@@ -28,6 +28,7 @@ pub mod explicit_skin;
 pub mod explicit_triggers;
 pub mod flexbody;
 pub mod flexmesh;
+pub mod glb;
 pub mod flextex;
 pub mod hires;
 pub mod host;

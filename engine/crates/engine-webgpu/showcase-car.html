@@ -24,7 +24,7 @@
 // ?height= m (drop), ?style=sedan|hatchback, ?paint=r,g,b, ?freeze= s (stop the
 // simulation there), ?cam=front|side|rear|top|three, ?dist= m, ?drag=0, ?n= cars (idle row).
 import { createWorld } from './rubble-world.mjs';
-import { showcaseCar, jbeamVisual, decodeTexture } from './generated/world-wasm/engine_world_wasm.js';
+import { showcaseCar, jbeamVisual, glbVisual, decodeTexture } from './generated/world-wasm/engine_world_wasm.js';
 import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
 
 const qs = new URLSearchParams(location.search);
@@ -51,7 +51,7 @@ try {
   const spec = { vehicles: Array.from({ length: n }, (_, i) => ({ truck: car.truck, at: [(i - (n - 1) / 2) * 3, 0], yaw: 0 })), scene, speed: kmh / 3.6, drag: qs.get('drag') !== '0' };
   for (const k of ['offset', 'at', 'height', 'angle', 'runUp']) if (qs.has(k)) spec[k] = Number(qs.get(k));
   // ?mod=: the imported vehicle's visual alone (no solver: a stand-in).
-  const sim = qs.has('mod') ? { layout: () => ({ vehicles: [], boxes: [], beams: 0 }), stepRate: () => 2000, maxFrameSteps: () => 0, frame() {}, timed: () => false, readDamage: async () => [null], readPoses: async () => [0, 0, 0] }
+  const sim = (qs.has('mod') || qs.has('glb')) ? { layout: () => ({ vehicles: [], boxes: [], beams: 0 }), stepRate: () => 2000, maxFrameSteps: () => 0, frame() {}, timed: () => false, readDamage: async () => [null], readPoses: async () => [0, 0, 0] }
     : world.explicitSim(spec);
   const layout = sim.layout();
 
@@ -85,7 +85,7 @@ try {
   const adapterInfo = await navigator.gpu.requestAdapter().then((a) => a?.info ? `${a.info.vendor} ${a.info.architecture} ${a.info.description}` : '?');
   const batchMs = [];
   const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES, zebra: Number(qs.get('zebra')) || 0, creaseSharp: Number(qs.get('crease')) || 0, splitDeg: Number(qs.get('splitDeg')) || 0, perfFlat: qs.has('perfFlat'), perfNoDiscard: qs.has('perfNoDiscard'), lodPx: Number(qs.get('lodPx')) || 0, debugWear: qs.has('debugWear'), perfSkip: qs.get('perfSkip')?.split(',') });
-  if (!qs.has('mod')) r.setSolver(sim.nodesBuffer(), sim.miscBuffer(), sim.beamsBuffer());
+  if (!qs.has('mod') && !qs.has('glb')) r.setSolver(sim.nodesBuffer(), sim.miscBuffer(), sim.beamsBuffer());
   // ?mod=<folder>: an imported BeamNG vehicle's flexbodies and props at rest
   // (its files.json lists the folder: .jbeam, .pc (?pc=), .dae,
   // .materials.json), skinned from its JBeam-mode rest nodes: the visual
@@ -99,6 +99,14 @@ try {
     if (!f) return null;
     try { return decodeTexture(new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer()), TEX_SIZE); } catch (e) { console.warn('texture', f, e); return null; }
   }));
+  // ?glb=<url>: a vehicle model in the vehicle art spec's glTF binary (an
+  // artist's delivery or gen2's sedan.glb) at rest, the same way.
+  if (qs.has('glb')) {
+    const bytes = new Uint8Array(await (await fetch(qs.get('glb'))).arrayBuffer());
+    const out = glbVisual(bytes, paint ? { paint } : {});
+    modVis = out.visual; modVis.lod = [];
+    window.__glbReport = { parts: out.parts, markers: out.markers, triangles: out.triangles };
+  }
   if (qs.has('mod')) {
     const base = qs.get('mod').replace(/\/$/, '');
     const list = await (await fetch(`${base}/files.json`)).json();
@@ -123,6 +131,8 @@ try {
       modVis.dataLoaded = layers.filter(Boolean).length;
     }
     window.__flexReport = out.report;
+  }
+  if (modVis) {
     // ?n= copies in a row, 3 m apart (the cost check).
     const nr0 = modVis.nodeRest, r00 = modVis.beamRest0;
     const nr = new Float32Array(nr0.length * n), r0 = new Float32Array(r00.length * n);

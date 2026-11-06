@@ -12,8 +12,10 @@
 pub mod build;
 pub mod export;
 pub mod mesh;
+pub mod model;
 pub mod sedan;
 pub mod shape;
+pub mod surface;
 
 pub use build::{Car, Part, Role};
 
@@ -29,6 +31,8 @@ pub fn files() -> Vec<(String, Vec<u8>)> {
         .collect();
     out.push((format!("{}/{}.dae", export::NAME, export::NAME), vis.collada.into_bytes()));
     out.push((format!("{}/{}.materials.json", export::NAME, export::NAME), vis.materials.into_bytes()));
+    // The render model to the vehicle art spec (`sedan.glb`, glTF axes).
+    out.push(("sedan.glb".into(), crate::glb::write(&model::to_glb(&model::build()))));
     let list: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
     let index = serde_json::to_string(&list).unwrap();
     out.push(("files.json".into(), index.into_bytes()));
