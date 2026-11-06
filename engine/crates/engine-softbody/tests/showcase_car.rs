@@ -7039,6 +7039,69 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
         "mass {total} kg, kerb {}",
         b.def.kerb_mass
     );
+    // Per part, the 2011 Accord's measured masses (NHTSA DOT HS 811 666
+    // §5.10, `sedan::ACCORD_*`): each part with its own pane, if it has one.
+    for (prefix, kg) in &b.def.part_masses {
+        for (q, name) in sk.parts.iter().enumerate() {
+            if !name.starts_with(prefix.as_str()) {
+                continue;
+            }
+            let pane = format!("glass_{name}");
+            let m: f32 = sk
+                .nodes
+                .iter()
+                .filter(|n| n.part as usize == q || sk.parts[n.part as usize] == pane)
+                .map(|n| n.mass)
+                .sum();
+            eprintln!("part {name:>10}: {m:6.2} kg (Accord {kg:.2})");
+            assert!(
+                (m - kg).abs() < 0.01 * kg,
+                "{name}: {m} kg against the Accord's {kg}"
+            );
+        }
+    }
+    // Centre of mass and principal moments of inertia (nodes and tyres).
+    let (com, inertia) = mass_properties(&b);
+    let front_axle = b.def.corners.iter().map(|c| c.z).fold(f32::MIN, f32::max);
+    let behind = front_axle - com.z;
+    eprintln!(
+        "centre of mass: x {:+.1} mm, {:.0} mm up, {:.0} mm behind the front axle; principal moments {:.0}, {:.0}, {:.0} kg·m² (about x, pitch {:.0}; y, yaw {:.0}; z, roll {:.0})",
+        com.x * 1e3,
+        com.y * 1e3,
+        behind * 1e3,
+        inertia[0],
+        inertia[1],
+        inertia[2],
+        inertia[3],
+        inertia[4],
+        inertia[5],
+    );
+    // (Across the car it is reported only: the driver's named mass sits on
+    // the left, +x, so the car is not mirror-symmetric in mass.)
+    // Along the car: NHTSA measured the 2011 Accord LX sedan's centre of
+    // gravity 1,147 mm behind its front axle at a 1,578 kg test weight
+    // (NCAP side pole, test 7077, the NHTSA Vehicle Crash Test Database).
+    // The 128 kg above the 1,450 kg kerb mass (ATD, instruments, ballast)
+    // lies somewhere between the axles (wheelbase 2.80 m), so the kerb
+    // centre of mass lies within (1578·1147 − 128·x)/1450 for x in 0–2.80 m:
+    // 1,001–1,248 mm (exact from the measured values).
+    assert!(
+        (1.001..=1.248).contains(&behind),
+        "centre of mass {behind} m behind the front axle"
+    );
+    // The principal moments: the 2011 Accord's measured inertia is not
+    // openly published (NHTSA's measured inertial parameters, SAE
+    // 2021-01-0970, list vehicles by name behind a paywall). What is
+    // asserted is that BeamNG's node pattern (`BEAMNG_NODES`) lumps the
+    // same masses: its principal moments within 1 % (a Choice) of the
+    // 0.24 m lattice's (measured at c6032885 without the pattern).
+    for (k, &want) in SEDAN1_PRINCIPAL_MOMENTS.iter().enumerate() {
+        let got = inertia[k];
+        assert!(
+            (got - want).abs() <= 0.01 * want,
+            "principal moment {k}: {got:.0} kg·m² against the lattice's {want:.0}"
+        );
+    }
     let rows = sk.bound_rows();
     let worst = rows.iter().cloned().fold(0.0f32, f32::max);
     assert!(worst <= 1.002, "a node past the step's bound: {worst}");
@@ -7258,6 +7321,84 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
             med(mass)
         );
     }
+}
+
+/// sedan1's principal moments of inertia about its centre of mass (kg·m²,
+/// ascending), Medium, on the 0.24 m lattice (no `BEAMNG_NODES`): the
+/// reference the node pattern's lumping is held to.
+const SEDAN1_PRINCIPAL_MOMENTS: [f32; 3] = [607.0, 2298.0, 2597.0];
+
+/// A built car's centre of mass (definition coordinates) and inertia: the
+/// three principal moments ascending, then the moments about x, y and z
+/// (kg·m²). Nodes are point masses; each tyre's mass sits at its axle
+/// nodes' midpoint.
+fn mass_properties(b: &Built) -> (Vec3, [f32; 6]) {
+    let sk = &b.skeleton;
+    let mut pts: Vec<(glam::DVec3, f64)> = sk
+        .nodes
+        .iter()
+        .map(|n| (n.p.as_dvec3(), n.mass as f64))
+        .collect();
+    for w in &sk.wheels {
+        let c = 0.5 * (sk.pos(w.a1) + sk.pos(w.a2));
+        pts.push((c.as_dvec3(), w.mass as f64));
+    }
+    let m: f64 = pts.iter().map(|x| x.1).sum();
+    let c = pts.iter().map(|(p, w)| *p * *w).sum::<glam::DVec3>() / m;
+    let mut t = glam::DMat3::ZERO;
+    for (p, w) in &pts {
+        let d = *p - c;
+        t += glam::DMat3::from_diagonal(glam::DVec3::splat(d.length_squared() * w))
+            - glam::DMat3::from_cols(d * d.x * w, d * d.y * w, d * d.z * w);
+    }
+    // Jacobi eigenvalues of the symmetric tensor.
+    let mut a = [
+        [t.x_axis.x, t.y_axis.x, t.z_axis.x],
+        [t.x_axis.y, t.y_axis.y, t.z_axis.y],
+        [t.x_axis.z, t.y_axis.z, t.z_axis.z],
+    ];
+    for _ in 0..50 {
+        for (p, q) in [(0, 1), (0, 2), (1, 2)] {
+            if a[p][q].abs() < 1e-12 {
+                continue;
+            }
+            let th = 0.5 * (2.0 * a[p][q]).atan2(a[q][q] - a[p][p]);
+            let (cs, sn) = (th.cos(), th.sin());
+            let mut r = [[0.0f64; 3]; 3];
+            for i in 0..3 {
+                r[i][i] = 1.0;
+            }
+            r[p][p] = cs;
+            r[q][q] = cs;
+            r[p][q] = sn;
+            r[q][p] = -sn;
+            // a = rᵀ a r
+            let mut tmp = [[0.0f64; 3]; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    tmp[i][j] = (0..3).map(|k| a[i][k] * r[k][j]).sum();
+                }
+            }
+            for i in 0..3 {
+                for j in 0..3 {
+                    a[i][j] = (0..3).map(|k| r[k][i] * tmp[k][j]).sum();
+                }
+            }
+        }
+    }
+    let mut e = [a[0][0] as f32, a[1][1] as f32, a[2][2] as f32];
+    e.sort_by(f32::total_cmp);
+    (
+        c.as_vec3(),
+        [
+            e[0],
+            e[1],
+            e[2],
+            t.x_axis.x as f32,
+            t.y_axis.y as f32,
+            t.z_axis.z as f32,
+        ],
+    )
 }
 
 /// The largest difference between a one-tier node's mass and its real local
