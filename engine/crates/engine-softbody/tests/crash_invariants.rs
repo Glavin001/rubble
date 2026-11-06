@@ -970,6 +970,25 @@ fn run_scene(name: &str, sc: Scene) -> Run {
     let s = &w.vehicles[0];
     r.finite = w.vehicles.iter().all(finite);
     r.rear = plastic(s, &car, &rear_beams);
+    // `CI_PLASTIC_LIST=1`: each rear-third beam past `PLASTIC`, where it is at rest
+    // (a probe).
+    if std::env::var("CI_PLASTIC_LIST").is_ok() {
+        for &j in &rear_beams {
+            let bm = &s.beams[j];
+            let strain = (bm.rest - bm.rest0) / bm.rest0.abs().max(1e-6);
+            if bm.broken || strain.abs() > PLASTIC {
+                let (a, c) = (bm.a as usize, bm.b as usize);
+                eprintln!(
+                    "  plastic {name} {sc:?} {} {a}-{c} {:+.2} % L0 {:.3} [{:.2} {:.2} {:.2}]-[{:.2} {:.2} {:.2}]{}",
+                    car.label(bm.a, bm.b),
+                    strain * 100.0,
+                    bm.rest0,
+                    rest[a].x, rest[a].y, rest[a].z, rest[c].x, rest[c].y, rest[c].z,
+                    if bm.broken { " broken" } else { "" }
+                );
+            }
+        }
+    }
     r.far = plastic(s, &car, &far_beams);
     if sc == Scene::Pole {
         r.far_hw = car
@@ -1362,6 +1381,28 @@ fn detached_door_takes_its_edge() {
     };
     let mut bare = v.clone();
     bare.alt.clear();
+    // (`CI_DEBUG=1`: the drawn triangles that join the door to another part
+    // before any pull, by piece: they are bound across the shut line.)
+    if std::env::var("CI_DEBUG").is_ok() {
+        let mut by: BTreeMap<String, usize> = BTreeMap::new();
+        for (k, t) in v.indices.chunks(3).enumerate() {
+            let all: Vec<Option<u16>> = t
+                .iter()
+                .flat_map(|&i| v.bind_nodes[i as usize].map(pof))
+                .collect();
+            if all.contains(&Some(part)) && all.iter().any(|&q| q != Some(part)) {
+                let i = t[0];
+                let name = v
+                    .pieces
+                    .iter()
+                    .find(|pc| i >= pc.1 && i < pc.1 + pc.2)
+                    .map_or("-".into(), |pc| pc.0.clone());
+                *by.entry(name).or_default() += 1;
+                let _ = k;
+            }
+        }
+        eprintln!("  bound across the door's shut line at rest: {by:?}");
+    }
     // Pulled until it comes off, then let go; sampled every 10 steps for
     // 0.3 s (the shut line's triangles stretch before they tear).
     let (mut t, mut off) = (0.0f32, None);
@@ -2293,6 +2334,46 @@ fn profile_drag_is_the_triangles() {
         .filter(|bm| bm.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamAeroTri)
         .count();
     assert!(tris > 0);
+    // No air acts on a block's faces (the engine's, inside the car): the
+    // truck's `rubble_aero_tri` lists no triangle wholly on a block's part.
+    {
+        let sk = &b.skeleton;
+        let blocks: Vec<&str> = ["powertrain", "battery", "seat", "radiator"].to_vec();
+        let on_block = |i: u32| {
+            let p = sk.parts[sk.nodes[i as usize].part as usize].as_str();
+            blocks.iter().any(|q| p.starts_with(q))
+        };
+        let mut listed = 0;
+        let mut on = 0;
+        let mut inside = false;
+        for line in b.truck.lines() {
+            let l = line.trim();
+            if l == "rubble_aero_tri" {
+                inside = true;
+                continue;
+            }
+            if !inside || l.starts_with(';') {
+                continue;
+            }
+            let f: Vec<&str> = l.split(',').map(|x| x.trim()).collect();
+            let Some(n) = f.get(..3).and_then(|n| {
+                n.iter()
+                    .map(|x| x.parse::<u32>().ok())
+                    .collect::<Option<Vec<_>>>()
+            }) else {
+                break;
+            };
+            listed += 1;
+            if n.iter().all(|&i| on_block(i)) {
+                on += 1;
+            }
+        }
+        eprintln!("rubble_aero_tri: {listed} triangles, {on} on a block's faces");
+        assert!(
+            listed > 0 && on == 0,
+            "{on} aero triangles on a block's faces"
+        );
+    }
     let m: f32 = s.nodes.iter().map(|n| n.mass).sum();
     let p0: f32 = s.nodes.iter().map(|n| n.mass * n.vel.z).sum();
     let steps = 100;

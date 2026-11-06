@@ -6441,8 +6441,22 @@ fn which_nodes() {
             );
         }
     }
-    for t in std::env::var("NODES").unwrap_or_default().split(',') {
-        let Ok(i) = t.parse::<usize>() else { continue };
+    // (`NODES=z<-1.9`: every node behind that spawn z.)
+    let list: Vec<usize> = match std::env::var("NODES").unwrap_or_default() {
+        v if v.starts_with("z<") => {
+            let zc: f32 = v[2..].parse().unwrap();
+            (0..b.skeleton.nodes.len())
+                .filter(|&i| b.skeleton.nodes[i].p.z < zc)
+                .collect()
+        }
+        v if v.starts_with("group:") => {
+            let mut g: Vec<usize> = b.groups[&v[6..]].iter().map(|&i| i as usize).collect();
+            g.sort();
+            g
+        }
+        v => v.split(',').filter_map(|t| t.parse().ok()).collect(),
+    };
+    for i in list {
         let n = &b.skeleton.nodes[i];
         let gs: Vec<&String> = b
             .groups

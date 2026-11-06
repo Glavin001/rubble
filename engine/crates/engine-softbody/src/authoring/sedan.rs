@@ -2216,13 +2216,7 @@ pub fn sedan_one_tier() -> VehicleDef {
     // grade's yield (DP600's 330 MPa). Its bending yields from the
     // section's plastic moment, as the rear's.
     {
-        let beam = Section {
-            depth: 0.06,
-            width: 0.10,
-            t: 0.0016,
-            sigma_y: DP600,
-            round: false,
-        };
+        let beam = ACCORD_BUMPER_BEAM;
         sectioned_by(
             &mut d.members,
             &Grades::default(),
@@ -2230,6 +2224,19 @@ pub fn sedan_one_tier() -> VehicleDef {
         );
         for m in d.members.iter_mut().filter(|m| m.name == "bumper_beam_f") {
             m.kg_per_m = section_kg_per_m(&beam);
+        }
+        // The rear bumper beam is the Accord's too: steel stampings (the
+        // report's light-weighting options replace "the baseline steel
+        // stampings" of both bumpers, §5.10.7), its assembly 7.84 kg against
+        // the front's 7.96 kg, so the same section (a Choice). Before, it was
+        // an aluminium 6082 extrusion. (`REAR_BEAM_ALU=1` keeps that, a
+        // measurement switch.)
+        if std::env::var("REAR_BEAM_ALU").map_or(true, |v| v != "1") {
+            sectioned_by(
+                &mut d.members,
+                &Grades::default(),
+                &[("bumper_beam_r", beam, 0.12, 1.0)],
+            );
         }
     }
     // Crush members: the front rails (an 80 × 120 × 1.6 mm DP600 box, a
@@ -2325,19 +2332,52 @@ pub fn sedan_one_tier() -> VehicleDef {
             sigma_y: HSLA340,
             round: false,
         };
-        d.members.push(ladder(member(
+        // Each section as a ladder whose outer chord is the shell's line
+        // there and whose inner chord lies the section's lever inside it,
+        // with a station at every lane node (`POLE_LANE`). The first build
+        // (`DECK_FRAME_V1=1`, a measurement switch) drew `deck_x` 2–4 cm off
+        // the shell's crown with stations 0.8 m apart: its lower chord
+        // snapped up onto the shell at the centre, so at mid-span both
+        // chords were one node 1 cm apart (no depth), and in the 56 km/h
+        // wall its centre bowed 218 mm forward. `rear_panel` had three
+        // stations over 1.5 m.
+        let v1 = std::env::var("DECK_FRAME_V1").is_ok_and(|v| v == "1");
+        let deck_x_path: &[(f32, f32, f32)] = if v1 {
+            &[(-0.80, 1.03, 0.78), (0.0, 1.05, 0.79), (0.80, 1.03, 0.78)]
+        } else {
+            // The shell's line at the deck opening's front edge (sedan1's
+            // built skin at z 0.77: y 0.97 at the gutters, 1.04, 1.06, 1.07 at
+            // the centre) less half the lever (0.04 m).
+            &[
+                (-0.81, 0.93, 0.77),
+                (-0.58, 1.00, 0.77),
+                (-0.29, 1.02, 0.77),
+                (0.0, 1.03, 0.77),
+                (0.29, 1.02, 0.77),
+                (0.58, 1.00, 0.77),
+                (0.81, 0.93, 0.77),
+            ]
+        };
+        // (Its outer chord is made first, so it takes the shell's lane node
+        // and the inner chord stays a lever below it.)
+        let down = [0.0, -1.0, 0.0];
+        let mut dx = ladder(member(
             "deck_x",
-            &[(-0.80, 1.03, 0.78), (0.0, 1.05, 0.79), (0.80, 1.03, 0.78)],
+            deck_x_path,
             0.10,
             0.08,
-            UP,
+            if v1 { UP } else { down },
             "hsla",
             [1.0, 1.0],
             0,
             false,
             1,
-        )));
-        d.members.push(ladder(member(
+        ));
+        if !v1 {
+            dx.station = DECK_STATION;
+        }
+        d.members.push(dx);
+        let mut gutter = ladder(member(
             "deck_gutter",
             &[
                 (0.80, 0.98, 1.36),
@@ -2353,10 +2393,31 @@ pub fn sedan_one_tier() -> VehicleDef {
             0,
             true,
             1,
-        )));
-        d.members.push(ladder(member(
+        ));
+        if !v1 {
+            gutter.station = super::vehicle::POLE_LANE;
+        }
+        d.members.push(gutter);
+        let rear_path: &[(f32, f32, f32)] = if v1 {
+            &[(-0.78, 0.72, 0.02), (0.0, 0.70, -0.01), (0.78, 0.72, 0.02)]
+        } else {
+            // The shell's line under the lid's rear edge (the built skin:
+            // z 0.13 at the quarters, 0.06, 0.02, −0.01 at the centre) plus
+            // half the lever (0.05 m) forward: the outer chord is the shell's.
+            &[
+                (-0.85, 0.71, 0.18),
+                (-0.61, 0.71, 0.11),
+                (-0.36, 0.71, 0.07),
+                (-0.12, 0.71, 0.04),
+                (0.12, 0.70, 0.04),
+                (0.36, 0.70, 0.07),
+                (0.61, 0.70, 0.11),
+                (0.85, 0.70, 0.18),
+            ]
+        };
+        let mut rp = ladder(member(
             "rear_panel",
-            &[(-0.78, 0.72, 0.02), (0.0, 0.70, -0.01), (0.78, 0.72, 0.02)],
+            rear_path,
             0.10,
             0.10,
             FWD,
@@ -2365,7 +2426,11 @@ pub fn sedan_one_tier() -> VehicleDef {
             0,
             false,
             1,
-        )));
+        ));
+        if !v1 {
+            rp.station = DECK_STATION;
+        }
+        d.members.push(rp);
         let list = [
             ("deck_x", hat(0.06, 0.08), 0.08, 1.0),
             ("deck_gutter", hat(0.05, 0.06), 0.06, 1.0),
@@ -2531,6 +2596,13 @@ pub fn sedan_one_tier() -> VehicleDef {
         side.kg_per_m = section_kg_per_m(&sec);
         d.members.push(side);
     }
+    // The rear end's panels (`REAR_END=0` leaves them out, a measurement
+    // switch): the package tray and the back panel, [`rear_end`].
+    if std::env::var("REAR_END").map_or(true, |v| v != "0")
+        && std::env::var("DECK_FRAME").map_or(true, |v| v != "0")
+    {
+        rear_end(&mut d);
+    }
     // The cowl and the dash panel where the 2011 Accord's are
     // (`COWL=0` keeps the two-tier package's, a measurement switch).
     if std::env::var("COWL").map_or(true, |v| v != "0") {
@@ -2549,8 +2621,25 @@ pub fn sedan_one_tier() -> VehicleDef {
             m.kg_per_m = section_kg_per_m(&sec);
         }
     }
+    if std::env::var("REAR_BEAM_ALU").map_or(true, |v| v != "1") {
+        for m in d.members.iter_mut().filter(|m| m.name == "bumper_beam_r") {
+            m.kg_per_m = section_kg_per_m(&ACCORD_BUMPER_BEAM);
+        }
+    }
     d
 }
+
+/// The 2011 Accord's bumper beams' section (front and rear: roll-formed and
+/// stamped steel of 590 MPa tensile, DOT HS 811 666 §5.10.7.1): a closed
+/// 60 deep × 100 tall box, 1.6 mm, at DP600's yield (a Choice: about
+/// 4.0 kg/m, so some 5 kg of each 7.8–8.0 kg assembly over its 1.2 m).
+pub const ACCORD_BUMPER_BEAM: Section = Section {
+    depth: 0.06,
+    width: 0.10,
+    t: 0.0016,
+    sigma_y: DP600,
+    round: false,
+};
 
 /// Each of the front subframe's rear body mounts lets go at this (N): a
 /// Choice set from the 2011 Accord's crash pulse (the drop at 40–50 ms of
@@ -2734,4 +2823,79 @@ pub fn door_flanges() -> Vec<FlangeSpec> {
         f("pillar_b", 0.0018, phs),
         f("pillar_c", 0.0014, dp780),
     ]
+}
+
+/// The deck opening's cross sections' (`deck_x`, `rear_panel`) station
+/// spacing (m): over their longest path segment (0.29 m), so they have a
+/// station at each of their path's points, the shell's lane nodes.
+pub const DECK_STATION: f32 = 0.30;
+
+/// sedan1's rear end panels, as the 2011 Accord's body structure has them
+/// (DOT HS 811 666 §10.5: the rear floor, the rear back panel and the
+/// package tray are sub-assemblies of their own; fig. 502, 503).
+///
+/// - **The package tray** (`tray`, `tray_m`, `tray_o`): from the deck
+///   opening's front edge (`deck_x`'s inner chord) forward to the rear seat
+///   back's top (`parcel`'s upper chord), across the car between the quarter
+///   inners. Without it, `deck_x` (a 1.6 m hat) had only the backlight in
+///   front of it: in the 56 km/h wall the lid and the deck's front edge
+///   pushed the backlight's beams to their yield.
+/// - **The back panel** (`back_panel`, `back_panel_s`): from the rear floor's
+///   rear edge (the shell's bottom ring, on `bumper_beam_r`) up to the rear
+///   end panel's upper reinforcement (`rear_panel`'s inner chord). Without it
+///   the rear panel's hat was joined to the floor and bumper beam only
+///   through the fascia's polypropylene.
+///
+/// Each is strips of its sheet, built as the dash panel's are
+/// ([`accord_dash`]): a ladder whose two chords are its two halves' steel,
+/// 0.8 mm ([`SHELL_GAUGE`], a Choice: package trays and back panels are
+/// 0.7–0.9 mm stampings), each chord yielding at σ_y·A of its half strip
+/// (210 MPa, [`super::vehicle::SHEET_YIELD`]'s grade: a membrane, the
+/// tray's and panel's beads keeping it from buckling as a flat sheet would,
+/// a Choice). The strips' chords lie on the deck's and rear panel's station
+/// lines (x 0, ±0.29, ±0.58), so every chord ends on a station node.
+/// The strips' steel is their sheet's (width × gauge × 7,850 kg/m³ per
+/// metre), which spreads the measured body mass over them: no mass is moved.
+fn rear_end(d: &mut VehicleDef) {
+    use super::vehicle::{SHEET_YIELD, SHELL_GAUGE};
+    let strip = |name: &str, x: f32, w: f32, path: &[(f32, f32, f32)], mirrored: bool, st: f32| {
+        let pts: Vec<(f32, f32, f32)> = path.iter().map(|p| (p.0 + x, p.1, p.2)).collect();
+        let mut m = ladder(member(
+            name,
+            &pts,
+            0.10,
+            w,
+            [1.0, 0.0, 0.0],
+            "panel",
+            [1.0, 1.0],
+            0,
+            mirrored,
+            0,
+        ));
+        m.station = st;
+        m
+    };
+    // The tray: rear end on `deck_x`'s inner chord (y 0.97 at z 0.77),
+    // front end on `parcel`'s upper chord (y 1.06 at z 1.35).
+    let tray = [(0.0, 0.97, 0.77), (0.0, 1.06, 1.35)];
+    // The back panel: from the floor's rear edge (y 0.33 at z 0.13) to the
+    // rear panel's inner chord (y 0.70 at z 0.08–0.11).
+    let back = [(0.0, 0.33, 0.13), (0.0, 0.70, 0.09)];
+    let mut strips = vec![
+        (strip("tray", 0.0, 0.58, &tray, false, 0.29), 0.58),
+        (strip("tray_m", 0.435, 0.29, &tray, true, 0.29), 0.29),
+        (strip("tray_o", 0.69, 0.22, &tray, true, 0.29), 0.22),
+        (strip("back_panel", 0.0, 0.69, &back, false, 0.37), 0.69),
+        (
+            strip("back_panel_s", 0.5175, 0.345, &back, true, 0.37),
+            0.345,
+        ),
+    ];
+    for (m, w) in &mut strips {
+        let half_strip = 0.5 * *w * SHELL_GAUGE;
+        m.kg_per_m = *w * SHELL_GAUGE * super::members::STEEL_DENSITY;
+        let s = SHEET_YIELD * half_strip / d.grades.panel.deform;
+        m.scale = [s, s];
+    }
+    d.members.extend(strips.into_iter().map(|(m, _)| m));
 }

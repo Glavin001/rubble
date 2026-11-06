@@ -5009,6 +5009,49 @@ fn brittle_glass(
         // the settling body: at 0.17 % they break at rest (158 beams in
         // `a`). The units name each pane's beams either way.
         if !brittle_glass_on() {
+            // Glass is elastic to its fracture: a pane's beams hold the
+            // real pane's strip as below (tempered σ·t·L, laminated cracking
+            // at its plies'), so a pane neither yields nor breaks on its own
+            // until brittle glass is on. Before, they kept the skin grade's
+            // 0.4 kN yield, about 1 MPa over a 3.5 mm strip: in the 56 km/h
+            // wall the backlight took the parcel shelf's push and set 70 mm
+            // plastically, which glass cannot. (One tier only; `GLASS_SKIN=1`
+            // keeps the skin grade's yield, a measurement switch.)
+            if def.one_tier && std::env::var("GLASS_SKIN").map_or(true, |v| v != "1") {
+                for &j in &pane {
+                    let l = sk.pos(sk.beams[j].a).distance(sk.pos(sk.beams[j].b));
+                    let b = &mut sk.beams[j];
+                    b.mat.deform = scale
+                        * if laminated {
+                            ANNEALED_STRENGTH * LAMINATED_GLASS * l
+                        } else {
+                            TEMPERED_STRENGTH * TEMPERED_THICKNESS * l
+                        };
+                    b.mat.strength = if laminated { f32::MAX } else { b.mat.deform };
+                }
+                // A bonded pane's mounts are its urethane bead, as below:
+                // its stiffness G·w·L/t where that is under the built one,
+                // and it holds τ·w·L, then lets go (a bead does not yield).
+                // Each mount on its own here (no pane group while brittle
+                // glass is off).
+                if bonded {
+                    let edge = mounts
+                        .iter()
+                        .map(|&j| sk.pos(sk.beams[j].a).distance(sk.pos(sk.beams[j].b)))
+                        .sum::<f32>()
+                        / mounts.len().max(1) as f32;
+                    for &j in &mounts {
+                        let b = &mut sk.beams[j];
+                        let l = sk.nodes[b.a as usize].p.distance(sk.nodes[b.b as usize].p);
+                        let real = URETHANE_G * BEAD_WIDTH / BEAD_THICKNESS * edge;
+                        if b.mat.k_at(l) > real {
+                            b.mat = b.mat.stiffer(real / b.mat.k_at(l));
+                        }
+                        b.mat.deform = scale * URETHANE_TAU * BEAD_WIDTH * edge;
+                        b.mat.strength = b.mat.deform;
+                    }
+                }
+            }
             let part = sk.nodes[nodes[0] as usize].part;
             out.push(DamageUnit {
                 name,
