@@ -1288,6 +1288,51 @@ and no tyres (`common`). It is not used.
 | Pole far side (past 0.2 %, broken; far doors' hardware) | 20, 0; holds | 99, 6; holds |
 | A8 sweep at 30 km/h (passed through) | **21 of 244** | 0 of 244 |
 
+**Community cars on the same scenes (2026-11-06).** Three community BeamNG
+cars, local only (`RUBBLE_JBEAM_COMMUNITY`, never committed): the ETK
+K-series (`kr6`), the Hirochi CCF (`f4_sport_M`) and the Gavril Vertex
+(default). They run in JBeam mode on their hubs (their tyres are BeamNG's
+shared `common` parts, not local). Their node sets are picked by position from
+the body shell (`showcase_car.rs` `community_car`; Choices), their parts and
+hinge groups by name (`crash_invariants.rs` `community_part`). Tests:
+`showcase_car` `community_scenes`, `crash_invariants`
+`community_invariants_report`, `explicit_scenes` `mdb_into_community_cars` (GPU;
+energy never rises: 165.8 kJ at most 165.9) (all `CI_CARS`). Reported, never asserted.
+
+| Reference (band) | ETK (roadster) | CCF | Vertex (sedan) | BX coupe |
+|---|---|---|---|---|
+| n max crush (380–580 mm) | 230 | 206 | 125 | 279 |
+| n dynamic crush (620–750 mm) | 471 | 462 | 470 | 461 |
+| n t_m (63–76 ms) | 48 | 49 | 51 | 48.5 |
+| n peak (34–47 g) | 60.3 | 49.6 | 45.1 | 49.8 |
+| n b1 (22.9–39.2) | 68.6 | — (no fit) | 142 | 86 |
+| n restitution (0.13–0.20) | 0.255 | 0.207 | 0.224 | 0.228 |
+| n apertures p90 (≤ 9 mm) | 18 | 2.2 | 27 | in |
+| n A-pillar bases rearward (≤ 15–17 mm) | 2 / 5 | 0.3 / 1.0 | 23 / 24 ¹ | in |
+| o residual (297–445 mm) | 76, sd 40 | 10, sd 9 ¹ | 400, sd 8 ¹ | 351 |
+| p initial / intermediate / peak (kN) | 6.3 / 12.5 / 98 | 13.6 / 21.9 / 198 | 6.6 / 14.5 / 58 | 9.0 / 14.0 / 28.7 |
+| q (4.48–5.32×) | 6.20 ² | 7.21 | 7.80 | 5.59 |
+| MDB residual (126–206 mm) | 224 | 91 | 221 | 202 |
+| Rear third, wall / head-on (past 0.2 %, broken) | 22, 0 / 0, 0 | 21, 0 / 2, 0 | 3, 0 / 0, 0 | 0, 0 / 0, 0 |
+| Lid against rear body, wall / head-on peak | 26.2 / 10.5 mm | 15.2 / 5.4 mm | 11.3 / 3.8 mm | 13.9 / 11.3 mm |
+| Rear body RMS, wall (≤ 5 mm) | 8.1 mm | 5.0 mm | 10.6 mm | 2.6 mm |
+| Wall ripple from 0.5 s (≤ 1 mm) | bumpers 3.3–3.8, exhaust 3.9, soft top 2.8, sideskirts 1.2–1.6 | fascia 8.0, antenna 7.4, exhaust 3.4, body and bonnet 1.6 | aerial 13.2, airdam 9.5, bonnet 5.5, body 3.1 | panels < 1; fascia 6.6 |
+| Pole far side (past 0.2 %, broken; far doors' hardware) | 11, 0; holds | 13, 2; holds | 25, 0; holds | 20, 0; holds |
+| Whole car broken in the wall / head-on / pole | 2 / 1 / 17 | 143 / 124 / 4 | 26 / 4 / 8 | |
+
+¹ The CCF's and the Vertex's floor-middle pick (`tunnel`) was empty (their floor's
+centreline nodes sit above the band), so the far-side frame was NaN and the pole
+measure read 0 mm, and the Vertex's A-pillar bases were empty (NaN). Each pick
+now falls back to the body nodes nearest its target; measured again with them. ² The ETK is a soft-top roadster: the roof crush
+loads its windscreen frame and roll hoops.
+
+What they show: like the BX, BeamNG's community content is stiff in the frontal
+(short crush, peak g at or above the band, t_m 48–51 ms against 63–76) and
+rebounds a little more than the band (e 0.21–0.26). Their side and roof
+structure is stronger than the references (p's peak 58–198 kN, q 6.2–7.8×).
+Their rear bodies flex more than the BX's (RMS 5–11 mm), and their light
+hardware (antennas, air dams, fascias) rings after the wall.
+
 **What BeamNG's content shows on this solver.**
 - **Side, roof and MDB.** BeamNG's own yields (about 1 % strain, 8 kN a
   body beam, at k·L about 1e6 N) land `o`, `p`, `q` and the MDB in or near
@@ -3410,3 +3455,37 @@ transverse–longitudinal). Medium, front left door unless noted:
   and its catchers lie on one line of each bay. New groups: `bow_r` (a rear roof
   bow), `door_belt_f/_r`, `door_mid_f/_r` (the doors' belt and inner rails, with
   `_r` mirrors); `floor_brace1`–`4` are gone (lumped shear panels instead).
+
+### sedan1's references after the yield fix and the contact staging (2026-11-06)
+
+Re-run of `showcase_car` and `crash_invariants` (CPU, default tests) after two
+solver changes: JBeam yield follows the elastic force only (jbeam-semantics-spec.md
+§3; sedan1's profile beams use the JBeam NORMAL rule) and `feat/jbeam-features`'
+contact work guard, residual pass and quantisation-neutral staging (spec §37.1).
+Before: d0948ba9; after: this branch. Same machine.
+
+- **Unchanged, failing before and after** (identical numbers): `n_wall_matches_the_nhtsa_sedans`
+  (restitution 0.2018 against 0.13–0.20), `f_wall_at_120_kmh…` (the 120 km/h ledger
+  rises 13.03 J between tenths), `g_pulling_a_door_tears_it_off` (the latch lets go at
+  78.1 kN against 30.0–64.3), `t_car_to_car_t_bone_at_80_kmh` (13 of 1,165 striker
+  nodes in the struck car's skin).
+- **Now passing:** `fixed_contact_quantisation_does_no_work` (48 km/h: +0.0102 J over
+  the run before, under 0.01 J after) and `contacts_do_no_positive_work` (56 km/h: the
+  contacts and their position steps added 0.379 J beyond 2 % of the steps' energy
+  over a tenth before).
+- **Moved** (`crash_invariants`, sedan1):
+
+  | Row | Before | After |
+  |---|---|---|
+  | Wall: lid vs rear body peak / end | 89.4 / 23.3 mm | 90.5 / 23.7 mm |
+  | Wall: rear body RMS / max | 17.2 / 187.6 mm | 17.2 / 186.0 mm |
+  | Wall: rear third plastic | 35 | 36 |
+  | Wall: ripple body / bootlid / bonnet / door | 3.5 / 1.5 / 0.7 / 2.3 mm | 3.3 / 3.2 / 0.8 / 3.3 mm |
+  | Wall: whole car (broken, plastic) | (13, 953) | (13, 939) |
+  | Drive: lid peak / end; rear RMS / max | 1.1 / 0.4; 0.4 / 1.9 mm | 1.5 / 0.5; 0.5 / 2.1 mm |
+  | Detached door: drawn triangles joining it (without fallback) | 842 | 1,070 (0 with it, both) |
+  | Settle (crushed car to 12 s): KE per second, 2nd–12th | 1,863 … 4.0 J | 2,068 … 4.1 J; 12th-second rms 45 → 37 mm/s |
+
+  The quantisation and contact-work rows (`showcase_car`) moved with the staging
+  (largest error on a node 0.10–0.13 N → 0.07–0.10 N). Every row stays within its
+  test's bound; the four failures are as before.

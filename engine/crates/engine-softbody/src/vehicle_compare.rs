@@ -478,6 +478,19 @@ impl Car {
         };
         let mut template = spawned;
         template.surface_contact = surface_contact();
+        // A measurement (research/explicit-stability): `RUBBLE_DAMP_SCHEME=N` runs
+        // every scene on that damping velocity (`ExplicitBeams::damp_scheme`).
+        // (4: `ExplicitBeamsSettings::centred_damping`.)
+        if let Some(k) = std::env::var("RUBBLE_DAMP_SCHEME")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            // (0: centred damping off; the BeamNG profile's default is on.)
+            template.settings.centred_damping = k == 4;
+            if k != 4 {
+                template.damp_scheme = k;
+            }
+        }
         place(&mut template, angle, 0.02);
         let spawn_pos = positions(&template);
         steps(&mut template, 1.0);
@@ -725,10 +738,30 @@ fn positions(s: &ExplicitBeams) -> Vec<Vec3> {
 }
 
 /// Nodes with at least one intact beam.
-fn attached(s: &ExplicitBeams) -> Vec<bool> {
-    (0..s.nodes.len())
-        .map(|i| s.incidence[i].iter().any(|&b| !s.beams[b as usize].broken))
-        .collect()
+/// The nodes still joined to `seeds` (the cabin) through unbroken beams: a part
+/// torn off with its own beams intact is not (its nodes are excluded from the
+/// crush measure, as a detached fascia or lamp lies ahead of the crushed front).
+fn attached_to(s: &ExplicitBeams, seeds: &[u32]) -> Vec<bool> {
+    let mut on = vec![false; s.nodes.len()];
+    let mut stack: Vec<u32> = seeds.to_vec();
+    for &i in seeds {
+        on[i as usize] = true;
+    }
+    while let Some(i) = stack.pop() {
+        for &b in &s.incidence[i as usize] {
+            let bm = &s.beams[b as usize];
+            if bm.broken {
+                continue;
+            }
+            for o in [bm.a, bm.b] {
+                if !on[o as usize] {
+                    on[o as usize] = true;
+                    stack.push(o);
+                }
+            }
+        }
+    }
+    on
 }
 
 fn pct(v: &mut [f32], q: f32) -> f32 {
@@ -976,7 +1009,7 @@ impl Intrusion {
     }
     fn sample(&mut self, s: &ExplicitBeams) {
         let now = positions(s);
-        let att = attached(s);
+        let att = attached_to(s, &self.fit_ids);
         let f = rigid_fit(&self.rest, &now, &self.fit_ids);
         for (k, (_, p, near)) in self.pts.iter().enumerate() {
             let v = near
@@ -1603,6 +1636,11 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
         Ok(s) => s,
         Err(e) => return json!({"error": e}),
     };
+    // `RUBBLE_DAMP_SCHEME` (a measurement) on a BeamNG profile spawn as on the template.
+    if std::env::var("RUBBLE_DAMP_SCHEME").is_ok() && s.beamng_profile {
+        s.damp_scheme = car.template.damp_scheme;
+        s.settings.centred_damping = car.template.settings.centred_damping;
+    }
     let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
     let com = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.pos * n.mass).sum::<Vec3>() / total;
     let mut first_break = None;
@@ -1811,7 +1849,7 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     let impulse: f32 = force.iter().sum::<f32>() * STEP;
     // Residual crush at bumper height (NHTSA's six zones), in the cabin's frame.
     let fit = rigid_fit(&rest, &now, &cabin);
-    let att = attached(s);
+    let att = attached_to(s, &cabin);
     let zones = 6usize;
     let (xl, xh) = (f.lo.x, f.hi.x);
     let band: Vec<u32> = car
@@ -1836,16 +1874,35 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
             .iter()
             .map(|&i| rest[i as usize].z)
             .fold(f32::MIN, f32::max);
+        // A node the crush left ahead of its rest place (in the cabin's frame) by
+        // more than 5 cm is a part hanging loose (a lamp or fascia on its last
+        // beams swings forward as the cabin rebounds), not the crushed front: a
+        // frontal wall pushes the structure back only.
         let r1_ = ids
             .iter()
             .filter(|&&i| att[i as usize] && now[i as usize].is_finite())
-            .map(|&i| fit.to_rest(now[i as usize]).z)
+            .map(|&i| (i, fit.to_rest(now[i as usize]).z))
+            .filter(|&(i, z)| z <= rest[i as usize].z + 0.05)
+            .map(|(_, z)| z)
             .fold(f32::MIN, f32::max);
         *ci = if ids.is_empty() || r1_ == f32::MIN {
             0.0
         } else {
             (r0 - r1_).max(0.0)
         };
+        if std::env::var("COMPARE_CRUSH_DEBUG").is_ok() {
+            let front = ids
+                .iter()
+                .copied()
+                .filter(|&i| att[i as usize] && now[i as usize].is_finite() && fit.to_rest(now[i as usize]).z <= rest[i as usize].z + 0.05)
+                .max_by(|&a, &b| fit.to_rest(now[a as usize]).z.total_cmp(&fit.to_rest(now[b as usize]).z));
+            let lead = ids.iter().copied().max_by(|&a, &b| rest[a as usize].z.total_cmp(&rest[b as usize].z));
+            eprintln!(
+                "(crush) zone {z}: {} nodes, rest front {r0:.3} (node {lead:?}), now front {r1_:.3} (node {front:?}, rest z {:.3})",
+                ids.len(),
+                front.map_or(0.0, |i| rest[i as usize].z)
+            );
+        }
     }
     let c_max = c.iter().copied().fold(0.0, f32::max);
     let c_avg = (0.5 * c[0] + c[1..5].iter().sum::<f32>() + 0.5 * c[5]) / 5.0;

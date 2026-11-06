@@ -668,6 +668,15 @@ fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Opt
     for l in [&mut lod, &mut far_vis] {
         flexmesh::rebase_textures(l, &vis.textures, &vis.data_textures).map_err(err)?;
     }
+    // On raycast wheels the wheels' pieces ride the drive wheels.
+    let mut vis = vis;
+    // (A vehicle without wheels has none to bind: the spawn has no drive either.)
+    if raycast && !desc.wheels.is_empty() {
+        let (config, _) = engine_softbody::explicit_drive::DriveConfig::from_desc(&desc).map_err(err)?;
+        for l in [&mut vis, &mut lod, &mut far_vis] {
+            engine_softbody::authoring::skin::bind_raycast_wheels(l, &config).map_err(err)?;
+        }
+    }
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
     set(&out, "visualLod", &visual_js(&lod).into());

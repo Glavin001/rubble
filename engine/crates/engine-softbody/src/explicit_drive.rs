@@ -1139,6 +1139,12 @@ impl ExplicitBeams {
             velocity,
             settings,
         )?;
+        if desc.wheels.is_empty() {
+            // A vehicle with no wheels (a boat, a body on its own) has nothing to
+            // drive on: it spawns without raycast wheels (never an error).
+            warnings.push("no wheels: spawned without raycast wheels (not drivable)".into());
+            return Ok((s, warnings));
+        }
         warnings.extend(s.attach_drive(desc, velocity)?);
         Ok((s, warnings))
     }

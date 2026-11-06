@@ -3,6 +3,8 @@
     { "name": "sedan1", "label": "Rubble sedan1 (authored, one tier, Medium)", "style": "sedan1", "page": "car=showcase&style=sedan1" },
     { "name": "etkk", "label": "ETK K-series kr6 (BeamNG community JBeam)", "mod": "etkk", "vehicle": "etkk", "pc": "kr6.pc" },
     { "name": "etkk_kc6", "label": "ETK K-series kc6 (hardtop coupe: the roof crush)", "mod": "etkk", "vehicle": "etkk", "pc": "kc6.pc", "optional": true },
+    { "name": "ccf", "label": "Hirochi CCF f4_sport_M (BeamNG community JBeam)", "mod": "ccf_tex", "vehicle": "ccf", "pc": "f4_sport_M.pc", "optional": true },
+    { "name": "vertex", "label": "Gavril Vertex (BeamNG community JBeam)", "mod": "vertex_tex", "vehicle": "gavril_vertex", "pc": "gavril_vertex.pc", "optional": true },
     { "name": "gen2", "label": "Rubble gen3 (the generated render model, rigged)", "mod": "gen2", "vehicle": "gen2", "pc": "gen2.pc", "optional": true }
   ]
 }

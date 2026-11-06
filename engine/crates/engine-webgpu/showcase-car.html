@@ -48,7 +48,9 @@ try {
   const buildMs = performance.now() - t0;
   const device = world.device();
   device.addEventListener('uncapturederror', (e) => fail('gpu: ' + (e.error?.message ?? e.error)));
-  const spec = { vehicles: Array.from({ length: n }, (_, i) => ({ truck: car.truck, at: [(i - (n - 1) / 2) * 3, 0], yaw: 0 })), scene, speed: kmh / 3.6, drag: qs.get('drag') !== '0' };
+  const spec = { vehicles: Array.from({ length: n }, (_, i) => ({ truck: car.truck, at: [(i - (n - 1) / 2) * 3, 0], yaw: 0 })), scene, speed: kmh / 3.6, drag: qs.get('drag') !== '0',
+    // ?centredDamping=0/1 (BeamNG profile vehicles, jbeam-semantics-spec.md §39).
+    ...(qs.has('centredDamping') ? { centredDamping: qs.get('centredDamping') !== '0' } : {}) };
   for (const k of ['offset', 'at', 'height', 'angle', 'runUp']) if (qs.has(k)) spec[k] = Number(qs.get(k));
   // ?mod=: the imported vehicle's visual alone (no solver: a stand-in).
   const sim = (qs.has('mod') || qs.has('glb')) ? { layout: () => ({ vehicles: [], boxes: [], beams: 0 }), stepRate: () => 2000, maxFrameSteps: () => 0, frame() {}, timed: () => false, readDamage: async () => [null], readPoses: async () => [0, 0, 0] }

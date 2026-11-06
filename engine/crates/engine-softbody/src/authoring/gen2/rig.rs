@@ -1470,7 +1470,6 @@ pub fn rig(model: &Model) -> Rig {
             // The latch on the door's rear shut line at the marker's height
             // (the rearmost skin point there, 3 cm in).
             let mut mk = marker(model, &format!("latch_door_{tagf}{x}"));
-            mk.x = s * mk.x.abs();
             let skin_pts = if front { &df } else { &dr };
             // On the vertical shut line: where the marker's height is forward
             // of the door's rear edge (over an arch), the latch goes up to it.
@@ -1696,10 +1695,7 @@ pub fn rig(model: &Model) -> Rig {
         };
         let own = fender_ids[&part].clone();
         for q in 1..=4 {
-            let mut mk = marker(model, &format!("bolt_fender_F{x}_{q}"));
-            // Markers on the right side mirror the left's (one is misplaced
-            // in the model on +X; its side is the part's).
-            mk.x = s * mk.x.abs();
+            let mk = marker(model, &format!("bolt_fender_F{x}_{q}"));
             let mut dv: Vec<(f32, usize)> = own.iter().map(|&i| (r.g(i).distance(mk), i)).collect();
             dv.sort_by(|a, b| a.0.total_cmp(&b.0));
             let bv = r.nearest(body, mk, 2, |_| true);

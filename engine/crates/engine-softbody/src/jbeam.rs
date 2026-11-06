@@ -593,6 +593,27 @@ impl JbeamDb {
     /// Resolve the part tree from the main part through each slot's configured
     /// (or default) part, depth first. Returns the parts in assembly order with
     /// their accumulated slot node offsets.
+    /// A local part for wheel slot `slot` whose chosen part is missing: the slot's
+    /// `default` when local, else the first by name of slot type `slot`, else of
+    /// its family (the type without its trailing `_<lug count>`).
+    fn wheel_substitute(&self, slot: &str, default: &str) -> Option<String> {
+        if !default.is_empty() && self.parts.contains_key(default) {
+            return Some(default.to_string());
+        }
+        let mut of = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+            let mut v: Vec<&String> = self
+                .parts
+                .iter()
+                .filter(|(_, p)| p.get("slotType").and_then(Value::as_str).is_some_and(|t| pred(t)))
+                .map(|(k, _)| k)
+                .collect();
+            v.sort();
+            v.first().map(|s| s.to_string())
+        };
+        let family = slot.trim_end_matches(|c: char| c.is_ascii_digit());
+        of(&|t| t == slot).or_else(|| of(&|t| t.starts_with(family) && family.ends_with('_')))
+    }
+
     fn assemble(&mut self, config: &PcConfig) -> Result<Vec<Placed>, String> {
         let main = match &config.main_part {
             Some(m) => m.clone(),
@@ -654,17 +675,43 @@ impl JbeamDb {
                         .and_then(Value::as_object)
                         .cloned()
                         .unwrap_or_default();
-                    let chosen = config.parts.get(&slot_name).cloned().unwrap_or(default);
+                    let mut chosen = config.parts.get(&slot_name).cloned().unwrap_or(default.clone());
                     if chosen.is_empty() {
                         continue;
                     }
+                    let mut substitute = false;
                     if !self.parts.contains_key(&chosen) {
-                        self.warnings
-                            .push(format!("slot `{slot_name}`: part `{chosen}` not found"));
-                        continue;
+                        // A wheel slot whose part is BeamNG's stock content (not
+                        // local): the wheel part carries the hub nodes the suspension
+                        // and the wheel rows use, so a local wheel part stands in
+                        // (spec §29.2): the slot's default, else the first by name of
+                        // its slot type, else of its family (`wheel_F_6` → `wheel_F_*`).
+                        // Any other slot whose part is missing (another mod's, or
+                        // stock content) takes its own default when that is local.
+                        let local = if slot_name.starts_with("wheel_") {
+                            self.wheel_substitute(&slot_name, &default)
+                        } else if !default.is_empty() && default != chosen && self.parts.contains_key(&default) {
+                            Some(default.clone())
+                        } else {
+                            None
+                        };
+                        match local {
+                            Some(l) => {
+                                self.warnings.push(format!(
+                                    "slot `{slot_name}`: part `{chosen}` not found: the local `{l}` stands in"
+                                ));
+                                chosen = l;
+                                substitute = true;
+                            }
+                            None => {
+                                self.warnings
+                                    .push(format!("slot `{slot_name}`: part `{chosen}` not found"));
+                                continue;
+                            }
+                        }
                     }
                     let ty = self.slot_type(&chosen).unwrap_or("");
-                    let allowed = if v2 {
+                    let allowed = substitute || if v2 {
                         field("allowTypes")
                             .and_then(Value::as_array)
                             .is_none_or(|a| a.iter().any(|t| t.as_str() == Some(ty)))
@@ -840,6 +887,74 @@ fn expand(
         }
     }
     out
+}
+
+/// The fuel's mass in each `fuelTank` of the parts' `energyStorage` rows [N], [ES]
+/// (jbeam-semantics-spec.md §40): `startingFuelCapacity` (L; default
+/// `fuelCapacity`) × `fuelLiquidDensity` (kg/L; default the `energyType`'s), spread
+/// evenly over the nodes of the tank's `fuel` engine groups and added to their
+/// `nodeWeight`. **Choice** (BeamNG names the presets, not their densities):
+/// gasoline 0.74, diesel 0.84, kerosene 0.80 kg/L, an unnamed type gasoline; a
+/// tank with no density, no fuel or no nodes adds nothing (warned).
+fn fuel_mass(
+    db: &JbeamDb,
+    parts: &[Placed],
+    vars: &HashMap<String, f64>,
+    engine_groups: &HashMap<u32, Vec<String>>,
+    desc: &mut SoftVehicleDesc,
+) {
+    let num = |v: Option<&Value>| v.and_then(|v| resolve(v, vars)).and_then(|v| v.as_f64());
+    for p in parts {
+        let part = &db.parts[&p.name];
+        let Some(rows) = part.get("energyStorage").and_then(Value::as_array) else {
+            continue;
+        };
+        for row in rows.iter().skip(1).filter_map(Value::as_array) {
+            let (Some("fuelTank"), Some(name)) = (row.first().and_then(Value::as_str), row.get(1).and_then(Value::as_str)) else {
+                continue;
+            };
+            let Some(tank) = part.get(name).and_then(Value::as_object) else {
+                continue;
+            };
+            let capacity = num(tank.get("fuelCapacity")).unwrap_or(0.0);
+            let litres = num(tank.get("startingFuelCapacity")).unwrap_or(capacity).max(0.0);
+            let density = num(tank.get("fuelLiquidDensity")).or_else(|| {
+                match tank.get("energyType").and_then(Value::as_str).unwrap_or("gasoline") {
+                    "gasoline" => Some(0.74),
+                    "diesel" => Some(0.84),
+                    "kerosene" => Some(0.80),
+                    _ => None,
+                }
+            });
+            let groups: Vec<&str> = match tank.get("fuel").and_then(|f| f.get("[engineGroup]:")) {
+                Some(Value::String(g)) => vec![g.as_str()],
+                Some(Value::Array(gs)) => gs.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            let mut nodes: Vec<u32> = engine_groups
+                .iter()
+                .filter(|(_, g)| g.iter().any(|g| groups.contains(&g.as_str())))
+                .map(|(&i, _)| i)
+                .collect();
+            nodes.sort_unstable();
+            let Some(density) = density else {
+                desc.warnings.push(format!("fuel tank `{name}`: energy type without a density; its fuel has no mass"));
+                continue;
+            };
+            let mass = litres * density;
+            if mass <= 0.0 {
+                continue;
+            }
+            if nodes.is_empty() {
+                desc.warnings.push(format!("fuel tank `{name}`: no node in its fuel groups {groups:?}; its {mass:.1} kg of fuel has no node"));
+                continue;
+            }
+            let share = (mass / nodes.len() as f64) as f32;
+            for i in nodes {
+                desc.nodes[i as usize].mass += share;
+            }
+        }
+    }
 }
 
 /// JBeam frame (+X left, +Y rear, +Z up) → Rubble (+X left, +Y up, +Z forward).
@@ -1204,6 +1319,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     let mut coupler_fields: BTreeMap<u32, Map<String, Value>> = BTreeMap::new();
     let mut part_nodes: Vec<(String, Vec<u32>)> = Vec::new();
     let mut group_nodes: Vec<(String, Vec<u32>)> = Vec::new();
+    // Each node's `engineGroup` names (its last definition's), for the tanks' mass.
+    let mut engine_groups: HashMap<u32, Vec<String>> = HashMap::new();
     for (pi, f) in expand(&db, &parts, "nodes", &vars) {
         let Some(id) = f.get("id").and_then(|v| {
             v.as_str()
@@ -1271,6 +1388,12 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         } else {
             coupler_fields.remove(&index);
         }
+        let eg: Vec<String> = match f.get("engineGroup") {
+            Some(Value::String(g)) if !g.is_empty() => vec![g.clone()],
+            Some(Value::Array(gs)) => gs.iter().filter_map(Value::as_str).filter(|g| !g.is_empty()).map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+        engine_groups.insert(index, eg);
         let mut add = |list: &mut Vec<(String, Vec<u32>)>, name: &str| match list
             .iter_mut()
             .find(|(n, _)| n == name)
@@ -1297,6 +1420,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             _ => {}
         }
     }
+    fuel_mass(&db, &parts, &vars, &engine_groups, &mut desc);
     desc.node_group_nodes = group_nodes.clone();
     for g in &mut desc.node_group_nodes {
         g.1.sort_unstable();
@@ -1317,6 +1441,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     let mut skipped: BTreeMap<String, u32> = BTreeMap::new();
     let mut jbeam_unsupported: BTreeMap<&str, u32> = BTreeMap::new();
     let mut missing = 0u32;
+    let mut missing_names: Vec<String> = Vec::new();
     // The `hydros` section's rows are beams of type HYDRO (after the `beams` rows).
     let hydro_rows = expand(&db, &parts, "hydros", &vars)
         .into_iter()
@@ -1331,6 +1456,13 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         let (Some(a), Some(b)) = (node(&f, "id1"), node(&f, "id2")) else {
             if !f.get("optional").and_then(Value::as_bool).unwrap_or(false) {
                 missing += 1;
+                for k in ["id1", "id2"] {
+                    if let Some(n) = f.get(k).and_then(Value::as_str) {
+                        if !ids.contains_key(n) && missing_names.len() < 8 && !missing_names.iter().any(|m: &String| m == n) {
+                            missing_names.push(n.to_string());
+                        }
+                    }
+                }
             }
             continue;
         };
@@ -1615,7 +1747,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     }
     if missing > 0 {
         desc.warnings.push(format!(
-            "{missing} beams reference nodes not in this configuration"
+            "{missing} beams reference nodes not in this configuration (such as {})",
+            missing_names.join(", ")
         ));
     }
     // Couplers (door, bonnet and boot latches): each `couplerNodes` table of an
@@ -2196,6 +2329,34 @@ mod tests {
       }
     }
     "#;
+
+    /// A fuel tank's fuel (`energyStorage`, spec §40): its starting volume × its
+    /// type's density, spread evenly over its `fuel` engine-group nodes; a variable
+    /// sets the volume; nodes outside the group keep their weight.
+    #[test]
+    fn fuel_tank_mass_spreads_over_its_fuel_nodes() {
+        let tank = |rows: &str| {
+            format!(
+                r#"{{"t": {{"slotType": "main",
+                "variables": [["name", "type", "unit", "category", "default", "min", "max"], ["$fuel", "range", "L", "c", 40, 0, 60]],
+                {rows}
+                "nodes": [["id", "posX", "posY", "posZ"], {{"nodeWeight": 5}},
+                    ["a", 0, 0, 0], {{"engineGroup": ["fuel"]}}, ["f1", 1, 0, 0], ["f2", 0, 1, 0],
+                    {{"engineGroup": ""}}, ["b", 0, 0, 1]],
+                "beams": [["id1:", "id2:"], ["a", "f1"], ["f1", "f2"], ["f2", "b"]]}}}}"#
+            )
+        };
+        let plain = load_jbeam(&[("t.jbeam", &tank(""))], None).unwrap();
+        assert!(plain.nodes.iter().all(|n| n.mass == 5.0));
+        let with = tank(
+            r#""energyStorage": [["type", "name"], ["fuelTank", "main"]],
+               "main": {"energyType": "diesel", "fuelCapacity": 60, "startingFuelCapacity": "$fuel", "fuel": {"[engineGroup]:": ["fuel"]}},"#,
+        );
+        let d = load_jbeam(&[("t.jbeam", &with)], None).unwrap();
+        let m: Vec<f32> = d.nodes.iter().map(|n| n.mass).collect();
+        let share = (40.0 * 0.84 / 2.0) as f32;
+        assert_eq!(m, vec![5.0, 5.0 + share, 5.0 + share, 5.0]);
+    }
 
     #[test]
     fn loads_parts_slots_variables_and_tables() {

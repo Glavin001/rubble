@@ -756,7 +756,9 @@ impl WebWorld {
     /// default 1 + 0.5·speed); arena (see `arena`): count, cols, speedMin, speedMax,
     /// hitMin, hitMax, headOn, layout ('rows' | 'ring', see `ring`), ringRadius;
     /// shapes (static colliders for every vehicle, see `shapes`); the
-    /// first vehicle copied to every spawn, drag, turbulence, fastInvSqrt (default true), timing
+    /// first vehicle copied to every spawn, drag, turbulence, fastInvSqrt (default true),
+    /// centredDamping (the BeamNG profile's centred damping, spec §39; default the
+    /// profile's), timing
     /// (default true: GPU timestamps when the device has them) }`.
     #[wasm_bindgen(js_name = explicitSim)]
     pub fn explicit_sim(&self, spec: JsValue) -> Result<ExplicitSim, JsValue> {
@@ -887,6 +889,14 @@ impl ExplicitSim {
                 Some(t) => t.clone(),
                 None => build(v, settings)?,
             };
+            // `centredDamping`: the BeamNG profile's centred damping on or off
+            // (jbeam-semantics-spec.md §39; its default otherwise). A Rigs of Rods
+            // profile vehicle is never changed.
+            if let Some(c) = spec.get("centredDamping").and_then(|c| c.as_bool()) {
+                if sim.beamng_profile {
+                    sim.settings.centred_damping = c;
+                }
+            }
             let speed = spots.get(vi).map_or(speed, |s| s.speed);
             if sim.nodes.is_empty() {
                 return Err("the vehicle has no nodes".into());

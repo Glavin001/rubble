@@ -13,6 +13,7 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     drag: false,
     turbulence: false,
     triangle_throttle: true,
+    centred_damping: false,
 };
 
 fn load(text: &str) -> Result<ExplicitBeams, String> {

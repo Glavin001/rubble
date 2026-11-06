@@ -6,7 +6,7 @@
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
-  hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout,
+  hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -16,7 +16,8 @@ import init, {
 // decodeTexture(bytes, size): a PNG or DDS as one mipped RGBA8 layer (engine_softbody::flextex).
 // jbeamVisualSkinned(spec, meshes, glb, skin): the same for a vehicle whose
 // flexbodies are a glTF render model with weighted skins (flexskin, `.rskin`).
-export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture };
+// FramePacer(rate, gpuBudget): fixed steps per displayed frame (engine-world-wasm frame_pacer.rs).
+export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, FramePacer };
 let ready = null;
 
 /** The wasm's world-less functions (terrain settings, predictions, buffer layout), once loaded. */

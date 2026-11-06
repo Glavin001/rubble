@@ -1,15 +1,15 @@
 //! A local, browser-sized copy of a community BeamNG vehicle for the crash lab's
 //! `?mod=` loader: its JBeam parts, configurations and materials as they are, its
 //! Collada meshes as they are (one level of detail: BeamNG's files carry one per
-//! mesh), and only the textures the configuration's flexbodies use, decoded (DDS:
-//! BC1–BC5, BC7; PNG) and downscaled to at most `size` pixels, written as PNG
+//! mesh), and only the textures its configurations' flexbodies use, decoded (DDS:
+//! BC1–BC7; PNG) and downscaled to at most `size` pixels, written as PNG
 //! beside the original's name (`<stem>.png`). Writes `files.json` (the folder's
 //! file list, the page's index). Nothing here is committed: point `out` at the
 //! gitignored `inspiration/` or `engine/crates/engine-webgpu/__mods/`.
 //!
 //! ```bash
 //! cargo run --release -p engine-softbody --example community_cache -- \
-//!     <vehicles-dir> <vehicle> <config.pc> <out-dir> [size=1024]
+//!     <vehicles-dir> <vehicle> <all|a.pc,b.pc> <out-dir> [size=1024] [label=...] [note=...]
 //! ```
 //!
 //! The mod's own files are data only: no script in them is read or run.
@@ -56,6 +56,8 @@ fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             76..=78 => 3,
             79..=81 => 4,
             82..=84 => 5,
+            95 => 6,
+            96 => 60,
             97..=99 => 7,
             f => return Err(format!("DXGI format {f} not read")),
         };
@@ -90,6 +92,15 @@ fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
                 2 => bcdec_rs::bc2(b, &mut tmp, 16),
                 3 => bcdec_rs::bc3(b, &mut tmp, 16),
                 7 => bcdec_rs::bc7(b, &mut tmp, 16),
+                6 | 60 => {
+                    // BC6H (half-float RGB): clamped to [0, 1] (the data maps' range).
+                    let mut f = [0f32; 48];
+                    bcdec_rs::bc6h_float(b, &mut f, 12, kind == 60);
+                    for i in 0..16 {
+                        let c = |k: usize| (f[i * 3 + k].clamp(0.0, 1.0) * 255.0).round() as u8;
+                        tmp[i * 4..i * 4 + 4].copy_from_slice(&[c(0), c(1), c(2), 255]);
+                    }
+                }
                 4 => {
                     let mut r = [0u8; 16];
                     bcdec_rs::bc4(b, &mut r, 4, false);
@@ -216,20 +227,21 @@ fn main() {
             _ => {}
         }
     }
-    let pcs = std::fs::read_to_string(vehicles.join(name).join(pc)).unwrap();
+    // The configurations: `all` (every .pc the vehicle ships) or a comma list.
+    let pc_names: Vec<String> = if pc == "all" {
+        let mut v: Vec<String> = std::fs::read_dir(vehicles.join(name))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|f| f.to_ascii_lowercase().ends_with(".pc"))
+            .collect();
+        v.sort();
+        v
+    } else {
+        pc.split(',').map(str::to_string).collect()
+    };
     let refs: Vec<(&str, &str)> = jbeam.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-    let desc = engine_softbody::jbeam::load_jbeam(&refs, Some(&pcs)).unwrap();
-    let flex = engine_softbody::jbeam::assembled_rows(&refs, Some(&pcs), "flexbodies").unwrap();
-    let props = engine_softbody::jbeam::assembled_rows(&refs, Some(&pcs), "props").unwrap();
-    let (sim, _) = engine_softbody::explicit_beams::ExplicitBeams::from_desc_jbeam_with(
-        &desc,
-        engine_softbody::explicit_beams::JbeamWheels::Pressure,
-        glam::Vec3::ZERO,
-        glam::Vec3::ZERO,
-        Default::default(),
-    )
-    .unwrap();
-    // The meshes the configuration draws decide which .dae files and textures go.
+    // Every mesh of every .dae (the configurations decide which go).
     let mut all = Vec::new();
     let mut dae_meshes = Vec::new();
     for p in &daes {
@@ -245,13 +257,57 @@ fn main() {
     for m in &mats {
         info.extend(engine_softbody::flexmesh::read_materials(m));
     }
-    let (vis, rep) =
-        engine_softbody::flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &all, &info, [0.5; 3]).unwrap();
-    let used: std::collections::BTreeSet<&str> = flex
-        .iter()
-        .chain(&props)
-        .filter_map(|(_, f)| f.get("mesh").and_then(|m| m.as_str()))
-        .collect();
+    let mut used: std::collections::BTreeSet<String> = Default::default();
+    let mut tex: std::collections::BTreeSet<String> = Default::default();
+    let mut configs: Vec<serde_json::Value> = Vec::new();
+    for pc in &pc_names {
+        let path = format!("{name}/{pc}");
+        let Ok(pcs) = std::fs::read_to_string(vehicles.join(name).join(pc)) else {
+            continue;
+        };
+        let loaded = engine_softbody::jbeam::load_jbeam(&refs, Some(&pcs)).and_then(|desc| {
+            let flex = engine_softbody::jbeam::assembled_rows(&refs, Some(&pcs), "flexbodies")?;
+            let props = engine_softbody::jbeam::assembled_rows(&refs, Some(&pcs), "props")?;
+            let (sim, _) = engine_softbody::explicit_beams::ExplicitBeams::from_desc_jbeam_with(
+                &desc,
+                engine_softbody::explicit_beams::JbeamWheels::Raycast,
+                glam::Vec3::ZERO,
+                glam::Vec3::ZERO,
+                Default::default(),
+            )?;
+            let (vis, rep) =
+                engine_softbody::flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &all, &info, [0.5; 3])?;
+            Ok((desc, sim, flex, props, vis, rep))
+        });
+        match loaded {
+            Ok((desc, sim, flex, props, vis, rep)) => {
+                used.extend(
+                    flex.iter()
+                        .chain(&props)
+                        .filter_map(|(_, f)| f.get("mesh").and_then(|m| m.as_str()).map(str::to_string)),
+                );
+                tex.extend(vis.textures.iter().chain(&vis.data_textures).cloned());
+                println!(
+                    "{path}: {} nodes, {} beams, {} flexbodies, {} triangles, unbound {}",
+                    sim.nodes.len(),
+                    sim.beams.len(),
+                    rep.flexbodies,
+                    rep.triangles,
+                    rep.unbound
+                );
+                configs.push(serde_json::json!({
+                    "pc": path,
+                    "name": desc.name,
+                    "nodes": sim.nodes.len(),
+                    "beams": sim.beams.len(),
+                    "triangles": rep.triangles,
+                    "wheels": desc.wheels.len(),
+                }));
+            }
+            Err(e) => println!("{path}: {e} (left out of the index)"),
+        }
+    }
+    let used: std::collections::BTreeSet<&str> = used.iter().map(String::as_str).collect();
     // Each .dae a used mesh is in, without the geometries no used mesh draws.
     for (p, meshes) in &dae_meshes {
         let keep: std::collections::BTreeSet<&str> = meshes
@@ -271,7 +327,7 @@ fn main() {
         println!("{r}: {:.1} -> {:.1} MB", text.len() as f64 / 1e6, slim.len() as f64 / 1e6);
         listed.push(r);
     }
-    let wanted: Vec<&String> = vis.textures.iter().chain(&vis.data_textures).collect();
+    let wanted: Vec<&String> = tex.iter().collect();
     let mut bytes_out = 0u64;
     for t in &wanted {
         let src = files.iter().find(|p| {
@@ -315,14 +371,34 @@ fn main() {
         .map(|m| m.len())
         .sum();
     println!(
-        "{name} {pc}: {} files, {:.1} MB ({:.1} MB textures); visual: {} flexbodies, {} props, {} triangles, unbound {:?}, missing {:?}",
+        "{name}: {} configurations, {} files, {:.1} MB ({:.1} MB textures)",
+        configs.len(),
         listed.len(),
         total as f64 / 1e6,
-        bytes_out as f64 / 1e6,
-        rep.flexbodies,
-        rep.props,
-        rep.triangles,
-        rep.unbound,
-        rep.missing
+        bytes_out as f64 / 1e6
     );
+    // The page's picker: `<out's parent>/index.json`, one entry per cache folder.
+    let label = a
+        .iter()
+        .find_map(|x| x.strip_prefix("label="))
+        .map_or_else(|| name.to_string(), str::to_string);
+    let folder = out.file_name().unwrap().to_string_lossy().into_owned();
+    let index_path = out.parent().unwrap().join("index.json");
+    let mut index: Vec<serde_json::Value> = std::fs::read_to_string(&index_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    index.retain(|e| e.get("folder").and_then(|f| f.as_str()) != Some(folder.as_str()));
+    index.push(serde_json::json!({
+        "folder": folder,
+        "label": label,
+        "vehicle": name,
+        "megabytes": (total as f64 / 1e5).round() / 10.0,
+        // A note the picker shows (e.g. `note=marginal at rest`: content at the
+        // explicit step's stability edge, jbeam-semantics-spec.md §29.1).
+        "note": a.iter().find_map(|x| x.strip_prefix("note=")).unwrap_or(""),
+        "configs": configs,
+    }));
+    index.sort_by(|a, b| a["label"].as_str().cmp(&b["label"].as_str()));
+    std::fs::write(&index_path, serde_json::to_string_pretty(&index).unwrap()).unwrap();
 }

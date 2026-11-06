@@ -112,6 +112,12 @@ pub struct ExplicitBeamsSettings {
     /// ([`Self::beamng`], jbeam-semantics-spec.md §36): every triangle is tested
     /// every step.
     pub triangle_throttle: bool,
+    /// Centred damping (jbeam-semantics-spec.md §39; on in the BeamNG profile,
+    /// off in the Rigs of Rods one): each JBeam element's damping reads the mean
+    /// of the step's start and end velocities instead of the start's, by a
+    /// correction after the node update. Lifts the damped explicit step's limit
+    /// from ω·h ≤ 2(√(1+ζ²) − ζ) to 2 and past it; JBeam elements only.
+    pub centred_damping: bool,
 }
 
 impl Default for ExplicitBeamsSettings {
@@ -121,6 +127,7 @@ impl Default for ExplicitBeamsSettings {
             drag: true,
             turbulence: true,
             triangle_throttle: true,
+            centred_damping: false,
         }
     }
 }
@@ -133,6 +140,7 @@ impl ExplicitBeamsSettings {
         Self {
             fast_inv_sqrt: false,
             triangle_throttle: false,
+            centred_damping: true,
             ..self
         }
     }
@@ -998,6 +1006,10 @@ pub struct ExplicitBeams {
     /// A measurement (`None`: off): the last step's two-body self-collision hits
     /// as found (contacter, triangle nodes, weights, depth, normal).
     pub self_hit_log: Option<Vec<(u32, [u32; 3], [f32; 3], f32, Vec3)>>,
+    /// A measurement (`None`: off): the last step's two-body self-contact forces
+    /// per node by phase: the first pass's normal part, its friction, the residual
+    /// pass (N; the node's share, as added).
+    pub self_contact_parts: Option<Vec<[Vec3; 3]>>,
     /// The contact-force log (jbeam-semantics-spec.md §32): per node the sum of
     /// its contacts' force magnitudes per step, and the contact breaks it drives
     /// (`None`: off, the default; [`Self::enable_contact_force`]).
@@ -1044,6 +1056,18 @@ pub struct ExplicitBeams {
     /// content, or a `.truck` with `rubble_beamng_profile`; else Rigs of
     /// Rods'. What hosts report as the vehicle's profile.
     pub beamng_profile: bool,
+    /// Measurement (jbeam-semantics-spec.md §39's comparison; never on in a
+    /// profile): the velocity the beam pass's damping reads, by a dry beam pass
+    /// (state restored) that predicts each node's end-of-step velocity. 0: off,
+    /// the step's velocity. 1: the predicted velocity (one Jacobi step toward
+    /// backward-Euler damping). 2: the mean of the two (what
+    /// [`ExplicitBeamsSettings::centred_damping`] gives at about a third of the cost).
+    pub damp_scheme: u32,
+    /// [`ExplicitBeamsSettings::centred_damping`]: each beam record's damping
+    /// slope from the last beam pass ([`BeamOut::slope`]; 0 for a record that
+    /// added no damping force). The kernel keeps it in the record's first
+    /// incidence entry's `.w`.
+    pub damp_slopes: Vec<f32>,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -1573,6 +1597,7 @@ impl ExplicitBeams {
             slide_hold: Vec::new(),
             contact_exact: None,
             self_hit_log: None,
+            self_contact_parts: None,
             contact_force: None,
             tread: Vec::new(),
             damp_filters: Vec::new(),
@@ -1590,6 +1615,8 @@ impl ExplicitBeams {
             trace: None,
             drive: None,
             beamng_profile: false,
+            damp_scheme: 0,
+            damp_slopes: Vec::new(),
         }
     }
 
@@ -3304,7 +3331,13 @@ impl ExplicitBeams {
         if self.drive.is_some() {
             crate::explicit_drive::drive_pass(self);
         }
-        self.node_pass();
+        if self.settings.centred_damping {
+            let v0: Vec<Vec3> = self.nodes.iter().map(|n| n.vel).collect();
+            self.node_pass();
+            self.centred_correction(&v0);
+        } else {
+            self.node_pass();
+        }
         if !self.wings.is_empty() {
             self.wing_pass();
         }
@@ -3320,7 +3353,11 @@ impl ExplicitBeams {
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 0);
         }
-        self.beam_pass();
+        if self.damp_scheme == 0 {
+            self.beam_pass();
+        } else {
+            self.beam_pass_predicted();
+        }
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 1);
         }
@@ -3696,7 +3733,136 @@ impl ExplicitBeams {
         }
     }
 
+    /// [`Self::damp_scheme`] > 0: a dry beam pass (state restored) predicts each
+    /// node's end-of-step velocity; the real pass then reads that (or its mean
+    /// with the step's) and the step's velocities are put back.
+    fn beam_pass_predicted(&mut self) {
+        let h = STEP;
+        let f0: Vec<Vec3> = self.nodes.iter().map(|n| n.force).collect();
+        let v0: Vec<Vec3> = self.nodes.iter().map(|n| n.vel).collect();
+        let snap = (
+            self.beams.clone(),
+            self.damp_filters.clone(),
+            self.beam_ext.clone(),
+            self.groups_now.clone(),
+            self.groups_last.clone(),
+            self.tri_breaks.clone(),
+            self.tri_dead.clone(),
+            self.deform_state.clone(),
+            self.key_input,
+            self.contact_force.clone(),
+        );
+        self.beam_pass();
+        let va: Vec<Vec3> = self
+            .nodes
+            .iter()
+            .map(|n| if n.has(NODE_IMMOVABLE) { n.vel } else { n.vel + n.force / n.mass * h })
+            .collect();
+        (
+            self.beams,
+            self.damp_filters,
+            self.beam_ext,
+            self.groups_now,
+            self.groups_last,
+            self.tri_breaks,
+            self.tri_dead,
+            self.deform_state,
+            self.key_input,
+            self.contact_force,
+        ) = snap;
+        let mix = if self.damp_scheme == 2 { 0.5 } else { 1.0 };
+        for (i, n) in self.nodes.iter_mut().enumerate() {
+            n.force = f0[i];
+            n.vel = v0[i] + (va[i] - v0[i]) * mix;
+        }
+        self.beam_pass();
+        for (i, n) in self.nodes.iter_mut().enumerate() {
+            n.vel = v0[i];
+        }
+    }
+
+    /// The centred damping's correction after the node update
+    /// ([`ExplicitBeamsSettings::centred_damping`], spec §39). Δvᵢ is the velocity
+    /// change the update gave node i. Each beam record with a damping slope s from
+    /// the last beam pass gives its ends −½·s·Δu along its current direction (Δu
+    /// its extension rate's change under Δv; a torsion bar −½·s·Δφ̇ through its
+    /// dihedral gradient, a coupler −½·s·(Δv_a − Δv_b)), equal and opposite, so the
+    /// damping it applied reads the mean of the step's start and end velocities.
+    /// Each node sums its incidence entries in order (the kernel's slots), then
+    /// v += h·c/m and x += h·(h·c/m).
+    fn centred_correction(&mut self, v0: &[Vec3]) {
+        let h = STEP;
+        let nb = self.beams.len();
+        self.damp_slopes.resize(nb, 0.0);
+        let dv: Vec<Vec3> = self.nodes.iter().zip(v0).map(|(n, v)| n.vel - *v).collect();
+        // Per beam record its two entries' corrections (end a, end b).
+        let mut slot = vec![[Vec3::ZERO; 2]; nb];
+        for j in 0..nb {
+            let slope = self.damp_slopes[j];
+            if slope == 0.0 {
+                continue;
+            }
+            let b = self.beams[j];
+            let (a, e) = (b.a as usize, b.b as usize);
+            match b.kind {
+                ExplicitKind::JbeamTorsion => {
+                    let n = self.beams[j + 1];
+                    let ids = [a, e, n.a as usize, n.b as usize];
+                    let g = dihedral_jacobian(ids.map(|i| self.nodes[i].pos));
+                    let dr = g[0].dot(dv[ids[0]])
+                        + g[1].dot(dv[ids[1]])
+                        + g[2].dot(dv[ids[2]])
+                        + g[3].dot(dv[ids[3]]);
+                    let t = -0.5 * slope * dr;
+                    slot[j] = [g[0] * t, g[1] * t];
+                    slot[j + 1] = [g[2] * t, g[3] * t];
+                }
+                ExplicitKind::JbeamCoupler => {
+                    let f = (dv[a] - dv[e]) * (-0.5 * slope);
+                    slot[j] = [f, -f];
+                }
+                _ => {
+                    let d = self.nodes[a].pos - self.nodes[e].pos;
+                    let inv = exact_length(d.dot(d)).1;
+                    let du = (dv[a] - dv[e]).dot(d) * inv;
+                    let push = d * ((-0.5 * slope * du) * inv);
+                    slot[j] = [push, -push];
+                }
+            }
+        }
+        for i in 0..self.nodes.len() {
+            let mut c = Vec3::ZERO;
+            let mut seen: Option<u32> = None;
+            for &j in &self.incidence[i] {
+                let b = &self.beams[j as usize];
+                // The entry's end as the kernel's layout assigns it (a beam from a
+                // node to itself has both entries in this list).
+                let other_end = b.b == i as u32 && b.a != i as u32;
+                let end = if other_end || (b.a == b.b && seen == Some(j)) {
+                    1
+                } else {
+                    0
+                };
+                if b.a == b.b {
+                    seen = Some(j);
+                }
+                c += slot[j as usize][end];
+            }
+            let n = &mut self.nodes[i];
+            if !n.has(NODE_IMMOVABLE) {
+                let dv = c / n.mass * h;
+                n.vel += dv;
+                n.pos += dv * h;
+            }
+        }
+    }
+
     fn beam_pass(&mut self) {
+        let slopes = self.settings.centred_damping;
+        if slopes {
+            self.damp_slopes.clear();
+            self.damp_slopes.resize(self.beams.len(), 0.0);
+        }
         std::mem::swap(&mut self.groups_last, &mut self.groups_now);
         self.groups_now.clear();
         if !self.tri_breaks.is_empty() {
@@ -3747,6 +3913,9 @@ impl ExplicitBeams {
                         self.cascade(beam.group);
                     }
                 }
+                if slopes && !beam.broken {
+                    self.damp_slopes[j] = beam.c;
+                }
                 for (n, f) in [beam.a, beam.b, c, d].into_iter().zip(f) {
                     self.nodes[n as usize].force += f;
                 }
@@ -3755,6 +3924,9 @@ impl ExplicitBeams {
             if beam.kind == ExplicitKind::JbeamCoupler {
                 let push = coupler_force(&mut beam, &na, &nb);
                 self.beams[j] = beam;
+                if slopes && !beam.broken {
+                    self.damp_slopes[j] = beam.c;
+                }
                 if beam.broken && beam.group > 0 {
                     self.cascade(beam.group);
                 }
@@ -3805,6 +3977,9 @@ impl ExplicitBeams {
                 }
             }
             self.beams[j] = beam;
+            if slopes && !beam.broken && beam.kind.is_jbeam() {
+                self.damp_slopes[j] = out.slope;
+            }
             if cascade {
                 self.cascade(beam.group);
             }
@@ -3833,6 +4008,10 @@ impl ExplicitBeams {
     fn collision_pass(&mut self) {
         let exact = self.exact_friction;
         self.last_contacts = 0;
+        if let Some(p) = self.self_contact_parts.as_mut() {
+            p.clear();
+            p.resize(self.nodes.len(), [Vec3::ZERO; 3]);
+        }
         if self.grid_cell > 0.0 {
             let cell = self.grid_cell;
             let nodes = &self.nodes;
@@ -4142,6 +4321,13 @@ impl ExplicitBeams {
                 f / n.mass
             }
         };
+        let mut first: Vec<Vec3> = Vec::with_capacity(found.len());
+        // §37.1: with the residual and the guard, the first pass's sums are a
+        // staging the later passes read; each hit's total is added once at the end
+        // (the accumulators as they were, then every hit's total: the first pass's
+        // quantisation, whatever the later passes add).
+        let staged = self.dissipative_contact;
+        let snapshot = staged.then(|| (self.contact_acc.clone(), self.contact_exact.clone()));
         for &(hn, [i0, i1, i2], [alpha, beta, gamma], depth, n) in found {
             let node = self.nodes[hn as usize];
             let (n0, n1, n2) = (
@@ -4194,6 +4380,59 @@ impl ExplicitBeams {
                     }
                 }
             }
+            first.push(f);
+            if let Some(p) = self.self_contact_parts.as_mut() {
+                let fnm = n * f.dot(n);
+                for (i, w) in [(hn, 1.0f32), (i1, -alpha), (i2, -beta), (i0, -gamma)] {
+                    p[i as usize][0] += fnm * w;
+                    p[i as usize][1] += (f - fnm) * w;
+                }
+            }
+            self.add_contact(hn as usize, f);
+            self.add_contact(i1 as usize, -(f * alpha));
+            self.add_contact(i2 as usize, -(f * beta));
+            self.add_contact(i0 as usize, -(f * gamma));
+            if !staged {
+                if let Some(l) = self.contact_force.as_mut() {
+                    l.add(hn as usize, f);
+                    l.add(i1 as usize, f * alpha);
+                    l.add(i2 as usize, f * beta);
+                    l.add(i0 as usize, f * gamma);
+                }
+            }
+        }
+        let Some((acc0, exact0)) = snapshot else {
+            return;
+        };
+        let res = if residual_on() {
+            self.residual_self_pass(found, &split)
+        } else {
+            vec![None; found.len()]
+        };
+        let with_res: Vec<Vec3> = found
+            .iter()
+            .zip(&first)
+            .zip(&res)
+            .map(|((x, &f), r)| match r {
+                Some(r) => f + x.4 * *r,
+                None => f,
+            })
+            .collect();
+        let guard = self.friction_guard_pass(found, &with_res);
+        self.contact_acc = acc0;
+        self.contact_exact = exact0;
+        for (j, &(hn, [i0, i1, i2], [alpha, beta, gamma], _, n)) in found.iter().enumerate() {
+            let mut f = with_res[j];
+            if let Some(g) = guard[j] {
+                f = f + g;
+            }
+            if let Some(p) = self.self_contact_parts.as_mut() {
+                let extra = [res[j].map_or(Vec3::ZERO, |r| n * r), guard[j].unwrap_or(Vec3::ZERO)];
+                for (i, w) in [(hn, 1.0f32), (i1, -alpha), (i2, -beta), (i0, -gamma)] {
+                    p[i as usize][2] += extra[0] * w;
+                    p[i as usize][1] += extra[1] * w;
+                }
+            }
             self.add_contact(hn as usize, f);
             self.add_contact(i1 as usize, -(f * alpha));
             self.add_contact(i2 as usize, -(f * beta));
@@ -4203,11 +4442,6 @@ impl ExplicitBeams {
                 l.add(i1 as usize, f * alpha);
                 l.add(i2 as usize, f * beta);
                 l.add(i0 as usize, f * gamma);
-            }
-        }
-        if self.dissipative_contact {
-            for _ in 0..residual_passes() {
-                self.residual_self_pass(found, &split);
             }
         }
     }
@@ -4226,7 +4460,82 @@ impl ExplicitBeams {
     /// the active hits only were measured to over-stop: +0.23 J of self-contact
     /// work in a tenth of the 58 km/h wall). No friction and no position step (the
     /// first pass's). All found from the sums before any is added (order free).
-    fn residual_self_pass(&mut self, found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)], split: &[u32]) {
+    /// §37.1's work guard over the step's two-body self hits, after the residual
+    /// pass. A hit's force t (its first-pass force with its residual, `first`) is
+    /// judged at the pair's realised mean velocity over the step: the forces now
+    /// (the staging sums with the residual's) on the nodes' own masses. Its work is
+    /// W(s) = s·A + s²·B, with
+    /// * A = t·(2v + h·a′), a′ the pair's relative acceleration without t;
+    /// * B = h·|t|²·inv, inv the nodes' own inverse masses.
+    ///
+    /// Where W(1) > 0, the force is scaled to the root s = −A/B (0 if A ≥ 0), and
+    /// (1 − s)·t is taken back from the pair (returned per hit). The first pass's
+    /// caps judge each hit at its own predicted velocity with split masses; hits
+    /// sharing nodes then did +1–2 J of friction work in a tenth at rest. A force
+    /// that does positive work moves the pair the way it pushes, so scaling its
+    /// normal part lets nothing in. Every guard is found from the same sums before
+    /// any is applied (order free, momentum-exact).
+    fn friction_guard_pass(
+        &self,
+        found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)],
+        first: &[Vec3],
+    ) -> Vec<Option<Vec3>> {
+        let mut out = vec![None; found.len()];
+        if !friction_guard() {
+            return out;
+        }
+        let now: Vec<Vec3> = self.forces_now();
+        let acc = |i: u32| {
+            let n = &self.nodes[i as usize];
+            if n.has(NODE_IMMOVABLE) {
+                Vec3::ZERO
+            } else {
+                now[i as usize] / n.mass
+            }
+        };
+        let im = |i: u32| {
+            let n = &self.nodes[i as usize];
+            if n.has(NODE_IMMOVABLE) {
+                0.0
+            } else {
+                1.0 / n.mass
+            }
+        };
+        for (j, (&(hn, [i0, i1, i2], [alpha, beta, gamma], _, _), &t)) in
+            found.iter().zip(first).enumerate()
+        {
+            if t == Vec3::ZERO {
+                continue;
+            }
+            let node = &self.nodes[hn as usize];
+            let (n0, n1, n2) = (
+                &self.nodes[i0 as usize],
+                &self.nodes[i1 as usize],
+                &self.nodes[i2 as usize],
+            );
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let a = acc(hn) - (acc(i1) * alpha + acc(i2) * beta + acc(i0) * gamma);
+            let inv = im(hn)
+                + crate::explicit_contact::two_body_inverse_mass(
+                    [im(i1), im(i2), im(i0)],
+                    [alpha, beta, gamma],
+                );
+            let a_rest = a - t * inv;
+            let aa = t.dot(v + v + a_rest * STEP);
+            let bb = STEP * t.dot(t) * inv;
+            if aa + bb > 0.0 && bb > 0.0 {
+                let s = if aa < 0.0 { (-aa / bb).min(1.0) } else { 0.0 };
+                out[j] = Some(t * -(1.0 - s));
+            }
+        }
+        out
+    }
+
+    fn residual_self_pass(
+        &mut self,
+        found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)],
+        split: &[u32],
+    ) -> Vec<Option<f32>> {
         let now: Vec<Vec3> = self.forces_now();
         let acc = |i: u32, n: &Node| {
             if n.has(NODE_IMMOVABLE) {
@@ -4260,8 +4569,10 @@ impl ExplicitBeams {
                 k as f32 / n.mass
             }
         };
-        let mut forces = Vec::with_capacity(found.len());
-        for (&(hn, [i0, i1, i2], [alpha, beta, gamma], _, n), &(a, x, on)) in found.iter().zip(&drive) {
+        let mut out = vec![None; found.len()];
+        for (j, (&(hn, [i0, i1, i2], [alpha, beta, gamma], _, _), &(a, x, on))) in
+            found.iter().zip(&drive).enumerate()
+        {
             if !on {
                 continue;
             }
@@ -4280,29 +4591,39 @@ impl ExplicitBeams {
             let m = 1.0 / inv;
             let r = -(a * m) - x * m / STEP;
             if r > 0.0 {
-                forces.push((hn, [i0, i1, i2], [alpha, beta, gamma], n * r));
+                out[j] = Some(r);
             }
         }
-        for (hn, [i0, i1, i2], [alpha, beta, gamma], f) in forces {
+        // (Into the staging sums, read by the guard.)
+        for (j, &(hn, [i0, i1, i2], [alpha, beta, gamma], _, n)) in found.iter().enumerate() {
+            let Some(r) = out[j] else { continue };
+            let f = n * r;
             self.add_contact(hn as usize, f);
             self.add_contact(i1 as usize, -(f * alpha));
             self.add_contact(i2 as usize, -(f * beta));
             self.add_contact(i0 as usize, -(f * gamma));
-            if let Some(l) = self.contact_force.as_mut() {
-                l.add(hn as usize, f);
-                l.add(i1 as usize, f * alpha);
-                l.add(i2 as usize, f * beta);
-                l.add(i0 as usize, f * gamma);
-            }
         }
+        out
     }
 }
 
-/// §37's residual passes after a step's two-body hits (1; `RESIDUAL_PASSES`
-/// overrides it, a measurement switch: 0 none; the GPU runs one). Measured on
-/// sedan1 (51 km/h wall, at rest 8–12 s, self-contact work per second): none
-/// 800 J sloshed against the steps, one 25–50 J; two and three no steadier and
-/// three did +0.3 J in a tenth beyond the steps' allowance.
+/// §37.1's friction guard (on; `FRICTION_GUARD=0`, a measurement switch: off).
+pub fn friction_guard() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var("FRICTION_GUARD").is_ok_and(|v| v == "0"))
+}
+
+/// §37.1's residual pass (on; `RESIDUAL_PASSES=0`, a measurement switch: off).
+/// Measured on sedan1 (51 km/h wall, at rest 8–12 s, self-contact work per
+/// second): none 800 J sloshed against the steps, one 25–50 J; two and three no
+/// steadier and did positive work in a tenth (Jacobi over-stops where hits share
+/// nodes with conflicting normals).
+pub fn residual_on() -> bool {
+    residual_passes() > 0
+}
+
+/// The residual passes vehicle contact's CPU measurement runs (`RESIDUAL_PASSES`,
+/// 1).
 pub fn residual_passes() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *N.get_or_init(|| {
@@ -4310,6 +4631,7 @@ pub fn residual_passes() -> usize {
             .ok()
             .and_then(|x| x.parse().ok())
             .unwrap_or(1)
+            .min(1)
     })
 }
 
@@ -4631,6 +4953,10 @@ pub struct BeamOut {
     pub force: f32,
     /// τ exceeded the strength: the beam breaks unless an end saves it.
     pub check_break: bool,
+    /// The damping law's slope ∂(damping force)/∂u at this step's rate (N·s/m;
+    /// the low-pass's gain included; 0 where the law has no damping). Read only by
+    /// the centred damping (jbeam-semantics-spec.md §39).
+    pub slope: f32,
 }
 
 /// One beam's force with the kind rules and the yield rules applied to `beam`
@@ -4754,6 +5080,7 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         e,
         force: f,
         check_break,
+        slope: if support_broke { 0.0 } else { c },
     }
 }
 
@@ -4788,14 +5115,15 @@ pub fn jbeam_force_filtered(
     };
     let e = len - beam.rest;
     let u = (na.vel - nb.vel).dot(d) * inv;
-    let u = match filter {
-        Some(f) => f.step(u),
-        None => u,
+    let (u, gain) = match filter {
+        Some(f) => (f.step(u), f.a),
+        None => (u, 1.0),
     };
     let mut k = beam.k;
     let c = beam.c;
-    // The damping force (positive along u).
+    // The damping force (positive along u), and its slope in u.
     let mut damp = c * u;
+    let mut slope = c;
     match beam.kind {
         ExplicitKind::JbeamBounded => {
             // Slow damping up to the split, the fast rate past it (continuous).
@@ -4803,6 +5131,7 @@ pub fn jbeam_force_filtered(
             let au = u.abs();
             if au > split {
                 damp = (c * split + beam.tt * (au - split)).copysign(u);
+                slope = beam.tt;
             }
             let long = beam.long_bound * beam.rest;
             let short = beam.short_bound * beam.rest;
@@ -4818,11 +5147,13 @@ pub fn jbeam_force_filtered(
                 let s = if zone > 0.0 { (o / zone).min(1.0) } else { 1.0 };
                 k += (beam.limit_k - k) * s;
                 damp += (beam.limit_c * u - damp) * s;
+                slope += (beam.limit_c - slope) * s;
             }
         }
         ExplicitKind::JbeamRope if e < 0.0 => {
             k = 0.0;
             damp = (c * 0.1) * u;
+            slope = c * 0.1;
         }
         ExplicitKind::JbeamSupport => {
             if e > 0.0 {
@@ -4835,10 +5166,12 @@ pub fn jbeam_force_filtered(
                         e,
                         force: 0.0,
                         check_break: false,
+                        slope: 0.0,
                     };
                 }
                 k = 0.0;
                 damp = 0.0;
+                slope = 0.0;
             }
         }
         _ => {}
@@ -4848,7 +5181,7 @@ pub fn jbeam_force_filtered(
     let mut tau = f.abs();
     let mut tear = false;
     if tau > beam.gate && beam.ty == ExplicitType::Deformable && k != 0.0 {
-        if f > beam.tc && e < 0.0 {
+        if f > beam.tc && e < 0.0 && e + (beam.tc / k) * (1.0 - beam.plastic) < 0.0 {
             let delta = e + (beam.tc / k) * (1.0 - beam.plastic);
             let old = beam.rest;
             let floor = beam.short_bound.max(MIN_REST);
@@ -4866,7 +5199,7 @@ pub fn jbeam_force_filtered(
                 beam.tc = (beam.tc * old / beam.rest).min(beam.limit_k.max(beam.tc));
                 beam.gate = beam.tc.min(beam.tt).min(beam.strength);
             }
-        } else if f < -beam.tt && e > 0.0 {
+        } else if f < -beam.tt && e > 0.0 && e - (beam.tt / k) * (1.0 - beam.plastic) > 0.0 {
             let delta = e - (beam.tt / k) * (1.0 - beam.plastic);
             let old = beam.rest;
             // A negative bound tears there (`rubble_jbeam_plastic`'s
@@ -4898,6 +5231,7 @@ pub fn jbeam_force_filtered(
         e,
         force: f,
         check_break: tau > beam.strength || tear,
+        slope: slope * gain,
     }
 }
 
@@ -5059,6 +5393,7 @@ pub fn shock2_force(beam: &mut Beam, sh: &Shock2, na: &Node, nb: &Node, fast: bo
         e,
         force: f,
         check_break: tau > beam.gate && tau > beam.strength,
+        slope: c,
     }
 }
 

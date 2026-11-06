@@ -143,6 +143,11 @@ static const uint FLAG_DISSIPATIVE = 32768u;
 // Some vehicle of the upload has FLAG_DISSIPATIVE: every vehicle's node phase takes
 // its nodes' contact position steps (gAcc at shiftAt, §37; the shapes path).
 static const uint FLAG_SHIFT_MEM = 65536u;
+// Centred damping (jbeam-semantics-spec.md §39, ExplicitBeamsSettings::centred_damping):
+// the beam phase keeps each JBeam record's damping slope in its first incidence
+// entry's .w, and after the node phase each record corrects its damping by
+// −½·slope·Δu (centredBeam, centredNode). gP.centredDv nonzero: some vehicle has it.
+static const uint FLAG_CENTRED = 262144u;
 // The contact position steps' fixed point, units per metre (explicit_beams.rs
 // SHIFT_FIXED, 2^24).
 static const float SHIFT_FIXED = 16777216.0;
@@ -247,6 +252,7 @@ struct Params
     uint surfSplit; // gAcc: per node its surface hit count this step
     uint surfSeg; // gStatic: per vehicle (segment start in gLists, segments); gLists the global beam indices
     uint surfMark; // gAcc: the find's slot masks: per triangle (global), then segments, nodes (their records' .z, .w)
+    uint centredDv; // gBeams: per node its step-start velocity, then its node phase's Δv (centred damping, §39; 0: no vehicle)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -1588,6 +1594,8 @@ float wrapAngle(float a)
     return a;
 }
 
+// Beam bn's vehicle has centred damping (FLAG_CENTRED, §39).
+bool centredOn(uint4 bn) { return gP.centredDv != 0u && (gStatic[(bn.z >> 16) * 4u + 3u].x & FLAG_CENTRED) != 0u; }
 void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, float4 s1, float4 c1, uint4 r2,
                     float3 x1, float3 x2, float3 v1, float3 v2)
 {
@@ -1655,7 +1663,7 @@ void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     else if (s1.w != 0.0)
         gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
     if (rest != s0.x) gBeams[gj * 2u] = float4(rest, s0.yzw);
-    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sscale(g1, t), 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sscale(g1, t), !broken && centredOn(bn) ? c1.y : 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(sscale(g2, t), 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(sscale(g3, t), 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(sscale(g4, t), 0.0);
@@ -1688,7 +1696,7 @@ void jcouplerUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     }
     if (broken) gBeams[gj * 2u + 1u] = float4(strength, m, 1.0, 1.0);
     else if (s1.w != 0.0) gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
-    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(fc, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(fc, !broken && centredOn(bn) ? c1.y : 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-fc, 0.0);
 }
 
@@ -1739,6 +1747,8 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     float len = li.x;
     float e = nf(len - rest);
     float u = smul(sdot(ssub3(va, vb), d), inv);
+    // The damping's slope in u and the low-pass's gain (centred damping, §39).
+    float gain = 1.0;
     if (r2.w != 0u)
     {
         // dampCutoffHz: the RC low-pass of the rate (spec §6).
@@ -1747,10 +1757,12 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         float y = nf(smul(flt.z, u) - smul(flt.w, flt.y));
         gBeams[fi] = float4(u, y, flt.z, flt.w);
         u = y;
+        gain = flt.z;
     }
     float k = c1.x;
     float c = c1.y;
     float damp = smul(c, u);
+    float slope = c;
     float last = 0.0;
     float f = 0.0;
     bool lengthBreak = false;
@@ -1761,6 +1773,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         {
             float m = nf(smul(c, tc) + smul(tt, nf(au - tc)));
             damp = u < 0.0 ? -m : m;
+            slope = tt;
         }
         float lb = smul(c2.y, rest);
         float sb = smul(c2.x, rest);
@@ -1772,6 +1785,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
             float sz = c2.z > 0.0 ? min(sdiv(o, c2.z), 1.0) : 1.0;
             k = nf(k + smul(nf(c1.z - k), sz));
             damp = nf(damp + smul(nf(smul(c1.w, u) - damp), sz));
+            slope = nf(slope + smul(nf(c1.w - slope), sz));
         }
     }
     else if (kind == KIND_JSUPPORT && e > 0.0)
@@ -1779,11 +1793,13 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         if (len > c2.y) lengthBreak = true;
         k = 0.0;
         damp = 0.0;
+        slope = 0.0;
     }
     else if (kind == KIND_JROPE && e < 0.0)
     {
         k = 0.0;
         damp = smul(smul(c, 0.1), u);
+        slope = smul(c, 0.1);
     }
     bool tear = false;
     if (lengthBreak)
@@ -1802,7 +1818,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         float tau = abs(f);
         if (tau > gate && type == TYPE_DEFORMABLE && k != 0.0)
         {
-            if (f > tc && e < 0.0)
+            if (f > tc && e < 0.0 && nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z))) < 0.0)
             {
                 float delta = nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z)));
                 float old = rest;
@@ -1825,7 +1841,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
                     gate = min(min(tc, tt), strength);
                 }
             }
-            else if (f < -tt && e > 0.0)
+            else if (f < -tt && e > 0.0 && nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z))) > 0.0)
             {
                 float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
                 float old = rest;
@@ -1870,7 +1886,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     else if (s1.w != 0.0)
         gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
     float3 push = sscale(d, smul(f, inv));
-    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, !broken && centredOn(bn) ? smul(slope, gain) : 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
 }
 
@@ -2038,6 +2054,8 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     float inv = li.y;
     float len = li.x;
     float u = smul(sdot(ssub3(va, vb), d), inv);
+    // The damping's slope in u and the low-pass's gain (centred damping, §39).
+    float gain = 1.0;
     if (r2.w != 0u)
     {
         uint fi = r2.w - 1u;
@@ -2045,9 +2063,11 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         float y = nf(smul(flt.z, u) - smul(flt.w, flt.y));
         gBeams[fi] = float4(u, y, flt.z, flt.w);
         u = y;
+        gain = flt.z;
     }
     float k = c1.x;
     float c = c1.y;
+    float slope = c;
     float e = 0.0;
     float f = 0.0;
     float last = 0.0;
@@ -2123,11 +2143,13 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
             lc = e2.w;
         }
         damp = smul(cs, u);
+        slope = cs;
         float au = abs(u);
         if (au > split)
         {
             float m = nf(smul(cs, split) + smul(cf, nf(au - split)));
             damp = u < 0.0 ? -m : m;
+            slope = cf;
         }
         float lb = smul(c2.y, rest);
         float sb = smul(c2.x, rest);
@@ -2139,6 +2161,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
             float sz = c2.z > 0.0 ? min(sdiv(o, c2.z), 1.0) : 1.0;
             k = nf(k + smul(nf(c1.z - k), sz));
             damp = nf(damp + smul(nf(smul(lc, u) - damp), sz));
+            slope = nf(slope + smul(nf(lc - slope), sz));
         }
     }
     else if (!done && kind == KIND_JSUPPORT && e > 0.0)
@@ -2146,11 +2169,13 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         if (len > c2.y) lengthBreak = true;
         k = 0.0;
         damp = 0.0;
+        slope = 0.0;
     }
     else if (!done && kind == KIND_JROPE && e < 0.0)
     {
         k = 0.0;
         damp = smul(smul(c, 0.1), u);
+        slope = smul(c, 0.1);
     }
     else if (!done && kind == KIND_JANISO)
     {
@@ -2163,7 +2188,8 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
             float zone = smul(e1.z, sw);
             float sz = zone > 0.0 ? min(sdiv(past, zone), 1.0) : 1.0;
             k = nf(k + smul(nf(e1.x - k), sz));
-            damp = smul(nf(c + smul(nf(e1.y - c), sz)), u);
+            slope = nf(c + smul(nf(e1.y - c), sz));
+            damp = smul(slope, u);
         }
     }
     if (lengthBreak)
@@ -2179,7 +2205,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         float tau = abs(f);
         if (tau > gate && type == TYPE_DEFORMABLE && k != 0.0)
         {
-            if (f > tc && e < 0.0)
+            if (f > tc && e < 0.0 && nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z))) < 0.0)
             {
                 float delta = nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z)));
                 float old = rest;
@@ -2202,7 +2228,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
                     gate = min(min(tc, tt), strength);
                 }
             }
-            else if (f < -tt && e > 0.0)
+            else if (f < -tt && e > 0.0 && nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z))) > 0.0)
             {
                 float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
                 float old = rest;
@@ -2248,6 +2274,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     else if (s1.w != 0.0)
         gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
     float3 push = sscale(d, smul(f, inv));
+    float slopeW = !broken && centredOn(bn) ? smul(slope, gain) : 0.0;
     if (kind == KIND_JLBEAM)
     {
         if (broken)
@@ -2255,14 +2282,151 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
             armA = float3(0.0, 0.0, 0.0);
             armB = float3(0.0, 0.0, 0.0);
         }
-        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sadd3(push, armA), 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sadd3(push, armA), slopeW);
         gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(sadd3(-push, armB), 0.0);
         gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(-sadd3(armA, armB), 0.0);
         gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
-    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, slopeW);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
+}
+
+// --- Centred damping (jbeam-semantics-spec.md §39; the CPU reference's
+// ExplicitBeams::centred_correction). The beam phase keeps each JBeam record's
+// damping slope in its first incidence entry's .w (0: none). gBeams at
+// gP.centredDv + node: the node phase's Δv (centredDelta, in the node loop: the
+// velocity before it kept in a register). After the node phase each record writes its
+// correction −½·slope·Δu into its incidence entries (centredBeam), and each node
+// adds their sum as a velocity and position step (centredNode).
+// Node gi's Δv after its node phase, from its velocity `v0` before it.
+void centredDelta(uint gi, float3 v0)
+{
+    gBeams[gP.centredDv + gi] = float4(ssub3(gNodes[gi * 3u + 1u].xyz, v0), 0.0);
+}
+
+// Record gj's correction into its entries (a torsion bar's first record also the
+// second's; the second writes nothing). No slope: zero.
+void centredBeam(uint gj)
+{
+    uint4 bn = gStatic[gP.beamBase + gj * 3u];
+    uint kind = bn.z & 0xFFu;
+    if (kind == KIND_JTORSION2) return;
+    uint sa = gP.incBase + gLists[gP.slotBase + gj * 2u];
+    uint sb = gP.incBase + gLists[gP.slotBase + gj * 2u + 1u];
+    float slope = gBeams[sa].w;
+    float3 fa = float3(0.0, 0.0, 0.0);
+    float3 fb = fa;
+    if (kind == KIND_JTORSION)
+    {
+        uint4 bn2 = gStatic[gP.beamBase + (gj + 1u) * 3u];
+        float3 f3 = fa;
+        float3 f4 = fa;
+        if (slope != 0.0)
+        {
+            float3 x1 = gNodes[bn.x * 3u].xyz;
+            float3 x2 = gNodes[bn.y * 3u].xyz;
+            float3 x3 = gNodes[bn2.x * 3u].xyz;
+            float3 x4 = gNodes[bn2.y * 3u].xyz;
+            float3 g1 = float3(0.0, 0.0, 0.0);
+            float3 g2 = g1;
+            float3 g3 = g1;
+            float3 g4 = g1;
+            float3 b1 = ssub3(x2, x1);
+            float3 b2 = ssub3(x3, x2);
+            float3 b3 = ssub3(x4, x3);
+            float3 n1 = scross(b1, b2);
+            float3 n2 = scross(b2, b3);
+            float l1 = sdot(n1, n1);
+            float l2 = sdot(n2, n2);
+            float ll = sdot(b2, b2);
+            if (!(l1 < 1e-12 || l2 < 1e-12 || ll < 1e-12))
+            {
+                float lb = ssqrt(ll);
+                g1 = sscale(n1, sdiv(-lb, l1));
+                g4 = sscale(n2, sdiv(lb, l2));
+                float p = sdiv(-sdot(b1, b2), ll);
+                float q = sdiv(-sdot(b3, b2), ll);
+                g2 = ssub3(sscale(g1, nf(p - 1.0)), sscale(g4, q));
+                g3 = ssub3(sscale(g4, nf(q - 1.0)), sscale(g1, p));
+            }
+            float3 d1 = gBeams[gP.centredDv + bn.x].xyz;
+            float3 d2 = gBeams[gP.centredDv + bn.y].xyz;
+            float3 d3 = gBeams[gP.centredDv + bn2.x].xyz;
+            float3 d4 = gBeams[gP.centredDv + bn2.y].xyz;
+            float dr = nf(nf(nf(sdot(g1, d1) + sdot(g2, d2)) + sdot(g3, d3)) + sdot(g4, d4));
+            float t = smul(smul(-0.5, slope), dr);
+            fa = sscale(g1, t);
+            fb = sscale(g2, t);
+            f3 = sscale(g3, t);
+            f4 = sscale(g4, t);
+        }
+        gBeams[sa] = float4(fa, 0.0);
+        gBeams[sb] = float4(fb, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(f3, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(f4, 0.0);
+        return;
+    }
+    if (slope != 0.0)
+    {
+        float3 dva = gBeams[gP.centredDv + bn.x].xyz;
+        float3 dvb = gBeams[gP.centredDv + bn.y].xyz;
+        if (kind == KIND_JCOUPLER)
+        {
+            fa = sscale(ssub3(dva, dvb), smul(-0.5, slope));
+        }
+        else
+        {
+            float3 d = ssub3(gNodes[bn.x * 3u].xyz, gNodes[bn.y * 3u].xyz);
+            float inv = sExactLength(sdot(d, d)).y;
+            float du = smul(sdot(ssub3(dva, dvb), d), inv);
+            fa = sscale(d, smul(smul(smul(-0.5, slope), du), inv));
+        }
+        fb = -fa;
+    }
+    gBeams[sa] = float4(fa, 0.0);
+    gBeams[sb] = float4(fb, 0.0);
+}
+
+// Node gi's correction: its entries' sum (the beam phase's group drops, as the node
+// phase's), v += h·c/m, x += h·(h·c/m).
+void centredNode(uint gi, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint4 info = gStatic[gP.nodeInfoBase + gi];
+    float3 c = beamSum(float3(0.0, 0.0, 0.0), info, beamOff, groupOff, groupCount, parity, false);
+    if ((info.x & NODE_IMMOVABLE) != 0u) return;
+    float4 P = gNodes[gi * 3u];
+    float4 V = gNodes[gi * 3u + 1u];
+    float3 dv = sscale(sdiv3(c, P.w), STEP);
+    // Both new records before either store (Slang's CUDA output may defer a load
+    // to its use).
+    float4 nV = float4(sadd3(V.xyz, dv), V.w);
+    float4 nP = float4(sadd3(P.xyz, sscale(dv, STEP)), P.w);
+    gNodes[gi * 3u + 1u] = nV;
+    gNodes[gi * 3u] = nP;
+}
+
+// The correction after a vehicle's node phase (gP.centredDv nonzero, so the barriers
+// are uniform): `lanes` lanes from `lane` over its nodes and records; a vehicle
+// without FLAG_CENTRED only meets the barriers.
+void centredPhase(uint flagsV, uint nodeOff, uint nodeCount, uint beamOff, uint beamCount, uint groupOff,
+                  uint groupCount, uint step, uint lane, uint lanes)
+{
+    bool on = (flagsV & FLAG_CENTRED) != 0u;
+    sync();
+    if (on)
+    {
+        for (uint j = lane, jStop = EB_END(j, beamCount, lanes); j < jStop; j += lanes) centredBeam(beamOff + j);
+    }
+    sync();
+    if (on)
+    {
+        uint parity = (step + 1u) & 1u;
+        for (uint i = lane, iStop = EB_END(i, nodeCount, lanes); i < iStop; i += lanes)
+            centredNode(nodeOff + i, beamOff, groupOff, groupCount, parity);
+    }
+    // No barrier here: what follows reads a node only after its own barrier, or
+    // (centredBox) its lane's own nodes.
 }
 
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
@@ -2551,7 +2715,7 @@ float selfTerm(float w, float im) { return w > 0.0 ? smul(smul(w, w), im) : 0.0;
 // the geometry the finding lane stored. Strict, in the CPU's order.
 float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn,
                        float pen, float3 vv, float friction, uint beamOff, uint groupOff, uint groupCount,
-                       uint parity)
+                       uint parity, bool shifts)
 {
     float imt = nf(nf(selfTerm(alpha, selfInvMass(t1)) + selfTerm(beta, selfInvMass(t2)))
                    + selfTerm(gamma, selfInvMass(t0)));
@@ -2565,7 +2729,7 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
     Surface surf = contactSurfaceV(hv, hv);
     float budget;
     float3 f = contactResponse(fh, vv, m, nn, surf, pen, friction, budget);
-    if (surf.dissipative != 0u && any(f != float3(0.0, 0.0, 0.0)))
+    if (shifts && surf.dissipative != 0u && any(f != float3(0.0, 0.0, 0.0)))
     {
         // §37: the position step, a position impulse δ·m shared like the hit's
         // force, each node by its own inverse mass (explicit_beams.rs
@@ -2591,7 +2755,7 @@ float3 selfTwoBodyForce(uint at, uint h, uint beamOff, uint groupOff, uint group
     return selfTwoBodyCore(h, gNext[at + 8u], gNext[at + 9u], gNext[at + 10u], alpha, beta,
                            nf(nf(1.0 - alpha) - beta), asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u])),
                            asfloat(gNext[at + 15u]), asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u])),
-                           asfloat(gNext[at + 20u]), beamOff, groupOff, groupCount, parity);
+                           asfloat(gNext[at + 20u]), beamOff, groupOff, groupCount, parity, true);
 }
 
 // Self-collision's anti-clip test (§36; explicit_beams.rs clip_hit, the order-free
@@ -3968,6 +4132,8 @@ void hitForce(uint v, uint at, uint key, int3 sum, uint round, float3 origin, fl
     gNext[at + 6u] = round;
 }
 
+bool selfResidual(uint v);
+
 // The computed hit at record `at` adds its shares to the accumulators.
 void selfAddOne(uint at, uint key, uint nodeOff)
 {
@@ -3979,6 +4145,8 @@ void selfAddOne(uint at, uint key, uint nodeOff)
     accAdd(gNext[at + 9u], hitShare(f, 2u, alpha, beta, gamma));
     accAdd(gNext[at + 10u], hitShare(f, 3u, alpha, beta, gamma));
     accAdd(gNext[at + 8u], hitShare(f, 4u, alpha, beta, gamma));
+    // (§37.1: a staged hit logs its total at the end.)
+    if (selfResidual(gStatic[gP.nodeInfoBase + nodeOff].w)) return;
     cfAdd(nodeOff + (key & 0xFFFFu), f);
     cfAdd(gNext[at + 9u], hitShare(f, 2u, alpha, beta, gamma));
     cfAdd(gNext[at + 10u], hitShare(f, 3u, alpha, beta, gamma));
@@ -4048,14 +4216,17 @@ uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r,
     return open;
 }
 
-// --- §37's residual pass (explicit_beams.rs residual_self_pass) ---
-// After a step's two-body self hits, each hit's pair still approaching at the
-// forces now (beams plus the accumulators' contact sums) is stopped by a normal
-// force with the first pass's reduced mass (its counts). Per node 4 words of gAcc
-// at resAt: unused, then the residual forces in FIXED units (merged into the
-// accumulators after every hit's force is found, so no hit reads another's).
+// --- §37.1's residual pass and work guard (explicit_beams.rs residual_self_pass,
+// friction_guard_pass) ---
+// The first pass's sums are a staging (in the accumulators, A). The residual pass
+// reads A and stages its forces in B; the guard reads A + B. Then each hit's total
+// (first pass + residual + guard) replaces its first-pass adds: D gathers, per
+// node, fix(total share) − fix(first-pass share) and is merged into A, so the
+// accumulators end as they were plus one add per share of each total (the CPU's
+// restore and re-add, integer for integer). Per node 8 words of gAcc at resAt:
+// unused, B xyz, D xyz, unused (zero between steps).
 
-uint resAt(uint x) { return gP.selfSplit + 4u * gP.totalNodes + 4u * x; }
+uint resAt(uint x) { return gP.selfSplit + 4u * gP.totalNodes + 8u * x; }
 
 // Vehicle v takes the residual pass: the two-body rule, dissipative.
 bool selfResidual(uint v)
@@ -4063,13 +4234,25 @@ bool selfResidual(uint v)
     return selfTwoBody(v) && (gStatic[v * 4u + 3u].x & FLAG_DISSIPATIVE) != 0u;
 }
 
-// Node x's acceleration from its force now (0 immovable).
-float3 resAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
+// Node x's acceleration from its force now (0 immovable): beams and A, with B when
+// `withB` (the integer sum A + B, then to newtons, as the CPU's one sum).
+float3 resAccNow(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity, bool withB)
 {
     if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return float3(0.0, 0.0, 0.0);
     float3 f = beamSum(gNodes[x * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + x], beamOff, groupOff, groupCount, parity,
                        false);
-    return sdiv3(sadd3(f, accForce(x)), gNodes[x * 3u].w);
+    int3 a = int3(gAcc[x * 3u].load(), gAcc[x * 3u + 1u].load(), gAcc[x * 3u + 2u].load());
+    if (withB)
+    {
+        uint at = resAt(x);
+        a += int3(gAcc[at + 1u].load(), gAcc[at + 2u].load(), gAcc[at + 3u].load());
+    }
+    float3 c = float3(float(a.x), float(a.y), float(a.z)) * (1.0 / FIXED);
+    return sdiv3(sadd3(f, c), gNodes[x * 3u].w);
+}
+float3 resAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    return resAccNow(x, beamOff, groupOff, groupCount, parity, false);
 }
 
 // The hit's pair (contacter h, triangle t0..t2 at weights, normal nn, relative
@@ -4087,46 +4270,106 @@ bool resDrive(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float 
     return vn < 0.0 && nf(smul(a, STEP) + x) < 0.0;
 }
 
-// An active hit's residual force on its contacter (0: none).
-float3 resForce(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float a, float x)
+// An active hit's residual normal force r (0: none), the first pass's counts.
+float resForceR(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float a, float x)
 {
     float imt = nf(nf(selfTerm(alpha, selfInvMass(t1)) + selfTerm(beta, selfInvMass(t2))) + selfTerm(gamma, selfInvMass(t0)));
     float inv = nf(selfInvMass(h) + imt);
-    if (!(inv > 0.0)) return float3(0.0, 0.0, 0.0);
+    if (!(inv > 0.0)) return 0.0;
     float m = sdiv(1.0, inv);
     float r = nf(-smul(a, m) - sdiv(smul(x, m), STEP));
-    if (!(r > 0.0)) return float3(0.0, 0.0, 0.0);
-    return sscale(nn, r);
+    return r > 0.0 ? r : 0.0;
 }
 
-void resShare(uint x, float3 f)
+// The hit's residual r (0: none) from A.
+float resOf(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float3 vv,
+            uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    uint at = resAt(x);
-    gAcc[at + 1u].add(toFixed(f.x));
-    gAcc[at + 2u].add(toFixed(f.y));
-    gAcc[at + 3u].add(toFixed(f.z));
-    cfAdd(x, f);
+    float a;
+    float x;
+    if (!resDrive(h, t0, t1, t2, alpha, beta, gamma, nn, vv, beamOff, groupOff, groupCount, parity, a, x)) return 0.0;
+    return resForceR(h, t0, t1, t2, alpha, beta, gamma, a, x);
 }
 
-void resAdd(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 f)
+// The residual force's shares into B.
+void resStage(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 f)
 {
-    resShare(h, f);
-    resShare(t1, hitShare(f, 2u, alpha, beta, gamma));
-    resShare(t2, hitShare(f, 3u, alpha, beta, gamma));
-    resShare(t0, hitShare(f, 4u, alpha, beta, gamma));
+    uint4 n4 = uint4(h, t1, t2, t0);
+    for (uint role = 1u; role <= 4u; role++)
+    {
+        uint x = role == 1u ? n4.x : (role == 2u ? n4.y : (role == 3u ? n4.z : n4.w));
+        float3 s = hitShare(f, role, alpha, beta, gamma);
+        uint at = resAt(x);
+        gAcc[at + 1u].add(toFixed(s.x));
+        gAcc[at + 2u].add(toFixed(s.y));
+        gAcc[at + 3u].add(toFixed(s.z));
+    }
 }
 
-// Node x's residual sums into its accumulator, its words cleared (the first of
-// its hits to get here takes them).
+// The work guard of a hit's force t (first pass with residual): −(1 − s)·t where
+// its work at the pair's realised mean velocity (A + B) would be positive; 0 else.
+bool guardOf(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 vv, float3 t,
+             uint beamOff, uint groupOff, uint groupCount, uint parity, out float3 g)
+{
+    g = float3(0.0, 0.0, 0.0);
+    if (all(t == float3(0.0, 0.0, 0.0))) return false;
+    float3 a = ssub3(resAccNow(h, beamOff, groupOff, groupCount, parity, true),
+                     sadd3(sadd3(sscale(resAccNow(t1, beamOff, groupOff, groupCount, parity, true), alpha),
+                                 sscale(resAccNow(t2, beamOff, groupOff, groupCount, parity, true), beta)),
+                           sscale(resAccNow(t0, beamOff, groupOff, groupCount, parity, true), gamma)));
+    float inv = nf(ownInvMass(h)
+                   + nf(nf(selfTerm(alpha, ownInvMass(t1)) + selfTerm(beta, ownInvMass(t2))) + selfTerm(gamma, ownInvMass(t0))));
+    float3 rest = ssub3(a, sscale(t, inv));
+    float aa = sdot(t, sadd3(sadd3(vv, vv), sscale(rest, STEP)));
+    float bb = smul(smul(STEP, sdot(t, t)), inv);
+    if (!(nf(aa + bb) > 0.0 && bb > 0.0)) return false;
+    float k = aa < 0.0 ? min(sdiv(-aa, bb), 1.0) : 0.0;
+    g = sscale(t, -nf(1.0 - k));
+    return true;
+}
+
+// A hit's total replaces its first-pass adds: per node, D += fix(total share) −
+// fix(first share); the total's magnitudes into the contact-force log.
+void resFinal(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 f1, float3 total)
+{
+    uint4 n4 = uint4(h, t1, t2, t0);
+    for (uint role = 1u; role <= 4u; role++)
+    {
+        uint x = role == 1u ? n4.x : (role == 2u ? n4.y : (role == 3u ? n4.z : n4.w));
+        float3 st = hitShare(total, role, alpha, beta, gamma);
+        int3 d = toFixed3(st) - toFixed3(hitShare(f1, role, alpha, beta, gamma));
+        uint at = resAt(x);
+        if (d.x != 0) gAcc[at + 4u].add(d.x);
+        if (d.y != 0) gAcc[at + 5u].add(d.y);
+        if (d.z != 0) gAcc[at + 6u].add(d.z);
+        cfAdd(x, st);
+    }
+}
+
+// The total of a hit (first pass f1, residual r along nn) with its guard.
+float3 resTotal(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float3 vv,
+                float3 f1, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    float3 f = f1;
+    if (r > 0.0) f = sadd3(f, sscale(nn, r));
+    float3 g;
+    if (guardOf(h, t0, t1, t2, alpha, beta, gamma, vv, f, beamOff, groupOff, groupCount, parity, g)) f = sadd3(f, g);
+    return f;
+}
+
+// Node x's D into its accumulator, its B and D cleared (the first to get here).
 void resMergeNode(uint x)
 {
     uint at = resAt(x);
-    int fx = gAcc[at + 1u].exchange(0);
-    int fy = gAcc[at + 2u].exchange(0);
-    int fz = gAcc[at + 3u].exchange(0);
-    if (fx != 0) gAcc[x * 3u].add(fx);
-    if (fy != 0) gAcc[x * 3u + 1u].add(fy);
-    if (fz != 0) gAcc[x * 3u + 2u].add(fz);
+    gAcc[at + 1u].store(0);
+    gAcc[at + 2u].store(0);
+    gAcc[at + 3u].store(0);
+    int dx = gAcc[at + 4u].exchange(0);
+    int dy = gAcc[at + 5u].exchange(0);
+    int dz = gAcc[at + 6u].exchange(0);
+    if (dx != 0) gAcc[x * 3u].add(dx);
+    if (dy != 0) gAcc[x * 3u + 1u].add(dy);
+    if (dz != 0) gAcc[x * 3u + 2u].add(dz);
 }
 
 void resMerge(uint h, uint t0, uint t1, uint t2)
@@ -4137,9 +4380,11 @@ void resMerge(uint h, uint t0, uint t1, uint t2)
     resMergeNode(t2);
 }
 
-// The residual pass over vehicle v's listed hits (lane `sub` of `lanes`): each
-// active hit's force into the residual sums (record word 23: one taken).
-void selfResidualForces(uint v, uint sub, uint lanes, uint beamOff, uint groupOff, uint groupCount, uint parity)
+// One phase of the pass over vehicle v's listed hits (lane `sub` of `lanes`):
+// 0 the residual (r in record word 21) into B; 1 the guard and the totals into D;
+// 2 the merge.
+void selfResidualPhase(uint v, uint sub, uint lanes, uint phase, uint beamOff, uint groupOff, uint groupCount,
+                       uint parity)
 {
     uint count = uint(gAcc[hitAcc(v)].load());
     if (count > HIT_CAP || !selfResidual(v)) return;
@@ -4148,43 +4393,31 @@ void selfResidualForces(uint v, uint sub, uint lanes, uint beamOff, uint groupOf
     for (uint i = sub, iStop = EB_END(i, count, lanes); i < iStop; i += lanes)
     {
         uint at = base + i * HIT_WORDS;
-        gNext[at + 23u] = 0u;
         uint h = nodeOff + (gNext[at] & 0xFFFFu);
         uint t0 = gNext[at + 8u];
         uint t1 = gNext[at + 9u];
         uint t2 = gNext[at + 10u];
+        if (phase == 2u)
+        {
+            resMerge(h, t0, t1, t2);
+            continue;
+        }
         float alpha = asfloat(gNext[at + 1u]);
         float beta = asfloat(gNext[at + 2u]);
         float gamma = nf(nf(1.0 - alpha) - beta);
         float3 nn = asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u]));
-        float a;
-        float x;
-        if (!resDrive(h, t0, t1, t2, alpha, beta, gamma, nn,
-                      asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u])), beamOff, groupOff, groupCount,
-                      parity, a, x))
-            continue;
-        float3 f = resForce(h, t0, t1, t2, alpha, beta, gamma, nn, a, x);
-        if (any(f != float3(0.0, 0.0, 0.0)))
+        float3 vv = asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u]));
+        if (phase == 0u)
         {
-            resAdd(h, t0, t1, t2, alpha, beta, gamma, f);
-            gNext[at + 23u] = 1u;
+            float r = resOf(h, t0, t1, t2, alpha, beta, gamma, nn, vv, beamOff, groupOff, groupCount, parity);
+            gNext[at + 21u] = asuint(r);
+            if (r > 0.0) resStage(h, t0, t1, t2, alpha, beta, gamma, sscale(nn, r));
+            continue;
         }
-    }
-}
-
-// Then (after a barrier) the residual sums of the hits that took one into the
-// accumulators.
-void selfResidualMerge(uint v, uint sub, uint lanes)
-{
-    uint count = uint(gAcc[hitAcc(v)].load());
-    if (count > HIT_CAP || !selfResidual(v)) return;
-    uint base = hitList(v);
-    uint nodeOff = gStatic[v * 4u].x;
-    for (uint i = sub, iStop = EB_END(i, count, lanes); i < iStop; i += lanes)
-    {
-        uint at = base + i * HIT_WORDS;
-        if (gNext[at + 23u] == 0u) continue;
-        resMerge(nodeOff + (gNext[at] & 0xFFFFu), gNext[at + 8u], gNext[at + 9u], gNext[at + 10u]);
+        float3 f1 = asfloat(uint3(gNext[at + 3u], gNext[at + 4u], gNext[at + 5u]));
+        float3 total = resTotal(h, t0, t1, t2, alpha, beta, gamma, nn, vv, f1, asfloat(gNext[at + 21u]), beamOff,
+                                groupOff, groupCount, parity);
+        resFinal(h, t0, t1, t2, alpha, beta, gamma, f1, total);
     }
 }
 
@@ -4235,10 +4468,11 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
     // then the merge, each after every lane's previous phase.
     if (gP.selfSplit != 0u)
     {
-        sync();
-        if (on) selfResidualForces(v, sub, lanes, beamOff, groupOff, groupCount, parity);
-        sync();
-        if (on) selfResidualMerge(v, sub, lanes);
+        for (uint phase = 0u; phase < 3u; phase++)
+        {
+            sync();
+            if (on) selfResidualPhase(v, sub, lanes, phase, beamOff, groupOff, groupCount, parity);
+        }
         sync();
     }
 }
@@ -4250,14 +4484,16 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
 // triangles in file order, every candidate in node order, each hit added at once).
 // Slow, and only for a step with more than HIT_CAP hits.
 void selfSerialHits(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity);
-void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity);
+void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity,
+                        uint mode);
 void selfSerialMerge(uint v);
 
 void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     selfSerialHits(v, origin, r, beamOff, groupOff, groupCount, parity);
     if (gP.selfSplit == 0u || !selfResidual(v)) return;
-    selfSerialResidual(v, origin, r, beamOff, groupOff, groupCount, parity);
+    selfSerialResidual(v, origin, r, beamOff, groupOff, groupCount, parity, 1u);
+    selfSerialResidual(v, origin, r, beamOff, groupOff, groupCount, parity, 2u);
     selfSerialMerge(v);
 }
 
@@ -4314,7 +4550,7 @@ void selfSerialHits(uint v, float3 origin, float r, uint beamOff, uint groupOff,
                                                      sscale(gNodes[tn.z * 3u + 1u].xyz, beta)),
                                                sscale(gNodes[tn.x * 3u + 1u].xyz, gamma)));
                 f = selfTwoBodyCore(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, pen, vv, V.w, beamOff,
-                                    groupOff, groupCount, parity);
+                                    groupOff, groupCount, parity, true);
             }
             else
             {
@@ -4327,6 +4563,7 @@ void selfSerialHits(uint v, float3 origin, float r, uint beamOff, uint groupOff,
             accAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
             accAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
             accAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
+            if (selfResidual(v)) continue; // (§37.1: logged as its total)
             cfAdd(h, f);
             cfAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
             cfAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
@@ -4335,9 +4572,12 @@ void selfSerialHits(uint v, float3 origin, float r, uint beamOff, uint groupOff,
     }
 }
 
-// selfSerial's residual pass (§37): its hits found again (the tests have no side
-// effects here), their residual forces into the residual sums.
-void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
+// selfSerial's residual pass and guard (§37.1): its hits found again (the tests
+// have no side effects here). Mode 1: the residual forces into B. Mode 2: each hit's
+// first-pass force again (without its position step), its residual (from A) and
+// guard (A + B), the total into D.
+void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity,
+                        uint mode)
 {
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
@@ -4381,18 +4621,22 @@ void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint group
             float3 rv = ssub3(V.xyz, sadd3(sadd3(sscale(gNodes[tn.y * 3u + 1u].xyz, alpha),
                                                  sscale(gNodes[tn.z * 3u + 1u].xyz, beta)),
                                            sscale(gNodes[tn.x * 3u + 1u].xyz, gamma)));
-            float ra;
-            float rx;
-            if (!resDrive(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, beamOff, groupOff, groupCount, parity, ra,
-                          rx))
+            float rr = resOf(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, beamOff, groupOff, groupCount, parity);
+            if (mode == 1u)
+            {
+                if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));
                 continue;
-            float3 rf = resForce(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, ra, rx);
-            if (any(rf != float3(0.0, 0.0, 0.0))) resAdd(h, tn.x, tn.y, tn.z, alpha, beta, gamma, rf);
+            }
+            float3 f1 = selfTwoBodyCore(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, pen, rv, V.w, beamOff, groupOff,
+                                        groupCount, parity, false);
+            float3 total = resTotal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, f1, rr, beamOff, groupOff,
+                                    groupCount, parity);
+            resFinal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, f1, total);
         }
     }
 }
 
-// The residual sums of vehicle v's nodes into their accumulators (one lane).
+// Vehicle v's nodes' D into their accumulators, B and D cleared (one lane).
 void selfSerialMerge(uint v)
 {
     uint4 r0 = gStatic[v * 4u];
@@ -4571,19 +4815,30 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
 #ifdef EB_VV_SOLO
+        bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+        {
+            float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdateSolo(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
+            if (centredV) centredDelta(nodeOff + i, v0);
+        }
 #else
 #ifdef EB_ABLATE
         uint nodeEnd = (gP.ablate & 2u) != 0u ? 0u : ((gP.ablate & 4u) != 0u ? min(nodeCount, LANES) : nodeCount);
 #else
         uint nodeEnd = nodeCount;
 #endif
+        bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeEnd, LANES); i < iStop; i += LANES)
+        {
+            float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdate(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
+            if (centredV) centredDelta(nodeOff + i, v0);
+        }
 #endif
+        if (gP.centredDv != 0u) centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
 
         for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
         if (candCount > 0u)
@@ -4927,8 +5182,11 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
         uint v = info.w;
         Vehicle x = vehicleAt(v);
         float3 origin = vehicleOrigin(v);
+        bool centred = gP.centredDv != 0u && (x.flags & FLAG_CENTRED) != 0u;
+        float3 v0 = centred ? gNodes[i * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
         nodeUpdate(i, info, v, i - x.nodeOff, vehicleStep(v), origin, x.flags, x.ground, x.boxOff, x.boxCount,
                    x.beamOff, x.groupOff, x.groupCount, true);
+        if (centred) centredDelta(i, v0);
         return ebLoopCapFlush();
     }
     i -= gP.totalNodes;
@@ -4951,6 +5209,31 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
             clipVmaxClear(i, vehicleStep(i) & 1u);
         }
     }
+    ebLoopCapFlush();
+}
+
+// Centred damping (§39) in the wide passes, after wide_nodes (which kept each
+// node's Δv): each record's correction into its entries, then each node's sum.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_centred_beams(uint3 id : SV_DispatchThreadID)
+{
+    uint j = id.x;
+    if (j >= gP.totalBeams) return;
+    uint v = gStatic[gP.beamBase + j * 3u].z >> 16;
+    if ((vehicleAt(v).flags & FLAG_CENTRED) != 0u) centredBeam(j);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_centred_nodes(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= gP.totalNodes) return ebLoopCapFlush();
+    uint v = gStatic[gP.nodeInfoBase + i].w;
+    Vehicle x = vehicleAt(v);
+    if ((x.flags & FLAG_CENTRED) != 0u)
+        centredNode(i, x.beamOff, x.groupOff, x.groupCount, (vehicleStep(v) + 1u) & 1u);
     ebLoopCapFlush();
 }
 
@@ -5613,6 +5896,33 @@ uint vvTestedAt(uint i) { return gP.vvMembers + 5u * gP.vehicles + i; }
 // adds into them), the tested-triangle list restarted per member, and a pending
 // reset of the self-collision throttles (a fast approach in the last contact pass)
 // applied after their update.
+// Centred damping in a contact group (§39): the corrected positions also into this
+// step's box keys (a superset of the box the node phase gave) and the frame bounds
+// check.
+void centredBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity, uint lane, uint lanes)
+{
+    float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
+    float3 hi = -lo;
+    bool has = false;
+    for (uint i = lane, iStop = EB_END(i, nodeCount, lanes); i < iStop; i += lanes)
+    {
+        float3 x = nf3(origin + gNodes[(nodeOff + i) * 3u].xyz);
+        lo = min(lo, x);
+        hi = max(hi, x);
+        has = true;
+    }
+    if (!has) return;
+    uint key = vvBoxKey(v, parity);
+    gAcc[key].min(vvKey(lo.x));
+    gAcc[key + 1u].min(vvKey(lo.y));
+    gAcc[key + 2u].min(vvKey(lo.z));
+    gAcc[key + 3u].max(vvKey(hi.x));
+    gAcc[key + 4u].max(vvKey(hi.y));
+    gAcc[key + 5u].max(vvKey(hi.z));
+    if (any(lo < asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz)) || any(hi > asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz)))
+        vvReportOutside(v);
+}
+
 void contactMemberStep(uint v, uint lane, uint s, bool first)
 {
     uint4 r0 = gStatic[v * 4u];
@@ -5659,10 +5969,13 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
         float3 hi = -lo;
         bool has = false;
+        bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
         {
+            float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
                        boxOff, boxCount, beamOff, groupOff, groupCount, true);
+            if (centredV) centredDelta(nodeOff + i, v0);
             float3 x = nf3(origin + gNodes[(nodeOff + i) * 3u].xyz);
             lo = min(lo, x);
             hi = max(hi, x);
@@ -5681,6 +5994,11 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
             if (any(lo < asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz)) || any(hi > asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz)))
                 vvReportOutside(v);
         }
+    }
+    if (gP.centredDv != 0u)
+    {
+        centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
+        if ((flagsV & FLAG_CENTRED) != 0u) centredBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
     for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)
@@ -6026,10 +6344,13 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
         float3 hi = -lo;
         bool has = false;
+        bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = pl, iStop = EB_END(i, nodeCount, P); i < iStop; i += P)
         {
+            float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
                        boxOff, boxCount, beamOff, groupOff, groupCount, true);
+            if (centredV) centredDelta(nodeOff + i, v0);
             float3 x = nf3(origin + gNodes[(nodeOff + i) * 3u].xyz);
             lo = min(lo, x);
             hi = max(hi, x);
@@ -6048,6 +6369,11 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
             if (any(lo < asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz)) || any(hi > asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz)))
                 vvReportOutside(v);
         }
+    }
+    if (gP.centredDv != 0u)
+    {
+        centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, pl, P);
+        if (on && (flagsV & FLAG_CENTRED) != 0u) centredBox(v, nodeOff, nodeCount, origin, parity, pl, P);
     }
     for (uint g = pl, gStop = EB_END(g, groupCount, P); g < gStop; g += P) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)
@@ -6659,11 +6985,191 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
     accAdd(t.tn.y, -sscale(f, alpha));
     accAdd(t.tn.z, -sscale(f, beta));
     accAdd(t.tn.x, -sscale(f, gamma));
+    // (§37.1: a staged hit, two-body and dissipative, logs its total at the end.)
+    if (surf.dissipative != 0u && vvTwoBody(gStatic[gP.nodeInfoBase + t.tn.x].w, vh)) return true;
     cfAdd(h, f);
     cfAdd(t.tn.y, sscale(f, alpha));
     cfAdd(t.tn.z, sscale(f, beta));
     cfAdd(t.tn.x, sscale(f, gamma));
     return true;
+}
+
+// --- §37.1's residual pass and work guard for vehicle contact (explicit_contact.rs
+// residual_vehicle_pass, guard_vehicle_pass), over an owner's listed hits after
+// they are applied: the same staging as self contact's (A the accumulators, B the
+// residual, D the totals' deltas at resAt). A turn whose list overflowed applied
+// its hits at once (out of the specification's order, as before) and stages none.
+
+// Node x of vehicle vx: its acceleration from its force now (vvPointForce: beams,
+// A, with B when `withB`; 0 immovable).
+float3 vvResAcc(uint x, uint vx, uint parity, bool withB)
+{
+    if (vvImmovable(x)) return float3(0.0, 0.0, 0.0);
+    uint4 info = gStatic[gP.nodeInfoBase + x];
+    uint4 rb0 = gStatic[vx * 4u];
+    uint4 rb2 = gStatic[vx * 4u + 2u];
+    float3 f = beamSum(gNodes[x * 3u + 2u].xyz, info, rb0.z, rb2.z, rb2.w, parity, false);
+    int3 a = int3(gAcc[x * 3u].load(), gAcc[x * 3u + 1u].load(), gAcc[x * 3u + 2u].load());
+    if (withB)
+    {
+        uint at = resAt(x);
+        a += int3(gAcc[at + 1u].load(), gAcc[at + 2u].load(), gAcc[at + 3u].load());
+    }
+    float3 c = sadd3(f, float3(float(a.x), float(a.y), float(a.z)) * (1.0 / FIXED));
+#ifdef EB_AERO
+    uint slot1 = info.x >> NODE_SLOT_SHIFT;
+    if (slot1 != 0u) c = sadd3(c, gBeams[gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u)].xyz);
+#endif
+    return sdiv3(c, gNodes[x * 3u].w);
+}
+
+// A listed hit's geometry and first-pass force again (vvTry without its adds and
+// position step); false: not a staged hit (or no longer a hit).
+bool vvStagedHit(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, uint slot, out float alpha,
+                 out float beta, out float gamma, out float3 nn, out float3 v, out float3 f)
+{
+    alpha = 0.0;
+    beta = 0.0;
+    gamma = 0.0;
+    nn = float3(0.0, 0.0, 0.0);
+    v = float3(0.0, 0.0, 0.0);
+    f = float3(0.0, 0.0, 0.0);
+    uint va = gStatic[gP.nodeInfoBase + t.tn.x].w;
+    if (!vvTwoBody(va, vh)) return false;
+    Surface surf = contactSurfaceV(vh, va);
+    if (surf.dissipative == 0u) return false;
+    float pen;
+    if (vvAnti(t, vh))
+    {
+        uint word;
+        if (vvClip(t, gt, h, p, vh, r, alpha, beta, gamma, pen, nn, word) != 1u) return false;
+    }
+    else
+    {
+        float3 q = ssub3(p, t.p0);
+        float delta = 0.0;
+        if (t.solvable)
+        {
+            alpha = sdot(t.ra, q);
+            beta = sdot(t.rb, q);
+            delta = sdot(t.rn, q);
+        }
+        gamma = nf(nf(1.0 - alpha) - beta);
+        if (!(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && abs(delta) <= r)) return false;
+        nn = t.n;
+        if (vvVote(t, h, vh, delta))
+        {
+            nn = -t.n;
+            delta = -delta;
+        }
+        pen = nf(r - delta);
+    }
+    float4 P = gNodes[h * 3u];
+    float4 V = gNodes[h * 3u + 1u];
+    float4 P0 = gNodes[t.tn.x * 3u];
+    float4 P1 = gNodes[t.tn.y * 3u];
+    float4 P2 = gNodes[t.tn.z * 3u];
+    float3 vt = sadd3(sadd3(sscale(gNodes[t.tn.y * 3u + 1u].xyz, alpha), sscale(gNodes[t.tn.z * 3u + 1u].xyz, beta)),
+                      sscale(gNodes[t.tn.x * 3u + 1u].xyz, gamma));
+    v = ssub3(V.xyz, vt);
+    float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), P.w);
+    float i1 = (alpha > 0.0 && !vvImmovable(t.tn.y)) ? smul(smul(alpha, alpha), sdiv(vvSplitK(vvSplitTri(t.tn.y)), P1.w)) : 0.0;
+    float i2 = (beta > 0.0 && !vvImmovable(t.tn.z)) ? smul(smul(beta, beta), sdiv(vvSplitK(vvSplitTri(t.tn.z)), P2.w)) : 0.0;
+    float i0 = (gamma > 0.0 && !vvImmovable(t.tn.x)) ? smul(smul(gamma, gamma), sdiv(vvSplitK(vvSplitTri(t.tn.x)), P0.w)) : 0.0;
+    float inv = nf(imh + nf(nf(i1 + i2) + i0));
+    float m = inv > 0.0 ? sdiv(1.0, inv) : 0.0;
+    float3 at = sadd3(sadd3(vvAccel(gBeams[gP.vvSnap + t.tn.y].xyz, t.tn.y, P1.w, alpha),
+                            vvAccel(gBeams[gP.vvSnap + t.tn.z].xyz, t.tn.z, P2.w, beta)),
+                      vvAccel(gBeams[gP.vvSnap + t.tn.x].xyz, t.tn.x, P0.w, gamma));
+    float3 fh = sscale(ssub3(vvAccel(gBeams[gP.vvSnap + h].xyz, h, P.w, 1.0), at), m);
+    float budget;
+    f = contactResponse(fh, v, m, nn, surf, pen, V.w, budget);
+    return true;
+}
+
+// The staged hit's residual r (0: none): approaching and still approaching at A,
+// with the first pass's counts.
+float vvResOf(uint va, uint vh, uint h, uint4 tn, float alpha, float beta, float gamma, float3 nn, float3 v,
+              uint parity, uint slot)
+{
+    float3 at = sadd3(sadd3(sscale(vvResAcc(tn.y, va, parity, false), alpha),
+                            sscale(vvResAcc(tn.z, va, parity, false), beta)),
+                      sscale(vvResAcc(tn.x, va, parity, false), gamma));
+    float an = sdot(ssub3(vvResAcc(h, vh, parity, false), at), nn);
+    float vn = sdot(v, nn);
+    if (!(vn < 0.0 && nf(smul(an, STEP) + vn) < 0.0)) return 0.0;
+    float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), gNodes[h * 3u].w);
+    float i1 = (alpha > 0.0 && !vvImmovable(tn.y)) ? smul(smul(alpha, alpha), sdiv(vvSplitK(vvSplitTri(tn.y)), gNodes[tn.y * 3u].w)) : 0.0;
+    float i2 = (beta > 0.0 && !vvImmovable(tn.z)) ? smul(smul(beta, beta), sdiv(vvSplitK(vvSplitTri(tn.z)), gNodes[tn.z * 3u].w)) : 0.0;
+    float i0 = (gamma > 0.0 && !vvImmovable(tn.x)) ? smul(smul(gamma, gamma), sdiv(vvSplitK(vvSplitTri(tn.x)), gNodes[tn.x * 3u].w)) : 0.0;
+    float inv = nf(imh + nf(nf(i1 + i2) + i0));
+    if (!(inv > 0.0)) return 0.0;
+    float m = sdiv(1.0, inv);
+    float r = nf(-smul(an, m) - sdiv(smul(vn, m), STEP));
+    return r > 0.0 ? r : 0.0;
+}
+
+// The guard of the staged hit's force t at A + B (explicit_contact.rs
+// guard_vehicle_pass).
+bool vvGuardOf(uint va, uint vh, uint h, uint4 tn, float alpha, float beta, float gamma, float3 v, float3 t,
+               uint parity, out float3 g)
+{
+    g = float3(0.0, 0.0, 0.0);
+    if (all(t == float3(0.0, 0.0, 0.0))) return false;
+    float3 a = ssub3(vvResAcc(h, vh, parity, true),
+                     sadd3(sadd3(sscale(vvResAcc(tn.y, va, parity, true), alpha),
+                                 sscale(vvResAcc(tn.z, va, parity, true), beta)),
+                           sscale(vvResAcc(tn.x, va, parity, true), gamma)));
+    float inv = nf(ownInvMass(h)
+                   + nf(nf(selfTerm(alpha, ownInvMass(tn.y)) + selfTerm(beta, ownInvMass(tn.z))) + selfTerm(gamma, ownInvMass(tn.x))));
+    float3 rest = ssub3(a, sscale(t, inv));
+    float aa = sdot(t, sadd3(sadd3(v, v), sscale(rest, STEP)));
+    float bb = smul(smul(STEP, sdot(t, t)), inv);
+    if (!(nf(aa + bb) > 0.0 && bb > 0.0)) return false;
+    float k = aa < 0.0 ? min(sdiv(-aa, bb), 1.0) : 0.0;
+    g = sscale(t, -nf(1.0 - k));
+    return true;
+}
+
+// One phase of the pass over owner va's n listed hits (two words each from `base`;
+// lane `lane` of `lanes`): 0 the residuals into B; 1 the guards and totals into D;
+// 2 the merge.
+void vvResidualPhase(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes, uint slot, uint phase)
+{
+    if (gP.selfSplit == 0u || gP.vvSplit == 0u) return;
+    float3 oa = asfloat(gMisc[va].xyz);
+    for (uint i = lane, iStop = EB_END(i, n, lanes); i < iStop; i += lanes)
+    {
+        uint gt = gNext[base + 2u * i];
+        uint h = gNext[base + 2u * i + 1u];
+        uint vh = gStatic[gP.nodeInfoBase + h].w;
+        VvTri t = vvTriangle(gt, oa, r);
+        float alpha;
+        float beta;
+        float gamma;
+        float3 nn;
+        float3 v;
+        float3 f1;
+        if (!vvStagedHit(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity, slot, alpha, beta,
+                         gamma, nn, v, f1))
+            continue;
+        if (phase == 2u)
+        {
+            resMerge(h, t.tn.x, t.tn.y, t.tn.z);
+            continue;
+        }
+        float rr = vvResOf(va, vh, h, t.tn, alpha, beta, gamma, nn, v, parity, slot);
+        if (phase == 0u)
+        {
+            if (rr > 0.0) resStage(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, sscale(nn, rr));
+            continue;
+        }
+        float3 total = f1;
+        if (rr > 0.0) total = sadd3(total, sscale(nn, rr));
+        float3 g;
+        if (vvGuardOf(va, vh, h, t.tn, alpha, beta, gamma, v, total, parity, g)) total = sadd3(total, g);
+        resFinal(h, t.tn.x, t.tn.y, t.tn.z, alpha, beta, gamma, f1, total);
+    }
 }
 
 // The owner's tested triangle t (list position p of GRID_SUBS lanes, lane `sub`)
@@ -6901,6 +7407,16 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 #endif
         uint prevHits = a > 0u ? gsVvHits[q ^ 1u].load() : 0u;
         if (a > 0u) vvApplyHits(prevVa, runOff, points, prevHits, prevRange, parity, lane);
+        // §37.1: the previous owner's residual pass and work guard (its listed hits).
+        if (gP.vvSplit != 0u && a > 0u)
+        {
+            for (uint ph = 0u; ph < 3u; ph++)
+            {
+                sync();
+                if (prevHits <= 2u * points)
+                    vvResidualPhase(prevVa, vvHitAt(runOff, 0u), prevHits, prevRange, parity, lane, LANES, 0u, ph);
+            }
+        }
         for (uint b = lane, bStop = EB_END(b, k, LANES); b < bStop; b += LANES)
         {
             uint vb = vvMember(off, b);
@@ -7043,6 +7559,12 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
     if (k > 0u) vvApplyHits(prevVa, runOff, points, lastHits, prevRange, parity, lane);
     if (gP.vvSplit != 0u)
     {
+        for (uint ph = 0u; ph < 3u; ph++)
+        {
+            sync();
+            if (k > 0u && lastHits <= 2u * points)
+                vvResidualPhase(prevVa, vvHitAt(runOff, 0u), lastHits, prevRange, parity, lane, LANES, 0u, ph);
+        }
         sync();
         if (lastHits > 0u) vvSplitClear(off, k, 1u, lane);
     }
@@ -7172,11 +7694,6 @@ uint vvLevel(uint a, uint k, uint points)
 void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 {
     uint parity = step & 1u;
-    if (gP.vvSplit != 0u)
-    {
-        vvSnapshot(off, k, parity, lane);
-        sync();
-    }
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     // (S) the partner scans: lane per ordered pair (a, b).
     for (uint p = lane, pStop = EB_END(p, k * k, LANES); p < pStop; p += LANES)
@@ -7207,6 +7724,28 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
         gsVvPair[a * VV_PART + b] = bits;
     }
     sync();
+    // No owner offered a partner this step and none resets (no frame boxes
+    // overlap: a group whose members have not met yet): the phases below would list
+    // nothing, test nothing and hit nothing (every throttle and count untouched), so
+    // they are skipped with their barriers. Lane 0 decides after the scans' barrier
+    // (gsUniformOpen is free between the member step and the next one).
+    if (lane == 0u)
+    {
+        uint offered = 0u;
+        // (An owner's reset or fix still clears its throttles below, offered or not.)
+        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+            offered += gsVvOff4[a].load() + gsVvReset4[a] + gsVvFix[a];
+        gsUniformOpen = offered;
+    }
+    sync();
+    if (gsUniformOpen == 0u) return;
+    // The two-body pass reads every member's node force at its start (nothing the
+    // scans wrote).
+    if (gP.vvSplit != 0u)
+    {
+        vvSnapshot(off, k, parity, lane);
+        sync();
+    }
     // (P) every owner's throttle step and candidates.
     {
         uint triTotal = 0u;
@@ -7386,6 +7925,23 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             }
         }
         sync();
+        // §37.1: this level's owners' residual pass and work guard (listed hits).
+        if (gP.vvSplit != 0u)
+        {
+            for (uint ph = 0u; ph < 3u; ph++)
+            {
+                for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+                {
+                    if (vvLevel(a, k, points) != l) continue;
+                    uint hits = gsVvHit4[a].load();
+                    if (hits > 2u * points) continue;
+                    uint va = vvMember(off, a);
+                    vvResidualPhase(va, vvHitSmall(runOff, points, a, 0u), hits, asfloat(gStatic[va * 4u + 3u].z),
+                                    parity, lane, LANES, a, ph);
+                }
+                sync();
+            }
+        }
     }
     // The two-body counts of every owner's turn, once all levels are applied.
     uint anyHits = 0u;

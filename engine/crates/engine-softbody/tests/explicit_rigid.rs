@@ -14,6 +14,7 @@ const QUIET: ExplicitBeamsSettings = ExplicitBeamsSettings {
     drag: false,
     turbulence: false,
     triangle_throttle: true,
+    centred_damping: false,
 };
 
 /// The procedural sedan's bare body, its long axis along +Z, its front face at z = 0,

@@ -12,6 +12,7 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     drag: false,
     turbulence: false,
     triangle_throttle: true,
+    centred_damping: false,
 };
 
 /// Unit-mass nodes at `points`, no ground contact, no drag.
@@ -135,6 +136,7 @@ fn frames_carry_the_remainder() {
             drag: true,
             turbulence: true,
             triangle_throttle: true,
+            centred_damping: false,
         }
     );
 }
