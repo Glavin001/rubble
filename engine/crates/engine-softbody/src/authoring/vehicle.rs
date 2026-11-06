@@ -800,13 +800,18 @@ pub fn bx_node_damping_rate(part: &str, contact: bool) -> Option<f32> {
     } else {
         return None;
     };
+    // (`BX_NODE_DAMPING=contact`: the contact-only nodes alone, a
+    // measurement switch.)
+    if !contact && std::env::var("BX_NODE_DAMPING").is_ok_and(|v| v == "contact") {
+        return None;
+    }
     Some(if contact { light } else { heavy })
 }
 
 /// BeamNG's node pattern: raise each patterned part's node to the BX's
 /// damping rate ([`bx_node_damping_rate`]) through the body dashpot it is
 /// from, both of the dashpot's nodes kept within 0.9 × [`super::skeleton::C_RATIO`].
-fn bx_node_damping(sk: &mut Skeleton, shell: &Shell, body_dash: &[(usize, u32)]) {
+fn bx_node_damping(sk: &mut Skeleton, shell: &Shell, body_dash: &[(usize, u32)], parts: &[String]) {
     let n = sk.nodes.len();
     let mut csum = vec![0.0f32; n];
     for b in &sk.beams {
@@ -818,10 +823,11 @@ fn bx_node_damping(sk: &mut Skeleton, shell: &Shell, body_dash: &[(usize, u32)])
     order.sort_by_key(|x| x.1);
     for (j, i) in order {
         let iu = i as usize;
-        let Some(rate) = bx_node_damping_rate(
-            &sk.parts[sk.nodes[iu].part as usize],
-            shell.contact.contains(&i),
-        ) else {
+        let name = &sk.parts[sk.nodes[iu].part as usize];
+        if !parts.iter().any(|p| name.starts_with(p.as_str())) {
+            continue;
+        }
+        let Some(rate) = bx_node_damping_rate(name, shell.contact.contains(&i)) else {
             continue;
         };
         let o = (sk.beams[j].a + sk.beams[j].b - i) as usize;
@@ -3983,11 +3989,22 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         // dashpot carrying the difference; the bound then takes what the
         // damping adds (`BX_NODE_DAMPING=0` leaves it out, a measurement
         // switch).
-        if def.damping.is_some()
-            && !shell.contact.is_empty()
+        // (`BX_BODY_DAMPING=1` does the same for the body's nodes, with or
+        // without the pattern, a measurement switch.)
+        let mut damped: Vec<String> = if !shell.contact.is_empty()
             && std::env::var("BX_NODE_DAMPING").map_or(true, |v| v != "0")
         {
-            bx_node_damping(&mut sk, &shell, &body_dash);
+            beamng_nodes_parts()
+        } else {
+            Vec::new()
+        };
+        if std::env::var("BX_BODY_DAMPING").is_ok_and(|v| v == "1") {
+            damped.push("body".into());
+        } else {
+            damped.retain(|p| p != "body");
+        }
+        if def.damping.is_some() && !damped.is_empty() {
+            bx_node_damping(&mut sk, &shell, &body_dash, &damped);
             sk.cap_to_bound()?;
         }
         for (b, &e) in sk.beams.iter_mut().zip(&elong) {
