@@ -3526,6 +3526,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     preload(&mut sk, def);
     // Collision skin: the shell's skin on a coarser lattice, its nodes contacters.
     sk.collision = coarse_skin(&sk, &shell)?;
+    sk.inner_collision = block_tris.len();
     sk.collision.extend(block_tris);
     for t in sk.collision.clone() {
         for i in t {
@@ -3539,12 +3540,30 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     // bears on the radiator support by beams: a light node there met the
     // face pinched against the wall, and in the 50 km/h wall two of the
     // radiator support's nodes left at 107–138 m/s.
+    // (Not the nodes its mounts and bearing beams hold: they meet it
+    // through those, and a mounted node in contact with its own block
+    // would be held twice.)
     for bl in def.blocks.iter().filter(|b| b.collide) {
         let (c, h) = (Vec3::from_array(bl.centre), Vec3::from_array(bl.half));
         let reach = if bl.bear > 0.0 { bl.bear } else { 0.5 };
-        for n in sk.nodes.iter_mut().filter(|n| n.part == 0) {
+        let own: std::collections::HashSet<u32> = groups
+            .get(&bl.name)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        let held: std::collections::HashSet<u32> = sk
+            .beams
+            .iter()
+            .filter_map(|b| match (own.contains(&b.a), own.contains(&b.b)) {
+                (true, false) => Some(b.b),
+                (false, true) => Some(b.a),
+                _ => None,
+            })
+            .collect();
+        for (i, n) in sk.nodes.iter_mut().enumerate() {
             let d = ((n.p - c).abs() - h).max(Vec3::ZERO).length();
-            if d <= reach && n.p.z <= c.z + h.z {
+            if n.part == 0 && d <= reach && n.p.z <= c.z + h.z && !held.contains(&(i as u32)) {
                 n.contacter = true;
             }
         }

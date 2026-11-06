@@ -2569,17 +2569,19 @@ pub const ACCORD_DASH_EQUIPMENT: f32 = 3.16 + 6.43;
 /// sedan1's cowl and dash panel at the 2011 Accord's place
 /// ([`ACCORD_DASH_BEHIND`]), sections and local masses.
 ///
-/// - **The cowl** (the screen's base) runs from 0.30 m behind the axle at
-///   the A-pillars to 0.27 m at the centre: a windscreen's base is furthest
-///   forward at the centre (it was 9 cm behind its ends). The A-pillars'
-///   cowl corners, the aprons' rear ends and every brace on them move with
-///   it; the hinge pillars' bases stay where the door's front edge needs
-///   them (z 3.36, 0.42 m behind the axle), so the hinge pillar leans
-///   forward to the cowl as a real A-pillar's lower half widens to its
-///   foot. The screen's base, its glass and the top line's knee move with
-///   the cowl (the screen stays one straight rake from the header).
+/// - **The cowl** (the plenum on the dash panel's top) is furthest forward
+///   at the centre, 0.27 m behind the axle, as a windscreen's base is (it
+///   was 9 cm behind its ends), its ends swept back in plan to the
+///   A-pillars' cowl corners. Those corners, the A-pillars, the screen's
+///   base (z 3.33) and the greenhouse's top line stay: moving them with the
+///   cowl (built and measured) changed the shell's top ahead of the doors,
+///   which moved the front door's hinge pins (upper 0.88 → 0.75 m, lower
+///   0.49 → 0.25 m), so the door's lower hinge bore on the sill
+///   (FMVSS 214's ram, `p`, 23 → 140 kN) and `g`'s door came off at 40 kN.
+///   The plenum runs forward from the screen's base under the bonnet's
+///   rear edge, as a real cowl does.
 /// - **The dash lower cross member** (`firewall`) runs at the dash panel's
-///   line between the front rails, its ends swept back round the
+///   line between the front rails (0.30 m behind the axle), its ends swept back round the
 ///   wheelhouses to the hinge pillars' bases (it ties the sills there as
 ///   before), and the tunnel runs forward to it.
 /// - **The dash panel** (`dash_panel`): three vertical strips from the
@@ -2602,41 +2604,32 @@ fn accord_dash(d: &mut VehicleDef) {
     use super::vehicle::{SHEET_YIELD, SHELL_GAUGE};
     let pr = d.profile.clone();
     let rp = |p: (f32, f32, f32)| restyle_point([p.0, p.1, p.2], &pr);
-    let (back_side, back_centre) = (ACCORD_DASH_BEHIND[1], ACCORD_DASH_BEHIND[0]);
-    let (z_side, z_centre) = (FRONT_AXLE - back_side, FRONT_AXLE - back_centre);
-    // The cowl's line in plan: a parabola, furthest forward at the centre.
-    let cowl_z = |x: f32| z_centre - (z_centre - z_side) * (x / 0.79).powi(2);
+    // The dash's line between the rails, and the A-pillars' cowl corners
+    // (kept: see the doc above).
+    let z_centre = FRONT_AXLE - ACCORD_DASH_BEHIND[0];
+    let z_dash = FRONT_AXLE - ACCORD_DASH_BEHIND[1];
+    let z_corner = 3.38;
+    // The cowl's line in plan: a parabola through the A-pillars' corners,
+    // furthest forward at the centre.
+    let cowl_z = |x: f32| z_centre - (z_centre - z_corner) * (x / 0.79).powi(2);
     // The strips' chords across the car.
     let chords = [-0.4875f32, -0.2925, -0.0975, 0.0975, 0.2925, 0.4875];
-    let (old_cw, new_cw) = (3.38f32, z_side);
     for m in d.members.iter_mut() {
         match m.name.as_str() {
             "cowl" => {
-                let mut pts = vec![(-0.79, 0.92, cowl_z(0.79))];
+                let mut pts = vec![(-0.79, 0.92, z_corner)];
                 pts.extend(chords.iter().map(|&x| (x, 0.92, cowl_z(x))));
-                pts.push((0.79, 0.92, cowl_z(0.79)));
+                pts.push((0.79, 0.92, z_corner));
                 m.path = pts.into_iter().map(rp).collect();
-            }
-            "pillar_a" | "apron" => {
-                for p in m.path.iter_mut().filter(|p| p[2] == old_cw) {
-                    p[2] = new_cw;
-                }
             }
             "firewall" => {
                 let mut pts = vec![(-0.79, 0.27, 3.36), (-0.58, 0.27, 3.38)];
-                pts.extend(chords.iter().map(|&x| (x, 0.30, z_centre - 0.01)));
+                pts.extend(chords.iter().map(|&x| (x, 0.30, z_dash)));
                 pts.extend([(0.58, 0.27, 3.38), (0.79, 0.27, 3.36)]);
                 m.path = pts.into_iter().map(rp).collect();
             }
-            "tunnel" => m.path.push(rp((0.0, 0.33, z_centre - 0.01))),
+            "tunnel" => m.path.push(rp((0.0, 0.33, z_dash))),
             _ => {}
-        }
-    }
-    for b in d.braces.iter_mut() {
-        for p in [&mut b.from, &mut b.to] {
-            if p[2] == old_cw && p[0].abs() == 0.79 {
-                p[2] = new_cw;
-            }
         }
     }
     // The dash panel's strips: from the lower cross member's top chord
@@ -2644,7 +2637,7 @@ fn accord_dash(d: &mut VehicleDef) {
     let strip = |name: &str, x: f32, mirrored: bool| {
         ladder(member(
             name,
-            &[(x, 0.38, z_centre - 0.01), (x, 0.83, cowl_z(x))],
+            &[(x, 0.38, z_dash), (x, 0.83, cowl_z(x))],
             0.10,
             0.195,
             [1.0, 0.0, 0.0],
@@ -2688,33 +2681,6 @@ fn accord_dash(d: &mut VehicleDef) {
             m.kg_per_m = section_kg_per_m(&sec);
         }
     }
-    // The screen's base, its glass and the top line's knee.
-    let knee = 3.33;
-    let base = z_side + 0.01;
-    let header = (2.55, d.profile.top.eval(2.55));
-    let foot = (base, d.profile.top.eval(knee));
-    d.profile.top = Curve::new(
-        &d.profile
-            .top
-            .0
-            .iter()
-            .filter(|p| !(p[0] > header.0 && p[0] <= knee))
-            .map(|p| (p[0], p[1]))
-            .chain([(0.5 * (header.0 + foot.0), 0.5 * (header.1 + foot.1)), foot])
-            .fold(Vec::<(f32, f32)>::new(), |mut v, p| {
-                v.push(p);
-                v.sort_by(|a, b| a.0.total_cmp(&b.0));
-                v
-            }),
-    );
-    for z in d.zones.iter_mut() {
-        if let Region::Top { z1, .. } = &mut z.region {
-            if *z1 == 3.32 {
-                *z1 = z_side;
-            }
-        }
-    }
-    d.look.windscreen[1] = base;
     // Named masses: the dash equipment on the driver's (left, +x) half; the
     // instrument panel's box follows the cowl it hangs from.
     d.masses.push(NamedMass {
