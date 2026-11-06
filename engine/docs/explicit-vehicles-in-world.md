@@ -256,8 +256,10 @@ on macOS), MSL and CUDA from the same source. The explicit solver itself runs on
 
 - Plan: vehicles × colliders AABB tests per window (brute force in v1; a uniform grid over
   colliders is the planned replacement when collider counts make it matter).
-- Frame: per step, for a vehicle with proxies, one extra barrier and a count pass over its
-  nodes against its proxy shapes (bounding-box culled); vehicles with none pay nothing.
+- Frame: per step, for a vehicle with proxies, two extra barriers, a pass writing each proxy
+  shape's bounding sphere (grown past rounding) once, and a count pass over its nodes against
+  its proxy shapes; a node skips a shape outside its grown sphere (the shape cull, lossless:
+  cplFace would reject it) and tests the rest in shape order. Vehicles with none pay nothing.
 - Emit and loads: one thread per proxy shape.
 
 Measured numbers (1, 16, 64 vehicles) are in §8 when the implementation lands.
@@ -335,16 +337,118 @@ the fracture phase (the houses' threshold loads, breaks and splits) 4.5 ms of 7.
 solve about 1.5 ms; the explicit vehicles' marked span 0.14–0.27 ms. The fracture's
 cost follows the bonds broken (1,776 at 64 cars and 120 Hz, 2,806 at 128; raycast
 3,265 and 4,761). Against E1 (≥ 100 cars at p99 ≤ 8.33 ms per 120 Hz step; ≥ 256 at
-60 Hz): not met; the destruction pipeline, not the explicit solver, is the first
-target.
+60 Hz): not met. (This phase split came from timestamp marks that Metal can take early;
+§8.2 measures it again: the explicit frame is the largest phase.)
+
+### 8.2 Where the time goes, and the lossless changes (E1), 2026-11-05
+
+**The attribution above was wrong.** A mark is an empty compute pass that writes a
+timestamp as it begins; on Metal a pass with no dependencies can start before the
+passes encoded ahead of it finish, so the marks put the explicit frame's time into
+the fracture's segment (and the marked total can run short). Three measures replace
+it (branch `feat/vehicle-scale`):
+
+- `EV_SPAN=1` (`explicit_vehicles_bench`): each step's span from its submit to its
+  completion. The bench waits for every step, so the GPU is idle at each submit; the
+  span is the GPU's time plus the submit latency and the readback decode (an upper
+  bound). It is the column the tables below report.
+- `RUBBLE_GPU_TIMING_SYNC=1`: every mark ends the command buffer, submits it and
+  waits; a segment's time is the host's wall time of its wait. Immune to the overlap,
+  slower in total (the GPU idles and clocks down between segments), so it is for the
+  split, not the total. `RUBBLE_GPU_TIMING_EXPLICIT=1` adds a mark after each of the
+  frame's dispatches.
+- `explicit_frame_probe`: the vehicles' frame alone on one crash-town state (a
+  snapshot), timed by its own pass timestamps, under switches (shape cull, vehicle
+  contact, coupling, the raycast wheels' pass).
+
+64 beam-tyre cars, 120 Hz, submit-and-wait medians: the frame's contact-group
+dispatch 6.1 ms, rigid broadphase 1.6, primal 1.7, dual 0.7, the threshold fracture
+1.7, the coupling plan 0.6 (the in-mode total is 15.6, inflated by the waits). The
+explicit frame, not the fracture, is the largest phase. The probe on the state after
+the strikes (17 steps, 64 cars): 0.66 ms with coupling and vehicle contact off, 2.7
+with vehicle contact on (head-on pairs are contact groups of two from before they
+meet), 3.7 with the coupling on and contact off (cars inside broken houses meet 30 to
+117 chunk shapes each), 5.8 with both. A frame's time is its slowest workgroup's:
+64 to 256 cars fill far less than the GPU, so it is the latency of the busiest vehicle
+or group, not the fleet's total work.
+
+Lossless changes (each bit for bit, or results unchanged by construction):
+
+| Change | Check | Effect |
+|---|---|---|
+| Coupling shape cull: each step every proxy shape's bounding sphere, grown past rounding, written once (`cplSpheres`); a node skips the shapes outside it | `the_coupling_shape_cull_is_bit_exact` (engine-world): frames with the cull on and off from the same snapshot, every state word equal, cars among 20 to 79 chunk shapes | frame 6.6 → 5.8 ms (64 cars, after the strikes) |
+| Raycast wheels a wheel per lane (rays, suspension, tyre and spin; the anti-roll bars on one lane between; one lane when two wheels share a hub node) | `explicit_drive_gpu` (bit for bit against the CPU), Metal `explicit_drive_parity` | the wheels' pass about 0.5 ms of a 7.9 ms raycast frame (64 cars) |
+| Crash town capacity sized per house (`capacity_for`'s rule per house, not its one-scene floor of 16,384 bodies times the houses) | same bonds broken (1,776 and 2,806 at 64 and 128 cars) | 32 houses alone 3.79 → 2.91 ms; 64 cars 10.19 → 9.39 ms; 128 cars 14.43 → 13.09 (span medians, 120 Hz) |
+
+**The 2^20 limit.** It is genuine: the fracture's split ranks chunks and body slots
+with a two-level scan (one group of 1024 blocks of 1024). It was reached by an
+artefact. The crash town multiplied a one-scene capacity floor (16,384 body slots for
+an 826-chunk house) by the houses, so 32 houses had 2^20 body slots, and every
+per-slot pass of each step ran over a million slots. 64 houses went past the bound.
+Sized per house, 32 houses take 2^17 slots and 64 fit (256 cars with 64 houses step:
+20.8 / p99 34.9 ms at 120 Hz). The bound is now checked when the fracture is created,
+named by its field (`WorldCapacity::max_bodies` past 2^20 fails with that message).
+The bench keeps 32 houses by default (`EV_MAX_HOUSES`) to compare with the baseline.
+
+**Before and after** (`explicit_vehicles_bench`, `EV_SPAN=1`: GPU ms per World step, submit
+to completion, 2 s of steps, at most 32 houses; before is eb0b389a with only the timing
+added, after is this branch; M3 Max, load 6 to 12 from other agents, one run at a time,
+23:00 to 23:45). The strikes are the same in both (the same bonds broken in every row):
+
+| Cars | Wheels | Hz | Before p50 / p95 / p99 | After p50 / p95 / p99 | After wall p50 |
+|---|---|---|---|---|---|
+| 16 | beam tyres | 60 | 14.44 / 16.64 / 16.80 | 13.07 / 14.62 / 14.77 | 13.76 |
+| 64 | beam tyres | 60 | 15.97 / 19.39 / 20.34 | 14.57 / 18.93 / 19.24 | 15.44 |
+| 128 | beam tyres | 60 | 24.25 / 31.69 / 32.29 | 21.31 / 26.32 / 28.84 | 22.23 |
+| 256 | beam tyres | 60 | 30.95 / 43.22 / 45.86 | 29.88 / 39.51 / 48.33 | 30.78 |
+| 16 | beam tyres | 120 | 8.09 / 9.08 / 9.47 | 7.36 / 8.21 / 8.49 | 7.93 |
+| 64 | beam tyres | 120 | 10.06 / 14.06 / 15.52 | 9.18 / 12.48 / 14.15 | 9.90 |
+| 128 | beam tyres | 120 | 14.69 / 19.37 / 21.46 | 13.03 / 16.56 / 17.80 | 13.78 |
+| 256 | beam tyres | 120 | 18.72 / 25.11 / 28.17 | 18.14 / 23.04 / 25.98 | 18.81 |
+| 16 | raycast | 60 | 19.94 / 21.42 / 21.60 | 16.57 / 17.58 / 17.86 | 17.01 |
+| 64 | raycast | 60 | 27.41 / 47.44 / 50.12 | 22.40 / 32.32 / 36.41 | 23.20 |
+| 128 | raycast | 60 | 38.98 / 52.18 / 53.91 | 30.65 / 40.00 / 40.49 | 31.57 |
+| 256 | raycast | 60 | 49.82 / 67.29 / 74.91 | 41.71 / 55.05 / 61.23 | 42.64 |
+| 16 | raycast | 120 | 13.37 / 15.73 / 17.69 | 10.99 / 13.31 / 14.15 | 11.63 |
+| 64 | raycast | 120 | 15.73 / 26.30 / 28.11 | 13.08 / 20.41 / 22.32 | 13.85 |
+| 128 | raycast | 120 | 23.02 / 32.56 / 35.74 | 17.54 / 25.14 / 27.31 | 18.38 |
+| 256 | raycast | 120 | 28.82 / 39.76 / 44.55 | 23.63 / 32.13 / 37.44 | 24.53 |
+
+256 beam-tyre cars at 60 Hz: the p99 is within the run-to-run spread (one long step).
+512 lanes a vehicle (`RUBBLE_EXPLICIT_LANES=512`) for these fleets: within noise (64 cars,
+120 Hz: p99 13.5 against 14.2), so the lanes policy is unchanged.
+
+**Against E1: not met.** 128 beam-tyre cars at 120 Hz: p99 17.8 ms against 8.33. 256 cars at
+60 Hz: p99 48.3 ms against 16.7. 16 cars at 120 Hz are at 8.5 ms. What bounds further scaling:
+
+- **The explicit frame is latency-bound.** It is one dispatch; its time is its slowest
+  workgroup's 17 or 34 serial steps of about ten barriers each. That workgroup is a contact
+  group, or a car among a broken house's chunks. Splitting a group into partitions (two cars:
+  128 lanes each) and the vehicle–vehicle pass cost a pair about four times a solo car
+  (0.66 against 2.7 ms a frame for 64 cars with the coupling off). The proxy shapes add
+  about 3 ms after the strikes. More cars barely raise it, until they fill the GPU.
+- **The rigid step.** About 2.9 ms at 32 houses alone, plus the debris the strikes free.
+  Broadphase and primal are 1.6 to 1.7 ms each at 64 cars (submit-and-wait split).
+- **The threshold fracture.** About 1.7 ms, following the bonds broken.
+- The coupling plan is brute force: 0.6 ms at 64 cars and 16 houses. It grows with cars ×
+  colliders.
+
+Lossless paths not yet taken:
+- a per-step grid of a vehicle's proxy shapes (only the cell's shapes tested; the bitmask
+  version measured here was slower, through atomic loads of global memory);
+- contact groups' partitions sized by the members' node counts;
+- the plan's colliders binned per window;
+- the contact module's cold Metal compile (about 62 s for the 428 KB module, past Chrome's
+  GPU watchdog): split into smaller modules.
 
 ## 9. Remaining
 
 - In-frame release: a chunk proxy freed the substep its load passes its capacity (today the
   vehicle meets the unbroken structure for one window, §4).
 - The proxy plan is brute force (vehicles × colliders); a collider grid when collider counts grow.
-- Per node, every proxy shape is tested (bounding-sphere culled); a vehicle inside a broken house
-  meets hundreds of pieces: a per-vehicle shape grid would cut that.
+- Per node, every proxy shape's grown sphere is tested (the shape cull, §8.2); a vehicle inside
+  a broken house meets up to about a hundred pieces: a per-vehicle shape grid would cut that.
+- E1 is not met (§8.2): the frame's slowest workgroup, the rigid step and the fracture bound it.
 - Threshold destructibles with their own fracture (crushing, blast loading) are refused
   loudly; the shared fracture's are supported.
 - Wide passes with the coupling (single very large vehicles without vehicle contact).
