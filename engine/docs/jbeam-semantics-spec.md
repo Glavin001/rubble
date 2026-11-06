@@ -2244,6 +2244,73 @@ simulated outside raycast drive). Probes: `settle_probe`, `contact_work_probe`
 * n's 32 ledgers: no rise between tenths over 0.04 J. Its bands (max crush,
   b1, t_m) fail, as before: the car's calibration.
 
+**The work guard (2026-11-06, later).** Tracing the failing tenth (56 km/h, drag
+off, 1.3–1.6 s; `contact_parts_probe`) split self-contact work by phase:
+first-pass normal −2.3 J, friction **+1.4 to +1.7 J**, residual −0.3 J.
+
+The cause is friction in the bonnet tangle. Each hit's friction cap
+(`no_positive_work`) judges it at its own predicted velocity with split masses,
+and hits sharing nodes then realise other velocities. The T-bone showed the same
+for vehicle contact's normal force: +32 J in one tenth when the cars met again
+at 0.6 s.
+
+**Rule** (`friction_guard_pass`, `guard_vehicle_pass`): after the residual pass,
+each staged hit's force t (its first-pass force with its residual) is judged at
+the pair's realised mean velocity over the step. That is the forces now (every
+staged sum of the step or turn) on the nodes' own masses. Its work is
+W(s) = s·A + s²·B, with
+* A = t·(2v + h·a′), where a′ is the pair's relative acceleration without t;
+* B = h·|t|²·inv.
+
+Where W(1) > 0 the hit takes −(1 − s)·t, with s = −A/B (0 if A ≥ 0).
+
+A force that does positive work moves the pair the way it pushes, so scaling its
+normal part lets nothing in. Every guard is found from the same sums (order
+free, momentum-exact).
+
+**Quantisation-neutral sums.** The first pass and the residual add to the
+accumulators as a staging the later passes read. At the end each hit's total
+(first pass, plus residual, plus guard) replaces its staged adds: the
+accumulators as they were, plus one add per share of the total. The fixed-point
+rounding is the first pass's alone.
+
+**Vehicle contact's residual pass is on.** It uses the same staging, first-pass
+counts and approaching pairs only. The T-bone leaked 8 / 9 / 5 / 2 / 2 of 1,026
+with it off and 3 / 4 / 6 / 0 / 2 with it on; the contact-work invariant holds
+either way.
+
+Measured (CPU, after the change):
+* `contacts_do_no_positive_work` passes (all 26 runs, the 12 s rest, the T-bone).
+* `fixed_contact_quantisation_does_no_work` passes (largest run +0.0016 J).
+* `crushed_car_settles`: relative rms 36 mm/s, fastest 0.85 m/s, kinetic energy
+  per second 213 → 3.4 J from the 3rd to the 12th second. A crushed part settling
+  lifted one second (13.7 → 18.7 J in the 7th), so the check is per two seconds.
+
+**GPU.** Per node, 8 words of gAcc at `resAt` (selfSplit + 4·totalNodes): the
+residual's staged sums B and the totals' deltas D, fix(total share) −
+fix(first-pass share), merged into the accumulators. That gives the CPU's restore
+and re-add, integer for integer.
+* **Self contact.** `selfResidualPhase` (residual, guard and totals, merge) after
+  `selfApply`'s rounds; `selfSerialResidual` past the hit list's room, which finds
+  the hits again and recomputes the first pass without its position step.
+* **Vehicle contact.** `vvResidualPhase` per owner after its listed hits:
+  `vvPass` in phase S and at the end; `vvPassSmall` after each level. A turn whose
+  list overflowed (more than 2 × points hits) applies its hits at once, out of
+  the specification's order as before, and stages none.
+
+Verified:
+* wgpu: `explicit_contact_gpu`, including `anti_clip_steps_like_the_cpu`
+  bit-exact with dissipative contact in a small group and owner by owner;
+  `explicit_beams_bitwise`, `explicit_jbeam_gpu`, `explicit_jbeam_ext_gpu`,
+  `explicit_drive_gpu`, `explicit_loop_cap`.
+* Metal: `vehicle_parity`, `explicit_parity`, `explicit_drive_parity`.
+
+**Stated floor.** Single-precision positions move by whole ulps (about 1 mm/s
+at the car's farthest coordinate) and contact steps by 2⁻²⁴ m (0.12 mm/s). The
+< 1 mm/s target is withdrawn; the tangle keeps about 35× the floor.
+
+The bounds below are superseded.
+
 **Open: `fixed_contact_quantisation_does_no_work`.** The residual pass's extra
 contact sums put 48 km/h with drag at +0.0102 J over the run, against the 0.01 J
 bound (worst case 5.9 J); the others are within ±0.015 J.

@@ -992,6 +992,10 @@ pub struct ExplicitBeams {
     /// A measurement (`None`: off): the last step's two-body self-collision hits
     /// as found (contacter, triangle nodes, weights, depth, normal).
     pub self_hit_log: Option<Vec<(u32, [u32; 3], [f32; 3], f32, Vec3)>>,
+    /// A measurement (`None`: off): the last step's two-body self-contact forces
+    /// per node by phase: the first pass's normal part, its friction, the residual
+    /// pass (N; the node's share, as added).
+    pub self_contact_parts: Option<Vec<[Vec3; 3]>>,
     /// The contact-force log (jbeam-semantics-spec.md §32): per node the sum of
     /// its contacts' force magnitudes per step, and the contact breaks it drives
     /// (`None`: off, the default; [`Self::enable_contact_force`]).
@@ -1565,6 +1569,7 @@ impl ExplicitBeams {
             slide_hold: Vec::new(),
             contact_exact: None,
             self_hit_log: None,
+            self_contact_parts: None,
             contact_force: None,
             tread: Vec::new(),
             damp_filters: Vec::new(),
@@ -3825,6 +3830,10 @@ impl ExplicitBeams {
     fn collision_pass(&mut self) {
         let exact = self.exact_friction;
         self.last_contacts = 0;
+        if let Some(p) = self.self_contact_parts.as_mut() {
+            p.clear();
+            p.resize(self.nodes.len(), [Vec3::ZERO; 3]);
+        }
         if self.grid_cell > 0.0 {
             let cell = self.grid_cell;
             let nodes = &self.nodes;
@@ -4134,6 +4143,13 @@ impl ExplicitBeams {
                 f / n.mass
             }
         };
+        let mut first: Vec<Vec3> = Vec::with_capacity(found.len());
+        // §37.1: with the residual and the guard, the first pass's sums are a
+        // staging the later passes read; each hit's total is added once at the end
+        // (the accumulators as they were, then every hit's total: the first pass's
+        // quantisation, whatever the later passes add).
+        let staged = self.dissipative_contact;
+        let snapshot = staged.then(|| (self.contact_acc.clone(), self.contact_exact.clone()));
         for &(hn, [i0, i1, i2], [alpha, beta, gamma], depth, n) in found {
             let node = self.nodes[hn as usize];
             let (n0, n1, n2) = (
@@ -4186,6 +4202,59 @@ impl ExplicitBeams {
                     }
                 }
             }
+            first.push(f);
+            if let Some(p) = self.self_contact_parts.as_mut() {
+                let fnm = n * f.dot(n);
+                for (i, w) in [(hn, 1.0f32), (i1, -alpha), (i2, -beta), (i0, -gamma)] {
+                    p[i as usize][0] += fnm * w;
+                    p[i as usize][1] += (f - fnm) * w;
+                }
+            }
+            self.add_contact(hn as usize, f);
+            self.add_contact(i1 as usize, -(f * alpha));
+            self.add_contact(i2 as usize, -(f * beta));
+            self.add_contact(i0 as usize, -(f * gamma));
+            if !staged {
+                if let Some(l) = self.contact_force.as_mut() {
+                    l.add(hn as usize, f);
+                    l.add(i1 as usize, f * alpha);
+                    l.add(i2 as usize, f * beta);
+                    l.add(i0 as usize, f * gamma);
+                }
+            }
+        }
+        let Some((acc0, exact0)) = snapshot else {
+            return;
+        };
+        let res = if residual_on() {
+            self.residual_self_pass(found, &split)
+        } else {
+            vec![None; found.len()]
+        };
+        let with_res: Vec<Vec3> = found
+            .iter()
+            .zip(&first)
+            .zip(&res)
+            .map(|((x, &f), r)| match r {
+                Some(r) => f + x.4 * *r,
+                None => f,
+            })
+            .collect();
+        let guard = self.friction_guard_pass(found, &with_res);
+        self.contact_acc = acc0;
+        self.contact_exact = exact0;
+        for (j, &(hn, [i0, i1, i2], [alpha, beta, gamma], _, n)) in found.iter().enumerate() {
+            let mut f = with_res[j];
+            if let Some(g) = guard[j] {
+                f = f + g;
+            }
+            if let Some(p) = self.self_contact_parts.as_mut() {
+                let extra = [res[j].map_or(Vec3::ZERO, |r| n * r), guard[j].unwrap_or(Vec3::ZERO)];
+                for (i, w) in [(hn, 1.0f32), (i1, -alpha), (i2, -beta), (i0, -gamma)] {
+                    p[i as usize][2] += extra[0] * w;
+                    p[i as usize][1] += extra[1] * w;
+                }
+            }
             self.add_contact(hn as usize, f);
             self.add_contact(i1 as usize, -(f * alpha));
             self.add_contact(i2 as usize, -(f * beta));
@@ -4195,11 +4264,6 @@ impl ExplicitBeams {
                 l.add(i1 as usize, f * alpha);
                 l.add(i2 as usize, f * beta);
                 l.add(i0 as usize, f * gamma);
-            }
-        }
-        if self.dissipative_contact {
-            for _ in 0..residual_passes() {
-                self.residual_self_pass(found, &split);
             }
         }
     }
@@ -4218,7 +4282,82 @@ impl ExplicitBeams {
     /// the active hits only were measured to over-stop: +0.23 J of self-contact
     /// work in a tenth of the 58 km/h wall). No friction and no position step (the
     /// first pass's). All found from the sums before any is added (order free).
-    fn residual_self_pass(&mut self, found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)], split: &[u32]) {
+    /// §37.1's work guard over the step's two-body self hits, after the residual
+    /// pass. A hit's force t (its first-pass force with its residual, `first`) is
+    /// judged at the pair's realised mean velocity over the step: the forces now
+    /// (the staging sums with the residual's) on the nodes' own masses. Its work is
+    /// W(s) = s·A + s²·B, with
+    /// * A = t·(2v + h·a′), a′ the pair's relative acceleration without t;
+    /// * B = h·|t|²·inv, inv the nodes' own inverse masses.
+    ///
+    /// Where W(1) > 0, the force is scaled to the root s = −A/B (0 if A ≥ 0), and
+    /// (1 − s)·t is taken back from the pair (returned per hit). The first pass's
+    /// caps judge each hit at its own predicted velocity with split masses; hits
+    /// sharing nodes then did +1–2 J of friction work in a tenth at rest. A force
+    /// that does positive work moves the pair the way it pushes, so scaling its
+    /// normal part lets nothing in. Every guard is found from the same sums before
+    /// any is applied (order free, momentum-exact).
+    fn friction_guard_pass(
+        &self,
+        found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)],
+        first: &[Vec3],
+    ) -> Vec<Option<Vec3>> {
+        let mut out = vec![None; found.len()];
+        if !friction_guard() {
+            return out;
+        }
+        let now: Vec<Vec3> = self.forces_now();
+        let acc = |i: u32| {
+            let n = &self.nodes[i as usize];
+            if n.has(NODE_IMMOVABLE) {
+                Vec3::ZERO
+            } else {
+                now[i as usize] / n.mass
+            }
+        };
+        let im = |i: u32| {
+            let n = &self.nodes[i as usize];
+            if n.has(NODE_IMMOVABLE) {
+                0.0
+            } else {
+                1.0 / n.mass
+            }
+        };
+        for (j, (&(hn, [i0, i1, i2], [alpha, beta, gamma], _, _), &t)) in
+            found.iter().zip(first).enumerate()
+        {
+            if t == Vec3::ZERO {
+                continue;
+            }
+            let node = &self.nodes[hn as usize];
+            let (n0, n1, n2) = (
+                &self.nodes[i0 as usize],
+                &self.nodes[i1 as usize],
+                &self.nodes[i2 as usize],
+            );
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let a = acc(hn) - (acc(i1) * alpha + acc(i2) * beta + acc(i0) * gamma);
+            let inv = im(hn)
+                + crate::explicit_contact::two_body_inverse_mass(
+                    [im(i1), im(i2), im(i0)],
+                    [alpha, beta, gamma],
+                );
+            let a_rest = a - t * inv;
+            let aa = t.dot(v + v + a_rest * STEP);
+            let bb = STEP * t.dot(t) * inv;
+            if aa + bb > 0.0 && bb > 0.0 {
+                let s = if aa < 0.0 { (-aa / bb).min(1.0) } else { 0.0 };
+                out[j] = Some(t * -(1.0 - s));
+            }
+        }
+        out
+    }
+
+    fn residual_self_pass(
+        &mut self,
+        found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)],
+        split: &[u32],
+    ) -> Vec<Option<f32>> {
         let now: Vec<Vec3> = self.forces_now();
         let acc = |i: u32, n: &Node| {
             if n.has(NODE_IMMOVABLE) {
@@ -4252,8 +4391,10 @@ impl ExplicitBeams {
                 k as f32 / n.mass
             }
         };
-        let mut forces = Vec::with_capacity(found.len());
-        for (&(hn, [i0, i1, i2], [alpha, beta, gamma], _, n), &(a, x, on)) in found.iter().zip(&drive) {
+        let mut out = vec![None; found.len()];
+        for (j, (&(hn, [i0, i1, i2], [alpha, beta, gamma], _, _), &(a, x, on))) in
+            found.iter().zip(&drive).enumerate()
+        {
             if !on {
                 continue;
             }
@@ -4272,29 +4413,39 @@ impl ExplicitBeams {
             let m = 1.0 / inv;
             let r = -(a * m) - x * m / STEP;
             if r > 0.0 {
-                forces.push((hn, [i0, i1, i2], [alpha, beta, gamma], n * r));
+                out[j] = Some(r);
             }
         }
-        for (hn, [i0, i1, i2], [alpha, beta, gamma], f) in forces {
+        // (Into the staging sums, read by the guard.)
+        for (j, &(hn, [i0, i1, i2], [alpha, beta, gamma], _, n)) in found.iter().enumerate() {
+            let Some(r) = out[j] else { continue };
+            let f = n * r;
             self.add_contact(hn as usize, f);
             self.add_contact(i1 as usize, -(f * alpha));
             self.add_contact(i2 as usize, -(f * beta));
             self.add_contact(i0 as usize, -(f * gamma));
-            if let Some(l) = self.contact_force.as_mut() {
-                l.add(hn as usize, f);
-                l.add(i1 as usize, f * alpha);
-                l.add(i2 as usize, f * beta);
-                l.add(i0 as usize, f * gamma);
-            }
         }
+        out
     }
 }
 
-/// §37's residual passes after a step's two-body hits (1; `RESIDUAL_PASSES`
-/// overrides it, a measurement switch: 0 none; the GPU runs one). Measured on
-/// sedan1 (51 km/h wall, at rest 8–12 s, self-contact work per second): none
-/// 800 J sloshed against the steps, one 25–50 J; two and three no steadier and
-/// three did +0.3 J in a tenth beyond the steps' allowance.
+/// §37.1's friction guard (on; `FRICTION_GUARD=0`, a measurement switch: off).
+pub fn friction_guard() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var("FRICTION_GUARD").is_ok_and(|v| v == "0"))
+}
+
+/// §37.1's residual pass (on; `RESIDUAL_PASSES=0`, a measurement switch: off).
+/// Measured on sedan1 (51 km/h wall, at rest 8–12 s, self-contact work per
+/// second): none 800 J sloshed against the steps, one 25–50 J; two and three no
+/// steadier and did positive work in a tenth (Jacobi over-stops where hits share
+/// nodes with conflicting normals).
+pub fn residual_on() -> bool {
+    residual_passes() > 0
+}
+
+/// The residual passes vehicle contact's CPU measurement runs (`RESIDUAL_PASSES`,
+/// 1).
 pub fn residual_passes() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *N.get_or_init(|| {
@@ -4302,6 +4453,7 @@ pub fn residual_passes() -> usize {
             .ok()
             .and_then(|x| x.parse().ok())
             .unwrap_or(1)
+            .min(1)
     })
 }
 

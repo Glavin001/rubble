@@ -439,7 +439,137 @@ Lossless paths not yet taken:
 - contact groups' partitions sized by the members' node counts;
 - the plan's colliders binned per window;
 - the contact module's cold Metal compile (about 62 s for the 428 KB module, past Chrome's
-  GPU watchdog): split into smaller modules.
+  GPU watchdog): split into smaller modules (measured in §8.3: 85–97 s cold now, 44–49 s
+  split; blocked by a Metal codegen dependence on dead code).
+
+### 8.3 Round 2 (E1), 2026-11-06
+
+**Coupling: workgroup copies and ranges** (eceb7bc3, lossless). The probe's ablation
+(`EV_ABLATE`, `EB_ABLATE` bits 8192 the bodies' integration, 16384 the spheres, 32768
+the count, 65536 the node phase's proxy contact; time only) at 128 cars after the
+strikes put the coupling's cost in the bodies' integration first: each body's lane
+walked every proxy shape (an unbroken house is one body with up to ~100 chunk
+colliders) with dependent loads of the coupling header on every shape record. The
+changes:
+
+- the coupling header's words copied to workgroup memory once a frame (`coupleBegin`);
+- each shape's step reaction a lane a shape (`cplReactBy`), then each body sums its
+  shapes' terms from workgroup memory in shape order; a body scans only the shape
+  range the plan writes in its record (`cpl_plan`, the body record's (1/I, w) word);
+- the per-step proxy spheres in workgroup memory (`gsCpl`, up to 256 shapes);
+- the count pass leaves each node's first and last inside shape (up to 1024 nodes),
+  and the node phase scans only that range;
+- a small contact group's members coupled side by side (`vvPartLanes` lanes each)
+  instead of one after another.
+
+All of it sits behind the coupling header's bit 2 (`set_coupling_workgroup_cache`).
+`the_coupling_workgroup_copies_are_bit_exact` (engine-world) compares frames with it
+on and off from one snapshot, every state word. The new `explicit_frame_dump` example
+compares a build against another across processes from one saved state: base and
+branch, 64 cars after 150 steps, are equal in every state word. Metal (Slang to MSL)
+miscompiled one form, an if/else holding two loops over shared accumulators (the box
+in `metal_coupled_sedan_into_a_rigid_box_matches_cpu` never moved). The split path is
+now its own function behind an early return, and Metal parity passes.
+
+Probe at 128 beam-tyre cars, 120 Hz, after 150 steps (the frame alone, median):
+
+| Probe setting | Base | Branch |
+|---|---|---|
+| As shipped | 9.39 ms | 7.31 ms |
+| Vehicle contact off (the coupling's cost) | 5.10 ms | 3.40 ms |
+| Coupling and contact off | 1.43 ms | 1.58 ms |
+
+**The contact module split: measured, not landed.** Cold compile in Chrome
+(`explicit-wgsl-check.mjs`, `EXPLICIT_WGSL_COLD=1`: each module's entry renamed with a
+nonce, so neither Chrome's cache nor the driver's can serve it; headless, M3 Max):
+
+| Module | Base | With the split (e3db9c96) |
+|---|---|---|
+| `explicit_beams_contact` (256 / 512 lanes) | 85 / 94 s | 44 / 46 s |
+| `explicit_beams_contact_aero` (256 / 512 lanes) | 97 / 88 s | 48 / 49 s |
+| `explicit_beams_contact_big` (the new module, groups of more than four) | – | 13–18 s |
+| `explicit_beams_solo` (unchanged) | 12 s | 12 s |
+
+A further split (the solo vehicles out of the contact module, the small groups'
+module alone 15 s) would serialise the solo and group dispatches. It is not taken.
+
+The split is backed out (8d067071). With the large-group path
+(`contactMemberStep`, `vvPass`) removed from the module that steps groups of at
+most four, five wgpu GPU parity tests fail deterministically:
+- `two_body_contact_steps_like_the_cpu` (0.19029114 m, every run);
+- `two_sedans_rear_end_match_cpu`;
+- `groups_of_three_and_four_bitwise`;
+- `sedans_head_on_and_t_bone_bitwise`;
+- `driving_into_a_parked_car_with_a_plain_car_beside_bitwise`.
+
+That path never runs for those groups. What was found:
+
+- Removing either function alone passes; removing both fails.
+- The two modules' WGSL, identifiers normalised, differ only by the never-taken
+  `else { vvPass(...) }` and the functions only it calls. The workgroup variables
+  are the same set.
+- naga's MSL of the two (naga 30.0.1, the bounds checks and workgroup
+  zero-initialisation wgpu uses) also differs only by that branch, the dead
+  functions and renamed loop counters.
+- It is not fast math. With wgpu-hal patched locally to compile with
+  `MTLCompileOptions.fastMathEnabled = false`, the failure is the same,
+  0.19029114 m.
+- Delaying odd lanes at the start of `vvPassSmall` (about 2,000 loads, no value
+  changed) in the passing module leaves it passing: no sign of a timing race there.
+- Native Metal from Slang's MSL (`engine-metal`) passed its rear-end parity with
+  the split.
+
+So the difference arises in Apple's Metal compiler from naga's MSL, sensitive to
+code outside the path that runs. A Chrome (Tint) run of the same WGSL against the
+CPU would confirm it, but needs a GPU-against-CPU contact page that does not exist
+yet. Until then, any edit to the frame kernel, dead code included, can change the
+small-group path's results. The parity tests above catch it.
+
+Draft report (Apple Feedback Assistant, not filed): "A compute kernel (about
+1 MB of MSL, from naga 30) gives different results for one code path when an unrelated function is
+removed from the module, a function that is never called on that path at run time.
+MSL otherwise identical (diff attached); fast math off does not change it; M3 Max,
+macOS 14.4. Repro: engine-webgpu `explicit_contact_gpu`
+`two_body_contact_steps_like_the_cpu` with `EB_VV_SMALL_ONLY` (Rubble e3db9c96)."
+
+**The vehicle–vehicle pair cost: design review** (for the ablation when the GPU is
+free; `EB_ABLATE` bits 131072 the small pass's triangles against candidates, 262144
+its candidate gathering, 524288 its levels, 512 the whole pass). A pair is a contact
+group of two: one workgroup, 128 lanes a member. Per step it runs the member step
+(the node and beam phases at half width, about ten barriers), then `vvPassSmall`.
+Before this round that pass took up to eight barriers on every step:
+- the two-body snapshot;
+- the partner scans;
+- the throttles and candidates;
+- the triangles against candidates;
+- one per level (two for a pair).
+
+At 128 cars the whole pass was about 2.9 ms of the 3.7 ms that vehicle contact adds
+(ablation 512, coupling off: 5.40 to 2.57 ms). The options, each lossless:
+
+1. **Early out when no owner was offered a partner** (taken; tested bit for bit by the
+   wgpu suites against the frozen reference). Groups form from frame-bound overlap
+   with a margin, so a pair is a group for many steps before its members' boxes
+   overlap. Then nothing below the scans lists, tests or hits anything. The pass now
+   decides after the scans (one barrier) and skips the snapshot, the throttle and
+   candidate phase, the triangle phase and the levels with their barriers. An
+   owner's fast-approach reset still runs the phases. Expected: most of the pass's
+   cost on the steps before contact. In the crash town that is most steps of
+   approaching pairs, an estimated 1 to 2 ms of the 2.9 at 128 cars.
+2. **The candidate gathering per owner side by side.** Today the owners go one after
+   another across all lanes. Splitting the lanes by owner, as the member step does,
+   halves that phase's serial depth for a pair. The candidates' order within an
+   owner's run follows an atomic counter either way, and the hits are applied in a
+   canonical order (`vvApplyOrdered`). Expected: a fraction of the 262144 ablation's
+   share.
+3. **Levels.** A pair's two owners touch each other's nodes, so their hits apply in
+   two levels: an inherent dependency, so no change.
+4. **The member step at full width.** A 512-lane contact module gives each member
+   256 lanes. Round 1 measured no change fleet-wide at 64 cars. Re-measure on the
+   pair-dominated probe before deciding.
+5. **Broad phase.** Groups come from frame bounds grown by the contact margin over the
+   frame's steps. A tighter per-step overlap test is already the scans' job, so
+   nothing to gain beyond the early out.
 
 ## 9. Remaining
 

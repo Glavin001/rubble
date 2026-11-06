@@ -6,6 +6,7 @@
 //!
 //!   explicit_frame_dump save <cars> <steps before> <state file>
 //!   explicit_frame_dump run <cars> <state file> <out file> [frames]
+//!   explicit_frame_dump time <cars> <state file> [repeats]   (needs RUBBLE_GPU_TIMING=1)
 //!
 //! (EV_HZ and EV_RAYCAST as explicit_vehicles_bench; bounded: perl -e 'alarm 600; exec @ARGV'.)
 
@@ -82,6 +83,23 @@ fn main() -> anyhow::Result<()> {
             }
             std::fs::write(&args[3], out)?;
             println!("{frames} frames of {steps} steps from {}: {}", args[2], args[3]);
+        }
+        "time" => {
+            // GPU ms per frame (its own pass timestamps), `reps` x 3 frames from the state.
+            let reps: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(9);
+            let x = w.explicit_vehicles_mut().unwrap();
+            let snap = x.snapshot_from_bytes(&std::fs::read(&args[2])?);
+            assert!(x.enable_frame_timing(64));
+            let mut t = Vec::new();
+            for _ in 0..reps {
+                x.restore(&snap);
+                x.request_contact_replan();
+                x.frame(steps);
+                x.wait();
+                t.extend(x.frame_times_ms());
+            }
+            t.sort_by(f64::total_cmp);
+            println!("frame ms median {:.3} min {:.3} max {:.3} (n {})", t[t.len() / 2], t[0], t[t.len() - 1], t.len());
         }
         _ => anyhow::bail!("usage: explicit_frame_dump save <cars> <steps> <file> | run <cars> <file> <out> [frames]"),
     }
