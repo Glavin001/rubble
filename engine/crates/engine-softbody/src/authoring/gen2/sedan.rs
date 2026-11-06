@@ -306,6 +306,11 @@ pub fn sedan() -> Car {
         c.fan(fwlo, &[lo[3], hi[3]], Role::Rail, body);
         c.fan(fwmid, &[hi[3], lo[3]], Role::Rail, body);
         c.beam(fwlo, fwmid, Role::Firewall, body);
+        // Torque box: the rail's end braced to the sill and onto the floor's
+        // side member, so the kick-down at the dash cannot fold.
+        let (si0b, sob0b, sot0b, fs1b) = (g(&c, "si0"), g(&c, "soB0"), g(&c, "soT0"), g(&c, "fs1"));
+        c.fan(lo[3], &[si0b, sob0b, fs1b], Role::Sill, body);
+        c.fan(hi[3], &[si0b, sot0b], Role::Sill, body);
         // Apron (upper load path) to the radiator support and the cowl.
         let apr: Vec<usize> = ["apr0", "apr1", "twr", "apr2", "cowlO"]
             .iter()
