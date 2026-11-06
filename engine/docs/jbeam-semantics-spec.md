@@ -1262,6 +1262,54 @@ centre of mass): 965 kJ at impact, 420 kJ at 0.5 s, 374 kJ at 1.0 s, 367 kJ at
 stiffness, with no plastic forks. Whether that is plausible for a forklift is
 open.
 
+### 29.1 Community cars: CCF, Gavril Vertex, ETK K-series (2026-11-06)
+
+Three full community cars with flexbodies (B3), local only (`RUBBLE_JBEAM_COMMUNITY`,
+the folder holding the mods; never committed): the 2020 Hirochi CCF (`thw_ccf2`,
+`f4_sport_M.pc`), the Gavril Vertex NA2 (`innocent_gavril_vertex`), the 1994 ETK
+K-series (`etkk_lucasbe`, `kr6.pc`). Their tyres, brake pads and bulbs are BeamNG's
+shared `common` parts, not local: **wheel, brake and bulb slots are ignored**, and the
+cars run on Rubble's raycast wheels (`JbeamWheels::Raycast`), or on their hubs
+(pressure wheels with `hasTire` false) for the crash scenes. Census: no unsupported
+physics feature (couplers §7.1 were the last); out of scope: the powertrain and
+hydro inputs (§31).
+
+`jbeam_accept` (CPU, raycast wheels, drag off), rest 4 s then a rigid wall at 56 km/h
+for 1.5 s:
+
+| car | nodes / beams | at rest 4 s | wall: broken / bent, deform groups, KE left (of the impact's) |
+|---|---|---|---|
+| CCF | 635 / 4,101 | 0 broken, 0 bent, KE 0.1 J, 0.13 m/s | 144 / 493, 11 of 33, 5.8 kJ (177 kJ) |
+| Vertex | 519 / 3,407 | 0, 0, 0.0 J | 26 / 472, 13 of 41, 5.8 kJ (160 kJ) |
+| ETK | 467 / 2,873 | 0, 0, 0.5 J, 0.15 m/s | 2 / 359, 6 of 18, 7.1 kJ (172 kJ) |
+
+The CCF tears its front fascia off (its bumper break groups), and a piece lands well
+to the side in the browser crash lab: **open** whether that is the content's light
+fascia or too much energy in the tear.
+
+**Through the `.truck` export the same content does not rest.** The ETK on raycast
+wheels through `desc_to_truck` (RoR's rules): 11 broken, 99 bent and a node at
+9.8 m/s within 1 s (JBeam mode: 0, 0, 0.15 m/s). That is what tore the browser drive
+yard's parked ETKs and sent cars past their contact frame bounds; the page now runs
+JBeam content in JBeam mode by default (`?jbeamMode=truck` opts back).
+
+**The full-size SUV and the boathauler trailer still do not rest (open, content past
+the step's limit).** On raycast wheels and on their hubs alike:
+* `fsw_fullsizesuv` (`mid-sport.pc`): nodes at 5–7 m/s for good, 6 beams bent at
+  spawn. Its rear axle node `rx2l` (4.7 kg) carries eight 9.4 MN/m beams to the
+  frame and an 18.8 MN/m axle beam: a Nyquist-rate oscillation (the force flips sign
+  every step and grows about 5 % a step from 50 ms). The spring modes' power
+  iteration gives ω·h = 2.07 (node `b1rr`), past the explicit step's limit of 2.
+* `boathauler` (`gooseneck.pc`): its leaf-spring axle nodes (`x35*`, `x45*`, 6.2 kg,
+  about 45 MN/m of plain beams each, plus the LBEAMs of §24) oscillate at the Nyquist
+  rate at 20 m/s (position ±5 mm), KE 23 kJ steady; the plain springs alone give
+  ω·h = 1.45, the LBEAMs' arm terms take it past 2.
+Both run in BeamNG at the same 2 kHz, so its integrator or node handling differs from
+the explicit solver's in a way its documentation does not give. Not fixed: every rule
+that would rest them (mass scaling, softening the springs, an implicit pass on the
+stiff subgraph) changes the content's physics, which needs the user's decision
+(AGENTS.md).
+
 ## 30. GPU layout of Part II and verification
 
 * Params words 64–68: `extIndex` (gLists, per beam its extension + 1), `extBase`
