@@ -691,6 +691,35 @@ resolution.
 
 ### Where we differ from real material, and why
 
+**Revised mass rule (2026-11-06, the BeamNG node pattern).** A node's
+mass is the real mass of the structure it represents: its Voronoi region
+at the structural resolution. This is ordinary lumped-mass discretisation,
+not moved mass. A contact-only node carries its own small real share: the
+sheet strip along its skin edges, half of each edge's length × 50 mm
+(`CONTACT_STRIP`, a Choice). The rest of its fine area goes to the
+structural nodes it is tied to. The reason: a structural node at the BX's
+spacing stands for the sheet around it, and lumping that sheet anywhere
+else would misplace the mass. The test (`one_tier_masses_are_real_…`)
+asserts, against the real car:
+- the total (the kerb mass, 0.05 kg);
+- each part with its pane against the Accord's measured masses (DOT HS
+  811 666 §5.10), within 1 %;
+- the centre of mass 1,001–1,248 mm behind the front axle. That band is
+  exact: NHTSA measured 1,147 mm at a 1,578 kg test weight (NCAP side
+  pole, test 7077, the Vehicle Crash Test Database), and the 128 kg above
+  the kerb lies somewhere between the axles. sedan1 is at 1,154 mm, 516 mm
+  up, and +40 mm across (the driver's named mass is on the left);
+- the three principal moments (607, 2,298 and 2,597 kg·m², about the
+  roll, pitch and yaw axes) within 1 % (a Choice) of the 0.24 m lattice's.
+  The Accord's measured inertia is not openly published (NHTSA's measured
+  inertial parameters, SAE 2021-01-0970, are paywalled), so the
+  real-car tolerance is open. The pattern moves the moments by under
+  0.1 %.
+
+Every node's mass still equals its `local` (nothing is moved to meet the
+bound). The text below is the rule before this revision; it holds for
+every node outside the pattern.
+
 **Masses are the real local mass. No mass is moved to meet the step's
 bound.** `one_tier_masses` gives every node what is physically there.
 
@@ -2280,6 +2309,270 @@ and High. Both tests still fail, now on the newer visual binding's
 `ALT_BIND_MAX` check: 23 rear side-glass vertices, such as `glass_side_r_r`
 at (−0.32, 1.41, 2.29). That check is the visual agent's, and they have the
 report.
+
+### BeamNG node pattern (2026-11-06, built behind a switch, not adopted)
+
+**Decision: built for the doors and the bonnet behind `BEAMNG_NODES`, measured, and
+not made the default.** The doors gain on `p` and `o`. Their panel ripple doubles,
+the bonnet takes `n`'s restitution just under its band, and the body gains nothing
+with its members' stations as they are. The 0.24 m lattice stays the default.
+
+**What is built** (`vehicle::beamng_contact_nodes`, `beamng_node_pass`):
+- **The switch.** `BEAMNG_NODES=door`, `door,bonnet`, or any comma list of part
+  prefixes. `1` means doors and bonnet. Unset or `0`, sedan1's `.truck` is as
+  before.
+- **Structural rings.** A part's structural rings are its end rings plus the
+  rings nearest `ceil(span / 0.5 m)` even stations (`BEAMNG_SPACING`, 0.5 m, the
+  middle of the BX's 0.45–0.55 m: a Choice). The front door has 3 structural
+  rings 0.37 m apart, the rear door 3, and the bonnet 3 or 4.
+- **Contact-only nodes.** The part's shell nodes on the rings between are
+  contact-only (`Shell::contact`), each with at least one structural neighbour.
+  A member's station never snaps onto one. On the body, a candidate that a
+  station snaps onto stays structural.
+  - The doors' rails (beam, belt, mid) take their stations at `BEAMNG_SPACING`,
+    so their stations land on the structural rings.
+- **The structure over them.**
+  - A member's lane chord that runs through contact nodes becomes one chord
+    between the structural nodes. It keeps its member's material and the
+    lane's steel area.
+  - The sheet becomes a coarse lattice between consecutive structural rings:
+    row edges and both diagonals, at most `BRIDGE_MAX` (0.75 m).
+  - A two-bay shell bend on the same pair takes the edge's material, so no
+    beam is counted twice.
+- **Ties.** Every spring beam at a contact node is a tie: the original sheet
+  edges, the lane chords' halves and the lane webs to the inner chord. Ties stay
+  out of the section cuts, so a section's yield is its structural beams'.
+  - Body dashpots from structural nodes go to structural nodes.
+- **A8 lanes.** The outer surface keeps every 0.24 m node. A pole meets a
+  contact node, and its ties carry the load to the structure.
+
+**The mass rule (revised, `one_tier_masses`).** A node's mass is the real mass of
+the structure it represents: its Voronoi region at the structural resolution.
+This is ordinary lumped-mass discretisation, not moved mass.
+- A contact node keeps the sheet along its skin edges: half of each edge × 50 mm
+  (`CONTACT_STRIP`, a Choice: a real flange strip's width).
+- The rest of its fine Voronoi area goes evenly to its structural neighbours on
+  the skin.
+- Each part's area, and so its mass, is unchanged, and every node's mass is
+  still its `local` mass.
+- *Reason.* The step's bound caps a beam at k ≈ G·m/(h²·n). The structural
+  nodes must carry the sheet they represent at the structural spacing, or a
+  coarse lattice gains nothing. The contact node's own share sets only its
+  ties' bound.
+
+**The mass test** (`one_tier_masses_are_real_and_beams_soft_only_at_the_bound`)
+now asserts, against the real car:
+- **Total mass:** the kerb mass, 1,450 kg, within 0.05 kg.
+- **Part masses:** each door, the bonnet, the boot lid and the fenders against
+  DOT HS 811 666 §5.10, within 1 %.
+- **Centre of mass, across the car:** within 5 mm of the centre line.
+- **Centre of mass, along the car:** within 1,001–1,248 mm behind the front
+  axle.
+  - NHTSA measured the 2011 Accord LX sedan at 1,147 mm behind the front axle,
+    at a 1,578 kg test weight (NCAP side pole, test 7077, Vehicle Crash Test
+    Database).
+  - The 128 kg above kerb lies somewhere between the axles. The kerb CG is
+    therefore (1578·1147 − 128·x)/1450 for x in 0–2.80 m: exact from the
+    measured values.
+- **Principal moments of inertia:** the Accord's measured moments are not openly
+  published (NHTSA's IPMD listings, SAE 2021-01-0970, are paywalled). The test
+  holds the pattern's moments within 1 % (a Choice) of the 0.24 m lattice's
+  (607, 2,298 and 2,597 kg·m²). That checks the lumping, not the car.
+- **Measured:** CG 1,154 mm behind the front axle (1,153 with the pattern),
+  516 mm up, 40 mm to the left (the driver's mass). The moments move under
+  0.1 %.
+- **Still failing (pre-existing):** the test's later "beams softer than the
+  bound" check fails with the pattern off too. Two beams sit at a node whose row
+  is 0.947, just under its 0.95 threshold.
+
+**Per part** (`topology_census_solver`, Medium; a part's structural row excludes
+its contact nodes and their ties):
+
+| Part | Built: nodes, mass p50, L p50, k·L p50, ε_y p50 | Pattern: structural + contact nodes, mass p50, L, k·L, ε_y | BX |
+|---|---|---|---|
+| doors (4) | 106, 0.96 kg, 0.30 m, 1.74e5 N, 2.11 % | 80 + 24 (0.34 kg), 1.17 kg, 0.34 m, **2.79e5 N**, 1.87 % | 6.5e5 N, 0.92 % |
+| bonnet | 26, 0.53 kg, 0.37 m, 1.07e5 N, 2.80 % | 16 + 10 (0.37 kg), 0.71 kg, 0.51 m, **1.67e5 N**, 1.79 % | 2.24e5 N, 5.51 % |
+| body (`body` in the list) | 592, 1.01 kg, 0.36 m, 2.14e5 N, 2.96 % | 513 + 79, 1.13 kg, 0.40 m, 2.13e5 N, 3.04 % | 7.92e5 N, 0.85 % |
+| boot lid, fenders (measured only) | 1.65e5 / 1.43e5 N | 2.60e5 / 2.35e5 N | 1.59e5 / 1.57e5 N |
+
+- **Doors.** k·L rises 1.6×; the gap to the BX falls from 3.7× to 2.3×. Their
+  three rails are the Accord's, 0.24 m apart, so the rows stay at the rails and
+  only the rings coarsen.
+- **Bonnet.** k·L rises 1.56×, to within 1.3× of the BX.
+- **Body.** No gain. Its k·L is its members' trusses, and their stations sit at
+  each member's own spacing (0.24–0.6 m), off the structural rings. With the
+  members' stations unconstrained (the first attempt), 65 stations became new
+  off-shell nodes and k·L fell to 1.93e5. Gaining on the body needs every body
+  member re-stationed on the structural rings: the large redesign.
+- **Boot lid and fenders.** These are already at the BX's k·L, so they are left
+  out.
+
+**Per reference** (Medium; the pattern on the doors, then on the doors and
+bonnet):
+
+| Reference (band) | Built | `BEAMNG_NODES=door` | `=1` (doors, bonnet) |
+|---|---|---|---|
+| p initial / intermediate / peak (≥ 10.0 / 15.6 / 28.4 kN) | 9.9 / 12.7 / 22.4 | **11.0** / 13.9 / 24.2 | 11.1 / 14.1 / 23.7 |
+| o residual (297–445 mm, 8 runs) | 288 (sd 14) | **299** (sd 6) | 290 (sd 11) |
+| g latch / door off (latch share inside 25.7–55.1 kN) | 43.9 / 54.7 | 44.0 / 64.5 | 45.2 / 52.1 |
+| q (4.48–5.32 ×) | 4.98 | | 4.94 |
+| r, s | pass | | pass |
+| n max crush (380–580 mm) | 635 | 635 | 642 |
+| n dynamic (620–750 mm) | 747 | 746 | 746 |
+| n t_m (63–76 ms) | 78.6 | 78.6 | 78.4 |
+| n peak (34–47 g) | 43.3 | 42.5 | 42.0 |
+| n b1 (22.9–39.2) | 22.0 | 22.1 | 21.8 |
+| n restitution (0.13–0.20) | 0.132 | 0.133 | **0.129** |
+| A8 at 30 km/h, Low and Medium (0 of 244) | 0, 0 | **0, 0** | 0 (Low) |
+| crash invariants (`CI_CARS=sedan1`) | 11 of 20 pass | 11 of 20 | 11 of 20 |
+| wall ripple from 0.5 s, doors (≤ 1 mm) | 1.9–3.0 mm | 4.5–6.9 mm | 5.6 mm (door_f_l) |
+| door panels' first mode ζ | 0.028 / 0.033 | 0.015 / 0.010 | 0.015 / 0.012 |
+| head-on lid / rear body (≤ 37 mm; ≤ 5 mm RMS) | 30.1 / 11.7 | 19.7 / 11.9 | 14.3 / 11.5 |
+| pole visual offset growth (≤ 20 mm) | 201 mm | 173 mm | |
+
+**A8 is not the risk it looked.** A contact node on its ties stops the pole in
+all 244 runs at both resolutions. Its lane ties keep the member's chord yield,
+and its webs to the inner chord give it inboard stiffness. Stiffer ties or a
+second contact row were not needed.
+
+**Why it is not the default.**
+- *Doors' ripple.* The doors' panel modes lose half their modal damping (ζ 0.028
+  → 0.015), so they ring 2× longer after the wall. The contact nodes' ties are
+  damped at the part's ζ on light nodes. The coarse lattice's stiffer beams on
+  heavier nodes raise ω_pair, so stiffness-proportional damping gives a low mode
+  less (`vehicle-test-strategy.md`, layer 1). Re-rating the body dashpots
+  structural-to-structural did not restore it. Open.
+- *Bonnet.* It takes `n`'s restitution to 0.129, just under its band (sd 0.004).
+- *Body.* It gives nothing until the members are re-stationed.
+
+**Not done this round:**
+- p's flange (the contact surface on the pillar face, and re-sizing the rigs for
+  the shut-face pin).
+- Hem rows on every panel edge.
+- `drive-check.mjs`, the BX column re-run, and MDB and `t` with the pattern.
+
+### BeamNG node pattern (2026-11-06, built behind a switch, not adopted)
+
+**Decision: built and measured on the doors, the bonnet and the body;
+kept behind `BEAMNG_NODES`, not the default.** On the doors it gains k·L
+(×1.6), p, o and t. But the doors' wall ripple roughly doubles and their
+modal damping halves. The body gains nothing until its members are
+re-stationed.
+
+**What is built** (`vehicle::beamng_contact_nodes`, `beamng_node_pass`):
+- `BEAMNG_NODES=door`, `door,bonnet`, `door,bonnet,body`, …;
+  `BEAMNG_NODES=1` is `door,bonnet`.
+- **Structural rings.** For each named part, its end rings plus the
+  rings nearest `ceil(span / 0.5 m)` even stations (`BEAMNG_SPACING`,
+  the BX's 0.45–0.55 m, a Choice). The part's nodes on the other rings
+  are contact-only (`Shell::contact`).
+  - The front door has structural rings at 2.41, 2.74 and 3.15, so 3
+    structural and 2 contact rings. The rear door has 3 and 1.
+  - The doors' rails take the same station spacing, so their stations land
+    on the structural rings. Members snap onto structural nodes only. On
+    the body, a contact candidate that a station snapped onto stays
+    structural.
+- **The structure between structural nodes.**
+  - A member's lane chord through contact nodes becomes one chord, with
+    its material and its lane's steel area.
+  - The sheet becomes a coarse lattice between consecutive structural
+    rings: rows and both diagonals, at most 0.75 m long (`BRIDGE_MAX`). An
+    existing two-bay bend there takes the edge's material (counted once).
+- **The contact-only nodes.** Every spring beam at a contact node is a tie,
+  so it stays out of the section cuts, and the cuts give the section's
+  yield to the structural chords. The A8 lanes stay at 0.24 m on the
+  outward faces through these nodes.
+- **Masses:** the revised rule above.
+- **Census:** `topology_census_solver` puts a part's contact nodes in
+  their own row (`door contact`). The part's row is then its structural
+  lattice.
+
+**Per part (Medium, census at the solver):**
+
+| Part | Before: nodes, mass, k·L, ε_y, springback | Pattern: structural nodes, mass, k·L, ε_y, springback; contact nodes | BX |
+|---|---|---|---|
+| doors (4) | 106, 0.96 kg, 1.74e5 N, 2.11 %, 10 % | 80, 1.17 kg, 2.79e5 N, 1.87 %, 9 %; 24 contact, 0.34 kg | 6.50e5, 0.92 %, 4 % |
+| bonnet | 26, 0.53 kg, 1.07e5 N, 2.80 %, 12 % | 16, 0.71 kg, 1.67e5 N, 1.79 %, 8 %; 10 contact, 0.37 kg | 2.24e5, 5.51 %, 22 % |
+| boot lid (measured only) | 16, 0.64 kg, 1.65e5 N, 1.75 % | 11, 0.75 kg, 2.60e5 N, 1.01 % | 1.59e5 |
+| fenders (measured only) | 20, 0.53 kg, 1.43e5 N, 2.15 % | 14, 0.64 kg, 2.35e5 N, 1.28 % | 1.57e5 |
+| body | 592, 1.01 kg, 2.14e5 N, 2.96 %, 13 % | 513, 1.13 kg, 2.13e5 N, 3.04 %, 13 %; 79 contact | 7.92e5, 0.85 %, 4 % |
+
+- **Doors: k·L ×1.6.** The doors govern p, o, g and t.
+- **The doors' rows across the panel stay at 0.24 m.** Their rails (the
+  intrusion beam, the mid rail and the belt) sit on three of the four
+  rows, and they are the Accord's structure.
+- **The bonnet: ×1.6.** It governs the lid invariants and n's front.
+- **The body gains nothing.** Its k·L is set by its members' box trusses,
+  whose stations keep their own spacing (0.24–0.6 m), so the shell's
+  contact rings take only 79 nodes. Filtering contact nodes out of the
+  body's snap pool made 65 stations new nodes off the shell, and k·L fell
+  to 1.93e5. Gaining on the body needs every body member re-stationed at
+  the structural spacing. That is the large step left.
+- **The boot lid and fenders** were already at the BX's k·L, so they are
+  left out of `1`.
+
+**Per reference (Medium; A8 at Low and Medium):**
+
+| Reference (band) | Default | `BEAMNG_NODES=door` | `BEAMNG_NODES=1` (doors, bonnet) |
+|---|---|---|---|
+| p initial / intermediate / peak (≥ 10.0 / 15.6 / 28.4 kN) | 9.9 / 12.7 / 22.4 | **11.0** / 13.9 / 24.2 | 11.1 / 14.1 / 23.7 |
+| o residual (297–445 mm, 8 runs) | 288 (sd 14) | **299** (sd 6) | 290 (sd 11) |
+| g latch / door off (latch 25.7–55.1 kN) | 43.9 / 54.7 | 44.0 / 64.5 | 45.2 / 52.1 |
+| q (4.48–5.32 ×) | 4.98 | | 4.94 |
+| r, s | pass | | pass |
+| n max crush (380–580 mm) | 635 | 635 | 642 |
+| n dynamic (620–750 mm) | 747 | 746 | 746 |
+| n b1 (22.9–39.2) | 22.0 | 22.1 | 21.8 |
+| n t_m (63–76 ms) | 78.6 | 78.6 | 78.4 |
+| n e (0.13–0.20) | 0.132 | 0.133 | **0.129** (out) |
+| n peak (34–47 g) | 43.3 | 42.5 | 42.0 |
+| n apertures, A-pillar | in | in | in |
+| t leaked (of the striker's nodes) | 9 of 1,026 | **5** of 1,024 | |
+| A8 at 30 km/h (Low / Medium) | 0 / 0 of 244 | 0 / 0 of 244 | |
+| crash invariants (sedan1) | 11 of 20 | 11 of 20 | 11 of 20 |
+| wall ripple, doors (≤ 1 mm) | f_l 2.8, f_r 1.9, r_l 3.0, r_r 3.0 | 5.6, 6.0, 3.2, 4.6 | 5.6, 5.9, 6.5, 6.3 |
+| doors' first mode, ζ (front / rear) | 17.6 Hz 0.028 / 14.3 Hz 0.033 | 19.5 Hz 0.015 / 12.8 Hz 0.014 | the same |
+| bonnet first mode (17.7–41.5 Hz) | 19.2 Hz | 19.2 | 20.9 |
+| pole visual drift (≤ 20 mm) | 201 mm | 229 | 146 |
+| head-on lid vs rear body peak (≤ 37 mm) | 30.1 mm | 19.7 | 14.3 |
+| mass, CG, moments | as above | under 0.1 % | under 0.1 % |
+
+**A8 holds.** The contact nodes are 0.34 kg on 3–4 ties and are at the
+bound. The lane ties keep the member's chord material and stay out of the
+cuts, so they are strong. Neither stiffer ties nor a second contact row was
+needed.
+
+**Why not adopted.**
+- **The doors' modal damping halves** (ζ 0.028–0.033 → 0.010–0.015), and
+  their wall ripple doubles. The ripple was already past its 1 mm band.
+- Rating the body dashpots between structural nodes only (tried, not
+  kept) left door ζ at 0.010–0.015. The cause is not yet found. The
+  stiffness-proportional beam damping on the coarse lattice is the
+  candidate.
+- p still misses its intermediate phase and peak.
+
+**Open, in order:**
+1. **The doors' damping on the coarse lattice.** Then re-judge the doors
+   pattern as the default: it fixes o, raises p and t, and keeps A8.
+2. **The body.** Re-station every body member at the structural spacing,
+   so the shell's structural rings are the members' stations. This is
+   what the body's ×3.7 needs.
+3. **p's flange.** The door end should slide along a 50 mm strip: pillar
+   face collision triangles, or long bearing beams. Then re-size the
+   hardware rigs for the shut-face pin. Not started.
+4. **Hem rows on every panel edge.** Not started. The visual agent is
+   waiting for them.
+5. `drive-check.mjs --stock --car showcase1` is not run. The wasm build
+   takes the default, which is unchanged.
+
+The default `.truck` is unchanged: with `BEAMNG_NODES` unset the contact
+set is empty and every path is as before.
+
+**Pre-existing, found on the way:**
+`one_tier_masses_are_real_and_beams_soft_only_at_the_bound` fails at this
+merge with or without the pattern. Two body beams near (0.01, 1.42, 2.23)
+are softer than the bound requires, with rows 0.947 just under the test's
+0.95.
 
 ## Hardware, bearing and sheet masses (2026-11-05)
 
