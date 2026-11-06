@@ -1921,6 +1921,142 @@ All 32 of `n`'s ledgers close. The non-ignored `crash_invariants` tests pass,
 real door's inner panel, the beam's end brackets and the belt have to carry
 it: the next round.
 
+### Steel grades, lid seals and p's door (2026-11-05, latest)
+
+**Decisions, in order.**
+
+1. **The side reinforcements are the Accord's measured steel** (`ACCORD_REINFORCEMENT`,
+   DP780; `ACCORD_GRADES=0` measures the old grades).
+   - Before, the A- and B-pillar reinforcements were hot-stamped 22MnB5 and the
+     rocker's DP980, "from fig. 113". Fig. 113 is the report's lightweight
+     design's material table, not the baseline car's.
+   - The baseline's measured data: Honda gives the body structure as 48 % HSS
+     by mass, mean tensile strength 412 MPa (DOT HS 811 666 §4.4.2.1). With
+     the rest mild steel, the HSS averages about 566 MPa tensile: 590–780-class
+     dual-phase, no press-hardened parts. The reinforcements are the strongest
+     of that class, DP780 (a Choice).
+   - The 2009 Accord's own IIHS roof result is now in
+     `crash-reference-targets.md`: SWR 3.87 (SWR0936, quoted in §4.8.5). The
+     test's band (4.48–5.32, compact sedans) is kept.
+2. **Lid seals bear elastically** (one tier; `LID_SEAL_SET=1` measures the old
+   yield). An EPDM seal takes no set. The lid's own bending had crushed the
+   seal beams plastically.
+3. **p's door, measured and not adopted.** The Accord's door frame and the shut
+   faces are built behind switches; neither passes p. Mechanism below.
+
+**Effect of 1 and 2 (Medium; after the solver's contact merge 64e7d1ef):**
+
+| | Before | Now | Band |
+|---|---|---|---|
+| q | 5.62 × | **4.98 ×** | 4.48–5.32 (Accord 3.87) |
+| o residual | 296 mm (sd 10) | 288 mm (sd 14) | 297–445 |
+| p initial / intermediate / peak | 10.0 / 14.3 / 27.7 kN | 9.9 / 12.7 / 22.4 kN | ≥ 10.0 / 15.6 / 28.4 |
+| g latch / door off | 40.2 / 64.2 kN | 43.9 / 54.7 kN | passes |
+| n max crush / dynamic / b1 / t_m / e / peak | | 635 / 747 mm / 22.0 / 78.6 ms / 0.132 / 43.3 g | 380–580 / 620–750 / 22.9–39.2 / 63–76 / 0.13–0.20 / 34–47 |
+| Rear third plastic, wall / head-on | 55 (worst 11 %) / 15 | 35 (worst 10 %) / 10 | 0 / 0 |
+| Lid against rear body, wall / head-on peak | 110 / 25 mm | 99 / 17 mm | ≤ 37 mm |
+| Boot lid / bonnet first mode | | **22.1 / 19.2 Hz** | 17.7–41.5 Hz |
+| Doors' first mode (front / rear) | | 17.6 / 12.7 Hz | report |
+
+- The grades leave n unchanged: the 56 km/h dynamic crush is 756 mm either way.
+- The lids' first modes are in the measured range on this build, both.
+  `lids_first_mode_in_the_measured_range` passes.
+- The non-ignored `crash_invariants` tests: 8 of 9 pass.
+  `detached_door_takes_its_edge` fails (1,204 / 93 joining triangles). It is
+  the visual binding, which the visual agent owns. This build's door pull
+  changed the door's flight.
+
+**p's door: what holds the door (probes `P_PATH=1`, `P_FLANGE=1`, `P_GEOM=1`).**
+
+`P_PATH` prints every 50 mm of ram travel:
+- the lateral force each door-to-body joint puts on the door, and its summed |force|;
+- how close each door member is to its yield;
+- how far in the door's hinge end, middle and lock end have gone.
+
+Findings, in the order found:
+- **The old beam was below the ram.** sedan1's front intrusion beam ran from
+  y 0.42 at the hinge to 0.62 at the lock. FMVSS 214's ram starts 127 mm above
+  the door's lowest point (y 0.50), so it met only the beam's lock end. The
+  boron × 5 belt and mid rail carried p.
+- **The Accord's beams run the other way** (fig. 163, 173: the thickness maps,
+  read as fractions of the door's height below the belt, a Choice within
+  about ±2 cm). Front door: 0.72 at the hinge end to 0.55 at the lock end.
+  Rear door: 0.64 to 0.56. The maps' gauges:
+
+  | Part | Front door | Rear door |
+  |---|---|---|
+  | Intrusion beam (tube) | 2.0 mm | 2.0 mm |
+  | Outer belt reinforcement | 0.6 mm | 0.8 mm |
+  | Inner belt reinforcement | 0.6 mm | 0.6 mm |
+  | Mid reinforcement | 0.5 mm | 0.5 mm |
+  | Inner panel | 0.8 mm, 1.5 mm at the hinge end (laser-welded blank) | 0.8 mm, 1.3 mm at the hinge end |
+  | Lock reinforcement | 0.9 mm | |
+  | Beam's hinge-end bracket | 1.2 mm | |
+
+  `ACCORD_DOORS=1` builds these: belt and mid as ladders whose chords are the
+  two strips (60 mm developed width, BH210: Choices), faces at their gauges.
+  `ACCORD_DOORS=beam` builds only the beams.
+- **The lock end was not held.** The door's last node row is the nearest ring
+  inside its outline, 0.10–0.12 m in. So its lock face stood one ring (0.16 m)
+  ahead of the B-pillar's section.
+  - Its flange was a node 0.1 m ahead of the pillar, on soft ties. It moved in
+    130 mm under 7 kN.
+  - The inner chord's 3 cm bearing slid through it as the door's end turned:
+    2–4 door ends were past their flange by 90–200 mm at 300–500 mm of ram.
+  - The door's lock end went in 136–239 mm while the B-pillar went 21–27 mm.
+- **Built, not adopted:**
+  - `FLANGE_REAL=1`: the flange ties and bearing at the flange strip's E·t·w/L,
+    capped by the bound.
+  - `FLANGE_GAP=<m>`: the flange's offset.
+  - `SHUT_FACES=1`: hem rings at each door's front and rear edge, 10 mm inside
+    its outline. The door frames' ends move onto them. The rail ends bear along
+    the car on the pillar beyond (`SHUT_BEAR`).
+
+| p (initial / intermediate / peak, kN) | Boron × 5 door | `ACCORD_DOORS=1` |
+|---|---|---|
+| as built | 10.0 / 14.3 / 27.7 | 6.2 / 10.3 / 19.7 |
+| `FLANGE_REAL=1` | | 6.3 / 10.5 / 22.3 |
+| `FLANGE_REAL=1 FLANGE_GAP=0.10` | 10.7 / 15.1 / 33.1 (before the grades) | 6.1 / 10.4 / 28.1 |
+| `SHUT_FACES=1` | 7.9 / 10.3 / 19.3 | 5.2 / 7.7 / 20.1 |
+| `SHUT_FACES=1`, with `SHUT_BEAR` | | 5.2 / 7.6 / 20.7 |
+| `DOOR_INNER=1` (with shut faces) | 6.9 / 11.3 / 18.6 | 6.3 / 6.9 / 14.6 |
+
+**What this says.**
+- With the shut faces the door's ends hold: the lock end is 41–45 mm in at
+  300 mm of ram, against 136–239 mm before.
+- The door's own members then reach 0.9 of their yields by 100 mm of ram, at
+  5–8 kN. With the Accord's stampings the door is strength-limited.
+- The real sections' mechanism estimate, by hand:
+  - beam: 2.1 kN·m;
+  - belt: 1.1 kN·m;
+  - mid rail: 0.9 kN·m.
+
+  Over the 0.95 m between faces that is about 17 kN pinned, or about 34 kN
+  with the ends fixed.
+- The end-fixity couple is the inner chord bearing along the car on the pillar,
+  plus the hinge's or latch's pull on the outer chord. On this lattice it
+  carries little: about 1 kN in the pillar bearing. The B-pillar's stations are
+  0.6 m apart, and its truss box (0.14 m) is wider than the 0.12 m between the
+  doors, so the door's end and the pillar's front face share one plane.
+- The shut faces cost elsewhere:
+  - q 4.40 (below its band);
+  - o 280 mm;
+  - g's door comes off at 111 kN (fails);
+  - `counts_per_resolution`'s build fails at another resolution.
+
+  So they stay a switch.
+- `FLANGE_GAP=0.10` passes the peak only because longer struts tolerate the
+  slide. It is not the flange's place, so it is not taken.
+
+**Open, in order:**
+1. The B-pillar's section at the doors' shut lines: its truss as wide as the
+   0.12 m between the doors, a station at each rail end's height, and the
+   flanges as the section's own nodes. Then `SHUT_FACES` with `ACCORD_DOORS=1`
+   again.
+2. The hem rows along the doors' bottom and window edges (rings give the
+   vertical edges only), and on the lids, fenders and fascias.
+3. The frontal: max crush 635 mm, b1 22.0, t_m 78.6 ms.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.

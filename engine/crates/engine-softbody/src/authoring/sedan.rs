@@ -2657,6 +2657,10 @@ pub fn sedan_one_tier() -> VehicleDef {
             m.kg_per_m = section_kg_per_m(&ACCORD_BUMPER_BEAM);
         }
     }
+    // The doors' shut faces at the doors' edges, over their pillars'
+    // flanges (built, not adopted: `SHUT_FACES=1` builds them, a
+    // measurement switch; `vehicle-authoring.md`, "p's door"): [`shut_faces`].
+    let shut = std::env::var("SHUT_FACES").is_ok_and(|v| v == "1");
     // The doors' frames as the 2011 Accord's (built, not adopted:
     // `ACCORD_DOORS=1` builds them, `=beam` only the intrusion beams; a
     // measurement switch, [`accord_doors`]).
@@ -2665,7 +2669,49 @@ pub fn sedan_one_tier() -> VehicleDef {
             accord_doors(&mut d, v == "1");
         }
     }
+    if shut {
+        shut_faces(&mut d);
+    }
     d
+}
+
+/// How far inside a door's outline its shut face's row of nodes lies (m):
+/// the hem, where the outer panel is folded over the inner's flange (a
+/// Choice: a hem is 8–12 mm wide).
+pub const HEM: f32 = 0.01;
+
+/// The doors' shut faces where a real door's are: at the door's edge, over
+/// the pillar it closes against.
+/// - **The hem rows.** A ring of the shell at each door's front and rear
+///   edge, [`HEM`] inside its outline (the shell's keys). Before, a door's
+///   last row of nodes was the nearest ring inside its outline, 0.10–0.12 m
+///   in: the drawn panel ran past its nodes, and the lock face stood one
+///   ring (0.16 m) ahead of the B-pillar's section, so the flange it bore on
+///   was a cantilever 0.1 m long that the door's end slid off in FMVSS 214
+///   (`vehicle-authoring.md`, "p's door").
+/// - **The frames' ends.** Each door rail's, beam's and face's ends at
+///   those rows: a real door's beam brackets and belt and mid reinforcements
+///   end on the inner panel's hinge and lock faces, which overlap the
+///   pillars' flanges.
+fn shut_faces(d: &mut VehicleDef) {
+    // (Front door 2.30–3.27, rear door 1.40–2.18: their outlines in
+    // [`sedan`].)
+    let edges: [(f32, f32); 4] = [(3.27, -HEM), (2.30, HEM), (2.18, -HEM), (1.40, HEM)];
+    for (z, inward) in edges {
+        d.stations.push(z + inward);
+    }
+    d.stations.sort_by(f32::total_cmp);
+    for m in d.members.iter_mut().filter(|m| m.name.starts_with("door_")) {
+        for p in m.path.iter_mut() {
+            for (z, inward) in edges {
+                // (A frame's end within 0.15 m inside that edge.)
+                let d_in = (p[2] - z) * inward.signum();
+                if (0.0..0.15).contains(&d_in) {
+                    p[2] = z + inward;
+                }
+            }
+        }
+    }
 }
 
 /// The 2011 Accord's bumper beams' section (front and rear: roll-formed and

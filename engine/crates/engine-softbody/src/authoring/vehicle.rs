@@ -1566,7 +1566,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                             && !sk.nodes[i as usize].catcher
                     })
                     .collect();
-                for st in [truss.first(), truss.last()] {
+                let ns = truss.stations.len();
+                let centre_of = |sk: &Skeleton, st: &[u32]| -> Vec3 {
+                    st.iter().map(|&i| sk.pos(i)).sum::<Vec3>() / st.len().max(1) as f32
+                };
+                for (k, st) in [(0usize, truss.first()), (ns - 1, truss.last())] {
                     let mut ends: Vec<u32> = st.to_vec();
                     ends.sort();
                     ends.dedup();
@@ -1578,8 +1582,52 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     if through.contains(&part) {
                         door_ends.push((part, ends.clone()));
                     }
+                    // One tier, with the shut faces at the doors' edges
+                    // (`sedan::shut_faces`): a rail's end bears along the car
+                    // on the pillar beyond the door's edge, as the inner
+                    // panel's end face closes on the pillar through its seal.
+                    // That bearing and the hinge's or latch's pull on the
+                    // outer chord are the couple that holds the rail's end
+                    // moment (a real door beam's end fixity). The pillar node
+                    // is the member node beyond the edge within 45° of the
+                    // rail's axis (`SHUT_BEAR=0`: the nearest two structure
+                    // nodes, as before, a measurement switch). Only with
+                    // `SHUT_FACES=1`.
+                    let along = {
+                        let other = if k == 0 {
+                            1.min(ns - 1)
+                        } else {
+                            ns.saturating_sub(2)
+                        };
+                        (centre_of(&sk, &st) - centre_of(&sk, &truss.stations[other]))
+                            .normalize_or_zero()
+                    };
+                    let shut_bear = one
+                        && through.contains(&part)
+                        && along.z.abs() > 0.7
+                        && std::env::var("SHUT_FACES").is_ok_and(|v| v == "1")
+                        && std::env::var("SHUT_BEAR").map_or(true, |v| v != "0");
                     for &a in &ends {
-                        for b in sk.nearest(sk.pos(a), &body, 2) {
+                        let pick: Vec<u32> = if shut_bear {
+                            let pa = sk.pos(a);
+                            body.iter()
+                                .copied()
+                                .filter(|&b| {
+                                    let d = sk.pos(b) - pa;
+                                    let ax = d.dot(along);
+                                    ax >= 0.03
+                                        && (d - along * ax).length() <= ax
+                                        && d.length() <= 0.3
+                                })
+                                .min_by(|&x, &y| {
+                                    sk.pos(x).distance(pa).total_cmp(&sk.pos(y).distance(pa))
+                                })
+                                .into_iter()
+                                .collect()
+                        } else {
+                            sk.nearest(sk.pos(a), &body, 2)
+                        };
+                        for b in pick {
                             let l = sk.pos(a).distance(sk.pos(b));
                             // (A door end bears on the pillar beside it
                             // along the car, the aperture closing in a
