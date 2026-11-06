@@ -3558,7 +3558,7 @@ fn markers(m: &mut Model) {
             );
             m.marker(
                 &format!("latch_door_{name}"),
-                sx(side_pt(zr + 0.03, 0.70)) - Vec3::new(s * 0.03, 0.0, 0.0),
+                sx(side_pt(zr, 0.70)) - Vec3::new(s * 0.03, 0.0, 0.0),
             );
         }
         m.marker(
@@ -3575,7 +3575,7 @@ fn markers(m: &mut Model) {
             Vec3::new(0.80, 0.88, 1.0),
             Vec3::new(0.78, 0.84, 1.45),
             Vec3::new(0.70, 0.79, 1.95),
-            sx(side_pt(DOOR_F + 0.04, 0.40)) * Vec3::new(s, 1.0, 1.0),
+            sx(side_pt(DOOR_F + 0.04, 0.40)),
         ];
         for (q, p) in pts.iter().enumerate() {
             let p = if q < 3 {

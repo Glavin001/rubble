@@ -234,6 +234,44 @@ fn main() {
             missing
         ),
     );
+    // Markers on their own side: a name's side tag (FL, FR, RL, RR, or a
+    // trailing L or R) against the sign of x (+X is the car's left).
+    let mut wrong_side: Vec<String> = Vec::new();
+    for k in &g.markers {
+        let tags: Vec<&str> = k.name.split('_').collect();
+        let left = tags.iter().any(|t| matches!(*t, "FL" | "RL" | "L"));
+        let right = tags.iter().any(|t| matches!(*t, "FR" | "RR" | "R"));
+        let x = k.pos[0];
+        if (left && x <= 0.0) || (right && x >= 0.0) {
+            wrong_side.push(format!("{} (x {:+.3})", k.name, x));
+        }
+    }
+    // Door latches on their door's trailing edge: within 20 mm (along z) of
+    // the rearmost door-skin vertex near the latch's height.
+    let mut latch_off: Vec<String> = Vec::new();
+    for tag in ["FL", "FR", "RL", "RR"] {
+        let Some(&l) = mk.get(format!("latch_door_{tag}").as_str()) else {
+            continue;
+        };
+        let door = soup(&g, &format!("door_{tag}"));
+        let trailing = door
+            .0
+            .iter()
+            .filter(|p| (p.y - l.y).abs() < 0.02 && p.x * l.x > 0.0)
+            .map(|p| p.z)
+            .fold(f32::MAX, f32::min);
+        if trailing == f32::MAX || (l.z - trailing).abs() > 0.02 {
+            latch_off.push(format!(
+                "latch_door_{tag} z {:.3}, door's trailing edge {:.3}",
+                l.z, trailing
+            ));
+        }
+    }
+    row(
+        "markers on their side; latches on the doors' trailing edges",
+        wrong_side.is_empty() && latch_off.is_empty(),
+        format!("wrong side {wrong_side:?}; latches off {latch_off:?}"),
+    );
     // Materials.
     let bad: Vec<&str> = g
         .materials
