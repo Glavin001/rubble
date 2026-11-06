@@ -2201,6 +2201,22 @@ pub fn sedan_one_tier() -> VehicleDef {
             )
         });
     }
+    // BeamNG's node pattern on the doors (`BEAMNG_NODES`): the doors'
+    // rails' stations at the structural spacing, so they land on the
+    // structural rings (their bays' lane nodes between are contact-only).
+    if super::vehicle::beamng_nodes_parts()
+        .iter()
+        .any(|p| p == "door")
+    {
+        for m in d.members.iter_mut().filter(|m| {
+            m.ride
+                && (m.name.starts_with("door_beam")
+                    || m.name.starts_with("door_belt")
+                    || m.name.starts_with("door_mid"))
+        }) {
+            m.station = super::vehicle::BEAMNG_SPACING;
+        }
+    }
     // The C-pillar (the rear doors' striker pillar) at pole-width stations
     // (A8: an outer member's stations at most a 254 mm pole apart), so its
     // latch meets the pillar's own nodes.

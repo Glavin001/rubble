@@ -1673,7 +1673,13 @@ fn e_upside_down_drop_from_15_m_keeps_its_ledgers() {
 #[test]
 #[ignore]
 fn pole_sweep_never_passes_through() {
-    let b = built(Resolution::Low);
+    // (`SWEEP_RES=medium`: the references' resolution.)
+    let b = built(
+        std::env::var("SWEEP_RES")
+            .ok()
+            .and_then(|r| Resolution::parse(&r))
+            .unwrap_or(Resolution::Low),
+    );
     let mut jobs = Vec::new();
     // `SWEEP_SPEEDS=28,32` other speeds, `SWEEP_SHIFT=0.025` offsets moved by
     // that much (how robust a clean sweep is).
@@ -8168,6 +8174,9 @@ fn sedan1_kinds(b: &Built) -> Vec<String> {
         let l = pa.distance(pc);
         let k = if bm.damper {
             "dashpot".to_string()
+        } else if b.shell.contact.contains(&a) || b.shell.contact.contains(&c) {
+            // (BeamNG's node pattern: what holds a contact-only node.)
+            "contact tie".into()
         } else if bm.ty != BeamType::Normal {
             "bearing".into()
         } else if rigid.contains(&a) && rigid.contains(&c) {
@@ -8267,10 +8276,21 @@ fn topology_census_solver() {
             name.into()
         }
     };
+    // (BeamNG's node pattern, `BEAMNG_NODES`: a part's contact-only nodes
+    // are their own row, so the part's row is its structural lattice; the
+    // ties between the two are counted in neither.)
+    eprintln!("[census] contact-only nodes: {}", b.shell.contact.len());
     solver_census(
         &s,
         sk.nodes.len(),
-        &|i| Some(key(&sk.parts[sk.nodes[i].part as usize])),
+        &|i| {
+            let k = key(&sk.parts[sk.nodes[i].part as usize]);
+            Some(if b.shell.contact.contains(&(i as u32)) {
+                format!("{k} contact")
+            } else {
+                k
+            })
+        },
         &kind_of,
     );
 }
