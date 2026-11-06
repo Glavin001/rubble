@@ -545,6 +545,12 @@ pub struct MatInfo {
     /// The colour map's file name (the path's last component: BeamNG paths
     /// are game-absolute, the files sit in the vehicle's folder).
     pub color_map: Option<String>,
+    /// Its data maps' file names (linear, not colour): the normal map
+    /// (DirectX convention, green down), roughness (red) and ambient
+    /// occlusion (red).
+    pub normal_map: Option<String>,
+    pub roughness_map: Option<String>,
+    pub ao_map: Option<String>,
 }
 
 /// Read a `*.materials.json` (relaxed JSON): every material by its `mapTo`
@@ -562,17 +568,21 @@ pub fn read_materials(src: &str) -> HashMap<String, MatInfo> {
             .and_then(Value::as_array)
             .filter(|a| a.len() >= 3)
             .map(|a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.5) as f32));
-        let color_map = f("colorMap")
-            .or_else(|| f("baseColorMap"))
-            .and_then(Value::as_str)
-            .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string());
+        let file = |k: &str| {
+            f(k).and_then(Value::as_str)
+                .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string())
+        };
+        let color_map = file("colorMap").or_else(|| file("baseColorMap"));
+        let normal_map = file("normalMap");
+        let roughness_map = file("roughnessMap");
+        let ao_map = file("ambientOcclusionMap").or_else(|| file("aoMap"));
         let textured = color_map.is_some();
         let translucent = v.get("translucent").and_then(Value::as_bool).unwrap_or(false)
             || v.get("translucentBlendOp").and_then(Value::as_str).is_some_and(|o| o != "None");
         let emissive = f("glow").and_then(Value::as_bool).unwrap_or(false)
             || f("emissive").and_then(Value::as_bool).unwrap_or(false)
             || f("emissiveFactor").is_some_and(|x| x.is_array());
-        let info = MatInfo { color, translucent, emissive, textured, color_map };
+        let info = MatInfo { color, translucent, emissive, textured, color_map, normal_map, roughness_map, ao_map };
         if let Some(t) = v.get("mapTo").and_then(Value::as_str) {
             out.insert(t.to_string(), info.clone());
         }
@@ -592,6 +602,29 @@ fn vec3_of(v: Option<&Value>, d: Vec3) -> Vec3 {
         ),
         _ => d,
     }
+}
+
+/// Renumbers `v`'s texture sets onto the file lists `colour` and `data`
+/// (another level of detail's, which uses every file this one does), so
+/// every level indexes the same texture layers.
+pub fn rebase_textures(v: &mut ShowcaseVisual, colour: &[String], data: &[String]) -> Result<(), String> {
+    let find = |list: &[String], name: &String| {
+        list.iter().position(|t| t == name).map(|k| k as u16).ok_or_else(|| format!("texture {name} missing from the base level"))
+    };
+    let at = |k: u16, own: &[String], base: &[String]| -> Result<u16, String> {
+        if k == u16::MAX { Ok(k) } else { find(base, &own[k as usize]) }
+    };
+    for s in &mut v.tex_sets {
+        *s = [
+            at(s[0], &v.textures, colour)?,
+            at(s[1], &v.data_textures, data)?,
+            at(s[2], &v.data_textures, data)?,
+            at(s[3], &v.data_textures, data)?,
+        ];
+    }
+    v.textures = colour.to_vec();
+    v.data_textures = data.to_vec();
+    Ok(())
 }
 
 /// What the visual was built from: counts and what was skipped.
@@ -630,8 +663,12 @@ pub fn jbeam_visual(
     // the material is translucent and emissive when it glows; its diffuse
     // colour when it is untextured (a textured one shades a flat mid grey,
     // except paint, which takes the paint).
-    // Textures by colour map, in first use order.
+    // Texture sets ([colour, normal, roughness, AO], file indices into
+    // `textures` and `data_textures`), in first use order; the file lists
+    // are sorted by name at the end (every level of detail the same).
     let mut textures: Vec<String> = Vec::new();
+    let mut data_textures: Vec<String> = Vec::new();
+    let mut sets: Vec<[u16; 4]> = Vec::new();
     let mut shade = |name: &str| -> (u8, [f32; 3], u16) {
         let mi = materials.get(name).or_else(|| materials.get(name.trim_end_matches("-material"))).cloned().unwrap_or_default();
         let mut c = material_class(name);
@@ -648,15 +685,28 @@ pub fn jbeam_visual(
         }
         // A colour map multiplies the material's colour (white unless the
         // material gives one); paint keeps the paint.
-        let tex = match &mi.color_map {
-            Some(f) if c != mat::PAINT => {
-                let k = textures.iter().position(|t| t == f).unwrap_or_else(|| {
-                    textures.push(f.clone());
-                    textures.len() - 1
-                });
-                k as u16
+        let index = |list: &mut Vec<String>, f: &Option<String>| -> u16 {
+            match f {
+                Some(f) if c != mat::PAINT => list.iter().position(|t| t == f).unwrap_or_else(|| {
+                    list.push(f.clone());
+                    list.len() - 1
+                }) as u16,
+                _ => u16::MAX,
             }
-            _ => u16::MAX,
+        };
+        let set = [
+            index(&mut textures, &mi.color_map),
+            index(&mut data_textures, &mi.normal_map),
+            index(&mut data_textures, &mi.roughness_map),
+            index(&mut data_textures, &mi.ao_map),
+        ];
+        let tex = if set.iter().all(|&k| k == u16::MAX) {
+            u16::MAX
+        } else {
+            sets.iter().position(|s| *s == set).unwrap_or_else(|| {
+                sets.push(set);
+                sets.len() - 1
+            }) as u16
         };
         let col = match (mi.color, mi.textured) {
             (Some(k), false) if !matches!(c, mat::GLASS | mat::SCREEN) => k,
@@ -982,7 +1032,25 @@ pub fn jbeam_visual(
         .iter()
         .map(|&t| if t { crate::authoring::skin::node_mat::RUBBER } else { crate::authoring::skin::node_mat::METAL })
         .collect();
+    // The file lists sorted by name, the sets renumbered.
+    let sorted = |list: Vec<String>| -> (Vec<String>, Vec<u16>) {
+        let mut order: Vec<usize> = (0..list.len()).collect();
+        order.sort_by(|&a, &b| list[a].cmp(&list[b]));
+        let mut to = vec![0u16; list.len()];
+        for (new, &old) in order.iter().enumerate() {
+            to[old] = new as u16;
+        }
+        (order.iter().map(|&k| list[k].clone()).collect(), to)
+    };
+    let (textures, tc) = sorted(textures);
+    let (data_textures, td) = sorted(data_textures);
+    let map = |k: u16, to: &[u16]| if k == u16::MAX { k } else { to[k as usize] };
+    out.tex_sets = sets
+        .iter()
+        .map(|s| [map(s[0], &tc), map(s[1], &td), map(s[2], &td), map(s[3], &td)])
+        .collect();
     out.textures = textures;
+    out.data_textures = data_textures;
     Ok((out, rep))
 }
 

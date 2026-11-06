@@ -294,13 +294,30 @@ pub fn showcase_car_visual(params: JsValue) -> Result<JsValue, JsValue> {
 
 fn visual_js(v: &ShowcaseVisual) -> Object {
     let vis = Object::new();
-    // Textures (imported vehicles' colour maps): file names, and per vertex
-    // its texture + 1 (0 untextured).
-    let tex = Array::new();
-    for t in &v.textures {
-        tex.push(&JsValue::from_str(t));
-    }
-    set(&vis, "textures", &tex.into());
+    // Textures (imported vehicles' maps, skin.rs `ShowcaseVisual::tex_sets`):
+    // colour and data file names, per vertex its texture set + 1 (0
+    // untextured), per set its [colour, normal, roughness, AO] file + 1 (0
+    // none; colour into `textures`, the rest into `dataTextures`).
+    let names = |list: &[String]| {
+        let a = Array::new();
+        for t in list {
+            a.push(&JsValue::from_str(t));
+        }
+        a
+    };
+    set(&vis, "textures", &names(&v.textures).into());
+    set(&vis, "dataTextures", &names(&v.data_textures).into());
+    let sets: Vec<u16> = v
+        .tex_sets
+        .iter()
+        .flatten()
+        .map(|&k| if k == u16::MAX { 0 } else { k + 1 })
+        .collect();
+    set(
+        &vis,
+        "texSets",
+        &js_sys::Uint16Array::from(sets.as_slice()).into(),
+    );
     if !v.tex.is_empty() {
         let t: Vec<u16> = v
             .tex
@@ -579,6 +596,11 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
         all.iter().map(|m| flexmesh::cluster(m, far_cell)).collect();
     let (far_vis, _) =
         flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &farther, &mats, paint).map_err(err)?;
+    // Every level on the full level's texture layers.
+    let (mut lod, mut far_vis) = (lod, far_vis);
+    for l in [&mut lod, &mut far_vis] {
+        flexmesh::rebase_textures(l, &vis.textures, &vis.data_textures).map_err(err)?;
+    }
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
     set(&out, "visualLod", &visual_js(&lod).into());
