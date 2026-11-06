@@ -77,7 +77,7 @@ fn jbeam_yield(beam: &mut Beam, len: f32, e: f32, k: f32, damp: f32, mut f: f32,
     let mut tau = f.abs();
     let mut tear = false;
     if tau > beam.gate && beam.ty == ExplicitType::Deformable && k != 0.0 {
-        if f > beam.tc && e < 0.0 {
+        if f > beam.tc && e < 0.0 && e + (beam.tc / k) * (1.0 - beam.plastic) < 0.0 {
             let delta = e + (beam.tc / k) * (1.0 - beam.plastic);
             let old = beam.rest;
             let floor = beam.short_bound.max(MIN_REST);
@@ -94,7 +94,7 @@ fn jbeam_yield(beam: &mut Beam, len: f32, e: f32, k: f32, damp: f32, mut f: f32,
                 beam.tc = (beam.tc * old / beam.rest).min(beam.limit_k.max(beam.tc));
                 beam.gate = beam.tc.min(beam.tt).min(beam.strength);
             }
-        } else if f < -beam.tt && e > 0.0 {
+        } else if f < -beam.tt && e > 0.0 && e - (beam.tt / k) * (1.0 - beam.plastic) > 0.0 {
             let delta = e - (beam.tt / k) * (1.0 - beam.plastic);
             let old = beam.rest;
             // A negative bound tears there (breakAtExpansion, §36).

@@ -272,8 +272,23 @@ content, and `feat/jbeam-features`' contact rest fix. What changed for the ETK:
 | 4. Door crush | 5.4 / 10.1 / 19.5 kN | 5.7 / 10.7 / 38.5 kN (initial and intermediate still under 10.0 / 15.6) |
 | 5. Roof (kr6 / kc6) | 1.61 / 9.62 × | 6.14 / 9.79 × |
 
-The CCF and the Vertex are in the table too (`vehicle-compare.md`). Two open points
-from them: the Vertex's wall ledger shows a 27 kJ rise (the energy check fails; its
-front suspension rings at 16–20 mm), and the CCF's wall residual crush reads 29 mm
-with b1 2,335 /s, with both headlights detached (the cabin fit or the crush frame
-is suspect, not yet read).
+The CCF and the Vertex are in the table too (`vehicle-compare.md`). Two points
+they raised, resolved the same day:
+- **The Vertex's +27 kJ (37.6 kJ in `jbeam_accept`) at the wall was created
+  energy:** its engine mounts (k 100 N/m, deform about 2 kN) yielded on their
+  damping force, and the JBeam yield rule moved their rest lengths the wrong way
+  (to ℓ + T/k = 20.7 m), a spring with 20 kJ in it. Yield now follows the elastic
+  force only (jbeam-semantics-spec.md §3); the rise is 16.9 J. Its front suspension
+  still rings 17–20 mm (unchanged: the arms' own oscillation, not the gain).
+- **The CCF's residual crush (29 mm) was the measure:** it took the most forward
+  "attached" node per zone, and a lamp or fascia hanging on its last beams swings
+  forward as the cabin rebounds (up to 1.9 m ahead of its rest place). The measure
+  now keeps nodes joined to the cabin through unbroken beams and not more than 5 cm
+  ahead of their rest place: CCF 208 / 102 mm (b1 131 /s), a stiff short front
+  (springback 0.56, like the ETK's 0.53). The same connectivity is used for the
+  intrusion points.
+- **The CCF's remaining ledger rise (467 J) is its tyres' gas**, which the ledger's
+  elastic sum leaves out (pressure records store none there): on its hubs alone the
+  rise is 0.02 kJ against 1.68 kJ on pressure wheels (`jbeam_accept ledger=1`).
+  Per beam, no linear beam gives energy back it had not stored
+  (`jbeam_accept beamledger=1`).

@@ -102,6 +102,23 @@ Tt ← Tt·L/L_old in tension); a stretched beam's strength drops by k × its pl
 elongation. `deformLimitStress` [B] "caps the growth of beamDeform as the beam
 deforms": the hardened thresholds never pass max(cap, their current value).
 
+**Yield follows the elastic force only (2026-11-06).** The yield test reads the
+whole force F = −k·e − D(u), damping included, and moves the rest length by
+δ = e ± (T/k)(1 − p). When damping alone carries |F| past T while the spring's own
+force is below it, δ had the wrong sign: in compression the rest length grew to
+ℓ + T/k (a spring storing T²/2k the step had not been given). On the Gavril Vertex's
+engine mounts (k 100 N/m, deform about 2 kN) that put 20 kJ in each of two beams in
+one step at the 56 km/h wall: the world ledger rose 37.6 kJ. **Fix:** a beam yields
+only when δ moves its rest length toward its current length (δ < 0 in compression,
+δ > 0 in tension), so plastic flow never stores energy; the same δ, gated (CPU
+`jbeam_force_filtered`, `jbeam_yield`; kernel `jbeamUpdate`, `jbeamExtUpdate`), bit for
+bit on the GPU. Every yield whose δ had the right sign is unchanged. The RoR profile's
+`Plain` rule is RoR's and unchanged. Measured: the Vertex's wall ledger rise
+37.6 kJ → 0.03 kJ (`jbeam_accept ledger=1`); `tension_yield_gpu` now judges each
+beam's largest yield over the run (a beam flung apart yields in tension, then, its
+Tc being low, back in compression on the rebound, which it no longer did by damping
+alone).
+
 **Deform limits** [B], [W]. `deformLimit` d limits "how far the beam can deform in
 compression, as a fraction of original length"; `deformLimitExpansion` dₑ the same in
 expansion (default: `deformLimit`). **Choice (ambiguous):** the limit is on the

@@ -4840,7 +4840,7 @@ pub fn jbeam_force_filtered(
     let mut tau = f.abs();
     let mut tear = false;
     if tau > beam.gate && beam.ty == ExplicitType::Deformable && k != 0.0 {
-        if f > beam.tc && e < 0.0 {
+        if f > beam.tc && e < 0.0 && e + (beam.tc / k) * (1.0 - beam.plastic) < 0.0 {
             let delta = e + (beam.tc / k) * (1.0 - beam.plastic);
             let old = beam.rest;
             let floor = beam.short_bound.max(MIN_REST);
@@ -4858,7 +4858,7 @@ pub fn jbeam_force_filtered(
                 beam.tc = (beam.tc * old / beam.rest).min(beam.limit_k.max(beam.tc));
                 beam.gate = beam.tc.min(beam.tt).min(beam.strength);
             }
-        } else if f < -beam.tt && e > 0.0 {
+        } else if f < -beam.tt && e > 0.0 && e - (beam.tt / k) * (1.0 - beam.plastic) > 0.0 {
             let delta = e - (beam.tt / k) * (1.0 - beam.plastic);
             let old = beam.rest;
             // A negative bound tears there (`rubble_jbeam_plastic`'s

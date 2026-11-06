@@ -77,8 +77,16 @@ fn tension_yield_steps_like_the_cpu() {
     };
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
     let bits = |a: Vec3| a.to_array().map(f32::to_bits);
+    // Each beam's largest and smallest plastic strain over the run: a stretched
+    // beam yields in tension first (its rebound may yield it back in compression
+    // after, as its Tc is low: yield follows the elastic force only, jbeam spec §3).
+    let mut extreme = vec![(0.0f32, 0.0f32); cpu.beams.len()];
     for step in 0..400 {
         cpu.step();
+        for (j, b) in cpu.beams.iter().enumerate() {
+            let e = b.rest / b.rest0 - 1.0;
+            extreme[j] = (extreme[j].0.max(e), extreme[j].1.min(e));
+        }
         gpu.frame(1);
         gpu.wait();
         let (p, v) = (&gpu.positions()[0], &gpu.velocities()[0]);
@@ -107,16 +115,17 @@ fn tension_yield_steps_like_the_cpu() {
     // Each stretched beam yielded in tension, each squeezed one in compression.
     let strain: Vec<f32> = cpu.beams.iter().map(|b| b.rest / b.rest0 - 1.0).collect();
     eprintln!("plastic strain per beam after 0.2 s: {strain:?}");
-    for (j, e) in strain.iter().enumerate() {
-        let pair = j;
-        if pair % 2 == 0 {
-            assert!(*e > 0.0, "beam {j} did not yield in tension");
+    eprintln!("largest / smallest plastic strain per beam: {extreme:?}");
+    for (j, (hi, lo)) in extreme.iter().enumerate() {
+        if j % 2 == 0 {
+            assert!(*hi > 0.0, "beam {j} did not yield in tension");
         } else {
-            assert!(*e < 0.0, "beam {j} did not yield in compression");
+            assert!(*lo < 0.0, "beam {j} did not yield in compression");
         }
     }
     // The tension side yields less with Tt 3 kN than at Tc = Tt = 500 N.
-    assert!(strain[0] < strain[4]);
+    assert!(extreme[0].0 < extreme[4].0);
+    let _ = strain;
 }
 
 /// The BeamNG profile's ropes and tearing (jbeam-semantics-spec.md §36) on the GPU,
@@ -182,3 +191,4 @@ fn ropes_and_tearing_step_like_the_cpu() {
     assert!(cpu.beams.iter().all(|b| b.strength == 50_000.0));
     assert!((cpu.beams[2].rest - 0.6).abs() < 1e-6);
 }
+

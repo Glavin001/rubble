@@ -1802,7 +1802,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         float tau = abs(f);
         if (tau > gate && type == TYPE_DEFORMABLE && k != 0.0)
         {
-            if (f > tc && e < 0.0)
+            if (f > tc && e < 0.0 && nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z))) < 0.0)
             {
                 float delta = nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z)));
                 float old = rest;
@@ -1825,7 +1825,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
                     gate = min(min(tc, tt), strength);
                 }
             }
-            else if (f < -tt && e > 0.0)
+            else if (f < -tt && e > 0.0 && nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z))) > 0.0)
             {
                 float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
                 float old = rest;
@@ -2179,7 +2179,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         float tau = abs(f);
         if (tau > gate && type == TYPE_DEFORMABLE && k != 0.0)
         {
-            if (f > tc && e < 0.0)
+            if (f > tc && e < 0.0 && nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z))) < 0.0)
             {
                 float delta = nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z)));
                 float old = rest;
@@ -2202,7 +2202,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
                     gate = min(min(tc, tt), strength);
                 }
             }
-            else if (f < -tt && e > 0.0)
+            else if (f < -tt && e > 0.0 && nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z))) > 0.0)
             {
                 float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
                 float old = rest;

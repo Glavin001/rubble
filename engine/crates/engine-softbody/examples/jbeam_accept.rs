@@ -598,6 +598,148 @@ fn main() {
         .map(|n| 0.5 * n.mass * n.vel.length_squared())
         .sum();
     let steps = (crash / 0.1).ceil() as usize;
+    if opt("beamledger=").is_some() {
+        // Per beam (two-node linear kinds as the world ledger counts them): its
+        // dissipation over the crash, D = −(W + ΔU), W = Σ F·Δℓ; a beam with D < 0
+        // gave the nodes energy it had not stored.
+        let mut s = s;
+        let u = |s: &ExplicitBeams, j: usize| -> f64 {
+            let b = &s.beams[j];
+            if b.broken || b.a == b.b {
+                return 0.0;
+            }
+            let len = s.nodes[b.a as usize].pos.distance(s.nodes[b.b as usize].pos);
+            use engine_softbody::explicit_beams::ExplicitKind as K;
+            let e = match b.kind {
+                K::JbeamPlain | K::JbeamBounded | K::JbeamCoupler | K::JbeamAniso => len - b.rest,
+                K::JbeamSupport => (len - b.rest).min(0.0),
+                _ => return 0.0,
+            };
+            0.5 * f64::from(b.k) * f64::from(e) * f64::from(e)
+        };
+        let n = s.beams.len();
+        let mut d = vec![0.0f64; n];
+        let mut u0: Vec<f64> = (0..n).map(|j| u(&s, j)).collect();
+        for _ in 0..(crash / 0.0005).round() as usize {
+            let len0: Vec<f32> = s.beams.iter().map(|b| s.nodes[b.a as usize].pos.distance(s.nodes[b.b as usize].pos)).collect();
+            let was: Vec<bool> = s.beams.iter().map(|b| b.broken).collect();
+            s.step();
+            for j in 0..n {
+                let b = s.beams[j];
+                if was[j] || b.a == b.b {
+                    continue;
+                }
+                use engine_softbody::explicit_beams::ExplicitKind as K;
+                if !matches!(b.kind, K::JbeamPlain | K::JbeamBounded | K::JbeamCoupler | K::JbeamAniso | K::JbeamSupport) {
+                    continue;
+                }
+                let l1 = s.nodes[b.a as usize].pos.distance(s.nodes[b.b as usize].pos);
+                let w = if b.kind == K::JbeamCoupler { 0.0 } else { f64::from(b.force) * f64::from(l1 - len0[j]) };
+                let u1 = u(&s, j);
+                d[j] += -(w + u1 - u0[j]);
+                u0[j] = u1;
+            }
+        }
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.sort_by(|&a, &b| d[a].total_cmp(&d[b]));
+        let nm = |i: u32| desc.nodes.get(i as usize).map_or("wheel".to_string(), |q| q.name.clone());
+        for &j in idx.iter().take(10) {
+            let b = s.beams[j];
+            println!("  beam {j} {:?} {}-{}: dissipation {:.1} J (k {} c {} rest {:.3} broken {})", b.kind, nm(b.a), nm(b.b), d[j], b.k, b.c, b.rest, b.broken);
+        }
+        let neg: f64 = d.iter().filter(|x| **x < 0.0).sum();
+        println!("  sum of negative dissipation {:.1} J", neg);
+        return;
+    }
+    if opt("ledger=").is_some() {
+        // The world energy ledger through the crash, every 50 ms: mechanical
+        // (kinetic + gravity + linear elastic) against its start, and each source's
+        // work so far (kJ).
+        let mut w = engine_softbody::explicit_contact::ExplicitBeamsWorld::new(vec![s]);
+        w.contact = false;
+        w.enable_ledger();
+        let start = w.ledger.as_ref().unwrap().start;
+        let mut low = f64::MAX;
+        let mut rise = 0.0f64;
+        // Work by beam kind (two-node kinds: F·Δℓ over each step) and the
+        // largest one-step rise of each kind's work (energy given to the nodes).
+        let mut by: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
+        for k in 1..=(crash / 0.05).round() as usize {
+            for _ in 0..100 {
+                if opt("jump=").is_some() && w.steps == 58 {
+                    // The ledger's elastic term per beam, now and 6 steps on: the
+                    // beams whose term jumps.
+                    let term = |v: &ExplicitBeams| -> Vec<f64> {
+                        (0..v.beams.len())
+                            .map(|j| {
+                                let mut one = v.clone();
+                                for (i, b) in one.beams.iter_mut().enumerate() {
+                                    b.broken = b.broken || i != j;
+                                }
+                                engine_softbody::explicit_contact::elastic_energy(&one)
+                            })
+                            .collect()
+                    };
+                    let t0 = term(&w.vehicles[0]);
+                    for _ in 0..6 {
+                        w.step();
+                    }
+                    let t1 = term(&w.vehicles[0]);
+                    let mut d: Vec<(f64, usize)> = (0..t0.len()).map(|j| (t1[j] - t0[j], j)).collect();
+                    d.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    let v = &w.vehicles[0];
+                    let nm = |i: u32| desc.nodes.get(i as usize).map_or("wheel".to_string(), |n| n.name.clone());
+                    for &(dd, j) in d.iter().take(8) {
+                        let b = v.beams[j];
+                        println!("    jump {dd:.0} J: beam {j} {:?} {}-{} k {} rest {:.3} len {:.3} force {:.0} ext {:?}", b.kind, nm(b.a), nm(b.b), b.k, b.rest,
+                            v.nodes[b.a as usize].pos.distance(v.nodes[b.b as usize].pos), b.force,
+                            v.ext_of.get(j).filter(|&&x| x != 0).map(|&x| v.beam_ext[x as usize - 1].e1));
+                    }
+                    return;
+                }
+                let len0: Vec<f32> = w.vehicles[0].beams.iter().map(|b| w.vehicles[0].nodes[b.a as usize].pos.distance(w.vehicles[0].nodes[b.b as usize].pos)).collect();
+                w.step();
+                let v = &w.vehicles[0];
+                let mut step_w: std::collections::BTreeMap<String, f64> = Default::default();
+                for (j, b) in v.beams.iter().enumerate() {
+                    if b.broken || b.a == b.b {
+                        continue;
+                    }
+                    let l1 = v.nodes[b.a as usize].pos.distance(v.nodes[b.b as usize].pos);
+                    let f = match b.kind {
+                        engine_softbody::explicit_beams::ExplicitKind::JbeamCoupler
+                        | engine_softbody::explicit_beams::ExplicitKind::JbeamTorsion
+                        | engine_softbody::explicit_beams::ExplicitKind::JbeamTorsionPair => continue,
+                        _ => b.force,
+                    };
+                    *step_w.entry(format!("{:?}", b.kind)).or_default() += f64::from(f) * f64::from(l1 - len0[j]);
+                }
+                for (kname, x) in step_w {
+                    let e = by.entry(kname).or_default();
+                    e.0 += x;
+                    e.1 = e.1.max(x);
+                }
+                let l = w.ledger.as_ref().unwrap();
+                low = low.min(l.mechanical());
+                rise = rise.max(l.mechanical() - low);
+                if opt("fine=").is_some() && w.steps % 4 == 0 && w.steps <= 200 {
+                    println!("    step {} mech {:+.2} KE {:.2} elastic {:.2} beams {:+.2} ground {:+.2}", w.steps, (l.mechanical() - start) / 1e3, l.kinetic / 1e3, l.elastic / 1e3, l.w_beams / 1e3, (l.w_ground_vertical + l.w_ground_horizontal) / 1e3);
+                }
+            }
+            if k == 1 || k == 2 || k == 20 {
+                println!("  work by kind so far (kJ; largest one-step gain J): {}", by.iter().map(|(n, (t, m))| format!("{n} {:+.2} ({:.0})", t / 1e3, m)).collect::<Vec<_>>().join(", "));
+            }
+            let l = w.ledger.as_ref().unwrap();
+            println!(
+                "  {:.2} s: mech {:+.2} (rise so far {:.2}) KE {:.2} elastic {:.2}; work beams {:+.2} ground v/h {:+.2}/{:+.2} self {:+.2} shifts {:+.2}/{:+.2} gravity {:+.2} disc {:+.3}",
+                0.05 * k as f32,
+                (l.mechanical() - start) / 1e3, rise / 1e3, l.kinetic / 1e3, l.elastic / 1e3,
+                l.w_beams / 1e3, l.w_ground_vertical / 1e3, l.w_ground_horizontal / 1e3,
+                l.w_self_contact / 1e3, l.w_contact_shift / 1e3, l.w_ground_shift / 1e3, l.w_gravity / 1e3, l.discretisation / 1e3
+            );
+        }
+        return;
+    }
     for k in 1..=steps {
         s.run(0.1);
         if opt("crashwatch=").is_some() {
