@@ -108,11 +108,28 @@ fn measure(w: &mut World, warm: u32, steps: u32) -> anyhow::Result<(f64, f64, f6
         w.poll_blocking()?;
     }
     let mut ms = Vec::with_capacity(steps as usize);
+    let mut ran = 0;
     for _ in 0..steps {
         w.step()?;
-        w.poll_blocking()?;
+        ran += w.poll_blocking()?.iter().filter(|f| f.ran).count();
         if let Some(t) = w.last_submit_instant() {
             ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+    let s = w.explicit_sleep_states();
+    eprintln!(
+        "  {ran} of {steps} measured steps ran; {} of {} vehicles asleep",
+        s.iter().filter(|x| x.1).count(),
+        s.len()
+    );
+    // VS_AWAKE=1: where the awake vehicles are (their first node, world), up to 12.
+    if std::env::var("VS_AWAKE").is_ok() {
+        if let Some(x) = w.explicit_vehicles() {
+            let p = x.positions();
+            let o = x.origins();
+            for (v, _) in s.iter().enumerate().filter(|(_, x)| !x.1).take(12) {
+                eprintln!("    awake {v}: node 0 at {:?} (origin {:?})", p[v][0], o[v]);
+            }
         }
     }
     Ok((pct(&mut ms, 0.5), pct(&mut ms, 0.95), pct(&mut ms, 0.99)))

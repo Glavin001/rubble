@@ -4,30 +4,50 @@
 <line x1="70" x2="490" y1="330.0" y2="330.0" stroke="#e9ecef"/>
 <text x="64" y="334.0" text-anchor="end">0.0</text>
 <line x1="70" x2="490" y1="272.0" y2="272.0" stroke="#e9ecef"/>
-<text x="64" y="276.0" text-anchor="end">1.7</text>
+<text x="64" y="276.0" text-anchor="end">1.3</text>
 <line x1="70" x2="490" y1="214.0" y2="214.0" stroke="#e9ecef"/>
-<text x="64" y="218.0" text-anchor="end">3.4</text>
+<text x="64" y="218.0" text-anchor="end">2.6</text>
 <line x1="70" x2="490" y1="156.0" y2="156.0" stroke="#e9ecef"/>
-<text x="64" y="160.0" text-anchor="end">5.2</text>
+<text x="64" y="160.0" text-anchor="end">3.8</text>
 <line x1="70" x2="490" y1="98.0" y2="98.0" stroke="#e9ecef"/>
-<text x="64" y="102.0" text-anchor="end">6.9</text>
+<text x="64" y="102.0" text-anchor="end">5.1</text>
 <line x1="70" x2="490" y1="40.0" y2="40.0" stroke="#e9ecef"/>
-<text x="64" y="44.0" text-anchor="end">8.6</text>
+<text x="64" y="44.0" text-anchor="end">6.4</text>
 <text x="16" y="185.0" transform="rotate(-90 16 185.0)" text-anchor="middle">ms per World step (120 Hz)</text>
 <text x="140.0" y="348" text-anchor="middle">spread</text>
 <text x="280.0" y="348" text-anchor="middle">traffic</text>
 <text x="420.0" y="348" text-anchor="middle">pileup</text>
 <text x="280.0" y="370" text-anchor="middle">case</text>
-<polyline points="140.0,213.5 280.0,209.2 420.0,131.0" fill="none" stroke="#2a6fdb" stroke-width="2"/>
-<polyline points="140.0,191.4 280.0,185.5 420.0,66.4" fill="none" stroke="#2a6fdb" stroke-width="2" stroke-dasharray="3 3"/>
-<circle cx="140.0" cy="213.5" r="3" fill="#2a6fdb"/>
-<text x="145.0" y="208.5" fill="#2a6fdb" font-size="10">3.46</text>
-<circle cx="280.0" cy="209.2" r="3" fill="#2a6fdb"/>
-<text x="285.0" y="204.2" fill="#2a6fdb" font-size="10">3.58</text>
-<circle cx="420.0" cy="131.0" r="3" fill="#2a6fdb"/>
-<text x="425.0" y="126.0" fill="#2a6fdb" font-size="10">5.90</text>
+<polyline points="140.0,198.6 280.0,170.7 420.0,106.0" fill="none" stroke="#2a6fdb" stroke-width="2"/>
+<polyline points="140.0,146.3 280.0,133.3 420.0,75.1" fill="none" stroke="#2a6fdb" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="140.0" cy="198.6" r="3" fill="#2a6fdb"/>
+<text x="145.0" y="193.6" fill="#2a6fdb" font-size="10">2.90</text>
+<circle cx="280.0" cy="170.7" r="3" fill="#2a6fdb"/>
+<text x="285.0" y="165.7" fill="#2a6fdb" font-size="10">3.52</text>
+<circle cx="420.0" cy="106.0" r="3" fill="#2a6fdb"/>
+<text x="425.0" y="101.0" fill="#2a6fdb" font-size="10">4.95</text>
 <line x1="502" x2="522" y1="40" y2="40" stroke="#2a6fdb" stroke-width="2"/>
 <text x="526" y="44">before p50</text>
-<line x1="502" x2="522" y1="56" y2="56" stroke="#495057" stroke-width="2" stroke-dasharray="3 3"/>
-<text x="526" y="60">p95</text>
+<polyline points="140.0,163.1 280.0,189.9 420.0,99.0" fill="none" stroke="#d9480f" stroke-width="2"/>
+<polyline points="140.0,131.8 280.0,136.0 420.0,66.4" fill="none" stroke="#d9480f" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="140.0" cy="163.1" r="3" fill="#d9480f"/>
+<text x="145.0" y="158.1" fill="#d9480f" font-size="10">3.69</text>
+<circle cx="280.0" cy="189.9" r="3" fill="#d9480f"/>
+<text x="285.0" y="184.9" fill="#d9480f" font-size="10">3.10</text>
+<circle cx="420.0" cy="99.0" r="3" fill="#d9480f"/>
+<text x="425.0" y="94.0" fill="#d9480f" font-size="10">5.11</text>
+<line x1="502" x2="522" y1="56" y2="56" stroke="#d9480f" stroke-width="2"/>
+<text x="526" y="60">after p50</text>
+<polyline points="140.0,165.5 280.0,166.3 420.0,103.4" fill="none" stroke="#2b8a3e" stroke-width="2"/>
+<polyline points="140.0,141.0 280.0,141.0 420.0,73.3" fill="none" stroke="#2b8a3e" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="140.0" cy="165.5" r="3" fill="#2b8a3e"/>
+<text x="145.0" y="160.5" fill="#2b8a3e" font-size="10">3.63</text>
+<circle cx="280.0" cy="166.3" r="3" fill="#2b8a3e"/>
+<text x="285.0" y="161.3" fill="#2b8a3e" font-size="10">3.62</text>
+<circle cx="420.0" cy="103.4" r="3" fill="#2b8a3e"/>
+<text x="425.0" y="98.4" fill="#2b8a3e" font-size="10">5.01</text>
+<line x1="502" x2="522" y1="72" y2="72" stroke="#2b8a3e" stroke-width="2"/>
+<text x="526" y="76">after-sleep-off p50</text>
+<line x1="502" x2="522" y1="88" y2="88" stroke="#495057" stroke-width="2" stroke-dasharray="3 3"/>
+<text x="526" y="92">p95</text>
 </svg>

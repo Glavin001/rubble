@@ -769,6 +769,37 @@ bodies run the same work as before. Failing test first: `explicit_rigid_gpu.rs`
 struck box last): before, GPU 0 m/s against the CPU's 10.80 m/s; after, equal to 1 %.
 (300 bodies did not show it: a lone vehicle runs on the 512-lane module.)
 
+### 10.3 Before and after (2026-11-06)
+
+`vehicle_scale_bench`, interleaved A/B: per scenario the baseline (3cf34d27 + the bench)
+then this branch (sleep on, the World's default), twice, then this branch with sleep off;
+median of the two runs' p50 (ms per 120 Hz World step, submit to completion). Load 40 to
+130 from other agents, so differences under about 1 ms are noise. CSV
+`engine/docs/measurements/vehicle-scale/after_ab.csv`, plots beside it.
+
+| Scenario | Before | After | After, sleep off |
+|---|---|---|---|
+| Fleet driving, 64 / 128 / 256 / 512 / 1024 cars | 2.74 / 3.02 / 3.73 / 6.08 / 11.10 | 3.80 / 3.00 / 3.67 / 6.22 / 11.63 | 2.48 / 3.36 / 3.89 / 6.31 / 11.47 |
+| 128 cars spread / traffic / pile-up | 2.90 / 3.52 / 4.95 | 3.69 / 3.10 / 5.11 | 3.63 / 3.62 / 5.01 |
+| **1,000 parked + 10 driving** | **14.34** (p95 25.4) | **2.65** (p95 3.0) | 13.57 |
+| Rigid bodies 10k / 30k / 100k (1 % awake) + 10 cars | 1.72 / 1.92 / 3.33 | 1.79 / 2.71 / 3.20 | 1.66 / 1.74 / 2.28 |
+| **Map side 500 / 1000 / 2000 / 4000 m, nothing driving** | 1.74 / 2.63 / 4.92 / **16.24** | 2.27 / 2.46 / 3.14 / **7.31** | 3.69 / 3.74 / 5.30 / 14.60 |
+
+* Awake work is unchanged (the fleet and density rows, within noise), as the bit-for-bit
+  checks say it must be.
+* Parked vehicles cost what the awake ones do (1,010 cars: 2.65 ms, like the 10 driving
+  cars plus the plan) instead of 1,010 cars' frame: 5.4× less at the median, 8× at p95.
+  With the awake list against sleeping workgroups returning at once (same build,
+  `RUBBLE_SLEEP_LIST=0`): 2.55 against 4.77 ms.
+* The idle map still grows with its area, at half the slope: in a 4 km side map 743 of
+  1,024 parked sedans sleep after 4 s, and with any awake the World cannot skip its step.
+  The rest stay awake: a share of parked repo sedans keep a residual motion past the rule's
+  0.1 mm over 0.5 s (in the 1,000-car lot 985 sleep; in the 500 m map 11 of 16; the same
+  after 12 s, and not the float rounding of large coordinates: the awake ones are rebased
+  to small local coordinates). Then `cpl_plan`'s per-vehicle scan of every collider
+  (§10.2) and the awake cars' frames remain. Loosening `reach` would let them sleep; it is
+  a lossy trade and left for a decision.
+
 ### 10.2 The coupling plan's O(vehicles × colliders): waiting on the World broadphase
 
 Not changed here. The surface-contact work (`feat/softrigid-surface-contact-r2`, spec
