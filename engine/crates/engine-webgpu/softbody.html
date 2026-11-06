@@ -79,9 +79,19 @@
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
     import { createCrashLab, LAB_PRESETS } from './crash-lab.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
+    import { createLoading, showFatal } from './load-progress.mjs';
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
-    const fail = (e) => { if (!errEl.textContent) errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String((e && e.message) || e); };
+    // Loading: each stage named where it runs (load-progress.mjs draws the card).
+    const loading = createLoading({ title: 'Loading Rubble', note: 'The first load compiles the GPU solver (up to about a minute); later loads hit the browser\'s shader cache.' });
+    loading.stage('Reading the scene');
+    const fail = (e) => {
+      if (!errEl.textContent) errEl.textContent = errorText(e);
+      statusEl.textContent = 'stopped';
+      window.__failed = String((e && e.message) || e);
+      loading.stop();
+      showFatal({ title: 'The simulation stopped', detail: String((e && e.message) || e), hint: 'Reload to start again. The full error is in the console and at the bottom of the page.' });
+    };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
     addEventListener('error', (e) => fail(e.error || e.message));
 
@@ -368,6 +378,8 @@
       maxHullVertices: 64,
     };
     // The world opens the device; the page renders on it and reads the world's buffers in place.
+    loading.stage('Loading the physics engine (wasm) and opening the GPU');
+    await loading.paint();
     const world = await createWorld({
       gravity: [0, -9.81, 0],
       contacts: 'canonical',
@@ -380,7 +392,16 @@
       soft: { maxBodies: big + 16, maxBeams: perCar.beams * big + 8192, maxParticles: perCar.particles * big + 2048, maxColors: 64, maxGroups: Math.max(1024, perCar.groups * big + 64), maxTriangles: perCar.triangles * big + 4096, maxObstacles: 64 },
     });
     const device = world.device();
-    device.lost.then((i) => fail('device lost: ' + i.message));
+    // A lost device (the GPU process restarted, a GPU reset or watchdog, memory):
+    // say so with the browser's reason, and offer the reload that makes a new one.
+    device.lost.then((i) => {
+      showFatal({
+        title: 'The GPU device was lost',
+        detail: `${i.reason}: ${i.message || '(no message)'}`,
+        hint: 'The browser took the WebGPU device away (its GPU process restarted, the GPU reset, or it ran out of memory). Reloading opens a new device. If it happens again, chrome://gpu has the browser\'s log.',
+      });
+      fail('device lost: ' + i.message);
+    });
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
     const canvas = document.getElementById('c');
     const context = canvas.getContext('webgpu');
@@ -526,11 +547,8 @@
     let xsim = null, xlayout = null;
     const XSPEED = (Number(qs.get('xspeed')) || 100) / 3.6;
     const XSPAWN = { wall: [0, -2 - runup], pole: [0, -2 - runup], limbo: [0, -2 - runup], headon: [0, -3 - runup / 2] };
-    const buildExplicit = () => {
-      xsim?.free();
-      // Its front face where the sedan's would be (CAR_FRONT ahead of the spawn).
-      const [x, z] = XSPAWN[scene] ?? [0, 0];
-      xsim = world.explicitSim({
+    // Its front face where the sedan's would be (CAR_FRONT ahead of the spawn).
+    const explicitSpec = (x, z) => ({
         vehicles: [{ ...vehicleSource(), at: [x, z + CAR_FRONT], front: true, yaw: 0 }], scene: xscene, speed: XSPEED,
         // arena: ?n= copies of the vehicle at 90–150 km/h into walls, poles and (?headOn=
         // share of lanes) each other, or (?layout=ring) all at the centre from concentric
@@ -544,11 +562,23 @@
         // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
         drag: qs.get('drag') !== '0',
       });
+    const buildExplicit = () => {
+      xsim?.free();
+      const [x, z] = XSPAWN[scene] ?? [0, 0];
+      xsim = world.explicitSim(explicitSpec(x, z));
       xlayout = xsim.layout();
       return xsim;
     };
     if (EXPLICIT) {
-      buildExplicit();
+      // First build: the vehicle spawned in Rust, then its GPU kernels compiled
+      // without blocking (explicitSimAsync); a restart's buildExplicit is a cache hit.
+      const [x, z] = XSPAWN[scene] ?? [0, 0];
+      if (carKind === 'showcase') { loading.stage('Building the car (Rust)'); await loading.paint(); showcaseBuilt(); }
+      xsim = await world.explicitSimAsync(explicitSpec(x, z), (stage) => {
+        if (stage === 'spawn') loading.stage('Spawning the vehicles (Rust)');
+        else if (stage.startsWith('compile')) loading.stage(`Compiling ${stage.split(' ')[1]} GPU solver kernels`);
+      });
+      xlayout = xsim.layout();
       // The explicit solver collides with its own copies; these only render (not soft
       // obstacles: the arena has hundreds).
       // Rows [centre, half, rotation, kind]: 0/1 box, 2 vertical cylinder (a 16-sided
@@ -695,7 +725,10 @@
     }
     world.reserveMovingRadius(0.5);
     const truckInfo = document.getElementById('truckInfo');
+    loading.stage('Saving the initial state (waits for the GPU)');
     const initial = await saveState(world);
+    loading.stage('Building the renderers');
+    await loading.paint();
 
     // ---------------------------------------------------------------- render data
     // Skin: every soft triangle (global particle indices) with its rest edge lengths.
@@ -2150,7 +2183,12 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       readDrive: () => xsim.readDrive(), wheelBodies: () => wheelBodies.flat().length } : null;
     window.__ready = true;
     statusEl.textContent = `scene ready · ${world.bodyCount()} bodies · ${softs.length} soft bodies`;
-    requestAnimationFrame(frame);
+    // The first frame on screen ends the loading card (its stages: window.__loadTimes).
+    loading.stage('First frame');
+    requestAnimationFrame((t) => {
+      frame(t);
+      device.queue.onSubmittedWorkDone().then(() => { if (!window.__failed) window.__loadTimes = loading.done(); });
+    });
   </script>
 </body>
 </html>

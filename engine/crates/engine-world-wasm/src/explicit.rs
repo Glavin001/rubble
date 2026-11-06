@@ -79,6 +79,16 @@ pub struct ExplicitSim {
     ai: Vec<drive::AiCar>,
 }
 
+/// What [`ExplicitSim::spawn`] spawns: the vehicles, the static boxes and shapes,
+/// the door-pull rig, and the scene's name.
+struct Spawn {
+    vehicles: Vec<Spawned>,
+    boxes: Vec<(Vec3, Vec3)>,
+    shapes: Vec<StaticShape>,
+    pull: Option<Pull>,
+    scene: String,
+}
+
 /// A door pull ([`engine_softbody::crash_rigs::add_door_pull`]): vehicle 0's rig
 /// node pulled from `start` along `dir` at `speed` m/s by a grab spring `k`.
 #[derive(Clone, Copy, Debug)]
@@ -753,6 +763,37 @@ impl WebWorld {
         let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
         ExplicitSim::new(self.world.device(), self.world.queue(), &spec).map_err(err)
     }
+
+    /// [`Self::explicit_sim`], its GPU kernels compiled first without blocking
+    /// (`createComputePipelineAsync`, see `crate::warm_pipelines`): a promise of
+    /// the `ExplicitSim`. Load with this; the synchronous call is then a cache hit
+    /// (a restart may use it). `progress(stage)` (optional) hears each stage:
+    /// `"spawn"`, then `"compile N"` with the number of kernels compiling.
+    #[wasm_bindgen(js_name = explicitSimAsync)]
+    pub fn explicit_sim_async(
+        &self,
+        spec: JsValue,
+        progress: Option<js_sys::Function>,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
+        let (device, queue) = (self.world.device().clone(), self.world.queue().clone());
+        Ok(wasm_bindgen_futures::future_to_promise(async move {
+            let say = |stage: String| {
+                if let Some(f) = &progress {
+                    let _ = f.call1(&JsValue::NULL, &stage.into());
+                }
+            };
+            say("spawn".into());
+            let spawn = ExplicitSim::spawn(&spec).map_err(err)?;
+            let sims: Vec<ExplicitBeams> = spawn.vehicles.iter().map(|v| v.sim.clone()).collect();
+            let specs = ExplicitBeamsGpu::compute_specs(&sims, None);
+            say(format!("compile {}", specs.len()));
+            crate::warm_pipelines(&device, &specs).await;
+            ExplicitSim::assemble(&device, &queue, &spec, spawn)
+                .map(JsValue::from)
+                .map_err(err)
+        }))
+    }
 }
 
 impl ExplicitSim {
@@ -779,6 +820,12 @@ impl ExplicitSim {
         queue: &wgpu::Queue,
         spec: &serde_json::Value,
     ) -> Result<Self, String> {
+        let spawn = Self::spawn(spec)?;
+        Self::assemble(device, queue, spec, spawn)
+    }
+
+    /// The vehicles `spec` spawns and the scene around them (CPU only).
+    fn spawn(spec: &serde_json::Value) -> Result<Spawn, String> {
         let flag = |k: &str| spec.get(k).and_then(|x| x.as_bool()).unwrap_or(true);
         let settings = ExplicitBeamsSettings {
             fast_inv_sqrt: flag("fastInvSqrt"),
@@ -968,6 +1015,30 @@ impl ExplicitSim {
                 warnings,
             });
         }
+        Ok(Spawn {
+            vehicles,
+            boxes,
+            shapes,
+            pull,
+            scene: scene.to_string(),
+        })
+    }
+
+    /// The solver on `device` for what [`Self::spawn`] spawned.
+    fn assemble(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        spec: &serde_json::Value,
+        spawn: Spawn,
+    ) -> Result<Self, String> {
+        let Spawn {
+            vehicles,
+            boxes,
+            shapes,
+            pull,
+            scene,
+        } = spawn;
+        let scene = scene.as_str();
         let sims: Vec<ExplicitBeams> = vehicles.iter().map(|v| v.sim.clone()).collect();
         let mut gpu = ExplicitBeamsGpu::new(device, queue, &sims);
         let timed = spec.get("timing").and_then(|x| x.as_bool()).unwrap_or(true)

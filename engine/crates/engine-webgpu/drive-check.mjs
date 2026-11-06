@@ -11,11 +11,16 @@
 //   cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
 //   wasm-pack build crates/engine-world-wasm --release --target web \
 //     --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
-//   node --experimental-websocket drive-check.mjs [run ...] [--car sedan|showcase|showcase1|hires|...] [--out DIR]
+//   node --experimental-websocket drive-check.mjs [run ...] [--car sedan|showcase|showcase1|hires|...] [--out DIR] [--stock]
+//
+// --stock: a user's Chrome (a visible window, no --enable-unsafe-webgpu or other
+// flags; check-chrome.mjs), where a windowed GPU watchdog applies. Every run also
+// fails a large compute pipeline compiled synchronously without an async warm-up.
 //
 // Runs: yard (settle, throttle, steer, brake), crash (full throttle into the wall),
 // drive (?drive=1 in an ordinary explicit scene: the wall crash scene, driven).
 import { frameContent } from './frame-content.mjs';
+import { chromeArgs, SYNC_COMPILE_PROBE } from './check-chrome.mjs';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
@@ -34,7 +39,9 @@ const OUT = opt('--out', join(ROOT, 'recordings', 'drive'));
 const CAR = opt('--car', 'sedan');
 // --size WxH: the window (screenshots) size; 1280x720 by default.
 const [W, H] = opt('--size', '1280x720').split('x').map(Number);
-const only = args.filter((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWith('--'));
+// --stock: a user's Chrome (a visible window, no WebGPU flags; check-chrome.mjs).
+const STOCK = args.includes('--stock');
+const only = args.filter((a, i) => !a.startsWith('--') && (!args[i - 1]?.startsWith('--') || args[i - 1] === '--stock'));
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 mkdirSync(OUT, { recursive: true });
@@ -80,11 +87,7 @@ const base = `http://127.0.0.1:${server.address().port}`;
 
 const profile = mkdtempSync(join(tmpdir(), 'drive-check-chrome-'));
 const debugPort = 9300 + Math.floor(Math.random() * 500);
-const chrome = spawn(CHROME, [
-  '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
-  '--enable-unsafe-webgpu', `--window-size=${W},${H}`, '--no-first-run', '--no-default-browser-check',
-  '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank',
-], { stdio: 'ignore' });
+const chrome = spawn(CHROME, chromeArgs({ stock: STOCK, port: debugPort, profile, width: W, height: H }), { stdio: 'ignore' });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
 process.on('exit', cleanup);
 
@@ -113,6 +116,10 @@ const evaluate = async (expression) => {
 };
 await send('Runtime.enable');
 await send('Log.enable');
+await send('Page.enable');
+// Every run: no large compute pipeline compiled synchronously (check-chrome.mjs).
+await send('Page.addScriptToEvaluateOnNewDocument', { source: SYNC_COMPILE_PROBE });
+if (STOCK) console.log('stock Chrome: a visible window, no WebGPU flags');
 await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 
 // A screenshot; an empty frame (the studio without the car and scenery: under
@@ -131,7 +138,8 @@ const shot = async (name) => {
 };
 // Wait for the page (after a navigation) to be ready on `solver`; throws on a page error.
 const ready = async (solver) => {
-  for (let i = 0; i < 300; i++) {
+  // Up to 3 min: a cold shader cache compiles the solver's kernels first.
+  for (let i = 0; i < 900; i++) {
     await new Promise((r) => setTimeout(r, 200));
     const err = await evaluate('document.getElementById("err")?.textContent || ""').catch(() => '');
     if (err) throw new Error(`page error: ${err}`);
@@ -271,6 +279,8 @@ for (const name of names) {
   try { res = await RUNS[name](); } catch (e) { res = { ok: false, msg: String(e.message || e) }; }
   const err = await pageError().catch(() => '');
   if (err) res = { ok: false, msg: `${res.msg} · page error: ${err}` };
+  const sync = await evaluate('(window.__syncCompiles || []).join(", ")').catch(() => '');
+  if (sync) res = { ok: false, msg: `${res.msg} · compiled synchronously (a windowed Chrome's GPU watchdog can kill a long compile; warm it with createComputePipelineAsync first): ${sync}` };
   if (empty.length) res = { ok: false, msg: `${res.msg} · empty frames: ${empty.join(', ')}` };
   if (!res.ok && pageErrors.length) res.msg += ` · console: ${pageErrors.slice(0, 3).map((e) => String(e).split('\n')[0]).join(' | ')}`;
   const secs = ((performance.now() - t0) / 1000).toFixed(1);

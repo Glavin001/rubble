@@ -116,11 +116,11 @@ pub struct GpuSnapshot {
 
 /// Vehicle–vehicle contact's pipelines, buffers and status reads.
 struct Contact {
-    /// The plan passes (bounds, pairs, group) and the contact groups' entry.
-    plan: [wgpu::ComputePipeline; 3],
-    groups: wgpu::ComputePipeline,
-    /// The solo vehicles' frame (`EB_VV_SOLO`).
-    solo: wgpu::ComputePipeline,
+    /// Its pipelines: built only for a fleet of more than one vehicle (a single
+    /// vehicle never runs the contact passes: [`FramePlanner`]'s `contact_active`),
+    /// which spares a one-vehicle scene the contact frame's compile (the largest
+    /// kernel, about a minute cold in Chrome on Metal).
+    pipes: Option<ContactPipes>,
     plan_group: wgpu::BindGroup,
     contact_group: wgpu::BindGroup,
     /// Indirect arguments: the solo vehicles (word 0) and the groups (word 4).
@@ -133,6 +133,71 @@ struct Contact {
     /// `engine_exec::explicit_plan::EXPLICIT_LOOP_CAP`.
     cap_at: u64,
     status: std::sync::Mutex<StatusRing>,
+}
+
+/// Vehicle–vehicle contact's pipelines.
+struct ContactPipes {
+    /// The plan passes (bounds, pairs, group) and the contact groups' entry.
+    plan: [wgpu::ComputePipeline; 3],
+    groups: wgpu::ComputePipeline,
+    /// The solo vehicles' frame (`EB_VV_SOLO`).
+    solo: wgpu::ComputePipeline,
+}
+
+/// The vehicle-contact passes' bind group layout entries: the frame's bindings,
+/// and for the plan passes the indirect arguments ([`plan::BIND_ARGS`]).
+fn contact_entries(args: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
+    let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let rw = wgpu::BufferBindingType::Storage { read_only: false };
+    let ro = wgpu::BufferBindingType::Storage { read_only: true };
+    let mut entries = vec![
+        entry(0, wgpu::BufferBindingType::Uniform),
+        entry(1, ro),
+        entry(2, ro),
+    ];
+    entries.extend((3..9).map(|b| entry(b, rw)));
+    if args {
+        entries.push(entry(plan::BIND_ARGS, rw));
+    }
+    entries
+}
+
+/// The wide passes' bind group layout entries (binding 0: one parameter copy per
+/// step, picked by the dynamic offset).
+fn wide_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: binding == 0,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let rw = wgpu::BufferBindingType::Storage { read_only: false };
+    let ro = wgpu::BufferBindingType::Storage { read_only: true };
+    vec![
+        entry(0, wgpu::BufferBindingType::Uniform),
+        entry(1, ro),
+        entry(2, ro),
+        entry(3, rw),
+        entry(4, rw),
+        entry(5, rw),
+        entry(6, rw),
+        entry(7, rw),
+        entry(8, rw),
+        entry(BIND_TABLE, wgpu::BufferBindingType::Uniform),
+    ]
 }
 
 /// A status read: its staging buffer and its map state (0 copied, not yet mapped;
@@ -207,6 +272,7 @@ impl Contact {
         acc: &wgpu::Buffer,
         (status_at, cap_at): (u64, u64),
         args_init: &[u8],
+        build_pipes: bool,
     ) -> Self {
         let args_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("explicit-beams-vv-args"),
@@ -216,30 +282,10 @@ impl Contact {
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
         });
-        let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let rw = wgpu::BufferBindingType::Storage { read_only: false };
-        let ro = wgpu::BufferBindingType::Storage { read_only: true };
         // The plan passes bind the indirect arguments (binding 10); the contact
         // entry, dispatched from them, must not.
         let layout_with = |args: bool| {
-            let mut entries = vec![
-                entry(0, wgpu::BufferBindingType::Uniform),
-                entry(1, ro),
-                entry(2, ro),
-            ];
-            entries.extend((3..9).map(|b| entry(b, rw)));
-            if args {
-                entries.push(entry(plan::BIND_ARGS, rw));
-            }
+            let entries = contact_entries(args);
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("explicit-beams-vv"),
                 entries: &entries,
@@ -286,13 +332,13 @@ impl Contact {
         };
         let (plan_layout, plan_group) = layout_with(true);
         let (contact_layout, contact_group) = layout_with(false);
-        let plan = plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), &plan_layout));
-        let groups = make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout);
-        let solo = make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout);
+        let pipes = build_pipes.then(|| ContactPipes {
+            plan: plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), &plan_layout)),
+            groups: make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout),
+            solo: make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout),
+        });
         Self {
-            plan,
-            groups,
-            solo,
+            pipes,
             plan_group,
             contact_group,
             args: args_buffer,
@@ -417,6 +463,50 @@ impl ExplicitBeamsGpu {
         Self::with_coupling(device, queue, vehicles, None)
     }
 
+    /// Every compute pipeline [`Self::with_coupling`] creates for `vehicles`, as
+    /// plain descriptors: a browser host compiles them ahead with
+    /// `createComputePipelineAsync` (see [`crate::ComputeSpec`]), largest first.
+    pub fn compute_specs(
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+    ) -> Vec<crate::ComputeSpec> {
+        let layout = ExplicitUpload::new(vehicles, coupling).layout;
+        let (aero, lanes) = (layout.aero, layout.lanes);
+        let u = crate::uniformize_workgroup_lanes;
+        let mut specs = vec![crate::ComputeSpec {
+            label: "explicit_beams_frame",
+            wgsl: u(module_wgsl(Kernel::Frame.module(aero, lanes))),
+            entry: plan::FRAME_ENTRY,
+            layout: None,
+        }];
+        if layout.wide_ok {
+            specs.extend(plan::WIDE_PASSES.iter().map(|&entry| crate::ComputeSpec {
+                label: entry,
+                wgsl: u(module_wgsl(entry)),
+                entry,
+                layout: Some(wide_entries()),
+            }));
+        }
+        if vehicles.len() > 1 {
+            specs.extend(plan::VV_PASSES.iter().map(|&entry| crate::ComputeSpec {
+                label: entry,
+                wgsl: u(module_wgsl(entry)),
+                entry,
+                layout: Some(contact_entries(true)),
+            }));
+            for kernel in [Kernel::Contact, Kernel::Solo] {
+                specs.push(crate::ComputeSpec {
+                    label: plan::FRAME_ENTRY,
+                    wgsl: u(module_wgsl(kernel.module(aero, lanes))),
+                    entry: plan::FRAME_ENTRY,
+                    layout: Some(contact_entries(false)),
+                });
+            }
+        }
+        specs.sort_by(|a, b| b.wgsl.len().cmp(&a.wgsl.len()));
+        specs
+    }
+
     /// [`Self::new`] with room for rigid-body proxies per vehicle (the World coupling,
     /// `slang/kernels/explicit_beams_rigid.slang`, [`CouplingLayout`]); off until the
     /// host writes the coupling header's `on` word.
@@ -503,6 +593,7 @@ impl ExplicitBeamsGpu {
             &acc,
             (layout.status.base, layout.status.cap),
             &upload.bytes(plan::BIND_ARGS),
+            vehicles.len() > 1,
         );
         let bufs = [
             params.clone(),
@@ -1091,13 +1182,24 @@ impl ExplicitBeamsGpu {
                 pass.set_bind_group(0, g, &[]);
             }
             Kernel::Solo | Kernel::Contact => {
-                let (solo, groups, g) =
-                    alt.map_or((&c.solo, &c.groups, &c.contact_group), |a| (&a.solo, &a.groups, &a.group));
+                let (solo, groups, g) = alt.map_or_else(
+                    || {
+                        let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
+                        (&p.solo, &p.groups, &c.contact_group)
+                    },
+                    |a| (&a.solo, &a.groups, &a.group),
+                );
                 pass.set_pipeline(if kernel == Kernel::Solo { solo } else { groups });
                 pass.set_bind_group(0, g, &[]);
             }
             Kernel::Vv(i) => {
-                let (p, g) = alt.map_or((&c.plan[i], &c.plan_group), |a| (&a.plan[i], &a.plan_group));
+                let (p, g) = alt.map_or_else(
+                    || {
+                        let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
+                        (&p.plan[i], &c.plan_group)
+                    },
+                    |a| (&a.plan[i], &a.plan_group),
+                );
                 pass.set_bind_group(0, g, &[]);
                 pass.set_pipeline(p);
             }
@@ -1693,33 +1795,9 @@ impl Wide {
             mapped_at_creation: false,
         });
         queue.write_buffer(&table, 0, bytemuck::cast_slice(vehicle_recs));
-        let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty,
-                // The parameters: one copy per step, picked by the offset.
-                has_dynamic_offset: binding == 0,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let rw = wgpu::BufferBindingType::Storage { read_only: false };
-        let ro = wgpu::BufferBindingType::Storage { read_only: true };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("explicit-beams-wide"),
-            entries: &[
-                entry(0, wgpu::BufferBindingType::Uniform),
-                entry(1, ro),
-                entry(2, ro),
-                entry(3, rw),
-                entry(4, rw),
-                entry(5, rw),
-                entry(6, rw),
-                entry(7, rw),
-                entry(8, rw),
-                entry(BIND_TABLE, wgpu::BufferBindingType::Uniform),
-            ],
+            entries: &wide_entries(),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("explicit-beams-wide"),

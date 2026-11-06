@@ -6,6 +6,8 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 #[cfg(feature = "gpu")]
+mod compute_spec;
+#[cfg(feature = "gpu")]
 mod explicit_beams_gpu;
 #[cfg(feature = "gpu")]
 pub mod explicit_coupling;
@@ -21,6 +23,8 @@ mod poses;
 pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
+#[cfg(feature = "gpu")]
+pub use compute_spec::ComputeSpec;
 #[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
     explicit_beams_shipped_wgsl, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu, GpuBeam,

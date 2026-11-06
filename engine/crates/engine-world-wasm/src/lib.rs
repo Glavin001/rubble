@@ -139,6 +139,130 @@ async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), 
     Ok((info, device, queue))
 }
 
+/// Compile `specs` with `createComputePipelineAsync`, all at once, and wait for
+/// them (`engine_webgpu::ComputeSpec`): the host's synchronous creation of the same
+/// descriptors afterwards is a cache hit. Chrome compiles an async pipeline on a
+/// worker thread; a synchronous one on the GPU process's main thread, where a
+/// kernel compiling for longer than the GPU watchdog (the explicit contact frame:
+/// about a minute cold on Metal) kills the GPU process in a windowed browser.
+/// A spec this cannot express, or a compile the browser rejects, is left to the
+/// synchronous creation, which reports it as before.
+pub(crate) async fn warm_pipelines(device: &wgpu::Device, specs: &[engine_webgpu::ComputeSpec]) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use js_sys::{Array, Function, Object, Promise, Reflect};
+        use wasm_bindgen::JsCast;
+        let Some(gpu) = device.as_webgpu() else {
+            return;
+        };
+        let gpu: &JsValue = gpu.as_ref();
+        let call = |obj: &JsValue, name: &str, arg: &JsValue| -> Result<JsValue, JsValue> {
+            let f: Function = Reflect::get(obj, &name.into())?.dyn_into()?;
+            f.call1(obj, arg)
+        };
+        let object = |fields: &[(&str, JsValue)]| -> Result<JsValue, JsValue> {
+            let o = Object::new();
+            for (k, v) in fields {
+                Reflect::set(&o, &(*k).into(), v)?;
+            }
+            Ok(o.into())
+        };
+        let entry = |e: &wgpu::BindGroupLayoutEntry| -> Option<Result<JsValue, JsValue>> {
+            let wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset,
+                min_binding_size,
+            } = e.ty
+            else {
+                return None;
+            };
+            let kind = match ty {
+                wgpu::BufferBindingType::Uniform => "uniform",
+                wgpu::BufferBindingType::Storage { read_only: true } => "read-only-storage",
+                wgpu::BufferBindingType::Storage { read_only: false } => "storage",
+            };
+            Some((|| {
+                let buffer = object(&[
+                    ("type", kind.into()),
+                    ("hasDynamicOffset", has_dynamic_offset.into()),
+                    (
+                        "minBindingSize",
+                        (min_binding_size.map_or(0, |n| n.get()) as f64).into(),
+                    ),
+                ])?;
+                object(&[
+                    ("binding", e.binding.into()),
+                    ("visibility", e.visibility.bits().into()),
+                    ("buffer", buffer),
+                ])
+            })())
+        };
+        let start = |s: &engine_webgpu::ComputeSpec| -> Result<Option<Promise>, JsValue> {
+            let layout = match &s.layout {
+                None => JsValue::from_str("auto"),
+                Some(entries) => {
+                    let list = Array::new();
+                    for e in entries {
+                        match entry(e) {
+                            Some(v) => list.push(&v?),
+                            None => return Ok(None),
+                        };
+                    }
+                    let bgl = call(
+                        gpu,
+                        "createBindGroupLayout",
+                        &object(&[("entries", list.into())])?,
+                    )?;
+                    let groups = Array::of1(&bgl);
+                    call(
+                        gpu,
+                        "createPipelineLayout",
+                        &object(&[("bindGroupLayouts", groups.into())])?,
+                    )?
+                }
+            };
+            let module = call(
+                gpu,
+                "createShaderModule",
+                &object(&[("label", s.label.into()), ("code", s.wgsl.as_str().into())])?,
+            )?;
+            let compute = object(&[("module", module), ("entryPoint", s.entry.into())])?;
+            let desc = object(&[
+                ("label", s.label.into()),
+                ("layout", layout),
+                ("compute", compute),
+            ])?;
+            Ok(Some(
+                call(gpu, "createComputePipelineAsync", &desc)?.dyn_into()?,
+            ))
+        };
+        let mut pending = Vec::new();
+        for s in specs {
+            match start(s) {
+                Ok(Some(p)) => pending.push((s.label, wasm_bindgen_futures::JsFuture::from(p))),
+                Ok(None) => {}
+                Err(e) => web_sys::console::warn_2(
+                    &format!("pipeline warm-up skipped ({})", s.label).into(),
+                    &e,
+                ),
+            }
+        }
+        for (label, p) in pending {
+            if let Err(e) = p.await {
+                web_sys::console::warn_2(
+                    &format!(
+                        "pipeline warm-up failed ({label}); the synchronous creation reports it"
+                    )
+                    .into(),
+                    &e,
+                );
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (device, specs);
+}
+
 /// The limits a world's buffers and kernels run into, as one line.
 pub(crate) fn limits_text(l: &wgpu::Limits) -> String {
     format!(
