@@ -160,8 +160,12 @@ pub fn jbeam_files(
                 s.insert("beamType".into(), json!("|BOUNDED"));
                 s.insert("beamSpring".into(), json!(0));
                 s.insert("beamDamp".into(), json!(0));
-                s.insert("beamLimitSpring".into(), json!(STOP_SPRING));
-                s.insert("beamLimitDamp".into(), json!(STOP_DAMP));
+                let ks = env_f("GEN3_STOP_SPRING", STOP_SPRING);
+                s.insert("beamLimitSpring".into(), json!(ks));
+                s.insert(
+                    "beamLimitDamp".into(),
+                    json!(STOP_DAMP * (ks / STOP_SPRING).sqrt()),
+                );
                 // `GEN3_STOP_CLOSE`: engage after this much closure instead.
                 let close = std::env::var("GEN3_STOP_CLOSE")
                     .ok()

@@ -221,7 +221,7 @@ pub fn sheet_eps(part: Part) -> f32 {
     }
 }
 
-fn env_f(k: &str, d: f32) -> f32 {
+pub fn env_f(k: &str, d: f32) -> f32 {
     std::env::var(k)
         .ok()
         .and_then(|v| v.parse().ok())

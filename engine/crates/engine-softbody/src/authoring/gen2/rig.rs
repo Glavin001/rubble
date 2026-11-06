@@ -63,6 +63,16 @@ pub const FENDER_ROW_BOLT: f32 = 16e3;
 /// An engine mount beam's strength (N): the round-3 value per beam, now in
 /// four break groups (one per block corner).
 pub const ENGINE_MOUNT: f32 = 60e3;
+/// The cooling module and radiator support crushed solid between the block
+/// and the bumper beam (m): a single-row aluminium radiator core (about
+/// 27 mm), a condenser (about 16 mm) and the tie bar's, shroud's and fan's
+/// flattened sheet and hub. An estimate from those parts' depths, not a
+/// measured Accord value; `GEN3_COOLING_STACK` sweeps it.
+pub const COOLING_STACK: f32 = 0.08;
+/// A front wheel's hub centre to the hinge pillar once its tyre is crushed
+/// onto the rim (m): the 16-inch rim's 0.20 m radius plus 3 cm of flattened
+/// tyre and brake hardware.
+pub const WHEEL_STACK: f32 = 0.23;
 /// Neighbourhood reach of the beam graph (m): the body's members and each
 /// closure's frame.
 pub const REACH_BODY: f32 = 0.90;
@@ -1591,6 +1601,33 @@ pub fn rig(model: &Model) -> Rig {
         }
         let _ = si;
     }
+    // The front stack (round 5): the block's front face meets the bumper
+    // beam through the cooling module once what lies between is crushed
+    // solid (COOLING_STACK), as a frontal pulse's late peak is the engine
+    // stopped against the barrier through the radiator support. BOUNDED
+    // stops from the block's front nodes to their two nearest beam nodes.
+    if !old_pt && std::env::var("GEN3_NO_STACK").is_err() {
+        let stack = env_f("GEN3_COOLING_STACK", COOLING_STACK);
+        let front_eng: Vec<usize> = eng
+            .iter()
+            .copied()
+            .filter(|&e| r.g(e).z > pt_z[2] - 0.05)
+            .collect();
+        for &e in &front_eng {
+            let g = r.g(e);
+            for t in r.nearest(Part::BumperF, g, 2, |i| {
+                r.member[i] == Some(Role::BumperBeam)
+            }) {
+                let l = r.g(t).distance(g);
+                if l <= stack + 0.02 {
+                    continue;
+                }
+                let j = r.car.beam(e, t, Role::Stop, body);
+                r.car.beams[j].role = Role::Stop;
+                r.car.stop_close.insert(j, l - stack);
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Suspension: hubs on the body, and rim proxies.
@@ -2099,6 +2136,20 @@ pub fn rig(model: &Model) -> Rig {
     }
 
     // ------------------------------------------------------------------
+    // Push links (round 5): in the ETK the bumper fascia, lamps, fenders
+    // and hood carry SUPPORT beams to the part behind them along the car
+    // (measured in its JBeam: fascia to fender and hood, lamp to fascia,
+    // hood and fender), so a part driven back pushes its neighbour back
+    // instead of sliding past it, and the two can still part (no tension).
+    // gen3's own: from each front-end part's nodes ahead of the front axle
+    // to the nearest node of the part behind it, 4-30 cm back and within
+    // 35° of the car's axis. SUPPORT ([`Role::Bearing`]).
+    // ------------------------------------------------------------------
+    if std::env::var("GEN3_NO_PUSH").is_err() {
+        push_links(&mut r);
+    }
+
+    // ------------------------------------------------------------------
     // Fender bolt rows: a real fender's top flange is bolted down the apron
     // rail every 15-25 cm and its rear edge to the hinge pillar (two or
     // three bolts), so it moves with the apron and the pillar rather than
@@ -2324,6 +2375,30 @@ pub fn rig(model: &Model) -> Rig {
     r.car.centred_damping = true;
     r.car.assign_masses();
 
+    // The wheel stack (round 5): a front wheel pushed back meets the hinge
+    // pillar's base once its tyre is crushed onto the rim (WHEEL_STACK from
+    // the hub's centre), and loads the sill and A-pillar. BOUNDED stops from
+    // both hub nodes to the pillar's base nodes.
+    if std::env::var("GEN3_NO_WHEEL_STACK").is_err() {
+        let stack = env_f("GEN3_WHEEL_STACK", WHEEL_STACK);
+        for s in [1.0f32, -1.0] {
+            let x = lr(s);
+            for hub in [format!("hubFi{x}"), format!("hubFo{x}")] {
+                let h = r.car.id(&hub);
+                for p in [format!("hp0{x}"), format!("hpi0{x}")] {
+                    let t = r.car.id(&p);
+                    let l = r.g(t).distance(r.g(h));
+                    if l <= stack + 0.02 {
+                        continue;
+                    }
+                    let j = r.car.beam(h, t, Role::Stop, body);
+                    r.car.beams[j].role = Role::Stop;
+                    r.car.stop_close.insert(j, l - stack);
+                }
+            }
+        }
+    }
+
     // Wheels and reference nodes.
     for (name, w, s) in [
         ("FL", "F", 1.0f32),
@@ -2424,6 +2499,25 @@ pub fn rig(model: &Model) -> Rig {
     // The footwell: the floor, sills and hinge pillars ahead of the front
     // seats (the side tests strike behind it).
     let foot_y = to_jbeam(Vec3::new(0.0, 0.0, 0.40)).y;
+    // The front crush zone's yield graded along the car (round 5): a rail's
+    // section and gauge grow from its triggered tip to the dash (tailored
+    // blanks), so the crush runs soft first and stiffens as it nears the
+    // cabin. CRUSH_GRADE[0] at the car's nose, [1] at the firewall, linear
+    // between (`GEN3_GRADE_FRONT`, `GEN3_GRADE_REAR`).
+    let nose_y = r
+        .car
+        .nodes
+        .iter()
+        .map(|n| n.p.y)
+        .fold(f32::MAX, f32::min);
+    let (gf, gr) = (
+        env("GEN3_GRADE_FRONT", CRUSH_GRADE[0]),
+        env("GEN3_GRADE_REAR", CRUSH_GRADE[1]),
+    );
+    let front_grade = |y: f32| {
+        let t = ((fw_y - y) / (fw_y - nose_y).max(1e-3)).clamp(0.0, 1.0);
+        gr + (gf - gr) * t
+    };
     for b in &mut r.car.beams {
         if !b.deform.is_finite()
             || b.break_group.is_some()
@@ -2453,13 +2547,18 @@ pub fn rig(model: &Model) -> Rig {
             // The suspension towers (front strut, rear wheelhouse) carry the
             // car's weight into the rails: at the crush zone's 0.28 two of
             // their beams yielded under the parked car; they keep round 3's
-            // 0.4, which none did ([`TOWER_YIELD`]).
+            // 0.4, which none did ([`TOWER_YIELD`]). Round 5: so do the
+            // apron's joints into the hinge pillar's front (`hpf`), the
+            // tower's load path to the cabin: at 0.25 one (hpf0R-ar1R)
+            // yielded parked.
             let tower = |i: usize| {
                 let n = &r.car.nodes[i].name;
-                n.starts_with("tw") || n.starts_with("wh")
+                n.starts_with("tw") || n.starts_with("wh") || n.starts_with("hpf")
             };
             b.deform *= if tower(b.a) || tower(b.b) {
                 cy.max(env("GEN3_TOWER_Y", TOWER_YIELD))
+            } else if mid.y < fw_y - 0.05 {
+                cy * front_grade(mid.y)
             } else {
                 cy
             };
@@ -2589,7 +2688,10 @@ pub fn rig(model: &Model) -> Rig {
 /// wall (surface contact on), round 4's structure: dynamic crush 581 mm at
 /// 0.4, 619 at 0.3, 631 at 0.28 (620-750); t_m 66 / 71 / 72 ms (63-76);
 /// b1 42.1 / 39.8 / 39.2 (<= 39.2).
-pub const CRUSH_YIELD: f32 = 0.28;
+/// Round 5 (push links, stacks, the hinge pillar's joints at the towers'
+/// yield): 620 mm at 0.25, 625 at 0.24, 629 at 0.23; b1 39.4 / 38.6 / 38.6;
+/// restitution 0.201 / 0.207 / 0.202 (each ±0.005 run to run of the yield).
+pub const CRUSH_YIELD: f32 = 0.23;
 /// The suspension towers' beams in the crush zone (see the zone pass).
 pub const TOWER_YIELD: f32 = 0.4;
 /// The footwell's (floor, sills, hinge pillars and firewall ahead of the
@@ -2615,6 +2717,9 @@ pub const SEAT_CM_R: f32 = 0.35;
 /// rear, kick-up): high-strength sections a wide side load reaches through
 /// the sill (`GEN3_CM_Y`).
 pub const CROSS_MEMBER_YIELD: f32 = 3.0;
+/// The front crush zone's yield grade, nose and firewall, on its yield
+/// (1, 1: ungraded; calibrated in round 5 on the pulse's bands).
+pub const CRUSH_GRADE: [f32; 2] = [1.0, 1.0];
 /// The floor pan's (the floor between the cross members and its diagonals):
 /// 0.7 mm sheet, which buckles in plane (`GEN3_PAN_Y`).
 pub const FLOOR_PAN_YIELD: f32 = 0.3;
@@ -2691,6 +2796,61 @@ fn boundary_points(p: &super::model::Part) -> Vec<usize> {
 /// vertex rides nodes within about 10 cm instead of extrapolating past the
 /// part's lattice; the stops carry a closure's edge onto its neighbour as a
 /// flange does. Returns the edge nodes.
+/// The push links (see the call): (front part, part behind) pairs.
+fn push_links(r: &mut Rig) {
+    let pairs = [
+        (Part::BumperF, Part::Body),
+        (Part::BumperF, Part::FenderL),
+        (Part::BumperF, Part::FenderR),
+        (Part::BumperF, Part::Hood),
+        (Part::FenderL, Part::Body),
+        (Part::FenderR, Part::Body),
+        (Part::Hood, Part::Body),
+    ];
+    let axle = AXLE_F;
+    let reach = env_f("GEN3_PUSH_REACH", PUSH_REACH);
+    let cone = (35f32).to_radians().tan();
+    for (pa, pb) in pairs {
+        let fronts: Vec<usize> = (0..r.car.nodes.len())
+            .filter(|&i| {
+                let n = &r.car.nodes[i];
+                n.part == pa && !n.contact && r.g(i).z > axle
+            })
+            .collect();
+        for a in fronts {
+            let ga = r.g(a);
+            let best = (0..r.car.nodes.len())
+                .filter(|&j| {
+                    let n = &r.car.nodes[j];
+                    n.part == pb
+                        && !n.contact
+                        && !n.name.starts_with("hub")
+                        && !n.name.starts_with("rim")
+                })
+                .filter_map(|j| {
+                    let d = r.g(j) - ga;
+                    let back = -d.z;
+                    let side = (d.x * d.x + d.y * d.y).sqrt();
+                    (back >= PUSH_MIN && back <= reach && side <= cone * back)
+                        .then_some((d.length(), j))
+                })
+                .min_by(|x, y| x.0.total_cmp(&y.0));
+            if let Some((_, b)) = best {
+                if !r.car.has_beam(a, b) {
+                    let part = if pa == Part::Body { pb } else { pa };
+                    let j = r.car.beam(a, b, Role::Bearing, part);
+                    r.car.beams[j].role = Role::Bearing;
+                }
+            }
+        }
+    }
+}
+
+/// Push links reach 4 cm to [`PUSH_REACH`] behind a node (shorter ones are
+/// the shut line's own edge stops).
+pub const PUSH_MIN: f32 = 0.04;
+pub const PUSH_REACH: f32 = 0.30;
+
 fn edge_nodes(
     r: &mut Rig,
     model: &Model,

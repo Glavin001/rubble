@@ -233,6 +233,15 @@ fn rest_drift_every_part_within_5_mm() {
         worst.push((p.name.clone(), mx));
     }
     println!("broken {broken}, bent {bent}");
+    let name = |i: u32| {
+        l.desc
+            .nodes
+            .get(i as usize)
+            .map_or(format!("#{i}"), |n| n.name.clone())
+    };
+    for b in l.sim.beams.iter().filter(|b| b.bent() || b.broken) {
+        println!("  bent or broken: {}-{}", name(b.a), name(b.b));
+    }
     assert_eq!((broken, bent), (0, 0));
     for (n, mx) in worst {
         assert!(mx <= 0.005, "{n}: {:.1} mm", mx * 1e3);
