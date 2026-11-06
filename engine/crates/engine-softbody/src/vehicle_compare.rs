@@ -1238,6 +1238,7 @@ pub fn visual_metrics(
     pairs.dedup();
     let mut gaps: Vec<f32> = Vec::new();
     let (mut g1, mut g5, mut gt) = (0usize, 0usize, 0usize);
+    let mut seam_by: std::collections::BTreeMap<String, usize> = Default::default();
     for &(i, j) in &pairs {
         if !ok(p1, i) || !ok(p1, j) {
             gt += 1;
@@ -1249,8 +1250,17 @@ pub fn visual_metrics(
         }
         if g > 0.05 {
             g5 += 1;
+            if std::env::var("SEAM_DEBUG").is_ok() {
+                let nm = |k: usize| v.pieces.get(piece[k] as usize).map_or("?", |q| q.0.as_str());
+                *seam_by.entry(format!("{} / {}", nm(i), nm(j))).or_insert(0usize) += 1;
+            }
         }
         gaps.push(g);
+    }
+    if !seam_by.is_empty() {
+        let mut v: Vec<_> = seam_by.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        eprintln!("seams opened > 5 cm by piece pair: {:?}", &v[..v.len().min(12)]);
     }
     json!({
         "available": true, "vertices": verts.len(), "triangles": tris.len(),
