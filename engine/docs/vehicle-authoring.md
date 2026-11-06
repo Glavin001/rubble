@@ -2342,7 +2342,6 @@ with its members' stations as they are. The 0.24 m lattice stays the default.
 - **Ties.** Every spring beam at a contact node is a tie: the original sheet
   edges, the lane chords' halves and the lane webs to the inner chord. Ties stay
   out of the section cuts, so a section's yield is its structural beams'.
-  - Body dashpots from structural nodes go to structural nodes.
 - **A8 lanes.** The outer surface keeps every 0.24 m node. A pole meets a
   contact node, and its ties carry the load to the structure.
 
@@ -2440,8 +2439,9 @@ second contact row were not needed.
   → 0.015), so they ring 2× longer after the wall. The contact nodes' ties are
   damped at the part's ζ on light nodes. The coarse lattice's stiffer beams on
   heavier nodes raise ω_pair, so stiffness-proportional damping gives a low mode
-  less (`vehicle-test-strategy.md`, layer 1). Re-rating the body dashpots
-  structural-to-structural did not restore it. Open.
+  less (`vehicle-test-strategy.md`, layer 1). Pairing structural nodes' body
+  dashpots only with structural nodes was measured and not kept: door ζ 0.015
+  and 0.010, ripple 4.5–6.9 mm. Open.
 - *Bonnet.* It takes `n`'s restitution to 0.129, just under its band (sd 0.004).
 - *Body.* It gives nothing until the members are re-stationed.
 
