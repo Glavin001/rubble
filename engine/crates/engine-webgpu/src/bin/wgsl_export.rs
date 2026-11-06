@@ -67,6 +67,22 @@ fn main() -> anyhow::Result<()> {
         .arg(&draw)
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for {}", draw.display());
+    // The playground's render layers (slang/render/*.slang, engine/docs/playground-plan.md
+    // phase 4): each page draws through these, not shaders of its own.
+    for (name, entries) in [(
+        "rigid_bodies",
+        &[("vs", "vertex"), ("fs", "fragment"), ("vsGround", "vertex"), ("fsGround", "fragment")][..],
+    )] {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../slang/render/{name}.slang"));
+        let mut cmd = std::process::Command::new(engine_slang_build::find_slangc()?);
+        cmd.args(["-target", "wgsl"]);
+        for (entry, stage) in entries {
+            cmd.args(["-entry", entry, "-stage", stage]);
+        }
+        let status = cmd.arg("-o").arg(out.join(format!("{name}.wgsl"))).arg(&src).status()?;
+        anyhow::ensure!(status.success(), "slangc failed for {}", src.display());
+    }
     // Soft-body skinning (standalone, run after the step): the same module the
     // native SoftSkinner embeds.
     std::fs::write(out.join("soft_skin.wgsl"), engine_webgpu::SOFT_SKIN_WGSL)?;
