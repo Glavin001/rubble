@@ -889,6 +889,74 @@ fn expand(
     out
 }
 
+/// The fuel's mass in each `fuelTank` of the parts' `energyStorage` rows [N], [ES]
+/// (jbeam-semantics-spec.md §40): `startingFuelCapacity` (L; default
+/// `fuelCapacity`) × `fuelLiquidDensity` (kg/L; default the `energyType`'s), spread
+/// evenly over the nodes of the tank's `fuel` engine groups and added to their
+/// `nodeWeight`. **Choice** (BeamNG names the presets, not their densities):
+/// gasoline 0.74, diesel 0.84, kerosene 0.80 kg/L, an unnamed type gasoline; a
+/// tank with no density, no fuel or no nodes adds nothing (warned).
+fn fuel_mass(
+    db: &JbeamDb,
+    parts: &[Placed],
+    vars: &HashMap<String, f64>,
+    engine_groups: &HashMap<u32, Vec<String>>,
+    desc: &mut SoftVehicleDesc,
+) {
+    let num = |v: Option<&Value>| v.and_then(|v| resolve(v, vars)).and_then(|v| v.as_f64());
+    for p in parts {
+        let part = &db.parts[&p.name];
+        let Some(rows) = part.get("energyStorage").and_then(Value::as_array) else {
+            continue;
+        };
+        for row in rows.iter().skip(1).filter_map(Value::as_array) {
+            let (Some("fuelTank"), Some(name)) = (row.first().and_then(Value::as_str), row.get(1).and_then(Value::as_str)) else {
+                continue;
+            };
+            let Some(tank) = part.get(name).and_then(Value::as_object) else {
+                continue;
+            };
+            let capacity = num(tank.get("fuelCapacity")).unwrap_or(0.0);
+            let litres = num(tank.get("startingFuelCapacity")).unwrap_or(capacity).max(0.0);
+            let density = num(tank.get("fuelLiquidDensity")).or_else(|| {
+                match tank.get("energyType").and_then(Value::as_str).unwrap_or("gasoline") {
+                    "gasoline" => Some(0.74),
+                    "diesel" => Some(0.84),
+                    "kerosene" => Some(0.80),
+                    _ => None,
+                }
+            });
+            let groups: Vec<&str> = match tank.get("fuel").and_then(|f| f.get("[engineGroup]:")) {
+                Some(Value::String(g)) => vec![g.as_str()],
+                Some(Value::Array(gs)) => gs.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            let mut nodes: Vec<u32> = engine_groups
+                .iter()
+                .filter(|(_, g)| g.iter().any(|g| groups.contains(&g.as_str())))
+                .map(|(&i, _)| i)
+                .collect();
+            nodes.sort_unstable();
+            let Some(density) = density else {
+                desc.warnings.push(format!("fuel tank `{name}`: energy type without a density; its fuel has no mass"));
+                continue;
+            };
+            let mass = litres * density;
+            if mass <= 0.0 {
+                continue;
+            }
+            if nodes.is_empty() {
+                desc.warnings.push(format!("fuel tank `{name}`: no node in its fuel groups {groups:?}; its {mass:.1} kg of fuel has no node"));
+                continue;
+            }
+            let share = (mass / nodes.len() as f64) as f32;
+            for i in nodes {
+                desc.nodes[i as usize].mass += share;
+            }
+        }
+    }
+}
+
 /// JBeam frame (+X left, +Y rear, +Z up) → Rubble (+X left, +Y up, +Z forward).
 pub fn to_rubble(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], -p[1]]
@@ -1251,6 +1319,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     let mut coupler_fields: BTreeMap<u32, Map<String, Value>> = BTreeMap::new();
     let mut part_nodes: Vec<(String, Vec<u32>)> = Vec::new();
     let mut group_nodes: Vec<(String, Vec<u32>)> = Vec::new();
+    // Each node's `engineGroup` names (its last definition's), for the tanks' mass.
+    let mut engine_groups: HashMap<u32, Vec<String>> = HashMap::new();
     for (pi, f) in expand(&db, &parts, "nodes", &vars) {
         let Some(id) = f.get("id").and_then(|v| {
             v.as_str()
@@ -1318,6 +1388,12 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         } else {
             coupler_fields.remove(&index);
         }
+        let eg: Vec<String> = match f.get("engineGroup") {
+            Some(Value::String(g)) if !g.is_empty() => vec![g.clone()],
+            Some(Value::Array(gs)) => gs.iter().filter_map(Value::as_str).filter(|g| !g.is_empty()).map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+        engine_groups.insert(index, eg);
         let mut add = |list: &mut Vec<(String, Vec<u32>)>, name: &str| match list
             .iter_mut()
             .find(|(n, _)| n == name)
@@ -1344,6 +1420,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             _ => {}
         }
     }
+    fuel_mass(&db, &parts, &vars, &engine_groups, &mut desc);
     desc.node_group_nodes = group_nodes.clone();
     for g in &mut desc.node_group_nodes {
         g.1.sort_unstable();
@@ -2252,6 +2329,34 @@ mod tests {
       }
     }
     "#;
+
+    /// A fuel tank's fuel (`energyStorage`, spec §40): its starting volume × its
+    /// type's density, spread evenly over its `fuel` engine-group nodes; a variable
+    /// sets the volume; nodes outside the group keep their weight.
+    #[test]
+    fn fuel_tank_mass_spreads_over_its_fuel_nodes() {
+        let tank = |rows: &str| {
+            format!(
+                r#"{{"t": {{"slotType": "main",
+                "variables": [["name", "type", "unit", "category", "default", "min", "max"], ["$fuel", "range", "L", "c", 40, 0, 60]],
+                {rows}
+                "nodes": [["id", "posX", "posY", "posZ"], {{"nodeWeight": 5}},
+                    ["a", 0, 0, 0], {{"engineGroup": ["fuel"]}}, ["f1", 1, 0, 0], ["f2", 0, 1, 0],
+                    {{"engineGroup": ""}}, ["b", 0, 0, 1]],
+                "beams": [["id1:", "id2:"], ["a", "f1"], ["f1", "f2"], ["f2", "b"]]}}}}"#
+            )
+        };
+        let plain = load_jbeam(&[("t.jbeam", &tank(""))], None).unwrap();
+        assert!(plain.nodes.iter().all(|n| n.mass == 5.0));
+        let with = tank(
+            r#""energyStorage": [["type", "name"], ["fuelTank", "main"]],
+               "main": {"energyType": "diesel", "fuelCapacity": 60, "startingFuelCapacity": "$fuel", "fuel": {"[engineGroup]:": ["fuel"]}},"#,
+        );
+        let d = load_jbeam(&[("t.jbeam", &with)], None).unwrap();
+        let m: Vec<f32> = d.nodes.iter().map(|n| n.mass).collect();
+        let share = (40.0 * 0.84 / 2.0) as f32;
+        assert_eq!(m, vec![5.0, 5.0 + share, 5.0 + share, 5.0]);
+    }
 
     #[test]
     fn loads_parts_slots_variables_and_tables() {

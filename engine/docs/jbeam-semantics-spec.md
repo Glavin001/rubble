@@ -2285,8 +2285,7 @@ whose damping is centred in time and diverge in ours.
   `beamDampVelocitySplit` limit beyond §22, or a per-node spring/mass limit.
 * [N] documents one mass rule the importer drops: a fuel tank's mass is spread
   over the nodes of its `fuel` engine group. The SUV's tank nodes are not the
-  ones that vibrate (`rx2l`), so it is not the cause; left as a follow-up (it
-  needs the powertrain's tank capacity, out of scope).
+  ones that vibrate (`rx2l`), so it is not the cause; implemented since (§40).
 
 So the law is documented and ours matches it (§29.1); the time level of the
 velocity in the dashpot is not. Centred damping is the standard explicit answer
@@ -2414,3 +2413,26 @@ Sources:
   the modified velocity Verlet with the dissipative force at a predicted velocity
   (λ = ½).
 * [CI], [I], [N], [PN] as in the header.
+
+## 40. Fuel-tank mass (2026-11-06)
+
+What BeamNG documents: [N] "`fuel`: These nodes contain the mass of the fuel inside
+the vehicle's fuel tank, which will be spread evenly between them and added to
+their nodeWeight"; a vehicle can have several tanks, each with its own engine group.
+[ES] (https://documentation.beamng.com/modding/vehicle/sections/energystorage/,
+retrieved 2026-11-06): a `fuelTank` row of `energyStorage` names a table with
+`energyType` ("Presets for energy density and weight density": gasoline, diesel,
+kerosene; any other needs `energyDensity` and `fuelLiquidDensity`),
+`fuelLiquidDensity` (kg/L), `fuelCapacity` (L, default 0), `startingFuelCapacity`
+(L, default `fuelCapacity`, "usually tied to a variable") and `fuel` (the nodes, e.g.
+`{"[engineGroup]:": ["fuel"]}`); the nodes "share the fuel's weight equally".
+
+**Rule** (`jbeam.rs` `fuel_mass`): for each `fuelTank`, starting volume ×
+density, spread evenly over the nodes whose `engineGroup` (their last definition's)
+is one of the tank's `fuel` groups, added to their `nodeWeight` at load. **Choice**:
+BeamNG names the presets but not their densities; gasoline 0.74, diesel 0.84,
+kerosene 0.80 kg/L (typical values); an `energyType` other than these without
+`fuelLiquidDensity`, or a tank whose groups have no node, adds nothing and warns.
+Other tank types (N₂O, air) are not simulated. Content without a `fuelTank` loads
+as before, bit for bit. The full-size SUV's default 90 L of petrol is 66.6 kg on its
+tank's nodes.
