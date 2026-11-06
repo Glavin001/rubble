@@ -252,6 +252,8 @@ pub const ZETA: f32 = 0.04;
 /// The explicit step's real bound with margin: the highest spring mode at
 /// ω_max·h ≤ 1.85 (symplectic Euler diverges past 2).
 pub const OMEGA_H: f32 = 1.85;
+/// The bound under centred damping (§39: stable below 2 at any ζ), with margin.
+pub const OMEGA_H_CENTRED: f32 = 1.92;
 
 impl Role {
     pub fn spec(self, part: Part) -> RoleSpec {
@@ -393,6 +395,11 @@ pub struct Car {
     /// The Gershgorin row cap only on contact-only nodes' ties (the
     /// structure is left to the measured bound, the power iteration).
     pub row_cap_contact_only: bool,
+    /// The car runs with centred damping (the BeamNG profile's default,
+    /// jbeam-semantics-spec.md §39): the step is stable to ω·h < 2 whatever
+    /// the damping, so the bound is the springs' highest mode at
+    /// [`OMEGA_H_CENTRED`], damping not counted.
+    pub centred_damping: bool,
     by_name: HashMap<String, usize>,
     pair: HashMap<(usize, usize), usize>,
 }
@@ -1012,6 +1019,7 @@ impl Car {
             }
         }
         let mut omega_h = 0.0;
+        let centred = self.centred_damping;
         for round in 0..2000 {
             let iters = if round == 0 { 400 } else { 40 };
             let mut lam = 0.0f32;
@@ -1019,7 +1027,7 @@ impl Car {
                 let mut y = vec![Vec3::ZERO; n];
                 for (j, b) in self.beams.iter().enumerate() {
                     let d = dirs[j];
-                    let keff = ks[j] + 2.0 * damp(ks[j], b) / H;
+                    let keff = ks[j] + if centred { 0.0 } else { 2.0 * damp(ks[j], b) / H };
                     let f = d * (keff * d.dot(x[b.a] - x[b.b]));
                     y[b.a] += f;
                     y[b.b] -= f;
@@ -1038,13 +1046,14 @@ impl Car {
                 x = y.into_iter().map(|v| v / ny.max(1e-30)).collect();
             }
             omega_h = lam.sqrt() * H;
+            let limit = if centred { OMEGA_H_CENTRED } else { OMEGA_H };
             if std::env::var("GEN3_MODE").is_ok() && (round < 3 || round % 50 == 0 || omega_h <= OMEGA_H) {
                 let mut v: Vec<(f32, usize)> = (0..n).map(|i| (x[i].length(), i)).collect();
                 v.sort_by(|a, b| b.0.total_cmp(&a.0));
                 let top: Vec<String> = v.iter().take(6).map(|&(a, i)| format!("{} {:.2} ({:.2} kg)", self.nodes[i].name, a, m[i])).collect();
                 eprintln!("mode round {round}: omega_h {omega_h:.3}: {}", top.join(", "));
             }
-            if omega_h <= OMEGA_H {
+            if omega_h <= limit {
                 break;
             }
             // Soften the beams that carry the mode: those with at least a
@@ -1056,7 +1065,7 @@ impl Car {
                 .iter()
                 .enumerate()
                 .map(|(j, b)| {
-                    let keff = ks[j] + 2.0 * damp(ks[j], b) / H;
+                    let keff = ks[j] + if centred { 0.0 } else { 2.0 * damp(ks[j], b) / H };
                     keff * dirs[j].dot(x[b.a] - x[b.b]).powi(2)
                 })
                 .collect();

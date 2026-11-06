@@ -1965,6 +1965,7 @@ pub fn rig(model: &Model) -> Rig {
     r.car.sheet_area = Some(voronoi_area(model, &r.car));
     r.car.mass_floor = Some(0.7);
     r.car.row_cap_contact_only = false;
+    r.car.centred_damping = true;
     r.car.assign_masses();
 
     // Wheels and reference nodes.
