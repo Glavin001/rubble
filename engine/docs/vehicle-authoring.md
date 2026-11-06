@@ -3455,3 +3455,37 @@ transverse–longitudinal). Medium, front left door unless noted:
   and its catchers lie on one line of each bay. New groups: `bow_r` (a rear roof
   bow), `door_belt_f/_r`, `door_mid_f/_r` (the doors' belt and inner rails, with
   `_r` mirrors); `floor_brace1`–`4` are gone (lumped shear panels instead).
+
+### sedan1's references after the yield fix and the contact staging (2026-11-06)
+
+Re-run of `showcase_car` and `crash_invariants` (CPU, default tests) after two
+solver changes: JBeam yield follows the elastic force only (jbeam-semantics-spec.md
+§3; sedan1's profile beams use the JBeam NORMAL rule) and `feat/jbeam-features`'
+contact work guard, residual pass and quantisation-neutral staging (spec §37.1).
+Before: d0948ba9; after: this branch. Same machine.
+
+- **Unchanged, failing before and after** (identical numbers): `n_wall_matches_the_nhtsa_sedans`
+  (restitution 0.2018 against 0.13–0.20), `f_wall_at_120_kmh…` (the 120 km/h ledger
+  rises 13.03 J between tenths), `g_pulling_a_door_tears_it_off` (the latch lets go at
+  78.1 kN against 30.0–64.3), `t_car_to_car_t_bone_at_80_kmh` (13 of 1,165 striker
+  nodes in the struck car's skin).
+- **Now passing:** `fixed_contact_quantisation_does_no_work` (48 km/h: +0.0102 J over
+  the run before, under 0.01 J after) and `contacts_do_no_positive_work` (56 km/h: the
+  contacts and their position steps added 0.379 J beyond 2 % of the steps' energy
+  over a tenth before).
+- **Moved** (`crash_invariants`, sedan1):
+
+  | Row | Before | After |
+  |---|---|---|
+  | Wall: lid vs rear body peak / end | 89.4 / 23.3 mm | 90.5 / 23.7 mm |
+  | Wall: rear body RMS / max | 17.2 / 187.6 mm | 17.2 / 186.0 mm |
+  | Wall: rear third plastic | 35 | 36 |
+  | Wall: ripple body / bootlid / bonnet / door | 3.5 / 1.5 / 0.7 / 2.3 mm | 3.3 / 3.2 / 0.8 / 3.3 mm |
+  | Wall: whole car (broken, plastic) | (13, 953) | (13, 939) |
+  | Drive: lid peak / end; rear RMS / max | 1.1 / 0.4; 0.4 / 1.9 mm | 1.5 / 0.5; 0.5 / 2.1 mm |
+  | Detached door: drawn triangles joining it (without fallback) | 842 | 1,070 (0 with it, both) |
+  | Settle (crushed car to 12 s): KE per second, 2nd–12th | 1,863 … 4.0 J | 2,068 … 4.1 J; 12th-second rms 45 → 37 mm/s |
+
+  The quantisation and contact-work rows (`showcase_car`) moved with the staging
+  (largest error on a node 0.10–0.13 N → 0.07–0.10 N). Every row stays within its
+  test's bound; the four failures are as before.
