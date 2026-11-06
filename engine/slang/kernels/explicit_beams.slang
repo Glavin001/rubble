@@ -6363,6 +6363,15 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
         uint gt = gNext[base + 2u * i];
         uint h = gNext[base + 2u * i + 1u];
         bool first = true;
+#ifdef EB_ABLATE
+        // Measurement only: 1048576 * 2 each hit applied alone, unordered (no scans).
+        if ((gP.ablate & 2097152u) != 0u)
+        {
+            uint vh2 = gStatic[gP.nodeInfoBase + h].w;
+            vvTry(vvTriangle(gt, oa, r), gt, h, nf3(asfloat(gMisc[vh2].xyz) + gNodes[h * 3u].xyz), vh2, r, parity, slot);
+            continue;
+        }
+#endif
         for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++)
         {
             if (gNext[base + 2u * j + 1u] == h && gNext[base + 2u * j] < gt)
