@@ -849,3 +849,32 @@ this was written, so `cpl_plan` still scans every collider for every vehicle eac
 `cpl_plan` reads their candidates and the sleep rule's World trigger becomes the
 broadphase's touch mark (a moving collider entering a sleeping vehicle's fat box); no
 second broadphase is built here.
+
+**Update (merge of `feat/softbody-world-broadphase` 3346fbac).**
+- `cpl_query` now takes each vehicle's candidates from the World's persistent resting
+  table plus the moving and moved lists. It runs on the lane-parallel plan and the
+  proxied list.
+- A sleeping vehicle keeps its bounds and is woken when a moving body comes near.
+
+Measured (`vehicle_scale_bench`, which now reports how many measured steps were planned
+from the broadphase):
+- **Idle map: every measured step plans from the broadphase.**
+- **1,000 parked + 10 driving: every step plans by the scan.** That World has only its
+  ground plane, and the rigid step keeps the awake-indexed resting table only for grids
+  of more than 512 colliders (`rigid_plan::awake_broadphase`). The scan there covers one
+  collider, so it costs nothing extra.
+
+Idle map, interleaved A/B, before the merge (scan) against after it (broadphase); p50 ms
+of two runs each, CSV `measurements/vehicle-scale/broadphase_ab.csv`:
+
+| Map side (m) | 500 | 1000 | 2000 | 4000 |
+|---|---|---|---|---|
+| Scan | 3.13 / 1.76 | 2.08 / 2.02 | 2.75 / 2.73 | 7.13 / 7.07 |
+| Broadphase | 1.79 / 3.71 | 2.09 / 3.68 | 2.78 / 4.20 | 6.98 / 7.26 |
+| Vehicles asleep | 11 of 16 | 45 of 64 | 183 of 256 | 745 of 1,024 |
+
+The two paths cost the same within noise: with 6,400 colliders the scan was not what grew
+with area. **Cost is still not flat in area.** About 27–30 % of the parked repo sedans
+never meet the rule (§10.3), and that share is the same at every map size, so their
+frames grow with the map. That is the residual motion that centred damping is expected
+to remove.

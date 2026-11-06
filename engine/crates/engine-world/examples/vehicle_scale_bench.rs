@@ -109,16 +109,22 @@ fn measure(w: &mut World, warm: u32, steps: u32) -> anyhow::Result<(f64, f64, f6
     }
     let mut ms = Vec::with_capacity(steps as usize);
     let mut ran = 0;
+    let mut broad = 0;
     for _ in 0..steps {
         w.step()?;
-        ran += w.poll_blocking()?.iter().filter(|f| f.ran).count();
+        let r = w.poll_blocking()?.iter().filter(|f| f.ran).count();
+        ran += r;
+        // The coupling plan's source this step (the World broadphase or the scan).
+        if r > 0 && w.explicit_plan_used_broadphase() == Some(true) {
+            broad += 1;
+        }
         if let Some(t) = w.last_submit_instant() {
             ms.push(t.elapsed().as_secs_f64() * 1e3);
         }
     }
     let s = w.explicit_sleep_states();
     eprintln!(
-        "  {ran} of {steps} measured steps ran; {} of {} vehicles asleep",
+        "  {ran} of {steps} measured steps ran ({broad} planned from the World broadphase); {} of {} vehicles asleep",
         s.iter().filter(|x| x.1).count(),
         s.len()
     );
