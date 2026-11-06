@@ -783,6 +783,60 @@ fn beamng_node_pass(
     (added, upgraded, ties)
 }
 
+/// BeamNG's node pattern: the BX's measured damping rate Σc/m (1/s) per
+/// node, the median over its part's nodes on Rubble's solver
+/// (`showcase_car::light_node_damping` with `RUBBLE_JBEAM_BX`), its nodes
+/// split at the part's median mass: `bx_door` 1,271 (light) and 590 (heavy),
+/// `bx_hood` 936 (one class), `bx_body_coupe` 735 and 787. A contact-only
+/// node takes the light rate, a structural node the heavy; `None` for parts
+/// the pattern does not build.
+pub fn bx_node_damping_rate(part: &str, contact: bool) -> Option<f32> {
+    let (light, heavy) = if part.starts_with("door") {
+        (1271.4, 590.0)
+    } else if part.starts_with("bonnet") {
+        (936.4, 936.4)
+    } else if part == "body" {
+        (735.3, 786.7)
+    } else {
+        return None;
+    };
+    Some(if contact { light } else { heavy })
+}
+
+/// BeamNG's node pattern: raise each patterned part's node to the BX's
+/// damping rate ([`bx_node_damping_rate`]) through the body dashpot it is
+/// from, both of the dashpot's nodes kept within 0.9 × [`super::skeleton::C_RATIO`].
+fn bx_node_damping(sk: &mut Skeleton, shell: &Shell, body_dash: &[(usize, u32)]) {
+    let n = sk.nodes.len();
+    let mut csum = vec![0.0f32; n];
+    for b in &sk.beams {
+        csum[b.a as usize] += b.mat.damp;
+        csum[b.b as usize] += b.mat.damp;
+    }
+    let cap = 0.9 * super::skeleton::C_RATIO;
+    let mut order: Vec<(usize, u32)> = body_dash.to_vec();
+    order.sort_by_key(|x| x.1);
+    for (j, i) in order {
+        let iu = i as usize;
+        let Some(rate) = bx_node_damping_rate(
+            &sk.parts[sk.nodes[iu].part as usize],
+            shell.contact.contains(&i),
+        ) else {
+            continue;
+        };
+        let o = (sk.beams[j].a + sk.beams[j].b - i) as usize;
+        let (mi, mo) = (sk.nodes[iu].mass, sk.nodes[o].mass);
+        let want = (rate * mi - csum[iu])
+            .min(cap * mi - csum[iu])
+            .min(cap * mo - csum[o]);
+        if want > 0.0 {
+            sk.beams[j].mat.damp += want;
+            csum[iu] += want;
+            csum[o] += want;
+        }
+    }
+}
+
 /// The skin's spacing against the frame's era (25–40 cm): the light skin
 /// tier is denser than the frame, so dents and creases are local.
 pub const SKIN_DENSITY: f32 = 1.0;
@@ -3885,8 +3939,25 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             for &(j, _) in &body_dash {
                 let (a, b) = (sk.beams[j].a as usize, sk.beams[j].b as usize);
                 let m = sk.nodes[a].mass.min(sk.nodes[b].mass);
+                // (BeamNG's node pattern: a dashpot at a contact-only node
+                // is rated on its structural end's mass, the panel mass it
+                // damps; `h·c/m` at the contact node stays far under
+                // `C_RATIO`.)
+                let m = match (
+                    shell.contact.contains(&(a as u32)),
+                    shell.contact.contains(&(b as u32)),
+                ) {
+                    (true, false) => sk.nodes[b].mass,
+                    (false, true) => sk.nodes[a].mass,
+                    _ => m,
+                };
                 sk.beams[j].mat.damp = BX_BODY_DASHPOT_RATE * m;
             }
+            // BeamNG's node pattern: each node of a patterned part damped at
+            // least at the BX's measured rate for its kind of node
+            // ([`bx_node_damping_rate`]), its own body dashpot carrying the
+            // difference (`BX_NODE_DAMPING=0` leaves it out, a measurement
+            // switch).
         }
         sk.exact_lengths = true;
         // The profile it ships with (spec §36). `BEAMNG_PROFILE=0` leaves the
@@ -3906,6 +3977,19 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .unwrap_or(AERO_DRAG_COEF);
         sk.drag_coef = Some((d, d));
         sk.cap_to_bound()?;
+        // BeamNG's node pattern: each node of a patterned part damped at
+        // least at the BX's measured rate for its kind of node
+        // ([`bx_node_damping_rate`]) at the built stiffnesses, its own body
+        // dashpot carrying the difference; the bound then takes what the
+        // damping adds (`BX_NODE_DAMPING=0` leaves it out, a measurement
+        // switch).
+        if def.damping.is_some()
+            && !shell.contact.is_empty()
+            && std::env::var("BX_NODE_DAMPING").map_or(true, |v| v != "0")
+        {
+            bx_node_damping(&mut sk, &shell, &body_dash);
+            sk.cap_to_bound()?;
+        }
         for (b, &e) in sk.beams.iter_mut().zip(&elong) {
             if e >= 0.0 {
                 // (A sheet edge given its real yield: the strength it had
@@ -4787,8 +4871,12 @@ fn one_tier_masses(
         let fine = area.clone();
         for c in cs {
             let e = &nbr[&c];
-            let keep =
-                (CONTACT_STRIP * e.iter().map(|x| 0.5 * x.1).sum::<f32>()).min(fine[c as usize]);
+            let keep = (std::env::var("CONTACT_STRIP")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(CONTACT_STRIP)
+                * e.iter().map(|x| 0.5 * x.1).sum::<f32>())
+            .min(fine[c as usize]);
             let to: Vec<u32> = e
                 .iter()
                 .map(|x| x.0)

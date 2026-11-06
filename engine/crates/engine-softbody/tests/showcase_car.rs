@@ -8485,3 +8485,107 @@ fn beamng_topology_census() {
         format!("{:?}", s.beams[j].kind)
     });
 }
+
+/// How a car damps its light nodes (a measurement, `--ignored`): per part,
+/// its nodes split at the part's median mass, and for each half the median
+/// node mass, the median damping ratio of its spring beams on their own
+/// two-mass mode (ζ = c / 2√(k·μ)), damping-only beams per node, and the
+/// median Σc/m per node (1/s, the node's damping rate). `RUBBLE_JBEAM_BX`:
+/// BeamNG's BX; else sedan1 (`BEAMNG_NODES` splits by contact-only instead).
+#[test]
+#[ignore]
+fn light_node_damping() {
+    let (s, n, part_of, light): (
+        ExplicitBeams,
+        usize,
+        Vec<Option<String>>,
+        Option<HashSet<usize>>,
+    ) = if let Some(desc) =
+        beamng_desc().filter(|_| std::env::var("CAR").map_or(true, |c| c == "bx"))
+    {
+        let s = beamng_spawn(&desc, Vec3::ZERO, 0.0);
+        let n = desc.nodes.len();
+        let mut part = vec![None; n];
+        for p in &desc.parts {
+            for &i in &p.nodes {
+                if part[i as usize].is_none() {
+                    part[i as usize] = Some(p.name.clone());
+                }
+            }
+        }
+        (s, n, part, None)
+    } else {
+        let b = built(Resolution::Medium);
+        let s = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+        let sk = &b.skeleton;
+        let n = sk.nodes.len();
+        let part = (0..n)
+            .map(|i| {
+                let p = &sk.parts[sk.nodes[i].part as usize];
+                Some(if p.starts_with("door") {
+                    "door".to_string()
+                } else {
+                    p.clone()
+                })
+            })
+            .collect();
+        let light = (!b.shell.contact.is_empty())
+            .then(|| b.shell.contact.iter().map(|&i| i as usize).collect());
+        (s, n, part, light)
+    };
+    let mut by: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    for i in 0..n {
+        if let Some(p) = &part_of[i] {
+            by.entry(p.clone()).or_default().push(i);
+        }
+    }
+    let mut zeta: Vec<Vec<f32>> = vec![Vec::new(); s.nodes.len()];
+    let mut dash = vec![0usize; s.nodes.len()];
+    let mut csum = vec![0.0f32; s.nodes.len()];
+    for bm in &s.beams {
+        let (a, b) = (bm.a as usize, bm.b as usize);
+        csum[a] += bm.c;
+        csum[b] += bm.c;
+        if bm.k <= 0.0 {
+            if bm.c > 0.0 {
+                dash[a] += 1;
+                dash[b] += 1;
+            }
+            continue;
+        }
+        let (ma, mb) = (s.nodes[a].mass, s.nodes[b].mass);
+        let z = bm.c / (2.0 * (bm.k * ma * mb / (ma + mb)).sqrt());
+        zeta[a].push(z);
+        zeta[b].push(z);
+    }
+    let med = |mut v: Vec<f32>| {
+        if v.is_empty() {
+            return f32::NAN;
+        }
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    for (p, nodes) in by {
+        if nodes.len() < 6 {
+            continue;
+        }
+        let mm = med(nodes.iter().map(|&i| s.nodes[i].mass).collect());
+        let (lo, hi): (Vec<usize>, Vec<usize>) = nodes.iter().partition(|&&i| match &light {
+            Some(l) => l.contains(&i),
+            None => s.nodes[i].mass < mm,
+        });
+        for (tag, v) in [("light", &lo), ("heavy", &hi)] {
+            if v.is_empty() {
+                continue;
+            }
+            eprintln!(
+                "[damping] {p:>16} {tag}: {:3} nodes, mass p50 {:.2} kg, beam ζ p50 {:.4}, dashpots per node {:.2}, Σc/m p50 {:.1} /s",
+                v.len(),
+                med(v.iter().map(|&i| s.nodes[i].mass).collect()),
+                med(v.iter().flat_map(|&i| zeta[i].iter().copied()).collect()),
+                v.iter().map(|&i| dash[i]).sum::<usize>() as f32 / v.len() as f32,
+                med(v.iter().map(|&i| csum[i] / s.nodes[i].mass).collect()),
+            );
+        }
+    }
+}
