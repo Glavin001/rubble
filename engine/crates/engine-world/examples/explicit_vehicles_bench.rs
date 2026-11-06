@@ -95,7 +95,10 @@ fn main() -> anyhow::Result<()> {
     }
     for &n in &counts {
       for vehicles in [n, 0] {
-        let houses = n.div_ceil(4).min(32);
+        // EV_MAX_HOUSES: the most houses (default 32, the baseline's; 64 fit the fracture's
+        // 2^20 body slots once the town's capacity is sized per house).
+        let max_houses: usize = std::env::var("EV_MAX_HOUSES").ok().and_then(|v| v.parse().ok()).unwrap_or(32);
+        let houses = n.div_ceil(4).min(max_houses);
         // EV_NO_CONTACT=1: the vehicles couple with nothing (filter mask 0): the plan and
         // frame without the strikes' destruction.
         let mut def = town_coupling();
@@ -120,9 +123,15 @@ fn main() -> anyhow::Result<()> {
             hz.map(|h| 1.0 / h),
             // At most 32 houses (the fracture's chunk capacity); the rest of the
             // fleet meets head on in open lanes.
-            Some(32),
+            Some(max_houses),
         )?;
         let w = &mut town.world;
+        // EV_CULL=0 (measurement): the coupling's shape cull off.
+        if std::env::var("EV_CULL").as_deref() == Ok("0") {
+            if let Some(x) = w.explicit_vehicles_mut() {
+                x.set_coupling_cull(false);
+            }
+        }
         let dt = w.solver().dt;
         let mut ms = Vec::new();
         let mut wall = Vec::new();

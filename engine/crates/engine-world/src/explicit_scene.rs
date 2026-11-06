@@ -150,10 +150,23 @@ pub fn crash_town_at(
     let houses = max_houses.map_or(houses, |m| houses.min(m.max(1)));
     let mut cap = stress_rubble::capacity_for(&scene);
     let h = houses as u32;
-    cap.max_bodies = (cap.max_bodies.max((chunks + 20) as u32) * h + 4 * h + 64).next_power_of_two();
-    cap.max_colliders = (cap.max_colliders * h + 4 * h + 64).next_power_of_two();
+    // Room for the houses by `capacity_for`'s own rule (three times the live slots: a
+    // split's children take new slots until compaction reclaims the retired ones) per
+    // house, plus a crate per vehicle and the ground; not `capacity_for`'s one-scene
+    // floor (16,384 bodies, 65,536 colliders) times the houses, which put 32 houses at
+    // 2^20 body slots (every per-slot pass of the step ran over a million slots) and 64
+    // past the fracture's scans (`GpuFracture::with_capacity`, at most 2^20).
+    let parts: usize = scene
+        .bodies
+        .iter()
+        .flat_map(|b| &b.chunks)
+        .map(|c| c.compound.as_ref().map_or(1, |p| p.len().max(1)))
+        .sum();
+    let extra = 3 * (4 * h + 64);
+    cap.max_bodies = (3 * (chunks as u32 + 2) * h + extra).next_power_of_two();
+    cap.max_colliders = (3 * (parts as u32 + 2) * h + extra).next_power_of_two();
     cap.max_hull_vertices *= h;
-    cap.max_contacts = stress_rubble::threshold::contact_capacity(chunks * houses, cap.max_contacts * h, 1 << 30);
+    cap.max_contacts = stress_rubble::threshold::contact_capacity(chunks * houses, cap.max_contacts, 1 << 30);
     cap.max_candidates = cap.max_candidates.max(cap.max_contacts);
     let mut world = World::new(
         gpu,

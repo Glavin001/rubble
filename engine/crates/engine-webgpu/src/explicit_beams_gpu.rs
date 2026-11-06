@@ -53,6 +53,9 @@ pub struct ExplicitBeamsGpu {
     /// Diagnostic marks after each of the frame's dispatches (`RUBBLE_GPU_TIMING_DISPATCH`,
     /// a host's [`crate::gpu_marks::GpuMarks`]).
     marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>,
+    /// The coupling header's state ([`Self::set_coupling_on`], [`Self::set_coupling_cull`]).
+    coupling_on: bool,
+    coupling_cull_off: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
@@ -527,6 +530,8 @@ impl ExplicitBeamsGpu {
             planner,
             timing: None,
             marks: None,
+            coupling_on: false,
+            coupling_cull_off: false,
             wide,
             contact,
             contact_errors: Default::default(),
@@ -922,8 +927,31 @@ impl ExplicitBeamsGpu {
         if on {
             self.set_wide(false);
         }
+        self.coupling_on = on;
+        self.write_coupling_header();
+    }
+
+    /// Tests and measurement: the coupling's per-step shape cull (on by default; lossless,
+    /// `explicit_beams_rigid.slang` `cplMay`) off, every node testing every proxy shape.
+    #[doc(hidden)]
+    pub fn set_coupling_cull(&mut self, on: bool) {
+        self.coupling_cull_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// Measurement only: the raycast wheels' pass on or off (off, the frames skip it and
+    /// results are meaningless: time only). No-op without wheels.
+    #[doc(hidden)]
+    pub fn set_drive_pass_for_timing(&mut self, on: bool) {
+        if let Some(d) = self.layout.drive {
+            self.queue.write_buffer(&self.misc, u64::from(d.header) * 16, bytemuck::bytes_of(&u32::from(on)));
+        }
+    }
+
+    fn write_coupling_header(&self) {
+        let word = u32::from(self.coupling_on) | if self.coupling_on && self.coupling_cull_off { 2 } else { 0 };
         self.queue
-            .write_buffer(&self.misc, self.layout.coupling_on_offset(), bytemuck::bytes_of(&(on as u32)));
+            .write_buffer(&self.misc, self.layout.coupling_on_offset(), bytemuck::bytes_of(&word));
     }
 
     /// The first node of vehicle `v` in [`Self::nodes_buffer`] (in nodes).
