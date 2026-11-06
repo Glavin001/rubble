@@ -1635,6 +1635,7 @@ The research behind the list is `ror-vs-beamng-research.md` §5.
 | Contact band | 2 cm (`set_collision_range`) | 2.5 cm, unless the file sets one | `collision_range` |
 | `NONCOLLIDABLE` triangles (JBeam) | not collision triangles | anti-clip only | `anti_only_tris` |
 | Contact force sums (CPU) | floats into the node's force | the GPU's fixed point (1/32 N, ties to even) | `fixed_contact` |
+| Self- and vehicle-contact work | RoR's penetration push (0.2·p/h) | never positive (§37) | `dissipative_contact` |
 | `.truck` deformable plain beams | RoR's rule (`Plain`) | JBeam's NORMAL rule (§3, `JbeamPlain`) | `use_jbeam_plasticity` |
 | `.truck` ropes | RoR's rope | JBeam's NORMAL rule in tension, none in compression (`JbeamRope`) | `use_jbeam_plasticity` |
 | Strength falls with plastic stretch | yes (k × the stretch) | no | `plastic_strength_drop` |
@@ -1775,8 +1776,8 @@ with the push zeroed in a trial the late self-contact work fell to 0–7 J per
 tenth. Which run's tenth crosses the ledger's limit is chaotic: any change to the
 arithmetic moves it. Checked: `showcase_car.rs`
 `fixed_contact_quantisation_does_no_work` (the sweep and the long rest: at most
-+0.01 J over a run and over any tenth, and within the worst case). The push is
-RoR's rule and a contact-model decision; open.
++0.01 J over a run and over any tenth, and within the worst case). Resolved
+in §37.
 
 **Plasticity.** [B]: a beam deforms past `beamDeform` and "will no longer return back
 to its original shape"; `deformLimit` / `deformLimitExpansion` cap the plastic change
@@ -1878,3 +1879,72 @@ then passes CLIP_DEPTH and is forgotten. Not anti-clip's to fix. The frontal wal
 are band hits on the side of δ (held sides 3,394), none crossed.
 
 **Still to come in this profile:** `externalCollisionBias`; flexbody 4-node binding.
+
+## 37. Self- and vehicle contact do no positive work (BeamNG profile, 2026-11-06)
+
+§36's note found sedan1's ledger rise in self-contact: RoR's contact rule
+(`contact_force`) cancels the pair's normal force, removes 80 % of an approach and
+adds 0.2·p/h of separating speed at depth p in the band (3 m/s at 7.5 mm, 10 m/s at
+the plane). A node its beams hold inside a band is kicked out whenever it
+approaches and pulled back: a limit cycle, +5 J per tenth of a second at rest for
+good, up to +216 J in a tenth of the speed sweep. Its cancelled tangential force
+(friction's stick term, −F_t, applied below 3 m/s of slip) does the same in the
+plane: a node rattling tangentially at 1.3 m/s against a cowl node took +31 J per
+tenth with the push capped. BeamNG documents anti-clip as deciding the side, not a
+push; a contact that adds energy is not physical. **Decision** (coordinator, BeamNG
+first): in the BeamNG profile a contact never does positive work. The RoR profile is
+unchanged, bit for bit.
+
+**Rule** (`ContactSurface::dissipative`, set by `ExplicitBeams::dissipative_contact`
+for self-collision and, when the owner or the partner has it, vehicle contact; GPU
+vehicle flag 32768 `FLAG_DISSIPATIVE`, `contactSurfaceV`, `noPositiveWork`). With
+vn, fn the pair's normal speed and force (the two-body rule's relative values, §10.3)
+and m the reduced mass, the normal force over the step does work r·(vn + vn′)/2·h,
+vn′ = vn + h·(fn + r)/m:
+* **No separation made.** r ≤ −fn − (vn + max(vn, 0))·m/h: approaching, the push
+  may stop the approach (vn′ ≤ 0) but not reverse it; separating, vn′ ≤ −vn (work
+  ≤ 0). RoR's r otherwise.
+* **No positive work, friction included.** The whole force c (normal and friction)
+  is scaled by s = min(1, −a/b), none when a ≥ 0, with a = c·(2v + h·F/m) and
+  b = h·|c|²/m (F the cancelled force, v the relative velocity): its work over the
+  step at the pair's mean velocity, ∝ s·a + s²·b, is ≤ 0.
+* Deterministic, strict single precision in one order on both (CPU
+  `no_positive_work`).
+
+**Choice: no position correction.** A position step toward the band surface would
+move a node its beams hold inward against them, which stores elastic energy that
+nothing accounts for (the same pump through the beams). A penetration is held, not
+undone: the rule cancels the inward force and the approach. Anti-clip (§36) still
+keeps each node's side: a node up to `CLIP_DEPTH` behind a plane is held there
+rather than pushed out. **Cost:** a node the swept test catches after it crossed
+in one step stays up to that step's travel (speed·h) behind the plane: in
+`explicit_contact_gpu.rs` `anti_clip_steps_like_the_cpu` the 150 m/s point ends
+6.1 cm behind the floor and the 90 m/s self-collision node 2.0 cm behind its
+triangle; RoR's push threw them 14 and 42 cm clear (the energy this section
+removes). A position step for a node behind the plane only (d < 0) is the open
+follow-up if that matters.
+
+Measured (CPU, sedan1, medium; `showcase_car.rs` `DISSIPATIVE_CONTACT=0` gives RoR's
+push for comparison):
+* **Speed sweep** (n's 24 runs, 47–59 km/h, drag on and off, 2 s): the most
+  self-contact work over any tenth −0.006 to −0.19 J (was +0.1 to +216 J); n's 32
+  ledgers all pass (largest rise between tenths 0.00 J; was 9.4 J at 51 km/h); the
+  bands unchanged (max crush 0.744 against 0.731 m, peak 29.4 against 30.3 g,
+  restitution 0.115 against 0.110; the car's own calibration fails them either way).
+* **At rest after the 51 km/h crash to 12 s:** self-contact −0.012 J per tenth at
+  most (was +5 J per tenth).
+* **T-bone at 80 km/h** (`t_car_to_car_t_bone_at_80_kmh`, leak metric, striker
+  offset −0.03 / 0 / +0.03 / 0.40 / 0.43 m): 40 / 46 / 50 / 48 / 51 leaked, against 40
+  / 46 / 49 / 48 / 52 with the push (deepest 0.218–0.238 m against 0.217–0.234 m);
+  the push held nothing the cancel does not. Over 1.5 s the most work over a tenth:
+  vehicle contact −102 J, self-contact −3.0 J.
+* **BX side pole** (`beamng_o`, BeamNG's BX coupe on its hub-only wheels, 8-run
+  ensemble at 32 km/h): residual crush 19–44 mm (mean 31), against 15–43 (mean 29)
+  with the push; every run finite.
+
+Checked: `showcase_car.rs` `contacts_do_no_positive_work` (the sweep, the long rest,
+the T-bone: self- and vehicle-contact work over any tenth at most +0.01 J).
+GPU: `anti_clip_steps_like_the_cpu` runs again with the rule on the floor and the
+self-colliding vehicle (vehicle contact from the owner's flag): side memories word
+for word and positions bit for bit; the JBeam cars' bit-for-bit runs
+(`jbeam_mode_steps_bit_for_bit`, the profile on) unchanged in status.
