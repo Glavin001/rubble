@@ -354,6 +354,12 @@ pub struct Shell {
     pub nodes: Vec<u32>,
     /// The caps' triangles (unoriented).
     pub cap_tris: Vec<[u32; 3]>,
+    /// One tier, BeamNG's node pattern (`BEAMNG_NODES`,
+    /// [`super::vehicle::beamng_contact_nodes`]): the light contact-only
+    /// nodes. They keep the 0.24 m pole lanes on the outer surface and are
+    /// tied to the structural nodes around them; the structure's beams run
+    /// between the structural nodes only. Empty otherwise.
+    pub contact: std::collections::HashSet<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

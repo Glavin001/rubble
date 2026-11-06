@@ -9,7 +9,7 @@ use super::body::{build_shell, check_closed, BodyProfile, Seg, Shell, ShellBeam,
 use super::curve::{Curve, Outline};
 use super::material::{Grades, Material};
 use super::members::{attach, block_spaced, box_truss, corner, plate, Corner, MemberSpec, Truss};
-use super::skeleton::{BeamType, Skeleton};
+use super::skeleton::{BeamType, SkBeam, Skeleton};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -489,6 +489,299 @@ pub const LANE_COS: f32 = 0.8;
 /// tier: the shell's spacing and the outer members' stations are at most
 /// this (static contact is per node).
 pub const POLE_LANE: f32 = 0.24;
+
+/// One tier, BeamNG's node pattern (`BEAMNG_NODES`): the structural nodes'
+/// spacing along a part (m). The Ibishu BX's structural nodes are 0.45–0.55
+/// m apart along its members and across its panels (`beamng_topology_census`,
+/// its body's median beam 0.55 m, its doors' 0.59 m); 0.5 m is the middle of
+/// that range (a Choice). A part's structural rings are its end rings and
+/// the rings nearest even stations at most this far apart; the rings between
+/// carry contact-only nodes.
+pub const BEAMNG_SPACING: f32 = 0.5;
+
+/// One tier, BeamNG's node pattern: a contact-only node's own sheet is the
+/// strip along its ties, half of each tie's length × this width (m), a
+/// Choice (the 50 mm of a real flange strip, `vehicle-authoring.md`,
+/// "Hardware, bearing and sheet masses"). The rest of its fine Voronoi
+/// area belongs to the structural nodes it is tied to (the Voronoi region at
+/// the structural resolution).
+pub const CONTACT_STRIP: f32 = 0.05;
+
+/// One tier, BeamNG's node pattern: a structural bridge (a sheet edge or a
+/// member's chord over contact-only nodes) is at most this long (m), so the
+/// coarse lattice joins only neighbouring structural rows.
+pub const BRIDGE_MAX: f32 = 0.75;
+
+/// The parts (name prefixes) built in BeamNG's node pattern, from
+/// `BEAMNG_NODES` (a measurement switch while the pattern is being built:
+/// `1` is every part built so far, else a comma list of prefixes such as
+/// `door,bonnet`). Empty: the 0.24 m lattice everywhere, as before.
+pub fn beamng_nodes_parts() -> Vec<String> {
+    match std::env::var("BEAMNG_NODES") {
+        Ok(v) if v == "1" => vec!["door".into()],
+        Ok(v) if !v.is_empty() && v != "0" => v.split(',').map(|x| x.trim().to_string()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// One tier, BeamNG's node pattern: the contact-only nodes of the parts
+/// named by `prefixes`. Per part, its rings (those holding its nodes) in z:
+/// the end rings and the rings nearest `ceil(span / BEAMNG_SPACING)` even
+/// stations are structural; the part's nodes on the others are
+/// contact-only, so long as each has a structural neighbour on the skin.
+pub fn beamng_contact_nodes(
+    sk: &Skeleton,
+    shell: &Shell,
+    prefixes: &[String],
+) -> std::collections::HashSet<u32> {
+    let mut ring_of: HashMap<u32, usize> = HashMap::new();
+    for (r, ring) in shell.rings.iter().enumerate() {
+        for &i in &ring.half {
+            ring_of.insert(i, r);
+            if let Some(&m) = shell.mirror.get(&i) {
+                ring_of.insert(m, r);
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    for (q, name) in sk.parts.iter().enumerate() {
+        if name.starts_with(GLASS_PART) || !prefixes.iter().any(|p| name.starts_with(p.as_str())) {
+            continue;
+        }
+        let nodes: Vec<u32> = shell
+            .nodes
+            .iter()
+            .copied()
+            .filter(|&i| sk.nodes[i as usize].part as usize == q)
+            .collect();
+        let mut rings: Vec<usize> = nodes
+            .iter()
+            .filter_map(|i| ring_of.get(i).copied())
+            .collect();
+        rings.sort_by(|a, b| shell.rings[*a].z.total_cmp(&shell.rings[*b].z));
+        rings.dedup();
+        if rings.len() < 3 {
+            continue;
+        }
+        let (z0, z1) = (
+            shell.rings[rings[0]].z,
+            shell.rings[*rings.last().unwrap()].z,
+        );
+        let n = ((z1 - z0) / BEAMNG_SPACING - 1e-3).ceil().max(1.0) as usize;
+        let mut structural: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for k in 0..=n {
+            let z = z0 + (z1 - z0) * k as f32 / n as f32;
+            let r = *rings
+                .iter()
+                .min_by(|a, b| {
+                    (shell.rings[**a].z - z)
+                        .abs()
+                        .total_cmp(&(shell.rings[**b].z - z).abs())
+                })
+                .unwrap();
+            structural.insert(r);
+        }
+        for &i in &nodes {
+            if ring_of.get(&i).is_some_and(|r| !structural.contains(r)) {
+                out.insert(i);
+            }
+        }
+    }
+    // Every contact-only node keeps a structural neighbour on the skin.
+    let mut has: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for t in &shell.tris {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            if sk.nodes[a as usize].part != sk.nodes[b as usize].part {
+                continue;
+            }
+            if out.contains(&a) && !out.contains(&b) {
+                has.insert(a);
+            }
+            if out.contains(&b) && !out.contains(&a) {
+                has.insert(b);
+            }
+        }
+    }
+    out.retain(|i| has.contains(i));
+    out
+}
+
+/// One tier, BeamNG's node pattern: the structure's beams over the
+/// contact-only nodes. Returns (bridges added, beams upgraded, ties).
+/// - **Members' chords.** A member's lane chord that runs through
+///   contact-only nodes from one structural node to the next becomes one
+///   chord between those two (its material and its lane's steel area), so
+///   the section's chord is the structural nodes' beam.
+/// - **The sheet.** Between consecutive structural rings of a part, each
+///   structural node is joined to the nearest structural node of the next
+///   ring in arc position and to that node's neighbours on its ring (the
+///   coarse lattice's row edges and both diagonals), within [`BRIDGE_MAX`].
+///   An existing beam there (a two-bay shell bend) takes the edge's material
+///   instead of being doubled.
+/// - **Ties.** Every spring beam at a contact-only node is a tie: it keeps
+///   the node on the structure and out of the members' section cuts.
+fn beamng_node_pass(
+    sk: &mut Skeleton,
+    shell: &Shell,
+    lanes: &mut Vec<(usize, f32)>,
+) -> (usize, usize, usize) {
+    let c = &shell.contact;
+    let lane_of: HashMap<usize, f32> = lanes.iter().copied().collect();
+    let spring = |b: &SkBeam| !b.damper && b.ty == BeamType::Normal && b.group == 0;
+    let mut adj: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (j, b) in sk.beams.iter().enumerate() {
+        if spring(b) && sk.nodes[b.a as usize].part == sk.nodes[b.b as usize].part {
+            adj.entry(b.a).or_default().push(j);
+            adj.entry(b.b).or_default().push(j);
+        }
+    }
+    // (pair) -> (material source beam, lane area)
+    let mut want: std::collections::BTreeMap<(u32, u32), (usize, Option<f32>)> = Default::default();
+    // Members' chords through contact-only nodes.
+    let mut structural: Vec<u32> = adj.keys().copied().filter(|i| !c.contains(i)).collect();
+    structural.sort();
+    for &a in &structural {
+        for &j0 in &adj[&a] {
+            let Some(&area) = lane_of.get(&j0) else {
+                continue;
+            };
+            let b0 = &sk.beams[j0];
+            let mut at = if b0.a == a { b0.b } else { b0.a };
+            if !c.contains(&at) {
+                continue;
+            }
+            let mut prev = a;
+            let mut dir = (sk.pos(at) - sk.pos(a)).normalize_or_zero();
+            let mut end = None;
+            for _ in 0..4 {
+                // The next lane beam on from `at`, straightest ahead.
+                let next = adj[&at]
+                    .iter()
+                    .filter(|&&j| lane_of.contains_key(&j))
+                    .map(|&j| {
+                        let b = &sk.beams[j];
+                        let o = if b.a == at { b.b } else { b.a };
+                        (o, (sk.pos(o) - sk.pos(at)).normalize_or_zero().dot(dir))
+                    })
+                    .filter(|&(o, d)| o != prev && d >= LANE_COS)
+                    .max_by(|x, y| x.1.total_cmp(&y.1));
+                let Some((o, _)) = next else { break };
+                if !c.contains(&o) {
+                    end = Some(o);
+                    break;
+                }
+                dir = (sk.pos(o) - sk.pos(at)).normalize_or_zero();
+                prev = at;
+                at = o;
+            }
+            if let Some(t) = end.filter(|&t| t != a) {
+                want.insert((a.min(t), a.max(t)), (j0, Some(area)));
+            }
+        }
+    }
+    // The sheet's coarse lattice between consecutive structural rings.
+    let mut ring_of: HashMap<u32, usize> = HashMap::new();
+    let mut v_of: HashMap<u32, f32> = HashMap::new();
+    for (r, ring) in shell.rings.iter().enumerate() {
+        for (k, &i) in ring.half.iter().enumerate() {
+            for n in [Some(i), shell.mirror.get(&i).copied()]
+                .into_iter()
+                .flatten()
+            {
+                ring_of.insert(n, r);
+                v_of.insert(n, ring.v[k] * if sk.pos(n).x < 0.0 { -1.0 } else { 1.0 });
+            }
+        }
+    }
+    let mut parts: Vec<u16> = c.iter().map(|&i| sk.nodes[i as usize].part).collect();
+    parts.sort();
+    parts.dedup();
+    for q in parts {
+        let mut by_ring: std::collections::BTreeMap<usize, Vec<u32>> = Default::default();
+        let mut contact_rings: std::collections::HashSet<usize> = Default::default();
+        for &i in &shell.nodes {
+            if sk.nodes[i as usize].part != q {
+                continue;
+            }
+            let Some(&r) = ring_of.get(&i) else { continue };
+            if c.contains(&i) {
+                contact_rings.insert(r);
+            } else {
+                by_ring.entry(r).or_default().push(i);
+            }
+        }
+        let mut rings: Vec<usize> = by_ring
+            .keys()
+            .copied()
+            .filter(|r| !contact_rings.contains(r))
+            .collect();
+        rings.sort_by(|a, b| shell.rings[*a].z.total_cmp(&shell.rings[*b].z));
+        for v in by_ring.values_mut() {
+            v.sort_by(|a, b| v_of[a].total_cmp(&v_of[b]));
+        }
+        for w in rings.windows(2) {
+            let (ra, rb) = (&by_ring[&w[0]], &by_ring[&w[1]]);
+            for (xa, xb) in [(ra, rb), (rb, ra)] {
+                for &a in xa.iter() {
+                    let Some(k) = (0..xb.len()).min_by(|&x, &y| {
+                        (v_of[&xb[x]] - v_of[&a])
+                            .abs()
+                            .total_cmp(&(v_of[&xb[y]] - v_of[&a]).abs())
+                    }) else {
+                        continue;
+                    };
+                    for kk in k.saturating_sub(1)..=(k + 1).min(xb.len() - 1) {
+                        let b = xb[kk];
+                        if sk.pos(a).distance(sk.pos(b)) > BRIDGE_MAX {
+                            continue;
+                        }
+                        // (Its material from a sheet beam at either end.)
+                        let src = adj[&a]
+                            .iter()
+                            .copied()
+                            .find(|&j| !lane_of.contains_key(&j))
+                            .or_else(|| adj[&a].first().copied());
+                        if let Some(src) = src {
+                            want.entry((a.min(b), a.max(b))).or_insert((src, None));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let (mut added, mut upgraded) = (0, 0);
+    for ((a, b), (src, area)) in want {
+        // (A sheet bridge's stiffness and yields are set from its length by
+        // `one_tier_real_stiffness`; a chord keeps its member's material.)
+        let mat = sk.beams[src].mat;
+        let j = if let Some(j) = sk.beam_index(a, b) {
+            let bm = &mut sk.beams[j];
+            if bm.damper || bm.ty != BeamType::Normal || bm.group != 0 || lane_of.contains_key(&j) {
+                continue;
+            }
+            bm.mat = mat;
+            upgraded += 1;
+            j
+        } else {
+            if !sk.beam(a, b, mat) {
+                continue;
+            }
+            added += 1;
+            sk.beams.len() - 1
+        };
+        if let Some(area) = area {
+            lanes.push((j, area));
+        }
+    }
+    let mut ties = 0;
+    for b in &mut sk.beams {
+        if !b.damper && (c.contains(&b.a) || c.contains(&b.b)) {
+            b.tie = true;
+            ties += 1;
+        }
+    }
+    (added, upgraded, ties)
+}
 
 /// The skin's spacing against the frame's era (25–40 cm): the light skin
 /// tier is denser than the frame, so dents and creases are local.
@@ -1023,7 +1316,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     if let Some(it) = interior.as_ref().filter(|it| it.floor > 0.0) {
         spacing.floor = it.floor;
     }
-    let shell = build_shell(
+    let mut shell = build_shell(
         &def.profile,
         &spacing,
         &def.stations,
@@ -1067,6 +1360,15 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         };
         grade_of.insert(i, m);
     }
+    // One tier, BeamNG's node pattern (`BEAMNG_NODES`): the contact-only
+    // nodes of the parts it names.
+    if one {
+        let pat = beamng_nodes_parts();
+        if !pat.is_empty() {
+            shell.contact = beamng_contact_nodes(&sk, &shell, &pat);
+        }
+    }
+    let shell = shell;
     // One tier: the shell's nodes are the frame's (members snap onto them,
     // `members::SNAP_FRAME`).
     if one {
@@ -1392,7 +1694,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     // (beam, the chord's steel area m²).
     let mut lane_beams: Vec<(usize, f32)> = Vec::new();
     let mut truss_names: Vec<String> = Vec::new();
-    let mut snap_pool: Vec<u32> = shell.nodes.clone();
+    // (BeamNG's node pattern: members snap onto structural nodes only.)
+    let mut snap_pool: Vec<u32> = shell
+        .nodes
+        .iter()
+        .copied()
+        .filter(|i| !shell.contact.contains(i))
+        .collect();
     // One tier: the shell's bend beams (two bays long) in a member's lane
     // stay the sheet's bending: the lane's edges are its chord already, and
     // a chord twice over in parallel would carry twice its section's yield.
@@ -3223,6 +3531,17 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         }
     }
     groups.insert("suspension".into(), wheel_nodes);
+    // One tier, BeamNG's node pattern: the structure's beams between the
+    // structural nodes, the contact-only nodes on ties.
+    if !shell.contact.is_empty() {
+        let (added, upgraded, ties) = beamng_node_pass(&mut sk, &shell, &mut lane_beams);
+        if std::env::var("BEAMNG_NODES_REPORT").is_ok() {
+            eprintln!(
+                "BEAMNG_NODES: {} contact-only nodes, {added} bridges added, {upgraded} beams upgraded, {ties} ties",
+                shell.contact.len()
+            );
+        }
+    }
     // Named masses.
     let mut named = 0.0;
     // Each node's stability floor at the built stiffnesses (what its beams
@@ -4432,6 +4751,48 @@ fn one_tier_masses(
                 _ => TEMPERED_THICKNESS,
             })
     };
+    // BeamNG's node pattern: the structural resolution's Voronoi regions.
+    // A contact-only node keeps the strip along its skin edges (half of each
+    // edge × [`CONTACT_STRIP`]); the rest of its area goes evenly to its
+    // structural neighbours on the skin. Each part's area, and so its mass,
+    // is unchanged.
+    if !shell.contact.is_empty() {
+        let mut edges: std::collections::BTreeSet<(u32, u32)> = Default::default();
+        for t in &shell.tris {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                if sk.nodes[a as usize].part == sk.nodes[b as usize].part {
+                    edges.insert((a.min(b), a.max(b)));
+                }
+            }
+        }
+        let mut nbr: HashMap<u32, Vec<(u32, f32)>> = HashMap::new();
+        for &(a, b) in &edges {
+            let l = sk.pos(a).distance(sk.pos(b));
+            nbr.entry(a).or_default().push((b, l));
+            nbr.entry(b).or_default().push((a, l));
+        }
+        let mut cs: Vec<u32> = shell.contact.iter().copied().collect();
+        cs.sort();
+        let fine = area.clone();
+        for c in cs {
+            let e = &nbr[&c];
+            let keep =
+                (CONTACT_STRIP * e.iter().map(|x| 0.5 * x.1).sum::<f32>()).min(fine[c as usize]);
+            let to: Vec<u32> = e
+                .iter()
+                .map(|x| x.0)
+                .filter(|j| !shell.contact.contains(j))
+                .collect();
+            if to.is_empty() {
+                continue;
+            }
+            let excess = fine[c as usize] - keep;
+            area[c as usize] -= excess;
+            for j in &to {
+                area[*j as usize] += excess / to.len() as f32;
+            }
+        }
+    }
     let mut w = vec![0.0f32; n];
     let mut glass = vec![0.0f32; n];
     for &i in &shell.nodes {
