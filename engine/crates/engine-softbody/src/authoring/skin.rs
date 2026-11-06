@@ -225,6 +225,129 @@ pub struct ShowcaseVisual {
     /// break list (spec §18: its sides' and its break group's beams), else
     /// its sides' beams across the part border.
     pub skin_death: Vec<[u32; 4]>,
+    /// Per vertex the skeleton part it rides (`u16::MAX`: none, a wheel's
+    /// or a structure group's).
+    pub part: Vec<u16>,
+    /// Per vertex its wheel: `tyre << 1` for a wheel's rotating piece (tyre,
+    /// rim, disc), `tyre << 1 | 1` for its non-rotating hardware (caliper),
+    /// `u32::MAX` none; `tyre` indexes `tyre_axles`.
+    pub wheel: Vec<u32>,
+    /// Per tyre (the solver's order) its axle nodes.
+    pub tyre_axles: Vec<[u32; 2]>,
+}
+
+/// `ShowcaseVisual::rigid` values.
+pub mod rigid_kind {
+    /// Rides its frame affinely (the body).
+    pub const NONE: u8 = 0;
+    /// Rigid on its frame's orthonormal basis (mirrors, handles, lamps).
+    pub const RIGID: u8 = 1;
+    /// On a raycast wheel ([`super::bind_raycast_wheels`]): `bind_nodes[0]`
+    /// the drive wheel, `bind_coords` and `bind_normal` its rest offset and
+    /// normal in the wheel's frame (axle, up, forward); it turns with the
+    /// wheel's spin.
+    pub const WHEEL: u8 = 2;
+    /// The same, steered and sprung but not spinning (a caliper).
+    pub const WHEEL_HUB: u8 = 3;
+}
+
+/// A raycast wheel as drawn (the drive state's outputs: `WheelState`'s
+/// centre, axle and up, and its spin angle).
+#[derive(Clone, Copy, Debug)]
+pub struct WheelPose {
+    pub centre: Vec3,
+    /// Unit, steered, pointing left.
+    pub axle: Vec3,
+    pub up: Vec3,
+    pub spin: f32,
+}
+
+/// A wheel vertex's position and normal from its rest offset `l` and normal
+/// `n` in its wheel's frame (axle A, up U, forward F = A × U): it turns about
+/// the axle by the spin angle (a positive spin rolls the top forward) unless
+/// `hub`. The renderer's `wheelVertex()` is the same.
+pub fn wheel_vertex(l: [f32; 3], n: [f32; 3], w: &WheelPose, hub: bool) -> (Vec3, Vec3) {
+    let a = w.axle.normalize_or_zero();
+    let u = (w.up - a * a.dot(w.up)).normalize_or_zero();
+    let f = a.cross(u);
+    let (sn, c) = if hub { (0.0, 1.0) } else { w.spin.sin_cos() };
+    let (ur, fr) = (u * c + f * sn, f * c - u * sn);
+    (
+        w.centre + a * l[0] + ur * l[1] + fr * l[2],
+        a * n[0] + ur * n[1] + fr * n[2],
+    )
+}
+
+/// Rebinds the wheels' pieces onto raycast wheels (a spawn without tyres,
+/// `ExplicitBeams::from_truck_raycast`): each tyre's vertices ride the drive
+/// wheel on the same axle nodes ([`rigid_kind::WHEEL`], its caliper
+/// [`rigid_kind::WHEEL_HUB`]), at their rest offset from the tyre's centre
+/// in the frame the drive uses at rest (the body's left and up from its
+/// reference nodes; `DriveConfig::hub_axles` aside). Drawn from the drive
+/// state, as a BeamNG flexbody on a wheel rides the wheel's own nodes.
+pub fn bind_raycast_wheels(
+    v: &mut ShowcaseVisual,
+    config: &crate::explicit_drive::DriveConfig,
+) -> Result<(), String> {
+    let rest = |i: u32| {
+        v.node_rest
+            .get(i as usize)
+            .map(|q| Vec3::from_array(*q))
+            .ok_or_else(|| format!("raycast wheels: node {i} past the visual's nodes"))
+    };
+    let [c, b, l] = config.refs;
+    let fw = (rest(c)? - rest(b)?).normalize_or_zero();
+    let up = fw.cross(rest(l)? - rest(c)?).normalize_or_zero();
+    let left = up.cross(fw);
+    // Per tyre its drive wheel and rest centre.
+    let mut of: Vec<Option<(u32, Vec3)>> = Vec::with_capacity(v.tyre_axles.len());
+    for ax in &v.tyre_axles {
+        let k = config.wheels.iter().position(|w| {
+            (w.node1 == ax[0] && w.node2 == ax[1]) || (w.node1 == ax[1] && w.node2 == ax[0])
+        });
+        of.push(match k {
+            Some(k) => Some((k as u32, 0.5 * (rest(ax[0])? + rest(ax[1])?))),
+            None => None,
+        });
+    }
+    let pose = |centre: Vec3| WheelPose {
+        centre,
+        axle: left,
+        up,
+        spin: 0.0,
+    };
+    for i in 0..v.positions.len() {
+        let w = v.wheel.get(i).copied().unwrap_or(u32::MAX);
+        if w == u32::MAX {
+            continue;
+        }
+        let Some(Some((k, centre))) = of.get((w >> 1) as usize).copied() else {
+            return Err(format!(
+                "raycast wheels: no drive wheel on tyre {}'s axle",
+                w >> 1
+            ));
+        };
+        let hub = w & 1 == 1;
+        let fr = pose(centre);
+        let (a, u) = (fr.axle, fr.up);
+        let f = a.cross(u);
+        let d = Vec3::from_array(v.positions[i]) - centre;
+        let n = Vec3::from_array(v.normals[i]);
+        v.bind_nodes[i] = [k, k, k];
+        v.bind_coords[i] = [d.dot(a), d.dot(u), d.dot(f)];
+        v.bind_normal[i] = [n.dot(a), n.dot(u), n.dot(f)];
+        v.bind_rest[i] = [1.0, 1.0];
+        v.rigid[i] = if hub {
+            rigid_kind::WHEEL_HUB
+        } else {
+            rigid_kind::WHEEL
+        };
+        v.smooth[i] = 0;
+        if let Some(a) = v.alt.get_mut(i) {
+            *a = 0;
+        }
+    }
+    Ok(())
 }
 
 /// Surface material of a solver node (`ShowcaseVisual::node_material`).
@@ -454,6 +577,16 @@ pub const BIND_MAX: f32 = 0.3;
 /// nodes and the rear bench's centroid 0.36 m from its seat frame (both
 /// wait on nodes there in the skeleton).
 pub const GROUP_BIND_MAX: f32 = 0.45;
+/// The farthest a shut-line vertex's own-part fallback (`ShowcaseVisual::alt`)
+/// may lie from it. The fallback carries the vertex only once its part has
+/// come off or its shut line has torn, when the alternative is a ribbon of
+/// skin stretched back to the car (or the vertex dropped); a BeamNG
+/// flexbody rides its own group's nodes whatever their distance. A door's
+/// belt line and a boot lid's rear edge lie 0.30–0.34 m from three of their
+/// own nodes that frame them (sedan1, 2026-11-05: the panels' edges are
+/// past their last node row). **Choice**: [`GROUP_BIND_MAX`], the reach
+/// already accepted for trim on structure nodes.
+pub const ALT_BIND_MAX: f32 = GROUP_BIND_MAX;
 /// Node frames are built from a part's this many nearest nodes.
 const FRAME_NODES: usize = 10;
 /// ... within this radius (m): a frame never spans further.
@@ -542,6 +675,8 @@ type Bound = ([u32; 3], [f32; 3], [f32; 3], f32);
 struct PartBinders {
     /// Per part, its nodes and the nodes across its border.
     frames: HashMap<u16, NodeGrid>,
+    /// Per part, its own nodes only (the shut-line fallback's frames).
+    own: HashMap<u16, NodeGrid>,
     /// Per part, its single-part skin triangles, and those with two of its
     /// nodes (the skin frame candidates).
     tris: HashMap<u16, Binder>,
@@ -552,6 +687,10 @@ struct PartBinders {
     skin: Binder,
     part_of: Vec<u16>,
     pos: Vec<Vec3>,
+    /// Parts held on by hinges and latches (doors, lids): no other part's
+    /// frame takes a node of theirs (a BeamNG body flexbody lists only the
+    /// body's nodes), or it would stretch after them when they come off.
+    detachable: std::collections::HashSet<u16>,
 }
 
 impl PartBinders {
@@ -559,6 +698,7 @@ impl PartBinders {
         sk: &super::skeleton::Skeleton,
         by_part: &HashMap<u16, Vec<[u32; 3]>>,
         pos: &[Vec3],
+        detachable: std::collections::HashSet<u16>,
     ) -> Self {
         let part_of: Vec<u16> = (0..pos.len())
             .map(|i| sk.nodes.get(i).map(|n| n.part).unwrap_or(u16::MAX))
@@ -567,6 +707,10 @@ impl PartBinders {
         for (i, nd) in sk.nodes.iter().enumerate() {
             ids.entry(nd.part).or_default().insert(i as u32);
         }
+        let own = ids
+            .iter()
+            .map(|(&p, v)| (p, NodeGrid::new(v.iter().copied().collect(), pos)))
+            .collect();
         // Across the border: nodes sharing a skin triangle with the part.
         for t in &sk.skin {
             for &a in t {
@@ -584,6 +728,7 @@ impl PartBinders {
             s
         };
         Self {
+            own,
             frames: ids
                 .into_iter()
                 .map(|(p, v)| (p, NodeGrid::new(v.into_iter().collect(), pos)))
@@ -611,6 +756,7 @@ impl PartBinders {
             skin: Binder::new(sk.skin.clone(), pos, 0.15),
             part_of,
             pos: pos.to_vec(),
+            detachable,
         }
     }
 
@@ -634,13 +780,8 @@ impl PartBinders {
         if let Some(b) = self.tris.get(&part).and_then(|b| b.bind_d(p, normal)) {
             cands.push(b.0);
         }
-        if let Some(g) = self.frames.get(&part) {
-            let near: Vec<u32> = g
-                .nearest(&self.pos, p)
-                .into_iter()
-                .filter(|&i| self.part_of[i as usize] == part)
-                .collect();
-            triples(&near, &mut cands);
+        if let Some(g) = self.own.get(&part) {
+            triples(&g.nearest(&self.pos, p), &mut cands);
         }
         best_frame(
             &self.pos,
@@ -649,19 +790,30 @@ impl PartBinders {
             normal,
             |t| {
                 (t.iter().all(|&i| self.part_of[i as usize] == part))
-                    .then(|| self.score(part, t, p, normal))
+                    .then(|| self.score(part, t, p, normal, true))
                     .flatten()
             },
             |t| self.is_skin(t),
         )
     }
 
-    fn score(&self, part: u16, t: [u32; 3], p: Vec3, normal: Vec3) -> Option<(f32, f32)> {
+    /// `strict`: no node of another, detachable part.
+    fn score(
+        &self,
+        part: u16,
+        t: [u32; 3],
+        p: Vec3,
+        normal: Vec3,
+        strict: bool,
+    ) -> Option<(f32, f32)> {
         let own = t
             .iter()
             .filter(|&&i| self.part_of[i as usize] == part)
             .count();
         if own < 2 {
+            return None;
+        }
+        if strict && self.crosses_detachable(part, t) {
             return None;
         }
         let (score, d) = frame_score(&self.pos, t, p, normal)?;
@@ -685,15 +837,35 @@ impl PartBinders {
             triples(&g.nearest(&self.pos, p), &mut cands);
         }
         // Skin triangles keep their (outward) winding; other frames are
-        // wound so their normal faces the vertex's.
-        best_frame(
-            &self.pos,
-            &cands,
-            p,
-            normal,
-            |t| self.score(part, t, p, normal),
-            |t| self.is_skin(t),
-        )
+        // wound so their normal faces the vertex's. A frame with a node of
+        // another, detachable part (a door's, a lid's) only where no other
+        // frame reaches within BIND_MAX (a body vertex beside a lid at low
+        // resolution); such a vertex must have its own part's fallback.
+        let pick = |strict: bool| {
+            best_frame(
+                &self.pos,
+                &cands,
+                p,
+                normal,
+                |t| self.score(part, t, p, normal, strict),
+                |t| self.is_skin(t),
+            )
+        };
+        match pick(true) {
+            Some(b) if b.3 <= BIND_MAX => Some(b),
+            strict => match pick(false) {
+                Some(l) if strict.is_none_or(|s| l.3 < s.3) => Some(l),
+                _ => strict,
+            },
+        }
+    }
+
+    /// Frame `t` of part `part` has a node of another, detachable part.
+    fn crosses_detachable(&self, part: u16, t: [u32; 3]) -> bool {
+        t.iter().any(|&i| {
+            let q = self.part_of[i as usize];
+            q != part && self.detachable.contains(&q)
+        })
     }
 
     fn is_skin(&self, t: [u32; 3]) -> bool {
@@ -954,7 +1126,12 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         &node_pos,
         0.15,
     );
-    let pb = PartBinders::new(sk, &by_part, &node_pos);
+    let pb = PartBinders::new(
+        sk,
+        &by_part,
+        &node_pos,
+        built.hardware.iter().map(|h| h.part).collect(),
+    );
     // Per skin triangle the beams whose break kills it (`skin_death`).
     let mut skin_index: HashMap<[u32; 3], u32> = sk
         .skin
@@ -1071,6 +1248,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     let mut out = ShowcaseVisual {
         node_count: node_pos.len() as u32,
         node_rest: sim.nodes.iter().map(|n| n.pos.to_array()).collect(),
+        tyre_axles: sim.tyres.iter().map(|t| t.axle).collect(),
         ..Default::default()
     };
     for piece in pieces.iter_mut() {
@@ -1176,6 +1354,9 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         }
     }
     let mut unbound: Vec<String> = Vec::new();
+    // Vertices of a detachable part on a frame across its border with no
+    // frame of its own part within ALT_BIND_MAX.
+    let mut stranded: Vec<String> = Vec::new();
     for piece in &pieces {
         let m = &piece.mesh;
         if m.is_empty() {
@@ -1339,6 +1520,8 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 out.smooth.push(0);
                 out.rigid.push(1);
                 out.alt.push(0);
+                out.part.push(part.unwrap_or(u16::MAX));
+                out.wheel.push(u32::MAX);
             }
             out.indices.extend(m.idx.iter().map(|i| i + first));
             out.pieces.push((piece.name.clone(), first, m.len() as u32));
@@ -1530,11 +1713,13 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             });
             if let Some(si) = si {
                 let pt = if tp != u16::MAX { Some(tp) } else { part };
-                // Within BIND_MAX only: a one-row part (a bumper's face) has
+                // Within ALT_BIND_MAX: a one-row part (a bumper's face) has
                 // no frame of its own there, and its shut line tears instead.
+                // A detachable part (a door, a lid) must have one: it comes
+                // off whole, and its edge must go with it.
                 if let Some((at, _, _, _)) = pt
                     .and_then(|pt| pb.bind_own(pt, m.pos[k], m.nrm[k]))
-                    .filter(|b| b.3 <= BIND_MAX)
+                    .filter(|b| b.3 <= ALT_BIND_MAX)
                 {
                     let (ac2, an2) = frame_coords(&node_pos, at, m.pos[k], m.nrm[k]);
                     out.alt_nodes.push(at);
@@ -1543,9 +1728,28 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                     out.alt_rest.push(rest_edges(&node_pos, at));
                     out.alt_tri.push(si);
                     alt = out.alt_nodes.len() as u32;
+                } else if let Some(pt) =
+                    pt.filter(|&q| pb.detachable.contains(&q) || pb.crosses_detachable(q, t))
+                {
+                    stranded.push(format!(
+                        "{} on {} at {:.2?}",
+                        piece.name,
+                        sk.parts.get(pt as usize).map_or("-", |s| s.as_str()),
+                        m.pos[k]
+                    ));
                 }
             }
             out.alt.push(alt);
+            out.wheel.push(match piece.bind {
+                Bind::Wheel(_) => (nearest_tyre() as u32) << 1,
+                Bind::Hub(_) => ((nearest_tyre() as u32) << 1) | 1,
+                _ => u32::MAX,
+            });
+            out.part.push(if tp != u16::MAX {
+                tp
+            } else {
+                part.unwrap_or(u16::MAX)
+            });
             out.bind_nodes.push(t);
             out.bind_coords.push(c);
             out.bind_normal.push(nl);
@@ -1589,6 +1793,15 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             BIND_MAX * 1e3,
             GROUP_BIND_MAX * 1e3,
             unbound.join(", ")
+        ));
+    }
+    if !stranded.is_empty() {
+        let n = stranded.len();
+        stranded.truncate(8);
+        return Err(format!(
+            "{n} visual vertices of a detachable part ride a frame across its border with no frame of their own part within ALT_BIND_MAX ({} mm), e.g. {}",
+            ALT_BIND_MAX * 1e3,
+            stranded.join(", ")
         ));
     }
     out.skin_death = death;

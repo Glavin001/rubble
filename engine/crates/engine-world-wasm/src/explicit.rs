@@ -1227,6 +1227,8 @@ impl ExplicitSim {
                     "mass": v.sim.nodes.iter().map(|n| f64::from(n.mass)).sum::<f64>(),
                     "nodeOffset": self.gpu.node_offset(i), "beamOffset": self.gpu.beam_offset(i),
                     "forward": v.forward.to_array(), "warnings": v.warnings,
+                    // The solver profile it runs (spec §36): "beamng" or "ror".
+                    "profile": if v.sim.beamng_profile { "beamng" } else { "ror" },
                 })
             })
             .collect();
