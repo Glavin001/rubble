@@ -354,10 +354,13 @@ Surface boxSurface()
     return s;
 }
 
-// Surface s as vehicle v's friction law takes it: exact with FLAG_EXACT_FRICTION.
+// Surface s as vehicle v's friction law takes it: exact with FLAG_EXACT_FRICTION;
+// dissipative (§37: the node pass's ground, box and shape contacts too) with
+// FLAG_DISSIPATIVE.
 Surface surfaceV(Surface s, uint v)
 {
     s.exact = (gStatic[v * 4u + 3u].x & FLAG_EXACT_FRICTION) != 0u ? 1u : 0u;
+    s.dissipative = (gStatic[v * 4u + 3u].x & FLAG_DISSIPATIVE) != 0u ? 1u : 0u;
     return s;
 }
 
@@ -538,10 +541,25 @@ float3 noPositiveWork(float3 c, float r, float3 n, float3 f, float3 v, float m)
     float a0 = nf(sdot(rn, u) + smul(sdot(rn, rn), hm));
     float a1 = nf(sdot(t, u) + smul(smul(2.0, hm), sdot(rn, t)));
     float b = smul(sdot(t, t), hm);
-    if (nf(nf(a0 + a1) + b) <= 0.0 || b <= 0.0) return c;
-    float disc = nf(smul(a1, a1) - smul(smul(4.0, b), a0));
-    float k = 0.0;
-    if (!(disc < 0.0)) k = clamp(sdiv(nf(ssqrt(disc) - a1), smul(2.0, b)), 0.0, 1.0);
+    float k = 1.0;
+    bool whole = true;
+    if (nf(nf(a0 + a1) + b) > 0.0 && b > 0.0)
+    {
+        whole = false;
+        float disc = nf(smul(a1, a1) - smul(smul(4.0, b), a0));
+        k = 0.0;
+        if (!(disc < 0.0)) k = clamp(sdiv(nf(ssqrt(disc) - a1), smul(2.0, b)), 0.0, 1.0);
+    }
+    // Nor does friction reverse the slip (explicit_beams.rs no_positive_work).
+    float3 vt = ssub3(v, sscale(n, sdot(v, n)));
+    float g = nf(sdot(vt, vt) + smul(hm, sdot(f, vt)));
+    float d = smul(hm, sdot(t, vt));
+    if (d < 0.0 && nf(g + smul(d, k)) < 0.0)
+    {
+        k = clamp(sdiv(g, -d), 0.0, k);
+        whole = false;
+    }
+    if (whole) return c;
     return sadd3(rn, sscale(t, k));
 }
 
@@ -599,6 +617,26 @@ float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, f
 {
     float budget;
     return contactResponse(f, v, m, n, s, p, friction, budget);
+}
+
+// The node pass's ground contact (depth > 0) of vehicle v's node: its force, and on
+// the dissipative surface (§37) its position step up (`lift`, m; explicit_beams.rs
+// node_pass).
+float3 groundContact(float3 f, float3 vel, float mass, uint v, float depth, float friction, inout float lift)
+{
+    Surface s = surfaceV(groundSurface(), v);
+    float budget;
+    float3 c = contactResponse(f, vel, mass, float3(0.0, 1.0, 0.0), s, depth, friction, budget);
+    if (s.dissipative != 0u && any(c != float3(0.0, 0.0, 0.0))) lift = shiftDepth(depth, budget, f.y);
+    return c;
+}
+
+// §37 after the node's x + h·v: its contacts' position step d, then the ground's.
+float3 takeSteps(float3 pos, float3 d, float lift)
+{
+    pos = sadd3(pos, d);
+    if (lift != 0.0) pos.y = nf(pos.y + lift);
+    return pos;
 }
 
 // A pressure-wheel node's ground contact (NODE_FRICTION_LIMIT, spec §28): the
@@ -1308,6 +1346,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     clipRoll(gi, flagsV);
     if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
     float3 shift = shiftTake(gi, flagsV);
+    float lift = 0.0; // §37's ground position step
     float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -1338,7 +1377,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
         }
         else if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
+            float3 c = groundContact(f, vel, mass, vehicle, ground - x.y, V.w, lift);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             cfAdd(gi, c);
             f += c;
@@ -1376,7 +1415,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     {
         vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
         pos = sadd3(pos, sscale(vel, STEP));
-        pos = sadd3(pos, shift);
+        pos = takeSteps(pos, shift, lift);
     }
     clipSpeed(vehicle, step, flagsV, vel);
 #ifdef EB_AERO

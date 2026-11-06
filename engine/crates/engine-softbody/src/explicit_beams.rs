@@ -959,6 +959,9 @@ pub struct ExplicitBeams {
     pub contact_shift: Vec<[i32; 3]>,
     /// The position steps the last node pass applied (m; empty: none).
     pub shift_applied: Vec<Vec3>,
+    /// The ground position steps the last node pass applied (m up, per node; empty
+    /// without [`Self::dissipative_contact`]).
+    pub ground_lift: Vec<f32>,
     /// RoR's rule that a beam's strength falls by k × its plastic stretch (true,
     /// the RoR profile and the solver's JBeam rule until §36). The BeamNG profile:
     /// false (BeamNG documents no such rule; its `deformLimitStress` and deform
@@ -1329,16 +1332,31 @@ pub fn no_positive_work(c: Vec3, r: f32, n: Vec3, f: Vec3, v: Vec3, m: f32, h: f
     let a0 = rn.dot(u) + rn.dot(rn) * hm;
     let a1 = t.dot(u) + 2.0 * hm * rn.dot(t);
     let b = t.dot(t) * hm;
-    if a0 + a1 + b <= 0.0 || b <= 0.0 {
-        return c;
+    let (mut s, mut whole) = (1.0f32, true);
+    if a0 + a1 + b > 0.0 && b > 0.0 {
+        whole = false;
+        let disc = a1 * a1 - 4.0 * b * a0;
+        s = if disc < 0.0 {
+            0.0
+        } else {
+            ((disc.sqrt() - a1) / (2.0 * b)).clamp(0.0, 1.0)
+        };
     }
-    let disc = a1 * a1 - 4.0 * b * a0;
-    let s = if disc < 0.0 {
-        0.0
+    // Nor does friction reverse the slip: the slip vt after the step, vt′ = vt +
+    // h·(f + s·t)/m along vt, stays ≥ 0 (at zero work a sliding pair could swap
+    // vt for −vt each step for good: a period-two chatter).
+    let vt = v - n * v.dot(n);
+    let g = vt.dot(vt) + hm * f.dot(vt);
+    let d = hm * t.dot(vt);
+    if d < 0.0 && g + d * s < 0.0 {
+        s = (g / -d).clamp(0.0, s);
+        whole = false;
+    }
+    if whole {
+        c
     } else {
-        ((disc.sqrt() - a1) / (2.0 * b)).clamp(0.0, 1.0)
-    };
-    rn + t * s
+        rn + t * s
+    }
 }
 
 /// The contact force of normal force `r` > 0 along `n` with its friction
@@ -1530,6 +1548,7 @@ impl ExplicitBeams {
             dissipative_contact: false,
             contact_shift: Vec::new(),
             shift_applied: Vec::new(),
+            ground_lift: Vec::new(),
             plastic_strength_drop: true,
             exact_friction: false,
             contact_acc: Vec::new(),
@@ -3319,6 +3338,11 @@ impl ExplicitBeams {
         }
         // §37: last step's contact position steps.
         self.shift_applied.clear();
+        self.ground_lift.clear();
+        if self.dissipative_contact {
+            self.ground_lift.resize(self.nodes.len(), 0.0);
+        }
+        let dissipative = self.dissipative_contact;
         if !self.contact_shift.is_empty() {
             self.shift_applied.extend(self.contact_shift.iter().map(|a| {
                 Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32) * (1.0 / SHIFT_FIXED)
@@ -3343,6 +3367,8 @@ impl ExplicitBeams {
             if let Some(l) = cf.as_mut() {
                 l.roll(i);
             }
+            // §37's ground position step (m, up).
+            let mut lift = 0.0f32;
             if !n.has(NODE_NO_GROUND) {
                 let x = origin + n.pos;
                 if n.has(NODE_TREAD) {
@@ -3377,16 +3403,22 @@ impl ExplicitBeams {
                         *s = [0.0; 2];
                     }
                 } else if ground > x.y {
-                    let c = contact_force(
+                    let (c, budget) = contact_response(
                         n.force,
                         n.vel,
                         n.mass,
                         Vec3::Y,
                         h,
-                        &ContactSurface::GROUND.exact_if(exact),
+                        &ContactSurface::GROUND
+                            .exact_if(exact)
+                            .dissipative_if(dissipative),
                         ground - x.y,
                         n.friction,
                     );
+                    // §37: the ground's position step (the node's own, up).
+                    if dissipative && c != Vec3::ZERO {
+                        lift = shift_depth(ground - x.y, budget, n.force.y);
+                    }
                     let c = if n.has(NODE_FRICTION_LIMIT) {
                         crate::explicit_jbeam_ext::friction_limit(
                             c,
@@ -3413,7 +3445,9 @@ impl ExplicitBeams {
                             n.mass,
                             normal,
                             h,
-                            &ContactSurface::BOX.exact_if(exact),
+                            &ContactSurface::BOX
+                                .exact_if(exact)
+                                .dissipative_if(dissipative),
                             0.0,
                             n.friction,
                         );
@@ -3431,7 +3465,9 @@ impl ExplicitBeams {
                             n.mass,
                             normal,
                             h,
-                            &ContactSurface::BOX.exact_if(exact),
+                            &ContactSurface::BOX
+                                .exact_if(exact)
+                                .dissipative_if(dissipative),
                             0.0,
                             n.friction,
                         );
@@ -3454,6 +3490,12 @@ impl ExplicitBeams {
                 n.pos += n.vel * h;
                 if let Some(&d) = self.shift_applied.get(i) {
                     n.pos += d;
+                }
+                if lift != 0.0 {
+                    n.pos.y += lift;
+                    if let Some(x) = self.ground_lift.get_mut(i) {
+                        *x = lift;
+                    }
                 }
             }
             n.force = Vec3::new(0.0, n.mass * GRAVITY, 0.0);
@@ -4111,16 +4153,18 @@ impl ExplicitBeams {
                 node.friction,
             );
             if self.dissipative_contact && f != Vec3::ZERO {
-                // §37: the position step, a position impulse δ·m shared by the
-                // sub-bodies' inverse masses.
+                // §37: the position step, a position impulse δ·m shared like the
+                // hit's force: each node moved by its share over its own mass (as
+                // the force moves it; the sub-bodies' k/m would move a node of k
+                // hits k times).
                 let tri = [(i1, alpha, n1), (i2, beta, n2), (i0, gamma, n0)];
                 let delta = shift_depth(depth, budget, fh.dot(n));
                 if delta > 0.0 {
                     let q = delta * m;
-                    self.add_shift(hn as usize, n * (q * imh));
+                    self.add_shift(hn as usize, n * (q * im(&node, 1)));
                     for (i, w, nd) in tri {
                         if w > 0.0 {
-                            self.add_shift(i as usize, n * -(w * (q * im(&nd, split[i as usize]))));
+                            self.add_shift(i as usize, n * -(w * (q * im(&nd, 1))));
                         }
                     }
                 }
@@ -4136,7 +4180,112 @@ impl ExplicitBeams {
                 l.add(i0 as usize, f * gamma);
             }
         }
+        if self.dissipative_contact {
+            for _ in 0..residual_passes() {
+                self.residual_self_pass(found);
+            }
+        }
     }
+
+    /// §37's residual pass over the step's two-body self hits (after the first,
+    /// [`Self::apply_two_body_self_hits`]): the approach a hit's split-mass stop
+    /// left (its sub-bodies are lighter than the nodes, so alone it stops only
+    /// m_split·inv of it) is stopped by a second normal force, as momentum-exact as
+    /// the first. Each hit's pair, at the forces now (the first pass's contact sums
+    /// with them), still approaching over the step, a·h + vn + max(vn, 0) < 0
+    /// ([`contact_response`]'s rule, a the pair's relative normal acceleration),
+    /// is active; the active hits split the nodes again (counts of the active hits
+    /// only: a hit alone is stopped whole) and each takes
+    /// r = −(a·m + (vn + max(vn, 0))·m/h) > 0 along its normal, m the reduced mass
+    /// of the active counts. No friction and no position step (the first pass's).
+    /// The forces are found from the sums before any of them is added (order free).
+    fn residual_self_pass(&mut self, found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)]) {
+        let now: Vec<Vec3> = self.forces_now();
+        let acc = |i: u32, n: &Node| {
+            if n.has(NODE_IMMOVABLE) {
+                Vec3::ZERO
+            } else {
+                now[i as usize] / n.mass
+            }
+        };
+        let mut drive = Vec::with_capacity(found.len());
+        let mut split = vec![0u32; self.nodes.len()];
+        for &(hn, [i0, i1, i2], [alpha, beta, gamma], _, n) in found {
+            let node = &self.nodes[hn as usize];
+            let (n0, n1, n2) = (
+                &self.nodes[i0 as usize],
+                &self.nodes[i1 as usize],
+                &self.nodes[i2 as usize],
+            );
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let at = acc(i1, n1) * alpha + acc(i2, n2) * beta + acc(i0, n0) * gamma;
+            let a = (acc(hn, node) - at).dot(n);
+            let vn = v.dot(n);
+            let x = vn + vn.max(0.0);
+            let on = a * STEP + x < 0.0;
+            drive.push((a, x, on));
+            if on {
+                split[hn as usize] += 1;
+                split[i0 as usize] += 1;
+                split[i1 as usize] += 1;
+                split[i2 as usize] += 1;
+            }
+        }
+        let im = |n: &Node, k: u32| {
+            if n.has(NODE_IMMOVABLE) {
+                0.0
+            } else {
+                k as f32 / n.mass
+            }
+        };
+        let mut forces = Vec::with_capacity(found.len());
+        for (&(hn, [i0, i1, i2], [alpha, beta, gamma], _, n), &(a, x, on)) in found.iter().zip(&drive) {
+            if !on {
+                continue;
+            }
+            let inv = im(&self.nodes[hn as usize], split[hn as usize])
+                + crate::explicit_contact::two_body_inverse_mass(
+                    [
+                        im(&self.nodes[i1 as usize], split[i1 as usize]),
+                        im(&self.nodes[i2 as usize], split[i2 as usize]),
+                        im(&self.nodes[i0 as usize], split[i0 as usize]),
+                    ],
+                    [alpha, beta, gamma],
+                );
+            if inv <= 0.0 {
+                continue;
+            }
+            let m = 1.0 / inv;
+            let r = -(a * m) - x * m / STEP;
+            if r > 0.0 {
+                forces.push((hn, [i0, i1, i2], [alpha, beta, gamma], n * r));
+            }
+        }
+        for (hn, [i0, i1, i2], [alpha, beta, gamma], f) in forces {
+            self.add_contact(hn as usize, f);
+            self.add_contact(i1 as usize, -(f * alpha));
+            self.add_contact(i2 as usize, -(f * beta));
+            self.add_contact(i0 as usize, -(f * gamma));
+            if let Some(l) = self.contact_force.as_mut() {
+                l.add(hn as usize, f);
+                l.add(i1 as usize, f * alpha);
+                l.add(i2 as usize, f * beta);
+                l.add(i0 as usize, f * gamma);
+            }
+        }
+    }
+}
+
+/// §37's residual passes after a step's two-body hits (2; `RESIDUAL_PASSES`
+/// overrides it, a measurement switch).
+pub fn residual_passes() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("RESIDUAL_PASSES")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(2)
+    })
 }
 
 fn signed_group(b: &crate::desc::SoftBeam) -> i32 {

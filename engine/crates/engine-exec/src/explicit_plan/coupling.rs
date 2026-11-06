@@ -54,9 +54,15 @@ pub fn proxy_records(layout: &CouplingLayout, set: &ProxySet) -> Result<Vec<[u32
             ProxyGeom::Capsule { radius, half_len } => {
                 (CPL_CAPSULE, [*radius, *half_len, 0.0], radius + half_len, 0)
             }
-            ProxyGeom::Hull { planes: list, radius } => {
+            ProxyGeom::Hull {
+                planes: list,
+                radius,
+            } => {
                 if planes as usize + list.len() > cap.planes as usize || list.len() > 0xFFFF {
-                    return Err(format!("explicit coupling: more than {} hull planes", cap.planes));
+                    return Err(format!(
+                        "explicit coupling: more than {} hull planes",
+                        cap.planes
+                    ));
                 }
                 for (i, &(n, d)) in list.iter().enumerate() {
                     recs[plane0 + planes as usize + i] = f4(n.x, n.y, n.z, d);
@@ -85,7 +91,12 @@ pub fn proxy_records(layout: &CouplingLayout, set: &ProxySet) -> Result<Vec<[u32
 pub fn decode_proxies(layout: &CouplingLayout, words: &[u32], set: &mut ProxySet) {
     let rec = |i: usize| -> [f32; 4] {
         let w = &words[i * 4..i * 4 + 4];
-        [f32::from_bits(w[0]), f32::from_bits(w[1]), f32::from_bits(w[2]), f32::from_bits(w[3])]
+        [
+            f32::from_bits(w[0]),
+            f32::from_bits(w[1]),
+            f32::from_bits(w[2]),
+            f32::from_bits(w[3]),
+        ]
     };
     for (j, b) in set.bodies.iter_mut().enumerate() {
         let at = 1 + j * CouplingLayout::BODY_RECS as usize;
