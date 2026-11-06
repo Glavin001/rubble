@@ -1307,7 +1307,8 @@ hinge groups by name (`crash_invariants.rs` `community_part`). Tests:
 | n b1 (22.9–39.2) | 68.6 | — (no fit) | 142 | 86 |
 | n restitution (0.13–0.20) | 0.255 | 0.207 | 0.224 | 0.228 |
 | n apertures p90 (≤ 9 mm) | 18 | 2.2 | 27 | in |
-| o residual (297–445 mm) | 76, sd 40 | not measured ¹ | not measured ¹ | 351 |
+| n A-pillar bases rearward (≤ 15–17 mm) | 2 / 5 | 0.3 / 1.0 | 23 / 24 ¹ | in |
+| o residual (297–445 mm) | 76, sd 40 | 10, sd 9 ¹ | 400, sd 8 ¹ | 351 |
 | p initial / intermediate / peak (kN) | 6.3 / 12.5 / 98 | 13.6 / 21.9 / 198 | 6.6 / 14.5 / 58 | 9.0 / 14.0 / 28.7 |
 | q (4.48–5.32×) | 6.20 ² | 7.21 | 7.80 | 5.59 |
 | MDB residual (126–206 mm) | not run | not run | not run | 202 |
@@ -1318,9 +1319,10 @@ hinge groups by name (`crash_invariants.rs` `community_part`). Tests:
 | Pole far side (past 0.2 %, broken; far doors' hardware) | 11, 0; holds | 13, 2; holds | 25, 0; holds | 20, 0; holds |
 | Whole car broken in the wall / head-on / pole | 2 / 1 / 17 | 143 / 124 / 4 | 26 / 4 / 8 | |
 
-¹ The side-pole measure found no struck node near the pole on the CCF and the
-Vertex (a residual of 0 mm at node 0), also with B-pillar picks of 6 and 10
-nodes: the measure's own node search fails on these cars (open). Not read. ² The ETK is a soft-top roadster: the roof crush
+¹ The CCF's and the Vertex's floor-middle pick (`tunnel`) was empty (their floor's
+centreline nodes sit above the band), so the far-side frame was NaN and the pole
+measure read 0 mm, and the Vertex's A-pillar bases were empty (NaN). Each pick
+now falls back to the body nodes nearest its target; measured again with them. ² The ETK is a soft-top roadster: the roof crush
 loads its windscreen frame and roll hoops.
 
 What they show: like the BX, BeamNG's community content is stiff in the frontal

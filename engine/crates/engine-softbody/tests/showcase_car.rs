@@ -8575,6 +8575,10 @@ fn community_car(desc: &engine_softbody::desc::SoftVehicleDesc) -> Car<'static> 
     fill(&mut g, "pillar_b", &[Vec3::new(w, yb, dz0), Vec3::new(-w, yb, dz0)]);
     fill(&mut g, "a_base_l", &[Vec3::new(w, ya, dz1)]);
     fill(&mut g, "a_base_r", &[Vec3::new(-w, ya, dz1)]);
+    // The floor's middle: the body nodes nearest the centreline at the floor, at a
+    // quarter, half and three quarters of the wheelbase.
+    let yt = floor + 0.1 * h;
+    fill(&mut g, "tunnel", &[0.25, 0.5, 0.75].map(|f| Vec3::new(0.0, yt, zr + f * wb)));
     let mut apertures = Vec::new();
     for side in [1.0f32, -1.0] {
         for fy in [0.2f32, 0.5] {
