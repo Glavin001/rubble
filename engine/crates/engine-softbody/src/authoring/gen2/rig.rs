@@ -1067,6 +1067,22 @@ pub fn rig(model: &Model) -> Rig {
             ] {
                 r.car.beam(a, b, Role::DoorFrame, part);
             }
+            // The side intrusion beam: a tube along the door at its middle,
+            // hinge pillar to latch (the inner middle row), tied to the skin's
+            // crease row it backs.
+            let mids: Vec<usize> = inner
+                .iter()
+                .copied()
+                .filter(|&i| r.car.nodes[i].name.contains("_im"))
+                .collect();
+            for w in mids.windows(2) {
+                let j = r.car.beam(w[0], w[1], Role::Intrusion, part);
+                r.car.beams[j].role = Role::Intrusion;
+            }
+            if let (Some(&a), Some(&b)) = (mids.first(), mids.last()) {
+                let j = r.car.beam(a, b, Role::Intrusion, part);
+                r.car.beams[j].role = Role::Intrusion;
+            }
             // The frame's legs run down inside the door to its inner panel
             // (the frame's base is the door's depth over its height, not the
             // belt's 8 cm).
