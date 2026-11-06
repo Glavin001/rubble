@@ -567,11 +567,15 @@
       const [x, z] = XSPAWN[scene] ?? [0, 0];
       xsim = world.explicitSim(explicitSpec(x, z));
       xlayout = xsim.layout();
-      // The profile each vehicle actually runs (layout.vehicles[].profile).
+      labelProfile();
+      return xsim;
+    };
+    // The profile each vehicle actually runs (layout.vehicles[].profile), on the
+    // solver button and the title: after the first (async) build and every restart.
+    const labelProfile = () => {
       const prof = [...new Set(xlayout.vehicles.map((v) => ({ beamng: 'BeamNG profile', ror: 'RoR parity' })[v.profile] ?? v.profile))].join(' + ');
       solverBtn.textContent = `solver: explicit 2 kHz (${prof}) ⇄ soft`;
       document.getElementById('infoTitle').innerHTML = `<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, ${prof}</span>`;
-      return xsim;
     };
     if (EXPLICIT) {
       // First build: the vehicle spawned in Rust, then its GPU kernels compiled
@@ -583,6 +587,7 @@
         else if (stage.startsWith('compile')) loading.stage(`Compiling ${stage.split(' ')[1]} GPU solver kernels`);
       });
       xlayout = xsim.layout();
+      labelProfile();
       // The explicit solver collides with its own copies; these only render (not soft
       // obstacles: the arena has hundreds).
       // Rows [centre, half, rotation, kind]: 0/1 box, 2 vertical cylinder (a 16-sided
