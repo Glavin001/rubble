@@ -133,6 +133,8 @@ pub struct Car {
     /// The front-left door's nodes (the door crush), when it has one.
     pub door: Option<(String, Vec<u32>)>,
     pub warnings: Vec<String>,
+    /// Per part, the largest move of its nodes about the body's rigid fit over the 1 s settle (m), largest first.
+    pub settle: Vec<(String, f32)>,
 }
 
 fn is_tyre(s: &ExplicitBeams, i: usize) -> bool {
@@ -188,7 +190,11 @@ fn bounds(s: &ExplicitBeams, ids: &[u32]) -> (Vec3, Vec3) {
 /// Every node at `v` (immovable ones still), tyres rolling.
 fn set_moving(s: &mut ExplicitBeams, v: Vec3) {
     for n in &mut s.nodes {
-        n.vel = if n.flags & NODE_IMMOVABLE != 0 { Vec3::ZERO } else { v };
+        n.vel = if n.flags & NODE_IMMOVABLE != 0 {
+            Vec3::ZERO
+        } else {
+            v
+        };
     }
     s.roll_tyres(v);
     if let Some(d) = s.drive.as_mut() {
@@ -207,10 +213,20 @@ fn steps(s: &mut ExplicitBeams, seconds: f32) {
 fn axles(s: &ExplicitBeams, lo: Vec3, hi: Vec3) -> (f32, f32) {
     let mid = 0.5 * (lo.z + hi.z);
     let (mut f, mut r) = ((0.0f32, 0u32), (0.0f32, 0u32));
-    let mut hubs: Vec<Vec3> = s.nodes.iter().filter(|n| n.flags & NODE_TYRE != 0).map(|n| n.pos).collect();
+    let mut hubs: Vec<Vec3> = s
+        .nodes
+        .iter()
+        .filter(|n| n.flags & NODE_TYRE != 0)
+        .map(|n| n.pos)
+        .collect();
     if hubs.is_empty() {
         if let Some(d) = s.drive.as_ref() {
-            hubs = d.config.wheels.iter().map(|w| 0.5 * (s.nodes[w.node1 as usize].pos + s.nodes[w.node2 as usize].pos)).collect();
+            hubs = d
+                .config
+                .wheels
+                .iter()
+                .map(|w| 0.5 * (s.nodes[w.node1 as usize].pos + s.nodes[w.node2 as usize].pos))
+                .collect();
         }
     }
     for p in hubs {
@@ -235,7 +251,13 @@ fn frame_of(s: &ExplicitBeams, skin: &[u32]) -> Frame {
         .filter(|&i| !is_tyre(s, i))
         .map(|i| s.nodes[i].pos.y)
         .fold(f32::MAX, f32::min);
-    Frame { lo, hi, front_axle, rear_axle, floor }
+    Frame {
+        lo,
+        hi,
+        front_axle,
+        rear_axle,
+        floor,
+    }
 }
 
 /// The manifest's default location: next to the crash lab.
@@ -254,7 +276,10 @@ pub fn mods_dir() -> PathBuf {
 pub fn available(spec: &CarSpec) -> bool {
     match (&spec.style, &spec.mod_dir) {
         (Some(_), _) => true,
-        (None, Some(m)) => mods_dir().join(m).join(spec.vehicle.as_deref().unwrap_or(m)).is_dir(),
+        (None, Some(m)) => mods_dir()
+            .join(m)
+            .join(spec.vehicle.as_deref().unwrap_or(m))
+            .is_dir(),
         _ => false,
     }
 }
@@ -287,7 +312,13 @@ fn crash_spawn(source: &Source) -> Result<(ExplicitBeams, f32, Vec<String>), Str
             Ok((s, 0.0, Vec::new()))
         }
         Source::Jbeam { desc, .. } => {
-            let (s, w) = ExplicitBeams::from_desc_jbeam_with(desc, JbeamWheels::Pressure, Vec3::ZERO, Vec3::ZERO, settings())?;
+            let (s, w) = ExplicitBeams::from_desc_jbeam_with(
+                desc,
+                JbeamWheels::Pressure,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                settings(),
+            )?;
             let f = crate::pack::forward_axis(desc);
             Ok((s, -f.x.atan2(f.z), w))
         }
@@ -300,21 +331,32 @@ fn raycast_spawn(source: &Source, truck_export: bool) -> Result<ExplicitBeams, S
     let truck = |text: &str| -> Result<ExplicitBeams, String> {
         let probe = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings())?;
         let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
-        let (mut s, _) = ExplicitBeams::from_truck_raycast(text, None, Vec3::new(0.0, probe.spawn_clearance() - low, 0.0), 0.0, Vec3::ZERO, settings())?;
+        let (mut s, _) = ExplicitBeams::from_truck_raycast(
+            text,
+            None,
+            Vec3::new(0.0, probe.spawn_clearance() - low, 0.0),
+            0.0,
+            Vec3::ZERO,
+            settings(),
+        )?;
         flatten_origin(&mut s);
         Ok(s)
     };
     match source {
         Source::Authored(b) => truck(&b.truck),
         Source::Jbeam { desc, .. } if truck_export => {
-            let (text, _) = crate::truck_export::desc_to_truck(desc, crate::truck_export::TyreDefaults::for_vehicle(desc));
+            let (text, _) = crate::truck_export::desc_to_truck(
+                desc,
+                crate::truck_export::TyreDefaults::for_vehicle(desc),
+            );
             let mut s = truck(&text)?;
             let f = crate::pack::forward_axis(desc);
             place(&mut s, -f.x.atan2(f.z), 0.02);
             Ok(s)
         }
         Source::Jbeam { desc, .. } => {
-            let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(desc, Vec3::ZERO, Vec3::ZERO, settings())?;
+            let (mut s, _) =
+                ExplicitBeams::from_desc_jbeam_raycast(desc, Vec3::ZERO, Vec3::ZERO, settings())?;
             let f = crate::pack::forward_axis(desc);
             place(&mut s, -f.x.atan2(f.z), 0.02);
             Ok(s)
@@ -326,27 +368,57 @@ impl Car {
     /// Load, spawn, settle and pick the node sets.
     pub fn load(spec: &CarSpec) -> Result<Car, String> {
         let source = if let Some(st) = &spec.style {
-            let b = build(&style(st).ok_or_else(|| format!("no style {st}"))?, &BuildParams { resolution: Resolution::Medium, ..Default::default() })?;
+            let b = build(
+                &style(st).ok_or_else(|| format!("no style {st}"))?,
+                &BuildParams {
+                    resolution: Resolution::Medium,
+                    ..Default::default()
+                },
+            )?;
             Source::Authored(Box::new(b))
         } else {
-            let m = spec.mod_dir.as_deref().ok_or("a car needs `style` or `mod`")?;
+            let m = spec
+                .mod_dir
+                .as_deref()
+                .ok_or("a car needs `style` or `mod`")?;
             let dir = mods_dir().join(m);
             let vehicle = spec.vehicle.clone().unwrap_or_else(|| m.to_string());
             let files = crate::jbeam::read_vehicle_dir(&dir, &vehicle)?;
             let pc = match &spec.pc {
-                Some(p) => Some(std::fs::read_to_string(dir.join(&vehicle).join(p)).map_err(|e| format!("{p}: {e}"))?),
+                Some(p) => Some(
+                    std::fs::read_to_string(dir.join(&vehicle).join(p))
+                        .map_err(|e| format!("{p}: {e}"))?,
+                ),
                 None => None,
             };
-            let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+            let refs: Vec<(&str, &str)> = files
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect();
             let desc = crate::jbeam::load_jbeam(&refs, pc.as_deref())?;
-            Source::Jbeam { desc: Box::new(desc), files, pc, dir, vehicle }
+            Source::Jbeam {
+                desc: Box::new(desc),
+                files,
+                pc,
+                dir,
+                vehicle,
+            }
         };
         let (spawned, angle, warnings) = crash_spawn(&source)?;
         // The visual binds to the spawn's node indices (rest positions).
         let visual = match &source {
             Source::Authored(b) => crate::authoring::skin::showcase_visual(b).ok(),
-            Source::Jbeam { files, pc, dir, vehicle, desc } => {
-                let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+            Source::Jbeam {
+                files,
+                pc,
+                dir,
+                vehicle,
+                desc,
+            } => {
+                let refs: Vec<(&str, &str)> = files
+                    .iter()
+                    .map(|(a, b)| (a.as_str(), b.as_str()))
+                    .collect();
                 let flex = crate::jbeam::assembled_rows(&refs, pc.as_deref(), "flexbodies")?;
                 let props = crate::jbeam::assembled_rows(&refs, pc.as_deref(), "props")?;
                 let mut paths = Vec::new();
@@ -357,57 +429,115 @@ impl Car {
                 for p in &paths {
                     let name = p.to_string_lossy();
                     if p.extension().is_some_and(|x| x == "dae") {
-                        let src = String::from_utf8_lossy(&std::fs::read(p).map_err(|e| e.to_string())?).into_owned();
+                        let src =
+                            String::from_utf8_lossy(&std::fs::read(p).map_err(|e| e.to_string())?)
+                                .into_owned();
                         meshes.extend(crate::flexmesh::read_collada(&src)?);
                     } else if name.ends_with(".materials.json") {
-                        mats.extend(crate::flexmesh::read_materials(&std::fs::read_to_string(p).unwrap_or_default()));
+                        mats.extend(crate::flexmesh::read_materials(
+                            &std::fs::read_to_string(p).unwrap_or_default(),
+                        ));
                     }
                 }
-                crate::flexmesh::jbeam_visual(&flex, &props, desc, &spawned, &meshes, &mats, [0.5, 0.05, 0.04]).ok().map(|r| r.0)
+                crate::flexmesh::jbeam_visual(
+                    &flex,
+                    &props,
+                    desc,
+                    &spawned,
+                    &meshes,
+                    &mats,
+                    [0.5, 0.05, 0.04],
+                )
+                .ok()
+                .map(|r| r.0)
             }
         };
         let mut template = spawned;
         place(&mut template, angle, 0.02);
+        let spawn_pos = positions(&template);
         steps(&mut template, 1.0);
         let skin = skin_nodes(&template);
         let frame = frame_of(&template, &skin);
         let n = template.nodes.len();
         // Parts and hardware.
-        let (parts, hardware): (Vec<(String, Vec<u32>)>, Vec<(String, Vec<(u32, u32)>)>) = match &source {
-            Source::Authored(b) => {
-                let sk = &b.skeleton;
-                let mut by: Vec<Vec<u32>> = vec![Vec::new(); sk.parts.len()];
-                for (i, q) in sk.nodes.iter().enumerate() {
-                    by[q.part as usize].push(i as u32);
-                }
-                let parts: Vec<(String, Vec<u32>)> = sk.parts.iter().cloned().zip(by).filter(|(_, v)| !v.is_empty()).collect();
-                let hw = b
-                    .hardware
-                    .iter()
-                    .map(|h| (h.name.clone(), h.beams.iter().map(|&j| (sk.beams[j].a, sk.beams[j].b)).collect()))
-                    .collect();
-                (parts, hw)
-            }
-            Source::Jbeam { desc, .. } => {
-                let parts: Vec<(String, Vec<u32>)> = desc
-                    .parts
-                    .iter()
-                    .map(|p| (p.name.clone(), p.nodes.iter().copied().filter(|&i| (i as usize) < n && !is_tyre(&template, i as usize)).collect::<Vec<u32>>()))
-                    .filter(|(_, v)| !v.is_empty())
-                    .collect();
-                let mut hw: Vec<(String, Vec<(u32, u32)>)> = desc.break_groups.iter().map(|g| (g.clone(), Vec::new())).collect();
-                for b in &desc.beams {
-                    let g = b.break_group as usize;
-                    if g > 0 && g <= hw.len() {
-                        hw[g - 1].1.push((b.a, b.b));
+        let (parts, hardware): (Vec<(String, Vec<u32>)>, Vec<(String, Vec<(u32, u32)>)>) =
+            match &source {
+                Source::Authored(b) => {
+                    let sk = &b.skeleton;
+                    let mut by: Vec<Vec<u32>> = vec![Vec::new(); sk.parts.len()];
+                    for (i, q) in sk.nodes.iter().enumerate() {
+                        by[q.part as usize].push(i as u32);
                     }
+                    let parts: Vec<(String, Vec<u32>)> = sk
+                        .parts
+                        .iter()
+                        .cloned()
+                        .zip(by)
+                        .filter(|(_, v)| !v.is_empty())
+                        .collect();
+                    let hw = b
+                        .hardware
+                        .iter()
+                        .map(|h| {
+                            (
+                                h.name.clone(),
+                                h.beams
+                                    .iter()
+                                    .map(|&j| (sk.beams[j].a, sk.beams[j].b))
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    (parts, hw)
                 }
-                hw.retain(|h| !h.1.is_empty());
-                (parts, hw)
-            }
-        };
+                Source::Jbeam { desc, .. } => {
+                    let parts: Vec<(String, Vec<u32>)> = desc
+                        .parts
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.name.clone(),
+                                p.nodes
+                                    .iter()
+                                    .copied()
+                                    .filter(|&i| {
+                                        (i as usize) < n && !is_tyre(&template, i as usize)
+                                    })
+                                    .collect::<Vec<u32>>(),
+                            )
+                        })
+                        .filter(|(_, v)| !v.is_empty())
+                        .collect();
+                    let mut hw: Vec<(String, Vec<(u32, u32)>)> = desc
+                        .break_groups
+                        .iter()
+                        .map(|g| (g.clone(), Vec::new()))
+                        .collect();
+                    for b in &desc.beams {
+                        let g = b.break_group as usize;
+                        if g > 0 && g <= hw.len() {
+                            hw[g - 1].1.push((b.a, b.b));
+                        }
+                    }
+                    hw.retain(|h| !h.1.is_empty());
+                    (parts, hw)
+                }
+            };
         let door = pick_door(spec, &template, &parts);
-        Ok(Car { spec: spec.clone(), source, template, frame, parts, hardware, skin, visual, door, warnings })
+        let settle = settle_moves(&template, &spawn_pos, &parts);
+        Ok(Car {
+            spec: spec.clone(),
+            source,
+            template,
+            frame,
+            parts,
+            hardware,
+            skin,
+            visual,
+            door,
+            warnings,
+            settle,
+        })
     }
 
     pub fn mass(&self) -> f32 {
@@ -417,8 +547,13 @@ impl Car {
 
 /// The front-left door: the manifest's part, else the part named like a door
 /// whose centre is left of the centreline, frontmost.
-fn pick_door(spec: &CarSpec, s: &ExplicitBeams, parts: &[(String, Vec<u32>)]) -> Option<(String, Vec<u32>)> {
-    let centre = |ids: &[u32]| ids.iter().map(|&i| s.nodes[i as usize].pos).sum::<Vec3>() / ids.len() as f32;
+fn pick_door(
+    spec: &CarSpec,
+    s: &ExplicitBeams,
+    parts: &[(String, Vec<u32>)],
+) -> Option<(String, Vec<u32>)> {
+    let centre =
+        |ids: &[u32]| ids.iter().map(|&i| s.nodes[i as usize].pos).sum::<Vec3>() / ids.len() as f32;
     if let Some(p) = &spec.door_part {
         return parts.iter().find(|(n, _)| n == p).cloned();
     }
@@ -427,7 +562,9 @@ fn pick_door(spec: &CarSpec, s: &ExplicitBeams, parts: &[(String, Vec<u32>)]) ->
     }
     parts
         .iter()
-        .filter(|(n, ids)| n.to_lowercase().contains("door") && ids.len() >= 4 && centre(ids).x > 0.2)
+        .filter(|(n, ids)| {
+            n.to_lowercase().contains("door") && ids.len() >= 4 && centre(ids).x > 0.2
+        })
         .max_by(|a, b| centre(&a.1).z.total_cmp(&centre(&b.1).z))
         .cloned()
 }
@@ -436,10 +573,43 @@ impl Car {
     /// A node's name: its JBeam name, else its authored part and index.
     pub fn node_name(&self, i: usize) -> String {
         match &self.source {
-            Source::Jbeam { desc, .. } => desc.nodes.get(i).map_or(format!("wheel#{i}"), |n| n.name.clone()),
-            Source::Authored(b) => b.skeleton.nodes.get(i).map_or(format!("tyre#{i}"), |q| format!("{}#{i}", b.skeleton.parts[q.part as usize])),
+            Source::Jbeam { desc, .. } => desc
+                .nodes
+                .get(i)
+                .map_or(format!("wheel#{i}"), |n| n.name.clone()),
+            Source::Authored(b) => b.skeleton.nodes.get(i).map_or(format!("tyre#{i}"), |q| {
+                format!("{}#{i}", b.skeleton.parts[q.part as usize])
+            }),
         }
     }
+}
+
+/// Per part, the largest move of its nodes over the settle about the whole
+/// car's rigid fit (tyres excluded), largest first: a part the content
+/// leaves unheld (a lid that springs open) shows here.
+fn settle_moves(
+    s: &ExplicitBeams,
+    spawn: &[Vec3],
+    parts: &[(String, Vec<u32>)],
+) -> Vec<(String, f32)> {
+    let now = positions(s);
+    let body: Vec<u32> = (0..s.nodes.len() as u32)
+        .filter(|&i| !is_tyre(s, i as usize))
+        .collect();
+    let fit = rigid_fit(spawn, &now, &body);
+    let mut v: Vec<(String, f32)> = parts
+        .iter()
+        .map(|(n, ids)| {
+            (
+                n.clone(),
+                ids.iter()
+                    .map(|&i| fit.to_rest(now[i as usize]).distance(spawn[i as usize]))
+                    .fold(0.0, f32::max),
+            )
+        })
+        .collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1));
+    v
 }
 
 /// Adds `deepest_node_name` beside every `deepest_node` in `v`.
@@ -479,8 +649,16 @@ impl Fit {
 /// matrix by shifted power iteration, f64).
 pub fn rigid_fit(rest: &[Vec3], now: &[Vec3], ids: &[u32]) -> Fit {
     let n = ids.len().max(1) as f64;
-    let c0 = ids.iter().map(|&i| rest[i as usize].as_dvec3()).sum::<DVec3>() / n;
-    let c1 = ids.iter().map(|&i| now[i as usize].as_dvec3()).sum::<DVec3>() / n;
+    let c0 = ids
+        .iter()
+        .map(|&i| rest[i as usize].as_dvec3())
+        .sum::<DVec3>()
+        / n;
+    let c1 = ids
+        .iter()
+        .map(|&i| now[i as usize].as_dvec3())
+        .sum::<DVec3>()
+        / n;
     // S = Σ a bᵀ with a = now − c1 (source), b = rest − c0 (target).
     let mut m = [[0.0f64; 3]; 3];
     for &i in ids {
@@ -523,7 +701,9 @@ fn positions(s: &ExplicitBeams) -> Vec<Vec3> {
 
 /// Nodes with at least one intact beam.
 fn attached(s: &ExplicitBeams) -> Vec<bool> {
-    (0..s.nodes.len()).map(|i| s.incidence[i].iter().any(|&b| !s.beams[b as usize].broken)).collect()
+    (0..s.nodes.len())
+        .map(|i| s.incidence[i].iter().any(|&b| !s.beams[b as usize].broken))
+        .collect()
 }
 
 fn pct(v: &mut [f32], q: f32) -> f32 {
@@ -542,7 +722,11 @@ fn butterworth(x: &[f32], dt: f32, hz: f32) -> Vec<f32> {
     let pass = |x: &[f32]| -> Vec<f32> {
         let w = (std::f32::consts::PI * hz * dt).tan();
         let n = 1.0 / (1.0 + 2f32.sqrt() * w + w * w);
-        let (b0, a1, a2) = (w * w * n, 2.0 * (w * w - 1.0) * n, (1.0 - 2f32.sqrt() * w + w * w) * n);
+        let (b0, a1, a2) = (
+            w * w * n,
+            2.0 * (w * w - 1.0) * n,
+            (1.0 - 2f32.sqrt() * w + w * w) * n,
+        );
         let (b1, b2) = (2.0 * b0, b0);
         let (mut x1, mut x2, mut y1, mut y2) = (x[0], x[0], x[0], x[0]);
         x.iter()
@@ -581,7 +765,12 @@ fn damage_report(car: &Car, s: &ExplicitBeams) -> Value {
     let broken_hw: Vec<&str> = car
         .hardware
         .iter()
-        .filter(|(_, pairs)| pairs.iter().any(|&(a, b)| at.get(&(a.min(b), a.max(b))).is_some_and(|js| js.iter().any(|&j| s.beams[j].broken))))
+        .filter(|(_, pairs)| {
+            pairs.iter().any(|&(a, b)| {
+                at.get(&(a.min(b), a.max(b)))
+                    .is_some_and(|js| js.iter().any(|&j| s.beams[j].broken))
+            })
+        })
         .map(|(n, _)| n.as_str())
         .collect();
     // Connected components over intact non-tyre beams; the main one holds the
@@ -610,7 +799,11 @@ fn damage_report(car: &Car, s: &ExplicitBeams) -> Value {
         let r = find(&mut parent, i);
         *mass.entry(r).or_default() += s.nodes[i].mass;
     }
-    let main = mass.iter().max_by(|a, b| a.1.total_cmp(b.1)).map(|(k, _)| *k).unwrap_or(0);
+    let main = mass
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(k, _)| *k)
+        .unwrap_or(0);
     let mut detached = Vec::new();
     for (name, ids) in &car.parts {
         let (mut out, mut all) = (0.0f32, 0.0f32);
@@ -625,7 +818,9 @@ fn damage_report(car: &Car, s: &ExplicitBeams) -> Value {
             detached.push(name.clone());
         }
     }
-    let free = (0..n).filter(|&i| !is_tyre(s, i) && find(&mut parent, i) != main).count();
+    let free = (0..n)
+        .filter(|&i| !is_tyre(s, i) && find(&mut parent, i) != main)
+        .count();
     let (broken, bent) = s.damage();
     json!({
         "broken_beams": broken, "bent_beams": bent,
@@ -647,9 +842,26 @@ struct Ripple {
 
 impl Ripple {
     fn new(car: &Car, rest: Vec<Vec3>) -> Self {
-        let parts: Vec<(String, Vec<u32>)> = car.parts.iter().filter(|(_, v)| v.len() >= 4).cloned().collect();
-        let acc = parts.iter().map(|(_, v)| vec![(DVec3::ZERO, 0.0); v.len()]).collect();
-        Ripple { parts, rest, acc, count: 0 }
+        // Panels: parts of four or more nodes, at least half of them on the collision skin.
+        let skin: std::collections::HashSet<u32> = car.skin.iter().copied().collect();
+        let parts: Vec<(String, Vec<u32>)> = car
+            .parts
+            .iter()
+            .filter(|(_, v)| {
+                v.len() >= 4 && 2 * v.iter().filter(|i| skin.contains(i)).count() >= v.len()
+            })
+            .cloned()
+            .collect();
+        let acc = parts
+            .iter()
+            .map(|(_, v)| vec![(DVec3::ZERO, 0.0); v.len()])
+            .collect();
+        Ripple {
+            parts,
+            rest,
+            acc,
+            count: 0,
+        }
     }
     fn sample(&mut self, now: &[Vec3]) {
         for (k, (_, ids)) in self.parts.iter().enumerate() {
@@ -671,7 +883,11 @@ impl Ripple {
             .iter()
             .zip(&self.acc)
             .map(|((name, _), a)| {
-                let ms = a.iter().map(|(s, q)| 2.0 * (q / n - (*s / n).length_squared()).max(0.0)).sum::<f64>() / a.len() as f64;
+                let ms = a
+                    .iter()
+                    .map(|(s, q)| 2.0 * (q / n - (*s / n).length_squared()).max(0.0))
+                    .sum::<f64>()
+                    / a.len() as f64;
                 (name.clone(), ms.sqrt())
             })
             .collect();
@@ -725,7 +941,13 @@ impl Intrusion {
             })
             .collect();
         let k = pts.len();
-        Intrusion { pts, fit_ids, rest, max: vec![0.0; k], last: vec![0.0; k] }
+        Intrusion {
+            pts,
+            fit_ids,
+            rest,
+            max: vec![0.0; k],
+            last: vec![0.0; k],
+        }
     }
     fn sample(&mut self, s: &ExplicitBeams) {
         let now = positions(s);
@@ -756,11 +978,31 @@ fn visual_now(car: &Car, s: &ExplicitBeams) -> Value {
     let Some(v) = &car.visual else {
         return json!({"available": false});
     };
-    let beams: Vec<BeamState> = s.beams.iter().map(|b| BeamState { broken: b.broken, rest: b.rest }).collect();
-    let rest_beams: Vec<BeamState> = car.template.beams.iter().map(|b| BeamState { broken: b.broken, rest: b.rest }).collect();
+    let beams: Vec<BeamState> = s
+        .beams
+        .iter()
+        .map(|b| BeamState {
+            broken: b.broken,
+            rest: b.rest,
+        })
+        .collect();
+    let rest_beams: Vec<BeamState> = car
+        .template
+        .beams
+        .iter()
+        .map(|b| BeamState {
+            broken: b.broken,
+            rest: b.rest,
+        })
+        .collect();
     let units = unit_states(v, &beams);
     let rest_units = unit_states(v, &rest_beams);
-    let (p0, n0) = deform_beams(v, &positions(&car.template), Some(&rest_units), Some(&rest_beams));
+    let (p0, n0) = deform_beams(
+        v,
+        &positions(&car.template),
+        Some(&rest_units),
+        Some(&rest_beams),
+    );
     let (p1, n1) = deform_beams(v, &positions(s), Some(&units), Some(&beams));
     visual_metrics(v, &p0, &n0, &p1, &n1)
 }
@@ -776,7 +1018,13 @@ fn visual_now(car: &Car, s: &ExplicitBeams) -> Value {
 ///   (shut lines and joins) and how far they opened;
 /// * **faceting**: the change of the dihedral angle across each interior
 ///   edge of a piece (a bent panel's creases).
-pub fn visual_metrics(v: &ShowcaseVisual, p0: &[Vec3], n0: &[Vec3], p1: &[Vec3], n1: &[Vec3]) -> Value {
+pub fn visual_metrics(
+    v: &ShowcaseVisual,
+    p0: &[Vec3],
+    n0: &[Vec3],
+    p1: &[Vec3],
+    n1: &[Vec3],
+) -> Value {
     let nv = v.positions.len();
     let mut piece = vec![u32::MAX; nv];
     for (k, (_, first, count)) in v.pieces.iter().enumerate() {
@@ -798,7 +1046,8 @@ pub fn visual_metrics(v: &ShowcaseVisual, p0: &[Vec3], n0: &[Vec3], p1: &[Vec3],
     let torn = verts.iter().filter(|&&i| !ok(p1, i)).count();
     // Stretch and flips.
     let (mut smax, mut smin) = (Vec::new(), Vec::new());
-    let (mut over, mut under, mut flips, mut flips0, mut live) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut over, mut under, mut flips, mut flips0, mut live) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
     let normal = |p: &[Vec3], t: &[usize; 3]| (p[t[1]] - p[t[0]]).cross(p[t[2]] - p[t[0]]);
     let flipped = |p: &[Vec3], n: &[Vec3], t: &[usize; 3]| {
         let g = normal(p, t);
@@ -855,7 +1104,13 @@ pub fn visual_metrics(v: &ShowcaseVisual, p0: &[Vec3], n0: &[Vec3], p1: &[Vec3],
     }
     // Welded positions: vertices at one place are one for adjacency
     // (meshes split vertices at UV and normal seams).
-    let key = |p: Vec3| ((p.x * 2e4).round() as i64, (p.y * 2e4).round() as i64, (p.z * 2e4).round() as i64);
+    let key = |p: Vec3| {
+        (
+            (p.x * 2e4).round() as i64,
+            (p.y * 2e4).round() as i64,
+            (p.z * 2e4).round() as i64,
+        )
+    };
     let mut weld: HashMap<(i64, i64, i64, u32), usize> = HashMap::new();
     let wid: Vec<usize> = (0..nv)
         .map(|i| {
@@ -883,7 +1138,8 @@ pub fn visual_metrics(v: &ShowcaseVisual, p0: &[Vec3], n0: &[Vec3], p1: &[Vec3],
         }
         let ang = |p: &[Vec3]| -> Option<f32> {
             let (na, nb) = (normal(p, a), normal(p, b));
-            (na.length_squared() > 1e-16 && nb.length_squared() > 1e-16).then(|| na.normalize().dot(nb.normalize()).clamp(-1.0, 1.0).acos())
+            (na.length_squared() > 1e-16 && nb.length_squared() > 1e-16)
+                .then(|| na.normalize().dot(nb.normalize()).clamp(-1.0, 1.0).acos())
         };
         let (Some(t0), true) = (ang(p0), a.iter().chain(b.iter()).all(|&i| ok(p1, i))) else {
             continue;
@@ -913,7 +1169,13 @@ pub fn visual_metrics(v: &ShowcaseVisual, p0: &[Vec3], n0: &[Vec3], p1: &[Vec3],
         boundary[i] = wboundary.contains_key(&wid[i]);
     }
     let cell = 0.01f32;
-    let ck = |p: Vec3| ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32, (p.z / cell).floor() as i32);
+    let ck = |p: Vec3| {
+        (
+            (p.x / cell).floor() as i32,
+            (p.y / cell).floor() as i32,
+            (p.z / cell).floor() as i32,
+        )
+    };
     let mut grid: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
     for &i in verts.iter().filter(|&&i| boundary[i]) {
         grid.entry(ck(p0[i])).or_default().push(i);
@@ -925,7 +1187,11 @@ pub fn visual_metrics(v: &ShowcaseVisual, p0: &[Vec3], n0: &[Vec3], p1: &[Vec3],
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
-                    for &j in grid.get(&(x + dx, y + dy, z + dz)).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    for &j in grid
+                        .get(&(x + dx, y + dy, z + dz))
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[])
+                    {
                         if piece[j] == piece[i] {
                             continue;
                         }
@@ -987,7 +1253,11 @@ enum Rigid {
 
 impl Rigid {
     fn all(s: &ExplicitBeams) -> Vec<Rigid> {
-        s.boxes.iter().map(|b| Rigid::Box(*b)).chain(s.shapes.iter().map(|q| Rigid::Shape(*q))).collect()
+        s.boxes
+            .iter()
+            .map(|b| Rigid::Box(*b))
+            .chain(s.shapes.iter().map(|q| Rigid::Shape(*q)))
+            .collect()
     }
     /// World box holding it.
     fn aabb(&self) -> (Vec3, Vec3) {
@@ -1006,12 +1276,18 @@ impl Rigid {
                 let d = (p - b.lo).min(b.hi - p);
                 d.min_element().max(0.0)
             }
-            Rigid::Shape(StaticShape::OrientedBox { centre, half, axes, .. }) => {
+            Rigid::Shape(StaticShape::OrientedBox {
+                centre, half, axes, ..
+            }) => {
                 let q = p - centre;
                 let l = Vec3::new(q.dot(axes[0]), q.dot(axes[1]), q.dot(axes[2]));
                 (half - l.abs()).min_element().max(0.0)
             }
-            Rigid::Shape(StaticShape::Cylinder { centre, radius, half_height }) => {
+            Rigid::Shape(StaticShape::Cylinder {
+                centre,
+                radius,
+                half_height,
+            }) => {
                 let r = radius - Vec3::new(p.x - centre.x, 0.0, p.z - centre.z).length();
                 let h = half_height - (p.y - centre.y).abs();
                 r.min(h).max(0.0)
@@ -1021,7 +1297,9 @@ impl Rigid {
                 let t = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
                 (radius - p.distance(a + ab * t)).max(0.0)
             }
-            Rigid::Shape(StaticShape::Sphere { centre, radius }) => (radius - p.distance(centre)).max(0.0),
+            Rigid::Shape(StaticShape::Sphere { centre, radius }) => {
+                (radius - p.distance(centre)).max(0.0)
+            }
         }
     }
     /// The deepest point of segment a–b (a vertical cylinder exactly: the
@@ -1029,11 +1307,19 @@ impl Rigid {
     /// otherwise 17 samples).
     fn depth_segment(&self, a: Vec3, b: Vec3) -> f32 {
         if let Rigid::Shape(StaticShape::Cylinder { centre, .. }) = *self {
-            let (a2, d2) = (Vec3::new(a.x - centre.x, 0.0, a.z - centre.z), Vec3::new(b.x - a.x, 0.0, b.z - a.z));
+            let (a2, d2) = (
+                Vec3::new(a.x - centre.x, 0.0, a.z - centre.z),
+                Vec3::new(b.x - a.x, 0.0, b.z - a.z),
+            );
             let t = (-a2.dot(d2) / d2.length_squared().max(1e-12)).clamp(0.0, 1.0);
-            return self.depth(a + (b - a) * t).max(self.depth(a)).max(self.depth(b));
+            return self
+                .depth(a + (b - a) * t)
+                .max(self.depth(a))
+                .max(self.depth(b));
         }
-        (0..=16).map(|k| self.depth(a + (b - a) * (k as f32 / 16.0))).fold(0.0, f32::max)
+        (0..=16)
+            .map(|k| self.depth(a + (b - a) * (k as f32 / 16.0)))
+            .fold(0.0, f32::max)
     }
     /// The deepest point of triangle p0 p1 p2 (a vertical cylinder exactly:
     /// the triangle's nearest point to the axis in plan view, if its height
@@ -1085,23 +1371,38 @@ struct Penetration {
 
 impl Penetration {
     fn new(s: &ExplicitBeams) -> Self {
-        Penetration { rigid: Rigid::all(s), nodes: Vec::new(), beams: Vec::new(), tris: Vec::new(), worst: (0.0, 0, 0.0) }
+        Penetration {
+            rigid: Rigid::all(s),
+            nodes: Vec::new(),
+            beams: Vec::new(),
+            tris: Vec::new(),
+            worst: (0.0, 0, 0.0),
+        }
     }
     fn sample(&mut self, s: &ExplicitBeams) {
         let p = positions(s);
         let (mut dn, mut db, mut dt) = (0.0f32, 0.0f32, 0.0f32);
         for r in &self.rigid {
             let (lo, hi) = r.aabb();
-            let near = |q: Vec3| q.cmpge(lo - Vec3::splat(0.01)).all() && q.cmple(hi + Vec3::splat(0.01)).all();
+            let near = |q: Vec3| {
+                q.cmpge(lo - Vec3::splat(0.01)).all() && q.cmple(hi + Vec3::splat(0.01)).all()
+            };
             let hit = |a: Vec3, b: Vec3| a.min(b).cmple(hi).all() && a.max(b).cmpge(lo).all();
-            for (i, q) in p.iter().enumerate().filter(|(i, q)| q.is_finite() && near(**q) && s.nodes[*i].flags & NODE_NO_GROUND == 0) {
+            for (i, q) in p.iter().enumerate().filter(|(i, q)| {
+                q.is_finite() && near(**q) && s.nodes[*i].flags & NODE_NO_GROUND == 0
+            }) {
                 let d = r.depth(*q);
                 if d > self.worst.0 {
                     self.worst = (d, i, s.nodes[i].mass);
                 }
                 dn = dn.max(d);
             }
-            for b in s.beams.iter().filter(|b| !b.broken && b.a != b.b && (s.nodes[b.a as usize].flags | s.nodes[b.b as usize].flags) & NODE_NO_GROUND == 0) {
+            for b in s.beams.iter().filter(|b| {
+                !b.broken
+                    && b.a != b.b
+                    && (s.nodes[b.a as usize].flags | s.nodes[b.b as usize].flags) & NODE_NO_GROUND
+                        == 0
+            }) {
                 let (a, c) = (p[b.a as usize], p[b.b as usize]);
                 if a.is_finite() && c.is_finite() && hit(a, c) {
                     db = db.max(r.depth_segment(a, c));
@@ -1109,7 +1410,9 @@ impl Penetration {
             }
             for t in &s.triangles {
                 let q = t.nodes.map(|i| p[i as usize]);
-                if q.iter().all(|x| x.is_finite()) && hit(q[0].min(q[1]).min(q[2]), q[0].max(q[1]).max(q[2])) {
+                if q.iter().all(|x| x.is_finite())
+                    && hit(q[0].min(q[1]).min(q[2]), q[0].max(q[1]).max(q[2]))
+                {
                     dt = dt.max(r.depth_triangle(q));
                 }
             }
@@ -1198,6 +1501,7 @@ pub fn census(car: &Car) -> Value {
         "skin_triangles": s.triangles.len(),
         "visual_vertices": car.visual.as_ref().map(|v| v.positions.len()), "visual_triangles": car.visual.as_ref().map(|v| v.indices.len() / 3),
         "parts": car.parts.len(), "hardware_groups": car.hardware.len(),
+        "settle_top_parts_mm": car.settle.iter().take(4).map(|(n, d)| json!([n, mm(*d)])).collect::<Vec<_>>(),
     })
 }
 
@@ -1243,12 +1547,20 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
     for b in s.beams.iter().filter(|b| b.broken) {
         let pa = part_of.get(&b.a).copied().unwrap_or("?");
         let pb = part_of.get(&b.b).copied().unwrap_or("?");
-        let k = if pa == pb { pa.to_string() } else { format!("{pa}/{pb}") };
+        let k = if pa == pb {
+            pa.to_string()
+        } else {
+            format!("{pa}/{pb}")
+        };
         *by.entry(k).or_default() += 1;
     }
     let mut by: Vec<(String, usize)> = by.into_iter().collect();
     by.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let ke: f32 = s.nodes.iter().map(|n| 0.5 * n.mass * n.vel.length_squared()).sum();
+    let ke: f32 = s
+        .nodes
+        .iter()
+        .map(|n| 0.5 * n.mass * n.vel.length_squared())
+        .sum();
     let vmax = s.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max);
     let wall = t0.elapsed().as_secs_f32();
     json!({
@@ -1272,19 +1584,47 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     let mut s = car.template.clone();
     let rest = positions(&s);
     set_moving(&mut s, Vec3::Z * v0);
-    let front = car.skin.iter().map(|&i| s.nodes[i as usize].pos.z).fold(f32::MIN, f32::max);
+    let front = car
+        .skin
+        .iter()
+        .map(|&i| s.nodes[i as usize].pos.z)
+        .fold(f32::MIN, f32::max);
     let gap = 0.05;
     let wall_z = front + gap;
-    s.boxes.push(StaticBox::centered(Vec3::new(0.0, 2.0, wall_z + 0.5), Vec3::new(0.5 * f.width() + 1.0, 2.0, 0.5)));
+    s.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 2.0, wall_z + 0.5),
+        Vec3::new(0.5 * f.width() + 1.0, 2.0, 0.5),
+    ));
     // The rear cabin (NCAP's rear-seat accelerometers stand in the middle of
     // the cabin's rear): non-tyre nodes over the rear half of the wheelbase.
     let cabin: Vec<u32> = (0..s.nodes.len() as u32)
-        .filter(|&i| !is_tyre(&s, i as usize) && (f.rear_axle - 0.1..f.rear_axle + 0.5 * f.wheelbase()).contains(&rest[i as usize].z))
+        .filter(|&i| {
+            !is_tyre(&s, i as usize)
+                && (f.rear_axle - 0.1..f.rear_axle + 0.5 * f.wheelbase())
+                    .contains(&rest[i as usize].z)
+        })
         .collect();
     let cm = cabin.iter().map(|&i| s.nodes[i as usize].mass).sum::<f32>();
-    let vcab = |s: &ExplicitBeams| cabin.iter().map(|&i| s.nodes[i as usize].mass * s.nodes[i as usize].vel.z).sum::<f32>() / cm;
-    let zcab = |s: &ExplicitBeams| cabin.iter().map(|&i| s.nodes[i as usize].mass * s.nodes[i as usize].pos.z).sum::<f32>() / cm;
-    let pz = |s: &ExplicitBeams| s.nodes.iter().map(|n| f64::from(n.mass) * f64::from(n.vel.z)).sum::<f64>();
+    let vcab = |s: &ExplicitBeams| {
+        cabin
+            .iter()
+            .map(|&i| s.nodes[i as usize].mass * s.nodes[i as usize].vel.z)
+            .sum::<f32>()
+            / cm
+    };
+    let zcab = |s: &ExplicitBeams| {
+        cabin
+            .iter()
+            .map(|&i| s.nodes[i as usize].mass * s.nodes[i as usize].pos.z)
+            .sum::<f32>()
+            / cm
+    };
+    let pz = |s: &ExplicitBeams| {
+        s.nodes
+            .iter()
+            .map(|n| f64::from(n.mass) * f64::from(n.vel.z))
+            .sum::<f64>()
+    };
     let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
     let mut pen = Penetration::new(&s);
     // Ledger (one-vehicle world).
@@ -1314,7 +1654,11 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
             pen.sample(s);
         }
         if t_contact.is_none() {
-            let reach = car.skin.iter().map(|&i| s.nodes[i as usize].pos.z).fold(f32::MIN, f32::max);
+            let reach = car
+                .skin
+                .iter()
+                .map(|&i| s.nodes[i as usize].pos.z)
+                .fold(f32::MIN, f32::max);
             if reach >= wall_z - 1e-3 {
                 t_contact = Some(k);
                 z_contact = zcab(s);
@@ -1365,8 +1709,16 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     let a = butterworth(&acc, STEP, 100.0);
     let peak_g = a.iter().map(|x| -x).fold(0.0f32, f32::max) / 9.81;
     let fz = butterworth(&force, STEP, 100.0);
-    let (ip, peak_f) = fz.iter().enumerate().fold((0, 0.0f32), |b, (i, &x)| if x > b.1 { (i, x) } else { b });
-    let curve: Vec<f64> = fz.iter().step_by(2).take(150).map(|x| r1(x / 1e3)).collect();
+    let (ip, peak_f) = fz
+        .iter()
+        .enumerate()
+        .fold((0, 0.0f32), |b, (i, &x)| if x > b.1 { (i, x) } else { b });
+    let curve: Vec<f64> = fz
+        .iter()
+        .step_by(2)
+        .take(150)
+        .map(|x| r1(x / 1e3))
+        .collect();
     let impulse: f32 = force.iter().sum::<f32>() * STEP;
     // Residual crush at bumper height (NHTSA's six zones), in the cabin's frame.
     let fit = rigid_fit(&rest, &now, &cabin);
@@ -1386,15 +1738,34 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     for (z, ci) in c.iter_mut().enumerate() {
         let x0 = xl + (xh - xl) * z as f32 / zones as f32;
         let x1 = xl + (xh - xl) * (z + 1) as f32 / zones as f32;
-        let ids: Vec<u32> = band.iter().copied().filter(|&i| (x0..x1).contains(&rest[i as usize].x)).collect();
-        let r0 = ids.iter().map(|&i| rest[i as usize].z).fold(f32::MIN, f32::max);
-        let r1_ = ids.iter().filter(|&&i| att[i as usize] && now[i as usize].is_finite()).map(|&i| fit.to_rest(now[i as usize]).z).fold(f32::MIN, f32::max);
-        *ci = if ids.is_empty() || r1_ == f32::MIN { 0.0 } else { (r0 - r1_).max(0.0) };
+        let ids: Vec<u32> = band
+            .iter()
+            .copied()
+            .filter(|&i| (x0..x1).contains(&rest[i as usize].x))
+            .collect();
+        let r0 = ids
+            .iter()
+            .map(|&i| rest[i as usize].z)
+            .fold(f32::MIN, f32::max);
+        let r1_ = ids
+            .iter()
+            .filter(|&&i| att[i as usize] && now[i as usize].is_finite())
+            .map(|&i| fit.to_rest(now[i as usize]).z)
+            .fold(f32::MIN, f32::max);
+        *ci = if ids.is_empty() || r1_ == f32::MIN {
+            0.0
+        } else {
+            (r0 - r1_).max(0.0)
+        };
     }
     let c_max = c.iter().copied().fold(0.0, f32::max);
     let c_avg = (0.5 * c[0] + c[1..5].iter().sum::<f32>() + 0.5 * c[5]) / 5.0;
     let b1 = (v0 - 8.0 / 3.6) / c_avg;
-    let springback = if d_dyn > 0.0 { (d_dyn - c_max) / d_dyn } else { f32::NAN };
+    let springback = if d_dyn > 0.0 {
+        (d_dyn - c_max) / d_dyn
+    } else {
+        f32::NAN
+    };
     let tm = t_m.unwrap_or(f32::NAN);
     let ke1 = l.kinetic;
     let closure = (l.kinetic - ke0) - l.kinetic_change();
@@ -1435,9 +1806,18 @@ pub fn scene_pole(car: &Car, kmh: f32, seconds: f32) -> Value {
     let rest = positions(&s);
     set_moving(&mut s, dir * kmh / 3.6);
     let r = 0.127;
-    let head = occupant_points(&f).iter().find(|p| p.0 == "head").unwrap().1;
+    let head = occupant_points(&f)
+        .iter()
+        .find(|p| p.0 == "head")
+        .unwrap()
+        .1;
     let head = Vec3::new(head.x, 0.0, head.z);
-    let gap = |c: Vec3| s.nodes.iter().map(|n| Vec3::new(n.pos.x - c.x, 0.0, n.pos.z - c.z).length()).fold(f32::MAX, f32::min);
+    let gap = |c: Vec3| {
+        s.nodes
+            .iter()
+            .map(|n| Vec3::new(n.pos.x - c.x, 0.0, n.pos.z - c.z).length())
+            .fold(f32::MAX, f32::min)
+    };
     let mut t = 0.0f32;
     while gap(head + dir * t) < r + 0.03 {
         t += 0.005;
@@ -1450,10 +1830,24 @@ pub fn scene_pole(car: &Car, kmh: f32, seconds: f32) -> Value {
 /// The far half's frame and the struck side's crush (shared by the pole and
 /// the MDB): `pole` the pole's centre (crush within ±0.15 m of its line),
 /// else NHTSA's struck-side maximum over the barrier's height band.
-fn side_run(car: &Car, s: ExplicitBeams, rest: Vec<Vec3>, pole: Option<Vec3>, mdb: Option<ExplicitBeams>, seconds: f32, t0: Instant) -> Value {
+fn side_run(
+    car: &Car,
+    s: ExplicitBeams,
+    rest: Vec<Vec3>,
+    pole: Option<Vec3>,
+    mdb: Option<ExplicitBeams>,
+    seconds: f32,
+    t0: Instant,
+) -> Value {
     let f = car.frame;
-    let far: Vec<u32> = (0..s.nodes.len() as u32).filter(|&i| !is_tyre(&s, i as usize) && rest[i as usize].x < -0.2 * f.width()).collect();
-    let reach = car.skin.iter().map(|&i| rest[i as usize].x).fold(f32::MIN, f32::max);
+    let far: Vec<u32> = (0..s.nodes.len() as u32)
+        .filter(|&i| !is_tyre(&s, i as usize) && rest[i as usize].x < -0.2 * f.width())
+        .collect();
+    let reach = car
+        .skin
+        .iter()
+        .map(|&i| rest[i as usize].x)
+        .fold(f32::MIN, f32::max);
     let struck: Vec<u32> = car
         .skin
         .iter()
@@ -1461,7 +1855,11 @@ fn side_run(car: &Car, s: ExplicitBeams, rest: Vec<Vec3>, pole: Option<Vec3>, md
         .filter(|&i| {
             let p = rest[i as usize];
             match pole {
-                Some(c) => p.x > 0.3 * 0.5 * f.width() && (p.z - c.z).abs() < 0.15 && (0.3..1.2).contains(&p.y),
+                Some(c) => {
+                    p.x > 0.3 * 0.5 * f.width()
+                        && (p.z - c.z).abs() < 0.15
+                        && (0.3..1.2).contains(&p.y)
+                }
                 None => p.x > reach - 0.15 && (0.279..=0.838).contains(&(p.y - f.floor.min(0.02))),
             }
         })
@@ -1471,9 +1869,15 @@ fn side_run(car: &Car, s: ExplicitBeams, rest: Vec<Vec3>, pole: Option<Vec3>, md
     let crush = |s: &ExplicitBeams| -> f32 {
         let now = positions(s);
         let fit = rigid_fit(&rest, &now, &far);
-        struck.iter().filter(|&&i| now[i as usize].is_finite()).map(|&i| rest[i as usize].x - fit.to_rest(now[i as usize]).x).fold(0.0, f32::max)
+        struck
+            .iter()
+            .filter(|&&i| now[i as usize].is_finite())
+            .map(|&i| rest[i as usize].x - fit.to_rest(now[i as usize]).x)
+            .fold(0.0, f32::max)
     };
     let mut dyn_max = 0.0f32;
+    // The pole's deepest reach into the car: its axis in the far side's frame from the struck side's skin.
+    let mut pole_reach = 0.0f32;
     let n = (seconds / STEP).round() as usize;
     let mut world = mdb.map(|m| {
         let mut w = ExplicitBeamsWorld::new(vec![s.clone(), m]);
@@ -1482,7 +1886,15 @@ fn side_run(car: &Car, s: ExplicitBeams, rest: Vec<Vec3>, pole: Option<Vec3>, md
     });
     let mut solo = if world.is_none() { Some(s) } else { None };
     let mut e_max = 0.0f64;
-    let mech = |v: &ExplicitBeams| v.nodes.iter().map(|n| f64::from(n.mass) * (0.5 * f64::from(n.vel.length_squared()) + 9.81 * f64::from(n.pos.y))).sum::<f64>();
+    let mech = |v: &ExplicitBeams| {
+        v.nodes
+            .iter()
+            .map(|n| {
+                f64::from(n.mass)
+                    * (0.5 * f64::from(n.vel.length_squared()) + 9.81 * f64::from(n.pos.y))
+            })
+            .sum::<f64>()
+    };
     let e0 = match (&world, &solo) {
         (Some(w), _) => w.vehicles.iter().map(mech).sum::<f64>(),
         (_, Some(s)) => mech(s),
@@ -1510,6 +1922,11 @@ fn side_run(car: &Car, s: ExplicitBeams, rest: Vec<Vec3>, pole: Option<Vec3>, md
             };
             e_max = e_max.max(e - e0);
             dyn_max = dyn_max.max(crush(car_s));
+            if let Some(c) = pole {
+                let now = positions(car_s);
+                let fit = rigid_fit(&rest, &now, &far);
+                pole_reach = pole_reach.max(reach - (fit.to_rest(c).x - 0.127));
+            }
             intr.sample(car_s);
         }
     }
@@ -1519,9 +1936,13 @@ fn side_run(car: &Car, s: ExplicitBeams, rest: Vec<Vec3>, pole: Option<Vec3>, md
         _ => unreachable!(),
     };
     let wall_s = t0.elapsed().as_secs_f32();
-    let ke: f32 = s.nodes.iter().map(|n| 0.5 * n.mass * n.vel.length_squared()).sum();
+    let ke: f32 = s
+        .nodes
+        .iter()
+        .map(|n| 0.5 * n.mass * n.vel.length_squared())
+        .sum();
     json!({
-        "residual_crush_mm": mm(crush(s)), "dynamic_crush_mm": mm(dyn_max), "struck_nodes": struck.len(),
+        "barrier_min_x": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.pos.x).fold(f32::MAX, f32::min))), "barrier_vx": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / w.vehicles[1].nodes.iter().map(|n| n.mass).sum::<f32>())), "car_vx": r3(s.nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / s.nodes.iter().map(|n| n.mass).sum::<f32>()), "pole_reach_mm": pole.map(|_| mm(pole_reach)), "residual_crush_mm": mm(crush(s)), "dynamic_crush_mm": mm(dyn_max), "struck_nodes": struck.len(),
         "energy_rise_j": r1(e_max as f32), "ke_end_kj": r3(ke / 1e3),
         "penetration": pen.result(), "intrusion": intr.result(), "damage": damage_report(car, s), "visual": visual_now(car, s),
         "sim_s": seconds, "wall_s_per_sim_s": r3(wall_s / seconds),
@@ -1591,7 +2012,10 @@ pub fn scene_pole_sweep(car: &Car, kmh: f32, spacing: f32, seconds: f32) -> Valu
     let runs = out.into_inner().unwrap();
     let get = |v: &Value, k: &str| v["penetration"][k]["max_mm"].as_f64().unwrap_or(0.0);
     let worst = |k: &str| runs.iter().map(|v| get(v, k)).fold(0.0, f64::max);
-    let through = runs.iter().filter(|v| v["through"].as_bool() == Some(true)).count();
+    let through = runs
+        .iter()
+        .filter(|v| v["through"].as_bool() == Some(true))
+        .count();
     let sim = offsets.len() as f32 * seconds;
     json!({
         "kmh": kmh, "spacing_m": spacing, "offsets": runs.len(), "passed_through": through,
@@ -1612,7 +2036,13 @@ pub fn scene_mdb(car: &Car, seconds: f32) -> Value {
         Ok(d) => d,
         Err(e) => return json!({"error": e}),
     };
-    let Ok((mut m, _)) = ExplicitBeams::from_desc_jbeam_with(&desc, JbeamWheels::Pressure, Vec3::ZERO, Vec3::ZERO, settings()) else {
+    let Ok((mut m, _)) = ExplicitBeams::from_desc_jbeam_with(
+        &desc,
+        JbeamWheels::Pressure,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        settings(),
+    ) else {
         return json!({"error": "MDB spawn"});
     };
     let fwd = crate::pack::forward_axis(&desc);
@@ -1621,7 +2051,11 @@ pub fn scene_mdb(car: &Car, seconds: f32) -> Value {
     let v = MDB_SPEED;
     let crab = MDB_CRAB_DEG.to_radians();
     let wb = f.wheelbase();
-    let irl = if wb <= 2.896 { 0.5 * (f.front_axle + f.rear_axle) + 0.94 } else { f.front_axle - 0.508 };
+    let irl = if wb <= 2.896 {
+        0.5 * (f.front_axle + f.rear_axle) + 0.94
+    } else {
+        f.front_axle - 0.508
+    };
     let contact = Vec3::new(f.hi.x, 0.0, irl - 0.5 * MDB_FACE[0]);
     let dir = Vec3::new(-crab.cos(), 0.0, -crab.sin());
     let gap = 0.3;
@@ -1649,14 +2083,27 @@ pub fn scene_door(car: &Car) -> Value {
     };
     let t0 = Instant::now();
     let mut s = car.template.clone();
-    let lo = door.iter().map(|&i| s.nodes[i as usize].pos.y).fold(f32::MAX, f32::min);
-    let (z0, z1) = door.iter().fold((f32::MAX, f32::MIN), |(a, c), &i| (a.min(s.nodes[i as usize].pos.z), c.max(s.nodes[i as usize].pos.z)));
+    let lo = door
+        .iter()
+        .map(|&i| s.nodes[i as usize].pos.y)
+        .fold(f32::MAX, f32::min);
+    let (z0, z1) = door.iter().fold((f32::MAX, f32::MIN), |(a, c), &i| {
+        (
+            a.min(s.nodes[i as usize].pos.z),
+            c.max(s.nodes[i as usize].pos.z),
+        )
+    });
     let zc = 0.5 * (z0 + z1);
-    let outer = door.iter().map(|&i| s.nodes[i as usize].pos.x).fold(f32::MIN, f32::max);
+    let outer = door
+        .iter()
+        .map(|&i| s.nodes[i as usize].pos.x)
+        .fold(f32::MIN, f32::max);
     let r = 0.1525;
     let (y0, y1) = (lo + 0.127, lo + 0.80);
     let doorset: std::collections::HashSet<u32> = door.iter().copied().collect();
-    let held: Vec<usize> = (0..s.nodes.len()).filter(|&i| !is_tyre(&s, i) && s.nodes[i].pos.x < -0.2 && !doorset.contains(&(i as u32))).collect();
+    let held: Vec<usize> = (0..s.nodes.len())
+        .filter(|&i| !is_tyre(&s, i) && s.nodes[i].pos.x < -0.2 && !doorset.contains(&(i as u32)))
+        .collect();
     let cx0 = outer + r + 0.01;
     let inside = move |p: Vec3, d: f32| -> Option<f32> {
         if p.y < y0 || p.y > y1 {
@@ -1675,10 +2122,18 @@ pub fn scene_door(car: &Car) -> Value {
     let first = curve.iter().position(|c| c.1 > 100.0).unwrap_or(0);
     let d0 = curve.get(first).map_or(0.0, |c| c.0);
     let avg = |upto: f32| {
-        let v: Vec<f32> = curve.iter().filter(|c| c.0 - d0 <= upto && c.0 >= d0).map(|c| c.1).collect();
+        let v: Vec<f32> = curve
+            .iter()
+            .filter(|c| c.0 - d0 <= upto && c.0 >= d0)
+            .map(|c| c.1)
+            .collect();
         v.iter().sum::<f32>() / v.len().max(1) as f32
     };
-    let peak = curve.iter().filter(|c| c.0 - d0 <= 0.457).map(|c| c.1).fold(0.0f32, f32::max);
+    let peak = curve
+        .iter()
+        .filter(|c| c.0 - d0 <= 0.457)
+        .map(|c| c.1)
+        .fold(0.0f32, f32::max);
     let weight = car.mass() * 9.81;
     let wall_s = t0.elapsed().as_secs_f32();
     json!({
@@ -1695,9 +2150,17 @@ pub fn scene_roof(car: &Car) -> Value {
     let f = car.frame;
     let mut s = car.template.clone();
     let skin: Vec<Vec3> = car.skin.iter().map(|&i| s.nodes[i as usize].pos).collect();
-    let wb_mid = |p: &Vec3| p.z > f.rear_axle - 0.3 && p.z < f.front_axle;
-    let top = skin.iter().filter(|p| wb_mid(p)).map(|p| p.y).fold(f32::MIN, f32::max);
-    let roof: Vec<Vec3> = skin.iter().copied().filter(|p| wb_mid(p) && p.y > top - 0.12).collect();
+    let wb_mid = |p: &Vec3| p.z > f.rear_axle - 0.3 && p.z < f.front_axle - 0.35 * f.wheelbase();
+    let top = skin
+        .iter()
+        .filter(|p| wb_mid(p))
+        .map(|p| p.y)
+        .fold(f32::MIN, f32::max);
+    let roof: Vec<Vec3> = skin
+        .iter()
+        .copied()
+        .filter(|p| wb_mid(p) && p.y > top - 0.12)
+        .collect();
     if roof.is_empty() {
         return json!({"error": "no roof"});
     }
@@ -1716,11 +2179,42 @@ pub fn scene_roof(car: &Car) -> Value {
         let q = p - Vec3::new(rail.x, rail.y, centre_z);
         q.dot(across).abs() < 0.381 && q.dot(along).abs() < 0.9145
     };
-    let start = s.nodes.iter().filter(|n| under(n.pos)).map(|n| n.pos.dot(push)).fold(f32::MAX, f32::min);
+    let start = s
+        .nodes
+        .iter()
+        .filter(|n| under(n.pos))
+        .map(|n| n.pos.dot(push))
+        .fold(f32::MAX, f32::min);
+    // The first nodes the platen meets (its contact, for the report).
+    let mut first: Vec<(f32, usize)> = (0..s.nodes.len())
+        .filter(|&i| under(s.nodes[i].pos))
+        .map(|i| (s.nodes[i].pos.dot(push) - start, i))
+        .collect();
+    first.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let first: Vec<Value> = first
+        .iter()
+        .take(6)
+        .map(|&(d, i)| {
+            json!([
+                car.node_name(i),
+                mm(d),
+                r3(s.nodes[i].mass),
+                [
+                    r3(s.nodes[i].pos.x),
+                    r3(s.nodes[i].pos.y),
+                    r3(s.nodes[i].pos.z)
+                ]
+            ])
+        })
+        .collect();
     let held: Vec<usize> = (0..s.nodes.len())
         .filter(|&i| {
             let p = s.nodes[i].pos;
-            !is_tyre(&s, i) && p.y < f.floor + 0.15 && p.x.abs() > 0.5 * f.width() - 0.25 && p.z > f.rear_axle + 0.3 && p.z < f.front_axle - 0.3
+            !is_tyre(&s, i)
+                && p.y < f.floor + 0.15
+                && p.x.abs() > 0.5 * f.width() - 0.25
+                && p.z > f.rear_axle + 0.3
+                && p.z < f.front_axle - 0.3
         })
         .collect();
     let inside = move |p: Vec3, d: f32| -> Option<f32> {
@@ -1735,7 +2229,7 @@ pub fn scene_roof(car: &Car) -> Value {
     let weight = car.mass() * 9.81;
     let wall_s = t0.elapsed().as_secs_f32();
     json!({
-        "peak_kn": r1(peak / 1e3), "ratio": r3(peak / weight), "held_nodes": held.len(),
+        "peak_kn": r1(peak / 1e3), "ratio": r3(peak / weight), "held_nodes": held.len(), "first_contact": first, "roof_top_m": r3(top), "header": [r3(header.x), r3(header.y), r3(header.z)], "axles": [r3(f.front_axle), r3(f.rear_axle)], "rail": [r3(rail.x), r3(rail.y), r3(rail.z)],
         "force_kn_10mm": curve.iter().step_by(2).map(|c| r1(c.1 / 1e3)).collect::<Vec<_>>(),
         "damage": damage_report(car, &s),
         "wall_s_per_sim_s": r3(wall_s / (0.127 / 0.1)),
@@ -1750,11 +2244,18 @@ pub fn run_car(car: &Car, quick: bool) -> Value {
         let rest = sc.spawn(|| scene_rest(car, false, rest_s));
         let rest_tx = jbeam.then(|| sc.spawn(|| scene_rest(car, true, rest_s)));
         let wall = sc.spawn(|| scene_wall(car, 56.0, if quick { 0.3 } else { 1.0 }));
-        let pole = sc.spawn(|| scene_pole(car, 32.0, if quick { 0.4 } else { 1.0 }));
-        let mdb = sc.spawn(|| scene_mdb(car, if quick { 0.4 } else { 1.0 }));
+        let pole = sc.spawn(|| scene_pole(car, 32.0, if quick { 0.4 } else { 1.5 }));
+        let mdb = sc.spawn(|| scene_mdb(car, if quick { 0.4 } else { 1.5 }));
         let roof = sc.spawn(|| scene_roof(car));
         let door = sc.spawn(|| scene_door(car));
-        let sweep = sc.spawn(|| scene_pole_sweep(car, 32.0, if quick { 1.0 } else { 0.2 }, if quick { 0.3 } else { 0.8 }));
+        let sweep = sc.spawn(|| {
+            scene_pole_sweep(
+                car,
+                32.0,
+                if quick { 1.0 } else { 0.2 },
+                if quick { 0.3 } else { 0.8 },
+            )
+        });
         json!({
             "name": car.spec.name, "label": car.spec.label,
             "census": census(car),

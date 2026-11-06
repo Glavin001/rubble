@@ -18,16 +18,32 @@ use std::path::PathBuf;
 
 fn main() -> Result<(), String> {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let opt = |k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1).cloned());
+    let opt = |k: &str| {
+        a.iter()
+            .position(|x| x == k)
+            .and_then(|i| a.get(i + 1).cloned())
+    };
     let quick = a.iter().any(|x| x == "--quick");
-    let manifest = opt("--manifest").map(PathBuf::from).unwrap_or_else(default_manifest);
-    let out = opt("--out").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/measurements"));
-    let m: Manifest = serde_json::from_str(&std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?).map_err(|e| e.to_string())?;
-    let only: Option<Vec<String>> = opt("--cars").map(|c| c.split(',').map(str::to_string).collect());
+    let manifest = opt("--manifest")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_manifest);
+    let out = opt("--out").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/measurements")
+    });
+    let m: Manifest = serde_json::from_str(
+        &std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?,
+    )
+    .map_err(|e| e.to_string())?;
+    let only: Option<Vec<String>> =
+        opt("--cars").map(|c| c.split(',').map(str::to_string).collect());
     let t0 = std::time::Instant::now();
     let mut results = Vec::new();
     let mut skipped = Vec::new();
-    for spec in m.cars.iter().filter(|c| only.as_ref().is_none_or(|o| o.contains(&c.name))) {
+    for spec in m
+        .cars
+        .iter()
+        .filter(|c| only.as_ref().is_none_or(|o| o.contains(&c.name)))
+    {
         if !available(spec) {
             eprintln!("- {}: files absent, skipped", spec.name);
             skipped.push(spec.name.clone());
@@ -35,19 +51,42 @@ fn main() -> Result<(), String> {
         }
         let t = std::time::Instant::now();
         let car = Car::load(spec)?;
-        eprintln!("{}: loaded in {:.1} s ({} nodes)", spec.name, t.elapsed().as_secs_f32(), car.template.nodes.len());
+        eprintln!(
+            "{}: loaded in {:.1} s ({} nodes)",
+            spec.name,
+            t.elapsed().as_secs_f32(),
+            car.template.nodes.len()
+        );
         let mut r = run_car(&car, quick);
         engine_softbody::vehicle_compare::name_nodes(&mut r, &car);
-        eprintln!("{}: scenes in {:.1} s", spec.name, t.elapsed().as_secs_f32());
+        eprintln!(
+            "{}: scenes in {:.1} s",
+            spec.name,
+            t.elapsed().as_secs_f32()
+        );
         results.push(r);
     }
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    let stem = if quick { "vehicle-compare-quick" } else { "vehicle-compare" };
+    let stem = if quick {
+        "vehicle-compare-quick"
+    } else {
+        "vehicle-compare"
+    };
     let doc = serde_json::json!({ "quick": quick, "skipped": skipped, "cars": results });
-    std::fs::write(out.join(format!("{stem}.json")), serde_json::to_string_pretty(&doc).unwrap()).map_err(|e| e.to_string())?;
-    std::fs::write(out.join(format!("{stem}.md")), markdown(&results, quick)).map_err(|e| e.to_string())?;
-    std::fs::write(out.join(format!("{stem}-force.svg")), force_svg(&results)).map_err(|e| e.to_string())?;
-    eprintln!("→ {}/{stem}.{{md,json}}, {stem}-force.svg ({:.0} s)", out.display(), t0.elapsed().as_secs_f32());
+    std::fs::write(
+        out.join(format!("{stem}.json")),
+        serde_json::to_string_pretty(&doc).unwrap(),
+    )
+    .map_err(|e| e.to_string())?;
+    std::fs::write(out.join(format!("{stem}.md")), markdown(&results, quick))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(out.join(format!("{stem}-force.svg")), force_svg(&results))
+        .map_err(|e| e.to_string())?;
+    eprintln!(
+        "→ {}/{stem}.{{md,json}}, {stem}-force.svg ({:.0} s)",
+        out.display(),
+        t0.elapsed().as_secs_f32()
+    );
     Ok(())
 }
 
@@ -106,9 +145,9 @@ const ROWS: &[(&str, &str, &str, &str)] = &[
     ("Wall 56 km/h", "peak force (kN) at (ms)", "wall56.peak_force_kn|wall56.peak_force_ms", ""),
     ("Wall 56 km/h", "energy: start, beams dissipated, elastic end (kJ)", "wall56.energy.start_kj|wall56.energy.beam_dissipation_kj|wall56.energy.elastic_end_kj", ""),
     ("Wall 56 km/h", "ledger closure (share of start); largest rise (J)", "wall56.energy.closure_share|wall56.energy.max_rise_j", "≤ 1e-3; 0"),
-    ("Wall 56 km/h", "ripple 0.5–0.6 s: worst part (mm)", "wall56.ripple_0_5s.worst_part|wall56.ripple_0_5s.worst_mm", "≤ 1 (Choice)"),
-    ("Wall 56 km/h", "ripple 0.5–0.6 s: median part (mm)", "wall56.ripple_0_5s.median_part_mm", "≤ 1"),
-    ("Wall 56 km/h", "ripple at 1 s: worst part (mm)", "wall56.ripple_end.worst_part|wall56.ripple_end.worst_mm", "≤ 1"),
+    ("Wall 56 km/h", "ripple 0.5–0.6 s: worst panel (mm)", "wall56.ripple_0_5s.worst_part|wall56.ripple_0_5s.worst_mm", "≤ 1 (Choice)"),
+    ("Wall 56 km/h", "ripple 0.5–0.6 s: median panel (mm)", "wall56.ripple_0_5s.median_part_mm", "≤ 1"),
+    ("Wall 56 km/h", "ripple at 1 s: worst panel (mm)", "wall56.ripple_end.worst_part|wall56.ripple_end.worst_mm", "≤ 1"),
     ("Wall 56 km/h", "intrusion max: feet / knees / chest (mm)", "wall56.intrusion.feet.max_mm|wall56.intrusion.knees.max_mm|wall56.intrusion.chest.max_mm", "firewall 1–67 mm rearward"),
     ("Wall 56 km/h", "penetration into the wall max: node / beam / triangle (mm)", "wall56.penetration.nodes.max_mm|wall56.penetration.beams.max_mm|wall56.penetration.triangles.max_mm", "0 (rigid)"),
     ("Wall 56 km/h", "penetration p99 in contact: node / beam / triangle (mm)", "wall56.penetration.nodes.p99_in_contact_mm|wall56.penetration.beams.p99_in_contact_mm|wall56.penetration.triangles.p99_in_contact_mm", ""),
@@ -122,6 +161,7 @@ const ROWS: &[(&str, &str, &str, &str)] = &[
     ("Wall 56 km/h", "mesh: seam gap p99 / max (mm)", "wall56.visual.seam_gap_p99_mm|wall56.visual.seam_gap_max_mm", ""),
     ("Wall 56 km/h", "mesh: dihedral change p99 / max (°); edges > 30° / > 60°", "wall56.visual.dihedral_p99_deg|wall56.visual.dihedral_max_deg|wall56.visual.dihedral_over_30|wall56.visual.dihedral_over_60", ""),
     ("Side pole 32 km/h, 75°", "residual / dynamic crush at the pole (mm)", "pole32.residual_crush_mm|pole32.dynamic_crush_mm", "297–445 residual"),
+    ("Side pole 32 km/h, 75°", "pole's deepest reach past the struck skin (mm)", "pole32.pole_reach_mm", "about the residual crush"),
     ("Side pole 32 km/h, 75°", "intrusion max: hip / chest / head (mm)", "pole32.intrusion.hip.max_mm|pole32.intrusion.chest.max_mm|pole32.intrusion.head.max_mm", ""),
     ("Side pole 32 km/h, 75°", "penetration into the pole max: node / beam / triangle (mm)", "pole32.penetration.nodes.max_mm|pole32.penetration.beams.max_mm|pole32.penetration.triangles.max_mm", "0 (rigid)"),
     ("Side pole 32 km/h, 75°", "penetration p99 in contact: node / beam / triangle (mm)", "pole32.penetration.nodes.p99_in_contact_mm|pole32.penetration.beams.p99_in_contact_mm|pole32.penetration.triangles.p99_in_contact_mm", ""),
@@ -141,8 +181,16 @@ const ROWS: &[(&str, &str, &str, &str)] = &[
 
 fn markdown(cars: &[Value], quick: bool) -> String {
     let mut s = String::new();
-    let _ = writeln!(s, "# Vehicle comparison{}\n", if quick { " (quick: shortened scenes)" } else { "" });
-    let _ = writeln!(s, "Generated by `cargo run --release -p engine-softbody --example vehicle_compare`{}; the method is in `vehicle-compare.md`'s companion doc `engine/docs/etkk-audit.md`. Bands are from `crash-reference-targets.md` and `vehicle-test-strategy.md`.\n", if quick { " -- --quick" } else { "" });
+    let _ = writeln!(
+        s,
+        "# Vehicle comparison{}\n",
+        if quick {
+            " (quick: shortened scenes)"
+        } else {
+            ""
+        }
+    );
+    let _ = writeln!(s, "Generated by `cargo run --release -p engine-softbody --example vehicle_compare`{}. Method, choices and caveats: `engine/docs/etkk-audit.md` (The harness). Bands are from `crash-reference-targets.md` and `vehicle-test-strategy.md`.\n", if quick { " -- --quick" } else { "" });
     let mut section = "";
     for &(sec, label, path, band) in ROWS {
         if sec != section {
@@ -167,22 +215,53 @@ fn markdown(cars: &[Value], quick: bool) -> String {
     for c in cars {
         for key in ["rest", "rest_truck_export"] {
             if c[key].is_object() {
-                let _ = writeln!(s, "- {} ({}): {}", c["name"].as_str().unwrap_or("?"), c[key]["path"].as_str().unwrap_or(""), fmt(&c[key]["broken_by_part"]));
+                let _ = writeln!(
+                    s,
+                    "- {} ({}): {}",
+                    c["name"].as_str().unwrap_or("?"),
+                    c[key]["path"].as_str().unwrap_or(""),
+                    fmt(&c[key]["broken_by_part"])
+                );
             }
         }
     }
-    let _ = writeln!(s, "\n## Ripple: worst five parts (mm, wall 0.5–0.6 s)\n");
+    let _ = writeln!(s, "\n## Ripple: worst five panels (mm, wall 0.5–0.6 s)\n");
     for c in cars {
-        let _ = writeln!(s, "- {}: {}", c["name"].as_str().unwrap_or("?"), fmt(&c["wall56"]["ripple_0_5s"]["top"]));
+        let _ = writeln!(
+            s,
+            "- {}: {}",
+            c["name"].as_str().unwrap_or("?"),
+            fmt(&c["wall56"]["ripple_0_5s"]["top"])
+        );
     }
     let _ = writeln!(s, "\n## Pole sweep: per offset (along the car from the rear, through?, reach mm, triangle penetration mm)\n");
     for c in cars {
-        let runs = c["pole_sweep32"]["runs"].as_array().cloned().unwrap_or_default();
+        let runs = c["pole_sweep32"]["runs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let row: Vec<String> = runs
             .iter()
-            .map(|r| format!("{}:{}{}/{}", fmt(&r["along"]), if r["through"].as_bool() == Some(true) { "THROUGH " } else { "" }, fmt(&r["reach_mm"]), fmt(&r["penetration"]["triangles"]["max_mm"])))
+            .map(|r| {
+                format!(
+                    "{}:{}{}/{}",
+                    fmt(&r["along"]),
+                    if r["through"].as_bool() == Some(true) {
+                        "THROUGH "
+                    } else {
+                        ""
+                    },
+                    fmt(&r["reach_mm"]),
+                    fmt(&r["penetration"]["triangles"]["max_mm"])
+                )
+            })
             .collect();
-        let _ = writeln!(s, "- {}: {}", c["name"].as_str().unwrap_or("?"), row.join("; "));
+        let _ = writeln!(
+            s,
+            "- {}: {}",
+            c["name"].as_str().unwrap_or("?"),
+            row.join("; ")
+        );
     }
     let _ = writeln!(s, "\nThe wall's force-time curves (100 Hz, from contact): `vehicle-compare{}-force.svg`; every number, and the curves at 1 ms, in the JSON.", if quick { "-quick" } else { "" });
     s
@@ -193,9 +272,20 @@ fn force_svg(cars: &[Value]) -> String {
     let colours = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e"];
     let curves: Vec<(String, Vec<f64>)> = cars
         .iter()
-        .map(|c| (c["name"].as_str().unwrap_or("?").to_string(), c["wall56"]["force_kn_1ms"].as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default()))
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap_or("?").to_string(),
+                c["wall56"]["force_kn_1ms"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
+                    .unwrap_or_default(),
+            )
+        })
         .collect();
-    let fmax = curves.iter().flat_map(|c| c.1.iter().copied()).fold(100.0, f64::max);
+    let fmax = curves
+        .iter()
+        .flat_map(|c| c.1.iter().copied())
+        .fold(100.0, f64::max);
     let fmax = (fmax / 100.0).ceil() * 100.0;
     let x = |ms: f64| l + (w - l - 20.0) * ms / 150.0;
     let y = |kn: f64| h - b - (h - b - 20.0) * kn / fmax;
@@ -211,7 +301,11 @@ fn force_svg(cars: &[Value]) -> String {
     let _ = write!(s, "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\">ms after contact</text><text x=\"14\" y=\"{}\" transform=\"rotate(-90 14 {})\" text-anchor=\"middle\">wall force on the car (kN, 100 Hz)</text>", 0.5 * (l + w), h - 6.0, 0.5 * h, 0.5 * h);
     for (k, (name, c)) in curves.iter().enumerate() {
         let col = colours[k % colours.len()];
-        let pts: Vec<String> = c.iter().enumerate().map(|(i, &f)| format!("{:.1},{:.1}", x(i as f64), y(f))).collect();
+        let pts: Vec<String> = c
+            .iter()
+            .enumerate()
+            .map(|(i, &f)| format!("{:.1},{:.1}", x(i as f64), y(f)))
+            .collect();
         let _ = write!(s, "<polyline fill=\"none\" stroke=\"{col}\" stroke-width=\"2\" points=\"{}\"/><text x=\"{}\" y=\"{}\" fill=\"{col}\">{name}</text>", pts.join(" "), w - 120.0, 36.0 + 16.0 * k as f64);
     }
     s.push_str("</svg>\n");

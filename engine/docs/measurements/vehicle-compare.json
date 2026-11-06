@@ -1,0 +1,4556 @@
+{
+  "cars": [
+    {
+      "census": {
+        "at_bound_share": 0.768,
+        "beam_kinds": {
+          "JbeamAeroTri": 868,
+          "JbeamPlain": 6214,
+          "JbeamRope": 102,
+          "LimitedSpring": 12,
+          "Support": 414
+        },
+        "beams": 8926,
+        "body_mass_kg": 1362.0,
+        "com": [
+          0.039,
+          0.512,
+          0.228
+        ],
+        "com_height_m": 0.512,
+        "ends_per_node_mean": 13.1,
+        "ends_per_node_p50": 12.0,
+        "eps_y_p50": 0.038,
+        "front_axle_share": 0.583,
+        "hardware_groups": 22,
+        "height_m": 1.415,
+        "kl_max": 13291087.0,
+        "kl_mean": 263899.0,
+        "kl_p10": 43805.0,
+        "kl_p50": 170320.0,
+        "kl_p90": 527391.0,
+        "len_p50": 0.334,
+        "length_m": 4.689,
+        "mass_kg": 1450.0,
+        "node_mass_mean": 1.49,
+        "node_mass_p50": 1.003,
+        "nodes": 914,
+        "parts": 18,
+        "settle_top_parts_mm": [
+          [
+            "suspension",
+            28.0
+          ],
+          [
+            "body",
+            4.2
+          ],
+          [
+            "door_f_r",
+            3.3
+          ],
+          [
+            "radiator",
+            0.7
+          ]
+        ],
+        "skin_triangles": 944,
+        "tyre_nodes": 112,
+        "visual_triangles": 344085,
+        "visual_vertices": 205242,
+        "wheelbase_m": 2.74,
+        "width_m": 1.881
+      },
+      "door": {
+        "damage": {
+          "bent_beams": 133,
+          "broken_beams": 0,
+          "finite": true,
+          "hardware_broken": 0,
+          "hardware_broken_names": [],
+          "hardware_total": 22,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "door_part": "door_f_l",
+        "force_kn_10mm": [
+          0.0,
+          0.0,
+          0.4,
+          1.6,
+          4.8,
+          7.9,
+          10.4,
+          10.8,
+          12.4,
+          10.2,
+          11.0,
+          12.2,
+          11.7,
+          13.5,
+          10.7,
+          11.8,
+          13.7,
+          14.4,
+          14.1,
+          12.3,
+          12.2,
+          12.8,
+          10.9,
+          12.5,
+          12.6,
+          14.8,
+          16.1,
+          18.1,
+          17.6,
+          18.7,
+          16.9,
+          18.2,
+          20.1,
+          22.2,
+          23.4,
+          23.5,
+          25.2,
+          25.5,
+          26.8,
+          27.4,
+          10.7,
+          10.5,
+          11.6,
+          13.0,
+          14.5,
+          16.6,
+          18.8,
+          21.4,
+          23.5,
+          24.2,
+          24.7
+        ],
+        "initial_kn": 10.0,
+        "intermediate_kn": 12.5,
+        "peak_kn": 27.8,
+        "peak_required_kn": 28.4,
+        "wall_s_per_sim_s": 0.992
+      },
+      "label": "Rubble sedan1 (authored, one tier, Medium)",
+      "mdb214": {
+        "barrier_min_x": -6.672,
+        "barrier_vx": -5.076,
+        "car_vx": -4.089,
+        "damage": {
+          "bent_beams": 410,
+          "broken_beams": 3,
+          "finite": true,
+          "hardware_broken": 0,
+          "hardware_broken_names": [],
+          "hardware_total": 22,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "dynamic_crush_mm": 667.3,
+        "energy_rise_j": 0.0,
+        "intrusion": {
+          "chest": {
+            "max_mm": 416.1,
+            "nodes": 44,
+            "residual_mm": 338.3
+          },
+          "feet": {
+            "max_mm": 529.6,
+            "nodes": 57,
+            "residual_mm": 474.6
+          },
+          "head": {
+            "max_mm": 346.7,
+            "nodes": 38,
+            "residual_mm": 283.7
+          },
+          "hip": {
+            "max_mm": 450.3,
+            "nodes": 60,
+            "residual_mm": 412.8
+          },
+          "knees": {
+            "max_mm": 539.0,
+            "nodes": 62,
+            "residual_mm": 469.1
+          }
+        },
+        "ke_end_kj": 15.549,
+        "penetration": {
+          "beams": {
+            "max_mm": 0.0,
+            "p99_in_contact_mm": null,
+            "p99_mm": 0.0,
+            "samples_in_contact": 0
+          },
+          "colliders": 0,
+          "deepest_node": 0,
+          "deepest_node_mass": 0.0,
+          "deepest_node_name": "body#0",
+          "nodes": {
+            "max_mm": 0.0,
+            "p99_in_contact_mm": null,
+            "p99_mm": 0.0,
+            "samples_in_contact": 0
+          },
+          "samples": 1500,
+          "triangles": {
+            "max_mm": 0.0,
+            "p99_in_contact_mm": null,
+            "p99_mm": 0.0,
+            "samples_in_contact": 0
+          }
+        },
+        "pole_reach_mm": null,
+        "residual_crush_mm": 565.9,
+        "sim_s": 1.5,
+        "struck_nodes": 43,
+        "visual": {
+          "available": true,
+          "compress_min": 0.016,
+          "compress_p01": 0.498,
+          "dihedral_edges": 393769,
+          "dihedral_max_deg": 179.7,
+          "dihedral_over_30": 17973,
+          "dihedral_over_60": 9525,
+          "dihedral_p99_deg": 105.2,
+          "flipped_at_rest": 11,
+          "flipped_new": 5517,
+          "seam_gap_max_mm": 469.2,
+          "seam_gap_p99_mm": 336.6,
+          "seam_open_1cm": 2367,
+          "seam_open_5cm": 1368,
+          "seam_pairs": 11569,
+          "seam_torn_pairs": 312,
+          "stretch_max": 1596.177,
+          "stretch_p99": 9.51,
+          "torn_fraction": 0.006,
+          "torn_vertices": 1014,
+          "triangles": 278773,
+          "tris_live": 276774,
+          "tris_over_1_5": 18780,
+          "tris_under_0_5": 2798,
+          "vertices": 166582
+        },
+        "wall_s_per_sim_s": 3.665
+      },
+      "name": "sedan1",
+      "pole32": {
+        "barrier_min_x": null,
+        "barrier_vx": null,
+        "car_vx": -0.027,
+        "damage": {
+          "bent_beams": 317,
+          "broken_beams": 0,
+          "finite": true,
+          "hardware_broken": 0,
+          "hardware_broken_names": [],
+          "hardware_total": 22,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "dynamic_crush_mm": 479.8,
+        "energy_rise_j": 0.0,
+        "intrusion": {
+          "chest": {
+            "max_mm": 333.4,
+            "nodes": 44,
+            "residual_mm": 327.9
+          },
+          "feet": {
+            "max_mm": 178.9,
+            "nodes": 57,
+            "residual_mm": 155.0
+          },
+          "head": {
+            "max_mm": 368.4,
+            "nodes": 38,
+            "residual_mm": 349.0
+          },
+          "hip": {
+            "max_mm": 345.1,
+            "nodes": 60,
+            "residual_mm": 302.7
+          },
+          "knees": {
+            "max_mm": 222.6,
+            "nodes": 62,
+            "residual_mm": 194.2
+          }
+        },
+        "ke_end_kj": 0.018,
+        "penetration": {
+          "beams": {
+            "max_mm": 127.0,
+            "p99_in_contact_mm": 127.0,
+            "p99_mm": 127.0,
+            "samples_in_contact": 1497
+          },
+          "colliders": 1,
+          "deepest_node": 171,
+          "deepest_node_mass": 0.645,
+          "deepest_node_name": "body#171",
+          "nodes": {
+            "max_mm": 12.5,
+            "p99_in_contact_mm": 9.6,
+            "p99_mm": 9.6,
+            "samples_in_contact": 1497
+          },
+          "samples": 1500,
+          "triangles": {
+            "max_mm": 127.0,
+            "p99_in_contact_mm": 127.0,
+            "p99_mm": 127.0,
+            "samples_in_contact": 1497
+          }
+        },
+        "pole_reach_mm": 536.3,
+        "residual_crush_mm": 452.2,
+        "sim_s": 1.5,
+        "struck_nodes": 8,
+        "visual": {
+          "available": true,
+          "compress_min": 0.006,
+          "compress_p01": 0.549,
+          "dihedral_edges": 394754,
+          "dihedral_max_deg": 179.9,
+          "dihedral_over_30": 12614,
+          "dihedral_over_60": 6386,
+          "dihedral_p99_deg": 85.0,
+          "flipped_at_rest": 11,
+          "flipped_new": 3452,
+          "seam_gap_max_mm": 595.7,
+          "seam_gap_p99_mm": 222.9,
+          "seam_open_1cm": 1774,
+          "seam_open_5cm": 1069,
+          "seam_pairs": 11569,
+          "seam_torn_pairs": 152,
+          "stretch_max": 571.133,
+          "stretch_p99": 5.416,
+          "torn_fraction": 0.003,
+          "torn_vertices": 509,
+          "triangles": 278773,
+          "tris_live": 277521,
+          "tris_over_1_5": 12338,
+          "tris_under_0_5": 2177,
+          "vertices": 166582
+        },
+        "wall_s_per_sim_s": 1.27
+      },
+      "pole_sweep32": {
+        "kmh": 32.0,
+        "offsets": 23,
+        "passed_through": 0,
+        "runs": [
+          {
+            "along": 0.021,
+            "finite": true,
+            "momentum_left": 0.474,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 126.9,
+                "samples_in_contact": 284
+              },
+              "colliders": 1,
+              "deepest_node": 762,
+              "deepest_node_mass": 0.172,
+              "deepest_node_name": "body#762",
+              "nodes": {
+                "max_mm": 13.6,
+                "p99_in_contact_mm": 13.0,
+                "p99_mm": 12.8,
+                "samples_in_contact": 273
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 265
+              }
+            },
+            "reach_mm": 525.7,
+            "through": false,
+            "z": -2.234
+          },
+          {
+            "along": 0.064,
+            "finite": true,
+            "momentum_left": 0.129,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 791
+              },
+              "colliders": 1,
+              "deepest_node": 675,
+              "deepest_node_mass": 0.221,
+              "deepest_node_name": "body#675",
+              "nodes": {
+                "max_mm": 27.4,
+                "p99_in_contact_mm": 11.0,
+                "p99_mm": 11.0,
+                "samples_in_contact": 790
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 791
+              }
+            },
+            "reach_mm": 575.7,
+            "through": false,
+            "z": -2.034
+          },
+          {
+            "along": 0.107,
+            "finite": true,
+            "momentum_left": 0.48,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 126.9,
+                "samples_in_contact": 273
+              },
+              "colliders": 1,
+              "deepest_node": 23,
+              "deepest_node_mass": 0.739,
+              "deepest_node_name": "body#23",
+              "nodes": {
+                "max_mm": 7.4,
+                "p99_in_contact_mm": 7.4,
+                "p99_mm": 7.4,
+                "samples_in_contact": 250
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 273
+              }
+            },
+            "reach_mm": 533.2,
+            "through": false,
+            "z": -1.834
+          },
+          {
+            "along": 0.149,
+            "finite": true,
+            "momentum_left": 0.133,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 795
+              },
+              "colliders": 1,
+              "deepest_node": 43,
+              "deepest_node_mass": 0.676,
+              "deepest_node_name": "body#43",
+              "nodes": {
+                "max_mm": 7.3,
+                "p99_in_contact_mm": 7.2,
+                "p99_mm": 7.2,
+                "samples_in_contact": 793
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 545
+              }
+            },
+            "reach_mm": 471.0,
+            "through": false,
+            "z": -1.634
+          },
+          {
+            "along": 0.192,
+            "finite": true,
+            "momentum_left": 0.082,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 796
+              },
+              "colliders": 1,
+              "deepest_node": 758,
+              "deepest_node_mass": 0.257,
+              "deepest_node_name": "body#758",
+              "nodes": {
+                "max_mm": 14.6,
+                "p99_in_contact_mm": 13.3,
+                "p99_mm": 13.3,
+                "samples_in_contact": 793
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 796
+              }
+            },
+            "reach_mm": 497.7,
+            "through": false,
+            "z": -1.434
+          },
+          {
+            "along": 0.235,
+            "finite": true,
+            "momentum_left": 0.304,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 406
+              },
+              "colliders": 1,
+              "deepest_node": 739,
+              "deepest_node_mass": 0.097,
+              "deepest_node_name": "body#739",
+              "nodes": {
+                "max_mm": 62.0,
+                "p99_in_contact_mm": 52.7,
+                "p99_mm": 28.7,
+                "samples_in_contact": 339
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 352
+              }
+            },
+            "reach_mm": 313.7,
+            "through": false,
+            "z": -1.234
+          },
+          {
+            "along": 0.277,
+            "finite": true,
+            "momentum_left": 0.191,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.8,
+                "p99_mm": 126.5,
+                "samples_in_contact": 154
+              },
+              "colliders": 1,
+              "deepest_node": 547,
+              "deepest_node_mass": 0.579,
+              "deepest_node_name": "body#547",
+              "nodes": {
+                "max_mm": 41.1,
+                "p99_in_contact_mm": 40.8,
+                "p99_mm": 30.3,
+                "samples_in_contact": 146
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 74.0,
+                "p99_in_contact_mm": 74.0,
+                "p99_mm": 71.5,
+                "samples_in_contact": 120
+              }
+            },
+            "reach_mm": 266.3,
+            "through": false,
+            "z": -1.034
+          },
+          {
+            "along": 0.32,
+            "finite": true,
+            "momentum_left": 0.091,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 111,
+              "deepest_node_mass": 1.036,
+              "deepest_node_name": "body#111",
+              "nodes": {
+                "max_mm": 17.9,
+                "p99_in_contact_mm": 16.0,
+                "p99_mm": 16.0,
+                "samples_in_contact": 797
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              }
+            },
+            "reach_mm": 412.2,
+            "through": false,
+            "z": -0.834
+          },
+          {
+            "along": 0.363,
+            "finite": true,
+            "momentum_left": 0.049,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 129,
+              "deepest_node_mass": 1.281,
+              "deepest_node_name": "body#129",
+              "nodes": {
+                "max_mm": 13.8,
+                "p99_in_contact_mm": 11.2,
+                "p99_mm": 11.2,
+                "samples_in_contact": 797
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              }
+            },
+            "reach_mm": 557.4,
+            "through": false,
+            "z": -0.634
+          },
+          {
+            "along": 0.405,
+            "finite": true,
+            "momentum_left": 0.008,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 171,
+              "deepest_node_mass": 0.645,
+              "deepest_node_name": "body#171",
+              "nodes": {
+                "max_mm": 29.4,
+                "p99_in_contact_mm": 24.6,
+                "p99_mm": 24.6,
+                "samples_in_contact": 797
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              }
+            },
+            "reach_mm": 575.2,
+            "through": false,
+            "z": -0.434
+          },
+          {
+            "along": 0.448,
+            "finite": true,
+            "momentum_left": 0.007,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 167,
+              "deepest_node_mass": 0.954,
+              "deepest_node_name": "body#167",
+              "nodes": {
+                "max_mm": 23.6,
+                "p99_in_contact_mm": 16.8,
+                "p99_mm": 16.8,
+                "samples_in_contact": 796
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              }
+            },
+            "reach_mm": 566.2,
+            "through": false,
+            "z": -0.234
+          },
+          {
+            "along": 0.49,
+            "finite": true,
+            "momentum_left": -0.009,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 211,
+              "deepest_node_mass": 0.806,
+              "deepest_node_name": "body#211",
+              "nodes": {
+                "max_mm": 31.8,
+                "p99_in_contact_mm": 24.9,
+                "p99_mm": 24.9,
+                "samples_in_contact": 795
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              }
+            },
+            "reach_mm": 444.9,
+            "through": false,
+            "z": -0.034
+          },
+          {
+            "along": 0.533,
+            "finite": true,
+            "momentum_left": 0.002,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 241,
+              "deepest_node_mass": 1.353,
+              "deepest_node_name": "body#241",
+              "nodes": {
+                "max_mm": 16.9,
+                "p99_in_contact_mm": 12.1,
+                "p99_mm": 12.1,
+                "samples_in_contact": 793
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              }
+            },
+            "reach_mm": 475.1,
+            "through": false,
+            "z": 0.166
+          },
+          {
+            "along": 0.576,
+            "finite": true,
+            "momentum_left": 0.032,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 296
+              },
+              "colliders": 1,
+              "deepest_node": 261,
+              "deepest_node_mass": 0.765,
+              "deepest_node_name": "body#261",
+              "nodes": {
+                "max_mm": 20.6,
+                "p99_in_contact_mm": 20.4,
+                "p99_mm": 18.8,
+                "samples_in_contact": 181
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 225
+              }
+            },
+            "reach_mm": 463.8,
+            "through": false,
+            "z": 0.366
+          },
+          {
+            "along": 0.618,
+            "finite": true,
+            "momentum_left": 0.035,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 271,
+              "deepest_node_mass": 0.765,
+              "deepest_node_name": "body#271",
+              "nodes": {
+                "max_mm": 17.3,
+                "p99_in_contact_mm": 16.6,
+                "p99_mm": 14.9,
+                "samples_in_contact": 285
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 353
+              }
+            },
+            "reach_mm": 658.3,
+            "through": false,
+            "z": 0.566
+          },
+          {
+            "along": 0.661,
+            "finite": true,
+            "momentum_left": -0.037,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 291,
+              "deepest_node_mass": 0.66,
+              "deepest_node_name": "body#291",
+              "nodes": {
+                "max_mm": 12.2,
+                "p99_in_contact_mm": 8.4,
+                "p99_mm": 8.4,
+                "samples_in_contact": 795
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              }
+            },
+            "reach_mm": 843.8,
+            "through": false,
+            "z": 0.766
+          },
+          {
+            "along": 0.704,
+            "finite": true,
+            "momentum_left": 0.059,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 126.8,
+                "samples_in_contact": 276
+              },
+              "colliders": 1,
+              "deepest_node": 720,
+              "deepest_node_mass": 0.364,
+              "deepest_node_name": "door_f_l#720",
+              "nodes": {
+                "max_mm": 25.9,
+                "p99_in_contact_mm": 25.8,
+                "p99_mm": 25.0,
+                "samples_in_contact": 241
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 276
+              }
+            },
+            "reach_mm": 261.5,
+            "through": false,
+            "z": 0.966
+          },
+          {
+            "along": 0.746,
+            "finite": true,
+            "momentum_left": -0.001,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 796
+              },
+              "colliders": 1,
+              "deepest_node": 517,
+              "deepest_node_mass": 0.768,
+              "deepest_node_name": "body#517",
+              "nodes": {
+                "max_mm": 13.1,
+                "p99_in_contact_mm": 10.7,
+                "p99_mm": 10.7,
+                "samples_in_contact": 796
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 796
+              }
+            },
+            "reach_mm": 470.0,
+            "through": false,
+            "z": 1.166
+          },
+          {
+            "along": 0.789,
+            "finite": true,
+            "momentum_left": 0.058,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 794
+              },
+              "colliders": 1,
+              "deepest_node": 923,
+              "deepest_node_mass": 0.786,
+              "deepest_node_name": "tyre#923",
+              "nodes": {
+                "max_mm": 14.3,
+                "p99_in_contact_mm": 9.4,
+                "p99_mm": 9.4,
+                "samples_in_contact": 792
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 94.5,
+                "p99_in_contact_mm": 93.7,
+                "p99_mm": 93.7,
+                "samples_in_contact": 790
+              }
+            },
+            "reach_mm": 483.6,
+            "through": false,
+            "z": 1.366
+          },
+          {
+            "along": 0.832,
+            "finite": true,
+            "momentum_left": 0.075,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 795
+              },
+              "colliders": 1,
+              "deepest_node": 361,
+              "deepest_node_mass": 0.537,
+              "deepest_node_name": "fender_l#361",
+              "nodes": {
+                "max_mm": 14.8,
+                "p99_in_contact_mm": 12.7,
+                "p99_mm": 12.7,
+                "samples_in_contact": 795
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 788
+              }
+            },
+            "reach_mm": 602.3,
+            "through": false,
+            "z": 1.566
+          },
+          {
+            "along": 0.874,
+            "finite": true,
+            "momentum_left": 0.02,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 796
+              },
+              "colliders": 1,
+              "deepest_node": 373,
+              "deepest_node_mass": 1.383,
+              "deepest_node_name": "body#373",
+              "nodes": {
+                "max_mm": 9.8,
+                "p99_in_contact_mm": 9.3,
+                "p99_mm": 9.3,
+                "samples_in_contact": 796
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 775
+              }
+            },
+            "reach_mm": 577.2,
+            "through": false,
+            "z": 1.766
+          },
+          {
+            "along": 0.917,
+            "finite": true,
+            "momentum_left": 0.385,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 126.9,
+                "samples_in_contact": 419
+              },
+              "colliders": 1,
+              "deepest_node": 407,
+              "deepest_node_mass": 0.088,
+              "deepest_node_name": "bumper_f#407",
+              "nodes": {
+                "max_mm": 10.2,
+                "p99_in_contact_mm": 9.9,
+                "p99_mm": 9.0,
+                "samples_in_contact": 402
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 123.3,
+                "p99_in_contact_mm": 120.6,
+                "p99_mm": 119.6,
+                "samples_in_contact": 403
+              }
+            },
+            "reach_mm": 638.4,
+            "through": false,
+            "z": 1.966
+          },
+          {
+            "along": 0.96,
+            "finite": true,
+            "momentum_left": 0.454,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 307
+              },
+              "colliders": 1,
+              "deepest_node": 627,
+              "deepest_node_mass": 0.252,
+              "deepest_node_name": "body#627",
+              "nodes": {
+                "max_mm": 20.9,
+                "p99_in_contact_mm": 19.8,
+                "p99_mm": 19.1,
+                "samples_in_contact": 281
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 307
+              }
+            },
+            "reach_mm": 708.8,
+            "through": false,
+            "z": 2.166
+          }
+        ],
+        "spacing_m": 0.20000000298023224,
+        "wall_s_per_sim_s": 0.214,
+        "worst_beam_mm": 127.0,
+        "worst_node_mm": 62.0,
+        "worst_triangle_mm": 127.0
+      },
+      "rest": {
+        "bent_beams": 0,
+        "broken_beams": 0,
+        "broken_by_part": [],
+        "creep_mm": 0.0,
+        "finite": true,
+        "first_break_s": null,
+        "ke_end_j": 0.0,
+        "path": ".truck, raycast wheels",
+        "sag_mm": -0.3,
+        "seconds": 10.0,
+        "vmax_end": 0.001,
+        "wall_s_per_sim_s": 0.821
+      },
+      "rest_truck_export": null,
+      "roof": {
+        "axles": [
+          1.431,
+          -1.309
+        ],
+        "damage": {
+          "bent_beams": 59,
+          "broken_beams": 0,
+          "finite": true,
+          "hardware_broken": 0,
+          "hardware_broken_names": [],
+          "hardware_total": 22,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "first_contact": [
+          [
+            "body#520",
+            0.0,
+            1.028,
+            [
+              0.656,
+              1.363,
+              0.286
+            ]
+          ],
+          [
+            "body#536",
+            24.2,
+            1.423,
+            [
+              0.693,
+              1.346,
+              -0.024
+            ]
+          ],
+          [
+            "body#221",
+            30.7,
+            1.178,
+            [
+              0.62,
+              1.364,
+              0.086
+            ]
+          ],
+          [
+            "body#241",
+            40.3,
+            1.353,
+            [
+              0.615,
+              1.34,
+              0.256
+            ]
+          ],
+          [
+            "body#201",
+            40.7,
+            2.171,
+            [
+              0.621,
+              1.368,
+              -0.094
+            ]
+          ],
+          [
+            "body#181",
+            54.9,
+            1.198,
+            [
+              0.621,
+              1.368,
+              -0.274
+            ]
+          ]
+        ],
+        "force_kn_10mm": [
+          1.2,
+          5.5,
+          9.6,
+          16.9,
+          29.4,
+          36.7,
+          43.7,
+          51.0,
+          54.4,
+          54.9,
+          58.5,
+          63.2,
+          66.9
+        ],
+        "header": [
+          0.009,
+          1.311,
+          0.405
+        ],
+        "held_nodes": 29,
+        "peak_kn": 66.9,
+        "rail": [
+          0.619,
+          1.36,
+          -0.275
+        ],
+        "ratio": 4.704,
+        "roof_top_m": 1.415,
+        "wall_s_per_sim_s": 1.218
+      },
+      "wall56": {
+        "campbell_b1": 22.1,
+        "damage": {
+          "bent_beams": 994,
+          "broken_beams": 14,
+          "finite": true,
+          "hardware_broken": 0,
+          "hardware_broken_names": [],
+          "hardware_total": 22,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "dynamic_crush_mm": 812.7,
+        "energy": {
+          "air_work_kj": 0.0,
+          "beam_dissipation_kj": 138.692,
+          "closure_share": -0.000013,
+          "contact_work_kj": -6.101,
+          "discretisation_kj": 0.0,
+          "elastic_end_kj": 6.992,
+          "ground_work_kj": -25.465,
+          "ke_end_kj": 0.089,
+          "ke_start_kj": 186.071,
+          "max_rise_j": 0.0,
+          "start_kj": 194.249
+        },
+        "force_kn_1ms": [
+          18.4,
+          19.4,
+          20.3,
+          21.2,
+          21.9,
+          23.5,
+          26.9,
+          33.9,
+          45.4,
+          61.2,
+          80.9,
+          107.1,
+          140.7,
+          176.8,
+          206.3,
+          226.0,
+          236.5,
+          239.3,
+          236.2,
+          229.3,
+          221.0,
+          215.0,
+          215.4,
+          223.0,
+          232.8,
+          236.5,
+          229.7,
+          214.3,
+          195.3,
+          179.4,
+          173.4,
+          185.4,
+          226.7,
+          310.5,
+          445.9,
+          625.2,
+          809.7,
+          936.3,
+          955.8,
+          862.2,
+          701.3,
+          538.2,
+          414.7,
+          341.3,
+          310.4,
+          306.8,
+          314.7,
+          322.0,
+          322.9,
+          318.5,
+          312.5,
+          307.2,
+          300.9,
+          290.0,
+          275.4,
+          262.9,
+          259.1,
+          267.3,
+          286.7,
+          313.2,
+          339.7,
+          358.7,
+          365.2,
+          358.2,
+          340.8,
+          318.5,
+          296.0,
+          276.2,
+          260.5,
+          248.9,
+          239.9,
+          231.6,
+          221.7,
+          209.2,
+          194.7,
+          180.6,
+          169.7,
+          163.9,
+          164.6,
+          171.2,
+          181.8,
+          192.2,
+          198.7,
+          198.9,
+          192.8,
+          182.3,
+          170.5,
+          160.0,
+          152.4,
+          147.8,
+          145.4,
+          143.3,
+          139.6,
+          132.8,
+          122.5,
+          109.7,
+          95.9,
+          82.9,
+          72.0,
+          63.8,
+          57.6,
+          52.7,
+          48.4,
+          44.5,
+          40.7,
+          37.4,
+          34.4,
+          31.9,
+          30.0,
+          28.7,
+          28.1,
+          27.9,
+          27.8,
+          27.7,
+          27.5,
+          27.1,
+          26.8,
+          26.4,
+          25.9,
+          25.0,
+          23.6,
+          21.6,
+          18.8,
+          15.3,
+          11.3,
+          7.5,
+          4.0,
+          1.3,
+          -0.8,
+          -2.3,
+          -3.3,
+          -4.2,
+          -5.0,
+          -5.7,
+          -6.3,
+          -6.8,
+          -7.0,
+          -7.0,
+          -6.8,
+          -6.5,
+          -6.0,
+          -5.4,
+          -4.8,
+          -3.9,
+          -3.0,
+          -2.0,
+          -0.9,
+          0.2,
+          0.9,
+          1.2
+        ],
+        "impulse_kns": 22.178,
+        "intrusion": {
+          "chest": {
+            "max_mm": 67.8,
+            "nodes": 44,
+            "residual_mm": 6.6
+          },
+          "feet": {
+            "max_mm": 186.6,
+            "nodes": 57,
+            "residual_mm": 155.0
+          },
+          "head": {
+            "max_mm": 27.7,
+            "nodes": 38,
+            "residual_mm": 7.1
+          },
+          "hip": {
+            "max_mm": 67.5,
+            "nodes": 60,
+            "residual_mm": 4.5
+          },
+          "knees": {
+            "max_mm": 98.7,
+            "nodes": 62,
+            "residual_mm": 20.5
+          }
+        },
+        "kmh": 56.0,
+        "mass_kg": 1450.0,
+        "mean_g_to_tm": 19.3,
+        "peak_force_kn": 961.1,
+        "peak_force_ms": 37.5,
+        "peak_g": 35.8,
+        "penetration": {
+          "beams": {
+            "max_mm": 65.9,
+            "p99_in_contact_mm": 65.8,
+            "p99_mm": 64.4,
+            "samples_in_contact": 161
+          },
+          "colliders": 1,
+          "deepest_node": 432,
+          "deepest_node_mass": 0.282,
+          "deepest_node_name": "bumper_f#432",
+          "nodes": {
+            "max_mm": 65.9,
+            "p99_in_contact_mm": 65.8,
+            "p99_mm": 64.4,
+            "samples_in_contact": 161
+          },
+          "samples": 1003,
+          "triangles": {
+            "max_mm": 65.9,
+            "p99_in_contact_mm": 65.8,
+            "p99_mm": 64.4,
+            "samples_in_contact": 161
+          }
+        },
+        "rebound_ms": 2.858,
+        "residual_crush_avg_mm": 603.6,
+        "residual_crush_max_mm": 636.1,
+        "residual_crush_zones_mm": [
+          540.5,
+          636.1,
+          619.4,
+          619.7,
+          623.7,
+          497.6
+        ],
+        "restitution": 0.184,
+        "ripple_0_5s": {
+          "median_part_mm": 2.0,
+          "top": [
+            [
+              "door_r_r",
+              4.2
+            ],
+            [
+              "door_r_l",
+              3.7
+            ],
+            [
+              "door_f_r",
+              3.0
+            ],
+            [
+              "bumper_f",
+              2.9
+            ],
+            [
+              "door_f_l",
+              2.6
+            ]
+          ],
+          "worst_mm": 4.2,
+          "worst_part": "door_r_r"
+        },
+        "ripple_end": {
+          "median_part_mm": 0.6,
+          "top": [
+            [
+              "door_r_r",
+              1.5
+            ],
+            [
+              "door_r_l",
+              1.1
+            ],
+            [
+              "bumper_f",
+              0.8
+            ],
+            [
+              "door_f_l",
+              0.8
+            ],
+            [
+              "door_f_r",
+              0.7
+            ]
+          ],
+          "worst_mm": 1.5,
+          "worst_part": "door_r_r"
+        },
+        "sim_s": 1.004,
+        "springback_ratio": 0.217,
+        "t_m_ms": 82.0,
+        "visual": {
+          "available": true,
+          "compress_min": 0.012,
+          "compress_p01": 0.369,
+          "dihedral_edges": 393747,
+          "dihedral_max_deg": 180.0,
+          "dihedral_over_30": 23331,
+          "dihedral_over_60": 12547,
+          "dihedral_p99_deg": 119.9,
+          "flipped_at_rest": 11,
+          "flipped_new": 7852,
+          "seam_gap_max_mm": 360.2,
+          "seam_gap_p99_mm": 196.7,
+          "seam_open_1cm": 3038,
+          "seam_open_5cm": 1297,
+          "seam_pairs": 11569,
+          "seam_torn_pairs": 200,
+          "stretch_max": 1046.934,
+          "stretch_p99": 13.238,
+          "torn_fraction": 0.006,
+          "torn_vertices": 1052,
+          "triangles": 278773,
+          "tris_live": 276751,
+          "tris_over_1_5": 24529,
+          "tris_under_0_5": 5594,
+          "vertices": 166582
+        },
+        "wall_s_per_sim_s": 1.467
+      },
+      "warnings": 0
+    },
+    {
+      "census": {
+        "at_bound_share": 0.651,
+        "beam_kinds": {
+          "JbeamAeroTri": 468,
+          "JbeamAniso": 34,
+          "JbeamBounded": 53,
+          "JbeamPlain": 2372,
+          "JbeamSupport": 305,
+          "JbeamTorsion": 47,
+          "JbeamTorsionPair": 47
+        },
+        "beams": 4306,
+        "body_mass_kg": 1344.6,
+        "com": [
+          -0.007,
+          0.4,
+          -0.015
+        ],
+        "com_height_m": 0.4,
+        "ends_per_node_mean": 11.8,
+        "ends_per_node_p50": 11.0,
+        "eps_y_p50": 0.034,
+        "front_axle_share": 0.494,
+        "hardware_groups": 59,
+        "height_m": 1.508,
+        "kl_max": 17782910.0,
+        "kl_mean": 942008.0,
+        "kl_p10": 39479.0,
+        "kl_p50": 369173.0,
+        "kl_p90": 2266039.0,
+        "len_p50": 0.422,
+        "length_m": 3.919,
+        "mass_kg": 1398.4,
+        "node_mass_mean": 2.879,
+        "node_mass_p50": 1.5,
+        "nodes": 467,
+        "parts": 73,
+        "settle_top_parts_mm": [
+          [
+            "etkk_hood",
+            944.8
+          ],
+          [
+            "etkk_trunk",
+            574.4
+          ],
+          [
+            "etkk_bumper_F",
+            78.9
+          ],
+          [
+            "etkk_headlight_L",
+            76.5
+          ]
+        ],
+        "skin_triangles": 519,
+        "tyre_nodes": 128,
+        "visual_triangles": 75134,
+        "visual_vertices": 65173,
+        "wheelbase_m": 2.389,
+        "width_m": 1.875
+      },
+      "door": {
+        "damage": {
+          "bent_beams": 37,
+          "broken_beams": 33,
+          "finite": true,
+          "hardware_broken": 2,
+          "hardware_broken_names": [
+            "mirror_L",
+            "doorglass_L_break"
+          ],
+          "hardware_total": 59,
+          "nodes_off_main_body": 5,
+          "parts_detached": 1,
+          "parts_detached_names": [
+            "etkk_mirror_L"
+          ]
+        },
+        "door_part": "etkk_door_L",
+        "force_kn_10mm": [
+          0.3,
+          0.0,
+          1.8,
+          4.7,
+          6.3,
+          7.0,
+          7.2,
+          7.1,
+          6.8,
+          6.3,
+          5.9,
+          5.7,
+          5.8,
+          6.3,
+          6.7,
+          7.3,
+          8.0,
+          8.9,
+          10.0,
+          11.3,
+          12.7,
+          13.8,
+          15.4,
+          16.7,
+          17.9,
+          18.4,
+          18.5,
+          18.5,
+          18.3,
+          18.0,
+          17.8,
+          17.9,
+          17.7,
+          17.7,
+          17.8,
+          17.9,
+          18.0,
+          18.1,
+          18.3,
+          18.6,
+          18.2,
+          18.0,
+          19.5,
+          18.6,
+          17.2,
+          17.1,
+          17.5,
+          18.0,
+          18.4,
+          18.8,
+          19.1
+        ],
+        "initial_kn": 5.4,
+        "intermediate_kn": 10.1,
+        "peak_kn": 19.5,
+        "peak_required_kn": 27.4,
+        "wall_s_per_sim_s": 0.592
+      },
+      "label": "ETK K-series kr6 (BeamNG community JBeam)",
+      "mdb214": {
+        "barrier_min_x": -7.084,
+        "barrier_vx": -3.957,
+        "car_vx": -4.417,
+        "damage": {
+          "bent_beams": 121,
+          "broken_beams": 29,
+          "finite": true,
+          "hardware_broken": 3,
+          "hardware_broken_names": [
+            "doorhinge_a_L",
+            "doorhinge_b_L",
+            "doorglass_L_break"
+          ],
+          "hardware_total": 59,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "dynamic_crush_mm": 484.5,
+        "energy_rise_j": 0.0,
+        "intrusion": {
+          "chest": {
+            "max_mm": 462.9,
+            "nodes": 35,
+            "residual_mm": 41.8
+          },
+          "feet": {
+            "max_mm": 245.6,
+            "nodes": 39,
+            "residual_mm": 128.0
+          },
+          "head": {
+            "max_mm": 109.8,
+            "nodes": 21,
+            "residual_mm": 43.0
+          },
+          "hip": {
+            "max_mm": 372.4,
+            "nodes": 46,
+            "residual_mm": 24.5
+          },
+          "knees": {
+            "max_mm": 246.2,
+            "nodes": 50,
+            "residual_mm": 36.7
+          }
+        },
+        "ke_end_kj": 15.912,
+        "penetration": {
+          "beams": {
+            "max_mm": 0.0,
+            "p99_in_contact_mm": null,
+            "p99_mm": 0.0,
+            "samples_in_contact": 0
+          },
+          "colliders": 0,
+          "deepest_node": 0,
+          "deepest_node_mass": 0.0,
+          "deepest_node_name": "int1r",
+          "nodes": {
+            "max_mm": 0.0,
+            "p99_in_contact_mm": null,
+            "p99_mm": 0.0,
+            "samples_in_contact": 0
+          },
+          "samples": 1500,
+          "triangles": {
+            "max_mm": 0.0,
+            "p99_in_contact_mm": null,
+            "p99_mm": 0.0,
+            "samples_in_contact": 0
+          }
+        },
+        "pole_reach_mm": null,
+        "residual_crush_mm": 209.7,
+        "sim_s": 1.5,
+        "struck_nodes": 16,
+        "visual": {
+          "available": true,
+          "compress_min": 0.05,
+          "compress_p01": 0.922,
+          "dihedral_edges": 109518,
+          "dihedral_max_deg": 178.7,
+          "dihedral_over_30": 317,
+          "dihedral_over_60": 143,
+          "dihedral_p99_deg": 8.8,
+          "flipped_at_rest": 19,
+          "flipped_new": 75,
+          "seam_gap_max_mm": 9.4,
+          "seam_gap_p99_mm": 0.8,
+          "seam_open_1cm": 0,
+          "seam_open_5cm": 0,
+          "seam_pairs": 785,
+          "seam_torn_pairs": 0,
+          "stretch_max": 30.109,
+          "stretch_p99": 1.083,
+          "torn_fraction": 0.001,
+          "torn_vertices": 82,
+          "triangles": 75134,
+          "tris_live": 75030,
+          "tris_over_1_5": 195,
+          "tris_under_0_5": 62,
+          "vertices": 65173
+        },
+        "wall_s_per_sim_s": 2.082
+      },
+      "name": "etkk",
+      "pole32": {
+        "barrier_min_x": null,
+        "barrier_vx": null,
+        "car_vx": -0.027,
+        "damage": {
+          "bent_beams": 82,
+          "broken_beams": 8,
+          "finite": true,
+          "hardware_broken": 1,
+          "hardware_broken_names": [
+            "sideskirt_L_mid2"
+          ],
+          "hardware_total": 59,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "dynamic_crush_mm": 636.2,
+        "energy_rise_j": 0.0,
+        "intrusion": {
+          "chest": {
+            "max_mm": 104.7,
+            "nodes": 35,
+            "residual_mm": 66.8
+          },
+          "feet": {
+            "max_mm": 48.2,
+            "nodes": 39,
+            "residual_mm": 39.8
+          },
+          "head": {
+            "max_mm": 122.3,
+            "nodes": 21,
+            "residual_mm": 55.5
+          },
+          "hip": {
+            "max_mm": 166.7,
+            "nodes": 46,
+            "residual_mm": 108.7
+          },
+          "knees": {
+            "max_mm": 86.1,
+            "nodes": 50,
+            "residual_mm": 34.9
+          }
+        },
+        "ke_end_kj": 0.004,
+        "penetration": {
+          "beams": {
+            "max_mm": 127.0,
+            "p99_in_contact_mm": 127.0,
+            "p99_mm": 127.0,
+            "samples_in_contact": 1492
+          },
+          "colliders": 1,
+          "deepest_node": 235,
+          "deepest_node_mass": 0.3,
+          "deepest_node_name": "sk3ll",
+          "nodes": {
+            "max_mm": 36.0,
+            "p99_in_contact_mm": 25.2,
+            "p99_mm": 25.2,
+            "samples_in_contact": 1486
+          },
+          "samples": 1500,
+          "triangles": {
+            "max_mm": 127.0,
+            "p99_in_contact_mm": 127.0,
+            "p99_mm": 127.0,
+            "samples_in_contact": 1492
+          }
+        },
+        "pole_reach_mm": 969.1,
+        "residual_crush_mm": 512.1,
+        "sim_s": 1.5,
+        "struck_nodes": 8,
+        "visual": {
+          "available": true,
+          "compress_min": 0.006,
+          "compress_p01": 0.83,
+          "dihedral_edges": 109134,
+          "dihedral_max_deg": 175.7,
+          "dihedral_over_30": 669,
+          "dihedral_over_60": 297,
+          "dihedral_p99_deg": 14.6,
+          "flipped_at_rest": 19,
+          "flipped_new": 128,
+          "seam_gap_max_mm": 0.5,
+          "seam_gap_p99_mm": 0.1,
+          "seam_open_1cm": 0,
+          "seam_open_5cm": 0,
+          "seam_pairs": 785,
+          "seam_torn_pairs": 0,
+          "stretch_max": 86.532,
+          "stretch_p99": 1.237,
+          "torn_fraction": 0.003,
+          "torn_vertices": 210,
+          "triangles": 75134,
+          "tris_live": 74788,
+          "tris_over_1_5": 545,
+          "tris_under_0_5": 261,
+          "vertices": 65173
+        },
+        "wall_s_per_sim_s": 0.809
+      },
+      "pole_sweep32": {
+        "kmh": 32.0,
+        "offsets": 19,
+        "passed_through": 0,
+        "runs": [
+          {
+            "along": 0.026,
+            "finite": true,
+            "momentum_left": 0.472,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.7,
+                "samples_in_contact": 259
+              },
+              "colliders": 1,
+              "deepest_node": 343,
+              "deepest_node_mass": 0.376,
+              "deepest_node_name": "tl4l",
+              "nodes": {
+                "max_mm": 11.0,
+                "p99_in_contact_mm": 10.8,
+                "p99_mm": 9.9,
+                "samples_in_contact": 230
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 259
+              }
+            },
+            "reach_mm": 684.7,
+            "through": false,
+            "z": -1.875
+          },
+          {
+            "along": 0.077,
+            "finite": true,
+            "momentum_left": 0.456,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.8,
+                "p99_mm": 126.7,
+                "samples_in_contact": 281
+              },
+              "colliders": 1,
+              "deepest_node": 312,
+              "deepest_node_mass": 0.5,
+              "deepest_node_name": "rb2ll",
+              "nodes": {
+                "max_mm": 8.1,
+                "p99_in_contact_mm": 7.8,
+                "p99_mm": 6.6,
+                "samples_in_contact": 257
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 281
+              }
+            },
+            "reach_mm": 491.2,
+            "through": false,
+            "z": -1.675
+          },
+          {
+            "along": 0.128,
+            "finite": true,
+            "momentum_left": 0.437,
+            "penetration": {
+              "beams": {
+                "max_mm": 101.6,
+                "p99_in_contact_mm": 99.9,
+                "p99_mm": 97.4,
+                "samples_in_contact": 219
+              },
+              "colliders": 1,
+              "deepest_node": 520,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#520",
+              "nodes": {
+                "max_mm": 37.6,
+                "p99_in_contact_mm": 28.1,
+                "p99_mm": 26.7,
+                "samples_in_contact": 218
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 48.3,
+                "p99_in_contact_mm": 48.3,
+                "p99_mm": 48.1,
+                "samples_in_contact": 219
+              }
+            },
+            "reach_mm": 308.7,
+            "through": false,
+            "z": -1.475
+          },
+          {
+            "along": 0.179,
+            "finite": true,
+            "momentum_left": 0.233,
+            "penetration": {
+              "beams": {
+                "max_mm": 126.9,
+                "p99_in_contact_mm": 126.4,
+                "p99_mm": 124.0,
+                "samples_in_contact": 152
+              },
+              "colliders": 1,
+              "deepest_node": 503,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#503",
+              "nodes": {
+                "max_mm": 36.4,
+                "p99_in_contact_mm": 34.5,
+                "p99_mm": 26.0,
+                "samples_in_contact": 123
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 151
+              }
+            },
+            "reach_mm": 467.5,
+            "through": false,
+            "z": -1.275
+          },
+          {
+            "along": 0.23,
+            "finite": true,
+            "momentum_left": 0.011,
+            "penetration": {
+              "beams": {
+                "max_mm": 126.9,
+                "p99_in_contact_mm": 126.7,
+                "p99_mm": 126.7,
+                "samples_in_contact": 788
+              },
+              "colliders": 1,
+              "deepest_node": 515,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#515",
+              "nodes": {
+                "max_mm": 25.6,
+                "p99_in_contact_mm": 21.6,
+                "p99_mm": 21.6,
+                "samples_in_contact": 787
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 788
+              }
+            },
+            "reach_mm": 589.1,
+            "through": false,
+            "z": -1.075
+          },
+          {
+            "along": 0.281,
+            "finite": true,
+            "momentum_left": 0.047,
+            "penetration": {
+              "beams": {
+                "max_mm": 98.6,
+                "p99_in_contact_mm": 98.5,
+                "p99_mm": 97.7,
+                "samples_in_contact": 119
+              },
+              "colliders": 1,
+              "deepest_node": 237,
+              "deepest_node_mass": 0.3,
+              "deepest_node_name": "sk4ll",
+              "nodes": {
+                "max_mm": 13.2,
+                "p99_in_contact_mm": 13.0,
+                "p99_mm": 12.6,
+                "samples_in_contact": 104
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 98.6,
+                "p99_in_contact_mm": 98.5,
+                "p99_mm": 97.7,
+                "samples_in_contact": 119
+              }
+            },
+            "reach_mm": 457.0,
+            "through": false,
+            "z": -0.875
+          },
+          {
+            "along": 0.332,
+            "finite": true,
+            "momentum_left": -0.052,
+            "penetration": {
+              "beams": {
+                "max_mm": 126.9,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.1,
+                "samples_in_contact": 123
+              },
+              "colliders": 1,
+              "deepest_node": 19,
+              "deepest_node_mass": 4.5,
+              "deepest_node_name": "f4ll",
+              "nodes": {
+                "max_mm": 8.5,
+                "p99_in_contact_mm": 8.5,
+                "p99_mm": 8.5,
+                "samples_in_contact": 109
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 126.2,
+                "samples_in_contact": 122
+              }
+            },
+            "reach_mm": 462.2,
+            "through": false,
+            "z": -0.675
+          },
+          {
+            "along": 0.383,
+            "finite": true,
+            "momentum_left": -0.012,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 785
+              },
+              "colliders": 1,
+              "deepest_node": 464,
+              "deepest_node_mass": 2.0,
+              "deepest_node_name": "sf2ll",
+              "nodes": {
+                "max_mm": 9.0,
+                "p99_in_contact_mm": 7.9,
+                "p99_mm": 7.9,
+                "samples_in_contact": 629
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 785
+              }
+            },
+            "reach_mm": 1598.0,
+            "through": false,
+            "z": -0.475
+          },
+          {
+            "along": 0.434,
+            "finite": true,
+            "momentum_left": 0.003,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 786
+              },
+              "colliders": 1,
+              "deepest_node": 235,
+              "deepest_node_mass": 0.3,
+              "deepest_node_name": "sk3ll",
+              "nodes": {
+                "max_mm": 35.4,
+                "p99_in_contact_mm": 33.7,
+                "p99_mm": 30.4,
+                "samples_in_contact": 587
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 786
+              }
+            },
+            "reach_mm": 1163.2,
+            "through": false,
+            "z": -0.275
+          },
+          {
+            "along": 0.485,
+            "finite": true,
+            "momentum_left": 0.003,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 189,
+              "deepest_node_mass": 0.25,
+              "deepest_node_name": "mi4l",
+              "nodes": {
+                "max_mm": 36.4,
+                "p99_in_contact_mm": 33.2,
+                "p99_mm": 33.2,
+                "samples_in_contact": 797
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              }
+            },
+            "reach_mm": 675.4,
+            "through": false,
+            "z": -0.075
+          },
+          {
+            "along": 0.536,
+            "finite": true,
+            "momentum_left": -0.017,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 791
+              },
+              "colliders": 1,
+              "deepest_node": 51,
+              "deepest_node_mass": 1.5,
+              "deepest_node_name": "p2ll",
+              "nodes": {
+                "max_mm": 15.0,
+                "p99_in_contact_mm": 14.5,
+                "p99_mm": 14.5,
+                "samples_in_contact": 605
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 787
+              }
+            },
+            "reach_mm": 1181.5,
+            "through": false,
+            "z": 0.125
+          },
+          {
+            "along": 0.587,
+            "finite": true,
+            "momentum_left": -0.009,
+            "penetration": {
+              "beams": {
+                "max_mm": 126.9,
+                "p99_in_contact_mm": 126.4,
+                "p99_mm": 126.4,
+                "samples_in_contact": 784
+              },
+              "colliders": 1,
+              "deepest_node": 176,
+              "deepest_node_mass": 1.7,
+              "deepest_node_name": "d4l",
+              "nodes": {
+                "max_mm": 28.3,
+                "p99_in_contact_mm": 28.2,
+                "p99_mm": 27.8,
+                "samples_in_contact": 159
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 74.0,
+                "p99_in_contact_mm": 72.4,
+                "p99_mm": 70.7,
+                "samples_in_contact": 348
+              }
+            },
+            "reach_mm": 497.5,
+            "through": false,
+            "z": 0.325
+          },
+          {
+            "along": 0.638,
+            "finite": true,
+            "momentum_left": -0.009,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 783
+              },
+              "colliders": 1,
+              "deepest_node": 10,
+              "deepest_node_mass": 4.5,
+              "deepest_node_name": "f2l",
+              "nodes": {
+                "max_mm": 16.7,
+                "p99_in_contact_mm": 16.0,
+                "p99_mm": 15.2,
+                "samples_in_contact": 493
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 783
+              }
+            },
+            "reach_mm": 1242.2,
+            "through": false,
+            "z": 0.525
+          },
+          {
+            "along": 0.689,
+            "finite": true,
+            "momentum_left": 0.024,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 782
+              },
+              "colliders": 1,
+              "deepest_node": 27,
+              "deepest_node_mass": 3.5,
+              "deepest_node_name": "f6l",
+              "nodes": {
+                "max_mm": 16.2,
+                "p99_in_contact_mm": 13.7,
+                "p99_mm": 13.5,
+                "samples_in_contact": 676
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 782
+              }
+            },
+            "reach_mm": 1318.9,
+            "through": false,
+            "z": 0.725
+          },
+          {
+            "along": 0.74,
+            "finite": true,
+            "momentum_left": -0.03,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 782
+              },
+              "colliders": 1,
+              "deepest_node": 231,
+              "deepest_node_mass": 0.3,
+              "deepest_node_name": "sk1ll",
+              "nodes": {
+                "max_mm": 26.1,
+                "p99_in_contact_mm": 17.1,
+                "p99_mm": 15.5,
+                "samples_in_contact": 535
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 782
+              }
+            },
+            "reach_mm": 1160.8,
+            "through": false,
+            "z": 0.925
+          },
+          {
+            "along": 0.791,
+            "finite": true,
+            "momentum_left": 0.04,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 125.7,
+                "p99_mm": 125.7,
+                "samples_in_contact": 783
+              },
+              "colliders": 1,
+              "deepest_node": 569,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#569",
+              "nodes": {
+                "max_mm": 23.7,
+                "p99_in_contact_mm": 16.4,
+                "p99_mm": 16.4,
+                "samples_in_contact": 783
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 782
+              }
+            },
+            "reach_mm": 545.3,
+            "through": false,
+            "z": 1.125
+          },
+          {
+            "along": 0.842,
+            "finite": true,
+            "momentum_left": 0.145,
+            "penetration": {
+              "beams": {
+                "max_mm": 84.7,
+                "p99_in_contact_mm": 84.3,
+                "p99_mm": 83.4,
+                "samples_in_contact": 111
+              },
+              "colliders": 1,
+              "deepest_node": 573,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#573",
+              "nodes": {
+                "max_mm": 26.7,
+                "p99_in_contact_mm": 23.8,
+                "p99_mm": 17.7,
+                "samples_in_contact": 109
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 84.3,
+                "p99_in_contact_mm": 84.0,
+                "p99_mm": 83.0,
+                "samples_in_contact": 94
+              }
+            },
+            "reach_mm": 570.6,
+            "through": false,
+            "z": 1.325
+          },
+          {
+            "along": 0.893,
+            "finite": true,
+            "momentum_left": 0.392,
+            "penetration": {
+              "beams": {
+                "max_mm": 126.9,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.6,
+                "samples_in_contact": 225
+              },
+              "colliders": 1,
+              "deepest_node": 590,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#590",
+              "nodes": {
+                "max_mm": 25.4,
+                "p99_in_contact_mm": 21.1,
+                "p99_mm": 18.7,
+                "samples_in_contact": 222
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 211
+              }
+            },
+            "reach_mm": 607.8,
+            "through": false,
+            "z": 1.525
+          },
+          {
+            "along": 0.944,
+            "finite": true,
+            "momentum_left": 0.423,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.8,
+                "samples_in_contact": 243
+              },
+              "colliders": 1,
+              "deepest_node": 290,
+              "deepest_node_mass": 0.7,
+              "deepest_node_name": "fb2ll",
+              "nodes": {
+                "max_mm": 12.1,
+                "p99_in_contact_mm": 11.4,
+                "p99_mm": 11.3,
+                "samples_in_contact": 216
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 243
+              }
+            },
+            "reach_mm": 657.8,
+            "through": false,
+            "z": 1.725
+          }
+        ],
+        "spacing_m": 0.20000000298023224,
+        "wall_s_per_sim_s": 0.143,
+        "worst_beam_mm": 127.0,
+        "worst_node_mm": 37.6,
+        "worst_triangle_mm": 127.0
+      },
+      "rest": {
+        "bent_beams": 0,
+        "broken_beams": 0,
+        "broken_by_part": [],
+        "creep_mm": 0.3,
+        "finite": true,
+        "first_break_s": null,
+        "ke_end_j": 0.5,
+        "path": "JBeam mode, raycast wheels",
+        "sag_mm": -2.6,
+        "seconds": 10.0,
+        "vmax_end": 0.147,
+        "wall_s_per_sim_s": 0.513
+      },
+      "rest_truck_export": {
+        "bent_beams": 131,
+        "broken_beams": 10,
+        "broken_by_part": [
+          [
+            "etkk_suspension_F",
+            4
+          ],
+          [
+            "etkk_suspension_F/etkk_body",
+            4
+          ],
+          [
+            "etkk_engine_2.4/etkk_body",
+            1
+          ],
+          [
+            "etkk_radiator/etkk_engine_2.4",
+            1
+          ]
+        ],
+        "creep_mm": 131.0,
+        "finite": true,
+        "first_break_s": 0.011,
+        "ke_end_j": 2396.1,
+        "path": "truck export, raycast wheels",
+        "sag_mm": -8.3,
+        "seconds": 10.0,
+        "vmax_end": 10.915,
+        "wall_s_per_sim_s": 0.195
+      },
+      "roof": {
+        "axles": [
+          1.174,
+          -1.215
+        ],
+        "damage": {
+          "bent_beams": 3,
+          "broken_beams": 0,
+          "finite": true,
+          "hardware_broken": 0,
+          "hardware_broken_names": [],
+          "hardware_total": 59,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "first_contact": [
+          [
+            "stb2",
+            0.0,
+            0.95,
+            [
+              -0.001,
+              1.187,
+              -0.305
+            ]
+          ],
+          [
+            "stb4hl",
+            21.3,
+            0.5,
+            [
+              0.248,
+              1.096,
+              -0.869
+            ]
+          ],
+          [
+            "stb3",
+            36.7,
+            0.95,
+            [
+              -0.002,
+              1.176,
+              -0.644
+            ]
+          ],
+          [
+            "stb1",
+            38.2,
+            0.95,
+            [
+              -0.001,
+              1.123,
+              -0.057
+            ]
+          ],
+          [
+            "rf1",
+            45.3,
+            1.7,
+            [
+              -0.001,
+              1.111,
+              -0.013
+            ]
+          ],
+          [
+            "stb4",
+            97.0,
+            0.95,
+            [
+              -0.002,
+              1.13,
+              -0.885
+            ]
+          ]
+        ],
+        "force_kn_10mm": [
+          0.1,
+          0.6,
+          1.1,
+          2.3,
+          3.7,
+          12.1,
+          16.1,
+          18.4,
+          20.1,
+          21.2,
+          22.1,
+          19.4,
+          18.1
+        ],
+        "header": [
+          -0.001,
+          1.117,
+          -0.035
+        ],
+        "held_nodes": 18,
+        "peak_kn": 22.1,
+        "rail": [
+          -0.001,
+          1.145,
+          -0.381
+        ],
+        "ratio": 1.608,
+        "roof_top_m": 1.187,
+        "wall_s_per_sim_s": 0.757
+      },
+      "wall56": {
+        "campbell_b1": 57.6,
+        "damage": {
+          "bent_beams": 362,
+          "broken_beams": 2,
+          "finite": true,
+          "hardware_broken": 1,
+          "hardware_broken_names": [
+            "driveshaft"
+          ],
+          "hardware_total": 59,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "dynamic_crush_mm": 511.2,
+        "energy": {
+          "air_work_kj": -0.0,
+          "beam_dissipation_kj": 128.261,
+          "closure_share": 0.000023,
+          "contact_work_kj": -1.838,
+          "discretisation_kj": 0.0,
+          "elastic_end_kj": 6.498,
+          "ground_work_kj": -24.964,
+          "ke_end_kj": 6.085,
+          "ke_start_kj": 170.451,
+          "max_rise_j": 14.3,
+          "start_kj": 176.403
+        },
+        "force_kn_1ms": [
+          36.6,
+          42.4,
+          50.9,
+          61.5,
+          73.1,
+          85.0,
+          98.0,
+          113.0,
+          130.6,
+          149.6,
+          169.4,
+          190.6,
+          211.8,
+          231.4,
+          251.2,
+          277.7,
+          317.7,
+          373.9,
+          441.7,
+          507.0,
+          556.8,
+          589.2,
+          608.4,
+          619.2,
+          626.4,
+          633.6,
+          641.6,
+          648.3,
+          650.9,
+          647.6,
+          636.3,
+          617.2,
+          594.4,
+          571.7,
+          554.0,
+          546.4,
+          549.4,
+          558.3,
+          567.5,
+          575.0,
+          580.6,
+          584.3,
+          584.8,
+          580.4,
+          571.2,
+          558.1,
+          541.9,
+          523.4,
+          503.6,
+          483.1,
+          460.6,
+          435.4,
+          407.7,
+          377.9,
+          346.1,
+          313.2,
+          279.7,
+          246.7,
+          215.3,
+          185.8,
+          159.6,
+          137.4,
+          119.7,
+          106.6,
+          97.4,
+          91.1,
+          86.1,
+          81.0,
+          75.0,
+          68.2,
+          60.8,
+          53.0,
+          45.1,
+          37.6,
+          30.7,
+          24.6,
+          19.6,
+          16.1,
+          14.5,
+          14.9,
+          16.8,
+          19.2,
+          21.3,
+          22.8,
+          23.7,
+          24.3,
+          24.6,
+          24.7,
+          24.3,
+          23.7,
+          22.9,
+          22.1,
+          21.5,
+          21.1,
+          21.2,
+          21.5,
+          21.7,
+          21.5,
+          21.0,
+          20.2,
+          19.1,
+          17.4,
+          15.2,
+          12.7,
+          10.2,
+          8.3,
+          6.8,
+          5.4,
+          4.0,
+          2.4,
+          0.6,
+          -1.0,
+          -2.3,
+          -3.2,
+          -3.6,
+          -3.7,
+          -3.8,
+          -3.9,
+          -4.0,
+          -3.9,
+          -3.4,
+          -2.7,
+          -2.0,
+          -1.2,
+          -0.1,
+          1.5,
+          3.5,
+          5.3,
+          6.5,
+          6.8,
+          6.3,
+          5.3,
+          4.0,
+          2.7,
+          1.6,
+          0.6,
+          -0.0,
+          -0.4,
+          -0.5,
+          -0.5,
+          -0.6,
+          -0.7,
+          -0.8,
+          -0.8,
+          -0.8,
+          -0.7,
+          -0.5,
+          -0.3,
+          -0.2,
+          -0.1
+        ],
+        "impulse_kns": 25.664,
+        "intrusion": {
+          "chest": {
+            "max_mm": 70.6,
+            "nodes": 35,
+            "residual_mm": 42.4
+          },
+          "feet": {
+            "max_mm": 61.0,
+            "nodes": 39,
+            "residual_mm": 23.1
+          },
+          "head": {
+            "max_mm": 79.5,
+            "nodes": 21,
+            "residual_mm": 37.8
+          },
+          "hip": {
+            "max_mm": 52.2,
+            "nodes": 46,
+            "residual_mm": 34.7
+          },
+          "knees": {
+            "max_mm": 104.8,
+            "nodes": 50,
+            "residual_mm": 64.1
+          }
+        },
+        "kmh": 56.0,
+        "mass_kg": 1398.4,
+        "mean_g_to_tm": 31.7,
+        "peak_force_kn": 650.9,
+        "peak_force_ms": 28.0,
+        "peak_g": 56.4,
+        "penetration": {
+          "beams": {
+            "max_mm": 37.0,
+            "p99_in_contact_mm": 37.0,
+            "p99_mm": 37.0,
+            "samples_in_contact": 130
+          },
+          "colliders": 1,
+          "deepest_node": 288,
+          "deepest_node_mass": 0.7,
+          "deepest_node_name": "fb2",
+          "nodes": {
+            "max_mm": 37.0,
+            "p99_in_contact_mm": 37.0,
+            "p99_mm": 37.0,
+            "samples_in_contact": 130
+          },
+          "samples": 1003,
+          "triangles": {
+            "max_mm": 37.0,
+            "p99_in_contact_mm": 37.0,
+            "p99_mm": 37.0,
+            "samples_in_contact": 130
+          }
+        },
+        "rebound_ms": 4.021,
+        "residual_crush_avg_mm": 231.4,
+        "residual_crush_max_mm": 280.6,
+        "residual_crush_zones_mm": [
+          150.8,
+          222.1,
+          250.8,
+          280.6,
+          247.8,
+          160.6
+        ],
+        "restitution": 0.258,
+        "ripple_0_5s": {
+          "median_part_mm": 0.8,
+          "top": [
+            [
+              "etkk_hood",
+              12.4
+            ],
+            [
+              "etkk_suspension_F",
+              12.4
+            ],
+            [
+              "etkk_upperarm_F",
+              12.2
+            ],
+            [
+              "etkk_suspension_R",
+              10.5
+            ],
+            [
+              "etkk_lowerarm_R",
+              10.4
+            ]
+          ],
+          "worst_mm": 12.4,
+          "worst_part": "etkk_hood"
+        },
+        "ripple_end": {
+          "median_part_mm": 0.8,
+          "top": [
+            [
+              "etkk_suspension_F",
+              7.6
+            ],
+            [
+              "etkk_upperarm_F",
+              7.6
+            ],
+            [
+              "etkk_lowerarm_F",
+              6.4
+            ],
+            [
+              "etkk_upperarm_R",
+              5.1
+            ],
+            [
+              "etkk_suspension_R",
+              5.0
+            ]
+          ],
+          "worst_mm": 7.6,
+          "worst_part": "etkk_suspension_F"
+        },
+        "sim_s": 1.004,
+        "springback_ratio": 0.451,
+        "t_m_ms": 50.0,
+        "visual": {
+          "available": true,
+          "compress_min": 0.083,
+          "compress_p01": 0.689,
+          "dihedral_edges": 108856,
+          "dihedral_max_deg": 177.4,
+          "dihedral_over_30": 1180,
+          "dihedral_over_60": 418,
+          "dihedral_p99_deg": 31.7,
+          "flipped_at_rest": 19,
+          "flipped_new": 189,
+          "seam_gap_max_mm": 17.7,
+          "seam_gap_p99_mm": 4.6,
+          "seam_open_1cm": 3,
+          "seam_open_5cm": 0,
+          "seam_pairs": 785,
+          "seam_torn_pairs": 2,
+          "stretch_max": 1690.171,
+          "stretch_p99": 1.549,
+          "torn_fraction": 0.009,
+          "torn_vertices": 610,
+          "triangles": 75134,
+          "tris_live": 74562,
+          "tris_over_1_5": 852,
+          "tris_under_0_5": 157,
+          "vertices": 65173
+        },
+        "wall_s_per_sim_s": 0.932
+      },
+      "warnings": 14
+    },
+    {
+      "census": {
+        "at_bound_share": 0.691,
+        "beam_kinds": {
+          "JbeamAeroTri": 476,
+          "JbeamBounded": 53,
+          "JbeamPlain": 2404,
+          "JbeamSupport": 310,
+          "JbeamTorsion": 34,
+          "JbeamTorsionPair": 34
+        },
+        "beams": 4299,
+        "body_mass_kg": 1336.2,
+        "com": [
+          -0.005,
+          0.398,
+          -0.014
+        ],
+        "com_height_m": 0.398,
+        "ends_per_node_mean": 12.0,
+        "ends_per_node_p50": 11.0,
+        "eps_y_p50": 0.034,
+        "front_axle_share": 0.494,
+        "hardware_groups": 62,
+        "height_m": 1.515,
+        "kl_max": 17782922.0,
+        "kl_mean": 947010.0,
+        "kl_p10": 45966.0,
+        "kl_p50": 388788.0,
+        "kl_p90": 2266054.0,
+        "len_p50": 0.425,
+        "length_m": 3.919,
+        "mass_kg": 1390.0,
+        "node_mass_mean": 2.924,
+        "node_mass_p50": 1.5,
+        "nodes": 457,
+        "parts": 73,
+        "settle_top_parts_mm": [
+          [
+            "etkk_hood",
+            948.2
+          ],
+          [
+            "etkk_trunk",
+            570.2
+          ],
+          [
+            "etkk_bumper_F",
+            79.8
+          ],
+          [
+            "etkk_headlight_L",
+            77.5
+          ]
+        ],
+        "skin_triangles": 508,
+        "tyre_nodes": 128,
+        "visual_triangles": 74782,
+        "visual_vertices": 64961,
+        "wheelbase_m": 2.388,
+        "width_m": 1.873
+      },
+      "door": {
+        "damage": {
+          "bent_beams": 36,
+          "broken_beams": 33,
+          "finite": true,
+          "hardware_broken": 2,
+          "hardware_broken_names": [
+            "mirror_L",
+            "doorglass_L_break"
+          ],
+          "hardware_total": 62,
+          "nodes_off_main_body": 5,
+          "parts_detached": 1,
+          "parts_detached_names": [
+            "etkk_mirror_L"
+          ]
+        },
+        "door_part": "etkk_door_L",
+        "force_kn_10mm": [
+          0.3,
+          0.1,
+          1.9,
+          4.8,
+          6.4,
+          7.0,
+          7.2,
+          7.1,
+          6.8,
+          6.3,
+          5.9,
+          5.7,
+          5.8,
+          6.3,
+          6.7,
+          7.3,
+          8.0,
+          8.9,
+          10.1,
+          11.4,
+          12.6,
+          13.6,
+          15.0,
+          16.5,
+          17.6,
+          18.1,
+          18.3,
+          18.2,
+          18.1,
+          17.8,
+          17.8,
+          17.6,
+          17.6,
+          17.6,
+          17.6,
+          17.8,
+          17.8,
+          18.0,
+          18.2,
+          18.6,
+          19.0,
+          18.6,
+          18.6,
+          18.2,
+          17.0,
+          17.0,
+          17.4,
+          17.8,
+          18.3,
+          18.6,
+          19.0
+        ],
+        "initial_kn": 5.4,
+        "intermediate_kn": 10.1,
+        "peak_kn": 19.0,
+        "peak_required_kn": 27.3,
+        "wall_s_per_sim_s": 0.606
+      },
+      "label": "ETK K-series kc6 (hardtop coupe: the roof crush)",
+      "mdb214": {
+        "barrier_min_x": -7.971,
+        "barrier_vx": -4.208,
+        "car_vx": -5.07,
+        "damage": {
+          "bent_beams": 113,
+          "broken_beams": 29,
+          "finite": true,
+          "hardware_broken": 3,
+          "hardware_broken_names": [
+            "doorhinge_a_L",
+            "doorhinge_b_L",
+            "doorglass_L_break"
+          ],
+          "hardware_total": 62,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "dynamic_crush_mm": 476.0,
+        "energy_rise_j": 0.0,
+        "intrusion": {
+          "chest": {
+            "max_mm": 456.6,
+            "nodes": 31,
+            "residual_mm": 58.3
+          },
+          "feet": {
+            "max_mm": 339.0,
+            "nodes": 40,
+            "residual_mm": 334.7
+          },
+          "head": {
+            "max_mm": 96.2,
+            "nodes": 15,
+            "residual_mm": 38.8
+          },
+          "hip": {
+            "max_mm": 354.8,
+            "nodes": 41,
+            "residual_mm": 264.2
+          },
+          "knees": {
+            "max_mm": 252.3,
+            "nodes": 50,
+            "residual_mm": 120.4
+          }
+        },
+        "ke_end_kj": 20.171,
+        "penetration": {
+          "beams": {
+            "max_mm": 0.0,
+            "p99_in_contact_mm": null,
+            "p99_mm": 0.0,
+            "samples_in_contact": 0
+          },
+          "colliders": 0,
+          "deepest_node": 0,
+          "deepest_node_mass": 0.0,
+          "deepest_node_name": "int1r",
+          "nodes": {
+            "max_mm": 0.0,
+            "p99_in_contact_mm": null,
+            "p99_mm": 0.0,
+            "samples_in_contact": 0
+          },
+          "samples": 1500,
+          "triangles": {
+            "max_mm": 0.0,
+            "p99_in_contact_mm": null,
+            "p99_mm": 0.0,
+            "samples_in_contact": 0
+          }
+        },
+        "pole_reach_mm": null,
+        "residual_crush_mm": 391.8,
+        "sim_s": 1.5,
+        "struck_nodes": 16,
+        "visual": {
+          "available": true,
+          "compress_min": 0.013,
+          "compress_p01": 0.935,
+          "dihedral_edges": 108895,
+          "dihedral_max_deg": 179.3,
+          "dihedral_over_30": 316,
+          "dihedral_over_60": 140,
+          "dihedral_p99_deg": 7.2,
+          "flipped_at_rest": 19,
+          "flipped_new": 76,
+          "seam_gap_max_mm": 5.7,
+          "seam_gap_p99_mm": 0.3,
+          "seam_open_1cm": 0,
+          "seam_open_5cm": 0,
+          "seam_pairs": 894,
+          "seam_torn_pairs": 0,
+          "stretch_max": 46.949,
+          "stretch_p99": 1.076,
+          "torn_fraction": 0.001,
+          "torn_vertices": 82,
+          "triangles": 74782,
+          "tris_live": 74678,
+          "tris_over_1_5": 193,
+          "tris_under_0_5": 45,
+          "vertices": 64961
+        },
+        "wall_s_per_sim_s": 2.07
+      },
+      "name": "etkk_kc6",
+      "pole32": {
+        "barrier_min_x": null,
+        "barrier_vx": null,
+        "car_vx": -0.009,
+        "damage": {
+          "bent_beams": 75,
+          "broken_beams": 22,
+          "finite": true,
+          "hardware_broken": 2,
+          "hardware_broken_names": [
+            "softtop_F",
+            "sideskirt_L_mid2"
+          ],
+          "hardware_total": 62,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "dynamic_crush_mm": 107.4,
+        "energy_rise_j": 0.0,
+        "intrusion": {
+          "chest": {
+            "max_mm": 72.3,
+            "nodes": 31,
+            "residual_mm": 20.8
+          },
+          "feet": {
+            "max_mm": 50.4,
+            "nodes": 40,
+            "residual_mm": 18.8
+          },
+          "head": {
+            "max_mm": 75.0,
+            "nodes": 15,
+            "residual_mm": 19.3
+          },
+          "hip": {
+            "max_mm": 183.8,
+            "nodes": 41,
+            "residual_mm": 91.4
+          },
+          "knees": {
+            "max_mm": 86.8,
+            "nodes": 50,
+            "residual_mm": 44.5
+          }
+        },
+        "ke_end_kj": 0.036,
+        "penetration": {
+          "beams": {
+            "max_mm": 127.0,
+            "p99_in_contact_mm": 126.9,
+            "p99_mm": 126.9,
+            "samples_in_contact": 1492
+          },
+          "colliders": 1,
+          "deepest_node": 224,
+          "deepest_node_mass": 0.3,
+          "deepest_node_name": "sk3l",
+          "nodes": {
+            "max_mm": 29.8,
+            "p99_in_contact_mm": 29.2,
+            "p99_mm": 25.8,
+            "samples_in_contact": 337
+          },
+          "samples": 1500,
+          "triangles": {
+            "max_mm": 127.0,
+            "p99_in_contact_mm": 127.0,
+            "p99_mm": 127.0,
+            "samples_in_contact": 1492
+          }
+        },
+        "pole_reach_mm": 1560.6,
+        "residual_crush_mm": 57.9,
+        "sim_s": 1.5,
+        "struck_nodes": 8,
+        "visual": {
+          "available": true,
+          "compress_min": 0.097,
+          "compress_p01": 0.953,
+          "dihedral_edges": 109021,
+          "dihedral_max_deg": 170.0,
+          "dihedral_over_30": 220,
+          "dihedral_over_60": 100,
+          "dihedral_p99_deg": 4.0,
+          "flipped_at_rest": 19,
+          "flipped_new": 46,
+          "seam_gap_max_mm": 0.4,
+          "seam_gap_p99_mm": 0.1,
+          "seam_open_1cm": 0,
+          "seam_open_5cm": 0,
+          "seam_pairs": 894,
+          "seam_torn_pairs": 0,
+          "stretch_max": 79.67,
+          "stretch_p99": 1.079,
+          "torn_fraction": 0.0,
+          "torn_vertices": 0,
+          "triangles": 74782,
+          "tris_live": 74762,
+          "tris_over_1_5": 186,
+          "tris_under_0_5": 51,
+          "vertices": 64961
+        },
+        "wall_s_per_sim_s": 0.683
+      },
+      "pole_sweep32": {
+        "kmh": 32.0,
+        "offsets": 19,
+        "passed_through": 0,
+        "runs": [
+          {
+            "along": 0.026,
+            "finite": true,
+            "momentum_left": 0.46,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.7,
+                "samples_in_contact": 250
+              },
+              "colliders": 1,
+              "deepest_node": 334,
+              "deepest_node_mass": 0.376,
+              "deepest_node_name": "tl5l",
+              "nodes": {
+                "max_mm": 8.7,
+                "p99_in_contact_mm": 8.7,
+                "p99_mm": 8.2,
+                "samples_in_contact": 212
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 250
+              }
+            },
+            "reach_mm": 671.9,
+            "through": false,
+            "z": -1.841
+          },
+          {
+            "along": 0.077,
+            "finite": true,
+            "momentum_left": 0.434,
+            "penetration": {
+              "beams": {
+                "max_mm": 126.9,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.8,
+                "samples_in_contact": 287
+              },
+              "colliders": 1,
+              "deepest_node": 330,
+              "deepest_node_mass": 0.376,
+              "deepest_node_name": "tl1l",
+              "nodes": {
+                "max_mm": 9.4,
+                "p99_in_contact_mm": 7.9,
+                "p99_mm": 6.4,
+                "samples_in_contact": 258
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 287
+              }
+            },
+            "reach_mm": 481.2,
+            "through": false,
+            "z": -1.641
+          },
+          {
+            "along": 0.128,
+            "finite": true,
+            "momentum_left": 0.439,
+            "penetration": {
+              "beams": {
+                "max_mm": 99.6,
+                "p99_in_contact_mm": 95.8,
+                "p99_mm": 92.9,
+                "samples_in_contact": 205
+              },
+              "colliders": 1,
+              "deepest_node": 494,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#494",
+              "nodes": {
+                "max_mm": 37.9,
+                "p99_in_contact_mm": 30.1,
+                "p99_mm": 24.2,
+                "samples_in_contact": 202
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 47.9,
+                "p99_in_contact_mm": 47.6,
+                "p99_mm": 46.2,
+                "samples_in_contact": 205
+              }
+            },
+            "reach_mm": 295.7,
+            "through": false,
+            "z": -1.441
+          },
+          {
+            "along": 0.179,
+            "finite": false,
+            "momentum_left": null,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.8,
+                "p99_mm": 126.7,
+                "samples_in_contact": 470
+              },
+              "colliders": 1,
+              "deepest_node": 497,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#497",
+              "nodes": {
+                "max_mm": 52.6,
+                "p99_in_contact_mm": 45.9,
+                "p99_mm": 33.0,
+                "samples_in_contact": 199
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 469
+              }
+            },
+            "reach_mm": 479.1,
+            "through": false,
+            "z": -1.241
+          },
+          {
+            "along": 0.23,
+            "finite": true,
+            "momentum_left": 0.015,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.8,
+                "p99_mm": 126.8,
+                "samples_in_contact": 789
+              },
+              "colliders": 1,
+              "deepest_node": 504,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#504",
+              "nodes": {
+                "max_mm": 57.3,
+                "p99_in_contact_mm": 34.8,
+                "p99_mm": 34.8,
+                "samples_in_contact": 788
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 788
+              }
+            },
+            "reach_mm": 524.2,
+            "through": false,
+            "z": -1.041
+          },
+          {
+            "along": 0.281,
+            "finite": true,
+            "momentum_left": 0.031,
+            "penetration": {
+              "beams": {
+                "max_mm": 126.8,
+                "p99_in_contact_mm": 126.8,
+                "p99_mm": 125.5,
+                "samples_in_contact": 126
+              },
+              "colliders": 1,
+              "deepest_node": 227,
+              "deepest_node_mass": 0.3,
+              "deepest_node_name": "sk4ll",
+              "nodes": {
+                "max_mm": 14.1,
+                "p99_in_contact_mm": 14.0,
+                "p99_mm": 13.0,
+                "samples_in_contact": 102
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 93.9,
+                "p99_in_contact_mm": 93.9,
+                "p99_mm": 93.3,
+                "samples_in_contact": 118
+              }
+            },
+            "reach_mm": 478.0,
+            "through": false,
+            "z": -0.841
+          },
+          {
+            "along": 0.332,
+            "finite": true,
+            "momentum_left": -0.064,
+            "penetration": {
+              "beams": {
+                "max_mm": 126.9,
+                "p99_in_contact_mm": 126.7,
+                "p99_mm": 124.9,
+                "samples_in_contact": 121
+              },
+              "colliders": 1,
+              "deepest_node": 19,
+              "deepest_node_mass": 4.5,
+              "deepest_node_name": "f4ll",
+              "nodes": {
+                "max_mm": 9.1,
+                "p99_in_contact_mm": 9.1,
+                "p99_mm": 9.1,
+                "samples_in_contact": 102
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 120
+              }
+            },
+            "reach_mm": 450.0,
+            "through": false,
+            "z": -0.641
+          },
+          {
+            "along": 0.383,
+            "finite": true,
+            "momentum_left": 0.048,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 785
+              },
+              "colliders": 1,
+              "deepest_node": 128,
+              "deepest_node_mass": 1.0,
+              "deepest_node_name": "ht2",
+              "nodes": {
+                "max_mm": 20.6,
+                "p99_in_contact_mm": 18.5,
+                "p99_mm": 17.1,
+                "samples_in_contact": 602
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 785
+              }
+            },
+            "reach_mm": 1243.1,
+            "through": false,
+            "z": -0.441
+          },
+          {
+            "along": 0.434,
+            "finite": true,
+            "momentum_left": 0.043,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 786
+              },
+              "colliders": 1,
+              "deepest_node": 224,
+              "deepest_node_mass": 0.3,
+              "deepest_node_name": "sk3l",
+              "nodes": {
+                "max_mm": 35.6,
+                "p99_in_contact_mm": 32.7,
+                "p99_mm": 30.4,
+                "samples_in_contact": 471
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 786
+              }
+            },
+            "reach_mm": 1781.2,
+            "through": false,
+            "z": -0.241
+          },
+          {
+            "along": 0.485,
+            "finite": true,
+            "momentum_left": -0.004,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              },
+              "colliders": 1,
+              "deepest_node": 179,
+              "deepest_node_mass": 0.25,
+              "deepest_node_name": "mi4l",
+              "nodes": {
+                "max_mm": 29.7,
+                "p99_in_contact_mm": 25.8,
+                "p99_mm": 25.8,
+                "samples_in_contact": 797
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 797
+              }
+            },
+            "reach_mm": 652.1,
+            "through": false,
+            "z": -0.041
+          },
+          {
+            "along": 0.536,
+            "finite": true,
+            "momentum_left": 0.015,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 791
+              },
+              "colliders": 1,
+              "deepest_node": 49,
+              "deepest_node_mass": 1.5,
+              "deepest_node_name": "p2l",
+              "nodes": {
+                "max_mm": 15.2,
+                "p99_in_contact_mm": 15.1,
+                "p99_mm": 13.8,
+                "samples_in_contact": 280
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 787
+              }
+            },
+            "reach_mm": 1062.1,
+            "through": false,
+            "z": 0.159
+          },
+          {
+            "along": 0.587,
+            "finite": true,
+            "momentum_left": -0.047,
+            "penetration": {
+              "beams": {
+                "max_mm": 126.9,
+                "p99_in_contact_mm": 126.0,
+                "p99_mm": 126.0,
+                "samples_in_contact": 718
+              },
+              "colliders": 1,
+              "deepest_node": 166,
+              "deepest_node_mass": 1.7,
+              "deepest_node_name": "d4l",
+              "nodes": {
+                "max_mm": 27.2,
+                "p99_in_contact_mm": 27.1,
+                "p99_mm": 26.5,
+                "samples_in_contact": 146
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 76.1,
+                "p99_in_contact_mm": 75.2,
+                "p99_mm": 72.8,
+                "samples_in_contact": 226
+              }
+            },
+            "reach_mm": 486.9,
+            "through": false,
+            "z": 0.359
+          },
+          {
+            "along": 0.638,
+            "finite": true,
+            "momentum_left": -0.017,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 783
+              },
+              "colliders": 1,
+              "deepest_node": 10,
+              "deepest_node_mass": 4.5,
+              "deepest_node_name": "f2l",
+              "nodes": {
+                "max_mm": 17.3,
+                "p99_in_contact_mm": 16.4,
+                "p99_mm": 14.6,
+                "samples_in_contact": 322
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 783
+              }
+            },
+            "reach_mm": 1229.2,
+            "through": false,
+            "z": 0.559
+          },
+          {
+            "along": 0.689,
+            "finite": true,
+            "momentum_left": 0.011,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 782
+              },
+              "colliders": 1,
+              "deepest_node": 352,
+              "deepest_node_mass": 3.0,
+              "deepest_node_name": "em1r",
+              "nodes": {
+                "max_mm": 17.7,
+                "p99_in_contact_mm": 17.4,
+                "p99_mm": 16.3,
+                "samples_in_contact": 477
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 782
+              }
+            },
+            "reach_mm": 1318.9,
+            "through": false,
+            "z": 0.759
+          },
+          {
+            "along": 0.74,
+            "finite": true,
+            "momentum_left": -0.002,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 782
+              },
+              "colliders": 1,
+              "deepest_node": 221,
+              "deepest_node_mass": 0.3,
+              "deepest_node_name": "sk1ll",
+              "nodes": {
+                "max_mm": 33.4,
+                "p99_in_contact_mm": 18.4,
+                "p99_mm": 17.3,
+                "samples_in_contact": 522
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 782
+              }
+            },
+            "reach_mm": 1138.1,
+            "through": false,
+            "z": 0.959
+          },
+          {
+            "along": 0.791,
+            "finite": true,
+            "momentum_left": 0.007,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.9,
+                "p99_mm": 126.9,
+                "samples_in_contact": 783
+              },
+              "colliders": 1,
+              "deepest_node": 574,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#574",
+              "nodes": {
+                "max_mm": 19.0,
+                "p99_in_contact_mm": 16.4,
+                "p99_mm": 16.4,
+                "samples_in_contact": 783
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 782
+              }
+            },
+            "reach_mm": 541.0,
+            "through": false,
+            "z": 1.159
+          },
+          {
+            "along": 0.842,
+            "finite": true,
+            "momentum_left": 0.144,
+            "penetration": {
+              "beams": {
+                "max_mm": 91.3,
+                "p99_in_contact_mm": 90.7,
+                "p99_mm": 87.9,
+                "samples_in_contact": 107
+              },
+              "colliders": 1,
+              "deepest_node": 564,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#564",
+              "nodes": {
+                "max_mm": 22.8,
+                "p99_in_contact_mm": 21.2,
+                "p99_mm": 18.1,
+                "samples_in_contact": 104
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 91.3,
+                "p99_in_contact_mm": 90.7,
+                "p99_mm": 87.9,
+                "samples_in_contact": 100
+              }
+            },
+            "reach_mm": 558.4,
+            "through": false,
+            "z": 1.359
+          },
+          {
+            "along": 0.893,
+            "finite": true,
+            "momentum_left": 0.436,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 126.7,
+                "p99_mm": 126.6,
+                "samples_in_contact": 294
+              },
+              "colliders": 1,
+              "deepest_node": 581,
+              "deepest_node_mass": 0.42,
+              "deepest_node_name": "wheel#581",
+              "nodes": {
+                "max_mm": 19.3,
+                "p99_in_contact_mm": 14.3,
+                "p99_mm": 13.1,
+                "samples_in_contact": 283
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 287
+              }
+            },
+            "reach_mm": 597.7,
+            "through": false,
+            "z": 1.559
+          },
+          {
+            "along": 0.944,
+            "finite": true,
+            "momentum_left": 0.438,
+            "penetration": {
+              "beams": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 126.8,
+                "samples_in_contact": 221
+              },
+              "colliders": 1,
+              "deepest_node": 280,
+              "deepest_node_mass": 0.7,
+              "deepest_node_name": "fb2ll",
+              "nodes": {
+                "max_mm": 13.3,
+                "p99_in_contact_mm": 13.2,
+                "p99_mm": 12.6,
+                "samples_in_contact": 184
+              },
+              "samples": 800,
+              "triangles": {
+                "max_mm": 127.0,
+                "p99_in_contact_mm": 127.0,
+                "p99_mm": 127.0,
+                "samples_in_contact": 221
+              }
+            },
+            "reach_mm": 654.8,
+            "through": false,
+            "z": 1.759
+          }
+        ],
+        "spacing_m": 0.20000000298023224,
+        "wall_s_per_sim_s": 0.143,
+        "worst_beam_mm": 127.0,
+        "worst_node_mm": 57.3,
+        "worst_triangle_mm": 127.0
+      },
+      "rest": {
+        "bent_beams": 0,
+        "broken_beams": 0,
+        "broken_by_part": [],
+        "creep_mm": 0.3,
+        "finite": true,
+        "first_break_s": null,
+        "ke_end_j": 0.5,
+        "path": "JBeam mode, raycast wheels",
+        "sag_mm": -2.6,
+        "seconds": 10.0,
+        "vmax_end": 0.147,
+        "wall_s_per_sim_s": 0.516
+      },
+      "rest_truck_export": {
+        "bent_beams": 143,
+        "broken_beams": 10,
+        "broken_by_part": [
+          [
+            "etkk_suspension_F",
+            4
+          ],
+          [
+            "etkk_suspension_F/etkk_body",
+            4
+          ],
+          [
+            "etkk_engine_2.4/etkk_body",
+            1
+          ],
+          [
+            "etkk_radiator/etkk_engine_2.4",
+            1
+          ]
+        ],
+        "creep_mm": 62.5,
+        "finite": true,
+        "first_break_s": 0.011,
+        "ke_end_j": 681.0,
+        "path": "truck export, raycast wheels",
+        "sag_mm": -18.8,
+        "seconds": 10.0,
+        "vmax_end": 6.439,
+        "wall_s_per_sim_s": 0.192
+      },
+      "roof": {
+        "axles": [
+          1.208,
+          -1.181
+        ],
+        "damage": {
+          "bent_beams": 11,
+          "broken_beams": 0,
+          "finite": true,
+          "hardware_broken": 0,
+          "hardware_broken_names": [],
+          "hardware_total": 62,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "first_contact": [
+          [
+            "ht1l",
+            0.0,
+            1.0,
+            [
+              0.551,
+              1.085,
+              -0.129
+            ]
+          ],
+          [
+            "ht2l",
+            19.7,
+            1.0,
+            [
+              0.551,
+              1.085,
+              -0.389
+            ]
+          ],
+          [
+            "rf1l",
+            19.9,
+            1.7,
+            [
+              0.554,
+              1.058,
+              -0.093
+            ]
+          ],
+          [
+            "d10l",
+            33.3,
+            1.7,
+            [
+              0.597,
+              1.024,
+              -0.101
+            ]
+          ],
+          [
+            "ht3l",
+            56.1,
+            1.0,
+            [
+              0.551,
+              1.077,
+              -0.749
+            ]
+          ],
+          [
+            "d11l",
+            60.3,
+            1.7,
+            [
+              0.613,
+              1.025,
+              -0.541
+            ]
+          ]
+        ],
+        "force_kn_10mm": [
+          1.4,
+          8.7,
+          16.8,
+          29.2,
+          42.6,
+          58.2,
+          69.3,
+          78.7,
+          91.8,
+          102.5,
+          112.6,
+          122.2,
+          131.2
+        ],
+        "header": [
+          0.001,
+          1.124,
+          0.001
+        ],
+        "held_nodes": 18,
+        "peak_kn": 131.2,
+        "rail": [
+          0.552,
+          1.076,
+          -0.34
+        ],
+        "ratio": 9.623,
+        "roof_top_m": 1.156,
+        "wall_s_per_sim_s": 0.736
+      },
+      "wall56": {
+        "campbell_b1": 64.3,
+        "damage": {
+          "bent_beams": 356,
+          "broken_beams": 2,
+          "finite": true,
+          "hardware_broken": 1,
+          "hardware_broken_names": [
+            "driveshaft"
+          ],
+          "hardware_total": 62,
+          "nodes_off_main_body": 0,
+          "parts_detached": 0,
+          "parts_detached_names": []
+        },
+        "dynamic_crush_mm": 507.2,
+        "energy": {
+          "air_work_kj": -0.0,
+          "beam_dissipation_kj": 128.028,
+          "closure_share": 0.000016,
+          "contact_work_kj": -2.684,
+          "discretisation_kj": 0.0,
+          "elastic_end_kj": 6.203,
+          "ground_work_kj": -24.122,
+          "ke_end_kj": 5.975,
+          "ke_start_kj": 169.435,
+          "max_rise_j": 16.1,
+          "start_kj": 175.296
+        },
+        "force_kn_1ms": [
+          39.2,
+          44.2,
+          51.7,
+          61.1,
+          71.4,
+          82.4,
+          94.8,
+          109.9,
+          128.0,
+          147.9,
+          168.5,
+          189.9,
+          210.6,
+          228.9,
+          247.3,
+          272.9,
+          313.2,
+          370.5,
+          439.2,
+          503.5,
+          550.7,
+          580.6,
+          597.9,
+          608.5,
+          617.5,
+          627.6,
+          639.0,
+          649.1,
+          655.3,
+          654.3,
+          643.5,
+          622.9,
+          596.7,
+          572.1,
+          555.2,
+          549.1,
+          552.2,
+          560.7,
+          571.2,
+          580.0,
+          584.9,
+          585.4,
+          581.7,
+          574.3,
+          564.0,
+          551.9,
+          538.7,
+          524.3,
+          508.7,
+          491.0,
+          469.5,
+          443.1,
+          412.5,
+          378.9,
+          343.7,
+          307.5,
+          271.4,
+          236.9,
+          205.2,
+          176.9,
+          152.1,
+          131.1,
+          113.7,
+          99.9,
+          89.5,
+          81.6,
+          75.7,
+          70.9,
+          66.4,
+          61.6,
+          56.2,
+          49.9,
+          42.9,
+          35.8,
+          29.7,
+          24.9,
+          21.3,
+          18.7,
+          16.9,
+          15.9,
+          15.9,
+          16.4,
+          17.2,
+          18.1,
+          18.9,
+          19.7,
+          20.3,
+          20.9,
+          21.4,
+          21.9,
+          22.2,
+          22.2,
+          21.7,
+          21.0,
+          20.3,
+          19.9,
+          19.7,
+          19.7,
+          19.9,
+          20.1,
+          19.8,
+          18.8,
+          17.1,
+          14.4,
+          10.7,
+          6.7,
+          2.9,
+          -0.0,
+          -1.7,
+          -2.6,
+          -2.9,
+          -3.2,
+          -3.5,
+          -3.8,
+          -4.1,
+          -4.1,
+          -3.9,
+          -3.3,
+          -2.4,
+          -1.7,
+          -1.3,
+          -1.4,
+          -1.9,
+          -2.7,
+          -3.5,
+          -3.9,
+          -3.7,
+          -3.0,
+          -2.2,
+          -1.2,
+          -0.3,
+          0.8,
+          2.0,
+          3.0,
+          3.7,
+          3.8,
+          3.6,
+          3.1,
+          2.7,
+          2.4,
+          2.1,
+          1.8,
+          1.4,
+          1.0,
+          0.5,
+          0.1,
+          -0.0,
+          -0.1,
+          0.1,
+          0.3
+        ],
+        "impulse_kns": 25.509,
+        "intrusion": {
+          "chest": {
+            "max_mm": 45.4,
+            "nodes": 31,
+            "residual_mm": 37.3
+          },
+          "feet": {
+            "max_mm": 52.8,
+            "nodes": 40,
+            "residual_mm": 26.9
+          },
+          "head": {
+            "max_mm": 48.5,
+            "nodes": 15,
+            "residual_mm": 32.7
+          },
+          "hip": {
+            "max_mm": 39.0,
+            "nodes": 41,
+            "residual_mm": 27.0
+          },
+          "knees": {
+            "max_mm": 105.0,
+            "nodes": 50,
+            "residual_mm": 40.8
+          }
+        },
+        "kmh": 56.0,
+        "mass_kg": 1390.0,
+        "mean_g_to_tm": 32.0,
+        "peak_force_kn": 655.9,
+        "peak_force_ms": 28.5,
+        "peak_g": 56.0,
+        "penetration": {
+          "beams": {
+            "max_mm": 33.6,
+            "p99_in_contact_mm": 33.6,
+            "p99_mm": 33.6,
+            "samples_in_contact": 138
+          },
+          "colliders": 1,
+          "deepest_node": 286,
+          "deepest_node_mass": 0.7,
+          "deepest_node_name": "fb3l",
+          "nodes": {
+            "max_mm": 33.6,
+            "p99_in_contact_mm": 33.6,
+            "p99_mm": 33.6,
+            "samples_in_contact": 138
+          },
+          "samples": 1003,
+          "triangles": {
+            "max_mm": 33.6,
+            "p99_in_contact_mm": 33.6,
+            "p99_mm": 33.6,
+            "samples_in_contact": 138
+          }
+        },
+        "rebound_ms": 3.709,
+        "residual_crush_avg_mm": 207.3,
+        "residual_crush_max_mm": 244.4,
+        "residual_crush_zones_mm": [
+          143.3,
+          204.9,
+          239.2,
+          244.4,
+          200.1,
+          152.2
+        ],
+        "restitution": 0.238,
+        "ripple_0_5s": {
+          "median_part_mm": 0.6,
+          "top": [
+            [
+              "etkk_upperarm_F",
+              12.8
+            ],
+            [
+              "etkk_suspension_F",
+              12.7
+            ],
+            [
+              "etkk_lowerarm_F",
+              11.0
+            ],
+            [
+              "etkk_hood",
+              9.5
+            ],
+            [
+              "etkk_suspension_R",
+              9.0
+            ]
+          ],
+          "worst_mm": 12.8,
+          "worst_part": "etkk_upperarm_F"
+        },
+        "ripple_end": {
+          "median_part_mm": 0.4,
+          "top": [
+            [
+              "etkk_upperarm_F",
+              10.2
+            ],
+            [
+              "etkk_suspension_F",
+              10.0
+            ],
+            [
+              "etkk_lowerarm_F",
+              8.8
+            ],
+            [
+              "etkk_hub_F",
+              4.8
+            ],
+            [
+              "etkk_upperarm_R",
+              4.6
+            ]
+          ],
+          "worst_mm": 10.2,
+          "worst_part": "etkk_upperarm_F"
+        },
+        "sim_s": 1.004,
+        "springback_ratio": 0.518,
+        "t_m_ms": 49.5,
+        "visual": {
+          "available": true,
+          "compress_min": 0.0,
+          "compress_p01": 0.676,
+          "dihedral_edges": 108233,
+          "dihedral_max_deg": 178.2,
+          "dihedral_over_30": 1210,
+          "dihedral_over_60": 439,
+          "dihedral_p99_deg": 32.9,
+          "flipped_at_rest": 19,
+          "flipped_new": 235,
+          "seam_gap_max_mm": 15.6,
+          "seam_gap_p99_mm": 2.5,
+          "seam_open_1cm": 2,
+          "seam_open_5cm": 0,
+          "seam_pairs": 894,
+          "seam_torn_pairs": 2,
+          "stretch_max": 2078.86,
+          "stretch_p99": 1.501,
+          "torn_fraction": 0.009,
+          "torn_vertices": 610,
+          "triangles": 74782,
+          "tris_live": 74210,
+          "tris_over_1_5": 746,
+          "tris_under_0_5": 172,
+          "vertices": 64961
+        },
+        "wall_s_per_sim_s": 0.794
+      },
+      "warnings": 14
+    }
+  ],
+  "quick": false,
+  "skipped": [
+    "gen2"
+  ]
+}
