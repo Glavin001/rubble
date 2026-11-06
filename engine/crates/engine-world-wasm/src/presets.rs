@@ -10,14 +10,9 @@ use rubble::*;
 use wasm_bindgen::prelude::*;
 
 fn family(name: &str) -> Result<Family, JsValue> {
-    Ok(match name {
-        "rigid" => Family::Rigid,
-        "vehicle" => Family::Vehicle,
-        "soft" => Family::Soft,
-        "motion" => Family::Motion,
-        "terrain" => Family::Terrain,
-        _ => return Err(err(format!("family {name}: not placed through SceneDef"))),
-    })
+    Family::from_name(name)
+        .filter(|f| rubble::play::scene::placed_here(*f))
+        .ok_or_else(|| err(format!("family {name}: not placed through SceneDef")))
 }
 
 /// The scene a family's page builds from its URL query (`location.search`): a `SceneDef`

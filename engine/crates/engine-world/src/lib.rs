@@ -539,6 +539,8 @@ pub struct World {
     /// Bodies found outside `kill_bounds` while frames were built, destroyed at
     /// the end of that poll: `(handle, position)`.
     leaving: Vec<(BodyId, [f32; 3])>,
+    /// The terrain's counters as the last polled frame reported them.
+    last_terrain_report: Option<engine_webgpu::TerrainStepReport>,
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
     fracture: threshold::Fracture,
@@ -659,6 +661,7 @@ impl World {
             sleep_archive_rows: def.sleep_archive_rows,
             kill_bounds: def.kill_bounds,
             leaving: Vec::new(),
+            last_terrain_report: None,
             contact_storage: contacts,
             motion: Default::default(),
             resync: false,
@@ -2935,7 +2938,11 @@ impl World {
                         s.face_strain = xyzw(bytes).map(|v| v[3]).collect();
                     }
                 }
-                Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
+                Extra::TerrainCounters => {
+                    let r = self.terrain_counters(step, bytes)?;
+                    self.last_terrain_report = Some(r.clone());
+                    terrain = Some(r)
+                }
                 Extra::TerrainHeights(id) => self.terrain_heights(*id, bytes),
                 Extra::TerrainWatch => self.terrain_strike(step, bytes),
                 Extra::TerrainSurface(shape, views) => {

@@ -54,6 +54,12 @@ pub enum Action {
     },
     /// The city's scenario (`?scenario=`), started once its houses have settled.
     Start,
+    /// The impact's meteor (or charge) on its way: it strikes after the approach.
+    Launch,
+    /// The impact's crater baked into the heightfield now.
+    Bake,
+    /// The player takes the wheel from a script's autopilot (the impact's truck).
+    TakeWheel,
     /// A steel ball of `radius` m from `origin` at `velocity` (the city's shells).
     Shell {
         origin: [f32; 3],
@@ -82,6 +88,9 @@ impl Action {
             Action::Guide { .. } => "guide",
             Action::Targets { .. } => "targets",
             Action::Start => "start",
+            Action::Launch => "launch",
+            Action::Bake => "bake",
+            Action::TakeWheel => "takeWheel",
             Action::Shell { .. } => "shell",
         }
     }
@@ -106,6 +115,7 @@ enum Kind {
     Terrain(TerrainDirector),
     Vehicle(VehicleDirector),
     City(super::city_scene::CityDirector),
+    Impact(super::impact::ImpactDirector),
 }
 
 /// A placed scene's script and the player's actions on it.
@@ -135,6 +145,9 @@ impl Director {
             (SceneDef::Terrain(_), Placed::Terrain(p)) => {
                 Kind::Terrain(TerrainDirector::new(p.clone(), world))
             }
+            (SceneDef::Impact(d), Placed::Impact(p)) => {
+                Kind::Impact(super::impact::ImpactDirector::new(d, p.clone()))
+            }
             (SceneDef::City(d), Placed::City(c)) => {
                 Kind::City(super::city_scene::CityDirector::new(d, c.clone())?)
             }
@@ -157,6 +170,7 @@ impl Director {
             Kind::Motion(d) => d.before_step(world, ev),
             Kind::Soft(d) => d.before_step(world, ev),
             Kind::Terrain(_) | Kind::City(_) => Ok(()),
+            Kind::Impact(d) => d.before_step(world, ev),
             Kind::Vehicle(d) => d.before_step(world, ev),
         }
     }
@@ -228,6 +242,7 @@ impl Director {
             Kind::Terrain(d) => d.act(world, action, ev),
             Kind::Vehicle(d) => d.act(world, action, ev),
             Kind::City(d) => d.act(world, action, ev),
+            Kind::Impact(d) => d.act(world, action, ev),
         }
     }
 
@@ -248,6 +263,7 @@ impl Director {
             Kind::Vehicle(d) => serde_json::json!({ "zones": d.zone_count }),
             Kind::Terrain(d) => serde_json::json!({ "craters": d.craters }),
             Kind::City(d) => serde_json::json!({ "shells": d.shells }),
+            Kind::Impact(d) => d.state(),
             _ => serde_json::Value::Null,
         }
     }

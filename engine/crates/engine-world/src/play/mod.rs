@@ -30,6 +30,7 @@ pub mod broadside;
 pub mod city_scene;
 pub mod director;
 pub mod hills;
+pub mod impact;
 pub mod motion;
 pub mod presets;
 pub mod range;

@@ -94,7 +94,7 @@
   </div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, pollFrame, stepFrames, drain, macrotask, worldWasm, saveState } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, pollFrame, stepFrames, drain, macrotask, worldWasm, saveState } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { GROUND_WGSL, switchError } from './terrain-render.mjs';
 
@@ -155,69 +155,28 @@
     };
 
     // ---------------------------------------------------------------- the event (Rust: π-scaling)
-    // The terrain's settings (engine-world's TerrainDef): dry sand at physical
-    // stiffness (E = 50 MPa), engine limits sized for the browser. Every limit
-    // fails by name when exceeded.
+    // The scene (rubble::play::impact, engine-world): the prediction (π-scaling), the
+    // plain, the terrain's settings and the world, from the page's switches; its script
+    // strikes after the launch, bakes, and drives the truck out (rubble::play::director).
     const G = 9.81;
     const W = await worldWasm();
-    const TERRAIN = {
-      config: { maxParticles: 3 << 19, maxBlocks: 8192, maxParcels: 1 << 18, maxSubsteps: 1024,
-        maxColumns: 1 << 17, maxFieldSamples: 1 << 19, maxCoupled: 64, profile: S.profile,
-        ...(S.cpr != null ? { cellsPerRadius: S.cpr } : {}) },
-      regionMargin: S.margin,
-      // The region's rest tolerance (set from the crater below): it bakes once
-      // its fastest particle stays under it for half a second with nothing in
-      // flight.
-      settleSpeed: 0.05, settleFrames: 30,
-      // The live surface the page draws over the open area (no patches, no
-      // debris copied back: it renders the engine's debris list in place).
-      surface: { patchSamples: 0, maxDebris: 0 },
-    };
-    const settingsInfo = W.terrainSettings(TERRAIN);
-    const pred = S.mode === 'impact'
-      ? W.terrainPredictImpact(TERRAIN, S.radius, S.density, S.speed * 1000, G)
-      : W.terrainPredictExplosion(TERRAIN, 10 ** S.charge, S.depth, G);
+    const sceneDef = await sceneFromQuery('impact', location.search);
+    const world = await createScene(sceneDef);
+    const placed = world.placeScene(sceneDef);
+    const settingsInfo = world.terrainSettings();
+    const pred = { crater: { radius: placed.radius, depth: placed.depth, finalRimRadius: placed.finalRimRadius, formationTime: placed.formationTime },
+      dx: placed.dx, sourceSpeed: placed.sourceSpeed, energy: placed.energy, mass: placed.mass };
     const R = pred.crater.radius;
-    // Rest, at the crater's scale: 1% of its gravity speed √(gR) (38 m/s for the
-    // default 151 m crater, so 0.38 m/s). A crater's walls keep creeping for
-    // minutes at a few tenths of a m/s; the bake freezes motion below that.
-    TERRAIN.settleSpeed = num('settle', 0.01 * Math.sqrt(G * R));
+    const HALF = 6 * R; // the heightfield's half side
+    const TERRAIN = { settleSpeed: placed.settleSpeed };
     $('bakeMode').options[0].textContent = `when settled (< ${TERRAIN.settleSpeed.toFixed(2)} m/s for 0.5 s)`;
     const DXR = pred.dx; // region cell (m)
     const PPC = settingsInfo.config.particlesPerCellAxis;
-    // The heightfield's samples are the region's cells (the native crater tests'
-    // spacing: each baked column holds PPC² particle columns), out to 6
-    // transient radii: room for the ejecta blanket and a drive in.
-    const SP = DXR;
-    const HALF = 6 * R;
-    const NX = 2 * Math.ceil(HALF / SP) + 1, NZ = NX;
-    const X0 = -0.5 * (NX - 1) * SP, Z0 = X0;
-    // Gently rolling plain, flat at the impact point (the scaling assumes level ground).
-    const amp = 0.01 * R;
-    const plain = (x, z) => {
-      const r = Math.hypot(x, z) / R;
-      const fade = Math.min(1, Math.max(0, (r - 0.4) / 1.2));
-      return fade * amp * (Math.sin(x / (1.7 * R) + 0.4) * Math.cos(z / (2.1 * R)) + 0.6 * Math.sin((x + z) / (0.9 * R)));
-    };
-    const initialHeights = new Float32Array(NX * NZ);
-    for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) initialHeights[j * NX + i] = plain(X0 + i * SP, Z0 + j * SP);
+    // The heightfield: the region's cells out to 6 transient radii.
+    const SP = placed.sp, NX = placed.nx, NZ = placed.nz, X0 = placed.x0, Z0 = X0;
+    const GROUND = placed.ground;
+    const initialHeights = Float32Array.from(world.heightFieldHeights(GROUND));
     let heights = initialHeights.slice();
-
-    // ---------------------------------------------------------------- world
-    // Rubble's World (engine-world-wasm) opens the device; the page renders on it
-    // and binds the world's buffers in place. The JS host's sizes: 4096 bodies,
-    // 8192 colliders, canonical contacts.
-    const world = await createWorld({
-      gravity: [0, -G, 0],
-      contacts: 'canonical',
-      capacity: { maxBodies: 4096, maxColliders: 8192, maxContacts: 65536, maxJoints: 64, maxCandidates: 131072, maxColors: 32,
-        // The JS host's 64 held its kinematic velocities only; World also carries
-        // teleports and velocity sets as commands (capacity only).
-        maxCommands: 2048 },
-      vehicles: { maxVehicles: 4, maxWheels: 16, maxCurvePoints: 512, maxDiffs: 8, maxAntiRolls: 8, maxParts: 16, maxRays: 16 },
-      // Two physics frames per drawn frame at 120 Hz: a readback slot each and one to spare.
-      readbackFrames: 4,
-    });
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -233,16 +192,8 @@
     configure();
     addEventListener('resize', configure);
     const DT = 1 / S.hz;
-    world.setSolver({ dt: DT, iterations: 8, gravityY: -G, flags: world.flags.SPEC_VELOCITY });
-    // The JS host's material table: slot 0 (the ground and the vehicle's part
-    // colliders) and the wheel rims at 0.9, the rest 0.6.
-    for (let i = 0; i < 64; i++) world.setMaterialSlot(i, { friction: i === 0 || i === WHEEL_RIM_MATERIAL ? 0.9 : 0.6 });
-    const groundBody = world.createBody({});
-    const GROUND = world.createHeightField(groundBody, { material: { friction: 0.9 } }, NX, NZ, SP, SP, initialHeights);
     const HF_BASE = world.shapeArenaBase(GROUND);
 
-    statusEl.textContent = 'enabling terrain…';
-    world.enableTerrain(TERRAIN);
     const T = W.terrainLayout();
     const terrainSettings = world.terrainSettings();
     // The debris draw: a particle billboard (6 vertices) per listed particle.
@@ -262,7 +213,7 @@
       const h = (a, b) => heights[(j + b) * NX + i + a];
       return u >= v ? h(0, 0) + u * (h(1, 0) - h(0, 0)) + v * (h(1, 1) - h(1, 0)) : h(0, 0) + v * (h(0, 1) - h(0, 0)) + u * (h(1, 1) - h(0, 1));
     };
-    const IMPACT = [0, surfaceAt(0, 0), 0];
+    const IMPACT = placed.impact;
 
     // Prediction panel.
     {
@@ -732,18 +683,13 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     }
 
     // ---------------------------------------------------------------- events
-    function launch() {
-      if (st.phase !== 'ready') return;
-      st.phase = 'approach'; st.t = -APPROACH; st.launchT = st.simTime;
-    }
-    function strike() {
+    function launch() { world.act({ action: 'launch' }); syncScript(); }
+    // The script struck (the activation World submitted): where each particle starts
+    // (render-only strata colours), the tracked particle.
+    function onStrike() {
       if (!terrain.areas.length) terrain.report = null;
-      if (S.mode === 'impact') world.terrainImpact(GROUND, IMPACT, S.radius, S.density, S.speed * 1000);
-      else world.terrainExplode(GROUND, IMPACT, 10 ** S.charge, S.depth);
       refreshAreas();
       st.region = terrain.region;
-      // Where each particle starts (render-only strata colours), right after
-      // the activation World submitted.
       rebind();
       const enc = device.createCommandEncoder();
       enc.clearBuffer(restBuf);
@@ -752,20 +698,28 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       p.dispatchWorkgroups(Math.ceil(maxParticles / 64));
       p.end();
       device.queue.submit([enc.finish()]);
-      st.phase = 'open'; st.t = 0; st.impactStep = st.frames; st.flash = 1;
+      st.impactStep = st.frames; st.flash = 1;
       pickTracked().catch(fail);
+    }
+    // The script's state (phase, time since the strike, bake time, the truck) and events.
+    function syncScript() {
+      for (const e of world.takeEvents()) {
+        if (e.what === 'strike') onStrike();
+        else if (e.what === 'drive') { const s = world.scriptState(); st.vehicle = s.vehicle; st.chassis = world.vehicleEntry(s.vehicle).chassis; }
+      }
+      const s = world.scriptState();
+      st.phase = s.phase; st.t = s.t; st.bakeT = s.bakeT;
     }
     // A bake, as the frame that carries it reports it: World's copy of the
     // heights follows by then.
     function onBake(slots) {
-      if (st.phase !== 'open') return;
-      st.phase = 'baked'; st.bakeT = st.t;
+      syncScript();
       heights = Float32Array.from(world.heightFieldHeights(GROUND));
       // The jump at the switch from the last live surface to the baked heightfield.
       st.switchError = switchError(terrain.views, heights, NX, slots);
       measureCrater();
     }
-    function bakeNow() { if (st.phase === 'open' && terrain.region) { world.terrainClose(); refreshAreas(); } }
+    function bakeNow() { world.act({ action: 'bake' }); refreshAreas(); syncScript(); }
     $('launch').onclick = launch;
     $('bake').onclick = bakeNow;
     $('replay').onclick = () => replay();
@@ -784,7 +738,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       else if (e.code === 'KeyX') $('cutBtn').click();
       else if (e.code === 'KeyG') $('surfBtn').click();
       else if (/^Digit[1-8]$/.test(e.code)) setView(viewBtns[Number(e.code.slice(5)) - 1].dataset.view);
-      if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code) && st.vehicle != null) st.manual = true;
+      if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code) && st.vehicle != null && !st.manual) { st.manual = true; world.act({ action: 'takeWheel' }); }
     });
     addEventListener('keyup', (e) => keys.delete(e.code));
 
@@ -792,6 +746,8 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       // World::restore_state: the scene as saved, open areas dropped (not
       // baked), the heightfield's samples back, the terrain pool started over.
       world.restoreState(initial);
+      world.act({ action: 'reset' });
+      world.takeEvents();
       heights = initialHeights.slice();
       terrain.report = null; terrain.views = []; terrain.substeps = 0;
       refreshAreas();
@@ -884,21 +840,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       let cross = 0;
       for (let b = 0; b < rim; b++) if (prof[b] < 0) cross = b;
       st.crater = { depth: -Math.min(...prof), rimR: (rim + 0.5) * SP, rimH: prof[rim], apparentR: (cross + 1) * SP };
-      // Drive in a few seconds later.
-      setTimeout(spawnVehicle, 1500);
     }
-    function spawnVehicle() {
-      if (st.phase !== 'baked' || st.vehicle != null) return;
-      // On the crater floor, facing out (-x): it drives up the inner wall
-      // toward the rim. (The baked rim itself is jagged, up to ~10 m between
-      // neighbouring samples; see the doc's open points.)
-      const x = IMPACT[0] - 0.08 * R;
-      const desc = presets.monster_truck;
-      st.vehicle = world.addVehicle(desc, [x, surfaceAt(x, 0) + 2.2, 0], [0, -Math.SQRT1_2, 0, Math.SQRT1_2]);
-      st.chassis = world.vehicleEntry(st.vehicle).chassis;
-      st.phase = 'drive';
-    }
-    const presets = Object.fromEntries((await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json()).map((p) => [p.name, p]));
     async function followCar() {
       if (st.chassis == null || st.carBusy) return;
       st.carBusy = true;
@@ -911,8 +853,9 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
         st.carSpeed = Math.hypot(f[7], f[8], f[9]);
       } finally { st.carBusy = false; }
     }
+    // The player's keys once they take the wheel (the script's autopilot before).
     function driveInput() {
-      if (st.vehicle == null) return;
+      if (st.vehicle == null || !st.manual) return;
       let inp;
       if (st.manual) {
         inp = { forward: keys.has('KeyW') ? 1 : 0, brake: keys.has('KeyS') ? 1 : 0, steer: (keys.has('KeyA') ? 1 : 0) - (keys.has('KeyD') ? 1 : 0) };
@@ -1011,22 +954,14 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     // One physics frame (DT, 1/120 s by default): the strike or a timed bake
     // when due, the drive input, then World's step (the terrain's coupled
     // substeps, or its bake, ahead of the rigid step).
-    function beforeStep() {
-      if (st.phase === 'approach' && st.t >= 0) strike();
-      // Timed bake: once nothing is in flight (a parcel still flying would be
-      // left out of the ledger), as the settle rule also requires.
-      if (st.phase === 'open' && S.bake === 'time' && st.t >= S.bakeAt && terrain.region && terrain.report && terrain.report.airborne === 0) {
-        world.terrainClose();
-        refreshAreas();
-      }
-      driveInput();
-    }
+    // The strike, the timed bake and the truck are the script's (before World's step).
+    function beforeStep() { driveInput(); }
     function afterStep() {
       refreshAreas();
       terrain.substeps = world.terrainLastSubsteps();
       if (terrain.substeps) pushCap(timing.substeps, terrain.substeps);
       st.frames++; st.simTime += DT;
-      if (st.phase === 'approach' || st.phase === 'open' || st.phase === 'baked' || st.phase === 'drive') st.t += DT;
+      syncScript();
       st.flash = Math.max(0, st.flash - DT * 4);
     }
     function physicsFrame() { beforeStep(); world.step(); afterStep(); }

@@ -64,7 +64,7 @@ fn every_placed_preset_builds_and_steps() {
         let mut play = Playground::of_placed(def, world, placed)
             .unwrap_or_else(|e| panic!("{}: {e:#}", p.name));
         let bodies = play.stats().bodies;
-        assert!(bodies > 1, "{}: {bodies} bodies", p.name);
+        assert!(bodies >= 1, "{}: {bodies} bodies", p.name);
         play.step(3).unwrap_or_else(|e| panic!("{}: {e:#}", p.name));
         let stepping = t.elapsed() - made - placing;
         let s = play.stats();

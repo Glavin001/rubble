@@ -109,6 +109,7 @@ pub enum SceneDef {
     Motion(motion::MotionSceneDef),
     Terrain(hills::HillsDef),
     City(super::city_scene::CitySceneDef),
+    Impact(super::impact::ImpactSceneDef),
     /// Broadside or the timber yard: built by [`super::stage::Play`] from its GLB.
     Range(super::stage::RangeSceneDef),
 }
@@ -122,6 +123,7 @@ pub enum Placed {
     Motion(motion::Placed),
     Terrain(hills::Placed),
     City(crate::city::City),
+    Impact(super::impact::Placed),
 }
 
 impl Placed {
@@ -138,6 +140,7 @@ impl Placed {
             Placed::Soft(p) => serde_json::to_value(p)?,
             Placed::Motion(p) => serde_json::to_value(p)?,
             Placed::Terrain(p) => serde_json::to_value(p)?,
+            Placed::Impact(p) => serde_json::to_value(p)?,
             Placed::City(c) => serde_json::json!({
                 "houses": c.houses.iter().map(|h| h.to_bits()).collect::<Vec<_>>(),
                 "lots": c.lots,
@@ -157,6 +160,7 @@ impl SceneDef {
             SceneDef::Motion(_) => Family::Motion,
             SceneDef::Terrain(_) => Family::Terrain,
             SceneDef::City(_) => Family::City,
+            SceneDef::Impact(_) => Family::Impact,
             SceneDef::Range(_) => Family::Range,
         }
     }
@@ -170,6 +174,7 @@ impl SceneDef {
             SceneDef::Motion(d) => motion::world_def(d),
             SceneDef::Terrain(d) => hills::world_def(d),
             SceneDef::City(d) => super::city_scene::world_def(d),
+            SceneDef::Impact(d) => super::impact::world_def(d),
             SceneDef::Range(_) => {
                 anyhow::bail!("a range scene builds its own world (Playground::new)")
             }
@@ -185,6 +190,7 @@ impl SceneDef {
             SceneDef::Motion(d) => Placed::Motion(motion::place(world, d)?),
             SceneDef::Terrain(d) => Placed::Terrain(hills::place(world, d)?),
             SceneDef::City(d) => Placed::City(super::city_scene::place(world, d)?),
+            SceneDef::Impact(d) => Placed::Impact(super::impact::place(world, d)?),
             SceneDef::Range(_) => {
                 anyhow::bail!("a range scene places itself (Playground::new)")
             }
@@ -333,6 +339,7 @@ impl SceneDef {
                 SceneDef::Terrain(hills::HillsDef { n })
             }
             Family::Range => SceneDef::Range(super::stage::RangeSceneDef::from_query(&q)?),
+            Family::Impact => SceneDef::Impact(super::impact::ImpactSceneDef::from_query(&q)),
             Family::City => SceneDef::City(super::city_scene::CitySceneDef::from_query(&q)?),
             f => anyhow::bail!("the {} family is not placed through SceneDef yet", f.name()),
         })
@@ -350,6 +357,7 @@ pub fn placed_here(family: Family) -> bool {
             | Family::Terrain
             | Family::City
             | Family::Range
+            | Family::Impact
     )
 }
 
