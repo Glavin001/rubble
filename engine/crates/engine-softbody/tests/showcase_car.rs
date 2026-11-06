@@ -1677,7 +1677,13 @@ fn e_upside_down_drop_from_15_m_keeps_its_ledgers() {
 #[test]
 #[ignore]
 fn pole_sweep_never_passes_through() {
-    let b = built(Resolution::Low);
+    // (`SWEEP_RES=medium`: the references' resolution.)
+    let b = built(
+        std::env::var("SWEEP_RES")
+            .ok()
+            .and_then(|r| Resolution::parse(&r))
+            .unwrap_or(Resolution::Low),
+    );
     let mut jobs = Vec::new();
     // `SWEEP_SPEEDS=28,32` other speeds, `SWEEP_SHIFT=0.025` offsets moved by
     // that much (how robust a clean sweep is).
@@ -7056,6 +7062,95 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
         "mass {total} kg, kerb {}",
         b.def.kerb_mass
     );
+    // Per part, the 2011 Accord's measured masses (NHTSA DOT HS 811 666
+    // §5.10, `sedan::ACCORD_*`): each part with its own pane, if it has one.
+    for (prefix, kg) in &b.def.part_masses {
+        for (q, name) in sk.parts.iter().enumerate() {
+            if !name.starts_with(prefix.as_str()) {
+                continue;
+            }
+            let pane = format!("glass_{name}");
+            let m: f32 = sk
+                .nodes
+                .iter()
+                .filter(|n| n.part as usize == q || sk.parts[n.part as usize] == pane)
+                .map(|n| n.mass)
+                .sum();
+            eprintln!("part {name:>10}: {m:6.2} kg (Accord {kg:.2})");
+            assert!(
+                (m - kg).abs() < 0.01 * kg,
+                "{name}: {m} kg against the Accord's {kg}"
+            );
+        }
+    }
+    // Centre of mass and principal moments of inertia (nodes and tyres).
+    let (com, inertia) = mass_properties(&b);
+    let front_axle = b.def.corners.iter().map(|c| c.z).fold(f32::MIN, f32::max);
+    let behind = front_axle - com.z;
+    eprintln!(
+        "centre of mass: x {:+.1} mm, {:.0} mm up, {:.0} mm behind the front axle; principal moments {:.0}, {:.0}, {:.0} kg·m² (about x, pitch {:.0}; y, yaw {:.0}; z, roll {:.0})",
+        com.x * 1e3,
+        com.y * 1e3,
+        behind * 1e3,
+        inertia[0],
+        inertia[1],
+        inertia[2],
+        inertia[3],
+        inertia[4],
+        inertia[5],
+    );
+    // Across the car: the structure, its sheet and its equipment are
+    // mirror-symmetric (exact); what is placed on one side is the named
+    // masses, blocks and hubs (`fixed`): the driver (75 kg, the kerb mass is
+    // "1,450 kg with its driver"), the dash equipment on the driver's half,
+    // the battery. So the centre of mass is off the centre line by the fixed
+    // masses' first moment alone.
+    let total = sk.total_mass();
+    let sym: f32 = sk
+        .nodes
+        .iter()
+        .map(|n| (n.mass - n.fixed) * n.p.x)
+        .sum::<f32>()
+        / total;
+    let fixed: f32 = sk.nodes.iter().map(|n| n.fixed * n.p.x).sum::<f32>() / total;
+    eprintln!(
+        "centre of mass across: {:+.1} mm from the structure, sheet and equipment, {:+.1} mm from the named masses, blocks and hubs",
+        sym * 1e3,
+        fixed * 1e3
+    );
+    assert!(
+        sym.abs() < 0.002,
+        "the symmetric mass is off the centre line by {sym} m"
+    );
+    assert!(
+        (com.x - fixed).abs() < 0.002,
+        "centre of mass {} m across, the placed masses' {fixed} m",
+        com.x
+    );
+    // Along the car: NHTSA measured the 2011 Accord LX sedan's centre of
+    // gravity 1,147 mm behind its front axle at a 1,578 kg test weight
+    // (NCAP side pole, test 7077, the NHTSA Vehicle Crash Test Database).
+    // The 128 kg above the 1,450 kg kerb mass (ATD, instruments, ballast)
+    // lies somewhere between the axles (wheelbase 2.80 m), so the kerb
+    // centre of mass lies within (1578·1147 − 128·x)/1450 for x in 0–2.80 m:
+    // 1,001–1,248 mm (exact from the measured values).
+    assert!(
+        (1.001..=1.248).contains(&behind),
+        "centre of mass {behind} m behind the front axle"
+    );
+    // The principal moments: the 2011 Accord's measured inertia is not
+    // openly published (NHTSA's measured inertial parameters, SAE
+    // 2021-01-0970, list vehicles by name behind a paywall). What is
+    // asserted is that BeamNG's node pattern (`BEAMNG_NODES`) lumps the
+    // same masses: its principal moments within 1 % (a Choice) of the
+    // 0.24 m lattice's (measured without the pattern, the battery at 12.4 kg).
+    for (k, &want) in SEDAN1_PRINCIPAL_MOMENTS.iter().enumerate() {
+        let got = inertia[k];
+        assert!(
+            (got - want).abs() <= 0.01 * want,
+            "principal moment {k}: {got:.0} kg·m² against the lattice's {want:.0}"
+        );
+    }
     let rows = sk.bound_rows();
     let worst = rows.iter().cloned().fold(0.0f32, f32::max);
     assert!(worst <= 1.002, "a node past the step's bound: {worst}");
@@ -7275,6 +7370,84 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
             med(mass)
         );
     }
+}
+
+/// sedan1's principal moments of inertia about its centre of mass (kg·m²,
+/// ascending), Medium, on the 0.24 m lattice (no `BEAMNG_NODES`): the
+/// reference the node pattern's lumping is held to.
+const SEDAN1_PRINCIPAL_MOMENTS: [f32; 3] = [608.0, 2296.0, 2594.0];
+
+/// A built car's centre of mass (definition coordinates) and inertia: the
+/// three principal moments ascending, then the moments about x, y and z
+/// (kg·m²). Nodes are point masses; each tyre's mass sits at its axle
+/// nodes' midpoint.
+fn mass_properties(b: &Built) -> (Vec3, [f32; 6]) {
+    let sk = &b.skeleton;
+    let mut pts: Vec<(glam::DVec3, f64)> = sk
+        .nodes
+        .iter()
+        .map(|n| (n.p.as_dvec3(), n.mass as f64))
+        .collect();
+    for w in &sk.wheels {
+        let c = 0.5 * (sk.pos(w.a1) + sk.pos(w.a2));
+        pts.push((c.as_dvec3(), w.mass as f64));
+    }
+    let m: f64 = pts.iter().map(|x| x.1).sum();
+    let c = pts.iter().map(|(p, w)| *p * *w).sum::<glam::DVec3>() / m;
+    let mut t = glam::DMat3::ZERO;
+    for (p, w) in &pts {
+        let d = *p - c;
+        t += glam::DMat3::from_diagonal(glam::DVec3::splat(d.length_squared() * w))
+            - glam::DMat3::from_cols(d * d.x * w, d * d.y * w, d * d.z * w);
+    }
+    // Jacobi eigenvalues of the symmetric tensor.
+    let mut a = [
+        [t.x_axis.x, t.y_axis.x, t.z_axis.x],
+        [t.x_axis.y, t.y_axis.y, t.z_axis.y],
+        [t.x_axis.z, t.y_axis.z, t.z_axis.z],
+    ];
+    for _ in 0..50 {
+        for (p, q) in [(0, 1), (0, 2), (1, 2)] {
+            if a[p][q].abs() < 1e-12 {
+                continue;
+            }
+            let th = 0.5 * (2.0 * a[p][q]).atan2(a[q][q] - a[p][p]);
+            let (cs, sn) = (th.cos(), th.sin());
+            let mut r = [[0.0f64; 3]; 3];
+            for i in 0..3 {
+                r[i][i] = 1.0;
+            }
+            r[p][p] = cs;
+            r[q][q] = cs;
+            r[p][q] = sn;
+            r[q][p] = -sn;
+            // a = rᵀ a r
+            let mut tmp = [[0.0f64; 3]; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    tmp[i][j] = (0..3).map(|k| a[i][k] * r[k][j]).sum();
+                }
+            }
+            for i in 0..3 {
+                for j in 0..3 {
+                    a[i][j] = (0..3).map(|k| r[k][i] * tmp[k][j]).sum();
+                }
+            }
+        }
+    }
+    let mut e = [a[0][0] as f32, a[1][1] as f32, a[2][2] as f32];
+    e.sort_by(f32::total_cmp);
+    (
+        c.as_vec3(),
+        [
+            e[0],
+            e[1],
+            e[2],
+            t.x_axis.x as f32,
+            t.y_axis.y as f32,
+            t.z_axis.z as f32,
+        ],
+    )
 }
 
 /// The largest difference between a one-tier node's mass and its real local
@@ -7999,6 +8172,445 @@ fn beamng_pole_sweep() {
 
 fn offset_of(o: f32) -> f32 {
     o
+}
+
+/// A solver-level topology census, the same arithmetic for sedan1 and for
+/// BeamNG's content: per part, its nodes, beam ends per node by kind, the
+/// share of nodes whose Gershgorin row (Σ (h²k + 2hc)(1/mᵢ + 1/√(mᵢmⱼ)) over
+/// h²·[`G_LIMIT`]) is at the bound (> 0.95), how a saturated node's row
+/// divides by kind, and the median node mass, length, k·L, yield strain and
+/// springback after 20 % plastic strain. A measurement (`--ignored`).
+fn solver_census(
+    s: &ExplicitBeams,
+    n: usize,
+    part_of: &dyn Fn(usize) -> Option<String>,
+    kind_of: &dyn Fn(usize) -> String,
+) {
+    use engine_softbody::authoring::skeleton::G_LIMIT;
+    let h = STEP;
+    let limit = G_LIMIT * h * h;
+    let mut row = vec![0.0f32; s.nodes.len()];
+    for bm in &s.beams {
+        let (a, b) = (bm.a as usize, bm.b as usize);
+        let q = h * h * bm.k + 2.0 * h * bm.c;
+        let (ma, mb) = (s.nodes[a].mass, s.nodes[b].mass);
+        let w = 1.0 / (ma * mb).sqrt();
+        row[a] += q * (1.0 / ma + w);
+        row[b] += q * (1.0 / mb + w);
+    }
+    for r in &mut row {
+        *r /= limit;
+    }
+    #[derive(Default)]
+    struct P {
+        nodes: HashSet<usize>,
+        ends: std::collections::BTreeMap<String, usize>,
+        share: std::collections::BTreeMap<String, f64>,
+        kl: Vec<f32>,
+        eps: Vec<f32>,
+        len: Vec<f32>,
+        kl_by: std::collections::BTreeMap<String, Vec<f32>>,
+        eps_by: std::collections::BTreeMap<String, Vec<f32>>,
+    }
+    let mut by: std::collections::BTreeMap<String, P> = Default::default();
+    for (j, bm) in s.beams.iter().enumerate() {
+        let (a, b) = (bm.a as usize, bm.b as usize);
+        if a >= n || b >= n {
+            continue;
+        }
+        let (Some(pa), Some(pb)) = (part_of(a), part_of(b)) else {
+            continue;
+        };
+        if pa != pb {
+            continue;
+        }
+        if bm.k <= 0.0 && bm.c <= 0.0 {
+            continue;
+        }
+        let kind = kind_of(j);
+        let p = by.entry(pa).or_default();
+        p.nodes.insert(a);
+        p.nodes.insert(b);
+        *p.ends.entry(kind.clone()).or_default() += 2;
+        let q = h * h * bm.k + 2.0 * h * bm.c;
+        for (i, o) in [(a, b), (b, a)] {
+            if row[i] > 0.95 {
+                let (mi, mo) = (s.nodes[i].mass, s.nodes[o].mass);
+                *p.share.entry(kind.clone()).or_default() +=
+                    (q * (1.0 / mi + 1.0 / (mi * mo).sqrt())) as f64;
+            }
+        }
+        if bm.ty == ExplicitType::Deformable && bm.k > 0.0 && bm.tc < 1.0e8 && bm.rest > 1e-3 {
+            let kl = bm.k * bm.rest;
+            p.kl.push(kl);
+            p.eps.push(bm.tc / kl);
+            p.len.push(bm.rest);
+            p.kl_by.entry(kind.clone()).or_default().push(kl);
+            p.eps_by.entry(kind.clone()).or_default().push(bm.tc / kl);
+        }
+    }
+    let med = |v: &mut Vec<f32>| {
+        if v.is_empty() {
+            return f32::NAN;
+        }
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    for (k, p) in &mut by {
+        let nn = p.nodes.len() as f32;
+        let total: usize = p.ends.values().sum();
+        let sat = p.nodes.iter().filter(|&&i| row[i] > 0.95).count() as f32 / nn;
+        let mut mass: Vec<f32> = p.nodes.iter().map(|&i| s.nodes[i].mass).collect();
+        let e = med(&mut p.eps);
+        eprintln!(
+            "[census] {k}: {} nodes, mass p50 {:.2} kg, {:.1} ends per node, at the bound {:.0} %, L p50 {:.3} m, k·L p50 {:.2e} N, ε_y p50 {:.2} %, springback at 20 % {:.0} %",
+            p.nodes.len(),
+            med(&mut mass),
+            total as f32 / nn,
+            sat * 100.0,
+            med(&mut p.len),
+            med(&mut p.kl),
+            e * 100.0,
+            e / (e + 0.2) * 100.0
+        );
+        let st: f64 = p.share.values().sum();
+        for (kind, &ends) in &p.ends {
+            let sh = p.share.get(kind).copied().unwrap_or(0.0);
+            let mut kl = p.kl_by.get(kind).cloned().unwrap_or_default();
+            let mut ey = p.eps_by.get(kind).cloned().unwrap_or_default();
+            eprintln!(
+                "[census]    {kind:<14} {:5.2} ends/node, {:4.0} % of saturated rows, k·L p50 {:.2e}, ε_y p50 {:.2} %",
+                ends as f32 / nn,
+                if st > 0.0 { sh / st * 100.0 } else { 0.0 },
+                med(&mut kl),
+                med(&mut ey) * 100.0
+            );
+        }
+    }
+}
+
+/// sedan1's beams by kind for [`solver_census`]: within a member (both ends
+/// in one member's group) by the angle to the member's local axis (the
+/// principal axis of its nodes within 0.35 m of the beam's midpoint): chord
+/// (within 32°; `bend` when longer than 1.5× the member's median chord),
+/// diagonal (32–73°), ring/web (past 73°); `lane chord` a chord on the
+/// shell; between two members `joint`; shell edges in no common member
+/// `sheet`; ties, dashpots, bearing (support) beams and rigidifier spokes
+/// by their flags and groups.
+fn sedan1_kinds(b: &Built) -> Vec<String> {
+    use engine_softbody::authoring::skeleton::BeamType;
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let shell: HashSet<u32> = b.shell.nodes.iter().copied().collect();
+    let names: Vec<&String> = b
+        .groups
+        .keys()
+        .filter(|k| {
+            b.def
+                .members
+                .iter()
+                .any(|m| *k == &m.name || k.strip_suffix("_r").is_some_and(|x| x == m.name))
+        })
+        .collect();
+    let mut of: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (gi, g) in names.iter().enumerate() {
+        for &i in &b.groups[*g] {
+            of[i as usize].push(gi);
+        }
+    }
+    let rigid: HashSet<u32> = b
+        .groups
+        .iter()
+        .filter(|(k, _)| k.contains("rigidifier"))
+        .flat_map(|(_, g)| g.iter().copied())
+        .collect();
+    let flange: HashSet<u32> = b
+        .groups
+        .iter()
+        .filter(|(k, _)| k.contains("flange"))
+        .flat_map(|(_, g)| g.iter().copied())
+        .collect();
+    let axis = |gi: usize, at: Vec3| -> Vec3 {
+        let pts: Vec<Vec3> = b.groups[names[gi]]
+            .iter()
+            .map(|&i| sk.pos(i))
+            .filter(|p| p.distance(at) < 0.35)
+            .collect();
+        if pts.len() < 2 {
+            return Vec3::ZERO;
+        }
+        let c = pts.iter().copied().sum::<Vec3>() / pts.len() as f32;
+        let mut m = glam::Mat3::ZERO;
+        for p in &pts {
+            let d = *p - c;
+            m += glam::Mat3::from_cols(d * d.x, d * d.y, d * d.z);
+        }
+        let mut v = Vec3::new(0.577, 0.577, 0.577);
+        for _ in 0..30 {
+            v = (m * v).normalize_or_zero();
+        }
+        v
+    };
+    let mut edge: HashSet<(u32, u32)> = HashSet::new();
+    for t in &b.shell.tris {
+        for (x, y) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            edge.insert((x.min(y), x.max(y)));
+        }
+    }
+    let mut raw: Vec<(String, Option<(usize, f32)>)> = Vec::with_capacity(sk.beams.len());
+    for bm in &sk.beams {
+        let (a, c) = (bm.a, bm.b);
+        let (pa, pc) = (sk.pos(a), sk.pos(c));
+        let l = pa.distance(pc);
+        let k = if bm.damper {
+            "dashpot".to_string()
+        } else if b.shell.contact.contains(&a) || b.shell.contact.contains(&c) {
+            // (BeamNG's node pattern: what holds a contact-only node.)
+            "contact tie".into()
+        } else if bm.ty != BeamType::Normal {
+            "bearing".into()
+        } else if rigid.contains(&a) && rigid.contains(&c) {
+            "rigidifier".into()
+        } else if flange.contains(&a) || flange.contains(&c) {
+            "flange".into()
+        } else if bm.tie {
+            "tie".into()
+        } else if shell.contains(&a)
+            && shell.contains(&c)
+            && sk.nodes[a as usize].part == sk.nodes[c as usize].part
+            && !edge.contains(&(a.min(c), a.max(c)))
+        {
+            // A shell beam that is no skin triangle's edge: the sheet's
+            // bending (over two bays) or a lane's extra.
+            "shell bend".into()
+        } else if let Some(&gi) = of[a as usize].iter().find(|g| of[c as usize].contains(g)) {
+            let ax = axis(gi, 0.5 * (pa + pc));
+            let cs = ((pc - pa) / l.max(1e-4)).dot(ax).abs();
+            if cs > 0.85 {
+                raw.push(("chord".into(), Some((gi, l))));
+                continue;
+            } else if cs > 0.3 {
+                "diagonal".into()
+            } else {
+                "ring/web".into()
+            }
+        } else if !of[a as usize].is_empty() && !of[c as usize].is_empty() {
+            "joint".into()
+        } else if shell.contains(&a) && shell.contains(&c) {
+            "sheet".into()
+        } else {
+            "other".into()
+        };
+        raw.push((k, None));
+    }
+    // Bends: chords longer than 1.5× their member's median chord.
+    let mut chord_len: Vec<Vec<f32>> = vec![Vec::new(); names.len()];
+    for (_, x) in &raw {
+        if let Some((gi, l)) = x {
+            chord_len[*gi].push(*l);
+        }
+    }
+    let medl: Vec<f32> = chord_len
+        .into_iter()
+        .map(|mut v| {
+            v.sort_by(f32::total_cmp);
+            v.get(v.len() / 2).copied().unwrap_or(0.0)
+        })
+        .collect();
+    raw.into_iter()
+        .zip(&sk.beams)
+        .map(|((k, x), bm)| match x {
+            Some((gi, l)) if l > 1.5 * medl[gi] => "bend".into(),
+            Some(_) if shell.contains(&bm.a) && shell.contains(&bm.b) => "lane chord".into(),
+            Some(_) => "chord".into(),
+            None => k,
+        })
+        .collect()
+}
+
+/// [`solver_census`] on sedan1 (`RES`, default Medium) from its `.truck`.
+#[test]
+#[ignore]
+fn topology_census_solver() {
+    let res = std::env::var("RES")
+        .ok()
+        .and_then(|r| Resolution::parse(&r))
+        .unwrap_or(Resolution::Medium);
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: res,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let sk = &b.skeleton;
+    let s = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+    let kinds = sedan1_kinds(&b);
+    // The .truck's beams by their nodes to the skeleton's (the order differs).
+    let mut at: std::collections::HashMap<(u32, u32), usize> = Default::default();
+    for (j, bm) in sk.beams.iter().enumerate() {
+        at.entry((bm.a.min(bm.b), bm.a.max(bm.b))).or_insert(j);
+    }
+    let kind_of = |j: usize| -> String {
+        let bm = &s.beams[j];
+        at.get(&(bm.a.min(bm.b), bm.a.max(bm.b)))
+            .map_or_else(|| "solver".into(), |&k| kinds[k].clone())
+    };
+    let key = |name: &str| -> String {
+        if name.starts_with("door") {
+            "door".into()
+        } else if name.starts_with("fender") {
+            "fender".into()
+        } else {
+            name.into()
+        }
+    };
+    // (BeamNG's node pattern, `BEAMNG_NODES`: a part's contact-only nodes
+    // are their own row, so the part's row is its structural lattice; the
+    // ties between the two are counted in neither.)
+    eprintln!("[census] contact-only nodes: {}", b.shell.contact.len());
+    solver_census(
+        &s,
+        sk.nodes.len(),
+        &|i| {
+            let k = key(&sk.parts[sk.nodes[i].part as usize]);
+            Some(if b.shell.contact.contains(&(i as u32)) {
+                format!("{k} contact")
+            } else {
+                k
+            })
+        },
+        &kind_of,
+    );
+}
+
+/// [`solver_census`] on BeamNG's BX (`RUBBLE_JBEAM_BX`), its beams by
+/// solver kind; a node is in the first part that lists it.
+#[test]
+#[ignore]
+fn beamng_topology_census() {
+    let Some(desc) = beamng_desc() else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    let s = beamng_spawn(&desc, Vec3::ZERO, 0.0);
+    let n = desc.nodes.len();
+    let mut part = vec![None; n];
+    for p in &desc.parts {
+        for &i in &p.nodes {
+            if part[i as usize].is_none() {
+                part[i as usize] = Some(p.name.clone());
+            }
+        }
+    }
+    solver_census(&s, n, &|i| part[i].clone(), &|j| {
+        format!("{:?}", s.beams[j].kind)
+    });
+}
+
+/// How a car damps its light nodes (a measurement, `--ignored`): per part,
+/// its nodes split at the part's median mass, and for each half the median
+/// node mass, the median damping ratio of its spring beams on their own
+/// two-mass mode (ζ = c / 2√(k·μ)), damping-only beams per node, and the
+/// median Σc/m per node (1/s, the node's damping rate). `RUBBLE_JBEAM_BX`:
+/// BeamNG's BX; else sedan1 (`BEAMNG_NODES` splits by contact-only instead).
+#[test]
+#[ignore]
+fn light_node_damping() {
+    let (s, n, part_of, light): (
+        ExplicitBeams,
+        usize,
+        Vec<Option<String>>,
+        Option<HashSet<usize>>,
+    ) = if let Some(desc) =
+        beamng_desc().filter(|_| std::env::var("CAR").map_or(true, |c| c == "bx"))
+    {
+        let s = beamng_spawn(&desc, Vec3::ZERO, 0.0);
+        let n = desc.nodes.len();
+        let mut part = vec![None; n];
+        for p in &desc.parts {
+            for &i in &p.nodes {
+                if part[i as usize].is_none() {
+                    part[i as usize] = Some(p.name.clone());
+                }
+            }
+        }
+        (s, n, part, None)
+    } else {
+        let b = built(Resolution::Medium);
+        let s = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+        let sk = &b.skeleton;
+        let n = sk.nodes.len();
+        let part = (0..n)
+            .map(|i| {
+                let p = &sk.parts[sk.nodes[i].part as usize];
+                Some(if p.starts_with("door") {
+                    "door".to_string()
+                } else {
+                    p.clone()
+                })
+            })
+            .collect();
+        let light = (!b.shell.contact.is_empty())
+            .then(|| b.shell.contact.iter().map(|&i| i as usize).collect());
+        (s, n, part, light)
+    };
+    let mut by: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    for i in 0..n {
+        if let Some(p) = &part_of[i] {
+            by.entry(p.clone()).or_default().push(i);
+        }
+    }
+    let mut zeta: Vec<Vec<f32>> = vec![Vec::new(); s.nodes.len()];
+    let mut dash = vec![0usize; s.nodes.len()];
+    let mut csum = vec![0.0f32; s.nodes.len()];
+    for bm in &s.beams {
+        let (a, b) = (bm.a as usize, bm.b as usize);
+        csum[a] += bm.c;
+        csum[b] += bm.c;
+        if bm.k <= 0.0 {
+            if bm.c > 0.0 {
+                dash[a] += 1;
+                dash[b] += 1;
+            }
+            continue;
+        }
+        let (ma, mb) = (s.nodes[a].mass, s.nodes[b].mass);
+        let z = bm.c / (2.0 * (bm.k * ma * mb / (ma + mb)).sqrt());
+        zeta[a].push(z);
+        zeta[b].push(z);
+    }
+    let med = |mut v: Vec<f32>| {
+        if v.is_empty() {
+            return f32::NAN;
+        }
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    for (p, nodes) in by {
+        if nodes.len() < 6 {
+            continue;
+        }
+        let mm = med(nodes.iter().map(|&i| s.nodes[i].mass).collect());
+        let (lo, hi): (Vec<usize>, Vec<usize>) = nodes.iter().partition(|&&i| match &light {
+            Some(l) => l.contains(&i),
+            None => s.nodes[i].mass < mm,
+        });
+        for (tag, v) in [("light", &lo), ("heavy", &hi)] {
+            if v.is_empty() {
+                continue;
+            }
+            eprintln!(
+                "[damping] {p:>16} {tag}: {:3} nodes, mass p50 {:.2} kg, beam ζ p50 {:.4}, dashpots per node {:.2}, Σc/m p50 {:.1} /s",
+                v.len(),
+                med(v.iter().map(|&i| s.nodes[i].mass).collect()),
+                med(v.iter().flat_map(|&i| zeta[i].iter().copied()).collect()),
+                v.iter().map(|&i| dash[i]).sum::<usize>() as f32 / v.len() as f32,
+                med(v.iter().map(|&i| csum[i] / s.nodes[i].mass).collect()),
+            );
+        }
+    }
 }
 
 /// The crushed car settles (jbeam-semantics-spec.md §37): sedan1 into the wall at

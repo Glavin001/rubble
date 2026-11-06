@@ -1715,21 +1715,21 @@ pub fn sedan() -> VehicleDef {
         m.skin = true;
         m
     };
-    // Not built (`LID_INNER=1` builds them, a measurement switch): the
-    // rigidifier stands in for the inner stamping as in BeamNG's BX, and these
-    // ladders took 37 % of the bonnet's row at the step's bound from its
-    // sheet (its first mode 13.0 Hz without them against 12.4 with, 19.3
-    // against 17.9 at the BX's rigidifier depth) and one of them pumped
-    // energy at the step's Nyquist rate in the 120 km/h wall
-    // (`vehicle-authoring.md`, "The lids").
-    if std::env::var("LID_INNER").is_ok_and(|v| v == "1") {
-        members.extend([
-            inner("lid_inner_r", 0.14, 0.58, [1.00, 1.04]),
-            inner("lid_inner_f", 0.46, 0.57, [1.03, 1.07]),
-            inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
-            inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
-        ]);
-    }
+    // The lids' inner ladders. The two-tier `sedan` keeps them (its `.truck`
+    // is unchanged; its Low deck top binds to them). The one-tier `sedan1`
+    // leaves them out ([`sedan_one_tier`], `LID_INNER=1` keeps them, a
+    // measurement switch): the rigidifier stands in for the inner stamping
+    // as in BeamNG's BX, and these ladders took 37 % of the bonnet's row at
+    // the step's bound from its sheet (its first mode 13.0 Hz without them
+    // against 12.4 with, 19.3 against 17.9 at the BX's rigidifier depth) and
+    // one of them pumped energy at the step's Nyquist rate in the 120 km/h
+    // wall (`vehicle-authoring.md`, "The lids").
+    members.extend([
+        inner("lid_inner_r", 0.14, 0.58, [1.00, 1.04]),
+        inner("lid_inner_f", 0.46, 0.57, [1.03, 1.07]),
+        inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
+        inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
+    ]);
     // The transverse members a sedan has besides those above (their
     // sections in [`side_sections`]): the front subframe's rear cross
     // member and the rear seat cushion's cross member. (A boot floor cross
@@ -2192,6 +2192,39 @@ pub fn sedan_one_tier() -> VehicleDef {
     d.one_tier = true;
     d.tiered = false;
     d.damping = Some(super::vehicle::DampingRatios::default());
+    // No lid inner ladders (see [`sedan`]; `LID_INNER=1` keeps them).
+    if std::env::var("LID_INNER").map_or(true, |v| v != "1") {
+        d.members.retain(|m| {
+            !matches!(
+                m.name.as_str(),
+                "lid_inner_r" | "lid_inner_f" | "bonnet_inner_1" | "bonnet_inner_3"
+            )
+        });
+    }
+    // The 12 V battery: the 2011 Accord's lead-acid battery weighs 12.4 kg
+    // (NHTSA DOT HS 811 666 §5.16.1). The two-tier package's 18 kg was a
+    // Choice; the 5.6 kg goes to the equipment spread over the body's shell
+    // (the kerb mass is unchanged). Its place on the left of the engine bay
+    // stays a Choice (the report does not give it).
+    for b in d.blocks.iter_mut().filter(|b| b.name == "battery") {
+        b.kg = ACCORD_BATTERY;
+    }
+    // BeamNG's node pattern on the doors (`BEAMNG_NODES`): the doors'
+    // rails' stations at the structural spacing, so they land on the
+    // structural rings (their bays' lane nodes between are contact-only).
+    if super::vehicle::beamng_nodes_parts()
+        .iter()
+        .any(|p| p == "door")
+    {
+        for m in d.members.iter_mut().filter(|m| {
+            m.ride
+                && (m.name.starts_with("door_beam")
+                    || m.name.starts_with("door_belt")
+                    || m.name.starts_with("door_mid"))
+        }) {
+            m.station = super::vehicle::BEAMNG_SPACING;
+        }
+    }
     // The C-pillar (the rear doors' striker pillar) at pole-width stations
     // (A8: an outer member's stations at most a 254 mm pole apart), so its
     // latch meets the pillar's own nodes.
@@ -2828,6 +2861,10 @@ pub const ACCORD_DASH_BEHIND: [f32; 2] = [0.27, 0.30];
 /// its accelerator and brake pedals with their linkages (6.43 kg, §5.13.7):
 /// both bolt to the dash panel on the driver's side.
 pub const ACCORD_DASH_EQUIPMENT: f32 = 3.16 + 6.43;
+
+/// The 2011 Accord's lead-acid 12 V battery (kg), NHTSA DOT HS 811 666
+/// §5.16.1.
+pub const ACCORD_BATTERY: f32 = 12.4;
 
 /// sedan1's cowl and dash panel at the 2011 Accord's place
 /// ([`ACCORD_DASH_BEHIND`]), sections and local masses.

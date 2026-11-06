@@ -200,12 +200,19 @@ pub struct ShowcaseVisual {
     /// Per solver node its surface material ([`node_mat`]): which nodes throw
     /// sparks when they scrape (metal), chips (plastic), nothing (rubber).
     pub node_material: Vec<u8>,
-    /// Texture files (an imported vehicle's colour maps, by file name in its
-    /// folder; `flextex` decodes them) and per vertex its texture's index
-    /// (`u16::MAX` or absent: untextured). Its colour multiplies the
-    /// vertex's (sampled at its `uvs`, v up).
+    /// Texture files (an imported vehicle's maps, by file name in its
+    /// folder; `flextex` decodes them): colour maps (sRGB) and data maps
+    /// (linear: normal, roughness, AO). Per vertex its texture set (an index
+    /// into `tex_sets`; `u16::MAX` or absent: untextured), each set its
+    /// [colour, normal, roughness, AO] files (indices into `textures`, then
+    /// `data_textures` for the other three; `u16::MAX` none). The colour
+    /// multiplies the vertex's (sampled at its `uvs`, v up); the normal map
+    /// (DirectX, green down) tilts its normal in the frame of its `uvs`;
+    /// roughness (red) replaces its material's; AO (red) multiplies its own.
     pub textures: Vec<String>,
+    pub data_textures: Vec<String>,
     pub tex: Vec<u16>,
+    pub tex_sets: Vec<[u16; 4]>,
     /// Per vertex riding a shut line's skin triangle (nodes of two parts):
     /// its index + 1 into the `alt_*` bindings (0 or absent: none), its own
     /// part's frame, computed at build time. It switches to it, for good, the
@@ -578,14 +585,18 @@ pub const BIND_MAX: f32 = 0.3;
 /// wait on nodes there in the skeleton).
 pub const GROUP_BIND_MAX: f32 = 0.45;
 /// The farthest a shut-line vertex's own-part fallback (`ShowcaseVisual::alt`)
-/// may lie from it. The fallback carries the vertex only once its part has
-/// come off or its shut line has torn, when the alternative is a ribbon of
-/// skin stretched back to the car (or the vertex dropped); a BeamNG
-/// flexbody rides its own group's nodes whatever their distance. A door's
-/// belt line and a boot lid's rear edge lie 0.30–0.34 m from three of their
-/// own nodes that frame them (sedan1, 2026-11-05: the panels' edges are
-/// past their last node row). **Choice**: [`GROUP_BIND_MAX`], the reach
-/// already accepted for trim on structure nodes.
+/// may lie from it where the parts never come apart whole (a bumper's
+/// face on the body: past it the shut line tears instead). The fallback
+/// carries the vertex only once its shut line has died or torn, when the
+/// alternative is a ribbon of skin stretched back to the car (or the vertex
+/// dropped). **Choice**: [`GROUP_BIND_MAX`], the reach already accepted for
+/// trim on structure nodes. Across a detachable part's border (a door, a
+/// lid) the fallback is required and may lie anywhere within
+/// [`FRAME_REACH`], as a BeamNG flexbody rides its own group's nodes
+/// whatever their distance: the part comes off whole, so its frame turns
+/// with the vertex. A door's belt line and a boot lid's rear edge lie
+/// 0.30–0.34 m from three of their own nodes (sedan1), the two-tier
+/// sedan's rear door glass at Low resolution farther.
 pub const ALT_BIND_MAX: f32 = GROUP_BIND_MAX;
 /// Node frames are built from a part's this many nearest nodes.
 const FRAME_NODES: usize = 10;
@@ -1150,7 +1161,26 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         coll.insert(u, i);
     }
     let mut side: HashMap<(u32, u32), u32> = HashMap::new();
+    // Only beams that hold their nodes together in tension: a support
+    // (compression only) lets its parts part long before it breaks at its
+    // long bound, and triggers and the records stored as beams (torsion,
+    // L-beams, pressure and aero triangles) never break.
     for (i, b) in sim.beams.iter().enumerate() {
+        use crate::explicit_beams::ExplicitKind as K;
+        if !matches!(
+            b.kind,
+            K::Plain
+                | K::LimitedSpring
+                | K::Rope
+                | K::Shock2
+                | K::JbeamPlain
+                | K::JbeamBounded
+                | K::JbeamAniso
+                | K::JbeamPressured
+                | K::JbeamRope
+        ) {
+            continue;
+        }
         side.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(i as u32);
     }
     // Per part, one solver beam of each of its hinge and latch groups (up
@@ -1715,11 +1745,15 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 let pt = if tp != u16::MAX { Some(tp) } else { part };
                 // Within ALT_BIND_MAX: a one-row part (a bumper's face) has
                 // no frame of its own there, and its shut line tears instead.
-                // A detachable part (a door, a lid) must have one: it comes
-                // off whole, and its edge must go with it.
+                // Across a detachable part's border (a door, a lid) there
+                // must be one, anywhere within FRAME_REACH: the part comes
+                // off whole and its edge goes with it (or stays with the car).
+                let detach =
+                    pt.is_some_and(|q| pb.detachable.contains(&q) || pb.crosses_detachable(q, t));
+                let reach = if detach { FRAME_REACH } else { ALT_BIND_MAX };
                 if let Some((at, _, _, _)) = pt
                     .and_then(|pt| pb.bind_own(pt, m.pos[k], m.nrm[k]))
-                    .filter(|b| b.3 <= ALT_BIND_MAX)
+                    .filter(|b| b.3 <= reach)
                 {
                     let (ac2, an2) = frame_coords(&node_pos, at, m.pos[k], m.nrm[k]);
                     out.alt_nodes.push(at);
@@ -1728,9 +1762,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                     out.alt_rest.push(rest_edges(&node_pos, at));
                     out.alt_tri.push(si);
                     alt = out.alt_nodes.len() as u32;
-                } else if let Some(pt) =
-                    pt.filter(|&q| pb.detachable.contains(&q) || pb.crosses_detachable(q, t))
-                {
+                } else if let Some(pt) = pt.filter(|_| detach) {
                     stranded.push(format!(
                         "{} on {} at {:.2?}",
                         piece.name,
@@ -1799,8 +1831,8 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
         let n = stranded.len();
         stranded.truncate(8);
         return Err(format!(
-            "{n} visual vertices of a detachable part ride a frame across its border with no frame of their own part within ALT_BIND_MAX ({} mm), e.g. {}",
-            ALT_BIND_MAX * 1e3,
+            "{n} visual vertices ride a frame across a detachable part's border with no frame of their own part within FRAME_REACH ({} mm), e.g. {}",
+            FRAME_REACH * 1e3,
             stranded.join(", ")
         ));
     }

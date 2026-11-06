@@ -1210,15 +1210,17 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     let importVis = null;
     const bodyVisual = () => carKind === 'showcase' ? (() => { const b = showcaseBuilt(); b.visual.lod ??= [b.visualLod, b.visualFar]; return b.visual; })()
       : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: qs.get('jbeamMode') === 'native', materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = [r.visualLod, r.visualFar]; loadBodyTextures(r.visual); return r.visual; })());
-    // An imported body's colour maps (decoded in the wasm), uploaded once
-    // they arrive; until then it shades untextured.
+    // An imported body's colour and data maps (normal, roughness, AO; decoded
+    // in the wasm), uploaded once they arrive; until then it shades untextured.
     const loadBodyTextures = (vis) => {
-      if (!importSrc.base || !vis.textures?.length || qs.get('tex') === '0') return;
-      Promise.all(vis.textures.map(async (t) => {
+      if (!importSrc.base || qs.get('tex') === '0') return;
+      const load = (names) => Promise.all(names.map(async (t) => {
         const f = importSrc.list.find((x) => x.split('/').pop().toLowerCase() === t.toLowerCase());
         if (!f) return null;
         try { return decodeTexture(new Uint8Array(await (await fetch(`${importSrc.base}/${f}`)).arrayBuffer()), 1024); } catch { return null; }
-      })).then((layers) => bodyR.setTextures(layers, 1024));
+      }));
+      if (vis.textures?.length) load(vis.textures).then((layers) => bodyR.setTextures(layers, 1024));
+      if (vis.dataTextures?.length) load(vis.dataTextures).then((layers) => bodyR.setDataTextures(layers, 1024));
     };
     const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
     let bodyFor = { layout: null, pos: null }, bodyIds = [];
