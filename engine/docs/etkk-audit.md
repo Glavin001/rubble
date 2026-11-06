@@ -292,3 +292,11 @@ they raised, resolved the same day:
   rise is 0.02 kJ against 1.68 kJ on pressure wheels (`jbeam_accept ledger=1`).
   Per beam, no linear beam gives energy back it had not stored
   (`jbeam_accept beamledger=1`).
+- **The ledger is now complete** (`elastic_energy`: bounded beams across their
+  bounds, ropes, torsion elements and pressure groups' gas; 2026-11-06). Re-run of
+  the harness after it and the `feat/jbeam-features` and surface-contact-r2 merges,
+  wall 56 km/h, largest rise of kinetic + gravitational + stored energy:
+  sedan1 8 J, ETK kr6 1.4 J, kc6 1.1 J, CCF 32.6 J (was 467 J: its tyres' gas),
+  Vertex 0 J (was 27 kJ before the yield fix). The CCF's 32.6 J (0.02 % of its
+  188.8 kJ) is not traced further. The crash numbers moved with the merges (CCF
+  residual crush 208 → 284 mm, sedan1 659 → 657 mm; `vehicle-compare.md`).
