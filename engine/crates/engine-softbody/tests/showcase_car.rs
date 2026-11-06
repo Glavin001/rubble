@@ -3777,41 +3777,58 @@ fn fixed_contact_quantisation_does_no_work() {
     check("51 km/h drag true, then at rest to 12 s", &mut s, 12.0);
 }
 
-/// The most self-contact work and the most vehicle-contact work (normal and
-/// friction) over any tenth of a second of `seconds` of `w`'s steps (the world's
-/// energy ledger, J).
+/// Over any tenth of a second of `seconds` of `w`'s steps (the world's energy
+/// ledger, J): the most self-contact work, the most vehicle-contact work (normal
+/// and friction), the most energy the contacts' position steps stored (§37), and
+/// the most of the three together less 2 % of that tenth's stored energy (the
+/// first-order estimate's error, see [`contacts_do_no_positive_work`]); and the
+/// three together over the run's tenths after its first `settle` seconds.
 fn contact_work_tenths(
     w: &mut engine_softbody::explicit_contact::ExplicitBeamsWorld,
     seconds: f32,
-) -> (f64, f64) {
+    settle: f32,
+) -> [f64; 5] {
     w.enable_ledger();
     let terms = |w: &engine_softbody::explicit_contact::ExplicitBeamsWorld| {
         let l = w.ledger.as_ref().unwrap();
-        (l.w_self_contact, l.w_contact_normal + l.w_contact_friction)
+        [
+            l.w_self_contact,
+            l.w_contact_normal + l.w_contact_friction,
+            l.w_contact_shift,
+        ]
     };
     let tenth = (0.1 / STEP).round() as usize;
-    let (mut most_self, mut most_vc) = (f64::MIN, f64::MIN);
+    let mut most = [f64::MIN, f64::MIN, f64::MIN, f64::MIN, 0.0];
     let mut last = terms(w);
     for k in 1..=(seconds / STEP).round() as usize {
         w.step();
         if k % tenth == 0 {
             let now = terms(w);
-            most_self = most_self.max(now.0 - last.0);
-            most_vc = most_vc.max(now.1 - last.1);
+            let d = [now[0] - last[0], now[1] - last[1], now[2] - last[2]];
+            for j in 0..3 {
+                most[j] = most[j].max(d[j]);
+            }
+            most[3] = most[3].max(d[0] + d[1] + d[2] - 2e-2 * d[2].abs());
+            if k as f32 * STEP > settle + 1e-4 {
+                most[4] += d[0] + d[1] + d[2];
+            }
             last = now;
         }
     }
-    (most_self, most_vc)
+    most
 }
 
 /// The BeamNG profile's self- and vehicle contact never do positive work
 /// (jbeam-semantics-spec.md §37): sedan1 into the wall over the n test's speed
 /// sweep (47–52 and 54–59 km/h, drag on and off, 2 s), the 51 km/h car crushed
 /// and at rest to 12 s, and the 80 km/h T-bone (two sedan1s, the striker's
-/// middle at the door's, 1.5 s). Bound (stated): the world ledger's
-/// self-contact work and vehicle-contact work over any tenth of a second at most
+/// middle at the door's, 1.5 s). Bounds (stated), over any tenth of a second of
+/// the world ledger: self-contact work and vehicle-contact work each at most
 /// +0.01 J (the ledger's rounding; RoR's push did up to +216 J in a tenth of the
-/// sweep and +5 J per tenth at rest for good, §36's note).
+/// sweep and +5 J per tenth at rest for good, §36's note); and with the energy the
+/// penetration's position steps store (−F·Δx, first order) at most +0.01 J beyond
+/// 1 % of that stored energy (the first-order estimate's error: the steps' budget
+/// is each hit's own predicted dissipation).
 #[test]
 fn contacts_do_no_positive_work() {
     use engine_softbody::explicit_contact::ExplicitBeamsWorld;
@@ -3824,14 +3841,22 @@ fn contacts_do_no_positive_work() {
     )
     .unwrap();
     let car = Car::of(&b);
-    let check = |what: &str, mut w: ExplicitBeamsWorld, seconds: f32| {
+    let check = |what: &str, mut w: ExplicitBeamsWorld, seconds: f32, settle: f32| {
         assert!(
             w.vehicles.iter().all(|v| v.dissipative_contact),
             "the BeamNG profile"
         );
-        let (sc, vc) = contact_work_tenths(&mut w, seconds);
+        let [sc, vc, sh, all, rest] = contact_work_tenths(&mut w, seconds, settle);
         eprintln!(
-            "({what}) most work over a tenth: self-contact {sc:+.4} J, vehicle contact {vc:+.4} J"
+            "({what}) most over a tenth: self-contact work {sc:+.4} J, vehicle contact {vc:+.4} J, position steps' stored energy {sh:+.4} J; together {all:+.4} J; together after {settle} s {rest:+.4} J"
+        );
+        assert!(
+            all <= 0.01,
+            "({what}) the contacts with their position steps added {all} J (beyond 2 % of the steps' energy) over a tenth"
+        );
+        assert!(
+            rest <= 0.01,
+            "({what}) the contacts with their position steps added {rest} J after {settle} s"
         );
         assert!(sc <= 0.01, "({what}) self-contact did {sc} J over a tenth");
         assert!(
@@ -3848,6 +3873,7 @@ fn contacts_do_no_positive_work() {
                 &format!("wall {kmh} km/h drag {drag}"),
                 ExplicitBeamsWorld::new(vec![s]),
                 2.0,
+                1.0,
             );
         }
     }
@@ -3856,6 +3882,7 @@ fn contacts_do_no_positive_work() {
         "wall 51 km/h drag true, then at rest to 12 s",
         ExplicitBeamsWorld::new(vec![s]),
         12.0,
+        2.0,
     );
     // The T-bone (as `t_car_to_car_t_bone_at_80_kmh` sets it up): the striker the
     // same car turned 90°, 5 cm off the struck car's side, its middle at the door's.
@@ -3895,6 +3922,7 @@ fn contacts_do_no_positive_work() {
         "T-bone 80 km/h",
         ExplicitBeamsWorld::new(vec![struck, striker]),
         1.5,
+        1.0,
     );
 }
 
@@ -3947,6 +3975,7 @@ fn wall_terms(car: &Car, kmh: f32, drag: bool) {
             l.w_ground_vertical + l.w_ground_horizontal,
             l.w_air,
             l.w_slides,
+            l.w_contact_shift,
         ]
     };
     let mut prev = snap(&w);
@@ -4006,10 +4035,10 @@ fn wall_terms(car: &Car, kmh: f32, drag: bool) {
                 let now = snap(&w);
                 let d: Vec<f64> = now.iter().zip(&prev).map(|(a, b)| a - b).collect();
                 eprintln!(
-                    "(terms {kmh} drag {drag}) to {:.3} s: Δ mean mech {:+8.2} J; ledger Δ mech {:+9.2} (kin {:+9.2}, elastic {:+9.2}); work beams {:+9.2} (dissipation {:+8.2}), self-contact {:+8.3}, ground {:+8.2}, air {:+8.2}, slides {:+6.2}; quantisation {:+.5}",
+                    "(terms {kmh} drag {drag}) to {:.3} s: Δ mean mech {:+8.2} J; ledger Δ mech {:+9.2} (kin {:+9.2}, elastic {:+9.2}); work beams {:+9.2} (dissipation {:+8.2}), self-contact {:+8.3}, ground {:+8.2}, air {:+8.2}, slides {:+6.2}, shift {:+8.3}; quantisation {:+.5}",
                     step as f32 * STEP,
                     mean - prev_mean,
-                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], wq
+                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], wq
                 );
                 // (`N_TOP=k`: the k nodes whose self-contact did the most work
                 // over the tenth.)
@@ -5363,6 +5392,7 @@ fn t_car_to_car_t_bone_at_80_kmh() {
     )
     .unwrap();
     striker.roll_tyres(v);
+    rule_switches(&mut striker);
     let map = solver_beams(&struck, &b);
     let groups: Vec<(&str, Vec<usize>)> = b
         .hardware

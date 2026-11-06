@@ -533,6 +533,8 @@ impl ExplicitUpload {
         // Anti-clip (jbeam-semantics-spec.md §36): its side memory names a
         // triangle by owner vehicle (10 bits) and index (20 bits).
         let any_anti = vehicles.iter().any(|v| v.anti_clip);
+        // Dissipative contact's position steps (§37) on every vehicle of the upload.
+        let any_shift = vehicles.iter().any(|v| v.dissipative_contact);
         if any_anti {
             assert!(
                 nv < engine_softbody::explicit_contact::CLIP_SELF as usize,
@@ -705,7 +707,8 @@ impl ExplicitUpload {
                 | (any_anti as u32) << 12
                 | (!v.plastic_strength_drop as u32) << 13
                 | (v.exact_friction as u32) << 14
-                | (v.dissipative_contact as u32) << 15;
+                | (v.dissipative_contact as u32) << 15
+                | (any_shift as u32) << 16;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1416,9 +1419,20 @@ impl ExplicitUpload {
         };
         // Self-collision's two-body rule (jbeam-semantics-spec.md §36): per node its
         // hit count this step (cleared by its node phase).
-        let self_split = if vehicles.iter().any(|v| v.two_body_contact) {
+        // Dissipative contact's position steps (§37): per node 3 words in SHIFT_FIXED
+        // units, right after the counts (the kernel's shiftAt: selfSplit +
+        // totalNodes), carried over from the CPU state.
+        let self_split = if vehicles.iter().any(|v| v.two_body_contact) || any_shift {
             let at = acc_init.len() as u32;
             acc_init.extend(std::iter::repeat_n(0, total_nodes));
+            if any_shift {
+                for v in vehicles {
+                    for i in 0..v.nodes.len() {
+                        let w = v.contact_shift.get(i).copied().unwrap_or([0; 3]);
+                        acc_init.extend(w);
+                    }
+                }
+            }
             at
         } else {
             0
