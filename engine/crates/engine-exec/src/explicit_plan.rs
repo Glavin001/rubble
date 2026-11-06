@@ -282,6 +282,7 @@ const L512: (&str, &str) = ("EB_LANES", "512");
 const AERO: (&str, &str) = ("EB_AERO", "1");
 const SOLO: (&str, &str) = ("EB_VV_SOLO", "1");
 const GROUPS: (&str, &str) = ("EB_VV_GROUPS", "1");
+const NOSURF: (&str, &str) = ("EB_NO_SURFACE", "1");
 
 const fn frame(name: &'static str, defines: &'static [(&'static str, &'static str)]) -> Module {
     Module {
@@ -319,6 +320,19 @@ pub const MODULES: &[Module] = &[
         "explicit_beams_contact_aero_wide",
         &[W, L512, AERO, SOLO, GROUPS],
     ),
+    // The same twelve without surface contact (Kernel::module_for).
+    frame("explicit_beams_nosurf", &[W, NOSURF]),
+    frame("explicit_beams_wide_nosurf", &[W, L512, NOSURF]),
+    frame("explicit_beams_aero_nosurf", &[W, L256, AERO, NOSURF]),
+    frame("explicit_beams_aero_wide_nosurf", &[W, L512, AERO, NOSURF]),
+    frame("explicit_beams_solo_nosurf", &[W, L256, SOLO, NOSURF]),
+    frame("explicit_beams_solo_wide_nosurf", &[W, L512, SOLO, NOSURF]),
+    frame("explicit_beams_solo_aero_nosurf", &[W, L256, AERO, SOLO, NOSURF]),
+    frame("explicit_beams_solo_aero_wide_nosurf", &[W, L512, AERO, SOLO, NOSURF]),
+    frame("explicit_beams_contact_nosurf", &[W, L256, SOLO, GROUPS, NOSURF]),
+    frame("explicit_beams_contact_wide_nosurf", &[W, L512, SOLO, GROUPS, NOSURF]),
+    frame("explicit_beams_contact_aero_nosurf", &[W, L256, AERO, SOLO, GROUPS, NOSURF]),
+    frame("explicit_beams_contact_aero_wide_nosurf", &[W, L512, AERO, SOLO, GROUPS, NOSURF]),
     pass(VV_PASSES[0]),
     pass(VV_PASSES[1]),
     pass(VV_PASSES[2]),
@@ -389,6 +403,23 @@ impl Kernel {
             Kernel::Vv(i) => VV_PASSES[i],
             Kernel::Wide(i) => WIDE_PASSES[i],
             Kernel::Sleep => SLEEP_LIST,
+        }
+    }
+
+    /// [`Self::module`] for a fleet with or without surface contact: without it the
+    /// frame kernels run their `_nosurf` twin (`EB_NO_SURFACE`: the surface pass
+    /// compiled out; with no vehicle flagged it would return at once).
+    pub fn module_for(self, aero: bool, lanes: u32, surface: bool) -> &'static str {
+        let name = self.module(aero, lanes);
+        if surface {
+            return name;
+        }
+        match self {
+            Kernel::Frame | Kernel::Solo | Kernel::Contact => MODULES
+                .iter()
+                .find(|m| m.name.strip_suffix("_nosurf") == Some(name))
+                .map_or(name, |m| m.name),
+            _ => name,
         }
     }
 
@@ -578,6 +609,9 @@ pub struct ExplicitLayout {
     pub vv_tri_base: u32,
     /// The fleet runs the aero modules (`EB_AERO`).
     pub aero: bool,
+    /// Some vehicle has surface contact: the frame modules with the surface pass
+    /// (else their `_nosurf` twins, [`Kernel::module_for`]).
+    pub surface: bool,
     /// A vehicle has more than [`WIDE_BEAMS`] beams.
     pub big: bool,
     /// Lanes per vehicle workgroup of the frame modules (256 or 512).
@@ -1910,6 +1944,7 @@ impl ExplicitUpload {
             sleep: sleep_layout,
             vv_tri_base,
             aero,
+            surface: any_surface,
             big,
             lanes,
             wide_ok,
@@ -2740,8 +2775,12 @@ mod tests {
         for k in ks {
             for aero in [false, true] {
                 for lanes in [256, 512] {
-                    let m = module(k.module(aero, lanes)).unwrap_or_else(|| panic!("{k:?}"));
-                    assert_eq!(m.entry, k.entry());
+                    for surface in [false, true] {
+                        let m = module(k.module_for(aero, lanes, surface)).unwrap_or_else(|| panic!("{k:?}"));
+                        assert_eq!(m.entry, k.entry());
+                        let frame = matches!(k, Kernel::Frame | Kernel::Solo | Kernel::Contact);
+                        assert_eq!(m.name.ends_with("_nosurf"), frame && !surface, "{k:?}");
+                    }
                 }
             }
         }

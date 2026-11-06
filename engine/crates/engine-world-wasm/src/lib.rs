@@ -149,8 +149,13 @@ async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), 
 /// kernel compiling for longer than the GPU watchdog (the explicit contact frame:
 /// about a minute cold on Metal) kills the GPU process in a windowed browser.
 /// A spec this cannot express, or a compile the browser rejects, is left to the
-/// synchronous creation, which reports it as before.
-pub(crate) async fn warm_pipelines(device: &wgpu::Device, specs: &[engine_webgpu::ComputeSpec]) {
+/// synchronous creation, which reports it as before. `done(module, ms)` hears each
+/// pipeline as it finishes (in completion order; `ms` since the compiles started).
+pub(crate) async fn warm_pipelines(
+    device: &wgpu::Device,
+    specs: &[engine_webgpu::ComputeSpec],
+    done: std::rc::Rc<dyn Fn(&str, f64)>,
+) {
     #[cfg(target_arch = "wasm32")]
     {
         use js_sys::{Array, Function, Object, Promise, Reflect};
@@ -239,10 +244,24 @@ pub(crate) async fn warm_pipelines(device: &wgpu::Device, specs: &[engine_webgpu
                 call(gpu, "createComputePipelineAsync", &desc)?.dyn_into()?,
             ))
         };
+        let now = || js_sys::Date::now();
+        let t0 = now();
         let mut pending = Vec::new();
         for s in specs {
             match start(s) {
-                Ok(Some(p)) => pending.push((s.label, wasm_bindgen_futures::JsFuture::from(p))),
+                Ok(Some(p)) => {
+                    // Each pipeline's completion, as it lands (settled either way).
+                    let (done, module) = (done.clone(), s.module);
+                    let hear = wasm_bindgen::closure::Closure::once_into_js(move |_: JsValue| {
+                        done(module, now() - t0);
+                    });
+                    // p.then(hear, hear): one of the two runs; the derived promise only
+                    // reports.
+                    if let Ok(then) = Reflect::get(&p, &"then".into()).and_then(|f| f.dyn_into::<Function>()) {
+                        let _ = then.call2(&p, &hear, &hear);
+                    }
+                    pending.push((s.label, wasm_bindgen_futures::JsFuture::from(p)));
+                }
                 Ok(None) => {}
                 Err(e) => web_sys::console::warn_2(
                     &format!("pipeline warm-up skipped ({})", s.label).into(),
@@ -263,7 +282,7 @@ pub(crate) async fn warm_pipelines(device: &wgpu::Device, specs: &[engine_webgpu
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = (device, specs);
+    let _ = (device, specs, done);
 }
 
 /// The limits a world's buffers and kernels run into, as one line.

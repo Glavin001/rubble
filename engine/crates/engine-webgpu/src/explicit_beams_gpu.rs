@@ -265,6 +265,7 @@ fn module_wgsl(name: &str) -> &'static str {
         _ => EXPLICIT_BEAMS_VV_PASSES
             .iter()
             .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
+            .chain(crate::EXPLICIT_BEAMS_NOSURF.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| *w)
             .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
@@ -484,17 +485,19 @@ impl ExplicitBeamsGpu {
         coupling: Option<CouplingCapacity>,
     ) -> Vec<crate::ComputeSpec> {
         let layout = ExplicitUpload::new(vehicles, coupling).layout;
-        let (aero, lanes) = (layout.aero, layout.lanes);
+        let (aero, lanes, surface) = (layout.aero, layout.lanes, layout.surface);
         let u = crate::uniformize_workgroup_lanes;
         let mut specs = vec![crate::ComputeSpec {
             label: "explicit_beams_frame",
-            wgsl: u(module_wgsl(Kernel::Frame.module(aero, lanes))),
+            module: Kernel::Frame.module_for(aero, lanes, surface),
+            wgsl: u(module_wgsl(Kernel::Frame.module_for(aero, lanes, surface))),
             entry: plan::FRAME_ENTRY,
             layout: None,
         }];
         if layout.wide_ok {
             specs.extend(plan::WIDE_PASSES.iter().map(|&entry| crate::ComputeSpec {
                 label: entry,
+                module: entry,
                 wgsl: u(module_wgsl(entry)),
                 entry,
                 layout: Some(wide_entries()),
@@ -503,6 +506,7 @@ impl ExplicitBeamsGpu {
         if vehicles.len() > 1 {
             specs.extend(plan::VV_PASSES.iter().chain([&plan::SLEEP_LIST]).map(|&entry| crate::ComputeSpec {
                 label: entry,
+                module: entry,
                 wgsl: u(module_wgsl(entry)),
                 entry,
                 layout: Some(contact_entries(true)),
@@ -510,7 +514,8 @@ impl ExplicitBeamsGpu {
             for kernel in [Kernel::Contact, Kernel::Solo] {
                 specs.push(crate::ComputeSpec {
                     label: plan::FRAME_ENTRY,
-                    wgsl: u(module_wgsl(kernel.module(aero, lanes))),
+                    module: kernel.module_for(aero, lanes, surface),
+                    wgsl: u(module_wgsl(kernel.module_for(aero, lanes, surface))),
                     entry: plan::FRAME_ENTRY,
                     layout: Some(contact_entries(false)),
                 });
@@ -547,7 +552,7 @@ impl ExplicitBeamsGpu {
         let (aero, big, lanes) = (layout.aero, layout.big, layout.lanes);
         // Large vehicles get twice the lanes (more loads in flight per step), a
         // small fleet 512 (frame_lanes).
-        let frame_module = Kernel::Frame.module(aero, lanes);
+        let frame_module = Kernel::Frame.module_for(aero, lanes, layout.surface);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams"),
             source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(frame_module)).into()),
@@ -618,8 +623,8 @@ impl ExplicitBeamsGpu {
             device,
             &buffers,
             (
-                module_wgsl(Kernel::Contact.module(aero, lanes)),
-                module_wgsl(Kernel::Solo.module(aero, lanes)),
+                module_wgsl(Kernel::Contact.module_for(aero, lanes, layout.surface)),
+                module_wgsl(Kernel::Solo.module_for(aero, lanes, layout.surface)),
             ),
             &acc,
             (layout.status.base, layout.status.cap),
@@ -1432,6 +1437,10 @@ impl ExplicitBeamsGpu {
         if variant == KernelVariant::Current || self.alts.iter().any(|(v, _)| *v == variant) {
             return;
         }
+        assert!(
+            !(variant == KernelVariant::CurrentDet && self.layout.surface),
+            "explicit beams: the EB_DET_HITS build has no surface pass (EB_NO_SURFACE): a fleet without surface contact only"
+        );
         let probe = variant == KernelVariant::BaselineProbe;
         if probe && self.probe.is_none() {
             let words = 1 + 2 * self.layout.total[0] as u64;
@@ -2170,6 +2179,9 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     ];
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));
+    }
+    for (n, w) in crate::EXPLICIT_BEAMS_NOSURF.iter() {
+        out.push((n.to_string(), "explicit_beams_frame", u(w)));
     }
     out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
     out

@@ -61,6 +61,23 @@ pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/so
 /// ([`ExplicitBeamsGpu`]), as `generated/wgsl/explicit_beams.wgsl`.
 pub const EXPLICIT_BEAMS_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams.wgsl"));
+/// The twelve frame modules without surface contact (`EB_NO_SURFACE`, name
+/// `<module>_nosurf`; `engine_exec::explicit_plan::Kernel::module_for`): the host runs
+/// them when no vehicle of the upload has surface contact.
+pub const EXPLICIT_BEAMS_NOSURF: [(&str, &str); 12] = [
+    ("explicit_beams_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_nosurf.wgsl"))),
+    ("explicit_beams_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nosurf.wgsl"))),
+    ("explicit_beams_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_nosurf.wgsl"))),
+    ("explicit_beams_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide_nosurf.wgsl"))),
+    ("explicit_beams_solo_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_nosurf.wgsl"))),
+    ("explicit_beams_solo_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_wide_nosurf.wgsl"))),
+    ("explicit_beams_solo_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_nosurf.wgsl"))),
+    ("explicit_beams_solo_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide_nosurf.wgsl"))),
+    ("explicit_beams_contact_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_nosurf.wgsl"))),
+    ("explicit_beams_contact_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_wide_nosurf.wgsl"))),
+    ("explicit_beams_contact_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_nosurf.wgsl"))),
+    ("explicit_beams_contact_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide_nosurf.wgsl"))),
+];
 /// The build's WGSL directory (native tests read the frozen baseline kernel,
 /// `explicit_baseline_*.wgsl`, from it at run time).
 #[doc(hidden)]

@@ -128,7 +128,7 @@ impl CudaExplicitBeams {
         }
         let mut kernels = HashMap::new();
         for k in wanted {
-            let name = k.module(layout.aero, layout.lanes);
+            let name = k.module_for(layout.aero, layout.lanes, layout.surface);
             let t = CUDA_EXPLICIT_KERNELS
                 .iter()
                 .find(|t| t.name == name)

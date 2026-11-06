@@ -110,7 +110,7 @@ impl MetalExplicitBeams {
         }
         let mut pipes = HashMap::new();
         for k in kernels {
-            let name = k.module(layout.aero, layout.lanes);
+            let name = k.module_for(layout.aero, layout.lanes, layout.surface);
             let t = EXPLICIT_KERNELS
                 .iter()
                 .find(|t| t.name == name)

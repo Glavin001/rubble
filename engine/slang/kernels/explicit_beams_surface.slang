@@ -1109,7 +1109,14 @@ void surfPairApply(uint v, uint p, float3 origin, float r, uint4 r0, uint4 r1, u
 }
 
 // Whether any vehicle of the upload has surface contact (uniform: a parameter).
+// A module built with EB_NO_SURFACE (the host picks it when no vehicle of the upload
+// has surface contact, so gP.surfSplit is 0 and the pass would return at once) has
+// none of the pass: the browser compiles the kernel without it.
+#ifdef EB_NO_SURFACE
+uint surfaceOn() { return 0u; }
+#else
 uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
+#endif
 
 // Step's surface pass of vehicle v (uniform `on`), after its self-collision and
 // before its slide nodes (parity: the step's): the barrier, the snapshot (and the casts'
@@ -1121,6 +1128,10 @@ uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 groupshared uint gsUniformSurf;
 void surfaceStep(uint v, uint lane, uint on, uint parity)
 {
+#ifdef EB_NO_SURFACE
+    // Compiled out (on is 0 in this module's uploads: the pass returns here).
+    return;
+#else
 #ifdef EB_ABLATE
     // Measurement only (time): 2^27 the whole pass and its barriers.
     if ((gP.ablate & 134217728u) != 0u) return;
@@ -1228,4 +1239,5 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
         }
     }
     if (lane == 0u && mine) gsHit = 1u;
+#endif
 }

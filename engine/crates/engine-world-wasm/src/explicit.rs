@@ -770,7 +770,8 @@ impl WebWorld {
     /// (`createComputePipelineAsync`, see `crate::warm_pipelines`): a promise of
     /// the `ExplicitSim`. Load with this; the synchronous call is then a cache hit
     /// (a restart may use it). `progress(stage)` (optional) hears each stage:
-    /// `"spawn"`, then `"compile N"` with the number of kernels compiling.
+    /// `"spawn"`, then `"compile N"` with the number of kernels compiling, then
+    /// `"compiled <module> <ms>"` as each one finishes (ms since the compiles began).
     #[wasm_bindgen(js_name = explicitSimAsync)]
     pub fn explicit_sim_async(
         &self,
@@ -780,17 +781,28 @@ impl WebWorld {
         let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
         let (device, queue) = (self.world.device().clone(), self.world.queue().clone());
         Ok(wasm_bindgen_futures::future_to_promise(async move {
-            let say = |stage: String| {
-                if let Some(f) = &progress {
-                    let _ = f.call1(&JsValue::NULL, &stage.into());
+            let progress = std::rc::Rc::new(progress);
+            let say = {
+                let progress = progress.clone();
+                move |stage: String| {
+                    if let Some(f) = progress.as_ref() {
+                        let _ = f.call1(&JsValue::NULL, &stage.into());
+                    }
                 }
             };
+            let say = std::rc::Rc::new(say);
             say("spawn".into());
             let spawn = ExplicitSim::spawn(&spec).map_err(err)?;
             let sims: Vec<ExplicitBeams> = spawn.vehicles.iter().map(|v| v.sim.clone()).collect();
             let specs = ExplicitBeamsGpu::compute_specs(&sims, None);
             say(format!("compile {}", specs.len()));
-            crate::warm_pipelines(&device, &specs).await;
+            let heard = say.clone();
+            crate::warm_pipelines(
+                &device,
+                &specs,
+                std::rc::Rc::new(move |module: &str, ms: f64| heard(format!("compiled {module} {ms:.0}"))),
+            )
+            .await;
             ExplicitSim::assemble(&device, &queue, &spec, spawn)
                 .map(JsValue::from)
                 .map_err(err)

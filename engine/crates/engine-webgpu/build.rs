@@ -656,6 +656,44 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         )?;
         explicit_post(&out)?;
     }
+    // The twelve frame modules again without surface contact (EB_NO_SURFACE, the
+    // `_nosurf` names; engine_exec::explicit_plan::Kernel::module_for): the host runs
+    // them when no vehicle of the upload has it, so a browser's first load compiles
+    // the frame kernels without the surface pass (feature_query and the pair path).
+    const W: (&str, &str) = ("ENGINE_WGSL", "1");
+    const L256: (&str, &str) = ("EB_LANES", "256");
+    const L512: (&str, &str) = ("EB_LANES", "512");
+    const AERO: (&str, &str) = ("EB_AERO", "1");
+    const SOLO: (&str, &str) = ("EB_VV_SOLO", "1");
+    const GROUPS: (&str, &str) = ("EB_VV_GROUPS", "1");
+    let frames: [(&str, &[(&str, &str)]); 12] = [
+        ("explicit_beams", &[W]),
+        ("explicit_beams_wide", &[W, L512]),
+        ("explicit_beams_aero", &[W, L256, AERO]),
+        ("explicit_beams_aero_wide", &[W, L512, AERO]),
+        ("explicit_beams_solo", &[W, L256, SOLO]),
+        ("explicit_beams_solo_wide", &[W, L512, SOLO]),
+        ("explicit_beams_solo_aero", &[W, L256, AERO, SOLO]),
+        ("explicit_beams_solo_aero_wide", &[W, L512, AERO, SOLO]),
+        ("explicit_beams_contact", &[W, L256, SOLO, GROUPS]),
+        ("explicit_beams_contact_wide", &[W, L512, SOLO, GROUPS]),
+        ("explicit_beams_contact_aero", &[W, L256, AERO, SOLO, GROUPS]),
+        ("explicit_beams_contact_aero_wide", &[W, L512, AERO, SOLO, GROUPS]),
+    ];
+    for (name, defines) in frames {
+        let out = wgsl_dir.join(format!("{name}_nosurf.wgsl"));
+        let mut d = defines.to_vec();
+        d.push(("EB_NO_SURFACE", "1"));
+        compile_with_defines(
+            &explicit_beams_source(slang_root),
+            "explicit_beams_frame",
+            SlangTarget::Wgsl,
+            &out,
+            &[],
+            &d,
+        )?;
+        explicit_post(&out)?;
+    }
     // The frozen baseline of the explicit-beams kernel (a test oracle,
     // `explicit_beams_baseline.slang`): every frame-entry variant and the plan passes
     // as `wgsl/explicit_baseline_*.wgsl`, plus the race-probe variants (`EB_RACE_PROBE`).
@@ -857,6 +895,13 @@ fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
                 }
                 if let Some(x) = extra {
                     d.push((x, "1"));
+                }
+                // The current kernel's deterministic-hits build serves the bitwise
+                // suite's fleets, which have no surface contact: without the surface
+                // pass (EB_NO_SURFACE), as the modules those fleets ship with; native
+                // Metal (naga) runs out of threadgroup slots in a contact module with it.
+                if prefix == "explicit_det_" {
+                    d.push(("EB_NO_SURFACE", "1"));
                 }
                 jobs.push((src.clone(), format!("{prefix}frame{tag}"), "explicit_beams_frame".into(), d.clone()));
                 d.push(("EB_VV_SOLO", "1"));

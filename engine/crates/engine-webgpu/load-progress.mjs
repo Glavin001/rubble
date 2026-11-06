@@ -4,6 +4,7 @@
 //
 //   const loading = createLoading();      // shows at once
 //   loading.stage('Building the car');    // ends the previous stage
+//   loading.item('module', ms, label);    // a part of the stage done (listed under it)
 //   await loading.paint();                // let the card draw before blocking work
 //   loading.done();                       // first frame on screen: hide
 //   showFatal({ title, detail, hint });   // the device is gone: say why, offer a reload
@@ -75,6 +76,17 @@ export function createLoading({ title = 'Loading', note = '' } = {}) {
       stageEl.textContent = name;
       tick();
       console.info(`[loading] ${name} (at ${secs(current.at - t0)})`);
+    },
+    /** Within the current stage: part `name` finished `ms` after the stage began
+     * (a module compiled), listed under it; `label` (optional) renames the stage. */
+    item(name, ms, label) {
+      const li = document.createElement('li');
+      li.innerHTML = '<span></span><span></span>';
+      li.firstChild.textContent = `  · ${name}`;
+      li.lastChild.textContent = secs(ms);
+      listEl.appendChild(li);
+      if (label && current) { current.name = label; stageEl.textContent = label; }
+      console.info(`[loading]   ${name} ${secs(ms)}`);
     },
     /** Resolves once the card has been drawn (before blocking work), or after
      * 100 ms in a hidden or occluded tab, where no frame comes. */

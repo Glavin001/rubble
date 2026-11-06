@@ -16,6 +16,8 @@
 #[derive(Clone, Debug)]
 pub struct ComputeSpec {
     pub label: &'static str,
+    /// The module's name (a loading card's progress line).
+    pub module: &'static str,
     /// The WGSL exactly as passed to `create_shader_module`.
     pub wgsl: String,
     pub entry: &'static str,

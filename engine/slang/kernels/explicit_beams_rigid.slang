@@ -314,7 +314,11 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
 {
     // §38.4 (explicit_beams_surface.slang FLAG_SURFACE): a fast proxy pushes the nodes
     // inside it out along its motion relative to them (CPU ProxySet::node_contact_with).
+    #ifdef EB_NO_SURFACE
+    bool fastSide = false; // gP.surfSplit is 0 in this module's uploads
+#else
     bool fastSide = (gStatic[v * 4u + 3u].x & 131072u) != 0u && gP.surfSplit != 0u;
+#endif
     uint4 hdr = gMisc[cplBase(v)];
     uint acc = cplAcc(v);
     uint nb = cplB();
