@@ -2201,6 +2201,14 @@ pub fn sedan_one_tier() -> VehicleDef {
             )
         });
     }
+    // The 12 V battery: the 2011 Accord's lead-acid battery weighs 12.4 kg
+    // (NHTSA DOT HS 811 666 §5.16.1). The two-tier package's 18 kg was a
+    // Choice; the 5.6 kg goes to the equipment spread over the body's shell
+    // (the kerb mass is unchanged). Its place on the left of the engine bay
+    // stays a Choice (the report does not give it).
+    for b in d.blocks.iter_mut().filter(|b| b.name == "battery") {
+        b.kg = ACCORD_BATTERY;
+    }
     // BeamNG's node pattern on the doors (`BEAMNG_NODES`): the doors'
     // rails' stations at the structural spacing, so they land on the
     // structural rings (their bays' lane nodes between are contact-only).
@@ -2853,6 +2861,10 @@ pub const ACCORD_DASH_BEHIND: [f32; 2] = [0.27, 0.30];
 /// its accelerator and brake pedals with their linkages (6.43 kg, §5.13.7):
 /// both bolt to the dash panel on the driver's side.
 pub const ACCORD_DASH_EQUIPMENT: f32 = 3.16 + 6.43;
+
+/// The 2011 Accord's lead-acid 12 V battery (kg), NHTSA DOT HS 811 666
+/// §5.16.1.
+pub const ACCORD_BATTERY: f32 = 12.4;
 
 /// sedan1's cowl and dash panel at the 2011 Accord's place
 /// ([`ACCORD_DASH_BEHIND`]), sections and local masses.

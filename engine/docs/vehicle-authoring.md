@@ -2619,6 +2619,110 @@ merge with or without the pattern. Two body beams near (0.01, 1.42, 2.23)
 are softer than the bound requires, with rows 0.947 just under the test's
 0.95.
 
+### The node pattern's damping, and the body's (2026-11-06, later)
+
+**Decision: built, still not the default.** BX damping on the door's nodes
+restores the ripple, but it pushes `g`'s door-off past its band. The body's
+re-stationing is not built yet.
+
+**The battery and the centre of mass across the car.**
+- sedan1's battery is the Accord's lead-acid 12.4 kg (DOT HS 811 666
+  §5.16.1). It was 18 kg, a Choice; the 5.6 kg goes to the spread equipment.
+- The mass test splits the centre of mass across the car (+37.6 mm, measured):
+  - **+36.6 mm** is the placed masses' first moment: the driver (75 kg, part
+    of the kerb mass by the definition's choice), the dash equipment on the
+    driver's half, and the battery;
+  - **+1.1 mm** is the mirror-symmetric rest.
+- The test asserts both, to 2 mm.
+- With the change, the rest of the test (the step's bound) passes on the
+  lattice.
+
+**How the BX damps its light nodes** (`light_node_damping`, Σc/m per node on
+Rubble's solver, nodes split at the part's median mass):
+
+| Part | BX light / heavy | sedan1 lattice light / heavy | sedan1 pattern (contact / structural) |
+|---|---|---|---|
+| door | 1,271 / 590 /s (beam ζ 0.040 / 0.039) | 637 / 458 /s | 786 / 480 /s |
+| bonnet (hood) | 936 /s | 854 / 826 /s | |
+| body | 735 / 787 /s (ζ 0.041 / 0.027) | 424 / 383 /s | |
+
+The BX damps a light node about twice as hard per kilogram as a heavy one.
+Its beamDamp is per beam, not per kilogram. Every class of sedan1's nodes is
+below the BX's rate.
+
+**Built** (`bx_node_damping`, after the bound):
+- Each node of a patterned part is raised to the BX's rate for its class
+  through its own body dashpot. Contact-only nodes take the light rate and
+  structural nodes the heavy one.
+- Both ends of each dashpot stay within 0.9 × `C_RATIO`.
+- The bound is then recapped.
+- Switches: `BX_NODE_DAMPING=0` leaves it out; `=contact` damps the contact
+  nodes only; `BX_BODY_DAMPING=1` does the body too, with or without the
+  pattern.
+
+| Medium | Lattice (battery 12.4) | Doors' pattern, no BX damping | Doors' pattern, BX damping | Contact nodes only | Lattice + BX body damping |
+|---|---|---|---|---|---|
+| door panel ζ, front / rear | 0.028 / 0.033 | 0.018 / 0.009 | 0.025 / 0.016 | 0.018 / 0.008 | |
+| wall ripple: doors (fl, fr, rl, rr), body (≤ 1 mm) | 3.5, 4.8, 4.6, 3.6; 4.8 | | ≤1, 1.4, 3.5, 5.1; 1.6 | 2.7, 1.7, 7.4, 6.5; 4.3 | |
+| crash invariants (of 20) | 12 | | **13** (head-on rear body RMS 4.5 mm passes) | 12 | |
+| p (≥ 10.0 / 15.6 / 28.4 kN) | 9.8 / 12.6 / 26.2 | 11.0 / 13.9 / 24.2 | 11.1 / 13.9 / 22.8 | 10.9 / 13.9 / 26.9 | 9.8 / 10.9 / 19.8 |
+| o (297–445 mm) | 286 | 299 | 282 | 289 | 287 |
+| g door off (≤ 83.4 kN, the summed strengths) | | 64.5 | **89.4 (fails)** | 75.6 | 60.8 (fails) |
+| q (4.48–5.32 ×) | | | 4.92 | | **3.49** |
+| n max crush (380–580 mm) | 646 | 647 | 640 | | **583** |
+| n b1 (22.9–39.2) | 21.8 | 21.9 | 21.8 | | **24.3** |
+| n t_m (63–76 ms) | 78.8 | 78.9 | 78.8 | | **71.9** |
+| n e (0.13–0.20, 8-run mean) | 0.132 | 0.128 | 0.132 | | 0.147 |
+| a, b, h, t, r, s | | | pass | | |
+
+- **The doors.** The structural nodes need the BX's rate as well as the
+  contact nodes: damping the contact nodes alone leaves the rear doors ringing
+  (7.4 mm).
+  - With both, the ripple is better than the lattice's on the whole and
+    invariants gain one.
+  - But the door then holds to 89.4 kN in `g`, past the summed strengths.
+  - So it is not the default.
+  - Open: why the door's own dashpots raise its pull-off. The hardware is
+    sized before damping, so a dashpot should not share the pull.
+- **The bonnet's n restitution** on the 8-run mean is 0.128–0.132, at the band
+  edge in every build. It is not the pattern's.
+- **The body's damping rate (a finding).** At the BX's rate the frontal comes
+  into its bands: max crush 583 mm (the edge), b1, t_m, e and the peak.
+  - The damping takes the step's row from the stiffness: q falls to 3.49 ×,
+    p to 19.8 kN and g fails.
+  - It is a trade the bound sets; measured only.
+
+**The body's re-stationing (built, measured, no gain).** `beamng_restation`,
+with `body` in `BEAMNG_NODES`; `BEAMNG_RESTATION=0` turns it off.
+- **How.** On each along-the-car segment of a body member's path, its stations
+  at its own spacing each move to the nearest structural ring as a path vertex
+  (a path vertex is always a station). The count is kept.
+- **Snapping.** Re-stationed members snap onto structural nodes only. A member
+  that is not re-stationed (a pillar across the rings) may still snap onto a
+  contact candidate, which then turns structural.
+
+Medium, `BEAMNG_NODES=door,bonnet,body`:
+
+| Body (structural row) | Lattice | Pattern, members as they were | Stations inserted at every ring | Stations moved to rings (built) |
+|---|---|---|---|---|
+| structural + contact nodes | 592 | 513 + 79 | 582 + 79 | 515 + 87 |
+| mass p50 | 1.01 kg | 1.13 kg | 0.98 kg | 1.13 kg |
+| L p50 | 0.36 m | 0.40 m | 0.36 m | 0.40 m |
+| k·L p50 (BX 7.92e5 N) | 2.14e5 N | 2.13e5 | 1.73e5 | 2.11e5 |
+
+- **Why it gains nothing.** The body members' stations are already at least
+  0.5 m apart: the default truss spacing is 1.0 m and crush members' 0.6 m. So
+  re-stationing only moves them.
+- **What limits the body's k·L.** It is the members' box trusses: four nodes a
+  station, about 15 beam ends a node, 1 kg nodes. The shell lattice is not
+  the limit.
+- **The BX's body is 145 nodes carrying 329 kg (2.5 kg median).** Ours is
+  about 600.
+- **What would close it.** Fewer, heavier body nodes: ladders where boxes are
+  now, members sharing one node per joint, and their outer chords on the
+  shell's structural nodes. That is the one-tier design's member redesign
+  ("Proposed: one tier"), not a node pattern on the shell.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.

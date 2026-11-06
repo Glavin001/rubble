@@ -354,10 +354,13 @@ Surface boxSurface()
     return s;
 }
 
-// Surface s as vehicle v's friction law takes it: exact with FLAG_EXACT_FRICTION.
+// Surface s as vehicle v's friction law takes it: exact with FLAG_EXACT_FRICTION;
+// dissipative (§37: the node pass's ground, box and shape contacts too) with
+// FLAG_DISSIPATIVE.
 Surface surfaceV(Surface s, uint v)
 {
     s.exact = (gStatic[v * 4u + 3u].x & FLAG_EXACT_FRICTION) != 0u ? 1u : 0u;
+    s.dissipative = (gStatic[v * 4u + 3u].x & FLAG_DISSIPATIVE) != 0u ? 1u : 0u;
     return s;
 }
 
@@ -538,10 +541,25 @@ float3 noPositiveWork(float3 c, float r, float3 n, float3 f, float3 v, float m)
     float a0 = nf(sdot(rn, u) + smul(sdot(rn, rn), hm));
     float a1 = nf(sdot(t, u) + smul(smul(2.0, hm), sdot(rn, t)));
     float b = smul(sdot(t, t), hm);
-    if (nf(nf(a0 + a1) + b) <= 0.0 || b <= 0.0) return c;
-    float disc = nf(smul(a1, a1) - smul(smul(4.0, b), a0));
-    float k = 0.0;
-    if (!(disc < 0.0)) k = clamp(sdiv(nf(ssqrt(disc) - a1), smul(2.0, b)), 0.0, 1.0);
+    float k = 1.0;
+    bool whole = true;
+    if (nf(nf(a0 + a1) + b) > 0.0 && b > 0.0)
+    {
+        whole = false;
+        float disc = nf(smul(a1, a1) - smul(smul(4.0, b), a0));
+        k = 0.0;
+        if (!(disc < 0.0)) k = clamp(sdiv(nf(ssqrt(disc) - a1), smul(2.0, b)), 0.0, 1.0);
+    }
+    // Nor does friction reverse the slip (explicit_beams.rs no_positive_work).
+    float3 vt = ssub3(v, sscale(n, sdot(v, n)));
+    float g = nf(sdot(vt, vt) + smul(hm, sdot(f, vt)));
+    float d = smul(hm, sdot(t, vt));
+    if (d < 0.0 && nf(g + smul(d, k)) < 0.0)
+    {
+        k = clamp(sdiv(g, -d), 0.0, k);
+        whole = false;
+    }
+    if (whole) return c;
     return sadd3(rn, sscale(t, k));
 }
 
@@ -599,6 +617,26 @@ float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, f
 {
     float budget;
     return contactResponse(f, v, m, n, s, p, friction, budget);
+}
+
+// The node pass's ground contact (depth > 0) of vehicle v's node: its force, and on
+// the dissipative surface (§37) its position step up (`lift`, m; explicit_beams.rs
+// node_pass).
+float3 groundContact(float3 f, float3 vel, float mass, uint v, float depth, float friction, inout float lift)
+{
+    Surface s = surfaceV(groundSurface(), v);
+    float budget;
+    float3 c = contactResponse(f, vel, mass, float3(0.0, 1.0, 0.0), s, depth, friction, budget);
+    if (s.dissipative != 0u && any(c != float3(0.0, 0.0, 0.0))) lift = shiftDepth(depth, budget, f.y);
+    return c;
+}
+
+// §37 after the node's x + h·v: its contacts' position step d, then the ground's.
+float3 takeSteps(float3 pos, float3 d, float lift)
+{
+    pos = sadd3(pos, d);
+    if (lift != 0.0) pos.y = nf(pos.y + lift);
+    return pos;
 }
 
 // A pressure-wheel node's ground contact (NODE_FRICTION_LIMIT, spec §28): the
@@ -1308,6 +1346,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     clipRoll(gi, flagsV);
     if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
     float3 shift = shiftTake(gi, flagsV);
+    float lift = 0.0; // §37's ground position step
     float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -1338,7 +1377,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
         }
         else if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
+            float3 c = groundContact(f, vel, mass, vehicle, ground - x.y, V.w, lift);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             cfAdd(gi, c);
             f += c;
@@ -1376,7 +1415,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     {
         vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
         pos = sadd3(pos, sscale(vel, STEP));
-        pos = sadd3(pos, shift);
+        pos = takeSteps(pos, shift, lift);
     }
     clipSpeed(vehicle, step, flagsV, vel);
 #ifdef EB_AERO
@@ -2484,6 +2523,13 @@ float selfInvMass(uint x)
     return sdiv(float(uint(gAcc[gP.selfSplit + x].load())), gNodes[x * 3u].w);
 }
 
+// Node x's own inverse mass (0 immovable): §37's position step shares.
+float ownInvMass(uint x)
+{
+    if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return 0.0;
+    return sdiv(1.0, gNodes[x * 3u].w);
+}
+
 // Node x's acceleration from its force at the pass's start (0 immovable).
 float3 selfAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
@@ -2516,17 +2562,18 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
     float3 f = contactResponse(fh, vv, m, nn, surf, pen, friction, budget);
     if (surf.dissipative != 0u && any(f != float3(0.0, 0.0, 0.0)))
     {
-        // §37: the position step, a position impulse δ·m shared by the sub-bodies'
-        // inverse masses (explicit_beams.rs apply_two_body_self_hits). Called once
-        // per hit (selfRound marks it computed; selfSerial applies in order).
+        // §37: the position step, a position impulse δ·m shared like the hit's
+        // force, each node by its own inverse mass (explicit_beams.rs
+        // apply_two_body_self_hits). Called once per hit (selfRound marks it
+        // computed; selfSerial applies in order).
         float delta = shiftDepth(pen, budget, sdot(fh, nn));
         if (delta > 0.0)
         {
             float q = smul(delta, m);
-            shiftAdd(h, sscale(nn, smul(q, selfInvMass(h))));
-            if (alpha > 0.0) shiftAdd(t1, sscale(nn, -smul(alpha, smul(q, selfInvMass(t1)))));
-            if (beta > 0.0) shiftAdd(t2, sscale(nn, -smul(beta, smul(q, selfInvMass(t2)))));
-            if (gamma > 0.0) shiftAdd(t0, sscale(nn, -smul(gamma, smul(q, selfInvMass(t0)))));
+            shiftAdd(h, sscale(nn, smul(q, ownInvMass(h))));
+            if (alpha > 0.0) shiftAdd(t1, sscale(nn, -smul(alpha, smul(q, ownInvMass(t1)))));
+            if (beta > 0.0) shiftAdd(t2, sscale(nn, -smul(beta, smul(q, ownInvMass(t2)))));
+            if (gamma > 0.0) shiftAdd(t0, sscale(nn, -smul(gamma, smul(q, ownInvMass(t0)))));
         }
     }
     return f;
@@ -3996,6 +4043,146 @@ uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r,
     return open;
 }
 
+// --- §37's residual pass (explicit_beams.rs residual_self_pass) ---
+// After a step's two-body self hits, each hit's pair still approaching at the
+// forces now (beams plus the accumulators' contact sums) is stopped by a normal
+// force with the first pass's reduced mass (its counts). Per node 4 words of gAcc
+// at resAt: unused, then the residual forces in FIXED units (merged into the
+// accumulators after every hit's force is found, so no hit reads another's).
+
+uint resAt(uint x) { return gP.selfSplit + 4u * gP.totalNodes + 4u * x; }
+
+// Vehicle v takes the residual pass: the two-body rule, dissipative.
+bool selfResidual(uint v)
+{
+    return selfTwoBody(v) && (gStatic[v * 4u + 3u].x & FLAG_DISSIPATIVE) != 0u;
+}
+
+// Node x's acceleration from its force now (0 immovable).
+float3 resAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return float3(0.0, 0.0, 0.0);
+    float3 f = beamSum(gNodes[x * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + x], beamOff, groupOff, groupCount, parity,
+                       false);
+    return sdiv3(sadd3(f, accForce(x)), gNodes[x * 3u].w);
+}
+
+// The hit's pair (contacter h, triangle t0..t2 at weights, normal nn, relative
+// velocity vv): its relative normal acceleration `a` now, `x` = vn + max(vn, 0),
+// and whether it approaches (vn < 0) and still does over the step.
+bool resDrive(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float3 vv,
+              uint beamOff, uint groupOff, uint groupCount, uint parity, out float a, out float x)
+{
+    float3 at = sadd3(sadd3(sscale(resAcc(t1, beamOff, groupOff, groupCount, parity), alpha),
+                            sscale(resAcc(t2, beamOff, groupOff, groupCount, parity), beta)),
+                      sscale(resAcc(t0, beamOff, groupOff, groupCount, parity), gamma));
+    a = sdot(ssub3(resAcc(h, beamOff, groupOff, groupCount, parity), at), nn);
+    float vn = sdot(vv, nn);
+    x = nf(vn + max(vn, 0.0));
+    return vn < 0.0 && nf(smul(a, STEP) + x) < 0.0;
+}
+
+// An active hit's residual force on its contacter (0: none).
+float3 resForce(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float a, float x)
+{
+    float imt = nf(nf(selfTerm(alpha, selfInvMass(t1)) + selfTerm(beta, selfInvMass(t2))) + selfTerm(gamma, selfInvMass(t0)));
+    float inv = nf(selfInvMass(h) + imt);
+    if (!(inv > 0.0)) return float3(0.0, 0.0, 0.0);
+    float m = sdiv(1.0, inv);
+    float r = nf(-smul(a, m) - sdiv(smul(x, m), STEP));
+    if (!(r > 0.0)) return float3(0.0, 0.0, 0.0);
+    return sscale(nn, r);
+}
+
+void resShare(uint x, float3 f)
+{
+    uint at = resAt(x);
+    gAcc[at + 1u].add(toFixed(f.x));
+    gAcc[at + 2u].add(toFixed(f.y));
+    gAcc[at + 3u].add(toFixed(f.z));
+    cfAdd(x, f);
+}
+
+void resAdd(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 f)
+{
+    resShare(h, f);
+    resShare(t1, hitShare(f, 2u, alpha, beta, gamma));
+    resShare(t2, hitShare(f, 3u, alpha, beta, gamma));
+    resShare(t0, hitShare(f, 4u, alpha, beta, gamma));
+}
+
+// Node x's residual sums into its accumulator, its words cleared (the first of
+// its hits to get here takes them).
+void resMergeNode(uint x)
+{
+    uint at = resAt(x);
+    int fx = gAcc[at + 1u].exchange(0);
+    int fy = gAcc[at + 2u].exchange(0);
+    int fz = gAcc[at + 3u].exchange(0);
+    if (fx != 0) gAcc[x * 3u].add(fx);
+    if (fy != 0) gAcc[x * 3u + 1u].add(fy);
+    if (fz != 0) gAcc[x * 3u + 2u].add(fz);
+}
+
+void resMerge(uint h, uint t0, uint t1, uint t2)
+{
+    resMergeNode(h);
+    resMergeNode(t0);
+    resMergeNode(t1);
+    resMergeNode(t2);
+}
+
+// The residual pass over vehicle v's listed hits (lane `sub` of `lanes`): each
+// active hit's force into the residual sums (record word 23: one taken).
+void selfResidualForces(uint v, uint sub, uint lanes, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint count = uint(gAcc[hitAcc(v)].load());
+    if (count > HIT_CAP || !selfResidual(v)) return;
+    uint base = hitList(v);
+    uint nodeOff = gStatic[v * 4u].x;
+    for (uint i = sub, iStop = EB_END(i, count, lanes); i < iStop; i += lanes)
+    {
+        uint at = base + i * HIT_WORDS;
+        gNext[at + 23u] = 0u;
+        uint h = nodeOff + (gNext[at] & 0xFFFFu);
+        uint t0 = gNext[at + 8u];
+        uint t1 = gNext[at + 9u];
+        uint t2 = gNext[at + 10u];
+        float alpha = asfloat(gNext[at + 1u]);
+        float beta = asfloat(gNext[at + 2u]);
+        float gamma = nf(nf(1.0 - alpha) - beta);
+        float3 nn = asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u]));
+        float a;
+        float x;
+        if (!resDrive(h, t0, t1, t2, alpha, beta, gamma, nn,
+                      asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u])), beamOff, groupOff, groupCount,
+                      parity, a, x))
+            continue;
+        float3 f = resForce(h, t0, t1, t2, alpha, beta, gamma, nn, a, x);
+        if (any(f != float3(0.0, 0.0, 0.0)))
+        {
+            resAdd(h, t0, t1, t2, alpha, beta, gamma, f);
+            gNext[at + 23u] = 1u;
+        }
+    }
+}
+
+// Then (after a barrier) the residual sums of the hits that took one into the
+// accumulators.
+void selfResidualMerge(uint v, uint sub, uint lanes)
+{
+    uint count = uint(gAcc[hitAcc(v)].load());
+    if (count > HIT_CAP || !selfResidual(v)) return;
+    uint base = hitList(v);
+    uint nodeOff = gStatic[v * 4u].x;
+    for (uint i = sub, iStop = EB_END(i, count, lanes); i < iStop; i += lanes)
+    {
+        uint at = base + i * HIT_WORDS;
+        if (gNext[at + 23u] == 0u) continue;
+        resMerge(nodeOff + (gNext[at] & 0xFFFFu), gNext[at + 8u], gNext[at + 9u], gNext[at + 10u]);
+    }
+}
+
 // Vehicle v's self-collision hits of this step, after the lanes that found them
 // (and resolvePending) passed a barrier: rounds of selfRound until no hit of any
 // member is open (every lane of the workgroup runs them: barriers), then each hit's
@@ -4039,6 +4226,16 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
     }
     if (on && sub == 0u && uint(gAcc[hitAcc(v)].load()) > HIT_CAP)
         selfSerial(v, origin, r, beamOff, groupOff, groupCount, parity);
+    // §37's residual pass (a listed vehicle's; selfSerial ran its own): the forces,
+    // then the merge, each after every lane's previous phase.
+    if (gP.selfSplit != 0u)
+    {
+        sync();
+        if (on) selfResidualForces(v, sub, lanes, beamOff, groupOff, groupCount, parity);
+        sync();
+        if (on) selfResidualMerge(v, sub, lanes);
+        sync();
+    }
 }
 
 
@@ -4047,7 +4244,20 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
 // self-collision of this step exactly as the specification orders it (tested
 // triangles in file order, every candidate in node order, each hit added at once).
 // Slow, and only for a step with more than HIT_CAP hits.
+void selfSerialHits(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity);
+void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity);
+void selfSerialMerge(uint v);
+
 void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    selfSerialHits(v, origin, r, beamOff, groupOff, groupCount, parity);
+    if (gP.selfSplit == 0u || !selfResidual(v)) return;
+    selfSerialResidual(v, origin, r, beamOff, groupOff, groupCount, parity);
+    selfSerialMerge(v);
+}
+
+// selfSerial's hits, each applied as found.
+void selfSerialHits(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
@@ -4118,6 +4328,70 @@ void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uin
             cfAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
         }
     }
+}
+
+// selfSerial's residual pass (§37): its hits found again (the tests have no side
+// effects here), their residual forces into the residual sums.
+void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    for (uint t = 0u, tStop = EB_END(t, r1.y, 1u); t < tStop; t++)
+    {
+        uint gt = r1.x + t;
+        if (asint(gMisc[gP.vehicles + gt].x) > 0) continue;
+        TriGeo T = triangleGeo(gt, origin, r, parity);
+        uint4 tn = T.tn;
+        for (uint k = 0u, kStop = EB_END(k, r2.y, 1u); k < kStop; k++)
+        {
+            uint h = gLists[r2.x + k];
+            if (h == tn.x || h == tn.y || h == tn.z) continue;
+            float4 P = gNodes[h * 3u];
+            float3 p = nf3(origin + P.xyz);
+            if (any(p < T.lo) || any(p > T.hi)) continue;
+            float alpha;
+            float beta;
+            float gamma;
+            float delta;
+            float3 nn;
+            float pen;
+            if ((T.clip & 1u) != 0u)
+            {
+                // Anti-clip: the test alone (tryContact recorded the sides).
+                uint word;
+                if (selfClip(T, h, p, origin, r, alpha, beta, gamma, pen, nn, word) != 1u) continue;
+            }
+            else
+            {
+                if (!triangleHit(T, p, r, alpha, beta, gamma, delta)) continue;
+                nn = T.n;
+                if (delta < 0.0)
+                {
+                    nn = -T.n;
+                    delta = -delta;
+                }
+                pen = nf(r - delta);
+            }
+            float4 V = gNodes[h * 3u + 1u];
+            float3 rv = ssub3(V.xyz, sadd3(sadd3(sscale(gNodes[tn.y * 3u + 1u].xyz, alpha),
+                                                 sscale(gNodes[tn.z * 3u + 1u].xyz, beta)),
+                                           sscale(gNodes[tn.x * 3u + 1u].xyz, gamma)));
+            float ra;
+            float rx;
+            if (!resDrive(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, beamOff, groupOff, groupCount, parity, ra,
+                          rx))
+                continue;
+            float3 rf = resForce(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, ra, rx);
+            if (any(rf != float3(0.0, 0.0, 0.0))) resAdd(h, tn.x, tn.y, tn.z, alpha, beta, gamma, rf);
+        }
+    }
+}
+
+// The residual sums of vehicle v's nodes into their accumulators (one lane).
+void selfSerialMerge(uint v)
+{
+    uint4 r0 = gStatic[v * 4u];
+    for (uint i = 0u, iStop = EB_END(i, r0.y, 1u); i < iStop; i++) resMergeNode(r0.x + i);
 }
 
 // Vehicle v's pending beams of this step's beam phase (breakException), on one lane
@@ -4259,6 +4533,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsUniformLanes = triCount > 0u ? 1u : 0u;
         coupleBegin();
         driveBegin();
+        // The coupling's spheres in workgroup memory (cplGsRange).
+        cplGsClear();
+        cplGsAdd(0u, v, 0u, 0u);
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
@@ -6354,7 +6631,7 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
         && any(f != float3(0.0, 0.0, 0.0)))
     {
         // §37: the position step, a position impulse δ·m shared by the sub-bodies'
-        // inverse masses (explicit_contact.rs).
+        // inverse masses (explicit_contact.rs; self contact shares by own masses).
         float delta = shiftDepth(pen, budget, sdot(fh, nn));
         if (delta > 0.0)
         {
@@ -6981,6 +7258,10 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
         // its range.
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
         {
+#ifdef EB_ABLATE
+            // Measurement only: 262144 the candidates.
+            if ((gP.ablate & 262144u) != 0u) break;
+#endif
             if (gsVvOff4[a].load() == 0u) continue;
             uint va = vvMember(off, a);
             uint key = vvBoxKey(va, parity);
@@ -7019,6 +7300,10 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
         uint total = 0u;
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();
         uint subs = clamp(LANES / max(total, 1u), 1u, 64u);
+#ifdef EB_ABLATE
+        // Measurement only: 131072 the owners' triangles against their candidates.
+        if ((gP.ablate & 131072u) != 0u) total = 0u;
+#endif
         for (uint p = lane, pStop = EB_END(p, total * subs, LANES); p < pStop; p += LANES)
         {
             uint q = p / subs;
@@ -7044,6 +7329,10 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
     for (uint l = 1u, lGuard = 0u; l <= k; l++)
     {
         EB_PASS(lGuard);
+#ifdef EB_ABLATE
+        // Measurement only: 524288 the levels (the hits' application).
+        if ((gP.ablate & 524288u) != 0u) break;
+#endif
         if (l == 1u)
         {
             uint total = 0u;
@@ -7141,6 +7430,20 @@ void contactGroup(uint g, uint lane)
             run += vvCpCount(vvMember(off, m));
         }
         vvClearCounters();
+        // The coupling's spheres in workgroup memory (cplGsRange): a small group's
+        // members one after another.
+        cplGsClear();
+        if (k <= CPL_GS_VEHICLES)
+        {
+            uint base = 0u;
+            uint nodeBase = 0u;
+            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+            {
+                cplGsAdd(m, vvMember(off, m), base, nodeBase);
+                base += gsCpl[CPL_GS_TAB + 5u * m + 2u];
+                nodeBase += gsCpl[CPL_GS_TAB + 5u * m + 4u];
+            }
+        }
     }
     sync();
     for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberBegin(vvMember(off, m), lane);

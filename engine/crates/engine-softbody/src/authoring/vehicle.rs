@@ -783,6 +783,146 @@ fn beamng_node_pass(
     (added, upgraded, ties)
 }
 
+/// BeamNG's node pattern: the z of the body's structural rings (the rings
+/// holding body nodes and no contact-only body node).
+fn beamng_body_ring_z(sk: &Skeleton, shell: &Shell) -> Vec<f32> {
+    let mut out = Vec::new();
+    for ring in &shell.rings {
+        let nodes: Vec<u32> = ring
+            .half
+            .iter()
+            .flat_map(|&i| [Some(i), shell.mirror.get(&i).copied()])
+            .flatten()
+            .filter(|&i| sk.nodes[i as usize].part == 0)
+            .collect();
+        if !nodes.is_empty() && !nodes.iter().any(|i| shell.contact.contains(i)) {
+            out.push(ring.z);
+        }
+    }
+    out
+}
+
+/// BeamNG's node pattern: a body member (not riding a panel, not bolted)
+/// re-stationed onto the body's structural rings `zs`. On each segment of
+/// its path that runs along the car (|Δz| ≥ half its length), its stations
+/// at its own spacing (`station`, else the crush or truss spacing) each move
+/// to the nearest structural ring, as path vertices (a path vertex is always
+/// a station); the count is kept (merged when two meet one ring), and none
+/// within 8 cm of the segment's ends (a Choice: closer, it merges with the
+/// end). Elsewhere its spacing is as before.
+pub fn beamng_restation(m: &MemberSpec, zs: &[f32]) -> MemberSpec {
+    if m.ride || m.bolted.is_some() || zs.is_empty() {
+        return m.clone();
+    }
+    let spacing = if m.station > 0.0 {
+        m.station
+    } else if m.beads > 0 {
+        Resolution::Medium.crush()
+    } else {
+        Resolution::Medium.truss()
+    };
+    let mut out = m.clone();
+    let mut path: Vec<[f32; 3]> = vec![m.path[0]];
+    let mut along = false;
+    for w in m.path.windows(2) {
+        let (a, b) = (Vec3::from_array(w[0]), Vec3::from_array(w[1]));
+        let d = b - a;
+        let l = d.length();
+        if d.z.abs() >= 0.5 * l && d.z.abs() > 1e-3 {
+            along = true;
+            let n = (l / spacing - 1e-3).ceil().max(1.0) as usize;
+            let (lo, hi) = (a.z.min(b.z), a.z.max(b.z));
+            let mut cut: Vec<f32> = Vec::new();
+            for k in 1..n {
+                let z = a.z + d.z * k as f32 / n as f32;
+                let near = zs
+                    .iter()
+                    .copied()
+                    .filter(|&r| r > lo + 0.08 && r < hi - 0.08)
+                    .min_by(|x, y| (x - z).abs().total_cmp(&(y - z).abs()));
+                if let Some(r) = near {
+                    if !cut.iter().any(|&c| (c - r).abs() < 1e-4) {
+                        cut.push(r);
+                    }
+                }
+            }
+            cut.sort_by(f32::total_cmp);
+            if d.z < 0.0 {
+                cut.reverse();
+            }
+            for z in cut {
+                path.push(a.lerp(b, (z - a.z) / d.z).to_array());
+            }
+        }
+        path.push(w[1]);
+    }
+    if along {
+        out.path = path;
+        out.station = spacing;
+    }
+    out
+}
+
+/// BeamNG's node pattern: the BX's measured damping rate Σc/m (1/s) per
+/// node, the median over its part's nodes on Rubble's solver
+/// (`showcase_car::light_node_damping` with `RUBBLE_JBEAM_BX`), its nodes
+/// split at the part's median mass: `bx_door` 1,271 (light) and 590 (heavy),
+/// `bx_hood` 936 (one class), `bx_body_coupe` 735 and 787. A contact-only
+/// node takes the light rate, a structural node the heavy; `None` for parts
+/// the pattern does not build.
+pub fn bx_node_damping_rate(part: &str, contact: bool) -> Option<f32> {
+    let (light, heavy) = if part.starts_with("door") {
+        (1271.4, 590.0)
+    } else if part.starts_with("bonnet") {
+        (936.4, 936.4)
+    } else if part == "body" {
+        (735.3, 786.7)
+    } else {
+        return None;
+    };
+    // (`BX_NODE_DAMPING=contact`: the contact-only nodes alone, a
+    // measurement switch.)
+    if !contact && std::env::var("BX_NODE_DAMPING").is_ok_and(|v| v == "contact") {
+        return None;
+    }
+    Some(if contact { light } else { heavy })
+}
+
+/// BeamNG's node pattern: raise each patterned part's node to the BX's
+/// damping rate ([`bx_node_damping_rate`]) through the body dashpot it is
+/// from, both of the dashpot's nodes kept within 0.9 × [`super::skeleton::C_RATIO`].
+fn bx_node_damping(sk: &mut Skeleton, shell: &Shell, body_dash: &[(usize, u32)], parts: &[String]) {
+    let n = sk.nodes.len();
+    let mut csum = vec![0.0f32; n];
+    for b in &sk.beams {
+        csum[b.a as usize] += b.mat.damp;
+        csum[b.b as usize] += b.mat.damp;
+    }
+    let cap = 0.9 * super::skeleton::C_RATIO;
+    let mut order: Vec<(usize, u32)> = body_dash.to_vec();
+    order.sort_by_key(|x| x.1);
+    for (j, i) in order {
+        let iu = i as usize;
+        let name = &sk.parts[sk.nodes[iu].part as usize];
+        if !parts.iter().any(|p| name.starts_with(p.as_str())) {
+            continue;
+        }
+        let Some(rate) = bx_node_damping_rate(name, shell.contact.contains(&i)) else {
+            continue;
+        };
+        let o = (sk.beams[j].a + sk.beams[j].b - i) as usize;
+        let (mi, mo) = (sk.nodes[iu].mass, sk.nodes[o].mass);
+        let want = (rate * mi - csum[iu])
+            .min(cap * mi - csum[iu])
+            .min(cap * mo - csum[o]);
+        if want > 0.0 {
+            sk.beams[j].mat.damp += want;
+            csum[iu] += want;
+            csum[o] += want;
+        }
+    }
+}
+
 /// The skin's spacing against the frame's era (25–40 cm): the light skin
 /// tier is denser than the frame, so dents and creases are local.
 pub const SKIN_DENSITY: f32 = 1.0;
@@ -1698,7 +1838,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         .nodes
         .iter()
         .copied()
-        .filter(|i| !shell.contact.contains(i) || sk.nodes[*i as usize].part == 0)
+        .filter(|i| {
+            !shell.contact.contains(i)
+                || (sk.nodes[*i as usize].part == 0
+                    && std::env::var("BEAMNG_RESTATION").is_ok_and(|v| v == "0"))
+        })
         .collect();
     // One tier: the shell's bend beams (two bays long) in a member's lane
     // stay the sheet's bending: the lane's edges are its chord already, and
@@ -1711,7 +1855,31 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         .map(|b| (b.0.min(b.1), b.0.max(b.1)))
         .collect();
     let lane_bends_stay = std::env::var("LANE_BENDS").map_or(true, |v| v != "1");
-    for m in &def.members {
+    // BeamNG's node pattern on the body: every body member's path takes a
+    // vertex at each of the body's structural rings it runs along (a path
+    // vertex is always a station), so its stations are the structural
+    // nodes and its bays' lane nodes between are contact-only.
+    let members: Vec<MemberSpec> = if shell
+        .contact
+        .iter()
+        .any(|&i| sk.nodes[i as usize].part == 0)
+        && std::env::var("BEAMNG_RESTATION").map_or(true, |v| v != "0")
+    {
+        let zs = beamng_body_ring_z(&sk, &shell);
+        def.members
+            .iter()
+            .map(|m| beamng_restation(m, &zs))
+            .collect()
+    } else {
+        def.members.clone()
+    };
+    let restationed: std::collections::HashSet<String> = members
+        .iter()
+        .zip(&def.members)
+        .filter(|(a, b)| a.path != b.path)
+        .map(|(a, _)| a.name.clone())
+        .collect();
+    for m in &members {
         let base = grades.get(&m.grade)?.stiffer(m.stiff);
         let sides: &[f32] = if m.mirrored { &[1.0, -1.0] } else { &[1.0] };
         for &side in sides {
@@ -1756,6 +1924,21 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     .iter()
                     .copied()
                     .filter(|&i| sk.nodes[i as usize].part == part)
+                    .collect()
+            } else if !restationed.contains(&m.name) {
+                // (BeamNG's node pattern: a member not re-stationed, such as
+                // a pillar across the rings, snaps onto contact-only
+                // candidates too, which then turn structural.)
+                snap_pool
+                    .iter()
+                    .copied()
+                    .chain(
+                        shell
+                            .contact
+                            .iter()
+                            .copied()
+                            .filter(|&i| sk.nodes[i as usize].part == 0),
+                    )
                     .collect()
             } else {
                 snap_pool.clone()
@@ -3885,8 +4068,25 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             for &(j, _) in &body_dash {
                 let (a, b) = (sk.beams[j].a as usize, sk.beams[j].b as usize);
                 let m = sk.nodes[a].mass.min(sk.nodes[b].mass);
+                // (BeamNG's node pattern: a dashpot at a contact-only node
+                // is rated on its structural end's mass, the panel mass it
+                // damps; `h·c/m` at the contact node stays far under
+                // `C_RATIO`.)
+                let m = match (
+                    shell.contact.contains(&(a as u32)),
+                    shell.contact.contains(&(b as u32)),
+                ) {
+                    (true, false) => sk.nodes[b].mass,
+                    (false, true) => sk.nodes[a].mass,
+                    _ => m,
+                };
                 sk.beams[j].mat.damp = BX_BODY_DASHPOT_RATE * m;
             }
+            // BeamNG's node pattern: each node of a patterned part damped at
+            // least at the BX's measured rate for its kind of node
+            // ([`bx_node_damping_rate`]), its own body dashpot carrying the
+            // difference (`BX_NODE_DAMPING=0` leaves it out, a measurement
+            // switch).
         }
         sk.exact_lengths = true;
         // The profile it ships with (spec §36). `BEAMNG_PROFILE=0` leaves the
@@ -3906,6 +4106,30 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .unwrap_or(AERO_DRAG_COEF);
         sk.drag_coef = Some((d, d));
         sk.cap_to_bound()?;
+        // BeamNG's node pattern: each node of a patterned part damped at
+        // least at the BX's measured rate for its kind of node
+        // ([`bx_node_damping_rate`]) at the built stiffnesses, its own body
+        // dashpot carrying the difference; the bound then takes what the
+        // damping adds (`BX_NODE_DAMPING=0` leaves it out, a measurement
+        // switch).
+        // (`BX_BODY_DAMPING=1` does the same for the body's nodes, with or
+        // without the pattern, a measurement switch.)
+        let mut damped: Vec<String> = if !shell.contact.is_empty()
+            && std::env::var("BX_NODE_DAMPING").map_or(true, |v| v != "0")
+        {
+            beamng_nodes_parts()
+        } else {
+            Vec::new()
+        };
+        if std::env::var("BX_BODY_DAMPING").is_ok_and(|v| v == "1") {
+            damped.push("body".into());
+        } else {
+            damped.retain(|p| p != "body");
+        }
+        if def.damping.is_some() && !damped.is_empty() {
+            bx_node_damping(&mut sk, &shell, &body_dash, &damped);
+            sk.cap_to_bound()?;
+        }
         for (b, &e) in sk.beams.iter_mut().zip(&elong) {
             if e >= 0.0 {
                 // (A sheet edge given its real yield: the strength it had
@@ -4787,8 +5011,12 @@ fn one_tier_masses(
         let fine = area.clone();
         for c in cs {
             let e = &nbr[&c];
-            let keep =
-                (CONTACT_STRIP * e.iter().map(|x| 0.5 * x.1).sum::<f32>()).min(fine[c as usize]);
+            let keep = (std::env::var("CONTACT_STRIP")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(CONTACT_STRIP)
+                * e.iter().map(|x| 0.5 * x.1).sum::<f32>())
+            .min(fine[c as usize]);
             let to: Vec<u32> = e
                 .iter()
                 .map(|x| x.0)

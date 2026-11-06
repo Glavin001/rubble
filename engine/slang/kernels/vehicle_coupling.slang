@@ -278,6 +278,13 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gMisc[at + 4u] = uint4(0u);
         gMisc[at + 5u] = uint4(0u);
         gMisc[at + 6u] = asuint(float4(sph.xyz, 0.0));
+        // The body's shapes lie in [first, last] (its record's (1/I, w) w: first + 1 |
+        // (last + 1) << 16; 0, as a host writes it, means every shape): its step sums
+        // (explicit_beams_rigid.slang cplIntegrateBody) scan that range only.
+        uint bw = brec(v, j) + 4u;
+        uint4 r4 = gMisc[bw];
+        uint first = (r4.w & 0xFFFFu) == 0u ? ns + 1u : (r4.w & 0xFFFFu);
+        gMisc[bw] = uint4(r4.xyz, first | ((ns + 1u) << 16));
         ns++;
     }
     gMisc[vrec(v)] = uint4(nb, ns, planes, 0u);

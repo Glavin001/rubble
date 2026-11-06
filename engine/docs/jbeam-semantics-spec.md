@@ -2114,3 +2114,102 @@ vehicle: side memories word for word, positions bit for bit (the 150 m/s point n
 ends 4.6 cm behind the floor, the 90 m/s self-collision node 1.1 cm behind its
 triangle: the step is capped by the hit's budget; RoR's push threw them 14 and 42
 cm clear).
+
+### 37.1 At rest: the ground, the residual stop, friction's slip (2026-11-06)
+
+sedan1 crushed at 51 km/h and at rest to 12 s still moved: kinetic energy about
+15 J, nodes at 0.2–4 m/s, 800 J a second sloshing between self-contact and the
+position steps. Three causes, three changes (BeamNG profile only; the RoR profile
+is unchanged, bit for bit).
+
+* **Ground, box and shape contact are dissipative too.** The node pass's static
+  contacts take §37's rule (`ContactSurface::dissipative_if`, GPU `surfaceV` with
+  `FLAG_DISSIPATIVE`). RoR's 0.2·p/h push on the ground did +8 to +10 J per tenth on
+  wheel nodes at rest. Its penetration becomes a position step up, the node's own
+  (`ExplicitBeams::ground_lift`, GPU `groundContact` and `takeSteps`), capped by
+  the contact's budget as every §37 step is; boxes and shapes have no depth term
+  (p = 0) and get none. Ledger: `EnergyLedger::w_ground_shift`.
+* **The residual stop.** A two-body hit's stop uses the split reduced mass, so a hit
+  whose nodes are in other hits stops only m_split·inv of its pair's approach
+  alone. The rest, (vn + h·a)(1 − m_split·inv), stayed as a ghost speed that the
+  steps cancelled every step. After the hits, one residual pass
+  (`residual_self_pass`; GPU `selfResidualForces`, `selfResidualMerge`, and
+  `selfSerialResidual` past the hit list's room) stops what is left. Each hit's pair,
+  at the forces now (the first pass's contact sums included), approaching
+  (vn < 0) and still approaching over the step (a·h + vn < 0), takes
+  r = −(a·m + vn·m/h) > 0 along its normal. (Separating pairs have no ghost
+  speed. Including them, the residual over-stopped where hits share nodes:
+  +0.4 J of self-contact work in a tenth of the 48 km/h wall.) m is the first pass's reduced mass (its counts).
+  No friction and no step. All the forces are found before any is added, as fixed
+  point, so the pass is order free and momentum-exact. **Choices (measured, the
+  wall sweep's self-contact work over any tenth):**
+  * one pass: at most −0.6 J;
+  * two or four passes, with the first pass's counts or with the active hits'
+    counts only: up to +0.25 to +2 J (Jacobi over-stops where hits share nodes
+    with conflicting normals);
+  * the node-level removal of the speed along a node's own step (tried first):
+    settles, but breaks momentum (the struck pressure-wheel car is not pushed).
+  * Vehicle contact's residual pass exists on the CPU as a measurement
+    (`VEHICLE_RESIDUAL=1`). It is not on the GPU yet, so it is off.
+* **Friction never reverses the slip.** At zero work a sliding pair could swap its
+  slip vt for −vt every step, for good (a node held ±4 m/s and 5 J that way).
+  `no_positive_work` now also caps the tangential scale s so that the slip after the
+  step, along vt, stays ≥ 0.
+* **Self contact's position-step shares are each node's own inverse mass.** The step is
+  still P = δ·m with the split m, shared as the hit's force is, w·P over each
+  node's own mass. Over the sub-body's k/m, a node of k hits moved k times its
+  share, and the steps stored more than their budget. Vehicle contact keeps k/m
+  (**Choice**, measured): own masses there let the 80 km/h T-bone leak 15–17 of
+  1,026 striker nodes at offsets 0 and −0.03 m; k/m leaked 6–7.
+
+Measured (CPU, sedan1, medium, at rest after the wall, the 8th–12th second):
+
+| | self-contact work | relative kinetic energy | relative rms |
+|---|---|---|---|
+| before (§37 as committed) | about 800 J/s | about 12 J | 130 mm/s |
+| now, 48 / 51 / 54 / 57 km/h | 25–50 J/s | 0.5–1.7 J | 28–52 mm/s |
+
+Relative means relative to the body's rigid motion, wheels left out.
+
+The sweep's ledgers over any tenth now have their contacts and steps between
+−0.4 and −4 J beyond the 2 % allowance (they were up to +0.09 J).
+
+**Floor (open).** The motion left is a tangle of two or three nodes of the crushed
+bonnet and body: mutual hits whose normals conflict, so no single pass stops them.
+Over a second at rest the beams do +48 J against −50 J of contact, while the steps'
+first-order estimate shows +7 J. The quantisation floor (single-precision positions
+at the car's coordinates, ulp/h; contact steps of 2⁻²⁴ m) is about 1 mm/s, about
+60× below.
+
+`showcase_car.rs` `crushed_car_settles` checks it (51 km/h, the solver stepped
+alone): kinetic energy per second monotone from 3 s (1,233 J to 5.3 J in the
+12th second); relative rms below 80 mm/s (56) and every body node below 2.5 m/s
+(1.49) over the 12th second. These are guards on the floor, not targets. The car has no brake to set (beam tyres; `brakeTorque` is not
+simulated outside raycast drive). Probes: `settle_probe`, `contact_work_probe`
+(`--ignored`).
+
+**Verified (2026-11-06, after merging showcase-main).**
+* wgpu: `explicit_contact_gpu`, `explicit_beams_bitwise`, `explicit_jbeam_gpu`,
+  `explicit_jbeam_ext_gpu`, `explicit_drive_gpu`, `explicit_loop_cap`.
+* Metal: `vehicle_parity`, `explicit_parity`, `explicit_drive_parity`.
+* All 23 WGSL modules compile in Chrome.
+* world-wasm `explicit_scenes`.
+* CPU: `energy_ledger`; `crushed_car_settles`; T-bone leaked 7 / 5 / 6 / 2 / 4 of
+  1,026 at the five offsets (≤ 0.7 %).
+* n's 32 ledgers: no rise between tenths over 0.04 J. Its bands (max crush,
+  b1, t_m) fail, as before: the car's calibration.
+
+**Open: `fixed_contact_quantisation_does_no_work`.** The residual pass's extra
+contact sums put 48 km/h with drag at +0.0102 J over the run, against the 0.01 J
+bound (worst case 5.9 J); the others are within ±0.015 J.
+
+**Open: the per-tenth contact-work bound.** `contacts_do_no_positive_work` fails
+on a run or two of its 26, which ones depending on the build. Before the merge it
+was 58 and 59 km/h with drag; after it, 56 km/h without drag (+0.38 J). At 58 km/h,
+one tenth at rest (about 1.5 s) had contacts plus steps +0.60 J beyond the 2 %
+allowance: the tangle's
+steps store 2–3 J in a tenth whose contact dissipates 2 J. Over the run after the
+crash, the same sum is −19 J. Every other run passes, as do the 12 s rest and the
+T-bone. Tried without a fix:
+* the step's cap scaled by m_split·inv;
+* no residual pass (54 km/h, drag off: +29 J).
