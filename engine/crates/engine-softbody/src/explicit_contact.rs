@@ -977,12 +977,11 @@ impl ForceSplit {
 /// collision; slide nodes; vehicle contact (normal along each hit's normal, and
 /// tangential: friction); and the node pass's own contacts (ground, boxes, static
 /// shapes, rigid partners: m·(v' − v)/h less the accumulated force), split into
-/// vertical and horizontal. Elastic energy is the state's ½k·e² of the linear
-/// beam kinds (plain, support in compression, rope in tension, couplers, bounded
-/// and anisotropic at their base rate, LBEAMs at their arm-following rest);
-/// pressure, torsion, aerodynamic and trigger records store none here, so their
-/// changes count in the beams' dissipation, −(W_beams + ΔU): damping, yield,
-/// fracture.
+/// vertical and horizontal. Elastic energy is every conservative record's stored
+/// energy ([`elastic_energy`]: the linear beam kinds, bounded beams across their
+/// bounds, torsion elements, pressure groups' gas); aerodynamic and trigger records
+/// store none. The beams' dissipation, −(W_beams + ΔU), is then damping, yield and
+/// fracture only, and a rise of kinetic + gravitational + elastic is created energy.
 #[derive(Clone, Debug, Default)]
 pub struct EnergyLedger {
     pub kinetic: f64,
@@ -1107,11 +1106,28 @@ impl EnergyLedger {
     }
 }
 
-/// The elastic energy (J) of `v`'s linear beam kinds (see [`EnergyLedger`]).
+/// The stored energy (J) of `v`'s conservative records (see [`EnergyLedger`]): ½k·e²
+/// of the linear beam kinds (plain, support in compression, ropes in tension,
+/// couplers, anisotropic at their base rate, LBEAMs at their arm-following rest);
+/// bounded beams' ∫k(x)·x dx across their bound zone and limit spring; torsion
+/// elements' ½k·wrap(φ − φ₀)²; and pressure groups' gas, ∫ p_gauge dV from the
+/// spawn volume (isothermal, capped as the force is). With every stored term in, a
+/// rise of kinetic + gravitational + this is energy the step created.
 pub fn elastic_energy(v: &ExplicitBeams) -> f64 {
     let mut u = 0.0f64;
     for (j, b) in v.beams.iter().enumerate() {
         if b.broken {
+            continue;
+        }
+        if b.kind == ExplicitKind::JbeamTorsion {
+            let (c, d) = (v.beams[j + 1].a, v.beams[j + 1].b);
+            let x = [b.a, b.b, c, d].map(|i| v.nodes[i as usize].pos);
+            let dphi = crate::explicit_beams::wrap_angle(crate::explicit_beams::dihedral(x) - b.rest);
+            u += 0.5 * f64::from(b.k) * f64::from(dphi) * f64::from(dphi);
+            continue;
+        }
+        if b.kind == ExplicitKind::JbeamPressureGroup {
+            u += gas_energy(v, j);
             continue;
         }
         let (pa, pb) = (v.nodes[b.a as usize].pos, v.nodes[b.b as usize].pos);
@@ -1121,11 +1137,14 @@ pub fn elastic_energy(v: &ExplicitBeams) -> f64 {
             | ExplicitKind::LimitedSpring
             | ExplicitKind::Shock2
             | ExplicitKind::JbeamPlain
-            | ExplicitKind::JbeamBounded
             | ExplicitKind::JbeamCoupler
             | ExplicitKind::JbeamAniso => len - b.rest,
+            ExplicitKind::JbeamBounded => {
+                u += bounded_energy(b, len - b.rest);
+                continue;
+            }
             ExplicitKind::Support | ExplicitKind::JbeamSupport => (len - b.rest).min(0.0),
-            ExplicitKind::Rope => (len - b.rest).max(0.0),
+            ExplicitKind::Rope | ExplicitKind::JbeamRope => (len - b.rest).max(0.0),
             ExplicitKind::JbeamLbeam => {
                 let c = v.beam_ext[v.ext_of[j] as usize - 1].index(0) as usize;
                 let (a, bb) = (pa.distance(v.nodes[c].pos), pb.distance(v.nodes[c].pos));
@@ -1136,6 +1155,90 @@ pub fn elastic_energy(v: &ExplicitBeams) -> f64 {
         u += 0.5 * f64::from(b.k) * f64::from(e) * f64::from(e);
     }
     u
+}
+
+/// A bounded beam's spring energy at extension `e`: ∫₀ᵉ k(x)·x dx with the rate
+/// `jbeam_force_filtered` gives it (the base rate inside the bounds, blending to the
+/// limit rate across the bound zone past them).
+fn bounded_energy(b: &crate::explicit_beams::Beam, e: f32) -> f64 {
+    let (long, short) = (b.long_bound * b.rest, b.short_bound * b.rest);
+    let rate = |x: f64| -> f64 {
+        let o = if x > f64::from(long) {
+            x - f64::from(long)
+        } else if x < -f64::from(short) {
+            -x - f64::from(short)
+        } else {
+            0.0
+        };
+        let k = f64::from(b.k);
+        if o > 0.0 {
+            let zone = f64::from(b.plastic);
+            let s = if zone > 0.0 { (o / zone).min(1.0) } else { 1.0 };
+            k + (f64::from(b.limit_k) - k) * s
+        } else {
+            k
+        }
+    };
+    let e = f64::from(e);
+    let inside = if e >= 0.0 { f64::from(long) } else { -f64::from(short) };
+    if (e >= 0.0 && e <= inside) || (e < 0.0 && e >= inside) {
+        return 0.5 * f64::from(b.k) * e * e;
+    }
+    // Inside the bound at the base rate, then Simpson's rule beyond it.
+    let mut u = 0.5 * f64::from(b.k) * inside * inside;
+    let n = 64;
+    let h = (e - inside) / n as f64;
+    let f = |x: f64| rate(x) * x;
+    let mut acc = f(inside) + f(e);
+    for i in 1..n {
+        acc += f(inside + h * i as f64) * if i % 2 == 1 { 4.0 } else { 2.0 };
+    }
+    u += acc * h / 3.0;
+    u
+}
+
+/// A pressure group's gas energy: ∫_V^{V₀} p(V') dV', p the gauge pressure the group
+/// applies (`pressure_group_gauge`: isothermal p_abs = p_abs,0·V₀/V, the volume held
+/// at 1 % of V₀ or more, the gauge capped).
+fn gas_energy(v: &ExplicitBeams, j: usize) -> f64 {
+    let ext = &v.beam_ext[v.ext_of[j] as usize - 1];
+    let c = v.nodes[v.beams[j].a as usize].pos;
+    let first = ext.index(0) as usize;
+    let count = ext.index(1) as usize;
+    let mut vol = 0.0f64;
+    for t in 0..count {
+        let r = first + 2 * t;
+        let x0 = (v.nodes[v.beams[r].a as usize].pos - c).as_dvec3();
+        let x1 = (v.nodes[v.beams[r].b as usize].pos - c).as_dvec3();
+        let x2 = (v.nodes[v.beams[r + 1].a as usize].pos - c).as_dvec3();
+        vol += x0.dot(x1.cross(x2));
+    }
+    let vol = vol / 6.0;
+    let v0 = f64::from(ext.e1[2]);
+    let cst = f64::from(ext.e1[3]) * v0;
+    let atm = f64::from(crate::explicit_jbeam_ext::ATMOSPHERE);
+    let cap = f64::from(ext.e2[0]);
+    let p = |x: f64| (cst / x.max(0.01 * v0) - atm).min(cap);
+    // Breakpoints: the volume floor and where the cap starts.
+    let (lo, hi, sign) = if vol < v0 { (vol, v0, 1.0) } else { (v0, vol, -1.0) };
+    let mut cuts = vec![lo, hi, 0.01 * v0];
+    if cap.is_finite() {
+        cuts.push(cst / (atm + cap));
+    }
+    cuts.retain(|&x| x >= lo && x <= hi);
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let mut u = 0.0;
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let m = 0.5 * (a + b);
+        u += if m < 0.01 * v0 || p(m) >= cap {
+            p(m) * (b - a)
+        } else {
+            cst * (b / a).ln() - atm * (b - a)
+        };
+    }
+    sign * u
 }
 
 /// One hit of an owner's walk: the triangle's nodes (n₀, n₁, n₂) and weights
