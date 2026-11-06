@@ -659,7 +659,7 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
                 let (a, b) = (tr[e], tr[(e + 1) % 3]);
                 edges.get(&(a.min(b), a.max(b))).map_or(0, |v| v.len()) == 1
             });
-            if (tr.iter().all(|&v| on_border(v)) && height < 0.0025)
+            if (tr.iter().all(|&v| on_border(v)) && height < 0.0035)
                 || (on_outline && height < 0.002)
             {
                 dead[t] = true;
@@ -1041,7 +1041,7 @@ pub fn hem(part: &mut Part, g: &Grid, ids: &[u32], e: usize, m: Mat) {
         let last = q + 1 == all.len();
         if let Some(&pk) = idx.last() {
             let (a, b) = (ids[pk] as usize, ids[k] as usize);
-            if a == b || (!last && part.pos[a].distance(part.pos[b]) < 0.005) {
+            if a == b || (!last && part.pos[a].distance(part.pos[b]) < 0.009) {
                 continue;
             }
         }
@@ -1528,7 +1528,7 @@ pub fn build() -> Model {
     // ------------------------------------------------------------------
     // Hood: from the cowl to its leading edge (bowed back to the corners).
     // ------------------------------------------------------------------
-    let hood_front = |t: f32| 2.20 + 0.075 * (1.0 - (2.0 * t - 1.0).powi(2));
+    let hood_front = |t: f32| 2.225 + 0.07 * (1.0 - (2.0 * t - 1.0).powi(2));
     let hood = {
         let h1 = th_hood.clone();
         let h2 = th_hood.clone();
@@ -1591,7 +1591,7 @@ pub fn build() -> Model {
             ZC_F
         } else {
             let w = 1.0 - t / t_seam;
-            ZC_F + (2.20 - ZC_F) * w.powf(1.6)
+            ZC_F + (2.225 - ZC_F) * w.powf(1.6)
         }
     };
     let fender = {
@@ -2007,42 +2007,53 @@ pub fn build() -> Model {
         )
         .edge_points(3);
     }
-    // Quarter below the belt: rear door to the tail lamp (over the bumper).
-    let t_seam_r = {
-        let lo = th_belt.at(ZC_R);
-        let hi = th_side_bottom.at(ZC_R);
-        (sf::theta_at_y(ZC_R, sf::shoulder_y(ZC_R)) - lo) / (hi - lo)
-    };
-    let quarter_rear = move |t: f32| {
-        if t >= t_seam_r {
-            ZC_R
-        } else {
-            let w = 1.0 - t / t_seam_r;
-            ZC_R + (quarter_end - ZC_R) * w.powf(1.3)
-        }
-    };
-    let quarter = {
+    // Quarter below the belt, in two strips: ahead of ZC_R down to the rear
+    // arch (the rear door to the bumper's end), and behind it down to the
+    // bumper's top, back to the deck side's end (the tail lamp's shut line
+    // runs straight down the deck side's and this strip's ends).
+    let th_bumper_r = Table::new(|u| sf::theta_at_y(u, BUMPER_TOP_R), -2.45, -1.6);
+    {
         let (a, b) = (th_belt.clone(), th_side_bottom.clone());
         let mut s = Strip::new(
             Param::Section,
             k(DOOR_R),
-            Box::new(quarter_rear),
+            k(ZC_R),
             Box::new(move |u| a.at(u)),
             Box::new(move |u| b.at(u)),
         );
         let c = th_shoulder.clone();
         s.creases.push(Box::new(move |u| c.at(u)));
-        s
+        panel_by(
+            &mut m,
+            "body_shell",
+            Some("body_shell"),
+            &s,
+            Mat::Paint,
+            [0.0, GAP, GAP, GAP],
+            [false, true, true, true],
+        );
+    }
+    let g_quarter = {
+        let (a, b) = (th_belt.clone(), th_bumper_r.clone());
+        let mut s = Strip::new(
+            Param::Section,
+            k(ZC_R),
+            k(quarter_end),
+            Box::new(move |u| a.at(u)),
+            Box::new(move |u| b.at(u)),
+        );
+        let c = th_shoulder.clone();
+        s.creases.push(Box::new(move |u| c.at(u)));
+        panel_by(
+            &mut m,
+            "body_shell",
+            Some("body_shell"),
+            &s,
+            Mat::Paint,
+            [0.0, GAP, 0.0, GAP],
+            [false, true, false, true],
+        )
     };
-    let g_quarter = panel_by(
-        &mut m,
-        "body_shell",
-        Some("body_shell"),
-        &quarter,
-        Mat::Paint,
-        [0.0, GAP, GAP, GAP],
-        [false, true, true, true],
-    );
     // Rockers: between the arches, from the door bottoms under to the floor.
     {
         let a = th_door_bottom.clone();
@@ -2103,7 +2114,7 @@ pub fn build() -> Model {
     };
     let x_tl_in = 0.47;
     let phi_tl_in = phi_at_x(Param::Tail, x_tl_in, 0.95);
-    let y_rbt = |phi: f32| BUMPER_TOP_R - 0.012 * (1.0 - (phi / FRAC_PI_2).powi(2)).max(0.0);
+    let y_rbt = |_phi: f32| BUMPER_TOP_R;
     // The light bar's band (below the fold).
     let (bar0, bar1) = (0.082f32, 0.050f32);
     {
@@ -2158,57 +2169,22 @@ pub fn build() -> Model {
             LampKind::Bar,
         );
     }
-    // Tail lamps: slim units at the rear face's corners under the deck's and
-    // the quarter's edges, wrapping round onto the quarter, tapering at their
-    // inner ends to the light bar's height.
+    // Tail lamps: slim units at the rear face's corners, wrapping round onto
+    // the side as far as the quarter's straight end (z = quarter_end), their
+    // tops tucked under one continuous shut line: the boot lid's fold, then
+    // the deck side's end. They taper at their inner ends to the light bar's
+    // height. Under them a body panel runs down to the bumper.
+    let phi_q = {
+        // The quarter's end in the tail family: its points' mean plan angle.
+        let e = g_quarter.edge_points(3);
+        e.iter().map(|&p| sf::invert(Param::Tail, p).0).sum::<f32>() / e.len() as f32
+    };
     let tl_top = {
-        // The edges above the lamp: the boot lid's fold, the deck side's tail
-        // end, the quarter's. Where two overlap in φ the lamp tucks under
-        // the lower (the one seen from behind).
-        let ys = sf::shoulder_y(ZC_R) - 0.01;
-        let edges: Vec<Vec<Vec3>> = vec![
-            fold.iter().copied().filter(|p| p.x > 0.0).collect(),
-            deck_end.clone(),
-            g_quarter
-                .edge_points(3)
-                .into_iter()
-                .filter(|p| p.y > ys)
-                .collect(),
-        ];
-        let spans: Vec<(f32, f32, F)> = edges
-            .iter()
-            .filter(|e| e.len() > 1)
-            .map(|e| {
-                let phis: Vec<f32> = e.iter().map(|&p| sf::invert(Param::Tail, p).0).collect();
-                let lo = phis.iter().copied().fold(f32::MAX, f32::min);
-                let hi = phis.iter().copied().fold(f32::MIN, f32::max);
-                (lo, hi, phi_y(Param::Tail, e))
-            })
-            .collect();
-        Table::new(
-            move |phi| {
-                let mut y = f32::MAX;
-                for (lo, hi, f) in &spans {
-                    if phi >= *lo - 1e-3 && phi <= *hi + 1e-3 {
-                        y = y.min(f(phi));
-                    }
-                }
-                if y == f32::MAX {
-                    // Outside every edge: the nearest edge's end.
-                    let (_, _, f) = spans
-                        .iter()
-                        .min_by(|a, b| {
-                            let d = |s: &(f32, f32, F)| (phi - s.0).abs().min((phi - s.1).abs());
-                            d(a).total_cmp(&d(b))
-                        })
-                        .unwrap();
-                    y = f(phi);
-                }
-                y
-            },
-            0.0,
-            FRAC_PI_2,
-        )
+        let mut top: Vec<Vec3> = fold.iter().copied().filter(|p| p.x > 0.0).collect();
+        top.extend(deck_end.iter().copied());
+        // The deck side's end below the belt continues as the quarter's.
+        top.extend(g_quarter.edge_points(3));
+        Table::new(phi_y(Param::Tail, &top), 0.0, FRAC_PI_2)
     };
     let tl_lo = {
         let t = tl_top.clone();
@@ -2222,13 +2198,12 @@ pub fn build() -> Model {
             FRAC_PI_2,
         )
     };
-    let phi_end_r = FRAC_PI_2 - 1e-3;
     {
         let (a, b) = (tl_lo.clone(), tl_top.clone());
         let st = Strip::new(
             Param::Tail,
             k(phi_tl_in),
-            k(phi_end_r),
+            k(phi_q),
             Box::new(move |p| a.at(p)),
             Box::new(move |p| b.at(p)),
         );
@@ -2251,12 +2226,12 @@ pub fn build() -> Model {
             [0.75, 0.03, 0.03],
             LampKind::Tail,
         );
-        // The quarter's rear face under the lamp, to the bumper.
+        // The rear face under the lamp, to the bumper.
         let a = tl_lo.clone();
         let st = Strip::new(
             Param::Tail,
             k(phi_tl_in),
-            k(phi_end_r),
+            k(phi_q),
             Box::new(y_rbt),
             Box::new(move |p| a.at(p)),
         );
@@ -2266,11 +2241,10 @@ pub fn build() -> Model {
             Some("body_shell"),
             &st,
             Mat::Paint,
-            [true, true, true, false],
-            [true, true, true, false],
+            [true, true, true, true],
+            [true, true, true, true],
         );
     }
-
     // ------------------------------------------------------------------
     // Nose: grille, headlamps, bumper.
     // ------------------------------------------------------------------
@@ -2330,14 +2304,14 @@ pub fn build() -> Model {
     // dark-chrome frame round a recessed honeycomb), a painted bar, then a
     // broad lower intake over the splitter. The centre's sides follow one
     // line, `x_edge(y)`.
-    let (y_bb, y_it, y_gb, y_gt) = (0.30f32, 0.37f32, 0.40f32, 0.60f32);
+    let (y_bb, y_it, y_gb, y_gt) = (0.30f32, 0.352f32, 0.40f32, 0.60f32);
     let x_edge = move |y: f32| {
         if y <= y_it {
-            0.55
+            0.48
         } else if y <= y_gb {
-            0.55 - 0.05 * (y - y_it) / (y_gb - y_it)
+            0.48 - 0.02 * (y - y_it) / (y_gb - y_it)
         } else {
-            0.50 - 0.10 * ((y - y_gb) / (y_gt - y_gb)).min(1.0)
+            0.46 - 0.05 * ((y - y_gb) / (y_gt - y_gb)).min(1.0)
         }
     };
     let phi_e = Table::new(
@@ -2411,9 +2385,9 @@ pub fn build() -> Model {
     }
     // Bumper: beside the centre, under the lamps and round to the arches; a
     // corner vent each side; a textured black splitter along its foot.
-    let phi_v0 = phi_at_x(Param::Nose, 0.62, 0.40);
-    let phi_v1 = phi_at_x(Param::Nose, 0.79, 0.40);
-    let (yv0, yv1) = (0.335, 0.455);
+    let phi_v0 = phi_at_x(Param::Nose, 0.665, 0.42);
+    let phi_v1 = phi_at_x(Param::Nose, 0.80, 0.42);
+    let (yv0, yv1) = (0.335, 0.53);
     {
         let side = |lo: F, hi: F, a0: F, a1: F, gaps: [bool; 4]| (a0, a1, lo, hi, gaps);
         let al = || arch_lo(Param::Nose, y_bb);
@@ -3584,7 +3558,7 @@ fn markers(m: &mut Model) {
             );
             m.marker(
                 &format!("latch_door_{name}"),
-                sx(side_pt(zr + 0.03, 0.70)) - Vec3::new(s * 0.03, 0.0, 0.0),
+                sx(side_pt(zr, 0.70)) - Vec3::new(s * 0.03, 0.0, 0.0),
             );
         }
         m.marker(
@@ -3601,7 +3575,7 @@ fn markers(m: &mut Model) {
             Vec3::new(0.80, 0.88, 1.0),
             Vec3::new(0.78, 0.84, 1.45),
             Vec3::new(0.70, 0.79, 1.95),
-            sx(side_pt(DOOR_F + 0.04, 0.40)) * Vec3::new(s, 1.0, 1.0),
+            sx(side_pt(DOOR_F + 0.04, 0.40)),
         ];
         for (q, p) in pts.iter().enumerate() {
             let p = if q < 3 {
