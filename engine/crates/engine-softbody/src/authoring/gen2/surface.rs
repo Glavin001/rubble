@@ -142,7 +142,8 @@ impl Profiles {
     pub fn new() -> Self {
         // The side glass's base: a gentle wedge, rising toward the tail.
         let belt = Spline::new(&[
-            (Z_REAR, 0.985),
+            (Z_REAR, 0.945),
+            (-2.20, 0.975),
             (-1.80, 0.998),
             (-1.20, 0.995),
             (-0.30, 0.978),
