@@ -571,6 +571,97 @@ At 128 cars the whole pass was about 2.9 ms of the 3.7 ms that vehicle contact a
    frame's steps. A tighter per-step overlap test is already the scans' job, so
    nothing to gain beyond the early out.
 
+### 8.4 Round 2 continued (E1, scaling), 2026-11-06
+
+Measured under a shared GPU (four other agents, load 15 to 40). Each change was timed
+by interleaved A/B: two builds alternating from one saved state, `explicit_frame_dump
+time`, 5 runs each, medians. The p99 matrix waits for a quiet window.
+
+| Change | Check | Effect |
+|---|---|---|
+| vvPassSmall early out (8f8cb79b) | bitwise against the frozen reference, frame dump, Metal parity | within noise alone; the whole branch, base 10.13 → 7.28 ms (128 cars after 150 steps, 120 Hz frame) |
+| Candidate gathering per owner side by side (6b23d0ce) | same | 7.25 → 7.14 ms, within noise |
+| Coupling plan written lane-parallel (9004c91b) | `the_coupling_plan_in_parallel_is_the_serial_walk`: every record and share count equal to the serial walk from one World state | not yet timed (0.9 ms in the sync split before) |
+| 512 lanes a vehicle (`RUBBLE_EXPLICIT_LANES=512`) | (setting) | 7.26 vs 7.16 ms, within noise: unchanged |
+
+Whole step, 128 cars at 120 Hz, two runs each under load: base p50 13.3 / p99 18.1–18.4
+ms, branch 11.4–11.7 / 14.5–16.3 ms.
+
+**Not landed, measured.**
+- **A pair's candidate grid in the triangle phase** (`vvTriangleCandsGrid`: each
+  owner's candidates bucketed by cell; a triangle visits its box's cells, and each
+  candidate counts only at its own cell). Bit-identical in every check, but not faster:
+  - the crash town at 128 cars: 7.63 against 7.50 ms;
+  - 16 high-resolution JBeam cars in pair crashes (`explicit_beams_scaling pileup`,
+    2 × 2 trials): 18.85 against 20.8 ms, *slower*, from its counting, scan and scatter
+    barriers.
+
+  The triangle phase's cost is the hit tests (`vvFind`, `vvClip`) on candidates
+  really in a triangle's box, not the scan over candidates.
+- **Ordered hit application.** Its scans are about 0.5 ms of the levels' 1.8 ms
+  (`EB_ABLATE` 2097152, time only); the rest is `vvTry`. Not taken.
+
+**Where a 128-car, 120 Hz step goes** (sync split, about 0.15 ms of wait per segment
+included):
+
+| Segment | Time |
+|---|---|
+| Explicit frame | 7.6 ms |
+| Rigid step | ~6.5 ms in this mode, ~3 ms in normal timing; its broadphase 1.75 ms against 0.75 for the houses alone (the freed debris) |
+| Fracture | 1.6 ms |
+| Coupling plan | 0.9 ms |
+| Coupling loads | 0.27 ms |
+
+The frame's ablation at 128 cars, coupling off:
+- the vehicle–vehicle pass is about 3.1 ms;
+- its triangle phase is about 2.4 ms;
+- its levels are about 1.8 ms (the two overlap).
+
+**Costs that scale with totals, not with activity** (the large-maps rule: a step's cost
+should follow awake bodies and active destruction only):
+
+- **The explicit frame** dispatches a workgroup per vehicle and steps every vehicle
+  through every substep. A parked car costs as much as a crashing one; there is no
+  soft-body sleep. A sleep rule for soft bodies changes results (a resting car still
+  oscillates at rounding level), so it is a design decision with an explicit
+  engine-wide setting, not a lossless change.
+- **The coupling plan** (`cpl_plan`) tests every collider in the World for every
+  vehicle, every window: O(vehicles × colliders). On a city map that is the largest
+  O(total) term on the vehicle side. The surface-contact work (vehicles in the World
+  broadphase as proxies) replaces this scan with the broadphase query; until then a
+  coupling-owned grid over colliders would do it.
+- **The vehicle contact plan** (`explicit_beams_vv_bounds`, `_pairs`, `_group`) is
+  O(vehicles) per plan, plus a single workgroup's connected components over the pairs.
+  It scales with the fleet, not the map.
+- **`cpl_bounds`, `cpl_share`, `cpl_loads` and `cpl_emit`** run a workgroup per
+  vehicle. They are cheap for vehicles without proxies, but are still launched.
+- **The rigid step and the threshold fracture**: see `engine/docs/large-maps.md`
+  (branch `feat/large-maps`). There, every per-step pass of `rigid_plan` and the
+  fracture's loads, breaks and readbacks run over all bodies, colliders, chunks and
+  bonds.
+
+### 8.5 Scaling to large maps: the baseline (2026-11-06)
+
+`vehicle_scale_bench` (engine-world example; CSV and plots in
+`engine/docs/measurements/vehicle-scale/`): repo sedans on beam tyres, World steps of
+1/120 s, each step's span from submit to completion (median, p95, p99 ms). M3 Max with
+other agents on the GPU (load 40 to 90), so single points are noisy; the shapes are
+what matter. Baseline (3cf34d27 with the bench added):
+
+| Scenario | Points (p50 ms) |
+|---|---|
+| Cars driving at fixed density (6 m lanes, 15 m apart) | 64: 2.14, 128: 3.47, 256: 4.91, 512: 8.20, 1024: 13.86 |
+| 128 cars: spread, traffic (1 m nose to tail), pile-up (pairs head on) | 3.46, 3.58, 5.90 |
+| 1,000 parked (settled 4 s) + 10 driving | 15.93 |
+| Rigid bodies at 1 % awake + 10 driving cars: 10k, 30k, 100k | 2.41, 2.39, 3.32 |
+| Nothing active: map side 500, 1000, 2000, 4000 m (400 sleeping buildings and 64 parked cars per km²) | 1.74, 2.81, 5.49, 15.64 |
+
+The parked lot costs as much as 1,000 driving cars, and an idle map grows with its area
+(its parked cars): the explicit frame steps every vehicle every substep, and the
+coupling's passes run a workgroup per vehicle. The rigid bodies' own idle cost is
+`large-maps.md`'s (their row is flat here because 99 % are asleep and the World skips
+nothing while the vehicles request every step).
+
 ## 9. Remaining
 
 - In-frame release: a chunk proxy freed the substep its load passes its capacity (today the
@@ -583,3 +674,285 @@ At 128 cars the whole pass was about 2.9 ms of the 3.7 ms that vehicle contact a
   loudly; the shared fracture's are supported.
 - Wide passes with the coupling (single very large vehicles without vehicle contact).
 - Rigid bodies resting *on* vehicles are held by staggered impulses (§2), a few mm of sink.
+
+## 10. Vehicle sleep (2026-11-06)
+
+Decision (user, 2026-11-06): vehicle sleep is an explicit engine-wide setting, on by
+default for large worlds and off in the crash lab. Code: `engine_softbody::explicit_sleep`
+(the rule and its CPU reference), `slang/kernels/explicit_beams_sleep.slang` (GPU),
+`vehicle_coupling.slang` (the World's wake), `ExplicitVehiclesDef::sleep` (World, default
+on), `ExplicitBeamsGpu::with_sleep` and `ExplicitBeamsWorld::sleep` (off unless set: the crash
+lab's hosts and the CPU fleet step every vehicle as before).
+
+**The rule** (every frame's end, for each awake vehicle; one arithmetic on CPU and GPU):
+a vehicle is *moving* if at some step of the frame some node's velocity had a component
+above `speed`; otherwise *displaced* if it has no anchor (its node positions when its still
+stretch began) or a node is farther than `reach` from its anchor along an axis. Moving: still
+count 0, anchor dropped. Displaced: anchor = the positions now, still count 0. Else the still
+count grows by the frame's steps. A solo vehicle sleeps when the count reaches `dwell`; the
+members of a contact group sleep together, when every member's count has reached it. A
+sleeping vehicle is not stepped at all, its step counter stands, and on waking it resumes
+exactly where it was frozen.
+
+**Thresholds, from the solver's resting floor** (`engine-softbody/examples/sleep_probe.rs`).
+The repo sedan parked on its beam tyres never comes to rest: a tyre node chatters against the
+ground for good at 0.112 m/s with a 57 µm stroke (the RoR ground rule's two-step limit
+cycle), RMS node speed 6 to 10 mm/s, KE 2–5·10⁻⁵ J/kg, while no node leaves a 57 µm box. An
+instantaneous speed bound at the 1 mm/s contact floor would never let it sleep, so stillness
+is judged by position, with a loose speed bound for what a frame-end test could alias:
+* `speed` 0.25 m/s (2.2 × the chatter; 0.031 J/kg per node);
+* `reach` 0.1 mm (above the chatter's stroke; over the dwell a still vehicle's mean speed is
+  at most 0.2 mm/s; it bounds the difference between a frozen vehicle and one that never
+  slept, plus the chatter);
+* `dwell` 1000 steps, 0.5 s (Box3D's time to sleep; longer than half a car body's bounce).
+
+Measured: the repo sedan sleeps 2.7 s after a 2 cm drop; the raycast sedan's slower
+suspension bounce (4 mm at 6 s) keeps it awake until it decays; the JBeam fixture car's
+lightly damped pressure wheels rock for about 50 s.
+
+**Waking** (the whole vehicle; still count 0, anchor dropped):
+* *rigid bodies*: the World's coupling plan (`cpl_plan`) wakes a vehicle when a collider
+  among its proxy candidates (the swept-bounds overlap) belongs to a moving body: a dynamic
+  body awake in the World, or any body with a velocity. Static, anchored and sleeping bodies
+  do not. Awake vehicles beside a moving body are reset too, so none falls asleep there;
+* *another vehicle*: a contact group (overlapping frame bounds, the vehicle contact plan)
+  with an awake member wakes its sleeping members;
+* *the host*: a changed drive input (throttle, brake release, steering), velocities written,
+  the grab (kept awake while held), held throttle (kept awake), `wake(v)` for a scripted
+  force.
+
+**Cost while asleep.** With two or more vehicles, a sleeping vehicle is not dispatched:
+`explicit_beams_sleep_list` (one workgroup, every frame, after the contact plan) writes the
+awake vehicles in vehicle order and the frame's indirect arguments (the frame over the
+awake ones; with vehicle contact the solo and group dispatches, the groups past the awake
+count). A lone vehicle's workgroup returns at once; a contact group of sleepers returns
+at once. With every vehicle asleep (the host reads the asleep bits back) and nothing
+written to one, the vehicles stop requesting World steps, so an all-asleep World skips its
+step. In the World, `cpl_bounds` keeps a sleeping vehicle's bounds (its nodes have not
+moved) instead of reading its nodes, and `cpl_share`, `cpl_loads` and `cpl_emit` are
+dispatched (indirect) over the vehicles `cpl_plan` gave proxies only. `cpl_plan` itself
+still runs a workgroup per vehicle and tests every collider (§8.4's O(vehicles ×
+colliders), the World-broadphase work, §10.1), and the awake list is O(vehicles) threads
+of one workgroup.
+
+Lossless for awake vehicles: a vehicle's frame is the same whatever workgroup runs it, and
+the coupling passes do nothing for a vehicle without proxies. Checked: the awake vehicles
+of a fleet with sleep on, through the awake list (with and without vehicle contact), bit
+for bit with a fleet without sleep, the sleeping one frozen; the World's coupling tests
+(momentum through the World, the house strike, the parallel plan, the cull, the workgroup
+copies) unchanged; `explicit_frame_dump` from one saved crash-town state (64 cars, sleep
+off: `town_coupling` keeps it off, a crash scene): every state word equal to 3cf34d27's.
+
+**Readback.** A pass after the frame packs the asleep bits (a word per 32 vehicles) into the
+World's step readback; `Frame::explicit_sleep` lists the vehicles that fell asleep or woke
+(`ExplicitSleepEvent`), and `World::explicit_sleep_states` reads every record (tests).
+
+**Tests.**
+
+| Test | Result |
+|---|---|
+| CPU ↔ GPU (`engine-webgpu/tests/explicit_sleep_gpu.rs`, the JBeam fixture car, bit for bit on both) | every node bit for bit every frame, the same still counts, asleep in the same frame (4.2 s after a 45 s settle); 10 frames asleep: no GPU state word changes, the step counter stands; woken, bit for bit again |
+| Off, and on for awake vehicles | a fleet built without sleep, one with sleep built and off, and one with it on: every frame bit for bit for the driving car (and the settling one until it sleeps) |
+| Another vehicle wakes it | a car at 6 m/s wakes a sleeping one 2.33 m before contact, in the same frame on the CPU and the GPU; against a car that never slept: 0.015 mm at waking, 0.054 mm at contact + 0.1 s |
+| World (`engine-world/tests/explicit_sleep.rs`) | the parked sedan sleeps in 2.73 s; 59 of 60 World steps skipped while asleep, its state unchanged; a falling box wakes it 0.52 m above the roof, 0.023 mm from a never-slept twin; over the strike the box departs from the twin's by 194 mm, as a twin's whose sedan was nudged 0.02 mm does (199 mm): a box between roof nodes is chaotic under node-only contact, not the sleep |
+
+### 10.1 Fix: every proxy body is integrated (more than a workgroup's lanes)
+
+**Behaviour change, only for a vehicle holding more proxy bodies than its workgroup has
+lanes (256, or 512 on the 512-lane modules; the room allows 1024).** `cplIntegrate` let
+lane j integrate body j and skipped bodies j ≥ LANES (and `cplIntegrateBy` capped them
+at LANES): such a body never moved inside the frame, its shapes' step sums were never
+folded into their window impulses, so the World received no impulse for it. Each lane
+now integrates bodies j, j + LANES, … (`explicit_beams_rigid.slang`); vehicles with fewer
+bodies run the same work as before. Failing test first: `explicit_rigid_gpu.rs`
+`more_proxy_bodies_than_lanes_are_all_integrated` (a lone sedan, 600 proxy bodies, the
+struck box last): before, GPU 0 m/s against the CPU's 10.80 m/s; after, equal to 1 %.
+(300 bodies did not show it: a lone vehicle runs on the 512-lane module.)
+
+### 10.3 Before and after (2026-11-06)
+
+`vehicle_scale_bench`, interleaved A/B: per scenario the baseline (3cf34d27 + the bench)
+then this branch (sleep on, the World's default), twice, then this branch with sleep off;
+median of the two runs' p50 (ms per 120 Hz World step, submit to completion). Load 40 to
+130 from other agents, so differences under about 1 ms are noise. CSV
+`engine/docs/measurements/vehicle-scale/after_ab.csv`, plots beside it.
+
+| Scenario | Before | After | After, sleep off |
+|---|---|---|---|
+| Fleet driving, 64 / 128 / 256 / 512 / 1024 cars | 2.74 / 3.02 / 3.73 / 6.08 / 11.10 | 3.80 / 3.00 / 3.67 / 6.22 / 11.63 | 2.48 / 3.36 / 3.89 / 6.31 / 11.47 |
+| 128 cars spread / traffic / pile-up | 2.90 / 3.52 / 4.95 | 3.69 / 3.10 / 5.11 | 3.63 / 3.62 / 5.01 |
+| **1,000 parked + 10 driving** | **14.34** (p95 25.4) | **2.65** (p95 3.0) | 13.57 |
+| Rigid bodies 10k / 30k / 100k (1 % awake) + 10 cars | 1.72 / 1.92 / 3.33 | 1.79 / 2.71 / 3.20 | 1.66 / 1.74 / 2.28 |
+| **Map side 500 / 1000 / 2000 / 4000 m, nothing driving** | 1.74 / 2.63 / 4.92 / **16.24** | 2.27 / 2.46 / 3.14 / **7.31** | 3.69 / 3.74 / 5.30 / 14.60 |
+
+* Awake work is unchanged (the fleet and density rows, within noise), as the bit-for-bit
+  checks say it must be.
+* Parked vehicles cost what the awake ones do (1,010 cars: 2.65 ms, like the 10 driving
+  cars plus the plan) instead of 1,010 cars' frame: 5.4× less at the median, 8× at p95.
+  With the awake list against sleeping workgroups returning at once (same build,
+  `RUBBLE_SLEEP_LIST=0`): 2.55 against 4.77 ms.
+* The idle map still grows with its area, at half the slope: in a 4 km side map 743 of
+  1,024 parked sedans sleep after 4 s, and with any awake the World cannot skip its step.
+  The rest stay awake: a share of parked repo sedans keep a residual motion past the rule's
+  0.1 mm over 0.5 s (in the 1,000-car lot 985 sleep; in the 500 m map 11 of 16; the same
+  after 12 s, and not the float rounding of large coordinates: the awake ones are rebased
+  to small local coordinates). Then `cpl_plan`'s per-vehicle scan of every collider
+  (§10.2) and the awake cars' frames remain. Loosening `reach` would let them sleep; it is
+  a lossy trade and left for a decision.
+
+### 10.4 Creep and sleep against distance from the origin
+
+`engine-softbody/examples/sleep_distance.rs`: on the CPU reference with the World's
+clock (120 Hz frames), each frame re-bases as the GPU does. A vehicle spawns at rest at
+(d, 0, d/2) the way `place_vehicle` places it (world positions, origin 0). The table gives
+when it falls asleep under the default rule, and its creep over the last 2 s of a run
+with sleep off, measured in vehicle-local coordinates.
+
+| d (m) | Repo sedan: asleep at (s); CoM / largest node travel (mm) | Fixture car (pressure wheels, 90 s): asleep at (s); CoM / node (mm) |
+|---|---|---|
+| 0 | 2.39; 0.003 / 0.023 | 49.6; 0.002 / 0.005 |
+| 30 | 2.42; 0.013 / 0.043 | 43.0; 0.007 / 0.024 |
+| 60 | 2.27; 0.000 / 0.036 | 54.8; 0.029 / 0.054 |
+| 100 | 2.61; 0.001 / 0.024 | 54.8; 0.039 / 0.085 |
+| 500 | 2.65; 0.044 / 0.176 | 58.7; 0.006 / 0.013 |
+| 1000 | 2.61; 0.001 / 0.044 | 47.6; 0.001 / 0.005 |
+| 2000 | 2.35; 0.002 / 0.039 | 44.9; 0.002 / 0.005 |
+| 4000 | 2.79; 0.004 / 0.045 | 53.2; 0.014 / 0.028 |
+
+**Creep does not grow with distance.** The solver already keeps node positions in
+vehicle-local coordinates: each frame moves a vehicle's origin to node 0 when node 0 is
+farther than `REBASE_RADIUS` (100 m) from it, so past 100 m every node sits within a car's
+size of its origin. Only the World-space boundaries add the origin back: proxies, the
+coupling plan and vehicle contact. The rule's `reach` test runs in local coordinates.
+
+The largest local coordinates come just inside the radius (up to 100 m, a float spacing
+of 7.6 µm). The fixture car's slightly larger creep at 60–100 m is from that band, and it
+still sleeps. The 1 mm/s creep measured earlier at x = −30 came from a run that never
+re-based. So no fix is built.
+
+A smaller radius would re-base at different frames from today, so it would not be bit
+for bit near the origin. It has no measured benefit for sleep.
+
+Open, and separate from sleep: at km scale the World-space boundaries run in f32 world
+coordinates. At 4 km the spacing is 0.24 mm for contact points against rigid proxies and
+between vehicles. The lossless direction would be to shift each vehicle's proxies into its
+local frame in `cpl_plan`, and its contact partners into the owner's frame. That is a
+contact-precision change, not a sleep one, so it is proposed here, not built.
+
+**Built (approved 2026-11-06, after the broadphase merge): contact in vehicle frames.**
+- *Rigid coupling.*
+  - `cpl_plan` writes each proxy body's centre and each shape's reference point relative
+    to the vehicle's origin.
+  - The frame tests nodes at their local positions: the node pass, the count pass and the
+    surface path's proxy loops. Static boxes still use World positions.
+  - An origin rebase moves the records with the origin (`cplRebase`).
+  - `cpl_loads` adds the origin back for the stress ingest's action point; `cpl_emit`
+    expresses the body's current centre in the same frame.
+- *Vehicle contact.*
+  - The contact's geometry runs in the owner's frame: triangles, contact points, the side
+    vote and anti-clip. Each partner sits at `origin(v) − origin(owner)` plus its local
+    positions (`vvRel`, which is exactly 0 for the owner itself).
+  - Selection stays in World coordinates: frame bounds, groups and the box prefilters.
+  - The CPU reference does the same (`ExplicitBeamsWorld::owner_frame`).
+- *Proof 1: bit for bit near the origin.* There every origin is 0, so `x − 0` and `0 + x`
+  are exact.
+  - `explicit_frame_dump` from one saved 16-car crash-town state (every car within 100 m,
+    up to 74 proxy shapes a car) matches the pre-fix build in every state word.
+  - The coupling, sleep, contact and Metal parity suites pass unchanged.
+- *Proof 2: the same contact precision at 4 km as at the origin.* Both scenes are bit for
+  bit equal.
+  - `explicit_rigid_gpu.rs` `far_from_the_origin_the_coupling_is_the_origins_bit_for_bit`:
+    the sedan into a free box, its vehicle origin at (4096, 0, 2048) m. All 48 frames
+    match, every node word and the box's whole state. The pre-fix kernels fail it at the
+    first contact frame, with 1,178 node words different.
+  - `explicit_far_origin_gpu.rs`: two sedans head on (fixed-point contact sums, so
+    deterministic) at the origin and at 4 km. All 30 frames match, on the GPU and on the
+    CPU (3,554 contact hits).
+- Rigid bodies' own positions remain World f32 (the rigid solver's state). What the fix
+  removes is the extra rounding the contact added when it put vehicle nodes into World
+  coordinates.
+
+### 10.2 The coupling plan's O(vehicles × colliders): waiting on the World broadphase
+
+Not changed here. The surface-contact work (`feat/softrigid-surface-contact-r2`, spec
+§38.3) moves the vehicles into the World broadphase as proxies with a per-vehicle
+candidate list and a sleeping-vehicle wake hook; it had not landed on that branch when
+this was written, so `cpl_plan` still scans every collider for every vehicle each window
+(also for sleeping vehicles, whose World wake trigger it carries). Once the proxies land,
+`cpl_plan` reads their candidates and the sleep rule's World trigger becomes the
+broadphase's touch mark (a moving collider entering a sleeping vehicle's fat box); no
+second broadphase is built here.
+
+**Update (merge of `feat/softbody-world-broadphase` 3346fbac).**
+- `cpl_query` now takes each vehicle's candidates from the World's persistent resting
+  table plus the moving and moved lists. It runs on the lane-parallel plan and the
+  proxied list.
+- A sleeping vehicle keeps its bounds and is woken when a moving body comes near.
+
+Measured (`vehicle_scale_bench`, which now reports how many measured steps were planned
+from the broadphase):
+- **Idle map: every measured step plans from the broadphase.**
+- **1,000 parked + 10 driving: every step plans by the scan.** That World has only its
+  ground plane, and the rigid step keeps the awake-indexed resting table only for grids
+  of more than 512 colliders (`rigid_plan::awake_broadphase`). The scan there covers one
+  collider, so it costs nothing extra.
+
+Idle map, interleaved A/B, before the merge (scan) against after it (broadphase); p50 ms
+of two runs each, CSV `measurements/vehicle-scale/broadphase_ab.csv`:
+
+| Map side (m) | 500 | 1000 | 2000 | 4000 |
+|---|---|---|---|---|
+| Scan | 3.13 / 1.76 | 2.08 / 2.02 | 2.75 / 2.73 | 7.13 / 7.07 |
+| Broadphase | 1.79 / 3.71 | 2.09 / 3.68 | 2.78 / 4.20 | 6.98 / 7.26 |
+| Vehicles asleep | 11 of 16 | 45 of 64 | 183 of 256 | 745 of 1,024 |
+
+The two paths cost the same within noise: with 6,400 colliders the scan was not what grew
+with area. **Cost is still not flat in area.** About 27–30 % of the parked repo sedans
+never meet the rule (§10.3), and that share is the same at every map size, so their
+frames grow with the map. That is the residual motion that centred damping is expected
+to remove.
+
+## 11. The vehicles in the World broadphase (2026-11-06)
+
+Branch `feat/softbody-world-broadphase`; measurements in
+`docs/measurements/softbody-world-broadphase.md`. This replaces §10.2's waiting note.
+
+**Candidates from the World's own broadphase.** When the rigid step kept the awake-indexed
+broadphase's persistent resting table (`WgpuSim::rest_view`: statics and sleepers at their
+cells, hierarchical or uniform; kept unless the step took the full pass, reused manifolds
+or a host write made it stale), `cpl_query` (one workgroup per vehicle) collects the
+coupling's candidates from:
+* the resting table's cells near the vehicle's swept box (the box plus a cell, or two
+  uniform cells and the largest half extent, and 5 cm for a sleeper's bounds from its last
+  moving step), each entry at its own inserted cell and level, and its header lists
+  (oversized statics, resting large dynamics); a range wider than the table's heads walks
+  the heads once instead;
+* the step's moving colliders (`list_moving_colliders`) and every collider of a body whose
+  pose or sleep state changed in it (`pose_pack`'s moved list): a body that moved, woke or
+  fell asleep is found wherever it went.
+
+Each candidate passes `cpl_plan`'s exact test (filter, swept bounding sphere against the
+swept box) before it is listed; `cpl_plan` reads the list (one copy of each) in place of its
+scan. Lossless: from one World state the two plans write every proxy record word for word
+(`engine-world/tests/explicit_vehicle_broadphase.rs`: hierarchical and uniform grids;
+statics, sleepers, falling and resting boxes beside and on a car; 20 checks each). Cost:
+O(nearby) for statics and sleepers, O(awake) for movers. Without the table (GPU fracture
+worlds such as the crash town, characters, soft bodies) the scan remains
+(`World::explicit_plan_used_broadphase`).
+
+**Proxy API** (`explicit_vehicles.rs`): each vehicle's proxy is a fat box (its swept box
+grown by `PROXY_SLACK`, 0.5 m, when the swept box leaves it), updated at the World's rate
+by `cpl_bounds`. It is frozen while the vehicle sleeps (vehicle sleep keeps its bounds; its
+plan still runs, from the broadphase, and wakes it beside a moving body) or while it is
+out of the broadphase. The calls:
+* `World::set_explicit_vehicle_in_broadphase(v, bool)` removes a vehicle (no query, no
+  proxies) or puts it back (refattened);
+* `explicit_vehicle_proxy(v)` reads its proxy;
+* `explicit_proxy_table()` hands its GPU records (fat box, refattens) to a GPU consumer.
+
+**Surface contact against the proxies** (spec §38.3–38.4): the candidate list is the
+surface pass's slot list after the static slots (every kind, static and dynamic). The
+per-vehicle copied slots remain only for the standalone `ExplicitSim`.
+
+What still follows the World's size per window: the clear of the per-body share counts
+(4 bytes × body capacity), and the rigid step's own O(total) passes (`large-maps.md` §1a).

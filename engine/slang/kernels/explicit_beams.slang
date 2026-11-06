@@ -253,6 +253,10 @@ struct Params
     uint surfSeg; // gStatic: per vehicle (segment start in gLists, segments); gLists the global beam indices
     uint surfMark; // gAcc: the find's slot masks: per triangle (global), then segments, nodes (their records' .z, .w)
     uint centredDv; // gBeams: per node its step-start velocity, then its node phase's Δv (centred damping, §39; 0: no vehicle)
+    // Vehicle sleep (explicit_beams_sleep.slang): gMisc record of its header, 0 off; the
+    // awake-list dispatch flag.
+    uint sleepRec;
+    uint sleepPad0;
     uint brakeBase; // gStatic: per parking brake 2 records (EB_AERO modules; see brakeApply)
 };
 
@@ -387,42 +391,9 @@ Surface contactSurfaceV(uint v, uint w)
 
 // --- numerical primitives (compatible profile) ---
 
-// Strict float arithmetic where a decision or a bit trick depends on rounding.
-// Metal compiles with fast math (fused multiply-add, reassociation, approximate
-// division and square root). Then a contacter lying in a triangle's plane can see
-// the other sign of δ than the CPU reference and be pushed out the other side, and
-// the bit-trick exponential (a·x + b to integer bits) can land on other bits. These
-// helpers give IEEE single precision in the CPU's order: every intermediate passes
-// through an XOR with a uniform the compiler cannot know is zero (no fusing or
-// reassociation across it); division and square root take one exact fma
-// correction.
+// Strict float arithmetic (slang/physics/strict.slang); its zero comes from a uniform.
 uint noFuseBits() { return gP.vehicles >> 31; }
-float nf(float x) { return asfloat(asuint(x) ^ noFuseBits()); }
-float3 nf3(float3 v) { return float3(nf(v.x), nf(v.y), nf(v.z)); }
-float smul(float a, float b) { return nf(a * b); }
-float sdot(float3 a, float3 b) { return nf(nf(smul(a.x, b.x) + smul(a.y, b.y)) + smul(a.z, b.z)); }
-float3 scross(float3 a, float3 b)
-{
-    return float3(nf(smul(a.y, b.z) - smul(b.y, a.z)), nf(smul(a.z, b.x) - smul(b.z, a.x)),
-                  nf(smul(a.x, b.y) - smul(b.x, a.y)));
-}
-float3 sscale(float3 v, float k) { return float3(smul(v.x, k), smul(v.y, k), smul(v.z, k)); }
-float sdiv(float a, float b)
-{
-    float r = 1.0 / b;
-    float q = nf(a * r);
-    return nf(fma(fma(-q, b, a), r, q));
-}
-float ssqrt(float x)
-{
-    if (x <= 0.0) return sqrt(x);
-    float s = nf(sqrt(x));
-    return nf(fma(fma(-s, s, x), 0.5 / s, s));
-}
-
-float3 sadd3(float3 a, float3 b) { return nf3(a + b); }
-float3 ssub3(float3 a, float3 b) { return nf3(a - b); }
-float3 sdiv3(float3 v, float k) { return float3(sdiv(v.x, k), sdiv(v.y, k), sdiv(v.z, k)); }
+#include "../physics/strict.slang"
 
 float sFastInvSqrt(float x)
 {
@@ -4773,6 +4744,8 @@ void contactGroup(uint g, uint lane);
 #include "explicit_beams_drive.slang"
 // Surface contact (jbeam-semantics-spec.md §38).
 #include "explicit_beams_surface.slang"
+// Vehicle sleep (engine_softbody::explicit_sleep).
+#include "explicit_beams_sleep.slang"
 
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
@@ -4780,13 +4753,16 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.x;
     uint lane = lid.x;
+    // Vehicle sleep, awake-indexed: the workgroup's awake vehicle (or contact group).
+    bool sleepListed = gP.sleepRec != 0u && gP.sleepPad0 != 0u;
+    if (sleepListed) v = sleepPick(gid.x, lane);
 #ifdef EB_VV_SOLO
 #ifdef EB_VV_GROUPS
     // Workgroups past the vehicles step the contact groups (one dispatch: groups
     // and solo vehicles run side by side).
-    if (gid.x >= gP.vehicles)
+    if (v >= gP.vehicles)
     {
-        contactGroup(gid.x - gP.vehicles, lane);
+        contactGroup(v - gP.vehicles, lane);
         return ebLoopCapFlush();
     }
 #endif
@@ -4795,6 +4771,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     sync();
     if (gsUniformLanes != 0u) return ebLoopCapFlush();
 #endif
+    // Vehicle sleep: a sleeping vehicle is not stepped.
+    bool sleepOn = gP.sleepRec != 0u;
+    if (sleepOn && !sleepListed)
+    {
+        if (sleepSkip(v, lane)) return ebLoopCapFlush();
+    }
+    bool sleepMove = false;
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
@@ -4842,6 +4825,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             uint4 m = gMisc[v];
             gMisc[v] = uint4(asuint(asfloat(m.xyz) + first), m.w);
         }
+        cplRebase(v, lane, first);
     }
     sync();
     uint4 misc = gMisc[v];
@@ -4911,6 +4895,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
 #endif
         if (gP.centredDv != 0u) centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
+        if (sleepOn) sleepMove = sleepTrack(nodeOff, nodeCount, lane, sleepMove);
 
         for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
         if (candCount > 0u)
@@ -5149,6 +5134,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     {
         uint last = (stepBase + gP.steps - 1u) & 1u;
         for (uint j = lane, jStop = EB_END(j, beamCount, LANES); j < jStop; j += LANES) groupDrops(beamOff + j, beamOff, groupOff, last, true);
+    }
+    if (sleepOn)
+    {
+        sleepMark(v, sleepMove);
+        sleepSettle(v, lane, gP.steps, true);
     }
     if (lane == 0u) gMisc[v] = uint4(misc.xyz, stepBase + gP.steps);
 #ifdef EB_VV_SOLO
@@ -5697,6 +5687,8 @@ void vvArgs(uint nv, uint groups)
     gArgs[4] = groups == 0u ? 0u : nv + groups;
     gArgs[5] = 1u;
     gArgs[6] = 1u;
+    // The plan's groups (vehicle sleep's awake list rewrites the arguments every frame).
+    gArgs[3] = groups;
 }
 
 void vvEmitPair(uint a, uint b)
@@ -6678,6 +6670,7 @@ void contactMemberBegin(uint v, uint lane)
             uint4 m = gMisc[v];
             gMisc[v] = uint4(asuint(asfloat(m.xyz) + first), m.w);
         }
+        cplRebase(v, lane, first);
     }
     sync();
 }
@@ -6746,6 +6739,12 @@ void vvFrame(inout VvTri t, float3 p1, float3 p2)
     t.rb = sscale(scross(t.n, u), rd);
     t.rn = sscale(scross(u, w), rd);
 }
+
+// Vehicle contact in the owner's frame: vehicle v's origin relative to the owner a's
+// (exactly 0 for v = a, and for every vehicle while the origins are 0). The contact's
+// geometry (triangles, contact points, votes, anti-clip) is in the owner's frame, its
+// selection (frame bounds, boxes, prefilters) in the World's.
+float3 vvRel(uint v, uint a) { return asfloat(gMisc[v].xyz) - asfloat(gMisc[a].xyz); }
 
 VvTri vvTriangle(uint gt, float3 origin, float r)
 {
@@ -6869,7 +6868,7 @@ bool vvVote(VvTri t, uint h, uint vh, float delta)
     int score = delta >= 0.0 ? 3 : -3;
     if (info.z > 3u)
     {
-        float3 ob = asfloat(gMisc[vh].xyz);
+        float3 ob = vvRel(vh, gStatic[gP.nodeInfoBase + t.tn.x].w);
         uint base = gP.vvNbr + info.y;
         // Four independent loads at a time (the far ends are a contiguous list).
         uint k = 0u;
@@ -6921,7 +6920,7 @@ uint vvClip(VvTri t, uint gt, uint h, float3 p, uint vh, float r, out float alph
     if (side == 0.0)
     {
         bool crossed = false;
-        float3 oa = asfloat(gMisc[va].xyz);
+        float3 oa = vvRel(va, va);
         VvTri pf;
         pf.p0 = ssub3(t.p0, sscale(gNodes[t.tn.x * 3u + 1u].xyz, STEP));
         float3 b1 = ssub3(nf3(oa + gNodes[t.tn.y * 3u].xyz), sscale(gNodes[t.tn.y * 3u + 1u].xyz, STEP));
@@ -7322,7 +7321,7 @@ uint vvHitAt(uint runOff, uint i) { return gP.vvHits + 2u * (2u * runOff + i); }
 void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r, uint parity,
                      uint q)
 {
-    VvTri t = vvTriangle(gt, asfloat(gMisc[va].xyz), r);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
     bool cand = false;
     bool hit = false;
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
@@ -7361,12 +7360,21 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
 // side by side.
 void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes, uint slot)
 {
-    float3 oa = asfloat(gMisc[va].xyz);
+    float3 oa = vvRel(va, va);
     for (uint i = lane, iStop = EB_END(i, n, lanes); i < iStop; i += lanes)
     {
         uint gt = gNext[base + 2u * i];
         uint h = gNext[base + 2u * i + 1u];
         bool first = true;
+#ifdef EB_ABLATE
+        // Measurement only: 1048576 * 2 each hit applied alone, unordered (no scans).
+        if ((gP.ablate & 2097152u) != 0u)
+        {
+            uint vh2 = gStatic[gP.nodeInfoBase + h].w;
+            vvTry(vvTriangle(gt, oa, r), gt, h, nf3(vvRel(vh2, va) + gNodes[h * 3u].xyz), vh2, r, parity, slot);
+            continue;
+        }
+#endif
         for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++)
         {
             if (gNext[base + 2u * j + 1u] == h && gNext[base + 2u * j] < gt)
@@ -7380,7 +7388,7 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
         for (uint it = 0u, itStop = EB_END(it, n, 1u); it < itStop; it++)
         {
             VvTri t = vvTriangle(gt, oa, r);
-            vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity, slot);
+            vvTry(t, gt, h, nf3(vvRel(vh, va) + gNodes[h * 3u].xyz), vh, r, parity, slot);
             // The point's next hit: the smallest later triangle.
             uint next = 0xFFFFFFFFu;
             for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++)
@@ -7599,6 +7607,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
                 uint v = vvMember(off, m);
                 uint4 cp = gStatic[gP.vvStatic + v];
                 float3 o = asfloat(gMisc[v].xyz);
+                float3 orel = vvRel(v, va);
                 for (uint i = lane, iStop = EB_END(i, cp.y, LANES); i < iStop; i += LANES)
                 {
                     uint h = gLists[cp.x + i];
@@ -7611,7 +7620,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
                     }
                     float3 e3 = float3(ex, ex, ex);
                     if (any(x < clo - e3) || any(x > chi + e3)) continue;
-                    gBeams[gP.vvRun + runOff + gsVvCands[q].add(1u)] = float4(x, asfloat(h));
+                    gBeams[gP.vvRun + runOff + gsVvCands[q].add(1u)] = float4(nf3(orel + gNodes[h * 3u].xyz), asfloat(h));
                 }
             }
         }
@@ -7703,7 +7712,7 @@ uint vvHitSmall(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 2
 void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands,
                           float r)
 {
-    VvTri t = vvTriangle(gt, asfloat(gMisc[va].xyz), r);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
     bool cand = false;
     bool hit = false;
     uint run = vvRunSmall(runOff, points, a);
@@ -7731,7 +7740,7 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
 // The overflow path: owner a's triangle walk again, applying each hit at once.
 void vvTriangleCandsApply(uint va, uint gt, uint sub, uint subs, uint run, uint cands, float r, uint parity, uint slot)
 {
-    VvTri t = vvTriangle(gt, asfloat(gMisc[va].xyz), r);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[run + e];
@@ -7884,8 +7893,12 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             gNext[vvTestedAt(ra1.x + gsVvList4[a].add(1u))] = t;
         }
         // Candidates: each owner's partners' contact points in its box grown by
-        // its range.
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        // its range; the owners side by side, vvPartLanes(k) lanes each (the same
+        // candidates per owner; their order in its run follows an atomic counter
+        // either way, and the hits apply in a canonical order, vvApplyOrdered).
+        uint cP = vvPartLanes(k);
+        uint cl = lane % cP;
+        for (uint a = lane / cP, aStop = EB_END(a, min(lane / cP + 1u, k), 1u); a < aStop; a++)
         {
 #ifdef EB_ABLATE
             // Measurement only: 262144 the candidates.
@@ -7906,7 +7919,8 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                 uint v = vvMember(off, m);
                 uint4 cp = gStatic[gP.vvStatic + v];
                 float3 o = asfloat(gMisc[v].xyz);
-                for (uint i = lane, iStop = EB_END(i, cp.y, LANES); i < iStop; i += LANES)
+                float3 orel = vvRel(v, va);
+                for (uint i = cl, iStop = EB_END(i, cp.y, cP); i < iStop; i += cP)
                 {
                     uint h = gLists[cp.x + i];
                     float3 x = nf3(o + gNodes[h * 3u].xyz);
@@ -7918,7 +7932,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                     }
                     float3 e3 = float3(ex, ex, ex);
                     if (any(x < clo - e3) || any(x > chi + e3)) continue;
-                    gBeams[run + gsVvCand4[a].add(1u)] = float4(x, asfloat(h));
+                    gBeams[run + gsVvCand4[a].add(1u)] = float4(nf3(orel + gNodes[h * 3u].xyz), asfloat(h));
                 }
             }
         }
@@ -8057,6 +8071,14 @@ void contactGroup(uint g, uint lane)
     uint driveOn = gsUniformDrive;
     uint surfOn = surfaceOn();
     sync();
+    // Vehicle sleep: a group with an awake member wakes the others; a group asleep is
+    // not stepped.
+    bool sleepOn = gP.sleepRec != 0u;
+    if (sleepOn)
+    {
+        if (sleepGroupSkip(off, k, lane)) return;
+    }
+    uint2 sleepMask = uint2(0u, 0u);
     // Members in vehicle order (a rank sort), their run prefixes and member
     // indices.
     for (uint i = lane, iStop = EB_END(i, k, LANES); i < iStop; i += LANES)
@@ -8113,6 +8135,7 @@ void contactGroup(uint g, uint lane)
                 surfaceStep(vvMember(off, m), lane, surfOn, (stepBase + s) & 1u);
             sync();
         }
+        if (sleepOn) sleepMask = sleepTrackMembers(off, k, lane, sleepMask);
 #ifdef EB_ABLATE
         if ((gP.ablate & 512u) != 0u) {} else
 #endif
@@ -8126,5 +8149,6 @@ void contactGroup(uint g, uint lane)
         }
     }
     coupleEndMembers(off, k, lane, coupleOn);
+    if (sleepOn) sleepGroupEnd(off, k, lane, sleepMask, gP.steps);
     for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
 }

@@ -2582,42 +2582,239 @@ costs 5.6× per step for one car at a pole on the GPU (+9 % for the 64-car arena
 Default it once sedan1's side is re-tuned with it on and the World-broadphase work below
 lands.
 
-### 38.3 Next: one collision system with the World (design, not built)
+### 38.3 One collision system with the World (built, 2026-11-06)
 
 Decision (user, 2026-11-06): surface contact reuses the rigid engine's collision
-machinery. Broad phase: vehicles enter the World broadphase as proxies (per part or
-chunk; fat AABBs padded by the band plus the fastest node's travel over a rigid step),
-updated incrementally at the rigid rate, skipped for sleeping vehicles, the query writing
-each vehicle's candidate colliders (static and dynamic, every shape kind) into its slot
-list on the GPU; the per-vehicle copied slots remain only as the standalone
-`ExplicitSim` fallback. Narrow phase: triangle, segment and point against a shape in
-shared `slang/physics` modules with one Rust twin; the response (§37 law, mass split,
-ownership, fixed-point sums) stays in the explicit kernel. Cost must follow awake
-vehicles and nearby colliders only (one car among 10k–100k static and sleeping bodies:
-flat).
+machinery. Branch `feat/softbody-world-broadphase`; measurements in
+`engine/docs/measurements/softbody-world-broadphase.md`.
 
-Findings that shape it:
-* `slang/physics` (`convex.slang`, `box_collide.slang`, `shapes.slang`) builds SAT
-  manifolds (reference face clipping, up to four points) from the World's hull
-  records; it has no closest-feature query with barycentric weights on a triangle or
-  segment, which ownership and the weighted response need. So the queries move into a
-  new shared module (`slang/physics/feature_query.slang`, the closest-point pairs,
-  separating axis and deepest-point selection above) reading shapes in the World's
-  formats (`Collider`, `HullRef` vertices and edges), not a copy of the manifold code.
-* Those modules use the GPU's native `dot`, `cross`, `normalize` (contraction allowed);
-  the explicit kernel's surface code is strict single precision so the CPU reference
-  matches it bit for bit. Sharing keeps parity only if the shared queries are written
-  strictly (the explicit kernel's `sdot`/`nf` helpers moved into `slang/physics`) and
-  the rigid engine's callers adopt them where they want them; changing the rigid
-  engine's own manifold paths would change rigid results (not done, not required).
-* The World's broadphase tables are built and queried per rigid step by
-  `world_step.slang` in `rigid_plan`; the explicit vehicles step in their own frame
-  plan. The proxy API the vehicle-sleep work needs (insert, update, remove, a candidate
-  list per vehicle, no update while asleep) lives on the World side
-  (`engine-world/src/explicit_vehicles.rs`, `cpl_plan`), with the candidate list
-  replacing the per-vehicle box slots as the surface pass's slot list. The
-  `large-maps.md` persistent broadphase (statics and sleepers not re-inserted) is a
-  prerequisite for the flat-cost benchmark and is not on this branch.
+**Shared narrow phase.** The strict closest-feature queries moved out of the explicit
+kernel into `slang/physics/feature_query.slang` (helpers `slang/physics/strict.slang`,
+the explicit kernel's `nf`/`sdot`/... unchanged in arithmetic), with one Rust twin,
+`engine_schema::feature_query` (`explicit_surface` re-exports it). Point, segment and
+triangle against box, convex hull, capsule, vertical cylinder, sphere and a single
+triangle (a trimesh's, or a heightfield cell's two, `heightfield_cell`), weights,
+normal, gap, point; strict poses (`shape_pose`, `axes`), bounds, and casts (below). A
+hull is read in the World's own record format (the hull arena's vertices, edges and
+planes, the collider's scale applied): `vehicle_coupling.slang` copies them after the
+proxy's planes when any vehicle has surface contact (`hullGeom`), and the kernel's
+accessors (`fqHullVertex`, `fqHullEdge`, `fqHullPlane`) read them there. The rigid
+engine's SAT manifolds (`convex.slang`, `box_collide.slang`) are untouched: rigid
+results are unchanged by construction. Planes and heightfields stay out of the coupling
+(the vehicles keep their own ground, as §1 of `explicit-vehicles-in-world.md`): their
+queries exist and are tested, but no proxy carries them.
+
+**Proxies in the surface pass.** The GPU surface pass meets the coupling's proxy shapes
+after the static slots (the CPU's `surface_shapes` order: boxes, shapes, proxies), static
+and dynamic, every kind (box, sphere, capsule, hull). A dynamic body is split over its
+surface hits this step and its vehicles (`share`), the inertia term strict (the CPU uses
+the same `fq::rot`), and takes +f at the contact point into the coupling's step sums (the
+node contact's), integrated at the next step's start. The CPU reference now integrates
+its proxies at the step's end, after the surface pass (`ProxySet::end_step` moved out of
+the node pass; nothing between reads them, so with surface contact off every result is
+bit for bit the same); a proxy's surface reactions join that step's sums
+(`surface_sum` removed). The plan's refusal of surface contact with proxies is gone.
+The proxy loops are their own functions beside the unchanged static-slot loops
+(`surfTriangleProxies`, `surfSegmentProxies`, `surfPointProxies`): with them inline an
+unrelated edit changed the turned-proxy results on Apple's compiler (the sensitivity of
+`explicit-vehicles-in-world.md` §8.3).
+
+Checked: `engine-webgpu/tests/explicit_surface_proxy_gpu.rs` (wgpu on Metal): the repo
+sedan, surface contact on, flying at 10 m/s into a 20 cm pole that is a proxy: a static
+turned box, a static turned hull (vertices and edges from the arena) and a free 60 kg
+box: first contact frames within 2.4e-7 m of the CPU, the vehicle's speed within 1 %, the
+free pole's velocity within 1 % and horizontal momentum closed to 0.03 of 37,628 N s; with
+coupling room but no proxies, bit for bit the static build. `surface_contact_gpu.rs` (the
+static slots against the CPU) still bit for bit. Native Metal
+(`engine-metal/tests/explicit_surface_proxy_parity.rs`): unturned poles match (1.8e-7 m);
+**open**: a turned proxy left the CPU by 3.9 cm at first contact there before the proxy
+loops were split out; the ignored test `metal_surface_contact_meets_a_turned_box_proxy_like_the_cpu`
+reruns it.
+
+**Broad phase.** See `explicit-vehicles-in-world.md` §11: the coupling plan's
+candidates come from the World broadphase's persistent resting table and the step's
+moving and moved colliders, not a scan of every collider; the plan is the scan's word
+for word.
+
+### 38.4 Fast proxies: casts (2026-11-06)
+
+Problem: contact with a proxy is discrete at 2 kHz. A body of least extent e moving v·h
+past e in a step can cross a panel or a node between steps; nodes it carries past its
+centre leave by the far side and push it on.
+
+Rule (with surface contact on; `RUBBLE_SURFACE_CAST=0` turns it off for measurement):
+* A proxy body is **fast** when (|v| + |ω| R) h > e/2 (R its shape's bound radius; e a
+  box's least half extent, a sphere's or capsule's radius, a hull's least plane offset,
+  at least 1 cm). Slow bodies take exactly the path they took before.
+* For each element (triangle, beam segment, node) with no discrete contact against a
+  fast shape: its time of impact over the step's relative motion d = (v_body − v_element)
+  h, by conservative advancement on `fq::distance` (`fq::toi`, at most 24 advances, each
+  the distance past the band over |d|: the band is never jumped), in the swept cull box.
+* A gathering pass takes each fast body's earliest time of impact t_min over every element
+  (GPU: in the snapshot phase, an atomic max of 0x7FFFFFFF − t's bits, by step parity).
+  Only elements met at t ≤ t_min + TIE/|d| get a contact: at their own time of impact,
+  against the shape moved there (`fq::translated`), so on the side it came from; the body
+  takes it at its own point now (`Found::shift`). An element it would reach only after
+  passing through another is not met this step.
+* Node contact (the node pass) with a fast body that overtakes the node (relative motion
+  along the body's own): the node leaves along that motion, not by the nearest face.
+* The response, mass splitting and reactions are the surface pass's own.
+
+Checked: `engine-softbody/tests/explicit_surface_cast.rs`: a steel ball (3 and 6 cm
+radius) at 300 and 600 m/s into a 0.6 m plate is met (without the casts the 3 cm ball
+passes untouched), momentum closes, kinetic energy falls; a 5 m/s ball runs the same
+path. `ccd_cannonball` (sedan1 and the repo sedan, CPU, wgpu and the World): the table
+is in the measurements file. No projectile tunnels at 30 to 600 m/s with the casts, and
+none gains speed. Before them the repo sedan let a 6 cm ball through at 600 m/s with 47 %
+of its momentum; an intermediate version (contact point at the moved pose) spun and sped
+the ball up: the body's lever arm is its point now. CPU and GPU agree on the momentum
+given to within 2 points; the World's run differs as its time coupling does (the ball
+integrates in the rigid step between windows).
+
+### 38.5 Cost: lossless speed-ups against the proxies (2026-11-06)
+
+Branch `feat/surface-contact-perf`; measurements in
+`engine/docs/measurements/softbody-world-broadphase.md` §3.
+
+**Where the time went** (`vehicle_broadphase_bench --probe`, EB_ABLATE bits 2^20–2^30 in
+`explicit_beams_surface.slang`, time only; one repo sedan among 11 proxy shapes, frame of
+17 steps, GPU timestamps): the frame 16.7 ms, of which the surface pass 15.9 ms (its three
+barriers 0.13 ms). The static slots and the snapshot were 0.5 ms; the proxies 15.4 ms: the
+per-element cull (each element read every shape's fast test and grown sphere) 1.8 ms, the
+shapes' strict poses and bounds rebuilt per element 0.8 ms, the narrow phase 12.9 ms
+(triangles 11.0, segments 3.1, points 0.9 ms; the apply recomputing the find's hits 6 ms).
+Of 134 pairs whose boxes met, 9 hit: the narrow phase ran mostly to reject, a box's twelve
+edges or a hull's eighteen against each triangle, four candidate passes per contact, on
+the few lanes whose elements sit by a shape while the rest of the workgroup waited.
+
+**The pair path** (`surfaceStep`; every decision uniform, each heavy function called once
+per phase, as the Metal and Chrome compilers inline every call): per step each proxy's
+bounds once
+(`surfPairBounds`); every live element against them, each meeting pair listed
+(`surfPairCull`: exactly fqNear's test, so the same pairs the per-element loops reach; their
+grown-sphere cull only ever skips pairs fqNear rejects); a barrier; the pairs spread over
+the lanes for the narrow phase (`surfPairFind`), each hit counted as the loops count it and
+kept (`SURF_HIT_CAP` 256 records of 19 words per vehicle); the apply from the kept hits.
+Every sum it feeds is fixed point or an integer count, so order is free. Fallbacks, both
+exact: more pairs than `SURF_PAIR_CAP` (2048) and the step takes the per-element loops;
+more hits than the records hold and the apply recomputes every pair's. A fast proxy
+(casts, §38.4) stays with the per-element loops (its bounds in the listing empty, the
+loops told to meet the fast proxies only), beside the pairs for the rest. Memory per vehicle with surface contact
+and the coupling: 2048 + 256·19 + 6·S words of gNext (≈ 30 KB with S = 128), two gAcc
+words. Switch (tests, measurement): coupling header bit 16, `RUBBLE_SURFACE_PAIRS=0`.
+
+**Edge culls in the shared queries** (`feature_query.slang` `fqFar`, `fqPrune`): a pass keeps
+candidates of gap at most its threshold (pass 0 the least so far, capped at the contact's
+band: a least gap past it is no contact either way; later passes gx + TIE). Every candidate
+of a shape edge pairs a point of the edge with a point of the element, so its gap is at
+least their boxes' gap, less the rounding of the computed points; an edge farther than
+the threshold by 1e-4 m + 1e-5 of the largest coordinate is skipped. The Rust twin keeps
+the full walk (the same candidates count). Switch: coupling header bit 32,
+`RUBBLE_SURFACE_CULLS=0`.
+
+Result (frame GPU time, the switches timed from one saved state; measurements file §3):
+one sedan among 11 proxies 21.9 → 4.2 ms per 17 steps (the pass 1.24 → 0.20 ms a step);
+the crash town, 4 cars among 29–77 house chunks each, 55.7 → 17.1 ms; 32 cars 213 → 37 ms
+(minima on a shared GPU; 16.7 ms with the pass off).
+
+Checked bit for bit: `engine-world/tests/surface_pairs.rs` (a sedan between rows of boxes,
+turned boxes, hulls, turned hulls, into a capsule, a sphere, a free box thrown at it and a
+fast steel ball (casts beside the pairs):
+pairs, culls and both against neither, every vehicle state word, proxy record and coupling
+sum, through the strike and at rest); `surface_contact_gpu.rs` (static slots, against the
+CPU twin, with the culls on) and `explicit_surface_proxy_gpu.rs` unchanged; the World
+coupling tests (`explicit_vehicles.rs`, including the workgroup-copy and cull bit-exact
+checks) pass.
+
+### 38.6 Friction against a turning body (cast regression, 2026-11-06)
+
+**Problem.** After the casts, a 6 cm steel ball at 100 m/s into the repo sedan gave 76 %
+of its momentum and went into the car (before: it bounced). Traced on the CPU: its first
+hit (a cast contact) left it at 3,545 rad/s, more kinetic energy than it had. The surface
+contact's friction against a dynamic proxy was capped (§37's no positive work) with the
+pair's reduced mass along the normal; a turning body answers a tangential impulse through
+its inertia as well (a sphere 3.5 times as much), so the cap let the friction drive the
+contact point's slip far past zero and spin the body up. Without friction the ball bounced
+(105 %).
+
+**Rule** (`no_positive_work_body`, GPU `surfBodyCap`; dynamic proxies only, after
+contact_response's own cap, so the friction is the lesser of both): the pair's velocity
+change per unit impulse x is k(x) = imt·x + split·(x/M + (I⁻¹(a × x)) × a) (a the arm from
+the body's centre, I⁻¹ in world, split its mass splitting); n·k(n) = 1/m keeps the normal
+rule; the friction t is scaled by the largest s ∈ [0, 1] for which
+(r·n + s·t)·(u + h·k(r·n + s·t)) ≤ 0, u = 2v + h·f/m. Static bodies and static slots take
+the old path bit for bit.
+
+Checked: `explicit_surface_cast.rs` `a_glancing_ball_is_not_spun_up_by_friction` (100 m/s
+at 60° and 45°, 30 m/s at 70°: energy, rotation and the plate's height under gravity
+included, does not rise; without the cap it rose 6.5-fold); the cannonball table (the
+measurements file §2.1): the repo sedan's 6 cm ball at 100 m/s 75.9 → 103.0 % (bounces),
+its 300 m/s 122.4 → 101.5 %, the spins that exceeded the projectile's speed gone
+(12,682 → 596 rad/s at 600 m/s); no projectile tunnels and none gains energy.
+
+### 38.7 Default or not (2026-11-06)
+
+**Not yet.** The cost is now small and flat where it was the blocker (one car: 0.20 ms a
+step against 1.24; flat in the map's bodies), but:
+* the crash town still pays for it: 32 cars among house chunks 37 ms a frame against 17
+  with it off (the per-element static-slot and fast-proxy loops, a contact group's
+  members stepping the pass one after another, and the hits' narrow phase remain); 64
+  and 256 cars were not measured (§3 of the measurements file: the merged branch's
+  64-car town stalls with the pass off too);
+* sedan1's NCAP side pole falls out of its band with it on (§38.2), a calibration the
+  default must wait for;
+* native Metal (Slang to MSL): the turned-proxy check
+  (`metal_surface_contact_meets_a_turned_box_proxy_like_the_cpu`) was not re-run: the
+  four parity tests' kernel compile ran past the 20-minute bound on a shared machine and
+  was stopped. wgpu on Metal matches the CPU for turned proxies (2.4e-7 m).
+
+Next: the static slots and fast proxies on the pair path too, a group's members side by
+side in the pass, and the Metal turned-proxy run on a quiet machine.
+
+### 38.8 Friction: a true stick (2026-11-06)
+
+**Problem** (reported from `feat/vehicle-gen3-r4`'s `pole_slide_mm`): in the 75° oblique pole
+the car slid along the pole with surface contact on (gen3 0.7–1.3 m, the ETK 1.7 m; node
+contact 0.13 m) and the pole crush collapsed. Checked against the list:
+* coefficient: `ContactSurface::BOX` (μs 1.2, kinetic curve from 1.2 to 0.75 plus 0.01·σ)
+  times the nodes' friction, weighted over the element, as node contact's;
+* the cap (§37 `no_positive_work`, and §38.6's for dynamic bodies): clipped 3–8 % of the
+  friction in the ETK's oblique pole, not more;
+* the tangent: per hit, from that hit's normal; no state, so nothing is lost when a
+  contact moves to an edge or the deepest point (a round shape's crossing normal from
+  radial axes was tried as well and changed nothing measured: not taken);
+* **the static/kinetic split: the defect.** The surface pass took RoR's law
+  (`contact_response`), whose static branch cancels the tangential *force* but meets an
+  existing *slip* with only 1 − e^(−σ/3 m/s) of the limit. A node inside a shape hides
+  it (the shape holds the node by its depth); a skin held at the band does not: a panel
+  on two bars between its node lines crept down a 25° slope (9 cm in 1 s, 0.7 m at 40°)
+  where node contact holds to 48°.
+
+**Rule** (`surface_response`, GPU `surfResponse`; surface contact only, node contact
+unchanged): the tangential force that stops the slip within the step, −(f_t + v_t·m/h),
+is taken whole while within μs·r; past it the pair slides on RoR's kinetic curve against
+its slip. Then §37's cap. Measurement switch (CPU): `RUBBLE_SURFACE_FRICTION=ror`.
+
+Checked: `engine-softbody/tests/explicit_surface_friction.rs`: on two capsules and on two
+bars (no node touching), a panel pushed along them holds under 1.1 × its weight and slides
+at 1.5 (node contact the same, to the millimetre); set sliding it stops within the
+law's distance (1 m/s: 4.3 cm; node contact on RoR's law 23.6 cm); on an incline it holds
+to 48° and slides at 55° (as node contact). `surface_contact_gpu` (static slots, GPU
+against the CPU) and `explicit_surface_proxy_gpu` pass; flag off bit for bit.
+
+Measured (`surface_pole --scene oblique --cyl`: the crash lab's oblique pole as a 254 mm
+cylinder, 32 km/h, 1 s, CPU; pole slide = the pole's shift along the car's long axis):
+
+| car | node contact | surface, RoR friction | surface, stick |
+|---|---|---|---|
+| ETK slide / residual crush | 51 / 468 mm | 624 / 205 mm | 324 / 307 mm |
+| sedan1 slide / residual crush | −124 / 569 mm | 2,637 / 1,515 mm | 2,726 / 1,613 mm |
+
+The ETK's slide halves and its residual crush rises toward node contact's. sedan1's does
+not move, and it is not friction: with every node's friction ×3 it slides the same
+2.7 m, frictionless 3.4 m the other way; its side gives 1.3–1.6 m to the pole with
+surface contact on (0.6 m node only), so the pole runs along the collapsed door. Open:
+sedan1's side structure under surface contact (with §38.2's calibration).
 
 ## 39. Centred damping (2026-11-06)
 

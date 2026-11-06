@@ -1061,6 +1061,9 @@ pub struct ExplicitBeams {
     /// content, or a `.truck` with `rubble_beamng_profile`; else Rigs of
     /// Rods'. What hosts report as the vehicle's profile.
     pub beamng_profile: bool,
+    /// Vehicle sleep's state ([`crate::explicit_sleep`]; used only by a fleet with the
+    /// setting on): still count, asleep, anchor.
+    pub sleep: crate::explicit_sleep::SleepState,
     /// Measurement (jbeam-semantics-spec.md §39's comparison; never on in a
     /// profile): the velocity the beam pass's damping reads, by a dry beam pass
     /// (state restored) that predicts each node's end-of-step velocity. 0: off,
@@ -1336,6 +1339,70 @@ pub fn contact_response(
     }
 }
 
+/// Surface contact's response (jbeam-semantics-spec.md §38.8): §37's dissipative normal
+/// force r (the approach stopped, no separation made) and friction with a true stick. The
+/// tangential force that stops the pair's slip within the step, −(f_t + v_t·m/h), is taken
+/// whole while it is within the static limit μs·r (μs = `surface.ms`·friction·strength);
+/// past it the pair slides on RoR's kinetic curve ([`contact_friction`]'s sliding branch:
+/// from μs at no slip toward `surface.mc`, plus `t2`·σ) against its slip (against the
+/// tangential force when it has none). Then [`no_positive_work`]. RoR's law
+/// ([`contact_response`]: the stick cancels the force only, and a slip under `va` = 3 m/s
+/// meets a fraction 1 − e^(−σ/va) of the limit) let a panel held on a bar by its skin creep
+/// down a 25° slope and a car slide along an oblique pole; node contact's interlock (a
+/// node inside the shape) hid it. Returns the force and the normal force's budget.
+#[allow(clippy::too_many_arguments)]
+pub fn surface_response(
+    f: Vec3,
+    v: Vec3,
+    m: f32,
+    n: Vec3,
+    h: f32,
+    surface: &ContactSurface,
+    p: f32,
+    friction: f32,
+) -> (Vec3, f32) {
+    if p < 0.0 {
+        return (Vec3::ZERO, 0.0);
+    }
+    let vn = v.dot(n);
+    let fn_ = f.dot(n);
+    let r = -fn_ - (vn + vn.max(0.0)) * m / h;
+    let budget = if vn < 0.0 {
+        (0.5 * m * (vn * vn) + 0.5 * h * (fn_ * vn)).max(0.0)
+    } else {
+        0.0
+    };
+    if r <= 0.0 {
+        return (Vec3::ZERO, 0.0);
+    }
+    let ft = f - n * fn_;
+    let vt = v - n * vn;
+    let stick = -(ft + vt * (m / h));
+    let gr = r * surface.strength * friction;
+    let ms = surface.ms * gr;
+    let c = if stick.dot(stick) <= ms * ms {
+        n * r + stick
+    } else {
+        // Sliding: RoR's kinetic curve (contact_friction's), against the slip (against
+        // the tangential force when there is none).
+        let sl = vt.length();
+        let dir = if sl > 0.0 {
+            -(vt / sl)
+        } else {
+            stick / stick.length()
+        };
+        let e = if surface.exact {
+            exact_exp(-exact_pow(sl / surface.vs, surface.alpha))
+        } else {
+            approx_exp(-approx_pow(sl / surface.vs, surface.alpha))
+        };
+        let g = surface.mc + (surface.ms - surface.mc) * e;
+        n * r + dir * ((g + (surface.t2 * sl).min(5.0)) * gr)
+    };
+    let capped = no_positive_work(c, r, n, f, v, m, h);
+    (capped, budget)
+}
+
 /// §37: the penetration's position step, the pair's separation δ along the
 /// normal this step (m), from the depth `p` in the band, the `budget` the step's
 /// normal force took out of the pair ([`contact_response`]) and the pair's normal
@@ -1352,6 +1419,56 @@ pub fn shift_depth(p: f32, budget: f32, fn_: f32) -> f32 {
     } else {
         budget / -fn_
     }
+}
+
+/// [`no_positive_work`] for a pair whose response to a force is not isotropic: a dynamic
+/// rigid body that turns (spec §38.4). `k(x)` is the pair's relative velocity change per
+/// unit impulse x (the element's Σ w²·k/m plus the body's 1/M and (I⁻¹(a × x)) × a, its
+/// mass split), so v′ = v + h·(f/m) + h·k(c). The normal part keeps its scalar rule (m is
+/// the reduced mass along n: n·k(n) = 1/m); the friction t = c − r·n (r recomputed from
+/// the same inputs as [`contact_response`]'s dissipative rule) is scaled by the largest
+/// s ∈ [0, 1] for which (r·n + s·t)·(u + h·k(r·n + s·t)) ≤ 0, u = 2v + h·f/m. With an
+/// isotropic k (1/m) it is no_positive_work's cap; with a turning body the friction no
+/// longer drives the contact point's slip past zero and spins the body up (a 6 cm steel
+/// ball at 100 m/s into a door took 3,500 rad/s from one hit: more energy than it had).
+/// Applied after contact_response's own cap, so the friction is the lesser of both.
+#[allow(clippy::too_many_arguments)]
+pub fn no_positive_work_body(
+    c: Vec3,
+    f: Vec3,
+    v: Vec3,
+    m: f32,
+    n: Vec3,
+    h: f32,
+    k: impl Fn(Vec3) -> Vec3,
+) -> Vec3 {
+    if m <= 0.0 {
+        return c;
+    }
+    let vn = v.dot(n);
+    let fn_ = f.dot(n);
+    let r = -fn_ - (vn + vn.max(0.0)) * m / h;
+    if r <= 0.0 {
+        return c;
+    }
+    let hm = h / m;
+    let rn = n * r;
+    let t = c - rn;
+    let u = v + v + f * hm;
+    let krn = k(rn);
+    let a0 = rn.dot(u) + h * rn.dot(krn);
+    let a1 = t.dot(u) + 2.0 * h * t.dot(krn);
+    let b = h * t.dot(k(t));
+    if a0 + a1 + b <= 0.0 || b <= 0.0 {
+        return c;
+    }
+    let disc = a1 * a1 - 4.0 * b * a0;
+    let s = if disc < 0.0 {
+        0.0
+    } else {
+        ((disc.sqrt() - a1) / (2.0 * b)).clamp(0.0, 1.0)
+    };
+    rn + t * s
 }
 
 /// §37: contact force `c` (normal part r·n, r > 0, n unit) on a pair of relative
@@ -1622,6 +1739,7 @@ impl ExplicitBeams {
             trace: None,
             drive: None,
             beamng_profile: false,
+            sleep: Default::default(),
             damp_scheme: 0,
             damp_slopes: Vec::new(),
         }
@@ -3345,6 +3463,13 @@ impl ExplicitBeams {
         } else {
             self.node_pass();
         }
+        if let Some(speed) = self.sleep.track {
+            // Vehicle sleep: the velocities this node pass (and its centred correction)
+            // left (the GPU's point).
+            if !self.sleep.moving {
+                self.sleep.moving = self.nodes.iter().any(|n| crate::explicit_sleep::moving(n.vel, speed));
+            }
+        }
         if !self.wings.is_empty() {
             self.wing_pass();
         }
@@ -3376,6 +3501,11 @@ impl ExplicitBeams {
         }
         if self.surface_contact {
             self.surface_pass();
+        }
+        // The rigid proxies integrate this step's reactions, the node pass's and the
+        // surface pass's (nothing between the node pass and here reads them).
+        if let Some(r) = self.rigid.as_mut() {
+            r.end_step();
         }
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 2);
@@ -3431,6 +3561,9 @@ impl ExplicitBeams {
         if let Some(r) = rigid.as_mut() {
             r.begin_step(origin, &self.nodes);
         }
+        // §38.4: with surface contact, a fast proxy pushes the nodes inside it out the side
+        // they came from.
+        let fast_side = self.surface_contact && !crate::explicit_surface::casts_off();
         let mut cf = self.contact_force.take();
         // (Sized by the pressure wheels' builder: every tread node has a slot.)
         let mut tread = std::mem::take(&mut self.tread);
@@ -3550,7 +3683,7 @@ impl ExplicitBeams {
                     }
                 }
                 if let Some(r) = rigid.as_mut() {
-                    let c = r.node_contact(x, &n);
+                    let c = r.node_contact_with(x, &n, fast_side);
                     if let Some(l) = cf.as_mut() {
                         l.add(i, c);
                     }
@@ -3590,10 +3723,9 @@ impl ExplicitBeams {
         }
         self.contact_force = cf;
         self.tread = tread;
-        if let Some(mut r) = rigid {
-            r.end_step();
-            self.rigid = Some(r);
-        }
+        // The proxies integrate their reactions at the step's end (`Self::step`), after
+        // the surface pass has added its own.
+        self.rigid = rigid;
         if let Some(g) = self.grab {
             self.grab_pass(g);
         }

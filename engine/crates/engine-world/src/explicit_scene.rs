@@ -269,6 +269,9 @@ pub fn town_coupling() -> ExplicitVehiclesDef {
             shapes: 1024,
             planes: 16384,
         },
+        // A crash scene: vehicle sleep off, so its strikes (and §8's measurements) are
+        // unchanged.
+        sleep: None,
         ..ExplicitVehiclesDef::default()
     }
 }

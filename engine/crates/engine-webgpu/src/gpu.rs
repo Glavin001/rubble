@@ -31,6 +31,25 @@ use std::sync::Arc;
 pub const POSES_BINDING: usize = BIND_COUNT;
 pub const POSE_HEADER_BINDING: usize = BIND_COUNT + 1;
 pub const MOVED_BINDING: usize = BIND_COUNT + 2;
+
+/// Where the last step left the awake-indexed broadphase's resting table
+/// ([`WgpuSim::rest_view`]), in binding 14's words.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RestView {
+    /// world_step.slang restBase(): the 32-word header, then the resting heads
+    /// (`hash_size`), the awake heads (`hash_size`), a resting link per collider, then
+    /// the moving-collider list (its count: scratch word 6).
+    pub rest_base: u32,
+    pub hash_size: u32,
+    /// gAabbs index of collider 0's bounds (HOST_S(1)).
+    pub aabb_base: u32,
+    /// The hierarchical grid's levels (0: the uniform split grid's table).
+    pub levels: u32,
+    /// The grid's base cell size (m).
+    pub cell: f32,
+    pub uniform: bool,
+    pub colliders: u32,
+}
 /// Bytes of one [`crate::PoseRecord`].
 pub const POSE_RECORD_BYTES: u64 = 32;
 
@@ -1296,6 +1315,14 @@ impl WgpuSim {
         self.wake_pending = true;
     }
 
+    /// [`Self::mark_gpu_impulses`] without the wake: the next step that runs applies the
+    /// records, and a step with nothing awake may still be skipped (a host whose pass
+    /// can only have appended records while some body is awake: explicit vehicles with
+    /// every one asleep).
+    pub fn schedule_gpu_impulses(&mut self) {
+        self.terrain_impulses_pending = true;
+    }
+
     /// The scratch atomics buffer (binding 21: the impulse records at `IMPULSE_BASE`).
     pub fn scratch_buffer(&self) -> &wgpu::Buffer {
         &self.bufs[21]
@@ -2502,6 +2529,36 @@ impl WgpuSim {
             }
         }
         (total, largest, at)
+    }
+
+    /// The persistent resting table (world_step.slang restBase: statics and sleepers,
+    /// each at its cell) and the moving-collider list as the last step left them, for
+    /// walkers outside the step (the explicit vehicles' proxy query,
+    /// `engine-world/src/explicit_vehicles.rs`). `None` when that step did not keep the
+    /// table (the full pass, reused manifolds, a fracture world) or a host write since
+    /// made it stale: then a walker must look at every collider.
+    pub fn rest_view(&self) -> Option<RestView> {
+        if self.rest_stale || !self.pose_output_enabled() {
+            return None;
+        }
+        let (base, hash) = self.debug_rest_layout();
+        let base = u32::try_from(base).ok()?;
+        Some(RestView {
+            rest_base: base,
+            hash_size: hash,
+            aabb_base: self.capacity.max_bodies,
+            levels: self.grid_levels,
+            cell: self.params.grid_cell_size,
+            uniform: self.grid_levels == 0,
+            colliders: self.collider_count,
+        })
+    }
+
+    /// Binding 14 (constraint ids: the resting table, the moving-collider list) and
+    /// binding 9 (collider bounds at [`RestView::aabb_base`]), for [`Self::rest_view`]'s
+    /// walkers.
+    pub fn rest_buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
+        (&self.bufs[14], &self.bufs[9])
     }
 
     /// Whether the next step runs the awake-indexed broadphase (its gates on the

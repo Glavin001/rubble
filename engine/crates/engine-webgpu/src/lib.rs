@@ -42,7 +42,7 @@ pub use gpu::creation_errors;
 pub use engine_exec::explicit_plan::explicit_loop_cap_hit;
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    default_device, default_device_with, instance_flags, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
+    default_device, default_device_with, instance_flags, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING, RestView,
     POSES_BINDING, POSE_HEADER_BINDING, POSE_RECORD_BYTES,
 };
 #[cfg(feature = "gpu")]
@@ -98,6 +98,9 @@ pub const EXPLICIT_BEAMS_VV_PASSES: [(&str, &str); 3] = [
     ("explicit_beams_vv_pairs", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_pairs.wgsl"))),
     ("explicit_beams_vv_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_group.wgsl"))),
 ];
+/// Vehicle sleep's awake list (`engine_exec::explicit_plan::SLEEP_LIST`).
+pub const EXPLICIT_BEAMS_SLEEP_LIST_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_sleep_list.wgsl"));
 pub const EXPLICIT_BEAMS_CONTACT_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact.wgsl"));
 pub const EXPLICIT_BEAMS_CONTACT_WIDE_WGSL: &str =

@@ -267,10 +267,15 @@ fn the_body_takes_the_equal_and_opposite_force() {
     let mut set = Box::new(set);
     set.begin_window();
     s.rigid = Some(set);
+    // (In f64: the measure's own f32 sums round by more than the bound.)
     let momentum = |s: &ExplicitBeams| {
-        let p: Vec3 = s.nodes.iter().map(|n| n.vel * n.mass).sum();
+        let p: glam::DVec3 = s
+            .nodes
+            .iter()
+            .map(|n| n.vel.as_dvec3() * f64::from(n.mass))
+            .sum();
         let b = &s.rigid.as_ref().unwrap().bodies[0];
-        p + b.vel / b.inv_mass
+        (p + b.vel.as_dvec3() / f64::from(b.inv_mass)).as_vec3()
     };
     let m_plate: f32 = s.nodes.iter().map(|n| n.mass).sum();
     let p0 = momentum(&s);
@@ -303,9 +308,12 @@ fn the_body_takes_the_equal_and_opposite_force() {
     // The fixed point's rounding: each hit's share to each node and the body's sum
     // round by at most 1/64 N a component, over the step.
     let bound = hits as f32 * 4.0 * (1.0 / 64.0) * STEP * 3f32.sqrt();
+    // Vertically, gravity's increments round in each node's f32 velocity as well (half an
+    // ulp of its speed, at most 4 m/s here, a step a node).
+    let gravity_rounding = (steps + 1) as f32 * m_plate * 0.5 * (4.0f32 * f32::EPSILON);
     assert!(
-        dp.length() < bound + 1e-3,
-        "momentum error {dp:?} of {p0:?} (bound {bound})"
+        dp.x.abs() + dp.z.abs() < bound + 1e-3 && dp.y.abs() < bound + gravity_rounding + 1e-3,
+        "momentum error {dp:?} of {p0:?} (bound {bound}, gravity's rounding {gravity_rounding})"
     );
 }
 

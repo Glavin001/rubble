@@ -26,6 +26,7 @@ pub mod explicit_ref;
 pub mod explicit_rigid;
 pub mod explicit_skin;
 pub mod explicit_surface;
+pub mod explicit_sleep;
 pub mod explicit_triggers;
 pub mod flexbody;
 pub mod flexmesh;

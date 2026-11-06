@@ -291,12 +291,30 @@ bool cplMay(uint v, uint k, float3 x, bool cull, uint2 gr)
     return dot(d, d) < asfloat(w.w);
 }
 
-// The two-body contact on a node of vehicle v at world x (force f so far, velocity vel,
+// A fast proxy's push direction for a node inside it (its own function: the shipped
+// path keeps its code).
+float4 cplFastSide(uint v, uint k, float3 vel, float4 n4)
+{
+    float3 vb;
+    if (!surfProxyFast(v, k, vb)) return n4;
+    float3 d = vb - vel;
+    // Only while the body overtakes the node (CPU node_contact_with).
+    if (!(dot(d, d) > 0.0) || !(dot(d, vb) > 0.0)) return n4;
+    return float4(normalize(d), 1.0);
+}
+
+// The two-body contact on a node of vehicle v at x (vehicle-local: relative to its
+// origin, as every proxy record is) (force f so far, velocity vel,
 // mass, friction) from every proxy shape it is inside, in shape order; the reactions are
 // summed into the shapes' accumulators. Returns the node's force with them added.
 // `local`: the node's index in its vehicle (its count pass range, cplGsNodes).
+bool surfProxyFast(uint v, uint k, out float3 vb);
+
 float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction)
 {
+    // §38.4 (explicit_beams_surface.slang FLAG_SURFACE): a fast proxy pushes the nodes
+    // inside it out along its motion relative to them (CPU ProxySet::node_contact_with).
+    bool fastSide = (gStatic[v * 4u + 3u].x & 131072u) != 0u && gP.surfSplit != 0u;
     uint4 hdr = gMisc[cplBase(v)];
     uint acc = cplAcc(v);
     uint nb = cplB();
@@ -317,6 +335,7 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
         if (!cplMay(v, k, x, cull, gr)) continue;
         float4 n4 = cplFace(v, k, x);
         if (n4.w == 0.0) continue;
+        if (fastSide) n4 = cplFastSide(v, k, vel, n4);
         uint at = cplShape(v, k);
         uint j = gMisc[at].y;
         uint b = cplBody(v, j);
@@ -360,22 +379,20 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
     return f;
 }
 
-// Lanes < B: each body sums its shapes' step reactions (into the shapes' window totals,
-// the sums cleared), then integrates (symplectic Euler, as the nodes); its count cleared.
+// Every body j < B (lane j, then j + LANES, ...: a vehicle may hold up to 1024 proxy
+// bodies, more than its lanes) sums its shapes' step reactions (into the shapes' window
+// totals, the sums cleared), then integrates (symplectic Euler, as the nodes); its count
+// cleared.
 void cplIntegrate(uint v, uint lane)
 {
     uint4 hdr = gMisc[cplBase(v)];
-    if (lane >= hdr.x) return;
-    cplIntegrateBody(v, lane);
+    for (uint j = lane, jStop = EB_END(j, hdr.x, LANES); j < jStop; j += LANES) cplIntegrateBody(v, j);
 }
-// The same, body j < B by lane j of `lanes` (and j + lanes, ...).
-// The same bodies as cplIntegrate (j < B and j < LANES), body j by lane j of `lanes`,
-// then j + lanes, ...
+// The same bodies (every j < B), body j by lane j of `lanes`, then j + lanes, ...
 void cplIntegrateBy(uint v, uint lane, uint lanes)
 {
     uint4 hdr = gMisc[cplBase(v)];
-    uint bodies = min(hdr.x, LANES);
-    for (uint j = lane, jStop = EB_END(j, bodies, lanes); j < jStop; j += lanes) cplIntegrateBody(v, j);
+    for (uint j = lane, jStop = EB_END(j, hdr.x, lanes); j < jStop; j += lanes) cplIntegrateBody(v, j);
 }
 // Whether vehicle v's step sums go through workgroup memory (cplReactBy): its every
 // sphere is there (so its shapes fit, 6 words each, in the spheres' and the nodes'
@@ -539,6 +556,27 @@ void cplIntegrateBodySplit(uint v, uint j)
     gAcc[acc + j].store(0);
 }
 
+// The origin rebase moved vehicle v's origin by `first`: its proxy records (bodies'
+// centres, shapes' reference points: relative to the origin) move back by it. Every
+// lane, inside the rebase's branch (no barrier; the rebase's own follows).
+void cplRebase(uint v, uint lane, float3 first)
+{
+    if (gMisc[coupleRec()].x == 0u) return;
+    uint4 hdr = gMisc[cplBase(v)];
+    for (uint j = lane, jStop = EB_END(j, hdr.x, LANES); j < jStop; j += LANES)
+    {
+        uint b = cplBody(v, j);
+        float4 c = asfloat(gMisc[b]);
+        gMisc[b] = asuint(float4(c.xyz - first, c.w));
+    }
+    for (uint k = lane, kStop = EB_END(k, hdr.y, LANES); k < kStop; k += LANES)
+    {
+        uint at = cplShape(v, k) + 6u;
+        float4 r = asfloat(gMisc[at]);
+        gMisc[at] = asuint(float4(r.xyz - first, r.w));
+    }
+}
+
 // Every lane: its nodes against the proxy shapes, each inside counted on its body.
 void cplCount(uint v, uint lane)
 {
@@ -561,7 +599,8 @@ void cplCountBy(uint v, uint lane, uint lanes)
         uint range = CPL_NONE;
         if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) == 0u)
         {
-            float3 x = origin + gNodes[gi * 3u].xyz;
+            // Vehicle-local, as the proxy records (relative to the vehicle's origin).
+            float3 x = gNodes[gi * 3u].xyz;
             for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
             {
                 if (cplMay(v, k, x, cull, gr) && cplFace(v, k, x).w != 0.0)
@@ -772,9 +811,9 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
         }
 #ifdef EB_ABLATE
         // Measurement only: 65536 the node's proxy contact.
-        float3 fr = (gP.ablate & 65536u) != 0u ? f : cplContacts(vehicle, local, x, f, vel, mass, V.w);
+        float3 fr = (gP.ablate & 65536u) != 0u ? f : cplContacts(vehicle, local, pos, f, vel, mass, V.w);
 #else
-        float3 fr = cplContacts(vehicle, local, x, f, vel, mass, V.w);
+        float3 fr = cplContacts(vehicle, local, pos, f, vel, mass, V.w);
 #endif
         cfAdd(gi, fr - f);
         f = fr;

@@ -302,11 +302,24 @@ pub struct ExplicitBeamsWorld {
     pub first_hit_step: Option<u64>,
     /// Scratch: world positions per vehicle and padded boxes.
     world: Vec<Vec<Vec3>>,
+    /// Scratch: the current owner's and its partners' positions in the owner's frame
+    /// (relative to its origin: the contact's geometry; the boxes stay in the World's).
+    frame: Vec<Vec<Vec3>>,
     /// Scratch: every node's force at the contact pass's start (two-body hits).
     pass_force: Vec<Vec<Vec3>>,
     /// The energy ledger (None: off; [`Self::enable_ledger`]).
     pub ledger: Option<EnergyLedger>,
     boxes: Vec<(Vec3, Vec3)>,
+    /// Vehicle sleep ([`crate::explicit_sleep`]): `None` (the default) off, every frame
+    /// as before.
+    pub sleep: Option<crate::explicit_sleep::VehicleSleep>,
+    /// Vehicles the contact pass leaves out (sleeping; empty: none).
+    skip: Vec<bool>,
+    /// Vehicle sleep's proximity wake: the GPU contact plan's frame bounds margin (m,
+    /// `engine_exec::explicit_plan::DEFAULT_CONTACT_MARGIN`) and the steps a plan covers
+    /// at least (`VV_PLAN_STEPS`).
+    pub plan_margin: f32,
+    pub plan_steps: u32,
 }
 
 impl ExplicitBeamsWorld {
@@ -329,15 +342,25 @@ impl ExplicitBeamsWorld {
             total: ContactStats::default(),
             first_hit_step: None,
             world: Vec::new(),
+            frame: Vec::new(),
             ledger: None,
             pass_force: Vec::new(),
             boxes: Vec::new(),
+            sleep: None,
+            skip: Vec::new(),
+            plan_margin: 1.0,
+            plan_steps: 34,
         }
     }
 
     /// One frame: every vehicle's wing check and origin rebase, then `steps` world
-    /// steps.
+    /// steps. With [`Self::sleep`], sleeping vehicles are not stepped
+    /// ([`Self::frame_sleeping`]).
     pub fn frame(&mut self, steps: u32) {
+        if let Some(cfg) = self.sleep {
+            self.frame_sleeping(steps, &cfg);
+            return;
+        }
         for v in &mut self.vehicles {
             v.check_wings();
             v.rebase_origin();
@@ -359,6 +382,129 @@ impl ExplicitBeamsWorld {
         }
         self.frame(steps);
         steps
+    }
+
+    /// The GPU contact plan's padded frame boxes (`explicit_beams_vv_bounds`) of a frame
+    /// of `steps` steps, from the current state: each vehicle's node box grown by twice
+    /// the travel at its extreme velocities over the plan's steps, the margin, and
+    /// [`BOX_MARGIN`].
+    pub fn plan_boxes(&self, steps: u32) -> Vec<(Vec3, Vec3)> {
+        let time = 2.0 * steps.max(self.plan_steps) as f32 * STEP;
+        let m = Vec3::splat(self.plan_margin);
+        self.vehicles
+            .iter()
+            .map(|v| {
+                let (mut lo, mut hi) = (Vec3::splat(3.0e38), Vec3::splat(-3.0e38));
+                let (mut vl, mut vh) = (Vec3::ZERO, Vec3::ZERO);
+                for n in &v.nodes {
+                    let x = v.origin + n.pos;
+                    lo = lo.min(x);
+                    hi = hi.max(x);
+                    vl = vl.min(n.vel);
+                    vh = vh.max(n.vel);
+                }
+                let alo = lo - (-vl * time + m);
+                let ahi = hi + (vh * time + m);
+                (alo - Vec3::splat(BOX_MARGIN), ahi + Vec3::splat(BOX_MARGIN))
+            })
+            .collect()
+    }
+
+    /// Vehicle sleep's groups: vehicles whose [`Self::plan_boxes`] overlap, connected
+    /// (the GPU plan's contact groups), as a label (smallest member) per vehicle. Without
+    /// vehicle contact (or one vehicle) every vehicle is its own group.
+    pub fn sleep_groups(&self, steps: u32) -> Vec<usize> {
+        let nv = self.vehicles.len();
+        let mut label: Vec<usize> = (0..nv).collect();
+        if !self.contact || nv < 2 {
+            return label;
+        }
+        fn root(l: &mut [usize], mut x: usize) -> usize {
+            while l[x] != x {
+                l[x] = l[l[x]];
+                x = l[x];
+            }
+            x
+        }
+        let b = self.plan_boxes(steps);
+        for i in 0..nv {
+            for j in i + 1..nv {
+                let apart = b[i].1.cmplt(b[j].0).any() || b[j].1.cmplt(b[i].0).any();
+                if !apart {
+                    let (ri, rj) = (root(&mut label, i), root(&mut label, j));
+                    let m = ri.min(rj);
+                    label[ri] = m;
+                    label[rj] = m;
+                }
+            }
+        }
+        for i in 0..nv {
+            label[i] = root(&mut label, i);
+        }
+        label
+    }
+
+    /// Wake vehicle `v` (a host write: input, velocities, a force).
+    pub fn wake(&mut self, v: usize) {
+        self.vehicles[v].sleep.wake();
+    }
+
+    /// One frame with vehicle sleep ([`crate::explicit_sleep`]): a group with an awake
+    /// member wakes its sleeping members; the awake vehicles are stepped (the contact
+    /// pass among them), their stillness tracked each step after the node pass; at the
+    /// frame's end the rule updates each one, and a group whose every member reached the
+    /// dwell falls asleep.
+    pub fn frame_sleeping(&mut self, steps: u32, cfg: &crate::explicit_sleep::VehicleSleep) {
+        let nv = self.vehicles.len();
+        let groups = self.sleep_groups(steps);
+        for g in 0..nv {
+            let members = (0..nv).filter(|&v| groups[v] == g);
+            let any_awake = members.clone().any(|v| !self.vehicles[v].sleep.asleep);
+            if any_awake {
+                for v in members {
+                    if self.vehicles[v].sleep.asleep {
+                        self.vehicles[v].sleep.wake();
+                    }
+                }
+            }
+        }
+        let awake: Vec<bool> = self.vehicles.iter().map(|v| !v.sleep.asleep).collect();
+        for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
+            v.check_wings();
+            v.rebase_origin();
+            v.sleep.track = Some(cfg.speed);
+            v.sleep.moving = v.grab.is_some();
+        }
+        for _ in 0..steps {
+            for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
+                v.step();
+            }
+            self.steps += 1;
+            if self.contact && nv > 1 {
+                self.skip = self.vehicles.iter().map(|v| v.sleep.asleep).collect();
+                self.contact_pass();
+                self.skip.clear();
+            }
+        }
+        let mut eligible = vec![false; nv];
+        for (i, v) in self.vehicles.iter_mut().enumerate() {
+            if !awake[i] {
+                continue;
+            }
+            let moving = v.sleep.moving;
+            v.sleep.track = None;
+            v.sleep.moving = false;
+            let pos: Vec<Vec3> = v.nodes.iter().map(|n| n.pos).collect();
+            eligible[i] = crate::explicit_sleep::frame_end(&mut v.sleep, &pos, moving, steps, cfg);
+        }
+        for g in 0..nv {
+            let members: Vec<usize> = (0..nv).filter(|&v| groups[v] == g && awake[v]).collect();
+            if !members.is_empty() && members.iter().all(|&v| eligible[v]) {
+                for v in members {
+                    self.vehicles[v].sleep.asleep = true;
+                }
+            }
+        }
     }
 
     /// One step: every vehicle's own step in vehicle order, then the contact pass.
@@ -448,9 +594,12 @@ impl ExplicitBeamsWorld {
         let mut partners: Vec<usize> = Vec::new();
         for a in 0..nv {
             partners.clear();
+            if self.skip.get(a).copied().unwrap_or(false) {
+                continue;
+            }
             let (alo, ahi) = self.boxes[a];
             for b in 0..nv {
-                if b == a {
+                if b == a || self.skip.get(b).copied().unwrap_or(false) {
                     continue;
                 }
                 let (blo, bhi) = self.boxes[b];
@@ -483,6 +632,7 @@ impl ExplicitBeamsWorld {
                 .map(|&b| self.vehicles[b].contact_points.len())
                 .sum();
             if offered > 0 {
+                self.owner_frame(a, &partners);
                 self.triangle_loop(a, &partners, &mut stats);
             }
         }
@@ -495,6 +645,22 @@ impl ExplicitBeamsWorld {
         self.total.hits += stats.hits;
         self.total.resets += stats.resets;
         self.last = stats;
+    }
+
+    /// The owner `a`'s and its partners' node positions in `a`'s frame: each vehicle's
+    /// origin less `a`'s, plus its node positions (the GPU's `vvRel`; exactly the world
+    /// positions while every origin is 0).
+    fn owner_frame(&mut self, a: usize, partners: &[usize]) {
+        let nv = self.vehicles.len();
+        self.frame.resize(nv, Vec::new());
+        let oa = self.vehicles[a].origin;
+        for &x in std::iter::once(&a).chain(partners) {
+            let v = &self.vehicles[x];
+            let rel = v.origin - oa;
+            let f = &mut self.frame[x];
+            f.clear();
+            f.extend(v.nodes.iter().map(|n| rel + n.pos));
+        }
     }
 
     /// Owner `a`'s triangle loop against `partners` (§3.3, §4.2, §5, §6): the walk
@@ -527,7 +693,7 @@ impl ExplicitBeamsWorld {
             }
             stats.triangles_tested += 1;
             let [i0, i1, i2] = self.vehicles[a].triangles[t].nodes;
-            let wa = &self.world[a];
+            let wa = &self.frame[a];
             let (p0, p1, p2) = (wa[i0 as usize], wa[i1 as usize], wa[i2 as usize]);
             // A broken triangle, or an anti-clip-only one while its vehicle's
             // anti-clip is off: no candidates.
@@ -554,7 +720,7 @@ impl ExplicitBeamsWorld {
                 0.0
             };
             for &b in partners {
-                let wb = &self.world[b];
+                let wb = &self.frame[b];
                 let anti = anti_a || (self.vehicles[b].anti_clip && !dead);
                 for &h in &self.vehicles[b].contact_points {
                     let x = wb[h as usize];
@@ -578,7 +744,7 @@ impl ExplicitBeamsWorld {
                 let frame = ContactFrame::new(p0, p1, p2);
                 for &(b, h) in &cands {
                     stats.candidates += 1;
-                    let x = self.world[b][h as usize];
+                    let x = self.frame[b][h as usize];
                     let (alpha, beta, gamma, delta) = frame.local(x);
                     // Anti-clip (§36): the side a point is kept on is the one it
                     // held for this triangle last step (it was in contact), or the
@@ -596,7 +762,7 @@ impl ExplicitBeamsWorld {
                             clip_side(&self.vehicles[b].clip_sides[h as usize], a as u32, t as u32);
                         let va = &self.vehicles[a];
                         let vb = &self.vehicles[b];
-                        let wb = &self.world[b];
+                        let wb = &self.frame[b];
                         let crossing = || {
                             let back = |i: u32, p: Vec3| p - va.nodes[i as usize].vel * STEP;
                             let pf = ContactFrame::new(back(i0, p0), back(i1, p1), back(i2, p2));
@@ -658,7 +824,7 @@ impl ExplicitBeamsWorld {
                         vb.neighbour_start[h as usize] as usize,
                         vb.neighbour_start[h as usize + 1] as usize,
                     );
-                    let wb = &self.world[b];
+                    let wb = &self.frame[b];
                     let behind = vote_behind(
                         delta,
                         frame.n,
