@@ -536,7 +536,7 @@ fn beam_energy(b: &Beam, len: f32, rest: f32) -> f64 {
     let x = len - rest;
     match b.kind {
         ExplicitKind::Support | ExplicitKind::JbeamSupport if x > 0.0 => 0.0,
-        ExplicitKind::Rope if x < 0.0 => 0.0,
+        ExplicitKind::Rope | ExplicitKind::JbeamRope if x < 0.0 => 0.0,
         ExplicitKind::LimitedSpring => {
             let (long, short) = (b.long_bound * b.rest, b.short_bound * b.rest);
             let k = |y: f32| {
@@ -685,7 +685,7 @@ impl Ledger {
                     n.mass,
                     Vec3::Y,
                     h,
-                    &ContactSurface::GROUND,
+                    &ContactSurface::GROUND.exact_if(s.exact_friction),
                     s.ground - x.y,
                     n.friction,
                 );
@@ -705,7 +705,7 @@ impl Ledger {
                     n.mass,
                     normal,
                     h,
-                    &ContactSurface::BOX,
+                    &ContactSurface::BOX.exact_if(s.exact_friction),
                     0.0,
                     n.friction,
                 );
