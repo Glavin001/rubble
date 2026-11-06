@@ -21,6 +21,8 @@
 //! - [`range`]: a baked Shardwright GLB as a threshold destructible on a ground slab, the
 //!   balls fired at it and its crush debris; [`broadside`] and [`timber_yard`] are its
 //!   scripted takes.
+//! - [`impact`] and [`showcase`]: the meteor impact and the meteor run on deformable
+//!   (MPM) ground.
 //! - [`stage`]: what a host draws for a range scene (its poses interpolated between steps,
 //!   its extra meshes) and its stats.
 //! - The fracture lab ([`crate::lab`]): every lab scene under every bond model.
@@ -36,6 +38,7 @@ pub mod presets;
 pub mod range;
 pub mod rigid;
 pub mod scene;
+pub mod showcase;
 pub mod softbody;
 pub mod stage;
 pub mod timber_yard;

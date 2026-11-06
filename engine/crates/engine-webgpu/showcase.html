@@ -52,8 +52,8 @@
   </div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, pollFrame, stepFrames, drain, macrotask, worldWasm, saveState } from './rubble-world.mjs';
-    import { WHEEL_RIM_MATERIAL, L } from './vehicle.mjs';
+    import { createScene, sceneFromQuery, pollFrame, stepFrames, drain, macrotask, worldWasm, saveState } from './rubble-world.mjs';
+    import { L } from './vehicle.mjs';
     import { GROUND_WGSL, switchError } from './terrain-render.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
 
@@ -67,36 +67,6 @@
     const num = (k, d) => (qs.has(k) && Number.isFinite(Number(qs.get(k))) ? Number(qs.get(k)) : d);
     if (qs.get('hud') === '0') $('hud').hidden = true;
 
-    // ================================================================ terrain settings
-    // The one place the terrain is configured (engine-world's TerrainDef).
-    const G = 9.81;
-    const TERRAIN = {
-      // A stony meteor: π-scaling gives a 27 m transient crater, a 35 m final rim.
-      meteor: { radius: num('radius', 1.0), density: 3000, speed: num('speed', 20) * 1000 },
-      settings: {
-        config: {
-          maxParticles: 1 << 20, maxBlocks: 8192, maxParcels: 1 << 17, maxSubsteps: 1024,
-          maxColumns: 1 << 16, maxFieldSamples: 1 << 19,
-          // The dune buggy drives into open regions: its 17 parts' colliders couple.
-          maxCoupled: 256,
-          // Cells across the transient radius: 6 gives 4.5 m cells.
-          cellsPerRadius: num('cpr', 6),
-          // The engine's game profile (TerrainProfile::Game: Courant 0.45,
-          // speed growth 1.0, bed 1.25 R) under these limits, the default for
-          // demos; ?profile=physical keeps the validation profile.
-          profile: qs.get('profile') ?? 'game',
-        },
-        // 1 R past the transient radius (the final rim is at 1.3 R): a box of
-        // ~100k particles, which the car's track can pass close to.
-        regionMargin: num('margin', 1.0),
-        settleSpeed: null, // 1% of the crater's √(gR), set below
-        settleFrames: 60, // 0.5 s at 120 Hz
-        // The live surface, with its patches (samples set below); the page
-        // draws the engine's debris list in place, so no debris copies.
-        surface: { cells: 1 << 21, maxDebris: 0 },
-      },
-    };
-
     // ================================================================ scenes
     // drive (default): a barrage, strikes on both sides of the road, some
     // close enough that the car drives up over a fresh rim, near misses just
@@ -106,93 +76,31 @@
     // engine's view and the game's side by side from one state.
     // play: you drive (keys or touch); a director drops meteors around you,
     // near misses ahead, beside and on your line, faster as you last; click or
-    // tap the ground to drop one yourself. Endless (see playTick).
-    const SCENE = ['drive', 'drive1', 'pass', 'bts', 'play'].includes(qs.get('scene')) ? qs.get('scene') : 'drive';
+    // tap the ground to drop one yourself. Endless.
+    //
+    // The scene (rubble::play::showcase, engine-world): the terrain's settings,
+    // the prediction (π-scaling), the dunes, the world and the car, from the
+    // page's switches; its script runs the strikes on their schedule, the
+    // autopilot round the road and play's director (rubble::play::director).
+    const sceneDef = await sceneFromQuery('showcase', location.search);
+    const SCENE = sceneDef.scene;
     const PLAY = SCENE === 'play';
-    // The barrage keeps several areas open at once (overlapping strikes grow
-    // one area): explicit, so a schedule that needs more fails by name.
-    if (SCENE === 'drive') TERRAIN.settings.config.maxRegions = num('regions', 8);
-    if (PLAY) TERRAIN.settings.config.maxRegions = num('regions', 12);
-    // Endless play: an area settles on its own sand and the parcels that can
-    // still reach it (engine_terrain::SettleRule::Local), not on the car
-    // driving over it or a barrage's ejecta flying elsewhere.
-    if (PLAY) TERRAIN.settings.settleRule = qs.get('rule') === 'strict' ? 'strict' : 'local';
-
-    // ================================================================ the crater (Rust: π-scaling)
-    const W = await worldWasm();
-    const pred = W.terrainPredictImpact({ ...TERRAIN.settings, settleSpeed: 0.05 }, TERRAIN.meteor.radius, TERRAIN.meteor.density, TERRAIN.meteor.speed, G);
-    const sandInfo = W.terrainSettings({ ...TERRAIN.settings, settleSpeed: 0.05 });
-    const R = pred.crater.radius, RIM = pred.crater.finalRimRadius;
-    TERRAIN.settings.settleSpeed = num('settle', 0.01 * Math.sqrt(G * R));
-    const DX = pred.dx;
-    // How far an open region's box reaches from its strike: R(1 + margin),
-    // rounded out to whole 4-cell blocks.
-    const REACH = R * (1 + TERRAIN.settings.regionMargin) + 4 * DX;
+    // Seeded, so a run can be replayed with ?seed=.
+    if (sceneDef.seed == null) sceneDef.seed = Math.floor(Math.random() * 1e9);
+    const world = await createScene(sceneDef);
+    const placed = world.placeScene(sceneDef);
+    const TERRAIN = placed.terrain;
+    const pred = placed.prediction;
+    const R = placed.radius, RIM = placed.rim, DX = placed.dx, REACH = placed.reach;
 
     // ================================================================ the ground
-    // Heightfield samples are the region's cells. Dunes, flattened over the
-    // strike field (π-scaling assumes level ground).
-    const SP = DX;
-    // play: a wide basin, 1.2 km across, rimmed by hills.
-    const HALF = PLAY ? num('half', 600) : 320;
-    const NX = 2 * Math.ceil(HALF / SP) + 1, NZ = NX;
-    const X0 = -0.5 * (NX - 1) * SP, Z0 = X0;
-    // The track: a stadium loop along x (straights at z = ±TURN joined by
-    // half circles), driven clockwise seen from above, the strike field inside
-    // on the car's left. Straights line up with the regions' boxes, so a strike
-    // can sit close beside one.
-    // The straights sit just outside a line of the regions' block lattice
-    // (4-cell blocks, which round a box out), so a strike beside them comes
-    // as close as its box allows.
-    // Clear of a box by more than a cell plus the buggy's reach: closer, its
-    // colliders' padded bounds (mpmColliderBounds) fall in the region's block
-    // cells and couple, and its parts overflow a cell's 8 slots (an error).
-    const CLEAR = num('clear', 9);
-    const BLOCK = 4 * DX;
-    const STRAIGHT = num('straight', 90);
-    const TURN = num('turn', Math.floor((58 * R / 15.1 - CLEAR) / BLOCK) * BLOCK + CLEAR + 0.5);
-    const TRACK = (() => {
-      const pts = [];
-      for (let x = -STRAIGHT; x < STRAIGHT; x += 1) pts.push([x, TURN]);
-      for (let a = 0; a < Math.PI; a += 1 / TURN) pts.push([STRAIGHT + TURN * Math.sin(a), TURN * Math.cos(a)]);
-      for (let x = STRAIGHT; x > -STRAIGHT; x -= 1) pts.push([x, -TURN]);
-      for (let a = 0; a < Math.PI; a += 1 / TURN) pts.push([-STRAIGHT - TURN * Math.sin(a), -TURN * Math.cos(a)]);
-      return pts;
-    })();
-    // Distance from the loop's spine (the segment between the turns' centres).
-    const spine = (x, z) => Math.hypot(x - Math.max(-STRAIGHT, Math.min(STRAIGHT, x)), z);
-    // Flat this far outside the track too: the barrage strikes outside it.
-    const FLAT_OUT = SCENE === 'drive' ? num('flatout', 75) : 14;
-    const dune = (x, z) => {
-      if (PLAY) {
-        // Low dunes everywhere (π-scaling assumes level ground: kept gentle),
-        // the basin's hills past HALF - 140 m.
-        const big = 2.6 * Math.sin(x / 47 + 0.7) * Math.cos(z / 61 - 0.4) + 1.6 * Math.sin((x + 1.7 * z) / 37);
-        const ridge = 1.2 * Math.sin((0.8 * x - 0.6 * z) / 11 + Math.sin(z / 29) * 2.0);
-        const edge = Math.min(1, Math.max(0, (Math.max(Math.abs(x), Math.abs(z)) - (HALF - 140)) / 90));
-        return 0.3 * (big + 0.35 * ridge) + edge * edge * 30 * (0.7 + 0.3 * Math.sin(x / 41) * Math.cos(z / 37));
-      }
-      const r = spine(x, z);
-      const field = Math.min(1, Math.max(0, (r - TURN - FLAT_OUT) / 40)); // flat inside the loop
-      const big = 2.6 * Math.sin(x / 47 + 0.7) * Math.cos(z / 61 - 0.4) + 1.6 * Math.sin((x + 1.7 * z) / 37);
-      const ridge = 1.2 * Math.sin((0.8 * x - 0.6 * z) / 11 + Math.sin(z / 29) * 2.0);
-      const far = Math.min(1, Math.max(0, (r - TURN - FLAT_OUT - 16) / 80)) * 9 * (0.6 + 0.4 * Math.sin(x / 53) * Math.cos(z / 71));
-      return field * (big + 0.35 * ridge) * 0.6 + far;
-    };
-    const initialHeights = new Float32Array(NX * NZ);
-    for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) initialHeights[j * NX + i] = dune(X0 + i * SP, Z0 + j * SP);
+    // Heightfield samples are the region's cells: dunes, flattened over the
+    // strike field (play: a wide basin rimmed by hills).
+    const SP = placed.sp, NX = placed.nx, NZ = placed.nz, X0 = placed.x0, Z0 = X0;
+    const GROUND = placed.ground;
+    const initialHeights = Float32Array.from(world.heightFieldHeights(GROUND));
     let heights = initialHeights.slice();
-    // The surface patches (engine_terrain::surface::SurfacePatch): World makes
-    // one more heightfield per area slot (max_regions of them) at the first
-    // strike, which the surface pass keeps on that area's live sand over its
-    // open window, so the wheels' rays meet the sand, not the lowered bed under
-    // it. Out of reach while its area is not open. Overlapping strikes grow one
-    // area to cover them both (49 × 25 samples for the drive scene's first
-    // two), so a patch takes the grown window plus its ring.
-    const REGIONS = sandInfo.config.maxRegions;
-    // The barrage's strikes chain along the road into longer grown windows.
-    const PN = num('patch', SCENE === 'drive' || PLAY ? 128 : 72);
-    TERRAIN.settings.surface.patchSamples = PN;
+    // The ground's height (the heightfield as last baked): the camera, picking.
     const groundAt = (x, z) => {
       const fx = Math.min(Math.max((x - X0) / SP, 0), NX - 1.001), fz = Math.min(Math.max((z - Z0) / SP, 0), NZ - 1.001);
       const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j;
@@ -201,19 +109,8 @@
     };
 
     // ================================================================ world
-    // Rubble's World (engine-world-wasm) opens the device; the page renders on
-    // it and binds the world's buffers in place. The JS host's sizes: 4096
-    // bodies, 8192 colliders, canonical contacts.
-    const world = await createWorld({
-      gravity: [0, -G, 0],
-      contacts: 'canonical',
-      capacity: { maxBodies: 4096, maxColliders: 8192, maxContacts: 65536, maxJoints: 64, maxCandidates: 131072, maxColors: 32,
-        // The JS host's 64 held its kinematic velocities only; World also carries
-        // teleports and velocity sets as commands (capacity only).
-        maxCommands: 2048 },
-      vehicles: { maxVehicles: 4, maxWheels: 16, maxCurvePoints: 512, maxDiffs: 8, maxAntiRolls: 8, maxParts: 64, maxRays: 16 },
-      readbackFrames: 4,
-    });
+    // Rubble's World (engine-world-wasm) opened the device; the page renders on
+    // it and binds the world's buffers in place.
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -235,18 +132,12 @@
     addEventListener('resize', () => { if (!fixedSize) configure(); });
     // 120 Hz: physics and render every frame (behind the scenes: 300 Hz, so
     // each recorded frame can be a finer slice of the strike).
-    const DT = SCENE === 'bts' ? 1 / 300 : 1 / 120;
-    world.setSolver({ dt: DT, iterations: 8, gravityY: -G, flags: world.flags.SPEC_VELOCITY });
-    // The JS host's material table: slot 0 (the ground, the patches and the
-    // buggy's part colliders) and the wheel rims at 0.9, the rest 0.6.
-    for (let i = 0; i < 64; i++) world.setMaterialSlot(i, { friction: i === 0 || i === WHEEL_RIM_MATERIAL ? 0.9 : 0.6 });
-    const GROUND = world.createHeightField(world.createBody({}), { material: { friction: 0.9 } }, NX, NZ, SP, SP, initialHeights);
+    const DT = placed.dt;
     const HF_BASE = world.shapeArenaBase(GROUND);
 
-    statusEl.textContent = 'enabling terrain…';
-    world.enableTerrain(TERRAIN.settings);
-    const T = W.terrainLayout();
+    const T = (await worldWasm()).terrainLayout();
     const terrainSettings = world.terrainSettings();
+    const sandInfo = terrainSettings;
     const maxParticles = terrainSettings.config.maxParticles, maxParcels = terrainSettings.config.maxParcels;
     // Several strikes at once (max_regions > 1); otherwise each region bakes first.
     const canOverlap = () => (terrainSettings.config.maxRegions ?? 1) > 1;
@@ -255,72 +146,21 @@
     const terrain = { report: null, areas: [], region: null, views: [] };
     const refreshAreas = () => { terrain.areas = world.terrainAreas(); terrain.region = terrain.areas[0] ?? null; };
 
-    // ---- the car: the dune buggy on an autopilot loop around the strike field
-    const presets = Object.fromEntries((await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json()).map((p) => [p.name, p]));
-    const CAR = qs.get('car') || 'dune_buggy';
-    const SPEED = num('kmh', 60) / 3.6;
-    const qYaw = (yaw) => [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)];
-    const startCar = () => {
-      const [x, z] = PLAY ? [0, 0] : TRACK[0];
-      // Facing +x along the first straight.
-      return world.addVehicle(presets[CAR], [x, groundAt(x, z) + 1.4, z], qYaw(Math.PI / 2));
-    };
+    // ---- the car: the dune buggy, on an autopilot loop around the strike field
+    // (the script's), or yours (play)
+    const CAR = sceneDef.car;
+    const SPEED = placed.speed, STRAIGHT = placed.straight, TURN = placed.turn;
 
     // ================================================================ the strikes
-    // Sim seconds (LEAD is the run-up before the recording starts). `pass`:
-    // beside where the car will be then, as close to the track as the
-    // strike's region box allows; `rimOf`: on that strike's rim, turned
-    // `rimTurn` from +x toward the field. `overlapT`: when the strike is due
-    // once regions may overlap (the second then lands on the first crater's
-    // rim while it still moves).
-    const LEAD = num('lead', SCENE === 'bts' ? 0 : 1.5);
-    // drive: `beside` m between the crater's rim and the track where the car
-    // passes (near misses: the car rides the rim's flank and the blanket).
-    const GAP = num('gap', 3);
-    const SCHEDULES = {
-      pass: [
-        { t: LEAD + num('t1', 1.2), pass: LEAD + num('pass1', 5.0) },
-        { t: LEAD + num('t2', 7.0), overlapT: LEAD + 3.4, rimOf: 0, rimTurn: num('turn2', 0.45) },
-        { t: LEAD + num('t3', 13.5), pass: LEAD + num('pass3', 17.0) },
-      ],
-      // The barrage. `side`: 1 inside the loop, -1 outside it. `beside` < 0:
-      // the track runs inside the rim, so the car drives up over its crest
-      // and down. A strike with t > pass lands just behind the car, one with
-      // t a little before pass just ahead of it.
-      drive: [
-        { t: LEAD + 0.5, pass: LEAD + 2.9, side: 1, beside: 2 },
-        { t: LEAD + 1.9, pass: LEAD + 3.9, side: -1, beside: -1 },
-        { t: LEAD + 4.4, pass: LEAD + 4.8, side: 1, beside: 4 }, // just ahead
-        { t: LEAD + 6.5, pass: LEAD + 5.2, side: -1, beside: 9 }, // just behind
-        { t: LEAD + 6.5, pass: LEAD + 8.9, side: 1, beside: -1 },
-        { t: LEAD + 8.0, pass: LEAD + 10.1, side: -1, beside: 3 },
-        { t: LEAD + 11.1, pass: LEAD + 11.5, side: 1, beside: 3 }, // just ahead
-        { t: LEAD + 12.5, pass: LEAD + 14.7, side: -1, beside: 2 },
-        { t: LEAD + 14.7, pass: LEAD + 13.7, side: 1, beside: 3 }, // just behind
-        { t: LEAD + 15.5, pass: LEAD + 17.9, side: 1, beside: 4 },
-        { t: LEAD + 17.1, pass: LEAD + 17.5, side: -1, beside: 2 }, // just ahead
-      ],
-      drive1: [
-        { t: LEAD + num('t1', 1.0), pass: LEAD + num('pass1', 4.6), beside: GAP },
-        { t: LEAD + num('t2', 7.0), overlapT: LEAD + 3.0, pass: LEAD + num('pass2', 10.6), beside: GAP },
-        { t: LEAD + num('t3', 13.0), pass: LEAD + num('pass3', 16.6), beside: GAP },
-      ],
-      // Filled as you play: the director's strikes and yours ({ t, at }).
-      play: [],
-      bts: [
-        { t: num('t1', 1.5), at: [0, 20] },
-        { t: num('t2', 5.6), overlapT: 2.6, rimOf: 0, rimTurn: num('turn2', 0.45) },
-      ],
-    };
-    const SCHEDULE = SCHEDULES[SCENE];
-    // Where the car is at sim time t (it reaches SPEED about 1.8 s in).
-    // The barrage's near misses need it closer: measured, the car is 0.75 s
-    // behind that from the start.
-    const RUNUP = SCENE === 'drive' ? 1.65 : 0.9;
-    const trackAt = (t) => TRACK[Math.min(TRACK.length - 1, Math.max(0, Math.round(SPEED * Math.max(0, t - RUNUP))))];
-    const APPROACH = 1.35; // s of fireball before contact (cosmetic)
+    // Sim seconds (LEAD is the run-up before the recording starts); the
+    // schedules and where each strike lands are the script's.
+    const LEAD = placed.lead;
+    const APPROACH = placed.approach; // s of fireball before contact
     const VIS_SPEED = 520; // m/s along its path (cosmetic: the real 20 km/s is one frame)
     const MAX_FX = 16;
+    // The script's schedule as last synced: each strike's state, contact time
+    // (t0), point and contact (struckAt).
+    let SCHEDULE = [];
 
     // ================================================================ rendering
     const SAMPLES = 4;
@@ -1027,149 +867,46 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     const cam = { eye: null, target: null, focus: null, focusW: 0 };
     function reset() {
       // World::restore_state: the scene as saved, open areas dropped (not
-      // baked), the heightfield's samples back, the terrain pool started over.
+      // baked), the heightfield's samples back, the terrain pool started over;
+      // then the script starts over.
       world.restoreState(initial);
+      world.act({ action: 'reset' });
+      world.takeEvents();
       heights = initialHeights.slice();
       terrain.report = null; terrain.views = [];
       refreshAreas();
-      st.t = 0; st.frame = 0; st.fx = []; st.strikes = []; st.lastStrike = -1e9; st.carPose = null; st.carSpeed = 0; st.switches = [];
+      st.t = 0; st.frame = 0; st.strikes = []; st.switches = [];
       cam.eye = null;
-      SCHEDULE.forEach((s) => { s.state = 'wait'; s.fx = null; s.liveRead = false; });
+      syncScript();
       if (PLAY) {
-        SCHEDULE.length = 0;
-        Object.assign(game, { over: null, near: 0, dropped: 0, survived: 0, next: 3, baked: 0, msg: '', msgT: -1e9, flipT: 0, stuckT: 0, trail: [] });
-        game.opened.clear();
+        game.baked = 0;
         $('over').hidden = true;
       }
     }
-    st.car = startCar();
+    st.car = placed.car;
     entries[st.car] = world.vehicleEntry(st.car);
-    const CHASSIS = entries[st.car].chassis;
     if (buggy) buggy.add(st.car);
     const initial = await saveState(world);
-    SCHEDULE.forEach((s) => { s.state = 'wait'; });
 
-    // ---- the schedule
-    // The box a strike at (x, z) opens (RegionPlan::around: the padded
-    // radius rounded out to whole blocks), and how far the road passes from it.
-    const boxOf = (x, z) => {
-      const reach = R * (1 + TERRAIN.settings.regionMargin);
-      return [Math.floor((x - reach) / BLOCK) * BLOCK, Math.floor((z - reach) / BLOCK) * BLOCK, Math.ceil((x + reach) / BLOCK) * BLOCK, Math.ceil((z + reach) / BLOCK) * BLOCK];
-    };
-    // How close the track comes to a box (every track point outside it).
-    const trackClearance = ([x0, z0, x1, z1]) => {
-      let d = Infinity;
-      for (const [x, z] of TRACK) d = Math.min(d, Math.hypot(Math.max(x0 - x, 0, x - x1), Math.max(z0 - z, 0, z - z1)));
-      return d;
-    };
-    function strikePoint(s) {
-      if (s.at) return s.at;
-      if (s.beside !== undefined) {
-        // Inside the loop beside where the car will pass: the rim `beside` m
-        // from the track (the region's box takes the track in).
-        // `side` -1: outside the loop instead, away from the spine.
-        const [ax, az] = trackAt(s.pass);
-        const sx = Math.max(-STRAIGHT, Math.min(STRAIGHT, ax));
-        const d = Math.hypot(ax - sx, az);
-        const off = (RIM + s.beside) * (s.side ?? 1);
-        return [ax + (sx - ax) / d * off, az - az / d * off];
-      }
-      if (s.rimOf !== undefined && SCENE !== 'pass') {
-        const o = SCHEDULE[s.rimOf].point;
-        return [o[0] + RIM * Math.cos(s.rimTurn), o[2] - RIM * Math.sin(s.rimTurn)];
-      }
-      if (s.rimOf !== undefined) {
-        const o = SCHEDULE[s.rimOf].point;
-        let [x, z] = [o[0] + RIM * Math.cos(s.rimTurn), o[2] - RIM * Math.sin(s.rimTurn)];
-        // Into the field until its box clears the track.
-        for (let k = 0; k < 400 && trackClearance(boxOf(x, z)) < CLEAR; k++) z -= 0.5 * Math.sign(z || 1);
-        return [x, z];
-      }
-      // From the loop's spine toward where the car passes, while the box
-      // still clears the track.
-      const [ax, az] = trackAt(s.pass);
-      const sx = Math.max(-STRAIGHT, Math.min(STRAIGHT, ax));
-      const d = Math.hypot(ax - sx, az);
-      const u = [(ax - sx) / d, az / d];
-      let f = 0;
-      while (f + 0.5 < d && trackClearance(boxOf(sx + u[0] * (f + 0.5), u[1] * (f + 0.5))) >= CLEAR) f += 0.5;
-      return [sx + u[0] * f, u[1] * f];
-    }
-    // The live surface's height at (x, z) (nearest sample), or null outside
-    // every open area's window.
-    async function liveHeightAt(x, z) {
-      const read = async (offset, bytes) => (await world.readTerrainSurface(offset / 4, bytes / 4)).buffer;
-      const head = new Uint32Array(await read(0, 4 * (T.SURFACE_VIEW_WORD + T.SURFACE_VIEW_WORDS * T.MAX_SURFACE_VIEWS)));
-      if (head[T.SURFACE_VALID_WORD] !== 1) return null;
-      for (let s = 0; s < T.MAX_SURFACE_VIEWS; s++) {
-        const v = head.subarray(T.SURFACE_VIEW_WORD + s * T.SURFACE_VIEW_WORDS, T.SURFACE_VIEW_WORD + (s + 1) * T.SURFACE_VIEW_WORDS);
-        if (!(v[0] & T.SURFACE_VIEW_OPEN)) continue;
-        const [i0, j0, ni, nj] = v.subarray(T.SURFACE_VIEW_WINDOW, T.SURFACE_VIEW_WINDOW + 4);
-        const ti = Math.round((x - X0) / SP) - i0, tj = Math.round((z - Z0) / SP) - j0;
-        if (ti < 0 || tj < 0 || ti >= ni || tj >= nj) continue;
-        // v[2]: the view's heights' first word.
-        return new Float32Array(await read(4 * (v[2] + tj * ni + ti), 4))[0];
-      }
-      return null;
-    }
-    function schedule() {
-      for (const s of SCHEDULE) {
-        if (s.state === 'done') continue;
-        if (s.state === 'wait') {
-          const due = canOverlap() && s.overlapT !== undefined ? s.overlapT : s.t;
-          if (st.t < due - APPROACH) continue;
-          if (terrain.region && !canOverlap()) {
-            // One region at a time (until the engine's multi-region API):
-            // bake the open one first, once nothing is in flight (a timed
-            // bake, World::terrain_close), and the next fireball starts then.
-            if ((terrain.report?.airborne ?? 1) > 0) continue;
-            st.closing = 'timed';
-            world.terrainClose();
-            refreshAreas();
-            continue; // the fireball starts next frame, on the baked heights
-
-          }
-          const [x, z] = strikePoint(s);
-          s.point = [x, groundAt(x, z), z];
-
-          // `lead` (play): a longer warning before contact; the fireball
-          // still shows for the last APPROACH s.
-          s.t0 = st.t + (s.lead ?? APPROACH);
-          // Coming in from beyond the strike as the car sees it, and from the
-          // side: it streaks down across the view toward the ground ahead.
-          const c = st.carPose ? st.carPose.p : [0, 0, 0];
-          const away = norm3([s.point[0] - c[0], 0, s.point[2] - c[2]]);
-          const side = [-away[2], 0, away[0]];
-          const d = [0.85 * away[0] + 0.55 * side[0], 0, 0.85 * away[2] + 0.55 * side[2]];
-          s.fx = { yaw: Math.atan2(d[0], d[2]), pitch: 0.5 };
-          s.state = 'approach';
-          st.fx.push(s);
-        }
-        // Over an open area the ground is the live surface (a rim still
-        // moving): its height there, read back just before contact.
-        if (s.state === 'approach' && !s.liveRead && terrain.areas.length && st.t > s.t0 - 0.25) {
-          s.liveRead = true;
-          liveHeightAt(s.point[0], s.point[2]).then((h) => { if (h !== null && s.state === 'approach') s.point[1] = h; }).catch(fail);
-        }
-        if (s.state === 'approach' && st.t >= s.t0 - 1e-9) {
-          if (terrain.region && !canOverlap()) throw new Error('a strike is due while a region is open');
-          if (PLAY && !playCanOpen(s.point[0], s.point[2])) {
-            // No area slot or pool room left by contact: it burns up.
-            s.state = 'fizzled'; s.struckAt = st.t; st.fx = st.fx.filter((f) => f !== s);
-            game.say('it burned up');
-            continue;
-          }
-          if (!terrain.areas.length) terrain.report = null;
-          world.terrainImpact(GROUND, s.point, TERRAIN.meteor.radius, TERRAIN.meteor.density, TERRAIN.meteor.speed);
-          refreshAreas();
-          s.state = 'done';
-          s.struckAt = st.t;
-          st.lastStrike = st.t;
-          st.strikes.push({ t: +st.t.toFixed(3), point: s.point.map((v) => +v.toFixed(2)), region: terrain.region && { window: terrain.region.window, dx: terrain.region.dx } });
-          if (PLAY) { struck(s); if (st.strikes.length > 400) st.strikes.splice(0, 100); }
-        }
+    // ---- the script (rubble::play::showcase): its state and what it did
+    // The schedule (each strike's state, contact time, point), the fireballs
+    // shown, the car as the script last read it, play's run; the strikes, the
+    // bakes it forced (one area at a time) and the end of a run.
+    function syncScript() {
+      const s = world.scriptState();
+      SCHEDULE = s.schedule; st.fx = s.fx; st.lastStrike = s.lastStrike;
+      st.carPose = s.car; st.carSpeed = s.carSpeed;
+      if (PLAY) Object.assign(game, s.game);
+      for (const e of world.takeEvents()) {
+        if (e.what === 'strike') {
+          st.strikes.push({ t: +e.data.t.toFixed(3), point: e.data.point.map((v) => +v.toFixed(2)), region: e.data.region });
+          if (PLAY && st.strikes.length > 400) st.strikes.splice(0, 100);
+        } else if (e.what === 'close') st.closing = 'timed';
+        else if (e.what === 'over') end(e.data.why, e.data.at);
       }
     }
+    // The first strike's point before it is scheduled (the bts camera's orbit).
+    const firstPoint = () => placed.firstPoint ?? [0, 0];
     // Each bake: by settling, or timed (a strike due with one region at a
     // time), as the frame that carries it reports it; and the jump from the
     // last live surface to the baked ground (World's heights follow by then).
@@ -1183,179 +920,30 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       rec.error = { rms: +e.rms.toFixed(3), mean: +e.mean.toFixed(3), worst: +e.worst.toFixed(3) };
     }
 
-    // ---- the autopilot: the road around the field, held to SPEED
-    function driveInput() {
-      if (PLAY) { world.setVehicleInput(st.car, playInput()); return; }
-      const p = st.carPose;
-      let inp = { forward: 1, brake: 0, steer: 0 };
-      if (p) {
-        // Pure pursuit: 14 m ahead of the nearest track point.
-        let best = 0, bd = Infinity;
-        TRACK.forEach(([x, z], k) => { const d = (x - p.p[0]) ** 2 + (z - p.p[2]) ** 2; if (d < bd) { bd = d; best = k; } });
-        const [tx, tz] = TRACK[(best + 14) % TRACK.length];
-        const want = [tx - p.p[0], 0, tz - p.p[2]];
-        const l = Math.hypot(want[0], want[2]) || 1;
-        const side = (p.fwd[0] * want[2] - p.fwd[2] * want[0]) / l;
-        inp.steer = Math.max(-1, Math.min(1, 2.2 * side));
-        const e = SPEED - st.carSpeed;
-        inp.forward = Math.max(0, Math.min(1, 0.35 * e + 0.25));
-        inp.brake = e < -3 ? Math.min(1, -0.2 * e) : 0;
-      }
-      world.setVehicleInput(st.car, inp);
-    }
-
     // ================================================================ play
-    // Your car, the director's meteors and yours, and how a run ends.
+    // You drive: your controls go to the script each step (it eases the
+    // steering); its director drops the meteors; yours drop where you click.
     const keys = new Set();
     const touch = { left: false, right: false, gas: false, brake: false };
     const key = (...c) => c.some((k) => keys.has(k));
-    let steerNow = 0;
-    const game = { over: null, near: 0, dropped: 0, survived: 0, next: 3, baked: 0, opened: new Map(), msg: '', msgT: -1e9, flipT: 0, stuckT: 0, throttle: false, best: 0 };
+    // The run as the script reports it (over, near misses, yours, survived,
+    // its message), the craters settled (from the frames) and your best.
+    const game = { over: null, near: 0, dropped: 0, survived: 0, baked: 0, msg: '', msgT: -1e9, best: 0 };
     try { game.best = Number(localStorage.getItem('rubble.meteorRun.best')) || 0; } catch { /* no storage: no best */ }
-    // Seeded, so a run can be replayed with ?seed=.
-    let seed = num('seed', Math.floor(Math.random() * 1e9)) >>> 0;
-    const rand = () => { seed = (seed + 0x6D2B79F5) >>> 0; let t = seed; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
-    const KILL = 0.5 * R; // a contact this close to the car (horizontally) ends the run
-    const NEAR = RIM + 12; // closer than this and you live: a near miss
-    // The open areas you leave behind bake on their own once their sand is
-    // at rest (the local settle rule, set above), and the pool takes back
-    // their slots while others are open: nothing here closes or pauses. A
-    // crater's sand creeps for some 10-15 s before it is at rest, and a strike
-    // into an open area grows it and starts it over; so the director keeps its
-    // strikes out of an area older than SETTLE_AFTER s (yours go anywhere).
-    // An area grown over others keeps the oldest one's age (growth can move it
-    // to another slot).
-    const SETTLE_AFTER = num('settleafter', 8);
-    const EDGE = HALF - 170;
-    const inField = (x, z) => Math.abs(x) < EDGE && Math.abs(z) < EDGE;
-    const pending = () => SCHEDULE.filter((s) => s.state === 'wait' || s.state === 'approach').length;
-    // The pool's held slots (live particles, and one per parcel in flight)
-    // and its parcel slots: a strike past either would fail by name.
-    const poolUse = () => { const r = terrain.report; return r && terrain.areas.length ? Math.max((r.live + r.airborne) / maxParticles, r.parcels / maxParcels) : 0; };
-    // A strike whose box comes within the areas' gap of an open area grows it
-    // (no new slot).
-    const touchesArea = (x, z) => {
-      const [x0, z0, x1, z1] = boxOf(x, z), g = 2 * BLOCK;
-      return terrain.areas.some((a) => x0 < a.end[0] + g && x1 > a.origin[0] - g && z0 < a.end[2] + g && z1 > a.origin[2] - g);
-    };
-    // The window a strike at (x, z) would grow to with the open areas it
-    // reaches (and theirs in turn): its samples across, against the patches'
-    // PN less their ring (a larger one fails by name: "surface patch samples").
-    const grownSpan = (x, z) => {
-      let [x0, z0, x1, z1] = boxOf(x, z);
-      const g = 2 * BLOCK, used = new Set();
-      for (let grew = true; grew;) {
-        grew = false;
-        for (const a of terrain.areas) {
-          if (used.has(a.slot) || !(x0 < a.end[0] + g && x1 > a.origin[0] - g && z0 < a.end[2] + g && z1 > a.origin[2] - g)) continue;
-          used.add(a.slot); grew = true;
-          x0 = Math.min(x0, a.origin[0]); z0 = Math.min(z0, a.origin[2]); x1 = Math.max(x1, a.end[0]); z1 = Math.max(z1, a.end[2]);
-        }
-      }
-      return Math.max(x1 - x0, z1 - z0) / SP + 4;
-    };
-    const fitsPatch = (x, z) => grownSpan(x, z) <= PN - 8;
-    // The age of the oldest open area a strike at (x, z) would grow (0: none).
-    const touchedAge = (x, z) => {
-      const [x0, z0, x1, z1] = boxOf(x, z), g = 2 * BLOCK;
-      let age = 0;
-      for (const a of terrain.areas) if (x0 < a.end[0] + g && x1 > a.origin[0] - g && z0 < a.end[2] + g && z1 > a.origin[2] - g) age = Math.max(age, st.t - (game.opened.get(a.slot)?.t ?? st.t));
-      return age;
-    };
-    const playCanOpen = (x, z) => poolUse() < 0.93 && fitsPatch(x, z) && (touchesArea(x, z) || terrain.areas.length < REGIONS);
-    game.say = (m) => { game.msg = m; game.msgT = st.t; };
-    function tryStrike(x, z, who) {
-      if (!inField(x, z)) return game.say('out of the basin');
-      if (poolUse() > 0.88) return game.say('too much sand in the air');
-      if (!touchesArea(x, z) && terrain.areas.length + pending() >= REGIONS) return game.say('too many craters still moving');
-      if (!fitsPatch(x, z)) return game.say('that crater field is too big already');
-      SCHEDULE.push({ t: st.t, at: [x, z], who, state: 'wait' });
-      if (who === 'you') game.dropped++;
+    function controls() {
+      const forward = (key('KeyW', 'ArrowUp') || touch.gas ? 1 : 0) - (key('KeyS', 'ArrowDown') || touch.brake ? 1 : 0);
+      const steer = (key('KeyD', 'ArrowRight') || touch.right ? 1 : 0) - (key('KeyA', 'ArrowLeft') || touch.left ? 1 : 0);
+      world.act({ action: 'drive', forward, steer, handbrake: key('Space') ? 1 : 0 });
     }
-    const flatFwd = () => norm3([st.carPose.fwd[0], 0, st.carPose.fwd[2]]);
-    function dropAhead() {
-      if (!st.carPose || game.over) return;
-      const f = flatFwd(), p = st.carPose.p, lead = 40 + st.carSpeed * APPROACH;
-      tryStrike(p[0] + f[0] * lead, p[2] + f[2] * lead, 'you');
-    }
-    function playInput() {
-      if (game.over) return { forward: 0, steer: 0, brake: 1 };
-      const fwd = (key('KeyW', 'ArrowUp') || touch.gas ? 1 : 0) - (key('KeyS', 'ArrowDown') || touch.brake ? 1 : 0);
-      const target = (key('KeyD', 'ArrowRight') || touch.right ? 1 : 0) - (key('KeyA', 'ArrowLeft') || touch.left ? 1 : 0);
-      steerNow += (target - steerNow) * Math.min(1, DT * 8);
-      game.throttle = fwd !== 0;
-      return { forward: fwd, steer: steerNow, brake: 0, handbrake: key('Space') ? 1 : 0 };
-    }
-    function end(why) {
-      if (game.over) return;
-      game.over = { why, at: st.t };
-      game.survived = st.t;
-      if (st.t > game.best) { game.best = st.t; try { localStorage.setItem('rubble.meteorRun.best', String(st.t)); } catch { /* no storage */ } }
+    // A meteor of yours at (x, z), or ahead of the car: the script says why not.
+    function tryStrike(x, z) { world.act({ action: 'strike', at: [x, z] }); syncScript(); }
+    function dropAhead() { world.act({ action: 'strike' }); syncScript(); }
+    // The run ended (the script's `over`): the card and your best.
+    function end(why, at) {
+      if (at > game.best) { game.best = at; try { localStorage.setItem('rubble.meteorRun.best', String(at)); } catch { /* no storage */ } }
       $('oWhy').textContent = why;
-      $('oScore').textContent = `${st.t.toFixed(1)} s survived · ${game.near} near misses · best ${game.best.toFixed(1)} s`;
+      $('oScore').textContent = `${at.toFixed(1)} s survived · ${game.near} near misses · best ${game.best.toFixed(1)} s`;
       $('over').hidden = false;
-    }
-    // Contact: a direct hit ends the run; close is a near miss.
-    function struck(s) {
-      if (game.over || !st.carPose) return;
-      const d = Math.hypot(st.carPose.p[0] - s.point[0], st.carPose.p[2] - s.point[2]);
-      if (d < KILL) end(s.who === 'you' ? 'Hit by your own meteor' : 'Direct hit');
-      else if (d < NEAR) { game.near++; game.say(`near miss! ${d.toFixed(0)} m`); }
-    }
-    // The director: where the car will be when a meteor lands, and round it:
-    // beside the line (a rim to ride), ahead on it (steer round the fresh
-    // crater), behind, far out (scenery), and, more often as you last, onto
-    // the car itself (the warning gives you the approach's 1.35 s to get out).
-    function direct() {
-      if (game.over || !st.carPose || st.t < 2.5 || st.t < game.next) return;
-      const gap = Math.max(0.9, 2.6 - st.t / 75);
-      game.next = st.t + gap * (0.7 + 0.6 * rand());
-      if (terrain.areas.length + pending() >= REGIONS - 2) return; // two kept for yours
-      const p = st.carPose.p, v = st.carPose.v, f = flatFwd(), side = [f[2], 0, -f[0]];
-      const at = [p[0] + v[0] * APPROACH, p[2] + v[2] * APPROACH];
-      const sgn = rand() < 0.5 ? -1 : 1, pick = rand();
-      const onYou = Math.min(0.3, 0.08 + st.t / 600);
-      // Onto the car: 2.4 s of warning, time to steer or brake out of the
-      // deadly middle (KILL) at full speed.
-      const ON_YOU_LEAD = 2.4;
-      let x, z, lead;
-      if (pick < onYou) { lead = ON_YOU_LEAD; x = p[0] + v[0] * lead + (rand() - 0.5) * 8; z = p[2] + v[2] * lead + (rand() - 0.5) * 8; }
-      else if (pick < onYou + 0.35) { const a = 8 + 35 * rand(), o = sgn * (RIM + 2 + 10 * rand()); x = at[0] + f[0] * a + side[0] * o; z = at[1] + f[2] * a + side[2] * o; }
-      else if (pick < onYou + 0.55) { const a = 30 + 30 * rand(), o = sgn * 6 * rand(); x = at[0] + f[0] * a + side[0] * o; z = at[1] + f[2] * a + side[2] * o; }
-      else if (pick < onYou + 0.75) { const a = 14 + 20 * rand(), o = sgn * 8 * rand(); x = p[0] - f[0] * a + side[0] * o; z = p[2] - f[2] * a + side[2] * o; }
-      else { const a = 2 * Math.PI * rand(), d = 70 + 120 * rand(); x = p[0] + Math.cos(a) * d; z = p[2] + Math.sin(a) * d; }
-      x = Math.max(-EDGE + 1, Math.min(EDGE - 1, x)); z = Math.max(-EDGE + 1, Math.min(EDGE - 1, z));
-      // Not into an area left to settle: try again next frame.
-      if (touchedAge(x, z) > SETTLE_AFTER) { game.next = st.t; return; }
-      if (poolUse() < 0.88 && fitsPatch(x, z)) SCHEDULE.push({ t: st.t, at: [x, z], who: 'sky', state: 'wait', lead });
-    }
-    // Each frame before the strikes: the run's end checks, the areas' ages,
-    // the director, and pruning what has played out.
-    function playTick() {
-      if (st.carPose && !game.over) {
-        game.flipT = st.carPose.up[1] < 0.3 ? game.flipT + DT : 0;
-        if (game.flipT > 2.5) end('Rolled over');
-        // Stuck: on the throttle, and under 5 m from where the car was 8 s ago.
-        game.stuckT = game.throttle ? game.stuckT + DT : 0;
-        if (st.frame % Math.round(1 / DT) === 0) { (game.trail ??= []).push(st.carPose.p.slice()); if (game.trail.length > 9) game.trail.shift(); }
-        const back = game.trail?.length === 9 ? game.trail[0] : null;
-        if (back && game.stuckT > 8 && Math.hypot(st.carPose.p[0] - back[0], st.carPose.p[2] - back[2]) < 5) end('Stuck in the sand');
-      }
-      {
-        const prev = game.opened, next = new Map();
-        for (const a of terrain.areas) {
-          let t = prev.get(a.slot)?.t ?? st.t;
-          for (const o of prev.values()) if (o.lo[0] < a.end[0] && o.hi[0] > a.origin[0] && o.lo[2] < a.end[2] && o.hi[2] > a.origin[2]) t = Math.min(t, o.t);
-          next.set(a.slot, { t, lo: a.origin, hi: a.end });
-        }
-        game.opened = next;
-      }
-      direct();
-      for (let i = SCHEDULE.length - 1; i >= 0; i--) {
-        const s = SCHEDULE[i];
-        if ((s.state === 'done' || s.state === 'fizzled') && st.t - s.struckAt > 12) SCHEDULE.splice(i, 1);
-      }
-      if (st.fx.length > 64) st.fx = st.fx.filter((s) => SCHEDULE.includes(s));
     }
     // The ground under a screen point: the ray from the eye, marched over the
     // heightfield, then bisected.
@@ -1390,7 +978,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       canvas.addEventListener('pointerdown', (e) => {
         if (game.over) { if (st.t - game.over.at > 1) reset(); return; }
         const hit = pickGround(e.clientX, e.clientY);
-        if (hit) tryStrike(hit[0], hit[1], 'you');
+        if (hit) tryStrike(hit[0], hit[1]);
       });
       const hold = (id, k) => {
         const el = $(id);
@@ -1416,7 +1004,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         // An orbit round the latest strike, the cut facing the camera.
         let f = null;
         for (const s of SCHEDULE) if (s.point) f = s.point;
-        f ??= [...strikePoint(SCHEDULE[0]), 0].map((v, i, a) => (i === 1 ? 0 : i === 0 ? a[0] : a[1]));
+        f ??= [firstPoint()[0], 0, firstPoint()[1]];
         const yaw = 2.2 + 0.0009 * st.frame, el = 0.36, d = num('orbit', 160);
         const want = [f[0] + d * Math.cos(el) * Math.cos(yaw), f[1] + d * Math.sin(el), f[2] + d * Math.cos(el) * Math.sin(yaw)];
         const k = cam.eye ? 1 - Math.exp(-dt * 2) : 1;
@@ -1602,29 +1190,17 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       const bakes = f.terrainBakes();
       if (bakes.length) onBake(bakes.map((b) => b.slot));
     }
-    // The chassis' state (readBodies: position, rotation, velocity), one read in flight.
-    let carRead = null;
-    function readCar() {
-      carRead ??= world.readBodies([CHASSIS]).then((f) => {
-        carRead = null;
-        const q = [f[3], f[4], f[5], f[6]];
-        const rot = (v) => { const [x, y, z, w] = q, d = 2 * (x * v[0] + y * v[1] + z * v[2]), s = w * w - (x * x + y * y + z * z); const c = cross3([x, y, z], v); return [x * d + v[0] * s + c[0] * 2 * w, y * d + v[1] * s + c[1] * 2 * w, z * d + v[2] * s + c[2] * 2 * w]; };
-        st.carPose = { p: [f[0], f[1], f[2]], fwd: rot([0, 0, 1]), up: rot([0, 1, 0]), v: [f[7], f[8], f[9]] };
-        st.carSpeed = Math.hypot(f[7], f[8], f[9]);
-      });
-      return carRead;
-    }
-    // One 1/120 s frame's scripting (strikes due, the car's input) and World's
-    // step: the terrain's substeps (or bakes) and its live surface ahead of the
-    // rigid step. Returns the frame's kind as the JS host's (0 none, 1 coupled,
-    // 2 baked, 3 some baked and the rest coupled).
+    // One 1/120 s frame: World's step, the script first (play: your controls
+    // to it; strikes due, the car's input), then the terrain's substeps (or
+    // bakes) and its live surface ahead of the rigid step. Returns the frame's
+    // kind as the JS host's (0 none, 1 coupled, 2 baked, 3 some baked and the
+    // rest coupled).
     function physicsFrame() {
-      if (PLAY) playTick();
-      schedule();
-      driveInput();
+      if (PLAY) controls();
       const before = terrain.areas.map((a) => a.slot);
       world.step();
       refreshAreas();
+      syncScript();
       const substeps = world.terrainLastSubsteps();
       const baked = before.some((s) => !terrain.areas.some((a) => a.slot === s));
       return { kind: substeps ? (baked ? 3 : 1) : baked ? 2 : 0, substeps };
@@ -1645,9 +1221,8 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       if (render && capture) enc.copyTextureToBuffer({ texture: lastTex }, { buffer: capture.buffer, bytesPerRow: capture.bytesPerRow }, [canvas.width, canvas.height]);
       const t0 = performance.now();
       device.queue.submit([enc.finish()]);
-      const car = readCar();
       const entry = { t: +st.t.toFixed(4), car: st.carPose && st.frame % 30 === 0 ? st.carPose.p.map((v) => +v.toFixed(1)) : undefined, kind, substeps, particles: terrain.report?.particles ?? 0, airborne: terrain.report?.airborne ?? 0 };
-      const done = [car];
+      const done = [];
       if (buggyRb) done.push(buggy.consume(buggyRb));
       if (wait) {
         await device.queue.onSubmittedWorkDone();
@@ -1825,14 +1400,11 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     window.__step = async (n = 1) => {
       manual = true;
       await stepFrames(world, n, onFrame, () => {
-        if (PLAY) playTick();
-        schedule();
-        driveInput();
-        readCar().catch(fail);
+        if (PLAY) controls();
         st.t += DT; st.frame++;
       });
       refreshAreas();
-      await readCar();
+      syncScript();
       return window.__showcase.state();
     };
     window.__world = world; window.__terrain = terrain;

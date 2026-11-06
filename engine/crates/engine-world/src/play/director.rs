@@ -66,6 +66,23 @@ pub enum Action {
         velocity: [f32; 3],
         radius: f32,
     },
+    /// A meteor the player drops at `at` (x, z; none: ahead of their car), when the
+    /// meteor run's play scene has room for it (else it says why).
+    Strike {
+        #[serde(default)]
+        at: Option<[f64; 2]>,
+    },
+    /// The player's controls on the car they drive (the meteor run's play): throttle
+    /// (−1..1), the steering they ask for (−1..1; the script eases toward it at 8/s),
+    /// handbrake (0..1). Held until the next.
+    Drive {
+        #[serde(default)]
+        forward: f64,
+        #[serde(default)]
+        steer: f64,
+        #[serde(default)]
+        handbrake: f64,
+    },
     /// The meteor range's carts moving, and steering that knows their routes (the host
     /// resets the scene after).
     Targets {
@@ -92,6 +109,8 @@ impl Action {
             Action::Bake => "bake",
             Action::TakeWheel => "takeWheel",
             Action::Shell { .. } => "shell",
+            Action::Strike { .. } => "strike",
+            Action::Drive { .. } => "drive",
         }
     }
 }
@@ -116,6 +135,7 @@ enum Kind {
     Vehicle(VehicleDirector),
     City(super::city_scene::CityDirector),
     Impact(super::impact::ImpactDirector),
+    Showcase(Box<super::showcase::ShowcaseDirector>),
 }
 
 /// A placed scene's script and the player's actions on it.
@@ -148,6 +168,9 @@ impl Director {
             (SceneDef::Impact(d), Placed::Impact(p)) => {
                 Kind::Impact(super::impact::ImpactDirector::new(d, p.clone()))
             }
+            (SceneDef::Showcase(d), Placed::Showcase(p)) => Kind::Showcase(Box::new(
+                super::showcase::ShowcaseDirector::new(d, p.clone(), world)?,
+            )),
             (SceneDef::City(d), Placed::City(c)) => {
                 Kind::City(super::city_scene::CityDirector::new(d, c.clone())?)
             }
@@ -171,6 +194,7 @@ impl Director {
             Kind::Soft(d) => d.before_step(world, ev),
             Kind::Terrain(_) | Kind::City(_) => Ok(()),
             Kind::Impact(d) => d.before_step(world, ev),
+            Kind::Showcase(d) => d.before_step(world, ev),
             Kind::Vehicle(d) => d.before_step(world, ev),
         }
     }
@@ -243,6 +267,7 @@ impl Director {
             Kind::Vehicle(d) => d.act(world, action, ev),
             Kind::City(d) => d.act(world, action, ev),
             Kind::Impact(d) => d.act(world, action, ev),
+            Kind::Showcase(d) => d.act(world, action, ev),
         }
     }
 
@@ -264,6 +289,7 @@ impl Director {
             Kind::Terrain(d) => serde_json::json!({ "craters": d.craters }),
             Kind::City(d) => serde_json::json!({ "shells": d.shells }),
             Kind::Impact(d) => d.state(),
+            Kind::Showcase(d) => d.state(),
             _ => serde_json::Value::Null,
         }
     }
