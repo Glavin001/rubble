@@ -31,8 +31,9 @@ pub const TRACK_HALF: f32 = 0.80;
 pub const TYRE_R: f32 = 0.3415;
 pub const TYRE_W: f32 = 0.235;
 pub const RIM_R: f32 = 0.2286;
-/// Wheel-arch opening radius about the wheel centre.
-pub const ARCH_R: f32 = 0.395;
+/// Wheel-arch opening radius about the wheel centre: a 30 mm gap over the
+/// tyre.
+pub const ARCH_R: f32 = 0.372;
 /// The vertical axes of the nose and tail families (at the arches' ends).
 pub const ZC_F: f32 = AXLE_F + ARCH_R * 0.82;
 pub const ZC_R: f32 = AXLE_R - ARCH_R * 0.82;
@@ -180,10 +181,10 @@ impl Profiles {
             // A fastback roof: the crown just behind the B-pillar, a long,
             // shallow backlight down to a short deck.
             roof: Spline::new(&[
-                (-2.25, 0.80),
-                (-1.95, 1.030),
-                (-1.62, 1.200),
-                (-1.30, 1.335),
+                (-2.35, 0.80),
+                (-2.05, 1.030),
+                (-1.68, 1.200),
+                (-1.32, 1.335),
                 (-1.00, 1.414),
                 (-0.70, 1.446),
                 (-0.40, 1.450),
@@ -316,10 +317,16 @@ fn section_w(z: f32, y: f32) -> f32 {
     // Crisp at the line (2 cm), a long concave return to the sill.
     let cut = smoothstep(yl + 0.006, yl - 0.02, y).powf(0.7) * smoothstep(0.34, 0.50, y);
     w -= depth * fade * cut;
+    // The rear bumper's line: behind the rear wheel the side steps in 6 mm
+    // below a crisp crease at 0.56 m, wrapping toward the tail.
+    w -= 0.006
+        * smoothstep(0.572, 0.552, y)
+        * smoothstep(0.30, 0.36, y)
+        * smoothstep(-1.80, -2.05, z);
     // Arch flares: a soft swell round each opening.
     for za in [AXLE_F, AXLE_R] {
         let r = ((z - za).powi(2) + (y - TYRE_R).powi(2)).sqrt();
-        w += 0.018 * (-((r - 0.44) / 0.075).powi(2)).exp() * smoothstep(0.98, 0.70, y);
+        w += 0.018 * (-((r - 0.418) / 0.072).powi(2)).exp() * smoothstep(0.98, 0.70, y);
     }
     w
 }
@@ -363,7 +370,9 @@ pub fn sdf_with(p: &Profiles, q: Vec3) -> f32 {
     let d_gl = x - glass_w(p, z, y);
     let d_gb = p.belt.at(z) - 0.2 - y;
     let gh = smax(smax(d_gl, d_roof, 0.055), d_gb, 0.02);
-    smin(lower, gh, 0.02)
+    // The greenhouse meets the body in a small fillet, a broader one round
+    // the C-pillar's foot (a clean sweep into the deck).
+    smin(lower, gh, 0.02 + 0.035 * smoothstep(-1.3, -2.0, z))
 }
 
 pub fn grad(q: Vec3) -> Vec3 {
