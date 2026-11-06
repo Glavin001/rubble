@@ -757,6 +757,16 @@ pub const HSLA340: f32 = 340e6;
 pub const S420: f32 = 420e6;
 pub const PHS: f32 = 1100e6;
 pub const TUBE1200: f32 = 1200e6;
+/// The side reinforcements' yield (Pa) at the 2008–12 Accord's measured
+/// steel: Honda gives its body structure as 48 % high-strength steel by
+/// mass, an average tensile strength of 412 MPa (NHTSA DOT HS 811 666
+/// §4.4.2.1). With the rest mild steel (270 MPa), the high-strength half
+/// averages about 566 MPa tensile: 590–780 MPa-class dual-phase sheet, no
+/// press-hardened 1,500 MPa parts (the report's 22MnB5 and CP grades are
+/// its lightweight design's). The pillars' and rocker's reinforcements as
+/// the strongest of that class, DP780 (EN 10338 HCT780X, Re 440 MPa), a
+/// Choice.
+pub const ACCORD_REINFORCEMENT: f32 = DP780;
 pub const AL6082: f32 = 250e6;
 
 /// The members' real sections and the truss's lever for their bending:
@@ -2450,15 +2460,26 @@ pub fn sedan_one_tier() -> VehicleDef {
     // sedan's side has there; the over-count had stood in for the rest. Each
     // member is now the sum of its layers ([`layered`]): the body side outer
     // (a hat over the member, BH210 0.7 mm), the reinforcement and the
-    // inner. Grades and gauges are WorldAutoSteel's FutureSteelVehicle and
-    // A2Mac1-style teardown descriptions of 2010s mid-size sedans (a Choice
-    // in each published range): B-pillar reinforcement hot-stamped 22MnB5
-    // 1.8 mm (published 1.5–2.0), its inner HSLA 1.2 mm; A-pillar and hinge
-    // pillar reinforcement hot-stamped 1.6 mm, inner DP780 1.4 mm; rocker
-    // reinforcement DP980 1.6 mm, inner DP780 1.4 mm. The 2011 Accord
-    // teardown's material classes (DOT HS 811 666 fig. 113) include each.
+    // inner. Gauges are WorldAutoSteel's FutureSteelVehicle and A2Mac1-style
+    // teardown descriptions of 2010s mid-size sedans (a Choice in each
+    // published range): B-pillar reinforcement 1.8 mm (published 1.5–2.0),
+    // its inner HSLA 1.2 mm; A-pillar and hinge pillar reinforcement 1.6 mm,
+    // inner DP780 1.4 mm; rocker reinforcement 1.6 mm, inner DP780 1.4 mm.
+    // The reinforcements' grade is the Accord's measured steel,
+    // [`ACCORD_REINFORCEMENT`] (DP780). Before, they were hot-stamped 22MnB5
+    // (pillars) and DP980 (rocker), read from the report's fig. 113, which
+    // is its lightweight design's material table, not the baseline car's.
     if std::env::var("SIDE_LAYERS").map_or(true, |v| v != "0") {
         use LayerShape::{Flange, Hat};
+        // The reinforcements at the 2008–12 Accord's measured steel,
+        // [`ACCORD_REINFORCEMENT`] (`ACCORD_GRADES=0`: the press-hardened
+        // and DP980 reinforcements of before, a measurement switch).
+        let accord = std::env::var("ACCORD_GRADES").map_or(true, |v| v != "0");
+        let (phs, dp980) = if accord {
+            (ACCORD_REINFORCEMENT, ACCORD_REINFORCEMENT)
+        } else {
+            (PHS, DP980)
+        };
         let list = [
             (
                 "sill",
@@ -2467,7 +2488,7 @@ pub fn sedan_one_tier() -> VehicleDef {
                     0.14,
                     &[
                         (0.0007, BH210, Hat),
-                        (0.0016, DP980, Hat),
+                        (0.0016, dp980, Hat),
                         (0.0014, DP780, Hat),
                     ],
                 ),
@@ -2481,7 +2502,7 @@ pub fn sedan_one_tier() -> VehicleDef {
                     0.12,
                     &[
                         (0.0007, BH210, Hat),
-                        (0.0018, PHS, Hat),
+                        (0.0018, phs, Hat),
                         (0.0012, HSLA340, Flange),
                     ],
                 ),
@@ -2495,7 +2516,7 @@ pub fn sedan_one_tier() -> VehicleDef {
                     0.12,
                     &[
                         (0.0007, BH210, Hat),
-                        (0.0016, PHS, Hat),
+                        (0.0016, phs, Hat),
                         (0.0014, DP780, Flange),
                     ],
                 ),
