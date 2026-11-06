@@ -4622,6 +4622,7 @@ fn door_path_probe(s: &ExplicitBeams, b: &Built, door: &str, d: f32, zc: f32) {
             .map_or("-".to_string(), |(k, _)| k.to_string())
     };
     let mut iface: std::collections::BTreeMap<String, (f32, usize)> = Default::default();
+    let mut iface_abs: std::collections::BTreeMap<String, f32> = Default::default();
     let mut own: std::collections::BTreeMap<String, (usize, usize, f32)> = Default::default();
     for bm in &s.beams {
         let (a, c) = (bm.a as usize, bm.b as usize);
@@ -4646,6 +4647,9 @@ fn door_path_probe(s: &ExplicitBeams, b: &Built, door: &str, d: f32, zc: f32) {
             let e = iface.entry(key).or_default();
             e.0 += fx / 1e3;
             e.1 += 1;
+            *iface_abs
+                .entry(format!("{:?} {}", bm.kind, group_of(bn as u32)))
+                .or_default() += bm.force.abs() / 1e3;
         } else if pa == pt && pc == pt {
             let key = sets
                 .iter()
@@ -4759,6 +4763,16 @@ fn door_path_probe(s: &ExplicitBeams, b: &Built, door: &str, d: f32, zc: f32) {
         v.iter()
             .take(12)
             .map(|(k, (f, c))| format!("{k} {f:.1} ({c})"))
+            .collect::<Vec<_>>()
+    );
+    let mut va: Vec<(String, f32)> = iface_abs.into_iter().collect();
+    va.sort_by(|x, y| y.1.total_cmp(&x.1));
+    eprintln!(
+        "(p path {:.0} mm) door joints' summed |force| (kN): {:?}",
+        d * 1e3,
+        va.iter()
+            .take(10)
+            .map(|(k, f)| format!("{k} {f:.1}"))
             .collect::<Vec<_>>()
     );
     eprintln!(
