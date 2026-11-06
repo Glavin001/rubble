@@ -2081,6 +2081,25 @@ Measured (CPU, after the change):
   per second 213 → 3.4 J from the 3rd to the 12th second. A crushed part settling
   lifted one second (13.7 → 18.7 J in the 7th), so the check is per two seconds.
 
+**GPU.** Per node, 8 words of gAcc at `resAt` (selfSplit + 4·totalNodes): the
+residual's staged sums B and the totals' deltas D, fix(total share) −
+fix(first-pass share), merged into the accumulators. That gives the CPU's restore
+and re-add, integer for integer.
+* **Self contact.** `selfResidualPhase` (residual, guard and totals, merge) after
+  `selfApply`'s rounds; `selfSerialResidual` past the hit list's room, which finds
+  the hits again and recomputes the first pass without its position step.
+* **Vehicle contact.** `vvResidualPhase` per owner after its listed hits:
+  `vvPass` in phase S and at the end; `vvPassSmall` after each level. A turn whose
+  list overflowed (more than 2 × points hits) applies its hits at once, out of
+  the specification's order as before, and stages none.
+
+Verified:
+* wgpu: `explicit_contact_gpu`, including `anti_clip_steps_like_the_cpu`
+  bit-exact with dissipative contact in a small group and owner by owner;
+  `explicit_beams_bitwise`, `explicit_jbeam_gpu`, `explicit_jbeam_ext_gpu`,
+  `explicit_drive_gpu`, `explicit_loop_cap`.
+* Metal: `vehicle_parity`, `explicit_parity`, `explicit_drive_parity`.
+
 **Stated floor.** Single-precision positions move by whole ulps (about 1 mm/s
 at the car's farthest coordinate) and contact steps by 2⁻²⁴ m (0.12 mm/s). The
 < 1 mm/s target is withdrawn; the tangle keeps about 35× the floor.
