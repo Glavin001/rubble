@@ -97,7 +97,8 @@ struct Params {
     serial_plan: u32,
     /// Vehicle sleep: gMisc record of vehicle 0's sleep record (0: off).
     sleep_base: u32,
-    pad: u32,
+    /// work's word of the proxied list (0: every vehicle).
+    list_base: u32,
 }
 
 pub(crate) struct ExplicitVehicles {
@@ -136,6 +137,10 @@ pub(crate) struct ExplicitVehicles {
     status_buf: wgpu::Buffer,
     status_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
     read_pending: bool,
+    /// work's word of the proxied list: its count (the x of cpl_share's, cpl_loads' and
+    /// cpl_emit's indirect arguments), 1, 1, 0, then the vehicles.
+    list_word: u64,
+    list_args: wgpu::Buffer,
     /// Vehicle sleep: work's word of the asleep bits (one word per 32 vehicles), and the
     /// bits the last delivered frame reported (all awake at the start).
     pub(crate) sleep_mask_word: u64,
@@ -250,12 +255,24 @@ impl ExplicitVehicles {
             usage: wgpu::BufferUsages::STORAGE,
         });
         let max_bodies = world.sim.capacity().max_bodies;
-        // Cleared each window: rows, status, share counts, bounds; then the vehicle table.
-        let cleared = 4 * (2 + u64::from(max_bodies) + 8 * vehicles.len() as u64);
-        let mask_words = vehicles.len().div_ceil(32) as u64;
-        let sleep_mask_word = cleared / 4 + 4 * vehicles.len() as u64;
-        let work = storage(device, "vehicle-coupling-work", cleared + 16 * vehicles.len() as u64 + 4 * mask_words);
-        queue.write_buffer(&work, cleared, bytemuck::cast_slice(&veh));
+        // Cleared each window: rows, status, share counts; then the bounds (cpl_bounds
+        // rewrites an awake vehicle's, a sleeping one's stand), the vehicle table, the
+        // asleep bits, the proxied list (its count cleared each window).
+        let nv = vehicles.len() as u64;
+        let cleared = 4 * (2 + u64::from(max_bodies));
+        let table = cleared + 32 * nv;
+        let mask_words = nv.div_ceil(32);
+        let sleep_mask_word = table / 4 + 4 * nv;
+        let list_word = (sleep_mask_word + mask_words).next_multiple_of(4);
+        let work = storage(device, "vehicle-coupling-work", 4 * (list_word + 4 + nv));
+        // The proxied list's indirect arguments: its count copied after the plan (a buffer
+        // bound for storage cannot also be a dispatch's indirect arguments).
+        let list_args = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vehicle-coupling-list-args"),
+            contents: bytemuck::cast_slice(&[0u32, 1, 1, 0]),
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+        });
+        queue.write_buffer(&work, table, bytemuck::cast_slice(&veh));
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vehicle-coupling-params"),
             size: std::mem::size_of::<Params>() as u64,
@@ -291,6 +308,8 @@ impl ExplicitVehicles {
             status_buf,
             status_busy: Default::default(),
             read_pending: false,
+            list_word,
+            list_args,
             sleep_mask_word,
             sleep_mask: vec![0; mask_words as usize],
             any_awake: true,
@@ -400,7 +419,7 @@ impl ExplicitVehicles {
                 (Some(s), true) => s.base,
                 _ => 0,
             },
-            pad: 0,
+            list_base: self.list_word as u32,
         };
         sim.queue().write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
     }
@@ -420,6 +439,7 @@ impl ExplicitVehicles {
         self.serial_plan = false;
         let mut enc = sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         enc.clear_buffer(&self.work, 0, Some(self.cleared));
+        enc.clear_buffer(&self.work, 4 * self.list_word, Some(4));
         let group = self.bind(sim, ingest);
         let nv = self.sims.len() as u32;
         {
@@ -466,7 +486,8 @@ impl ExplicitVehicles {
         });
         pass.set_bind_group(0, &group, &[]);
         pass.set_pipeline(&self.pipes[5]);
-        pass.dispatch_workgroups(nv, 1, 1);
+        let _ = nv;
+        pass.dispatch_workgroups_indirect(&self.list_args, 0);
         pass.set_pipeline(&self.pipes[6]);
         pass.dispatch_workgroups(1, 1, 1);
         drop(pass);
@@ -503,6 +524,7 @@ impl ExplicitVehicles {
         let rows = ingest.map_or(0, |i| i.3);
         self.write_params(sim, steps, rows);
         enc.clear_buffer(&self.work, 0, Some(self.cleared));
+        enc.clear_buffer(&self.work, 4 * self.list_word, Some(4));
         let group = self.bind(sim, ingest);
         let nv = self.sims.len() as u32;
         {
@@ -515,8 +537,17 @@ impl ExplicitVehicles {
             pass.dispatch_workgroups(nv, 1, 1);
             pass.set_pipeline(&self.pipes[1]);
             pass.dispatch_workgroups(nv, 1, 1);
+        }
+        enc.copy_buffer_to_buffer(&self.work, 4 * self.list_word, &self.list_args, 0, 4);
+        {
+            // Only the vehicles with proxies (cpl_plan's list).
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("vehicle coupling share"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(0, &group, &[]);
             pass.set_pipeline(&self.pipes[2]);
-            pass.dispatch_workgroups(nv, 1, 1);
+            pass.dispatch_workgroups_indirect(&self.list_args, 0);
         }
         if let Some(m) = sim.marks() {
             m.mark(enc, "vehicle coupling plan");
@@ -538,7 +569,7 @@ impl ExplicitVehicles {
             });
             pass.set_bind_group(0, &group, &[]);
             pass.set_pipeline(&self.pipes[3]);
-            pass.dispatch_workgroups(nv, 1, 1);
+            pass.dispatch_workgroups_indirect(&self.list_args, 0);
             pass.set_pipeline(&self.pipes[4]);
             pass.dispatch_workgroups(1, 1, 1);
             if self.gpu.sleep_on() {

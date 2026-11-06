@@ -145,6 +145,8 @@ struct Contact {
 struct ContactPipes {
     /// The plan passes (bounds, pairs, group) and the contact groups' entry.
     plan: [wgpu::ComputePipeline; 3],
+    /// Vehicle sleep's awake list ([`plan::SLEEP_LIST`]).
+    sleep: wgpu::ComputePipeline,
     groups: wgpu::ComputePipeline,
     /// The solo vehicles' frame (`EB_VV_SOLO`).
     solo: wgpu::ComputePipeline,
@@ -257,6 +259,7 @@ fn module_wgsl(name: &str) -> &'static str {
         "explicit_beams_contact_wide" => EXPLICIT_BEAMS_CONTACT_WIDE_WGSL,
         "explicit_beams_contact_aero" => EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
         "explicit_beams_contact_aero_wide" => EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
+        "explicit_beams_sleep_list" => crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL,
         _ => EXPLICIT_BEAMS_VV_PASSES
             .iter()
             .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
@@ -340,6 +343,7 @@ impl Contact {
         let (contact_layout, contact_group) = layout_with(false);
         let pipes = build_pipes.then(|| ContactPipes {
             plan: plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), &plan_layout)),
+            sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), &plan_layout),
             groups: make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout),
             solo: make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout),
         });
@@ -450,6 +454,7 @@ fn kernel_name(cmd: &Cmd) -> &'static str {
         Kernel::Vv(1) => "explicit vv pairs",
         Kernel::Vv(_) => "explicit vv group plan",
         Kernel::Wide(_) => "explicit wide",
+        Kernel::Sleep => "explicit sleep list",
     }
 }
 
@@ -494,7 +499,7 @@ impl ExplicitBeamsGpu {
             }));
         }
         if vehicles.len() > 1 {
-            specs.extend(plan::VV_PASSES.iter().map(|&entry| crate::ComputeSpec {
+            specs.extend(plan::VV_PASSES.iter().chain([&plan::SLEEP_LIST]).map(|&entry| crate::ComputeSpec {
                 label: entry,
                 wgsl: u(module_wgsl(entry)),
                 entry,
@@ -625,7 +630,10 @@ impl ExplicitBeamsGpu {
             misc.clone(),
             next.clone(),
         ];
-        let planner = FramePlanner::new(&layout);
+        let mut planner = FramePlanner::new(&layout);
+        if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
+            planner.set_sleep_listing(false);
+        }
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -682,6 +690,13 @@ impl ExplicitBeamsGpu {
     /// Whether vehicle sleep runs.
     pub fn sleep_on(&self) -> bool {
         self.planner.sleep_on()
+    }
+
+    /// Measurement only: dispatch through the awake list (the default) or every vehicle
+    /// with a sleeping one's workgroup returning at once (`RUBBLE_SLEEP_LIST=0` at
+    /// creation). The same results.
+    pub fn set_sleep_listing(&mut self, on: bool) {
+        self.planner.set_sleep_listing(on);
     }
 
     /// Wake vehicle `v` before the next frame (a scripted force or any host write the
@@ -1323,6 +1338,11 @@ impl ExplicitBeamsGpu {
                 );
                 pass.set_bind_group(0, g, &[]);
                 pass.set_pipeline(p);
+            }
+            Kernel::Sleep => {
+                let p = c.pipes.as_ref().expect("explicit beams: the sleep list for one vehicle");
+                pass.set_bind_group(0, &c.plan_group, &[]);
+                pass.set_pipeline(&p.sleep);
             }
             Kernel::Wide(i) => {
                 let w = self.wide.as_ref().expect("explicit beams: wide passes not built");
@@ -2047,6 +2067,7 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));
     }
+    out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
     out
 }
 

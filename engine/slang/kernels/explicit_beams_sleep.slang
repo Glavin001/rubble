@@ -9,6 +9,11 @@
 // 2 anchored, 0, 0). A host wakes a vehicle by writing its record (0, 0, 0, 0); the
 // World's coupling plan writes it too (vehicle_coupling.slang cpl_plan).
 //
+// Awake-indexed dispatch (gP.sleepPad0 = 1, "listed"): explicit_beams_sleep_list writes,
+// every frame before it, the awake vehicles in vehicle order at gNext[sleepList()] (count
+// first) and the frame's indirect arguments; the frame's workgroups past the count step
+// the contact groups. Sleeping vehicles are not dispatched at all.
+//
 // Every barrier here is under gP.sleepRec != 0 (a uniform) and each function is called
 // by every lane: workgroup-uniform control flow. The paths are their own functions,
 // called behind that uniform test (Metal's codegen of the shipped paths stays as it
@@ -20,6 +25,8 @@ static const uint SLEEP_ANCHORED = 2u;
 uint vvMember(uint off, uint m);
 
 uint4 sleepHdr() { return gMisc[gP.sleepRec]; }
+// gNext word of the awake list (count, then the vehicles).
+uint sleepList() { return gMisc[gP.sleepRec + 1u].z; }
 uint sleepVRec(uint v) { return gMisc[gP.sleepRec].x + v; }
 uint sleepFlags(uint v) { return gMisc[gP.sleepRec + 1u].x + 2u * v; }
 uint sleepAnchor(uint gi) { return gMisc[gP.sleepRec + 1u].y + gi; }
@@ -38,6 +45,20 @@ bool sleepSkip(uint v, uint lane)
     if (lane == 0u) gsUniformLanes = gMisc[sleepVRec(v)].y & SLEEP_ASLEEP;
     sync();
     return gsUniformLanes != 0u;
+}
+
+// Listed dispatch: workgroup `g`'s vehicle (or vehicles + its contact group past the
+// awake count), every lane, uniform.
+uint sleepPick(uint g, uint lane)
+{
+    sync();
+    if (lane == 0u) gsUniformLanes = gNext[sleepList()];
+    sync();
+    uint n = gsUniformLanes;
+    sync();
+    if (lane == 0u) gsUniformLanes = g < n ? gNext[sleepList() + 1u + g] : gP.vehicles + (g - n);
+    sync();
+    return gsUniformLanes;
 }
 
 // After a step's node phase: whether one of this lane's nodes of vehicle v is moving
@@ -166,3 +187,62 @@ void sleepGroupEnd(uint off, uint k, uint lane, uint2 mask, uint steps)
         for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) gMisc[base + vvMember(off, m)].y |= SLEEP_ASLEEP;
     }
 }
+
+// --- The awake list (one workgroup, every frame before the frame's dispatch): the awake
+// vehicles in vehicle order, then the indirect arguments: without vehicle contact the
+// frame over the awake vehicles (words 8..10); with it, as vvArgs wrote them at the last
+// plan, the awake vehicles in place of the fleet (word 3: the plan's groups).
+#ifdef EB_SLEEP_LIST
+// (gArgs: the vehicle-contact plan's indirect arguments, binding 10, declared there.)
+groupshared uint gsSleepScan[256];
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_sleep_list(uint3 lid : SV_GroupThreadID)
+{
+    uint lane = lid.x;
+    uint nv = gP.vehicles;
+    uint base = sleepHdr().x;
+    uint list = sleepList();
+    uint run = 0u;
+    for (uint c = 0u, cStop = EB_END(c, (nv + 255u) / 256u, 1u); c < cStop; c++)
+    {
+        uint v = 256u * c + lane;
+        bool awake = v < nv && (gMisc[base + v].y & SLEEP_ASLEEP) == 0u;
+        gsSleepScan[lane] = awake ? 1u : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        if (lane == 0u)
+        {
+            uint r = run;
+            for (uint k = 0u; k < 256u; k++)
+            {
+                uint x = gsSleepScan[k];
+                gsSleepScan[k] = r;
+                r += x;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (awake) gNext[list + 1u + gsSleepScan[lane]] = v;
+        run = gsSleepScan[255] + ((256u * c + 255u < nv && (gMisc[base + 256u * c + 255u].y & SLEEP_ASLEEP) == 0u) ? 1u : 0u);
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane == 0u)
+    {
+        gNext[list] = run;
+        gArgs[8] = run;
+        gArgs[9] = 1u;
+        gArgs[10] = 1u;
+        if (gP.vvOn != 0u)
+        {
+            uint groups = gArgs[3];
+            gArgs[0] = groups == 0u ? run : 0u;
+            gArgs[1] = 1u;
+            gArgs[2] = 1u;
+            gArgs[4] = groups == 0u ? 0u : run + groups;
+            gArgs[5] = 1u;
+            gArgs[6] = 1u;
+        }
+    }
+    ebLoopCapFlush();
+}
+#endif

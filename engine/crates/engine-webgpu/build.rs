@@ -612,6 +612,12 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             )
         })
         .collect();
+    // Vehicle sleep's awake list (engine_exec::explicit_plan::SLEEP_LIST).
+    vv.push((
+        "explicit_beams_sleep_list".to_string(),
+        "",
+        vec![("ENGINE_WGSL", "1"), ("EB_SLEEP_LIST", "1")],
+    ));
     for (name, lanes, aero) in [
         ("explicit_beams_contact", "256", false),
         ("explicit_beams_contact_wide", "512", false),

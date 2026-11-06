@@ -76,8 +76,14 @@ fn main() {
         .unwrap()
     };
     let lift = sim.spawn_clearance() - sim.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    // x=<m>: the vehicle moved along x (the rounding of every position changes).
+    let dx: f32 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("x="))
+        .map_or(0.0, |s| s.parse().unwrap());
     for n in &mut sim.nodes {
         n.pos.y += lift;
+        n.pos.x += dx;
     }
     let mass: f32 = sim.nodes.iter().map(|n| n.mass).sum();
     println!("{file}: {} nodes, {mass:.0} kg", sim.nodes.len());

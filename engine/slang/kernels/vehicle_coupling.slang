@@ -22,6 +22,14 @@
 //   cpl_sleep_mask one thread per 32 vehicles, after the frame: the vehicles' asleep bits
 //                  (vehicle sleep, explicit_beams_sleep.slang) for the World's readback.
 //
+// Proxied list (gP.listBase nonzero): cpl_plan appends each vehicle with a proxy shape to
+// gWork[listBase + 4 ...] (its count at listBase, the x of the indirect arguments
+// (count, 1, 1) the host dispatches cpl_share, cpl_loads and cpl_emit with): a vehicle
+// with no proxy is not launched (those passes do nothing for it). The list stays until
+// the next window's plan clears its count (cpl_emit, at the next step's start, reads it).
+// cpl_bounds keeps a sleeping vehicle's bounds (its nodes have not moved since they
+// were taken; the bounds are not in the cleared region).
+//
 // Vehicle sleep (sleepBase nonzero: gMisc record of vehicle 0's sleep record): cpl_plan
 // wakes a vehicle (writes its record (0, 0, 0, 0): awake, still count 0, no anchor) when
 // a collider among its candidates belongs to a moving body: a dynamic body awake in the
@@ -58,7 +66,7 @@ struct Params
     uint rowCap;         // chunk records at most (the ingest merges this many of slot 1)
     uint serialPlan;     // tests: cpl_plan's lane-0 walk even within every room
     uint sleepBase;      // vehicle sleep: gMisc record of vehicle 0's sleep record (0 off)
-    uint pad2;
+    uint listBase;       // gWork word of the proxied list's count (0: every vehicle, gid.x)
 };
 
 static const uint BODY_RECS = 5u;
@@ -72,10 +80,11 @@ static const uint ST_BODIES = 2u;
 static const uint ST_PLANES = 4u;
 static const uint ST_IMPULSES = 8u;
 static const uint ST_ROWS = 16u;
-// work: [0] chunk rows used, [1] status, [2..2+maxBodies) share counts, then per vehicle
-// 8 words of bounds (ordered bits: lo xyz, hi xyz, speed, 0) (all cleared each window),
-// then per vehicle 4 words written once by the host: node offset, nodes, mass bits, 0;
-// then the asleep bits (vehicle sleep), a word per 32 vehicles.
+// work: [0] chunk rows used, [1] status, [2..2+maxBodies) share counts (all cleared each
+// window), then per vehicle 8 words of bounds (ordered bits: lo xyz, hi xyz, speed, 0;
+// rewritten by cpl_bounds for every awake vehicle), then per vehicle 4 words written once
+// by the host: node offset, nodes, mass bits, 0; then the asleep bits (vehicle sleep), a
+// word per 32 vehicles; then the proxied list (listBase: count, 1, 1, 0, the vehicles).
 uint wShare() { return 2u; }
 uint wBounds(uint v) { return 2u + gP.maxBodies + 8u * v; }
 uint4 vehicleAt(uint v)
@@ -113,6 +122,20 @@ float3 qrot(float4 q, float3 v)
 }
 
 uint vrec(uint v) { return gP.miscBase + v * gP.recs; }
+
+// Workgroup g's vehicle: the g-th proxied one (listBase), or g; NONE past the list.
+uint listed(uint g)
+{
+    if (gP.listBase == 0u) return g;
+    return g < gWork[gP.listBase].load() ? gWork[gP.listBase + 4u + g].load() : NONE;
+}
+// cpl_plan: vehicle v has proxies this window.
+void listAppend(uint v, uint shapes)
+{
+    if (gP.listBase == 0u || shapes == 0u) return;
+    uint at = gWork[gP.listBase].add(1u);
+    gWork[gP.listBase + 4u + at].store(v);
+}
 uint brec(uint v, uint j) { return vrec(v) + 1u + j * BODY_RECS; }
 uint srec(uint v, uint k) { return vrec(v) + 1u + gP.B * BODY_RECS + k * SHAPE_RECS; }
 uint prec(uint v, uint i) { return vrec(v) + 1u + gP.B * BODY_RECS + gP.S * SHAPE_RECS + i; }
@@ -148,8 +171,12 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     else if (lane < 7u) gsBox[lane].store(0u);
     GroupMemoryBarrierWithGroupSync();
     uint4 vt = vehicleAt(v);
+    // Vehicle sleep: a sleeping vehicle's nodes have not moved since its bounds were
+    // taken; they stand (every lane takes the barriers).
+    bool keep = gP.sleepBase != 0u && (gMisc[gP.sleepBase + v].y & 1u) != 0u;
+    uint nodes = keep ? 0u : vt.y;
     float3 origin = asfloat(gMisc[v].xyz);
-    for (uint i = lane; i < vt.y; i += 256u)
+    for (uint i = lane; i < nodes; i += 256u)
     {
         float3 x = origin + gNodes[(vt.x + i) * 3u].xyz;
         float3 u = gNodes[(vt.x + i) * 3u + 1u].xyz;
@@ -162,7 +189,7 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsBox[6].max(asuint(length(u)));
     }
     GroupMemoryBarrierWithGroupSync();
-    if (lane < 7u) gWork[wBounds(v) + lane].store(gsBox[lane].load());
+    if (lane < 7u && !keep) gWork[wBounds(v) + lane].store(gsBox[lane].load());
 }
 
 // A collider's world centre and bounding radius (its kind supported), else radius < 0.
@@ -268,7 +295,11 @@ void cplPlanShapes(uint v, uint lane, uint n)
         gMisc[at + 5u] = uint4(0u);
         gMisc[at + 6u] = asuint(float4(sph.xyz, 0.0));
     }
-    if (lane == 0u) gMisc[vrec(v)] = uint4(gsBodies.load(), n, gsPlanes.load(), 0u);
+    if (lane == 0u)
+    {
+        gMisc[vrec(v)] = uint4(gsBodies.load(), n, gsPlanes.load(), 0u);
+        listAppend(v, n);
+    }
 }
 
 [shader("compute")]
@@ -462,13 +493,15 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         ns++;
     }
     gMisc[vrec(v)] = uint4(nb, ns, planes, 0u);
+    listAppend(v, ns);
 }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cpl_share(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    uint v = gid.x;
+    uint v = listed(gid.x);
+    if (v == NONE) return;
     for (uint j = lid.x; j < gMisc[vrec(v)].x; j += 64u)
     {
         uint b = brec(v, j);
@@ -518,7 +551,8 @@ void shapeLoad(uint v, uint k)
 [numthreads(64, 1, 1)]
 void cpl_loads(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    uint v = gid.x;
+    uint v = listed(gid.x);
+    if (v == NONE) return;
     if (gP.ingestRows == 0u) return;
     for (uint k = lid.x; k < gMisc[vrec(v)].y; k += 64u) shapeLoad(v, k);
 }
@@ -603,7 +637,8 @@ void emitPair(uint v, uint j, uint body, uint key)
 [numthreads(1, 1, 1)]
 void cpl_emit(uint3 gid : SV_GroupID)
 {
-    uint v = gid.x;
+    uint v = listed(gid.x);
+    if (v == NONE) return;
     uint ns = gMisc[vrec(v)].y;
     for (uint k = 0u; k < ns; k++)
     {

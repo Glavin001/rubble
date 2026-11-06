@@ -152,43 +152,77 @@ fn sleep_off_and_awake_vehicles_are_bit_for_bit() {
         eprintln!("no GPU adapter: skipped");
         return;
     };
-    // A car driving (never still) and one settling, apart: contact active (two vehicles),
-    // no group. Three fleets: no sleep room, room with sleep off, sleep on.
+    // A car driving (never still), one settling and one settled (it sleeps within a few
+    // seconds), apart: no group. Three fleets: no sleep room, room with sleep off, sleep on
+    // (the awake list's dispatch: two or more vehicles); with vehicle contact (the solo
+    // frame) and without (the plain frame).
     let fleet = vec![
         car(Vec3::ZERO, Vec3::new(0.0, 0.0, 8.0)),
         car(Vec3::new(30.0, 0.0, 0.0), Vec3::ZERO),
+        parked(Vec3::new(0.0, 0.0, -40.0), 70.0),
     ];
-    let mut plain = ExplicitBeamsGpu::new(&device, &queue, &fleet);
-    let mut off =
-        ExplicitBeamsGpu::with_sleep(&device, &queue, &fleet, None, Some(VehicleSleep::default()));
-    assert!(!off.set_sleep(false));
-    let mut on =
-        ExplicitBeamsGpu::with_sleep(&device, &queue, &fleet, None, Some(VehicleSleep::default()));
-    for f in 0..240 {
-        for g in [&mut plain, &mut off, &mut on] {
-            g.frame(steps(f));
-        }
-        let (p, o, n) = (plain.positions(), off.positions(), on.positions());
-        for v in 0..2 {
-            assert_eq!(
-                bits(&p[v]),
-                bits(&o[v]),
-                "frame {f} vehicle {v}: sleep off differs"
-            );
-        }
-        // The driving car never sleeps: bit for bit with sleep on.
-        assert_eq!(
-            bits(&p[0]),
-            bits(&n[0]),
-            "frame {f}: the awake vehicle differs with sleep on"
+    for contact in [true, false] {
+        let mut plain = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+        let mut off = ExplicitBeamsGpu::with_sleep(
+            &device,
+            &queue,
+            &fleet,
+            None,
+            Some(VehicleSleep::default()),
         );
-        if !on.sleep_states()[1].1 {
-            assert_eq!(
-                bits(&p[1]),
-                bits(&n[1]),
-                "frame {f}: the settling vehicle differs before it sleeps"
-            );
+        assert!(!off.set_sleep(false));
+        let mut on = ExplicitBeamsGpu::with_sleep(
+            &device,
+            &queue,
+            &fleet,
+            None,
+            Some(VehicleSleep::default()),
+        );
+        let mut frozen: Option<Vec<[u32; 3]>> = None;
+        for g in [&mut plain, &mut off, &mut on] {
+            g.set_vehicle_contact(contact);
         }
+        for f in 0..900 {
+            for g in [&mut plain, &mut off, &mut on] {
+                g.frame(steps(f));
+            }
+            let (p, o, n) = (plain.positions(), off.positions(), on.positions());
+            for v in 0..3 {
+                assert_eq!(
+                    bits(&p[v]),
+                    bits(&o[v]),
+                    "contact {contact}, frame {f}, vehicle {v}: sleep off differs"
+                );
+            }
+            // The driving car never sleeps: bit for bit with sleep on.
+            assert_eq!(
+                bits(&p[0]),
+                bits(&n[0]),
+                "contact {contact}, frame {f}: the awake vehicle differs with sleep on"
+            );
+            let s = on.sleep_states();
+            assert!(!s[0].1, "the driving car slept");
+            for v in 1..3 {
+                if !s[v].1 {
+                    assert_eq!(
+                        bits(&p[v]),
+                        bits(&n[v]),
+                        "contact {contact}, frame {f}: vehicle {v} differs before it sleeps"
+                    );
+                }
+            }
+            // Asleep: not dispatched, frozen.
+            if s[2].1 {
+                match &frozen {
+                    None => frozen = Some(bits(&n[2])),
+                    Some(x) => assert_eq!(x, &bits(&n[2]), "a sleeping vehicle moved"),
+                }
+            }
+        }
+        assert!(
+            frozen.is_some(),
+            "contact {contact}: the parked car never slept"
+        );
     }
 }
 
@@ -202,7 +236,7 @@ fn an_approaching_vehicle_wakes_a_sleeping_one() {
     // A parked car, and one 40 m behind it that sets off at 6 m/s once the first sleeps.
     let fleet = vec![
         parked(Vec3::ZERO, 45.0),
-        parked(Vec3::new(0.0, 0.0, -40.0), 45.0),
+        parked(Vec3::new(0.0, 0.0, -40.0), 70.0),
     ];
     let mut cpu = ExplicitBeamsWorld::new(fleet.clone());
     cpu.sleep = Some(cfg);

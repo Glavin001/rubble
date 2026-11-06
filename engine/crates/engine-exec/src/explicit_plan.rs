@@ -171,8 +171,11 @@ pub const PARAM_WORDS: usize = 84;
 pub const W_SLEEP: usize = 80;
 /// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
 pub const VV_SPLIT_SLOTS: usize = 5;
-/// Bytes of the indirect arguments buffer.
-pub const ARGS_BYTES: u64 = 32;
+/// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
+/// groups (16), the awake vehicles' frame (32, vehicle sleep).
+pub const ARGS_BYTES: u64 = 48;
+/// The vehicle sleep awake list's pass ([`Kernel::Sleep`]).
+pub const SLEEP_LIST: &str = "explicit_beams_sleep_list";
 /// Params word: the phases a measurement build skips (`EB_ABLATE`).
 pub const W_ABLATE: usize = 63;
 /// Params word: the steps the contact plan's frame bounds cover.
@@ -310,6 +313,11 @@ pub const MODULES: &[Module] = &[
     pass(WIDE_PASSES[5]),
     pass(WIDE_PASSES[6]),
     pass(WIDE_PASSES[7]),
+    Module {
+        name: SLEEP_LIST,
+        entry: SLEEP_LIST,
+        defines: &[W, ("EB_SLEEP_LIST", "1")],
+    },
 ];
 
 /// A dispatch's kernel. The frame kernels' module depends on the fleet
@@ -327,6 +335,8 @@ pub enum Kernel {
     Vv(usize),
     /// A wide pass ([`WIDE_PASSES`] index).
     Wide(usize),
+    /// Vehicle sleep: the awake list and the frame's indirect arguments ([`SLEEP_LIST`]).
+    Sleep,
 }
 
 impl Kernel {
@@ -359,6 +369,7 @@ impl Kernel {
             ]),
             Kernel::Vv(i) => VV_PASSES[i],
             Kernel::Wide(i) => WIDE_PASSES[i],
+            Kernel::Sleep => SLEEP_LIST,
         }
     }
 
@@ -368,6 +379,7 @@ impl Kernel {
             Kernel::Frame | Kernel::Solo | Kernel::Contact => FRAME_ENTRY,
             Kernel::Vv(i) => VV_PASSES[i],
             Kernel::Wide(i) => WIDE_PASSES[i],
+            Kernel::Sleep => SLEEP_LIST,
         }
     }
 
@@ -375,7 +387,7 @@ impl Kernel {
     /// (the WebGPU layouts; Metal and CUDA bind what the reflection lists).
     pub fn extra_binding(self) -> Option<u32> {
         match self {
-            Kernel::Vv(_) => Some(BIND_ARGS),
+            Kernel::Vv(_) | Kernel::Sleep => Some(BIND_ARGS),
             Kernel::Wide(_) => Some(BIND_TABLE),
             _ => None,
         }
@@ -391,6 +403,7 @@ impl Kernel {
             Kernel::Vv(1) => "vv_pairs",
             Kernel::Vv(_) => "vv_group",
             Kernel::Wide(i) => WIDE_PASSES[i],
+            Kernel::Sleep => "sleep list",
         }
     }
 }
@@ -473,9 +486,11 @@ pub struct SleepLayout {
     /// 0's record (one per vehicle: still steps, flags, 0, 0).
     pub header: u32,
     pub base: u32,
-    /// gAcc word of vehicle 0's two flags; gBeams record of node 0's anchor.
+    /// gAcc word of vehicle 0's two flags; gBeams record of node 0's anchor; gNext word
+    /// of the awake list (its count, then the vehicles).
     pub flags: u32,
     pub anchor: u32,
+    pub list: u32,
     pub cfg: engine_softbody::explicit_sleep::VehicleSleep,
 }
 
@@ -1484,13 +1499,17 @@ impl ExplicitUpload {
             let flags = acc_init.len() as u32;
             acc_init.extend(std::iter::repeat_n(0, 2 * nv));
             misc.push([header + 2, cfg.dwell, cfg.speed.to_bits(), cfg.reach.to_bits()]);
-            misc.push([flags, 0, 0, 0]);
+            // The awake list (count, then the vehicles) in gNext.
+            let list = next_len as u32;
+            next_len += nv + 1;
+            misc.push([flags, 0, list, 0]);
             misc.extend(vehicles.iter().map(|v| v.sleep.words()));
             SleepLayout {
                 header,
                 base: header + 2,
                 flags,
                 anchor: 0,
+                list,
                 cfg,
             }
         });
@@ -1821,6 +1840,9 @@ pub struct FramePlanner {
     frames: u64,
     /// Vehicle sleep's header record (0: no room).
     sleep_rec: u32,
+    /// Measurement only ([`Self::set_sleep_listing`]): false dispatches every vehicle,
+    /// a sleeping one's workgroup returning at once.
+    sleep_listing: bool,
 }
 
 impl FramePlanner {
@@ -1838,7 +1860,14 @@ impl FramePlanner {
             wide_on: layout.wide_default,
             frames: 0,
             sleep_rec: layout.sleep.map_or(0, |s| s.header),
+            sleep_listing: true,
         }
+    }
+
+    /// Measurement only: the awake list's dispatch on (the default) or off (every vehicle
+    /// dispatched, a sleeping one returning at once). Results are the same either way.
+    pub fn set_sleep_listing(&mut self, on: bool) {
+        self.sleep_listing = on;
     }
 
     /// Vehicle sleep on or off (only with room, [`ExplicitUpload::with_sleep`]; on at
@@ -1852,6 +1881,12 @@ impl FramePlanner {
     /// Vehicle sleep runs this frame.
     pub fn sleep_on(&self) -> bool {
         self.words[W_SLEEP] != 0
+    }
+
+    /// Frames dispatch the awake vehicles only (vehicle sleep on, more than one vehicle:
+    /// the awake list's pass, [`Kernel::Sleep`], writes the indirect arguments).
+    pub fn sleep_listed(&self) -> bool {
+        self.sleep_on() && self.nv > 1 && self.sleep_listing
     }
 
     /// Vehicles in the fleet.
@@ -1931,6 +1966,7 @@ impl FramePlanner {
         );
         self.words[0] = steps;
         self.words[W_VV_ON] = self.contact_active() as u32;
+        self.words[W_SLEEP + 1] = self.sleep_listed() as u32;
         self.contact.planning = false;
         if self.contact_active() {
             let replan = self.contact.replan.swap(false, Ordering::Relaxed);
@@ -1989,6 +2025,9 @@ impl FramePlanner {
                 }
                 out.push(d(Kernel::Vv(2), 1, 0));
             }
+            if self.sleep_listed() {
+                out.push(d(Kernel::Sleep, 1, 0));
+            }
             // The vehicles (grouped ones return at once) and, past them, the
             // contact groups, side by side. The plan wrote one of the two non-empty.
             out.push(Cmd::Indirect {
@@ -2019,6 +2058,15 @@ impl FramePlanner {
                 },
             );
             out
+        } else if self.sleep_listed() {
+            // The awake vehicles only.
+            vec![
+                d(Kernel::Sleep, 1, 0),
+                Cmd::Indirect {
+                    kernel: Kernel::Frame,
+                    offset: 32,
+                },
+            ]
         } else {
             vec![d(Kernel::Frame, nv, 0)]
         }

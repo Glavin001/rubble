@@ -4077,13 +4077,16 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.x;
     uint lane = lid.x;
+    // Vehicle sleep, awake-indexed: the workgroup's awake vehicle (or contact group).
+    bool sleepListed = gP.sleepRec != 0u && gP.sleepPad0 != 0u;
+    if (sleepListed) v = sleepPick(gid.x, lane);
 #ifdef EB_VV_SOLO
 #ifdef EB_VV_GROUPS
     // Workgroups past the vehicles step the contact groups (one dispatch: groups
     // and solo vehicles run side by side).
-    if (gid.x >= gP.vehicles)
+    if (v >= gP.vehicles)
     {
-        contactGroup(gid.x - gP.vehicles, lane);
+        contactGroup(v - gP.vehicles, lane);
         return ebLoopCapFlush();
     }
 #endif
@@ -4094,7 +4097,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
     // Vehicle sleep: a sleeping vehicle is not stepped.
     bool sleepOn = gP.sleepRec != 0u;
-    if (sleepOn)
+    if (sleepOn && !sleepListed)
     {
         if (sleepSkip(v, lane)) return ebLoopCapFlush();
     }
@@ -4963,6 +4966,8 @@ void vvArgs(uint nv, uint groups)
     gArgs[4] = groups == 0u ? 0u : nv + groups;
     gArgs[5] = 1u;
     gArgs[6] = 1u;
+    // The plan's groups (vehicle sleep's awake list rewrites the arguments every frame).
+    gArgs[3] = groups;
 }
 
 void vvEmitPair(uint a, uint b)

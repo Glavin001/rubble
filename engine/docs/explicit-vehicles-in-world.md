@@ -721,11 +721,27 @@ lightly damped pressure wheels rock for about 50 s.
   the grab (kept awake while held), held throttle (kept awake), `wake(v)` for a scripted
   force.
 
-**Cost while asleep.** A sleeping vehicle's frame workgroup returns at once; a contact group
-of sleepers returns at once. With every vehicle asleep (the host reads the asleep bits back)
-and nothing written to one, the vehicles stop requesting World steps, so an all-asleep World
-skips its step. The coupling plan still runs a workgroup per vehicle and tests every
-collider (§8.4's O(vehicles × colliders), the World-broadphase work).
+**Cost while asleep.** With two or more vehicles, a sleeping vehicle is not dispatched:
+`explicit_beams_sleep_list` (one workgroup, every frame, after the contact plan) writes the
+awake vehicles in vehicle order and the frame's indirect arguments (the frame over the
+awake ones; with vehicle contact the solo and group dispatches, the groups past the awake
+count). A lone vehicle's workgroup returns at once; a contact group of sleepers returns
+at once. With every vehicle asleep (the host reads the asleep bits back) and nothing
+written to one, the vehicles stop requesting World steps, so an all-asleep World skips its
+step. In the World, `cpl_bounds` keeps a sleeping vehicle's bounds (its nodes have not
+moved) instead of reading its nodes, and `cpl_share`, `cpl_loads` and `cpl_emit` are
+dispatched (indirect) over the vehicles `cpl_plan` gave proxies only. `cpl_plan` itself
+still runs a workgroup per vehicle and tests every collider (§8.4's O(vehicles ×
+colliders), the World-broadphase work, §10.1), and the awake list is O(vehicles) threads
+of one workgroup.
+
+Lossless for awake vehicles: a vehicle's frame is the same whatever workgroup runs it, and
+the coupling passes do nothing for a vehicle without proxies. Checked: the awake vehicles
+of a fleet with sleep on, through the awake list (with and without vehicle contact), bit
+for bit with a fleet without sleep, the sleeping one frozen; the World's coupling tests
+(momentum through the World, the house strike, the parallel plan, the cull, the workgroup
+copies) unchanged; `explicit_frame_dump` from one saved crash-town state (64 cars, sleep
+off: `town_coupling` keeps it off, a crash scene): every state word equal to 3cf34d27's.
 
 **Readback.** A pass after the frame packs the asleep bits (a word per 32 vehicles) into the
 World's step readback; `Frame::explicit_sleep` lists the vehicles that fell asleep or woke

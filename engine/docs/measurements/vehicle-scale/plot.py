@@ -29,6 +29,8 @@ XLABEL = {
 
 
 def load(paths):
+    """Rows; repeated (label, scenario, x) runs (interleaved A/B) folded into their
+    median p50, p95 and p99."""
     rows = []
     for p in paths:
         with open(p) as f:
@@ -36,7 +38,27 @@ def load(paths):
                 if len(r) < 8 or r[0].startswith("#"):
                     continue
                 rows.append(r)
-    return rows
+    groups = defaultdict(list)
+    order = []
+    for r in rows:
+        k = (r[0], r[1], r[2])
+        if k not in groups:
+            order.append(k)
+        groups[k].append(r)
+
+    def med(v):
+        v = sorted(v)
+        n = len(v)
+        return v[n // 2] if n % 2 else 0.5 * (v[n // 2 - 1] + v[n // 2])
+
+    out = []
+    for k in order:
+        rs = groups[k]
+        r = list(rs[0])
+        for c in (5, 6, 7):
+            r[c] = f"{med([float(x[c]) for x in rs]):.3f}"
+        out.append(r)
+    return out
 
 
 def esc(s):
