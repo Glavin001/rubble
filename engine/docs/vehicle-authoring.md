@@ -1718,6 +1718,117 @@ minima; each grade's steel is a Choice):
 - **The ledger tally** now counts the aero triangles' force as its drag
   term.
 
+### The powertrain, the door pull and the ledgers (2026-11-05, late)
+
+- **Powertrain at its real mass and place** (05c14e91): the 2011 Accord's
+  2.4 L engine 169.9 kg and automatic transaxle 96.7 kg (DOT HS 811 666
+  §5.12.1.1, §5.12.2.1) as one rigid block. Its place is read off the
+  report's side view (fig. 87, about 7 mm a pixel: a Choice within about
+  ±20 mm): front face 0.39 m ahead of the front axle, rear face 0.12 m
+  behind. Its mounts go only where the 2008–12 Accord's are (`mount_to`:
+  the rails and the subframe). Probes: `PT_LOAD`, `NODE_TRACE`,
+  `LEDGER_TOP`, `LEDGER_WARN`, `BEAR_REPORT=<part>`.
+- **`g` in the car's frame** (451d816a): the door is pulled with −F·mᵢ/M on
+  every node (d'Alembert), so the car does not fly off at 100–200 m/s
+  (`G_FREE=1` pulls the free car). With the solver's `JbeamRope` and
+  `breakAtExpansion` (0435b1dd) the latch lets go at 40–43 kN (band
+  25.7–55.3) and the door comes off at 84.0–84.6 kN, against the build's
+  own bound of 83.4 kN (the summed strengths). **Kept as is:** the bound is
+  the static rig's sum; in the car, the hinges are loaded at the angle the
+  door has swung to once the latch is gone, about 1.46× their rig share, so
+  the door holds a little past the sum.
+- **Ledgers** (e513966a, 847339ab): contact is recomputed with the
+  profile's exact friction; a compressed `JbeamRope` stores nothing;
+  `FIXED_CONTACT=0` measures the f32 contact sums. Since the solver's
+  dissipative contact (0eb963d2, spec §37) all 32 of `n`'s ledgers close.
+
+### The dash where the Accord's is (2026-11-05, latest)
+
+**Why.** sedan1's dash and cowl sat 0.40–0.49 m behind the front axle,
+against 0.27–0.30 m on the Accord (fig. 87), so the engine reached the dash
+about 0.13 m late, and the frontal was soft (max crush 730 mm, peak 30 g).
+
+**Built** (`accord_dash`, `COWL=0` keeps the old package):
+- **Dash lower cross member** (`firewall`) at 0.30 m behind the axle
+  between the rails, its ends swept back round the wheelhouses to the
+  hinge pillars' bases (z 3.36, kept). The tunnel runs forward to it.
+  Section a 60 × 100 × 1.4 mm HSLA hat (a Choice).
+- **Dash panel** (`dash_panel`, `dash_panel_s`): three vertical strips
+  from the lower cross member to the cowl, 0.39 m wide, their chords 0.195 m
+  apart. Each is its share of a 0.8 mm sheet (a Choice in 0.7–0.9 mm),
+  a membrane: each chord yields at σ_y·A of its half strip (210 MPa).
+- **Cowl** (the plenum on the dash's top): furthest forward at the centre,
+  0.27 m behind the axle, its ends swept back in plan to the A-pillars.
+  Section the plenum's 150 × 100 × 1.0 mm DP600 box (as `screen_ring`).
+- **Local masses**: the master cylinder 3.16 kg (fig. 209) and the pedals
+  and linkages 6.43 kg (§5.13.7) as a named mass on the driver's half of
+  the dash, out of the equipment the kerb mass leaves. No mass moved.
+- **Not moved (deviation from the plan, decided):** the A-pillars, the
+  windscreen's base (z 3.33) and the greenhouse's top line. Moving them
+  with the cowl (built and measured, 1e07cdb1) changed the shell's top
+  ahead of the doors, which moved the front door's hinge pins (upper
+  0.88 → 0.75 m, lower 0.49 → 0.25 m). The lower hinge then bore on the
+  sill: FMVSS 214's ram (`p`) read 140 kN instead of 24, and `g`'s door came
+  off at 40 kN. The plenum now runs forward under the bonnet's rear edge
+  from the screen's base, as a real cowl does.
+
+**The engine meets the dash as contact** (`BlockSpec::collide`;
+`PT_COLLIDE=0` measures the old bearing beams on every face). The bearing
+beams joined fixed node pairs: in the 56 km/h wall the dash's nodes went
+7 cm into the engine while their beams lengthened (`NODE_TRACE`). Now
+the block's outer faces are collision triangles (no air on them:
+`rubble_aero_tri` lists only the skin), and every body node within 0.5 m
+behind or beside it is a contacter, except those its mounts hold. Ahead,
+its front face keeps its bearing beams to the radiator support: as
+contact, a light node there was pinched against the wall and two
+radiator-support nodes left at 107–138 m/s in the 50 km/h wall.
+
+**The cradle drops its rear** (`CRADLE_BOLT=0` welds it as before). The
+Accord's engine cradle rear mount lets go by design between 40 and 50 ms
+(fig. 55, report text at §3 and §8). The cradle is now a frame: its rear
+cross member, its cross member on the axle line and side members, welded
+to each other only (`MemberSpec::bolted`, `Bolt::weld`). Its front cross
+member stays welded to the rails (the front mounts). Each rear end is bolted
+to its rail by one detacher group. The report gives no strength, so
+`CRADLE_REAR_MOUNT` = 24 kN a mount is a Choice: the value at which the
+first mount lets go between 45 and 50 ms (swept 12–64 kN; `BOLT_LOAD=subframe_f0`
+prints each mount's load; `CRADLE_REAR_MOUNT=<N>` sets it). Before the frame,
+each cross member was welded to the rails, and the rear one carried only
+2–4 kN at 40–50 ms.
+
+**Effect, `n` (Medium, 8-run ensemble, dissipative contact merged):**
+
+| | Before | Built |
+|---|---|---|
+| max crush (380–580 mm) | 730 | 688 |
+| b1 (22.9–39.2) | 19.3 | 20.6 |
+| dynamic crush (620–750 mm) | 794 | **748** |
+| t_m (63–76 ms) | 87 | 77.9 |
+| restitution (0.13–0.20) | 0.110 | 0.125 |
+| peak (34–47 g) | 30.3 | **40.0** |
+| A-pillar bases (mm) | −3 / −2 | −1 / −5 |
+| firewall (mm) | 35 / 21 | 40 / 34 |
+| ledgers failing, of 32 | 1 | 0 |
+
+With the A-pillars moved too (1e07cdb1, before dissipative contact) it was
+633 mm, 22.4, 728, 74.4 ms, 0.141, 46.7 g.
+
+**Other scenes** (before the dissipative-contact merge): `o` 300 mm (sd 13,
+297–445: in band); `p` peak 23.9 kN (≥ 28.4: fails, as before); `q` 5.58×
+(4.48–5.32: fails, was 5.77); `g` latch 43.1 kN, door off 84.0 kN; `r`
+passes. `t` (80 km/h T-bone) leaks 42 of 1,002 striker nodes; bisected to
+the dissipative contact commit (0eb963d2: 4 before, 49 at it), with the
+solver agent. `detached_door_takes_its_edge` fails (19–54 drawn triangles
+joining the detached door; the pull's outcome changes with any change to
+the car, door off at 3.6–7.4 s); with the visual agent.
+
+**Open: the rear third and far panels.** In the 56 km/h wall 71–89 rear
+beams pass 0.2 % plastic strain (worst 28–34 %; body sheet in compression,
+boot lid and bumper seams) and every panel's ripple stays at 2–6 mm after
+0.5 s (visible: 1 mm), with or without this round's changes. That is the
+rear-end round (back panel, rear floor, rear rails to the bumper beam,
+parcel shelf).
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
