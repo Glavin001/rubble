@@ -220,7 +220,8 @@ fn env_f(k: &str, d: f32) -> f32 {
 /// aprons, rear rails), `GEN2_CRUSH`: calibrated on wall56 against NHTSA's
 /// frontal residual crush (`crash-reference-targets.md` §1).
 pub fn crush_mult() -> f32 {
-    env_f("GEN2_CRUSH", 4.5)
+    // gen3 (2026-11-06): the census yield (the first lattice needed 4.5).
+    env_f("GEN2_CRUSH", 1.0)
 }
 
 /// The crush cans' yield against the rails' (`GEN2_CAN`): their trigger.
@@ -230,7 +231,8 @@ pub fn can_mult() -> f32 {
 
 /// The cabin's yield multiple (sills, pillars, roof rails), `GEN2_CABIN`.
 pub fn cabin_mult() -> f32 {
-    env_f("GEN2_CABIN", 6.0)
+    // gen3 (2026-11-06): 1.2 (the first lattice needed 6).
+    env_f("GEN2_CABIN", 1.2)
 }
 
 /// The Gershgorin row cap as a multiple of sedan1's (`GEN2_ROW`, default 2.0:

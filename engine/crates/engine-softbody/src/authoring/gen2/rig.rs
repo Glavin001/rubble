@@ -49,6 +49,12 @@ pub const RIM_NODE_KG: f32 = 2.0;
 pub const UNSPRUNG_KG: f32 = 30.0 - RIM_NODES as f32 * RIM_NODE_KG;
 /// Plastic compression limit of the crush zones' beams (deformLimit).
 pub const STACK_LIMIT: f32 = 0.7;
+/// Bolt strengths per beam (N): fender bolts and its front bracket, the
+/// bumper covers' bolts and their side mounts (a 56 km/h wall unbolted
+/// both fenders and both covers at 9 / 6 / 4 kN).
+pub const FENDER_BOLT: f32 = 25e3;
+pub const BUMPER_BOLT: f32 = 20e3;
+pub const BUMPER_SIDE_BOLT: f32 = 15e3;
 /// Neighbourhood reach of the beam graph (m): the body's members and each
 /// closure's frame.
 pub const REACH_BODY: f32 = 0.90;
@@ -1699,8 +1705,14 @@ pub fn rig(model: &Model) -> Rig {
             let bv = r.nearest(body, mk, 2, |_| true);
             for &(_, d) in dv.iter().take(2) {
                 for &b in &bv {
-                    r.car
-                        .hardware(d, b, Role::Bolt, part, &format!("fender_{x}_bolt{q}"), 9e3);
+                    r.car.hardware(
+                        d,
+                        b,
+                        Role::Bolt,
+                        part,
+                        &format!("fender_{x}_bolt{q}"),
+                        FENDER_BOLT,
+                    );
                 }
             }
         }
@@ -1731,8 +1743,14 @@ pub fn rig(model: &Model) -> Rig {
                 )
             });
             for b in bv {
-                r.car
-                    .hardware(d, b, Role::Bolt, part, &format!("fender_{x}_bracket"), 9e3);
+                r.car.hardware(
+                    d,
+                    b,
+                    Role::Bolt,
+                    part,
+                    &format!("fender_{x}_bracket"),
+                    FENDER_BOLT,
+                );
             }
         }
     }
@@ -1751,8 +1769,14 @@ pub fn rig(model: &Model) -> Rig {
             let bv = r.nearest(body, mk, 2, |_| true);
             for &(_, d) in dv.iter().take(1) {
                 for &b in &bv {
-                    r.car
-                        .hardware(d, b, Role::Bolt, part, &format!("bumper_{nm}_bolt{q}"), 6e3);
+                    r.car.hardware(
+                        d,
+                        b,
+                        Role::Bolt,
+                        part,
+                        &format!("bumper_{nm}_bolt{q}"),
+                        BUMPER_BOLT,
+                    );
                 }
             }
         }
@@ -1761,8 +1785,14 @@ pub fn rig(model: &Model) -> Rig {
             let g = r.g(c);
             if (g.z - if front { bf_lo.z } else { br_hi.z }).abs() < 0.10 {
                 for b in r.nearest(body, g, 3, |_| true) {
-                    r.car
-                        .hardware(c, b, Role::Bolt, part, &format!("bumper_{nm}_side"), 4e3);
+                    r.car.hardware(
+                        c,
+                        b,
+                        Role::Bolt,
+                        part,
+                        &format!("bumper_{nm}_side"),
+                        BUMPER_SIDE_BOLT,
+                    );
                 }
             }
         }

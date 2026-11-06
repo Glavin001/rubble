@@ -1694,7 +1694,8 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
                 .iter()
                 .map(|&i| s.nodes[i as usize].pos.z)
                 .fold(f32::MIN, f32::max);
-            if reach >= wall_z - 1e-3 {
+            // Within the contact band (surface contact stops the skin there).
+            if reach >= wall_z - 0.03 {
                 t_contact = Some(k);
                 z_contact = zcab(s);
             }

@@ -1,5 +1,7 @@
 # gen2: the generated sedan as BeamNG content
 
+> **Superseded by gen3** (`vehicle-gen3.md`): `gen2::files()` now writes the render model rigged. This lattice (`sedan.rs`, `mesh.rs`) is kept as `gen2::files_gen2()`; it needs `GEN2_CRUSH=4.5 GEN2_CABIN=6`, the old defaults.
+
 `engine_softbody::authoring::gen2` is Rubble's second vehicle generator. One Rust
 source builds the physics skeleton and the render mesh together from one analytic
 shape, and writes them as the same format the imported community cars use:
