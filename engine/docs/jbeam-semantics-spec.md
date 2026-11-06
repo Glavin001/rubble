@@ -1748,6 +1748,36 @@ ties). The RoR profile keeps float sums. Checked: `jbeam_mode_steps_bit_for_bit`
 the Astral R 1,200 steps bit for bit (its first self-contact at step 354);
 `anti_clip_steps_like_the_cpu`, positions equal after 162 steps of crossings.
 
+*The quantisation does no work (2026-11-06).* sedan1's speed sweep failed its
+ledger in one run (51 km/h, drag on: +9.4 J between tenths); with `rubble_drag_coef
+0` another run failed (+31.6 J), and with f32 sums none, so the fixed point was
+suspected. Measured (`ExplicitBeams::contact_exact`, a measurement: beside the
+fixed sums, each node's contact forces summed in f64 and counted; the
+quantisation is the fixed sum less that, its work taken at the node's mean
+velocity over the step, as the ledger's): over the 24 sweep runs (47–59 km/h, drag
+on and off, 2 s) the quantisation's net work is −0.0033…+0.0036 J per run, at
+most +0.0036 J over any tenth, the largest error on a node 0.065 N (the rounding's
+worst case, adds·√3/64 N over the node's path, 0.3–1.2 J per run); over the
+crushed 51 km/h car at rest to 12 s, 0.0000 J. It is unbiased (ties to even, no
+correlation with velocity), no add saturates (|F| < 2²⁴/32 N keeps the
+conversion exact), and the order does not enter (integer sums).
+What rises is **self-contact**: the world ledger (`showcase_car.rs` `n_wall_runs`,
+`N_TERMS=1`) puts +102 J of self-contact work in the failing tenth, nearly all
+on one 0.55 kg node (352, beside cowl node 320) rattling at 1.2–1.4 m/s against
+a triangle it is a vertex of (weight 0.88) with node 320 inside its band. The
+source is the contact rule's penetration push (`contact_force`: an approaching
+pair inside the band is given 0.2·p/h of separating speed, 3 m/s at 7.5 mm): a
+node held inside a band by its beams is kicked out whenever it approaches and
+pulled back by them, a limit cycle the beams' damping then absorbs. It runs with
+f32 sums too (the most self-contact work over a tenth across the sweep: fixed
+0.2–216 J, f32 0.1–152 J; at rest after the crash +5 J per tenth for good), and
+with the push zeroed in a trial the late self-contact work fell to 0–7 J per
+tenth. Which run's tenth crosses the ledger's limit is chaotic: any change to the
+arithmetic moves it. Checked: `showcase_car.rs`
+`fixed_contact_quantisation_does_no_work` (the sweep and the long rest: at most
++0.01 J over a run and over any tenth, and within the worst case). The push is
+RoR's rule and a contact-model decision; open.
+
 **Plasticity.** [B]: a beam deforms past `beamDeform` and "will no longer return back
 to its original shape"; `deformLimit` / `deformLimitExpansion` cap the plastic change
 and `deformLimitStress` the hardening; nothing documents a strength that falls as the

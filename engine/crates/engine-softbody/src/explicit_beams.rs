@@ -937,6 +937,15 @@ pub struct ExplicitBeams {
     /// [`Self::fixed_contact`]: this step's slide-force sums, added by the next
     /// node pass after the contact sums.
     pub slide_hold: Vec<(u32, Vec3)>,
+    /// A measurement (`None`: off; `Some(Vec::new())` turns it on): beside
+    /// [`Self::contact_acc`], every node's contact forces summed exactly (f64) and
+    /// counted, so the fixed point's quantisation is `contact_sum − exact`
+    /// ([`Self::contact_quantisation`]), at most `count`·√3/64 N (each add rounds
+    /// each component by at most half a unit; the rest of the arithmetic is exact).
+    pub contact_exact: Option<Vec<(glam::DVec3, u32)>>,
+    /// A measurement (`None`: off): the last step's two-body self-collision hits
+    /// as found (contacter, triangle nodes, weights, depth, normal).
+    pub self_hit_log: Option<Vec<(u32, [u32; 3], [f32; 3], f32, Vec3)>>,
     /// The contact-force log (jbeam-semantics-spec.md §32): per node the sum of
     /// its contacts' force magnitudes per step, and the contact breaks it drives
     /// (`None`: off, the default; [`Self::enable_contact_force`]).
@@ -1398,6 +1407,8 @@ impl ExplicitBeams {
             exact_friction: false,
             contact_acc: Vec::new(),
             slide_hold: Vec::new(),
+            contact_exact: None,
+            self_hit_log: None,
             contact_force: None,
             tread: Vec::new(),
             damp_filters: Vec::new(),
@@ -3170,6 +3181,9 @@ impl ExplicitBeams {
             }
             self.contact_acc.clear();
             self.slide_hold.clear();
+            if let Some(e) = self.contact_exact.as_mut() {
+                e.clear();
+            }
         }
         let h = STEP;
         let origin = self.origin;
@@ -3753,6 +3767,9 @@ impl ExplicitBeams {
                 tri.wait = (tri.wait + 1).min(cap);
             }
         }
+        if let Some(l) = self.self_hit_log.as_mut() {
+            l.clone_from(&found);
+        }
         if !found.is_empty() {
             self.apply_two_body_self_hits(&found);
         }
@@ -3776,6 +3793,23 @@ impl ExplicitBeams {
         let a = &mut self.contact_acc[i];
         for (k, x) in f.to_array().into_iter().enumerate() {
             a[k] = a[k].wrapping_add(to_fixed(x));
+        }
+        if let Some(e) = self.contact_exact.as_mut() {
+            if e.len() != self.nodes.len() {
+                *e = vec![(glam::DVec3::ZERO, 0); self.nodes.len()];
+            }
+            e[i].0 += f.as_dvec3();
+            e[i].1 += 1;
+        }
+    }
+
+    /// The measurement [`Self::contact_exact`]: node `i`'s fixed-point contact
+    /// sum less the exact sum of its contact forces (N), and how many forces it
+    /// adds (zero when off).
+    pub fn contact_quantisation(&self, i: usize) -> (glam::DVec3, u32) {
+        match self.contact_exact.as_ref().and_then(|e| e.get(i)) {
+            Some(&(e, k)) => (self.contact_sum(i).as_dvec3() - e, k),
+            None => (glam::DVec3::ZERO, 0),
         }
     }
 

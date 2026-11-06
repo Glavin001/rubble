@@ -602,6 +602,20 @@ struct Ledger {
     /// rebound speed peaked (`axis` points into the obstacle).
     axis: Vec3,
     rebound: (f32, DVec3, DVec3, DVec3),
+    /// The fixed-point contact sums' quantisation (`fixed_contact`, spec §36):
+    /// its work, the fixed sum less the exact sum of every contact force at
+    /// the step's mean velocity (J): over the run, the current tenth, the
+    /// largest over a tenth, and the largest |error| on a node (N).
+    quant: f64,
+    quant_tenth: f64,
+    quant_tenth_max: f64,
+    quant_max: f64,
+    /// The quantisation's work in the tenths around the largest rise of the
+    /// tenths' means (J: that tenth and the one before).
+    quant_at_rise: f64,
+    quant_prev_tenth: f64,
+    /// The quantisation's worst case over the run: Σ adds·√3/64 N·|Δx| (J).
+    quant_bound: f64,
 }
 
 impl Ledger {
@@ -627,6 +641,13 @@ impl Ledger {
             steps: 0,
             axis,
             rebound: (0.0, DVec3::ZERO, DVec3::ZERO, DVec3::ZERO),
+            quant: 0.0,
+            quant_tenth: 0.0,
+            quant_tenth_max: 0.0,
+            quant_max: 0.0,
+            quant_at_rise: 0.0,
+            quant_prev_tenth: 0.0,
+            quant_bound: 0.0,
         }
     }
 
@@ -714,8 +735,25 @@ impl Ledger {
             }
         }
         let before: Vec<(f32, bool)> = s.beams.iter().map(|b| (b.rest, b.broken)).collect();
+        // (The contact sums' quantisation this node pass takes: the exact
+        // sums kept beside the fixed ones from the first tallied step.)
+        if s.fixed_contact && s.contact_exact.is_none() {
+            s.contact_exact = Some(Vec::new());
+        }
+        let quant: Vec<(DVec3, u32)> = (0..s.nodes.len())
+            .map(|i| s.contact_quantisation(i))
+            .collect();
         s.step();
         self.steps += 1;
+        let mut wq = 0.0;
+        for ((n, v), &(q, k)) in s.nodes.iter().zip(&vel).zip(&quant) {
+            let dx = ((n.vel + *v) * (0.5 * h)).as_dvec3();
+            wq += q.dot(dx);
+            self.quant_max = self.quant_max.max(q.length());
+            self.quant_bound += k as f64 * 3f64.sqrt() / 64.0 * dx.length();
+        }
+        self.quant += wq;
+        self.quant_tenth += wq;
         self.force_rounding += s
             .beams
             .iter()
@@ -755,10 +793,16 @@ impl Ledger {
             if self.window.len() == 6 {
                 let m = self.window.iter().sum::<f64>() / 6.0;
                 if let Some(p) = self.window_mean {
+                    if m - p > self.rise_window {
+                        self.quant_at_rise = self.quant_tenth + self.quant_prev_tenth;
+                    }
                     self.rise_window = self.rise_window.max(m - p);
                 }
                 self.window_mean = Some(m);
                 self.window.clear();
+                self.quant_tenth_max = self.quant_tenth_max.max(self.quant_tenth);
+                self.quant_prev_tenth = self.quant_tenth;
+                self.quant_tenth = 0.0;
             }
         }
     }
@@ -840,6 +884,10 @@ impl Ledger {
             self.plastic / 1e3,
             self.rise,
             self.rise_window
+        );
+        eprintln!(
+            "({what}) contact quantisation: work {:+.4} J over the run (worst case {:.3} J), largest over a tenth {:+.4} J, {:+.4} J over the two tenths of the largest rise; largest error on a node {:.4} N",
+            self.quant, self.quant_bound, self.quant_tenth_max, self.quant_at_rise, self.quant_max
         );
         // (`LEDGER_WARN=1`: report a failed ledger and go on to the scene's
         // own measures, a measurement switch.)
@@ -3232,19 +3280,7 @@ fn reference_wall_p(
     p: Perturb,
 ) -> Vec<(&'static str, f32)> {
     let v0 = kmh * (1.0 + p.speed) / 3.6;
-    let mut s = car.spawn(Quat::from_rotation_y(p.yaw) * Vec3::new(0.0, 0.0, v0), 0.0);
-    s.settings.drag = drag;
-    // (`NO_SELF=1`, a measurement: no self-collision, to tell an energy
-    // rise of the contact from one of the beams.)
-    if std::env::var("NO_SELF").is_ok() {
-        s.triangles.clear();
-        s.finish();
-    }
-    let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
-    s.boxes.push(StaticBox::centered(
-        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
-        Vec3::new(3.0, 2.0, 1.0),
-    ));
+    let mut s = wall_spawn(car, kmh, drag, p);
     let l0 = car.cabin_local(&s);
     let ground = s.nodes[..car.n]
         .iter()
@@ -3269,11 +3305,6 @@ fn reference_wall_p(
     let dt = engine_softbody::authoring::skeleton::STEP;
     let mut acc: Vec<f32> = Vec::new();
     let mut vprev = vcm(&s);
-    // (`FIXED_CONTACT=0`: contact sums in f32, not the GPU's fixed point, a
-    // measurement switch.)
-    if std::env::var("FIXED_CONTACT").is_ok_and(|v| v == "0") {
-        s.fixed_contact = false;
-    }
     let mut ledger = Ledger::new(&s, Vec3::Z);
     let was: Vec<bool> = s.beams.iter().map(|bm| bm.broken).collect();
     let mut nan_seen = (Vec::new(), false);
@@ -3570,6 +3601,253 @@ fn n_wall_matches_the_nhtsa_sedans() {
     let b = built(Resolution::Medium);
     let fails = n_wall(&Car::of(&b));
     assert!(fails.is_empty(), "{fails:#?}");
+}
+
+/// The BeamNG profile's fixed-point contact sums (spec §36) do no work of their
+/// own. sedan1 (the profile's car): the n test's speed sweep (47–52 and 54–59
+/// km/h, drag on and off, 2 s each) and the 51 km/h car crushed and at rest to
+/// 12 s (its contacts persist; as built at rest it has none). Each step the
+/// quantisation, every node's fixed-point contact sum less the exact sum of its
+/// contact forces, does work at the node's mean velocity over the step. Bound
+/// (stated): over any tenth of a second and over a run its work is at most
+/// +0.01 J, and its size within the rounding's worst case (each add's half
+/// unit, √3/64 N, over the node's path). Measured 2026-11-06: at most 0.0036 J
+/// per run against the 9.4 J rise between tenths the 51 km/h run shows (that is
+/// self-contact's penetration push, spec §36's note).
+#[test]
+fn fixed_contact_quantisation_does_no_work() {
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let car = Car::of(&b);
+    let check = |what: &str, s: &mut ExplicitBeams, seconds: f32| {
+        assert!(s.fixed_contact, "sedan1 runs the BeamNG profile");
+        let mut l = Ledger::new(s, Vec3::Z);
+        for _ in 0..(seconds / STEP).round() as usize {
+            l.step(s);
+        }
+        eprintln!(
+            "({what}) quantisation work {:+.5} J (worst case {:.3} J), most over a tenth {:+.5} J, largest error on a node {:.4} N",
+            l.quant, l.quant_bound, l.quant_tenth_max, l.quant_max
+        );
+        assert!(
+            l.quant.abs() <= l.quant_bound,
+            "({what}) beyond the rounding's worst case"
+        );
+        assert!(
+            l.quant <= 0.01,
+            "({what}) quantisation work {} J over the run",
+            l.quant
+        );
+        assert!(
+            l.quant_tenth_max <= 0.01,
+            "({what}) quantisation work {} J over a tenth",
+            l.quant_tenth_max
+        );
+    };
+    for kmh in [
+        47.0, 48.0, 49.0, 50.0, 51.0, 52.0, 54.0, 55.0, 56.0, 57.0, 58.0, 59.0,
+    ] {
+        for drag in [true, false] {
+            let mut s = wall_spawn(&car, kmh, drag, Perturb::default());
+            check(&format!("{kmh} km/h drag {drag}"), &mut s, 2.0);
+        }
+    }
+    // (At rest as built no node is in a self-contact band: the long rest is the
+    // crushed car's, where contacts persist.)
+    let mut s = wall_spawn(&car, 51.0, true, Perturb::default());
+    check("51 km/h drag true, then at rest to 12 s", &mut s, 12.0);
+}
+
+/// Some of the n test's speed-sweep runs (a measurement, `--ignored`):
+/// `N_KMH` (comma-separated, default 51), drag on and off (`N_DRAG=1` / `0`:
+/// one), each with its ledgers (set `LEDGER_WARN=1` to go on past a failure).
+#[test]
+#[ignore]
+fn n_wall_runs() {
+    let b = built(Resolution::Medium);
+    let car = Car::of(&b);
+    let noise = car.noise();
+    let kmh = std::env::var("N_KMH").unwrap_or_else(|_| "51".into());
+    let drags: Vec<bool> = match std::env::var("N_DRAG").as_deref() {
+        Ok("1") => vec![true],
+        Ok("0") => vec![false],
+        _ => vec![true, false],
+    };
+    for k in kmh.split(',').filter_map(|x| x.parse::<f32>().ok()) {
+        for &d in &drags {
+            if std::env::var("N_TERMS").is_ok() {
+                wall_terms(&car, k, d);
+            } else {
+                reference_wall_p(&car, k, d, noise, Perturb::default());
+            }
+        }
+    }
+}
+
+/// `N_TERMS=1` in [`n_wall_runs`]: the run as [`reference_wall_p`] sets it up,
+/// stepped by the world's energy ledger; per tenth of a second (six frames of
+/// 33 steps, as [`Ledger`] judges) the change of the frames' mean mechanical
+/// energy and each source's work, and the contact sums' quantisation work.
+fn wall_terms(car: &Car, kmh: f32, drag: bool) {
+    use engine_softbody::explicit_contact::ExplicitBeamsWorld;
+    let mut s = wall_spawn(car, kmh, drag, Perturb::default());
+    s.contact_exact = s.fixed_contact.then(Vec::new);
+    s.self_hit_log = Some(Vec::new());
+    let mut w = ExplicitBeamsWorld::new(vec![s]);
+    w.enable_ledger();
+    let snap = |w: &ExplicitBeamsWorld| {
+        let l = w.ledger.as_ref().unwrap();
+        [
+            l.mechanical(),
+            l.kinetic,
+            l.elastic,
+            l.w_beams,
+            l.beam_dissipation(),
+            l.w_self_contact,
+            l.w_ground_vertical + l.w_ground_horizontal,
+            l.w_air,
+            l.w_slides,
+        ]
+    };
+    let mut prev = snap(&w);
+    let (mut prev_mean, mut frames, mut sum, mut wq) = (f64::NAN, 0, 0.0, 0.0);
+    let mut per_node: Vec<f64> = Vec::new();
+    // (Over the run: the largest rise of the tenths' means, the most
+    // self-contact work over a tenth, the quantisation's work.)
+    let (mut rise, mut self_max, mut quant_run) = (0.0f64, f64::MIN, 0.0f64);
+    // (`N_SECONDS`: the run's length, default 2 s.)
+    let secs: f32 = std::env::var("N_SECONDS")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(2.0);
+    for step in 1..=(secs / STEP) as usize {
+        let s = &w.vehicles[0];
+        let quant: Vec<DVec3> = (0..s.nodes.len())
+            .map(|i| s.contact_quantisation(i).0)
+            .collect();
+        let vel: Vec<Vec3> = s.nodes.iter().map(|n| n.vel).collect();
+        // (The self-contact force this step's node pass applies.)
+        let fsc: Vec<Vec3> = s.trace.as_ref().map_or(Vec::new(), |t| t.parts[2].clone());
+        w.step();
+        let s = &w.vehicles[0];
+        // (`N_WATCH=node,from,to`: that node's self-contact hits each step.)
+        if let Ok(x) = std::env::var("N_WATCH") {
+            let x: Vec<usize> = x.split(',').filter_map(|y| y.parse().ok()).collect();
+            if x.len() == 3 && (x[1]..=x[2]).contains(&step) {
+                let i = x[0];
+                let n = &s.nodes[i];
+                let wk = fsc
+                    .get(i)
+                    .map_or(0.0, |f| f.dot((n.vel + vel[i]) * (0.5 * STEP)));
+                eprintln!(
+                    "  step {step} node {i} pos {:.4?} vel {:.3?} self-contact force applied {:.2?} work {wk:+.4} J",
+                    n.pos, n.vel, fsc.get(i)
+                );
+                for h in s.self_hit_log.iter().flatten() {
+                    if h.0 as usize == i || h.1.contains(&(i as u32)) {
+                        eprintln!("    hit {:?}", h);
+                    }
+                }
+            }
+        }
+        per_node.resize(s.nodes.len(), 0.0);
+        for (i, ((n, v), q)) in s.nodes.iter().zip(&vel).zip(&quant).enumerate() {
+            let dx = ((n.vel + *v) * (0.5 * STEP)).as_dvec3();
+            wq += q.dot(dx);
+            if let Some(f) = fsc.get(i) {
+                per_node[i] += f.as_dvec3().dot(dx);
+            }
+        }
+        if step % 33 == 0 {
+            sum += mech_energy(s);
+            frames += 1;
+            if frames == 6 {
+                let mean = sum / 6.0;
+                let now = snap(&w);
+                let d: Vec<f64> = now.iter().zip(&prev).map(|(a, b)| a - b).collect();
+                eprintln!(
+                    "(terms {kmh} drag {drag}) to {:.3} s: Δ mean mech {:+8.2} J; ledger Δ mech {:+9.2} (kin {:+9.2}, elastic {:+9.2}); work beams {:+9.2} (dissipation {:+8.2}), self-contact {:+8.3}, ground {:+8.2}, air {:+8.2}, slides {:+6.2}; quantisation {:+.5}",
+                    step as f32 * STEP,
+                    mean - prev_mean,
+                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], wq
+                );
+                // (`N_TOP=k`: the k nodes whose self-contact did the most work
+                // over the tenth.)
+                let top: usize = std::env::var("N_TOP")
+                    .ok()
+                    .and_then(|x| x.parse().ok())
+                    .unwrap_or(0);
+                let mut v: Vec<(f64, usize)> = per_node
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(i, e)| (e, i))
+                    .collect();
+                v.sort_by(|a, b| b.0.total_cmp(&a.0));
+                for &(e, i) in v.iter().take(top) {
+                    let groups: Vec<&String> = car.built.map_or(Vec::new(), |b| {
+                        b.groups
+                            .iter()
+                            .filter(|(_, g)| g.contains(&(i as u32)))
+                            .map(|(k, _)| k)
+                            .collect()
+                    });
+                    let n = &s.nodes[i];
+                    eprintln!(
+                        "    node {i} {:+.3} J, {:.3} kg, |v| {:.3} m/s, at {:.3?} {groups:?}",
+                        e,
+                        n.mass,
+                        n.vel.length(),
+                        n.pos
+                    );
+                }
+                per_node.iter_mut().for_each(|x| *x = 0.0);
+                if prev_mean.is_finite() {
+                    rise = rise.max(mean - prev_mean);
+                }
+                self_max = self_max.max(d[5]);
+                quant_run += wq;
+                prev = now;
+                prev_mean = mean;
+                (frames, sum, wq) = (0, 0.0, 0.0);
+            }
+        }
+    }
+    eprintln!(
+        "(terms {kmh} drag {drag}) summary: largest rise between tenths {rise:.2} J; most self-contact work over a tenth {self_max:+.2} J; quantisation work {quant_run:+.5} J"
+    );
+}
+
+/// The n test's wall run as [`reference_wall_p`] sets it up: `car` at `kmh`
+/// (perturbed by `p`) toward a rigid wall 5 cm ahead, the per-node drag
+/// `drag`.
+fn wall_spawn(car: &Car, kmh: f32, drag: bool, p: Perturb) -> ExplicitBeams {
+    let v0 = kmh * (1.0 + p.speed) / 3.6;
+    let mut s = car.spawn(Quat::from_rotation_y(p.yaw) * Vec3::new(0.0, 0.0, v0), 0.0);
+    s.settings.drag = drag;
+    // (`NO_SELF=1`, a measurement: no self-collision, to tell an energy
+    // rise of the contact from one of the beams.)
+    if std::env::var("NO_SELF").is_ok() {
+        s.triangles.clear();
+        s.finish();
+    }
+    let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+    s.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+        Vec3::new(3.0, 2.0, 1.0),
+    ));
+    // (`FIXED_CONTACT=0`: contact sums in f32, not the GPU's fixed point, a
+    // measurement switch.)
+    if std::env::var("FIXED_CONTACT").is_ok_and(|v| v == "0") {
+        s.fixed_contact = false;
+    }
+    s
 }
 
 /// The n test's runs and bands on `car`: the failures.
