@@ -2636,6 +2636,14 @@ pub fn sedan_one_tier() -> VehicleDef {
             m.kg_per_m = section_kg_per_m(&ACCORD_BUMPER_BEAM);
         }
     }
+    // The doors' frames as the 2011 Accord's (built, not adopted:
+    // `ACCORD_DOORS=1` builds them, `=beam` only the intrusion beams; a
+    // measurement switch, [`accord_doors`]).
+    if let Ok(v) = std::env::var("ACCORD_DOORS") {
+        if v == "1" || v == "beam" {
+            accord_doors(&mut d, v == "1");
+        }
+    }
     d
 }
 
@@ -2833,6 +2841,111 @@ pub fn door_flanges() -> Vec<FlangeSpec> {
         f("pillar_b", 0.0018, phs),
         f("pillar_c", 0.0014, dp780),
     ]
+}
+
+/// The doors' intrusion beams as the 2011 Accord's are (NHTSA DOT HS 811 666
+/// fig. 163 and 173, the front and rear door frames' steel thickness maps):
+/// - **Where.** Both beams run from high at the hinge end to low at the lock
+///   end (the two-tier package drew them the other way). Read off the maps
+///   as fractions of the door's height below the belt (a Choice within
+///   about ±2 cm): front, hinge end 0.37 and lock end 0.74, just under the
+///   mid rail at the hinge end (they share its bracket); rear, 0.63 and 0.81.
+///   On sedan1's doors (belt 0.93, bottom 0.47) that is y 0.72 → 0.55 and
+///   0.64 → 0.56. Before, the front beam ran 0.42 → 0.62, so FMVSS 214's ram
+///   (from 127 mm above the door's lowest point) met only its lock end.
+/// - **Section.** A 2.0 mm tube (both maps' red), Ø 31.8 mm and 1,200 MPa
+///   as before (Choices: the report gives neither).
+/// - The lock faces start at the beams' lock ends, as before; the hinge
+///   faces keep their full height (the lower hinge stays where it was).
+fn accord_doors(d: &mut VehicleDef, stampings: bool) {
+    let pr = d.profile.clone();
+    let tube = Section {
+        depth: 0.0318,
+        width: 0.0318,
+        t: 0.0020,
+        sigma_y: TUBE1200,
+        round: true,
+    };
+    let at = |p: (f32, f32, f32)| restyle_point([p.0, p.1, p.2], &pr);
+    for m in d.members.iter_mut() {
+        let path: Option<Vec<[f32; 3]>> = match m.name.as_str() {
+            "door_beam_f" => Some(vec![at((0.83, 0.72, 3.18)), at((0.83, 0.55, 2.40))]),
+            "door_beam_r" => Some(vec![at((0.83, 0.64, 2.10)), at((0.83, 0.56, 1.52))]),
+            "door_face_lf" => Some(vec![
+                at((0.83, 0.55, 2.40)),
+                at((0.83, 0.75, 2.36)),
+                at((0.83, 0.93, 2.36)),
+            ]),
+            "door_face_lr" => Some(vec![
+                at((0.83, 0.56, 1.52)),
+                at((0.83, 0.75, 1.50)),
+                at((0.83, 0.93, 1.48)),
+            ]),
+            _ => None,
+        };
+        if let Some(p) = path {
+            m.path = p;
+        }
+    }
+    let list = [
+        ("door_beam_f", tube, 0.14, 1.0),
+        ("door_beam_r", tube, 0.14, 1.0),
+    ];
+    sectioned_by(&mut d.members, &Grades::default(), &list);
+    for m in d
+        .members
+        .iter_mut()
+        .filter(|m| m.name == "door_beam_f" || m.name == "door_beam_r")
+    {
+        m.kg_per_m = section_kg_per_m(&tube);
+    }
+    // The belt and mid rails as the maps' stampings (with `stampings`;
+    // otherwise the two-tier boron × 5 stays). A door's rail is a
+    // ladder across the door's depth: its outer chord the outer panel's
+    // reinforcement, its inner chord the inner panel's, so its bending is
+    // the two strips' axial yields over the depth. Each chord yields at
+    // σ_y·t·b of the weaker strip (a ladder's chords share one yield):
+    // - belt: the outer and inner belt reinforcements, 0.6 mm each (both
+    //   maps; the rear's outer 0.8 mm);
+    // - mid rail: the outer panel's mid reinforcement, 0.5 mm (both maps),
+    //   against the inner panel's 0.8 mm strip at its height.
+    // The strips' developed width b is 60 mm (a Choice: the maps give the
+    // gauge, not the section) and their grade BH210 (the report: "cold
+    // rolled sheet steel of various bake hardenable grades").
+    if stampings {
+        let b = 0.06;
+        let strip = |t: f32| BH210 * t * b;
+        for (name, t_weak, t_out, t_in) in [
+            ("door_belt_f", 0.0006, 0.0006, 0.0006),
+            ("door_belt_r", 0.0006, 0.0008, 0.0006),
+            ("door_mid_f", 0.0005, 0.0005, 0.0008),
+            ("door_mid_r", 0.0005, 0.0005, 0.0008),
+        ] {
+            for m in d.members.iter_mut().filter(|m| m.name == name) {
+                let s = strip(t_weak) / Grades::default().get(&m.grade).unwrap().deform;
+                m.scale = [s, s];
+                m.knee = None;
+                m.kg_per_m = (t_out + t_in) * b * super::members::STEEL_DENSITY;
+            }
+        }
+        // The inner panel's end faces (the laser-welded blank's gauges):
+        // front hinge face 1.5 mm, lock face 0.8 mm with its 0.9 mm lock
+        // reinforcement; rear hinge face 1.3 mm, lock face 0.8 mm. Each of
+        // the face's two chords carries half its 150 mm depth in tension,
+        // BH210 as the rest of the door.
+        for (name, t) in [
+            ("door_face_hf", 0.0015),
+            ("door_face_lf", 0.0017),
+            ("door_face_hr", 0.0013),
+            ("door_face_lr", 0.0008),
+        ] {
+            for m in d.members.iter_mut().filter(|m| m.name == name) {
+                let f = 0.5 * BH210 * t * 0.15;
+                let s = f / Grades::default().get(&m.grade).unwrap().deform;
+                m.scale = [s, s];
+            }
+        }
+    }
 }
 
 /// The deck opening's cross sections' (`deck_x`, `rear_panel`) station
