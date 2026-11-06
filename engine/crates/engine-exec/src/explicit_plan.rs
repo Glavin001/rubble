@@ -514,6 +514,10 @@ pub struct ExplicitLayout {
     pub key_base: u32,
     /// Per vehicle its first wing and count.
     pub wing_spans: Vec<(u32, u32)>,
+    /// gStatic record of the parking brakes (2 records each) and per vehicle
+    /// its first brake and count (spec §25.1).
+    pub brake_base: u32,
+    pub brake_spans: Vec<(u32, u32)>,
     /// Nodes, beams, triangles, candidates, group slots over the fleet.
     pub total: [u32; 5],
     /// gMisc record of the rigid coupling's header.
@@ -969,7 +973,14 @@ impl ExplicitUpload {
                 || !v.triggers.is_empty()
                 || !v.commands.is_empty()
                 || !v.slides.is_empty()
+                || !v.brakes.is_empty()
         });
+        // Parking brakes (jbeam-semantics-spec.md §25.1): per brake 2 records,
+        // (node1, node2, arm, first hub node) global, (hub nodes, torque bits,
+        // input bits, 0); per vehicle its (first brake, count) in the third aero
+        // record's .z, .w.
+        let mut brake_recs: Vec<[u32; 4]> = Vec::new();
+        let mut brake_spans: Vec<(u32, u32)> = Vec::with_capacity(nv);
         // Command records: with triggers every command line (keyed), else the
         // self-centering ones.
         let cmd_count = |v: &ExplicitBeams| {
@@ -1029,7 +1040,19 @@ impl ExplicitUpload {
             ]);
             let slide_off = (slide_recs.len() / 2) as u32;
             let seg_off = seg_recs.len() as u32;
-            aero_recs.push([slide_off, v.slides.len() as u32, 0, 0]);
+            let brake_off = (brake_recs.len() / 2) as u32;
+            aero_recs.push([slide_off, v.slides.len() as u32, brake_off, v.brakes.len() as u32]);
+            brake_spans.push((brake_off, v.brakes.len() as u32));
+            let u = v.parking_brake.min(1.0);
+            for b in &v.brakes {
+                brake_recs.push([
+                    node_off + b.axle[0],
+                    node_off + b.axle[1],
+                    node_off + b.arm,
+                    node_off + b.first,
+                ]);
+                brake_recs.push([b.count, b.torque.to_bits(), u.to_bits(), 0]);
+            }
             spans[vi].slide_off = slide_off;
             spans[vi].seg_off = seg_off;
             let seg_global = |s: Option<u32>| s.map_or(NONE, |s| seg_off + s);
@@ -1576,6 +1599,8 @@ impl ExplicitUpload {
         let seg_base = statics.len() as u32;
         let seg_total = seg_recs.len() as u32;
         statics.extend(seg_recs);
+        let brake_base = statics.len() as u32;
+        statics.extend(brake_recs);
         let vv_static_base = statics.len() as u32;
         statics.extend(vv_static);
         // Per vehicle its slide slots, then per slot its list (the kernel's
@@ -1718,6 +1743,7 @@ impl ExplicitUpload {
             surf_seg,
             surf_mark,
             centred_dv,
+            brake_base,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -1748,6 +1774,8 @@ impl ExplicitUpload {
             slide_state: slide_state_base,
             key_base,
             wing_spans,
+            brake_base,
+            brake_spans,
             total,
             couple_rec: couple_rec as u32,
             coupling,

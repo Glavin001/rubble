@@ -253,6 +253,7 @@ struct Params
     uint surfSeg; // gStatic: per vehicle (segment start in gLists, segments); gLists the global beam indices
     uint surfMark; // gAcc: the find's slot masks: per triangle (global), then segments, nodes (their records' .z, .w)
     uint centredDv; // gBeams: per node its step-start velocity, then its node phase's Δv (centred damping, §39; 0: no vehicle)
+    uint brakeBase; // gStatic: per parking brake 2 records (EB_AERO modules; see brakeApply)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -3397,6 +3398,77 @@ void wingCheck(uint gw, float3 origin)
     if (sdot(cl, cl) > sref || sdot(cr, cr) > sref) gBeams[ws] = float4(1.0, 0.0, 0.0, 0.0);
 }
 
+// --- Parking brakes (jbeam-semantics-spec.md §25.1; CPU reference
+// engine_softbody::explicit_beams::brake_apply) ---
+//   gStatic at brakeBase per brake: (node1, node2, arm, first hub node) global,
+//   (hub nodes, torque bits, input bits, 0); a vehicle's (first brake, count) is
+//   its third aero record's .z, .w.
+// One lane runs a vehicle's brakes in file order, as the CPU, after the node
+// phase and the grab (before the wings' gather: a node both braked and winged
+// would sum its two forces in the other order).
+float3 brakePerp(float3 p, float3 c, float3 a)
+{
+    float3 r = ssub3(p, c);
+    return ssub3(r, sscale(a, sdot(a, r)));
+}
+
+void brakeOne(uint gb)
+{
+    uint4 A = gStatic[gP.brakeBase + gb * 2u];
+    uint4 B = gStatic[gP.brakeBase + gb * 2u + 1u];
+    float tmax = smul(asfloat(B.y), asfloat(B.z));
+    if (!(tmax > 0.0)) return;
+    float3 p1 = gNodes[A.x * 3u].xyz;
+    float3 p2 = gNodes[A.y * 3u].xyz;
+    float3 v1 = gNodes[A.x * 3u + 1u].xyz;
+    float3 v2 = gNodes[A.y * 3u + 1u].xyz;
+    float3 span = ssub3(p2, p1);
+    float ls = sdot(span, span);
+    if (!(ls > 1e-12)) return;
+    float3 a = sscale(span, sdiv(1.0, ssqrt(ls)));
+    float3 c = sscale(sadd3(p1, p2), 0.5);
+    float3 vc = sscale(sadd3(v1, v2), 0.5);
+    float l = 0.0;
+    float iw = 0.0;
+    for (uint k = 0u, kStop = EB_END(k, B.x, 1u); k < kStop; k++)
+    {
+        uint i = A.w + k;
+        float4 P = gNodes[i * 3u];
+        float3 r = brakePerp(P.xyz, c, a);
+        l = nf(l + smul(P.w, sdot(a, scross(r, ssub3(gNodes[i * 3u + 1u].xyz, vc)))));
+        iw = nf(iw + smul(P.w, sdot(r, r)));
+    }
+    float4 PA = gNodes[A.z * 3u];
+    float3 ra = brakePerp(PA.xyz, c, a);
+    float da = sdot(ra, ra);
+    if (!(iw > 0.0) || !(da > 1e-8)) return;
+    float ia = smul(PA.w, da);
+    float wr = nf(sdiv(l, iw) - sdiv(sdot(a, scross(ra, ssub3(gNodes[A.z * 3u + 1u].xyz, vc))), da));
+    float ieff = sdiv(smul(iw, ia), nf(iw + ia));
+    float mag = min(sdiv(smul(abs(wr), ieff), STEP), tmax);
+    float tau = wr > 0.0 ? -mag : mag;
+    float g = sdiv(tau, iw);
+    float3 s = float3(0.0, 0.0, 0.0);
+    for (uint k = 0u, kStop = EB_END(k, B.x, 1u); k < kStop; k++)
+    {
+        uint i = A.w + k;
+        float4 P = gNodes[i * 3u];
+        float3 f = sscale(scross(a, brakePerp(P.xyz, c, a)), smul(g, P.w));
+        addForce(i, f);
+        s = sadd3(s, f);
+    }
+    float3 fa = sscale(scross(a, ra), sdiv(-tau, da));
+    addForce(A.z, fa);
+    float3 half = sscale(sadd3(s, fa), -0.5);
+    addForce(A.x, half);
+    addForce(A.y, half);
+}
+
+void brakeApply(uint off, uint count)
+{
+    for (uint k = 0u, kStop = EB_END(k, count, 1u); k < kStop; k++) brakeOne(off + k);
+}
+
 // The fuselage drag D from the front node's velocity and height, for the next step.
 void fuseDrag(uint4 rec, float3 origin, uint vehicle)
 {
@@ -4861,6 +4933,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
         sync();
         if (lane == 0u) grabApply(nodeOff, nodeCount, origin);
+#ifdef EB_AERO
+        if (lane == 0u) brakeApply(aero2.z, aero2.w);
+#endif
         if (lane == 0u)
         {
             gsHit = 0u;
@@ -6025,6 +6100,9 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     }
     sync();
     if (lane == 0u) grabApply(nodeOff, nodeCount, origin);
+#ifdef EB_AERO
+    if (lane == 0u) brakeApply(aero2.z, aero2.w);
+#endif
     if (lane == 0u && s > 0u) gMisc[vvRec(v, VV_FLAGS)].w = 0u;
     if (lane == 0u)
     {
@@ -6395,6 +6473,9 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
     }
     sync();
     if (on && pl == 0u) grabApply(nodeOff, nodeCount, origin);
+#ifdef EB_AERO
+    if (on && pl == 0u) brakeApply(aero2.z, aero2.w);
+#endif
     if (on && pl == 0u && s > 0u) gMisc[vvRec(v, VV_FLAGS)].w = 0u;
     // This step's self-collision per member: the grid or (few pairs) the early list.
     uint listed = on ? gsTestedM[2u * m + parity].load() : 0u;

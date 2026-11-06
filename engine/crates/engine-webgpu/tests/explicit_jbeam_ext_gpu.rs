@@ -115,6 +115,54 @@ fn pressure_wheel_car_matches_at_rest_and_into_a_wall() {
     eprintln!("wall run: max difference {worst} m (a crash is chaotic: reported, not judged)");
 }
 
+/// The parking brake (spec §25.1) on the GPU against the CPU: the Part II car
+/// rolling at 1 m/s with its rear brakes applied; then a car spawned applied and
+/// released on both.
+#[test]
+fn parking_brake_matches_cpu() {
+    let text = PART2_CAR.replace(
+        r#"["RL", "wheel_RL""#,
+        r#"{"parkingTorque": 800}, ["RL", "wheel_RL""#,
+    );
+    let v = Vec3::new(0.0, 0.0, 1.0);
+    let mut s = spawn(&text, Some(JbeamWheels::Pressure), v);
+    assert_eq!(s.brakes.len(), 2);
+    s.parking_brake = 1.0;
+    let Some((worst, cb, gb, ..)) = compare("parking brake applied", &mut s, 120) else {
+        return;
+    };
+    assert_eq!((cb, gb), (0, 0));
+    assert!(worst < 5e-3, "applied: {worst}");
+    let Ok((_, device, queue)) = default_device() else {
+        return;
+    };
+    let mut cpu = spawn(&text, Some(JbeamWheels::Pressure), v);
+    cpu.parking_brake = 1.0;
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    cpu.parking_brake = 0.0;
+    gpu.set_parking_brake(0, 0.0);
+    let mut clock = FrameClock::default();
+    let mut worst = 0.0f32;
+    for _ in 0..60 {
+        cpu.frame();
+        gpu.frame(clock.next());
+        let g = &gpu.positions()[0];
+        let d = cpu
+            .positions()
+            .iter()
+            .zip(g)
+            .map(|(a, b)| a.distance(*b))
+            .fold(0.0, f32::max);
+        worst = worst.max(d);
+    }
+    gpu.wait();
+    eprintln!(
+        "parking brake released on the GPU: max position difference {:.4} mm",
+        worst * 1e3
+    );
+    assert!(worst < 5e-3, "released: {worst}");
+}
+
 /// The solver on a device with WebGPU's 64 KiB uniform binding limit (Chrome's):
 /// the parameter buffer holds 129 copies of 512 bytes (66 KiB), so every pass binds
 /// one copy, never the whole buffer. Its frames match the full-limit device's.

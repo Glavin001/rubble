@@ -551,7 +551,12 @@ impl ExplicitBeamsGpu {
             mapped_at_creation: false,
         });
         queue.write_buffer(&params, 0, bytemuck::cast_slice(&layout.words));
-        let statics = init("explicit-beams-static", plan::BIND_STATIC, storage);
+        // (COPY_DST: the parking brake input lives in its records.)
+        let statics = init(
+            "explicit-beams-static",
+            plan::BIND_STATIC,
+            storage | wgpu::BufferUsages::COPY_DST,
+        );
         let lists = init("explicit-beams-lists", plan::BIND_LISTS, storage);
         let nodes = init("explicit-beams-nodes", plan::BIND_NODES, state);
         let beams = init("explicit-beams-beams", plan::BIND_BEAMS, state);
@@ -1718,6 +1723,20 @@ impl ExplicitBeamsGpu {
     /// World's rigid coupling, change the speeds the plan's frame bounds assumed).
     pub fn request_contact_replan(&self) {
         self.planner.request_replan();
+    }
+
+    /// Set a vehicle's parking brake input (0 released to 1 applied, as
+    /// `ExplicitBeams::parking_brake`; jbeam-semantics-spec.md §25.1).
+    pub fn set_parking_brake(&self, vehicle: usize, input: f32) {
+        let Some(&(off, count)) = self.layout.brake_spans.get(vehicle) else {
+            return;
+        };
+        let u = input.min(1.0);
+        for k in 0..count {
+            let rec = u64::from(self.layout.brake_base + 2 * (off + k) + 1);
+            self.queue
+                .write_buffer(&self.bufs[1], rec * 16 + 8, bytemuck::bytes_of(&u.to_bits()));
+        }
     }
 
     /// Set one node's velocity (vehicle index, node index within it).
