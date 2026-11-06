@@ -94,6 +94,9 @@ static const uint TRI_EXCL_CAP = 16u; // explicit_jbeam_ext.rs TRI_EXCL_CAP
 static const uint KIND_JATRI = 18u; // a triangle's aerodynamics (spec §31), nodes x0-x1
 static const uint KIND_JATRI2 = 19u; // its x2-x2 record
 static const uint KIND_JLBEAM2 = 20u; // an LBEAM's x3-x3 record (the vertex's force)
+// A rope by JBeam's NORMAL rule (the BeamNG profile's .truck ropes, §36): in
+// compression no spring and a tenth of its damping, in tension a KIND_JPLAIN beam.
+static const uint KIND_JROPE = 21u;
 static const uint TYPE_EXT = 4u;
 static const uint EXT_GROUPS = 1u;
 static const uint EXT_DEFORM = 2u;
@@ -1604,6 +1607,12 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         k = 0.0;
         damp = 0.0;
     }
+    else if (kind == KIND_JROPE && e < 0.0)
+    {
+        k = 0.0;
+        damp = smul(smul(c, 0.1), u);
+    }
+    bool tear = false;
     if (lengthBreak)
     {
         broken = true;
@@ -1648,10 +1657,13 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
                 float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
                 float old = rest;
                 float free = nf(rest + delta);
-                if (free > c2.y)
+                // A negative bound tears there (breakAtExpansion, §36).
+                float ceilLen = abs(c2.y);
+                if (free > ceilLen)
                 {
-                    rest = max(c2.y, old);
+                    rest = max(ceilLen, old);
                     f = nf(smul(-k, nf(len - rest)) - damp);
+                    tear = c2.y < 0.0;
                 }
                 else
                 {
@@ -1667,7 +1679,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
                 }
             }
         }
-        if (tau > strength)
+        if (tau > strength || tear)
         {
             broken = true;
             f = 0.0;
@@ -1860,6 +1872,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     float f = 0.0;
     float last = 0.0;
     bool broken = false;
+    bool tear = false;
     bool lengthBreak = false;
     bool done = false;
     float3 armA = float3(0.0, 0.0, 0.0);
@@ -1954,6 +1967,11 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         k = 0.0;
         damp = 0.0;
     }
+    else if (!done && kind == KIND_JROPE && e < 0.0)
+    {
+        k = 0.0;
+        damp = smul(smul(c, 0.1), u);
+    }
     else if (!done && kind == KIND_JANISO)
     {
         if (len > e1.w) lengthBreak = true;
@@ -2009,10 +2027,13 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
                 float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
                 float old = rest;
                 float free = nf(rest + delta);
-                if (free > c2.y)
+                // A negative bound tears there (breakAtExpansion, §36).
+                float ceilLen = abs(c2.y);
+                if (free > ceilLen)
                 {
-                    rest = max(c2.y, old);
+                    rest = max(ceilLen, old);
                     f = nf(smul(-k, nf(len - rest)) - damp);
+                    tear = c2.y < 0.0;
                 }
                 else
                 {
@@ -2028,7 +2049,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
                 }
             }
         }
-        if (tau > strength) broken = true;
+        if (tau > strength || tear) broken = true;
     }
     if (broken)
     {
@@ -2037,7 +2058,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     }
     if ((e0.x & EXT_DEFORM) != 0u)
     {
-        bool yields = kind == KIND_JPLAIN || kind == KIND_JSUPPORT || kind == KIND_JANISO;
+        bool yields = kind == KIND_JPLAIN || kind == KIND_JROPE || kind == KIND_JSUPPORT || kind == KIND_JANISO;
         if (broken || (yields && !(st.x > 0.0) && abs(nf(rest - e2.x)) > smul(asfloat(e0.w), e2.x))) extDeform(x, 0u);
     }
     float4 n0 = float4(rest, tc, tt, gate);

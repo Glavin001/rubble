@@ -249,6 +249,10 @@ pub enum ExplicitKind {
     /// carries the vertex's force (the arm terms, spec §24) on the GPU; no force
     /// of its own.
     JbeamLbeam2,
+    /// A rope by JBeam's NORMAL rule (the BeamNG profile's `.truck` ropes, spec
+    /// §36): in compression no spring and a tenth of its damping (RoR's rope), in
+    /// tension a [`ExplicitKind::JbeamPlain`] beam (yield, limits, tear).
+    JbeamRope,
 }
 
 impl ExplicitKind {
@@ -275,6 +279,7 @@ impl ExplicitKind {
             ExplicitKind::JbeamAeroTri => 18,
             ExplicitKind::JbeamAeroTri2 => 19,
             ExplicitKind::JbeamLbeam2 => 20,
+            ExplicitKind::JbeamRope => 21,
         }
     }
 
@@ -283,6 +288,7 @@ impl ExplicitKind {
         matches!(
             self,
             ExplicitKind::JbeamPlain
+                | ExplicitKind::JbeamRope
                 | ExplicitKind::JbeamSupport
                 | ExplicitKind::JbeamBounded
                 | ExplicitKind::JbeamCoupler
@@ -1878,7 +1884,7 @@ impl ExplicitBeams {
     pub fn set_damp_cutoff(&mut self, lines: &[(u32, u32, f32)]) -> Result<(), String> {
         let mut at: HashMap<(u32, u32), usize> = HashMap::new();
         for (j, b) in self.beams.iter().enumerate() {
-            if b.kind == ExplicitKind::JbeamPlain {
+            if matches!(b.kind, ExplicitKind::JbeamPlain | ExplicitKind::JbeamRope) {
                 at.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(j);
             }
         }
@@ -1904,12 +1910,18 @@ impl ExplicitBeams {
     /// strength falls with its plastic stretch (`plastic_strength_drop` off).
     pub fn use_jbeam_plasticity(&mut self) {
         for b in &mut self.beams {
-            if b.kind == ExplicitKind::Plain && b.ty == ExplicitType::Deformable {
-                b.kind = ExplicitKind::JbeamPlain;
-                b.limit_k = f32::INFINITY;
-                b.short_bound = 0.0;
-                b.long_bound = f32::INFINITY;
+            if b.ty != ExplicitType::Deformable {
+                continue;
             }
+            let kind = match b.kind {
+                ExplicitKind::Plain => ExplicitKind::JbeamPlain,
+                ExplicitKind::Rope => ExplicitKind::JbeamRope,
+                _ => continue,
+            };
+            b.kind = kind;
+            b.limit_k = f32::INFINITY;
+            b.short_bound = 0.0;
+            b.long_bound = f32::INFINITY;
         }
         self.plastic_strength_drop = false;
     }
@@ -2757,23 +2769,37 @@ impl ExplicitBeams {
     /// and its rest length held within (1 − d)·L and (1 + dₑ)·L of its rest
     /// length L now (a negative limit: none), exactly as JBeam mode loads
     /// them. Errors name a pair with no plain beam.
-    pub fn set_jbeam_plastic(&mut self, lines: &[(u32, u32, f32, f32, f32)]) -> Result<(), String> {
+    pub fn set_jbeam_plastic(&mut self, lines: &[(u32, u32, f32, f32, f32, bool)]) -> Result<(), String> {
         let mut at: HashMap<(u32, u32), usize> = HashMap::new();
         for (j, b) in self.beams.iter().enumerate() {
-            if b.kind == ExplicitKind::Plain && b.ty == ExplicitType::Deformable {
+            if matches!(b.kind, ExplicitKind::Plain | ExplicitKind::Rope) && b.ty == ExplicitType::Deformable {
                 at.entry((b.a.min(b.b), b.a.max(b.b))).or_insert(j);
             }
         }
-        for &(a, b, stress, d, de) in lines {
+        for &(a, b, stress, d, de, tear) in lines {
             let Some(&j) = at.get(&(a.min(b), a.max(b))) else {
-                return Err(format!("rubble_jbeam_plastic: no plain beam {a}–{b}"));
+                return Err(format!("rubble_jbeam_plastic: no plain beam or rope {a}–{b}"));
             };
+            if tear && !(de >= 0.0) {
+                return Err(format!(
+                    "rubble_jbeam_plastic: {a}–{b} tears at its expansion limit but has none ({de})"
+                ));
+            }
             let beam = &mut self.beams[j];
-            beam.kind = ExplicitKind::JbeamPlain;
+            beam.kind = if beam.kind == ExplicitKind::Rope {
+                ExplicitKind::JbeamRope
+            } else {
+                ExplicitKind::JbeamPlain
+            };
             beam.limit_k = if stress >= 0.0 { stress } else { f32::INFINITY };
             beam.short_bound = if d >= 0.0 { (1.0 - d) * beam.rest } else { 0.0 };
             beam.long_bound = if de >= 0.0 {
-                (1.0 + de) * beam.rest
+                let l = (1.0 + de) * beam.rest;
+                if tear {
+                    -l
+                } else {
+                    l
+                }
             } else {
                 f32::INFINITY
             };
@@ -4209,6 +4235,7 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         | ExplicitKind::Shock2
         | ExplicitKind::Trigger
         | ExplicitKind::JbeamPlain
+        | ExplicitKind::JbeamRope
         | ExplicitKind::JbeamSupport
         | ExplicitKind::JbeamBounded
         | ExplicitKind::JbeamCoupler
@@ -4330,6 +4357,10 @@ pub fn jbeam_force_filtered(
                 damp += (beam.limit_c * u - damp) * s;
             }
         }
+        ExplicitKind::JbeamRope if e < 0.0 => {
+            k = 0.0;
+            damp = (c * 0.1) * u;
+        }
         ExplicitKind::JbeamSupport => {
             if e > 0.0 {
                 if len > beam.long_bound {
@@ -4352,6 +4383,7 @@ pub fn jbeam_force_filtered(
     let mut f = -k * e - damp;
     beam.force = f;
     let mut tau = f.abs();
+    let mut tear = false;
     if tau > beam.gate && beam.ty == ExplicitType::Deformable && k != 0.0 {
         if f > beam.tc && e < 0.0 {
             let delta = e + (beam.tc / k) * (1.0 - beam.plastic);
@@ -4374,12 +4406,15 @@ pub fn jbeam_force_filtered(
         } else if f < -beam.tt && e > 0.0 {
             let delta = e - (beam.tt / k) * (1.0 - beam.plastic);
             let old = beam.rest;
-            let ceiling = beam.long_bound;
+            // A negative bound tears there (`rubble_jbeam_plastic`'s
+            // breakAtExpansion, §36).
+            let ceiling = beam.long_bound.abs();
             let free = beam.rest + delta;
             if free > ceiling {
                 // At the expansion limit: elastic about the limit length.
                 beam.rest = ceiling.max(old);
                 f = -k * (len - beam.rest) - damp;
+                tear = beam.long_bound < 0.0;
             } else {
                 beam.rest = free;
                 f -= (f + beam.tt) / 2.0;
@@ -4399,7 +4434,7 @@ pub fn jbeam_force_filtered(
         inv,
         e,
         force: f,
-        check_break: tau > beam.strength,
+        check_break: tau > beam.strength || tear,
     }
 }
 

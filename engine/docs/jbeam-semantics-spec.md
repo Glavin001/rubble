@@ -837,6 +837,12 @@ per beam on the CPU and the GPU, so such a beam in a `.truck` vehicle runs §3's
 rule in both (`showcase_car_gpu` wall and side-pole counts match). Files without
 the section load as before, bit for bit.
 
+**Since §36:** a line may name a rope (`r`) beam, which becomes a tension-only JBeam
+beam (`JbeamRope`), and may take a sixth field, `breakAtExpansion` (nonzero): the
+beam tears the step its rest length would pass (1 + deformLimitExpansion)·L (stored
+as a negative expansion bound), in tension only; a compressed beam is untouched.
+Without the field the beam holds at the limit, elastic about it (as before).
+
 ### 18.4 Rubble's `.truck` extension: a tension-side yield force (2026-11-05)
 
 **Rubble extension, not RoR or JBeam** (`truck.rs`, `ExplicitBeams::set_tension_yield`).
@@ -1630,6 +1636,7 @@ The research behind the list is `ror-vs-beamng-research.md` §5.
 | `NONCOLLIDABLE` triangles (JBeam) | not collision triangles | anti-clip only | `anti_only_tris` |
 | Contact force sums (CPU) | floats into the node's force | the GPU's fixed point (1/32 N, ties to even) | `fixed_contact` |
 | `.truck` deformable plain beams | RoR's rule (`Plain`) | JBeam's NORMAL rule (§3, `JbeamPlain`) | `use_jbeam_plasticity` |
+| `.truck` ropes | RoR's rope | JBeam's NORMAL rule in tension, none in compression (`JbeamRope`) | `use_jbeam_plasticity` |
 | Strength falls with plastic stretch | yes (k × the stretch) | no | `plastic_strength_drop` |
 | Friction law's exp and pow | bit tricks (Schraudolph) | `exact_exp` / `exact_pow` | `exact_friction` |
 | Air drag (`.truck`) | per node, DRAG·|v|·v (mass-independent), turbulence | the triangles' (§31), dragCoef 100 or `rubble_drag_coef` | `settings.drag` → aero triangles |
@@ -1759,7 +1766,20 @@ JBeam) loses strength with stretch. GPU: vehicle flag 8192 (`FLAG_KEEP_STRENGTH`
   steel); that is content (`vehicle-authoring.md`, springback), not this rule.
 * **Rupture.** Without the strength drop, a beam's only failures are its strength and
   its deform limits, as in BeamNG. A `.truck` file that wants steel to tear at its
-  elongation at break sets `deformLimitExpansion` (`rubble_jbeam_plastic`).
+  elongation at break sets `deformLimitExpansion` with `breakAtExpansion`
+  (`rubble_jbeam_plastic`'s sixth field, §18.3): it tears at that stretch in tension,
+  never in compression. (A strength set at a hardening cap, the alternative, tears
+  crushed beams: compression hardens Tc toward the cap and the halfway rule's
+  overshoot passes S; the showcase car measured 136 / 86 / 19 broken at margins 1.05
+  / 1.5 / 3 in its 56 km/h wall, against 4 without.)
+* **Ropes.** A profile rope (`r`) is `JbeamRope` (kind 21): in compression no spring
+  and a tenth of its damping (RoR's rope), in tension JBeam's NORMAL rule, its
+  strength kept as it yields. RoR's rope lowered its strength by k·δ each step, which
+  at a slow pull (δ ≈ 0.1 mm a step) is below half an ulp of a 110 kN strength and
+  never accumulated (the showcase car's door ropes held at 80–114 kN). Profile
+  hardware ropes tear by `breakAtExpansion`. `tension_yield_gpu.rs`
+  `ropes_and_tearing_step_like_the_cpu`: ropes and plain beams, torn and held, bit for
+  bit on the GPU; `explicit_beams.rs` `profile_truck_ropes_and_break_at_expansion`.
 * **Measured** (`crash_invariants.rs`, sedan1's 56 km/h wall, CPU; `CI_DROP=1` puts
   the drop back, `CI_PSET=1` sets coefficient 1, measurement only), lid vs rear body
   peak/end; rear body RMS; rear third plastic/broken; ripple body/bootlid/bonnet/door;

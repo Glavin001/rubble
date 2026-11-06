@@ -999,3 +999,54 @@ fn profile_truck_aero_triangles() {
     assert!(profile_truck("rubble_aero_tri\n0, 2, 3, 10, 10\n").is_err());
 }
 
+
+/// BeamNG-profile ropes and tearing (jbeam-semantics-spec.md §36): a `.truck` rope
+/// is a tension-only JBeam beam (no spring in compression) that keeps its strength
+/// as it yields; `rubble_jbeam_plastic`'s sixth field tears a beam (rope or plain)
+/// the step its rest length reaches (1 + deformLimitExpansion)·L, in tension only.
+#[test]
+fn profile_truck_ropes_and_break_at_expansion() {
+    let rope = PROFILE_TRUCK
+        .replace("3, 0, 1.5, 0\n", "3, 0, 1.5, 0\n4, 0, 2.5, 0\n")
+        .replace(
+            "0, 3\nsubmesh",
+            "0, 3\nset_beam_defaults 1000000, 500, 50000, 1000000\nbeams\n3, 4, r\nsubmesh",
+        );
+    let load = |extra: &str| {
+        let text = rope.replace("end\n", &format!("{extra}end\n"));
+        ExplicitBeams::from_truck(&text, Vec3::new(0.0, 10.0, 0.0), Vec3::ZERO, ExplicitBeamsSettings::default())
+            .unwrap()
+    };
+    let mut s = load("");
+    let j = s.beams.iter().position(|b| (b.a, b.b) == (3, 4)).unwrap();
+    assert_eq!(s.beams[j].kind, ExplicitKind::JbeamRope);
+    let pull = |s: &mut ExplicitBeams, dy: f32| {
+        let (na, mut nb) = (s.nodes[3], s.nodes[4]);
+        nb.pos.y += dy;
+        let keep = !s.plastic_strength_drop;
+        jbeam_force_filtered(&mut s.beams[j], &na, &nb, false, None, keep)
+    };
+    // Compressed: no force (at rest, no damping).
+    let mut c = s.clone();
+    let (na, mut nb) = (c.nodes[3], c.nodes[4]);
+    nb.pos = na.pos + (nb.pos - na.pos) * 0.5;
+    assert_eq!(jbeam_force(&mut c.beams[j], &na, &nb, false).force, 0.0);
+    // Stretched past its threshold: it yields, keeps its strength (the profile).
+    let strength = s.beams[j].strength;
+    let rest = s.beams[j].rest;
+    let o = pull(&mut s, 0.5);
+    assert!(!o.check_break && s.beams[j].rest > rest, "yields");
+    assert_eq!(s.beams[j].strength, strength);
+    // With breakAtExpansion (dₑ 0.5): pulled to 2·L it tears (its threshold 400 kN: RoR's minimum deform).
+    let mut s = load("rubble_jbeam_plastic\n3, 4, -1, -1, 0.5, 1\n");
+    assert_eq!(s.beams[j].kind, ExplicitKind::JbeamRope);
+    let o = pull(&mut s, 0.2);
+    assert!(!o.check_break, "below the limit");
+    let o = pull(&mut s, 1.0);
+    assert!(o.check_break, "past the limit: tears");
+    // Without the flag the same pull holds at the limit.
+    let mut s = load("rubble_jbeam_plastic\n3, 4, -1, -1, 0.5\n");
+    let o = pull(&mut s, 1.0);
+    assert!(!o.check_break);
+    assert!((s.beams[j].rest - 1.5 * rest).abs() < 1e-5);
+}
