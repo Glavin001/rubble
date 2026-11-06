@@ -7419,11 +7419,6 @@ uint vvLevel(uint a, uint k, uint points)
 void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 {
     uint parity = step & 1u;
-    if (gP.vvSplit != 0u)
-    {
-        vvSnapshot(off, k, parity, lane);
-        sync();
-    }
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     // (S) the partner scans: lane per ordered pair (a, b).
     for (uint p = lane, pStop = EB_END(p, k * k, LANES); p < pStop; p += LANES)
@@ -7454,6 +7449,28 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
         gsVvPair[a * VV_PART + b] = bits;
     }
     sync();
+    // No owner offered a partner this step and none resets (no frame boxes
+    // overlap: a group whose members have not met yet): the phases below would list
+    // nothing, test nothing and hit nothing (every throttle and count untouched), so
+    // they are skipped with their barriers. Lane 0 decides after the scans' barrier
+    // (gsUniformOpen is free between the member step and the next one).
+    if (lane == 0u)
+    {
+        uint offered = 0u;
+        // (An owner's reset or fix still clears its throttles below, offered or not.)
+        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+            offered += gsVvOff4[a].load() + gsVvReset4[a] + gsVvFix[a];
+        gsUniformOpen = offered;
+    }
+    sync();
+    if (gsUniformOpen == 0u) return;
+    // The two-body pass reads every member's node force at its start (nothing the
+    // scans wrote).
+    if (gP.vvSplit != 0u)
+    {
+        vvSnapshot(off, k, parity, lane);
+        sync();
+    }
     // (P) every owner's throttle step and candidates.
     {
         uint triTotal = 0u;
