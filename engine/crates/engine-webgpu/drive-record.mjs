@@ -96,8 +96,10 @@ const grab = async () => {
   const s = await send('Page.captureScreenshot', { format: 'jpeg', quality: 92 });
   writeFileSync(join(frameDir, `f${String(frameNo++).padStart(6, '0')}.jpg`), Buffer.from(s.result.data, 'base64'));
 };
+// Up to 5 min: the first load compiles the solver's kernels (explicitSimAsync),
+// past a minute on a loaded machine.
 const ready = async () => {
-  for (let i = 0; i < 300; i++) {
+  for (let i = 0; i < 1500; i++) {
     await new Promise((r) => setTimeout(r, 200));
     const err = await evaluate('document.getElementById("err")?.textContent || ""').catch(() => '');
     if (err) throw new Error(`page error: ${err}`);
