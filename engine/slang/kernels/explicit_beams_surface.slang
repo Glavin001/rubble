@@ -387,6 +387,11 @@ void surfTriangle(uint v, uint gt, float3 origin, float r, uint boxOff, uint box
     }
     if (proxies != 0u)
     {
+        // Proxy records are vehicle-local (relative to the origin): so are the positions
+        // tested against them.
+        x0 = nf3(gNodes[tn.x * 3u].xyz);
+        x1 = nf3(gNodes[tn.y * 3u].xyz);
+        x2 = nf3(gNodes[tn.z * 3u].xyz);
         float3 tlo = ssub3(min(min(x0, x1), x2), float3(r, r, r));
         float3 thi = sadd3(max(max(x0, x1), x2), float3(r, r, r));
         for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
@@ -451,14 +456,19 @@ void surfSegment(uint v, uint gj, uint mk, float3 origin, float r, uint boxOff, 
         return;
     }
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
-    float3 x0 = nf3(origin + gNodes[bn.x * 3u].xyz);
-    float3 x1 = nf3(origin + gNodes[bn.y * 3u].xyz);
+    float3 w0 = nf3(origin + gNodes[bn.x * 3u].xyz);
+    float3 w1 = nf3(origin + gNodes[bn.y * 3u].xyz);
+    // Proxy records are vehicle-local (relative to the origin).
+    float3 l0 = nf3(gNodes[bn.x * 3u].xyz);
+    float3 l1 = nf3(gNodes[bn.y * 3u].xyz);
     uint found = 0u;
     uint total = boxCount + proxies;
-    float3 tlo = ssub3(min(x0, x1), float3(r, r, r));
-    float3 thi = sadd3(max(x0, x1), float3(r, r, r));
+    float3 tlo = ssub3(min(l0, l1), float3(r, r, r));
+    float3 thi = sadd3(max(l0, l1), float3(r, r, r));
     for (uint b = 0u, bStop = EB_END(b, total, 1u); b < bStop; b++)
     {
+        float3 x0 = b < boxCount ? w0 : l0;
+        float3 x1 = b < boxCount ? w1 : l1;
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
         float3 lo;
         float3 hi;
@@ -524,13 +534,16 @@ void surfPoint(uint v, uint gi, uint mk, float3 origin, float r, uint boxOff, ui
         surfMaskOut(mk, apply, 0u);
         return;
     }
-    float3 x = nf3(origin + gNodes[gi * 3u].xyz);
+    float3 xw = nf3(origin + gNodes[gi * 3u].xyz);
+    // Proxy records are vehicle-local (relative to the origin).
+    float3 xl = nf3(gNodes[gi * 3u].xyz);
     uint found = 0u;
     uint total = boxCount + proxies;
-    float3 tlo = ssub3(x, float3(r, r, r));
-    float3 thi = sadd3(x, float3(r, r, r));
+    float3 tlo = ssub3(xl, float3(r, r, r));
+    float3 thi = sadd3(xl, float3(r, r, r));
     for (uint b = 0u, bStop = EB_END(b, total, 1u); b < bStop; b++)
     {
+        float3 x = b < boxCount ? xw : xl;
         if (apply && (mask & surfMarkBit(b)) == 0u) continue;
         float3 lo;
         float3 hi;

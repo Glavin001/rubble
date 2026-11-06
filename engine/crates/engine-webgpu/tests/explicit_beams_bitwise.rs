@@ -316,7 +316,11 @@ fn sedan_alone_and_into_a_wall_bitwise() {
 #[test]
 fn sedans_head_on_and_t_bone_bitwise() {
     let s = repo_sedan();
-    let o = Vec3::new(100.0, 0.0, 100.0);
+    // At the World origin: vehicle contact runs in the owner's frame (vvRel) while the
+    // frozen reference runs it in World coordinates; the two are the same arithmetic
+    // only while every vehicle's origin is 0 (never re-based: within REBASE_RADIUS).
+    // (explicit_far_origin_gpu.rs covers contact away from the origin.)
+    let o = Vec3::ZERO;
     compare_steps("sedan head-on", &pair(&s, o, 0.85 * SPEED, 1.5, false), &[(2, STEPS), (300, 1), (40, STEPS)], true);
     compare_steps("sedan T-bone", &pair(&s, o, 0.85 * SPEED, 1.0, true), &[(2, STEPS), (300, 1), (40, STEPS)], true);
 }
@@ -391,7 +395,11 @@ fn mixed_fleet_bitwise() {
 /// head-on pairs side by side): contact groups of three and four, the owners' levels.
 fn chain_and_four(text: &str, name: &str) {
     let g = geo(text);
-    let o = Vec3::new(100.0, 0.0, 100.0);
+    // At the World origin: vehicle contact runs in the owner's frame (vvRel) while the
+    // frozen reference runs it in World coordinates; the two are the same arithmetic
+    // only while every vehicle's origin is 0 (never re-based: within REBASE_RADIUS).
+    // (explicit_far_origin_gpu.rs covers contact away from the origin.)
+    let o = Vec3::ZERO;
     let len = g.along.1 - g.along.0;
     let chain = vec![
         spawn(text, o, 0.0, g.forward * (0.85 * SPEED)),

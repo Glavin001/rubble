@@ -206,6 +206,59 @@ fn more_proxy_bodies_than_lanes_are_all_integrated() {
     assert!(gset.bodies[..599].iter().all(|b| b.vel == Vec3::ZERO));
 }
 
+/// Contact precision does not depend on where the vehicle is: the first test's crash
+/// (the sedan into a free 1,200 kg box) at the origin and with the vehicle's origin at
+/// (4096, 0, 2048) m, the box written in the vehicle's frame (proxy records are relative
+/// to its origin) and its centre on a 2^-11 m grid (so the box sits at the same place at
+/// 4 km too, a float spacing there being 2^-11 m). Every node word and the box's whole
+/// state end bit for bit equal. (With contact tested in world coordinates, as before this
+/// test, a node's world position at 4 km rounded to 0.49 mm.)
+#[test]
+fn far_from_the_origin_the_coupling_is_the_origins_bit_for_bit() {
+    let Some((device, queue)) = device() else {
+        eprintln!("skip: no GPU");
+        return;
+    };
+    let (sim, mut set, _) = setup(1200.0);
+    let grid = |v: Vec3| (v * 2048.0).round() / 2048.0;
+    set.bodies[0].pos = grid(set.bodies[0].pos);
+    set.begin_window();
+    let run = |origin: Vec3| {
+        let mut s = sim.clone();
+        s.origin = origin;
+        let mut gpu = ExplicitBeamsGpu::with_coupling(&device, &queue, std::slice::from_ref(&s), Some(CAP));
+        write_proxies(&gpu, &queue, 0, &set).unwrap();
+        gpu.set_coupling_on(true);
+        let mut nodes = Vec::new();
+        for _ in 0..48 {
+            gpu.frame(STEPS);
+            nodes.push(gpu.state_words().into_iter().find(|(n, _)| *n == "nodes").unwrap().1);
+        }
+        let mut gset = set.clone();
+        read_proxies(&gpu, &device, &queue, 0, &mut gset);
+        (nodes, gset)
+    };
+    let (a_nodes, a_set) = run(Vec3::ZERO);
+    let (b_nodes, b_set) = run(Vec3::new(4096.0, 0.0, 2048.0));
+    assert!(a_set.bodies[0].vel.z > 1.0, "the box was not struck");
+    for (f, (a, b)) in a_nodes.iter().zip(&b_nodes).enumerate() {
+        let differ = a.iter().zip(b).filter(|(x, y)| x != y).count();
+        assert_eq!(differ, 0, "frame {f}: {differ} node words differ at 4 km");
+    }
+    let bits = |b: &RigidProxy| {
+        [b.pos, b.vel, b.ang_vel].map(|v| v.to_array().map(f32::to_bits))
+    };
+    assert_eq!(bits(&a_set.bodies[0]), bits(&b_set.bodies[0]), "the box differs at 4 km");
+    assert_eq!(
+        a_set.bodies[0].rot.to_array().map(f32::to_bits),
+        b_set.bodies[0].rot.to_array().map(f32::to_bits)
+    );
+    println!(
+        "48 frames at the origin and at 4 km: every node word and the box (now {:.4} m/s) bit for bit",
+        a_set.bodies[0].vel.z
+    );
+}
+
 /// Built with coupling room but off: every frame bit for bit the plain build's.
 #[test]
 fn coupling_off_is_bit_for_bit() {

@@ -4216,6 +4216,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             uint4 m = gMisc[v];
             gMisc[v] = uint4(asuint(asfloat(m.xyz) + first), m.w);
         }
+        cplRebase(v, lane, first);
     }
     sync();
     uint4 misc = gMisc[v];
@@ -5969,6 +5970,7 @@ void contactMemberBegin(uint v, uint lane)
             uint4 m = gMisc[v];
             gMisc[v] = uint4(asuint(asfloat(m.xyz) + first), m.w);
         }
+        cplRebase(v, lane, first);
     }
     sync();
 }
@@ -6037,6 +6039,12 @@ void vvFrame(inout VvTri t, float3 p1, float3 p2)
     t.rb = sscale(scross(t.n, u), rd);
     t.rn = sscale(scross(u, w), rd);
 }
+
+// Vehicle contact in the owner's frame: vehicle v's origin relative to the owner a's
+// (exactly 0 for v = a, and for every vehicle while the origins are 0). The contact's
+// geometry (triangles, contact points, votes, anti-clip) is in the owner's frame, its
+// selection (frame bounds, boxes, prefilters) in the World's.
+float3 vvRel(uint v, uint a) { return asfloat(gMisc[v].xyz) - asfloat(gMisc[a].xyz); }
 
 VvTri vvTriangle(uint gt, float3 origin, float r)
 {
@@ -6160,7 +6168,7 @@ bool vvVote(VvTri t, uint h, uint vh, float delta)
     int score = delta >= 0.0 ? 3 : -3;
     if (info.z > 3u)
     {
-        float3 ob = asfloat(gMisc[vh].xyz);
+        float3 ob = vvRel(vh, gStatic[gP.nodeInfoBase + t.tn.x].w);
         uint base = gP.vvNbr + info.y;
         // Four independent loads at a time (the far ends are a contiguous list).
         uint k = 0u;
@@ -6212,7 +6220,7 @@ uint vvClip(VvTri t, uint gt, uint h, float3 p, uint vh, float r, out float alph
     if (side == 0.0)
     {
         bool crossed = false;
-        float3 oa = asfloat(gMisc[va].xyz);
+        float3 oa = vvRel(va, va);
         VvTri pf;
         pf.p0 = ssub3(t.p0, sscale(gNodes[t.tn.x * 3u + 1u].xyz, STEP));
         float3 b1 = ssub3(nf3(oa + gNodes[t.tn.y * 3u].xyz), sscale(gNodes[t.tn.y * 3u + 1u].xyz, STEP));
@@ -6433,7 +6441,7 @@ uint vvHitAt(uint runOff, uint i) { return gP.vvHits + 2u * (2u * runOff + i); }
 void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r, uint parity,
                      uint q)
 {
-    VvTri t = vvTriangle(gt, asfloat(gMisc[va].xyz), r);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
     bool cand = false;
     bool hit = false;
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
@@ -6472,7 +6480,7 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
 // side by side.
 void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane, uint lanes, uint slot)
 {
-    float3 oa = asfloat(gMisc[va].xyz);
+    float3 oa = vvRel(va, va);
     for (uint i = lane, iStop = EB_END(i, n, lanes); i < iStop; i += lanes)
     {
         uint gt = gNext[base + 2u * i];
@@ -6483,7 +6491,7 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
         if ((gP.ablate & 2097152u) != 0u)
         {
             uint vh2 = gStatic[gP.nodeInfoBase + h].w;
-            vvTry(vvTriangle(gt, oa, r), gt, h, nf3(asfloat(gMisc[vh2].xyz) + gNodes[h * 3u].xyz), vh2, r, parity, slot);
+            vvTry(vvTriangle(gt, oa, r), gt, h, nf3(vvRel(vh2, va) + gNodes[h * 3u].xyz), vh2, r, parity, slot);
             continue;
         }
 #endif
@@ -6500,7 +6508,7 @@ void vvApplyOrdered(uint va, uint base, uint n, float r, uint parity, uint lane,
         for (uint it = 0u, itStop = EB_END(it, n, 1u); it < itStop; it++)
         {
             VvTri t = vvTriangle(gt, oa, r);
-            vvTry(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity, slot);
+            vvTry(t, gt, h, nf3(vvRel(vh, va) + gNodes[h * 3u].xyz), vh, r, parity, slot);
             // The point's next hit: the smallest later triangle.
             uint next = 0xFFFFFFFFu;
             for (uint j = 0u, jStop = EB_END(j, n, 1u); j < jStop; j++)
@@ -6709,6 +6717,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
                 uint v = vvMember(off, m);
                 uint4 cp = gStatic[gP.vvStatic + v];
                 float3 o = asfloat(gMisc[v].xyz);
+                float3 orel = vvRel(v, va);
                 for (uint i = lane, iStop = EB_END(i, cp.y, LANES); i < iStop; i += LANES)
                 {
                     uint h = gLists[cp.x + i];
@@ -6721,7 +6730,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
                     }
                     float3 e3 = float3(ex, ex, ex);
                     if (any(x < clo - e3) || any(x > chi + e3)) continue;
-                    gBeams[gP.vvRun + runOff + gsVvCands[q].add(1u)] = float4(x, asfloat(h));
+                    gBeams[gP.vvRun + runOff + gsVvCands[q].add(1u)] = float4(nf3(orel + gNodes[h * 3u].xyz), asfloat(h));
                 }
             }
         }
@@ -6807,7 +6816,7 @@ uint vvHitSmall(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 2
 void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands,
                           float r)
 {
-    VvTri t = vvTriangle(gt, asfloat(gMisc[va].xyz), r);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
     bool cand = false;
     bool hit = false;
     uint run = vvRunSmall(runOff, points, a);
@@ -6835,7 +6844,7 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
 // The overflow path: owner a's triangle walk again, applying each hit at once.
 void vvTriangleCandsApply(uint va, uint gt, uint sub, uint subs, uint run, uint cands, float r, uint parity, uint slot)
 {
-    VvTri t = vvTriangle(gt, asfloat(gMisc[va].xyz), r);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[run + e];
@@ -7014,6 +7023,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                 uint v = vvMember(off, m);
                 uint4 cp = gStatic[gP.vvStatic + v];
                 float3 o = asfloat(gMisc[v].xyz);
+                float3 orel = vvRel(v, va);
                 for (uint i = cl, iStop = EB_END(i, cp.y, cP); i < iStop; i += cP)
                 {
                     uint h = gLists[cp.x + i];
@@ -7026,7 +7036,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                     }
                     float3 e3 = float3(ex, ex, ex);
                     if (any(x < clo - e3) || any(x > chi + e3)) continue;
-                    gBeams[run + gsVvCand4[a].add(1u)] = float4(x, asfloat(h));
+                    gBeams[run + gsVvCand4[a].add(1u)] = float4(nf3(orel + gNodes[h * 3u].xyz), asfloat(h));
                 }
             }
         }

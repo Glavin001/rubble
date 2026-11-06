@@ -302,6 +302,9 @@ pub struct ExplicitBeamsWorld {
     pub first_hit_step: Option<u64>,
     /// Scratch: world positions per vehicle and padded boxes.
     world: Vec<Vec<Vec3>>,
+    /// Scratch: the current owner's and its partners' positions in the owner's frame
+    /// (relative to its origin: the contact's geometry; the boxes stay in the World's).
+    frame: Vec<Vec<Vec3>>,
     /// Scratch: every node's force at the contact pass's start (two-body hits).
     pass_force: Vec<Vec<Vec3>>,
     /// The energy ledger (None: off; [`Self::enable_ledger`]).
@@ -339,6 +342,7 @@ impl ExplicitBeamsWorld {
             total: ContactStats::default(),
             first_hit_step: None,
             world: Vec::new(),
+            frame: Vec::new(),
             ledger: None,
             pass_force: Vec::new(),
             boxes: Vec::new(),
@@ -628,6 +632,7 @@ impl ExplicitBeamsWorld {
                 .map(|&b| self.vehicles[b].contact_points.len())
                 .sum();
             if offered > 0 {
+                self.owner_frame(a, &partners);
                 self.triangle_loop(a, &partners, &mut stats);
             }
         }
@@ -640,6 +645,22 @@ impl ExplicitBeamsWorld {
         self.total.hits += stats.hits;
         self.total.resets += stats.resets;
         self.last = stats;
+    }
+
+    /// The owner `a`'s and its partners' node positions in `a`'s frame: each vehicle's
+    /// origin less `a`'s, plus its node positions (the GPU's `vvRel`; exactly the world
+    /// positions while every origin is 0).
+    fn owner_frame(&mut self, a: usize, partners: &[usize]) {
+        let nv = self.vehicles.len();
+        self.frame.resize(nv, Vec::new());
+        let oa = self.vehicles[a].origin;
+        for &x in std::iter::once(&a).chain(partners) {
+            let v = &self.vehicles[x];
+            let rel = v.origin - oa;
+            let f = &mut self.frame[x];
+            f.clear();
+            f.extend(v.nodes.iter().map(|n| rel + n.pos));
+        }
     }
 
     /// Owner `a`'s triangle loop against `partners` (§3.3, §4.2, §5, §6): the walk
@@ -672,7 +693,7 @@ impl ExplicitBeamsWorld {
             }
             stats.triangles_tested += 1;
             let [i0, i1, i2] = self.vehicles[a].triangles[t].nodes;
-            let wa = &self.world[a];
+            let wa = &self.frame[a];
             let (p0, p1, p2) = (wa[i0 as usize], wa[i1 as usize], wa[i2 as usize]);
             // A broken triangle, or an anti-clip-only one while its vehicle's
             // anti-clip is off: no candidates.
@@ -699,7 +720,7 @@ impl ExplicitBeamsWorld {
                 0.0
             };
             for &b in partners {
-                let wb = &self.world[b];
+                let wb = &self.frame[b];
                 let anti = anti_a || (self.vehicles[b].anti_clip && !dead);
                 for &h in &self.vehicles[b].contact_points {
                     let x = wb[h as usize];
@@ -723,7 +744,7 @@ impl ExplicitBeamsWorld {
                 let frame = ContactFrame::new(p0, p1, p2);
                 for &(b, h) in &cands {
                     stats.candidates += 1;
-                    let x = self.world[b][h as usize];
+                    let x = self.frame[b][h as usize];
                     let (alpha, beta, gamma, delta) = frame.local(x);
                     // Anti-clip (§36): the side a point is kept on is the one it
                     // held for this triangle last step (it was in contact), or the
@@ -741,7 +762,7 @@ impl ExplicitBeamsWorld {
                             clip_side(&self.vehicles[b].clip_sides[h as usize], a as u32, t as u32);
                         let va = &self.vehicles[a];
                         let vb = &self.vehicles[b];
-                        let wb = &self.world[b];
+                        let wb = &self.frame[b];
                         let crossing = || {
                             let back = |i: u32, p: Vec3| p - va.nodes[i as usize].vel * STEP;
                             let pf = ContactFrame::new(back(i0, p0), back(i1, p1), back(i2, p2));
@@ -803,7 +824,7 @@ impl ExplicitBeamsWorld {
                         vb.neighbour_start[h as usize] as usize,
                         vb.neighbour_start[h as usize + 1] as usize,
                     );
-                    let wb = &self.world[b];
+                    let wb = &self.frame[b];
                     let behind = vote_behind(
                         delta,
                         frame.n,

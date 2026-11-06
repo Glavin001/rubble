@@ -551,7 +551,7 @@ void cplPlanShapes(uint v, uint lane, uint n)
             float4 p2 = gBodies[7u * body + 2u];
             float4 p3 = gBodies[7u * body + 3u];
             float4 p4 = gBodies[7u * body + 4u];
-            gMisc[b] = asuint(p0);
+            gMisc[b] = asuint(float4(p0.xyz - asfloat(gMisc[v].xyz), p0.w));
             gMisc[b + 1u] = asuint(gBodies[7u * body + 1u]);
             gMisc[b + 2u] = asuint(float4(p3.xyz, 1.0));
             gMisc[b + 3u] = uint4(asuint(p4.xyz), body);
@@ -595,7 +595,7 @@ void cplPlanShapes(uint v, uint lane, uint n)
         gMisc[at + 3u] = uint4(asuint(prm.y), asuint(prm.z), asuint(sph.w + 0.01), hullCounts);
         gMisc[at + 4u] = uint4(0u);
         gMisc[at + 5u] = uint4(0u);
-        gMisc[at + 6u] = asuint(float4(sph.xyz, 0.0));
+        gMisc[at + 6u] = asuint(float4(sph.xyz - asfloat(gMisc[v].xyz), 0.0));
     }
     if (lane == 0u)
     {
@@ -754,7 +754,7 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             float4 p3 = gBodies[7u * body + 3u];
             float4 p4 = gBodies[7u * body + 4u];
             // Asleep or not, its motion; static and kinematic: 1/M = 0 (infinite mass).
-            gMisc[b] = asuint(p0);
+            gMisc[b] = asuint(float4(p0.xyz - asfloat(gMisc[v].xyz), p0.w));
             gMisc[b + 1u] = asuint(gBodies[7u * body + 1u]);
             gMisc[b + 2u] = asuint(float4(p3.xyz, 1.0));
             gMisc[b + 3u] = uint4(asuint(p4.xyz), body);
@@ -799,7 +799,7 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gMisc[at + 3u] = uint4(asuint(prm.y), asuint(prm.z), asuint(sph.w + 0.01), hullCounts);
         gMisc[at + 4u] = uint4(0u);
         gMisc[at + 5u] = uint4(0u);
-        gMisc[at + 6u] = asuint(float4(sph.xyz, 0.0));
+        gMisc[at + 6u] = asuint(float4(sph.xyz - asfloat(gMisc[v].xyz), 0.0));
         // The body's shapes lie in [first, last] (its record's (1/I, w) w: first + 1 |
         // (last + 1) << 16; 0, as a host writes it, means every shape): its step sums
         // (explicit_beams_rigid.slang cplIntegrateBody) scan that range only.
@@ -851,7 +851,7 @@ void shapeLoad(uint v, uint k)
     if (row >= gP.rowCap) { gWork[1].or(ST_ROWS); return; }
     uint base = 2u * (gP.ingestSlot * gP.ingestRows + row);
     float3 jz = to_zup(j);
-    float3 p = to_zup(actionPoint(ref, j, m));
+    float3 p = to_zup(actionPoint(ref, j, m) + asfloat(gMisc[v].xyz));
     // coupling.slang Record: ids (chunk, other body: none, slot, valid), point (|J|),
     // impulse (closing speed 0: a sustained load, J / dt), other (mass, modulus, radius),
     // key (substep, this collider, other: the vehicle, feature).
@@ -918,7 +918,7 @@ void emitPair(uint v, uint j, uint body, uint key)
     bool whole = gMisc[b + 3u].w == body && asuint(cur.w) == asuint(c0.w);
     if (whole)
     {
-        proxyImpulse(v, j, cur.xyz, J, L);
+        proxyImpulse(v, j, cur.xyz - asfloat(gMisc[v].xyz), J, L);
     }
     else
     {
@@ -929,7 +929,7 @@ void emitPair(uint v, uint j, uint body, uint key)
         float3 ii = asfloat(gMisc[b + 4u].xyz);
         float3 dv = Jp * c0.w;
         float3 dw = qrot(q, ii * qrot(float4(-q.xyz, q.w), Lp));
-        J = (dv + cross(dw, cur.xyz - c0.xyz)) / cur.w;
+        J = (dv + cross(dw, (cur.xyz - asfloat(gMisc[v].xyz)) - c0.xyz)) / cur.w;
         float4 rot = gBodies[7u * body + 1u];
         float3 ci = gBodies[7u * body + 2u].xyz;
         float3 lw = qrot(float4(-rot.xyz, rot.w), dw);

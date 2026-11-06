@@ -839,6 +839,39 @@ between vehicles. The lossless direction would be to shift each vehicle's proxie
 local frame in `cpl_plan`, and its contact partners into the owner's frame. That is a
 contact-precision change, not a sleep one, so it is proposed here, not built.
 
+**Built (approved 2026-11-06, after the broadphase merge): contact in vehicle frames.**
+- *Rigid coupling.*
+  - `cpl_plan` writes each proxy body's centre and each shape's reference point relative
+    to the vehicle's origin.
+  - The frame tests nodes at their local positions: the node pass, the count pass and the
+    surface path's proxy loops. Static boxes still use World positions.
+  - An origin rebase moves the records with the origin (`cplRebase`).
+  - `cpl_loads` adds the origin back for the stress ingest's action point; `cpl_emit`
+    expresses the body's current centre in the same frame.
+- *Vehicle contact.*
+  - The contact's geometry runs in the owner's frame: triangles, contact points, the side
+    vote and anti-clip. Each partner sits at `origin(v) − origin(owner)` plus its local
+    positions (`vvRel`, which is exactly 0 for the owner itself).
+  - Selection stays in World coordinates: frame bounds, groups and the box prefilters.
+  - The CPU reference does the same (`ExplicitBeamsWorld::owner_frame`).
+- *Proof 1: bit for bit near the origin.* There every origin is 0, so `x − 0` and `0 + x`
+  are exact.
+  - `explicit_frame_dump` from one saved 16-car crash-town state (every car within 100 m,
+    up to 74 proxy shapes a car) matches the pre-fix build in every state word.
+  - The coupling, sleep, contact and Metal parity suites pass unchanged.
+- *Proof 2: the same contact precision at 4 km as at the origin.* Both scenes are bit for
+  bit equal.
+  - `explicit_rigid_gpu.rs` `far_from_the_origin_the_coupling_is_the_origins_bit_for_bit`:
+    the sedan into a free box, its vehicle origin at (4096, 0, 2048) m. All 48 frames
+    match, every node word and the box's whole state. The pre-fix kernels fail it at the
+    first contact frame, with 1,178 node words different.
+  - `explicit_far_origin_gpu.rs`: two sedans head on (fixed-point contact sums, so
+    deterministic) at the origin and at 4 km. All 30 frames match, on the GPU and on the
+    CPU (3,554 contact hits).
+- Rigid bodies' own positions remain World f32 (the rigid solver's state). What the fix
+  removes is the extra rounding the contact added when it put vehicle nodes into World
+  coordinates.
+
 ### 10.2 The coupling plan's O(vehicles × colliders): waiting on the World broadphase
 
 Not changed here. The surface-contact work (`feat/softrigid-surface-contact-r2`, spec
