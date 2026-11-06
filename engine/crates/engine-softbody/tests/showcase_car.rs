@@ -4600,6 +4600,176 @@ fn elastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
     );
 }
 
+/// `P_PATH`: the lateral force each kind of door-to-body joint puts on the
+/// door (kN, + outward: holding it against the ram), by the body member its
+/// body end belongs to; and each door member's beams near their yield.
+fn door_path_probe(s: &ExplicitBeams, b: &Built, door: &str, d: f32, zc: f32) {
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let Some(pt) = sk.parts.iter().position(|p| p == door) else {
+        return;
+    };
+    let out = if door.ends_with("_l") { 1.0f32 } else { -1.0 };
+    let mut names: Vec<&String> = b.groups.keys().collect();
+    names.sort();
+    let sets: Vec<(&String, HashSet<u32>)> = names
+        .iter()
+        .map(|k| (*k, b.groups[*k].iter().copied().collect()))
+        .collect();
+    let group_of = |i: u32| {
+        sets.iter()
+            .find(|(k, g)| g.contains(&i) && !k.starts_with('~'))
+            .map_or("-".to_string(), |(k, _)| k.to_string())
+    };
+    let mut iface: std::collections::BTreeMap<String, (f32, usize)> = Default::default();
+    let mut own: std::collections::BTreeMap<String, (usize, usize, f32)> = Default::default();
+    for bm in &s.beams {
+        let (a, c) = (bm.a as usize, bm.b as usize);
+        if a >= n || c >= n || bm.broken {
+            continue;
+        }
+        let (pa, pc) = (sk.nodes[a].part as usize, sk.nodes[c].part as usize);
+        if (pa == pt) != (pc == pt) {
+            if pa != 0 && pc != 0 {
+                continue;
+            }
+            let (dn, bn) = if pa == pt { (a, c) } else { (c, a) };
+            let u = (s.nodes[dn].pos - s.nodes[bn].pos).normalize_or_zero();
+            // Compression pushes the door node away from the body node.
+            let fx = bm.force * u.x * out;
+            let end = if s.nodes[bn].pos.z > zc {
+                "hinge"
+            } else {
+                "lock"
+            };
+            let key = format!("{:?} {} {end}", bm.kind, group_of(bn as u32));
+            let e = iface.entry(key).or_default();
+            e.0 += fx / 1e3;
+            e.1 += 1;
+        } else if pa == pt && pc == pt {
+            let key = sets
+                .iter()
+                .find(|(_, g)| g.contains(&(a as u32)) && g.contains(&(c as u32)))
+                .map_or("skin".to_string(), |(k, _)| k.to_string());
+            let e = own.entry(key).or_default();
+            e.0 += 1;
+            let r = if bm.force > 0.0 {
+                bm.force / bm.tc
+            } else {
+                -bm.force / bm.tt
+            };
+            if r.is_finite() && r > 0.95 {
+                e.1 += 1;
+            }
+            if r.is_finite() {
+                e.2 = e.2.max(r);
+            }
+        }
+    }
+    if let Some(fl) = b.groups.get(&format!("{door}_flanges")) {
+        // A door end node bearing on a flange that has gone inboard of it
+        // has passed through the flange: (count, deepest mm).
+        let fl: HashSet<u32> = fl.iter().copied().collect();
+        let (mut c, mut worst) = (0, 0.0f32);
+        for bm in &s.beams {
+            let (a, f) = if fl.contains(&bm.b) {
+                (bm.a, bm.b)
+            } else if fl.contains(&bm.a) {
+                (bm.b, bm.a)
+            } else {
+                continue;
+            };
+            if sk.nodes[a as usize].part as usize != pt || bm.broken {
+                continue;
+            }
+            let past = s.nodes[f as usize].pos.x.abs() - s.nodes[a as usize].pos.x.abs();
+            if past > 0.0 {
+                c += 1;
+                worst = worst.max(past * 1e3);
+            }
+        }
+        eprintln!(
+            "(p path {:.0} mm) door ends past their flange: {c}, deepest {worst:.0} mm",
+            d * 1e3
+        );
+    }
+    if std::env::var("P_FLANGE").is_ok_and(|v| v == "1") {
+        if let Some(fl) = b.groups.get(&format!("{door}_flanges")) {
+            for &f in fl {
+                let f = f as usize;
+                let v: Vec<String> = s
+                    .beams
+                    .iter()
+                    .filter(|bm| (bm.a as usize == f || bm.b as usize == f) && !bm.broken)
+                    .map(|bm| {
+                        let o = if bm.a as usize == f { bm.b } else { bm.a } as usize;
+                        format!(
+                            "{}{:?} F{:.1} L{:.3}/{:.3} at x{:.3}",
+                            &sk.parts[sk.nodes[o].part as usize][..4],
+                            bm.kind,
+                            bm.force / 1e3,
+                            s.nodes[o].pos.distance(s.nodes[f].pos),
+                            bm.rest,
+                            s.nodes[o].pos.x
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "(p flange {:.0} mm) {f} x{:.3} z{:.2}: {v:?}",
+                    d * 1e3,
+                    s.nodes[f].pos.x,
+                    s.nodes[f].pos.z
+                );
+            }
+        }
+    }
+    if d < 0.06 {
+        // (Once: the flange nodes' masses and their beams' stiffness.)
+        if let Some(fl) = b.groups.get(&format!("{door}_flanges")) {
+            for &f in fl {
+                let f = f as usize;
+                let ks: Vec<String> = s
+                    .beams
+                    .iter()
+                    .filter(|bm| bm.a as usize == f || bm.b as usize == f)
+                    .map(|bm| {
+                        let o = if bm.a as usize == f { bm.b } else { bm.a } as usize;
+                        format!(
+                            "{}:{:.0}kN/m,{:.2}kg,{:?}",
+                            sk.parts[sk.nodes[o].part as usize],
+                            bm.k / 1e3,
+                            s.nodes[o].mass,
+                            bm.kind
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "(p flange) node {f} at {:?} {:.3} kg: {ks:?}",
+                    s.nodes[f].pos, s.nodes[f].mass
+                );
+            }
+        }
+    }
+    let mut v: Vec<(String, (f32, usize))> = iface.into_iter().collect();
+    v.sort_by(|x, y| y.1 .0.abs().total_cmp(&x.1 .0.abs()));
+    let total: f32 = v.iter().map(|x| x.1 .0).sum();
+    eprintln!(
+        "(p path {:.0} mm) door held by {total:.1} kN: {:?}",
+        d * 1e3,
+        v.iter()
+            .take(12)
+            .map(|(k, (f, c))| format!("{k} {f:.1} ({c})"))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "(p path {:.0} mm) door members (beams, at yield, max F/yield): {:?}",
+        d * 1e3,
+        own.iter()
+            .map(|(k, (c, y, r))| format!("{k} {c} {y} {r:.2}"))
+            .collect::<Vec<_>>()
+    );
+}
+
 fn plastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
     let sk = &b.skeleton;
     let n = sk.nodes.len();
@@ -4616,6 +4786,8 @@ fn plastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
             continue;
         }
         let w = 0.5 * (bm.tc.abs() + bm.tt.abs()) as f64 * (bm.rest - bm.rest0).abs() as f64;
+        // (A rope's or bounded beam's threshold may be unbounded.)
+        let w = if w.is_finite() { w } else { 0.0 };
         if w == 0.0 && !bm.broken {
             continue;
         }
@@ -4700,6 +4872,20 @@ fn ram_rig(
     speed: f32,
     inside: &dyn Fn(Vec3, f32) -> Option<f32>,
 ) -> Vec<(f32, f32)> {
+    ram_rig_with(s, held, dir, travel, speed, inside, &mut |_, _| {})
+}
+
+/// [`ram_rig`] calling `hook(state, travel)` every 50 mm of ram travel.
+fn ram_rig_with(
+    s: &mut ExplicitBeams,
+    held: &[usize],
+    dir: Vec3,
+    travel: f32,
+    speed: f32,
+    inside: &dyn Fn(Vec3, f32) -> Option<f32>,
+    hook: &mut dyn FnMut(&ExplicitBeams, f32),
+) -> Vec<(f32, f32)> {
+    let mut next_hook = 0.05f32;
     let dt = engine_softbody::authoring::skeleton::STEP;
     // The held nodes are immovable (the solver's own pin: they take no step).
     // (Resetting their positions after each step instead is not a constraint:
@@ -4727,6 +4913,10 @@ fn ram_rig(
         }
         acc += f;
         n += 1;
+        if d >= next_hook {
+            hook(s, d);
+            next_hook += 0.05;
+        }
         if d >= next {
             out.push((d, acc / n as f32));
             acc = 0.0;
@@ -4794,7 +4984,112 @@ fn p_door_crush(car: &Car) -> (f32, Vec<String>) {
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(0.457 + 0.05);
-    let curve = ram_rig(&mut s, &held, -Vec3::X, travel, 0.1, &inside);
+    // (`P_PATH=1`: every 50 mm, where the door's load leaves it, and how
+    // close its own members are to their yields.)
+    if std::env::var("P_GEOM").is_ok_and(|v| v == "1") {
+        // The door's lowest row and what of the body is beside it.
+        let mut low: Vec<usize> = door.clone();
+        low.sort_by(|&a, &c| s.nodes[a].pos.y.total_cmp(&s.nodes[c].pos.y));
+        let sill: Vec<usize> = car.g["sill"].iter().map(|&i| i as usize).collect();
+        let pb: Vec<usize> = car.g["pillar_b"].iter().map(|&i| i as usize).collect();
+        let mut lock: Vec<usize> = door
+            .iter()
+            .copied()
+            .filter(|&i| s.nodes[i].pos.z < z0 + 0.06)
+            .collect();
+        lock.sort_by(|&a, &c| s.nodes[a].pos.y.total_cmp(&s.nodes[c].pos.y));
+        for &i in &lock {
+            let p = s.nodes[i].pos;
+            let mut near: Vec<(f32, usize)> = pb
+                .iter()
+                .map(|&j| (s.nodes[j].pos.distance(p), j))
+                .collect();
+            near.sort_by(|a, c| a.0.total_cmp(&c.0));
+            eprintln!(
+                "(p geom lock) door {i} {:?} {:.2} kg; pillar_b nearest: {:?}",
+                p,
+                s.nodes[i].mass,
+                near.iter()
+                    .take(4)
+                    .map(|&(d, j)| format!("{j} {:?} {:.2}kg", s.nodes[j].pos, s.nodes[j].mass))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for &i in low.iter().take(14) {
+            let p = s.nodes[i].pos;
+            let mut near: Vec<(f32, usize)> = sill
+                .iter()
+                .map(|&j| (s.nodes[j].pos.distance(p), j))
+                .collect();
+            near.sort_by(|a, c| a.0.total_cmp(&c.0));
+            eprintln!(
+                "(p geom) door {i} {:?} {:.2} kg; sill nearest: {:?}",
+                p,
+                s.nodes[i].mass,
+                near.iter()
+                    .take(3)
+                    .map(|&(d, j)| format!("{j} {:?} {d:.3}", s.nodes[j].pos))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    let path_probe = std::env::var("P_PATH").is_ok_and(|v| v == "1");
+    let rest: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
+    let curve = ram_rig_with(
+        &mut s,
+        &held,
+        -Vec3::X,
+        travel,
+        0.1,
+        &inside,
+        &mut |s, d| {
+            if let (true, Some(b)) = (path_probe, car.built) {
+                door_path_probe(s, b, "door_f_l", d, zc);
+                // How far in (mm) the door's hinge end, middle and lock end have
+                // gone, and the pillars and sill beside it: whether the ram's
+                // travel is the door's bending or the body's.
+                let inward = |ids: &[usize]| {
+                    let v: Vec<f32> = ids
+                        .iter()
+                        .map(|&i| (rest[i].x - s.nodes[i].pos.x) * 1e3)
+                        .collect();
+                    v.iter().sum::<f32>() / v.len().max(1) as f32
+                };
+                let near = |zs: f32, ze: f32| -> Vec<usize> {
+                    door.iter()
+                        .copied()
+                        .filter(|&i| {
+                            rest[i].z >= zs && rest[i].z < ze && rest[i].y > y0 && rest[i].y < y1
+                        })
+                        .collect()
+                };
+                let w = 0.15;
+                let grp = |g: &str| -> Vec<usize> {
+                    car.g.get(g).map_or(Vec::new(), |v| {
+                        v.iter()
+                            .map(|&i| i as usize)
+                            .filter(|&i| {
+                                rest[i].z > z0 - 0.1
+                                    && rest[i].z < z1 + 0.1
+                                    && rest[i].y > y0 - 0.2
+                                    && rest[i].y < y1
+                            })
+                            .collect()
+                    })
+                };
+                eprintln!(
+                "(p path {:.0} mm) inward mm: door hinge end {:.0}, middle {:.0}, lock end {:.0}; pillar_a {:.0}, pillar_b {:.0}, sill {:.0}",
+                d * 1e3,
+                inward(&near(z1 - w, z1 + 0.01)),
+                inward(&near(zc - w, zc + w)),
+                inward(&near(z0 - 0.01, z0 + w)),
+                inward(&grp("pillar_a")),
+                inward(&grp("pillar_b")),
+                inward(&grp("sill")),
+            );
+            }
+        },
+    );
     if let (Ok(_), Some(b)) = (std::env::var("P_SPLIT"), car.built) {
         force_census(&s, b, "p", None);
         plastic_census(&s, b, "p");

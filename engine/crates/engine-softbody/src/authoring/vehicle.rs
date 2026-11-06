@@ -1193,11 +1193,20 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     // A lid (bonnet, boot lid): it hangs on its hinges and
                     // latch (placed below); its edge bears on its seals.
                     let _ = (hinge_scale, latch_scale, in_latch);
-                    let mm = if at_hinge || at_latch_edge {
+                    let mut mm = if at_hinge || at_latch_edge {
                         Material::weld(m, grades.hsla)
                     } else {
                         m.scaled(0.5)
                     };
+                    // One tier: a lid's seal is EPDM rubber, which does not
+                    // take a set, so it bears elastically and never yields
+                    // (`LID_SEAL_SET=1`: the skin's yield, as before, a
+                    // measurement switch). The lid's own bending under the
+                    // step's bound had crushed them plastically.
+                    if def.one_tier && std::env::var("LID_SEAL_SET").map_or(true, |v| v != "1") {
+                        mm.deform = f32::MAX;
+                        mm.strength = f32::MAX;
+                    }
                     sk.beam_with(a, b, mm, BeamType::Support(SEAL_BREAK), 0);
                 }
             }
@@ -1989,10 +1998,35 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 // pillar and to its neighbours along the strip.
                 let mut strip: Vec<u32> = Vec::new();
                 for (nodes, c) in &edge {
-                    let pf = Vec3::new(side * (xin - FLANGE_GAP), c.y, c.z);
+                    let gap = std::env::var("FLANGE_GAP")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(FLANGE_GAP);
+                    let pf = Vec3::new(side * (xin - gap), c.y, c.z);
                     let flange = flange_of[&sk.nearest(pf, &flanged, 1)[0]].clone();
+                    // (`FLANGE_ROOT=member`: the flange is its pillar's own
+                    // stampings' flange, so it is welded to that member's
+                    // nodes only, not to the skin round it.)
+                    let own_member: Vec<u32> =
+                        if std::env::var("FLANGE_ROOT").is_ok_and(|v| v == "member") {
+                            flanged
+                                .iter()
+                                .copied()
+                                .filter(|i| flange_of[i].member == flange.member)
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                     let root: Vec<u32> = sk
-                        .nearest(pf, &body, 4)
+                        .nearest(
+                            pf,
+                            if own_member.is_empty() {
+                                &body
+                            } else {
+                                &own_member
+                            },
+                            4,
+                        )
                         .into_iter()
                         .filter(|&r| sk.pos(r).distance(pf) <= 0.35)
                         .collect();
@@ -2028,11 +2062,40 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         strength: cap + (base.strength - base.deform),
                         ..base
                     };
+                    // One tier: the flange is the pillar's own sheet, so its
+                    // ties to the pillar take that strip's real stiffness,
+                    // E·t·w/L (the step's bound then lowers them where it
+                    // must, [`Skeleton::cap_to_bound`]).
+                    let real_flange = one && std::env::var("FLANGE_REAL").is_ok_and(|v| v == "1");
+                    let strip_k = |sk: &Skeleton, x: u32, y: u32, m: Material| -> Material {
+                        let l = sk.pos(x).distance(sk.pos(y)).max(1e-3);
+                        let target = E_STEEL * flange.t * flange.width / l;
+                        Material {
+                            k: target * l.max(super::material::REF_LENGTH)
+                                / super::material::REF_LENGTH,
+                            damp: m.damp * (target / m.k_at(l)).sqrt(),
+                            ..m
+                        }
+                    };
                     for r in root {
-                        sk.tie(f, r, weld);
+                        if real_flange {
+                            let m = strip_k(&sk, f, r, weld);
+                            if sk.beam(f, r, m) {
+                                sk.beams.last_mut().unwrap().tie = true;
+                            }
+                        } else {
+                            sk.tie(f, r, weld);
+                        }
                     }
                     if let Some(&prev) = strip.last() {
-                        sk.tie(f, prev, weld);
+                        if real_flange {
+                            let m = strip_k(&sk, f, prev, weld);
+                            if sk.beam(f, prev, m) {
+                                sk.beams.last_mut().unwrap().tie = true;
+                            }
+                        } else {
+                            sk.tie(f, prev, weld);
+                        }
                     }
                     strip.push(f);
                     // The end's chords bear on it (pushed in, only).
@@ -2047,7 +2110,12 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                             strength: cap + (base.strength - base.deform),
                             ..base
                         };
-                        sk.beam_with(a, f, bear.stiffer(sc), BeamType::Support(SEAL_BREAK), 0);
+                        let bear = if real_flange {
+                            strip_k(&sk, a, f, bear)
+                        } else {
+                            bear.stiffer(sc)
+                        };
+                        sk.beam_with(a, f, bear, BeamType::Support(SEAL_BREAK), 0);
                     }
                     flange_nodes.push((format!("{name}_flanges"), f));
                 }

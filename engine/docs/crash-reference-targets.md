@@ -59,6 +59,7 @@ That gives **n = 82 tests**: median mass 1,511 kg, median length 4,622 mm, media
 | **FMVSS 216a roof**: required | ≥ **3.0 × unloaded vehicle weight** (GVWR ≤ 6,000 lb) before 127 mm of platen travel, each side; head-form load ≤ 222 N | For 1,450 kg: ≥ 42.7 kN | 49 CFR 571.216a S5. Platen 762 × 1,829 mm, pitched 5° and rolled 25° |
 | IIHS roof (rating discontinued) | Good ≥ 4.0; Acceptable 3.25; Marginal 2.5; peak before 5 in (127 mm) | Good for 1,450 kg: ≥ 56.9 kN | iihs.org roof-strength page: "virtually all vehicles earned good ratings" |
 | Roof: typical compact sedans | strength-to-weight ratio about 4.5–5.3 | about 5 | Secondary press reports of IIHS results: 2011 Mazda3 sedan 5.32; 2010 Corolla 5.1; 2006–11 Civic 4.48 |
+| Roof: 2009 Honda Accord sedan (the car sedan1's body-in-white and masses come from) | strength-to-weight ratio 3.87 (peak 56.3 kN within 127 mm at a 1,485 kg curb weight); rated Acceptable | 3.87 | IIHS Roof Strength Report SWR0936 (2009-10-21), quoted in NHTSA DOT HS 811 666 §4.8.5 |
 
 **Comparable frontal tests (NHTSA DB, 1,400–1,520 kg, 4.55–4.90 m sedans).** Values are test number, model, mass, and maximum residual crush:
 - 8407, 2014 Corolla, 1,480 kg: 521 mm
