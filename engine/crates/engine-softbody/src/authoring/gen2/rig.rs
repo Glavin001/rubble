@@ -2504,12 +2504,7 @@ pub fn rig(model: &Model) -> Rig {
     // blanks), so the crush runs soft first and stiffens as it nears the
     // cabin. CRUSH_GRADE[0] at the car's nose, [1] at the firewall, linear
     // between (`GEN3_GRADE_FRONT`, `GEN3_GRADE_REAR`).
-    let nose_y = r
-        .car
-        .nodes
-        .iter()
-        .map(|n| n.p.y)
-        .fold(f32::MAX, f32::min);
+    let nose_y = r.car.nodes.iter().map(|n| n.p.y).fold(f32::MAX, f32::min);
     let (gf, gr) = (
         env("GEN3_GRADE_FRONT", CRUSH_GRADE[0]),
         env("GEN3_GRADE_REAR", CRUSH_GRADE[1]),

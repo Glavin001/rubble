@@ -1097,7 +1097,12 @@ impl ExplicitUpload {
             let slide_off = (slide_recs.len() / 2) as u32;
             let seg_off = seg_recs.len() as u32;
             let brake_off = (brake_recs.len() / 2) as u32;
-            aero_recs.push([slide_off, v.slides.len() as u32, brake_off, v.brakes.len() as u32]);
+            aero_recs.push([
+                slide_off,
+                v.slides.len() as u32,
+                brake_off,
+                v.brakes.len() as u32,
+            ]);
             brake_spans.push((brake_off, v.brakes.len() as u32));
             let u = v.parking_brake.min(1.0);
             for b in &v.brakes {

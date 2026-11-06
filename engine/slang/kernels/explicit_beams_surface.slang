@@ -1118,6 +1118,7 @@ uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 // reaches the barriers only (all decisions below are uniform). The caller's barrier
 // follows. Each heavy function has one call site per phase: the Metal and Chrome
 // compilers inline every call.
+groupshared uint gsUniformSurf;
 void surfaceStep(uint v, uint lane, uint on, uint parity)
 {
 #ifdef EB_ABLATE
@@ -1145,7 +1146,11 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
 #ifdef EB_ABLATE
     if ((gP.ablate & 1073741824u) != 0u) pairs = false;
 #endif
+    // Barriers sit under `if (pairs)`: lane 0's flag through workgroup memory
+    // (gsUniformSurf, read as workgroupUniformLoad), uniform for Chrome.
+    if (lane == 0u) gsUniformSurf = pairs ? 1u : 0u;
     sync();
+    pairs = gsUniformSurf != 0u;
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
     {
         uint gi = r0.x + i;

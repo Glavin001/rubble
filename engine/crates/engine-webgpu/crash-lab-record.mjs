@@ -112,7 +112,8 @@ const grab = async () => {
   writeFileSync(join(frameDir, `f${String(frameNo++).padStart(6, '0')}.jpg`), Buffer.from(s.result.data, 'base64'));
 };
 const ready = async () => {
-  for (let i = 0; i < 300; i++) {
+  // (Up to 5 min: the merged surface pass made the frame modules slow to compile in Chrome.)
+  for (let i = 0; i < 1500; i++) {
     await new Promise((r) => setTimeout(r, 200));
     const err = await evaluate('document.getElementById("err")?.textContent || ""').catch(() => '');
     if (err) throw new Error(`page error: ${err}`);
