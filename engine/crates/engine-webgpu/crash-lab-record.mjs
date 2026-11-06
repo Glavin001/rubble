@@ -36,7 +36,9 @@ const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', showcase1: 'car=sho
   // textures at 1K; engine-webgpu/__mods, never committed), on raycast wheels.
   etkk: 'mod=/__mods/etkk_tex&pc=etkk/kr6.pc&wheels=raycast', ccf: 'mod=/__mods/ccf_tex&pc=ccf/f4_sport_M.pc&wheels=raycast',
   vertex: 'mod=/__mods/vertex_tex&pc=gavril_vertex/gavril_vertex.pc&wheels=raycast', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
-  mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck' };
+  mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck',
+  // Rubble's generated sedan (gen2_export writes it to __mods/gen2), on raycast wheels as the lab's ETK.
+  gen2: 'mod=/__mods/gen2&pc=gen2/gen2.pc&wheels=raycast' };
 // The comparison manifest's cars (vehicle-compare-cars.json, shared with the
 // CPU harness `vehicle_compare`): a JBeam car under __mods/ in JBeam mode, the
 // physics the harness runs it on.

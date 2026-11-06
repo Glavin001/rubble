@@ -6,7 +6,7 @@
 //!
 //! ```bash
 //! cargo run --release -p engine-softbody --example gen2_crash -- <vehicles-dir> <name> <config.pc> [wall] [pole] [rest] [step=0.25] [kmh=56] [polekmh=32]
-//! # gen2: engine/crates/engine-webgpu/__mods/gen2 gen2 sedan.pc
+//! # gen2: engine/crates/engine-webgpu/__mods/gen2 gen2 gen2.pc
 //! ```
 //! * `rest`: 10 s parked on raycast wheels: broken and bent beams, KE.
 //! * `wall`: residual crush at bumper height (6 zones across the front, as
@@ -16,7 +16,9 @@
 //! * `pole`: a 254 mm rigid pole, the car driven sideways into it at each
 //!   station along its length: the deepest node inside the pole's face (the
 //!   node-only contact's clip), residual crush at the pole, beams broken.
-use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape};
+use engine_softbody::explicit_beams::{
+    ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape,
+};
 use glam::Vec3;
 
 fn mass_cg(s: &ExplicitBeams) -> (f32, Vec3, Vec3) {
@@ -34,12 +36,20 @@ fn main() {
     let f = |k: &str, d: f32| opt(k).map_or(d, |s| s.parse().unwrap());
     let dir = std::path::Path::new(dir);
     let texts = engine_softbody::jbeam::read_vehicle_dir(dir, name).unwrap();
-    let files: Vec<(&str, &str)> = texts.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let files: Vec<(&str, &str)> = texts
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let pcs = std::fs::read_to_string(dir.join(name).join(pc)).unwrap();
     let desc = engine_softbody::jbeam::load_jbeam(&files, Some(&pcs)).unwrap();
     let spawn = |v: Vec3| -> ExplicitBeams {
-        let settings = ExplicitBeamsSettings { drag: false, turbulence: false, ..Default::default() };
-        let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, v, settings).unwrap();
+        let settings = ExplicitBeamsSettings {
+            drag: false,
+            turbulence: false,
+            ..Default::default()
+        };
+        let (mut s, _) =
+            ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, v, settings).unwrap();
         let fwd = engine_softbody::pack::forward_axis(&desc);
         let turn = glam::Quat::from_rotation_y(-fwd.x.atan2(fwd.z));
         for n in &mut s.nodes {
@@ -48,14 +58,27 @@ fn main() {
         }
         // Rest the body at its authored ride height: its lowest node where the
         // file has it above the ground (raycast wheels hold it there).
-        let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::INFINITY, f32::min);
-        let authored = desc.nodes.iter().map(|n| n.position[1]).fold(f32::INFINITY, f32::min);
+        let low = s
+            .nodes
+            .iter()
+            .map(|n| n.pos.y)
+            .fold(f32::INFINITY, f32::min);
+        let authored = desc
+            .nodes
+            .iter()
+            .map(|n| n.position[1])
+            .fold(f32::INFINITY, f32::min);
         for n in &mut s.nodes {
             n.pos.y += authored.max(0.05) - low;
         }
         s
     };
-    let named = |s: &ExplicitBeams, nm: &str| desc.nodes.iter().position(|n| n.name == nm).map(|i| s.nodes[i].pos);
+    let named = |s: &ExplicitBeams, nm: &str| {
+        desc.nodes
+            .iter()
+            .position(|n| n.name == nm)
+            .map(|i| s.nodes[i].pos)
+    };
 
     if has("rest") {
         let mut s = spawn(Vec3::ZERO);
@@ -64,18 +87,42 @@ fn main() {
         }
         if has("park") {
             // Parked: the brakes on, as a parked car's handbrake.
-            s.set_drive_input(engine_softbody::explicit_drive::DriveInput { forward: 0.0, steer: 0.0, brake: 1.0, handbrake: 1.0 });
+            s.set_drive_input(engine_softbody::explicit_drive::DriveInput {
+                forward: 0.0,
+                steer: 0.0,
+                brake: 1.0,
+                handbrake: 1.0,
+            });
         }
-        let ke =|s: &ExplicitBeams| s.nodes.iter().map(|n| 0.5 * n.mass * n.vel.length_squared()).sum::<f32>();
+        let ke = |s: &ExplicitBeams| {
+            s.nodes
+                .iter()
+                .map(|n| 0.5 * n.mass * n.vel.length_squared())
+                .sum::<f32>()
+        };
         let mut peak_v = 0.0f32;
         for k in 1..=100 {
             s.run(0.1);
             peak_v = peak_v.max(s.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max));
             if k % 20 == 0 {
                 if has("fast") {
-                    let mut v: Vec<(f32, usize)> = s.nodes.iter().enumerate().map(|(i, n)| (n.vel.length(), i)).collect();
+                    let mut v: Vec<(f32, usize)> = s
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, n)| (n.vel.length(), i))
+                        .collect();
                     v.sort_by(|a, b| b.0.total_cmp(&a.0));
-                    let names: Vec<String> = v.iter().take(6).map(|&(sp, i)| format!("{} {sp:.3}", desc.nodes.get(i).map_or("?", |n| n.name.as_str()))).collect();
+                    let names: Vec<String> = v
+                        .iter()
+                        .take(6)
+                        .map(|&(sp, i)| {
+                            format!(
+                                "{} {sp:.3}",
+                                desc.nodes.get(i).map_or("?", |n| n.name.as_str())
+                            )
+                        })
+                        .collect();
                     println!("    fastest {names:?} contacts {}", s.last_contacts);
                 }
                 let (b, bent) = s.damage();
@@ -88,18 +135,36 @@ fn main() {
         let v0 = f("kmh=", 56.0) / 3.6;
         let mut s = spawn(Vec3::new(0.0, 0.0, v0));
         let n0 = desc.nodes.len();
-        let front = s.nodes.iter().map(|n| n.pos.z).fold(f32::NEG_INFINITY, f32::max);
+        let front = s
+            .nodes
+            .iter()
+            .map(|n| n.pos.z)
+            .fold(f32::NEG_INFINITY, f32::max);
         let wall_z = front + 0.01;
-        s.boxes.push(StaticBox::centered(Vec3::new(0.0, 1.5, wall_z + 1.0), Vec3::new(5.0, 3.0, 1.0)));
+        s.boxes.push(StaticBox::centered(
+            Vec3::new(0.0, 1.5, wall_z + 1.0),
+            Vec3::new(5.0, 3.0, 1.0),
+        ));
         // Bumper-level profile: 6 zones across the width (NHTSA C1–C6).
-        let (xmin, xmax) = s.nodes[..n0].iter().fold((f32::MAX, f32::MIN), |(lo, hi), n| (lo.min(n.pos.x), hi.max(n.pos.x)));
+        let (xmin, xmax) = s.nodes[..n0]
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), n| {
+                (lo.min(n.pos.x), hi.max(n.pos.x))
+            });
         let band = |n: &engine_softbody::explicit_beams::Node| n.pos.y > 0.15 && n.pos.y < 0.90;
         let zone = |x: f32| (((x - xmin) / (xmax - xmin) * 6.0) as usize).min(5);
         // Reference: the mean position of the rear 40 % of the car's nodes (by
         // spawn position), which the frontal leaves undamaged.
-        let zmin0 = s.nodes[..n0].iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
-        let rear_set: Vec<usize> = (0..n0).filter(|&i| s.nodes[i].pos.z < zmin0 + 0.4 * (front - zmin0)).collect();
-        let rear_ref = |s: &ExplicitBeams| rear_set.iter().map(|&i| s.nodes[i].pos.z).sum::<f32>() / rear_set.len() as f32;
+        let zmin0 = s.nodes[..n0]
+            .iter()
+            .map(|n| n.pos.z)
+            .fold(f32::MAX, f32::min);
+        let rear_set: Vec<usize> = (0..n0)
+            .filter(|&i| s.nodes[i].pos.z < zmin0 + 0.4 * (front - zmin0))
+            .collect();
+        let rear_ref = |s: &ExplicitBeams| {
+            rear_set.iter().map(|&i| s.nodes[i].pos.z).sum::<f32>() / rear_set.len() as f32
+        };
         let rear_off = rear_ref(&s) - zmin0;
         // The car's main piece: the heaviest set of nodes joined by unbroken
         // beams (a part that came off does not count as the car's front).
@@ -130,7 +195,9 @@ fn main() {
                 let r = find(&mut parent, i);
                 mass[r] += s.nodes[i].mass;
             }
-            let best = (0..n0).max_by(|&a, &b| mass[a].total_cmp(&mass[b])).unwrap();
+            let best = (0..n0)
+                .max_by(|&a, &b| mass[a].total_cmp(&mass[b]))
+                .unwrap();
             (0..n0).map(|i| find(&mut parent, i) == best).collect()
         };
         let profile = |s: &ExplicitBeams| {
@@ -150,12 +217,38 @@ fn main() {
         let r0 = rear_ref(&s);
         let len0 = front - rear_ref(&s);
         let (m, cg0, _) = mass_cg(&s);
-        let cab0 = [named(&s, "cowlOl"), named(&s, "soT0l"), named(&s, "soT2l"), named(&s, "bp1l")];
+        let cab0 = [
+            named(&s, "cowlOl"),
+            named(&s, "soT0l"),
+            named(&s, "soT2l"),
+            named(&s, "bp1l"),
+        ];
         let mut contact_t = None;
         let mut max_travel = 0.0f32;
         let mut t_max = 0.0f32;
         let mut vs: Vec<f32> = Vec::new();
         let mut cg_contact = cg0;
+        // The rear cabin (vehicle_compare's definition): nodes over the rear
+        // half of the wheelbase; its travel from contact is the dynamic crush.
+        let axz: Vec<f32> = desc
+            .wheels
+            .iter()
+            .map(|w| s.nodes[w.node1 as usize].pos.z)
+            .collect();
+        let (ra, fa) = (
+            axz.iter().copied().fold(f32::MAX, f32::min),
+            axz.iter().copied().fold(f32::MIN, f32::max),
+        );
+        let cab: Vec<usize> = (0..n0)
+            .filter(|&i| (ra - 0.1..ra + 0.5 * (fa - ra)).contains(&s.nodes[i].pos.z))
+            .collect();
+        let cab_z = |s: &ExplicitBeams| {
+            cab.iter()
+                .map(|&i| s.nodes[i].pos.z * s.nodes[i].mass)
+                .sum::<f32>()
+                / cab.iter().map(|&i| s.nodes[i].mass).sum::<f32>()
+        };
+        let (mut cab_contact, mut cab_max, mut cab_t) = (0.0f32, 0.0f32, 0.0f32);
         for step in 0..(0.30 / 0.0005) as usize {
             s.step();
             let (_, cg, v) = mass_cg(&s);
@@ -164,8 +257,14 @@ fn main() {
             if contact_t.is_none() && s.nodes[..n0].iter().any(|n| n.pos.z >= wall_z - 0.002) {
                 contact_t = Some(t);
                 cg_contact = cg;
+                cab_contact = cab_z(&s);
             }
             if contact_t.is_some() {
+                let ct = cab_z(&s) - cab_contact;
+                if ct > cab_max {
+                    cab_max = ct;
+                    cab_t = t - contact_t.unwrap();
+                }
                 let travel = cg.z - cg_contact.z;
                 if travel > max_travel {
                     max_travel = travel;
@@ -182,20 +281,46 @@ fn main() {
             peak = peak.max((vs[k - w] - vs[k]) / (w as f32 * 0.0005) / 9.81);
         }
         let p1 = profile(&s);
-        let crush: Vec<f32> = (0..6).map(|k| if p0[k].is_finite() && p1[k].is_finite() { p0[k] - p1[k] } else { f32::NAN }).collect();
-        let cmax = crush.iter().copied().filter(|c| c.is_finite()).fold(0.0, f32::max);
-        let cavg = (crush[0] / 2.0 + crush[1] + crush[2] + crush[3] + crush[4] + crush[5] / 2.0) / 5.0;
+        let crush: Vec<f32> = (0..6)
+            .map(|k| {
+                if p0[k].is_finite() && p1[k].is_finite() {
+                    p0[k] - p1[k]
+                } else {
+                    f32::NAN
+                }
+            })
+            .collect();
+        let cmax = crush
+            .iter()
+            .copied()
+            .filter(|c| c.is_finite())
+            .fold(0.0, f32::max);
+        let cavg =
+            (crush[0] / 2.0 + crush[1] + crush[2] + crush[3] + crush[4] + crush[5] / 2.0) / 5.0;
         let keep1 = main_piece(&s);
-        let len1 = s.nodes[..n0].iter().enumerate().filter(|(i, _)| keep1[*i]).map(|(_, n)| n.pos.z).fold(f32::NEG_INFINITY, f32::max) - rear_ref(&s);
+        let len1 = s.nodes[..n0]
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep1[*i])
+            .map(|(_, n)| n.pos.z)
+            .fold(f32::NEG_INFINITY, f32::max)
+            - rear_ref(&s);
         let _ = rear_off;
         let b1 = (v0 - 8.0 / 3.6) / cavg.max(1e-3);
         let (broken, bent) = s.damage();
         println!("wall {:.0} km/h, {m:.0} kg:", v0 * 3.6);
-        println!("  residual crush C1..C6 (mm) {:?}", crush.iter().map(|c| (c * 1e3).round()).collect::<Vec<_>>());
+        println!(
+            "  residual crush C1..C6 (mm) {:?}",
+            crush.iter().map(|c| (c * 1e3).round()).collect::<Vec<_>>()
+        );
         println!("  max residual crush {:.0} mm (NHTSA sedans p10-p90 380-580, median 491); NHTSA average C {:.0} mm (261-512, 428)", cmax * 1e3, cavg * 1e3);
         println!("  length loss {:.0} mm (311-602, 470)", (len0 - len1) * 1e3);
-        println!("  dynamic crush (CG travel) {:.0} mm at {:.1} ms (max dynamic crush not openly available; time ~77 ms one test)", max_travel * 1e3, t_max * 1e3);
-        println!("  restitution {:.3} (0.03-0.2, ~0.11), rebound {:.2} m/s", v_reb / v0, v_reb);
+        println!("  dynamic crush: rear cabin travel {:.0} mm at {:.1} ms (620-750 mm, 63-76 ms); CG travel {:.0} mm at {:.1} ms", cab_max * 1e3, cab_t * 1e3, max_travel * 1e3, t_max * 1e3);
+        println!(
+            "  restitution {:.3} (0.03-0.2, ~0.11), rebound {:.2} m/s",
+            v_reb / v0,
+            v_reb
+        );
         println!("  peak deceleration (10 ms average) {:.1} g (fleet 36-46 g at the occupant compartment); Campbell b1 {:.1} /s (22.9-39.2, 30.4)", peak, b1);
         println!("  broken {broken} bent {bent}");
         if let Some(list) = opt("nodes=") {
@@ -204,19 +329,38 @@ fn main() {
             for nm in list.split(',') {
                 if let Some(i) = desc.nodes.iter().position(|n| n.name == nm) {
                     let z0 = spawn_pos[i].z - r0;
-                    println!("    {nm}: {:+.0} mm rearward, {:+.0} mm up", (z0 - (s.nodes[i].pos.z - r1)) * 1e3, (s.nodes[i].pos.y - spawn_pos[i].y) * 1e3);
+                    println!(
+                        "    {nm}: {:+.0} mm rearward, {:+.0} mm up",
+                        (z0 - (s.nodes[i].pos.z - r1)) * 1e3,
+                        (s.nodes[i].pos.y - spawn_pos[i].y) * 1e3
+                    );
                 }
             }
         }
         if has("broken") {
-            let nm = |i: u32| desc.nodes.get(i as usize).map_or("?".to_string(), |n| n.name.clone());
+            let nm = |i: u32| {
+                desc.nodes
+                    .get(i as usize)
+                    .map_or("?".to_string(), |n| n.name.clone())
+            };
             for b in s.beams.iter().filter(|b| b.broken) {
-                println!("    broken {:?} {}-{} strength {:.0} group {}", b.kind, nm(b.a), nm(b.b), b.strength, b.group);
+                println!(
+                    "    broken {:?} {}-{} strength {:.0} group {}",
+                    b.kind,
+                    nm(b.a),
+                    nm(b.b),
+                    b.strength,
+                    b.group
+                );
             }
         }
         if has("yielded") {
             // Beams behind the dash that yielded most (plastic strain).
-            let nm = |i: u32| desc.nodes.get(i as usize).map_or("?".to_string(), |n| n.name.clone());
+            let nm = |i: u32| {
+                desc.nodes
+                    .get(i as usize)
+                    .map_or("?".to_string(), |n| n.name.clone())
+            };
             let mut v: Vec<(f32, usize)> = s
                 .beams
                 .iter()
@@ -226,18 +370,38 @@ fn main() {
                     let ya = desc.nodes[b.a as usize].position[2];
                     let yb = desc.nodes[b.b as usize].position[2];
                     // Rubble z forward = −JBeam y: behind the dash (y > 0.5).
-                    if has("front") { -ya < 0.5 && -yb < 0.5 } else { -ya > 0.5 && -yb > 0.5 }
+                    if has("front") {
+                        -ya < 0.5 && -yb < 0.5
+                    } else {
+                        -ya > 0.5 && -yb > 0.5
+                    }
                 })
                 .map(|(j, b)| (((b.rest - b.rest0) / b.rest0).abs(), j))
                 .collect();
             v.sort_by(|a, b| b.0.total_cmp(&a.0));
             for &(e, j) in v.iter().take(40) {
                 let b = &s.beams[j];
-                println!("    yielded {:.1} % {}-{} broken {} deform {:.0}", e * 100.0, nm(b.a), nm(b.b), b.broken, b.tc);
+                println!(
+                    "    yielded {:.1} % {}-{} broken {} deform {:.0}",
+                    e * 100.0,
+                    nm(b.a),
+                    nm(b.b),
+                    b.broken,
+                    b.tc
+                );
             }
         }
-        let cab1 = [named(&s, "cowlOl"), named(&s, "soT0l"), named(&s, "soT2l"), named(&s, "bp1l")];
-        if let ([Some(a0), Some(s0), Some(t0), Some(b0)], [Some(a1), Some(s1), Some(t1), Some(b1n)]) = (cab0, cab1) {
+        let cab1 = [
+            named(&s, "cowlOl"),
+            named(&s, "soT0l"),
+            named(&s, "soT2l"),
+            named(&s, "bp1l"),
+        ];
+        if let (
+            [Some(a0), Some(s0), Some(t0), Some(b0)],
+            [Some(a1), Some(s1), Some(t1), Some(b1n)],
+        ) = (cab0, cab1)
+        {
             // Relative to the B-pillar: A-pillar base and cowl rearward, the
             // front door aperture's length change.
             println!(
@@ -255,8 +419,15 @@ fn main() {
         let step = f("step=", 0.25);
         let s0 = spawn(Vec3::ZERO);
         let n0 = desc.nodes.len();
-        let (zmin, zmax) = s0.nodes[..n0].iter().fold((f32::MAX, f32::MIN), |(lo, hi), n| (lo.min(n.pos.z), hi.max(n.pos.z)));
-        let side = s0.nodes[..n0].iter().map(|n| n.pos.x).fold(f32::MIN, f32::max);
+        let (zmin, zmax) = s0.nodes[..n0]
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), n| {
+                (lo.min(n.pos.z), hi.max(n.pos.z))
+            });
+        let side = s0.nodes[..n0]
+            .iter()
+            .map(|n| n.pos.x)
+            .fold(f32::MIN, f32::max);
         let r = 0.127;
         println!("side pole {kmh:.0} km/h, 254 mm pole, stations every {step} m along {:.2} m (front {zmax:.2}):", zmax - zmin);
         let mut worst = 0.0f32;
@@ -268,7 +439,10 @@ fn main() {
             s.shapes.push(StaticShape::cylinder(c, r, 1.2));
             let mut deepest = 0.0f32;
             let mut who = 0usize;
-            let side0 = s.nodes[..n0].iter().map(|n| n.pos.x).fold(f32::MIN, f32::max);
+            let side0 = s.nodes[..n0]
+                .iter()
+                .map(|n| n.pos.x)
+                .fold(f32::MIN, f32::max);
             for _ in 0..(0.15 / 0.0005) as usize {
                 s.step();
                 for (i, n) in s.nodes[..n0].iter().enumerate() {
@@ -285,9 +459,18 @@ fn main() {
             // Residual crush at the pole: how far the side at the pole's
             // station moved in, relative to the far side.
             let near = |s: &ExplicitBeams| {
-                s.nodes[..n0].iter().filter(|n| (n.pos.z - z).abs() < 0.15 && n.pos.y > 0.25 && n.pos.y < 1.1).map(|n| n.pos.x).fold(f32::MIN, f32::max)
+                s.nodes[..n0]
+                    .iter()
+                    .filter(|n| (n.pos.z - z).abs() < 0.15 && n.pos.y > 0.25 && n.pos.y < 1.1)
+                    .map(|n| n.pos.x)
+                    .fold(f32::MIN, f32::max)
             };
-            let far = |s: &ExplicitBeams| s.nodes[..n0].iter().map(|n| n.pos.x).fold(f32::MAX, f32::min);
+            let far = |s: &ExplicitBeams| {
+                s.nodes[..n0]
+                    .iter()
+                    .map(|n| n.pos.x)
+                    .fold(f32::MAX, f32::min)
+            };
             let crush = (side0 - far(&s0)) - (near(&s) - far(&s));
             let (broken, _) = s.damage();
             worst = worst.max(deepest);

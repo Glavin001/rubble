@@ -158,7 +158,18 @@ pub fn top_edge(y: f32) -> (f32, f32) {
 
 /// The crown of the top patch at y (m above its edge at the centre line).
 fn crown(y: f32) -> f32 {
-    smooth(&[(Y_FRONT, 0.03), (-0.6, 0.055), (0.6, 0.06), (1.6, 0.03), (2.8, 0.03), (3.4, 0.035), (Y_REAR, 0.03)], y)
+    smooth(
+        &[
+            (Y_FRONT, 0.03),
+            (-0.6, 0.055),
+            (0.6, 0.06),
+            (1.6, 0.03),
+            (2.8, 0.03),
+            (3.4, 0.035),
+            (Y_REAR, 0.03),
+        ],
+        y,
+    )
 }
 
 /// A point on the top (u = x / w_t, −1 right edge … 1 left edge).

@@ -18,7 +18,7 @@ pub mod shape;
 pub use build::{Car, Part, Role};
 
 /// Every file of the generated sedan, paths relative to a mod folder (the
-/// folder the page's `?mod=` points at): `gen2/*.jbeam`, `gen2/sedan.pc`,
+/// folder the page's `?mod=` points at): `gen2/*.jbeam`, `gen2/gen2.pc`,
 /// `gen2/gen2.dae`, `gen2/gen2.materials.json`, then `files.json`.
 pub fn files() -> Vec<(String, Vec<u8>)> {
     let car = sedan::sedan();

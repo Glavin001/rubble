@@ -7,8 +7,8 @@
 use super::build::*;
 use super::shape::*;
 use crate::authoring::sedan::{
-    ACCORD_BIW, ACCORD_DECKLID, ACCORD_DOOR_F, ACCORD_DOOR_R, ACCORD_ENGINE_KG, ACCORD_FENDER, ACCORD_HOOD,
-    ACCORD_TRANSAXLE_KG,
+    ACCORD_BIW, ACCORD_DECKLID, ACCORD_DOOR_F, ACCORD_DOOR_R, ACCORD_ENGINE_KG, ACCORD_FENDER,
+    ACCORD_HOOD, ACCORD_TRANSAXLE_KG,
 };
 use glam::Vec3;
 use std::collections::HashMap;
@@ -109,7 +109,12 @@ pub fn sedan() -> Car {
     }
     let roof_y = [1.58, 1.90, 2.35, 2.80];
     for (k, &y) in roof_y.iter().enumerate() {
-        n(&mut c, &format!("rfC{k}"), top(y, 0.0) - Vec3::Z * 0.01, body);
+        n(
+            &mut c,
+            &format!("rfC{k}"),
+            top(y, 0.0) - Vec3::Z * 0.01,
+            body,
+        );
     }
     let deck_y = 3.36;
     n(&mut c, "dkC", top(deck_y, 0.0) - Vec3::Z * 0.02, body);
@@ -130,8 +135,16 @@ pub fn sedan() -> Car {
         let nm = |b: &str| format!("{b}{x}");
         // Front rails: two-node stations (low, high), x = 0.46.
         for (k, &y) in [-0.72f32, -0.36, 0.02, 0.36].iter().enumerate() {
-            c.node(&nm(&format!("rlLo{k}")), m(Vec3::new(0.46, y, 0.36), s), body);
-            c.node(&nm(&format!("rlHi{k}")), m(Vec3::new(0.46, y, 0.54), s), body);
+            c.node(
+                &nm(&format!("rlLo{k}")),
+                m(Vec3::new(0.46, y, 0.36), s),
+                body,
+            );
+            c.node(
+                &nm(&format!("rlHi{k}")),
+                m(Vec3::new(0.46, y, 0.54), s),
+                body,
+            );
         }
         c.node(&nm("fwLo"), m(Vec3::new(0.46, fw_y, 0.26), s), body);
         c.node(&nm("fwMid"), m(Vec3::new(0.44, fw_y + 0.04, 0.60), s), body);
@@ -141,13 +154,29 @@ pub fn sedan() -> Car {
         c.node(&nm("twr"), m(Vec3::new(0.58, 0.04, 0.82), s), body);
         c.node(&nm("apr2"), m(Vec3::new(0.72, 0.38, 0.83), s), body);
         // Cowl: A-pillar base top (outer), cowl inner.
-        c.node(&nm("cowlO"), inset(m(side(0.82, z_belt(0.82) - 0.01), s), 0.06), body);
+        c.node(
+            &nm("cowlO"),
+            inset(m(side(0.82, z_belt(0.82) - 0.01), s), 0.06),
+            body,
+        );
         c.node(&nm("cowlI"), top(cowl_y, 0.48 * s) - Vec3::Z * 0.02, body);
         // Sills: outer bottom, outer top, inner.
         for (k, &y) in sill_y.iter().enumerate() {
-            c.node(&nm(&format!("soB{k}")), inset(m(side(y, 0.19), s), 0.01), body);
-            c.node(&nm(&format!("soT{k}")), inset(m(side(y, 0.33), s), 0.035), body);
-            c.node(&nm(&format!("si{k}")), m(Vec3::new(side(y, 0.3).x - 0.17, y, 0.26), s), body);
+            c.node(
+                &nm(&format!("soB{k}")),
+                inset(m(side(y, 0.19), s), 0.01),
+                body,
+            );
+            c.node(
+                &nm(&format!("soT{k}")),
+                inset(m(side(y, 0.33), s), 0.035),
+                body,
+            );
+            c.node(
+                &nm(&format!("si{k}")),
+                m(Vec3::new(side(y, 0.3).x - 0.17, y, 0.26), s),
+                body,
+            );
             if k > 0 {
                 c.node(&nm(&format!("fs{k}")), m(Vec3::new(0.46, y, 0.21), s), body);
             }
@@ -158,16 +187,25 @@ pub fn sedan() -> Car {
         c.node(&nm("bp1"), inset(m(side(1.90, 0.64), s), 0.07), body);
         c.node(&nm("bp2"), inset(m(side(1.90, 0.97), s), 0.06), body);
         for (k, &y) in roof_y.iter().enumerate() {
-            c.node(&nm(&format!("rr{k}")), inset(m(glass(y, 1.0), s), 0.015), body);
+            c.node(
+                &nm(&format!("rr{k}")),
+                inset(m(glass(y, 1.0), s), 0.015),
+                body,
+            );
         }
         c.node(&nm("cpLo"), inset(m(side(2.90, 0.80), s), 0.03), body);
         c.node(&nm("cp0"), inset(m(side(2.90, 0.99), s), 0.02), body);
         c.node(&nm("dk"), top(deck_y, 0.95 * s) - Vec3::Z * 0.02, body);
         // Rear rails (x = 0.50); the floor side member's last station is the
         // rear rail's first low node.
-        for (k, &(y, zl, zh)) in [(2.42f32, 0.24f32, 0.40f32), (2.95, 0.30, 0.46), (3.40, 0.32, 0.48), (3.70, 0.36, 0.52)]
-            .iter()
-            .enumerate()
+        for (k, &(y, zl, zh)) in [
+            (2.42f32, 0.24f32, 0.40f32),
+            (2.95, 0.30, 0.46),
+            (3.40, 0.32, 0.48),
+            (3.70, 0.36, 0.52),
+        ]
+        .iter()
+        .enumerate()
         {
             if k > 0 {
                 c.node(&nm(&format!("rrLo{k}")), m(Vec3::new(0.50, y, zl), s), body);
@@ -178,7 +216,10 @@ pub fn sedan() -> Car {
         // Quarter panel and rear arch lip.
         let lip = |ya: f32, deg: f32| {
             let a = deg.to_radians();
-            let (y, z) = (ya + (ARCH_R + 0.02) * a.cos(), WHEEL_R + (ARCH_R + 0.02) * a.sin());
+            let (y, z) = (
+                ya + (ARCH_R + 0.02) * a.cos(),
+                WHEEL_R + (ARCH_R + 0.02) * a.sin(),
+            );
             side(y, z)
         };
         c.node(&nm("aR3"), m(lip(AXLE_R, 52.0), s), body);
@@ -191,18 +232,58 @@ pub fn sedan() -> Car {
         c.node(&nm("rp"), inset(m(side(3.86, 0.80), s), 0.03), body);
         // Hubs (raycast wheels' axle nodes).
         for (w, y) in [("F", AXLE_F), ("R", AXLE_R)] {
-            c.node(&nm(&format!("hub{w}i")), m(Vec3::new(TRACK_HALF - 0.09, y, WHEEL_R), s), body);
-            c.node(&nm(&format!("hub{w}o")), m(Vec3::new(TRACK_HALF + 0.07, y, WHEEL_R), s), body);
+            c.node(
+                &nm(&format!("hub{w}i")),
+                m(Vec3::new(TRACK_HALF - 0.09, y, WHEEL_R), s),
+                body,
+            );
+            c.node(
+                &nm(&format!("hub{w}o")),
+                m(Vec3::new(TRACK_HALF + 0.07, y, WHEEL_R), s),
+                body,
+            );
         }
         // Bumper beams.
-        c.node(&nm("bbLo1"), m(Vec3::new(0.46, -0.88, 0.40), s), Part::BumperF);
-        c.node(&nm("bbHi1"), m(Vec3::new(0.46, -0.88, 0.56), s), Part::BumperF);
-        c.node(&nm("bbLo0"), m(Vec3::new(0.74, -0.84, 0.41), s), Part::BumperF);
-        c.node(&nm("bbHi0"), m(Vec3::new(0.74, -0.84, 0.55), s), Part::BumperF);
-        c.node(&nm("rbLo1"), m(Vec3::new(0.50, 3.83, 0.40), s), Part::BumperR);
-        c.node(&nm("rbHi1"), m(Vec3::new(0.50, 3.83, 0.54), s), Part::BumperR);
-        c.node(&nm("rbLo0"), m(Vec3::new(0.70, 3.79, 0.41), s), Part::BumperR);
-        c.node(&nm("rbHi0"), m(Vec3::new(0.70, 3.79, 0.53), s), Part::BumperR);
+        c.node(
+            &nm("bbLo1"),
+            m(Vec3::new(0.46, -0.88, 0.40), s),
+            Part::BumperF,
+        );
+        c.node(
+            &nm("bbHi1"),
+            m(Vec3::new(0.46, -0.88, 0.56), s),
+            Part::BumperF,
+        );
+        c.node(
+            &nm("bbLo0"),
+            m(Vec3::new(0.74, -0.84, 0.41), s),
+            Part::BumperF,
+        );
+        c.node(
+            &nm("bbHi0"),
+            m(Vec3::new(0.74, -0.84, 0.55), s),
+            Part::BumperF,
+        );
+        c.node(
+            &nm("rbLo1"),
+            m(Vec3::new(0.50, 3.83, 0.40), s),
+            Part::BumperR,
+        );
+        c.node(
+            &nm("rbHi1"),
+            m(Vec3::new(0.50, 3.83, 0.54), s),
+            Part::BumperR,
+        );
+        c.node(
+            &nm("rbLo0"),
+            m(Vec3::new(0.70, 3.79, 0.41), s),
+            Part::BumperR,
+        );
+        c.node(
+            &nm("rbHi0"),
+            m(Vec3::new(0.70, 3.79, 0.53), s),
+            Part::BumperR,
+        );
     }
     let id = |c: &Car, name: &str| c.id(name);
     let both = |name: &str| [format!("{name}l"), format!("{name}r")];
@@ -226,9 +307,17 @@ pub fn sedan() -> Car {
         c.fan(fwmid, &[hi[3], lo[3]], Role::Rail, body);
         c.beam(fwlo, fwmid, Role::Firewall, body);
         // Apron (upper load path) to the radiator support and the cowl.
-        let apr: Vec<usize> = ["apr0", "apr1", "twr", "apr2", "cowlO"].iter().map(|b| g(&c, b)).collect();
+        let apr: Vec<usize> = ["apr0", "apr1", "twr", "apr2", "cowlO"]
+            .iter()
+            .map(|b| g(&c, b))
+            .collect();
         c.chain(&[apr[0], apr[1], apr[3], apr[4]], Role::Apron, body);
-        c.fan(apr[2], &[apr[1], apr[3], hi[2], hi[1], hi[3], lo[2]], Role::Apron, body);
+        c.fan(
+            apr[2],
+            &[apr[1], apr[3], hi[2], hi[1], hi[3], lo[2]],
+            Role::Apron,
+            body,
+        );
         // Apron walls down to the rail (webs).
         c.fan(apr[0], &[hi[0], lo[0], hi[1]], Role::Web, body);
         c.fan(apr[1], &[hi[1], hi[0], hi[2]], Role::Web, body);
@@ -239,8 +328,18 @@ pub fn sedan() -> Car {
         c.chain(&[so_t0, hp, cowlo], Role::PillarA, body);
         c.fan(hp, &[so_b0, si0, fwmid, fwlo, apr[3]], Role::Web, body);
         c.fan(cowlo, &[cowli, fwmid, apr[3]], Role::Firewall, body);
-        c.fan(cowli, &[fwmid, c.id("cowlC"), c.id("fwMidC")], Role::Firewall, body);
-        c.fan(fwlo, &[si0, so_b0, c.id("fwLoC"), c.id("fwMidC")], Role::Firewall, body);
+        c.fan(
+            cowli,
+            &[fwmid, c.id("cowlC"), c.id("fwMidC")],
+            Role::Firewall,
+            body,
+        );
+        c.fan(
+            fwlo,
+            &[si0, so_b0, c.id("fwLoC"), c.id("fwMidC")],
+            Role::Firewall,
+            body,
+        );
         c.fan(fwmid, &[c.id("fwMidC"), si0], Role::Firewall, body);
         // Sill: triangular section, stations 0.5 m.
         let sob: Vec<usize> = (0..4).map(|k| g(&c, &format!("soB{k}"))).collect();
@@ -259,7 +358,9 @@ pub fn sedan() -> Car {
             }
         }
         // Floor: side member (the front rail's continuation), cross members.
-        let fs: Vec<usize> = std::iter::once(fwlo).chain((1..4).map(|k| g(&c, &format!("fs{k}")))).collect();
+        let fs: Vec<usize> = std::iter::once(fwlo)
+            .chain((1..4).map(|k| g(&c, &format!("fs{k}"))))
+            .collect();
         c.chain(&fs, Role::Rail, body);
         for k in 0..4 {
             c.beam(fs[k], si[k], Role::Floor, body);
@@ -267,7 +368,11 @@ pub fn sedan() -> Car {
                 c.beam(fs[k], si[k + 1], Role::Floor, body);
                 c.beam(si[k], fs[k + 1], Role::Floor, body);
             }
-            let t = if k == 0 { c.id("fwLoC") } else { c.id(&format!("tn{k}")) };
+            let t = if k == 0 {
+                c.id("fwLoC")
+            } else {
+                c.id(&format!("tn{k}"))
+            };
             c.beam(fs[k], t, Role::Floor, body);
             if k < 3 {
                 let t1 = c.id(&format!("tn{}", k + 1));
@@ -290,15 +395,34 @@ pub fn sedan() -> Car {
         c.beam(cp0, dk, Role::PillarC, body);
         // Rear wheelhouse, rear rails, quarter.
         let wh = g(&c, "wh");
-        let rlo: Vec<usize> = std::iter::once(fs[3]).chain((1..4).map(|k| g(&c, &format!("rrLo{k}")))).collect();
+        let rlo: Vec<usize> = std::iter::once(fs[3])
+            .chain((1..4).map(|k| g(&c, &format!("rrLo{k}"))))
+            .collect();
         let rhi: Vec<usize> = (0..4).map(|k| g(&c, &format!("rrHi{k}"))).collect();
         c.ladder(&rlo, &rhi, Role::RearRail, Role::Web, Role::Web, body);
         c.fan(rhi[0], &[si[3], sot[3]], Role::Cross, body);
-        c.fan(wh, &[rhi[0], rhi[1], rhi[2], cplo, sot[3], cp0], Role::Cross, body);
-        let (ar3, ar4, qr0, qm0, qr1, qb1, qb2, rp) =
-            (g(&c, "aR3"), g(&c, "aR4"), g(&c, "qr0"), g(&c, "qm0"), g(&c, "qr1"), g(&c, "qb1"), g(&c, "qb2"), g(&c, "rp"));
+        c.fan(
+            wh,
+            &[rhi[0], rhi[1], rhi[2], cplo, sot[3], cp0],
+            Role::Cross,
+            body,
+        );
+        let (ar3, ar4, qr0, qm0, qr1, qb1, qb2, rp) = (
+            g(&c, "aR3"),
+            g(&c, "aR4"),
+            g(&c, "qr0"),
+            g(&c, "qm0"),
+            g(&c, "qr1"),
+            g(&c, "qb1"),
+            g(&c, "qb2"),
+            g(&c, "rp"),
+        );
         c.panel(
-            &[vec![Some(ar3), Some(ar4), Some(qr0)], vec![Some(cplo), Some(qm0), Some(qr1)], vec![Some(cp0), Some(qb1), Some(qb2)]],
+            &[
+                vec![Some(ar3), Some(ar4), Some(qr0)],
+                vec![Some(cplo), Some(qm0), Some(qr1)],
+                vec![Some(cp0), Some(qb1), Some(qb2)],
+            ],
             body,
             &[Role::Sheet, Role::Sheet, Role::PillarC],
             Role::Sheet,
@@ -313,7 +437,16 @@ pub fn sedan() -> Car {
         c.fan(qb2, &[rp, dk, rhi[3]], Role::Cross, body);
         c.fan(rp, &[rhi[3], c.id("rpC")], Role::Cross, body);
         // Sill outer face: a sheet panel over the sill (collision skin).
-        c.panel(&[sob.iter().map(|&i| Some(i)).collect(), sot.iter().map(|&i| Some(i)).collect()], body, &[Role::Sill, Role::Sill], Role::Cross, false);
+        c.panel(
+            &[
+                sob.iter().map(|&i| Some(i)).collect(),
+                sot.iter().map(|&i| Some(i)).collect(),
+            ],
+            body,
+            &[Role::Sill, Role::Sill],
+            Role::Cross,
+            false,
+        );
         // Hubs: links to the rails (front) and rear rails (rear).
         let (hfi, hfo) = (g(&c, "hubFi"), g(&c, "hubFo"));
         c.beam(hfi, hfo, Role::Susp, body);
@@ -327,14 +460,38 @@ pub fn sedan() -> Car {
         }
         // Bumper beams on the crush cans.
         let gb = |c: &Car, b: &str| c.id(&format!("{b}{x}"));
-        let (bl1, bh1, bl0, bh0) = (gb(&c, "bbLo1"), gb(&c, "bbHi1"), gb(&c, "bbLo0"), gb(&c, "bbHi0"));
-        c.ladder(&[bl0, bl1, c.id("bbLoC")], &[bh0, bh1, c.id("bbHiC")], Role::BumperBeam, Role::Web, Role::Web, Part::BumperF);
+        let (bl1, bh1, bl0, bh0) = (
+            gb(&c, "bbLo1"),
+            gb(&c, "bbHi1"),
+            gb(&c, "bbLo0"),
+            gb(&c, "bbHi0"),
+        );
+        c.ladder(
+            &[bl0, bl1, c.id("bbLoC")],
+            &[bh0, bh1, c.id("bbHiC")],
+            Role::BumperBeam,
+            Role::Web,
+            Role::Web,
+            Part::BumperF,
+        );
         c.fan(bl1, &[lo[0], hi[0]], Role::CrushCan, body);
         c.fan(bh1, &[hi[0], lo[0]], Role::CrushCan, body);
         c.fan(bl0, &[lo[0]], Role::CrushCan, body);
         c.fan(bh0, &[hi[0], apr[0]], Role::CrushCan, body);
-        let (rl1, rh1, rl0, rh0) = (gb(&c, "rbLo1"), gb(&c, "rbHi1"), gb(&c, "rbLo0"), gb(&c, "rbHi0"));
-        c.ladder(&[rl0, rl1, c.id("rbLoC")], &[rh0, rh1, c.id("rbHiC")], Role::BumperBeam, Role::Web, Role::Web, Part::BumperR);
+        let (rl1, rh1, rl0, rh0) = (
+            gb(&c, "rbLo1"),
+            gb(&c, "rbHi1"),
+            gb(&c, "rbLo0"),
+            gb(&c, "rbHi0"),
+        );
+        c.ladder(
+            &[rl0, rl1, c.id("rbLoC")],
+            &[rh0, rh1, c.id("rbHiC")],
+            Role::BumperBeam,
+            Role::Web,
+            Role::Web,
+            Part::BumperR,
+        );
         c.fan(rl1, &[rlo[3], rhi[3]], Role::CrushCan, body);
         c.fan(rh1, &[rhi[3], rlo[3]], Role::CrushCan, body);
         c.fan(rl0, &[rlo[3], qr0], Role::CrushCan, body);
@@ -366,7 +523,12 @@ pub fn sedan() -> Car {
     pair(&mut c, "rlLo2", Role::Cross); // subframe cross member
     pair(&mut c, "rlLo3", Role::Cross);
     pair(&mut c, "twr", Role::Cross); // strut brace
-    for (a, b) in [("rlLo2l", "rlLo3r"), ("rlLo2r", "rlLo3l"), ("rlLo1l", "rlLo2r"), ("rlLo1r", "rlLo2l")] {
+    for (a, b) in [
+        ("rlLo2l", "rlLo3r"),
+        ("rlLo2r", "rlLo3l"),
+        ("rlLo1l", "rlLo2r"),
+        ("rlLo1r", "rlLo2l"),
+    ] {
         let (a, b) = (id(&c, a), id(&c, b));
         c.beam(a, b, Role::Web, body);
     }
@@ -377,7 +539,9 @@ pub fn sedan() -> Car {
     c.beam(id(&c, "fwLoC"), id(&c, "fwMidC"), Role::Firewall, body);
     c.beam(id(&c, "fwMidC"), id(&c, "cowlC"), Role::Firewall, body);
     // Tunnel and floor cross members.
-    let tn: Vec<usize> = std::iter::once(id(&c, "fwLoC")).chain((1..4).map(|k| id(&c, &format!("tn{k}")))).collect();
+    let tn: Vec<usize> = std::iter::once(id(&c, "fwLoC"))
+        .chain((1..4).map(|k| id(&c, &format!("tn{k}"))))
+        .collect();
     c.chain(&tn, Role::Tunnel, body);
     for k in 1..4 {
         pair(&mut c, &format!("si{k}"), Role::Cross);
@@ -400,11 +564,23 @@ pub fn sedan() -> Car {
         let l: Vec<Option<usize>> = (0..4).map(|k| Some(id(&c, &format!("rr{k}l")))).collect();
         let cc: Vec<Option<usize>> = rfc.iter().map(|&i| Some(i)).collect();
         let r: Vec<Option<usize>> = (0..4).map(|k| Some(id(&c, &format!("rr{k}r")))).collect();
-        c.panel(&[r, cc, l], body, &[Role::RoofRail, Role::RoofBow, Role::RoofRail], Role::RoofBow, false);
+        c.panel(
+            &[r, cc, l],
+            body,
+            &[Role::RoofRail, Role::RoofBow, Role::RoofRail],
+            Role::RoofBow,
+            false,
+        );
     }
     // Windshield frame (cowl row to header) and its glass as collision skin.
     {
-        let cowl = [id(&c, "cowlOr"), id(&c, "cowlIr"), id(&c, "cowlC"), id(&c, "cowlIl"), id(&c, "cowlOl")];
+        let cowl = [
+            id(&c, "cowlOr"),
+            id(&c, "cowlIr"),
+            id(&c, "cowlC"),
+            id(&c, "cowlIl"),
+            id(&c, "cowlOl"),
+        ];
         let head = [id(&c, "rr0r"), rfc[0], id(&c, "rr0l")];
         // Sort both chains along x for the zipper (strip works along y; use a
         // local mapping: triangulate by index).
@@ -450,22 +626,39 @@ pub fn sedan() -> Car {
     }
     // C-pillar sails (collision skin above the belt behind the rear door).
     for s in ["l", "r"] {
-        let (a, b, d, e) = (id(&c, &format!("cp0{s}")), id(&c, &format!("rr3{s}")), id(&c, &format!("dk{s}")), id(&c, &format!("qb1{s}")));
+        let (a, b, d, e) = (
+            id(&c, &format!("cp0{s}")),
+            id(&c, &format!("rr3{s}")),
+            id(&c, &format!("dk{s}")),
+            id(&c, &format!("qb1{s}")),
+        );
         c.tri(a, b, d, body);
         c.tri(a, d, e, body);
         c.beam(d, e, Role::Sheet, body);
     }
     // Firewall skin (the engine's collision target) and the underbody.
     for s in ["l", "r"] {
-        let (lo, mid, co) = (id(&c, &format!("fwLo{s}")), id(&c, &format!("fwMid{s}")), id(&c, &format!("cowlI{s}")));
+        let (lo, mid, co) = (
+            id(&c, &format!("fwLo{s}")),
+            id(&c, &format!("fwMid{s}")),
+            id(&c, &format!("cowlI{s}")),
+        );
         let (loc, midc) = (id(&c, "fwLoC"), id(&c, "fwMidC"));
         c.tri(lo, loc, midc, body);
         c.tri(lo, midc, mid, body);
         c.tri(mid, midc, id(&c, "cowlC"), body);
         c.tri(mid, id(&c, "cowlC"), co, body);
         for k in 0..3 {
-            let (si, si1, fs) = (id(&c, &format!("si{k}{s}")), id(&c, &format!("si{}{s}", k + 1)), id(&c, &format!("fs{}{s}", k + 1)));
-            let fs0 = if k == 0 { id(&c, &format!("fwLo{s}")) } else { id(&c, &format!("fs{k}{s}")) };
+            let (si, si1, fs) = (
+                id(&c, &format!("si{k}{s}")),
+                id(&c, &format!("si{}{s}", k + 1)),
+                id(&c, &format!("fs{}{s}", k + 1)),
+            );
+            let fs0 = if k == 0 {
+                id(&c, &format!("fwLo{s}"))
+            } else {
+                id(&c, &format!("fs{k}{s}"))
+            };
             c.tri(si, si1, fs, body);
             c.tri(si, fs, fs0, body);
         }
@@ -481,7 +674,11 @@ pub fn sedan() -> Car {
         // 2.4 L engine and transaxle, 0.39 m ahead of the axle to 0.12 m behind.
         for (k, (xx, y, z)) in [0.30f32, -0.30]
             .iter()
-            .flat_map(|&xx| [-0.39f32, -0.13, 0.12].into_iter().flat_map(move |y| [0.38f32, 0.84].into_iter().map(move |z| (xx, y, z))))
+            .flat_map(|&xx| {
+                [-0.39f32, -0.13, 0.12]
+                    .into_iter()
+                    .flat_map(move |y| [0.38f32, 0.84].into_iter().map(move |z| (xx, y, z)))
+            })
             .enumerate()
         {
             en.push(c.node(&format!("en{k}"), Vec3::new(xx, y, z), e));
@@ -495,17 +692,56 @@ pub fn sedan() -> Car {
         // front nodes to the rails' upper chords.
         let at = |xx: f32, y: f32, z: f32| {
             let s = if xx > 0.0 { 0usize } else { 6 };
-            let yi = [-0.39f32, -0.13, 0.12].iter().position(|&v| (v - y).abs() < 1e-3).unwrap();
+            let yi = [-0.39f32, -0.13, 0.12]
+                .iter()
+                .position(|&v| (v - y).abs() < 1e-3)
+                .unwrap();
             s + yi * 2 + usize::from(z > 0.5)
         };
         let mounts = [
-            (at(0.3, -0.39, 0.38), "rlLo1l"), (at(0.3, -0.39, 0.38), "rlHi1l"), (at(0.3, 0.12, 0.38), "rlLo2l"), (at(0.3, 0.12, 0.38), "rlHi2l"),
-            (at(-0.3, -0.39, 0.38), "rlLo1r"), (at(-0.3, -0.39, 0.38), "rlHi1r"), (at(-0.3, 0.12, 0.38), "rlLo2r"), (at(-0.3, 0.12, 0.38), "rlHi2r"),
-            (at(0.3, -0.39, 0.84), "rlHi1l"), (at(-0.3, -0.39, 0.84), "rlHi1r"),
+            (at(0.3, -0.39, 0.38), "rlLo1l"),
+            (at(0.3, -0.39, 0.38), "rlHi1l"),
+            (at(0.3, 0.12, 0.38), "rlLo2l"),
+            (at(0.3, 0.12, 0.38), "rlHi2l"),
+            (at(-0.3, -0.39, 0.38), "rlLo1r"),
+            (at(-0.3, -0.39, 0.38), "rlHi1r"),
+            (at(-0.3, 0.12, 0.38), "rlLo2r"),
+            (at(-0.3, 0.12, 0.38), "rlHi2r"),
+            (at(0.3, -0.39, 0.84), "rlHi1l"),
+            (at(-0.3, -0.39, 0.84), "rlHi1r"),
         ];
         for (k, b) in mounts {
             let bi = c.id(b);
             c.beam(en[k], bi, Role::Mount, e);
+        }
+        // The dash panel stops the engine: gapped BOUNDED stops from the
+        // block's rear face to the firewall, free until 8 cm are left.
+        for (xs, sx) in [(0.3f32, "l"), (-0.3, "r")] {
+            let (lo, hi) = (en[at(xs, 0.12, 0.38)], en[at(xs, 0.12, 0.84)]);
+            for (a, to) in [
+                (
+                    lo,
+                    vec![
+                        format!("fwLo{sx}"),
+                        "fwLoC".to_string(),
+                        format!("fwMid{sx}"),
+                    ],
+                ),
+                (
+                    hi,
+                    vec![
+                        format!("fwMid{sx}"),
+                        "fwMidC".to_string(),
+                        format!("cowlI{sx}"),
+                    ],
+                ),
+            ] {
+                for t in to {
+                    let ti = c.id(&t);
+                    let j = c.beam(a, ti, Role::Stop, e);
+                    c.beams[j].role = Role::Stop;
+                }
+            }
         }
     }
 
@@ -547,7 +783,13 @@ pub fn sedan() -> Car {
                 }
                 ids.push(v);
             }
-            c.panel(&ids, part, &[Role::Sheet, Role::Intrusion, Role::DoorFrame], Role::DoorFrame, false);
+            c.panel(
+                &ids,
+                part,
+                &[Role::Sheet, Role::Intrusion, Role::DoorFrame],
+                Role::DoorFrame,
+                false,
+            );
             // Inner frame: two rows 0.11 m inboard (hinge face, latch face,
             // the inner panel's top and bottom).
             let mut inner: Vec<Vec<usize>> = Vec::new();
@@ -564,7 +806,14 @@ pub fn sedan() -> Car {
                 }
                 inner.push(v);
             }
-            c.ladder(&inner[0], &inner[1], Role::DoorFrame, Role::DoorFrame, Role::Sheet, part);
+            c.ladder(
+                &inner[0],
+                &inner[1],
+                Role::DoorFrame,
+                Role::DoorFrame,
+                Role::Sheet,
+                part,
+            );
             // Depth: each inner node to the outer nodes around it.
             for (r, &rr) in [0usize, 2].iter().enumerate() {
                 for k in 0..inner[r].len() {
@@ -576,7 +825,11 @@ pub fn sedan() -> Car {
                             let row = &ids[q as usize];
                             [k as isize - 1, k as isize, k as isize + 1]
                                 .iter()
-                                .filter_map(|&kk| (kk >= 0).then(|| row.get(kk as usize).copied().flatten()).flatten())
+                                .filter_map(|&kk| {
+                                    (kk >= 0)
+                                        .then(|| row.get(kk as usize).copied().flatten())
+                                        .flatten()
+                                })
                                 .collect::<Vec<_>>()
                         })
                         .collect();
@@ -585,12 +838,30 @@ pub fn sedan() -> Car {
             }
             // Window frame: two nodes at the roof rail (B-pillar / C-pillar top).
             let (wy0, wy1) = if front { (1.34, 1.84) } else { (2.36, 2.76) };
-            let w0 = c.node(&format!("d{tag}w0{x}"), inset(m(glass(wy0, 0.97), s), 0.02), part);
-            let w1 = c.node(&format!("d{tag}w1{x}"), inset(m(glass(wy1, if front { 0.97 } else { 0.80 }), s), 0.02), part);
+            let w0 = c.node(
+                &format!("d{tag}w0{x}"),
+                inset(m(glass(wy0, 0.97), s), 0.02),
+                part,
+            );
+            let w1 = c.node(
+                &format!("d{tag}w1{x}"),
+                inset(m(glass(wy1, if front { 0.97 } else { 0.80 }), s), 0.02),
+                part,
+            );
             let belt: Vec<usize> = ids[2].iter().flatten().copied().collect();
             c.chain(&[belt[0], w0, w1, belt[2]], Role::DoorFrame, part);
-            c.fan(w0, &[belt[1], belt[2], inner[1][0], inner[1][1]], Role::DoorFrame, part);
-            c.fan(w1, &[belt[1], inner[1][2], inner[1][1]], Role::DoorFrame, part);
+            c.fan(
+                w0,
+                &[belt[1], belt[2], inner[1][0], inner[1][1]],
+                Role::DoorFrame,
+                part,
+            );
+            c.fan(
+                w1,
+                &[belt[1], inner[1][2], inner[1][1]],
+                Role::DoorFrame,
+                part,
+            );
             c.tri(belt[0], belt[1], w0, part);
             c.tri(belt[1], w1, w0, part);
             c.tri(belt[1], belt[2], w1, part);
@@ -604,10 +875,20 @@ pub fn sedan() -> Car {
             };
             let dn = part.name().trim_start_matches("gen2_").to_string();
             // Census: two groups of 4–14 beams at 30–98 kN a beam.
-            for (pins, to, grp) in [([inner[0][0], ids[0][0].unwrap()], [pil_lo, pil_mid], "lo"), ([inner[1][0], ids[2][0].unwrap()], [pil_mid, pil_hi], "up")] {
+            for (pins, to, grp) in [
+                ([inner[0][0], ids[0][0].unwrap()], [pil_lo, pil_mid], "lo"),
+                ([inner[1][0], ids[2][0].unwrap()], [pil_mid, pil_hi], "up"),
+            ] {
                 for pin in pins {
                     for t in to {
-                        c.hardware(pin, t, Role::Hinge, part, &format!("{dn}_hinge_{grp}"), 40e3);
+                        c.hardware(
+                            pin,
+                            t,
+                            Role::Hinge,
+                            part,
+                            &format!("{dn}_hinge_{grp}"),
+                            40e3,
+                        );
                     }
                 }
             }
@@ -624,13 +905,28 @@ pub fn sedan() -> Car {
                 ("couplerTag".into(), serde_json::json!(ltag)),
                 ("couplerStrength".into(), serde_json::json!(40000)),
                 ("couplerStartRadius".into(), serde_json::json!(0.02)),
-                ("breakGroup".into(), serde_json::json!(format!("{dn}_latch"))),
+                (
+                    "breakGroup".into(),
+                    serde_json::json!(format!("{dn}_latch")),
+                ),
             ];
             c.nodes[strike].opts = vec![("tag".into(), serde_json::json!(ltag))];
             let lnear: Vec<usize> = if front {
-                vec![ids[1][2].unwrap(), ids[2][2].unwrap(), inner[0][2], inner[1][2], ids[1][1].unwrap()]
+                vec![
+                    ids[1][2].unwrap(),
+                    ids[2][2].unwrap(),
+                    inner[0][2],
+                    inner[1][2],
+                    ids[1][1].unwrap(),
+                ]
             } else {
-                vec![ids[1][2].unwrap(), ids[2][2].unwrap(), inner[1][2], inner[0][2], ids[1][1].unwrap()]
+                vec![
+                    ids[1][2].unwrap(),
+                    ids[2][2].unwrap(),
+                    inner[1][2],
+                    inner[0][2],
+                    ids[1][1].unwrap(),
+                ]
             };
             c.fan(latch, &lnear, Role::DoorFrame, part);
             let snear: Vec<usize> = if front {
@@ -641,29 +937,50 @@ pub fn sedan() -> Car {
             c.fan(strike, &snear, Role::PillarB, body);
             // Bearing: the door's edges and bottom bear on the pillars and sill
             // (compression only).
-            let rear_edge: Vec<usize> = [ids[0].get(2).copied().flatten(), ids[1][2], ids[2][2]].into_iter().flatten().collect();
-            let front_edge: Vec<usize> = [ids[0][0], ids[1][0], ids[2][0]].into_iter().flatten().collect();
+            let rear_edge: Vec<usize> = [ids[0].get(2).copied().flatten(), ids[1][2], ids[2][2]]
+                .into_iter()
+                .flatten()
+                .collect();
+            let front_edge: Vec<usize> = [ids[0][0], ids[1][0], ids[2][0]]
+                .into_iter()
+                .flatten()
+                .collect();
             for &d in &front_edge {
                 let pd = c.p(d);
-                let mut best: Vec<(f32, usize)> = [pil_lo, pil_mid, pil_hi].iter().map(|&b| (c.p(b).distance(pd), b)).collect();
+                let mut best: Vec<(f32, usize)> = [pil_lo, pil_mid, pil_hi]
+                    .iter()
+                    .map(|&b| (c.p(b).distance(pd), b))
+                    .collect();
                 best.sort_by(|a, b| a.0.total_cmp(&b.0));
                 for &(_, b) in best.iter().take(2) {
                     c.beam(d, b, Role::Bearing, part);
                 }
             }
-            let rear_pil: Vec<usize> = if front { vec![gs(&c, "soT2"), gs(&c, "bp1"), gs(&c, "bp2")] } else { vec![gs(&c, "soT3"), gs(&c, "cpLo"), gs(&c, "cp0"), gs(&c, "aR3")] };
+            let rear_pil: Vec<usize> = if front {
+                vec![gs(&c, "soT2"), gs(&c, "bp1"), gs(&c, "bp2")]
+            } else {
+                vec![gs(&c, "soT3"), gs(&c, "cpLo"), gs(&c, "cp0"), gs(&c, "aR3")]
+            };
             for &d in &rear_edge {
                 let pd = c.p(d);
-                let mut best: Vec<(f32, usize)> = rear_pil.iter().map(|&b| (c.p(b).distance(pd), b)).collect();
+                let mut best: Vec<(f32, usize)> =
+                    rear_pil.iter().map(|&b| (c.p(b).distance(pd), b)).collect();
                 best.sort_by(|a, b| a.0.total_cmp(&b.0));
                 for &(_, b) in best.iter().take(2) {
                     c.beam(d, b, Role::Bearing, part);
                 }
             }
             let sills: Vec<usize> = (0..4).map(|k| gs(&c, &format!("soT{k}"))).collect();
-            for d in ids[0].iter().flatten().copied().chain(inner[0].iter().copied()).collect::<Vec<_>>() {
+            for d in ids[0]
+                .iter()
+                .flatten()
+                .copied()
+                .chain(inner[0].iter().copied())
+                .collect::<Vec<_>>()
+            {
                 let pd = c.p(d);
-                let mut best: Vec<(f32, usize)> = sills.iter().map(|&b| (c.p(b).distance(pd), b)).collect();
+                let mut best: Vec<(f32, usize)> =
+                    sills.iter().map(|&b| (c.p(b).distance(pd), b)).collect();
                 best.sort_by(|a, b| a.0.total_cmp(&b.0));
                 c.beam(d, best[0].1, Role::Bearing, part);
             }
@@ -671,19 +988,25 @@ pub fn sedan() -> Car {
             let rails: Vec<usize> = (0..4).map(|k| gs(&c, &format!("rr{k}"))).collect();
             for w in [w0, w1] {
                 let pw = c.p(w);
-                let mut best: Vec<(f32, usize)> = rails.iter().map(|&b| (c.p(b).distance(pw), b)).collect();
+                let mut best: Vec<(f32, usize)> =
+                    rails.iter().map(|&b| (c.p(b).distance(pw), b)).collect();
                 best.sort_by(|a, b| a.0.total_cmp(&b.0));
                 c.beam(w, best[0].1, Role::Bearing, part);
             }
             // Pole lanes on the door's outer skin, backed by the inner frame.
             let back: Vec<usize> = inner.iter().flatten().copied().collect();
-            c.lanes(part, &back, &|q: Vec3| {
-                if q.z > z_belt(q.y) - 0.005 {
-                    q
-                } else {
-                    Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z)
-                }
-            }, &|_, _| true);
+            c.lanes(
+                part,
+                &back,
+                &|q: Vec3| {
+                    if q.z > z_belt(q.y) - 0.005 {
+                        q
+                    } else {
+                        Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z)
+                    }
+                },
+                &|_, _| true,
+            );
         }
     }
 
@@ -692,7 +1015,11 @@ pub fn sedan() -> Car {
     // ------------------------------------------------------------------
     for s in [1.0f32, -1.0] {
         let x = lr(s);
-        let part = if s > 0.0 { Part::FenderL } else { Part::FenderR };
+        let part = if s > 0.0 {
+            Part::FenderL
+        } else {
+            Part::FenderR
+        };
         let p = |y: f32, z: f32| m(side(y, z), s);
         let top_row: Vec<usize> = [-0.78f32, -0.30, 0.20, 0.72]
             .iter()
@@ -702,7 +1029,10 @@ pub fn sedan() -> Car {
         let mut low = vec![c.node(&format!("fdL0{x}"), p(-0.80, 0.44), part)];
         for (k, deg) in [160.0f32, 122.0, 90.0, 58.0, 20.0].iter().enumerate() {
             let a = deg.to_radians();
-            let (y, z) = (AXLE_F + (ARCH_R + 0.02) * a.cos(), WHEEL_R + (ARCH_R + 0.02) * a.sin());
+            let (y, z) = (
+                AXLE_F + (ARCH_R + 0.02) * a.cos(),
+                WHEEL_R + (ARCH_R + 0.02) * a.sin(),
+            );
             low.push(c.node(&format!("fdA{k}{x}"), p(y, z), part));
         }
         low.push(c.node(&format!("fdL1{x}"), p(0.74, 0.40), part));
@@ -717,7 +1047,12 @@ pub fn sedan() -> Car {
         // the apron (compression only).
         let gs = |c: &Car, b: &str| c.id(&format!("{b}{x}"));
         let grp = format!("{}_bolts", part.name().trim_start_matches("gen2_"));
-        let aprons = [gs(&c, "apr0"), gs(&c, "apr1"), gs(&c, "apr2"), gs(&c, "cowlO")];
+        let aprons = [
+            gs(&c, "apr0"),
+            gs(&c, "apr1"),
+            gs(&c, "apr2"),
+            gs(&c, "cowlO"),
+        ];
         for (k, &t) in top_row.iter().enumerate() {
             c.hardware(t, aprons[k], Role::Bolt, part, &grp, 9e3);
         }
@@ -729,15 +1064,36 @@ pub fn sedan() -> Car {
         c.hardware(low[0], bb0, Role::Bolt, part, &grp, 6e3);
         for &t in &low[1..4] {
             let pt = c.p(t);
-            let mut best: Vec<(f32, usize)> = [gs(&c, "apr1"), gs(&c, "twr"), gs(&c, "apr2"), gs(&c, "rlHi1"), gs(&c, "rlHi2")]
-                .iter()
-                .map(|&b| (c.p(b).distance(pt), b))
-                .collect();
+            let mut best: Vec<(f32, usize)> = [
+                gs(&c, "apr1"),
+                gs(&c, "twr"),
+                gs(&c, "apr2"),
+                gs(&c, "rlHi1"),
+                gs(&c, "rlHi2"),
+            ]
+            .iter()
+            .map(|&b| (c.p(b).distance(pt), b))
+            .collect();
             best.sort_by(|a, b| a.0.total_cmp(&b.0));
             c.beam(t, best[0].1, Role::Bearing, part);
         }
-        let back = [gs(&c, "apr0"), gs(&c, "apr1"), gs(&c, "apr2"), gs(&c, "twr"), gs(&c, "rlHi0"), gs(&c, "rlHi1"), gs(&c, "rlHi3"), gs(&c, "hp"), gs(&c, "bbHi0")];
-        c.lanes(part, &back, &|q: Vec3| Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z), &|_, _| true);
+        let back = [
+            gs(&c, "apr0"),
+            gs(&c, "apr1"),
+            gs(&c, "apr2"),
+            gs(&c, "twr"),
+            gs(&c, "rlHi0"),
+            gs(&c, "rlHi1"),
+            gs(&c, "rlHi3"),
+            gs(&c, "hp"),
+            gs(&c, "bbHi0"),
+        ];
+        c.lanes(
+            part,
+            &back,
+            &|q: Vec3| Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z),
+            &|_, _| true,
+        );
     }
 
     // ------------------------------------------------------------------
@@ -749,16 +1105,44 @@ pub fn sedan() -> Car {
         let us = [-0.95f32, -0.33, 0.33, 0.95];
         let mut rows: Vec<Vec<Option<usize>>> = Vec::new();
         for (r, &y) in ys.iter().enumerate() {
-            rows.push(us.iter().enumerate().map(|(k, &u)| Some(c.node(&format!("hd{r}{k}"), top(y, u) + Vec3::Z * 0.004, part))).collect());
+            rows.push(
+                us.iter()
+                    .enumerate()
+                    .map(|(k, &u)| {
+                        Some(c.node(&format!("hd{r}{k}"), top(y, u) + Vec3::Z * 0.004, part))
+                    })
+                    .collect(),
+            );
         }
         c.panel(&rows, part, &[Role::Sheet; 4], Role::Sheet, true);
         let g = |r: usize, k: usize| rows[r][k].unwrap();
         // Hinges: rear corners to the cowl and the apron.
         for (k, x) in [(0usize, "r"), (3, "l")] {
             let (co, ap) = (c.id(&format!("cowlO{x}")), c.id(&format!("apr2{x}")));
-            c.hardware(g(3, k), co, Role::Hinge, part, &format!("hood_hinge_{x}"), 40e3);
-            c.hardware(g(3, k), ap, Role::Hinge, part, &format!("hood_hinge_{x}"), 40e3);
-            c.hardware(g(2, k), ap, Role::Hinge, part, &format!("hood_hinge_{x}"), 40e3);
+            c.hardware(
+                g(3, k),
+                co,
+                Role::Hinge,
+                part,
+                &format!("hood_hinge_{x}"),
+                40e3,
+            );
+            c.hardware(
+                g(3, k),
+                ap,
+                Role::Hinge,
+                part,
+                &format!("hood_hinge_{x}"),
+                40e3,
+            );
+            c.hardware(
+                g(2, k),
+                ap,
+                Role::Hinge,
+                part,
+                &format!("hood_hinge_{x}"),
+                40e3,
+            );
         }
         // Latch: a coupler at the front centre to the radiator support.
         let lp = top(-0.78, 0.0) - Vec3::Z * 0.03;
@@ -772,18 +1156,27 @@ pub fn sedan() -> Car {
             ("couplerStartRadius".into(), serde_json::json!(0.02)),
         ];
         c.nodes[strike].opts = vec![("tag".into(), serde_json::json!("hood_latch"))];
-        c.fan(latch, &[g(0, 1), g(0, 2), g(1, 1), g(1, 2)], Role::Sheet, part);
+        c.fan(
+            latch,
+            &[g(0, 1), g(0, 2), g(1, 1), g(1, 2)],
+            Role::Sheet,
+            part,
+        );
         let (rsc, a0l, a0r) = (c.id("rsC"), c.id("apr0l"), c.id("apr0r"));
         c.fan(strike, &[rsc, a0l, a0r], Role::Cross, body);
         // Bearing on the aprons, the radiator support and the cowl.
-        let seats: Vec<usize> = ["apr0l", "apr1l", "twrl", "apr2l", "apr0r", "apr1r", "twrr", "apr2r", "rsC", "cowlIl", "cowlIr", "cowlC"]
-            .iter()
-            .map(|b| c.id(b))
-            .collect();
+        let seats: Vec<usize> = [
+            "apr0l", "apr1l", "twrl", "apr2l", "apr0r", "apr1r", "twrr", "apr2r", "rsC", "cowlIl",
+            "cowlIr", "cowlC",
+        ]
+        .iter()
+        .map(|b| c.id(b))
+        .collect();
         let hood_nodes: Vec<usize> = rows.iter().flatten().flatten().copied().collect();
         for h in hood_nodes {
             let ph = c.p(h);
-            let mut best: Vec<(f32, usize)> = seats.iter().map(|&b| (c.p(b).distance(ph), b)).collect();
+            let mut best: Vec<(f32, usize)> =
+                seats.iter().map(|&b| (c.p(b).distance(ph), b)).collect();
             best.sort_by(|a, b| a.0.total_cmp(&b.0));
             if best[0].0 < 0.35 {
                 c.beam(h, best[0].1, Role::Bearing, part);
@@ -791,8 +1184,15 @@ pub fn sedan() -> Car {
         }
         // Pole lanes along the hood's outer edges (a pole at the front
         // corner meets them), backed by the aprons.
-        let back: Vec<usize> = ["apr0l", "apr1l", "twrl", "apr2l", "apr0r", "apr1r", "twrr", "apr2r"].iter().map(|b| c.id(b)).collect();
-        c.lanes(part, &back, &|q: Vec3| q, &|a: Vec3, b: Vec3| a.x.abs() > 0.5 && b.x.abs() > 0.5);
+        let back: Vec<usize> = [
+            "apr0l", "apr1l", "twrl", "apr2l", "apr0r", "apr1r", "twrr", "apr2r",
+        ]
+        .iter()
+        .map(|b| c.id(b))
+        .collect();
+        c.lanes(part, &back, &|q: Vec3| q, &|a: Vec3, b: Vec3| {
+            a.x.abs() > 0.5 && b.x.abs() > 0.5
+        });
     }
 
     // ------------------------------------------------------------------
@@ -804,15 +1204,43 @@ pub fn sedan() -> Car {
         let us = [-0.94f32, 0.0, 0.94];
         let mut rows: Vec<Vec<Option<usize>>> = Vec::new();
         for (r, &y) in ys.iter().enumerate() {
-            rows.push(us.iter().enumerate().map(|(k, &u)| Some(c.node(&format!("tk{r}{k}"), top(y, u) + Vec3::Z * 0.004, part))).collect());
+            rows.push(
+                us.iter()
+                    .enumerate()
+                    .map(|(k, &u)| {
+                        Some(c.node(&format!("tk{r}{k}"), top(y, u) + Vec3::Z * 0.004, part))
+                    })
+                    .collect(),
+            );
         }
         c.panel(&rows, part, &[Role::Sheet; 3], Role::Sheet, true);
         let g = |r: usize, k: usize| rows[r][k].unwrap();
         for (k, x) in [(0usize, "r"), (2, "l")] {
             let (dk, qb) = (c.id(&format!("dk{x}")), c.id(&format!("qb1{x}")));
-            c.hardware(g(0, k), dk, Role::Hinge, part, &format!("trunk_hinge_{x}"), 25e3);
-            c.hardware(g(0, k), qb, Role::Hinge, part, &format!("trunk_hinge_{x}"), 25e3);
-            c.hardware(g(1, k), qb, Role::Hinge, part, &format!("trunk_hinge_{x}"), 25e3);
+            c.hardware(
+                g(0, k),
+                dk,
+                Role::Hinge,
+                part,
+                &format!("trunk_hinge_{x}"),
+                25e3,
+            );
+            c.hardware(
+                g(0, k),
+                qb,
+                Role::Hinge,
+                part,
+                &format!("trunk_hinge_{x}"),
+                25e3,
+            );
+            c.hardware(
+                g(1, k),
+                qb,
+                Role::Hinge,
+                part,
+                &format!("trunk_hinge_{x}"),
+                25e3,
+            );
         }
         let lp = top(3.88, 0.0) - Vec3::Z * 0.04;
         let latch = c.node("tkLatch", lp, part);
@@ -825,13 +1253,24 @@ pub fn sedan() -> Car {
             ("couplerStartRadius".into(), serde_json::json!(0.02)),
         ];
         c.nodes[strike].opts = vec![("tag".into(), serde_json::json!("trunk_latch"))];
-        c.fan(latch, &[g(2, 1), g(2, 0), g(2, 2), g(1, 1)], Role::Sheet, part);
+        c.fan(
+            latch,
+            &[g(2, 1), g(2, 0), g(2, 2), g(1, 1)],
+            Role::Sheet,
+            part,
+        );
         let (rpc, rpl, rpr) = (c.id("rpC"), c.id("rpl"), c.id("rpr"));
         c.fan(strike, &[rpc, rpl, rpr], Role::Cross, body);
-        let seats: Vec<usize> = ["dkl", "dkr", "dkC", "qb1l", "qb1r", "qb2l", "qb2r", "rpl", "rpr", "rpC"].iter().map(|b| c.id(b)).collect();
+        let seats: Vec<usize> = [
+            "dkl", "dkr", "dkC", "qb1l", "qb1r", "qb2l", "qb2r", "rpl", "rpr", "rpC",
+        ]
+        .iter()
+        .map(|b| c.id(b))
+        .collect();
         for h in rows.iter().flatten().flatten().copied().collect::<Vec<_>>() {
             let ph = c.p(h);
-            let mut best: Vec<(f32, usize)> = seats.iter().map(|&b| (c.p(b).distance(ph), b)).collect();
+            let mut best: Vec<(f32, usize)> =
+                seats.iter().map(|&b| (c.p(b).distance(ph), b)).collect();
             best.sort_by(|a, b| a.0.total_cmp(&b.0));
             if best[0].0 < 0.35 {
                 c.beam(h, best[0].1, Role::Bearing, part);
@@ -846,14 +1285,30 @@ pub fn sedan() -> Car {
         let part = if front { Part::BumperF } else { Part::BumperR };
         let pre = if front { "fF" } else { "fR" };
         let xs = [-0.82f32, -0.62, -0.34, 0.0, 0.34, 0.62, 0.82];
-        let zs: [f32; 3] = if front { [0.30, 0.47, 0.64] } else { [0.36, 0.52, 0.70] };
+        let zs: [f32; 3] = if front {
+            [0.30, 0.47, 0.64]
+        } else {
+            [0.36, 0.52, 0.70]
+        };
         let mut rows: Vec<Vec<Option<usize>>> = Vec::new();
         for (r, &z) in zs.iter().enumerate() {
             let mut v = Vec::new();
             for (k, &xx) in xs.iter().enumerate() {
                 let y = end_y(xx.abs(), front);
                 let q = Vec3::new(side(y, z).x * xx.signum(), y, z);
-                let q = if xx == 0.0 { Vec3::new(0.0, if front { Y_FRONT + 0.005 } else { Y_REAR - 0.005 }, z) } else { q };
+                let q = if xx == 0.0 {
+                    Vec3::new(
+                        0.0,
+                        if front {
+                            Y_FRONT + 0.005
+                        } else {
+                            Y_REAR - 0.005
+                        },
+                        z,
+                    )
+                } else {
+                    q
+                };
                 v.push(Some(c.node(&format!("{pre}{r}{k}"), q, part)));
             }
             rows.push(v);
@@ -861,20 +1316,27 @@ pub fn sedan() -> Car {
         c.panel(&rows, part, &[Role::Sheet; 3], Role::Sheet, true);
         // Clips to the bumper beam (compression bearing plus light clips).
         let beam: Vec<usize> = if front {
-            ["bbLo0r", "bbHi0r", "bbLo1r", "bbHi1r", "bbLoC", "bbHiC", "bbLo1l", "bbHi1l", "bbLo0l", "bbHi0l", "rsC", "apr0l", "apr0r"]
-                .iter()
-                .map(|b| c.id(b))
-                .collect()
+            [
+                "bbLo0r", "bbHi0r", "bbLo1r", "bbHi1r", "bbLoC", "bbHiC", "bbLo1l", "bbHi1l",
+                "bbLo0l", "bbHi0l", "rsC", "apr0l", "apr0r",
+            ]
+            .iter()
+            .map(|b| c.id(b))
+            .collect()
         } else {
-            ["rbLo0r", "rbHi0r", "rbLo1r", "rbHi1r", "rbLoC", "rbHiC", "rbLo1l", "rbHi1l", "rbLo0l", "rbHi0l", "rpl", "rpr", "rpC", "qr0l", "qr0r"]
-                .iter()
-                .map(|b| c.id(b))
-                .collect()
+            [
+                "rbLo0r", "rbHi0r", "rbLo1r", "rbHi1r", "rbLoC", "rbHiC", "rbLo1l", "rbHi1l",
+                "rbLo0l", "rbHi0l", "rpl", "rpr", "rpC", "qr0l", "qr0r",
+            ]
+            .iter()
+            .map(|b| c.id(b))
+            .collect()
         };
         let grp = format!("{}_clips", part.name().trim_start_matches("gen2_"));
         for f in rows.iter().flatten().flatten().copied().collect::<Vec<_>>() {
             let pf = c.p(f);
-            let mut best: Vec<(f32, usize)> = beam.iter().map(|&b| (c.p(b).distance(pf), b)).collect();
+            let mut best: Vec<(f32, usize)> =
+                beam.iter().map(|&b| (c.p(b).distance(pf), b)).collect();
             best.sort_by(|a, b| a.0.total_cmp(&b.0));
             c.beam(f, best[0].1, Role::Bearing, part);
             c.hardware(f, best[1].1, Role::Bolt, part, &grp, 2.5e3);
@@ -886,11 +1348,14 @@ pub fn sedan() -> Car {
     // rear structure.
     // ------------------------------------------------------------------
     {
-        let back: Vec<usize> = ["si0", "si1", "si2", "si3", "wh", "rrHi1", "rrHi2", "rrHi3", "rrLo2", "rrLo3", "bp1", "hp", "cpLo"]
-            .iter()
-            .flat_map(|b| both(b))
-            .map(|b| c.id(&b))
-            .collect();
+        let back: Vec<usize> = [
+            "si0", "si1", "si2", "si3", "wh", "rrHi1", "rrHi2", "rrHi3", "rrLo2", "rrLo3", "bp1",
+            "hp", "cpLo",
+        ]
+        .iter()
+        .flat_map(|b| both(b))
+        .map(|b| c.id(&b))
+        .collect();
         // Only the side-facing body triangles get lanes: split the body's
         // triangles into a temporary part.
         let side_tris: Vec<usize> = (0..c.tris.len())
@@ -910,7 +1375,12 @@ pub fn sedan() -> Car {
         // Split under the Engine tag, then return them (and their lane nodes)
         // to the body.
         let first_node = c.nodes.len();
-        c.lanes(Part::Engine, &back, &|q: Vec3| Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z), &|_, _| true);
+        c.lanes(
+            Part::Engine,
+            &back,
+            &|q: Vec3| Vec3::new(side(q.y, q.z).x * q.x.signum(), q.y, q.z),
+            &|_, _| true,
+        );
         for i in first_node..c.nodes.len() {
             c.nodes[i].part = body;
             let nm = c.nodes[i].name.replace("xengine", "xbody");
@@ -942,7 +1412,11 @@ pub fn sedan() -> Car {
             let ring: Vec<usize> = (0..RIM_NODES)
                 .map(|k| {
                     let a = (k as f32 + 0.5) * std::f32::consts::TAU / RIM_NODES as f32;
-                    let q = Vec3::new(TRACK_HALF * s, ya + RIM_R * a.cos(), WHEEL_R + RIM_R * a.sin());
+                    let q = Vec3::new(
+                        TRACK_HALF * s,
+                        ya + RIM_R * a.cos(),
+                        WHEEL_R + RIM_R * a.sin(),
+                    );
                     c.node(&format!("rim{w}{k}{x}"), q, body)
                 })
                 .collect();
@@ -950,7 +1424,11 @@ pub fn sedan() -> Car {
                 c.nodes[r].no_group = true;
                 c.nodes[r].fixed_mass = RIM_NODE_KG;
                 // Off the axle line too, or the ring spins freely about it.
-                let arm = if w == "F" { c.id(&format!("twr{x}")) } else { c.id(&format!("wh{x}")) };
+                let arm = if w == "F" {
+                    c.id(&format!("twr{x}"))
+                } else {
+                    c.id(&format!("wh{x}"))
+                };
                 c.fan(r, &[hi, ho, arm], Role::Susp, body);
                 c.beam(r, ring[(k + 1) % ring.len()], Role::Susp, body);
                 c.beam(r, ring[(k + 2) % ring.len()], Role::Susp, body);
@@ -992,18 +1470,35 @@ pub fn sedan() -> Car {
         ("radiator_cooling", 15.0, Vec3::new(0.0, -0.68, 0.55), 0.4),
         ("windshield", 13.0, Vec3::new(0.0, 1.20, 1.20), 0.7),
         ("rear_glass", 9.0, Vec3::new(0.0, 3.05, 1.25), 0.6),
-        ("front_subframe_steering", 45.0, Vec3::new(0.0, 0.0, 0.36), 0.6),
+        (
+            "front_subframe_steering",
+            45.0,
+            Vec3::new(0.0, 0.0, 0.36),
+            0.6,
+        ),
         ("rear_subframe", 22.0, Vec3::new(0.0, 2.85, 0.35), 0.65),
         // HVAC module and the dash's wiring sit behind the dash panel.
         ("hvac_wiring", 40.0, Vec3::new(0.0, 0.85, 0.65), 0.6),
     ];
     for (name, kg, at, radius) in named {
-        c.named.push(Named { name, kg, at, radius, part: body });
+        c.named.push(Named {
+            name,
+            kg,
+            at,
+            radius,
+            part: body,
+        });
     }
     // Unsprung (front drive: the front corners carry the drive shafts).
     for s in [1.0f32, -1.0] {
         for (y, kg) in [(AXLE_F, UNSPRUNG_KG + 6.0), (AXLE_R, UNSPRUNG_KG - 6.0)] {
-            c.named.push(Named { name: "unsprung", kg, at: Vec3::new(TRACK_HALF * s, y, WHEEL_R), radius: 0.1, part: body });
+            c.named.push(Named {
+                name: "unsprung",
+                kg,
+                at: Vec3::new(TRACK_HALF * s, y, WHEEL_R),
+                radius: 0.1,
+                part: body,
+            });
         }
     }
     let fixed: f32 = BUMPER_F_KG
@@ -1022,7 +1517,13 @@ pub fn sedan() -> Car {
     // fluids, brake booster and ABS unit), ahead of the dash.
     let module = KERB - fixed;
     assert!(module >= 0.0, "masses exceed the kerb by {} kg", -module);
-    c.named.push(Named { name: "front_end_module", kg: module, at: Vec3::new(0.0, -0.40, 0.62), radius: 0.55, part: body });
+    c.named.push(Named {
+        name: "front_end_module",
+        kg: module,
+        at: Vec3::new(0.0, -0.40, 0.62),
+        radius: 0.55,
+        part: body,
+    });
     let body_kg = ACCORD_BIW;
     c.part_mass = [
         (Part::Body, body_kg),
@@ -1043,12 +1544,27 @@ pub fn sedan() -> Car {
     c.assign_masses();
 
     // Wheels and reference nodes.
-    for (name, w, s, y) in [("FL", "F", 1.0f32, AXLE_F), ("FR", "F", -1.0, AXLE_F), ("RL", "R", 1.0, AXLE_R), ("RR", "R", -1.0, AXLE_R)] {
+    for (name, w, s, y) in [
+        ("FL", "F", 1.0f32, AXLE_F),
+        ("FR", "F", -1.0, AXLE_F),
+        ("RL", "R", 1.0, AXLE_R),
+        ("RR", "R", -1.0, AXLE_R),
+    ] {
         let x = lr(s);
         let _ = y;
         let (n1, n2) = (c.id(&format!("hub{w}i{x}")), c.id(&format!("hub{w}o{x}")));
-        let arm = if w == "F" { c.id(&format!("twr{x}")) } else { c.id(&format!("wh{x}")) };
-        c.wheels.push(Wheel { name, n1, n2, arm, dir: s });
+        let arm = if w == "F" {
+            c.id(&format!("twr{x}"))
+        } else {
+            c.id(&format!("wh{x}"))
+        };
+        c.wheels.push(Wheel {
+            name,
+            n1,
+            n2,
+            arm,
+            dir: s,
+        });
     }
     c.refs = [c.id("tn1"), c.id("tn2"), c.id("si1l"), c.id("rfC1")];
     let hub = hub_extra(&c);
@@ -1064,13 +1580,24 @@ pub fn sedan() -> Car {
         // Crushed sheet steel stacks at about a third of its length (a folded
         // crush can's solid length): JBeam's deformLimit on the crush zones'
         // beams, so a crushed bay stacks instead of inverting.
-        if (mid.y < fw_y - 0.05 || mid.y > 2.9) && !matches!(b.role, Role::Sheet | Role::Bend | Role::Tie | Role::Backing) {
+        if (mid.y < fw_y - 0.05 || mid.y > 2.9)
+            && !matches!(b.role, Role::Sheet | Role::Bend | Role::Tie | Role::Backing)
+        {
             b.deform_limit = STACK_LIMIT;
         }
         if b.part != body {
             continue;
         }
-        let web =matches!(b.role, Role::Web | Role::Cross | Role::Firewall | Role::Floor | Role::Tunnel | Role::RoofBow | Role::Sheet);
+        let web = matches!(
+            b.role,
+            Role::Web
+                | Role::Cross
+                | Role::Firewall
+                | Role::Floor
+                | Role::Tunnel
+                | Role::RoofBow
+                | Role::Sheet
+        );
         if !web {
             continue;
         }

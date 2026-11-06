@@ -89,7 +89,10 @@ impl Part {
         }
     }
     pub fn is_door(self) -> bool {
-        matches!(self, Part::DoorFL | Part::DoorFR | Part::DoorRL | Part::DoorRR)
+        matches!(
+            self,
+            Part::DoorFL | Part::DoorFR | Part::DoorRL | Part::DoorRR
+        )
     }
 }
 
@@ -139,6 +142,8 @@ pub enum Role {
     Engine,
     /// Engine mounts.
     Mount,
+    /// A gapped stop (BOUNDED, no base spring): the engine against the dash.
+    Stop,
     /// Suspension links holding the hubs (raycast wheels' axle nodes).
     Susp,
 }
@@ -148,7 +153,12 @@ fn role_rank(r: Role) -> u8 {
     match r {
         Role::Tie | Role::Backing | Role::Bend => 0,
         Role::Sheet | Role::Bearing => 1,
-        Role::Web | Role::Cross | Role::Floor | Role::Firewall | Role::RoofBow | Role::DoorFrame => 2,
+        Role::Web
+        | Role::Cross
+        | Role::Floor
+        | Role::Firewall
+        | Role::RoofBow
+        | Role::DoorFrame => 2,
         _ => 3,
     }
 }
@@ -198,7 +208,10 @@ pub fn sheet_eps(part: Part) -> f32 {
 }
 
 fn env_f(k: &str, d: f32) -> f32 {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(d)
 }
 
 /// The crash structure's yield multiple over the body's 1.15 % (rails, cans,
@@ -206,6 +219,11 @@ fn env_f(k: &str, d: f32) -> f32 {
 /// frontal residual crush (`crash-reference-targets.md` §1).
 pub fn crush_mult() -> f32 {
     env_f("GEN2_CRUSH", 4.5)
+}
+
+/// The crush cans' yield against the rails' (`GEN2_CAN`): their trigger.
+pub fn can_mult() -> f32 {
+    env_f("GEN2_CAN", 0.6)
 }
 
 /// The cabin's yield multiple (sills, pillars, roof rails), `GEN2_CABIN`.
@@ -243,12 +261,16 @@ impl Role {
             support: false,
             limit_expansion: lim,
         };
-        let fixed = |k: f32, eps: f32, strength: f32| RoleSpec { k_fixed: k, strength, ..s(0.0, eps, 0.0, false) };
+        let fixed = |k: f32, eps: f32, strength: f32| RoleSpec {
+            k_fixed: k,
+            strength,
+            ..s(0.0, eps, 0.0, false)
+        };
         let e = sheet_eps(part);
         let body = 0.0115;
         match self {
             Role::Rail => s(1.05e6, body * crush_mult(), 5.5, true),
-            Role::CrushCan => s(0.9e6, body * 0.6 * crush_mult(), 3.0, true),
+            Role::CrushCan => s(0.9e6, body * can_mult() * crush_mult(), 3.0, true),
             Role::BumperBeam => s(0.9e6, body * 2.0, 4.0, true),
             Role::Apron => s(0.9e6, body * crush_mult(), 3.0, true),
             Role::Firewall => s(0.8e6, body, 4.0, false),
@@ -267,15 +289,21 @@ impl Role {
             Role::Bend => s(0.6 * sheet_kl(part), e, 0.0, false),
             Role::DoorFrame => s(0.75e6, 0.0145, 0.0, true),
             Role::Intrusion => s(0.9e6, 0.0145 * 2.0, 0.0, true),
-            Role::Tie | Role::Backing => s(sheet_kl(part), e.max(0.0145), 0.0, false),
+            // Elastic: a light lane node follows the panel (its own beams yield).
+            Role::Tie | Role::Backing => s(sheet_kl(part), f32::INFINITY, 0.0, false),
             // Hardware (census: hinges 30–98 kN a beam, k 0.5–3e6).
             Role::Hinge => fixed(1.5e6, inf, 40e3),
             Role::Bolt => fixed(0.8e6, inf, 9e3),
             // Seals and stops: SUPPORT, 100–280 kN.
-            Role::Bearing => RoleSpec { support: true, ..fixed(0.6e6, inf, 150e3) },
+            Role::Bearing => RoleSpec {
+                support: true,
+                ..fixed(0.6e6, inf, 150e3)
+            },
             Role::Engine => fixed(6e6, inf, inf),
             Role::Mount => fixed(2.0e6, inf, 60e3),
             Role::Susp => fixed(3.0e6, 0.03, 250e3),
+            // Free until engaged: no share of the bound at rest.
+            Role::Stop => fixed(1.0, f32::INFINITY, f32::INFINITY),
         }
     }
 }
@@ -376,7 +404,10 @@ impl Car {
     }
 
     pub fn id(&self, name: &str) -> usize {
-        *self.by_name.get(name).unwrap_or_else(|| panic!("no node {name}"))
+        *self
+            .by_name
+            .get(name)
+            .unwrap_or_else(|| panic!("no node {name}"))
     }
 
     pub fn p(&self, i: usize) -> Vec3 {
@@ -389,7 +420,9 @@ impl Car {
         assert_ne!(a, b, "beam onto itself: {}", self.nodes[a].name);
         let key = (a.min(b), a.max(b));
         if let Some(&j) = self.pair.get(&key) {
-            if role_rank(role) > role_rank(self.beams[j].role) && self.beams[j].break_group.is_none() {
+            if role_rank(role) > role_rank(self.beams[j].role)
+                && self.beams[j].break_group.is_none()
+            {
                 self.beams[j].role = role;
             }
             return j;
@@ -417,7 +450,15 @@ impl Car {
     }
 
     /// A hardware beam in a break group, with its own strength.
-    pub fn hardware(&mut self, a: usize, b: usize, role: Role, part: Part, group: &str, strength: f32) -> usize {
+    pub fn hardware(
+        &mut self,
+        a: usize,
+        b: usize,
+        role: Role,
+        part: Part,
+        group: &str,
+        strength: f32,
+    ) -> usize {
         let j = self.beam(a, b, role, part);
         self.beams[j].role = role;
         self.beams[j].break_group = Some(group.to_string());
@@ -441,7 +482,15 @@ impl Car {
     }
 
     /// Ladder between two parallel chains: rungs and both diagonals.
-    pub fn ladder(&mut self, a: &[usize], b: &[usize], chord: Role, rung: Role, web: Role, part: Part) {
+    pub fn ladder(
+        &mut self,
+        a: &[usize],
+        b: &[usize],
+        chord: Role,
+        rung: Role,
+        web: Role,
+        part: Part,
+    ) {
         self.chain(a, chord, part);
         self.chain(b, chord, part);
         for k in 0..a.len().min(b.len()) {
@@ -462,7 +511,11 @@ impl Car {
         }
         let cen = (pa + pb + pc) / 3.0;
         let axis = Vec3::new(0.0, cen.y, 0.70);
-        let out = if (cen - axis).length() < 0.05 { Vec3::Z } else { cen - axis };
+        let out = if (cen - axis).length() < 0.05 {
+            Vec3::Z
+        } else {
+            cen - axis
+        };
         if n.dot(out) >= 0.0 {
             self.tris.push(Tri { n: [a, b, c], part });
         } else {
@@ -474,7 +527,14 @@ impl Car {
     /// columns in order): sheet edges along rows and columns, both diagonals of
     /// each full cell (sheet), collision triangles, and two-bay bends along rows
     /// and columns when `bends`.
-    pub fn panel(&mut self, rows: &[Vec<Option<usize>>], part: Part, row_role: &[Role], col_role: Role, bends: bool) {
+    pub fn panel(
+        &mut self,
+        rows: &[Vec<Option<usize>>],
+        part: Part,
+        row_role: &[Role],
+        col_role: Role,
+        bends: bool,
+    ) {
         for (r, row) in rows.iter().enumerate() {
             let ids: Vec<usize> = row.iter().flatten().copied().collect();
             let role = row_role.get(r).copied().unwrap_or(Role::Sheet);
@@ -487,7 +547,10 @@ impl Car {
         }
         let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
         for c in 0..cols {
-            let ids: Vec<usize> = rows.iter().filter_map(|r| r.get(c).copied().flatten()).collect();
+            let ids: Vec<usize> = rows
+                .iter()
+                .filter_map(|r| r.get(c).copied().flatten())
+                .collect();
             self.chain(&ids, col_role, part);
             if bends {
                 for w in ids.windows(3) {
@@ -525,8 +588,16 @@ impl Car {
     /// a fan, and every lane node is tied to its neighbours along the edge, to
     /// the triangle corners, to the centre nodes, and to the nearest `backing`
     /// node (its support across the panel).
-    pub fn lanes(&mut self, part: Part, backing: &[usize], surf: &dyn Fn(Vec3) -> Vec3, edge_ok: &dyn Fn(Vec3, Vec3) -> bool) {
-        let tris: Vec<usize> = (0..self.tris.len()).filter(|&t| self.tris[t].part == part).collect();
+    pub fn lanes(
+        &mut self,
+        part: Part,
+        backing: &[usize],
+        surf: &dyn Fn(Vec3) -> Vec3,
+        edge_ok: &dyn Fn(Vec3, Vec3) -> bool,
+    ) {
+        let tris: Vec<usize> = (0..self.tris.len())
+            .filter(|&t| self.tris[t].part == part)
+            .collect();
         let mut edge_pts: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
         let mut serial = 0usize;
         let pname = part.name().trim_start_matches("gen2_").to_string();
@@ -589,7 +660,9 @@ impl Car {
             if split == 1 {
                 // One split edge: a fan from the corner opposite it.
                 let k0 = perim.iter().position(|&q| q == opposite).unwrap();
-                let ring: Vec<usize> = (0..perim.len()).map(|k| perim[(k0 + k) % perim.len()]).collect();
+                let ring: Vec<usize> = (0..perim.len())
+                    .map(|k| perim[(k0 + k) % perim.len()])
+                    .collect();
                 for k in 1..ring.len() - 1 {
                     new_tris.push([ring[0], ring[k], ring[k + 1]]);
                 }
@@ -607,16 +680,26 @@ impl Car {
             }
         }
         let old = std::mem::take(&mut self.tris);
-        self.tris = old.into_iter().zip(keep).filter(|(_, k)| *k).map(|(t, _)| t).collect();
+        self.tris = old
+            .into_iter()
+            .zip(keep)
+            .filter(|(_, k)| *k)
+            .map(|(t, _)| t)
+            .collect();
         for t in new_tris {
             self.tri(t[0], t[1], t[2], part);
         }
         // Backing ties: every lane node to its nearest backing node.
         if !backing.is_empty() {
-            let lane: Vec<usize> = (0..self.nodes.len()).filter(|&i| self.nodes[i].contact && self.nodes[i].part == part).collect();
+            let lane: Vec<usize> = (0..self.nodes.len())
+                .filter(|&i| self.nodes[i].contact && self.nodes[i].part == part)
+                .collect();
             for i in lane {
                 let p = self.p(i);
-                let mut best: Vec<(f32, usize)> = backing.iter().map(|&b| (self.p(b).distance(p), b)).collect();
+                let mut best: Vec<(f32, usize)> = backing
+                    .iter()
+                    .map(|&b| (self.p(b).distance(p), b))
+                    .collect();
                 best.sort_by(|x, y| x.0.total_cmp(&y.0));
                 for &(_, b) in best.iter().take(1) {
                     self.beam(i, b, Role::Backing, part);
@@ -650,17 +733,30 @@ impl Car {
         // its centre: the structural nodes stand for the sheet around them).
         let structural_of: HashMap<Part, Vec<usize>> = Part::ALL
             .iter()
-            .map(|&p| (p, (0..n).filter(|&i| self.nodes[i].part == p && !self.nodes[i].contact).collect()))
+            .map(|&p| {
+                (
+                    p,
+                    (0..n)
+                        .filter(|&i| self.nodes[i].part == p && !self.nodes[i].contact)
+                        .collect(),
+                )
+            })
             .collect();
         for t in &self.tris {
             let [a, b, c] = t.n;
-            let area = 0.5 * (self.p(b) - self.p(a)).cross(self.p(c) - self.p(a)).length();
+            let area = 0.5
+                * (self.p(b) - self.p(a))
+                    .cross(self.p(c) - self.p(a))
+                    .length();
             let dens = 0.8 * 7.85 * 3.0; // 0.8 mm steel ≈ 6.3 kg/m², relative weight only
             for &e in &[a, b, c] {
                 let e = if self.nodes[e].contact {
                     let p = self.p(e);
                     let list = &structural_of[&t.part];
-                    *list.iter().min_by(|&&x, &&y| self.p(x).distance(p).total_cmp(&self.p(y).distance(p))).unwrap()
+                    *list
+                        .iter()
+                        .min_by(|&&x, &&y| self.p(x).distance(p).total_cmp(&self.p(y).distance(p)))
+                        .unwrap()
                 } else {
                     e
                 };
@@ -675,11 +771,20 @@ impl Car {
             }
         }
         for (&part, &kg) in &self.part_mass.clone() {
-            let ids: Vec<usize> = (0..n).filter(|&i| self.nodes[i].part == part && self.nodes[i].fixed_mass == 0.0).collect();
+            let ids: Vec<usize> = (0..n)
+                .filter(|&i| self.nodes[i].part == part && self.nodes[i].fixed_mass == 0.0)
+                .collect();
             let contact = ids.iter().filter(|&&i| self.nodes[i].contact).count();
             let budget = kg - contact as f32 * CONTACT_MASS;
-            assert!(budget > 0.0, "{part:?}: {kg} kg for {contact} contact nodes");
-            let mut sw: f32 = ids.iter().filter(|&&i| !self.nodes[i].contact).map(|&i| w[i]).sum();
+            assert!(
+                budget > 0.0,
+                "{part:?}: {kg} kg for {contact} contact nodes"
+            );
+            let mut sw: f32 = ids
+                .iter()
+                .filter(|&&i| !self.nodes[i].contact)
+                .map(|&i| w[i])
+                .sum();
             let structural = ids.iter().filter(|&&i| !self.nodes[i].contact).count();
             if sw <= 0.0 {
                 for &i in &ids {
@@ -690,17 +795,37 @@ impl Car {
             // A floor of half the mean share (BeamNG closures are near uniform): no node is left
             // as light as a lane node.
             let floor = 0.5 * sw / structural as f32;
-            let sw2: f32 = ids.iter().filter(|&&i| !self.nodes[i].contact).map(|&i| w[i].max(floor)).sum();
+            let sw2: f32 = ids
+                .iter()
+                .filter(|&&i| !self.nodes[i].contact)
+                .map(|&i| w[i].max(floor))
+                .sum();
             for &i in &ids {
-                self.nodes[i].mass = if self.nodes[i].contact { CONTACT_MASS } else { budget * w[i].max(floor) / sw2 };
+                self.nodes[i].mass = if self.nodes[i].contact {
+                    CONTACT_MASS
+                } else {
+                    budget * w[i].max(floor) / sw2
+                };
             }
         }
         for m in self.named.clone() {
             let ids: Vec<usize> = (0..n)
-                .filter(|&i| self.nodes[i].part == m.part && !self.nodes[i].contact && self.p(i).distance(m.at) <= m.radius)
+                .filter(|&i| {
+                    self.nodes[i].part == m.part
+                        && !self.nodes[i].contact
+                        && self.p(i).distance(m.at) <= m.radius
+                })
                 .collect();
-            assert!(!ids.is_empty(), "named mass {} has no nodes within {} m", m.name, m.radius);
-            let ws: Vec<f32> = ids.iter().map(|&i| 1.0 / (self.p(i).distance(m.at) + 0.15)).collect();
+            assert!(
+                !ids.is_empty(),
+                "named mass {} has no nodes within {} m",
+                m.name,
+                m.radius
+            );
+            let ws: Vec<f32> = ids
+                .iter()
+                .map(|&i| 1.0 / (self.p(i).distance(m.at) + 0.15))
+                .collect();
             let s: f32 = ws.iter().sum();
             for (&i, &wi) in ids.iter().zip(&ws) {
                 self.nodes[i].mass += m.kg * wi / s;
@@ -716,8 +841,14 @@ impl Car {
     /// mass (`hub_extra`, kg per node) counts as the solver adds it.
     pub fn assign_springs(&mut self, hub_extra: &HashMap<usize, f32>) {
         let n = self.nodes.len();
-        let m: Vec<f32> = (0..n).map(|i| self.nodes[i].mass + hub_extra.get(&i).copied().unwrap_or(0.0)).collect();
-        let len: Vec<f32> = self.beams.iter().map(|b| self.p(b.a).distance(self.p(b.b)).max(0.02)).collect();
+        let m: Vec<f32> = (0..n)
+            .map(|i| self.nodes[i].mass + hub_extra.get(&i).copied().unwrap_or(0.0))
+            .collect();
+        let len: Vec<f32> = self
+            .beams
+            .iter()
+            .map(|b| self.p(b.a).distance(self.p(b.b)).max(0.02))
+            .collect();
         let mu = |b: &Beam| m[b.a] * m[b.b] / (m[b.a] + m[b.b]);
         let mult = stiff_mult();
         let mut ks: Vec<f32> = self
@@ -726,7 +857,11 @@ impl Car {
             .zip(&len)
             .map(|(b, &l)| {
                 let sp = b.role.spec(b.part);
-                mult * if sp.k_fixed > 0.0 { sp.k_fixed } else { sp.kl / l.max(SPRING_LENGTH) }
+                mult * if sp.k_fixed > 0.0 {
+                    sp.k_fixed
+                } else {
+                    sp.kl / l.max(SPRING_LENGTH)
+                }
             })
             .collect();
         let damp = |k: f32, b: &Beam| 2.0 * ZETA * (k * mu(b)).sqrt();
@@ -787,16 +922,39 @@ impl Car {
         }
         // The real bound: the highest mode of M⁻¹K (power iteration), the
         // beams of the nodes that carry it softened until ω_max·h ≤ OMEGA_H.
-        let dirs: Vec<Vec3> = self.beams.iter().map(|b| (self.p(b.b) - self.p(b.a)).normalize_or_zero()).collect();
-        let mut x: Vec<Vec3> = (0..n).map(|i| Vec3::new((i % 7) as f32 - 3.0, (i % 5) as f32 - 2.0, (i % 3) as f32 - 1.5)).collect();
+        let dirs: Vec<Vec3> = self
+            .beams
+            .iter()
+            .map(|b| (self.p(b.b) - self.p(b.a)).normalize_or_zero())
+            .collect();
+        let mut x: Vec<Vec3> = (0..n)
+            .map(|i| {
+                Vec3::new(
+                    (i % 7) as f32 - 3.0,
+                    (i % 5) as f32 - 2.0,
+                    (i % 3) as f32 - 1.5,
+                )
+            })
+            .collect();
         // Damping counts as stiffness 2c/h (symplectic Euler with damping is
         // stable while h²ω² + 2hγ < 4); the loader's latch couplers (spec §7:
         // k = 0.16 μ/h², c = √(kμ), isotropic) are in the model too.
         let mut couplers: Vec<(usize, usize, f32)> = Vec::new();
         for i in 0..n {
-            let tag = |k: &str| self.nodes[i].opts.iter().find(|(o, _)| o == k).and_then(|(_, v)| v.as_str().map(str::to_string));
+            let tag = |k: &str| {
+                self.nodes[i]
+                    .opts
+                    .iter()
+                    .find(|(o, _)| o == k)
+                    .and_then(|(_, v)| v.as_str().map(str::to_string))
+            };
             if let Some(t) = tag("couplerTag") {
-                if let Some(o) = (0..n).find(|&o| self.nodes[o].opts.iter().any(|(k, v)| k == "tag" && v.as_str() == Some(&t))) {
+                if let Some(o) = (0..n).find(|&o| {
+                    self.nodes[o]
+                        .opts
+                        .iter()
+                        .any(|(k, v)| k == "tag" && v.as_str() == Some(&t))
+                }) {
                     let mu = m[i] * m[o] / (m[i] + m[o]);
                     couplers.push((i, o, 0.96 * mu / (H * H)));
                 }
@@ -846,14 +1004,20 @@ impl Car {
             let sp = b.role.spec(b.part);
             b.k = ks[j];
             b.c = 2.0 * ZETA * (ks[j] * (m[b.a] * m[b.b] / (m[b.a] + m[b.b]))).sqrt();
-            b.deform = if sp.eps.is_finite() { sp.eps * ks[j] * len[j].max(SPRING_LENGTH) } else { f32::INFINITY };
+            b.deform = if sp.eps.is_finite() {
+                sp.eps * ks[j] * len[j].max(SPRING_LENGTH)
+            } else {
+                f32::INFINITY
+            };
         }
     }
 
     /// Gershgorin row of every node as a multiple of sedan1's bound.
     pub fn rows(&self, hub_extra: &HashMap<usize, f32>) -> Vec<f32> {
         let n = self.nodes.len();
-        let m: Vec<f32> = (0..n).map(|i| self.nodes[i].mass + hub_extra.get(&i).copied().unwrap_or(0.0)).collect();
+        let m: Vec<f32> = (0..n)
+            .map(|i| self.nodes[i].mass + hub_extra.get(&i).copied().unwrap_or(0.0))
+            .collect();
         let mut r = vec![0.0f32; n];
         for b in &self.beams {
             let q = H * H * b.k + 2.0 * H * b.c;
