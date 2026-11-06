@@ -103,7 +103,7 @@ impl MetalExplicitBeams {
         let fast = std::env::var("ENGINE_FAST_MATH").as_deref() != Ok("off");
         let options = CompileOptions::new();
         options.set_fast_math_enabled(fast);
-        let mut kernels = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact, Kernel::ContactBig];
+        let mut kernels = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact];
         kernels.extend((0..plan::VV_PASSES.len()).map(Kernel::Vv));
         if layout.wide_ok {
             kernels.extend((0..plan::WIDE_PASSES.len()).map(Kernel::Wide));

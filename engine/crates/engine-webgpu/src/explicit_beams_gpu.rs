@@ -18,8 +18,6 @@
 
 use crate::{
     EXPLICIT_BEAMS_AERO_WGSL, EXPLICIT_BEAMS_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
-    EXPLICIT_BEAMS_CONTACT_BIG_AERO_WGSL, EXPLICIT_BEAMS_CONTACT_BIG_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_BIG_WGSL,
-    EXPLICIT_BEAMS_CONTACT_BIG_WIDE_WGSL,
     EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_WGSL,
     EXPLICIT_BEAMS_CONTACT_WIDE_WGSL, EXPLICIT_BEAMS_SOLO_AERO_WGSL, EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL,
     EXPLICIT_BEAMS_SOLO_WGSL, EXPLICIT_BEAMS_SOLO_WIDE_WGSL, EXPLICIT_BEAMS_VV_PASSES, EXPLICIT_BEAMS_WGSL,
@@ -145,8 +143,6 @@ struct ContactPipes {
     groups: wgpu::ComputePipeline,
     /// The solo vehicles' frame (`EB_VV_SOLO`).
     solo: wgpu::ComputePipeline,
-    /// The groups of more than four members ([`Kernel::ContactBig`]).
-    big: wgpu::ComputePipeline,
 }
 
 /// The vehicle-contact passes' bind group layout entries: the frame's bindings,
@@ -256,10 +252,6 @@ fn module_wgsl(name: &str) -> &'static str {
         "explicit_beams_contact_wide" => EXPLICIT_BEAMS_CONTACT_WIDE_WGSL,
         "explicit_beams_contact_aero" => EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
         "explicit_beams_contact_aero_wide" => EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
-        "explicit_beams_contact_big" => EXPLICIT_BEAMS_CONTACT_BIG_WGSL,
-        "explicit_beams_contact_big_wide" => EXPLICIT_BEAMS_CONTACT_BIG_WIDE_WGSL,
-        "explicit_beams_contact_big_aero" => EXPLICIT_BEAMS_CONTACT_BIG_AERO_WGSL,
-        "explicit_beams_contact_big_aero_wide" => EXPLICIT_BEAMS_CONTACT_BIG_AERO_WIDE_WGSL,
         _ => EXPLICIT_BEAMS_VV_PASSES
             .iter()
             .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
@@ -277,7 +269,7 @@ impl Contact {
     fn new(
         device: &wgpu::Device,
         buffers: &[&wgpu::Buffer; 9],
-        (contact_wgsl, solo_wgsl, big_wgsl): (&str, &str, &str),
+        (contact_wgsl, solo_wgsl): (&str, &str),
         acc: &wgpu::Buffer,
         (status_at, cap_at): (u64, u64),
         args_init: &[u8],
@@ -345,7 +337,6 @@ impl Contact {
             plan: plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), &plan_layout)),
             groups: make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout),
             solo: make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout),
-            big: make(plan::CONTACT_ENTRY, big_wgsl, &contact_layout),
         });
         Self {
             pipes,
@@ -450,7 +441,6 @@ fn kernel_name(cmd: &Cmd) -> &'static str {
         Kernel::Frame => "explicit frame (solo)",
         Kernel::Solo => "explicit solo vehicles",
         Kernel::Contact => "explicit contact groups",
-        Kernel::ContactBig => "explicit large contact groups",
         Kernel::Vv(0) => "explicit vv bounds",
         Kernel::Vv(1) => "explicit vv pairs",
         Kernel::Vv(_) => "explicit vv group plan",
@@ -505,11 +495,11 @@ impl ExplicitBeamsGpu {
                 entry,
                 layout: Some(contact_entries(true)),
             }));
-            for kernel in [Kernel::Contact, Kernel::Solo, Kernel::ContactBig] {
+            for kernel in [Kernel::Contact, Kernel::Solo] {
                 specs.push(crate::ComputeSpec {
-                    label: kernel.entry(),
+                    label: plan::FRAME_ENTRY,
                     wgsl: u(module_wgsl(kernel.module(aero, lanes))),
-                    entry: kernel.entry(),
+                    entry: plan::FRAME_ENTRY,
                     layout: Some(contact_entries(false)),
                 });
             }
@@ -600,7 +590,6 @@ impl ExplicitBeamsGpu {
             (
                 module_wgsl(Kernel::Contact.module(aero, lanes)),
                 module_wgsl(Kernel::Solo.module(aero, lanes)),
-                module_wgsl(Kernel::ContactBig.module(aero, lanes)),
             ),
             &acc,
             (layout.status.base, layout.status.cap),
@@ -1219,15 +1208,6 @@ impl ExplicitBeamsGpu {
                 );
                 pass.set_pipeline(if kernel == Kernel::Solo { solo } else { groups });
                 pass.set_bind_group(0, g, &[]);
-            }
-            Kernel::ContactBig => {
-                // A test variant's contact module steps every group itself.
-                if alt.is_some() || std::env::var("XNOBIG").is_ok() {
-                    return;
-                }
-                let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
-                pass.set_pipeline(&p.big);
-                pass.set_bind_group(0, &c.contact_group, &[]);
             }
             Kernel::Vv(i) => {
                 let (p, g) = alt.map_or_else(
@@ -1946,10 +1926,6 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
         ("explicit_beams_contact_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_WIDE_WGSL)),
         ("explicit_beams_contact_aero".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_AERO_WGSL)),
         ("explicit_beams_contact_aero_wide".into(), "explicit_beams_frame", u(EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL)),
-        ("explicit_beams_contact_big".into(), plan::CONTACT_ENTRY, u(EXPLICIT_BEAMS_CONTACT_BIG_WGSL)),
-        ("explicit_beams_contact_big_wide".into(), plan::CONTACT_ENTRY, u(EXPLICIT_BEAMS_CONTACT_BIG_WIDE_WGSL)),
-        ("explicit_beams_contact_big_aero".into(), plan::CONTACT_ENTRY, u(EXPLICIT_BEAMS_CONTACT_BIG_AERO_WGSL)),
-        ("explicit_beams_contact_big_aero_wide".into(), plan::CONTACT_ENTRY, u(EXPLICIT_BEAMS_CONTACT_BIG_AERO_WIDE_WGSL)),
     ];
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));

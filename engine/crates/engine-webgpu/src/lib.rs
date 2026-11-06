@@ -104,16 +104,6 @@ pub const EXPLICIT_BEAMS_CONTACT_AERO_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero.wgsl"));
 pub const EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide.wgsl"));
-/// The contact groups of more than four members (entry `explicit_beams_contact`,
-/// `EB_VV_BIG_ONLY`), at the frame modules' four variants.
-pub const EXPLICIT_BEAMS_CONTACT_BIG_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big.wgsl"));
-pub const EXPLICIT_BEAMS_CONTACT_BIG_WIDE_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_wide.wgsl"));
-pub const EXPLICIT_BEAMS_CONTACT_BIG_AERO_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero.wgsl"));
-pub const EXPLICIT_BEAMS_CONTACT_BIG_AERO_WIDE_WGSL: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_wide.wgsl"));
 /// The frame entry for the vehicles stepped alone while contact is active
 /// (`EB_VV_SOLO`: the vehicle from the solo list, the frame bounds check), at the
 /// four variants; [`EXPLICIT_BEAMS_WGSL`] and the others stay the plain frame.

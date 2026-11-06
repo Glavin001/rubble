@@ -4785,8 +4785,6 @@ static const float VV_APPROACH_SQ = 16.0;
 // Members a contact group may have (one workgroup steps them one after another);
 // a larger group's vehicles run alone that frame and the host fails.
 static const uint VV_MAX_GROUP = 64u;
-// Groups of at most VV_PART members step side by side (contactMembersStep).
-static const uint VV_PART = 4u;
 static const int VV_MAX_WAIT = 12;
 
 [[vk::binding(10, 0)]] RWStructuredBuffer<uint> gArgs;
@@ -4937,10 +4935,7 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 
 // The frame's dispatch arguments: with no group the solo frame over the vehicles
 // (words 0..2), else the frame with the groups over vehicles + groups (words 4..6).
-// The frame's dispatches: the solo vehicles (no groups), or the vehicles and the
-// groups past them; and every group again for the larger groups' module when one
-// has more than VV_PART members (`big`), else none.
-void vvArgs(uint nv, uint groups, bool big)
+void vvArgs(uint nv, uint groups)
 {
     gArgs[0] = groups == 0u ? nv : 0u;
     gArgs[1] = 1u;
@@ -4948,9 +4943,6 @@ void vvArgs(uint nv, uint groups, bool big)
     gArgs[4] = groups == 0u ? 0u : nv + groups;
     gArgs[5] = 1u;
     gArgs[6] = 1u;
-    gArgs[8] = big ? groups : 0u;
-    gArgs[9] = 1u;
-    gArgs[10] = 1u;
 }
 
 void vvEmitPair(uint a, uint b)
@@ -5051,7 +5043,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         }
         if (lane == 0u)
         {
-            vvArgs(nv, 0u, false);
+            vvArgs(nv, 0u);
             gAcc[vvCtl(VV_BIGS)].store(0);
         }
         return ebLoopCapFlush();
@@ -5184,14 +5176,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     sync();
     if (lane == 0u)
     {
-        // A group past VV_PART members (and within VV_MAX_GROUP: larger ones run alone).
-        bool big = false;
-        for (uint g = 0u, gStop = EB_END(g, groups, 1u); g < gStop; g++)
-        {
-            uint m = gMisc[gP.vvGroups + g].y;
-            if (m > VV_PART) big = true;
-        }
-        vvArgs(nv, groups, big);
+        vvArgs(nv, groups);
     }
     // Clear for the next frame.
     for (uint b = lane, bGuard = 0u; b <= gP.vvGridMask; b += 256u)
@@ -5467,7 +5452,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
 // read each other's state within their steps (contact reaches them only through
 // the accumulators of the contact pass), so every member's step is the same, bit
 // for bit, while the barriers are shared: k members cost about one member's step.
-// (VV_PART: with VV_MAX_GROUP, above.)
+static const uint VV_PART = 4u;
 groupshared Atomic<uint> gsTestedM[2u * VV_PART];
 groupshared Atomic<uint> gsPairCountM[VV_PART];
 groupshared uint gsBlkM[GRID_BLOCKS * VV_PART];
@@ -7017,16 +7002,6 @@ void contactGroup(uint g, uint lane)
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
     sync();
-    // The groups split over two modules (engine_exec::explicit_plan MODULES): the
-    // frame with groups of at most VV_PART members (EB_VV_SMALL_ONLY) and the larger
-    // groups' own dispatch (EB_VV_BIG_ONLY, explicit_beams_contact); each returns at
-    // once for the other's groups (k uniform). Without either define, every group.
-#ifdef EB_VV_SMALL_ONLY
-    if (k > VV_PART) return;
-#endif
-#ifdef EB_VV_BIG_ONLY
-    if (k <= VV_PART) return;
-#endif
     // Members in vehicle order (a rank sort), their run prefixes and member
     // indices.
     for (uint i = lane, iStop = EB_END(i, k, LANES); i < iStop; i += LANES)
@@ -7069,41 +7044,25 @@ void contactGroup(uint g, uint lane)
     {
         coupleStepMembers(off, k, lane, s, coupleOn);
         driveStepMembers(off, k, lane, s, driveOn);
-#if defined(EB_VV_SMALL_ONLY)
-        contactMembersStep(off, k, lane, s);
-#elif defined(EB_VV_BIG_ONLY)
-        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
-#else
         if (k <= VV_PART)
         {
             contactMembersStep(off, k, lane, s);
         }
         else
         {
-#ifndef XDBG1
             for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
-#endif
         }
-#endif
 #ifdef EB_ABLATE
         if ((gP.ablate & 512u) != 0u) {} else
 #endif
-#if defined(EB_VV_SMALL_ONLY)
-        vvPassSmall(k, off, runOff, points, stepBase + s, lane);
-#elif defined(EB_VV_BIG_ONLY)
-        vvPass(k, off, runOff, points, stepBase + s, lane);
-#else
         if (k <= VV_PART)
         {
             vvPassSmall(k, off, runOff, points, stepBase + s, lane);
         }
         else
         {
-#ifndef XDBG2
             vvPass(k, off, runOff, points, stepBase + s, lane);
-#endif
         }
-#endif
     }
     coupleEndMembers(off, k, lane, coupleOn);
     for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
