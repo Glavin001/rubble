@@ -6864,8 +6864,12 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             gNext[vvTestedAt(ra1.x + gsVvList4[a].add(1u))] = t;
         }
         // Candidates: each owner's partners' contact points in its box grown by
-        // its range.
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        // its range; the owners side by side, vvPartLanes(k) lanes each (the same
+        // candidates per owner; their order in its run follows an atomic counter
+        // either way, and the hits apply in a canonical order, vvApplyOrdered).
+        uint cP = vvPartLanes(k);
+        uint cl = lane % cP;
+        for (uint a = lane / cP, aStop = EB_END(a, min(lane / cP + 1u, k), 1u); a < aStop; a++)
         {
 #ifdef EB_ABLATE
             // Measurement only: 262144 the candidates.
@@ -6886,7 +6890,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                 uint v = vvMember(off, m);
                 uint4 cp = gStatic[gP.vvStatic + v];
                 float3 o = asfloat(gMisc[v].xyz);
-                for (uint i = lane, iStop = EB_END(i, cp.y, LANES); i < iStop; i += LANES)
+                for (uint i = cl, iStop = EB_END(i, cp.y, cP); i < iStop; i += cP)
                 {
                     uint h = gLists[cp.x + i];
                     float3 x = nf3(o + gNodes[h * 3u].xyz);
