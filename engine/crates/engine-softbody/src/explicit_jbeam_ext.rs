@@ -163,7 +163,7 @@ pub fn jbeam_ext_force_with(
     let mut k = beam.k;
     let c = beam.c;
     let mut damp = c * u;
-    // The damping's slope in u (§38).
+    // The damping's slope in u (§39).
     let mut slope = c;
     let broke = |beam: &mut Beam| {
         beam.broken = true;

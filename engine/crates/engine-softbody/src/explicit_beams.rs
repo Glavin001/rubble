@@ -112,7 +112,7 @@ pub struct ExplicitBeamsSettings {
     /// ([`Self::beamng`], jbeam-semantics-spec.md §36): every triangle is tested
     /// every step.
     pub triangle_throttle: bool,
-    /// Centred damping (jbeam-semantics-spec.md §38; opt-in, off in every
+    /// Centred damping (jbeam-semantics-spec.md §39; opt-in, off in every
     /// profile): each JBeam element's damping reads the mean of the step's start
     /// and end velocities instead of the start's, by a correction after the node
     /// update. Lifts the damped explicit step's limit from ω·h ≤ 2(√(1+ζ²) − ζ)
@@ -1037,7 +1037,7 @@ pub struct ExplicitBeams {
     /// content, or a `.truck` with `rubble_beamng_profile`; else Rigs of
     /// Rods'. What hosts report as the vehicle's profile.
     pub beamng_profile: bool,
-    /// Measurement (jbeam-semantics-spec.md §38's comparison; never on in a
+    /// Measurement (jbeam-semantics-spec.md §39's comparison; never on in a
     /// profile): the velocity the beam pass's damping reads, by a dry beam pass
     /// (state restored) that predicts each node's end-of-step velocity. 0: off,
     /// the step's velocity. 1: the predicted velocity (one Jacobi step toward
@@ -3755,7 +3755,7 @@ impl ExplicitBeams {
     }
 
     /// The centred damping's correction after the node update
-    /// ([`ExplicitBeamsSettings::centred_damping`], spec §38). Δvᵢ is the velocity
+    /// ([`ExplicitBeamsSettings::centred_damping`], spec §39). Δvᵢ is the velocity
     /// change the update gave node i. Each beam record with a damping slope s from
     /// the last beam pass gives its ends −½·s·Δu along its current direction (Δu
     /// its extension rate's change under Δv; a torsion bar −½·s·Δφ̇ through its
@@ -4781,7 +4781,7 @@ pub struct BeamOut {
     pub check_break: bool,
     /// The damping law's slope ∂(damping force)/∂u at this step's rate (N·s/m;
     /// the low-pass's gain included; 0 where the law has no damping). Read only by
-    /// the centred damping (jbeam-semantics-spec.md §38).
+    /// the centred damping (jbeam-semantics-spec.md §39).
     pub slope: f32,
 }
 

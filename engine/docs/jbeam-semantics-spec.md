@@ -1378,7 +1378,7 @@ the SUV and trailer miss are brake pads and bulbs only (no nodes). Measured
   stabilisation it does not document) is not public. Left as is (content physics
   unchanged); the options are the user's: a smaller step for such vehicles, or an
   implicit treatment of their stiffest elements.
-* **Resolved opt-in (2026-11-06, §38):** the explicit damping's half-step lag
+* **Resolved opt-in (2026-11-06, §39):** the explicit damping's half-step lag
   lowers the limit below 2 (to 1.87–1.98 at their ζ); centred damping
   (`centred_damping`) rests every SUV configuration, the trailer's axles and the
   CCF's broken ones at the same 2 kHz step, content physics unchanged.
@@ -2246,7 +2246,9 @@ T-bone. Tried without a fix:
 * the step's cap scaled by m_split·inv;
 * no residual pass (54 km/h, drag off: +29 J).
 
-## 38. Centred damping (opt-in, 2026-11-06)
+## 39. Centred damping (2026-11-06)
+
+(§38 is the surface contact of `feat/softrigid-surface-contact`.)
 
 `ExplicitBeamsSettings::centred_damping`, off in every profile (the RoR and BeamNG
 profiles are bit for bit as before; a caller turns it on per vehicle). Research

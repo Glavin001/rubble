@@ -1,5 +1,5 @@
 //! Centred damping (`ExplicitBeamsSettings::centred_damping`,
-//! `engine/docs/jbeam-semantics-spec.md` §38) on the GPU against the CPU reference,
+//! `engine/docs/jbeam-semantics-spec.md` §39) on the GPU against the CPU reference,
 //! bit for bit every step: every node's position and velocity. Original Rubble
 //! fixtures (`engine_softbody::jbeam_fixture`); opt-in, a community vehicle that
 //! does not rest without it (`RUBBLE_COMPARE_MODS`, the crash lab's `__mods/`).

@@ -143,7 +143,7 @@ static const uint FLAG_DISSIPATIVE = 32768u;
 // Some vehicle of the upload has FLAG_DISSIPATIVE: every vehicle's node phase takes
 // its nodes' contact position steps (gAcc at shiftAt, §37; the shapes path).
 static const uint FLAG_SHIFT_MEM = 65536u;
-// Centred damping (jbeam-semantics-spec.md §38, ExplicitBeamsSettings::centred_damping):
+// Centred damping (jbeam-semantics-spec.md §39, ExplicitBeamsSettings::centred_damping):
 // the beam phase keeps each JBeam record's damping slope in its first incidence
 // entry's .w, and after the node phase each record corrects its damping by
 // −½·slope·Δu (centredBeam, centredNode). gP.centredDv nonzero: some vehicle has it.
@@ -247,7 +247,7 @@ struct Params
     uint selfSplit; // gAcc: per node its self-collision two-body hit count this step (0: no two-body vehicle)
     uint clipMem; // gAcc: anti-clip's side memory, per node 4 words (held m0 m1, recorded p0 p1) (0: no anti-clip vehicle)
     uint clipVmax; // gAcc: per vehicle 2 parities its fastest node's speed (float bits) this step
-    uint centredDv; // gBeams: per node its step-start velocity, then its node phase's Δv (centred damping, §38; 0: no vehicle)
+    uint centredDv; // gBeams: per node its step-start velocity, then its node phase's Δv (centred damping, §39; 0: no vehicle)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -1589,7 +1589,7 @@ float wrapAngle(float a)
     return a;
 }
 
-// Beam bn's vehicle has centred damping (FLAG_CENTRED, §38).
+// Beam bn's vehicle has centred damping (FLAG_CENTRED, §39).
 bool centredOn(uint4 bn) { return (gStatic[(bn.z >> 16) * 4u + 3u].x & FLAG_CENTRED) != 0u; }
 void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, float4 s1, float4 c1, uint4 r2,
                     float3 x1, float3 x2, float3 v1, float3 v2)
@@ -1742,7 +1742,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     float len = li.x;
     float e = nf(len - rest);
     float u = smul(sdot(ssub3(va, vb), d), inv);
-    // The damping's slope in u and the low-pass's gain (centred damping, §38).
+    // The damping's slope in u and the low-pass's gain (centred damping, §39).
     float gain = 1.0;
     if (r2.w != 0u)
     {
@@ -2049,7 +2049,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     float inv = li.y;
     float len = li.x;
     float u = smul(sdot(ssub3(va, vb), d), inv);
-    // The damping's slope in u and the low-pass's gain (centred damping, §38).
+    // The damping's slope in u and the low-pass's gain (centred damping, §39).
     float gain = 1.0;
     if (r2.w != 0u)
     {
@@ -2287,7 +2287,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
 }
 
-// --- Centred damping (jbeam-semantics-spec.md §38; the CPU reference's
+// --- Centred damping (jbeam-semantics-spec.md §39; the CPU reference's
 // ExplicitBeams::centred_correction). The beam phase keeps each JBeam record's
 // damping slope in its first incidence entry's .w (0: none). gBeams at
 // gP.centredDv + node: the node's velocity before its node phase (centredSave),
@@ -5778,7 +5778,7 @@ uint vvTestedAt(uint i) { return gP.vvMembers + 5u * gP.vehicles + i; }
 // adds into them), the tested-triangle list restarted per member, and a pending
 // reset of the self-collision throttles (a fast approach in the last contact pass)
 // applied after their update.
-// Centred damping in a contact group (§38): the corrected positions also into this
+// Centred damping in a contact group (§39): the corrected positions also into this
 // step's box keys (a superset of the box the node phase gave) and the frame bounds
 // check.
 void centredBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity, uint lane, uint lanes)

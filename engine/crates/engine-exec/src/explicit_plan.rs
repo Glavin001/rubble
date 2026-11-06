@@ -535,7 +535,7 @@ impl ExplicitUpload {
         let any_anti = vehicles.iter().any(|v| v.anti_clip);
         // Dissipative contact's position steps (§37) on every vehicle of the upload.
         let any_shift = vehicles.iter().any(|v| v.dissipative_contact);
-        // Centred damping (jbeam-semantics-spec.md §38): some vehicle has it.
+        // Centred damping (jbeam-semantics-spec.md §39): some vehicle has it.
         let any_centred = vehicles.iter().any(|v| v.settings.centred_damping);
         if any_anti {
             assert!(
@@ -1179,7 +1179,7 @@ impl ExplicitUpload {
             .collect();
         let inc_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
-        // Centred damping (§38): each record's damping slope of the last beam pass in
+        // Centred damping (§39): each record's damping slope of the last beam pass in
         // its first incidence entry's .w (the kernel's beam phase keeps it there).
         {
             let mut off = 0usize;
@@ -1289,7 +1289,7 @@ impl ExplicitUpload {
         };
         // The tread contact (jbeam-semantics-spec.md §34): per node (z, the depth
         // the step before, 0, 0) for every vehicle when any has tread nodes.
-        // Centred damping (§38): per node its step-start velocity, then its Δv.
+        // Centred damping (§39): per node its step-start velocity, then its Δv.
         let centred_dv = if any_centred {
             let at = beams.len() as u32;
             beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
@@ -1647,7 +1647,7 @@ impl ExplicitUpload {
         ];
         // The wide passes do not run wings, the fuselage drag, commands or shocks2.
         // Raycast wheels run in the vehicle workgroups only.
-        // Centred damping runs in the vehicle workgroups only (§38).
+        // Centred damping runs in the vehicle workgroups only (§39).
         let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none() && !any_centred;
         // Every vehicle must have run the same steps for the wide passes (one
         // step parity for the group slots).
