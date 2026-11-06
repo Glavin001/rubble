@@ -1,30 +1,36 @@
 //! The generator's builder: nodes, beams with roles, panels (skin triangles with
 //! their sheet edges, cross braces and two-bay bends), contact-only nodes in the
-//! pole lanes, and the three rules that set what the file carries:
+//! pole lanes, and the rules that set what the file carries, adopted from the
+//! BeamNG authoring census (`engine/docs/beamng-authoring-census.md`, "Authoring
+//! rules"):
 //!
 //! * **mass** ([`Car::assign_masses`]): each part's real mass over its structural
 //!   nodes by their share of the part's members (kg/m × length, half to each end)
-//!   and of its sheet (area × areal density, a third to each corner), the named
-//!   masses (engine, occupants, fuel, …) on the structure that carries them, the
-//!   contact-only nodes at a fixed light mass taken out of their part's budget;
-//! * **stiffness** ([`Car::assign_springs`]): every beam as stiff as the fixed
-//!   2 kHz step allows, by Gershgorin rows (`skeleton::G_LIMIT`, the rule the
-//!   authored sedans use): Σⱼ qᵢⱼ (1/mᵢ + 1/√(mᵢmⱼ)) ≤ 4·1.2 with
-//!   qᵢⱼ = h²kᵢⱼ + 2h·cᵢⱼ, shared between a node's beams by their role weights;
-//! * **yield** ([`Role::spec`]): each role's deform force from its section, its
-//!   strength from the part (hardware breaks; the structure bends).
+//!   and of its sheet (area, a third to each corner), the named masses (engine,
+//!   occupants, fuel, …) on the structure that carries them, the contact-only
+//!   nodes at a fixed light mass taken out of their part's budget;
+//! * **stiffness** ([`Car::assign_springs`]): each role's census k·L band
+//!   (k = k·L / L), capped only where a node's Gershgorin row would pass
+//!   [`row_cap`] × sedan1's bound (the light lane nodes, measured margin);
+//! * **damping**: every spring beam at ζ = [`ZETA`] of its pair (no dashpots);
+//! * **yield** ([`RoleSpec::eps`]): beamDeform = ε_y·k·L, ε_y the census's
+//!   (body 1.15 %, doors 1.45 %, skins 3 %), the crash structure's multiple
+//!   calibrated on the frontal; the structure FLT_MAX, hardware in break groups.
 
 use glam::Vec3;
 use std::collections::{BTreeMap, HashMap};
 
 /// The fixed explicit step (s).
 pub const H: f32 = 0.0005;
-/// Gershgorin row bound (`skeleton::G_LIMIT` × h²: 1.2 × 4).
+/// sedan1's Gershgorin row bound (`skeleton::G_LIMIT` × h²: 1.2 × 4).
 pub const ROW_BOUND: f32 = 4.8;
 /// Mass of a contact-only node (kg): the agreed pattern's light lane nodes.
 pub const CONTACT_MASS: f32 = 0.15;
 /// Largest spacing of contact points along a pole lane (m).
 pub const LANE: f32 = 0.20;
+/// Beams shorter than this take the spring of one this long (BeamNG springs
+/// are near uniform within a part: a short beam is not made stiffer).
+pub const SPRING_LENGTH: f32 = 0.4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Part {
@@ -82,10 +88,12 @@ impl Part {
             (false, false) => Part::DoorRR,
         }
     }
+    pub fn is_door(self) -> bool {
+        matches!(self, Part::DoorFL | Part::DoorFR | Part::DoorRL | Part::DoorRR)
+    }
 }
 
-/// What a beam is: sets its share of the bound, its yield and strength, its
-/// mass per metre (the mass rule) and its damping time.
+/// What a beam is: its census k·L, yield strain, strength and mass per metre.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Role {
     /// Front rail chords (DP600 hat boxes).
@@ -123,9 +131,9 @@ pub enum Role {
     Backing,
     /// Door and lid hinges (break groups).
     Hinge,
-    /// Bolts: fenders, bumper fascias, bumper beams.
+    /// Bolts: fenders, bumper fascias.
     Bolt,
-    /// Compression-only bearing (door edges on pillars, lids on their seats).
+    /// Compression-only seals and stops (door edges on pillars, lids on seats).
     Bearing,
     /// The powertrain block (rigid).
     Engine,
@@ -135,67 +143,135 @@ pub enum Role {
     Susp,
 }
 
+/// Which role keeps a pair asked for twice.
+fn role_rank(r: Role) -> u8 {
+    match r {
+        Role::Tie | Role::Backing | Role::Bend => 0,
+        Role::Sheet | Role::Bearing => 1,
+        Role::Web | Role::Cross | Role::Floor | Role::Firewall | Role::RoofBow | Role::DoorFrame => 2,
+        _ => 3,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RoleSpec {
-    /// Share of a node's bound (relative).
-    pub weight: f32,
-    /// Deform (yield) force, N.
-    pub deform: f32,
+    /// Target k·L (N): the census band (spring = k·L / L).
+    pub kl: f32,
+    /// A fixed spring instead (N/m), for hardware whose length is incidental.
+    pub k_fixed: f32,
+    /// Yield strain: beamDeform = ε_y · k · L (∞: never yields).
+    pub eps: f32,
     /// Strength (break force), N (∞: never).
     pub strength: f32,
     /// Mass per metre for the mass rule (kg/m), 0 for none.
     pub kg_per_m: f32,
-    /// Damping as a time constant (c = τ·k, s).
-    pub tau: f32,
     /// Compression-only.
     pub support: bool,
-    /// Hard cap on k (N/m).
-    pub k_max: f32,
+    /// Carries deformLimitExpansion 1.2 (BeamNG: on 37–49 % of body beams).
+    pub limit_expansion: bool,
 }
 
+/// Census k·L bands of a part's sheet (N): body 0.8–1.1e6, doors 0.4–1.0e6,
+/// bonnet 2.2–4.7e5, boot 2.2–5e5, fenders 1.5–4.3e5, bumper covers 0.4–1.3e5.
+pub fn sheet_kl(part: Part) -> f32 {
+    match part {
+        Part::Body => 0.8e6,
+        Part::DoorFL | Part::DoorFR | Part::DoorRL | Part::DoorRR => 0.65e6,
+        Part::Hood => 3.3e5,
+        Part::Trunk => 3.5e5,
+        Part::FenderL | Part::FenderR => 2.8e5,
+        Part::BumperF | Part::BumperR => 0.9e5,
+        Part::Engine => 1.0e6,
+    }
+}
+
+/// Census yield strain of a part's sheet: body 1.0–1.3 %, doors 1.3–1.6 %,
+/// bonnet 1.5–5.5 %, boot 2–5 %, fenders 1.4–4.6 %, bumper covers 3–21 %.
+pub fn sheet_eps(part: Part) -> f32 {
+    match part {
+        Part::Body => 0.0115,
+        Part::DoorFL | Part::DoorFR | Part::DoorRL | Part::DoorRR => 0.0145,
+        Part::Hood | Part::Trunk | Part::FenderL | Part::FenderR => 0.03,
+        Part::BumperF | Part::BumperR => 0.08,
+        Part::Engine => f32::INFINITY,
+    }
+}
+
+fn env_f(k: &str, d: f32) -> f32 {
+    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+}
+
+/// The crash structure's yield multiple over the body's 1.15 % (rails, cans,
+/// aprons, rear rails), `GEN2_CRUSH`: calibrated on wall56 against NHTSA's
+/// frontal residual crush (`crash-reference-targets.md` §1).
+pub fn crush_mult() -> f32 {
+    env_f("GEN2_CRUSH", 2.5)
+}
+
+/// The cabin's yield multiple (sills, pillars, roof rails), `GEN2_CABIN`.
+pub fn cabin_mult() -> f32 {
+    env_f("GEN2_CABIN", 1.6)
+}
+
+/// The Gershgorin row cap as a multiple of sedan1's (`GEN2_ROW`, default 2.0:
+/// the census's BeamNG parts run at p50 1.1–1.6, p90 1.4–2.6 in JBeam mode).
+pub fn row_cap() -> f32 {
+    env_f("GEN2_ROW", 2.0)
+}
+
+/// Stiffness multiple on every census band (`GEN2_STIFF`, the margin sweep).
+pub fn stiff_mult() -> f32 {
+    env_f("GEN2_STIFF", 1.0)
+}
+
+/// Damping ratio of every spring beam (census ζ 0.03–0.05).
+pub const ZETA: f32 = 0.04;
+
 impl Role {
-    pub fn spec(self) -> RoleSpec {
+    pub fn spec(self, part: Part) -> RoleSpec {
         let inf = f32::INFINITY;
-        let s = |weight, deform, strength, kg_per_m| RoleSpec {
-            weight,
-            deform,
-            strength,
+        let s = |kl: f32, eps: f32, kg_per_m: f32, lim: bool| RoleSpec {
+            kl,
+            k_fixed: 0.0,
+            eps,
+            strength: inf,
             kg_per_m,
-            tau: 6.0e-5,
             support: false,
-            k_max: inf,
+            limit_expansion: lim,
         };
+        let fixed = |k: f32, eps: f32, strength: f32| RoleSpec { k_fixed: k, strength, ..s(0.0, eps, 0.0, false) };
+        let e = sheet_eps(part);
+        let body = 0.0115;
         match self {
-            // Sections (DOT HS 811 666 teardown grades; members.rs): a chord's
-            // yield is its share of the member's plastic collapse force.
-            Role::Rail => s(1.0, 42e3, inf, 5.5),
-            Role::CrushCan => s(0.8, 22e3, inf, 3.0),
-            Role::BumperBeam => s(1.0, 30e3, inf, 4.0),
-            Role::Apron => s(0.8, 16e3, inf, 3.0),
-            Role::Firewall => s(0.7, 14e3, inf, 4.0),
-            Role::Floor => s(0.6, 12e3, inf, 5.0),
-            Role::Tunnel => s(0.8, 24e3, inf, 4.0),
-            Role::Sill => s(1.0, 48e3, inf, 6.0),
-            Role::PillarA => s(1.0, 38e3, inf, 4.0),
-            Role::PillarB => s(1.0, 44e3, inf, 5.0),
-            Role::PillarC => s(0.9, 26e3, inf, 3.5),
-            Role::RoofRail => s(1.0, 30e3, inf, 3.5),
-            Role::RoofBow => s(0.7, 12e3, inf, 2.0),
-            Role::RearRail => s(1.0, 32e3, inf, 4.5),
-            Role::Cross => s(0.6, 14e3, inf, 2.5),
-            Role::Web => s(0.5, 10e3, inf, 1.5),
-            Role::Sheet => s(0.5, 4.5e3, inf, 0.0),
-            Role::Bend => s(0.3, 2.5e3, inf, 0.0),
-            Role::DoorFrame => s(0.8, 9e3, inf, 0.0),
-            Role::Intrusion => s(1.0, 24e3, inf, 0.0),
-            Role::Tie => RoleSpec { tau: 3.0e-5, ..s(0.35, 3e3, inf, 0.0) },
-            Role::Backing => RoleSpec { tau: 3.0e-5, ..s(0.6, 4e3, inf, 0.0) },
-            Role::Hinge => s(0.8, inf, 18e3, 0.0),
-            Role::Bolt => s(0.6, inf, 9e3, 0.0),
-            Role::Bearing => RoleSpec { support: true, ..s(0.5, 15e3, inf, 0.0) },
-            Role::Engine => s(1.0, inf, inf, 0.0),
-            Role::Mount => s(0.8, inf, 45e3, 0.0),
-            Role::Susp => s(1.0, 60e3, 95e3, 0.0),
+            Role::Rail => s(1.05e6, body * crush_mult(), 5.5, true),
+            Role::CrushCan => s(0.9e6, body * 0.6 * crush_mult(), 3.0, true),
+            Role::BumperBeam => s(0.9e6, body * 2.0, 4.0, true),
+            Role::Apron => s(0.9e6, body * crush_mult(), 3.0, true),
+            Role::Firewall => s(0.8e6, body, 4.0, false),
+            Role::Floor => s(0.8e6, body, 5.0, false),
+            Role::Tunnel => s(1.0e6, body * 1.3, 4.0, true),
+            Role::Sill => s(1.1e6, body * cabin_mult(), 6.0, true),
+            Role::PillarA => s(1.05e6, body * cabin_mult(), 4.0, true),
+            Role::PillarB => s(1.1e6, body * cabin_mult(), 5.0, true),
+            Role::PillarC => s(0.95e6, body * 1.2, 3.5, true),
+            Role::RoofRail => s(1.0e6, body * cabin_mult(), 3.5, true),
+            Role::RoofBow => s(0.8e6, body, 2.0, false),
+            Role::RearRail => s(1.0e6, body * crush_mult(), 4.5, true),
+            Role::Cross => s(0.85e6, body, 2.5, false),
+            Role::Web => s(0.8e6, body, 1.5, false),
+            Role::Sheet => s(sheet_kl(part), e, 0.0, false),
+            Role::Bend => s(0.6 * sheet_kl(part), e, 0.0, false),
+            Role::DoorFrame => s(0.75e6, 0.0145, 0.0, true),
+            Role::Intrusion => s(0.9e6, 0.0145 * 2.0, 0.0, true),
+            Role::Tie | Role::Backing => s(sheet_kl(part), e.max(0.0145), 0.0, false),
+            // Hardware (census: hinges 30–98 kN a beam, k 0.5–3e6).
+            Role::Hinge => fixed(1.5e6, inf, 40e3),
+            Role::Bolt => fixed(0.8e6, inf, 9e3),
+            // Seals and stops: SUPPORT, 100–280 kN.
+            Role::Bearing => RoleSpec { support: true, ..fixed(0.6e6, inf, 150e3) },
+            Role::Engine => fixed(6e6, inf, inf),
+            Role::Mount => fixed(2.0e6, inf, 60e3),
+            Role::Susp => fixed(3.0e6, 0.03, 140e3),
         }
     }
 }
@@ -302,12 +378,12 @@ impl Car {
         assert_ne!(a, b, "beam onto itself: {}", self.nodes[a].name);
         let key = (a.min(b), a.max(b));
         if let Some(&j) = self.pair.get(&key) {
-            if role.spec().weight > self.beams[j].role.spec().weight && self.beams[j].break_group.is_none() {
+            if role_rank(role) > role_rank(self.beams[j].role) && self.beams[j].break_group.is_none() {
                 self.beams[j].role = role;
             }
             return j;
         }
-        let sp = role.spec();
+        let sp = role.spec(part);
         self.beams.push(Beam {
             a,
             b,
@@ -315,7 +391,7 @@ impl Car {
             part,
             k: 0.0,
             c: 0.0,
-            deform: sp.deform,
+            deform: 0.0,
             strength: sp.strength,
             break_group: None,
         });
@@ -447,17 +523,22 @@ impl Car {
         for &t in &tris {
             let [a, b, c] = self.tris[t].n;
             let mut perim: Vec<usize> = Vec::new();
-            let mut split = false;
+            let mut split = 0usize;
+            let mut opposite = a;
             for (u, v) in [(a, b), (b, c), (c, a)] {
                 perim.push(u);
                 let key = (u.min(v), u.max(v));
                 let (pu, pv) = (self.p(key.0), self.p(key.1));
-                let run = (pv - pu).y.abs();
+                // Row-like edges only (a run along the car, little rise): the
+                // pole lanes cross them; diagonals stay single beams.
+                let d = pv - pu;
+                let run = d.y.abs();
                 let n = ((run / LANE).ceil() as usize).max(1);
-                if n <= 1 {
+                if n <= 1 || d.z.abs() > 0.35 * run {
                     continue;
                 }
-                split = true;
+                split += 1;
+                opposite = [a, b, c].into_iter().find(|&w| w != u && w != v).unwrap();
                 let pts = if let Some(p) = edge_pts.get(&key) {
                     p.clone()
                 } else {
@@ -489,10 +570,19 @@ impl Car {
                     }
                 }
             }
-            if !split {
+            if split == 0 {
                 continue;
             }
             keep[t] = false;
+            if split == 1 {
+                // One split edge: a fan from the corner opposite it.
+                let k0 = perim.iter().position(|&q| q == opposite).unwrap();
+                let ring: Vec<usize> = (0..perim.len()).map(|k| perim[(k0 + k) % perim.len()]).collect();
+                for k in 1..ring.len() - 1 {
+                    new_tris.push([ring[0], ring[k], ring[k + 1]]);
+                }
+                continue;
+            }
             let cen = surf((self.p(a) + self.p(b) + self.p(c)) / 3.0);
             serial += 1;
             let ci = self.node(&format!("x{pname}{serial}"), cen, part);
@@ -532,7 +622,7 @@ impl Car {
         let n = self.nodes.len();
         let mut w = vec![0.0f32; n];
         for b in &self.beams {
-            let kgm = b.role.spec().kg_per_m;
+            let kgm = b.role.spec(b.part).kg_per_m;
             if kgm == 0.0 {
                 continue;
             }
@@ -602,77 +692,36 @@ impl Car {
         self.nodes.iter().map(|n| n.mass).sum()
     }
 
-    // ---------------------------------------------------------------------
-    // Stiffness at the bound
+    // Stiffness: census bands, the stability margin
     // ---------------------------------------------------------------------
 
-    /// Springs and damping: see the module docs. Hub nodes' extra wheel mass
-    /// (`hub_extra`, kg per node) counts in the bound as the solver adds it.
+    /// Springs, damping and yield: see the module docs. Hub nodes' extra wheel
+    /// mass (`hub_extra`, kg per node) counts as the solver adds it.
     pub fn assign_springs(&mut self, hub_extra: &HashMap<usize, f32>) {
         let n = self.nodes.len();
         let m: Vec<f32> = (0..n).map(|i| self.nodes[i].mass + hub_extra.get(&i).copied().unwrap_or(0.0)).collect();
-        let qf = |tau: f32| H * (H + 2.0 * tau);
-        // coefficient per beam end: q per unit k times (1/m_i + 1/sqrt(m_i m_j))
-        let coef = |i: usize, j: usize, tau: f32| qf(tau) * (1.0 / m[i] + 1.0 / (m[i] * m[j]).sqrt());
+        let len: Vec<f32> = self.beams.iter().map(|b| self.p(b.a).distance(self.p(b.b)).max(0.02)).collect();
+        let mu = |b: &Beam| m[b.a] * m[b.b] / (m[b.a] + m[b.b]);
+        let mult = stiff_mult();
+        let mut ks: Vec<f32> = self
+            .beams
+            .iter()
+            .zip(&len)
+            .map(|(b, &l)| {
+                let sp = b.role.spec(b.part);
+                mult * if sp.k_fixed > 0.0 { sp.k_fixed } else { sp.kl / l.max(SPRING_LENGTH) }
+            })
+            .collect();
+        let damp = |k: f32, b: &Beam| 2.0 * ZETA * (k * mu(b)).sqrt();
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (j, b) in self.beams.iter().enumerate() {
             adj[b.a].push(j);
             adj[b.b].push(j);
         }
-        let weight = |b: &Beam| b.role.spec().weight;
-        let mut s: Vec<f32> = (0..n)
-            .map(|i| {
-                let r: f32 = adj[i]
-                    .iter()
-                    .map(|&j| {
-                        let b = &self.beams[j];
-                        let o = if b.a == i { b.b } else { b.a };
-                        weight(b) * coef(i, o, b.role.spec().tau)
-                    })
-                    .sum();
-                if r > 0.0 { ROW_BOUND / r } else { 0.0 }
-            })
-            .collect();
-        let k_of = |s: &[f32], b: &Beam| (weight(b) * s[b.a].min(s[b.b])).min(b.role.spec().k_max);
-        for _ in 0..60 {
-            let ks: Vec<f32> = self.beams.iter().map(|b| k_of(&s, b)).collect();
-            let mut changed = false;
-            for i in 0..n {
-                let row: f32 = adj[i]
-                    .iter()
-                    .map(|&j| {
-                        let b = &self.beams[j];
-                        let o = if b.a == i { b.b } else { b.a };
-                        ks[j] * coef(i, o, b.role.spec().tau)
-                    })
-                    .sum();
-                if row > 0.0 && row < 0.995 * ROW_BOUND {
-                    s[i] *= (ROW_BOUND / row).min(1.5);
-                    changed = true;
-                }
-            }
-            // Never past the bound: scale back any row that went over.
-            let ks: Vec<f32> = self.beams.iter().map(|b| k_of(&s, b)).collect();
-            for i in 0..n {
-                let row: f32 = adj[i]
-                    .iter()
-                    .map(|&j| {
-                        let b = &self.beams[j];
-                        let o = if b.a == i { b.b } else { b.a };
-                        ks[j] * coef(i, o, b.role.spec().tau)
-                    })
-                    .sum();
-                if row > ROW_BOUND {
-                    s[i] *= ROW_BOUND / row;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        // Final pass: the exact rows within the bound.
-        let mut ks: Vec<f32> = self.beams.iter().map(|b| k_of(&s, b)).collect();
-        for _ in 0..20 {
+        // The cap: rows past row_cap × sedan1's bound scale their beams back
+        // (the lane nodes' ties, mostly).
+        let cap = row_cap() * ROW_BOUND;
+        for _ in 0..40 {
             let mut over = false;
             for i in 0..n {
                 let row: f32 = adj[i]
@@ -680,14 +729,38 @@ impl Car {
                     .map(|&j| {
                         let b = &self.beams[j];
                         let o = if b.a == i { b.b } else { b.a };
-                        ks[j] * coef(i, o, b.role.spec().tau)
+                        let q = H * H * ks[j] + 2.0 * H * damp(ks[j], b);
+                        q * (1.0 / m[i] + 1.0 / (m[i] * m[o]).sqrt())
                     })
                     .sum();
-                if row > ROW_BOUND * 1.0001 {
+                if row > cap * 1.0001 {
                     over = true;
-                    let f = ROW_BOUND / row;
-                    for &j in &adj[i] {
-                        ks[j] *= f;
+                    // The lane ties give way first: a structural node keeps its
+                    // members' census stiffness while its ties can absorb the excess.
+                    let tie = |j: usize| matches!(self.beams[j].role, Role::Tie | Role::Backing);
+                    let part_row = |want_tie: bool| -> f32 {
+                        adj[i]
+                            .iter()
+                            .filter(|&&j| tie(j) == want_tie)
+                            .map(|&j| {
+                                let b = &self.beams[j];
+                                let o = if b.a == i { b.b } else { b.a };
+                                let q = H * H * ks[j] + 2.0 * H * damp(ks[j], b);
+                                q * (1.0 / m[i] + 1.0 / (m[i] * m[o]).sqrt())
+                            })
+                            .sum()
+                    };
+                    let (rt, rs) = (part_row(true), part_row(false));
+                    if !self.nodes[i].contact && rt > 0.0 && rs < cap {
+                        let f = ((cap - rs) / rt).min(1.0).powf(1.05);
+                        for &j in adj[i].iter().filter(|&&j| tie(j)) {
+                            ks[j] *= f;
+                        }
+                    } else {
+                        let f = (cap / row).powf(1.05);
+                        for &j in &adj[i] {
+                            ks[j] *= f;
+                        }
                     }
                 }
             }
@@ -695,13 +768,15 @@ impl Car {
                 break;
             }
         }
-        for (b, k) in self.beams.iter_mut().zip(ks) {
-            b.k = k;
-            b.c = b.role.spec().tau * k;
+        for (j, b) in self.beams.iter_mut().enumerate() {
+            let sp = b.role.spec(b.part);
+            b.k = ks[j];
+            b.c = 2.0 * ZETA * (ks[j] * (m[b.a] * m[b.b] / (m[b.a] + m[b.b]))).sqrt();
+            b.deform = if sp.eps.is_finite() { sp.eps * ks[j] * len[j] } else { f32::INFINITY };
         }
     }
 
-    /// Gershgorin row of every node (fraction of the bound).
+    /// Gershgorin row of every node as a multiple of sedan1's bound.
     pub fn rows(&self, hub_extra: &HashMap<usize, f32>) -> Vec<f32> {
         let n = self.nodes.len();
         let m: Vec<f32> = (0..n).map(|i| self.nodes[i].mass + hub_extra.get(&i).copied().unwrap_or(0.0)).collect();

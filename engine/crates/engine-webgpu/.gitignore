@@ -3,3 +3,6 @@
 
 # Demo videos from record-vehicle-demos.mjs
 /recordings/
+
+# Local BeamNG mod caches and the generated gen2 car (never committed)
+/__mods/

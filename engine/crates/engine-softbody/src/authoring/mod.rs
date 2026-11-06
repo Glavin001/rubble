@@ -15,6 +15,7 @@
 
 pub mod body;
 pub mod curve;
+pub mod gen2;
 pub mod hatchback;
 pub mod material;
 pub mod members;
