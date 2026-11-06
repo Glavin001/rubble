@@ -728,6 +728,13 @@ fn main() {
                         if cover[k] > 0 {
                             overl += 1;
                             *opairs.entry((cover[k] as usize - 1, pi)).or_insert(0) += 1;
+                            if std::env::var("GLB_DEBUG").is_ok() {
+                                let c = (s.0[tr[0]] + s.0[tr[1]] + s.0[tr[2]]) / 3.0;
+                                println!(
+                                    "  uv overlap {} at ({:.3}, {:.3}, {:.3})",
+                                    panels[pi], c.x, c.y, c.z
+                                );
+                            }
                         } else {
                             covered += 1;
                         }
