@@ -483,6 +483,17 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         "nodeRestNormal",
         &f32s(v.node_rest_normal.iter().flatten().copied()),
     );
+    // Weighted skins (engine_softbody::flexskin, a Rubble extension): per
+    // vertex its entries (CSR wtStart, vertexCount + 1; empty: none), each
+    // entry's solver node and (A, dA/dT, dA/dB), per vertex its detail
+    // offset and normal coefficients. showcase-car-render.mjs weightedVertex().
+    if v.wt_start.len() == v.positions.len() + 1 {
+        set(&vis, "wtStart", &Uint32Array::from(v.wt_start.as_slice()).into());
+        set(&vis, "wtNode", &Uint32Array::from(v.wt_node.as_slice()).into());
+        set(&vis, "wtW", &f32s(v.wt_w.iter().flatten().copied()));
+        set(&vis, "wtOff", &f32s(v.wt_off.iter().flatten().copied()));
+        set(&vis, "wtNrm", &f32s(v.wt_nrm.iter().flatten().copied()));
+    }
     set(&vis, "nodeCount", &JsValue::from(v.node_count));
     set(
         &vis,
@@ -506,6 +517,21 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
 /// unbound, missing } }`.
 #[wasm_bindgen(js_name = jbeamVisual)]
 pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
+    jbeam_visual_with(spec, meshes, None, None)
+}
+
+/// [`jbeam_visual`] for a vehicle whose flexbodies are a glTF render model
+/// (`glb`, the vehicle art spec's `.glb`: its meshes by name, in the JBeam
+/// frame through each row's `pos`) with weighted skins (`skin`, the `.rskin`
+/// sidecar the rows name with `"rubbleSkin"`: engine_softbody::flexskin), read
+/// verbatim. `meshes` may add Collada files. One level of detail
+/// (`visualLod` and `visualFar` are null).
+#[wasm_bindgen(js_name = jbeamVisualSkinned)]
+pub fn jbeam_visual_skinned(spec: JsValue, meshes: Array, glb: &[u8], skin: &[u8]) -> Result<JsValue, JsValue> {
+    jbeam_visual_with(spec, meshes, Some(glb), Some(skin))
+}
+
+fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Option<&[u8]>) -> Result<JsValue, JsValue> {
     use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
     use engine_softbody::flexmesh;
     use glam::Vec3;
@@ -582,6 +608,14 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
         let text = String::from_utf8_lossy(&bytes);
         all.extend(flexmesh::read_collada(&text).map_err(|e| err(format!("{name}: {e}")))?);
     }
+    if let Some(g) = glb {
+        let g = engine_softbody::glb::read(g).map_err(err)?;
+        all.extend(g.meshes.iter().map(|m| engine_softbody::flexskin::glb_mesh(&g, m)));
+    }
+    let skin = match skin {
+        Some(b) => Some(engine_softbody::flexskin::Skin::decode(b).map_err(err)?),
+        None => None,
+    };
     let mut mats = std::collections::HashMap::new();
     for m in v
         .get("materials")
@@ -594,7 +628,25 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
         ));
     }
     let (vis, rep) =
-        flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &all, &mats, paint).map_err(err)?;
+        flexmesh::jbeam_visual_skinned(&flex, &props, &desc, &sim, &all, &mats, paint, skin.as_ref()).map_err(err)?;
+    if skin.is_some() {
+        let out = Object::new();
+        set(&out, "visual", &visual_js(&vis).into());
+        set(&out, "visualLod", &JsValue::NULL);
+        set(&out, "visualFar", &JsValue::NULL);
+        let r = Object::new();
+        set(&r, "flexbodies", &JsValue::from(rep.flexbodies as u32));
+        set(&r, "vertices", &JsValue::from(rep.vertices as u32));
+        set(&r, "triangles", &JsValue::from(rep.triangles as u32));
+        set(&r, "unbound", &JsValue::from(rep.unbound as u32));
+        let missing = Array::new();
+        for m in &rep.missing {
+            missing.push(&JsValue::from_str(m));
+        }
+        set(&r, "missing", &missing.into());
+        set(&out, "report", &r.into());
+        return Ok(out.into());
+    }
     // The distant level: the meshes clustered (flexmesh::cluster).
     let far: Vec<flexmesh::DaeMesh> = all
         .iter()

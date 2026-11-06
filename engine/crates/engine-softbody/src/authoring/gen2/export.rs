@@ -37,6 +37,10 @@ pub struct Flex {
     pub mesh: String,
     pub groups: Vec<String>,
     pub deform_group: Option<String>,
+    /// A weighted skin's sidecar file (`"rubbleSkin"`, a Rubble extension:
+    /// [`crate::flexskin`]) and the mesh's placement (`"pos"`, JBeam frame).
+    pub skin: Option<String>,
+    pub pos: Option<[f32; 3]>,
 }
 
 fn rows(header: Value, rows: Vec<Value>) -> String {
@@ -257,6 +261,12 @@ pub fn jbeam_files(
                 let mut o = Map::new();
                 if let Some(g) = &f.deform_group {
                     o.insert("deformGroup".into(), json!(g));
+                }
+                if let Some(k) = &f.skin {
+                    o.insert("rubbleSkin".into(), json!(k));
+                }
+                if let Some(p) = f.pos {
+                    o.insert("pos".into(), json!({"x": p[0], "y": p[1], "z": p[2]}));
                 }
                 json!([f.mesh, f.groups, [], Value::Object(o)])
             })

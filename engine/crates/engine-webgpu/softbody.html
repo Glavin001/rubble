@@ -71,7 +71,7 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, decodeTexture } from './rubble-world.mjs';
+    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture } from './rubble-world.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
@@ -159,7 +159,13 @@
       const pc = pcName && list.includes(pcName) ? (await text(pcName))[1] : undefined;
       const meshes = await Promise.all(list.filter((f) => f.endsWith('.dae')).map(async (f) => [f, new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer())]));
       const materials = await Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text));
-      importSrc = { kind: 'jbeam', files, pc, meshes, materials, base, list, label: base.split('/').pop() };
+      // A glTF render model with weighted skins (Rubble's flexskin: gen2/gen3):
+      // the vehicle folder's .glb and .rskin.
+      const bin = async (f) => (f ? new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer()) : null);
+      const skinName = list.find((f) => f.endsWith('.rskin'));
+      const glbName = skinName && list.find((f) => f.endsWith('.glb') && f.includes('/'));
+      const [glb, skin] = await Promise.all([bin(glbName), bin(skinName)]);
+      importSrc = { kind: 'jbeam', files, pc, meshes, materials, base, list, label: base.split('/').pop(), glb, skin };
     } else if (qs.get('car') === 'import') {
       try { importSrc = JSON.parse(sessionStorage.getItem(IMPORT_KEY) || 'null'); } catch { importSrc = null; }
     }
@@ -1218,7 +1224,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // Or an imported JBeam vehicle's flexbodies and props (?mod=).
     let importVis = null;
     const bodyVisual = () => carKind === 'showcase' ? (() => { const b = showcaseBuilt(); b.visual.lod ??= [b.visualLod, b.visualFar]; return b.visual; })()
-      : (importVis ??= (() => { const r = jbeamVisual({ jbeam: importSrc.files, pc: importSrc.pc, native: JBEAM_NATIVE, ...(RAYCAST ? { wheels: 'raycast' } : {}), materials: importSrc.materials ?? [] }, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = [r.visualLod, r.visualFar]; loadBodyTextures(r.visual); return r.visual; })());
+      : (importVis ??= (() => { const spec = { jbeam: importSrc.files, pc: importSrc.pc, native: JBEAM_NATIVE, ...(RAYCAST ? { wheels: 'raycast' } : {}), materials: importSrc.materials ?? [] }; const r = importSrc.skin ? jbeamVisualSkinned(spec, importSrc.meshes, importSrc.glb, importSrc.skin) : jbeamVisual(spec, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = r.visualLod ? [r.visualLod, r.visualFar] : []; loadBodyTextures(r.visual); return r.visual; })());
     // An imported body's colour and data maps (normal, roughness, AO; decoded
     // in the wasm), uploaded once they arrive; until then it shades untextured.
     const loadBodyTextures = (vis) => {
@@ -1231,7 +1237,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (vis.textures?.length) load(vis.textures).then((layers) => bodyR.setTextures(layers, 1024));
       if (vis.dataTextures?.length) load(vis.dataTextures).then((layers) => bodyR.setDataTextures(layers, 1024));
     };
-    const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
+    const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length || importSrc?.skin) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
     let bodyFor = { layout: null, pos: null }, bodyIds = [];
     const syncBody = () => {
       const pos = labR.positionsBuffer();

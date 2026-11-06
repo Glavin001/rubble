@@ -8,7 +8,7 @@
 //! ```
 //! `out-dir` defaults to `engine/crates/engine-webgpu/__mods/gen2` (gitignored),
 //! which the page loads as `softbody.html?solver=explicit&mod=/__mods/gen2&pc=gen2/gen2.pc&wheels=raycast`.
-use engine_softbody::authoring::gen2::{self, build::*, sedan};
+use engine_softbody::authoring::gen2::{self, build::*, gen3, rig};
 use std::collections::BTreeMap;
 
 fn pct(v: &mut Vec<f32>, q: f32) -> f32 {
@@ -24,15 +24,20 @@ fn main() {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../engine-webgpu/__mods/gen2").to_string()
     });
     let out = std::path::Path::new(&out);
-    for (p, bytes) in gen2::files() {
+    let t0 = std::time::Instant::now();
+    let g = gen3::build();
+    let ne: usize = g.skin.meshes.iter().flat_map(|m| m.verts.iter()).map(|v| v.w.len()).sum();
+    let nv: usize = g.skin.meshes.iter().map(|m| m.verts.len()).sum();
+    println!("built in {:.1} s; skins: {nv} vertices, {ne} entries ({:.1} per vertex, max {})", t0.elapsed().as_secs_f32(), ne as f32 / nv as f32, g.skin.meshes.iter().flat_map(|m| m.verts.iter()).map(|v| v.w.len()).max().unwrap_or(0));
+    for (p, bytes) in gen2::files_of(&g) {
         let path = out.join(&p);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, bytes).unwrap();
     }
     println!("wrote {}", out.display());
 
-    let car = sedan::sedan();
-    let hub = sedan::hub_extra(&car);
+    let car = g.rig.car.clone();
+    let hub = rig::hub_extra(&car);
     let rows = car.rows(&hub);
     let total: f32 = car.nodes.iter().map(|n| n.mass).sum::<f32>() + hub.values().sum::<f32>();
     let com = car
@@ -44,7 +49,7 @@ fn main() {
         / total;
     println!(
         "mass {total:.2} kg (kerb {:.0}); centre of mass {:.0} mm behind the front axle (band 1,001–1,248), {:.0} mm up, {:+.0} mm left",
-        sedan::KERB,
+        rig::KERB,
         com.y * 1e3,
         com.z * 1e3,
         com.x * 1e3

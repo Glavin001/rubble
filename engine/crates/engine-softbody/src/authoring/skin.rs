@@ -241,6 +241,16 @@ pub struct ShowcaseVisual {
     pub wheel: Vec<u32>,
     /// Per tyre (the solver's order) its axle nodes.
     pub tyre_axles: Vec<[u32; 2]>,
+    /// Weighted skins ([`crate::flexskin`], a Rubble extension): per vertex
+    /// (CSR, `positions.len() + 1` starts, or empty) its entries: solver
+    /// node (`wt_node`) and (A, ∂A/∂T, ∂A/∂B) (`wt_w`); per vertex its detail
+    /// offset and normal coefficients. A vertex with entries is skinned by
+    /// [`crate::flexskin::eval`] (the renderer's `weightedVertex()`), never torn.
+    pub wt_start: Vec<u32>,
+    pub wt_node: Vec<u32>,
+    pub wt_w: Vec<[f32; 3]>,
+    pub wt_off: Vec<[f32; 3]>,
+    pub wt_nrm: Vec<[f32; 3]>,
 }
 
 /// `ShowcaseVisual::rigid` values.
@@ -2457,7 +2467,27 @@ pub fn deform_beams(
     let rest_pl = node_planes(v, &rest);
     let mut pos = Vec::with_capacity(v.positions.len());
     let mut nrm = Vec::with_capacity(v.positions.len());
+    let weighted = v.wt_start.len() == v.positions.len() + 1;
+    let mut wbuf: Vec<(u32, f32, f32, f32)> = Vec::new();
     for i in 0..v.positions.len() {
+        if weighted && v.wt_start[i + 1] > v.wt_start[i] {
+            let gone = units.is_some_and(|st| {
+                let u = v.unit.get(i).copied().unwrap_or(u32::MAX);
+                u != u32::MAX && st[u as usize].broken && shatters(v.units[u as usize].kind, v.material[i])
+            });
+            if gone {
+                pos.push(Vec3::splat(f32::NAN));
+                nrm.push(Vec3::Y);
+                continue;
+            }
+            let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
+            wbuf.clear();
+            wbuf.extend((a..b).map(|k| (v.wt_node[k], v.wt_w[k][0], v.wt_w[k][1], v.wt_w[k][2])));
+            let (p, n) = crate::flexskin::eval(&wbuf, v.wt_off[i], v.wt_nrm[i], nodes);
+            pos.push(p);
+            nrm.push(n);
+            continue;
+        }
         let alt = on_alt(v, i, nodes, beams);
         let ([a, b, c], [al, be, h], [r1, r2], bn) = match alt {
             Some(k) => (

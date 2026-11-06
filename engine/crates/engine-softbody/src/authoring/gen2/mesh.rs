@@ -728,6 +728,8 @@ pub fn build(car: &Car) -> Visual {
                 mesh: m.name.clone(),
                 groups: m.groups.clone(),
                 deform_group: m.deform.clone(),
+                skin: None,
+                pos: None,
             },
         ));
     }

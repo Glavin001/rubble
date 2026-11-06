@@ -666,6 +666,25 @@ pub fn jbeam_visual(
     materials: &HashMap<String, MatInfo>,
     paint: [f32; 3],
 ) -> Result<(ShowcaseVisual, FlexReport), String> {
+    jbeam_visual_skinned(flex, props, desc, sim, meshes, materials, paint, None)
+}
+
+/// [`jbeam_visual`] with weighted skins ([`crate::flexskin`], a Rubble
+/// extension): a flexbody row with `"rubbleSkin"` whose mesh `skin` has takes
+/// its vertices' explicit node weights verbatim (its node names mapped to
+/// the solver's nodes; every one must exist), and shades by the vehicle art
+/// spec's material classes ([`crate::glb::class_of`]).
+#[allow(clippy::too_many_arguments)]
+pub fn jbeam_visual_skinned(
+    flex: &[(String, Map<String, Value>)],
+    props: &[(String, Map<String, Value>)],
+    desc: &SoftVehicleDesc,
+    sim: &crate::explicit_beams::ExplicitBeams,
+    meshes: &[DaeMesh],
+    materials: &HashMap<String, MatInfo>,
+    paint: [f32; 3],
+    skin: Option<&crate::flexskin::Skin>,
+) -> Result<(ShowcaseVisual, FlexReport), String> {
     // A mesh material's class and colour: its name's class, made glass when
     // the material is translucent and emissive when it glows; its diffuse
     // colour when it is untextured (a textured one shades a flat mid grey,
@@ -761,6 +780,7 @@ pub fn jbeam_visual(
         ..Default::default()
     };
     let mut rep = FlexReport::default();
+    let mut wt_cnt: Vec<u32> = Vec::new();
     let mut add = |name: &str,
                    m: &DaeMesh,
                    xf: Mat4,
@@ -868,6 +888,11 @@ pub fn jbeam_visual(
                 .collect();
             pool.sort_unstable();
             pool.dedup();
+            let skinned = if row.get("rubbleSkin").is_some() {
+                Some(skin.and_then(|s| s.mesh(mesh)).ok_or_else(|| format!("{mesh}: rubbleSkin names no skin for it"))?)
+            } else {
+                None
+            };
             // A wheel's groups (`wheelhub_FR`, `tire_FR`) are the nodes its
             // pressureWheels row makes, which the solver appends after the
             // desc's: the wheel's own nodes near the mesh, and its hub.
@@ -887,7 +912,7 @@ pub fn jbeam_visual(
                         .map(|i| i as u32),
                 );
             }
-            if pool.len() < 3 && wheel_pool.len() < 3 {
+            if skinned.is_none() && pool.len() < 3 && wheel_pool.len() < 3 {
                 rep.missing.push(format!("{mesh}: groups {groups:?} have {} nodes", pool.len()));
                 continue;
             }
@@ -901,7 +926,67 @@ pub fn jbeam_visual(
                 t,
             );
             let first = out.positions.len();
-            add(&format!("{pname}:{mesh}"), m, xf, &pool, None, (pool.len() < 3).then_some(&wheel_pool[..]), &mut out, &mut rep);
+            if let Some(ms) = skinned {
+                let sk = skin.unwrap();
+                if ms.verts.len() != m.pos.len() {
+                    return Err(format!("{mesh}: {} skinned vertices for {}", ms.verts.len(), m.pos.len()));
+                }
+                // The skin's node names to solver nodes.
+                let map: Vec<u32> = sk
+                    .nodes
+                    .iter()
+                    .map(|n| by_name.get(n.as_str()).and_then(|&i| sim_of[i as usize]).ok_or_else(|| format!("{mesh}: skin node {n} is not the vehicle's")))
+                    .collect::<Result<_, _>>()?;
+                let first = out.positions.len() as u32;
+                for (k, sv) in ms.verts.iter().enumerate() {
+                    let p = to_r(xf.transform_point3(m.pos[k]));
+                    let n = to_r(xf.transform_vector3(m.nrm[k])).normalize_or(Vec3::Y);
+                    let mut top = sv.w.clone();
+                    top.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+                    let t = [0, 1, 2].map(|q| map[top.get(q).or(top.first()).map_or(0, |e| e.0) as usize]);
+                    let (c, nl) = crate::authoring::skin::frame_coords(sim_nodes, t, p, n);
+                    let (p0, p1, p2) = (sim_nodes[t[0] as usize], sim_nodes[t[1] as usize], sim_nodes[t[2] as usize]);
+                    let i = out.positions.len();
+                    wt_cnt.resize(i, 0);
+                    out.wt_off.resize(i, [0.0; 3]);
+                    out.wt_nrm.resize(i, [0.0; 3]);
+                    wt_cnt.push(sv.w.len() as u32);
+                    out.wt_off.push(sv.off);
+                    out.wt_nrm.push(sv.nrm);
+                    for &(nd, a, da, db) in &sv.w {
+                        out.wt_node.push(map[nd as usize]);
+                        out.wt_w.push([a, da, db]);
+                    }
+                    out.positions.push(p.to_array());
+                    out.normals.push(n.to_array());
+                    out.uvs.push(m.uv.get(k).copied().unwrap_or([0.0; 2]));
+                    out.bind_nodes.push(t);
+                    out.bind_coords.push(c);
+                    out.bind_normal.push(nl);
+                    out.bind_rest.push([p1.distance(p0).max(1e-3) * 1e3, p2.distance(p0).max(1e-3) * 1e3]);
+                    out.ao.push(1.0);
+                    out.smooth.push(0);
+                    out.rigid.push(0);
+                    out.material.push(mat::PAINT);
+                    out.colors.push(paint);
+                    out.tex.push(u16::MAX);
+                }
+                for (ti, t) in m.tris.iter().enumerate() {
+                    let mname = m.materials.get(m.tri_mat[ti] as usize).map_or("", String::as_str);
+                    let class = crate::glb::class_of(mname, mesh);
+                    let col = crate::authoring::skin::color(class, paint);
+                    for &x in t {
+                        out.material[first as usize + x as usize] = class;
+                        out.colors[first as usize + x as usize] = col;
+                    }
+                    out.indices.extend(t.iter().map(|&x| x + first));
+                }
+                let count = out.positions.len() as u32 - first;
+                out.pieces.push((format!("{pname}:{mesh}"), first, count));
+                rep.vertices += count as usize;
+            } else {
+                add(&format!("{pname}:{mesh}"), m, xf, &pool, None, (pool.len() < 3).then_some(&wheel_pool[..]), &mut out, &mut rep);
+            }
             if let Some(g) = deform_of(&row) {
                 let windshield = mesh.to_ascii_lowercase().contains("windshield") || mesh.to_ascii_lowercase().contains("windscreen");
                 let kind = if windshield { crate::authoring::skin::unit_kind::LAMINATED } else { crate::authoring::skin::unit_kind::TEMPERED };
@@ -964,6 +1049,18 @@ pub fn jbeam_visual(
     }
     rep.triangles = out.indices.len() / 3;
     out.unit.resize(out.positions.len(), u32::MAX);
+    if !out.wt_node.is_empty() {
+        let nv = out.positions.len();
+        wt_cnt.resize(nv, 0);
+        out.wt_off.resize(nv, [0.0; 3]);
+        out.wt_nrm.resize(nv, [0.0; 3]);
+        out.wt_start = std::iter::once(0)
+            .chain(wt_cnt.iter().scan(0u32, |a, &c| {
+                *a += c;
+                Some(*a)
+            }))
+            .collect();
+    }
     // The units' beams: the desc beams in each deform group, as solver beams
     // (by node pair), and the group's trigger ratio.
     let mut by_pair: HashMap<(u32, u32), Vec<u32>> = HashMap::new();

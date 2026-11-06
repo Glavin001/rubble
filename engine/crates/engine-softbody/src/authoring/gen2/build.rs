@@ -31,6 +31,8 @@ pub const LANE: f32 = 0.20;
 /// Beams shorter than this take the spring of one this long (BeamNG springs
 /// are near uniform within a part: a short beam is not made stiffer).
 pub const SPRING_LENGTH: f32 = 0.4;
+/// Lane nodes a backing node takes before the next nearest takes them.
+pub const BACKING_LOAD: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Part {
@@ -379,6 +381,16 @@ pub struct Car {
     pub refs: [usize; 4],
     /// The highest spring mode after [`Car::assign_springs`] (ω_max·h).
     pub omega_h: f32,
+    /// Per node the render surface it stands for (m²; its Voronoi share of
+    /// its part's meshes), when the car is rigged from a render model: the
+    /// mass rule's sheet term (else the collision triangles' areas).
+    pub sheet_area: Option<Vec<f32>>,
+    /// The mass rule's floor as a share of a part's mean structural node
+    /// (None: 0.5).
+    pub mass_floor: Option<f32>,
+    /// The Gershgorin row cap only on contact-only nodes' ties (the
+    /// structure is left to the measured bound, the power iteration).
+    pub row_cap_contact_only: bool,
     by_name: HashMap<String, usize>,
     pair: HashMap<(usize, usize), usize>,
 }
@@ -694,6 +706,7 @@ impl Car {
             let lane: Vec<usize> = (0..self.nodes.len())
                 .filter(|&i| self.nodes[i].contact && self.nodes[i].part == part)
                 .collect();
+            let mut load: HashMap<usize, usize> = HashMap::new();
             for i in lane {
                 let p = self.p(i);
                 let mut best: Vec<(f32, usize)> = backing
@@ -701,7 +714,17 @@ impl Car {
                     .map(|&b| (self.p(b).distance(p), b))
                     .collect();
                 best.sort_by(|x, y| x.0.total_cmp(&y.0));
-                for &(_, b) in best.iter().take(1) {
+                // The nearest backing node with room (at most `BACKING_LOAD`
+                // lane nodes each, so no one node's row carries a whole lane;
+                // within 1.5× the nearest's distance), else the nearest.
+                let d0 = best.first().map_or(0.0, |b| b.0);
+                let pick = best
+                    .iter()
+                    .find(|&&(d, b)| d <= 1.5 * d0 + 1e-6 && load.get(&b).copied().unwrap_or(0) < BACKING_LOAD)
+                    .or(best.first())
+                    .map(|q| q.1);
+                if let Some(b) = pick {
+                    *load.entry(b).or_insert(0) += 1;
                     self.beam(i, b, Role::Backing, part);
                 }
             }
@@ -742,7 +765,15 @@ impl Car {
                 )
             })
             .collect();
-        for t in &self.tris {
+        let dens = 0.8 * 7.85 * 3.0; // 0.8 mm steel ≈ 6.3 kg/m², relative weight only
+        if let Some(area) = &self.sheet_area {
+            for (i, a) in area.iter().enumerate() {
+                if i < n && !self.nodes[i].contact {
+                    w[i] += a * dens;
+                }
+            }
+        }
+        for t in self.tris.iter().filter(|_| self.sheet_area.is_none()) {
             let [a, b, c] = t.n;
             let area = 0.5
                 * (self.p(b) - self.p(a))
@@ -794,7 +825,7 @@ impl Car {
             }
             // A floor of half the mean share (BeamNG closures are near uniform): no node is left
             // as light as a lane node.
-            let floor = 0.5 * sw / structural as f32;
+            let floor = self.mass_floor.unwrap_or(0.5) * sw / structural as f32;
             let sw2: f32 = ids
                 .iter()
                 .filter(|&&i| !self.nodes[i].contact)
@@ -885,7 +916,10 @@ impl Car {
                         q * (1.0 / m[i] + 1.0 / (m[i] * m[o]).sqrt())
                     })
                     .sum();
-                if row > cap * 1.0001 {
+                let contact_only = self.row_cap_contact_only
+                    && !self.nodes[i].contact
+                    && adj[i].iter().all(|&j| !matches!(self.beams[j].role, Role::Tie | Role::Backing));
+                if row > cap * 1.0001 && !contact_only {
                     over = true;
                     // The lane ties give way first: a structural node keeps its
                     // members' census stiffness while its ties can absorb the excess.
@@ -903,7 +937,13 @@ impl Car {
                             .sum()
                     };
                     let (rt, rs) = (part_row(true), part_row(false));
-                    if !self.nodes[i].contact && rt > 0.0 && rs < cap {
+                    if self.row_cap_contact_only && !self.nodes[i].contact {
+                        // The structure keeps its members: only its ties give.
+                        let f = ((cap - rs).max(0.2 * rt) / rt.max(1e-30)).min(1.0);
+                        for &j in adj[i].iter().filter(|&&j| tie(j)) {
+                            ks[j] *= f;
+                        }
+                    } else if !self.nodes[i].contact && rt > 0.0 && rs < cap {
                         let f = ((cap - rs) / rt).min(1.0).powf(1.05);
                         for &j in adj[i].iter().filter(|&&j| tie(j)) {
                             ks[j] *= f;
@@ -987,15 +1027,32 @@ impl Car {
                 x = y.into_iter().map(|v| v / ny.max(1e-30)).collect();
             }
             omega_h = lam.sqrt() * H;
+            if std::env::var("GEN3_MODE").is_ok() && (round < 3 || round % 50 == 0 || omega_h <= OMEGA_H) {
+                let mut v: Vec<(f32, usize)> = (0..n).map(|i| (x[i].length(), i)).collect();
+                v.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let top: Vec<String> = v.iter().take(6).map(|&(a, i)| format!("{} {:.2} ({:.2} kg)", self.nodes[i].name, a, m[i])).collect();
+                eprintln!("mode round {round}: omega_h {omega_h:.3}: {}", top.join(", "));
+            }
             if omega_h <= OMEGA_H {
                 break;
             }
-            let amax = x.iter().map(|v| v.length_squared()).fold(0.0, f32::max);
-            for i in 0..n {
-                if x[i].length_squared() >= 0.25 * amax {
-                    for &j in &adj[i] {
-                        ks[j] *= 0.97;
-                    }
+            // Soften the beams that carry the mode: those with at least a
+            // quarter of the largest beam's strain energy in it (not every
+            // beam of the nodes that move: a light node's mode then softens
+            // only its own beams, not its heavy neighbours' members).
+            let e: Vec<f32> = self
+                .beams
+                .iter()
+                .enumerate()
+                .map(|(j, b)| {
+                    let keff = ks[j] + 2.0 * damp(ks[j], b) / H;
+                    keff * dirs[j].dot(x[b.a] - x[b.b]).powi(2)
+                })
+                .collect();
+            let emax = e.iter().copied().fold(0.0, f32::max);
+            for j in 0..e.len() {
+                if e[j] >= 0.25 * emax {
+                    ks[j] *= 0.97;
                 }
             }
         }

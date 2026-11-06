@@ -469,12 +469,66 @@ fn wheelVertex(i: u32, bd: Bind) {
   outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(0.0, 0.0))));
 }
 
+// Weighted skins (engine_softbody::flexskin, a Rubble extension; the CPU twin
+// is flexskin::eval). A weighted vertex's Bind (flags bit 25): n0 its entry
+// count, vehicle its first entry slot in binds (4 entries a 64-byte slot,
+// each (node, A, dA/dT, dA/dB)), (a, b, h) its detail offset, (nt, nb, nn) its
+// rest normal's coefficients in the frame (U, V, W):
+// P = sum A q, U = sum a q, V = sum b q, W = (U x V)/|U x V|;
+// x = P + off.x U/|U| + off.y (W x U/|U|) + off.z W;
+// n = normalize(nt (V x W) + nb (W x U) + nn (U x V)).
+struct Weighted { pos: vec3f, nrm: vec3f, ids: vec3u };
+fn wEntry(slot: u32, e: u32) -> vec4u {
+  let b = binds[slot + e / 4u];
+  let k = e % 4u;
+  if (k == 0u) { return vec4u(b.n0, b.n1, b.n2, b.vehicle); }
+  if (k == 1u) { return vec4u(bitcast<u32>(b.a), bitcast<u32>(b.b), bitcast<u32>(b.h), bitcast<u32>(b.r1)); }
+  if (k == 2u) { return vec4u(bitcast<u32>(b.nt), bitcast<u32>(b.nb), bitcast<u32>(b.nn), bitcast<u32>(b.r2)); }
+  return vec4u(bitcast<u32>(b.rx), bitcast<u32>(b.ry), bitcast<u32>(b.rz), b.flags);
+}
+fn weightedVertex(bd: Bind) -> Weighted {
+  var p = vec3f(0.0); var u = vec3f(0.0); var v = vec3f(0.0);
+  var ids = vec3u(0u);
+  for (var e = 0u; e < bd.n0; e++) {
+    let w = wEntry(bd.vehicle, e);
+    let q = nodePos(w.x);
+    p += q * bitcast<f32>(w.y);
+    u += q * bitcast<f32>(w.z);
+    v += q * bitcast<f32>(w.w);
+    if (e < 3u) { ids[e] = w.x; }
+  }
+  if (bd.n0 < 2u) { ids.y = ids.x; }
+  if (bd.n0 < 3u) { ids.z = ids.y; }
+  let c = cross(u, v);
+  let wn = c * (1.0 / max(length(c), 1e-20));
+  let un = u * (1.0 / max(length(u), 1e-20));
+  let vn = cross(wn, un);
+  let pos = p + un * bd.a + vn * bd.b + wn * bd.h;
+  let n = cross(v, wn) * bd.nt + cross(wn, u) * bd.nb + c * bd.nn;
+  return Weighted(pos, n * (1.0 / max(length(n), 1e-20)), ids);
+}
+
 @compute @workgroup_size(${WG})
 fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= params.count) { return; }
   var bd = binds[i];
   if ((bd.flags & (1u << 23u)) != 0u) { wheelVertex(i, bd); return; }
+  let weighted = (bd.flags & (1u << 25u)) != 0u;
+  var pos: vec3f;
+  var n: vec3f;
+  var w: vec3f;
+  var tear: f32;
+  var nrm: vec3f;
+  if (weighted) {
+    let r = weightedVertex(bd);
+    pos = r.pos + origin();
+    nrm = r.nrm;
+    n = r.nrm;
+    w = vec3f(1.0 / 3.0);
+    tear = 0.0;
+    bd.n0 = r.ids.x; bd.n1 = r.ids.y; bd.n2 = r.ids.z;
+  } else {
   if (bd.vehicle != 0u) {
     // On a shut line's frame: its own part's frame for good once the frame
     // has died (a beam of its death record broke) or torn (skin.rs on_alt).
@@ -494,7 +548,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let e2 = nodePos(bd.n2) - nodePos(bd.n0);
   let c = cross(e1, e2);
   let cl = length(c);
-  let n = select(vec3f(0.0, 1.0, 0.0), c / cl, cl > 1e-12);
+  n = select(vec3f(0.0, 1.0, 0.0), c / cl, cl > 1e-12);
   let l1 = length(e1);
   let l2 = length(e2);
   let t = e1 / max(l1, 1e-9);
@@ -503,10 +557,8 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let s2 = l2 / max(bd.r2, 1e-6);
   let torn = s1 > 2.5 || s2 > 2.5 || cl <= 1e-12;
   let rigid = (bd.flags & 2u) != 0u;
-  var pos: vec3f;
   let t0 = nodeN[NS * bd.n0].w; let t1 = nodeN[NS * bd.n1].w; let t2 = nodeN[NS * bd.n2].w;
-  var w = vec3f(1.0 - bd.a - bd.b, bd.a, bd.b);
-  var tear: f32;
+  w = vec3f(1.0 - bd.a - bd.b, bd.a, bd.b);
   if (rigid) {
     // Rigid parts (mirrors, handles, lamps, tempered panes): the rest shape
     // in the triangle's orthonormal frame, never stretched; they go whole.
@@ -522,7 +574,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   tear = select(clamp(tear, 0.0, 1.0), 1.0, torn);
   // The rest normal carried by the triangle's frame (faceted: keeps kinks).
   let nf = normalize(bd.nt * t + bd.nb * b + bd.nn * n + vec3f(1e-9));
-  var nrm = nf;
+  nrm = nf;
   if ((bd.flags & 1u) != 0u && !rigid) {
     // The body's skin: the crease envelope (envelope()) now and at rest. The
     // vertex moves by the change of its offset (the rest pose and any rigid
@@ -547,6 +599,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
       pos += clamp(now.e - rest.e, -ENVELOPE_MAX, ENVELOPE_MAX) * now.u;
       nrm = normalize(rotTo(rest.n, now.n, vec3f(bd.rx, bd.ry, bd.rz)));
     }
+  }
   }
   // The binding nodes' plastic strain, broken beams and scrape.
   let q0 = nodeN[NS * bd.n0 + 2u]; let q1 = nodeN[NS * bd.n1 + 2u]; let q2 = nodeN[NS * bd.n2 + 2u];
@@ -1596,7 +1649,13 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         const n = v.vertexCount;
         // Shut-line fallbacks after the n bindings (word 3 links them).
         const na = v.alt && v.alt.length === n ? v.altTri.length : 0;
-        const bindData = new ArrayBuffer((n + na) * 64);
+        // Weighted skins (flexskin): 4 entries a 64-byte slot after the
+        // fallbacks; per vertex its entries' first slot.
+        const ws = v.wtStart && v.wtStart.length === n + 1 ? v.wtStart : null;
+        const wslot = ws ? new Uint32Array(n) : null;
+        let nslots = 0;
+        if (ws) for (let i = 0; i < n; i++) { wslot[i] = n + na + nslots; nslots += Math.ceil((ws[i + 1] - ws[i]) / 4); }
+        const bindData = new ArrayBuffer((n + na + nslots) * 64);
         const u = new Uint32Array(bindData);
         const f = new Float32Array(bindData);
         for (let i = 0; i < n; i++) {
@@ -1627,6 +1686,24 @@ export function createShowcaseCarRenderer(device, opts = {}) {
             | (un === 0xffffffff ? 0 : ((un + 1) & 0x3fff) << 2) | (v.shard && v.shard[i] ? 1 << 16 : 0) | (v.material[i] << 17);
           const a = na ? v.alt[i] : 0;
           u[o + 3] = a ? n + a - 1 : 0;
+          if (ws && ws[i + 1] > ws[i]) {
+            // Entries sorted by |A| (the first three are the vertex's plastic,
+            // scrape and damage nodes), packed (node, A, dA/dT, dA/dB).
+            const k0 = ws[i], k1 = ws[i + 1];
+            const ord = [];
+            for (let k = k0; k < k1; k++) ord.push(k);
+            ord.sort((x, y) => Math.abs(v.wtW[3 * y]) - Math.abs(v.wtW[3 * x]));
+            u[o] = k1 - k0;
+            u[o + 3] = wslot[i];
+            f[o + 4] = v.wtOff[3 * i]; f[o + 5] = v.wtOff[3 * i + 1]; f[o + 6] = v.wtOff[3 * i + 2];
+            f[o + 8] = v.wtNrm[3 * i]; f[o + 9] = v.wtNrm[3 * i + 1]; f[o + 10] = v.wtNrm[3 * i + 2];
+            u[o + 15] = (u[o + 15] & ~3) | (1 << 25);
+            ord.forEach((k, e) => {
+              const q = wslot[i] * 16 + 4 * e;
+              u[q] = v.wtNode[k];
+              f[q + 1] = v.wtW[3 * k]; f[q + 2] = v.wtW[3 * k + 1]; f[q + 3] = v.wtW[3 * k + 2];
+            });
+          }
           if (a) {
             // The fallback: its own-part frame, the same vertex otherwise.
             const q = (n + a - 1) * 16, k = a - 1;
