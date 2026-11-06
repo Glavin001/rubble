@@ -331,6 +331,54 @@ pub fn add_door_pull(sim: &mut ExplicitBeams, door: &[u32], rig_at: Vec3) -> u32
     rig
 }
 
+/// A quasi-static rig (FMVSS 214's static door crush, FMVSS 216a's roof):
+/// `held` nodes pinned with the solver's `NODE_IMMOVABLE` (the rig's
+/// restraint); a rigid ram moved `travel` m along `dir` at `speed` m/s, each
+/// step putting nodes inside it back on its surface (`inside(p, offset)`: the
+/// depth along `dir`, if inside, with the ram moved `offset`). The force is
+/// the momentum it takes out each step. Returns (ram travel, force) every 5 mm.
+/// (The reference scenes' rig in `tests/showcase_car.rs`, as a library rig.)
+pub fn ram_rig(
+    s: &mut ExplicitBeams,
+    held: &[usize],
+    dir: Vec3,
+    travel: f32,
+    speed: f32,
+    inside: &dyn Fn(Vec3, f32) -> Option<f32>,
+) -> Vec<(f32, f32)> {
+    let dt = crate::explicit_beams::STEP;
+    for &i in held {
+        s.nodes[i].flags |= crate::explicit_beams::NODE_IMMOVABLE;
+        s.nodes[i].vel = Vec3::ZERO;
+    }
+    let mut out = Vec::new();
+    let (mut d, mut acc, mut n, mut next) = (0.0f32, 0.0f32, 0usize, 0.005f32);
+    while d < travel {
+        d += speed * dt;
+        s.step();
+        let mut f = 0.0f32;
+        for nd in s.nodes.iter_mut() {
+            if let Some(depth) = inside(nd.pos, d) {
+                nd.pos += dir * depth;
+                let vn = nd.vel.dot(dir);
+                if vn < speed {
+                    f += nd.mass * (speed - vn) / dt;
+                    nd.vel += dir * (speed - vn);
+                }
+            }
+        }
+        acc += f;
+        n += 1;
+        if d >= next {
+            out.push((d, acc / n as f32));
+            acc = 0.0;
+            n = 0;
+            next += 0.005;
+        }
+    }
+    out
+}
+
 /// The door nodes a pull takes: of the collision-skin nodes within 15 cm of the
 /// side (`side`, a unit vector, the outermost skin node along it), the `count`
 /// nearest to `at` (vehicle frame).
