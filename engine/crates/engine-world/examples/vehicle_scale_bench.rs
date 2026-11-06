@@ -20,7 +20,7 @@
 //!
 //! Environment: VS_WARM (steps before the measured ones, default 120), VS_STEPS (measured,
 //! 120), VS_SETTLE (steps parked cars settle before the measured ones, 480), VS_HZ (120),
-//! VS_LABEL (a CSV column).
+//! VS_SLEEP=0 (vehicle sleep off; the World's default is on), VS_LABEL (a CSV column).
 //!
 //! cargo run --release -p engine-world --example vehicle_scale_bench -- fleet 64 128
 //! (one run at a time; bounded: perl -e 'alarm 900; exec @ARGV' ...).
@@ -36,11 +36,20 @@ fn sedan() -> ExplicitBeams {
         "/../../docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck"
     ))
     .expect("sedan");
-    ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, ExplicitBeamsSettings::default()).unwrap()
+    ExplicitBeams::from_truck(
+        &text,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        ExplicitBeamsSettings::default(),
+    )
+    .unwrap()
 }
 
 fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(d)
 }
 
 fn pct(v: &mut [f64], q: f64) -> f64 {
@@ -72,12 +81,23 @@ fn world(bodies: u32) -> anyhow::Result<World> {
         },
     )?;
     let g = w.create_body(&BodyDef::default())?;
-    w.create_shape(g, &ShapeDef::default(), Geometry::Plane { normal: [0.0, 1.0, 0.0], offset: 0.0 })?;
+    w.create_shape(
+        g,
+        &ShapeDef::default(),
+        Geometry::Plane {
+            normal: [0.0, 1.0, 0.0],
+            offset: 0.0,
+        },
+    )?;
     Ok(w)
 }
 
 fn add_vehicles(w: &mut World, cars: &[ExplicitBeams]) -> anyhow::Result<()> {
-    let def = ExplicitVehiclesDef::default();
+    let mut def = ExplicitVehiclesDef::default();
+    // VS_SLEEP=0: vehicle sleep off (the World's default is on).
+    if std::env::var("VS_SLEEP").as_deref() == Ok("0") {
+        def.sleep = None;
+    }
     w.add_explicit_vehicles(cars, &def)
 }
 
@@ -105,15 +125,31 @@ fn report(scenario: &str, x: &str, cars: usize, bodies: usize, r: (f64, f64, f64
         "{label},{scenario},{x},{cars},{bodies},{:.3},{:.3},{:.3},{steps}",
         r.0, r.1, r.2
     );
-    eprintln!("{scenario} {x}: {cars} cars, {bodies} bodies: p50 {:.2} p95 {:.2} p99 {:.2} ms", r.0, r.1, r.2);
+    eprintln!(
+        "{scenario} {x}: {cars} cars, {bodies} bodies: p50 {:.2} p95 {:.2} p99 {:.2} ms",
+        r.0, r.1, r.2
+    );
 }
 
 /// Cars in lanes along +Z: `lanes` lanes `dx` apart, `n` cars, `dz` apart along a lane
 /// (front to front), at `speed`, starting at `x0`, `z0`.
-fn lanes(t: &ExplicitBeams, n: usize, lanes: usize, dx: f32, dz: f32, speed: f32, x0: f32, z0: f32) -> Vec<ExplicitBeams> {
+fn lanes(
+    t: &ExplicitBeams,
+    n: usize,
+    lanes: usize,
+    dx: f32,
+    dz: f32,
+    speed: f32,
+    x0: f32,
+    z0: f32,
+) -> Vec<ExplicitBeams> {
     (0..n)
         .map(|i| {
-            let at = Vec3::new(x0 + (i % lanes) as f32 * dx, 0.0, z0 - (i / lanes) as f32 * dz);
+            let at = Vec3::new(
+                x0 + (i % lanes) as f32 * dx,
+                0.0,
+                z0 - (i / lanes) as f32 * dz,
+            );
             place_vehicle(t, at, 0, speed, 0.0)
         })
         .collect()
@@ -128,12 +164,18 @@ fn main() -> anyhow::Result<()> {
     let settle: u32 = env("VS_SETTLE", 480);
     let t = sedan();
     let len = {
-        let (lo, hi) = t.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));
+        let (lo, hi) = t.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| {
+            (a.min(n.pos), b.max(n.pos))
+        });
         (hi - lo).max_element()
     };
     match mode.as_str() {
         "fleet" => {
-            let ns = if nums.is_empty() { vec![64, 128, 256, 512, 1024] } else { nums };
+            let ns = if nums.is_empty() {
+                vec![64, 128, 256, 512, 1024]
+            } else {
+                nums
+            };
             for n in ns {
                 let mut w = world(0)?;
                 let lanes_n = (n as f32).sqrt().ceil() as usize;
@@ -153,7 +195,11 @@ fn main() -> anyhow::Result<()> {
                     _ => (0..n)
                         .map(|i| {
                             let pair = i / 2;
-                            let at = Vec3::new((pair % lanes_n) as f32 * 6.0, 0.0, (pair / lanes_n) as f32 * 40.0);
+                            let at = Vec3::new(
+                                (pair % lanes_n) as f32 * 6.0,
+                                0.0,
+                                (pair / lanes_n) as f32 * 40.0,
+                            );
                             if i % 2 == 0 {
                                 place_vehicle(&t, at - Vec3::Z * 4.0, 0, 10.0, 0.0)
                             } else {
@@ -174,7 +220,19 @@ fn main() -> anyhow::Result<()> {
             let mut w = world(0)?;
             let cols = (p as f32).sqrt().ceil() as usize;
             let mut cars: Vec<ExplicitBeams> = (0..p)
-                .map(|i| place_vehicle(&t, Vec3::new((i % cols) as f32 * 3.0, 0.0, (i / cols) as f32 * (len + 1.5)), 0, 0.0, 0.0))
+                .map(|i| {
+                    place_vehicle(
+                        &t,
+                        Vec3::new(
+                            (i % cols) as f32 * 3.0,
+                            0.0,
+                            (i / cols) as f32 * (len + 1.5),
+                        ),
+                        0,
+                        0.0,
+                        0.0,
+                    )
+                })
                 .collect();
             cars.extend(lanes(&t, d, d, 6.0, 15.0, 10.0, -200.0, 0.0));
             add_vehicles(&mut w, &cars)?;
@@ -182,14 +240,22 @@ fn main() -> anyhow::Result<()> {
             report("parked", &format!("{p}+{d}"), p + d, 0, r, &w);
         }
         "bodies" => {
-            let ns = if nums.is_empty() { vec![10_000, 30_000, 100_000] } else { nums };
+            let ns = if nums.is_empty() {
+                vec![10_000, 30_000, 100_000]
+            } else {
+                nums
+            };
             for n in ns {
                 let mut w = world(n as u32)?;
                 let cols = (n as f32).sqrt().ceil() as usize;
                 let defs: Vec<BodyDef> = (0..n)
                     .map(|i| {
                         let awake = i % 100 == 0;
-                        let p = [(i % cols) as f32 * 1.5, if awake { 4.0 + (i % 7) as f32 } else { 0.5 }, 100.0 + (i / cols) as f32 * 1.5];
+                        let p = [
+                            (i % cols) as f32 * 1.5,
+                            if awake { 4.0 + (i % 7) as f32 } else { 0.5 },
+                            100.0 + (i / cols) as f32 * 1.5,
+                        ];
                         BodyDef {
                             is_awake: awake,
                             ..BodyDef::dynamic(p)
@@ -206,7 +272,11 @@ fn main() -> anyhow::Result<()> {
             }
         }
         "map" => {
-            let ls = if nums.is_empty() { vec![500, 1000, 2000, 4000] } else { nums };
+            let ls = if nums.is_empty() {
+                vec![500, 1000, 2000, 4000]
+            } else {
+                nums
+            };
             for l in ls {
                 let l = l as f32;
                 let km2 = l * l / 1e6;
@@ -218,8 +288,15 @@ fn main() -> anyhow::Result<()> {
                     // Buildings as sleeping dynamic bodies at rest (a static box this
                     // large past LARGE_STATIC_CAP of them overflows the grid's list of
                     // oversized statics: a rigid-side limit, not this benchmark's).
-                    let p = [(i % cols) as f32 * pitch - 0.5 * l, 4.0, (i / cols) as f32 * pitch - 0.5 * l];
-                    let b = w.create_body(&BodyDef { is_awake: false, ..BodyDef::dynamic(p) })?;
+                    let p = [
+                        (i % cols) as f32 * pitch - 0.5 * l,
+                        4.0,
+                        (i / cols) as f32 * pitch - 0.5 * l,
+                    ];
+                    let b = w.create_body(&BodyDef {
+                        is_awake: false,
+                        ..BodyDef::dynamic(p)
+                    })?;
                     w.create_box_shape(b, &ShapeDef::default(), [2.0, 4.0, 2.0])?;
                 }
                 let nc = (64.0 * km2).round().max(1.0) as usize;
@@ -228,7 +305,11 @@ fn main() -> anyhow::Result<()> {
                 let cars: Vec<ExplicitBeams> = (0..nc)
                     .map(|i| {
                         // Between the buildings.
-                        let at = Vec3::new((i % cc) as f32 * cp - 0.5 * l + 0.5 * pitch, 0.0, (i / cc) as f32 * cp - 0.5 * l + 0.5 * pitch);
+                        let at = Vec3::new(
+                            (i % cc) as f32 * cp - 0.5 * l + 0.5 * pitch,
+                            0.0,
+                            (i / cc) as f32 * cp - 0.5 * l + 0.5 * pitch,
+                        );
                         place_vehicle(&t, at, 0, 0.0, 0.0)
                     })
                     .collect();

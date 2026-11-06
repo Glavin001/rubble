@@ -75,6 +75,7 @@ pub use engine_webgpu::TerrainStepReport;
 pub use error::{StaleHandle, Unsupported};
 pub use explicit_vehicles::ExplicitVehiclesDef;
 pub use events::{
+    ExplicitSleepEvent,
     coalesce, BodyEvents, BodyLeftWorld, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
     ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,
     RayBatchResult, SensorEvent, SensorEvents, SkinId, SkinOutput, SoftOutput, StepGpuTime,
@@ -333,6 +334,8 @@ enum Extra {
     TerrainHeights(ShapeId),
     /// The terrain look-ahead's pick after this step.
     TerrainWatch,
+    /// The explicit vehicles' asleep bits after this step (vehicle sleep).
+    ExplicitSleep,
     /// The live surface's heights, for these views of the ground shape.
     TerrainSurface(ShapeId, Vec<engine_terrain::surface::SurfaceViewRange>),
     /// The surface pass's debris gather.
@@ -2335,6 +2338,16 @@ impl World {
                     });
                 }
                 extras.extend(motion::extras(&self.sim, &self.motion, casts));
+                if explicit_read.is_some() {
+                    if let Some((buffer, offset, size)) = self.explicit.as_ref().and_then(|x| x.sleep_extra()) {
+                        extras.push(readback::Extra {
+                            kind: Extra::ExplicitSleep,
+                            buffer,
+                            offset,
+                            size,
+                        });
+                    }
+                }
                 // The step's timestamps are resolved in a submission of their
                 // own after the step's (Metal: a resolve in the same command
                 // buffer can read the last passes' samples before they land).
@@ -2791,6 +2804,7 @@ impl World {
         let mut cast_results = Vec::new();
         let mut projectiles = Vec::new();
         let mut lost_contacts = 0;
+        let mut explicit_sleep = Vec::new();
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
@@ -2854,6 +2868,11 @@ impl World {
                 Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
                 Extra::TerrainHeights(id) => self.terrain_heights(*id, bytes),
                 Extra::TerrainWatch => self.terrain_strike(step, bytes),
+                Extra::ExplicitSleep => {
+                    if let Some(x) = self.explicit.as_mut() {
+                        explicit_sleep = x.sleep_changes(bytemuck::cast_slice(bytes));
+                    }
+                }
                 Extra::TerrainSurface(shape, views) => {
                     terrain_surface = Self::terrain_surface_views(*shape, views, bytes)
                 }
@@ -2892,6 +2911,7 @@ impl World {
             terrain_debris,
             terrain_bakes: Vec::new(),
             gpu_time,
+            explicit_sleep,
         })
     }
 

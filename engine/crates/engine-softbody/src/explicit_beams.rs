@@ -1008,6 +1008,9 @@ pub struct ExplicitBeams {
     /// Raycast wheels, drive and driver input ([`crate::explicit_drive`]); `None`
     /// (the default) for none, every step unchanged.
     pub drive: Option<Box<crate::explicit_drive::Drive>>,
+    /// Vehicle sleep's state ([`crate::explicit_sleep`]; used only by a fleet with the
+    /// setting on): still count, asleep, anchor.
+    pub sleep: crate::explicit_sleep::SleepState,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -1482,6 +1485,7 @@ impl ExplicitBeams {
             rigid: None,
             trace: None,
             drive: None,
+            sleep: Default::default(),
         }
     }
 
@@ -3191,6 +3195,12 @@ impl ExplicitBeams {
             crate::explicit_drive::drive_pass(self);
         }
         self.node_pass();
+        if let Some(speed) = self.sleep.track {
+            // Vehicle sleep: the velocities this node pass left (the GPU's point).
+            if !self.sleep.moving {
+                self.sleep.moving = self.nodes.iter().any(|n| crate::explicit_sleep::moving(n.vel, speed));
+            }
+        }
         if !self.wings.is_empty() {
             self.wing_pass();
         }

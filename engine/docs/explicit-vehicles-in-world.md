@@ -674,3 +674,68 @@ nothing while the vehicles request every step).
   loudly; the shared fracture's are supported.
 - Wide passes with the coupling (single very large vehicles without vehicle contact).
 - Rigid bodies resting *on* vehicles are held by staggered impulses (§2), a few mm of sink.
+
+## 10. Vehicle sleep (2026-11-06)
+
+Decision (user, 2026-11-06): vehicle sleep is an explicit engine-wide setting, on by
+default for large worlds and off in the crash lab. Code: `engine_softbody::explicit_sleep`
+(the rule and its CPU reference), `slang/kernels/explicit_beams_sleep.slang` (GPU),
+`vehicle_coupling.slang` (the World's wake), `ExplicitVehiclesDef::sleep` (World, default
+on), `ExplicitBeamsGpu::with_sleep` and `ExplicitBeamsWorld::sleep` (off unless set: the crash
+lab's hosts and the CPU fleet step every vehicle as before).
+
+**The rule** (every frame's end, for each awake vehicle; one arithmetic on CPU and GPU):
+a vehicle is *moving* if at some step of the frame some node's velocity had a component
+above `speed`; otherwise *displaced* if it has no anchor (its node positions when its still
+stretch began) or a node is farther than `reach` from its anchor along an axis. Moving: still
+count 0, anchor dropped. Displaced: anchor = the positions now, still count 0. Else the still
+count grows by the frame's steps. A solo vehicle sleeps when the count reaches `dwell`; the
+members of a contact group sleep together, when every member's count has reached it. A
+sleeping vehicle is not stepped at all, its step counter stands, and on waking it resumes
+exactly where it was frozen.
+
+**Thresholds, from the solver's resting floor** (`engine-softbody/examples/sleep_probe.rs`).
+The repo sedan parked on its beam tyres never comes to rest: a tyre node chatters against the
+ground for good at 0.112 m/s with a 57 µm stroke (the RoR ground rule's two-step limit
+cycle), RMS node speed 6 to 10 mm/s, KE 2–5·10⁻⁵ J/kg, while no node leaves a 57 µm box. An
+instantaneous speed bound at the 1 mm/s contact floor would never let it sleep, so stillness
+is judged by position, with a loose speed bound for what a frame-end test could alias:
+* `speed` 0.25 m/s (2.2 × the chatter; 0.031 J/kg per node);
+* `reach` 0.1 mm (above the chatter's stroke; over the dwell a still vehicle's mean speed is
+  at most 0.2 mm/s; it bounds the difference between a frozen vehicle and one that never
+  slept, plus the chatter);
+* `dwell` 1000 steps, 0.5 s (Box3D's time to sleep; longer than half a car body's bounce).
+
+Measured: the repo sedan sleeps 2.7 s after a 2 cm drop; the raycast sedan's slower
+suspension bounce (4 mm at 6 s) keeps it awake until it decays; the JBeam fixture car's
+lightly damped pressure wheels rock for about 50 s.
+
+**Waking** (the whole vehicle; still count 0, anchor dropped):
+* *rigid bodies*: the World's coupling plan (`cpl_plan`) wakes a vehicle when a collider
+  among its proxy candidates (the swept-bounds overlap) belongs to a moving body: a dynamic
+  body awake in the World, or any body with a velocity. Static, anchored and sleeping bodies
+  do not. Awake vehicles beside a moving body are reset too, so none falls asleep there;
+* *another vehicle*: a contact group (overlapping frame bounds, the vehicle contact plan)
+  with an awake member wakes its sleeping members;
+* *the host*: a changed drive input (throttle, brake release, steering), velocities written,
+  the grab (kept awake while held), held throttle (kept awake), `wake(v)` for a scripted
+  force.
+
+**Cost while asleep.** A sleeping vehicle's frame workgroup returns at once; a contact group
+of sleepers returns at once. With every vehicle asleep (the host reads the asleep bits back)
+and nothing written to one, the vehicles stop requesting World steps, so an all-asleep World
+skips its step. The coupling plan still runs a workgroup per vehicle and tests every
+collider (§8.4's O(vehicles × colliders), the World-broadphase work).
+
+**Readback.** A pass after the frame packs the asleep bits (a word per 32 vehicles) into the
+World's step readback; `Frame::explicit_sleep` lists the vehicles that fell asleep or woke
+(`ExplicitSleepEvent`), and `World::explicit_sleep_states` reads every record (tests).
+
+**Tests.**
+
+| Test | Result |
+|---|---|
+| CPU ↔ GPU (`engine-webgpu/tests/explicit_sleep_gpu.rs`, the JBeam fixture car, bit for bit on both) | every node bit for bit every frame, the same still counts, asleep in the same frame (4.2 s after a 45 s settle); 10 frames asleep: no GPU state word changes, the step counter stands; woken, bit for bit again |
+| Off, and on for awake vehicles | a fleet built without sleep, one with sleep built and off, and one with it on: every frame bit for bit for the driving car (and the settling one until it sleeps) |
+| Another vehicle wakes it | a car at 6 m/s wakes a sleeping one 2.33 m before contact, in the same frame on the CPU and the GPU; against a car that never slept: 0.015 mm at waking, 0.054 mm at contact + 0.1 s |
+| World (`engine-world/tests/explicit_sleep.rs`) | the parked sedan sleeps in 2.73 s; 59 of 60 World steps skipped while asleep, its state unchanged; a falling box wakes it 0.52 m above the roof, 0.023 mm from a never-slept twin; over the strike the box departs from the twin's by 194 mm, as a twin's whose sedan was nudged 0.02 mm does (199 mm): a box between roof nodes is chaotic under node-only contact, not the sleep |

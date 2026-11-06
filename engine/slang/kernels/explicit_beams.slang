@@ -236,6 +236,11 @@ struct Params
     uint selfSplit; // gAcc: per node its self-collision two-body hit count this step (0: no two-body vehicle)
     uint clipMem; // gAcc: anti-clip's side memory, per node 4 words (held m0 m1, recorded p0 p1) (0: no anti-clip vehicle)
     uint clipVmax; // gAcc: per vehicle 2 parities its fastest node's speed (float bits) this step
+    // Vehicle sleep (explicit_beams_sleep.slang): gMisc record of its header, 0 off.
+    uint sleepRec;
+    uint sleepPad0;
+    uint sleepPad1;
+    uint sleepPad2;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -4063,6 +4068,8 @@ void contactGroup(uint g, uint lane);
 
 // Raycast wheels (engine_softbody::explicit_drive).
 #include "explicit_beams_drive.slang"
+// Vehicle sleep (engine_softbody::explicit_sleep).
+#include "explicit_beams_sleep.slang"
 
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
@@ -4085,6 +4092,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     sync();
     if (gsUniformLanes != 0u) return ebLoopCapFlush();
 #endif
+    // Vehicle sleep: a sleeping vehicle is not stepped.
+    bool sleepOn = gP.sleepRec != 0u;
+    if (sleepOn)
+    {
+        if (sleepSkip(v, lane)) return ebLoopCapFlush();
+    }
+    bool sleepMove = false;
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
@@ -4189,6 +4203,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             nodeUpdate(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
 #endif
+        if (sleepOn) sleepMove = sleepTrack(nodeOff, nodeCount, lane, sleepMove);
 
         for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
         if (candCount > 0u)
@@ -4423,6 +4438,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     {
         uint last = (stepBase + gP.steps - 1u) & 1u;
         for (uint j = lane, jStop = EB_END(j, beamCount, LANES); j < jStop; j += LANES) groupDrops(beamOff + j, beamOff, groupOff, last, true);
+    }
+    if (sleepOn)
+    {
+        sleepMark(v, sleepMove);
+        sleepSettle(v, lane, gP.steps, true);
     }
     if (lane == 0u) gMisc[v] = uint4(misc.xyz, stepBase + gP.steps);
 #ifdef EB_VV_SOLO
@@ -7032,6 +7052,14 @@ void contactGroup(uint g, uint lane)
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
     sync();
+    // Vehicle sleep: a group with an awake member wakes the others; a group asleep is
+    // not stepped.
+    bool sleepOn = gP.sleepRec != 0u;
+    if (sleepOn)
+    {
+        if (sleepGroupSkip(off, k, lane)) return;
+    }
+    uint2 sleepMask = uint2(0u, 0u);
     // Members in vehicle order (a rank sort), their run prefixes and member
     // indices.
     for (uint i = lane, iStop = EB_END(i, k, LANES); i < iStop; i += LANES)
@@ -7082,6 +7110,7 @@ void contactGroup(uint g, uint lane)
         {
             for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
         }
+        if (sleepOn) sleepMask = sleepTrackMembers(off, k, lane, sleepMask);
 #ifdef EB_ABLATE
         if ((gP.ablate & 512u) != 0u) {} else
 #endif
@@ -7095,5 +7124,6 @@ void contactGroup(uint g, uint lane)
         }
     }
     coupleEndMembers(off, k, lane, coupleOn);
+    if (sleepOn) sleepGroupEnd(off, k, lane, sleepMask, gP.steps);
     for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
 }

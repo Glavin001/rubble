@@ -33,6 +33,10 @@ pub struct ExplicitVehiclesDef {
     pub margin: f32,
     /// Vehicle–vehicle contact between the explicit vehicles (the solver's own).
     pub vehicle_contact: bool,
+    /// Vehicle sleep (`engine_softbody::explicit_sleep`, an engine-wide setting): on by
+    /// default in the World (large maps: a parked vehicle costs nothing per step); `None`
+    /// steps every vehicle every step, bit for bit as without it (the crash lab).
+    pub sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
 }
 
 impl Default for ExplicitVehiclesDef {
@@ -47,6 +51,7 @@ impl Default for ExplicitVehiclesDef {
             mask: 0xFFFF,
             margin: 0.1,
             vehicle_contact: true,
+            sleep: Some(engine_softbody::explicit_sleep::VehicleSleep::default()),
         }
     }
 }
@@ -90,7 +95,9 @@ struct Params {
     row_cap: u32,
     /// Tests: cpl_plan's serial walk (1) instead of its lane-parallel records.
     serial_plan: u32,
-    pad: [u32; 2],
+    /// Vehicle sleep: gMisc record of vehicle 0's sleep record (0: off).
+    sleep_base: u32,
+    pad: u32,
 }
 
 pub(crate) struct ExplicitVehicles {
@@ -100,7 +107,8 @@ pub(crate) struct ExplicitVehicles {
     /// The vehicles as added (spawn state: node counts, masses).
     pub sims: Vec<ExplicitBeams>,
     bgl: wgpu::BindGroupLayout,
-    /// cpl_bounds, cpl_plan, cpl_share, cpl_loads, cpl_loads_end, cpl_emit, cpl_emit_end.
+    /// cpl_bounds, cpl_plan, cpl_share, cpl_loads, cpl_loads_end, cpl_emit, cpl_emit_end,
+    /// cpl_sleep_mask.
     pipes: Vec<wgpu::ComputePipeline>,
     params: wgpu::Buffer,
     work: wgpu::Buffer,
@@ -117,12 +125,23 @@ pub(crate) struct ExplicitVehicles {
     carry: f64,
     /// A frame ran: its impulses are emitted at the next step's start.
     emit_pending: bool,
+    /// That frame was encoded while some vehicle could be awake (vehicle sleep): its
+    /// emit wakes the rigid step. Otherwise every vehicle was asleep with nothing
+    /// written to one, so it stepped only if the plan woke it beside a moving body
+    /// (then the rigid step runs anyway): the emit schedules its records without a wake.
+    emit_wakes: bool,
     pub windows: u64,
     pub steps: u64,
     status: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
     status_buf: wgpu::Buffer,
     status_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
     read_pending: bool,
+    /// Vehicle sleep: work's word of the asleep bits (one word per 32 vehicles), and the
+    /// bits the last delivered frame reported (all awake at the start).
+    pub(crate) sleep_mask_word: u64,
+    pub(crate) sleep_mask: Vec<u32>,
+    /// Some vehicle was awake in the last delivered frame (or none delivered yet).
+    pub(crate) any_awake: bool,
 }
 
 fn storage(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
@@ -144,7 +163,7 @@ impl ExplicitVehicles {
         );
         let device = world.sim.device();
         let queue = world.sim.queue();
-        let mut gpu = ExplicitBeamsGpu::with_coupling(device, queue, vehicles, Some(def.capacity));
+        let mut gpu = ExplicitBeamsGpu::with_sleep(device, queue, vehicles, Some(def.capacity), def.sleep);
         gpu.set_vehicle_contact(def.vehicle_contact);
         gpu.set_coupling_on(true);
         let layout = gpu.coupling().expect("coupling room");
@@ -186,7 +205,16 @@ impl ExplicitVehicles {
             label: Some("vehicle_coupling"),
             source: wgpu::ShaderSource::Wgsl(VEHICLE_COUPLING_WGSL.into()),
         });
-        let pipes = ["cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end"]
+        let pipes = [
+            "cpl_bounds",
+            "cpl_plan",
+            "cpl_share",
+            "cpl_loads",
+            "cpl_loads_end",
+            "cpl_emit",
+            "cpl_emit_end",
+            "cpl_sleep_mask",
+        ]
             .iter()
             .map(|e| {
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -224,7 +252,9 @@ impl ExplicitVehicles {
         let max_bodies = world.sim.capacity().max_bodies;
         // Cleared each window: rows, status, share counts, bounds; then the vehicle table.
         let cleared = 4 * (2 + u64::from(max_bodies) + 8 * vehicles.len() as u64);
-        let work = storage(device, "vehicle-coupling-work", cleared + 16 * vehicles.len() as u64);
+        let mask_words = vehicles.len().div_ceil(32) as u64;
+        let sleep_mask_word = cleared / 4 + 4 * vehicles.len() as u64;
+        let work = storage(device, "vehicle-coupling-work", cleared + 16 * vehicles.len() as u64 + 4 * mask_words);
         queue.write_buffer(&work, cleared, bytemuck::cast_slice(&veh));
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vehicle-coupling-params"),
@@ -254,13 +284,55 @@ impl ExplicitVehicles {
             tri_count,
             carry: 0.0,
             emit_pending: false,
+            emit_wakes: true,
             windows: 0,
             steps: 0,
             status: Default::default(),
             status_buf,
             status_busy: Default::default(),
             read_pending: false,
+            sleep_mask_word,
+            sleep_mask: vec![0; mask_words as usize],
+            any_awake: true,
         })
+    }
+
+    /// The vehicle sleep readback (World step's extras): the asleep bits after the frame.
+    pub(crate) fn sleep_extra(&self) -> Option<(&wgpu::Buffer, u64, u64)> {
+        self.gpu
+            .sleep_on()
+            .then(|| (&self.work, self.sleep_mask_word * 4, 4 * self.sleep_mask.len() as u64))
+    }
+
+    /// A delivered frame's asleep bits: the vehicles that fell asleep or woke since the
+    /// last one, in vehicle order.
+    pub(crate) fn sleep_changes(&mut self, words: &[u32]) -> Vec<crate::ExplicitSleepEvent> {
+        let nv = self.sims.len();
+        let mut out = Vec::new();
+        for (k, (&new, old)) in words.iter().zip(self.sleep_mask.iter_mut()).enumerate() {
+            let mut diff = new ^ *old;
+            while diff != 0 {
+                let b = diff.trailing_zeros();
+                diff &= diff - 1;
+                let v = 32 * k + b as usize;
+                if v < nv {
+                    out.push(crate::ExplicitSleepEvent {
+                        vehicle: v as u32,
+                        asleep: new & (1 << b) != 0,
+                    });
+                }
+            }
+            *old = new;
+        }
+        let full = |k: usize| if 32 * (k + 1) <= nv { u32::MAX } else { (1u32 << (nv % 32)) - 1 };
+        self.any_awake = self.sleep_mask.iter().enumerate().any(|(k, &w)| w != full(k));
+        out
+    }
+
+    /// Whether this World step must run for the vehicles: some vehicle was awake when
+    /// last seen, or the host wrote to one since (a wake is pending).
+    pub(crate) fn needs_step(&self) -> bool {
+        !self.gpu.sleep_on() || self.any_awake || self.gpu.wakes_pending()
     }
 
     fn bind(
@@ -324,7 +396,11 @@ impl ExplicitVehicles {
             filter: u32::from(self.def.categories) | u32::from(self.def.mask) << 16,
             row_cap: self.ingest_rows().min(ingest_rows),
             serial_plan: u32::from(self.serial_plan),
-            pad: [0; 2],
+            sleep_base: match (self.gpu.sleep_layout(), self.gpu.sleep_on()) {
+                (Some(s), true) => s.base,
+                _ => 0,
+            },
+            pad: 0,
         };
         sim.queue().write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
     }
@@ -394,7 +470,11 @@ impl ExplicitVehicles {
         pass.set_pipeline(&self.pipes[6]);
         pass.dispatch_workgroups(1, 1, 1);
         drop(pass);
-        sim.mark_gpu_impulses();
+        if self.emit_wakes {
+            sim.mark_gpu_impulses();
+        } else {
+            sim.schedule_gpu_impulses();
+        }
     }
 
     /// Step 3, after the rigid step: the next window's plan, frame and chunk loads.
@@ -461,10 +541,15 @@ impl ExplicitVehicles {
             pass.dispatch_workgroups(nv, 1, 1);
             pass.set_pipeline(&self.pipes[4]);
             pass.dispatch_workgroups(1, 1, 1);
+            if self.gpu.sleep_on() {
+                pass.set_pipeline(&self.pipes[7]);
+                pass.dispatch_workgroups(nv.div_ceil(32).div_ceil(64), 1, 1);
+            }
         }
         self.windows += 1;
         self.steps += u64::from(steps);
         self.emit_pending = steps > 0;
+        self.emit_wakes = self.needs_step();
         self.read_pending = false;
         if self.windows % STATUS_EVERY == 1 && !self.status_busy.load(std::sync::atomic::Ordering::Acquire) {
             enc.copy_buffer_to_buffer(&self.work, 0, &self.status_buf, 0, 16);
@@ -527,6 +612,12 @@ impl World {
     /// Mutable access (velocity writes, the grab, vehicle contact settings).
     pub fn explicit_vehicles_mut(&mut self) -> Option<&mut ExplicitBeamsGpu> {
         self.explicit.as_mut().map(|x| &mut x.gpu)
+    }
+
+    /// Blocking read (tests, tools): per explicit vehicle its sleep state (still steps,
+    /// asleep); empty without vehicle sleep.
+    pub fn explicit_sleep_states(&self) -> Vec<(u32, bool)> {
+        self.explicit.as_ref().map_or_else(Vec::new, |x| x.gpu.sleep_states())
     }
 
     /// Explicit steps the vehicles have run, and windows (World steps) they took.
@@ -592,7 +683,11 @@ impl World {
             return Ok(());
         };
         let r = self.fracture.vehicle_ingest().map(|ingest| x.encode_emit(&mut self.sim, ingest, enc));
-        self.sim.request_step();
+        // Vehicle sleep: every vehicle asleep and nothing written to one: the vehicles
+        // need no step (the rigid bodies may still run it).
+        if x.needs_step() {
+            self.sim.request_step();
+        }
         self.explicit = Some(x);
         r
     }

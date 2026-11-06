@@ -1296,6 +1296,14 @@ impl WgpuSim {
         self.wake_pending = true;
     }
 
+    /// [`Self::mark_gpu_impulses`] without the wake: the next step that runs applies the
+    /// records, and a step with nothing awake may still be skipped (a host whose pass
+    /// can only have appended records while some body is awake: explicit vehicles with
+    /// every one asleep).
+    pub fn schedule_gpu_impulses(&mut self) {
+        self.terrain_impulses_pending = true;
+    }
+
     /// The scratch atomics buffer (binding 21: the impulse records at `IMPULSE_BASE`).
     pub fn scratch_buffer(&self) -> &wgpu::Buffer {
         &self.bufs[21]

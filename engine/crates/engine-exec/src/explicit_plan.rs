@@ -165,7 +165,10 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-pub const PARAM_WORDS: usize = 80;
+pub const PARAM_WORDS: usize = 84;
+/// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
+/// `sleepRec`).
+pub const W_SLEEP: usize = 80;
 /// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
 pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer.
@@ -463,6 +466,26 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
     Ok(())
 }
 
+/// Vehicle sleep's records (`explicit_beams_sleep.slang`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SleepLayout {
+    /// gMisc record of the header (the Params word [`W_SLEEP`] when on), and of vehicle
+    /// 0's record (one per vehicle: still steps, flags, 0, 0).
+    pub header: u32,
+    pub base: u32,
+    /// gAcc word of vehicle 0's two flags; gBeams record of node 0's anchor.
+    pub flags: u32,
+    pub anchor: u32,
+    pub cfg: engine_softbody::explicit_sleep::VehicleSleep,
+}
+
+impl SleepLayout {
+    /// Byte offset in gMisc of vehicle v's record.
+    pub fn record_offset(&self, v: usize) -> u64 {
+        (u64::from(self.base) + v as u64) * 16
+    }
+}
+
 /// Every buffer's initial contents ([`ExplicitUpload::bytes`]) and the layout.
 pub struct ExplicitUpload {
     pub layout: ExplicitLayout,
@@ -511,6 +534,8 @@ pub struct ExplicitLayout {
     pub coupling: Option<CouplingLayout>,
     /// The raycast wheels' records (None: no vehicle has them).
     pub drive: Option<drive::DriveLayout>,
+    /// Vehicle sleep's records (None: no room, sleep off for good).
+    pub sleep: Option<SleepLayout>,
     /// gMisc record of the first triangle's contact throttle.
     pub vv_tri_base: u32,
     /// The fleet runs the aero modules (`EB_AERO`).
@@ -529,6 +554,17 @@ impl ExplicitUpload {
     /// Pack `vehicles` (their current state: positions, velocities, forces, beam
     /// state, throttles, origin), with room for rigid proxies when `coupling` is set.
     pub fn new(vehicles: &[ExplicitBeams], coupling: Option<CouplingCapacity>) -> Self {
+        Self::with_sleep(vehicles, coupling, None)
+    }
+
+    /// [`Self::new`] with room for vehicle sleep (`engine_softbody::explicit_sleep`)
+    /// when `sleep` is set (on at upload; the planner turns it off and on). `None`: the
+    /// layout of a fleet without it, word for word.
+    pub fn with_sleep(
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+        sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
+    ) -> Self {
         let nv = vehicles.len();
         // Anti-clip (jbeam-semantics-spec.md §36): its side memory names a
         // triangle by owner vehicle (10 bits) and index (20 bits).
@@ -1440,6 +1476,36 @@ impl ExplicitUpload {
         } else {
             (0, 0)
         };
+        // Vehicle sleep (explicit_beams_sleep.slang): two header records and a record
+        // per vehicle in gMisc, two flags per vehicle in gAcc, an anchor per node in
+        // gBeams (appended below).
+        let mut sleep_layout = sleep.map(|cfg| {
+            let header = misc.len() as u32;
+            let flags = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, 2 * nv));
+            misc.push([header + 2, cfg.dwell, cfg.speed.to_bits(), cfg.reach.to_bits()]);
+            misc.push([flags, 0, 0, 0]);
+            misc.extend(vehicles.iter().map(|v| v.sleep.words()));
+            SleepLayout {
+                header,
+                base: header + 2,
+                flags,
+                anchor: 0,
+                cfg,
+            }
+        });
+        // (gBeams ends with the extension states: the anchors follow them.)
+        if let Some(s) = sleep_layout.as_mut() {
+            s.anchor = beams.len() as u32;
+            for v in vehicles {
+                if v.sleep.anchor.len() == v.nodes.len() {
+                    beams.extend(v.sleep.anchor.iter().map(|a| [a.x, a.y, a.z, 0.0]));
+                } else {
+                    beams.extend(std::iter::repeat_n([0.0f32; 4], v.nodes.len()));
+                }
+            }
+            misc[s.header as usize + 1][1] = s.anchor;
+        }
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -1593,6 +1659,7 @@ impl ExplicitUpload {
             self_split,
             clip_mem,
             clip_vmax,
+            sleep_layout.map_or(0, |s| s.header),
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -1626,6 +1693,7 @@ impl ExplicitUpload {
             couple_rec: couple_rec as u32,
             coupling,
             drive,
+            sleep: sleep_layout,
             vv_tri_base,
             aero,
             big,
@@ -1751,6 +1819,8 @@ pub struct FramePlanner {
     wide_on: bool,
     /// Frames submitted (every STATUS_EVERY-th reads the status).
     frames: u64,
+    /// Vehicle sleep's header record (0: no room).
+    sleep_rec: u32,
 }
 
 impl FramePlanner {
@@ -1767,7 +1837,21 @@ impl FramePlanner {
             wide_ok: layout.wide_ok,
             wide_on: layout.wide_default,
             frames: 0,
+            sleep_rec: layout.sleep.map_or(0, |s| s.header),
         }
+    }
+
+    /// Vehicle sleep on or off (only with room, [`ExplicitUpload::with_sleep`]; on at
+    /// upload). Returns whether it is on. Off, every vehicle steps whatever its record
+    /// says; a host turning it on again writes the records (every vehicle awake).
+    pub fn set_sleep(&mut self, on: bool) -> bool {
+        self.words[W_SLEEP] = if on { self.sleep_rec } else { 0 };
+        self.sleep_on()
+    }
+
+    /// Vehicle sleep runs this frame.
+    pub fn sleep_on(&self) -> bool {
+        self.words[W_SLEEP] != 0
     }
 
     /// Vehicles in the fleet.
@@ -1816,9 +1900,10 @@ impl FramePlanner {
         self.contact.replan.store(true, Ordering::Relaxed);
     }
 
-    /// Wide passes on (and possible), and contact not active.
+    /// Wide passes on (and possible), and contact not active, and no vehicle sleep (it
+    /// runs in the vehicle workgroups only).
     pub fn is_wide(&self) -> bool {
-        self.wide_ok && self.wide_on && !self.contact_active()
+        self.wide_ok && self.wide_on && !self.contact_active() && !self.sleep_on()
     }
 
     /// Run frames as the wide passes or one workgroup per vehicle; returns

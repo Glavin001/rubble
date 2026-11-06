@@ -19,6 +19,15 @@
 //                  belong to now (emitPair: whole, or split among its pieces as the
 //                  whole body's change of motion), as impulse records after the host's;
 //   cpl_emit_end   one thread: IMPULSE_FIRST (the records are applied once).
+//   cpl_sleep_mask one thread per 32 vehicles, after the frame: the vehicles' asleep bits
+//                  (vehicle sleep, explicit_beams_sleep.slang) for the World's readback.
+//
+// Vehicle sleep (sleepBase nonzero: gMisc record of vehicle 0's sleep record): cpl_plan
+// wakes a vehicle (writes its record (0, 0, 0, 0): awake, still count 0, no anchor) when
+// a collider among its candidates belongs to a moving body: a dynamic body awake in the
+// World, or any body with a velocity (a kinematic one moving). Static, anchored and
+// sleeping bodies do not wake it. Run every window, for awake vehicles too, so a vehicle
+// cannot fall asleep beside a moving body.
 //
 // Limits are loud: a vehicle with more shapes, bodies or planes than its room, more
 // impulse records than IMPULSE_CAP or more chunk records than the ingest's rows sets a
@@ -48,7 +57,8 @@ struct Params
     uint filter;         // the vehicles' collision filter: categories | mask << 16
     uint rowCap;         // chunk records at most (the ingest merges this many of slot 1)
     uint serialPlan;     // tests: cpl_plan's lane-0 walk even within every room
-    uint pad1, pad2;
+    uint sleepBase;      // vehicle sleep: gMisc record of vehicle 0's sleep record (0 off)
+    uint pad2;
 };
 
 static const uint BODY_RECS = 5u;
@@ -64,7 +74,8 @@ static const uint ST_IMPULSES = 8u;
 static const uint ST_ROWS = 16u;
 // work: [0] chunk rows used, [1] status, [2..2+maxBodies) share counts, then per vehicle
 // 8 words of bounds (ordered bits: lo xyz, hi xyz, speed, 0) (all cleared each window),
-// then per vehicle 4 words written once by the host: node offset, nodes, mass bits, 0.
+// then per vehicle 4 words written once by the host: node offset, nodes, mass bits, 0;
+// then the asleep bits (vehicle sleep), a word per 32 vehicles.
 uint wShare() { return 2u; }
 uint wBounds(uint v) { return 2u + gP.maxBodies + 8u * v; }
 uint4 vehicleAt(uint v)
@@ -115,6 +126,17 @@ groupshared uint gsBody[LIST_CAP];
 groupshared uint gsFaces[LIST_CAP];
 groupshared Atomic<uint> gsBodies;
 groupshared Atomic<uint> gsPlanes;
+groupshared Atomic<uint> gsWake;
+
+// Vehicle sleep: a body that moves (wakes a vehicle it may touch).
+bool bodyMoving(uint body)
+{
+    uint flags = asuint(gBodies[7u * body + 2u].w);
+    float3 bv = gBodies[7u * body + 3u].xyz;
+    float3 bw = gBodies[7u * body + 4u].xyz;
+    bool awakeDynamic = (flags & 1u) != 0u && (flags & 4u) == 0u;
+    return awakeDynamic || any(bv != float3(0.0)) || any(bw != float3(0.0));
+}
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -255,7 +277,11 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.x;
     uint lane = lid.x;
-    if (lane == 0u) gsCount.store(0u);
+    if (lane == 0u)
+    {
+        gsCount.store(0u);
+        gsWake.store(0u);
+    }
     GroupMemoryBarrierWithGroupSync();
     uint wb = wBounds(v);
     float vmax = asfloat(gWork[wb + 6u].load());
@@ -279,10 +305,12 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         float3 q = clamp(s.xyz, lo, hi);
         float3 d = s.xyz - q;
         if (dot(d, d) > r * r) continue;
+        if (gP.sleepBase != 0u && bodyMoving(body)) gsWake.store(1u);
         uint at = gsCount.add(1u);
         if (at < LIST_CAP) gsList[at] = c;
     }
     GroupMemoryBarrierWithGroupSync();
+    if (lane == 0u && gP.sleepBase != 0u && gsWake.load() != 0u) gMisc[gP.sleepBase + v] = uint4(0u, 0u, 0u, 0u);
     // The listed colliders in collider order: each one's rank among them (the indices
     // are distinct), the list's first n (all of it within its room; a list past it is
     // an error the status reports, as before).
@@ -597,4 +625,16 @@ void cpl_emit(uint3 gid : SV_GroupID)
 void cpl_emit_end(uint3 tid : SV_DispatchThreadID)
 {
     gScratch[gP.impulseFirst].store(min(gScratch[gP.impulseCount].load(), gP.impulseCap));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cpl_sleep_mask(uint3 tid : SV_DispatchThreadID)
+{
+    uint t = tid.x;
+    if (gP.sleepBase == 0u || 32u * t >= gP.vehicles) return;
+    uint word = 0u;
+    for (uint k = 0u; k < 32u && 32u * t + k < gP.vehicles; k++)
+        word |= (gMisc[gP.sleepBase + 32u * t + k].y & 1u) << k;
+    gWork[2u + gP.maxBodies + 12u * gP.vehicles + t].store(word);
 }
