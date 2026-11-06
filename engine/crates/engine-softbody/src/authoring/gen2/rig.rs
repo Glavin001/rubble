@@ -281,8 +281,11 @@ fn body_blocked(p: Vec3, doors: &[Aperture]) -> bool {
     if doors.iter().any(|d| d.inside(p, 0.055)) {
         return true;
     }
-    let cabin = x < 0.62 && p.y > 0.46 && p.y < 1.28 && p.z > -1.72 && p.z < 0.78;
-    let bay = x < 0.58 && p.y > 0.72 && p.z > 0.98 && p.z < 1.98;
+    // The cabin's volume (8 cm in from the skin: beams along the bonded
+    // glass and the roof are the shell's, not across the cabin).
+    let cabin =
+        x < 0.62 && p.y > 0.46 && p.y < 1.28 && p.z > -1.72 && p.z < 0.78 && sf::sdf(p) < -0.08;
+    let bay = x < 0.48 && p.y > 0.72 && p.z > 0.98 && p.z < 1.98;
     let trunk = x < 0.58 && p.y > 0.86 && p.y < 1.06 && p.z > -2.38 && p.z < -1.86;
     cabin || bay || trunk
 }
@@ -767,6 +770,33 @@ pub fn rig(model: &Model) -> Rig {
             Some(Role::Firewall),
             false,
         );
+    }
+    // The bonded windshield and backlight (part of the shell's shear path):
+    // a row across each glass's middle.
+    let ws = model
+        .parts
+        .iter()
+        .find(|p| p.name == "glass_windshield")
+        .map(|p| bounds(&p.pos));
+    let bl = model
+        .parts
+        .iter()
+        .find(|p| p.name == "glass_rear")
+        .map(|p| bounds(&p.pos));
+    for (tag, b) in [("ws", ws), ("bl", bl)] {
+        let Some((lo, hi)) = b else { continue };
+        let z = 0.5 * (lo.z + hi.z);
+        for (k, xx) in [-0.42f32, 0.0, 0.42].iter().enumerate() {
+            let p = top(z, xx.abs());
+            let p = mirror(p, if *xx < 0.0 { -1.0 } else { 1.0 });
+            cput(
+                &mut r,
+                &format!("{tag}{k}"),
+                inward(p, 0.005),
+                Some(Role::Sheet),
+                false,
+            );
+        }
     }
     cput(
         &mut r,

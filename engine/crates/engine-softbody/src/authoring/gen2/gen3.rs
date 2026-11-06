@@ -48,6 +48,30 @@ pub fn part_of(mesh: &str) -> Option<Part> {
     })
 }
 
+/// Pieces that move rigidly (one frame for the piece, [`flexskin::bind_rigid`]):
+/// lamps, mirrors, handles, wipers, the grille, the cabin's hard parts, the
+/// engine's ancillaries and the wheels' pieces.
+pub fn rigid(mesh: &str) -> bool {
+    [
+        "headlight_",
+        "taillight_",
+        "mirror_",
+        "handle_",
+        "wiper_",
+        "grille",
+        "seat_",
+        "steering_wheel",
+        "dash",
+        "engine_block",
+        "radiator",
+        "tyre_",
+        "rim_",
+        "brake_disc_",
+    ]
+    .iter()
+    .any(|p| mesh.starts_with(p))
+}
+
 /// The nodes a mesh binds to: its part's structural nodes (no contact-only
 /// lane nodes, latch hardware or wheel nodes), or a wheel's hub and rim nodes.
 pub fn pool(car: &Car, mesh: &str) -> Vec<u32> {
@@ -91,8 +115,12 @@ pub fn skins(glb: &Glb, car: &Car) -> Result<Skin, String> {
                 Vec3::new(n.x, -n.z, n.y)
             }));
         }
-        let (verts, _) =
-            flexskin::bind(&ids, &pos, &vp, &vn).map_err(|e| format!("{}: {e}", m.name))?;
+        let (verts, _) = if rigid(&m.name) {
+            flexskin::bind_rigid(&ids, &pos, &vp, &vn)
+        } else {
+            flexskin::bind(&ids, &pos, &vp, &vn)
+        }
+        .map_err(|e| format!("{}: {e}", m.name))?;
         meshes.push(MeshSkin {
             name: m.name.clone(),
             verts,

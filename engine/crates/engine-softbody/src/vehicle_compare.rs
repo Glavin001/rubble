@@ -72,6 +72,12 @@ pub struct Manifest {
 
 /// The solver settings every car runs with (the reference scenes': drag on,
 /// no turbulence).
+/// Surface contact (jbeam-semantics-spec.md §38) for every car of a run:
+/// `SURFACE_CONTACT=1` on, else off (the harness's default, unchanged).
+pub fn surface_contact() -> bool {
+    std::env::var("SURFACE_CONTACT").is_ok_and(|v| v == "1")
+}
+
 pub fn settings() -> ExplicitBeamsSettings {
     ExplicitBeamsSettings {
         turbulence: false,
@@ -328,6 +334,12 @@ fn crash_spawn(source: &Source) -> Result<(ExplicitBeams, f32, Vec<String>), Str
 /// The rest scene's spawn on raycast wheels: `truck_export` for a JBeam car
 /// through the page's default `.truck` export, else JBeam mode.
 fn raycast_spawn(source: &Source, truck_export: bool) -> Result<ExplicitBeams, String> {
+    let mut s = raycast_spawn_inner(source, truck_export)?;
+    s.surface_contact = surface_contact();
+    Ok(s)
+}
+
+fn raycast_spawn_inner(source: &Source, truck_export: bool) -> Result<ExplicitBeams, String> {
     let truck = |text: &str| -> Result<ExplicitBeams, String> {
         let probe = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings())?;
         let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
@@ -439,7 +451,17 @@ impl Car {
                         ));
                     }
                 }
-                crate::flexmesh::jbeam_visual(
+                // A glTF render model with weighted skins (flexskin): the
+                // `.rskin` and the `.glb` beside it.
+                let mut skin = None;
+                if let Some(sk) = paths.iter().find(|p| p.extension().is_some_and(|x| x == "rskin")) {
+                    skin = Some(crate::flexskin::Skin::decode(&std::fs::read(sk).map_err(|e| e.to_string())?)?);
+                    if let Some(g) = paths.iter().find(|p| p.extension().is_some_and(|x| x == "glb") && p.parent() == sk.parent()) {
+                        let g = crate::glb::read(&std::fs::read(g).map_err(|e| e.to_string())?)?;
+                        meshes.extend(g.meshes.iter().map(|m| crate::flexskin::glb_mesh(&g, m)));
+                    }
+                }
+                crate::flexmesh::jbeam_visual_skinned(
                     &flex,
                     &props,
                     desc,
@@ -447,12 +469,15 @@ impl Car {
                     &meshes,
                     &mats,
                     [0.5, 0.05, 0.04],
+                    skin.as_ref(),
                 )
+                .map_err(|e| eprintln!("visual: {e}"))
                 .ok()
                 .map(|r| r.0)
             }
         };
         let mut template = spawned;
+        template.surface_contact = surface_contact();
         place(&mut template, angle, 0.02);
         let spawn_pos = positions(&template);
         steps(&mut template, 1.0);

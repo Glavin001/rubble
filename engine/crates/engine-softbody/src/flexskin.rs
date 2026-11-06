@@ -32,8 +32,8 @@
 
 use glam::{DMat3, DVec3, Vec3};
 
-/// The regularisation λ of the fit (m²): (2 cm)².
-pub const LAMBDA: f64 = 4e-4;
+/// The regularisation λ of the fit (m²): (5 mm)².
+pub const LAMBDA: f64 = 2.5e-5;
 /// The kernel radius of a node: this multiple of its distance to its
 /// [`K_SPACING`]-th nearest neighbour in its pool, at least [`R_MIN`].
 pub const R_SPACING: f64 = 1.45;
@@ -368,6 +368,56 @@ pub fn bind(
             }
         }
         if !failed {
+            return Ok((out, scale));
+        }
+        scale *= 1.12;
+    }
+    Err(format!(
+        "flexskin: no well-posed fit over {} nodes",
+        ids.len()
+    ))
+}
+
+/// Bind a rigid piece (a lamp, mirror, handle, seat, wheel): every vertex
+/// takes the weights of the piece's centroid, so the frame (U, V, W) is one
+/// for the whole piece and each vertex is its rest offset from Σ Aⱼqⱼ in
+/// it: the piece moves rigidly with its nodes' local motion and never warps.
+pub fn bind_rigid(
+    ids: &[u32],
+    pos: &[Vec3],
+    verts: &[Vec3],
+    nrms: &[Vec3],
+) -> Result<(Vec<Vert>, f64), String> {
+    let c = verts.iter().map(|v| v.as_dvec3()).sum::<DVec3>() / verts.len().max(1) as f64;
+    let dpos: Vec<DVec3> = pos.iter().map(|p| p.as_dvec3()).collect();
+    let mut scale = 1.0;
+    for _ in 0..12 {
+        let pool = Pool::new(ids.to_vec(), dpos.clone(), scale);
+        if let Some(cv) = bind_vertex(&pool, c, DVec3::Y) {
+            let (mut p, mut u, mut v) = (DVec3::ZERO, DVec3::ZERO, DVec3::ZERO);
+            let at = |id: u32| pool.pos[pool.ids.iter().position(|&x| x == id).unwrap()];
+            for &(n, a, da, db) in &cv.w {
+                p += at(n) * a as f64;
+                u += at(n) * da as f64;
+                v += at(n) * db as f64;
+            }
+            let wn = u.cross(v).normalize();
+            let un = u.normalize();
+            let vn = wn.cross(un);
+            let e = DMat3::from_cols(u, v, wn);
+            let out = verts
+                .iter()
+                .zip(nrms)
+                .map(|(x, n)| {
+                    let d = x.as_dvec3() - p;
+                    let cn = e.transpose() * n.as_dvec3().normalize_or(DVec3::Y);
+                    Vert {
+                        w: cv.w.clone(),
+                        off: [d.dot(un) as f32, d.dot(vn) as f32, d.dot(wn) as f32],
+                        nrm: [cn.x as f32, cn.y as f32, cn.z as f32],
+                    }
+                })
+                .collect();
             return Ok((out, scale));
         }
         scale *= 1.12;
