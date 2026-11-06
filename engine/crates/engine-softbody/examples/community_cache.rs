@@ -9,7 +9,7 @@
 //!
 //! ```bash
 //! cargo run --release -p engine-softbody --example community_cache -- \
-//!     <vehicles-dir> <vehicle> <all|a.pc,b.pc> <out-dir> [size=1024] [label=...]
+//!     <vehicles-dir> <vehicle> <all|a.pc,b.pc> <out-dir> [size=1024] [label=...] [note=...]
 //! ```
 //!
 //! The mod's own files are data only: no script in them is read or run.
@@ -394,6 +394,9 @@ fn main() {
         "label": label,
         "vehicle": name,
         "megabytes": (total as f64 / 1e5).round() / 10.0,
+        // A note the picker shows (e.g. `note=marginal at rest`: content at the
+        // explicit step's stability edge, jbeam-semantics-spec.md §29.1).
+        "note": a.iter().find_map(|x| x.strip_prefix("note=")).unwrap_or(""),
         "configs": configs,
     }));
     index.sort_by(|a, b| a["label"].as_str().cmp(&b["label"].as_str()));

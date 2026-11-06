@@ -190,10 +190,10 @@
       modSel.add(new Option('Converted BeamNG vehicles…', ''));
       for (const c of cars) {
         const g = document.createElement('optgroup');
-        g.label = `${c.label} (${c.megabytes} MB)`;
+        g.label = `${c.label} (${c.megabytes} MB)${c.note ? ` · ${c.note}` : ''}`;
         for (const k of c.configs) {
           const mod = `/__mods/${c.folder}`;
-          g.appendChild(new Option(`${c.label} · ${k.pc.split('/').pop().replace(/\.pc$/, '')} (${k.nodes} nodes)`, `${mod}|${k.pc}|${k.wheels ?? 1}`, false, qs.get('mod') === mod && qs.get('pc') === k.pc));
+          g.appendChild(new Option(`${c.label} · ${k.pc.split('/').pop().replace(/\.pc$/, '')} (${k.nodes} nodes)${c.note ? ` · ${c.note}` : ''}`, `${mod}|${k.pc}|${k.wheels ?? 1}`, false, qs.get('mod') === mod && qs.get('pc') === k.pc));
         }
         modSel.appendChild(g);
       }
