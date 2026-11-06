@@ -1378,6 +1378,10 @@ the SUV and trailer miss are brake pads and bulbs only (no nodes). Measured
   stabilisation it does not document) is not public. Left as is (content physics
   unchanged); the options are the user's: a smaller step for such vehicles, or an
   implicit treatment of their stiffest elements.
+* **Resolved opt-in (2026-11-06, §38):** the explicit damping's half-step lag
+  lowers the limit below 2 (to 1.87–1.98 at their ζ); centred damping
+  (`centred_damping`) rests every SUV configuration, the trailer's axles and the
+  CCF's broken ones at the same 2 kHz step, content physics unchanged.
 
 ### 29.2 Parts a configuration names that are not local (2026-11-06)
 
@@ -2241,3 +2245,156 @@ crash, the same sum is −19 J. Every other run passes, as do the 12 s rest and 
 T-bone. Tried without a fix:
 * the step's cap scaled by m_split·inv;
 * no residual pass (54 km/h, drag off: +29 J).
+
+## 38. Centred damping (opt-in, 2026-11-06)
+
+`ExplicitBeamsSettings::centred_damping`, off in every profile (the RoR and BeamNG
+profiles are bit for bit as before; a caller turns it on per vehicle). Research
+branch `research/explicit-stability`.
+
+**Why.** §29.1 left the full-size SUV, the boathauler trailer and the CCF's
+`country`, `f4_cup` and `f6_offroadster` configurations vibrating or breaking at
+rest: content BeamNG runs at the same 2 kHz. The step's own limit is not the
+whole story: with a dashpot, symplectic Euler (velocity first, then position,
+the damping read from the step's start velocity) is stable only to
+ω·h ≤ 2(√(1 + ζ²) − ζ), so damping *lowers* the limit (1.94 at ζ = 0.03, 1.87 at
+0.07). The damping reads v_{n−½}, half a step behind the position it acts at
+(the θ/2 lag of §6), and near the Nyquist rate that lag turns the dashpot into
+an anti-dashpot. BeamNG's staff say its content sits at that edge: "Most of the
+vehicles have the spring values very close to the max value for a given mass"
+(Goosah, BeamNG team, forum 2018-07-25 [F]); the census measures BeamNG parts
+at 1.1–4× a conservative per-node bound with ζ 0.03–0.05
+(`beamng-authoring-census.md`). Modes between 1.87 and 2 then run in an engine
+whose damping is centred in time and diverge in ours.
+
+**What BeamNG publishes (searched 2026-11-06; nothing on its integrator).**
+* The beam law is Hooke's law with a dashpot, F = −kx − cẋ, run "up to 2KHz" for
+  stability (Gambi, BeamNG, Panichella, ICSE-SEIP [G]). The BeamNG.tech
+  technical paper [BT] says nothing on the integrator.
+* Instability is "a beamSpring and/or beamDamp values that are too high for the
+  nodeWeight", fixed by "lowering beamSpring/Damp or raising nodeWeight"; the
+  worst case shows an "instability detected" message [CI]. So BeamNG has a
+  stability limit of its own and no automatic stabilisation, mass scaling or
+  minimum node weight is documented ([N]: default `nodeWeight` 25 kg as of
+  0.40.2, no minimum). Too much beamDamp also explodes ([I], [P]): its damping is
+  explicit with a damping limit, as the plain law here.
+* `dampCutoffHz` exists to "run higher damping before instability" (§6, [PN]).
+* No public source gives the time level of the damping velocity, a
+  `beamDampVelocitySplit` limit beyond §22, or a per-node spring/mass limit.
+* [N] documents one mass rule the importer drops: a fuel tank's mass is spread
+  over the nodes of its `fuel` engine group. The SUV's tank nodes are not the
+  ones that vibrate (`rx2l`), so it is not the cause; left as a follow-up (it
+  needs the powertrain's tank capacity, out of scope).
+
+So the law is documented and ours matches it (§29.1); the time level of the
+velocity in the dashpot is not. Centred damping is the standard explicit answer
+from molecular dynamics with velocity-dependent forces: the dashpot reads a
+velocity predicted half a step ahead, v + ½·h·F/m (Groot and Warren's modified
+velocity Verlet for dissipative particle dynamics, λ = ½ [GW]).
+
+**Rule.** After the node update (each node v₁ = v₀ + h·F/m, x₁ = x₀ + h·v₁), with
+Δvᵢ = v₁ − v₀ every JBeam record whose last beam pass applied damping of slope s
+(∂(damping force)/∂u at that pass's rate, the `dampCutoffHz` gain included: c, the
+fast rate past the velocity split, the limit damping in the bound zone, ×0.1 for a
+rope in compression, 0 for a support in tension or a broken record; a torsion
+bar's c, a coupler's c) adds −½·s·Δu to its ends along its current direction (Δu
+= (Δv_a − Δv_b)·d̂; a torsion bar −½·s·Δφ̇ through its dihedral gradient, a
+coupler −½·s·(Δv_a − Δv_b)), equal and opposite. Each node sums these in its
+incidence order and takes v += h·c/m, x += h·(h·c/m). The damping the step applied
+then reads ½(v₀ + v₁): the mean of the step's start and end velocities.
+* Linear in its inputs; momentum is exact (every record's correction sums to zero).
+* Breaks, yield and the filter state are decided by the beam pass as before (at
+  the start velocity); only the motion is corrected.
+* RoR (`.truck`) kinds take no correction.
+* Cost on the CPU: one pass over the records and one over the nodes, +10 % per
+  step on the ETK (237 → 262 µs, 17 configurations) and +13 % on the CCF (289 →
+  327 µs, 26), the minimum of four alternating runs at rest (M3 Max). The
+  dry-pass form of the same rule (two full beam passes) costs about three times
+  that. On the GPU two more phases per step with three barriers (not timed: the
+  GPU is shared). Off, nothing runs and nothing changes.
+
+**One mode** (x″ = −ω²x − (c/m)x′, Ω = ω·h, γ = c·h/m = 2ζΩ; the step map's
+spectral radius, scratchpad `mode1.py`):
+
+| ζ | current: largest stable Ω | damping on the predicted end velocity | backward-Euler damping (local) | **centred** |
+|---|---|---|---|---|
+| 0.01 | 1.980 | 2.021 | 2.020 | 2.000 |
+| 0.03 | 1.941 | 2.070 | 2.061 | 2.004 |
+| 0.07 | 1.865 | 2.213 | 2.145 | 2.023 |
+| 0.15 | 1.722 | 3.333 | 2.322 | 2.148 |
+
+| Ω | current: largest stable γ | predicted end velocity | backward Euler | **centred** |
+|---|---|---|---|---|
+| 0.1 | 1.995 | 1.000 | unbounded | 2.000 |
+| 1.0 | 1.500 | 1.000 | unbounded | 2.000 |
+| 1.9 | 0.195 | 1.000 | unbounded | 1.998 |
+
+Centred damping never lowers the limit below 2 and keeps the plain law's damping
+budget (γ < 2 at every Ω), where the predicted-end-velocity schemes halve it (γ < 1:
+nodes whose beams' summed c·h/m lies between 1 and 2, which run now, would diverge).
+
+**Measured** (CPU, `community_sweep`, JBeam mode on raycast wheels, 1 s at rest;
+clean: no beam broken or bent, fastest node < 1 m/s):
+
+| vehicle | configs | current: clean / marginal / broken | predicted end velocity (dry pass) | centred (dry pass, 2 beam passes) | **centred** |
+|---|---|---|---|---|---|
+| Full-size SUV | 22 | 2 / 20 / 0 | (SUV and trailer: 0 clean, arctic diverges) | 22 / 0 / 0 | 22 / 0 / 0 |
+| Boat trailer | 8 | 0 / 8 / 0 | | 0 / 8 / 0 | 0 / 8 / 0 |
+| Hirochi CCF | 43 | 26 / 9 / 8 | | 39 / 4 / 0 | 39 / 4 / 0 |
+| Gavril Vertex | 106 | 97 / 9 / 0 | | 97 / 9 / 0 | 96 / 10 / 0 |
+| ETK K-series | 17 | 17 / 0 / 0 | | 17 / 0 / 0 | 17 / 0 / 0 |
+| 48 ft yacht | 2 | 2 / 0 / 0 | | 2 / 0 / 0 | 2 / 0 / 0 |
+| **all** | 198 | 144 / 46 / 8 | | 177 / 21 / 0 | 176 / 22 / 0 |
+
+* The SUV: 4.7–20.4 m/s and 5–28 bent beams at rest → 0.19–0.67 m/s, none bent.
+* The trailer: 20.7 m/s, 23 kJ → 0.16–0.28 m/s, 1.5–13 J; its 14 bent beams are
+  a settle of its leaf springs (30 before), not a vibration.
+* The CCF: every broken configuration rests (`country_M` 22.6 m/s and 16 broken
+  → 0.06 m/s; `f4_cup_*` 27 m/s → 0.20; `f6_offroadster_M` 29 m/s, 18 broken →
+  0.07; `f6_tuned_M` 2 broken → 0).
+* The Vertex: no configuration changes class except `offroader` (5 bent → clean)
+  and `hohoho_its_christmas_time` (0.98 → 1.98 m/s, a loose prop at 1 s; KE 4.6 J);
+  `hocus_pocus…` stays at 9.8 m/s both ways (a loose prop).
+* The predicted-end-velocity variant is what "damping applied with the end-of-step
+  velocity" gives explicitly; it fails as the analysis says (the arctic SUV, clean
+  before, diverges).
+
+**Crash scenes** (`vehicle_compare`, CPU, RUBBLE_DAMP_SCHEME=4 against 0): wall56,
+1 s after impact:
+
+| car | rest: KE, fastest node | broken / bent | crush dynamic / residual | peak force | restitution | beam dissipation | energy closure |
+|---|---|---|---|---|---|---|---|
+| ETK kr6 | 0.5 J, 0.148 → 0.0 J, 0.001 m/s | 2 / 338 → 2 / 332 | 489 / 193 → 486 / 188 mm | 712 → 755 kN | 0.35 → 0.37 | 122.9 → 120.9 kJ | 2·10⁻⁵ → −1·10⁻⁵ |
+| CCF f4_sport_M | 0.0 J, 0.131 → 0.001 m/s | 141 / 462 → 142 / 459 | 474 / 6 → 473 / 75 mm | 581 → 581 kN | 0.27 → 0.27 | 152.0 → 152.2 kJ | 1·10⁻⁶ → 0 |
+| Vertex | 0.0 J, 0.001 m/s both | 31 / 438 → 40 / 436 | 479 / 118 → 479 / 117 mm | 542 → 582 kN | 0.22 → 0.20 | 111.0 → 111.8 kJ | −7·10⁻⁶ → −8·10⁻⁶ |
+
+The crash itself is the same within its run-to-run spread (break counts of torn
+fascia are chaotic, §29.1); the residual vibration of the parked cars goes. The CCF's
+residual crush (6 → 75 mm) is its springback (0.94 before): the front settles
+instead of ringing back. The energy ledger closes as before.
+
+**GPU.** `slang/kernels/explicit_beams.slang` (`FLAG_CENTRED`, `centredPhase`,
+`centredBeam`, `centredNode`; the slope in the first incidence entry's `.w`, a
+per-node Δv region at `gP.centredDv`) in the vehicle workgroups and the contact
+groups; the wide passes are not taken when a vehicle has it (the planner falls back
+to the workgroup frame). `tests/explicit_centred_damping_gpu.rs`: bit for bit every
+step against the CPU for the pressure-wheel fixture car at rest (4,000 steps) and at
+10 m/s (2,000), the latched box into a wall (1,500 steps, breaks), the break-group
+fixtures pulled apart, the node couplers; opt-in the full-size SUV on its hubs
+(2,000 steps bit for bit, fastest node 0.30 m/s). Off: the existing parity tests
+pass unchanged, and `jbeam_accept` gives the same output as before this change
+(ETK, CCF, SUV, trailer; raycast and pressure wheels).
+
+Sources:
+* [F] BeamNG forum, Goosah (BeamNG team, global moderator), 2018-07-25/26:
+  https://www.beamng.com/goto/post?id=898127
+* [G] A. Gambi, BeamNG GmbH, S. Panichella, soft-body simulation for CPS testing
+  (ICSE-SEIP): https://beamng.tech/research/ (PDF in `inspiration/research-explicit-stability/`)
+* [BT] BeamNG.tech technical paper (2021):
+  https://beamng.tech/blog/2021-06-21-beamng-tech-whitepaper/bng_technical_paper.pdf
+* [P] BeamNG soft-body physics page: https://beamng.com/game/about/physics
+* [GW] R. D. Groot, P. B. Warren, "Dissipative particle dynamics: bridging the gap
+  between atomistic and mesoscopic simulation", J. Chem. Phys. 107, 4423 (1997):
+  the modified velocity Verlet with the dissipative force at a predicted velocity
+  (λ = ½).
+* [CI], [I], [N], [PN] as in the header.
