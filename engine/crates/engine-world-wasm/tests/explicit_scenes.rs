@@ -494,3 +494,18 @@ fn mdb_keeps_its_shape_against_the_sedan_and_the_showcase_car() {
         assert!(worst_crush < 0.85, "{label}: the face collapses ({worst_crush})");
     }
 }
+
+/// `centredDamping` (jbeam-semantics-spec.md §39) sets the BeamNG profile's centred
+/// damping on the JBeam barrier and leaves the Rigs of Rods profile sedan alone.
+#[test]
+fn centred_damping_toggle_reaches_beamng_profile_vehicles_only() {
+    for on in [false, true] {
+        let Some(s) = sim("mdb214", serde_json::json!({ "centredDamping": on })) else {
+            eprintln!("no GPU: skipped");
+            return;
+        };
+        assert!(s.spawned(1).beamng_profile && !s.spawned(0).beamng_profile);
+        assert_eq!(s.spawned(1).settings.centred_damping, on);
+        assert!(!s.spawned(0).settings.centred_damping);
+    }
+}

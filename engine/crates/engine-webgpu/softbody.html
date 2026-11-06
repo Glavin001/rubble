@@ -100,7 +100,7 @@
     // What a scene or preset change keeps: the solver, the vehicle (built-in car,
     // .truck, imported mod and configuration, wheels, JBeam mode) and the view and
     // contact options.
-    const KEEP_KEYS = ['solver', 'car', 'style', 'res', 'truck', 'mod', 'pc', 'wheels', 'jbeamMode', 'tyres', 'drag', 'lab', 'drive', 'tex', 'skin', 'surfaceContact', 'fullContact'];
+    const KEEP_KEYS = ['solver', 'car', 'style', 'res', 'truck', 'mod', 'pc', 'wheels', 'jbeamMode', 'tyres', 'drag', 'lab', 'drive', 'tex', 'skin', 'surfaceContact', 'fullContact', 'centredDamping'];
     const keepVehicle = (s) => { for (const k of KEEP_KEYS) if (qs.has(k)) s.set(k, qs.get(k)); return s; };
     window.__keepVehicle = keepVehicle;
     // JBeam imports run in JBeam mode (BeamNG's rules) unless ?jbeamMode=truck.
@@ -621,6 +621,9 @@
         ...(xscene === 'traffic' && qs.has('ai') ? { ai: qs.get('ai') } : {}),
         // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
         drag: qs.get('drag') !== '0',
+        // ?centredDamping=0/1: the BeamNG profile's centred damping (jbeam-semantics-spec.md
+        // §39) off or on; absent, the profile's default.
+        ...(qs.has('centredDamping') ? { centredDamping: qs.get('centredDamping') !== '0' } : {}),
       });
     const buildExplicit = () => {
       xsim?.free();
