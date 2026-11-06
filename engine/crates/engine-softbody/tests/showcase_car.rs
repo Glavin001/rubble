@@ -107,7 +107,12 @@ fn skins_are_closed_and_the_truck_loads() {
         let part = |i: u32| sk.nodes[i as usize].part;
         let lattice = coarse_skin(sk, &b.shell).unwrap();
         check_closed(&sk.collision).unwrap();
-        assert_eq!(sk.collision, lattice);
+        // (Then the colliding blocks' faces, each inside its own part.)
+        assert_eq!(sk.collision[..lattice.len()], lattice[..]);
+        for t in &sk.collision[lattice.len()..] {
+            let p = part(t[0]);
+            assert!(p != 0 && t.iter().all(|&i| part(i) == p), "{t:?}");
+        }
         assert!(sk.full_contact);
         assert_eq!(sk.collision_breaks.len(), sk.collision.len());
         let groups: HashSet<u32> = b.hardware.iter().map(|h| h.group).collect();
@@ -173,6 +178,32 @@ fn skins_are_closed_and_the_truck_loads() {
                 .copied()
                 .filter(|&i| detachable.contains(&part(i))),
         );
+        // A colliding block's faces' nodes, and the body's nodes behind and
+        // beside it within its bearing reach (`BlockSpec::collide`).
+        expect.extend(sk.collision[lattice.len()..].iter().flatten().copied());
+        for bl in style(&car_style())
+            .unwrap()
+            .blocks
+            .iter()
+            .filter(|b| b.collide)
+        {
+            // (Its box from its own nodes' design positions: the build
+            // places the car and settles it after.)
+            let q = sk.parts.iter().position(|p| p == &bl.name).unwrap() as u16;
+            let at = |i: u32| b.design[i as usize];
+            let (lo, hi) = (0..sk.nodes.len() as u32)
+                .filter(|&i| sk.nodes[i as usize].part == q)
+                .fold((Vec3::MAX, Vec3::MIN), |(a, z), i| {
+                    (a.min(at(i)), z.max(at(i)))
+                });
+            let (c, h) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+            let reach = if bl.bear > 0.0 { bl.bear } else { 0.5 };
+            expect.extend((0..sk.nodes.len() as u32).filter(|&i| {
+                sk.nodes[i as usize].part == 0
+                    && ((at(i) - c).abs() - h).max(Vec3::ZERO).length() <= reach
+                    && at(i).z <= c.z + h.z
+            }));
+        }
         let contacters: HashSet<u32> = (0..sk.nodes.len() as u32)
             .filter(|&i| sk.nodes[i as usize].contacter)
             .collect();
@@ -315,26 +346,48 @@ fn left_and_right_mirror() {
     }
     assert_eq!(unmatched, 0, "nodes without a mirror");
     // Left and right halves weigh the same but for the driver (left seat).
+    // (Halves by the design's x: the rest pose leans to the driver's side,
+    // which carried the centre line's nodes into the left half.)
     let left: f32 = b
         .skeleton
         .nodes
         .iter()
-        .filter(|n| n.p.x > 1e-3)
-        .map(|n| n.mass)
+        .zip(&pos)
+        .filter(|(_, p)| p.x > 1e-3)
+        .map(|(n, _)| n.mass)
         .sum();
     let right: f32 = b
         .skeleton
         .nodes
         .iter()
-        .filter(|n| n.p.x < -1e-3)
-        .map(|n| n.mass)
+        .zip(&pos)
+        .filter(|(_, p)| p.x < -1e-3)
+        .map(|(n, _)| n.mass)
         .sum();
-    eprintln!("left {left:.1} kg, right {right:.1} kg");
-    // The driver (75 kg) and the battery (18 kg) are on the left; the
-    // structure's mass, spread by need, fills what they leave, so it can
-    // only take from that difference, never add to it.
+    // What is on the left only, as in the real car: the named masses whose
+    // box lies left of the centre line (the driver, sedan1's master cylinder
+    // and pedals), the battery (18 kg) and the steering column with what
+    // it carries of the instrument panel's mass.
+    let def = style(&car_style()).unwrap();
+    let named: f32 = def
+        .masses
+        .iter()
+        .filter(|m| m.lo[0] > 0.0)
+        .map(|m| m.kg)
+        .sum();
+    let column: f32 = b.groups["column"]
+        .iter()
+        .filter(|&&i| pos[i as usize].x > 1e-3)
+        .map(|&i| b.skeleton.nodes[i as usize].mass)
+        .sum();
+    let one_sided = named + 18.0 + column;
+    eprintln!(
+        "left {left:.1} kg, right {right:.1} kg; left only: named {named:.1}, battery 18, column {column:.1} kg"
+    );
+    // The structure's mass, spread by need, fills what they leave, so it
+    // can only take from that difference, never add to it.
     assert!(
-        left > right && left - right <= 93.0 + 1e-3 * left,
+        left > right && left - right <= one_sided + 1e-3 * left,
         "left {left} right {right}"
     );
 }
@@ -3284,6 +3337,40 @@ fn reference_wall_p(
         if let Some(b) = car.built {
             g_nan_probe(&s, b, &was, &mut nan_seen, (t / dt).round() as i64, 0.0);
         }
+        // (`BOLT_LOAD=<member>`: every 5 ms, each bolted end's load: the
+        // resultant of its beams to the rails, left and right, and how many
+        // are broken.)
+        if let (Ok(m), Some(b)) = (std::env::var("BOLT_LOAD"), car.built) {
+            let step = (t / dt).round() as i64;
+            if step % 10 == 0 && t <= 0.12 {
+                let own: HashSet<u32> = b.groups[&m].iter().copied().collect();
+                let mut out = Vec::new();
+                for rail in ["rail_f", "rail_f_r"] {
+                    let r: HashSet<u32> = b.groups[rail].iter().copied().collect();
+                    let (mut f, mut broken, mut n) = (Vec3::ZERO, 0, 0);
+                    for bm in &s.beams {
+                        let (own_a, own_b) = (own.contains(&bm.a), own.contains(&bm.b));
+                        if own_a == own_b || !(r.contains(&bm.a) || r.contains(&bm.b)) {
+                            continue;
+                        }
+                        n += 1;
+                        if bm.broken {
+                            broken += 1;
+                            continue;
+                        }
+                        let (o, e) = if own_a { (bm.a, bm.b) } else { (bm.b, bm.a) };
+                        let u = (s.nodes[e as usize].pos - s.nodes[o as usize].pos).normalize();
+                        f += u * bm.force;
+                    }
+                    out.push(format!(
+                        "{rail} {:.1} kN (along {:.1}) {broken}/{n} broken",
+                        f.length() / 1e3,
+                        f.z / 1e3
+                    ));
+                }
+                eprintln!("(bolt) t {:.0} ms: {}", t * 1e3, out.join("; "));
+            }
+        }
         // (`PT_LOAD=1`: every 10 ms, the push along the car of each beam
         // joining the powertrain to the body, summed by the member it meets
         // and by kind; and the powertrain's mean travel against the cabin.)
@@ -3575,6 +3662,18 @@ fn n_wall_matches_the_nhtsa_sedans() {
 /// The n test's runs and bands on `car`: the failures.
 fn n_wall(car: &Car) -> Vec<String> {
     let noise = car.noise();
+    // (`N_QUICK=1`: one run, 56 km/h (`N_KMH`) with drag (`N_DRAG=0`
+    // without), no ensemble and no Campbell sweep: a measurement for the
+    // probes, never the test's verdict.)
+    if std::env::var("N_QUICK").is_ok_and(|v| v == "1") {
+        let kmh = std::env::var("N_KMH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(56.0);
+        let drag = std::env::var("N_DRAG").map_or(true, |v| v != "0");
+        let r = reference_wall_p(car, kmh, drag, noise, Perturb::default());
+        return vec![format!("N_QUICK (not judged): {r:?}")];
+    }
     // The ensemble at 56 km/h (`ensemble`: ±1 cm, ±0.3 %, ±0.2°), drag on
     // and off in turn: its mean is judged, its spread reported.
     let runs: Vec<Vec<(&str, f32)>> = ensemble()

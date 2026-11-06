@@ -149,6 +149,29 @@ pub struct MemberSpec {
     /// its truss's width × height at [`DEFAULT_GAUGE`]).
     #[serde(default)]
     pub kg_per_m: f32,
+    /// A bolted assembly's member (a subframe's, [`Bolt`]): it is welded
+    /// only to the members its bolt names (its stations snap onto theirs, no
+    /// other structure's, nor the shell), and its end stations are bolted
+    /// to the structure, each by one detacher group that lets go at the
+    /// bolt's strength.
+    #[serde(default)]
+    pub bolted: Option<Bolt>,
+}
+
+/// A bolted assembly's member ([`MemberSpec::bolted`]): a subframe's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bolt {
+    /// The members its ends bolt to (their groups, a mirrored member's right
+    /// side as `<name>_r`); empty: its ends are not bolted.
+    pub to: Vec<String>,
+    /// The members of its own assembly it is welded to (its stations snap
+    /// onto their nodes).
+    #[serde(default)]
+    pub weld: Vec<String>,
+    /// Each end's strength (N): the most its joint carries before the whole
+    /// joint (one detacher group) lets go. Each of its beams breaks at its
+    /// even share.
+    pub strength: f32,
 }
 
 /// The wall of a member without a real section (m): a Choice, typical of a

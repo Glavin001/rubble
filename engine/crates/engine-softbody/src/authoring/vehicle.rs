@@ -150,6 +150,12 @@ pub struct BlockSpec {
     /// right side as `<name>_r`); empty: any structure node within `reach`.
     #[serde(default)]
     pub mount_to: Vec<String>,
+    /// Its outer faces are collision triangles: the structure's nodes meet
+    /// the block as contact (a node against its faces), whatever their
+    /// path, as a crushed dash meets an engine. Off: only its bearing
+    /// beams and the contact of its own nodes.
+    #[serde(default)]
+    pub collide: bool,
 }
 
 /// A long diagonal across a panel the body's torsion runs through (and its
@@ -1414,7 +1420,15 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             };
             // A member riding a panel meets only its own part's frame (it
             // must not weld the panel to the body across a shut line).
-            let pool: Vec<u32> = if m.ride {
+            // (A bolted member meets nothing as a weld, the shell neither:
+            // its own nodes, its ends joined by its bolts below.)
+            let attach = if m.bolted.is_some() { 0 } else { m.attach };
+            let pool: Vec<u32> = if let Some(bolt) = &m.bolted {
+                bolt.weld
+                    .iter()
+                    .flat_map(|name| groups.get(name).into_iter().flatten().copied())
+                    .collect()
+            } else if m.ride {
                 snap_pool
                     .iter()
                     .copied()
@@ -1431,7 +1445,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             // nodes (the lane's shell beams are that chord and that face).
             // `LANE_TRUSS=1` keeps them (a measurement switch).
             let lane_pre: std::collections::HashSet<u32> =
-                if one && m.attach > 0 && std::env::var("LANE_TRUSS").map_or(true, |v| v != "1") {
+                if one && attach > 0 && std::env::var("LANE_TRUSS").map_or(true, |v| v != "1") {
                     let r = 0.5 * m.width.max(m.height) + LANE_REACH;
                     shell
                         .nodes
@@ -1488,7 +1502,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             } else {
                 format!("{}_r", m.name)
             });
-            if m.attach > 0 {
+            if attach > 0 {
                 // The stations (catchers ride their bays), but those snapped onto
                 // the shell (already part of it).
                 let on_shell: std::collections::HashSet<u32> =
@@ -1514,7 +1528,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     &mut sk,
                     &nodes,
                     &pool,
-                    m.attach,
+                    attach,
                     0.35,
                     // Welded along its flanges: the panel's stiffness, half the
                     // member's strength (the load path holds while the member
@@ -1594,7 +1608,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             // most `POLE_LANE` apart, so a pole meets the member's chord in
             // every lane.
             let mut nodes = nodes;
-            if one && m.attach > 0 {
+            if one && attach > 0 {
                 let r = 0.5 * m.width.max(m.height) + LANE_REACH;
                 let dist = |q: Vec3| -> (f32, Vec3, f32) {
                     // (Distance to the path, its tangent there, its arc fraction.)
@@ -1667,6 +1681,45 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             } else {
                 format!("{}_r", m.name)
             };
+            // Bolted ends: each end station's nodes to the two nearest nodes
+            // of the members it bolts to (within 0.3 m), one detacher group
+            // an end, each beam at its even share of the bolt's strength.
+            if let Some(bolt) = m.bolted.as_ref().filter(|b| !b.to.is_empty()) {
+                let mut to: Vec<u32> = bolt
+                    .to
+                    .iter()
+                    .flat_map(|name| groups.get(name).into_iter().flatten().copied())
+                    .filter(|&i| sk.nodes[i as usize].part == 0)
+                    .collect();
+                to.sort();
+                to.dedup();
+                for st in [truss.first(), truss.last()] {
+                    let mut ends: Vec<u32> = st.to_vec();
+                    ends.sort();
+                    ends.dedup();
+                    let mut pairs = Vec::new();
+                    for &a in &ends {
+                        for b in sk.nearest(sk.pos(a), &to, 2) {
+                            if sk.pos(a).distance(sk.pos(b)) <= 0.3 {
+                                pairs.push((a, b));
+                            }
+                        }
+                    }
+                    if pairs.is_empty() {
+                        return Err(format!("{key}: a bolted end meets none of {:?}", bolt.to));
+                    }
+                    groups_made += 1;
+                    let each = bolt.strength / pairs.len() as f32;
+                    let mt = Material {
+                        deform: each,
+                        strength: each,
+                        ..base
+                    };
+                    for (a, b) in pairs {
+                        sk.beam_with(a, b, mt, BeamType::Normal, groups_made);
+                    }
+                }
+            }
             groups.insert(key, nodes.clone());
             structure_nodes.extend(nodes);
         }
@@ -2853,20 +2906,32 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         groups.insert(pl.name.clone(), nodes);
     }
     // Blocks.
+    // (The collision triangles of the blocks that collide.)
+    let mut block_tris: Vec<[u32; 3]> = Vec::new();
     for bl in &def.blocks {
         let part = sk.part(&bl.name);
+        let spacing = Vec3::new(
+            bl.spacing,
+            bl.spacing,
+            if bl.depth > 0.0 { bl.depth } else { bl.spacing },
+        );
         let nodes = block_spaced(
             &mut sk,
             Vec3::from_array(bl.centre),
             Vec3::from_array(bl.half),
-            Vec3::new(
-                bl.spacing,
-                bl.spacing,
-                if bl.depth > 0.0 { bl.depth } else { bl.spacing },
-            ),
+            spacing,
             part,
             grades.rigid.stiffer(bl.stiff),
         );
+        if bl.collide {
+            block_tris.extend(block_faces(
+                &sk,
+                &nodes,
+                Vec3::from_array(bl.centre),
+                Vec3::from_array(bl.half),
+                spacing,
+            ));
+        }
         sk.add_mass(&nodes, bl.kg);
         let mount = grades.get(&bl.mount_grade)?.scaled(bl.mount_scale);
         let c = Vec3::from_array(bl.centre);
@@ -2924,7 +2989,11 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             };
             // (As contact, the front face too: the radiator support and the
             // bumper stack against the block as the front crushes.)
-            let faces: &[Vec3] = if bl.bear_clear > 0.0 {
+            // (A colliding block meets what is behind and beside it as
+            // contact: only its front face bears by beams.)
+            let faces: &[Vec3] = if bl.collide {
+                &[Vec3::Z]
+            } else if bl.bear_clear > 0.0 {
                 &[-Vec3::Z, Vec3::X, -Vec3::X, Vec3::Z]
             } else {
                 &[-Vec3::Z, Vec3::X, -Vec3::X]
@@ -3457,9 +3526,27 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
     preload(&mut sk, def);
     // Collision skin: the shell's skin on a coarser lattice, its nodes contacters.
     sk.collision = coarse_skin(&sk, &shell)?;
+    sk.collision.extend(block_tris);
     for t in sk.collision.clone() {
         for i in t {
             sk.nodes[i as usize].contacter = true;
+        }
+    }
+    // A colliding block's faces meet the body's nodes behind and beside it:
+    // every body node within its bearing reach of the block's box (else
+    // 0.5 m), and not ahead of its front face, is a contacter (the
+    // self-collision candidates are the contacters). Ahead, its front face
+    // bears on the radiator support by beams: a light node there met the
+    // face pinched against the wall, and in the 50 km/h wall two of the
+    // radiator support's nodes left at 107–138 m/s.
+    for bl in def.blocks.iter().filter(|b| b.collide) {
+        let (c, h) = (Vec3::from_array(bl.centre), Vec3::from_array(bl.half));
+        let reach = if bl.bear > 0.0 { bl.bear } else { 0.5 };
+        for n in sk.nodes.iter_mut().filter(|n| n.part == 0) {
+            let d = ((n.p - c).abs() - h).max(Vec3::ZERO).length();
+            if d <= reach && n.p.z <= c.z + h.z {
+                n.contacter = true;
+            }
         }
     }
     shut_line_breaks(&mut sk, &shell, &hardware);
@@ -4299,6 +4386,57 @@ fn one_tier_masses(
         sk.nodes[i].local = m;
     }
     Ok(ledger)
+}
+
+/// A block's outer faces as triangles ([`BlockSpec::collide`]), each wound
+/// with its normal outward (away from the block's centre). `nodes` are
+/// [`super::members::block_spaced`]'s, in its order.
+fn block_faces(
+    sk: &Skeleton,
+    nodes: &[u32],
+    centre: Vec3,
+    half: Vec3,
+    spacing: Vec3,
+) -> Vec<[u32; 3]> {
+    let cnt = |h: f32, s: f32| ((2.0 * h / s).ceil() as usize).max(1) + 1;
+    let n = [
+        cnt(half.x, spacing.x),
+        cnt(half.y, spacing.y),
+        cnt(half.z, spacing.z),
+    ];
+    assert_eq!(
+        nodes.len(),
+        n[0] * n[1] * n[2],
+        "block_faces: not a block's grid"
+    );
+    let at = |c: [usize; 3]| nodes[(c[2] * n[1] + c[1]) * n[0] + c[0]];
+    let mut tris = Vec::new();
+    for axis in 0..3 {
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+        for side in [0, n[axis] - 1] {
+            if n[u] < 2 || n[v] < 2 {
+                continue;
+            }
+            for i in 0..n[u] - 1 {
+                for j in 0..n[v] - 1 {
+                    let mut c = [0usize; 3];
+                    c[axis] = side;
+                    let mut q = |di: usize, dj: usize| {
+                        c[u] = i + di;
+                        c[v] = j + dj;
+                        at(c)
+                    };
+                    let (a, b, d, e) = (q(0, 0), q(1, 0), q(1, 1), q(0, 1));
+                    for t in [[a, b, d], [a, d, e]] {
+                        let (p0, p1, p2) = (sk.pos(t[0]), sk.pos(t[1]), sk.pos(t[2]));
+                        let out = (p1 - p0).cross(p2 - p0).dot((p0 + p1 + p2) / 3.0 - centre) > 0.0;
+                        tris.push(if out { t } else { [t[0], t[2], t[1]] });
+                    }
+                }
+            }
+        }
+    }
+    tris
 }
 
 /// The collision skin across the shut lines (A1: no collision triangle
