@@ -394,10 +394,19 @@ impl ExplicitVehicles {
             pass.set_pipeline(&self.pipes[2]);
             pass.dispatch_workgroups(nv, 1, 1);
         }
+        if let Some(m) = sim.marks() {
+            m.mark(enc, "vehicle coupling plan");
+        }
         // The rigid bodies push the vehicles: vehicle contact's frame bounds are planned
         // from this window's speeds.
         self.gpu.request_contact_replan();
+        if std::env::var("RUBBLE_GPU_TIMING_EXPLICIT").is_ok() {
+            self.gpu.set_marks(sim.marks().cloned());
+        }
         let read = self.gpu.frame_encode(enc, steps);
+        if let Some(m) = sim.marks() {
+            m.mark(enc, "explicit frame");
+        }
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("vehicle coupling loads"),

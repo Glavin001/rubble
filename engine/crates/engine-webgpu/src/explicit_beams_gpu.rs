@@ -50,6 +50,9 @@ pub struct ExplicitBeamsGpu {
     /// The wide passes (one thread per element over every vehicle), when possible.
     wide: Option<Wide>,
     timing: Option<FrameTiming>,
+    /// Diagnostic marks after each of the frame's dispatches (`RUBBLE_GPU_TIMING_DISPATCH`,
+    /// a host's [`crate::gpu_marks::GpuMarks`]).
+    marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
@@ -378,6 +381,23 @@ struct FrameTiming {
     used: u32,
 }
 
+/// A plan command's kernel, for diagnostic marks.
+fn kernel_name(cmd: &Cmd) -> &'static str {
+    let k = match *cmd {
+        Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => kernel,
+        Cmd::Copy { .. } => return "copy",
+    };
+    match k {
+        Kernel::Frame => "explicit frame (solo)",
+        Kernel::Solo => "explicit solo vehicles",
+        Kernel::Contact => "explicit contact groups",
+        Kernel::Vv(0) => "explicit vv bounds",
+        Kernel::Vv(1) => "explicit vv pairs",
+        Kernel::Vv(_) => "explicit vv group plan",
+        Kernel::Wide(_) => "explicit wide",
+    }
+}
+
 /// The wide passes' pipelines and bind group ([`ExplicitBeamsGpu::set_wide`]).
 struct Wide {
     passes: Vec<wgpu::ComputePipeline>,
@@ -506,6 +526,7 @@ impl ExplicitBeamsGpu {
             layout,
             planner,
             timing: None,
+            marks: None,
             wide,
             contact,
             contact_errors: Default::default(),
@@ -583,6 +604,16 @@ impl ExplicitBeamsGpu {
         }
         let raw = self.read(&self.contact.args);
         bytemuck::cast_slice::<u8, u32>(&raw)[4]
+    }
+
+    /// Diagnostic (blocking): the member count of each contact group of the current
+    /// plan.
+    #[doc(hidden)]
+    pub fn contact_group_sizes(&self) -> Vec<u32> {
+        let n = self.contact_groups() as usize;
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        let at = self.planner.words[46] as usize;
+        (0..n).map(|g| misc[(at + g) * 4 + 1]).collect()
     }
 
     /// Per vehicle with the contact-force log (jbeam-semantics-spec.md §32;
@@ -944,6 +975,12 @@ impl ExplicitBeamsGpu {
         self.encode(enc, steps)
     }
 
+    /// Diagnostic: a mark after each of the frame's dispatches, named by kernel (`None`:
+    /// stop).
+    pub fn set_marks(&mut self, marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>) {
+        self.marks = marks;
+    }
+
     /// After the submission holding a [`Self::frame_encode`]: its status read mapped.
     pub fn frame_submitted(&self, read: bool) {
         if read {
@@ -979,6 +1016,19 @@ impl ExplicitBeamsGpu {
         for (i, run) in runs.iter().enumerate() {
             if i > 0 {
                 self.copy(enc, copies[i - 1]);
+            }
+            if let Some(m) = self.marks.clone() {
+                for cmd in *run {
+                    {
+                        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("explicit_beams"),
+                            timestamp_writes: None,
+                        });
+                        self.dispatch(&mut pass, cmd, alt);
+                    }
+                    m.mark(enc, kernel_name(cmd));
+                }
+                continue;
             }
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("explicit_beams"),

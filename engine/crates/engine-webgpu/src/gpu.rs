@@ -3079,6 +3079,11 @@ impl WgpuSim {
         self.marks = marks;
     }
 
+    /// The marks [`Self::set_marks`] set (hosts' own passes mark into the same timeline).
+    pub fn marks(&self) -> Option<&std::sync::Arc<crate::gpu_marks::GpuMarks>> {
+        self.marks.as_ref()
+    }
+
     /// The plan's dispatches in one compute pass of `enc` (its copies are encoded before).
     fn encode_dispatches(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
         self.encode_dispatches_hooked(enc, cmds, None);

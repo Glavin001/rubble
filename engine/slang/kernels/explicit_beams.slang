@@ -136,6 +136,10 @@ static const uint TRI_ANTI_ONLY = 0x40000000u;
 static const uint FLAG_KEEP_STRENGTH = 8192u;
 // The BeamNG profile's friction law with exact exponentials (§36, exact_exp/pow).
 static const uint FLAG_EXACT_FRICTION = 16384u;
+// The BeamNG profile's self- and vehicle contact do no positive work
+// (jbeam-semantics-spec.md §37, `dissipative_contact`; vehicle contact: the owner's
+// or the partner's flag).
+static const uint FLAG_DISSIPATIVE = 32768u;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -255,6 +259,7 @@ struct Surface
     float alpha;
     float strength;
     uint exact; // the friction law's exponentials exact (sExactExp, sExactPow; §36)
+    uint dissipative; // the normal force does no positive work (§37, FLAG_DISSIPATIVE)
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<Params> gP;
@@ -330,6 +335,7 @@ Surface groundSurface()
     Surface s;
     s.va = 3.0; s.ms = 0.85; s.mc = 0.6; s.t2 = 0.006; s.vs = 3.0; s.alpha = 2.0; s.strength = 1.0;
     s.exact = 0u;
+    s.dissipative = 0u;
     return s;
 }
 
@@ -338,6 +344,7 @@ Surface boxSurface()
     Surface s;
     s.va = 3.0; s.ms = 1.2; s.mc = 0.75; s.t2 = 0.01; s.vs = 6.0; s.alpha = 2.0; s.strength = 1.0;
     s.exact = 0u;
+    s.dissipative = 0u;
     return s;
 }
 
@@ -345,6 +352,15 @@ Surface boxSurface()
 Surface surfaceV(Surface s, uint v)
 {
     s.exact = (gStatic[v * 4u + 3u].x & FLAG_EXACT_FRICTION) != 0u ? 1u : 0u;
+    return s;
+}
+
+// Self- and vehicle contact's surface: surfaceV(boxSurface(), v), dissipative when
+// vehicle v or w has FLAG_DISSIPATIVE (self-collision: w = v).
+Surface contactSurfaceV(uint v, uint w)
+{
+    Surface s = surfaceV(boxSurface(), v);
+    s.dissipative = ((gStatic[v * 4u + 3u].x | gStatic[w * 4u + 3u].x) & FLAG_DISSIPATIVE) != 0u ? 1u : 0u;
     return s;
 }
 
@@ -501,6 +517,22 @@ float noise(uint vehicle, uint step, uint node, uint axis)
     return asfloat(0x40000000u | (h & 0x7FFFFFu)) - 3.0;
 }
 
+// §37 (explicit_beams.rs no_positive_work): contact force c on a pair of relative
+// velocity v, reduced mass m, under force f, scaled by s = min(1, −a/b) (none when
+// a ≥ 0) so its work over the step at the pair's mean velocity is ≤ 0:
+// a = c·(2v + h·f/m), b = h·|c|²/m. Strict, in the CPU's order.
+float3 noPositiveWork(float3 c, float3 f, float3 v, float m)
+{
+    if (m <= 0.0) return c;
+    float hm = sdiv(STEP, m);
+    float3 u = sadd3(sadd3(v, v), sscale(f, hm));
+    float a = sdot(c, u);
+    float b = smul(sdot(c, c), hm);
+    if (nf(a + b) <= 0.0) return c;
+    if (a >= 0.0) return float3(0.0, 0.0, 0.0);
+    return sscale(c, sdiv(-a, b));
+}
+
 float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, float friction)
 {
     if (p < 0.0) return float3(0.0, 0.0, 0.0);
@@ -510,6 +542,10 @@ float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, f
     float r = -fn;
     if (vn < 0.0)
         r = nf(r - sdiv(smul(nf(smul(0.8, vn) - sdiv(smul(0.2, p), STEP)), m), STEP));
+    // §37: never a separation made, so no positive work (explicit_beams.rs
+    // contact_force): r ≤ −fn − (vn + max(vn, 0))·m/h.
+    if (s.dissipative != 0u)
+        r = min(r, nf(-fn - sdiv(smul(nf(vn + max(vn, 0.0)), m), STEP)));
     if (r <= 0.0) return float3(0.0, 0.0, 0.0);
     float3 sf = ssub3(f, sscale(n, fn));
     float3 sl = ssub3(v, sscale(n, vn));
@@ -517,10 +553,15 @@ float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, f
     if (sigma > 0.0) sl = sdiv3(sl, sigma);
     float gr = smul(smul(r, s.strength), friction);
     float ms = smul(s.ms, gr);
+    float3 c;
     if (sigma < s.va && gr > 0.0 && sdot(sf, sf) <= smul(ms, ms))
-        return ssub3(ssub3(sscale(n, r), sscale(sl, smul(ms, nf(1.0 - frictionExp(s, -sdiv(sigma, s.va)))))), sf);
-    float g = nf(s.mc + smul(nf(s.ms - s.mc), frictionExp(s, -frictionPow(s, sdiv(sigma, s.vs), s.alpha))));
-    return ssub3(sscale(n, r), sscale(sl, smul(nf(g + min(smul(s.t2, sigma), 5.0)), gr)));
+        c = ssub3(ssub3(sscale(n, r), sscale(sl, smul(ms, nf(1.0 - frictionExp(s, -sdiv(sigma, s.va)))))), sf);
+    else
+    {
+        float g = nf(s.mc + smul(nf(s.ms - s.mc), frictionExp(s, -frictionPow(s, sdiv(sigma, s.vs), s.alpha))));
+        c = ssub3(sscale(n, r), sscale(sl, smul(nf(g + min(smul(s.t2, sigma), 5.0)), gr)));
+    }
+    return s.dissipative != 0u ? noPositiveWork(c, f, v, m) : c;
 }
 
 // A pressure-wheel node's ground contact (NODE_FRICTION_LIMIT, spec §28): the
@@ -2374,7 +2415,8 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
                             sscale(selfAcc(t2, beamOff, groupOff, groupCount, parity), beta)),
                       sscale(selfAcc(t0, beamOff, groupOff, groupCount, parity), gamma));
     float3 fh = sscale(ssub3(selfAcc(h, beamOff, groupOff, groupCount, parity), a3), m);
-    return contactForce(fh, vv, m, nn, surfaceV(boxSurface(), gStatic[gP.nodeInfoBase + h].w), pen, friction);
+    uint hv = gStatic[gP.nodeInfoBase + h].w;
+    return contactForce(fh, vv, m, nn, contactSurfaceV(hv, hv), pen, friction);
 }
 
 float3 selfTwoBodyForce(uint at, uint h, uint beamOff, uint groupOff, uint groupCount, uint parity)
@@ -3727,7 +3769,7 @@ float3 hitContact(float4 V, float4 P, float4 P0, float4 P1, float4 P2, float3 v0
     float3 vv = ssub3(V.xyz, sadd3(sadd3(sscale(v1, alpha), sscale(v2, beta)), sscale(v0, gamma)));
     float mt = nf(nf(smul(alpha, P1.w) + smul(beta, P2.w)) + smul(gamma, P0.w));
     float m = sdiv(smul(P.w, mt), nf(P.w + mt));
-    return contactForce(sadd3(fb, a3), vv, m, nn, surfaceV(boxSurface(), v), pen, V.w);
+    return contactForce(sadd3(fb, a3), vv, m, nn, contactSurfaceV(v, v), pen, V.w);
 }
 
 // The force of the hit at record `at` (key `key`) of vehicle v: its node's force,
@@ -3751,9 +3793,9 @@ void hitForce(uint v, uint at, uint key, int3 sum, uint round, float3 origin, fl
                         false);
     float3 a3 = float3(float(acc.x), float(acc.y), float(acc.z)) * (1.0 / FIXED);
 #ifdef EB_DET_HITS
-    float3 f = contactForce(fb + a3, vv, m, nn, surfaceV(boxSurface(), v), pen, friction);
+    float3 f = contactForce(fb + a3, vv, m, nn, contactSurfaceV(v, v), pen, friction);
 #else
-    float3 f = contactForce(sadd3(fb, a3), vv, m, nn, surfaceV(boxSurface(), v), pen, friction);
+    float3 f = contactForce(sadd3(fb, a3), vv, m, nn, contactSurfaceV(v, v), pen, friction);
 #endif
     gNext[at + 3u] = asuint(f.x);
     gNext[at + 4u] = asuint(f.y);
@@ -6192,7 +6234,7 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
                           vvAccel(gBeams[gP.vvSnap + t.tn.x].xyz, t.tn.x, P0.w, gamma));
         fh = sscale(ssub3(vvAccel(gBeams[gP.vvSnap + h].xyz, h, P.w, 1.0), at), m);
     }
-    float3 f = contactForce(fh, v, m, nn, surfaceV(boxSurface(), vh), pen, V.w);
+    float3 f = contactForce(fh, v, m, nn, contactSurfaceV(vh, gStatic[gP.nodeInfoBase + t.tn.x].w), pen, V.w);
     accAdd(h, f);
     accAdd(t.tn.y, -sscale(f, alpha));
     accAdd(t.tn.z, -sscale(f, beta));

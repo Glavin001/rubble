@@ -476,6 +476,9 @@ pub struct World {
     tuned: std::collections::BTreeSet<u32>,
     /// The last step's GPU time from its marks (`RUBBLE_GPU_TIMING=1`).
     last_gpu_ms: Option<f64>,
+    /// When the last step's submission went to the queue (for hosts timing the GPU's
+    /// span: submit to completion, [`Self::last_submit_instant`]).
+    last_submit: Option<std::time::Instant>,
     shapes: Vec<ShapeSlot>,
     free_shapes: Vec<u32>,
     /// Retired colliders: `(collider, released at step)`.
@@ -620,6 +623,7 @@ impl World {
             free_bodies: Vec::new(),
             tuned: std::collections::BTreeSet::new(),
             last_gpu_ms: None,
+            last_submit: None,
             shapes: Vec::new(),
             free_shapes: Vec::new(),
             free_colliders: Vec::new(),
@@ -864,6 +868,12 @@ impl World {
     /// Whether the resting-pair carry runs ([`Self::set_carry_rest`]).
     pub fn carry_rest(&self) -> bool {
         self.sim.carry_rest()
+    }
+
+    /// When the last step's submission was queued (a host that waits for it, the GPU
+    /// otherwise idle, reads the step's GPU span as the time from here to completion).
+    pub fn last_submit_instant(&self) -> Option<std::time::Instant> {
+        self.last_submit
     }
 
     /// GPU time of the last step, every pass of it (`RUBBLE_GPU_TIMING=1`; else None).
@@ -2206,7 +2216,7 @@ impl World {
             } else {
                 96
             };
-            std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new(self.sim.device(), cap))
+            std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new_for(self.sim.device(), self.sim.queue(), cap))
         });
         if let Some(m) = &marks {
             m.mark(&mut enc, "begin");
@@ -2237,9 +2247,12 @@ impl World {
         let ran = self.sim.last_step_ran();
         // Explicit vehicles: the next window's frame and chunk loads, before the
         // fracture takes them (forward-only).
+        if let (Some(m), true) = (&marks, ran && self.explicit.is_some()) {
+            m.mark(&mut enc, "rigid step end");
+        }
         let explicit_read = if ran { self.explicit_after_step(&mut enc)? } else { None };
         if let (Some(m), Some(_)) = (&marks, explicit_read) {
-            m.mark(&mut enc, "explicit vehicles");
+            m.mark(&mut enc, "vehicle coupling loads");
         }
         lap("rigid encoded");
         if let Some(m) = &marks {
@@ -2365,7 +2378,9 @@ impl World {
             let staging = m.resolve(self.sim.device(), &mut enc);
             (m, staging)
         });
-        self.sim.queue().submit([enc.finish()]);
+        let cmd = enc.finish();
+        self.last_submit = Some(std::time::Instant::now());
+        self.sim.queue().submit([cmd]);
         self.explicit_after_submit(explicit_read);
         if let Some((m, staging)) = timing {
             let parts = m.report(self.sim.device(), self.sim.queue(), &staging);
