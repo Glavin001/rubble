@@ -242,6 +242,11 @@ struct Params
     uint selfSplit; // gAcc: per node its self-collision two-body hit count this step (0: no two-body vehicle)
     uint clipMem; // gAcc: anti-clip's side memory, per node 4 words (held m0 m1, recorded p0 p1) (0: no anti-clip vehicle)
     uint clipVmax; // gAcc: per vehicle 2 parities its fastest node's speed (float bits) this step
+    // Surface contact (§38, explicit_beams_surface.slang; 0: no vehicle has it).
+    uint surfSnap; // gBeams: per node its force at the surface pass's start
+    uint surfSplit; // gAcc: per node its surface hit count this step
+    uint surfPad0;
+    uint surfPad1;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -4156,6 +4161,8 @@ void contactGroup(uint g, uint lane);
 
 // Raycast wheels (engine_softbody::explicit_drive).
 #include "explicit_beams_drive.slang"
+// Surface contact (jbeam-semantics-spec.md §38).
+#include "explicit_beams_surface.slang"
 
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
@@ -4239,6 +4246,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsUniformLanes = triCount > 0u ? 1u : 0u;
         coupleBegin();
         driveBegin();
+        surfaceBegin(flagsV);
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
@@ -4257,6 +4265,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint selfOn = gsUniformLanes;
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
+    uint surfOn = gsUniformSurf;
 
     for (uint s = 0u, sStop = EB_END(s, gP.steps, 1u); s < sStop; s++)
     {
@@ -4485,6 +4494,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             sync();
             selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parity);
         }
+        surfaceStep(v, lane, surfOn, parity);
 #ifdef EB_AERO
         // Slide nodes, after this step's beams and self-collision, a lane each.
         if ((flagsV & FLAG_SLIDES) != 0u)
@@ -7095,11 +7105,13 @@ void contactGroup(uint g, uint lane)
         gsUniformLanes = G.y;
         coupleBegin();
         driveBegin();
+        surfaceBeginMembers(off, G.y);
     }
     sync();
     uint k = gsUniformLanes;
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
+    uint surfOn = gsUniformSurf;
     sync();
     // Members in vehicle order (a rank sort), their run prefixes and member
     // indices.
@@ -7136,6 +7148,12 @@ void contactGroup(uint g, uint lane)
         else
         {
             for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
+        }
+        if (surfOn != 0u)
+        {
+            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+                surfaceStep(vvMember(off, m), lane, surfOn, (stepBase + s) & 1u);
+            sync();
         }
 #ifdef EB_ABLATE
         if ((gP.ablate & 512u) != 0u) {} else

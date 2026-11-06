@@ -711,6 +711,14 @@ impl ExplicitBeams {
             ));
         }
         for s in &self.shapes {
+            // An unturned box is an axis-aligned box slot on the GPU (lo, hi only).
+            if let Some(b) = s.as_aabb() {
+                let c = (b.lo + b.hi) * 0.5;
+                let half = (b.hi - b.lo) * 0.5;
+                let axes = [Vec3::X, Vec3::Y, Vec3::Z];
+                out.push((SurfaceShape::Box { c, axes, half }, b.lo, b.hi));
+                continue;
+            }
             let bd = s.bounds();
             out.push((SurfaceShape::from_static(s), bd.lo, bd.hi));
         }
