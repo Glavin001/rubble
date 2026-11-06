@@ -696,6 +696,9 @@ pub struct SoftCoupler {
     /// (`breakGroupType` 1).
     pub break_group: u32,
     pub break_group_passive: bool,
+    /// Further break groups (0 = none; a node coupler whose nodes name several,
+    /// `jbeam-semantics-spec.md` §7.1), with `break_group_passive`'s type.
+    pub extra_break_groups: [u32; 2],
 }
 
 impl Default for SoftCoupler {
@@ -706,6 +709,7 @@ impl Default for SoftCoupler {
             strength: f32::INFINITY,
             break_group: 0,
             break_group_passive: false,
+            extra_break_groups: [0, 0],
         }
     }
 }

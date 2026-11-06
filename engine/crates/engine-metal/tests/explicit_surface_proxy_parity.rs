@@ -39,6 +39,7 @@ fn sedan(speed: f32, surface: bool) -> ExplicitBeams {
         drag: false,
         turbulence: false,
         triangle_throttle: true,
+        centred_damping: false,
     };
     let mut sim = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
     let b = |s: &ExplicitBeams| {

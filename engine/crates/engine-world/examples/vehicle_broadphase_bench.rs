@@ -36,6 +36,7 @@ fn sedan(at: Vec3, speed: f32) -> ExplicitBeams {
         drag: false,
         turbulence: false,
         triangle_throttle: true,
+        centred_damping: false,
     };
     let mut sim = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
     let b = |s: &ExplicitBeams| s.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));

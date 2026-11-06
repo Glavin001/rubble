@@ -36,6 +36,7 @@ fn car(name: &str) -> ExplicitBeams {
         drag: false,
         turbulence: false,
         triangle_throttle: true,
+        centred_damping: false,
     };
     let text = match name {
         "sedan1" => {

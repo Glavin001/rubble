@@ -23,6 +23,7 @@ pub fn exact() -> ExplicitBeamsSettings {
         drag: false,
         turbulence: false,
         triangle_throttle: true,
+        centred_damping: false,
     }
 }
 

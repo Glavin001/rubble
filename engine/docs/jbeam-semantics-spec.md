@@ -102,6 +102,23 @@ Tt ← Tt·L/L_old in tension); a stretched beam's strength drops by k × its pl
 elongation. `deformLimitStress` [B] "caps the growth of beamDeform as the beam
 deforms": the hardened thresholds never pass max(cap, their current value).
 
+**Yield follows the elastic force only (2026-11-06).** The yield test reads the
+whole force F = −k·e − D(u), damping included, and moves the rest length by
+δ = e ± (T/k)(1 − p). When damping alone carries |F| past T while the spring's own
+force is below it, δ had the wrong sign: in compression the rest length grew to
+ℓ + T/k (a spring storing T²/2k the step had not been given). On the Gavril Vertex's
+engine mounts (k 100 N/m, deform about 2 kN) that put 20 kJ in each of two beams in
+one step at the 56 km/h wall: the world ledger rose 37.6 kJ. **Fix:** a beam yields
+only when δ moves its rest length toward its current length (δ < 0 in compression,
+δ > 0 in tension), so plastic flow never stores energy; the same δ, gated (CPU
+`jbeam_force_filtered`, `jbeam_yield`; kernel `jbeamUpdate`, `jbeamExtUpdate`), bit for
+bit on the GPU. Every yield whose δ had the right sign is unchanged. The RoR profile's
+`Plain` rule is RoR's and unchanged. Measured: the Vertex's wall ledger rise
+37.6 kJ → 0.03 kJ (`jbeam_accept ledger=1`); `tension_yield_gpu` now judges each
+beam's largest yield over the run (a beam flung apart yields in tension, then, its
+Tc being low, back in compression on the rebound, which it no longer did by damping
+alone).
+
 **Deform limits** [B], [W]. `deformLimit` d limits "how far the beam can deform in
 compression, as a fraction of original length"; `deformLimitExpansion` dₑ the same in
 expansion (default: `deformLimit`). **Choice (ambiguous):** the limit is on the
@@ -250,6 +267,45 @@ F_a = −k·(x_a − x_b) − c·(v_a − v_b), with k = 0.16·μ/h² and c = �
 reduced mass): ω·h = 0.4 and a damping ratio of 0.5, as stiff as the fixed step allows
 with margin. It breaks when |F| > strength. The BX's doors, bonnet and boot are held
 by five such latches; without them the boot lid rattled on its supports.
+
+### 7.1 Node couplers (`couplerTag` → `tag`, 2026-11-06) [C]
+
+BeamNG's documented coupler system: a *coupler node* (`couplerTag` t) couples to a
+*tag node* (`tag` t). "Active" nodes move toward each other and merge; a coupler node
+"connects to one tag node at a time", and a tag node to one coupler node.
+`couplerStartRadius` "also sets the coupler to Active after spawn, so nodes in range
+connect immediately"; `couplerRadius` alone needs the coupler toggle (a driver
+input). `couplerStrength` (N, default FLT_MAX): "if the two nodes have different
+values, the lower one applies". `breakGroup` / `breakGroupType` are common node
+arguments: the connection breaks when the group breaks, and a type-0 coupler breaking
+breaks the group. `couplerLock` and `couplerWeld` only protect a coupler from the
+toggle (no physics). `couplerLockRadius` (default 0.025 m) is where connected nodes
+"are treated as one and snap together"; `couplerLatchSpeed` (default 0.3 m/s) the
+approach speed while Active. This is how BeamNG content latches doors, bonnets, boot
+lids, soft tops (the CCF, the Gavril Vertex and the ETK K-series use it; their
+`couplerNodes` controller tables carry no `couplingStartRadius`).
+
+* **Pairing (Choice for order):** coupler nodes with `couplerStartRadius` > 0 in node
+  order, each to the nearest free tag node of its tag within that radius (lowest
+  index on a tie). Others: none coupled (warnings count them: no start radius, no
+  free tag node).
+* **The coupling:** §7's zero-length spring–damper (the nodes "considered one"),
+  the same `JbeamCoupler` record, strength the lower of the two nodes'. A pair an
+  advanced controller already coupled stays one coupling (the lower strength).
+* **Break groups:** the coupler node's `breakGroup` (a name or a table) then the tag
+  node's, at most three (§17), of the coupler node's `breakGroupType` (the tag
+  node's when the coupler node names none). A coupler in more than one group gets an
+  extension record (`EXT_GROUPS`, §17) and its own breaks set its groups off by §17's
+  pending rule; with one group, as §7.
+* **Latching approach not simulated:** every pair in the three cars spawns at 0 m
+  (within `couplerLockRadius`); a pair farther apart is coupled at spawn with a
+  warning naming the largest gap.
+* **Effect:** CCF `f4_sport_M` 4 node couplers (+2 advanced), Vertex 7, ETK `kr6` 7,
+  the hood latches passive in both hinge groups.
+* Tests: `explicit_jbeam.rs` `node_couplers_couple_at_spawn_and_break_by_strength_and_group`
+  (`jbeam_fixture::NODE_COUPLERS`); GPU `explicit_jbeam_ext_gpu.rs`
+  `node_couplers_step_bit_for_bit` (800 steps bit for bit through both kinds of
+  break). Kernel: `jcouplerUpdate`, and a `KIND_JCOUPLER` arm in `jbeamExtUpdate`.
 
 ## 8. Break groups [B], [T], [C], [TB]
 
@@ -989,6 +1045,10 @@ an arm).
   it to about 1 J. **Open**; the test checks the exact bounds (no energy above the
   2 cm drop's, never off its flat). Coast-down C_rr is unchanged (0.052 / 0.071).
 * The `.truck` path still drops LBEAMs (RoR has none).
+* **The third node in the row's options** (2026-11-06): [L]'s examples write it
+  `["a", "b", {"id3:": "c"}]`, with the header's node-column colon. Inline option
+  keys now drop a trailing `:` (the same field as the header's). Before, the
+  boathauler trailer's 20 suspension LBEAMs were skipped as "LBEAM without id3".
 
 ## 25. Pressure wheels (JBeam mode, opt-in) [WH]
 
@@ -1218,6 +1278,155 @@ centre of mass): 965 kJ at impact, 420 kJ at 0.5 s, 374 kJ at 1.0 s, 367 kJ at
 1.5 s: falling monotonically, so no energy appears; the rebound is the content's
 stiffness, with no plastic forks. Whether that is plausible for a forklift is
 open.
+
+### 29.1 Community cars: CCF, Gavril Vertex, ETK K-series (2026-11-06)
+
+Three full community cars with flexbodies (B3), local only (`RUBBLE_JBEAM_COMMUNITY`,
+the folder holding the mods; never committed): the 2020 Hirochi CCF (`thw_ccf2`,
+`f4_sport_M.pc`), the Gavril Vertex NA2 (`innocent_gavril_vertex`), the 1994 ETK
+K-series (`etkk_lucasbe`, `kr6.pc`). Their tyres, brake pads and bulbs are BeamNG's
+shared `common` parts, not local: **wheel, brake and bulb slots are ignored**, and the
+cars run on Rubble's raycast wheels (`JbeamWheels::Raycast`), or on their hubs
+(pressure wheels with `hasTire` false) for the crash scenes. Census: no unsupported
+physics feature (couplers §7.1 were the last); out of scope: the powertrain and
+hydro inputs (§31).
+
+`jbeam_accept` (CPU, raycast wheels, drag off), rest 4 s then a rigid wall at 56 km/h
+for 1.5 s:
+
+| car | nodes / beams | at rest 4 s | wall: broken / bent, deform groups, KE left (of the impact's) |
+|---|---|---|---|
+| CCF | 635 / 4,101 | 0 broken, 0 bent, KE 0.1 J, 0.13 m/s | 144 / 493, 11 of 33, 5.8 kJ (177 kJ) |
+| Vertex | 519 / 3,407 | 0, 0, 0.0 J | 26 / 472, 13 of 41, 5.8 kJ (160 kJ) |
+| ETK | 467 / 2,873 | 0, 0, 0.5 J, 0.15 m/s | 2 / 359, 6 of 18, 7.1 kJ (172 kJ) |
+
+The CCF tears its front fascia off (its bumper break groups), and a piece lands well
+to the side in the browser crash lab: **open** whether that is the content's light
+fascia or too much energy in the tear.
+
+**Browser (GPU) against the CPU reference** (2026-11-06, JBeam mode on raycast wheels
+both; `community-check.mjs` against `jbeam_accept wheels=raycast`), the wall at
+56 km/h after 1.5 s, broken / bent: ETK 2 / 369 against 2 / 359, CCF 142 / 494
+against 144 / 493, Vertex 26 / 466 against 26 / 472. The lab's impact detection fires
+at 570 ms (the run-up), not before. A GPU ETK that sheds fragments and ends as a heap
+was the `.truck` path's (before the JBeam-mode default).
+
+**Wheels coming off after the wall (2026-11-06): the visual, not the physics.** The
+ETK breaks two beams at 56 km/h (a bounded transmission-to-differential beam and the
+bonnet latch), the SUV 44 (headlights, its turbo intake); no hub, suspension or
+break-group beam. Its hub nodes stay within 3 cm of their place against the centre
+of mass. The wheels drawn away from the car were the wheel meshes placed at their
+`.dae` model origin, fixed by moving each wheel piece onto its wheel
+(`flexmesh`, fd87ec32 on).
+
+**Through the `.truck` export the same content does not rest.** The ETK on raycast
+wheels through `desc_to_truck` (RoR's rules): 11 broken, 99 bent and a node at
+9.8 m/s within 1 s (JBeam mode: 0, 0, 0.15 m/s). That is what tore the browser drive
+yard's parked ETKs and sent cars past their contact frame bounds; the page now runs
+JBeam content in JBeam mode by default (`?jbeamMode=truck` opts back).
+
+**The full-size SUV and the boathauler trailer still do not rest (open, content past
+the step's limit).** On raycast wheels and on their hubs alike:
+* `fsw_fullsizesuv` (`mid-sport.pc`): nodes at 5–7 m/s for good, 6 beams bent at
+  spawn. Its rear axle node `rx2l` (4.7 kg) carries eight 9.4 MN/m beams to the
+  frame and an 18.8 MN/m axle beam: a Nyquist-rate oscillation (the force flips sign
+  every step and grows about 5 % a step from 50 ms). The spring modes' power
+  iteration gives ω·h = 2.07 (node `b1rr`), past the explicit step's limit of 2.
+* `boathauler` (`gooseneck.pc`): its leaf-spring axle nodes (`x35*`, `x45*`, 6.2 kg,
+  about 45 MN/m of plain beams each, plus the LBEAMs of §24) oscillate at the Nyquist
+  rate at 20 m/s (position ±5 mm), KE 23 kJ steady; the plain springs alone give
+  ω·h = 1.45, the LBEAMs' arm terms take it past 2.
+Both run in BeamNG at the same 2 kHz, so its integrator or node handling differs from
+the explicit solver's in a way its documentation does not give. Not fixed: every rule
+that would rest them (mass scaling, softening the springs, an implicit pass on the
+stiff subgraph) changes the content's physics, which needs the user's decision
+(AGENTS.md).
+
+*Not the missing wheel mass (2026-11-06).* The hypothesis: BeamNG's shared wheel,
+tyre, brake and hub parts (not local) add mass the hub and suspension nodes lack. The
+raycast spawn already adds each wheel's mass (20 kg) to its hub nodes, and the slots
+the SUV and trailer miss are brake pads and bulbs only (no nodes). Measured
+(`jbeam_accept`, raycast wheels, 2 s at rest; measurement options):
+* **SUV.** 30 kg more per wheel on its hub nodes (`hubmass=30`): 6.8 m/s, KE 241 J
+  (without 6.2 m/s, 207 J). The oscillating node `rx2l` is not a hub node: it is the
+  rear trackbar's frame mount (4.7 kg, `nodeWeight` 4.7 in the file), tied to both
+  frame rails by eight 9.4 MN/m beams and to the axle by the 18.8 MN/m trackbar; its
+  lateral mode is at ω·h ≈ 2.0 by hand ((4·9.4 MN/m)/4.7 kg + 18.8 MN/m/2.35 kg).
+  Without the torsion bars, the couplers or the damping filters it still runs
+  (5.8 / 6.7 / 15.7 m/s).
+* **Trailer.** Its axle torsion bars: without them (`droptorsion=` the ten bars
+  `x15·`/`x14r`…, spring 810,100 N·m/rad, two per axle about the axle tube and about
+  its top beam) it rests: 0.27 m/s, KE 3.3 J (with them 20.7 m/s, 23 kJ). Without
+  the LBEAMs, the frame's torsion bars or the leaf bars about `x14`…: still unstable.
+  Its axle tube's twist mode from these bars alone: the four 6.2 kg corner nodes 0.13 m
+  off the twist axis, I ≈ 0.22 kg·m² per end, ω·h ≈ 1.9 with both bars; with the tube's
+  plain beams past 2. The node weights are the file's (6.2 kg inline on each corner;
+  the leaf nodes 3 kg from a modifier row, which the importer carries). BeamNG's
+  torsion bar page gives the roles (levers 1 and 4, axis 2–3, Nm/rad) and warns that
+  levers far from 90° to the axis are "less stable"; here they are at 90°. How BeamNG
+  applies the torque to the four nodes is not documented (§9's dihedral gradient is a
+  Choice): **open**, the next suspect.
+
+*The torsion law and the damped limit (2026-11-06).*
+* **§9's law is the exact one.** τ·∂φ/∂xᵢ (the Blondel–Karplus gradient) puts τ/r⊥
+  on each lever end along its plane's normal (r⊥ its distance from the axis line,
+  not the arm's length), and the axis nodes' reactions leave no net force and no net
+  torque; it is −∇ of ½k(φ − φ₀)², so momentum, angular momentum and energy are
+  conserved (`explicit_jbeam.rs` `torsion_forces_are_the_exact_lever_law`, and
+  `dihedral_gradient_matches_the_f64_reference`'s central differences). No lever-arm
+  error, no double application. Nothing to fix.
+* **With it the trailer's highest mode is past the limit.** The spring modes' power
+  iteration with the torsion elements' k·g·gᵀ (`jbeam_accept modes=1 torsion=1`):
+  ω·h = 2.013 at the axle corner `x34l` (6.2 kg); the plain beams alone 1.448; without
+  the ten axle bars 1.715. The 810,100 N·m/rad bars on 0.267 m levers are
+  11.4 MN/m at each lever end.
+* **SUV, with damping.** Symplectic Euler with a dashpot is stable to
+  ω·h ≤ 2(√(1 + ζ²) − ζ). The beams on `rx2l`: to the frame 9.4 MN/m, 141 N·s/m,
+  μ ≈ 3.4 kg, ζ = c/(2√(kμ)) = 0.012 (limit 1.98); the trackbar 18.8 MN/m,
+  940 N·s/m, μ = 2.35 kg, ζ = 0.071 (limit 1.86). Its lateral mode at ≈ 2.0 is past
+  both; the spring modes' iteration gives 2.07 for the whole car (node `b1rr`, its
+  supports at full k). The damping is the documented one: −c·u with u the extension
+  rate from the step's start velocities (the force pass reads the velocities before
+  the node pass updates them), the trackbar's through its 500 Hz `dampCutoffHz`
+  filter (§6; without the filters the SUV breaks 12 beams at rest), and the
+  stiff-damper rule (§28) does not apply (c·h/μ = 0.2). No deviation found.
+* So both vehicles are past the 0.5 ms explicit step's stability limit as written,
+  with the exact laws. BeamNG runs them at 2 kHz; how it does (its integrator, or a
+  stabilisation it does not document) is not public. Left as is (content physics
+  unchanged); the options are the user's: a smaller step for such vehicles, or an
+  implicit treatment of their stiffest elements.
+* **Resolved (2026-11-06, §39, the BeamNG profile's default):** the explicit damping's half-step lag
+  lowers the limit below 2 (to 1.87–1.98 at their ζ); centred damping
+  (`centred_damping`) rests every SUV configuration, the trailer's axles and the
+  CCF's broken ones at the same 2 kHz step, content physics unchanged.
+
+### 29.2 Parts a configuration names that are not local (2026-11-06)
+
+A community mod's configurations name parts from BeamNG's stock content (tyres,
+wheels, brake pads, bulbs, occupants) and from other mods (a "godmode" suspension),
+none of them local. **Choice** (BeamNG documents none; the data's own slots give the
+fallback):
+* **A missing part takes its slot's default** when that is local (the slot row's
+  `default`), with a warning (`the local … stands in`).
+* **A wheel slot** (`wheel_*`) whose part and default are both missing takes the
+  first local part by name of its slot type, else of its family (`wheel_F_6` →
+  `wheel_F_5`): the wheel part carries the hub nodes (`fw1rr`, `fw1r`, …) the
+  suspension's beams and the `pressureWheels` rows use, so without it a car has no
+  hubs and no wheels. Its rim and hub geometry is the stand-in's; its tyre (BeamNG's
+  shared tyres) stays missing, so a raycast wheel's radius is the row's own or its
+  hub's.
+* Else the slot stays empty (warning), as before.
+* **No wheels at all** (a boat; a bare body with its suspension slots empty, CCF
+  `skull`): raycast spawns give no drive and a warning, never an error
+  (`from_desc_jbeam_raycast`); the page shows a notice and the picker sends the
+  vehicle to the 15 m drop.
+* Beams the file gives `beamStrength` 0 (e.g. the Vertex's hood-open switch beams
+  in `beater`, `vanilla`) break at once by design; the sweep lists them apart.
+
+Sweep of every configuration (`community_sweep`, CPU, JBeam mode on raycast wheels,
+1 s at rest): see the report of 2026-11-06 (scratchpad); the classes left are content
+at the explicit step's edge (§29.1: the SUV, the trailer, the CCF's `country` and
+`f6_offroadster` subframes, its `f4_cup` window nets).
 
 ## 30. GPU layout of Part II and verification
 
@@ -1955,6 +2164,172 @@ ends 4.6 cm behind the floor, the 90 m/s self-collision node 1.1 cm behind its
 triangle: the step is capped by the hit's budget; RoR's push threw them 14 and 42
 cm clear).
 
+### 37.1 At rest: the ground, the residual stop, friction's slip (2026-11-06)
+
+sedan1 crushed at 51 km/h and at rest to 12 s still moved: kinetic energy about
+15 J, nodes at 0.2–4 m/s, 800 J a second sloshing between self-contact and the
+position steps. Three causes, three changes (BeamNG profile only; the RoR profile
+is unchanged, bit for bit).
+
+* **Ground, box and shape contact are dissipative too.** The node pass's static
+  contacts take §37's rule (`ContactSurface::dissipative_if`, GPU `surfaceV` with
+  `FLAG_DISSIPATIVE`). RoR's 0.2·p/h push on the ground did +8 to +10 J per tenth on
+  wheel nodes at rest. Its penetration becomes a position step up, the node's own
+  (`ExplicitBeams::ground_lift`, GPU `groundContact` and `takeSteps`), capped by
+  the contact's budget as every §37 step is; boxes and shapes have no depth term
+  (p = 0) and get none. Ledger: `EnergyLedger::w_ground_shift`.
+* **The residual stop.** A two-body hit's stop uses the split reduced mass, so a hit
+  whose nodes are in other hits stops only m_split·inv of its pair's approach
+  alone. The rest, (vn + h·a)(1 − m_split·inv), stayed as a ghost speed that the
+  steps cancelled every step. After the hits, one residual pass
+  (`residual_self_pass`; GPU `selfResidualForces`, `selfResidualMerge`, and
+  `selfSerialResidual` past the hit list's room) stops what is left. Each hit's pair,
+  at the forces now (the first pass's contact sums included), approaching
+  (vn < 0) and still approaching over the step (a·h + vn < 0), takes
+  r = −(a·m + vn·m/h) > 0 along its normal. (Separating pairs have no ghost
+  speed. Including them, the residual over-stopped where hits share nodes:
+  +0.4 J of self-contact work in a tenth of the 48 km/h wall.) m is the first pass's reduced mass (its counts).
+  No friction and no step. All the forces are found before any is added, as fixed
+  point, so the pass is order free and momentum-exact. **Choices (measured, the
+  wall sweep's self-contact work over any tenth):**
+  * one pass: at most −0.6 J;
+  * two or four passes, with the first pass's counts or with the active hits'
+    counts only: up to +0.25 to +2 J (Jacobi over-stops where hits share nodes
+    with conflicting normals);
+  * the node-level removal of the speed along a node's own step (tried first):
+    settles, but breaks momentum (the struck pressure-wheel car is not pushed).
+  * Vehicle contact's residual pass exists on the CPU as a measurement
+    (`VEHICLE_RESIDUAL=1`). It is not on the GPU yet, so it is off.
+* **Friction never reverses the slip.** At zero work a sliding pair could swap its
+  slip vt for −vt every step, for good (a node held ±4 m/s and 5 J that way).
+  `no_positive_work` now also caps the tangential scale s so that the slip after the
+  step, along vt, stays ≥ 0.
+* **Self contact's position-step shares are each node's own inverse mass.** The step is
+  still P = δ·m with the split m, shared as the hit's force is, w·P over each
+  node's own mass. Over the sub-body's k/m, a node of k hits moved k times its
+  share, and the steps stored more than their budget. Vehicle contact keeps k/m
+  (**Choice**, measured): own masses there let the 80 km/h T-bone leak 15–17 of
+  1,026 striker nodes at offsets 0 and −0.03 m; k/m leaked 6–7.
+
+Measured (CPU, sedan1, medium, at rest after the wall, the 8th–12th second):
+
+| | self-contact work | relative kinetic energy | relative rms |
+|---|---|---|---|
+| before (§37 as committed) | about 800 J/s | about 12 J | 130 mm/s |
+| now, 48 / 51 / 54 / 57 km/h | 25–50 J/s | 0.5–1.7 J | 28–52 mm/s |
+
+Relative means relative to the body's rigid motion, wheels left out.
+
+The sweep's ledgers over any tenth now have their contacts and steps between
+−0.4 and −4 J beyond the 2 % allowance (they were up to +0.09 J).
+
+**Floor (open).** The motion left is a tangle of two or three nodes of the crushed
+bonnet and body: mutual hits whose normals conflict, so no single pass stops them.
+Over a second at rest the beams do +48 J against −50 J of contact, while the steps'
+first-order estimate shows +7 J. The quantisation floor (single-precision positions
+at the car's coordinates, ulp/h; contact steps of 2⁻²⁴ m) is about 1 mm/s, about
+60× below.
+
+`showcase_car.rs` `crushed_car_settles` checks it (51 km/h, the solver stepped
+alone): kinetic energy per second monotone from 3 s (1,233 J to 5.3 J in the
+12th second); relative rms below 80 mm/s (56) and every body node below 2.5 m/s
+(1.49) over the 12th second. These are guards on the floor, not targets. The car has no brake to set (beam tyres; `brakeTorque` is not
+simulated outside raycast drive). Probes: `settle_probe`, `contact_work_probe`
+(`--ignored`).
+
+**Verified (2026-11-06, after merging showcase-main).**
+* wgpu: `explicit_contact_gpu`, `explicit_beams_bitwise`, `explicit_jbeam_gpu`,
+  `explicit_jbeam_ext_gpu`, `explicit_drive_gpu`, `explicit_loop_cap`.
+* Metal: `vehicle_parity`, `explicit_parity`, `explicit_drive_parity`.
+* All 23 WGSL modules compile in Chrome.
+* world-wasm `explicit_scenes`.
+* CPU: `energy_ledger`; `crushed_car_settles`; T-bone leaked 7 / 5 / 6 / 2 / 4 of
+  1,026 at the five offsets (≤ 0.7 %).
+* n's 32 ledgers: no rise between tenths over 0.04 J. Its bands (max crush,
+  b1, t_m) fail, as before: the car's calibration.
+
+**The work guard (2026-11-06, later).** Tracing the failing tenth (56 km/h, drag
+off, 1.3–1.6 s; `contact_parts_probe`) split self-contact work by phase:
+first-pass normal −2.3 J, friction **+1.4 to +1.7 J**, residual −0.3 J.
+
+The cause is friction in the bonnet tangle. Each hit's friction cap
+(`no_positive_work`) judges it at its own predicted velocity with split masses,
+and hits sharing nodes then realise other velocities. The T-bone showed the same
+for vehicle contact's normal force: +32 J in one tenth when the cars met again
+at 0.6 s.
+
+**Rule** (`friction_guard_pass`, `guard_vehicle_pass`): after the residual pass,
+each staged hit's force t (its first-pass force with its residual) is judged at
+the pair's realised mean velocity over the step. That is the forces now (every
+staged sum of the step or turn) on the nodes' own masses. Its work is
+W(s) = s·A + s²·B, with
+* A = t·(2v + h·a′), where a′ is the pair's relative acceleration without t;
+* B = h·|t|²·inv.
+
+Where W(1) > 0 the hit takes −(1 − s)·t, with s = −A/B (0 if A ≥ 0).
+
+A force that does positive work moves the pair the way it pushes, so scaling its
+normal part lets nothing in. Every guard is found from the same sums (order
+free, momentum-exact).
+
+**Quantisation-neutral sums.** The first pass and the residual add to the
+accumulators as a staging the later passes read. At the end each hit's total
+(first pass, plus residual, plus guard) replaces its staged adds: the
+accumulators as they were, plus one add per share of the total. The fixed-point
+rounding is the first pass's alone.
+
+**Vehicle contact's residual pass is on.** It uses the same staging, first-pass
+counts and approaching pairs only. The T-bone leaked 8 / 9 / 5 / 2 / 2 of 1,026
+with it off and 3 / 4 / 6 / 0 / 2 with it on; the contact-work invariant holds
+either way.
+
+Measured (CPU, after the change):
+* `contacts_do_no_positive_work` passes (all 26 runs, the 12 s rest, the T-bone).
+* `fixed_contact_quantisation_does_no_work` passes (largest run +0.0016 J).
+* `crushed_car_settles`: relative rms 36 mm/s, fastest 0.85 m/s, kinetic energy
+  per second 213 → 3.4 J from the 3rd to the 12th second. A crushed part settling
+  lifted one second (13.7 → 18.7 J in the 7th), so the check is per two seconds.
+
+**GPU.** Per node, 8 words of gAcc at `resAt` (selfSplit + 4·totalNodes): the
+residual's staged sums B and the totals' deltas D, fix(total share) −
+fix(first-pass share), merged into the accumulators. That gives the CPU's restore
+and re-add, integer for integer.
+* **Self contact.** `selfResidualPhase` (residual, guard and totals, merge) after
+  `selfApply`'s rounds; `selfSerialResidual` past the hit list's room, which finds
+  the hits again and recomputes the first pass without its position step.
+* **Vehicle contact.** `vvResidualPhase` per owner after its listed hits:
+  `vvPass` in phase S and at the end; `vvPassSmall` after each level. A turn whose
+  list overflowed (more than 2 × points hits) applies its hits at once, out of
+  the specification's order as before, and stages none.
+
+Verified:
+* wgpu: `explicit_contact_gpu`, including `anti_clip_steps_like_the_cpu`
+  bit-exact with dissipative contact in a small group and owner by owner;
+  `explicit_beams_bitwise`, `explicit_jbeam_gpu`, `explicit_jbeam_ext_gpu`,
+  `explicit_drive_gpu`, `explicit_loop_cap`.
+* Metal: `vehicle_parity`, `explicit_parity`, `explicit_drive_parity`.
+
+**Stated floor.** Single-precision positions move by whole ulps (about 1 mm/s
+at the car's farthest coordinate) and contact steps by 2⁻²⁴ m (0.12 mm/s). The
+< 1 mm/s target is withdrawn; the tangle keeps about 35× the floor.
+
+The bounds below are superseded.
+
+**Open: `fixed_contact_quantisation_does_no_work`.** The residual pass's extra
+contact sums put 48 km/h with drag at +0.0102 J over the run, against the 0.01 J
+bound (worst case 5.9 J); the others are within ±0.015 J.
+
+**Open: the per-tenth contact-work bound.** `contacts_do_no_positive_work` fails
+on a run or two of its 26, which ones depending on the build. Before the merge it
+was 58 and 59 km/h with drag; after it, 56 km/h without drag (+0.38 J). At 58 km/h,
+one tenth at rest (about 1.5 s) had contacts plus steps +0.60 J beyond the 2 %
+allowance: the tangle's
+steps store 2–3 J in a tenth whose contact dissipates 2 J. Over the run after the
+crash, the same sum is −19 J. Every other run passes, as do the 12 s rest and the
+T-bone. Tried without a fix:
+* the step's cap scaled by m_split·inv;
+* no residual pass (54 km/h, drag off: +29 J).
+
 ## 38. Surface contact: collision triangles against rigid shapes (opt-in, 2026-11-06)
 
 **Problem.** Static and rigid contact was node only (a node strictly inside a shape is
@@ -2215,3 +2590,291 @@ Findings that shape it:
   replacing the per-vehicle box slots as the surface pass's slot list. The
   `large-maps.md` persistent broadphase (statics and sleepers not re-inserted) is a
   prerequisite for the flat-cost benchmark and is not on this branch.
+
+## 39. Centred damping (2026-11-06)
+
+`ExplicitBeamsSettings::centred_damping`: **on in the BeamNG profile** (`beamng()`,
+since 2026-11-06), off in the Rigs of Rods profile, which stays bit for bit. A
+vehicle turns it back alone (`s.settings.centred_damping = false`); the crash lab
+and the showcase page take `?centredDamping=0/1` (ExplicitSim's `centredDamping`,
+BeamNG profile vehicles only). Research branch `research/explicit-stability`.
+
+**Why.** §29.1 left the full-size SUV, the boathauler trailer and the CCF's
+`country`, `f4_cup` and `f6_offroadster` configurations vibrating or breaking at
+rest: content BeamNG runs at the same 2 kHz. The step's own limit is not the
+whole story: with a dashpot, symplectic Euler (velocity first, then position,
+the damping read from the step's start velocity) is stable only to
+ω·h ≤ 2(√(1 + ζ²) − ζ), so damping *lowers* the limit (1.94 at ζ = 0.03, 1.87 at
+0.07). The damping reads v_{n−½}, half a step behind the position it acts at
+(the θ/2 lag of §6), and near the Nyquist rate that lag turns the dashpot into
+an anti-dashpot. BeamNG's staff say its content sits at that edge: "Most of the
+vehicles have the spring values very close to the max value for a given mass"
+(Goosah, BeamNG team, forum 2018-07-25 [F]); the census measures BeamNG parts
+at 1.1–4× a conservative per-node bound with ζ 0.03–0.05
+(`beamng-authoring-census.md`). Modes between 1.87 and 2 then run in an engine
+whose damping is centred in time and diverge in ours.
+
+**What BeamNG publishes (searched 2026-11-06; nothing on its integrator).**
+* The beam law is Hooke's law with a dashpot, F = −kx − cẋ, run "up to 2KHz" for
+  stability (Gambi, BeamNG, Panichella, ICSE-SEIP [G]). The BeamNG.tech
+  technical paper [BT] says nothing on the integrator.
+* Instability is "a beamSpring and/or beamDamp values that are too high for the
+  nodeWeight", fixed by "lowering beamSpring/Damp or raising nodeWeight"; the
+  worst case shows an "instability detected" message [CI]. So BeamNG has a
+  stability limit of its own and no automatic stabilisation, mass scaling or
+  minimum node weight is documented ([N]: default `nodeWeight` 25 kg as of
+  0.40.2, no minimum). Too much beamDamp also explodes ([I], [P]): its damping is
+  explicit with a damping limit, as the plain law here.
+* `dampCutoffHz` exists to "run higher damping before instability" (§6, [PN]).
+* No public source gives the time level of the damping velocity, a
+  `beamDampVelocitySplit` limit beyond §22, or a per-node spring/mass limit.
+* [N] documents one mass rule the importer drops: a fuel tank's mass is spread
+  over the nodes of its `fuel` engine group. The SUV's tank nodes are not the
+  ones that vibrate (`rx2l`), so it is not the cause; implemented since (§40).
+
+So the law is documented and ours matches it (§29.1); the time level of the
+velocity in the dashpot is not. Centred damping is the standard explicit answer
+from molecular dynamics with velocity-dependent forces: the dashpot reads a
+velocity predicted half a step ahead, v + ½·h·F/m (Groot and Warren's modified
+velocity Verlet for dissipative particle dynamics, λ = ½ [GW]).
+
+**Rule.** After the node update (each node v₁ = v₀ + h·F/m, x₁ = x₀ + h·v₁), with
+Δvᵢ = v₁ − v₀ every JBeam record whose last beam pass applied damping of slope s
+(∂(damping force)/∂u at that pass's rate, the `dampCutoffHz` gain included: c, the
+fast rate past the velocity split, the limit damping in the bound zone, ×0.1 for a
+rope in compression, 0 for a support in tension or a broken record; a torsion
+bar's c, a coupler's c) adds −½·s·Δu to its ends along its current direction (Δu
+= (Δv_a − Δv_b)·d̂; a torsion bar −½·s·Δφ̇ through its dihedral gradient, a
+coupler −½·s·(Δv_a − Δv_b)), equal and opposite. Each node sums these in its
+incidence order and takes v += h·c/m, x += h·(h·c/m). The damping the step applied
+then reads ½(v₀ + v₁): the mean of the step's start and end velocities.
+* Linear in its inputs; momentum is exact (every record's correction sums to zero).
+* Breaks, yield and the filter state are decided by the beam pass as before (at
+  the start velocity); only the motion is corrected.
+* RoR (`.truck`) kinds take no correction.
+* Cost on the CPU: one pass over the records and one over the nodes, +10 % per
+  step on the ETK (237 → 262 µs, 17 configurations) and +13 % on the CCF (289 →
+  327 µs, 26), the minimum of four alternating runs at rest (M3 Max). The
+  dry-pass form of the same rule (two full beam passes) costs about three times
+  that. On the GPU two more phases per step with three barriers (not timed: the
+  GPU is shared). Off, nothing runs and nothing changes.
+
+**One mode** (x″ = −ω²x − (c/m)x′, Ω = ω·h, γ = c·h/m = 2ζΩ; the step map's
+spectral radius, scratchpad `mode1.py`):
+
+| ζ | current: largest stable Ω | damping on the predicted end velocity | backward-Euler damping (local) | **centred** |
+|---|---|---|---|---|
+| 0.01 | 1.980 | 2.021 | 2.020 | 2.000 |
+| 0.03 | 1.941 | 2.070 | 2.061 | 2.004 |
+| 0.07 | 1.865 | 2.213 | 2.145 | 2.023 |
+| 0.15 | 1.722 | 3.333 | 2.322 | 2.148 |
+
+| Ω | current: largest stable γ | predicted end velocity | backward Euler | **centred** |
+|---|---|---|---|---|
+| 0.1 | 1.995 | 1.000 | unbounded | 2.000 |
+| 1.0 | 1.500 | 1.000 | unbounded | 2.000 |
+| 1.9 | 0.195 | 1.000 | unbounded | 1.998 |
+
+Centred damping never lowers the limit below 2 and keeps the plain law's damping
+budget (γ < 2 at every Ω), where the predicted-end-velocity schemes halve it (γ < 1:
+nodes whose beams' summed c·h/m lies between 1 and 2, which run now, would diverge).
+
+**Measured** (CPU, `community_sweep`, JBeam mode on raycast wheels, 1 s at rest;
+clean: no beam broken or bent, fastest node < 1 m/s):
+
+| vehicle | configs | current: clean / marginal / broken | predicted end velocity (dry pass) | centred (dry pass, 2 beam passes) | **centred** |
+|---|---|---|---|---|---|
+| Full-size SUV | 22 | 2 / 20 / 0 | (SUV and trailer: 0 clean, arctic diverges) | 22 / 0 / 0 | 22 / 0 / 0 |
+| Boat trailer | 8 | 0 / 8 / 0 | | 0 / 8 / 0 | 0 / 8 / 0 |
+| Hirochi CCF | 43 | 26 / 9 / 8 | | 39 / 4 / 0 | 39 / 4 / 0 |
+| Gavril Vertex | 106 | 97 / 9 / 0 | | 97 / 9 / 0 | 96 / 10 / 0 |
+| ETK K-series | 17 | 17 / 0 / 0 | | 17 / 0 / 0 | 17 / 0 / 0 |
+| 48 ft yacht | 2 | 2 / 0 / 0 | | 2 / 0 / 0 | 2 / 0 / 0 |
+| **all** | 198 | 144 / 46 / 8 | | 177 / 21 / 0 | 176 / 22 / 0 |
+
+* The SUV: 4.7–20.4 m/s and 5–28 bent beams at rest → 0.19–0.67 m/s, none bent.
+* The trailer: 20.7 m/s, 23 kJ → 0.16–0.28 m/s, 1.5–13 J; its 14 bent beams are
+  a settle of its leaf springs (30 before), not a vibration.
+* The CCF: every broken configuration rests (`country_M` 22.6 m/s and 16 broken
+  → 0.06 m/s; `f4_cup_*` 27 m/s → 0.20; `f6_offroadster_M` 29 m/s, 18 broken →
+  0.07; `f6_tuned_M` 2 broken → 0).
+* The Vertex: no configuration changes class except `offroader` (5 bent → clean)
+  and `hohoho_its_christmas_time` (0.98 → 1.98 m/s, a loose prop at 1 s; KE 4.6 J);
+  `hocus_pocus…` stays at 9.8 m/s both ways (a loose prop).
+* The predicted-end-velocity variant is what "damping applied with the end-of-step
+  velocity" gives explicitly; it fails as the analysis says (the arctic SUV, clean
+  before, diverges).
+
+**Crash scenes** (`vehicle_compare`, CPU, RUBBLE_DAMP_SCHEME=4 against 0): wall56,
+1 s after impact:
+
+| car | rest: KE, fastest node | broken / bent | crush dynamic / residual | peak force | restitution | beam dissipation | energy closure |
+|---|---|---|---|---|---|---|---|
+| ETK kr6 | 0.5 J, 0.148 → 0.0 J, 0.001 m/s | 2 / 338 → 2 / 332 | 489 / 193 → 486 / 188 mm | 712 → 755 kN | 0.35 → 0.37 | 122.9 → 120.9 kJ | 2·10⁻⁵ → −1·10⁻⁵ |
+| CCF f4_sport_M | 0.0 J, 0.131 → 0.001 m/s | 141 / 462 → 142 / 459 | 474 / 6 → 473 / 75 mm | 581 → 581 kN | 0.27 → 0.27 | 152.0 → 152.2 kJ | 1·10⁻⁶ → 0 |
+| Vertex | 0.0 J, 0.001 m/s both | 31 / 438 → 40 / 436 | 479 / 118 → 479 / 117 mm | 542 → 582 kN | 0.22 → 0.20 | 111.0 → 111.8 kJ | −7·10⁻⁶ → −8·10⁻⁶ |
+
+The crash itself is the same within its run-to-run spread (break counts of torn
+fascia are chaotic, §29.1); the residual vibration of the parked cars goes. The CCF's
+residual crush (6 → 75 mm) is its springback (0.94 before): the front settles
+instead of ringing back. The energy ledger closes as before.
+
+**GPU.** `slang/kernels/explicit_beams.slang` (`FLAG_CENTRED`, `centredPhase`,
+`centredBeam`, `centredNode`; the slope in the first incidence entry's `.w`, a
+per-node Δv region at `gP.centredDv`) in the vehicle workgroups, the contact
+groups and the wide passes (the node loops keep each node's Δv; two more passes per
+step, `wide_centred_beams` and `wide_centred_nodes`, only when a vehicle has it).
+Metal (`engine-metal/tests/explicit_centred_damping.rs`) as wgpu: the fixture car
+at rest and the latched box into a wall bit for bit on the frame and the wide
+passes.
+
+GPU cost (`centred_damping_frame_cost`, `RUBBLE_CENTRED_TIMING=256`: 256 fixture
+cars parked apart, M3 Max shared with other work, median 60 fps frame of 240,
+the four configurations interleaved frame by frame):
+
+| path | off | centred | |
+|---|---|---|---|
+| wide passes | 36.9 ms | 42.0 ms | +14 % |
+| vehicle workgroups | 10.3 ms | 12.2 ms | +19 % |
+
+**Where it goes, and what did not cut it (2026-11-06).** The same measurement,
+three rounds of two binaries alternating (each round its own interleaved off/on),
+with kernel variants that skip one part (measurement builds, not kept):
+
+| variant | vehicle workgroups | wide passes |
+|---|---|---|
+| as shipped | +23.0 … +24.9 % | +8.3 … +9.0 % |
+| the records' corrections skipped | +6.9 … +7.5 % | +6.8 … +7.0 % |
+| the nodes' sums skipped | +20.6 … +21.2 % | +4.9 … +5.3 % |
+| both skipped (barriers, Δv) | +2.7 … +3.3 % | +4.8 … +5.0 % |
+
+So on the vehicle workgroups the records' corrections are three quarters of the
+cost, the nodes' sums a sixth; on the wide passes the two extra dispatches are
+half. (The earlier +14 % of the wide passes did not repeat: +8–9 % in every
+later round.) Bit-identical changes tried:
+* the step-start velocity in a register in the node loop (no Δv buffer round
+  trip), the barrier after the nodes' sums dropped (what follows reads a node only
+  after its own barrier), the beam phase's flag read skipped when no vehicle has
+  the flag: kept (simpler, no slower), +23.7 … +24.2 % / +7.2 … +8.0 %: within the
+  noise;
+* each record's correction in its own coalesced entries (no incidence lookups in
+  the records' pass) and the nodes gathering them through their incidence lists:
+  worse, +39 % / +19 %, not kept.
+The rest is the scheme's work itself (one more pass over the records with their
+lengths at the new positions, one over the nodes); a cheaper form would change
+the results.
+
+(The community cars do not take the wide passes: they carry commands or shocks2.) `tests/explicit_centred_damping_gpu.rs`: bit for bit every
+step against the CPU for the pressure-wheel fixture car at rest (4,000 steps) and at
+10 m/s (2,000), the latched box into a wall (1,500 steps, breaks), the break-group
+fixtures pulled apart, the node couplers; opt-in the full-size SUV on its hubs
+(2,000 steps bit for bit, fastest node 0.30 m/s). Off: the existing parity tests
+pass unchanged, and `jbeam_accept` gives the same output as before this change
+(ETK, CCF, SUV, trailer; raycast and pressure wheels).
+
+Sources:
+* [F] BeamNG forum, Goosah (BeamNG team, global moderator), 2018-07-25/26:
+  https://www.beamng.com/goto/post?id=898127
+* [G] A. Gambi, BeamNG GmbH, S. Panichella, soft-body simulation for CPS testing
+  (ICSE-SEIP): https://beamng.tech/research/ (PDF in `inspiration/research-explicit-stability/`)
+* [BT] BeamNG.tech technical paper (2021):
+  https://beamng.tech/blog/2021-06-21-beamng-tech-whitepaper/bng_technical_paper.pdf
+* [P] BeamNG soft-body physics page: https://beamng.com/game/about/physics
+* [GW] R. D. Groot, P. B. Warren, "Dissipative particle dynamics: bridging the gap
+  between atomistic and mesoscopic simulation", J. Chem. Phys. 107, 4423 (1997):
+  the modified velocity Verlet with the dissipative force at a predicted velocity
+  (λ = ½).
+* [CI], [I], [N], [PN] as in the header.
+
+### 39.1 The BeamNG profile's default (2026-11-06)
+
+`beamng()` turns centred damping on; the Rigs of Rods profile is unchanged, bit for
+bit. Re-run with the fuel-tank mass of §40 in both columns (it moves the community
+cars' masses, so "off" here is not §39's "current"):
+
+* **Community sweep** (198 configurations, 1 s at rest): off 141 / 49 / 8 clean /
+  marginal / broken, **on 176 / 22 / 0** (the same classes as §39's centred column;
+  the Vertex's `powerdemonrwd` 1.01 → 0.79 m/s, `taxi_taxi_carrier` 0.96 → 1.00).
+  Re-run on `merge/showcase-main` with the complete energy ledger and the yield fix
+  (feat/jbeam-community 81283d5e) and surface contact r2: off 144 / 46 / 8, **on
+  176 / 22 / 0**.
+* **`vehicle_compare`** (sedan1, ETK kr6 and kc6, CCF, Vertex;
+  `engine/docs/measurements/vehicle-compare.{md,json}` is the new baseline, the old
+  one had sedan1 and the ETKs only). Every reference that moved, off → on:
+
+| car | measure | off | on |
+|---|---|---|---|
+| sedan1 | wall56 bent beams | 974 | 980 |
+| sedan1 | wall56 crush dynamic / residual | 808.5 / 614.5 mm | 809.6 / 630.6 mm |
+| sedan1 | wall56 peak force, restitution, Campbell b1 | 935.7 kN, 0.189, 21.7 | 929.1 kN, 0.188, 21.1 |
+| sedan1 | pole32 crush dynamic / residual | 398.9 / 318.4 mm | 396.2 / 298.5 mm |
+| sedan1 | MDB crush dynamic / residual | 665.1 / 552.3 mm | 656.5 / 562.9 mm |
+| sedan1 | roof peak, door peak | 68.5, 24.1 kN | 67.5, 24.7 kN |
+| ETK kr6 | rest KE, fastest node | 0.5 J, 0.148 m/s | 0.0 J, 0.001 m/s |
+| ETK kr6 | wall56 bent; crush dynamic / residual | 335; 501.0 / 197.5 mm | 337; 497.0 / 193.6 mm |
+| ETK kr6 | wall56 peak, restitution, b1 | 714.5 kN, 0.352, 67.5 | 765.5 kN, 0.362, 68.9 |
+| ETK kr6 | pole32 dynamic / residual | 166.4 / 62.2 mm | 162.9 / 53.9 mm |
+| ETK kr6 | MDB dynamic / residual | 471.0 / 293.5 mm | 467.3 / 228.2 mm |
+| ETK kr6 | roof, door peak | 84.3, 38.5 kN | 84.7, 38.3 kN |
+| ETK kc6 | rest KE, fastest node | 0.5 J, 0.148 m/s | 0.0 J, 0.001 m/s |
+| ETK kc6 | wall56 bent; dynamic / residual | 331; 497.1 / 196.1 mm | 338; 495.4 / 194.5 mm |
+| ETK kc6 | wall56 peak, restitution, b1 | 698.5 kN, 0.338, 68.0 | 760.2 kN, 0.360, 68.5 |
+| ETK kc6 | pole32 dynamic / residual | 103.5 / 57.3 mm | 98.8 / 55.0 mm |
+| ETK kc6 | MDB dynamic / residual | 474.6 / 300.3 mm | 466.6 / 230.8 mm |
+| ETK kc6 | roof, door peak | 133.9, 38.2 kN | 133.4, 86.5 kN |
+| CCF | rest fastest node | 0.062 m/s | 0.001 m/s |
+| CCF | wall56 broken / bent | 140 / 474 | 142 / 476 |
+| CCF | wall56 dynamic / residual | 481.4 / 240.7 mm | 479.5 / 19.9 mm |
+| CCF | wall56 peak, restitution, b1 | 604.0 kN, 0.264, 55.4 | 585.2 kN, 0.276, 669.9 |
+| CCF | pole32 dynamic / residual | 364.0 / 284.7 mm | 364.6 / 286.0 mm |
+| CCF | MDB dynamic / residual | 306.2 / 127.3 mm | 300.6 / 127.2 mm |
+| CCF | roof, door peak | 103.1, 189.1 kN | 109.2, 375.0 kN |
+| Vertex | wall56 broken / bent | 33 / 453 | 45 / 444 |
+| Vertex | wall56 dynamic / residual | 488.9 / 121.7 mm | 488.4 / 124.9 mm |
+| Vertex | wall56 peak, restitution, b1 | 558.0 kN, 0.214, 109.5 | 576.8 kN, 0.201, 106.7 |
+| Vertex | pole32 dynamic / residual | 266.8 / 198.6 mm | 301.1 / 238.7 mm |
+| Vertex | MDB dynamic / residual | 331.5 / 241.5 mm | 323.8 / 234.7 mm |
+| Vertex | roof, door peak | 17.1, 54.6 kN | 16.8, 60.7 kN |
+
+  Readings: the parked cars stop ringing (0.15 → 0.001 m/s); dynamic crush moves
+  by 0–2 % (the Vertex pole 13 %); the residual crushes and the door pulls move
+  where a path branches. The ETK kc6's and the CCF's door pulls follow the off
+  curves to the hinges (the same forces to the 10 mm sample) and then take
+  another break order (the kc6 loses its soft top's front mount too), so their
+  peaks are a different event, not a stiffer door. The CCF's wall residual (241 →
+  20 mm, so b1 670) is the front springing back to its shape: §39's single run
+  read 6 → 75 mm for the same car without the fuel mass. Crush residuals at this
+  car's springback are not a stable reference.
+* **sedan1's profile suites** (`showcase_car`) and `crash_invariants`: off and on
+  run the same 30 and 9 tests. `crash_invariants` passes both ways. `showcase_car`
+  fails 6 tests off and 5 on, all of them on the base branch too (after its
+  compile fix): `f_wall_at_120_kmh…` (energy rose 13.0 J between tenths, both),
+  `g_pulling_a_door_tears_it_off` (the latch at 78.1 kN, not 30.0–64.3, both),
+  `t_car_to_car_t_bone_at_80_kmh` (13 of 1,165 striker nodes in the skin, both),
+  `n_wall_matches_the_nhtsa_sedans` (restitution 0.2018, not 0.13–0.20, both),
+  `contacts_do_no_positive_work` (0.38 J off, 0.23 J on, over a tenth); and
+  off only `fixed_contact_quantisation_does_no_work` (0.0102 J), which passes on.
+  None is caused by this change; they are follow-ups.
+
+## 40. Fuel-tank mass (2026-11-06)
+
+What BeamNG documents: [N] "`fuel`: These nodes contain the mass of the fuel inside
+the vehicle's fuel tank, which will be spread evenly between them and added to
+their nodeWeight"; a vehicle can have several tanks, each with its own engine group.
+[ES] (https://documentation.beamng.com/modding/vehicle/sections/energystorage/,
+retrieved 2026-11-06): a `fuelTank` row of `energyStorage` names a table with
+`energyType` ("Presets for energy density and weight density": gasoline, diesel,
+kerosene; any other needs `energyDensity` and `fuelLiquidDensity`),
+`fuelLiquidDensity` (kg/L), `fuelCapacity` (L, default 0), `startingFuelCapacity`
+(L, default `fuelCapacity`, "usually tied to a variable") and `fuel` (the nodes, e.g.
+`{"[engineGroup]:": ["fuel"]}`); the nodes "share the fuel's weight equally".
+
+**Rule** (`jbeam.rs` `fuel_mass`): for each `fuelTank`, starting volume ×
+density, spread evenly over the nodes whose `engineGroup` (their last definition's)
+is one of the tank's `fuel` groups, added to their `nodeWeight` at load. **Choice**:
+BeamNG names the presets but not their densities; gasoline 0.74, diesel 0.84,
+kerosene 0.80 kg/L (typical values); an `energyType` other than these without
+`fuelLiquidDensity`, or a tank whose groups have no node, adds nothing and warns.
+Other tank types (N₂O, air) are not simulated. Content without a `fuelTank` loads
+as before, bit for bit. The full-size SUV's default 90 L of petrol is 66.6 kg on its
+tank's nodes.

@@ -77,7 +77,7 @@ fn jbeam_yield(beam: &mut Beam, len: f32, e: f32, k: f32, damp: f32, mut f: f32,
     let mut tau = f.abs();
     let mut tear = false;
     if tau > beam.gate && beam.ty == ExplicitType::Deformable && k != 0.0 {
-        if f > beam.tc && e < 0.0 {
+        if f > beam.tc && e < 0.0 && e + (beam.tc / k) * (1.0 - beam.plastic) < 0.0 {
             let delta = e + (beam.tc / k) * (1.0 - beam.plastic);
             let old = beam.rest;
             let floor = beam.short_bound.max(MIN_REST);
@@ -94,7 +94,7 @@ fn jbeam_yield(beam: &mut Beam, len: f32, e: f32, k: f32, damp: f32, mut f: f32,
                 beam.tc = (beam.tc * old / beam.rest).min(beam.limit_k.max(beam.tc));
                 beam.gate = beam.tc.min(beam.tt).min(beam.strength);
             }
-        } else if f < -beam.tt && e > 0.0 {
+        } else if f < -beam.tt && e > 0.0 && e - (beam.tt / k) * (1.0 - beam.plastic) > 0.0 {
             let delta = e - (beam.tt / k) * (1.0 - beam.plastic);
             let old = beam.rest;
             // A negative bound tears there (breakAtExpansion, §36).
@@ -156,13 +156,15 @@ pub fn jbeam_ext_force_with(
     let (len, inv) = crate::explicit_beams::exact_length(q);
     let e = len - beam.rest;
     let u = (na.vel - nb.vel).dot(d) * inv;
-    let u = match filter {
-        Some(f) => f.step(u),
-        None => u,
+    let (u, gain) = match filter {
+        Some(f) => (f.step(u), f.a),
+        None => (u, 1.0),
     };
     let mut k = beam.k;
     let c = beam.c;
     let mut damp = c * u;
+    // The damping's slope in u (§39).
+    let mut slope = c;
     let broke = |beam: &mut Beam| {
         beam.broken = true;
         beam.force = 0.0;
@@ -172,6 +174,7 @@ pub fn jbeam_ext_force_with(
             e,
             force: 0.0,
             check_break: false,
+            slope: 0.0,
         }
     };
     match beam.kind {
@@ -183,9 +186,11 @@ pub fn jbeam_ext_force_with(
                 (c, beam.tt, beam.tc, beam.limit_c)
             };
             damp = cs * u;
+            slope = cs;
             let au = u.abs();
             if au > split {
                 damp = (cs * split + cf * (au - split)).copysign(u);
+                slope = cf;
             }
             let long = beam.long_bound * beam.rest;
             let short = beam.short_bound * beam.rest;
@@ -201,11 +206,13 @@ pub fn jbeam_ext_force_with(
                 let s = if zone > 0.0 { (o / zone).min(1.0) } else { 1.0 };
                 k += (beam.limit_k - k) * s;
                 damp += (lc * u - damp) * s;
+                slope += (lc - slope) * s;
             }
         }
         ExplicitKind::JbeamRope if e < 0.0 => {
             k = 0.0;
             damp = (c * 0.1) * u;
+            slope = c * 0.1;
         }
         ExplicitKind::JbeamSupport => {
             if e > 0.0 {
@@ -214,6 +221,7 @@ pub fn jbeam_ext_force_with(
                 }
                 k = 0.0;
                 damp = 0.0;
+                slope = 0.0;
             }
         }
         ExplicitKind::JbeamAniso => {
@@ -234,7 +242,8 @@ pub fn jbeam_ext_force_with(
                     1.0
                 };
                 k += (ext.e1[0] - k) * s;
-                damp = (c + (ext.e1[1] - c) * s) * u;
+                slope = c + (ext.e1[1] - c) * s;
+                damp = slope * u;
             }
         }
         ExplicitKind::JbeamPressured => {
@@ -250,6 +259,7 @@ pub fn jbeam_ext_force_with(
                 e,
                 force: f,
                 check_break: gauge > ext.e2[1] || f.abs() > beam.strength,
+                slope: slope * gain,
             };
         }
         _ => {}
@@ -263,6 +273,7 @@ pub fn jbeam_ext_force_with(
         e,
         force: f,
         check_break: tau > beam.strength,
+        slope: slope * gain,
     }
 }
 
@@ -316,9 +327,9 @@ pub fn lbeam_force(
     // The damper: id1–id2's extension rate, as a beam's (a pair dashpot, always
     // dissipative).
     let u = (na.vel - nb.vel).dot(d) * inv;
-    let u = match filter {
-        Some(f) => f.step(u),
-        None => u,
+    let (u, gain) = match filter {
+        Some(f) => (f.step(u), f.a),
+        None => (u, 1.0),
     };
     let f = -spring - beam.c * u;
     beam.force = f;
@@ -329,6 +340,7 @@ pub fn lbeam_force(
             e,
             force: f,
             check_break: f.abs() > beam.strength,
+            slope: beam.c * gain,
         },
         fa: ga * spring,
         fb: gb * spring,
@@ -538,6 +550,22 @@ impl ExplicitBeams {
                 self.nodes[n2 as usize].force += f;
                 return;
             }
+            ExplicitKind::JbeamCoupler => {
+                // A coupler in several break groups (spec §7.1): its own breaks set
+                // them off by the pending rule (§17).
+                let (na, nb) = (self.nodes[beam.a as usize], self.nodes[beam.b as usize]);
+                let push = crate::explicit_beams::coupler_force(&mut beam, &na, &nb);
+                self.beams[j] = beam;
+                if self.settings.centred_damping && !beam.broken {
+                    self.damp_slopes[j] = beam.c;
+                }
+                if beam.broken && beam.group > 0 {
+                    self.beam_ext[x].pending = true;
+                }
+                self.nodes[beam.a as usize].force += push;
+                self.nodes[beam.b as usize].force -= push;
+                return;
+            }
             ExplicitKind::JbeamPressureGroup => {
                 let c = self.nodes[beam.a as usize].pos;
                 let p = pressure_group_gauge(&self.beams, &self.nodes, &self.beam_ext[x], c);
@@ -594,6 +622,9 @@ impl ExplicitBeams {
             broke_now = true;
         }
         self.beams[j] = beam;
+        if self.settings.centred_damping && !broke_now {
+            self.damp_slopes[j] = out.slope;
+        }
         let ext = self.beam_ext[x];
         // Yield moves only plain, support and anisotropic rest lengths (E2 .x holds
         // the spawn rest length of those); not while the precompression ramps in.
@@ -711,6 +742,19 @@ impl ExplicitBeams {
         ) {
             ext.e2[0] = beam.rest0;
         }
+        self.push_ext(j, ext);
+    }
+
+    /// Coupler `j`'s further break groups (spec §7.1): an extension record with
+    /// only `EXT_GROUPS`, of the coupler's group sign.
+    pub(crate) fn attach_coupler_groups(&mut self, j: usize, extra: [u32; 2]) {
+        let sign = self.beams[j].group.signum();
+        let ext = BeamExt {
+            beam: j as u32,
+            mask: EXT_GROUPS,
+            extra_groups: extra.map(|g| sign * g as i32),
+            ..Default::default()
+        };
         self.push_ext(j, ext);
     }
 

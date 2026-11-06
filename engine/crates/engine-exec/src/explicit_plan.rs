@@ -164,11 +164,11 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 /// step word) plus the frame's end, at the uniform offset alignment.
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
-/// Words of the kernel's Params.
+/// Words of the kernel's Params (87 used).
 pub const PARAM_WORDS: usize = 88;
 /// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
-/// `sleepRec`).
-pub const W_SLEEP: usize = 84;
+/// `sleepRec`; after centred damping's word 84). The next word is the awake-list flag.
+pub const W_SLEEP: usize = 85;
 /// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
 pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
@@ -234,7 +234,7 @@ pub struct Module {
 /// The frame entry point (frame, solo and contact modules).
 pub const FRAME_ENTRY: &str = "explicit_beams_frame";
 /// The wide passes, in dispatch-kind order ([`Kernel::Wide`]).
-pub const WIDE_PASSES: [&str; 8] = [
+pub const WIDE_PASSES: [&str; 10] = [
     "explicit_beams_wide_begin",
     "explicit_beams_wide_rebase",
     "explicit_beams_wide_nodes",
@@ -243,6 +243,8 @@ pub const WIDE_PASSES: [&str; 8] = [
     "explicit_beams_wide_end",
     "explicit_beams_wide_close",
     "explicit_beams_wide_hits",
+    "explicit_beams_wide_centred_beams",
+    "explicit_beams_wide_centred_nodes",
 ];
 /// The vehicle-contact plan passes ([`Kernel::Vv`]): bounds, pairs, group.
 pub const VV_PASSES: [&str; 3] = [
@@ -258,6 +260,12 @@ const WIDE_TRIS: usize = 4;
 const WIDE_END: usize = 5;
 const WIDE_CLOSE: usize = 6;
 const WIDE_HITS: usize = 7;
+// Centred damping (jbeam-semantics-spec.md §39): after a step's nodes, when a
+// vehicle has it.
+const WIDE_CENTRED_BEAMS: usize = 8;
+const WIDE_CENTRED_NODES: usize = 9;
+/// The Params word of the centred damping's Δv region (nonzero: some vehicle has it).
+const W_CENTRED_DV: usize = 84;
 
 const W: (&str, &str) = ("ENGINE_WGSL", "1");
 const L256: (&str, &str) = ("EB_LANES", "256");
@@ -313,6 +321,8 @@ pub const MODULES: &[Module] = &[
     pass(WIDE_PASSES[5]),
     pass(WIDE_PASSES[6]),
     pass(WIDE_PASSES[7]),
+    pass(WIDE_PASSES[8]),
+    pass(WIDE_PASSES[9]),
     Module {
         name: SLEEP_LIST,
         entry: SLEEP_LIST,
@@ -588,6 +598,10 @@ impl ExplicitUpload {
         // (Surface contact's position steps too, §38.)
         let any_shift = vehicles.iter().any(|v| v.dissipative_contact || v.surface_contact);
         let any_surface = vehicles.iter().any(|v| v.surface_contact);
+        // (Surface contact against rigid proxies runs on the GPU: the World-broadphase
+        // branch's proxy path, explicit_beams_surface.slang.)
+        // Centred damping (jbeam-semantics-spec.md §39): some vehicle has it.
+        let any_centred = vehicles.iter().any(|v| v.settings.centred_damping);
         if any_anti {
             assert!(
                 nv < engine_softbody::explicit_contact::CLIP_SELF as usize,
@@ -762,7 +776,8 @@ impl ExplicitUpload {
                 | (v.exact_friction as u32) << 14
                 | (v.dissipative_contact as u32) << 15
                 | (any_shift as u32) << 16
-                | (v.surface_contact as u32) << 17;
+                | (v.surface_contact as u32) << 17
+                | (v.settings.centred_damping as u32) << 18;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1231,6 +1246,22 @@ impl ExplicitUpload {
             .collect();
         let inc_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
+        // Centred damping (§39): each record's damping slope of the last beam pass in
+        // its first incidence entry's .w (the kernel's beam phase keeps it there).
+        {
+            let mut off = 0usize;
+            for v in vehicles {
+                if v.settings.centred_damping {
+                    for (j, &slope) in v.damp_slopes.iter().enumerate().take(v.beams.len()) {
+                        let at = slots[off + j][0];
+                        if at != u32::MAX {
+                            beams[inc_base as usize + at as usize][3] = slope;
+                        }
+                    }
+                }
+                off += v.beams.len();
+            }
+        }
         // The self-collision grid's sorted runs, at each vehicle's candidate offset.
         let grid_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
@@ -1333,6 +1364,14 @@ impl ExplicitUpload {
         };
         // The tread contact (jbeam-semantics-spec.md §34): per node (z, the depth
         // the step before, 0, 0) for every vehicle when any has tread nodes.
+        // Centred damping (§39): per node its step-start velocity, then its Δv.
+        let centred_dv = if any_centred {
+            let at = beams.len() as u32;
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
+            at
+        } else {
+            0
+        };
         let tread_state = if vehicles.iter().any(|v| !v.tread.is_empty()) {
             let at = beams.len() as u32;
             for v in vehicles {
@@ -1493,18 +1532,20 @@ impl ExplicitUpload {
         // hit count this step (cleared by its node phase).
         // Dissipative contact's position steps (§37): per node 3 words in SHIFT_FIXED
         // units, right after the counts (the kernel's shiftAt: selfSplit +
-        // totalNodes), carried over from the CPU state.
+        // totalNodes), carried over from the CPU state (zero without them).
         let self_split = if vehicles.iter().any(|v| v.two_body_contact) || any_shift {
             let at = acc_init.len() as u32;
             acc_init.extend(std::iter::repeat_n(0, total_nodes));
-            if any_shift {
-                for v in vehicles {
-                    for i in 0..v.nodes.len() {
-                        let w = v.contact_shift.get(i).copied().unwrap_or([0; 3]);
-                        acc_init.extend(w);
-                    }
+            for v in vehicles {
+                for i in 0..v.nodes.len() {
+                    let w = v.contact_shift.get(i).copied().unwrap_or([0; 3]);
+                    acc_init.extend(w);
                 }
             }
+            // §37.1's residual pass and work guard (the kernel's resAt: selfSplit +
+            // 4·totalNodes): per node 8 words (the residual's staged sums B, the
+            // totals' deltas D), zero between steps.
+            acc_init.extend(std::iter::repeat_n(0, 8 * total_nodes));
             at
         } else {
             0
@@ -1766,6 +1807,7 @@ impl ExplicitUpload {
             surf_split,
             surf_seg,
             surf_mark,
+            centred_dv,
             sleep_layout.map_or(0, |s| s.header),
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
@@ -2190,9 +2232,14 @@ impl FramePlanner {
         let nv = self.nv;
         let [nodes, beams, tris, cands, slots] = self.total;
         let buckets = nv * WIDE_GRID_BUCKETS as u32;
+        let centred = self.words[W_CENTRED_DV] != 0;
         let mut plan = vec![(0, WIDE_BEGIN, groups(nv)), (0, WIDE_REBASE, groups(nodes))];
         for k in 0..steps {
             plan.push((k, WIDE_NODES, groups(nodes + slots + buckets)));
+            if centred {
+                plan.push((k, WIDE_CENTRED_BEAMS, groups(beams)));
+                plan.push((k, WIDE_CENTRED_NODES, groups(nodes)));
+            }
             plan.push((k, WIDE_BEAMS_PASS, groups(beams + cands + tris)));
             plan.push((k, WIDE_TRIS, groups(tris * WIDE_SUBS)));
             // One workgroup per vehicle: deferred breaks and self-collision hits.
@@ -2594,6 +2641,7 @@ mod tests {
             turbulence: false,
             fast_inv_sqrt: true,
             triangle_throttle: true,
+            centred_damping: false,
         };
         let mut vs = Vec::new();
         for k in 0..2 {
@@ -2624,7 +2672,7 @@ mod tests {
     fn kernels_have_modules() {
         let mut ks = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact];
         ks.extend((0..3).map(Kernel::Vv));
-        ks.extend((0..8).map(Kernel::Wide));
+        ks.extend((0..WIDE_PASSES.len()).map(Kernel::Wide));
         for k in ks {
             for aero in [false, true] {
                 for lanes in [256, 512] {

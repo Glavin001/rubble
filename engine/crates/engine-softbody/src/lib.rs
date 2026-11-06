@@ -43,6 +43,7 @@ pub mod procedural;
 pub mod reference_cars;
 pub mod truck;
 pub mod truck_export;
+pub mod vehicle_compare;
 pub mod visual;
 
 pub use damage::{damage_summary, SoftDamage};

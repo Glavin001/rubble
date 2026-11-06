@@ -756,7 +756,9 @@ impl WebWorld {
     /// default 1 + 0.5·speed); arena (see `arena`): count, cols, speedMin, speedMax,
     /// hitMin, hitMax, headOn, layout ('rows' | 'ring', see `ring`), ringRadius;
     /// shapes (static colliders for every vehicle, see `shapes`); the
-    /// first vehicle copied to every spawn, drag, turbulence, fastInvSqrt (default true), timing
+    /// first vehicle copied to every spawn, drag, turbulence, fastInvSqrt (default true),
+    /// centredDamping (the BeamNG profile's centred damping, spec §39; default the
+    /// profile's), timing
     /// (default true: GPU timestamps when the device has them) }`.
     #[wasm_bindgen(js_name = explicitSim)]
     pub fn explicit_sim(&self, spec: JsValue) -> Result<ExplicitSim, JsValue> {
@@ -887,6 +889,14 @@ impl ExplicitSim {
                 Some(t) => t.clone(),
                 None => build(v, settings)?,
             };
+            // `centredDamping`: the BeamNG profile's centred damping on or off
+            // (jbeam-semantics-spec.md §39; its default otherwise). A Rigs of Rods
+            // profile vehicle is never changed.
+            if let Some(c) = spec.get("centredDamping").and_then(|c| c.as_bool()) {
+                if sim.beamng_profile {
+                    sim.settings.centred_damping = c;
+                }
+            }
             let speed = spots.get(vi).map_or(speed, |s| s.speed);
             if sim.nodes.is_empty() {
                 return Err("the vehicle has no nodes".into());
@@ -1129,16 +1139,39 @@ impl ExplicitSim {
         MAX_FRAME_STEPS
     }
 
-    /// Submit one frame of `steps` fixed steps for every vehicle (never waits).
+    /// Submit one frame of `steps` fixed steps for every vehicle (never waits). A
+    /// contact error (a vehicle past its frame bounds: the margin widens by itself)
+    /// is a console warning and the sim keeps stepping; other errors are returned.
     pub fn frame(&mut self, steps: u32) -> Result<(), JsValue> {
-        self.frame_native(steps).map_err(err)
+        self.frame_steps(steps).map_err(err)?;
+        for e in self.gpu.take_contact_errors() {
+            let note = format!("explicit beams vehicle contact (the sim continues): {e}");
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::warn_1(&note.into());
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("{note}");
+        }
+        Ok(())
     }
 }
 
 impl ExplicitSim {
-    /// [`Self::frame`] for native hosts and tests (errors as text).
+    /// [`Self::frame`] for native hosts and tests (errors as text, a contact
+    /// error too: the sim keeps stepping).
     #[doc(hidden)]
     pub fn frame_native(&mut self, steps: u32) -> Result<(), String> {
+        self.frame_steps(steps)?;
+        // A contact error (a vehicle past its frame bounds: the margin widens by
+        // itself) never stops the sim: the caller gets it and keeps stepping.
+        let errors = self.gpu.take_contact_errors();
+        if !errors.is_empty() {
+            return Err(format!("vehicle contact (the sim continues): {}", errors.join("; ")));
+        }
+        Ok(())
+    }
+
+    /// One frame's steps; contact errors are left for the caller.
+    fn frame_steps(&mut self, steps: u32) -> Result<(), String> {
         if steps > MAX_FRAME_STEPS {
             return Err(format!(
                 "at most {MAX_FRAME_STEPS} steps per frame, got {steps}"
@@ -1154,12 +1187,6 @@ impl ExplicitSim {
         if steps > 0 {
             self.gpu.frame(steps);
             self.steps += u64::from(steps);
-        }
-        // A contact error (a vehicle past its frame bounds: the margin widens by
-        // itself) never stops the sim: the page gets it and keeps stepping.
-        let errors = self.gpu.take_contact_errors();
-        if !errors.is_empty() {
-            return Err(format!("vehicle contact (the sim continues): {}", errors.join("; ")));
         }
         Ok(())
     }
