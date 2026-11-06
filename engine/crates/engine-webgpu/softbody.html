@@ -1069,7 +1069,12 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
 @group(0) @binding(15) var<storage, read> xtris: array<vec4u>;
 @group(0) @binding(16) var<storage, read> xrecs: array<vec4u>;
 @group(0) @binding(17) var<storage, read> xbeams: array<vec4f>;
-fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xmisc[v].xyz); }
+// frame.opts.z: the frame's lead (FramePacer.lead, simulated seconds past the last
+// step): positions carried forward by their velocity (visual only).
+fn xpos(i: u32, v: u32) -> vec3f {
+  let p = xnodes[i * 3u].xyz + bitcast<vec3f>(xmisc[v].xyz);
+  return select(p, p + xnodes[i * 3u + 1u].xyz * frame.opts.z, frame.opts.z > 0.0);
+}
 // The collision skin: panels go dark with strain, a triangle past 1.8× its spawn
 // edges reads as torn and is dropped.
 @vertex fn vsXSkin(@builtin(vertex_index) vi: u32) -> Out {
@@ -1886,7 +1891,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       frameF.set(vp, 0);
       frameF.set([...camEye, 0], 16);
       frameF.set([...LIGHT, 0], 20);
-      frameF.set([beamView ? 1 : 0, LAB && labR.opts.studio ? 1 : 0, 0, 0], 24);
+      frameF.set([beamView ? 1 : 0, LAB && labR.opts.studio ? 1 : 0, manual ? 0 : xLead, 0], 24);
       frameF.set(lightViewProj(camTarget), 28);
       frameF.set(mat4Inv(vp), 44);
       device.queue.writeBuffer(frameBuf, 0, frameF);
@@ -2070,9 +2075,9 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         // motion stands for (a frame a cap held short moves camera and subject
         // alike); otherwise as stepped, by the frame's wall time.
         const paced = !lab || (!lab.st.paused && lab.st.replay < 0);
-        // (The lab's renderer carries the nodes; the traffic and arena views draw
-        // the stepped state, their camera too.)
-        xLead = paced && lab ? pacer.lead() : 0;
+        // (The lab's gather carries the nodes forward, the page's own explicit
+        // skin and beams do in xpos: traffic and the arena.)
+        xLead = paced ? pacer.lead() : 0;
         // The orbit cameras' subject at the step on display, before the camera moves.
         lab?.followFocus(0, xLead);
         updateCamera(paced ? pacer.shownDt() : dt, false);
