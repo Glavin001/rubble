@@ -3269,6 +3269,11 @@ fn reference_wall_p(
     let dt = engine_softbody::authoring::skeleton::STEP;
     let mut acc: Vec<f32> = Vec::new();
     let mut vprev = vcm(&s);
+    // (`FIXED_CONTACT=0`: contact sums in f32, not the GPU's fixed point, a
+    // measurement switch.)
+    if std::env::var("FIXED_CONTACT").is_ok_and(|v| v == "0") {
+        s.fixed_contact = false;
+    }
     let mut ledger = Ledger::new(&s, Vec3::Z);
     let was: Vec<bool> = s.beams.iter().map(|bm| bm.broken).collect();
     let mut nan_seen = (Vec::new(), false);
