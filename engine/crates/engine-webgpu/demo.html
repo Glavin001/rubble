@@ -586,7 +586,7 @@
       const cam = cameraEye();
       return {
         viewProj: mul(perspective(Math.PI / 5, aspect, 0.2, cfg.far), lookAt(cam, target, [0, 1, 0])),
-        eye: cam, mode: colorMode, projectile: projectileSlot,
+        eye: cam, look: { colors: colorMode }, projectile: projectileSlot,
         ground: { half: cfg.ground, y: cfg.groundY ?? 0.5 }, count: drawCount,
       };
     }

@@ -69,10 +69,13 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(status.success(), "slangc failed for {}", draw.display());
     // The playground's render layers (slang/render/*.slang, engine/docs/playground-plan.md
     // phase 4): each page draws through these, not shaders of its own.
-    for (name, entries) in [(
-        "rigid_bodies",
-        &[("vs", "vertex"), ("fs", "fragment"), ("vsGround", "vertex"), ("fsGround", "fragment")][..],
-    )] {
+    for (name, entries) in [
+        (
+            "rigid_bodies",
+            &[("vs", "vertex"), ("fs", "fragment"), ("vsGround", "vertex"), ("fsGround", "fragment")][..],
+        ),
+        ("heightfield", &[("vs", "vertex"), ("fs", "fragment")][..]),
+    ] {
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../slang/render/{name}.slang"));
         let mut cmd = std::process::Command::new(engine_slang_build::find_slangc()?);

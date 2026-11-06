@@ -1,51 +1,15 @@
-// The rigid-body layer (engine/docs/playground-plan.md phase 4): every body's collider
-// drawn from the live body and collider buffers, one instance per body after the ground
-// (instance k draws body and collider k + 1). Boxes are drawn as boxes; spheres and
-// capsules as their bounds box, ray-hit in the fragment so nothing sticks out. The ground
-// is a plane. Shared by every page that draws rigid bodies (WGSL via wgsl_export).
+// The rigid-body layer (engine/docs/playground-plan.md phase 4): every collider drawn from
+// the live body and collider buffers (instance k: collider k + 1 on its body), boxes as
+// boxes, spheres and capsules as their bounds box ray-hit in the fragment. A preset picks
+// its look as data (gFrame.style): the colours (the demo's position / sleep / speed tints,
+// or the terrain page's per-shape colours) and the lighting (the demo's, or sky, specular
+// and fog). Plus a ground square (the demo's). WGSL via wgsl_export.
 
-struct Body
-{
-    float3 position; float invMass;
-    float4 orientation;
-    float3 invInertia; uint flags;
-    float3 linearVel; float sleepTimer;
-    float3 angularVel; uint generation;
-    float3 initialPos; float initialPad;
-    float4 initialRot;
-};
-
-struct Collider
-{
-    uint body; uint shape; uint material; uint generation;
-    float3 localPos; float density;
-    float4 localRot;
-    float4 params;
-};
-
-// The view-projection by columns; mode: 0 position tint, 1 awake/asleep, 2 speed;
-// projectile: the scene's ball (0xffffffff: every sphere is a ball); the ground plane.
-struct Frame
-{
-    float4 c0; float4 c1; float4 c2; float4 c3;
-    uint mode; uint projectile;
-    // The ground square: its half side and height.
-    float groundHalf; float groundY;
-};
-struct Eye { float3 pos; float pad; };
+#include "common.slang"
 
 StructuredBuffer<Body> gBodies;
 ConstantBuffer<Frame> gFrame;
 StructuredBuffer<Collider> gCols;
-ConstantBuffer<Eye> gEye;
-
-float3 quatRotate(float4 q, float3 v)
-{
-    float3 u = q.xyz;
-    return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
-}
-
-float4 clip(float3 w) { return gFrame.c0 * w.x + gFrame.c1 * w.y + gFrame.c2 * w.z + gFrame.c3; }
 
 struct VsOut
 {
@@ -55,8 +19,9 @@ struct VsOut
     float3 world : POSITION1;
     float3 center : POSITION2;
     float radius : RADIUS;
-    // Capsule: world-space half segment (axis · half length); zero for spheres.
+    // Demo look: the capsule's world half segment. Terrain look: its unit axis (hh: half length).
     float3 axis : AXIS;
+    float hh : HALFLEN;
 };
 
 // The unit cube's 36 corners (half extent 0.5) and their face normals, by vertex index,
@@ -89,46 +54,57 @@ VsOut vs(uint vid : SV_VertexID, uint inst : SV_InstanceID)
 {
     float3 corner, normal;
     cubeCorner(vid, corner, normal);
-    Body b = gBodies[inst + 1u];
     Collider col = gCols[inst + 1u];
+    Body b = gBodies[col.body];
+    float4 q = b.orientation;
+    bool terrainLook = gFrame.style.y == LIGHT_SKY;
+    VsOut o;
+    o.radius = 0.0;
+    o.hh = 0.0;
+    o.axis = float3(0.0);
     float3 half = col.params.xyz;
-    float radius = 0.0;
-    float3 axis = float3(0.0);
     if (col.shape == 0u)
     {
-        // Bounds cube of half extent r; the fragment ray-hits the sphere.
         half = float3(col.params.x);
-        radius = col.params.x;
+        o.radius = col.params.x;
     }
     else if (col.shape == 1u)
     {
-        // Capsule along local Y (radius, half length): its bounds box, ray-hit in the fragment.
         half = float3(col.params.x, col.params.y + col.params.x, col.params.x);
-        radius = col.params.x;
-        axis = quatRotate(b.orientation, float3(0.0, col.params.y, 0.0));
+        o.radius = col.params.x;
+        o.hh = col.params.y;
     }
-    float3 world = b.position + quatRotate(b.orientation, corner * (half / 0.5));
-    VsOut o;
-    o.pos = clip(world);
-    o.normal = quatRotate(b.orientation, normal);
+    float3 local = col.localPos + quatRotate(col.localRot, corner * half * gFrame.params.z);
+    float3 world = b.position + quatRotate(q, local);
     o.world = world;
-    o.center = b.position;
-    o.radius = radius;
-    o.axis = axis;
-    // The ball stays grey: the projectile when the scene names one, else every sphere.
-    bool isBall = col.shape == 0u && (gFrame.projectile == 0xffffffffu || col.body == gFrame.projectile);
+    o.pos = clip(gFrame, world);
+    o.normal = quatRotate(q, quatRotate(col.localRot, normal));
+    o.center = b.position + quatRotate(q, col.localPos);
+    if (col.shape == 1u)
+    {
+        o.axis = terrainLook ? quatRotate(q, quatRotate(col.localRot, float3(0.0, 1.0, 0.0)))
+                             : quatRotate(q, float3(0.0, col.params.y, 0.0));
+    }
+    uint scheme = gFrame.style.x;
+    if (scheme == COLOR_SHAPES)
+    {
+        float h = hash(col.body);
+        bool asleep = (b.flags & 8u) == 0u;
+        if (col.shape == 0u) o.color = lerp(float3(0.25, 0.45, 0.8), float3(0.35, 0.6, 0.9), h);
+        else if (col.shape == 1u) o.color = lerp(float3(0.75, 0.3, 0.3), float3(0.9, 0.45, 0.35), h);
+        else o.color = lerp(float3(0.85, 0.6, 0.25), float3(0.95, 0.8, 0.45), h);
+        if (asleep) o.color = o.color * 0.65;
+        return o;
+    }
+    // The demo's colours. The ball stays grey: the projectile when the scene names one,
+    // else every sphere.
+    bool isBall = col.shape == 0u && (gFrame.style.z == 0xffffffffu || col.body == gFrame.style.z);
     if (isBall)
         o.color = float3(0.75, 0.78, 0.82);
-    else if (gFrame.mode == 1u)
-    {
-        bool sleeping = (b.flags & 4u) != 0u;
-        o.color = sleeping ? float3(0.28, 0.48, 0.82) : float3(0.95, 0.58, 0.16);
-    }
-    else if (gFrame.mode == 2u)
-    {
-        float t = clamp(length(b.linearVel) / 3.0, 0.0, 1.0);
-        o.color = lerp(float3(0.22, 0.32, 0.48), float3(0.95, 0.22, 0.16), t);
-    }
+    else if (scheme == COLOR_SLEEP)
+        o.color = (b.flags & 4u) != 0u ? float3(0.28, 0.48, 0.82) : float3(0.95, 0.58, 0.16);
+    else if (scheme == COLOR_SPEED)
+        o.color = lerp(float3(0.22, 0.32, 0.48), float3(0.95, 0.22, 0.16), clamp(length(b.linearVel) / 3.0, 0.0, 1.0));
     else
     {
         float t = frac(b.position.y * 0.08 + b.position.x * 0.05);
@@ -137,18 +113,56 @@ VsOut vs(uint vid : SV_VertexID, uint inst : SV_InstanceID)
     return o;
 }
 
-float4 shade(float3 color, float3 n)
+// The terrain page's capsule (or sphere, hh = 0) hit.
+float capsuleHit(float3 ro, float3 rd, float3 pa, float3 pb, float r)
 {
-    float3 light = normalize(float3(0.35, 0.85, 0.4));
-    float ndl = max(dot(n, light), 0.0);
-    return float4(color * (0.28 + 0.72 * ndl), 1.0);
+    float3 ba = pb - pa;
+    float3 oa = ro - pa;
+    float baba = dot(ba, ba), bard = dot(ba, rd), baoa = dot(ba, oa), rdoa = dot(rd, oa), oaoa = dot(oa, oa);
+    float a = baba - bard * bard, b = baba * rdoa - baoa * bard, c = baba * oaoa - baoa * baoa - r * r * baba;
+    float hh = b * b - a * c;
+    if (hh >= 0.0 && a > 1e-9)
+    {
+        float t = (-b - sqrt(hh)) / a;
+        float y = baoa + t * bard;
+        if (y > 0.0 && y < baba)
+            return t;
+        float3 oc = y <= 0.0 ? oa : ro - pb;
+        float b2 = dot(rd, oc), c2 = dot(oc, oc) - r * r;
+        hh = b2 * b2 - c2;
+        if (hh > 0.0)
+            return -b2 - sqrt(hh);
+    }
+    else if (a <= 1e-9)
+    {
+        float b2 = dot(rd, oa), c2 = oaoa - r * r, h2 = b2 * b2 - c2;
+        if (h2 > 0.0)
+            return -b2 - sqrt(h2);
+    }
+    return -1.0;
 }
 
 [shader("fragment")]
 float4 fs(VsOut i) : SV_Target
 {
     float3 n = normalize(i.normal);
-    float3 eye = gEye.pos;
+    float3 eye = gFrame.eye.xyz;
+    if (gFrame.style.y == LIGHT_SKY)
+    {
+        if (i.radius > 0.0)
+        {
+            float3 rd = normalize(i.world - eye);
+            float3 pa = i.center - i.axis * i.hh;
+            float3 pb = i.center + i.axis * i.hh;
+            float t = capsuleHit(eye, rd, pa, pb, i.radius);
+            if (t < 0.0)
+                discard;
+            float3 p = eye + rd * t;
+            float s = clamp(dot(p - pa, i.axis), 0.0, 2.0 * i.hh);
+            n = normalize(p - (pa + i.axis * s));
+        }
+        return float4(shade(gFrame, i.color, n, i.world), 1.0);
+    }
     if (i.radius > 0.0 && dot(i.axis, i.axis) > 0.0)
     {
         // Ray vs capsule (segment centre ± axis, radius).
@@ -213,26 +227,27 @@ float4 fs(VsOut i) : SV_Target
             discard;
         n = normalize((eye + rd * tHit) - i.center);
     }
-    return shade(i.color, n);
+    return float4(shade(gFrame, i.color, n, i.world), 1.0);
 }
 
-// The ground: a square of half side groundHalf at groundY, two triangles by vertex index.
+// The ground: a square of half side params.x at params.y, two triangles by vertex index.
 [shader("vertex")]
 VsOut vsGround(uint vid : SV_VertexID)
 {
     float2 q[6] = { float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1) };
-    float3 corner = float3(q[vid].x * gFrame.groundHalf, gFrame.groundY, q[vid].y * gFrame.groundHalf);
+    float3 corner = float3(q[vid].x * gFrame.params.x, gFrame.params.y, q[vid].y * gFrame.params.x);
     VsOut o;
-    o.pos = clip(corner);
+    o.pos = clip(gFrame, corner);
     o.normal = float3(0.0, 1.0, 0.0);
-    // Keep the bodies bound in this entry point (one layout for both pipelines).
+    // Keep every buffer bound in this entry point (one layout for both pipelines).
     o.color = float3(0.22, 0.24, 0.28) + gBodies[0].position * 0.0 + float3(gCols[0].density * 0.0);
     o.world = corner;
     o.center = corner;
     o.radius = 0.0;
     o.axis = float3(0.0);
+    o.hh = 0.0;
     return o;
 }
 
 [shader("fragment")]
-float4 fsGround(VsOut i) : SV_Target { return shade(i.color, normalize(i.normal)); }
+float4 fsGround(VsOut i) : SV_Target { return float4(shade(gFrame, i.color, normalize(i.normal), i.world), 1.0); }

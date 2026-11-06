@@ -38,6 +38,7 @@
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
     import { createScene, sceneFromQuery, Poses, pollFrame, stepFrames, errorText } from './rubble-world.mjs';
+    import { createRigidLayer, createHeightfieldLayer, COLORS, LIGHT } from './layers.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -93,167 +94,11 @@
     const surfaceAt = (x, z) => { const h = world.heightFieldSurface(terrain, x, z); return Number.isNaN(h) ? null : h; };
 
     // ---------------------------------------------------------------- renderer
-    const SHADER = /* wgsl */`
-struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
-  linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
-struct Collider { body: u32, shape: u32, material: u32, generation: u32, localPos: vec3f, density: f32, localRot: vec4f, params: vec4f };
-struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
-@group(0) @binding(0) var<storage, read> bodies: array<Body>;
-@group(0) @binding(1) var<uniform> frame: Frame;
-@group(0) @binding(2) var<storage, read> cols: array<Collider>;
-@group(0) @binding(3) var<storage, read> hulls: array<vec4u>;
-
-fn qrot(q: vec4f, v: vec3f) -> vec3f {
-  let u = q.xyz;
-  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
-}
-fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
-fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f {
-  let l = normalize(frame.light.xyz);
-  let diff = max(dot(n, l), 0.0);
-  let v = normalize(frame.eye.xyz - w);
-  let spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.2;
-  let sky = 0.5 + 0.5 * n.y;
-  let fog = clamp(length(frame.eye.xyz - w) / 160.0, 0.0, 1.0);
-  return mix(c * (0.22 + 0.18 * sky + 0.75 * diff) + spec, vec3f(0.55, 0.62, 0.72), fog * fog);
-}
-
-struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1) c: vec3f, @location(2) w: vec3f,
-  @location(3) center: vec3f, @location(4) r: f32, @location(5) axis: vec3f, @location(6) hh: f32 };
-
-@vertex fn vsCol(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
-  let ci = inst + 1u;
-  let col = cols[ci];
-  let b = bodies[col.body];
-  var o: Out;
-  o.r = 0.0; o.hh = 0.0;
-  var half = col.params.xyz;
-  if (col.shape == 0u) { half = vec3f(col.params.x); o.r = col.params.x; }
-  if (col.shape == 1u) { half = vec3f(col.params.x, col.params.y + col.params.x, col.params.x); o.r = col.params.x; o.hh = col.params.y; }
-  let q = b.orientation;
-  let local = col.localPos + qrot(col.localRot, corner * half * 2.02);
-  let w = b.position + qrot(q, local);
-  o.w = w;
-  o.center = b.position + qrot(q, col.localPos);
-  o.axis = qrot(q, qrot(col.localRot, vec3f(0.0, 1.0, 0.0)));
-  o.n = qrot(q, qrot(col.localRot, normal));
-  o.clip = frame.viewProj * vec4f(w, 1.0);
-  let h = hash(col.body);
-  let asleep = (b.flags & 8u) == 0u;
-  if (col.shape == 0u) { o.c = mix(vec3f(0.25, 0.45, 0.8), vec3f(0.35, 0.6, 0.9), h); }
-  else if (col.shape == 1u) { o.c = mix(vec3f(0.75, 0.3, 0.3), vec3f(0.9, 0.45, 0.35), h); }
-  else { o.c = mix(vec3f(0.85, 0.6, 0.25), vec3f(0.95, 0.8, 0.45), h); }
-  if (asleep) { o.c = o.c * 0.65; }
-  return o;
-}
-
-fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
-  let ba = pb - pa; let oa = ro - pa;
-  let baba = dot(ba, ba); let bard = dot(ba, rd); let baoa = dot(ba, oa); let rdoa = dot(rd, oa); let oaoa = dot(oa, oa);
-  let a = baba - bard * bard; let b = baba * rdoa - baoa * bard; let c = baba * oaoa - baoa * baoa - r * r * baba;
-  var hh = b * b - a * c;
-  if (hh >= 0.0 && a > 1e-9) {
-    let t = (-b - sqrt(hh)) / a;
-    let y = baoa + t * bard;
-    if (y > 0.0 && y < baba) { return t; }
-    let oc = select(ro - pb, oa, y <= 0.0);
-    let b2 = dot(rd, oc); let c2 = dot(oc, oc) - r * r;
-    hh = b2 * b2 - c2;
-    if (hh > 0.0) { return -b2 - sqrt(hh); }
-  } else if (a <= 1e-9) {
-    let b2 = dot(rd, oa); let c2 = oaoa - r * r; let h2 = b2 * b2 - c2;
-    if (h2 > 0.0) { return -b2 - sqrt(h2); }
-  }
-  return -1.0;
-}
-
-@fragment fn fsCol(i: Out) -> @location(0) vec4f {
-  var n = normalize(i.n);
-  if (i.r > 0.0) {
-    let rd = normalize(i.w - frame.eye.xyz);
-    let pa = i.center - i.axis * i.hh;
-    let pb = i.center + i.axis * i.hh;
-    let t = capsuleHit(frame.eye.xyz, rd, pa, pb, i.r);
-    if (t < 0.0) { discard; }
-    let p = frame.eye.xyz + rd * t;
-    let s = clamp(dot(p - pa, i.axis), 0.0, 2.0 * i.hh);
-    n = normalize(p - (pa + i.axis * s));
-  }
-  return vec4f(shade(i.c, n, i.w), 1.0);
-}
-
-// The terrain straight from the physics records (engine_schema::heightfield):
-// header (magic, nx, nz, flags), (dx, dz, min, max), then heights, four per record.
-const HF_BASE = ${world.shapeArenaBase(terrain)}u;
-fn hfH(i: u32, j: u32, nx: u32) -> f32 {
-  let k = j * nx + i;
-  let r = hulls[HF_BASE + 2u + (k >> 2u)];
-  return bitcast<f32>(r[k & 3u]);
-}
-@vertex fn vsTerrain(@builtin(vertex_index) vi: u32) -> Out {
-  let head = hulls[HF_BASE];
-  let nx = head.y; let nz = head.z;
-  let d = bitcast<vec4f>(hulls[HF_BASE + 1u]);
-  let cell = vi / 6u;
-  let ci = cell % (nx - 1u); let cj = cell / (nx - 1u);
-  // Triangles (00, 11, 10) and (00, 01, 11): the collider's diagonal split.
-  let corner = array<vec2u, 6>(vec2u(0u, 0u), vec2u(1u, 1u), vec2u(1u, 0u), vec2u(0u, 0u), vec2u(0u, 1u), vec2u(1u, 1u))[vi % 6u];
-  let i = ci + corner.x; let j = cj + corner.y;
-  let x0 = -0.5 * f32(nx - 1u) * d.x; let z0 = -0.5 * f32(nz - 1u) * d.y;
-  let h = hfH(i, j, nx);
-  let hx0 = hfH(max(i, 1u) - 1u, j, nx); let hx1 = hfH(min(i + 1u, nx - 1u), j, nx);
-  let hz0 = hfH(i, max(j, 1u) - 1u, nx); let hz1 = hfH(i, min(j + 1u, nz - 1u), nx);
-  var o: Out;
-  o.w = vec3f(x0 + f32(i) * d.x, h, z0 + f32(j) * d.y);
-  o.n = normalize(vec3f(-(hx1 - hx0) / (2.0 * d.x), 1.0, -(hz1 - hz0) / (2.0 * d.y)));
-  o.c = vec3f(0.0); o.center = o.w; o.r = 0.0; o.axis = vec3f(0.0); o.hh = 0.0;
-  o.clip = frame.viewProj * vec4f(o.w, 1.0);
-  return o;
-}
-@fragment fn fsTerrain(i: Out) -> @location(0) vec4f {
-  let n = normalize(i.n);
-  let g = abs(fract(i.w.xz) - 0.5);
-  let line = smoothstep(0.47, 0.5, max(g.x, g.y));
-  let slope = 1.0 - n.y;
-  let grass = mix(vec3f(0.33, 0.42, 0.25), vec3f(0.42, 0.37, 0.27), clamp(slope * 4.0, 0.0, 1.0));
-  let low = clamp(-i.w.y * 0.4, 0.0, 1.0);
-  let base = mix(grass, vec3f(0.38, 0.3, 0.22), low);
-  return vec4f(shade(mix(base, base * 1.25, line * 0.4), n, i.w), 1.0);
-}
-`;
-    const mod = device.createShaderModule({ label: 'terrain-render', code: SHADER });
-    const info = await mod.getCompilationInfo();
-    const err = info.messages.find((m) => m.type === 'error');
-    if (err) throw new Error(`render shader: ${err.message} @${err.lineNum}`);
-
-    const cube = [];
-    for (const [u, v, w] of [[0, 1, 2], [1, 2, 0], [2, 0, 1]]) for (const s of [-1, 1]) {
-      const n = [0, 0, 0]; n[w] = s;
-      const cs = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => { const p = [0, 0, 0]; p[u] = a * 0.5; p[v] = b * 0.5; p[w] = s * 0.5; return p; });
-      const tris = s > 0 ? [[0, 1, 2], [0, 2, 3]] : [[0, 2, 1], [0, 3, 2]];
-      for (const t of tris) for (const k of t) cube.push(...cs[k], ...n);
-    }
-    const cubeVbo = device.createBuffer({ size: cube.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(cubeVbo, 0, new Float32Array(cube));
-    const frameBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const vtx6 = [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }];
-    const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
-    const pipe = (vs, fs, buffers) => device.createRenderPipeline({
-      layout: 'auto', vertex: { module: mod, entryPoint: vs, buffers }, fragment: { module: mod, entryPoint: fs, targets: [{ format }] },
-      primitive: { cullMode: 'none' }, depthStencil,
-    });
-    const colPipe = pipe('vsCol', 'fsCol', vtx6);
-    const terrainPipe = pipe('vsTerrain', 'fsTerrain', []);
-    const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
-    // The world's buffers can be replaced when they grow: rebind when one is a new object.
-    let colBind = null, terrainBind = null, bound = [];
-    const rebind = () => {
-      const bufs = [world.bodyBuffer(), world.colliderBuffer(), world.hullArenaBuffer()];
-      if (bufs.every((b, i) => b === bound[i])) return;
-      bound = bufs;
-      colBind = bind(colPipe, [[0, bufs[0]], [1, frameBuf], [2, bufs[1]]]);
-      terrainBind = bind(terrainPipe, [[1, frameBuf], [3, bufs[2]]]);
-    };
+    // The render layers (slang/render): the heightfield from its physics records, the
+    // bodies by collider, in this page's look (per-shape colours, sky, specular and fog).
+    const [hfLayer, rigid] = await Promise.all([createHeightfieldLayer(device, format), createRigidLayer(device, format)]);
+    const LOOK = { colors: COLORS.shapes, light: LIGHT.sky, lightDir: [0.45, 0.8, 0.35], fog: { distance: 160, color: [0.55, 0.62, 0.72] } };
+    const HF_BASE = world.shapeArenaBase(terrain);
     let depth = null;
 
     // ---------------------------------------------------------------- camera / input
@@ -311,19 +156,17 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
         depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
       }
       const eye = eyeOf();
-      frameF.set(viewProj(eye, cam.target, canvas.width / canvas.height), 0);
-      frameF.set([...eye, 0], 16);
-      frameF.set([0.45, 0.8, 0.35, 0], 20);
-      device.queue.writeBuffer(frameBuf, 0, frameF);
+      view = { viewProj: viewProj(eye, cam.target, canvas.width / canvas.height), eye, look: LOOK, heightfield: HF_BASE,
+        cells: (NX - 1) * (NZ - 1), boundScale: 2.02, ground: null, count: world.colliderCount() - 1 };
     }
+    let view = null;
     function drawScene(enc) {
-      rebind();
       const rp = enc.beginRenderPass({
         colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
-      rp.setPipeline(terrainPipe); rp.setBindGroup(0, terrainBind); rp.draw((NX - 1) * (NZ - 1) * 6);
-      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount() - 1);
+      hfLayer.draw(rp, world, view);
+      rigid.draw(rp, world, view);
       rp.end();
     }
     function draw() {
@@ -332,7 +175,6 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
       drawScene(enc);
       device.queue.submit([enc.finish()]);
     }
-    const frameF = new Float32Array(24);
     let manual = false;
     let lastT = performance.now(), fpsAcc = 0, fpsN = 0, fpsShow = 0, physMs = 0;
     const statsEl = document.getElementById('stats');
