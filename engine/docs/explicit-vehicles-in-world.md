@@ -928,3 +928,116 @@ So the parked cars that never sleep are RoR-profile sedans whose residual motion
 above the rule's 0.1 mm over 0.5 s; centred damping does not reach them. The step times
 of this run (load 20 to 120 from other agents, a 15-fold slowdown of the baseline's own
 fleet case) are not comparable and are not reported.
+
+### 10.5 BeamNG-profile cars at scale (2026-11-06)
+
+Large maps will run BeamNG-profile cars, so the parked, 1,000-parked and idle-map benches
+were rerun with them: `vehicle_scale_bench` `VS_CAR=etkk` (the ETK K-series kr6,
+community JBeam, raycast wheels, the vehicle-compare harness's settings) and
+`VS_CAR=fixture` (the JBeam fixture car on pressure wheels). gen3 was not added: it needs
+`authoring::gen2` from `feat/vehicle-gen3-r3`. CSV `measurements/vehicle-scale/beamng_profile.csv`.
+
+**Fixed first: slide nodes and raycast wheels in the vehicle's frame** (2d64e66c).
+- *The symptom.* A parked ETK slept in 2.5 s at the origin and at 100 m, and never at 1 km
+  or 4 km (its node box over 2 s: 326 µm at 1 km, 709 µm at 4 km).
+- *The cause.* The slide pass measured each slide node's rail distance from World
+  positions (origin + pos). At 4 km those are 0.24 mm apart, so the slide springs saw
+  rounding noise every step.
+- *The fix.*
+  - `slide_pass` and `segment_distance` now work in the vehicle's frame. The kernel passes
+    `SLIDE_FRAME` = 0 to `slidePass` and `slideNode`.
+  - Raycast wheels do the same: their hubs, rays and ground height are relative to the
+    vehicle's origin, and the origin is added only at the World boundary.
+  - At origin 0 both are exact, so nothing changes near the origin.
+- *Proof.* `explicit_far_origin_gpu`
+  `slide_nodes_and_raycast_wheels_at_4_km_are_the_origins_bit_for_bit`: a slide node on its
+  rail and the fixture car on raycast wheels step bit for bit alike at the origin and at
+  4 km, on the CPU and on the GPU. With either fix reverted, the CPU half fails at frame 0.
+- *After the fix* (`sleep_distance car=etkk`): the ETK is asleep at 2.43–2.61 s at every
+  distance from 0 to 4,000 m.
+
+**Also fixed: the idle map put one car in four on a building.** The car pitch is
+2.5 building pitches, so every car with an odd column and an odd row sat on a building and
+never slept. That, not tyre chatter, was most of the "27–30 % never sleep" reported above:
+- before: 11 of 16, 45 of 64, 183 of 256 and 745 of 1,024 sedans asleep;
+- after, with cars at cell centres: 15 of 16, 59 of 64, 247 of 256 and 997 of 1,024.
+
+The sedan's real non-sleepers (RoR-profile tyre chatter) are about 2.6 %.
+
+Results (p50 ms per World step, each step waited for, other agents on the GPU):
+
+| Scenario | ETK kr6 (raycast) | Fixture car, 4 s settle | Fixture car, 60 s settle | Repo sedan |
+|---|---|---|---|---|
+| 1,000 parked + 10 driving | 1,000 of 1,010 asleep; 75.0 | 0 of 1,010; 155.7 | 934 of 1,010; 47.7 | 992 of 1,010 (§10.2) |
+| Idle map 500 m | 16 of 16; 0.003 (no step) | 0 of 16; 128.7 | 16 of 16; 0.002 | 15 of 16; 31.7 |
+| Idle map 1000 m | 64 of 64; 0.005 | 0 of 64; 45.7 | 64 of 64; 0.003 | 59 of 64; 34.0 |
+| Idle map 2000 m | 256 of 256; 0.004 | 0 of 256; 75.6 | not run (timer) | 247 of 256; 39.4 |
+| Idle map 3900 / 4000 m | 973 of 973; 0.027 | 0 of 973; 159.7 | not run (timer) | 997 of 1,024; 47.5 |
+
+- **ETK: cost against area is flat.** Every parked ETK sleeps, so the World skips its
+  steps at every map size (0 of 120 measured steps ran).
+- **The 1,000-parked lot.** The cost is the 10 driving ETKs; the 1,000 sleeping ETKs
+  cost nothing.
+- **The fixture car on pressure wheels is awake for its first ~45 s** (next point). Once
+  settled it sleeps like the ETK.
+- **Map 4000 with JBeam cars is past a limit.** Its 1,024 cars exceed anti-clip's 1,023
+  vehicles per upload (`explicit_plan.rs`, a clear error), so the JBeam rows stop at
+  3900 m (973 cars).
+
+**The fixture car's ~45 s settling is the car rolling on free wheels, not a contact
+defect.**
+- *What the trace shows* (`sleep_distance car=fixture`, `SD_TRACE=1`):
+  - The centre of mass moves fore and aft at up to 0.23 m/s, changing sign about every
+    3 s.
+  - The fastest nodes are always tyre tread nodes, at twice the chassis speed: the top of
+    a rolling wheel.
+  - Ground-contact nodes slip at about 0.1 mm/s, so the tyres roll rather than slide.
+- *How it ends.* The fixture defines no brakes, so after the 2 cm drop the car rocks on its
+  tyres' flat spots. Rolling resistance (tread hysteresis) slowly damps the motion, and it
+  falls asleep at 44.6 s.
+- *Ablations* (`SD_SUB`), asleep at:
+  - ×10 tyre tread, sidewall, L-beam, hub or chassis damping: 41–50 s (the beams' damping
+    is not what holds it);
+  - tyre friction 0.2: 31.6 s;
+  - 60 psi: 51 s;
+  - raycast wheels on the same car: 2.6 s.
+- *So nothing was changed.* A parked BeamNG car would hold a parking brake. If parked
+  pressure-wheel cars should settle quickly, the fix belongs in the content or the host (a
+  parking brake), not in the ground contact law.
+
+**The 1,000-parked lot plans by the scan.** It has only the ground plane, and the rigid
+step keeps its resting table only for more than 512 colliders. The scan covers that one
+collider, so its cost is trivial. The idle maps plan from the broadphase whenever a step
+runs.
+
+### 10.6 The crash-town GPU hang on merged branches (2026-11-06)
+
+**The symptom.** On `feat/surface-contact-perf` the 64-car crash town stalled in one GPU
+submission for over an hour, with surface contact off too.
+
+**The cause.** That branch merged this one at 0ce6f1c6, before cd371f29.
+- `cplRebase` (from 5706e4de) reads the coupling header from workgroup memory before
+  `coupleBegin` writes it.
+- Any coupled vehicle that re-bases (beyond `REBASE_RADIUS`) then loops over garbage
+  bounds. The 64-car town's 4 × 4 lots put cars up to ~145 m out; the 32-car town's
+  cars stay within it.
+- Each loop runs up to its cap (2^20 passes) per lane, writing over gMisc. The corrupted
+  record headers then drive the coupling's nested loops toward the cap too.
+- The bug was present from 5706e4de until cd371f29. The broadphase, centred damping and
+  surface contact are not involved.
+
+**The fix and the guard** (26e3b700, lossless):
+- `cplB()` and `cplS()` are held to 1,024, as the host already requires.
+- `cplVeh(v)` holds each vehicle's record counts to the region's B and S. A bad count
+  raises the loop-cap flag, so the frame fails as a runaway loop in milliseconds
+  (`explicit_rigid_gpu` `a_corrupt_proxy_header_fails_loudly_not_slowly`: 0.02 s).
+
+**Checked on this branch, under hard timers.** The town runs to completion at 4, 8, 16 and
+32 cars. `explicit_frame_probe` now prints how many vehicles re-based.
+
+**Open: Metal `explicit_surface_proxy_parity`** fails 3 of 5 tests, with early frames
+2–4 cm apart.
+- It passes at a2ff9e02 and at 5706e4de, and fails from the showcase merge 0ce6f1c6 on
+  (the test did not exist on showcase-main).
+- The wgpu counterpart passes.
+- The guard does not change it: the numbers are the same with and without it.
