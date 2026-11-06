@@ -4193,10 +4193,10 @@ impl ExplicitBeams {
     /// sub-bodies are lighter than the nodes (k/m), so a hit whose nodes are in
     /// other hits stops only m_split·inv of its pair's approach alone (the rest a
     /// ghost speed the position steps cancel each step). Each hit's pair, at the
-    /// forces now (the first pass's contact sums with them) still approaching over
-    /// the step, a·h + vn + max(vn, 0) < 0 ([`contact_response`]'s rule, a the
-    /// pair's relative normal acceleration), takes r = −(a·m + (vn + max(vn,
-    /// 0))·m/h) > 0 along its normal with the first pass's reduced mass m:
+    /// forces now (the first pass's contact sums with them), approaching (vn < 0)
+    /// and still approaching over the step, a·h + vn < 0 ([`contact_response`]'s
+    /// rule, a the pair's relative normal acceleration), takes r = −(a·m +
+    /// vn·m/h) > 0 along its normal with the first pass's reduced mass m:
     /// momentum-exact, and never more than the first pass's split allows (counts of
     /// the active hits only were measured to over-stop: +0.23 J of self-contact
     /// work in a tenth of the 58 km/h wall). No friction and no position step (the
@@ -4223,7 +4223,10 @@ impl ExplicitBeams {
             let a = (acc(hn, node) - at).dot(n);
             let vn = v.dot(n);
             let x = vn + vn.max(0.0);
-            drive.push((a, x, a * STEP + x < 0.0));
+            // (Approaching pairs only: a separating one has no ghost speed, and
+            // its residual over-stopped where hits share nodes, +0.4 J of
+            // self-contact work in a tenth of the 48 km/h wall.)
+            drive.push((a, x, vn < 0.0 && a * STEP + x < 0.0));
         }
         let im = |n: &Node, k: u32| {
             if n.has(NODE_IMMOVABLE) {

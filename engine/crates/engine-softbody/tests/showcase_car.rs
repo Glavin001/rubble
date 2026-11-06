@@ -3818,6 +3818,16 @@ fn contact_work_tenths(
                 most[j] = most[j].max(d[j]);
             }
             most[3] = most[3].max(d[0] + d[1] + d[2] - 2e-2 * d[2].abs());
+            if std::env::var("CW_TENTHS").is_ok() {
+                eprintln!(
+                    "(tenth {:.1} s) self {:+.3} vehicle {:+.3} steps {:+.3} together {:+.3}",
+                    k as f32 * STEP,
+                    d[0],
+                    d[1],
+                    d[2],
+                    d[0] + d[1] + d[2] - 2e-2 * d[2].abs()
+                );
+            }
             if k as f32 * STEP > settle + 1e-4 {
                 most[4] += d[0] + d[1] + d[2];
             }
@@ -3873,9 +3883,13 @@ fn contacts_do_no_positive_work() {
             "({what}) vehicle contact did {vc} J over a tenth"
         );
     };
-    for kmh in [
-        47.0, 48.0, 49.0, 50.0, 51.0, 52.0, 54.0, 55.0, 56.0, 57.0, 58.0, 59.0,
-    ] {
+    // (`CW_SKIP_SWEEP=1`, a measurement: the long rest and the T-bone only.)
+    let sweep: &[f32] = if std::env::var("CW_SKIP_SWEEP").is_ok() {
+        &[]
+    } else {
+        &[47.0, 48.0, 49.0, 50.0, 51.0, 52.0, 54.0, 55.0, 56.0, 57.0, 58.0, 59.0]
+    };
+    for &kmh in sweep {
         for drag in [true, false] {
             let s = wall_spawn(&car, kmh, drag, Perturb::default());
             check(
@@ -7985,6 +7999,93 @@ fn beamng_pole_sweep() {
 
 fn offset_of(o: f32) -> f32 {
     o
+}
+
+/// The crushed car settles (jbeam-semantics-spec.md §37): sedan1 into the wall at
+/// 51 km/h (drag on), then at rest to 12 s. The beam-tyre car has no brake (the
+/// solver simulates none outside raycast drive: `brakeTorque` is unsimulated), so
+/// its free wheels may roll and the body is judged by its nodes' motion relative
+/// to the body's own rigid motion (wheels left out: their spin is free).
+///
+/// Bounds (stated, measured 2026-11-06): the most kinetic energy within each second
+/// never exceeds the second before's from 3 s; over the 12th second the body's
+/// relative rms speed (mass-weighted) is below 80 mm/s and no body node moves
+/// faster than 2.5 m/s relative (guards on the measured floor, not targets). The step's quantisation floor is reported beside
+/// them: a node's position in single precision at the car's farthest coordinate
+/// moves by whole ulps, ulp/h of speed, and a contact step by 2⁻²⁴ m, 2⁻²⁴/h
+/// (about 1 and 0.12 mm/s). Measured: rms 56 mm/s, fastest 1.49 m/s, the most
+/// kinetic energy per second 1,233 J in the 3rd second to 5.3 J in the 12th. The floor above the quantisation is
+/// a two- to three-node tangle of the crushed bonnet and body (mutual hits with
+/// conflicting normals) that keeps about 0.5 J moving; RoR's push kept +5 J per
+/// tenth and 130 mm/s here, and §37 without the residual pass 800 J/s sloshing
+/// between contact and steps.
+#[test]
+fn crushed_car_settles() {
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let car = Car::of(&b);
+    let mut s = wall_spawn(&car, 51.0, true, Perturb::default());
+    assert!(s.dissipative_contact, "the BeamNG profile");
+    let body = b.skeleton.nodes.len();
+    let per_second = (1.0 / STEP).round() as usize;
+    let mut most_ke = Vec::new();
+    let (mut ke_max, mut rms_last, mut fast_last) = (0.0f64, 0.0f64, 0.0f32);
+    for k in 1..=12 * per_second {
+        s.step();
+        let ke: f64 = s
+            .nodes
+            .iter()
+            .map(|n| 0.5 * f64::from(n.mass) * f64::from(n.vel.length_squared()))
+            .sum();
+        ke_max = ke_max.max(ke);
+        if k > 11 * per_second {
+            let (vc, om, com) = rigid_motion_of(&s.nodes[..body]);
+            let (mut rel, mut total) = (0.0f64, 0.0f64);
+            for n in &s.nodes[..body] {
+                let r = n.vel - vc - om.cross(n.pos - com);
+                rel += f64::from(n.mass) * f64::from(r.length_squared());
+                total += f64::from(n.mass);
+                fast_last = fast_last.max(r.length());
+            }
+            rms_last = rms_last.max((rel / total).sqrt());
+        }
+        if k % per_second == 0 {
+            most_ke.push(ke_max);
+            ke_max = 0.0;
+        }
+    }
+    let far = s
+        .nodes
+        .iter()
+        .map(|n| (s.origin + n.pos).abs().max_element())
+        .fold(0.0f32, f32::max);
+    let ulp = f32::from_bits(far.to_bits() + 1) - far;
+    let floor = (ulp / STEP).max(1.0 / 16_777_216.0 / STEP);
+    eprintln!(
+        "(settle) the most kinetic energy per second (J): {:?}; over the 12th second relative rms {:.2} mm/s, fastest relative {:.1} mm/s; quantisation floor {:.3} mm/s ({:.0}× below the rms)",
+        most_ke.iter().map(|e| format!("{e:.3}")).collect::<Vec<_>>(),
+        rms_last * 1e3,
+        fast_last * 1e3,
+        floor * 1e3,
+        rms_last / f64::from(floor)
+    );
+    for t in 3..most_ke.len() {
+        assert!(
+            most_ke[t] <= most_ke[t - 1],
+            "kinetic energy rose in second {}: {} J after {} J",
+            t + 1,
+            most_ke[t],
+            most_ke[t - 1]
+        );
+    }
+    assert!(rms_last < 0.08, "relative rms {rms_last} m/s over the 12th second");
+    assert!(fast_last < 2.5, "a body node at {fast_last} m/s relative over the 12th second");
 }
 
 /// A measurement (`--ignored`): sedan1 into the wall at `SETTLE_KMH` (51), then

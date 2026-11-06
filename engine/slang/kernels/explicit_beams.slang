@@ -4049,7 +4049,7 @@ float3 resAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
 
 // The hit's pair (contacter h, triangle t0..t2 at weights, normal nn, relative
 // velocity vv): its relative normal acceleration `a` now, `x` = vn + max(vn, 0),
-// and whether it is still approaching over the step.
+// and whether it approaches (vn < 0) and still does over the step.
 bool resDrive(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float3 vv,
               uint beamOff, uint groupOff, uint groupCount, uint parity, out float a, out float x)
 {
@@ -4059,7 +4059,7 @@ bool resDrive(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float 
     a = sdot(ssub3(resAcc(h, beamOff, groupOff, groupCount, parity), at), nn);
     float vn = sdot(vv, nn);
     x = nf(vn + max(vn, 0.0));
-    return nf(smul(a, STEP) + x) < 0.0;
+    return vn < 0.0 && nf(smul(a, STEP) + x) < 0.0;
 }
 
 // An active hit's residual force on its contacter (0: none).
@@ -6610,16 +6610,16 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
     if (surf.dissipative != 0u && vvTwoBody(gStatic[gP.nodeInfoBase + t.tn.x].w, vh)
         && any(f != float3(0.0, 0.0, 0.0)))
     {
-        // §37: the position step, a position impulse δ·m shared like the hit's
-        // force, each node by its own inverse mass (explicit_contact.rs).
+        // §37: the position step, a position impulse δ·m shared by the sub-bodies'
+        // inverse masses (explicit_contact.rs; self contact shares by own masses).
         float delta = shiftDepth(pen, budget, sdot(fh, nn));
         if (delta > 0.0)
         {
             float q = smul(delta, m);
-            float imh = vvImmovable(h) ? 0.0 : sdiv(1.0, P.w);
-            float im1 = vvImmovable(t.tn.y) ? 0.0 : sdiv(1.0, P1.w);
-            float im2 = vvImmovable(t.tn.z) ? 0.0 : sdiv(1.0, P2.w);
-            float im0 = vvImmovable(t.tn.x) ? 0.0 : sdiv(1.0, P0.w);
+            float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), P.w);
+            float im1 = vvImmovable(t.tn.y) ? 0.0 : sdiv(vvSplitK(vvSplitTri(t.tn.y)), P1.w);
+            float im2 = vvImmovable(t.tn.z) ? 0.0 : sdiv(vvSplitK(vvSplitTri(t.tn.z)), P2.w);
+            float im0 = vvImmovable(t.tn.x) ? 0.0 : sdiv(vvSplitK(vvSplitTri(t.tn.x)), P0.w);
             shiftAdd(h, sscale(nn, smul(q, imh)));
             if (alpha > 0.0) shiftAdd(t.tn.y, sscale(nn, -smul(alpha, smul(q, im1))));
             if (beta > 0.0) shiftAdd(t.tn.z, sscale(nn, -smul(beta, smul(q, im2))));

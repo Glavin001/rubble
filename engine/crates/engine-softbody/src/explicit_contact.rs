@@ -18,8 +18,8 @@
 //! bit-identical to stepping each alone.
 
 use crate::explicit_beams::{
-    contact_force, contact_response, shift_depth, ContactSurface, ExplicitBeams, ExplicitKind,
-    ForceTrace, Node, GRAVITY, NODE_IMMOVABLE, STEP,
+    contact_response, shift_depth, ContactSurface, ExplicitBeams, ExplicitKind, ForceTrace, Node,
+    GRAVITY, NODE_IMMOVABLE, STEP,
 };
 use glam::Vec3;
 
@@ -718,7 +718,7 @@ impl ExplicitBeamsWorld {
             let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
             let dissipative =
                 self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact;
-            // (§37's position step shares: the nodes' own inverse masses; none
+            // (§37's position step shares: the sub-bodies' inverse masses; none
             // outside the two-body rule.)
             let (m, fh, ims) = if two_body(b) {
                 // Each node of the hit is one of its k sub-bodies (mass m/k); an
@@ -755,8 +755,11 @@ impl ExplicitBeamsWorld {
                 (
                     m,
                     (acc(self.pass_force[b][h as usize], &node) - at) * m,
-                    // (§37's position step: each node's share over its own mass.)
-                    Some([im(&node, 1.0), im(&n1, 1.0), im(&n2, 1.0), im(&n0, 1.0)]),
+                    // (§37's position step: the sub-bodies' inverse masses k/m.
+                    // Self contact shares by the nodes' own masses; here own masses
+                    // let the 80 km/h T-bone leak 15–17 of 1,026 striker nodes, k/m
+                    // 6–7.)
+                    Some([imh, im(&n1, k(i1)), im(&n2, k(i2)), im(&n0, k(i0))]),
                 )
             } else {
                 let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
@@ -779,9 +782,8 @@ impl ExplicitBeamsWorld {
                 node.friction,
             );
             if let (true, Some([imh, im1, im2, im0])) = (f != Vec3::ZERO && dissipative, ims) {
-                // §37: the position step, a position impulse δ·m shared like the
-                // hit's force (each node by its own inverse mass; explicit_beams'
-                // self-hit order).
+                // §37: the position step, a position impulse δ·m shared by the
+                // sub-bodies' inverse masses (explicit_beams' self-hit order).
                 let delta = shift_depth(x.p, budget, fh.dot(x.n));
                 if delta > 0.0 {
                     let q = delta * m;
@@ -822,7 +824,8 @@ impl ExplicitBeamsWorld {
             }
         }
         let dissipative = |b: usize| {
-            two_body(b) && (self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact)
+            two_body(b)
+                && (self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact)
         };
         let on: Vec<bool> = hits.iter().map(|x| dissipative(x.b)).collect();
         if vehicle_residual() && on.iter().any(|&x| x) {
@@ -895,15 +898,17 @@ impl ExplicitBeamsWorld {
             }
             let [i0, i1, i2] = x.tri;
             let va = &self.vehicles[a];
-            let inv = im(&self.vehicles[x.b].nodes[x.h as usize], split_b[x.b][x.h as usize])
-                + two_body_inverse_mass(
-                    [
-                        im(&va.nodes[i1 as usize], split_a[i1 as usize]),
-                        im(&va.nodes[i2 as usize], split_a[i2 as usize]),
-                        im(&va.nodes[i0 as usize], split_a[i0 as usize]),
-                    ],
-                    x.w,
-                );
+            let inv = im(
+                &self.vehicles[x.b].nodes[x.h as usize],
+                split_b[x.b][x.h as usize],
+            ) + two_body_inverse_mass(
+                [
+                    im(&va.nodes[i1 as usize], split_a[i1 as usize]),
+                    im(&va.nodes[i2 as usize], split_a[i2 as usize]),
+                    im(&va.nodes[i0 as usize], split_a[i0 as usize]),
+                ],
+                x.w,
+            );
             if inv <= 0.0 {
                 continue;
             }
