@@ -4655,6 +4655,14 @@ fn door_path_probe(s: &ExplicitBeams, b: &Built, door: &str, d: f32, zc: f32) {
                 .iter()
                 .find(|(_, g)| g.contains(&(a as u32)) && g.contains(&(c as u32)))
                 .map_or("skin".to_string(), |(k, _)| k.to_string());
+            // (`P_WEB=1`: a member's chords, along the car at rest, apart
+            // from its webs.)
+            let key = if std::env::var("P_WEB").is_ok_and(|v| v == "1") {
+                let r = (sk.nodes[a].p - sk.nodes[c].p).normalize_or_zero();
+                format!("{key}{}", if r.z.abs() > 0.9 { ".chord" } else { ".web" })
+            } else {
+                key
+            };
             let e = own.entry(key).or_default();
             e.0 += 1;
             let r = if bm.force > 0.0 {
@@ -4683,10 +4691,28 @@ fn door_path_probe(s: &ExplicitBeams, b: &Built, door: &str, d: f32, zc: f32) {
             } else {
                 continue;
             };
-            if sk.nodes[a as usize].part as usize != pt || bm.broken {
+            if sk.nodes[a as usize].part as usize != pt {
                 continue;
             }
             let past = s.nodes[f as usize].pos.x.abs() - s.nodes[a as usize].pos.x.abs();
+            // (`P_BEAR=1`: each bearing beam's rest and present length,
+            // force and state.)
+            if std::env::var("P_BEAR").is_ok_and(|v| v == "1") {
+                let l = s.nodes[a as usize].pos.distance(s.nodes[f as usize].pos);
+                eprintln!(
+                    "(p bear {:.0} mm) door {a} on flange {f}: rest {:.3} len {l:.3} m, {:.1} kN, tc {:.1} kN, k {:.0} kN/m, past {:.0} mm{}",
+                    d * 1e3,
+                    bm.rest,
+                    bm.force / 1e3,
+                    bm.tc / 1e3,
+                    bm.k / 1e3,
+                    past * 1e3,
+                    if bm.broken { " BROKEN" } else { "" }
+                );
+            }
+            if bm.broken {
+                continue;
+            }
             if past > 0.0 {
                 c += 1;
                 worst = worst.max(past * 1e3);
@@ -7950,4 +7976,311 @@ fn beamng_pole_sweep() {
 
 fn offset_of(o: f32) -> f32 {
     o
+}
+
+/// A solver-level topology census, the same arithmetic for sedan1 and for
+/// BeamNG's content: per part, its nodes, beam ends per node by kind, the
+/// share of nodes whose Gershgorin row (Σ (h²k + 2hc)(1/mᵢ + 1/√(mᵢmⱼ)) over
+/// h²·[`G_LIMIT`]) is at the bound (> 0.95), how a saturated node's row
+/// divides by kind, and the median node mass, length, k·L, yield strain and
+/// springback after 20 % plastic strain. A measurement (`--ignored`).
+fn solver_census(
+    s: &ExplicitBeams,
+    n: usize,
+    part_of: &dyn Fn(usize) -> Option<String>,
+    kind_of: &dyn Fn(usize) -> String,
+) {
+    use engine_softbody::authoring::skeleton::G_LIMIT;
+    let h = STEP;
+    let limit = G_LIMIT * h * h;
+    let mut row = vec![0.0f32; s.nodes.len()];
+    for bm in &s.beams {
+        let (a, b) = (bm.a as usize, bm.b as usize);
+        let q = h * h * bm.k + 2.0 * h * bm.c;
+        let (ma, mb) = (s.nodes[a].mass, s.nodes[b].mass);
+        let w = 1.0 / (ma * mb).sqrt();
+        row[a] += q * (1.0 / ma + w);
+        row[b] += q * (1.0 / mb + w);
+    }
+    for r in &mut row {
+        *r /= limit;
+    }
+    #[derive(Default)]
+    struct P {
+        nodes: HashSet<usize>,
+        ends: std::collections::BTreeMap<String, usize>,
+        share: std::collections::BTreeMap<String, f64>,
+        kl: Vec<f32>,
+        eps: Vec<f32>,
+        len: Vec<f32>,
+        kl_by: std::collections::BTreeMap<String, Vec<f32>>,
+        eps_by: std::collections::BTreeMap<String, Vec<f32>>,
+    }
+    let mut by: std::collections::BTreeMap<String, P> = Default::default();
+    for (j, bm) in s.beams.iter().enumerate() {
+        let (a, b) = (bm.a as usize, bm.b as usize);
+        if a >= n || b >= n {
+            continue;
+        }
+        let (Some(pa), Some(pb)) = (part_of(a), part_of(b)) else {
+            continue;
+        };
+        if pa != pb {
+            continue;
+        }
+        if bm.k <= 0.0 && bm.c <= 0.0 {
+            continue;
+        }
+        let kind = kind_of(j);
+        let p = by.entry(pa).or_default();
+        p.nodes.insert(a);
+        p.nodes.insert(b);
+        *p.ends.entry(kind.clone()).or_default() += 2;
+        let q = h * h * bm.k + 2.0 * h * bm.c;
+        for (i, o) in [(a, b), (b, a)] {
+            if row[i] > 0.95 {
+                let (mi, mo) = (s.nodes[i].mass, s.nodes[o].mass);
+                *p.share.entry(kind.clone()).or_default() +=
+                    (q * (1.0 / mi + 1.0 / (mi * mo).sqrt())) as f64;
+            }
+        }
+        if bm.ty == ExplicitType::Deformable && bm.k > 0.0 && bm.tc < 1.0e8 && bm.rest > 1e-3 {
+            let kl = bm.k * bm.rest;
+            p.kl.push(kl);
+            p.eps.push(bm.tc / kl);
+            p.len.push(bm.rest);
+            p.kl_by.entry(kind.clone()).or_default().push(kl);
+            p.eps_by.entry(kind.clone()).or_default().push(bm.tc / kl);
+        }
+    }
+    let med = |v: &mut Vec<f32>| {
+        if v.is_empty() {
+            return f32::NAN;
+        }
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    for (k, p) in &mut by {
+        let nn = p.nodes.len() as f32;
+        let total: usize = p.ends.values().sum();
+        let sat = p.nodes.iter().filter(|&&i| row[i] > 0.95).count() as f32 / nn;
+        let mut mass: Vec<f32> = p.nodes.iter().map(|&i| s.nodes[i].mass).collect();
+        let e = med(&mut p.eps);
+        eprintln!(
+            "[census] {k}: {} nodes, mass p50 {:.2} kg, {:.1} ends per node, at the bound {:.0} %, L p50 {:.3} m, k·L p50 {:.2e} N, ε_y p50 {:.2} %, springback at 20 % {:.0} %",
+            p.nodes.len(),
+            med(&mut mass),
+            total as f32 / nn,
+            sat * 100.0,
+            med(&mut p.len),
+            med(&mut p.kl),
+            e * 100.0,
+            e / (e + 0.2) * 100.0
+        );
+        let st: f64 = p.share.values().sum();
+        for (kind, &ends) in &p.ends {
+            let sh = p.share.get(kind).copied().unwrap_or(0.0);
+            let mut kl = p.kl_by.get(kind).cloned().unwrap_or_default();
+            let mut ey = p.eps_by.get(kind).cloned().unwrap_or_default();
+            eprintln!(
+                "[census]    {kind:<14} {:5.2} ends/node, {:4.0} % of saturated rows, k·L p50 {:.2e}, ε_y p50 {:.2} %",
+                ends as f32 / nn,
+                if st > 0.0 { sh / st * 100.0 } else { 0.0 },
+                med(&mut kl),
+                med(&mut ey) * 100.0
+            );
+        }
+    }
+}
+
+/// sedan1's beams by kind for [`solver_census`]: within a member (both ends
+/// in one member's group) by the angle to the member's local axis (the
+/// principal axis of its nodes within 0.35 m of the beam's midpoint): chord
+/// (within 32°; `bend` when longer than 1.5× the member's median chord),
+/// diagonal (32–73°), ring/web (past 73°); `lane chord` a chord on the
+/// shell; between two members `joint`; shell edges in no common member
+/// `sheet`; ties, dashpots, bearing (support) beams and rigidifier spokes
+/// by their flags and groups.
+fn sedan1_kinds(b: &Built) -> Vec<String> {
+    use engine_softbody::authoring::skeleton::BeamType;
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let shell: HashSet<u32> = b.shell.nodes.iter().copied().collect();
+    let names: Vec<&String> = b
+        .groups
+        .keys()
+        .filter(|k| {
+            b.def
+                .members
+                .iter()
+                .any(|m| *k == &m.name || k.strip_suffix("_r").is_some_and(|x| x == m.name))
+        })
+        .collect();
+    let mut of: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (gi, g) in names.iter().enumerate() {
+        for &i in &b.groups[*g] {
+            of[i as usize].push(gi);
+        }
+    }
+    let rigid: HashSet<u32> = b
+        .groups
+        .iter()
+        .filter(|(k, _)| k.contains("rigidifier"))
+        .flat_map(|(_, g)| g.iter().copied())
+        .collect();
+    let flange: HashSet<u32> = b
+        .groups
+        .iter()
+        .filter(|(k, _)| k.contains("flange"))
+        .flat_map(|(_, g)| g.iter().copied())
+        .collect();
+    let axis = |gi: usize, at: Vec3| -> Vec3 {
+        let pts: Vec<Vec3> = b.groups[names[gi]]
+            .iter()
+            .map(|&i| sk.pos(i))
+            .filter(|p| p.distance(at) < 0.35)
+            .collect();
+        if pts.len() < 2 {
+            return Vec3::ZERO;
+        }
+        let c = pts.iter().copied().sum::<Vec3>() / pts.len() as f32;
+        let mut m = glam::Mat3::ZERO;
+        for p in &pts {
+            let d = *p - c;
+            m += glam::Mat3::from_cols(d * d.x, d * d.y, d * d.z);
+        }
+        let mut v = Vec3::new(0.577, 0.577, 0.577);
+        for _ in 0..30 {
+            v = (m * v).normalize_or_zero();
+        }
+        v
+    };
+    let mut raw: Vec<(String, Option<(usize, f32)>)> = Vec::with_capacity(sk.beams.len());
+    for bm in &sk.beams {
+        let (a, c) = (bm.a, bm.b);
+        let (pa, pc) = (sk.pos(a), sk.pos(c));
+        let l = pa.distance(pc);
+        let k = if bm.damper {
+            "dashpot".to_string()
+        } else if bm.ty != BeamType::Normal {
+            "bearing".into()
+        } else if rigid.contains(&a) && rigid.contains(&c) {
+            "rigidifier".into()
+        } else if flange.contains(&a) || flange.contains(&c) {
+            "flange".into()
+        } else if bm.tie {
+            "tie".into()
+        } else if let Some(&gi) = of[a as usize].iter().find(|g| of[c as usize].contains(g)) {
+            let ax = axis(gi, 0.5 * (pa + pc));
+            let cs = ((pc - pa) / l.max(1e-4)).dot(ax).abs();
+            if cs > 0.85 {
+                raw.push(("chord".into(), Some((gi, l))));
+                continue;
+            } else if cs > 0.3 {
+                "diagonal".into()
+            } else {
+                "ring/web".into()
+            }
+        } else if !of[a as usize].is_empty() && !of[c as usize].is_empty() {
+            "joint".into()
+        } else if shell.contains(&a) && shell.contains(&c) {
+            "sheet".into()
+        } else {
+            "other".into()
+        };
+        raw.push((k, None));
+    }
+    // Bends: chords longer than 1.5× their member's median chord.
+    let mut chord_len: Vec<Vec<f32>> = vec![Vec::new(); names.len()];
+    for (_, x) in &raw {
+        if let Some((gi, l)) = x {
+            chord_len[*gi].push(*l);
+        }
+    }
+    let medl: Vec<f32> = chord_len
+        .into_iter()
+        .map(|mut v| {
+            v.sort_by(f32::total_cmp);
+            v.get(v.len() / 2).copied().unwrap_or(0.0)
+        })
+        .collect();
+    raw.into_iter()
+        .zip(&sk.beams)
+        .map(|((k, x), bm)| match x {
+            Some((gi, l)) if l > 1.5 * medl[gi] => "bend".into(),
+            Some(_) if shell.contains(&bm.a) && shell.contains(&bm.b) => "lane chord".into(),
+            Some(_) => "chord".into(),
+            None => k,
+        })
+        .collect()
+}
+
+/// [`solver_census`] on sedan1 (`RES`, default Medium) from its `.truck`.
+#[test]
+#[ignore]
+fn topology_census_solver() {
+    let res = std::env::var("RES")
+        .ok()
+        .and_then(|r| Resolution::parse(&r))
+        .unwrap_or(Resolution::Medium);
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: res,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let sk = &b.skeleton;
+    let s = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+    let kinds = sedan1_kinds(&b);
+    // The .truck's beams by their nodes to the skeleton's (the order differs).
+    let mut at: std::collections::HashMap<(u32, u32), usize> = Default::default();
+    for (j, bm) in sk.beams.iter().enumerate() {
+        at.entry((bm.a.min(bm.b), bm.a.max(bm.b))).or_insert(j);
+    }
+    let kind_of = |j: usize| -> String {
+        let bm = &s.beams[j];
+        at.get(&(bm.a.min(bm.b), bm.a.max(bm.b)))
+            .map_or_else(|| "solver".into(), |&k| kinds[k].clone())
+    };
+    let key = |name: &str| -> String {
+        if name.starts_with("door") {
+            "door".into()
+        } else if name.starts_with("fender") {
+            "fender".into()
+        } else {
+            name.into()
+        }
+    };
+    solver_census(
+        &s,
+        sk.nodes.len(),
+        &|i| Some(key(&sk.parts[sk.nodes[i].part as usize])),
+        &kind_of,
+    );
+}
+
+/// [`solver_census`] on BeamNG's BX (`RUBBLE_JBEAM_BX`), its beams by
+/// solver kind; a node is in the first part that lists it.
+#[test]
+#[ignore]
+fn beamng_topology_census() {
+    let Some(desc) = beamng_desc() else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    let s = beamng_spawn(&desc, Vec3::ZERO, 0.0);
+    let n = desc.nodes.len();
+    let mut part = vec![None; n];
+    for p in &desc.parts {
+        for &i in &p.nodes {
+            if part[i as usize].is_none() {
+                part[i as usize] = Some(p.name.clone());
+            }
+        }
+    }
+    solver_census(&s, n, &|i| part[i].clone(), &|j| {
+        format!("{:?}", s.beams[j].kind)
+    });
 }

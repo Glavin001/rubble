@@ -1715,21 +1715,21 @@ pub fn sedan() -> VehicleDef {
         m.skin = true;
         m
     };
-    // Not built (`LID_INNER=1` builds them, a measurement switch): the
-    // rigidifier stands in for the inner stamping as in BeamNG's BX, and these
-    // ladders took 37 % of the bonnet's row at the step's bound from its
-    // sheet (its first mode 13.0 Hz without them against 12.4 with, 19.3
-    // against 17.9 at the BX's rigidifier depth) and one of them pumped
-    // energy at the step's Nyquist rate in the 120 km/h wall
-    // (`vehicle-authoring.md`, "The lids").
-    if std::env::var("LID_INNER").is_ok_and(|v| v == "1") {
-        members.extend([
-            inner("lid_inner_r", 0.14, 0.58, [1.00, 1.04]),
-            inner("lid_inner_f", 0.46, 0.57, [1.03, 1.07]),
-            inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
-            inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
-        ]);
-    }
+    // The lids' inner ladders. The two-tier `sedan` keeps them (its `.truck`
+    // is unchanged; its Low deck top binds to them). The one-tier `sedan1`
+    // leaves them out ([`sedan_one_tier`], `LID_INNER=1` keeps them, a
+    // measurement switch): the rigidifier stands in for the inner stamping
+    // as in BeamNG's BX, and these ladders took 37 % of the bonnet's row at
+    // the step's bound from its sheet (its first mode 13.0 Hz without them
+    // against 12.4 with, 19.3 against 17.9 at the BX's rigidifier depth) and
+    // one of them pumped energy at the step's Nyquist rate in the 120 km/h
+    // wall (`vehicle-authoring.md`, "The lids").
+    members.extend([
+        inner("lid_inner_r", 0.14, 0.58, [1.00, 1.04]),
+        inner("lid_inner_f", 0.46, 0.57, [1.03, 1.07]),
+        inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
+        inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
+    ]);
     // The transverse members a sedan has besides those above (their
     // sections in [`side_sections`]): the front subframe's rear cross
     // member and the rear seat cushion's cross member. (A boot floor cross
@@ -2192,6 +2192,15 @@ pub fn sedan_one_tier() -> VehicleDef {
     d.one_tier = true;
     d.tiered = false;
     d.damping = Some(super::vehicle::DampingRatios::default());
+    // No lid inner ladders (see [`sedan`]; `LID_INNER=1` keeps them).
+    if std::env::var("LID_INNER").map_or(true, |v| v != "1") {
+        d.members.retain(|m| {
+            !matches!(
+                m.name.as_str(),
+                "lid_inner_r" | "lid_inner_f" | "bonnet_inner_1" | "bonnet_inner_3"
+            )
+        });
+    }
     // The C-pillar (the rear doors' striker pillar) at pole-width stations
     // (A8: an outer member's stations at most a 254 mm pole apart), so its
     // latch meets the pillar's own nodes.
@@ -2671,9 +2680,98 @@ pub fn sedan_one_tier() -> VehicleDef {
     }
     if shut {
         shut_faces(&mut d);
+        // The B-pillar's section at the shut lines (`SHUT_SECTION=0`: the
+        // 0.14 m truss box of before, a measurement switch): [`shut_section`].
+        if shut_section_on() {
+            shut_section(&mut d);
+        }
     }
     d
 }
+
+/// Whether [`shut_section`] is built (with the shut faces).
+pub fn shut_section_on() -> bool {
+    std::env::var("SHUT_FACES").is_ok_and(|v| v == "1")
+        && std::env::var("SHUT_SECTION").map_or(true, |v| v != "0")
+}
+
+/// The B-pillar as its real section, 120 mm along the car × 70 mm across
+/// ([`side_sections`]' and the layered section's), against the 0.14 m
+/// truss box it was drawn as.
+/// - **It fits the gap.** Its front face is at the front door's lock edge
+///   (2.30) and its rear face at the rear door's hinge edge (2.18), so each
+///   door's hem row ([`HEM`] inside its outline) stands one compressed seal
+///   ahead of the pillar's face, not in its plane.
+/// - **Its depth** across the car is the reinforcement hat's 70 mm about
+///   the same line (x 0.79), so its inner face (x 0.755) is the doors'
+///   inner chords' (x 0.76): each rail's inner end bears along the car on
+///   the pillar's inner corner, the compression side of the end-fixity
+///   couple. Its chords' yields are taken over that depth (the section's
+///   M_p unchanged, its lever halved).
+/// - **A station at each door rail's end height** (belt, mid rail,
+///   intrusion beam and end faces, both doors): each rail's end meets the
+///   pillar's own section, not a bay 0.6 m long. Heights within
+///   [`SHUT_MERGE`] are one station; within [`SHUT_MERGE`] of the pillar's
+///   belt knee the knee moves to it (a pillar's tumblehome turns at the
+///   belt); within [`SHUT_SILL`] of its foot the sill carries the end.
+fn shut_section(d: &mut VehicleDef) {
+    // (The doors' edges at the B-pillar: the front door's lock edge and the
+    // rear door's hinge edge, [`sedan`]'s outlines.)
+    let (front, rear) = (2.30, 2.18);
+    let mut heights: Vec<f32> = d
+        .members
+        .iter()
+        .filter(|m| m.name.starts_with("door_"))
+        .flat_map(|m| [m.path[0], *m.path.last().unwrap()])
+        .filter(|p| (p[2] - (front + HEM)).abs() < 0.02 || (p[2] - (rear - HEM)).abs() < 0.02)
+        .map(|p| p[1])
+        .collect();
+    heights.sort_by(f32::total_cmp);
+    for m in d.members.iter_mut().filter(|m| m.name == "pillar_b") {
+        let foot = m.path[0];
+        let mut knee = m.path[1];
+        let top = m.path[2..].to_vec();
+        // (Clusters of heights each within `SHUT_MERGE` of the next, each
+        // one station at its mean.)
+        let mut clusters: Vec<Vec<f32>> = Vec::new();
+        for &h in heights.iter().filter(|&&h| h >= foot[1] + SHUT_SILL) {
+            match clusters.last_mut() {
+                Some(c) if h - c.last().unwrap() < SHUT_MERGE => c.push(h),
+                _ => clusters.push(vec![h]),
+            }
+        }
+        let mut lower: Vec<f32> = Vec::new();
+        for c in clusters {
+            let h = c.iter().sum::<f32>() / c.len() as f32;
+            if (h - knee[1]).abs() < SHUT_MERGE {
+                knee[1] = h;
+            } else {
+                lower.push(h);
+            }
+        }
+        let mut path = vec![foot];
+        for h in lower.into_iter().filter(|&h| h < knee[1]) {
+            let t = (h - foot[1]) / (knee[1] - foot[1]);
+            let p = [0, 1, 2].map(|k| foot[k] + (knee[k] - foot[k]) * t);
+            path.push([p[0], h, p[2]]);
+        }
+        path.push(knee);
+        path.extend(top);
+        m.path = path;
+        // 120 along the car (its width, square to `OUT`) × 70 across; the
+        // chords' yields over the 70 mm lever instead of 140 mm.
+        m.width = front - rear;
+        m.scale = m.scale.map(|s| s * m.height / 0.07);
+        m.height = 0.07;
+    }
+}
+
+/// Door rail end heights closer than this (m) are one B-pillar station
+/// ([`shut_section`]; a Choice, about a rail's 60 mm strip width).
+pub const SHUT_MERGE: f32 = 0.05;
+/// A door rail's end this close above the B-pillar's foot (m) is the sill's
+/// ([`shut_section`]; a Choice: the sill's 100 mm section and a bay).
+pub const SHUT_SILL: f32 = 0.15;
 
 /// How far inside a door's outline its shut face's row of nodes lies (m):
 /// the hem, where the outer panel is folded over the inner's flange (a

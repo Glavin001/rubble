@@ -1607,6 +1607,14 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                         && along.z.abs() > 0.7
                         && std::env::var("SHUT_FACES").is_ok_and(|v| v == "1")
                         && std::env::var("SHUT_BEAR").map_or(true, |v| v != "0");
+                    // (With the B-pillar's shut section, `sedan::shut_section`,
+                    // the pillar's face is one compressed seal, `sedan::HEM`,
+                    // beyond the door's hem row: half of it is the least.)
+                    let reach = if super::sedan::shut_section_on() {
+                        0.5 * super::sedan::HEM
+                    } else {
+                        0.03
+                    };
                     for &a in &ends {
                         let pick: Vec<u32> = if shut_bear {
                             let pa = sk.pos(a);
@@ -1615,7 +1623,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                                 .filter(|&b| {
                                     let d = sk.pos(b) - pa;
                                     let ax = d.dot(along);
-                                    ax >= 0.03
+                                    ax >= reach
                                         && (d - along * ax).length() <= ax
                                         && d.length() <= 0.3
                                 })
@@ -2046,17 +2054,28 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                 // pillar and to its neighbours along the strip.
                 let mut strip: Vec<u32> = Vec::new();
                 for (nodes, c) in &edge {
+                    // With the B-pillar's shut section (`sedan::shut_section`)
+                    // each flange is its pillar's own: one compressed seal
+                    // (`sedan::HEM`) inboard of the door's inner chord, welded
+                    // to that member's nodes at its strip's real stiffness.
+                    let own = one && super::sedan::shut_section_on();
                     let gap = std::env::var("FLANGE_GAP")
                         .ok()
                         .and_then(|v| v.parse::<f32>().ok())
-                        .unwrap_or(FLANGE_GAP);
-                    let pf = Vec3::new(side * (xin - gap), c.y, c.z);
+                        .unwrap_or(if own { super::sedan::HEM } else { FLANGE_GAP });
+                    // (`FLANGE_INTO=<m>`: the flange that far under the door,
+                    // toward its middle, a measurement switch.)
+                    let into = std::env::var("FLANGE_INTO")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(0.0);
+                    let pf = Vec3::new(side * (xin - gap), c.y, c.z + into * (zmid - c.z).signum());
                     let flange = flange_of[&sk.nearest(pf, &flanged, 1)[0]].clone();
                     // (`FLANGE_ROOT=member`: the flange is its pillar's own
                     // stampings' flange, so it is welded to that member's
                     // nodes only, not to the skin round it.)
                     let own_member: Vec<u32> =
-                        if std::env::var("FLANGE_ROOT").is_ok_and(|v| v == "member") {
+                        if own || std::env::var("FLANGE_ROOT").is_ok_and(|v| v == "member") {
                             flanged
                                 .iter()
                                 .copied()
@@ -2073,7 +2092,9 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                             } else {
                                 &own_member
                             },
-                            4,
+                            // (Its own member's section: two stations' nodes,
+                            // so not in one plane.)
+                            if own { 6 } else { 4 },
                         )
                         .into_iter()
                         .filter(|&r| sk.pos(r).distance(pf) <= 0.35)
@@ -2114,7 +2135,8 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     // ties to the pillar take that strip's real stiffness,
                     // E·t·w/L (the step's bound then lowers them where it
                     // must, [`Skeleton::cap_to_bound`]).
-                    let real_flange = one && std::env::var("FLANGE_REAL").is_ok_and(|v| v == "1");
+                    let real_flange =
+                        own || (one && std::env::var("FLANGE_REAL").is_ok_and(|v| v == "1"));
                     let strip_k = |sk: &Skeleton, x: u32, y: u32, m: Material| -> Material {
                         let l = sk.pos(x).distance(sk.pos(y)).max(1e-3);
                         let target = E_STEEL * flange.t * flange.width / l;
