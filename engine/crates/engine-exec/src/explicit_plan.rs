@@ -537,12 +537,6 @@ impl ExplicitUpload {
         // (Surface contact's position steps too, §38.)
         let any_shift = vehicles.iter().any(|v| v.dissipative_contact || v.surface_contact);
         let any_surface = vehicles.iter().any(|v| v.surface_contact);
-        if any_surface {
-            assert!(
-                coupling.is_none(),
-                "explicit vehicles: surface contact (jbeam-semantics-spec.md §38) runs against static boxes and shapes on the GPU; with rigid proxies it is the CPU reference's only (ExplicitBeams::rigid)"
-            );
-        }
         if any_anti {
             assert!(
                 nv < engine_softbody::explicit_contact::CLIP_SELF as usize,
@@ -1379,7 +1373,16 @@ impl ExplicitUpload {
                 cap.bodies,
                 cap.shapes | cap.planes << 16,
             ];
-            misc[couple_rec + 1] = [layout.acc_base, cull_base, 0, 0];
+            // Surface contact against the proxies (§38.3): per vehicle and proxy body
+            // its surface hits this step (gAcc), at the header's .z (0: none).
+            let surf_body = if any_surface {
+                let at = acc_init.len() as u32;
+                acc_init.extend(std::iter::repeat_n(0, (cap.bodies * nv as u32) as usize));
+                at
+            } else {
+                0
+            };
+            misc[couple_rec + 1] = [layout.acc_base, cull_base, surf_body, 0];
             layout
         });
         // Raycast wheels (explicit_plan::drive): a region per vehicle when any has them.

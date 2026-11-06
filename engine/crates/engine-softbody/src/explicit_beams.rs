@@ -3307,6 +3307,11 @@ impl ExplicitBeams {
         if self.surface_contact {
             self.surface_pass();
         }
+        // The rigid proxies integrate this step's reactions, the node pass's and the
+        // surface pass's (nothing between the node pass and here reads them).
+        if let Some(r) = self.rigid.as_mut() {
+            r.end_step();
+        }
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 2);
         }
@@ -3497,10 +3502,9 @@ impl ExplicitBeams {
         }
         self.contact_force = cf;
         self.tread = tread;
-        if let Some(mut r) = rigid {
-            r.end_step();
-            self.rigid = Some(r);
-        }
+        // The proxies integrate their reactions at the step's end (`Self::step`), after
+        // the surface pass has added its own.
+        self.rigid = rigid;
         if let Some(g) = self.grab {
             self.grab_pass(g);
         }

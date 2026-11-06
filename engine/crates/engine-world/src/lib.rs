@@ -73,7 +73,7 @@ pub use engine_terrain::{
 };
 pub use engine_webgpu::TerrainStepReport;
 pub use error::{StaleHandle, Unsupported};
-pub use explicit_vehicles::ExplicitVehiclesDef;
+pub use explicit_vehicles::{ExplicitVehiclesDef, VehicleProxy, PROXY_SLACK};
 pub use events::{
     coalesce, BodyEvents, BodyLeftWorld, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
     ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,

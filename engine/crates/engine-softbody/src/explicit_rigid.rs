@@ -19,27 +19,8 @@ use crate::explicit_beams::{
     contact_force, shape_face, ContactSurface, Node, StaticShape, NODE_NO_GROUND, STEP,
 };
 use crate::explicit_surface::SurfaceShape;
+use engine_schema::feature_query as fq;
 use glam::{Mat3, Quat, Vec3};
-
-/// A world box holding the shape, 1 cm wide of it (the surface pass's cull).
-fn surface_bounds(s: &SurfaceShape) -> (Vec3, Vec3) {
-    let (lo, hi) = match s {
-        SurfaceShape::Box { c, axes, half } => {
-            let e = axes[0].abs() * half.x + axes[1].abs() * half.y + axes[2].abs() * half.z;
-            (*c - e, *c + e)
-        }
-        SurfaceShape::Sphere { c, radius } => (*c - Vec3::splat(*radius), *c + Vec3::splat(*radius)),
-        SurfaceShape::Capsule { a, b, radius } => (a.min(*b) - Vec3::splat(*radius), a.max(*b) + Vec3::splat(*radius)),
-        SurfaceShape::Cylinder { c, radius, half_height } => {
-            let e = Vec3::new(*radius, *half_height, *radius);
-            (*c - e, *c + e)
-        }
-        SurfaceShape::Hull { verts, .. } => verts
-            .iter()
-            .fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(a, b), &v| (a.min(v), b.max(v))),
-    };
-    (lo - Vec3::splat(0.01), hi + Vec3::splat(0.01))
-}
 
 /// A convex hull's vertices and edges from its planes (n · x ≤ d inside): every
 /// triple of planes meeting at a point inside all of them (merged within 10 µm), and
@@ -123,10 +104,8 @@ pub struct ProxyShape {
     pub peak: f32,
     /// This step's fixed-point sums: force, moment about `reference`.
     sum: [i64; 6],
-    /// The surface contact's reactions of the last step
-    /// ([`crate::explicit_surface`]), integrated with the next step's sums.
-    surface_sum: [i64; 6],
-    /// A hull's vertices and edges in its own frame (from its planes, once).
+    /// A hull's vertices (scale applied) and edges in its own frame: the World's hull
+    /// records ([`ProxyShape::with_hull_geometry`]), or else from its planes, once.
     hull_local: Option<(Vec<Vec3>, Vec<[u32; 2]>)>,
     /// This step's world geometry and cull box.
     world: Option<(WorldGeom, Vec3, Vec3)>,
@@ -239,10 +218,34 @@ impl ProxyShape {
             reference: Vec3::ZERO,
             peak: 0.0,
             sum: [0; 6],
-            surface_sum: [0; 6],
             hull_local: None,
             world: None,
         }
+    }
+
+    /// A hull's vertices (in its frame, the collider's scale applied) and edges (vertex
+    /// pairs) as the World's hull records hold them (`engine_schema::convex`), for the
+    /// surface contact; without them they are found from the planes.
+    pub fn with_hull_geometry(mut self, verts: Vec<Vec3>, edges: Vec<[u32; 2]>) -> Self {
+        self.hull_local = Some((verts, edges));
+        self
+    }
+
+    /// A hull's local vertices and edges when given or found already (the GPU records
+    /// carry them then, for the surface contact).
+    pub fn hull_geometry_known(&self) -> Option<&(Vec<Vec3>, Vec<[u32; 2]>)> {
+        self.hull_local.as_ref()
+    }
+
+    /// A hull's local vertices and edges (from its planes when not given).
+    pub fn hull_geometry(&mut self) -> Option<&(Vec<Vec3>, Vec<[u32; 2]>)> {
+        let ProxyGeom::Hull { planes, .. } = &self.geom else {
+            return None;
+        };
+        if self.hull_local.is_none() {
+            self.hull_local = Some(hull_from_planes(planes));
+        }
+        self.hull_local.as_ref()
     }
 
     /// The window's angular impulse about point `c` (N m s).
@@ -409,11 +412,6 @@ impl ProxySet {
         let mut force = vec![Vec3::ZERO; nb];
         let mut torque = vec![Vec3::ZERO; nb];
         for s in &mut self.shapes {
-            // The last step's surface reactions with this step's node reactions.
-            for k in 0..6 {
-                s.sum[k] += s.surface_sum[k];
-            }
-            s.surface_sum = [0; 6];
             let f = Vec3::new(unfixed(s.sum[0]), unfixed(s.sum[1]), unfixed(s.sum[2]));
             let m = Vec3::new(unfixed(s.sum[3]), unfixed(s.sum[4]), unfixed(s.sum[5]));
             s.impulse += f * h;
@@ -444,61 +442,54 @@ impl ProxySet {
     }
 
     /// The surface contact's view of the shapes at the bodies' poses now
-    /// ([`crate::explicit_surface`]): each shape in shape order with its cull box.
+    /// ([`crate::explicit_surface`]): each shape in shape order with its cull box. The
+    /// poses are the shared module's strict ones (`fq::shape_pose`), as the GPU's.
     pub fn surface_shapes(&mut self) -> Vec<(SurfaceShape, Vec3, Vec3)> {
         let mut out = Vec::with_capacity(self.shapes.len());
-        for s in &mut self.shapes {
-            let b = &self.bodies[s.body as usize];
-            let (p, q) = shape_pose(b, s);
-            let shape = match &s.geom {
-                ProxyGeom::Box { half } => {
-                    let m = Mat3::from_quat(q);
-                    SurfaceShape::Box {
-                        c: p,
-                        axes: [m.x_axis, m.y_axis, m.z_axis],
-                        half: *half,
-                    }
-                }
-                ProxyGeom::Sphere { radius } => SurfaceShape::Sphere { c: p, radius: *radius },
-                ProxyGeom::Capsule { radius, half_len } => {
-                    let axis = q * Vec3::Y * *half_len;
-                    SurfaceShape::Capsule {
-                        a: p - axis,
-                        b: p + axis,
-                        radius: *radius,
-                    }
-                }
-                ProxyGeom::Hull { planes, .. } => {
-                    let (verts, edges) = s.hull_local.get_or_insert_with(|| hull_from_planes(planes)).clone();
-                    let m = Mat3::from_quat(q);
-                    SurfaceShape::Hull {
-                        verts: verts.iter().map(|&v| p + m * v).collect(),
-                        edges,
-                        planes: planes
-                            .iter()
-                            .map(|&(n, d)| {
-                                let wn = m * n;
-                                (wn, d + wn.dot(p))
-                            })
-                            .collect(),
-                    }
-                }
-            };
-            let (lo, hi) = surface_bounds(&shape);
+        for k in 0..self.shapes.len() {
+            let b = &self.bodies[self.shapes[k].body as usize];
+            let (bp, bq) = (b.pos, b.rot);
+            let shape = surface_shape(bp, bq, &mut self.shapes[k]);
+            let (lo, hi) = fq::bounds(&shape);
             out.push((shape, lo, hi));
         }
         out
     }
 
-    /// Adds the surface contact's force `f` on shape `k` at world point `at` to its
-    /// surface sums (fixed point, as the node reactions), integrated by the next
-    /// [`Self::end_step`].
+    /// Adds the surface contact's force `f` on shape `k` at world point `at` to this
+    /// step's sums (fixed point, as the node reactions), integrated by this step's
+    /// [`Self::end_step`]. The moment is the strict (at − reference) × f.
     pub fn add_surface_reaction(&mut self, k: usize, f: Vec3, at: Vec3) {
         let s = &mut self.shapes[k];
-        let m = (at - s.reference).cross(f);
-        for (slot, v) in s.surface_sum.iter_mut().zip([f.x, f.y, f.z, m.x, m.y, m.z]) {
+        let m = fq::cross3(at - s.reference, f);
+        for (slot, v) in s.sum.iter_mut().zip([f.x, f.y, f.z, m.x, m.y, m.z]) {
             *slot += fixed(v);
         }
+    }
+
+    /// Per shape, its body's velocity when the body is fast for the surface contact's
+    /// casts (§38.4): it moves more than half the shape's least extent in a step,
+    /// counting its spin at the shape's bounding radius, (|v| + |ω| R) h > e / 2, with
+    /// e a box's least half extent, a sphere's or capsule's radius, a hull's least
+    /// plane offset (its inscribed radius about its origin; at least 1 cm). Else none.
+    pub fn cast_velocities(&self) -> Vec<Option<Vec3>> {
+        self.shapes
+            .iter()
+            .map(|s| {
+                let b = &self.bodies[s.body as usize];
+                let (e, radius) = match &s.geom {
+                    ProxyGeom::Box { half } => (half.x.min(half.y).min(half.z), half.length()),
+                    ProxyGeom::Sphere { radius } => (*radius, *radius),
+                    ProxyGeom::Capsule { radius, half_len } => (*radius, radius + half_len),
+                    ProxyGeom::Hull { planes, radius } => {
+                        (planes.iter().fold(f32::INFINITY, |m, p| m.min(p.1)).max(0.01), *radius)
+                    }
+                };
+                let len = |v: Vec3| fq::dot3(v, v).sqrt();
+                let travel = len(b.vel) * STEP + (len(b.ang_vel) * (radius + 0.01)) * STEP;
+                (travel > 0.5 * e).then_some(b.vel)
+            })
+            .collect()
     }
 
     /// Per body, the window's impulse and angular impulse about its centre of mass now.
@@ -511,5 +502,30 @@ impl ProxySet {
             o.1 += s.angular_impulse_about(b.pos);
         }
         out
+    }
+}
+
+/// Proxy shape `s` of a body at (`bp`, `bq`) as the surface contact meets it: the strict
+/// pose (`fq::shape_pose`), a box's axes, a capsule's ends along its local y, a hull's
+/// world vertices, edges and planes (`fq::hull_world`). The GPU's `cplSurfShape` is
+/// the same arithmetic.
+pub fn surface_shape(bp: Vec3, bq: Quat, s: &mut ProxyShape) -> SurfaceShape {
+    let (p, r) = fq::shape_pose(bp, bq, s.local_pos, s.local_rot);
+    let a = fq::axes(r);
+    match s.geom.clone() {
+        ProxyGeom::Box { half } => SurfaceShape::Box { c: p, axes: a, half },
+        ProxyGeom::Sphere { radius } => SurfaceShape::Sphere { c: p, radius },
+        ProxyGeom::Capsule { radius, half_len } => {
+            let e = a[1] * half_len;
+            SurfaceShape::Capsule {
+                a: p - e,
+                b: p + e,
+                radius,
+            }
+        }
+        ProxyGeom::Hull { planes, .. } => {
+            let (verts, edges) = s.hull_geometry().cloned().unwrap_or_default();
+            fq::hull_world(p, &a, &verts, &edges, &planes)
+        }
     }
 }

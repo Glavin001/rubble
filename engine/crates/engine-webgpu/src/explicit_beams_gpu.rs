@@ -1040,7 +1040,12 @@ impl ExplicitBeamsGpu {
     }
 
     fn write_coupling_header(&self) {
-        let word = u32::from(self.coupling_on) | if self.coupling_on && self.coupling_cull_off { 2 } else { 0 };
+        // Bit 8 (measurement only, `RUBBLE_SURFACE_CAST=0`): the surface contact's casts of
+        // fast proxies off (explicit_beams_surface.slang surfProxyFast).
+        let casts_off = engine_softbody::explicit_surface::casts_off();
+        let word = u32::from(self.coupling_on)
+            | if self.coupling_on && self.coupling_cull_off { 2 } else { 0 }
+            | if self.coupling_on && casts_off { 8 } else { 0 };
         self.queue
             .write_buffer(&self.misc, self.layout.coupling_on_offset(), bytemuck::bytes_of(&word));
     }

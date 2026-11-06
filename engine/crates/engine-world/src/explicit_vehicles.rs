@@ -52,6 +52,12 @@ impl Default for ExplicitVehiclesDef {
 }
 
 const STEP: f64 = engine_softbody::explicit_beams::STEP as f64;
+/// A vehicle's broadphase proxy: its swept box grown by this (m) when it leaves the
+/// last one (so a vehicle at rest or cruising refattens rarely).
+pub const PROXY_SLACK: f32 = 0.5;
+/// Proxy flags (the vehicle table's 4th word, `vehicle_coupling.slang`).
+const PROXY_ASLEEP: u32 = 1;
+const PROXY_OUT: u32 = 2;
 /// Impulse record keys (after the host's, the terrain's 0x300000 + collider).
 const KEY_BASE: u32 = 0x50_0000;
 const ST_NAMES: [&str; 5] = [
@@ -88,7 +94,17 @@ struct Params {
     step: u32,
     filter: u32,
     row_cap: u32,
-    pad: [u32; 3],
+    hull_geom: u32,
+    mode: u32,
+    pad2: u32,
+    rest_base: u32,
+    hash_size: u32,
+    aabb_base: u32,
+    levels: u32,
+    cell: f32,
+    large_static_base: u32,
+    slack: f32,
+    cand_cap: u32,
 }
 
 pub(crate) struct ExplicitVehicles {
@@ -98,12 +114,19 @@ pub(crate) struct ExplicitVehicles {
     /// The vehicles as added (spawn state: node counts, masses).
     pub sims: Vec<ExplicitBeams>,
     bgl: wgpu::BindGroupLayout,
-    /// cpl_bounds, cpl_plan, cpl_share, cpl_loads, cpl_loads_end, cpl_emit, cpl_emit_end.
+    /// cpl_bounds, cpl_plan, cpl_share, cpl_loads, cpl_loads_end, cpl_emit, cpl_emit_end,
+    /// cpl_query.
     pipes: Vec<wgpu::ComputePipeline>,
     params: wgpu::Buffer,
     work: wgpu::Buffer,
     /// Bytes of `work` cleared each window (the vehicle table follows).
     cleared: u64,
+    /// Per vehicle its proxy flags (asleep, out of the broadphase), as uploaded.
+    flags: Vec<u32>,
+    /// The last window's plan source: the World broadphase (true) or the scan.
+    pub(crate) last_query: bool,
+    /// Measurement: plan by the scan even when the resting table is kept.
+    force_scan: bool,
     /// Stand-ins for the threshold ingest's records, row counts and collider table.
     dummy: [wgpu::Buffer; 3],
     /// For renderers: per collision triangle (global nodes a, b, c, vehicle).
@@ -168,6 +191,10 @@ impl ExplicitVehicles {
             entry(10, ro),
             entry(11, rw),
             entry(12, rw),
+            entry(13, ro),
+            entry(14, ro),
+            entry(15, ro),
+            entry(16, ro),
         ];
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vehicle-coupling"),
@@ -182,7 +209,16 @@ impl ExplicitVehicles {
             label: Some("vehicle_coupling"),
             source: wgpu::ShaderSource::Wgsl(VEHICLE_COUPLING_WGSL.into()),
         });
-        let pipes = ["cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end"]
+        let pipes = [
+            "cpl_bounds",
+            "cpl_plan",
+            "cpl_share",
+            "cpl_loads",
+            "cpl_loads_end",
+            "cpl_emit",
+            "cpl_emit_end",
+            "cpl_query",
+        ]
             .iter()
             .map(|e| {
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -218,9 +254,16 @@ impl ExplicitVehicles {
             usage: wgpu::BufferUsages::STORAGE,
         });
         let max_bodies = world.sim.capacity().max_bodies;
-        // Cleared each window: rows, status, share counts, bounds; then the vehicle table.
-        let cleared = 4 * (2 + u64::from(max_bodies) + 8 * vehicles.len() as u64);
-        let work = storage(device, "vehicle-coupling-work", cleared + 16 * vehicles.len() as u64);
+        let nv = vehicles.len() as u64;
+        // Cleared each window: rows, status, share counts, bounds, candidate counts; then
+        // the vehicle table, the proxies (fat boxes, persistent) and the candidates.
+        let cleared = 4 * (2 + u64::from(max_bodies) + 9 * nv);
+        let cand_cap = u64::from(3 * def.capacity.shapes);
+        let work = storage(
+            device,
+            "vehicle-coupling-work",
+            cleared + 16 * nv + 32 * nv + 4 * cand_cap * nv,
+        );
         queue.write_buffer(&work, cleared, bytemuck::cast_slice(&veh));
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vehicle-coupling-params"),
@@ -244,6 +287,9 @@ impl ExplicitVehicles {
             params,
             work,
             cleared,
+            flags: vec![0; vehicles.len()],
+            last_query: false,
+            force_scan: std::env::var("RUBBLE_COUPLING_SCAN").is_ok(),
             dummy: [0, 1, 2].map(|_| storage(device, "vehicle-coupling-dummy", 160)),
             tris,
             tri_count,
@@ -267,7 +313,8 @@ impl ExplicitVehicles {
             Some((r, c, i, _)) => (r, c, i),
             None => (&self.dummy[0], &self.dummy[1], &self.dummy[2]),
         };
-        let bufs: [(u32, &wgpu::Buffer); 11] = [
+        let (ids, aabbs) = sim.rest_buffers();
+        let bufs: [(u32, &wgpu::Buffer); 15] = [
             (0, &self.params),
             (1, sim.body_buffer()),
             (2, sim.collider_buffer()),
@@ -279,6 +326,10 @@ impl ExplicitVehicles {
             (10, info),
             (11, records),
             (12, rows),
+            (13, ids),
+            (14, aabbs),
+            (15, sim.moved_header_buffer()),
+            (16, sim.moved_buffer()),
         ];
         let entries: Vec<wgpu::BindGroupEntry> = bufs
             .iter()
@@ -294,7 +345,7 @@ impl ExplicitVehicles {
         })
     }
 
-    fn write_params(&self, sim: &engine_webgpu::WgpuSim, steps: u32, ingest_rows: u32) {
+    fn write_params(&self, sim: &engine_webgpu::WgpuSim, steps: u32, ingest_rows: u32, rest: Option<engine_webgpu::RestView>) {
         let cap = self.layout.cap;
         let p = Params {
             vehicles: self.sims.len() as u32,
@@ -318,9 +369,40 @@ impl ExplicitVehicles {
             step: self.windows as u32,
             filter: u32::from(self.def.categories) | u32::from(self.def.mask) << 16,
             row_cap: self.ingest_rows().min(ingest_rows),
-            pad: [0; 3],
+            hull_geom: u32::from(self.sims.iter().any(|v| v.surface_contact)),
+            mode: u32::from(rest.is_some()),
+            pad2: 0,
+            rest_base: rest.map_or(0, |r| r.rest_base),
+            hash_size: rest.map_or(1, |r| r.hash_size),
+            aabb_base: rest.map_or(0, |r| r.aabb_base),
+            levels: rest.map_or(0, |r| r.levels),
+            cell: rest.map_or(1.0, |r| r.cell),
+            large_static_base: engine_schema::LARGE_STATIC_BASE,
+            slack: PROXY_SLACK,
+            cand_cap: self.cand_cap(),
         };
         sim.queue().write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
+    }
+
+    fn cand_cap(&self) -> u32 {
+        3 * self.layout.cap.shapes
+    }
+
+    fn work_vehicle(&self, v: u32) -> u64 {
+        self.cleared + 16 * u64::from(v)
+    }
+
+    fn work_proxy(&self, v: u32) -> u64 {
+        self.cleared + 16 * self.sims.len() as u64 + 32 * u64::from(v)
+    }
+
+    fn set_flag(&mut self, queue: &wgpu::Queue, v: u32, flag: u32, on: bool) {
+        let f = self.flags[v as usize];
+        let f = if on { f | flag } else { f & !flag };
+        self.flags[v as usize] = f;
+        queue.write_buffer(&self.work, self.work_vehicle(v) + 12, bytemuck::bytes_of(&f));
+        // Its touch mark starts clear.
+        queue.write_buffer(&self.work, self.work_proxy(v) + 24, bytemuck::bytes_of(&0u32));
     }
 
     /// Chunk records a window can make at most: a record per proxy shape.
@@ -377,7 +459,11 @@ impl ExplicitVehicles {
         self.carry -= steps;
         let steps = steps as u32;
         let rows = ingest.map_or(0, |i| i.3);
-        self.write_params(sim, steps, rows);
+        // The World broadphase's resting table when the rigid step just kept it (O(nearby)
+        // per vehicle); else every collider is scanned.
+        let rest = if self.force_scan { None } else { sim.rest_view() };
+        self.last_query = rest.is_some();
+        self.write_params(sim, steps, rows, rest);
         enc.clear_buffer(&self.work, 0, Some(self.cleared));
         let group = self.bind(sim, ingest);
         let nv = self.sims.len() as u32;
@@ -389,6 +475,10 @@ impl ExplicitVehicles {
             pass.set_bind_group(0, &group, &[]);
             pass.set_pipeline(&self.pipes[0]);
             pass.dispatch_workgroups(nv, 1, 1);
+            if self.last_query {
+                pass.set_pipeline(&self.pipes[7]);
+                pass.dispatch_workgroups(nv, 1, 1);
+            }
             pass.set_pipeline(&self.pipes[1]);
             pass.dispatch_workgroups(nv, 1, 1);
             pass.set_pipeline(&self.pipes[2]);
@@ -453,6 +543,21 @@ impl ExplicitVehicles {
             });
         }
     }
+}
+
+/// A vehicle's proxy in the World broadphase ([`World::explicit_vehicle_proxy`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VehicleProxy {
+    /// Its fat box: the swept box (nodes, the band, the fastest node's travel over a
+    /// World step) grown by [`PROXY_SLACK`] when the swept box last left it.
+    pub lo: glam::Vec3,
+    pub hi: glam::Vec3,
+    pub asleep: bool,
+    pub in_broadphase: bool,
+    /// A moving collider entered the fat box while asleep (cleared when the flag is set).
+    pub touched: bool,
+    /// Times the fat box was rebuilt.
+    pub refattens: u32,
 }
 
 impl World {
@@ -521,6 +626,165 @@ impl World {
                     .collect()
             })
             .collect()
+    }
+
+    /// Vehicle `v`'s broadphase proxy asleep (`true`): from the next step its proxy box
+    /// is not updated, it queries nothing and has no proxies (no coupling while it
+    /// sleeps), and a moving collider entering its fat box marks it touched
+    /// ([`World::explicit_vehicle_proxy`], the wake hook). `false`: awake again (the
+    /// default). The explicit frame itself still steps it: putting the vehicle's
+    /// own simulation to sleep is the caller's (vehicle sleep).
+    pub fn set_explicit_vehicle_asleep(&mut self, v: u32, asleep: bool) -> anyhow::Result<()> {
+        let queue = self.sim.queue().clone();
+        let x = self.explicit.as_mut().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        anyhow::ensure!((v as usize) < x.sims.len(), "explicit vehicle {v} out of range");
+        x.set_flag(&queue, v, PROXY_ASLEEP, asleep);
+        Ok(())
+    }
+
+    /// Vehicle `v` out of the World broadphase (`false`: removed: no proxy, no query, no
+    /// coupling) or back in (`true`, the default). Its fat box is rebuilt on return.
+    pub fn set_explicit_vehicle_in_broadphase(&mut self, v: u32, inside: bool) -> anyhow::Result<()> {
+        let queue = self.sim.queue().clone();
+        let x = self.explicit.as_mut().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        anyhow::ensure!((v as usize) < x.sims.len(), "explicit vehicle {v} out of range");
+        x.set_flag(&queue, v, PROXY_OUT, !inside);
+        if inside {
+            // Refattened at the next window (moves 0).
+            let at = x.work_proxy(v) + 28;
+            queue.write_buffer(&x.work, at, bytemuck::bytes_of(&0u32));
+        }
+        Ok(())
+    }
+
+    /// Blocking read (tests, tools): vehicle `v`'s broadphase proxy.
+    pub fn explicit_vehicle_proxy(&self, v: u32) -> Option<VehicleProxy> {
+        let x = self.explicit.as_ref()?;
+        if v as usize >= x.sims.len() {
+            return None;
+        }
+        let w = engine_webgpu::explicit_coupling::read_words(self.sim.device(), self.sim.queue(), &x.work, x.work_proxy(v), 32);
+        let f = |k: usize| f32::from_bits(w[k]);
+        let flags = x.flags[v as usize];
+        Some(VehicleProxy {
+            lo: glam::Vec3::new(f(0), f(1), f(2)),
+            hi: glam::Vec3::new(f(3), f(4), f(5)),
+            asleep: flags & PROXY_ASLEEP != 0,
+            in_broadphase: flags & PROXY_OUT == 0,
+            touched: w[6] != 0,
+            refattens: w[7],
+        })
+    }
+
+    /// The proxies' GPU table (for a GPU consumer such as vehicle sleep): the buffer,
+    /// the byte offset of vehicle 0's record and the stride. Each record: fat box lo xyz,
+    /// hi xyz (f32 bits), touched while asleep (u32), refattens (u32).
+    pub fn explicit_proxy_table(&self) -> Option<(&wgpu::Buffer, u64, u64)> {
+        let x = self.explicit.as_ref()?;
+        Some((&x.work, x.work_proxy(0), 32))
+    }
+
+    /// Test hook: the coupling plan run now twice from the World's current state, from the
+    /// World broadphase's resting table and by the scan of every collider; each run's
+    /// proxy records (every vehicle's region, every word) and status. Errors when the last
+    /// step did not keep the resting table. Overwrites the last window's records (the
+    /// next step's impulses): for tests that end or compare here.
+    #[doc(hidden)]
+    pub fn debug_explicit_plans(&mut self) -> anyhow::Result<[(Vec<u32>, u32); 2]> {
+        let rest = self.sim.rest_view().ok_or_else(|| anyhow::anyhow!("the last step kept no resting table"))?;
+        let x = self.explicit.as_ref().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        let l = x.layout;
+        let mut out: Vec<(Vec<u32>, u32)> = Vec::new();
+        for query in [true, false] {
+            x.write_params(&self.sim, 34, 0, query.then_some(rest));
+            let mut enc = self.sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("plan-check") });
+            enc.clear_buffer(&x.work, 0, Some(x.cleared));
+            let group = x.bind(&self.sim, None);
+            let nv = x.sims.len() as u32;
+            {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("plan-check"), timestamp_writes: None });
+                pass.set_bind_group(0, &group, &[]);
+                pass.set_pipeline(&x.pipes[0]);
+                pass.dispatch_workgroups(nv, 1, 1);
+                if query {
+                    pass.set_pipeline(&x.pipes[7]);
+                    pass.dispatch_workgroups(nv, 1, 1);
+                }
+                pass.set_pipeline(&x.pipes[1]);
+                pass.dispatch_workgroups(nv, 1, 1);
+                pass.set_pipeline(&x.pipes[2]);
+                pass.dispatch_workgroups(nv, 1, 1);
+            }
+            self.sim.queue().submit([enc.finish()]);
+            let words = engine_webgpu::explicit_coupling::read_words(
+                self.sim.device(),
+                self.sim.queue(),
+                x.gpu.misc_buffer(),
+                u64::from(l.misc_base) * 16,
+                u64::from(l.misc_words()) * 16,
+            );
+            let status = engine_webgpu::explicit_coupling::read_words(self.sim.device(), self.sim.queue(), &x.work, 0, 16)[1];
+            out.push((words, status));
+        }
+        let b = out.pop().unwrap();
+        let a = out.pop().unwrap();
+        Ok([a, b])
+    }
+
+    /// Measurement hook: the coupling plan (bounds, the broadphase query or the scan, the
+    /// plan, the share counts) from the World's current state, `reps` times in one
+    /// submission, waited for; the mean wall time per plan (ms). `scan`: every collider
+    /// scanned; else the World broadphase's resting table (an error when the last step
+    /// kept none). Overwrites the last window's records, like
+    /// [`World::debug_explicit_plans`].
+    #[doc(hidden)]
+    pub fn debug_time_explicit_plan(&mut self, scan: bool, reps: u32) -> anyhow::Result<f64> {
+        let rest = if scan {
+            None
+        } else {
+            Some(self.sim.rest_view().ok_or_else(|| anyhow::anyhow!("the last step kept no resting table"))?)
+        };
+        let x = self.explicit.as_ref().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        x.write_params(&self.sim, 34, 0, rest);
+        let group = x.bind(&self.sim, None);
+        let nv = x.sims.len() as u32;
+        let mut enc = self.sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("plan-time") });
+        for _ in 0..reps {
+            enc.clear_buffer(&x.work, 0, Some(x.cleared));
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("plan-time"), timestamp_writes: None });
+            pass.set_bind_group(0, &group, &[]);
+            pass.set_pipeline(&x.pipes[0]);
+            pass.dispatch_workgroups(nv, 1, 1);
+            if rest.is_some() {
+                pass.set_pipeline(&x.pipes[7]);
+                pass.dispatch_workgroups(nv, 1, 1);
+            }
+            pass.set_pipeline(&x.pipes[1]);
+            pass.dispatch_workgroups(nv, 1, 1);
+            pass.set_pipeline(&x.pipes[2]);
+            pass.dispatch_workgroups(nv, 1, 1);
+        }
+        let t = std::time::Instant::now();
+        self.sim.queue().submit([enc.finish()]);
+        let _ = self.sim.device().poll(wgpu::PollType::wait_indefinitely());
+        Ok(t.elapsed().as_secs_f64() * 1e3 / f64::from(reps.max(1)))
+    }
+
+    /// Measurement switch (interleaved A/B): plan every window by the scan of every
+    /// collider (`true`) even when the World broadphase's resting table is kept (also
+    /// `RUBBLE_COUPLING_SCAN=1`). The proxies are the same either way.
+    #[doc(hidden)]
+    pub fn set_explicit_plan_scan(&mut self, scan: bool) {
+        if let Some(x) = self.explicit.as_mut() {
+            x.force_scan = scan;
+        }
+    }
+
+    /// Whether the last window's proxies came from the World broadphase's persistent
+    /// resting table (true) or a scan of every collider (false: the step did not keep
+    /// that table, as in a world with a GPU fracture).
+    pub fn explicit_plan_used_broadphase(&self) -> Option<bool> {
+        self.explicit.as_ref().map(|x| x.last_query)
     }
 
     /// The coupling's record layout in the explicit buffers (for reads of the proxies).
