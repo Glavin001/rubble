@@ -33,6 +33,8 @@ mod demo;
 mod explicit;
 mod explicit_world;
 mod frame;
+/// Real-time pacing of the explicit solver's fixed steps on a display.
+mod frame_pacer;
 mod guidance;
 /// The fracture lab (`fracture/`): its scenes as destructibles, its shots.
 mod lab;
@@ -46,6 +48,7 @@ mod vehicle;
 
 pub use city::WebCity;
 pub use frame::WebFrame;
+pub use frame_pacer::FramePacer;
 pub use lab::{check_lab_chunk_order, LabAsset, LabPreload, LabScene};
 /// The lab's scene bindings (`engine-fracture-wasm`), exported from this module too.
 pub use engine_fracture_wasm;
