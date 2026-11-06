@@ -453,6 +453,19 @@ impl Car {
             }
         };
         let mut template = spawned;
+        // A measurement (research/explicit-stability): `RUBBLE_DAMP_SCHEME=N` runs
+        // every scene on that damping velocity (`ExplicitBeams::damp_scheme`).
+        // (4: `ExplicitBeamsSettings::centred_damping`.)
+        if let Some(k) = std::env::var("RUBBLE_DAMP_SCHEME")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            if k == 4 {
+                template.settings.centred_damping = true;
+            } else {
+                template.damp_scheme = k;
+            }
+        }
         place(&mut template, angle, 0.02);
         let spawn_pos = positions(&template);
         steps(&mut template, 1.0);
@@ -1515,6 +1528,8 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
         Ok(s) => s,
         Err(e) => return json!({"error": e}),
     };
+    s.damp_scheme = car.template.damp_scheme;
+    s.settings.centred_damping = car.template.settings.centred_damping;
     let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
     let com = |s: &ExplicitBeams| s.nodes.iter().map(|n| n.pos * n.mass).sum::<Vec3>() / total;
     let mut first_break = None;

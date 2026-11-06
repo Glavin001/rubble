@@ -15,6 +15,7 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     drag: false,
     turbulence: false,
     triangle_throttle: true,
+    centred_damping: false,
 };
 
 /// Pairs of 1 kg nodes 0.5 m apart, high above the ground, each pair joined by

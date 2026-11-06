@@ -112,6 +112,12 @@ pub struct ExplicitBeamsSettings {
     /// ([`Self::beamng`], jbeam-semantics-spec.md §36): every triangle is tested
     /// every step.
     pub triangle_throttle: bool,
+    /// Centred damping (jbeam-semantics-spec.md §38; opt-in, off in every
+    /// profile): each JBeam element's damping reads the mean of the step's start
+    /// and end velocities instead of the start's, by a correction after the node
+    /// update. Lifts the damped explicit step's limit from ω·h ≤ 2(√(1+ζ²) − ζ)
+    /// to 2 and past it; JBeam elements only.
+    pub centred_damping: bool,
 }
 
 impl Default for ExplicitBeamsSettings {
@@ -121,6 +127,7 @@ impl Default for ExplicitBeamsSettings {
             drag: true,
             turbulence: true,
             triangle_throttle: true,
+            centred_damping: false,
         }
     }
 }
@@ -1030,6 +1037,18 @@ pub struct ExplicitBeams {
     /// content, or a `.truck` with `rubble_beamng_profile`; else Rigs of
     /// Rods'. What hosts report as the vehicle's profile.
     pub beamng_profile: bool,
+    /// Measurement (jbeam-semantics-spec.md §38's comparison; never on in a
+    /// profile): the velocity the beam pass's damping reads, by a dry beam pass
+    /// (state restored) that predicts each node's end-of-step velocity. 0: off,
+    /// the step's velocity. 1: the predicted velocity (one Jacobi step toward
+    /// backward-Euler damping). 2: the mean of the two (what
+    /// [`ExplicitBeamsSettings::centred_damping`] gives at about a third of the cost).
+    pub damp_scheme: u32,
+    /// [`ExplicitBeamsSettings::centred_damping`]: each beam record's damping
+    /// slope from the last beam pass ([`BeamOut::slope`]; 0 for a record that
+    /// added no damping force). The kernel keeps it in the record's first
+    /// incidence entry's `.w`.
+    pub damp_slopes: Vec<f32>,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -1572,6 +1591,8 @@ impl ExplicitBeams {
             trace: None,
             drive: None,
             beamng_profile: false,
+            damp_scheme: 0,
+            damp_slopes: Vec::new(),
         }
     }
 
@@ -3286,7 +3307,13 @@ impl ExplicitBeams {
         if self.drive.is_some() {
             crate::explicit_drive::drive_pass(self);
         }
-        self.node_pass();
+        if self.settings.centred_damping {
+            let v0: Vec<Vec3> = self.nodes.iter().map(|n| n.vel).collect();
+            self.node_pass();
+            self.centred_correction(&v0);
+        } else {
+            self.node_pass();
+        }
         if !self.wings.is_empty() {
             self.wing_pass();
         }
@@ -3302,7 +3329,11 @@ impl ExplicitBeams {
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 0);
         }
-        self.beam_pass();
+        if self.damp_scheme == 0 {
+            self.beam_pass();
+        } else {
+            self.beam_pass_predicted();
+        }
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 1);
         }
@@ -3675,7 +3706,136 @@ impl ExplicitBeams {
         }
     }
 
+    /// [`Self::damp_scheme`] > 0: a dry beam pass (state restored) predicts each
+    /// node's end-of-step velocity; the real pass then reads that (or its mean
+    /// with the step's) and the step's velocities are put back.
+    fn beam_pass_predicted(&mut self) {
+        let h = STEP;
+        let f0: Vec<Vec3> = self.nodes.iter().map(|n| n.force).collect();
+        let v0: Vec<Vec3> = self.nodes.iter().map(|n| n.vel).collect();
+        let snap = (
+            self.beams.clone(),
+            self.damp_filters.clone(),
+            self.beam_ext.clone(),
+            self.groups_now.clone(),
+            self.groups_last.clone(),
+            self.tri_breaks.clone(),
+            self.tri_dead.clone(),
+            self.deform_state.clone(),
+            self.key_input,
+            self.contact_force.clone(),
+        );
+        self.beam_pass();
+        let va: Vec<Vec3> = self
+            .nodes
+            .iter()
+            .map(|n| if n.has(NODE_IMMOVABLE) { n.vel } else { n.vel + n.force / n.mass * h })
+            .collect();
+        (
+            self.beams,
+            self.damp_filters,
+            self.beam_ext,
+            self.groups_now,
+            self.groups_last,
+            self.tri_breaks,
+            self.tri_dead,
+            self.deform_state,
+            self.key_input,
+            self.contact_force,
+        ) = snap;
+        let mix = if self.damp_scheme == 2 { 0.5 } else { 1.0 };
+        for (i, n) in self.nodes.iter_mut().enumerate() {
+            n.force = f0[i];
+            n.vel = v0[i] + (va[i] - v0[i]) * mix;
+        }
+        self.beam_pass();
+        for (i, n) in self.nodes.iter_mut().enumerate() {
+            n.vel = v0[i];
+        }
+    }
+
+    /// The centred damping's correction after the node update
+    /// ([`ExplicitBeamsSettings::centred_damping`], spec §38). Δvᵢ is the velocity
+    /// change the update gave node i. Each beam record with a damping slope s from
+    /// the last beam pass gives its ends −½·s·Δu along its current direction (Δu
+    /// its extension rate's change under Δv; a torsion bar −½·s·Δφ̇ through its
+    /// dihedral gradient, a coupler −½·s·(Δv_a − Δv_b)), equal and opposite, so the
+    /// damping it applied reads the mean of the step's start and end velocities.
+    /// Each node sums its incidence entries in order (the kernel's slots), then
+    /// v += h·c/m and x += h·(h·c/m).
+    fn centred_correction(&mut self, v0: &[Vec3]) {
+        let h = STEP;
+        let nb = self.beams.len();
+        self.damp_slopes.resize(nb, 0.0);
+        let dv: Vec<Vec3> = self.nodes.iter().zip(v0).map(|(n, v)| n.vel - *v).collect();
+        // Per beam record its two entries' corrections (end a, end b).
+        let mut slot = vec![[Vec3::ZERO; 2]; nb];
+        for j in 0..nb {
+            let slope = self.damp_slopes[j];
+            if slope == 0.0 {
+                continue;
+            }
+            let b = self.beams[j];
+            let (a, e) = (b.a as usize, b.b as usize);
+            match b.kind {
+                ExplicitKind::JbeamTorsion => {
+                    let n = self.beams[j + 1];
+                    let ids = [a, e, n.a as usize, n.b as usize];
+                    let g = dihedral_jacobian(ids.map(|i| self.nodes[i].pos));
+                    let dr = g[0].dot(dv[ids[0]])
+                        + g[1].dot(dv[ids[1]])
+                        + g[2].dot(dv[ids[2]])
+                        + g[3].dot(dv[ids[3]]);
+                    let t = -0.5 * slope * dr;
+                    slot[j] = [g[0] * t, g[1] * t];
+                    slot[j + 1] = [g[2] * t, g[3] * t];
+                }
+                ExplicitKind::JbeamCoupler => {
+                    let f = (dv[a] - dv[e]) * (-0.5 * slope);
+                    slot[j] = [f, -f];
+                }
+                _ => {
+                    let d = self.nodes[a].pos - self.nodes[e].pos;
+                    let inv = exact_length(d.dot(d)).1;
+                    let du = (dv[a] - dv[e]).dot(d) * inv;
+                    let push = d * ((-0.5 * slope * du) * inv);
+                    slot[j] = [push, -push];
+                }
+            }
+        }
+        for i in 0..self.nodes.len() {
+            let mut c = Vec3::ZERO;
+            let mut seen: Option<u32> = None;
+            for &j in &self.incidence[i] {
+                let b = &self.beams[j as usize];
+                // The entry's end as the kernel's layout assigns it (a beam from a
+                // node to itself has both entries in this list).
+                let other_end = b.b == i as u32 && b.a != i as u32;
+                let end = if other_end || (b.a == b.b && seen == Some(j)) {
+                    1
+                } else {
+                    0
+                };
+                if b.a == b.b {
+                    seen = Some(j);
+                }
+                c += slot[j as usize][end];
+            }
+            let n = &mut self.nodes[i];
+            if !n.has(NODE_IMMOVABLE) {
+                let dv = c / n.mass * h;
+                n.vel += dv;
+                n.pos += dv * h;
+            }
+        }
+    }
+
     fn beam_pass(&mut self) {
+        let slopes = self.settings.centred_damping;
+        if slopes {
+            self.damp_slopes.clear();
+            self.damp_slopes.resize(self.beams.len(), 0.0);
+        }
         std::mem::swap(&mut self.groups_last, &mut self.groups_now);
         self.groups_now.clear();
         if !self.tri_breaks.is_empty() {
@@ -3726,6 +3886,9 @@ impl ExplicitBeams {
                         self.cascade(beam.group);
                     }
                 }
+                if slopes && !beam.broken {
+                    self.damp_slopes[j] = beam.c;
+                }
                 for (n, f) in [beam.a, beam.b, c, d].into_iter().zip(f) {
                     self.nodes[n as usize].force += f;
                 }
@@ -3734,6 +3897,9 @@ impl ExplicitBeams {
             if beam.kind == ExplicitKind::JbeamCoupler {
                 let push = coupler_force(&mut beam, &na, &nb);
                 self.beams[j] = beam;
+                if slopes && !beam.broken {
+                    self.damp_slopes[j] = beam.c;
+                }
                 if beam.broken && beam.group > 0 {
                     self.cascade(beam.group);
                 }
@@ -3784,6 +3950,9 @@ impl ExplicitBeams {
                 }
             }
             self.beams[j] = beam;
+            if slopes && !beam.broken && beam.kind.is_jbeam() {
+                self.damp_slopes[j] = out.slope;
+            }
             if cascade {
                 self.cascade(beam.group);
             }
@@ -4610,6 +4779,10 @@ pub struct BeamOut {
     pub force: f32,
     /// τ exceeded the strength: the beam breaks unless an end saves it.
     pub check_break: bool,
+    /// The damping law's slope ∂(damping force)/∂u at this step's rate (N·s/m;
+    /// the low-pass's gain included; 0 where the law has no damping). Read only by
+    /// the centred damping (jbeam-semantics-spec.md §38).
+    pub slope: f32,
 }
 
 /// One beam's force with the kind rules and the yield rules applied to `beam`
@@ -4733,6 +4906,7 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         e,
         force: f,
         check_break,
+        slope: if support_broke { 0.0 } else { c },
     }
 }
 
@@ -4767,14 +4941,15 @@ pub fn jbeam_force_filtered(
     };
     let e = len - beam.rest;
     let u = (na.vel - nb.vel).dot(d) * inv;
-    let u = match filter {
-        Some(f) => f.step(u),
-        None => u,
+    let (u, gain) = match filter {
+        Some(f) => (f.step(u), f.a),
+        None => (u, 1.0),
     };
     let mut k = beam.k;
     let c = beam.c;
-    // The damping force (positive along u).
+    // The damping force (positive along u), and its slope in u.
     let mut damp = c * u;
+    let mut slope = c;
     match beam.kind {
         ExplicitKind::JbeamBounded => {
             // Slow damping up to the split, the fast rate past it (continuous).
@@ -4782,6 +4957,7 @@ pub fn jbeam_force_filtered(
             let au = u.abs();
             if au > split {
                 damp = (c * split + beam.tt * (au - split)).copysign(u);
+                slope = beam.tt;
             }
             let long = beam.long_bound * beam.rest;
             let short = beam.short_bound * beam.rest;
@@ -4797,11 +4973,13 @@ pub fn jbeam_force_filtered(
                 let s = if zone > 0.0 { (o / zone).min(1.0) } else { 1.0 };
                 k += (beam.limit_k - k) * s;
                 damp += (beam.limit_c * u - damp) * s;
+                slope += (beam.limit_c - slope) * s;
             }
         }
         ExplicitKind::JbeamRope if e < 0.0 => {
             k = 0.0;
             damp = (c * 0.1) * u;
+            slope = c * 0.1;
         }
         ExplicitKind::JbeamSupport => {
             if e > 0.0 {
@@ -4814,10 +4992,12 @@ pub fn jbeam_force_filtered(
                         e,
                         force: 0.0,
                         check_break: false,
+                        slope: 0.0,
                     };
                 }
                 k = 0.0;
                 damp = 0.0;
+                slope = 0.0;
             }
         }
         _ => {}
@@ -4877,6 +5057,7 @@ pub fn jbeam_force_filtered(
         e,
         force: f,
         check_break: tau > beam.strength || tear,
+        slope: slope * gain,
     }
 }
 
@@ -5038,6 +5219,7 @@ pub fn shock2_force(beam: &mut Beam, sh: &Shock2, na: &Node, nb: &Node, fast: bo
         e,
         force: f,
         check_break: tau > beam.gate && tau > beam.strength,
+        slope: c,
     }
 }
 

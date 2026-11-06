@@ -143,6 +143,11 @@ static const uint FLAG_DISSIPATIVE = 32768u;
 // Some vehicle of the upload has FLAG_DISSIPATIVE: every vehicle's node phase takes
 // its nodes' contact position steps (gAcc at shiftAt, §37; the shapes path).
 static const uint FLAG_SHIFT_MEM = 65536u;
+// Centred damping (jbeam-semantics-spec.md §38, ExplicitBeamsSettings::centred_damping):
+// the beam phase keeps each JBeam record's damping slope in its first incidence
+// entry's .w, and after the node phase each record corrects its damping by
+// −½·slope·Δu (centredBeam, centredNode). gP.centredDv nonzero: some vehicle has it.
+static const uint FLAG_CENTRED = 131072u;
 // The contact position steps' fixed point, units per metre (explicit_beams.rs
 // SHIFT_FIXED, 2^24).
 static const float SHIFT_FIXED = 16777216.0;
@@ -242,6 +247,7 @@ struct Params
     uint selfSplit; // gAcc: per node its self-collision two-body hit count this step (0: no two-body vehicle)
     uint clipMem; // gAcc: anti-clip's side memory, per node 4 words (held m0 m1, recorded p0 p1) (0: no anti-clip vehicle)
     uint clipVmax; // gAcc: per vehicle 2 parities its fastest node's speed (float bits) this step
+    uint centredDv; // gBeams: per node its step-start velocity, then its node phase's Δv (centred damping, §38; 0: no vehicle)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -1583,6 +1589,8 @@ float wrapAngle(float a)
     return a;
 }
 
+// Beam bn's vehicle has centred damping (FLAG_CENTRED, §38).
+bool centredOn(uint4 bn) { return (gStatic[(bn.z >> 16) * 4u + 3u].x & FLAG_CENTRED) != 0u; }
 void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, float4 s1, float4 c1, uint4 r2,
                     float3 x1, float3 x2, float3 v1, float3 v2)
 {
@@ -1650,7 +1658,7 @@ void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     else if (s1.w != 0.0)
         gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
     if (rest != s0.x) gBeams[gj * 2u] = float4(rest, s0.yzw);
-    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sscale(g1, t), 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sscale(g1, t), !broken && centredOn(bn) ? c1.y : 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(sscale(g2, t), 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(sscale(g3, t), 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(sscale(g4, t), 0.0);
@@ -1683,7 +1691,7 @@ void jcouplerUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     }
     if (broken) gBeams[gj * 2u + 1u] = float4(strength, m, 1.0, 1.0);
     else if (s1.w != 0.0) gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
-    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(fc, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(fc, !broken && centredOn(bn) ? c1.y : 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-fc, 0.0);
 }
 
@@ -1734,6 +1742,8 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     float len = li.x;
     float e = nf(len - rest);
     float u = smul(sdot(ssub3(va, vb), d), inv);
+    // The damping's slope in u and the low-pass's gain (centred damping, §38).
+    float gain = 1.0;
     if (r2.w != 0u)
     {
         // dampCutoffHz: the RC low-pass of the rate (spec §6).
@@ -1742,10 +1752,12 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         float y = nf(smul(flt.z, u) - smul(flt.w, flt.y));
         gBeams[fi] = float4(u, y, flt.z, flt.w);
         u = y;
+        gain = flt.z;
     }
     float k = c1.x;
     float c = c1.y;
     float damp = smul(c, u);
+    float slope = c;
     float last = 0.0;
     float f = 0.0;
     bool lengthBreak = false;
@@ -1756,6 +1768,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         {
             float m = nf(smul(c, tc) + smul(tt, nf(au - tc)));
             damp = u < 0.0 ? -m : m;
+            slope = tt;
         }
         float lb = smul(c2.y, rest);
         float sb = smul(c2.x, rest);
@@ -1767,6 +1780,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
             float sz = c2.z > 0.0 ? min(sdiv(o, c2.z), 1.0) : 1.0;
             k = nf(k + smul(nf(c1.z - k), sz));
             damp = nf(damp + smul(nf(smul(c1.w, u) - damp), sz));
+            slope = nf(slope + smul(nf(c1.w - slope), sz));
         }
     }
     else if (kind == KIND_JSUPPORT && e > 0.0)
@@ -1774,11 +1788,13 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
         if (len > c2.y) lengthBreak = true;
         k = 0.0;
         damp = 0.0;
+        slope = 0.0;
     }
     else if (kind == KIND_JROPE && e < 0.0)
     {
         k = 0.0;
         damp = smul(smul(c, 0.1), u);
+        slope = smul(c, 0.1);
     }
     bool tear = false;
     if (lengthBreak)
@@ -1865,7 +1881,7 @@ void jbeamUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, floa
     else if (s1.w != 0.0)
         gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
     float3 push = sscale(d, smul(f, inv));
-    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, !broken && centredOn(bn) ? smul(slope, gain) : 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
 }
 
@@ -2033,6 +2049,8 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     float inv = li.y;
     float len = li.x;
     float u = smul(sdot(ssub3(va, vb), d), inv);
+    // The damping's slope in u and the low-pass's gain (centred damping, §38).
+    float gain = 1.0;
     if (r2.w != 0u)
     {
         uint fi = r2.w - 1u;
@@ -2040,9 +2058,11 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         float y = nf(smul(flt.z, u) - smul(flt.w, flt.y));
         gBeams[fi] = float4(u, y, flt.z, flt.w);
         u = y;
+        gain = flt.z;
     }
     float k = c1.x;
     float c = c1.y;
+    float slope = c;
     float e = 0.0;
     float f = 0.0;
     float last = 0.0;
@@ -2118,11 +2138,13 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
             lc = e2.w;
         }
         damp = smul(cs, u);
+        slope = cs;
         float au = abs(u);
         if (au > split)
         {
             float m = nf(smul(cs, split) + smul(cf, nf(au - split)));
             damp = u < 0.0 ? -m : m;
+            slope = cf;
         }
         float lb = smul(c2.y, rest);
         float sb = smul(c2.x, rest);
@@ -2134,6 +2156,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
             float sz = c2.z > 0.0 ? min(sdiv(o, c2.z), 1.0) : 1.0;
             k = nf(k + smul(nf(c1.z - k), sz));
             damp = nf(damp + smul(nf(smul(lc, u) - damp), sz));
+            slope = nf(slope + smul(nf(lc - slope), sz));
         }
     }
     else if (!done && kind == KIND_JSUPPORT && e > 0.0)
@@ -2141,11 +2164,13 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
         if (len > c2.y) lengthBreak = true;
         k = 0.0;
         damp = 0.0;
+        slope = 0.0;
     }
     else if (!done && kind == KIND_JROPE && e < 0.0)
     {
         k = 0.0;
         damp = smul(smul(c, 0.1), u);
+        slope = smul(c, 0.1);
     }
     else if (!done && kind == KIND_JANISO)
     {
@@ -2158,7 +2183,8 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
             float zone = smul(e1.z, sw);
             float sz = zone > 0.0 ? min(sdiv(past, zone), 1.0) : 1.0;
             k = nf(k + smul(nf(e1.x - k), sz));
-            damp = smul(nf(c + smul(nf(e1.y - c), sz)), u);
+            slope = nf(c + smul(nf(e1.y - c), sz));
+            damp = smul(slope, u);
         }
     }
     if (lengthBreak)
@@ -2243,6 +2269,7 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
     else if (s1.w != 0.0)
         gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
     float3 push = sscale(d, smul(f, inv));
+    float slopeW = !broken && centredOn(bn) ? smul(slope, gain) : 0.0;
     if (kind == KIND_JLBEAM)
     {
         if (broken)
@@ -2250,14 +2277,152 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
             armA = float3(0.0, 0.0, 0.0);
             armB = float3(0.0, 0.0, 0.0);
         }
-        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sadd3(push, armA), 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(sadd3(push, armA), slopeW);
         gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(sadd3(-push, armB), 0.0);
         gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(-sadd3(armA, armB), 0.0);
         gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
-    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, slopeW);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
+}
+
+// --- Centred damping (jbeam-semantics-spec.md §38; the CPU reference's
+// ExplicitBeams::centred_correction). The beam phase keeps each JBeam record's
+// damping slope in its first incidence entry's .w (0: none). gBeams at
+// gP.centredDv + node: the node's velocity before its node phase (centredSave),
+// then the phase's Δv (centredDelta). After the node phase each record writes its
+// correction −½·slope·Δu into its incidence entries (centredBeam), and each node
+// adds their sum as a velocity and position step (centredNode).
+void centredSave(uint gi) { gBeams[gP.centredDv + gi] = float4(gNodes[gi * 3u + 1u].xyz, 0.0); }
+
+void centredDelta(uint gi)
+{
+    float3 v0 = gBeams[gP.centredDv + gi].xyz;
+    gBeams[gP.centredDv + gi] = float4(ssub3(gNodes[gi * 3u + 1u].xyz, v0), 0.0);
+}
+
+// Record gj's correction into its entries (a torsion bar's first record also the
+// second's; the second writes nothing). No slope: zero.
+void centredBeam(uint gj)
+{
+    uint4 bn = gStatic[gP.beamBase + gj * 3u];
+    uint kind = bn.z & 0xFFu;
+    if (kind == KIND_JTORSION2) return;
+    uint sa = gP.incBase + gLists[gP.slotBase + gj * 2u];
+    uint sb = gP.incBase + gLists[gP.slotBase + gj * 2u + 1u];
+    float slope = gBeams[sa].w;
+    float3 fa = float3(0.0, 0.0, 0.0);
+    float3 fb = fa;
+    if (kind == KIND_JTORSION)
+    {
+        uint4 bn2 = gStatic[gP.beamBase + (gj + 1u) * 3u];
+        float3 f3 = fa;
+        float3 f4 = fa;
+        if (slope != 0.0)
+        {
+            float3 x1 = gNodes[bn.x * 3u].xyz;
+            float3 x2 = gNodes[bn.y * 3u].xyz;
+            float3 x3 = gNodes[bn2.x * 3u].xyz;
+            float3 x4 = gNodes[bn2.y * 3u].xyz;
+            float3 g1 = float3(0.0, 0.0, 0.0);
+            float3 g2 = g1;
+            float3 g3 = g1;
+            float3 g4 = g1;
+            float3 b1 = ssub3(x2, x1);
+            float3 b2 = ssub3(x3, x2);
+            float3 b3 = ssub3(x4, x3);
+            float3 n1 = scross(b1, b2);
+            float3 n2 = scross(b2, b3);
+            float l1 = sdot(n1, n1);
+            float l2 = sdot(n2, n2);
+            float ll = sdot(b2, b2);
+            if (!(l1 < 1e-12 || l2 < 1e-12 || ll < 1e-12))
+            {
+                float lb = ssqrt(ll);
+                g1 = sscale(n1, sdiv(-lb, l1));
+                g4 = sscale(n2, sdiv(lb, l2));
+                float p = sdiv(-sdot(b1, b2), ll);
+                float q = sdiv(-sdot(b3, b2), ll);
+                g2 = ssub3(sscale(g1, nf(p - 1.0)), sscale(g4, q));
+                g3 = ssub3(sscale(g4, nf(q - 1.0)), sscale(g1, p));
+            }
+            float3 d1 = gBeams[gP.centredDv + bn.x].xyz;
+            float3 d2 = gBeams[gP.centredDv + bn.y].xyz;
+            float3 d3 = gBeams[gP.centredDv + bn2.x].xyz;
+            float3 d4 = gBeams[gP.centredDv + bn2.y].xyz;
+            float dr = nf(nf(nf(sdot(g1, d1) + sdot(g2, d2)) + sdot(g3, d3)) + sdot(g4, d4));
+            float t = smul(smul(-0.5, slope), dr);
+            fa = sscale(g1, t);
+            fb = sscale(g2, t);
+            f3 = sscale(g3, t);
+            f4 = sscale(g4, t);
+        }
+        gBeams[sa] = float4(fa, 0.0);
+        gBeams[sb] = float4(fb, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(f3, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(f4, 0.0);
+        return;
+    }
+    if (slope != 0.0)
+    {
+        float3 dva = gBeams[gP.centredDv + bn.x].xyz;
+        float3 dvb = gBeams[gP.centredDv + bn.y].xyz;
+        if (kind == KIND_JCOUPLER)
+        {
+            fa = sscale(ssub3(dva, dvb), smul(-0.5, slope));
+        }
+        else
+        {
+            float3 d = ssub3(gNodes[bn.x * 3u].xyz, gNodes[bn.y * 3u].xyz);
+            float inv = sExactLength(sdot(d, d)).y;
+            float du = smul(sdot(ssub3(dva, dvb), d), inv);
+            fa = sscale(d, smul(smul(smul(-0.5, slope), du), inv));
+        }
+        fb = -fa;
+    }
+    gBeams[sa] = float4(fa, 0.0);
+    gBeams[sb] = float4(fb, 0.0);
+}
+
+// Node gi's correction: its entries' sum (the beam phase's group drops, as the node
+// phase's), v += h·c/m, x += h·(h·c/m).
+void centredNode(uint gi, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint4 info = gStatic[gP.nodeInfoBase + gi];
+    float3 c = beamSum(float3(0.0, 0.0, 0.0), info, beamOff, groupOff, groupCount, parity, false);
+    if ((info.x & NODE_IMMOVABLE) != 0u) return;
+    float4 P = gNodes[gi * 3u];
+    float4 V = gNodes[gi * 3u + 1u];
+    float3 dv = sscale(sdiv3(c, P.w), STEP);
+    gNodes[gi * 3u + 1u] = float4(sadd3(V.xyz, dv), V.w);
+    gNodes[gi * 3u] = float4(sadd3(P.xyz, sscale(dv, STEP)), P.w);
+}
+
+// The correction after a vehicle's node phase (gP.centredDv nonzero, so the barriers
+// are uniform): `lanes` lanes from `lane` over its nodes and records; a vehicle
+// without FLAG_CENTRED only meets the barriers.
+void centredPhase(uint flagsV, uint nodeOff, uint nodeCount, uint beamOff, uint beamCount, uint groupOff,
+                  uint groupCount, uint step, uint lane, uint lanes)
+{
+    bool on = (flagsV & FLAG_CENTRED) != 0u;
+    if (on)
+    {
+        for (uint i = lane, iStop = EB_END(i, nodeCount, lanes); i < iStop; i += lanes) centredDelta(nodeOff + i);
+    }
+    sync();
+    if (on)
+    {
+        for (uint j = lane, jStop = EB_END(j, beamCount, lanes); j < jStop; j += lanes) centredBeam(beamOff + j);
+    }
+    sync();
+    if (on)
+    {
+        uint parity = (step + 1u) & 1u;
+        for (uint i = lane, iStop = EB_END(i, nodeCount, lanes); i < iStop; i += lanes)
+            centredNode(nodeOff + i, beamOff, groupOff, groupCount, parity);
+    }
+    sync();
 }
 
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
@@ -4563,6 +4728,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
 #ifdef EB_VV_SOLO
+        if (gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u)
+        {
+            for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES) centredSave(nodeOff + i);
+        }
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
             nodeUpdateSolo(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
@@ -4572,10 +4741,15 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #else
         uint nodeEnd = nodeCount;
 #endif
+        if (gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u)
+        {
+            for (uint i = lane, iStop = EB_END(i, nodeEnd, LANES); i < iStop; i += LANES) centredSave(nodeOff + i);
+        }
         for (uint i = lane, iStop = EB_END(i, nodeEnd, LANES); i < iStop; i += LANES)
             nodeUpdate(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
 #endif
+        if (gP.centredDv != 0u) centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
 
         for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
         if (candCount > 0u)
@@ -5604,6 +5778,33 @@ uint vvTestedAt(uint i) { return gP.vvMembers + 5u * gP.vehicles + i; }
 // adds into them), the tested-triangle list restarted per member, and a pending
 // reset of the self-collision throttles (a fast approach in the last contact pass)
 // applied after their update.
+// Centred damping in a contact group (§38): the corrected positions also into this
+// step's box keys (a superset of the box the node phase gave) and the frame bounds
+// check.
+void centredBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity, uint lane, uint lanes)
+{
+    float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
+    float3 hi = -lo;
+    bool has = false;
+    for (uint i = lane, iStop = EB_END(i, nodeCount, lanes); i < iStop; i += lanes)
+    {
+        float3 x = nf3(origin + gNodes[(nodeOff + i) * 3u].xyz);
+        lo = min(lo, x);
+        hi = max(hi, x);
+        has = true;
+    }
+    if (!has) return;
+    uint key = vvBoxKey(v, parity);
+    gAcc[key].min(vvKey(lo.x));
+    gAcc[key + 1u].min(vvKey(lo.y));
+    gAcc[key + 2u].min(vvKey(lo.z));
+    gAcc[key + 3u].max(vvKey(hi.x));
+    gAcc[key + 4u].max(vvKey(hi.y));
+    gAcc[key + 5u].max(vvKey(hi.z));
+    if (any(lo < asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz)) || any(hi > asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz)))
+        vvReportOutside(v);
+}
+
 void contactMemberStep(uint v, uint lane, uint s, bool first)
 {
     uint4 r0 = gStatic[v * 4u];
@@ -5650,6 +5851,10 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
         float3 hi = -lo;
         bool has = false;
+        if (gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u)
+        {
+            for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES) centredSave(nodeOff + i);
+        }
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
         {
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
@@ -5672,6 +5877,11 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
             if (any(lo < asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz)) || any(hi > asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz)))
                 vvReportOutside(v);
         }
+    }
+    if (gP.centredDv != 0u)
+    {
+        centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
+        if ((flagsV & FLAG_CENTRED) != 0u) centredBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
     for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)
@@ -6017,6 +6227,10 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
         float3 hi = -lo;
         bool has = false;
+        if (gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u)
+        {
+            for (uint i = pl, iStop = EB_END(i, nodeCount, P); i < iStop; i += P) centredSave(nodeOff + i);
+        }
         for (uint i = pl, iStop = EB_END(i, nodeCount, P); i < iStop; i += P)
         {
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
@@ -6039,6 +6253,11 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
             if (any(lo < asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz)) || any(hi > asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz)))
                 vvReportOutside(v);
         }
+    }
+    if (gP.centredDv != 0u)
+    {
+        centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, pl, P);
+        if (on && (flagsV & FLAG_CENTRED) != 0u) centredBox(v, nodeOff, nodeCount, origin, parity, pl, P);
     }
     for (uint g = pl, gStop = EB_END(g, groupCount, P); g < gStop; g += P) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)

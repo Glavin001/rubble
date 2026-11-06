@@ -14,6 +14,7 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     drag: false,
     turbulence: false,
     triangle_throttle: true,
+    centred_damping: false,
 };
 
 /// One node of `mass` at `p`, no ground contact, no drag.

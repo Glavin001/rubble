@@ -28,10 +28,23 @@ fn main() {
     // broken, bent, fastest node), which the page's picker shows ("marginal at
     // rest" past 1 m/s or with a beam broken).
     let mark = a.iter().any(|x| x == "mark");
+    // `scheme=N`: the damping velocity (4: `ExplicitBeamsSettings::centred_damping`;
+    // 1, 2: `ExplicitBeams::damp_scheme`, measurements).
+    // `brief`: rows of broken, bent, fastest node, KE and the CPU time per step.
+    let scheme: u32 = a
+        .iter()
+        .find_map(|x| x.strip_prefix("scheme="))
+        .map_or(0, |s| s.parse().unwrap());
+    let brief = a.iter().any(|x| x == "brief");
     let mut index: Vec<serde_json::Value> =
         serde_json::from_str(&std::fs::read_to_string(mods.join("index.json")).unwrap()).unwrap();
-    println!("| vehicle | config | loads | wheels | broken | bent | fastest node (m/s) | missing parts |");
-    println!("|---|---|---|---|---|---|---|---|");
+    if brief {
+        println!("| vehicle | config | broken | bent | fastest node (m/s) | KE (J) | µs/step |");
+        println!("|---|---|---|---|---|---|---|");
+    } else {
+        println!("| vehicle | config | loads | wheels | broken | bent | fastest node (m/s) | missing parts |");
+        println!("|---|---|---|---|---|---|---|---|");
+    }
     for car in index.iter_mut() {
         let folder = car["folder"].as_str().unwrap().to_string();
         let folder = folder.as_str();
@@ -89,7 +102,17 @@ fn main() {
             for n in &mut s.nodes {
                 n.pos.y -= low - 0.02;
             }
+            // 4: the centred damping (`centred_damping`); 1, 2: the measurements.
+            if scheme == 4 {
+                s.settings.centred_damping = true;
+            } else {
+                s.damp_scheme = scheme;
+            }
+            let t0 = std::time::Instant::now();
+            let steps0 = s.steps;
             s.run(secs);
+            let us = t0.elapsed().as_secs_f64() * 1e6 / (s.steps - steps0).max(1) as f64;
+            let ke: f32 = s.nodes.iter().map(|n| 0.5 * n.mass * n.vel.length_squared()).sum();
             let (broken, bent) = s.damage();
             // Beams the file gives no strength (`beamStrength` 0: BeamNG content's
             // sensor beams, e.g. a hood-open switch) break at once by design.
@@ -102,6 +125,11 @@ fn main() {
             m.dedup();
             if mark {
                 k["rest"] = serde_json::json!({ "broken": broken, "bent": bent, "fastest": (fast * 100.0).round() / 100.0, "finite": !nan });
+            }
+            if brief {
+                let nan = if nan { "NaN " } else { "" };
+                row(format!("{broken} | {bent} | {nan}{fast:.2} | {ke:.1} | {us:.0}"));
+                continue;
             }
             row(format!(
                 "yes | {} | {broken}{} | {bent} | {}{fast:.2} | {}",
