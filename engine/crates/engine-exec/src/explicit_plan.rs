@@ -1421,18 +1421,19 @@ impl ExplicitUpload {
         // hit count this step (cleared by its node phase).
         // Dissipative contact's position steps (§37): per node 3 words in SHIFT_FIXED
         // units, right after the counts (the kernel's shiftAt: selfSplit +
-        // totalNodes), carried over from the CPU state.
+        // totalNodes), carried over from the CPU state (zero without them).
         let self_split = if vehicles.iter().any(|v| v.two_body_contact) || any_shift {
             let at = acc_init.len() as u32;
             acc_init.extend(std::iter::repeat_n(0, total_nodes));
-            if any_shift {
-                for v in vehicles {
-                    for i in 0..v.nodes.len() {
-                        let w = v.contact_shift.get(i).copied().unwrap_or([0; 3]);
-                        acc_init.extend(w);
-                    }
+            for v in vehicles {
+                for i in 0..v.nodes.len() {
+                    let w = v.contact_shift.get(i).copied().unwrap_or([0; 3]);
+                    acc_init.extend(w);
                 }
             }
+            // §37's residual pass (the kernel's resAt: selfSplit + 4·totalNodes):
+            // per node its active count and residual sums, zero between steps.
+            acc_init.extend(std::iter::repeat_n(0, 4 * total_nodes));
             at
         } else {
             0
@@ -1734,6 +1735,22 @@ pub struct PlannerState {
     fresh: bool,
     frames: u64,
     replan: bool,
+}
+
+impl PlannerState {
+    /// As words (tests: a snapshot saved to a file).
+    pub fn to_words(self) -> [u32; 5] {
+        [self.left, u32::from(self.fresh), self.frames as u32, (self.frames >> 32) as u32, u32::from(self.replan)]
+    }
+    /// From [`Self::to_words`].
+    pub fn from_words(w: [u32; 5]) -> Self {
+        Self {
+            left: w[0],
+            fresh: w[1] != 0,
+            frames: u64::from(w[2]) | (u64::from(w[3]) << 32),
+            replan: w[4] != 0,
+        }
+    }
 }
 
 /// Plans each frame of one uploaded fleet: parameters and commands. Hosts call

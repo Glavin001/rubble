@@ -27,10 +27,12 @@
 
 // The coupling header's .x at the frame's start: read once uniformly
 // (gsUniformCouple, workgroupUniformLoad: the barriers below depend on it) and by the
-// node phase (gsCoupleOn).
+// node phase (gsCpl[0]).
 groupshared uint gsUniformCouple;
-groupshared uint gsCoupleOn;
+// gsCpl[0] is word 0 of gsCpl (below): Metal binds each workgroup variable as an
+// argument, at most 31 per kernel.
 uint vvMember(uint off, uint m);
+uint vvPartLanes(uint k);
 
 static const uint CPL_BOX = 0u;
 static const uint CPL_SPHERE = 1u;
@@ -39,16 +41,48 @@ static const uint CPL_HULL = 3u;
 static const uint CPL_BODY_RECS = 5u;
 static const uint CPL_SHAPE_RECS = 7u;
 
+static const uint CPL_GS = 256u;
+static const uint CPL_GS_VEHICLES = 4u;
+// Per node (its vehicle's first nodes from its node base, while they fit in
+// CPL_GS_NODES): the first and last shape the count pass found it inside
+// (first | last << 16), CPL_NONE when none. The node phase that step tests the same
+// node position against the same shapes (nothing moves the nodes or the bodies
+// between), so it starts at the first and stops after the last: the shapes outside
+// that range were rejected (no force, no sum), the rest are tested as before, in order.
+static const uint CPL_GS_NODES = 1024u;
+static const uint CPL_NONE = 0xFFFFFFFFu;
+// One workgroup array (Metal binds each workgroup variable as an argument, at most 31
+// a kernel): word 0 the coupling header's .x, then per table entry (vehicle, base,
+// count, node base, node count), then the coupling header's words (CPL_GS_HDR: region
+// base, B, S | planes << 16, the accumulators' base, the spheres' base; constant
+// through a frame, copied by coupleBegin so the record arithmetic reads no buffer),
+// then the spheres (4 words each), then the nodes' ranges.
+static const uint CPL_GS_TAB = 1u;
+static const uint CPL_GS_HDR = 21u;
+static const uint CPL_GS_SPH = 32u;
+static const uint CPL_GS_NODE = CPL_GS_SPH + 4u * CPL_GS;
+groupshared uint gsCpl[CPL_GS_NODE + CPL_GS_NODES];
+
+
 uint coupleRec() { return grabRec() + 2u; }
-uint cplB() { return gMisc[coupleRec()].z; }
-uint cplS() { return gMisc[coupleRec()].w & 0xFFFFu; }
-uint cplPlanes() { return gMisc[coupleRec()].w >> 16; }
+// Header word i (CPL_GS_HDR order); from the buffer when the workgroup copies are
+// off (the header's .x bit 2, tests).
+uint cplHdr(uint i)
+{
+    if ((gsCpl[0] & 4u) == 0u) return gsCpl[CPL_GS_HDR + i];
+    uint4 h = gMisc[coupleRec()];
+    uint4 h1 = gMisc[coupleRec() + 1u];
+    return i == 0u ? h.y : (i == 1u ? h.z : (i == 2u ? h.w : (i == 3u ? h1.x : h1.y)));
+}
+uint cplB() { return cplHdr(1u); }
+uint cplS() { return cplHdr(2u) & 0xFFFFu; }
+uint cplPlanes() { return cplHdr(2u) >> 16; }
 uint cplRecs() { return 1u + cplB() * CPL_BODY_RECS + cplS() * CPL_SHAPE_RECS + cplPlanes(); }
-uint cplBase(uint v) { return gMisc[coupleRec()].y + v * cplRecs(); }
+uint cplBase(uint v) { return cplHdr(0u) + v * cplRecs(); }
 uint cplBody(uint v, uint j) { return cplBase(v) + 1u + j * CPL_BODY_RECS; }
 uint cplShape(uint v, uint k) { return cplBase(v) + 1u + cplB() * CPL_BODY_RECS + k * CPL_SHAPE_RECS; }
 uint cplPlane(uint v, uint i) { return cplBase(v) + 1u + cplB() * CPL_BODY_RECS + cplS() * CPL_SHAPE_RECS + i; }
-uint cplAcc(uint v) { return gMisc[coupleRec() + 1u].x + v * (cplB() + 6u * cplS()); }
+uint cplAcc(uint v) { return cplHdr(3u) + v * (cplB() + 6u * cplS()); }
 
 float3 cplRot(float4 q, float3 v)
 {
@@ -143,14 +177,69 @@ float4 cplFace(uint v, uint k, float3 x)
 //
 // gNext at gMisc[coupleRec() + 1].y, per vehicle S x 4 words: per shape (centre,
 // grown radius squared) (engine_exec::explicit_plan coupling layout).
-uint cplSphere(uint v, uint k) { return gMisc[coupleRec() + 1u].y + (v * cplS() + k) * 4u; }
-bool cplCullOn() { return (gMisc[coupleRec()].x & 2u) == 0u; }
+uint cplSphere(uint v, uint k) { return cplHdr(4u) + (v * cplS() + k) * 4u; }
+bool cplCullOn() { return (gsCpl[0] & 2u) == 0u; }
+
+// The spheres in workgroup memory as well (the same words): the frame's vehicle, or a
+// small contact group's members, each its first shapes from its base while they fit
+// in CPL_GS (the rest read from gNext). A table of up to CPL_GS_VEHICLES vehicles and
+// their bases, written by lane 0 at the frame's start (cplGsClear, cplGsAdd, before the
+// barrier the reads follow); an empty table reads every sphere from gNext.
+
+// Lane 0: an empty table.
+void cplGsClear()
+{
+    for (uint e = 0u; e < CPL_GS_VEHICLES; e++)
+    {
+        gsCpl[CPL_GS_TAB + 5u * e + 0u] = 0xFFFFFFFFu;
+        gsCpl[CPL_GS_TAB + 5u * e + 2u] = 0u;
+        gsCpl[CPL_GS_TAB + 5u * e + 4u] = 0u;
+    }
+}
+// Vehicle v as entry e: its spheres from `base`, its nodes' ranges from `nodeBase`.
+void cplGsAdd(uint e, uint v, uint base, uint nodeBase)
+{
+    // The header's .x bit 2 (tests): no workgroup copies, every read from the buffers.
+    if ((gsCpl[0] & 4u) != 0u) return;
+    uint shapes = gsCpl[0] != 0u ? gMisc[cplBase(v)].y : 0u;
+    uint nodes = gStatic[v * 4u].y;
+    gsCpl[CPL_GS_TAB + 5u * e + 0u] = v;
+    gsCpl[CPL_GS_TAB + 5u * e + 1u] = base;
+    gsCpl[CPL_GS_TAB + 5u * e + 2u] = base < CPL_GS ? min(shapes, CPL_GS - base) : 0u;
+    gsCpl[CPL_GS_TAB + 5u * e + 3u] = nodeBase;
+    gsCpl[CPL_GS_TAB + 5u * e + 4u] = shapes > 0u && nodeBase < CPL_GS_NODES ? min(nodes, CPL_GS_NODES - nodeBase) : 0u;
+}
+
+// Vehicle v's node ranges in workgroup memory: (base, count), (0, 0) when none.
+uint2 cplGsNodes(uint v)
+{
+    for (uint e = 0u; e < CPL_GS_VEHICLES; e++)
+    {
+        if (gsCpl[CPL_GS_TAB + 5u * e + 0u] == v) return uint2(gsCpl[CPL_GS_TAB + 5u * e + 3u], gsCpl[CPL_GS_TAB + 5u * e + 4u]);
+    }
+    return uint2(0u, 0u);
+}
+
+// Vehicle v's spheres in workgroup memory: (base, count), (0, 0) when none.
+uint2 cplGsRange(uint v)
+{
+    for (uint e = 0u; e < CPL_GS_VEHICLES; e++)
+    {
+        if (gsCpl[CPL_GS_TAB + 5u * e + 0u] == v) return uint2(gsCpl[CPL_GS_TAB + 5u * e + 1u], gsCpl[CPL_GS_TAB + 5u * e + 2u]);
+    }
+    return uint2(0u, 0u);
+}
 
 // Every lane, after the bodies' integration (its barrier passed): each shape's sphere.
 void cplSpheres(uint v, uint lane)
 {
+    cplSpheresBy(v, lane, LANES);
+}
+void cplSpheresBy(uint v, uint lane, uint lanes)
+{
     uint shapes = cplCullOn() ? gMisc[cplBase(v)].y : 0u;
-    for (uint k = lane, kStop = EB_END(k, shapes, LANES); k < kStop; k += LANES)
+    uint2 gr = cplGsRange(v);
+    for (uint k = lane, kStop = EB_END(k, shapes, lanes); k < kStop; k += lanes)
     {
         // The sphere as cplFace computes it.
         uint at = cplShape(v, k);
@@ -166,34 +255,66 @@ void cplSpheres(uint v, uint lane)
         // Not finite (or NaN): every node tests it.
         bool finite = all(abs(p) < 1.0e30) && abs(r) < 1.0e18;
         uint s = cplSphere(v, k);
-        gNext[s] = asuint(p.x);
-        gNext[s + 1u] = asuint(p.y);
-        gNext[s + 2u] = asuint(p.z);
-        gNext[s + 3u] = asuint(finite ? r * r : 3.0e38);
+        uint4 w = uint4(asuint(p.x), asuint(p.y), asuint(p.z), asuint(finite ? r * r : 3.0e38));
+        gNext[s] = w.x;
+        gNext[s + 1u] = w.y;
+        gNext[s + 2u] = w.z;
+        gNext[s + 3u] = w.w;
+        if (k < gr.y)
+        {
+            uint g = CPL_GS_SPH + 4u * (gr.x + k);
+            gsCpl[g] = w.x;
+            gsCpl[g + 1u] = w.y;
+            gsCpl[g + 2u] = w.z;
+            gsCpl[g + 3u] = w.w;
+        }
     }
 }
 
 // Whether a node at world x may be inside shape k (false: cplFace rejects it).
-bool cplMay(uint v, uint k, float3 x, bool cull)
+// (gr: cplGsRange(v).)
+bool cplMay(uint v, uint k, float3 x, bool cull, uint2 gr)
 {
     if (!cull) return true;
-    uint s = cplSphere(v, k);
-    float3 d = x - asfloat(uint3(gNext[s], gNext[s + 1u], gNext[s + 2u]));
-    return dot(d, d) < asfloat(gNext[s + 3u]);
+    uint4 w;
+    if (k < gr.y)
+    {
+        uint g = CPL_GS_SPH + 4u * (gr.x + k);
+        w = uint4(gsCpl[g], gsCpl[g + 1u], gsCpl[g + 2u], gsCpl[g + 3u]);
+    }
+    else
+    {
+        uint s = cplSphere(v, k);
+        w = uint4(gNext[s], gNext[s + 1u], gNext[s + 2u], gNext[s + 3u]);
+    }
+    float3 d = x - asfloat(w.xyz);
+    return dot(d, d) < asfloat(w.w);
 }
 
 // The two-body contact on a node of vehicle v at world x (force f so far, velocity vel,
 // mass, friction) from every proxy shape it is inside, in shape order; the reactions are
 // summed into the shapes' accumulators. Returns the node's force with them added.
-float3 cplContacts(uint v, float3 x, float3 f, float3 vel, float mass, float friction)
+// `local`: the node's index in its vehicle (its count pass range, cplGsNodes).
+float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction)
 {
     uint4 hdr = gMisc[cplBase(v)];
     uint acc = cplAcc(v);
     uint nb = cplB();
     bool cull = cplCullOn();
-    for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
+    uint2 gr = cplGsRange(v);
+    uint k0 = 0u;
+    uint k1 = hdr.y;
+    uint2 gn = cplGsNodes(v);
+    if (local < gn.y)
     {
-        if (!cplMay(v, k, x, cull)) continue;
+        uint r = gsCpl[CPL_GS_NODE + gn.x + local];
+        if (r == CPL_NONE) return f;
+        k0 = r & 0xFFFFu;
+        k1 = min((r >> 16) + 1u, hdr.y);
+    }
+    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
+    {
+        if (!cplMay(v, k, x, cull, gr)) continue;
         float4 n4 = cplFace(v, k, x);
         if (n4.w == 0.0) continue;
         uint at = cplShape(v, k);
@@ -245,7 +366,75 @@ void cplIntegrate(uint v, uint lane)
 {
     uint4 hdr = gMisc[cplBase(v)];
     if (lane >= hdr.x) return;
-    uint j = lane;
+    cplIntegrateBody(v, lane);
+}
+// The same, body j < B by lane j of `lanes` (and j + lanes, ...).
+// The same bodies as cplIntegrate (j < B and j < LANES), body j by lane j of `lanes`,
+// then j + lanes, ...
+void cplIntegrateBy(uint v, uint lane, uint lanes)
+{
+    uint4 hdr = gMisc[cplBase(v)];
+    uint bodies = min(hdr.x, LANES);
+    for (uint j = lane, jStop = EB_END(j, bodies, lanes); j < jStop; j += lanes) cplIntegrateBody(v, j);
+}
+// Whether vehicle v's step sums go through workgroup memory (cplReactBy): its every
+// sphere is there (so its shapes fit, 6 words each, in the spheres' and the nodes'
+// ranges' words, free between the node phase and the spheres' pass).
+bool cplSplit(uint v, uint shapes)
+{
+    uint2 gr = cplGsRange(v);
+    return shapes > 0u && gr.y == shapes;
+}
+
+// Before the bodies' integration (a barrier between): each shape's step reaction, a
+// lane a shape (the work cplIntegrateBody did per shape, one shape after another, for
+// the same shapes: their body j < B and j < LANES), its force and its torque term
+// about the body's centre left in workgroup memory for the body's sum in shape order.
+void cplReactBy(uint v, uint lane, uint lanes)
+{
+    uint4 hdr = gMisc[cplBase(v)];
+    if (!cplSplit(v, hdr.y)) return;
+    uint2 gr = cplGsRange(v);
+    uint bodies = min(hdr.x, LANES);
+    uint acc = cplAcc(v);
+    uint nb = cplB();
+    uint s0 = cplShape(v, 0u);
+    for (uint k = lane, kStop = EB_END(k, hdr.y, lanes); k < kStop; k += lanes)
+    {
+        uint at = s0 + k * CPL_SHAPE_RECS;
+        uint j = gMisc[at].y;
+        if (j >= bodies) continue;
+        float3 c = asfloat(gMisc[cplBody(v, j)].xyz);
+        uint s = acc + nb + 6u * k;
+        float3 F = float3(float(gAcc[s].load()), float(gAcc[s + 1u].load()), float(gAcc[s + 2u].load())) * (1.0 / FIXED);
+        float3 M = float3(float(gAcc[s + 3u].load()), float(gAcc[s + 4u].load()), float(gAcc[s + 5u].load())) * (1.0 / FIXED);
+        for (uint w = 0u; w < 6u; w++) gAcc[s + w].store(0);
+        float4 imp = asfloat(gMisc[at + 4u]);
+        float4 mom = asfloat(gMisc[at + 5u]);
+        float3 ref = asfloat(gMisc[at + 6u].xyz);
+        gMisc[at + 4u] = asuint(float4(imp.xyz + F * STEP, max(imp.w, length(F))));
+        gMisc[at + 5u] = asuint(float4(mom.xyz + M * STEP, 0.0));
+        float3 t = M + cross(ref - c, F);
+        uint g = CPL_GS_SPH + 6u * (gr.x + k);
+        gsCpl[g] = asuint(F.x);
+        gsCpl[g + 1u] = asuint(F.y);
+        gsCpl[g + 2u] = asuint(F.z);
+        gsCpl[g + 3u] = asuint(t.x);
+        gsCpl[g + 4u] = asuint(t.y);
+        gsCpl[g + 5u] = asuint(t.z);
+    }
+}
+
+void cplIntegrateBody(uint v, uint j)
+{
+    // The split path its own function behind an early return (Metal's codegen of
+    // the path below stays as it was).
+    if (cplSplit(v, gMisc[cplBase(v)].y))
+    {
+        cplIntegrateBodySplit(v, j);
+        return;
+    }
+    uint4 hdr = gMisc[cplBase(v)];
     uint b = cplBody(v, j);
     uint acc = cplAcc(v);
     uint nb = cplB();
@@ -256,9 +445,16 @@ void cplIntegrate(uint v, uint lane)
     float4 c4 = asfloat(gMisc[b + 4u]);
     float3 force = float3(0.0, 0.0, 0.0);
     float3 torque = float3(0.0, 0.0, 0.0);
-    for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
+    // Its shapes' range from the plan (c4.w, vehicle_coupling.slang cpl_plan; 0 every
+    // shape): the shapes outside it are another body's, skipped either way. The shape
+    // records from one base (the same addresses as cplShape).
+    uint range = (gsCpl[0] & 4u) != 0u ? 0u : asuint(c4.w);
+    uint k0 = range == 0u ? 0u : (range & 0xFFFFu) - 1u;
+    uint k1 = range == 0u ? hdr.y : min(range >> 16, hdr.y);
+    uint s0 = cplShape(v, 0u);
+    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
     {
-        uint at = cplShape(v, k);
+        uint at = s0 + k * CPL_SHAPE_RECS;
         if (gMisc[at].y != j) continue;
         uint s = acc + nb + 6u * k;
         float3 F = float3(float(gAcc[s].load()), float(gAcc[s + 1u].load()), float(gAcc[s + 2u].load())) * (1.0 / FIXED);
@@ -293,8 +489,63 @@ void cplIntegrate(uint v, uint lane)
     gAcc[acc + j].store(0);
 }
 
+void cplIntegrateBodySplit(uint v, uint j)
+{
+    uint4 hdr = gMisc[cplBase(v)];
+    uint b = cplBody(v, j);
+    uint acc = cplAcc(v);
+    uint nb = cplB();
+    float4 c0 = asfloat(gMisc[b]);
+    float4 q = asfloat(gMisc[b + 1u]);
+    float4 c2 = asfloat(gMisc[b + 2u]);
+    float4 c3 = asfloat(gMisc[b + 3u]);
+    float4 c4 = asfloat(gMisc[b + 4u]);
+    float3 force = float3(0.0, 0.0, 0.0);
+    float3 torque = float3(0.0, 0.0, 0.0);
+    // Its shapes' range from the plan (c4.w, vehicle_coupling.slang cpl_plan; 0 every
+    // shape): the shapes outside it are another body's, skipped either way. The shape
+    // records from one base (the same addresses as cplShape).
+    uint range = (gsCpl[0] & 4u) != 0u ? 0u : asuint(c4.w);
+    uint k0 = range == 0u ? 0u : (range & 0xFFFFu) - 1u;
+    uint k1 = range == 0u ? hdr.y : min(range >> 16, hdr.y);
+    uint s0 = cplShape(v, 0u);
+    // The shapes' terms from cplReactBy, summed in shape order.
+    uint gx = cplGsRange(v).x;
+    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
+    {
+        if (gMisc[s0 + k * CPL_SHAPE_RECS].y != j) continue;
+        uint g = CPL_GS_SPH + 6u * (gx + k);
+        force += asfloat(uint3(gsCpl[g], gsCpl[g + 1u], gsCpl[g + 2u]));
+        torque += asfloat(uint3(gsCpl[g + 3u], gsCpl[g + 4u], gsCpl[g + 5u]));
+    }
+    float3 vel = c2.xyz;
+    float3 w = c3.xyz;
+    if (c0.w != 0.0)
+    {
+        vel += force * (c0.w * STEP);
+        float3 lt = cplRot(float4(-q.xyz, q.w), torque);
+        w += cplRot(q, c4.xyz * lt) * STEP;
+    }
+    float3 pos = c0.xyz + vel * STEP;
+    if (any(w != float3(0.0, 0.0, 0.0)))
+    {
+        float4 dq = cplQmul(float4(w, 0.0), q);
+        q = normalize(q + 0.5 * STEP * dq);
+    }
+    gMisc[b] = asuint(float4(pos, c0.w));
+    gMisc[b + 1u] = asuint(q);
+    gMisc[b + 2u] = asuint(float4(vel, c2.w));
+    gMisc[b + 3u] = uint4(asuint(w), gMisc[b + 3u].w);
+    gAcc[acc + j].store(0);
+}
+
 // Every lane: its nodes against the proxy shapes, each inside counted on its body.
 void cplCount(uint v, uint lane)
+{
+    cplCountBy(v, lane, LANES);
+}
+// The same over `lanes` lanes.
+void cplCountBy(uint v, uint lane, uint lanes)
 {
     uint4 hdr = gMisc[cplBase(v)];
     if (hdr.y == 0u) return;
@@ -302,15 +553,25 @@ void cplCount(uint v, uint lane)
     float3 origin = asfloat(gMisc[v].xyz);
     uint acc = cplAcc(v);
     bool cull = cplCullOn();
-    for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
+    uint2 gr = cplGsRange(v);
+    uint2 gn = cplGsNodes(v);
+    for (uint i = lane, iStop = EB_END(i, r0.y, lanes); i < iStop; i += lanes)
     {
         uint gi = r0.x + i;
-        if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) != 0u) continue;
-        float3 x = origin + gNodes[gi * 3u].xyz;
-        for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
+        uint range = CPL_NONE;
+        if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) == 0u)
         {
-            if (cplMay(v, k, x, cull) && cplFace(v, k, x).w != 0.0) gAcc[acc + gMisc[cplShape(v, k)].y].add(1);
+            float3 x = origin + gNodes[gi * 3u].xyz;
+            for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
+            {
+                if (cplMay(v, k, x, cull, gr) && cplFace(v, k, x).w != 0.0)
+                {
+                    gAcc[acc + gMisc[cplShape(v, k)].y].add(1);
+                    range = range == CPL_NONE ? (k | (k << 16)) : ((range & 0xFFFFu) | (k << 16));
+                }
+            }
         }
+        if (i < gn.y) gsCpl[CPL_GS_NODE + gn.x + i] = range;
     }
 }
 
@@ -318,7 +579,27 @@ void cplCount(uint v, uint lane)
 void coupleStep(uint v, uint lane, uint s, uint on)
 {
     if (on == 0u) return;
-    if (s > 0u) cplIntegrate(v, lane);
+#ifdef EB_ABLATE
+    // Measurement only: 8192 the bodies' integration, 16384 the spheres, 32768 the count.
+    if (s > 0u && (gP.ablate & 8192u) == 0u)
+    {
+        cplReactBy(v, lane, LANES);
+        sync();
+        cplIntegrate(v, lane);
+    }
+    sync();
+    if ((gP.ablate & 16384u) == 0u) cplSpheres(v, lane);
+    sync();
+    if ((gP.ablate & 32768u) == 0u) cplCount(v, lane);
+    sync();
+    return;
+#endif
+    if (s > 0u)
+    {
+        cplReactBy(v, lane, LANES);
+        sync();
+        cplIntegrate(v, lane);
+    }
     sync();
     cplSpheres(v, lane);
     sync();
@@ -330,13 +611,57 @@ void coupleStep(uint v, uint lane, uint s, uint on)
 void coupleEnd(uint v, uint lane, uint on)
 {
     if (on == 0u) return;
-    if (gP.steps > 0u) cplIntegrate(v, lane);
+    if (gP.steps > 0u)
+    {
+        cplReactBy(v, lane, LANES);
+        sync();
+        cplIntegrate(v, lane);
+    }
 }
 
 // coupleStep and coupleEnd for a contact group's k members.
 void coupleStepMembers(uint off, uint k, uint lane, uint s, uint on)
 {
     if (on == 0u) return;
+#ifdef EB_ABLATE
+    if (s > 0u && (gP.ablate & 8192u) == 0u)
+    {
+        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplReactBy(vvMember(off, m), lane, LANES);
+        sync();
+        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
+    }
+    sync();
+    if ((gP.ablate & 16384u) == 0u)
+        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplSpheres(vvMember(off, m), lane);
+    sync();
+    if ((gP.ablate & 32768u) == 0u)
+        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplCount(vvMember(off, m), lane);
+    sync();
+    return;
+#endif
+    if (k <= CPL_GS_VEHICLES && (on & 4u) == 0u)
+    {
+        // A small group: its members side by side, vvPartLanes(k) lanes each (the
+        // members' proxies are their own: the same work per member as one after the
+        // other, the counts integer sums).
+        uint P = vvPartLanes(k);
+        uint m = lane / P;
+        uint pl = lane % P;
+        bool on = m < k;
+        uint v = vvMember(off, on ? m : 0u);
+        if (s > 0u)
+        {
+            if (on) cplReactBy(v, pl, P);
+            sync();
+            if (on) cplIntegrateBy(v, pl, P);
+        }
+        sync();
+        if (on) cplSpheresBy(v, pl, P);
+        sync();
+        if (on) cplCountBy(v, pl, P);
+        sync();
+        return;
+    }
     if (s > 0u)
     {
         for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
@@ -352,7 +677,15 @@ void coupleEndMembers(uint off, uint k, uint lane, uint on)
 {
     if (on == 0u) return;
     sync();
-    if (gP.steps > 0u)
+    if (gP.steps > 0u && k <= CPL_GS_VEHICLES && (on & 4u) == 0u)
+    {
+        uint P = vvPartLanes(k);
+        uint m = lane / P;
+        if (m < k) cplReactBy(vvMember(off, m), lane % P, P);
+        sync();
+        if (m < k) cplIntegrateBy(vvMember(off, m), lane % P, P);
+    }
+    else if (gP.steps > 0u)
     {
         for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplIntegrate(vvMember(off, m), lane);
     }
@@ -374,6 +707,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     clipRoll(gi, flagsV);
     if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
     float3 shift = shiftTake(gi, flagsV); // §37's contact position step
+    float lift = 0.0; // §37's ground position step
     float selfGroup = gNodes[gi * 3u + 2u].w;
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -404,7 +738,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
         }
         else if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
+            float3 c = groundContact(f, vel, mass, vehicle, ground - x.y, V.w, lift);
             cfAdd(gi, c);
             f += c;
         }
@@ -436,7 +770,12 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
                 }
             }
         }
-        float3 fr = cplContacts(vehicle, x, f, vel, mass, V.w);
+#ifdef EB_ABLATE
+        // Measurement only: 65536 the node's proxy contact.
+        float3 fr = (gP.ablate & 65536u) != 0u ? f : cplContacts(vehicle, local, x, f, vel, mass, V.w);
+#else
+        float3 fr = cplContacts(vehicle, local, x, f, vel, mass, V.w);
+#endif
         cfAdd(gi, fr - f);
         f = fr;
     }
@@ -444,7 +783,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     {
         vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
         pos = sadd3(pos, sscale(vel, STEP));
-        pos = sadd3(pos, shift);
+        pos = takeSteps(pos, shift, lift);
     }
     clipSpeed(vehicle, step, flagsV, vel);
 #ifdef EB_AERO
@@ -477,15 +816,24 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
 
 // Whether vehicle v has proxy shapes this window (the coupling on, read at the
 // frame's start, and its region non-empty).
+// The wide passes (no coupleBegin, gsCpl unset) read the header itself: the coupling
+// is off whenever they run, so the record arithmetic never sees an unset copy.
 bool cplHas(uint v)
 {
-    return gsCoupleOn != 0u && gMisc[cplBase(v)].y != 0u;
+    return gsCpl[0] != 0u && gMisc[coupleRec()].x != 0u && gMisc[cplBase(v)].y != 0u;
 }
 
 // The frame's start (lane 0, before the barrier the uniform read follows).
 void coupleBegin()
 {
-    uint on = gMisc[coupleRec()].x;
+    uint4 h = gMisc[coupleRec()];
+    uint on = h.x;
     gsUniformCouple = on;
-    gsCoupleOn = on;
+    gsCpl[0] = on;
+    uint4 h1 = gMisc[coupleRec() + 1u];
+    gsCpl[CPL_GS_HDR] = h.y;
+    gsCpl[CPL_GS_HDR + 1u] = h.z;
+    gsCpl[CPL_GS_HDR + 2u] = h.w;
+    gsCpl[CPL_GS_HDR + 3u] = h1.x;
+    gsCpl[CPL_GS_HDR + 4u] = h1.y;
 }
