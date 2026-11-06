@@ -18,8 +18,8 @@
 //! bit-identical to stepping each alone.
 
 use crate::explicit_beams::{
-    contact_force, ContactSurface, ExplicitBeams, ExplicitKind, ForceTrace, Node, GRAVITY,
-    NODE_IMMOVABLE, STEP,
+    contact_force, contact_response, shift_depth, ContactSurface, ExplicitBeams, ExplicitKind,
+    ForceTrace, Node, GRAVITY, NODE_IMMOVABLE, STEP,
 };
 use glam::Vec3;
 
@@ -861,7 +861,11 @@ impl ExplicitBeamsWorld {
                 va.nodes[i2 as usize],
             );
             let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
-            let (m, fh) = if two_body(b) {
+            let dissipative =
+                self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact;
+            // (§37's position step shares: the sub-bodies' inverse masses; none
+            // outside the two-body rule.)
+            let (m, fh, ims) = if two_body(b) {
                 // Each node of the hit is one of its k sub-bodies (mass m/k); an
                 // immovable node is of infinite mass. The triangle point's inverse
                 // mass is Σ w²·k/m; the pair's relative normal acceleration from the
@@ -893,15 +897,20 @@ impl ExplicitBeamsWorld {
                 let at = acc(pf[i1 as usize], &n1) * alpha
                     + acc(pf[i2 as usize], &n2) * beta
                     + acc(pf[i0 as usize], &n0) * gamma;
-                (m, (acc(self.pass_force[b][h as usize], &node) - at) * m)
+                (
+                    m,
+                    (acc(self.pass_force[b][h as usize], &node) - at) * m,
+                    Some([imh, im(&n1, k(i1)), im(&n2, k(i2)), im(&n0, k(i0))]),
+                )
             } else {
                 let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
                 (
                     (node.mass * mt) / (node.mass + mt),
                     self.vehicles[b].force_now(h as usize),
+                    None,
                 )
             };
-            let f = contact_force(
+            let (f, budget) = contact_response(
                 fh,
                 v,
                 m,
@@ -909,13 +918,25 @@ impl ExplicitBeamsWorld {
                 STEP,
                 &ContactSurface::BOX
                     .exact_if(self.vehicles[b].exact_friction)
-                    .dissipative_if(
-                        self.vehicles[a].dissipative_contact
-                            || self.vehicles[b].dissipative_contact,
-                    ),
+                    .dissipative_if(dissipative),
                 x.p,
                 node.friction,
             );
+            if let (true, Some([imh, im1, im2, im0])) = (f != Vec3::ZERO && dissipative, ims) {
+                // §37: the position step, a position impulse δ·m shared by the
+                // sub-bodies' inverse masses (explicit_beams' self-hit order).
+                let delta = shift_depth(x.p, budget, fh.dot(x.n));
+                if delta > 0.0 {
+                    let q = delta * m;
+                    self.vehicles[b].add_shift(h as usize, x.n * (q * imh));
+                    let va = &mut self.vehicles[a];
+                    for (i, w, imk) in [(i1, alpha, im1), (i2, beta, im2), (i0, gamma, im0)] {
+                        if w > 0.0 {
+                            va.add_shift(i as usize, x.n * -(w * (q * imk)));
+                        }
+                    }
+                }
+            }
             if let Some(l) = self.ledger.as_mut() {
                 let fnorm = x.n * f.dot(x.n);
                 let ft = f - fnorm;
@@ -996,6 +1017,11 @@ pub struct EnergyLedger {
     pub w_contact_friction: f64,
     pub w_ground_vertical: f64,
     pub w_ground_horizontal: f64,
+    /// The contact position steps' energy (§37, self- and vehicle contact): per
+    /// step Σ −F·Δx over the nodes they moved, F the node's air, beam and slide
+    /// forces of the step (the first-order change of the potential and elastic
+    /// energy they store). Not a work on the velocities: not in kinetic_change.
+    pub w_contact_shift: f64,
     pub discretisation: f64,
     prev: Vec<ForceSplit>,
     vc: Vec<[Vec<Vec3>; 2]>,
@@ -1055,6 +1081,11 @@ impl EnergyLedger {
             self.w_contact_friction += w(vc[1][i]);
             self.w_ground_vertical += w(Vec3::new(0.0, ground.y, 0.0));
             self.w_ground_horizontal += w(Vec3::new(ground.x, 0.0, ground.z));
+            if let Some(&d) = v.shift_applied.get(i) {
+                self.w_contact_shift -= (prev[0][i] + prev[1][i] + prev[3][i])
+                    .as_dvec3()
+                    .dot(d.as_dvec3());
+            }
         }
         if let Some(t) = v.trace.as_ref() {
             self.prev[k].trace = (**t).clone();

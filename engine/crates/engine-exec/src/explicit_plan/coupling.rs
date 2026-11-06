@@ -48,6 +48,7 @@ pub fn proxy_records(layout: &CouplingLayout, set: &ProxySet) -> Result<Vec<[u32
     let plane0 = shape0 + (cap.shapes * CouplingLayout::SHAPE_RECS) as usize;
     for (k, s) in set.shapes.iter().enumerate() {
         let at = shape0 + k * CouplingLayout::SHAPE_RECS as usize;
+        let mut hull_counts = 0u32;
         let (kind, p, radius, span) = match &s.geom {
             ProxyGeom::Box { half } => (CPL_BOX, [half.x, half.y, half.z], half.length(), 0),
             ProxyGeom::Sphere { radius } => (CPL_SPHERE, [*radius, 0.0, 0.0], *radius, 0),
@@ -55,14 +56,29 @@ pub fn proxy_records(layout: &CouplingLayout, set: &ProxySet) -> Result<Vec<[u32
                 (CPL_CAPSULE, [*radius, *half_len, 0.0], radius + half_len, 0)
             }
             ProxyGeom::Hull { planes: list, radius } => {
-                if planes as usize + list.len() > cap.planes as usize || list.len() > 0xFFFF {
+                // With its vertices and edges known (the surface contact's), they follow
+                // the planes: vertices, then edges four to a record (a | b << 8).
+                let geom = s.hull_geometry_known();
+                let extra = geom.map_or(0, |(v, e)| v.len() + e.len().div_ceil(4));
+                if planes as usize + list.len() + extra > cap.planes as usize || list.len() > 0xFFFF {
                     return Err(format!("explicit coupling: more than {} hull planes", cap.planes));
                 }
                 for (i, &(n, d)) in list.iter().enumerate() {
                     recs[plane0 + planes as usize + i] = f4(n.x, n.y, n.z, d);
                 }
                 let span = planes | (list.len() as u32) << 16;
-                planes += list.len() as u32;
+                let mut at = plane0 + planes as usize + list.len();
+                if let Some((verts, edges)) = geom {
+                    for v in verts {
+                        recs[at] = f4(v.x, v.y, v.z, 0.0);
+                        at += 1;
+                    }
+                    for (k, e) in edges.iter().enumerate() {
+                        recs[at + k / 4][k % 4] = e[0] | e[1] << 8;
+                    }
+                    hull_counts = (verts.len() as u32) | (edges.len() as u32) << 8;
+                }
+                planes += (list.len() + extra) as u32;
                 (CPL_HULL, [0.0; 3], *radius, span)
             }
         };
@@ -70,6 +86,7 @@ pub fn proxy_records(layout: &CouplingLayout, set: &ProxySet) -> Result<Vec<[u32
         recs[at + 1] = f4(s.local_pos.x, s.local_pos.y, s.local_pos.z, p[0]);
         recs[at + 2] = q4(s.local_rot);
         recs[at + 3] = f4(p[1], p[2], radius + 0.01, 0.0);
+        recs[at + 3][3] = hull_counts;
         recs[at + 4] = f4(0.0, 0.0, 0.0, 0.0);
         recs[at + 5] = f4(0.0, 0.0, 0.0, 0.0);
         recs[at + 6] = f4(s.reference.x, s.reference.y, s.reference.z, 0.0);

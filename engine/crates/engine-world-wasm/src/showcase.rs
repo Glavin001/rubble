@@ -94,13 +94,17 @@ const FAR_DETAIL: f32 = 0.2;
 
 /// The visual for a spawn on raycast wheels (`engine_softbody::explicit_drive`):
 /// without the tyre nodes and beams the `.truck` spawn builds, so every binding,
-/// beam index and per-node array matches that solver's vehicle. The tyres' own
-/// skin goes (the page draws the raycast wheels); beams after the tyres' move down.
+/// beam index and per-node array matches that solver's vehicle. The wheels'
+/// pieces (tyre, rim, disc, caliper) ride the raycast wheels instead
+/// (`skin::bind_raycast_wheels`: the renderer places them from the drive
+/// state); beams after the tyres' move down.
 struct TyreCut {
     /// The spawn's nodes without tyres, its first tyre beam and the tyre beams.
     nodes: u32,
     first: u32,
     count: u32,
+    /// The raycast spawn's drive (its wheels, in the drive state's order).
+    config: engine_softbody::explicit_drive::DriveConfig,
 }
 
 impl TyreCut {
@@ -120,10 +124,17 @@ impl TyreCut {
         .map_err(err)?;
         // Beam order: cinecam beams, tyre beams, then the file's.
         let first = engine_softbody::truck::parse_truck(truck).cinecams.len() as u32 * 8;
+        let config = without
+            .drive
+            .as_ref()
+            .ok_or_else(|| err("raycast spawn without a drive"))?
+            .config
+            .clone();
         Ok(Self {
             nodes: without.nodes.len() as u32,
             first,
             count: (with.beams.len() - without.beams.len()) as u32,
+            config,
         })
     }
 
@@ -137,7 +148,8 @@ impl TyreCut {
         }
     }
 
-    fn apply(&self, v: &mut ShowcaseVisual) {
+    fn apply(&self, v: &mut ShowcaseVisual) -> Result<(), JsValue> {
+        engine_softbody::authoring::skin::bind_raycast_wheels(v, &self.config).map_err(err)?;
         let n = self.nodes;
         let live = |t: &[u32; 3]| t.iter().all(|&i| i < n);
         let ok_vertex: Vec<bool> = v.bind_nodes.iter().map(live).collect();
@@ -196,6 +208,7 @@ impl TyreCut {
             }
         }
         v.node_count = n;
+        Ok(())
     }
 }
 
@@ -215,11 +228,11 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     } else {
         None
     };
-    let fix = |mut v: ShowcaseVisual| {
+    let fix = |mut v: ShowcaseVisual| -> Result<ShowcaseVisual, JsValue> {
         if let Some(c) = &cut {
-            c.apply(&mut v);
+            c.apply(&mut v)?;
         }
-        v
+        Ok(v)
     };
     // Measurement switches (a visual A/B on identical physics): `bind:
     // 'legacy'` the binding before the flexbody rebinding; `alt: false` no
@@ -241,7 +254,7 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
         })
         .map_err(err)
     };
-    let v = fix(make(1.0)?);
+    let v = fix(make(1.0)?)?;
     let out = Object::new();
     set(&out, "truck", &JsValue::from_str(&b.truck));
     let counts = Object::new();
@@ -264,10 +277,10 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     set(&out, "counts", &counts);
     set(&out, "visual", &visual_js(&v).into());
     // The distant level of detail (the renderer picks it by distance).
-    let lod = fix(make(0.45)?);
+    let lod = fix(make(0.45)?)?;
     set(&out, "visualLod", &visual_js(&lod).into());
     // A third, coarser level (a car a few hundred pixels long and less).
-    let far = fix(make(FAR_DETAIL)?);
+    let far = fix(make(FAR_DETAIL)?)?;
     set(&out, "visualFar", &visual_js(&far).into());
     Ok(out.into())
 }
@@ -281,13 +294,30 @@ pub fn showcase_car_visual(params: JsValue) -> Result<JsValue, JsValue> {
 
 fn visual_js(v: &ShowcaseVisual) -> Object {
     let vis = Object::new();
-    // Textures (imported vehicles' colour maps): file names, and per vertex
-    // its texture + 1 (0 untextured).
-    let tex = Array::new();
-    for t in &v.textures {
-        tex.push(&JsValue::from_str(t));
-    }
-    set(&vis, "textures", &tex.into());
+    // Textures (imported vehicles' maps, skin.rs `ShowcaseVisual::tex_sets`):
+    // colour and data file names, per vertex its texture set + 1 (0
+    // untextured), per set its [colour, normal, roughness, AO] file + 1 (0
+    // none; colour into `textures`, the rest into `dataTextures`).
+    let names = |list: &[String]| {
+        let a = Array::new();
+        for t in list {
+            a.push(&JsValue::from_str(t));
+        }
+        a
+    };
+    set(&vis, "textures", &names(&v.textures).into());
+    set(&vis, "dataTextures", &names(&v.data_textures).into());
+    let sets: Vec<u16> = v
+        .tex_sets
+        .iter()
+        .flatten()
+        .map(|&k| if k == u16::MAX { 0 } else { k + 1 })
+        .collect();
+    set(
+        &vis,
+        "texSets",
+        &js_sys::Uint16Array::from(sets.as_slice()).into(),
+    );
     if !v.tex.is_empty() {
         let t: Vec<u16> = v
             .tex
@@ -566,6 +596,11 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
         all.iter().map(|m| flexmesh::cluster(m, far_cell)).collect();
     let (far_vis, _) =
         flexmesh::jbeam_visual(&flex, &props, &desc, &sim, &farther, &mats, paint).map_err(err)?;
+    // Every level on the full level's texture layers.
+    let (mut lod, mut far_vis) = (lod, far_vis);
+    for l in [&mut lod, &mut far_vis] {
+        flexmesh::rebase_textures(l, &vis.textures, &vis.data_textures).map_err(err)?;
+    }
     let out = Object::new();
     set(&out, "visual", &visual_js(&vis).into());
     set(&out, "visualLod", &visual_js(&lod).into());

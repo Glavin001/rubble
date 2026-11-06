@@ -48,6 +48,15 @@ pub const DEFAULT_COLLISION_RANGE: f32 = 0.02;
 pub const BEAMNG_COLLISION_RANGE: f32 = 0.025;
 /// The GPU's contact-force fixed point: units per newton (the kernel's `FIXED`).
 pub const CONTACT_FIXED: f32 = 32.0;
+/// The contact position step's fixed point (§37): units per metre, 2²⁴ (the
+/// kernel's `SHIFT_FIXED`).
+pub const SHIFT_FIXED: f32 = 16_777_216.0;
+
+/// A position-step component in [`SHIFT_FIXED`] units, as the kernel's
+/// `toFixedShift`: clamped to ±2·10⁹, rounded to nearest with ties to even.
+pub fn to_fixed_shift(x: f32) -> i32 {
+    (x * SHIFT_FIXED).clamp(-2.0e9, 2.0e9).round_ties_even() as i32
+}
 
 /// A force component in [`CONTACT_FIXED`] units, as the kernel's `toFixed`:
 /// clamped to ±2·10⁹, rounded to nearest with ties to even.
@@ -944,6 +953,26 @@ pub struct ExplicitBeams {
     /// Vehicle contact takes it when the owner or the partner has it. Off: RoR's
     /// rule.
     pub dissipative_contact: bool,
+    /// Surface contact (opt-in, jbeam-semantics-spec.md §38;
+    /// [`crate::explicit_surface`]): the collision triangles meet the static boxes and
+    /// shapes and the rigid proxies by their surface (edges and faces), beside node
+    /// contact, with the two-body dissipative rule in the vehicle's band. Off (the
+    /// default): node contact only, every step bit for bit as before.
+    pub surface_contact: bool,
+    /// The surface pass's hits in the last step (a statistic; not simulated state).
+    pub surface_last: u32,
+    /// The surface pass's segments (beam-edge contact, [`crate::explicit_surface::surface_segments`]),
+    /// found at its first step.
+    pub surface_segs: Option<Vec<u32>>,
+    /// The surface pass's total force on the nodes in the last step (N; as their
+    /// contact sums take it): a statistic for momentum ledgers, not simulated state.
+    pub surface_force: glam::DVec3,
+    /// [`Self::dissipative_contact`]'s position steps this step, per node in
+    /// [`SHIFT_FIXED`] units (summed as integers, order free); the next node pass
+    /// adds them to the positions after x + h·v (empty until used).
+    pub contact_shift: Vec<[i32; 3]>,
+    /// The position steps the last node pass applied (m; empty: none).
+    pub shift_applied: Vec<Vec3>,
     /// RoR's rule that a beam's strength falls by k × its plastic stretch (true,
     /// the RoR profile and the solver's JBeam rule until §36). The BeamNG profile:
     /// false (BeamNG documents no such rule; its `deformLimitStress` and deform
@@ -1008,6 +1037,10 @@ pub struct ExplicitBeams {
     /// Raycast wheels, drive and driver input ([`crate::explicit_drive`]); `None`
     /// (the default) for none, every step unchanged.
     pub drive: Option<Box<crate::explicit_drive::Drive>>,
+    /// Spawned on the BeamNG profile (jbeam-semantics-spec.md §36): JBeam
+    /// content, or a `.truck` with `rubble_beamng_profile`; else Rigs of
+    /// Rods'. What hosts report as the vehicle's profile.
+    pub beamng_profile: bool,
     /// Vehicle sleep's state ([`crate::explicit_sleep`]; used only by a fleet with the
     /// setting on): still count, asleep, anchor.
     pub sleep: crate::explicit_sleep::SleepState,
@@ -1225,55 +1258,104 @@ pub fn contact_force(
     p: f32,
     friction: f32,
 ) -> Vec3 {
+    contact_response(f, v, m, n, h, surface, p, friction).0
+}
+
+/// [`contact_force`] and, on a [`ContactSurface::dissipative`] surface (§37), the
+/// energy its normal force takes out of the pair this step (J, ≥ 0): the budget of
+/// the penetration's position step ([`shift_depth`]). RoR's rule: (force, 0).
+///
+/// §37's normal force stops an approach (vn′ = 0) and, separating, at most
+/// cancels the inward force with vn′ ≥ −vn: r = −fn − (vn + max(vn, 0))·m/h. Its
+/// work r·(vn + vn′)/2·h is −(½·m·vn² + ½·h·fn·vn) approaching and 0 otherwise, so
+/// it does none positive and makes no separating speed. Friction is then capped
+/// ([`no_positive_work`]).
+#[allow(clippy::too_many_arguments)]
+pub fn contact_response(
+    f: Vec3,
+    v: Vec3,
+    m: f32,
+    n: Vec3,
+    h: f32,
+    surface: &ContactSurface,
+    p: f32,
+    friction: f32,
+) -> (Vec3, f32) {
     if p < 0.0 {
-        return Vec3::ZERO;
+        return (Vec3::ZERO, 0.0);
     }
     let vn = v.dot(n);
     let fn_ = f.dot(n);
     let mut r = -fn_;
-    if vn < 0.0 {
+    let mut budget = 0.0;
+    if surface.dissipative {
+        r = -fn_ - (vn + vn.max(0.0)) * m / h;
+        if vn < 0.0 {
+            budget = (0.5 * m * (vn * vn) + 0.5 * h * (fn_ * vn)).max(0.0);
+        }
+    } else if vn < 0.0 {
         r -= (0.8 * vn - 0.2 * p / h) * m / h;
     }
-    if surface.dissipative {
-        // (§37) Over the step the normal force does work r·(vn + vn′)/2·h, with
-        // vn′ = vn + h·(fn + r)/m the pair's normal speed after it. Capped so that
-        // vn′ ≤ 0 when approaching (the push stops the approach, never reverses
-        // it) and vn′ ≤ −vn when separating (work ≤ 0):
-        // r ≤ −fn − (vn + max(vn, 0))·m/h.
-        r = r.min(-fn_ - (vn + vn.max(0.0)) * m / h);
-    }
     if r <= 0.0 {
-        return Vec3::ZERO;
+        return (Vec3::ZERO, 0.0);
     }
     let c = contact_friction(r, f, v, n, surface, friction);
     if surface.dissipative {
-        no_positive_work(c, f, v, m, h)
+        (no_positive_work(c, r, n, f, v, m, h), budget)
     } else {
-        c
+        (c, 0.0)
     }
 }
 
-/// §37: contact force `c` on a pair of relative velocity `v`, reduced mass `m`,
-/// under force `f`, scaled down (s ∈ [0, 1]) until its work over the step at the
-/// pair's mean velocity, c·(v + v′)/2·h with v′ = v + h·(f + c)/m, is ≤ 0: the
-/// work is ∝ s·a + s²·b, a = c·(2v + h·f/m), b = h·|c|²/m, so s = min(1, −a/b),
-/// none when a ≥ 0. (Friction's stick term cancels the tangential force like the
-/// normal term cancels the normal one, and both do positive work while the beams
-/// decelerate the pair.)
-pub fn no_positive_work(c: Vec3, f: Vec3, v: Vec3, m: f32, h: f32) -> Vec3 {
+/// §37: the penetration's position step, the pair's separation δ along the
+/// normal this step (m), from the depth `p` in the band, the `budget` the step's
+/// normal force took out of the pair ([`contact_response`]) and the pair's normal
+/// force `fn` (from the forces at the pass's start). RoR's push moves the pair
+/// 0.2·p apart per step as speed that stays; here δ = 0.2·p is a move without
+/// speed, as a position impulse P = δ·m shared like the hit's force (each node by
+/// its sub-body's inverse mass). Against an inward force (fn < 0) it stores |fn|·δ
+/// (first order), capped to the budget: δ ≤ budget/|fn|; with fn ≥ 0 the move
+/// releases energy and is not capped.
+pub fn shift_depth(p: f32, budget: f32, fn_: f32) -> f32 {
+    let full = 0.2 * p;
+    if fn_ >= 0.0 || -fn_ * full <= budget {
+        full
+    } else {
+        budget / -fn_
+    }
+}
+
+/// §37: contact force `c` (normal part r·n, r > 0, n unit) on a pair of relative
+/// velocity `v`, reduced mass `m`, under force `f`, with its tangential (friction)
+/// part t = c − r·n scaled by the largest s ∈ [0, 1] for which the force's work
+/// over the step at the pair's mean velocity, (r·n + s·t)·(v + v′)/2·h with
+/// v′ = v + h·(f + r·n + s·t)/m, is ≤ 0. That work is ∝ a0 + a1·s + b·s² with
+/// u = 2v + h·f/m, a0 = r·n·u + h·r²/m (≤ 0 by the normal rule), a1 = t·u +
+/// 2h·(r·n)·t/m, b = h·|t|²/m; s is its positive root. (Friction's stick term
+/// cancels the tangential force like RoR's normal term, and both do positive work
+/// while the beams decelerate the pair.) The normal part is left whole: it holds
+/// the pair apart.
+pub fn no_positive_work(c: Vec3, r: f32, n: Vec3, f: Vec3, v: Vec3, m: f32, h: f32) -> Vec3 {
     if m <= 0.0 {
         return c;
     }
-    let u = v + v + f * (h / m);
-    let a = c.dot(u);
-    let b = c.dot(c) * (h / m);
-    if a + b <= 0.0 {
-        c
-    } else if a >= 0.0 {
-        Vec3::ZERO
-    } else {
-        c * (-a / b)
+    let hm = h / m;
+    let rn = n * r;
+    let t = c - rn;
+    let u = v + v + f * hm;
+    let a0 = rn.dot(u) + rn.dot(rn) * hm;
+    let a1 = t.dot(u) + 2.0 * hm * rn.dot(t);
+    let b = t.dot(t) * hm;
+    if a0 + a1 + b <= 0.0 || b <= 0.0 {
+        return c;
     }
+    let disc = a1 * a1 - 4.0 * b * a0;
+    let s = if disc < 0.0 {
+        0.0
+    } else {
+        ((disc.sqrt() - a1) / (2.0 * b)).clamp(0.0, 1.0)
+    };
+    rn + t * s
 }
 
 /// The contact force of normal force `r` > 0 along `n` with its friction
@@ -1463,6 +1545,12 @@ impl ExplicitBeams {
             anti_only_tris: Vec::new(),
             fixed_contact: false,
             dissipative_contact: false,
+            surface_contact: false,
+            surface_last: 0,
+            surface_segs: None,
+            surface_force: glam::DVec3::ZERO,
+            contact_shift: Vec::new(),
+            shift_applied: Vec::new(),
             plastic_strength_drop: true,
             exact_friction: false,
             contact_acc: Vec::new(),
@@ -1485,6 +1573,7 @@ impl ExplicitBeams {
             rigid: None,
             trace: None,
             drive: None,
+            beamng_profile: false,
             sleep: Default::default(),
         }
     }
@@ -1937,6 +2026,7 @@ impl ExplicitBeams {
         // `rubble_beamng_profile` (Rubble's extension, spec §36): the BeamNG
         // profile's switches and two-body vehicle contact.
         if file.beamng_profile {
+            s.beamng_profile = true;
             s.settings = s.settings.beamng();
             s.two_body_contact = true;
             s.anti_clip = true;
@@ -2474,6 +2564,7 @@ impl ExplicitBeams {
         // 0.2 % error strains stiff beams at rest).
         let settings = settings.beamng();
         let mut s = Self::spawn_nodes(desc, position, 0.0, velocity, settings);
+        s.beamng_profile = true;
         for b in &desc.beams {
             s.push_jbeam_beam(b);
         }
@@ -3223,6 +3314,14 @@ impl ExplicitBeams {
         if !self.triangles.is_empty() && !self.candidates.is_empty() {
             self.collision_pass();
         }
+        if self.surface_contact {
+            self.surface_pass();
+        }
+        // The rigid proxies integrate this step's reactions, the node pass's and the
+        // surface pass's (nothing between the node pass and here reads them).
+        if let Some(r) = self.rigid.as_mut() {
+            r.end_step();
+        }
         if let Some(t) = trace.as_mut() {
             t.capture(&forces_now_of(&self), 2);
         }
@@ -3253,6 +3352,14 @@ impl ExplicitBeams {
             if let Some(e) = self.contact_exact.as_mut() {
                 e.clear();
             }
+        }
+        // §37: last step's contact position steps.
+        self.shift_applied.clear();
+        if !self.contact_shift.is_empty() {
+            self.shift_applied.extend(self.contact_shift.iter().map(|a| {
+                Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32) * (1.0 / SHIFT_FIXED)
+            }));
+            self.contact_shift.clear();
         }
         let h = STEP;
         let origin = self.origin;
@@ -3381,6 +3488,9 @@ impl ExplicitBeams {
             if !n.has(NODE_IMMOVABLE) {
                 n.vel += n.force / n.mass * h;
                 n.pos += n.vel * h;
+                if let Some(&d) = self.shift_applied.get(i) {
+                    n.pos += d;
+                }
             }
             n.force = Vec3::new(0.0, n.mass * GRAVITY, 0.0);
             if self.fusedrag.is_some() {
@@ -3402,10 +3512,9 @@ impl ExplicitBeams {
         }
         self.contact_force = cf;
         self.tread = tread;
-        if let Some(mut r) = rigid {
-            r.end_step();
-            self.rigid = Some(r);
-        }
+        // The proxies integrate their reactions at the step's end (`Self::step`), after
+        // the surface pass has added its own.
+        self.rigid = rigid;
         if let Some(g) = self.grab {
             self.grab_pass(g);
         }
@@ -3884,6 +3993,17 @@ impl ExplicitBeams {
         }
     }
 
+    /// Adds position step `d` (m) to node `i`'s ([`Self::contact_shift`]).
+    pub fn add_shift(&mut self, i: usize, d: Vec3) {
+        if self.contact_shift.len() != self.nodes.len() {
+            self.contact_shift = vec![[0; 3]; self.nodes.len()];
+        }
+        let a = &mut self.contact_shift[i];
+        for (k, x) in d.to_array().into_iter().enumerate() {
+            a[k] = a[k].wrapping_add(to_fixed_shift(x));
+        }
+    }
+
     /// Node `i`'s fixed-point contact sum in newtons (zero when none).
     pub fn contact_sum(&self, i: usize) -> Vec3 {
         match self.contact_acc.get(i) {
@@ -4013,7 +4133,7 @@ impl ExplicitBeams {
                 + acc(pass[i2 as usize], &n2) * beta
                 + acc(pass[i0 as usize], &n0) * gamma;
             let fh = (acc(pass[hn as usize], &node) - at) * m;
-            let f = contact_force(
+            let (f, budget) = contact_response(
                 fh,
                 v,
                 m,
@@ -4025,6 +4145,21 @@ impl ExplicitBeams {
                 depth,
                 node.friction,
             );
+            if self.dissipative_contact && f != Vec3::ZERO {
+                // §37: the position step, a position impulse δ·m shared by the
+                // sub-bodies' inverse masses.
+                let tri = [(i1, alpha, n1), (i2, beta, n2), (i0, gamma, n0)];
+                let delta = shift_depth(depth, budget, fh.dot(n));
+                if delta > 0.0 {
+                    let q = delta * m;
+                    self.add_shift(hn as usize, n * (q * imh));
+                    for (i, w, nd) in tri {
+                        if w > 0.0 {
+                            self.add_shift(i as usize, n * -(w * (q * im(&nd, split[i as usize]))));
+                        }
+                    }
+                }
+            }
             self.add_contact(hn as usize, f);
             self.add_contact(i1 as usize, -(f * alpha));
             self.add_contact(i2 as usize, -(f * beta));

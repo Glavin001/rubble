@@ -116,6 +116,12 @@ try {
       r.setTextures(layers, TEX_SIZE);
       modVis.texLoaded = layers.filter(Boolean).length;
     }
+    // Its data maps (normal, roughness, AO), linear (?dataTex=0 without).
+    if (qs.get('tex') !== '0' && qs.get('dataTex') !== '0' && modVis.dataTextures?.length) {
+      const layers = await loadTextures(modVis.dataTextures, list, base);
+      r.setDataTextures(layers, TEX_SIZE);
+      modVis.dataLoaded = layers.filter(Boolean).length;
+    }
     window.__flexReport = out.report;
     // ?n= copies in a row, 3 m apart (the cost check).
     const nr0 = modVis.nodeRest, r00 = modVis.beamRest0;

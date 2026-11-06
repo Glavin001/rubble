@@ -49,7 +49,7 @@ const only = args.filter((a, i) => !a.startsWith('--') && (!args[i - 1]?.startsW
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 mkdirSync(OUT, { recursive: true });
-const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', showcase1: 'car=showcase&style=sedan1', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
+const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', showcase1: 'car=showcase&style=sedan1', etkk: 'mod=/__mods/etkk&pc=etkk/kr6.pc', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
   mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck',
   // Imported BeamNG mods drawn with their flexbodies (?mod=: the lab reads the
   // folder's files.json, which this server lists).

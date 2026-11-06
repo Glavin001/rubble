@@ -165,10 +165,10 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params.
-pub const PARAM_WORDS: usize = 84;
+pub const PARAM_WORDS: usize = 88;
 /// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
 /// `sleepRec`).
-pub const W_SLEEP: usize = 80;
+pub const W_SLEEP: usize = 84;
 /// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
 pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
@@ -584,6 +584,10 @@ impl ExplicitUpload {
         // Anti-clip (jbeam-semantics-spec.md §36): its side memory names a
         // triangle by owner vehicle (10 bits) and index (20 bits).
         let any_anti = vehicles.iter().any(|v| v.anti_clip);
+        // Dissipative contact's position steps (§37) on every vehicle of the upload.
+        // (Surface contact's position steps too, §38.)
+        let any_shift = vehicles.iter().any(|v| v.dissipative_contact || v.surface_contact);
+        let any_surface = vehicles.iter().any(|v| v.surface_contact);
         if any_anti {
             assert!(
                 nv < engine_softbody::explicit_contact::CLIP_SELF as usize,
@@ -756,7 +760,9 @@ impl ExplicitUpload {
                 | (any_anti as u32) << 12
                 | (!v.plastic_strength_drop as u32) << 13
                 | (v.exact_friction as u32) << 14
-                | (v.dissipative_contact as u32) << 15;
+                | (v.dissipative_contact as u32) << 15
+                | (any_shift as u32) << 16
+                | (v.surface_contact as u32) << 17;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -975,7 +981,8 @@ impl ExplicitUpload {
             node_off += v.nodes.len() as u32;
             beam_off += v.beams.len() as u32;
             tri_off += v.triangles.len() as u32;
-            box_off += v.boxes.len() as u32;
+            // Its slots: its boxes, then its static shapes (each a slot).
+            box_off += (v.boxes.len() + v.shapes.len()) as u32;
         }
         // Shape parameter records after every box slot (offsets from the box base).
         let shape_at = box_recs.len() as u32;
@@ -1316,6 +1323,14 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // Surface contact (§38): per node its force at the surface pass's start.
+        let surf_snap = if any_surface {
+            let at = beams.len() as u32;
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
+            at
+        } else {
+            0
+        };
         // The tread contact (jbeam-semantics-spec.md §34): per node (z, the depth
         // the step before, 0, 0) for every vehicle when any has tread nodes.
         let tread_state = if vehicles.iter().any(|v| !v.tread.is_empty()) {
@@ -1409,7 +1424,16 @@ impl ExplicitUpload {
                 cap.bodies,
                 cap.shapes | cap.planes << 16,
             ];
-            misc[couple_rec + 1] = [layout.acc_base, cull_base, 0, 0];
+            // Surface contact against the proxies (§38.3): per vehicle and proxy body
+            // its surface hits this step (gAcc), at the header's .z (0: none).
+            let surf_body = if any_surface {
+                let at = acc_init.len() as u32;
+                acc_init.extend(std::iter::repeat_n(0, (cap.bodies * nv as u32) as usize));
+                at
+            } else {
+                0
+            };
+            misc[couple_rec + 1] = [layout.acc_base, cull_base, surf_body, 0];
             layout
         });
         // Raycast wheels (explicit_plan::drive): a region per vehicle when any has them.
@@ -1467,9 +1491,20 @@ impl ExplicitUpload {
         };
         // Self-collision's two-body rule (jbeam-semantics-spec.md §36): per node its
         // hit count this step (cleared by its node phase).
-        let self_split = if vehicles.iter().any(|v| v.two_body_contact) {
+        // Dissipative contact's position steps (§37): per node 3 words in SHIFT_FIXED
+        // units, right after the counts (the kernel's shiftAt: selfSplit +
+        // totalNodes), carried over from the CPU state.
+        let self_split = if vehicles.iter().any(|v| v.two_body_contact) || any_shift {
             let at = acc_init.len() as u32;
             acc_init.extend(std::iter::repeat_n(0, total_nodes));
+            if any_shift {
+                for v in vehicles {
+                    for i in 0..v.nodes.len() {
+                        let w = v.contact_shift.get(i).copied().unwrap_or([0; 3]);
+                        acc_init.extend(w);
+                    }
+                }
+            }
             at
         } else {
             0
@@ -1490,6 +1525,36 @@ impl ExplicitUpload {
             (mem, vmax)
         } else {
             (0, 0)
+        };
+        // Surface contact (§38): per node its hit count this step.
+        let surf_split = if any_surface {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, total_nodes));
+            at
+        } else {
+            0
+        };
+        // Surface contact's segments per vehicle (beam-edge contact; none without
+        // the flag), and the find's slot masks (gAcc): per triangle, then per
+        // segment, then per node, each the slots it hit (bit b slot b, bit 31 any
+        // slot from 31 on), so the apply recomputes only those.
+        let surf_segs: Vec<Vec<u32>> = vehicles
+            .iter()
+            .map(|v| {
+                if any_surface && v.surface_contact {
+                    engine_softbody::explicit_surface::surface_segments(v)
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        let surf_seg_total: usize = surf_segs.iter().map(Vec::len).sum();
+        let surf_mark = if any_surface {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, total_tris + surf_seg_total + total_nodes));
+            at
+        } else {
+            0
         };
         // Vehicle sleep (explicit_beams_sleep.slang): two header records and a record
         // per vehicle in gMisc, two flags per vehicle in gAcc, an anchor per node in
@@ -1588,6 +1653,25 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // Surface contact's segments (§38, beam-edge contact): per vehicle (start in
+        // gLists, count, its first segment's mask in gAcc, its first node's mask in
+        // gAcc), the global beam indices in gLists.
+        let surf_seg = if any_surface {
+            let base = statics.len() as u32;
+            let mut beam_at = 0u32;
+            let mut seg_mark = surf_mark + total_tris as u32;
+            let mut node_mark = seg_mark + surf_seg_total as u32;
+            for (v, segs) in vehicles.iter().zip(&surf_segs) {
+                statics.push([lists.len() as u32, segs.len() as u32, seg_mark, node_mark]);
+                lists.extend(segs.iter().map(|&j| beam_at + j));
+                beam_at += v.beams.len() as u32;
+                seg_mark += segs.len() as u32;
+                node_mark += v.nodes.len() as u32;
+            }
+            base
+        } else {
+            0
+        };
 
         let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
         let lanes = frame_lanes(vehicles);
@@ -1678,6 +1762,10 @@ impl ExplicitUpload {
             self_split,
             clip_mem,
             clip_vmax,
+            surf_snap,
+            surf_split,
+            surf_seg,
+            surf_mark,
             sleep_layout.map_or(0, |s| s.header),
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
@@ -1690,7 +1778,8 @@ impl ExplicitUpload {
         ];
         // The wide passes do not run wings, the fuselage drag, commands or shocks2.
         // Raycast wheels run in the vehicle workgroups only.
-        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none();
+        // (Surface contact runs in the frame modules: not in the wide passes.)
+        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none() && !any_surface;
         // Every vehicle must have run the same steps for the wide passes (one
         // step parity for the group slots).
         let same_steps = vehicles.windows(2).all(|w| w[0].steps == w[1].steps);
@@ -2492,6 +2581,43 @@ fn vv_cell(vehicles: &[ExplicitBeams]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each vehicle's box slots (its boxes, then its static shapes) start after every
+    /// earlier vehicle's: two vehicles with a box and a cylinder each, the second's
+    /// first slot is its own box.
+    #[test]
+    fn box_slots_of_later_vehicles_skip_earlier_shapes() {
+        use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape};
+        let text = "slots\nglobals\n40, 0, tracks/semi\nnodes\n0, 0.0, 0.0, 0.0\n1, 0.3, 0.0, 0.0\nbeams\n0, 1\nend\n";
+        let settings = ExplicitBeamsSettings {
+            drag: false,
+            turbulence: false,
+            fast_inv_sqrt: true,
+            triangle_throttle: true,
+        };
+        let mut vs = Vec::new();
+        for k in 0..2 {
+            let mut v = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
+            let c = Vec3::new(10.0 * k as f32 + 1.0, 0.5, 0.0);
+            v.boxes.push(StaticBox::centered(c, Vec3::splat(0.5)));
+            v.shapes.push(StaticShape::cylinder(c + Vec3::X * 3.0, 0.2, 1.0));
+            vs.push(v);
+        }
+        let up = ExplicitUpload::new(&vs, None);
+        let box_base = up.layout.words[5] as usize;
+        for (k, v) in vs.iter().enumerate() {
+            let r1 = up.statics[k * 4 + 1];
+            assert_eq!(r1[3], 2, "vehicle {k}: its box and its cylinder");
+            let lo = up.statics[box_base + r1[2] as usize * 2];
+            let want = v.boxes[0].lo;
+            assert_eq!(
+                [f32::from_bits(lo[0]), f32::from_bits(lo[1]), f32::from_bits(lo[2])],
+                [want.x, want.y, want.z],
+                "vehicle {k}: its first slot (offset {}) is its own box",
+                r1[2]
+            );
+        }
+    }
 
     /// Every kernel a plan can name has a module, with its entry.
     #[test]

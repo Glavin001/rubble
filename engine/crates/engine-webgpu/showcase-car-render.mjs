@@ -106,7 +106,8 @@ struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r
 // the index in binds of its own-part binding (after the count vertices),
 // whose word 3 is its frame's death record (4 beam ids at deathAt).
 struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listAt: u32, trisAt: u32, beamOffset: u32, level: u32,
-  restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32, deathAt: u32 };
+  restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32, deathAt: u32,
+  wheelAt: u32 };
 // The frame's effects: simulated seconds since the last update (0: nothing
 // moves, spawns or accumulates), a seed, the floor and the static boxes
 // (centre, kind; half extents) the sparks and scrapes test.
@@ -442,11 +443,38 @@ fn pick() {
   }
 }
 
+// Raycast wheels (skin.rs wheel_vertex, the CPU mirror): a wheel piece's
+// vertex (flags bit 23; bit 24 it spins) rides drive wheel n0, whose misc
+// records (state, centre, axle, up: ExplicitSim.wheelRecords) are 4 words
+// at wheelAt + 4·n0; (a, b, h) and (nt, nb, nn) its rest offset and normal
+// in the wheel's frame (axle A, up U, forward F = A × U), turned about the
+// axle by the spin angle.
+fn wheelVertex(i: u32, bd: Bind) {
+  let r = params.wheelAt + 4u * bd.n0;
+  let st = bitcast<vec4f>(misc[topo[r]]);
+  let centre = bitcast<vec4f>(misc[topo[r + 1u]]).xyz;
+  let a = normalize(bitcast<vec4f>(misc[topo[r + 2u]]).xyz + vec3f(1e-9));
+  let up = bitcast<vec4f>(misc[topo[r + 3u]]).xyz;
+  let u = normalize(up - a * dot(a, up) + vec3f(1e-9));
+  let f = cross(a, u);
+  let spin = select(0.0, st.y, (bd.flags & (1u << 24u)) != 0u);
+  let c = cos(spin);
+  let s = sin(spin);
+  let ur = u * c + f * s;
+  let fr = f * c - u * s;
+  let pos = centre + a * bd.a + ur * bd.b + fr * bd.h;
+  let nrm = normalize(a * bd.nt + ur * bd.nb + fr * bd.nn + vec3f(1e-9));
+  let k = i * 2u;
+  outv[k] = vec4f(pos, bitcast<f32>(pack2x16float(vec2f(0.0, 0.0))));
+  outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(0.0, 0.0))));
+}
+
 @compute @workgroup_size(${WG})
 fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= params.count) { return; }
   var bd = binds[i];
+  if ((bd.flags & (1u << 23u)) != 0u) { wheelVertex(i, bd); return; }
   if (bd.vehicle != 0u) {
     // On a shut line's frame: its own part's frame for good once the frame
     // has died (a beam of its death record broke) or torn (skin.rs on_alt).
@@ -623,6 +651,11 @@ struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
 // Imported vehicles' colour maps (setTextures): one array, a layer each.
 @group(0) @binding(1) var texArr: texture_2d_array<f32>;
 @group(0) @binding(2) var texSamp: sampler;
+// Their data maps (setDataTextures, linear: normal, roughness, AO), and the
+// texture sets (skin.rs tex_sets): per set its colour, normal, roughness
+// and AO layers + 1 (0 none); a vertex's tex is its set + 1.
+@group(0) @binding(3) var texData: texture_2d_array<f32>;
+@group(0) @binding(4) var<storage, read> texSets: array<vec4u>;
 
 struct VOut {
   @builtin(position) @invariant clip: vec4f,
@@ -637,7 +670,7 @@ struct VOut {
   @location(8) uv: vec2f,
   // (plastic strain, paint worn through: µm).
   @location(9) wear: vec2f,
-  // Texture layer + 1 (0 none): an imported vehicle's colour map.
+  // Texture set + 1 (0 none): an imported vehicle's maps.
   @location(10) @interpolate(flat) tex: u32,
 };
 
@@ -785,6 +818,22 @@ fn noise3(p: vec3f) -> f32 {
 // a mirror's glass (skin.rs shatters()). i.strain < 0 marks a broken unit.
 fn shattered(m: u32, d: f32) -> bool { return d < 0.0 && (m == 1u || m == 27u || m == 17u || m == 20u || m == 2u); }
 
+// A normal map's tangent-space normal t (DirectX: green along +v of the
+// image, rows top first) on n, in the cotangent frame of the surface's and
+// the map's screen-space derivatives (no tangents stored; Schüler 2013's
+// construction), its texels as stored (0..1).
+fn normalMapped(n: vec3f, pdx: vec3f, pdy: vec3f, tdx: vec2f, tdy: vec2f, t: vec3f) -> vec3f {
+  let q = t * 2.0 - 1.0;
+  let dp2perp = cross(pdy, n);
+  let dp1perp = cross(n, pdx);
+  let tt = dp2perp * tdx.x + dp1perp * tdy.x;
+  let bb = dp2perp * tdx.y + dp1perp * tdy.y;
+  let m = max(dot(tt, tt), dot(bb, bb));
+  if (m < 1e-20) { return n; }
+  let s = inverseSqrt(m);
+  return normalize(tt * s * q.x + bb * s * q.y + n * max(q.z, 1e-3));
+}
+
 // Per material: rough, metal (F0 scale), clearcoat.
 fn props(m: u32) -> vec3f {
   switch m {
@@ -917,6 +966,9 @@ fn shade(i: VOut, front: bool) -> vec4f {
   // row first, Collada's t points up).
   let tdx = dpdx(i.uv) * vec2f(1.0, -1.0);
   let tdy = dpdy(i.uv) * vec2f(1.0, -1.0);
+  // The surface's footprint (a normal map's tangent frame).
+  let pdx = dpdx(i.world);
+  let pdy = dpdy(i.world);
   var zc = 0.0;
   var zw = 1.0;
   if (ZEBRA > 0.0) {
@@ -960,6 +1012,16 @@ fn shade(i: VOut, front: bool) -> vec4f {
   if (dot(n, v) < 0.0) { n = -n; }
   let l = normalize(frame.light.xyz);
   var ao = clamp(i.ao, 0.0, 1.0);
+  // An imported material's data maps: its normal map tilts n, its roughness
+  // map replaces the material's, its AO map darkens.
+  var roughMap = -1.0;
+  if (i.tex > 0u) {
+    let ts = texSets[i.tex - 1u];
+    let st = vec2f(i.uv.x, 1.0 - i.uv.y);
+    if (ts.y > 0u) { n = normalMapped(n, pdx, pdy, tdx, tdy, textureSampleGrad(texData, texSamp, st, ts.y - 1u, tdx, tdy).xyz); }
+    if (ts.z > 0u) { roughMap = textureSampleGrad(texData, texSamp, st, ts.z - 1u, tdx, tdy).r; }
+    if (ts.w > 0u) { ao *= textureSampleGrad(texData, texSamp, st, ts.w - 1u, tdx, tdy).r; }
+  }
   // Wheels (they turn, so nothing is baked): the arch shades their tops and
   // the car's body their inner faces.
   if (i.mat == 6u || i.mat == 7u || i.mat == 22u || i.mat == 23u || i.mat == 28u) {
@@ -983,7 +1045,8 @@ fn shade(i: VOut, front: bool) -> vec4f {
   var m = i.mat;
   var albedo = i.color;
   if (i.tex > 0u) {
-    albedo *= textureSampleGrad(texArr, texSamp, vec2f(i.uv.x, 1.0 - i.uv.y), i.tex - 1u, tdx, tdy).rgb;
+    let tc = texSets[i.tex - 1u].x;
+    if (tc > 0u) { albedo *= textureSampleGrad(texArr, texSamp, vec2f(i.uv.x, 1.0 - i.uv.y), tc - 1u, tdx, tdy).rgb; }
   }
   // Worn depth (µm, WEAR_*): through clear and base to primer past 65 µm,
   // through primer and e-coat to bare steel past 110 µm; in streaks (the
@@ -1077,7 +1140,7 @@ fn shade(i: VOut, front: bool) -> vec4f {
   if (m >= 12u && m <= 16u) {
     // Cabin trim (seats, dash, door cards, headliner, carpet): under the roof,
     // lit by what comes through the glass; a soft sheen, no studio reflection.
-    let sheen = pow(1.0 - ndv, 3.0) * 0.08 + sun.x * ggx(ndh, 0.25) * ndl * 0.02;
+    let sheen = pow(1.0 - ndv, 3.0) * 0.08 + sun.x * ggx(ndh, select(0.25, roughMap, roughMap >= 0.0)) * ndl * 0.02;
     let cab = albedo * (irradiance(n) * 0.55 * ao + sun * ndl / 3.14159 * 0.35 * ao) + vec3f(sheen) * ao;
     return vec4f(tonemap(cab), 1.0);
   }
@@ -1088,6 +1151,7 @@ fn shade(i: VOut, front: bool) -> vec4f {
     return vec4f(vec3f(mix(0.04, 0.92, band) * mix(0.6, 1.0, ao)), 1.0);
   }
   var pr = props(m);
+  if (roughMap >= 0.0) { pr.x = roughMap; }
   var albedo2 = albedo;
   var ao2 = ao;
   if (m == 10u) {
@@ -1350,27 +1414,59 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   let texArr = device.createTexture({ size: [1, 1, 1], format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
   device.queue.writeTexture({ texture: texArr }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, [1, 1, 1]);
   let texLayers = 0;
-  const texEntries = () => [{ binding: 1, resource: texArr.createView({ dimension: '2d-array' }) }, { binding: 2, resource: texSamp }];
+  // Data maps (normal, roughness, AO; linear): a flat layer until setDataTextures.
+  let texData = device.createTexture({ size: [1, 1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  device.queue.writeTexture({ texture: texData }, new Uint8Array([128, 128, 255, 255]), { bytesPerRow: 4 }, [1, 1, 1]);
+  // Texture sets of every car's levels (DRAW_WGSL texSets): 4 words each, set
+  // k at 4·k; rebuilt as cars are added.
+  let setWords = [0, 0, 0, 0];
+  let setsBuf = null;
+  const syncSets = () => {
+    setsBuf?.destroy();
+    setsBuf = upload('showcase-tex-sets', new Uint32Array(setWords));
+  };
+  const texEntries = () => [{ binding: 1, resource: texArr.createView({ dimension: '2d-array' }) }, { binding: 2, resource: texSamp },
+    { binding: 3, resource: texData.createView({ dimension: '2d-array' }) }, { binding: 4, resource: { buffer: setsBuf } }];
   const makeDrawBinds = () => [drawPipe, glassPipe].map((p) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }, ...texEntries()] }));
-  let [drawBind, glassBind] = makeDrawBinds();
+  let drawBind = null, glassBind = null;
   const fxBind = device.createBindGroup({ layout: fxPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }, { binding: 1, resource: { buffer: fxBuf } }] });
   const cars = new Map();
   let nextId = 1;
   let nodesBuf = null;
   let miscBuf = null;
   let beamsBuf = null;
-  let posBuf = null, restBuf = null, posPipes = null;
+  let posBuf = null, restBuf = null, posMisc = null, posPipes = null;
   const bindFor = (car, lv, src0, src1, beams) => device.createBindGroup({
     layout: skinLayout,
     entries: [src0, src1, lv.binds, lv.out, lv.params, car.topo, beams, car.nodeN, fxuBuf, fxBuf]
       .map((buffer, binding) => ({ binding, resource: { buffer } })),
   });
-  const makePosBind = (car) => posBuf && car.levels.map((lv) => bindFor(car, lv, posBuf, posBuf, restBuf));
+  const makePosBind = (car) => posBuf && car.levels.map((lv) => bindFor(car, lv, posBuf, posMisc ?? posBuf, restBuf));
   const makeSkinBind = (car) => car.levels.map((lv) => bindFor(car, lv, nodesBuf, miscBuf, beamsBuf));
   const upload = (label, data, usage = GPUBufferUsage.STORAGE) => {
     const b = device.createBuffer({ label, size: Math.max(16, Math.ceil(data.byteLength / 4) * 4), usage: usage | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(b, 0, data);
     return b;
+  };
+  syncSets();
+  [drawBind, glassBind] = makeDrawBinds();
+  // Upload `layers` (decodeTexture's mipped RGBA8, null: `fill`) as a new
+  // `format` array of `size` × `size`.
+  const layerArray = (layers, size, format, fill) => {
+    const mips = Math.log2(size) + 1;
+    if (!Number.isInteger(mips)) throw new Error('showcase textures: size must be a power of two');
+    const t = device.createTexture({ size: [size, size, Math.max(1, layers.length)], mipLevelCount: mips, format, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    layers.forEach((data, z) => {
+      let off = 0;
+      for (let l = 0, sz = size; l < mips; l++, sz = Math.max(1, sz >> 1)) {
+        const n = sz * sz * 4;
+        let px = data ? data.subarray(off, off + n) : null;
+        if (!px) { px = new Uint8Array(n); for (let k = 0; k < n; k += 4) px.set(fill, k); }
+        device.queue.writeTexture({ texture: t, mipLevel: l, origin: [0, 0, z] }, px, { bytesPerRow: sz * 4, rowsPerImage: sz }, [sz, sz, 1]);
+        off += n;
+      }
+    });
+    return t;
   };
 
   return {
@@ -1382,20 +1478,20 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * if this set starts with the same layers).
      */
     setTextures(layers, size) {
-      const mips = Math.log2(size) + 1;
-      if (!Number.isInteger(mips)) throw new Error('showcase setTextures: size must be a power of two');
       texArr.destroy();
-      texArr = device.createTexture({ size: [size, size, Math.max(1, layers.length)], mipLevelCount: mips, format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-      layers.forEach((data, z) => {
-        let off = 0;
-        for (let l = 0, s = size; l < mips; l++, s = Math.max(1, s >> 1)) {
-          const n = s * s * 4;
-          const px = data ? data.subarray(off, off + n) : new Uint8Array(n).fill(255);
-          device.queue.writeTexture({ texture: texArr, mipLevel: l, origin: [0, 0, z] }, px, { bytesPerRow: s * 4, rowsPerImage: s }, [s, s, 1]);
-          off += n;
-        }
-      });
+      texArr = layerArray(layers, size, 'rgba8unorm-srgb', [255, 255, 255, 255]);
       texLayers = layers.length;
+      [drawBind, glassBind] = makeDrawBinds();
+      return 0;
+    },
+    /**
+     * The data maps (normal, roughness, AO: linear; `decodeTexture` per file of a
+     * visual's `dataTextures`, null for a missing one: flat), as setTextures; pass
+     * the first layer's index as addCar's `dataBase`.
+     */
+    setDataTextures(layers, size) {
+      texData.destroy();
+      texData = layerArray(layers, size, 'rgba8unorm', [128, 128, 255, 255]);
       [drawBind, glassBind] = makeDrawBinds();
       return 0;
     },
@@ -1404,12 +1500,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * order; e.g. the crash lab's positionsBuffer(), so replays deform the body too),
      * with the beams' state from `rest` (f32 per beam, all vehicles in order, negative
      * when broken: the lab's restBuffer()). Call again when either buffer is replaced;
-     * null returns to the solver buffers.
+     * null returns to the solver buffers. `misc`: the solver's miscBuffer(), for raycast
+     * wheels (their pieces are placed from its drive records).
      */
-    setPositions(buf, rest) {
+    setPositions(buf, rest, misc = null) {
       if (buf && !rest) throw new Error('showcase setPositions: the beams\' rest buffer is needed (crash-lab restBuffer())');
       posBuf = buf;
       restBuf = rest ?? null;
+      posMisc = misc;
       if (buf && !posPipes) {
         const m = device.createShaderModule({ label: 'showcase-skin-pos', code: crease(SKIN_POS_WGSL) });
         posPipes = {
@@ -1433,7 +1531,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * vehicle's first node in the solver (`layout.vehicles[i].nodeOffset`), `vehicle`
      * its index (for its origin). Returns an id.
      */
-    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0 } = {}) {
+    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0, dataBase = 0, wheelRecords = null } = {}) {
       const nodeCount = visual.nodeCount;
       const nt = visual.normalTris, start = visual.nodeTriStart, list = visual.nodeTriList;
       const units = visual.unitKind?.length ?? 0;
@@ -1449,8 +1547,12 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const nodeMatAt = unitListAt + (units ? visual.unitBeams.length : 0);
       const deathAt = nodeMatAt + nodeCount;
       const death = visual.skinDeath ?? new Uint32Array(0);
-      const topo = new Uint32Array(deathAt + death.length);
+      // Raycast wheels' misc records (ExplicitSim.wheelRecords), 4 per wheel.
+      const wheelAt = deathAt + death.length;
+      const wheelRecs = wheelRecords ?? new Uint32Array(0);
+      const topo = new Uint32Array(wheelAt + Math.max(wheelRecs.length, 1));
       topo.set(death, deathAt);
+      topo.set(wheelRecs, wheelAt);
       const tf = new Float32Array(topo.buffer);
       topo.set(start, 0);
       topo.set(list, listAt);
@@ -1517,7 +1619,11 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           // Flags: smooth, rigid, damage unit + 1 (bits 2-15), shard seed
           // (16), material (17-22).
           const un = v.unit ? v.unit[i] : 0xffffffff;
-          u[o + 15] = (v.smooth ? v.smooth[i] : 0) | (v.rigid && v.rigid[i] ? 2 : 0)
+          // Rigid kinds (skin.rs rigid_kind): 1 rigid, 2 a raycast wheel's
+          // (bit 23, spinning: 24), 3 its caliper (bit 23).
+          const rk = v.rigid ? v.rigid[i] : 0;
+          if (rk >= 2 && !wheelRecords) throw new Error('showcase addCar: raycast wheel pieces need wheelRecords (ExplicitSim.wheelRecords)');
+          u[o + 15] = (v.smooth ? v.smooth[i] : 0) | (rk === 1 ? 2 : 0) | (rk >= 2 ? 1 << 23 : 0) | (rk === 2 ? 1 << 24 : 0)
             | (un === 0xffffffff ? 0 : ((un + 1) & 0x3fff) << 2) | (v.shard && v.shard[i] ? 1 << 16 : 0) | (v.material[i] << 17);
           const a = na ? v.alt[i] : 0;
           u[o + 3] = a ? n + a - 1 : 0;
@@ -1547,15 +1653,22 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         // Per vertex: colour, AO, material, rest position (the glass's crack
         // pattern is drawn in rest space so it rides the glass).
         // and texture coordinates (printed parts: tyres, plates, displays).
+        // The level's texture sets into the shared table, its files offset
+        // by the car's layer bases (a visual without sets: one per colour map).
+        const vs = v.texSets ?? Uint16Array.from((v.textures ?? []).flatMap((_, k) => [k + 1, 0, 0, 0]));
+        const setBase = setWords.length / 4;
+        for (let k = 0; k < vs.length; k += 4) {
+          setWords.push(vs[k] ? vs[k] + texBase : 0, vs[k + 1] ? vs[k + 1] + dataBase : 0, vs[k + 2] ? vs[k + 2] + dataBase : 0, vs[k + 3] ? vs[k + 3] + dataBase : 0);
+        }
         const attr = new ArrayBuffer(n * 40);
         const af = new Float32Array(attr);
         const au = new Uint32Array(attr);
         for (let i = 0; i < n; i++) {
           af.set(v.colors.subarray(3 * i, 3 * i + 3), 10 * i);
           af[10 * i + 3] = v.ao ? v.ao[i] : 1;
-          // Material (low byte), texture layer + 1 (high half; 0 none).
+          // Material (low byte), texture set + 1 (high half; 0 none).
           const t = v.tex ? v.tex[i] : 0;
-          au[10 * i + 4] = v.material[i] | (t ? (t + texBase) << 16 : 0);
+          au[10 * i + 4] = v.material[i] | (t ? (t + setBase) << 16 : 0);
           af.set(v.positions.subarray(3 * i, 3 * i + 3), 10 * i + 5);
           if (v.uvs) af.set(v.uvs.subarray(2 * i, 2 * i + 2), 10 * i + 8);
         }
@@ -1606,12 +1719,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         const floorIndex = device.createBuffer({ label: 'showcase-floor-index', size: floorList.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(floorIndex, 0, floorList);
         const params = device.createBuffer({ label: 'showcase-params', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, 0, 0, 0]);
+        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, 0, 0]);
         return { n, binds, out, attrs, index, floorIndex, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const car = { nodeOffset, beamOffset };
       const extra = (Array.isArray(lod) ? lod : [lod]).filter(Boolean).slice(0, 2);
       const levels = [visual, ...extra].map((v, k) => level(v, k));
+      syncSets();
+      [drawBind, glassBind] = makeDrawBinds();
       for (const lv of levels) device.queue.writeBuffer(lv.params, 0, lv.pw());
       // SKIN_WGSL's Lod: per level n, opaque, glass, low, mid counts, edge.
       const lodData = new ArrayBuffer(112);
@@ -1660,6 +1775,8 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       for (const lv of car.levels) for (const b of [lv.binds, lv.out, lv.attrs, lv.index, lv.floorIndex, lv.params]) b.destroy();
       for (const b of [car.topo, car.nodeN, car.lod, car.args]) b.destroy();
       cars.delete(id);
+      // The last car gone: the texture sets' table starts over.
+      if (!cars.size) setWords = [0, 0, 0, 0];
     },
     /**
      * The damage units' state as the renderer holds it (for checks): per car id

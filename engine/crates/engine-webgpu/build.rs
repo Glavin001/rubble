@@ -522,7 +522,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     let coupling = wgsl_dir.join("vehicle_coupling.wgsl");
     let mut cmd = std::process::Command::new(find_slangc()?);
     cmd.args(["-target", "wgsl"]);
-    for e in ["cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end", "cpl_sleep_mask"] {
+    for e in ["cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end", "cpl_query", "cpl_sleep_mask"] {
         cmd.args(["-entry", e, "-stage", "compute"]);
     }
     let status = cmd

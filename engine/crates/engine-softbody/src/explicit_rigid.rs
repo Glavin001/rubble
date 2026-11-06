@@ -18,7 +18,53 @@
 use crate::explicit_beams::{
     contact_force, shape_face, ContactSurface, Node, StaticShape, NODE_NO_GROUND, STEP,
 };
+use crate::explicit_surface::SurfaceShape;
+use engine_schema::feature_query as fq;
 use glam::{Mat3, Quat, Vec3};
+
+/// A convex hull's vertices and edges from its planes (n · x ≤ d inside): every
+/// triple of planes meeting at a point inside all of them (merged within 10 µm), and
+/// an edge between two vertices that share two planes.
+pub fn hull_from_planes(planes: &[(Vec3, f32)]) -> (Vec<Vec3>, Vec<[u32; 2]>) {
+    let mut verts: Vec<(Vec3, Vec<usize>)> = Vec::new();
+    let n = planes.len();
+    for i in 0..n {
+        for j in i + 1..n {
+            for k in j + 1..n {
+                let (a, b, c) = (planes[i].0, planes[j].0, planes[k].0);
+                let det = a.dot(b.cross(c));
+                if det.abs() < 1e-9 {
+                    continue;
+                }
+                let x = (b.cross(c) * planes[i].1 + c.cross(a) * planes[j].1 + a.cross(b) * planes[k].1) / det;
+                if planes.iter().any(|&(pn, pd)| pn.dot(x) - pd > 1e-5) {
+                    continue;
+                }
+                let on: Vec<usize> = (0..n).filter(|&p| (planes[p].0.dot(x) - planes[p].1).abs() <= 1e-5).collect();
+                match verts.iter_mut().find(|(v, _)| v.distance(x) <= 1e-5) {
+                    Some((_, set)) => {
+                        for p in on {
+                            if !set.contains(&p) {
+                                set.push(p);
+                            }
+                        }
+                    }
+                    None => verts.push((x, on)),
+                }
+            }
+        }
+    }
+    let mut edges = Vec::new();
+    for a in 0..verts.len() {
+        for b in a + 1..verts.len() {
+            let shared = verts[a].1.iter().filter(|p| verts[b].1.contains(p)).count();
+            if shared >= 2 {
+                edges.push([a as u32, b as u32]);
+            }
+        }
+    }
+    (verts.into_iter().map(|(v, _)| v).collect(), edges)
+}
 
 /// Fixed-point scale of the per-step sums (the explicit kernel's `FIXED`).
 pub const FIXED: f32 = 32.0;
@@ -58,6 +104,9 @@ pub struct ProxyShape {
     pub peak: f32,
     /// This step's fixed-point sums: force, moment about `reference`.
     sum: [i64; 6],
+    /// A hull's vertices (scale applied) and edges in its own frame: the World's hull
+    /// records ([`ProxyShape::with_hull_geometry`]), or else from its planes, once.
+    hull_local: Option<(Vec<Vec3>, Vec<[u32; 2]>)>,
     /// This step's world geometry and cull box.
     world: Option<(WorldGeom, Vec3, Vec3)>,
 }
@@ -169,8 +218,34 @@ impl ProxyShape {
             reference: Vec3::ZERO,
             peak: 0.0,
             sum: [0; 6],
+            hull_local: None,
             world: None,
         }
+    }
+
+    /// A hull's vertices (in its frame, the collider's scale applied) and edges (vertex
+    /// pairs) as the World's hull records hold them (`engine_schema::convex`), for the
+    /// surface contact; without them they are found from the planes.
+    pub fn with_hull_geometry(mut self, verts: Vec<Vec3>, edges: Vec<[u32; 2]>) -> Self {
+        self.hull_local = Some((verts, edges));
+        self
+    }
+
+    /// A hull's local vertices and edges when given or found already (the GPU records
+    /// carry them then, for the surface contact).
+    pub fn hull_geometry_known(&self) -> Option<&(Vec<Vec3>, Vec<[u32; 2]>)> {
+        self.hull_local.as_ref()
+    }
+
+    /// A hull's local vertices and edges (from its planes when not given).
+    pub fn hull_geometry(&mut self) -> Option<&(Vec<Vec3>, Vec<[u32; 2]>)> {
+        let ProxyGeom::Hull { planes, .. } = &self.geom else {
+            return None;
+        };
+        if self.hull_local.is_none() {
+            self.hull_local = Some(hull_from_planes(planes));
+        }
+        self.hull_local.as_ref()
     }
 
     /// The window's angular impulse about point `c` (N m s).
@@ -366,6 +441,57 @@ impl ProxySet {
         }
     }
 
+    /// The surface contact's view of the shapes at the bodies' poses now
+    /// ([`crate::explicit_surface`]): each shape in shape order with its cull box. The
+    /// poses are the shared module's strict ones (`fq::shape_pose`), as the GPU's.
+    pub fn surface_shapes(&mut self) -> Vec<(SurfaceShape, Vec3, Vec3)> {
+        let mut out = Vec::with_capacity(self.shapes.len());
+        for k in 0..self.shapes.len() {
+            let b = &self.bodies[self.shapes[k].body as usize];
+            let (bp, bq) = (b.pos, b.rot);
+            let shape = surface_shape(bp, bq, &mut self.shapes[k]);
+            let (lo, hi) = fq::bounds(&shape);
+            out.push((shape, lo, hi));
+        }
+        out
+    }
+
+    /// Adds the surface contact's force `f` on shape `k` at world point `at` to this
+    /// step's sums (fixed point, as the node reactions), integrated by this step's
+    /// [`Self::end_step`]. The moment is the strict (at − reference) × f.
+    pub fn add_surface_reaction(&mut self, k: usize, f: Vec3, at: Vec3) {
+        let s = &mut self.shapes[k];
+        let m = fq::cross3(at - s.reference, f);
+        for (slot, v) in s.sum.iter_mut().zip([f.x, f.y, f.z, m.x, m.y, m.z]) {
+            *slot += fixed(v);
+        }
+    }
+
+    /// Per shape, its body's velocity when the body is fast for the surface contact's
+    /// casts (§38.4): it moves more than half the shape's least extent in a step,
+    /// counting its spin at the shape's bounding radius, (|v| + |ω| R) h > e / 2, with
+    /// e a box's least half extent, a sphere's or capsule's radius, a hull's least
+    /// plane offset (its inscribed radius about its origin; at least 1 cm). Else none.
+    pub fn cast_velocities(&self) -> Vec<Option<Vec3>> {
+        self.shapes
+            .iter()
+            .map(|s| {
+                let b = &self.bodies[s.body as usize];
+                let (e, radius) = match &s.geom {
+                    ProxyGeom::Box { half } => (half.x.min(half.y).min(half.z), half.length()),
+                    ProxyGeom::Sphere { radius } => (*radius, *radius),
+                    ProxyGeom::Capsule { radius, half_len } => (*radius, radius + half_len),
+                    ProxyGeom::Hull { planes, radius } => {
+                        (planes.iter().fold(f32::INFINITY, |m, p| m.min(p.1)).max(0.01), *radius)
+                    }
+                };
+                let len = |v: Vec3| fq::dot3(v, v).sqrt();
+                let travel = len(b.vel) * STEP + (len(b.ang_vel) * (radius + 0.01)) * STEP;
+                (travel > 0.5 * e).then_some(b.vel)
+            })
+            .collect()
+    }
+
     /// Per body, the window's impulse and angular impulse about its centre of mass now.
     pub fn body_impulses(&self) -> Vec<(Vec3, Vec3)> {
         let mut out = vec![(Vec3::ZERO, Vec3::ZERO); self.bodies.len()];
@@ -376,5 +502,30 @@ impl ProxySet {
             o.1 += s.angular_impulse_about(b.pos);
         }
         out
+    }
+}
+
+/// Proxy shape `s` of a body at (`bp`, `bq`) as the surface contact meets it: the strict
+/// pose (`fq::shape_pose`), a box's axes, a capsule's ends along its local y, a hull's
+/// world vertices, edges and planes (`fq::hull_world`). The GPU's `cplSurfShape` is
+/// the same arithmetic.
+pub fn surface_shape(bp: Vec3, bq: Quat, s: &mut ProxyShape) -> SurfaceShape {
+    let (p, r) = fq::shape_pose(bp, bq, s.local_pos, s.local_rot);
+    let a = fq::axes(r);
+    match s.geom.clone() {
+        ProxyGeom::Box { half } => SurfaceShape::Box { c: p, axes: a, half },
+        ProxyGeom::Sphere { radius } => SurfaceShape::Sphere { c: p, radius },
+        ProxyGeom::Capsule { radius, half_len } => {
+            let e = a[1] * half_len;
+            SurfaceShape::Capsule {
+                a: p - e,
+                b: p + e,
+                radius,
+            }
+        }
+        ProxyGeom::Hull { planes, .. } => {
+            let (verts, edges) = s.hull_geometry().cloned().unwrap_or_default();
+            fq::hull_world(p, &a, &verts, &edges, &planes)
+        }
     }
 }

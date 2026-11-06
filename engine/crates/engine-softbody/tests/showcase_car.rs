@@ -473,6 +473,11 @@ fn rule_switches(s: &mut ExplicitBeams) {
     if std::env::var("DISSIPATIVE_CONTACT").is_ok_and(|v| v == "0") {
         s.dissipative_contact = false;
     }
+    // SURFACE_CONTACT=1: surface contact (jbeam-semantics-spec.md §38) on, for
+    // its calibration check.
+    if std::env::var("SURFACE_CONTACT").is_ok_and(|v| v == "1") {
+        s.surface_contact = true;
+    }
 }
 
 /// The solver's beam for each skeleton beam (the `.truck` sorts them), by
@@ -822,6 +827,11 @@ impl Ledger {
             .map(|i| s.contact_quantisation(i))
             .collect();
         s.step();
+        // Surface contact's force on the nodes this step (§38; zero when off): an
+        // obstacle's impulse. (The next tally's node forces hold it, in the contact
+        // sums: not internal.)
+        self.obstacle += s.surface_force * f64::from(h);
+        self.internal -= s.surface_force * f64::from(h);
         self.steps += 1;
         let mut wq = 0.0;
         for ((n, v), &(q, k)) in s.nodes.iter().zip(&vel).zip(&quant) {
@@ -1673,7 +1683,13 @@ fn e_upside_down_drop_from_15_m_keeps_its_ledgers() {
 #[test]
 #[ignore]
 fn pole_sweep_never_passes_through() {
-    let b = built(Resolution::Low);
+    // (`SWEEP_RES=medium`: the references' resolution.)
+    let b = built(
+        std::env::var("SWEEP_RES")
+            .ok()
+            .and_then(|r| Resolution::parse(&r))
+            .unwrap_or(Resolution::Low),
+    );
     let mut jobs = Vec::new();
     // `SWEEP_SPEEDS=28,32` other speeds, `SWEEP_SHIFT=0.025` offsets moved by
     // that much (how robust a clean sweep is).
@@ -3777,41 +3793,58 @@ fn fixed_contact_quantisation_does_no_work() {
     check("51 km/h drag true, then at rest to 12 s", &mut s, 12.0);
 }
 
-/// The most self-contact work and the most vehicle-contact work (normal and
-/// friction) over any tenth of a second of `seconds` of `w`'s steps (the world's
-/// energy ledger, J).
+/// Over any tenth of a second of `seconds` of `w`'s steps (the world's energy
+/// ledger, J): the most self-contact work, the most vehicle-contact work (normal
+/// and friction), the most energy the contacts' position steps stored (§37), and
+/// the most of the three together less 2 % of that tenth's stored energy (the
+/// first-order estimate's error, see [`contacts_do_no_positive_work`]); and the
+/// three together over the run's tenths after its first `settle` seconds.
 fn contact_work_tenths(
     w: &mut engine_softbody::explicit_contact::ExplicitBeamsWorld,
     seconds: f32,
-) -> (f64, f64) {
+    settle: f32,
+) -> [f64; 5] {
     w.enable_ledger();
     let terms = |w: &engine_softbody::explicit_contact::ExplicitBeamsWorld| {
         let l = w.ledger.as_ref().unwrap();
-        (l.w_self_contact, l.w_contact_normal + l.w_contact_friction)
+        [
+            l.w_self_contact,
+            l.w_contact_normal + l.w_contact_friction,
+            l.w_contact_shift,
+        ]
     };
     let tenth = (0.1 / STEP).round() as usize;
-    let (mut most_self, mut most_vc) = (f64::MIN, f64::MIN);
+    let mut most = [f64::MIN, f64::MIN, f64::MIN, f64::MIN, 0.0];
     let mut last = terms(w);
     for k in 1..=(seconds / STEP).round() as usize {
         w.step();
         if k % tenth == 0 {
             let now = terms(w);
-            most_self = most_self.max(now.0 - last.0);
-            most_vc = most_vc.max(now.1 - last.1);
+            let d = [now[0] - last[0], now[1] - last[1], now[2] - last[2]];
+            for j in 0..3 {
+                most[j] = most[j].max(d[j]);
+            }
+            most[3] = most[3].max(d[0] + d[1] + d[2] - 2e-2 * d[2].abs());
+            if k as f32 * STEP > settle + 1e-4 {
+                most[4] += d[0] + d[1] + d[2];
+            }
             last = now;
         }
     }
-    (most_self, most_vc)
+    most
 }
 
 /// The BeamNG profile's self- and vehicle contact never do positive work
 /// (jbeam-semantics-spec.md §37): sedan1 into the wall over the n test's speed
 /// sweep (47–52 and 54–59 km/h, drag on and off, 2 s), the 51 km/h car crushed
 /// and at rest to 12 s, and the 80 km/h T-bone (two sedan1s, the striker's
-/// middle at the door's, 1.5 s). Bound (stated): the world ledger's
-/// self-contact work and vehicle-contact work over any tenth of a second at most
+/// middle at the door's, 1.5 s). Bounds (stated), over any tenth of a second of
+/// the world ledger: self-contact work and vehicle-contact work each at most
 /// +0.01 J (the ledger's rounding; RoR's push did up to +216 J in a tenth of the
-/// sweep and +5 J per tenth at rest for good, §36's note).
+/// sweep and +5 J per tenth at rest for good, §36's note); and with the energy the
+/// penetration's position steps store (−F·Δx, first order) at most +0.01 J beyond
+/// 1 % of that stored energy (the first-order estimate's error: the steps' budget
+/// is each hit's own predicted dissipation).
 #[test]
 fn contacts_do_no_positive_work() {
     use engine_softbody::explicit_contact::ExplicitBeamsWorld;
@@ -3824,14 +3857,22 @@ fn contacts_do_no_positive_work() {
     )
     .unwrap();
     let car = Car::of(&b);
-    let check = |what: &str, mut w: ExplicitBeamsWorld, seconds: f32| {
+    let check = |what: &str, mut w: ExplicitBeamsWorld, seconds: f32, settle: f32| {
         assert!(
             w.vehicles.iter().all(|v| v.dissipative_contact),
             "the BeamNG profile"
         );
-        let (sc, vc) = contact_work_tenths(&mut w, seconds);
+        let [sc, vc, sh, all, rest] = contact_work_tenths(&mut w, seconds, settle);
         eprintln!(
-            "({what}) most work over a tenth: self-contact {sc:+.4} J, vehicle contact {vc:+.4} J"
+            "({what}) most over a tenth: self-contact work {sc:+.4} J, vehicle contact {vc:+.4} J, position steps' stored energy {sh:+.4} J; together {all:+.4} J; together after {settle} s {rest:+.4} J"
+        );
+        assert!(
+            all <= 0.01,
+            "({what}) the contacts with their position steps added {all} J (beyond 2 % of the steps' energy) over a tenth"
+        );
+        assert!(
+            rest <= 0.01,
+            "({what}) the contacts with their position steps added {rest} J after {settle} s"
         );
         assert!(sc <= 0.01, "({what}) self-contact did {sc} J over a tenth");
         assert!(
@@ -3848,6 +3889,7 @@ fn contacts_do_no_positive_work() {
                 &format!("wall {kmh} km/h drag {drag}"),
                 ExplicitBeamsWorld::new(vec![s]),
                 2.0,
+                1.0,
             );
         }
     }
@@ -3856,6 +3898,7 @@ fn contacts_do_no_positive_work() {
         "wall 51 km/h drag true, then at rest to 12 s",
         ExplicitBeamsWorld::new(vec![s]),
         12.0,
+        2.0,
     );
     // The T-bone (as `t_car_to_car_t_bone_at_80_kmh` sets it up): the striker the
     // same car turned 90°, 5 cm off the struck car's side, its middle at the door's.
@@ -3895,6 +3938,7 @@ fn contacts_do_no_positive_work() {
         "T-bone 80 km/h",
         ExplicitBeamsWorld::new(vec![struck, striker]),
         1.5,
+        1.0,
     );
 }
 
@@ -3947,6 +3991,7 @@ fn wall_terms(car: &Car, kmh: f32, drag: bool) {
             l.w_ground_vertical + l.w_ground_horizontal,
             l.w_air,
             l.w_slides,
+            l.w_contact_shift,
         ]
     };
     let mut prev = snap(&w);
@@ -4006,10 +4051,10 @@ fn wall_terms(car: &Car, kmh: f32, drag: bool) {
                 let now = snap(&w);
                 let d: Vec<f64> = now.iter().zip(&prev).map(|(a, b)| a - b).collect();
                 eprintln!(
-                    "(terms {kmh} drag {drag}) to {:.3} s: Δ mean mech {:+8.2} J; ledger Δ mech {:+9.2} (kin {:+9.2}, elastic {:+9.2}); work beams {:+9.2} (dissipation {:+8.2}), self-contact {:+8.3}, ground {:+8.2}, air {:+8.2}, slides {:+6.2}; quantisation {:+.5}",
+                    "(terms {kmh} drag {drag}) to {:.3} s: Δ mean mech {:+8.2} J; ledger Δ mech {:+9.2} (kin {:+9.2}, elastic {:+9.2}); work beams {:+9.2} (dissipation {:+8.2}), self-contact {:+8.3}, ground {:+8.2}, air {:+8.2}, slides {:+6.2}, shift {:+8.3}; quantisation {:+.5}",
                     step as f32 * STEP,
                     mean - prev_mean,
-                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], wq
+                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], wq
                 );
                 // (`N_TOP=k`: the k nodes whose self-contact did the most work
                 // over the tenth.)
@@ -4571,6 +4616,216 @@ fn elastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
     );
 }
 
+/// `P_PATH`: the lateral force each kind of door-to-body joint puts on the
+/// door (kN, + outward: holding it against the ram), by the body member its
+/// body end belongs to; and each door member's beams near their yield.
+fn door_path_probe(s: &ExplicitBeams, b: &Built, door: &str, d: f32, zc: f32) {
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let Some(pt) = sk.parts.iter().position(|p| p == door) else {
+        return;
+    };
+    let out = if door.ends_with("_l") { 1.0f32 } else { -1.0 };
+    let mut names: Vec<&String> = b.groups.keys().collect();
+    names.sort();
+    let sets: Vec<(&String, HashSet<u32>)> = names
+        .iter()
+        .map(|k| (*k, b.groups[*k].iter().copied().collect()))
+        .collect();
+    let group_of = |i: u32| {
+        sets.iter()
+            .find(|(k, g)| g.contains(&i) && !k.starts_with('~'))
+            .map_or("-".to_string(), |(k, _)| k.to_string())
+    };
+    let mut iface: std::collections::BTreeMap<String, (f32, usize)> = Default::default();
+    let mut iface_abs: std::collections::BTreeMap<String, f32> = Default::default();
+    let mut own: std::collections::BTreeMap<String, (usize, usize, f32)> = Default::default();
+    for bm in &s.beams {
+        let (a, c) = (bm.a as usize, bm.b as usize);
+        if a >= n || c >= n || bm.broken {
+            continue;
+        }
+        let (pa, pc) = (sk.nodes[a].part as usize, sk.nodes[c].part as usize);
+        if (pa == pt) != (pc == pt) {
+            if pa != 0 && pc != 0 {
+                continue;
+            }
+            let (dn, bn) = if pa == pt { (a, c) } else { (c, a) };
+            let u = (s.nodes[dn].pos - s.nodes[bn].pos).normalize_or_zero();
+            // Compression pushes the door node away from the body node.
+            let fx = bm.force * u.x * out;
+            let end = if s.nodes[bn].pos.z > zc {
+                "hinge"
+            } else {
+                "lock"
+            };
+            let key = format!("{:?} {} {end}", bm.kind, group_of(bn as u32));
+            let e = iface.entry(key).or_default();
+            e.0 += fx / 1e3;
+            e.1 += 1;
+            *iface_abs
+                .entry(format!("{:?} {}", bm.kind, group_of(bn as u32)))
+                .or_default() += bm.force.abs() / 1e3;
+        } else if pa == pt && pc == pt {
+            let key = sets
+                .iter()
+                .find(|(_, g)| g.contains(&(a as u32)) && g.contains(&(c as u32)))
+                .map_or("skin".to_string(), |(k, _)| k.to_string());
+            // (`P_WEB=1`: a member's chords, along the car at rest, apart
+            // from its webs.)
+            let key = if std::env::var("P_WEB").is_ok_and(|v| v == "1") {
+                let r = (sk.nodes[a].p - sk.nodes[c].p).normalize_or_zero();
+                format!("{key}{}", if r.z.abs() > 0.9 { ".chord" } else { ".web" })
+            } else {
+                key
+            };
+            let e = own.entry(key).or_default();
+            e.0 += 1;
+            let r = if bm.force > 0.0 {
+                bm.force / bm.tc
+            } else {
+                -bm.force / bm.tt
+            };
+            if r.is_finite() && r > 0.95 {
+                e.1 += 1;
+            }
+            if r.is_finite() {
+                e.2 = e.2.max(r);
+            }
+        }
+    }
+    if let Some(fl) = b.groups.get(&format!("{door}_flanges")) {
+        // A door end node bearing on a flange that has gone inboard of it
+        // has passed through the flange: (count, deepest mm).
+        let fl: HashSet<u32> = fl.iter().copied().collect();
+        let (mut c, mut worst) = (0, 0.0f32);
+        for bm in &s.beams {
+            let (a, f) = if fl.contains(&bm.b) {
+                (bm.a, bm.b)
+            } else if fl.contains(&bm.a) {
+                (bm.b, bm.a)
+            } else {
+                continue;
+            };
+            if sk.nodes[a as usize].part as usize != pt {
+                continue;
+            }
+            let past = s.nodes[f as usize].pos.x.abs() - s.nodes[a as usize].pos.x.abs();
+            // (`P_BEAR=1`: each bearing beam's rest and present length,
+            // force and state.)
+            if std::env::var("P_BEAR").is_ok_and(|v| v == "1") {
+                let l = s.nodes[a as usize].pos.distance(s.nodes[f as usize].pos);
+                eprintln!(
+                    "(p bear {:.0} mm) door {a} on flange {f}: rest {:.3} len {l:.3} m, {:.1} kN, tc {:.1} kN, k {:.0} kN/m, past {:.0} mm{}",
+                    d * 1e3,
+                    bm.rest,
+                    bm.force / 1e3,
+                    bm.tc / 1e3,
+                    bm.k / 1e3,
+                    past * 1e3,
+                    if bm.broken { " BROKEN" } else { "" }
+                );
+            }
+            if bm.broken {
+                continue;
+            }
+            if past > 0.0 {
+                c += 1;
+                worst = worst.max(past * 1e3);
+            }
+        }
+        eprintln!(
+            "(p path {:.0} mm) door ends past their flange: {c}, deepest {worst:.0} mm",
+            d * 1e3
+        );
+    }
+    if std::env::var("P_FLANGE").is_ok_and(|v| v == "1") {
+        if let Some(fl) = b.groups.get(&format!("{door}_flanges")) {
+            for &f in fl {
+                let f = f as usize;
+                let v: Vec<String> = s
+                    .beams
+                    .iter()
+                    .filter(|bm| (bm.a as usize == f || bm.b as usize == f) && !bm.broken)
+                    .map(|bm| {
+                        let o = if bm.a as usize == f { bm.b } else { bm.a } as usize;
+                        format!(
+                            "{}{:?} F{:.1} L{:.3}/{:.3} at x{:.3}",
+                            &sk.parts[sk.nodes[o].part as usize][..4],
+                            bm.kind,
+                            bm.force / 1e3,
+                            s.nodes[o].pos.distance(s.nodes[f].pos),
+                            bm.rest,
+                            s.nodes[o].pos.x
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "(p flange {:.0} mm) {f} x{:.3} z{:.2}: {v:?}",
+                    d * 1e3,
+                    s.nodes[f].pos.x,
+                    s.nodes[f].pos.z
+                );
+            }
+        }
+    }
+    if d < 0.06 {
+        // (Once: the flange nodes' masses and their beams' stiffness.)
+        if let Some(fl) = b.groups.get(&format!("{door}_flanges")) {
+            for &f in fl {
+                let f = f as usize;
+                let ks: Vec<String> = s
+                    .beams
+                    .iter()
+                    .filter(|bm| bm.a as usize == f || bm.b as usize == f)
+                    .map(|bm| {
+                        let o = if bm.a as usize == f { bm.b } else { bm.a } as usize;
+                        format!(
+                            "{}:{:.0}kN/m,{:.2}kg,{:?}",
+                            sk.parts[sk.nodes[o].part as usize],
+                            bm.k / 1e3,
+                            s.nodes[o].mass,
+                            bm.kind
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "(p flange) node {f} at {:?} {:.3} kg: {ks:?}",
+                    s.nodes[f].pos, s.nodes[f].mass
+                );
+            }
+        }
+    }
+    let mut v: Vec<(String, (f32, usize))> = iface.into_iter().collect();
+    v.sort_by(|x, y| y.1 .0.abs().total_cmp(&x.1 .0.abs()));
+    let total: f32 = v.iter().map(|x| x.1 .0).sum();
+    eprintln!(
+        "(p path {:.0} mm) door held by {total:.1} kN: {:?}",
+        d * 1e3,
+        v.iter()
+            .take(12)
+            .map(|(k, (f, c))| format!("{k} {f:.1} ({c})"))
+            .collect::<Vec<_>>()
+    );
+    let mut va: Vec<(String, f32)> = iface_abs.into_iter().collect();
+    va.sort_by(|x, y| y.1.total_cmp(&x.1));
+    eprintln!(
+        "(p path {:.0} mm) door joints' summed |force| (kN): {:?}",
+        d * 1e3,
+        va.iter()
+            .take(10)
+            .map(|(k, f)| format!("{k} {f:.1}"))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "(p path {:.0} mm) door members (beams, at yield, max F/yield): {:?}",
+        d * 1e3,
+        own.iter()
+            .map(|(k, (c, y, r))| format!("{k} {c} {y} {r:.2}"))
+            .collect::<Vec<_>>()
+    );
+}
+
 fn plastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
     let sk = &b.skeleton;
     let n = sk.nodes.len();
@@ -4587,6 +4842,8 @@ fn plastic_census(s: &ExplicitBeams, b: &Built, tag: &str) {
             continue;
         }
         let w = 0.5 * (bm.tc.abs() + bm.tt.abs()) as f64 * (bm.rest - bm.rest0).abs() as f64;
+        // (A rope's or bounded beam's threshold may be unbounded.)
+        let w = if w.is_finite() { w } else { 0.0 };
         if w == 0.0 && !bm.broken {
             continue;
         }
@@ -4671,6 +4928,20 @@ fn ram_rig(
     speed: f32,
     inside: &dyn Fn(Vec3, f32) -> Option<f32>,
 ) -> Vec<(f32, f32)> {
+    ram_rig_with(s, held, dir, travel, speed, inside, &mut |_, _| {})
+}
+
+/// [`ram_rig`] calling `hook(state, travel)` every 50 mm of ram travel.
+fn ram_rig_with(
+    s: &mut ExplicitBeams,
+    held: &[usize],
+    dir: Vec3,
+    travel: f32,
+    speed: f32,
+    inside: &dyn Fn(Vec3, f32) -> Option<f32>,
+    hook: &mut dyn FnMut(&ExplicitBeams, f32),
+) -> Vec<(f32, f32)> {
+    let mut next_hook = 0.05f32;
     let dt = engine_softbody::authoring::skeleton::STEP;
     // The held nodes are immovable (the solver's own pin: they take no step).
     // (Resetting their positions after each step instead is not a constraint:
@@ -4698,6 +4969,10 @@ fn ram_rig(
         }
         acc += f;
         n += 1;
+        if d >= next_hook {
+            hook(s, d);
+            next_hook += 0.05;
+        }
         if d >= next {
             out.push((d, acc / n as f32));
             acc = 0.0;
@@ -4765,7 +5040,112 @@ fn p_door_crush(car: &Car) -> (f32, Vec<String>) {
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(0.457 + 0.05);
-    let curve = ram_rig(&mut s, &held, -Vec3::X, travel, 0.1, &inside);
+    // (`P_PATH=1`: every 50 mm, where the door's load leaves it, and how
+    // close its own members are to their yields.)
+    if std::env::var("P_GEOM").is_ok_and(|v| v == "1") {
+        // The door's lowest row and what of the body is beside it.
+        let mut low: Vec<usize> = door.clone();
+        low.sort_by(|&a, &c| s.nodes[a].pos.y.total_cmp(&s.nodes[c].pos.y));
+        let sill: Vec<usize> = car.g["sill"].iter().map(|&i| i as usize).collect();
+        let pb: Vec<usize> = car.g["pillar_b"].iter().map(|&i| i as usize).collect();
+        let mut lock: Vec<usize> = door
+            .iter()
+            .copied()
+            .filter(|&i| s.nodes[i].pos.z < z0 + 0.06)
+            .collect();
+        lock.sort_by(|&a, &c| s.nodes[a].pos.y.total_cmp(&s.nodes[c].pos.y));
+        for &i in &lock {
+            let p = s.nodes[i].pos;
+            let mut near: Vec<(f32, usize)> = pb
+                .iter()
+                .map(|&j| (s.nodes[j].pos.distance(p), j))
+                .collect();
+            near.sort_by(|a, c| a.0.total_cmp(&c.0));
+            eprintln!(
+                "(p geom lock) door {i} {:?} {:.2} kg; pillar_b nearest: {:?}",
+                p,
+                s.nodes[i].mass,
+                near.iter()
+                    .take(4)
+                    .map(|&(d, j)| format!("{j} {:?} {:.2}kg", s.nodes[j].pos, s.nodes[j].mass))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for &i in low.iter().take(14) {
+            let p = s.nodes[i].pos;
+            let mut near: Vec<(f32, usize)> = sill
+                .iter()
+                .map(|&j| (s.nodes[j].pos.distance(p), j))
+                .collect();
+            near.sort_by(|a, c| a.0.total_cmp(&c.0));
+            eprintln!(
+                "(p geom) door {i} {:?} {:.2} kg; sill nearest: {:?}",
+                p,
+                s.nodes[i].mass,
+                near.iter()
+                    .take(3)
+                    .map(|&(d, j)| format!("{j} {:?} {d:.3}", s.nodes[j].pos))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    let path_probe = std::env::var("P_PATH").is_ok_and(|v| v == "1");
+    let rest: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
+    let curve = ram_rig_with(
+        &mut s,
+        &held,
+        -Vec3::X,
+        travel,
+        0.1,
+        &inside,
+        &mut |s, d| {
+            if let (true, Some(b)) = (path_probe, car.built) {
+                door_path_probe(s, b, "door_f_l", d, zc);
+                // How far in (mm) the door's hinge end, middle and lock end have
+                // gone, and the pillars and sill beside it: whether the ram's
+                // travel is the door's bending or the body's.
+                let inward = |ids: &[usize]| {
+                    let v: Vec<f32> = ids
+                        .iter()
+                        .map(|&i| (rest[i].x - s.nodes[i].pos.x) * 1e3)
+                        .collect();
+                    v.iter().sum::<f32>() / v.len().max(1) as f32
+                };
+                let near = |zs: f32, ze: f32| -> Vec<usize> {
+                    door.iter()
+                        .copied()
+                        .filter(|&i| {
+                            rest[i].z >= zs && rest[i].z < ze && rest[i].y > y0 && rest[i].y < y1
+                        })
+                        .collect()
+                };
+                let w = 0.15;
+                let grp = |g: &str| -> Vec<usize> {
+                    car.g.get(g).map_or(Vec::new(), |v| {
+                        v.iter()
+                            .map(|&i| i as usize)
+                            .filter(|&i| {
+                                rest[i].z > z0 - 0.1
+                                    && rest[i].z < z1 + 0.1
+                                    && rest[i].y > y0 - 0.2
+                                    && rest[i].y < y1
+                            })
+                            .collect()
+                    })
+                };
+                eprintln!(
+                "(p path {:.0} mm) inward mm: door hinge end {:.0}, middle {:.0}, lock end {:.0}; pillar_a {:.0}, pillar_b {:.0}, sill {:.0}",
+                d * 1e3,
+                inward(&near(z1 - w, z1 + 0.01)),
+                inward(&near(zc - w, zc + w)),
+                inward(&near(z0 - 0.01, z0 + w)),
+                inward(&grp("pillar_a")),
+                inward(&grp("pillar_b")),
+                inward(&grp("sill")),
+            );
+            }
+        },
+    );
     if let (Ok(_), Some(b)) = (std::env::var("P_SPLIT"), car.built) {
         force_census(&s, b, "p", None);
         plastic_census(&s, b, "p");
@@ -5363,6 +5743,7 @@ fn t_car_to_car_t_bone_at_80_kmh() {
     )
     .unwrap();
     striker.roll_tyres(v);
+    rule_switches(&mut striker);
     let map = solver_beams(&struck, &b);
     let groups: Vec<(&str, Vec<usize>)> = b
         .hardware
@@ -6668,6 +7049,95 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
         "mass {total} kg, kerb {}",
         b.def.kerb_mass
     );
+    // Per part, the 2011 Accord's measured masses (NHTSA DOT HS 811 666
+    // §5.10, `sedan::ACCORD_*`): each part with its own pane, if it has one.
+    for (prefix, kg) in &b.def.part_masses {
+        for (q, name) in sk.parts.iter().enumerate() {
+            if !name.starts_with(prefix.as_str()) {
+                continue;
+            }
+            let pane = format!("glass_{name}");
+            let m: f32 = sk
+                .nodes
+                .iter()
+                .filter(|n| n.part as usize == q || sk.parts[n.part as usize] == pane)
+                .map(|n| n.mass)
+                .sum();
+            eprintln!("part {name:>10}: {m:6.2} kg (Accord {kg:.2})");
+            assert!(
+                (m - kg).abs() < 0.01 * kg,
+                "{name}: {m} kg against the Accord's {kg}"
+            );
+        }
+    }
+    // Centre of mass and principal moments of inertia (nodes and tyres).
+    let (com, inertia) = mass_properties(&b);
+    let front_axle = b.def.corners.iter().map(|c| c.z).fold(f32::MIN, f32::max);
+    let behind = front_axle - com.z;
+    eprintln!(
+        "centre of mass: x {:+.1} mm, {:.0} mm up, {:.0} mm behind the front axle; principal moments {:.0}, {:.0}, {:.0} kg·m² (about x, pitch {:.0}; y, yaw {:.0}; z, roll {:.0})",
+        com.x * 1e3,
+        com.y * 1e3,
+        behind * 1e3,
+        inertia[0],
+        inertia[1],
+        inertia[2],
+        inertia[3],
+        inertia[4],
+        inertia[5],
+    );
+    // Across the car: the structure, its sheet and its equipment are
+    // mirror-symmetric (exact); what is placed on one side is the named
+    // masses, blocks and hubs (`fixed`): the driver (75 kg, the kerb mass is
+    // "1,450 kg with its driver"), the dash equipment on the driver's half,
+    // the battery. So the centre of mass is off the centre line by the fixed
+    // masses' first moment alone.
+    let total = sk.total_mass();
+    let sym: f32 = sk
+        .nodes
+        .iter()
+        .map(|n| (n.mass - n.fixed) * n.p.x)
+        .sum::<f32>()
+        / total;
+    let fixed: f32 = sk.nodes.iter().map(|n| n.fixed * n.p.x).sum::<f32>() / total;
+    eprintln!(
+        "centre of mass across: {:+.1} mm from the structure, sheet and equipment, {:+.1} mm from the named masses, blocks and hubs",
+        sym * 1e3,
+        fixed * 1e3
+    );
+    assert!(
+        sym.abs() < 0.002,
+        "the symmetric mass is off the centre line by {sym} m"
+    );
+    assert!(
+        (com.x - fixed).abs() < 0.002,
+        "centre of mass {} m across, the placed masses' {fixed} m",
+        com.x
+    );
+    // Along the car: NHTSA measured the 2011 Accord LX sedan's centre of
+    // gravity 1,147 mm behind its front axle at a 1,578 kg test weight
+    // (NCAP side pole, test 7077, the NHTSA Vehicle Crash Test Database).
+    // The 128 kg above the 1,450 kg kerb mass (ATD, instruments, ballast)
+    // lies somewhere between the axles (wheelbase 2.80 m), so the kerb
+    // centre of mass lies within (1578·1147 − 128·x)/1450 for x in 0–2.80 m:
+    // 1,001–1,248 mm (exact from the measured values).
+    assert!(
+        (1.001..=1.248).contains(&behind),
+        "centre of mass {behind} m behind the front axle"
+    );
+    // The principal moments: the 2011 Accord's measured inertia is not
+    // openly published (NHTSA's measured inertial parameters, SAE
+    // 2021-01-0970, list vehicles by name behind a paywall). What is
+    // asserted is that BeamNG's node pattern (`BEAMNG_NODES`) lumps the
+    // same masses: its principal moments within 1 % (a Choice) of the
+    // 0.24 m lattice's (measured without the pattern, the battery at 12.4 kg).
+    for (k, &want) in SEDAN1_PRINCIPAL_MOMENTS.iter().enumerate() {
+        let got = inertia[k];
+        assert!(
+            (got - want).abs() <= 0.01 * want,
+            "principal moment {k}: {got:.0} kg·m² against the lattice's {want:.0}"
+        );
+    }
     let rows = sk.bound_rows();
     let worst = rows.iter().cloned().fold(0.0f32, f32::max);
     assert!(worst <= 1.002, "a node past the step's bound: {worst}");
@@ -6887,6 +7357,84 @@ fn one_tier_masses_are_real_and_beams_soft_only_at_the_bound() {
             med(mass)
         );
     }
+}
+
+/// sedan1's principal moments of inertia about its centre of mass (kg·m²,
+/// ascending), Medium, on the 0.24 m lattice (no `BEAMNG_NODES`): the
+/// reference the node pattern's lumping is held to.
+const SEDAN1_PRINCIPAL_MOMENTS: [f32; 3] = [608.0, 2296.0, 2594.0];
+
+/// A built car's centre of mass (definition coordinates) and inertia: the
+/// three principal moments ascending, then the moments about x, y and z
+/// (kg·m²). Nodes are point masses; each tyre's mass sits at its axle
+/// nodes' midpoint.
+fn mass_properties(b: &Built) -> (Vec3, [f32; 6]) {
+    let sk = &b.skeleton;
+    let mut pts: Vec<(glam::DVec3, f64)> = sk
+        .nodes
+        .iter()
+        .map(|n| (n.p.as_dvec3(), n.mass as f64))
+        .collect();
+    for w in &sk.wheels {
+        let c = 0.5 * (sk.pos(w.a1) + sk.pos(w.a2));
+        pts.push((c.as_dvec3(), w.mass as f64));
+    }
+    let m: f64 = pts.iter().map(|x| x.1).sum();
+    let c = pts.iter().map(|(p, w)| *p * *w).sum::<glam::DVec3>() / m;
+    let mut t = glam::DMat3::ZERO;
+    for (p, w) in &pts {
+        let d = *p - c;
+        t += glam::DMat3::from_diagonal(glam::DVec3::splat(d.length_squared() * w))
+            - glam::DMat3::from_cols(d * d.x * w, d * d.y * w, d * d.z * w);
+    }
+    // Jacobi eigenvalues of the symmetric tensor.
+    let mut a = [
+        [t.x_axis.x, t.y_axis.x, t.z_axis.x],
+        [t.x_axis.y, t.y_axis.y, t.z_axis.y],
+        [t.x_axis.z, t.y_axis.z, t.z_axis.z],
+    ];
+    for _ in 0..50 {
+        for (p, q) in [(0, 1), (0, 2), (1, 2)] {
+            if a[p][q].abs() < 1e-12 {
+                continue;
+            }
+            let th = 0.5 * (2.0 * a[p][q]).atan2(a[q][q] - a[p][p]);
+            let (cs, sn) = (th.cos(), th.sin());
+            let mut r = [[0.0f64; 3]; 3];
+            for i in 0..3 {
+                r[i][i] = 1.0;
+            }
+            r[p][p] = cs;
+            r[q][q] = cs;
+            r[p][q] = sn;
+            r[q][p] = -sn;
+            // a = rᵀ a r
+            let mut tmp = [[0.0f64; 3]; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    tmp[i][j] = (0..3).map(|k| a[i][k] * r[k][j]).sum();
+                }
+            }
+            for i in 0..3 {
+                for j in 0..3 {
+                    a[i][j] = (0..3).map(|k| r[k][i] * tmp[k][j]).sum();
+                }
+            }
+        }
+    }
+    let mut e = [a[0][0] as f32, a[1][1] as f32, a[2][2] as f32];
+    e.sort_by(f32::total_cmp);
+    (
+        c.as_vec3(),
+        [
+            e[0],
+            e[1],
+            e[2],
+            t.x_axis.x as f32,
+            t.y_axis.y as f32,
+            t.z_axis.z as f32,
+        ],
+    )
 }
 
 /// The largest difference between a one-tier node's mass and its real local
@@ -7611,4 +8159,443 @@ fn beamng_pole_sweep() {
 
 fn offset_of(o: f32) -> f32 {
     o
+}
+
+/// A solver-level topology census, the same arithmetic for sedan1 and for
+/// BeamNG's content: per part, its nodes, beam ends per node by kind, the
+/// share of nodes whose Gershgorin row (Σ (h²k + 2hc)(1/mᵢ + 1/√(mᵢmⱼ)) over
+/// h²·[`G_LIMIT`]) is at the bound (> 0.95), how a saturated node's row
+/// divides by kind, and the median node mass, length, k·L, yield strain and
+/// springback after 20 % plastic strain. A measurement (`--ignored`).
+fn solver_census(
+    s: &ExplicitBeams,
+    n: usize,
+    part_of: &dyn Fn(usize) -> Option<String>,
+    kind_of: &dyn Fn(usize) -> String,
+) {
+    use engine_softbody::authoring::skeleton::G_LIMIT;
+    let h = STEP;
+    let limit = G_LIMIT * h * h;
+    let mut row = vec![0.0f32; s.nodes.len()];
+    for bm in &s.beams {
+        let (a, b) = (bm.a as usize, bm.b as usize);
+        let q = h * h * bm.k + 2.0 * h * bm.c;
+        let (ma, mb) = (s.nodes[a].mass, s.nodes[b].mass);
+        let w = 1.0 / (ma * mb).sqrt();
+        row[a] += q * (1.0 / ma + w);
+        row[b] += q * (1.0 / mb + w);
+    }
+    for r in &mut row {
+        *r /= limit;
+    }
+    #[derive(Default)]
+    struct P {
+        nodes: HashSet<usize>,
+        ends: std::collections::BTreeMap<String, usize>,
+        share: std::collections::BTreeMap<String, f64>,
+        kl: Vec<f32>,
+        eps: Vec<f32>,
+        len: Vec<f32>,
+        kl_by: std::collections::BTreeMap<String, Vec<f32>>,
+        eps_by: std::collections::BTreeMap<String, Vec<f32>>,
+    }
+    let mut by: std::collections::BTreeMap<String, P> = Default::default();
+    for (j, bm) in s.beams.iter().enumerate() {
+        let (a, b) = (bm.a as usize, bm.b as usize);
+        if a >= n || b >= n {
+            continue;
+        }
+        let (Some(pa), Some(pb)) = (part_of(a), part_of(b)) else {
+            continue;
+        };
+        if pa != pb {
+            continue;
+        }
+        if bm.k <= 0.0 && bm.c <= 0.0 {
+            continue;
+        }
+        let kind = kind_of(j);
+        let p = by.entry(pa).or_default();
+        p.nodes.insert(a);
+        p.nodes.insert(b);
+        *p.ends.entry(kind.clone()).or_default() += 2;
+        let q = h * h * bm.k + 2.0 * h * bm.c;
+        for (i, o) in [(a, b), (b, a)] {
+            if row[i] > 0.95 {
+                let (mi, mo) = (s.nodes[i].mass, s.nodes[o].mass);
+                *p.share.entry(kind.clone()).or_default() +=
+                    (q * (1.0 / mi + 1.0 / (mi * mo).sqrt())) as f64;
+            }
+        }
+        if bm.ty == ExplicitType::Deformable && bm.k > 0.0 && bm.tc < 1.0e8 && bm.rest > 1e-3 {
+            let kl = bm.k * bm.rest;
+            p.kl.push(kl);
+            p.eps.push(bm.tc / kl);
+            p.len.push(bm.rest);
+            p.kl_by.entry(kind.clone()).or_default().push(kl);
+            p.eps_by.entry(kind.clone()).or_default().push(bm.tc / kl);
+        }
+    }
+    let med = |v: &mut Vec<f32>| {
+        if v.is_empty() {
+            return f32::NAN;
+        }
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    for (k, p) in &mut by {
+        let nn = p.nodes.len() as f32;
+        let total: usize = p.ends.values().sum();
+        let sat = p.nodes.iter().filter(|&&i| row[i] > 0.95).count() as f32 / nn;
+        let mut mass: Vec<f32> = p.nodes.iter().map(|&i| s.nodes[i].mass).collect();
+        let e = med(&mut p.eps);
+        eprintln!(
+            "[census] {k}: {} nodes, mass p50 {:.2} kg, {:.1} ends per node, at the bound {:.0} %, L p50 {:.3} m, k·L p50 {:.2e} N, ε_y p50 {:.2} %, springback at 20 % {:.0} %",
+            p.nodes.len(),
+            med(&mut mass),
+            total as f32 / nn,
+            sat * 100.0,
+            med(&mut p.len),
+            med(&mut p.kl),
+            e * 100.0,
+            e / (e + 0.2) * 100.0
+        );
+        let st: f64 = p.share.values().sum();
+        for (kind, &ends) in &p.ends {
+            let sh = p.share.get(kind).copied().unwrap_or(0.0);
+            let mut kl = p.kl_by.get(kind).cloned().unwrap_or_default();
+            let mut ey = p.eps_by.get(kind).cloned().unwrap_or_default();
+            eprintln!(
+                "[census]    {kind:<14} {:5.2} ends/node, {:4.0} % of saturated rows, k·L p50 {:.2e}, ε_y p50 {:.2} %",
+                ends as f32 / nn,
+                if st > 0.0 { sh / st * 100.0 } else { 0.0 },
+                med(&mut kl),
+                med(&mut ey) * 100.0
+            );
+        }
+    }
+}
+
+/// sedan1's beams by kind for [`solver_census`]: within a member (both ends
+/// in one member's group) by the angle to the member's local axis (the
+/// principal axis of its nodes within 0.35 m of the beam's midpoint): chord
+/// (within 32°; `bend` when longer than 1.5× the member's median chord),
+/// diagonal (32–73°), ring/web (past 73°); `lane chord` a chord on the
+/// shell; between two members `joint`; shell edges in no common member
+/// `sheet`; ties, dashpots, bearing (support) beams and rigidifier spokes
+/// by their flags and groups.
+fn sedan1_kinds(b: &Built) -> Vec<String> {
+    use engine_softbody::authoring::skeleton::BeamType;
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let shell: HashSet<u32> = b.shell.nodes.iter().copied().collect();
+    let names: Vec<&String> = b
+        .groups
+        .keys()
+        .filter(|k| {
+            b.def
+                .members
+                .iter()
+                .any(|m| *k == &m.name || k.strip_suffix("_r").is_some_and(|x| x == m.name))
+        })
+        .collect();
+    let mut of: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (gi, g) in names.iter().enumerate() {
+        for &i in &b.groups[*g] {
+            of[i as usize].push(gi);
+        }
+    }
+    let rigid: HashSet<u32> = b
+        .groups
+        .iter()
+        .filter(|(k, _)| k.contains("rigidifier"))
+        .flat_map(|(_, g)| g.iter().copied())
+        .collect();
+    let flange: HashSet<u32> = b
+        .groups
+        .iter()
+        .filter(|(k, _)| k.contains("flange"))
+        .flat_map(|(_, g)| g.iter().copied())
+        .collect();
+    let axis = |gi: usize, at: Vec3| -> Vec3 {
+        let pts: Vec<Vec3> = b.groups[names[gi]]
+            .iter()
+            .map(|&i| sk.pos(i))
+            .filter(|p| p.distance(at) < 0.35)
+            .collect();
+        if pts.len() < 2 {
+            return Vec3::ZERO;
+        }
+        let c = pts.iter().copied().sum::<Vec3>() / pts.len() as f32;
+        let mut m = glam::Mat3::ZERO;
+        for p in &pts {
+            let d = *p - c;
+            m += glam::Mat3::from_cols(d * d.x, d * d.y, d * d.z);
+        }
+        let mut v = Vec3::new(0.577, 0.577, 0.577);
+        for _ in 0..30 {
+            v = (m * v).normalize_or_zero();
+        }
+        v
+    };
+    let mut edge: HashSet<(u32, u32)> = HashSet::new();
+    for t in &b.shell.tris {
+        for (x, y) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            edge.insert((x.min(y), x.max(y)));
+        }
+    }
+    let mut raw: Vec<(String, Option<(usize, f32)>)> = Vec::with_capacity(sk.beams.len());
+    for bm in &sk.beams {
+        let (a, c) = (bm.a, bm.b);
+        let (pa, pc) = (sk.pos(a), sk.pos(c));
+        let l = pa.distance(pc);
+        let k = if bm.damper {
+            "dashpot".to_string()
+        } else if b.shell.contact.contains(&a) || b.shell.contact.contains(&c) {
+            // (BeamNG's node pattern: what holds a contact-only node.)
+            "contact tie".into()
+        } else if bm.ty != BeamType::Normal {
+            "bearing".into()
+        } else if rigid.contains(&a) && rigid.contains(&c) {
+            "rigidifier".into()
+        } else if flange.contains(&a) || flange.contains(&c) {
+            "flange".into()
+        } else if bm.tie {
+            "tie".into()
+        } else if shell.contains(&a)
+            && shell.contains(&c)
+            && sk.nodes[a as usize].part == sk.nodes[c as usize].part
+            && !edge.contains(&(a.min(c), a.max(c)))
+        {
+            // A shell beam that is no skin triangle's edge: the sheet's
+            // bending (over two bays) or a lane's extra.
+            "shell bend".into()
+        } else if let Some(&gi) = of[a as usize].iter().find(|g| of[c as usize].contains(g)) {
+            let ax = axis(gi, 0.5 * (pa + pc));
+            let cs = ((pc - pa) / l.max(1e-4)).dot(ax).abs();
+            if cs > 0.85 {
+                raw.push(("chord".into(), Some((gi, l))));
+                continue;
+            } else if cs > 0.3 {
+                "diagonal".into()
+            } else {
+                "ring/web".into()
+            }
+        } else if !of[a as usize].is_empty() && !of[c as usize].is_empty() {
+            "joint".into()
+        } else if shell.contains(&a) && shell.contains(&c) {
+            "sheet".into()
+        } else {
+            "other".into()
+        };
+        raw.push((k, None));
+    }
+    // Bends: chords longer than 1.5× their member's median chord.
+    let mut chord_len: Vec<Vec<f32>> = vec![Vec::new(); names.len()];
+    for (_, x) in &raw {
+        if let Some((gi, l)) = x {
+            chord_len[*gi].push(*l);
+        }
+    }
+    let medl: Vec<f32> = chord_len
+        .into_iter()
+        .map(|mut v| {
+            v.sort_by(f32::total_cmp);
+            v.get(v.len() / 2).copied().unwrap_or(0.0)
+        })
+        .collect();
+    raw.into_iter()
+        .zip(&sk.beams)
+        .map(|((k, x), bm)| match x {
+            Some((gi, l)) if l > 1.5 * medl[gi] => "bend".into(),
+            Some(_) if shell.contains(&bm.a) && shell.contains(&bm.b) => "lane chord".into(),
+            Some(_) => "chord".into(),
+            None => k,
+        })
+        .collect()
+}
+
+/// [`solver_census`] on sedan1 (`RES`, default Medium) from its `.truck`.
+#[test]
+#[ignore]
+fn topology_census_solver() {
+    let res = std::env::var("RES")
+        .ok()
+        .and_then(|r| Resolution::parse(&r))
+        .unwrap_or(Resolution::Medium);
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: res,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let sk = &b.skeleton;
+    let s = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+    let kinds = sedan1_kinds(&b);
+    // The .truck's beams by their nodes to the skeleton's (the order differs).
+    let mut at: std::collections::HashMap<(u32, u32), usize> = Default::default();
+    for (j, bm) in sk.beams.iter().enumerate() {
+        at.entry((bm.a.min(bm.b), bm.a.max(bm.b))).or_insert(j);
+    }
+    let kind_of = |j: usize| -> String {
+        let bm = &s.beams[j];
+        at.get(&(bm.a.min(bm.b), bm.a.max(bm.b)))
+            .map_or_else(|| "solver".into(), |&k| kinds[k].clone())
+    };
+    let key = |name: &str| -> String {
+        if name.starts_with("door") {
+            "door".into()
+        } else if name.starts_with("fender") {
+            "fender".into()
+        } else {
+            name.into()
+        }
+    };
+    // (BeamNG's node pattern, `BEAMNG_NODES`: a part's contact-only nodes
+    // are their own row, so the part's row is its structural lattice; the
+    // ties between the two are counted in neither.)
+    eprintln!("[census] contact-only nodes: {}", b.shell.contact.len());
+    solver_census(
+        &s,
+        sk.nodes.len(),
+        &|i| {
+            let k = key(&sk.parts[sk.nodes[i].part as usize]);
+            Some(if b.shell.contact.contains(&(i as u32)) {
+                format!("{k} contact")
+            } else {
+                k
+            })
+        },
+        &kind_of,
+    );
+}
+
+/// [`solver_census`] on BeamNG's BX (`RUBBLE_JBEAM_BX`), its beams by
+/// solver kind; a node is in the first part that lists it.
+#[test]
+#[ignore]
+fn beamng_topology_census() {
+    let Some(desc) = beamng_desc() else {
+        eprintln!("skip: RUBBLE_JBEAM_BX not set");
+        return;
+    };
+    let s = beamng_spawn(&desc, Vec3::ZERO, 0.0);
+    let n = desc.nodes.len();
+    let mut part = vec![None; n];
+    for p in &desc.parts {
+        for &i in &p.nodes {
+            if part[i as usize].is_none() {
+                part[i as usize] = Some(p.name.clone());
+            }
+        }
+    }
+    solver_census(&s, n, &|i| part[i].clone(), &|j| {
+        format!("{:?}", s.beams[j].kind)
+    });
+}
+
+/// How a car damps its light nodes (a measurement, `--ignored`): per part,
+/// its nodes split at the part's median mass, and for each half the median
+/// node mass, the median damping ratio of its spring beams on their own
+/// two-mass mode (ζ = c / 2√(k·μ)), damping-only beams per node, and the
+/// median Σc/m per node (1/s, the node's damping rate). `RUBBLE_JBEAM_BX`:
+/// BeamNG's BX; else sedan1 (`BEAMNG_NODES` splits by contact-only instead).
+#[test]
+#[ignore]
+fn light_node_damping() {
+    let (s, n, part_of, light): (
+        ExplicitBeams,
+        usize,
+        Vec<Option<String>>,
+        Option<HashSet<usize>>,
+    ) = if let Some(desc) =
+        beamng_desc().filter(|_| std::env::var("CAR").map_or(true, |c| c == "bx"))
+    {
+        let s = beamng_spawn(&desc, Vec3::ZERO, 0.0);
+        let n = desc.nodes.len();
+        let mut part = vec![None; n];
+        for p in &desc.parts {
+            for &i in &p.nodes {
+                if part[i as usize].is_none() {
+                    part[i as usize] = Some(p.name.clone());
+                }
+            }
+        }
+        (s, n, part, None)
+    } else {
+        let b = built(Resolution::Medium);
+        let s = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+        let sk = &b.skeleton;
+        let n = sk.nodes.len();
+        let part = (0..n)
+            .map(|i| {
+                let p = &sk.parts[sk.nodes[i].part as usize];
+                Some(if p.starts_with("door") {
+                    "door".to_string()
+                } else {
+                    p.clone()
+                })
+            })
+            .collect();
+        let light = (!b.shell.contact.is_empty())
+            .then(|| b.shell.contact.iter().map(|&i| i as usize).collect());
+        (s, n, part, light)
+    };
+    let mut by: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    for i in 0..n {
+        if let Some(p) = &part_of[i] {
+            by.entry(p.clone()).or_default().push(i);
+        }
+    }
+    let mut zeta: Vec<Vec<f32>> = vec![Vec::new(); s.nodes.len()];
+    let mut dash = vec![0usize; s.nodes.len()];
+    let mut csum = vec![0.0f32; s.nodes.len()];
+    for bm in &s.beams {
+        let (a, b) = (bm.a as usize, bm.b as usize);
+        csum[a] += bm.c;
+        csum[b] += bm.c;
+        if bm.k <= 0.0 {
+            if bm.c > 0.0 {
+                dash[a] += 1;
+                dash[b] += 1;
+            }
+            continue;
+        }
+        let (ma, mb) = (s.nodes[a].mass, s.nodes[b].mass);
+        let z = bm.c / (2.0 * (bm.k * ma * mb / (ma + mb)).sqrt());
+        zeta[a].push(z);
+        zeta[b].push(z);
+    }
+    let med = |mut v: Vec<f32>| {
+        if v.is_empty() {
+            return f32::NAN;
+        }
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    for (p, nodes) in by {
+        if nodes.len() < 6 {
+            continue;
+        }
+        let mm = med(nodes.iter().map(|&i| s.nodes[i].mass).collect());
+        let (lo, hi): (Vec<usize>, Vec<usize>) = nodes.iter().partition(|&&i| match &light {
+            Some(l) => l.contains(&i),
+            None => s.nodes[i].mass < mm,
+        });
+        for (tag, v) in [("light", &lo), ("heavy", &hi)] {
+            if v.is_empty() {
+                continue;
+            }
+            eprintln!(
+                "[damping] {p:>16} {tag}: {:3} nodes, mass p50 {:.2} kg, beam ζ p50 {:.4}, dashpots per node {:.2}, Σc/m p50 {:.1} /s",
+                v.len(),
+                med(v.iter().map(|&i| s.nodes[i].mass).collect()),
+                med(v.iter().flat_map(|&i| zeta[i].iter().copied()).collect()),
+                v.iter().map(|&i| dash[i]).sum::<usize>() as f32 / v.len() as f32,
+                med(v.iter().map(|&i| csum[i] / s.nodes[i].mass).collect()),
+            );
+        }
+    }
 }

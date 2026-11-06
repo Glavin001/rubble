@@ -185,17 +185,21 @@ RUNS.yard = async () => {
   ok = ok && fast.speed > 4 && fast.centre[2] - z0 > 3;
   for (let i = 0; i < 30; i++) await lab('L.draw()');
   msgs.push(`→ ${await shot(`${CAR}_yard_throttle`)}`);
-  await drive({ forward: 0.4, steer: -1 }, 2.0);
-  const turned = await player();
-  const dh = unwrap(turned.heading - fast.heading);
-  msgs.push(`steer left 2 s: heading ${(dh * 180 / Math.PI).toFixed(0)}°, ${(turned.speed * 3.6).toFixed(1)} km/h`);
+  // Right first (toward −X, the open side), then left back: the parked cars
+  // stand at x = 14 (z 20 and 30), left of the path, where a left turn from
+  // ~40 km/h ended in them (the turn read +5° once the car was pinned there).
   // +Y yaw from +Z toward +X is a left turn.
-  ok = ok && dh > 0.3;
+  const xz = (p) => `(${p.centre[0].toFixed(1)}, ${p.centre[2].toFixed(1)})`;
   await drive({ forward: 0.4, steer: 1 }, 2.0);
   const right = await player();
-  const dr = unwrap(right.heading - turned.heading);
-  msgs.push(`steer right 2 s: heading ${(dr * 180 / Math.PI).toFixed(0)}°`);
+  const dr = unwrap(right.heading - fast.heading);
+  msgs.push(`steer right 2 s: heading ${(dr * 180 / Math.PI).toFixed(0)}°, ${(right.speed * 3.6).toFixed(1)} km/h, at ${xz(right)}`);
   ok = ok && dr < -0.3;
+  await drive({ forward: 0.4, steer: -1 }, 2.0);
+  const turned = await player();
+  const dh = unwrap(turned.heading - right.heading);
+  msgs.push(`steer left 2 s: heading ${(dh * 180 / Math.PI).toFixed(0)}°, at ${xz(turned)}`);
+  ok = ok && dh > 0.3;
   for (let i = 0; i < 30; i++) await lab('L.draw()');
   msgs.push(`→ ${await shot(`${CAR}_yard_turn`)}`);
   await drive({ forward: -1 }, 2.5);

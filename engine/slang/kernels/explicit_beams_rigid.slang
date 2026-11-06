@@ -704,6 +704,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     cfRoll(gi, groupOff, flagsV);
     clipRoll(gi, flagsV);
     if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
+    float3 shift = shiftTake(gi, flagsV); // §37's contact position step
     float selfGroup = gNodes[gi * 3u + 2u].w;
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -779,6 +780,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     {
         vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
         pos = sadd3(pos, sscale(vel, STEP));
+        pos = sadd3(pos, shift);
     }
     clipSpeed(vehicle, step, flagsV, vel);
 #ifdef EB_AERO

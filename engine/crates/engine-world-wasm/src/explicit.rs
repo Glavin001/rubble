@@ -1007,6 +1007,11 @@ impl ExplicitSim {
                 boxes.push((c, half));
             }
             sim.shapes.extend_from_slice(&shapes);
+            // `surfaceContact`: the collision triangles meet the boxes and shapes by
+            // their surface too (jbeam-semantics-spec.md §38; off by default).
+            if spec.get("surfaceContact").and_then(|x| x.as_bool()).unwrap_or(false) {
+                sim.surface_contact = true;
+            }
             vehicles.push(Spawned {
                 name: desc.name.clone(),
                 sim,
@@ -1227,6 +1232,8 @@ impl ExplicitSim {
                     "mass": v.sim.nodes.iter().map(|n| f64::from(n.mass)).sum::<f64>(),
                     "nodeOffset": self.gpu.node_offset(i), "beamOffset": self.gpu.beam_offset(i),
                     "forward": v.forward.to_array(), "warnings": v.warnings,
+                    // The solver profile it runs (spec §36): "beamng" or "ror".
+                    "profile": if v.sim.beamng_profile { "beamng" } else { "ror" },
                 })
             })
             .collect();

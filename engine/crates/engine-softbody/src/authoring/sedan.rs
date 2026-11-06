@@ -757,6 +757,16 @@ pub const HSLA340: f32 = 340e6;
 pub const S420: f32 = 420e6;
 pub const PHS: f32 = 1100e6;
 pub const TUBE1200: f32 = 1200e6;
+/// The side reinforcements' yield (Pa) at the 2008–12 Accord's measured
+/// steel: Honda gives its body structure as 48 % high-strength steel by
+/// mass, an average tensile strength of 412 MPa (NHTSA DOT HS 811 666
+/// §4.4.2.1). With the rest mild steel (270 MPa), the high-strength half
+/// averages about 566 MPa tensile: 590–780 MPa-class dual-phase sheet, no
+/// press-hardened 1,500 MPa parts (the report's 22MnB5 and CP grades are
+/// its lightweight design's). The pillars' and rocker's reinforcements as
+/// the strongest of that class, DP780 (EN 10338 HCT780X, Re 440 MPa), a
+/// Choice.
+pub const ACCORD_REINFORCEMENT: f32 = DP780;
 pub const AL6082: f32 = 250e6;
 
 /// The members' real sections and the truss's lever for their bending:
@@ -1705,21 +1715,21 @@ pub fn sedan() -> VehicleDef {
         m.skin = true;
         m
     };
-    // Not built (`LID_INNER=1` builds them, a measurement switch): the
-    // rigidifier stands in for the inner stamping as in BeamNG's BX, and these
-    // ladders took 37 % of the bonnet's row at the step's bound from its
-    // sheet (its first mode 13.0 Hz without them against 12.4 with, 19.3
-    // against 17.9 at the BX's rigidifier depth) and one of them pumped
-    // energy at the step's Nyquist rate in the 120 km/h wall
-    // (`vehicle-authoring.md`, "The lids").
-    if std::env::var("LID_INNER").is_ok_and(|v| v == "1") {
-        members.extend([
-            inner("lid_inner_r", 0.14, 0.58, [1.00, 1.04]),
-            inner("lid_inner_f", 0.46, 0.57, [1.03, 1.07]),
-            inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
-            inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
-        ]);
-    }
+    // The lids' inner ladders. The two-tier `sedan` keeps them (its `.truck`
+    // is unchanged; its Low deck top binds to them). The one-tier `sedan1`
+    // leaves them out ([`sedan_one_tier`], `LID_INNER=1` keeps them, a
+    // measurement switch): the rigidifier stands in for the inner stamping
+    // as in BeamNG's BX, and these ladders took 37 % of the bonnet's row at
+    // the step's bound from its sheet (its first mode 13.0 Hz without them
+    // against 12.4 with, 19.3 against 17.9 at the BX's rigidifier depth) and
+    // one of them pumped energy at the step's Nyquist rate in the 120 km/h
+    // wall (`vehicle-authoring.md`, "The lids").
+    members.extend([
+        inner("lid_inner_r", 0.14, 0.58, [1.00, 1.04]),
+        inner("lid_inner_f", 0.46, 0.57, [1.03, 1.07]),
+        inner("bonnet_inner_1", 3.79, 0.61, [0.94, 0.97]),
+        inner("bonnet_inner_3", 4.30, 0.59, [0.85, 0.88]),
+    ]);
     // The transverse members a sedan has besides those above (their
     // sections in [`side_sections`]): the front subframe's rear cross
     // member and the rear seat cushion's cross member. (A boot floor cross
@@ -2182,6 +2192,39 @@ pub fn sedan_one_tier() -> VehicleDef {
     d.one_tier = true;
     d.tiered = false;
     d.damping = Some(super::vehicle::DampingRatios::default());
+    // No lid inner ladders (see [`sedan`]; `LID_INNER=1` keeps them).
+    if std::env::var("LID_INNER").map_or(true, |v| v != "1") {
+        d.members.retain(|m| {
+            !matches!(
+                m.name.as_str(),
+                "lid_inner_r" | "lid_inner_f" | "bonnet_inner_1" | "bonnet_inner_3"
+            )
+        });
+    }
+    // The 12 V battery: the 2011 Accord's lead-acid battery weighs 12.4 kg
+    // (NHTSA DOT HS 811 666 §5.16.1). The two-tier package's 18 kg was a
+    // Choice; the 5.6 kg goes to the equipment spread over the body's shell
+    // (the kerb mass is unchanged). Its place on the left of the engine bay
+    // stays a Choice (the report does not give it).
+    for b in d.blocks.iter_mut().filter(|b| b.name == "battery") {
+        b.kg = ACCORD_BATTERY;
+    }
+    // BeamNG's node pattern on the doors (`BEAMNG_NODES`): the doors'
+    // rails' stations at the structural spacing, so they land on the
+    // structural rings (their bays' lane nodes between are contact-only).
+    if super::vehicle::beamng_nodes_parts()
+        .iter()
+        .any(|p| p == "door")
+    {
+        for m in d.members.iter_mut().filter(|m| {
+            m.ride
+                && (m.name.starts_with("door_beam")
+                    || m.name.starts_with("door_belt")
+                    || m.name.starts_with("door_mid"))
+        }) {
+            m.station = super::vehicle::BEAMNG_SPACING;
+        }
+    }
     // The C-pillar (the rear doors' striker pillar) at pole-width stations
     // (A8: an outer member's stations at most a 254 mm pole apart), so its
     // latch meets the pillar's own nodes.
@@ -2450,15 +2493,26 @@ pub fn sedan_one_tier() -> VehicleDef {
     // sedan's side has there; the over-count had stood in for the rest. Each
     // member is now the sum of its layers ([`layered`]): the body side outer
     // (a hat over the member, BH210 0.7 mm), the reinforcement and the
-    // inner. Grades and gauges are WorldAutoSteel's FutureSteelVehicle and
-    // A2Mac1-style teardown descriptions of 2010s mid-size sedans (a Choice
-    // in each published range): B-pillar reinforcement hot-stamped 22MnB5
-    // 1.8 mm (published 1.5–2.0), its inner HSLA 1.2 mm; A-pillar and hinge
-    // pillar reinforcement hot-stamped 1.6 mm, inner DP780 1.4 mm; rocker
-    // reinforcement DP980 1.6 mm, inner DP780 1.4 mm. The 2011 Accord
-    // teardown's material classes (DOT HS 811 666 fig. 113) include each.
+    // inner. Gauges are WorldAutoSteel's FutureSteelVehicle and A2Mac1-style
+    // teardown descriptions of 2010s mid-size sedans (a Choice in each
+    // published range): B-pillar reinforcement 1.8 mm (published 1.5–2.0),
+    // its inner HSLA 1.2 mm; A-pillar and hinge pillar reinforcement 1.6 mm,
+    // inner DP780 1.4 mm; rocker reinforcement 1.6 mm, inner DP780 1.4 mm.
+    // The reinforcements' grade is the Accord's measured steel,
+    // [`ACCORD_REINFORCEMENT`] (DP780). Before, they were hot-stamped 22MnB5
+    // (pillars) and DP980 (rocker), read from the report's fig. 113, which
+    // is its lightweight design's material table, not the baseline car's.
     if std::env::var("SIDE_LAYERS").map_or(true, |v| v != "0") {
         use LayerShape::{Flange, Hat};
+        // The reinforcements at the 2008–12 Accord's measured steel,
+        // [`ACCORD_REINFORCEMENT`] (`ACCORD_GRADES=0`: the press-hardened
+        // and DP980 reinforcements of before, a measurement switch).
+        let accord = std::env::var("ACCORD_GRADES").map_or(true, |v| v != "0");
+        let (phs, dp980) = if accord {
+            (ACCORD_REINFORCEMENT, ACCORD_REINFORCEMENT)
+        } else {
+            (PHS, DP980)
+        };
         let list = [
             (
                 "sill",
@@ -2467,7 +2521,7 @@ pub fn sedan_one_tier() -> VehicleDef {
                     0.14,
                     &[
                         (0.0007, BH210, Hat),
-                        (0.0016, DP980, Hat),
+                        (0.0016, dp980, Hat),
                         (0.0014, DP780, Hat),
                     ],
                 ),
@@ -2481,7 +2535,7 @@ pub fn sedan_one_tier() -> VehicleDef {
                     0.12,
                     &[
                         (0.0007, BH210, Hat),
-                        (0.0018, PHS, Hat),
+                        (0.0018, phs, Hat),
                         (0.0012, HSLA340, Flange),
                     ],
                 ),
@@ -2495,7 +2549,7 @@ pub fn sedan_one_tier() -> VehicleDef {
                     0.12,
                     &[
                         (0.0007, BH210, Hat),
-                        (0.0016, PHS, Hat),
+                        (0.0016, phs, Hat),
                         (0.0014, DP780, Flange),
                     ],
                 ),
@@ -2636,7 +2690,150 @@ pub fn sedan_one_tier() -> VehicleDef {
             m.kg_per_m = section_kg_per_m(&ACCORD_BUMPER_BEAM);
         }
     }
+    // The doors' shut faces at the doors' edges, over their pillars'
+    // flanges (built, not adopted: `SHUT_FACES=1` builds them, a
+    // measurement switch; `vehicle-authoring.md`, "p's door"): [`shut_faces`].
+    let shut = std::env::var("SHUT_FACES").is_ok_and(|v| v == "1");
+    // The doors' frames as the 2011 Accord's (built, not adopted:
+    // `ACCORD_DOORS=1` builds them, `=beam` only the intrusion beams; a
+    // measurement switch, [`accord_doors`]).
+    if let Ok(v) = std::env::var("ACCORD_DOORS") {
+        if v == "1" || v == "beam" {
+            accord_doors(&mut d, v == "1");
+        }
+    }
+    if shut {
+        shut_faces(&mut d);
+        // The B-pillar's section at the shut lines (`SHUT_SECTION=0`: the
+        // 0.14 m truss box of before, a measurement switch): [`shut_section`].
+        if shut_section_on() {
+            shut_section(&mut d);
+        }
+    }
     d
+}
+
+/// Whether [`shut_section`] is built (with the shut faces).
+pub fn shut_section_on() -> bool {
+    std::env::var("SHUT_FACES").is_ok_and(|v| v == "1")
+        && std::env::var("SHUT_SECTION").map_or(true, |v| v != "0")
+}
+
+/// The B-pillar as its real section, 120 mm along the car × 70 mm across
+/// ([`side_sections`]' and the layered section's), against the 0.14 m
+/// truss box it was drawn as.
+/// - **It fits the gap.** Its front face is at the front door's lock edge
+///   (2.30) and its rear face at the rear door's hinge edge (2.18), so each
+///   door's hem row ([`HEM`] inside its outline) stands one compressed seal
+///   ahead of the pillar's face, not in its plane.
+/// - **Its depth** across the car is the reinforcement hat's 70 mm about
+///   the same line (x 0.79), so its inner face (x 0.755) is the doors'
+///   inner chords' (x 0.76): each rail's inner end bears along the car on
+///   the pillar's inner corner, the compression side of the end-fixity
+///   couple. Its chords' yields are taken over that depth (the section's
+///   M_p unchanged, its lever halved).
+/// - **A station at each door rail's end height** (belt, mid rail,
+///   intrusion beam and end faces, both doors): each rail's end meets the
+///   pillar's own section, not a bay 0.6 m long. Heights within
+///   [`SHUT_MERGE`] are one station; within [`SHUT_MERGE`] of the pillar's
+///   belt knee the knee moves to it (a pillar's tumblehome turns at the
+///   belt); within [`SHUT_SILL`] of its foot the sill carries the end.
+fn shut_section(d: &mut VehicleDef) {
+    // (The doors' edges at the B-pillar: the front door's lock edge and the
+    // rear door's hinge edge, [`sedan`]'s outlines.)
+    let (front, rear) = (2.30, 2.18);
+    let mut heights: Vec<f32> = d
+        .members
+        .iter()
+        .filter(|m| m.name.starts_with("door_"))
+        .flat_map(|m| [m.path[0], *m.path.last().unwrap()])
+        .filter(|p| (p[2] - (front + HEM)).abs() < 0.02 || (p[2] - (rear - HEM)).abs() < 0.02)
+        .map(|p| p[1])
+        .collect();
+    heights.sort_by(f32::total_cmp);
+    for m in d.members.iter_mut().filter(|m| m.name == "pillar_b") {
+        let foot = m.path[0];
+        let mut knee = m.path[1];
+        let top = m.path[2..].to_vec();
+        // (Clusters of heights each within `SHUT_MERGE` of the next, each
+        // one station at its mean.)
+        let mut clusters: Vec<Vec<f32>> = Vec::new();
+        for &h in heights.iter().filter(|&&h| h >= foot[1] + SHUT_SILL) {
+            match clusters.last_mut() {
+                Some(c) if h - c.last().unwrap() < SHUT_MERGE => c.push(h),
+                _ => clusters.push(vec![h]),
+            }
+        }
+        let mut lower: Vec<f32> = Vec::new();
+        for c in clusters {
+            let h = c.iter().sum::<f32>() / c.len() as f32;
+            if (h - knee[1]).abs() < SHUT_MERGE {
+                knee[1] = h;
+            } else {
+                lower.push(h);
+            }
+        }
+        let mut path = vec![foot];
+        for h in lower.into_iter().filter(|&h| h < knee[1]) {
+            let t = (h - foot[1]) / (knee[1] - foot[1]);
+            let p = [0, 1, 2].map(|k| foot[k] + (knee[k] - foot[k]) * t);
+            path.push([p[0], h, p[2]]);
+        }
+        path.push(knee);
+        path.extend(top);
+        m.path = path;
+        // 120 along the car (its width, square to `OUT`) × 70 across; the
+        // chords' yields over the 70 mm lever instead of 140 mm.
+        m.width = front - rear;
+        m.scale = m.scale.map(|s| s * m.height / 0.07);
+        m.height = 0.07;
+    }
+}
+
+/// Door rail end heights closer than this (m) are one B-pillar station
+/// ([`shut_section`]; a Choice, about a rail's 60 mm strip width).
+pub const SHUT_MERGE: f32 = 0.05;
+/// A door rail's end this close above the B-pillar's foot (m) is the sill's
+/// ([`shut_section`]; a Choice: the sill's 100 mm section and a bay).
+pub const SHUT_SILL: f32 = 0.15;
+
+/// How far inside a door's outline its shut face's row of nodes lies (m):
+/// the hem, where the outer panel is folded over the inner's flange (a
+/// Choice: a hem is 8–12 mm wide).
+pub const HEM: f32 = 0.01;
+
+/// The doors' shut faces where a real door's are: at the door's edge, over
+/// the pillar it closes against.
+/// - **The hem rows.** A ring of the shell at each door's front and rear
+///   edge, [`HEM`] inside its outline (the shell's keys). Before, a door's
+///   last row of nodes was the nearest ring inside its outline, 0.10–0.12 m
+///   in: the drawn panel ran past its nodes, and the lock face stood one
+///   ring (0.16 m) ahead of the B-pillar's section, so the flange it bore on
+///   was a cantilever 0.1 m long that the door's end slid off in FMVSS 214
+///   (`vehicle-authoring.md`, "p's door").
+/// - **The frames' ends.** Each door rail's, beam's and face's ends at
+///   those rows: a real door's beam brackets and belt and mid reinforcements
+///   end on the inner panel's hinge and lock faces, which overlap the
+///   pillars' flanges.
+fn shut_faces(d: &mut VehicleDef) {
+    // (Front door 2.30–3.27, rear door 1.40–2.18: their outlines in
+    // [`sedan`].)
+    let edges: [(f32, f32); 4] = [(3.27, -HEM), (2.30, HEM), (2.18, -HEM), (1.40, HEM)];
+    for (z, inward) in edges {
+        d.stations.push(z + inward);
+    }
+    d.stations.sort_by(f32::total_cmp);
+    for m in d.members.iter_mut().filter(|m| m.name.starts_with("door_")) {
+        for p in m.path.iter_mut() {
+            for (z, inward) in edges {
+                // (A frame's end within 0.15 m inside that edge.)
+                let d_in = (p[2] - z) * inward.signum();
+                if (0.0..0.15).contains(&d_in) {
+                    p[2] = z + inward;
+                }
+            }
+        }
+    }
 }
 
 /// The 2011 Accord's bumper beams' section (front and rear: roll-formed and
@@ -2664,6 +2861,10 @@ pub const ACCORD_DASH_BEHIND: [f32; 2] = [0.27, 0.30];
 /// its accelerator and brake pedals with their linkages (6.43 kg, §5.13.7):
 /// both bolt to the dash panel on the driver's side.
 pub const ACCORD_DASH_EQUIPMENT: f32 = 3.16 + 6.43;
+
+/// The 2011 Accord's lead-acid 12 V battery (kg), NHTSA DOT HS 811 666
+/// §5.16.1.
+pub const ACCORD_BATTERY: f32 = 12.4;
 
 /// sedan1's cowl and dash panel at the 2011 Accord's place
 /// ([`ACCORD_DASH_BEHIND`]), sections and local masses.
@@ -2833,6 +3034,111 @@ pub fn door_flanges() -> Vec<FlangeSpec> {
         f("pillar_b", 0.0018, phs),
         f("pillar_c", 0.0014, dp780),
     ]
+}
+
+/// The doors' intrusion beams as the 2011 Accord's are (NHTSA DOT HS 811 666
+/// fig. 163 and 173, the front and rear door frames' steel thickness maps):
+/// - **Where.** Both beams run from high at the hinge end to low at the lock
+///   end (the two-tier package drew them the other way). Read off the maps
+///   as fractions of the door's height below the belt (a Choice within
+///   about ±2 cm): front, hinge end 0.37 and lock end 0.74, just under the
+///   mid rail at the hinge end (they share its bracket); rear, 0.63 and 0.81.
+///   On sedan1's doors (belt 0.93, bottom 0.47) that is y 0.72 → 0.55 and
+///   0.64 → 0.56. Before, the front beam ran 0.42 → 0.62, so FMVSS 214's ram
+///   (from 127 mm above the door's lowest point) met only its lock end.
+/// - **Section.** A 2.0 mm tube (both maps' red), Ø 31.8 mm and 1,200 MPa
+///   as before (Choices: the report gives neither).
+/// - The lock faces start at the beams' lock ends, as before; the hinge
+///   faces keep their full height (the lower hinge stays where it was).
+fn accord_doors(d: &mut VehicleDef, stampings: bool) {
+    let pr = d.profile.clone();
+    let tube = Section {
+        depth: 0.0318,
+        width: 0.0318,
+        t: 0.0020,
+        sigma_y: TUBE1200,
+        round: true,
+    };
+    let at = |p: (f32, f32, f32)| restyle_point([p.0, p.1, p.2], &pr);
+    for m in d.members.iter_mut() {
+        let path: Option<Vec<[f32; 3]>> = match m.name.as_str() {
+            "door_beam_f" => Some(vec![at((0.83, 0.72, 3.18)), at((0.83, 0.55, 2.40))]),
+            "door_beam_r" => Some(vec![at((0.83, 0.64, 2.10)), at((0.83, 0.56, 1.52))]),
+            "door_face_lf" => Some(vec![
+                at((0.83, 0.55, 2.40)),
+                at((0.83, 0.75, 2.36)),
+                at((0.83, 0.93, 2.36)),
+            ]),
+            "door_face_lr" => Some(vec![
+                at((0.83, 0.56, 1.52)),
+                at((0.83, 0.75, 1.50)),
+                at((0.83, 0.93, 1.48)),
+            ]),
+            _ => None,
+        };
+        if let Some(p) = path {
+            m.path = p;
+        }
+    }
+    let list = [
+        ("door_beam_f", tube, 0.14, 1.0),
+        ("door_beam_r", tube, 0.14, 1.0),
+    ];
+    sectioned_by(&mut d.members, &Grades::default(), &list);
+    for m in d
+        .members
+        .iter_mut()
+        .filter(|m| m.name == "door_beam_f" || m.name == "door_beam_r")
+    {
+        m.kg_per_m = section_kg_per_m(&tube);
+    }
+    // The belt and mid rails as the maps' stampings (with `stampings`;
+    // otherwise the two-tier boron × 5 stays). A door's rail is a
+    // ladder across the door's depth: its outer chord the outer panel's
+    // reinforcement, its inner chord the inner panel's, so its bending is
+    // the two strips' axial yields over the depth. Each chord yields at
+    // σ_y·t·b of the weaker strip (a ladder's chords share one yield):
+    // - belt: the outer and inner belt reinforcements, 0.6 mm each (both
+    //   maps; the rear's outer 0.8 mm);
+    // - mid rail: the outer panel's mid reinforcement, 0.5 mm (both maps),
+    //   against the inner panel's 0.8 mm strip at its height.
+    // The strips' developed width b is 60 mm (a Choice: the maps give the
+    // gauge, not the section) and their grade BH210 (the report: "cold
+    // rolled sheet steel of various bake hardenable grades").
+    if stampings {
+        let b = 0.06;
+        let strip = |t: f32| BH210 * t * b;
+        for (name, t_weak, t_out, t_in) in [
+            ("door_belt_f", 0.0006, 0.0006, 0.0006),
+            ("door_belt_r", 0.0006, 0.0008, 0.0006),
+            ("door_mid_f", 0.0005, 0.0005, 0.0008),
+            ("door_mid_r", 0.0005, 0.0005, 0.0008),
+        ] {
+            for m in d.members.iter_mut().filter(|m| m.name == name) {
+                let s = strip(t_weak) / Grades::default().get(&m.grade).unwrap().deform;
+                m.scale = [s, s];
+                m.knee = None;
+                m.kg_per_m = (t_out + t_in) * b * super::members::STEEL_DENSITY;
+            }
+        }
+        // The inner panel's end faces (the laser-welded blank's gauges):
+        // front hinge face 1.5 mm, lock face 0.8 mm with its 0.9 mm lock
+        // reinforcement; rear hinge face 1.3 mm, lock face 0.8 mm. Each of
+        // the face's two chords carries half its 150 mm depth in tension,
+        // BH210 as the rest of the door.
+        for (name, t) in [
+            ("door_face_hf", 0.0015),
+            ("door_face_lf", 0.0017),
+            ("door_face_hr", 0.0013),
+            ("door_face_lr", 0.0008),
+        ] {
+            for m in d.members.iter_mut().filter(|m| m.name == name) {
+                let f = 0.5 * BH210 * t * 0.15;
+                let s = f / Grades::default().get(&m.grade).unwrap().deform;
+                m.scale = [s, s];
+            }
+        }
+    }
 }
 
 /// The deck opening's cross sections' (`deck_x`, `rear_panel`) station

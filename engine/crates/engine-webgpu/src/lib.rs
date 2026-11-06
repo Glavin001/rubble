@@ -42,7 +42,7 @@ pub use gpu::creation_errors;
 pub use engine_exec::explicit_plan::explicit_loop_cap_hit;
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    default_device, default_device_with, instance_flags, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
+    default_device, default_device_with, instance_flags, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING, RestView,
     POSES_BINDING, POSE_HEADER_BINDING, POSE_RECORD_BYTES,
 };
 #[cfg(feature = "gpu")]
