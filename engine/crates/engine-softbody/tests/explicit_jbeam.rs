@@ -403,3 +403,42 @@ fn node_couplers_couple_at_spawn_and_break_by_strength_and_group() {
     assert!(gap > 0.2, "the lid did not part: {gap}");
     assert!(s.nodes.iter().all(|n| n.pos.is_finite()));
 }
+
+/// The torsion law (spec §9) is the exact one: the forces τ·∂φ/∂xᵢ put τ/r⊥ on each
+/// lever end along its plane's normal (r⊥ its distance from the axis line), and the
+/// axis nodes' reactions leave no net force and no net torque (momentum and angular
+/// momentum conserved); the field is −∇ of ½k(φ − φ₀)² (checked by central
+/// differences in `dihedral_gradient_matches_the_f64_reference`).
+#[test]
+fn torsion_forces_are_the_exact_lever_law() {
+    use engine_softbody::explicit_beams::dihedral_jacobian;
+    let cases = [
+        [
+            Vec3::new(0.0, 0.267, 0.0),
+            Vec3::ZERO,
+            Vec3::new(1.7, 0.0, 0.0),
+            Vec3::new(1.7, 0.267, 0.05),
+        ],
+        [
+            Vec3::new(-0.3, 0.4, 0.2),
+            Vec3::new(0.1, 0.0, 0.0),
+            Vec3::new(0.2, 0.0, 1.1),
+            Vec3::new(0.9, -0.2, 1.4),
+        ],
+    ];
+    for x in cases {
+        let g = dihedral_jacobian(x);
+        let axis = (x[2] - x[1]).normalize();
+        let perp = |p: Vec3| {
+            let d = p - x[1];
+            (d - axis * d.dot(axis)).length()
+        };
+        assert!((g[0].length() - 1.0 / perp(x[0])).abs() < 1e-4 * g[0].length());
+        assert!((g[3].length() - 1.0 / perp(x[3])).abs() < 1e-4 * g[3].length());
+        assert!(g[0].dot(axis).abs() < 1e-5 && g[3].dot(axis).abs() < 1e-5);
+        let f: Vec3 = g.iter().copied().sum();
+        let m: Vec3 = (0..4).map(|i| x[i].cross(g[i])).sum();
+        assert!(f.length() < 1e-4, "net force {f}");
+        assert!(m.length() < 1e-4, "net torque {m}");
+    }
+}

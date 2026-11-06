@@ -1335,6 +1335,35 @@ the SUV and trailer miss are brake pads and bulbs only (no nodes). Measured
   applies the torque to the four nodes is not documented (§9's dihedral gradient is a
   Choice): **open**, the next suspect.
 
+*The torsion law and the damped limit (2026-11-06).*
+* **§9's law is the exact one.** τ·∂φ/∂xᵢ (the Blondel–Karplus gradient) puts τ/r⊥
+  on each lever end along its plane's normal (r⊥ its distance from the axis line,
+  not the arm's length), and the axis nodes' reactions leave no net force and no net
+  torque; it is −∇ of ½k(φ − φ₀)², so momentum, angular momentum and energy are
+  conserved (`explicit_jbeam.rs` `torsion_forces_are_the_exact_lever_law`, and
+  `dihedral_gradient_matches_the_f64_reference`'s central differences). No lever-arm
+  error, no double application. Nothing to fix.
+* **With it the trailer's highest mode is past the limit.** The spring modes' power
+  iteration with the torsion elements' k·g·gᵀ (`jbeam_accept modes=1 torsion=1`):
+  ω·h = 2.013 at the axle corner `x34l` (6.2 kg); the plain beams alone 1.448; without
+  the ten axle bars 1.715. The 810,100 N·m/rad bars on 0.267 m levers are
+  11.4 MN/m at each lever end.
+* **SUV, with damping.** Symplectic Euler with a dashpot is stable to
+  ω·h ≤ 2(√(1 + ζ²) − ζ). The beams on `rx2l`: to the frame 9.4 MN/m, 141 N·s/m,
+  μ ≈ 3.4 kg, ζ = c/(2√(kμ)) = 0.012 (limit 1.98); the trackbar 18.8 MN/m,
+  940 N·s/m, μ = 2.35 kg, ζ = 0.071 (limit 1.86). Its lateral mode at ≈ 2.0 is past
+  both; the spring modes' iteration gives 2.07 for the whole car (node `b1rr`, its
+  supports at full k). The damping is the documented one: −c·u with u the extension
+  rate from the step's start velocities (the force pass reads the velocities before
+  the node pass updates them), the trackbar's through its 500 Hz `dampCutoffHz`
+  filter (§6; without the filters the SUV breaks 12 beams at rest), and the
+  stiff-damper rule (§28) does not apply (c·h/μ = 0.2). No deviation found.
+* So both vehicles are past the 0.5 ms explicit step's stability limit as written,
+  with the exact laws. BeamNG runs them at 2 kHz; how it does (its integrator, or a
+  stabilisation it does not document) is not public. Left as is (content physics
+  unchanged); the options are the user's: a smaller step for such vehicles, or an
+  implicit treatment of their stiffest elements.
+
 ## 30. GPU layout of Part II and verification
 
 * Params words 64–68: `extIndex` (gLists, per beam its extension + 1), `extBase`

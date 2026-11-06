@@ -364,6 +364,22 @@ fn main() {
                 y[b.a as usize] += f;
                 y[b.b as usize] -= f;
             }
+            if opt("torsion=").is_some() {
+                // The torsion elements' stiffness k·g·gᵀ (g = ∂φ/∂x, spec §9).
+                for j in 0..s.beams.len() {
+                    let b = s.beams[j];
+                    if b.broken || b.kind != engine_softbody::explicit_beams::ExplicitKind::JbeamTorsion {
+                        continue;
+                    }
+                    let c = s.beams[j + 1];
+                    let ids = [b.a, b.b, c.a, c.b].map(|i| i as usize);
+                    let g = engine_softbody::explicit_beams::dihedral_jacobian(ids.map(|i| s.nodes[i].pos));
+                    let gx: f32 = (0..4).map(|k| g[k].dot(x[ids[k]])).sum();
+                    for k in 0..4 {
+                        y[ids[k]] += g[k] * (b.k * gx);
+                    }
+                }
+            }
             for i in 0..n {
                 y[i] /= s.nodes[i].mass.max(1e-6);
             }
