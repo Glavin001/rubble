@@ -135,6 +135,7 @@ const ROWS: &[(&str, &str, &str, &str)] = &[
     ("Rest 10 s, raycast wheels", "creep over the last 5 s (mm); sag (mm)", "rest.creep_mm|rest.sag_mm", ""),
     ("Rest 10 s, raycast wheels", "KE at 10 s (J); fastest node (m/s)", "rest.ke_end_j|rest.vmax_end", ""),
     ("Rest 10 s, raycast wheels", "page's .truck export: broken / bent", "rest_truck_export.broken_beams|rest_truck_export.bent_beams", "0 / 0"),
+    ("Rest 10 s, raycast wheels", "page's .truck export: diverged at (s)", "rest_truck_export.diverged_s", "never"),
     ("Wall 56 km/h", "dynamic crush (mm)", "wall56.dynamic_crush_mm", "620–750"),
     ("Wall 56 km/h", "t_m (ms)", "wall56.t_m_ms", "63–76"),
     ("Wall 56 km/h", "peak (g, 100 Hz, rear cabin)", "wall56.peak_g", "34–47"),

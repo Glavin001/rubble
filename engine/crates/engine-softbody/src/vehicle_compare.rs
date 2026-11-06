@@ -454,9 +454,16 @@ impl Car {
                 // A glTF render model with weighted skins (flexskin): the
                 // `.rskin` and the `.glb` beside it.
                 let mut skin = None;
-                if let Some(sk) = paths.iter().find(|p| p.extension().is_some_and(|x| x == "rskin")) {
-                    skin = Some(crate::flexskin::Skin::decode(&std::fs::read(sk).map_err(|e| e.to_string())?)?);
-                    if let Some(g) = paths.iter().find(|p| p.extension().is_some_and(|x| x == "glb") && p.parent() == sk.parent()) {
+                if let Some(sk) = paths
+                    .iter()
+                    .find(|p| p.extension().is_some_and(|x| x == "rskin"))
+                {
+                    skin = Some(crate::flexskin::Skin::decode(
+                        &std::fs::read(sk).map_err(|e| e.to_string())?,
+                    )?);
+                    if let Some(g) = paths.iter().find(|p| {
+                        p.extension().is_some_and(|x| x == "glb") && p.parent() == sk.parent()
+                    }) {
                         let g = crate::glb::read(&std::fs::read(g).map_err(|e| e.to_string())?)?;
                         meshes.extend(g.meshes.iter().map(|m| crate::flexskin::glb_mesh(&g, m)));
                     }
@@ -1046,7 +1053,9 @@ fn seam_diagnosis(v: &ShowcaseVisual, rest: &[Vec3], now: &[Vec3], pairs: &[(usi
             return Some(v.bind_nodes[i][0]);
         }
         let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
-        (a..b).max_by(|&x, &y| v.wt_w[x][0].total_cmp(&v.wt_w[y][0])).map(|k| v.wt_node[k])
+        (a..b)
+            .max_by(|&x, &y| v.wt_w[x][0].total_cmp(&v.wt_w[y][0]))
+            .map(|k| v.wt_node[k])
     };
     let mut piece = vec![0usize; v.positions.len()];
     for (k, (_, first, count)) in v.pieces.iter().enumerate() {
@@ -1056,8 +1065,11 @@ fn seam_diagnosis(v: &ShowcaseVisual, rest: &[Vec3], now: &[Vec3], pairs: &[(usi
     }
     let mut by: std::collections::BTreeMap<String, (usize, f32, f32, usize)> = Default::default();
     for &(i, j, g) in pairs {
-        let (Some(a), Some(b)) = (top(i), top(j)) else { continue };
-        let ng = now[a as usize].distance(now[b as usize]) - rest[a as usize].distance(rest[b as usize]);
+        let (Some(a), Some(b)) = (top(i), top(j)) else {
+            continue;
+        };
+        let ng =
+            now[a as usize].distance(now[b as usize]) - rest[a as usize].distance(rest[b as usize]);
         let key = format!("{} / {}", v.pieces[piece[i]].0, v.pieces[piece[j]].0);
         let e = by.entry(key).or_insert((0, 0.0, 0.0, 0));
         e.0 += 1;
@@ -1336,8 +1348,14 @@ pub fn visual_metrics(
         if g > 0.05 {
             g5 += 1;
             if std::env::var("SEAM_DEBUG").is_ok() {
-                let nm = |k: usize| v.pieces.get(piece[k] as usize).map_or("?", |q| q.0.as_str());
-                *seam_by.entry(format!("{} / {}", nm(i), nm(j))).or_insert(0usize) += 1;
+                let nm = |k: usize| {
+                    v.pieces
+                        .get(piece[k] as usize)
+                        .map_or("?", |q| q.0.as_str())
+                };
+                *seam_by
+                    .entry(format!("{} / {}", nm(i), nm(j)))
+                    .or_insert(0usize) += 1;
                 SEAM_PAIRS.with(|c| c.borrow_mut().push((i, j, g)));
             }
         }
@@ -1346,7 +1364,10 @@ pub fn visual_metrics(
     if !seam_by.is_empty() {
         let mut v: Vec<_> = seam_by.into_iter().collect();
         v.sort_by(|a, b| b.1.cmp(&a.1));
-        eprintln!("seams opened > 5 cm by piece pair: {:?}", &v[..v.len().min(12)]);
+        eprintln!(
+            "seams opened > 5 cm by piece pair: {:?}",
+            &v[..v.len().min(12)]
+        );
     }
     json!({
         "available": true, "vertices": verts.len(), "triangles": tris.len(),
@@ -1636,6 +1657,7 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
         Ok(s) => s,
         Err(e) => return json!({"error": e}),
     };
+    let t_spawn = t0.elapsed().as_secs_f32();
     // `RUBBLE_DAMP_SCHEME` (a measurement) on a BeamNG profile spawn as on the template.
     if std::env::var("RUBBLE_DAMP_SCHEME").is_ok() && s.beamng_profile {
         s.damp_scheme = car.template.damp_scheme;
@@ -1647,10 +1669,18 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
     let mut com_half = Vec3::ZERO;
     let mut com_1 = Vec3::ZERO;
     let n_steps = (seconds / STEP).round() as usize;
+    // A run that diverges (a node's position no longer finite) stops there:
+    // its state is lost, and stepping NaNs costs about 50× a live step (the
+    // contact pass's boxes are no longer bounded).
+    let mut diverged = None;
     for k in 0..n_steps {
         s.step();
         if first_break.is_none() && k % 20 == 0 && s.beams.iter().any(|b| b.broken) {
             first_break = Some((k + 1) as f32 * STEP);
+        }
+        if k % 20 == 0 && !s.nodes.iter().all(|n| n.pos.is_finite()) {
+            diverged = Some((k + 1) as f32 * STEP);
+            break;
         }
         if k + 1 == (1.0 / STEP) as usize {
             com_1 = com(&s);
@@ -1658,6 +1688,15 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
         if k + 1 == n_steps / 2 {
             com_half = com(&s);
         }
+    }
+    if std::env::var("COMPARE_TIMES").is_ok() {
+        eprintln!(
+            "  rest (truck export {truck_export}): spawned in {:.1} s, {} nodes, {} beams; stepped in {:.1} s",
+            t_spawn,
+            s.nodes.len(),
+            s.beams.len(),
+            t0.elapsed().as_secs_f32() - t_spawn
+        );
     }
     let c = com(&s);
     let (broken, bent) = s.damage();
@@ -1691,12 +1730,12 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
     let wall = t0.elapsed().as_secs_f32();
     json!({
         "path": if truck_export { "truck export, raycast wheels" } else if matches!(car.source, Source::Authored(_)) { ".truck, raycast wheels" } else { "JBeam mode, raycast wheels" },
-        "seconds": seconds, "broken_beams": broken, "bent_beams": bent, "first_break_s": first_break.map(r3),
+        "seconds": seconds, "diverged_s": diverged.map(r3), "broken_beams": broken, "bent_beams": bent, "first_break_s": first_break.map(r3),
         "broken_by_part": by.iter().take(6).map(|(k, n)| json!([k, n])).collect::<Vec<_>>(),
         "ke_end_j": r1(ke), "vmax_end": r3(vmax),
         "creep_mm": mm((c - com_half).length()), "sag_mm": mm(com_1.y - c.y),
         "finite": s.nodes.iter().all(|n| n.pos.is_finite()),
-        "wall_s_per_sim_s": r3(wall / seconds),
+        "wall_s_per_sim_s": r3(wall / diverged.unwrap_or(seconds)),
     })
 }
 
@@ -1894,9 +1933,20 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
             let front = ids
                 .iter()
                 .copied()
-                .filter(|&i| att[i as usize] && now[i as usize].is_finite() && fit.to_rest(now[i as usize]).z <= rest[i as usize].z + 0.05)
-                .max_by(|&a, &b| fit.to_rest(now[a as usize]).z.total_cmp(&fit.to_rest(now[b as usize]).z));
-            let lead = ids.iter().copied().max_by(|&a, &b| rest[a as usize].z.total_cmp(&rest[b as usize].z));
+                .filter(|&i| {
+                    att[i as usize]
+                        && now[i as usize].is_finite()
+                        && fit.to_rest(now[i as usize]).z <= rest[i as usize].z + 0.05
+                })
+                .max_by(|&a, &b| {
+                    fit.to_rest(now[a as usize])
+                        .z
+                        .total_cmp(&fit.to_rest(now[b as usize]).z)
+                });
+            let lead = ids
+                .iter()
+                .copied()
+                .max_by(|&a, &b| rest[a as usize].z.total_cmp(&rest[b as usize].z));
             eprintln!(
                 "(crush) zone {z}: {} nodes, rest front {r0:.3} (node {lead:?}), now front {r1_:.3} (node {front:?}, rest z {:.3})",
                 ids.len(),
@@ -2386,21 +2436,45 @@ pub fn scene_roof(car: &Car) -> Value {
 pub fn run_car(car: &Car, quick: bool) -> Value {
     let rest_s = if quick { 2.0 } else { 10.0 };
     let jbeam = matches!(car.source, Source::Jbeam { .. });
+    // `COMPARE_TIMES=1`: each scene's wall-clock time on stderr.
+    let timed = |name: &'static str, f: &dyn Fn() -> Value| -> Value {
+        let t = std::time::Instant::now();
+        let v = f();
+        if std::env::var("COMPARE_TIMES").is_ok() {
+            eprintln!(
+                "  {}: {name} in {:.1} s",
+                car.spec.name,
+                t.elapsed().as_secs_f32()
+            );
+        }
+        v
+    };
     std::thread::scope(|sc| {
-        let rest = sc.spawn(|| scene_rest(car, false, rest_s));
-        let rest_tx = jbeam.then(|| sc.spawn(|| scene_rest(car, true, rest_s)));
-        let wall = sc.spawn(|| scene_wall(car, 56.0, if quick { 0.3 } else { 1.0 }));
-        let pole = sc.spawn(|| scene_pole(car, 32.0, if quick { 0.4 } else { 1.5 }));
-        let mdb = sc.spawn(|| scene_mdb(car, if quick { 0.4 } else { 1.5 }));
-        let roof = sc.spawn(|| scene_roof(car));
-        let door = sc.spawn(|| scene_door(car));
+        let rest = sc.spawn(|| timed("rest", &|| scene_rest(car, false, rest_s)));
+        let rest_tx = jbeam
+            .then(|| sc.spawn(|| timed("rest_truck_export", &|| scene_rest(car, true, rest_s))));
+        let wall = sc.spawn(|| {
+            timed("wall56", &|| {
+                scene_wall(car, 56.0, if quick { 0.3 } else { 1.0 })
+            })
+        });
+        let pole = sc.spawn(|| {
+            timed("pole32", &|| {
+                scene_pole(car, 32.0, if quick { 0.4 } else { 1.5 })
+            })
+        });
+        let mdb = sc.spawn(|| timed("mdb214", &|| scene_mdb(car, if quick { 0.4 } else { 1.5 })));
+        let roof = sc.spawn(|| timed("roof", &|| scene_roof(car)));
+        let door = sc.spawn(|| timed("door", &|| scene_door(car)));
         let sweep = sc.spawn(|| {
-            scene_pole_sweep(
-                car,
-                32.0,
-                if quick { 1.0 } else { 0.2 },
-                if quick { 0.3 } else { 0.8 },
-            )
+            timed("pole_sweep32", &|| {
+                scene_pole_sweep(
+                    car,
+                    32.0,
+                    if quick { 1.0 } else { 0.2 },
+                    if quick { 0.3 } else { 0.8 },
+                )
+            })
         });
         json!({
             "name": car.spec.name, "label": car.spec.label,
