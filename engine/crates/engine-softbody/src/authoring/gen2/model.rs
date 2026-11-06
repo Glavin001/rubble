@@ -553,6 +553,65 @@ fn aspect(a: Vec3, b: Vec3, c: Vec3) -> f32 {
     l / (2.0 * area.max(1e-14))
 }
 
+/// Whether any of `new` (vertex triples) overlaps, in UV, a live triangle of
+/// `part.tris[tri0..]` other than those in `skip` (interiors only: sharing
+/// an edge or a corner is not an overlap).
+fn uv_overlaps(part: &Part, tri0: usize, dead: &[bool], new: &[[u32; 3]], skip: &[usize]) -> bool {
+    let uvt = |t: [u32; 3]| t.map(|x| part.uv[x as usize]);
+    let sep = |a: [[f32; 2]; 3], b: [[f32; 2]; 3]| -> bool {
+        for tri in [a, b] {
+            for e in 0..3 {
+                let (p, q) = (tri[e], tri[(e + 1) % 3]);
+                let n = [q[1] - p[1], p[0] - q[0]];
+                let l = (n[0] * n[0] + n[1] * n[1]).sqrt();
+                if l < 1e-12 {
+                    continue;
+                }
+                let pr = |v: [f32; 2]| (v[0] * n[0] + v[1] * n[1]) / l;
+                let (mut a0, mut a1, mut b0, mut b1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                for v in a {
+                    a0 = a0.min(pr(v));
+                    a1 = a1.max(pr(v));
+                }
+                for v in b {
+                    b0 = b0.min(pr(v));
+                    b1 = b1.max(pr(v));
+                }
+                let eps = 2e-5;
+                if a1 <= b0 + eps || b1 <= a0 + eps {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    for nt in new {
+        let a = uvt(*nt);
+        let (lo, hi) = a.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(l, h), v| {
+            (
+                [l[0].min(v[0]), l[1].min(v[1])],
+                [h[0].max(v[0]), h[1].max(v[1])],
+            )
+        });
+        for r in tri0..part.tris.len() {
+            if dead[r] || skip.contains(&r) {
+                continue;
+            }
+            let b = uvt(part.tris[r]);
+            if b.iter().all(|v| v[0] < lo[0]) || b.iter().all(|v| v[0] > hi[0]) {
+                continue;
+            }
+            if b.iter().all(|v| v[1] < lo[1]) || b.iter().all(|v| v[1] > hi[1]) {
+                continue;
+            }
+            if !sep(a, b) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Remove slivers from the triangles `part.tris[tri0..]` (one strip, after
 /// its quads are split): a thin triangle with a short edge has that edge
 /// collapsed (into the end on the strip's border, which never moves, so the
@@ -596,7 +655,13 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
             // A sliver of three points along the strip's outline (a kinked
             // border) spans no visible surface: drop it.
             let height = (p[1] - p[0]).cross(p[2] - p[0]).length() / len(el);
-            if tr.iter().all(|&v| on_border(v)) && height < 0.0025 {
+            let on_outline = (0..3).any(|e| {
+                let (a, b) = (tr[e], tr[(e + 1) % 3]);
+                edges.get(&(a.min(b), a.max(b))).map_or(0, |v| v.len()) == 1
+            });
+            if (tr.iter().all(|&v| on_border(v)) && height < 0.0025)
+                || (on_outline && height < 0.002)
+            {
                 dead[t] = true;
                 changed = true;
                 continue;
@@ -704,6 +769,15 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
                 if !ok {
                     continue;
                 }
+                // Nor may the moved triangles lap over others in the chart.
+                let moved: Vec<[u32; 3]> = around
+                    .iter()
+                    .filter(|&&q| !part.tris[q].contains(&k))
+                    .map(|&q| part.tris[q].map(|x| if x == v { k } else { x }))
+                    .collect();
+                if uv_overlaps(part, tri0, &dead, &moved, &around) {
+                    continue;
+                }
                 for &q in &around {
                     let tq = part.tris[q];
                     if tq.contains(&k) {
@@ -789,6 +863,9 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
                     ok = false;
                 }
                 if !ok || after >= before * 0.95 {
+                    continue;
+                }
+                if uv_overlaps(part, tri0, &dead, &out, &[t, t2]) {
                     continue;
                 }
                 part.tris[t] = out[0];
@@ -970,6 +1047,21 @@ pub fn hem(part: &mut Part, g: &Grid, ids: &[u32], e: usize, m: Mat) {
         }
         idx.push(k);
         inner.push(inner_all[q]);
+    }
+    // Where two hemmed edges meet at a sharp corner their returns would
+    // cross: the wall stops one point short of an acute corner.
+    let acute = |end: usize, next: usize| {
+        let k = all[end];
+        let (a, b) = (g.p[all[next]] - g.p[k], g.p[inner_all[end]] - g.p[k]);
+        a.normalize_or_zero().dot(b.normalize_or_zero()) > 0.5
+    };
+    if idx.len() > 3 && acute(0, 1) {
+        idx.remove(0);
+        inner.remove(0);
+    }
+    if idx.len() > 3 && acute(all.len() - 1, all.len() - 2) {
+        idx.pop();
+        inner.pop();
     }
     if idx.len() < 2 {
         return;
@@ -1325,14 +1417,14 @@ const Y_DOOR_BOTTOM: f32 = TYRE_R;
 const WS_BASE: f32 = 0.745;
 const WS_TOP: f32 = -0.08;
 const BL_TOP: f32 = -1.00;
-const BL_BASE: f32 = -1.95;
+const BL_BASE: f32 = -2.05;
 /// The hood's rear edge (the cowl between it and the windshield).
 const HOOD_REAR: f32 = 0.86;
 /// Bumper top on the sides (front, rear).
 const BUMPER_TOP_F: f32 = 0.60;
 const BUMPER_TOP_R: f32 = 0.78;
 /// The lamps' depth below their top edge (slim LED units), in height.
-const HEADLAMP_H: f32 = 0.085;
+const HEADLAMP_H: f32 = 0.105;
 const TAILLAMP_H: f32 = 0.075;
 
 pub fn build() -> Model {
@@ -1367,20 +1459,20 @@ pub fn build() -> Model {
         let b = th_belt.clone();
         Table::new(
             move |u| sf::theta_corner(u).min(b.at(u) - 0.07),
-            -2.05,
+            -2.15,
             0.85,
         )
     };
     let th_top_edge = {
         let c = th_corner.clone();
-        Table::new(move |u| theta_walk(u, c.at(u), -0.05), -2.05, 0.85)
+        Table::new(move |u| theta_walk(u, c.at(u), -0.05), -2.15, 0.85)
     };
     let th_frame_top = {
         let c = th_corner.clone();
         let b = th_belt.clone();
         Table::new(
             move |u| theta_walk(u, c.at(u), 0.035).min(b.at(u) - 0.02),
-            -2.05,
+            -2.15,
             0.85,
         )
     };
@@ -1406,11 +1498,11 @@ pub fn build() -> Model {
                 x_bl_top + (x_blb - x_bl_top) * sf::smoothstep(BL_TOP, BL_BASE, u),
             )
         },
-        -2.05,
+        -2.15,
         -0.9,
     );
     let x_trunk = move |u: f32| {
-        let w = x_blb + (0.76 - x_blb) * sf::smoothstep(BL_BASE, BL_BASE - 0.30, u);
+        let w = x_blb + (0.76 - x_blb) * sf::smoothstep(BL_BASE, BL_BASE - 0.20, u);
         w - 0.20 * sf::smoothstep(-2.10, -2.48, u).powf(1.4)
     };
     // Clamped inside the deck's own edge (where it turns 45° to the side), which
@@ -1590,11 +1682,11 @@ pub fn build() -> Model {
     // molding's top.
     let th_glass_top = {
         let f = th_frame_top.clone();
-        Table::new(move |u| theta_walk(u, f.at(u), frame_w), -2.05, 0.85)
+        Table::new(move |u| theta_walk(u, f.at(u), frame_w), -2.15, 0.85)
     };
     let th_glass_bottom = {
         let b = th_belt.clone();
-        Table::new(move |u| theta_walk(u, b.at(u), -0.012), -2.05, 0.85)
+        Table::new(move |u| theta_walk(u, b.at(u), -0.016), -2.15, 0.85)
     };
     let (g1, g2, z0) = (GAP, 2.0 * GAP, 0.0);
     // Front door upper: sail | glass | rear frame, and the top frame; the
@@ -1866,6 +1958,7 @@ pub fn build() -> Model {
         )
     };
     let quarter_end = -2.36;
+    let deck_end: Vec<Vec3>;
     {
         let (a, b) = (c_top.clone(), th_belt.clone());
         let (ft, ct, bt) = (th_frame_top.clone(), c_top.clone(), th_belt.clone());
@@ -1903,7 +1996,7 @@ pub fn build() -> Model {
             Box::new(move |u| a.at(u)),
             Box::new(move |u| b.at(u)),
         );
-        panel_by(
+        deck_end = panel_by(
             &mut m,
             "body_shell",
             Some("body_shell"),
@@ -1911,7 +2004,8 @@ pub fn build() -> Model {
             Mat::Paint,
             [g1, z0, z0, g1],
             [true, false, false, true],
-        );
+        )
+        .edge_points(3);
     }
     // Quarter below the belt: rear door to the tail lamp (over the bumper).
     let t_seam_r = {
@@ -2070,6 +2164,8 @@ pub fn build() -> Model {
     let tl_top = {
         let mut top = Vec::new();
         top.extend(fold.iter().copied().filter(|p| p.x > 0.0));
+        // The deck side's tail end (between the boot lid and the quarter).
+        top.extend(deck_end.iter().copied());
         let ys = sf::shoulder_y(ZC_R) - 0.01;
         top.extend(g_quarter.edge_points(3).into_iter().filter(|p| p.y > ys));
         Table::new(phi_y(Param::Tail, &top), 0.0, FRAC_PI_2)
@@ -2190,10 +2286,36 @@ pub fn build() -> Model {
     }
     // Between the lamps: a painted nose bar carrying a slim LED light bar
     // under the bonnet's edge (the lamps' running lights joined across the
-    // car); the grille below it, from 6 cm under the lamps' feet down to the
-    // lower bumper: a slim dark-chrome frame round a recessed honeycomb.
-    let y_gb = 0.38;
-    let y_gt = 0.60;
+    // car). Below it the grille, a trapezoid widening downward (a slim
+    // dark-chrome frame round a recessed honeycomb), a painted bar, then a
+    // broad lower intake over the splitter. The centre's sides follow one
+    // line, `x_edge(y)`.
+    let (y_bb, y_it, y_gb, y_gt) = (0.30f32, 0.37f32, 0.40f32, 0.60f32);
+    let x_edge = move |y: f32| {
+        if y <= y_it {
+            0.55
+        } else if y <= y_gb {
+            0.55 - 0.05 * (y - y_it) / (y_gb - y_it)
+        } else {
+            0.50 - 0.10 * ((y - y_gb) / (y_gt - y_gb)).min(1.0)
+        }
+    };
+    let phi_e = Table::new(
+        move |y| phi_at_x(Param::Nose, x_edge(y), y),
+        y_bb - 0.02,
+        y_gt + 0.02,
+    );
+    // A centre strip between heights y0 and y1, its ends on the line.
+    let centre = |y0: f32, y1: f32| -> Strip {
+        let (pa, pb) = (phi_e.clone(), phi_e.clone());
+        Strip::new(
+            Param::Nose,
+            Box::new(move |t| -pa.at(y0 + t * (y1 - y0))),
+            Box::new(move |t| pb.at(y0 + t * (y1 - y0))),
+            k(y0),
+            k(y1),
+        )
+    };
     {
         let edge = Table::new(phi_y(Param::Nose, &hood_edge), -phi_g, phi_g);
         let (e0, e1, e2) = (edge.clone(), edge.clone(), edge.clone());
@@ -2223,39 +2345,82 @@ pub fn build() -> Model {
         let mut g = grid(&st, 0.012);
         g.shrink([true; 4], GAP);
         lamp(&mut m, "grille", "grille", &g, [1.0; 3], LampKind::Bar);
-        let st = Strip::new(Param::Nose, k(-phi_g), k(phi_g), k(y_gb), k(y_gt));
-        let mut g = grid(&st, 0.016);
+        let mut g = grid(&centre(y_gb, y_gt), 0.016);
         g.shrink([true, true, true, true], GAP);
         grille(&mut m, &g);
+        // The bar between the grille and the intake.
+        panel(
+            &mut m,
+            "bumper_front",
+            None,
+            &centre(y_it, y_gb),
+            Mat::Paint,
+            [true, true, false, false],
+            [true, true, false, false],
+        );
+        // The lower intake: recessed, textured black.
+        let g = grid(&centre(y_bb + 0.004, y_it), H);
+        recess(
+            &mut m,
+            "bumper_front",
+            &g,
+            0.035,
+            Mat::TrimBlack,
+            Mat::TrimBlack,
+        );
     }
-    // Bumper: under the grille, the lamps and round to the arches; a corner
-    // vent each side; a textured black splitter along its foot.
-    let y_bb = 0.30;
-    let phi_v0 = phi_at_x(Param::Nose, 0.60, 0.40);
+    // Bumper: beside the centre, under the lamps and round to the arches; a
+    // corner vent each side; a textured black splitter along its foot.
+    let phi_v0 = phi_at_x(Param::Nose, 0.62, 0.40);
     let phi_v1 = phi_at_x(Param::Nose, 0.79, 0.40);
     let (yv0, yv1) = (0.335, 0.455);
     {
-        let side = |lo: F, hi: F, a0: f32, a1: f32, gaps: [bool; 4]| (a0, a1, lo, hi, gaps);
+        let side = |lo: F, hi: F, a0: F, a1: F, gaps: [bool; 4]| (a0, a1, lo, hi, gaps);
         let al = || arch_lo(Param::Nose, y_bb);
         let hl = || -> F { Box::new(hl_lo_abs.clone()) };
-        let pieces: Vec<(f32, f32, F, F, [bool; 4])> = vec![
-            (-phi_g, phi_g, k(y_bb), k(y_gb), [true, true, false, false]),
-            side(al(), hl(), phi_g, phi_v0, [true, true, false, false]),
-            side(al(), k(yv0), phi_v0, phi_v1, [true, false, false, false]),
-            side(k(yv1), hl(), phi_v0, phi_v1, [false, true, false, false]),
-            side(al(), hl(), phi_v1, FRAC_PI_2, [true, true, false, true]),
+        // The inner side follows the centre's line: φ at the height of the
+        // point t up the strip (lo and hi themselves depend on φ: solved).
+        let inner: F = {
+            let (pe, lo, hi) = (phi_e.clone(), arch_lo(Param::Nose, y_bb), hl_lo_abs.clone());
+            Box::new(move |t| {
+                let mut phi = pe.at(y_gb);
+                for _ in 0..8 {
+                    let y = lo(phi) + t * (hi(phi) - lo(phi));
+                    phi = if y >= y_gt { phi_g } else { pe.at(y) };
+                }
+                phi
+            })
+        };
+        let pieces: Vec<(F, F, F, F, [bool; 4])> = vec![
+            side(al(), hl(), inner, k(phi_v0), [true, true, true, false]),
+            side(
+                al(),
+                k(yv0),
+                k(phi_v0),
+                k(phi_v1),
+                [true, false, false, false],
+            ),
+            side(
+                k(yv1),
+                hl(),
+                k(phi_v0),
+                k(phi_v1),
+                [false, true, false, false],
+            ),
+            side(
+                al(),
+                hl(),
+                k(phi_v1),
+                k(FRAC_PI_2),
+                [true, true, false, true],
+            ),
         ];
-        for (q, (a0, a1, lo, hi, gaps)) in pieces.into_iter().enumerate() {
-            let st = Strip::new(Param::Nose, k(a0), k(a1), lo, hi);
+        for (a0, a1, lo, hi, gaps) in pieces {
+            let st = Strip::new(Param::Nose, a0, a1, lo, hi);
             let mut g = grid(&st, H);
             g.shrink(gaps, GAP);
             let part = m.part("bumper_front");
-            let both = if q == 0 {
-                vec![g.clone()]
-            } else {
-                vec![g.clone(), g.mirrored()]
-            };
-            for gg in both {
+            for gg in [g.clone(), g.mirrored()] {
                 let ids = emit(part, &gg, Mat::Paint, [1.0; 3]);
                 for e in 0..4 {
                     if gaps[e] {
@@ -2283,9 +2448,10 @@ pub fn build() -> Model {
             Mat::TrimBlack,
             Mat::TrimBlack,
         );
-        // Splitter: a textured black lip under the bumper's foot.
-        let st = Strip::new(Param::Nose, k(-1.05), k(1.05), k(0.262), k(y_bb - 0.004));
-        let g = grid(&st, H).offset(0.006);
+        // Splitter: a textured black lip under the bumper's foot, standing
+        // proud of it.
+        let st = Strip::new(Param::Nose, k(-1.05), k(1.05), k(0.258), k(y_bb - 0.004));
+        let g = grid(&st, H).offset(0.012);
         emit(m.part("bumper_front"), &g, Mat::TrimBlack, [1.0; 3]);
     }
     // Rear bumper: the painted cover with the licence plate's recess, over a
@@ -2294,10 +2460,9 @@ pub fn build() -> Model {
         let yd = |phi: f32| 0.47 - 0.09 * sf::smoothstep(0.75, 1.15, phi.abs());
         let blo = Table::new(
             move |phi| {
-                let z = sf::hit(Param::Tail, phi, 0.45).z;
                 let b = yd(phi);
                 let b = b + (TYRE_R - b).max(0.0) * sf::smoothstep(1.05, 1.35, phi.abs());
-                b.max(sf::arch_y(z).unwrap_or(0.0))
+                b.max(arch_at(Param::Tail, phi))
             },
             -FRAC_PI_2,
             FRAC_PI_2,
@@ -2357,6 +2522,25 @@ pub fn build() -> Model {
         );
         let g = grid(&st, H).offset(0.002);
         emit(m.part("bumper_rear"), &g, Mat::TrimBlack, [1.0; 3]);
+        // The diffuser's surround: a satin-metal strip along the painted
+        // cover's foot.
+        let st = Strip::new(
+            Param::Tail,
+            k(-1.02),
+            k(1.02),
+            Box::new(move |phi| yd(phi) + 0.003),
+            Box::new(move |phi| yd(phi) + 0.013),
+        );
+        let g = grid(&st, H).offset(0.0025);
+        emit(m.part("bumper_rear"), &g, Mat::Chrome, [0.55, 0.56, 0.58]);
+        // Side reflectors: slim red strips low on the bumper's corners.
+        for g in {
+            let st = Strip::new(Param::Tail, k(1.08), k(1.42), k(0.505), k(0.523));
+            let g = grid(&st, 0.012).offset(0.0025);
+            [g.clone(), g.mirrored()]
+        } {
+            emit(m.part("bumper_rear"), &g, Mat::LampLens, [0.75, 0.03, 0.03]);
+        }
         // Strakes: vertical fins standing 24 mm off the diffuser.
         let part = m.part("bumper_rear");
         for x in [-0.30f32, -0.13, 0.13, 0.30] {
@@ -2395,15 +2579,35 @@ pub fn build() -> Model {
     m
 }
 
+/// The wheel arch's edge height on a nose or tail ray φ (0 off the arch):
+/// the ray's z taken at the arch's own height (iterated).
+fn arch_at(param: Param, phi: f32) -> f32 {
+    let mut y = 0.45f32;
+    let mut out = 0.0;
+    for _ in 0..6 {
+        let z = sf::hit(param, phi, y).z;
+        match sf::arch_y(z) {
+            Some(a) => {
+                out = a;
+                y = a.clamp(0.2, 0.9);
+            }
+            None => {
+                out = 0.0;
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// A nose or tail panel's lower edge: `base`, rising (to the wheel centre's
 /// height at the sides) and following the wheel arch where the panel
 /// reaches it.
 fn arch_lo(param: Param, base: f32) -> F {
     tab(
         move |phi| {
-            let z = sf::hit(param, phi, 0.45).z;
             let b = base + (TYRE_R - base).max(0.0) * sf::smoothstep(1.05, 1.35, phi.abs());
-            b.max(sf::arch_y(z).unwrap_or(0.0))
+            b.max(arch_at(param, phi))
         },
         -FRAC_PI_2,
         FRAC_PI_2,

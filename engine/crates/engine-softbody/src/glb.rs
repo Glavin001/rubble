@@ -466,8 +466,10 @@ pub fn read(bytes: &[u8]) -> Result<Glb, String> {
 /// The renderer's material class for a spec material on a part.
 pub fn class_of(material: &str, part: &str) -> u8 {
     let p = part.to_ascii_lowercase();
-    // Rear lamps: the tail lamps, and a light bar on the boot lid.
-    let tail = p.starts_with("taillight") || p.starts_with("trunk_lid");
+    // Rear lamps: the tail lamps, a light bar on the boot lid, reflectors on
+    // the rear bumper.
+    let tail =
+        p.starts_with("taillight") || p.starts_with("trunk_lid") || p.starts_with("bumper_rear");
     match material {
         "paint" => mat::PAINT,
         // On a rim, bright metal is a diamond-cut spoke face.
@@ -478,12 +480,12 @@ pub fn class_of(material: &str, part: &str) -> u8 {
                 mat::UNDERBODY
             } else if p.starts_with("grille") {
                 mat::GRILLE
-            } else if tail {
-                mat::TAIL_BACK
             } else if p.starts_with("bumper") {
                 // Bumper splitters, vents and diffusers: unpainted
                 // moulded-in-colour plastic, grained.
                 mat::GRAINED
+            } else if tail {
+                mat::TAIL_BACK
             } else {
                 mat::TRIM
             }
