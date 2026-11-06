@@ -150,6 +150,62 @@ fn coupled_crash_matches_the_cpu_and_closes_momentum() {
     assert!((horizontal(j) - horizontal(gset.bodies[0].vel * 1200.0)).length() < 1e-3 * j.length());
 }
 
+/// More proxy bodies than a workgroup has lanes (a lone sedan runs on 512 lanes): 599
+/// small boxes far off, then the free box the sedan hits as body 600 (shape 600). Every
+/// body is integrated, the 600th as the CPU does: it takes the strike's impulse and
+/// moves off like the first test's box. (Before the fix the kernel integrated bodies
+/// j < LANES only: the struck box stood still.)
+#[test]
+fn more_proxy_bodies_than_lanes_are_all_integrated() {
+    let Some((device, queue)) = device() else {
+        eprintln!("skip: no GPU");
+        return;
+    };
+    let (sim, one, _) = setup(1200.0);
+    let mut set = ProxySet {
+        bodies: Vec::new(),
+        shapes: Vec::new(),
+        frozen: false,
+    };
+    for k in 0..599u32 {
+        let mut b = one.bodies[0].clone();
+        b.body = 100 + k;
+        b.pos = Vec3::new(50.0 + 2.0 * (k % 30) as f32, 0.5, 50.0 + 2.0 * (k / 30) as f32);
+        set.bodies.push(b);
+        set.shapes.push(ProxyShape::new(k, Vec3::ZERO, Quat::IDENTITY, ProxyGeom::Box { half: Vec3::splat(0.4) }, 1000 + k, None));
+    }
+    set.bodies.push(one.bodies[0].clone());
+    let mut struck = one.shapes[0].clone();
+    struck.body = 599;
+    set.shapes.push(struck);
+    set.begin_window();
+    let cap = CouplingCapacity {
+        bodies: 600,
+        shapes: 600,
+        planes: 64,
+    };
+    let mut gpu = ExplicitBeamsGpu::with_coupling(&device, &queue, std::slice::from_ref(&sim), Some(cap));
+    write_proxies(&gpu, &queue, 0, &set).unwrap();
+    gpu.set_coupling_on(true);
+    let mut cpu = sim.clone();
+    cpu.rigid = Some(Box::new(set.clone()));
+    for _ in 0..48 {
+        gpu.frame(STEPS);
+        for _ in 0..STEPS {
+            cpu.step();
+        }
+    }
+    let mut gset = set.clone();
+    read_proxies(&gpu, &device, &queue, 0, &mut gset);
+    let cset = cpu.rigid.take().unwrap();
+    let (g, c) = (gset.bodies[599].vel.z, cset.bodies[599].vel.z);
+    println!("body 600 of 600: GPU {g:.4} m/s, CPU {c:.4} m/s; window impulse GPU {:?}", gset.shapes[599].impulse);
+    assert!(c > 1.0, "the CPU's box was not struck ({c} m/s)");
+    assert!((g - c).abs() < 0.01 * c, "the 600th proxy body: GPU {g} m/s, CPU {c} m/s");
+    // The far boxes are untouched on both.
+    assert!(gset.bodies[..599].iter().all(|b| b.vel == Vec3::ZERO));
+}
+
 /// Built with coupling room but off: every frame bit for bit the plain build's.
 #[test]
 fn coupling_off_is_bit_for_bit() {

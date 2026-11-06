@@ -755,3 +755,27 @@ World's step readback; `Frame::explicit_sleep` lists the vehicles that fell asle
 | Off, and on for awake vehicles | a fleet built without sleep, one with sleep built and off, and one with it on: every frame bit for bit for the driving car (and the settling one until it sleeps) |
 | Another vehicle wakes it | a car at 6 m/s wakes a sleeping one 2.33 m before contact, in the same frame on the CPU and the GPU; against a car that never slept: 0.015 mm at waking, 0.054 mm at contact + 0.1 s |
 | World (`engine-world/tests/explicit_sleep.rs`) | the parked sedan sleeps in 2.73 s; 59 of 60 World steps skipped while asleep, its state unchanged; a falling box wakes it 0.52 m above the roof, 0.023 mm from a never-slept twin; over the strike the box departs from the twin's by 194 mm, as a twin's whose sedan was nudged 0.02 mm does (199 mm): a box between roof nodes is chaotic under node-only contact, not the sleep |
+
+### 10.1 Fix: every proxy body is integrated (more than a workgroup's lanes)
+
+**Behaviour change, only for a vehicle holding more proxy bodies than its workgroup has
+lanes (256, or 512 on the 512-lane modules; the room allows 1024).** `cplIntegrate` let
+lane j integrate body j and skipped bodies j ≥ LANES (and `cplIntegrateBy` capped them
+at LANES): such a body never moved inside the frame, its shapes' step sums were never
+folded into their window impulses, so the World received no impulse for it. Each lane
+now integrates bodies j, j + LANES, … (`explicit_beams_rigid.slang`); vehicles with fewer
+bodies run the same work as before. Failing test first: `explicit_rigid_gpu.rs`
+`more_proxy_bodies_than_lanes_are_all_integrated` (a lone sedan, 600 proxy bodies, the
+struck box last): before, GPU 0 m/s against the CPU's 10.80 m/s; after, equal to 1 %.
+(300 bodies did not show it: a lone vehicle runs on the 512-lane module.)
+
+### 10.2 The coupling plan's O(vehicles × colliders): waiting on the World broadphase
+
+Not changed here. The surface-contact work (`feat/softrigid-surface-contact-r2`, spec
+§38.3) moves the vehicles into the World broadphase as proxies with a per-vehicle
+candidate list and a sleeping-vehicle wake hook; it had not landed on that branch when
+this was written, so `cpl_plan` still scans every collider for every vehicle each window
+(also for sleeping vehicles, whose World wake trigger it carries). Once the proxies land,
+`cpl_plan` reads their candidates and the sleep rule's World trigger becomes the
+broadphase's touch mark (a moving collider entering a sleeping vehicle's fat box); no
+second broadphase is built here.

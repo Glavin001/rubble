@@ -360,22 +360,20 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
     return f;
 }
 
-// Lanes < B: each body sums its shapes' step reactions (into the shapes' window totals,
-// the sums cleared), then integrates (symplectic Euler, as the nodes); its count cleared.
+// Every body j < B (lane j, then j + LANES, ...: a vehicle may hold up to 1024 proxy
+// bodies, more than its lanes) sums its shapes' step reactions (into the shapes' window
+// totals, the sums cleared), then integrates (symplectic Euler, as the nodes); its count
+// cleared.
 void cplIntegrate(uint v, uint lane)
 {
     uint4 hdr = gMisc[cplBase(v)];
-    if (lane >= hdr.x) return;
-    cplIntegrateBody(v, lane);
+    for (uint j = lane, jStop = EB_END(j, hdr.x, LANES); j < jStop; j += LANES) cplIntegrateBody(v, j);
 }
-// The same, body j < B by lane j of `lanes` (and j + lanes, ...).
-// The same bodies as cplIntegrate (j < B and j < LANES), body j by lane j of `lanes`,
-// then j + lanes, ...
+// The same bodies (every j < B), body j by lane j of `lanes`, then j + lanes, ...
 void cplIntegrateBy(uint v, uint lane, uint lanes)
 {
     uint4 hdr = gMisc[cplBase(v)];
-    uint bodies = min(hdr.x, LANES);
-    for (uint j = lane, jStop = EB_END(j, bodies, lanes); j < jStop; j += lanes) cplIntegrateBody(v, j);
+    for (uint j = lane, jStop = EB_END(j, hdr.x, lanes); j < jStop; j += lanes) cplIntegrateBody(v, j);
 }
 // Whether vehicle v's step sums go through workgroup memory (cplReactBy): its every
 // sphere is there (so its shapes fit, 6 words each, in the spheres' and the nodes'
