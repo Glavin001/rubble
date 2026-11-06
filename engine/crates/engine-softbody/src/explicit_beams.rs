@@ -52,6 +52,13 @@ pub const CONTACT_FIXED: f32 = 32.0;
 /// kernel's `SHIFT_FIXED`).
 pub const SHIFT_FIXED: f32 = 16_777_216.0;
 
+/// §37: vehicle contact's position step is RoR's whole 0.2·p, uncapped, while the
+/// pair approaches faster than this (m/s): an impact between vehicles. **Choice**
+/// (measured): capped there too, sedan1's 80 km/h T-bone leaked 10–25 of 983
+/// striker nodes; uncapped from 0.3 m/s, 0–6 (RoR's push 1–14). Self-collision
+/// stays capped (uncapped, the 47 km/h wall rebounded with kilojoules).
+pub const SHIFT_FAST_APPROACH: f32 = 0.3;
+
 /// A position-step component in [`SHIFT_FIXED`] units, as the kernel's
 /// `toFixedShift`: clamped to ±2·10⁹, rounded to nearest with ties to even.
 pub fn to_fixed_shift(x: f32) -> i32 {
@@ -959,6 +966,12 @@ pub struct ExplicitBeams {
     pub contact_shift: Vec<[i32; 3]>,
     /// The position steps the last node pass applied (m; empty: none).
     pub shift_applied: Vec<Vec3>,
+    /// The speed the last node pass took from nodes along their position steps
+    /// (m/s, subtracted; sized as [`Self::shift_applied`]).
+    pub shift_dv: Vec<Vec3>,
+    /// The ground position steps the last node pass applied (m up, per node; empty
+    /// without [`Self::dissipative_contact`]).
+    pub ground_lift: Vec<f32>,
     /// RoR's rule that a beam's strength falls by k × its plastic stretch (true,
     /// the RoR profile and the solver's JBeam rule until §36). The BeamNG profile:
     /// false (BeamNG documents no such rule; its `deformLimitStress` and deform
@@ -1526,6 +1539,8 @@ impl ExplicitBeams {
             dissipative_contact: false,
             contact_shift: Vec::new(),
             shift_applied: Vec::new(),
+            shift_dv: Vec::new(),
+            ground_lift: Vec::new(),
             plastic_strength_drop: true,
             exact_friction: false,
             contact_acc: Vec::new(),
@@ -3312,7 +3327,13 @@ impl ExplicitBeams {
         }
         // §37: last step's contact position steps.
         self.shift_applied.clear();
+        self.shift_dv.clear();
+        self.ground_lift.clear();
+        if self.dissipative_contact {
+            self.ground_lift.resize(self.nodes.len(), 0.0);
+        }
         if !self.contact_shift.is_empty() {
+            self.shift_dv.resize(self.contact_shift.len(), Vec3::ZERO);
             self.shift_applied.extend(self.contact_shift.iter().map(|a| {
                 Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32) * (1.0 / SHIFT_FIXED)
             }));
@@ -3336,6 +3357,8 @@ impl ExplicitBeams {
             if let Some(l) = cf.as_mut() {
                 l.roll(i);
             }
+            // §37's ground position step (m, up).
+            let mut lift = 0.0f32;
             if !n.has(NODE_NO_GROUND) {
                 let x = origin + n.pos;
                 if n.has(NODE_TREAD) {
@@ -3370,16 +3393,22 @@ impl ExplicitBeams {
                         *s = [0.0; 2];
                     }
                 } else if ground > x.y {
-                    let c = contact_force(
+                    let (c, budget) = contact_response(
                         n.force,
                         n.vel,
                         n.mass,
                         Vec3::Y,
                         h,
-                        &ContactSurface::GROUND.exact_if(exact),
+                        &ContactSurface::GROUND
+                            .exact_if(exact)
+                            .dissipative_if(self.dissipative_contact),
                         ground - x.y,
                         n.friction,
                     );
+                    // §37: the ground's position step (the node's own, up).
+                    if self.dissipative_contact && c != Vec3::ZERO {
+                        lift = shift_depth(ground - x.y, budget, n.force.y);
+                    }
                     let c = if n.has(NODE_FRICTION_LIMIT) {
                         crate::explicit_jbeam_ext::friction_limit(
                             c,
@@ -3406,7 +3435,9 @@ impl ExplicitBeams {
                             n.mass,
                             normal,
                             h,
-                            &ContactSurface::BOX.exact_if(exact),
+                            &ContactSurface::BOX
+                                .exact_if(exact)
+                                .dissipative_if(self.dissipative_contact),
                             0.0,
                             n.friction,
                         );
@@ -3424,7 +3455,9 @@ impl ExplicitBeams {
                             n.mass,
                             normal,
                             h,
-                            &ContactSurface::BOX.exact_if(exact),
+                            &ContactSurface::BOX
+                                .exact_if(exact)
+                                .dissipative_if(self.dissipative_contact),
                             0.0,
                             n.friction,
                         );
@@ -3447,6 +3480,22 @@ impl ExplicitBeams {
                 n.pos += n.vel * h;
                 if let Some(&d) = self.shift_applied.get(i) {
                     n.pos += d;
+                    // §37: a node its contacts step back keeps no speed into them
+                    // (else it keeps a speed its steps cancel each step: a node held
+                    // still with a ghost speed). Takes kinetic energy only.
+                    let dd = d.dot(d);
+                    let vd = n.vel.dot(d);
+                    if vd < 0.0 && dd > 0.0 {
+                        let dv = d * (vd / dd);
+                        n.vel -= dv;
+                        if let Some(x) = self.shift_dv.get_mut(i) {
+                            *x = dv;
+                        }
+                    }
+                }
+                n.pos.y += lift;
+                if let Some(x) = self.ground_lift.get_mut(i) {
+                    *x = lift;
                 }
             }
             n.force = Vec3::new(0.0, n.mass * GRAVITY, 0.0);
@@ -4104,16 +4153,26 @@ impl ExplicitBeams {
                 node.friction,
             );
             if self.dissipative_contact && f != Vec3::ZERO {
-                // §37: the position step, a position impulse δ·m shared by the
-                // sub-bodies' inverse masses.
+                // §37: the position step, the pair δ apart along n as a position
+                // impulse P = δ/inv, inv = 1/m_h + Σ w²/m_k (the nodes' own masses),
+                // moving each node by its share over its own mass as the hit's force
+                // does; against the pair's normal force on those masses,
+                // fn_m = fn/(m·inv), it stores |fn_m|·δ (first order), capped.
                 let tri = [(i1, alpha, n1), (i2, beta, n2), (i0, gamma, n0)];
-                let delta = shift_depth(depth, budget, fh.dot(n));
-                if delta > 0.0 {
-                    let q = delta * m;
-                    self.add_shift(hn as usize, n * (q * imh));
-                    for (i, w, nd) in tri {
-                        if w > 0.0 {
-                            self.add_shift(i as usize, n * -(w * (q * im(&nd, split[i as usize]))));
+                let inv = im(&node, 1)
+                    + crate::explicit_contact::two_body_inverse_mass(
+                        [im(&n1, 1), im(&n2, 1), im(&n0, 1)],
+                        [alpha, beta, gamma],
+                    );
+                if inv > 0.0 && m > 0.0 {
+                    let delta = shift_depth(depth, budget, fh.dot(n) / (m * inv));
+                    if delta > 0.0 {
+                        let q = delta / inv;
+                        self.add_shift(hn as usize, n * (q * im(&node, 1)));
+                        for (i, w, nd) in tri {
+                            if w > 0.0 {
+                                self.add_shift(i as usize, n * -(w * (q * im(&nd, 1))));
+                            }
                         }
                     }
                 }

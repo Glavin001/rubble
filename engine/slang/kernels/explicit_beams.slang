@@ -146,6 +146,9 @@ static const uint FLAG_SHIFT_MEM = 65536u;
 // The contact position steps' fixed point, units per metre (explicit_beams.rs
 // SHIFT_FIXED, 2^24).
 static const float SHIFT_FIXED = 16777216.0;
+// Vehicle contact's fast approach (m/s): the whole 0.2·p step (explicit_beams.rs
+// SHIFT_FAST_APPROACH).
+static const float SHIFT_FAST_APPROACH = 0.3;
 
 static const uint NO_GROUP = 0xFFFFFFFFu;
 
@@ -358,6 +361,8 @@ Surface boxSurface()
 Surface surfaceV(Surface s, uint v)
 {
     s.exact = (gStatic[v * 4u + 3u].x & FLAG_EXACT_FRICTION) != 0u ? 1u : 0u;
+    // §37: the node pass's ground, box and shape contacts are dissipative too.
+    s.dissipative = (gStatic[v * 4u + 3u].x & FLAG_DISSIPATIVE) != 0u ? 1u : 0u;
     return s;
 }
 
@@ -599,6 +604,29 @@ float3 contactForce(float3 f, float3 v, float m, float3 n, Surface s, float p, f
 {
     float budget;
     return contactResponse(f, v, m, n, s, p, friction, budget);
+}
+
+// The node pass's ground contact (depth > 0) of vehicle v's node: its force, and on
+// the dissipative surface (§37) its position step up (`lift`, m;
+// explicit_beams.rs node pass).
+float3 groundContact(float3 f, float3 vel, float mass, uint v, float depth, float friction, inout float lift)
+{
+    Surface s = surfaceV(groundSurface(), v);
+    float budget;
+    float3 c = contactResponse(f, vel, mass, float3(0.0, 1.0, 0.0), s, depth, friction, budget);
+    if (s.dissipative != 0u && any(c != float3(0.0, 0.0, 0.0))) lift = shiftDepth(depth, budget, f.y);
+    return c;
+}
+
+// §37 after the node's x + h·v: its contacts' position step d (the speed into it
+// taken: a node held by its steps keeps no ghost speed), then the ground's lift.
+void takeSteps(inout float3 pos, inout float3 vel, float3 d, float lift)
+{
+    pos = sadd3(pos, d);
+    float dd = sdot(d, d);
+    float vd = sdot(vel, d);
+    if (vd < 0.0 && dd > 0.0) vel = ssub3(vel, sscale(d, sdiv(vd, dd)));
+    pos.y = nf(pos.y + lift);
 }
 
 // A pressure-wheel node's ground contact (NODE_FRICTION_LIMIT, spec §28): the
@@ -1308,6 +1336,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     clipRoll(gi, flagsV);
     if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
     float3 shift = shiftTake(gi, flagsV);
+    float lift = 0.0; // §37's ground position step
     float selfGroup = gNodes[gi * 3u + 2u].w; // JBeam self-collision group (kept)
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -1338,7 +1367,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
         }
         else if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
+            float3 c = groundContact(f, vel, mass, vehicle, ground - x.y, V.w, lift);
             if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
             cfAdd(gi, c);
             f += c;
@@ -1376,7 +1405,7 @@ uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, 
     {
         vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
         pos = sadd3(pos, sscale(vel, STEP));
-        pos = sadd3(pos, shift);
+        takeSteps(pos, vel, shift, lift);
     }
     clipSpeed(vehicle, step, flagsV, vel);
 #ifdef EB_AERO
@@ -2464,6 +2493,13 @@ float selfInvMass(uint x)
     return sdiv(float(uint(gAcc[gP.selfSplit + x].load())), gNodes[x * 3u].w);
 }
 
+// Node x's own inverse mass (0 immovable): §37's position step shares.
+float ownInvMass(uint x)
+{
+    if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return 0.0;
+    return sdiv(1.0, gNodes[x * 3u].w);
+}
+
 // Node x's acceleration from its force at the pass's start (0 immovable).
 float3 selfAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
@@ -2496,17 +2532,25 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
     float3 f = contactResponse(fh, vv, m, nn, surf, pen, friction, budget);
     if (surf.dissipative != 0u && any(f != float3(0.0, 0.0, 0.0)))
     {
-        // §37: the position step, a position impulse δ·m shared by the sub-bodies'
-        // inverse masses (explicit_beams.rs apply_two_body_self_hits). Called once
-        // per hit (selfRound marks it computed; selfSerial applies in order).
-        float delta = shiftDepth(pen, budget, sdot(fh, nn));
-        if (delta > 0.0)
+        // §37: the position step, a position impulse δ/inv over the nodes' own
+        // masses (explicit_beams.rs apply_two_body_self_hits). Called once per hit
+        // (selfRound marks it computed; selfSerial applies in order).
+        float ih = ownInvMass(h);
+        float i1 = ownInvMass(t1);
+        float i2 = ownInvMass(t2);
+        float i0 = ownInvMass(t0);
+        float inv = nf(ih + nf(nf(selfTerm(alpha, i1) + selfTerm(beta, i2)) + selfTerm(gamma, i0)));
+        if (inv > 0.0 && m > 0.0)
         {
-            float q = smul(delta, m);
-            shiftAdd(h, sscale(nn, smul(q, selfInvMass(h))));
-            if (alpha > 0.0) shiftAdd(t1, sscale(nn, -smul(alpha, smul(q, selfInvMass(t1)))));
-            if (beta > 0.0) shiftAdd(t2, sscale(nn, -smul(beta, smul(q, selfInvMass(t2)))));
-            if (gamma > 0.0) shiftAdd(t0, sscale(nn, -smul(gamma, smul(q, selfInvMass(t0)))));
+            float delta = shiftDepth(pen, budget, sdiv(sdot(fh, nn), smul(m, inv)));
+            if (delta > 0.0)
+            {
+                float q = sdiv(delta, inv);
+                shiftAdd(h, sscale(nn, smul(q, ih)));
+                if (alpha > 0.0) shiftAdd(t1, sscale(nn, -smul(alpha, smul(q, i1))));
+                if (beta > 0.0) shiftAdd(t2, sscale(nn, -smul(beta, smul(q, i2))));
+                if (gamma > 0.0) shiftAdd(t0, sscale(nn, -smul(gamma, smul(q, i0))));
+            }
         }
     }
     return f;
@@ -6333,20 +6377,25 @@ bool vvTry(VvTri t, uint gt, uint h, float3 p, uint vh, float r, uint parity, ui
     if (surf.dissipative != 0u && vvTwoBody(gStatic[gP.nodeInfoBase + t.tn.x].w, vh)
         && any(f != float3(0.0, 0.0, 0.0)))
     {
-        // §37: the position step, a position impulse δ·m shared by the sub-bodies'
-        // inverse masses (explicit_contact.rs).
-        float delta = shiftDepth(pen, budget, sdot(fh, nn));
-        if (delta > 0.0)
+        // §37: the position step, a position impulse δ/inv over the nodes' own
+        // masses (explicit_contact.rs); a fast approach takes the whole 0.2·p.
+        if (sdot(v, nn) < -SHIFT_FAST_APPROACH) budget = asfloat(0x7F800000u);
+        float imh = vvImmovable(h) ? 0.0 : sdiv(1.0, P.w);
+        float im1 = vvImmovable(t.tn.y) ? 0.0 : sdiv(1.0, P1.w);
+        float im2 = vvImmovable(t.tn.z) ? 0.0 : sdiv(1.0, P2.w);
+        float im0 = vvImmovable(t.tn.x) ? 0.0 : sdiv(1.0, P0.w);
+        float inv = nf(imh + nf(nf(selfTerm(alpha, im1) + selfTerm(beta, im2)) + selfTerm(gamma, im0)));
+        if (inv > 0.0 && m > 0.0)
         {
-            float q = smul(delta, m);
-            float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), P.w);
-            float im1 = vvImmovable(t.tn.y) ? 0.0 : sdiv(vvSplitK(vvSplitTri(t.tn.y)), P1.w);
-            float im2 = vvImmovable(t.tn.z) ? 0.0 : sdiv(vvSplitK(vvSplitTri(t.tn.z)), P2.w);
-            float im0 = vvImmovable(t.tn.x) ? 0.0 : sdiv(vvSplitK(vvSplitTri(t.tn.x)), P0.w);
-            shiftAdd(h, sscale(nn, smul(q, imh)));
-            if (alpha > 0.0) shiftAdd(t.tn.y, sscale(nn, -smul(alpha, smul(q, im1))));
-            if (beta > 0.0) shiftAdd(t.tn.z, sscale(nn, -smul(beta, smul(q, im2))));
-            if (gamma > 0.0) shiftAdd(t.tn.x, sscale(nn, -smul(gamma, smul(q, im0))));
+            float delta = shiftDepth(pen, budget, sdiv(sdot(fh, nn), smul(m, inv)));
+            if (delta > 0.0)
+            {
+                float q = sdiv(delta, inv);
+                shiftAdd(h, sscale(nn, smul(q, imh)));
+                if (alpha > 0.0) shiftAdd(t.tn.y, sscale(nn, -smul(alpha, smul(q, im1))));
+                if (beta > 0.0) shiftAdd(t.tn.z, sscale(nn, -smul(beta, smul(q, im2))));
+                if (gamma > 0.0) shiftAdd(t.tn.x, sscale(nn, -smul(gamma, smul(q, im0))));
+            }
         }
     }
     accAdd(h, f);

@@ -18,7 +18,7 @@
 //! bit-identical to stepping each alone.
 
 use crate::explicit_beams::{
-    contact_force, contact_response, shift_depth, ContactSurface, ExplicitBeams, ExplicitKind,
+    contact_force, contact_response, shift_depth, ContactSurface, SHIFT_FAST_APPROACH, ExplicitBeams, ExplicitKind,
     ForceTrace, Node, GRAVITY, NODE_IMMOVABLE, STEP,
 };
 use glam::Vec3;
@@ -718,8 +718,8 @@ impl ExplicitBeamsWorld {
             let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
             let dissipative =
                 self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact;
-            // (§37's position step shares: the sub-bodies' inverse masses; none
-            // outside the two-body rule.)
+            // (§37's position step: the nodes' own inverse masses; none outside the
+            // two-body rule.)
             let (m, fh, ims) = if two_body(b) {
                 // Each node of the hit is one of its k sub-bodies (mass m/k); an
                 // immovable node is of infinite mass. The triangle point's inverse
@@ -755,7 +755,7 @@ impl ExplicitBeamsWorld {
                 (
                     m,
                     (acc(self.pass_force[b][h as usize], &node) - at) * m,
-                    Some([imh, im(&n1, k(i1)), im(&n2, k(i2)), im(&n0, k(i0))]),
+                    Some([im(&node, 1.0), im(&n1, 1.0), im(&n2, 1.0), im(&n0, 1.0)]),
                 )
             } else {
                 let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
@@ -778,11 +778,22 @@ impl ExplicitBeamsWorld {
                 node.friction,
             );
             if let (true, Some([imh, im1, im2, im0])) = (f != Vec3::ZERO && dissipative, ims) {
-                // §37: the position step, a position impulse δ·m shared by the
-                // sub-bodies' inverse masses (explicit_beams' self-hit order).
-                let delta = shift_depth(x.p, budget, fh.dot(x.n));
+                // §37: the position step as explicit_beams' self hits take it.
+                // (A fast approach, an impact between vehicles, takes RoR's whole
+                // 0.2·p as the step: SHIFT_FAST_APPROACH.)
+                let budget = if v.dot(x.n) < -SHIFT_FAST_APPROACH {
+                    f32::INFINITY
+                } else {
+                    budget
+                };
+                let inv = imh + two_body_inverse_mass([im1, im2, im0], [alpha, beta, gamma]);
+                let delta = if inv > 0.0 && m > 0.0 {
+                    shift_depth(x.p, budget, fh.dot(x.n) / (m * inv))
+                } else {
+                    0.0
+                };
                 if delta > 0.0 {
-                    let q = delta * m;
+                    let q = delta / inv;
                     self.vehicles[b].add_shift(h as usize, x.n * (q * imh));
                     let va = &mut self.vehicles[a];
                     for (i, w, imk) in [(i1, alpha, im1), (i2, beta, im2), (i0, gamma, im0)] {
@@ -875,8 +886,14 @@ pub struct EnergyLedger {
     /// The contact position steps' energy (§37, self- and vehicle contact): per
     /// step Σ −F·Δx over the nodes they moved, F the node's air, beam and slide
     /// forces of the step (the first-order change of the potential and elastic
-    /// energy they store). Not a work on the velocities: not in kinetic_change.
+    /// energy they store), and the kinetic energy the node pass took along them
+    /// (the speed into a step, ≤ 0; that part is in kinetic_change).
     pub w_contact_shift: f64,
+    /// [`Self::w_contact_shift`]'s kinetic part (in kinetic_change).
+    pub w_shift_kinetic: f64,
+    /// The ground's position steps' energy (§37), as [`Self::w_contact_shift`]
+    /// (−F·Δx over the nodes they lifted).
+    pub w_ground_shift: f64,
     pub discretisation: f64,
     prev: Vec<ForceSplit>,
     vc: Vec<[Vec<Vec3>; 2]>,
@@ -907,6 +924,7 @@ impl EnergyLedger {
             + self.w_contact_friction
             + self.w_ground_vertical
             + self.w_ground_horizontal
+            + self.w_shift_kinetic
             - self.discretisation
     }
 
@@ -921,10 +939,22 @@ impl EnergyLedger {
             // kinetic energy's change exactly (the position step v'·h would add
             // ½m|v' − v|², large for the stiff modes of a crash).
             let _ = x0;
-            let dx = ((n.vel + v0) * (0.5 * STEP)).as_dvec3();
+            // (§37: the node pass may then take speed along a position step; the
+            // forces act to the speed before that, and the kinetic energy it takes,
+            // ½m(|v″|² − |v′|²) ≤ 0, is the steps' term.)
+            let taken = v.shift_dv.get(i).copied().unwrap_or(Vec3::ZERO);
+            let v1 = n.vel + taken;
+            if taken != Vec3::ZERO {
+                let de = 0.5
+                    * f64::from(n.mass)
+                    * (f64::from(n.vel.length_squared()) - f64::from(v1.length_squared()));
+                self.w_contact_shift += de;
+                self.w_shift_kinetic += de;
+            }
+            let dx = ((v1 + v0) * (0.5 * STEP)).as_dvec3();
             let w = |f: Vec3| f.as_dvec3().dot(dx);
             let g = Vec3::new(0.0, n.mass * GRAVITY, 0.0);
-            let dv = n.vel - v0;
+            let dv = v1 - v0;
             let f_tot = dv * (n.mass / STEP);
             let ground = f_tot - f_acc;
             self.w_gravity += w(g);
@@ -936,10 +966,12 @@ impl EnergyLedger {
             self.w_contact_friction += w(vc[1][i]);
             self.w_ground_vertical += w(Vec3::new(0.0, ground.y, 0.0));
             self.w_ground_horizontal += w(Vec3::new(ground.x, 0.0, ground.z));
+            let held = (prev[0][i] + prev[1][i] + prev[3][i]).as_dvec3();
             if let Some(&d) = v.shift_applied.get(i) {
-                self.w_contact_shift -= (prev[0][i] + prev[1][i] + prev[3][i])
-                    .as_dvec3()
-                    .dot(d.as_dvec3());
+                self.w_contact_shift -= held.dot(d.as_dvec3());
+            }
+            if let Some(&y) = v.ground_lift.get(i) {
+                self.w_ground_shift -= held.y * f64::from(y);
             }
         }
         if let Some(t) = v.trace.as_ref() {

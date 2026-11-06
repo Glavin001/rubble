@@ -715,7 +715,9 @@ impl Ledger {
                     n.mass,
                     Vec3::Y,
                     h,
-                    &ContactSurface::GROUND.exact_if(s.exact_friction),
+                    &ContactSurface::GROUND
+                        .exact_if(s.exact_friction)
+                        .dissipative_if(s.dissipative_contact),
                     s.ground - x.y,
                     n.friction,
                 );
@@ -735,7 +737,9 @@ impl Ledger {
                     n.mass,
                     normal,
                     h,
-                    &ContactSurface::BOX.exact_if(s.exact_friction),
+                    &ContactSurface::BOX
+                        .exact_if(s.exact_friction)
+                        .dissipative_if(s.dissipative_contact),
                     0.0,
                     n.friction,
                 );
@@ -3676,7 +3680,8 @@ fn fixed_contact_quantisation_does_no_work() {
 
 /// Over any tenth of a second of `seconds` of `w`'s steps (the world's energy
 /// ledger, J): the most self-contact work, the most vehicle-contact work (normal
-/// and friction), the most energy the contacts' position steps stored (§37), and
+/// and friction), the most energy the contacts' position steps stored (§37; the
+/// ground's with the ground's work, checked here too), and
 /// the most of the three together less 2 % of that tenth's stored energy (the
 /// first-order estimate's error, see [`contacts_do_no_positive_work`]); and the
 /// three together over the run's tenths after its first `settle` seconds.
@@ -3692,6 +3697,7 @@ fn contact_work_tenths(
             l.w_self_contact,
             l.w_contact_normal + l.w_contact_friction,
             l.w_contact_shift,
+            l.w_ground_vertical + l.w_ground_horizontal + l.w_ground_shift,
         ]
     };
     let tenth = (0.1 / STEP).round() as usize;
@@ -3702,6 +3708,12 @@ fn contact_work_tenths(
         if k % tenth == 0 {
             let now = terms(w);
             let d = [now[0] - last[0], now[1] - last[1], now[2] - last[2]];
+            let ground = now[3] - last[3];
+            assert!(
+                ground <= 0.01,
+                "the ground with its position steps added {ground} J over a tenth (to {:.2} s)",
+                k as f32 * STEP
+            );
             for j in 0..3 {
                 most[j] = most[j].max(d[j]);
             }
@@ -3823,6 +3835,70 @@ fn contacts_do_no_positive_work() {
     );
 }
 
+/// The crushed car settles (jbeam-semantics-spec.md §37): sedan1 into the wall at
+/// 51 km/h, then at rest to 16 s. Bounds (stated): from 3 s the most kinetic
+/// energy within each second never exceeds the second before's (or is below 10 µJ);
+/// by 12 s the mass-weighted rms node speed is below 1 mm/s; over the last second
+/// the fastest node below 2 mm/s (light nodes keep about 1 mm/s: single-precision
+/// positions near 1 m and the 1/32 N contact sums). RoR's push kept +5 J per tenth
+/// and nodes at 0.2–1.2 m/s here.
+#[test]
+fn crushed_car_settles() {
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let car = Car::of(&b);
+    let kmh: f32 = std::env::var("SETTLE_KMH").ok().and_then(|x| x.parse().ok()).unwrap_or(51.0);
+    let mut s = wall_spawn(&car, kmh, true, Perturb::default());
+    assert!(s.dissipative_contact, "the BeamNG profile");
+    let total: f64 = s.nodes.iter().map(|n| f64::from(n.mass)).sum();
+    let per_second = (1.0 / STEP).round() as usize;
+    let mut most_ke = Vec::new();
+    let (mut ke_max, mut v_last) = (0.0f64, 0.0f32);
+    for k in 1..=16 * per_second {
+        s.step();
+        let ke = f64::from(ke(&s));
+        ke_max = ke_max.max(ke);
+        if k > 15 * per_second {
+            v_last = v_last.max(s.max_speed());
+        }
+        if k == 12 * per_second {
+            let rms = (2.0 * ke / total).sqrt();
+            let vcm = s.nodes.iter().map(|n| n.mass * n.vel).sum::<Vec3>() / total as f32;
+            eprintln!(
+                "(settle) at 12 s: rms speed {:.3} mm/s, fastest node {:.2} mm/s, centre of mass {:.3?} mm/s",
+                rms * 1e3,
+                s.max_speed() * 1e3,
+                vcm * 1e3
+            );
+            assert!(rms < 1e-3, "rms node speed {rms} m/s at 12 s");
+        }
+        if k % per_second == 0 {
+            most_ke.push(ke_max);
+            ke_max = 0.0;
+        }
+    }
+    eprintln!(
+        "(settle) the most kinetic energy per second (J): {:?}; fastest node over the last second {:.2} mm/s",
+        most_ke.iter().map(|e| format!("{e:.2e}")).collect::<Vec<_>>(),
+        v_last * 1e3
+    );
+    for t in 3..most_ke.len() {
+        assert!(
+            most_ke[t] <= most_ke[t - 1] || most_ke[t] < 1e-5,
+            "kinetic energy rose in second {t}: {} J after {} J",
+            most_ke[t],
+            most_ke[t - 1]
+        );
+    }
+    assert!(v_last < 2e-3, "fastest node {v_last} m/s over the last second");
+}
+
 /// Some of the n test's speed-sweep runs (a measurement, `--ignored`):
 /// `N_KMH` (comma-separated, default 51), drag on and off (`N_DRAG=1` / `0`:
 /// one), each with its ledgers (set `LEDGER_WARN=1` to go on past a failure).
@@ -3932,10 +4008,18 @@ fn wall_terms(car: &Car, kmh: f32, drag: bool) {
                 let now = snap(&w);
                 let d: Vec<f64> = now.iter().zip(&prev).map(|(a, b)| a - b).collect();
                 eprintln!(
-                    "(terms {kmh} drag {drag}) to {:.3} s: Δ mean mech {:+8.2} J; ledger Δ mech {:+9.2} (kin {:+9.2}, elastic {:+9.2}); work beams {:+9.2} (dissipation {:+8.2}), self-contact {:+8.3}, ground {:+8.2}, air {:+8.2}, slides {:+6.2}, shift {:+8.3}; quantisation {:+.5}",
+                    "(terms {kmh} drag {drag}) to {:.3} s: Δ mean mech {:+8.2} J; ledger Δ mech {:+9.2} (kin {:+9.2}, elastic {:+9.2}); work beams {:+9.2} (dissipation {:+8.2}), self-contact {:+8.3}, ground {:+8.2}, air {:+8.2}, slides {:+6.2}, shift {:+8.3}; quantisation {:+.5}; kinetic {:.4} J, fastest node {:.4} m/s {:?} (node, kg, height above ground), centre of mass {:.5} m/s",
                     step as f32 * STEP,
                     mean - prev_mean,
-                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], wq
+                    d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], wq,
+                    now[1],
+                    s.max_speed(),
+                    (0..s.nodes.len())
+                        .max_by(|&a, &b| s.nodes[a].vel.length().total_cmp(&s.nodes[b].vel.length()))
+                        .map(|i| (i, s.nodes[i].mass, s.origin.y + s.nodes[i].pos.y - s.ground)),
+                    (s.nodes.iter().map(|n| n.mass * n.vel).sum::<Vec3>()
+                        / s.nodes.iter().map(|n| n.mass).sum::<f32>())
+                    .length()
                 );
                 // (`N_TOP=k`: the k nodes whose self-contact did the most work
                 // over the tenth.)
