@@ -363,6 +363,40 @@ fn mdb_into_beamng_reference_car() {
     mdb_side_impact_of("BX", serde_json::json!({ "desc": desc, "native": true }), false);
 }
 
+/// The FMVSS 214 MDB into the community cars (`RUBBLE_JBEAM_COMMUNITY`: the ETK
+/// K-series `kr6`, the Hirochi CCF `f4_sport_M`, the Gavril Vertex), JBeam mode on
+/// their hubs (their tyres are BeamNG's shared parts, not local). Reported, as the
+/// BX's (`CI_CARS` picks).
+#[test]
+#[ignore]
+fn mdb_into_community_cars() {
+    let Ok(root) = std::env::var("RUBBLE_JBEAM_COMMUNITY") else {
+        eprintln!("skip: RUBBLE_JBEAM_COMMUNITY not set");
+        return;
+    };
+    let cars = std::env::var("CI_CARS").unwrap_or_else(|_| "etkk,ccf,vertex".into());
+    for car in cars.split(',') {
+        let (m, name, pc) = match car {
+            "etkk" => ("etkk_lucasbe", "etkk", "kr6.pc"),
+            "ccf" => ("thw_ccf2", "ccf", "f4_sport_M.pc"),
+            "vertex" => ("innocent_gavril_vertex", "gavril_vertex", "gavril_vertex.pc"),
+            _ => continue,
+        };
+        let dir = std::path::Path::new(&root).join(m).join("vehicles");
+        let Ok(files) = engine_softbody::jbeam::read_vehicle_dir(&dir, name) else {
+            eprintln!("skip: no {name} under {}", dir.display());
+            continue;
+        };
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let pcs = std::fs::read_to_string(dir.join(name).join(pc)).unwrap();
+        let mut desc = engine_softbody::jbeam::load_jbeam(&refs, Some(&pcs)).unwrap();
+        for w in &mut desc.pressure_wheels {
+            w.flags.insert("hasTire".into(), false);
+        }
+        mdb_side_impact_of(car, serde_json::json!({ "desc": desc, "native": true }), false);
+    }
+}
+
 #[test]
 fn mdb_into_the_sedan_conserves_energy_and_crushes_in_the_fmvss_214_spread() {
     mdb_side_impact("sedan", explicit_sedan_truck(true));
@@ -458,5 +492,20 @@ fn mdb_keeps_its_shape_against_the_sedan_and_the_showcase_car() {
         eprintln!("MDB into the {label}: carriage length change at most {:.2} %, mean face crush at most {:.0} %; contact errors {errors:?}", 100.0 * worst_len, 100.0 * worst_crush);
         assert!(worst_len < 0.03, "{label}: the carriage deforms {worst_len}");
         assert!(worst_crush < 0.85, "{label}: the face collapses ({worst_crush})");
+    }
+}
+
+/// `centredDamping` (jbeam-semantics-spec.md §39) sets the BeamNG profile's centred
+/// damping on the JBeam barrier and leaves the Rigs of Rods profile sedan alone.
+#[test]
+fn centred_damping_toggle_reaches_beamng_profile_vehicles_only() {
+    for on in [false, true] {
+        let Some(s) = sim("mdb214", serde_json::json!({ "centredDamping": on })) else {
+            eprintln!("no GPU: skipped");
+            return;
+        };
+        assert!(s.spawned(1).beamng_profile && !s.spawned(0).beamng_profile);
+        assert_eq!(s.spawned(1).settings.centred_damping, on);
+        assert!(!s.spawned(0).settings.centred_damping);
     }
 }

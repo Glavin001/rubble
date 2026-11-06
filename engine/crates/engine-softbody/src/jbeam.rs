@@ -593,6 +593,27 @@ impl JbeamDb {
     /// Resolve the part tree from the main part through each slot's configured
     /// (or default) part, depth first. Returns the parts in assembly order with
     /// their accumulated slot node offsets.
+    /// A local part for wheel slot `slot` whose chosen part is missing: the slot's
+    /// `default` when local, else the first by name of slot type `slot`, else of
+    /// its family (the type without its trailing `_<lug count>`).
+    fn wheel_substitute(&self, slot: &str, default: &str) -> Option<String> {
+        if !default.is_empty() && self.parts.contains_key(default) {
+            return Some(default.to_string());
+        }
+        let mut of = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+            let mut v: Vec<&String> = self
+                .parts
+                .iter()
+                .filter(|(_, p)| p.get("slotType").and_then(Value::as_str).is_some_and(|t| pred(t)))
+                .map(|(k, _)| k)
+                .collect();
+            v.sort();
+            v.first().map(|s| s.to_string())
+        };
+        let family = slot.trim_end_matches(|c: char| c.is_ascii_digit());
+        of(&|t| t == slot).or_else(|| of(&|t| t.starts_with(family) && family.ends_with('_')))
+    }
+
     fn assemble(&mut self, config: &PcConfig) -> Result<Vec<Placed>, String> {
         let main = match &config.main_part {
             Some(m) => m.clone(),
@@ -654,17 +675,43 @@ impl JbeamDb {
                         .and_then(Value::as_object)
                         .cloned()
                         .unwrap_or_default();
-                    let chosen = config.parts.get(&slot_name).cloned().unwrap_or(default);
+                    let mut chosen = config.parts.get(&slot_name).cloned().unwrap_or(default.clone());
                     if chosen.is_empty() {
                         continue;
                     }
+                    let mut substitute = false;
                     if !self.parts.contains_key(&chosen) {
-                        self.warnings
-                            .push(format!("slot `{slot_name}`: part `{chosen}` not found"));
-                        continue;
+                        // A wheel slot whose part is BeamNG's stock content (not
+                        // local): the wheel part carries the hub nodes the suspension
+                        // and the wheel rows use, so a local wheel part stands in
+                        // (spec §29.2): the slot's default, else the first by name of
+                        // its slot type, else of its family (`wheel_F_6` → `wheel_F_*`).
+                        // Any other slot whose part is missing (another mod's, or
+                        // stock content) takes its own default when that is local.
+                        let local = if slot_name.starts_with("wheel_") {
+                            self.wheel_substitute(&slot_name, &default)
+                        } else if !default.is_empty() && default != chosen && self.parts.contains_key(&default) {
+                            Some(default.clone())
+                        } else {
+                            None
+                        };
+                        match local {
+                            Some(l) => {
+                                self.warnings.push(format!(
+                                    "slot `{slot_name}`: part `{chosen}` not found: the local `{l}` stands in"
+                                ));
+                                chosen = l;
+                                substitute = true;
+                            }
+                            None => {
+                                self.warnings
+                                    .push(format!("slot `{slot_name}`: part `{chosen}` not found"));
+                                continue;
+                            }
+                        }
                     }
                     let ty = self.slot_type(&chosen).unwrap_or("");
-                    let allowed = if v2 {
+                    let allowed = substitute || if v2 {
                         field("allowTypes")
                             .and_then(Value::as_array)
                             .is_none_or(|a| a.iter().any(|t| t.as_str() == Some(ty)))
@@ -817,7 +864,10 @@ fn expand(
                         if let Value::Object(opts) = v {
                             for (k, o) in opts {
                                 if let Some(x) = resolve(o, vars) {
-                                    fields.insert(k.clone(), x);
+                                    // A key written with the header's node-column
+                                    // colon (BeamNG's L-beam page: `{"id3:": …}`)
+                                    // names the same field.
+                                    fields.insert(k.trim_end_matches(':').to_string(), x);
                                 }
                             }
                         } else if let Some(x) = resolve(v, vars) {
@@ -839,6 +889,74 @@ fn expand(
     out
 }
 
+/// The fuel's mass in each `fuelTank` of the parts' `energyStorage` rows [N], [ES]
+/// (jbeam-semantics-spec.md §40): `startingFuelCapacity` (L; default
+/// `fuelCapacity`) × `fuelLiquidDensity` (kg/L; default the `energyType`'s), spread
+/// evenly over the nodes of the tank's `fuel` engine groups and added to their
+/// `nodeWeight`. **Choice** (BeamNG names the presets, not their densities):
+/// gasoline 0.74, diesel 0.84, kerosene 0.80 kg/L, an unnamed type gasoline; a
+/// tank with no density, no fuel or no nodes adds nothing (warned).
+fn fuel_mass(
+    db: &JbeamDb,
+    parts: &[Placed],
+    vars: &HashMap<String, f64>,
+    engine_groups: &HashMap<u32, Vec<String>>,
+    desc: &mut SoftVehicleDesc,
+) {
+    let num = |v: Option<&Value>| v.and_then(|v| resolve(v, vars)).and_then(|v| v.as_f64());
+    for p in parts {
+        let part = &db.parts[&p.name];
+        let Some(rows) = part.get("energyStorage").and_then(Value::as_array) else {
+            continue;
+        };
+        for row in rows.iter().skip(1).filter_map(Value::as_array) {
+            let (Some("fuelTank"), Some(name)) = (row.first().and_then(Value::as_str), row.get(1).and_then(Value::as_str)) else {
+                continue;
+            };
+            let Some(tank) = part.get(name).and_then(Value::as_object) else {
+                continue;
+            };
+            let capacity = num(tank.get("fuelCapacity")).unwrap_or(0.0);
+            let litres = num(tank.get("startingFuelCapacity")).unwrap_or(capacity).max(0.0);
+            let density = num(tank.get("fuelLiquidDensity")).or_else(|| {
+                match tank.get("energyType").and_then(Value::as_str).unwrap_or("gasoline") {
+                    "gasoline" => Some(0.74),
+                    "diesel" => Some(0.84),
+                    "kerosene" => Some(0.80),
+                    _ => None,
+                }
+            });
+            let groups: Vec<&str> = match tank.get("fuel").and_then(|f| f.get("[engineGroup]:")) {
+                Some(Value::String(g)) => vec![g.as_str()],
+                Some(Value::Array(gs)) => gs.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            let mut nodes: Vec<u32> = engine_groups
+                .iter()
+                .filter(|(_, g)| g.iter().any(|g| groups.contains(&g.as_str())))
+                .map(|(&i, _)| i)
+                .collect();
+            nodes.sort_unstable();
+            let Some(density) = density else {
+                desc.warnings.push(format!("fuel tank `{name}`: energy type without a density; its fuel has no mass"));
+                continue;
+            };
+            let mass = litres * density;
+            if mass <= 0.0 {
+                continue;
+            }
+            if nodes.is_empty() {
+                desc.warnings.push(format!("fuel tank `{name}`: no node in its fuel groups {groups:?}; its {mass:.1} kg of fuel has no node"));
+                continue;
+            }
+            let share = (mass / nodes.len() as f64) as f32;
+            for i in nodes {
+                desc.nodes[i as usize].mass += share;
+            }
+        }
+    }
+}
+
 /// JBeam frame (+X left, +Y rear, +Z up) → Rubble (+X left, +Y up, +Z forward).
 pub fn to_rubble(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], -p[1]]
@@ -856,6 +974,139 @@ fn tri_aero(f: &Map<String, Value>) -> [f32; 4] {
         g("stallAngle").unwrap_or(0.58).clamp(0.0, std::f32::consts::FRAC_PI_2),
         g("skinDragCoef").unwrap_or(0.0).max(0.0),
     ]
+}
+
+/// The node couplers coupled at spawn, and notes on the others.
+struct NodeCouplers {
+    couplers: Vec<SoftCoupler>,
+    warnings: Vec<String>,
+}
+
+/// BeamNG's node couplers (`jbeam-semantics-spec.md` §7.1; [C]): a coupler node
+/// (`couplerTag` t) and a tag node (`tag` t). Only `couplerStartRadius` makes a
+/// coupler Active at spawn; then it couples to the nearest free tag node of its tag
+/// within that radius (lowest index on a tie; one tag node per coupler node and one
+/// coupler node per tag node, coupler nodes in node order). The strength is the
+/// lower of the two nodes' `couplerStrength` (default unbreakable); the break groups
+/// are the coupler node's then the tag node's (`breakGroup`, a name or a table, at
+/// most three), of the coupler node's `breakGroupType` (the tag node's when the
+/// coupler node names none).
+fn node_couplers(
+    desc: &SoftVehicleDesc,
+    fields: &BTreeMap<u32, Map<String, Value>>,
+    groups: &mut HashMap<String, u32>,
+) -> NodeCouplers {
+    let text = |f: &Map<String, Value>, k: &str| {
+        f.get(k)
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    };
+    let num = |f: &Map<String, Value>, k: &str| f.get(k).and_then(as_f32);
+    let names = |f: &Map<String, Value>| -> Vec<String> {
+        match f.get("breakGroup") {
+            Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let pos = |i: u32| glam::Vec3::from_array(desc.nodes[i as usize].position);
+    let mut out = NodeCouplers {
+        couplers: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let mut used: std::collections::BTreeSet<u32> = Default::default();
+    let (mut inactive, mut unmatched, mut latching, mut too_many) = (0, 0, 0, 0);
+    let mut far = 0.0f32;
+    for (&c, cf) in fields {
+        let Some(tag) = text(cf, "couplerTag") else {
+            continue;
+        };
+        let Some(start) = num(cf, "couplerStartRadius").filter(|r| *r > 0.0) else {
+            // Not Active at spawn: only the coupler toggle (a driver input) couples it.
+            inactive += 1;
+            continue;
+        };
+        let best = fields
+            .iter()
+            .filter(|(&t, tf)| t != c && !used.contains(&t) && text(tf, "tag").as_deref() == Some(tag.as_str()))
+            .map(|(&t, tf)| (pos(c).distance(pos(t)), t, tf))
+            .filter(|(d, _, _)| *d <= start)
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let Some((d, t, tf)) = best else {
+            unmatched += 1;
+            continue;
+        };
+        used.insert(t);
+        let lock = num(cf, "couplerLockRadius").unwrap_or(0.025);
+        if d > lock {
+            latching += 1;
+            far = far.max(d);
+        }
+        let strength = num(cf, "couplerStrength")
+            .unwrap_or(f32::INFINITY)
+            .min(num(tf, "couplerStrength").unwrap_or(f32::INFINITY));
+        let own = names(cf);
+        let ty = if own.is_empty() { tf } else { cf };
+        let passive = num(ty, "breakGroupType").is_some_and(|t| t as i32 == 1);
+        let mut gs: Vec<u32> = Vec::new();
+        for g in own.into_iter().chain(names(tf)) {
+            let n = groups.len() as u32 + 1;
+            let gi = *groups.entry(g).or_insert(n);
+            if !gs.contains(&gi) {
+                gs.push(gi);
+            }
+        }
+        if gs.len() > 3 {
+            too_many += 1;
+        }
+        out.couplers.push(SoftCoupler {
+            a: c,
+            b: t,
+            strength,
+            break_group: gs.first().copied().unwrap_or(0),
+            break_group_passive: passive,
+            extra_break_groups: [
+                gs.get(1).copied().unwrap_or(0),
+                gs.get(2).copied().unwrap_or(0),
+            ],
+        });
+    }
+    if !out.couplers.is_empty() {
+        out.warnings.push(format!(
+            "{} node couplers (couplerTag to tag) coupled at spawn",
+            out.couplers.len()
+        ));
+    }
+    if inactive > 0 {
+        out.warnings.push(format!(
+            "{inactive} node couplers have no couplerStartRadius: not Active at spawn, \
+             left uncoupled (BeamNG couples them by the coupler toggle only)"
+        ));
+    }
+    if unmatched > 0 {
+        out.warnings.push(format!(
+            "{unmatched} node couplers have no free tag node within couplerStartRadius: \
+             left uncoupled"
+        ));
+    }
+    if latching > 0 {
+        out.warnings.push(format!(
+            "{latching} node couplers spawn farther apart than couplerLockRadius (up to \
+             {far:.4} m): coupled at spawn, without BeamNG's latching approach"
+        ));
+    }
+    if too_many > 0 {
+        out.warnings.push(format!(
+            "{too_many} node couplers name more than three break groups (first three used)"
+        ));
+    }
+    out
 }
 
 /// A triangle's `externalCollisionBias` (m, ≥ 0).
@@ -992,8 +1243,6 @@ pub fn unsupported_features(census: &BTreeMap<String, usize>) -> Vec<(String, us
         "beams.beamLimitDampFunction",
         "beams.breakGroup=table>3",
         "triangles.skinDragCoef",
-        "nodes.couplerTag",
-        "nodes.couplerStrength",
         "nodes.slidingFrictionCoef",
         "nodes.stribeckExponent",
         "nodes.stribeckVelMult",
@@ -1065,8 +1314,13 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     // Nodes. Parts: each JBeam part's own nodes (named as the part), and each
     // node `group` (the sets BeamNG flexbodies bind to).
     let mut ids: HashMap<String, u32> = HashMap::new();
+    // Node couplers (spec §7.1): the fields of each node with a `couplerTag` or a
+    // `tag` (a later definition of the node replaces them).
+    let mut coupler_fields: BTreeMap<u32, Map<String, Value>> = BTreeMap::new();
     let mut part_nodes: Vec<(String, Vec<u32>)> = Vec::new();
     let mut group_nodes: Vec<(String, Vec<u32>)> = Vec::new();
+    // Each node's `engineGroup` names (its last definition's), for the tanks' mass.
+    let mut engine_groups: HashMap<u32, Vec<String>> = HashMap::new();
     for (pi, f) in expand(&db, &parts, "nodes", &vars) {
         let Some(id) = f.get("id").and_then(|v| {
             v.as_str()
@@ -1128,6 +1382,18 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             desc.nodes.push(node);
             desc.nodes.len() as u32 - 1
         };
+        let tagged = |k: &str| f.get(k).and_then(Value::as_str).is_some_and(|t| !t.is_empty());
+        if tagged("couplerTag") || tagged("tag") {
+            coupler_fields.insert(index, f.clone());
+        } else {
+            coupler_fields.remove(&index);
+        }
+        let eg: Vec<String> = match f.get("engineGroup") {
+            Some(Value::String(g)) if !g.is_empty() => vec![g.clone()],
+            Some(Value::Array(gs)) => gs.iter().filter_map(Value::as_str).filter(|g| !g.is_empty()).map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+        engine_groups.insert(index, eg);
         let mut add = |list: &mut Vec<(String, Vec<u32>)>, name: &str| match list
             .iter_mut()
             .find(|(n, _)| n == name)
@@ -1154,6 +1420,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             _ => {}
         }
     }
+    fuel_mass(&db, &parts, &vars, &engine_groups, &mut desc);
     desc.node_group_nodes = group_nodes.clone();
     for g in &mut desc.node_group_nodes {
         g.1.sort_unstable();
@@ -1174,6 +1441,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     let mut skipped: BTreeMap<String, u32> = BTreeMap::new();
     let mut jbeam_unsupported: BTreeMap<&str, u32> = BTreeMap::new();
     let mut missing = 0u32;
+    let mut missing_names: Vec<String> = Vec::new();
     // The `hydros` section's rows are beams of type HYDRO (after the `beams` rows).
     let hydro_rows = expand(&db, &parts, "hydros", &vars)
         .into_iter()
@@ -1188,6 +1456,13 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         let (Some(a), Some(b)) = (node(&f, "id1"), node(&f, "id2")) else {
             if !f.get("optional").and_then(Value::as_bool).unwrap_or(false) {
                 missing += 1;
+                for k in ["id1", "id2"] {
+                    if let Some(n) = f.get(k).and_then(Value::as_str) {
+                        if !ids.contains_key(n) && missing_names.len() < 8 && !missing_names.iter().any(|m: &String| m == n) {
+                            missing_names.push(n.to_string());
+                        }
+                    }
+                }
             }
             continue;
         };
@@ -1472,7 +1747,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     }
     if missing > 0 {
         desc.warnings.push(format!(
-            "{missing} beams reference nodes not in this configuration"
+            "{missing} beams reference nodes not in this configuration (such as {})",
+            missing_names.join(", ")
         ));
     }
     // Couplers (door, bonnet and boot latches): each `couplerNodes` table of an
@@ -1480,6 +1756,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     // `couplingStartRadius` at spawn start coupled; the others (and node-level
     // `couplerTag` couplers) need a coupling action and are left out.
     let mut uncoupled = 0usize;
+    let mut uncoupled_pairs: Vec<(u32, u32)> = Vec::new();
     for p in &parts {
         let Some(m) = db.parts[&p.name].as_object() else {
             continue;
@@ -1515,7 +1792,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 let pa = glam::Vec3::from_array(desc.nodes[a as usize].position);
                 let pb = glam::Vec3::from_array(desc.nodes[b as usize].position);
                 if !(start > 0.0 && pa.distance(pb) <= start) {
-                    uncoupled += 1;
+                    uncoupled_pairs.push((a, b));
                     continue;
                 }
                 let opts = row.last().and_then(Value::as_object);
@@ -1539,10 +1816,35 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                         .unwrap_or(f32::INFINITY),
                     break_group,
                     break_group_passive: passive,
+                    ..Default::default()
                 });
             }
         }
     }
+    let node_couplers = node_couplers(&desc, &coupler_fields, &mut groups);
+    for cp in node_couplers.couplers {
+        // A pair an advanced controller already coupled is one coupling (the
+        // weaker strength).
+        match desc
+            .couplers
+            .iter_mut()
+            .find(|c| (c.a, c.b) == (cp.a, cp.b) || (c.a, c.b) == (cp.b, cp.a))
+        {
+            Some(c) => c.strength = c.strength.min(cp.strength),
+            None => desc.couplers.push(cp),
+        }
+    }
+    desc.warnings.extend(node_couplers.warnings);
+    // An advanced pair not coupled at spawn that a node coupler couples is coupled.
+    uncoupled += uncoupled_pairs
+        .iter()
+        .filter(|&&(a, b)| {
+            !desc
+                .couplers
+                .iter()
+                .any(|c| (c.a, c.b) == (a, b) || (c.a, c.b) == (b, a))
+        })
+        .count();
     if !desc.couplers.is_empty() {
         desc.warnings.push(format!(
             "{} coupler node pairs (latches) coupled at spawn: only the explicit solver's \
@@ -2028,6 +2330,34 @@ mod tests {
     }
     "#;
 
+    /// A fuel tank's fuel (`energyStorage`, spec §40): its starting volume × its
+    /// type's density, spread evenly over its `fuel` engine-group nodes; a variable
+    /// sets the volume; nodes outside the group keep their weight.
+    #[test]
+    fn fuel_tank_mass_spreads_over_its_fuel_nodes() {
+        let tank = |rows: &str| {
+            format!(
+                r#"{{"t": {{"slotType": "main",
+                "variables": [["name", "type", "unit", "category", "default", "min", "max"], ["$fuel", "range", "L", "c", 40, 0, 60]],
+                {rows}
+                "nodes": [["id", "posX", "posY", "posZ"], {{"nodeWeight": 5}},
+                    ["a", 0, 0, 0], {{"engineGroup": ["fuel"]}}, ["f1", 1, 0, 0], ["f2", 0, 1, 0],
+                    {{"engineGroup": ""}}, ["b", 0, 0, 1]],
+                "beams": [["id1:", "id2:"], ["a", "f1"], ["f1", "f2"], ["f2", "b"]]}}}}"#
+            )
+        };
+        let plain = load_jbeam(&[("t.jbeam", &tank(""))], None).unwrap();
+        assert!(plain.nodes.iter().all(|n| n.mass == 5.0));
+        let with = tank(
+            r#""energyStorage": [["type", "name"], ["fuelTank", "main"]],
+               "main": {"energyType": "diesel", "fuelCapacity": 60, "startingFuelCapacity": "$fuel", "fuel": {"[engineGroup]:": ["fuel"]}},"#,
+        );
+        let d = load_jbeam(&[("t.jbeam", &with)], None).unwrap();
+        let m: Vec<f32> = d.nodes.iter().map(|n| n.mass).collect();
+        let share = (40.0 * 0.84 / 2.0) as f32;
+        assert_eq!(m, vec![5.0, 5.0 + share, 5.0 + share, 5.0]);
+    }
+
     #[test]
     fn loads_parts_slots_variables_and_tables() {
         let pc = r#"{"format": 2, "mainPartName": "toycar", "parts": {"toycar_body": "toycar_body_soft"}, "vars": {"$stiff": 3}}"#;
@@ -2096,5 +2426,18 @@ mod tests {
         let d = load_jbeam(&[("toycar.jbeam", CAR)], Some(pc)).unwrap();
         assert_eq!(d.nodes.len(), 3, "stiff body, no wheels");
         assert!(d.wheels.is_empty());
+    }
+
+    #[test]
+    fn lbeam_third_node_in_row_options_with_the_node_colon() {
+        // BeamNG's L-beam page writes the third node as `{"id3:": …}` in the row.
+        let text = r#"{"lb": {"slotType": "main",
+            "nodes": [["id", "posX", "posY", "posZ"], ["a", 0, 0, 1], ["b", 1, 0, 1], ["c", 0, 1, 1]],
+            "beams": [["id1:", "id2:"], ["a", "c"], ["b", "c"], {"beamType": "|LBEAM"}, ["a", "b", {"id3:": "c"}]]}}"#;
+        let d = load_jbeam(&[("lb.jbeam", text)], None).unwrap();
+        let l: Vec<_> = d.elements.iter().filter(|e| e.kind == ElementKind::Lbeam).collect();
+        assert_eq!(l.len(), 1, "{:?}", d.warnings);
+        assert_eq!(l[0].nodes[2], 2);
+        assert!(!d.warnings.iter().any(|w| w.contains("LBEAM without id3")));
     }
 }

@@ -568,7 +568,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     )?;
     explicit_post(&beams)?;
     // The wide passes: one module per entry point.
-    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits"] {
+    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits", "centred_beams", "centred_nodes"] {
         let entry = format!("explicit_beams_wide_{pass}");
         let out = wgsl_dir.join(format!("{entry}.wgsl"));
         compile_with_defines(

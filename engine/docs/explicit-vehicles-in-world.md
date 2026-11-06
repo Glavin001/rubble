@@ -800,6 +800,78 @@ median of the two runs' p50 (ms per 120 Hz World step, submit to completion). Lo
   (§10.2) and the awake cars' frames remain. Loosening `reach` would let them sleep; it is
   a lossy trade and left for a decision.
 
+### 10.4 Creep and sleep against distance from the origin
+
+`engine-softbody/examples/sleep_distance.rs`: on the CPU reference with the World's
+clock (120 Hz frames), each frame re-bases as the GPU does. A vehicle spawns at rest at
+(d, 0, d/2) the way `place_vehicle` places it (world positions, origin 0). The table gives
+when it falls asleep under the default rule, and its creep over the last 2 s of a run
+with sleep off, measured in vehicle-local coordinates.
+
+| d (m) | Repo sedan: asleep at (s); CoM / largest node travel (mm) | Fixture car (pressure wheels, 90 s): asleep at (s); CoM / node (mm) |
+|---|---|---|
+| 0 | 2.39; 0.003 / 0.023 | 49.6; 0.002 / 0.005 |
+| 30 | 2.42; 0.013 / 0.043 | 43.0; 0.007 / 0.024 |
+| 60 | 2.27; 0.000 / 0.036 | 54.8; 0.029 / 0.054 |
+| 100 | 2.61; 0.001 / 0.024 | 54.8; 0.039 / 0.085 |
+| 500 | 2.65; 0.044 / 0.176 | 58.7; 0.006 / 0.013 |
+| 1000 | 2.61; 0.001 / 0.044 | 47.6; 0.001 / 0.005 |
+| 2000 | 2.35; 0.002 / 0.039 | 44.9; 0.002 / 0.005 |
+| 4000 | 2.79; 0.004 / 0.045 | 53.2; 0.014 / 0.028 |
+
+**Creep does not grow with distance.** The solver already keeps node positions in
+vehicle-local coordinates: each frame moves a vehicle's origin to node 0 when node 0 is
+farther than `REBASE_RADIUS` (100 m) from it, so past 100 m every node sits within a car's
+size of its origin. Only the World-space boundaries add the origin back: proxies, the
+coupling plan and vehicle contact. The rule's `reach` test runs in local coordinates.
+
+The largest local coordinates come just inside the radius (up to 100 m, a float spacing
+of 7.6 µm). The fixture car's slightly larger creep at 60–100 m is from that band, and it
+still sleeps. The 1 mm/s creep measured earlier at x = −30 came from a run that never
+re-based. So no fix is built.
+
+A smaller radius would re-base at different frames from today, so it would not be bit
+for bit near the origin. It has no measured benefit for sleep.
+
+Open, and separate from sleep: at km scale the World-space boundaries run in f32 world
+coordinates. At 4 km the spacing is 0.24 mm for contact points against rigid proxies and
+between vehicles. The lossless direction would be to shift each vehicle's proxies into its
+local frame in `cpl_plan`, and its contact partners into the owner's frame. That is a
+contact-precision change, not a sleep one, so it is proposed here, not built.
+
+**Built (approved 2026-11-06, after the broadphase merge): contact in vehicle frames.**
+- *Rigid coupling.*
+  - `cpl_plan` writes each proxy body's centre and each shape's reference point relative
+    to the vehicle's origin.
+  - The frame tests nodes at their local positions: the node pass, the count pass and the
+    surface path's proxy loops. Static boxes still use World positions.
+  - An origin rebase moves the records with the origin (`cplRebase`).
+  - `cpl_loads` adds the origin back for the stress ingest's action point; `cpl_emit`
+    expresses the body's current centre in the same frame.
+- *Vehicle contact.*
+  - The contact's geometry runs in the owner's frame: triangles, contact points, the side
+    vote and anti-clip. Each partner sits at `origin(v) − origin(owner)` plus its local
+    positions (`vvRel`, which is exactly 0 for the owner itself).
+  - Selection stays in World coordinates: frame bounds, groups and the box prefilters.
+  - The CPU reference does the same (`ExplicitBeamsWorld::owner_frame`).
+- *Proof 1: bit for bit near the origin.* There every origin is 0, so `x − 0` and `0 + x`
+  are exact.
+  - `explicit_frame_dump` from one saved 16-car crash-town state (every car within 100 m,
+    up to 74 proxy shapes a car) matches the pre-fix build in every state word.
+  - The coupling, sleep, contact and Metal parity suites pass unchanged.
+- *Proof 2: the same contact precision at 4 km as at the origin.* Both scenes are bit for
+  bit equal.
+  - `explicit_rigid_gpu.rs` `far_from_the_origin_the_coupling_is_the_origins_bit_for_bit`:
+    the sedan into a free box, its vehicle origin at (4096, 0, 2048) m. All 48 frames
+    match, every node word and the box's whole state. The pre-fix kernels fail it at the
+    first contact frame, with 1,178 node words different.
+  - `explicit_far_origin_gpu.rs`: two sedans head on (fixed-point contact sums, so
+    deterministic) at the origin and at 4 km. All 30 frames match, on the GPU and on the
+    CPU (3,554 contact hits).
+- Rigid bodies' own positions remain World f32 (the rigid solver's state). What the fix
+  removes is the extra rounding the contact added when it put vehicle nodes into World
+  coordinates.
+
 ### 10.2 The coupling plan's O(vehicles × colliders): waiting on the World broadphase
 
 Not changed here. The surface-contact work (`feat/softrigid-surface-contact-r2`, spec
@@ -810,6 +882,35 @@ this was written, so `cpl_plan` still scans every collider for every vehicle eac
 `cpl_plan` reads their candidates and the sleep rule's World trigger becomes the
 broadphase's touch mark (a moving collider entering a sleeping vehicle's fat box); no
 second broadphase is built here.
+
+**Update (merge of `feat/softbody-world-broadphase` 3346fbac).**
+- `cpl_query` now takes each vehicle's candidates from the World's persistent resting
+  table plus the moving and moved lists. It runs on the lane-parallel plan and the
+  proxied list.
+- A sleeping vehicle keeps its bounds and is woken when a moving body comes near.
+
+Measured (`vehicle_scale_bench`, which now reports how many measured steps were planned
+from the broadphase):
+- **Idle map: every measured step plans from the broadphase.**
+- **1,000 parked + 10 driving: every step plans by the scan.** That World has only its
+  ground plane, and the rigid step keeps the awake-indexed resting table only for grids
+  of more than 512 colliders (`rigid_plan::awake_broadphase`). The scan there covers one
+  collider, so it costs nothing extra.
+
+Idle map, interleaved A/B, before the merge (scan) against after it (broadphase); p50 ms
+of two runs each, CSV `measurements/vehicle-scale/broadphase_ab.csv`:
+
+| Map side (m) | 500 | 1000 | 2000 | 4000 |
+|---|---|---|---|---|
+| Scan | 3.13 / 1.76 | 2.08 / 2.02 | 2.75 / 2.73 | 7.13 / 7.07 |
+| Broadphase | 1.79 / 3.71 | 2.09 / 3.68 | 2.78 / 4.20 | 6.98 / 7.26 |
+| Vehicles asleep | 11 of 16 | 45 of 64 | 183 of 256 | 745 of 1,024 |
+
+The two paths cost the same within noise: with 6,400 colliders the scan was not what grew
+with area. **Cost is still not flat in area.** About 27–30 % of the parked repo sedans
+never meet the rule (§10.3), and that share is the same at every map size, so their
+frames grow with the map. That is the residual motion that centred damping is expected
+to remove.
 
 ## 11. The vehicles in the World broadphase (2026-11-06)
 

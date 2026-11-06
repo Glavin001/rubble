@@ -789,7 +789,9 @@ impl Ledger {
                     n.mass,
                     Vec3::Y,
                     h,
-                    &ContactSurface::GROUND.exact_if(s.exact_friction),
+                    &ContactSurface::GROUND
+                        .exact_if(s.exact_friction)
+                        .dissipative_if(s.dissipative_contact),
                     s.ground - x.y,
                     n.friction,
                 );
@@ -809,7 +811,9 @@ impl Ledger {
                     n.mass,
                     normal,
                     h,
-                    &ContactSurface::BOX.exact_if(s.exact_friction),
+                    &ContactSurface::BOX
+                        .exact_if(s.exact_friction)
+                        .dissipative_if(s.dissipative_contact),
                     0.0,
                     n.friction,
                 );
@@ -2309,12 +2313,17 @@ fn h_settles_after_the_wall_crash() {
 /// velocity (from the angular momentum and inertia about the centre of mass)
 /// and the centre of mass.
 fn rigid_motion(s: &ExplicitBeams) -> (Vec3, Vec3, Vec3) {
-    let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
-    let com = s.nodes.iter().map(|n| n.mass * n.pos).sum::<Vec3>() / total;
-    let vc = s.nodes.iter().map(|n| n.mass * n.vel).sum::<Vec3>() / total;
+    rigid_motion_of(&s.nodes)
+}
+
+/// [`rigid_motion`] of the nodes `nodes`.
+fn rigid_motion_of(nodes: &[engine_softbody::explicit_beams::Node]) -> (Vec3, Vec3, Vec3) {
+    let total: f32 = nodes.iter().map(|n| n.mass).sum();
+    let com = nodes.iter().map(|n| n.mass * n.pos).sum::<Vec3>() / total;
+    let vc = nodes.iter().map(|n| n.mass * n.vel).sum::<Vec3>() / total;
     let mut l = Vec3::ZERO;
     let mut inertia = glam::Mat3::ZERO;
-    for n in &s.nodes {
+    for n in nodes {
         let r = n.pos - com;
         l += n.mass * r.cross(n.vel - vc);
         inertia += n.mass
@@ -3825,6 +3834,19 @@ fn contact_work_tenths(
                 most[j] = most[j].max(d[j]);
             }
             most[3] = most[3].max(d[0] + d[1] + d[2] - 2e-2 * d[2].abs());
+            if std::env::var("CW_TENTHS").is_ok() {
+                let l = w.ledger.as_ref().unwrap();
+                eprintln!(
+                    "(tenth {:.1} s) self {:+.3} vehicle {:+.3} (normal so far {:+.3}, friction so far {:+.3}) steps {:+.3} together {:+.3}",
+                    k as f32 * STEP,
+                    d[0],
+                    d[1],
+                    l.w_contact_normal,
+                    l.w_contact_friction,
+                    d[2],
+                    d[0] + d[1] + d[2] - 2e-2 * d[2].abs()
+                );
+            }
             if k as f32 * STEP > settle + 1e-4 {
                 most[4] += d[0] + d[1] + d[2];
             }
@@ -3880,9 +3902,13 @@ fn contacts_do_no_positive_work() {
             "({what}) vehicle contact did {vc} J over a tenth"
         );
     };
-    for kmh in [
-        47.0, 48.0, 49.0, 50.0, 51.0, 52.0, 54.0, 55.0, 56.0, 57.0, 58.0, 59.0,
-    ] {
+    // (`CW_SKIP_SWEEP=1`, a measurement: the long rest and the T-bone only.)
+    let sweep: &[f32] = if std::env::var("CW_SKIP_SWEEP").is_ok() {
+        &[]
+    } else {
+        &[47.0, 48.0, 49.0, 50.0, 51.0, 52.0, 54.0, 55.0, 56.0, 57.0, 58.0, 59.0]
+    };
+    for &kmh in sweep {
         for drag in [true, false] {
             let s = wall_spawn(&car, kmh, drag, Perturb::default());
             check(
@@ -8496,6 +8522,199 @@ fn beamng_topology_census() {
     });
 }
 
+// --- Community BeamNG cars on the same scenes (opt-in: RUBBLE_JBEAM_COMMUNITY) ---
+
+/// A community car's default configuration (`RUBBLE_JBEAM_COMMUNITY`, the folder
+/// holding the mods; `etkk`, `ccf` or `vertex`), its pressure wheels without their
+/// tyres (BeamNG's shared tyres are not local; the body is what is measured).
+fn community_desc(car: &str) -> Option<engine_softbody::desc::SoftVehicleDesc> {
+    let root = std::env::var("RUBBLE_JBEAM_COMMUNITY").ok()?;
+    let (m, name, pc) = match car {
+        "etkk" => ("etkk_lucasbe", "etkk", "kr6.pc"),
+        "ccf" => ("thw_ccf2", "ccf", "f4_sport_M.pc"),
+        "vertex" => ("innocent_gavril_vertex", "gavril_vertex", "gavril_vertex.pc"),
+        _ => return None,
+    };
+    let dir = std::path::Path::new(&root).join(m).join("vehicles");
+    let files = engine_softbody::jbeam::read_vehicle_dir(&dir, name).ok()?;
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let pcs = std::fs::read_to_string(dir.join(name).join(pc)).ok()?;
+    let mut desc = engine_softbody::jbeam::load_jbeam(&refs, Some(&pcs)).ok()?;
+    for w in &mut desc.pressure_wheels {
+        w.flags.insert("hasTire".into(), false);
+    }
+    Some(desc)
+}
+
+/// A community car as a [`Car`]. Its node sets are picked by position from the
+/// settled body shell (parts `*_body`, `*_floor`), car-generic, each a Choice;
+/// in the turned frame (+x left, +y up, +z forward), with H the body's height
+/// over its floor (its 10th percentile height), W its half width, the axles' z
+/// from its wheels and the left front door's z extent:
+/// * `sill` / `sill_r`: |x| > 0.7 W, below the floor + 0.15 H, between the
+///   axles less 0.15 m;
+/// * `tunnel`: |x| < 0.25 W, below the floor + 0.25 H, between the axles;
+/// * `accel`: below the floor + 0.25 H, 20–45 % of the wheelbase ahead of the
+///   rear axle (NCAP's rear-seat cross member);
+/// * `pillar_b`: |x| > 0.5 W, above the floor + 0.4 H, within 0.2 m of the
+///   door's rear edge; `header_f`: above the floor + 0.85 H, within 0.15 m of the
+///   roof's front; `roof_rail`: the roof's left (x > 0.4 W);
+/// * `a_base_l` / `_r`: |x| > 0.5 W, below the floor + 0.45 H, within 0.15 m of
+///   the door's front edge; `firewall_l` / `_r`: 0.1–0.8 W, 0.1–0.7 H, from
+///   0.1 m behind to 0.5 m ahead of the door's front edge;
+/// * apertures: the body nodes nearest the hinge and latch pillars (the door's
+///   front and rear edges) at 0.2 H and 0.5 H, both sides.
+fn community_car(desc: &engine_softbody::desc::SoftVehicleDesc) -> Car<'static> {
+    let settled = beamng_spawn(desc, Vec3::ZERO, 2.0);
+    let n = desc.nodes.len();
+    let p = |i: u32| settled.nodes[i as usize].pos;
+    let mut body: Vec<u32> = desc
+        .parts
+        .iter()
+        .filter(|q| q.name.ends_with("_body") || q.name.ends_with("_floor"))
+        .flat_map(|q| q.nodes.iter().copied())
+        .collect();
+    body.sort_unstable();
+    body.dedup();
+    let mut ys: Vec<f32> = body.iter().map(|&i| p(i).y).collect();
+    ys.sort_by(f32::total_cmp);
+    let floor = ys[ys.len() / 10];
+    let h = ys[ys.len() - 1] - floor;
+    let w = body.iter().map(|&i| p(i).x.abs()).fold(0.0, f32::max);
+    let mut axle_z: Vec<f32> = desc.wheels.iter().map(|wh| p(wh.node1).z).collect();
+    axle_z.sort_by(f32::total_cmp);
+    let (zr, zf) = (axle_z[0], axle_z[axle_z.len() - 1]);
+    let wb = zf - zr;
+    let door: Vec<u32> = desc
+        .parts
+        .iter()
+        .find(|q| {
+            let l = q.name.to_ascii_lowercase();
+            l.ends_with("door_l") || l.ends_with("door_fl")
+        })
+        .map(|q| q.nodes.clone())
+        .unwrap_or_default();
+    let (dz0, dz1) = door
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(a, b), &i| (a.min(p(i).z), b.max(p(i).z)));
+    let pick = |f: &dyn Fn(Vec3) -> bool| -> Vec<u32> { body.iter().copied().filter(|&i| f(p(i))).collect() };
+    let y = |q: Vec3| (q.y - floor) / h;
+    let mut g = std::collections::HashMap::new();
+    for (key, side) in [("sill", 1.0f32), ("sill_r", -1.0)] {
+        g.insert(key, pick(&|q| side * q.x > 0.7 * w && y(q) < 0.15 && q.z > zr + 0.15 && q.z < zf - 0.15));
+    }
+    g.insert("tunnel", pick(&|q| q.x.abs() < 0.25 * w && y(q) < 0.25 && q.z > zr && q.z < zf));
+    g.insert("accel", pick(&|q| y(q) < 0.25 && q.z > zr + 0.2 * wb && q.z < zr + 0.45 * wb));
+    g.insert("pillar_b", pick(&|q| q.x.abs() > 0.5 * w && y(q) > 0.4 && (q.z - dz0).abs() < 0.2));
+    let roof_front = body.iter().map(|&i| p(i)).filter(|&q| y(q) > 0.85).map(|q| q.z).fold(f32::MIN, f32::max);
+    g.insert("header_f", pick(&|q| y(q) > 0.85 && q.z > roof_front - 0.15));
+    g.insert("roof_rail", pick(&|q| y(q) > 0.85 && q.x > 0.4 * w));
+    for (key, side) in [("a_base_l", 1.0f32), ("a_base_r", -1.0)] {
+        g.insert(key, pick(&|q| side * q.x > 0.5 * w && y(q) < 0.45 && (q.z - dz1).abs() < 0.15));
+    }
+    for (key, side) in [("firewall_l", 1.0f32), ("firewall_r", -1.0)] {
+        g.insert(
+            key,
+            pick(&|q| {
+                let a = side * q.x;
+                a > 0.1 * w && a < 0.8 * w && y(q) > 0.1 && y(q) < 0.7 && q.z > dz1 - 0.1 && q.z < dz1 + 0.5
+            }),
+        );
+    }
+    g.insert("door_f_l", door);
+    let nearest = |t: Vec3| -> usize {
+        body.iter().copied().min_by(|&a, &b| p(a).distance(t).total_cmp(&p(b).distance(t))).unwrap() as usize
+    };
+    // A pick the bands leave empty takes the body nodes nearest its target (each
+    // side): the B-pillar at 0.6 H on the door's rear edge, the A-pillar bases at
+    // 0.25 H on its front edge.
+    let fill = |g: &mut std::collections::HashMap<&str, Vec<u32>>, key: &'static str, targets: &[Vec3]| {
+        if g.get(key).is_none_or(|v| v.is_empty()) {
+            g.insert(key, targets.iter().map(|&t| nearest(t) as u32).collect());
+        }
+    };
+    let (yb, ya) = (floor + 0.6 * h, floor + 0.25 * h);
+    fill(&mut g, "pillar_b", &[Vec3::new(w, yb, dz0), Vec3::new(-w, yb, dz0)]);
+    fill(&mut g, "a_base_l", &[Vec3::new(w, ya, dz1)]);
+    fill(&mut g, "a_base_r", &[Vec3::new(-w, ya, dz1)]);
+    // The floor's middle: the body nodes nearest the centreline at the floor, at a
+    // quarter, half and three quarters of the wheelbase.
+    let yt = floor + 0.1 * h;
+    fill(&mut g, "tunnel", &[0.25, 0.5, 0.75].map(|f| Vec3::new(0.0, yt, zr + f * wb)));
+    let mut apertures = Vec::new();
+    for side in [1.0f32, -1.0] {
+        for fy in [0.2f32, 0.5] {
+            let yy = floor + fy * h;
+            apertures.push((
+                nearest(Vec3::new(side * w, yy, dz1 + 0.05)),
+                nearest(Vec3::new(side * w, yy, dz0 - 0.05)),
+            ));
+        }
+    }
+    for (k, v) in &g {
+        eprintln!("(community) {k}: {} nodes", v.len());
+    }
+    let mut primary = vec![false; n];
+    for q in desc.parts.iter().filter(|q| {
+        q.name.ends_with("_body") || q.name.contains("bumperbar") || q.name.ends_with("_floor")
+    }) {
+        for &i in &q.nodes {
+            primary[i as usize] = true;
+        }
+    }
+    let mut shell: Vec<u32> = desc.triangles.iter().flat_map(|t| t.nodes).collect();
+    shell.sort_unstable();
+    shell.dedup();
+    shell.retain(|&i| (i as usize) < n);
+    Car {
+        built: None,
+        along: settled.nodes[..n].iter().map(|q| q.pos.z).collect(),
+        settled: Some(settled),
+        n,
+        primary,
+        shell,
+        g,
+        apertures,
+    }
+}
+
+/// n, o, p and q on the community cars (`RUBBLE_JBEAM_COMMUNITY`; `CI_CARS`,
+/// default `etkk,ccf,vertex`; `COMMUNITY_SCENES`, default `n,o,p,q`): reported,
+/// never asserted. Skips without the content.
+#[test]
+#[ignore]
+fn community_scenes() {
+    if std::env::var("RUBBLE_JBEAM_COMMUNITY").is_err() {
+        eprintln!("skip: RUBBLE_JBEAM_COMMUNITY not set");
+        return;
+    }
+    let cars = std::env::var("CI_CARS").unwrap_or_else(|_| "etkk,ccf,vertex".into());
+    let scenes = std::env::var("COMMUNITY_SCENES").unwrap_or_else(|_| "n,o,p,q".into());
+    for c in cars.split(',') {
+        let desc = community_desc(c).expect("RUBBLE_JBEAM_COMMUNITY: car not found");
+        let car = community_car(&desc);
+        for sc in scenes.split(',') {
+            match sc {
+                "n" => eprintln!("(community {c} n) {:#?}", n_wall(&car)),
+                "o" => {
+                    let crushes: Vec<f32> = ensemble().into_iter().map(|q| side_pole_crush_p(&car, 32.0, q)).collect();
+                    let (m, sd, lo, hi) = spread(&crushes);
+                    eprintln!(
+                        "(community {c} o) side pole residual crush: mean {:.0} mm, sd {:.0}, range {:.0}–{:.0} (297–445)",
+                        m * 1e3, sd * 1e3, lo * 1e3, hi * 1e3
+                    );
+                }
+                "p" => {
+                    let (peak, fails) = p_door_crush(&car);
+                    eprintln!("(community {c} p) peak {:.1} kN; {fails:?}", peak / 1e3);
+                }
+                "q" => eprintln!("(community {c} q) roof {:.2} × weight (4.48–5.32)", q_roof_crush(&car)),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// How a car damps its light nodes (a measurement, `--ignored`): per part,
 /// its nodes split at the part's median mass, and for each half the median
 /// node mass, the median damping ratio of its spring beams on their own
@@ -8596,6 +8815,370 @@ fn light_node_damping() {
                 v.iter().map(|&i| dash[i]).sum::<usize>() as f32 / v.len() as f32,
                 med(v.iter().map(|&i| csum[i] / s.nodes[i].mass).collect()),
             );
+        }
+    }
+}
+
+/// The crushed car settles (jbeam-semantics-spec.md §37): sedan1 into the wall at
+/// 51 km/h (drag on), then at rest to 12 s. The beam-tyre car has no brake (the
+/// solver simulates none outside raycast drive: `brakeTorque` is unsimulated), so
+/// its free wheels may roll and the body is judged by its nodes' motion relative
+/// to the body's own rigid motion (wheels left out: their spin is free).
+///
+/// Bounds (stated, measured 2026-11-06): from 3 s, the most kinetic energy within
+/// each two seconds never exceeds the two before's (a crushed part settling can
+/// lift one second's: 13.7 → 18.7 J in the 7th); over the 12th second the body's
+/// relative rms speed (mass-weighted) is below 80 mm/s and no body node moves
+/// faster than 2.5 m/s relative (guards on the measured floor, not targets). The step's quantisation floor is reported beside
+/// them: a node's position in single precision at the car's farthest coordinate
+/// moves by whole ulps, ulp/h of speed, and a contact step by 2⁻²⁴ m, 2⁻²⁴/h
+/// (about 1 and 0.12 mm/s: the stated floor). Measured with the residual pass and
+/// the work guard (§37.1): rms 36 mm/s, fastest 0.85 m/s, the most kinetic energy
+/// per second 213 J in the 3rd second to 3.4 J in the 12th. Above the floor is a
+/// two- to three-node tangle of the crushed bonnet and body (mutual hits with
+/// conflicting normals). RoR's push kept +5 J per tenth and 130 mm/s here; §37
+/// without the residual pass sloshed 800 J/s between contact and steps.
+#[test]
+fn crushed_car_settles() {
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let car = Car::of(&b);
+    let mut s = wall_spawn(&car, 51.0, true, Perturb::default());
+    assert!(s.dissipative_contact, "the BeamNG profile");
+    let body = b.skeleton.nodes.len();
+    let per_second = (1.0 / STEP).round() as usize;
+    let mut most_ke = Vec::new();
+    let (mut ke_max, mut rms_last, mut fast_last) = (0.0f64, 0.0f64, 0.0f32);
+    for k in 1..=12 * per_second {
+        s.step();
+        let ke: f64 = s
+            .nodes
+            .iter()
+            .map(|n| 0.5 * f64::from(n.mass) * f64::from(n.vel.length_squared()))
+            .sum();
+        ke_max = ke_max.max(ke);
+        if k > 11 * per_second {
+            let (vc, om, com) = rigid_motion_of(&s.nodes[..body]);
+            let (mut rel, mut total) = (0.0f64, 0.0f64);
+            for n in &s.nodes[..body] {
+                let r = n.vel - vc - om.cross(n.pos - com);
+                rel += f64::from(n.mass) * f64::from(r.length_squared());
+                total += f64::from(n.mass);
+                fast_last = fast_last.max(r.length());
+            }
+            rms_last = rms_last.max((rel / total).sqrt());
+        }
+        if k % per_second == 0 {
+            most_ke.push(ke_max);
+            ke_max = 0.0;
+        }
+    }
+    let far = s
+        .nodes
+        .iter()
+        .map(|n| (s.origin + n.pos).abs().max_element())
+        .fold(0.0f32, f32::max);
+    let ulp = f32::from_bits(far.to_bits() + 1) - far;
+    let floor = (ulp / STEP).max(1.0 / 16_777_216.0 / STEP);
+    eprintln!(
+        "(settle) the most kinetic energy per second (J): {:?}; over the 12th second relative rms {:.2} mm/s, fastest relative {:.1} mm/s; quantisation floor {:.3} mm/s ({:.0}× below the rms)",
+        most_ke.iter().map(|e| format!("{e:.3}")).collect::<Vec<_>>(),
+        rms_last * 1e3,
+        fast_last * 1e3,
+        floor * 1e3,
+        rms_last / f64::from(floor)
+    );
+    // Seconds 3–4, 5–6, …, 11–12.
+    let pairs: Vec<f64> = (2..most_ke.len())
+        .step_by(2)
+        .map(|t| most_ke[t].max(*most_ke.get(t + 1).unwrap_or(&0.0)))
+        .collect();
+    for k in 1..pairs.len() {
+        assert!(
+            pairs[k] <= pairs[k - 1],
+            "kinetic energy rose in seconds {}–{}: {} J after {} J",
+            2 * k + 3,
+            2 * k + 4,
+            pairs[k],
+            pairs[k - 1]
+        );
+    }
+    assert!(rms_last < 0.08, "relative rms {rms_last} m/s over the 12th second");
+    assert!(fast_last < 2.5, "a body node at {fast_last} m/s relative over the 12th second");
+}
+
+/// A measurement (`--ignored`): sedan1 into the wall at `SETTLE_KMH` (51), then
+/// at rest to `SETTLE_S` (12) s; per second the most kinetic energy, the most
+/// kinetic energy relative to the car's rigid motion, the relative rms speed, the
+/// fastest relative node, and the world ledger's self-contact, position-step and
+/// ground terms over the second.
+#[test]
+#[ignore]
+fn settle_probe() {
+    use engine_softbody::explicit_contact::ExplicitBeamsWorld;
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let car = Car::of(&b);
+    let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let s = wall_spawn(&car, env("SETTLE_KMH", 51.0), true, Perturb::default());
+    let mut s = s;
+    if std::env::var("SETTLE_TRACE").is_ok() || std::env::var("SETTLE_HITS").is_ok() {
+        s.self_hit_log = Some(Vec::new());
+    }
+    let mut w = ExplicitBeamsWorld::new(vec![s]);
+    w.enable_ledger();
+    let per_second = (1.0 / STEP).round() as usize;
+    let terms = |w: &ExplicitBeamsWorld| {
+        let l = w.ledger.as_ref().unwrap();
+        [
+            l.w_self_contact,
+            l.w_contact_shift,
+            l.w_ground_vertical + l.w_ground_horizontal,
+            l.w_ground_shift,
+            l.w_beams,
+            l.beam_dissipation(),
+            l.w_air,
+            l.w_gravity,
+            l.w_slides,
+        ]
+    };
+    let mut last = terms(&w);
+    let secs = env("SETTLE_S", 12.0) as usize;
+    let (mut tail_rel, mut tail_slosh, mut tail_n) = (0.0f64, 0.0f64, 0usize);
+    let (mut ke_max, mut rel_max, mut rms_max, mut fast) = (0.0f64, 0.0f64, 0.0f64, 0.0f32);
+    let mut fast_at = (0usize, 0usize, 0.0f32, 0.0f32);
+    for k in 1..=(env("SETTLE_S", 12.0) as usize) * per_second {
+        w.step();
+        let s = &w.vehicles[0];
+        let body = b.skeleton.nodes.len();
+        let (vc, om, com) = rigid_motion_of(&s.nodes[..body]);
+        let total: f64 = s.nodes[..body].iter().map(|n| f64::from(n.mass)).sum();
+        let (mut ke, mut rel) = (0.0f64, 0.0f64);
+        for (i, n) in s.nodes[..body].iter().enumerate() {
+            ke += 0.5 * f64::from(n.mass) * f64::from(n.vel.length_squared());
+            let r = n.vel - vc - om.cross(n.pos - com);
+            rel += 0.5 * f64::from(n.mass) * f64::from(r.length_squared());
+            if r.length() > fast {
+                fast = r.length();
+                fast_at = (k, i, n.mass, s.origin.y + n.pos.y - s.ground);
+            }
+        }
+        if let Some(t) = std::env::var("SETTLE_TRACE").ok().and_then(|x| x.parse::<usize>().ok()) {
+            if k + 6 > (env("SETTLE_S", 12.0) as usize) * per_second {
+                let n = &s.nodes[t];
+                let hits: Vec<_> = s
+                    .self_hit_log
+                    .iter()
+                    .flatten()
+                    .filter(|h| h.0 as usize == t || h.1.contains(&(t as u32)))
+                    .collect();
+                eprintln!(
+                    "(trace {t}) step {k}: pos {:?} vel {:?} force {:?} shift {:?}; hits {:?}",
+                    n.pos,
+                    n.vel,
+                    s.force_now(t),
+                    s.shift_applied.get(t),
+                    hits
+                );
+            }
+        }
+        if std::env::var("SETTLE_HITS").is_ok() && k % per_second == 0 {
+            eprintln!("(settle hits) {}", s.self_hit_log.as_ref().map_or(0, |l| l.len()));
+        }
+        if std::env::var("SETTLE_WHO").is_ok() && k % per_second == 0 {
+            let mut v: Vec<(usize, f32)> = s
+                .nodes[..body]
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (i, 0.5 * n.mass * (n.vel - vc - om.cross(n.pos - com)).length_squared()))
+                .collect();
+            v.sort_by(|a, c| c.1.total_cmp(&a.1));
+            let part = |i: usize| {
+                if i < b.skeleton.nodes.len() {
+                    b.skeleton.parts[b.skeleton.nodes[i].part as usize].clone()
+                } else {
+                    format!("wheel+{}", i - b.skeleton.nodes.len())
+                }
+            };
+            eprintln!(
+                "(settle who) {:?}",
+                v[..12]
+                    .iter()
+                    .map(|&(i, x)| (i, part(i), x, s.nodes[i].mass, s.origin.y + s.nodes[i].pos.y - s.ground))
+                    .collect::<Vec<_>>()
+            );
+        }
+        ke_max = ke_max.max(ke);
+        rel_max = rel_max.max(rel);
+        if k > (secs - 4) * per_second {
+            tail_rel += rel;
+            tail_n += 1;
+        }
+        rms_max = rms_max.max((2.0 * rel / total).sqrt());
+        if k % per_second == 0 {
+            let now = terms(&w);
+            eprintln!(
+                "(settle) to {:2} s: kinetic {:.3e} J, relative {:.3e} J, relative rms {:.3} mm/s, fastest relative {:.2} mm/s {:?}, com {:.3} mm/s; self-contact {:+.3} J, steps {:+.3} J, ground {:+.3} J, ground steps {:+.3} J",
+                k / per_second,
+                ke_max,
+                rel_max,
+                rms_max * 1e3,
+                fast * 1e3,
+                (fast_at, b.skeleton.nodes.get(fast_at.1).map(|n| b.skeleton.parts[n.part as usize].clone())),
+                vc.length() * 1e3,
+                now[0] - last[0],
+                now[1] - last[1],
+                now[2] - last[2],
+                now[3] - last[3]
+            );
+            eprintln!(
+                "(settle terms) beams {:+.3} J (dissipation {:+.3}), air {:+.3}, gravity {:+.3}, slides {:+.3}",
+                now[4] - last[4],
+                now[5] - last[5],
+                now[6] - last[6],
+                now[7] - last[7],
+                now[8] - last[8]
+            );
+            if k > (secs - 4) * per_second {
+                tail_slosh += (now[0] - last[0]).abs();
+            }
+            last = now;
+            (ke_max, rel_max, rms_max, fast) = (0.0, 0.0, 0.0, 0.0);
+        }
+    }
+    eprintln!(
+        "(settle summary) last 4 s: mean relative kinetic {:.4} J, self-contact work {:.2} J/s",
+        tail_rel / tail_n as f64,
+        tail_slosh / 4.0
+    );
+}
+
+/// A measurement (`--ignored`): [`contact_work_tenths`] of one wall run at
+/// `CW_KMH` (47; comma-separated), drag on, `CW_S` (2) s.
+#[test]
+#[ignore]
+fn contact_work_probe() {
+    use engine_softbody::explicit_contact::ExplicitBeamsWorld;
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let car = Car::of(&b);
+    let secs: f32 = std::env::var("CW_S").ok().and_then(|x| x.parse().ok()).unwrap_or(2.0);
+    let kmhs = std::env::var("CW_KMH").unwrap_or_else(|_| "47".into());
+    for kmh in kmhs.split(',').filter_map(|x| x.parse::<f32>().ok()) {
+        for drag in [true, false] {
+            let s = wall_spawn(&car, kmh, drag, Perturb::default());
+            let mut w = ExplicitBeamsWorld::new(vec![s]);
+            let [sc, vc, sh, all, rest] = contact_work_tenths(&mut w, secs, 1.0);
+            eprintln!(
+                "(cw {kmh} drag {drag}) self {sc:+.4} vehicle {vc:+.4} steps {sh:+.4} together {all:+.4} after {rest:+.4}"
+            );
+        }
+    }
+}
+
+/// A measurement (`--ignored`): one wall run (`CW_KMH`, 56; `CW_DRAG`, 0) through
+/// the world ledger, per tenth: self-contact work by phase (first pass normal and
+/// friction, residual pass; each force at the node's mean velocity over the node
+/// pass that applies it), the position steps' stored energy, and the ledger's
+/// "together"; with `CW_TOP=k` the k nodes of most positive contact work in each
+/// tenth whose together is positive.
+#[test]
+#[ignore]
+fn contact_parts_probe() {
+    use engine_softbody::explicit_contact::ExplicitBeamsWorld;
+    let b = build(
+        &style("sedan1").unwrap(),
+        &BuildParams {
+            resolution: Resolution::Medium,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let car = Car::of(&b);
+    let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (kmh, drag, secs) = (env("CW_KMH", 56.0), env("CW_DRAG", 0.0) != 0.0, env("CW_S", 2.0));
+    let top = env("CW_TOP", 0.0) as usize;
+    let mut s = wall_spawn(&car, kmh, drag, Perturb::default());
+    s.self_contact_parts = Some(Vec::new());
+    let mut w = ExplicitBeamsWorld::new(vec![s]);
+    w.enable_ledger();
+    let n = w.vehicles[0].nodes.len();
+    let tenth = (0.1 / STEP).round() as usize;
+    let terms = |w: &ExplicitBeamsWorld| {
+        let l = w.ledger.as_ref().unwrap();
+        (l.w_self_contact, l.w_contact_shift)
+    };
+    let mut last = terms(&w);
+    let mut ph = [0.0f64; 3];
+    let mut per_node = vec![[0.0f64; 3]; n];
+    for k in 1..=(secs / STEP).round() as usize {
+        let v = &w.vehicles[0];
+        let parts = v.self_contact_parts.clone().unwrap_or_default();
+        let v0: Vec<Vec3> = v.nodes.iter().map(|x| x.vel).collect();
+        w.step();
+        let v = &w.vehicles[0];
+        for (i, p) in parts.iter().enumerate() {
+            let dx = ((v.nodes[i].vel + v0[i]) * (0.5 * STEP)).as_dvec3();
+            for j in 0..3 {
+                let e = p[j].as_dvec3().dot(dx);
+                ph[j] += e;
+                per_node[i][j] += e;
+            }
+        }
+        if k % tenth == 0 {
+            let now = terms(&w);
+            let (sc, sh) = (now.0 - last.0, now.1 - last.1);
+            let together = sc + sh - 2e-2 * sh.abs();
+            eprintln!(
+                "(parts {:.1} s) normal {:+.3} friction {:+.3} residual {:+.3} (sum {:+.3}; ledger self {:+.3}) steps {:+.3} together {:+.3}",
+                k as f32 * STEP,
+                ph[0],
+                ph[1],
+                ph[2],
+                ph[0] + ph[1] + ph[2],
+                sc,
+                sh,
+                together
+            );
+            if top > 0 && together > 0.0 {
+                let mut idx: Vec<usize> = (0..n).collect();
+                idx.sort_by(|&a, &c| {
+                    let sa: f64 = per_node[a].iter().sum();
+                    let sc: f64 = per_node[c].iter().sum();
+                    sc.total_cmp(&sa)
+                });
+                for &i in &idx[..top] {
+                    eprintln!(
+                        "    node {i} ({:?}, {:.3} kg): normal {:+.4} friction {:+.4} residual {:+.4}",
+                        b.skeleton.nodes.get(i).map(|x| b.skeleton.parts[x.part as usize].clone()),
+                        v.nodes[i].mass,
+                        per_node[i][0],
+                        per_node[i][1],
+                        per_node[i][2]
+                    );
+                }
+            }
+            last = now;
+            ph = [0.0; 3];
+            per_node.iter_mut().for_each(|x| *x = [0.0; 3]);
         }
     }
 }

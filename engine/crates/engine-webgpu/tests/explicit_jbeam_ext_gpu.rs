@@ -283,3 +283,68 @@ fn jbeam_mode_steps_bit_for_bit() {
         check(name, s, steps);
     }
 }
+
+/// Node couplers (spec §7.1, `jbeam_fixture::NODE_COUPLERS`): the lid thrown off its
+/// body, the active latch breaking by strength and setting off its group, the passive
+/// coupler in two groups (an extension record) broken by its second group: CPU and
+/// GPU bit for bit every step.
+#[test]
+fn node_couplers_step_bit_for_bit() {
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let d = load_jbeam(
+        &[("nc.jbeam", engine_softbody::jbeam_fixture::NODE_COUPLERS)],
+        None,
+    )
+    .unwrap();
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        drag: false,
+        ..Default::default()
+    };
+    let (mut cpu, _) = ExplicitBeams::from_desc_jbeam(
+        &d,
+        TyreDefaults::default(),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::ZERO,
+        settings,
+    )
+    .unwrap();
+    for (i, n) in d.nodes.iter().enumerate() {
+        if n.name.starts_with('l') {
+            cpu.nodes[i].vel.y += 3.0;
+        }
+    }
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    for step in 0..800 {
+        cpu.step();
+        gpu.frame(1);
+        let (gp, gv) = (&gpu.positions()[0], &gpu.velocities()[0]);
+        let cp = cpu.positions();
+        for i in 0..cpu.nodes.len() {
+            assert!(
+                cp[i].to_array().map(f32::to_bits) == gp[i].to_array().map(f32::to_bits)
+                    && cpu.nodes[i].vel.to_array().map(f32::to_bits)
+                        == gv[i].to_array().map(f32::to_bits),
+                "step {step} node {i}: CPU {:?} GPU {:?}",
+                cp[i],
+                gp[i]
+            );
+        }
+    }
+    gpu.wait();
+    let gb: Vec<bool> = gpu.beams()[0].iter().map(|b| b.broken).collect();
+    assert_eq!(cpu.beams.iter().map(|b| b.broken).collect::<Vec<_>>(), gb);
+    let couplers = cpu
+        .beams
+        .iter()
+        .filter(|b| b.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamCoupler)
+        .count();
+    assert!(cpu.beams.iter().filter(|b| b.broken).count() >= couplers + 2);
+    eprintln!(
+        "node couplers: 800 steps bit for bit, {} broken",
+        gb.iter().filter(|&&b| b).count()
+    );
+}

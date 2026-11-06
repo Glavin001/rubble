@@ -303,7 +303,8 @@ float4 cplFastSide(uint v, uint k, float3 vel, float4 n4)
     return float4(normalize(d), 1.0);
 }
 
-// The two-body contact on a node of vehicle v at world x (force f so far, velocity vel,
+// The two-body contact on a node of vehicle v at x (vehicle-local: relative to its
+// origin, as every proxy record is) (force f so far, velocity vel,
 // mass, friction) from every proxy shape it is inside, in shape order; the reactions are
 // summed into the shapes' accumulators. Returns the node's force with them added.
 // `local`: the node's index in its vehicle (its count pass range, cplGsNodes).
@@ -555,6 +556,27 @@ void cplIntegrateBodySplit(uint v, uint j)
     gAcc[acc + j].store(0);
 }
 
+// The origin rebase moved vehicle v's origin by `first`: its proxy records (bodies'
+// centres, shapes' reference points: relative to the origin) move back by it. Every
+// lane, inside the rebase's branch (no barrier; the rebase's own follows).
+void cplRebase(uint v, uint lane, float3 first)
+{
+    if (gMisc[coupleRec()].x == 0u) return;
+    uint4 hdr = gMisc[cplBase(v)];
+    for (uint j = lane, jStop = EB_END(j, hdr.x, LANES); j < jStop; j += LANES)
+    {
+        uint b = cplBody(v, j);
+        float4 c = asfloat(gMisc[b]);
+        gMisc[b] = asuint(float4(c.xyz - first, c.w));
+    }
+    for (uint k = lane, kStop = EB_END(k, hdr.y, LANES); k < kStop; k += LANES)
+    {
+        uint at = cplShape(v, k) + 6u;
+        float4 r = asfloat(gMisc[at]);
+        gMisc[at] = asuint(float4(r.xyz - first, r.w));
+    }
+}
+
 // Every lane: its nodes against the proxy shapes, each inside counted on its body.
 void cplCount(uint v, uint lane)
 {
@@ -577,7 +599,8 @@ void cplCountBy(uint v, uint lane, uint lanes)
         uint range = CPL_NONE;
         if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) == 0u)
         {
-            float3 x = origin + gNodes[gi * 3u].xyz;
+            // Vehicle-local, as the proxy records (relative to the vehicle's origin).
+            float3 x = gNodes[gi * 3u].xyz;
             for (uint k = 0u, kStop = EB_END(k, hdr.y, 1u); k < kStop; k++)
             {
                 if (cplMay(v, k, x, cull, gr) && cplFace(v, k, x).w != 0.0)
@@ -723,6 +746,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     clipRoll(gi, flagsV);
     if (gP.selfSplit != 0u && (flagsV & FLAG_TWO_BODY) != 0u) gAcc[gP.selfSplit + gi].store(0);
     float3 shift = shiftTake(gi, flagsV); // §37's contact position step
+    float lift = 0.0; // §37's ground position step
     float selfGroup = gNodes[gi * 3u + 2u].w;
     float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, info, beamOff, groupOff, groupCount, (step + 1u) & 1u, true);
     if (hits)
@@ -753,7 +777,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
         }
         else if (ground > x.y)
         {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
+            float3 c = groundContact(f, vel, mass, vehicle, ground - x.y, V.w, lift);
             cfAdd(gi, c);
             f += c;
         }
@@ -787,9 +811,9 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
         }
 #ifdef EB_ABLATE
         // Measurement only: 65536 the node's proxy contact.
-        float3 fr = (gP.ablate & 65536u) != 0u ? f : cplContacts(vehicle, local, x, f, vel, mass, V.w);
+        float3 fr = (gP.ablate & 65536u) != 0u ? f : cplContacts(vehicle, local, pos, f, vel, mass, V.w);
 #else
-        float3 fr = cplContacts(vehicle, local, x, f, vel, mass, V.w);
+        float3 fr = cplContacts(vehicle, local, pos, f, vel, mass, V.w);
 #endif
         cfAdd(gi, fr - f);
         f = fr;
@@ -798,7 +822,7 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
     {
         vel = sadd3(vel, sscale(sdiv3(f, mass), STEP));
         pos = sadd3(pos, sscale(vel, STEP));
-        pos = sadd3(pos, shift);
+        pos = takeSteps(pos, shift, lift);
     }
     clipSpeed(vehicle, step, flagsV, vel);
 #ifdef EB_AERO

@@ -15,6 +15,7 @@ const QUIET: ExplicitBeamsSettings = ExplicitBeamsSettings {
     drag: false,
     turbulence: false,
     triangle_throttle: false,
+    centred_damping: false,
 };
 
 /// A 0.6 m square plate in y = 1 (two triangles, nodes at its corners), no ground.

@@ -108,6 +108,7 @@ body.lab-on:not(.lab-clean) #labCounts { left: auto; right: 22px; bottom: 146px;
  * @param {() => void} ctx.restart rebuild the scene
  * @param {(e: any) => void} ctx.fail
  * @param {boolean} [ctx.drive] the scene is driven (WASD, Space handbrake, chase camera)
+ * @param {any} ctx.pacer the page's FramePacer (engine-world-wasm): steps per displayed frame
  */
 export function createCrashLab(ctx) {
   const { qs, canvas, renderer } = ctx;
@@ -132,7 +133,6 @@ export function createCrashLab(ctx) {
     slow: slowParam === 'auto' ? Number(P('autoSlow', 20)) : Math.max(1, Number(slowParam) || 1),
     paused: qs.get('paused') === '1',
     pending: 0, // steps queued by the step buttons
-    acc: 0,
     impactStep: null,
     lastState: null,
     reads: 0,
@@ -215,7 +215,8 @@ export function createCrashLab(ctx) {
   $('labPreset').onchange = (e) => {
     const [kind, k] = e.target.value.split(':');
     if (kind === 's') { location.href = ctx.sceneUrl(k); return; }
-    const u = new URL(location.href); const keep = ['car', 'truck', 'tyres', 'drag', 'surfaceContact']; const s = new URLSearchParams(); s.set('solver', 'explicit'); s.set('preset', k); for (const x of keep) if (qs.has(x)) s.set(x, qs.get(x)); u.search = s.toString(); location.href = u.href;
+    // The page's vehicle and options (softbody.html keepVehicle) carry across.
+    const u = new URL(location.href); const s = new URLSearchParams(); window.__keepVehicle?.(s); s.set('solver', 'explicit'); s.set('preset', k); u.search = s.toString(); location.href = u.href;
   };
   $('labPlay').onclick = (e) => { playPause(); blur(e); };
   $('labFrame').onclick = (e) => { frameStep(); blur(e); };
@@ -269,8 +270,11 @@ export function createCrashLab(ctx) {
     const tail = 'FROM THE SIMULATION';
     if (st.replay >= 0) return `REPLAY · ${tail}`;
     if (st.paused) return `PAUSED · ${tail}`;
-    const slow = st.auto && st.impactStep == null ? 1 : st.slow;
-    return `${slow === 1 ? 'REAL TIME' : `${slow}x SLOWER`} · ${tail}`;
+    const slow = slowNow();
+    // Below real pace (a GPU that cannot keep up: the steps capped): the share shown.
+    const sp = ctx.pacer.speed();
+    const pace = sp < 0.97 ? ` · ${Math.round(sp * 100)} % PACE (GPU)` : '';
+    return `${slow === 1 ? 'REAL TIME' : `${slow}x SLOWER`}${pace} · ${tail}`;
   };
   /** The time readout: ms from the first impact (− before it), else time since the start. */
   function timeText(step) {
@@ -303,20 +307,19 @@ export function createCrashLab(ctx) {
   function physicsStep() { st.replay = -1; st.paused = true; st.pending += 1; syncPanel(); }
   function restart() {
     releaseGrab();
-    st.impactStep = null; st.ring = []; st.ringBytes = 0; st.replay = -1; st.acc = 0; st.pending = 0; st.lastState = null; st.focus = null;
+    st.impactStep = null; st.ring = []; st.ringBytes = 0; st.replay = -1; st.pending = 0; st.lastState = null; st.focus = null; st.focusAt = null;
     ctx.restart();
+    ctx.pacer.reset(slowNow());
     syncPanel();
   }
-  /** Steps to take this displayed frame (`dt` wall seconds), at most `max`. */
+  /** The slow-motion factor asked for now (auto: real time until the impact). */
+  const slowNow = () => (st.auto && st.impactStep == null ? 1 : st.slow);
+  /** Steps to take this displayed frame (`dt` wall seconds), at most `max`: the
+   * page's FramePacer (Rust: accumulator, caps, eased slow motion). */
   function stepsFor(dt, max) {
     if (st.replay >= 0) return 0;
     if (st.paused) { const k = Math.min(st.pending, max); st.pending -= k; return k; }
-    const slow = st.auto && st.impactStep == null ? 1 : st.slow;
-    st.acc += Math.max(0, dt) * STEP_RATE / slow;
-    const per = STEP_RATE / 60 / slow;
-    const k = Math.max(0, Math.min(Math.floor(st.acc), Math.ceil(2 * per), max));
-    st.acc = Math.min(st.acc - k, Math.max(1, per));
-    return k;
+    return ctx.pacer.advance(dt, slowNow(), max);
   }
   /** Chunks of a frame's steps: before the impact in auto mode, small chunks so the
    * impact read lands within a few milliseconds of it. */
@@ -353,7 +356,16 @@ export function createCrashLab(ctx) {
     let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
     for (let i = 0; i < p.length; i += 3) for (let a = 0; a < 3; a++) { const x = p[i + a]; if (x < lo[a]) lo[a] = x; if (x > hi[a]) hi[a] = x; }
     const c = lo.map((x, a) => (x + hi[a]) / 2);
-    if (c.every(Number.isFinite)) {
+    if (c.every(Number.isFinite) && (!st.focusAt || s.step >= st.focusAt.step)) {
+      // The focus's velocity from the previous read (the camera carries the focus
+      // forward to the step on display: reads arrive a few frames late).
+      // Over at least 24 steps (reads come every 8 or 17 steps before the impact:
+      // the box centre of a deforming body is noisy over fewer).
+      const f = st.focusAt, ref = f?.ref && s.step - f.ref.step <= 400 ? f.ref : f;
+      const dstep = ref ? s.step - ref.step : 0;
+      const vel = dstep > 0 ? c.map((x, a) => (x - ref.p[a]) * STEP_RATE / dstep) : (f?.v ?? [0, 0, 0]);
+      const keep = ref && s.step - ref.step < 24 ? ref : { p: c, step: s.step };
+      st.focusAt = { p: c, v: dstep >= 24 || !f?.v ? vel : f.v, step: s.step, ref: keep };
       st.focus = c;
       st.size = Math.max(4, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
     }
@@ -492,25 +504,40 @@ export function createCrashLab(ctx) {
   syncPanel();
   let camSet = false;
 
+  /** The orbit cameras follow the focus. A live frame (`ahead`: its lead, the
+   * simulated seconds it shows past the last step) follows it where it is on
+   * display: the last read carried forward by its velocity (at most 0.1 s).
+   * Otherwise (`ahead` null: automation, frame-stepped; a replay) as read.
+   * `spin` radians of yaw. */
+  function followFocus(spin = 0, ahead = null) {
+    if (!st.focus || st.cam === 'follow') return;
+    const f = st.focusAt;
+    const lead = f && ahead != null && st.replay < 0 ? Math.min(0.1, Math.max(0, ctx.sim().steps() - f.step) / STEP_RATE + ahead) : 0;
+    const p = lead > 0 ? f.p.map((x, a) => x + f.v[a] * lead) : st.focus;
+    ctx.setOrbit({ follow: p, spin });
+  }
+
   return {
     st,
     stepsFor,
+    followFocus,
     chunks,
     read,
-    /** Per displayed frame (before drawing): replay upload or live gather, HUD, camera. */
-    beforeDraw(enc, dt) {
+    /** Per displayed frame (before drawing): replay upload or live gather (`lead`
+     * simulated seconds past the last step: FramePacer.lead), HUD, camera. */
+    beforeDraw(enc, dt, lead = null) {
       if (st.replay >= 0 && st.ring[st.replay]) renderer.upload(st.ring[st.replay]);
-      else renderer.gather(enc);
+      else renderer.gather(enc, st.paused || lead == null ? 0 : lead);
       if (st.focus) {
         renderer.set({ focus: [st.focus[0], st.focus[2]] });
         if (!camSet) { camSet = true; camera(st.cam, st.camZoom ?? 1, st.camYaw ?? null); }
-        if (st.cam !== 'follow') ctx.setOrbit({ follow: st.focus, spin: st.spin ? dt * 0.12 : 0 });
+        followFocus(st.spin ? dt * 0.12 : 0, st.paused && lead != null ? 0 : lead);
       }
       if (st.grab) applyGrab();
       updateHud();
     },
     /** The scene was rebuilt (restart): rebind and recount. */
-    rebuilt() { renderer.setSim(ctx.sim(), ctx.layout()); counts(); legend(); },
+    rebuilt() { st.focusAt = null; renderer.setSim(ctx.sim(), ctx.layout()); counts(); legend(); },
     timeText,
     /** The solver step on display (the replayed frame's, else the live one). */
     shownStep: () => (st.replay >= 0 && st.ring[st.replay] ? st.ring[st.replay].step : ctx.sim().steps()),

@@ -551,6 +551,9 @@ pub struct MatInfo {
     pub normal_map: Option<String>,
     pub roughness_map: Option<String>,
     pub ao_map: Option<String>,
+    /// A stage takes the vehicle's paint (BeamNG's `instanceDiffuse`): the body
+    /// paint, whatever its colour map holds under it.
+    pub paint: bool,
 }
 
 /// Read a `*.materials.json` (relaxed JSON): every material by its `mapTo`
@@ -582,7 +585,11 @@ pub fn read_materials(src: &str) -> HashMap<String, MatInfo> {
         let emissive = f("glow").and_then(Value::as_bool).unwrap_or(false)
             || f("emissive").and_then(Value::as_bool).unwrap_or(false)
             || f("emissiveFactor").is_some_and(|x| x.is_array());
-        let info = MatInfo { color, translucent, emissive, textured, color_map, normal_map, roughness_map, ao_map };
+        let paint = v
+            .get("Stages")
+            .and_then(Value::as_array)
+            .is_some_and(|st| st.iter().any(|s| s.get("instanceDiffuse").and_then(Value::as_bool) == Some(true)));
+        let info = MatInfo { color, translucent, emissive, textured, color_map, normal_map, roughness_map, ao_map, paint };
         if let Some(t) = v.get("mapTo").and_then(Value::as_str) {
             out.insert(t.to_string(), info.clone());
         }
@@ -677,7 +684,10 @@ pub fn jbeam_visual(
         }
         // A colour-mapped material is not the body paint (paint is a flat
         // colour): it shades satin with its map (carbon, fabric, wood, dials).
-        if mi.textured && c == mat::PAINT {
+        if mi.paint && !mi.translucent && !mi.emissive {
+            // BeamNG's paint flag (`instanceDiffuse`): the vehicle's paint.
+            c = mat::PAINT;
+        } else if mi.textured && c == mat::PAINT {
             c = mat::DASH;
         }
         if mi.emissive {
@@ -877,6 +887,75 @@ pub fn jbeam_visual(
                         .map(|i| i as u32),
                 );
             }
+            // On raycast wheels (no wheel nodes: the solver has the desc's nodes
+            // only) a wheel's pieces (groups `wheel*`, `tire*`) ride its drive wheel
+            // (`skin::bind_raycast_wheels`): placed rigidly on its hub nodes here,
+            // marked with their wheel (a caliper or brake hardware does not spin).
+            let mut on_wheel: Option<u32> = None;
+            let wheel_groups = groups.iter().any(|g| {
+                let l = g.to_ascii_lowercase();
+                l.starts_with("wheel") || l.contains("tire") || l.contains("tyre")
+            });
+            if wheel_groups && sim_nodes.len() == desc.nodes.len() {
+                let suffix: Vec<String> = groups.iter().filter_map(|g| g.rsplit('_').next().map(str::to_string)).collect();
+                on_wheel = desc
+                    .pressure_wheels
+                    .iter()
+                    .find(|w| suffix.iter().any(|s| w.name.ends_with(s.as_str())))
+                    .and_then(|w| {
+                        desc.wheels.iter().position(|d| {
+                            (d.node1, d.node2) == (w.node1, w.node2) || (d.node1, d.node2) == (w.node2, w.node1)
+                        })
+                    })
+                    .map(|k| k as u32);
+            }
+            if let Some(k) = on_wheel {
+                let wh = &desc.wheels[k as usize];
+                let (Some(a), Some(b)) = (sim_of[wh.node1 as usize], sim_of[wh.node2 as usize]) else {
+                    rep.missing.push(format!("{mesh}: its wheel's hub nodes are not in the solver"));
+                    continue;
+                };
+                let c = (0..sim_nodes.len() as u32).find(|&i| i != a && i != b).unwrap_or(a);
+                if out.tyre_axles.is_empty() {
+                    out.tyre_axles = desc
+                        .wheels
+                        .iter()
+                        .map(|d| [sim_of[d.node1 as usize].unwrap_or(0), sim_of[d.node2 as usize].unwrap_or(0)])
+                        .collect();
+                }
+                let t = vec3_of(row.get("pos"), Vec3::ZERO);
+                let r = vec3_of(row.get("rot"), Vec3::ZERO);
+                let sc = vec3_of(row.get("scale"), Vec3::ONE);
+                let xf = Mat4::from_scale_rotation_translation(
+                    sc,
+                    Quat::from_euler(glam::EulerRot::XYZ, r.x.to_radians(), r.y.to_radians(), r.z.to_radians()),
+                    t,
+                );
+                let first = out.positions.len();
+                add(&format!("{pname}:{mesh}"), m, xf, &pool, Some([a, b, c]), None, &mut out, &mut rep);
+                // BeamNG places a wheel's meshes on its wheel (they are modelled
+                // about their own origin, not where the car's wheel is): a piece
+                // whose bounding box's centre is off its wheel's centre by more than
+                // 0.15 m is moved there (each piece by its own box: a caliper
+                // modelled off the axle stays put).
+                let centre = 0.5 * (sim_nodes[a as usize] + sim_nodes[b as usize]);
+                let (lo, hi) = out.positions[first..].iter().fold(
+                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                    |(lo, hi), q| (lo.min(Vec3::from_array(*q)), hi.max(Vec3::from_array(*q))),
+                );
+                if first < out.positions.len() {
+                    let off = centre - 0.5 * (lo + hi);
+                    let shift = if off.length() > 0.15 { off } else { Vec3::ZERO };
+                    for q in &mut out.positions[first..] {
+                        *q = (Vec3::from_array(*q) + shift).to_array();
+                    }
+                }
+                let lower = mesh.to_ascii_lowercase();
+                let hub = u32::from(lower.contains("caliper") || lower.contains("brake"));
+                out.wheel.resize(first, u32::MAX);
+                out.wheel.resize(out.positions.len(), k << 1 | hub);
+                continue;
+            }
             if pool.len() < 3 && wheel_pool.len() < 3 {
                 rep.missing.push(format!("{mesh}: groups {groups:?} have {} nodes", pool.len()));
                 continue;
@@ -1051,6 +1130,9 @@ pub fn jbeam_visual(
         .collect();
     out.textures = textures;
     out.data_textures = data_textures;
+    if !out.wheel.is_empty() {
+        out.wheel.resize(out.positions.len(), u32::MAX);
+    }
     Ok((out, rep))
 }
 
