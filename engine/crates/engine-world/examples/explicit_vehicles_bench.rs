@@ -84,8 +84,15 @@ fn alone(n: usize, wide: bool, coupled: bool) -> String {
 fn main() -> anyhow::Result<()> {
     let counts: Vec<usize> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
     let counts = if counts.is_empty() { vec![1, 16, 64] } else { counts };
-    // SAFETY: set before any thread reads it.
-    unsafe { std::env::set_var("RUBBLE_GPU_TIMING", "1") };
+    // EV_SPAN=1: no timestamp marks; the GPU time is each step's span from its submit to
+    // its completion (the bench waits for every step, so the GPU is idle at each submit).
+    // Marks (the default) are empty passes whose timestamps Metal may take before the
+    // passes encoded ahead of them finish.
+    let span = std::env::var("EV_SPAN").as_deref() == Ok("1");
+    if !span {
+        // SAFETY: set before any thread reads it.
+        unsafe { std::env::set_var("RUBBLE_GPU_TIMING", "1") };
+    }
     for &n in &counts {
       for vehicles in [n, 0] {
         let houses = n.div_ceil(4).min(32);
@@ -94,6 +101,10 @@ fn main() -> anyhow::Result<()> {
         let mut def = town_coupling();
         if std::env::var("EV_NO_CONTACT").is_ok() {
             def.mask = 0;
+        }
+        // EV_NO_VV=1 (measurement): no vehicle–vehicle contact.
+        if std::env::var("EV_NO_VV").is_ok() {
+            def.vehicle_contact = false;
         }
         // EV_HZ: World steps per second (default the houses' solver's, 60).
         let hz: Option<f32> = std::env::var("EV_HZ").ok().and_then(|v| v.parse().ok());
@@ -120,7 +131,9 @@ fn main() -> anyhow::Result<()> {
         for _ in 0..steps {
             let t0 = std::time::Instant::now();
             w.step()?;
-            for f in w.poll_blocking()? {
+            let frames = w.poll_blocking()?;
+            let span_ms = w.last_submit_instant().map(|t| t.elapsed().as_secs_f64() * 1e3);
+            for f in frames {
                 for e in &f.destruction_events {
                     if let DestructionEvent::BondsBroken { bonds, .. } = e {
                         broken += bonds.len();
@@ -128,7 +141,19 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             wall.push(t0.elapsed().as_secs_f64() * 1e3);
-            if let Some(t) = w.last_step_gpu_ms() {
+            if std::env::var("EV_GROUPS").is_ok() && w.step_count() % 20 == 0 {
+                if let Some(x) = w.explicit_vehicles() {
+                    let mut g = x.contact_group_sizes();
+                    g.sort_unstable();
+                    eprintln!("step {}: {} groups, sizes {:?}", w.step_count(), g.len(), g);
+                    let mut shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
+                    shapes.sort_unstable();
+                    eprintln!("  proxy shapes per vehicle: {shapes:?}");
+                }
+            }
+            if span {
+                ms.extend(span_ms);
+            } else if let Some(t) = w.last_step_gpu_ms() {
                 ms.push(t);
             }
         }
