@@ -2028,9 +2028,26 @@ alone): kinetic energy per second monotone from 3 s (1,233 J to 5.3 J in the
 simulated outside raycast drive). Probes: `settle_probe`, `contact_work_probe`
 (`--ignored`).
 
+**Verified (2026-11-06, after merging showcase-main).**
+* wgpu: `explicit_contact_gpu`, `explicit_beams_bitwise`, `explicit_jbeam_gpu`,
+  `explicit_jbeam_ext_gpu`, `explicit_drive_gpu`, `explicit_loop_cap`.
+* Metal: `vehicle_parity`, `explicit_parity`, `explicit_drive_parity`.
+* All 23 WGSL modules compile in Chrome.
+* world-wasm `explicit_scenes`.
+* CPU: `energy_ledger`; `crushed_car_settles`; T-bone leaked 7 / 5 / 6 / 2 / 4 of
+  1,026 at the five offsets (≤ 0.7 %).
+* n's 32 ledgers: no rise between tenths over 0.04 J. Its bands (max crush,
+  b1, t_m) fail, as before: the car's calibration.
+
+**Open: `fixed_contact_quantisation_does_no_work`.** The residual pass's extra
+contact sums put 48 km/h with drag at +0.0102 J over the run, against the 0.01 J
+bound (worst case 5.9 J); the others are within ±0.015 J.
+
 **Open: the per-tenth contact-work bound.** `contacts_do_no_positive_work` fails
-on 2 of its 26 runs. At 58 and 59 km/h with drag, one tenth at rest (about 1.5 s)
-has contacts plus steps +0.60 and +0.16 J beyond the 2 % allowance: the tangle's
+on a run or two of its 26, which ones depending on the build. Before the merge it
+was 58 and 59 km/h with drag; after it, 56 km/h without drag (+0.38 J). At 58 km/h,
+one tenth at rest (about 1.5 s) had contacts plus steps +0.60 J beyond the 2 %
+allowance: the tangle's
 steps store 2–3 J in a tenth whose contact dissipates 2 J. Over the run after the
 crash, the same sum is −19 J. Every other run passes, as do the 12 s rest and the
 T-bone. Tried without a fix:
