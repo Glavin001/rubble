@@ -1528,7 +1528,7 @@ pub fn build() -> Model {
     // ------------------------------------------------------------------
     // Hood: from the cowl to its leading edge (bowed back to the corners).
     // ------------------------------------------------------------------
-    let hood_front = |t: f32| 2.20 + 0.075 * (1.0 - (2.0 * t - 1.0).powi(2));
+    let hood_front = |t: f32| 2.225 + 0.07 * (1.0 - (2.0 * t - 1.0).powi(2));
     let hood = {
         let h1 = th_hood.clone();
         let h2 = th_hood.clone();
@@ -1591,7 +1591,7 @@ pub fn build() -> Model {
             ZC_F
         } else {
             let w = 1.0 - t / t_seam;
-            ZC_F + (2.20 - ZC_F) * w.powf(1.6)
+            ZC_F + (2.225 - ZC_F) * w.powf(1.6)
         }
     };
     let fender = {
@@ -2304,14 +2304,14 @@ pub fn build() -> Model {
     // dark-chrome frame round a recessed honeycomb), a painted bar, then a
     // broad lower intake over the splitter. The centre's sides follow one
     // line, `x_edge(y)`.
-    let (y_bb, y_it, y_gb, y_gt) = (0.30f32, 0.37f32, 0.40f32, 0.60f32);
+    let (y_bb, y_it, y_gb, y_gt) = (0.30f32, 0.352f32, 0.40f32, 0.60f32);
     let x_edge = move |y: f32| {
         if y <= y_it {
-            0.55
+            0.48
         } else if y <= y_gb {
-            0.55 - 0.05 * (y - y_it) / (y_gb - y_it)
+            0.48 - 0.02 * (y - y_it) / (y_gb - y_it)
         } else {
-            0.50 - 0.10 * ((y - y_gb) / (y_gt - y_gb)).min(1.0)
+            0.46 - 0.05 * ((y - y_gb) / (y_gt - y_gb)).min(1.0)
         }
     };
     let phi_e = Table::new(
@@ -2385,9 +2385,9 @@ pub fn build() -> Model {
     }
     // Bumper: beside the centre, under the lamps and round to the arches; a
     // corner vent each side; a textured black splitter along its foot.
-    let phi_v0 = phi_at_x(Param::Nose, 0.62, 0.40);
-    let phi_v1 = phi_at_x(Param::Nose, 0.79, 0.40);
-    let (yv0, yv1) = (0.335, 0.455);
+    let phi_v0 = phi_at_x(Param::Nose, 0.665, 0.42);
+    let phi_v1 = phi_at_x(Param::Nose, 0.80, 0.42);
+    let (yv0, yv1) = (0.335, 0.53);
     {
         let side = |lo: F, hi: F, a0: F, a1: F, gaps: [bool; 4]| (a0, a1, lo, hi, gaps);
         let al = || arch_lo(Param::Nose, y_bb);
