@@ -172,3 +172,115 @@ with 76 seams.
   - `bolt_fender_FR_4` is at +X (the left side). The rig takes its side from the part.
   - `latch_door_R*` is mid-door (z −0.93), not on the rear door's shut line. The rig
     moves it to the shut line at the nearest height.
+
+## Round 2 (2026-11-06)
+
+### Merges
+
+- `merge/showcase-main` (1613f7d7): centred damping is the BeamNG-profile default, plus
+  the energy ledger and surface contact r2.
+- The styling branch (6a433a06). The fender-bolt marker is now on its own side, so the
+  rig no longer corrects it.
+- The rear doors' latch marker is on the glass line (z −0.96, y 0.70). The skin's rear
+  edge at that height is about 30 cm further back, so the rig still moves the latch onto
+  the edge. The front doors' marker is already on it.
+
+### Stability under centred damping
+
+Centred damping is stable below ω·h = 2 at any damping (§39). The bound is now the
+springs' highest mode at 1.92, without counting damping (`Car::centred_damping`).
+
+Measured ω·h is 1.918. Parked 30 s, raycast and pressure wheels: 0 broken, 0 bent;
+KE 0.018 J (raycast) and 0.004 J (pressure).
+
+### Sidecar v2
+
+- Weights are quantised: A on a 2⁻¹³ grid, ∂A on a 2⁻⁹/m grid, rounded by largest
+  remainder.
+  - Σ A = 1 and Σ ∂A = 0 exactly, so every rigid motion stays exact.
+  - The offset and normal are measured with the quantised values, so the rest pose stays
+    exact.
+- The sidecar stores i16 steps, u16 nodes and a u8 count per vertex, so it is lossless
+  against the binding (`Skin::packable` checks this).
+- Size: 30.0 MB, was 55; gzipped 15.8 MB. Rest fidelity is unchanged.
+
+### CPU and GPU parity
+
+`engine-world-wasm/tests/skin_parity_gpu.rs` runs the renderer's own `weightedVertex()`,
+read from `showcase-car-render.mjs`, against `flexskin::eval`.
+
+- Input: 4,000 vertices of a bent, crushed lattice, packed as the page packs them.
+- Positions agree within 1.0e-6 m and unit normals within 1.5e-6. This is not
+  bit-for-bit: 4 of 4,000 vertices agree bit for bit.
+
+### Seams: what opens
+
+Measured with `SEAM_DEBUG=1` and the `gen3_seams` example (the wall at 32, 40, 48 and
+56 km/h, surface contact on).
+
+| km/h | gen3 residual max (mm) | gen3 seams > 1 cm / > 5 cm (of 3,754) | ETK residual max (mm) | ETK seams > 1 cm / > 5 cm (of 785) |
+|---|---|---|---|---|
+| 32 | 436 | 1,100 / 528 | 111 | 0 / 0 |
+| 56 | 629 | 1,624 / 1,153 | 234 | 1 / 0 |
+
+- **The ETK's seams never open, even 1 cm.** It is not only that it crushes less.
+- **gen3's seams open in two ways**, about half each:
+  - **The parts separate.** The two parts' heaviest nodes move 5–11 cm apart.
+    - The hood lifts off the fenders and the grille.
+    - The front doors move against the A-pillar and sill and against the rear doors.
+    - The bumper cover moves against the fenders.
+  - **The skin reaches past its nodes.** The nodes stay within 1 cm but the skins are
+    10–17 cm apart: the bumper cover against the lamps, the lamps against the fenders,
+    the doors against each other and the doors against the fenders. MLS kernels about
+    0.5 m wide cannot follow a fold between two nodes.
+- **What I tried, and none of it helped:**
+  - Lamps and grille skinned instead of rigid: kept.
+  - Lane nodes added to the binding pools: 1,174 seams, and parked fidelity 2.6 mm.
+  - Smaller kernels: 983 seams, but parked fidelity 1.25 mm.
+  - Grille on the body plus a third bumper-cover row: 1,304.
+- **Real cars** keep their shut lines within centimetres, because each closure's edge
+  carries a flange and is bolted or stopped every 15–25 cm along it. gen3's closures
+  have structural nodes about 0.5 m apart, and their edges are held only at the hinges,
+  the latch and the seals.
+- **Next:** shut-line edge nodes on both sides of each shut line, every 0.2–0.25 m, as
+  structural (not lane) nodes. Each is tied to its own part's edge and to a SUPPORT stop
+  against its neighbour, and is part of the binding pool, so a border vertex rides nodes
+  within 10 cm. That is a lattice change for the next round.
+
+### Side: the FMVSS 214 door reading
+
+The coordinator's door figure was the FMVSS 214 static door test, read as "too stiff".
+That test sets **minimums**: initial ≥ 10.0 kN, intermediate ≥ 15.6 kN, peak
+≥ min(2 × curb weight, 31.1 kN). The door therefore passes intermediate and peak and
+fails only the initial (9.7 kN), by a little.
+
+The added door intrusion beams change the side results as follows:
+
+| | before | with intrusion beams | band |
+|---|---|---|---|
+| MDB residual (mm) | 247 | 238 | 126–206 |
+| Pole residual / dynamic (mm) | 178 / 301 | 178 / 296 | 297–445 residual |
+| FMVSS 214 initial / intermediate / peak (kN) | 9.6 / 37.2 / 142.9 | 9.7 / 38.4 / 157.8 | ≥ 10.0 / 15.6 / 31.1 |
+
+The pole and the MDB pull opposite ways: the pole residual is low (mostly elastic) and
+the MDB residual is high. Not resolved this round.
+
+### Frontal after round 2 (surface contact on)
+
+| | gen3 | band |
+|---|---|---|
+| Dynamic crush (mm) | 583 | 620–750 |
+| t_m (ms) | 60 | 63–76 |
+| Peak, rear cabin (g) | 46.8 | 34–47 |
+| Residual max / avg (mm) | 575 / 326 | 380–580 / 261–512 |
+| Campbell b1 (1/s) | 41 | 22.9–39.2 |
+| Restitution | 0.141 | 0.13–0.20 |
+| Feet intrusion (mm) | 94 | 1–67 |
+| Roof, peak / weight | 5.94 | 4.48–5.32 |
+
+### Browser (GPU)
+
+- The wall at 56 km/h draws the skinned car correctly through the crush: the hood folds,
+  the windshield cracks, the roof stays.
+- The side pole on this page differs from the CPU harness: 0 beams bent at 32 km/h on
+  gen3, while the ETK runs normally. This is open and not investigated.
