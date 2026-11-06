@@ -13,7 +13,8 @@
 // EXPLICIT_WGSL_COLD=1 each module's entry point is renamed with a nonce first, so
 // no shader cache (Chrome's or the driver's, keyed by source) can serve it: the
 // times are a user's first load. EXPLICIT_WGSL_ONLY=a,b compiles only the modules
-// whose names contain one of them.
+// whose names contain one of them; EXPLICIT_WGSL_DIR another directory of
+// modules with its manifest.json.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
@@ -22,7 +23,7 @@ import { dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const DIR = join(ROOT, 'generated', 'explicit-wgsl');
+const DIR = process.env.EXPLICIT_WGSL_DIR || join(ROOT, 'generated', 'explicit-wgsl');
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 const PAGE = `<!doctype html><meta charset="utf-8"><title>explicit wgsl</title><script type="module">

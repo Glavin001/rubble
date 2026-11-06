@@ -18,7 +18,72 @@
 use crate::explicit_beams::{
     contact_force, shape_face, ContactSurface, Node, StaticShape, NODE_NO_GROUND, STEP,
 };
+use crate::explicit_surface::SurfaceShape;
 use glam::{Mat3, Quat, Vec3};
+
+/// A world box holding the shape, 1 cm wide of it (the surface pass's cull).
+fn surface_bounds(s: &SurfaceShape) -> (Vec3, Vec3) {
+    let (lo, hi) = match s {
+        SurfaceShape::Box { c, axes, half } => {
+            let e = axes[0].abs() * half.x + axes[1].abs() * half.y + axes[2].abs() * half.z;
+            (*c - e, *c + e)
+        }
+        SurfaceShape::Sphere { c, radius } => (*c - Vec3::splat(*radius), *c + Vec3::splat(*radius)),
+        SurfaceShape::Capsule { a, b, radius } => (a.min(*b) - Vec3::splat(*radius), a.max(*b) + Vec3::splat(*radius)),
+        SurfaceShape::Cylinder { c, radius, half_height } => {
+            let e = Vec3::new(*radius, *half_height, *radius);
+            (*c - e, *c + e)
+        }
+        SurfaceShape::Hull { verts, .. } => verts
+            .iter()
+            .fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(a, b), &v| (a.min(v), b.max(v))),
+    };
+    (lo - Vec3::splat(0.01), hi + Vec3::splat(0.01))
+}
+
+/// A convex hull's vertices and edges from its planes (n · x ≤ d inside): every
+/// triple of planes meeting at a point inside all of them (merged within 10 µm), and
+/// an edge between two vertices that share two planes.
+pub fn hull_from_planes(planes: &[(Vec3, f32)]) -> (Vec<Vec3>, Vec<[u32; 2]>) {
+    let mut verts: Vec<(Vec3, Vec<usize>)> = Vec::new();
+    let n = planes.len();
+    for i in 0..n {
+        for j in i + 1..n {
+            for k in j + 1..n {
+                let (a, b, c) = (planes[i].0, planes[j].0, planes[k].0);
+                let det = a.dot(b.cross(c));
+                if det.abs() < 1e-9 {
+                    continue;
+                }
+                let x = (b.cross(c) * planes[i].1 + c.cross(a) * planes[j].1 + a.cross(b) * planes[k].1) / det;
+                if planes.iter().any(|&(pn, pd)| pn.dot(x) - pd > 1e-5) {
+                    continue;
+                }
+                let on: Vec<usize> = (0..n).filter(|&p| (planes[p].0.dot(x) - planes[p].1).abs() <= 1e-5).collect();
+                match verts.iter_mut().find(|(v, _)| v.distance(x) <= 1e-5) {
+                    Some((_, set)) => {
+                        for p in on {
+                            if !set.contains(&p) {
+                                set.push(p);
+                            }
+                        }
+                    }
+                    None => verts.push((x, on)),
+                }
+            }
+        }
+    }
+    let mut edges = Vec::new();
+    for a in 0..verts.len() {
+        for b in a + 1..verts.len() {
+            let shared = verts[a].1.iter().filter(|p| verts[b].1.contains(p)).count();
+            if shared >= 2 {
+                edges.push([a as u32, b as u32]);
+            }
+        }
+    }
+    (verts.into_iter().map(|(v, _)| v).collect(), edges)
+}
 
 /// Fixed-point scale of the per-step sums (the explicit kernel's `FIXED`).
 pub const FIXED: f32 = 32.0;
@@ -58,6 +123,11 @@ pub struct ProxyShape {
     pub peak: f32,
     /// This step's fixed-point sums: force, moment about `reference`.
     sum: [i64; 6],
+    /// The surface contact's reactions of the last step
+    /// ([`crate::explicit_surface`]), integrated with the next step's sums.
+    surface_sum: [i64; 6],
+    /// A hull's vertices and edges in its own frame (from its planes, once).
+    hull_local: Option<(Vec<Vec3>, Vec<[u32; 2]>)>,
     /// This step's world geometry and cull box.
     world: Option<(WorldGeom, Vec3, Vec3)>,
 }
@@ -169,6 +239,8 @@ impl ProxyShape {
             reference: Vec3::ZERO,
             peak: 0.0,
             sum: [0; 6],
+            surface_sum: [0; 6],
+            hull_local: None,
             world: None,
         }
     }
@@ -337,6 +409,11 @@ impl ProxySet {
         let mut force = vec![Vec3::ZERO; nb];
         let mut torque = vec![Vec3::ZERO; nb];
         for s in &mut self.shapes {
+            // The last step's surface reactions with this step's node reactions.
+            for k in 0..6 {
+                s.sum[k] += s.surface_sum[k];
+            }
+            s.surface_sum = [0; 6];
             let f = Vec3::new(unfixed(s.sum[0]), unfixed(s.sum[1]), unfixed(s.sum[2]));
             let m = Vec3::new(unfixed(s.sum[3]), unfixed(s.sum[4]), unfixed(s.sum[5]));
             s.impulse += f * h;
@@ -363,6 +440,64 @@ impl ProxySet {
                 )
                 .normalize();
             }
+        }
+    }
+
+    /// The surface contact's view of the shapes at the bodies' poses now
+    /// ([`crate::explicit_surface`]): each shape in shape order with its cull box.
+    pub fn surface_shapes(&mut self) -> Vec<(SurfaceShape, Vec3, Vec3)> {
+        let mut out = Vec::with_capacity(self.shapes.len());
+        for s in &mut self.shapes {
+            let b = &self.bodies[s.body as usize];
+            let (p, q) = shape_pose(b, s);
+            let shape = match &s.geom {
+                ProxyGeom::Box { half } => {
+                    let m = Mat3::from_quat(q);
+                    SurfaceShape::Box {
+                        c: p,
+                        axes: [m.x_axis, m.y_axis, m.z_axis],
+                        half: *half,
+                    }
+                }
+                ProxyGeom::Sphere { radius } => SurfaceShape::Sphere { c: p, radius: *radius },
+                ProxyGeom::Capsule { radius, half_len } => {
+                    let axis = q * Vec3::Y * *half_len;
+                    SurfaceShape::Capsule {
+                        a: p - axis,
+                        b: p + axis,
+                        radius: *radius,
+                    }
+                }
+                ProxyGeom::Hull { planes, .. } => {
+                    let (verts, edges) = s.hull_local.get_or_insert_with(|| hull_from_planes(planes)).clone();
+                    let m = Mat3::from_quat(q);
+                    SurfaceShape::Hull {
+                        verts: verts.iter().map(|&v| p + m * v).collect(),
+                        edges,
+                        planes: planes
+                            .iter()
+                            .map(|&(n, d)| {
+                                let wn = m * n;
+                                (wn, d + wn.dot(p))
+                            })
+                            .collect(),
+                    }
+                }
+            };
+            let (lo, hi) = surface_bounds(&shape);
+            out.push((shape, lo, hi));
+        }
+        out
+    }
+
+    /// Adds the surface contact's force `f` on shape `k` at world point `at` to its
+    /// surface sums (fixed point, as the node reactions), integrated by the next
+    /// [`Self::end_step`].
+    pub fn add_surface_reaction(&mut self, k: usize, f: Vec3, at: Vec3) {
+        let s = &mut self.shapes[k];
+        let m = (at - s.reference).cross(f);
+        for (slot, v) in s.surface_sum.iter_mut().zip([f.x, f.y, f.z, m.x, m.y, m.z]) {
+            *slot += fixed(v);
         }
     }
 

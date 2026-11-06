@@ -255,3 +255,40 @@ Bands are from `crash-reference-targets.md` and `vehicle-test-strategy.md`.
 - The ETK's ledger rises 14–16 J in the wall; sedan1's rises 0. The ledger
   does not cover pressure tyres or bounded beams (`vehicle-test-strategy.md`).
 - Raycast wheels are used only at rest.
+
+## Re-run with couplers and the contact fix (2026-11-06, `feat/jbeam-community`)
+
+The harness again (`vehicle_compare --cars sedan1,etkk,etkk_kc6,ccf,vertex`) after
+BeamNG's node couplers (spec §7.1), JBeam mode as the page's default for JBeam
+content, and `feat/jbeam-features`' contact rest fix. What changed for the ETK:
+
+| Finding | Before | Now |
+|---|---|---|
+| 1. Lids held | hood 945 mm, trunk 574 mm adrift over the settle | **resolved**: latched by their couplers; the largest settle drifts are the soft top 32.8 mm (kr6) and the front suspension 5 mm; the lids are not among them |
+| 2. Parked | JBeam mode 0 / 0; `.truck` export 10 broken | JBeam mode 0 / 0 (0.5 J, 0.15 m/s); the `.truck` path is no longer the page's default |
+| 3. Frontal (kr6) | dynamic 511 mm, t_m 50 ms, 56 g, residual 281 mm, e 0.26 | dynamic 489 mm, t_m 46 ms, 66 g, residual 228 mm, e 0.35 (stiffer with the lids latched) |
+| 4. Side pole (kr6) | residual 512 mm, reach 969 mm | residual 57 mm, reach 1,045 mm (the pole still slips between the skin's nodes) |
+| 4. MDB (kr6 / kc6) | 210 / 392 mm | 364 / 265 mm |
+| 4. Door crush | 5.4 / 10.1 / 19.5 kN | 5.7 / 10.7 / 38.5 kN (initial and intermediate still under 10.0 / 15.6) |
+| 5. Roof (kr6 / kc6) | 1.61 / 9.62 × | 6.14 / 9.79 × |
+
+The CCF and the Vertex are in the table too (`vehicle-compare.md`). Two points
+they raised, resolved the same day:
+- **The Vertex's +27 kJ (37.6 kJ in `jbeam_accept`) at the wall was created
+  energy:** its engine mounts (k 100 N/m, deform about 2 kN) yielded on their
+  damping force, and the JBeam yield rule moved their rest lengths the wrong way
+  (to ℓ + T/k = 20.7 m), a spring with 20 kJ in it. Yield now follows the elastic
+  force only (jbeam-semantics-spec.md §3); the rise is 16.9 J. Its front suspension
+  still rings 17–20 mm (unchanged: the arms' own oscillation, not the gain).
+- **The CCF's residual crush (29 mm) was the measure:** it took the most forward
+  "attached" node per zone, and a lamp or fascia hanging on its last beams swings
+  forward as the cabin rebounds (up to 1.9 m ahead of its rest place). The measure
+  now keeps nodes joined to the cabin through unbroken beams and not more than 5 cm
+  ahead of their rest place: CCF 208 / 102 mm (b1 131 /s), a stiff short front
+  (springback 0.56, like the ETK's 0.53). The same connectivity is used for the
+  intrusion points.
+- **The CCF's remaining ledger rise (467 J) is its tyres' gas**, which the ledger's
+  elastic sum leaves out (pressure records store none there): on its hubs alone the
+  rise is 0.02 kJ against 1.68 kJ on pressure wheels (`jbeam_accept ledger=1`).
+  Per beam, no linear beam gives energy back it had not stored
+  (`jbeam_accept beamledger=1`).

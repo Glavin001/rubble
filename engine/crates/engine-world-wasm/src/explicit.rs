@@ -1017,6 +1017,11 @@ impl ExplicitSim {
                 boxes.push((c, half));
             }
             sim.shapes.extend_from_slice(&shapes);
+            // `surfaceContact`: the collision triangles meet the boxes and shapes by
+            // their surface too (jbeam-semantics-spec.md §38; off by default).
+            if spec.get("surfaceContact").and_then(|x| x.as_bool()).unwrap_or(false) {
+                sim.surface_contact = true;
+            }
             vehicles.push(Spawned {
                 name: desc.name.clone(),
                 sim,

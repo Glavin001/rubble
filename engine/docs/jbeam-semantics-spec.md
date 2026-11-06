@@ -102,6 +102,23 @@ Tt ← Tt·L/L_old in tension); a stretched beam's strength drops by k × its pl
 elongation. `deformLimitStress` [B] "caps the growth of beamDeform as the beam
 deforms": the hardened thresholds never pass max(cap, their current value).
 
+**Yield follows the elastic force only (2026-11-06).** The yield test reads the
+whole force F = −k·e − D(u), damping included, and moves the rest length by
+δ = e ± (T/k)(1 − p). When damping alone carries |F| past T while the spring's own
+force is below it, δ had the wrong sign: in compression the rest length grew to
+ℓ + T/k (a spring storing T²/2k the step had not been given). On the Gavril Vertex's
+engine mounts (k 100 N/m, deform about 2 kN) that put 20 kJ in each of two beams in
+one step at the 56 km/h wall: the world ledger rose 37.6 kJ. **Fix:** a beam yields
+only when δ moves its rest length toward its current length (δ < 0 in compression,
+δ > 0 in tension), so plastic flow never stores energy; the same δ, gated (CPU
+`jbeam_force_filtered`, `jbeam_yield`; kernel `jbeamUpdate`, `jbeamExtUpdate`), bit for
+bit on the GPU. Every yield whose δ had the right sign is unchanged. The RoR profile's
+`Plain` rule is RoR's and unchanged. Measured: the Vertex's wall ledger rise
+37.6 kJ → 0.03 kJ (`jbeam_accept ledger=1`); `tension_yield_gpu` now judges each
+beam's largest yield over the run (a beam flung apart yields in tension, then, its
+Tc being low, back in compression on the rebound, which it no longer did by damping
+alone).
+
 **Deform limits** [B], [W]. `deformLimit` d limits "how far the beam can deform in
 compression, as a fraction of original length"; `deformLimitExpansion` dₑ the same in
 expansion (default: `deformLimit`). **Choice (ambiguous):** the limit is on the
@@ -2231,6 +2248,73 @@ simulated outside raycast drive). Probes: `settle_probe`, `contact_work_probe`
 * n's 32 ledgers: no rise between tenths over 0.04 J. Its bands (max crush,
   b1, t_m) fail, as before: the car's calibration.
 
+**The work guard (2026-11-06, later).** Tracing the failing tenth (56 km/h, drag
+off, 1.3–1.6 s; `contact_parts_probe`) split self-contact work by phase:
+first-pass normal −2.3 J, friction **+1.4 to +1.7 J**, residual −0.3 J.
+
+The cause is friction in the bonnet tangle. Each hit's friction cap
+(`no_positive_work`) judges it at its own predicted velocity with split masses,
+and hits sharing nodes then realise other velocities. The T-bone showed the same
+for vehicle contact's normal force: +32 J in one tenth when the cars met again
+at 0.6 s.
+
+**Rule** (`friction_guard_pass`, `guard_vehicle_pass`): after the residual pass,
+each staged hit's force t (its first-pass force with its residual) is judged at
+the pair's realised mean velocity over the step. That is the forces now (every
+staged sum of the step or turn) on the nodes' own masses. Its work is
+W(s) = s·A + s²·B, with
+* A = t·(2v + h·a′), where a′ is the pair's relative acceleration without t;
+* B = h·|t|²·inv.
+
+Where W(1) > 0 the hit takes −(1 − s)·t, with s = −A/B (0 if A ≥ 0).
+
+A force that does positive work moves the pair the way it pushes, so scaling its
+normal part lets nothing in. Every guard is found from the same sums (order
+free, momentum-exact).
+
+**Quantisation-neutral sums.** The first pass and the residual add to the
+accumulators as a staging the later passes read. At the end each hit's total
+(first pass, plus residual, plus guard) replaces its staged adds: the
+accumulators as they were, plus one add per share of the total. The fixed-point
+rounding is the first pass's alone.
+
+**Vehicle contact's residual pass is on.** It uses the same staging, first-pass
+counts and approaching pairs only. The T-bone leaked 8 / 9 / 5 / 2 / 2 of 1,026
+with it off and 3 / 4 / 6 / 0 / 2 with it on; the contact-work invariant holds
+either way.
+
+Measured (CPU, after the change):
+* `contacts_do_no_positive_work` passes (all 26 runs, the 12 s rest, the T-bone).
+* `fixed_contact_quantisation_does_no_work` passes (largest run +0.0016 J).
+* `crushed_car_settles`: relative rms 36 mm/s, fastest 0.85 m/s, kinetic energy
+  per second 213 → 3.4 J from the 3rd to the 12th second. A crushed part settling
+  lifted one second (13.7 → 18.7 J in the 7th), so the check is per two seconds.
+
+**GPU.** Per node, 8 words of gAcc at `resAt` (selfSplit + 4·totalNodes): the
+residual's staged sums B and the totals' deltas D, fix(total share) −
+fix(first-pass share), merged into the accumulators. That gives the CPU's restore
+and re-add, integer for integer.
+* **Self contact.** `selfResidualPhase` (residual, guard and totals, merge) after
+  `selfApply`'s rounds; `selfSerialResidual` past the hit list's room, which finds
+  the hits again and recomputes the first pass without its position step.
+* **Vehicle contact.** `vvResidualPhase` per owner after its listed hits:
+  `vvPass` in phase S and at the end; `vvPassSmall` after each level. A turn whose
+  list overflowed (more than 2 × points hits) applies its hits at once, out of
+  the specification's order as before, and stages none.
+
+Verified:
+* wgpu: `explicit_contact_gpu`, including `anti_clip_steps_like_the_cpu`
+  bit-exact with dissipative contact in a small group and owner by owner;
+  `explicit_beams_bitwise`, `explicit_jbeam_gpu`, `explicit_jbeam_ext_gpu`,
+  `explicit_drive_gpu`, `explicit_loop_cap`.
+* Metal: `vehicle_parity`, `explicit_parity`, `explicit_drive_parity`.
+
+**Stated floor.** Single-precision positions move by whole ulps (about 1 mm/s
+at the car's farthest coordinate) and contact steps by 2⁻²⁴ m (0.12 mm/s). The
+< 1 mm/s target is withdrawn; the tangle keeps about 35× the floor.
+
+The bounds below are superseded.
+
 **Open: `fixed_contact_quantisation_does_no_work`.** The residual pass's extra
 contact sums put 48 km/h with drag at +0.0102 J over the run, against the 0.01 J
 bound (worst case 5.9 J); the others are within ±0.015 J.
@@ -2246,9 +2330,268 @@ T-bone. Tried without a fix:
 * the step's cap scaled by m_split·inv;
 * no residual pass (54 km/h, drag off: +29 J).
 
-## 39. Centred damping (2026-11-06)
+## 38. Surface contact: collision triangles against rigid shapes (opt-in, 2026-11-06)
 
-(§38 is the surface contact of `feat/softrigid-surface-contact`.)
+**Problem.** Static and rigid contact was node only (a node strictly inside a shape is
+pushed out), so a shape narrower than the node spacing passes between nodes with beams
+and skin across it: the imported ETK (nodes about 0.5 m apart) let a 20 cm side pole
+2.0 m into it at 32 km/h. **Decision** (user, 2026-11-06): rigid colliders stay
+shapes; the soft body's collision triangles meet them by their surface, opt-in, with
+node-only staying the default bit for bit.
+
+**Switch.** `ExplicitBeams::surface_contact` (CPU, `explicit_surface.rs`); vehicle flag
+131072 `FLAG_SURFACE` (GPU, `explicit_beams_surface.slang`); spec field
+`surfaceContact` (`ExplicitSim`); page `?surfaceContact=1` (softbody.html, the crash
+lab keeps it). Off: nothing runs (a uniform early return on the GPU).
+
+**Features (no double counting).** Node contact keeps every node; a triangle takes the
+contacts whose nearest feature on the triangle is an edge or its face. Per (live,
+collidable, not anti-clip-only) triangle and shape whose boxes come within the band r:
+* **X candidates**, the shape's features against the triangle as closest-point pairs: a
+  box's 12 edges against the triangle (each end, the edge against each triangle edge,
+  the edge piercing the face) and each triangle edge's run inside the box (distance 0
+  at its middle); a capsule's or vertical cylinder's axis segment the same way (a
+  cylinder's pairs taken to the solid cylinder's nearest point); a sphere's centre
+  against the triangle; a hull's edges and the triangle edges inside its planes (CPU
+  reference: proxy hulls, vertices and edges from their planes). Gap = distance less
+  the shape's radius.
+* **V**: each triangle vertex outside the shape, its exact distance to the shape. If a
+  vertex is no farther than the nearest X candidate (+`TIE`, 0.1 mm) the contact is
+  the node's and the triangle takes none. A vertex inside the shape does not count (the
+  triangle still meets what crosses it beside that node).
+* The X candidates within `TIE` of the nearest are **one contact at their mean**
+  (weights, triangle point, shape point): a pole's face parallel to a panel is nearest
+  along a strip whose ends the candidates are, so the contact is the strip's middle.
+  Weights on one vertex only: the node's.
+* **Normal**: from the triangle point toward the shape point; touching or crossing
+  (gap or their distance ≤ 10 µm), the separating axis of least overlap (triangle
+  normal, the shape's face axes, then edge × edge; a later axis must beat the best by
+  10 µm), oriented from the triangle toward the shape. **Choice**: the minimum
+  translation keeps a triangle crossing a wall edge-on pushed along the wall's normal,
+  not sideways along its own.
+
+**Response.** Vehicle contact's two-body rule (§10.3) with the shape as the contacter:
+infinite mass when static or kinematic; a dynamic proxy k·(1/M + (r×n)·I⁻¹(r×n)), k its
+surface hits this step × its share. The triangle point's inverse mass Σ w²·k/m (k the
+node's surface hits this step: mass splitting); the relative velocity the shape's at
+the point less Σ w·v; the pair's force −Σ w·F/m times the reduced mass, F each node's
+force at the pass's start (its force plus its contact sum, a snapshot). Then §37's rule,
+always (**Choice**: a new mode, no RoR legacy): dissipative, with the position step, in
+the vehicle's band r (2.5 cm in the BeamNG profile); gap g ≤ r gives depth
+min(r − g, r) (anti-clip's: a node behind is pushed as at the plane). The triangle's
+nodes take −w·f through the fixed-point sums (the vehicle's `fixed_contact`) and the
+position step their shares; a dynamic body takes +f at the contact point (fixed-point
+surface sums per shape, integrated with the next step's reaction); the rigid body takes
+no position step. Node contact in the next node pass reads the node's force with these
+sums in it and only tops up to its own target: no double counting where both act.
+
+**Order.** After self-collision, before the slide nodes, every step: find (positions
+only) and count, then apply in triangle and shape order. GPU: three barrier-separated
+phases (the snapshot; the find, counts by atomics; the apply, hits recomputed:
+positions do not change), the same strict arithmetic in the CPU's order. The frame
+kernel and the contact groups run it; the wide passes are off for a fleet with it
+(`wide_ok`); with rigid proxies (the World's coupling) it is the CPU reference's only
+for now and the plan refuses it (a clear error, not a silent fallback). Params:
+`surfSnap` (gBeams, a float4 per node), `surfSplit` (gAcc, a word per node).
+
+**Checked.**
+* CPU, `tests/explicit_surface.rs`: triangle against box (face, turned edge, crossing),
+  capsule, sphere, cylinder and hull, each with the expected gap, normal and point; a
+  shape nearest a vertex left to the node; a plate with node lines 0.5 m apart at
+  10 m/s against a 20 cm pole between them: node-only passes (mean x −2.4 m), surface
+  contact catches it, its front edge's middle never more than 2 cm into the pole; a
+  free 20 kg block takes the equal and opposite force: momentum closes to 0.9 mN·s of
+  2,000 N·s (fixed-point rounding); a plate resting on a 4 cm bar under its middle (its
+  nodes off the bar) is held, never below the bar's top, and gains no energy (0.1 s
+  means never above their earlier peak; kinetic energy at rest < 0.01 J); off, or
+  nothing near: bit for bit.
+* GPU, `engine-world-wasm/tests/surface_contact_gpu.rs` (wgpu on Metal): sedan1 in
+  the crash lab's side pole at 32 km/h, every node's position and velocity bit for bit
+  with the CPU after each frame, off and on (2,941 hits); the 75° and frontal poles
+  with it on (2,342 and 4,352 hits).
+
+**Measured** (CPU reference, `examples/surface_pole.rs`, the crash lab's own spawn,
+32 km/h, 0.6 s; off → on). Depth: how far any node, beam point or triangle point gets
+inside the pole box (beams and triangles sampled); p99 over every inside element and
+frame; crush: the struck side's skin in the pole's lane against the far side.
+
+| Car, test | node / beam / triangle depth (mm) | p99 (mm), inside samples | peak (kN) | crush max / end (mm) | µs/step |
+|---|---|---|---|---|---|
+| ETK, side 90° | 31.6 / 99.6 / 98.1 → 47.6 / 95.7 / 9.8 | 97.3 (2,315) → 95.7 (96) | 148 → 401 | 2,030 / 1,916 → 353 / 160 | 90 → 255 |
+| ETK, oblique 75° | 73.8 / 100 / 98.2 → 28.1 / 92.6 / 33.3 | 97.6 (1,167) → 91.1 (158) | 291 → 379 | 778 / 778 → 366 / 49 | 112 → 151 |
+| ETK, frontal | 55.1 / 99.5 / 97.8 → 65.0 / 98.4 / 7.2 | 97.3 (1,376) → 96.1 (184) | 200 → 291 | 402 / 361 → 442 / 391 | 110 → 127 |
+| sedan1, side 90° | 6.2 / 100 / 99.1 → 1.2 / 98.3 / 0.0 | 98.2 (7,385) → 97.9 (202) | 251 → 235 | 412 → 699 | 1,379 → 1,383 |
+| sedan1, oblique 75° | 4.1 / 100 / 99.8 → 1.2 / 99.8 / 0.0 | 98.0 (8,874) → 93.7 (154) | 295 → 239 | 635 → 1,081 | 1,285 → 1,654 |
+| sedan1, frontal | 4.7 / 99.8 / 99.2 → 6.3 / 99.7 / 17.8 | 95.4 (2,037) → 97.5 (755) | 231 → 229 | 537 / 491 → 674 / 534 | 1,856 → 1,468 |
+
+* The ETK no longer lets the pole through: side crush 2.0 m (the pole through the car)
+  → 353 mm peak, 160 mm residual; the peak force rises to 401 kN as the skin and
+  structure take the load.
+* The skin wraps the pole: the deepest triangle point inside it falls from 98–100 mm
+  (the pole across the panel) to 0–33 mm; the elements inside fall 7–50 fold.
+* What remains inside are beams that are on no collision triangle (interior structure,
+  cross-car members behind the skin). Beam-edge contact behind the same switch is the
+  next step (not built).
+* sedan1's skin-based crush rises (412 → 699 mm side) because the skin now holds
+  instead of passing through the pole uncrushed while the structure behind held (node
+  depth 6 mm). The NCAP residual crush calibration (§36, `o_side_pole_matches_the_nhtsa_sedans`)
+  must be re-run with it on before any default change.
+* Cost (CPU reference: every triangle against every slot whose box is near; no
+  broad-phase beyond the per-vehicle slot list): the ETK side pole 2.8× per step,
+  sedan1 1.0–1.3×.
+* GPU (`--gpu`, wgpu on Metal, M3 Max, wall clock per step with the frame's wait):
+  sedan1 alone at the side pole 195 → 616 µs/step (3.2×: the triangles at the pole
+  each run their whole narrow phase in one lane, twice: find, then apply); the
+  `arena` of 64 sedan1 into walls and poles 8.23 → 9.76 ms per fleet step (+19 %:
+  most triangles cull out; the three barriers and the snapshot per step remain). The
+  ETK (RoR profile: float contact sums, not bit for bit, so its GPU run is its own
+  chaotic path): side pole, triangle depth 98.9 → 25.9 mm, inside samples 2,101 → 281,
+  crush max 456 → 339 mm, end 302 → 61 mm, peak 153 → 398 kN, 121 → 188 µs/step.
+* Lossless speed-ups not yet taken: keep each triangle's find result for its apply
+  (most hit one slot), spread a triangle's candidates over lanes, and a per-vehicle
+  slot grid for large static sets.
+
+**Open:** beam-edge contact; GPU proxies (the World's coupling); the single-vehicle GPU
+cost; the NCAP pole calibration with it on. The default stays node only until those
+hold.
+
+### 38.1 Round 2: beam edges, point band, deepest point (opt-in, 2026-11-06)
+
+Round 1 left interior beams on no collision triangle crossing the pole (p99 ≈ 95 mm).
+Three additions, all behind the same switch (off: bit for bit as before, CPU and GPU):
+* **Beam-edge contact** (`segment_contact`, GPU `surfSegment`). The segments are
+  `surface_segments`: every beam of a physical kind (`segment_kind`: plain, limited,
+  support, rope, shocks2, JBeam plain/support/bounded/aniso/pressured/rope; not
+  triggers, couplers, torsion, LBEAM, pressure or aero records) between two distinct
+  collidable nodes (not `NODE_NO_GROUND`) that is no edge of a collision triangle the
+  pass meets (a triangle owns its edges, a node its ends). Fixed at spawn. A broken
+  beam is skipped (GPU: its flag or this step's detacher-group break, as the CPU sees
+  it after the beam pass). X candidates per shape edge (box's twelve, a capsule's or
+  cylinder's axis, a hull's edges): the edge–beam closest points unless parallel, and
+  each edge end against the beam (a parallel run's ends); a sphere's centre against
+  the beam; the beam's run inside a box or hull (both its ends, distance 0). V: the
+  beam's ends, as a triangle's vertices. The same mean, band, law and splitting;
+  weights (w₀, w₁, 0) on nodes (a, b, a).
+* **Deepest point when touching or crossing.** With the normal from the separating
+  axis (gap or point distance ≤ 10 µm), the contact is no longer the mean of the
+  candidates (a run's middle the element turns about: measured, a sedan1 bumper beam
+  held at its middle rotated 4 cm into the pole while the middle separated) but the
+  deepest of the candidates with shared weights along the normal (ties within 0.1 mm
+  their mean). The runs inside a box are now listed by both ends (triangles too). A
+  beam whose deepest candidates spread along it (the least-overlap axis is usually
+  across the beam, so a run's two ends tie) gets **two contacts**, at the least and
+  the most parameter, so it is held at both.
+* **Point contact in the band** (`point_contact`, GPU `surfPoint`). A collidable node
+  outside a shape and within the band of it (gap > 10 µm) gets the same two-body law
+  toward the shape's nearest point (a hull's: back along its farthest plane). A node
+  strictly inside stays node contact's, which tops up to its own target (no double
+  count). Without it, a vertex-nearest contact was the node's but node contact has no
+  band, so an ETK front node reached 36 mm inside.
+
+Checked: `tests/explicit_surface.rs` (a beam under a box face by its edges, its end
+the node's, capsule, sphere, cylinder; a tilted beam through a box held at both run
+ends; a node in the band; the plate's one segment, its non-triangle diagonal), and
+`surface_contact_gpu.rs` bit for bit on the GPU: side 2,923, oblique 2,404, frontal
+9,040 hits.
+
+**Measured** (CPU, `surface_pole.rs`, 32 km/h, 0.6 s, flag on; round 1 → round 2).
+The harness now counts colliding matter only: nodes not `NODE_NO_GROUND` and beams of
+`segment_kind` between two of them (round 1's 30–65 mm ETK node depths were
+non-colliding nodes; flag off, the same filter: ETK node depth 4–10 mm).
+
+| Car, test | node / beam / tri depth (mm) | p99 (mm), inside samples | peak (kN) | crush max / end (mm) |
+|---|---|---|---|---|
+| ETK, side 90° | 0.0 / 0.5 / 0.0 | 0.5 (1) | 373 | 336 / 0 |
+| ETK, oblique 75° | 0 / 0 / 0 | 0 (0) | 338 | 735 / 518 |
+| ETK, frontal | 0 / 0 / 0 | 0 (0) | 216 | 548 / 497 |
+| sedan1, side 90° | 0 / 0 / 0 | 0 (0) | 365 | 459 |
+| sedan1, oblique 75° | 0 / 1.2 / 0 | 1.2 (2) | 349 | 874 |
+| sedan1, frontal | 0 / 24.7 / 17.3 | 24.7 (31) | 212 | 592 / 480 |
+
+Flag off (same harness): p99 96–98 mm on every case. Every case is now within the
+2.5 cm band. Crush moves (sedan1 oblique 635 → 874 mm, ETK oblique 778 → 735 mm):
+the pole now meets the structure where it is, see §38.2.
+
+Cost (GPU, wgpu on Metal, M3 Max, shared with other work): sedan1 at the side pole,
+1 s, 118 → 644 µs/step (round 1 measured 195 → 616 on a quieter GPU); the 64-car
+`arena` 7.41 → 8.30 ms per fleet step (+12 %). CPU reference: sedan1 425 → 490
+µs/step, the ETK 85 → 105.
+
+GPU, lossless: the find stores per triangle, segment and node the mask of the slots
+it hit (gAcc at `surfMark`; bit b slot b, bit 31 any slot from 31 on) and the apply
+recomputes only those: sedan1 at the side pole 107.9 → 608.3 µs/step (118.2 → 643.8
+without the masks in the same session); the 64-car arena 6.90 → 7.52 ms per fleet step
+(+9 %, was +12 %). Bit for bit as before.
+
+### 38.2 Calibration with surface contact on (sedan1, CPU, 2026-11-06)
+
+`showcase_car.rs` with `SURFACE_CONTACT=1` (a measurement switch). The momentum
+ledger now counts the surface pass's force on the nodes (`ExplicitBeams::surface_force`,
+as the fixed-point sums take it) as the obstacle's impulse; before, it showed as
+"internal" (c, d, n failed their ledgers on that alone).
+
+| Test | off | on | band |
+|---|---|---|---|
+| o, NCAP side pole 32 km/h 75°, ensemble mean residual crush | 299 mm (145–424), pass | **68 mm (42–115), fails** | 297–445 mm |
+| c, side pole at the B-pillar 32 km/h | door intrusion 11 mm, B-pillar 14, passes | 93 mm, 9, passes; ledgers close | not through |
+| d, centre pole 50 km/h | CoM 1.66 m behind, passes | 3.52 m behind, passes; ledgers close | not through |
+| n, wall 56 km/h ensemble | max crush 474, b1 31.1, dynamic 668, restitution **0.2018 fails** (pre-existing) | 520, 28.0, 657, 0.1994: **every band passes** | 380–580, 22.9–39.2, 620–750, 0.13–0.20 |
+| q, FMVSS 216a roof | 69.9 kN = 4.91 × weight | the same (the platen is not a static shape) | ≥ 3.0 |
+| MDB (`explicit_scenes.rs`) | not run: vehicle against vehicle, no static shape meets the surface pass | | |
+
+The side pole moves: the pole used to slip between the door's nodes and the measured
+crush (the struck skin's nodes against the far side) included that pass-through; met by
+the skin and the beams, the door holds and the residual crush falls to a quarter. That
+is sedan1's side structure calibrated with node-only contact, not a contact error: with
+surface contact on, its door and sill strengths need re-tuning against §4.11 before the
+flag can be the default. The ETK has no band tests in this branch (its harness,
+`vehicle_compare`, is on `feat/vehicle-compare`, which does not carry surface contact).
+
+**Recommendation: not the default yet.** It removes pass-through (p99 penetration
+91–98 → ≤ 25 mm on every pole case) and brings the wall back inside every band, but it
+takes sedan1's NCAP side pole from inside its band (299 mm) to far below it (68 mm), and
+costs 5.6× per step for one car at a pole on the GPU (+9 % for the 64-car arena).
+Default it once sedan1's side is re-tuned with it on and the World-broadphase work below
+lands.
+
+### 38.3 Next: one collision system with the World (design, not built)
+
+Decision (user, 2026-11-06): surface contact reuses the rigid engine's collision
+machinery. Broad phase: vehicles enter the World broadphase as proxies (per part or
+chunk; fat AABBs padded by the band plus the fastest node's travel over a rigid step),
+updated incrementally at the rigid rate, skipped for sleeping vehicles, the query writing
+each vehicle's candidate colliders (static and dynamic, every shape kind) into its slot
+list on the GPU; the per-vehicle copied slots remain only as the standalone
+`ExplicitSim` fallback. Narrow phase: triangle, segment and point against a shape in
+shared `slang/physics` modules with one Rust twin; the response (§37 law, mass split,
+ownership, fixed-point sums) stays in the explicit kernel. Cost must follow awake
+vehicles and nearby colliders only (one car among 10k–100k static and sleeping bodies:
+flat).
+
+Findings that shape it:
+* `slang/physics` (`convex.slang`, `box_collide.slang`, `shapes.slang`) builds SAT
+  manifolds (reference face clipping, up to four points) from the World's hull
+  records; it has no closest-feature query with barycentric weights on a triangle or
+  segment, which ownership and the weighted response need. So the queries move into a
+  new shared module (`slang/physics/feature_query.slang`, the closest-point pairs,
+  separating axis and deepest-point selection above) reading shapes in the World's
+  formats (`Collider`, `HullRef` vertices and edges), not a copy of the manifold code.
+* Those modules use the GPU's native `dot`, `cross`, `normalize` (contraction allowed);
+  the explicit kernel's surface code is strict single precision so the CPU reference
+  matches it bit for bit. Sharing keeps parity only if the shared queries are written
+  strictly (the explicit kernel's `sdot`/`nf` helpers moved into `slang/physics`) and
+  the rigid engine's callers adopt them where they want them; changing the rigid
+  engine's own manifold paths would change rigid results (not done, not required).
+* The World's broadphase tables are built and queried per rigid step by
+  `world_step.slang` in `rigid_plan`; the explicit vehicles step in their own frame
+  plan. The proxy API the vehicle-sleep work needs (insert, update, remove, a candidate
+  list per vehicle, no update while asleep) lives on the World side
+  (`engine-world/src/explicit_vehicles.rs`, `cpl_plan`), with the candidate list
+  replacing the per-vehicle box slots as the surface pass's slot list. The
+  `large-maps.md` persistent broadphase (statics and sleepers not re-inserted) is a
+  prerequisite for the flat-cost benchmark and is not on this branch.
+
+## 39. Centred damping (2026-11-06)
 
 `ExplicitBeamsSettings::centred_damping`: **on in the BeamNG profile** (`beamng()`,
 since 2026-11-06), off in the Rigs of Rods profile, which stays bit for bit. A

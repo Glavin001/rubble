@@ -621,6 +621,9 @@
         ...(xscene === 'traffic' && qs.has('ai') ? { ai: qs.get('ai') } : {}),
         // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
         drag: qs.get('drag') !== '0',
+        // ?surfaceContact=1: collision triangles meet the boxes and shapes by their
+        // surface too (jbeam-semantics-spec.md §38; off by default).
+        surfaceContact: qs.get('surfaceContact') === '1',
         // ?centredDamping=0/1: the BeamNG profile's centred damping (jbeam-semantics-spec.md
         // §39) off or on; absent, the profile's default.
         ...(qs.has('centredDamping') ? { centredDamping: qs.get('centredDamping') !== '0' } : {}),

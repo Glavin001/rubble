@@ -1490,7 +1490,9 @@ impl ExplicitBeamsGpu {
         for b in self.snapshot_sources().iter().take(n) {
             let len = w[at] as usize;
             at += 1;
-            assert_eq!(len as u64 * 4, b.size(), "explicit beams: a snapshot of another layout");
+            // (A shorter buffer: the indirect arguments of a build with fewer dispatches,
+            // the rest zero.)
+            assert!(len as u64 * 4 <= b.size(), "explicit beams: a snapshot of another layout");
             let c = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("explicit-beams-snapshot"),
                 size: b.size(),
