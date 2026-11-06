@@ -196,7 +196,90 @@ fn world(n: usize, cars: usize, side: f32) -> (World, Vec<ExplicitBeams>) {
     (w, fleet)
 }
 
+/// `--probe`: the explicit frame alone (its own GPU timestamps) from one saved state,
+/// under the ablation masks in `EV_ABLATE` (time only: `EB_ABLATE` builds), interleaved.
+fn probe(w: &mut World) {
+    let hz = 120.0f32;
+    let steps = (1.0 / hz / engine_softbody::explicit_beams::STEP).round() as u32;
+    let shapes: Vec<usize> = w
+        .explicit_window_impulses()
+        .iter()
+        .map(|v| v.len())
+        .collect();
+    let x = w.explicit_vehicles_mut().unwrap();
+    assert!(
+        x.enable_frame_timing(64),
+        "timestamp queries (RUBBLE_GPU_TIMING=1)"
+    );
+    let snap = x.snapshot();
+    let masks: Vec<u32> = std::iter::once(0)
+        .chain(
+            std::env::var("EV_ABLATE")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|m| m.trim().parse().ok()),
+        )
+        .collect();
+    // Then the lossless switches (each A/B against the first row): pair path off, edge
+    // culls off, both off.
+    let switches: [(&str, bool, bool); 3] = [
+        ("pairs off", false, true),
+        ("culls off", true, false),
+        ("both off", false, false),
+    ];
+    let mut t: Vec<Vec<f64>> = vec![Vec::new(); masks.len() + switches.len()];
+    for _round in 0..5 {
+        for i in 0..t.len() {
+            let (m, pairs, culls) = if i < masks.len() {
+                (masks[i], true, true)
+            } else {
+                let s = switches[i - masks.len()];
+                (0, s.1, s.2)
+            };
+            x.set_ablation(m);
+            for _ in 0..3 {
+                // (A restore writes the coupling header back: the switches after it.)
+                x.restore(&snap);
+                x.set_surface_pairs(pairs);
+                x.set_surface_culls(culls);
+                x.frame(steps);
+                x.wait();
+            }
+            t[i].extend(x.frame_times_ms());
+        }
+    }
+    x.set_surface_pairs(true);
+    x.set_surface_culls(true);
+    x.set_ablation(0);
+    x.restore(&snap);
+    x.frame(steps);
+    x.wait();
+    let pairs = x.surface_pair_stats();
+    x.restore(&snap);
+    println!("probe: frame of {steps} steps, proxy shapes per car {shapes:?}, surface pairs (listed, hit) at the frame's end {:?}", &pairs[..pairs.len().min(8)]);
+    for (i, m) in masks.iter().enumerate() {
+        println!("  ablate {m:>10}: median {:.3} ms", median(t[i].clone()));
+    }
+    for (i, s) in switches.iter().enumerate() {
+        println!(
+            "  {:>17}: median {:.3} ms",
+            s.0,
+            median(t[masks.len() + i].clone())
+        );
+    }
+    if std::env::var("EV_PROFILE").is_ok() {
+        let p = x.profile_frame(steps);
+        x.wait();
+        println!("  per dispatch: {p:?}");
+        x.restore(&snap);
+    }
+}
+
 fn main() {
+    if std::env::args().any(|a| a == "--probe") {
+        // SAFETY: before any thread reads it (the device asks for timestamp queries).
+        unsafe { std::env::set_var("RUBBLE_GPU_TIMING", "1") };
+    }
     let cars: usize = arg("--cars").map_or(1, |s| s.parse().unwrap());
     let side: f32 = arg("--side").map_or(1000.0, |s| s.parse().unwrap());
     let reps: u32 = arg("--reps").map_or(20, |s| s.parse().unwrap());
@@ -228,6 +311,10 @@ fn main() {
         for _ in 0..240 {
             w.step().unwrap();
             w.poll_blocking().unwrap();
+        }
+        if std::env::args().any(|a| a == "--probe") {
+            probe(&mut w);
+            continue;
         }
         let awake = w.counters().map_or(0, |c| c.awake_count);
         let mut span = [Vec::new(), Vec::new()];

@@ -85,6 +85,7 @@ struct FqAcc
     float3 lq;
     float3 hw;
     float3 hq;
+    float lim;  // pass 0: candidates past min(gx, lim) cannot matter (fqFar)
 };
 
 // --- Strict poses (the twin's rot, qmul, normalize4, shape_pose, axes, to_world) ---
@@ -189,7 +190,35 @@ FqAcc fqAccNew()
     a.lq = a.lw;
     a.hw = a.lw;
     a.hq = a.lw;
+    a.lim = 3.0e38;
     return a;
+}
+
+// --- Lossless culls inside the candidate walks (no twin: the same candidates count) ---
+//
+// A pass keeps the candidates of gap at most its threshold: pass 0 the least so far
+// (with a.lim, the band of a contact query: a least gap past it is no contact either
+// way), later passes gx + FQ_TIE. Every candidate of a shape edge pairs a point of the
+// edge with a point of the element, so its gap (a box's, a hull's or a triangle
+// shape's: the points' distance) is at least the gap between their boxes, less the
+// rounding of the computed points (within 1e-5 of the largest coordinate and 1e-4 m,
+// far past it). An edge whose box is farther than the threshold by that is skipped.
+// The includer's switch (tests and measurement): false, every candidate is walked.
+bool fqCullsOn();
+float fqPrune(FqAcc a)
+{
+    if (!fqCullsOn()) return 3.0e38;
+    return a.pass == 0u ? min(a.gx, a.lim) : a.gx + FQ_TIE;
+}
+
+bool fqFar(float3 e0, float3 e1, float3 tlo, float3 thi, float thr)
+{
+    float3 elo = min(e0, e1);
+    float3 ehi = max(e0, e1);
+    float3 gap = max(max(elo - thi, tlo - ehi), float3(0.0, 0.0, 0.0));
+    float3 m3 = max(max(abs(elo), abs(ehi)), max(abs(tlo), abs(thi)));
+    float t = thr + 1e-4 + 1e-5 * max(max(m3.x, m3.y), m3.z);
+    return dot(gap, gap) > t * t;
 }
 
 void fqAccDeep(inout FqAcc a, float3 n, uint pass)
@@ -472,9 +501,17 @@ void fqCandidates(FqShape s, float3 x0, float3 x1, float3 x2, inout FqAcc a)
         fqSegTri(s, ssub3(s.c, h), sadd3(s.c, h), x0, x1, x2, a);
         return;
     }
+    float3 tlo = min(min(x0, x1), x2);
+    float3 thi = max(max(x0, x1), x2);
     if (s.kind == FQ_TRI)
     {
-        for (uint k = 0u; k < 3u; k++) fqSegTri(s, fqTriV(s, k), fqTriV(s, (k + 1u) % 3u), x0, x1, x2, a);
+        for (uint k = 0u; k < 3u; k++)
+        {
+            float3 e0 = fqTriV(s, k);
+            float3 e1 = fqTriV(s, (k + 1u) % 3u);
+            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
+            fqSegTri(s, e0, e1, x0, x1, x2, a);
+        }
         for (uint k = 0u; k < 3u; k++)
         {
             float3 p0 = fqX(x0, x1, x2, k);
@@ -497,7 +534,10 @@ void fqCandidates(FqShape s, float3 x0, float3 x1, float3 x2, inout FqAcc a)
         {
             if (e >= s.ne) break;
             uint2 ve = fqHullEdge(s, e);
-            fqSegTri(s, fqHullV(s, ve.x), fqHullV(s, ve.y), x0, x1, x2, a);
+            float3 e0 = fqHullV(s, ve.x);
+            float3 e1 = fqHullV(s, ve.y);
+            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
+            fqSegTri(s, e0, e1, x0, x1, x2, a);
         }
         fqEdgesInside(s, x0, x1, x2, a);
         return;
@@ -512,7 +552,10 @@ void fqCandidates(FqShape s, float3 x0, float3 x1, float3 x2, inout FqAcc a)
             float sv = (k & 2u) != 0u ? fqHalf(s, v) : -fqHalf(s, v);
             float3 m = sadd3(sadd3(s.c, sscale(fqAxis(s, u), su)), sscale(fqAxis(s, v), sv));
             float3 e = sscale(fqAxis(s, i), fqHalf(s, i));
-            fqSegTri(s, ssub3(m, e), sadd3(m, e), x0, x1, x2, a);
+            float3 e0 = ssub3(m, e);
+            float3 e1 = sadd3(m, e);
+            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
+            fqSegTri(s, e0, e1, x0, x1, x2, a);
         }
     }
     fqEdgesInside(s, x0, x1, x2, a);
@@ -725,6 +768,7 @@ bool fqContact(FqShape s, float3 x0, float3 x1, float3 x2, float r, out float3 w
     if (!(nl > 1e-8)) return false;
     float3 tn = sdiv3(nc, nl);
     FqAcc a = fqAccNew();
+    a.lim = r;
     fqCandidates(s, x0, x1, x2, a);
     float gx = a.gx;
     if (!(gx <= r)) return false;
@@ -840,9 +884,17 @@ void fqSegCandidates(FqShape s, float3 p0, float3 p1, inout FqAcc a)
         fqEdgeBeam(s, ssub3(s.c, h), sadd3(s.c, h), p0, p1, d, dd, a);
         return;
     }
+    float3 tlo = min(p0, p1);
+    float3 thi = max(p0, p1);
     if (s.kind == FQ_TRI)
     {
-        for (uint k = 0u; k < 3u; k++) fqEdgeBeam(s, fqTriV(s, k), fqTriV(s, (k + 1u) % 3u), p0, p1, d, dd, a);
+        for (uint k = 0u; k < 3u; k++)
+        {
+            float3 e0 = fqTriV(s, k);
+            float3 e1 = fqTriV(s, (k + 1u) % 3u);
+            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
+            fqEdgeBeam(s, e0, e1, p0, p1, d, dd, a);
+        }
         float t;
         float4 c = fqPierce(p0, p1, s.c, s.b, s.ax0, t);
         if (c.w != 0.0)
@@ -862,7 +914,10 @@ void fqSegCandidates(FqShape s, float3 p0, float3 p1, inout FqAcc a)
         {
             if (e >= s.ne) break;
             uint2 ve = fqHullEdge(s, e);
-            fqEdgeBeam(s, fqHullV(s, ve.x), fqHullV(s, ve.y), p0, p1, d, dd, a);
+            float3 e0 = fqHullV(s, ve.x);
+            float3 e1 = fqHullV(s, ve.y);
+            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
+            fqEdgeBeam(s, e0, e1, p0, p1, d, dd, a);
         }
         fqBeamInside(s, p0, p1, a);
         return;
@@ -877,7 +932,10 @@ void fqSegCandidates(FqShape s, float3 p0, float3 p1, inout FqAcc a)
             float sv = (k & 2u) != 0u ? fqHalf(s, v) : -fqHalf(s, v);
             float3 m = sadd3(sadd3(s.c, sscale(fqAxis(s, u), su)), sscale(fqAxis(s, v), sv));
             float3 e = sscale(fqAxis(s, i), fqHalf(s, i));
-            fqEdgeBeam(s, ssub3(m, e), sadd3(m, e), p0, p1, d, dd, a);
+            float3 e0 = ssub3(m, e);
+            float3 e1 = sadd3(m, e);
+            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
+            fqEdgeBeam(s, e0, e1, p0, p1, d, dd, a);
         }
     }
     fqBeamInside(s, p0, p1, a);
@@ -965,6 +1023,7 @@ bool fqSegContact(FqShape s, float3 x0, float3 x1, float r, out float3 w, out fl
     float3 d = ssub3(x1, x0);
     if (!(sdot(d, d) > 1e-12)) return false;
     FqAcc a = fqAccNew();
+    a.lim = r;
     fqSegCandidates(s, x0, x1, a);
     float gx = a.gx;
     if (!(gx <= r)) return false;

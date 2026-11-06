@@ -24,7 +24,19 @@ fn sedan() -> ExplicitBeams {
         "/../../docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck"
     ))
     .unwrap();
-    ExplicitBeams::from_truck(&text, glam::Vec3::ZERO, glam::Vec3::ZERO, ExplicitBeamsSettings::default()).unwrap()
+    let mut s = ExplicitBeams::from_truck(
+        &text,
+        glam::Vec3::ZERO,
+        glam::Vec3::ZERO,
+        ExplicitBeamsSettings::default(),
+    )
+    .unwrap();
+    // EV_SURFACE=1: surface contact on (jbeam-semantics-spec.md §38), with its §37 law.
+    if std::env::var("EV_SURFACE").as_deref() == Ok("1") {
+        s.surface_contact = true;
+        s.dissipative_contact = true;
+    }
+    s
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -75,6 +87,8 @@ fn main() -> anyhow::Result<()> {
             t.extend(x.frame_times_ms());
         }
         x.restore(&snap);
+        x.set_surface_pairs(true);
+        x.set_surface_culls(true);
         x.set_coupling_on(true);
         x.set_coupling_cull(true);
         x.set_coupling_workgroup_cache(true);
@@ -96,6 +110,23 @@ fn main() -> anyhow::Result<()> {
         }
     };
     time(x, "as shipped", &|_| {});
+    if std::env::var("EV_SURFACE").as_deref() == Ok("1") {
+        x.frame(steps);
+        x.wait();
+        let mut st = x.surface_pair_stats();
+        st.sort_unstable();
+        println!("  surface pairs (listed, hits) per car after a frame: {st:?}");
+        x.restore(&snap);
+        time(x, "surface pair path off", &|x| x.set_surface_pairs(false));
+        time(x, "surface edge culls off", &|x| x.set_surface_culls(false));
+        time(x, "surface pairs and culls off", &|x| {
+            x.set_surface_pairs(false);
+            x.set_surface_culls(false)
+        });
+        if std::env::var("EV_SURFACE_ONLY").is_ok() {
+            return Ok(());
+        }
+    }
     // EV_ABLATE=m1,m2,...: the same frame with phases skipped (EB_ABLATE masks,
     // ExplicitBeamsGpu::set_ablation; time only), with vehicle contact on and off.
     if let Ok(list) = std::env::var("EV_ABLATE") {

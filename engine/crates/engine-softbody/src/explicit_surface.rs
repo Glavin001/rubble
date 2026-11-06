@@ -30,8 +30,8 @@
 //! fusing): the GPU kernel (`explicit_beams.slang`, `surfaceContact`) does the same.
 
 use crate::explicit_beams::{
-    contact_response, shift_depth, to_fixed, ContactSurface, ExplicitBeams, ExplicitKind, Node,
-    StaticShape, CONTACT_FIXED, NODE_IMMOVABLE, NODE_NO_GROUND, STEP,
+    contact_response, no_positive_work_body, shift_depth, to_fixed, ContactSurface, ExplicitBeams,
+    ExplicitKind, Node, StaticShape, CONTACT_FIXED, NODE_IMMOVABLE, NODE_NO_GROUND, STEP,
 };
 // The geometry is the shared strict closest-feature module (its Slang twin is
 // `slang/physics/feature_query.slang`).
@@ -442,7 +442,10 @@ impl ExplicitBeams {
             let at = (acc(pass[tri[0] as usize], &nd[0]) * w[0]
                 + acc(pass[tri[1] as usize], &nd[1]) * w[1])
                 + acc(pass[tri[2] as usize], &nd[2]) * w[2];
-            // The shape: static (infinite mass, its velocity zero), or a proxy body.
+            // The shape: static (infinite mass, its velocity zero), or a proxy body (a
+            // dynamic one's response for the friction cap: its split, 1/M, arm, rotation,
+            // local 1/I).
+            let mut body = None;
             let (ims_shape, vs) = match self.rigid.as_ref().filter(|_| f.slot >= statics) {
                 Some(rs) => {
                     let sh = &rs.shapes[(f.slot - statics) as usize];
@@ -457,6 +460,7 @@ impl ExplicitBeams {
                         let conj = glam::Quat::from_xyzw(-b.rot.x, -b.rot.y, -b.rot.z, b.rot.w);
                         let irn = fq::rot(b.rot, b.inv_inertia * fq::rot(conj, rn));
                         let k = body_hits[sh.body as usize].max(1) as f32 * b.share.max(1.0);
+                        body = Some((k, b.inv_mass, arm, b.rot, conj, b.inv_inertia));
                         (k * (b.inv_mass + dot3(rn, irn)), vb)
                     }
                 }
@@ -471,6 +475,17 @@ impl ExplicitBeams {
             if fc == Vec3::ZERO {
                 continue;
             }
+            // A dynamic body turns: the friction capped with its full response (§38.4).
+            let fc = match body {
+                Some((k, im, arm, rot, conj, ii)) => {
+                    no_positive_work_body(fc, fh, vs - vt, m, nn, STEP, |x| {
+                        let l = fq::rot(conj, cross3(arm, x));
+                        let w = fq::rot(rot, Vec3::new(ii.x * l.x, ii.y * l.y, ii.z * l.z));
+                        x * imt + (x * im + cross3(w, arm)) * k
+                    })
+                }
+                None => fc,
+            };
             // §37: the position step (the triangle's share; a rigid body takes none).
             let delta = shift_depth(p, budget, dot3(fh, nn));
             if delta > 0.0 {

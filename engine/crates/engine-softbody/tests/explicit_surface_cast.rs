@@ -2,10 +2,11 @@
 //! fired at a plate whose node spacing and thickness it would cross in one 0.5 ms step.
 //! * it is met (its momentum goes to the plate) instead of passing through untouched;
 //! * momentum closes (plate plus ball) to the fixed-point rounding;
-//! * kinetic energy does not rise;
+//! * energy (kinetic, the ball's turning included, and the plate's under gravity) does not
+//!   rise, also for a glancing ball whose contact's friction would spin it;
 //! * the casts change nothing for a slow ball (bit for bit).
 
-use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, STEP};
+use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, GRAVITY, STEP};
 use engine_softbody::explicit_rigid::{ProxyGeom, ProxySet, ProxyShape, RigidProxy};
 use glam::{Quat, Vec3};
 
@@ -72,15 +73,28 @@ struct Shot {
 }
 
 fn shoot(speed: f32, radius: f32, steps: u32) -> (Shot, ExplicitBeams) {
+    shoot_at(speed, radius, steps, Vec3::new(0.0, -1.0, 0.0))
+}
+
+/// The ball's direction `dir` (unit; the plate's normal is y).
+fn shoot_at(speed: f32, radius: f32, steps: u32, dir: Vec3) -> (Shot, ExplicitBeams) {
     let mut s = plate();
-    let set = ball(speed, radius);
+    let mut set = ball(speed, radius);
+    set.bodies[0].vel = dir * speed;
+    // Aimed at the plate's middle (0.05, 1, 0.07) from 0.4 m back along its path.
+    set.bodies[0].pos = Vec3::new(0.05, 1.0, 0.07) - dir * 0.4;
     let mb = 1.0 / set.bodies[0].inv_mass;
     s.rigid = Some(Box::new(set));
+    // Kinetic energy (the ball's turning included) and the plate's height under gravity
+    // (the ball, a proxy, takes none).
     let energy = |s: &ExplicitBeams| {
         let n: f64 = s
             .nodes
             .iter()
-            .map(|n| 0.5 * f64::from(n.mass) * f64::from(n.vel.length_squared()))
+            .map(|n| {
+                0.5 * f64::from(n.mass) * f64::from(n.vel.length_squared())
+                    - f64::from(n.mass) * f64::from(GRAVITY) * f64::from(s.origin.y + n.pos.y)
+            })
             .sum();
         n + s.rigid.as_ref().unwrap().bodies[0].kinetic_energy()
     };
@@ -143,6 +157,33 @@ fn a_fast_ball_is_met_by_the_plate_and_gains_no_energy() {
         assert!(o.e1 <= o.e0 * 1.0001, "energy {} -> {}", o.e0, o.e1);
         assert!(o.dp < 1e-2 * speed, "momentum error {}", o.dp);
     }
+}
+
+/// A glancing shot: the friction of the contact slides on a ball that turns. Capped with
+/// only the pair's reduced mass along the normal, it drove the contact point's slip past
+/// zero and spun the ball up beyond the energy it had (a 6 cm ball at 100 m/s into a
+/// door: 3,500 rad/s from one hit). With the ball's full response (its inertia about the
+/// contact) the energy, rotation included, does not rise.
+#[test]
+fn a_glancing_ball_is_not_spun_up_by_friction() {
+    let mut worst = 0.0f64;
+    for (speed, radius, deg) in [
+        (100.0f32, 0.06f32, 60.0f32),
+        (100.0, 0.03, 45.0),
+        (30.0, 0.06, 70.0),
+    ] {
+        let a = deg.to_radians();
+        let dir = Vec3::new(a.sin(), -a.cos(), 0.0);
+        let (o, s) = shoot_at(speed, radius, 40, dir);
+        let w = s.rigid.as_ref().unwrap().bodies[0].ang_vel.length();
+        println!(
+            "{speed} m/s r {radius} at {deg} deg: ball v {:?}, w {w:.1} rad/s, hits {}, E {:.1} -> {:.1}",
+            o.ball_v, o.hits, o.e0, o.e1
+        );
+        worst = worst.max(o.e1 / o.e0);
+        assert!(o.hits > 0, "the ball was met");
+    }
+    assert!(worst <= 1.0001, "energy rose by {worst}");
 }
 
 #[test]

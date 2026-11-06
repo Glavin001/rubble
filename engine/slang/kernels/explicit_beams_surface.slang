@@ -43,6 +43,10 @@ uint2 fqHullEdge(FqShape s, uint e)
     return uint2(x & 255u, (x >> 8) & 255u);
 }
 
+// The shared queries' edge culls (lossless): off with the coupling header's bit 32
+// (tests and measurement).
+bool fqCullsOn() { return (gMisc[coupleRec()].x & 32u) == 0u; }
+
 // Box slot b of a vehicle (boxBase records: (lo, kind), (hi, at)) as a shape, and its
 // cull box.
 FqShape surfSlot(uint boxOff, uint b, out float3 lo, out float3 hi)
@@ -280,6 +284,41 @@ float3 surfAcc(uint x)
 
 float surfTerm(float w, float im) { return w > 0.0 ? smul(smul(w, w), im) : 0.0; }
 
+// A dynamic proxy body's response to impulse x at the contact (CPU
+// explicit_surface apply_surface_hits' k): the element's imt plus the body's split share
+// of 1/M and (I⁻¹(arm × x)) × arm.
+float3 surfBodyK(float3 x, float imt, float split, float im, float3 arm, float4 bq, float3 ii)
+{
+    float3 l = fqRot(float4(-bq.xyz, bq.w), scross(arm, x));
+    float3 w = fqRot(bq, float3(smul(ii.x, l.x), smul(ii.y, l.y), smul(ii.z, l.z)));
+    return sadd3(sscale(x, imt), sscale(sadd3(sscale(x, im), scross(w, arm)), split));
+}
+
+// no_positive_work_body (explicit_beams.rs, spec §38.4): the friction of a contact with
+// a turning dynamic body capped with the body's full response. Strict, in the CPU's order.
+float3 surfBodyCap(float3 c, float3 f, float3 v, float m, float3 n, float imt, float split, float im, float3 arm,
+                   float4 bq, float3 ii)
+{
+    if (m <= 0.0) return c;
+    float vn = sdot(v, n);
+    float fn = sdot(f, n);
+    float r = nf(-fn - sdiv(smul(nf(vn + max(vn, 0.0)), m), STEP));
+    if (r <= 0.0) return c;
+    float hm = sdiv(STEP, m);
+    float3 rn = sscale(n, r);
+    float3 t = ssub3(c, rn);
+    float3 u = sadd3(sadd3(v, v), sscale(f, hm));
+    float3 krn = surfBodyK(rn, imt, split, im, arm, bq, ii);
+    float a0 = nf(sdot(rn, u) + smul(STEP, sdot(rn, krn)));
+    float a1 = nf(sdot(t, u) + smul(smul(2.0, STEP), sdot(t, krn)));
+    float b = smul(STEP, sdot(t, surfBodyK(t, imt, split, im, arm, bq, ii)));
+    if (nf(nf(a0 + a1) + b) <= 0.0 || b <= 0.0) return c;
+    float disc = nf(smul(a1, a1) - smul(smul(4.0, b), a0));
+    float k = 0.0;
+    if (!(disc < 0.0)) k = clamp(sdiv(nf(ssqrt(disc) - a1), smul(2.0, b)), 0.0, 1.0);
+    return sadd3(rn, sscale(t, k));
+}
+
 // apply_surface_hits for one hit on element tn (global nodes) of vehicle v, against a
 // static slot (k NONE) or proxy shape k of body slot j (q: the contact point).
 void surfApplyTo(uint v, uint4 tn, float3 w, float3 nn, float gap, float r, uint k, uint j, float3 q)
@@ -295,23 +334,30 @@ void surfApplyTo(uint v, uint4 tn, float3 w, float3 nn, float gap, float r, uint
     // point; finite mass split over its surface hits this step and its vehicles).
     float ims = 0.0;
     float3 vs = float3(0.0, 0.0, 0.0);
+    // A dynamic body's response for the friction cap (split 0: none).
+    float split = 0.0;
+    float bim = 0.0;
+    float3 arm = float3(0.0, 0.0, 0.0);
+    float4 bq = float4(0.0, 0.0, 0.0, 1.0);
+    float3 ii = float3(0.0, 0.0, 0.0);
     if (k != 0xFFFFFFFFu)
     {
         uint b = cplBody(v, j);
         float4 c0 = asfloat(gMisc[b]);
-        float4 bq = asfloat(gMisc[b + 1u]);
+        bq = asfloat(gMisc[b + 1u]);
         float4 c2 = asfloat(gMisc[b + 2u]);
         float4 c3 = asfloat(gMisc[b + 3u]);
-        float3 arm = ssub3(q, c0.xyz);
+        arm = ssub3(q, c0.xyz);
         vs = sadd3(c2.xyz, scross(c3.xyz, arm));
         if (c0.w != 0.0)
         {
-            float3 ii = asfloat(gMisc[b + 4u].xyz);
+            ii = asfloat(gMisc[b + 4u].xyz);
             float3 rn = scross(arm, nn);
             float3 l = fqRot(float4(-bq.xyz, bq.w), rn);
             float3 irn = fqRot(bq, float3(smul(ii.x, l.x), smul(ii.y, l.y), smul(ii.z, l.z)));
             float hits = float(max(uint(gAcc[surfBodyBase() + v * cplB() + j].load()), 1u));
-            float split = smul(hits, max(c2.w, 1.0));
+            split = smul(hits, max(c2.w, 1.0));
+            bim = c0.w;
             ims = smul(split, nf(c0.w + sdot(rn, irn)));
         }
     }
@@ -326,6 +372,8 @@ void surfApplyTo(uint v, uint4 tn, float3 w, float3 nn, float gap, float r, uint
     float budget;
     float3 fc = contactResponse(fh, ssub3(vs, vt), m, nn, surf, p, fr, budget);
     if (all(fc == float3(0.0, 0.0, 0.0))) return;
+    // A dynamic body turns: the friction capped with its full response (§38.4).
+    if (split != 0.0) fc = surfBodyCap(fc, fh, ssub3(vs, vt), m, nn, imt, split, bim, arm, bq, ii);
     float delta = shiftDepth(p, budget, sdot(fh, nn));
     if (delta > 0.0)
     {
@@ -390,11 +438,17 @@ uint surfTriangleProxies(uint v, uint4 tn, float3 x0, float3 x1, float3 x2, floa
         float3 vb;
         bool fast = surfProxyFast(v, k, vb);
         if (!fast && !surfProxyMay(v, k, tlo, thi)) continue;
+#ifdef EB_ABLATE
+        if ((gP.ablate & 536870912u) != 0u) continue;
+#endif
         uint j;
         FqShape s = surfProxyShape(v, k, j);
         float3 lo;
         float3 hi;
         fqBounds(s, lo, hi);
+#ifdef EB_ABLATE
+        if ((gP.ablate & 268435456u) != 0u) continue;
+#endif
         float3 w;
         float3 nn;
         float g;
@@ -490,11 +544,17 @@ uint surfSegmentProxies(uint v, uint4 bn, float3 x0, float3 x1, float r, uint bo
         float3 vb;
         bool fast = surfProxyFast(v, k, vb);
         if (!fast && !surfProxyMay(v, k, tlo, thi)) continue;
+#ifdef EB_ABLATE
+        if ((gP.ablate & 536870912u) != 0u) continue;
+#endif
         uint j;
         FqShape s = surfProxyShape(v, k, j);
         float3 lo;
         float3 hi;
         fqBounds(s, lo, hi);
+#ifdef EB_ABLATE
+        if ((gP.ablate & 268435456u) != 0u) continue;
+#endif
         float3 w;
         float3 nn;
         float g;
@@ -591,11 +651,17 @@ uint surfPointProxies(uint v, uint gi, float3 x, float r, uint boxCount, uint pr
         float3 vb;
         bool fast = surfProxyFast(v, k, vb);
         if (!fast && !surfProxyMay(v, k, tlo, thi)) continue;
+#ifdef EB_ABLATE
+        if ((gP.ablate & 536870912u) != 0u) continue;
+#endif
         uint j;
         FqShape s = surfProxyShape(v, k, j);
         float3 lo;
         float3 hi;
         fqBounds(s, lo, hi);
+#ifdef EB_ABLATE
+        if ((gP.ablate & 268435456u) != 0u) continue;
+#endif
         float3 nn;
         float g;
         bool hit = fqSegNear(x, x, r, lo, hi) && fqPointContact(s, x, r, nn, g);
@@ -743,8 +809,319 @@ bool surfAnyFast(uint v, uint proxies)
     return false;
 }
 
+// --- The pair path (lossless): the proxy part of the find and the apply over a list of
+// (element, proxy shape) pairs whose boxes meet, spread over the lanes, each hit kept
+// for the apply. The same hits as the per-element loops (a pair is listed exactly when
+// the loops' fqNear holds; their sphere cull only skips pairs fqNear rejects); every sum
+// it feeds is fixed point or an integer count, so their order is free. Used when the
+// vehicle has proxies, none of them fast this step (the casts keep the per-element
+// loops), and its list holds every pair (else the per-element loops, that step).
+//   gNext at gMisc[coupleRec() + 1].w (0: no pair path): per vehicle SURF_PAIR_CAP
+//   pair words (kind << 30 | shape k << 20 | the element's index in the vehicle), then
+//   per vehicle SURF_HIT_CAP hits of SURF_HIT_WORDS words (the pair word; two; the body
+//   slot; w, n, g, q, w2, q2), then per vehicle and shape its bounds (lo, hi) this step.
+//   gAcc after the casts' earliest times: per vehicle the pairs listed, then per vehicle
+//   the hits found this step. More hits than the region holds: the apply recomputes
+//   every pair's.
+static const uint SURF_PAIR_CAP = 2048u;
+static const uint SURF_HIT_CAP = 256u;
+static const uint SURF_HIT_WORDS = 19u;
+static const uint SURF_TRI = 0u;
+static const uint SURF_SEG = 1u;
+static const uint SURF_PT = 2u;
+
+uint surfPairBase() { return gMisc[coupleRec() + 1u].w; }
+// The coupling header's bit 16: the pair path off (tests and measurement).
+bool surfPairsOn() { return surfPairBase() != 0u && (gMisc[coupleRec()].x & 16u) == 0u; }
+uint surfPairAt(uint v, uint p) { return surfPairBase() + v * SURF_PAIR_CAP + p; }
+uint surfHitAt(uint v, uint h)
+{
+    return surfPairBase() + gP.vehicles * SURF_PAIR_CAP + (v * SURF_HIT_CAP + h) * SURF_HIT_WORDS;
+}
+uint surfBoundsAt(uint v, uint k)
+{
+    return surfPairBase() + gP.vehicles * (SURF_PAIR_CAP + SURF_HIT_CAP * SURF_HIT_WORDS) + (v * cplS() + k) * 6u;
+}
+uint surfPairCount(uint v) { return surfBodyBase() + 3u * cplB() * gP.vehicles + v; }
+uint surfHitCount(uint v) { return surfPairCount(v) + gP.vehicles; }
+
+float3 surfLoad3(uint at) { return asfloat(uint3(gNext[at], gNext[at + 1u], gNext[at + 2u])); }
+void surfStore3(uint at, float3 x)
+{
+    uint3 u = asuint(x);
+    gNext[at] = u.x;
+    gNext[at + 1u] = u.y;
+    gNext[at + 2u] = u.z;
+}
+
+// Every lane, the snapshot phase: each proxy shape's bounds this step (as the loops'
+// fqBounds of surfProxyShape), and the counts cleared.
+void surfPairBounds(uint v, uint lane, uint proxies)
+{
+    for (uint k = lane, kStop = EB_END(k, proxies, LANES); k < kStop; k += LANES)
+    {
+        uint j;
+        FqShape s = surfProxyShape(v, k, j);
+        float3 lo;
+        float3 hi;
+        fqBounds(s, lo, hi);
+        uint at = surfBoundsAt(v, k);
+        surfStore3(at, lo);
+        surfStore3(at + 3u, hi);
+    }
+    if (lane == 0u)
+    {
+        gAcc[surfPairCount(v)].store(0);
+        gAcc[surfHitCount(v)].store(0);
+    }
+}
+
+// Element (kind, index i in the vehicle) with box tlo..thi (grown by the band) against
+// every proxy shape's bounds: each that it meets listed (fqNear's test).
+void surfPairList(uint v, uint kind, uint i, float3 tlo, float3 thi, uint proxies)
+{
+    for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
+    {
+        uint at = surfBoundsAt(v, k);
+        float3 lo = surfLoad3(at);
+        float3 hi = surfLoad3(at + 3u);
+        if (!(all(tlo <= hi) && all(thi >= lo))) continue;
+        uint p = uint(gAcc[surfPairCount(v)].add(1));
+        if (p < SURF_PAIR_CAP) gNext[surfPairAt(v, p)] = (kind << 30) | (k << 20) | i;
+    }
+}
+
+// The listing phase: every live element of vehicle v against the shapes' bounds.
+void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1, uint4 sr, uint groupOff,
+                  uint parity, uint triCount, uint segCount, uint nodeCount, uint proxies)
+{
+    for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+    {
+        uint gt = r1.x + t;
+        if ((gP.triBreak != 0u && triangleDead(gt)) || (gMisc[gP.vehicles + gt].z & TRI_ANTI_ONLY) != 0u) continue;
+        uint4 tn = gStatic[gP.triBase + gt];
+        float3 x0 = nf3(origin + gNodes[tn.x * 3u].xyz);
+        float3 x1 = nf3(origin + gNodes[tn.y * 3u].xyz);
+        float3 x2 = nf3(origin + gNodes[tn.z * 3u].xyz);
+        float3 tlo = ssub3(min(min(x0, x1), x2), float3(r, r, r));
+        float3 thi = sadd3(max(max(x0, x1), x2), float3(r, r, r));
+        surfPairList(v, SURF_TRI, t, tlo, thi, proxies);
+    }
+    for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+    {
+        uint gj = gLists[sr.x + j];
+        if (surfBroken(gj, groupOff, parity)) continue;
+        uint4 bn = gStatic[gP.beamBase + gj * 3u];
+        float3 x0 = nf3(origin + gNodes[bn.x * 3u].xyz);
+        float3 x1 = nf3(origin + gNodes[bn.y * 3u].xyz);
+        float3 tlo = ssub3(min(x0, x1), float3(r, r, r));
+        float3 thi = sadd3(max(x0, x1), float3(r, r, r));
+        surfPairList(v, SURF_SEG, j, tlo, thi, proxies);
+    }
+    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    {
+        uint gi = r0.x + i;
+        if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) != 0u) continue;
+        float3 x = nf3(origin + gNodes[gi * 3u].xyz);
+        float3 tlo = ssub3(min(x, x), float3(r, r, r));
+        float3 thi = sadd3(max(x, x), float3(r, r, r));
+        surfPairList(v, SURF_PT, i, tlo, thi, proxies);
+    }
+}
+
+// A pair word's element as nodes (a triangle's three; a segment's (a, b, a); a node's
+// (x, x, x)).
+uint4 surfPairNodes(uint code, uint4 r0, uint4 r1, uint4 sr)
+{
+    uint kind = code >> 30;
+    uint i = code & 0xFFFFFu;
+    if (kind == SURF_TRI) return gStatic[gP.triBase + r1.x + i];
+    if (kind == SURF_SEG)
+    {
+        uint4 bn = gStatic[gP.beamBase + gLists[sr.x + i] * 3u];
+        return uint4(bn.x, bn.y, bn.x, 0u);
+    }
+    uint gi = r0.x + i;
+    return uint4(gi, gi, gi, 0u);
+}
+
+// Pair `code`'s narrow phase (the loops' own queries): a hit with its body slot j, its
+// weights, normal, gap and point, and a segment's second.
+bool surfPairContact(uint v, uint code, float3 origin, float r, uint4 tn, out uint j, out float3 w, out float3 nn,
+                     out float g, out float3 q, out bool two, out float3 w2, out float3 q2)
+{
+    uint kind = code >> 30;
+    uint k = (code >> 20) & 1023u;
+    float3 x0 = nf3(origin + gNodes[tn.x * 3u].xyz);
+    float3 x1 = nf3(origin + gNodes[tn.y * 3u].xyz);
+    float3 x2 = nf3(origin + gNodes[tn.z * 3u].xyz);
+    FqShape s = surfProxyShape(v, k, j);
+    w = float3(1.0, 0.0, 0.0);
+    nn = float3(0.0, 0.0, 0.0);
+    g = 0.0;
+    q = x0;
+    two = false;
+    w2 = float3(0.0, 0.0, 0.0);
+    q2 = float3(0.0, 0.0, 0.0);
+    if (kind == SURF_TRI) return fqContact(s, x0, x1, x2, r, w, nn, g, q);
+    if (kind == SURF_SEG) return fqSegContact(s, x0, x1, r, w, nn, g, q, two, w2, q2);
+    return fqPointContact(s, x0, r, nn, g);
+}
+
+// The find of pair p: its narrow phase, the hit counted (as the loops count it) and kept.
+void surfPairFind(uint v, uint p, float3 origin, float r, uint4 r0, uint4 r1, uint4 sr)
+{
+    uint code = gNext[surfPairAt(v, p)];
+    uint4 tn = surfPairNodes(code, r0, r1, sr);
+    uint j;
+    float3 w;
+    float3 nn;
+    float g;
+    float3 q;
+    bool two;
+    float3 w2;
+    float3 q2;
+    if (!surfPairContact(v, code, origin, r, tn, j, w, nn, g, q, two, w2, q2)) return;
+    uint kind = code >> 30;
+    if (kind == SURF_TRI)
+    {
+        if (w.x > 0.0) gAcc[gP.surfSplit + tn.x].add(1);
+        if (w.y > 0.0) gAcc[gP.surfSplit + tn.y].add(1);
+        if (w.z > 0.0) gAcc[gP.surfSplit + tn.z].add(1);
+    }
+    else if (kind == SURF_SEG)
+    {
+        int hits = two ? 2 : 1;
+        gAcc[gP.surfSplit + tn.x].add(hits);
+        gAcc[gP.surfSplit + tn.y].add(hits);
+    }
+    else
+        gAcc[gP.surfSplit + tn.x].add(1);
+    surfBodyHit(v, j);
+    if (two) surfBodyHit(v, j);
+    uint h = uint(gAcc[surfHitCount(v)].add(1));
+    if (h >= SURF_HIT_CAP) return;
+    uint at = surfHitAt(v, h);
+    gNext[at] = code;
+    gNext[at + 1u] = two ? 1u : 0u;
+    gNext[at + 2u] = j;
+    surfStore3(at + 3u, w);
+    surfStore3(at + 6u, nn);
+    gNext[at + 9u] = asuint(g);
+    surfStore3(at + 10u, q);
+    surfStore3(at + 13u, w2);
+    surfStore3(at + 16u, q2);
+}
+
+// The apply of kept hit h, as the loops apply it (a segment's second as well).
+void surfHitApply(uint v, uint h, float r, uint4 r0, uint4 r1, uint4 sr)
+{
+    uint at = surfHitAt(v, h);
+    uint code = gNext[at];
+    uint4 tn = surfPairNodes(code, r0, r1, sr);
+    uint k = (code >> 20) & 1023u;
+    uint j = gNext[at + 2u];
+    float3 nn = surfLoad3(at + 6u);
+    float g = asfloat(gNext[at + 9u]);
+    surfApplyTo(v, tn, surfLoad3(at + 3u), nn, g, r, k, j, surfLoad3(at + 10u));
+    if (gNext[at + 1u] != 0u) surfApplyTo(v, tn, surfLoad3(at + 13u), nn, g, r, k, j, surfLoad3(at + 16u));
+}
+
+// More hits than the region holds: pair p's narrow phase again, and its hit applied.
+void surfPairApply(uint v, uint p, float3 origin, float r, uint4 r0, uint4 r1, uint4 sr)
+{
+    uint code = gNext[surfPairAt(v, p)];
+    uint4 tn = surfPairNodes(code, r0, r1, sr);
+    uint j;
+    float3 w;
+    float3 nn;
+    float g;
+    float3 q;
+    bool two;
+    float3 w2;
+    float3 q2;
+    if (!surfPairContact(v, code, origin, r, tn, j, w, nn, g, q, two, w2, q2)) return;
+    uint k = (code >> 20) & 1023u;
+    surfApplyTo(v, tn, w, nn, g, r, k, j, q);
+    if (two) surfApplyTo(v, tn, w2, nn, g, r, k, j, q2);
+}
+
 // Whether any vehicle of the upload has surface contact (uniform: a parameter).
 uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
+
+// The pair path's step of vehicle v (surfaceStep's, every lane; no proxy fast this
+// step, so no casts): the snapshot, the shapes' bounds, the listing, the find (the
+// static slots by the per-element loops, the proxies by pair), the apply. More pairs
+// than the list holds: the per-element loops meet the proxies too, that step. Its own
+// function behind surfaceStep's uniform early return (explicit-vehicles-in-world.md
+// §8.3: the per-element path's code stays as it was).
+void surfaceStepPairs(uint v, uint lane, uint parity, bool mine, uint4 r0, uint4 r1, uint4 r2, uint4 sr,
+                      float3 origin, float r, uint nodeCount, uint triCount, uint segCount, uint proxies,
+                      uint bodies)
+{
+    sync();
+    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    {
+        uint gi = r0.x + i;
+        float3 f = beamSum(gNodes[gi * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + gi], r0.z, r2.z, r2.w, parity, false);
+        gBeams[gP.surfSnap + gi] = float4(sadd3(f, accForce(gi)), 0.0);
+        gAcc[gP.surfSplit + gi].store(0);
+    }
+    for (uint j = lane, jStop = EB_END(j, bodies, LANES); j < jStop; j += LANES)
+    {
+        gAcc[surfBodyBase() + v * cplB() + j].store(0);
+        gAcc[surfTminAt(v, j, parity + 1u)].store(0);
+    }
+    surfPairBounds(v, lane, proxies);
+    sync();
+    surfPairCull(v, lane, origin, r, r0, r1, sr, r2.z, parity, triCount, segCount, nodeCount, proxies);
+    sync();
+    uint listed = uint(gAcc[surfPairCount(v)].load());
+    // A list too long for the region: the per-element loops meet the proxies this step.
+    bool pairs = listed <= SURF_PAIR_CAP;
+    uint px = pairs ? 0u : proxies;
+    // Without static slots nor proxies for them the per-element loops find nothing.
+    bool loops = r1.w != 0u || px != 0u;
+    if (loops)
+    {
+        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+            surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, px, parity, false);
+        for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+            surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, px, r2.z, parity, false);
+        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+            surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, px, parity, false);
+    }
+    if (pairs)
+    {
+        for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
+            surfPairFind(v, p, origin, r, r0, r1, sr);
+    }
+    sync();
+    if (loops)
+    {
+        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+            surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, px, parity, true);
+        for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+            surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, px, r2.z, parity, true);
+        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+            surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, px, parity, true);
+    }
+    if (pairs)
+    {
+        uint found = uint(gAcc[surfHitCount(v)].load());
+        if (found <= SURF_HIT_CAP)
+        {
+            for (uint h = lane, hStop = EB_END(h, found, LANES); h < hStop; h += LANES)
+                surfHitApply(v, h, r, r0, r1, sr);
+        }
+        else
+        {
+            for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
+                surfPairApply(v, p, origin, r, r0, r1, sr);
+        }
+    }
+    if (lane == 0u && mine) gsHit = 1u;
+}
 
 // Step's surface pass of vehicle v (uniform `on`), after its self-collision and
 // before its slide nodes (parity: the step's): the barrier, the snapshot, the find,
@@ -752,6 +1129,10 @@ uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 // barrier follows.
 void surfaceStep(uint v, uint lane, uint on, uint parity)
 {
+#ifdef EB_ABLATE
+    // Measurement only (time): 2^27 the whole pass and its barriers.
+    if ((gP.ablate & 134217728u) != 0u) return;
+#endif
     if (on == 0u) return;
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
@@ -766,6 +1147,18 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
     uint segCount = mine ? sr.y : 0u;
     uint proxies = mine ? surfProxies(v) : 0u;
     uint bodies = proxies != 0u ? gMisc[cplBase(v)].x : 0u;
+    // Uniform: the vehicle meets proxies, none fast this step, and has the pair region
+    // (measurement: EB_ABLATE's 2^30 turns the pair path off).
+    bool pairs = proxies != 0u && surfPairsOn();
+#ifdef EB_ABLATE
+    if ((gP.ablate & 1073741824u) != 0u) pairs = false;
+#endif
+    if (pairs && !surfAnyFast(v, proxies))
+    {
+        surfaceStepPairs(v, lane, parity, mine, r0, r1, r2, sr, origin, r, nodeCount, triCount, segCount, proxies,
+                         bodies);
+        return;
+    }
     sync();
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
     {

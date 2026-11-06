@@ -12,8 +12,9 @@
 //!
 //! ```text
 //! perl -e 'alarm 900; exec @ARGV' cargo run --release -p engine-world --example ccd_cannonball \
-//!     [-- --car sedan1|sedan] [--modes cpu,gpu,world] [--speeds 30,100,300,600]
+//!     [-- --car sedan1|sedan|etkk] [--modes cpu,gpu,world] [--speeds 30,100,300,600]
 //! ```
+//! (`etkk`: the imported ETK, `RUBBLE_ETK=<vehicles dir holding etkk/>`.)
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use engine_softbody::explicit_rigid::{ProxyGeom, ProxySet, ProxyShape, RigidProxy};
@@ -53,6 +54,24 @@ fn car(name: &str) -> ExplicitBeams {
             .expect("build")
             .truck
         }
+        "etkk" => {
+            // The imported ETK (a BeamNG mod, never committed): RUBBLE_ETK is the
+            // `vehicles` directory holding `etkk/` (surface_pole's), through its `.truck`.
+            let dir = std::env::var("RUBBLE_ETK").expect("RUBBLE_ETK=<vehicles dir>");
+            let dir = std::path::Path::new(&dir);
+            let files = engine_softbody::jbeam::read_vehicle_dir(dir, "etkk").expect("etkk");
+            let pc = std::fs::read_to_string(dir.join("etkk/kr6.pc")).expect("kr6.pc");
+            let refs: Vec<(&str, &str)> = files
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect();
+            let desc = engine_softbody::jbeam::load_jbeam(&refs, Some(&pc)).expect("load");
+            engine_softbody::truck_export::desc_to_truck(
+                &desc,
+                engine_softbody::truck_export::TyreDefaults::for_vehicle(&desc),
+            )
+            .0
+        }
         _ => std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck"
@@ -78,6 +97,11 @@ fn car(name: &str) -> ExplicitBeams {
         n.pos += shift;
     }
     sim.ground = 0.0;
+    if std::env::var("CCD_NOFRICTION").is_ok() {
+        for n in &mut sim.nodes {
+            n.friction = 0.0;
+        }
+    }
     sim.surface_contact = true;
     sim.dissipative_contact = true;
     sim
@@ -159,6 +183,11 @@ struct Out {
     transfer: f32,
     depth: f32,
     end_x: f32,
+    /// CPU only: kinetic energy (the projectile's turning included, and the car's) at
+    /// the end over the projectile's at the start.
+    energy: f64,
+    /// CPU only: the projectile's spin at the end (rad/s).
+    spin: f32,
 }
 
 fn proxy(shot: Shot, at: Vec3, speed: f32) -> ProxySet {
@@ -218,10 +247,18 @@ fn run_cpu(sim: &ExplicitBeams, shot: Shot, speed: f32) -> Out {
         }
     }
     let b = &cpu.rigid.as_ref().unwrap().bodies[0];
+    let car: f64 = cpu
+        .nodes
+        .iter()
+        .map(|n| 0.5 * f64::from(n.mass) * f64::from(n.vel.length_squared()))
+        .sum();
+    let e0 = 0.5 * f64::from(shot.mass()) * f64::from(speed) * f64::from(speed);
     Out {
         transfer: 1.0 - (-b.vel.x / speed),
         depth,
         end_x: b.pos.x,
+        energy: (b.kinetic_energy() + car) / e0,
+        spin: b.ang_vel.length(),
     }
 }
 
@@ -250,6 +287,8 @@ fn run_gpu(sim: &ExplicitBeams, shot: Shot, speed: f32) -> Out {
         transfer: 1.0 - (-set.bodies[0].vel.x / speed),
         depth,
         end_x: set.bodies[0].pos.x,
+        energy: f64::NAN,
+        spin: f32::NAN,
     }
 }
 
@@ -299,6 +338,8 @@ fn run_world(sim: &ExplicitBeams, shot: Shot, speed: f32) -> Out {
         transfer: 1.0 - (-v[0] / speed),
         depth,
         end_x: last.x,
+        energy: f64::NAN,
+        spin: f32::NAN,
     }
 }
 
@@ -318,9 +359,9 @@ fn main() {
         sim.triangles.len()
     );
     println!(
-        "| car | mode | projectile | m/s | outcome | momentum given | deepest (mm) | end x (m) |"
+        "| car | mode | projectile | m/s | outcome | momentum given | deepest (mm) | end x (m) | KE after / before | spin (rad/s) |"
     );
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
     for shot in [Shot::Sphere(0.06), Shot::Sphere(0.15), Shot::Box(0.1)] {
         for &v in &speeds {
             for mode in modes.split(',') {
@@ -336,11 +377,13 @@ fn main() {
                     "hit"
                 };
                 println!(
-                    "| {name} | {mode} | {} | {v:.0} | {outcome} | {:.1} % | {:.1} | {:.2} |",
+                    "| {name} | {mode} | {} | {v:.0} | {outcome} | {:.1} % | {:.1} | {:.2} | {:.3} | {:.0} |",
                     shot.label(),
                     100.0 * o.transfer,
                     1000.0 * o.depth,
-                    o.end_x
+                    o.end_x,
+                    o.energy,
+                    o.spin
                 );
             }
         }

@@ -1325,6 +1325,56 @@ pub fn shift_depth(p: f32, budget: f32, fn_: f32) -> f32 {
     }
 }
 
+/// [`no_positive_work`] for a pair whose response to a force is not isotropic: a dynamic
+/// rigid body that turns (spec §38.4). `k(x)` is the pair's relative velocity change per
+/// unit impulse x (the element's Σ w²·k/m plus the body's 1/M and (I⁻¹(a × x)) × a, its
+/// mass split), so v′ = v + h·(f/m) + h·k(c). The normal part keeps its scalar rule (m is
+/// the reduced mass along n: n·k(n) = 1/m); the friction t = c − r·n (r recomputed from
+/// the same inputs as [`contact_response`]'s dissipative rule) is scaled by the largest
+/// s ∈ [0, 1] for which (r·n + s·t)·(u + h·k(r·n + s·t)) ≤ 0, u = 2v + h·f/m. With an
+/// isotropic k (1/m) it is no_positive_work's cap; with a turning body the friction no
+/// longer drives the contact point's slip past zero and spins the body up (a 6 cm steel
+/// ball at 100 m/s into a door took 3,500 rad/s from one hit: more energy than it had).
+/// Applied after contact_response's own cap, so the friction is the lesser of both.
+#[allow(clippy::too_many_arguments)]
+pub fn no_positive_work_body(
+    c: Vec3,
+    f: Vec3,
+    v: Vec3,
+    m: f32,
+    n: Vec3,
+    h: f32,
+    k: impl Fn(Vec3) -> Vec3,
+) -> Vec3 {
+    if m <= 0.0 {
+        return c;
+    }
+    let vn = v.dot(n);
+    let fn_ = f.dot(n);
+    let r = -fn_ - (vn + vn.max(0.0)) * m / h;
+    if r <= 0.0 {
+        return c;
+    }
+    let hm = h / m;
+    let rn = n * r;
+    let t = c - rn;
+    let u = v + v + f * hm;
+    let krn = k(rn);
+    let a0 = rn.dot(u) + h * rn.dot(krn);
+    let a1 = t.dot(u) + 2.0 * h * t.dot(krn);
+    let b = h * t.dot(k(t));
+    if a0 + a1 + b <= 0.0 || b <= 0.0 {
+        return c;
+    }
+    let disc = a1 * a1 - 4.0 * b * a0;
+    let s = if disc < 0.0 {
+        0.0
+    } else {
+        ((disc.sqrt() - a1) / (2.0 * b)).clamp(0.0, 1.0)
+    };
+    rn + t * s
+}
+
 /// §37: contact force `c` (normal part r·n, r > 0, n unit) on a pair of relative
 /// velocity `v`, reduced mass `m`, under force `f`, with its tangential (friction)
 /// part t = c − r·n scaled by the largest s ∈ [0, 1] for which the force's work

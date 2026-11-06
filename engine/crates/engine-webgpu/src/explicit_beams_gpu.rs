@@ -57,6 +57,8 @@ pub struct ExplicitBeamsGpu {
     coupling_on: bool,
     coupling_cull_off: bool,
     coupling_cache_off: bool,
+    surface_pairs_off: bool,
+    surface_culls_off: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
@@ -651,6 +653,8 @@ impl ExplicitBeamsGpu {
             coupling_on: false,
             coupling_cull_off: false,
             coupling_cache_off: false,
+            surface_pairs_off: std::env::var("RUBBLE_SURFACE_PAIRS").as_deref() == Ok("0"),
+            surface_culls_off: std::env::var("RUBBLE_SURFACE_CULLS").as_deref() == Ok("0"),
             wide,
             contact,
             contact_errors: Default::default(),
@@ -1150,6 +1154,25 @@ impl ExplicitBeamsGpu {
         self.write_coupling_header();
     }
 
+    /// Tests and measurement: the surface contact's pair path for the proxies
+    /// (`explicit_beams_surface.slang` surfPairFind; lossless) on or off (the coupling
+    /// header's bit 16; `RUBBLE_SURFACE_PAIRS=0` starts it off). Off, the per-element
+    /// loops meet every proxy.
+    #[doc(hidden)]
+    pub fn set_surface_pairs(&mut self, on: bool) {
+        self.surface_pairs_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// Tests and measurement: the shared feature queries' edge culls
+    /// (`feature_query.slang` fqFar; lossless) on or off (the coupling header's bit 32;
+    /// `RUBBLE_SURFACE_CULLS=0` starts them off).
+    #[doc(hidden)]
+    pub fn set_surface_culls(&mut self, on: bool) {
+        self.surface_culls_off = !on;
+        self.write_coupling_header();
+    }
+
     /// Tests and measurement: the coupling's workgroup copies and ranges (on by default;
     /// lossless, `explicit_beams_rigid.slang`: the header words, the proxy spheres and
     /// each node's shape range from the count pass in workgroup memory, the shapes'
@@ -1179,9 +1202,22 @@ impl ExplicitBeamsGpu {
         let word = u32::from(self.coupling_on)
             | if self.coupling_on && self.coupling_cull_off { 2 } else { 0 }
             | if self.coupling_on && self.coupling_cache_off { 4 } else { 0 }
-            | if self.coupling_on && casts_off { 8 } else { 0 };
-        self.queue
-            .write_buffer(&self.misc, self.layout.coupling_on_offset(), bytemuck::bytes_of(&word));
+            | if self.coupling_on && casts_off { 8 } else { 0 }
+            | if self.coupling_on && self.surface_pairs_off {
+                16
+            } else {
+                0
+            }
+            | if self.coupling_on && self.surface_culls_off {
+                32
+            } else {
+                0
+            };
+        self.queue.write_buffer(
+            &self.misc,
+            self.layout.coupling_on_offset(),
+            bytemuck::bytes_of(&word),
+        );
     }
 
     /// The first node of vehicle `v` in [`Self::nodes_buffer`] (in nodes).
@@ -1707,6 +1743,51 @@ impl ExplicitBeamsGpu {
             // vehicles).
             ("keys", next[w[31] as usize..w[47] as usize - nv].to_vec()),
         ]
+    }
+
+    /// Tests only: the World coupling's state, beside [`Self::state_words`]: every proxy
+    /// record (bodies as integrated in the frames, shapes, planes) and the coupling's
+    /// gAcc sums (per body its count, per shape its step and window reactions). Empty
+    /// without the coupling.
+    #[doc(hidden)]
+    pub fn coupling_words(&self) -> Vec<(&'static str, Vec<u32>)> {
+        let Some(c) = self.layout.coupling else {
+            return Vec::new();
+        };
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
+        let m0 = c.misc_base as usize * 4;
+        let a0 = c.acc_base as usize;
+        vec![
+            (
+                "coupling records",
+                misc[m0..m0 + c.misc_words() as usize * 4].to_vec(),
+            ),
+            (
+                "coupling sums",
+                acc[a0..a0 + c.acc_words() as usize].to_vec(),
+            ),
+        ]
+    }
+
+    /// Tests and measurement: per vehicle, the surface pair path's last step (pairs
+    /// listed, hits found; `explicit_beams_surface.slang` surfPairFind). A vehicle that
+    /// took the per-element loops that step reads as it was last listed.
+    #[doc(hidden)]
+    pub fn surface_pair_stats(&self) -> Vec<(u32, u32)> {
+        let Some(c) = self.layout.coupling else {
+            return Vec::new();
+        };
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        let h = (self.layout.couple_rec as usize + 1) * 4;
+        let (body, pairs) = (misc[h + 2] as usize, misc[h + 3] as usize);
+        if pairs == 0 {
+            return Vec::new();
+        }
+        let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
+        let nv = self.layout.spans.len();
+        let at = body + 3 * c.cap.bodies as usize * nv;
+        (0..nv).map(|v| (acc[at + v], acc[at + nv + v])).collect()
     }
 
     /// Take in a contact error a finished frame reported ([`Self::contact_status`]),

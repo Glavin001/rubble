@@ -176,6 +176,15 @@ pub const VV_SPLIT_SLOTS: usize = 5;
 pub const ARGS_BYTES: u64 = 48;
 /// The vehicle sleep awake list's pass ([`Kernel::Sleep`]).
 pub const SLEEP_LIST: &str = "explicit_beams_sleep_list";
+/// The surface contact's pair path (`explicit_beams_surface.slang` `SURF_PAIR_CAP`,
+/// `SURF_HIT_CAP`, `SURF_HIT_WORDS`): the pairs a vehicle lists per step before it takes
+/// the per-element loops instead (a word each), and the hits it keeps for the apply
+/// (past them the apply recomputes), of `SURF_HIT_WORDS` words each. Performance only:
+/// either way the results are the same.
+pub const SURF_PAIR_CAP: usize = 2048;
+pub const SURF_HIT_CAP: usize = 256;
+pub const SURF_HIT_WORDS: usize = 19;
+
 /// Params word: the phases a measurement build skips (`EB_ABLATE`).
 pub const W_ABLATE: usize = 63;
 /// Params word: the steps the contact plan's frame bounds cover.
@@ -1428,13 +1437,32 @@ impl ExplicitUpload {
             // its surface hits this step (gAcc), at the header's .z (0: none).
             let surf_body = if any_surface {
                 let at = acc_init.len() as u32;
-                // Then by step parity each fast body's earliest time of impact (§38.4).
-                acc_init.extend(std::iter::repeat_n(0, (3 * cap.bodies * nv as u32) as usize));
+                // Then by step parity each fast body's earliest time of impact (§38.4),
+                // then per vehicle the surface pair path's count of listed pairs.
+                acc_init.extend(std::iter::repeat_n(
+                    0,
+                    (3 * cap.bodies * nv as u32) as usize + 2 * nv,
+                ));
                 at
             } else {
                 0
             };
-            misc[couple_rec + 1] = [layout.acc_base, cull_base, surf_body, 0];
+            // The surface pair path (`explicit_beams_surface.slang` surfPairAt): per vehicle
+            // SURF_PAIR_CAP pair words, then per vehicle SURF_HIT_CAP hits, then per
+            // vehicle and shape its bounds (6 words) in gNext, at the header's .w (0: none;
+            // also when a vehicle has more elements than a pair word's 20 bits index).
+            let elements_fit = vehicles
+                .iter()
+                .all(|v| v.triangles.len().max(v.beams.len()).max(v.nodes.len()) < 1 << 20);
+            let surf_pairs = if any_surface && elements_fit {
+                let at = next_len as u32;
+                next_len +=
+                    nv * (SURF_PAIR_CAP + SURF_HIT_CAP * SURF_HIT_WORDS + 6 * cap.shapes as usize);
+                at
+            } else {
+                0
+            };
+            misc[couple_rec + 1] = [layout.acc_base, cull_base, surf_body, surf_pairs];
             layout
         });
         // Raycast wheels (explicit_plan::drive): a region per vehicle when any has them.
