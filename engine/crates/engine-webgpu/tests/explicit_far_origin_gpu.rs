@@ -170,3 +170,110 @@ fn rebased_vehicles_step_and_meet() {
     assert!(o.iter().all(|o| o.length() > 4000.0), "both re-based");
     assert!(met, "they met");
 }
+
+/// A BeamNG-profile JBeam rig with its origin at `origin` (local nodes the same whatever
+/// the origin): the fixture's slide node on a fixed rail (hanging on its spring under
+/// gravity), or with `raycast` the fixture car on raycast wheels resting 2 cm above the
+/// ground, driven at half throttle.
+fn rig(raycast: bool, origin: Vec3) -> ExplicitBeams {
+    use engine_softbody::jbeam_fixture::{PART2_CAR, PART2_RAIL};
+    let text = if raycast { PART2_CAR } else { PART2_RAIL };
+    let d = engine_softbody::jbeam::load_jbeam(&[("t.jbeam", text)], None).unwrap();
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        drag: false,
+        ..Default::default()
+    };
+    let mut s = if raycast {
+        ExplicitBeams::from_desc_jbeam_raycast(&d, Vec3::ZERO, Vec3::ZERO, settings)
+    } else {
+        ExplicitBeams::from_desc_jbeam_with(
+            &d,
+            engine_softbody::explicit_beams::JbeamWheels::Pressure,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            settings,
+        )
+    }
+    .unwrap()
+    .0;
+    s.fixed_contact = true;
+    if raycast {
+        let lift = s.spawn_clearance() - s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+        for n in &mut s.nodes {
+            n.pos.y += lift;
+        }
+        s.set_drive_input(engine_softbody::explicit_drive::DriveInput {
+            forward: 0.5,
+            ..Default::default()
+        });
+    } else {
+        // Clear of the ground.
+        for n in &mut s.nodes {
+            n.pos.y += 2.0;
+        }
+    }
+    s.origin = origin;
+    s
+}
+
+/// Slide nodes and raycast wheels work in the vehicle's frame (the slide pass's rail
+/// distance, the wheels' hubs, rays and ground height relative to its origin): a slide
+/// node on its rail and the fixture car on raycast wheels step bit for bit alike at the
+/// origin and at 4 km, on the CPU and on the GPU. (In World coordinates the rail distance
+/// at 4 km rounded to 0.24 mm, enough to keep a parked ETK awake for good.)
+#[test]
+fn slide_nodes_and_raycast_wheels_at_4_km_are_the_origins_bit_for_bit() {
+    let gpu = default_device().ok();
+    for raycast in [false, true] {
+        // The rail rig (clear of the ground, which it never meets) also high up: its
+        // node hangs off the rail along y, which World y at 0 would keep exact.
+        let far = if raycast {
+            FAR
+        } else {
+            FAR + Vec3::new(0.3, 97.7, 0.1)
+        };
+        let near = rig(raycast, Vec3::ZERO);
+        if raycast {
+            assert!(near.drive.is_some(), "raycast wheels");
+        } else {
+            assert!(!near.slides.is_empty(), "a slide node");
+        }
+        let mut a = ExplicitBeamsWorld::new(vec![near.clone()]);
+        let mut b = ExplicitBeamsWorld::new(vec![rig(raycast, far)]);
+        for f in 0..FRAMES {
+            a.frame(17);
+            b.frame(17);
+            assert_eq!(
+                local_bits(&a.vehicles[0]),
+                local_bits(&b.vehicles[0]),
+                "CPU frame {f}, raycast {raycast}"
+            );
+        }
+        let Some((_, device, queue)) = gpu.as_ref() else {
+            eprintln!("no GPU adapter: GPU half skipped");
+            continue;
+        };
+        let mut a = ExplicitBeamsGpu::new(device, queue, &[near]);
+        let mut b = ExplicitBeamsGpu::new(device, queue, &[rig(raycast, far)]);
+        let nodes = |g: &ExplicitBeamsGpu| {
+            g.state_words()
+                .into_iter()
+                .find(|(n, _)| *n == "nodes")
+                .unwrap()
+                .1
+        };
+        for f in 0..FRAMES {
+            a.frame(17);
+            b.frame(17);
+            let (x, y) = (nodes(&a), nodes(&b));
+            let differ = x.iter().zip(&y).filter(|(p, q)| p != q).count();
+            assert_eq!(
+                differ, 0,
+                "GPU frame {f}, raycast {raycast}: {differ} node words differ at 4 km"
+            );
+        }
+        a.kernel_status().unwrap();
+        b.kernel_status().unwrap();
+    }
+}

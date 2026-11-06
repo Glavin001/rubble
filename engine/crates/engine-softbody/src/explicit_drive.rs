@@ -491,13 +491,17 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
     }
 }
 
-/// The nearest hit of the ray `p + t·d`, t ≤ `t_max`: ground, boxes, shapes in order.
-fn ray_cast(s: &ExplicitBeams, p: Vec3, d: Vec3, t_max: f32) -> Option<Hit> {
+/// The nearest hit of the ray `p + t·d`, t ≤ `t_max`, `p` in the vehicle's frame (its
+/// origin `ow`): ground (its height in that frame), boxes and shapes (World positions:
+/// the ray's start moved to the World) in order.
+fn ray_cast(s: &ExplicitBeams, p: Vec3, ow: Vec3, d: Vec3, t_max: f32) -> Option<Hit> {
     let mut best: Option<Hit> = None;
-    if d.y < -PARALLEL && p.y >= s.ground {
-        let t = dv(s.ground - p.y, d.y);
+    let ground = s.ground - ow.y;
+    if d.y < -PARALLEL && p.y >= ground {
+        let t = dv(ground - p.y, d.y);
         best = Some(Hit { t, n: Vec3::Y });
     }
+    let p = ow + p;
     for b in &s.boxes {
         closer(
             &mut best,
@@ -555,15 +559,18 @@ pub fn spin_solve(
     (w, f)
 }
 
-/// The hub of wheel `w`: (mass, world position, velocity) mass-weighted over its nodes.
+/// The hub of wheel `w`: (mass, position in the vehicle's frame, velocity) mass-weighted
+/// over its nodes.
 fn hub(s: &ExplicitBeams, w: &DriveWheel) -> (f32, Vec3, Vec3) {
+    // The vehicle's frame: positions relative to its origin (0 + pos, the GPU's sum).
+    let o = Vec3::ZERO;
     let n1 = &s.nodes[w.node1 as usize];
     if w.node1 == w.node2 {
-        return (n1.mass, s.origin + n1.pos, n1.vel);
+        return (n1.mass, o + n1.pos, n1.vel);
     }
     let n2 = &s.nodes[w.node2 as usize];
     let m = n1.mass + n2.mass;
-    let x = (s.origin + n1.pos) * n1.mass + (s.origin + n2.pos) * n2.mass;
+    let x = (o + n1.pos) * n1.mass + (o + n2.pos) * n2.mass;
     let v = n1.vel * n1.mass + n2.vel * n2.mass;
     (m, div3(x, m), div3(v, m))
 }
@@ -590,7 +597,12 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
     };
     let h = STEP;
     let nw = d.config.wheels.len();
-    let o = s.origin;
+    // The wheels work in the vehicle's frame (positions relative to its origin, so their
+    // precision does not depend on where the vehicle is); the origin is added only at
+    // the World's boundary: the ground's height, the static boxes' and shapes' rays and
+    // the wheel centres reported.
+    let ow = s.origin;
+    let o = Vec3::ZERO;
     let c = &d.config;
     // 1. Frame, speed, input.
     let x = |i: u32| o + s.nodes[i as usize].pos;
@@ -669,7 +681,7 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
             nrm(fw * (dot(a, fw) - r0) + up * (dot(a, up) - r1) + left * (dot(a, left) - r2 + 1.0));
         axle[k] = a;
         let hp = xh + up * w.rest_len;
-        let hit = ray_cast(s, hp, -up, w.susp_max + w.radius);
+        let hit = ray_cast(s, hp, ow, -up, w.susp_max + w.radius);
         len[k] = w.susp_max;
         if let Some(ht) = hit {
             let cos_t = dot(ht.n, up);
@@ -829,7 +841,7 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
         out.length = len[k];
         out.kappa = kappa;
         out.alpha = alpha;
-        out.centre = xh + up * (w.rest_len - len[k]);
+        out.centre = ow + (xh + up * (w.rest_len - len[k]));
         out.axle = uw.cross(fwd);
         out.up = uw;
         d.wheels[k] = out;
