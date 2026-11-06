@@ -134,3 +134,39 @@ fn vehicle_contact_at_4_km_is_the_origins_bit_for_bit_on_the_gpu() {
         "GPU: {FRAMES} frames head on, every node word bit for bit at the origin and at 4 km"
     );
 }
+
+/// Spawned as the World spawns vehicles: origin 0 and the nodes far out, so both
+/// vehicles re-base on their first frame (each origin onto its node 0) and then meet.
+#[test]
+fn rebased_vehicles_step_and_meet() {
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut fleet = crash(Vec3::ZERO);
+    for v in &mut fleet {
+        for n in &mut v.nodes {
+            n.pos += FAR;
+        }
+    }
+    let time = |fleet: &[ExplicitBeams]| {
+        let mut g = ExplicitBeamsGpu::new(&device, &queue, fleet);
+        let t = std::time::Instant::now();
+        let mut met = false;
+        for _ in 0..FRAMES {
+            g.frame(17);
+            met |= g.contact_groups() > 0;
+        }
+        g.wait();
+        (g, met, t.elapsed().as_secs_f64())
+    };
+    let (_, _, near) = time(&crash(Vec3::ZERO));
+    let (g, met, secs) = time(&fleet);
+    g.contact_status().unwrap();
+    let ks = g.kernel_status();
+    let o = g.origins();
+    eprintln!("re-based origins {o:?}, met {met}; {secs:.1} s against {near:.1} s near the origin; kernel status {ks:?}");
+    ks.unwrap();
+    assert!(o.iter().all(|o| o.length() > 4000.0), "both re-based");
+    assert!(met, "they met");
+}

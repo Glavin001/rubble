@@ -543,17 +543,24 @@ void cplIntegrateBodySplit(uint v, uint j)
 // lane, inside the rebase's branch (no barrier; the rebase's own follows).
 void cplRebase(uint v, uint lane, float3 first)
 {
-    if (gMisc[coupleRec()].x == 0u) return;
-    uint4 hdr = gMisc[cplBase(v)];
-    for (uint j = lane, jStop = EB_END(j, hdr.x, LANES); j < jStop; j += LANES)
+    // The header from the buffer: the rebase runs before coupleBegin copies it to
+    // workgroup memory (cplHdr's copies are not yet written here).
+    uint4 h = gMisc[coupleRec()];
+    if (h.x == 0u) return;
+    uint nb = h.z;
+    uint ns = h.w & 0xFFFFu;
+    uint recs = 1u + nb * CPL_BODY_RECS + ns * CPL_SHAPE_RECS + (h.w >> 16);
+    uint base = h.y + v * recs;
+    uint4 hdr = gMisc[base];
+    for (uint j = lane, jStop = EB_END(j, min(hdr.x, nb), LANES); j < jStop; j += LANES)
     {
-        uint b = cplBody(v, j);
+        uint b = base + 1u + j * CPL_BODY_RECS;
         float4 c = asfloat(gMisc[b]);
         gMisc[b] = asuint(float4(c.xyz - first, c.w));
     }
-    for (uint k = lane, kStop = EB_END(k, hdr.y, LANES); k < kStop; k += LANES)
+    for (uint k = lane, kStop = EB_END(k, min(hdr.y, ns), LANES); k < kStop; k += LANES)
     {
-        uint at = cplShape(v, k) + 6u;
+        uint at = base + 1u + nb * CPL_BODY_RECS + k * CPL_SHAPE_RECS + 6u;
         float4 r = asfloat(gMisc[at]);
         gMisc[at] = asuint(float4(r.xyz - first, r.w));
     }
