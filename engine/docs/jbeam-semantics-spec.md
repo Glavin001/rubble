@@ -1310,6 +1310,31 @@ that would rest them (mass scaling, softening the springs, an implicit pass on t
 stiff subgraph) changes the content's physics, which needs the user's decision
 (AGENTS.md).
 
+*Not the missing wheel mass (2026-11-06).* The hypothesis: BeamNG's shared wheel,
+tyre, brake and hub parts (not local) add mass the hub and suspension nodes lack. The
+raycast spawn already adds each wheel's mass (20 kg) to its hub nodes, and the slots
+the SUV and trailer miss are brake pads and bulbs only (no nodes). Measured
+(`jbeam_accept`, raycast wheels, 2 s at rest; measurement options):
+* **SUV.** 30 kg more per wheel on its hub nodes (`hubmass=30`): 6.8 m/s, KE 241 J
+  (without 6.2 m/s, 207 J). The oscillating node `rx2l` is not a hub node: it is the
+  rear trackbar's frame mount (4.7 kg, `nodeWeight` 4.7 in the file), tied to both
+  frame rails by eight 9.4 MN/m beams and to the axle by the 18.8 MN/m trackbar; its
+  lateral mode is at ω·h ≈ 2.0 by hand ((4·9.4 MN/m)/4.7 kg + 18.8 MN/m/2.35 kg).
+  Without the torsion bars, the couplers or the damping filters it still runs
+  (5.8 / 6.7 / 15.7 m/s).
+* **Trailer.** Its axle torsion bars: without them (`droptorsion=` the ten bars
+  `x15·`/`x14r`…, spring 810,100 N·m/rad, two per axle about the axle tube and about
+  its top beam) it rests: 0.27 m/s, KE 3.3 J (with them 20.7 m/s, 23 kJ). Without
+  the LBEAMs, the frame's torsion bars or the leaf bars about `x14`…: still unstable.
+  Its axle tube's twist mode from these bars alone: the four 6.2 kg corner nodes 0.13 m
+  off the twist axis, I ≈ 0.22 kg·m² per end, ω·h ≈ 1.9 with both bars; with the tube's
+  plain beams past 2. The node weights are the file's (6.2 kg inline on each corner;
+  the leaf nodes 3 kg from a modifier row, which the importer carries). BeamNG's
+  torsion bar page gives the roles (levers 1 and 4, axis 2–3, Nm/rad) and warns that
+  levers far from 90° to the axis are "less stable"; here they are at 90°. How BeamNG
+  applies the torque to the four nodes is not documented (§9's dihedral gradient is a
+  Choice): **open**, the next suspect.
+
 ## 30. GPU layout of Part II and verification
 
 * Params words 64–68: `extIndex` (gLists, per beam its extension + 1), `extBase`

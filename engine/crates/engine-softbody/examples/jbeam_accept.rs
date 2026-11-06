@@ -106,6 +106,14 @@ fn main() {
             n.pos.y -= low - lift;
         }
         s.roll_tyres(v);
+        if let Some(m) = opt("hubmass=") {
+            // A measurement: each wheel assembly's mass (kg) split over its two hub nodes.
+            let m: f32 = m.parse().unwrap();
+            for w in &desc.wheels {
+                s.nodes[w.node1 as usize].mass += 0.5 * m;
+                s.nodes[w.node2 as usize].mass += 0.5 * m;
+            }
+        }
         if let Some(cap) = opt("dampcap=") {
             let cap: f32 = cap.parse().unwrap();
             for b in &mut s.beams {
@@ -134,11 +142,46 @@ fn main() {
             s.candidates.retain(|&c| c != i);
         }
     }
+    if let Some(kind) = opt("drop=") {
+        // A measurement: one beam kind left out (lbeam, torsion).
+        for b in &mut s.beams {
+            let k = format!("{:?}", b.kind).to_ascii_lowercase();
+            if k.starts_with(&format!("jbeam{kind}")) {
+                b.broken = true;
+            }
+        }
+    }
+    if let Some(pre) = opt("droptorsion=") {
+        // A measurement: torsion elements whose first node's name starts with `pre`.
+        for j in 0..s.beams.len() {
+            let b = s.beams[j];
+            if b.kind == engine_softbody::explicit_beams::ExplicitKind::JbeamTorsion
+                && desc.nodes.get(b.a as usize).is_some_and(|q| pre.split(',').any(|p| if let Some(e) = p.strip_prefix('=') { q.name == e } else { q.name.starts_with(p) }))
+            {
+                s.beams[j].broken = true;
+                s.beams[j + 1].broken = true;
+            }
+        }
+    }
     if opt("noself=").is_some() {
         s.candidates.clear();
     }
     for w in &warnings {
         println!("warning: {w}");
+    }
+    if opt("wheelinfo=").is_some() {
+        let nm = |i: u32| desc.nodes[i as usize].name.clone();
+        for w in &desc.wheels {
+            println!(
+                "wheel {}({} kg) {}({} kg) arm {:?} mass {} radius {}",
+                nm(w.node1), desc.nodes[w.node1 as usize].mass, nm(w.node2), desc.nodes[w.node2 as usize].mass,
+                w.arm.map(nm), w.mass, w.radius
+            );
+        }
+        for pw in &desc.pressure_wheels {
+            println!("pressure wheel {} values {:?}", pw.name, pw.values.iter().filter(|(k, _)| k.contains("eight") || k.contains("Weight") || *k == "radius").collect::<Vec<_>>());
+        }
+        return;
     }
     if opt("parts=").is_some() {
         // Each part with its node count and break groups its beams name.
@@ -277,6 +320,34 @@ fn main() {
             println!("dragCoef/liftCoef {k}: {n} triangles, area {a:.2} m², drag area {cda:.3} m²");
         }
         println!("total drag area C·A {total:.2} m² ({} triangles)", desc.triangles.len());
+        return;
+    }
+    if opt("nodemodes=").is_some() {
+        // Per node: ω·h of its local mode, λmax(Σ k (1/m_i + 1/m_j) d dᵀ) (each beam a
+        // pair on its reduced mass; springs only, plain and support beams at k).
+        let n = s.nodes.len();
+        let mut kk = vec![glam::Mat3::ZERO; n];
+        for b in s.beams.iter().filter(|b| !b.broken && b.a != b.b && b.k > 0.0 && b.k.is_finite()) {
+            let (a, c) = (b.a as usize, b.b as usize);
+            let d = (s.nodes[a].pos - s.nodes[c].pos).normalize_or_zero();
+            let dd = glam::Mat3::from_cols(d * d.x, d * d.y, d * d.z);
+            let w = b.k * (1.0 / s.nodes[a].mass + 1.0 / s.nodes[c].mass);
+            kk[a] += dd * w;
+            kk[c] += dd * w;
+        }
+        let mut out: Vec<(f32, usize)> = (0..n)
+            .map(|i| {
+                let mut v = Vec3::new(1.0, 0.7, 0.3);
+                for _ in 0..60 {
+                    v = (kk[i] * v).normalize_or_zero();
+                }
+                ((kk[i] * v).length().sqrt() * 0.0005, i)
+            })
+            .collect();
+        out.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for &(wh, i) in out.iter().take(12) {
+            println!("node {} {} m {:.2}: omega*h {:.2}", i, desc.nodes.get(i).map_or("?", |q| q.name.as_str()), s.nodes[i].mass, wh);
+        }
         return;
     }
     if opt("modes=").is_some() {
