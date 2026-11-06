@@ -184,17 +184,16 @@ for frame time.
 | 5 | **One check, one wasm.** The preset matrix (native, C, web); fold the per-page scripts; merge `engine-vehicle-wasm`. | One matrix covers every preset on three hosts; one wasm download per page |
 | 6 | **Docs and cleanup.** README gallery links to presets; `public-api.md` covers `rubble::play`; delete the replaced page code. | No page-specific engine code left outside presets |
 
-## Decisions needed
+## Decisions (2026-11-06)
 
-1. **The legacy engine (`crates/`, `web/`).** Recommendation: retire it in its own PR
-   (delete, keeping a tag for history), since nothing deployed uses it. Your call.
-2. **`blast_parity`.** Recommendation: keep it on the stress world as the one labelled
-   exception until it's ported onto `World` (a separate piece of work, as decided in the
-   lab plan).
-3. **Old page URLs.** Recommendation: redirects kept indefinitely (cheap, and recordings
-   and README media depend on them).
-4. **Page-only tuning** (camera paths, HUD fields, crash-cam timings). Recommendation: carried
-   into each preset as data; nothing dropped. Any difference is listed in the phase's report.
+1. **The legacy engine (`crates/`, `web/`).** Retired in its own PR (deleted, with a git
+   tag for history). The playground PRs leave it alone.
+2. **`blast_parity`.** Stays on the stress world as the one labelled exception until it's
+   ported onto `World` (separate work, as decided in the lab plan).
+3. **Old page URLs.** Redirect to their presets indefinitely (README media and recordings
+   depend on them).
+4. **Page-only tuning** (camera paths, HUD fields, crash-cam timings). Carried into each
+   preset as data; nothing dropped. Any difference is listed in the phase's report.
 
 ## Risks
 
