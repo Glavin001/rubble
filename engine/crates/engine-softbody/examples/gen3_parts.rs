@@ -22,6 +22,34 @@ fn main() {
         );
     }
     println!("total verts {tot}");
+    // `GEN3_TOP=<part>,...`: each part's top (largest y) per 5 cm of z, over
+    // `GEN3_TOP_X` (default 0.55..0.75) of |x|.
+    if let Ok(names) = std::env::var("GEN3_TOP") {
+        let (x0, x1) = std::env::var("GEN3_TOP_X")
+            .ok()
+            .and_then(|v| {
+                let mut it = v.split("..").map(|q| q.parse::<f32>().ok());
+                Some((it.next()??, it.next()??))
+            })
+            .unwrap_or((0.55, 0.75));
+        for name in names.split(',') {
+            let p = m.parts.iter().find(|p| p.name == name).expect("part");
+            let mut line = format!("{name}:");
+            for k in 0..120 {
+                let z = -2.6 + 0.05 * k as f32;
+                let top = p
+                    .pos
+                    .iter()
+                    .filter(|q| (q.z - z).abs() < 0.025 && (x0..x1).contains(&q.x.abs()))
+                    .map(|q| q.y)
+                    .fold(f32::MIN, f32::max);
+                if top > f32::MIN {
+                    line += &format!(" {z:.2}:{top:.3}");
+                }
+            }
+            println!("{line}");
+        }
+    }
     // `GEN3_EDGE=<part>`: its side-facing skin's front and rear edge (z) per
     // height, every 5 cm.
     if let Ok(name) = std::env::var("GEN3_EDGE") {

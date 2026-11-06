@@ -86,6 +86,39 @@ fn in_static(sim: &ExplicitBeams, x: Vec3) -> bool {
             .any(|s| shape_face(s, &StaticShape::bounds(s), x).is_some())
 }
 
+/// `sim`'s colliders grown by `r` on every side.
+fn grown(sim: &ExplicitBeams, r: f32) -> ExplicitBeams {
+    let mut g = ExplicitBeams::empty(sim.settings);
+    g.boxes = sim
+        .boxes
+        .iter()
+        .map(|b| engine_softbody::explicit_beams::StaticBox {
+            lo: b.lo - Vec3::splat(r),
+            hi: b.hi + Vec3::splat(r),
+        })
+        .collect();
+    g.shapes = sim
+        .shapes
+        .iter()
+        .map(|s| match *s {
+            StaticShape::OrientedBox {
+                centre,
+                half,
+                rotation,
+                ..
+            } => StaticShape::oriented_box(centre, half + Vec3::splat(r), rotation),
+            StaticShape::Cylinder {
+                centre,
+                radius,
+                half_height,
+            } => StaticShape::cylinder(centre, radius + r, half_height + r),
+            StaticShape::Capsule { a, b, radius } => StaticShape::capsule(a, b, radius + r),
+            StaticShape::Sphere { centre, radius } => StaticShape::sphere(centre, radius + r),
+        })
+        .collect();
+    g
+}
+
 #[wasm_bindgen]
 impl ExplicitSim {
     /// Grab node `node` of vehicle `vehicle`: from the next frame on every step pulls
@@ -195,6 +228,17 @@ impl ExplicitSim {
             s.shapes = v.sim.shapes.clone();
             let rest0: Vec<f32> = v.sim.beams.iter().map(|b| b.rest0).collect();
             let airborne = v.sim.origin.y + low - v.sim.ground > AIRBORNE;
+            // With surface contact the collision triangles meet the
+            // colliders by their faces: a 20 cm pole can stop between nodes
+            // with none inside it, so points across each triangle count too.
+            // The faces stop at the collider's surface (they touch, never
+            // enter), so they are tested against it grown by the contact range.
+            let tris: Vec<[u32; 3]> = if v.sim.surface_contact {
+                v.sim.triangles.iter().map(|t| t.nodes).collect()
+            } else {
+                Vec::new()
+            };
+            let grown = grown(&s, v.sim.collision_range.max(0.01));
             statics.push((
                 s,
                 rest0,
@@ -202,6 +246,8 @@ impl ExplicitSim {
                 airborne,
                 v.sim.ground,
                 v.sim.collision_range,
+                tris,
+                grown,
             ));
         }
         let step = self.steps as f64;
@@ -216,7 +262,9 @@ impl ExplicitSim {
                 let (mut bent, mut broken, mut contact) = (0u32, 0u32, false);
                 let mut boxes = Vec::with_capacity(nv);
                 let mut at = nv * 4;
-                for (i, (s, rest0, n, airborne, ground, range)) in statics.iter().enumerate() {
+                for (i, (s, rest0, n, airborne, ground, range, tris, grown)) in
+                    statics.iter().enumerate()
+                {
                     let o = Vec3::new(f(w[i * 4]), f(w[i * 4 + 1]), f(w[i * 4 + 2]));
                     let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
                     for k in 0..*n {
@@ -231,6 +279,32 @@ impl ExplicitSim {
                         contact = contact || in_static(s, x) || (*airborne && x.y < *ground);
                     }
                     boxes.push((lo - Vec3::splat(*range), hi + Vec3::splat(*range)));
+                    if !contact && !tris.is_empty() {
+                        let p = |k: u32| {
+                            let k = k as usize;
+                            o + Vec3::new(
+                                f(w[at + k * 12]),
+                                f(w[at + k * 12 + 1]),
+                                f(w[at + k * 12 + 2]),
+                            )
+                        };
+                        // The centroid, the edges' midpoints and the points
+                        // halfway from the centroid to each corner.
+                        const BARY: [[f32; 3]; 7] = [
+                            [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+                            [0.5, 0.5, 0.0],
+                            [0.0, 0.5, 0.5],
+                            [0.5, 0.0, 0.5],
+                            [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
+                            [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
+                            [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0],
+                        ];
+                        contact = tris.iter().any(|t| {
+                            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                            BARY.iter()
+                                .any(|w3| in_static(grown, a * w3[0] + b * w3[1] + c * w3[2]))
+                        });
+                    }
                     at += n * 12;
                     for (k, &r0) in rest0.iter().enumerate() {
                         let r = f(w[at + k * 8]);

@@ -2219,6 +2219,9 @@ pub fn color(m: u8, paint: [f32; 3]) -> [f32; 3] {
         // under the lids), satin and a shade darker.
         mat::INNER => [paint[0] * 0.8, paint[1] * 0.8, paint[2] * 0.8],
         mat::ENGINE => [0.16, 0.165, 0.17],
+        // Unpainted moulded-in-colour plastic (bumper splitters, vents,
+        // diffusers): black, its grain is the shader's.
+        mat::GRAINED => [0.025, 0.025, 0.027],
         _ => [1.0, 0.0, 1.0],
     }
 }

@@ -2130,14 +2130,22 @@ pub fn rig(model: &Model) -> Rig {
     // The cabin's yield by height (the floor, sills and lower pillars, and
     // the greenhouse above the belt) and the doors': `GEN3_FLOOR_Y`,
     // `GEN3_ROOF_Y`, `GEN3_DOOR_Y` (multiples on the census yield).
-    let env = |k: &str| {
+    let env = |k: &str, d: f32| {
         std::env::var(k)
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(1.0)
+            .unwrap_or(d)
     };
-    let (fy, ry, dy) = (env("GEN3_FLOOR_Y"), env("GEN3_ROOF_Y"), env("GEN3_DOOR_Y"));
+    let (fy, ry, dy) = (
+        env("GEN3_FLOOR_Y", FOOTWELL_YIELD),
+        env("GEN3_ROOF_Y", GREENHOUSE_YIELD),
+        env("GEN3_DOOR_Y", 1.0),
+    );
+    let (sy, cy) = (env("GEN3_SIDE_Y", 1.0), env("GEN3_CRUSH_Y", CRUSH_YIELD));
     let belt_h = to_jbeam(Vec3::new(0.0, 0.95, 0.0)).z;
+    // The footwell: the floor, sills and hinge pillars ahead of the front
+    // seats (the side tests strike behind it).
+    let foot_y = to_jbeam(Vec3::new(0.0, 0.0, 0.40)).y;
     for b in &mut r.car.beams {
         if !b.deform.is_finite()
             || b.break_group.is_some()
@@ -2157,15 +2165,39 @@ pub fn rig(model: &Model) -> Rig {
             continue;
         }
         let mid = 0.5 * (r.car.nodes[b.a].p + r.car.nodes[b.b].p);
+        let crush_zone = mid.y < fw_y - 0.05 || mid.y > rear_y;
         if b.part.is_door() {
             b.deform *= dy;
+        } else if b.part == body && crush_zone && b.role != Role::Sheet {
+            b.deform *= cy;
         } else if b.part == body && mid.y >= fw_y - 0.05 && mid.y <= rear_y {
-            b.deform *= if mid.z > belt_h { ry } else { fy };
+            b.deform *= if mid.z > belt_h {
+                ry
+            } else if mid.y < foot_y {
+                fy
+            } else {
+                sy
+            };
         }
     }
     let _ = (ARCH_R, &eng);
     r
 }
+
+/// The yield of the crush zones' body members (rails, cans, aprons, rear
+/// rails and their webs) as a multiple of the census's 1.15 %: 0.46 %, in
+/// the census's body band (p10 0.2-0.3 %, p50 1.0-1.3 %). Measured on the
+/// wall (surface contact on): dynamic crush 583 to 602 mm (620-750), t_m 60
+/// to 70 ms (63-76), b1 41 to 35.5 /s (<= 39.2).
+pub const CRUSH_YIELD: f32 = 0.4;
+/// The footwell's (floor, sills, hinge pillars and firewall ahead of the
+/// front seats, below the belt): 4.1 %, under the census's body p90
+/// (4.9-9.3 %): high-strength steel there. Feet intrusion 94 to 53 mm (<= 67).
+pub const FOOTWELL_YIELD: f32 = 3.0;
+/// The greenhouse's (above the belt, firewall to the rear shelf): 0.62 %.
+/// FMVSS 216a 5.94 to 5.02 x weight (4.48-5.32); its frontal racking stays
+/// within the cabin (the A-pillar's chords carry the header).
+pub const GREENHOUSE_YIELD: f32 = 0.45;
 
 /// Spacing of the shut lines' edge nodes (m): a real closure's flange is
 /// bolted, hinged or stopped every 15-25 cm along it.
