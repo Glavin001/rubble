@@ -3,9 +3,11 @@
 // static box slots (axis-aligned boxes, oriented boxes, cylinders, capsules, spheres)
 // by their surface, beside node contact. Included by explicit_beams.slang.
 //
-// Off (no vehicle of the frame has FLAG_SURFACE: gsUniformSurf 0) nothing here runs.
-// On, per step after self-collision and before the slide nodes, three phases with a
-// barrier before each (every lane reaches them: the flag is a uniform load):
+// Off (no vehicle of the upload has FLAG_SURFACE: gP.surfSplit 0, a uniform) nothing
+// here runs. On, per step after self-collision and before the slide nodes, three
+// phases with a barrier before each (every lane reaches them; a vehicle without the
+// flag does no work between them). No workgroup memory (Metal's threadgroup slots
+// are spent by the contact modules):
 //   snap   per node its force at the pass's start (beam sum + accumulator) into gBeams
 //          at surfSnap, its hit count at surfSplit cleared
 //   find   per collision triangle the narrow phase against every slot near it; each
@@ -15,7 +17,6 @@
 //          accumulators (fixed point, order free) and the position steps
 // Every operation strict, in the CPU reference's order.
 
-groupshared uint gsUniformSurf;
 static const uint FLAG_SURFACE = 131072u;
 static const float SURF_TIE = 1e-4;
 static const float SURF_PIERCE = 1e-5;
@@ -638,21 +639,8 @@ void surfTriangle(uint v, uint gt, float3 origin, float r, uint boxOff, uint box
     }
 }
 
-// The frame's start (lane 0, before the barrier the uniform read follows): on when
-// the vehicle has the flag.
-void surfaceBegin(uint flagsV)
-{
-    gsUniformSurf = (gP.surfSplit != 0u && (flagsV & FLAG_SURFACE) != 0u) ? 1u : 0u;
-}
-
-// A contact group's start (lane 0): on when any member has the flag.
-void surfaceBeginMembers(uint off, uint k)
-{
-    uint on = 0u;
-    for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
-        if ((gStatic[vvMember(off, m) * 4u + 3u].x & FLAG_SURFACE) != 0u) on = 1u;
-    gsUniformSurf = gP.surfSplit != 0u ? on : 0u;
-}
+// Whether any vehicle of the upload has surface contact (uniform: a parameter).
+uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 
 // Step's surface pass of vehicle v (uniform `on`), after its self-collision and
 // before its slide nodes (parity: the step's): the barrier, the snapshot, the find,

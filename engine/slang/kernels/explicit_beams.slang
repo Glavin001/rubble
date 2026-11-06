@@ -4246,7 +4246,6 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsUniformLanes = triCount > 0u ? 1u : 0u;
         coupleBegin();
         driveBegin();
-        surfaceBegin(flagsV);
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
@@ -4265,7 +4264,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint selfOn = gsUniformLanes;
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
-    uint surfOn = gsUniformSurf;
+    uint surfOn = surfaceOn();
 
     for (uint s = 0u, sStop = EB_END(s, gP.steps, 1u); s < sStop; s++)
     {
@@ -7105,13 +7104,12 @@ void contactGroup(uint g, uint lane)
         gsUniformLanes = G.y;
         coupleBegin();
         driveBegin();
-        surfaceBeginMembers(off, G.y);
     }
     sync();
     uint k = gsUniformLanes;
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
-    uint surfOn = gsUniformSurf;
+    uint surfOn = surfaceOn();
     sync();
     // Members in vehicle order (a rank sort), their run prefixes and member
     // indices.

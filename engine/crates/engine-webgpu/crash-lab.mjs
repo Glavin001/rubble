@@ -215,7 +215,7 @@ export function createCrashLab(ctx) {
   $('labPreset').onchange = (e) => {
     const [kind, k] = e.target.value.split(':');
     if (kind === 's') { location.href = ctx.sceneUrl(k); return; }
-    const u = new URL(location.href); const keep = ['car', 'truck', 'tyres', 'drag']; const s = new URLSearchParams(); s.set('solver', 'explicit'); s.set('preset', k); for (const x of keep) if (qs.has(x)) s.set(x, qs.get(x)); u.search = s.toString(); location.href = u.href;
+    const u = new URL(location.href); const keep = ['car', 'truck', 'tyres', 'drag', 'surfaceContact']; const s = new URLSearchParams(); s.set('solver', 'explicit'); s.set('preset', k); for (const x of keep) if (qs.has(x)) s.set(x, qs.get(x)); u.search = s.toString(); location.href = u.href;
   };
   $('labPlay').onclick = (e) => { playPause(); blur(e); };
   $('labFrame').onclick = (e) => { frameStep(); blur(e); };

@@ -1954,3 +1954,116 @@ vehicle: side memories word for word, positions bit for bit (the 150 m/s point n
 ends 4.6 cm behind the floor, the 90 m/s self-collision node 1.1 cm behind its
 triangle: the step is capped by the hit's budget; RoR's push threw them 14 and 42
 cm clear).
+
+## 38. Surface contact: collision triangles against rigid shapes (opt-in, 2026-11-06)
+
+**Problem.** Static and rigid contact was node only (a node strictly inside a shape is
+pushed out), so a shape narrower than the node spacing passes between nodes with beams
+and skin across it: the imported ETK (nodes about 0.5 m apart) let a 20 cm side pole
+2.0 m into it at 32 km/h. **Decision** (user, 2026-11-06): rigid colliders stay
+shapes; the soft body's collision triangles meet them by their surface, opt-in, with
+node-only staying the default bit for bit.
+
+**Switch.** `ExplicitBeams::surface_contact` (CPU, `explicit_surface.rs`); vehicle flag
+131072 `FLAG_SURFACE` (GPU, `explicit_beams_surface.slang`); spec field
+`surfaceContact` (`ExplicitSim`); page `?surfaceContact=1` (softbody.html, the crash
+lab keeps it). Off: nothing runs (a uniform early return on the GPU).
+
+**Features (no double counting).** Node contact keeps every node; a triangle takes the
+contacts whose nearest feature on the triangle is an edge or its face. Per (live,
+collidable, not anti-clip-only) triangle and shape whose boxes come within the band r:
+* **X candidates**, the shape's features against the triangle as closest-point pairs: a
+  box's 12 edges against the triangle (each end, the edge against each triangle edge,
+  the edge piercing the face) and each triangle edge's run inside the box (distance 0
+  at its middle); a capsule's or vertical cylinder's axis segment the same way (a
+  cylinder's pairs taken to the solid cylinder's nearest point); a sphere's centre
+  against the triangle; a hull's edges and the triangle edges inside its planes (CPU
+  reference: proxy hulls, vertices and edges from their planes). Gap = distance less
+  the shape's radius.
+* **V**: each triangle vertex outside the shape, its exact distance to the shape. If a
+  vertex is no farther than the nearest X candidate (+`TIE`, 0.1 mm) the contact is
+  the node's and the triangle takes none. A vertex inside the shape does not count (the
+  triangle still meets what crosses it beside that node).
+* The X candidates within `TIE` of the nearest are **one contact at their mean**
+  (weights, triangle point, shape point): a pole's face parallel to a panel is nearest
+  along a strip whose ends the candidates are, so the contact is the strip's middle.
+  Weights on one vertex only: the node's.
+* **Normal**: from the triangle point toward the shape point; touching or crossing
+  (gap or their distance ≤ 10 µm), the separating axis of least overlap (triangle
+  normal, the shape's face axes, then edge × edge; a later axis must beat the best by
+  10 µm), oriented from the triangle toward the shape. **Choice**: the minimum
+  translation keeps a triangle crossing a wall edge-on pushed along the wall's normal,
+  not sideways along its own.
+
+**Response.** Vehicle contact's two-body rule (§10.3) with the shape as the contacter:
+infinite mass when static or kinematic; a dynamic proxy k·(1/M + (r×n)·I⁻¹(r×n)), k its
+surface hits this step × its share. The triangle point's inverse mass Σ w²·k/m (k the
+node's surface hits this step: mass splitting); the relative velocity the shape's at
+the point less Σ w·v; the pair's force −Σ w·F/m times the reduced mass, F each node's
+force at the pass's start (its force plus its contact sum, a snapshot). Then §37's rule,
+always (**Choice**: a new mode, no RoR legacy): dissipative, with the position step, in
+the vehicle's band r (2.5 cm in the BeamNG profile); gap g ≤ r gives depth
+min(r − g, r) (anti-clip's: a node behind is pushed as at the plane). The triangle's
+nodes take −w·f through the fixed-point sums (the vehicle's `fixed_contact`) and the
+position step their shares; a dynamic body takes +f at the contact point (fixed-point
+surface sums per shape, integrated with the next step's reaction); the rigid body takes
+no position step. Node contact in the next node pass reads the node's force with these
+sums in it and only tops up to its own target: no double counting where both act.
+
+**Order.** After self-collision, before the slide nodes, every step: find (positions
+only) and count, then apply in triangle and shape order. GPU: three barrier-separated
+phases (the snapshot; the find, counts by atomics; the apply, hits recomputed:
+positions do not change), the same strict arithmetic in the CPU's order. The frame
+kernel and the contact groups run it; the wide passes are off for a fleet with it
+(`wide_ok`); with rigid proxies (the World's coupling) it is the CPU reference's only
+for now and the plan refuses it (a clear error, not a silent fallback). Params:
+`surfSnap` (gBeams, a float4 per node), `surfSplit` (gAcc, a word per node).
+
+**Checked.**
+* CPU, `tests/explicit_surface.rs`: triangle against box (face, turned edge, crossing),
+  capsule, sphere, cylinder and hull, each with the expected gap, normal and point; a
+  shape nearest a vertex left to the node; a plate with node lines 0.5 m apart at
+  10 m/s against a 20 cm pole between them: node-only passes (mean x −2.4 m), surface
+  contact catches it, its front edge's middle never more than 2 cm into the pole; a
+  free 20 kg block takes the equal and opposite force: momentum closes to 0.9 mN·s of
+  2,000 N·s (fixed-point rounding); a plate resting on a 4 cm bar under its middle (its
+  nodes off the bar) is held, never below the bar's top, and gains no energy (0.1 s
+  means never above their earlier peak; kinetic energy at rest < 0.01 J); off, or
+  nothing near: bit for bit.
+* GPU, `engine-world-wasm/tests/surface_contact_gpu.rs` (wgpu on Metal): sedan1 in
+  the crash lab's side pole at 32 km/h, every node's position and velocity bit for bit
+  with the CPU after each frame, off and on (2,941 hits); the 75° and frontal poles
+  with it on (2,342 and 4,352 hits).
+
+**Measured** (CPU reference, `examples/surface_pole.rs`, the crash lab's own spawn,
+32 km/h, 0.6 s; off → on). Depth: how far any node, beam point or triangle point gets
+inside the pole box (beams and triangles sampled); p99 over every inside element and
+frame; crush: the struck side's skin in the pole's lane against the far side.
+
+| Car, test | node / beam / triangle depth (mm) | p99 (mm), inside samples | peak (kN) | crush max / end (mm) | µs/step |
+|---|---|---|---|---|---|
+| ETK, side 90° | 31.6 / 99.6 / 98.1 → 47.6 / 95.7 / 9.8 | 97.3 (2,315) → 95.7 (96) | 148 → 401 | 2,030 / 1,916 → 353 / 160 | 90 → 255 |
+| ETK, oblique 75° | 73.8 / 100 / 98.2 → 28.1 / 92.6 / 33.3 | 97.6 (1,167) → 91.1 (158) | 291 → 379 | 778 / 778 → 366 / 49 | 112 → 151 |
+| ETK, frontal | 55.1 / 99.5 / 97.8 → 65.0 / 98.4 / 7.2 | 97.3 (1,376) → 96.1 (184) | 200 → 291 | 402 / 361 → 442 / 391 | 110 → 127 |
+| sedan1, side 90° | 6.2 / 100 / 99.1 → 1.2 / 98.3 / 0.0 | 98.2 (7,385) → 97.9 (202) | 251 → 235 | 412 → 699 | 1,379 → 1,383 |
+| sedan1, oblique 75° | 4.1 / 100 / 99.8 → 1.2 / 99.8 / 0.0 | 98.0 (8,874) → 93.7 (154) | 295 → 239 | 635 → 1,081 | 1,285 → 1,654 |
+| sedan1, frontal | 4.7 / 99.8 / 99.2 → 6.3 / 99.7 / 17.8 | 95.4 (2,037) → 97.5 (755) | 231 → 229 | 537 / 491 → 674 / 534 | 1,856 → 1,468 |
+
+* The ETK no longer lets the pole through: side crush 2.0 m (the pole through the car)
+  → 353 mm peak, 160 mm residual; the peak force rises to 401 kN as the skin and
+  structure take the load.
+* The skin wraps the pole: the deepest triangle point inside it falls from 98–100 mm
+  (the pole across the panel) to 0–33 mm; the elements inside fall 7–50 fold.
+* What remains inside are beams that are on no collision triangle (interior structure,
+  cross-car members behind the skin). Beam-edge contact behind the same switch is the
+  next step (not built).
+* sedan1's skin-based crush rises (412 → 699 mm side) because the skin now holds
+  instead of passing through the pole uncrushed while the structure behind held (node
+  depth 6 mm). The NCAP residual crush calibration (§36, `o_side_pole_matches_the_nhtsa_sedans`)
+  must be re-run with it on before any default change.
+* Cost (CPU reference: every triangle against every slot whose box is near; no
+  broad-phase beyond the per-vehicle slot list): the ETK side pole 2.8× per step,
+  sedan1 1.0–1.3×.
+
+**Open:** beam-edge contact; GPU proxies (the World's coupling); GPU cost at scale; the
+NCAP pole calibration with it on. The default stays node only until those hold.

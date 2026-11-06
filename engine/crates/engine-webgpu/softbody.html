@@ -218,7 +218,7 @@
     const xsceneUrl = (id) => {
       const u = new URL(location.href), s = new URLSearchParams();
       s.set('solver', 'explicit'); s.set('xscene', id);
-      for (const k of ['car', 'truck', 'tyres', 'drag', 'res', 'style', 'lab', 'drive']) if (qs.has(k)) s.set(k, qs.get(k));
+      for (const k of ['car', 'truck', 'tyres', 'drag', 'res', 'style', 'lab', 'drive', 'surfaceContact']) if (qs.has(k)) s.set(k, qs.get(k));
       u.search = s.toString();
       return u.href;
     };
@@ -561,6 +561,9 @@
         ...(xscene === 'traffic' && qs.has('ai') ? { ai: qs.get('ai') } : {}),
         // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
         drag: qs.get('drag') !== '0',
+        // ?surfaceContact=1: collision triangles meet the boxes and shapes by their
+        // surface too (jbeam-semantics-spec.md §38; off by default).
+        surfaceContact: qs.get('surfaceContact') === '1',
       });
     const buildExplicit = () => {
       xsim?.free();
