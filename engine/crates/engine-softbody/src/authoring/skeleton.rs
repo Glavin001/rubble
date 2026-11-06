@@ -214,6 +214,11 @@ pub struct Skeleton {
     /// triangles ([`Skeleton::exposed_triangles`]) at these (dragCoef,
     /// liftCoef), every other one (covered, inner) none.
     pub aero_exposed: Option<(f32, f32)>,
+    /// The last this many collision triangles are inside the car (a
+    /// colliding block's faces): contact only, no air acts on them. With
+    /// [`Skeleton::drag_coef`] the rest are listed in `rubble_aero_tri` at
+    /// its coefficients, so the car's drag is its skin's alone.
+    pub inner_collision: usize,
     /// The nodes are the vehicle at rest on flat ground at this height
     /// (`rubble_rest_pose`): it spawns standing, its beams' rest lengths
     /// (`rest_scale`) the unloaded design's.
@@ -1486,6 +1491,12 @@ impl Skeleton {
             let _ = writeln!(s, "\nrubble_aero_tri\n; a, b, c, dragCoef, liftCoef");
             for k in self.exposed_triangles() {
                 let t = self.collision[k];
+                let _ = writeln!(s, "{}, {}, {}, {d}, {l}", t[0], t[1], t[2]);
+            }
+        } else if let (Some((d, l)), true) = (self.drag_coef, self.inner_collision > 0) {
+            let _ = writeln!(s, "\nrubble_aero_tri\n; a, b, c, dragCoef, liftCoef");
+            let outer = self.collision.len() - self.inner_collision;
+            for t in &self.collision[..outer] {
                 let _ = writeln!(s, "{}, {}, {}, {d}, {l}", t[0], t[1], t[2]);
             }
         }

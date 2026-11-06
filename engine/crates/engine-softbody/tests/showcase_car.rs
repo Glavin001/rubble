@@ -198,8 +198,24 @@ fn skins_are_closed_and_the_truck_loads() {
                 });
             let (c, h) = (0.5 * (lo + hi), 0.5 * (hi - lo));
             let reach = if bl.bear > 0.0 { bl.bear } else { 0.5 };
+            // (Not the nodes its mounts and bearing beams hold.)
+            let held: HashSet<u32> = sk
+                .beams
+                .iter()
+                .filter_map(|bm| {
+                    match (
+                        sk.nodes[bm.a as usize].part == q,
+                        sk.nodes[bm.b as usize].part == q,
+                    ) {
+                        (true, false) => Some(bm.b),
+                        (false, true) => Some(bm.a),
+                        _ => None,
+                    }
+                })
+                .collect();
             expect.extend((0..sk.nodes.len() as u32).filter(|&i| {
-                sk.nodes[i as usize].part == 0
+                !held.contains(&i)
+                    && sk.nodes[i as usize].part == 0
                     && ((at(i) - c).abs() - h).max(Vec3::ZERO).length() <= reach
                     && at(i).z <= c.z + h.z
             }));
