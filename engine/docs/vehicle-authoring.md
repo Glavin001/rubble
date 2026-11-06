@@ -1296,7 +1296,8 @@ shared `common` parts, not local). Their node sets are picked by position from
 the body shell (`showcase_car.rs` `community_car`; Choices), their parts and
 hinge groups by name (`crash_invariants.rs` `community_part`). Tests:
 `showcase_car` `community_scenes`, `crash_invariants`
-`community_invariants_report` (both `CI_CARS`). Reported, never asserted.
+`community_invariants_report`, `explicit_scenes` `mdb_into_community_cars` (GPU;
+energy never rises: 165.8 kJ at most 165.9) (all `CI_CARS`). Reported, never asserted.
 
 | Reference (band) | ETK (roadster) | CCF | Vertex (sedan) | BX coupe |
 |---|---|---|---|---|
@@ -1311,7 +1312,7 @@ hinge groups by name (`crash_invariants.rs` `community_part`). Tests:
 | o residual (297–445 mm) | 76, sd 40 | 10, sd 9 ¹ | 400, sd 8 ¹ | 351 |
 | p initial / intermediate / peak (kN) | 6.3 / 12.5 / 98 | 13.6 / 21.9 / 198 | 6.6 / 14.5 / 58 | 9.0 / 14.0 / 28.7 |
 | q (4.48–5.32×) | 6.20 ² | 7.21 | 7.80 | 5.59 |
-| MDB residual (126–206 mm) | not run | not run | not run | 202 |
+| MDB residual (126–206 mm) | 224 | 91 | 221 | 202 |
 | Rear third, wall / head-on (past 0.2 %, broken) | 22, 0 / 0, 0 | 21, 0 / 2, 0 | 3, 0 / 0, 0 | 0, 0 / 0, 0 |
 | Lid against rear body, wall / head-on peak | 26.2 / 10.5 mm | 15.2 / 5.4 mm | 11.3 / 3.8 mm | 13.9 / 11.3 mm |
 | Rear body RMS, wall (≤ 5 mm) | 8.1 mm | 5.0 mm | 10.6 mm | 2.6 mm |
