@@ -4146,6 +4146,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsUniformLanes = triCount > 0u ? 1u : 0u;
         coupleBegin();
         driveBegin();
+        // The coupling's spheres in workgroup memory (cplGsRange).
+        cplGsClear();
+        cplGsAdd(0u, v, 0u, 0u);
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
@@ -6847,6 +6850,10 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
         // its range.
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
         {
+#ifdef EB_ABLATE
+            // Measurement only: 262144 the candidates.
+            if ((gP.ablate & 262144u) != 0u) break;
+#endif
             if (gsVvOff4[a].load() == 0u) continue;
             uint va = vvMember(off, a);
             uint key = vvBoxKey(va, parity);
@@ -6885,6 +6892,10 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
         uint total = 0u;
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();
         uint subs = clamp(LANES / max(total, 1u), 1u, 64u);
+#ifdef EB_ABLATE
+        // Measurement only: 131072 the owners' triangles against their candidates.
+        if ((gP.ablate & 131072u) != 0u) total = 0u;
+#endif
         for (uint p = lane, pStop = EB_END(p, total * subs, LANES); p < pStop; p += LANES)
         {
             uint q = p / subs;
@@ -6910,6 +6921,10 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
     for (uint l = 1u, lGuard = 0u; l <= k; l++)
     {
         EB_PASS(lGuard);
+#ifdef EB_ABLATE
+        // Measurement only: 524288 the levels (the hits' application).
+        if ((gP.ablate & 524288u) != 0u) break;
+#endif
         if (l == 1u)
         {
             uint total = 0u;
@@ -7007,6 +7022,20 @@ void contactGroup(uint g, uint lane)
             run += vvCpCount(vvMember(off, m));
         }
         vvClearCounters();
+        // The coupling's spheres in workgroup memory (cplGsRange): a small group's
+        // members one after another.
+        cplGsClear();
+        if (k <= CPL_GS_VEHICLES)
+        {
+            uint base = 0u;
+            uint nodeBase = 0u;
+            for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
+            {
+                cplGsAdd(m, vvMember(off, m), base, nodeBase);
+                base += gsCpl[CPL_GS_TAB + 5u * m + 2u];
+                nodeBase += gsCpl[CPL_GS_TAB + 5u * m + 4u];
+            }
+        }
     }
     sync();
     for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberBegin(vvMember(off, m), lane);

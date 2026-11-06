@@ -9,6 +9,11 @@
 //   node --experimental-websocket explicit-wgsl-check.mjs
 //
 // Needs Chrome (CHROME env to override). Exits non-zero when a module fails.
+// Prints each module's compile time (shader module and async pipeline). With
+// EXPLICIT_WGSL_COLD=1 each module's entry point is renamed with a nonce first, so
+// no shader cache (Chrome's or the driver's, keyed by source) can serve it: the
+// times are a user's first load. EXPLICIT_WGSL_ONLY=a,b compiles only the modules
+// whose names contain one of them.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
@@ -21,7 +26,7 @@ const DIR = join(ROOT, 'generated', 'explicit-wgsl');
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 const PAGE = `<!doctype html><meta charset="utf-8"><title>explicit wgsl</title><script type="module">
-window.__run = async () => {
+window.__run = async (nonce, only) => {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   const L = adapter.limits;
   const device = await adapter.requestDevice({ requiredLimits: {
@@ -37,17 +42,21 @@ window.__run = async () => {
   const list = await (await fetch('/manifest.json')).json();
   const out = [];
   for (const m of list) {
-    const code = await (await fetch('/' + m.name + '.wgsl')).text();
+    if (only.length && !only.some((o) => m.name.includes(o))) continue;
+    let code = await (await fetch('/' + m.name + '.wgsl')).text();
+    const entry = nonce ? m.entry + '_n' + nonce : m.entry;
+    if (nonce) code = code.split('fn ' + m.entry + '(').join('fn ' + entry + '(');
+    const t0 = performance.now();
     device.pushErrorScope('validation');
     const mod = device.createShaderModule({ code, label: m.name });
     const info = await mod.getCompilationInfo();
     const msgs = info.messages.filter((x) => x.type === 'error').map((x) => x.lineNum + ':' + x.linePos + ' ' + x.message);
     let pipe = null;
     try {
-      await device.createComputePipelineAsync({ layout: 'auto', compute: { module: mod, entryPoint: m.entry }, label: m.name });
+      await device.createComputePipelineAsync({ layout: 'auto', compute: { module: mod, entryPoint: entry }, label: m.name });
     } catch (e) { pipe = String(e.message || e); }
     const scope = await device.popErrorScope();
-    out.push({ name: m.name, errors: msgs, pipeline: pipe, scope: scope ? scope.message : null });
+    out.push({ name: m.name, errors: msgs, pipeline: pipe, scope: scope ? scope.message : null, ms: performance.now() - t0, kb: code.length / 1024 });
   }
   return { adapter: (adapter.info && adapter.info.description) || '', limits: { wg: L.maxComputeWorkgroupStorageSize, inv: L.maxComputeInvocationsPerWorkgroup }, out, errors };
 };
@@ -96,14 +105,17 @@ for (let i = 0; i < 100; i++) {
   if (await evaluate('window.__ready === true').catch(() => false)) break;
   await new Promise((r) => setTimeout(r, 100));
 }
-const r = await evaluate('window.__run()');
+const nonce = process.env.EXPLICIT_WGSL_COLD === '1' ? Date.now().toString(36) : '';
+const only = (process.env.EXPLICIT_WGSL_ONLY || '').split(',').filter(Boolean);
+const r = await evaluate(`window.__run(${JSON.stringify(nonce)}, ${JSON.stringify(only)})`);
 console.log(`Chrome WebGPU: ${r.adapter}; workgroup storage ${r.limits.wg} B, invocations ${r.limits.inv}`);
 let bad = 0;
 for (const m of r.out) {
   const fail = m.errors.length || m.pipeline || m.scope;
   if (fail) bad++;
-  console.log(`${fail ? 'FAIL' : 'ok  '} ${m.name}${m.errors.length ? ' ' + m.errors.slice(0, 3).join(' | ') : ''}${m.pipeline ? ' pipeline: ' + m.pipeline : ''}${m.scope ? ' scope: ' + m.scope : ''}`);
+  console.log(`${fail ? 'FAIL' : 'ok  '} ${m.name} ${m.kb.toFixed(0)} KB ${(m.ms / 1000).toFixed(2)} s${m.errors.length ? ' ' + m.errors.slice(0, 3).join(' | ') : ''}${m.pipeline ? ' pipeline: ' + m.pipeline : ''}${m.scope ? ' scope: ' + m.scope : ''}`);
 }
 if (r.errors.length) { bad++; console.log('device errors:', r.errors.slice(0, 5)); }
+console.log(`compile total ${(r.out.reduce((a, m) => a + m.ms, 0) / 1000).toFixed(2)} s${nonce ? ' (cold: nonce ' + nonce + ')' : ''}`);
 console.log(bad ? `${bad} failed` : `all ${r.out.length} modules compile in Chrome`);
 process.exit(bad ? 1 : 0);

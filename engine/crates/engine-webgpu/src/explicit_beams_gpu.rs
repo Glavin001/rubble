@@ -56,6 +56,7 @@ pub struct ExplicitBeamsGpu {
     /// The coupling header's state ([`Self::set_coupling_on`], [`Self::set_coupling_cull`]).
     coupling_on: bool,
     coupling_cull_off: bool,
+    coupling_cache_off: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
@@ -623,6 +624,7 @@ impl ExplicitBeamsGpu {
             marks: None,
             coupling_on: false,
             coupling_cull_off: false,
+            coupling_cache_off: false,
             wide,
             contact,
             contact_errors: Default::default(),
@@ -1030,6 +1032,19 @@ impl ExplicitBeamsGpu {
         self.write_coupling_header();
     }
 
+    /// Tests and measurement: the coupling's workgroup copies and ranges (on by default;
+    /// lossless, `explicit_beams_rigid.slang`: the header words, the proxy spheres and
+    /// each node's shape range from the count pass in workgroup memory, the shapes'
+    /// step reactions a lane a shape before each body sums them in shape order, a body's
+    /// shapes scanned over the range the plan wrote, a small contact group's members'
+    /// coupling side by side) off: every read from the buffers, every scan over every
+    /// shape, as before them.
+    #[doc(hidden)]
+    pub fn set_coupling_workgroup_cache(&mut self, on: bool) {
+        self.coupling_cache_off = !on;
+        self.write_coupling_header();
+    }
+
     /// Measurement only: the raycast wheels' pass on or off (off, the frames skip it and
     /// results are meaningless: time only). No-op without wheels.
     #[doc(hidden)]
@@ -1040,7 +1055,9 @@ impl ExplicitBeamsGpu {
     }
 
     fn write_coupling_header(&self) {
-        let word = u32::from(self.coupling_on) | if self.coupling_on && self.coupling_cull_off { 2 } else { 0 };
+        let word = u32::from(self.coupling_on)
+            | if self.coupling_on && self.coupling_cull_off { 2 } else { 0 }
+            | if self.coupling_on && self.coupling_cache_off { 4 } else { 0 };
         self.queue
             .write_buffer(&self.misc, self.layout.coupling_on_offset(), bytemuck::bytes_of(&word));
     }
@@ -1446,6 +1463,45 @@ impl ExplicitBeamsGpu {
             copies,
             state: self.planner.state(),
         }
+    }
+
+    /// Tests only: a [`Self::snapshot`] as bytes (blocking), for [`Self::snapshot_from_bytes`]
+    /// in another process: a kernel's frames compared with another build's from one state.
+    #[doc(hidden)]
+    pub fn snapshot_to_bytes(&self, snap: &GpuSnapshot) -> Vec<u8> {
+        let mut out: Vec<u32> = snap.state.to_words().to_vec();
+        out.push(snap.copies.len() as u32);
+        for c in &snap.copies {
+            let words: Vec<u32> = bytemuck::pod_collect_to_vec(&self.read(c));
+            out.push(words.len() as u32);
+            out.extend(words);
+        }
+        bytemuck::cast_slice(&out).to_vec()
+    }
+
+    /// Tests only: a snapshot from [`Self::snapshot_to_bytes`] (the same fleet and layout).
+    #[doc(hidden)]
+    pub fn snapshot_from_bytes(&self, bytes: &[u8]) -> GpuSnapshot {
+        let w: Vec<u32> = bytemuck::pod_collect_to_vec(bytes);
+        let state = plan::PlannerState::from_words([w[0], w[1], w[2], w[3], w[4]]);
+        let n = w[5] as usize;
+        let mut at = 6;
+        let mut copies = Vec::new();
+        for b in self.snapshot_sources().iter().take(n) {
+            let len = w[at] as usize;
+            at += 1;
+            assert_eq!(len as u64 * 4, b.size(), "explicit beams: a snapshot of another layout");
+            let c = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("explicit-beams-snapshot"),
+                size: b.size(),
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue.write_buffer(&c, 0, bytemuck::cast_slice(&w[at..at + len]));
+            at += len;
+            copies.push(c);
+        }
+        GpuSnapshot { copies, state }
     }
 
     /// Tests only: put back a [`Self::snapshot`].

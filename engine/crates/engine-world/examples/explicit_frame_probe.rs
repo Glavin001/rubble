@@ -77,6 +77,7 @@ fn main() -> anyhow::Result<()> {
         x.restore(&snap);
         x.set_coupling_on(true);
         x.set_coupling_cull(true);
+        x.set_coupling_workgroup_cache(true);
         x.set_vehicle_contact(true);
         x.set_drive_pass_for_timing(true);
         println!("  {label:40} median {:.3} ms (min {:.3})", median(t.clone()), t.iter().copied().fold(f64::MAX, f64::min));
@@ -90,10 +91,30 @@ fn main() -> anyhow::Result<()> {
             x.restore(&snap);
             x.set_coupling_on(true);
             x.set_coupling_cull(true);
+            x.set_coupling_workgroup_cache(true);
             x.set_vehicle_contact(true);
         }
     };
     time(x, "as shipped", &|_| {});
+    // EV_ABLATE=m1,m2,...: the same frame with phases skipped (EB_ABLATE masks,
+    // ExplicitBeamsGpu::set_ablation; time only), with vehicle contact on and off.
+    if let Ok(list) = std::env::var("EV_ABLATE") {
+        for m in list.split(',').filter_map(|m| m.trim().parse::<u32>().ok()) {
+            x.set_ablation(m);
+            time(x, &format!("ablate {m}"), &|_| {});
+            time(x, &format!("ablate {m}, vehicle contact off"), &|x| x.set_vehicle_contact(false));
+            time(x, &format!("ablate {m}, coupling off"), &|x| x.set_coupling_on(false));
+        }
+        x.set_ablation(0);
+        if std::env::var("EV_ABLATE_ONLY").is_ok() {
+            return Ok(());
+        }
+    }
+    time(x, "workgroup copies off", &|x| x.set_coupling_workgroup_cache(false));
+    time(x, "workgroup copies off, vehicle contact off", &|x| {
+        x.set_coupling_workgroup_cache(false);
+        x.set_vehicle_contact(false)
+    });
     time(x, "shape cull off", &|x| x.set_coupling_cull(false));
     if std::env::var("EV_RAYCAST").as_deref() == Ok("1") {
         time(x, "raycast wheels' pass skipped (time only)", &|x| x.set_drive_pass_for_timing(false));
