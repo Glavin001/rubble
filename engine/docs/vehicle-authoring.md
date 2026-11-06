@@ -2057,6 +2057,88 @@ Findings, in the order found:
    vertical edges only), and on the lids, fenders and fascias.
 3. The frontal: max crush 635 mm, b1 22.0, t_m 78.6 ms.
 
+### The B-pillar's shut section (2026-11-06, measured, not adopted)
+
+**Decision: built as open item 1 says, measured, and not adopted.** p does
+not reach its 28.4 kN, and g fails.
+
+**What is built** (`sedan::shut_section`; with `SHUT_FACES=1`;
+`SHUT_SECTION=0` builds the shut faces without it, a measurement switch):
+- **The pillar's real section.** It is 120 mm along the car × 70 mm across,
+  as `side_sections` and the layered section give it. Before, the truss box
+  was 0.14 × 0.14 m.
+  - Its faces are at the doors' outlines (2.30 and 2.18), so each door's hem
+    row stands one compressed seal (`HEM`, 10 mm) ahead of the pillar's face.
+    Before, the hem row and the face were in one plane.
+  - Its inner face (x 0.755) is the doors' inner chords' (x 0.76): each
+    rail's inner end bears along the car on the pillar's inner corner. That
+    is the compression side of the end-fixity couple.
+  - Its chords' yields are taken over the 70 mm lever, so the section's M_p
+    is unchanged.
+- **A station at each door rail's end height.** The rail ends' heights are
+  clustered within 5 cm (`SHUT_MERGE`, a Choice). The belt cluster moves the
+  pillar's knee to the belt, and the ends within 15 cm of the foot are the
+  sill's (`SHUT_SILL`, a Choice). Medium's stations: the foot, 0.54, 0.63,
+  0.75 and the belt at 0.92 m, then the roof. Before, they were 0.6 m apart.
+- **Flanges as the pillar's own.** Each flange is `HEM` inboard of the
+  door's inner chord. It is welded to six of its own member's nodes, so two
+  stations and not one plane, at the strip's real E·t·w/L (`FLANGE_REAL`'s
+  rule). The bearing's reach is half a seal.
+- Probes: `P_WEB=1` splits each door member's chords from its webs.
+  `P_BEAR=1` gives each flange bearing's rest length, length, force and
+  state. `FLANGE_INTO=<m>` puts the flange that far under the door, a
+  measurement switch.
+
+**Measured (Medium, after merging origin/merge/showcase-main at 1ab179d9):**
+
+| | default (no shut faces) | `SHUT_FACES=1 ACCORD_DOORS=1 SHUT_SECTION=0` | with the section | `SHUT_FACES=1` (boron × 5 door), with the section | Band |
+|---|---|---|---|---|---|
+| p initial / intermediate / peak (kN) | 9.9 / 12.7 / 22.4 | 5.2 / 7.6 / 20.7 | 5.3 / 8.7 / 18.2 | 7.9 / 11.7 / 19.2 | ≥ 10.0 / 15.6 / 28.4 |
+| q | 4.98 × | 4.36 × | **4.87 ×** | 4.41 × | 4.48–5.32 |
+| o residual (mm, 8 runs) | 288 (sd 14) | 294 (sd 7) | 285 (sd 15) | **303 (sd 18)** | 297–445 |
+| g: first hardware / door off (kN) | 43.9 / 54.7 | 65.2 / 112.8 | 79.9 / 80.4 | 66.7 / 107.3 | statics 25.7–57.3 |
+
+`FLANGE_GAP` 0.03 and 0.05 give a peak of 18.8 and 18.2 kN. `FLANGE_INTO`
+0.015 and 0.04 give 18.2 and 20.5 kN. Four times the door ladders' web
+yields (an experiment, not kept) gives 18.9 kN.
+
+**What holds the door now (`P_PATH`, `P_WEB`, `P_BEAR`, with the section):**
+- **The ends hold through 300 mm of ram.** The hinge end is in 5–28 mm and
+  the lock end 5–25 mm (136–239 mm before the shut faces). The B-pillar
+  moves 2–6 mm.
+- **p's first two phases are the step's bound, not the load path.** By
+  100 mm of ram, single beams of every door member are at 0.85–1.0 of their
+  yield (webs and chords alike). Each member has only 0–2 beams at yield.
+  The door's members are at 0.2–1 % of their real k, so the door deflects as
+  a soft spring. Its 50–150 mm force is 4–7 kN, against the real
+  mechanism's 17–34 kN (a fixed-ended 2.1 kN·m tube yields at 15 mm). The
+  BX on Rubble's solver also misses these two phases (9.0 / 14.0 kN).
+  Raising them with forces kept real needs the BX's topology: fewer beam
+  ends per node and longer beams, so the bound leaves each beam stiffer
+  ("Yield strain: BeamNG's against ours").
+- **The peak is lost at the lock end, past 350 mm.** The door works as a
+  cable (catenary): its rails pull the lock end toward the hinge, and the
+  latch rope takes it (6 → 25 kN at 300–500 mm). The rails' inner-chord ends
+  slide 2–4 cm forward off their flange node, which is one node at the door
+  end's z. They then pass inboard of it: 74, 151 and 224 mm past at 400,
+  450 and 500 mm. A compression-only beam of rest length L carries at most
+  k·L before it closes (at the bound, 480 kN/m × 16 mm is 7.7 kN). A real
+  flange is a 50 mm strip under the door's end. A single node is not.
+- **g with the shut faces.** The latch's share of the pull is 45 % against
+  the statics' 51 %, but its ropes hold to 33 kN in this geometry. One of
+  them runs straight inboard to the pillar's inner corner. So the latch
+  lets go at 79.9 kN, past the statics' 57 kN. The shut faces alone did
+  the same (65 kN, door off at 113 kN). The hardware rigs' sizing is not
+  redone for the shut-face pin.
+
+**Open, in order:**
+1. The flange as a strip the door's end can slide along: a contact surface
+   on the pillar's face, or bearing beams long enough that k·L exceeds the
+   flange's capacity. This is the peak's mechanism.
+2. The door rigs (`hardware_rigs`) sized on the shut-face geometry, so g's
+   latch lets go inside its statics.
+3. p's first two phases: the BX's topology, with forces kept real.
+
 ## Hardware, bearing and sheet masses (2026-11-05)
 
 Parts hang on hardware, not on their seams.
