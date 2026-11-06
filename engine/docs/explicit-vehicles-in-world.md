@@ -571,6 +571,75 @@ At 128 cars the whole pass was about 2.9 ms of the 3.7 ms that vehicle contact a
    frame's steps. A tighter per-step overlap test is already the scans' job, so
    nothing to gain beyond the early out.
 
+### 8.4 Round 2 continued (E1, scaling), 2026-11-06
+
+Measured under a shared GPU (four other agents, load 15 to 40). Each change was timed
+by interleaved A/B: two builds alternating from one saved state, `explicit_frame_dump
+time`, 5 runs each, medians. The p99 matrix waits for a quiet window.
+
+| Change | Check | Effect |
+|---|---|---|
+| vvPassSmall early out (8f8cb79b) | bitwise against the frozen reference, frame dump, Metal parity | within noise alone; the whole branch, base 10.13 → 7.28 ms (128 cars after 150 steps, 120 Hz frame) |
+| Candidate gathering per owner side by side (6b23d0ce) | same | 7.25 → 7.14 ms, within noise |
+| Coupling plan written lane-parallel (9004c91b) | `the_coupling_plan_in_parallel_is_the_serial_walk`: every record and share count equal to the serial walk from one World state | not yet timed (0.9 ms in the sync split before) |
+| 512 lanes a vehicle (`RUBBLE_EXPLICIT_LANES=512`) | (setting) | 7.26 vs 7.16 ms, within noise: unchanged |
+
+Whole step, 128 cars at 120 Hz, two runs each under load: base p50 13.3 / p99 18.1–18.4
+ms, branch 11.4–11.7 / 14.5–16.3 ms.
+
+**Not landed, measured.**
+- **A pair's candidate grid in the triangle phase** (`vvTriangleCandsGrid`: each
+  owner's candidates bucketed by cell; a triangle visits its box's cells, and each
+  candidate counts only at its own cell). Bit-identical in every check, but not faster:
+  - the crash town at 128 cars: 7.63 against 7.50 ms;
+  - 16 high-resolution JBeam cars in pair crashes (`explicit_beams_scaling pileup`,
+    2 × 2 trials): 18.85 against 20.8 ms, *slower*, from its counting, scan and scatter
+    barriers.
+
+  The triangle phase's cost is the hit tests (`vvFind`, `vvClip`) on candidates
+  really in a triangle's box, not the scan over candidates.
+- **Ordered hit application.** Its scans are about 0.5 ms of the levels' 1.8 ms
+  (`EB_ABLATE` 2097152, time only); the rest is `vvTry`. Not taken.
+
+**Where a 128-car, 120 Hz step goes** (sync split, about 0.15 ms of wait per segment
+included):
+
+| Segment | Time |
+|---|---|
+| Explicit frame | 7.6 ms |
+| Rigid step | ~6.5 ms in this mode, ~3 ms in normal timing; its broadphase 1.75 ms against 0.75 for the houses alone (the freed debris) |
+| Fracture | 1.6 ms |
+| Coupling plan | 0.9 ms |
+| Coupling loads | 0.27 ms |
+
+The frame's ablation at 128 cars, coupling off:
+- the vehicle–vehicle pass is about 3.1 ms;
+- its triangle phase is about 2.4 ms;
+- its levels are about 1.8 ms (the two overlap).
+
+**Costs that scale with totals, not with activity** (the large-maps rule: a step's cost
+should follow awake bodies and active destruction only):
+
+- **The explicit frame** dispatches a workgroup per vehicle and steps every vehicle
+  through every substep. A parked car costs as much as a crashing one; there is no
+  soft-body sleep. A sleep rule for soft bodies changes results (a resting car still
+  oscillates at rounding level), so it is a design decision with an explicit
+  engine-wide setting, not a lossless change.
+- **The coupling plan** (`cpl_plan`) tests every collider in the World for every
+  vehicle, every window: O(vehicles × colliders). On a city map that is the largest
+  O(total) term on the vehicle side. The surface-contact work (vehicles in the World
+  broadphase as proxies) replaces this scan with the broadphase query; until then a
+  coupling-owned grid over colliders would do it.
+- **The vehicle contact plan** (`explicit_beams_vv_bounds`, `_pairs`, `_group`) is
+  O(vehicles) per plan, plus a single workgroup's connected components over the pairs.
+  It scales with the fleet, not the map.
+- **`cpl_bounds`, `cpl_share`, `cpl_loads` and `cpl_emit`** run a workgroup per
+  vehicle. They are cheap for vehicles without proxies, but are still launched.
+- **The rigid step and the threshold fracture**: see `engine/docs/large-maps.md`
+  (branch `feat/large-maps`). There, every per-step pass of `rigid_plan` and the
+  fracture's loads, breaks and readbacks run over all bodies, colliders, chunks and
+  bonds.
+
 ## 9. Remaining
 
 - In-frame release: a chunk proxy freed the substep its load passes its capacity (today the
