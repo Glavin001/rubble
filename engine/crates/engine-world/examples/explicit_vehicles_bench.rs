@@ -123,6 +123,12 @@ fn main() -> anyhow::Result<()> {
             Some(32),
         )?;
         let w = &mut town.world;
+        // EV_CULL=0 (measurement): the coupling's shape cull off.
+        if std::env::var("EV_CULL").as_deref() == Ok("0") {
+            if let Some(x) = w.explicit_vehicles_mut() {
+                x.set_coupling_cull(false);
+            }
+        }
         let dt = w.solver().dt;
         let mut ms = Vec::new();
         let mut wall = Vec::new();

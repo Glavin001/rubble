@@ -1336,7 +1336,7 @@ impl ExplicitUpload {
         // Then per vehicle its self-collision hit list and pending beams (the
         // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
         let hit_base = slot_list_base as usize + slot_list_len as usize;
-        let next_len = hit_base + nv * SELF_HIT_WORDS;
+        let mut next_len = hit_base + nv * SELF_HIT_WORDS;
         let hit_acc = acc_init.len();
         acc_init.extend(std::iter::repeat_n(0, 2 * nv));
         // Last: the loop-cap flag (the kernel's `EB_LOOP_CAP`, at the parameter
@@ -1347,13 +1347,17 @@ impl ExplicitUpload {
                 CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
             acc_init.extend(std::iter::repeat_n(0, layout.acc_words() as usize));
+            // The shape cull's spheres (`explicit_beams_rigid.slang` `cplSpheres`): per
+            // vehicle and shape 4 words of gNext, rewritten every step.
+            let cull_base = next_len as u32;
+            next_len += (4 * cap.shapes * nv as u32) as usize;
             misc[couple_rec] = [
                 0,
                 layout.misc_base,
                 cap.bodies,
                 cap.shapes | cap.planes << 16,
             ];
-            misc[couple_rec + 1] = [layout.acc_base, 0, 0, 0];
+            misc[couple_rec + 1] = [layout.acc_base, cull_base, 0, 0];
             layout
         });
         // Raycast wheels (explicit_plan::drive): a region per vehicle when any has them.
