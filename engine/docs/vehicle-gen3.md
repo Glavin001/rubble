@@ -1079,6 +1079,21 @@ phase of a slow bounce.**
   the same bounce.
 - This round does not change the rear. Giving this check margin needs the tail
   corner's static warp reduced.
+- About 0.2° of that warp is the lane nodes'. Without them (`GEN3_NOLANES`) the
+  static warp is 0.80° at 30 s. A stricter bound on their ties (ω·h 1.5 or 1.0
+  instead of 1.92) does not help: 0.98° at 30 s, and 1.05° and 1.11° at 10 s.
+  The mechanism is not found yet.
+
+### On the GPU page
+
+`media/gen3-r6/` shows wall56 in the `three` view, gen3 beside the ETK: the same
+preset and camera, both aligned to gen3's impact (570 ms), surface contact on,
+raycast wheels. Each car is shown at impact, at +55–58 ms and settled (+1.5 s).
+- Chrome's first load took about 6 minutes, with the kept profile.
+- gen3's hood folds up at the wall, the front stacks behind it, and the doors stay
+  shut on their hinges.
+- The ETK's hood and front crumple more locally, and its driver's door springs
+  open.
 
 ### Open
 
