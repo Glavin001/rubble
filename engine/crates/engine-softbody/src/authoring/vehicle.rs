@@ -514,11 +514,11 @@ pub const BRIDGE_MAX: f32 = 0.75;
 
 /// The parts (name prefixes) built in BeamNG's node pattern, from
 /// `BEAMNG_NODES` (a measurement switch while the pattern is being built:
-/// `1` is every part built so far, else a comma list of prefixes such as
+/// `1` is the doors and the bonnet, the parts it gains on; else a comma list of prefixes such as
 /// `door,bonnet`). Empty: the 0.24 m lattice everywhere, as before.
 pub fn beamng_nodes_parts() -> Vec<String> {
     match std::env::var("BEAMNG_NODES") {
-        Ok(v) if v == "1" => vec!["door".into()],
+        Ok(v) if v == "1" => vec!["door".into(), "bonnet".into()],
         Ok(v) if !v.is_empty() && v != "0" => v.split(',').map(|x| x.trim().to_string()).collect(),
         _ => Vec::new(),
     }
@@ -1368,7 +1368,6 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             shell.contact = beamng_contact_nodes(&sk, &shell, &pat);
         }
     }
-    let shell = shell;
     // One tier: the shell's nodes are the frame's (members snap onto them,
     // `members::SNAP_FRAME`).
     if one {
@@ -1699,7 +1698,7 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         .nodes
         .iter()
         .copied()
-        .filter(|i| !shell.contact.contains(i))
+        .filter(|i| !shell.contact.contains(i) || sk.nodes[*i as usize].part == 0)
         .collect();
     // One tier: the shell's bend beams (two bays long) in a member's lane
     // stay the sheet's bending: the lane's edges are its chord already, and
@@ -2102,6 +2101,18 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             }
             groups.insert(key, nodes.clone());
             structure_nodes.extend(nodes);
+        }
+    }
+    // BeamNG's node pattern on the body: a contact-only candidate that a
+    // member's station snapped onto is structural (the panels' members snap
+    // onto structural nodes only, above). The pattern's structural rings
+    // and the members' stations do not always coincide on the body, so a
+    // ring can hold both.
+    if !shell.contact.is_empty() {
+        for t in &trusses {
+            for i in t.stations.iter().flatten() {
+                shell.contact.remove(i);
+            }
         }
     }
     // Door hardware and bearing. At each door's hinge edge the highest
