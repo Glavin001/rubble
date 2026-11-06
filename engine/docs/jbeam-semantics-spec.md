@@ -2377,9 +2377,23 @@ instead of ringing back. The energy ledger closes as before.
 
 **GPU.** `slang/kernels/explicit_beams.slang` (`FLAG_CENTRED`, `centredPhase`,
 `centredBeam`, `centredNode`; the slope in the first incidence entry's `.w`, a
-per-node Δv region at `gP.centredDv`) in the vehicle workgroups and the contact
-groups; the wide passes are not taken when a vehicle has it (the planner falls back
-to the workgroup frame). `tests/explicit_centred_damping_gpu.rs`: bit for bit every
+per-node Δv region at `gP.centredDv`) in the vehicle workgroups, the contact
+groups and the wide passes (`wide_nodes` keeps each node's Δv; two more passes per
+step, `wide_centred_beams` and `wide_centred_nodes`, only when a vehicle has it).
+Metal (`engine-metal/tests/explicit_centred_damping.rs`) as wgpu: the fixture car
+at rest and the latched box into a wall bit for bit on the frame and the wide
+passes.
+
+GPU cost (`centred_damping_frame_cost`, `RUBBLE_CENTRED_TIMING=256`: 256 fixture
+cars parked apart, M3 Max shared with other work, median 60 fps frame of 240,
+the four configurations interleaved frame by frame):
+
+| path | off | centred | |
+|---|---|---|---|
+| wide passes | 36.9 ms | 42.0 ms | +14 % |
+| vehicle workgroups | 10.3 ms | 12.2 ms | +19 % |
+
+(The community cars do not take the wide passes: they carry commands or shocks2.) `tests/explicit_centred_damping_gpu.rs`: bit for bit every
 step against the CPU for the pressure-wheel fixture car at rest (4,000 steps) and at
 10 m/s (2,000), the latched box into a wall (1,500 steps, breaks), the break-group
 fixtures pulled apart, the node couplers; opt-in the full-size SUV on its hubs

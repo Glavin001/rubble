@@ -5092,8 +5092,11 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
         uint v = info.w;
         Vehicle x = vehicleAt(v);
         float3 origin = vehicleOrigin(v);
+        bool centred = gP.centredDv != 0u && (x.flags & FLAG_CENTRED) != 0u;
+        if (centred) centredSave(i);
         nodeUpdate(i, info, v, i - x.nodeOff, vehicleStep(v), origin, x.flags, x.ground, x.boxOff, x.boxCount,
                    x.beamOff, x.groupOff, x.groupCount, true);
+        if (centred) centredDelta(i);
         return ebLoopCapFlush();
     }
     i -= gP.totalNodes;
@@ -5116,6 +5119,31 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
             clipVmaxClear(i, vehicleStep(i) & 1u);
         }
     }
+    ebLoopCapFlush();
+}
+
+// Centred damping (§39) in the wide passes, after wide_nodes (which kept each
+// node's Δv): each record's correction into its entries, then each node's sum.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_centred_beams(uint3 id : SV_DispatchThreadID)
+{
+    uint j = id.x;
+    if (j >= gP.totalBeams) return;
+    uint v = gStatic[gP.beamBase + j * 3u].z >> 16;
+    if ((vehicleAt(v).flags & FLAG_CENTRED) != 0u) centredBeam(j);
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_centred_nodes(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= gP.totalNodes) return ebLoopCapFlush();
+    uint v = gStatic[gP.nodeInfoBase + i].w;
+    Vehicle x = vehicleAt(v);
+    if ((x.flags & FLAG_CENTRED) != 0u)
+        centredNode(i, x.beamOff, x.groupOff, x.groupCount, (vehicleStep(v) + 1u) & 1u);
     ebLoopCapFlush();
 }
 

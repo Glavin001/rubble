@@ -228,7 +228,7 @@ pub struct Module {
 /// The frame entry point (frame, solo and contact modules).
 pub const FRAME_ENTRY: &str = "explicit_beams_frame";
 /// The wide passes, in dispatch-kind order ([`Kernel::Wide`]).
-pub const WIDE_PASSES: [&str; 8] = [
+pub const WIDE_PASSES: [&str; 10] = [
     "explicit_beams_wide_begin",
     "explicit_beams_wide_rebase",
     "explicit_beams_wide_nodes",
@@ -237,6 +237,8 @@ pub const WIDE_PASSES: [&str; 8] = [
     "explicit_beams_wide_end",
     "explicit_beams_wide_close",
     "explicit_beams_wide_hits",
+    "explicit_beams_wide_centred_beams",
+    "explicit_beams_wide_centred_nodes",
 ];
 /// The vehicle-contact plan passes ([`Kernel::Vv`]): bounds, pairs, group.
 pub const VV_PASSES: [&str; 3] = [
@@ -252,6 +254,12 @@ const WIDE_TRIS: usize = 4;
 const WIDE_END: usize = 5;
 const WIDE_CLOSE: usize = 6;
 const WIDE_HITS: usize = 7;
+// Centred damping (jbeam-semantics-spec.md §39): after a step's nodes, when a
+// vehicle has it.
+const WIDE_CENTRED_BEAMS: usize = 8;
+const WIDE_CENTRED_NODES: usize = 9;
+/// The Params word of the centred damping's Δv region (nonzero: some vehicle has it).
+const W_CENTRED_DV: usize = 80;
 
 const W: (&str, &str) = ("ENGINE_WGSL", "1");
 const L256: (&str, &str) = ("EB_LANES", "256");
@@ -307,6 +315,8 @@ pub const MODULES: &[Module] = &[
     pass(WIDE_PASSES[5]),
     pass(WIDE_PASSES[6]),
     pass(WIDE_PASSES[7]),
+    pass(WIDE_PASSES[8]),
+    pass(WIDE_PASSES[9]),
 ];
 
 /// A dispatch's kernel. The frame kernels' module depends on the fleet
@@ -1647,8 +1657,7 @@ impl ExplicitUpload {
         ];
         // The wide passes do not run wings, the fuselage drag, commands or shocks2.
         // Raycast wheels run in the vehicle workgroups only.
-        // Centred damping runs in the vehicle workgroups only (§39).
-        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none() && !any_centred;
+        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none();
         // Every vehicle must have run the same steps for the wide passes (one
         // step parity for the group slots).
         let same_steps = vehicles.windows(2).all(|w| w[0].steps == w[1].steps);
@@ -2012,9 +2021,14 @@ impl FramePlanner {
         let nv = self.nv;
         let [nodes, beams, tris, cands, slots] = self.total;
         let buckets = nv * WIDE_GRID_BUCKETS as u32;
+        let centred = self.words[W_CENTRED_DV] != 0;
         let mut plan = vec![(0, WIDE_BEGIN, groups(nv)), (0, WIDE_REBASE, groups(nodes))];
         for k in 0..steps {
             plan.push((k, WIDE_NODES, groups(nodes + slots + buckets)));
+            if centred {
+                plan.push((k, WIDE_CENTRED_BEAMS, groups(beams)));
+                plan.push((k, WIDE_CENTRED_NODES, groups(nodes)));
+            }
             plan.push((k, WIDE_BEAMS_PASS, groups(beams + cands + tris)));
             plan.push((k, WIDE_TRIS, groups(tris * WIDE_SUBS)));
             // One workgroup per vehicle: deferred breaks and self-collision hits.
@@ -2409,7 +2423,7 @@ mod tests {
     fn kernels_have_modules() {
         let mut ks = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact];
         ks.extend((0..3).map(Kernel::Vv));
-        ks.extend((0..8).map(Kernel::Wide));
+        ks.extend((0..WIDE_PASSES.len()).map(Kernel::Wide));
         for k in ks {
             for aero in [false, true] {
                 for lanes in [256, 512] {

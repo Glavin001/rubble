@@ -4,7 +4,7 @@
 //! fixtures (`engine_softbody::jbeam_fixture`); opt-in, a community vehicle that
 //! does not rest without it (`RUBBLE_COMPARE_MODS`, the crash lab's `__mods/`).
 use engine_softbody::explicit_beams::{
-    ExplicitBeams, ExplicitBeamsSettings, JbeamWheels, StaticBox,
+    ExplicitBeams, ExplicitBeamsSettings, FrameClock, JbeamWheels, StaticBox,
 };
 use engine_softbody::jbeam::load_jbeam;
 use engine_softbody::jbeam_fixture::{latched_box_jbeam, NODE_COUPLERS, PART2_CAR, PART2_GROUPS};
@@ -34,38 +34,55 @@ fn spawn(text: &str, wheels: Option<JbeamWheels>, v: Vec3) -> ExplicitBeams {
     s
 }
 
-/// Both engines one step at a time for `steps`; every node bit for bit after each.
-/// Returns the GPU's broken count, or `None` without an adapter.
-fn bit_for_bit(label: &str, mut cpu: ExplicitBeams, steps: u32) -> Option<usize> {
+/// The CPU and the GPU one step at a time for `steps`, the GPU both on its
+/// per-vehicle frame and on the wide passes: every node bit for bit after each
+/// step. Returns the broken count and the fastest node's speed, or `None` without
+/// an adapter.
+fn bit_for_bit(label: &str, mut cpu: ExplicitBeams, steps: u32) -> Option<(usize, f32)> {
     let (_, device, queue) = default_device().ok()?;
     assert!(cpu.settings.centred_damping);
-    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    let mut frame = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    let mut wide = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    wide.set_vehicle_contact(false);
+    // (A vehicle with commands, wings or shocks2 cannot take the wide passes.)
+    let wide_ok = wide.set_wide(true);
+    if !wide_ok {
+        eprintln!("{label}: no wide passes (commands, wings or shocks2)");
+    }
     for step in 0..steps {
         cpu.step();
-        gpu.frame(1);
-        let (gp, gv) = (&gpu.positions()[0], &gpu.velocities()[0]);
+        frame.frame(1);
+        wide.frame(1);
         let cp = cpu.positions();
-        for i in 0..cpu.nodes.len() {
-            let same = cp[i].to_array().map(f32::to_bits) == gp[i].to_array().map(f32::to_bits)
-                && cpu.nodes[i].vel.to_array().map(f32::to_bits)
-                    == gv[i].to_array().map(f32::to_bits);
-            assert!(
-                same,
-                "{label}: step {step} node {i}: CPU {:?} {:?} GPU {:?} {:?}",
-                cp[i], cpu.nodes[i].vel, gp[i], gv[i]
-            );
+        let paths = [("frame", &frame), ("wide", &wide)];
+        for (path, gpu) in &paths[..1 + wide_ok as usize] {
+            let (gp, gv) = (&gpu.positions()[0], &gpu.velocities()[0]);
+            for i in 0..cpu.nodes.len() {
+                let same = cp[i].to_array().map(f32::to_bits) == gp[i].to_array().map(f32::to_bits)
+                    && cpu.nodes[i].vel.to_array().map(f32::to_bits)
+                        == gv[i].to_array().map(f32::to_bits);
+                assert!(
+                    same,
+                    "{label} ({path}): step {step} node {i}: CPU {:?} {:?} GPU {:?} {:?}",
+                    cp[i], cpu.nodes[i].vel, gp[i], gv[i]
+                );
+            }
         }
     }
-    gpu.wait();
-    let gb: Vec<bool> = gpu.beams()[0].iter().map(|b| b.broken).collect();
-    assert_eq!(
-        cpu.beams.iter().map(|b| b.broken).collect::<Vec<_>>(),
-        gb,
-        "{label}: broken beams"
+    let cb: Vec<bool> = cpu.beams.iter().map(|b| b.broken).collect();
+    let paths = [("frame", &frame), ("wide", &wide)];
+    for (path, gpu) in &paths[..1 + wide_ok as usize] {
+        gpu.wait();
+        let gb: Vec<bool> = gpu.beams()[0].iter().map(|b| b.broken).collect();
+        assert_eq!(cb, gb, "{label} ({path}): broken beams");
+    }
+    let broken = cb.iter().filter(|&&b| b).count();
+    let vmax = cpu.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max);
+    eprintln!(
+        "{label}: {steps} steps bit for bit ({}), {broken} broken, fastest node {vmax:.2} m/s",
+        if wide_ok { "frame and wide" } else { "frame" }
     );
-    let broken = gb.iter().filter(|&&b| b).count();
-    eprintln!("{label}: {steps} steps bit for bit, {broken} broken");
-    Some(broken)
+    Some((broken, vmax))
 }
 
 /// The pressure-wheel fixture car (LBEAMs, anisotropic sidewalls, the tread
@@ -109,7 +126,7 @@ fn breaking_elements_step_bit_for_bit() {
         Vec3::new(0.0, 1.0, front + 1.05),
         Vec3::new(4.0, 3.0, 1.0),
     ));
-    let Some(broken) = bit_for_bit("latched box into a wall", boxed, 1500) else {
+    let Some((broken, _)) = bit_for_bit("latched box into a wall", boxed, 1500) else {
         eprintln!("no GPU adapter: skipped");
         return;
     };
@@ -120,7 +137,7 @@ fn breaking_elements_step_bit_for_bit() {
         let d = load_jbeam(&[("t.jbeam", PART2_GROUPS)], None).unwrap();
         let i = d.nodes.iter().position(|n| n.name == pull).unwrap();
         s.nodes[i].vel = Vec3::new(40.0, 0.0, 0.0);
-        let b = bit_for_bit(&format!("groups pulled at {pull}"), s, 500).unwrap();
+        let (b, _) = bit_for_bit(&format!("groups pulled at {pull}"), s, 500).unwrap();
         assert!(b > 0);
     }
 
@@ -174,24 +191,82 @@ fn community_suv_rests_bit_for_bit() {
     for n in &mut s.nodes {
         n.pos.y += 0.02 - low;
     }
+    let (_, vmax) = bit_for_bit("SUV on its hubs", s, 2000).unwrap();
+    assert!(vmax < 1.0, "the SUV rests: {vmax} m/s");
+}
+
+/// Opt-in timing (`RUBBLE_CENTRED_TIMING=<fleet size>`, at most 256): a fleet of
+/// the pressure-wheel fixture car parked apart, 60 fps frames, interleaved A/B so
+/// a shared GPU's load falls on every configuration alike: the wide passes without
+/// and with centred damping, and the per-vehicle frame without and with it. Prints the median
+/// frame time of each. (The community cars carry commands or shocks2, which the
+/// wide passes do not run.)
+#[test]
+fn centred_damping_frame_cost() {
+    let Ok(n) = std::env::var("RUBBLE_CENTRED_TIMING") else {
+        return;
+    };
+    let n: usize = n.parse().unwrap();
+    let fleet = |centred: bool| -> Vec<ExplicitBeams> {
+        (0..n)
+            .map(|k| {
+                let mut s = spawn(PART2_CAR, Some(JbeamWheels::Pressure), Vec3::ZERO);
+                s.settings.centred_damping = centred;
+                let at = Vec3::new(4.0 * (k % 16) as f32, 0.0, 6.0 * (k / 16) as f32);
+                for nd in &mut s.nodes {
+                    nd.pos += at;
+                }
+                s
+            })
+            .collect()
+    };
     let (_, device, queue) = default_device().unwrap();
-    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&s));
-    for step in 0..2000 {
-        s.step();
-        gpu.frame(1);
-        let (gp, gv) = (&gpu.positions()[0], &gpu.velocities()[0]);
-        let cp = s.positions();
-        for i in 0..s.nodes.len() {
-            assert!(
-                cp[i].to_array().map(f32::to_bits) == gp[i].to_array().map(f32::to_bits)
-                    && s.nodes[i].vel.to_array().map(f32::to_bits)
-                        == gv[i].to_array().map(f32::to_bits),
-                "SUV: step {step} node {i}"
-            );
+    let (off, on) = (fleet(false), fleet(true));
+    let mut runs = [
+        (
+            "wide, centred off",
+            ExplicitBeamsGpu::new(&device, &queue, &off),
+            true,
+        ),
+        (
+            "wide, centred on",
+            ExplicitBeamsGpu::new(&device, &queue, &on),
+            true,
+        ),
+        (
+            "frame, centred off",
+            ExplicitBeamsGpu::new(&device, &queue, &off),
+            false,
+        ),
+        (
+            "frame, centred on",
+            ExplicitBeamsGpu::new(&device, &queue, &on),
+            false,
+        ),
+    ];
+    for (label, g, wide) in &mut runs {
+        g.set_vehicle_contact(false);
+        assert_eq!(g.set_wide(*wide), *wide, "{label}");
+    }
+    let mut times: Vec<Vec<f64>> = vec![Vec::new(); runs.len()];
+    let mut clock = [FrameClock::default(); 4];
+    for frame in 0..260 {
+        for (k, (_, g, _)) in runs.iter_mut().enumerate() {
+            let t = std::time::Instant::now();
+            g.frame(clock[k].next());
+            g.wait();
+            if frame >= 20 {
+                times[k].push(t.elapsed().as_secs_f64() * 1e3);
+            }
         }
     }
-    gpu.wait();
-    let vmax = s.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max);
-    eprintln!("SUV on its hubs: 2000 steps bit for bit, fastest node {vmax:.2} m/s");
-    assert!(vmax < 1.0, "the SUV rests: {vmax} m/s");
+    for ((label, ..), t) in runs.iter().zip(&mut times) {
+        t.sort_by(f64::total_cmp);
+        eprintln!(
+            "{n} fixture cars, {label}: median {:.2} ms per 60 fps frame (p10 {:.2}, p90 {:.2})",
+            t[t.len() / 2],
+            t[t.len() / 10],
+            t[t.len() * 9 / 10]
+        );
+    }
 }
