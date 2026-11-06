@@ -33,6 +33,15 @@ const CHROME = process.env.CHROME || (process.platform === 'darwin'
 mkdirSync(OUT, { recursive: true });
 const CARS = { sedan: 'car=sedan', showcase: 'car=showcase', showcase1: 'car=showcase&style=sedan1', etkk: 'mod=/__mods/etkk&pc=etkk/kr6.pc', hires: 'car=hires', e36: 'truck=/__local/E36Sedan.truck', viper: 'truck=/__local/ViperGTS.car',
   mustang: 'truck=/__local/1982-Ford-Mustang-GT-351W.truck', agora: 'truck=/__local/95bbUID-agoras.truck' };
+// The comparison manifest's cars (vehicle-compare-cars.json, shared with the
+// CPU harness `vehicle_compare`): a JBeam car under __mods/ in JBeam mode, the
+// physics the harness runs it on.
+for (const c of JSON.parse(readFileSync(join(ROOT, 'vehicle-compare-cars.json'), 'utf8')).cars) {
+  CARS[c.name] ??= c.page ?? `mod=/__mods/${c.mod}&pc=${c.vehicle ?? c.mod}/${c.pc}&jbeamMode=native`;
+}
+if (CARS[CAR]?.startsWith("mod=") && !existsSync(join(ROOT, CARS[CAR].split('&')[0].slice(5)))) { console.log(`- ${CAR}: not in __mods/, skipped`); process.exit(0); }
+// --label TEXT: a caption drawn over every frame (the side-by-side recorder's car names).
+const LABEL = opt('--label', '');
 if (!CARS[CAR]) throw new Error(`--car: one of ${Object.keys(CARS).join(', ')}`);
 const carFile = CARS[CAR].startsWith('truck=') ? join(LOCAL, CARS[CAR].split('/__local/')[1]) : null;
 if (carFile && !existsSync(carFile)) { console.log(`- ${CAR}: ${carFile} not found, skipped`); process.exit(0); }
@@ -148,6 +157,7 @@ for (const run of runs) {
   await open(`preset=${name}&paused=1${view === 'strain' ? '&skin3=ghost&skeleton=1&nodes=1&color=strain' : ''}`);
   await lab(`(L.lab.camera('${p.cam}', ${p.zoom ?? 1}, ${p.yaw ?? null}), true)`);
   await lab('(L.lab.setClean(true), true)');
+  if (LABEL) await evaluate(`(() => { const d = document.createElement('div'); d.textContent = ${JSON.stringify(LABEL)}; d.style.cssText = 'position:fixed;left:24px;bottom:24px;z-index:99999;font:600 28px system-ui,sans-serif;color:#fff;background:rgba(0,0,0,.55);padding:6px 14px;border-radius:6px;pointer-events:none'; document.body.appendChild(d); return true; })()`);
   const pre = impact / HZ;
   const lead = Math.min(1.0, pre - 0.03);
   if (pre - 0.03 - lead > 0) await lab(`L.advance(${Math.round((pre - 0.03 - lead) * HZ)}, 40)`);
