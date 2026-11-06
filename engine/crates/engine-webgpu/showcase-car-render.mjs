@@ -106,7 +106,8 @@ struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r
 // the index in binds of its own-part binding (after the count vertices),
 // whose word 3 is its frame's death record (4 beam ids at deathAt).
 struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listAt: u32, trisAt: u32, beamOffset: u32, level: u32,
-  restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32, deathAt: u32 };
+  restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32, deathAt: u32,
+  wheelAt: u32 };
 // The frame's effects: simulated seconds since the last update (0: nothing
 // moves, spawns or accumulates), a seed, the floor and the static boxes
 // (centre, kind; half extents) the sparks and scrapes test.
@@ -442,11 +443,38 @@ fn pick() {
   }
 }
 
+// Raycast wheels (skin.rs wheel_vertex, the CPU mirror): a wheel piece's
+// vertex (flags bit 23; bit 24 it spins) rides drive wheel n0, whose misc
+// records (state, centre, axle, up: ExplicitSim.wheelRecords) are 4 words
+// at wheelAt + 4·n0; (a, b, h) and (nt, nb, nn) its rest offset and normal
+// in the wheel's frame (axle A, up U, forward F = A × U), turned about the
+// axle by the spin angle.
+fn wheelVertex(i: u32, bd: Bind) {
+  let r = params.wheelAt + 4u * bd.n0;
+  let st = bitcast<vec4f>(misc[topo[r]]);
+  let centre = bitcast<vec4f>(misc[topo[r + 1u]]).xyz;
+  let a = normalize(bitcast<vec4f>(misc[topo[r + 2u]]).xyz + vec3f(1e-9));
+  let up = bitcast<vec4f>(misc[topo[r + 3u]]).xyz;
+  let u = normalize(up - a * dot(a, up) + vec3f(1e-9));
+  let f = cross(a, u);
+  let spin = select(0.0, st.y, (bd.flags & (1u << 24u)) != 0u);
+  let c = cos(spin);
+  let s = sin(spin);
+  let ur = u * c + f * s;
+  let fr = f * c - u * s;
+  let pos = centre + a * bd.a + ur * bd.b + fr * bd.h;
+  let nrm = normalize(a * bd.nt + ur * bd.nb + fr * bd.nn + vec3f(1e-9));
+  let k = i * 2u;
+  outv[k] = vec4f(pos, bitcast<f32>(pack2x16float(vec2f(0.0, 0.0))));
+  outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(0.0, 0.0))));
+}
+
 @compute @workgroup_size(${WG})
 fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= params.count) { return; }
   var bd = binds[i];
+  if ((bd.flags & (1u << 23u)) != 0u) { wheelVertex(i, bd); return; }
   if (bd.vehicle != 0u) {
     // On a shut line's frame: its own part's frame for good once the frame
     // has died (a beam of its death record broke) or torn (skin.rs on_alt).
@@ -1359,13 +1387,13 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   let nodesBuf = null;
   let miscBuf = null;
   let beamsBuf = null;
-  let posBuf = null, restBuf = null, posPipes = null;
+  let posBuf = null, restBuf = null, posMisc = null, posPipes = null;
   const bindFor = (car, lv, src0, src1, beams) => device.createBindGroup({
     layout: skinLayout,
     entries: [src0, src1, lv.binds, lv.out, lv.params, car.topo, beams, car.nodeN, fxuBuf, fxBuf]
       .map((buffer, binding) => ({ binding, resource: { buffer } })),
   });
-  const makePosBind = (car) => posBuf && car.levels.map((lv) => bindFor(car, lv, posBuf, posBuf, restBuf));
+  const makePosBind = (car) => posBuf && car.levels.map((lv) => bindFor(car, lv, posBuf, posMisc ?? posBuf, restBuf));
   const makeSkinBind = (car) => car.levels.map((lv) => bindFor(car, lv, nodesBuf, miscBuf, beamsBuf));
   const upload = (label, data, usage = GPUBufferUsage.STORAGE) => {
     const b = device.createBuffer({ label, size: Math.max(16, Math.ceil(data.byteLength / 4) * 4), usage: usage | GPUBufferUsage.COPY_DST });
@@ -1404,12 +1432,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * order; e.g. the crash lab's positionsBuffer(), so replays deform the body too),
      * with the beams' state from `rest` (f32 per beam, all vehicles in order, negative
      * when broken: the lab's restBuffer()). Call again when either buffer is replaced;
-     * null returns to the solver buffers.
+     * null returns to the solver buffers. `misc`: the solver's miscBuffer(), for raycast
+     * wheels (their pieces are placed from its drive records).
      */
-    setPositions(buf, rest) {
+    setPositions(buf, rest, misc = null) {
       if (buf && !rest) throw new Error('showcase setPositions: the beams\' rest buffer is needed (crash-lab restBuffer())');
       posBuf = buf;
       restBuf = rest ?? null;
+      posMisc = misc;
       if (buf && !posPipes) {
         const m = device.createShaderModule({ label: 'showcase-skin-pos', code: crease(SKIN_POS_WGSL) });
         posPipes = {
@@ -1433,7 +1463,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * vehicle's first node in the solver (`layout.vehicles[i].nodeOffset`), `vehicle`
      * its index (for its origin). Returns an id.
      */
-    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0 } = {}) {
+    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0, wheelRecords = null } = {}) {
       const nodeCount = visual.nodeCount;
       const nt = visual.normalTris, start = visual.nodeTriStart, list = visual.nodeTriList;
       const units = visual.unitKind?.length ?? 0;
@@ -1449,8 +1479,12 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const nodeMatAt = unitListAt + (units ? visual.unitBeams.length : 0);
       const deathAt = nodeMatAt + nodeCount;
       const death = visual.skinDeath ?? new Uint32Array(0);
-      const topo = new Uint32Array(deathAt + death.length);
+      // Raycast wheels' misc records (ExplicitSim.wheelRecords), 4 per wheel.
+      const wheelAt = deathAt + death.length;
+      const wheelRecs = wheelRecords ?? new Uint32Array(0);
+      const topo = new Uint32Array(wheelAt + Math.max(wheelRecs.length, 1));
       topo.set(death, deathAt);
+      topo.set(wheelRecs, wheelAt);
       const tf = new Float32Array(topo.buffer);
       topo.set(start, 0);
       topo.set(list, listAt);
@@ -1517,7 +1551,11 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           // Flags: smooth, rigid, damage unit + 1 (bits 2-15), shard seed
           // (16), material (17-22).
           const un = v.unit ? v.unit[i] : 0xffffffff;
-          u[o + 15] = (v.smooth ? v.smooth[i] : 0) | (v.rigid && v.rigid[i] ? 2 : 0)
+          // Rigid kinds (skin.rs rigid_kind): 1 rigid, 2 a raycast wheel's
+          // (bit 23, spinning: 24), 3 its caliper (bit 23).
+          const rk = v.rigid ? v.rigid[i] : 0;
+          if (rk >= 2 && !wheelRecords) throw new Error('showcase addCar: raycast wheel pieces need wheelRecords (ExplicitSim.wheelRecords)');
+          u[o + 15] = (v.smooth ? v.smooth[i] : 0) | (rk === 1 ? 2 : 0) | (rk >= 2 ? 1 << 23 : 0) | (rk === 2 ? 1 << 24 : 0)
             | (un === 0xffffffff ? 0 : ((un + 1) & 0x3fff) << 2) | (v.shard && v.shard[i] ? 1 << 16 : 0) | (v.material[i] << 17);
           const a = na ? v.alt[i] : 0;
           u[o + 3] = a ? n + a - 1 : 0;
@@ -1606,7 +1644,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         const floorIndex = device.createBuffer({ label: 'showcase-floor-index', size: floorList.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(floorIndex, 0, floorList);
         const params = device.createBuffer({ label: 'showcase-params', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, 0, 0, 0]);
+        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, 0, 0]);
         return { n, binds, out, attrs, index, floorIndex, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const car = { nodeOffset, beamOffset };

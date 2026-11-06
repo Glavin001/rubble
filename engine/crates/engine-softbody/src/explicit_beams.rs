@@ -1008,6 +1008,10 @@ pub struct ExplicitBeams {
     /// Raycast wheels, drive and driver input ([`crate::explicit_drive`]); `None`
     /// (the default) for none, every step unchanged.
     pub drive: Option<Box<crate::explicit_drive::Drive>>,
+    /// Spawned on the BeamNG profile (jbeam-semantics-spec.md §36): JBeam
+    /// content, or a `.truck` with `rubble_beamng_profile`; else Rigs of
+    /// Rods'. What hosts report as the vehicle's profile.
+    pub beamng_profile: bool,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -1482,6 +1486,7 @@ impl ExplicitBeams {
             rigid: None,
             trace: None,
             drive: None,
+            beamng_profile: false,
         }
     }
 
@@ -1933,6 +1938,7 @@ impl ExplicitBeams {
         // `rubble_beamng_profile` (Rubble's extension, spec §36): the BeamNG
         // profile's switches and two-body vehicle contact.
         if file.beamng_profile {
+            s.beamng_profile = true;
             s.settings = s.settings.beamng();
             s.two_body_contact = true;
             s.anti_clip = true;
@@ -2470,6 +2476,7 @@ impl ExplicitBeams {
         // 0.2 % error strains stiff beams at rest).
         let settings = settings.beamng();
         let mut s = Self::spawn_nodes(desc, position, 0.0, velocity, settings);
+        s.beamng_profile = true;
         for b in &desc.beams {
             s.push_jbeam_beam(b);
         }

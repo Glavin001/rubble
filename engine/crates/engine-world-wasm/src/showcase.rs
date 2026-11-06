@@ -94,13 +94,17 @@ const FAR_DETAIL: f32 = 0.2;
 
 /// The visual for a spawn on raycast wheels (`engine_softbody::explicit_drive`):
 /// without the tyre nodes and beams the `.truck` spawn builds, so every binding,
-/// beam index and per-node array matches that solver's vehicle. The tyres' own
-/// skin goes (the page draws the raycast wheels); beams after the tyres' move down.
+/// beam index and per-node array matches that solver's vehicle. The wheels'
+/// pieces (tyre, rim, disc, caliper) ride the raycast wheels instead
+/// (`skin::bind_raycast_wheels`: the renderer places them from the drive
+/// state); beams after the tyres' move down.
 struct TyreCut {
     /// The spawn's nodes without tyres, its first tyre beam and the tyre beams.
     nodes: u32,
     first: u32,
     count: u32,
+    /// The raycast spawn's drive (its wheels, in the drive state's order).
+    config: engine_softbody::explicit_drive::DriveConfig,
 }
 
 impl TyreCut {
@@ -120,10 +124,17 @@ impl TyreCut {
         .map_err(err)?;
         // Beam order: cinecam beams, tyre beams, then the file's.
         let first = engine_softbody::truck::parse_truck(truck).cinecams.len() as u32 * 8;
+        let config = without
+            .drive
+            .as_ref()
+            .ok_or_else(|| err("raycast spawn without a drive"))?
+            .config
+            .clone();
         Ok(Self {
             nodes: without.nodes.len() as u32,
             first,
             count: (with.beams.len() - without.beams.len()) as u32,
+            config,
         })
     }
 
@@ -137,7 +148,8 @@ impl TyreCut {
         }
     }
 
-    fn apply(&self, v: &mut ShowcaseVisual) {
+    fn apply(&self, v: &mut ShowcaseVisual) -> Result<(), JsValue> {
+        engine_softbody::authoring::skin::bind_raycast_wheels(v, &self.config).map_err(err)?;
         let n = self.nodes;
         let live = |t: &[u32; 3]| t.iter().all(|&i| i < n);
         let ok_vertex: Vec<bool> = v.bind_nodes.iter().map(live).collect();
@@ -196,6 +208,7 @@ impl TyreCut {
             }
         }
         v.node_count = n;
+        Ok(())
     }
 }
 
@@ -215,11 +228,11 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     } else {
         None
     };
-    let fix = |mut v: ShowcaseVisual| {
+    let fix = |mut v: ShowcaseVisual| -> Result<ShowcaseVisual, JsValue> {
         if let Some(c) = &cut {
-            c.apply(&mut v);
+            c.apply(&mut v)?;
         }
-        v
+        Ok(v)
     };
     // Measurement switches (a visual A/B on identical physics): `bind:
     // 'legacy'` the binding before the flexbody rebinding; `alt: false` no
@@ -241,7 +254,7 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
         })
         .map_err(err)
     };
-    let v = fix(make(1.0)?);
+    let v = fix(make(1.0)?)?;
     let out = Object::new();
     set(&out, "truck", &JsValue::from_str(&b.truck));
     let counts = Object::new();
@@ -264,10 +277,10 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     set(&out, "counts", &counts);
     set(&out, "visual", &visual_js(&v).into());
     // The distant level of detail (the renderer picks it by distance).
-    let lod = fix(make(0.45)?);
+    let lod = fix(make(0.45)?)?;
     set(&out, "visualLod", &visual_js(&lod).into());
     // A third, coarser level (a car a few hundred pixels long and less).
-    let far = fix(make(FAR_DETAIL)?);
+    let far = fix(make(FAR_DETAIL)?)?;
     set(&out, "visualFar", &visual_js(&far).into());
     Ok(out.into())
 }

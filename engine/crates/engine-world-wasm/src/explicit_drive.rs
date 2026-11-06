@@ -256,6 +256,32 @@ impl ExplicitSim {
         Ok(())
     }
 
+    /// Vehicle `vehicle`'s raycast wheels' records in the misc buffer
+    /// (`miscBuffer`, vec4 records), 4 per wheel in the drive state's order:
+    /// its state (omega, spin angle, steer, length), centre (world), axle
+    /// (unit, steered, left) and up, written every step. The showcase
+    /// renderer places the wheels' pieces from them (`skin::wheel_vertex`).
+    /// Empty without raycast wheels.
+    #[wasm_bindgen(js_name = wheelRecords)]
+    pub fn wheel_records(&self, vehicle: u32) -> Vec<u32> {
+        use engine_exec::explicit_plan::drive::{VEHICLE_RECS, WHEEL_RECS};
+        let (Some(l), Some(d)) = (
+            self.gpu.layout().drive,
+            self.vehicles
+                .get(vehicle as usize)
+                .and_then(|v| v.sim.drive.as_ref()),
+        ) else {
+            return Vec::new();
+        };
+        let base = l.vehicle(vehicle as usize) + VEHICLE_RECS;
+        (0..d.wheels.len() as u32)
+            .flat_map(|k| {
+                let w = base + WHEEL_RECS * k;
+                [w + 15, w + 17, w + 18, w + 19]
+            })
+            .collect()
+    }
+
     /// Whether the scene's cars drive themselves.
     #[wasm_bindgen(js_name = selfDriving)]
     pub fn self_driving(&self) -> bool {

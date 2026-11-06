@@ -228,6 +228,126 @@ pub struct ShowcaseVisual {
     /// Per vertex the skeleton part it rides (`u16::MAX`: none, a wheel's
     /// or a structure group's).
     pub part: Vec<u16>,
+    /// Per vertex its wheel: `tyre << 1` for a wheel's rotating piece (tyre,
+    /// rim, disc), `tyre << 1 | 1` for its non-rotating hardware (caliper),
+    /// `u32::MAX` none; `tyre` indexes `tyre_axles`.
+    pub wheel: Vec<u32>,
+    /// Per tyre (the solver's order) its axle nodes.
+    pub tyre_axles: Vec<[u32; 2]>,
+}
+
+/// `ShowcaseVisual::rigid` values.
+pub mod rigid_kind {
+    /// Rides its frame affinely (the body).
+    pub const NONE: u8 = 0;
+    /// Rigid on its frame's orthonormal basis (mirrors, handles, lamps).
+    pub const RIGID: u8 = 1;
+    /// On a raycast wheel ([`super::bind_raycast_wheels`]): `bind_nodes[0]`
+    /// the drive wheel, `bind_coords` and `bind_normal` its rest offset and
+    /// normal in the wheel's frame (axle, up, forward); it turns with the
+    /// wheel's spin.
+    pub const WHEEL: u8 = 2;
+    /// The same, steered and sprung but not spinning (a caliper).
+    pub const WHEEL_HUB: u8 = 3;
+}
+
+/// A raycast wheel as drawn (the drive state's outputs: `WheelState`'s
+/// centre, axle and up, and its spin angle).
+#[derive(Clone, Copy, Debug)]
+pub struct WheelPose {
+    pub centre: Vec3,
+    /// Unit, steered, pointing left.
+    pub axle: Vec3,
+    pub up: Vec3,
+    pub spin: f32,
+}
+
+/// A wheel vertex's position and normal from its rest offset `l` and normal
+/// `n` in its wheel's frame (axle A, up U, forward F = A × U): it turns about
+/// the axle by the spin angle (a positive spin rolls the top forward) unless
+/// `hub`. The renderer's `wheelVertex()` is the same.
+pub fn wheel_vertex(l: [f32; 3], n: [f32; 3], w: &WheelPose, hub: bool) -> (Vec3, Vec3) {
+    let a = w.axle.normalize_or_zero();
+    let u = (w.up - a * a.dot(w.up)).normalize_or_zero();
+    let f = a.cross(u);
+    let (sn, c) = if hub { (0.0, 1.0) } else { w.spin.sin_cos() };
+    let (ur, fr) = (u * c + f * sn, f * c - u * sn);
+    (
+        w.centre + a * l[0] + ur * l[1] + fr * l[2],
+        a * n[0] + ur * n[1] + fr * n[2],
+    )
+}
+
+/// Rebinds the wheels' pieces onto raycast wheels (a spawn without tyres,
+/// `ExplicitBeams::from_truck_raycast`): each tyre's vertices ride the drive
+/// wheel on the same axle nodes ([`rigid_kind::WHEEL`], its caliper
+/// [`rigid_kind::WHEEL_HUB`]), at their rest offset from the tyre's centre
+/// in the frame the drive uses at rest (the body's left and up from its
+/// reference nodes; `DriveConfig::hub_axles` aside). Drawn from the drive
+/// state, as a BeamNG flexbody on a wheel rides the wheel's own nodes.
+pub fn bind_raycast_wheels(
+    v: &mut ShowcaseVisual,
+    config: &crate::explicit_drive::DriveConfig,
+) -> Result<(), String> {
+    let rest = |i: u32| {
+        v.node_rest
+            .get(i as usize)
+            .map(|q| Vec3::from_array(*q))
+            .ok_or_else(|| format!("raycast wheels: node {i} past the visual's nodes"))
+    };
+    let [c, b, l] = config.refs;
+    let fw = (rest(c)? - rest(b)?).normalize_or_zero();
+    let up = fw.cross(rest(l)? - rest(c)?).normalize_or_zero();
+    let left = up.cross(fw);
+    // Per tyre its drive wheel and rest centre.
+    let mut of: Vec<Option<(u32, Vec3)>> = Vec::with_capacity(v.tyre_axles.len());
+    for ax in &v.tyre_axles {
+        let k = config.wheels.iter().position(|w| {
+            (w.node1 == ax[0] && w.node2 == ax[1]) || (w.node1 == ax[1] && w.node2 == ax[0])
+        });
+        of.push(match k {
+            Some(k) => Some((k as u32, 0.5 * (rest(ax[0])? + rest(ax[1])?))),
+            None => None,
+        });
+    }
+    let pose = |centre: Vec3| WheelPose {
+        centre,
+        axle: left,
+        up,
+        spin: 0.0,
+    };
+    for i in 0..v.positions.len() {
+        let w = v.wheel.get(i).copied().unwrap_or(u32::MAX);
+        if w == u32::MAX {
+            continue;
+        }
+        let Some(Some((k, centre))) = of.get((w >> 1) as usize).copied() else {
+            return Err(format!(
+                "raycast wheels: no drive wheel on tyre {}'s axle",
+                w >> 1
+            ));
+        };
+        let hub = w & 1 == 1;
+        let fr = pose(centre);
+        let (a, u) = (fr.axle, fr.up);
+        let f = a.cross(u);
+        let d = Vec3::from_array(v.positions[i]) - centre;
+        let n = Vec3::from_array(v.normals[i]);
+        v.bind_nodes[i] = [k, k, k];
+        v.bind_coords[i] = [d.dot(a), d.dot(u), d.dot(f)];
+        v.bind_normal[i] = [n.dot(a), n.dot(u), n.dot(f)];
+        v.bind_rest[i] = [1.0, 1.0];
+        v.rigid[i] = if hub {
+            rigid_kind::WHEEL_HUB
+        } else {
+            rigid_kind::WHEEL
+        };
+        v.smooth[i] = 0;
+        if let Some(a) = v.alt.get_mut(i) {
+            *a = 0;
+        }
+    }
+    Ok(())
 }
 
 /// Surface material of a solver node (`ShowcaseVisual::node_material`).
@@ -1128,6 +1248,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     let mut out = ShowcaseVisual {
         node_count: node_pos.len() as u32,
         node_rest: sim.nodes.iter().map(|n| n.pos.to_array()).collect(),
+        tyre_axles: sim.tyres.iter().map(|t| t.axle).collect(),
         ..Default::default()
     };
     for piece in pieces.iter_mut() {
@@ -1400,6 +1521,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 out.rigid.push(1);
                 out.alt.push(0);
                 out.part.push(part.unwrap_or(u16::MAX));
+                out.wheel.push(u32::MAX);
             }
             out.indices.extend(m.idx.iter().map(|i| i + first));
             out.pieces.push((piece.name.clone(), first, m.len() as u32));
@@ -1618,6 +1740,11 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 }
             }
             out.alt.push(alt);
+            out.wheel.push(match piece.bind {
+                Bind::Wheel(_) => (nearest_tyre() as u32) << 1,
+                Bind::Hub(_) => ((nearest_tyre() as u32) << 1) | 1,
+                _ => u32::MAX,
+            });
             out.part.push(if tp != u16::MAX {
                 tp
             } else {
