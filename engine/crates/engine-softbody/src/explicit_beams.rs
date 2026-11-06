@@ -961,6 +961,9 @@ pub struct ExplicitBeams {
     pub surface_contact: bool,
     /// The surface pass's hits in the last step (a statistic; not simulated state).
     pub surface_last: u32,
+    /// The surface pass's segments (beam-edge contact, [`crate::explicit_surface::surface_segments`]),
+    /// found at its first step.
+    pub surface_segs: Option<Vec<u32>>,
     /// [`Self::dissipative_contact`]'s position steps this step, per node in
     /// [`SHIFT_FIXED`] units (summed as integers, order free); the next node pass
     /// adds them to the positions after x + h·v (empty until used).
@@ -1538,6 +1541,7 @@ impl ExplicitBeams {
             dissipative_contact: false,
             surface_contact: false,
             surface_last: 0,
+            surface_segs: None,
             contact_shift: Vec::new(),
             shift_applied: Vec::new(),
             plastic_strength_drop: true,
@@ -3296,7 +3300,7 @@ impl ExplicitBeams {
         if !self.triangles.is_empty() && !self.candidates.is_empty() {
             self.collision_pass();
         }
-        if self.surface_contact && !self.triangles.is_empty() {
+        if self.surface_contact {
             self.surface_pass();
         }
         if let Some(t) = trace.as_mut() {

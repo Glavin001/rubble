@@ -2079,3 +2079,65 @@ frame; crush: the struck side's skin in the pole's lane against the far side.
 **Open:** beam-edge contact; GPU proxies (the World's coupling); the single-vehicle GPU
 cost; the NCAP pole calibration with it on. The default stays node only until those
 hold.
+
+### 38.1 Round 2: beam edges, point band, deepest point (opt-in, 2026-11-06)
+
+Round 1 left interior beams on no collision triangle crossing the pole (p99 ≈ 95 mm).
+Three additions, all behind the same switch (off: bit for bit as before, CPU and GPU):
+* **Beam-edge contact** (`segment_contact`, GPU `surfSegment`). The segments are
+  `surface_segments`: every beam of a physical kind (`segment_kind`: plain, limited,
+  support, rope, shocks2, JBeam plain/support/bounded/aniso/pressured/rope; not
+  triggers, couplers, torsion, LBEAM, pressure or aero records) between two distinct
+  collidable nodes (not `NODE_NO_GROUND`) that is no edge of a collision triangle the
+  pass meets (a triangle owns its edges, a node its ends). Fixed at spawn. A broken
+  beam is skipped (GPU: its flag or this step's detacher-group break, as the CPU sees
+  it after the beam pass). X candidates per shape edge (box's twelve, a capsule's or
+  cylinder's axis, a hull's edges): the edge–beam closest points unless parallel, and
+  each edge end against the beam (a parallel run's ends); a sphere's centre against
+  the beam; the beam's run inside a box or hull (both its ends, distance 0). V: the
+  beam's ends, as a triangle's vertices. The same mean, band, law and splitting;
+  weights (w₀, w₁, 0) on nodes (a, b, a).
+* **Deepest point when touching or crossing.** With the normal from the separating
+  axis (gap or point distance ≤ 10 µm), the contact is no longer the mean of the
+  candidates (a run's middle the element turns about: measured, a sedan1 bumper beam
+  held at its middle rotated 4 cm into the pole while the middle separated) but the
+  deepest of the candidates with shared weights along the normal (ties within 0.1 mm
+  their mean). The runs inside a box are now listed by both ends (triangles too). A
+  beam whose deepest candidates spread along it (the least-overlap axis is usually
+  across the beam, so a run's two ends tie) gets **two contacts**, at the least and
+  the most parameter, so it is held at both.
+* **Point contact in the band** (`point_contact`, GPU `surfPoint`). A collidable node
+  outside a shape and within the band of it (gap > 10 µm) gets the same two-body law
+  toward the shape's nearest point (a hull's: back along its farthest plane). A node
+  strictly inside stays node contact's, which tops up to its own target (no double
+  count). Without it, a vertex-nearest contact was the node's but node contact has no
+  band, so an ETK front node reached 36 mm inside.
+
+Checked: `tests/explicit_surface.rs` (a beam under a box face by its edges, its end
+the node's, capsule, sphere, cylinder; a tilted beam through a box held at both run
+ends; a node in the band; the plate's one segment, its non-triangle diagonal), and
+`surface_contact_gpu.rs` bit for bit on the GPU: side 2,923, oblique 2,404, frontal
+9,040 hits.
+
+**Measured** (CPU, `surface_pole.rs`, 32 km/h, 0.6 s, flag on; round 1 → round 2).
+The harness now counts colliding matter only: nodes not `NODE_NO_GROUND` and beams of
+`segment_kind` between two of them (round 1's 30–65 mm ETK node depths were
+non-colliding nodes; flag off, the same filter: ETK node depth 4–10 mm).
+
+| Car, test | node / beam / tri depth (mm) | p99 (mm), inside samples | peak (kN) | crush max / end (mm) |
+|---|---|---|---|---|
+| ETK, side 90° | 0.0 / 0.5 / 0.0 | 0.5 (1) | 373 | 336 / 0 |
+| ETK, oblique 75° | 0 / 0 / 0 | 0 (0) | 338 | 735 / 518 |
+| ETK, frontal | 0 / 0 / 0 | 0 (0) | 216 | 548 / 497 |
+| sedan1, side 90° | 0 / 0 / 0 | 0 (0) | 365 | 459 |
+| sedan1, oblique 75° | 0 / 1.2 / 0 | 1.2 (2) | 349 | 874 |
+| sedan1, frontal | 0 / 24.7 / 17.3 | 24.7 (31) | 212 | 592 / 480 |
+
+Flag off (same harness): p99 96–98 mm on every case. Every case is now within the
+2.5 cm band. Crush moves (sedan1 oblique 635 → 874 mm, ETK oblique 778 → 735 mm):
+the pole now meets the structure where it is, see §38.2.
+
+Cost (GPU, wgpu on Metal, M3 Max, shared with other work): sedan1 at the side pole,
+1 s, 118 → 644 µs/step (round 1 measured 195 → 616 on a quieter GPU); the 64-car
+`arena` 7.41 → 8.30 ms per fleet step (+12 %). CPU reference: sedan1 425 → 490
+µs/step, the ETK 85 → 105.

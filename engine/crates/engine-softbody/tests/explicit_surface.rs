@@ -399,3 +399,109 @@ fn off_is_bit_for_bit_node_contact() {
     }
     assert_eq!(a.positions(), b.positions());
 }
+
+#[test]
+fn a_beam_meets_a_box_by_its_edges_and_its_ends_are_the_nodes() {
+    use engine_softbody::explicit_surface::segment_contact;
+    // A 0.6 m beam along x 1 cm under the pole's −z face: the two edges it passes
+    // under are nearest, one contact at their middle shared by both nodes.
+    let x = [Vec3::new(-0.3, 0.0, 0.0), Vec3::new(0.3, 0.0, 0.0)];
+    let h = segment_contact(&x, &pole_box(0.01), R)
+        .expect("in the band")
+        .0;
+    assert!(
+        (h.gap - 0.01).abs() < 1e-6 && (h.n - Vec3::Z).length() < 1e-5,
+        "{h:?}"
+    );
+    assert!((h.w[0] - 0.5).abs() < 1e-5 && (h.w[1] - 0.5).abs() < 1e-5 && h.w[2] == 0.0);
+    assert!(h.q.length() < 1e-5, "{h:?}");
+    // A beam whose end is nearest (under the face): the node's.
+    let end = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, -0.5)];
+    assert!(segment_contact(&end, &pole_box(0.01), R).is_none());
+    assert!(
+        segment_contact(&x, &pole_box(0.03), R).is_none(),
+        "past the band"
+    );
+    let cap = SurfaceShape::Capsule {
+        a: Vec3::new(0.0, -1.0, 0.03),
+        b: Vec3::new(0.0, 1.0, 0.03),
+        radius: 0.02,
+    };
+    let h = segment_contact(&x, &cap, R).expect("capsule").0;
+    assert!(
+        (h.gap - 0.01).abs() < 1e-6 && (h.n - Vec3::Z).length() < 1e-5,
+        "{h:?}"
+    );
+    let sph = SurfaceShape::Sphere {
+        c: Vec3::new(0.1, 0.0, 0.05),
+        radius: 0.04,
+    };
+    let h = segment_contact(&x, &sph, R).expect("sphere").0;
+    assert!(
+        (h.gap - 0.01).abs() < 1e-6 && (h.q.x - 0.1).abs() < 1e-6,
+        "{h:?}"
+    );
+    let cyl = SurfaceShape::Cylinder {
+        c: Vec3::new(0.0, 0.0, 0.11),
+        radius: 0.1,
+        half_height: 1.0,
+    };
+    let h = segment_contact(&x, &cyl, R).expect("cylinder").0;
+    assert!(
+        (h.gap - 0.01).abs() < 1e-5 && (h.n - Vec3::Z).length() < 1e-4,
+        "{h:?}"
+    );
+}
+
+#[test]
+fn a_beam_through_a_box_is_held_at_both_ends_of_its_run() {
+    use engine_softbody::explicit_surface::segment_contact;
+    // A beam across the pole, tilted: 2 cm inside its −z face at x = +0.1, 0.5 cm at
+    // x = −0.1. The normal is the least overlap: across the beam (beam × y, mostly
+    // +z); its run's ends are equally deep along it, so one contact at each (x = ±0.1).
+    let x = [Vec3::new(-0.3, 0.0, -0.0025), Vec3::new(0.3, 0.0, 0.02)];
+    let (a, b) = segment_contact(&x, &pole_box(0.0), R).expect("crossing");
+    let b = b.expect("a second contact");
+    for h in [a, b] {
+        assert!(
+            h.gap <= PIERCE && h.n.z > 0.99 && h.n.dot(x[1] - x[0]).abs() < 1e-5,
+            "{h:?}"
+        );
+        assert!(h.w[0] > 0.0 && h.w[1] > 0.0);
+    }
+    assert!(
+        (a.q.x + 0.1).abs() < 1e-4 && (b.q.x - 0.1).abs() < 1e-4,
+        "{a:?} {b:?}"
+    );
+}
+
+#[test]
+fn a_node_in_the_band_is_met_by_point_contact() {
+    use engine_softbody::explicit_surface::point_contact;
+    let h = point_contact(Vec3::ZERO, &pole_box(0.01), R).expect("band");
+    assert!(
+        (h.gap - 0.01).abs() < 1e-6 && (h.n - Vec3::Z).length() < 1e-6,
+        "{h:?}"
+    );
+    assert_eq!(h.w, [1.0, 0.0, 0.0]);
+    assert!(
+        point_contact(Vec3::new(0.0, 0.0, 0.05), &pole_box(0.01), R).is_none(),
+        "inside"
+    );
+    assert!(
+        point_contact(Vec3::new(0.0, 0.0, -0.05), &pole_box(0.01), R).is_none(),
+        "past"
+    );
+}
+
+#[test]
+fn the_segments_are_the_beams_on_no_collision_triangle() {
+    use engine_softbody::explicit_surface::surface_segments;
+    // The plate: its triangles' five edges are theirs; the other diagonal 1–2 is a
+    // segment.
+    let s = plate(Vec3::ZERO, Vec3::ZERO);
+    let segs = surface_segments(&s);
+    assert_eq!(segs.len(), 1, "{segs:?}");
+    let b = s.beams[segs[0] as usize];
+    assert_eq!((b.a.min(b.b), b.a.max(b.b)), (1, 2));
+}

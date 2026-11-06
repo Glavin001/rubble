@@ -1542,6 +1542,25 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // Surface contact's segments (§38, beam-edge contact): per vehicle (start in
+        // gLists, count), the global beam indices in gLists.
+        let surf_seg = if any_surface {
+            let base = statics.len() as u32;
+            let mut beam_at = 0u32;
+            for v in vehicles {
+                let segs = if v.surface_contact {
+                    engine_softbody::explicit_surface::surface_segments(v)
+                } else {
+                    Vec::new()
+                };
+                statics.push([lists.len() as u32, segs.len() as u32, 0, 0]);
+                lists.extend(segs.iter().map(|&j| beam_at + j));
+                beam_at += v.beams.len() as u32;
+            }
+            base
+        } else {
+            0
+        };
 
         let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
         let lanes = frame_lanes(vehicles);
@@ -1634,6 +1653,7 @@ impl ExplicitUpload {
             clip_vmax,
             surf_snap,
             surf_split,
+            surf_seg,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
