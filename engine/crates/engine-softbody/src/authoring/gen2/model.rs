@@ -659,7 +659,7 @@ fn clean_slivers(part: &mut Part, tri0: usize, first: usize, border: &[bool], id
                 let (a, b) = (tr[e], tr[(e + 1) % 3]);
                 edges.get(&(a.min(b), a.max(b))).map_or(0, |v| v.len()) == 1
             });
-            if (tr.iter().all(|&v| on_border(v)) && height < 0.0025)
+            if (tr.iter().all(|&v| on_border(v)) && height < 0.0035)
                 || (on_outline && height < 0.002)
             {
                 dead[t] = true;
@@ -1041,7 +1041,7 @@ pub fn hem(part: &mut Part, g: &Grid, ids: &[u32], e: usize, m: Mat) {
         let last = q + 1 == all.len();
         if let Some(&pk) = idx.last() {
             let (a, b) = (ids[pk] as usize, ids[k] as usize);
-            if a == b || (!last && part.pos[a].distance(part.pos[b]) < 0.005) {
+            if a == b || (!last && part.pos[a].distance(part.pos[b]) < 0.009) {
                 continue;
             }
         }
