@@ -8699,6 +8699,8 @@ fn community_scenes() {
                 _ => {}
             }
         }
+    }
+}
 
 /// How a car damps its light nodes (a measurement, `--ignored`): per part,
 /// its nodes split at the part's median mass, and for each half the median
