@@ -693,3 +693,164 @@ leaves its hinges.
 - **Frontal chest intrusion.** The truss door beam raised it in some configurations:
   60–194 mm across the sweep, 61 mm in the final build. The measure is noisy and has
   no band.
+
+## Round 5 (2026-11-06)
+
+Branch `feat/vehicle-gen3-r5`, merged with `feat/surface-contact-perf` (908e1187:
+surface friction's true stick). Surface contact is on unless marked. Full tables:
+`measurements/vehicle-compare-gen3-surface-on.md` and `-off.md`. Stills:
+`media/gen3-r5/`.
+
+### Decisions
+
+- **The ETK's seams are not shut: our seam metric could not see them.**
+  - The seam count pairs *boundary* vertices (open mesh edges) of two pieces
+    within 1 cm. The ETK's panels are hemmed, closed meshes: its hood, fender,
+    door and lamp lines have no open edge. Its 785 pairs all lie inside one group
+    (body and carpet, dash and gauges, quarter panels), whose sides share their
+    binding nodes. Its 0 is the metric, not the car.
+  - Paired over **every vertex within 1.5 cm** (`shutline_*`, a new harness row),
+    the ETK opens 796 pairs past 5 cm at 56 km/h, gen3 2,715.
+  - **The ETK's hood tents too:** it rises 440 mm (gen3 683 mm) and its
+    hood/fender line opens 509 mm, every pair past 5 cm at the end.
+  - Its flexbodies never share nodes across a seam (0 shared group nodes on every
+    pair below). Shared seam nodes are not how it keeps lines shut.
+- **What keeps the ETK's other lines shut is SUPPORT beams between parts**,
+  measured in its JBeam: the bumper fascia to the fender fronts and the hood; the
+  headlamp (its own 6-node part, bolted to the radiator support) to the fascia, the
+  hood and the fender; the doors to the hinge pillar. They are compression-only, so a
+  part driven back pushes its neighbour back instead of sliding past it, and the two
+  can still part.
+- **gen3 takes the idiom: push links** (`push_links`, `Role::Bearing`): from each
+  front-end part's nodes ahead of the front axle (cover, fenders, hood) to the
+  nearest node of the part behind it (fenders, hood, body), 4–30 cm back and within
+  35° of the car's axis. No tension, so a part whose hardware breaks still separates.
+  - In round 4 the cover's corner dived 187 mm and went 522 mm back, while the lamp
+    at the apron tip went 225 mm back and the fender front rose 360 mm.
+  - Now the cover rises with its neighbours: hood/grille node gap 266 → 88 mm,
+    lamp/fender 332 → 131–226 mm, lamp/cover 345 → 195–310 mm.
+  - Shut lines at equal crush (gen3 at 48 km/h, 527 mm; the ETK at 64 km/h,
+    550 mm): 2,042 against the ETK's 851 (round 4's model: 2,290).
+  - Not taken: shared seam nodes (the ETK does not use them), and a stiffer hood
+    inner frame (the ETK's hood tents as much).
+- **Stacks:** BOUNDED stops from the block's front nodes to the bumper beam,
+  engaging once the cooling module is crushed solid (`COOLING_STACK` 0.08 m, an
+  estimate from the parts' depths), and from the front hubs to the hinge pillar's
+  base (`WHEEL_STACK` 0.23 m: the rim plus flattened tyre). The dash stops were
+  already there.
+- **Crush zone yield 0.23** (was 0.28): the push links stiffen the front. The hinge
+  pillar's front joints (`hpf`) keep the towers' 0.4: at 0.25 one (hpf0R–ar1R)
+  yielded under the parked car.
+- **Parking brake** (jbeam-semantics-spec.md §25.1): a pressure wheel row with
+  `parkingTorque` and a `nodeArm` gets a Coulomb torque between its hub rings and its
+  arm about the axle. Stick removes at most the two bodies' relative spin in one step.
+  - CPU and GPU (`EB_AERO` modules), bit-identical: 0.0000 mm in
+    `parking_brake_matches_cpu`, applied, and released through
+    `ExplicitBeamsGpu::set_parking_brake`. Metal `vehicle_parity` and
+    `explicit_parity` pass.
+  - Released by default: content without brakes, or with them released, is
+    unchanged bit for bit (test).
+  - gen3's rear wheels carry 1,240 N·m (FMVSS 135's 20 % grade at the Accord's
+    GVWR, × 2).
+  - The harness parks every JBeam car 10 s on pressure wheels, applied and
+    released.
+
+### Required numbers (surface contact on)
+
+| Measure | Round 4 | Round 5 | Band |
+|---|---|---|---|
+| Frontal dynamic crush (mm) | 626 | 629 | 620–750 ✓ |
+| t_m (ms) | 71 | 72 | 63–76 ✓ |
+| Peak, rear cabin (g) | 29.3 | 29.2 | 34–47 ✗ |
+| Residual max / avg (mm) | 543 / 334 | 468 / 345 | 380–580 ✓ |
+| Campbell b1 (1/s) | 39.9 | **38.6** | ≤ 39.2 ✓ |
+| Restitution | 0.212 | 0.202 | ≤ 0.20 ✗ (by 0.002) |
+| Feet intrusion (mm) | 60 | 66.8 | ≤ 67 ✓ (at the edge) |
+| Roof / weight | 5.32 | 5.22 | 4.48–5.32 ✓ |
+| Side pole residual (mm) | 153 | 132 (slide 1.28 m) | 297–445 ✗ |
+| MDB residual (mm) | 191 | 193 | 126–206 ✓ |
+| FMVSS 214 door: initial / intermediate / peak (kN) | 10.8 / 28.5 / 97 | 10.4 / 28.5 / 94 | ≥ 10.0 / 15.6 / 28.5 ✓ |
+| Shut lines > 5 cm, wall (every vertex within 1.5 cm) | 2,200 | 2,715 | ETK 796 |
+| Parked 10 s on pressure wheels: KE (J) | 1.10 | **0.003** | ETK 0.084 (released 3.63) |
+
+Chest intrusion rose to 148 mm (61 mm in round 4). It has no band and swung 60–194 mm
+across round 4's sweeps.
+
+**Surface contact off:** dynamic crush 669 mm, peak 28.8 g, residual 456 / 334 mm, b1
+39.9, restitution 0.23, pole 247 mm.
+
+**The ETK (on):** dynamic crush 501 mm, peak 70 g, residual 233 mm, b1 68,
+restitution 0.37, pole 119 mm (slide 1.70 m), MDB 244 mm, roof 6.02, door 6.5 kN.
+
+### The ETK seam evidence (wall 56 km/h, every vertex within 1.5 cm)
+
+The node gap is the separation, beyond rest, of the two vertices' heaviest nodes.
+Each gap is the maximum over the crash / the value at 0.5 s. From
+`gen3_seam_evidence`.
+
+| Seam | ETK flexbody groups | Shared nodes | ETK pairs | ETK skin gap (mm) | ETK node gap (mm) | gen3 r5 skin gap | gen3 r5 node gap |
+|---|---|---|---|---|---|---|---|
+| hood / fender | `etkk_hood` / `etkk_fender_L` | 0 | 153 | 509 / 489 | 335 / 323 | 302–434 / 216–291 | 330–478 / 228–325 |
+| hood / bumper (gen3: grille) | `etkk_hood` / `etkk_bumper_F` | 0 | 127 | 175 / 157 | 171 / 153 | 166 / 128 | 124 / 88 |
+| bumper / headlamp | `etkk_bumper_F` / `etkk_headlight_R` | 0 | 44 (+2 housing) | 48 / 0 (housing 84 / 48) | 14 / 0 (58 / 44) | 270–382 / 242–377 | 210–314 / 195–310 |
+| fender / headlamp | `etkk_fender_R` / `etkk_headlight_R` | 0 | 11 | 76 / 51 | 54 / 0.6 | 230–333 / 202–328 | 150–230 / 131–226 |
+| door / A-pillar (body) | `etkk_body` / `etkk_door_L` | 0 | 61 | 23 / 10 | 9 / 3 | 175–186 / 107–115 | 172–196 / 131–139 |
+| door / fender | `etkk_door_L` / `etkk_fender_L` | 0 | 35 | 37 / 18 | 9 / 5 | 224–244 / 89–106 | 98–118 / 13–17 |
+
+Hood rise in the cabin's frame: the ETK 440 mm, gen3 683 mm.
+
+### Pulse: what limits it
+
+- The stops work when they engage. With the stack at 0.25–0.30 m they engage near
+  20–30 ms and the force spikes to 530–660 kN. At the estimated 0.08 m they engage at
+  the very end and change nothing.
+- **The crush is not progressive.**
+  - The block's front is 0.57 m behind the nose (the Accord's place). To close the
+    0.31 m to the beam, the cans and rail tips ahead of it must crush first.
+  - gen3's front crushes along its whole length at once, so the block meets the beam
+    only as the car stops.
+- A yield graded from a soft nose to a stiff firewall (`GEN3_GRADE_FRONT/REAR`,
+  ungraded by default) raised the mid-crash force but cut the crush (575 mm at
+  0.3–3.0) and the residual (b1 51). Not adopted.
+- The plateau stays at 330–440 kN. 34 g needs about 485 kN held for 10 ms through
+  the 100 Hz filter.
+
+### Side pole after the friction fix
+
+`feat/surface-contact-perf`'s stick changed the harness's 75° pole little:
+- gen3: at the centre offset, slide 1.20 → 1.09 m and residual 153 → 137 mm (RoR
+  friction, `RUBBLE_SURFACE_FRICTION=ror`, against the stick); 0.86–1.43 m across
+  the offsets.
+- the ETK: slide 1.66 → 1.70 m, residual 117 → 119 mm.
+- Node contact: gen3 slides −0.10 to 1.07 m, mean residual 193 mm.
+
+The friction branch measured its own scene (`surface_pole --scene oblique --cyl`),
+where the ETK's slide halved. The harness's pole still slides 1–2 m. The side was not
+tuned.
+
+### Chrome
+
+The merged surface pass put barriers under a branch on a storage-loaded flag
+(`pairs`), which Chrome's uniformity analysis rejects, so the page did not load. The
+flag now goes through workgroup memory (`gsUniformSurf`, read as
+`workgroupUniformLoad`), as the other `gsUniform*` flags do.
+
+### Checks (`gen3_rig`)
+
+| Check | Round 5 | Required |
+|---|---|---|
+| Rest fidelity at spawn | 0.16 mm / 0.07° | ≤ 1 mm / 1° |
+| Parked 10 s, beyond the nodes' own motion | 0.53 mm / **0.98°** | ≤ 1 mm / 1° (close) |
+| Drift, every part | ≤ 2.3 mm | ≤ 5 mm |
+| Broken / bent at rest | 0 / 0 | 0 / 0 |
+| wall56 stretch / fold p99 | 1.27 / 5.2° | ≤ 1.6 / ≤ 31° |
+| pole32 stretch / fold p99 | 1.11 / 1.0° | ≤ 1.6 / ≤ 31° |
+
+ω·h is 1.915 (bound 1.92).
+
+### Open
+
+- The pulse's peak (29 g against 34–47) and restitution (0.202 against ≤ 0.20).
+- The pole residual: the harness's pole still slides 1–2 m for both cars.
+- Shut lines: the doors (the hinge pillar moving back), the lamp corners and the
+  hood.
