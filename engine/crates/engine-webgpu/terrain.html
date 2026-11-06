@@ -79,10 +79,6 @@
     const terrain = placed.terrain;
     const NX = placed.nx, NZ = placed.nz, DX = placed.dx, DZ = placed.dz;
     const X0 = -0.5 * (NX - 1) * DX, Z0 = -0.5 * (NZ - 1) * DZ;
-    const initialHeights = Float32Array.from(world.heightFieldHeights(terrain));
-    let heights = initialHeights.slice();
-    // The page's random sequence, continued from where placement left it.
-    const rand = (() => { let s = placed.seed; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); })();
     // Bodies: boxes, spheres and capsules on a jittered grid above the hills ({ id, slot, p, q }).
     const bodies = placed.bodies;
     // Every body's pose as the last polled frame left it.
@@ -300,56 +296,13 @@ fn hfH(i: u32, j: u32, nx: u32) -> f32 {
     document.getElementById('rainBtn').onclick = () => rain();
 
     // ---------------------------------------------------------------- edits
-    const uploadHeights = () => world.setHeightFieldRegion(terrain, 0, 0, NX, NZ, heights);
+    // Craters, rain and reset are the scene's actions (rubble::play::director): random
+    // spots continue placement's sequence; the blast and the lift read the last polled poses.
     let craters = 0;
-    function crater(at) {
-      const c = at || [(rand() - 0.5) * 24, (rand() - 0.5) * 24];
-      const R = 3.0, D = 1.4;
-      // A bowl of depth D inside R; the dug volume heaped onto a rim out to 1.6R.
-      let dug = 0;
-      for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) {
-        const r = Math.hypot(X0 + i * DX - c[0], Z0 + j * DZ - c[1]);
-        if (r < R) { const d = D * (1 - (r / R) ** 2); heights[j * NX + i] -= d; dug += d; }
-      }
-      let rimW = 0;
-      const rimShape = (r) => (r >= R && r < 1.6 * R) ? Math.sin(Math.PI * (r - R) / (0.6 * R)) : 0;
-      for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) rimW += rimShape(Math.hypot(X0 + i * DX - c[0], Z0 + j * DZ - c[1]));
-      for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) {
-        const w = rimShape(Math.hypot(X0 + i * DX - c[0], Z0 + j * DZ - c[1]));
-        if (w > 0) heights[j * NX + i] += dug * w / rimW;
-      }
-      uploadHeights();
-      // Blast: an outward and upward impulse on bodies within 2R (wakes them).
-      for (const b of bodies) {
-        const p = poses.position(b.slot);
-        const dx = p[0] - c[0], dz = p[2] - c[1];
-        const r = Math.hypot(dx, dz);
-        if (r > 2 * R) continue;
-        const k = 6 * (1 - r / (2 * R));
-        world.bodyApplyLinearImpulse(b.id, [k * dx / (r + 0.3), k * 1.2, k * dz / (r + 0.3)], p, true);
-      }
-      craters++;
-    }
-    function rain() {
-      // Lift a random tenth of the bodies 10 m up, at rest.
-      for (const b of bodies) {
-        if (rand() > 0.1) continue;
-        const p = poses.position(b.slot);
-        const to = [p[0] + (rand() - 0.5) * 2, Math.max(p[1], surfaceAt(p[0], p[2]) ?? 0) + 10, p[2] + (rand() - 0.5) * 2];
-        world.bodySetTransform(b.id, to, poses.rotation(b.slot));
-        world.bodySetVelocity(b.id, [0, 0, 0], [0, 0, 0]);
-      }
-    }
-    function reset() {
-      // Every body back to its start, at rest.
-      for (const b of bodies) {
-        world.bodySetTransform(b.id, b.p, b.q);
-        world.bodySetVelocity(b.id, [0, 0, 0], [0, 0, 0]);
-      }
-      heights = initialHeights.slice();
-      uploadHeights();
-      craters = 0;
-    }
+    const act = (a) => { world.act(a); for (const e of world.takeEvents()) { if (e.what === 'crater') craters++; else if (e.what === 'reset') craters = 0; } };
+    const crater = (at) => act({ action: 'crater', at });
+    const rain = () => act({ action: 'rain' });
+    const reset = () => act({ action: 'reset' });
 
     // ---------------------------------------------------------------- loop
     function updateCamera() {

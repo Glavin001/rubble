@@ -237,6 +237,17 @@ impl SceneDef {
                     cannon_ccd: q.get("ccd") != Some("0"),
                     street: None,
                     range: None,
+                    guide: q.get("guide") != Some("0"),
+                    // The menu takes `?strength=` when it names an option (else none: 0).
+                    guide_strength: match q.get("strength") {
+                        None | Some("") => 1,
+                        Some("0") => 0,
+                        Some("1") => 1,
+                        Some("2") => 2,
+                        _ => 0,
+                    },
+                    targets_moving: q.get("targets") == Some("moving"),
+                    routes: q.get("routes") != Some("0"),
                     scene,
                 })
             }
@@ -430,7 +441,7 @@ impl Playground {
     pub fn new(gpu: GpuContext, scene: SceneDef) -> anyhow::Result<Self> {
         let mut world = World::new(gpu, &scene.world_def()?)?;
         let placed = scene.place(&mut world)?;
-        let director = super::Director::new(&scene, &placed, &world);
+        let director = super::Director::new(&scene, &placed, &mut world)?;
         Ok(Playground {
             world,
             scene,

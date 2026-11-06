@@ -215,6 +215,14 @@ pub struct VehicleSceneDef {
     pub street: Option<StreetLayout>,
     /// The meteor range's pads and meteors.
     pub range: Option<RangeLayout>,
+    /// Directed debris on (`?guide=0`: off) and its strength (`?strength=` 0, 1, 2 as
+    /// the page's menu reads it; default 1).
+    pub guide: bool,
+    pub guide_strength: u32,
+    /// The range's carts move (`?targets=moving`); steering knows their routes
+    /// (`?routes=0`: not).
+    pub targets_moving: bool,
+    pub routes: bool,
 }
 
 impl Default for VehicleSceneDef {
@@ -234,6 +242,10 @@ impl Default for VehicleSceneDef {
             cannon_ccd: true,
             street: None,
             range: None,
+            guide: true,
+            guide_strength: 1,
+            targets_moving: false,
+            routes: true,
         }
     }
 }

@@ -26,6 +26,7 @@ Principles (unchanged from the lab):
 | 2 | Done: `demo.html`'s built scenes are made in Rust (`engine-scenes::web`, `play::rigid`). |
 | 3 | Done for vehicles, soft bodies, motion and terrain (`play::{vehicles, softbody, motion, hills}`); the city was already Rust (`rubble::city`). The street and range layouts moved to `engine_vehicle::streets`. |
 | 3b | Done: one `SceneDef` over those families (`play::scene`): its world, its placement, a page's URL switches read in Rust (`from_query`, so a preset's query is its page's scene), and `Playground`. Bindings: wasm `createScene`/`placeScene`/`sceneFromQuery`/`presetScene`; C `rbCreatePlay`/`rbPlay_Step`/`rbPlay_GetStats`; native `tests/play_presets.rs` (all 44 placed presets). |
+| 3c | Done for vehicles, soft bodies, motion and terrain: `play::Action` and `play::Director` (`play::director`, `play::vehicle_director`). Each scene's script (the gallery's volleys, the playground's NPCs and platform, the T-bone ram, the crusher's winch, the traffic drivers, the gauntlet's shelling, the range's volleys and scoring, the meteor run's director and judge, directed debris) runs in Rust before each step or frame, and the player's actions (fire, cannon, ram, crater, rain, guide, targets, reset) are `act` calls. Pages call `world.act()` and follow `takeEvents()`; natively `Playground::act`/`frame`. `World::begin_body_read` reads body records without waiting, as the pages' `readBodies`. The gauntlet, range and run scripts moved to `engine_vehicle::scripts`. |
 | 4–6 | Not started. |
 
 Every move was checked in Chrome against the page before it: the body records before the
@@ -45,6 +46,20 @@ How this differs from the target below, so far:
 - `World::settle_uploads` (new): bulk placement hands its uploads over in batches;
   natively, one write per body piled up Metal staging buffers (gables506k placed in over
   10 minutes, now 7.7 s).
+
+How the directors' results compare with the pages before them (outcome checks in Chrome,
+the pages' own scripts):
+
+- Same: the CCD gallery, bullets and character checks (positions to 1 mm), the NPC
+  circles, the crusher, the meteor range (static and moving: identical hits, turns and
+  scores), the meteor run's take (identical score, near misses and hits), cruise traffic
+  (the player's car identical), the cannons.
+- Different, and why: the pages' frame-stepped hooks (`__step`, the takes) skipped some
+  of what the interactive page did. The T-bone ram fired before the page had read the
+  car (its default spot; the interactive page aimed at the car, as the director now
+  always does: 14 broken beams, as the old page gives once it has read the car), and the
+  gauntlet take never latched the car's rest height for its zones (rAF stubbed).
+  The derby (chase) traffic is chaotic and differs run to run.
 
 Known on main, not from this work: R (reset) in `motion.html`'s ccd and character scenes
 fails ("forcing a body to sleep" is unsupported).

@@ -71,7 +71,7 @@ impl WebWorld {
     pub fn place_scene(&mut self, def: JsValue) -> Result<JsValue, JsValue> {
         let scene: SceneDef = from_js("SceneDef", def)?;
         let placed = res(scene.place(&mut self.world))?;
-        self.director = Some(rubble::play::Director::new(&scene, &placed, &self.world));
+        self.director = Some(res(rubble::play::Director::new(&scene, &placed, &mut self.world))?);
         if let Placed::Rigid(p) = &placed {
             let o = js_sys::Object::new();
             let bodies: Vec<f64> = p.bodies.iter().map(|b| handle(b.to_bits())).collect();
@@ -149,6 +149,12 @@ impl WebWorld {
         if let Some(d) = &mut self.director {
             d.set_player(soft);
         }
+    }
+
+    /// The placed scene's script state (`play::Director::state`).
+    #[wasm_bindgen(js_name = scriptState)]
+    pub fn script_state(&self) -> JsValue {
+        js(self.director.as_ref().map(|d| d.state()).unwrap_or_default())
     }
 
     /// What the placed scene's director did since the last call (`[{step, what}]`, oldest

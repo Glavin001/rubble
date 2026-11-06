@@ -37,6 +37,7 @@ pub mod scene;
 pub mod softbody;
 pub mod stage;
 pub mod timber_yard;
+pub mod vehicle_director;
 pub mod vehicles;
 
 pub use director::{Action, Aim, Director, Event};

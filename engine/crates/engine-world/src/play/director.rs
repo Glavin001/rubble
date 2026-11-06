@@ -9,7 +9,8 @@
 //! pages read their last readback: frame-latent by design, never a hidden wait.
 
 use super::scene::{Placed, SceneDef};
-use super::{motion, softbody};
+use super::vehicle_director::VehicleDirector;
+use super::{hills, motion, softbody};
 use crate::*;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,29 @@ pub enum Action {
     Cannon { aim: Aim },
     /// The T-bone ram (T), now rather than at its scheduled step.
     Ram,
+    /// A crater dug in the heightfield at `at` (x, z; none: the scene's next random
+    /// spot), its earth heaped on a rim, bodies near it blasted outward.
+    Crater {
+        #[serde(default)]
+        at: Option<[f64; 2]>,
+    },
+    /// A random tenth of the bodies lifted 10 m, at rest.
+    Rain,
+    /// Directed debris on or off, and its strength (0 subtle, 1 cinematic, 2 exaggerated).
+    Guide {
+        #[serde(default)]
+        on: Option<bool>,
+        #[serde(default)]
+        strength: Option<u32>,
+    },
+    /// The meteor range's carts moving, and steering that knows their routes (the host
+    /// resets the scene after).
+    Targets {
+        #[serde(default)]
+        moving: Option<bool>,
+        #[serde(default)]
+        routes: Option<bool>,
+    },
 }
 
 impl Action {
@@ -45,6 +69,10 @@ impl Action {
             Action::Fire { .. } => "fire",
             Action::Cannon { .. } => "cannon",
             Action::Ram => "ram",
+            Action::Crater { .. } => "crater",
+            Action::Rain => "rain",
+            Action::Guide { .. } => "guide",
+            Action::Targets { .. } => "targets",
         }
     }
 }
@@ -55,6 +83,9 @@ pub struct Event {
     /// The step it happened before.
     pub step: u64,
     pub what: &'static str,
+    /// What it was about (a touchdown's lane and score, a judged near miss…).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 enum Kind {
@@ -62,6 +93,8 @@ enum Kind {
     None,
     Motion(MotionDirector),
     Soft(SoftDirector),
+    Terrain(TerrainDirector),
+    Vehicle(VehicleDirector),
 }
 
 /// A placed scene's script and the player's actions on it.
@@ -72,7 +105,7 @@ pub struct Director {
 
 impl Director {
     /// The director of `scene`, just placed (`placed`) in `world`.
-    pub fn new(scene: &SceneDef, placed: &Placed, world: &World) -> Director {
+    pub fn new(scene: &SceneDef, placed: &Placed, world: &mut World) -> anyhow::Result<Director> {
         let kind = match (scene, placed) {
             (SceneDef::Motion(d), Placed::Motion(p)) => {
                 Kind::Motion(MotionDirector::new(d, p.clone()))
@@ -80,12 +113,18 @@ impl Director {
             (SceneDef::Soft(d), Placed::Soft(p)) => {
                 Kind::Soft(SoftDirector::new(d, p.clone(), world))
             }
+            (SceneDef::Terrain(_), Placed::Terrain(p)) => {
+                Kind::Terrain(TerrainDirector::new(p.clone(), world))
+            }
+            (SceneDef::Vehicle(d), Placed::Vehicle(p)) => {
+                Kind::Vehicle(VehicleDirector::new(d, p.clone(), world)?)
+            }
             _ => Kind::None,
         };
-        Director {
+        Ok(Director {
             kind,
             events: Vec::new(),
-        }
+        })
     }
 
     /// The scene's own script for the step about to be taken.
@@ -95,6 +134,8 @@ impl Director {
             Kind::None => Ok(()),
             Kind::Motion(d) => d.before_step(world, ev),
             Kind::Soft(d) => d.before_step(world, ev),
+            Kind::Terrain(_) => Ok(()),
+            Kind::Vehicle(d) => d.before_step(world, ev),
         }
     }
 
@@ -107,8 +148,10 @@ impl Director {
         dt: f64,
         user_car: Option<u32>,
     ) -> anyhow::Result<()> {
+        let ev = &mut self.events;
         match &mut self.kind {
             Kind::Soft(d) => d.before_frame(world, dt, user_car),
+            Kind::Vehicle(d) => d.before_frame(world, ev),
             _ => Ok(()),
         }
     }
@@ -117,6 +160,7 @@ impl Director {
     pub fn after_frame(&mut self, world: &World) -> anyhow::Result<()> {
         match &mut self.kind {
             Kind::Soft(d) => d.after_frame(world),
+            Kind::Vehicle(d) => d.after_frame(world),
             _ => Ok(()),
         }
     }
@@ -126,6 +170,7 @@ impl Director {
     pub fn prepare(&mut self, world: &World) -> anyhow::Result<()> {
         match &mut self.kind {
             Kind::Soft(d) => d.prepare(world),
+            Kind::Vehicle(d) => d.after_frame(world),
             _ => Ok(()),
         }
     }
@@ -134,6 +179,7 @@ impl Director {
     pub fn pending(&self, world: &World) -> bool {
         match &self.kind {
             Kind::Soft(d) => d.pending(world),
+            Kind::Vehicle(d) => d.pending(world),
             _ => false,
         }
     }
@@ -157,14 +203,28 @@ impl Director {
             Kind::None => anyhow::bail!("this scene has no {} action", action.name()),
             Kind::Motion(d) => d.act(world, action, ev),
             Kind::Soft(d) => d.act(world, action, ev),
+            Kind::Terrain(d) => d.act(world, action, ev),
+            Kind::Vehicle(d) => d.act(world, action, ev),
         }
     }
 
     /// Whether the script fires on its own (the gallery's volleys, the range's bursts).
     /// Checks turn it off to fire at steps of their own.
     pub fn set_autofire(&mut self, on: bool) {
-        if let Kind::Motion(d) = &mut self.kind {
-            d.autofire = on;
+        match &mut self.kind {
+            Kind::Motion(d) => d.autofire = on,
+            Kind::Vehicle(d) => d.autofire = on,
+            _ => {}
+        }
+    }
+
+    /// The script's state for a host's HUD and checks (the vehicle scenes' guidance zone
+    /// count; none for the others).
+    pub fn state(&self) -> serde_json::Value {
+        match &self.kind {
+            Kind::Vehicle(d) => serde_json::json!({ "zones": d.zone_count }),
+            Kind::Terrain(d) => serde_json::json!({ "craters": d.craters }),
+            _ => serde_json::Value::Null,
         }
     }
 
@@ -174,10 +234,24 @@ impl Director {
     }
 }
 
-fn note(ev: &mut Vec<Event>, world: &World, what: &'static str) {
+pub(crate) fn note(ev: &mut Vec<Event>, world: &World, what: &'static str) {
     ev.push(Event {
         step: world.step_count(),
         what,
+        data: None,
+    });
+}
+
+pub(crate) fn note_with(
+    ev: &mut Vec<Event>,
+    world: &World,
+    what: &'static str,
+    data: serde_json::Value,
+) {
+    ev.push(Event {
+        step: world.step_count(),
+        what,
+        data: Some(data),
     });
 }
 
@@ -817,6 +891,8 @@ impl SoftDirector {
         action: &Action,
         ev: &mut Vec<Event>,
     ) -> anyhow::Result<()> {
+        // Aim with the freshest pose that has landed.
+        self.take_reads(world)?;
         match action {
             Action::Reset => {
                 // The host restores its saved world first; the script starts over.
@@ -859,4 +935,190 @@ impl SoftDirector {
 fn soft_core(world: &World, soft: u32) -> Option<(VehicleHandle, BodyId)> {
     let (v, chassis) = world.sim().soft_host().entries.get(soft as usize)?.core?;
     Some((v, world.body_at(chassis)?))
+}
+
+// ---------------------------------------------------------------------------- terrain
+
+/// `terrain.html`'s actions: craters dug in the heightfield, bodies rained from 10 m, and
+/// reset. Random spots continue the scene's sequence (placement's LCG) in order.
+pub struct TerrainDirector {
+    placed: hills::Placed,
+    seed: u32,
+    initial: Vec<f32>,
+    heights: Vec<f32>,
+    pub craters: u32,
+}
+
+impl TerrainDirector {
+    fn new(placed: hills::Placed, world: &World) -> Self {
+        let initial = match world.shape_geometry(ShapeId::from_bits(placed.terrain)) {
+            Ok(Geometry::HeightField { field, .. }) => field.heights().to_vec(),
+            _ => Vec::new(),
+        };
+        TerrainDirector {
+            seed: placed.seed,
+            heights: initial.clone(),
+            initial,
+            craters: 0,
+            placed,
+        }
+    }
+
+    /// The page's LCG, in f64 as the page computes it.
+    fn rand(&mut self) -> f64 {
+        let x = self.seed as f64 * 1664525.0 + 1013904223.0;
+        self.seed = (x % 4294967296.0) as u64 as u32;
+        self.seed as f64 / 4294967296.0
+    }
+
+    /// A body's position and rotation as of the last polled frame (its start before).
+    fn pose(world: &World, b: &hills::PlacedBody) -> anyhow::Result<([f64; 3], [f32; 4])> {
+        let t = world
+            .body_transform(BodyId::from_bits(b.id))?
+            .unwrap_or(Transform::new(b.p, b.q));
+        Ok((t.position.map(|x| x as f64), t.rotation))
+    }
+
+    fn upload(&self, world: &mut World) -> anyhow::Result<()> {
+        let p = &self.placed;
+        world.set_height_field_region(
+            ShapeId::from_bits(p.terrain),
+            0,
+            0,
+            p.nx,
+            p.nz,
+            &self.heights,
+        )
+    }
+
+    fn act(
+        &mut self,
+        world: &mut World,
+        action: &Action,
+        ev: &mut Vec<Event>,
+    ) -> anyhow::Result<()> {
+        match action {
+            Action::Crater { at } => {
+                let c = match at {
+                    Some(c) => *c,
+                    None => {
+                        let x = (self.rand() - 0.5) * 24.0;
+                        let z = (self.rand() - 0.5) * 24.0;
+                        [x, z]
+                    }
+                };
+                note(ev, world, "crater");
+                self.crater(world, c)
+            }
+            Action::Rain => {
+                note(ev, world, "rain");
+                self.rain(world)
+            }
+            Action::Reset => {
+                note(ev, world, "reset");
+                // Every body back to its start, at rest; the ground as placed.
+                for b in &self.placed.bodies {
+                    let id = BodyId::from_bits(b.id);
+                    world.body_set_transform(id, Transform::new(b.p, b.q))?;
+                    world.body_set_velocity(id, [0.0; 3], [0.0; 3])?;
+                }
+                self.heights = self.initial.clone();
+                self.upload(world)?;
+                self.craters = 0;
+                Ok(())
+            }
+            a => anyhow::bail!("the terrain scene has no {} action", a.name()),
+        }
+    }
+
+    fn crater(&mut self, world: &mut World, c: [f64; 2]) -> anyhow::Result<()> {
+        let p = &self.placed;
+        let (nx, nz) = (p.nx as usize, p.nz as usize);
+        let (dx, dz) = (p.dx as f64, p.dz as f64);
+        let x0 = -0.5 * (nx as f64 - 1.0) * dx;
+        let z0 = -0.5 * (nz as f64 - 1.0) * dz;
+        let (r_, d_) = (3.0f64, 1.4f64);
+        let at = |i: usize, j: usize| {
+            hills::js_hypot(&[x0 + i as f64 * dx - c[0], z0 + j as f64 * dz - c[1]])
+        };
+        // A bowl of depth D inside R; the dug volume heaped onto a rim out to 1.6R.
+        let mut dug = 0.0;
+        for j in 0..nz {
+            for i in 0..nx {
+                let r = at(i, j);
+                if r < r_ {
+                    let d = d_ * (1.0 - (r / r_) * (r / r_));
+                    let h = &mut self.heights[j * nx + i];
+                    *h = (*h as f64 - d) as f32;
+                    dug += d;
+                }
+            }
+        }
+        let rim = |r: f64| {
+            if r >= r_ && r < 1.6 * r_ {
+                (std::f64::consts::PI * (r - r_) / (0.6 * r_)).sin()
+            } else {
+                0.0
+            }
+        };
+        let mut rim_w = 0.0;
+        for j in 0..nz {
+            for i in 0..nx {
+                rim_w += rim(at(i, j));
+            }
+        }
+        for j in 0..nz {
+            for i in 0..nx {
+                let w = rim(at(i, j));
+                if w > 0.0 {
+                    let h = &mut self.heights[j * nx + i];
+                    *h = (*h as f64 + dug * w / rim_w) as f32;
+                }
+            }
+        }
+        self.upload(world)?;
+        // Blast: an outward and upward impulse on bodies within 2R (wakes them).
+        for b in &self.placed.bodies {
+            let (pos, _) = Self::pose(world, b)?;
+            let (ddx, ddz) = (pos[0] - c[0], pos[2] - c[1]);
+            let r = hills::js_hypot(&[ddx, ddz]);
+            if r > 2.0 * r_ {
+                continue;
+            }
+            let k = 6.0 * (1.0 - r / (2.0 * r_));
+            let j = [k * ddx / (r + 0.3), k * 1.2, k * ddz / (r + 0.3)];
+            world.body_apply_linear_impulse(
+                BodyId::from_bits(b.id),
+                j.map(|x| x as f32),
+                pos.map(|x| x as f32),
+                true,
+            )?;
+        }
+        self.craters += 1;
+        Ok(())
+    }
+
+    fn rain(&mut self, world: &mut World) -> anyhow::Result<()> {
+        let terrain = ShapeId::from_bits(self.placed.terrain);
+        let bodies = self.placed.bodies.clone();
+        for b in &bodies {
+            if self.rand() > 0.1 {
+                continue;
+            }
+            let (p, q) = Self::pose(world, b)?;
+            let surface = match world.shape_geometry(terrain)? {
+                Geometry::HeightField { field, .. } => field
+                    .surface(p[0] as f32, p[2] as f32)
+                    .map(|(h, _)| h as f64),
+                _ => None,
+            };
+            let x = p[0] + (self.rand() - 0.5) * 2.0;
+            let y = p[1].max(surface.unwrap_or(0.0)) + 10.0;
+            let z = p[2] + (self.rand() - 0.5) * 2.0;
+            let id = BodyId::from_bits(b.id);
+            world.body_set_transform(id, Transform::new([x as f32, y as f32, z as f32], q))?;
+            world.body_set_velocity(id, [0.0; 3], [0.0; 3])?;
+        }
+        Ok(())
+    }
 }

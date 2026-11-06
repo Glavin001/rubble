@@ -47,7 +47,7 @@ fn every_placed_preset_builds_and_steps() {
                 placing.as_secs_f64() * 1e3
             );
         }
-        let director = rubble::play::Director::new(&def, &placed, &world);
+        let director = rubble::play::Director::new(&def, &placed, &mut world).unwrap();
         let mut play = Playground {
             world,
             scene: def,
@@ -78,4 +78,88 @@ fn every_placed_preset_builds_and_steps() {
         "{} presets ran",
         ran.len()
     );
+}
+
+/// Each scene's director natively, through [`Playground`]: its actions and its own script
+/// change the world as the pages' did (a volley flies, a crater digs, the T-bone ram
+/// launches at its step, the range's volleys land and score, the run sends meteors).
+#[test]
+fn directors_act_and_script() {
+    use rubble::play::{Action, Aim};
+    let aim = Aim {
+        eye: [0.0, 3.0, -10.0],
+        dir: [0.0, 0.0, 1.0],
+    };
+    let events = |p: &mut Playground| -> Vec<&'static str> {
+        p.director
+            .take_events()
+            .into_iter()
+            .map(|e| e.what)
+            .collect()
+    };
+    let dt = 1.0 / 60.0;
+
+    // Motion: the gallery's volley (F, and on its own at step 20), the playground's rocket.
+    let mut p = Playground::preset(GpuContext::Default, "ccd", "autofire=0").unwrap();
+    p.step(5).unwrap();
+    p.act(&Action::Fire { aim: None }).unwrap();
+    p.step(10).unwrap();
+    assert_eq!(events(&mut p), ["volley"]);
+    let mut p = Playground::preset(GpuContext::Default, "ccd", "").unwrap();
+    p.step(25).unwrap();
+    assert_eq!(
+        events(&mut p),
+        ["volley"],
+        "the gallery fires on its own at step 20"
+    );
+    let mut p = Playground::preset(GpuContext::Default, "character", "").unwrap();
+    p.step(4).unwrap();
+    p.act(&Action::Cannon { aim }).unwrap();
+    // (Reset here hits main's "forcing a body to sleep" gap, as motion.html's R does.)
+    assert_eq!(events(&mut p), ["rocket"]);
+    assert!(
+        p.act(&Action::Crater { at: None }).is_err(),
+        "no craters in motion scenes"
+    );
+
+    // Terrain: craters (random spots continue placement's sequence), rain, reset.
+    let mut p = Playground::preset(GpuContext::Default, "terrain", "n=500").unwrap();
+    p.step(30).unwrap();
+    p.act(&Action::Crater {
+        at: Some([0.0, 0.0]),
+    })
+    .unwrap();
+    p.act(&Action::Crater { at: None }).unwrap();
+    p.act(&Action::Rain).unwrap();
+    p.step(30).unwrap();
+    assert_eq!(p.director.state()["craters"], 2);
+    p.act(&Action::Reset).unwrap();
+    assert_eq!(p.director.state()["craters"], 0);
+    assert_eq!(events(&mut p), ["crater", "crater", "rain", "reset"]);
+
+    // Soft: the T-bone ram launches at step 60 by itself; the yard's cannon.
+    let mut p = Playground::preset(GpuContext::Default, "soft-tbone", "").unwrap();
+    for _ in 0..20 {
+        p.frame(4, dt).unwrap();
+    }
+    assert_eq!(events(&mut p), ["ram"]);
+    let mut p = Playground::preset(GpuContext::Default, "soft-yard", "").unwrap();
+    p.act(&Action::Cannon { aim }).unwrap();
+    p.act(&Action::Ram).unwrap();
+    assert_eq!(events(&mut p), ["cannon", "ram"]);
+
+    // Vehicles: the range's volleys land on the pads and score; the playground's cannon.
+    let mut p = Playground::preset(GpuContext::Default, "meteors", "").unwrap();
+    for _ in 0..300 {
+        p.frame(1, dt).unwrap();
+    }
+    let ev = p.director.take_events();
+    let volleys = ev.iter().filter(|e| e.what == "volley").count();
+    let downs = ev.iter().filter(|e| e.what == "touchdown").count();
+    assert!(volleys >= 2, "{volleys} volleys in 5 s");
+    assert!(downs > 0, "no touchdowns");
+    assert!(p.director.state()["zones"].as_u64().unwrap() > 0);
+    let mut p = Playground::preset(GpuContext::Default, "playground", "").unwrap();
+    p.act(&Action::Cannon { aim }).unwrap();
+    assert_eq!(events(&mut p), ["cannon"]);
 }
