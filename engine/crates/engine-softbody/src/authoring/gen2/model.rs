@@ -2162,13 +2162,53 @@ pub fn build() -> Model {
     // the quarter's edges, wrapping round onto the quarter, tapering at their
     // inner ends to the light bar's height.
     let tl_top = {
-        let mut top = Vec::new();
-        top.extend(fold.iter().copied().filter(|p| p.x > 0.0));
-        // The deck side's tail end (between the boot lid and the quarter).
-        top.extend(deck_end.iter().copied());
+        // The edges above the lamp: the boot lid's fold, the deck side's tail
+        // end, the quarter's. Where two overlap in φ the lamp tucks under
+        // the lower (the one seen from behind).
         let ys = sf::shoulder_y(ZC_R) - 0.01;
-        top.extend(g_quarter.edge_points(3).into_iter().filter(|p| p.y > ys));
-        Table::new(phi_y(Param::Tail, &top), 0.0, FRAC_PI_2)
+        let edges: Vec<Vec<Vec3>> = vec![
+            fold.iter().copied().filter(|p| p.x > 0.0).collect(),
+            deck_end.clone(),
+            g_quarter
+                .edge_points(3)
+                .into_iter()
+                .filter(|p| p.y > ys)
+                .collect(),
+        ];
+        let spans: Vec<(f32, f32, F)> = edges
+            .iter()
+            .filter(|e| e.len() > 1)
+            .map(|e| {
+                let phis: Vec<f32> = e.iter().map(|&p| sf::invert(Param::Tail, p).0).collect();
+                let lo = phis.iter().copied().fold(f32::MAX, f32::min);
+                let hi = phis.iter().copied().fold(f32::MIN, f32::max);
+                (lo, hi, phi_y(Param::Tail, e))
+            })
+            .collect();
+        Table::new(
+            move |phi| {
+                let mut y = f32::MAX;
+                for (lo, hi, f) in &spans {
+                    if phi >= *lo - 1e-3 && phi <= *hi + 1e-3 {
+                        y = y.min(f(phi));
+                    }
+                }
+                if y == f32::MAX {
+                    // Outside every edge: the nearest edge's end.
+                    let (_, _, f) = spans
+                        .iter()
+                        .min_by(|a, b| {
+                            let d = |s: &(f32, f32, F)| (phi - s.0).abs().min((phi - s.1).abs());
+                            d(a).total_cmp(&d(b))
+                        })
+                        .unwrap();
+                    y = f(phi);
+                }
+                y
+            },
+            0.0,
+            FRAC_PI_2,
+        )
     };
     let tl_lo = {
         let t = tl_top.clone();
