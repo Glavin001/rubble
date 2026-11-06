@@ -381,6 +381,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed=RUBBLE_SLANG_CACHE");
     println!("cargo:rerun-if-env-changed=RUBBLE_EB_REF");
     println!("cargo:rerun-if-env-changed=RUBBLE_EB_SRC");
+    println!("cargo:rerun-if-env-changed=XDBG");
     println!("cargo:rerun-if-env-changed=RUBBLE_EB_REF_UNCAPPED");
     println!("cargo:rerun-if-changed=src/wgsl_loop_cap.rs");
     if let Ok(f) = std::env::var("RUBBLE_EB_SRC") {
@@ -631,7 +632,13 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             d.clone(),
         ));
         d.push(("EB_VV_GROUPS", "1"));
+        // The groups split over two modules (engine_exec::explicit_plan Kernel::ContactBig):
+        // the frame with the groups of at most four members, and the larger groups'.
+        let mut big = d.clone();
+        d.push((if std::env::var("XDBG").is_ok() { "XDBG_X" } else { "EB_VV_SMALL_ONLY" }, "1")); if let Ok(x) = std::env::var("XDBG") { d.push((Box::leak(x.into_boxed_str()), "1")); }
         vv.push((name.to_string(), "explicit_beams_frame", d));
+        big.push(("EB_VV_BIG_ONLY", "1"));
+        vv.push((name.replace("contact", "contact_big"), "explicit_beams_contact", big));
     }
     for (name, entry, defines) in &vv {
         let out = wgsl_dir.join(format!("{name}.wgsl"));

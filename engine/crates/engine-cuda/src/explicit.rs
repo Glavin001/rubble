@@ -65,7 +65,7 @@ pub struct CudaExplicitBeams {
     sizes: Vec<u64>,
     kernels: HashMap<Kernel, Kernel_>,
     /// Host copy of the indirect arguments; stale once a plan pass is queued.
-    args: [u32; 8],
+    args: [u32; 12],
     args_dirty: bool,
     /// Host reads of the indirect arguments (each one waits for the stream).
     pub args_syncs: u64,
@@ -121,7 +121,7 @@ impl CudaExplicitBeams {
             sizes.push(bytes.len() as u64);
         }
 
-        let mut wanted = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact];
+        let mut wanted = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact, Kernel::ContactBig];
         wanted.extend((0..plan::VV_PASSES.len()).map(Kernel::Vv));
         if layout.wide_ok {
             wanted.extend((0..plan::WIDE_PASSES.len()).map(Kernel::Wide));
@@ -180,7 +180,7 @@ impl CudaExplicitBeams {
             bufs,
             sizes,
             kernels,
-            args: [0; 8],
+            args: [0; 12],
             args_dirty: false,
             args_syncs: 0,
             status_due: false,
@@ -263,7 +263,7 @@ impl CudaExplicitBeams {
                 }
                 Cmd::Indirect { kernel, offset } => {
                     if self.args_dirty {
-                        let mut raw = [0u32; 8];
+                        let mut raw = [0u32; 12];
                         unsafe {
                             result::memcpy_dtoh_async(
                                 bytemuck::cast_slice_mut::<u32, u8>(&mut raw),
