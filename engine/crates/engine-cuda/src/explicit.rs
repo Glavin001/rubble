@@ -121,7 +121,7 @@ impl CudaExplicitBeams {
             sizes.push(bytes.len() as u64);
         }
 
-        let mut wanted = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact];
+        let mut wanted = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact, Kernel::ContactBig];
         wanted.extend((0..plan::VV_PASSES.len()).map(Kernel::Vv));
         if layout.wide_ok {
             wanted.extend((0..plan::WIDE_PASSES.len()).map(Kernel::Wide));

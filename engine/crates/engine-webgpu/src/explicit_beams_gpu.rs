@@ -35,8 +35,12 @@ use wgpu::util::DeviceExt;
 pub struct ExplicitBeamsGpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
-    group: wgpu::BindGroup,
+    /// The plain frame's pipeline and bind group ([`Kernel::Frame`]), created at first
+    /// use: a fleet of more than one vehicle runs the contact kernels while vehicle
+    /// contact is on, so a browser host compiles this one after the first frame
+    /// ([`crate::ComputeSpec::deferred`]).
+    frame: std::sync::OnceLock<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    frame_module: &'static str,
     params: wgpu::Buffer,
     nodes: wgpu::Buffer,
     beams: wgpu::Buffer,
@@ -152,6 +156,8 @@ struct ContactPipes {
     groups: wgpu::ComputePipeline,
     /// The solo vehicles' frame (`EB_VV_SOLO`).
     solo: wgpu::ComputePipeline,
+    /// The groups of more than four members ([`Kernel::ContactBig`]).
+    big: wgpu::ComputePipeline,
 }
 
 /// The vehicle-contact passes' bind group layout entries: the frame's bindings,
@@ -266,6 +272,7 @@ fn module_wgsl(name: &str) -> &'static str {
             .iter()
             .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
             .chain(crate::EXPLICIT_BEAMS_NOSURF.iter())
+            .chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| *w)
             .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
@@ -280,7 +287,7 @@ impl Contact {
     fn new(
         device: &wgpu::Device,
         buffers: &[&wgpu::Buffer; 9],
-        (contact_wgsl, solo_wgsl): (&str, &str),
+        (contact_wgsl, solo_wgsl, big_wgsl): (&str, &str, &str),
         acc: &wgpu::Buffer,
         (status_at, cap_at): (u64, u64),
         args_init: &[u8],
@@ -349,6 +356,7 @@ impl Contact {
             sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), &plan_layout),
             groups: make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout),
             solo: make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout),
+            big: make(plan::CONTACT_ENTRY, big_wgsl, &contact_layout),
         });
         Self {
             pipes,
@@ -453,6 +461,7 @@ fn kernel_name(cmd: &Cmd) -> &'static str {
         Kernel::Frame => "explicit frame (solo)",
         Kernel::Solo => "explicit solo vehicles",
         Kernel::Contact => "explicit contact groups",
+        Kernel::ContactBig => "explicit large contact groups",
         Kernel::Vv(0) => "explicit vv bounds",
         Kernel::Vv(1) => "explicit vv pairs",
         Kernel::Vv(_) => "explicit vv group plan",
@@ -493,6 +502,9 @@ impl ExplicitBeamsGpu {
             wgsl: u(module_wgsl(Kernel::Frame.module_for(aero, lanes, surface))),
             entry: plan::FRAME_ENTRY,
             layout: None,
+            // More than one vehicle: the contact kernels run while contact is on; the
+            // plain frame only once it is turned off (created at first use).
+            deferred: vehicles.len() > 1,
         }];
         if layout.wide_ok {
             specs.extend(plan::WIDE_PASSES.iter().map(|&entry| crate::ComputeSpec {
@@ -501,6 +513,7 @@ impl ExplicitBeamsGpu {
                 wgsl: u(module_wgsl(entry)),
                 entry,
                 layout: Some(wide_entries()),
+                deferred: false,
             }));
         }
         if vehicles.len() > 1 {
@@ -510,14 +523,16 @@ impl ExplicitBeamsGpu {
                 wgsl: u(module_wgsl(entry)),
                 entry,
                 layout: Some(contact_entries(true)),
+                deferred: false,
             }));
-            for kernel in [Kernel::Contact, Kernel::Solo] {
+            for kernel in [Kernel::Contact, Kernel::Solo, Kernel::ContactBig] {
                 specs.push(crate::ComputeSpec {
-                    label: plan::FRAME_ENTRY,
+                    label: kernel.entry(),
                     module: kernel.module_for(aero, lanes, surface),
                     wgsl: u(module_wgsl(kernel.module_for(aero, lanes, surface))),
-                    entry: plan::FRAME_ENTRY,
+                    entry: kernel.entry(),
                     layout: Some(contact_entries(false)),
+                    deferred: false,
                 });
             }
         }
@@ -553,18 +568,6 @@ impl ExplicitBeamsGpu {
         // Large vehicles get twice the lanes (more loads in flight per step), a
         // small fleet 512 (frame_lanes).
         let frame_module = Kernel::Frame.module_for(aero, lanes, layout.surface);
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("explicit_beams"),
-            source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(frame_module)).into()),
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("explicit_beams_frame"),
-            layout: None,
-            module: &module,
-            entry_point: Some(plan::FRAME_ENTRY),
-            compilation_options: Default::default(),
-            cache: None,
-        });
         let storage = wgpu::BufferUsages::STORAGE;
         let state = storage | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
         let init = |label: &str, b: u32, usage| {
@@ -594,25 +597,6 @@ impl ExplicitBeamsGpu {
         let groups = init("explicit-beams-groups", plan::BIND_GROUPS, state);
         let misc = init("explicit-beams-misc", plan::BIND_MISC, state);
         let next = init("explicit-beams-grid-next", plan::BIND_NEXT, state);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("explicit-beams"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                (0, &params),
-                (1, &statics),
-                (2, &lists),
-                (3, &nodes),
-                (4, &beams),
-                (5, &acc),
-                (6, &groups),
-                (7, &misc),
-                (8, &next),
-            ]
-            .map(|(binding, b)| wgpu::BindGroupEntry {
-                binding,
-                resource: if binding == 0 { params_window(b) } else { b.as_entire_binding() },
-            }),
-        });
         let buffers = [
             &params, &statics, &lists, &nodes, &beams, &acc, &groups, &misc, &next,
         ];
@@ -625,6 +609,7 @@ impl ExplicitBeamsGpu {
             (
                 module_wgsl(Kernel::Contact.module_for(aero, lanes, layout.surface)),
                 module_wgsl(Kernel::Solo.module_for(aero, lanes, layout.surface)),
+                module_wgsl(Kernel::ContactBig.module_for(aero, lanes, layout.surface)),
             ),
             &acc,
             (layout.status.base, layout.status.cap),
@@ -646,11 +631,12 @@ impl ExplicitBeamsGpu {
         if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
             planner.set_sleep_listing(false);
         }
-        Self {
+        let one = vehicles.len() <= 1;
+        let gpu = Self {
             device: device.clone(),
             queue: queue.clone(),
-            pipeline,
-            group,
+            frame: std::sync::OnceLock::new(),
+            frame_module,
             params,
             nodes,
             beams,
@@ -679,7 +665,42 @@ impl ExplicitBeamsGpu {
             sleep_inputs: vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect(),
             sleep_grab: None,
             sleep_wake: Default::default(),
+        };
+        // One vehicle runs the plain frame from the first frame on.
+        if one {
+            gpu.frame_pipe();
         }
+        gpu
+    }
+
+    /// The plain frame's pipeline and bind group, created at first use (see `frame`).
+    fn frame_pipe(&self) -> &(wgpu::ComputePipeline, wgpu::BindGroup) {
+        self.frame.get_or_init(|| {
+            let device = &self.device;
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("explicit_beams"),
+                source: wgpu::ShaderSource::Wgsl(
+                    crate::uniformize_workgroup_lanes(module_wgsl(self.frame_module)).into(),
+                ),
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("explicit_beams_frame"),
+                layout: None,
+                module: &module,
+                entry_point: Some(plan::FRAME_ENTRY),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("explicit-beams"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: if i == 0 { params_window(&self.bufs[0]) } else { self.bufs[i].as_entire_binding() },
+                }),
+            });
+            (pipeline, group)
+        })
     }
 
     /// Vehicle sleep's layout (`None`: built without room, [`Self::with_sleep`]).
@@ -840,7 +861,12 @@ impl ExplicitBeamsGpu {
     /// plan.
     #[doc(hidden)]
     pub fn contact_group_sizes(&self) -> Vec<u32> {
-        let n = self.contact_groups() as usize;
+        if !self.contact_active() {
+            return Vec::new();
+        }
+        // The plan's group count (indirect-arguments word 3; word 4 is the frame's
+        // workgroups, vehicles + groups).
+        let n = bytemuck::cast_slice::<u8, u32>(&self.read(&self.contact.args))[3] as usize;
         let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
         let at = self.planner.words[46] as usize;
         (0..n).map(|g| misc[(at + g) * 4 + 1]).collect()
@@ -1363,7 +1389,13 @@ impl ExplicitBeamsGpu {
         };
         match kernel {
             Kernel::Frame => {
-                let (p, g) = alt.map_or((&self.pipeline, &self.group), |a| (&a.frame, &a.group));
+                let (p, g) = alt.map_or_else(
+                    || {
+                        let f = self.frame_pipe();
+                        (&f.0, &f.1)
+                    },
+                    |a| (&a.frame, &a.group),
+                );
                 pass.set_pipeline(p);
                 pass.set_bind_group(0, g, &[]);
             }
@@ -1377,6 +1409,16 @@ impl ExplicitBeamsGpu {
                 );
                 pass.set_pipeline(if kernel == Kernel::Solo { solo } else { groups });
                 pass.set_bind_group(0, g, &[]);
+            }
+            Kernel::ContactBig => {
+                // A test variant's contact module steps every group (no split): nothing
+                // to dispatch here.
+                if alt.is_some() {
+                    return;
+                }
+                let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
+                pass.set_pipeline(&p.big);
+                pass.set_bind_group(0, &c.contact_group, &[]);
             }
             Kernel::Vv(i) => {
                 let (p, g) = alt.map_or_else(
@@ -1865,8 +1907,9 @@ impl ExplicitBeamsGpu {
                 label: Some("explicit_beams_split"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.group, &[]);
+            let (pipeline, group) = self.frame_pipe();
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
             for _ in 0..dispatches {
                 pass.dispatch_workgroups(self.layout.spans.len() as u32, 1, 1);
             }
@@ -2180,8 +2223,9 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));
     }
-    for (n, w) in crate::EXPLICIT_BEAMS_NOSURF.iter() {
-        out.push((n.to_string(), "explicit_beams_frame", u(w)));
+    for (n, w) in crate::EXPLICIT_BEAMS_NOSURF.iter().chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter()) {
+        let entry = if n.contains("contact_big") { plan::CONTACT_ENTRY } else { plan::FRAME_ENTRY };
+        out.push((n.to_string(), entry, u(w)));
     }
     out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
     out

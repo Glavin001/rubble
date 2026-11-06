@@ -153,7 +153,8 @@ pub const BIND_NEXT: u32 = 8;
 /// The wide passes' vehicle table (uniform, [`TABLE_BYTES`]).
 pub const BIND_TABLE: u32 = 9;
 /// The contact plan's indirect arguments ([`ARGS_BYTES`]): solo vehicles at byte 0,
-/// contact groups at byte 16.
+/// contact groups at byte 16, vehicle sleep's awake vehicles at byte 32, the groups of
+/// more than four members ([`Kernel::ContactBig`]) at byte 48.
 pub const BIND_ARGS: u32 = 10;
 /// Bindings a host allocates (0..BIND_COUNT; 11 and 12 are test-only variants').
 pub const BIND_COUNT: usize = 11;
@@ -173,7 +174,7 @@ pub const W_SLEEP: usize = 85;
 pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
 /// groups (16), the awake vehicles' frame (32, vehicle sleep).
-pub const ARGS_BYTES: u64 = 48;
+pub const ARGS_BYTES: u64 = 64;
 /// The vehicle sleep awake list's pass ([`Kernel::Sleep`]).
 pub const SLEEP_LIST: &str = "explicit_beams_sleep_list";
 /// The surface contact's pair path (`explicit_beams_surface.slang` `SURF_PAIR_CAP`,
@@ -283,6 +284,17 @@ const AERO: (&str, &str) = ("EB_AERO", "1");
 const SOLO: (&str, &str) = ("EB_VV_SOLO", "1");
 const GROUPS: (&str, &str) = ("EB_VV_GROUPS", "1");
 const NOSURF: (&str, &str) = ("EB_NO_SURFACE", "1");
+const SMALL: (&str, &str) = ("EB_VV_SMALL_ONLY", "1");
+const BIG: (&str, &str) = ("EB_VV_BIG_ONLY", "1");
+/// The larger contact groups' entry point ([`Kernel::ContactBig`]).
+pub const CONTACT_ENTRY: &str = "explicit_beams_contact";
+const fn big(name: &'static str, defines: &'static [(&'static str, &'static str)]) -> Module {
+    Module {
+        name,
+        entry: CONTACT_ENTRY,
+        defines,
+    }
+}
 
 const fn frame(name: &'static str, defines: &'static [(&'static str, &'static str)]) -> Module {
     Module {
@@ -310,16 +322,22 @@ pub const MODULES: &[Module] = &[
     frame("explicit_beams_solo_wide", &[W, L512, SOLO]),
     frame("explicit_beams_solo_aero", &[W, L256, AERO, SOLO]),
     frame("explicit_beams_solo_aero_wide", &[W, L512, AERO, SOLO]),
-    frame("explicit_beams_contact", &[W, L256, SOLO, GROUPS]),
-    frame("explicit_beams_contact_wide", &[W, L512, SOLO, GROUPS]),
+    // The frame with the contact groups of at most four members (EB_VV_SMALL_ONLY);
+    // the larger groups' modules follow (Kernel::ContactBig).
+    frame("explicit_beams_contact", &[W, L256, SOLO, GROUPS, SMALL]),
+    frame("explicit_beams_contact_wide", &[W, L512, SOLO, GROUPS, SMALL]),
     frame(
         "explicit_beams_contact_aero",
-        &[W, L256, AERO, SOLO, GROUPS],
+        &[W, L256, AERO, SOLO, GROUPS, SMALL],
     ),
     frame(
         "explicit_beams_contact_aero_wide",
-        &[W, L512, AERO, SOLO, GROUPS],
+        &[W, L512, AERO, SOLO, GROUPS, SMALL],
     ),
+    big("explicit_beams_contact_big", &[W, L256, SOLO, GROUPS, BIG]),
+    big("explicit_beams_contact_big_wide", &[W, L512, SOLO, GROUPS, BIG]),
+    big("explicit_beams_contact_big_aero", &[W, L256, AERO, SOLO, GROUPS, BIG]),
+    big("explicit_beams_contact_big_aero_wide", &[W, L512, AERO, SOLO, GROUPS, BIG]),
     // The same twelve without surface contact (Kernel::module_for).
     frame("explicit_beams_nosurf", &[W, NOSURF]),
     frame("explicit_beams_wide_nosurf", &[W, L512, NOSURF]),
@@ -329,10 +347,14 @@ pub const MODULES: &[Module] = &[
     frame("explicit_beams_solo_wide_nosurf", &[W, L512, SOLO, NOSURF]),
     frame("explicit_beams_solo_aero_nosurf", &[W, L256, AERO, SOLO, NOSURF]),
     frame("explicit_beams_solo_aero_wide_nosurf", &[W, L512, AERO, SOLO, NOSURF]),
-    frame("explicit_beams_contact_nosurf", &[W, L256, SOLO, GROUPS, NOSURF]),
-    frame("explicit_beams_contact_wide_nosurf", &[W, L512, SOLO, GROUPS, NOSURF]),
-    frame("explicit_beams_contact_aero_nosurf", &[W, L256, AERO, SOLO, GROUPS, NOSURF]),
-    frame("explicit_beams_contact_aero_wide_nosurf", &[W, L512, AERO, SOLO, GROUPS, NOSURF]),
+    frame("explicit_beams_contact_nosurf", &[W, L256, SOLO, GROUPS, SMALL, NOSURF]),
+    frame("explicit_beams_contact_wide_nosurf", &[W, L512, SOLO, GROUPS, SMALL, NOSURF]),
+    frame("explicit_beams_contact_aero_nosurf", &[W, L256, AERO, SOLO, GROUPS, SMALL, NOSURF]),
+    frame("explicit_beams_contact_aero_wide_nosurf", &[W, L512, AERO, SOLO, GROUPS, SMALL, NOSURF]),
+    big("explicit_beams_contact_big_nosurf", &[W, L256, SOLO, GROUPS, BIG, NOSURF]),
+    big("explicit_beams_contact_big_wide_nosurf", &[W, L512, SOLO, GROUPS, BIG, NOSURF]),
+    big("explicit_beams_contact_big_aero_nosurf", &[W, L256, AERO, SOLO, GROUPS, BIG, NOSURF]),
+    big("explicit_beams_contact_big_aero_wide_nosurf", &[W, L512, AERO, SOLO, GROUPS, BIG, NOSURF]),
     pass(VV_PASSES[0]),
     pass(VV_PASSES[1]),
     pass(VV_PASSES[2]),
@@ -362,8 +384,12 @@ pub enum Kernel {
     /// Contact active: the solo vehicles' frame (`EB_VV_SOLO`).
     Solo,
     /// Contact active: the frame with the contact groups past the vehicles
-    /// (`EB_VV_GROUPS`).
+    /// (`EB_VV_GROUPS`), those of at most four members (`EB_VV_SMALL_ONLY`).
     Contact,
+    /// Contact active: the contact groups of more than four members (`EB_VV_BIG_ONLY`,
+    /// entry [`CONTACT_ENTRY`]; no workgroups most frames). A module of its own, so
+    /// neither contact module carries both group paths: the largest kernel's compile.
+    ContactBig,
     /// A contact plan pass ([`VV_PASSES`] index).
     Vv(usize),
     /// A wide pass ([`WIDE_PASSES`] index).
@@ -400,6 +426,12 @@ impl Kernel {
                 "explicit_beams_contact_aero",
                 "explicit_beams_contact_aero_wide",
             ]),
+            Kernel::ContactBig => pick([
+                "explicit_beams_contact_big",
+                "explicit_beams_contact_big_wide",
+                "explicit_beams_contact_big_aero",
+                "explicit_beams_contact_big_aero_wide",
+            ]),
             Kernel::Vv(i) => VV_PASSES[i],
             Kernel::Wide(i) => WIDE_PASSES[i],
             Kernel::Sleep => SLEEP_LIST,
@@ -415,7 +447,7 @@ impl Kernel {
             return name;
         }
         match self {
-            Kernel::Frame | Kernel::Solo | Kernel::Contact => MODULES
+            Kernel::Frame | Kernel::Solo | Kernel::Contact | Kernel::ContactBig => MODULES
                 .iter()
                 .find(|m| m.name.strip_suffix("_nosurf") == Some(name))
                 .map_or(name, |m| m.name),
@@ -427,6 +459,7 @@ impl Kernel {
     pub fn entry(self) -> &'static str {
         match self {
             Kernel::Frame | Kernel::Solo | Kernel::Contact => FRAME_ENTRY,
+            Kernel::ContactBig => CONTACT_ENTRY,
             Kernel::Vv(i) => VV_PASSES[i],
             Kernel::Wide(i) => WIDE_PASSES[i],
             Kernel::Sleep => SLEEP_LIST,
@@ -449,6 +482,7 @@ impl Kernel {
             Kernel::Frame => "frame",
             Kernel::Solo => "solo frame",
             Kernel::Contact => "frame with groups",
+            Kernel::ContactBig => "large groups",
             Kernel::Vv(0) => "vv_bounds",
             Kernel::Vv(1) => "vv_pairs",
             Kernel::Vv(_) => "vv_group",
@@ -2268,6 +2302,12 @@ impl FramePlanner {
                 kernel: Kernel::Contact,
                 offset: 16,
             });
+            // The groups of more than four members, when the plan has one (else no
+            // workgroups).
+            out.push(Cmd::Indirect {
+                kernel: Kernel::ContactBig,
+                offset: 48,
+            });
             out
         } else if self.is_wide() && wide_allowed {
             let plan = self.wide_plan(steps);
@@ -2769,7 +2809,7 @@ mod tests {
     /// Every kernel a plan can name has a module, with its entry.
     #[test]
     fn kernels_have_modules() {
-        let mut ks = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact];
+        let mut ks = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact, Kernel::ContactBig];
         ks.extend((0..3).map(Kernel::Vv));
         ks.extend((0..WIDE_PASSES.len()).map(Kernel::Wide));
         for k in ks {
@@ -2778,7 +2818,7 @@ mod tests {
                     for surface in [false, true] {
                         let m = module(k.module_for(aero, lanes, surface)).unwrap_or_else(|| panic!("{k:?}"));
                         assert_eq!(m.entry, k.entry());
-                        let frame = matches!(k, Kernel::Frame | Kernel::Solo | Kernel::Contact);
+                        let frame = matches!(k, Kernel::Frame | Kernel::Solo | Kernel::Contact | Kernel::ContactBig);
                         assert_eq!(m.name.ends_with("_nosurf"), frame && !surface, "{k:?}");
                     }
                 }

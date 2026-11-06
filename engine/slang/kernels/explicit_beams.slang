@@ -4535,8 +4535,10 @@ void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uin
 {
     selfSerialHits(v, origin, r, beamOff, groupOff, groupCount, parity);
     if (gP.selfSplit == 0u || !selfResidual(v)) return;
-    selfSerialResidual(v, origin, r, beamOff, groupOff, groupCount, parity, 1u);
-    selfSerialResidual(v, origin, r, beamOff, groupOff, groupCount, parity, 2u);
+    // Modes 1 then 2, from one call site: the browser's and the driver's compilers
+    // inline every call, so each site is a copy of the whole pass.
+    for (uint mode = 1u; mode <= 2u; mode++)
+        selfSerialResidual(v, origin, r, beamOff, groupOff, groupCount, parity, mode);
     selfSerialMerge(v);
 }
 
@@ -4697,9 +4699,12 @@ void resolvePending(uint v, uint parity)
     uint4 r2 = gStatic[v * 4u + 2u];
     bool fast = (gStatic[v * 4u + 3u].x & FLAG_FAST_INV_SQRT) != 0u;
     gResolving = 1u;
-    if (n <= PEND_CAP)
+    // The listed beams in spawn order, or (more than the list holds) every pending beam
+    // in index order: one call site of beamUpdate (the compilers inline every call).
+    bool listed = n <= PEND_CAP;
+    uint base = pendList(v);
+    if (listed)
     {
-        uint base = pendList(v);
         for (uint i = 1u, iStop = EB_END(i, n, 1u); i < iStop; i++)
         {
             uint x = gNext[base + i];
@@ -4713,18 +4718,13 @@ void resolvePending(uint v, uint parity)
             }
             gNext[base + j] = x;
         }
-        for (uint i = 0u, iStop = EB_END(i, n, 1u); i < iStop; i++)
-        {
-            uint j = gNext[base + i];
-            beamUpdate(r0.z + j, j, fast, r2.z, parity);
-        }
     }
-    else
+    uint count = listed ? n : r0.w;
+    for (uint i = 0u, iStop = EB_END(i, count, 1u); i < iStop; i++)
     {
-        for (uint j = 0u, jStop = EB_END(j, r0.w, 1u); j < jStop; j++)
-        {
-            if (gBeams[(r0.z + j) * 2u + 1u].w == 2.0) beamUpdate(r0.z + j, j, fast, r2.z, parity);
-        }
+        uint j = listed ? gNext[base + i] : i;
+        if (!listed && gBeams[(r0.z + j) * 2u + 1u].w != 2.0) continue;
+        beamUpdate(r0.z + j, j, fast, r2.z, parity);
     }
     gResolving = 0u;
 }
@@ -5529,6 +5529,8 @@ static const float VV_APPROACH_SQ = 16.0;
 // Members a contact group may have (one workgroup steps them one after another);
 // a larger group's vehicles run alone that frame and the host fails.
 static const uint VV_MAX_GROUP = 64u;
+// Groups of at most VV_PART members step side by side (contactMembersStep).
+static const uint VV_PART = 4u;
 static const int VV_MAX_WAIT = 12;
 
 [[vk::binding(10, 0)]] RWStructuredBuffer<uint> gArgs;
@@ -5678,9 +5680,14 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 }
 
 // The frame's dispatch arguments: with no group the solo frame over the vehicles
-// (words 0..2), else the frame with the groups over vehicles + groups (words 4..6).
-void vvArgs(uint nv, uint groups)
+// (words 0..2), else the frame with the groups over vehicles + groups (words 4..6);
+// and every group again for the larger groups' module (words 12..14) when one has
+// more than VV_PART members (`big`), else none.
+void vvArgs(uint nv, uint groups, bool big)
 {
+    gArgs[12] = big ? groups : 0u;
+    gArgs[13] = 1u;
+    gArgs[14] = 1u;
     gArgs[0] = groups == 0u ? nv : 0u;
     gArgs[1] = 1u;
     gArgs[2] = 1u;
@@ -5789,7 +5796,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         }
         if (lane == 0u)
         {
-            vvArgs(nv, 0u);
+            vvArgs(nv, 0u, false);
             gAcc[vvCtl(VV_BIGS)].store(0);
         }
         return ebLoopCapFlush();
@@ -5922,7 +5929,14 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
     sync();
     if (lane == 0u)
     {
-        vvArgs(nv, groups);
+        // A group past VV_PART members (within VV_MAX_GROUP: a larger one's
+        // vehicles run alone, its member count 0).
+        bool big = false;
+        for (uint g = 0u, gStop = EB_END(g, groups, 1u); g < gStop; g++)
+        {
+            if (gMisc[gP.vvGroups + g].y > VV_PART) big = true;
+        }
+        vvArgs(nv, groups, big);
     }
     // Clear for the next frame.
     for (uint b = lane, bGuard = 0u; b <= gP.vvGridMask; b += 256u)
@@ -6236,7 +6250,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
 // read each other's state within their steps (contact reaches them only through
 // the accumulators of the contact pass), so every member's step is the same, bit
 // for bit, while the barriers are shared: k members cost about one member's step.
-static const uint VV_PART = 4u;
+// (VV_PART: with VV_MAX_GROUP, above.)
 groupshared Atomic<uint> gsTestedM[2u * VV_PART];
 groupshared Atomic<uint> gsPairCountM[VV_PART];
 groupshared uint gsBlkM[GRID_BLOCKS * VV_PART];
@@ -8071,6 +8085,17 @@ void contactGroup(uint g, uint lane)
     uint driveOn = gsUniformDrive;
     uint surfOn = surfaceOn();
     sync();
+    // The groups over two modules (engine_exec::explicit_plan Kernel::ContactBig): the
+    // frame with the groups of at most VV_PART members (EB_VV_SMALL_ONLY) and the
+    // larger groups' own dispatch (EB_VV_BIG_ONLY, entry explicit_beams_contact); each
+    // returns at once for the other's groups (k uniform), and holds only its own path.
+    // Without either define, every group.
+#ifdef EB_VV_SMALL_ONLY
+    if (k > VV_PART) return;
+#endif
+#ifdef EB_VV_BIG_ONLY
+    if (k <= VV_PART) return;
+#endif
     // Vehicle sleep: a group with an awake member wakes the others; a group asleep is
     // not stepped.
     bool sleepOn = gP.sleepRec != 0u;
@@ -8121,14 +8146,20 @@ void contactGroup(uint g, uint lane)
     {
         coupleStepMembers(off, k, lane, s, coupleOn);
         driveStepMembers(off, k, lane, s, driveOn);
+#ifndef EB_VV_BIG_ONLY
         if (k <= VV_PART)
         {
             contactMembersStep(off, k, lane, s);
         }
+#endif
+#if !defined(EB_VV_BIG_ONLY) && !defined(EB_VV_SMALL_ONLY)
         else
+#endif
+#ifndef EB_VV_SMALL_ONLY
         {
             for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
         }
+#endif
         if (surfOn != 0u)
         {
             for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
@@ -8139,14 +8170,20 @@ void contactGroup(uint g, uint lane)
 #ifdef EB_ABLATE
         if ((gP.ablate & 512u) != 0u) {} else
 #endif
+#ifndef EB_VV_BIG_ONLY
         if (k <= VV_PART)
         {
             vvPassSmall(k, off, runOff, points, stepBase + s, lane);
         }
+#endif
+#if !defined(EB_VV_BIG_ONLY) && !defined(EB_VV_SMALL_ONLY)
         else
+#endif
+#ifndef EB_VV_SMALL_ONLY
         {
             vvPass(k, off, runOff, points, stepBase + s, lane);
         }
+#endif
     }
     coupleEndMembers(off, k, lane, coupleOn);
     if (sleepOn) sleepGroupEnd(off, k, lane, sleepMask, gP.steps);

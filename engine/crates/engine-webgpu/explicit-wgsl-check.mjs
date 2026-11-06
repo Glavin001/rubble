@@ -16,6 +16,8 @@
 // whose names contain one of them; EXPLICIT_WGSL_DIR another directory of
 // modules with its manifest.json. EXPLICIT_WGSL_PARALLEL=a,b (exact names) compiles
 // those at once, as a page's load does, and prints when each finishes.
+// EXPLICIT_WGSL_MODULES_ONLY=1: the shader modules only (Tint's validation, uniformity
+// included), no pipelines: seconds, not the driver's compile.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
@@ -28,7 +30,7 @@ const DIR = process.env.EXPLICIT_WGSL_DIR || join(ROOT, 'generated', 'explicit-w
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 const PAGE = `<!doctype html><meta charset="utf-8"><title>explicit wgsl</title><script type="module">
-window.__run = async (nonce, only, exact) => {
+window.__run = async (nonce, only, exact, moduleOnly) => {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   const L = adapter.limits;
   const device = await adapter.requestDevice({ requiredLimits: {
@@ -54,7 +56,7 @@ window.__run = async (nonce, only, exact) => {
     const info = await mod.getCompilationInfo();
     const msgs = info.messages.filter((x) => x.type === 'error').map((x) => x.lineNum + ':' + x.linePos + ' ' + x.message);
     let pipe = null;
-    try {
+    if (!moduleOnly) try {
       await device.createComputePipelineAsync({ layout: 'auto', compute: { module: mod, entryPoint: entry }, label: m.name });
     } catch (e) { pipe = String(e.message || e); }
     const scope = await device.popErrorScope();
@@ -112,7 +114,10 @@ const profile = mkdtempSync(join(tmpdir(), 'explicit-wgsl-chrome-'));
 const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
-  '--enable-unsafe-webgpu', '--no-first-run', '--no-default-browser-check', 'about:blank',
+  '--enable-unsafe-webgpu', '--no-first-run',
+  // Dawn renames every symbol before Metal sees it, so a renamed entry point alone
+  // would still hit the driver's shader cache: keep the names (EXPLICIT_WGSL_COLD).
+  ...(process.env.EXPLICIT_WGSL_COLD === '1' ? ['--enable-dawn-features=disable_symbol_renaming'] : []), '--no-default-browser-check', 'about:blank',
 ], { stdio: 'ignore' });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} server.close(); };
 process.on('exit', cleanup);
@@ -158,8 +163,8 @@ const names = JSON.parse(readFileSync(join(DIR, 'manifest.json'), 'utf8')).map((
 const r = { out: [], errors: [] };
 let bad = 0;
 for (const name of names) {
-  const one = await evaluate(`window.__run(${JSON.stringify(nonce)}, ${JSON.stringify([name])}, true)`);
-  if (!r.adapter) {
+  const one = await evaluate(`window.__run(${JSON.stringify(nonce)}, ${JSON.stringify([name])}, true, ${process.env.EXPLICIT_WGSL_MODULES_ONLY === '1'})`);
+  if (r.adapter === undefined) {
     r.adapter = one.adapter;
     console.log(`Chrome WebGPU: ${one.adapter}; workgroup storage ${one.limits.wg} B, invocations ${one.limits.inv}`);
   }

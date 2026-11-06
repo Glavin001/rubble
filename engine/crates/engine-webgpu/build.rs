@@ -637,7 +637,14 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             d.clone(),
         ));
         d.push(("EB_VV_GROUPS", "1"));
-        vv.push((name.to_string(), "explicit_beams_frame", d));
+        // The groups of at most four members here (EB_VV_SMALL_ONLY), the larger ones
+        // in their own module (EB_VV_BIG_ONLY, entry explicit_beams_contact):
+        // engine_exec::explicit_plan Kernel::ContactBig.
+        let mut small = d.clone();
+        small.push(("EB_VV_SMALL_ONLY", "1"));
+        vv.push((name.to_string(), "explicit_beams_frame", small));
+        d.push(("EB_VV_BIG_ONLY", "1"));
+        vv.push((name.replace("contact", "contact_big"), "explicit_beams_contact", d));
     }
     for (name, entry, defines) in &vv {
         let out = wgsl_dir.join(format!("{name}.wgsl"));
@@ -656,37 +663,46 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         )?;
         explicit_post(&out)?;
     }
-    // The twelve frame modules again without surface contact (EB_NO_SURFACE, the
-    // `_nosurf` names; engine_exec::explicit_plan::Kernel::module_for): the host runs
-    // them when no vehicle of the upload has it, so a browser's first load compiles
-    // the frame kernels without the surface pass (feature_query and the pair path).
+    // The sixteen frame and contact modules again without surface contact
+    // (EB_NO_SURFACE, the `_nosurf` names; engine_exec::explicit_plan::Kernel::module_for):
+    // the host runs them when no vehicle of the upload has it, so a browser's first
+    // load compiles the frame kernels without the surface pass (feature_query and the
+    // pair path).
     const W: (&str, &str) = ("ENGINE_WGSL", "1");
     const L256: (&str, &str) = ("EB_LANES", "256");
     const L512: (&str, &str) = ("EB_LANES", "512");
     const AERO: (&str, &str) = ("EB_AERO", "1");
     const SOLO: (&str, &str) = ("EB_VV_SOLO", "1");
     const GROUPS: (&str, &str) = ("EB_VV_GROUPS", "1");
-    let frames: [(&str, &[(&str, &str)]); 12] = [
-        ("explicit_beams", &[W]),
-        ("explicit_beams_wide", &[W, L512]),
-        ("explicit_beams_aero", &[W, L256, AERO]),
-        ("explicit_beams_aero_wide", &[W, L512, AERO]),
-        ("explicit_beams_solo", &[W, L256, SOLO]),
-        ("explicit_beams_solo_wide", &[W, L512, SOLO]),
-        ("explicit_beams_solo_aero", &[W, L256, AERO, SOLO]),
-        ("explicit_beams_solo_aero_wide", &[W, L512, AERO, SOLO]),
-        ("explicit_beams_contact", &[W, L256, SOLO, GROUPS]),
-        ("explicit_beams_contact_wide", &[W, L512, SOLO, GROUPS]),
-        ("explicit_beams_contact_aero", &[W, L256, AERO, SOLO, GROUPS]),
-        ("explicit_beams_contact_aero_wide", &[W, L512, AERO, SOLO, GROUPS]),
+    const SMALL: (&str, &str) = ("EB_VV_SMALL_ONLY", "1");
+    const BIG: (&str, &str) = ("EB_VV_BIG_ONLY", "1");
+    const F: &str = "explicit_beams_frame";
+    const C: &str = "explicit_beams_contact";
+    let frames: [(&str, &str, &[(&str, &str)]); 16] = [
+        ("explicit_beams", F, &[W]),
+        ("explicit_beams_wide", F, &[W, L512]),
+        ("explicit_beams_aero", F, &[W, L256, AERO]),
+        ("explicit_beams_aero_wide", F, &[W, L512, AERO]),
+        ("explicit_beams_solo", F, &[W, L256, SOLO]),
+        ("explicit_beams_solo_wide", F, &[W, L512, SOLO]),
+        ("explicit_beams_solo_aero", F, &[W, L256, AERO, SOLO]),
+        ("explicit_beams_solo_aero_wide", F, &[W, L512, AERO, SOLO]),
+        ("explicit_beams_contact", F, &[W, L256, SOLO, GROUPS, SMALL]),
+        ("explicit_beams_contact_wide", F, &[W, L512, SOLO, GROUPS, SMALL]),
+        ("explicit_beams_contact_aero", F, &[W, L256, AERO, SOLO, GROUPS, SMALL]),
+        ("explicit_beams_contact_aero_wide", F, &[W, L512, AERO, SOLO, GROUPS, SMALL]),
+        ("explicit_beams_contact_big", C, &[W, L256, SOLO, GROUPS, BIG]),
+        ("explicit_beams_contact_big_wide", C, &[W, L512, SOLO, GROUPS, BIG]),
+        ("explicit_beams_contact_big_aero", C, &[W, L256, AERO, SOLO, GROUPS, BIG]),
+        ("explicit_beams_contact_big_aero_wide", C, &[W, L512, AERO, SOLO, GROUPS, BIG]),
     ];
-    for (name, defines) in frames {
+    for (name, entry, defines) in frames {
         let out = wgsl_dir.join(format!("{name}_nosurf.wgsl"));
         let mut d = defines.to_vec();
         d.push(("EB_NO_SURFACE", "1"));
         compile_with_defines(
             &explicit_beams_source(slang_root),
-            "explicit_beams_frame",
+            entry,
             SlangTarget::Wgsl,
             &out,
             &[],

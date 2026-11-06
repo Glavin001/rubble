@@ -151,6 +151,8 @@ async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), 
 /// A spec this cannot express, or a compile the browser rejects, is left to the
 /// synchronous creation, which reports it as before. `done(module, ms)` hears each
 /// pipeline as it finishes (in completion order; `ms` since the compiles started).
+/// A deferred spec ([`engine_webgpu::ComputeSpec::deferred`]) starts once the others
+/// are done and is not waited for: the host creates it at first use.
 pub(crate) async fn warm_pipelines(
     device: &wgpu::Device,
     specs: &[engine_webgpu::ComputeSpec],
@@ -246,8 +248,11 @@ pub(crate) async fn warm_pipelines(
         };
         let now = || js_sys::Date::now();
         let t0 = now();
+        // The pipelines the first frame needs, all at once; then (not waited for) the
+        // deferred ones, so they do not hold up the others' compiles.
         let mut pending = Vec::new();
-        for s in specs {
+        let mut later = Vec::new();
+        for s in specs.iter().filter(|s| !s.deferred) {
             match start(s) {
                 Ok(Some(p)) => {
                     // Each pipeline's completion, as it lands (settled either way).
@@ -280,6 +285,26 @@ pub(crate) async fn warm_pipelines(
                 );
             }
         }
+        for s in specs.iter().filter(|s| s.deferred) {
+            match start(s) {
+                Ok(Some(p)) => {
+                    let (done, module) = (done.clone(), s.module);
+                    let hear = wasm_bindgen::closure::Closure::once_into_js(move |_: JsValue| {
+                        done(module, now() - t0);
+                    });
+                    if let Ok(then) = Reflect::get(&p, &"then".into()).and_then(|f| f.dyn_into::<Function>()) {
+                        let _ = then.call2(&p, &hear, &hear);
+                    }
+                    later.push(p);
+                }
+                Ok(None) => {}
+                Err(e) => web_sys::console::warn_2(
+                    &format!("pipeline warm-up skipped ({})", s.label).into(),
+                    &e,
+                ),
+            }
+        }
+        drop(later);
     }
     #[cfg(not(target_arch = "wasm32"))]
     let _ = (device, specs, done);

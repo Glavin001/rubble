@@ -23,4 +23,7 @@ pub struct ComputeSpec {
     pub entry: &'static str,
     /// The single bind group's layout entries; `None`: the automatic layout.
     pub layout: Option<Vec<wgpu::BindGroupLayoutEntry>>,
+    /// Not needed for the first frame (the host creates it at first use): a browser
+    /// host compiles it after the others, without waiting for it.
+    pub deferred: bool,
 }

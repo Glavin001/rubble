@@ -771,7 +771,8 @@ impl WebWorld {
     /// the `ExplicitSim`. Load with this; the synchronous call is then a cache hit
     /// (a restart may use it). `progress(stage)` (optional) hears each stage:
     /// `"spawn"`, then `"compile N"` with the number of kernels compiling, then
-    /// `"compiled <module> <ms>"` as each one finishes (ms since the compiles began).
+    /// `"compiled <module> <ms>"` as each one finishes (ms since the compiles began;
+    /// a kernel the first frame does not need compiles after the promise resolves).
     #[wasm_bindgen(js_name = explicitSimAsync)]
     pub fn explicit_sim_async(
         &self,
@@ -795,7 +796,7 @@ impl WebWorld {
             let spawn = ExplicitSim::spawn(&spec).map_err(err)?;
             let sims: Vec<ExplicitBeams> = spawn.vehicles.iter().map(|v| v.sim.clone()).collect();
             let specs = ExplicitBeamsGpu::compute_specs(&sims, None);
-            say(format!("compile {}", specs.len()));
+            say(format!("compile {}", specs.iter().filter(|s| !s.deferred).count()));
             let heard = say.clone();
             crate::warm_pipelines(
                 &device,
