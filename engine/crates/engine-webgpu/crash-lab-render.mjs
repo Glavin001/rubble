@@ -355,7 +355,9 @@ struct BgFrag { @location(0) c: vec4f, @builtin(frag_depth) depth: f32 };
 }
 
 // Live state into the compact buffers: node world positions, beam rest lengths
-// (negated when broken).
+// (negated when broken). counts.z: the frame's lead (f32 bits, simulated seconds
+// past the last step, under one step: FramePacer.lead): positions carried forward
+// by their velocity so whole steps do not show as uneven motion.
 @group(0) @binding(0) var<storage, read> xnodes: array<vec4f>;
 @group(0) @binding(11) var<storage, read> xmisc: array<vec4u>;
 @group(0) @binding(12) var<storage, read> xbeams: array<vec4f>;
@@ -366,7 +368,9 @@ struct BgFrag { @location(0) c: vec4f, @builtin(frag_depth) depth: f32 };
   let i = id.x;
   if (i < counts.x) {
     let v = nodeVeh[i] & 0xffffu;
-    let p = xnodes[i * 3u].xyz + bitcast<vec3f>(xmisc[v].xyz);
+    let lead = bitcast<f32>(counts.z);
+    let p0 = xnodes[i * 3u].xyz + bitcast<vec3f>(xmisc[v].xyz);
+    let p = select(p0, p0 + xnodes[i * 3u + 1u].xyz * lead, lead > 0.0);
     outPos[i * 3u] = p.x; outPos[i * 3u + 1u] = p.y; outPos[i * 3u + 2u] = p.z;
     return;
   }
@@ -392,6 +396,7 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
   let sim = null, layout = null, mod = null, pipes = null, bufs = null, groups = null, sides = 0;
   const labBuf = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const countsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  let gatherLead = 0;
   const opts = { colorMode: 'strain', skin: 'ghost', skeleton: true, nodes: true, stubs: true, tyres: true, studio: true, tubeR: 0.009, nodeR: 0.017, grab: null, floorY: 0, focus: [0, 0], reflect: false,
     // cables: a beam range drawn as cables in every view; solidTris: triangle
     // ranges [first, count] drawn solid in the 'body' view (vehicles without a
@@ -445,6 +450,7 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
     };
     device.queue.writeBuffer(bufs.nodeVeh, 0, nodeVeh);
     device.queue.writeBuffer(countsBuf, 0, new Uint32Array([l.nodes, l.beams, 0, 0]));
+    gatherLead = 0;
     const recs = s.beamRecordsBuffer(), info = s.labBeamsBuffer(), tris = s.trisBuffer();
     const common = [[1, frameBuf], [2, labBuf], [3, bufs.pos]];
     groups = {
@@ -486,9 +492,14 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
      * negative when broken; live or replayed): the showcase body's damage
      * units read their beams' state from it. */
     restBuffer() { return bufs?.rest ?? null; },
-    /** Live frame: copy the solver's state into the compact buffers. */
-    gather(enc) {
+    /** Live frame: copy the solver's state into the compact buffers, carried
+     * `lead` simulated seconds forward by the node velocities (0: as stepped). */
+    gather(enc, lead = 0) {
       if (!sim) return;
+      if (lead !== gatherLead) {
+        gatherLead = lead;
+        device.queue.writeBuffer(countsBuf, 8, new Float32Array([lead]));
+      }
       const p = enc.beginComputePass({ label: 'crash-lab-gather' });
       p.setPipeline(pipes.gather); p.setBindGroup(0, groups.gather);
       p.dispatchWorkgroups(Math.ceil((layout.nodes + layout.beams) / 256));
