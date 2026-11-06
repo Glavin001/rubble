@@ -78,6 +78,9 @@ VsOut vs(uint vid : SV_VertexID, uint inst : SV_InstanceID)
     float3 world = b.position + quatRotate(q, local);
     o.world = world;
     o.pos = clip(gFrame, world);
+    // Parked out of sight (below light.w when set): not drawn.
+    if (gFrame.light.w != 0.0 && b.position.y < gFrame.light.w)
+        o.pos = float4(0.0, 0.0, 2.0, 1.0);
     o.normal = quatRotate(q, quatRotate(col.localRot, normal));
     o.center = b.position + quatRotate(q, col.localPos);
     if (col.shape == 1u)
@@ -86,6 +89,24 @@ VsOut vs(uint vid : SV_VertexID, uint inst : SV_InstanceID)
                              : quatRotate(q, float3(0.0, col.params.y, 0.0));
     }
     uint scheme = gFrame.style.x;
+    if (scheme == COLOR_MOTION)
+    {
+        bool dyn = b.invMass > 0.0 && (b.flags & 1u) != 0u;
+        bool kin = (b.flags & 3u) == 2u;
+        bool ccd = (b.flags & 64u) != 0u;
+        if (col.shape == 1u && kin) o.color = float3(0.2, 0.75, 0.95);          // characters
+        else if (kin) o.color = float3(0.35, 0.45, 0.85);                       // kinematic platforms
+        else if (ccd) o.color = float3(0.95, 0.25, 0.2);                        // CCD bodies
+        else if (!dyn && col.shape == 0u) o.color = float3(0.12, 0.12, 0.14);   // parked balls
+        else if (!dyn) o.color = float3(0.6, 0.61, 0.65);
+        else if (col.shape == 0u) o.color = float3(0.15, 0.16, 0.18);           // control balls
+        else
+        {
+            o.color = lerp(float3(0.85, 0.55, 0.25), float3(0.9, 0.78, 0.4), hash(col.body));
+            if ((b.flags & 4u) != 0u) o.color = o.color * 0.7;
+        }
+        return o;
+    }
     if (scheme == COLOR_SHAPES)
     {
         float h = hash(col.body);
@@ -250,4 +271,16 @@ VsOut vsGround(uint vid : SV_VertexID)
 }
 
 [shader("fragment")]
-float4 fsGround(VsOut i) : SV_Target { return float4(shade(gFrame, i.color, normalize(i.normal), i.world), 1.0); }
+float4 fsGround(VsOut i) : SV_Target
+{
+    if (gFrame.style.y == LIGHT_SKY)
+    {
+        // The motion page's floor: a 2 m grid on a checker.
+        float2 g = abs(frac(i.world.xz / 2.0) - 0.5);
+        float line = smoothstep(0.47, 0.5, max(g.x, g.y));
+        float checker = step(0.0, sin(i.world.x * 0.785) * sin(i.world.z * 0.785));
+        float3 base = lerp(float3(0.26, 0.29, 0.27), float3(0.3, 0.33, 0.31), checker);
+        return float4(shade(gFrame, lerp(base, float3(0.45, 0.48, 0.46), line * 0.6), float3(0.0, 1.0, 0.0), i.world), 1.0);
+    }
+    return float4(shade(gFrame, i.color, normalize(i.normal), i.world), 1.0);
+}

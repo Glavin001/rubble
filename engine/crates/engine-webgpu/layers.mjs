@@ -8,18 +8,19 @@ import { loadShaderModules } from './shader-loader.mjs';
 const WGSL = (file) => new URL(`./generated/wgsl/${file}`, import.meta.url).href;
 
 /** Colours (`look.colors`) and lighting (`look.light`), as `slang/render/common.slang`. */
-export const COLORS = { position: 0, sleep: 1, speed: 2, shapes: 3 };
+export const COLORS = { position: 0, sleep: 1, speed: 2, shapes: 3, motion: 4 };
 export const LIGHT = { demo: 0, sky: 1 };
 
-// The frame every layer reads (common.slang `Frame`, 144 bytes).
+// The frame every layer reads (common.slang `Frame`, 160 bytes).
 function frameWriter(device) {
-  const buf = device.createBuffer({ size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const data = new ArrayBuffer(144), f = new Float32Array(data), u = new Uint32Array(data);
+  const buf = device.createBuffer({ size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const data = new ArrayBuffer(160), f = new Float32Array(data), u = new Uint32Array(data);
   return {
     buf,
     /**
      * `view`: { viewProj (16 floats, column-major), eye [x, y, z], look: { colors, light,
-     * lightDir, fog: { distance, color } }, projectile (a body slot, or none), ground: { half,
+     * lightDir, fog: { distance, color }, spec (the sky light's specular, 0.2), hideBelow
+     * (bodies under this height not drawn; 0: none) }, projectile (a body slot, or none), ground: { half,
      * y } | null, boundScale (2: exact bounds; the terrain page pads them 2.02), heightfield
      * (its hull arena base) }.
      */
@@ -27,7 +28,7 @@ function frameWriter(device) {
       const look = view.look ?? {};
       f.set(view.viewProj, 0);
       f.set([view.eye[0], view.eye[1], view.eye[2], 0], 16);
-      f.set([...(look.lightDir ?? [0.35, 0.85, 0.4]), 0], 20);
+      f.set([...(look.lightDir ?? [0.35, 0.85, 0.4]), look.hideBelow ?? 0], 20);
       u[24] = look.colors ?? 0;
       u[25] = look.light ?? 0;
       u[26] = view.projectile ?? 0xffffffff;
@@ -36,7 +37,9 @@ function frameWriter(device) {
       f[29] = view.ground?.y ?? 0;
       f[30] = view.boundScale ?? 2;
       f[31] = look.fog?.distance ?? 1;
-      f.set([...(look.fog?.color ?? [0, 0, 0]), 0], 32);
+      f.set([...(look.fog?.color ?? [0, 0, 0]), look.spec ?? 0.2], 32);
+      u[36] = view.pool?.base ?? 0;
+      u[37] = view.pool?.stride ?? 0;
       device.queue.writeBuffer(buf, 0, data);
     },
   };
@@ -133,6 +136,47 @@ export async function createHeightfieldLayer(device, format, { depthFormat = 'de
       pass.setBindGroup(0, bind);
       pass.setPipeline(pipeline);
       pass.draw(view.cells * 6);
+    },
+  };
+}
+
+/**
+ * The projectile layer (`projectiles.slang`): every live projectile as a tracer, from the
+ * world's projectile pool. `draw(pass, world, view)`.
+ */
+export async function createProjectileLayer(device, format, { depthFormat = 'depth24plus', status } = {}) {
+  const [{ module }] = await loadShaderModules(device, [{ name: 'projectiles', file: 'projectiles.wgsl' }], { urlOf: WGSL, status });
+  const layout = device.createBindGroupLayout({
+    label: 'projectile layer',
+    entries: [
+      { binding: 0, visibility: ALL, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: storage },
+    ],
+  });
+  const pipeline = await device.createRenderPipelineAsync({
+    label: 'projectiles', layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+    vertex: { module, entryPoint: 'vs' },
+    fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { cullMode: 'none' }, depthStencil: depthState(depthFormat),
+  });
+  const frame = frameWriter(device);
+  let bind = null, bound = null;
+  return {
+    draw(pass, world, view) {
+      const l = world.projectileLayout();
+      if (!l.projectileSlots) return;
+      const pool = world.motionBuffer();
+      if (!bind || pool !== bound) {
+        bound = pool;
+        bind = device.createBindGroup({ layout, entries: [
+          { binding: 0, resource: { buffer: frame.buf } },
+          { binding: 1, resource: { buffer: pool } },
+        ] });
+      }
+      frame.write({ ...view, pool: { base: l.projectileBase, stride: l.projectileStride } });
+      pass.setBindGroup(0, bind);
+      pass.setPipeline(pipeline);
+      pass.draw(36, l.projectileSlots);
     },
   };
 }

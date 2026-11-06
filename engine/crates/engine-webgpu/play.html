@@ -13,6 +13,8 @@
     .bad { color: #f85149; }
     button, select { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 3px 8px; font: inherit; }
     kbd { font-size: 11px; padding: 0 4px; border: 1px solid #30363d; border-radius: 4px; }
+    .ok { color: #3fb950; } .warn { color: #d29922; }
+    table { border-collapse: collapse; } td, th { padding: 1px 6px; text-align: left; }
     #err { color: #f85149; white-space: pre-wrap; }
     h1 { font-size: 14px; margin: 0 0 4px; }
   </style>
@@ -79,14 +81,14 @@
     const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
     const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
     const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-    const cam = { yaw: 0.7, pitch: 0.45, dist: 42, target: [0, 0, 0], fov: Math.PI / 3, near: 0.05, far: 600, minDist: 4, maxDist: 120 };
+    const cam = { yaw: 0.7, pitch: 0.45, dist: 42, target: [0, 0, 0], fov: Math.PI / 3, near: 0.05, far: 600, minDist: 4, maxDist: 120, minPitch: 0.05, maxPitch: 1.4 };
     let drag = null;
     canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; });
     addEventListener('pointerup', () => { drag = null; });
     addEventListener('pointermove', (e) => {
       if (!drag) return;
       cam.yaw -= (e.clientX - drag.x) * 0.005;
-      cam.pitch = Math.max(0.05, Math.min(1.4, cam.pitch + (e.clientY - drag.y) * 0.005));
+      cam.pitch = Math.max(cam.minPitch, Math.min(cam.maxPitch, cam.pitch + (e.clientY - drag.y) * 0.005));
       drag = { x: e.clientX, y: e.clientY };
     });
     canvas.addEventListener('wheel', (e) => { e.preventDefault(); cam.dist = Math.max(cam.minDist, Math.min(cam.maxDist, cam.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
@@ -118,10 +120,12 @@
     };
     const keys = {};
     addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'SELECT' || e.repeat) return;
-      keys[e.code]?.();
+      if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+      scene?.keydown?.(e);
+      if (!e.repeat) keys[e.code]?.();
     });
-    const scene = await family.setup({ world, placed, sceneDef, device, format, cam, ui, preset });
+    let scene = null;
+    scene = await family.setup({ world, placed, sceneDef, device, format, cam, ui, preset, eyeOf });
     let lastCounters = null;
     const onFrame = (f) => {
       scene.onFrame?.(f);
@@ -156,9 +160,12 @@
       if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
       if (manual) { requestAnimationFrame(frame); return; }
       const t0 = performance.now();
-      for (let k = 0; k < (scene.stepsPerFrame ?? 1); k++) world.step();
+      // Steps only while a readback slot is free (never blocks), each after the family's
+      // per-step input.
+      for (let k = 0; k < (scene.stepsPerFrame ?? 1) && world.canStep(); k++) { scene.beforeStep?.(); world.step(); }
       pollFrame(world, onFrame);
       physMs = performance.now() - t0;
+      scene.frame?.(dt);
       draw();
       const c = lastCounters;
       $('stats').innerHTML = (scene.hud?.() ?? '') + (c ? ` · contacts ${c.contact} · awake ${c.awake}${c.overflow ? ` · <span class="bad">overflow 0x${c.overflow.toString(16)}</span>` : ''}` : '');
@@ -170,7 +177,8 @@
     // __step(n): n physics steps, frame-locked, then a draw; the family's hooks besides.
     window.__step = async (n = 1) => {
       manual = true;
-      await stepFrames(world, n, onFrame);
+      await stepFrames(world, n, onFrame, scene.beforeStep ?? null);
+      scene.frame?.(0);
       draw();
       return { steps: world.stepCount(), counters: lastCounters };
     };

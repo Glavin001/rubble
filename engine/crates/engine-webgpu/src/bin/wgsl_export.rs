@@ -75,6 +75,7 @@ fn main() -> anyhow::Result<()> {
             &[("vs", "vertex"), ("fs", "fragment"), ("vsGround", "vertex"), ("fsGround", "fragment")][..],
         ),
         ("heightfield", &[("vs", "vertex"), ("fs", "fragment")][..]),
+        ("projectiles", &[("vs", "vertex"), ("fs", "fragment")][..]),
     ] {
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../slang/render/{name}.slang"));

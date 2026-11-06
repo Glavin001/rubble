@@ -25,14 +25,17 @@ static const uint COLOR_POSITION = 0u;
 static const uint COLOR_SLEEP = 1u;
 static const uint COLOR_SPEED = 2u;
 static const uint COLOR_SHAPES = 3u;
+// The motion page's: characters, kinematic platforms, CCD bodies, parked and control balls.
+static const uint COLOR_MOTION = 4u;
 // Lighting (style.y): the demo's (Lambert, fixed light) or sky, specular and fog.
 static const uint LIGHT_DEMO = 0u;
 static const uint LIGHT_SKY = 1u;
 
 // The view-projection by columns; the eye; the light direction; style: colours, lighting,
-// the projectile's body (0xffffffff: every sphere), unused; params: the ground square's
-// half side and height, the bounds scale (corner × half × scale: 2 exact, 2.02 padded),
-// the fog distance; the fog colour.
+// the projectile's body (0xffffffff: every sphere), the heightfield's hull arena base;
+// params: the ground square's half side and height, the bounds scale (corner × half × scale:
+// 2 exact, 2.02 padded), the fog distance; fog: its colour, and the specular strength (w);
+// hide: bodies below this height are not drawn (light.w, 0: none).
 struct Frame
 {
     float4 c0; float4 c1; float4 c2; float4 c3;
@@ -41,6 +44,8 @@ struct Frame
     uint4 style;
     float4 params;
     float4 fog;
+    // The projectile pool's records: base, stride (vec4s).
+    uint4 pool;
 };
 
 float3 quatRotate(float4 q, float3 v)
@@ -65,7 +70,7 @@ float3 shade(Frame f, float3 c, float3 n, float3 w)
         float3 l = normalize(f.light.xyz);
         float diff = max(dot(n, l), 0.0);
         float3 v = normalize(f.eye.xyz - w);
-        float spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.2;
+        float spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * f.fog.w;
         float sky = 0.5 + 0.5 * n.y;
         float fog = clamp(length(f.eye.xyz - w) / f.params.w, 0.0, 1.0);
         return lerp(c * (0.22 + 0.18 * sky + 0.75 * diff) + spec, f.fog.xyz, fog * fog);
