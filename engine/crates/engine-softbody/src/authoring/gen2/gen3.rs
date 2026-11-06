@@ -53,12 +53,9 @@ pub fn part_of(mesh: &str) -> Option<Part> {
 /// engine's ancillaries and the wheels' pieces.
 pub fn rigid(mesh: &str) -> bool {
     [
-        "headlight_",
-        "taillight_",
         "mirror_",
         "handle_",
         "wiper_",
-        "grille",
         "seat_",
         "steering_wheel",
         "dash",

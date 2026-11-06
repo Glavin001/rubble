@@ -999,6 +999,52 @@ impl Intrusion {
 
 /// The visual quality of the render mesh now against the settled rest
 /// (`visual_metrics`).
+thread_local! {
+    /// `SEAM_DEBUG`: the last visual_metrics' opened pairs (vertex, vertex, gap).
+    static SEAM_PAIRS: std::cell::RefCell<Vec<(usize, usize, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `SEAM_DEBUG`: per piece pair, whether the opened seams are the parts'
+/// nodes separating (the gap between each vertex's heaviest node pair) or the
+/// skin reaching past its nodes.
+fn seam_diagnosis(v: &ShowcaseVisual, rest: &[Vec3], now: &[Vec3], pairs: &[(usize, usize, f32)]) {
+    let top = |i: usize| -> Option<u32> {
+        if v.wt_start.len() != v.positions.len() + 1 {
+            return Some(v.bind_nodes[i][0]);
+        }
+        let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
+        (a..b).max_by(|&x, &y| v.wt_w[x][0].total_cmp(&v.wt_w[y][0])).map(|k| v.wt_node[k])
+    };
+    let mut piece = vec![0usize; v.positions.len()];
+    for (k, (_, first, count)) in v.pieces.iter().enumerate() {
+        for x in *first..first + count {
+            piece[x as usize] = k;
+        }
+    }
+    let mut by: std::collections::BTreeMap<String, (usize, f32, f32, usize)> = Default::default();
+    for &(i, j, g) in pairs {
+        let (Some(a), Some(b)) = (top(i), top(j)) else { continue };
+        let ng = now[a as usize].distance(now[b as usize]) - rest[a as usize].distance(rest[b as usize]);
+        let key = format!("{} / {}", v.pieces[piece[i]].0, v.pieces[piece[j]].0);
+        let e = by.entry(key).or_insert((0, 0.0, 0.0, 0));
+        e.0 += 1;
+        e.1 += g;
+        e.2 += ng;
+        if ng > 0.05 {
+            e.3 += 1;
+        }
+    }
+    let mut v2: Vec<_> = by.into_iter().collect();
+    v2.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    for (k, (n, g, ng, nb)) in v2.iter().take(16) {
+        eprintln!(
+            "  seam {k}: {n} pairs, skin gap mean {:.0} mm, top-node gap mean {:.0} mm, node gap > 5 cm {nb}",
+            g / *n as f32 * 1e3,
+            ng / *n as f32 * 1e3
+        );
+    }
+}
+
 fn visual_now(car: &Car, s: &ExplicitBeams) -> Value {
     let Some(v) = &car.visual else {
         return json!({"available": false});
@@ -1029,7 +1075,13 @@ fn visual_now(car: &Car, s: &ExplicitBeams) -> Value {
         Some(&rest_beams),
     );
     let (p1, n1) = deform_beams(v, &positions(s), Some(&units), Some(&beams));
-    visual_metrics(v, &p0, &n0, &p1, &n1)
+    SEAM_PAIRS.with(|c| c.borrow_mut().clear());
+    let out = visual_metrics(v, &p0, &n0, &p1, &n1);
+    if std::env::var("SEAM_DEBUG").is_ok() {
+        let pairs = SEAM_PAIRS.with(|c| c.borrow().clone());
+        seam_diagnosis(v, &positions(&car.template), &positions(s), &pairs);
+    }
+    out
 }
 
 /// Render-mesh quality after a deformation, wheels excluded:
@@ -1253,6 +1305,7 @@ pub fn visual_metrics(
             if std::env::var("SEAM_DEBUG").is_ok() {
                 let nm = |k: usize| v.pieces.get(piece[k] as usize).map_or("?", |q| q.0.as_str());
                 *seam_by.entry(format!("{} / {}", nm(i), nm(j))).or_insert(0usize) += 1;
+                SEAM_PAIRS.with(|c| c.borrow_mut().push((i, j, g)));
             }
         }
         gaps.push(g);
