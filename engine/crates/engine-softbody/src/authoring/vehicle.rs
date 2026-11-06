@@ -1193,11 +1193,20 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     // A lid (bonnet, boot lid): it hangs on its hinges and
                     // latch (placed below); its edge bears on its seals.
                     let _ = (hinge_scale, latch_scale, in_latch);
-                    let mm = if at_hinge || at_latch_edge {
+                    let mut mm = if at_hinge || at_latch_edge {
                         Material::weld(m, grades.hsla)
                     } else {
                         m.scaled(0.5)
                     };
+                    // One tier: a lid's seal is EPDM rubber, which does not
+                    // take a set, so it bears elastically and never yields
+                    // (`LID_SEAL_SET=1`: the skin's yield, as before, a
+                    // measurement switch). The lid's own bending under the
+                    // step's bound had crushed them plastically.
+                    if def.one_tier && std::env::var("LID_SEAL_SET").map_or(true, |v| v != "1") {
+                        mm.deform = f32::MAX;
+                        mm.strength = f32::MAX;
+                    }
                     sk.beam_with(a, b, mm, BeamType::Support(SEAL_BREAK), 0);
                 }
             }
