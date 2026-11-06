@@ -869,3 +869,220 @@ camera and timing (surface contact on, raycast wheels): at impact, +60 ms and se
 - The pole residual: the harness's pole still slides 1–2 m for both cars.
 - Shut lines: the doors (the hinge pillar moving back), the lamp corners and the
   hood.
+
+## Round 6 (2026-11-06)
+
+Branch `feat/vehicle-gen3-r6`. Surface contact is on unless marked. Full tables:
+`measurements/vehicle-compare-gen3-surface-on.md` and `-off.md`. Stills:
+`media/gen3-r6/`.
+
+### Decisions
+
+- **The front is graded by station, from measured data.**
+  - **The shape to match.**
+    - The 2011 Accord's NCAP pulse (DOT HS 811 666 fig. 55, left rear sill) is
+      12 g at 10 ms and 26 g at 20 ms, and peaks at 33 g at 78 ms.
+    - The 2012 Camry's NCAP force against crush (CCSA's validation against
+      NHTSA test 8545, fig. 10) is about 250 kN to 300 mm. It then rises to
+      900 kN at 420 mm as the engine stacks.
+    - gen3's force was flat at 330–440 kN from 10 ms to the end.
+  - **Rails, aprons and cans** (`RAIL_ZONES`), each zone a gauge and grade:
+
+    | Zone | Gauge, grade | Spring | Yield force |
+    |---|---|---|---|
+    | Crush cans (triggered) | 1.4 mm, 340 MPa | 0.875 | 0.62 |
+    | Tip, bumper to the block's front (the reference) | 1.6 mm, 440 MPa | 1 | 1 |
+    | To the strut tower (the gauge step) | 2.0 mm, 440 MPa | 1.25 | 1.45 |
+    | Behind the tower, the kick-down under the dash | 2.0 mm, 590 MPa | 1.25 | 1.95 |
+
+    - The grades are the Accord body's (270/340/440/980 MPa, DOT HS 811 666
+      fig. 140).
+    - The gauges are a mid-size sedan rail's usual range (1.4–2.0 mm), **not
+      measured on an Accord**. I found no public gauge table for its rails.
+    - A thin-walled section folding progressively carries a mean force ∝
+      σ_y·t^(5/3) (Wierzbicki and Abramowicz), and its spring goes as t.
+    - So the section (`Beam::section`) scales the spring by t / 1.6. The yield
+      strain is scaled by (σ / 440)·(t / 1.6)^(2/3), so the yield force goes as
+      σ·t^(5/3).
+  - **Grading the rails alone did not move the plateau.** Crush yields from 0.12
+    to 0.23 changed the force by only 10 %. `WALL_DEBUG` (plastic work by member
+    every 10 ms) found two things carrying the front along its whole length:
+    - **The body's shut-line edge ties ahead of the dash.** These are the radiator
+      support's, aprons' and lamp surrounds' flanges (ebody–rh, ar–ebody).
+      - They took 21 kJ of the 114 kJ of plastic work, half of it by 20 ms.
+      - They kept the census sheet yield, 4.3 times the rails'.
+      - They now take their station's rail yield.
+    - **The towers' yield floor** (round 4's 0.4).
+      - It held on every beam with a tower node. That included the radiator
+        support's upper tie to the tower (rsu–tw) and the apron tip's (ar3–tw),
+        which are the front of the upper load path.
+      - The floor now holds only where the beam's middle is within 0.235 m of
+        the axle. rh2–tw, at 0.15 m, bent parked when it did not.
+  - **Crush yield 0.26** (the tip's).
+
+- **The block's stack now engages.** Round 5's stops never did.
+  - **Why:** a stop's closure was its own length's, but the targets were 0.14–0.29
+    m to the side of the block's corners. A stop along a diagonal never closes to
+    8 cm, so the block passed the beam.
+  - **Fix 1:** the closure is along the car (`stack_close`). The stop engages
+    when the gap along the car is the stack. The dash stops get the same fix.
+  - **Fix 2:** the front bumper beam gets stations on the block's face lines
+    (x = ±0.26). The stops go only to beam nodes within 0.12 m of the block's
+    line (`STACK_REACH`).
+  - **Fix 3:** the block still dived under the beam. It pitches down 6 cm on its
+    mounts while the beam rides up 5 cm on the wall by 50 ms.
+    - The block's front face is now a collision face (two triangles, part
+      engine), and the front beam's nodes collide with it (self-collision).
+    - A face meets the beam wherever the two overlap across the car and up the
+      block.
+  - **Result:** with all three fixes the block meets the beam at 40 ms, and the
+    force rises to 500–530 kN at 55 ms.
+
+- **Lane nodes keep their bound in any geometry.**
+  - **The failure:** once the stack stops were added, the FMVSS 216 roof run
+    diverged (NaN at 58 mm of platen travel).
+    - The platen pressed lane node xbody47 (0.15 kg) into its backing and lined
+      up its ties, which sum to 3.9e6 N/m. Aligned, that is ω·h 2.6.
+    - The power iteration only sees the rest geometry's modes. In round 5's car
+      the same node already rattled at 10–170 m/s under the platen.
+  - **Fix:** each contact-only node's ties are scaled so that Σ k (1/m +
+    1/m_far)·h² ≤ 1.92² (Gershgorin with its ties aligned).
+    `GEN3_NO_LANE_BOUND` turns it off.
+
+- **The pole scene is the NCAP oblique pole's.**
+  - **Why the two scenes disagreed.**
+    - `surface_pole --scene oblique` strikes the car's middle, about at its
+      centre of mass, and runs 0.6 s.
+    - `vehicle_compare` struck the generic head point, 0.64 of the wheelbase aft
+      of the front axle, and ran 1.5 s. That is 0.29 m behind the ETK's centre of
+      mass and 0.59 m behind gen3's.
+    - The 75° impulse behind the centre of mass yaws the car about the pole. In
+      `vehicle_compare`'s scene the ETK slid 0.99 m by 0.6 s and 1.70 m by 1.5 s.
+      With the pole moved onto its centre of mass (+0.30 m), it slid 0.03 m.
+    - `surface_pole`'s figures (624 → 324 mm across the friction fix) measure the
+      centre of mass's move across the approach at 0.6 s. `pole_slide_mm` is the
+      pole's place along the car in the far side's frame, a different measure.
+    - Pole shape and friction source are not the difference. Both scenes use the
+      254 mm cylinder (`--cyl`) and the nodes' own friction.
+  - **The impact line now matches NHTSA's tests: `POLE_LINE`, 0.464 of the
+    wheelbase aft of the front axle.**
+    - On the 2018 Accord in TP-214P (reports v10841 and v10842), the line was
+      1,303 and 1,313 mm aft of the axle on a 2,819–2,820 mm wheelbase. That is
+      0.10 m behind the test weight's centre of mass.
+    - A 2020 Veloster's was at 0.50 of its wheelbase and a 2024 Nautilus's at
+      0.45.
+    - In all of these tests the deepest crush lies on the line (0–150 mm from
+      it): the cars do not slide along the pole. The Accord's residual was
+      266–319 mm across the five heights.
+  - **The car rides a carriage.**
+    - The tests tow the car in on a platform (the MCW report measures heights
+      "from top of platform").
+    - The wheels do not turn, and the tyres sit on the carriage's low-friction
+      pads (`CARRIAGE_MU` 0.1; PTFE on steel is 0.04–0.10).
+  - `POLE_OLD=1` keeps round 5's scene.
+
+### Required numbers (surface contact on)
+
+| Measure | Round 5 | Round 6 | Band |
+|---|---|---|---|
+| Frontal dynamic crush (mm) | 629 | 651 | 620–750 ✓ |
+| t_m (ms) | 72 | 72 | 63–76 ✓ |
+| Peak, rear cabin (g) | 29.2 | **34.4** | 34–47 ✓ |
+| Residual max / avg (mm) | 468 / 345 | 577 / 355 | 380–580 ✓ (at the edge) |
+| Campbell b1 (1/s) | 38.6 | 37.5 | ≤ 39.2 ✓ |
+| Restitution | 0.202 | **0.193** | ≤ 0.20 ✓ |
+| Feet intrusion (mm) | 66.8 | **62.1** | ≤ 67 ✓ |
+| Roof / weight | 5.22 | 5.25 | 4.48–5.32 ✓ |
+| MDB residual (mm) | 193 | 198 | 126–206 ✓ |
+| FMVSS 214 door: initial / intermediate / peak (kN) | 10.4 / 28.5 / 94 | 10.5 / 29.2 / 98 | ≥ 10.0 / 15.6 / 28.5 ✓ |
+| Side pole residual / dynamic (mm), the new scene | – | 151 / 290 | 297–445 ✗ |
+| Parked 10 s on pressure wheels, brake applied: KE (J) | 0.003 | 0.009 | |
+
+- **Force every 5 ms from contact (kN):** 116, 369, 334, 328, 348, 340, 357, 361,
+  348, 354, **507**, 378, 290…
+- **The edges.** The peak is 0.4 g inside its band, and the residual max is 3 mm
+  inside its band. Across crush yields 0.25 / 0.26 / 0.27 / 0.28:
+  - peak 35.7 / 34.4 / 32.3 / 30.2 g;
+  - restitution 0.193 / 0.193 / 0.191 / 0.218;
+  - residual max 581 / 577 / 425 / 418 mm. It falls either near 430 or near 580
+    mm, depending on whether one zone folds, within ±0.01 of the yield.
+
+**Surface contact off:**
+- wall: dynamic crush 672 mm, t_m 73.5 ms, peak 31.9 g, residual 454 / 313 mm,
+  b1 42.7, restitution 0.225, feet 62 mm;
+- pole 250 / 358 mm, but the pole reaches 504 mm past the skin (node contact lets
+  it pass between nodes);
+- MDB 198 mm.
+
+**The ETK (on):** dynamic crush 501 mm, peak 70 g, residual 233 mm, b1 68,
+restitution 0.37, pole 202 / 281 mm on the new scene, MDB 244 mm, roof 6.02, door
+6.5 kN. With surface contact off its pole reads 438 mm, with the pole 555 mm past
+its skin.
+
+### The pole: not met
+
+On the NCAP geometry, neither car reaches the band with surface contact on: gen3
+reads 151 mm and the ETK 202 mm. Across ±10 cm of offset, gen3 reads 33–182 mm and
+the ETK 57–260 mm.
+
+- **What happens** (`POLE_TRACE`):
+  - The dynamic crush stops at about 290 mm.
+  - The car leaves the pole at 2.8 m/s of its 8.9: a restitution of 0.32. It then
+    glides off on the carriage, turning slowly.
+  - At the deepest crush the structure holds 15.5 kJ elastic of the 57 kJ. The
+    largest shares are the front door's latch to striker (0.5 kJ), the seat's
+    front cross member from sill to tunnel (0.5 kJ each), and the floor rail and
+    sill joints.
+  - The plastic work is 30 kJ, a third of it the floor pan's.
+- **Yields cannot separate the pole from the MDB** (`gen3_side`, five offsets):
+
+  | Lever | Pole mean (mm) | MDB (mm) |
+  |---|---|---|
+  | Round 6 | 124 | 198 |
+  | Cross members × 1/3 (`GEN3_CM_Y` 1.0) | 131 | 199 |
+  | Doors × 0.5 | 125 | 260 |
+  | Side zone × 0.5 | 168 | 276 |
+  | Side 0.3, doors 0.5, cross members 1.0, intrusion beam 0.5 | 206 | 364 |
+  | Side 0.2, doors 0.3, cross members 0.5, intrusion beam 0.3, pan 0.15 | 227 | 512 |
+
+  - The last row puts the MDB at 2.5 times its band. The pole still reads 227 mm,
+    and the dynamic crush still stops near 375 mm.
+  - So the limit is not the yields. It is how the pole meets the side:
+    - With surface contact, the pole pushes whole skin triangles about 0.5 m
+      across, so the side answers as a membrane spanning its nodes.
+    - With node contact, the pole passes between the nodes instead.
+  - Denting the side locally, as a real door dents, needs nodes closer than the
+    pole's 254 mm across the door and sill. That is a lattice change for the next
+    round and is not done here.
+
+### Checks (`gen3_rig`)
+
+| Check | Round 5 | Round 6 | Required |
+|---|---|---|---|
+| Rest fidelity at spawn | 0.16 mm / 0.07° | 0.16 mm / 0.07° | ≤ 1 mm / 1° |
+| Parked 10 s, beyond the nodes' own motion | 0.53 mm / 0.98° | 0.53 mm / **1.03°** | ≤ 1 mm / 1° ✗ |
+| Drift, every part | ≤ 2.3 mm | ≤ 2.1 mm | ≤ 5 mm |
+| Broken / bent at rest | 0 / 0 | 0 / 0 | 0 / 0 |
+| wall56 stretch / fold p99 | 1.27 / 5.2° | 1.28 / 6.0° | ≤ 1.6 / ≤ 31° |
+| pole32 stretch / fold p99 (the new scene) | 1.11 / 1.0° | 1.06 / 1.2° | ≤ 1.6 / ≤ 31° |
+
+ω·h is 1.919 (bound 1.92).
+
+**Parked normal fidelity is at the limit, and its 10 s reading depends on the
+phase of a slow bounce.**
+- The worst vertex is at the body shell's tail corner.
+- Its static warp is 0.99° after 20 s and 0.98° after 30 s, as in round 5.
+- At 9.5 / 10 / 10.5 / 12 s it reads 0.94 / 1.03 / 1.04 / 1.00°: the car's slow
+  parked bounce on raycast wheels adds about ±0.05°.
+- With this round's changes switched off by their variables (all but the stack
+  closure), it reads 1.05–1.11° at 9.5–10.5 s. Round 5's 0.98° was one phase of
+  the same bounce.
+- This round does not change the rear. Giving this check margin needs the tail
+  corner's static warp reduced.
+
+### Open
+
+- The pole residual (151 mm against 297–445): the lattice's spacing against a
+  254 mm pole (above).
+- Parked normal fidelity: 0.98° static and 1.03° at 10 s, against 1°.
+- The residual max (577 mm) and the peak (34.4 g) are each just inside their bands.

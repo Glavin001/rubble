@@ -6,7 +6,7 @@
 //! SURFACE_CONTACT=1 cargo run --release -p engine-softbody --example gen3_side -- [car] [offset_m ...]
 //! ```
 //! `SIDE_S` sets the run length (s, default 1.5, the harness's). The pole's
-//! line (the driver's head) is printed against the car's centre of mass.
+//! impact line ([`POLE_LINE`]) is printed against the car's centre of mass.
 use engine_softbody::vehicle_compare::{default_manifest, scene_mdb, scene_pole_at, Car, Manifest};
 
 fn main() -> Result<(), String> {
@@ -34,12 +34,13 @@ fn main() -> Result<(), String> {
     let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
     let cg = s.nodes.iter().map(|n| n.pos * n.mass).sum::<glam::Vec3>() / total;
     let f = car.frame;
-    let head = f.front_axle - 0.64 * (f.front_axle - f.rear_axle);
+    let line =
+        f.front_axle - engine_softbody::vehicle_compare::POLE_LINE * (f.front_axle - f.rear_axle);
     println!(
-        "{name}: head line {:.3} m, centre of mass {:.3} m along the car (the line {:+.3} m ahead of it); {secs} s",
-        head,
+        "{name}: impact line {:.3} m, centre of mass {:.3} m along the car (the line {:+.3} m ahead of it); {secs} s",
+        line,
         cg.z,
-        head - cg.z
+        line - cg.z
     );
     let (poles, mdb) = std::thread::scope(|sc| {
         let hs: Vec<_> = dz
