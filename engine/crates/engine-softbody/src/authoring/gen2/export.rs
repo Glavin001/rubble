@@ -99,11 +99,14 @@ pub fn jbeam_files(car: &Car, flex: &[(Part, Flex)], deform_groups: &[(String, V
             o.insert("beamDamp".into(), num(b.c));
             o.insert("beamDeform".into(), num(b.deform));
             o.insert("beamStrength".into(), num(b.strength));
+            if b.deform_limit > 0.0 {
+                o.insert("deformLimit".into(), json!(b.deform_limit));
+            }
             if sp.limit_expansion {
                 o.insert("deformLimitExpansion".into(), json!(1.2));
             }
             if sp.support {
-                o.insert("beamLongBound".into(), json!(1.0));
+                o.insert("beamLongBound".into(), json!(100.0));
             }
             o.insert("breakGroup".into(), json!(b.break_group.clone().unwrap_or_default()));
             let dg: Vec<&(String, Vec<usize>, f32)> =

@@ -23,7 +23,15 @@ pub const BUMPER_F_KG: f32 = 7.96 + 2.5;
 pub const BUMPER_R_KG: f32 = 7.84 + 1.3;
 /// Unsprung mass per corner on the hub nodes besides the wheel (kg): knuckle,
 /// hub, brake, half the links.
-pub const UNSPRUNG_KG: f32 = 30.0;
+pub const UNSPRUNG_KG: f32 = 30.0 - RIM_NODES as f32 * RIM_NODE_KG;
+/// Wheel proxy rim nodes per wheel, their radius (m) and mass (kg each, out
+/// of the unsprung mass).
+pub const RIM_NODES: usize = 6;
+pub const RIM_R: f32 = 0.25;
+pub const RIM_NODE_KG: f32 = 2.0;
+/// Plastic compression limit of the crush zones' beams (deformLimit): a
+/// folded section stacks at 1 − 0.7 = 30 % of its length.
+pub const STACK_LIMIT: f32 = 0.7;
 
 fn lr(s: f32) -> &'static str {
     if s > 0.0 {
@@ -917,13 +925,46 @@ pub fn sedan() -> Car {
     }
 
     // ------------------------------------------------------------------
-    // Self-collision: every skin node (triangles' nodes) and the engine.
+    // Wheel proxies: the raycast wheels have no geometry, so each hub carries
+    // a ring of rim nodes (contacters, no triangles, as BeamNG's wheel nodes)
+    // in the wheel's plane at the rim's radius. In a frontal the wheel stacks
+    // against the hinge pillar and sill, the outer load path real cars have.
+    // ------------------------------------------------------------------
+    let mut rims = Vec::new();
+    for s in [1.0f32, -1.0] {
+        let x = lr(s);
+        for (w, ya) in [("F", AXLE_F), ("R", AXLE_R)] {
+            let (hi, ho) = (c.id(&format!("hub{w}i{x}")), c.id(&format!("hub{w}o{x}")));
+            let ring: Vec<usize> = (0..RIM_NODES)
+                .map(|k| {
+                    let a = (k as f32 + 0.5) * std::f32::consts::TAU / RIM_NODES as f32;
+                    let q = Vec3::new(TRACK_HALF * s, ya + RIM_R * a.cos(), WHEEL_R + RIM_R * a.sin());
+                    c.node(&format!("rim{w}{k}{x}"), q, body)
+                })
+                .collect();
+            for (k, &r) in ring.iter().enumerate() {
+                c.nodes[r].no_group = true;
+                c.nodes[r].fixed_mass = RIM_NODE_KG;
+                c.fan(r, &[hi, ho], Role::Susp, body);
+                c.beam(r, ring[(k + 1) % ring.len()], Role::Susp, body);
+                c.beam(r, ring[(k + 2) % ring.len()], Role::Susp, body);
+                rims.push(r);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Self-collision: every skin node (triangles' nodes), the engine and the
+    // wheel proxies.
     // ------------------------------------------------------------------
     let mut skin = vec![false; c.nodes.len()];
     for t in &c.tris {
         for &i in &t.n {
             skin[i] = true;
         }
+    }
+    for &r in &rims {
+        skin[r] = true;
     }
     for (i, nd) in c.nodes.iter_mut().enumerate() {
         nd.self_collision = skin[i] || nd.part == Part::Engine;
@@ -967,6 +1008,7 @@ pub fn sedan() -> Car {
         + ACCORD_ENGINE_KG
         + ACCORD_TRANSAXLE_KG
         + ACCORD_BIW
+        + 4.0 * RIM_NODES as f32 * RIM_NODE_KG
         + c.named.iter().map(|m| m.kg).sum::<f32>()
         + 4.0 * WHEEL_KG;
     // What is left of the kerb is a front-drive car's front-end module (air
@@ -1005,6 +1047,35 @@ pub fn sedan() -> Car {
     c.refs = [c.id("tn1"), c.id("tn2"), c.id("si1l"), c.id("rfC1")];
     let hub = hub_extra(&c);
     c.assign_springs(&hub);
+    // Yield by zone: a member's webs and ties are its section as much as its
+    // chords, so the front crush zone's webs and cross ties take the crush
+    // multiple and the cabin's (the safety cage: DP980/PHS) the cabin multiple.
+    for b in &mut c.beams {
+        if !matches!(b.part, Part::Body | Part::BumperF | Part::BumperR) || !b.deform.is_finite() {
+            continue;
+        }
+        let mid = 0.5 * (c.nodes[b.a].p + c.nodes[b.b].p);
+        // Crushed sheet steel stacks at about a third of its length (a folded
+        // crush can's solid length): JBeam's deformLimit on the crush zones'
+        // beams, so a crushed bay stacks instead of inverting.
+        if (mid.y < fw_y - 0.05 || mid.y > 2.9) && !matches!(b.role, Role::Sheet | Role::Bend | Role::Tie | Role::Backing) {
+            b.deform_limit = STACK_LIMIT;
+        }
+        if b.part != body {
+            continue;
+        }
+        let web =matches!(b.role, Role::Web | Role::Cross | Role::Firewall | Role::Floor | Role::Tunnel | Role::RoofBow | Role::Sheet);
+        if !web {
+            continue;
+        }
+        if mid.y < fw_y - 0.05 {
+            b.deform *= crush_mult();
+        } else if mid.y < 2.9 {
+            b.deform *= cabin_mult();
+        } else {
+            b.deform *= crush_mult();
+        }
+    }
     c
 }
 

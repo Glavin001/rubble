@@ -110,5 +110,6 @@ fn main() {
         }
     }
     let mut lane: Vec<f32> = (0..car.nodes.len()).filter(|&i| car.nodes[i].contact).map(|i| rows[i]).collect();
+    println!("highest spring mode omega_max*h {:.3}", car.omega_h);
     println!("contact-only nodes: row p50 {:.2} max {:.2}", pct(&mut lane, 0.5), pct(&mut lane, 1.0));
 }

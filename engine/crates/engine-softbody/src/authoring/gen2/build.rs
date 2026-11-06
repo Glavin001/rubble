@@ -205,18 +205,18 @@ fn env_f(k: &str, d: f32) -> f32 {
 /// aprons, rear rails), `GEN2_CRUSH`: calibrated on wall56 against NHTSA's
 /// frontal residual crush (`crash-reference-targets.md` §1).
 pub fn crush_mult() -> f32 {
-    env_f("GEN2_CRUSH", 2.5)
+    env_f("GEN2_CRUSH", 4.5)
 }
 
 /// The cabin's yield multiple (sills, pillars, roof rails), `GEN2_CABIN`.
 pub fn cabin_mult() -> f32 {
-    env_f("GEN2_CABIN", 1.6)
+    env_f("GEN2_CABIN", 6.0)
 }
 
 /// The Gershgorin row cap as a multiple of sedan1's (`GEN2_ROW`, default 2.0:
 /// the census's BeamNG parts run at p50 1.1–1.6, p90 1.4–2.6 in JBeam mode).
 pub fn row_cap() -> f32 {
-    env_f("GEN2_ROW", 2.0)
+    env_f("GEN2_ROW", 3.0)
 }
 
 /// Stiffness multiple on every census band (`GEN2_STIFF`, the margin sweep).
@@ -226,6 +226,10 @@ pub fn stiff_mult() -> f32 {
 
 /// Damping ratio of every spring beam (census ζ 0.03–0.05).
 pub const ZETA: f32 = 0.04;
+
+/// The explicit step's real bound with margin: the highest spring mode at
+/// ω_max·h ≤ 1.85 (symplectic Euler diverges past 2).
+pub const OMEGA_H: f32 = 1.85;
 
 impl Role {
     pub fn spec(self, part: Part) -> RoleSpec {
@@ -271,7 +275,7 @@ impl Role {
             Role::Bearing => RoleSpec { support: true, ..fixed(0.6e6, inf, 150e3) },
             Role::Engine => fixed(6e6, inf, inf),
             Role::Mount => fixed(2.0e6, inf, 60e3),
-            Role::Susp => fixed(3.0e6, 0.03, 140e3),
+            Role::Susp => fixed(3.0e6, 0.03, 250e3),
         }
     }
 }
@@ -290,6 +294,8 @@ pub struct Node {
     pub self_collision: bool,
     /// Excluded from the flexbody groups (latch nodes coincide with tag nodes).
     pub no_group: bool,
+    /// A mass of its own (kg), outside its part's budget (0: none).
+    pub fixed_mass: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -303,6 +309,8 @@ pub struct Beam {
     pub deform: f32,
     pub strength: f32,
     pub break_group: Option<String>,
+    /// JBeam deformLimit (compression: L ≥ (1 − d)·L₀), 0 for none.
+    pub deform_limit: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -341,6 +349,8 @@ pub struct Car {
     /// Real part masses (kg) the structural nodes share.
     pub part_mass: BTreeMap<Part, f32>,
     pub refs: [usize; 4],
+    /// The highest spring mode after [`Car::assign_springs`] (ω_max·h).
+    pub omega_h: f32,
     by_name: HashMap<String, usize>,
     pair: HashMap<(usize, usize), usize>,
 }
@@ -358,6 +368,7 @@ impl Car {
             opts: Vec::new(),
             self_collision: false,
             no_group: false,
+            fixed_mass: 0.0,
         });
         let i = self.nodes.len() - 1;
         self.by_name.insert(name.to_string(), i);
@@ -394,6 +405,7 @@ impl Car {
             deform: 0.0,
             strength: sp.strength,
             break_group: None,
+            deform_limit: 0.0,
         });
         let j = self.beams.len() - 1;
         self.pair.insert(key, j);
@@ -657,8 +669,13 @@ impl Car {
                 }
             }
         }
+        for i in 0..n {
+            if self.nodes[i].fixed_mass > 0.0 {
+                self.nodes[i].mass = self.nodes[i].fixed_mass;
+            }
+        }
         for (&part, &kg) in &self.part_mass.clone() {
-            let ids: Vec<usize> = (0..n).filter(|&i| self.nodes[i].part == part).collect();
+            let ids: Vec<usize> = (0..n).filter(|&i| self.nodes[i].part == part && self.nodes[i].fixed_mass == 0.0).collect();
             let contact = ids.iter().filter(|&&i| self.nodes[i].contact).count();
             let budget = kg - contact as f32 * CONTACT_MASS;
             assert!(budget > 0.0, "{part:?}: {kg} kg for {contact} contact nodes");
@@ -670,9 +687,9 @@ impl Car {
                 }
                 sw = structural as f32;
             }
-            // A floor of a fifth of the mean share: no structural node is left
+            // A floor of half the mean share (BeamNG closures are near uniform): no node is left
             // as light as a lane node.
-            let floor = 0.2 * sw / structural as f32;
+            let floor = 0.5 * sw / structural as f32;
             let sw2: f32 = ids.iter().filter(|&&i| !self.nodes[i].contact).map(|&i| w[i].max(floor)).sum();
             for &i in &ids {
                 self.nodes[i].mass = if self.nodes[i].contact { CONTACT_MASS } else { budget * w[i].max(floor) / sw2 };
@@ -768,11 +785,68 @@ impl Car {
                 break;
             }
         }
+        // The real bound: the highest mode of M⁻¹K (power iteration), the
+        // beams of the nodes that carry it softened until ω_max·h ≤ OMEGA_H.
+        let dirs: Vec<Vec3> = self.beams.iter().map(|b| (self.p(b.b) - self.p(b.a)).normalize_or_zero()).collect();
+        let mut x: Vec<Vec3> = (0..n).map(|i| Vec3::new((i % 7) as f32 - 3.0, (i % 5) as f32 - 2.0, (i % 3) as f32 - 1.5)).collect();
+        // Damping counts as stiffness 2c/h (symplectic Euler with damping is
+        // stable while h²ω² + 2hγ < 4); the loader's latch couplers (spec §7:
+        // k = 0.16 μ/h², c = √(kμ), isotropic) are in the model too.
+        let mut couplers: Vec<(usize, usize, f32)> = Vec::new();
+        for i in 0..n {
+            let tag = |k: &str| self.nodes[i].opts.iter().find(|(o, _)| o == k).and_then(|(_, v)| v.as_str().map(str::to_string));
+            if let Some(t) = tag("couplerTag") {
+                if let Some(o) = (0..n).find(|&o| self.nodes[o].opts.iter().any(|(k, v)| k == "tag" && v.as_str() == Some(&t))) {
+                    let mu = m[i] * m[o] / (m[i] + m[o]);
+                    couplers.push((i, o, 0.96 * mu / (H * H)));
+                }
+            }
+        }
+        let mut omega_h = 0.0;
+        for round in 0..2000 {
+            let iters = if round == 0 { 400 } else { 40 };
+            let mut lam = 0.0f32;
+            for _ in 0..iters {
+                let mut y = vec![Vec3::ZERO; n];
+                for (j, b) in self.beams.iter().enumerate() {
+                    let d = dirs[j];
+                    let keff = ks[j] + 2.0 * damp(ks[j], b) / H;
+                    let f = d * (keff * d.dot(x[b.a] - x[b.b]));
+                    y[b.a] += f;
+                    y[b.b] -= f;
+                }
+                for &(a, b, k) in &couplers {
+                    let f = (x[a] - x[b]) * k;
+                    y[a] += f;
+                    y[b] -= f;
+                }
+                for i in 0..n {
+                    y[i] /= m[i];
+                }
+                let ny = y.iter().map(|v| v.length_squared()).sum::<f32>().sqrt();
+                let nx = x.iter().map(|v| v.length_squared()).sum::<f32>().sqrt();
+                lam = ny / nx.max(1e-30);
+                x = y.into_iter().map(|v| v / ny.max(1e-30)).collect();
+            }
+            omega_h = lam.sqrt() * H;
+            if omega_h <= OMEGA_H {
+                break;
+            }
+            let amax = x.iter().map(|v| v.length_squared()).fold(0.0, f32::max);
+            for i in 0..n {
+                if x[i].length_squared() >= 0.25 * amax {
+                    for &j in &adj[i] {
+                        ks[j] *= 0.97;
+                    }
+                }
+            }
+        }
+        self.omega_h = omega_h;
         for (j, b) in self.beams.iter_mut().enumerate() {
             let sp = b.role.spec(b.part);
             b.k = ks[j];
             b.c = 2.0 * ZETA * (ks[j] * (m[b.a] * m[b.b] / (m[b.a] + m[b.b]))).sqrt();
-            b.deform = if sp.eps.is_finite() { sp.eps * ks[j] * len[j] } else { f32::INFINITY };
+            b.deform = if sp.eps.is_finite() { sp.eps * ks[j] * len[j].max(SPRING_LENGTH) } else { f32::INFINITY };
         }
     }
 
