@@ -810,3 +810,48 @@ this was written, so `cpl_plan` still scans every collider for every vehicle eac
 `cpl_plan` reads their candidates and the sleep rule's World trigger becomes the
 broadphase's touch mark (a moving collider entering a sleeping vehicle's fat box); no
 second broadphase is built here.
+
+## 11. The vehicles in the World broadphase (2026-11-06)
+
+Branch `feat/softbody-world-broadphase`; measurements in
+`docs/measurements/softbody-world-broadphase.md`. This replaces §10.2's waiting note.
+
+**Candidates from the World's own broadphase.** When the rigid step kept the awake-indexed
+broadphase's persistent resting table (`WgpuSim::rest_view`: statics and sleepers at their
+cells, hierarchical or uniform; kept unless the step took the full pass, reused manifolds
+or a host write made it stale), `cpl_query` (one workgroup per vehicle) collects the
+coupling's candidates from:
+* the resting table's cells near the vehicle's swept box (the box plus a cell, or two
+  uniform cells and the largest half extent, and 5 cm for a sleeper's bounds from its last
+  moving step), each entry at its own inserted cell and level, and its header lists
+  (oversized statics, resting large dynamics); a range wider than the table's heads walks
+  the heads once instead;
+* the step's moving colliders (`list_moving_colliders`) and every collider of a body whose
+  pose or sleep state changed in it (`pose_pack`'s moved list): a body that moved, woke or
+  fell asleep is found wherever it went.
+
+Each candidate passes `cpl_plan`'s exact test (filter, swept bounding sphere against the
+swept box) before it is listed; `cpl_plan` reads the list (one copy of each) in place of its
+scan. Lossless: from one World state the two plans write every proxy record word for word
+(`engine-world/tests/explicit_vehicle_broadphase.rs`: hierarchical and uniform grids;
+statics, sleepers, falling and resting boxes beside and on a car; 20 checks each). Cost:
+O(nearby) for statics and sleepers, O(awake) for movers. Without the table (GPU fracture
+worlds such as the crash town, characters, soft bodies) the scan remains
+(`World::explicit_plan_used_broadphase`).
+
+**Proxy API** (`explicit_vehicles.rs`): each vehicle's proxy is a fat box (its swept box
+grown by `PROXY_SLACK`, 0.5 m, when the swept box leaves it), updated at the World's rate
+by `cpl_bounds`. It is frozen while the vehicle sleeps (vehicle sleep keeps its bounds; its
+plan still runs, from the broadphase, and wakes it beside a moving body) or while it is
+out of the broadphase. The calls:
+* `World::set_explicit_vehicle_in_broadphase(v, bool)` removes a vehicle (no query, no
+  proxies) or puts it back (refattened);
+* `explicit_vehicle_proxy(v)` reads its proxy;
+* `explicit_proxy_table()` hands its GPU records (fat box, refattens) to a GPU consumer.
+
+**Surface contact against the proxies** (spec §38.3–38.4): the candidate list is the
+surface pass's slot list after the static slots (every kind, static and dynamic). The
+per-vehicle copied slots remain only for the standalone `ExplicitSim`.
+
+What still follows the World's size per window: the clear of the per-body share counts
+(4 bytes × body capacity), and the rigid step's own O(total) passes (`large-maps.md` §1a).

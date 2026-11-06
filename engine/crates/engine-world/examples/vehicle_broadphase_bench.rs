@@ -58,7 +58,7 @@ fn sedan(at: Vec3, speed: f32) -> ExplicitBeams {
         n.vel = Vec3::new(0.0, 0.0, speed);
     }
     sim.ground = at.y;
-    sim.surface_contact = true;
+    sim.surface_contact = !std::env::args().any(|a| a == "--no-surface");
     sim.dissipative_contact = true;
     sim
 }
@@ -216,6 +216,12 @@ fn main() {
                 planes: 4096,
             },
             ..ExplicitVehiclesDef::default()
+        };
+        // `--no-sleep`: the cars stay awake (their frame and surface pass run every step).
+        let def = if std::env::args().any(|a| a == "--no-sleep") {
+            ExplicitVehiclesDef { sleep: None, ..def }
+        } else {
+            def
         };
         w.add_explicit_vehicles(&fleet, &def).unwrap();
         // Settle: the boxes land and fall asleep.
