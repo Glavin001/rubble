@@ -1595,7 +1595,7 @@ float wrapAngle(float a)
 }
 
 // Beam bn's vehicle has centred damping (FLAG_CENTRED, §39).
-bool centredOn(uint4 bn) { return (gStatic[(bn.z >> 16) * 4u + 3u].x & FLAG_CENTRED) != 0u; }
+bool centredOn(uint4 bn) { return gP.centredDv != 0u && (gStatic[(bn.z >> 16) * 4u + 3u].x & FLAG_CENTRED) != 0u; }
 void jtorsionUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, float4 s1, float4 c1, uint4 r2,
                     float3 x1, float3 x2, float3 v1, float3 v2)
 {
@@ -2295,15 +2295,13 @@ void jbeamExtUpdate(uint gj, uint local, uint groupOff, uint parity, uint4 bn, f
 // --- Centred damping (jbeam-semantics-spec.md §39; the CPU reference's
 // ExplicitBeams::centred_correction). The beam phase keeps each JBeam record's
 // damping slope in its first incidence entry's .w (0: none). gBeams at
-// gP.centredDv + node: the node's velocity before its node phase (centredSave),
-// then the phase's Δv (centredDelta). After the node phase each record writes its
+// gP.centredDv + node: the node phase's Δv (centredDelta, in the node loop: the
+// velocity before it kept in a register). After the node phase each record writes its
 // correction −½·slope·Δu into its incidence entries (centredBeam), and each node
 // adds their sum as a velocity and position step (centredNode).
-void centredSave(uint gi) { gBeams[gP.centredDv + gi] = float4(gNodes[gi * 3u + 1u].xyz, 0.0); }
-
-void centredDelta(uint gi)
+// Node gi's Δv after its node phase, from its velocity `v0` before it.
+void centredDelta(uint gi, float3 v0)
 {
-    float3 v0 = gBeams[gP.centredDv + gi].xyz;
     gBeams[gP.centredDv + gi] = float4(ssub3(gNodes[gi * 3u + 1u].xyz, v0), 0.0);
 }
 
@@ -2415,10 +2413,6 @@ void centredPhase(uint flagsV, uint nodeOff, uint nodeCount, uint beamOff, uint 
                   uint groupCount, uint step, uint lane, uint lanes)
 {
     bool on = (flagsV & FLAG_CENTRED) != 0u;
-    if (on)
-    {
-        for (uint i = lane, iStop = EB_END(i, nodeCount, lanes); i < iStop; i += lanes) centredDelta(nodeOff + i);
-    }
     sync();
     if (on)
     {
@@ -2431,7 +2425,8 @@ void centredPhase(uint flagsV, uint nodeOff, uint nodeCount, uint beamOff, uint 
         for (uint i = lane, iStop = EB_END(i, nodeCount, lanes); i < iStop; i += lanes)
             centredNode(nodeOff + i, beamOff, groupOff, groupCount, parity);
     }
-    sync();
+    // No barrier here: what follows reads a node only after its own barrier, or
+    // (centredBox) its lane's own nodes.
 }
 
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
@@ -4820,26 +4815,28 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
 #ifdef EB_VV_SOLO
-        if (gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u)
-        {
-            for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES) centredSave(nodeOff + i);
-        }
+        bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+        {
+            float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdateSolo(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
+            if (centredV) centredDelta(nodeOff + i, v0);
+        }
 #else
 #ifdef EB_ABLATE
         uint nodeEnd = (gP.ablate & 2u) != 0u ? 0u : ((gP.ablate & 4u) != 0u ? min(nodeCount, LANES) : nodeCount);
 #else
         uint nodeEnd = nodeCount;
 #endif
-        if (gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u)
-        {
-            for (uint i = lane, iStop = EB_END(i, nodeEnd, LANES); i < iStop; i += LANES) centredSave(nodeOff + i);
-        }
+        bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeEnd, LANES); i < iStop; i += LANES)
+        {
+            float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdate(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
+            if (centredV) centredDelta(nodeOff + i, v0);
+        }
 #endif
         if (gP.centredDv != 0u) centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
 
@@ -5186,10 +5183,10 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
         Vehicle x = vehicleAt(v);
         float3 origin = vehicleOrigin(v);
         bool centred = gP.centredDv != 0u && (x.flags & FLAG_CENTRED) != 0u;
-        if (centred) centredSave(i);
+        float3 v0 = centred ? gNodes[i * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
         nodeUpdate(i, info, v, i - x.nodeOff, vehicleStep(v), origin, x.flags, x.ground, x.boxOff, x.boxCount,
                    x.beamOff, x.groupOff, x.groupCount, true);
-        if (centred) centredDelta(i);
+        if (centred) centredDelta(i, v0);
         return ebLoopCapFlush();
     }
     i -= gP.totalNodes;
@@ -5972,14 +5969,13 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
         float3 hi = -lo;
         bool has = false;
-        if (gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u)
-        {
-            for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES) centredSave(nodeOff + i);
-        }
+        bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
         {
+            float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
                        boxOff, boxCount, beamOff, groupOff, groupCount, true);
+            if (centredV) centredDelta(nodeOff + i, v0);
             float3 x = nf3(origin + gNodes[(nodeOff + i) * 3u].xyz);
             lo = min(lo, x);
             hi = max(hi, x);
@@ -6348,14 +6344,13 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
         float3 hi = -lo;
         bool has = false;
-        if (gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u)
-        {
-            for (uint i = pl, iStop = EB_END(i, nodeCount, P); i < iStop; i += P) centredSave(nodeOff + i);
-        }
+        bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = pl, iStop = EB_END(i, nodeCount, P); i < iStop; i += P)
         {
+            float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
                        boxOff, boxCount, beamOff, groupOff, groupCount, true);
+            if (centredV) centredDelta(nodeOff + i, v0);
             float3 x = nf3(origin + gNodes[(nodeOff + i) * 3u].xyz);
             lo = min(lo, x);
             hi = max(hi, x);

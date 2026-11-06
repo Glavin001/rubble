@@ -2722,7 +2722,7 @@ instead of ringing back. The energy ledger closes as before.
 **GPU.** `slang/kernels/explicit_beams.slang` (`FLAG_CENTRED`, `centredPhase`,
 `centredBeam`, `centredNode`; the slope in the first incidence entry's `.w`, a
 per-node Δv region at `gP.centredDv`) in the vehicle workgroups, the contact
-groups and the wide passes (`wide_nodes` keeps each node's Δv; two more passes per
+groups and the wide passes (the node loops keep each node's Δv; two more passes per
 step, `wide_centred_beams` and `wide_centred_nodes`, only when a vehicle has it).
 Metal (`engine-metal/tests/explicit_centred_damping.rs`) as wgpu: the fixture car
 at rest and the latched box into a wall bit for bit on the frame and the wide
@@ -2736,6 +2736,33 @@ the four configurations interleaved frame by frame):
 |---|---|---|---|
 | wide passes | 36.9 ms | 42.0 ms | +14 % |
 | vehicle workgroups | 10.3 ms | 12.2 ms | +19 % |
+
+**Where it goes, and what did not cut it (2026-11-06).** The same measurement,
+three rounds of two binaries alternating (each round its own interleaved off/on),
+with kernel variants that skip one part (measurement builds, not kept):
+
+| variant | vehicle workgroups | wide passes |
+|---|---|---|
+| as shipped | +23.0 … +24.9 % | +8.3 … +9.0 % |
+| the records' corrections skipped | +6.9 … +7.5 % | +6.8 … +7.0 % |
+| the nodes' sums skipped | +20.6 … +21.2 % | +4.9 … +5.3 % |
+| both skipped (barriers, Δv) | +2.7 … +3.3 % | +4.8 … +5.0 % |
+
+So on the vehicle workgroups the records' corrections are three quarters of the
+cost, the nodes' sums a sixth; on the wide passes the two extra dispatches are
+half. (The earlier +14 % of the wide passes did not repeat: +8–9 % in every
+later round.) Bit-identical changes tried:
+* the step-start velocity in a register in the node loop (no Δv buffer round
+  trip), the barrier after the nodes' sums dropped (what follows reads a node only
+  after its own barrier), the beam phase's flag read skipped when no vehicle has
+  the flag: kept (simpler, no slower), +23.7 … +24.2 % / +7.2 … +8.0 %: within the
+  noise;
+* each record's correction in its own coalesced entries (no incidence lookups in
+  the records' pass) and the nodes gathering them through their incidence lists:
+  worse, +39 % / +19 %, not kept.
+The rest is the scheme's work itself (one more pass over the records with their
+lengths at the new positions, one over the nodes); a cheaper form would change
+the results.
 
 (The community cars do not take the wide passes: they carry commands or shocks2.) `tests/explicit_centred_damping_gpu.rs`: bit for bit every
 step against the CPU for the pressure-wheel fixture car at rest (4,000 steps) and at
@@ -2768,6 +2795,9 @@ cars' masses, so "off" here is not §39's "current"):
 * **Community sweep** (198 configurations, 1 s at rest): off 141 / 49 / 8 clean /
   marginal / broken, **on 176 / 22 / 0** (the same classes as §39's centred column;
   the Vertex's `powerdemonrwd` 1.01 → 0.79 m/s, `taxi_taxi_carrier` 0.96 → 1.00).
+  Re-run on `merge/showcase-main` with the complete energy ledger and the yield fix
+  (feat/jbeam-community 81283d5e) and surface contact r2: off 144 / 46 / 8, **on
+  176 / 22 / 0**.
 * **`vehicle_compare`** (sedan1, ETK kr6 and kc6, CCF, Vertex;
   `engine/docs/measurements/vehicle-compare.{md,json}` is the new baseline, the old
   one had sedan1 and the ETKs only). Every reference that moved, off → on:
