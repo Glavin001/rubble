@@ -1431,9 +1431,10 @@ impl ExplicitUpload {
                     acc_init.extend(w);
                 }
             }
-            // §37's residual pass (the kernel's resAt: selfSplit + 4·totalNodes):
-            // per node its active count and residual sums, zero between steps.
-            acc_init.extend(std::iter::repeat_n(0, 4 * total_nodes));
+            // §37.1's residual pass and work guard (the kernel's resAt: selfSplit +
+            // 4·totalNodes): per node 8 words (the residual's staged sums B, the
+            // totals' deltas D), zero between steps.
+            acc_init.extend(std::iter::repeat_n(0, 8 * total_nodes));
             at
         } else {
             0
