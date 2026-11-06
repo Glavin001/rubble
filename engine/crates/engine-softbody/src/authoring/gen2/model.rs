@@ -127,6 +127,15 @@ impl Part {
         if g.length_squared() < 1e-14 {
             return;
         }
+        // Three nearly collinear points (a grid folding along a kinked
+        // border) span no surface: drop the sliver.
+        let l = (b - a)
+            .length_squared()
+            .max((c - b).length_squared())
+            .max((a - c).length_squared());
+        if l / g.length() > 40.0 {
+            return;
+        }
         let n = self.nrm[t[0] as usize] + self.nrm[t[1] as usize] + self.nrm[t[2] as usize];
         self.tris.push(if g.dot(n) >= 0.0 {
             t
@@ -580,7 +589,16 @@ pub fn emit(part: &mut Part, g: &Grid, m: Mat, col: [f32; 3]) -> Vec<u32> {
             }
             match u.len() {
                 4 => part.quad(q[0], q[1], q[2], q[3], m),
-                3 => part.tri([u[0], u[1], u[2]], m),
+                3 => {
+                    // A collapsed quad along a border can leave three nearly
+                    // collinear border points: a sliver of no area, dropped.
+                    let [a, b, c] = [u[0], u[1], u[2]].map(|v| part.pos[v as usize]);
+                    let area = 0.5 * (b - a).cross(c - a).length();
+                    let l = (b - a).length().max((c - b).length()).max((a - c).length());
+                    if l * l / (2.0 * area.max(1e-12)) <= 12.0 {
+                        part.tri([u[0], u[1], u[2]], m);
+                    }
+                }
                 _ => {}
             }
         }
@@ -956,7 +974,7 @@ const BL_BASE: f32 = -1.80;
 /// The hood's rear edge (the cowl between it and the windshield).
 const HOOD_REAR: f32 = 0.86;
 /// Bumper top on the sides (front, rear).
-const BUMPER_TOP_F: f32 = 0.625;
+const BUMPER_TOP_F: f32 = 0.67;
 const BUMPER_TOP_R: f32 = 0.80;
 
 pub fn build() -> Model {
@@ -1031,7 +1049,7 @@ pub fn build() -> Model {
     // ------------------------------------------------------------------
     // Hood: from the cowl to its leading edge (bowed back to the corners).
     // ------------------------------------------------------------------
-    let hood_front = |t: f32| 2.115 + 0.10 * (1.0 - (2.0 * t - 1.0).powi(2));
+    let hood_front = |t: f32| 2.115 + 0.06 * (1.0 - (2.0 * t - 1.0).powi(2));
     let hood = {
         let h1 = th_hood.clone();
         let h2 = th_hood.clone();
@@ -1599,21 +1617,49 @@ pub fn build() -> Model {
     let phi_tl_in = phi_at_x(Param::Tail, x_tl_in, 0.80);
     let y_rbt = |phi: f32| BUMPER_TOP_R - 0.015 * (1.0 - (phi / FRAC_PI_2).powi(2)).max(0.0) + 0.0;
     {
-        let fy = phi_y(Param::Tail, &fold);
-        let st = Strip::new(
-            Param::Tail,
-            k(-phi_tl_in),
-            k(phi_tl_in),
-            Box::new(y_rbt),
-            fy,
-        );
-        let mut g = grid(&st, H);
-        g.shrink([true, false, true, true], GAP);
-        let part = m.part("trunk_lid");
-        let ids = emit(part, &g, Mat::Paint, [1.0; 3]);
-        for e in [0, 2, 3] {
-            hem(part, &g, &ids, e, Mat::Paint);
+        // Round a licence-plate recess (a US plate, 305 × 152 mm, on a
+        // 330 × 165 mm pocket 15 mm deep).
+        let phi_p = phi_at_x(Param::Tail, 0.165, 0.90);
+        let (yp0, yp1) = (0.828, 0.993);
+        let pieces: [(f32, f32, F, F, [bool; 4]); 4] = [
+            (
+                -phi_tl_in,
+                -phi_p,
+                Box::new(y_rbt),
+                phi_y(Param::Tail, &fold),
+                [true, false, true, false],
+            ),
+            (
+                phi_p,
+                phi_tl_in,
+                Box::new(y_rbt),
+                phi_y(Param::Tail, &fold),
+                [true, false, false, true],
+            ),
+            (
+                -phi_p,
+                phi_p,
+                Box::new(y_rbt),
+                k(yp0),
+                [true, false, false, false],
+            ),
+            (-phi_p, phi_p, k(yp1), phi_y(Param::Tail, &fold), [false; 4]),
+        ];
+        for (a0, a1, lo, hi, gaps) in pieces {
+            let st = Strip::new(Param::Tail, k(a0), k(a1), lo, hi);
+            let mut g = grid(&st, H);
+            g.shrink(gaps, GAP);
+            let part = m.part("trunk_lid");
+            let ids = emit(part, &g, Mat::Paint, [1.0; 3]);
+            for e in 0..4 {
+                if gaps[e] {
+                    hem(part, &g, &ids, e, Mat::Paint);
+                }
+            }
         }
+        let st = Strip::new(Param::Tail, k(-phi_p), k(phi_p), k(yp0), k(yp1));
+        let g = grid(&st, H);
+        recess(&mut m, "trunk_lid", &g, 0.015, Mat::MetalBare, Mat::Paint);
     }
     let _ = fold_y;
     // Tail lamps: the rear face's corners up to the quarter's and the deck's
@@ -1642,7 +1688,7 @@ pub fn build() -> Model {
     let phi_g = phi_at_x(Param::Nose, x_grille, 0.62);
     let y_bt_f = move |phi: f32| {
         let w = sf::smoothstep(phi_g - 0.02, phi_g + 0.08, phi.abs());
-        0.545 + (BUMPER_TOP_F - 0.545) * w
+        0.56 + (BUMPER_TOP_F - 0.56) * w
     };
     {
         let mut top: Vec<Vec3> = hood_edge.iter().copied().filter(|p| p.x > 0.0).collect();
@@ -1724,11 +1770,23 @@ pub fn build() -> Model {
     }
     // Rear bumper.
     {
+        // The painted cover stops 8 cm up at the centre over a black valance.
+        let valance = |phi: f32| 0.34 + 0.08 * (1.0 - sf::smoothstep(1.05, 1.25, phi.abs()));
+        let lo = tab(
+            move |phi| {
+                let z = sf::hit(Param::Tail, phi, 0.45).z;
+                let b = valance(phi);
+                let b = b + (TYRE_R - b).max(0.0) * sf::smoothstep(1.05, 1.35, phi.abs());
+                b.max(sf::arch_y(z).unwrap_or(0.0))
+            },
+            -FRAC_PI_2,
+            FRAC_PI_2,
+        );
         let st = Strip::new(
             Param::Tail,
             k(-FRAC_PI_2),
             k(FRAC_PI_2),
-            arch_lo(Param::Tail, 0.34),
+            lo,
             Box::new(y_rbt),
         );
         let mut g = grid(&st, H);
@@ -1738,9 +1796,14 @@ pub fn build() -> Model {
         for e in 0..4 {
             hem(part, &g, &ids, e, Mat::Paint);
         }
-        // A black diffuser band along the bottom.
-        let st = Strip::new(Param::Tail, k(-1.2), k(1.2), Box::new(|_| 0.30), k(0.34));
-        let g = grid(&st, H).offset(0.002);
+        let st = Strip::new(
+            Param::Tail,
+            k(-1.15),
+            k(1.15),
+            k(0.27),
+            Box::new(move |phi| valance(phi) - 0.004),
+        );
+        let g = grid(&st, H).offset(0.003);
         emit(m.part("bumper_rear"), &g, Mat::TrimBlack, [1.0; 3]);
     }
 

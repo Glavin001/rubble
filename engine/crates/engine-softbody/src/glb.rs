@@ -511,6 +511,9 @@ pub fn class_of(material: &str, part: &str) -> u8 {
                 mat::BRAKE
             } else if p.starts_with("firewall") {
                 mat::INNER
+            } else if p.starts_with("trunk_lid") || p.starts_with("bumper") {
+                // Bare metal on a closure or bumper: the licence plate.
+                mat::PLATE
             } else {
                 mat::ENGINE
             }

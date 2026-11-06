@@ -407,6 +407,9 @@ fn main() {
             }
             if cr.dot(n[tr[0]] + n[tr[1]] + n[tr[2]]) < 0.0 {
                 inverted += 1;
+                if std::env::var("GLB_DEBUG").is_ok() {
+                    println!("  inverted {} ({:.3}, {:.3}, {:.3})", m.name, a.x, a.y, a.z);
+                }
             }
             if is_panel(&m.name) {
                 let l = [(b - a).length(), (c - b).length(), (a - c).length()];
