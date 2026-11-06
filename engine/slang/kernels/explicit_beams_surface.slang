@@ -901,16 +901,37 @@ void surfApply(uint v, uint4 tn, float3 w, float3 nn, float gap, float r)
 
 // Triangle gt (of vehicle v) against every box slot: apply 0 counts its hits, 1
 // applies them.
+// The find's slot masks (lossless: the apply recomputes only the slots its element
+// hit, the same hits in the same order): bit b for slot b < 31, bit 31 any slot
+// from 31 on.
+uint surfMarkBit(uint b) { return b < 31u ? (1u << b) : 0x80000000u; }
+
+// An element's mask at gAcc index mk: the find stores it (0 when it skips the
+// element), the apply reads it.
+uint surfMaskIn(uint mk, bool apply) { return apply ? uint(gAcc[mk].load()) : 0u; }
+void surfMaskOut(uint mk, bool apply, uint mask)
+{
+    if (!apply) gAcc[mk].store(int(mask));
+}
+
 void surfTriangle(uint v, uint gt, float3 origin, float r, uint boxOff, uint boxCount, bool apply)
 {
-    if (gP.triBreak != 0u && triangleDead(gt)) return;
-    if ((gMisc[gP.vehicles + gt].z & TRI_ANTI_ONLY) != 0u) return;
+    uint mk = gP.surfMark + gt;
+    uint mask = surfMaskIn(mk, apply);
+    if ((gP.triBreak != 0u && triangleDead(gt)) || (gMisc[gP.vehicles + gt].z & TRI_ANTI_ONLY) != 0u
+        || (apply && mask == 0u))
+    {
+        surfMaskOut(mk, apply, 0u);
+        return;
+    }
     uint4 tn = gStatic[gP.triBase + gt];
     float3 x0 = nf3(origin + gNodes[tn.x * 3u].xyz);
     float3 x1 = nf3(origin + gNodes[tn.y * 3u].xyz);
     float3 x2 = nf3(origin + gNodes[tn.z * 3u].xyz);
+    uint found = 0u;
     for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
     {
+        if (apply && (mask & surfMarkBit(b)) == 0u) continue;
         float3 lo;
         float3 hi;
         SurfShape s = surfSlot(boxOff, b, lo, hi);
@@ -922,6 +943,7 @@ void surfTriangle(uint v, uint gt, float3 origin, float r, uint boxOff, uint box
         if (!surfContact(s, x0, x1, x2, r, w, nn, g, q)) continue;
         if (!apply)
         {
+            found |= surfMarkBit(b);
             if (w.x > 0.0) gAcc[gP.surfSplit + tn.x].add(1);
             if (w.y > 0.0) gAcc[gP.surfSplit + tn.y].add(1);
             if (w.z > 0.0) gAcc[gP.surfSplit + tn.z].add(1);
@@ -929,6 +951,7 @@ void surfTriangle(uint v, uint gt, float3 origin, float r, uint boxOff, uint box
         else
             surfApply(v, tn, w, nn, g, r);
     }
+    surfMaskOut(mk, apply, found);
 }
 
 // Beam j is broken as the CPU sees it after this step's beam pass: its flag, or a
@@ -944,15 +967,22 @@ bool surfBroken(uint j, uint groupOff, uint parity)
 
 // Beam gj of vehicle v (a segment: beam-edge contact) against every box slot: apply
 // 0 counts its hits, 1 applies them (its nodes (a, b, a), w.z 0).
-void surfSegment(uint v, uint gj, float3 origin, float r, uint boxOff, uint boxCount, uint groupOff, uint parity,
-                 bool apply)
+void surfSegment(uint v, uint gj, uint mk, float3 origin, float r, uint boxOff, uint boxCount, uint groupOff,
+                 uint parity, bool apply)
 {
-    if (surfBroken(gj, groupOff, parity)) return;
+    uint mask = surfMaskIn(mk, apply);
+    if ((apply && mask == 0u) || surfBroken(gj, groupOff, parity))
+    {
+        surfMaskOut(mk, apply, 0u);
+        return;
+    }
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
     float3 x0 = nf3(origin + gNodes[bn.x * 3u].xyz);
     float3 x1 = nf3(origin + gNodes[bn.y * 3u].xyz);
+    uint found = 0u;
     for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
     {
+        if (apply && (mask & surfMarkBit(b)) == 0u) continue;
         float3 lo;
         float3 hi;
         SurfShape s = surfSlot(boxOff, b, lo, hi);
@@ -968,6 +998,7 @@ void surfSegment(uint v, uint gj, float3 origin, float r, uint boxOff, uint boxC
         uint hits = two ? 2u : 1u;
         if (!apply)
         {
+            found |= surfMarkBit(b);
             gAcc[gP.surfSplit + bn.x].add(int(hits));
             gAcc[gP.surfSplit + bn.y].add(int(hits));
         }
@@ -977,6 +1008,7 @@ void surfSegment(uint v, uint gj, float3 origin, float r, uint boxOff, uint boxC
             if (two) surfApply(v, uint4(bn.x, bn.y, bn.x, 0u), w2, nn, g, r);
         }
     }
+    surfMaskOut(mk, apply, found);
 }
 
 // point_nearest: the shape's point nearest x outside it (.w 1), else .w 0.
@@ -1029,12 +1061,19 @@ bool surfPointContact(SurfShape s, float3 x, float r, out float3 n, out float g)
 
 // Node gi of vehicle v (point contact in the band) against every box slot: apply 0
 // counts its hits, 1 applies them.
-void surfPoint(uint v, uint gi, float3 origin, float r, uint boxOff, uint boxCount, bool apply)
+void surfPoint(uint v, uint gi, uint mk, float3 origin, float r, uint boxOff, uint boxCount, bool apply)
 {
-    if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) != 0u) return;
+    uint mask = surfMaskIn(mk, apply);
+    if ((apply && mask == 0u) || (gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) != 0u)
+    {
+        surfMaskOut(mk, apply, 0u);
+        return;
+    }
     float3 x = nf3(origin + gNodes[gi * 3u].xyz);
+    uint found = 0u;
     for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
     {
+        if (apply && (mask & surfMarkBit(b)) == 0u) continue;
         float3 lo;
         float3 hi;
         SurfShape s = surfSlot(boxOff, b, lo, hi);
@@ -1042,9 +1081,15 @@ void surfPoint(uint v, uint gi, float3 origin, float r, uint boxOff, uint boxCou
         float3 nn;
         float g;
         if (!surfPointContact(s, x, r, nn, g)) continue;
-        if (!apply) gAcc[gP.surfSplit + gi].add(1);
-        else surfApply(v, uint4(gi, gi, gi, 0u), float3(1.0, 0.0, 0.0), nn, g, r);
+        if (!apply)
+        {
+            found |= surfMarkBit(b);
+            gAcc[gP.surfSplit + gi].add(1);
+        }
+        else
+            surfApply(v, uint4(gi, gi, gi, 0u), float3(1.0, 0.0, 0.0), nn, g, r);
     }
+    surfMaskOut(mk, apply, found);
 }
 
 // Whether any vehicle of the upload has surface contact (uniform: a parameter).
@@ -1080,15 +1125,15 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
     for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
         surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, false);
     for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
-        surfSegment(v, gLists[sr.x + j], origin, r, r1.z, r1.w, r2.z, parity, false);
+        surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, r2.z, parity, false);
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
-        surfPoint(v, r0.x + i, origin, r, r1.z, r1.w, false);
+        surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, false);
     sync();
     for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
         surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, true);
     for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
-        surfSegment(v, gLists[sr.x + j], origin, r, r1.z, r1.w, r2.z, parity, true);
+        surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, r2.z, parity, true);
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
-        surfPoint(v, r0.x + i, origin, r, r1.z, r1.w, true);
+        surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, true);
     if (lane == 0u && mine) gsHit = 1u;
 }

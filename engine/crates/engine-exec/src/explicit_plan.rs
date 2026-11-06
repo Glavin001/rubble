@@ -1480,6 +1480,28 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // Surface contact's segments per vehicle (beam-edge contact; none without
+        // the flag), and the find's slot masks (gAcc): per triangle, then per
+        // segment, then per node, each the slots it hit (bit b slot b, bit 31 any
+        // slot from 31 on), so the apply recomputes only those.
+        let surf_segs: Vec<Vec<u32>> = vehicles
+            .iter()
+            .map(|v| {
+                if any_surface && v.surface_contact {
+                    engine_softbody::explicit_surface::surface_segments(v)
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        let surf_seg_total: usize = surf_segs.iter().map(Vec::len).sum();
+        let surf_mark = if any_surface {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, total_tris + surf_seg_total + total_nodes));
+            at
+        } else {
+            0
+        };
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -1544,19 +1566,19 @@ impl ExplicitUpload {
             0
         };
         // Surface contact's segments (§38, beam-edge contact): per vehicle (start in
-        // gLists, count), the global beam indices in gLists.
+        // gLists, count, its first segment's mask in gAcc, its first node's mask in
+        // gAcc), the global beam indices in gLists.
         let surf_seg = if any_surface {
             let base = statics.len() as u32;
             let mut beam_at = 0u32;
-            for v in vehicles {
-                let segs = if v.surface_contact {
-                    engine_softbody::explicit_surface::surface_segments(v)
-                } else {
-                    Vec::new()
-                };
-                statics.push([lists.len() as u32, segs.len() as u32, 0, 0]);
+            let mut seg_mark = surf_mark + total_tris as u32;
+            let mut node_mark = seg_mark + surf_seg_total as u32;
+            for (v, segs) in vehicles.iter().zip(&surf_segs) {
+                statics.push([lists.len() as u32, segs.len() as u32, seg_mark, node_mark]);
                 lists.extend(segs.iter().map(|&j| beam_at + j));
                 beam_at += v.beams.len() as u32;
+                seg_mark += segs.len() as u32;
+                node_mark += v.nodes.len() as u32;
             }
             base
         } else {
@@ -1655,6 +1677,7 @@ impl ExplicitUpload {
             surf_snap,
             surf_split,
             surf_seg,
+            surf_mark,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
