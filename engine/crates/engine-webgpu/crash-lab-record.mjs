@@ -68,14 +68,17 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 
-const profile = mkdtempSync(join(tmpdir(), 'crash-lab-chrome-'));
+// CRASH_LAB_PROFILE: a kept Chrome profile, so its shader cache serves later runs.
+const keepProfile = process.env.CRASH_LAB_PROFILE;
+if (keepProfile) mkdirSync(keepProfile, { recursive: true });
+const profile = keepProfile || mkdtempSync(join(tmpdir(), 'crash-lab-chrome-'));
 const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
   '--enable-unsafe-webgpu', `--window-size=${W},${H}`, '--no-first-run', '--no-default-browser-check',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank',
 ], { stdio: 'ignore' });
-const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
+const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} if (!keepProfile) { try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} } };
 process.on('exit', cleanup);
 
 let targets = [];
@@ -112,8 +115,8 @@ const grab = async () => {
   writeFileSync(join(frameDir, `f${String(frameNo++).padStart(6, '0')}.jpg`), Buffer.from(s.result.data, 'base64'));
 };
 const ready = async () => {
-  // (Up to 5 min: the merged surface pass made the frame modules slow to compile in Chrome.)
-  for (let i = 0; i < 1500; i++) {
+  // (Up to 15 min: Chrome takes about 8 min to compile the frame module since the surface pass merge; CRASH_LAB_PROFILE keeps its cache.)
+  for (let i = 0; i < 4500; i++) {
     await new Promise((r) => setTimeout(r, 200));
     const err = await evaluate('document.getElementById("err")?.textContent || ""').catch(() => '');
     if (err) throw new Error(`page error: ${err}`);

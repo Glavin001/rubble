@@ -835,6 +835,21 @@ The merged surface pass put barriers under a branch on a storage-loaded flag
 flag now goes through workgroup memory (`gsUniformSurf`, read as
 `workgroupUniformLoad`), as the other `gsUniform*` flags do.
 
+Since the merge, Chrome takes about 8 minutes to compile the frame module on a first
+load (the ETK and gen3 alike, raycast wheels). `crash-lab-record.mjs` now waits up to
+15 minutes, and `CRASH_LAB_PROFILE` keeps its Chrome profile (and shader cache).
+
+### On the GPU page
+
+`media/gen3-r5/`: wall56 in the `three` view, gen3 beside the ETK, same preset,
+camera and timing (surface contact on, raycast wheels): at impact, +60 ms and settled
+(+1.5 s).
+- Both hoods fold up at the wall. The ETK's tents the way gen3's does, as measured.
+- gen3's bumper cover and lamps stay with the fenders' fronts instead of diving
+  under them.
+- The pole and MDB stills were not re-recorded: each page load costs the 8-minute
+  compile.
+
 ### Checks (`gen3_rig`)
 
 | Check | Round 5 | Required |
