@@ -2647,10 +2647,36 @@ below the BX's rate.
     p to 19.8 kN and g fails.
   - It is a trade the bound sets; measured only.
 
-**The body's re-stationing** (every body member onto the structural rings) is
-not built yet. The mechanism planned: insert each along-the-car member's path
-vertices at the body's structural rings, since a path vertex is always a
-station.
+**The body's re-stationing (built, measured, no gain).** `beamng_restation`,
+with `body` in `BEAMNG_NODES`; `BEAMNG_RESTATION=0` turns it off.
+- **How.** On each along-the-car segment of a body member's path, its stations
+  at its own spacing each move to the nearest structural ring as a path vertex
+  (a path vertex is always a station). The count is kept.
+- **Snapping.** Re-stationed members snap onto structural nodes only. A member
+  that is not re-stationed (a pillar across the rings) may still snap onto a
+  contact candidate, which then turns structural.
+
+Medium, `BEAMNG_NODES=door,bonnet,body`:
+
+| Body (structural row) | Lattice | Pattern, members as they were | Stations inserted at every ring | Stations moved to rings (built) |
+|---|---|---|---|---|
+| structural + contact nodes | 592 | 513 + 79 | 582 + 79 | 515 + 87 |
+| mass p50 | 1.01 kg | 1.13 kg | 0.98 kg | 1.13 kg |
+| L p50 | 0.36 m | 0.40 m | 0.36 m | 0.40 m |
+| k·L p50 (BX 7.92e5 N) | 2.14e5 N | 2.13e5 | 1.73e5 | 2.11e5 |
+
+- **Why it gains nothing.** The body members' stations are already at least
+  0.5 m apart: the default truss spacing is 1.0 m and crush members' 0.6 m. So
+  re-stationing only moves them.
+- **What limits the body's k·L.** It is the members' box trusses: four nodes a
+  station, about 15 beam ends a node, 1 kg nodes. The shell lattice is not
+  the limit.
+- **The BX's body is 145 nodes carrying 329 kg (2.5 kg median).** Ours is
+  about 600.
+- **What would close it.** Fewer, heavier body nodes: ladders where boxes are
+  now, members sharing one node per joint, and their outer chords on the
+  shell's structural nodes. That is the one-tier design's member redesign
+  ("Proposed: one tier"), not a node pattern on the shell.
 
 ## Hardware, bearing and sheet masses (2026-11-05)
 
