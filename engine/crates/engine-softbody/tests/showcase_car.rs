@@ -535,8 +535,8 @@ fn solver_len(s: &ExplicitBeams, b: &Beam) -> f32 {
 fn beam_energy(b: &Beam, len: f32, rest: f32) -> f64 {
     let x = len - rest;
     match b.kind {
-        ExplicitKind::Support if x > 0.0 => 0.0,
-        ExplicitKind::Rope if x < 0.0 => 0.0,
+        ExplicitKind::Support | ExplicitKind::JbeamSupport if x > 0.0 => 0.0,
+        ExplicitKind::Rope | ExplicitKind::JbeamRope if x < 0.0 => 0.0,
         ExplicitKind::LimitedSpring => {
             let (long, short) = (b.long_bound * b.rest, b.short_bound * b.rest);
             let k = |y: f32| {
@@ -595,6 +595,8 @@ struct Ledger {
     rise_window: f64,
     /// Energy the beams lost to yield and fracture (J).
     plastic: f64,
+    /// The same per beam (`LEDGER_TOP=1` lists the largest at the check).
+    per_beam: Vec<f64>,
     steps: usize,
     /// The obstacle impulse and CG velocity (along `axis`) when the CG's
     /// rebound speed peaked (`axis` points into the obstacle).
@@ -621,6 +623,7 @@ impl Ledger {
             window_mean: None,
             rise_window: 0.0,
             plastic: 0.0,
+            per_beam: vec![0.0; s.beams.len()],
             steps: 0,
             axis,
             rebound: (0.0, DVec3::ZERO, DVec3::ZERO, DVec3::ZERO),
@@ -682,7 +685,7 @@ impl Ledger {
                     n.mass,
                     Vec3::Y,
                     h,
-                    &ContactSurface::GROUND,
+                    &ContactSurface::GROUND.exact_if(s.exact_friction),
                     s.ground - x.y,
                     n.friction,
                 );
@@ -702,7 +705,7 @@ impl Ledger {
                     n.mass,
                     normal,
                     h,
-                    &ContactSurface::BOX,
+                    &ContactSurface::BOX.exact_if(s.exact_friction),
                     0.0,
                     n.friction,
                 );
@@ -722,17 +725,21 @@ impl Ledger {
         for (n, v) in s.nodes.iter().zip(&vel) {
             self.rounding += (n.mass * f32::EPSILON * (v.length() + (n.vel - *v).length())) as f64;
         }
-        for (b, &(rest, broken)) in s.beams.iter().zip(&before) {
+        for (j, (b, &(rest, broken))) in s.beams.iter().zip(&before).enumerate() {
             if broken || (b.rest == rest && !b.broken) {
                 continue;
             }
             let len = solver_len(s, b);
-            self.plastic += beam_energy(b, len, rest)
+            let de = beam_energy(b, len, rest)
                 - if b.broken {
                     0.0
                 } else {
                     beam_energy(b, len, b.rest)
                 };
+            self.plastic += de;
+            if let Some(x) = self.per_beam.get_mut(j) {
+                *x += de;
+            }
         }
         let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
         let v = momentum(s) / total as f64;
@@ -784,6 +791,25 @@ impl Ledger {
     /// the same car's largest rise between frames standing still) and the
     /// energy lost is at least what the beams lost to yield and fracture.
     fn check(&self, s: &ExplicitBeams, what: &str, noise: f64) {
+        if std::env::var("LEDGER_TOP").is_ok() {
+            let mut v: Vec<(usize, f64)> = self.per_beam.iter().copied().enumerate().collect();
+            v.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+            for &(j, e) in v.iter().take(12) {
+                let b = &s.beams[j];
+                eprintln!(
+                    "({what}) yield/fracture {:.2} kJ: beam {j} {}-{} {:?} k {:.3e} rest {:.4} (spawn {:.4}) len {:.4} broken {}",
+                    e / 1e3,
+                    b.a,
+                    b.b,
+                    b.kind,
+                    b.k,
+                    b.rest,
+                    b.rest0,
+                    solver_len(s, b),
+                    b.broken
+                );
+            }
+        }
         let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
         let e = mech_energy(s);
         let res = self.residual(s);
@@ -815,6 +841,18 @@ impl Ledger {
             self.rise,
             self.rise_window
         );
+        // (`LEDGER_WARN=1`: report a failed ledger and go on to the scene's
+        // own measures, a measurement switch.)
+        if std::env::var("LEDGER_WARN").is_ok() {
+            let ok = res.length() <= self.rounding
+                && self.internal.length() <= self.rounding + self.force_rounding
+                && self.rise_window <= noise
+                && self.e0 - e >= self.plastic - noise;
+            if !ok {
+                eprintln!("({what}) LEDGER FAILS (LEDGER_WARN: not asserted)");
+            }
+            return;
+        }
         assert!(
             res.length() <= self.rounding,
             "({what}) momentum residual {res:?} N·s beyond rounding {}",
@@ -843,6 +881,106 @@ impl Ledger {
 
 fn momentum(s: &ExplicitBeams) -> DVec3 {
     s.nodes.iter().map(|n| (n.mass * n.vel).as_dvec3()).sum()
+}
+
+/// A node's Gershgorin row in the solver as it stands (intact beams, their
+/// current k and c), as a fraction of the step's bound (`G_LIMIT`).
+fn solver_row(s: &ExplicitBeams, i: usize) -> f32 {
+    use engine_softbody::authoring::skeleton::G_LIMIT;
+    let h = STEP;
+    let mi = s.nodes[i].mass.max(1e-6);
+    let mut r = 0.0f32;
+    for &j in &s.incidence[i] {
+        let bm = &s.beams[j as usize];
+        if bm.broken {
+            continue;
+        }
+        let o = if bm.a as usize == i { bm.b } else { bm.a } as usize;
+        let mo = s.nodes[o].mass.max(1e-6);
+        r += (h * h * bm.k + 2.0 * h * bm.c) * (1.0 / mi + 1.0 / (mi * mo).sqrt());
+    }
+    r / (G_LIMIT * h * h)
+}
+
+/// `G_NAN=1` (the door pull's non-finite run, for the solver agent): every
+/// step's newly broken beams (the first steps that break any, up to 40
+/// beams), each with its two nodes' masses, Gershgorin rows (built, and in the
+/// solver as it stands), speeds and parts; then the first non-finite node.
+/// Returns true once a node is non-finite (the pull stops there).
+fn g_nan_probe(
+    s: &ExplicitBeams,
+    b: &Built,
+    was: &[bool],
+    seen: &mut (Vec<bool>, bool),
+    step: i64,
+    pull: f32,
+) -> bool {
+    if std::env::var("G_NAN").is_err() {
+        return false;
+    }
+    let sk = &b.skeleton;
+    let n = sk.nodes.len();
+    let rows = sk.bound_rows();
+    let part = |i: usize| {
+        if i < n {
+            sk.parts[sk.nodes[i].part as usize].as_str()
+        } else {
+            "(tyre)"
+        }
+    };
+    let row = |i: usize| if i < n { rows[i] } else { f32::NAN };
+    if seen.0.is_empty() {
+        seen.0 = vec![false; s.beams.len()];
+    }
+    for (j, bm) in s.beams.iter().enumerate() {
+        if !bm.broken || was[j] || seen.0[j] || seen.0.iter().filter(|&&x| x).count() >= 40 {
+            continue;
+        }
+        let (a, c) = (bm.a as usize, bm.b as usize);
+        let len = s.nodes[a].pos.distance(s.nodes[c].pos);
+        eprintln!(
+            "(g nan) step {step} pull {:.2} kN: beam {j} {a}-{c} {:?}/{:?} {}~{} k {:.3e} c {:.1} rest {:.4} len {:.4} strength {:.2} kN tt {:.2} kN tc {:.2} kN; m {:.3}/{:.3} kg; row built {:.3}/{:.3}, solver {:.3}/{:.3}; |v| {:.2}/{:.2} m/s",
+            pull / 1e3,
+            bm.kind,
+            bm.ty,
+            part(a),
+            part(c),
+            bm.k,
+            bm.c,
+            bm.rest,
+            len,
+            bm.strength / 1e3,
+            bm.tt / 1e3,
+            bm.tc / 1e3,
+            s.nodes[a].mass,
+            s.nodes[c].mass,
+            row(a),
+            row(c),
+            solver_row(s, a),
+            solver_row(s, c),
+            s.nodes[a].vel.length(),
+            s.nodes[c].vel.length(),
+        );
+        seen.0[j] = true;
+    }
+    if !seen.1 {
+        if let Some(i) = (0..s.nodes.len())
+            .find(|&i| !(s.nodes[i].pos.is_finite() && s.nodes[i].vel.is_finite()))
+        {
+            seen.1 = true;
+            eprintln!(
+                "(g nan) step {step} pull {:.2} kN: first non-finite node {i} ({}), m {:.3} kg, row built {:.3}, solver {:.3}; broken beams so far {}",
+                pull / 1e3,
+                part(i),
+                s.nodes[i].mass,
+                row(i),
+                solver_row(s, i),
+                s.beams.iter().zip(was).filter(|(bm, &w)| bm.broken && !w).count()
+            );
+            return true;
+        }
+    }
+    false
 }
 
 /// The largest rise of the mechanical energy between frames of the car
@@ -1654,6 +1792,9 @@ fn g_pulling_a_door_tears_it_off() {
     let mut last = [(0.0f32, 0.0f32, 0.0f32); 3];
     let (mut first, mut off) = (None, None);
     let was: Vec<bool> = s.beams.iter().map(|bm| bm.broken).collect();
+    let mut nan_seen = (Vec::new(), false);
+    let g_free = std::env::var("G_FREE").is_ok();
+    let m_car: f32 = s.nodes.iter().map(|nd| nd.mass).sum();
     let mut t = 0.0f32;
     while t < 16.0 && off.is_none() {
         let f = rate * t;
@@ -1661,8 +1802,22 @@ fn g_pulling_a_door_tears_it_off() {
             let mi = s.nodes[i].mass;
             s.nodes[i].force += out * (f * mi / m);
         }
+        // In the car's frame (d'Alembert): every node takes its share of the
+        // pull's reaction, −F·mᵢ/M, so its internal loads are exactly those
+        // of the free car pulled by F, without the free car's growing
+        // sideways speed (128 m/s at 77 kN, under the triangles' aero:
+        // `G_FREE=1` pulls the free car, a measurement).
+        if !g_free {
+            for nd in s.nodes.iter_mut() {
+                let mi = nd.mass;
+                nd.force -= out * (f * mi / m_car);
+            }
+        }
         s.step();
         t += STEP;
+        if g_nan_probe(&s, &b, &was, &mut nan_seen, (t / STEP).round() as i64, f) {
+            break;
+        }
         // Each unit's load on the door against its measured strength: the
         // latch assembly (primary and secondary, fully latched) and each
         // hinge, as the ellipse through their longitudinal and transverse
@@ -1796,7 +1951,7 @@ fn g_pulling_a_door_tears_it_off() {
                         r += u * -bm.force;
                     }
                     format!(
-                        "{} {:.1} [along {:.1} out {:.1} up {:.1}] (ropes at {:?} of strength)",
+                        "{} {:.1} [along {:.1} out {:.1} up {:.1}] (ropes at {:?} of strength; group, kind, broken {:?})",
                         g.0,
                         g.1.iter().map(|&j| -s.beams[j].force).sum::<f32>() / 1e3,
                         -r.dot(h.along) / 1e3,
@@ -1804,6 +1959,9 @@ fn g_pulling_a_door_tears_it_off() {
                         -r.y / 1e3,
                         g.1.iter()
                             .map(|&j| (-s.beams[j].force / s.beams[j].strength * 100.0).round())
+                            .collect::<Vec<_>>(),
+                        g.1.iter()
+                            .map(|&j| (s.beams[j].group, s.beams[j].kind, s.beams[j].broken))
                             .collect::<Vec<_>>()
                     )
                 })
@@ -3112,9 +3270,124 @@ fn reference_wall_p(
     let mut acc: Vec<f32> = Vec::new();
     let mut vprev = vcm(&s);
     let mut ledger = Ledger::new(&s, Vec3::Z);
+    let was: Vec<bool> = s.beams.iter().map(|bm| bm.broken).collect();
+    let mut nan_seen = (Vec::new(), false);
     for _ in 0..(2.0 / dt) as usize {
         ledger.step(&mut s);
         t += dt;
+        // (`G_NAN=1`: each break with its nodes' masses, rows and speeds.)
+        if let Some(b) = car.built {
+            g_nan_probe(&s, b, &was, &mut nan_seen, (t / dt).round() as i64, 0.0);
+        }
+        // (`PT_LOAD=1`: every 10 ms, the push along the car of each beam
+        // joining the powertrain to the body, summed by the member it meets
+        // and by kind; and the powertrain's mean travel against the cabin.)
+        if let (Ok(_), Some(b)) = (std::env::var("PT_LOAD"), car.built) {
+            let step = (t / dt).round() as i64;
+            if step % 20 == 0 && t <= 0.12 {
+                let sk = &b.skeleton;
+                let n = sk.nodes.len();
+                let pt = sk.parts.iter().position(|p| p == "powertrain").unwrap() as u16;
+                let mut by: std::collections::BTreeMap<String, f32> = Default::default();
+                for bm in s.beams.iter().filter(|bm| !bm.broken) {
+                    let (a, c) = (bm.a as usize, bm.b as usize);
+                    if a >= n || c >= n || ((sk.nodes[a].part == pt) == (sk.nodes[c].part == pt)) {
+                        continue;
+                    }
+                    let (e, o) = if sk.nodes[a].part == pt {
+                        (a, c)
+                    } else {
+                        (c, a)
+                    };
+                    if sk.nodes[o].part != 0 {
+                        continue;
+                    }
+                    let u = (s.nodes[o].pos - s.nodes[e].pos).normalize();
+                    // Force on the body node along the car's rearward (−z).
+                    let fz = bm.force * u.z;
+                    let mut gs: Vec<&String> = b
+                        .groups
+                        .iter()
+                        .filter(|(k, g)| g.contains(&(o as u32)) && k.as_str() != "powertrain")
+                        .map(|(k, _)| k)
+                        .collect();
+                    gs.sort();
+                    let key = format!("{:?} {}", bm.kind, gs.first().map_or("~", |k| k.as_str()));
+                    *by.entry(key).or_default() += fz;
+                }
+                if step % 40 == 0 {
+                    let sup: Vec<String> = s
+                        .beams
+                        .iter()
+                        .filter(|bm| {
+                            let (a, c) = (bm.a as usize, bm.b as usize);
+                            matches!(bm.kind, ExplicitKind::JbeamSupport | ExplicitKind::Support)
+                                && a < n
+                                && c < n
+                                && (sk.nodes[a].part == pt || sk.nodes[c].part == pt)
+                        })
+                        .map(|bm| {
+                            format!(
+                                "{}-{} len {:.3} rest {:.3} rest0 {:.3} f {:.1}{}",
+                                bm.a,
+                                bm.b,
+                                solver_len(&s, bm),
+                                bm.rest,
+                                bm.rest0,
+                                bm.force / 1e3,
+                                if bm.broken { " broken" } else { "" }
+                            )
+                        })
+                        .collect();
+                    eprintln!("(pt) supports {sup:?}");
+                }
+                let tot: f32 = by.values().sum();
+                let mut v: Vec<(String, f32)> = by.into_iter().collect();
+                v.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+                let ptm: Vec<usize> = (0..n).filter(|&i| sk.nodes[i].part == pt).collect();
+                let zp = ptm.iter().map(|&i| s.nodes[i].pos.z).sum::<f32>() / ptm.len() as f32;
+                let cab = &b.groups["pillar_b"];
+                let zc =
+                    cab.iter().map(|&i| s.nodes[i as usize].pos.z).sum::<f32>() / cab.len() as f32;
+                eprintln!(
+                    "(pt) t {:.0} ms: powertrain to cabin {:.3} m; push on the body {:.1} kN: {:?}",
+                    t * 1e3,
+                    zp - zc,
+                    tot / 1e3,
+                    v.iter()
+                        .take(8)
+                        .map(|(k, f)| format!("{k} {:.1}", f / 1e3))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        // (`NODE_TRACE=<node>,<from step>,<to step>`: its motion and its
+        // three largest beam forces each step.)
+        if let Ok(v) = std::env::var("NODE_TRACE") {
+            let w: Vec<usize> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+            let step = (t / dt).round() as usize;
+            if w.len() == 3 && (w[1]..=w[2]).contains(&step) {
+                let i = w[0];
+                let mut f: Vec<(f32, usize)> = s.incidence[i]
+                    .iter()
+                    .map(|&j| (s.beams[j as usize].force, j as usize))
+                    .filter(|x| !s.beams[x.1].broken)
+                    .collect();
+                f.sort_by(|a, b| b.0.abs().total_cmp(&a.0.abs()));
+                let top: Vec<String> = f
+                    .iter()
+                    .take(3)
+                    .map(|&(fo, j)| {
+                        let bm = &s.beams[j];
+                        format!("{j} {}-{} {:?} {:.1} kN", bm.a, bm.b, bm.kind, fo / 1e3)
+                    })
+                    .collect();
+                eprintln!(
+                    "(trace) step {step} node {i} pos {:.3?} vel {:.2?} beams {top:?}",
+                    s.nodes[i].pos, s.nodes[i].vel
+                );
+            }
+        }
         let v = vcm(&s);
         acc.push((v - vprev) / dt / 9.81);
         vprev = v;
@@ -3482,7 +3755,12 @@ fn side_pole_crush_p(car: &Car, kmh: f32, p: Perturb) -> f32 {
             .unwrap_or_default();
         let sup: Vec<usize> = (0..s.beams.len())
             .filter(|&j| fl.contains(&s.beams[j].a) || fl.contains(&s.beams[j].b))
-            .filter(|&j| s.beams[j].kind == ExplicitKind::Support)
+            .filter(|&j| {
+                matches!(
+                    s.beams[j].kind,
+                    ExplicitKind::Support | ExplicitKind::JbeamSupport
+                )
+            })
             .collect();
         let mut sup_peak = vec![0.0f32; sup.len()];
         let mut rope_peak: Vec<(f32, usize, f32)> = Vec::new();
@@ -5576,6 +5854,41 @@ fn which_nodes() {
             ex.len(),
             sk.collision.len()
         );
+    }
+    // (`BEAR_REPORT=<part>`: that block's bearing supports: the node it
+    // meets, the gap (spawn less rest length) and the member there.)
+    if let Ok(part) = std::env::var("BEAR_REPORT") {
+        let sk = &b.skeleton;
+        for bm in &sk.beams {
+            if !matches!(
+                bm.ty,
+                engine_softbody::authoring::skeleton::BeamType::Support(_)
+            ) {
+                continue;
+            }
+            let (pa, pb) = (
+                &sk.parts[sk.nodes[bm.a as usize].part as usize],
+                &sk.parts[sk.nodes[bm.b as usize].part as usize],
+            );
+            if pa != &part && pb != &part {
+                continue;
+            }
+            let o = if pa == &part { bm.b } else { bm.a };
+            let l = sk.pos(bm.a).distance(sk.pos(bm.b));
+            let gs: Vec<&String> = b
+                .groups
+                .iter()
+                .filter(|(_, g)| g.contains(&o))
+                .map(|(k, _)| k)
+                .collect();
+            eprintln!(
+                "bear {}-{}: to {o} at {:.2?} {gs:?}, length {l:.3}, gap {:.3} m",
+                bm.a,
+                bm.b,
+                sk.pos(o),
+                l * (1.0 - bm.rest_scale)
+            );
+        }
     }
     // (`RUPTURE_REPORT=1`: the ductile beams' rupture, by part.)
     if std::env::var("RUPTURE_REPORT").is_ok() {

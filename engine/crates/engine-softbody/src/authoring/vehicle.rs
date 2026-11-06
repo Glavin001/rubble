@@ -137,6 +137,19 @@ pub struct BlockSpec {
     /// driven back meets the firewall and tunnel in a crash).
     #[serde(default)]
     pub bear: f32,
+    /// Bearing as contact (m; 0: the bearing beams carry load from the
+    /// start). When set, each bearing beam is a support whose rest length is
+    /// its length once the block's face has closed the gap to the structure
+    /// node to this clearance (what stays between them crushed: manifold,
+    /// heat shield, hoses), so it carries nothing until the block reaches
+    /// the structure, and then as contact: elastic, at the rigid grade's
+    /// strength (the structure behind it yields, not the contact).
+    #[serde(default)]
+    pub bear_clear: f32,
+    /// The members its mounts bolt to (their groups, a mirrored member's
+    /// right side as `<name>_r`); empty: any structure node within `reach`.
+    #[serde(default)]
+    pub mount_to: Vec<String>,
 }
 
 /// A long diagonal across a panel the body's torsion runs through (and its
@@ -2868,7 +2881,25 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             .collect();
         // Mounts from the block's outer nodes to the structure within reach.
         let before = sk.beams.len();
-        attach(&mut sk, &outer, &chassis, bl.mounts, bl.reach, mount);
+        let to: Vec<u32> = if bl.mount_to.is_empty() {
+            chassis.clone()
+        } else {
+            let mut v = Vec::new();
+            for name in &bl.mount_to {
+                v.extend(
+                    groups
+                        .get(name)
+                        .ok_or_else(|| format!("{}: no member {name} to mount to", bl.name))?
+                        .iter()
+                        .copied()
+                        .filter(|&i| sk.nodes[i as usize].part == 0),
+                );
+            }
+            v.sort();
+            v.dedup();
+            v
+        };
+        attach(&mut sk, &outer, &to, bl.mounts, bl.reach, mount);
         // Kept as built (the block's mass steadies them).
         for bm in &mut sk.beams[before..] {
             bm.fixed = true;
@@ -2879,12 +2910,26 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
             // that never tear on stretch, so a block knocked loose still meets
             // the structure instead of passing through it.
             // Stiff enough to carry the block, strong as the structure.
-            let bear = Material {
-                k: grades.mount.k,
-                damp: grades.mount.damp,
-                ..grades.uhss.scaled(BEAR_SCALE)
+            let bear = if bl.bear_clear > 0.0 {
+                // Contact between the block and the structure: as stiff as
+                // the block's own lattice (the step's bound then caps it at
+                // the nodes it meets, as every beam), never yielding.
+                grades.rigid.stiffer(bl.stiff)
+            } else {
+                Material {
+                    k: grades.mount.k,
+                    damp: grades.mount.damp,
+                    ..grades.uhss.scaled(BEAR_SCALE)
+                }
             };
-            for face in [-Vec3::Z, Vec3::X, -Vec3::X] {
+            // (As contact, the front face too: the radiator support and the
+            // bumper stack against the block as the front crushes.)
+            let faces: &[Vec3] = if bl.bear_clear > 0.0 {
+                &[-Vec3::Z, Vec3::X, -Vec3::X, Vec3::Z]
+            } else {
+                &[-Vec3::Z, Vec3::X, -Vec3::X]
+            };
+            for &face in faces {
                 let lim = c.dot(face) + h.dot(face.abs());
                 let on: Vec<u32> = outer
                     .iter()
@@ -2900,9 +2945,25 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
                     for b in sk.nearest(sk.pos(a), &beyond, 2) {
                         let l = sk.pos(a).distance(sk.pos(b));
                         if l <= bl.bear {
-                            let st = l.max(super::material::REF_LENGTH)
-                                / super::skeleton::TIE_LENGTH.max(l);
-                            sk.beam_with(a, b, bear.stiffer(st), BeamType::Support(10.0), 0);
+                            if bl.bear_clear > 0.0 {
+                                // Contact once the face has travelled to the
+                                // node's plane less the clearance: the rest
+                                // length is the strut's length then.
+                                let d = sk.pos(b) - sk.pos(a);
+                                let dn = d.dot(face);
+                                let c = bl.bear_clear.min(dn);
+                                let rest = (d.length_squared() - dn * dn + c * c).sqrt();
+                                let st = rest.max(super::material::REF_LENGTH)
+                                    / super::skeleton::TIE_LENGTH.max(rest);
+                                if sk.beam_with(a, b, bear.stiffer(st), BeamType::Support(10.0), 0)
+                                {
+                                    sk.beams.last_mut().unwrap().rest_scale = rest / l;
+                                }
+                            } else {
+                                let st = l.max(super::material::REF_LENGTH)
+                                    / super::skeleton::TIE_LENGTH.max(l);
+                                sk.beam_with(a, b, bear.stiffer(st), BeamType::Support(10.0), 0);
+                            }
                         }
                     }
                 }

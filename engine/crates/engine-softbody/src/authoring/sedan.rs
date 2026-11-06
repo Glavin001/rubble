@@ -244,6 +244,8 @@ pub fn seat_frame(name: &str, centre: [f32; 3], half: [f32; 3], kg: f32) -> Bloc
         mount_grade: "mount".into(),
         mount_scale: 3.0,
         bear: 0.0,
+        bear_clear: 0.0,
+        mount_to: Vec::new(),
     }
 }
 
@@ -299,6 +301,18 @@ pub const CRUSH_RIGIDITY: f32 = 0.15;
 /// block is rigid, and its 175 kg pays for a lattice 3 × as stiff at the
 /// step (it used 38 of its 72 kg of mass beyond its beams' need).
 pub const POWERTRAIN_STIFF: f32 = 3.0;
+
+/// The 2011 Accord's 2.4 L engine (kg; NHTSA DOT HS 811 666 §5.12.1.1).
+pub const ACCORD_ENGINE_KG: f32 = 169.9;
+/// Its 5-speed automatic transaxle (kg; ibid. §5.12.2.1).
+pub const ACCORD_TRANSAXLE_KG: f32 = 96.7;
+/// The powertrain's front face ahead of the front axle (m; ibid. fig. 87).
+pub const ACCORD_PT_AHEAD: f32 = 0.39;
+/// Its rear face behind the front axle (m; ibid. fig. 87).
+pub const ACCORD_PT_BEHIND: f32 = 0.12;
+/// What stays between the powertrain and the structure it meets, crushed
+/// (m, a Choice: the manifold's heat shield and hoses).
+pub const POWERTRAIN_CLEARANCE: f32 = 0.03;
 
 /// The B-pillar's station spacing (m): two bays below the belt, so a side
 /// pole at mid-span meets a station (the centre hinge of its 4·M_p/L
@@ -1748,6 +1762,8 @@ pub fn sedan() -> VehicleDef {
             // the pole through between it and a rail).
             mount_scale: 4.0,
             bear: 0.5,
+            bear_clear: 0.0,
+            mount_to: Vec::new(),
         },
         // Seat frames (the seats ride them): as heavy as their own lattice
         // needs; the rest of the seats' mass is a named mass on the floor
@@ -1769,6 +1785,8 @@ pub fn sedan() -> VehicleDef {
             mount_grade: "mount".into(),
             mount_scale: 3.0,
             bear: 0.0,
+            bear_clear: 0.0,
+            mount_to: Vec::new(),
         },
     ];
     let plates = vec![PlateSpec {
@@ -2234,6 +2252,47 @@ pub fn sedan_one_tier() -> VehicleDef {
     for m in d.members.iter_mut().filter(|m| m.name == "rail_f") {
         // (The bays' cuts set the strength: no tuned grading.)
         m.scale = [1.0, 1.0];
+    }
+    // The powertrain as the 2011 Accord's (`POWERTRAIN=0` keeps the
+    // two-tier block, a measurement switch): the 2.4 L engine 169.9 kg and
+    // its 5-speed automatic transaxle 96.7 kg (NHTSA DOT HS 811 666
+    // §5.12.1.1, §5.12.2.1), one rigid package. Where it sits is read off the
+    // same report's side view of the scanned car (fig. 87, A2Mac1; its front
+    // overhang L104 895 mm and wheelbase 2,799 mm give the scale, about
+    // 7 mm a pixel, so each reading is a Choice within about ±20 mm): the
+    // package's front face (intake side) 0.39 m ahead of the front axle,
+    // its rear face (exhaust manifold and close-coupled converter, toward
+    // the dash) 0.12 m behind it, so a FWD transaxle's differential sits on
+    // the axle line as its half-shafts need. Its width and height stay the
+    // two-tier block's (it fills the bay between the rails). It reaches the
+    // dash, the subframe's rear cross member and the rails as contact, not
+    // through struts loaded from the start ([`BlockSpec::bear_clear`]): the
+    // clearance left between, once crushed, is 30 mm (a Choice: the
+    // manifold's heat shield and hoses).
+    if std::env::var("POWERTRAIN").map_or(true, |v| v != "0") {
+        for bl in d.blocks.iter_mut().filter(|b| b.name == "powertrain") {
+            let (front, rear) = (FRONT_AXLE + ACCORD_PT_AHEAD, FRONT_AXLE - ACCORD_PT_BEHIND);
+            bl.kg = ACCORD_ENGINE_KG + ACCORD_TRANSAXLE_KG;
+            bl.centre[2] = 0.5 * (front + rear);
+            bl.half[2] = 0.5 * (front - rear);
+            bl.depth = front - rear;
+            bl.bear_clear = POWERTRAIN_CLEARANCE;
+            // Mounted where the 2008–12 Accord's are (Honda's parts
+            // catalogue: the engine side mount on the right frame, the
+            // transmission mount on the left frame, the front and rear roll
+            // mounts on the subframe), not to whatever structure is near:
+            // the package's front face is now 0.23 m from the radiator
+            // support's top, which a nearest-node mount had bolted it to.
+            bl.mount_to = [
+                "rail_f",
+                "rail_f_r",
+                "subframe_f0",
+                "subframe_f1",
+                "subframe_f2",
+            ]
+            .map(String::from)
+            .to_vec();
+        }
     }
     // The deck lid opening's frame (A7): a real sedan's opening is ringed by
     // closed sections, the rear package tray's upper reinforcement across

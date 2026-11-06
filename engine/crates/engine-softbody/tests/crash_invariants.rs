@@ -1924,7 +1924,7 @@ fn boot_lid_attachment_report() {
             let d = (s.nodes[o].pos - s.nodes[l].pos).normalize();
             // Moving the lid by u changes the beam's length by −u·d.
             let resists = |u: Vec3| match bm.kind {
-                ExplicitKind::Rope => -u.dot(d) > 0.0,
+                ExplicitKind::Rope | ExplicitKind::JbeamRope => -u.dot(d) > 0.0,
                 ExplicitKind::Support | ExplicitKind::JbeamSupport => -u.dot(d) < 0.0,
                 _ => true,
             };
@@ -1939,7 +1939,7 @@ fn boot_lid_attachment_report() {
             back += k_along(-Vec3::Z);
             down += k_along(-Vec3::Y);
             up += k_along(Vec3::Y);
-            if bm.kind == ExplicitKind::Rope {
+            if matches!(bm.kind, ExplicitKind::Rope | ExplicitKind::JbeamRope) {
                 eprintln!(
                     "  {car} lid hardware rope {}: k {:.0}, dir {:.2?}, strength {:.0}",
                     label(&b, bm.a, bm.b),
