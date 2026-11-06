@@ -825,7 +825,7 @@ impl ExplicitBeamsWorld {
             two_body(b) && (self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact)
         };
         let on: Vec<bool> = hits.iter().map(|x| dissipative(x.b)).collect();
-        if on.iter().any(|&x| x) {
+        if vehicle_residual() && on.iter().any(|&x| x) {
             for _ in 0..crate::explicit_beams::residual_passes() {
                 self.residual_vehicle_pass(a, &hits, &on);
             }
@@ -833,7 +833,8 @@ impl ExplicitBeamsWorld {
     }
 
     /// §37's residual pass over owner `a`'s two-body dissipative hits of this
-    /// turn (`on`), as `ExplicitBeams::residual_self_pass` takes self hits: each
+    /// turn (`on`; a CPU measurement, `VEHICLE_RESIDUAL=1`: not on the GPU yet,
+    /// so off), as `ExplicitBeams::residual_self_pass` takes self hits: each
     /// pair still approaching at the forces now (the turn's contact sums with
     /// them) is stopped by a normal force with the reduced mass of the active
     /// hits' counts. All found from the sums before any is added.
@@ -1142,4 +1143,11 @@ struct Hit {
     h: u32,
     n: Vec3,
     p: f32,
+}
+
+/// The measurement switch of vehicle contact's residual pass (`VEHICLE_RESIDUAL=1`;
+/// off: the GPU has none yet).
+fn vehicle_residual() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VEHICLE_RESIDUAL").is_ok_and(|v| v == "1"))
 }

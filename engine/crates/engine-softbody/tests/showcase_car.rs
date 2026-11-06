@@ -8021,6 +8021,11 @@ fn settle_probe() {
             l.w_contact_shift,
             l.w_ground_vertical + l.w_ground_horizontal,
             l.w_ground_shift,
+            l.w_beams,
+            l.beam_dissipation(),
+            l.w_air,
+            l.w_gravity,
+            l.w_slides,
         ]
     };
     let mut last = terms(&w);
@@ -8111,6 +8116,14 @@ fn settle_probe() {
                 now[1] - last[1],
                 now[2] - last[2],
                 now[3] - last[3]
+            );
+            eprintln!(
+                "(settle terms) beams {:+.3} J (dissipation {:+.3}), air {:+.3}, gravity {:+.3}, slides {:+.3}",
+                now[4] - last[4],
+                now[5] - last[5],
+                now[6] - last[6],
+                now[7] - last[7],
+                now[8] - last[8]
             );
             if k > (secs - 4) * per_second {
                 tail_slosh += (now[0] - last[0]).abs();

@@ -1421,18 +1421,19 @@ impl ExplicitUpload {
         // hit count this step (cleared by its node phase).
         // Dissipative contact's position steps (§37): per node 3 words in SHIFT_FIXED
         // units, right after the counts (the kernel's shiftAt: selfSplit +
-        // totalNodes), carried over from the CPU state.
+        // totalNodes), carried over from the CPU state (zero without them).
         let self_split = if vehicles.iter().any(|v| v.two_body_contact) || any_shift {
             let at = acc_init.len() as u32;
             acc_init.extend(std::iter::repeat_n(0, total_nodes));
-            if any_shift {
-                for v in vehicles {
-                    for i in 0..v.nodes.len() {
-                        let w = v.contact_shift.get(i).copied().unwrap_or([0; 3]);
-                        acc_init.extend(w);
-                    }
+            for v in vehicles {
+                for i in 0..v.nodes.len() {
+                    let w = v.contact_shift.get(i).copied().unwrap_or([0; 3]);
+                    acc_init.extend(w);
                 }
             }
+            // §37's residual pass (the kernel's resAt: selfSplit + 4·totalNodes):
+            // per node its active count and residual sums, zero between steps.
+            acc_init.extend(std::iter::repeat_n(0, 4 * total_nodes));
             at
         } else {
             0

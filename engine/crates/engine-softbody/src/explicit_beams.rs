@@ -4182,24 +4182,26 @@ impl ExplicitBeams {
         }
         if self.dissipative_contact {
             for _ in 0..residual_passes() {
-                self.residual_self_pass(found);
+                self.residual_self_pass(found, &split);
             }
         }
     }
 
     /// §37's residual pass over the step's two-body self hits (after the first,
-    /// [`Self::apply_two_body_self_hits`]): the approach a hit's split-mass stop
-    /// left (its sub-bodies are lighter than the nodes, so alone it stops only
-    /// m_split·inv of it) is stopped by a second normal force, as momentum-exact as
-    /// the first. Each hit's pair, at the forces now (the first pass's contact sums
-    /// with them), still approaching over the step, a·h + vn + max(vn, 0) < 0
-    /// ([`contact_response`]'s rule, a the pair's relative normal acceleration),
-    /// is active; the active hits split the nodes again (counts of the active hits
-    /// only: a hit alone is stopped whole) and each takes
-    /// r = −(a·m + (vn + max(vn, 0))·m/h) > 0 along its normal, m the reduced mass
-    /// of the active counts. No friction and no position step (the first pass's).
-    /// The forces are found from the sums before any of them is added (order free).
-    fn residual_self_pass(&mut self, found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)]) {
+    /// [`Self::apply_two_body_self_hits`], with its counts `split`): a second
+    /// iteration of the mass-split pass for the approach the first left. Its
+    /// sub-bodies are lighter than the nodes (k/m), so a hit whose nodes are in
+    /// other hits stops only m_split·inv of its pair's approach alone (the rest a
+    /// ghost speed the position steps cancel each step). Each hit's pair, at the
+    /// forces now (the first pass's contact sums with them) still approaching over
+    /// the step, a·h + vn + max(vn, 0) < 0 ([`contact_response`]'s rule, a the
+    /// pair's relative normal acceleration), takes r = −(a·m + (vn + max(vn,
+    /// 0))·m/h) > 0 along its normal with the first pass's reduced mass m:
+    /// momentum-exact, and never more than the first pass's split allows (counts of
+    /// the active hits only were measured to over-stop: +0.23 J of self-contact
+    /// work in a tenth of the 58 km/h wall). No friction and no position step (the
+    /// first pass's). All found from the sums before any is added (order free).
+    fn residual_self_pass(&mut self, found: &[(u32, [u32; 3], [f32; 3], f32, Vec3)], split: &[u32]) {
         let now: Vec<Vec3> = self.forces_now();
         let acc = |i: u32, n: &Node| {
             if n.has(NODE_IMMOVABLE) {
@@ -4209,7 +4211,6 @@ impl ExplicitBeams {
             }
         };
         let mut drive = Vec::with_capacity(found.len());
-        let mut split = vec![0u32; self.nodes.len()];
         for &(hn, [i0, i1, i2], [alpha, beta, gamma], _, n) in found {
             let node = &self.nodes[hn as usize];
             let (n0, n1, n2) = (
@@ -4222,14 +4223,7 @@ impl ExplicitBeams {
             let a = (acc(hn, node) - at).dot(n);
             let vn = v.dot(n);
             let x = vn + vn.max(0.0);
-            let on = a * STEP + x < 0.0;
-            drive.push((a, x, on));
-            if on {
-                split[hn as usize] += 1;
-                split[i0 as usize] += 1;
-                split[i1 as usize] += 1;
-                split[i2 as usize] += 1;
-            }
+            drive.push((a, x, a * STEP + x < 0.0));
         }
         let im = |n: &Node, k: u32| {
             if n.has(NODE_IMMOVABLE) {
@@ -4276,15 +4270,18 @@ impl ExplicitBeams {
     }
 }
 
-/// §37's residual passes after a step's two-body hits (2; `RESIDUAL_PASSES`
-/// overrides it, a measurement switch).
+/// §37's residual passes after a step's two-body hits (1; `RESIDUAL_PASSES`
+/// overrides it, a measurement switch: 0 none; the GPU runs one). Measured on
+/// sedan1 (51 km/h wall, at rest 8–12 s, self-contact work per second): none
+/// 800 J sloshed against the steps, one 25–50 J; two and three no steadier and
+/// three did +0.3 J in a tenth beyond the steps' allowance.
 pub fn residual_passes() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("RESIDUAL_PASSES")
             .ok()
             .and_then(|x| x.parse().ok())
-            .unwrap_or(2)
+            .unwrap_or(1)
     })
 }
 
