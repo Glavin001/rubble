@@ -30,7 +30,7 @@ use crate::authoring::{build, style, BuildParams, Built, Resolution};
 use crate::desc::SoftVehicleDesc;
 use crate::explicit_beams::{
     ExplicitBeams, ExplicitBeamsSettings, JbeamWheels, StaticBox, StaticShape, NODE_IMMOVABLE,
-    NODE_TYRE, STEP,
+    NODE_NO_GROUND, NODE_TYRE, STEP,
 };
 use crate::explicit_contact::ExplicitBeamsWorld;
 use glam::{DMat3, DQuat, DVec3, Quat, Vec3};
@@ -430,6 +430,32 @@ fn pick_door(spec: &CarSpec, s: &ExplicitBeams, parts: &[(String, Vec<u32>)]) ->
         .filter(|(n, ids)| n.to_lowercase().contains("door") && ids.len() >= 4 && centre(ids).x > 0.2)
         .max_by(|a, b| centre(&a.1).z.total_cmp(&centre(&b.1).z))
         .cloned()
+}
+
+impl Car {
+    /// A node's name: its JBeam name, else its authored part and index.
+    pub fn node_name(&self, i: usize) -> String {
+        match &self.source {
+            Source::Jbeam { desc, .. } => desc.nodes.get(i).map_or(format!("wheel#{i}"), |n| n.name.clone()),
+            Source::Authored(b) => b.skeleton.nodes.get(i).map_or(format!("tyre#{i}"), |q| format!("{}#{i}", b.skeleton.parts[q.part as usize])),
+        }
+    }
+}
+
+/// Adds `deepest_node_name` beside every `deepest_node` in `v`.
+pub fn name_nodes(v: &mut Value, car: &Car) {
+    match v {
+        Value::Object(m) => {
+            if let Some(i) = m.get("deepest_node").and_then(|x| x.as_u64()) {
+                m.insert("deepest_node_name".into(), json!(car.node_name(i as usize)));
+            }
+            for (_, x) in m.iter_mut() {
+                name_nodes(x, car);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| name_nodes(x, car)),
+        _ => {}
+    }
 }
 
 // --- Geometry helpers ----------------------------------------------------------
@@ -949,6 +975,160 @@ pub fn visual_metrics(v: &ShowcaseVisual, p0: &[Vec3], n0: &[Vec3], p1: &[Vec3],
     })
 }
 
+// --- Penetration into rigid colliders ---------------------------------------------
+
+/// A rigid collider the car meets: a static box (the wall) or a static shape
+/// (the pole).
+#[derive(Clone, Copy, Debug)]
+enum Rigid {
+    Box(StaticBox),
+    Shape(StaticShape),
+}
+
+impl Rigid {
+    fn all(s: &ExplicitBeams) -> Vec<Rigid> {
+        s.boxes.iter().map(|b| Rigid::Box(*b)).chain(s.shapes.iter().map(|q| Rigid::Shape(*q))).collect()
+    }
+    /// World box holding it.
+    fn aabb(&self) -> (Vec3, Vec3) {
+        match *self {
+            Rigid::Box(b) => (b.lo, b.hi),
+            Rigid::Shape(q) => {
+                let b = q.bounds();
+                (b.lo, b.hi)
+            }
+        }
+    }
+    /// How deep `p` is inside (m, 0 outside): its distance to the nearest surface.
+    fn depth(&self, p: Vec3) -> f32 {
+        match *self {
+            Rigid::Box(b) => {
+                let d = (p - b.lo).min(b.hi - p);
+                d.min_element().max(0.0)
+            }
+            Rigid::Shape(StaticShape::OrientedBox { centre, half, axes, .. }) => {
+                let q = p - centre;
+                let l = Vec3::new(q.dot(axes[0]), q.dot(axes[1]), q.dot(axes[2]));
+                (half - l.abs()).min_element().max(0.0)
+            }
+            Rigid::Shape(StaticShape::Cylinder { centre, radius, half_height }) => {
+                let r = radius - Vec3::new(p.x - centre.x, 0.0, p.z - centre.z).length();
+                let h = half_height - (p.y - centre.y).abs();
+                r.min(h).max(0.0)
+            }
+            Rigid::Shape(StaticShape::Capsule { a, b, radius }) => {
+                let ab = b - a;
+                let t = ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                (radius - p.distance(a + ab * t)).max(0.0)
+            }
+            Rigid::Shape(StaticShape::Sphere { centre, radius }) => (radius - p.distance(centre)).max(0.0),
+        }
+    }
+    /// The deepest point of segment a–b (a vertical cylinder exactly: the
+    /// segment's nearest point to the axis in plan view, within the caps;
+    /// otherwise 17 samples).
+    fn depth_segment(&self, a: Vec3, b: Vec3) -> f32 {
+        if let Rigid::Shape(StaticShape::Cylinder { centre, .. }) = *self {
+            let (a2, d2) = (Vec3::new(a.x - centre.x, 0.0, a.z - centre.z), Vec3::new(b.x - a.x, 0.0, b.z - a.z));
+            let t = (-a2.dot(d2) / d2.length_squared().max(1e-12)).clamp(0.0, 1.0);
+            return self.depth(a + (b - a) * t).max(self.depth(a)).max(self.depth(b));
+        }
+        (0..=16).map(|k| self.depth(a + (b - a) * (k as f32 / 16.0))).fold(0.0, f32::max)
+    }
+    /// The deepest point of triangle p0 p1 p2 (a vertical cylinder exactly:
+    /// the triangle's nearest point to the axis in plan view, if its height
+    /// there is within the caps; otherwise a 6×6 barycentric grid).
+    fn depth_triangle(&self, p: [Vec3; 3]) -> f32 {
+        if let Rigid::Shape(StaticShape::Cylinder { centre, .. }) = *self {
+            let flat = |v: Vec3| glam::Vec2::new(v.x - centre.x, v.z - centre.z);
+            let (a, b, c) = (flat(p[0]), flat(p[1]), flat(p[2]));
+            // Barycentric of the axis (origin) in the plan-view triangle.
+            let (v0, v1, v2) = (b - a, c - a, -a);
+            let den = v0.x * v1.y - v1.x * v0.y;
+            let mut best = [p[0], p[1], p[2]]
+                .iter()
+                .map(|&q| self.depth(q))
+                .fold(0.0, f32::max);
+            for (x, y) in [(p[0], p[1]), (p[1], p[2]), (p[2], p[0])] {
+                best = best.max(self.depth_segment(x, y));
+            }
+            if den.abs() > 1e-12 {
+                let u = (v2.x * v1.y - v1.x * v2.y) / den;
+                let v = (v0.x * v2.y - v2.x * v0.y) / den;
+                if u >= 0.0 && v >= 0.0 && u + v <= 1.0 {
+                    best = best.max(self.depth(p[0] + (p[1] - p[0]) * u + (p[2] - p[0]) * v));
+                }
+            }
+            return best;
+        }
+        let mut best = 0.0f32;
+        for i in 0..=6 {
+            for j in 0..=6 - i {
+                let (u, v) = (i as f32 / 6.0, j as f32 / 6.0);
+                best = best.max(self.depth(p[0] + (p[1] - p[0]) * u + (p[2] - p[0]) * v));
+            }
+        }
+        best
+    }
+}
+
+/// Per sample, the deepest node, beam segment and collision-triangle point of
+/// the car inside any rigid collider; the max and p99 over the samples.
+struct Penetration {
+    rigid: Vec<Rigid>,
+    nodes: Vec<f32>,
+    beams: Vec<f32>,
+    tris: Vec<f32>,
+    /// The deepest node seen: (depth, index, mass).
+    worst: (f32, usize, f32),
+}
+
+impl Penetration {
+    fn new(s: &ExplicitBeams) -> Self {
+        Penetration { rigid: Rigid::all(s), nodes: Vec::new(), beams: Vec::new(), tris: Vec::new(), worst: (0.0, 0, 0.0) }
+    }
+    fn sample(&mut self, s: &ExplicitBeams) {
+        let p = positions(s);
+        let (mut dn, mut db, mut dt) = (0.0f32, 0.0f32, 0.0f32);
+        for r in &self.rigid {
+            let (lo, hi) = r.aabb();
+            let near = |q: Vec3| q.cmpge(lo - Vec3::splat(0.01)).all() && q.cmple(hi + Vec3::splat(0.01)).all();
+            let hit = |a: Vec3, b: Vec3| a.min(b).cmple(hi).all() && a.max(b).cmpge(lo).all();
+            for (i, q) in p.iter().enumerate().filter(|(i, q)| q.is_finite() && near(**q) && s.nodes[*i].flags & NODE_NO_GROUND == 0) {
+                let d = r.depth(*q);
+                if d > self.worst.0 {
+                    self.worst = (d, i, s.nodes[i].mass);
+                }
+                dn = dn.max(d);
+            }
+            for b in s.beams.iter().filter(|b| !b.broken && b.a != b.b && (s.nodes[b.a as usize].flags | s.nodes[b.b as usize].flags) & NODE_NO_GROUND == 0) {
+                let (a, c) = (p[b.a as usize], p[b.b as usize]);
+                if a.is_finite() && c.is_finite() && hit(a, c) {
+                    db = db.max(r.depth_segment(a, c));
+                }
+            }
+            for t in &s.triangles {
+                let q = t.nodes.map(|i| p[i as usize]);
+                if q.iter().all(|x| x.is_finite()) && hit(q[0].min(q[1]).min(q[2]), q[0].max(q[1]).max(q[2])) {
+                    dt = dt.max(r.depth_triangle(q));
+                }
+            }
+        }
+        self.nodes.push(dn);
+        self.beams.push(db);
+        self.tris.push(dt);
+    }
+    fn result(&self) -> Value {
+        let st = |v: &[f32]| {
+            let mut a = v.to_vec();
+            let max = a.iter().copied().fold(0.0, f32::max);
+            let mut hot: Vec<f32> = a.iter().copied().filter(|&x| x > 0.0).collect();
+            json!({"max_mm": mm(max), "p99_mm": mm(pct(&mut a, 0.99)), "p99_in_contact_mm": mm(pct(&mut hot, 0.99)), "samples_in_contact": hot.len()})
+        };
+        json!({"deepest_node": self.worst.1, "deepest_node_mass": r3(self.worst.2), "colliders": self.rigid.len(), "samples": self.nodes.len(), "nodes": st(&self.nodes), "beams": st(&self.beams), "triangles": st(&self.tris)})
+    }
+}
+
 // --- Census --------------------------------------------------------------------
 
 /// The car's census on its crash spawn (tyres excluded): nodes, mass per node,
@@ -1106,6 +1286,7 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     let zcab = |s: &ExplicitBeams| cabin.iter().map(|&i| s.nodes[i as usize].mass * s.nodes[i as usize].pos.z).sum::<f32>() / cm;
     let pz = |s: &ExplicitBeams| s.nodes.iter().map(|n| f64::from(n.mass) * f64::from(n.vel.z)).sum::<f64>();
     let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
+    let mut pen = Penetration::new(&s);
     // Ledger (one-vehicle world).
     let mut w = ExplicitBeamsWorld::new(vec![s]);
     w.contact = false;
@@ -1129,6 +1310,9 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
         w.step();
         k += 1;
         let s = &w.vehicles[0];
+        if k % 2 == 0 {
+            pen.sample(s);
+        }
         if t_contact.is_none() {
             let reach = car.skin.iter().map(|&i| s.nodes[i as usize].pos.z).fold(f32::MIN, f32::max);
             if reach >= wall_z - 1e-3 {
@@ -1232,7 +1416,7 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
             "air_work_kj": r3((l.w_air / 1e3) as f32), "discretisation_kj": r3((l.discretisation / 1e3) as f32),
             "closure_share": (closure / e0.max(1.0) * 1e6).round() / 1e6, "max_rise_j": r1(e_rise as f32),
         },
-        "ripple_0_5s": ripple.result(), "ripple_end": ripple_late.result(),
+        "penetration": pen.result(), "ripple_0_5s": ripple.result(), "ripple_end": ripple_late.result(),
         "intrusion": intr.result(),
         "damage": damage_report(car, s),
         "visual": visual_now(car, s),
@@ -1283,6 +1467,7 @@ fn side_run(car: &Car, s: ExplicitBeams, rest: Vec<Vec3>, pole: Option<Vec3>, md
         })
         .collect();
     let mut intr = Intrusion::new(car, rest.clone(), far.clone());
+    let mut pen = Penetration::new(&s);
     let crush = |s: &ExplicitBeams| -> f32 {
         let now = positions(s);
         let fit = rigid_fit(&rest, &now, &far);
@@ -1309,6 +1494,14 @@ fn side_run(car: &Car, s: ExplicitBeams, rest: Vec<Vec3>, pole: Option<Vec3>, md
             (_, Some(s)) => s.step(),
             _ => {}
         }
+        if k % 2 == 1 {
+            let car_s = match (&world, &solo) {
+                (Some(w), _) => &w.vehicles[0],
+                (_, Some(s)) => s,
+                _ => unreachable!(),
+            };
+            pen.sample(car_s);
+        }
         if k % 10 == 9 {
             let (car_s, e) = match (&world, &solo) {
                 (Some(w), _) => (&w.vehicles[0], w.vehicles.iter().map(mech).sum::<f64>()),
@@ -1330,8 +1523,80 @@ fn side_run(car: &Car, s: ExplicitBeams, rest: Vec<Vec3>, pole: Option<Vec3>, md
     json!({
         "residual_crush_mm": mm(crush(s)), "dynamic_crush_mm": mm(dyn_max), "struck_nodes": struck.len(),
         "energy_rise_j": r1(e_max as f32), "ke_end_kj": r3(ke / 1e3),
-        "intrusion": intr.result(), "damage": damage_report(car, s), "visual": visual_now(car, s),
+        "penetration": pen.result(), "intrusion": intr.result(), "damage": damage_report(car, s), "visual": visual_now(car, s),
         "sim_s": seconds, "wall_s_per_sim_s": r3(wall_s / seconds),
+    })
+}
+
+/// A side-pole sweep: square-on (90°) at `kmh` into a 254 mm pole, its line
+/// every `spacing` m along the car from bumper to bumper, `seconds` each.
+/// Per offset: penetration into the pole (nodes, beams, triangles), the
+/// pole's deepest reach into the car in the far side's frame, and whether it
+/// passed through (the car keeps more than half its momentum along the pole's
+/// line, or the pole's reach passes the far side's skin).
+pub fn scene_pole_sweep(car: &Car, kmh: f32, spacing: f32, seconds: f32) -> Value {
+    let t0 = Instant::now();
+    let f = car.frame;
+    let r = 0.127;
+    let mut offsets = Vec::new();
+    let mut z = f.lo.z + 0.1;
+    while z <= f.hi.z - 0.1 + 1e-4 {
+        offsets.push(z);
+        z += spacing;
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out = std::sync::Mutex::new(vec![Value::Null; offsets.len()]);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(6));
+    std::thread::scope(|sc| {
+        for _ in 0..threads {
+            sc.spawn(|| loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&zc) = offsets.get(k) else { break };
+                let mut s = car.template.clone();
+                let rest = positions(&s);
+                let v = kmh / 3.6;
+                set_moving(&mut s, Vec3::X * v);
+                let reach = car.skin.iter().map(|&i| rest[i as usize].x).fold(f32::MIN, f32::max);
+                let far_x = car.skin.iter().map(|&i| rest[i as usize].x).fold(f32::MAX, f32::min);
+                let centre = Vec3::new(reach + r + 0.03, 2.0, zc);
+                s.shapes.push(StaticShape::cylinder(centre, r, 2.0));
+                let far: Vec<u32> = (0..s.nodes.len() as u32).filter(|&i| !is_tyre(&s, i as usize) && rest[i as usize].x < -0.2 * f.width()).collect();
+                let p0: f32 = s.nodes.iter().map(|n| n.mass * n.vel.x).sum();
+                let mut pen = Penetration::new(&s);
+                let mut deepest = f32::MIN;
+                let n = (seconds / STEP).round() as usize;
+                for j in 0..n {
+                    s.step();
+                    if j % 2 == 1 {
+                        pen.sample(&s);
+                    }
+                    if j % 20 == 19 {
+                        // The pole's axis in the far side's rest frame: how far in it has come.
+                        let now = positions(&s);
+                        let fit = rigid_fit(&rest, &now, &far);
+                        deepest = deepest.max(reach - (fit.to_rest(centre).x - r));
+                    }
+                }
+                let p1: f32 = s.nodes.iter().map(|n| n.mass * n.vel.x).sum();
+                let width = reach - far_x;
+                let through = p1 > 0.5 * p0 || deepest > width;
+                out.lock().unwrap()[k] = json!({
+                    "z": r3(zc), "along": r3((zc - f.lo.z) / f.length()), "through": through,
+                    "reach_mm": mm(deepest), "momentum_left": r3(p1 / p0), "penetration": pen.result(),
+                    "finite": s.nodes.iter().all(|q| q.pos.is_finite()),
+                });
+            });
+        }
+    });
+    let runs = out.into_inner().unwrap();
+    let get = |v: &Value, k: &str| v["penetration"][k]["max_mm"].as_f64().unwrap_or(0.0);
+    let worst = |k: &str| runs.iter().map(|v| get(v, k)).fold(0.0, f64::max);
+    let through = runs.iter().filter(|v| v["through"].as_bool() == Some(true)).count();
+    let sim = offsets.len() as f32 * seconds;
+    json!({
+        "kmh": kmh, "spacing_m": spacing, "offsets": runs.len(), "passed_through": through,
+        "worst_node_mm": worst("nodes"), "worst_beam_mm": worst("beams"), "worst_triangle_mm": worst("triangles"),
+        "runs": runs, "wall_s_per_sim_s": r3(t0.elapsed().as_secs_f32() / sim),
     })
 }
 
@@ -1489,6 +1754,7 @@ pub fn run_car(car: &Car, quick: bool) -> Value {
         let mdb = sc.spawn(|| scene_mdb(car, if quick { 0.4 } else { 1.0 }));
         let roof = sc.spawn(|| scene_roof(car));
         let door = sc.spawn(|| scene_door(car));
+        let sweep = sc.spawn(|| scene_pole_sweep(car, 32.0, if quick { 1.0 } else { 0.2 }, if quick { 0.3 } else { 0.8 }));
         json!({
             "name": car.spec.name, "label": car.spec.label,
             "census": census(car),
@@ -1499,6 +1765,7 @@ pub fn run_car(car: &Car, quick: bool) -> Value {
             "mdb214": mdb.join().unwrap(),
             "roof": roof.join().unwrap(),
             "door": door.join().unwrap(),
+            "pole_sweep32": sweep.join().unwrap(),
             "warnings": car.warnings.len(),
         })
     })
