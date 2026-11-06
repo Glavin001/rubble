@@ -2242,12 +2242,26 @@ pub fn scene_pole_at(car: &Car, kmh: f32, seconds: f32, dz: f32) -> Value {
             .map(|n| Vec3::new(n.pos.x - c.x, 0.0, n.pos.z - c.z).length())
             .fold(f32::MAX, f32::min)
     };
+    // Round 7: the pole starts outside the car, past the last node on its
+    // line (a line through the cabin can be clear of nodes at the head
+    // point itself: at 10 cm ahead of the line round 6's pole started
+    // inside the car, 0.5 m in from the skin).
     let mut t = 0.0f32;
-    while gap(head + dir * t) < r + 0.03 {
+    let mut last = 0.0f32;
+    while t < 3.0 {
+        if gap(head + dir * t) < r + 0.03 {
+            last = t;
+        }
         t += 0.005;
     }
-    let centre = head + dir * t + Vec3::Y * 2.0;
-    s.shapes.push(StaticShape::cylinder(centre, r, 2.0));
+    let t = last + 0.005;
+    // (`POLE_HALF_H`, a diagnostic: a shorter pole from the ground up.)
+    let hh = std::env::var("POLE_HALF_H")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(2.0);
+    let centre = head + dir * t + Vec3::Y * hh;
+    s.shapes.push(StaticShape::cylinder(centre, r, hh));
     side_run(car, s, rest, Some(centre), None, seconds, t0)
 }
 
@@ -2300,6 +2314,7 @@ fn side_run(
             .fold(0.0, f32::max)
     };
     let mut dyn_max = 0.0f32;
+    let mut vx_min = f32::MAX;
     let side_debug = std::env::var("SIDE_DEBUG").is_ok();
     let mut elastic_at_max = String::new();
     // The pole's deepest reach into the car: its axis in the far side's frame from the struck side's skin.
@@ -2363,6 +2378,12 @@ fn side_run(
                 _ => unreachable!(),
             };
             e_max = e_max.max(e - e0);
+            // The car's fastest rebound off the struck side (world x: both
+            // scenes strike the car's +x side moving -x into it, or move the
+            // car +x into the pole).
+            let m_car: f32 = car_s.nodes.iter().map(|n| n.mass).sum();
+            let vx = car_s.nodes.iter().map(|n| n.vel.x * n.mass).sum::<f32>() / m_car;
+            vx_min = vx_min.min(vx);
             let c_now = crush(car_s);
             if side_debug && c_now > dyn_max {
                 // The elastic energy at the deepest crush: what springs back.
@@ -2412,14 +2433,90 @@ fn side_run(
                 );
             }
             dyn_max = dyn_max.max(c_now);
+            // `MDB_TRACE`: every 5 ms the car's and the barrier's velocity
+            // across the car and the crush (the force from their momentum).
+            if pole.is_none() && k % 10 == 9 && std::env::var("MDB_TRACE").is_ok() {
+                if let Some(w) = &world {
+                    let vx = |v: &ExplicitBeams| {
+                        let m: f32 = v.nodes.iter().map(|n| n.mass).sum();
+                        (v.nodes.iter().map(|n| n.vel.x * n.mass).sum::<f32>() / m, m)
+                    };
+                    let ((vc, mc), (vb, mb)) = (vx(&w.vehicles[0]), vx(&w.vehicles[1]));
+                    eprintln!(
+                        "  mdb {:.0} ms: car vx {vc:.3} ({mc:.0} kg), barrier vx {vb:.3} ({mb:.0} kg), crush {:.0} mm",
+                        (k + 1) as f32 * STEP * 1e3,
+                        c_now * 1e3
+                    );
+                }
+            }
             if let Some(c) = pole {
                 let now = positions(car_s);
                 let fit = rigid_fit(&rest, &now, &far);
                 pole_reach = pole_reach.max(reach - (fit.to_rest(c).x - 0.127));
                 // `POLE_TRACE`: every 50 ms the pole in the far side's frame,
                 // the car's yaw and its centre of mass's velocity.
-                if k % 100 == 99 && std::env::var("POLE_TRACE").is_ok() {
+                // (`POLE_TRACE=<ms>` sets the interval; `POLE_WRAP=1` also
+                // lists the struck nodes outboard of the pole's axis: what
+                // it has passed.)
+                let every = std::env::var("POLE_TRACE")
+                    .ok()
+                    .map(|v| v.parse::<usize>().unwrap_or(50).max(5) * 2);
+                if every.is_some_and(|e| (k + 1) % e == 0) {
                     let q = fit.to_rest(c);
+                    // `POLE_FORCES=<ms>`: the beams carrying the most force then.
+                    let at = std::env::var("POLE_FORCES")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok());
+                    if at.is_some_and(|t| ((k + 1) as f32 * STEP * 1e3 - t).abs() < 0.25) {
+                        let mut v: Vec<(f32, usize)> = car_s
+                            .beams
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, b)| !b.broken && b.a != b.b)
+                            .map(|(j, b)| (b.force.abs(), j))
+                            .collect();
+                        v.sort_by(|a, b| b.0.total_cmp(&a.0));
+                        let top: Vec<String> = v
+                            .iter()
+                            .take(30)
+                            .map(|&(f, j)| {
+                                let b = &car_s.beams[j];
+                                format!(
+                                    "{}-{} {:.0}",
+                                    car.node_name(b.a as usize),
+                                    car.node_name(b.b as usize),
+                                    f / 1e3
+                                )
+                            })
+                            .collect();
+                        eprintln!("    forces (kN): {}", top.join(", "));
+                    }
+                    if std::env::var("POLE_WRAP").is_ok() {
+                        let mut w: Vec<(f32, usize)> = (0..car_s.nodes.len())
+                            .filter(|&i| !is_tyre(car_s, i))
+                            .filter_map(|i| {
+                                let p = fit.to_rest(now[i]);
+                                ((p.z - q.z).abs() < 0.2 && p.x > q.x && rest[i].x > 0.5)
+                                    .then_some((p.x - q.x, i))
+                            })
+                            .collect();
+                        w.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        let top: Vec<String> = w
+                            .iter()
+                            .take(10)
+                            .map(|&(d, i)| {
+                                let p = fit.to_rest(now[i]);
+                                format!(
+                                    "{} +{:.0} mm (y {:.2} z {:+.2})",
+                                    car.node_name(i),
+                                    d * 1e3,
+                                    p.y,
+                                    p.z - q.z
+                                )
+                            })
+                            .collect();
+                        eprintln!("    nearest outboard: {}", top.join(", "));
+                    }
                     let fwd = fit.r.transpose() * glam::DVec3::Z;
                     let m: f32 = car_s.nodes.iter().map(|n| n.mass).sum();
                     let v = car_s.nodes.iter().map(|n| n.vel * n.mass).sum::<Vec3>() / m;
@@ -2511,7 +2608,7 @@ fn side_run(
         .map(|n| 0.5 * n.mass * n.vel.length_squared())
         .sum();
     json!({
-        "barrier_min_x": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.pos.x).fold(f32::MAX, f32::min))), "barrier_vx": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / w.vehicles[1].nodes.iter().map(|n| n.mass).sum::<f32>())), "car_vx": r3(s.nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / s.nodes.iter().map(|n| n.mass).sum::<f32>()), "pole_reach_mm": pole.map(|_| mm(pole_reach)), "residual_crush_mm": mm(crush(s)), "pole_slide_mm": imprint.map(|x| mm(x.0)), "residual_crush_imprint_mm": imprint.map(|x| mm(x.1)), "dynamic_crush_mm": mm(dyn_max), "struck_nodes": struck.len(),
+        "barrier_min_x": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.pos.x).fold(f32::MAX, f32::min))), "barrier_vx": world.as_ref().map(|w| r3(w.vehicles[1].nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / w.vehicles[1].nodes.iter().map(|n| n.mass).sum::<f32>())), "car_vx": r3(s.nodes.iter().map(|n| n.mass * n.vel.x).sum::<f32>() / s.nodes.iter().map(|n| n.mass).sum::<f32>()), "pole_reach_mm": pole.map(|_| mm(pole_reach)), "rebound_vx": r3(vx_min), "residual_crush_mm": mm(crush(s)), "pole_slide_mm": imprint.map(|x| mm(x.0)), "residual_crush_imprint_mm": imprint.map(|x| mm(x.1)), "dynamic_crush_mm": mm(dyn_max), "struck_nodes": struck.len(),
         "energy_rise_j": r1(e_max as f32), "ke_end_kj": r3(ke / 1e3),
         "penetration": pen.result(), "intrusion": intr.result(), "damage": damage_report(car, s), "visual": visual_now(car, s),
         "sim_s": seconds, "wall_s_per_sim_s": r3(wall_s / seconds),
@@ -2597,6 +2694,11 @@ pub fn scene_pole_sweep(car: &Car, kmh: f32, spacing: f32, seconds: f32) -> Valu
 /// into the driver's side at the impact reference line, as the crash lab's
 /// `mdb214` scene places it; two-body contact.
 pub fn scene_mdb(car: &Car, seconds: f32) -> Value {
+    scene_mdb_at(car, seconds, 0.0)
+}
+
+/// [`scene_mdb`] with the barrier moved `dz` m along the car (+ forward).
+pub fn scene_mdb_at(car: &Car, seconds: f32, dz: f32) -> Value {
     use crate::crash_rigs::{mdb214_jbeam, MDB_CRAB_DEG, MDB_FACE, MDB_SPEED};
     let t0 = Instant::now();
     let f = car.frame;
@@ -2625,7 +2727,7 @@ pub fn scene_mdb(car: &Car, seconds: f32) -> Value {
     } else {
         f.front_axle - 0.508
     };
-    let contact = Vec3::new(f.hi.x, 0.0, irl - 0.5 * MDB_FACE[0]);
+    let contact = Vec3::new(f.hi.x, 0.0, irl - 0.5 * MDB_FACE[0] + dz);
     let dir = Vec3::new(-crab.cos(), 0.0, -crab.sin());
     let gap = 0.3;
     // The barrier's face middle (its most forward skin along −X) at contact − dir·gap.

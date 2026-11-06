@@ -96,6 +96,28 @@ pub const WHEEL_STACK: f32 = 0.23;
 /// closure's frame.
 pub const REACH_BODY: f32 = 0.90;
 pub const REACH_PANEL: f32 = 0.66;
+/// Round 7: the doors' column pitch (m), at most the 254 mm pole's width so
+/// the pole meets a column, and their graph's reach below the belt (two
+/// bays along the door and a cell's diagonal: bending over two bays, not a
+/// membrane over the whole door).
+pub const DOOR_PITCH: f32 = 0.20;
+pub const DOOR_REACH: f32 = 0.42;
+/// Round 7: the sill box's station pitch between its cross members (m).
+pub const SILL_PITCH: f32 = 0.25;
+
+/// Round 7's side lattice for the pole (opt-in, `GEN3_SIDE_R7=1`): the front
+/// doors' columns at [`DOOR_PITCH`] with the intrusion beam's outer chord as
+/// the skin's middle row, the sill as its own box at [`SILL_PITCH`], the
+/// doors' inner panels bearing inward on their opening, and the window
+/// glass without collision faces. Measured in `engine/docs/vehicle-gen3.md`
+/// (round 7): it deepens the pole 136 to 210 mm but takes the MDB out of its
+/// band (202 to 220 mm) and the frontal's feet intrusion and pulse with it,
+/// so it is not the default. Each part has its own switch inside it
+/// (`GEN3_OLD_DOOR`, `GEN3_NO_SKIN_ROW`, `GEN3_OLD_SILL_BOX`,
+/// `GEN3_NO_DOOR_STOPS`, `GEN3_WINDOW_TRIS`, `GEN3_DENSE_REAR`).
+pub fn side_r7() -> bool {
+    std::env::var("GEN3_SIDE_R7").is_ok()
+}
 
 /// glTF (model) to JBeam (car) coordinates.
 pub fn to_jbeam(g: Vec3) -> Vec3 {
@@ -443,6 +465,11 @@ pub fn rig(model: &Model) -> Rig {
     let mut sill_t = [Vec::new(), Vec::new()];
     let mut sill_b = [Vec::new(), Vec::new()];
     let mut floor_r = [Vec::new(), Vec::new()];
+    // Round 7: the sill box's chords (outer, top, bottom) through every
+    // station, front to rear, and its stations between the cross members.
+    let dense_sill = side_r7() && std::env::var("GEN3_OLD_SILL_BOX").is_err();
+    let mut sill_chords: [[Vec<usize>; 3]; 2] = Default::default();
+    let mut sill_mid: Vec<usize> = Vec::new();
     let mut rail_lo = [Vec::new(), Vec::new()];
     let mut rail_hi = [Vec::new(), Vec::new()];
     let mut apron = [Vec::new(), Vec::new()];
@@ -491,6 +518,37 @@ pub fn rig(model: &Model) -> Rig {
                 Some(Role::Floor),
                 false,
             ));
+            sill_chords[si][0].push(sill_o[si][k]);
+            sill_chords[si][1].push(sill_t[si][k]);
+            sill_chords[si][2].push(sill_b[si][k]);
+            // Round 7: the sill's own stations between the cross members,
+            // at most [`SILL_PITCH`] apart (outer, top and bottom: the box's
+            // section), so a pole between two cross members bends the box
+            // about a station under it.
+            if let (true, Some(&z1)) = (dense_sill, sill_z.get(k + 1)) {
+                let m = ((z - z1) / env_f("GEN3_SILL_PITCH", SILL_PITCH)).ceil() as usize;
+                for j in 1..m {
+                    let zm = z + (z1 - z) * j as f32 / m as f32;
+                    let o = side(zm, 0.5 * (y_rocker + 0.17));
+                    let t = inward(side(zm, y_rocker + 0.02), 0.07);
+                    let b = Vec3::new(o.x - 0.11, 0.17, zm);
+                    for (c, (tag, g, skin)) in
+                        [("slo", o, true), ("slt", t, false), ("slb", b, false)]
+                            .into_iter()
+                            .enumerate()
+                    {
+                        let i = put(
+                            &mut r,
+                            format!("{tag}{k}m{j}{x}"),
+                            g,
+                            Some(Role::Sill),
+                            skin,
+                        );
+                        sill_chords[si][c].push(i);
+                        sill_mid.push(i);
+                    }
+                }
+            }
         }
         // Hinge pillar (behind the fender, ahead of the front door) and the
         // A-pillar up to the windshield header.
@@ -950,8 +1008,8 @@ pub fn rig(model: &Model) -> Rig {
         let rows: Vec<Vec<Option<usize>>> = vec![sill_o[si].iter().map(|&i| Some(i)).collect()];
         let _ = rows;
         // Rocker strip: outer face to the box top.
-        let a: Vec<Option<usize>> = sill_o[si].iter().map(|&i| Some(i)).collect();
-        let b: Vec<Option<usize>> = sill_t[si].iter().map(|&i| Some(i)).collect();
+        let a: Vec<Option<usize>> = sill_chords[si][0].iter().map(|&i| Some(i)).collect();
+        let b: Vec<Option<usize>> = sill_chords[si][1].iter().map(|&i| Some(i)).collect();
         r.car
             .panel(&[a, b], body, &[Role::Sill, Role::Sill], Role::Sill, false);
         // Quarter grid (columns are stations; rows bottom, shoulder, top).
@@ -1007,6 +1065,13 @@ pub fn rig(model: &Model) -> Rig {
         let g = r.g(i);
         g.y > belt(g.z.min(z_a)) + 0.05
     };
+    let sill_node = |r: &Rig, i: usize| {
+        let n = &r.car.nodes[i].name;
+        ["slo", "slt", "slb"].iter().any(|p| {
+            n.strip_prefix(p)
+                .is_some_and(|k| k.starts_with(|c: char| c.is_ascii_digit()))
+        })
+    };
     graph_pairs(
         &mut r,
         &body_ids,
@@ -1015,11 +1080,43 @@ pub fn rig(model: &Model) -> Rig {
         Role::Web,
         &|p| body_blocked(p, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06)),
         &|r, a, b| {
+            // Round 7: the sill box is wired as its own section below, not
+            // by the graph: its stations between the cross members join only
+            // the sill, and no sill node spans the box to another's station
+            // (beams 0.5-0.9 m long across and along it braced every station
+            // against its neighbours, so a pole met the whole sill at once).
+            if dense_sill
+                && ((sill_node(r, a) && sill_node(r, b))
+                    || sill_mid.contains(&a)
+                    || sill_mid.contains(&b))
+            {
+                return false;
+            }
             !split
                 || !((front_member(r, a) && greenhouse(r, b))
                     || (front_member(r, b) && greenhouse(r, a)))
         },
     );
+    // The sill box: its three chords through every station, the section at
+    // each station and the shear webs of its three walls between stations.
+    if dense_sill {
+        for ch in &sill_chords {
+            for k in 0..ch[0].len() {
+                let [o, t, b] = [ch[0][k], ch[1][k], ch[2][k]];
+                for (a, c) in [(o, t), (o, b), (t, b)] {
+                    r.car.beam(a, c, Role::Sill, body);
+                }
+                if k + 1 < ch[0].len() {
+                    for w in 0..3 {
+                        r.car.beam(ch[w][k], ch[w][k + 1], Role::Sill, body);
+                        let v = (w + 1) % 3;
+                        r.car.beam(ch[w][k], ch[v][k + 1], Role::Sill, body);
+                        r.car.beam(ch[v][k], ch[w][k + 1], Role::Sill, body);
+                    }
+                }
+            }
+        }
+    }
     // The A-pillars' chords: the hinge pillar's top straight to the header
     // (the roof rail's front station), outer and inner walls. The pillar is
     // a closed section about 8 cm deep; as a chain of two bays through its
@@ -1136,7 +1233,23 @@ pub fn rig(model: &Model) -> Rig {
         for s in [1.0f32, -1.0] {
             let part = Part::door(front, s > 0.0);
             let dn = part.name().trim_start_matches("gen2_").to_string();
-            let cols = [hi.z - 0.03, 0.5 * (lo.z + hi.z), lo.z + 0.03];
+            // Round 7: the door's columns at most [`DOOR_PITCH`] apart (a
+            // 254 mm pole between two columns 0.5 m apart met a straight
+            // span and pushed the panel in as a membrane; at this pitch it
+            // meets a column and the door folds about it). `GEN3_OLD_DOOR`
+            // keeps round 6's three.
+            let dense = side_r7()
+                && std::env::var("GEN3_OLD_DOOR").is_err()
+                && (front || std::env::var("GEN3_DENSE_REAR").is_ok());
+            let cols: Vec<f32> = if dense {
+                let (z0, z1) = (hi.z - 0.03, lo.z + 0.03);
+                let n = ((z0 - z1) / env_f("GEN3_DOOR_PITCH", DOOR_PITCH)).ceil() as usize;
+                (0..=n)
+                    .map(|k| z0 + (z1 - z0) * k as f32 / n as f32)
+                    .collect()
+            } else {
+                vec![hi.z - 0.03, 0.5 * (lo.z + hi.z), lo.z + 0.03]
+            };
             let mut grid: Vec<Vec<Option<usize>>> = vec![Vec::new(), Vec::new(), Vec::new()];
             let mut inner: Vec<usize> = Vec::new();
             for (k, &z) in cols.iter().enumerate() {
@@ -1179,7 +1292,10 @@ pub fn rig(model: &Model) -> Rig {
             // tube can form a plastic hinge where a narrow object strikes it
             // (a pole between two columns otherwise met a 0.5 m straight
             // span). On the inner panel's middle row, between its columns.
+            // (At round 7's pitch the columns are the stations.)
             let split_beam = std::env::var("GEN3_OLD_INTRUSION").is_err();
+            let mid_stations = split_beam && !dense;
+            let skin_row = dense && split_beam && std::env::var("GEN3_NO_SKIN_ROW").is_err();
             // The tube's outer chord, 2 cm under the skin at every station
             // (the inner chord is the middle row, 8 cm in): a 6 cm deep
             // truss, so the beam resists a load across the door by bending.
@@ -1188,8 +1304,10 @@ pub fn rig(model: &Model) -> Rig {
             let mut outer_chord: Vec<usize> = Vec::new();
             if split_beam {
                 let mut zs: Vec<f32> = cols.to_vec();
-                for k in 0..cols.len() - 1 {
-                    zs.push(0.5 * (cols[k] + cols[k + 1]));
+                if mid_stations {
+                    for k in 0..cols.len() - 1 {
+                        zs.push(0.5 * (cols[k] + cols[k + 1]));
+                    }
                 }
                 for (k, &z) in zs.iter().enumerate() {
                     let bottom = low_at(pts, z, 0.04).unwrap_or(lo.y) + 0.03;
@@ -1197,20 +1315,29 @@ pub fn rig(model: &Model) -> Rig {
                     let out = std::env::var("GEN3_INTRUSION_OUT")
                         .ok()
                         .and_then(|v| v.parse().ok())
-                        .unwrap_or(INTRUSION_OUT);
+                        .unwrap_or(if skin_row { 0.0 } else { INTRUSION_OUT });
                     let p = mirror(inward(side(z, ym), out), s);
                     let i = r.node(
                         &format!("{dn}_io{k}"),
                         p,
                         part,
                         Some(Role::DoorFrame),
-                        false,
+                        skin_row,
                     );
                     inner.push(i);
                     outer_chord.push(i);
                 }
             }
-            if split_beam {
+            // Round 7: the outer chord is the skin's middle row (on the
+            // skin, in its triangles): the skin between the bottom row
+            // (on the sill) and the shoulder was one triangle 0.49 m tall,
+            // so a pole pushed the sill and the shoulder and never the
+            // intrusion beam between them. `GEN3_NO_SKIN_ROW` keeps it 2 cm
+            // under the skin, out of the triangles.
+            if skin_row {
+                grid.insert(1, outer_chord.iter().map(|&i| Some(i)).collect());
+            }
+            if mid_stations {
                 for k in 0..cols.len() - 1 {
                     let z = 0.5 * (cols[k] + cols[k + 1]);
                     let bottom = low_at(pts, z, 0.04).unwrap_or(lo.y) + 0.03;
@@ -1253,22 +1380,36 @@ pub fn rig(model: &Model) -> Rig {
                     )
                 })
                 .collect();
-            r.car
-                .panel(&grid, part, &[Role::Sheet; 3], Role::Sheet, true);
+            r.car.panel(
+                &grid,
+                part,
+                &vec![Role::Sheet; grid.len()],
+                Role::Sheet,
+                true,
+            );
             let mut below: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
             below.extend(&inner);
+            if skin_row {
+                // (The outer chord is in the grid and the inner list.)
+                below.sort();
+                below.dedup();
+            }
             // Below the belt: everything to everything in reach.
-            graph(&mut r, &below, REACH_PANEL, part, Role::DoorFrame, &|_| {
-                false
-            });
+            let reach = if dense {
+                env_f("GEN3_DOOR_REACH", DOOR_REACH)
+            } else {
+                REACH_PANEL
+            };
+            graph(&mut r, &below, reach, part, Role::DoorFrame, &|_| false);
             // The frame: front and rear legs from the belt, and the top.
-            let belt_row: Vec<usize> = grid[2].iter().flatten().copied().collect();
+            let belt_row: Vec<usize> = grid.last().unwrap().iter().flatten().copied().collect();
             let ib: Vec<usize> = inner
                 .iter()
                 .copied()
                 .filter(|&i| r.car.nodes[i].name.contains("_i1"))
                 .collect();
             let (bf, br) = (belt_row[0], *belt_row.last().unwrap());
+            let bm = belt_row[belt_row.len() / 2];
             let (ibf, ibr) = (ib[0], *ib.last().unwrap());
             let (f0, f1) = (frame[0], frame[1]);
             let (fi0, fi1) = (frame_in[0], frame_in[1]);
@@ -1278,8 +1419,8 @@ pub fn rig(model: &Model) -> Rig {
                 (br, f1),
                 (ibr, f1),
                 (f0, f1),
-                (belt_row[1], f0),
-                (belt_row[1], f1),
+                (bm, f0),
+                (bm, f1),
                 (f0, fi0),
                 (f1, fi1),
                 (fi0, fi1),
@@ -1348,9 +1489,19 @@ pub fn rig(model: &Model) -> Rig {
                     r.car.beam(f, i, Role::DoorFrame, part);
                 }
             }
-            r.car.tri(bf, f0, belt_row[1], part);
-            r.car.tri(belt_row[1], f0, f1, part);
-            r.car.tri(belt_row[1], f1, br, part);
+            // The window opening is glass, which carries no load (tempered
+            // glass breaks at a few kN): round 7 drops its collision faces
+            // (`GEN3_WINDOW_TRIS` keeps them). As three triangles from the
+            // belt to the frame's top they were a rigid plate: a pole meeting
+            // the window pushed the frame, and through its seals the roof
+            // rail, from first contact (a pole cut off at 1.0 m reads 275 mm
+            // residual, at 1.2 m 213). The pole now meets the frame and the
+            // roof rail themselves.
+            if !side_r7() || std::env::var("GEN3_WINDOW_TRIS").is_ok() {
+                r.car.tri(bf, f0, bm, part);
+                r.car.tri(bm, f0, f1, part);
+                r.car.tri(bm, f1, br, part);
+            }
             let all: Vec<usize> = below
                 .iter()
                 .copied()
@@ -1852,6 +2003,52 @@ pub fn rig(model: &Model) -> Rig {
                 for b in inb {
                     if r.g(b).distance(g) < 0.25 {
                         if std::env::var("GEN3_NOSEAL").is_err() {
+                            r.car.beam(d, b, Role::Bearing, part);
+                        }
+                    }
+                }
+            }
+            // Round 7: the door's inner panel bears inward on its opening's
+            // flanges (SUPPORT): its first and last columns on the hinge
+            // pillar and the B- or C-pillar, its bottom row on the sill. A
+            // door pushed in across its width (the MDB) loads the opening's
+            // structure; a pole between its edges folds it between them.
+            // The skin seals below run from the door's edge along the car to
+            // the pillar's face and held nothing inward. `GEN3_NO_DOOR_STOPS`
+            // drops them.
+            if side_r7() && std::env::var("GEN3_NO_DOOR_STOPS").is_err() {
+                // (The intrusion beam's ends too: its brackets bear on the
+                // pillars, `GEN3_STOPS_NO_IO` leaves them out.)
+                let stops_io = std::env::var("GEN3_STOPS_NO_IO").is_err();
+                let inner_nodes: Vec<usize> = own
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let n = &r.car.nodes[i].name;
+                        (!r.skin[i]
+                            && (n.contains("_i0") || n.contains("_i1") || n.contains("_im")))
+                            || (stops_io && n.contains("_io"))
+                    })
+                    .collect();
+                let (zmin, zmax) = inner_nodes.iter().fold((f32::MAX, f32::MIN), |a, &i| {
+                    let z = r.g(i).z;
+                    (a.0.min(z), a.1.max(z))
+                });
+                for &d in &inner_nodes {
+                    let g = r.g(d);
+                    let edge = (g.z - zmin).abs() < 0.02 || (g.z - zmax).abs() < 0.02;
+                    let bottom = r.car.nodes[d].name.contains("_i0");
+                    if !(edge || bottom) {
+                        continue;
+                    }
+                    let flange = r.nearest(body, g, 1, |i| {
+                        let q = r.g(i);
+                        pillar(i, &r)
+                            && q.x.abs() < g.x.abs() - 0.02
+                            && Vec3::new(0.0, q.y - g.y, q.z - g.z).length() < 0.15
+                    });
+                    for b in flange {
+                        if r.g(b).distance(g) < 0.25 {
                             r.car.beam(d, b, Role::Bearing, part);
                         }
                     }
@@ -2591,6 +2788,7 @@ pub fn rig(model: &Model) -> Rig {
     // reinforcement): `GEN3_DOOR_UP_Y` times the door's yield.
     let door_up_h = to_jbeam(Vec3::new(0.0, 0.75, 0.0)).z;
     let duy = env("GEN3_DOOR_UP_Y", 1.0);
+    let rdy = env("GEN3_RDOOR_Y", 1.0);
     // The footwell: the floor, sills and hinge pillars ahead of the front
     // seats (the side tests strike behind it).
     let foot_y = to_jbeam(Vec3::new(0.0, 0.0, 0.40)).y;
@@ -2665,6 +2863,9 @@ pub fn rig(model: &Model) -> Rig {
         let crush_zone = mid.y < fw_y - 0.05 || mid.y > rear_y;
         if b.part.is_door() {
             b.deform *= dy;
+            if matches!(b.part, Part::DoorRL | Part::DoorRR) {
+                b.deform *= rdy;
+            }
             if mid.z > door_up_h {
                 b.deform *= duy;
             }
@@ -2808,6 +3009,34 @@ pub fn rig(model: &Model) -> Rig {
             }
             let mid = 0.5 * (r.car.nodes[b.a].p + r.car.nodes[b.b].p);
             b.deform *= if mid.z > split { bu } else { bl };
+        }
+    }
+    // Round 7: the sill box's own members (`GEN3_SILL_CHORD_Y` on its chords
+    // and wall webs between stations, `GEN3_SILL_SEC_Y` on its section at a
+    // station).
+    if dense_sill {
+        let (chord_y, sec_y) = (env("GEN3_SILL_CHORD_Y", 1.0), env("GEN3_SILL_SEC_Y", 1.0));
+        let mut at: HashMap<usize, usize> = HashMap::new();
+        for ch in &sill_chords {
+            for w in ch {
+                for (k, &i) in w.iter().enumerate() {
+                    at.insert(i, k);
+                }
+            }
+        }
+        for b in &mut r.car.beams {
+            if let (Some(&ka), Some(&kb)) = (at.get(&b.a), at.get(&b.b)) {
+                if b.deform.is_finite() && b.break_group.is_none() {
+                    let main = !sill_mid.contains(&b.a) && !sill_mid.contains(&b.b);
+                    // (A main station's own section already took
+                    // `GEN3_SILL_SEC_Y` in the floor pass.)
+                    if ka != kb {
+                        b.deform *= chord_y;
+                    } else if !main {
+                        b.deform *= sec_y;
+                    }
+                }
+            }
         }
     }
     let _ = (ARCH_R, &eng);
