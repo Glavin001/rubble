@@ -140,6 +140,17 @@ fn main() {
     for w in &warnings {
         println!("warning: {w}");
     }
+    if opt("parts=").is_some() {
+        // Each part with its node count and break groups its beams name.
+        for p in &desc.parts {
+            println!("part {} {}", p.name, p.nodes.len());
+        }
+        let mut gs: Vec<&str> = (0..desc.beams.len()).flat_map(|j| desc.beam_group_names(j).1).collect();
+        gs.sort();
+        gs.dedup();
+        println!("break groups {gs:?}");
+        return;
+    }
     if opt("couplers=").is_some() {
         let nm = |i: u32| desc.nodes[i as usize].name.clone();
         let gn = |g: u32| desc.break_groups.get(g as usize - 1).cloned().unwrap_or_default();

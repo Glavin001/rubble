@@ -296,6 +296,96 @@ impl SceneCar {
         })
     }
 
+    /// A community BeamNG car (`RUBBLE_JBEAM_COMMUNITY`, the folder holding the
+    /// mods: `etkk`, `ccf` or `vertex`, their default configurations), on its hubs
+    /// (pressure wheels without their tyres: BeamNG's shared tyres are not local,
+    /// and the body is what is measured), settled 2 s. Its parts map onto the
+    /// authored names by a car-generic rule on the JBeam part names (a Choice:
+    /// `community_part`), its far doors' and lid's hardware are its right-door and
+    /// lid hinge break groups. None without the content.
+    fn community(car: &str) -> Option<Self> {
+        use engine_softbody::explicit_beams::JbeamWheels;
+        let root = std::env::var("RUBBLE_JBEAM_COMMUNITY").ok()?;
+        let (m, name, pc) = community_car(car)?;
+        let dir = std::path::Path::new(&root).join(m).join("vehicles");
+        let files = engine_softbody::jbeam::read_vehicle_dir(&dir, name).ok()?;
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let pcs = std::fs::read_to_string(dir.join(name).join(pc)).ok()?;
+        let mut desc = engine_softbody::jbeam::load_jbeam(&refs, Some(&pcs)).ok()?;
+        for w in &mut desc.pressure_wheels {
+            w.flags.insert("hasTire".into(), false);
+        }
+        let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(
+            &desc,
+            JbeamWheels::Pressure,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            settings(),
+        )
+        .ok()?;
+        let f = engine_softbody::pack::forward_axis(&desc);
+        let turn = glam::Quat::from_rotation_y(-f.x.atan2(f.z));
+        for nd in &mut s.nodes {
+            nd.pos = turn * nd.pos;
+        }
+        let low = s.nodes.iter().map(|q| q.pos.y).fold(f32::MAX, f32::min);
+        let mid = s.nodes.iter().map(|q| q.pos).sum::<Vec3>() / s.nodes.len() as f32;
+        for nd in &mut s.nodes {
+            nd.pos -= Vec3::new(mid.x, low - 0.02, mid.z);
+        }
+        s.run(2.0);
+        let n = desc.nodes.len();
+        let mut own: Vec<Option<&str>> = vec![None; n];
+        for p in &desc.parts {
+            for &i in &p.nodes {
+                own[i as usize].get_or_insert(p.name.as_str());
+            }
+        }
+        let part = (0..n)
+            .map(|i| own[i].map_or("other".into(), community_part))
+            .collect();
+        let mut hw: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for j in 0..desc.beams.len() {
+            for g in desc.beam_group_names(j).1 {
+                hw.entry(g.to_string()).or_default().push(j);
+            }
+        }
+        let names: Vec<String> = hw.keys().cloned().collect();
+        let lower = |g: &str| g.to_ascii_lowercase();
+        let far_doors = names
+            .iter()
+            .filter(|g| {
+                let l = lower(g);
+                l.contains("doorhinge") && (l.ends_with("_r") || l.ends_with("_fr") || l.ends_with("_rr"))
+            })
+            .cloned()
+            .collect();
+        let lid = names
+            .iter()
+            .find(|g| {
+                let l = lower(g);
+                l.starts_with("trunkhinge") || l.starts_with("boothinge") || l.starts_with("tailgatehinge")
+            })
+            .map(|g| g.trim_end_matches(|c| c != '_').trim_end_matches('_').to_string())
+            .unwrap_or_else(|| "trunkhinge".into());
+        let len = {
+            let (a, c) = s.nodes[..n].iter().fold((f32::MAX, f32::MIN), |(a, c), q| {
+                (a.min(q.pos.z), c.max(q.pos.z))
+            });
+            c - a
+        };
+        Some(SceneCar {
+            built: None,
+            settled: Some(s),
+            n,
+            len,
+            part,
+            hardware: hw.into_iter().collect(),
+            far_doors,
+            lid,
+        })
+    }
+
     /// Standing at `at` (its centre along and across, as the authored spawn),
     /// moving at `vel`; `turned`: facing −z.
     fn spawn(&self, at: Vec3, vel: Vec3, turned: bool) -> ExplicitBeams {
@@ -345,6 +435,52 @@ impl SceneCar {
     }
 }
 
+/// The community cars (`RUBBLE_JBEAM_COMMUNITY`): mod folder, vehicle, configuration.
+fn community_car(car: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    Some(match car {
+        "etkk" => ("etkk_lucasbe", "etkk", "kr6.pc"),
+        "ccf" => ("thw_ccf2", "ccf", "f4_sport_M.pc"),
+        "vertex" => ("innocent_gavril_vertex", "gavril_vertex", "gavril_vertex.pc"),
+        _ => return None,
+    })
+}
+
+/// A community JBeam part's role by its name (a Choice, car-generic): the body
+/// shell and floor, the boot lid, the bonnet, the left front wing, the doors
+/// (`door_L`/`door_FL` left front, `door_R`/`door_FR` right front, `door_RL`,
+/// `door_RR` the rear doors), the chassis; else its own name without the car's
+/// prefix.
+fn community_part(p: &str) -> String {
+    let l = p.to_ascii_lowercase();
+    let tail = l.split_once('_').map_or(l.as_str(), |x| x.1);
+    let chassis = [
+        "suspension", "hub", "subframe", "arm", "tierod", "strut", "shock", "swaybar",
+        "steering", "halfshaft", "differential", "mounts", "knuckle",
+    ];
+    let ends = |k: &[&str]| k.iter().any(|e| l.ends_with(e));
+    if ends(&["_body", "_floor"]) {
+        "body".into()
+    } else if l.contains("trunk") || l.ends_with("_boot") || l.contains("tailgate") {
+        "bootlid".into()
+    } else if l.contains("hood") || l.contains("bonnet") {
+        "bonnet".into()
+    } else if ends(&["fender_l", "wing_l", "wing_fl", "fender_fl"]) {
+        "fender_l".into()
+    } else if ends(&["door_l", "door_fl", "doorpanel_l", "doorpanel_fl"]) {
+        "door_f_l".into()
+    } else if ends(&["door_r", "door_fr", "doorpanel_r", "doorpanel_fr"]) {
+        "door_f_r".into()
+    } else if ends(&["door_rl", "doorpanel_rl"]) {
+        "door_r_l".into()
+    } else if ends(&["door_rr", "doorpanel_rr"]) {
+        "door_r_r".into()
+    } else if chassis.iter().any(|c| l.contains(c)) {
+        "suspension".into()
+    } else {
+        tail.into()
+    }
+}
+
 fn scene_car(name: &str) -> Arc<SceneCar> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<SceneCar>>>> = OnceLock::new();
     let m = CACHE.get_or_init(Default::default);
@@ -353,6 +489,8 @@ fn scene_car(name: &str) -> Arc<SceneCar> {
     }
     let c = Arc::new(if name == "bx" {
         SceneCar::beamng().expect("RUBBLE_JBEAM_BX: no bx")
+    } else if community_car(name).is_some() {
+        SceneCar::community(name).expect("RUBBLE_JBEAM_COMMUNITY: car not found")
     } else {
         SceneCar::authored(built(name))
     });
@@ -1594,7 +1732,26 @@ fn beamng_reference_invariants_report() {
         eprintln!("skip: RUBBLE_JBEAM_BX not set");
         return;
     }
-    let car = "bx";
+    reference_invariants("bx");
+}
+
+/// The community cars (`RUBBLE_JBEAM_COMMUNITY`; `CI_CARS`, default
+/// `etkk,ccf,vertex`) on the BX's invariants, on their hubs: reported, never
+/// asserted. Skips without the content.
+#[test]
+#[ignore]
+fn community_invariants_report() {
+    if std::env::var("RUBBLE_JBEAM_COMMUNITY").is_err() {
+        eprintln!("skip: RUBBLE_JBEAM_COMMUNITY not set");
+        return;
+    }
+    let cars = std::env::var("CI_CARS").unwrap_or_else(|_| "etkk,ccf,vertex".into());
+    for car in cars.split(',') {
+        reference_invariants(car);
+    }
+}
+
+fn reference_invariants(car: &str) {
     for sc in [Scene::Wall, Scene::HeadOn] {
         let r = scene(car, sc);
         row(
