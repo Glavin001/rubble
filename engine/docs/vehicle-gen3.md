@@ -283,4 +283,144 @@ the MDB residual is high. Not resolved this round.
 - The wall at 56 km/h draws the skinned car correctly through the crush: the hood folds,
   the windshield cracks, the roof stays.
 - The side pole on this page differs from the CPU harness: 0 beams bent at 32 km/h on
-  gen3, while the ETK runs normally. This is open and not investigated.
+  gen3, while the ETK runs normally. Round 3 traced it to the lab's impact detection.
+
+## Round 3 (2026-11-06)
+
+Branch `feat/vehicle-gen3-r3`. Every number below is surface contact on unless marked.
+
+### The page's defects
+
+| Defect | Cause | Fix |
+|---|---|---|
+| The roof not drawn in the wall56 side view at +76 ms | Physics, not rendering. The greenhouse racked 28 cm forward against the floor (the ETK 7 cm; pitch removed: gen3 18 cm, the ETK under 1.5 cm) and dropped 16 cm, so the door frames hid it. The A-pillar was a two-bay chain through its middle node with no depth against the cabin's inertia and buckled out; its top node coincided with the roof rail's front node and the two were never joined; and the reach graph ran struts from the aprons up to the A-pillar's middle and the windshield. | One node at the header; chord beams hinge pillar to header (outer and inner walls, inside the pillar's section); a hinge-pillar front wall behind the arch (a box about 20 cm deep); no beams from the aprons, rails and cross members to nodes above the belt. The roof is drawn at +76 ms (stills). |
+| A magenta stub at the rear | `skin::color` had no colour for `GRAINED` (moulded-in black plastic: the rear diffuser, the front splitter), so it fell to the magenta debug colour. | Black. |
+| The side pole reads 0 broken, 0 bent; no impact | The lab's impact was "a node inside a static collider". With surface contact the faces stop a 20 cm pole between nodes, so no node ever enters it: the time readout, slow motion and counts stayed at their pre-impact state. | Points across each collision triangle against the colliders grown by the contact range count as an impact too (`explicit_lab.rs`). The pole now reads an impact at 108 ms (step 216). |
+| The trunk lid sits raised | At rest it is on its design (lid top 1.006–1.010 m against the deck sides' 1.003–1.005 m at the same sections; skin at spawn 0.15 mm). In the wall it lifted with the greenhouse's racking; it lifts about 3.5 cm against the tail lamps at 90 ms and returns. | The racking fix above. |
+
+### Shut lines: edge nodes
+
+- Where two parts' meshes meet (boundary vertices of different parts within 1 cm, as
+  the harness finds seams), a structural node on each side every 22 cm, 2.5 cm in from
+  the edge and 1 cm under the skin; 228 in all. Each is tied into its own panel's frame
+  (its nearest structural nodes, an inner one among them, and more until the ties span
+  all three directions), chained to its neighbours along the edge, and stopped against
+  the node across the line (SUPPORT).
+- They are in their part's binding pool, so border vertices ride nodes within about
+  10 cm.
+- Mass: 0.15 kg each from the part's budget. The panel's sheet stays with the nodes
+  that carried it, so adding edge nodes does not lighten them.
+- Stability: the bound softens the edge ties and stops (`Role::EdgeTie`, `EdgeStop`)
+  before a panel's own springs. Without that, the hood, fenders and doors lost half
+  their stiffness (k ratio p50 0.31–0.55). Now p50 is 0.85–1.0 and ω·h is 1.917.
+- **Decision:** edge nodes with fixed light mass, not Voronoi-weighted ones. Weighted
+  ones took 20 % of a panel's mass and the bound softened the panel.
+
+| | before | edge nodes | edge nodes, round 3 yields |
+|---|---|---|---|
+| wall56 seams > 5 cm (of pairs) | 934 / 3,697 | 869 / 3,830 | 1,138 / 3,830 |
+| pole32 | 168 | 132 | 237 |
+| MDB | 304 | 210 | 385 |
+
+**Not met: seams are not like the ETK's, and the seam test stays ignored.** The skins
+now follow their edges: for doors against the body, the heaviest nodes' gap is most of
+the skin gap. What still opens is the parts themselves separating:
+
+- in the crush zone, the hood against the fenders and grille, and the bumper cover
+  against the lamps (heaviest-node gaps 9–22 cm);
+- the front doors against the hinge pillars (8–10 cm).
+
+The round-3 yields add about 30 % more opened pairs, because the front now crushes
+602 mm instead of 583. The ETK keeps its seams shut while crushing 504 mm dynamic and
+234 mm residual; gen3's residual is 583 mm.
+
+### Yields by zone
+
+All are within the census's body band (p10 0.2–0.3 %, p50 1.0–1.3 %, p90 4.9–9.3 %).
+
+| Zone | multiple | ε_y |
+|---|---|---|
+| Crush zones (rails, cans, aprons, rear rails, their webs) | 0.4 | 0.46 % |
+| Footwell (floor, sills, hinge pillars, firewall ahead of the front seats, below the belt) | 3.0 | 4.1 % |
+| Greenhouse (above the belt) | 0.45 | 0.62 % |
+| Side (below the belt, behind the footwell), doors | 1.0 | 1.38 % / 1.45 % |
+
+`GEN3_CRUSH_Y`, `GEN3_FLOOR_Y`, `GEN3_ROOF_Y`, `GEN3_SIDE_Y` and `GEN3_DOOR_Y`
+override them for sweeps.
+
+### Frontal and side after round 3
+
+| | round 2 | round 3 | band |
+|---|---|---|---|
+| Dynamic crush (mm) | 583 | 602 | 620–750 |
+| t_m (ms) | 60 | **70** | 63–76 |
+| Peak, rear cabin (g) | 46.8 | 31.1 | 34–47 |
+| Residual max / avg (mm) | 575 / 326 | 583 / 375 | 380–580 / 261–512 |
+| Campbell b1 (1/s) | 41 | **35.5** | ≤ 39.2 |
+| Restitution | 0.141 | 0.206 | 0.13–0.20 |
+| Feet intrusion (mm) | 94 | **53** | ≤ 67 |
+| Roof, peak / weight | 5.94 | **5.06** | 4.48–5.32 |
+| Pole residual / dynamic (mm) | 178 / 296 | 188 / 308 | 297–445 residual |
+| MDB residual (mm) | 238 | 209 | 126–206 |
+| FMVSS 214 door initial (kN) | 9.7 | 9.1 | ≥ 10.0 |
+
+Surface contact off, for reference: dynamic crush 630 mm, t_m 71.5 ms, b1 35.1 /s,
+peak 30.9 g, residual 593 / 380 mm, feet 53 mm, pole 209 mm, MDB 209 mm, roof 5.06,
+door 9.1 kN. Full tables: `measurements/vehicle-compare-gen3-surface-on.md` and
+`-off.md`.
+
+- **Frontal:** t_m, b1, feet and roof are now in band. Dynamic crush is 18 mm short.
+  - The peak fell below its band as the front softened. A weaker crush zone means a
+    longer, flatter pulse.
+  - Restitution is 0.006 over its band. Residual max is 3 mm over its band.
+- **Side: not met.** The pole and the MDB still pull opposite ways.
+
+| Change | Pole residual (mm) | MDB residual (mm) | Door initial (kN) |
+|---|---|---|---|
+| Side yield × 0.5 | 273 | 274 | 8.9 |
+| Side yield × 0.35, doors × 3 | 298 | 403 | 8.7 |
+| Side yield × 1.4 | 107 | 181 | 9.1 |
+| Doors × 0.5 | 210 | 280 | 7.8 |
+
+  - Every yield that lets the pole crush deeper lets the MDB crush deeper too.
+  - The door's initial force does not follow the door's yield (it stayed 7.8–9.1 kN).
+  - Separating the two needs a structural answer, not a yield multiple: a sill and
+    roof rail whose bending strength exceeds the B-pillar's and the door's local
+    plastic hinge.
+
+### Rear-door latch
+
+The marker is 3 cm in from the rear door's shut line at 0.70 m, as the front door's is.
+
+- The rear door's skin edge at that height is z −0.958, and the old marker was
+  −0.960, so the marker was on the edge all along.
+- The rig had compared it with the door mesh's rearmost point at any height: the
+  window frame's corner at −1.44, at the belt. So it moved the latch up to the belt.
+- The rig's correction is removed.
+
+### Harness slowdown
+
+- The scenes take under 10 s each. The 3–4 minutes were the page's `.truck` export
+  rest run alone, with surface contact on or off: 230 s.
+- That export goes non-finite at 21 ms. The rig's round-2 stability bound counts on
+  centred damping, which the Rigs of Rods `.truck` rules do not apply. Stepping a NaN
+  state costs about 50× a live step.
+- The run now stops at the first non-finite node and reports `diverged_s`. The harness
+  takes 9 s for gen3 again.
+- `COMPARE_TIMES=1` prints each scene's time.
+- The surface pass was not the cause and is unchanged.
+
+### Checks (`gen3_rig`)
+
+| Check | Round 3 |
+|---|---|
+| Rest fidelity at spawn | 0.15 mm / 0.06° |
+| Parked 10 s, beyond the nodes' own motion | 0.54 mm / 0.41° |
+| Drift, every part | ≤ 1.3 mm |
+| Broken / bent at rest | 0 / 0 |
+| wall56 stretch / fold p99 | 1.15 / 5.7° |
+| pole32 stretch / fold p99 | 1.06 / 1.2° |
+| Seams > 5 cm wall / pole | 1,138 / 237 (ignored test) |
+
+Stills (GPU page, gen3 beside the ETK, same preset, camera and time):
+`media/gen3-r3/`.

@@ -94,6 +94,13 @@ fn main() -> Result<(), String> {
         }
         p
     });
+    // `PROBE_REAR=1`: the band over the trunk (its rear 0.4 m, above 0.75 m)
+    // instead of the middle of the car (above 1 m).
+    let (band_z, band_y) = if std::env::var("PROBE_REAR").is_ok() {
+        (f.lo.z + 0.25, 0.75)
+    } else {
+        (mid, 1.0)
+    };
     let report = |t: f32, s: &ExplicitBeams| {
         // In the floor's own frame (its rigid fit): the greenhouse's move
         // against the floor without the car's pitch.
@@ -118,7 +125,10 @@ fn main() -> Result<(), String> {
             let (p0, _) = engine_softbody::authoring::skin::deform(v, &rest);
             let mut hi: std::collections::BTreeMap<&str, f32> = Default::default();
             for k in 0..p.len() {
-                if (p0[k].z - mid).abs() < 0.25 && p0[k].y > rest_floor(&f) + 1.0 {
+                if (p0[k].z - band_z).abs() < 0.2
+                    && p0[k].y > rest_floor(&f) + band_y
+                    && p0[k].x.abs() < 0.6
+                {
                     let e = hi.entry(piece[k].as_str()).or_insert(f32::MIN);
                     *e = e.max(p[k].y);
                 }

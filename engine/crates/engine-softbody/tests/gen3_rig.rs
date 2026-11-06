@@ -291,10 +291,13 @@ fn mesh_quality_after_wall56_and_side_pole() {
     crashes(false);
 }
 
-/// Open (2026-11-06): about 1,100 of 4,091 seam pairs open past 5 cm in the
-/// wall (the hood against the fenders and grille, the front doors against
-/// the body and rear doors, the bumper cover against the lamps: `SEAM_DEBUG=1`
-/// lists them); 123 at the side pole. `engine/docs/vehicle-gen3.md`.
+/// Open (round 3, 2026-11-06): with the shut lines' edge nodes the skins
+/// follow their parts' edges (the top-node gap is most of the skin gap now),
+/// but 1,138 of 3,830 seam pairs still open past 5 cm in the wall, 237 at the
+/// side pole: the parts themselves separate in the crush zone (the hood off
+/// the fenders and grille, the bumper cover off the lamps, 9-22 cm) and the
+/// front doors against the hinge pillars (8-10 cm). `SEAM_DEBUG=1` lists them;
+/// `engine/docs/vehicle-gen3.md`, round 3.
 #[test]
 #[ignore = "open: seams past 5 cm in the wall (vehicle-gen3.md)"]
 fn seams_stay_shut_after_wall56_and_side_pole() {
