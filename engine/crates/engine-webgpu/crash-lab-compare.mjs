@@ -28,6 +28,10 @@ const timeout = Number(opt('--timeout', '600')) * 1000;
 mkdirSync(dirname(out), { recursive: true });
 
 const clips = [];
+// The first car's impact time; the others are recorded on it (the same scene
+// places every car's front at the same distance), so the clips line up even
+// where a car's impact detection fires early (a lid springing open at spawn).
+let impactMs = opt('--impact', null);
 for (const name of names) {
   const car = manifest.find((c) => c.name === name);
   if (!car) throw new Error(`--cars: ${name} is not in vehicle-compare-cars.json`);
@@ -35,7 +39,12 @@ for (const name of names) {
   const clip = join(dirname(out), `${preset}-${name}.mp4`);
   console.log(`${name}: recording ${preset}…`);
   const child = spawn(process.execPath, ['--experimental-websocket', join(ROOT, 'crash-lab-record.mjs'), '--car', name, '--size', size,
-    '--label', car.label || name, '--out', clip, preset], { stdio: 'inherit' });
+    '--label', car.label || name, '--out', clip, ...(impactMs != null ? ['--impact', String(impactMs)] : []), preset], { stdio: ['ignore', 'pipe', 'inherit'] });
+  child.stdout.on('data', (d) => {
+    process.stdout.write(d);
+    const m = /impact at (\d+) ms/.exec(d.toString());
+    if (m && impactMs == null) impactMs = Number(m[1]);
+  });
   // The kill timer: a hung page or GPU never outlives `timeout`.
   const timer = setTimeout(() => { console.log(`${name}: timed out, killed`); child.kill('SIGKILL'); }, timeout);
   const code = await new Promise((r) => child.on('exit', r));

@@ -195,6 +195,22 @@ Bands are from `crash-reference-targets.md` and `vehicle-test-strategy.md`.
     CPU reference (rest, wall, MDB); sedan1 is 1.4–7.4. That follows the node
     counts.
 
+11. **On the page (GPU, `jbeamMode=native`) the same wall looks far worse
+    than on the CPU.** This is observed in the side-by-side video, not
+    measured.
+    - Within about 250 ms of contact, the ETK sheds many fragments and its
+      front tears open. By 2 s it is a crumpled heap.
+    - The CPU reference breaks only 2 beams in the same scene.
+    - Its wheels are not drawn on the page.
+    - Its impact detection fires at 10 ms, before it reaches the wall. The
+      recorder aligns the clips with `--impact`.
+    - The GPU path has no harness yet, so this is a follow-up for the solver
+      and page owners.
+
+    The video is at
+    `engine/crates/engine-webgpu/recordings/compare/wall56.mp4` (gitignored:
+    it shows the mod's mesh). Regenerate it with `crash-lab-compare.mjs`.
+
 ## Design goals for gen2 (from the findings)
 
 - **Lids:** latch hood and trunk with break-group beams, not couplers (finding 1).

@@ -151,7 +151,8 @@ for (const run of runs) {
   let s = await lab('L.state()');
   while (s.impactStep == null && s.step < 6 * HZ) s = await lab('L.advance(200, 20)');
   if (s.impactStep == null) throw new Error(`${name}: no impact`);
-  const impact = s.impactStep;
+  // --impact MS: the impact time given (the side-by-side recorder aligns every car to the first one's; a car whose detection fires early, at spawn, is placed the same).
+  const impact = opt('--impact', null) != null ? Math.round(Number(opt('--impact')) * HZ / 1000) : s.impactStep;
   // Pass 2: the recording.
   // The strain pass: the beam skeleton and nodes coloured by strain over a ghost body.
   await open(`preset=${name}&paused=1${view === 'strain' ? '&skin3=ghost&skeleton=1&nodes=1&color=strain' : ''}`);
