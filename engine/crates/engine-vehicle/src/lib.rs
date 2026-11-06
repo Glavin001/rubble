@@ -9,6 +9,7 @@ pub mod desc;
 pub mod host;
 pub mod pack;
 pub mod presets;
+pub mod scripts;
 pub mod streets;
 
 pub use desc::*;
