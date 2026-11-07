@@ -698,8 +698,20 @@ impl ExplicitVehicles {
         if std::env::var("RUBBLE_GPU_TIMING_EXPLICIT").is_ok() {
             self.gpu.set_marks(sim.marks().cloned());
         }
-        let seg = if steps > 0 { sim.host_segment("explicit_frame") } else { None };
-        let read = self.gpu.frame_encode_timed(enc, steps, sim.step_query_set().zip(seg.map(|k| 2 * k)));
+        // `GpuTiming::Phases`: each of the frame's dispatches timed on its own (named by
+        // its kernel); `Step`: the frame as one segment.
+        let read = if sim.gpu_timing() == engine_webgpu::GpuTiming::Phases && steps > 0 && sim.host_segments_left() > 1 {
+            let (first, cap) = (sim.next_host_segment(), sim.host_segments_left() - 1);
+            let set = sim.step_query_set().expect("timing on").clone();
+            let (read, labels) = self.gpu.frame_encode_per_dispatch(enc, steps, &set, first, cap);
+            for l in labels {
+                let _ = sim.host_segment(l);
+            }
+            read
+        } else {
+            let seg = if steps > 0 { sim.host_segment("explicit_frame") } else { None };
+            self.gpu.frame_encode_timed(enc, steps, sim.step_query_set().zip(seg.map(|k| 2 * k)))
+        };
         if let Some(m) = sim.marks() {
             m.mark(enc, "explicit frame");
         }

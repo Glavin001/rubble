@@ -69,6 +69,9 @@ pub struct ExplicitBeamsGpu {
     debug_coupling_bits: u32,
     /// The coupling's per-node shape ranges off ([`Self::set_coupling_node_ranges`]).
     coupling_ranges_off: bool,
+    /// Diagnostic: the large contact groups' pipeline from an edited module
+    /// ([`Self::debug_set_contact_big_wgsl`]).
+    debug_big: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
     surface_pairs_off: bool,
     surface_culls_off: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
@@ -758,6 +761,7 @@ impl ExplicitBeamsGpu {
             coupling_cache_off: false,
             debug_coupling_bits: 0,
             coupling_ranges_off: coupling_node_ranges_off_default(),
+            debug_big: None,
             surface_pairs_off: std::env::var("RUBBLE_SURFACE_PAIRS").as_deref() == Ok("0"),
             surface_culls_off: std::env::var("RUBBLE_SURFACE_CULLS").as_deref() == Ok("0"),
             wide,
@@ -835,6 +839,40 @@ impl ExplicitBeamsGpu {
     pub fn debug_coupling_bits(&mut self, bits: u32) {
         self.debug_coupling_bits = bits;
         self.write_coupling_header();
+    }
+
+    /// Diagnostic: the large contact groups' module's WGSL as its pipeline compiles it.
+    #[doc(hidden)]
+    pub fn debug_contact_big_wgsl(&self) -> String {
+        let (aero, _, lanes) = self.module_kind;
+        crate::uniformize_workgroup_lanes(module_wgsl(Kernel::ContactBig.module_for(aero, lanes, self.layout.surface)))
+    }
+
+    /// Diagnostic: run `src` as the large contact groups' module from now on.
+    #[doc(hidden)]
+    pub fn debug_set_contact_big_wgsl(&mut self, src: &str) {
+        let device = &self.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("explicit_beams_contact (debug)"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("explicit_beams_contact (debug)"),
+            layout: None,
+            module: &module,
+            entry_point: Some(plan::CONTACT_ENTRY),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams-vv (debug)"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 0 { params_window(&self.bufs[0]) } else { self.bufs[i].as_entire_binding() },
+            }),
+        });
+        self.debug_big = Some((pipeline, group));
     }
 
     /// Diagnostic: the byte size of each state binding's buffer (bindings 0..=8).
@@ -1472,7 +1510,7 @@ impl ExplicitBeamsGpu {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        let read = self.encode(&mut enc, steps, None);
+        let read = self.encode(&mut enc, steps, None, None).0;
         self.queue.submit([enc.finish()]);
         if read {
             self.contact.map_status();
@@ -1492,7 +1530,25 @@ impl ExplicitBeamsGpu {
         if self.layout.spans.is_empty() || steps == 0 {
             return false;
         }
-        self.encode(enc, steps, stamp)
+        self.encode(enc, steps, stamp, None).0
+    }
+
+    /// [`Self::frame_encode`] with each dispatch in its own pass, timed in a host's
+    /// query set: dispatch i (while i < `cap`) writes timestamps `2 (first + i)` and
+    /// `2 (first + i) + 1`. Returns the status-read flag and the timed dispatches'
+    /// kernel labels, in order (the passes add their own cost: a diagnostic).
+    pub fn frame_encode_per_dispatch(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        steps: u32,
+        set: &wgpu::QuerySet,
+        first: u32,
+        cap: u32,
+    ) -> (bool, Vec<&'static str>) {
+        if self.layout.spans.is_empty() || steps == 0 {
+            return (false, Vec::new());
+        }
+        self.encode(enc, steps, None, Some((set, first, cap)))
     }
 
     /// Diagnostic: a mark after each of the frame's dispatches, named by kernel (`None`:
@@ -1510,7 +1566,14 @@ impl ExplicitBeamsGpu {
 
     /// The frame's commands (the shared plan's), replayed: a compute pass per run of
     /// dispatches, a copy between them; whether they copy the status for a read.
-    fn encode(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32, ext: Option<(&wgpu::QuerySet, u32)>) -> bool {
+    fn encode(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        steps: u32,
+        ext: Option<(&wgpu::QuerySet, u32)>,
+        per: Option<(&wgpu::QuerySet, u32, u32)>,
+    ) -> (bool, Vec<&'static str>) {
+        let mut labels = Vec::new();
         self.check_contact_status();
         self.write_wakes();
         self.write_params(steps);
@@ -1537,6 +1600,25 @@ impl ExplicitBeamsGpu {
         for (i, run) in runs.iter().enumerate() {
             if i > 0 {
                 self.copy(enc, copies[i - 1]);
+            }
+            if let Some((q, first, cap)) = per {
+                for cmd in *run {
+                    let k = first + labels.len() as u32;
+                    let timed = (labels.len() as u32) < cap;
+                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("explicit_beams"),
+                        timestamp_writes: timed.then_some(wgpu::ComputePassTimestampWrites {
+                            query_set: q,
+                            beginning_of_pass_write_index: Some(2 * k),
+                            end_of_pass_write_index: Some(2 * k + 1),
+                        }),
+                    });
+                    self.dispatch(&mut pass, cmd, alt);
+                    if timed {
+                        labels.push(kernel_name(cmd));
+                    }
+                }
+                continue;
             }
             if let Some(m) = self.marks.clone() {
                 for cmd in *run {
@@ -1565,7 +1647,7 @@ impl ExplicitBeamsGpu {
         if read {
             self.contact.read_status(&self.device, enc);
         }
-        read
+        (read, labels)
     }
 
     /// One plan dispatch: its pipeline (the variant's, when one is set) and bind
@@ -1604,6 +1686,11 @@ impl ExplicitBeamsGpu {
                 // A test variant's contact module steps every group (no split): nothing
                 // to dispatch here.
                 if alt.is_some() {
+                    return;
+                }
+                if let Some((p, g)) = &self.debug_big {
+                    pass.set_pipeline(p);
+                    pass.set_bind_group(0, g, &[]);
                     return;
                 }
                 let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");

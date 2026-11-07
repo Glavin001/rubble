@@ -147,6 +147,20 @@ impl WebWorld {
         }
     }
 
+    /// Diagnostic: the large contact groups' module's WGSL.
+    #[wasm_bindgen(js_name = debugExplicitContactBigWgsl)]
+    pub fn debug_explicit_contact_big_wgsl(&self) -> String {
+        self.world.explicit_vehicles().map_or(String::new(), |g| g.debug_contact_big_wgsl())
+    }
+
+    /// Diagnostic: run `src` as the large contact groups' module.
+    #[wasm_bindgen(js_name = debugSetExplicitContactBigWgsl)]
+    pub fn debug_set_explicit_contact_big_wgsl(&mut self, src: &str) {
+        if let Some(g) = self.world.explicit_vehicles_mut() {
+            g.debug_set_contact_big_wgsl(src);
+        }
+    }
+
     /// Diagnostic: run `src` as the explicit frame module (an edited copy of
     /// [`Self::debug_explicit_frame_wgsl`]; ablations without a rebuild).
     #[wasm_bindgen(js_name = debugSetExplicitFrameWgsl)]

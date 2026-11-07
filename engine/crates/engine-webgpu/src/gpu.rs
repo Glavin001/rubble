@@ -4000,6 +4000,19 @@ impl WgpuSim {
         })
     }
 
+    /// Room for host segments after the step's (see [`Self::host_segment`]).
+    pub fn host_segments_left(&self) -> u32 {
+        match self.step_queries.as_ref().filter(|_| self.gpu_timing != crate::GpuTiming::Off) {
+            Some(q) if self.last_step_ran && !self.timed_segments.is_empty() => q.segments.saturating_sub(self.timed_segments.len() as u32),
+            _ => 0,
+        }
+    }
+
+    /// The next host segment's index ([`Self::host_segment`] returns it when called).
+    pub fn next_host_segment(&self) -> u32 {
+        self.timed_segments.len() as u32
+    }
+
     /// The step's timestamp query set (with timing on).
     pub fn step_query_set(&self) -> Option<&wgpu::QuerySet> {
         self.step_queries.as_ref().filter(|_| self.gpu_timing != crate::GpuTiming::Off).map(|q| &q.set)

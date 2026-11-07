@@ -149,6 +149,14 @@ fn main() -> anyhow::Result<()> {
                 x.set_coupling_cull(false);
             }
         }
+        // EV_PHASES=1: the World's own per-segment timestamps (`GpuTiming::Phases`: the
+        // rigid step's phases, the coupling's passes, each explicit dispatch by kernel),
+        // their mean ms over the run printed below.
+        let phases = std::env::var("EV_PHASES").as_deref() == Ok("1");
+        if phases {
+            w.set_gpu_timing(GpuTiming::Phases)?;
+        }
+        let mut seg_ms: std::collections::BTreeMap<&'static str, (f64, u32)> = Default::default();
         let dt = w.solver().dt;
         let mut ms = Vec::new();
         let mut wall = Vec::new();
@@ -160,6 +168,17 @@ fn main() -> anyhow::Result<()> {
             let frames = w.poll_blocking()?;
             let span_ms = w.last_submit_instant().map(|t| t.elapsed().as_secs_f64() * 1e3);
             for f in frames {
+                if let Some(t) = &f.gpu_time {
+                    let mut per: std::collections::BTreeMap<&'static str, f64> = Default::default();
+                    for (n, ms) in &t.segments {
+                        *per.entry(n).or_default() += ms;
+                    }
+                    for (n, ms) in per {
+                        let e = seg_ms.entry(n).or_default();
+                        e.0 += ms;
+                        e.1 += 1;
+                    }
+                }
                 for e in &f.destruction_events {
                     if let DestructionEvent::BondsBroken { bonds, .. } = e {
                         broken += bonds.len();
@@ -191,6 +210,12 @@ fn main() -> anyhow::Result<()> {
             stats(wall),
             w.explicit_vehicle_steps()
         );
+        if phases {
+            let mut v: Vec<(&str, f64)> = seg_ms.iter().map(|(n, (ms, k))| (*n, ms / f64::from(*k))).collect();
+            v.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let list: Vec<String> = v.iter().take(10).map(|(n, ms)| format!("{n} {ms:.2}")).collect();
+            println!("  segments (mean ms per step): {}", list.join(", "));
+        }
         drop(town);
       }
         if std::env::var("EV_ALONE").as_deref() == Ok("0") {

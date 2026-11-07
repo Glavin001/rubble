@@ -1008,3 +1008,20 @@ Metal parity tests.
 **The page's loop.** World steps are paced to wall time by `FramePacer` (a 120 Hz display
 draws every frame and takes a 1/60 s step every other one), not one per
 `requestAnimationFrame`; the HUD shows real time as World steps per second.
+
+**Results** (M3 Max, Chrome 1280×720, `?timing=step`, measured 6 s after the start, GPU ms
+per World step median; native: `EV_PAGE=1 explicit_vehicles_bench`, the first 2 s):
+
+| n | before (Chrome) | after, headless (60 Hz rAF) | after, windowed (120 Hz) | native |
+|---|---|---|---|---|
+| 1 | 1–3 FPS, 1.3 World steps/s, explicit frame 260–1,100 ms | 60 FPS, 60 steps/s; 9.2 ms (frame 6.0, cpl_emit 1.6, rigid 1.4) | 120 FPS, 60 steps/s; 9.4 ms | 4.15 ms |
+| 4 | 2 FPS, frame 758 ms | 56 FPS, 34 steps/s (56 %); 25 ms (frame 22) | 60 FPS, 34 steps/s | 17.2 ms (not real time either) |
+| 16 | 1 FPS, frame 1,458 ms | 20 FPS, 12 steps/s (20 %); 78 ms (frame 76) | 20 FPS, 12 steps/s | 9.1 ms |
+
+**Remaining (n ≥ 4).** With `?timing=phases` the explicit frame is timed per dispatch:
+at 16 cars the large contact groups' kernel (`explicit_beams_contact`, groups of more than
+four) is 73 ms a step in Chrome against 6.9 ms natively (`EV_PHASES=1`); the coupling is
+not the cause there (73 → 47 ms with it off, in a different state). The next step is the
+same-pipeline switch bisection (`debugSetExplicitContactBigWgsl`) on that kernel. At 4 cars
+in one house the town is over a 60 Hz step's budget natively too (17 ms). `cpl_emit` (one
+lane per vehicle over its proxy shapes, O(shapes²)) is 1.1 ms natively, 1.6 ms in Chrome.
