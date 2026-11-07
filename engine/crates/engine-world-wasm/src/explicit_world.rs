@@ -184,6 +184,22 @@ impl WebWorld {
         arr.into()
     }
 
+    /// Per vehicle its frame-bounds margin (m; a vehicle's widens after it left its
+    /// frame bounds).
+    #[wasm_bindgen(js_name = explicitContactMargin)]
+    pub fn explicit_contact_margin(&self) -> Vec<f64> {
+        self.world.explicit_vehicles().map_or(Vec::new(), |g| {
+            (0..g.vehicle_count()).map(|v| f64::from(g.vehicle_contact_margin(v))).collect()
+        })
+    }
+
+    /// Diagnostic: the vehicle-contact records' first gMisc record (6 a vehicle: padded
+    /// box lo, hi, allowed lo, hi, flags, member/own margin).
+    #[wasm_bindgen(js_name = debugExplicitVvRecords)]
+    pub fn debug_explicit_vv_records(&self) -> u32 {
+        self.world.explicit_vehicles().map_or(0, |g| (g.vv_record_words().start / 4) as u32)
+    }
+
     /// Whether the explicit frame runs as the wide passes.
     #[wasm_bindgen(js_name = explicitWide)]
     pub fn explicit_wide(&self) -> bool {

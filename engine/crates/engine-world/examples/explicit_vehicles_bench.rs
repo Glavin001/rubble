@@ -143,6 +143,21 @@ fn main() -> anyhow::Result<()> {
             Some(max_houses),
         )?;
         let w = &mut town.world;
+        // EV_MARGIN=m (measurement): the vehicle contact's frame-bounds margin.
+        if let Some(m) = std::env::var("EV_MARGIN").ok().and_then(|v| v.parse::<f32>().ok()) {
+            if let Some(x) = w.explicit_vehicles_mut() {
+                x.set_contact_margin(m);
+            }
+        }
+        // EV_VMARGIN=v:m (measurement): vehicle v's own frame-bounds margin.
+        if let Some((v, m)) = std::env::var("EV_VMARGIN").ok().and_then(|s| {
+            let (a, b) = s.split_once(':')?;
+            Some((a.parse::<usize>().ok()?, b.parse::<f32>().ok()?))
+        }) {
+            if let Some(x) = w.explicit_vehicles_mut() {
+                x.set_vehicle_contact_margin(v, m);
+            }
+        }
         // EV_CULL=0 (measurement): the coupling's shape cull off.
         if std::env::var("EV_CULL").as_deref() == Ok("0") {
             if let Some(x) = w.explicit_vehicles_mut() {
@@ -160,7 +175,9 @@ fn main() -> anyhow::Result<()> {
         let dt = w.solver().dt;
         let mut ms = Vec::new();
         let mut wall = Vec::new();
-        let steps = (2.0 / dt).round() as u32;
+        // EV_SECS: simulated seconds (default 2).
+        let secs: f32 = std::env::var("EV_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+        let steps = (secs / dt).round() as u32;
         let mut broken = 0usize;
         for _ in 0..steps {
             let t0 = std::time::Instant::now();
@@ -187,10 +204,14 @@ fn main() -> anyhow::Result<()> {
             }
             wall.push(t0.elapsed().as_secs_f64() * 1e3);
             if std::env::var("EV_GROUPS").is_ok() && w.step_count() % 20 == 0 {
-                if let Some(x) = w.explicit_vehicles() {
+                let sc = w.step_count();
+                if let Some(x) = w.explicit_vehicles_mut() {
                     let mut g = x.contact_group_sizes();
                     g.sort_unstable();
-                    eprintln!("step {}: {} groups, sizes {:?}", w.step_count(), g.len(), g);
+                    eprintln!("step {}: {} groups, sizes {:?}, contact margin {} m, widest own {} m", sc, g.len(), g, x.contact_margin(), (0..x.vehicle_count()).map(|v| x.vehicle_contact_margin(v)).fold(0.0f32, f32::max));
+                    for e in x.take_contact_errors() {
+                        eprintln!("  error: {e}");
+                    }
                     let mut shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
                     shapes.sort_unstable();
                     eprintln!("  proxy shapes per vehicle: {shapes:?}");

@@ -5670,6 +5670,47 @@ bool vvCells(float3 lo, float3 hi, out int3 c0, out int3 span)
     return true;
 }
 
+// vvBounds' boxes, cells and flags for vehicle v with its own margin (wider than the
+// fleet's): the same arithmetic with `margin` from the vehicle's record.
+void vvBoundsRest(uint v, float3 blo, float3 bhi, float3 vl, float3 vh, float time, float margin)
+{
+    float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
+    float3 alo = blo - (-vl * time + float3(margin, margin, margin));
+    float3 ahi = bhi + (vh * time + float3(margin, margin, margin));
+    float3 plo = alo - m3;
+    float3 phi = ahi + m3;
+    gMisc[vvRec(v, VV_P_LO)] = uint4(asuint(plo), 0u);
+    gMisc[vvRec(v, VV_P_HI)] = uint4(asuint(phi), 0u);
+    gMisc[vvRec(v, VV_ALLOWED_LO)] = uint4(asuint(alo), 0u);
+    gMisc[vvRec(v, VV_ALLOWED_HI)] = uint4(asuint(ahi), 0u);
+    int3 c0;
+    int3 span;
+    // A box that is not finite (a node at infinity or NaN) partners no one
+    // here (a GPU deviation: the specification's rule would partner it with
+    // every vehicle and group the whole fleet).
+    bool finite = all(abs(plo) < 3.0e38) && all(abs(phi) < 3.0e38);
+    bool big = finite && !vvCells(plo, phi, c0, span);
+    if (finite && !big)
+    {
+        for (int x = 0; x < min(span.x, int(VV_MAX_SPAN)); x++)
+            for (int y = 0; y < min(span.y, int(VV_MAX_SPAN)); y++)
+                for (int z = 0; z < min(span.z, int(VV_MAX_SPAN)); z++)
+                {
+                    uint b = vvHash(c0 + int3(x, y, z));
+                    uint slot = uint(gAcc[gP.vvGridCount + b].add(1));
+                    if (slot < VV_SLOTS) gNext[gP.vvGrid + b * VV_SLOTS + slot] = v;
+                    else big = true;
+                }
+    }
+    if (big)
+    {
+        uint at = uint(gAcc[vvCtl(VV_BIGS)].add(1));
+        gNext[gP.vvBig + at] = v;
+    }
+    uint4 fl = gMisc[vvRec(v, VV_FLAGS)];
+    gMisc[vvRec(v, VV_FLAGS)] = uint4(finite ? (big ? 1u : 0u) : 2u, 0u, 0u, fl.w);
+}
+
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -5729,6 +5770,15 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         if ((gP.vvOn & 4u) == 0u
             && (any(blo < asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz)) || any(bhi > asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz))))
             vvReportOutside(v);
+        // This vehicle's own margin when wider than the fleet's (VV_MEMBER .y: the host
+        // widens a vehicle's after it left its frame bounds; 0 until then): the rest in
+        // its own function (the fleet's path below keeps its codegen).
+        if (asfloat(gMisc[vvRec(v, VV_MEMBER)].y) > margin)
+        {
+            vvBoundsRest(v, blo, bhi, vl, vh, time, asfloat(gMisc[vvRec(v, VV_MEMBER)].y));
+            ebLoopCapFlush();
+            return;
+        }
         float3 alo = blo - (-vl * time + float3(margin, margin, margin));
         float3 ahi = bhi + (vh * time + float3(margin, margin, margin));
         float3 plo = alo - m3;

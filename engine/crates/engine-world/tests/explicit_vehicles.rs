@@ -467,6 +467,112 @@ fn the_coupling_node_ranges_are_bit_exact() {
     assert!(checked >= 2, "the comparison ran with the cars among the house's chunks");
 }
 
+/// A vehicle's own frame-bounds margin (what a frame-bounds error widens now, in place
+/// of the fleet's) changes only which vehicles step together: the same frames with
+/// vehicle 0's margin at 8 m (larger groups) and at the fleet's 1 m are equal bit for
+/// bit. Sixteen cars into four houses at 120 Hz, compared once they are among the
+/// chunks.
+#[test]
+fn a_vehicle_contact_margin_changes_no_result() {
+    let template = sedan(0.0, 0.0, Vec3::ZERO, 0);
+    let mut town = rubble::explicit_scene::crash_town_at(
+        GpuContext::Default,
+        &template,
+        4,
+        16,
+        15.0,
+        8.0,
+        30,
+        &rubble::explicit_scene::town_coupling(),
+        Some(1.0 / 120.0),
+        None,
+    )
+    .unwrap();
+    let w = &mut town.world;
+    let mut checked = 0;
+    for step in 0..120 {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        if step < 60 || step % 30 != 0 {
+            continue;
+        }
+        let x = w.explicit_vehicles_mut().unwrap();
+        let snap = x.snapshot();
+        let mut run = |margin: f32| {
+            x.restore(&snap);
+            for v in 0..16 {
+                x.set_vehicle_contact_margin(v, margin);
+            }
+            for _ in 0..3 {
+                x.frame(17);
+            }
+            x.wait();
+            let groups = x.contact_group_sizes();
+            for v in 0..16 {
+                x.set_vehicle_contact_margin(v, 0.0);
+            }
+            let plan = x.vv_record_words();
+            let mut words = x.state_words();
+            for (name, w) in words.iter_mut() {
+                if *name == "misc" {
+                    w[plan.clone()].fill(0);
+                }
+            }
+            words.extend(x.coupling_words());
+            (words, groups)
+        };
+        let (base, g1) = run(0.0);
+        let (wide, g8) = run(8.0);
+        x.restore(&snap);
+        println!("step {step}: groups {g1:?} and with 8 m {g8:?}");
+        for ((name, a), (_, b)) in base.iter().zip(&wide) {
+            let diff = a.iter().zip(b).filter(|(p, q)| p != q).count();
+            assert_eq!(diff, 0, "step {step}: {name}: {diff} words differ with an 8 m vehicle margin");
+        }
+        if g8.iter().max() > g1.iter().max() {
+            checked += 1;
+        }
+    }
+    assert!(checked >= 1, "the wider margin grouped more vehicles");
+}
+
+/// The window impulse records `cpl_emit` writes a lane a shape are its one-lane walk's,
+/// word for word (sorted by key, the order the rigid step sums them in). Four cars into
+/// one house at 120 Hz, compared once they meet its chunks.
+#[test]
+fn the_coupling_emit_in_parallel_is_the_serial_walk() {
+    let template = sedan(0.0, 0.0, Vec3::ZERO, 0);
+    let mut town = rubble::explicit_scene::crash_town_at(
+        GpuContext::Default,
+        &template,
+        1,
+        4,
+        15.0,
+        8.0,
+        30,
+        &rubble::explicit_scene::town_coupling(),
+        Some(1.0 / 120.0),
+        None,
+    )
+    .unwrap();
+    let w = &mut town.world;
+    let mut checked = 0;
+    for step in 0..150 {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        if step < 40 || step % 10 != 0 {
+            continue;
+        }
+        let serial = w.explicit_emit_records(true);
+        let parallel = w.explicit_emit_records(false);
+        assert_eq!(serial, parallel, "step {step}: the emitted records differ");
+        if serial.len() >= 10 {
+            checked += 1;
+        }
+    }
+    assert!(checked >= 2, "the comparison ran with tens of records");
+}
+
 /// The coupling plan's lane-parallel records (`vehicle_coupling.slang` `cplPlanShapes`)
 /// are its serial walk's: from one World state, the plan alone both ways gives the same
 /// proxy records (bodies, shapes, hull planes, each body's shape range) and share
