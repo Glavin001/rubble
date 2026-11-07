@@ -25,3 +25,24 @@ memory, the contact modules up to 31.5 KB, against Metal's 32 KB. A 470–585-no
 positions and velocities are 15–19 KB. They do not fit beside the grid counts and
 offsets (8 KB), the tested-triangle list (8 KB), the pair list (4 KB) and the coupling's
 copies (8.3 KB), all live within a step.
+
+## Gather instead of scatter (the brief's step 2): already the design
+
+The beams' forces are not accumulated by atomics. The beam phase writes each beam's
+force on each end into that end's incidence entry (`gBeams[incBase + slot]`, the CSR of
+beam ends built at upload), and the node phase sums a node's entries in beam order
+(`beamSum`): a fixed order, the CPU's, no atomics. The fixed-point atomics (`gAcc`) carry
+only contact forces (self-collision hits, vehicle contact, the coupling's reactions),
+whose integer sums are order-free by construction. Nothing to change.
+
+## Packing small vehicles (step 5): no idle lanes
+
+Fleets of up to 32 vehicles run 512 lanes a vehicle, larger ones 256. The cars measured
+have 470–585 nodes and 1,500–4,300 beams: every phase spreads over all lanes (the beam
+phase 3–9 passes a lane), so no lanes are idle to pack another vehicle into.
+
+## Spreading a vehicle over workgroups (step 4): exists as the wide passes
+
+`explicit_beams_wide_*` already run one vehicle across the GPU, a dispatch per phase per
+step (6 a step with centred damping, about 200 a frame). They do not run the coupling,
+aero, raycast wheels or surface contact, so the town's cars (coupled) cannot use them.
