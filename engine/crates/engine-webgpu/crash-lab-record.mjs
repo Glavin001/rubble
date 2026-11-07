@@ -130,7 +130,7 @@ const ready = async () => {
       console.log(`  loading ${((i + 1) / 5).toFixed(0)} s: ${st.slice(0, 160)}`);
     }
   }
-  throw new Error('the page did not start');
+  throw new Error(`the page did not start${pageErrors.length ? `; page errors: ${pageErrors.slice(0, 5).join(' | ')}` : ''}`);
 };
 // --query a=b&c=d: appended to every page's query (bind=legacy, alt=0: a
 // visual A/B on identical physics).

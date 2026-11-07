@@ -1303,3 +1303,174 @@ ETK. They use the same preset and camera, with the ETK aligned to gen3's impact
     A-pillar may sit further back than the Accord's;
   - the seat and its cross members as the wide load's path.
 - **Parked fidelity at every time:** remove the slow parked bounce on raycast wheels.
+
+## Round 8 (2026-11-06)
+
+Branch `feat/vehicle-gen3-r8`. Surface contact is on unless marked. Tables:
+`measurements/vehicle-compare-gen3-surface-on.md` and `-off.md` (the default car,
+unchanged) and `measurements/vehicle-compare-gen3-r8-cabin.md` (`GEN3_CABIN_R8=1`,
+beside the ETK).
+
+### Decisions (deviations first)
+
+- **The pole is not met.** Every lever this round measured left the pole's mean below
+  200 mm (band 297–445) and moved the MDB with it. Where the side gives, the floor bends
+  with it and springs back (below): the car wraps round the pole.
+- **gen3's cabin sat 0.21 m aft of the Accord's. The fix ships opt-in
+  (`GEN3_CABIN_R8=1`), not as the default.** It moves the firewall, cowl, windshield,
+  A-pillars, front doors and B-pillars 0.21 m forward, and seats the driver on the
+  Accord's H-point. With it the frontal falls out of band (restitution 0.264, b1 42.4,
+  MDB 238 mm). Without the flag the export and every harness number are round 7's,
+  bit for bit.
+- **The default car is unchanged.** `gen3_rig` passes; ω·h 1.919; 0 broken, 0 bent at
+  rest; 1,450 kg, centre of mass 1,216 mm behind the front axle.
+- **Round 7's frontal is on a knife edge.** A 10 nm move of the dash's render boxes (a
+  float rounding in the interior's placement) changed the stability bound's softening
+  and moved b1 from 34.5 to 39.9 /s, the door's initial force from 10.7 to 9.8 kN and
+  the roof from 5.31 to 5.37. The default now keeps round 7's literals exactly.
+
+### The geometry against the Accord
+
+NHTSA's oblique pole test of the 2018 Accord (v10841, data sheets 4, 7, 10 and 11;
+v10842 alike) gives these positions, aft of the front axle (axle at 934 mm from the
+front, the coordinates' origin):
+
+| | Accord | gen3, round 7 | `GEN3_CABIN_R8` |
+|---|---|---|---|
+| front door's leading edge | 0.453 (impact line 1,304 − 851) | 0.672 | 0.462 |
+| door striker on the B-pillar | 1.515 (H-point + 278, "hip point to striker") | 1.730 | 1.52 |
+| B-pillar accelerometers: sill / lower / middle | 1.497 / 1.536 / 1.622 | nodes 1.71–1.80 | 1.50–1.59 |
+| A-pillar at the roof rail | 1.15–1.30 (the window-top crush row starts at the line) | 1.495 | 1.285 |
+| windshield angle | 30.8° | 29° | 29° |
+| driver's H-point | 1.237 (seat track accelerometer at the H-point) | 1.915 (behind the B-pillar) | 1.237 |
+| firewall centre | 0.154 (accelerometer); dash line 0.27–0.30 | 0.535 | 0.325 |
+
+- **"A-pillar engagement: no direct engagement"** in both Accord tests. In gen3 the
+  A-pillar's middle (`ap1`, 1.09 m aft, 1.16 m up) and the door frame's front corner
+  (`door_FL_f0`, 1.22 m aft) lay within the pole's radius: round 7's "top of the pole
+  carries a third".
+- The render model's seats were 0.68 m aft of the Accord's, behind the B-pillar; the
+  front seat's front cross member (`SEAT_CM_F`, 1.23 m) sat right under the pole line.
+- `examples/gen3_geom.rs` prints the rig's nodes and every part's extent along the car.
+- **What `GEN3_CABIN_R8` moves** (`surface::cabin_fwd`): the windshield's base and top
+  and the roof ahead of its crown (`gh_shift`, blending back at z −0.70), the door shut
+  lines `DOOR_F` and `DOOR_B` (the rear door's rear edge stays), the cowl and hood's
+  rear edge, the firewall (render and rig), the front rails' rearmost station, the
+  cabin and engine-bay guards, the window frame's front corner, and the interior from
+  the Accord's dummy clearances (chest to steering wheel 349 mm, chest to dash 591 mm):
+  dash, wheel, seats on the H-point, the rear seat 0.5 m forward, and the named masses
+  (driver, seats, dash, HVAC, windshield, rear seat) with them. The centre of mass moves
+  to 1,119 mm behind the axle (band 1,001–1,248; the Accord's test weight 1,213 mm).
+- Wheelbase change after the pole, struck / far side: the Accord −54 / +12 mm (its side
+  lengths −64 / +12); gen3 round 7 −15 / +38; `GEN3_CABIN_R8` −41 / −28; with
+  `GEN3_SIDE_R7` too −75 / +7.
+
+### Required numbers (surface contact on)
+
+| Measure | Round 7 = round 8 default | `GEN3_CABIN_R8` | `GEN3_CABIN_R8` + `GEN3_SIDE_R7` | Band |
+|---|---|---|---|---|
+| Frontal dynamic crush (mm) | 655 | 643 | 666 | 620–750 |
+| t_m (ms) | 72.5 | 70 | 71 | 63–76 |
+| Peak, rear cabin (g) | 35.6 | 34.6 | 35.8 | 34–47 |
+| Residual max / avg (mm) | 569 / 386 | 407 / 315 | 418 / 309 | 380–580 / 261–512 |
+| Campbell b1 (1/s) | 34.5 | **42.4** | **43.2** | ≤ 39.2 |
+| Restitution | 0.190 | **0.264** | **0.287** | ≤ 0.20 |
+| Feet intrusion (mm) | 60.8 | 30.0 | 56.3 | ≤ 67 |
+| Roof / weight | 5.311 | 4.56 | **4.04** | 4.48–5.32 |
+| MDB residual (mm), offset 0 / mean of five | 191 / 195 | **238 / 239** | **263 / 270** | 126–206 |
+| FMVSS 214 door: initial / intermediate / peak (kN) | 10.7 / 28.8 / 96 | 10.3 / 28.0 / 89 | **9.9** / 19.6 / 69 | ≥ 10.0 / 15.6 / 28.5 |
+| Pole residual / dynamic (mm), offset 0 | 147 / 271 | 166 / 329 | 184 / 387 | 297–445 |
+| Pole mean of five offsets (mm) | 128 | 136 | 196 | |
+| Pole cut at 1.0 m (`POLE_HALF_H=0.5`), mean (mm) | – | – | 263 | |
+
+The ETK on the same scene: pole 202 / 281 mm, MDB 244 mm.
+
+### The pole: what limits it
+
+- **Where the side gives, the car wraps round the pole and springs back as a whole**
+  (`SIDE_DEBUG`, new: the
+  far side's departure from its own rigid fit, and each side's wheelbase change):
+
+  | | far side off its fit at the deepest crush, max / mean (mm) | at the end (mm) | springback (dynamic − residual, mm) |
+  |---|---|---|---|
+  | gen3 round 7 (the default) | 84 / 30 | 58 / 21 | 124 (271 − 147) |
+  | gen3 `GEN3_CABIN_R8` | 313 / 93 | 164 / 58 | 164 (329 − 166) |
+  | gen3 `GEN3_CABIN_R8` + `GEN3_SIDE_R7` | 332 / 126 | 141 / 56 | 203 (387 − 184) |
+  | ETK | 78 / 35 | 37 / 11 | 79 (281 − 202) |
+
+  - Round 7's car does not wrap: its far side stays as straight as the ETK's, but its
+    side is too strong locally (271 mm dynamic, 300 kN).
+  - Once the side gives (the pole line between the seat's cross member and the B-pillar
+    with the cabin forward, and R7's side lattice), the floor bends with it instead of
+    the side alone crushing.
+
+  - The far side's rear (z −1.27 m: the rear door, the rear wheel) swings 300 mm toward
+    the pole while its middle (z −0.35) bows 250 mm outward: the cross members push the
+    far side out, and the rear half keeps moving past the pole.
+  - Half of that bending is elastic. At the deepest crush the structure holds 11.4 kJ
+    elastic, spread over the floor, tunnel, sills and both sides' latches: no member
+    carries more than 0.3 kJ.
+  - The dynamic crush, 330–390 mm, is about what a 297–445 mm residual needs. The
+    residual is short by the springback.
+- **The frontal shows the same flexibility.** With the cabin forward the car's centre of
+  mass rebounds at 3.7 m/s (0.24) and the rear cabin rings ±0.4 m/s about it, peaking at
+  4.1 m/s (0.264): `WALL_DEBUG` now prints both. Round 7's rebound: 2.67 / 3.16 m/s. The
+  shorter bay leaves 26 kJ elastic at t_m (round 7 about 17 kJ), spread over the hood,
+  the fenders and the floor's joints to the rails.
+- **No side lever separated the pole from the MDB** (`GEN3_CABIN_R8` + `GEN3_SIDE_R7`;
+  pole and MDB means of five offsets):
+
+  | Lever | Pole | MDB | Also |
+  |---|---|---|---|
+  | none | 176 | 261 | |
+  | the roof rail's and window frame's sections × 0.3 (`GEN3_RAIL_SEC_Y`) | 179 | 274 | roof 3.97 |
+  | the same × 0.1, frame × 0.1 (`GEN3_FRAME_SEC_Y`) | 179 | 276 | roof 3.91 |
+  | intrusion beam mass 3 kg/m (`GEN3_INTRUSION_KGM`) | 169 | 241 | door 11.9 kN |
+  | intrusion 6 kg/m, door frame 2 kg/m (`GEN3_DOORFRAME_KGM`) | 171 | 231 | restitution 0.31 |
+  | front sheet yield 1.5 % (`GEN3_FRONT_SHEET_EPS`, the frontal's rebound) | – | – | restitution 0.236, peak 32.9 g |
+
+  (This table's rows ran before the engine-bay guard fix; its "none" reads 196 / 270
+  after it.) The upper load path is not the limit once the A-pillar is out of the way:
+  making the roof rail's and the window frame's sections crush moved the pole 3 mm and
+  took the roof out of its band. Mass on the intrusion beam stiffened the side to both.
+- **The seat path was not built.** The Accord's pole line is the seated driver's head
+  (1.30 m against the H-point's 1.237): a seat that carries a wide load across the car
+  is under the pole too, so it cannot separate the two tests.
+- **What would be needed:** a side that gives locally on a floor that does not bend
+  with it, as the ETK's (dynamic 281 mm, far side 35 mm mean) does. gen3 has either the
+  side too strong (round 7: far side 30 mm, dynamic 271) or the floor too soft
+  (93–126 mm once the side gives). Under
+  the 2 kHz bound every spring is capped by its nodes' mass (92 % of gen3's nodes sit at
+  the bound; node mass p50 0.46 kg against BeamNG's 1.2–4 kg). Fewer, heavier
+  structural nodes along the floor, sills and tunnel, or a smaller step, would allow
+  it; this round changed neither.
+
+### Checks (`gen3_rig`)
+
+- Default: passes (3 passed, the seam check ignored as before).
+- `GEN3_CABIN_R8=1`: **fails** parked fidelity, 2.85 mm / 1.41° (≤ 1 mm / 1°; at spawn
+  0.92 mm / 0.11°); rest drift ≤ 2.8 mm; 0 broken, 0 bent; wall56 stretch p99 1.35,
+  fold 5.1°; pole32 1.18, 1.7°. A further reason it is not the default.
+
+### On the GPU page
+
+See below (`media/gen3-r8/`).
+
+### Diagnostics added
+
+- `examples/gen3_geom.rs`: the rig's nodes (CSV) and the parts' extents along the car.
+- `SIDE_DEBUG`: the far side's departure from its rigid fit (worst ten nodes) at the
+  deepest crush and at the end, and each side's wheelbase change.
+- `WALL_DEBUG`: the rear cabin's and the centre of mass's velocity every 10 ms to
+  300 ms, and the elastic energy by member at t_m.
+- The intrusion readings' worst node (`max_node` in the JSON).
+- `GEN3_RAIL_SEC_Y`, `GEN3_FRAME_SEC_Y`, `GEN3_INTRUSION_KGM`, `GEN3_DOORFRAME_KGM`,
+  `GEN3_FRONT_SHEET_EPS`, `GEN3_SILL_BOX_FOOTWELL` (R7's sill box now keeps the
+  footwell braced and unboxed: feet 135 → 117 mm).
+- `CRASH_LAB_PROGRESS` in `crash-lab-record.mjs`: the page's load every 30 s.
+
+### Open
+
+- The pole (above): global stiffness under the bound.
+- `GEN3_CABIN_R8` as the default: the frontal's rebound (0.264) and b1 (42.4) with the
+  shorter engine bay, the MDB (238 mm) and parked fidelity (1.41°).
