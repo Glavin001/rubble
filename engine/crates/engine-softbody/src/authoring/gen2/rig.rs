@@ -357,7 +357,7 @@ fn body_blocked(p: Vec3, doors: &[Aperture], trunk_z: (f32, f32)) -> bool {
         && p.z > -1.72
         && p.z < 0.78 + sf::cabin_fwd()
         && sf::sdf(p) < -0.08;
-    // (The bay starts ahead of the firewall, which `GEN3_CABIN_R8` moves.)
+    // (The bay starts ahead of the firewall, which round 8's cabin moved.)
     let bay = x < 0.48 && p.y > 0.72 && p.z > 0.98 + sf::cabin_fwd() && p.z < 1.98;
     // The trunk opening (under the lid, from its mesh), clear of the shelf
     // and tail panel at its ends.
@@ -2587,7 +2587,7 @@ pub fn rig(model: &Model) -> Rig {
     let named = vec![
         ("driver", 75.0, j(hpf + Vec3::new(0.0, 0.05, 0.0)), 0.6),
         ("front_seats", 35.0, j(0.5 * (hpf + hpr)), 0.75),
-        // (`GEN3_CABIN_R8`: the rear seat 0.5 m forward with the render's.)
+        // (Round 8's cabin: the rear seat 0.5 m forward with the render's.)
         (
             "rear_seat",
             17.5,

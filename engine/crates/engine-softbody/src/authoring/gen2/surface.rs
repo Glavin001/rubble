@@ -61,19 +61,20 @@ pub const YC: f32 = 0.62;
 /// [`GH_FWD_CROWN`]; the rear doors' rear shut line and everything behind
 /// stay.
 ///
-/// Opt-in (`GEN3_CABIN_R8=1`, [`cabin_fwd`]): with it the frontal's
-/// restitution reads 0.27 against its band's 0.20 (the shorter engine bay;
-/// `engine/docs/vehicle-gen3.md`, round 8), so it is not the default.
+/// Round 8 shipped it opt-in (`GEN3_CABIN_R8=1`); round 9 makes it the
+/// default geometry: a car that is wrong where it matters cannot be
+/// calibrated honestly. `GEN3_CABIN_R7=1` keeps round 7's cabin, 0.21 m aft,
+/// for comparison only.
 pub const CABIN_FWD_R8: f32 = 0.21;
 
-/// The cabin's move forward (m): [`CABIN_FWD_R8`] with `GEN3_CABIN_R8`, else 0.
+/// The cabin's move forward (m): [`CABIN_FWD_R8`], or 0 with `GEN3_CABIN_R7`.
 pub fn cabin_fwd() -> f32 {
     static C: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *C.get_or_init(|| {
-        if std::env::var("GEN3_CABIN_R8").is_ok() {
-            CABIN_FWD_R8
-        } else {
+        if std::env::var("GEN3_CABIN_R7").is_ok() {
             0.0
+        } else {
+            CABIN_FWD_R8
         }
     })
 }

@@ -3223,7 +3223,7 @@ fn mirrors_handles_wipers(m: &mut Model, door_f: &Grid, door_r: &Grid) {
 /// forward as the test sets it. Round 8 seats the driver there; round 7's
 /// seats were 0.68 m further back, behind the B-pillar.
 pub const ACCORD_H_POINT_AFT: f32 = 1.237;
-/// The H-point's section (z): the Accord's with `GEN3_CABIN_R8`, else round
+/// The H-point's section (z): the Accord's, or with `GEN3_CABIN_R7` round
 /// 7's.
 pub fn h_point_z() -> f32 {
     if sf::cabin_fwd() > 0.0 {
@@ -3242,7 +3242,7 @@ fn interior(m: &mut Model) {
     // steering wheel's hub 0.40 m ahead (its rim about 0.35 m from the
     // chest), the seats on the H-point and the rear seat 0.5 m further
     // forward than round 7's (over the rear axle then).
-    // (Without `GEN3_CABIN_R8`, round 7's.)
+    // (With `GEN3_CABIN_R7`, round 7's.)
     let r8 = sf::cabin_fwd() > 0.0;
     let dash_rear = h_point_z() + 0.59;
     let dash_d = 0.5 * (firewall_z() - dash_rear);
