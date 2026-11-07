@@ -104,6 +104,8 @@ print('camera solve: rms %.1f px, f %.0f px (%.0f mm on 36 mm), at %s' %
 for (u, v), q in zip(uv, project(p, X)):
     print('   photo (%4.0f,%4.0f)  model (%6.1f,%6.1f)' % (u, v, q[0], q[1]))
 
+json.dump({'p': [float(x) for x in p], 'W': W, 'H': H}, open(out + '.cam.json', 'w'))
+
 # Blender camera from the solve (glTF -> Blender axes: x, -z, y)
 if '--outdoor' in argv:
     cam = render.outdoor(samples=samples, res=(W * 2, H * 2))

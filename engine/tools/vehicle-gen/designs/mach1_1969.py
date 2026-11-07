@@ -56,39 +56,42 @@ K = [
     key(_off(0.016), [(2.4, 0.47), (1.80, 0.46), (1.0, 0.30), (-0.98, 0.30),
                       (-1.80, 0.48), (-2.5, 0.560)]),
     # 3 widest line
-    key(_off(0.0), [(2.4, 0.56), (1.0, 0.52), (-0.98, 0.52), (-1.80, 0.62), (-2.5, 0.690)]),
+    key(_off(0.0), [(2.3, 0.52), (1.0, 0.52), (-0.98, 0.52), (-1.80, 0.62), (-2.5, 0.690)]),
     # 4 arch-top line (upper body side)
-    key(_off(0.002), [(2.4, 0.70), (2.1, 0.71), (1.37, 0.74), (0.6, 0.72), (-0.7, 0.73),
+    key(_off(0.002), [(2.3, 0.69), (2.1, 0.705), (1.37, 0.74), (0.6, 0.72), (-0.7, 0.73),
                       (-1.37, 0.77), (-2.5, 0.830)]),
-    # 5 shoulder crease
-    key(_shoulder_x(), [(2.32, 0.79), (1.75, 0.815), (1.37, 0.83), (1.0, 0.845),
-                      (0.63, 0.860), (-0.24, 0.872), (-0.715, 0.885), (-0.95, 0.908),
-                      (-1.37, 0.922), (-1.77, 0.918), (-2.10, 0.910), (-2.45, 0.900)]),
-    # 6 belt (window sill) / bonnet shut line / quarter top
-    key([(2.32, 0.600), (2.15, 0.615), (1.95, 0.690), (1.75, 0.762), (1.37, 0.786),
-         (0.63, 0.780), (0.55, 0.785),
-         (-0.715, 0.800), (-1.37, 0.795), (-2.0, 0.780), (-2.45, 0.770)],
-        [(2.32, 0.800), (1.75, 0.832), (1.37, 0.848), (0.63, 0.887), (0.55, 0.905),
-         (0.12, 0.915), (-0.62, 0.930), (-0.715, 0.935), (-0.95, 0.955), (-1.37, 0.963),
-         (-1.77, 0.952), (-2.10, 0.942), (-2.45, 0.935)]),
-    # 7 daylight-opening top (roof rail outer) / bonnet line / sail
-    key([(2.32, 0.500), (1.95, 0.580), (1.37, 0.620), (0.80, 0.650), (0.55, 0.715), (0.12, 0.640),
-         (-0.24, 0.635), (-0.62, 0.640), (-0.90, 0.660), (-1.37, 0.700), (-1.77, 0.730),
-         (-2.00, 0.660), (-2.20, 0.600), (-2.45, 0.570)],
-        [(2.32, 0.803), (1.37, 0.859), (0.63, 0.894), (0.55, 0.918), (0.12, 1.215),
-         (-0.24, 1.250), (-0.62, 1.228), (-0.90, 1.175), (-1.37, 1.040), (-1.77, 0.957),
-         (-2.10, 0.947), (-2.45, 0.943)]),
+    # 5 shoulder crease; at the nose it drops away convexly (traced off the
+    # side photograph)
+    key(_shoulder_x(), [(2.26, 0.745), (2.10, 0.790), (1.75, 0.818), (1.37, 0.835), (1.0, 0.848),
+                        (0.585, 0.862), (-0.24, 0.872), (-0.715, 0.885), (-0.95, 0.908),
+                        (-1.37, 0.922), (-1.77, 0.918), (-2.10, 0.910), (-2.45, 0.900)]),
+    # 6 belt (side-glass sill, 0.93 m) / bonnet shut line / quarter top
+    key([(2.26, 0.600), (2.15, 0.615), (1.95, 0.690), (1.75, 0.762), (1.37, 0.786),
+         (0.60, 0.782), (0.40, 0.790), (-0.715, 0.800), (-1.37, 0.795), (-2.0, 0.780),
+         (-2.45, 0.770)],
+        [(2.26, 0.760), (2.10, 0.808), (1.75, 0.840), (1.37, 0.858), (0.60, 0.895),
+         (0.40, 0.925), (0.12, 0.928), (-0.62, 0.935), (-0.715, 0.937), (-0.95, 0.955),
+         (-1.37, 0.963), (-1.77, 0.952), (-2.10, 0.942), (-2.45, 0.935)]),
+    # 7 daylight-opening top (roof rail outer); the A-pillar foot is at
+    # z 0.40 and its top at 0.066 (traced) / bonnet line / sail
+    key([(2.26, 0.500), (1.95, 0.580), (1.37, 0.620), (0.80, 0.660), (0.47, 0.700),
+         (0.40, 0.712), (0.066, 0.640), (-0.24, 0.635), (-0.62, 0.640), (-0.90, 0.660),
+         (-1.37, 0.700), (-1.77, 0.730), (-2.00, 0.660), (-2.20, 0.600), (-2.45, 0.570)],
+        [(2.26, 0.765), (2.10, 0.812), (1.37, 0.866), (0.60, 0.900), (0.47, 0.912),
+         (0.40, 0.926), (0.066, 1.218), (-0.24, 1.232), (-0.62, 1.226), (-0.73, 1.218),
+         (-0.90, 1.175), (-1.37, 1.040), (-1.77, 0.957), (-2.10, 0.947), (-2.45, 0.943)]),
     # 8 glass edge (windscreen / back light) / bonnet line / boot lid
-    key([(2.32, 0.380), (1.95, 0.440), (1.37, 0.460), (0.80, 0.490), (0.63, 0.520), (0.55, 0.645), (0.12, 0.585),
-         (-0.24, 0.580), (-0.62, 0.580), (-0.90, 0.585), (-1.37, 0.600), (-1.77, 0.630),
-         (-2.00, 0.540), (-2.20, 0.490), (-2.45, 0.470)],
-        [(2.32, 0.808), (1.37, 0.862), (0.63, 0.900), (0.55, 0.921), (0.12, 1.238),
-         (-0.24, 1.272), (-0.62, 1.243), (-0.90, 1.192), (-1.37, 1.065), (-1.77, 0.958),
-         (-2.10, 0.949), (-2.45, 0.944)]),
-    # 9 top centre line
-    key(0.0, [(2.32, 0.812), (2.10, 0.838), (1.75, 0.853), (1.37, 0.868), (1.00, 0.886),
-              (0.63, 0.903), (0.55, 0.925), (0.12, 1.262), (-0.24, 1.300), (-0.62, 1.268),
-              (-0.90, 1.215), (-1.37, 1.090), (-1.77, 0.975), (-2.10, 0.950), (-2.45, 0.945)]),
+    key([(2.26, 0.380), (1.95, 0.440), (1.37, 0.460), (0.80, 0.490), (0.52, 0.540),
+         (0.42, 0.640), (0.09, 0.585), (-0.24, 0.580), (-0.62, 0.580), (-0.90, 0.585),
+         (-1.37, 0.600), (-1.77, 0.630), (-2.00, 0.540), (-2.20, 0.490), (-2.45, 0.470)],
+        [(2.26, 0.770), (2.10, 0.818), (1.37, 0.870), (0.60, 0.905), (0.52, 0.912),
+         (0.42, 0.928), (0.09, 1.238), (-0.24, 1.262), (-0.62, 1.243), (-0.90, 1.192),
+         (-1.37, 1.065), (-1.77, 0.958), (-2.10, 0.949), (-2.45, 0.944)]),
+    # 9 top centre line: the bonnet droops to the nose
+    key(0.0, [(2.26, 0.775), (2.20, 0.795), (2.10, 0.822), (1.75, 0.852), (1.37, 0.868),
+              (1.00, 0.886), (0.60, 0.905), (0.52, 0.912), (0.47, 0.928), (0.12, 1.262),
+              (-0.24, 1.300), (-0.62, 1.268), (-0.90, 1.215), (-1.37, 1.090), (-1.77, 0.975),
+              (-2.10, 0.950), (-2.45, 0.945)]),
 ]
 
 # the shoulder is a crisp crease along the front fender and door and rolls
@@ -151,8 +154,8 @@ def tube():
 
 
 # --- layout ----------------------------------------------------------------------
-ZLINES = [('F', 2.31), ('AF1', 1.76), ('AF2', ZF_AX), ('AF3', 0.99), ('DF', 0.63),
-          ('WB', 0.55), ('WT', 0.12), ('GR', -0.62), ('DR', -0.715), ('AR1', -0.97),
+ZLINES = [('F', 2.26), ('AF1', 1.76), ('AF2', ZF_AX), ('AF3', 0.99), ('DF', 0.585),
+          ('WB', 0.40), ('WT', 0.12), ('GR', -0.63), ('DR', -0.715), ('Q', -0.80), ('AR1', -0.97),
           ('AR2', ZR_AX), ('AR3', -1.77), ('T', -2.43)]
 VLINES = [0, 1, 2, 3, 4, 5, 5.33, 5.67, 6, 7, 8, 9]
 
@@ -162,7 +165,7 @@ def front_z(x, y):
     lean = 0.095 * np.clip((0.80 - y) / 0.40, 0, 1) ** 1.3
     corner = 0.050 * (x / 0.87) ** 6
     vee = 0.012 * (1 - np.clip(x / 0.85, 0, 1) ** 2)
-    return 2.31 - lean - corner + vee
+    return 2.26 - lean - corner + vee
 
 
 def rear_z(x, y):
@@ -173,8 +176,8 @@ def rear_z(x, y):
     return -2.43 + dish + tuck + corner
 
 
-HEADLIGHT = dict(x=0.748, y=0.645, R=0.088)
-HEADLIGHT_INNER = dict(x=0.500, y=0.640, R=0.058)
+HEADLIGHT = dict(x=0.748, y=0.622, R=0.085)
+HEADLIGHT_INNER = dict(x=0.500, y=0.615, R=0.058)
 TAILLIGHT = dict(x0=0.40, x1=0.64, y0=0.690, y1=0.835)
 GRILLE_X = 0.62
 
@@ -189,7 +192,7 @@ def assign(zf, zt, lo, hi, side):
     front = I in ('F', 'AF1', 'AF2', 'AF3')
     cabin = I in ('DF', 'WB', 'WT', 'GR')
     if lo == 0:
-        return 'body_shell' if I in ('DF', 'WB', 'WT', 'GR', 'DR') else None
+        return 'body_shell' if I in ('DF', 'WB', 'WT', 'GR', 'DR', 'Q') else None
     if lo <= 7:
         if front:
             return 'fender_F' + s
@@ -200,18 +203,20 @@ def assign(zf, zt, lo, hi, side):
         return 'hood'
     if I == 'AR3':
         return 'trunk_lid'
-    if I == 'DF':
-        return 'body_shell'
     if lo == 8:
+        if I == 'DF':
+            return 'door_F' + s          # the mirror sail at the door's top front
         if I in ('WB', 'WT'):
             return 'glass_door_F' + s
-        if I == 'GR':
+        if I in ('GR', 'DR'):
             return 'glass_quarter_' + s
+        return 'body_shell'
+    if I == 'DF':
         return 'body_shell'
     if lo == 10:
         if I == 'WB':
             return 'glass_windshield'
-        if I in ('DR', 'AR1', 'AR2'):
+        if I in ('Q', 'AR1', 'AR2'):
             return 'glass_rear'
     return 'body_shell'
 
@@ -221,10 +226,30 @@ def build_layout(cb):
     zi = cb.zi
     tube = cb.tube
     # back light top and quarter glass rear edge
-    i = zi['DR']
-    for jl, z in ((9, -0.88), (10, -0.89), (11, -0.90)):
-        cb.set_z(i, jl, z)
+    # bonnet rear edge, windscreen base and A-pillar (traced off the side
+    # photograph): the side glass meets the pillar at z 0.40, the windscreen
+    # base bows forward to 0.47 at the centre
+    for name, zs in (('DF', {8: 0.56, 9: 0.545, 10: 0.53, 11: 0.52}),
+                     ('WB', {10: 0.42, 11: 0.47}),
+                     ('WT', {8: 0.10, 9: 0.066, 10: 0.09, 11: 0.12}),
+                     # quarter glass: its rear edge leans forward going up
+                     ('DR', {9: -0.68, 10: -0.80, 11: -0.81}),
+                     ('Q', {8: -0.881, 9: -0.726, 10: -0.89, 11: -0.90})):
+        for jl, z in zs.items():
+            cb.set_z(zi[name], jl, z)
     i0 = zi['F']
+    # the quarter glass's rear edge is a curve, bowed rearward at mid-height
+    iq = zi['Q']
+    za, zb = -0.881, -0.726
+    va, vb = 6.0, 7.0
+    for side in ('L', 'R'):
+        def qcurve(t, side=side):
+            z = za + (zb - za) * t - 0.040 * np.sin(np.pi * t)
+            v = va + (vb - va) * t
+            if side == 'R':
+                v = tube.VM - v
+            return np.stack([z, v], 1)
+        cb.arcs.append((cb.nid(iq, cb.j(8, side)), cb.nid(iq, cb.j(9, side)), qcurve))
     cb.end_fit(i0, front_z)
     cb.end_fit(zi['T'], rear_z)
     cb.arch(ARCH_F['center'], ARCH_F['R'], (zi['AF1'], zi['AF2'], zi['AF3']), [1, 2, 3, 4],
@@ -384,7 +409,7 @@ def parts(cb):
     # grille: black egg-crate in a thin bright surround, recessed between the
     # fender ends, closed behind by a back plate
     g = Mesh()
-    gx, gy0, gy1 = 0.584, 0.505, 0.770
+    gx, gy0, gy1 = 0.584, 0.495, 0.735
     loop = np.array([[gx, gy0], [gx, gy1], [-gx, gy1], [-gx, gy0]])
     from vehgen.mesh import rrect as _rr
     outline = _rr(2 * gx, gy1 - gy0, 0.035, 5)
@@ -474,13 +499,13 @@ def parts(cb):
 
     # mirrors, handles, wipers
     for s, sg in (('L', 1), ('R', -1)):
-        v = 5.75 if sg > 0 else tube.VM - 5.75
-        base = tube.eval(0.40, v)[0]
+        v = 6.35 if sg > 0 else tube.VM - 6.35
+        base = tube.eval(0.50, v)[0]
         out['mirror_' + s] = P.sport_mirror(base, sg)
         mk['mount_mirror_' + s] = (base, (sg, 0, 0))
         out['handle_F' + s] = P.door_handle(tube, -0.53, 0.826, sg)
     for s, x0, x1 in (('L', 0.56, 0.10), ('R', 0.02, -0.44)):
-        zs = 0.495
+        zs = 0.40
         pts = []
         for x in np.linspace(x0, x1, 8):
             v = tube.v_at_x(zs, abs(x), 7.9, 9.0)[0]
@@ -507,10 +532,10 @@ def parts(cb):
     VM = tube.VM
     for side in (1, -1):
         f = (lambda v: v) if side > 0 else (lambda v: VM - v)
-        drip = [(0.53, f(7.25)), (0.12, f(7.25)), (-0.30, f(7.25)), (-0.62, f(7.25)), (-0.86, f(7.25))]
+        drip = [(0.38, f(7.25)), (0.066, f(7.25)), (-0.30, f(7.25)), (-0.62, f(7.25)), (-0.86, f(7.25))]
         bx.add(_molding(tube, drip, off=0.003, sec=(0.008, 0.005)))
-    ws = ([(0.55, 8.0), (0.335, 8.0), (0.12, 8.0), (0.12, 9.0), (0.12, 10.0), (0.335, 10.0),
-           (0.55, 10.0), (0.55, 9.0)])
+    ws = ([(0.42, 8.0), (0.255, 8.0), (0.09, 8.0), (0.12, 9.0), (0.09, 10.0), (0.255, 10.0),
+           (0.42, 10.0), (0.47, 9.0)])
     bx.add(_molding(tube, ws, off=0.002, sec=(0.010, 0.005), closed=True, n=6))
     zDR = [-0.89, -0.90, -0.89]
     rw = ([(-0.89, 8.0), (-1.33, 8.0), (-1.742, 8.0), (-1.742, 9.0), (-1.742, 10.0), (-1.33, 10.0),
@@ -555,7 +580,7 @@ def parts(cb):
     mouth = box((0, float(tube.eval(1.42, 9.0)[0][1]) + 0.034, 1.424), (0.15, 0.016, 0.002), 'interior_plastic')
     hx.add(mouth)
     for sg in (1, -1):
-        z = 2.12
+        z = 2.08
         v = tube.v_at_x(z, 0.47, 6.0, 9.0)[0]
         if sg < 0:
             v = VM - v
@@ -603,7 +628,7 @@ def parts(cb):
     rs.add(back)
     out['seat_rear'] = rs
     dash = Mesh()
-    dash.add(rbox((0, 0.735, 0.42), (0.74, 0.115, 0.115), 0.05, 3, 'interior_plastic'))
+    dash.add(rbox((0, 0.735, 0.40), (0.68, 0.115, 0.105), 0.05, 3, "interior_plastic"))
     for sg in (1, -1):
         dash.add(rbox((sg * 0.37, 0.86, 0.36), (0.20, 0.035, 0.07), 0.03, 2, 'interior_plastic'))
     for k in range(2):
@@ -611,7 +636,7 @@ def parts(cb):
         g_.transform(rot_y(-np.pi / 2), (0.37 + (k - 0.5) * 0.10, 0.80, 0.302))
         dash.add(g_)
     out['dash'] = dash
-    out['steering_wheel'] = P.steering_wheel((0.37, 0.80, 0.13), R=0.19, tilt_deg=24, column=0.17)
+    out['steering_wheel'] = P.steering_wheel((0.37, 0.80, 0.11), R=0.19, tilt_deg=24, column=0.14)
     out['console'] = rbox((0, 0.405, -0.10), (0.09, 0.10, 0.40), 0.03, 2, 'interior_plastic')
     from vehgen.panels import inner_panel, boundary_loops
     for s in ('L', 'R'):
@@ -693,11 +718,11 @@ def parts(cb):
     # markers: closures
     for s, sg in (('L', 1), ('R', -1)):
         for nm, y in (('upper', 0.76), ('lower', 0.42)):
-            Pp, Nn = P.surface_point(tube, 0.612, y, sg)
+            Pp, Nn = P.surface_point(tube, 0.565, y, sg)
             mk['hinge_door_F%s_%s' % (s, nm)] = (Pp - Nn * 0.035, (sg, 0, 0))
         Pp, Nn = P.surface_point(tube, -0.700, 0.62, sg)
         mk['latch_door_F' + s] = (Pp - Nn * 0.035, (sg, 0, 0))
-        mk['hinge_hood_' + s] = ((sg * 0.70, 0.860, 0.665), (1, 0, 0))
+        mk['hinge_hood_' + s] = ((sg * 0.68, 0.860, 0.60), (1, 0, 0))
         mk['hinge_trunk_' + s] = ((sg * 0.55, 0.925, -1.72), (1, 0, 0))
         for k, (z, y) in enumerate(((2.10, 0.79), (1.70, 0.82), (1.10, 0.85), (0.70, 0.87))):
             v = tube.v_at_height(z, y, 5.0, 6.0)[0] if False else None
