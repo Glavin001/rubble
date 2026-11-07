@@ -195,3 +195,59 @@ their place are counted as torn off, not crush.
 ![ETK after the wall](media/crash-orbit/crash-orbit-etk-0.jpg)
 ![ETK before and after](media/crash-orbit/crash-orbit-etk-before-after-0.jpg)
 ![Sedan before and after](media/crash-orbit/crash-orbit-sedan-before-after-0.jpg)
+
+## After the crash: stills and inspect mode (2026-11-07)
+
+After the strike the bricks cover the car in the drive's own views, so the damage was hard
+to see. There are two ways to see it now. Both are rendering and camera only: the World
+steps unchanged.
+
+**Post-crash stills.** `crash-orbit.mjs capture etk etk2 sedan --after 2` snapshots each
+car 2 s after it is out of the wall or at rest (`etk2`: both cars of the two-ETK run,
+`etk2-0-…` and `etk2-1-…`, each in its own paint and vehicle slot). `crash-orbit.mjs
+stills <name> <snap>[,<snap>]` renders crash-orbit.html at set views about the car's
+heading, framed tight: `front34`, `side`, `rear34` and `topfront` (`--views`). With two
+snapshots (rest, crash) it renders a before/after pair. The crush measure is now
+`crash-measure.mjs`, which crash-orbit.mjs and the drive page share. It gives the same
+output as before. The stills and snapshots are in `~/Development/rubble-artifacts/post-crash/`
+(not committed: the ETK is community content).
+
+| Car (this build, frame-locked) | Impact | Beams broken | Front crush mean (max) | Length lost | Body max |
+|---|---|---|---|---|---|
+| ETK | 113 km/h | 67 / 3,800 | 14 cm (28 cm) | 8 cm | 49 cm, rear quarter |
+| Two ETKs: the first (red) | 113 km/h | 19 / 3,800 | 14 cm (27 cm) | 8 cm | 73 cm, rear quarter |
+| Two ETKs: the second (blue, spun about 90° after the wall) | 121 km/h | 42 / 3,800 | 8 cm (12 cm) | 7 cm | 20 cm, front quarter |
+| Sedan `?drag=0` | 105 km/h | 183 / 6,865 | 54 cm (101 cm) | 24 cm | 139 cm, middle |
+
+**Inspect mode (brick-ring-drive.html).** Press `I`, or use `?inspect=auto` to start it
+once every car has struck the wall and stood still for 1 s (or 8 s after the strike). The
+bricks on and around the car (body centre within half the car's length + 1.3 m of its
+vertical axis) and those between the camera and the car (within 2.2 m of that line) are
+ghosted. They are drawn after the cars as outlines over a faint fill, and they cast no
+shadow (`env.setCut` / `env.drawGhosts` in one-world-render.mjs). The camera goes once
+around the car in 12 s (`?inspectSecs=`), starting at its front three-quarter. The panel
+shows the impact speed, the car's broken beams, and its crush. The crush is
+crash-measure.mjs run on the car's nodes now against the same car at 0.25 s, before the
+throttle. With two cars, each is inspected in turn. Press `I` or `Esc` to return to the
+normal view (a click also does this).
+
+The recorder's `--inspect` appends this orbit (one per car) after the ×4 replays. It is
+recorded on the real-time pass's crashed cars, from 9 s after the strike:
+
+    node brick-ring-drive-record.mjs etk-v3:car=etk etk2-v3:car=etk\&n=2 "sedan-v3:car=sedan&drag=0" --inspect
+
+Videos v3 (`~/Development/rubble-artifacts/brick-ring-drive/`; the older clips are kept):
+`brick-ring-drive-etk-v3.mp4`, `brick-ring-drive-etk2-v3.mp4`, `brick-ring-drive-sedan-v3.mp4`.
+The clips are 39.8 s (ETK: 15.4 s real time, 12.3 s of replays, 12 s of inspect),
+51.8 s (two ETKs: 24 s of inspect) and 40.3 s (sedan). The panel's impact speed is the
+car's speed on the frame before the strike is seen: 111 km/h for the sedan. The
+crash-orbit capture gives 105 km/h, the speed on the strike's own frame. The runs are not
+bit-reproducible in Chrome (for example, the sedan broke 160–185 beams over four runs),
+so the numbers vary a little from clip to clip.
+
+Seen once (not fixed here, since this work is rendering only): a sedan `?drag=0` replay
+stopped at World step 422 with "explicit vehicles: more colliders than the shapes room
+(capacity … shapes: 1024)". The coupling room that the earlier sampling said was never
+more than 122 shapes a car can be exceeded by the sedan in the pile. Raising
+`ExplicitVehiclesDef::capacity` (or failing more gracefully) is a follow-up. The re-run
+recorded cleanly.

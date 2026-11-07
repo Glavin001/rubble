@@ -31,6 +31,15 @@
     body.clean #controls, body.clean #about, body.clean #status { display: none; }
     body.clean #hud { width: 16rem; }
     body.clean #caption { display: block; }
+    #inspect { right: 22px; bottom: 22px; padding: 10px 14px; display: none; min-width: 17rem; }
+    #inspect b { font-size: 19px; font-weight: 750; display: block; }
+    #inspect .sub { color: #c3cbd9; font-size: 13.5px; margin: 1px 0 7px; }
+    #inspect .grid { display: grid; grid-template-columns: auto auto; column-gap: 16px; row-gap: 1px; font-variant-numeric: tabular-nums; font-size: 13.5px; }
+    #inspect .k { color: #9aa5b8; }
+    #inspect .v { text-align: right; font-weight: 650; }
+    #inspect .note { color: #8d96aa; font-size: 11.5px; margin-top: 7px; }
+    body.inspecting #inspect { display: block; }
+    body.inspecting #caption, body.inspecting #speedo { display: none; }
   </style>
 </head>
 <body>
@@ -46,13 +55,14 @@
       </div>
     </div>
     <div id="stats"></div>
-    <div id="about" class="muted"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>C</kbd> camera · <kbd>T</kbd> slow motion · <kbd>R</kbd> again. A 2 kHz node–beam car (BeamNG-style deformation) on raycast wheels and 110,440 rigid bricks act on each other both ways in one World.</div>
+    <div id="about" class="muted"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>C</kbd> camera · <kbd>T</kbd> slow motion · <kbd>I</kbd> inspect the car (bricks ghosted; <kbd>I</kbd>/<kbd>Esc</kbd> back) · <kbd>R</kbd> again. A 2 kHz node–beam car (BeamNG-style deformation) on raycast wheels and 110,440 rigid bricks act on each other both ways in one World.</div>
     <div id="status" class="muted">starting…</div>
     <div id="err"></div>
   </div>
   <div id="speedo" class="panel"><b id="kmh">0</b> <span>km/h</span></div>
   <div id="caption" class="panel"><b id="capTitle">Brick Ring Drive</b><span id="capSub"></span></div>
   <div id="slowTag" class="panel">SLOW MOTION ×4</div>
+  <div id="inspect" class="panel"><b id="inTitle">After the wall</b><div class="sub" id="inSub"></div><div class="grid" id="inStats"></div><div class="note" id="inNote"></div></div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
     // Thin page: the scene is rubble::brick_ring_drive (Rust), all physics Rust/Slang in
@@ -65,11 +75,13 @@
     // ?car=etk (the BeamNG community ETK K-series in __mods, never committed) | sedan
     // (Rubble's authored sedan); ?n=1|2; ?sleep=0 the demo's no-sleep ring; ?timing=step|
     // phases the GPU split; ?auto=1 a scripted run at the wall; ?record=1 frame-locked
-    // (the recorder); ?runUp= m; ?speed= m/s at spawn.
+    // (the recorder); ?runUp= m; ?speed= m/s at spawn; ?inspect=auto the post-crash
+    // inspect orbit once the cars stand still (key I by hand; ?inspectSecs= per car).
     import { createBrickRingDrive, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { loadMod, modVisual, modTextures, LOCAL_MODS } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
+    import { measureCrush } from './crash-measure.mjs';
 
     const qs = new URLSearchParams(location.search);
     const RECORD = qs.has('record');
@@ -178,11 +190,16 @@
     let nodeBusy = false, beamBusy = false;
     const carState = layout.cars.map((c) => ({ c: [c.front[0], G + 0.7, c.front[2] - 2.3], v: [0, 0, c.speed], fwd: [0, 0, 1] }));
     let beamsBroken = 0;
+    const carBeamsBroken = new Array(N).fill(0);
     // Two nodes along the car (its first and last nodes in z at the start) give its heading.
     let headNodes = null;
+    // Each car's node positions (world) from the next node readback: inspect mode's crush.
+    let posRequests = [];
+    const requestPositions = () => new Promise((r) => posRequests.push(r));
     async function readNodes(enc) {
       if (nodeBusy) return null;
       nodeBusy = true;
+      const reqs = posRequests; posRequests = [];
       enc.copyBufferToBuffer(world.explicitNodesBuffer(), 0, nodeRead, 0, nodeBytes);
       enc.copyBufferToBuffer(world.explicitMiscBuffer(), 0, miscRead, 0, 16 * N);
       return async () => {
@@ -203,6 +220,10 @@
           const l = Math.hypot(d[0], d[2]) || 1;
           carState[i] = { c: c.map((x, j) => x / nodesPer[i] + o[4 * i + j]), v: v.map((x) => x / nodesPer[i]), fwd: [d[0] / l, 0, d[2] / l] };
         }
+        if (reqs.length) {
+          const pos = Array.from({ length: N }, (_, i) => Array.from({ length: nodesPer[i] }, (_, k) => [0, 1, 2].map((j) => f[(spans[2 * i] + k) * 12 + j] + o[4 * i + j])));
+          for (const r of reqs) r(pos);
+        }
         nodeRead.unmap(); miscRead.unmap();
         nodeBusy = false;
       };
@@ -215,7 +236,7 @@
         await beamRead.mapAsync(GPUMapMode.READ);
         const f = new Float32Array(beamRead.getMappedRange());
         let n = 0;
-        for (let i = 0; i < N; i++) { const a = spans[2 * i + 1]; for (let k = 0; k < beamsPer[i]; k++) if (f[(a + k) * 8 + 6] !== 0) n++; }
+        for (let i = 0; i < N; i++) { const a = spans[2 * i + 1]; let m = 0; for (let k = 0; k < beamsPer[i]; k++) if (f[(a + k) * 8 + 6] !== 0) m++; carBeamsBroken[i] = m; n += m; }
         beamsBroken = n;
         beamRead.unmap();
         beamBusy = false;
@@ -229,6 +250,8 @@
       if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
       if (e.code === 'KeyR') location.reload();
       if (e.code === 'KeyT') manualSlow = !manualSlow;
+      if (e.code === 'KeyI') { if (inspect) stopInspect(); else startInspect(); }
+      if (e.code === 'Escape' && inspect) stopInspect();
       if (e.code === 'KeyC') { const ks = Object.keys(CAMS); camMode = ks[(ks.indexOf(camMode) + 1) % ks.length]; camSel.value = camMode; cam.init = false; }
     });
     addEventListener('keyup', (e) => keys.delete(e.code));
@@ -354,6 +377,7 @@
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('pointerdown', (e) => {
       canvas.focus();
+      if (inspect) stopInspect();
       if (camMode !== 'free') {
         const d = sub3(cam.eye, cam.at);
         free.dist = Math.hypot(...d); free.yaw = Math.atan2(d[0], d[2]); free.pitch = Math.asin(d[1] / free.dist); free.target = [...cam.at];
@@ -373,6 +397,7 @@
     });
     canvas.addEventListener('wheel', (e) => { e.preventDefault(); free.dist = Math.max(3, Math.min(600, free.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
     function updateCamera(t, wallDt) {
+      if (inspect) { inspectCamera(wallDt); return; }
       if (camMode === 'free') {
         const cp = Math.cos(free.pitch);
         cam.eye = [free.target[0] + free.dist * cp * Math.sin(free.yaw), free.target[1] + free.dist * Math.sin(free.pitch), free.target[2] + free.dist * cp * Math.cos(free.yaw)];
@@ -410,6 +435,104 @@
       return AUTO_SLOW && at != null && t >= at - PRE && t < at + SLOW_FOR ? 0.25 : 1;
     };
 
+    // ---------------------------------------------------------------- inspect (rendering only)
+    // After the crash: the bricks on, around and in front of the car ghosted (the scene
+    // renderer's cut: outlines over a faint fill, no shadows), the camera once around the
+    // car in INSPECT_SECS wall seconds from its front three-quarter, the HUD its impact
+    // speed, broken beams and crush (crash-measure.mjs: its nodes now against the same
+    // car at 0.25 s, before the throttle). The World steps on unchanged. Two cars: each in
+    // turn. I starts and ends it, Esc ends it; ?inspect=auto starts it once every car has
+    // struck and stood still for 1 s (or 8 s after the strike).
+    const INSPECT_SECS = Number(qs.get('inspectSecs') || 12);
+    const INSPECT_AUTO = qs.get('inspect') === 'auto';
+    const inEls = { title: document.getElementById('inTitle'), sub: document.getElementById('inSub'), stats: document.getElementById('inStats'), note: document.getElementById('inNote') };
+    let inspect = null, inspectDone = false;
+    let restPos = null, restAsked = false, lastTrackT = 0;
+    const track = Array.from({ length: N }, () => ({ hist: [], impactAt: null, kmh: null, still: 0 }));
+    function trackCars(t, simDt) {
+      if (!restAsked && t >= 0.25) { restAsked = true; requestPositions().then((p) => { restPos = p; }); }
+      for (let i = 0; i < N; i++) {
+        const s = carState[i], k = track[i];
+        const kmh = 3.6 * Math.abs(s.v[0] * s.fwd[0] + s.v[2] * s.fwd[2]);
+        // carState is the readback of the last frame drawn: its speed is that frame's.
+        k.hist.push([lastTrackT, kmh]); if (k.hist.length > 30) k.hist.shift();
+        // This car's strike: the page's for car 0, else its front within 0.3 m of the
+        // wall's inner face; the speed on the frame nearest it.
+        const toWall = layout.inner - (Math.hypot(s.c[0], s.c[2]) + 2.3);
+        if (k.impactAt == null && (i === 0 ? impactAt != null : toWall < 0.3)) {
+          k.impactAt = i === 0 ? impactAt : Math.max(0, t - 1 / 60);
+          k.kmh = k.hist.reduce((b, h) => (Math.abs(h[0] - k.impactAt) < Math.abs(b[0] - k.impactAt) ? h : b))[1];
+        }
+        k.still = Math.hypot(...s.v) < 0.3 ? k.still + simDt : 0;
+      }
+      lastTrackT = t;
+      if (INSPECT_AUTO && !inspect && !inspectDone && impactAt != null && track.every((k) => k.impactAt != null || t > impactAt + 3)
+        && (track.every((k) => k.still >= 1) || t > impactAt + 8)) startInspect();
+    }
+    function startInspect(car = 0) {
+      inspectDone = true;
+      inspect = { car, wall: 0, metrics: null, heading: null };
+      document.body.classList.add('inspecting');
+      cam.init = false;
+      measureInspected();
+    }
+    function stopInspect() {
+      inspect = null;
+      env.setCut(null);
+      document.body.classList.remove('inspecting');
+      cam.init = false;
+    }
+    function measureInspected() {
+      const ins = inspect;
+      requestPositions().then((p) => {
+        if (inspect !== ins) return;
+        // The car's length along its rest heading (+z) sizes the cut and the orbit.
+        const rest = restPos?.[ins.car];
+        try { ins.metrics = rest ? measureCrush(rest, p[ins.car]) : null; } catch (e) { console.warn(e); ins.metrics = null; }
+        inspectHud();
+      });
+      inspectHud();
+    }
+    const carLen = (i) => { const r = restPos?.[i]; if (!r) return 4.5; let lo = Infinity, hi = -Infinity; for (const p of r) { lo = Math.min(lo, p[2]); hi = Math.max(hi, p[2]); } return hi - lo; };
+    function inspectCamera(wallDt) {
+      const i = inspect.car, s = carState[i];
+      inspect.wall += wallDt;
+      // Each car once around, then the next.
+      if (inspect.wall >= INSPECT_SECS && N > 1) { inspect = { car: (i + 1) % N, wall: inspect.wall - INSPECT_SECS, metrics: null, heading: null }; cam.init = false; measureInspected(); return inspectCamera(0); }
+      inspect.heading ??= Math.atan2(s.fwd[0], s.fwd[2]);
+      const len = carLen(i);
+      const a = inspect.heading + 35 * Math.PI / 180 + 2 * Math.PI * inspect.wall / INSPECT_SECS;
+      const pitch = 20 * Math.PI / 180, dist = 1.1 * len + 1.9;
+      const at = [s.c[0], Math.max(s.c[1] - 0.15, G + 0.45), s.c[2]];
+      const eye = [at[0] + dist * Math.cos(pitch) * Math.sin(a), Math.max(at[1] + dist * Math.sin(pitch), G + 0.5), at[2] + dist * Math.cos(pitch) * Math.cos(a)];
+      if (!cam.init) { cam.eye = eye; cam.at = at; cam.init = true; cam.lastMode = 'inspect'; }
+      else { cam.eye = mix3(cam.eye, eye, 1 - Math.exp(-wallDt / 0.08)); cam.at = mix3(cam.at, at, 1 - Math.exp(-wallDt / 0.15)); }
+      env.setCut({ centre: s.c, radius: 0.5 * len + 1.3, towardEye: 2.2, opacity: 0.05 });
+    }
+    function inspectHud() {
+      if (!inspect) return;
+      const i = inspect.car, k = track[i], m = inspect.metrics;
+      inEls.title.textContent = `${NAME[0].replace(/^./, (c) => c.toUpperCase())}${N > 1 ? ` · car ${i + 1} of ${N}` : ''}`;
+      inEls.sub.textContent = k.impactAt != null ? `after the wall, ${(simSteps / RATE - k.impactAt).toFixed(1)} s past the strike` : 'no strike yet';
+      // The car's own frame: x is its left when it heads +z with y up (right = fwd × up).
+      const side = (w) => w.replace('+x side', 'left side').replace('−x side', 'right side');
+      const rows = [
+        ['impact speed', k.kmh != null ? `${k.kmh.toFixed(0)} km/h` : '–'],
+        ['beams broken', `${nf(carBeamsBroken[i])} / ${nf(beamsPer[i])} (${(100 * carBeamsBroken[i] / beamsPer[i]).toFixed(1)} %)`],
+        ...(m ? [
+          ['front crush', `${(100 * m.frontCrush).toFixed(0)} cm (max ${(100 * m.frontCrushMax).toFixed(0)} cm)`],
+          ['length lost', `${(100 * m.lengthLoss).toFixed(0)} cm`],
+          ['most displaced', `${(100 * m.bodyMaxDisp).toFixed(0)} cm, ${side(m.bodyMaxWhere)}`],
+          ['nodes moved > 10 cm', `${nf(m.nodesMoved.over10cm)} / ${nf(m.nodesMoved.of)}`],
+          ...(m.detached.length ? [['nodes torn off', nf(m.detached.length)]] : []),
+        ] : [['crush', restPos ? 'measuring…' : 'no rest shape']]),
+      ];
+      inEls.stats.innerHTML = rows.map(([a, b]) => `<span class="k">${a}</span><span class="v">${b}</span>`).join('');
+      inEls.note.textContent = `Inspect: bricks within ${(0.5 * carLen(i) + 1.3).toFixed(1)} m and toward the camera ghosted (drawing only; the World runs on). I or Esc: back.`;
+    }
+    window.__inspect = (on = true, car = 0) => { if (on) startInspect(car); else stopInspect(); return true; };
+    window.__inspectState = () => inspect && { car: inspect.car, wall: inspect.wall, metrics: inspect.metrics, impactKmh: track[inspect.car].kmh, impactAt: track[inspect.car].impactAt, beamsBroken: carBeamsBroken[inspect.car] };
+
     // ---------------------------------------------------------------- frame
     let depthTex = null, msaaTex = null;
     let simSteps = 0;
@@ -423,6 +546,7 @@
       }
       const t = simSteps / RATE + lead;
       detect(t);
+      trackCars(t, simDt);
       updateCamera(t, wallDt);
       const aspect = canvas.width / canvas.height;
       const vp = viewProj(cam.eye, cam.at, aspect, 0.1, 2500);
@@ -439,6 +563,7 @@
       });
       env.draw(pass, world);
       cars.draw(pass, { viewProj: vp, eye: cam.eye, light: env.sun, height: canvas.height });
+      env.drawGhosts(pass, world);
       pass.end();
       const finishNodes = readNodes(enc);
       const now = performance.now();
@@ -492,6 +617,7 @@
       ];
       statsEl.innerHTML = rows.map(([k, v]) => `<span class="k">${k}</span><span class="v">${v}</span>`).join('');
       slowTag.style.display = scale < 1 ? 'block' : 'none';
+      if (inspect) inspectHud();
       const s = carState[0];
       kmhEl.textContent = (3.6 * Math.abs(s.v[0] * s.fwd[0] + s.v[2] * s.fwd[2])).toFixed(0);
     }
@@ -518,7 +644,7 @@
       const origin = [o[0], o[1], o[2]];
       const positions = Array.from({ length: nodesPer[i] }, (_, k) => [0, 1, 2].map((j) => +(f[k * 12 + j] + origin[j]).toFixed(5)));
       const broken = []; for (let k = 0; k < beamsPer[i]; k++) if (bf[k * 8 + 6] !== 0) broken.push(k);
-      return { format: 'rubble-crash-snapshot/1', car: kind, carName: NAME[0], query: location.search, t: simSteps / RATE, impactAt, ground: G,
+      return { format: 'rubble-crash-snapshot/1', car: kind, carName: NAME[0], vehicle: i, paint: PAINTS[i % PAINTS.length], query: location.search, t: simSteps / RATE, impactAt, ground: G,
         nodeCount: nodesPer[i], beamCount: beamsPer[i], origin, positions, broken, beamsBroken: broken.length,
         gpu: { nodes: b64(nodes), misc: b64(miscB), beams: b64(beams), nodeState: b64(nodeState), wheelRecords: Array.from(world.explicitWheelRecords(i)) } };
     };
@@ -545,7 +671,11 @@
           hud(scale);
           return { t: simSteps / RATE, scale, beamsBroken, impactAt, cars: carState };
         },
-        set(o) { if ('cam' in o) { camMode = o.cam; cam.init = false; } return true; },
+        set(o) {
+          if ('cam' in o) { camMode = o.cam; cam.init = false; }
+          if ('inspect' in o) { if (o.inspect) startInspect(o.car ?? 0); else stopInspect(); }
+          return true;
+        },
       };
       hud(1);
       window.__ready = true;
