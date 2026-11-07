@@ -1,6 +1,6 @@
 # Verification plan: soft bodies, rigid bodies and their seams
 
-Status: **plan for review** (2026-11-07). Docs only: no code, no GPU runs were made for it.
+Status: **plan for review** (2026-11-07). Docs only. It now includes the measured probes of `fix/etk-strength` (49a30f40, §0.1).
 Branch `docs/verification-plan`, from `perf/explicit-2khz` (2820e47e).
 
 **The ask** (user, 2026-11-07). Before more performance work, get test coverage we can be
@@ -120,6 +120,62 @@ covers:
 
 None covers the BeamNG profile (JBeam content, §37 contact, exact friction). That is the
 path the ETK takes.
+
+**F7. Raycast wheels do not see rigid bodies.** The ring drive and the World ETK run on
+raycast wheels. Those wheels meet the vehicle's own ground plane only, never a World body.
+Reported by the coordinator's measurements (§0.1), and not yet a test.
+
+### 0.1 Measured evidence (branch `fix/etk-strength`, 49a30f40, 2026-11-07)
+
+These are diagnostic probes, not committed tests. They change no solver, kernel or
+importer code.
+
+* `engine-softbody/examples/crush_probe.rs`: a car into a rigid wall on the CPU
+  reference.
+* `engine-softbody/examples/coupling_probe.rs`: one car into the same obstacle through
+  native colliders and through the coupling's CPU reference (walls, a free box, brick
+  proxies, drops).
+* `engine-world/examples/coupling_wall_gpu.rs`: the ETK into an anchored box, a free box
+  or a brick wall in a small GPU World. It covers World rates, momentum while flying, and
+  a rigid-only shooter.
+* Logs: `~/Development/rubble-artifacts/etk-strength/`.
+
+They answer several of this plan's questions in part. Each result below is labelled as
+**evidence** (it stands as a measurement) or as a **gap** (a committed test is still
+needed).
+
+| # | Measured | Answers | Evidence / gap |
+|---|---|---|---|
+| E1 | **ETK at 50 km/h into an immovable wall, four paths:** native box/shape, static rigid proxy, heavy (free) proxy, and GPU World anchored body. They agree within about 5 % in momentum exchanged. Without raycast wheels: 0.8 % in momentum and 5 % in peak force. | X2 (§3.2), the cross-path for a wall | **Evidence** that the coupling transmits a wall's reaction as the native wall does, to within the F1 law difference. **Gap:** it is a probe; T-X2 should commit it with the C tolerance (nudged-twin spread). The 5 % with wheels is F7 (wheels see only the native ground). |
+| E2 | **Two real coupling differences** that `static_proxy_is_the_static_shape_bit_for_bit` cannot see, because it uses an RoR-profile car. (a) Rigid-body contact uses plain `ContactSurface::BOX`, so it ignores the BeamNG profile's exact friction and no-positive-work rule (CPU `explicit_rigid.rs` `node_contact_with`; GPU `explicit_beams_rigid.slang` proxy branches against the static-slot branch that uses `surfaceV(boxSurface(), vehicle)`; line numbers differ between branches). (b) Raycast wheels do not see rigid bodies (F7). | F1, F7, T5.1 | **Confirmed** by measurement. Still a **gap** for a committed test (T5.1, T5.5) and a **decision** for the user. |
+| E3 | **Newton III and momentum.** CPU box: residual 0.004 N·s. GPU World box: 0.0. GPU ETK into floating bricks: ±7 %. **A rigid-only World with no car** (a 1,453 kg block shot into floating bricks) **loses 5.5 % of its momentum.** | §3.3, G3.1 | **Evidence** that the coupling itself closes momentum, and that the ±7 % is the AVBD multi-body solve, not the coupling. **New gap:** a rigid-only momentum test (T3.6) belongs to the rigid seam, not the coupling seam. |
+| E4 | **Drop from 1 m onto every ground path** (native plane, static shape, static proxy, box, heavy proxy): peak force 697–720 kN, impulse 10.3 kN·s on every path. | X1 (§3.2) | **Evidence**: the ground paths agree in impulse and within 3 % in peak force at 1 m. **Gap:** 0.5 m and 15 m, rebound and settle height, and a committed form. |
+| E5 | **ETK at 56 km/h into a rigid wall (CPU) against the NHTSA small-sedan band.** Dynamic crush 0.55 m (band 0.62–0.75 m). Peak 67 g through a 5 ms box filter (band 34–47 g, CFC 60). Stiffer and springier than the band. Importer values match an independent parse for all 2,767 beams. | D0 (§3.1), T1.1 | **Evidence** that the import is faithful (every beam) and that the ETK is stiffer than measured sedans in the frontal: a content property, not an importer error. **Gap:** the peak g is not comparable until it uses a proper CFC 60 filter (SAE J211); until then the 67 g is reported, not judged. |
+| E6 | **A loose wall of 25 kg bricks converges with World rate.** The car's momentum lost is 9.1, 10.1 and 10.1 kN·s at 60, 120 and 240 Hz. The bricks' peak force on the car is about 100 kN. The ETK front's yield against a rigid wall is about 600 kN. | §3.5 hypothesis (C), R1/R2 | **Evidence against** the window-latency hypothesis at these rates (see §3.5's revision). **Gap:** the iteration count was not swept, and a column in compressive contact (R1's row against one block) is still unmeasured. |
+
+**Status of the plan's items after these probes.** The probes are examples, not
+asserting tests. "Measured" means a number exists. It does not mean the item is covered:
+each still needs a committed test with a typed tolerance.
+
+| Item | Status |
+|---|---|
+| D0, the ETK into a rigid wall (§3.1) | **Measured** (E5): 0.55 m dynamic crush at 56 km/h, `crush_probe.rs` |
+| X2, the wall cross-path (§3.2) | **Measured** (E1): four paths within about 5 % momentum, `coupling_probe.rs`, `coupling_wall_gpu.rs` |
+| X1, the drop cross-path (§3.2) | **Measured** at 1 m (E4): 697–720 kN and 10.3 kN·s on every path, `coupling_probe.rs` |
+| §3.3, the Newton III residual | **Measured** (E3): CPU 0.004 N·s; GPU World box 0.0 |
+| F1, rigid proxies ignore the BeamNG-profile surface | **Open**: confirmed, untested, a decision for the user |
+| F7, raycast wheels do not see rigid bodies | **Open** |
+| AVBD multi-body momentum loss (5.5 %, rigid only) | **Open, a top gap**: T3.6 |
+| X3, rigid box against a soft block of the same mass | Not measured |
+| R1, a row of bricks against one block | Not measured |
+
+**What this changes in the plan:**
+* D0 and the wall and drop cross-paths have measured answers. They move from "first to
+  investigate" to "commit as tests with typed tolerances".
+* The investigation's open questions are now three:
+  * the user's decision on F1/F7;
+  * AVBD's own momentum loss in multi-body contact (T3.1, T3.6);
+  * the CFC 60 comparison for the ETK's content.
 
 ---
 
@@ -337,6 +393,14 @@ reference as (e)-like regression.
 * engine-metal `webgpu_parity.rs::box_drop_matches_metal`, `columns_wgpu_parity.rs`.
 
 **Gaps:**
+* **G3.0 (top gap, measured): AVBD loses momentum in a multi-body impact.**
+  * Measured in a rigid-only World with no vehicle (E3, `coupling_wall_gpu.rs`'s shooter
+    check): a 1,453 kg block shot into floating bricks loses **5.5 %** of its momentum.
+  * The coupling's own residual is 0.004 N·s on the CPU and 0.0 on the GPU World box.
+    So the ±7 % in the ETK-into-bricks run belongs to this seam, not to the coupling.
+  * No test asserts momentum in any multi-body AVBD impact. The cause is not yet known:
+    iteration count, the penalty ramp, or something else. Measuring it is T3.6, and any
+    fix is the user's decision.
 * **G3.1 Few analytic tests of AVBD itself.** Its suite is mostly
   reference-checkpoint and regression. There is none for the stop distance, the incline
   threshold, momentum in free collisions, or **momentum propagation through a contact
@@ -368,6 +432,16 @@ reference as (e)-like regression.
 * **T3.4 `free_boxes_conserve_linear_and_angular_momentum`.** Two boxes in an off-centre
   collision, no gravity. P and L about the origin closed to R plus the solver's
   per-step tolerance. Report the latter.
+* **T3.6 `multi_body_impact_conserves_momentum`** (rigid only, no vehicle). Measured
+  today at −5.5 % (E3).
+  * Setup: the probe's scene as a test. A 1,453 kg block into floating bricks, with no
+    gravity and no ground, so there is no external impulse. Also a 2-body and a 10-body
+    row for the trend.
+  * Measured: total linear momentum each step, and its loss against the iteration count
+    {4, 8, 16, 32} and dt {1/60, 1/120, 1/240}.
+  * Bound: R, plus the solver's stated per-step tolerance. That bound must first be
+    derived from AVBD's formulation; until then, report the loss and do not assert it.
+    It is `#[ignore]`d with the measured value while the loss stands.
 * **T3.5 `no_vehicles_is_bit_for_bit_main`** (CI-able).
   * Run the ring (28k) and gables-12 for 200 steps with no `ExplicitVehiclesDef`, and
     with one that has zero vehicles.
@@ -508,6 +582,9 @@ profile).
     strikes it.
   * The box's velocity after the window and the car's momentum: bit for bit, or within
     the World's sleep-wake tolerance if wake changes the solve order (C).
+* **T5.5 `raycast_wheels_meet_rigid_bodies`** (F7, open). A car on raycast wheels
+  driven onto a static box ramp that is a World body. Today the wheels see only the
+  vehicle's own plane: the test records that, `#[ignore]`d, until the user decides.
 * **T5.4 `bonds_house_takes_the_vehicles_impulse`** (World, GPU). The house test in
   `StrengthModel::Bonds`. Momentum closed through the joints (ΔP ≤ 2·10⁻⁴·P0, as the
   existing World test), and the bonds loaded.
@@ -636,6 +713,18 @@ for what needs AVBD.
 * **Reading:** if the ETK crushes far less than the NHTSA spread at 56 km/h into a
   *rigid* wall, then 15 cm in the ring is (A), content. The fix is in authoring and
   conversion (the user's rule), and no coupling test can say otherwise.
+* **Measured** (E5, `crush_probe.rs`, a probe, not yet a test):
+  * dynamic crush 0.55 m at 56 km/h, against the NHTSA small-sedan band of 0.62–0.75 m;
+  * peak 67 g through a 5 ms box filter, against 34–47 g at CFC 60. The figures are not
+    comparable until a proper SAE J211 CFC 60 filter is used;
+  * stiffer and springier than the band;
+  * the importer matches an independent parse for all 2,767 beams.
+
+  So the ETK reaches a substantial crush against a rigid wall. The 15 cm in the ring is
+  not explained by the car being unable to crush. Its front yields at about 600 kN
+  against a rigid wall (E6).
+* **Still to commit:** the test with a CFC 60 filter, the residual crush, and the
+  113 km/h report.
 
 ### 3.2 The three cross-path scenes
 
@@ -746,6 +835,34 @@ smooth contact its error is first order in Δ. For contact between bodies whose
 coupled stiffness exceeds what a window can resolve (rigid neighbours), it is not small
 at any practical Δ until Δ ≈ h. Stated as a **hypothesis**; R1–R3 decide it.
 
+**Revision after measurement (E6, `coupling_wall_gpu.rs`, 2026-11-07).** The fact, the
+measurement and the hypothesis are kept apart here.
+
+* **Fact (design).** Inside a window, a proxy is free of its neighbours (F3). This is
+  unchanged.
+* **Measurement.**
+  * A loose wall of floating 25 kg bricks struck by the ETK takes 9.1, 10.1 and
+    10.1 kN·s of the car's momentum at 60, 120 and 240 Hz. This converges by 120 Hz,
+    and 60 Hz is within 10 % of the converged value.
+  * The bricks' peak force on the car is about 100 kN. The ETK's front yields at about
+    600 kN against a rigid wall.
+* **Revised hypothesis.**
+  * **The window length is not the driver at these rates.** The window-latency
+    mechanism of (i)–(iii) would make the result depend on Δ, and it does not
+    (60 Hz is within 10 %).
+  * The small crush in the ring follows from the force the wall can apply. A loose wall
+    of light bricks loads the front to about 1/6 of its collapse force, so the front
+    barely yields. That is the physics of such a wall, provided AVBD transmits the
+    column's resistance correctly.
+  * The "column mass at once" estimate above assumed a rigid column in compressive
+    contact. The probe measured loose bricks. The two cases are not yet compared.
+* **Still open:**
+  * a column in compressive contact (R1, a row against one block). There, rigid physics
+    predicts a much larger force;
+  * AVBD's iteration dependence (T3.1);
+  * AVBD's own 5.5 % momentum loss in multi-body impacts (G3.0, T3.6). That loss, if it
+    lies in the contact chain, would reduce the force a column can transmit.
+
 **Alternatives.** Listed for the user's decision after the evidence, none adopted here:
 * proxy↔proxy contact inside the frame (neighbouring bricks collide at 2 kHz);
 * a shorter World window near vehicles;
@@ -770,25 +887,24 @@ run is bounded (≤ 10–20 min, kill timer, one job at a time).
 
 | # | Item | GPU | Why first |
 |---|---|---|---|
-| 1 | **D0** ETK rigid-wall crush at 56 and 113 km/h (§3.1) | no | Decides whether the 15 cm is content before anyone touches the coupling. |
-| 2 | **T5.1** static proxy = static shape in the BeamNG profile (F1) | no | One test; already predicted to fail. It measures the law divergence that every World test of the ETK inherits. |
-| 3 | **X3** car into a rigid box against a soft block of the same mass, with the e-corrected energy comparison (§3.2) | no | Answers "does soft↔rigid transmit the same force as soft↔soft" with exact momentum and energy, CPU only. |
-| 4 | **§3.3** per-step impulse tap (CPU) and the Newton III residual | no | Instrumentation that items 3, 5 and 9 read. |
-| 5 | **X1, X2** drop and wall cross-paths | no | The other two scenes the user named. |
-| 6 | **T5.2, T4.1** angular momentum across the coupling and across vehicle contact | no | Closes the conservation set: (b) is complete only with L. |
-| 7 | **T2.1** ground and shape impulse log, giving momentum in every crash | no | Closes `vehicle-test-strategy.md`'s gap; X1 needs it. |
-| 8 | **T3.1** inelastic chain against AVBD iterations | yes | The rigid-side fact behind §3.5. Small and bounded. |
-| 9 | **R1** row of bricks against one block, with Δ and iteration sweeps | yes | Decides hypothesis (C) for the ring. |
-| 10 | **R2, then R3** wall slice, then the ring | yes | The user's scene, read through 1–9. |
-| 11 | **T8.1** BeamNG-profile coupling parity: wgpu, Metal, CUDA | yes | The ETK's path on every backend. |
-| 12 | **T3.5** no vehicles = main, bit for bit, plus the timing gate | yes | Protects rigid scale (north-star rule). |
-| 13 | **T5.3, T5.4, T7.1, T7.2, T6.1** sleep, bonds, limits, clocks, ground | mixed | Remaining seams. |
-| 14 | **T1.1–T1.3** JBeam field conformance, census, mass | no | Large but mechanical. Raises import certainty to "every documented field". |
-| 15 | **T3.2–T3.4** AVBD analytic laws | yes | Rigid correctness beyond regression. |
-| 16 | **T2.2, T8.2, T4.2, T4.3** rotation invariance, Chrome hash, ETK head-on, RoR §9 | mixed | Completeness. T4.3 is opt-in. |
-| 17 | **(f2)** BeamNG recordings via BeamNGpy | user's machine | Only if the user can run BeamNG (§5). |
+| — | *Measured by probes (§0.1), still to commit as tests:* D0 (E5), X2 wall (E1), X1 drop at 1 m (E4), Newton III residual (E3), the loose-brick rate sweep (E6) | mixed | Convert the probes `crush_probe.rs`, `coupling_probe.rs` and `coupling_wall_gpu.rs` into asserting tests with typed tolerances. D0 needs a CFC 60 filter first. |
+| 1 | **T3.6** AVBD multi-body momentum (rigid only, measured −5.5 %) with **T3.1** chain against iterations | yes | Top open gap: the rigid seam itself loses momentum, and every soft↔rigid result in a pile inherits it. |
+| 2 | **T5.1** static proxy = static shape in the BeamNG profile (F1), and **T5.5** raycast wheels against rigid bodies (F7) | no / yes | Both confirmed by measurement and untested. Each measures a law divergence that every World test of the ETK inherits; changing them is the user's decision. |
+| 3 | **X3** car into a rigid box against a soft block of the same mass, with the e-corrected energy comparison (§3.2) | no | The soft↔rigid against soft↔soft question, with exact momentum and energy; not yet measured. |
+| 4 | **R1** a row of bricks in compressive contact against one block, with Δ and iteration sweeps | yes | The case E6 did not cover; decides whether a column transmits rigid-body force. |
+| 5 | **§3.3** per-step impulse tap (CPU) | no | Instrumentation for items 3 and 4. |
+| 6 | **T5.2, T4.1** angular momentum across the coupling and across vehicle contact | no | Closes the conservation set. |
+| 7 | **T2.1** ground and shape impulse log, giving momentum in every crash | no | Closes `vehicle-test-strategy.md`'s gap. |
+| 8 | **R2, then R3** wall slice, then the ring | yes | The user's scene, read through 1–7. |
+| 9 | **T8.1** BeamNG-profile coupling parity: wgpu, Metal, CUDA | yes | The ETK's path on every backend. |
+| 10 | **T3.5** no vehicles = main, bit for bit, plus the timing gate | yes | Protects rigid scale (north-star rule). |
+| 11 | **T5.3, T5.4, T7.1, T7.2, T6.1** sleep, bonds, limits, clocks, ground | mixed | Remaining seams. |
+| 12 | **T1.1–T1.3** JBeam field conformance, census, mass (E5 already checked all 2,767 ETK beams against an independent parse) | no | Raises import certainty to every documented field and every car. |
+| 13 | **T3.2–T3.4** AVBD analytic laws | yes | Rigid correctness beyond regression. |
+| 14 | **T2.2, T8.2, T4.2, T4.3** rotation invariance, Chrome hash, ETK head-on, RoR §9 | mixed | Completeness. T4.3 is opt-in. |
+| 15 | **(f2)** BeamNG recordings via BeamNGpy | user's machine | Only if the user can run BeamNG (§5). |
 
-Items 1–7 need no GPU and can land as one branch of tests. A test that finds a real
+Items 2 (T5.1), 3, 5, 6 and 7 need no GPU. A test that finds a real
 defect is `#[ignore]`d with its measured value, and the fix goes to the user as a
 decision.
 
@@ -811,6 +927,11 @@ decision.
 * Whether soft↔rigid and soft↔soft give the same momentum exchange (exact), and how far
   their dissipation differs at equal restitution: measured, with the cause attributed to
   the law difference F2 or not.
+
+**Not certain today** (measured, open):
+* AVBD loses 5.5 % of the momentum in a rigid-only multi-body impact (G3.0). Until T3.6
+  explains or bounds it, "no path creates or destroys momentum" holds for the coupling
+  (residual 0.004 N·s on the CPU, 0.0 on the GPU World box) but not for AVBD piles.
 
 **Certain only relative to a reference:**
 * RoR profile ≈ RoR's own solver on RoR content (e). That is a strong statement about
