@@ -90,9 +90,11 @@ export async function createShowcase(spec) {
 export async function createBrickRingDrive(spec) {
   ready ??= init();
   await ready;
+  const { vehicles, ...rest } = spec;
+  const layout = brickRingLayout(rest);
   const world = await WebWorld.createBrickRingDrive(spec);
   world.flags = solverFlags();
-  return { world, layout: brickRingLayout(spec) };
+  return { world, layout };
 }
 
 /** The wasm, once loaded (pages that call its free functions before a world). */

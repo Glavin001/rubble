@@ -152,13 +152,8 @@ fn main() -> anyhow::Result<()> {
     let mut awake = 0u32;
     let mut wall = std::time::Instant::now();
     for k in 1..=steps {
-        if k <= 3 {
-            eprintln!("step {k}");
-        }
+        let ts = std::time::Instant::now();
         w.step()?;
-        if k <= 3 {
-            eprintln!("stepped {k}");
-        }
         for f in w.poll_blocking()? {
             for (n, t) in f.gpu_time.iter().flat_map(|t| t.segments.iter()) {
                 let e = seg.entry(n).or_default();
@@ -172,7 +167,33 @@ fn main() -> anyhow::Result<()> {
                 awake = c.awake_count;
             }
         }
+        // Guards (a GPU run must never hang the machine): a slow step is printed at once;
+        // every step the cars' nodes are checked, and the run stops at the first
+        // non-finite one, or when car 0's node 0 nears the origin rebase radius (100 m)
+        // unless BR_FAR=1.
+        let step_ms = ts.elapsed().as_secs_f64() * 1e3;
+        if step_ms > 250.0 {
+            println!("step {k}: {step_ms:.0} ms wall");
+        }
+        if let Some(x) = w.explicit_vehicles() {
+            let pos = x.positions();
+            let bad = pos.iter().flatten().filter(|p| !p.is_finite()).count();
+            if bad > 0 {
+                println!("step {k}: {bad} non-finite nodes; stopping");
+                break;
+            }
+            if std::env::var("BR_FAR").as_deref() != Ok("1") && pos[0][0].length() > 95.0 {
+                println!("step {k}: car 0 node 0 at {:.1} m from the origin; stopping (BR_FAR=1 to go on)", pos[0][0].length());
+                break;
+            }
+        }
         if k % 15 == 0 {
+            // Each car's proxy shapes in its last window (the coupling's room per car).
+            let shapes: Vec<usize> = w
+                .explicit_window_impulses()
+                .iter()
+                .map(|v| v.len())
+                .collect();
             let line = match w.explicit_vehicles() {
                 Some(x) => {
                     let (pos, vel, beams) = (x.positions(), x.velocities(), x.beams());
@@ -185,12 +206,13 @@ fn main() -> anyhow::Result<()> {
                     let v = vel[0].iter().copied().sum::<glam::Vec3>() / vel[0].len() as f32;
                     let bad = pos.iter().flatten().filter(|p| !p.is_finite()).count();
                     format!(
-                        "car 0 at ({:.2}, {:.2}, {:.2}) {:.1} m/s; beams broken {:?}{}",
+                        "car 0 at ({:.2}, {:.2}, {:.2}) {:.1} m/s; beams broken {:?}; proxy shapes {:?}{}",
                         c.x,
                         c.y,
                         c.z,
                         v.length(),
                         broken,
+                        shapes,
                         if bad > 0 {
                             format!(" NON-FINITE {bad}")
                         } else {

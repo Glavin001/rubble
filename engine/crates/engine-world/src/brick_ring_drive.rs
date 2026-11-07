@@ -111,7 +111,7 @@ pub fn drive_ring() -> RingSpec {
 pub const DRIVE_SHAPES: u32 = 1024;
 
 /// The demo's World for `bodies` bodies (demo-config.mjs `ring110k`: `sceneCap`,
-/// `demoSolver`, `parseDemoQuery`'s features; checked by `ring_world_def_is_the_demos`).
+/// `demoSolver`, `parseDemoQuery`'s features; `ring_world_def_is_the_demos` holds the values demo-config.mjs gives).
 pub fn ring_world_def(bodies: u32) -> WorldDef {
     let b = bodies.max(4096).next_power_of_two();
     let cap_contacts = 1u32 << 21;
@@ -318,7 +318,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_demo_ring_has_its_110441_bricks() {
+    fn the_demo_ring_has_its_110440_bricks() {
+        // demo.html's ring110k: 110,442 bodies with its ground and ball.
         assert_eq!(RingSpec::demo().bricks().len(), 110_440);
+    }
+
+    #[test]
+    fn ring_world_def_is_the_demos() {
+        // demo-config.mjs for ?scene=ring110k (sceneCap(131072), demoSolver with sleep
+        // off, parseDemoQuery's features): only the sparse colour start differs from
+        // EngineFeatures::default().
+        let d = ring_world_def(110_442);
+        assert_eq!(d.capacity.max_bodies, 131_072);
+        assert_eq!(d.capacity.max_colliders, 262_144);
+        assert_eq!(d.capacity.max_contacts, 2_097_152);
+        assert_eq!(d.capacity.max_candidates, 2_097_152);
+        assert_eq!((d.solver.iterations, d.solver.flags), (4, 1));
+        assert_eq!(d.solver.sleep_time, 1.0e6);
+        assert!(matches!(d.contacts, ContactStorage::Persistent));
+        let mut f = d.features.clone();
+        f.sparse_colors = 32;
+        assert_eq!(
+            format!("{f:?}"),
+            format!("{:?}", WorldDef::default().features)
+        );
+        assert_eq!(d.features.sparse_colors, 10);
     }
 }
