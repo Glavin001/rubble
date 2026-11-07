@@ -54,7 +54,8 @@ def main() -> int:
         # Anything the command left in its group goes too.
         try:
             os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # Gone, or (macOS) only exited members left in the group.
             pass
 
 
