@@ -7,7 +7,8 @@ Interleaved rigid regression runs: for each round, each scene, each build in tur
 usage: driver.py OUT_CSV ROUNDS BUILD=BINDIR [BUILD=BINDIR ...]
 BINDIR holds each build's release `rigid_regression_bench` example and `city_scale`
 test binary (engine-world), copied out of its target dir.
-env: RR_ONLY=substring filter on scene keys; RR_NO_CITY=1 skips the city runs.
+env: RR_ROUND=k numbers the first round k (one bounded round per invocation);
+RR_ONLY=substring filter on scene keys; RR_NO_CITY=1 skips the city runs.
 """
 import json, os, subprocess, sys, time
 
@@ -56,7 +57,8 @@ def run(cmd, env, timeout):
         return -9, x.stdout or "", "TIMEOUT", time.time() - t
 
 
-for r in range(rounds):
+first = int(os.environ.get("RR_ROUND", "0"))
+for r in range(first, first + rounds):
     order = builds[r % len(builds):] + builds[: r % len(builds)]
     for key, args, env in BENCH:
         if only and only not in key:
