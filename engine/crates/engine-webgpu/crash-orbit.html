@@ -66,18 +66,21 @@
 
     // ---------------------------------------------------------------- the cars' visuals (as the drive builds them)
     const MODS = { etk: { base: './__mods/etkk_tex', pc: 'etkk/kc6.pc' } };
+    // Each car in its drive paint (the snapshot's, else the first car's red).
     const PAINT = [0.6, 0.04, 0.03];
     const built = {};
-    async function visualFor(kind) {
-      if (built[kind]) return built[kind];
+    let modFor = {};
+    async function visualFor(kind, paint = PAINT) {
+      const key = `${kind}:${paint.join(',')}`;
+      if (built[key]) return built[key];
       subEl.textContent = `building the ${kind} body…`;
       if (kind === 'sedan') {
-        const c = showcaseCar({ style: 'sedan', resolution: 'low', paint: PAINT, wheels: 'raycast' });
+        const c = showcaseCar({ style: 'sedan', resolution: 'low', paint, wheels: 'raycast' });
         c.visual.lod = [c.visualLod, c.visualFar];
-        return (built[kind] = { visual: c.visual, mod: null });
+        return (built[key] = { visual: c.visual, mod: null });
       }
-      const mod = await loadMod(MODS[kind].base, { pc: MODS[kind].pc });
-      return (built[kind] = { visual: modVisual(mod, { native: true, raycast: true, paint: PAINT }).visual, mod });
+      const mod = (modFor[kind] ??= await loadMod(MODS[kind].base, { pc: MODS[kind].pc }));
+      return (built[key] = { visual: modVisual(mod, { native: true, raycast: true, paint }).visual, mod });
     }
 
     // ---------------------------------------------------------------- the device and renderers
@@ -128,11 +131,14 @@
       const nf = new Float32Array(nodes.buffer);
       for (let i = 0; i < s.nodeCount; i++) for (let j = 4; j < 12; j++) nf[i * 12 + j] = j === 7 || j === 11 ? nf[i * 12 + j] : 0; // velocity and force off (no lead)
       const mf = new Float32Array(misc.buffer), d = placed[k];
-      for (let j = 0; j < 3; j++) mf[j] += d[j]; // vehicle 0's origin
+      // The snapshot's car is vehicle `v` of its World (the second of two: 1); its nodes
+      // are relative to that vehicle's origin in the misc buffer (16 bytes a vehicle).
+      const v = s.vehicle ?? Math.max(0, [0, 1, 2, 3].findIndex((w) => 4 * w + 2 < mf.length && [0, 1, 2].every((j) => Math.abs(mf[4 * w + j] - s.origin[j]) < 1e-4)));
+      for (let j = 0; j < 3; j++) mf[4 * v + j] += d[j]; // its origin
       const recs = s.gpu.wheelRecords.map((r) => r + miscAt / 16);
       for (let w = 0; w < s.gpu.wheelRecords.length; w += 4) { const c = s.gpu.wheelRecords[w + 1] * 4; for (let j = 0; j < 3; j++) mf[c + j] += d[j]; }
       nodeParts.push(nodes); beamParts.push(beams); miscParts.push(misc);
-      addSpecs.push({ snap: s, nodeOffset: nodeAt, beamOffset: beamAt, vehicle: miscAt / 16, wheelRecords: new Uint32Array(recs), state: unb64(s.gpu.nodeState) });
+      addSpecs.push({ snap: s, nodeOffset: nodeAt, beamOffset: beamAt, vehicle: miscAt / 16 + v, wheelRecords: new Uint32Array(recs), state: unb64(s.gpu.nodeState) });
       nodeAt += s.nodeCount; beamAt += s.beamCount; miscAt += misc.byteLength;
     }
     const join = (parts) => { const n = parts.reduce((a, p) => a + p.byteLength, 0); const u = new Uint8Array(n); let o = 0; for (const p of parts) { u.set(p, o); o += p.byteLength; } return u; };
@@ -140,7 +146,7 @@
     cars.setSolver(upload(join(nodeParts)), upload(join(miscParts)), upload(join(beamParts)));
     const kinds = [...new Set(snaps.map((s) => s.car))];
     if (kinds.length > 1) { fail('side by side needs snapshots of one car'); throw new Error('mixed cars'); }
-    const { visual, mod } = await visualFor(kinds[0]);
+    const { visual, mod } = await visualFor(kinds[0], snaps[0].paint);
     if (mod && qs.get('tex') !== '0') {
       subEl.textContent = 'decoding the textures…';
       const [colour, data] = await Promise.all([modTextures(mod, visual.textures), modTextures(mod, visual.dataTextures)]);
@@ -148,6 +154,7 @@
       if (data.length) cars.setDataTextures(data, 1024);
     }
     for (const a of addSpecs) {
+      const { visual } = await visualFor(kinds[0], a.snap.paint);
       if (a.snap.nodeCount !== visual.nodeCount || a.snap.beamCount !== visual.beamRest0.length) throw new Error(`snapshot ${a.snap.nodeCount} nodes / ${a.snap.beamCount} beams, the visual ${visual.nodeCount} / ${visual.beamRest0.length}`);
       a.id = cars.addCar(visual, { nodeOffset: a.nodeOffset, beamOffset: a.beamOffset, vehicle: a.vehicle, lod: visual.lod, wheelRecords: a.wheelRecords });
       cars.writeNodeState(a.id, a.state);
@@ -164,21 +171,29 @@
     for (const x of [box.lo[0], box.hi[0]]) for (const z of [box.lo[2], box.hi[2]]) pts.push([x, Math.min(G, box.lo[1]), z]);
     const centre = bbox(pts).c;
     const aspect = () => canvas.width / canvas.height;
-    const dirAt = (a) => [Math.cos(PITCH) * Math.sin(a), Math.sin(PITCH), Math.cos(PITCH) * Math.cos(a)];
+    let pitch = PITCH;
+    const dirAt = (a) => [Math.cos(pitch) * Math.sin(a), Math.sin(pitch), Math.cos(pitch) * Math.cos(a)];
     // One distance for the whole orbit: the nearest from which every node fits in 95 %
     // of the view at every angle (no breathing as the car turns).
     const FILL = Number(qs.get('fill') || 0.95);
-    function fitDistance() {
-      const tv = Math.tan(FOV / 2) * FILL, th = tv * aspect();
+    function fitDistance(angles = Array.from({ length: 96 }, (_, k) => START + 2 * Math.PI * k / 96), fill = FILL) {
+      const tv = Math.tan(FOV / 2) * fill, th = tv * aspect();
       let d = 0;
-      for (let k = 0; k < 96; k++) {
-        const z = dirAt(START + 2 * Math.PI * k / 96), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      for (const a of angles) {
+        const z = dirAt(a), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
         for (const p of pts) { const q = sub3(p, centre); const pz = dot3(q, z); d = Math.max(d, pz + Math.abs(dot3(q, x)) / th, pz + Math.abs(dot3(q, y)) / tv); }
       }
       return d;
     }
     let DIST = fitDistance();
     addEventListener('resize', () => { DIST = fitDistance(); });
+    // Stills at set views about the first car's heading (the snapshot's `fwd`, else +z):
+    // the camera's azimuth from the car's nose (degrees, + toward the car's +x side when
+    // it heads +z) and its pitch, framed tight at that one angle.
+    const fwd0 = snaps[0].fwd ?? [0, 0, 1];
+    const HEADING = Math.atan2(fwd0[0], fwd0[2]);
+    const VIEWS = { front34: [35, 14], side: [90, 8], rear34: [-145, 14], topfront: [0, 52] };
+    let fixedAngle = null;
     function viewProj(eye, at, near, far) {
       const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
       const v = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot3(x, eye), -dot3(y, eye), -dot3(z, eye), 1];
@@ -236,7 +251,7 @@
         depthTex = device.createTexture({ size: [canvas.width, canvas.height], format: DEPTH, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
         msaaTex = SAMPLES > 1 ? device.createTexture({ size: [canvas.width, canvas.height], format, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
       }
-      const a = START + 2 * Math.PI * t / SECS;
+      const a = fixedAngle ?? START + 2 * Math.PI * t / SECS;
       const dir = dirAt(a);
       const eye = centre.map((c, j) => c + DIST * dir[j]);
       const vp = viewProj(eye, centre, 0.05, 2000);
@@ -262,7 +277,16 @@
     window.__snaps = snaps;
     if (RECORD) {
       // Frame-locked: the orbit at `t` seconds, drawn and finished.
-      window.__rec = { async frame(t) { draw(t); await device.queue.onSubmittedWorkDone(); return { t, dist: DIST }; } };
+      window.__rec = {
+        async frame(t) { draw(t); await device.queue.onSubmittedWorkDone(); return { t, dist: DIST }; },
+        // One still at a named view (VIEWS): crash-orbit.mjs stills.
+        async view(name, fill = 0.9) {
+          const [az, el] = VIEWS[name];
+          pitch = el * Math.PI / 180; fixedAngle = HEADING + az * Math.PI / 180;
+          DIST = fitDistance([fixedAngle], fill);
+          draw(0); await device.queue.onSubmittedWorkDone(); return { view: name, dist: DIST };
+        },
+      };
       draw(0); await device.queue.onSubmittedWorkDone();
       window.__ready = true;
     } else {

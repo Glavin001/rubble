@@ -8,6 +8,11 @@
 //       against <car>-rest.json in the car's own frame, written into the crash snapshot.
 //   node crash-orbit.mjs record name snap[,snap] [--secs 12]   crash-orbit.html,
 //       frame-locked, one orbit at 60 fps → name.mp4 (H.264), stills at four angles.
+//   node crash-orbit.mjs stills name snap[,snap] [--views front34,side,rear34,topfront]
+//       [--to dir]   crash-orbit.html at set views about the car's heading, framed tight.
+//
+// Runs: etk, sedan (?drag=0), etk2 (two ETKs: <run>-0-…, <run>-1-…). capture --after s:
+// the crash snapshot s seconds after each car is out of the wall or at rest.
 //
 // Snapshots and stills go to --out (default <repo>/out/crash-orbit, gitignored) and are
 // copied with the videos to ~/Development/rubble-artifacts/crash-orbit. ETK snapshots
@@ -20,6 +25,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { measureCrush } from './crash-measure.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -36,94 +42,21 @@ mkdirSync(ART, { recursive: true });
 if (STILLS) mkdirSync(STILLS, { recursive: true });
 const LIMIT_MIN = Number(opt('--limit', '15'));
 setTimeout(() => { console.error(`time limit (${LIMIT_MIN} min)`); process.exit(9); }, LIMIT_MIN * 60_000).unref();
-const QUERY = { etk: 'car=etk', sedan: 'car=sedan&drag=0' };
+const QUERY = { etk: 'car=etk', etk2: 'car=etk&n=2', sedan: 'car=sedan&drag=0' };
 const keep = (file) => { copyFileSync(file, join(ART, basename(file))); };
 
 // ---------------------------------------------------------------- measure (no browser)
-// Rigid alignment (Kabsch, Horn's quaternion form) of the crashed nodes onto the rest
-// nodes on the car's rear two fifths, iterated with the nodes that moved more than
-// 3 cm left out, then each node's displacement in the rest car's frame: x right, y up,
-// z forward (the car drives at the wall along +z at rest).
-function kabsch(P, Q, w) {
-  // Rotation R and translation t with R·P + t ≈ Q (weighted rows).
-  let sw = 0; const cp = [0, 0, 0], cq = [0, 0, 0];
-  for (let i = 0; i < P.length; i++) if (w[i]) { sw += 1; for (let j = 0; j < 3; j++) { cp[j] += P[i][j]; cq[j] += Q[i][j]; } }
-  for (let j = 0; j < 3; j++) { cp[j] /= sw; cq[j] /= sw; }
-  const S = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-  for (let i = 0; i < P.length; i++) if (w[i]) for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) S[a][b] += (P[i][a] - cp[a]) * (Q[i][b] - cq[b]);
-  const [[xx, xy, xz], [yx, yy, yz], [zx, zy, zz]] = S;
-  const N = [[xx + yy + zz, yz - zy, zx - xz, xy - yx], [yz - zy, xx - yy - zz, xy + yx, zx + xz], [zx - xz, xy + yx, -xx + yy - zz, yz + zy], [xy - yx, zx + xz, yz + zy, -xx - yy + zz]];
-  // The largest eigenvector by power iteration on N + cI.
-  let q = [1, 0, 0, 0];
-  for (let it = 0; it < 500; it++) {
-    const n = [0, 1, 2, 3].map((r) => N[r].reduce((s, v, c) => s + v * q[c], 0) + 1e3 * q[r]);
-    const l = Math.hypot(...n); q = n.map((v) => v / l);
-  }
-  const [w0, x, y, z] = q;
-  const R = [[w0 * w0 + x * x - y * y - z * z, 2 * (x * y - w0 * z), 2 * (x * z + w0 * y)], [2 * (x * y + w0 * z), w0 * w0 - x * x + y * y - z * z, 2 * (y * z - w0 * x)], [2 * (x * z - w0 * y), 2 * (y * z + w0 * x), w0 * w0 - x * x - y * y + z * z]];
-  const t = [0, 1, 2].map((a) => cq[a] - (R[a][0] * cp[0] + R[a][1] * cp[1] + R[a][2] * cp[2]));
-  return (p) => [0, 1, 2].map((a) => R[a][0] * p[0] + R[a][1] * p[1] + R[a][2] * p[2] + t[a]);
-}
-function measure(car) {
-  const rest = JSON.parse(readFileSync(join(OUT, `${car}-rest.json`), 'utf8'));
-  const crashFile = join(OUT, `${car}-crash.json`);
+// The crush (crash-measure.mjs): <name>-crash.json against <name>-rest.json in the rest
+// car's frame (x right, y up, z forward: the car drives at the wall along +z at rest).
+function measure(name) {
+  const rest = JSON.parse(readFileSync(join(OUT, `${name}-rest.json`), 'utf8'));
+  const crashFile = join(OUT, `${name}-crash.json`);
   const crash = JSON.parse(readFileSync(crashFile, 'utf8'));
-  const R = rest.positions, C = crash.positions, n = R.length;
-  if (C.length !== n) throw new Error('snapshots of different cars');
-  // The rest car's frame: z its +z heading (forward), centred on its bounding box.
-  let zlo = Infinity, zhi = -Infinity, xlo = Infinity, xhi = -Infinity;
-  for (const p of R) { zlo = Math.min(zlo, p[2]); zhi = Math.max(zhi, p[2]); xlo = Math.min(xlo, p[0]); xhi = Math.max(xhi, p[0]); }
-  const len = zhi - zlo, cx = 0.5 * (xlo + xhi);
-  let w = R.map((p) => (p[2] - zlo < 0.4 * len ? 1 : 0));
-  let align = null;
-  for (let it = 0; it < 6; it++) {
-    align = kabsch(C, R, w);
-    const res = C.map((p, i) => { const a = align(p); return Math.hypot(a[0] - R[i][0], a[1] - R[i][1], a[2] - R[i][2]); });
-    const nw = R.map((p, i) => (p[2] - zlo < 0.4 * len && res[i] < 0.03 ? 1 : 0));
-    if (nw.reduce((a, b) => a + b, 0) < 12) break;
-    w = nw;
-  }
-  const A = C.map(align);
-  const used = w.reduce((a, b) => a + b, 0);
-  const rms = Math.sqrt(A.reduce((s, a, i) => s + (w[i] ? (a[0] - R[i][0]) ** 2 + (a[1] - R[i][1]) ** 2 + (a[2] - R[i][2]) ** 2 : 0), 0) / used);
-  const disp = A.map((a, i) => [a[0] - R[i][0], a[1] - R[i][1], a[2] - R[i][2]]);
-  const mag = disp.map((d) => Math.hypot(...d));
-  // Front crush: the frontmost rest nodes (within 10 cm of the nose), how far back
-  // they went (mean and the most), and the car's overall length lost at the front.
-  const front = R.map((p, i) => i).filter((i) => zhi - R[i][2] < 0.1);
-  const back = front.map((i) => -disp[i][2]);
-  let azhi = -Infinity; for (const a of A) azhi = Math.max(azhi, a[2]);
-  let mi = 0; for (let i = 1; i < n; i++) if (mag[i] > mag[mi]) mi = i;
-  const where = (p) => {
-    const f = (p[2] - zlo) / len;
-    const along = f > 0.8 ? 'front' : f > 0.6 ? 'front quarter' : f > 0.4 ? 'middle' : f > 0.2 ? 'rear quarter' : 'rear';
-    const side = Math.abs(p[0] - cx) < 0.25 ? 'centre' : p[0] > cx ? '+x side' : '−x side';
-    return `${along}, ${side}`;
-  };
-  const over = (d) => mag.filter((m) => m > d).length;
-  // Nodes more than 1.5 m from their place: torn off and left behind (in the wall or
-  // the debris), not crush; the body's largest displacement leaves them out.
-  const DETACHED = 1.5;
-  const detached = mag.map((m, i) => i).filter((i) => mag[i] > DETACHED).map((i) => ({ node: i, disp: +mag[i].toFixed(3), dir: disp[i].map((x) => +x.toFixed(3)), where: where(R[i]) }));
-  let bi = -1; for (let i = 0; i < n; i++) if (mag[i] <= DETACHED && (bi < 0 || mag[i] > mag[bi])) bi = i;
-  // Displacement by fifth of the car's length (rest position): mean and max.
-  const bands = [0, 1, 2, 3, 4].map((b) => { const ids = R.map((p, i) => i).filter((i) => Math.min(4, Math.floor(5 * (R[i][2] - zlo) / len)) === b); return { from: +(b / 5).toFixed(1), nodes: ids.length, mean: +(ids.reduce((s, i) => s + mag[i], 0) / ids.length).toFixed(4), max: +Math.max(...ids.map((i) => mag[i])).toFixed(4) }; });
-  const metrics = {
-    restLength: +len.toFixed(4),
-    alignNodes: used, alignRms: +rms.toFixed(4),
-    frontNodes: front.length,
-    frontCrush: +(back.reduce((a, b) => a + b, 0) / back.length).toFixed(4),
-    frontCrushMax: +Math.max(...back).toFixed(4),
-    lengthLoss: +(zhi - azhi).toFixed(4),
-    maxDisp: +mag[mi].toFixed(4), maxNode: mi, maxAt: R[mi].map((x) => +x.toFixed(3)), maxDir: disp[mi].map((x) => +x.toFixed(3)), maxWhere: where(R[mi]),
-    bodyMaxDisp: +mag[bi].toFixed(4), bodyMaxNode: bi, bodyMaxDir: disp[bi].map((x) => +x.toFixed(3)), bodyMaxWhere: where(R[bi]), detached,
-    nodesMoved: { over5cm: over(0.05), over10cm: over(0.1), over20cm: over(0.2), of: n },
-    bands,
-  };
+  const metrics = measureCrush(rest.positions, crash.positions);
   crash.metrics = metrics;
   writeFileSync(crashFile, JSON.stringify(crash));
   keep(crashFile);
-  console.log(`${car}: ${JSON.stringify(metrics, null, 1)}`);
+  console.log(`${name}: ${JSON.stringify(metrics, null, 1)}`);
 }
 if (MODE === 'measure') { for (const c of REST.length ? REST : ['etk', 'sedan']) measure(c); process.exit(0); }
 
@@ -196,47 +129,64 @@ const grabTo = async (file, quality = 90) => {
 const save = (name, obj) => { const f = join(OUT, name); writeFileSync(f, JSON.stringify(obj)); keep(f); return f; };
 
 if (MODE === 'capture') {
-  for (const car of REST.length ? REST : ['etk', 'sedan']) {
-    const q = QUERY[car];
-    if (!q) throw new Error(`no car ${car}`);
+  // --after s: the crash snapshot this long after each car is out of the wall or at rest
+  // (whichever comes first; by default 3 s after the break-out or 0.5 s at rest).
+  const AFTER = opt('--after', null);
+  const outFor = AFTER == null ? 3 : Number(AFTER), restFor = AFTER == null ? 0 : Number(AFTER);
+  for (const run of REST.length ? REST : ['etk', 'sedan']) {
+    const q = QUERY[run];
+    if (!q) throw new Error(`no run ${run} (${Object.keys(QUERY).join(', ')})`);
+    const n = /(^|&)n=2/.test(q) ? 2 : 1;
+    // One car: <run>-rest.json, <run>-crash.json; two: <run>-<i>-… for each.
+    const name = (i) => (n > 1 ? `${run}-${i}` : run);
     const rec = (expr) => evaluate(`(async () => { const R = window.__rec; return ${expr}; })()`);
     // At rest: no input for 1.5 s (the car settles on its wheels).
     await open('brick-ring-drive.html', `${q}&record=1`);
     await evaluate('window.__drive({ forward: 0, steer: 0, brake: 1, handbrake: 1 })');
     let st = null;
     for (let f = 0; f < 90; f++) st = await rec('R.frame(60, 1)');
-    const rest = await evaluate('window.__snapshot(0)');
-    rest.impactKmh = null;
-    console.log(`${car} rest: t ${rest.t.toFixed(2)} s, ${rest.beamsBroken} of ${rest.beamCount} beams broken → ${save(`${car}-rest.json`, rest)}`);
+    for (let i = 0; i < n; i++) {
+      const rest = await evaluate(`window.__snapshot(${i})`);
+      rest.impactKmh = null; rest.fwd = st.cars[i].fwd;
+      console.log(`${name(i)} rest: t ${rest.t.toFixed(2)} s, ${rest.beamsBroken} of ${rest.beamCount} beams broken → ${save(`${name(i)}-rest.json`, rest)}`);
+    }
     // The crash: the scripted run at the wall.
     await open('brick-ring-drive.html', `${q}&record=1`);
     const layout = await evaluate('({ inner: window.__layout.inner })');
     await rec('R.set({ cam: "director" })');
-    const speeds = [];
-    let impactKmh = null, breakout = null, still = 0, maxKmh = 0;
     const OUT_AT = layout.inner + 5.2 + 2.3; // the car's rear past the wall's outer face
+    const cars = Array.from({ length: n }, () => ({ speeds: [], impactAt: null, impactKmh: null, breakout: null, restAt: null, still: 0, maxKmh: 0, done: false }));
     for (;;) {
       st = await rec('R.frame(60, 1)');
-      const c = st.cars[0], kmh = 3.6 * Math.abs(c.v[0] * c.fwd[0] + c.v[2] * c.fwd[2]);
-      speeds.push([st.t, kmh]); maxKmh = Math.max(maxKmh, kmh);
-      if (impactKmh == null && st.impactAt != null) {
-        // The speed on the frame at the strike's time (detected a frame later).
-        impactKmh = speeds.reduce((b, s) => (Math.abs(s[0] - st.impactAt) < Math.abs(b[0] - st.impactAt) ? s : b))[1];
-        console.log(`${car}: strike at ${st.impactAt.toFixed(3)} s, ${impactKmh.toFixed(1)} km/h`);
+      for (const [i, k] of cars.entries()) {
+        const c = st.cars[i], kmh = 3.6 * Math.abs(c.v[0] * c.fwd[0] + c.v[2] * c.fwd[2]);
+        k.speeds.push([st.t, kmh]); k.maxKmh = Math.max(k.maxKmh, kmh);
+        // The strike: the page's (car 0), else this car's front within 0.3 m of the
+        // wall's inner face; the speed on the frame at that time (seen a frame later).
+        const toWall = layout.inner - (Math.hypot(c.c[0], c.c[2]) + 2.3);
+        if (k.impactAt == null && (i === 0 ? st.impactAt != null : toWall < 0.3)) {
+          k.impactAt = i === 0 ? st.impactAt : st.t - 1 / 60;
+          k.impactKmh = k.speeds.reduce((b, s) => (Math.abs(s[0] - k.impactAt) < Math.abs(b[0] - k.impactAt) ? s : b))[1];
+          console.log(`${name(i)}: strike at ${k.impactAt.toFixed(3)} s, ${k.impactKmh.toFixed(1)} km/h`);
+        }
+        if (k.impactAt != null && k.breakout == null && Math.hypot(c.c[0], c.c[2]) > OUT_AT) { k.breakout = st.t; console.log(`${name(i)}: out of the wall at ${st.t.toFixed(2)} s, ${kmh.toFixed(0)} km/h`); }
+        k.still = Math.hypot(...c.v) < 0.3 ? k.still + 1 : 0;
+        if (k.impactAt != null && k.restAt == null && k.still >= 30) { k.restAt = st.t - 0.5; console.log(`${name(i)}: at rest from ${k.restAt.toFixed(2)} s`); }
+        if (k.impactAt != null && ((k.restAt != null && st.t >= k.restAt + 0.5 + restFor) || (k.breakout != null && st.t >= k.breakout + outFor))) k.done = true;
       }
-      if (impactKmh != null && breakout == null && Math.hypot(c.c[0], c.c[2]) > OUT_AT) { breakout = st.t; console.log(`${car}: out of the wall at ${st.t.toFixed(2)} s, ${kmh.toFixed(0)} km/h`); }
-      still = Math.hypot(...c.v) < 0.3 ? still + 1 : 0;
-      if (impactKmh != null && (still >= 30 || (breakout != null && st.t > breakout + 3))) break;
-      if (st.t > 40) throw new Error(`${car}: no rest by 40 s (strike ${impactKmh}, break-out ${breakout})`);
+      if (cars.every((k) => k.done)) break;
+      if (st.t > 40) throw new Error(`${run}: no rest by 40 s (${JSON.stringify(cars.map(({ speeds, ...k }) => k))})`);
     }
     // The drive's own view of the car as it stands (beside it, outside the ring), to
     // hold the orbit's rendering against.
     await rec('R.set({ cam: "exit" })');
     for (let f = 0; f < 2; f++) await rec('R.frame(60, 0)');
-    await grabTo(join(OUT, `${car}-crash-drive.jpg`), 88); keep(join(OUT, `${car}-crash-drive.jpg`));
-    const crash = await evaluate('window.__snapshot(0)');
-    Object.assign(crash, { impactKmh, breakout, maxKmh, speeds: speeds.filter((_, k) => k % 6 === 0).map(([t, v]) => [+t.toFixed(3), +v.toFixed(2)]) });
-    console.log(`${car} crash: t ${crash.t.toFixed(2)} s (strike ${crash.impactAt.toFixed(2)} s at ${impactKmh.toFixed(1)} km/h, top ${maxKmh.toFixed(0)} km/h), ${crash.beamsBroken} of ${crash.beamCount} beams broken → ${save(`${car}-crash.json`, crash)}`);
+    await grabTo(join(OUT, `${run}-crash-drive.jpg`), 88); keep(join(OUT, `${run}-crash-drive.jpg`));
+    for (const [i, k] of cars.entries()) {
+      const crash = await evaluate(`window.__snapshot(${i})`);
+      Object.assign(crash, { impactAt: k.impactAt, impactKmh: k.impactKmh, breakout: k.breakout, restAt: k.restAt, maxKmh: k.maxKmh, fwd: st.cars[i].fwd, speeds: k.speeds.filter((_, j) => j % 6 === 0).map(([t, v]) => [+t.toFixed(3), +v.toFixed(2)]) });
+      console.log(`${name(i)} crash: t ${crash.t.toFixed(2)} s (strike ${k.impactAt.toFixed(2)} s at ${k.impactKmh.toFixed(1)} km/h, top ${k.maxKmh.toFixed(0)} km/h), ${crash.beamsBroken} of ${crash.beamCount} beams broken → ${save(`${name(i)}-crash.json`, crash)}`);
+    }
     if (pageErrors.length) console.log('page messages:\n' + pageErrors.slice(0, 10).join('\n'));
     pageErrors.length = 0;
   }
@@ -268,5 +218,24 @@ if (MODE === 'record') {
   if (pageErrors.length) console.log('page messages:\n' + pageErrors.slice(0, 10).join('\n'));
   process.exit(0);
 }
-console.error('usage: node crash-orbit.mjs capture|measure|record …');
+if (MODE === 'stills') {
+  // Stills of crash-orbit.html at set views (front34, side, rear34, topfront) →
+  // <--to or ART>/<name>-<view>.jpg.
+  const [name, snaps] = REST;
+  const views = opt('--views', 'front34,side,rear34,topfront').split(',');
+  const to = opt('--to', ART);
+  mkdirSync(to, { recursive: true });
+  const extra = opt('--query', '');
+  await open('crash-orbit.html', `record=1&snap=${snaps.split(',').map((s) => `/__snap/${s}`).join(',')}${extra ? '&' + extra : ''}`);
+  for (const v of views) {
+    // Drawn twice: the before / after tags follow the first draw.
+    for (let k = 0; k < 2; k++) await evaluate(`window.__rec.view(${JSON.stringify(v)}, ${Number(opt('--fill', '0.9'))})`);
+    const f = join(to, `${name}-${v}.jpg`);
+    await grabTo(f, 92);
+    console.log(`${name} ${v} → ${f}`);
+  }
+  if (pageErrors.length) console.log('page messages:\n' + pageErrors.slice(0, 10).join('\n'));
+  process.exit(0);
+}
+console.error('usage: node crash-orbit.mjs capture|measure|record|stills …');
 process.exit(2);
