@@ -296,7 +296,7 @@
     }
     // The wall point the first car heads for (the inner face on its start line).
     const WALL = [layout.cars[0].front[0], G, layout.inner];
-    const CAMS = { director: 'Director', chase: 'Chase', side: 'Wall side', hood: 'Bumper', orbit: 'Orbit', aerial: 'Aerial', free: 'Free' };
+    const CAMS = { director: 'Director', chase: 'Chase', side: 'Wall side', outside: 'Outside the ring', hood: 'Bumper', orbit: 'Orbit', aerial: 'Aerial', free: 'Free' };
     const camSel = document.getElementById('camSel');
     let camMode = CAMS[qs.get('cam')] ? qs.get('cam') : (AUTO ? 'director' : 'chase');
     for (const [k, v] of Object.entries(CAMS)) camSel.add(new Option(v, k, k === camMode, k === camMode));
@@ -314,9 +314,12 @@
         case 'chase': return [add3(s.c, add3(mul3(h, -7.5), [0, 2.4, 0])), add3(s.c, add3(mul3(h, 6), [0, 0.5, 0]))];
         case 'hood': return [add3(s.c, add3(mul3(h, 2.6), add3(mul3(left, 0.9), [0, 0.2, 0]))), add3(s.c, add3(mul3(h, 12), [0, 0.4, 0]))];
         case 'side': return [add3(WALL, [-11, 3.2, -6.5]), mix3(add3(WALL, [0, 1.4, 1.0]), c, 0.3)];
+        // Outside the ring, facing the wall where the car comes out.
+        case 'outside': return [add3(WALL, [7.5, 2.2, 15]), add3(WALL, [0, 1.3, 2.5])];
         case 'aerial': return [add3(c, [-9, 13, -14]), add3(c, [0, 0, 3])];
         case 'orbit': {
-          const a = 2.4 + wall * 0.15;
+          // A slow swing inside the ring about the hole (the wall stands 20 m high).
+          const a = Math.PI + 0.9 * Math.sin(wall * 0.3);
           const around = add3(WALL, [0, 1.5, 1.5]);
           return [add3(around, [16 * Math.sin(a), 5.5, 16 * Math.cos(a)]), around];
         }

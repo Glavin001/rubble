@@ -3,7 +3,7 @@
 // Record (frame-locked, `?record=1`: the page steps the World itself, one video frame of
 // 1/60 s at a time, the scripted run `?auto=1`): the run-up from the chase camera, the
 // strike from the wall's side, an orbit and the chase out of the hole; then the strike
-// again ×4 slower from the wall's side and from the bumper (replays: the scene is built
+// again ×4 slower from the wall's side and from outside the ring (replays: the scene is built
 // again and driven by the same script to the strike), encoded with ffmpeg (H.264).
 //
 //   cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
@@ -148,8 +148,9 @@ for (const run of runs.length ? runs : ['etk']) {
   }
   if (hit == null) throw new Error(`${name}: no strike seen in ${st.t.toFixed(1)} s`);
   const realFrames = frameNo;
-  // Passes 2 and 3: the strike ×4 slower from the wall's side, then from the bumper.
-  for (const [r, camName] of ['side', 'hood'].entries()) {
+  // Passes 2 and 3: the strike ×4 slower from the wall's side, then from outside the
+  // ring where the car comes out.
+  for (const [r, camName] of ['side', 'outside'].entries()) {
     await open(`${query}&record=1&slowmo=1&impactAt=${hit.toFixed(4)}`);
     await rec(`R.set({ cam: "${camName}" })`);
     const from = Math.max(0, hit - (r ? 0.5 : 0.7));
