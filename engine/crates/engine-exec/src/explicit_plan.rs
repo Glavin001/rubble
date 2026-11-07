@@ -165,9 +165,12 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 /// step word) plus the frame's end, at the uniform offset alignment.
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
-/// Words of the kernel's Params (all 89 used; word 87 the parking brakes' base, word
-/// 88 the triangles' per-step geometry).
-pub const PARAM_WORDS: usize = 89;
+/// Words of the kernel's Params (all 90 used; word 87 the parking brakes' base, word
+/// 88 the triangles' per-step geometry, word 89 the grid walk's pairs).
+pub const PARAM_WORDS: usize = 90;
+/// The grid walk's pairs a vehicle lists per step before it walks again with its tests
+/// (the kernel's `TRI_PAIR_CAP`; 2 gNext words a pair).
+pub const TRI_PAIR_CAP: usize = 8192;
 /// gBeams records per self-collision triangle of its per-step geometry (the kernel's
 /// `TRI_GEO_RECS`, `triGeoFill`).
 pub const TRI_GEO_RECS: usize = 9;
@@ -1811,6 +1814,15 @@ impl ExplicitUpload {
             rec[2] = (hit_base + k * SELF_HIT_WORDS) as u32;
             rec[3] = (hit_acc + 2 * k) as u32;
         }
+        // The grid walk's (triangle, contacter) pairs per vehicle (the kernel's
+        // triPairsAt; scratch), with the triangles' step geometry.
+        let tri_pairs = if tri_geo != 0 {
+            let at = next_len as u32;
+            next_len += nv * 2 * TRI_PAIR_CAP;
+            at
+        } else {
+            0
+        };
         let mut next_init = vec![0u32; next_len.max(1)];
         if any_keys {
             for (vi, v) in vehicles.iter().enumerate() {
@@ -1989,6 +2001,7 @@ impl ExplicitUpload {
             0,
             brake_base,
             tri_geo,
+            tri_pairs,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [

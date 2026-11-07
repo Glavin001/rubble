@@ -259,6 +259,7 @@ struct Params
     uint sleepPad0;
     uint brakeBase; // gStatic: per parking brake 2 records (EB_AERO modules; see brakeApply)
     uint triGeo; // gBeams: per triangle TRI_GEO_RECS records of its step geometry (triGeoFill; 0 none)
+    uint triPairs; // gNext: per vehicle 2 · TRI_PAIR_CAP words, the grid walk's pairs (0: the walk tests them)
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -3148,10 +3149,25 @@ groupshared uint gsTested[TRI_LIST];
 groupshared Atomic<uint> gsTestedCount[2];
 
 void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
-                  uint beamOff, uint groupOff, uint groupCount, uint parity)
+                  uint beamOff, uint groupOff, uint groupCount, uint parity, uint listAt)
 {
-    triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, false, 0u);
+    triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, false, 0u,
+                     listAt);
 }
+
+// --- The grid walk's pairs, then their tests (lossless) ---
+// The walk's lanes take (triangle, cell) shares of very different sizes, and each
+// tested its contacters as it found them, so the step waited for the lane with the
+// most tests. With gP.triPairs, the frame's walk lists the (triangle, contacter) pairs
+// that pass the box test tryContact applies first (with its expression), in gNext at
+// triPairs + vehicle · 2 · TRI_PAIR_CAP (2 words a pair: global triangle, node; count in
+// gsPairCount, unused by a grid step), and after a barrier the lanes test the list,
+// a pair each. The tests and their results are the walk's: the hits are applied in
+// the specification's order whatever order they were found in (selfApply). A list past
+// TRI_PAIR_CAP runs the walk again with its tests (the list has no effects).
+static const uint TRI_PAIR_CAP = 8192u;
+uint triPairsAt(uint v) { return gP.triPairs + v * 2u * TRI_PAIR_CAP; }
+uint triPairAdd();
 
 // triangleGrid's walk, the bucket offsets in workgroup memory (gsOff) or, `at`, in
 // gNext at offBase (a contact group member's grid, triangleGridAt). One call site of
@@ -3159,7 +3175,7 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
 // outer loop walks the candidates (one each); else the covered cells, each bucket's
 // run once. The same tests in the same order as two separate loops.
 void triangleGridWalk(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
-                      uint beamOff, uint groupOff, uint groupCount, uint parity, bool at, uint offBase)
+                      uint beamOff, uint groupOff, uint groupCount, uint parity, bool at, uint offBase, uint listAt)
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
     // The frame's walk: the step's geometry from the beam phase (triGeoFill).
@@ -3240,6 +3256,20 @@ void triangleGridWalk(uint gt, uint sub, float3 origin, float r, float cell, uin
                 if (any(p < t.lo) || any(p > t.hi)) continue;
                 h = asuint(E.w);
             }
+            if (listAt != 0u)
+            {
+                // Listed for the test pass when inside the box tryContact tests first
+                // (outside, tryContact returns before any effect).
+                float3 q = nf3(origin + gNodes[h * 3u].xyz);
+                if (any(q < t.lo) || any(q > t.hi)) continue;
+                uint n = triPairAdd();
+                if (n < TRI_PAIR_CAP)
+                {
+                    gNext[listAt + 2u * n] = gt;
+                    gNext[listAt + 2u * n + 1u] = h;
+                }
+                continue;
+            }
             tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
         }
     }
@@ -3310,6 +3340,7 @@ void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, flo
 static const uint PAIR_LIST = 1024u;
 groupshared uint gsPairs[PAIR_LIST];
 groupshared Atomic<uint> gsPairCount;
+uint triPairAdd() { return gsPairCount.add(1u); }
 
 void trianglePairs(uint t, uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
                    uint candCount, uint parity)
@@ -5320,7 +5351,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             {
                 uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
                 triangleGrid(triOff + t, p % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff,
-                             groupOff, groupCount, parity);
+                             groupOff, groupCount, parity, gP.triPairs != 0u ? triPairsAt(v) : 0u);
             }
         }
         else if (candCount > 0u && cell > 0.0)
@@ -5344,6 +5375,33 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             for (uint p = lane, pStop = EB_END(p, triCount * lanes, stride); p < pStop && lane < stride; p += stride)
                 triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
                              groupOff, groupCount, parity);
+        }
+#ifdef EB_ABLATE
+        if ((gP.ablate & 256u) == 0u)
+#endif
+        if (gridOn != 0u && gP.triPairs != 0u)
+        {
+            // The walk's listed pairs, a pair a lane (triPairsAt); past the list's
+            // room, the walk again with its tests.
+            sync();
+            uint listedPairs = gsPairCount.load();
+            if (listedPairs <= TRI_PAIR_CAP)
+            {
+                uint at = triPairsAt(v);
+                for (uint i = lane, iStop = EB_END(i, listedPairs, LANES); i < iStop; i += LANES)
+                    tryContact(triGeoLoad(gNext[at + 2u * i]), gNext[at + 2u * i + 1u], origin, range, beamOff,
+                               groupOff, groupCount, parity);
+            }
+            else
+            {
+                uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
+                for (uint p = lane, pStop = EB_END(p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
+                {
+                    uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
+                    triangleGrid(triOff + t, p % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff,
+                                 groupOff, groupCount, parity, 0u);
+                }
+            }
         }
         if (selfOn != 0u)
         {
@@ -6505,7 +6563,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         {
             uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
             triangleGrid(triOff + t, p % GRID_SUBS, origin, range, cell, candOff, candCount, beamOff, groupOff,
-                         groupCount, parity);
+                         groupCount, parity, 0u);
         }
     }
     else if (candCount > 0u && cell > 0.0)
@@ -6570,7 +6628,7 @@ uint vvPartLanes(uint k)
 void triangleGridAt(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
                     uint beamOff, uint groupOff, uint groupCount, uint parity, uint offBase)
 {
-    triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, true, offBase);
+    triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, true, offBase, 0u);
 }
 
 // trianglePairs into member m's slice of the pair list.
