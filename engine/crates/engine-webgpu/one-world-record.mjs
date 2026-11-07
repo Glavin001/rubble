@@ -10,8 +10,8 @@
 //   node one-world-record.mjs [--size 1280x720] [--out dir] [--stills dir] [preset ...]
 //   node one-world-record.mjs --probe house      # real time for 12 s: the page's readout
 //
-// Presets: house, crates, twoway, convoy (convoy:4: four cars). --montage: also a
-// 60 s cut of every preset's video. Needs Chrome and ffmpeg.
+// Presets: house, crates, twoway, convoy (convoy:4: four cars). --montage: only a 60 s
+// cut of the presets already recorded in --out. Needs Chrome and ffmpeg.
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
@@ -35,6 +35,28 @@ mkdirSync(OUT, { recursive: true });
 // A hard limit on the whole run (GPU runs stay bounded).
 const LIMIT_MIN = Number(opt('--limit', '15'));
 setTimeout(() => { console.error(`time limit (${LIMIT_MIN} min)`); process.exit(9); }, LIMIT_MIN * 60_000).unref();
+
+// --montage: a 60 s cut of the recorded presets (videos.json in --out): each one's real
+// time run from 2.2 s before its impact to 3.3 s after, then 9.5 s of its slow replay.
+if (MONTAGE) {
+  const vids = JSON.parse(readFileSync(join(OUT, 'videos.json'), 'utf8'));
+  const order = ['house', 'crates', 'twoway', 'convoy4', 'convoy'];
+  const pick = order.map((n) => vids.find((v) => v.name === n)).filter(Boolean).filter((v, i, a) => !(v.name === 'convoy' && a.some((w) => w.name === 'convoy4')));
+  const inputs = [], parts = [];
+  pick.forEach((v, i) => {
+    inputs.push('-i', v.file);
+    const a0 = Math.max(0, v.impact - 2.2), a1 = Math.min(v.real, v.impact + 3.3);
+    const b0 = v.replayFrom, b1 = Math.min(v.total, v.replayFrom + 9.5);
+    parts.push(`[${i}:v]trim=${a0.toFixed(3)}:${a1.toFixed(3)},setpts=PTS-STARTPTS[a${i}]`, `[${i}:v]trim=${b0.toFixed(3)}:${b1.toFixed(3)},setpts=PTS-STARTPTS[b${i}]`);
+  });
+  const cat = pick.map((_, i) => `[a${i}][b${i}]`).join('') + `concat=n=${2 * pick.length}:v=1:a=0[out]`;
+  const file = join(OUT, 'one-world-montage.mp4');
+  const r = spawnSync('ffmpeg', ['-loglevel', 'error', '-y', ...inputs, '-filter_complex', [...parts, cat].join(';'), '-map', '[out]',
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '22', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', file], { stdio: 'inherit' });
+  if (r.status !== 0) throw new Error('ffmpeg failed');
+  console.log(`montage of ${pick.map((v) => v.name).join(', ')} → ${file}`);
+  process.exit(0);
+}
 
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wasm': 'application/wasm' };
 const server = createServer((req, res) => {
@@ -168,9 +190,12 @@ for (const run of only.length ? only : ['house', 'crates', 'twoway', 'convoy']) 
     '-c:v', 'libx264', '-preset', 'medium', '-crf', '21', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', file], { stdio: 'inherit' });
   rmSync(frameDir, { recursive: true, force: true });
   if (enc.status !== 0) throw new Error('ffmpeg failed');
-  console.log(`${name}: ${(realFrames / FPS).toFixed(1)} s real time + ${((frameNo - realFrames) / FPS).toFixed(1)} s replay → ${file}`);
+  console.log(`${name}: ${(realFrames / FPS).toFixed(1)} s real time + ${((frameNo - realFrames) / FPS).toFixed(1)} s replay (impact at ${hit.toFixed(3)} s) → ${file}`);
   videos.push({ name, file, real: realFrames / FPS, total: frameNo / FPS, impact: hit, replayFrom: realFrames / FPS });
   if (pageErrors.length) console.log('page messages:\n' + pageErrors.slice(0, 10).join('\n'));
 }
-writeFileSync(join(OUT, 'videos.json'), JSON.stringify(videos, null, 1));
+// videos.json: every recording's impact and replay start (merged by name: the montage reads it).
+const index = join(OUT, 'videos.json');
+const all = existsSync(index) ? JSON.parse(readFileSync(index, 'utf8')).filter((v) => !videos.some((w) => w.name === v.name)) : [];
+writeFileSync(index, JSON.stringify([...all, ...videos], null, 1));
 process.exit(0);
