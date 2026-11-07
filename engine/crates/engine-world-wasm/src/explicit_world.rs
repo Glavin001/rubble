@@ -8,6 +8,11 @@ use rubble::explicit_scene::{crash_town, town_coupling, town_layout};
 use rubble::GpuContext;
 use wasm_bindgen::prelude::*;
 
+thread_local! {
+    /// Diagnostic: an explicit-vehicles snapshot (`debugExplicitSnapshot`).
+    static SNAP: std::cell::RefCell<Option<engine_webgpu::GpuSnapshot>> = const { std::cell::RefCell::new(None) };
+}
+
 fn num(v: &serde_json::Value, k: &str, d: f64) -> f64 {
     v.get(k).and_then(|x| x.as_f64()).unwrap_or(d)
 }
@@ -147,6 +152,20 @@ impl WebWorld {
         }
     }
 
+    /// Diagnostic: a contact module's WGSL (`which`: "solo", "groups" or "big").
+    #[wasm_bindgen(js_name = debugExplicitContactWgsl)]
+    pub fn debug_explicit_contact_wgsl(&self, which: &str) -> String {
+        self.world.explicit_vehicles().map_or(String::new(), |g| g.debug_contact_wgsl(which))
+    }
+
+    /// Diagnostic: run `src` as a contact module.
+    #[wasm_bindgen(js_name = debugSetExplicitContactWgsl)]
+    pub fn debug_set_explicit_contact_wgsl(&mut self, which: &str, src: &str) {
+        if let Some(g) = self.world.explicit_vehicles_mut() {
+            g.debug_set_contact_wgsl(which, src);
+        }
+    }
+
     /// Diagnostic: the large contact groups' module's WGSL.
     #[wasm_bindgen(js_name = debugExplicitContactBigWgsl)]
     pub fn debug_explicit_contact_big_wgsl(&self) -> String {
@@ -198,6 +217,29 @@ impl WebWorld {
     #[wasm_bindgen(js_name = debugExplicitVvRecords)]
     pub fn debug_explicit_vv_records(&self) -> u32 {
         self.world.explicit_vehicles().map_or(0, |g| (g.vv_record_words().start / 4) as u32)
+    }
+
+    /// Diagnostic (determinism checks): keep a snapshot of the explicit vehicles' state.
+    #[wasm_bindgen(js_name = debugExplicitSnapshot)]
+    pub fn debug_explicit_snapshot(&self) {
+        if let Some(g) = self.world.explicit_vehicles() {
+            let snap = g.snapshot();
+            SNAP.with(|s| *s.borrow_mut() = Some(snap));
+        }
+    }
+
+    /// Diagnostic: restore the kept snapshot and run one explicit frame of `steps` steps
+    /// (the vehicles alone, the coupling's records as they were).
+    #[wasm_bindgen(js_name = debugExplicitRestoreAndFrame)]
+    pub fn debug_explicit_restore_and_frame(&mut self, steps: u32) {
+        if let Some(g) = self.world.explicit_vehicles_mut() {
+            SNAP.with(|s| {
+                if let Some(snap) = s.borrow().as_ref() {
+                    g.restore(snap);
+                }
+            });
+            g.frame(steps);
+        }
     }
 
     /// Whether the explicit frame runs as the wide passes.

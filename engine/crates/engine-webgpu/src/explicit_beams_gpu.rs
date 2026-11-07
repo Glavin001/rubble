@@ -72,6 +72,9 @@ pub struct ExplicitBeamsGpu {
     /// Diagnostic: the large contact groups' pipeline from an edited module
     /// ([`Self::debug_set_contact_big_wgsl`]).
     debug_big: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    /// Diagnostic: the solo and the contact groups' pipelines from edited modules.
+    debug_solo: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    debug_groups: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
     /// Per vehicle its own frame-bounds margin (m, 0: the fleet's), widened when it
     /// left its frame bounds ([`Self::vehicle_contact_margin`]).
     vehicle_margins: Vec<f32>,
@@ -772,6 +775,8 @@ impl ExplicitBeamsGpu {
             debug_coupling_bits: 0,
             coupling_ranges_off: coupling_node_ranges_off_default(),
             debug_big: None,
+            debug_solo: None,
+            debug_groups: None,
             vehicle_margins: vec![0.0; vehicles_n],
             surface_pairs_off: std::env::var("RUBBLE_SURFACE_PAIRS").as_deref() == Ok("0"),
             surface_culls_off: std::env::var("RUBBLE_SURFACE_CULLS").as_deref() == Ok("0"),
@@ -855,13 +860,40 @@ impl ExplicitBeamsGpu {
     /// Diagnostic: the large contact groups' module's WGSL as its pipeline compiles it.
     #[doc(hidden)]
     pub fn debug_contact_big_wgsl(&self) -> String {
+        self.debug_contact_wgsl("big")
+    }
+
+    /// Diagnostic: a contact module's WGSL (`which`: "solo", "groups" or "big").
+    #[doc(hidden)]
+    pub fn debug_contact_wgsl(&self, which: &str) -> String {
         let (aero, _, lanes) = self.module_kind;
-        crate::uniformize_workgroup_lanes(module_wgsl(Kernel::ContactBig.module_for(aero, lanes, self.layout.surface)))
+        let k = match which {
+            "solo" => Kernel::Solo,
+            "groups" => Kernel::Contact,
+            _ => Kernel::ContactBig,
+        };
+        crate::uniformize_workgroup_lanes(module_wgsl(k.module_for(aero, lanes, self.layout.surface)))
+    }
+
+    /// Diagnostic: run `src` as a contact module ("solo", "groups" or "big") from now on.
+    #[doc(hidden)]
+    pub fn debug_set_contact_wgsl(&mut self, which: &str, src: &str) {
+        let entry = if which == "big" { plan::CONTACT_ENTRY } else { plan::FRAME_ENTRY };
+        let made = self.debug_contact_pipe(src, entry);
+        match which {
+            "solo" => self.debug_solo = Some(made),
+            "groups" => self.debug_groups = Some(made),
+            _ => self.debug_big = Some(made),
+        }
     }
 
     /// Diagnostic: run `src` as the large contact groups' module from now on.
     #[doc(hidden)]
     pub fn debug_set_contact_big_wgsl(&mut self, src: &str) {
+        self.debug_set_contact_wgsl("big", src);
+    }
+
+    fn debug_contact_pipe(&self, src: &str, entry: &str) -> (wgpu::ComputePipeline, wgpu::BindGroup) {
         let device = &self.device;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams_contact (debug)"),
@@ -881,7 +913,7 @@ impl ExplicitBeamsGpu {
             label: Some("explicit_beams_contact (debug)"),
             layout: Some(&pl),
             module: &module,
-            entry_point: Some(plan::CONTACT_ENTRY),
+            entry_point: Some(entry),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -893,7 +925,7 @@ impl ExplicitBeamsGpu {
                 resource: if i == 0 { params_window(&self.bufs[0]) } else { self.bufs[i].as_entire_binding() },
             }),
         });
-        self.debug_big = Some((pipeline, group));
+        (pipeline, group)
     }
 
     /// Diagnostic: the byte size of each state binding's buffer (bindings 0..=8).
@@ -1721,8 +1753,14 @@ impl ExplicitBeamsGpu {
                     },
                     |a| (&a.solo, &a.groups, &a.group),
                 );
-                pass.set_pipeline(if kernel == Kernel::Solo { solo } else { groups });
-                pass.set_bind_group(0, g, &[]);
+                let dbg = if kernel == Kernel::Solo { &self.debug_solo } else { &self.debug_groups };
+                if let (Some((p, dg)), None) = (dbg, alt) {
+                    pass.set_pipeline(p);
+                    pass.set_bind_group(0, dg, &[]);
+                } else {
+                    pass.set_pipeline(if kernel == Kernel::Solo { solo } else { groups });
+                    pass.set_bind_group(0, g, &[]);
+                }
             }
             Kernel::ContactBig => {
                 // A test variant's contact module steps every group (no split): nothing
