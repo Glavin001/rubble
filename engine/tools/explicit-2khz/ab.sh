@@ -15,8 +15,8 @@ here="$(dirname "$0")"
 mkdir -p "$dir"
 state="$dir/state.bin"
 [ -f "$state" ] || "$here/bounded.sh" 600 "$base" save "$cars" "$before" "$state" 2>&1 | grep -v warn
-"$here/bounded.sh" 600 "$base" run "$cars" "$state" "$dir/base.txt" 3 2>&1 | grep -v warn
-"$here/bounded.sh" 600 "$branch" run "$cars" "$state" "$dir/branch.txt" 3 2>&1 | grep -v warn
+"$here/bounded.sh" 600 "$base" run "$cars" "$state" "$dir/base.txt" "${FRAMES:-3}" 2>&1 | grep -v warn
+"$here/bounded.sh" 600 "$branch" run "$cars" "$state" "$dir/branch.txt" "${FRAMES:-3}" 2>&1 | grep -v warn
 if cmp -s "$dir/base.txt" "$dir/branch.txt"; then echo "BITWISE: equal ($(wc -l < "$dir/base.txt") lines)"; else echo "BITWISE: DIFFER"; cmp "$dir/base.txt" "$dir/branch.txt" | head -3; fi
 i=0
 while [ "$i" -lt "$rounds" ]; do

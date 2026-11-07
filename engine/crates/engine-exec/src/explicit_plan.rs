@@ -1414,15 +1414,6 @@ impl ExplicitUpload {
         let grid_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
         let grid = vehicles.iter().any(|v| grid_cell(v) > 0.0) as u32;
-        // The self-collision triangles' geometry for the grid walk, written once a step
-        // (the kernel's triGeoFill; scratch): TRI_GEO_RECS records per triangle.
-        let tri_geo = if grid != 0 && total_tris > 0 {
-            let at = beams.len() as u32;
-            beams.extend(std::iter::repeat_n([0.0f32; 4], total_tris * TRI_GEO_RECS));
-            at
-        } else {
-            0
-        };
         debug_assert_eq!(nbr.len(), lists.len());
         let slot_base = lists.len() as u32;
         lists.extend(slots.iter().flatten());
@@ -1814,6 +1805,16 @@ impl ExplicitUpload {
             rec[2] = (hit_base + k * SELF_HIT_WORDS) as u32;
             rec[3] = (hit_acc + 2 * k) as u32;
         }
+        // The self-collision triangles' geometry for the grid walk, written once a step
+        // (the kernel's triGeoFill; scratch): TRI_GEO_RECS records per triangle, after
+        // every other region (a snapshot of a layout without it restores unchanged).
+        let tri_geo = if grid != 0 && total_tris > 0 {
+            let at = beams.len() as u32;
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_tris * TRI_GEO_RECS));
+            at
+        } else {
+            0
+        };
         // The grid walk's (triangle, contacter) pairs per vehicle (the kernel's
         // triPairsAt; scratch), with the triangles' step geometry.
         let tri_pairs = if tri_geo != 0 {
