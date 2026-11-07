@@ -898,19 +898,33 @@ pub fn jbeam_visual_skinned(
             // desc's: the wheel's own nodes near the mesh, and its hub.
             let wheelish = groups.iter().any(|g| ["wheel", "tire", "tyre", "hub"].iter().any(|k| g.to_ascii_lowercase().contains(k)));
             let mut wheel_pool: Vec<u32> = Vec::new();
+            // The pressure wheel's centre (its axle nodes' midpoint) when the solver
+            // built its rings: its pieces are placed on it below.
+            let mut wheel_at: Option<Vec3> = None;
             if pool.len() < 3 && wheelish && !m.pos.is_empty() {
                 let c = m.pos.iter().map(|&p| to_r(p)).sum::<Vec3>() / m.pos.len() as f32;
                 let suffix: Vec<String> = groups.iter().filter_map(|g| g.rsplit('_').next().map(str::to_string)).collect();
                 for w in &desc.pressure_wheels {
                     if suffix.iter().any(|s| w.name.ends_with(s.as_str())) {
-                        wheel_pool.extend([w.node1, w.node2].iter().filter_map(|&n| sim_of.get(n as usize).copied().flatten()));
+                        let ends: Vec<u32> = [w.node1, w.node2].iter().filter_map(|&n| sim_of.get(n as usize).copied().flatten()).collect();
+                        wheel_pool.extend(&ends);
+                        // Its own nodes: the solver's wheel on that axle (hub rings,
+                        // and tyre rings when it has a tyre).
+                        if let [a, b] = ends[..] {
+                            if let Some(t) = sim.tyres.iter().find(|t| t.axle == [a, b] || t.axle == [b, a]) {
+                                wheel_pool.extend(t.first..t.first + t.count);
+                                wheel_at = Some(0.5 * (sim_nodes[a as usize] + sim_nodes[b as usize]));
+                            }
+                        }
                     }
                 }
-                wheel_pool.extend(
-                    (desc.nodes.len()..sim_nodes.len())
-                        .filter(|&i| sim_nodes[i].distance(c) < 0.6)
-                        .map(|i| i as u32),
-                );
+                if wheel_at.is_none() {
+                    wheel_pool.extend(
+                        (desc.nodes.len()..sim_nodes.len())
+                            .filter(|&i| sim_nodes[i].distance(c) < 0.6)
+                            .map(|i| i as u32),
+                    );
+                }
             }
             // On raycast wheels (no wheel nodes: the solver has the desc's nodes
             // only) a wheel's pieces (groups `wheel*`, `tire*`) ride its drive wheel
@@ -989,11 +1003,25 @@ pub fn jbeam_visual_skinned(
             let t = vec3_of(row.get("pos"), Vec3::ZERO);
             let r = vec3_of(row.get("rot"), Vec3::ZERO);
             let s = vec3_of(row.get("scale"), Vec3::ONE);
-            let xf = Mat4::from_scale_rotation_translation(
+            let mut xf = Mat4::from_scale_rotation_translation(
                 s,
                 Quat::from_euler(glam::EulerRot::XYZ, r.x.to_radians(), r.y.to_radians(), r.z.to_radians()),
                 t,
             );
+            // A pressure wheel's pieces, modelled about their own origin, go on its
+            // wheel as on raycast wheels: a piece whose box centre is more than 0.15 m
+            // off the wheel's centre is moved there (in the JBeam frame: to_rubble's
+            // inverse).
+            if let Some(w) = wheel_at {
+                let (lo, hi) = m.pos.iter().map(|&p| to_r(xf.transform_point3(p))).fold(
+                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                    |(lo, hi), q| (lo.min(q), hi.max(q)),
+                );
+                let off = w - 0.5 * (lo + hi);
+                if off.length() > 0.15 {
+                    xf = Mat4::from_translation(Vec3::new(off.x, -off.z, off.y)) * xf;
+                }
+            }
             let first = out.positions.len();
             if let Some(ms) = skinned {
                 let sk = skin.unwrap();

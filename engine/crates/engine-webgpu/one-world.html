@@ -148,7 +148,7 @@
       const paint = PAINTS[i % PAINTS.length];
       if (kind === 'sedan') { const c = showcaseCar({ style: qs.get('style') || 'sedan', resolution: RES, paint }); c.visual.lod = [c.visualLod, c.visualFar]; return c; }
       const r = modVisual(mod, { native: true, paint });
-      if (i === 0) console.log('flexbodies', r.report);
+      if (i === 0) console.log('flexbodies', JSON.stringify(r.report));
       return r;
     });
     // The World's vehicle: the mod's files (Rust parses and builds it), or the sedan's .truck.
