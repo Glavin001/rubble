@@ -25,7 +25,7 @@
 //! ([`to_jbeam`]).
 
 use super::build::*;
-use super::model::Model;
+use super::model::{firewall_z, ws_top, Model};
 use super::surface::{self as sf, Param, ARCH_R, AXLE_F, AXLE_R, TRACK_HALF, TYRE_R};
 use crate::authoring::sedan::{
     ACCORD_BIW, ACCORD_DASH_BEHIND, ACCORD_DECKLID, ACCORD_DOOR_F, ACCORD_DOOR_R, ACCORD_ENGINE_KG,
@@ -351,8 +351,12 @@ fn body_blocked(p: Vec3, doors: &[Aperture], trunk_z: (f32, f32)) -> bool {
     }
     // The cabin's volume (8 cm in from the skin: beams along the bonded
     // glass and the roof are the shell's, not across the cabin).
-    let cabin =
-        x < 0.62 && p.y > 0.46 && p.y < 1.28 && p.z > -1.72 && p.z < 0.78 && sf::sdf(p) < -0.08;
+    let cabin = x < 0.62
+        && p.y > 0.46
+        && p.y < 1.28
+        && p.z > -1.72
+        && p.z < 0.78 + sf::cabin_fwd()
+        && sf::sdf(p) < -0.08;
     let bay = x < 0.48 && p.y > 0.72 && p.z > 0.98 && p.z < 1.98;
     // The trunk opening (under the lid, from its mesh), clear of the shelf
     // and tail panel at its ends.
@@ -463,7 +467,9 @@ pub fn rig(model: &Model) -> Rig {
             z_c + 0.10,
         ]
     };
-    let roof_z = [-0.08f32, z_b, 0.5 * (z_b + -1.05), -1.05];
+    // The roof rails' stations: the windshield header (round 8: the
+    // Accord's, [`sf::cabin_fwd`]), the B-pillar, between, the backlight.
+    let roof_z = [ws_top(), z_b, 0.5 * (z_b + -1.05), -1.05];
     let mut sill_o = [Vec::new(), Vec::new()];
     let mut sill_t = [Vec::new(), Vec::new()];
     let mut sill_b = [Vec::new(), Vec::new()];
@@ -481,7 +487,14 @@ pub fn rig(model: &Model) -> Rig {
     let mut quarter: [Vec<Vec<Option<usize>>>; 2] = [Vec::new(), Vec::new()];
     let mut rrail = [Vec::new(), Vec::new()];
     let mut named_ids: HashMap<String, usize> = HashMap::new();
-    let rail_z = [0.95f32, 1.32, 1.70, 2.05];
+    // (Round 8: the rearmost station 7 cm ahead of the firewall, which
+    // moved forward with the cabin; round 7 had it at 0.95.)
+    let rail0 = if sf::cabin_fwd() > 0.0 {
+        firewall_z() + 0.07
+    } else {
+        0.95
+    };
+    let rail_z = [rail0, 1.32, 1.70, 2.05];
     let rrail_z = [-1.60f32, -1.95, -2.25];
     let qz = [z_c - 0.03, -1.85, -2.18, z_tail + 0.12];
     for (si, s) in [1.0f32, -1.0].into_iter().enumerate() {
@@ -528,7 +541,10 @@ pub fn rig(model: &Model) -> Rig {
             // at most [`SILL_PITCH`] apart (outer, top and bottom: the box's
             // section), so a pole between two cross members bends the box
             // about a station under it.
-            if let (true, Some(&z1)) = (dense_sill, sill_z.get(k + 1)) {
+            // (Round 8: not in the footwell, toe board to the seat's front
+            // cross member, unless `GEN3_SILL_BOX_FOOTWELL`; see the graph.)
+            let box_here = k >= 1 || std::env::var("GEN3_SILL_BOX_FOOTWELL").is_ok();
+            if let (true, true, Some(&z1)) = (dense_sill, box_here, sill_z.get(k + 1)) {
                 let m = ((z - z1) / env_f("GEN3_SILL_PITCH", SILL_PITCH)).ceil() as usize;
                 for j in 1..m {
                     let zm = z + (z1 - z) * j as f32 / m as f32;
@@ -611,7 +627,7 @@ pub fn rig(model: &Model) -> Rig {
         // The A-pillar's middle (its top is the roof rail's front station,
         // `rr0`/`rri0`, at the windshield header: one node, not two
         // coincident ones the graph would leave unjoined).
-        for (k, &z) in [0.33f32].iter().enumerate() {
+        for (k, &z) in [0.33 + sf::gh_shift(0.33)].iter().enumerate() {
             let c = corner(z);
             put(
                 &mut r,
@@ -829,7 +845,7 @@ pub fn rig(model: &Model) -> Rig {
             put(
                 &mut r,
                 format!("fw{k}{x}"),
-                Vec3::new(0.50, y, 0.88),
+                Vec3::new(0.50, y, firewall_z()),
                 Some(Role::Firewall),
                 false,
             );
@@ -917,7 +933,7 @@ pub fn rig(model: &Model) -> Rig {
         cput(
             &mut r,
             &format!("fwC{k}"),
-            Vec3::new(0.0, y, 0.88),
+            Vec3::new(0.0, y, firewall_z()),
             Some(Role::Firewall),
             false,
         );
@@ -1088,7 +1104,16 @@ pub fn rig(model: &Model) -> Rig {
             // the sill, and no sill node spans the box to another's station
             // (beams 0.5-0.9 m long across and along it braced every station
             // against its neighbours, so a pole met the whole sill at once).
+            // Round 8: the footwell's sill (toe board to the seat's front
+            // cross member) keeps the graph's bracing: the frontal loads it
+            // end on from the hinge pillar, and as a bare box it let the toe
+            // board in (feet intrusion 135 mm against 61). The side tests
+            // strike behind it (`GEN3_SILL_BOX_FOOTWELL` boxes it too).
+            let footwell = |i: usize| r.g(i).z >= sill_z[1] - 0.01;
+            let fw_braced =
+                std::env::var("GEN3_SILL_BOX_FOOTWELL").is_err() && footwell(a) && footwell(b);
             if dense_sill
+                && !fw_braced
                 && ((sill_node(r, a) && sill_node(r, b))
                     || sill_mid.contains(&a)
                     || sill_mid.contains(&b))
@@ -1355,9 +1380,11 @@ pub fn rig(model: &Model) -> Rig {
                     ));
                 }
             }
-            // The window frame: its top at the front and rear.
+            // The window frame: its top at the front and rear. (The front
+            // door's front corner is where the frame meets the A-pillar: it
+            // moves with the greenhouse, [`sf::gh_shift`].)
             let (fz0, fz1) = if front {
-                (0.20f32, lo.z + 0.04)
+                (0.20f32 + sf::gh_shift(0.20), lo.z + 0.04)
             } else {
                 (hi.z - 0.04, -0.95)
             };
@@ -2559,11 +2586,21 @@ pub fn rig(model: &Model) -> Rig {
     let named = vec![
         ("driver", 75.0, j(hpf + Vec3::new(0.0, 0.05, 0.0)), 0.6),
         ("front_seats", 35.0, j(0.5 * (hpf + hpr)), 0.75),
-        ("rear_seat", 17.5, j(Vec3::new(0.0, 0.40, -1.45)), 0.65),
+        // (`GEN3_CABIN_R8`: the rear seat 0.5 m forward with the render's.)
+        (
+            "rear_seat",
+            17.5,
+            j(Vec3::new(
+                0.0,
+                0.40,
+                -1.45 + if sf::cabin_fwd() > 0.0 { 0.5 } else { 0.0 },
+            )),
+            0.65,
+        ),
         (
             "dashboard_steering",
             40.0,
-            j(Vec3::new(0.0, 0.80, 0.55)),
+            j(Vec3::new(0.0, 0.80, 0.55 + sf::cabin_fwd())),
             0.6,
         ),
         ("fuel", 45.0, j(Vec3::new(0.0, 0.30, -1.20)), 0.6),
@@ -2577,7 +2614,12 @@ pub fn rig(model: &Model) -> Rig {
             j(Vec3::new(0.0, 0.55, 2.05)),
             0.45,
         ),
-        ("windshield", 13.0, j(Vec3::new(0.0, 1.20, 0.25)), 0.8),
+        (
+            "windshield",
+            13.0,
+            j(Vec3::new(0.0, 1.20, 0.25 + sf::cabin_fwd())),
+            0.8,
+        ),
         ("rear_glass", 9.0, j(Vec3::new(0.0, 1.25, -1.45)), 0.7),
         (
             "front_subframe_steering",
@@ -2586,7 +2628,12 @@ pub fn rig(model: &Model) -> Rig {
             0.6,
         ),
         ("rear_subframe", 22.0, j(Vec3::new(0.0, 0.35, -1.45)), 0.7),
-        ("hvac_wiring", 40.0, j(Vec3::new(0.0, 0.65, 0.60)), 0.6),
+        (
+            "hvac_wiring",
+            40.0,
+            j(Vec3::new(0.0, 0.65, 0.60 + sf::cabin_fwd())),
+            0.6,
+        ),
     ];
     for (name, kg, at, radius) in named {
         r.car.named.push(Named {
@@ -2745,7 +2792,7 @@ pub fn rig(model: &Model) -> Rig {
     r.car.assign_springs(&hub);
     // Zones: the crush zones' members stack (deformLimit) and carry the crush
     // yield multiple; the cabin's the cabin multiple.
-    let fw_y = to_jbeam(Vec3::new(0.0, 0.0, 0.88)).y;
+    let fw_y = to_jbeam(Vec3::new(0.0, 0.0, firewall_z())).y;
     let rear_y = to_jbeam(Vec3::new(0.0, 0.0, -1.75)).y;
     for b in &mut r.car.beams {
         if !matches!(b.part, Part::Body | Part::BumperF | Part::BumperR) || !b.deform.is_finite() {
@@ -2810,7 +2857,7 @@ pub fn rig(model: &Model) -> Rig {
     let rdy = env("GEN3_RDOOR_Y", 1.0);
     // The footwell: the floor, sills and hinge pillars ahead of the front
     // seats (the side tests strike behind it).
-    let foot_y = to_jbeam(Vec3::new(0.0, 0.0, 0.40)).y;
+    let foot_y = to_jbeam(Vec3::new(0.0, 0.0, 0.40 + sf::cabin_fwd())).y;
     // The front crush zone's yield graded along the car (round 5): a rail's
     // section and gauge grow from its triggered tip to the dash (tailored
     // blanks), so the crush runs soft first and stiffens as it nears the
@@ -2855,7 +2902,7 @@ pub fn rig(model: &Model) -> Rig {
                 continue;
             }
             let g = to_gltf(0.5 * (r.car.nodes[b.a].p + r.car.nodes[b.b].p));
-            if g.z > 0.88 - 0.05 {
+            if g.z > firewall_z() - 0.05 {
                 b.deform *= cy * zone_yield(zone_at(g.z));
             }
         }
@@ -3141,7 +3188,7 @@ pub fn rail_zone(car: &Car, b: &Beam) -> Option<usize> {
         return None;
     }
     let mid = to_gltf(0.5 * (car.nodes[b.a].p + car.nodes[b.b].p));
-    if mid.z < 0.88 - 0.05 {
+    if mid.z < firewall_z() - 0.05 {
         return None;
     }
     if b.role == Role::CrushCan {

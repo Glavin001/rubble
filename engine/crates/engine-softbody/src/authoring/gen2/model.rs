@@ -1409,17 +1409,37 @@ fn bar(part: &mut Part, a: Vec3, b: Vec3, up: Vec3, w0: f32, w1: f32, th: f32, m
 // ---------------------------------------------------------------------------
 
 /// Door shut lines (z) and the door bottom (rocker line) height.
-const DOOR_F: f32 = WS_BASE;
-const DOOR_B: f32 = -0.345;
+fn door_f() -> f32 {
+    ws_base()
+}
+fn door_b() -> f32 {
+    -0.345 + sf::cabin_fwd()
+}
 const DOOR_R: f32 = -0.96;
 const Y_DOOR_BOTTOM: f32 = TYRE_R;
 /// Windshield base and top, backlight top and base (z).
-const WS_BASE: f32 = 0.745;
-const WS_TOP: f32 = -0.08;
+/// (Round 8: the windshield's base and top are the Accord's,
+/// [`sf::cabin_fwd`].)
+pub fn ws_base() -> f32 {
+    sf::GH_OLD_BASE + sf::cabin_fwd()
+}
+pub fn ws_top() -> f32 {
+    sf::GH_OLD_TOP + sf::cabin_fwd()
+}
 const BL_TOP: f32 = -1.00;
 const BL_BASE: f32 = -2.05;
+/// The firewall (dash panel) section (z): round 8 moves it with the cabin
+/// ([`sf::cabin_fwd`]), 0.325 m aft of the front axle (the Accord's dash
+/// line is 0.27-0.30 m, `ACCORD_DASH_BEHIND`).
+pub fn firewall_z() -> f32 {
+    0.88 + sf::cabin_fwd()
+}
+/// Round 7's seat H-point (z), behind the B-pillar.
+const SEAT_H_Z_R7: f32 = -0.50;
 /// The hood's rear edge (the cowl between it and the windshield).
-const HOOD_REAR: f32 = 0.86;
+pub fn hood_rear() -> f32 {
+    0.86 + sf::cabin_fwd()
+}
 /// Bumper top on the sides (front, rear).
 const BUMPER_TOP_F: f32 = 0.60;
 const BUMPER_TOP_R: f32 = 0.78;
@@ -1460,12 +1480,16 @@ pub fn build() -> Model {
         Table::new(
             move |u| sf::theta_corner(u).min(b.at(u) - 0.07),
             -2.15,
-            0.85,
+            0.85 + sf::cabin_fwd(),
         )
     };
     let th_top_edge = {
         let c = th_corner.clone();
-        Table::new(move |u| theta_walk(u, c.at(u), -0.05), -2.15, 0.85)
+        Table::new(
+            move |u| theta_walk(u, c.at(u), -0.05),
+            -2.15,
+            0.85 + sf::cabin_fwd(),
+        )
     };
     let th_frame_top = {
         let c = th_corner.clone();
@@ -1473,7 +1497,7 @@ pub fn build() -> Model {
         Table::new(
             move |u| theta_walk(u, c.at(u), 0.035).min(b.at(u) - 0.02),
             -2.15,
-            0.85,
+            0.85 + sf::cabin_fwd(),
         )
     };
     // The hood and trunk lines on the top.
@@ -1534,7 +1558,7 @@ pub fn build() -> Model {
         let h2 = th_hood.clone();
         Strip::new(
             Param::Section,
-            k(HOOD_REAR),
+            k(hood_rear()),
             Box::new(hood_front),
             Box::new(move |u| -h1.at(u)),
             Box::new(move |u| h2.at(u)),
@@ -1560,8 +1584,8 @@ pub fn build() -> Model {
         let (a, b) = (th_hood.clone(), th_hood.clone());
         let st = Strip::new(
             Param::Section,
-            k(WS_BASE),
-            k(HOOD_REAR),
+            k(ws_base()),
+            k(hood_rear()),
             Box::new(move |u| -a.at(u)),
             Box::new(move |u| b.at(u)),
         );
@@ -1598,7 +1622,7 @@ pub fn build() -> Model {
         let (a, b) = (th_hood.clone(), th_side_bottom.clone());
         let mut s = Strip::new(
             Param::Section,
-            k(DOOR_F),
+            k(door_f()),
             Box::new(fender_front),
             Box::new(move |u| a.at(u)),
             Box::new(move |u| b.at(u)),
@@ -1639,8 +1663,8 @@ pub fn build() -> Model {
         emit(m.part(r), &inner.mirrored(), Mat::Paint, [1.0; 3]);
         g
     };
-    let g_door_f = door_skin(&mut m, DOOR_F, DOOR_B, "door_FL", "door_FR");
-    let g_door_r = door_skin(&mut m, DOOR_B, DOOR_R, "door_RL", "door_RR");
+    let g_door_f = door_skin(&mut m, door_f(), door_b(), "door_FL", "door_FR");
+    let g_door_r = door_skin(&mut m, door_b(), DOOR_R, "door_RL", "door_RR");
 
     // Window frames and glass, left (then mirrored). The daylight opening's
     // ends: the front door's at the A-pillar, the rear's at the C-pillar
@@ -1649,7 +1673,7 @@ pub fn build() -> Model {
     let dlo_rear_belt = -1.42;
     let dlo_rear_top = -0.99;
     // Front door: frame from the mirror sail to the B-pillar.
-    let sail_end = 0.58;
+    let sail_end = 0.58 + sf::cabin_fwd();
     // A window-frame strip on the section family: `gaps` each edge's step
     // back (a 4 mm shut line is GAP a side, or 2 GAP on one side when the
     // other side's panel runs on), hemmed where it steps back.
@@ -1682,11 +1706,19 @@ pub fn build() -> Model {
     // molding's top.
     let th_glass_top = {
         let f = th_frame_top.clone();
-        Table::new(move |u| theta_walk(u, f.at(u), frame_w), -2.15, 0.85)
+        Table::new(
+            move |u| theta_walk(u, f.at(u), frame_w),
+            -2.15,
+            0.85 + sf::cabin_fwd(),
+        )
     };
     let th_glass_bottom = {
         let b = th_belt.clone();
-        Table::new(move |u| theta_walk(u, b.at(u), -0.016), -2.15, 0.85)
+        Table::new(
+            move |u| theta_walk(u, b.at(u), -0.016),
+            -2.15,
+            0.85 + sf::cabin_fwd(),
+        )
     };
     let (g1, g2, z0) = (GAP, 2.0 * GAP, 0.0);
     // Front door upper: sail | glass | rear frame, and the top frame; the
@@ -1695,7 +1727,7 @@ pub fn build() -> Model {
         &mut m,
         "door_FL",
         "door_FR",
-        k(DOOR_F),
+        k(door_f()),
         k(sail_end),
         &th_frame_top,
         &th_belt,
@@ -1708,7 +1740,7 @@ pub fn build() -> Model {
         "door_FL",
         "door_FR",
         k(sail_end),
-        k(DOOR_B + 0.03),
+        k(door_b() + 0.03),
         &th_frame_top,
         &th_glass_top,
         Mat::TrimBlack,
@@ -1720,7 +1752,7 @@ pub fn build() -> Model {
         "door_FL",
         "door_FR",
         k(sail_end),
-        k(DOOR_B + 0.03),
+        k(door_b() + 0.03),
         &th_glass_bottom,
         &th_belt,
         Mat::Chrome,
@@ -1731,8 +1763,8 @@ pub fn build() -> Model {
         &mut m,
         "door_FL",
         "door_FR",
-        k(DOOR_B + 0.03),
-        k(DOOR_B),
+        k(door_b() + 0.03),
+        k(door_b()),
         &th_frame_top,
         &th_belt,
         Mat::TrimBlack,
@@ -1744,7 +1776,7 @@ pub fn build() -> Model {
         "glass_door_FL",
         "glass_door_FR",
         k(sail_end - 0.002),
-        k(DOOR_B + 0.032),
+        k(door_b() + 0.032),
         &th_glass_top,
         &th_glass_bottom,
         Mat::Glass,
@@ -1778,8 +1810,8 @@ pub fn build() -> Model {
         &mut m,
         "door_RL",
         "door_RR",
-        k(DOOR_B),
-        k(DOOR_B - 0.03),
+        k(door_b()),
+        k(door_b() - 0.03),
         &th_frame_top,
         &th_belt,
         Mat::TrimBlack,
@@ -1790,7 +1822,7 @@ pub fn build() -> Model {
         &mut m,
         "door_RL",
         "door_RR",
-        k(DOOR_B - 0.03),
+        k(door_b() - 0.03),
         slant_in(&th_frame_top, &th_glass_top, 0.0),
         &th_frame_top,
         &th_glass_top,
@@ -1804,7 +1836,7 @@ pub fn build() -> Model {
         &mut m,
         "door_RL",
         "door_RR",
-        k(DOOR_B - 0.03),
+        k(door_b() - 0.03),
         slant_in(&th_glass_bottom, &th_belt, 0.0),
         &th_glass_bottom,
         &th_belt,
@@ -1840,7 +1872,7 @@ pub fn build() -> Model {
         &mut m,
         "glass_door_RL",
         "glass_door_RR",
-        k(DOOR_B - 0.028),
+        k(door_b() - 0.028),
         k(div_a - 0.002),
         &th_glass_top,
         &th_glass_bottom,
@@ -1869,8 +1901,8 @@ pub fn build() -> Model {
         let (a, b) = (th_top_edge.clone(), th_top_edge.clone());
         let mut st = Strip::new(
             Param::Section,
-            k(WS_BASE),
-            k(WS_TOP),
+            k(ws_base()),
+            k(ws_top()),
             Box::new(move |u| -a.at(u)),
             Box::new(move |u| b.at(u)),
         );
@@ -1910,8 +1942,8 @@ pub fn build() -> Model {
         let (a, f) = (th_top_edge.clone(), th_frame_top.clone());
         let st = Strip::new(
             Param::Section,
-            k(WS_BASE),
-            k(WS_TOP),
+            k(ws_base()),
+            k(ws_top()),
             Box::new(move |u| a.at(u)),
             Box::new(move |u| f.at(u)),
         );
@@ -1930,7 +1962,7 @@ pub fn build() -> Model {
         let (a, b) = (th_frame_top.clone(), th_frame_top.clone());
         let st = Strip::new(
             Param::Section,
-            k(WS_TOP),
+            k(ws_top()),
             k(BL_TOP),
             Box::new(move |u| -a.at(u)),
             Box::new(move |u| b.at(u)),
@@ -3135,7 +3167,7 @@ fn mirrors_handles_wipers(m: &mut Model, door_f: &Grid, door_r: &Grid) {
         }
         // Door handles: flush, just under the shoulder line: a painted bar
         // standing 1.5 mm off the skin in a dark 3 mm reveal.
-        for (front, z) in [(true, -0.20f32), (false, -0.90)] {
+        for (front, z) in [(true, -0.20f32 + sf::cabin_fwd()), (false, -0.90)] {
             let tag = if front { "F" } else { "R" };
             let y = sf::shoulder_y(z) - 0.032;
             let p = sf::hit(Param::Section, z, sf::theta_at_y(z, y));
@@ -3168,8 +3200,8 @@ fn mirrors_handles_wipers(m: &mut Model, door_f: &Grid, door_r: &Grid) {
         {
             let part = m.part(&format!("wiper_{side}"));
             let x0: f32 = if left { 0.05 } else { -0.55 };
-            let a = sf::hit(Param::Section, WS_BASE - 0.01, x0.atan2(0.4));
-            let b = sf::hit(Param::Section, WS_BASE - 0.06, (x0 + 0.52).atan2(0.4));
+            let a = sf::hit(Param::Section, ws_base() - 0.01, x0.atan2(0.4));
+            let b = sf::hit(Param::Section, ws_base() - 0.06, (x0 + 0.52).atan2(0.4));
             let n = sf::normal(a);
             bar(
                 part,
@@ -3185,15 +3217,56 @@ fn mirrors_handles_wipers(m: &mut Model, door_f: &Grid, door_r: &Grid) {
     }
 }
 
+/// The 2018 Accord's driver H-point aft of the front axle (m): NHTSA test
+/// v10841, data sheet 7 (the seat track's accelerometer at the dummy's
+/// H-point, X 2,171 mm from the front with the axle at 934 mm), the seat full
+/// forward as the test sets it. Round 8 seats the driver there; round 7's
+/// seats were 0.68 m further back, behind the B-pillar.
+pub const ACCORD_H_POINT_AFT: f32 = 1.237;
+/// The H-point's section (z): the Accord's with `GEN3_CABIN_R8`, else round
+/// 7's.
+pub fn h_point_z() -> f32 {
+    if sf::cabin_fwd() > 0.0 {
+        AXLE_F - ACCORD_H_POINT_AFT
+    } else {
+        SEAT_H_Z_R7
+    }
+}
+
 fn interior(m: &mut Model) {
     let id = Mat3::IDENTITY;
+    // Round 8: the interior placed from the Accord's dummy clearances (data
+    // sheet 4: chest to steering wheel 349 mm, chest to dash 591 mm; the
+    // chest stands about over the H-point, torso angle -5°): the dash's rear
+    // face 0.59 m ahead of the H-point, filling forward to the firewall, the
+    // steering wheel's hub 0.40 m ahead (its rim about 0.35 m from the
+    // chest), the seats on the H-point and the rear seat 0.5 m further
+    // forward than round 7's (over the rear axle then).
+    // (Without `GEN3_CABIN_R8`, round 7's.)
+    let r8 = sf::cabin_fwd() > 0.0;
+    let dash_rear = h_point_z() + 0.59;
+    let dash_d = 0.5 * (firewall_z() - dash_rear);
+    // The dash's main and lower mouldings' and the binnacle's sections.
+    let (dash_z, dash_lo_z, binnacle_z, dash_d) = if r8 {
+        (
+            dash_rear + dash_d,
+            dash_rear + 0.10,
+            dash_rear + 0.07,
+            dash_d,
+        )
+    } else {
+        (0.52, 0.40, 0.37, 0.22)
+    };
+    let wheel_z = if r8 { h_point_z() + 0.40 } else { 0.17 };
+    let seat_dz = h_point_z() - SEAT_H_Z_R7;
+    let (rear_dz, console_dz) = if r8 { (0.5, 0.45) } else { (0.0, 0.0) };
     // Dash: a deep moulding under the windshield, its top padded.
     {
         let part = m.part("dash");
         rounded_box(
             part,
-            Vec3::new(0.0, 0.80, 0.52),
-            Vec3::new(0.70, 0.12, 0.22),
+            Vec3::new(0.0, 0.80, dash_z),
+            Vec3::new(0.70, 0.12, dash_d),
             0.07,
             id,
             Mat::InteriorPlastic,
@@ -3201,7 +3274,7 @@ fn interior(m: &mut Model) {
         );
         rounded_box(
             part,
-            Vec3::new(0.0, 0.62, 0.40),
+            Vec3::new(0.0, 0.62, dash_lo_z),
             Vec3::new(0.66, 0.10, 0.14),
             0.05,
             id,
@@ -3211,7 +3284,7 @@ fn interior(m: &mut Model) {
         // Instrument binnacle.
         rounded_box(
             part,
-            Vec3::new(0.37, 0.93, 0.37),
+            Vec3::new(0.37, 0.93, binnacle_z),
             Vec3::new(0.17, 0.035, 0.08),
             0.03,
             id,
@@ -3222,7 +3295,7 @@ fn interior(m: &mut Model) {
     // Steering wheel (driver on the left, +X) and column.
     {
         let part = m.part("steering_wheel");
-        let c = Vec3::new(0.37, 0.90, 0.17);
+        let c = Vec3::new(0.37, 0.90, wheel_z);
         let ax = Vec3::new(0.0, 0.42, -0.9).normalize();
         let tube: Vec<(f32, f32)> = (0..=16)
             .map(|q| {
@@ -3283,7 +3356,7 @@ fn interior(m: &mut Model) {
         let part = m.part(name);
         rounded_box(
             part,
-            Vec3::new(x, 0.40, -0.40),
+            Vec3::new(x, 0.40, -0.40 + seat_dz),
             Vec3::new(0.25, 0.06, 0.26),
             0.05,
             id,
@@ -3293,7 +3366,7 @@ fn interior(m: &mut Model) {
         let back = Mat3::from_rotation_x(-0.25);
         rounded_box(
             part,
-            Vec3::new(x, 0.75, -0.72),
+            Vec3::new(x, 0.75, -0.72 + seat_dz),
             Vec3::new(0.24, 0.30, 0.06),
             0.05,
             back,
@@ -3302,7 +3375,7 @@ fn interior(m: &mut Model) {
         );
         rounded_box(
             part,
-            Vec3::new(x, 1.12, -0.82),
+            Vec3::new(x, 1.12, -0.82 + seat_dz),
             Vec3::new(0.12, 0.08, 0.05),
             0.04,
             back,
@@ -3311,7 +3384,7 @@ fn interior(m: &mut Model) {
         );
         rounded_box(
             part,
-            Vec3::new(x, 0.27, -0.40),
+            Vec3::new(x, 0.27, -0.40 + seat_dz),
             Vec3::new(0.20, 0.07, 0.22),
             0.02,
             id,
@@ -3323,7 +3396,7 @@ fn interior(m: &mut Model) {
         let part = m.part("seat_rear");
         rounded_box(
             part,
-            Vec3::new(0.0, 0.40, -1.32),
+            Vec3::new(0.0, 0.40, -1.32 + rear_dz),
             Vec3::new(0.66, 0.08, 0.25),
             0.06,
             id,
@@ -3333,7 +3406,7 @@ fn interior(m: &mut Model) {
         let back = Mat3::from_rotation_x(-0.32);
         rounded_box(
             part,
-            Vec3::new(0.0, 0.76, -1.62),
+            Vec3::new(0.0, 0.76, -1.62 + rear_dz),
             Vec3::new(0.66, 0.30, 0.07),
             0.06,
             back,
@@ -3343,7 +3416,7 @@ fn interior(m: &mut Model) {
         for x in [-0.42f32, 0.42] {
             rounded_box(
                 part,
-                Vec3::new(x, 1.10, -1.72),
+                Vec3::new(x, 1.10, -1.72 + rear_dz),
                 Vec3::new(0.11, 0.07, 0.05),
                 0.04,
                 back,
@@ -3356,7 +3429,7 @@ fn interior(m: &mut Model) {
         let part = m.part("console");
         rounded_box(
             part,
-            Vec3::new(0.0, 0.42, -0.10),
+            Vec3::new(0.0, 0.42, -0.10 + console_dz),
             Vec3::new(0.10, 0.14, 0.55),
             0.05,
             id,
@@ -3365,7 +3438,7 @@ fn interior(m: &mut Model) {
         );
         rounded_box(
             part,
-            Vec3::new(0.0, 0.58, 0.18),
+            Vec3::new(0.0, 0.58, 0.18 + console_dz),
             Vec3::new(0.08, 0.08, 0.20),
             0.04,
             Mat3::from_rotation_x(0.5),
@@ -3375,16 +3448,16 @@ fn interior(m: &mut Model) {
     }
     // Door trims: inside each door, from the floor to the belt.
     for (name, z0, z1) in [
-        ("door_trim_FL", DOOR_F - 0.05, DOOR_B + 0.03),
-        ("door_trim_RL", DOOR_B - 0.03, DOOR_R + 0.05),
+        ("door_trim_FL", door_f() - 0.05, door_b() + 0.03),
+        ("door_trim_RL", door_b() - 0.03, DOOR_R + 0.05),
     ] {
         let (a, b) = (
             Table::new(
                 |u| sf::theta_at_y(u, sf::with_profiles(|p| p.belt.at(u)) - 0.01),
                 -1.2,
-                0.8,
+                0.8 + sf::cabin_fwd(),
             ),
-            Table::new(|u| sf::theta_at_y(u, 0.36), -1.2, 0.8),
+            Table::new(|u| sf::theta_at_y(u, 0.36), -1.2, 0.8 + sf::cabin_fwd()),
         );
         let mut st = Strip::new(
             Param::Section,
@@ -3406,11 +3479,11 @@ fn interior(m: &mut Model) {
     }
     // Headliner: the roof 30 mm in, facing down.
     {
-        let a = Table::new(|u| sf::theta_corner(u) - 0.05, -1.2, 0.0);
+        let a = Table::new(|u| sf::theta_corner(u) - 0.05, -1.2, sf::cabin_fwd());
         let b = a.clone();
         let mut st = Strip::new(
             Param::Section,
-            k(WS_TOP - 0.03),
+            k(ws_top() - 0.03),
             k(BL_TOP + 0.03),
             Box::new(move |u| -a.at(u)),
             Box::new(move |u| b.at(u)),
@@ -3465,7 +3538,7 @@ fn bay(m: &mut Model) {
     );
     rounded_box(
         m.part("firewall"),
-        Vec3::new(0.0, 0.60, 0.88),
+        Vec3::new(0.0, 0.60, firewall_z()),
         Vec3::new(0.70, 0.30, 0.006),
         0.004,
         id,
@@ -3546,7 +3619,7 @@ fn markers(m: &mut Model) {
         let s = if left { 1.0f32 } else { -1.0 };
         let sx = |p: Vec3| Vec3::new(s * p.x, p.y, p.z);
         let side = if left { "L" } else { "R" };
-        for (tag, zf, zr) in [("F", DOOR_F, DOOR_B), ("R", DOOR_B, DOOR_R)] {
+        for (tag, zf, zr) in [("F", door_f(), door_b()), ("R", door_b(), DOOR_R)] {
             let name = format!("{tag}{side}");
             m.marker(
                 &format!("hinge_door_{name}_upper"),
@@ -3567,7 +3640,7 @@ fn markers(m: &mut Model) {
         }
         m.marker(
             &format!("hinge_hood_{side}"),
-            Vec3::new(s * 0.62, 0.92, HOOD_REAR + 0.06),
+            Vec3::new(s * 0.62, 0.92, hood_rear() + 0.06),
         );
         m.marker(
             &format!("hinge_trunk_{side}"),
@@ -3579,7 +3652,7 @@ fn markers(m: &mut Model) {
             Vec3::new(0.80, 0.88, 1.0),
             Vec3::new(0.78, 0.84, 1.45),
             Vec3::new(0.70, 0.79, 1.95),
-            sx(side_pt(DOOR_F + 0.04, 0.40)),
+            sx(side_pt(door_f() + 0.04, 0.40)),
         ];
         for (q, p) in pts.iter().enumerate() {
             let p = if q < 3 {
@@ -3602,8 +3675,8 @@ fn markers(m: &mut Model) {
             Vec3::new(*x, 0.48, -2.38 + 0.10 * (x.abs() / 0.75).powi(2)),
         );
     }
-    m.marker("seat_H_point_FL", Vec3::new(0.37, 0.50, -0.50));
-    m.marker("seat_H_point_FR", Vec3::new(-0.37, 0.50, -0.50));
+    m.marker("seat_H_point_FL", Vec3::new(0.37, 0.50, h_point_z()));
+    m.marker("seat_H_point_FR", Vec3::new(-0.37, 0.50, h_point_z()));
 }
 
 /// The model as the spec's glTF scene: UV0 packed into one non-overlapping

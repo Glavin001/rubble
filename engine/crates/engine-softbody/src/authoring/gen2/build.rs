@@ -215,7 +215,9 @@ pub fn sheet_eps(part: Part) -> f32 {
     match part {
         Part::Body => 0.0115,
         Part::DoorFL | Part::DoorFR | Part::DoorRL | Part::DoorRR => 0.0145,
-        Part::Hood | Part::Trunk | Part::FenderL | Part::FenderR => 0.03,
+        Part::Trunk => 0.03,
+        // (`GEN3_FRONT_SHEET_EPS`: the hood's and fenders', a diagnostic.)
+        Part::Hood | Part::FenderL | Part::FenderR => env_f("GEN3_FRONT_SHEET_EPS", 0.03),
         Part::BumperF | Part::BumperR => 0.08,
         Part::Engine => f32::INFINITY,
     }

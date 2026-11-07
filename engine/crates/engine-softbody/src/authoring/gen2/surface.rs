@@ -39,6 +39,80 @@ pub const ZC_F: f32 = AXLE_F + ARCH_R * 0.82;
 pub const ZC_R: f32 = AXLE_R - ARCH_R * 0.82;
 /// The section family's ray origin height.
 pub const YC: f32 = 0.62;
+/// Round 8: the cabin's front half (firewall, cowl, windshield, A-pillars,
+/// front doors, B-pillars) moved forward to the 2018 Accord's. Measured aft
+/// of the front axle in NHTSA's oblique pole test of the Accord (v10841,
+/// data sheets 4, 7 and 10):
+///
+/// | | Accord | round 7's gen3 |
+/// |---|---|---|
+/// | front door's leading edge | 0.453 | 0.672 |
+/// | door striker (B-pillar) | 1.515 (H-point + 278 mm) | 1.730 |
+/// | B-pillar accelerometers (sill, lower, middle) | 1.50 / 1.54 / 1.62 | 1.71-1.80 (nodes) |
+/// | A-pillar at the roof rail | 1.15-1.30 (the window-top crush row starts at the line) | 1.495 |
+/// | windshield angle | 30.8° | 29° |
+///
+/// The cabin sat 0.21 m aft of the Accord's on the same wheelbase, so at the
+/// pole's line (1.30 m, the dummy's head) the A-pillar's middle and the door
+/// frame's front corner were inside the pole's radius ("A-pillar
+/// engagement: no direct engagement" in the Accord's test) and the front
+/// seat's front cross member sat under it. The windshield keeps its angle;
+/// the roof behind the header blends back to the old roof at
+/// [`GH_FWD_CROWN`]; the rear doors' rear shut line and everything behind
+/// stay.
+///
+/// Opt-in (`GEN3_CABIN_R8=1`, [`cabin_fwd`]): with it the frontal's
+/// restitution reads 0.27 against its band's 0.20 (the shorter engine bay;
+/// `engine/docs/vehicle-gen3.md`, round 8), so it is not the default.
+pub const CABIN_FWD_R8: f32 = 0.21;
+
+/// The cabin's move forward (m): [`CABIN_FWD_R8`] with `GEN3_CABIN_R8`, else 0.
+pub fn cabin_fwd() -> f32 {
+    static C: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *C.get_or_init(|| {
+        if std::env::var("GEN3_CABIN_R8").is_ok() {
+            CABIN_FWD_R8
+        } else {
+            0.0
+        }
+    })
+}
+/// The old windshield's base and top (z) and where the roof's shift ends.
+pub const GH_OLD_BASE: f32 = 0.745;
+pub const GH_OLD_TOP: f32 = -0.08;
+pub const GH_FWD_CROWN: f32 = -0.70;
+
+/// How far forward the greenhouse at old section `z` moves ([`cabin_fwd`]
+/// from the windshield's top forward, less behind it to none at
+/// [`GH_FWD_CROWN`]).
+pub fn gh_shift(z: f32) -> f32 {
+    let f = cabin_fwd();
+    if z >= GH_OLD_TOP {
+        f
+    } else if z >= GH_FWD_CROWN {
+        f * (z - GH_FWD_CROWN) / (GH_OLD_TOP - GH_FWD_CROWN)
+    } else {
+        0.0
+    }
+}
+
+/// The old section whose greenhouse now stands at `z` (the inverse of
+/// `z0 + gh_shift(z0)`, monotone and piecewise linear).
+pub fn gh_old_z(z: f32) -> f32 {
+    if cabin_fwd() == 0.0 {
+        return z;
+    }
+    let knots = [GH_FWD_CROWN, GH_OLD_TOP, GH_OLD_BASE];
+    let mapped = knots.map(|k| k + gh_shift(k));
+    if z <= mapped[0] {
+        return z;
+    }
+    if z >= mapped[2] {
+        return z - cabin_fwd();
+    }
+    let i = if z < mapped[1] { 0 } else { 1 };
+    knots[i] + (z - mapped[i]) * (knots[i + 1] - knots[i]) / (mapped[i + 1] - mapped[i])
+}
 
 /// Monotone piecewise cubic Hermite interpolation (Fritsch–Carlson): C¹, no
 /// overshoot, through the knots.
@@ -181,20 +255,24 @@ impl Profiles {
             ]),
             // A fastback roof: the crown just behind the B-pillar, a long,
             // shallow backlight down to a short deck.
-            roof: Spline::new(&[
-                (-2.35, 0.80),
-                (-2.05, 1.030),
-                (-1.68, 1.200),
-                (-1.32, 1.335),
-                (-1.00, 1.414),
-                (-0.70, 1.446),
-                (-0.40, 1.450),
-                (-0.12, 1.428),
-                (0.15, 1.350),
-                (0.45, 1.185),
-                (0.80, 0.975),
-                (1.05, 0.78),
-            ]),
+            // (Ahead of the crown the knots move forward by [`gh_shift`].)
+            roof: Spline::new(
+                &[
+                    (-2.35, 0.80),
+                    (-2.05, 1.030),
+                    (-1.68, 1.200),
+                    (-1.32, 1.335),
+                    (-1.00, 1.414),
+                    (-0.70, 1.446),
+                    (-0.40, 1.450),
+                    (-0.12, 1.428),
+                    (0.15, 1.350),
+                    (0.45, 1.185),
+                    (0.80, 0.975),
+                    (1.05, 0.78),
+                ]
+                .map(|(z, y)| (z + gh_shift(z), y)),
+            ),
             belt,
             bottom: Spline::new(&[
                 (Z_REAR - 0.05, 0.44),
@@ -314,7 +392,7 @@ fn section_w(z: f32, y: f32) -> f32 {
     let depth = 0.006 + 0.012 * smoothstep(0.6, -0.9, z);
     // It rises out of the front door's leading edge and dies into the rear
     // door's trailing edge (under the haunch).
-    let fade = smoothstep(0.76, 0.40, z) * smoothstep(-0.97, -0.62, z);
+    let fade = smoothstep(0.76 + cabin_fwd(), 0.40 + cabin_fwd(), z) * smoothstep(-0.97, -0.62, z);
     // Crisp at the line (2 cm), a long concave return to the sill.
     let cut = smoothstep(yl + 0.006, yl - 0.02, y).powf(0.7) * smoothstep(0.34, 0.50, y);
     w -= depth * fade * cut;
@@ -338,7 +416,8 @@ fn glass_w(p: &Profiles, z: f32, y: f32) -> f32 {
     let b = p.belt.at(z);
     let g = ((y - b) / (1.44 - b)).clamp(-0.5, 1.3);
     let w = 0.878 - 0.250 * g.max(0.0).powf(1.08) + 0.02 * (-g).max(0.0);
-    let taper = 1.0 - 0.04 * smoothstep(-0.7, -1.95, z) - 0.02 * smoothstep(0.1, 0.8, z);
+    let zg = gh_old_z(z);
+    let taper = 1.0 - 0.04 * smoothstep(-0.7, -1.95, zg) - 0.02 * smoothstep(0.1, 0.8, zg);
     w * taper
 }
 

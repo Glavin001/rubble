@@ -989,6 +989,8 @@ struct Intrusion {
     rest: Vec<Vec3>,
     max: Vec<f32>,
     last: Vec<f32>,
+    /// The node that moved the most toward each point (the max's).
+    arg: Vec<u32>,
 }
 
 impl Intrusion {
@@ -1012,6 +1014,7 @@ impl Intrusion {
             rest,
             max: vec![0.0; k],
             last: vec![0.0; k],
+            arg: vec![u32::MAX; k],
         }
     }
     fn sample(&mut self, s: &ExplicitBeams) {
@@ -1019,19 +1022,22 @@ impl Intrusion {
         let att = attached_to(s, &self.fit_ids);
         let f = rigid_fit(&self.rest, &now, &self.fit_ids);
         for (k, (_, p, near)) in self.pts.iter().enumerate() {
-            let v = near
+            let (v, at) = near
                 .iter()
                 .filter(|(i, _)| att[*i as usize] && now[*i as usize].is_finite())
-                .map(|&(i, d0)| d0 - f.to_rest(now[i as usize]).distance(*p))
-                .fold(0.0f32, f32::max);
+                .map(|&(i, d0)| (d0 - f.to_rest(now[i as usize]).distance(*p), i))
+                .fold((0.0f32, u32::MAX), |a, b| if b.0 > a.0 { b } else { a });
             self.last[k] = v;
-            self.max[k] = self.max[k].max(v);
+            if v > self.max[k] {
+                self.max[k] = v;
+                self.arg[k] = at;
+            }
         }
     }
     fn result(&self) -> Value {
         let mut o = serde_json::Map::new();
         for (k, (n, _, near)) in self.pts.iter().enumerate() {
-            o.insert(n.to_string(), json!({"max_mm": mm(self.max[k]), "residual_mm": mm(self.last[k]), "nodes": near.len()}));
+            o.insert(n.to_string(), json!({"max_mm": mm(self.max[k]), "residual_mm": mm(self.last[k]), "nodes": near.len(), "max_node": self.arg[k]}));
         }
         Value::Object(o)
     }
@@ -1982,16 +1988,21 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
             d_dyn = d_dyn.max(d);
             if v <= 0.0 {
                 t_m = Some(steps_after as f32 * STEP);
+                if std::env::var("WALL_DEBUG").is_ok() {
+                    eprintln!("  wall t_m: elastic {}", elastic_by_member(car, s, 16));
+                }
             }
         } else {
             rebound = rebound.max(-v);
         }
         let ts = steps_after as f32 * STEP;
         // `WALL_DEBUG`: the plastic work by member every 10 ms, and the force.
-        if steps_after % 20 == 0 && steps_after <= 160 && std::env::var("WALL_DEBUG").is_ok() {
+        if steps_after % 20 == 0 && steps_after <= 600 && std::env::var("WALL_DEBUG").is_ok() {
             eprintln!(
-                "  wall {:.0} ms: force {:.0} kN; plastic {}",
+                "  wall {:.0} ms: rear cabin v {:.2} m/s, car's centre of mass {:.2} m/s; force {:.0} kN; plastic {}",
                 ts * 1e3,
+                v,
+                (p / f64::from(total)) as f32,
                 force.iter().rev().take(20).sum::<f32>() / 20e3,
                 plastic_by_member(car, s, 14)
             );
@@ -2160,6 +2171,50 @@ pub fn plastic_by_member(car: &Car, s: &ExplicitBeams, top: usize) -> String {
             std::mem::swap(&mut a, &mut c);
         }
         *by.entry(format!("{a}-{c}")).or_default() += fy * dr.abs();
+    }
+    let mut v: Vec<(String, f64)> = by.into_iter().collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let tot: f64 = v.iter().map(|x| x.1).sum();
+    format!(
+        "{:.1} kJ: {}",
+        tot / 1e3,
+        v.iter()
+            .take(top)
+            .map(|(k, e)| format!("{k} {:.2}", e / 1e3))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The elastic energy now by member pair (as [`plastic_by_member`]): what
+/// springs back (`WALL_DEBUG`). Supports hold none in tension.
+pub fn elastic_by_member(car: &Car, s: &ExplicitBeams, top: usize) -> String {
+    let stem = |i: u32| -> String {
+        let n = car.node_name(i as usize);
+        let n = n.trim_end_matches(['L', 'R']);
+        let n: String = n.chars().filter(|c| !c.is_ascii_digit()).collect();
+        n.trim_end_matches(['L', 'R']).to_string()
+    };
+    let mut by: std::collections::BTreeMap<String, f64> = Default::default();
+    for b in s.beams.iter().filter(|b| {
+        b.a != b.b
+            && !b.broken
+            && b.k > 0.0
+            && !is_tyre(s, b.a as usize)
+            && !is_tyre(s, b.b as usize)
+    }) {
+        let l = (s.nodes[b.a as usize].pos - s.nodes[b.b as usize].pos).length();
+        let e = l - b.rest;
+        let e = if b.kind == ExplicitKind::JbeamSupport {
+            e.min(0.0)
+        } else {
+            e
+        };
+        let (mut a, mut c) = (stem(b.a), stem(b.b));
+        if a > c {
+            std::mem::swap(&mut a, &mut c);
+        }
+        *by.entry(format!("{a}-{c}")).or_default() += f64::from(0.5 * b.k * e * e);
     }
     let mut v: Vec<(String, f64)> = by.into_iter().collect();
     v.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -2413,8 +2468,42 @@ fn side_run(
                     .collect();
                 v.sort_by(|a, b| b.0.total_cmp(&a.0));
                 let total: f32 = v.iter().map(|x| x.0).sum();
+                // The far side's own bending: its nodes' lateral departure
+                // from the rigid fit (max, mean; mm). A car wrapped round the
+                // pole bends as a whole, and springs back as a whole.
+                let now = positions(car_s);
+                let fit = rigid_fit(&rest, &now, &far);
+                let dev: Vec<f32> = far
+                    .iter()
+                    .filter(|&&i| now[i as usize].is_finite())
+                    .map(|&i| (fit.to_rest(now[i as usize]).x - rest[i as usize].x).abs())
+                    .collect();
+                let dmax = dev.iter().copied().fold(0.0f32, f32::max);
+                let dmean = dev.iter().sum::<f32>() / dev.len().max(1) as f32;
+                // By node: the far side's ten worst (name, mm, place along).
+                let mut by: Vec<(f32, u32)> = far
+                    .iter()
+                    .filter(|&&i| now[i as usize].is_finite())
+                    .map(|&i| ((fit.to_rest(now[i as usize]).x - rest[i as usize].x), i))
+                    .collect();
+                by.sort_by(|a, b| b.0.abs().total_cmp(&a.0.abs()));
+                let worst: Vec<String> = by
+                    .iter()
+                    .take(10)
+                    .map(|&(d, i)| {
+                        format!(
+                            "{} {:+.0} (z {:+.2})",
+                            car.node_name(i as usize),
+                            d * 1e3,
+                            rest[i as usize].z
+                        )
+                    })
+                    .collect();
                 elastic_at_max = format!(
-                    "elastic {:.0} J at {:.0} mm; top: {}",
+                    "far side off its fit max {:.0} / mean {:.0} mm [{}]; elastic {:.0} J at {:.0} mm; top: {}",
+                    dmax * 1e3,
+                    dmean * 1e3,
+                    worst.join(", "),
                     total,
                     c_now * 1e3,
                     v.iter()
@@ -2599,6 +2688,36 @@ fn side_run(
             top.join(", "),
             if pole.is_some() { "pole" } else { "mdb" },
             elastic_at_max
+        );
+        // The far side at the end: what of its bending stayed.
+        let now = positions(s);
+        let fit = rigid_fit(&rest, &now, &far);
+        let dev: Vec<f32> = far
+            .iter()
+            .filter(|&&i| now[i as usize].is_finite())
+            .map(|&i| (fit.to_rest(now[i as usize]).x - rest[i as usize].x).abs())
+            .collect();
+        // The wheelbase on each side (front hub to rear hub, the outer hub
+        // nodes when the car names them): NHTSA's pre/post wheelbase and
+        // side lengths (the 2018 Accord's pole test: struck wheelbase -54 mm,
+        // struck side length -64 mm, far side +12 mm).
+        let id = |n: &str| (0..s.nodes.len()).find(|&i| car.node_name(i) == n);
+        let wb = |l: &str| -> String {
+            match (id(&format!("hubFo{l}")), id(&format!("hubRo{l}"))) {
+                (Some(a), Some(b)) => format!(
+                    "{:+.0}",
+                    ((now[a] - now[b]).length() - (rest[a] - rest[b]).length()) * 1e3
+                ),
+                _ => "–".into(),
+            }
+        };
+        eprintln!(
+            "  side {} at the end: far side off its fit max {:.0} / mean {:.0} mm; wheelbase change struck (L) {} mm, far (R) {} mm",
+            if pole.is_some() { "pole" } else { "mdb" },
+            dev.iter().copied().fold(0.0f32, f32::max) * 1e3,
+            dev.iter().sum::<f32>() / dev.len().max(1) as f32 * 1e3,
+            wb("L"),
+            wb("R")
         );
     }
     let wall_s = t0.elapsed().as_secs_f32();
