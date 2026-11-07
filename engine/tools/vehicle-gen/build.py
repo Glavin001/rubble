@@ -42,6 +42,8 @@ new, extras, markers = D.parts(cb)
 for k, m in extras.items():
     parts[k].add(m)
 parts.update(new)
+if hasattr(D, 'post'):
+    D.post(parts)
 S = uvpack.pack(parts)
 uvpack.normalise_other(parts)
 print('built %d parts in %.1fs; paint atlas %.2f m square' % (len(parts), time.time() - t0, S))

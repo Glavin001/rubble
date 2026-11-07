@@ -23,8 +23,8 @@ TRACK = 1.486
 ZF_AX = WHEELBASE / 2
 ZR_AX = -WHEELBASE / 2
 TYRE_D = 0.662                         # F70-14 class (about 26 in), measured off photos
-TYRE_W = 0.215
-RIM_D = 14 * 0.0254
+TYRE_W = 0.235
+RIM_D = 15 * 0.0254
 RIM_W = 7 * 0.0254
 WHEEL_Y = TYRE_D / 2
 
@@ -39,29 +39,35 @@ def _off(d):
     return [(z, float(_W(z)) - d) for z in _ZS]
 
 
+def _shoulder_x():
+    # the hip's top rolls inboard over the rear wheel
+    hip = table([(-2.6, 0.040), (-1.55, 0.040), (-0.95, 0.007), (2.5, 0.007)])
+    return [(z, float(_W(z)) - float(hip(z))) for z in _ZS]
+
+
 # --- key points (x, y) of the left half section --------------------------------
 K = [
     # 0 floor centre
     key(0.0, 0.215),
     # 1 rocker / sill bottom
     key(_off(0.050), [(2.4, 0.40), (1.80, 0.40), (1.0, 0.235), (-0.98, 0.235),
-                      (-1.80, 0.36), (-2.5, 0.36)]),
+                      (-1.80, 0.33), (-2.5, 0.30)]),
     # 2 door bottom line / rocker top
     key(_off(0.016), [(2.4, 0.47), (1.80, 0.46), (1.0, 0.30), (-0.98, 0.30),
-                      (-1.80, 0.48), (-2.5, 0.50)]),
+                      (-1.80, 0.48), (-2.5, 0.560)]),
     # 3 widest line
-    key(_off(0.0), [(2.4, 0.56), (1.0, 0.52), (-0.98, 0.52), (-1.80, 0.60), (-2.5, 0.665)]),
+    key(_off(0.0), [(2.4, 0.56), (1.0, 0.52), (-0.98, 0.52), (-1.80, 0.62), (-2.5, 0.690)]),
     # 4 arch-top line (upper body side)
     key(_off(0.002), [(2.4, 0.70), (2.1, 0.71), (1.37, 0.74), (0.6, 0.72), (-0.7, 0.73),
-                      (-1.37, 0.76), (-2.5, 0.805)]),
+                      (-1.37, 0.77), (-2.5, 0.830)]),
     # 5 shoulder crease
-    key(_off(0.007), [(2.32, 0.79), (1.75, 0.815), (1.37, 0.83), (1.0, 0.845),
+    key(_shoulder_x(), [(2.32, 0.79), (1.75, 0.815), (1.37, 0.83), (1.0, 0.845),
                       (0.63, 0.860), (-0.24, 0.872), (-0.715, 0.885), (-0.95, 0.908),
                       (-1.37, 0.922), (-1.77, 0.918), (-2.10, 0.910), (-2.45, 0.900)]),
     # 6 belt (window sill) / bonnet shut line / quarter top
     key([(2.32, 0.600), (2.15, 0.615), (1.95, 0.690), (1.75, 0.762), (1.37, 0.786),
          (0.63, 0.780), (0.55, 0.785),
-         (-0.715, 0.800), (-1.37, 0.802), (-2.45, 0.800)],
+         (-0.715, 0.800), (-1.37, 0.795), (-2.0, 0.780), (-2.45, 0.770)],
         [(2.32, 0.800), (1.75, 0.832), (1.37, 0.848), (0.63, 0.887), (0.55, 0.905),
          (0.12, 0.915), (-0.62, 0.930), (-0.715, 0.935), (-0.95, 0.955), (-1.37, 0.963),
          (-1.77, 0.952), (-2.10, 0.942), (-2.45, 0.935)]),
@@ -73,7 +79,7 @@ K = [
          (-0.24, 1.250), (-0.62, 1.228), (-0.90, 1.175), (-1.37, 1.040), (-1.77, 0.957),
          (-2.10, 0.947), (-2.45, 0.943)]),
     # 8 glass edge (windscreen / back light) / bonnet line / boot lid
-    key([(2.32, 0.400), (1.95, 0.520), (1.37, 0.560), (0.80, 0.585), (0.55, 0.645), (0.12, 0.585),
+    key([(2.32, 0.380), (1.95, 0.440), (1.37, 0.460), (0.80, 0.490), (0.63, 0.520), (0.55, 0.645), (0.12, 0.585),
          (-0.24, 0.580), (-0.62, 0.580), (-0.90, 0.585), (-1.37, 0.600), (-1.77, 0.630),
          (-2.00, 0.540), (-2.20, 0.490), (-2.45, 0.470)],
         [(2.32, 0.808), (1.37, 0.862), (0.63, 0.900), (0.55, 0.921), (0.12, 1.238),
@@ -85,8 +91,12 @@ K = [
               (-0.90, 1.215), (-1.37, 1.090), (-1.77, 0.975), (-2.10, 0.950), (-2.45, 0.945)]),
 ]
 
+# the shoulder is a crisp crease along the front fender and door and rolls
+# into a round hip over the rear wheel
+_HIP = table([(-2.6, 1.0), (-1.55, 1.0), (-0.95, 0.0), (2.5, 0.0)])
 HANDLES = [(1 / 3, 1 / 3), (0.30, 0.30), (0.33, 0.33), (0.36, 0.36), (0.33, 0.33),
-           (0.14, 0.12), (0.22, 0.25), (0.33, 0.33), (0.33, 0.33), (1 / 3, 1 / 3)]
+           (lambda z: 0.14 + 0.20 * _HIP(z), lambda z: 0.12 + 0.24 * _HIP(z)),
+           (lambda z: 0.22 + 0.10 * _HIP(z), 0.25), (0.33, 0.33), (0.33, 0.33), (1 / 3, 1 / 3)]
 
 ARCH_F = dict(center=(ZF_AX, WHEEL_Y), R=0.380)
 ARCH_R = dict(center=(ZR_AX, WHEEL_Y), R=0.392)
@@ -157,15 +167,15 @@ def front_z(x, y):
 
 def rear_z(x, y):
     x = np.abs(x)
-    dish = 0.010 * (1 - np.clip(x / 0.88, 0, 1) ** 2)
+    dish = 0.022 * (1 - np.clip(x / 0.80, 0, 1) ** 2)      # concave tail panel
     tuck = 0.035 * np.clip((0.52 - y) / 0.18, 0, 1)
-    corner = 0.045 * (x / 0.88) ** 6
+    corner = 0.110 * np.clip(x / 0.88, 0, 1.05) ** 4          # corners roll round
     return -2.43 + dish + tuck + corner
 
 
 HEADLIGHT = dict(x=0.748, y=0.645, R=0.088)
 HEADLIGHT_INNER = dict(x=0.500, y=0.640, R=0.058)
-TAILLIGHT = dict(x0=0.43, x1=0.69, y0=0.665, y1=0.805)
+TAILLIGHT = dict(x0=0.40, x1=0.64, y0=0.690, y1=0.835)
 GRILLE_X = 0.62
 
 
@@ -340,11 +350,35 @@ def parts(cb):
         hl = HEADLIGHT
         zs = float(front_z(np.array([hl['x']]), np.array([hl['y']]))[0])
         nrm = P.graph_normal(front_z, hl['x'], hl['y'], 1) * [sg, 1, 1]
-        cen = np.array([sg * hl['x'], hl['y'], zs]) - nrm * 0.012
-        l1, h1 = P.round_lamp(cen, hl['R'] - 0.017, tint=CLEAR, axis=nrm)
+        # the lamp sits at the bottom of a scooped bucket under the fender brow
+        DEEP = 0.042
+        cen = np.array([sg * hl['x'], hl['y'], zs]) - nrm * DEEP
+        l1, h1 = P.round_lamp(cen, hl['R'] - 0.020, tint=CLEAR, axis=nrm)
+        Rt = P.rot_to(nrm)
+        rings = []
+        for t, rr, dd in ((0.0, hl['R'] - 0.003, 0.007), (0.5, hl['R'] - 0.007, 0.024),
+                          (1.0, hl['R'] - 0.012, DEEP - 0.010)):
+            ring = []
+            for a_ in np.linspace(0, 2 * np.pi, 49)[:-1]:
+                off = Rt @ np.array([0.0, rr * np.cos(a_), rr * np.sin(a_)])
+                q = np.array([sg * hl['x'], hl['y'], 0.0]) + off
+                zq = float(front_z(np.array([abs(q[0])]), np.array([q[1]]))[0])
+                q[2] = zq
+                ring.append(q - nrm * dd)
+            rings.append(ring)
+        bucket = grid(np.array(rings), mat='paint', closed_v=True)
+        cn = bucket.vertex_normals().mean(0)
+        if np.dot(cn, nrm) < 0:
+            bucket.flip()
+        extras.setdefault('fender_F' + s, Mesh()).add(bucket)
         hi = HEADLIGHT_INNER
         l2, h2 = P.round_lamp((sg * hi['x'], hi['y'], zg + 0.020), hi['R'], tint=CLEAR, depth=0.014)
-        out['headlight_%s_lens' % s] = l1.add(l2)
+        # side markers: amber at the front of the fender, red at the tail
+        fm, fn = P.surface_point(tube, 2.06, 0.560, sg)
+        mk_ = rbox((0, 0, 0), (0.004, 0.016, 0.034), 0.003, 1, 'lamp_lens')
+        mk_.transform(P.rot_to(fn) @ rot_y(0), fm + fn * 0.005)
+        mk_.tint(AMBER)
+        out['headlight_%s_lens' % s] = l1.add(l2).add(mk_)
         out['headlight_%s_housing' % s] = h1.add(h2)
 
     # grille: black egg-crate in a thin bright surround, recessed between the
@@ -380,13 +414,13 @@ def parts(cb):
     path = np.c_[pp[:, 0], np.full(len(pp), yb), pp[:, 1]]
     bf = orient_outward(sweep(path, rrect(0.032, 0.084, 0.016, 4), mat='chrome', up=(0, 1, 0)))
     ols = [full(P.plan_outline(tube, front_z, 0.40, 1, 2.3, side_len=0.06))]
-    pv = P.fit_path(ols, -0.012, 1, step=0.018)
+    pv = P.fit_path(ols, -0.022, 1, step=0.018)
     pv = pv[4:-4]
     vpath = np.c_[pv[:, 0], np.full(len(pv), 0.0), pv[:, 1]]
-    vsec = np.array([[0.004, 0.395], [-0.026, 0.395], [-0.050, 0.300], [-0.070, 0.268],
-                     [-0.052, 0.264], [-0.020, 0.300]])
+    vsec = np.array([[0.004, 0.392], [-0.026, 0.392], [-0.046, 0.310], [-0.058, 0.282],
+                     [-0.040, 0.280], [-0.014, 0.310]])
     bf.add(orient_outward(sweep(vpath, P.densify(vsec, 0.02), mat='paint', up=(0, 1, 0))))
-    csec = np.array([[-0.020, 0.258], [-0.075, 0.258], [-0.075, 0.248], [-0.020, 0.250]])
+    csec = np.array([[0.070, 0.272], [-0.050, 0.272], [-0.050, 0.260], [0.070, 0.262]])
     k = len(vpath) // 8
     bf.add(orient_outward(sweep(vpath[k:-k] * [0.97, 1, 1], csec, mat='trim_black', up=(0, 1, 0))))
     out['bumper_front'] = bf
@@ -395,11 +429,11 @@ def parts(cb):
         mk['bolt_bumper_front_%d' % (k_ + 1)] = ((x, yb, zz - 0.004), (1, 0, 0))
 
     # rear bumper
-    yr = 0.560
-    ols = [full(P.plan_outline(tube, rear_z, y, -1, -2.4, side_len=0.18)) for y in (0.52, 0.56, 0.60)]
+    yr = 0.600
+    ols = [full(P.plan_outline(tube, rear_z, y, -1, -2.4, side_len=0.18)) for y in (0.56, 0.60, 0.64)]
     pr = P.fit_path(ols, 0.023, -1, step=0.018)[::-1]
     path = np.c_[pr[:, 0], np.full(len(pr), yr), pr[:, 1]]
-    out['bumper_rear'] = orient_outward(sweep(path, rrect(0.034, 0.072, 0.014, 4), mat='chrome', up=(0, 1, 0)))
+    out['bumper_rear'] = orient_outward(sweep(path, rrect(0.040, 0.088, 0.018, 4), mat='chrome', up=(0, 1, 0)))
     for k_, x in enumerate((-0.62, -0.30, 0.30, 0.62)):
         zz = float(rear_z(np.array([abs(x)]), np.array([yr]))[0])
         mk['bolt_bumper_rear_%d' % (k_ + 1)] = ((x, yr, zz + 0.004), (1, 0, 0))
@@ -412,20 +446,29 @@ def parts(cb):
         zt = float(rear_z(np.array([xm]), np.array([ym]))[0])
         w = tl['x1'] - tl['x0']
         hgt = tl['y1'] - tl['y0']
+        # three tall rounded lamps, each in its own bright bezel, on a black
+        # backing that fills the opening
         lens = Mesh()
-        lw = (w - 0.026) / 3
-        for k in range(3):
-            x = tl['x0'] + 0.009 + lw / 2 + k * (lw + 0.004)
-            lens.add(rbox((sg * x, ym, zt + 0.010), (lw / 2 - 0.002, hgt / 2 - 0.012, 0.007), 0.005, 2, 'lamp_lens'))
-        lens.tint(RED)
         hous = Mesh()
-        rr = rrect(w - 0.012, hgt - 0.012, 0.010, 3)
-        path = np.c_[sg * xm + rr[:, 0], ym + rr[:, 1], np.full(len(rr), zt + 0.006)]
-        hous.add(orient_outward(sweep(path, rrect(0.006, 0.020, 0.0025, 1), mat='chrome', closed=True, up=(0, 0, 1))))
-        hous.add(box((sg * xm, ym, zt + 0.045), (w / 2 - 0.006, hgt / 2 - 0.006, 0.010), 'lamp_emissive'))
-        for k in (1, 2):
-            x = tl['x0'] + 0.009 + k * (lw + 0.004) - 0.002
-            hous.add(box((sg * x, ym, zt + 0.016), (0.0018, hgt / 2 - 0.010, 0.008), 'chrome'))
+        gapx = 0.012
+        lw = (w - 0.020 - 2 * gapx) / 3
+        hous.add(box((sg * xm, ym, zt + 0.046), (w / 2 - 0.005, hgt / 2 - 0.005, 0.006), 'trim_black'))
+        for k in range(3):
+            x = tl['x0'] + 0.010 + lw / 2 + k * (lw + gapx)
+            zk = float(rear_z(np.array([x]), np.array([ym]))[0])
+            lh = hgt - 0.016
+            lens.add(rbox((sg * x, ym, zk + 0.016), (lw / 2 - 0.007, lh / 2 - 0.008, 0.006),
+                          min(lw / 2 - 0.008, 0.022), 3, 'lamp_lens'))
+            rr = rrect(lw - 0.002, lh + 0.002, min(lw / 2 - 0.002, 0.024), 4)
+            path = np.c_[sg * x + rr[:, 0], ym + rr[:, 1], np.full(len(rr), zk + 0.008)]
+            hous.add(orient_outward(sweep(path, rrect(0.003, 0.010, 0.0013, 1), mat='chrome', closed=True,
+                                          up=(0, 0, 1))))
+            hous.add(box((sg * x, ym, zk + 0.032), (lw / 2 - 0.006, lh / 2 - 0.006, 0.003), 'lamp_emissive'))
+        lens.tint(RED)
+        rm, rn = P.surface_point(tube, -2.20, 0.690, sg)
+        mr = rbox((0, 0, 0), (0.004, 0.014, 0.030), 0.003, 1, 'lamp_lens')
+        mr.transform(P.rot_to(rn), rm + rn * 0.005)
+        lens.add(mr.tint(RED))
         out['taillight_%s_lens' % s] = lens
         out['taillight_%s_housing' % s] = hous
 
@@ -450,7 +493,14 @@ def parts(cb):
     # body extras: quarter scoops, rocker mouldings, window reveals, fuel cap
     bx = Mesh()
     for sg in (1, -1):
-        bx.add(_surface_bump(tube, -0.745, -0.985, 0.805, 0.905, 0.020, sg))
+        bx.add(_surface_bump(tube, -0.735, -1.00, 0.775, 0.925, 0.030, sg))
+        # the scoop's dark mouth facing forward
+        from vehgen.parts import surface_point as _sp
+        Q, Nq = _sp(tube, -0.742, 0.850, sg)
+        Nq = Nq / np.linalg.norm(Nq)
+        mouth = rbox((0, 0, 0), (0.011, 0.058, 0.0015), 0.0014, 1, 'trim_black')
+        mouth.transform(None, Q + Nq * 0.016)
+        bx.add(mouth)
         sv = np.linspace(0.52, -0.66, 30)
         Pp, Nn = P.path_on_surface(tube, sv, 0.285, sg, off=0.004)
         bx.add(orient_outward(sweep(Pp, rrect(0.005, 0.016, 0.002, 1), mat='chrome', twist_up=None)))
@@ -467,10 +517,25 @@ def parts(cb):
            (-0.89, 10.0), (-0.90, 9.0)])
     bx.add(_molding(tube, rw, off=0.002, sec=(0.010, 0.005), closed=True, n=6))
     zt = float(rear_z(np.array([0.0]), np.array([0.735]))[0])
-    cap = closed_lathe([(0.0, 0.008), (0.040, 0.007), (0.048, 0.0), (0.046, -0.004), (0.0, -0.004)], 40, 'chrome')
+    cap = closed_lathe([(0.0, 0.012), (0.045, 0.010), (0.058, 0.0), (0.056, -0.004), (0.0, -0.004)], 40, 'chrome')
     cap.transform(rot_y(np.pi / 2), (0, 0.735, zt - 0.004))
     bx.add(cap)
-    extras['body_shell'] = bx
+    extras.setdefault('body_shell', Mesh()).add(bx)
+
+    # bright lip mouldings round the wheel openings (fender front, body rear)
+    for (arch, owner) in ((ARCH_F, 'fender_F'), (ARCH_R, 'body_shell')):
+        zc, yc = arch['center']
+        Ra = arch['R'] + 0.004
+        for s, sg in (('L', 1), ('R', -1)):
+            lo_y = 0.30 if owner == 'fender_F' else 0.26
+            a0 = np.arcsin(np.clip((lo_y - yc) / Ra, -1, 1))
+            angs = np.linspace(a0, np.pi - a0, 60)
+            zs_ = zc + Ra * np.cos(angs)
+            ys_ = yc + Ra * np.sin(angs)
+            Pp, Nn = P.path_on_surface(tube, zs_, ys_, sg, off=0.004)
+            mold = orient_outward(sweep(Pp, rrect(0.004, 0.012, 0.0018, 1), mat='chrome', twist_up=Nn))
+            key_ = owner + (s if owner == 'fender_F' else '')
+            extras.setdefault(key_, Mesh()).add(mold)
 
     # bonnet: scoop and pins
     hx = Mesh()
@@ -502,6 +567,29 @@ def parts(cb):
         pin.transform(None, Pp + [0, 0.001, 0])
         hx.add(orient_outward(pin))
     extras['hood'] = hx
+
+    # the optional rear wing: two black uprights on the lid, a cambered blade
+    wx = Mesh()
+    zw = -2.27
+    for sg in (1, -1):
+        v = tube.v_at_x(zw, 0.72, 6.0, 9.0)[0]
+        if sg < 0:
+            v = VM - v
+        Q = tube.eval(zw, v)[0]
+        up = rbox((0, 0, 0), (0.010, 0.030, 0.045), 0.007, 2, 'trim_black')
+        up.transform(rot_x(np.radians(8)), Q + [0, 0.032, -0.005])
+        wx.add(up)
+    yb = float(tube.eval(zw, 9.0)[0][1]) + 0.068
+    blade = []
+    for x in np.linspace(-0.80, 0.80, 33):
+        droop = 0.030 * max(0.0, (abs(x) - 0.62) / 0.18) ** 2
+        blade.append([x, yb + 0.006 * (1 - (x / 0.8) ** 2) - droop, zw - 0.005])
+    sec = np.array([[0.065, 0.004], [0.030, 0.012], [-0.040, 0.010], [-0.065, -0.004],
+                    [-0.040, -0.006], [0.030, -0.004]])
+    wb = orient_outward(sweep(np.array(blade), sec, mat='trim_black', up=(0, 1, 0)))
+    wb.v = wb.v  # chord along z: sweep side = T x up = x x y = +z
+    wx.add(wb)
+    extras['trunk_lid'] = wx
 
     # interior
     hf = 0.255
@@ -590,11 +678,11 @@ def parts(cb):
     for sg in (1, -1):
         pts = [(sg * 0.30, 0.34, 1.32), (sg * 0.33, 0.25, 1.13), (sg * 0.31, 0.181, 0.98), (sg * 0.30, 0.178, 0.30),
                (sg * 0.30, 0.175, -0.60), (sg * 0.36, 0.185, -1.15), (sg * 0.40, 0.20, -1.45),
-               (sg * 0.44, 0.22, -1.85), (sg * 0.45, 0.24, -2.25), (sg * 0.45, 0.245, -2.42)]
+               (sg * 0.44, 0.22, -1.85), (sg * 0.45, 0.24, -2.20), (sg * 0.45, 0.245, -2.36)]
         ex.add(P.tube_pipe(pts, 0.026, n=5))
         ex.add(rbox((sg * 0.30, 0.177, -0.85), (0.10, 0.026, 0.22), 0.02, 2, 'metal_bare'))
         tip = closed_lathe([(0.033, 0.0), (0.036, 0.0), (0.036, -0.10), (0.033, -0.10)], 20, 'chrome')
-        tip.transform(rot_y(np.pi / 2), (sg * 0.45, 0.245, -2.40))
+        tip.transform(rot_y(np.pi / 2), (sg * 0.45, 0.245, -2.33))
         ex.add(tip)
     out['exhaust'] = ex
     for tag, zc, R in (('F', ZF_AX, 0.360), ('R', ZR_AX, 0.372)):
@@ -618,3 +706,20 @@ def parts(cb):
     mk['latch_hood'] = ((0.0, 0.775, 2.25), (1, 0, 0))
     mk['latch_trunk'] = ((0.0, 0.905, -2.39), (1, 0, 0))
     return out, extras, mk
+
+
+def post(parts):
+    """Mach 1 bonnet: the matte-black centre between the glass-edge lines
+    (a mesh row, so the colour break is a clean line, not a staircase)."""
+    from vehgen.mesh import MAT
+    t = tube()
+    m = parts['hood']
+    for F, M, I in ((m.q, m.qm, m.qi), (m.t, m.tm, m.ti)):
+        if not len(F):
+            continue
+        c = m.v[F].mean(1)
+        skin = I < 100
+        v = t.v_at_x(c[skin, 2], np.abs(c[skin, 0]), 7.0, 9.0)
+        sel = np.zeros(len(F), bool)
+        sel[np.where(skin)[0]] = v > 8.0
+        M[sel] = MAT['trim_black']

@@ -19,7 +19,7 @@ def make_materials(paint_rgb=(0.0, 0.1, 0.7), metallic=0.45, rough=0.26):
     spec = {
         'paint': dict(c=(*paint_rgb, 1), m=metallic, r=rough, coat=1.0),
         'chrome': dict(c=(0.92, 0.92, 0.94, 1), m=1.0, r=0.06),
-        'trim_black': dict(c=(0.018, 0.018, 0.02, 1), m=0.0, r=0.55),
+        'trim_black': dict(c=(0.018, 0.018, 0.02, 1), m=0.0, r=0.72),
         'rubber': dict(c=(0.016, 0.016, 0.017, 1), m=0.0, r=0.78),
         'glass': dict(c=(0.06, 0.075, 0.08, 0.22), m=0.0, r=0.02, alpha=True),
         'lamp_lens': dict(c=(1, 1, 1, 0.45), m=0.0, r=0.03, alpha=True, vcol=True),

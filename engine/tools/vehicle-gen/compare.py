@@ -105,7 +105,14 @@ for (u, v), q in zip(uv, project(p, X)):
     print('   photo (%4.0f,%4.0f)  model (%6.1f,%6.1f)' % (u, v, q[0], q[1]))
 
 # Blender camera from the solve (glTF -> Blender axes: x, -z, y)
-cam = render.studio(samples=samples, res=(W * 2, H * 2))
+if '--outdoor' in argv:
+    cam = render.outdoor(samples=samples, res=(W * 2, H * 2))
+else:
+    cam = render.studio(samples=samples, res=(W * 2, H * 2))
+if '--paint' in argv:
+    rgb = [float(x) for x in argv[argv.index('--paint') + 1].split(',')]
+    b = bpy.data.materials['paint'].node_tree.nodes['Principled BSDF']
+    b.inputs['Base Color'].default_value = (*rgb, 1)
 G2B = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], float)
 Rcw = rot(p[3:6]).T                      # camera-to-world, glTF
 M = np.eye(4)

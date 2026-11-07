@@ -60,8 +60,11 @@ class Tube:
         A, B = K[i, k], K[i, k + 1]
         TA, TB = T[i, k], T[i, k + 1]
         L = np.linalg.norm(B - A, axis=1, keepdims=True)
-        hout = np.array([h[1] for h in self.h])[k][:, None]
-        hin = np.array([h[0] for h in self.h])[k + 1][:, None]
+        # handles may be constants or functions of z
+        Hin = np.stack([h[0](z) if callable(h[0]) else np.full(len(z), h[0]) for h in self.h], 1)
+        Hout = np.stack([h[1](z) if callable(h[1]) else np.full(len(z), h[1]) for h in self.h], 1)
+        hout = Hout[i, k][:, None]
+        hin = Hin[i, k + 1][:, None]
         P1 = A + TA * hout * L
         P2 = B - TB * hin * L
         # arc-length parametrisation within each segment, so girth lines

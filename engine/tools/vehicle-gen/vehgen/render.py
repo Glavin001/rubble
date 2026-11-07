@@ -153,3 +153,50 @@ def quick(res=(1280, 720), wire=False):
     sc.collection.objects.link(cam)
     sc.camera = cam
     return cam
+
+
+def outdoor(samples=96, res=(1600, 900), sun_elev=38.0, sun_rot=140.0):
+    """Daylight like the reference photos: physical sky, sun, asphalt."""
+    sc = bpy.context.scene
+    sc.render.engine = 'CYCLES'
+    try:
+        prefs = bpy.context.preferences.addons['cycles'].preferences
+        prefs.compute_device_type = 'METAL'
+        prefs.get_devices()
+        for d in prefs.devices:
+            d.use = True
+        sc.cycles.device = 'GPU'
+    except Exception:
+        pass
+    sc.cycles.samples = samples
+    sc.cycles.use_denoising = True
+    sc.render.resolution_x, sc.render.resolution_y = res
+    sc.view_settings.view_transform = 'AgX'
+    sc.view_settings.look = 'AgX - Medium High Contrast'
+    sc.view_settings.exposure = -1.7
+    world = bpy.data.worlds.new('sky')
+    world.use_nodes = True
+    nt = world.node_tree
+    sky = nt.nodes.new('ShaderNodeTexSky')
+    sky.sky_type = 'NISHITA'
+    sky.sun_elevation = np.radians(sun_elev)
+    sky.sun_rotation = np.radians(sun_rot)
+    sky.air_density = 1.0
+    sky.dust_density = 2.0
+    nt.links.new(sky.outputs['Color'], nt.nodes['Background'].inputs['Color'])
+    nt.nodes['Background'].inputs['Strength'].default_value = 0.35
+    sc.world = world
+    bpy.ops.mesh.primitive_plane_add(size=200, location=(0, 0, 0))
+    floor = bpy.context.object
+    floor.name = '_floor'
+    fm = bpy.data.materials.new('_asphalt')
+    fm.use_nodes = True
+    fb = fm.node_tree.nodes['Principled BSDF']
+    fb.inputs['Base Color'].default_value = (0.20, 0.20, 0.19, 1)
+    fb.inputs['Roughness'].default_value = 0.85
+    floor.data.materials.append(fm)
+    cam_data = bpy.data.cameras.new('_cam')
+    cam = bpy.data.objects.new('_cam', cam_data)
+    sc.collection.objects.link(cam)
+    sc.camera = cam
+    return cam

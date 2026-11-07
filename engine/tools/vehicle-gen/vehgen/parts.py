@@ -45,49 +45,70 @@ def tyre(D_out, W, rim_d, rim_w, segs=96, grooves=3):
 
 
 def rim_magnum(rim_d, rim_w, segs=72, spokes=5):
-    """Five wide flat spokes, chrome trim ring, centre cap: a 1960s
-    muscle-car five-spoke in our own proportions."""
+    """Late-60s polished five-spoke: a chrome dished face with five dark
+    window cut-outs (the spokes are the chrome left between them), a narrow
+    polished lip and a small domed centre cap."""
     r = rim_d / 2
     hw = rim_w / 2
     m = Mesh()
-    # barrel (inner, bare metal) with flanges
     barrel = [(r + 0.012, -hw - 0.006), (r + 0.012, -hw + 0.004), (r - 0.004, -hw + 0.008),
               (r - 0.010, -hw + 0.030), (r - 0.010, hw - 0.020), (r - 0.004, hw - 0.006),
               (r - 0.008, hw - 0.006), (r - 0.014, hw - 0.020), (r - 0.014, -hw + 0.030),
               (r - 0.008, -hw + 0.006)]
     m.add(closed_lathe(barrel, segs, 'metal_bare'))
-    # polished outer lip / trim ring
-    ring = [(r + 0.014, hw - 0.010), (r + 0.016, hw + 0.002), (r + 0.006, hw + 0.010),
-            (r - 0.030, hw + 0.006), (r - 0.034, hw - 0.004), (r - 0.010, hw - 0.012)]
-    m.add(closed_lathe(ring, segs, 'chrome'))
-    # dished face plate behind the spokes (dark)
-    face = [(r - 0.030, hw - 0.004), (0.070, hw - 0.030), (0.070, hw - 0.040), (r - 0.030, hw - 0.016)]
-    m.add(closed_lathe(face, segs, 'trim_black'))
-    # hub and centre cap
-    hub = [(0.0, hw - 0.004), (0.035, hw - 0.006), (0.060, hw - 0.012), (0.080, hw - 0.020),
-           (0.080, hw - 0.036), (0.0, hw - 0.036)]
-    m.add(closed_lathe(hub, 48, 'chrome'))
-    # spokes: tapered flat bars from hub to trim ring, following the dish
+    lip = [(r + 0.014, hw - 0.010), (r + 0.016, hw + 0.002), (r + 0.008, hw + 0.010),
+           (r - 0.026, hw + 0.004), (r - 0.030, hw - 0.004), (r - 0.010, hw - 0.012)]
+    m.add(closed_lathe(lip, segs, 'chrome'))
+    r0, r1 = 0.046, r - 0.033
+    a_in, a_out = hw - 0.024, hw - 0.004
+
+    def ax(rr):
+        return a_in + (a_out - a_in) * np.clip((rr - r0) / (r1 - r0), 0, 1) ** 0.8
+    dish = [(r0, a_in), (r1, a_out), (r1, a_out - 0.006), (r0, a_in - 0.006)]
+    m.add(closed_lathe(dish, segs, 'chrome'))
+    cap = [(0.0, a_in + 0.020), (0.022, a_in + 0.018), (0.040, a_in + 0.008), (0.048, a_in - 0.002),
+           (0.0, a_in - 0.002)]
+    m.add(closed_lathe(cap, 48, 'chrome'))
+    # windows: between spoke centre lines, spokes 30 mm wide at the cap and
+    # 44 mm at the rim
+    ri, ro = r0 + 0.016, r1 - 0.012
     for k in range(spokes):
-        a = 2 * np.pi * k / spokes
-        path = []
-        for t in np.linspace(0, 1, 7):
-            rr = 0.060 + (r - 0.040 - 0.060) * t
-            ax = hw - 0.018 + 0.010 * t
-            path.append([ax, rr * np.cos(a), rr * np.sin(a)])
-        path = np.array(path)
-        w0, w1 = 0.034, 0.050
-        sc = np.stack([np.linspace(w0, w1, len(path)), np.full(len(path), 1.0)], 1)
-        sec = rrect(1.0, 0.012, 0.004, 2)
-        up = np.tile([1.0, 0, 0], (len(path), 1))
-        sp = sweep(path, sec, mat='chrome', up=(1, 0, 0), scale=sc, twist_up=up)
-        m.add(orient_outward(sp))
-    # lug nuts
-    for k in range(5):
-        a = 2 * np.pi * (k + 0.5) / 5
-        nut = closed_lathe([(0.0, 0.010), (0.009, 0.008), (0.010, -0.006), (0.0, -0.006)], 12, 'chrome')
-        nut.transform(None, (hw - 0.026, 0.050 * np.cos(a), 0.050 * np.sin(a)))
-        m.add(nut)
+        c0 = 2 * np.pi * k / spokes
+        c1 = 2 * np.pi * (k + 1) / spokes
+        pts = []
+        for rr, wid in ((ri, 0.015), (ro, 0.022)):
+            pass
+        # left edge (offset from spoke at c0), outer arc, right edge, inner arc
+        def edge(c, sgn, rr, wid):
+            d = np.array([np.cos(c), np.sin(c)])
+            n = np.array([-np.sin(c), np.cos(c)]) * sgn
+            # point at radius rr along the offset line
+            t = np.sqrt(max(rr * rr - wid * wid, 1e-9))
+            return d * t + n * wid
+        poly = []
+        for rr, wid in ((ri, 0.015), (ro, 0.022)):
+            poly.append(edge(c0, 1, rr, wid))
+        a0_ = np.arctan2(*poly[-1][::-1])
+        a1_ = np.arctan2(*edge(c1, -1, ro, 0.022)[::-1])
+        if a1_ < a0_:
+            a1_ += 2 * np.pi
+        for a_ in np.linspace(a0_, a1_, 9)[1:-1]:
+            poly.append(np.array([ro * np.cos(a_), ro * np.sin(a_)]))
+        poly.append(edge(c1, -1, ro, 0.022))
+        poly.append(edge(c1, -1, ri, 0.015))
+        b0_ = np.arctan2(*poly[-1][::-1])
+        b1_ = np.arctan2(*poly[0][::-1])
+        if b1_ > b0_:
+            b1_ -= 2 * np.pi
+        for a_ in np.linspace(b0_, b1_, 5)[1:-1]:
+            poly.append(np.array([ri * np.cos(a_), ri * np.sin(a_)]))
+        poly = np.array(poly)
+        rad = np.linalg.norm(poly, axis=1)
+        # a single dark panel just proud of the dish (open surface)
+        from .mesh import zigzag_cap
+        front = np.c_[ax(rad) + 0.0010, poly[:, 0], poly[:, 1]]
+        T = zigzag_cap(np.arange(len(front)), front, np.array([1.0, 0, 0]))
+        m.add(Mesh.from_faces(front, tris=T, mat='trim_black'))
     return m
 
 
