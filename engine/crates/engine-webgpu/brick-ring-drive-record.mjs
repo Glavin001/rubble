@@ -171,7 +171,7 @@ for (const run of runs.length ? runs : ['etk']) {
       await grabTo(file); inspectFrames.push(file);
       const k = f % per;
       if (STILLS && [Math.round(0.02 * per), Math.round(0.3 * per), Math.round(0.55 * per), Math.round(0.8 * per)].includes(k)) await grabTo(join(STILLS, `${name}-inspect-car${Math.floor(f / per)}-${Math.round(100 * k / per)}.jpg`), 85);
-      if (k === per - 1) console.log(`${name}: inspect car ${Math.floor(f / per)}: ${JSON.stringify(await evaluate('(({ car, metrics, impactKmh, beamsBroken }) => ({ car, impactKmh, beamsBroken, frontCrush: metrics?.frontCrush, frontCrushMax: metrics?.frontCrushMax, lengthLoss: metrics?.lengthLoss, bodyMaxDisp: metrics?.bodyMaxDisp, where: metrics?.bodyMaxWhere, alignRms: metrics?.alignRms }))(window.__inspectState())'))}`);
+      if (k === per - 2) console.log(`${name}: inspect car ${Math.floor(f / per)}: ${JSON.stringify(await evaluate('(({ car, metrics, impactKmh, beamsBroken }) => ({ car, impactKmh, beamsBroken, frontCrush: metrics?.frontCrush, frontCrushMax: metrics?.frontCrushMax, lengthLoss: metrics?.lengthLoss, bodyMaxDisp: metrics?.bodyMaxDisp, where: metrics?.bodyMaxWhere, alignRms: metrics?.alignRms }))(window.__inspectState())'))}`);
     }
   }
   // Passes 2 and 3: the strike ×4 slower from the wall's side, then from outside the
