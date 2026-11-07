@@ -94,20 +94,22 @@ bool ebSpend()
 #endif
     return true;
 }
-// The uniform form's end: the cap only, never the per-invocation budget. Its own
-// function so its value depends on its arguments alone: Tint's uniformity analysis
-// (Chrome) is not path-sensitive, and an end read through ebEnd (which reads ebSpent,
-// a per-invocation value) is "possibly non-uniform", which fails every barrier the
-// loop reaches. Same end as ebEnd(.., false).
-uint ebEndUniform(uint start, uint bound, uint step, uint line)
+#define EB_END(start, bound, step) ebEnd(start, bound, step, __LINE__, true)
+// A barrier loop also stops at `most` passes, its real maximum (steps a frame, members a
+// group, ...), uniform across the workgroup like its bound.
+// The end from the cap and `most` alone (never the budget's per-invocation count: Tint's
+// uniformity analysis must see the bound uniform, so the barriers inside stay legal).
+uint ebEndMost(uint start, uint bound, uint step, uint line, uint most)
 {
-    uint end = min(bound, max(start + min(step, 0xFFFFFFFFu / EB_LOOP_CAP) * EB_LOOP_CAP, start));
-    end = min(end, 0xFFFFFFFFu - max(step, 1u) + 1u);
+    uint s = max(step, 1u);
+    uint passes = max(min(EB_LOOP_CAP, most), 1u);
+    uint end = min(bound, max(start + min(s, 0xFFFFFFFFu / passes) * passes, start));
+    end = min(end, 0xFFFFFFFFu - s + 1u);
+    if (step == 0u) end = min(end, start);
     if (end < bound)
         ebLoopCapHit(line);
     return end;
 }
-#define EB_END(start, bound, step) ebEnd(start, bound, step, __LINE__, true)
-#define EB_END_UNIFORM(start, bound, step) ebEndUniform(start, bound, step, __LINE__)
+#define EB_END_UNIFORM(start, bound, step, most) ebEndMost(start, bound, step, __LINE__, most)
 #define EB_PASS(guard) if (++guard > EB_LOOP_CAP || !ebSpend()) { ebLoopCapHit(__LINE__); break; }
-#define EB_PASS_UNIFORM(guard) if (++guard > EB_LOOP_CAP) { ebLoopCapHit(__LINE__); break; }
+#define EB_PASS_UNIFORM(guard, most) if (++guard > min(EB_LOOP_CAP, most)) { ebLoopCapHit(__LINE__); break; }

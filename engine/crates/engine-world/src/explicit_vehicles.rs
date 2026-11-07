@@ -134,7 +134,7 @@ struct Params {
 fn coupling_loop_budget(p: &Params) -> u32 {
     let [c, h, s, pl, b, k, v] = [p.colliders, p.hash_size, p.s, p.planes, p.b, p.cand_cap, p.vehicles].map(u64::from);
     let unit = c + 33 * h + s * (s + pl + b) + k * k + 64 * v + 4096;
-    (4 * unit).clamp(1 << 22, 1 << 31) as u32
+    engine_webgpu::loop_budget_override().unwrap_or_else(|| (4 * unit).clamp(1 << 22, 1 << 31) as u32)
 }
 
 pub(crate) struct ExplicitVehicles {
@@ -393,6 +393,26 @@ impl ExplicitVehicles {
             sleep_mask: vec![0; mask_words as usize],
             any_awake: true,
         })
+    }
+
+    /// The coupling passes' status word (work[1], byte offset): the World reads it with
+    /// every step ([`Self::status_bits_error`]).
+    pub(crate) fn status_word(&self) -> (&wgpu::Buffer, u64) {
+        (&self.work, 4)
+    }
+
+    /// The coupling status bits as an error (none: Ok): a room exceeded, or a loop held
+    /// to its cap or past its pass budget (ST_LOOP).
+    pub(crate) fn status_bits_error(&self, bits: u32) -> Result<(), String> {
+        if bits == 0 {
+            return Ok(());
+        }
+        let names: Vec<&str> = (0..ST_NAMES.len()).filter(|k| bits & (1 << k) != 0).map(|k| ST_NAMES[k]).collect();
+        Err(format!(
+            "explicit vehicles: {} (capacity {:?}; raise ExplicitVehiclesDef::capacity)",
+            names.join(", "),
+            self.layout.cap
+        ))
     }
 
     /// The vehicle sleep readback (World step's extras): the asleep bits after the frame.
@@ -682,12 +702,7 @@ impl ExplicitVehicles {
         enc: &mut wgpu::CommandEncoder,
     ) -> anyhow::Result<bool> {
         if let Some(bits) = self.status.lock().unwrap().take() {
-            let names: Vec<&str> = (0..6).filter(|k| bits & (1 << k) != 0).map(|k| ST_NAMES[k]).collect();
-            anyhow::bail!(
-                "explicit vehicles: {} (capacity {:?}; raise ExplicitVehiclesDef::capacity)",
-                names.join(", "),
-                self.layout.cap
-            );
+            self.status_bits_error(bits).map_err(anyhow::Error::msg)?;
         }
         // The explicit solver's own status (loop cap, vehicle-contact limits) is read
         // without waiting inside its frame (it fails the frame that finds an error).
