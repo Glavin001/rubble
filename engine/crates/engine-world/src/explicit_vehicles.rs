@@ -134,7 +134,7 @@ struct Params {
 fn coupling_loop_budget(p: &Params) -> u32 {
     let [c, h, s, pl, b, k, v] = [p.colliders, p.hash_size, p.s, p.planes, p.b, p.cand_cap, p.vehicles].map(u64::from);
     let unit = c + 33 * h + s * (s + pl + b) + k * k + 64 * v + 4096;
-    (4 * unit).clamp(1 << 22, 1 << 31) as u32
+    engine_webgpu::loop_budget_override().unwrap_or_else(|| (4 * unit).clamp(1 << 22, 1 << 31) as u32)
 }
 
 pub(crate) struct ExplicitVehicles {

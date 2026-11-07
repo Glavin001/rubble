@@ -180,7 +180,17 @@ pub const LOOP_BUDGET_MAX: u64 = 1 << 31;
 /// [`LOOP_BUDGET_MIN`]..=[`LOOP_BUDGET_MAX`]. A loop of a sound state never reaches it;
 /// a corrupt count stops there and fails the frame (the loop-cap flag).
 pub fn loop_budget(unit: u64, steps: u32) -> u32 {
+    // RUBBLE_LOOP_BUDGET (tests of the budget itself): a fixed budget instead.
+    if let Some(b) = loop_budget_override() {
+        return b;
+    }
     (2 * unit * (u64::from(steps) + 2)).clamp(LOOP_BUDGET_MIN, LOOP_BUDGET_MAX) as u32
+}
+
+/// `RUBBLE_LOOP_BUDGET`: a fixed pass budget for every frame (tests of the budget: a
+/// small one must end frames with the loop-cap error, never hang).
+pub fn loop_budget_override() -> Option<u32> {
+    std::env::var("RUBBLE_LOOP_BUDGET").ok().and_then(|v| v.parse().ok())
 }
 /// The grid walk's pairs a vehicle lists per step before it walks again with its tests
 /// (the kernel's `TRI_PAIR_CAP`; 2 gNext words a pair).
