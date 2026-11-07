@@ -445,11 +445,10 @@
     // GPU ms per World step: the whole step and its segments (?timing=phases: the rigid
     // passes against the vehicles' coupling and 2 kHz frame).
     const gpuSeg = new Map(); let gpuTotal = [];
-    const VEHICLE_SEGS = new Set(['cpl_emit', 'cpl_plan', 'cpl_query', 'cpl_share', 'explicit_frame', 'cpl_loads']);
     const median = (a) => a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : 0;
     function gpuSplit() {
       let veh = 0, rigid = 0;
-      for (const [n, a] of gpuSeg) { const m = a.reduce((x, y) => x + y, 0) / a.length; if (VEHICLE_SEGS.has(n) || n.startsWith('explicit')) veh += m; else rigid += m; }
+      for (const [n, a] of gpuSeg) { const m = a.reduce((x, y) => x + y, 0) / a.length; if (n.startsWith('cpl_') || n.startsWith('explicit')) veh += m; else rigid += m; }
       return { total: median(gpuTotal), vehicle: veh, rigid };
     }
     window.__gpu = () => ({ total: [...gpuTotal], split: gpuSplit(), segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
