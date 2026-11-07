@@ -1454,7 +1454,21 @@ The ETK on the same scene: pole 202 / 281 mm, MDB 244 mm.
 
 ### On the GPU page
 
-See below (`media/gen3-r8/`).
+`media/gen3-r8/` shows the page's pole (`pole29`, `three` view) with `GEN3_CABIN_R8`'s
+export: impact (110 ms, as round 7's), +64 ms and settled, on raycast wheels, surface
+contact on. The ETK on the same preset and camera is round 7's
+(`media/gen3-r7/pole29_etk_*.jpg`): its physics and the page are unchanged, and the
+default gen3 is round 7's bit for bit (`media/gen3-r7/pole29_gen3_*.jpg`).
+- The pole now strikes the front door's rear half, behind the A-pillar; at +64 ms the
+  windshield and the front side glass have shattered and the rear door stands ajar on
+  its hinges.
+- **No MDB stills.** The `mdb214` page did not start within the recorder's 15 minutes,
+  twice (a kill timer at 18–20 min), with no page error or console error. With the same
+  Chrome profile, car and build, the `pole29` page was ready in 3 s. So the hang is the
+  two-vehicle scene's (the barrier is a second vehicle), not the shader cache: the
+  page's status stays "loading…", which it sets only at the end of its setup.
+  `CRASH_LAB_PROGRESS=1` logs the wait and the recorder now prints the page's errors
+  when it gives up. Finding the step that hangs needs the page's setup instrumented.
 
 ### Diagnostics added
 
