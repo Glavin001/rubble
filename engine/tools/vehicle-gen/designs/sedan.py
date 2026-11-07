@@ -232,11 +232,15 @@ def build_layout(cb):
 
 
 def build_caps(cb):
+    build_nose(cb)
+    build_tail(cb)
+
+
+def build_nose(cb):
     zi = cb.zi
-    i0, iT = zi['F'], zi['T']
+    i0 = zi['F']
     J = cb.J
     nF = (lambda j: cb.nid(i0, j % J))
-    nT = (lambda j: cb.nid(iT, j % J))
     # nose: bumper cover with the headlamps under the bonnet edge and the
     # grille opening between them
     left = [nF(k) for k in range(1, 6)]
@@ -260,7 +264,14 @@ def build_caps(cb):
         return 'bumper_front'
     cb.cap('capF', front_z, 1, left, right, bottom, top, fpart)
     cb.grille_cols = (xs[3], xs[C - 3], xs[4], xs[C - 4])
+
+
+def build_tail(cb):
     # tail: bumper cover low, tail panel, wrap-round lamps under the lid
+    zi = cb.zi
+    iT = zi['T']
+    J = cb.J
+    nT = (lambda j: cb.nid(iT, j % J))
     left = [nT(k) for k in range(1, 6)]
     right = [nT(J - k) for k in range(1, 6)]
     y0 = cb.L.node_pos(nT(1))[1]

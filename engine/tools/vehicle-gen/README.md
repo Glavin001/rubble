@@ -14,6 +14,34 @@ need next, and we know every vertex's surface parameters.
 | 1969 fastback Mach 1, electric blue | [designs/mach1_1969.py](designs/mach1_1969.py) | [engine/scenes/vehicles/mach1_1969](../../scenes/vehicles/mach1_1969) |
 | Mid-size four-door sedan (the spec's car) | [designs/sedan.py](designs/sedan.py) | [engine/scenes/vehicles/sedan](../../scenes/vehicles/sedan) |
 | Off-road 4x4 SUV | [designs/suv_4x4.py](designs/suv_4x4.py) | [engine/scenes/vehicles/suv_4x4](../../scenes/vehicles/suv_4x4) |
+| Police interceptor (from the sedan) | [designs/police_sedan.py](designs/police_sedan.py) | [engine/scenes/vehicles/police_sedan](../../scenes/vehicles/police_sedan) |
+| Estate wagon (from the sedan) | [designs/wagon.py](designs/wagon.py) | [engine/scenes/vehicles/wagon](../../scenes/vehicles/wagon) |
+| Fastback gasser (from the Mach 1) | [designs/mach1_gasser.py](designs/mach1_gasser.py) | [engine/scenes/vehicles/mach1_gasser](../../scenes/vehicles/mach1_gasser) |
+
+### Variants
+
+A design can start from another and override only what differs
+([vehgen/design.py](vehgen/design.py)):
+
+```python
+from vehgen.design import derive
+derive('sedan', globals())        # the sedan's tables and functions, in this module
+NAME = 'wagon'
+K[9] = key(0.0, [...])            # a new roof centre line
+def rear_z(x, y): ...             # a new tail face
+def build_tail(cb): ...           # a new tail cap; the nose stays the sedan's
+_sedan_parts = parts
+def parts(cb):
+    out, extras, mk = _sedan_parts(cb)
+    out['roof_rails'] = ...       # extra parts
+    return out, extras, mk
+```
+
+The base's functions read the variant's globals, so overriding a constant,
+key line or function changes everything that uses it. The three variants
+above are 90-150 lines each. What a variant cannot easily change: proportions
+along the car (z positions are absolute in the base's tables and parts) and
+door count.
 
 ## Running
 

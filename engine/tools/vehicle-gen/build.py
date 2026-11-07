@@ -51,7 +51,7 @@ uvpack.normalise_other(parts)
 print('built %d parts in %.1fs; paint atlas %.2f m square' % (len(parts), time.time() - t0, S))
 
 blender.reset_scene()
-mats = blender.make_materials(D.PAINT, D.PAINT_METALLIC, D.PAINT_ROUGHNESS)
+mats = blender.make_materials(D.PAINT, D.PAINT_METALLIC, D.PAINT_ROUGHNESS, getattr(D, 'PAINT_COAT', 1.0))
 root = blender.make_root()
 for name in sorted(parts):
     blender.make_object(name, parts[name], mats, root)
