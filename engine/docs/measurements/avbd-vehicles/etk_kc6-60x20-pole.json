@@ -1,0 +1,120 @@
+{
+  "car": "etk_kc6",
+  "config": "60x20",
+  "result": {
+    "barrier_min_x": null,
+    "barrier_vx": null,
+    "car_vx": 2.688,
+    "damage": {
+      "bent_beams": 204,
+      "broken_beams": 57,
+      "finite": true,
+      "hardware_broken": 6,
+      "hardware_broken_names": [
+        "softtop_RR",
+        "doorhinge_b_R",
+        "doorglass_R_break",
+        "sideskirt_R_rear",
+        "sideskirt_L_mid2",
+        "sideskirt_L_rear"
+      ],
+      "hardware_total": 62,
+      "nodes_off_main_body": 0,
+      "parts_detached": 0,
+      "parts_detached_names": []
+    },
+    "dynamic_crush_mm": 49.0,
+    "energy_rise_j": 0.0,
+    "intrusion": {
+      "chest": {
+        "max_mm": 251.1,
+        "nodes": 32,
+        "residual_mm": 251.1
+      },
+      "feet": {
+        "max_mm": 244.1,
+        "nodes": 41,
+        "residual_mm": 244.1
+      },
+      "head": {
+        "max_mm": 141.3,
+        "nodes": 15,
+        "residual_mm": 115.5
+      },
+      "hip": {
+        "max_mm": 154.3,
+        "nodes": 42,
+        "residual_mm": 154.3
+      },
+      "knees": {
+        "max_mm": 231.9,
+        "nodes": 50,
+        "residual_mm": 231.9
+      }
+    },
+    "ke_end_kj": 7.611,
+    "penetration": {
+      "beams": {
+        "max_mm": 126.9,
+        "p99_in_contact_mm": 126.9,
+        "p99_mm": 126.9,
+        "samples_in_contact": 283
+      },
+      "colliders": 1,
+      "deepest_node": 162,
+      "deepest_node_mass": 1.7,
+      "nodes": {
+        "max_mm": 7.4,
+        "p99_in_contact_mm": 7.4,
+        "p99_mm": 7.4,
+        "samples_in_contact": 66
+      },
+      "samples": 1500,
+      "triangles": {
+        "max_mm": 127.0,
+        "p99_in_contact_mm": 127.0,
+        "p99_mm": 127.0,
+        "samples_in_contact": 283
+      }
+    },
+    "pole_reach_mm": 7492.5,
+    "pole_slide_mm": -1657.1,
+    "residual_crush_imprint_mm": 31.3,
+    "residual_crush_mm": 31.3,
+    "sim_s": 1.5,
+    "struck_nodes": 8,
+    "visual": {
+      "available": true,
+      "compress_min": 0.031,
+      "compress_p01": 0.654,
+      "dihedral_edges": 132487,
+      "dihedral_max_deg": 179.0,
+      "dihedral_over_30": 1706,
+      "dihedral_over_60": 739,
+      "dihedral_p99_deg": 37.1,
+      "flipped_at_rest": 19,
+      "flipped_new": 256,
+      "seam_gap_max_mm": 30.4,
+      "seam_gap_p99_mm": 28.2,
+      "seam_open_1cm": 10,
+      "seam_open_5cm": 0,
+      "seam_pairs": 894,
+      "seam_torn_pairs": 0,
+      "shutline_gap_p99_mm": 69.6,
+      "shutline_open_5cm": 160,
+      "shutline_pairs": 12301,
+      "stretch_max": 31.555,
+      "stretch_p99": 1.77,
+      "torn_fraction": 0.001,
+      "torn_vertices": 82,
+      "triangles": 90566,
+      "tris_live": 90462,
+      "tris_over_1_5": 1441,
+      "tris_under_0_5": 450,
+      "vertices": 77885
+    },
+    "wall_s_per_sim_s": 0.622
+  },
+  "scene": "pole",
+  "wall_s": 1.058021903038025
+}

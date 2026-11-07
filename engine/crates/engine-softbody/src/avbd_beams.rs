@@ -440,6 +440,36 @@ fn shape_depth(sh: &StaticShape, bd: &crate::explicit_beams::StaticBox, x: Vec3,
     hi
 }
 
+/// The face of `b` the segment `a → x` enters through (`a` outside), by the slab
+/// test; `None` when `a` is inside.
+fn entry_face(b: &crate::explicit_beams::StaticBox, a: Vec3, x: Vec3) -> Option<Vec3> {
+    let inside = (0..3).all(|k| a[k] > b.lo[k] && a[k] < b.hi[k]);
+    if inside {
+        return None;
+    }
+    let d = x - a;
+    let mut best: Option<(f32, Vec3)> = None;
+    for k in 0..3 {
+        let (face, n) = if a[k] <= b.lo[k] {
+            (b.lo[k], -1.0)
+        } else if a[k] >= b.hi[k] {
+            (b.hi[k], 1.0)
+        } else {
+            continue;
+        };
+        if d[k].abs() < 1e-12 {
+            continue;
+        }
+        let t = (face - a[k]) / d[k];
+        if best.is_none_or(|(bt, _)| t > bt) {
+            let mut nv = Vec3::ZERO;
+            nv[k] = n;
+            best = Some((t, nv));
+        }
+    }
+    best.map(|(_, n)| n)
+}
+
 fn box_depth(b: &crate::explicit_beams::StaticBox, x: Vec3, n: Vec3) -> f32 {
     // Distance to the face with outward normal n.
     if n.x > 0.5 {
@@ -650,7 +680,11 @@ fn step(s: &mut ExplicitBeams, st: &mut AvbdState, h: f32) {
                     add(0, Vec3::Y, ground, &surface_g);
                 }
                 for (bi, bx) in boxes_local.iter().enumerate() {
-                    if let Some(nrm) = crate::explicit_beams::box_face(bx, xi) {
+                    if let Some(nearest) = crate::explicit_beams::box_face(bx, xi) {
+                        // A node that started the step outside meets the face it
+                        // entered through (one implicit step can carry it past the
+                        // middle of a thin box, or nearer another face).
+                        let nrm = entry_face(bx, x0[i], xi).unwrap_or(nearest);
                         let d = box_depth(bx, xi, nrm);
                         add(1 + bi as u32, nrm, nrm.dot(xi) + d, &surface_b);
                     }

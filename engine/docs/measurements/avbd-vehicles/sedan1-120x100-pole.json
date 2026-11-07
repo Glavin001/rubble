@@ -1,0 +1,113 @@
+{
+  "car": "sedan1",
+  "config": "120x100",
+  "result": {
+    "barrier_min_x": null,
+    "barrier_vx": null,
+    "car_vx": 0.049,
+    "damage": {
+      "bent_beams": 206,
+      "broken_beams": 7,
+      "finite": true,
+      "hardware_broken": 0,
+      "hardware_broken_names": [],
+      "hardware_total": 22,
+      "nodes_off_main_body": 0,
+      "parts_detached": 0,
+      "parts_detached_names": []
+    },
+    "dynamic_crush_mm": 375.5,
+    "energy_rise_j": 0.0,
+    "intrusion": {
+      "chest": {
+        "max_mm": 316.0,
+        "nodes": 45,
+        "residual_mm": 227.9
+      },
+      "feet": {
+        "max_mm": 58.3,
+        "nodes": 58,
+        "residual_mm": 44.0
+      },
+      "head": {
+        "max_mm": 350.1,
+        "nodes": 39,
+        "residual_mm": 253.7
+      },
+      "hip": {
+        "max_mm": 354.6,
+        "nodes": 60,
+        "residual_mm": 226.4
+      },
+      "knees": {
+        "max_mm": 229.3,
+        "nodes": 61,
+        "residual_mm": 169.3
+      }
+    },
+    "ke_end_kj": 0.008,
+    "penetration": {
+      "beams": {
+        "max_mm": 127.0,
+        "p99_in_contact_mm": 127.0,
+        "p99_mm": 127.0,
+        "samples_in_contact": 1492
+      },
+      "colliders": 1,
+      "deepest_node": 193,
+      "deepest_node_mass": 1.299,
+      "nodes": {
+        "max_mm": 0.3,
+        "p99_in_contact_mm": 0.3,
+        "p99_mm": 0.3,
+        "samples_in_contact": 641
+      },
+      "samples": 1500,
+      "triangles": {
+        "max_mm": 127.0,
+        "p99_in_contact_mm": 127.0,
+        "p99_mm": 127.0,
+        "samples_in_contact": 1492
+      }
+    },
+    "pole_reach_mm": 500.7,
+    "pole_slide_mm": -77.8,
+    "residual_crush_imprint_mm": 254.0,
+    "residual_crush_mm": 254.0,
+    "sim_s": 1.5,
+    "struck_nodes": 7,
+    "visual": {
+      "available": true,
+      "compress_min": 0.018,
+      "compress_p01": 0.698,
+      "dihedral_edges": 395444,
+      "dihedral_max_deg": 179.5,
+      "dihedral_over_30": 6193,
+      "dihedral_over_60": 2833,
+      "dihedral_p99_deg": 45.5,
+      "flipped_at_rest": 18,
+      "flipped_new": 1649,
+      "seam_gap_max_mm": 241.9,
+      "seam_gap_p99_mm": 89.4,
+      "seam_open_1cm": 1312,
+      "seam_open_5cm": 540,
+      "seam_pairs": 11603,
+      "seam_torn_pairs": 0,
+      "shutline_gap_p99_mm": 67.7,
+      "shutline_open_5cm": 1296,
+      "shutline_pairs": 71173,
+      "stretch_max": 493.429,
+      "stretch_p99": 2.578,
+      "torn_fraction": 0.0,
+      "torn_vertices": 0,
+      "triangles": 278707,
+      "tris_live": 278232,
+      "tris_over_1_5": 6167,
+      "tris_under_0_5": 1011,
+      "vertices": 166487
+    },
+    "wall_s_per_sim_s": 11.707
+  },
+  "scene": "pole",
+  "wall_s": 18.379472732543945
+}
