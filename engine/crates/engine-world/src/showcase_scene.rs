@@ -256,14 +256,25 @@ pub fn jbeam_vehicle(
     pc: Option<&str>,
     settings: ExplicitBeamsSettings,
 ) -> anyhow::Result<(ExplicitBeams, Vec<String>)> {
+    jbeam_vehicle_on(files, pc, settings, JbeamWheels::Pressure)
+}
+
+/// [`jbeam_vehicle`] on `wheels`: [`JbeamWheels::Pressure`] (its own pressure wheels) or
+/// [`JbeamWheels::Raycast`] (drivable: `engine_softbody::explicit_drive`'s raycast wheels
+/// on its hubs, `ExplicitBeams::from_desc_jbeam_raycast`).
+pub fn jbeam_vehicle_on(
+    files: &[(&str, &str)],
+    pc: Option<&str>,
+    settings: ExplicitBeamsSettings,
+    wheels: JbeamWheels,
+) -> anyhow::Result<(ExplicitBeams, Vec<String>)> {
     let desc = engine_softbody::jbeam::load_jbeam(files, pc).map_err(anyhow::Error::msg)?;
-    let (mut sim, warnings) = ExplicitBeams::from_desc_jbeam_with(
-        &desc,
-        JbeamWheels::Pressure,
-        Vec3::ZERO,
-        Vec3::ZERO,
-        settings,
-    )
+    let (mut sim, warnings) = match wheels {
+        JbeamWheels::Raycast => {
+            ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, Vec3::ZERO, settings)
+        }
+        w => ExplicitBeams::from_desc_jbeam_with(&desc, w, Vec3::ZERO, Vec3::ZERO, settings),
+    }
     .map_err(anyhow::Error::msg)?;
     anyhow::ensure!(!sim.nodes.is_empty(), "the vehicle has no nodes");
     let f = engine_softbody::pack::forward_axis(&desc);

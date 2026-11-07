@@ -7,7 +7,7 @@
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
   hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
-  showcaseLayout,
+  showcaseLayout, brickRingLayout,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -80,6 +80,19 @@ export async function createShowcase(spec) {
   const world = await WebWorld.createShowcase(spec);
   world.flags = solverFlags();
   return { world, layout };
+}
+
+/**
+ * The brick ring drive (`rubble::brick_ring_drive`): the 110k brick ring with drivable
+ * soft-body cars on raycast wheels in one World on its own device (spec as
+ * `WebWorld.createBrickRingDrive`), and its layout (`brickRingLayout`).
+ */
+export async function createBrickRingDrive(spec) {
+  ready ??= init();
+  await ready;
+  const world = await WebWorld.createBrickRingDrive(spec);
+  world.flags = solverFlags();
+  return { world, layout: brickRingLayout(spec) };
 }
 
 /** The wasm, once loaded (pages that call its free functions before a world). */

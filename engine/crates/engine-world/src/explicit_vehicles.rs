@@ -841,6 +841,11 @@ impl World {
         self.explicit.as_ref().map(|x| (&x.tris, x.tri_count))
     }
 
+    /// The explicit vehicles as they were added (spawn state: node counts, raycast wheels).
+    pub fn explicit_vehicles_as_added(&self) -> &[ExplicitBeams] {
+        self.explicit.as_ref().map_or(&[], |x| x.sims.as_slice())
+    }
+
     /// Mutable access (velocity writes, the grab, vehicle contact settings).
     pub fn explicit_vehicles_mut(&mut self) -> Option<&mut ExplicitBeamsGpu> {
         self.explicit.as_mut().map(|x| &mut x.gpu)

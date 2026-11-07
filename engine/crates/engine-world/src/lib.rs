@@ -34,6 +34,7 @@ mod explicit_vehicles;
 #[cfg(feature = "stress")]
 pub mod explicit_scene;
 pub mod showcase_scene;
+pub mod brick_ring_drive;
 mod guidance;
 mod handles;
 mod host_state;

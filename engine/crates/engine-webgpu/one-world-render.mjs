@@ -387,9 +387,14 @@ export function lightViewProj(sun, focus, half) {
   return mat4mul(proj, view);
 }
 
-export function createSceneRenderer(device, { format, depthFormat = 'depth32float', sampleCount = 1 }) {
+// `hullTris`: triangles drawn per collider instance (a scene of boxes only: 12);
+// `firstCollider`: colliders before it are not drawn (a ground slab the sky's ground
+// stands for); `brick`: light dynamic colliders (below 700 kg/m³) are shaded as brick.
+export function createSceneRenderer(device, { format, depthFormat = 'depth32float', sampleCount = 1, hullTris = HULL_TRIS, firstCollider = 0, brick = false }) {
   const mod = (label, code) => device.createShaderModule({ label, code });
-  const colMod = mod('one-world colliders', COLLIDERS);
+  const colMod = mod('one-world colliders', brick
+    ? COLLIDERS.replace('let density = bitcast<f32>(i.kind.x);', 'let raw = bitcast<f32>(i.kind.x);\n  let density = select(raw, 1900.0, raw > 0.0 && raw < 700.0);')
+    : COLLIDERS);
   const envMod = mod('one-world env', ENV);
   const frameBuf = device.createBuffer({ size: 64 * 3 + 16 * 5, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const frameData = new Float32Array((64 * 3 + 16 * 5) / 4);
@@ -462,7 +467,7 @@ export function createSceneRenderer(device, { format, depthFormat = 'depth32floa
       const g = bind(world);
       const pass = encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
       const n = world.colliderCount();
-      pass.setPipeline(P.boxS); pass.setBindGroup(0, g.boxS); pass.draw(3 * HULL_TRIS, n);
+      pass.setPipeline(P.boxS); pass.setBindGroup(0, g.boxS); pass.draw(3 * hullTris, Math.max(0, n - firstCollider), 0, firstCollider);
       pass.setPipeline(P.sphereS); pass.setBindGroup(0, g.sphereS); pass.draw(24 * 16 * 6, Math.min(n, sphereCols));
       pass.setPipeline(P.rodS); pass.setBindGroup(0, g.rodS); pass.draw(36);
       extra?.(pass, lightVP);
@@ -474,7 +479,7 @@ export function createSceneRenderer(device, { format, depthFormat = 'depth32floa
       const n = world.colliderCount();
       pass.setPipeline(P.sky); pass.setBindGroup(0, g.box); pass.draw(3);
       pass.setPipeline(P.ground); pass.setBindGroup(0, g.box); pass.draw(6);
-      pass.setPipeline(P.box); pass.setBindGroup(0, g.box); pass.draw(3 * HULL_TRIS, n);
+      pass.setPipeline(P.box); pass.setBindGroup(0, g.box); pass.draw(3 * hullTris, Math.max(0, n - firstCollider), 0, firstCollider);
       pass.setPipeline(P.sphere); pass.setBindGroup(0, g.sphere); pass.draw(24 * 16 * 6, Math.min(n, sphereCols));
       pass.setPipeline(P.rod); pass.setBindGroup(0, g.rod); pass.draw(36);
     },
