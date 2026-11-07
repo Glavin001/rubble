@@ -56,7 +56,6 @@ export function measureCrush(R, C) {
   // they went (mean and the most), and the car's overall length lost at the front.
   const front = R.map((p, i) => i).filter((i) => zhi - R[i][2] < 0.1);
   const back = front.map((i) => -disp[i][2]);
-  let azhi = -Infinity; for (const a of A) azhi = Math.max(azhi, a[2]);
   let mi = 0; for (let i = 1; i < n; i++) if (mag[i] > mag[mi]) mi = i;
   const where = (p) => {
     const f = (p[2] - zlo) / len;
@@ -70,6 +69,9 @@ export function measureCrush(R, C) {
   const DETACHED = 1.5;
   const detached = mag.map((m, i) => i).filter((i) => mag[i] > DETACHED).map((i) => ({ node: i, disp: +mag[i].toFixed(3), dir: disp[i].map((x) => +x.toFixed(3)), where: where(R[i]) }));
   let bi = -1; for (let i = 0; i < n; i++) if (mag[i] <= DETACHED && (bi < 0 || mag[i] > mag[bi])) bi = i;
+  // The length at the front: the body's frontmost node, torn-off nodes left out (a piece
+  // thrown ahead of the car is not the car's length).
+  let azhi = -Infinity; for (let i = 0; i < n; i++) if (mag[i] <= DETACHED) azhi = Math.max(azhi, A[i][2]);
   // Displacement by fifth of the car's length (rest position): mean and max.
   const bands = [0, 1, 2, 3, 4].map((b) => { const ids = R.map((p, i) => i).filter((i) => Math.min(4, Math.floor(5 * (R[i][2] - zlo) / len)) === b); return { from: +(b / 5).toFixed(1), nodes: ids.length, mean: +(ids.reduce((s, i) => s + mag[i], 0) / ids.length).toFixed(4), max: +Math.max(...ids.map((i) => mag[i])).toFixed(4) }; });
   return {

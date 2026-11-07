@@ -27,8 +27,21 @@ struct Frame {
   ground: vec4f,    // y, road half width, road centre x, road length
   rod: vec4f,       // anchor xyz, ball body slot (bits; 0xffffffff none)
   focus: vec4f,     // xyz, fog distance
+  cut: vec4f,       // the ghost cut's centre xyz, its radius about it (m; 0: no cut)
+  cut2: vec4f,      // the cut's radius along the line to the eye (m), ghost opacity
 };
 @group(0) @binding(0) var<uniform> frame: Frame;
+// The ghost cut (rendering only): a body whose centre is within cut.w of the cut's
+// vertical axis (any height: what lies on or over the car), or within cut2.x of the
+// line from the cut's centre to the eye (what stands between the camera and the car).
+fn ghosted(p: vec3f) -> bool {
+  if (frame.cut.w <= 0.0) { return false; }
+  if (length(p.xz - frame.cut.xz) < frame.cut.w) { return true; }
+  let a = frame.cut.xyz;
+  let d = frame.eye.xyz - a;
+  let t = clamp(dot(p - a, d) / max(dot(d, d), 1e-6), 0.0, 1.0);
+  return length(p - (a + d * t)) < frame.cut2.x;
+}
 
 fn qrot(q: vec4f, v: vec3f) -> vec3f {
   let u = q.xyz;
@@ -172,15 +185,23 @@ fn solidWorld(ci: u32, vi: u32, o: ptr<function, Out>) -> bool {
   (*o).edges = edges;
   return true;
 }
+fn colGhosted(ci: u32) -> bool { return ghosted(bodyPos(bodies[cols[ci].body])); }
 @vertex fn vsBox(@builtin(vertex_index) vi: u32, @builtin(instance_index) ci: u32) -> Out {
   var o: Out;
-  if (!solidWorld(ci, vi, &o)) { o.clip = vec4f(2.0, 2.0, 2.0, 1.0); return o; }
+  if (colGhosted(ci) || !solidWorld(ci, vi, &o)) { o.clip = vec4f(2.0, 2.0, 2.0, 1.0); return o; }
+  o.clip = frame.viewProj * vec4f(o.w, 1.0);
+  return o;
+}
+// The ghosted colliders only (drawn last, blended, no depth write).
+@vertex fn vsBoxGhost(@builtin(vertex_index) vi: u32, @builtin(instance_index) ci: u32) -> Out {
+  var o: Out;
+  if (!colGhosted(ci) || !solidWorld(ci, vi, &o)) { o.clip = vec4f(2.0, 2.0, 2.0, 1.0); return o; }
   o.clip = frame.viewProj * vec4f(o.w, 1.0);
   return o;
 }
 @vertex fn vsBoxShadow(@builtin(vertex_index) vi: u32, @builtin(instance_index) ci: u32) -> @builtin(position) vec4f {
   var o: Out;
-  if (!solidWorld(ci, vi, &o)) { return vec4f(2.0, 2.0, 2.0, 1.0); }
+  if (colGhosted(ci) || !solidWorld(ci, vi, &o)) { return vec4f(2.0, 2.0, 2.0, 1.0); }
   return frame.lightVP * vec4f(o.w, 1.0);
 }
 // Spheres (the wrecking ball): a 24 × 16 latitude–longitude mesh, among the first colliders.
@@ -302,6 +323,20 @@ fn rodWorld(vi: u32, o: ptr<function, Out>) -> bool {
   var c = lit(albedo * edge, n, i.w, ao, spec);
   return vec4f(fog(c, i.w), 1.0);
 }
+// A ghosted collider: a faint pale fill and its face outlines (cut2.y the fill's
+// opacity), so the bricks over and around the car read as a glass model of the pile.
+@fragment fn fsGhost(i: Out) -> @location(0) vec4f {
+  let px = i.bary / max(fwidth(i.bary), vec3f(1e-6));
+  let dEdge = min(min(select(1e9, px.x, i.edges.x > 0.5), select(1e9, px.y, i.edges.y > 0.5)), select(1e9, px.z, i.edges.z > 0.5));
+  let line = 1.0 - smoothstep(0.5, 1.6, dEdge);
+  let n = normalize(i.n);
+  let shade = 0.75 + 0.25 * max(dot(n, frame.sun.xyz), 0.0);
+  let c = mix(vec3f(0.86, 0.6, 0.48), vec3f(1.0, 0.93, 0.85), line) * shade;
+  // Faded out well above the car (the wall over it) and right at the eye (bricks the
+  // camera passes through), so the outlines near the car carry the picture.
+  let keep = (1.0 - smoothstep(frame.cut.y + 1.5, frame.cut.y + 4.5, i.w.y)) * smoothstep(1.2, 3.5, distance(i.w, frame.eye.xyz));
+  return vec4f(c, (frame.cut2.y + (1.0 - frame.cut2.y) * 0.4 * line) * keep);
+}
 `;
 
 const ENV = /* wgsl */ `
@@ -396,8 +431,8 @@ export function createSceneRenderer(device, { format, depthFormat = 'depth32floa
     ? COLLIDERS.replace('let density = bitcast<f32>(i.kind.x);', 'let raw = bitcast<f32>(i.kind.x);\n  let density = select(raw, 1900.0, raw > 0.0 && raw < 700.0);')
     : COLLIDERS);
   const envMod = mod('one-world env', ENV);
-  const frameBuf = device.createBuffer({ size: 64 * 3 + 16 * 5, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const frameData = new Float32Array((64 * 3 + 16 * 5) / 4);
+  const frameBuf = device.createBuffer({ size: 64 * 3 + 16 * 7, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const frameData = new Float32Array((64 * 3 + 16 * 7) / 4);
   const shadowTex = device.createTexture({ size: [SHADOW, SHADOW], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
   const shadowView = shadowTex.createView();
   const shadowSamp = device.createSampler({ compare: 'less', magFilter: 'linear', minFilter: 'linear' });
@@ -427,7 +462,18 @@ export function createSceneRenderer(device, { format, depthFormat = 'depth32floa
     boxS: pipe(colMod, 'vsBoxShadow', null, shadowDepth),
     sphereS: pipe(colMod, 'vsSphereShadow', null, shadowDepth),
     rodS: pipe(colMod, 'vsRodShadow', null, shadowDepth),
+    // The ghost cut's colliders: blended over what is drawn, no depth write.
+    ghost: device.createRenderPipeline({
+      layout, vertex: { module: colMod, entryPoint: 'vsBoxGhost' },
+      fragment: { module: colMod, entryPoint: 'fsGhost', targets: [{ format, blend: {
+        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' } } }] },
+      primitive: { cullMode: 'none' }, depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'less' },
+      multisample: { count: sampleCount },
+    }),
   };
+  // The ghost cut (env.cut): off until set; rendering only.
+  let cut = null;
   const res = (b) => ({ buffer: b });
   let bound = [], group = null;
   // The shadow pass cannot sample the map it writes: its group binds a dummy.
@@ -460,7 +506,22 @@ export function createSceneRenderer(device, { format, depthFormat = 'depth32floa
       frameData.set([rod ? rod.anchor[0] : 0, rod ? rod.anchor[1] : 0, rod ? rod.anchor[2] : 0, 0], 60);
       new Uint32Array(frameData.buffer, 63 * 4, 1)[0] = rod ? rod.body : 0xffffffff;
       frameData.set([focus[0], focus[1], focus[2], fogDist], 64);
+      frameData.set(cut ? [cut.centre[0], cut.centre[1], cut.centre[2], cut.radius, cut.towardEye ?? 0, cut.opacity ?? 0.06, 0, 0] : [0, 0, 0, 0, 0, 0, 0, 0], 68);
       device.queue.writeBuffer(frameBuf, 0, frameData);
+    },
+    /**
+     * The ghost cut, rendering only: colliders whose body centre is within `radius` m of
+     * `centre`'s vertical axis, or within `towardEye` m of the line from `centre` to the
+     * eye, are left out of the solid and shadow passes and drawn by `drawGhosts` as
+     * outlines over a faint fill (`opacity`). `null` turns it off. Read at `frame`.
+     */
+    setCut(c) { cut = c && c.radius > 0 ? c : null; },
+    /** The ghost cut's colliders, blended: after everything solid (the cars too). */
+    drawGhosts(pass, world) {
+      if (!cut) return;
+      const g = bind(world);
+      const n = world.colliderCount();
+      pass.setPipeline(P.ghost); pass.setBindGroup(0, g.box); pass.draw(3 * hullTris, Math.max(0, n - firstCollider), 0, firstCollider);
     },
     /** The shadow map: colliders, then `extra(pass, lightVP)` (the cars). */
     shadowPass(encoder, world, extra) {

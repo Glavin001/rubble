@@ -11,6 +11,10 @@
 //     --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
 //   node brick-ring-drive-record.mjs [--out dir] [--stills dir] [--query 'car=etk'] [name]
 //   node brick-ring-drive-record.mjs --probe [--secs 14] [--query 'car=sedan&timing=phases']
+//   node brick-ring-drive-record.mjs etk-v3:car=etk --inspect [--inspectSecs 12]
+//
+// --inspect (a flag: put it after the runs): the page's inspect orbit (key I) around each
+// crashed car of the real-time pass, bricks ghosted, appended after the replays.
 //
 // --probe: the page's own real-time loop (its FramePacer, ?auto=1) for --secs seconds,
 // its readout every second (World steps/s, FPS, GPU ms split, awake bodies, broken beams).
@@ -18,7 +22,7 @@
 // A hard time limit (--limit, minutes) bounds every run.
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, statSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, existsSync, statSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -150,6 +154,26 @@ for (const run of runs.length ? runs : ['etk']) {
   }
   if (hit == null) throw new Error(`${name}: no strike seen in ${st.t.toFixed(1)} s`);
   const realFrames = frameNo;
+  // --inspect: the inspect orbit around each car on this run's crashed cars (the World
+  // stepping on), recorded now and put after the replays: the bricks on and in front of
+  // the car ghosted, one turn of --inspectSecs (12) per car.
+  const inspectFrames = [];
+  if (args.includes('--inspect')) {
+    const secs = Number(opt('--inspectSecs', '12'));
+    const cars = await evaluate('window.__state().cars.length');
+    await rec('R.set({ inspect: true })');
+    const inDir = join(frameDir, 'inspect');
+    mkdirSync(inDir, { recursive: true });
+    const per = Math.round(secs * FPS);
+    for (let f = 0; f < per * cars; f++) {
+      st = await rec('R.frame(60, 1)');
+      const file = join(inDir, `i${String(f).padStart(6, '0')}.jpg`);
+      await grabTo(file); inspectFrames.push(file);
+      const k = f % per;
+      if (STILLS && [Math.round(0.02 * per), Math.round(0.3 * per), Math.round(0.55 * per), Math.round(0.8 * per)].includes(k)) await grabTo(join(STILLS, `${name}-inspect-car${Math.floor(f / per)}-${Math.round(100 * k / per)}.jpg`), 85);
+      if (k === per - 1) console.log(`${name}: inspect car ${Math.floor(f / per)}: ${JSON.stringify(await evaluate('(({ car, metrics, impactKmh, beamsBroken }) => ({ car, impactKmh, beamsBroken, frontCrush: metrics?.frontCrush, frontCrushMax: metrics?.frontCrushMax, lengthLoss: metrics?.lengthLoss, bodyMaxDisp: metrics?.bodyMaxDisp, where: metrics?.bodyMaxWhere, alignRms: metrics?.alignRms }))(window.__inspectState())'))}`);
+    }
+  }
   // Passes 2 and 3: the strike ×4 slower from the wall's side, then from outside the
   // ring where the car comes out.
   for (const [r, camName] of ['side', 'outside'].entries()) {
@@ -167,13 +191,15 @@ for (const run of runs.length ? runs : ['etk']) {
       if (STILLS && shot < 2 && st.t >= hit + (r ? [0.45, 0.9] : [0.05, 0.3])[shot]) await grabTo(join(STILLS, `${name}-${camName}-${shot++}.jpg`), 78);
     }
   }
+  // The inspect orbit after the replays.
+  for (const f of inspectFrames) renameSync(f, join(frameDir, `f${String(frameNo++).padStart(6, '0')}.jpg`));
   const file = join(OUT, `brick-ring-drive-${name}.mp4`);
   const enc = spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-framerate', String(FPS), '-i', join(frameDir, 'f%06d.jpg'),
     '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', file], { stdio: 'inherit' });
   rmSync(frameDir, { recursive: true, force: true });
   if (enc.status !== 0) throw new Error('ffmpeg failed');
-  console.log(`${name}: ${(realFrames / FPS).toFixed(1)} s real time + ${((frameNo - realFrames) / FPS).toFixed(1)} s replays (strike at ${hit.toFixed(3)} s) → ${file}`);
-  videos.push({ name, file, real: realFrames / FPS, total: frameNo / FPS, impact: hit });
+  console.log(`${name}: ${(realFrames / FPS).toFixed(1)} s real time + ${((frameNo - realFrames - inspectFrames.length) / FPS).toFixed(1)} s replays + ${(inspectFrames.length / FPS).toFixed(1)} s inspect (strike at ${hit.toFixed(3)} s) → ${file}`);
+  videos.push({ name, file, real: realFrames / FPS, total: frameNo / FPS, impact: hit, inspect: inspectFrames.length / FPS });
   if (pageErrors.length) console.log('page messages:\n' + pageErrors.slice(0, 10).join('\n'));
 }
 const index = join(OUT, 'videos.json');
