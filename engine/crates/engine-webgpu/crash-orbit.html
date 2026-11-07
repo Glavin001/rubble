@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Rubble · Crash Orbit</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0d1016; color: #e6ebf3; font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel { position: fixed; background: rgba(12, 15, 22, 0.72); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; padding: 10px 14px; backdrop-filter: blur(6px); }
+    #hud { left: 18px; bottom: 18px; min-width: 17rem; }
+    #hud h1 { font-size: 18px; margin: 0 0 1px; font-weight: 750; }
+    #hud .sub { color: #aab3c4; font-size: 12.5px; margin-bottom: 6px; }
+    #stats { display: grid; grid-template-columns: auto auto; column-gap: 14px; row-gap: 1px; font-variant-numeric: tabular-nums; font-size: 13px; }
+    #stats .k { color: #8d96aa; }
+    #stats .v { text-align: right; font-weight: 650; }
+    #err { color: #ff8e8e; white-space: pre-wrap; }
+    .tag { position: fixed; transform: translate(-50%, -100%); padding: 4px 10px; font-weight: 750; font-size: 14px; letter-spacing: 0.04em; white-space: nowrap; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <canvas id="c" tabindex="0"></canvas>
+  <div id="hud" class="panel">
+    <h1 id="title">Crash Orbit</h1>
+    <div class="sub" id="sub">loading…</div>
+    <div id="stats"></div>
+    <div id="err"></div>
+  </div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
+  <script type="module">
+    // A static view of soft-body cars saved by crash-orbit.mjs from the brick ring drive
+    // (brick-ring-drive.html's window.__snapshot): no World and no stepping. Each car is
+    // drawn by the drive's own renderer (showcase-car-render.mjs) from its saved node,
+    // beam, misc and render-state buffers, so the deformed body, its tears, broken
+    // glass and worn paint are the drive's; on a plain ground under one sun, the camera
+    // orbiting it once in ?secs= seconds (12). The ground is plain asphalt: the scene
+    // renderer's road, 400 m wide, its lines far off.
+    //
+    // ?snap=URL[,URL]: one snapshot, or two side by side (the first on the left at the
+    // start: before / after). ?record=1: frame-locked (crash-orbit.mjs: window.__rec.frame(t)).
+    // ?secs= orbit period; ?pitch= degrees above; ?fov= degrees; ?start= start angle (deg).
+    import { loadWasm, showcaseCar, errorText } from './rubble-world.mjs';
+    import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
+    import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
+    import { createSceneRenderer } from './one-world-render.mjs';
+
+    const qs = new URLSearchParams(location.search);
+    const RECORD = qs.has('record');
+    const SAMPLES = Number(qs.get('msaa') || 4);
+    const SECS = Number(qs.get('secs') || 12);
+    const PITCH = Number(qs.get('pitch') || 13) * Math.PI / 180;
+    const FOV = Number(qs.get('fov') || 38) * Math.PI / 180;
+    const START = Number(qs.get('start') || 35) * Math.PI / 180;
+    const errEl = document.getElementById('err'), subEl = document.getElementById('sub');
+    const fail = (e) => { errEl.textContent = errorText(e); window.__failed = String(e?.message ?? e); console.error(e); };
+    addEventListener('error', (e) => fail(e.error ?? e.message));
+    addEventListener('unhandledrejection', (e) => fail(e.reason));
+    if (!navigator.gpu) { fail('WebGPU is not available in this browser'); throw new Error('no WebGPU'); }
+
+    const urls = (qs.get('snap') || '').split(',').filter(Boolean);
+    if (!urls.length) { fail('?snap=<snapshot.json> is needed (crash-orbit.mjs capture writes them)'); throw new Error('no snapshot'); }
+    await loadWasm();
+    const snaps = await Promise.all(urls.map(async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(`${u}: ${r.status}`); return r.json(); }));
+    const unb64 = (s) => { const b = atob(s); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };
+
+    // ---------------------------------------------------------------- the cars' visuals (as the drive builds them)
+    const MODS = { etk: { base: './__mods/etkk_tex', pc: 'etkk/kc6.pc' } };
+    const PAINT = [0.6, 0.04, 0.03];
+    const built = {};
+    async function visualFor(kind) {
+      if (built[kind]) return built[kind];
+      subEl.textContent = `building the ${kind} body…`;
+      if (kind === 'sedan') {
+        const c = showcaseCar({ style: 'sedan', resolution: 'low', paint: PAINT, wheels: 'raycast' });
+        c.visual.lod = [c.visualLod, c.visualFar];
+        return (built[kind] = { visual: c.visual, mod: null });
+      }
+      const mod = await loadMod(MODS[kind].base, { pc: MODS[kind].pc });
+      return (built[kind] = { visual: modVisual(mod, { native: true, raycast: true, paint: PAINT }).visual, mod });
+    }
+
+    // ---------------------------------------------------------------- the device and renderers
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    const L = adapter.limits;
+    const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: L.maxStorageBuffersPerShaderStage, maxStorageBufferBindingSize: L.maxStorageBufferBindingSize, maxBufferSize: L.maxBufferSize, maxTextureArrayLayers: L.maxTextureArrayLayers } });
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+    const canvas = document.getElementById('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    const configure = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      context.configure({ device, format, alphaMode: 'opaque' });
+    };
+    configure();
+    addEventListener('resize', configure);
+    const DEPTH = 'depth32float';
+    const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, hullTris: 12, firstCollider: 1, brick: true });
+    env.sun = (() => { const v = [0.42, 0.78, 0.46]; const l = Math.hypot(...v); return v.map((x) => x / l); })();
+    // No World: empty body, collider and hull buffers (no colliders drawn).
+    const emptyBuf = () => device.createBuffer({ size: 256, usage: GPUBufferUsage.STORAGE });
+    const noWorld = (() => { const b = [emptyBuf(), emptyBuf(), emptyBuf()]; return { bodyBuffer: () => b[0], colliderBuffer: () => b[1], hullArenaBuffer: () => b[2], colliderCount: () => 0 }; })();
+    const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'] });
+
+    // ---------------------------------------------------------------- the snapshots in one set of buffers
+    // Side by side: each car moved sideways (its origin in the misc buffer and its raycast
+    // wheels' centres; its nodes are relative to its origin) so the pair's centre is at
+    // the first car's place.
+    const bbox = (pts) => { const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity]; for (const p of pts) for (let j = 0; j < 3; j++) { lo[j] = Math.min(lo[j], p[j]); hi[j] = Math.max(hi[j], p[j]); } return { lo, hi, c: lo.map((x, j) => 0.5 * (x + hi[j])) }; };
+    const G = snaps[0].ground;
+    const GAP = Number(qs.get('gap') || 0.9);
+    const widths = snaps.map((s) => { const b = bbox(s.positions); return b.hi[0] - b.lo[0]; });
+    const total = widths.reduce((a, b) => a + b, 0) + GAP * (snaps.length - 1);
+    const home = bbox(snaps[0].positions).c;
+    let xAt = home[0] - total / 2;
+    const placed = snaps.map((s, k) => { const b = bbox(s.positions); const x = xAt + widths[k] / 2; xAt += widths[k] + GAP; return snaps.length === 1 ? [0, 0, 0] : [x - b.c[0], 0, home[2] - b.c[2]]; });
+    const nodeParts = [], beamParts = [], miscParts = [];
+    let nodeAt = 0, beamAt = 0, miscAt = 0;
+    const addSpecs = [];
+    for (const [k, s] of snaps.entries()) {
+      const nodes = unb64(s.gpu.nodes), beams = unb64(s.gpu.beams), misc = unb64(s.gpu.misc);
+      const nf = new Float32Array(nodes.buffer);
+      for (let i = 0; i < s.nodeCount; i++) for (let j = 4; j < 12; j++) nf[i * 12 + j] = j === 7 || j === 11 ? nf[i * 12 + j] : 0; // velocity and force off (no lead)
+      const mf = new Float32Array(misc.buffer), d = placed[k];
+      for (let j = 0; j < 3; j++) mf[j] += d[j]; // vehicle 0's origin
+      const recs = s.gpu.wheelRecords.map((r) => r + miscAt / 16);
+      for (let w = 0; w < s.gpu.wheelRecords.length; w += 4) { const c = s.gpu.wheelRecords[w + 1] * 4; for (let j = 0; j < 3; j++) mf[c + j] += d[j]; }
+      nodeParts.push(nodes); beamParts.push(beams); miscParts.push(misc);
+      addSpecs.push({ snap: s, nodeOffset: nodeAt, beamOffset: beamAt, vehicle: miscAt / 16, wheelRecords: new Uint32Array(recs), state: unb64(s.gpu.nodeState) });
+      nodeAt += s.nodeCount; beamAt += s.beamCount; miscAt += misc.byteLength;
+    }
+    const join = (parts) => { const n = parts.reduce((a, p) => a + p.byteLength, 0); const u = new Uint8Array(n); let o = 0; for (const p of parts) { u.set(p, o); o += p.byteLength; } return u; };
+    const upload = (u8) => { const b = device.createBuffer({ size: Math.max(16, u8.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, u8); return b; };
+    cars.setSolver(upload(join(nodeParts)), upload(join(miscParts)), upload(join(beamParts)));
+    const kinds = [...new Set(snaps.map((s) => s.car))];
+    if (kinds.length > 1) { fail('side by side needs snapshots of one car'); throw new Error('mixed cars'); }
+    const { visual, mod } = await visualFor(kinds[0]);
+    if (mod && qs.get('tex') !== '0') {
+      subEl.textContent = 'decoding the textures…';
+      const [colour, data] = await Promise.all([modTextures(mod, visual.textures), modTextures(mod, visual.dataTextures)]);
+      if (colour.length) cars.setTextures(colour, 1024);
+      if (data.length) cars.setDataTextures(data, 1024);
+    }
+    for (const a of addSpecs) {
+      if (a.snap.nodeCount !== visual.nodeCount || a.snap.beamCount !== visual.beamRest0.length) throw new Error(`snapshot ${a.snap.nodeCount} nodes / ${a.snap.beamCount} beams, the visual ${visual.nodeCount} / ${visual.beamRest0.length}`);
+      a.id = cars.addCar(visual, { nodeOffset: a.nodeOffset, beamOffset: a.beamOffset, vehicle: a.vehicle, lod: visual.lod, wheelRecords: a.wheelRecords });
+      cars.writeNodeState(a.id, a.state);
+    }
+
+    // ---------------------------------------------------------------- the orbit's framing
+    const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+    const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const pts = snaps.flatMap((s, k) => s.positions.map((p) => [p[0] + placed[k][0], p[1], p[2] + placed[k][2]]));
+    const box = bbox(pts);
+    // The wheels reach the ground below the body's nodes.
+    for (const x of [box.lo[0], box.hi[0]]) for (const z of [box.lo[2], box.hi[2]]) pts.push([x, Math.min(G, box.lo[1]), z]);
+    const centre = bbox(pts).c;
+    const aspect = () => canvas.width / canvas.height;
+    const dirAt = (a) => [Math.cos(PITCH) * Math.sin(a), Math.sin(PITCH), Math.cos(PITCH) * Math.cos(a)];
+    // One distance for the whole orbit: the nearest from which every node fits in 95 %
+    // of the view at every angle (no breathing as the car turns).
+    const FILL = Number(qs.get('fill') || 0.95);
+    function fitDistance() {
+      const tv = Math.tan(FOV / 2) * FILL, th = tv * aspect();
+      let d = 0;
+      for (let k = 0; k < 96; k++) {
+        const z = dirAt(START + 2 * Math.PI * k / 96), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+        for (const p of pts) { const q = sub3(p, centre); const pz = dot3(q, z); d = Math.max(d, pz + Math.abs(dot3(q, x)) / th, pz + Math.abs(dot3(q, y)) / tv); }
+      }
+      return d;
+    }
+    let DIST = fitDistance();
+    addEventListener('resize', () => { DIST = fitDistance(); });
+    function viewProj(eye, at, near, far) {
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const v = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot3(x, eye), -dot3(y, eye), -dot3(z, eye), 1];
+      const f = 1 / Math.tan(FOV / 2), nf = 1 / (near - far);
+      const p = [f / aspect(), 0, 0, 0, 0, f, 0, 0, 0, 0, far * nf, -1, 0, 0, far * near * nf, 0];
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = p[r] * v[c * 4] + p[4 + r] * v[c * 4 + 1] + p[8 + r] * v[c * 4 + 2] + p[12 + r] * v[c * 4 + 3];
+      return o;
+    }
+    function invert(a) {
+      const o = new Float32Array(16);
+      const b00 = a[0] * a[5] - a[1] * a[4], b01 = a[0] * a[6] - a[2] * a[4], b02 = a[0] * a[7] - a[3] * a[4], b03 = a[1] * a[6] - a[2] * a[5];
+      const b04 = a[1] * a[7] - a[3] * a[5], b05 = a[2] * a[7] - a[3] * a[6], b06 = a[8] * a[13] - a[9] * a[12], b07 = a[8] * a[14] - a[10] * a[12];
+      const b08 = a[8] * a[15] - a[11] * a[12], b09 = a[9] * a[14] - a[10] * a[13], b10 = a[9] * a[15] - a[11] * a[13], b11 = a[10] * a[15] - a[11] * a[14];
+      const d = 1 / (b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06);
+      o[0] = (a[5] * b11 - a[6] * b10 + a[7] * b09) * d; o[1] = (a[2] * b10 - a[1] * b11 - a[3] * b09) * d;
+      o[2] = (a[13] * b05 - a[14] * b04 + a[15] * b03) * d; o[3] = (a[10] * b04 - a[9] * b05 - a[11] * b03) * d;
+      o[4] = (a[6] * b08 - a[4] * b11 - a[7] * b07) * d; o[5] = (a[0] * b11 - a[2] * b08 + a[3] * b07) * d;
+      o[6] = (a[14] * b02 - a[12] * b05 - a[15] * b01) * d; o[7] = (a[8] * b05 - a[10] * b02 + a[11] * b01) * d;
+      o[8] = (a[4] * b10 - a[5] * b08 + a[7] * b06) * d; o[9] = (a[1] * b08 - a[0] * b10 - a[3] * b06) * d;
+      o[10] = (a[12] * b04 - a[13] * b02 + a[15] * b00) * d; o[11] = (a[9] * b02 - a[8] * b04 - a[11] * b00) * d;
+      o[12] = (a[5] * b07 - a[4] * b09 - a[6] * b06) * d; o[13] = (a[0] * b09 - a[1] * b07 + a[2] * b06) * d;
+      o[14] = (a[13] * b01 - a[12] * b03 - a[14] * b00) * d; o[15] = (a[8] * b03 - a[9] * b01 + a[10] * b00) * d;
+      return o;
+    }
+
+    // ---------------------------------------------------------------- HUD
+    const NAMES = { etk: 'ETK K-series', sedan: 'Soft-body sedan' };
+    const nf = (x) => x.toLocaleString('en-US');
+    const statsEl = document.getElementById('stats');
+    const s0 = snaps[snaps.length - 1];
+    const crashed = snaps.find((s) => s.impactKmh != null);
+    document.getElementById('title').textContent = NAMES[s0.car] ?? s0.carName;
+    const m = crashed?.metrics;
+    const pct = (a, b) => `${(100 * a / b).toFixed(1)} %`;
+    const rows = [];
+    if (crashed) {
+      subEl.textContent = snaps.length > 1 ? 'before and after the brick wall' : `after the brick wall, ${(crashed.t - crashed.impactAt).toFixed(1)} s past the strike`;
+      rows.push(['impact speed', `${crashed.impactKmh.toFixed(0)} km/h`], ['beams broken', `${nf(crashed.beamsBroken)} / ${nf(crashed.beamCount)} (${pct(crashed.beamsBroken, crashed.beamCount)})`]);
+      if (m) rows.push(['front crush', `${(100 * m.frontCrush).toFixed(0)} cm`], ['length lost', `${(100 * m.lengthLoss).toFixed(0)} cm`], ['max node displacement', `${(100 * m.maxDisp).toFixed(0)} cm (${m.maxWhere})`]);
+    } else {
+      subEl.textContent = 'at rest, before the crash';
+      rows.push(['beams broken', `${nf(s0.beamsBroken)} / ${nf(s0.beamCount)}`]);
+    }
+    statsEl.innerHTML = rows.map(([k, v]) => `<span class="k">${k}</span><span class="v">${v}</span>`).join('');
+    // Before / after tags above each car.
+    const tags = snaps.length > 1 ? snaps.map((s) => { const e = document.createElement('div'); e.className = 'tag panel'; e.textContent = s.impactKmh != null ? `after ${s.impactKmh.toFixed(0)} km/h` : 'before'; document.body.appendChild(e); return e; }) : [];
+    const tops = snaps.map((s, k) => { const b = bbox(s.positions); return [b.c[0] + placed[k][0], b.hi[1] + 0.25, b.c[2] + placed[k][2]]; });
+
+    // ---------------------------------------------------------------- frame
+    let depthTex = null, msaaTex = null;
+    function draw(t) {
+      if (!depthTex || depthTex.width !== canvas.width || depthTex.height !== canvas.height) {
+        depthTex?.destroy(); msaaTex?.destroy();
+        depthTex = device.createTexture({ size: [canvas.width, canvas.height], format: DEPTH, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+        msaaTex = SAMPLES > 1 ? device.createTexture({ size: [canvas.width, canvas.height], format, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
+      }
+      const a = START + 2 * Math.PI * t / SECS;
+      const dir = dirAt(a);
+      const eye = centre.map((c, j) => c + DIST * dir[j]);
+      const vp = viewProj(eye, centre, 0.05, 2000);
+      env.frame({ viewProj: vp, invViewProj: invert(vp), eye, focus: [centre[0], G, centre[2]], ground: G, lead: 0, time: 0, road: [200, centre[0] + 100, 0], fogDist: 400 });
+      const enc = device.createCommandEncoder();
+      cars.update(enc, { dt: 0, floorY: G, lead: 0 });
+      env.shadowPass(enc, noWorld, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }));
+      const tex = context.getCurrentTexture().createView();
+      const pass = enc.beginRenderPass({
+        colorAttachments: [msaaTex ? { view: msaaTex.createView(), resolveTarget: tex, loadOp: 'clear', storeOp: 'discard', clearValue: [0, 0, 0, 1] } : { view: tex, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }],
+        depthStencilAttachment: { view: depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' },
+      });
+      env.draw(pass, noWorld);
+      cars.draw(pass, { viewProj: vp, eye, light: env.sun, height: canvas.height });
+      pass.end();
+      device.queue.submit([enc.finish()]);
+      for (const [k, e] of tags.entries()) {
+        const p = tops[k], c = [0, 1, 2, 3].map((r) => vp[r] * p[0] + vp[4 + r] * p[1] + vp[8 + r] * p[2] + vp[12 + r]);
+        e.style.left = `${(0.5 + 0.5 * c[0] / c[3]) * canvas.clientWidth}px`;
+        e.style.top = `${(0.5 - 0.5 * c[1] / c[3]) * canvas.clientHeight}px`;
+      }
+    }
+    window.__snaps = snaps;
+    if (RECORD) {
+      // Frame-locked: the orbit at `t` seconds, drawn and finished.
+      window.__rec = { async frame(t) { draw(t); await device.queue.onSubmittedWorkDone(); return { t, dist: DIST }; } };
+      draw(0); await device.queue.onSubmittedWorkDone();
+      window.__ready = true;
+    } else {
+      const t0 = performance.now();
+      const loop = (now) => { try { draw((now - t0) / 1000); } catch (e) { fail(e); return; } requestAnimationFrame(loop); };
+      window.__ready = true;
+      requestAnimationFrame(loop);
+    }
+  </script>
+</body>
+</html>

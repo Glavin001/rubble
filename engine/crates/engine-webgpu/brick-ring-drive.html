@@ -162,7 +162,8 @@
       if (colour.length) cars.setTextures(colour, 1024);
       if (data.length) cars.setDataTextures(data, 1024);
     }
-    for (let i = 0; i < N; i++) cars.addCar(visuals[i].visual, { nodeOffset: spans[2 * i], beamOffset: spans[2 * i + 1], vehicle: i, lod: visuals[i].visual.lod, wheelRecords: world.explicitWheelRecords(i) });
+    const carIds = [];
+    for (let i = 0; i < N; i++) carIds.push(cars.addCar(visuals[i].visual, { nodeOffset: spans[2 * i], beamOffset: spans[2 * i + 1], vehicle: i, lod: visuals[i].visual.lod, wheelRecords: world.explicitWheelRecords(i) }));
 
     // ---------------------------------------------------------------- readbacks
     // The cars' nodes (centroid and velocity: the camera and the speedometer) and beams
@@ -496,6 +497,29 @@
     window.__layout = layout;
     window.__state = () => ({ impactAt, beamsBroken, awake, steps: world.explicitSteps(), bodies: world.bodyCount(), simRate, fps, t: simSteps / RATE, cars: carState, gpu: TIMING ? window.__gpu() : null });
     window.__drive = (i) => { autoOverride = i; };
+    // A snapshot of car `i` as it stands (crash-orbit.mjs; crash-orbit.html draws it):
+    // its explicit nodes (world positions: local + the vehicle's origin), its broken
+    // beams, and the buffers the renderer skins from (its node and beam spans, the whole
+    // misc buffer with the raycast wheels' records, the renderer's node state), base64.
+    window.__snapshot = async (i = 0) => {
+      await device.queue.onSubmittedWorkDone();
+      const nb = nodesPer[i] * 48, bb = beamsPer[i] * 32, misc = world.explicitMiscBuffer();
+      const bufs = [[world.explicitNodesBuffer(), spans[2 * i] * 48, nb], [misc, 0, misc.size], [world.explicitBeamsBuffer(), spans[2 * i + 1] * 32, bb]];
+      const enc = device.createCommandEncoder();
+      const reads = bufs.map(([src, off, size]) => { const rb = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); enc.copyBufferToBuffer(src, off, rb, 0, size); return rb; });
+      const state = cars.readNodeState(enc, carIds[i]);
+      device.queue.submit([enc.finish()]);
+      const [nodes, miscB, beams] = await Promise.all(reads.map(async (rb) => { await rb.mapAsync(GPUMapMode.READ); const b = new Uint8Array(rb.getMappedRange().slice(0)); rb.destroy(); return b; }));
+      const nodeState = new Uint8Array((await state()).buffer);
+      const b64 = (u8) => { let s = ''; for (let k = 0; k < u8.length; k += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(k, k + 0x8000)); return btoa(s); };
+      const f = new Float32Array(nodes.buffer), o = new Float32Array(miscB.buffer, 16 * i, 4), bf = new Float32Array(beams.buffer);
+      const origin = [o[0], o[1], o[2]];
+      const positions = Array.from({ length: nodesPer[i] }, (_, k) => [0, 1, 2].map((j) => +(f[k * 12 + j] + origin[j]).toFixed(5)));
+      const broken = []; for (let k = 0; k < beamsPer[i]; k++) if (bf[k * 8 + 6] !== 0) broken.push(k);
+      return { format: 'rubble-crash-snapshot/1', car: kind, carName: NAME[0], query: location.search, t: simSteps / RATE, impactAt, ground: G,
+        nodeCount: nodesPer[i], beamCount: beamsPer[i], origin, positions, broken, beamsBroken: broken.length,
+        gpu: { nodes: b64(nodes), misc: b64(miscB), beams: b64(beams), nodeState: b64(nodeState), wheelRecords: Array.from(world.explicitWheelRecords(i)) } };
+    };
     statusEl.textContent = `built in ${(buildMs / 1000).toFixed(1)} s`;
     canvas.focus();
 

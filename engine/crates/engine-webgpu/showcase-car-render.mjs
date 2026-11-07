@@ -1835,7 +1835,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         nodeCount, vehicle, levels, units, stateAt, unitNames: visual.unitNames ?? [], skinBind: null, posBind: null,
         topo: upload('showcase-topology', topo),
         // Per node 6 vec4, per unit 1, the level state 1 (zeros: nothing yet).
-        nodeN: device.createBuffer({ label: 'showcase-node-state', size: (stateAt + units + 1) * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+        nodeN: device.createBuffer({ label: 'showcase-node-state', size: (stateAt + units + 1) * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }),
         lod: upload('showcase-lod', lodData, GPUBufferUsage.UNIFORM),
         // Indirect args (23 words a level); level 0 drawn until the first pick.
         args: upload('showcase-lod-args', argWords, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT),
@@ -1867,6 +1867,31 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       cars.delete(id);
       // The last car gone: the texture sets' table starts over.
       if (!cars.size) setWords = [0, 0, 0, 0];
+    },
+    /**
+     * A car's whole per-node and per-unit render state (normals, plastic strain, paint
+     * worn by sliding, broken units: the history `update` keeps), copied in `encoder`
+     * and resolved once mapped to a Float32Array, for a snapshot of the car as drawn
+     * (crash-orbit.html). `writeNodeState(id, data)` puts one back.
+     */
+    readNodeState(encoder, id) {
+      const car = cars.get(id);
+      if (!car) return async () => null;
+      const size = car.nodeN.size;
+      const rb = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      encoder.copyBufferToBuffer(car.nodeN, 0, rb, 0, size);
+      return async () => {
+        await rb.mapAsync(GPUMapMode.READ);
+        const out = new Float32Array(rb.getMappedRange().slice(0));
+        rb.destroy();
+        return out;
+      };
+    },
+    writeNodeState(id, data) {
+      const car = cars.get(id);
+      if (!car) throw new Error(`showcase writeNodeState: no car ${id}`);
+      if (data.byteLength !== car.nodeN.size) throw new Error(`showcase writeNodeState: ${data.byteLength} bytes for a ${car.nodeN.size}-byte state`);
+      device.queue.writeBuffer(car.nodeN, 0, data);
     },
     /**
      * The damage units' state as the renderer holds it (for checks): per car id
