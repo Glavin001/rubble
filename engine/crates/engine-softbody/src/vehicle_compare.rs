@@ -1928,11 +1928,20 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     let total: f32 = s.nodes.iter().map(|n| n.mass).sum();
     let mut pen = Penetration::new(&s);
     // Ledger (one-vehicle world).
+    // The AVBD mode (opt-in, avbd-vehicles.md) has no force trace: its energy is
+    // measured from the state (`avbd_beams::energy`), not by the ledger.
+    let avbd = s.avbd.is_some();
     let mut w = ExplicitBeamsWorld::new(vec![s]);
     w.contact = false;
-    w.enable_ledger();
-    let e0 = w.ledger.as_ref().unwrap().start;
-    let ke0 = w.ledger.as_ref().unwrap().kinetic;
+    let avbd_e0 = crate::avbd_beams::energy(&w.vehicles[0]);
+    if !avbd {
+        w.enable_ledger();
+    }
+    let e0 = w
+        .ledger
+        .as_ref()
+        .map_or(avbd_e0.0 + avbd_e0.1 + avbd_e0.2, |l| l.start);
+    let ke0 = w.ledger.as_ref().map_or(avbd_e0.0, |l| l.kinetic);
     let mut ripple = Ripple::new(car, rest.clone());
     let mut ripple_late = Ripple::new(car, rest.clone());
     let mut intr = Intrusion::new(car, rest.clone(), cabin.clone());
@@ -2008,7 +2017,6 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     let s = &w.vehicles[0];
     hw.report("wall", s);
     let now = positions(s);
-    let l = w.ledger.as_ref().unwrap();
     // The pulse (100 Hz) and force (100 Hz), 1 ms samples to 150 ms.
     let a = butterworth(&acc, STEP, 100.0);
     let peak_g = a.iter().map(|x| -x).fold(0.0f32, f32::max) / 9.81;
@@ -2101,11 +2109,31 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
         f32::NAN
     };
     let tm = t_m.unwrap_or(f32::NAN);
-    let ke1 = l.kinetic;
-    let closure = (l.kinetic - ke0) - l.kinetic_change();
     let wall_s = t0.elapsed().as_secs_f32();
     let sim_s = k as f32 * STEP;
-    json!({
+    let energy = match w.ledger.as_ref() {
+        Some(l) => {
+            let ke1 = l.kinetic;
+            let closure = (l.kinetic - ke0) - l.kinetic_change();
+            json!({
+            "start_kj": r3((e0 / 1e3) as f32), "ke_start_kj": r3((ke0 / 1e3) as f32), "ke_end_kj": r3((ke1 / 1e3) as f32),
+            "elastic_end_kj": r3((l.elastic / 1e3) as f32), "beam_dissipation_kj": r3((l.beam_dissipation() / 1e3) as f32),
+            "contact_work_kj": r3(((l.w_contact_normal + l.w_contact_friction + l.w_self_contact + l.w_contact_shift) / 1e3) as f32),
+            "ground_work_kj": r3(((l.w_ground_vertical + l.w_ground_horizontal) / 1e3) as f32),
+            "air_work_kj": r3((l.w_air / 1e3) as f32), "discretisation_kj": r3((l.discretisation / 1e3) as f32),
+            "closure_share": (closure / e0.max(1.0) * 1e6).round() / 1e6, "max_rise_j": r1(e_rise as f32),
+            })
+        }
+        None => {
+            let (ke1, pe1, el1) = crate::avbd_beams::energy(s);
+            json!({
+            "start_kj": r3((e0 / 1e3) as f32), "ke_start_kj": r3((ke0 / 1e3) as f32), "ke_end_kj": r3((ke1 / 1e3) as f32),
+            "elastic_end_kj": r3((el1 / 1e3) as f32), "gravity_change_kj": r3(((pe1 - avbd_e0.1) / 1e3) as f32),
+            "dissipated_kj": r3(((e0 - ke1 - pe1 - el1) / 1e3) as f32),
+            })
+        }
+    };
+    let mut out = json!({
         "kmh": kmh, "mass_kg": r1(total),
         "dynamic_crush_mm": mm(d_dyn), "t_m_ms": r1(tm * 1e3), "peak_g": r1(peak_g), "mean_g_to_tm": r1(v0 / tm / 9.81),
         "rebound_ms": r3(rebound), "restitution": r3(rebound / v0),
@@ -2113,20 +2141,21 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
         "campbell_b1": r1(b1), "springback_ratio": r3(springback),
         "peak_force_kn": r1(peak_f / 1e3), "peak_force_ms": r1((ip as f32 * STEP) * 1e3), "impulse_kns": r3(impulse / 1e3),
         "force_kn_1ms": curve,
-        "energy": {
-            "start_kj": r3((e0 / 1e3) as f32), "ke_start_kj": r3((ke0 / 1e3) as f32), "ke_end_kj": r3((ke1 / 1e3) as f32),
-            "elastic_end_kj": r3((l.elastic / 1e3) as f32), "beam_dissipation_kj": r3((l.beam_dissipation() / 1e3) as f32),
-            "contact_work_kj": r3(((l.w_contact_normal + l.w_contact_friction + l.w_self_contact + l.w_contact_shift) / 1e3) as f32),
-            "ground_work_kj": r3(((l.w_ground_vertical + l.w_ground_horizontal) / 1e3) as f32),
-            "air_work_kj": r3((l.w_air / 1e3) as f32), "discretisation_kj": r3((l.discretisation / 1e3) as f32),
-            "closure_share": (closure / e0.max(1.0) * 1e6).round() / 1e6, "max_rise_j": r1(e_rise as f32),
-        },
+        "energy": energy,
         "penetration": pen.result(), "ripple_0_5s": ripple.result(), "ripple_end": ripple_late.result(),
         "intrusion": intr.result(),
         "damage": damage_report(car, s),
         "visual": visual_now(car, s),
         "sim_s": r3(sim_s), "wall_s_per_sim_s": r3(wall_s / sim_s),
-    })
+    });
+    if let Some(a) = &s.avbd {
+        out["avbd"] = json!({
+            "steps": a.stats.steps, "clamped": a.stats.clamped,
+            "last_sweep_dx_mean_mm": a.stats.last_dx_sum / a.stats.steps.max(1) as f64 * 1e3,
+            "last_sweep_dx_max_mm": a.stats.last_dx_max * 1e3,
+        });
+    }
+    out
 }
 
 /// FMVSS 214's oblique pole (32 km/h, 75°, 254 mm) at the driver's head:

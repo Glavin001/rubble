@@ -9,6 +9,7 @@
 //! particle and beam model for tests and calibration.
 
 pub mod authoring;
+pub mod avbd_beams;
 pub mod buggy;
 pub mod calibrate;
 pub mod color;

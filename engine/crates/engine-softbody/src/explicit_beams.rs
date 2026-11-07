@@ -1076,6 +1076,11 @@ pub struct ExplicitBeams {
     /// added no damping force). The kernel keeps it in the record's first
     /// incidence entry's `.w`.
     pub damp_slopes: Vec<f32>,
+    /// The AVBD vehicle mode (opt-in, `engine/docs/avbd-vehicles.md`;
+    /// [`crate::avbd_beams`]): `Some`, each [`Self::step`] call is a 0.5 ms tick
+    /// and the vehicle takes an implicit AVBD step whenever a whole AVBD step
+    /// has accumulated. `None` (the default): the explicit step, unchanged.
+    pub avbd: Option<Box<crate::avbd_beams::AvbdState>>,
 }
 
 /// The wheel model of a JBeam-mode spawn ([`ExplicitBeams::from_desc_jbeam_with`]).
@@ -1742,6 +1747,7 @@ impl ExplicitBeams {
             sleep: Default::default(),
             damp_scheme: 0,
             damp_slopes: Vec::new(),
+            avbd: None,
         }
     }
 
@@ -3453,6 +3459,10 @@ impl ExplicitBeams {
     /// One fixed step: nodes, wings, fuselage drag, commands, beams,
     /// self-collision.
     pub fn step(&mut self) {
+        if self.avbd.is_some() {
+            crate::avbd_beams::tick(self);
+            return;
+        }
         if self.drive.is_some() {
             crate::explicit_drive::drive_pass(self);
         }
@@ -3822,7 +3832,7 @@ impl ExplicitBeams {
     /// slide forces are summed (from zero, in slide order: node, rail end a, rail
     /// end b) and that sum is added to its force, as the kernel's slide slots do
     /// (jbeam-semantics-spec.md §35: bit for bit when a rail end takes several).
-    fn slide_pass(&mut self) {
+    pub(crate) fn slide_pass(&mut self) {
         let mut sums: Vec<(u32, Vec3)> = Vec::new();
         let mut add = |n: u32, f: Vec3| match sums.iter_mut().find(|s| s.0 == n) {
             Some(s) => s.1 += f,
@@ -4002,7 +4012,7 @@ impl ExplicitBeams {
         }
     }
 
-    fn beam_pass(&mut self) {
+    pub(crate) fn beam_pass(&mut self) {
         let slopes = self.settings.centred_damping;
         if slopes {
             self.damp_slopes.clear();

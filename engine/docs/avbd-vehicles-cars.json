@@ -1,0 +1,6 @@
+{
+  "cars": [
+    { "name": "sedan1", "label": "Rubble sedan1 (authored, one tier, Medium)", "style": "sedan1" },
+    { "name": "etk_kc6", "label": "ETK K-series kc6 (community JBeam, local __mods/etkk_tex)", "mod": "etkk_tex", "vehicle": "etkk", "pc": "kc6.pc" }
+  ]
+}
