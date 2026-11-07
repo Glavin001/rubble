@@ -266,6 +266,10 @@ fn every_explicit_slang_loop_is_capped() {
         }
     }
     assert!(files.iter().any(|f| f.0 == "explicit_loop_cap.slang"), "the caps are included");
+    // The World's coupling passes carry the same caps and budget.
+    let coupling = std::fs::read_to_string(dir.join("vehicle_coupling.slang")).unwrap();
+    assert!(coupling.contains("#include \"explicit_loop_cap.slang\""), "the coupling passes include the caps");
+    files.push(("vehicle_coupling.slang".to_string(), coupling));
     let mut loops = 0;
     for (name, text) in &files {
         let bad = uncapped_slang_loops(text);
