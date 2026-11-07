@@ -69,3 +69,10 @@ if do_render:
     os.makedirs(rdir, exist_ok=True)
     cam = render.studio(samples=samples)
     render.render_views(cam, os.path.join(rdir, design), views)
+
+if opt('--out') is None:
+    # keep the model viewer's list (engine/scenes/vehicles/index.json) current
+    # (after the renders: it lists their thumbnails)
+    sys.path.insert(0, os.path.join(HERE, 'tools'))
+    import vehicles_manifest  # noqa: E402
+    print('wrote %s (%d vehicles)' % vehicles_manifest.write())

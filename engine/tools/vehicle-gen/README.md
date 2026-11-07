@@ -99,7 +99,37 @@ photo.
 side and a 50/50 overlay) and, with `--lines`, draws the model's visible edges
 in cyan over the photo with the traced lines in yellow. `tools/zoom.py` crops
 and enlarges a photo with a pixel grid for tracing; `tools/backproject.py`
-turns pixels into rays from the solved camera, to place a feature in 3D.
+turns pixels into rays from the solved camera (onto a known plane, or at the
+depth where a left/right pair is mirror-symmetric) and projects 3D points
+back, to place a feature in depth.
+
+### Viewer
+
+`viewer/index.html` shows every built vehicle (the list is
+`engine/scenes/vehicles/index.json`, which `build.py` rewrites; or run
+`tools/vehicles_manifest.py`): orbit, turntable, explode, parts grouped by
+kind with triangle counts (click to isolate, hover to name), markers,
+wireframe, paint colour, `?car=<name>`. Serve `engine/` and open it:
+
+```bash
+python3 -m http.server 8813 --directory engine     # from the repo root
+# http://localhost:8813/tools/vehicle-gen/viewer/
+```
+
+The web build (`engine/scripts/build-web.sh`) publishes it at `/models/`
+with the models beside it.
+
+### Mesh debugging
+
+`tools/aspect_at.py` lists the worst triangles of a part near a point and
+`tools/crossings_at.py` where two parts cross, to trace `check.py` failures
+to their cause.
+
+### Agent skills
+
+`.claude/skills/vehicle-from-photos` (the photo-matching procedure) and
+`.claude/skills/vehicle-gen-design` (designs, variants, checks, preview) hold
+the working procedures for agents; `.cursor/skills` links to them.
 
 ## How a car is built
 
