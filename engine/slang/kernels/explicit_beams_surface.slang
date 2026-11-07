@@ -1123,8 +1123,8 @@ uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 // gathering when a proxy is fast, and the proxies' bounds on the pair path), the listing
 // of the pair path (its own barrier), the find, the apply. A vehicle without the flag
 // reaches the barriers only (all decisions below are uniform). The caller's barrier
-// follows. Each heavy function has one call site per phase: the Metal and Chrome
-// compilers inline every call.
+// follows. Each heavy function has one call site (the find and the apply share
+// them, phase by phase): the Metal and Chrome compilers inline every call.
 groupshared uint gsUniformSurf;
 void surfaceStep(uint v, uint lane, uint on, uint parity)
 {
@@ -1200,43 +1200,42 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
     }
     // Without static slots nor proxies for them the per-element loops find nothing.
     bool loops = r1.w != 0u || px != 0u;
-    if (loops)
+    // The find (phase 0), the barrier, the apply (phase 1): the same calls per phase as
+    // two passes in a row, from one call site each (the compilers inline every call).
+    // The pair path's find and apply stay separate functions (Metal's fast math compiles
+    // a function by its whole body: one shared body would shift the find's rounding).
+    for (uint phase = 0u; phase < 2u; phase++)
     {
-        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
-            surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, px, parity, false);
-        for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
-            surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, px, r2.z, parity, false);
-        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
-            surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, px, parity, false);
-    }
-    if (pairs)
-    {
-        for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
-            surfPairFind(v, p, origin, r, r0, r1, sr);
-    }
-    sync();
-    if (loops)
-    {
-        for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
-            surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, px, parity, true);
-        for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
-            surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, px, r2.z, parity, true);
-        for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
-            surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, px, parity, true);
-    }
-    if (pairs)
-    {
-        uint found = uint(gAcc[surfHitCount(v)].load());
-        if (found <= SURF_HIT_CAP)
+        bool apply = phase != 0u;
+        if (loops)
         {
-            for (uint h = lane, hStop = EB_END(h, found, LANES); h < hStop; h += LANES)
-                surfHitApply(v, h, r, r0, r1, sr);
+            for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
+                surfTriangle(v, r1.x + t, origin, r, r1.z, r1.w, px, parity, apply);
+            for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
+                surfSegment(v, gLists[sr.x + j], sr.z + j, origin, r, r1.z, r1.w, px, r2.z, parity, apply);
+            for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+                surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, px, parity, apply);
         }
-        else
+        if (pairs && !apply)
         {
             for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
-                surfPairApply(v, p, origin, r, r0, r1, sr);
+                surfPairFind(v, p, origin, r, r0, r1, sr);
         }
+        if (pairs && apply)
+        {
+            uint found = uint(gAcc[surfHitCount(v)].load());
+            if (found <= SURF_HIT_CAP)
+            {
+                for (uint h = lane, hStop = EB_END(h, found, LANES); h < hStop; h += LANES)
+                    surfHitApply(v, h, r, r0, r1, sr);
+            }
+            else
+            {
+                for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
+                    surfPairApply(v, p, origin, r, r0, r1, sr);
+            }
+        }
+        if (!apply) sync();
     }
     if (lane == 0u && mine) gsHit = 1u;
 #endif
