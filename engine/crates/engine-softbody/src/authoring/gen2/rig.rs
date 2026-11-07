@@ -102,6 +102,9 @@ pub const REACH_PANEL: f32 = 0.66;
 /// membrane over the whole door).
 pub const DOOR_PITCH: f32 = 0.20;
 pub const DOOR_REACH: f32 = 0.42;
+/// Round 7: how far ahead of the rear door's rear shut line the lane ties
+/// start to give first (m, [`Car::lane_ties_from`]).
+pub const LANE_TIES_AHEAD: f32 = 0.15;
 /// Round 7: the sill box's station pitch between its cross members (m).
 pub const SILL_PITCH: f32 = 0.25;
 
@@ -2660,7 +2663,19 @@ pub fn rig(model: &Model) -> Rig {
     r.car.sheet_area = Some(voronoi_area(model, &r.car));
     r.car.mass_floor = Some(0.7);
     r.car.row_cap_contact_only = false;
-    r.car.lane_ties_first = std::env::var("GEN3_LANE_TIES_FIRST").is_ok();
+    // Round 7: lane ties give first behind [`LANE_TIES_AHEAD`] ahead of the
+    // rear door's rear shut line (the C-pillar, the quarter and the tail),
+    // where the lanes had softened the members that carry the tail corner's
+    // skin. Ahead of it the round-6 calibration (the frontal, the roof) was
+    // made on the softened members and keeps them. `GEN3_LANE_SOFTENS_PANEL`
+    // keeps round 6's bound everywhere; `GEN3_LANE_TIES_FROM=<JBeam y>`
+    // moves the line (at or below -100: everywhere).
+    r.car.lane_ties_first = std::env::var("GEN3_LANE_SOFTENS_PANEL").is_err();
+    r.car.lane_ties_from = match env_f("GEN3_LANE_TIES_FROM", f32::NAN) {
+        y if y.is_nan() => to_jbeam(Vec3::new(0.0, 0.0, z_c + LANE_TIES_AHEAD)).y,
+        y if y <= -100.0 => f32::MIN,
+        y => y,
+    };
     r.car.centred_damping = true;
     r.car.assign_masses();
 
@@ -3073,7 +3088,9 @@ pub const FOOTWELL_YIELD: f32 = 3.0;
 /// FMVSS 216a 5.94 to 5.02 x weight at 0.45 in round 3 (4.48-5.32); with
 /// round 4's hot-stamped A-pillar and B-pillar upper, 5.57 at 0.45, 5.32 at
 /// 0.38.
-pub const GREENHOUSE_YIELD: f32 = 0.38;
+/// Round 7: 0.37, 5.31 x weight with the lane ties giving first behind the
+/// rear doors (5.38 at 0.38).
+pub const GREENHOUSE_YIELD: f32 = 0.37;
 /// The A-pillar chords' yield over the greenhouse's: a hot-stamped section
 /// (boron steel, about 1,000-1,200 MPa against 300-400 MPa for the HSLA the
 /// greenhouse's yield stands for).

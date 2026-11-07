@@ -445,7 +445,7 @@ pub struct Car {
     /// The Gershgorin row cap only on contact-only nodes' ties (the
     /// structure is left to the measured bound, the power iteration).
     pub row_cap_contact_only: bool,
-    /// Round 7 (gen3, opt-in `GEN3_LANE_TIES_FIRST=1`): lane nodes' ties
+    /// Round 7 (gen3): lane nodes' ties
     /// stop softening the members around them. In the row cap a structural
     /// node's lane ties gave with its shut-line edge ties, and a node over
     /// the cap on its members alone scaled them by its whole row, lane ties
@@ -453,10 +453,14 @@ pub struct Car {
     /// springs without lanes (the quarter's qt, qs and ebody at the tail).
     /// With this flag only lane ties give first, members take the cap on
     /// their own row, and the power iteration's mode softens lane ties
-    /// before members. The parked tail corner's normal warp falls from
-    /// 1.03° to 0.80-0.88° (5-30 s), but the round-6 calibration moves
-    /// (frontal peak 34.4 to 30.5 g, roof 5.25 to 5.66): not the default.
+    /// before members. Everywhere, the parked tail corner's normal warp
+    /// falls from 1.03° to 0.80-0.88° (5-30 s), but the round-6 calibration
+    /// moves (frontal peak 34.4 to 30.5 g, roof 5.25 to 5.66); gen3 uses it
+    /// behind its rear doors only ([`Car::lane_ties_from`]).
     pub lane_ties_first: bool,
+    /// [`Car::lane_ties_first`] only at nodes this far back or more (JBeam
+    /// y, m; `f32::MIN` everywhere).
+    pub lane_ties_from: f32,
     /// The car runs with centred damping (the BeamNG profile's default,
     /// jbeam-semantics-spec.md §39): the step is stable to ω·h < 2 whatever
     /// the damping, so the bound is the springs' highest mode at
@@ -1067,8 +1071,9 @@ impl Car {
                     // (ebody-qt) down with them to a fifth of their spring,
                     // the edge sagged parked and the tail corner's normals
                     // warped about 0.2° more.
+                    let here = self.lane_ties_first && self.nodes[i].p.y >= self.lane_ties_from;
                     let tie = |j: usize| {
-                        if self.lane_ties_first {
+                        if here {
                             matches!(self.beams[j].role, Role::Tie | Role::Backing)
                         } else {
                             self.beams[j].role.yields_first()
@@ -1098,7 +1103,7 @@ impl Car {
                         for &j in adj[i].iter().filter(|&&j| tie(j)) {
                             ks[j] *= f;
                         }
-                    } else if self.lane_ties_first && !self.nodes[i].contact && rt > 0.0 {
+                    } else if here && !self.nodes[i].contact && rt > 0.0 {
                         // The members over the cap alone: they take the
                         // cap on their own row (not on their row and the
                         // lane ties', which softened the quarter's members
@@ -1171,7 +1176,8 @@ impl Car {
         }
         let mut omega_h = 0.0;
         let centred = self.centred_damping;
-        let lanes_first = self.lane_ties_first;
+        // (Everywhere only: a mode has no one place.)
+        let lanes_first = self.lane_ties_first && self.lane_ties_from == f32::MIN;
         for round in 0..2000 {
             let iters = if round == 0 { 400 } else { 40 };
             let mut lam = 0.0f32;
