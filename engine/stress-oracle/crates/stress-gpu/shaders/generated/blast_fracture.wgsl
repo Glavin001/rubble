@@ -31,6 +31,8 @@ struct BlastParams_std140_0
     @align(4) section_bending_0 : u32,
     @align(16) chunk_loads_0 : u32,
     @align(4) r_virial_0 : u32,
+    @align(8) a_events_0 : u32,
+    @align(4) ev_broken_cap_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;
@@ -284,6 +286,18 @@ fn blast_breaks(@builtin(global_invocation_id) id_2 : vec3<u32>)
     var _S17 : u32 = atomicOr(&(atom_0[params_0.a_dirty_0 + work_0[bond_0.n0_0]]), u32(1));
     var _S18 : u32 = atomicAdd(&(atom_0[params_0.a_counters_0]), u32(1));
     var _S19 : u32 = atomicAdd(&(atom_0[params_0.a_counters_0 + u32(1)]), u32(1));
+    if((params_0.ev_broken_cap_0) != u32(0))
+    {
+        var i_0 : u32 = atomicAdd(&(atom_0[params_0.a_counters_0 + u32(20)]), u32(1));
+        if(i_0 < (params_0.ev_broken_cap_0))
+        {
+            atomicStore(&(atom_0[params_0.a_events_0 + i_0]), j_1);
+        }
+        else
+        {
+            var _S20 : u32 = atomicOr(&(atom_0[params_0.a_counters_0 + u32(3)]), u32(128));
+        }
+    }
     return;
 }
 

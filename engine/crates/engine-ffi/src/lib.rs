@@ -20,6 +20,7 @@
 
 mod controls;
 mod guidance;
+pub mod lab;
 pub use controls::*;
 use controls::text;
 mod terrain;
@@ -2972,6 +2973,33 @@ pub enum RbStrengthModel {
     /// The fracture lab's GPU threshold splitter: bonded clusters are bodies that
     /// split on the GPU (its `threshold` mode). Projectiles: `rbBody_SetProjectile`.
     RB_STRENGTH_THRESHOLD = 1,
+    /// The threshold model's GPU fracture with the load path deciding the bonds: gravity
+    /// and the contact loads carried through the bond graph to the supports, each bond
+    /// checked against its tension, shear, compression and bending capacities.
+    RB_STRENGTH_LOAD_PATH = 2,
+    /// The threshold model with an analytic local impact deciding a predicted strike
+    /// (ballistic limit, plug, back-face spall, strain-rate strength).
+    RB_STRENGTH_IMPACT_LOCAL = 3,
+    /// vibe-land's GPU stress solver: Blast's bond-impulse solve decides the bonds each step.
+    RB_STRENGTH_BLAST_GPU = 4,
+}
+
+/// A stress model's fracture switch (`RbDestructibleDef::contact_fracture`,
+/// `strike_prediction`): the model's own, on or off.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbFractureSwitch {
+    RB_FRACTURE_MODEL_DEFAULT = 0,
+    RB_FRACTURE_ON = 1,
+    RB_FRACTURE_OFF = 2,
+}
+
+fn switch_in(s: RbFractureSwitch) -> Option<bool> {
+    match s {
+        RbFractureSwitch::RB_FRACTURE_MODEL_DEFAULT => None,
+        RbFractureSwitch::RB_FRACTURE_ON => Some(true),
+        RbFractureSwitch::RB_FRACTURE_OFF => Some(false),
+    }
 }
 
 /// A placed destructible (`rbDefaultDestructibleDef`). Assets are authored in
@@ -2988,7 +3016,7 @@ pub struct RbDestructibleDef {
     pub friction: f32,
     pub user_data: u64,
     pub model: RbStrengthModel,
-    /// `RB_STRENGTH_THRESHOLD` only: support loss. Each anchored piece's weight flows down its
+    /// Stress models only (every model but `RB_STRENGTH_BONDS`): support loss. Each anchored piece's weight flows down its
     /// intact bonds, and a bond carrying more than its compressive capacity breaks, so a
     /// structure whose supports are shot away collapses. Off by default.
     pub support_loss: bool,
@@ -2996,11 +3024,18 @@ pub struct RbDestructibleDef {
     /// sudden loss of support (a bond is held to before + k (after - before)). 1 (the
     /// default): quasi-static.
     pub support_loss_dynamic_factor: f32,
-    /// `RB_STRENGTH_THRESHOLD` only: blasts (`rbWorld_Detonate`) load its exposed chunk
+    /// Stress models only: blasts (`rbWorld_Detonate`) load its exposed chunk
     /// faces with their face pressures. Off by default.
     pub blast_loading: bool,
-    /// `RB_STRENGTH_THRESHOLD` only: chunk crushing. Off by default.
+    /// Stress models only: chunk crushing. Off by default.
     pub crush: RbCrushDef,
+    /// Stress models only: the in-step contact fracture (a contact closing on a structure
+    /// faster than the strike speed has its load solved within the step, before the solve).
+    /// The model's own by default: on for `RB_STRENGTH_LOAD_PATH`, off for the others.
+    pub contact_fracture: RbFractureSwitch,
+    /// Stress models only: strike prediction for projectiles (`rbBody_SetProjectile`). The
+    /// model's own by default: on unless the contact fracture is.
+    pub strike_prediction: RbFractureSwitch,
     pub internal_value: u32,
 }
 
@@ -3129,6 +3164,8 @@ pub extern "C" fn rbDefaultDestructibleDef() -> RbDestructibleDef {
         support_loss_dynamic_factor: 1.0,
         blast_loading: false,
         crush: RbCrushDef::default(),
+        contact_fracture: RbFractureSwitch::RB_FRACTURE_MODEL_DEFAULT,
+        strike_prediction: RbFractureSwitch::RB_FRACTURE_MODEL_DEFAULT,
         internal_value: COOKIE,
     }
 }
@@ -3169,6 +3206,10 @@ pub unsafe extern "C" fn rbCreateDestructible(
             support_loss_dynamic_factor: d.support_loss_dynamic_factor,
             blast_loading: d.blast_loading,
             crush: crush_in(&d.crush)?,
+            fracture: FractureOptions {
+                contact_fracture: switch_in(d.contact_fracture),
+                strike_prediction: switch_in(d.strike_prediction),
+            },
             ..base
         };
         let id = w.world.create_destructible(&def)?;
@@ -3180,6 +3221,9 @@ fn strength_model(m: RbStrengthModel) -> StrengthModel {
     match m {
         RbStrengthModel::RB_STRENGTH_BONDS => StrengthModel::Bonds,
         RbStrengthModel::RB_STRENGTH_THRESHOLD => StrengthModel::Threshold,
+        RbStrengthModel::RB_STRENGTH_LOAD_PATH => StrengthModel::LoadPath,
+        RbStrengthModel::RB_STRENGTH_IMPACT_LOCAL => StrengthModel::ImpactLocal,
+        RbStrengthModel::RB_STRENGTH_BLAST_GPU => StrengthModel::BlastGpu,
     }
 }
 

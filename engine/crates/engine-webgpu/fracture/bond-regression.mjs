@@ -3,7 +3,7 @@
 //   import('./bond-regression.mjs').then(m=>m.runBondGpuTests())
 // Each case is a small scene of unit-density boxes welded by bonds, judged by
 // physical invariants (a strong weld holds, a weak one breaks the right way).
-import {createLabWorld,bondAsset} from './lab-world.mjs';
+import {createLabFromScene} from './lab-world.mjs';
 import {quatMul,quatConjugate,inverseRotate,sub} from './vec.mjs';
 import {scaleBondSprings,sceneHandle,sceneObject} from './wasm.mjs';
 
@@ -30,7 +30,7 @@ function scene(bodies,joints,extra=[]){
 let penaltyScale;
 async function run(device,sc,steps){
   sc={...sc,joints:scaleBondSprings(sc.joints,sc.bodies,1/120,penaltyScale)};
-  const scene=sceneObject(sceneHandle(sc)),sim=await createLabWorld(scene,bondAsset(scene));
+  const scene=sceneObject(sceneHandle(sc)),sim=await createLabFromScene(scene,{bonds:'d6'});
   try{await sim.step(steps);const snap=await sim.snapshot(),flags=Array.from(sim.bondsIntact(),k=>k?0:1);
     return {pos:i=>[snap[i*28],snap[i*28+1],snap[i*28+2]],rot:i=>[snap[i*28+4],snap[i*28+5],snap[i*28+6],snap[i*28+7]],flags,counters:sim.counters};}
   finally{sim.dispose()}

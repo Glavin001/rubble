@@ -39,6 +39,9 @@ mod guidance;
 mod handles;
 mod host_state;
 mod joints;
+/// The fracture lab as one API (scenes, bond models, settings, actions, stats).
+#[cfg(feature = "stress")]
+pub mod lab;
 mod math;
 mod motion;
 mod queries;
@@ -66,7 +69,7 @@ pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
     CRUSH_PARTICLE_GROUP,
     DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructiblePreload,
-    DestructibleStats, Preload, StrengthModel,
+    DestructibleStats, FractureOptions, Preload, StrengthModel,
 };
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
@@ -488,6 +491,14 @@ pub struct World {
     /// When the last step's submission went to the queue (for hosts timing the GPU's
     /// span: submit to completion, [`Self::last_submit_instant`]).
     last_submit: Option<web_time::Instant>,
+    /// The latest delivered step's GPU time (`WorldDef::gpu_timing`).
+    last_step_gpu_time: Option<StepGpuTime>,
+    /// With `WorldDef::gpu_timing`: the whole tick's GPU time (the rigid step, terrain, the
+    /// fracture), marker passes over the buffers the tick writes (so a browser orders them
+    /// after that work), read without waiting; the median of the recent ticks (ms).
+    #[cfg(feature = "stress")]
+    tick_timer: Option<stress_gpu::frame_timer::FrameTimer>,
+    tick_gpu_ms: Option<f64>,
     shapes: Vec<ShapeSlot>,
     free_shapes: Vec<u32>,
     /// Retired colliders: `(collider, released at step)`.
@@ -633,6 +644,10 @@ impl World {
             tuned: std::collections::BTreeSet::new(),
             last_gpu_ms: None,
             last_submit: None,
+            last_step_gpu_time: None,
+            #[cfg(feature = "stress")]
+            tick_timer: None,
+            tick_gpu_ms: None,
             shapes: Vec::new(),
             free_shapes: Vec::new(),
             free_colliders: Vec::new(),
@@ -883,6 +898,12 @@ impl World {
     /// otherwise idle, reads the step's GPU span as the time from here to completion).
     pub fn last_submit_instant(&self) -> Option<web_time::Instant> {
         self.last_submit
+    }
+
+    /// The latest delivered step's GPU time ([`WorldDef::gpu_timing`]; `None` until a
+    /// timed step's frame is polled, or where the device has no timestamp queries).
+    pub fn last_step_gpu_time(&self) -> Option<&StepGpuTime> {
+        self.last_step_gpu_time.as_ref()
     }
 
     /// GPU time of the last step, every pass of it (`RUBBLE_GPU_TIMING=1`; else None).
@@ -2217,6 +2238,8 @@ impl World {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("world step"),
             });
+        #[cfg(feature = "stress")]
+        self.tick_timer_begin(&mut enc);
         // `RUBBLE_GPU_TIMING=1` (diagnostic): each phase's GPU time, printed per step.
         let marks = engine_webgpu::gpu_marks::GpuMarks::enabled(self.sim.device()).then(|| {
             // A mark per dispatch (`RUBBLE_GPU_TIMING_DISPATCH=1`) needs more room.
@@ -2250,9 +2273,18 @@ impl World {
         }
         // Explicit vehicles: the last window's impulses, applied by the rigid step.
         self.explicit_before_step(&mut enc)?;
-        self.sim
-            .step_encode(&mut enc)
-            .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
+        #[cfg(feature = "stress")]
+        let in_step = fracture && self.fracture_in_step();
+        #[cfg(not(feature = "stress"))]
+        let in_step = false;
+        if in_step {
+            #[cfg(feature = "stress")]
+            self.step_encode_contact(&mut enc)?;
+        } else {
+            self.sim
+                .step_encode(&mut enc)
+                .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
+        }
         let ran = self.sim.last_step_ran();
         // Explicit vehicles: the next window's frame and chunk loads, before the
         // fracture takes them (forward-only).
@@ -2399,6 +2431,8 @@ impl World {
             self.readback.pending.push_back(skipped);
         }
         lap("fracture + readback encoded");
+        #[cfg(feature = "stress")]
+        let tick_timed = self.tick_timer_end(&mut enc);
         let timing = marks.map(|m| {
             m.mark(&mut enc, "readback copies");
             self.sim.set_marks(None);
@@ -2409,6 +2443,12 @@ impl World {
         self.last_submit = Some(web_time::Instant::now());
         self.sim.queue().submit([cmd]);
         self.explicit_after_submit(explicit_read);
+        #[cfg(feature = "stress")]
+        if tick_timed {
+            if let Some(t) = &mut self.tick_timer {
+                t.submitted();
+            }
+        }
         if let Some((m, staging)) = timing {
             let parts = m.report(self.sim.device(), self.sim.queue(), &staging);
             let total: f64 = parts.iter().map(|p| p.1).sum();
@@ -2440,9 +2480,63 @@ impl World {
             self.readback.map(slot);
         }
         let _ = self.sim.device().poll(wgpu::PollType::Poll);
+        #[cfg(feature = "stress")]
+        if let Some(ms) = self.tick_timer.as_mut().and_then(|t| t.poll()) {
+            self.tick_gpu_ms = Some(ms);
+        }
         lap("mapped + polled");
         self.step += 1;
         Ok(())
+    }
+
+    /// The whole tick's GPU time ([`WorldDef::gpu_timing`]: the rigid step, terrain and the
+    /// fracture), the median of the recent ticks (ms); `None` until one is read, or where
+    /// the device has no timestamp queries. Read without waiting.
+    pub fn tick_gpu_ms(&self) -> Option<f64> {
+        self.tick_gpu_ms
+    }
+
+    /// Opens the tick's GPU timing span (with `WorldDef::gpu_timing`).
+    #[cfg(feature = "stress")]
+    fn tick_timer_begin(&mut self, enc: &mut wgpu::CommandEncoder) {
+        if self.sim.gpu_timing() == GpuTiming::Off
+            || !self.sim.device().features().contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            return;
+        }
+        let gpu = stress_gpu::gpu::Gpu::from_device(
+            self.adapter.clone(),
+            self.sim.device().clone(),
+            self.sim.queue().clone(),
+        );
+        if self.tick_timer.is_none() {
+            self.tick_timer = stress_gpu::frame_timer::FrameTimer::new(&gpu, "world tick");
+        }
+        let (bodies, counters) = (self.sim.body_buffer(), self.sim.counters_buffer());
+        if let Some(t) = &mut self.tick_timer {
+            t.begin(&gpu, enc, &[bodies, counters]);
+        }
+    }
+
+    /// Closes it after the tick's last work: a marker over the buffers it writes last (the
+    /// bodies, the counters, the fracture's state). Whether a span was open.
+    #[cfg(feature = "stress")]
+    fn tick_timer_end(&mut self, enc: &mut wgpu::CommandEncoder) -> bool {
+        let Some(t) = self.tick_timer.as_mut() else {
+            return false;
+        };
+        if self.sim.gpu_timing() == GpuTiming::Off {
+            return false;
+        }
+        let gpu = stress_gpu::gpu::Gpu::from_device(
+            self.adapter.clone(),
+            self.sim.device().clone(),
+            self.sim.queue().clone(),
+        );
+        let mut deps = vec![self.sim.body_buffer(), self.sim.counters_buffer()];
+        deps.extend(self.fracture.state_buffers());
+        t.end(&gpu, enc, &deps);
+        true
     }
 
     /// The frames of every step whose results are ready, oldest first. Never
@@ -2937,6 +3031,11 @@ impl World {
             terrain_bakes: Vec::new(),
             gpu_time,
             explicit_sleep,
+        })
+        .inspect(|f| {
+            if f.gpu_time.is_some() {
+                self.last_step_gpu_time = f.gpu_time.clone();
+            }
         })
     }
 

@@ -281,6 +281,7 @@ impl crate::DestructibleAssetDesc {
                 scene: std::sync::Arc::new(Ok(scene.clone())),
                 placement: [0.0; 3],
                 nodes: Vec::new(),
+                pack: None,
             }),
         };
         desc.validate()?;

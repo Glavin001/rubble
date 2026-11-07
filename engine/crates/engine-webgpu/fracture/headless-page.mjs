@@ -18,7 +18,7 @@
 //   staticUnhit  1: houses outside the shot's column become static (immovable).
 //            Behaviour-changing; only to estimate compound houses that stay intact.
 import {parseFractureGlb,buildScene,buildCuboidHouse,buildPairScene,layoutScene,withoutJoints,withCapacity,withParams,wakeAll,sceneHandle,SAMPLES} from './wasm.mjs';
-import {createLabWorld,settleBonds,bondAsset} from './lab-world.mjs';
+import {createLabFromScene,settleScene} from './lab-world.mjs';
 
 // The lab's bundled scenes (engine-fracture samples.rs); bonds only with bonds=1.
 async function buildNamed(name,bonds,layout,levelOverride=null,paramsOverride={}){
@@ -29,7 +29,7 @@ async function buildNamed(name,bonds,layout,levelOverride=null,paramsOverride={}
  const asset=parseFractureGlb(await response.arrayBuffer());
  const level=levelOverride??asset.initialLevel(entry.level);
  const built=withParams(buildScene(asset,level,{maxHullVertices:entry.maxHullVertices}),paramsOverride);
- return layoutScene(bonds?await settleBonds(built):withoutJoints(built),lay,false);
+ return layoutScene(bonds?await settleScene(built):withoutJoints(built),lay,false);
 }
 
 async function run(){
@@ -45,9 +45,9 @@ async function run(){
  let scene=withParams(withCapacity(built,budget),paramsOverride);
  if(num('awake',0)===1)scene=wakeAll(scene);
  const frozen=num('staticUnhit',0)===1?sceneHandle(scene).freezeUnhitCopies():0;
- const sim=await createLabWorld(scene,bondAsset(scene),{gpuTiming:num('profile',1)?'phases':'step'});
+ const sim=await createLabFromScene(scene,{bonds:scene.jointCount?'d6':'none',gpuTiming:num('profile',1)?'phases':'step'});
  let gpuError=null;sim.device.addEventListener('uncapturederror',e=>{gpuError??=String(e.error.message)});
- if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.launch(scene.rowShot.origin,scene.rowShot.direction,{arc:false});
+ if((q.get('shot')??'row')==='row'&&scene.rowShot)sim.queue('row');
  const log=[],t0=performance.now();
  for(let k=0;k<warm;k+=4){await sim.step(Math.min(4,warm-k));
   if(trace&&Math.floor((k+4)/trace)>Math.floor(k/trace)){const c=sim.counters;log.push({tick:sim.steps,awake:c.awake,contacts:c.contact,candidates:c.candidate})}}

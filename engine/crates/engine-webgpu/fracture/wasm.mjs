@@ -10,8 +10,12 @@ const {Asset,Scene,nearMissSettings,HullArena:RustArena,hullView:rustHullView,hu
 if(node){const {readFileSync}=await import('node:fs');mod.initSync({module:readFileSync(new URL('../generated/fracture-wasm/engine_fracture_wasm_bg.wasm',import.meta.url))})}
 // The build Broadside also loads: its Asyncify one where the browser has no JSPI (Safari).
 else{const {JSPI}=await import('./gpu-wait.mjs');await mod.default({module_or_path:new URL(`../generated/world-wasm/engine_world_wasm_bg${JSPI?'':'.asyncify'}.wasm`,import.meta.url)})}
-// The lab's World assets (browser only: engine-world-wasm lab.rs).
-export const LabAsset=mod.LabAsset;
+// The lab's runs on World (browser only: engine-world-wasm lab.rs, over engine-world's
+// `rubble::lab`): a run of the page's choices, each stress model's own fracture switches,
+// the default physics rate.
+export const LabRun=mod.LabRun;
+export const labFractureDefaults=bonds=>mod.labFractureDefaults?.(bonds)??null;
+export const labDefaultPhysicsHz=()=>mod.labDefaultPhysicsHz?.()??60;
 
 export {nearMissSettings,hullBase,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices};
 export const SAMPLES=samples();

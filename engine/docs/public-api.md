@@ -422,13 +422,24 @@ let id = world.create_destructible(&def)?;
 This returns a `DestructibleId`. Each intact cluster is a body, an actor in
 Blast's terms, reachable as a `BodyId`.
 
-**`StrengthModel`** picks how bonds fail. The same API serves all three:
+**`StrengthModel`** picks how bonds fail. The same API serves all of them:
 
 - **`Threshold`** is the fracture lab's `threshold` mode, fully GPU-resident
   (`GpuFracture`, shipped in D1b). Each bonded cluster is one body. Contact and
   impact loads are compared against bond capacity, with strike prediction for
   bodies marked as projectiles (`body_set_projectile`), and splits go into body
   slots reserved when the destructible is placed.
+- **`LoadPath`**, **`ImpactLocal`** and **`BlastGpu`** run on the same GPU fracture
+  (engine/docs/lab-world-plan.md): the load path carries gravity and the contact loads
+  through the bonds to the supports and checks each bond's tension, shear, compression and
+  bending; the analytic local impact decides a predicted strike (ballistic limit, plug,
+  spall, strain-rate strength); `BlastGpu` is vibe-land's GPU stress solver deciding the
+  bonds each step. `DestructibleDef::fracture` (`FractureOptions`) switches the in-step
+  contact fracture and strike prediction, with the same meaning for every stress model
+  (`None`: the model's own). Every stress destructible in a world shares one fracture,
+  which runs one model; placing one of another model or options is an error naming why.
+  For the models whose tables cannot be appended, the fracture is laid out at placement:
+  place them all before the first step.
 - **`Stress(StressSettings)`** is Blast-parity: a quasi-static stress solve
   with `compression`, `tension` and `shear` limits, each with an elastic and a
   fatal value, plus an iteration budget. It is the charter baseline profile
@@ -847,6 +858,8 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Bonds that settle under self-weight before they can break (the lab's preload) | `preload_destructible_asset`, `rbWorld_PreloadDestructibleAsset` (the lab's procedure, checked against the Metal lab: the masonry arch never sleeps within 600 steps in either, so both give up there) | ✅ |
 | The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
 | Fracture lab `threshold` mode (GPU splitter) | `StrengthModel::Threshold`, `RB_STRENGTH_THRESHOLD`; `body_set_projectile`, `rbBody_SetProjectile`; `solver_for`, `rbWorld_UseDestructibleAssetSolverFor`; `rbWorld_GetDestructibleAssetGround` (D1b) | ✅ |
+| Fracture lab stress models (load path, local impact, vibe-land's GPU stress solver) | `StrengthModel::{LoadPath, ImpactLocal, BlastGpu}`, `FractureOptions`; `RB_STRENGTH_LOAD_PATH`, `RB_STRENGTH_IMPACT_LOCAL`, `RB_STRENGTH_BLAST_GPU`, `RbDestructibleDef::contact_fracture`, `strike_prediction` | ✅ |
+| The fracture lab as one API (scenes, bond models, settings, actions, stats) | `rubble::lab` (`LabPlan`, `Lab`, `LabAction`, `LabStats`); `rbCreateLab`, `rbLab_Queue`, `rbLab_Step`, `rbLab_GetStats` (`examples/lab.c`); `World::tick_gpu_ms` | ✅ |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
 | Deformable terrain (`impact.html`, `terrain.html`): meteor and charge craters, heavy-body strikes, vehicle ruts, baked heights for the host's mesh | `enable_terrain`, `terrain_impact` / `terrain_explode` / `terrain_open`, `terrain_watch_shape`, `set_height_field_soil`; `rbWorld_EnableTerrain`, `rbTerrain_*`, `rbHeightField_SetSoil`, `rbHeightField_GetHeights` | ✅ (an Unreal sample project 🔜) |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |

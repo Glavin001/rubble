@@ -64,6 +64,8 @@ struct BlastParams_0
     uint section_bending_0;
     uint chunk_loads_0;
     uint r_virial_0;
+    uint a_events_0;
+    uint ev_broken_cap_0;
 };
 
 struct KernelContext_0

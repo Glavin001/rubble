@@ -1809,6 +1809,7 @@ void fr_lp_breaks(uint3 id: SV_DispatchThreadID)
         atom[a_dirty() + body_of(bond.x)].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
     }
 }
 
@@ -2467,6 +2468,7 @@ void il_breaks<let SRC : uint>(uint i)
         atom[a_dirty() + b].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
         if (SRC == 1)
             atom[a_counters() + C_CS_BREAKS].add(1u);
     }
@@ -2505,13 +2507,17 @@ void fr_il_tube_collect(uint3 id: SV_DispatchThreadID)
         il_tube_collect<0>(id.x);
 }
 
-// A group per body slot (most leave at once: not struck).
+// A group per body slot (most leave at once: not struck), the groups in rows of
+// IL_RUN_ROW (WebGPU dispatches at most 65,535 groups along a dimension; a world's body
+// slots can be more).
+static const uint IL_RUN_ROW = 65535;
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void fr_il_run(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
-    if (params.shot_count > 0)
-        il_run<0>(group.x, thread.x);
+    uint b = group.y * IL_RUN_ROW + group.x;
+    if (params.shot_count > 0 && b < params.body_count)
+        il_run<0>(b, thread.x);
 }
 
 [shader("compute")]
@@ -2907,6 +2913,7 @@ void fr_cs_hertz(uint3 id: SV_DispatchThreadID)
         atom[a_dirty() + b].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
         atom[a_counters() + C_CS_BREAKS].add(1u);
     }
 }
@@ -3111,6 +3118,7 @@ void cs_break(uint i, uint s)
         atom[a_dirty() + s].or(1u);
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
         atom[a_counters() + C_CS_BREAKS].add(1u);
     }
 }
@@ -4033,6 +4041,7 @@ void fr_crush_bonds(uint3 id: SV_DispatchThreadID)
     atom[a_dirty() + body_of(bond.x)].or(1u);
     atom[a_counters() + C_FRAME_BROKEN].add(1u);
     atom[a_counters() + C_BROKEN].add(1u);
+    event_broken(i);
 }
 
 [shader("compute")]

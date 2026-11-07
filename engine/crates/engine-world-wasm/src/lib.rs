@@ -51,7 +51,7 @@ mod vehicle;
 pub use city::WebCity;
 pub use frame::WebFrame;
 pub use frame_pacer::FramePacer;
-pub use lab::{check_lab_chunk_order, LabAsset, LabPreload, LabScene};
+pub use lab::{check_lab_chunk_order, LabRun, LabScene, LabSettleJob};
 /// The lab's scene bindings (`engine-fracture-wasm`), exported from this module too.
 pub use engine_fracture_wasm;
 pub use scene::WebSnapshot;

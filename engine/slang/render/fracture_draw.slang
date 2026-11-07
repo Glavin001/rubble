@@ -7,7 +7,8 @@ struct BodyPose { float4 p; float4 q; float4 invI; float4 v; float4 w; float4 ip
 // Column-major view-projection; mode.x = instance stride, mode.y = colour mode
 // (0 materials, 1 sleep state: awake orange, asleep blue, static grey, 2 bodies: one
 // colour per body, hues a golden-ratio step apart), mode.z = joints
-// per copy (0: the scene runs without joints).
+// per copy (0: the scene runs without joints), mode.w = 1 when the records are a pose
+// stream carrying each record's body slot + 1 in p.w (the lab's stress models).
 struct View { float4 c0; float4 c1; float4 c2; float4 c3; uint4 mode; };
 
 StructuredBuffer<BodyPose> gBodies;
@@ -87,7 +88,13 @@ VsOut vs(uint vid : SV_VertexID, uint copy : SV_InstanceID)
         r.color = (flags & 1u) != 0u && !asleep ? float3(1.0, 0.45, 0.12) : asleep ? float3(0.25, 0.45, 0.85) : float3(0.45, 0.45, 0.48);
     }
     else if (gView.mode.y == 2u && index != 0u)
-        r.color = slotColor(index - 1u);
+    {
+        // mode.w = 1: the records are a pose stream (the stress models' chunks, drawn from
+        // their bodies' poses), each carrying its rigid body slot + 1 in p.w: a body keeps one
+        // colour as pieces break off it. Else the record is the body itself.
+        uint body_slot = gView.mode.w != 0u ? asuint(body.p.w) : index;
+        r.color = body_slot != 0u ? slotColor(body_slot - 1u) : r.color;
+    }
     r.world = world;
     return r;
 }
