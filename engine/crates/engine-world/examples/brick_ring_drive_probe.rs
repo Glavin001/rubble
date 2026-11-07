@@ -238,6 +238,12 @@ fn main() -> anyhow::Result<()> {
         if let Some(x) = w.explicit_vehicles() {
             let pos = x.positions();
             let bad = pos.iter().flatten().filter(|p| !p.is_finite()).count();
+            // The explicit frame's loop-cap flag (a loop that reached its cap or the
+            // frame's loop budget): the frame's results are not to be trusted.
+            if let Err(e) = x.kernel_status() {
+                println!("step {k}: explicit kernel status: {e}; stopping");
+                break;
+            }
             if bad > 0 {
                 println!("step {k}: {bad} non-finite nodes; stopping");
                 break;
