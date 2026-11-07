@@ -207,7 +207,13 @@ void cplGsAdd(uint e, uint v, uint base, uint nodeBase)
     gsCpl[CPL_GS_TAB + 5u * e + 1u] = base;
     gsCpl[CPL_GS_TAB + 5u * e + 2u] = base < CPL_GS ? min(shapes, CPL_GS - base) : 0u;
     gsCpl[CPL_GS_TAB + 5u * e + 3u] = nodeBase;
-    gsCpl[CPL_GS_TAB + 5u * e + 4u] = shapes > 0u && nodeBase < CPL_GS_NODES ? min(nodes, CPL_GS_NODES - nodeBase) : 0u;
+    // The header's .x bit 64 (a host setting, browsers' WebGPU): no node ranges, every
+    // node's contacts scan its vehicle's shapes from the first (the same shapes pass the
+    // cull and the face test, in the same order: the same sums). The range lookup in
+    // cplContacts runs hundreds of times slower as Chrome compiles it for Metal (Tint's
+    // bounds-checked form).
+    bool ranges = (gsCpl[0] & 64u) == 0u;
+    gsCpl[CPL_GS_TAB + 5u * e + 4u] = ranges && shapes > 0u && nodeBase < CPL_GS_NODES ? min(nodes, CPL_GS_NODES - nodeBase) : 0u;
 }
 
 // Vehicle v's node ranges in workgroup memory: (base, count), (0, 0) when none.

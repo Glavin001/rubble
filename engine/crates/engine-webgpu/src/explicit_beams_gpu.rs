@@ -65,6 +65,10 @@ pub struct ExplicitBeamsGpu {
     coupling_on: bool,
     coupling_cull_off: bool,
     coupling_cache_off: bool,
+    /// Diagnostic: extra bits OR-ed into the coupling header word ([`Self::debug_coupling_bits`]).
+    debug_coupling_bits: u32,
+    /// The coupling's per-node shape ranges off ([`Self::set_coupling_node_ranges`]).
+    coupling_ranges_off: bool,
     surface_pairs_off: bool,
     surface_culls_off: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
@@ -233,6 +237,20 @@ fn split_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
 /// `RUBBLE_SURFACE_SPLIT=0`, a measurement: the frame with the pass in it).
 pub fn surface_split_default() -> bool {
     std::env::var("RUBBLE_SURFACE_SPLIT").as_deref() != Ok("0")
+}
+
+/// Whether the coupling's per-node shape ranges start off
+/// ([`ExplicitBeamsGpu::set_coupling_node_ranges`]): in browsers' WebGPU (wasm32), where
+/// Chrome's compile of the range lookup for Metal (Tint's bounds-checked MSL) runs the
+/// coupled frame hundreds of times slower (the crash town's car against a crate:
+/// 755 ms a 1/60 s frame with them, 0.87 ms without; `engine/docs/explicit-vehicles-in-world.md`).
+/// `RUBBLE_COUPLING_RANGES=0|1` overrides it natively.
+pub fn coupling_node_ranges_off_default() -> bool {
+    match std::env::var("RUBBLE_COUPLING_RANGES").as_deref() {
+        Ok("0") => true,
+        Ok("1") => false,
+        _ => cfg!(target_arch = "wasm32"),
+    }
 }
 
 /// The split frame's pipelines and bind group ([`FramePlanner::set_surface_split`]).
@@ -738,6 +756,8 @@ impl ExplicitBeamsGpu {
             coupling_on: false,
             coupling_cull_off: false,
             coupling_cache_off: false,
+            debug_coupling_bits: 0,
+            coupling_ranges_off: coupling_node_ranges_off_default(),
             surface_pairs_off: std::env::var("RUBBLE_SURFACE_PAIRS").as_deref() == Ok("0"),
             surface_culls_off: std::env::var("RUBBLE_SURFACE_CULLS").as_deref() == Ok("0"),
             wide,
@@ -806,6 +826,21 @@ impl ExplicitBeamsGpu {
     #[doc(hidden)]
     pub fn debug_frame_wgsl(&self) -> String {
         crate::uniformize_workgroup_lanes(module_wgsl(self.frame_module))
+    }
+
+    /// Diagnostic (ablations of an edited frame module, [`Self::debug_set_frame_wgsl`]):
+    /// bits OR-ed into the coupling header word from the next frame (the shipped kernel
+    /// reads bits 1 to 32 only).
+    #[doc(hidden)]
+    pub fn debug_coupling_bits(&mut self, bits: u32) {
+        self.debug_coupling_bits = bits;
+        self.write_coupling_header();
+    }
+
+    /// Diagnostic: the byte size of each state binding's buffer (bindings 0..=8).
+    #[doc(hidden)]
+    pub fn debug_binding_sizes(&self) -> Vec<u64> {
+        self.bufs.iter().map(|b| b.size()).collect()
     }
 
     /// Diagnostic (browser ablations without a rebuild): frames run `src` as the
@@ -1344,6 +1379,17 @@ impl ExplicitBeamsGpu {
         self.write_coupling_header();
     }
 
+    /// The coupling's per-node shape ranges (`explicit_beams_rigid.slang` `cplGsAdd`, the
+    /// header's bit 64): each node's contacts start at the first proxy shape its count
+    /// pass found it inside and stop after the last (on), or scan every shape (off; the
+    /// same shapes pass the cull and the face test, in the same order: the same results).
+    /// Off by default in browsers' WebGPU ([`coupling_node_ranges_off_default`]), on
+    /// elsewhere.
+    pub fn set_coupling_node_ranges(&mut self, on: bool) {
+        self.coupling_ranges_off = !on;
+        self.write_coupling_header();
+    }
+
     /// Tests and measurement: the coupling's workgroup copies and ranges (on by default;
     /// lossless, `explicit_beams_rigid.slang`: the header words, the proxy spheres and
     /// each node's shape range from the count pass in workgroup memory, the shapes'
@@ -1383,7 +1429,9 @@ impl ExplicitBeamsGpu {
                 32
             } else {
                 0
-            };
+            }
+            | if self.coupling_on && self.coupling_ranges_off { 64 } else { 0 }
+            | if self.coupling_on { self.debug_coupling_bits } else { 0 };
         self.queue.write_buffer(
             &self.misc,
             self.layout.coupling_on_offset(),

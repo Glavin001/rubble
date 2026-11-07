@@ -956,3 +956,55 @@ per-vehicle copied slots remain only for the standalone `ExplicitSim`.
 
 What still follows the World's size per window: the clear of the per-body share counts
 (4 bytes × body capacity), and the rigid step's own O(total) passes (`large-maps.md` §1a).
+
+## 12. The crash town in Chrome (2026-11-07)
+
+`explicit-world.html` ran at 1 to 3 FPS in Chrome (M3 Max, headless and windowed) while
+the same town is 3.8 to 4.2 ms a World step natively (`explicit_vehicles_bench 1`; with
+`EV_PAGE=1` the page's own car: the procedural sedan with tyres, fast inverse square root,
+drag and turbulence, 4.15 ms median, 51 bonds broken in 2 s).
+
+**Measured in Chrome.** `?timing=step|phases` now times the coupling's passes and the
+explicit frame as segments of the World step's own timestamps (`WgpuSim::host_segment`,
+resolved and read with the step's readback; nothing waits on wasm): `cpl_emit`,
+`cpl_plan`, `cpl_share`, `explicit_frame`, `cpl_loads`. At `?n=1` the rigid step was
+1.3 ms and the coupling passes 0.01 to 0.05 ms each; the explicit frame (33 explicit steps)
+was 260 to 1,100 ms, growing with the proxies the car met.
+
+**Ablations** (Chrome, one car):
+* wide passes (`?wide=1`): 0.67 ms, but the wide passes do not run the coupling (the car
+  no longer feels the bodies): neither a fix nor the cause (the town's car already ran a
+  workgroup per vehicle);
+* coupling off (`?knobs=coupling:0`): 0.51 ms;
+* the coupling's workgroup copies off (`couplingCache:0`): 7 to 10 ms among the house's
+  chunks;
+* Dawn's robustness off (`--enable-dawn-features=disable_robustness`, diagnosis only):
+  2.1 ms;
+* loop caps: no loop reached its cap (the cap word stayed 0).
+
+**Root cause.** One edited frame module with runtime switches in the coupling header
+(`debugSetExplicitFrameWgsl`, `debugExplicitCouplingBits`), the same compiled pipeline
+throughout, the car touching a crate (`?speed=0.01&runUp=1.2`): every switch at its shipped
+value, 755 ms a frame; only the per-node shape range lookup in `cplContacts` off, 0.87 ms;
+every other workgroup copy (header words, spheres, reaction sums, body ranges) made no
+difference. In that state every node's range is empty, so the lookup returns at once and
+the shapes loop runs 0 times: the cost is not work done but how Chrome compiles it. Tint's
+bounds-checked MSL (every index clamped, the array lengths passed down every call) leaves
+the coupling's small helpers as calls (the offline Metal front end keeps `cplMay`,
+`cplHdr`, `cplShape` as calls only in the checked form), and with the frame kernel's live
+state Metal's back end runs that path hundreds of times slower. An atomic counter added at
+the lookup made it fast too: a compiler pathology, not our arithmetic. Native wgpu (naga's
+MSL) compiles the same WGSL well.
+
+**Fix (lossless).** `ExplicitBeamsGpu::set_coupling_node_ranges`: the header's bit 64
+makes `cplGsAdd` record no node ranges (one lane, once a frame), so every node scans its
+vehicle's shapes from the first; the same shapes pass the cull and the face test in the
+same order, the same sums. Off by default on wasm32 (`coupling_node_ranges_off_default`;
+`RUBBLE_COUPLING_RANGES=0|1` natively), on elsewhere. Tests:
+`the_coupling_node_ranges_are_bit_exact` (engine-world: four cars in a house at 120 Hz,
+every state word equal both ways), the engine-world and engine-webgpu explicit suites, the
+Metal parity tests.
+
+**The page's loop.** World steps are paced to wall time by `FramePacer` (a 120 Hz display
+draws every frame and takes a 1/60 s step every other one), not one per
+`requestAnimationFrame`; the HUD shows real time as World steps per second.

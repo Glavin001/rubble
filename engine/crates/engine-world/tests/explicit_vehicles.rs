@@ -409,6 +409,64 @@ fn the_coupling_workgroup_copies_are_bit_exact() {
     assert!(checked >= 2, "the comparison ran with the cars among the house's chunks");
 }
 
+/// The coupling's per-node shape ranges (`cplGsAdd`, the header's bit 64: off by default
+/// in browsers' WebGPU, where Chrome's compile of the lookup is pathological) change no
+/// result: the same frames with them on and off are equal bit for bit. Four cars into
+/// one house at 120 Hz, compared once they are among its chunks.
+#[test]
+fn the_coupling_node_ranges_are_bit_exact() {
+    let template = sedan(0.0, 0.0, Vec3::ZERO, 0);
+    let mut town = rubble::explicit_scene::crash_town_at(
+        GpuContext::Default,
+        &template,
+        1,
+        4,
+        15.0,
+        8.0,
+        30,
+        &rubble::explicit_scene::town_coupling(),
+        Some(1.0 / 120.0),
+        None,
+    )
+    .unwrap();
+    let w = &mut town.world;
+    let mut checked = 0;
+    for step in 0..150 {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        if step < 60 || step % 30 != 0 {
+            continue;
+        }
+        let shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
+        let x = w.explicit_vehicles_mut().unwrap();
+        let snap = x.snapshot();
+        let mut run = |ranges: bool| {
+            x.restore(&snap);
+            x.set_coupling_node_ranges(ranges);
+            for _ in 0..3 {
+                x.frame(17);
+            }
+            x.wait();
+            // (The header's bit itself is the one word the runs set apart.)
+            x.set_coupling_node_ranges(true);
+            x.state_words()
+        };
+        let off = run(false);
+        let on = run(true);
+        x.restore(&snap);
+        x.set_coupling_node_ranges(true);
+        println!("step {step}: proxy shapes per vehicle {shapes:?}");
+        for ((name, a), (_, b)) in off.iter().zip(&on) {
+            let diff = a.iter().zip(b).filter(|(p, q)| p != q).count();
+            assert_eq!(diff, 0, "step {step}: {name}: {diff} words differ with the node ranges on");
+        }
+        if shapes.iter().any(|&n| n >= 10) {
+            checked += 1;
+        }
+    }
+    assert!(checked >= 2, "the comparison ran with the cars among the house's chunks");
+}
+
 /// The coupling plan's lane-parallel records (`vehicle_coupling.slang` `cplPlanShapes`)
 /// are its serial walk's: from one World state, the plan alone both ways gives the same
 /// proxy records (bodies, shapes, hull planes, each body's shape range) and share

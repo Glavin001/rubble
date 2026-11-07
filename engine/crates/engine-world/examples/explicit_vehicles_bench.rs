@@ -14,8 +14,24 @@ use engine_webgpu::{CouplingCapacity, ExplicitBeamsGpu};
 use rubble::explicit_scene::{crash_town, place_vehicle, town_coupling};
 use rubble::*;
 
-/// The repo sedan on its beam tyres, or (EV_RAYCAST=1) on raycast wheels (the drive).
+/// The repo sedan on its beam tyres, or (EV_RAYCAST=1) on raycast wheels (the drive), or
+/// (EV_PAGE=1) the crash town page's car: the procedural sedan with its soft tyres
+/// (`explicitSedanTruck(true)`) and the page's settings (fast inverse square root, drag
+/// and turbulence), as `createVehicleTown` builds it.
 fn sedan() -> ExplicitBeams {
+    if std::env::var("EV_PAGE").as_deref() == Ok("1") {
+        let text = engine_softbody::procedural::car_truck(&engine_softbody::procedural::CarParams {
+            minimass: 10.0,
+            ..engine_softbody::procedural::CarParams::sedan()
+        });
+        let settings = ExplicitBeamsSettings {
+            fast_inv_sqrt: true,
+            drag: true,
+            turbulence: true,
+            ..Default::default()
+        };
+        return ExplicitBeams::from_truck(&text, glam::Vec3::ZERO, glam::Vec3::ZERO, settings).unwrap();
+    }
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck"
@@ -118,7 +134,8 @@ fn main() -> anyhow::Result<()> {
             vehicles,
             15.0,
             8.0,
-            30,
+            // The page builds the town without settling the houses first.
+            if std::env::var("EV_PAGE").as_deref() == Ok("1") { 0 } else { 30 },
             &def,
             hz.map(|h| 1.0 / h),
             // At most 32 houses (the fracture's chunk capacity); the rest of the

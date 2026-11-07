@@ -39,7 +39,7 @@
     // Thin page: the scene is rubble::explicit_scene::crash_town (the native benchmark's
     // builder) and all physics is Rust/Slang; this draws the world's colliders and the
     // vehicles' collision skins from the GPU buffers in place.
-    import { createVehicleTown, pollFrame, errorText } from './rubble-world.mjs';
+    import { createVehicleTown, pollFrame, errorText, FramePacer } from './rubble-world.mjs';
     const qs = new URLSearchParams(location.search);
     const N = Math.max(1, Number(qs.get('n')) || 16);
     const SPEED = Number(qs.get('speed')) || 15;
@@ -253,10 +253,18 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     // ---------------------------------------------------------------- loop
     const statsEl = document.getElementById('stats');
     let broken = 0, splits = 0, fps = 0, frames = 0, fpsAt = performance.now(), stepMs = [];
+    // World steps paced to wall time by Rust's FramePacer (frame_pacer.rs), not one per
+    // displayed frame: a 120 Hz display draws every frame and takes a 1/60 s step every
+    // other one; a slow frame takes the steps it owes (at most 4). ?minFps=N: a frame-rate
+    // floor with the World step's GPU time as its budget (needs ?timing=).
+    const RATE = 1 / world.solver().dt;
+    const pacer = new FramePacer(RATE, Number(qs.get('minFps')) || 0);
+    let lastNow = null, owedMissed = 0, simSteps = 0, simAt = performance.now(), simRate = 0, hudAt = 0;
     const onFrame = (f) => {
       broken += f.bondsBroken();
       if (TIMING) for (const t of f.gpuTimes() || []) {
         gpuTotal.push(t.totalMs); if (gpuTotal.length > 120) gpuTotal.shift();
+        pacer.reportGpu(t.totalMs, 1);
         // A segment name can repeat in a step: summed per step.
         const per = new Map();
         for (const [n, ms] of t.segments) per.set(n, (per.get(n) || 0) + ms);
@@ -270,6 +278,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
         ['vehicles', `${N} · ${triCount.toLocaleString()} skin triangles`],
         ['houses', `${layout.houses} cuboid houses (threshold, prefractured)`],
         ['World steps', `${ws} (1/60 s) · explicit steps ${xs.toLocaleString()} (2 kHz)`],
+        ['real time', `${(100 * simRate / RATE).toFixed(0)} % (${simRate.toFixed(1)} World steps/s)${owedMissed ? ` · ${owedMissed} steps behind (readback)` : ''}`],
         ['bonds broken', broken.toLocaleString()],
         ['explicit frame', world.explicitWide() ? 'wide passes' : 'a workgroup per vehicle'],
         ['bodies', world.bodyCount().toLocaleString()],
@@ -285,16 +294,24 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     async function frame(now) {
       frames++;
       if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
+      const dt = lastNow === null ? 0 : (now - lastNow) / 1000;
+      lastNow = now;
       try {
-        if (!paused && world.canStep()) {
+        const owed = paused ? 0 : pacer.advance(dt, 1, 4);
+        for (let k = 0; k < owed; k++) {
+          // A step waits for a free readback slot (never blocks): one owed past it is
+          // dropped, and the HUD's real time says so.
+          if (!world.canStep()) { owedMissed += owed - k; break; }
           const t = performance.now();
           world.step();
           stepMs.push(performance.now() - t);
           if (stepMs.length > 120) stepMs.shift();
+          simSteps++;
         }
+        if (now - simAt > 1000) { simRate = simSteps * 1000 / (now - simAt); simSteps = 0; simAt = now; }
         pollFrame(world, onFrame);
         draw();
-        hud();
+        if (now - hudAt > 250) { hud(); hudAt = now; }
         statusEl.textContent = 'running';
       } catch (e) { fail(e); return; }
       requestAnimationFrame(frame);

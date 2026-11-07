@@ -102,7 +102,7 @@ impl WebWorld {
 
     /// Measurement knobs of the explicit frame (ablations in a browser): `coupling` (the
     /// rigid coupling in the frame; off, the vehicles no longer feel the bodies),
-    /// `couplingCull`, `couplingCache`, `surfacePairs`, `surfaceCulls` (lossless paths on
+    /// `couplingCull`, `couplingCache`, `couplingRanges`, `surfacePairs`, `surfaceCulls` (lossless paths on
     /// or off). Returns false for an unknown knob.
     #[wasm_bindgen(js_name = setExplicitKnob)]
     pub fn set_explicit_knob(&mut self, name: &str, on: bool) -> bool {
@@ -113,6 +113,7 @@ impl WebWorld {
             "couplingCache" => g.set_coupling_workgroup_cache(on),
             "surfacePairs" => g.set_surface_pairs(on),
             "surfaceCulls" => g.set_surface_culls(on),
+            "couplingRanges" => g.set_coupling_node_ranges(on),
             _ => return false,
         }
         true
@@ -131,6 +132,21 @@ impl WebWorld {
         self.world.explicit_vehicles().map_or(String::new(), |g| g.debug_frame_wgsl())
     }
 
+    /// Diagnostic: the explicit frame's state bindings' buffer sizes (bytes, bindings 0..=8).
+    #[wasm_bindgen(js_name = debugExplicitBindingSizes)]
+    pub fn debug_explicit_binding_sizes(&self) -> Vec<f64> {
+        self.world.explicit_vehicles().map_or(Vec::new(), |g| g.debug_binding_sizes().into_iter().map(|x| x as f64).collect())
+    }
+
+    /// Diagnostic: extra bits in the coupling header word (an edited frame module's
+    /// runtime switches).
+    #[wasm_bindgen(js_name = debugExplicitCouplingBits)]
+    pub fn debug_explicit_coupling_bits(&mut self, bits: u32) {
+        if let Some(g) = self.world.explicit_vehicles_mut() {
+            g.debug_coupling_bits(bits);
+        }
+    }
+
     /// Diagnostic: run `src` as the explicit frame module (an edited copy of
     /// [`Self::debug_explicit_frame_wgsl`]; ablations without a rebuild).
     #[wasm_bindgen(js_name = debugSetExplicitFrameWgsl)]
@@ -138,6 +154,20 @@ impl WebWorld {
         if let Some(g) = self.world.explicit_vehicles_mut() {
             g.debug_set_frame_wgsl(src);
         }
+    }
+
+    /// Diagnostic: the explicit accumulators `GPUBuffer` (gAcc) and the word of its
+    /// last proxy shape's sums (free while vehicle 0 has fewer proxy shapes than its
+    /// room): `[buffer, word]`.
+    #[wasm_bindgen(js_name = debugExplicitAcc)]
+    pub fn debug_explicit_acc(&self) -> JsValue {
+        let (Some(g), Some(c)) = (self.world.explicit_vehicles(), self.world.explicit_coupling_layout()) else {
+            return JsValue::NULL;
+        };
+        let arr = js_sys::Array::new();
+        arr.push(&gpu_buffer(g.acc_buffer()));
+        arr.push(&JsValue::from(c.acc_base + c.cap.bodies + 6 * (c.cap.shapes - 1)));
+        arr.into()
     }
 
     /// Whether the explicit frame runs as the wide passes.
