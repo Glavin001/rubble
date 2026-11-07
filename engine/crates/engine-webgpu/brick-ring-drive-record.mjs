@@ -128,7 +128,9 @@ const FPS = 60;
 const videos = [];
 for (const run of runs.length ? runs : ['etk']) {
   const { name, query } = parse(run);
-  const frameDir = mkdtempSync(join(tmpdir(), 'brick-ring-frames-'));
+  // Frames beside the videos (a restart wipes the temporary directory).
+  mkdirSync(join(OUT, 'frames'), { recursive: true });
+  const frameDir = mkdtempSync(join(OUT, 'frames', `${name}-`));
   let frameNo = 0;
   const grab = () => grabTo(join(frameDir, `f${String(frameNo++).padStart(6, '0')}.jpg`));
   const rec = (expr) => evaluate(`(async () => { const R = window.__rec; return ${expr}; })()`);
@@ -153,14 +155,16 @@ for (const run of runs.length ? runs : ['etk']) {
   for (const [r, camName] of ['side', 'outside'].entries()) {
     await open(`${query}&record=1&slowmo=1&impactAt=${hit.toFixed(4)}`);
     await rec(`R.set({ cam: "${camName}" })`);
-    const from = Math.max(0, hit - (r ? 0.5 : 0.7));
+    // The entry from inside (the car is in the wall a second later), then the
+    // break-out from outside.
+    const from = Math.max(0, hit - (r ? 0.15 : 0.6));
     while (true) { st = await rec('R.frame(60, 1)'); if (st.t >= from - 1e-6) break; }
-    const end = hit + (r ? 1.5 : 2.0);
+    const end = hit + (r ? 2.4 : 0.9);
     let shot = 0;
     while (st.t < end) {
       st = await rec('R.frame(60)');
       await grab();
-      if (STILLS && shot < 2 && st.t >= hit + [0.12, 0.45][shot]) await grabTo(join(STILLS, `${name}-${camName}-${shot++}.jpg`), 78);
+      if (STILLS && shot < 2 && st.t >= hit + (r ? [0.45, 0.9] : [0.05, 0.3])[shot]) await grabTo(join(STILLS, `${name}-${camName}-${shot++}.jpg`), 78);
     }
   }
   const file = join(OUT, `brick-ring-drive-${name}.mp4`);
