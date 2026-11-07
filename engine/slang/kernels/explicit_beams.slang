@@ -4041,6 +4041,11 @@ struct SegPoint
     float ratio;
 };
 
+// Slide nodes work in the vehicle's frame (positions relative to its origin, the CPU's
+// `Vec3::ZERO + pos`): their rail distance keeps the same precision wherever the vehicle
+// is (at 4 km World positions are 0.24 mm apart, enough to keep a parked car awake).
+static const float3 SLIDE_FRAME = float3(0.0, 0.0, 0.0);
+
 SegPoint segmentPoint(uint gs, float3 origin, float3 x)
 {
     uint j = gStatic[gP.segBase + gs].x;
@@ -5418,7 +5423,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         if ((flagsV & FLAG_SLIDES) != 0u)
         {
             uint count = min(aero2.y, gP.slideTotal - min(aero2.x, gP.slideTotal));
-            for (uint k = lane, kStop = EB_END(k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, origin, groupOff, parity);
+            for (uint k = lane, kStop = EB_END(k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, SLIDE_FRAME, groupOff, parity);
         }
 #endif
         sync();
@@ -6592,7 +6597,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parity);
     }
 #ifdef EB_AERO
-    if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, origin, groupOff, parity);
+    if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, SLIDE_FRAME, groupOff, parity);
 #endif
     sync();
 }
@@ -6962,7 +6967,7 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         selfApply(v, on, pl, P, lane, origin, range, beamOff, groupOff, groupCount, parity);
     }
 #ifdef EB_AERO
-    if (on && pl == P - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, origin, groupOff, parity);
+    if (on && pl == P - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, SLIDE_FRAME, groupOff, parity);
 #endif
     sync();
 }

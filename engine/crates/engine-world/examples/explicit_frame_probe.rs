@@ -203,9 +203,14 @@ fn main() -> anyhow::Result<()> {
         Some(32),
     )?;
     let w = &mut town.world;
-    for _ in 0..before {
+    let trace = std::env::var("EV_TRACE").is_ok();
+    for k in 0..before {
+        let t = std::time::Instant::now();
         w.step()?;
         w.poll_blocking()?;
+        if trace {
+            eprintln!("step {k}: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        }
     }
     let shapes: Vec<usize> = w
         .explicit_window_impulses()
@@ -217,6 +222,8 @@ fn main() -> anyhow::Result<()> {
     let mut s = shapes.clone();
     s.sort_unstable();
     println!("{n} cars, after {before} steps at {hz} Hz; frame of {steps} steps; proxy shapes per car {s:?}");
+    let rebased = x.origins().iter().filter(|o| **o != glam::Vec3::ZERO).count();
+    println!("  {rebased} of {n} vehicles re-based (origin moved off 0)");
     assert!(x.enable_frame_timing(64));
     let snap = x.snapshot();
     let mut time = |x: &mut engine_webgpu::ExplicitBeamsGpu,
