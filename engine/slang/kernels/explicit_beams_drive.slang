@@ -263,8 +263,8 @@ float3 drvForceNow(uint gi, uint beamOff, uint groupOff, uint groupCount, uint s
 // One vehicle's wheels (explicit_drive::drive_pass) in four parts, each in the CPU's
 // order: drvCtx (frame, speed, inputs: section 1), drvRays (one wheel's ray and
 // suspension: section 2), drvBars (the anti-roll bars), drvTyre (one wheel's tyre,
-// spin and hub forces: sections 3 and 4) and drvEnd. driveVehicle runs them on one
-// lane; driveStep runs a wheel per lane when no two wheels share a hub node (a
+// spin and hub forces: sections 3 and 4) and drvEnd. driveWheelsSplit runs them on
+// one lane, or a wheel per lane when no two wheels share a hub node (a
 // wheel's tyre reads its hub nodes' accumulators, which only its own forces then
 // touch, and its own records), else on one lane: the same arithmetic, so the same
 // bits. Between the parts each wheel's (length, load) and hit are kept in its scratch
@@ -667,17 +667,6 @@ bool drvWheelsApart(DrvCtx c)
     return apart;
 }
 
-// One vehicle's wheels at step `step` on one lane: explicit_drive::drive_pass.
-void driveVehicle(uint v, uint step)
-{
-    DrvCtx c;
-    if (!drvCtx(v, c)) return;
-    for (uint k = 0u, kStop = EB_END(k, c.nw, 1u); k < kStop; k++) drvRays(c, k);
-    drvBars(c);
-    for (uint k = 0u, kStop = EB_END(k, c.nw, 1u); k < kStop; k++) drvTyre(c, k, step);
-    drvEnd(c);
-}
-
 // The frame's start (lane 0, before the barrier the uniform read follows).
 void driveBegin()
 {
@@ -685,19 +674,23 @@ void driveBegin()
 }
 
 // Wheel `w` of vehicle v (live: the lane has one) at step `step`, the three parts of
-// a step, each followed by a barrier (every lane reaches them).
+// a step, each followed by a barrier (every lane reaches them). Wheels apart: wheel w
+// on lane w; else lane 0 runs every wheel, in explicit_drive::drive_pass's order (the
+// rays, the bars, the tyres, the end: the barriers between change nothing on one
+// lane). One call site per part (the compilers inline every call).
 void driveWheelsSplit(uint v, uint w, bool live, uint step)
 {
     DrvCtx c;
     bool has = live && w < DRV_MAX_WHEELS && drvCtx(v, c);
     bool apart = has && drvWheelsApart(c);
-    if (has && apart && w < c.nw) drvRays(c, w);
-    if (has && !apart && w == 0u) driveVehicle(v, step);
+    uint k0 = apart ? w : 0u;
+    uint k1 = !has ? 0u : (apart ? min(w + 1u, c.nw) : (w == 0u ? c.nw : 0u));
+    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++) drvRays(c, k);
     sync();
-    if (has && apart && w == 0u) drvBars(c);
+    if (has && w == 0u) drvBars(c);
     sync();
-    if (has && apart && w < c.nw) drvTyre(c, w, step);
-    if (has && apart && w == 0u) drvEnd(c);
+    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++) drvTyre(c, k, step);
+    if (has && w == 0u) drvEnd(c);
 }
 
 // The drive's part of step s of vehicle v (uniform `on`): its wheels, then a barrier.
