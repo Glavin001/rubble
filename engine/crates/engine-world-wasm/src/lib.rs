@@ -42,6 +42,7 @@ mod motion;
 mod read;
 mod scene;
 mod showcase;
+mod showcase_world;
 mod soft;
 mod terrain;
 mod vehicle;

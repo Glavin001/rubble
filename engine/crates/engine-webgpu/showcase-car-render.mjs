@@ -111,7 +111,9 @@ struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listA
 // The frame's effects: simulated seconds since the last update (0: nothing
 // moves, spawns or accumulates), a seed, the floor and the static boxes
 // (centre, kind; half extents) the sparks and scrapes test.
-struct Fx { dt: f32, seed: u32, floorY: f32, boxes: u32, box: array<vec4f, ${2 * FX_BOXES}> };
+// lead.x: seconds the shown state is carried past the solver's (node velocity ×
+// lead; FramePacer.lead: smooth motion between fixed steps in slow motion).
+struct Fx { dt: f32, seed: u32, floorY: f32, boxes: u32, lead: vec4f, box: array<vec4f, ${2 * FX_BOXES}> };
 @group(0) @binding(0) var<storage, read> nodes: array<vec4f>;
 @group(0) @binding(1) var<storage, read> misc: array<vec4u>;
 @group(0) @binding(2) var<storage, read> binds: array<Bind>;
@@ -175,7 +177,7 @@ fn origin() -> vec3f {
   let o = misc[params.vehicle];
   return vec3f(bitcast<f32>(o.x), bitcast<f32>(o.y), bitcast<f32>(o.z));
 }
-fn nodePos(i: u32) -> vec3f { return nodes[(params.nodeOffset + i) * 3u].xyz; }
+fn nodePos(i: u32) -> vec3f { let k = (params.nodeOffset + i) * 3u; return nodes[k].xyz + nodes[k + 1u].xyz * fxu.lead.x; }
 fn beamBroken(j: u32) -> bool { return beams[(params.beamOffset + j) * 2u + 1u].z != 0.0; }
 fn beamRest(j: u32) -> f32 { return beams[(params.beamOffset + j) * 2u].x; }
 fn restN(i: u32) -> vec3f {
@@ -662,7 +664,7 @@ const SKIN_POS_WGSL = (() => {
   let s = SKIN_WGSL;
   const swap = (a, b) => { if (!s.includes(a)) throw new Error('showcase skinPos: missing ' + a); s = s.replace(a, b); };
   swap('@group(0) @binding(0) var<storage, read> nodes: array<vec4f>;', '@group(0) @binding(0) var<storage, read> pos: array<f32>;');
-  swap('fn nodePos(i: u32) -> vec3f { return nodes[(params.nodeOffset + i) * 3u].xyz; }',
+  swap('fn nodePos(i: u32) -> vec3f { let k = (params.nodeOffset + i) * 3u; return nodes[k].xyz + nodes[k + 1u].xyz * fxu.lead.x; }',
     'fn nodePos(i: u32) -> vec3f { let k = (params.nodeOffset + i) * 3u; return vec3f(pos[k], pos[k + 1u], pos[k + 2u]); }');
   swap('@group(0) @binding(6) var<storage, read> beams: array<vec4f>;', '@group(0) @binding(6) var<storage, read> beams: array<f32>;');
   swap('fn beamBroken(j: u32) -> bool { return beams[(params.beamOffset + j) * 2u + 1u].z != 0.0; }', 'fn beamBroken(j: u32) -> bool { return beams[params.beamOffset + j] < 0.0; }');
@@ -1357,9 +1359,11 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   // Debris: one ring buffer for every car, and the effects uniform (dt,
   // seed, floor, static boxes).
   const fxBuf = device.createBuffer({ label: 'showcase-fx', size: fxBufferSize(FX_N), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  const fxuBuf = device.createBuffer({ label: 'showcase-fx-frame', size: 16 + 32 * FX_BOXES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const fxu = new ArrayBuffer(16 + 32 * FX_BOXES);
+  const fxuBuf = device.createBuffer({ label: 'showcase-fx-frame', size: 32 + 32 * FX_BOXES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const fxu = new ArrayBuffer(32 + 32 * FX_BOXES);
   let fxSeed = 0, fxLive = false;
+  // drawDepth's pipeline (made on first use, per depth format).
+  let depthOnly = null;
   const fxModule = device.createShaderModule({ label: 'showcase-fx-draw', code: FX_DRAW_MODULE });
   const fxPipe = device.createRenderPipeline({
     label: 'showcase-fx',
@@ -1894,7 +1898,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * buffer given to setPositions): node normals, the level-of-detail pick (by
      * the last draw's eye), then the picked level's skin.
      */
-    update(encoder, { dt = 0, floorY = 0, boxes = null } = {}) {
+    update(encoder, { dt = 0, floorY = 0, boxes = null, lead = 0 } = {}) {
       const usePos = !!posBuf;
       if (!usePos && !nodesBuf) return;
       // Effects: dt the simulated seconds since the last update (0: nothing
@@ -1904,11 +1908,12 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       uf[0] = live ? dt : 0;
       uw[1] = ++fxSeed;
       uf[2] = floorY;
+      uf[4] = lead;
       const nb = boxes ? Math.min(boxes.length, FX_BOXES) : 0;
       uw[3] = nb;
       for (let k = 0; k < nb; k++) {
         const [cx, cy, cz, hx, hy, hz, , , , , kind] = boxes[k];
-        uf.set([cx, cy, cz, kind, hx, hy, hz, 0], 4 + 8 * k);
+        uf.set([cx, cy, cz, kind, hx, hy, hz, 0], 8 + 8 * k);
       }
       device.queue.writeBuffer(fxuBuf, 0, fxu);
       if (live) fxLive = true;
@@ -2011,6 +2016,36 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         pass.setPipeline(fxPipe);
         pass.setBindGroup(0, fxBind);
         pass.draw(6, FX_N);
+      }
+    },
+    /**
+     * Every car's opaque level into a depth-only pass (a shadow map): `viewProj`
+     * the light's, `format` the pass's depth format. Uses its own uniform.
+     */
+    drawDepth(pass, { viewProj, format: depthFmt = 'depth32float' }) {
+      if (!depthOnly || depthOnly.format !== depthFmt) {
+        const module = device.createShaderModule({
+          label: 'showcase-depth',
+          code: '@group(0) @binding(0) var<uniform> vp: mat4x4f;\n@vertex fn vs(@location(0) p: vec3f, @location(8) tw: u32) -> @builtin(position) vec4f {\n  // A torn vertex (its triangles discarded in the colour pass) collapses outside.\n  if (unpack2x16float(tw).x > 0.5) { return vec4f(2.0, 2.0, 2.0, 1.0); }\n  return vp * vec4f(p, 1.0);\n}',
+        });
+        const pipe = device.createRenderPipeline({
+          label: 'showcase-depth', layout: 'auto',
+          vertex: { module, entryPoint: 'vs', buffers: [{ arrayStride: OUT_STRIDE, attributes: OUT_LAYOUT.attributes.slice(0, 2) }] },
+          primitive: { topology: 'triangle-list', cullMode: 'none' },
+          depthStencil: { format: depthFmt, depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2.5 },
+        });
+        const buf = device.createBuffer({ label: 'showcase-depth-vp', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        depthOnly = { format: depthFmt, pipe, buf, bind: device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buf } }] }) };
+      }
+      device.queue.writeBuffer(depthOnly.buf, 0, Float32Array.from(viewProj));
+      pass.setPipeline(depthOnly.pipe);
+      pass.setBindGroup(0, depthOnly.bind);
+      for (const car of cars.values()) {
+        car.levels.forEach((lv, k) => {
+          pass.setVertexBuffer(0, lv.out);
+          pass.setIndexBuffer(lv.index, 'uint32');
+          pass.drawIndexedIndirect(car.args, k * 92 + 12);
+        });
       }
     },
     destroy() {

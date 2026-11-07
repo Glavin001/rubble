@@ -33,6 +33,7 @@ mod explicit_vehicles;
 /// The explicit vehicles' crash scene (soft vehicles into prefractured houses).
 #[cfg(feature = "stress")]
 pub mod explicit_scene;
+pub mod showcase_scene;
 mod guidance;
 mod handles;
 mod host_state;

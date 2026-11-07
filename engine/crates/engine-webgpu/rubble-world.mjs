@@ -7,6 +7,7 @@
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
   hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
+  showcaseLayout,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -63,6 +64,27 @@ export async function createVehicleTown(spec) {
   const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) });
   world.flags = solverFlags();
   return { world, layout: vehicleTownLayout(spec.houses ?? 0, spec.count ?? 4) };
+}
+
+/**
+ * The one-World showcase (`rubble::showcase_scene`): `spec` `{ truck, preset: 'house' |
+ * 'crates' | 'twoway' | 'convoy', count, speed, runUp, drag }` (`truck` .truck text).
+ * Returns the world and its layout (`showcaseLayout`).
+ */
+export async function createShowcase(spec) {
+  ready ??= init();
+  await ready;
+  const { truck, ...rest } = spec;
+  const layout = showcaseLayout(rest);
+  const world = await WebWorld.createShowcase(spec);
+  world.flags = solverFlags();
+  return { world, layout };
+}
+
+/** The wasm, once loaded (pages that call its free functions before a world). */
+export async function loadWasm() {
+  ready ??= init();
+  await ready;
 }
 
 /**
