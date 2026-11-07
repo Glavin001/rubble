@@ -2398,7 +2398,7 @@ void centredPhase(uint flagsV, uint nodeOff, uint nodeCount, uint beamOff, uint 
             centredNode(nodeOff + i, beamOff, groupOff, groupCount, parity);
     }
     // No barrier here: what follows reads a node only after its own barrier, or
-    // (centredBox) its lane's own nodes.
+    // (memberBox) its lane's own nodes.
 }
 
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
@@ -6115,10 +6115,16 @@ uint vvTestedAt(uint i) { return gP.vvMembers + 5u * gP.vehicles + i; }
 // adds into them), the tested-triangle list restarted per member, and a pending
 // reset of the self-collision throttles (a fast approach in the last contact pass)
 // applied after their update.
-// Centred damping in a contact group (§39): the corrected positions also into this
-// step's box keys (a superset of the box the node phase gave) and the frame bounds
-// check.
-void centredBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity, uint lane, uint lanes)
+// A contact group member's box of this step (world positions after integration) into
+// this parity's keys, and the frame bounds check: `lanes` lanes from `lane`, each over
+// its own nodes (no lane: nothing). Its own pass after the node phase, each lane
+// reading back the positions it wrote. The box was once kept as the node loop's
+// running min and max: Chrome's Metal compile (Tint's bounds-checked MSL) returned a
+// wrong box from that loop for the lanes past the last full stride (every member's
+// local node 208 of the page's 463-node car, 256 lanes a member: the position of
+// global node 0), so vehicles reported frame-bounds errors native never shows. With
+// centred damping (§39) it runs again after the correction (a superset of the box).
+void memberBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity, uint lane, uint lanes)
 {
     float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
     float3 hi = -lo;
@@ -6182,12 +6188,6 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     }
     sync();
     {
-        // The contact pass's box of this step (world positions after integration)
-        // into this parity's keys (the other parity's cleared for the next step),
-        // and the frame bounds check.
-        float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
-        float3 hi = -lo;
-        bool has = false;
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
         {
@@ -6195,29 +6195,16 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
                        boxOff, boxCount, beamOff, groupOff, groupCount, true);
             if (centredV) centredDelta(nodeOff + i, v0);
-            float3 x = nf3(origin + gNodes[(nodeOff + i) * 3u].xyz);
-            lo = min(lo, x);
-            hi = max(hi, x);
-            has = true;
         }
+        // The contact pass's box of this step (the other parity's keys cleared for the
+        // next step), and the frame bounds check.
         if (lane < 6u) gAcc[vvBoxKey(v, parity ^ 1u) + lane].store(lane < 3u ? VV_INT_MAX : VV_INT_MIN);
-        if (has)
-        {
-            uint key = vvBoxKey(v, parity);
-            gAcc[key].min(vvKey(lo.x));
-            gAcc[key + 1u].min(vvKey(lo.y));
-            gAcc[key + 2u].min(vvKey(lo.z));
-            gAcc[key + 3u].max(vvKey(hi.x));
-            gAcc[key + 4u].max(vvKey(hi.y));
-            gAcc[key + 5u].max(vvKey(hi.z));
-            if (any(lo < asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz)) || any(hi > asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz)))
-                vvReportOutside(v);
-        }
+        memberBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
     if (gP.centredDv != 0u)
     {
         centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
-        if ((flagsV & FLAG_CENTRED) != 0u) centredBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
+        if ((flagsV & FLAG_CENTRED) != 0u) memberBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
     for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)
@@ -6534,9 +6521,6 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
     }
     sync();
     {
-        float3 lo = float3(3.0e38, 3.0e38, 3.0e38);
-        float3 hi = -lo;
-        bool has = false;
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = pl, iStop = EB_END(i, nodeCount, P); i < iStop; i += P)
         {
@@ -6544,29 +6528,14 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
                        boxOff, boxCount, beamOff, groupOff, groupCount, true);
             if (centredV) centredDelta(nodeOff + i, v0);
-            float3 x = nf3(origin + gNodes[(nodeOff + i) * 3u].xyz);
-            lo = min(lo, x);
-            hi = max(hi, x);
-            has = true;
         }
         if (on && pl < 6u) gAcc[vvBoxKey(v, parity ^ 1u) + pl].store(pl < 3u ? VV_INT_MAX : VV_INT_MIN);
-        if (has)
-        {
-            uint key = vvBoxKey(v, parity);
-            gAcc[key].min(vvKey(lo.x));
-            gAcc[key + 1u].min(vvKey(lo.y));
-            gAcc[key + 2u].min(vvKey(lo.z));
-            gAcc[key + 3u].max(vvKey(hi.x));
-            gAcc[key + 4u].max(vvKey(hi.y));
-            gAcc[key + 5u].max(vvKey(hi.z));
-            if (any(lo < asfloat(gMisc[vvRec(v, VV_ALLOWED_LO)].xyz)) || any(hi > asfloat(gMisc[vvRec(v, VV_ALLOWED_HI)].xyz)))
-                vvReportOutside(v);
-        }
+        memberBox(v, nodeOff, nodeCount, origin, parity, pl, P);
     }
     if (gP.centredDv != 0u)
     {
         centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, pl, P);
-        if (on && (flagsV & FLAG_CENTRED) != 0u) centredBox(v, nodeOff, nodeCount, origin, parity, pl, P);
+        if (on && (flagsV & FLAG_CENTRED) != 0u) memberBox(v, nodeOff, nodeCount, origin, parity, pl, P);
     }
     for (uint g = pl, gStop = EB_END(g, groupCount, P); g < gStop; g += P) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)
