@@ -303,6 +303,12 @@ struct Surface
 #define EB_LOOP_CAP_WORD gP.loopCapWord
 #define EB_LOOP_BUDGET gP.loopBudget
 #include "explicit_loop_cap.slang"
+// Barrier loops' real maxima (EB_END_UNIFORM, EB_PASS_UNIFORM): steps a frame (the
+// host's PARAM_COPIES - 1), members a contact group (VV_MAX_GROUP), the awake list's
+// chunks of 256 vehicles.
+static const uint EB_MAX_STEPS = 128u;
+static const uint EB_MAX_MEMBERS = 64u;
+static const uint EB_MAX_CHUNKS = 4096u;
 #ifdef EB_DET_HITS
 // Tests only: the self-collision hit forces with the frozen baseline's arithmetic
 // (hitForce), so this kernel's ordered application compares bit for bit with the
@@ -4943,9 +4949,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         sync();
     }
-    for (uint s = gP.pad2, sStop = min(gP.pad2 + 1u, gP.steps); s < sStop; s++)
+    for (uint s = gP.pad2, sStop = EB_END_UNIFORM(s, min(gP.pad2 + 1u, gP.steps), 1u, 1u); s < sStop; s++)
 #else
-    for (uint s = 0u, sStop = EB_END_UNIFORM(s, gP.steps, 1u); s < sStop; s++)
+    for (uint s = 0u, sStop = EB_END_UNIFORM(s, gP.steps, 1u, EB_MAX_STEPS); s < sStop; s++)
 #endif
     {
         coupleStep(v, lane, s, coupleOn);
@@ -5786,8 +5792,7 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         if (asfloat(gMisc[vvRec(v, VV_MEMBER)].y) > margin)
         {
             vvBoundsRest(v, blo, bhi, vl, vh, time, asfloat(gMisc[vvRec(v, VV_MEMBER)].y));
-            ebLoopCapFlush();
-            return;
+            return ebLoopCapFlush();
         }
         float3 alo = blo - (-vl * time + float3(margin, margin, margin));
         float3 ahi = bhi + (vh * time + float3(margin, margin, margin));
@@ -7581,7 +7586,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
     uint prevListed = 0u;
     uint prevVa = 0u;
     float prevRange = 0.0;
-    for (uint a = 0u, aStop = EB_END_UNIFORM(a, k, 1u); a < aStop; a++)
+    for (uint a = 0u, aStop = EB_END_UNIFORM(a, k, 1u, EB_MAX_MEMBERS); a < aStop; a++)
     {
         uint q = a & 1u;
         uint va = vvMember(off, a);
@@ -8073,7 +8078,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
     // triangle's throttle update (its marks are final) and a later owner's reset.
     for (uint l = 1u, lGuard = 0u; l <= k; l++)
     {
-        EB_PASS_UNIFORM(lGuard);
+        EB_PASS_UNIFORM(lGuard, EB_MAX_MEMBERS + 1u);
 #ifdef EB_ABLATE
         // Measurement only: 524288 the levels (the hits' application).
         if ((gP.ablate & 524288u) != 0u) break;
@@ -8228,9 +8233,9 @@ void contactGroup(uint g, uint lane)
         }
     }
     sync();
-    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u); m < mStop; m++) contactMemberBegin(vvMember(off, m), lane);
+    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberBegin(vvMember(off, m), lane);
     uint stepBase = gMisc[vvMember(off, 0u)].w;
-    for (uint s = 0u, sStop = EB_END_UNIFORM(s, gP.steps, 1u); s < sStop; s++)
+    for (uint s = 0u, sStop = EB_END_UNIFORM(s, gP.steps, 1u, EB_MAX_STEPS); s < sStop; s++)
     {
         coupleStepMembers(off, k, lane, s, coupleOn);
         driveStepMembers(off, k, lane, s, driveOn);
@@ -8245,12 +8250,12 @@ void contactGroup(uint g, uint lane)
 #endif
 #ifndef EB_VV_SMALL_ONLY
         {
-            for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u); m < mStop; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
+            for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberStep(vvMember(off, m), lane, s, m == 0u);
         }
 #endif
         if (surfOn != 0u)
         {
-            for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u); m < mStop; m++)
+            for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++)
                 surfaceStep(vvMember(off, m), lane, surfOn, (stepBase + s) & 1u);
             sync();
         }
@@ -8275,5 +8280,5 @@ void contactGroup(uint g, uint lane)
     }
     coupleEndMembers(off, k, lane, coupleOn);
     if (sleepOn) sleepGroupEnd(off, k, lane, sleepMask, gP.steps);
-    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
+    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
 }

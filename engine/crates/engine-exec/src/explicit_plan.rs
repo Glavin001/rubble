@@ -180,7 +180,17 @@ pub const LOOP_BUDGET_MAX: u64 = 1 << 31;
 /// [`LOOP_BUDGET_MIN`]..=[`LOOP_BUDGET_MAX`]. A loop of a sound state never reaches it;
 /// a corrupt count stops there and fails the frame (the loop-cap flag).
 pub fn loop_budget(unit: u64, steps: u32) -> u32 {
+    // RUBBLE_LOOP_BUDGET (tests of the budget): a fixed budget instead.
+    if let Some(b) = loop_budget_override() {
+        return b;
+    }
     (2 * unit * (u64::from(steps) + 2)).clamp(LOOP_BUDGET_MIN, LOOP_BUDGET_MAX) as u32
+}
+
+/// `RUBBLE_LOOP_BUDGET`: a fixed pass budget for every frame (tests of the budget: a
+/// small one must end frames with the loop-cap error, never hang).
+pub fn loop_budget_override() -> Option<u32> {
+    std::env::var("RUBBLE_LOOP_BUDGET").ok().and_then(|v| v.parse().ok())
 }
 /// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
 /// `sleepRec`; after centred damping's word 84). The next word is the awake-list flag.
@@ -2802,9 +2812,13 @@ pub fn explicit_loop_cap_hit(flag: i32) -> Result<(), String> {
     } else {
         format!("a kernel loop (number {flag} in its WGSL module, counting from 1)")
     };
+    // The flag names the highest stopped loop: past its own cap (EXPLICIT_LOOP_CAP passes,
+    // or a barrier loop's real maximum), or the first to find the frame's pass budget
+    // spent (the passes were taken by all the loops before it).
     Err(format!(
-        "{place} ran {EXPLICIT_LOOP_CAP} passes, its cap, and was stopped: that frame's results \
-         are invalid (a runaway loop: a corrupt count or bound)"
+        "{place} was stopped: at its cap ({EXPLICIT_LOOP_CAP} passes, or a barrier loop's \
+         maximum) or when the frame's pass budget ran out; that frame's results are invalid \
+         (a runaway loop: a corrupt count or bound)"
     ))
 }
 

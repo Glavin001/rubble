@@ -95,6 +95,21 @@ bool ebSpend()
     return true;
 }
 #define EB_END(start, bound, step) ebEnd(start, bound, step, __LINE__, true)
-#define EB_END_UNIFORM(start, bound, step) ebEnd(start, bound, step, __LINE__, false)
+// A barrier loop also stops at `most` passes, its real maximum (steps a frame, members a
+// group, ...), uniform across the workgroup like its bound.
+// The end from the cap and `most` alone (never the budget's per-invocation count: Tint's
+// uniformity analysis must see the bound uniform, so the barriers inside stay legal).
+uint ebEndMost(uint start, uint bound, uint step, uint line, uint most)
+{
+    uint s = max(step, 1u);
+    uint passes = max(min(EB_LOOP_CAP, most), 1u);
+    uint end = min(bound, max(start + min(s, 0xFFFFFFFFu / passes) * passes, start));
+    end = min(end, 0xFFFFFFFFu - s + 1u);
+    if (step == 0u) end = min(end, start);
+    if (end < bound)
+        ebLoopCapHit(line);
+    return end;
+}
+#define EB_END_UNIFORM(start, bound, step, most) ebEndMost(start, bound, step, __LINE__, most)
 #define EB_PASS(guard) if (++guard > EB_LOOP_CAP || !ebSpend()) { ebLoopCapHit(__LINE__); break; }
-#define EB_PASS_UNIFORM(guard) if (++guard > EB_LOOP_CAP) { ebLoopCapHit(__LINE__); break; }
+#define EB_PASS_UNIFORM(guard, most) if (++guard > min(EB_LOOP_CAP, most)) { ebLoopCapHit(__LINE__); break; }
