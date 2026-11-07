@@ -65,12 +65,13 @@ pub const PROXY_SLACK: f32 = 0.5;
 const PROXY_OUT: u32 = 2;
 /// Impulse record keys (after the host's, the terrain's 0x300000 + collider).
 const KEY_BASE: u32 = 0x50_0000;
-const ST_NAMES: [&str; 5] = [
+const ST_NAMES: [&str; 6] = [
     "more colliders than the shapes room",
     "more bodies than the bodies room",
     "more hull planes than the planes room",
     "more impulse records than IMPULSE_CAP",
     "more chunk records than the threshold ingest's rows",
+    "a coupling loop past its cap or pass budget (a corrupt count; the frame is invalid)",
 ];
 /// Windows between status reads.
 const STATUS_EVERY: u64 = 8;
@@ -120,7 +121,20 @@ struct Params {
     cand_cap: u32,
     /// work's word of the broadphase region (candidate counts, proxies, candidates).
     extra_base: u32,
-    pad0: u32,
+    /// Passes one invocation of the plan passes may take (explicit_loop_cap.slang; see
+    /// [`coupling_loop_budget`]).
+    loop_budget: u32,
+}
+
+/// The coupling passes' pass budget: four times a bound on one invocation's passes
+/// (every collider; every resting-table head on each of 33 levels; shapes against
+/// shapes, planes and bodies; candidates against candidates; the vehicles), held to
+/// 2^22..2^31. A sound state never reaches it; a corrupt count stops there and sets
+/// ST_LOOP.
+fn coupling_loop_budget(p: &Params) -> u32 {
+    let [c, h, s, pl, b, k, v] = [p.colliders, p.hash_size, p.s, p.planes, p.b, p.cand_cap, p.vehicles].map(u64::from);
+    let unit = c + 33 * h + s * (s + pl + b) + k * k + 64 * v + 4096;
+    (4 * unit).clamp(1 << 22, 1 << 31) as u32
 }
 
 pub(crate) struct ExplicitVehicles {
@@ -524,8 +538,9 @@ impl ExplicitVehicles {
             slack: PROXY_SLACK,
             cand_cap: self.cand_cap(),
             extra_base: self.extra_word as u32,
-            pad0: 0,
+            loop_budget: 0,
         };
+        let p = Params { loop_budget: coupling_loop_budget(&p), ..p };
         sim.queue().write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
     }
 
@@ -667,7 +682,7 @@ impl ExplicitVehicles {
         enc: &mut wgpu::CommandEncoder,
     ) -> anyhow::Result<bool> {
         if let Some(bits) = self.status.lock().unwrap().take() {
-            let names: Vec<&str> = (0..5).filter(|k| bits & (1 << k) != 0).map(|k| ST_NAMES[k]).collect();
+            let names: Vec<&str> = (0..6).filter(|k| bits & (1 << k) != 0).map(|k| ST_NAMES[k]).collect();
             anyhow::bail!(
                 "explicit vehicles: {} (capacity {:?}; raise ExplicitVehiclesDef::capacity)",
                 names.join(", "),

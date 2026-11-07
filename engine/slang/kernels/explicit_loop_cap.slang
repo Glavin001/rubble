@@ -36,7 +36,14 @@ void ebLoopCapHit(uint line)
 void ebLoopCapFlush()
 {
     if (ebLoopHit != 0u)
+    {
+#ifdef EB_LOOP_CAP_STORE
+        // An including file with its own status word (vehicle_coupling.slang).
+        EB_LOOP_CAP_STORE(ebLoopHit);
+#else
         gAcc[EB_LOOP_CAP_WORD].max(int(ebLoopHit));
+#endif
+    }
 }
 // The pass budget (an including file that defines EB_LOOP_BUDGET, the explicit frame
 // kernels: gP.loopBudget, the host's bound on one invocation's legitimate passes in a
