@@ -64,8 +64,13 @@ headless, 60 Hz):
 **What the cars do.**
 - The ETK at 111 km/h goes through the 5.2 m base and comes out at 40 km/h, with 43–72
   beams broken. A tunnel of blocks bursts out of the far face, and the wall above stands.
-- The authored sedan on raycast wheels tops out at about 41 km/h and stops in the wall
-  (31–35 beams). The drive's limit for that car is a follow-up.
+- The authored sedan on raycast wheels tops out at about 41 km/h with the explicit solver's
+  air drag and turbulence on, on the CPU reference as on the GPU. So it is the drag model,
+  not the World. Without drag (`?drag=0`) it reaches 33 m/s and still climbs. At 41 km/h it
+  stops in the wall (31–35 beams broken). With `?drag=0` it hits at 99 km/h, crumples (158
+  beams broken), breaks out to z = 90 m, and stays real time: 54–60 World steps/s, at most
+  9.7 ms GPU a step (vehicle 8.8). The drag's effect on that car is a follow-up; the default
+  keeps drag on.
 - Coupling room: at most 122 proxy shapes per car were seen (sampled every 15 steps, the
   ETK at 28 m/s into the wall), of the 1,024 it has. So the room was not raised.
 

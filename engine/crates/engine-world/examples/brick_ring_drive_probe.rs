@@ -30,12 +30,40 @@ fn main() -> anyhow::Result<()> {
     let car = std::env::var("BR_CAR").unwrap_or_else(|_| "none".into());
     let settings = ExplicitBeamsSettings {
         fast_inv_sqrt: true,
-        drag: true,
-        turbulence: true,
+        drag: std::env::var("BR_DRAG").as_deref() != Ok("0"),
+        turbulence: std::env::var("BR_DRAG").as_deref() != Ok("0"),
         ..Default::default()
     };
     let template: Option<ExplicitBeams> = match car.as_str() {
         "none" => None,
+        "showcase" => {
+            // The page's ?car=sedan: the authored showcase sedan (showcaseCar, low).
+            use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+            let def = style("sedan").ok_or_else(|| anyhow::anyhow!("no sedan style"))?;
+            let b = build(
+                &def,
+                &BuildParams {
+                    resolution: Resolution::Low,
+                    ..BuildParams::default()
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+            let (s, notes) = ExplicitBeams::from_truck_raycast(
+                &b.truck,
+                None,
+                glam::Vec3::ZERO,
+                0.0,
+                glam::Vec3::ZERO,
+                settings,
+            )
+            .map_err(anyhow::Error::msg)?;
+            println!(
+                "showcase sedan: {} nodes, {} beams; {notes:?}",
+                s.nodes.len(),
+                s.beams.len()
+            );
+            Some(s)
+        }
         "sedan" => {
             // The explicit solver's procedural sedan (explicitSedanTruck).
             let text =

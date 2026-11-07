@@ -117,6 +117,9 @@
       runUp: Number(qs.get('runUp') || 100),
       speed: Number(qs.get('speed') || 0),
       sleep: qs.get('sleep') !== '0',
+      // ?drag=0: the explicit solver's air drag and turbulence off (the authored sedan's
+      // drag holds it near 41 km/h on full throttle; the ETK reaches 111 km/h with it).
+      drag: qs.get('drag') !== '0',
       ring: Object.fromEntries(['scale', 'radius', 'courses', 'tier', 'rows', 'density'].filter((k) => qs.has(k)).map((k) => [k, Number(qs.get(k))])),
       ...(qs.has('shapes') ? { shapes: Number(qs.get('shapes')) } : {}),
       ...(TIMING ? { gpuTiming: TIMING } : {}),
