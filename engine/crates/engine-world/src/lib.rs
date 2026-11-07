@@ -481,7 +481,7 @@ pub struct World {
     last_gpu_ms: Option<f64>,
     /// When the last step's submission went to the queue (for hosts timing the GPU's
     /// span: submit to completion, [`Self::last_submit_instant`]).
-    last_submit: Option<std::time::Instant>,
+    last_submit: Option<web_time::Instant>,
     shapes: Vec<ShapeSlot>,
     free_shapes: Vec<u32>,
     /// Retired colliders: `(collider, released at step)`.
@@ -875,7 +875,7 @@ impl World {
 
     /// When the last step's submission was queued (a host that waits for it, the GPU
     /// otherwise idle, reads the step's GPU span as the time from here to completion).
-    pub fn last_submit_instant(&self) -> Option<std::time::Instant> {
+    pub fn last_submit_instant(&self) -> Option<web_time::Instant> {
         self.last_submit
     }
 
@@ -2161,7 +2161,7 @@ impl World {
         let step = self.step;
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
             .is_ok()
-            .then(std::time::Instant::now);
+            .then(web_time::Instant::now);
         let lap = |what: &str| {
             if let Some(t) = &host_t {
                 eprintln!(
@@ -2392,7 +2392,7 @@ impl World {
             (m, staging)
         });
         let cmd = enc.finish();
-        self.last_submit = Some(std::time::Instant::now());
+        self.last_submit = Some(web_time::Instant::now());
         self.sim.queue().submit([cmd]);
         self.explicit_after_submit(explicit_read);
         if let Some((m, staging)) = timing {
@@ -2523,7 +2523,7 @@ impl World {
                 Pending::Mapped { step, slot } => {
                     let timing = std::env::var("RUBBLE_WORLD_TIMING")
                         .is_ok()
-                        .then(std::time::Instant::now);
+                        .then(web_time::Instant::now);
                     if !self.readback.ready(self.sim.device(), slot, wait)? {
                         break;
                     }
@@ -2534,7 +2534,7 @@ impl World {
                         );
                     }
                     self.readback.pending.pop_front();
-                    let timing = timing.map(|_| std::time::Instant::now());
+                    let timing = timing.map(|_| web_time::Instant::now());
                     let raw = self.readback.take(slot);
                     frames.push(self.frame(step, raw)?);
                     if let Some(t) = timing {

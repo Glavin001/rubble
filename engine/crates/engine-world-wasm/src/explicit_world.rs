@@ -48,6 +48,13 @@ impl WebWorld {
         };
         let template = ExplicitBeams::from_truck(truck, glam::Vec3::ZERO, glam::Vec3::ZERO, settings).map_err(err)?;
         let (info, device, queue) = crate::web_device().await?;
+        // Compile the vehicles' kernels without blocking first (as `explicitSimAsync`
+        // does): created synchronously inside `crash_town`, the contact frame compiles
+        // past a windowed browser's GPU watchdog and the device is lost.
+        let count = num(&spec, "count", 4.0) as usize;
+        let fleet = vec![template.clone(); count.max(1)];
+        let specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(town_coupling().capacity));
+        crate::warm_pipelines(&device, &specs).await;
         let town = res(crash_town(
             GpuContext::Shared { info, device, queue },
             &template,

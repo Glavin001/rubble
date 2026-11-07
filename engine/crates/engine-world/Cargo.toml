@@ -18,6 +18,7 @@ engine-fracture.workspace = true
 engine-gpu-wait.workspace = true
 wgpu.workspace = true
 glam.workspace = true
+web-time.workspace = true
 bytemuck.workspace = true
 anyhow.workspace = true
 serde_json = { workspace = true, optional = true }
