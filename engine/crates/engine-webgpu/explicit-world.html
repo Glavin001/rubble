@@ -58,6 +58,11 @@
     const { world, layout } = await createVehicleTown({ count: N, speed: SPEED, runUp: RUNUP });
     const buildMs = performance.now() - t0;
     const device = world.device();
+    // ?timing=step|phases: the World's GPU time per step, by segment, in the HUD.
+    const TIMING = qs.get('timing');
+    if (TIMING) { try { world.setGpuTiming(TIMING); } catch (e) { console.warn('gpu timing', e); } }
+    const gpuSeg = new Map(); let gpuTotal = [];
+    window.__gpu = () => ({ total: [...gpuTotal], segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
 
@@ -243,7 +248,13 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     // ---------------------------------------------------------------- loop
     const statsEl = document.getElementById('stats');
     let broken = 0, splits = 0, fps = 0, frames = 0, fpsAt = performance.now(), stepMs = [];
-    const onFrame = (f) => { broken += f.bondsBroken(); };
+    const onFrame = (f) => {
+      broken += f.bondsBroken();
+      if (TIMING) for (const t of f.gpuTimes() || []) {
+        gpuTotal.push(t.totalMs); if (gpuTotal.length > 120) gpuTotal.shift();
+        for (const [n, ms] of t.segments) { const a = gpuSeg.get(n) || []; a.push(ms); if (a.length > 120) a.shift(); gpuSeg.set(n, a); }
+      }
+    };
     function hud() {
       const [xs, ws] = world.explicitSteps();
       const med = stepMs.length ? [...stepMs].sort((a, b) => a - b)[stepMs.length >> 1] : NaN;
@@ -255,6 +266,8 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
         ['bodies', world.bodyCount().toLocaleString()],
         ['step wall', Number.isFinite(med) ? `${med.toFixed(2)} ms (median, step + poll)` : '—'],
         ['FPS', fps.toFixed(0)],
+        ...(TIMING ? [['GPU / step', gpuTotal.length ? `${[...gpuTotal].sort((a, b) => a - b)[gpuTotal.length >> 1].toFixed(2)} ms median` : '—'],
+          ...[...gpuSeg].map(([n, v]) => [n, `${(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2)} ms`]).sort((a, b) => parseFloat(b[1]) - parseFloat(a[1])).slice(0, 8)] : []),
         ['build', `${(buildMs / 1000).toFixed(1)} s`],
       ];
       statsEl.innerHTML = rows.map(([k, v]) => `<span class="k">${k}</span><span>${v}</span>`).join('');

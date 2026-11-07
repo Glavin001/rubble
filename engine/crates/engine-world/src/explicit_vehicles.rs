@@ -130,6 +130,8 @@ pub(crate) struct ExplicitVehicles {
     /// The vehicles as added (spawn state: node counts, masses).
     pub sims: Vec<ExplicitBeams>,
     bgl: wgpu::BindGroupLayout,
+    /// cpl_query's own layout (the broadphase buffers).
+    bgl_q: wgpu::BindGroupLayout,
     /// cpl_bounds, cpl_plan, cpl_share, cpl_loads, cpl_loads_end, cpl_emit, cpl_emit_end,
     /// cpl_sleep_mask, cpl_query.
     pipes: Vec<wgpu::ComputePipeline>,
@@ -226,6 +228,16 @@ impl ExplicitVehicles {
             entry(10, ro),
             entry(11, rw),
             entry(12, rw),
+        ];
+        // cpl_query (the World broadphase's resting table and moved lists) has its own
+        // layout: with them every pass would bind 14 storage buffers, past WebGPU's
+        // per-stage limit (maxStorageBuffersPerShaderStage, 10 in browsers).
+        let entries_q = [
+            entry(0, wgpu::BufferBindingType::Uniform),
+            entry(1, ro),
+            entry(2, ro),
+            entry(8, rw),
+            entry(9, rw),
             entry(13, ro),
             entry(14, ro),
             entry(15, ro),
@@ -235,6 +247,15 @@ impl ExplicitVehicles {
             label: Some("vehicle-coupling"),
             entries: &entries,
         });
+        let bgl_q = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vehicle-coupling-query"),
+            entries: &entries_q,
+        });
+        let pl_q = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vehicle-coupling-query"),
+            bind_group_layouts: &[Some(&bgl_q)],
+            immediate_size: 0,
+        });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vehicle-coupling"),
             bind_group_layouts: &[Some(&bgl)],
@@ -242,7 +263,7 @@ impl ExplicitVehicles {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vehicle_coupling"),
-            source: wgpu::ShaderSource::Wgsl(VEHICLE_COUPLING_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(engine_webgpu::uniformize_workgroup_lanes(VEHICLE_COUPLING_WGSL).into()),
         });
         let pipes = [
             "cpl_bounds",
@@ -259,7 +280,7 @@ impl ExplicitVehicles {
             .map(|e| {
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(e),
-                    layout: Some(&pl),
+                    layout: Some(if *e == "cpl_query" { &pl_q } else { &pl }),
                     module: &module,
                     entry_point: Some(e),
                     compilation_options: Default::default(),
@@ -330,6 +351,7 @@ impl ExplicitVehicles {
             def: *def,
             sims: vehicles.to_vec(),
             bgl,
+            bgl_q,
             pipes,
             params,
             work,
@@ -406,8 +428,7 @@ impl ExplicitVehicles {
             Some((r, c, i, _)) => (r, c, i),
             None => (&self.dummy[0], &self.dummy[1], &self.dummy[2]),
         };
-        let (ids, aabbs) = sim.rest_buffers();
-        let bufs: [(u32, &wgpu::Buffer); 15] = [
+        let bufs: [(u32, &wgpu::Buffer); 11] = [
             (0, &self.params),
             (1, sim.body_buffer()),
             (2, sim.collider_buffer()),
@@ -419,6 +440,30 @@ impl ExplicitVehicles {
             (10, info),
             (11, records),
             (12, rows),
+        ];
+        let entries: Vec<wgpu::BindGroupEntry> = bufs
+            .iter()
+            .map(|(b, buf)| wgpu::BindGroupEntry {
+                binding: *b,
+                resource: buf.as_entire_binding(),
+            })
+            .collect();
+        sim.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vehicle-coupling"),
+            layout: &self.bgl,
+            entries: &entries,
+        })
+    }
+
+    /// cpl_query's bind group ([`Self::bgl_q`]).
+    fn bind_query(&self, sim: &engine_webgpu::WgpuSim) -> wgpu::BindGroup {
+        let (ids, aabbs) = sim.rest_buffers();
+        let bufs: [(u32, &wgpu::Buffer); 9] = [
+            (0, &self.params),
+            (1, sim.body_buffer()),
+            (2, sim.collider_buffer()),
+            (8, sim.scratch_buffer()),
+            (9, &self.work),
             (13, ids),
             (14, aabbs),
             (15, sim.moved_header_buffer()),
@@ -432,8 +477,8 @@ impl ExplicitVehicles {
             })
             .collect();
         sim.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vehicle-coupling"),
-            layout: &self.bgl,
+            label: Some("vehicle-coupling-query"),
+            layout: &self.bgl_q,
             entries: &entries,
         })
     }
@@ -609,6 +654,7 @@ impl ExplicitVehicles {
         enc.clear_buffer(&self.work, 0, Some(self.cleared));
         enc.clear_buffer(&self.work, 4 * self.list_word, Some(4));
         let group = self.bind(sim, ingest);
+        let qgroup = self.bind_query(sim);
         let nv = self.sims.len() as u32;
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -619,8 +665,10 @@ impl ExplicitVehicles {
             pass.set_pipeline(&self.pipes[0]);
             pass.dispatch_workgroups(nv, 1, 1);
             if self.last_query {
+                pass.set_bind_group(0, &qgroup, &[]);
                 pass.set_pipeline(&self.pipes[8]);
                 pass.dispatch_workgroups(nv, 1, 1);
+                pass.set_bind_group(0, &group, &[]);
             }
             pass.set_pipeline(&self.pipes[1]);
             pass.dispatch_workgroups(nv, 1, 1);
@@ -860,6 +908,7 @@ impl World {
             enc.clear_buffer(&x.work, 0, Some(x.cleared));
             enc.clear_buffer(&x.work, 4 * x.list_word, Some(4));
             let group = x.bind(&self.sim, None);
+            let qgroup = x.bind_query(&self.sim);
             let nv = x.sims.len() as u32;
             {
                 let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("plan-check"), timestamp_writes: None });
@@ -867,8 +916,10 @@ impl World {
                 pass.set_pipeline(&x.pipes[0]);
                 pass.dispatch_workgroups(nv, 1, 1);
                 if query {
+                    pass.set_bind_group(0, &qgroup, &[]);
                     pass.set_pipeline(&x.pipes[8]);
                     pass.dispatch_workgroups(nv, 1, 1);
+                    pass.set_bind_group(0, &group, &[]);
                 }
                 pass.set_pipeline(&x.pipes[1]);
                 pass.dispatch_workgroups(nv, 1, 1);
@@ -907,6 +958,7 @@ impl World {
         let x = self.explicit.as_ref().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
         x.write_params(&self.sim, 34, 0, rest);
         let group = x.bind(&self.sim, None);
+        let qgroup = x.bind_query(&self.sim);
         let nv = x.sims.len() as u32;
         let mut enc = self.sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("plan-time") });
         for _ in 0..reps {
@@ -917,8 +969,10 @@ impl World {
             pass.set_pipeline(&x.pipes[0]);
             pass.dispatch_workgroups(nv, 1, 1);
             if rest.is_some() {
+                pass.set_bind_group(0, &qgroup, &[]);
                 pass.set_pipeline(&x.pipes[8]);
                 pass.dispatch_workgroups(nv, 1, 1);
+                pass.set_bind_group(0, &group, &[]);
             }
             pass.set_pipeline(&x.pipes[1]);
             pass.dispatch_workgroups(nv, 1, 1);

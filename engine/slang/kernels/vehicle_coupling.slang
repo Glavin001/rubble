@@ -182,6 +182,11 @@ groupshared uint gsFaces[LIST_CAP];
 groupshared Atomic<uint> gsBodies;
 groupshared Atomic<uint> gsPlanes;
 groupshared Atomic<uint> gsWake;
+// A vehicle's record and sleep word broadcast to its workgroup: barriers follow
+// branches on them, and Chrome's uniformity analysis needs workgroupUniformLoad
+// (engine_webgpu::uniformize_workgroup_lanes rewrites the reads).
+groupshared uint4 gsUniformCpl;
+groupshared uint gsUniformCplKeep;
 
 // Vehicle sleep: a body that moves (wakes a vehicle it may touch).
 bool bodyMoving(uint body)
@@ -203,11 +208,16 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint lane = lid.x;
     if (lane < 3u) gsBox[lane].store(0xFFFFFFFFu);
     else if (lane < 7u) gsBox[lane].store(0u);
+    if (lane == 0u)
+    {
+        gsUniformCpl = vehicleAt(v);
+        gsUniformCplKeep = (gP.sleepBase != 0u && (gMisc[gP.sleepBase + v].y & 1u) != 0u) ? 1u : 0u;
+    }
     GroupMemoryBarrierWithGroupSync();
-    uint4 vt = vehicleAt(v);
+    uint4 vt = gsUniformCpl;
     // Vehicle sleep: a sleeping vehicle's nodes have not moved since its bounds were
     // taken; they stand (every lane takes the barriers).
-    bool keep = gP.sleepBase != 0u && (gMisc[gP.sleepBase + v].y & 1u) != 0u;
+    bool keep = gsUniformCplKeep != 0u;
     // Out of the broadphase: no update either (no proxies).
     keep = keep || (vt.w & PROXY_OUT) != 0u;
     if (lane == 0u && gP.extraBase != 0u) gWork[wCandCount(v)].store(0u);
@@ -385,7 +395,9 @@ void cpl_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint v = gid.x;
     uint lane = lid.x;
     if (gP.mode == 0u) return;
-    uint4 vt = vehicleAt(v);
+    if (lane == 0u) gsUniformCpl = vehicleAt(v);
+    GroupMemoryBarrierWithGroupSync();
+    uint4 vt = gsUniformCpl;
     if ((vt.w & PROXY_OUT) != 0u) return;
     float3 lo;
     float3 hi;
@@ -614,9 +626,10 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     {
         gsCount.store(0u);
         gsWake.store(0u);
+        gsUniformCpl = vehicleAt(v);
     }
     GroupMemoryBarrierWithGroupSync();
-    if ((vehicleAt(v).w & PROXY_OUT) != 0u)
+    if ((gsUniformCpl.w & PROXY_OUT) != 0u)
     {
         // Out of the broadphase: no proxies.
         if (lane == 0u) gMisc[vrec(v)] = uint4(0u, 0u, 0u, 0u);

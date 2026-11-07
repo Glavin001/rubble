@@ -54,7 +54,7 @@ impl WebWorld {
         let count = num(&spec, "count", 4.0) as usize;
         let fleet = vec![template.clone(); count.max(1)];
         let specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(town_coupling().capacity));
-        crate::warm_pipelines(&device, &specs).await;
+        crate::warm_pipelines(&device, &specs, std::rc::Rc::new(|_: &str, _: f64| {})).await;
         let town = res(crash_town(
             GpuContext::Shared { info, device, queue },
             &template,
