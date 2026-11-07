@@ -93,6 +93,59 @@ impl WebWorld {
         self.world.explicit_triangles().map_or(0, |(_, n)| n)
     }
 
+    /// Run the explicit frame as the wide passes (`true`) or one workgroup per vehicle
+    /// (an ablation knob; results are the same). Returns whether wide is now on.
+    #[wasm_bindgen(js_name = setExplicitWide)]
+    pub fn set_explicit_wide(&mut self, on: bool) -> bool {
+        self.world.explicit_vehicles_mut().is_some_and(|g| g.set_wide(on))
+    }
+
+    /// Measurement knobs of the explicit frame (ablations in a browser): `coupling` (the
+    /// rigid coupling in the frame; off, the vehicles no longer feel the bodies),
+    /// `couplingCull`, `couplingCache`, `surfacePairs`, `surfaceCulls` (lossless paths on
+    /// or off). Returns false for an unknown knob.
+    #[wasm_bindgen(js_name = setExplicitKnob)]
+    pub fn set_explicit_knob(&mut self, name: &str, on: bool) -> bool {
+        let Some(g) = self.world.explicit_vehicles_mut() else { return false };
+        match name {
+            "coupling" => g.set_coupling_on(on),
+            "couplingCull" => g.set_coupling_cull(on),
+            "couplingCache" => g.set_coupling_workgroup_cache(on),
+            "surfacePairs" => g.set_surface_pairs(on),
+            "surfaceCulls" => g.set_surface_culls(on),
+            _ => return false,
+        }
+        true
+    }
+
+    /// The explicit solver's errors since the last call (a loop at its cap, vehicle
+    /// contact limits); empty: none.
+    #[wasm_bindgen(js_name = explicitErrors)]
+    pub fn explicit_errors(&mut self) -> Vec<String> {
+        self.world.explicit_vehicles_mut().map_or(Vec::new(), |g| g.take_contact_errors())
+    }
+
+    /// Diagnostic: the explicit frame module's WGSL (per-vehicle workgroups).
+    #[wasm_bindgen(js_name = debugExplicitFrameWgsl)]
+    pub fn debug_explicit_frame_wgsl(&self) -> String {
+        self.world.explicit_vehicles().map_or(String::new(), |g| g.debug_frame_wgsl())
+    }
+
+    /// Diagnostic: run `src` as the explicit frame module (an edited copy of
+    /// [`Self::debug_explicit_frame_wgsl`]; ablations without a rebuild).
+    #[wasm_bindgen(js_name = debugSetExplicitFrameWgsl)]
+    pub fn debug_set_explicit_frame_wgsl(&mut self, src: &str) {
+        if let Some(g) = self.world.explicit_vehicles_mut() {
+            g.debug_set_frame_wgsl(src);
+        }
+    }
+
+    /// Whether the explicit frame runs as the wide passes.
+    #[wasm_bindgen(js_name = explicitWide)]
+    pub fn explicit_wide(&self) -> bool {
+        self.world.explicit_vehicles().is_some_and(|g| g.is_wide())
+    }
+
     /// `[explicit steps, World steps]` the vehicles have run.
     #[wasm_bindgen(js_name = explicitSteps)]
     pub fn explicit_steps(&self) -> Vec<f64> {

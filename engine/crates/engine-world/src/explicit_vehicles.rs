@@ -604,9 +604,10 @@ impl ExplicitVehicles {
         }
         let group = self.bind(sim, ingest);
         let nv = self.sims.len() as u32;
+        let seg = sim.host_segment_before_step("cpl_emit");
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("vehicle coupling emit"),
-            timestamp_writes: None,
+            timestamp_writes: sim.segment_writes(seg, true, true),
         });
         pass.set_bind_group(0, &group, &[]);
         pass.set_pipeline(&self.pipes[5]);
@@ -626,7 +627,7 @@ impl ExplicitVehicles {
     /// Returns the explicit frame's status-read flag (for [`Self::after_submit`]).
     pub fn encode_frame(
         &mut self,
-        sim: &engine_webgpu::WgpuSim,
+        sim: &mut engine_webgpu::WgpuSim,
         dt: f32,
         ingest: Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u32)>,
         enc: &mut wgpu::CommandEncoder,
@@ -656,10 +657,13 @@ impl ExplicitVehicles {
         let group = self.bind(sim, ingest);
         let qgroup = self.bind_query(sim);
         let nv = self.sims.len() as u32;
+        // With the World's GPU timing on: the coupling's passes and the explicit frame
+        // as segments of the step's GPU times (resolved and read with its readback).
+        let seg = sim.host_segment("cpl_plan");
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("vehicle coupling plan"),
-                timestamp_writes: None,
+                timestamp_writes: sim.segment_writes(seg, true, true),
             });
             pass.set_bind_group(0, &group, &[]);
             pass.set_pipeline(&self.pipes[0]);
@@ -676,9 +680,10 @@ impl ExplicitVehicles {
         enc.copy_buffer_to_buffer(&self.work, 4 * self.list_word, &self.list_args, 0, 4);
         {
             // Only the vehicles with proxies (cpl_plan's list).
+            let seg = sim.host_segment("cpl_share");
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("vehicle coupling share"),
-                timestamp_writes: None,
+                timestamp_writes: sim.segment_writes(seg, true, true),
             });
             pass.set_bind_group(0, &group, &[]);
             pass.set_pipeline(&self.pipes[2]);
@@ -693,14 +698,16 @@ impl ExplicitVehicles {
         if std::env::var("RUBBLE_GPU_TIMING_EXPLICIT").is_ok() {
             self.gpu.set_marks(sim.marks().cloned());
         }
-        let read = self.gpu.frame_encode(enc, steps);
+        let seg = if steps > 0 { sim.host_segment("explicit_frame") } else { None };
+        let read = self.gpu.frame_encode_timed(enc, steps, sim.step_query_set().zip(seg.map(|k| 2 * k)));
         if let Some(m) = sim.marks() {
             m.mark(enc, "explicit frame");
         }
         {
+            let seg = sim.host_segment("cpl_loads");
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("vehicle coupling loads"),
-                timestamp_writes: None,
+                timestamp_writes: sim.segment_writes(seg, true, true),
             });
             pass.set_bind_group(0, &group, &[]);
             pass.set_pipeline(&self.pipes[3]);
@@ -1031,7 +1038,7 @@ impl World {
         let r = self
             .fracture
             .vehicle_ingest()
-            .and_then(|ingest| x.encode_frame(&self.sim, dt, ingest, enc));
+            .and_then(|ingest| x.encode_frame(&mut self.sim, dt, ingest, enc));
         self.explicit = Some(x);
         r.map(Some)
     }

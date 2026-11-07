@@ -802,6 +802,42 @@ impl ExplicitBeamsGpu {
         })
     }
 
+    /// Diagnostic: the per-vehicle frame module's WGSL as the frame compiles it.
+    #[doc(hidden)]
+    pub fn debug_frame_wgsl(&self) -> String {
+        crate::uniformize_workgroup_lanes(module_wgsl(self.frame_module))
+    }
+
+    /// Diagnostic (browser ablations without a rebuild): frames run `src` as the
+    /// per-vehicle frame module from now on (its entry point and bindings as the
+    /// shipped one's). An invalid module is the device's error.
+    #[doc(hidden)]
+    pub fn debug_set_frame_wgsl(&mut self, src: &str) {
+        let device = &self.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("explicit_beams (debug)"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("explicit_beams_frame (debug)"),
+            layout: None,
+            module: &module,
+            entry_point: Some(plan::FRAME_ENTRY),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams (debug)"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 0 { params_window(&self.bufs[0]) } else { self.bufs[i].as_entire_binding() },
+            }),
+        });
+        self.frame = std::sync::OnceLock::new();
+        let _ = self.frame.set((pipeline, group));
+    }
+
     /// Vehicle sleep's layout (`None`: built without room, [`Self::with_sleep`]).
     pub fn sleep_layout(&self) -> Option<plan::SleepLayout> {
         self.layout.sleep
@@ -1388,7 +1424,7 @@ impl ExplicitBeamsGpu {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        let read = self.encode(&mut enc, steps);
+        let read = self.encode(&mut enc, steps, None);
         self.queue.submit([enc.finish()]);
         if read {
             self.contact.map_status();
@@ -1398,10 +1434,17 @@ impl ExplicitBeamsGpu {
     /// [`Self::frame`] encoded into `enc` (a host's own submission, such as the World's
     /// step). Submit it, then call [`Self::frame_submitted`] with the result.
     pub fn frame_encode(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32) -> bool {
+        self.frame_encode_timed(enc, steps, None)
+    }
+
+    /// [`Self::frame_encode`], its GPU time written to a host's query set: timestamp
+    /// `stamp.1` as the frame's first pass begins and `stamp.1 + 1` as its last ends
+    /// (wasm-safe: the host resolves and reads them with its own readback).
+    pub fn frame_encode_timed(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32, stamp: Option<(&wgpu::QuerySet, u32)>) -> bool {
         if self.layout.spans.is_empty() || steps == 0 {
             return false;
         }
-        self.encode(enc, steps)
+        self.encode(enc, steps, stamp)
     }
 
     /// Diagnostic: a mark after each of the frame's dispatches, named by kernel (`None`:
@@ -1419,7 +1462,7 @@ impl ExplicitBeamsGpu {
 
     /// The frame's commands (the shared plan's), replayed: a compute pass per run of
     /// dispatches, a copy between them; whether they copy the status for a read.
-    fn encode(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32) -> bool {
+    fn encode(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32, ext: Option<(&wgpu::QuerySet, u32)>) -> bool {
         self.check_contact_status();
         self.write_wakes();
         self.write_params(steps);
@@ -1434,7 +1477,7 @@ impl ExplicitBeamsGpu {
         let cmds = self.planner.commands(steps, alt.is_none());
         let set = self.timing.as_ref().map(|t| &t.set);
         let stamps = |begin: bool, end: bool| {
-            set.zip(slot)
+            ext.or(set.zip(slot))
                 .map(|(q, k)| wgpu::ComputePassTimestampWrites {
                     query_set: q,
                     beginning_of_pass_write_index: begin.then_some(k),

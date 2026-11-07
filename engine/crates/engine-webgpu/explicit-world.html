@@ -61,7 +61,12 @@
     // ?timing=step|phases: the World's GPU time per step, by segment, in the HUD.
     const TIMING = qs.get('timing');
     if (TIMING) { try { world.setGpuTiming(TIMING); } catch (e) { console.warn('gpu timing', e); } }
+    // ?wide=0|1 (ablation): the explicit frame as the wide passes or a workgroup per vehicle.
+    if (qs.has('wide')) world.setExplicitWide(qs.get('wide') === '1');
+    // ?knobs=coupling:0,couplingCache:0 (ablation; see setExplicitKnob).
+    for (const kv of (qs.get('knobs') || '').split(',').filter(Boolean)) { const [k, v] = kv.split(':'); if (!world.setExplicitKnob(k, v === '1')) console.warn('unknown knob', k); }
     const gpuSeg = new Map(); let gpuTotal = [];
+    window.__gpuReset = () => { gpuSeg.clear(); gpuTotal = []; };
     window.__gpu = () => ({ total: [...gpuTotal], segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -252,7 +257,10 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
       broken += f.bondsBroken();
       if (TIMING) for (const t of f.gpuTimes() || []) {
         gpuTotal.push(t.totalMs); if (gpuTotal.length > 120) gpuTotal.shift();
-        for (const [n, ms] of t.segments) { const a = gpuSeg.get(n) || []; a.push(ms); if (a.length > 120) a.shift(); gpuSeg.set(n, a); }
+        // A segment name can repeat in a step: summed per step.
+        const per = new Map();
+        for (const [n, ms] of t.segments) per.set(n, (per.get(n) || 0) + ms);
+        for (const [n, ms] of per) { const a = gpuSeg.get(n) || []; a.push(ms); if (a.length > 120) a.shift(); gpuSeg.set(n, a); }
       }
     };
     function hud() {
@@ -263,6 +271,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
         ['houses', `${layout.houses} cuboid houses (threshold, prefractured)`],
         ['World steps', `${ws} (1/60 s) · explicit steps ${xs.toLocaleString()} (2 kHz)`],
         ['bonds broken', broken.toLocaleString()],
+        ['explicit frame', world.explicitWide() ? 'wide passes' : 'a workgroup per vehicle'],
         ['bodies', world.bodyCount().toLocaleString()],
         ['step wall', Number.isFinite(med) ? `${med.toFixed(2)} ms (median, step + poll)` : '—'],
         ['FPS', fps.toFixed(0)],

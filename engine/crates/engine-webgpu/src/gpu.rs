@@ -443,6 +443,9 @@ pub struct WgpuSim {
     step_queries: Option<StepQueries>,
     /// Segments the last encoded step timed (empty: not timed), in pass order.
     timed_segments: Vec<&'static str>,
+    /// Host passes timed before the next step's ([`WgpuSim::host_segment_before_step`]):
+    /// the step's own segments follow them.
+    pre_segments: Vec<&'static str>,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
     last_timings: PhaseTimingsMs,
@@ -1123,6 +1126,7 @@ impl WgpuSim {
             gpu_timing: crate::GpuTiming::Off,
             step_queries: None,
             timed_segments: Vec::new(),
+            pre_segments: Vec::new(),
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
             last_timings: PhaseTimingsMs::default(),
@@ -2761,6 +2765,7 @@ impl WgpuSim {
             self.last_timings.total_gpu = 0.0;
             self.last_step_ran = false;
             self.timed_segments.clear();
+            self.pre_segments.clear();
             return Ok(self.last_counters);
         }
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
@@ -3151,6 +3156,7 @@ impl WgpuSim {
     fn encode_dispatches_hooked(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) {
         let segments = self.encode_passes(enc, cmds, hook);
         self.timed_segments = segments;
+        self.pre_segments.clear();
     }
 
     /// The plan's dispatches in compute passes of `enc`; returns the segments
@@ -3166,7 +3172,8 @@ impl WgpuSim {
         // anyway (then the step's time is the sum of its segments).
         let per_phase = queries.is_some()
             && (self.gpu_timing == crate::GpuTiming::Phases || split || hook.is_some());
-        let mut segments: Vec<&'static str> = Vec::new();
+        // Host passes timed before the step come first (`host_segment_before_step`).
+        let mut segments: Vec<&'static str> = if queries.is_some() { self.pre_segments.clone() } else { Vec::new() };
         // `RUBBLE_SKIP_KERNELS=a,b` (diagnostic, A/B timing): leave those out.
         let skip = std::env::var("RUBBLE_SKIP_KERNELS").unwrap_or_default();
         let skipped = |k: &str| !skip.is_empty() && skip.split(',').any(|s| s == k);
@@ -3174,7 +3181,7 @@ impl WgpuSim {
         // empty pass need not write its timestamps (Dawn and Metal leave them
         // zero), and a phase with no work has no time to report.
         let mut dispatched = false;
-        let mut pass = Some(begin_timed(enc, queries, 0));
+        let mut pass = Some(begin_timed(enc, queries, segments.len()));
         for (k, c) in cmds.iter().enumerate() {
             match *c {
                 rigid_plan::Cmd::Dispatch { kernel, .. }
@@ -3315,6 +3322,7 @@ impl WgpuSim {
             self.last_timings.total_gpu = 0.0;
             self.last_step_ran = false;
             self.timed_segments.clear();
+            self.pre_segments.clear();
             return Ok(false);
         }
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
@@ -3951,6 +3959,50 @@ impl WgpuSim {
             return None;
         }
         Some((&q.resolve, 16 * self.timed_segments.len() as u64, &self.timed_segments))
+    }
+
+    /// A host's own work timed as a segment of the step's GPU times (with
+    /// [`WgpuSim::set_gpu_timing`] on), after the step's segments: encoded after
+    /// [`Self::step_encode`] in the same frame. Returns the segment's index `k`: the
+    /// host's first pass writes timestamp `2k` as it begins and its last `2k + 1` as it
+    /// ends ([`Self::segment_writes`]). `None`: timing off, the step skipped, or no room.
+    pub fn host_segment(&mut self, name: &'static str) -> Option<u32> {
+        let q = self.step_queries.as_ref().filter(|_| self.gpu_timing != crate::GpuTiming::Off)?;
+        let k = self.timed_segments.len() as u32;
+        if !self.last_step_ran || self.timed_segments.is_empty() || k >= q.segments {
+            return None;
+        }
+        self.timed_segments.push(name);
+        Some(k)
+    }
+
+    /// [`Self::host_segment`] for work encoded before the next [`Self::step_encode`]
+    /// in the same frame: its segment precedes the step's. If the step is then skipped,
+    /// nothing is reported.
+    pub fn host_segment_before_step(&mut self, name: &'static str) -> Option<u32> {
+        let q = self.step_queries.as_ref().filter(|_| self.gpu_timing != crate::GpuTiming::Off)?;
+        let k = self.pre_segments.len() as u32;
+        if k + 1 >= q.segments {
+            return None;
+        }
+        self.pre_segments.push(name);
+        Some(k)
+    }
+
+    /// Timestamp writes of a pass of host segment `segment` ([`Self::host_segment`]):
+    /// at its begin when `begin`, at its end when `end`.
+    pub fn segment_writes(&self, segment: Option<u32>, begin: bool, end: bool) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        let (q, k) = (self.step_queries.as_ref()?, segment?);
+        Some(wgpu::ComputePassTimestampWrites {
+            query_set: &q.set,
+            beginning_of_pass_write_index: begin.then_some(2 * k),
+            end_of_pass_write_index: end.then_some(2 * k + 1),
+        })
+    }
+
+    /// The step's timestamp query set (with timing on).
+    pub fn step_query_set(&self) -> Option<&wgpu::QuerySet> {
+        self.step_queries.as_ref().filter(|_| self.gpu_timing != crate::GpuTiming::Off).map(|q| &q.set)
     }
 
     /// Nanoseconds per timestamp tick.
