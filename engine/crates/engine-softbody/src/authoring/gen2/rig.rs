@@ -357,7 +357,8 @@ fn body_blocked(p: Vec3, doors: &[Aperture], trunk_z: (f32, f32)) -> bool {
         && p.z > -1.72
         && p.z < 0.78 + sf::cabin_fwd()
         && sf::sdf(p) < -0.08;
-    let bay = x < 0.48 && p.y > 0.72 && p.z > 0.98 && p.z < 1.98;
+    // (The bay starts ahead of the firewall, which `GEN3_CABIN_R8` moves.)
+    let bay = x < 0.48 && p.y > 0.72 && p.z > 0.98 + sf::cabin_fwd() && p.z < 1.98;
     // The trunk opening (under the lid, from its mesh), clear of the shelf
     // and tail panel at its ends.
     let trunk = x < 0.58 && p.y > 0.86 && p.y < 1.06 && p.z > trunk_z.0 && p.z < trunk_z.1;
@@ -2976,6 +2977,39 @@ pub fn rig(model: &Model) -> Rig {
     for b in &mut r.car.beams {
         if b.role == Role::Intrusion && b.deform.is_finite() {
             b.deform *= iy;
+        }
+    }
+    // Round 8: the roof rail's and the door window frame's own sections (a
+    // rail station's outer node to its inner, `rr<k>`-`rri<k>`; a frame
+    // corner to its inner, `_f<k>`-`_fi<k>`): a thin closed section that
+    // crushes across under a pole while the rail still carries the roof's
+    // load along it (`GEN3_RAIL_SEC_Y`, `GEN3_FRAME_SEC_Y`, multiples of
+    // their yield).
+    let (rsy, fsy) = (env("GEN3_RAIL_SEC_Y", 1.0), env("GEN3_FRAME_SEC_Y", 1.0));
+    if rsy != 1.0 || fsy != 1.0 {
+        for b in &mut r.car.beams {
+            if !b.deform.is_finite() || b.break_group.is_some() {
+                continue;
+            }
+            let (na, nb) = (&r.car.nodes[b.a].name, &r.car.nodes[b.b].name);
+            let sec = |o: &str, i: &str| {
+                let pair = |x: &str, y: &str| {
+                    x.strip_prefix(o)
+                        .zip(y.strip_prefix(i))
+                        .is_some_and(|(p, q)| p == q && p.starts_with(|c: char| c.is_ascii_digit()))
+                };
+                pair(na, nb) || pair(nb, na)
+            };
+            if sec("rr", "rri") {
+                b.deform *= rsy;
+            } else if na.contains("_f") && nb.contains("_fi")
+                || na.contains("_fi") && nb.contains("_f")
+            {
+                let strip = |n: &str| n.replace("_fi", "_f");
+                if strip(na) == strip(nb) {
+                    b.deform *= fsy;
+                }
+            }
         }
     }
     // The A-pillar's chords (hinge pillar top to the header, outer and inner

@@ -120,7 +120,15 @@ const ready = async () => {
     await new Promise((r) => setTimeout(r, 200));
     const err = await evaluate('document.getElementById("err")?.textContent || ""').catch(() => '');
     if (err) throw new Error(`page error: ${err}`);
-    if (await evaluate('window.__ready === true && !!window.__lab').catch(() => false)) return;
+    if (await evaluate('window.__ready === true && !!window.__lab').catch(() => false)) {
+      if (process.env.CRASH_LAB_PROGRESS) console.log(`  ready after ${(i / 5).toFixed(0)} s`);
+      return;
+    }
+    // CRASH_LAB_PROGRESS: the page's status line every 30 s while it loads.
+    if (process.env.CRASH_LAB_PROGRESS && i % 150 === 149) {
+      const st = await evaluate('document.getElementById("status")?.textContent || ""').catch((e) => `(${e.message})`);
+      console.log(`  loading ${((i + 1) / 5).toFixed(0)} s: ${st.slice(0, 160)}`);
+    }
   }
   throw new Error('the page did not start');
 };

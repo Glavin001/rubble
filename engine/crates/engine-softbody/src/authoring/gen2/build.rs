@@ -331,8 +331,10 @@ impl Role {
             Role::Web => s(0.8e6, body, 1.5, false),
             Role::Sheet => s(sheet_kl(part), e, 0.0, false),
             Role::Bend => s(0.6 * sheet_kl(part), e, 0.0, false),
-            Role::DoorFrame => s(0.75e6, 0.0145, 0.0, true),
-            Role::Intrusion => s(0.9e6, 0.0145 * 2.0, 0.0, true),
+            // (`GEN3_DOORFRAME_KGM`, `GEN3_INTRUSION_KGM`: member mass, kg/m, a
+            // round-8 lever; it moves the door's mass, not its total.)
+            Role::DoorFrame => s(0.75e6, 0.0145, env_f("GEN3_DOORFRAME_KGM", 0.0), true),
+            Role::Intrusion => s(0.9e6, 0.0145 * 2.0, env_f("GEN3_INTRUSION_KGM", 0.0), true),
             // Elastic: a light lane node follows the panel (its own beams yield).
             Role::Tie | Role::Backing => s(sheet_kl(part), f32::INFINITY, 0.0, false),
             // Hardware (census: hinges 30–98 kN a beam, k 0.5–3e6).
