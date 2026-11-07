@@ -1268,6 +1268,17 @@ rear doors dense too):
 | wall56 stretch / fold p99 | 1.28 / 6.0° | 1.29 / 6.1° | ≤ 1.6 / ≤ 31° |
 | pole32 stretch / fold p99 | 1.06 / 1.2° | 1.06 / 1.1° | ≤ 1.6 / ≤ 31° |
 
+### On the GPU page
+
+`media/gen3-r7/` shows the page's pole (`pole29`) in the `three` view, gen3 beside the
+ETK. They use the same preset and camera, with the ETK aligned to gen3's impact
+(110 ms). Surface contact is on, on raycast wheels. Each car is shown at impact, at
++53–64 ms and settled.
+- At +64 ms gen3's front door is creased in at the pole, and its side glass has
+  shattered.
+- **No MDB stills.** The `mdb214` page did not start within the recorder's 15 min, twice,
+  with the kept profile (`CRASH_LAB_PROFILE`). Each GPU run is held to 20 min.
+
 ### Diagnostics added
 
 - `POLE_TRACE=<ms>`: the interval.
