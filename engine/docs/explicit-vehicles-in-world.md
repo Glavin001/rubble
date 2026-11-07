@@ -1072,3 +1072,53 @@ not the cause there (73 → 47 ms with it off, in a different state). The next s
 same-pipeline switch bisection (`debugSetExplicitContactBigWgsl`) on that kernel. At 4 cars
 in one house the town is over a 60 Hz step's budget natively too (17 ms). `cpl_emit` (one
 lane per vehicle over its proxy shapes, O(shapes²)) is 1.1 ms natively, 1.6 ms in Chrome.
+
+### 12.2 The −x cars' bounds errors: a wrong box from the node loop (2026-11-07)
+
+**Symptom.** In Chrome at 16 cars the small contact groups' kernel (groups of two, 512
+lanes, 256 a member) reported frame-bounds errors for vehicles 3, 7, 11 and 15. Each
+report widened that vehicle's margin to 4–8 m, the groups merged, and the large groups'
+kernel took 73–83 ms a step. Native wgpu never reported one.
+
+**What was wrong.** Each member's box was kept as the node loop's running min and max,
+read back after each node's update. In Chrome's build of that loop the lanes past the
+last full stride returned a box that held one more point: the position of global node 0
+(vehicle 0's first node). This happened in every member, every step, from the lane of
+local node 208 (463 nodes, 256 lanes a member: lanes 0–206 take two nodes, the rest one).
+The positions stored between steps were right. Evidence, all in Chrome on one build:
+- the bogus extreme, (−0.80, 0.31, 17.3), was the same world point for every member, and
+  matched global node 0 within 5 cm when read from the node buffer;
+- it needed Dawn's bounds-checked MSL: `--enable-dawn-features=disable_robustness`
+  (diagnosis only) gave no reports;
+- it needed the coupled node path to scan the proxy shapes. The runtime knob
+  `coupling:0` gave no reports, and neither did `couplingRanges:1` (most nodes return
+  early). `couplingCache:0` and `couplingCull:0` still reported;
+- extra code in paths that never run here kept the reports: an atomic in
+  `selfSerialMerge`, in `vvTriangleCandsApply`, or in `contactMemberEnd` (same pipeline,
+  through `debugSetExplicitContactWgsl`). Moving the box out of the node loop removed them.
+
+No undefined behaviour was found in the source. The audit covered the per-lane node
+loops and their bounds, the coupling's workgroup words and their barriers, the uniform
+loads, the thread-local arrays and the integer conversions. The front end's AIR of
+Tint's MSL (`xcrun metal -emit-llvm`) computes the box correctly. So the fault is in how
+Apple's back end compiles that loop in the bounds-checked form; it was not reduced
+further.
+
+**Fix (lossless).** `memberBox` (the former `centredBox`) builds the box in its own pass
+after the node phase, each lane reading back the positions it wrote. Both member steps
+use it (the small groups' `contactMembersStep` and the large groups' `contactMemberStep`).
+It has the same positions, keys and bounds check as before. The bitwise and parity
+suites pass: engine-webgpu bitwise, contact, `explicit_beams_gpu`, rigid and sleep;
+engine-world `explicit_vehicles`; Metal `explicit_parity`, `vehicle_parity` and
+`explicit_drive_parity`.
+
+**§8.3's split.** e3db9c96's form (the small module calls `contactMembersStep` and
+`vvPassSmall` with no `k` guard) now passes the five two-body tests, with this fix and
+without it. The split itself landed in 953a34df, so the 0.19 m failure no longer
+reproduces. This fix cannot be credited for it.
+
+| n | Chrome (headless, `?timing=phases`, after the fix) | before |
+|---|---|---|
+| 1 | 60 FPS, 34 World steps/s (GPU shared with another session); 7.2 ms (solo frame 5.4) | 10.4 ms |
+| 4 | 60 FPS, 22 World steps/s; 23.4 ms (contact groups 21.9) | 23.8 ms |
+| 16 | 55 FPS, 19 World steps/s; 26.4 ms (contact groups 24.4, large groups 0); margins 1 m, no bounds reports in 440 steps | 84.6 ms, 11 steps/s |
