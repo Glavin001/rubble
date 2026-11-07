@@ -19,6 +19,67 @@ use rubble::*;
 /// (`explicitSedanTruck(true)`) and the page's settings (fast inverse square root, drag
 /// and turbulence), as `createVehicleTown` builds it.
 fn sedan() -> ExplicitBeams {
+    // EV_ETK=<folder>[:<pc>] (measurement): a BeamNG JBeam vehicle (the ETK K-series:
+    // __mods/etkk_tex, etkk/kc6.pc) in JBeam mode with its pressure wheels, turned to
+    // face +Z (showcase_scene::jbeam_vehicle's steps, on demo/one-world-etk).
+    if let Ok(spec) = std::env::var("EV_ETK") {
+        let (dir, pc) = spec
+            .split_once(':')
+            .unwrap_or((spec.as_str(), "etkk/kc6.pc"));
+        let dir = std::path::Path::new(dir);
+        let list = std::fs::read_to_string(dir.join("files.json")).unwrap();
+        let names: Vec<&str> = list.split('"').filter(|s| s.ends_with(".jbeam")).collect();
+        let files: Vec<(String, String)> = names
+            .iter()
+            .map(|f| (f.to_string(), std::fs::read_to_string(dir.join(f)).unwrap()))
+            .collect();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect();
+        let pc = std::fs::read_to_string(dir.join(pc)).ok();
+        let desc = engine_softbody::jbeam::load_jbeam(&refs, pc.as_deref()).unwrap();
+        let settings = ExplicitBeamsSettings {
+            fast_inv_sqrt: true,
+            drag: true,
+            turbulence: true,
+            ..Default::default()
+        };
+        let (mut sim, _) = ExplicitBeams::from_desc_jbeam_with(
+            &desc,
+            engine_softbody::explicit_beams::JbeamWheels::Pressure,
+            glam::Vec3::ZERO,
+            glam::Vec3::ZERO,
+            settings,
+        )
+        .unwrap();
+        let f = engine_softbody::pack::forward_axis(&desc);
+        let angle = -f.x.atan2(f.z);
+        let quarter = angle / std::f32::consts::FRAC_PI_2;
+        let k = quarter.round();
+        let rot = |p: glam::Vec3| -> glam::Vec3 {
+            if (quarter - k).abs() > 1e-6 {
+                return glam::Quat::from_rotation_y(angle) * p;
+            }
+            match (k as i32).rem_euclid(4) {
+                0 => p,
+                1 => glam::Vec3::new(p.z, p.y, -p.x),
+                2 => glam::Vec3::new(-p.x, p.y, -p.z),
+                _ => glam::Vec3::new(-p.z, p.y, p.x),
+            }
+        };
+        for n in &mut sim.nodes {
+            n.pos = rot(n.pos);
+            n.vel = rot(n.vel);
+        }
+        eprintln!(
+            "EV_ETK: {} nodes, {} beams, {} triangles",
+            sim.nodes.len(),
+            sim.beams.len(),
+            sim.triangles.len()
+        );
+        return sim;
+    }
     if std::env::var("EV_PAGE").as_deref() == Ok("1") {
         let text = engine_softbody::procedural::car_truck(&engine_softbody::procedural::CarParams {
             minimass: 10.0,

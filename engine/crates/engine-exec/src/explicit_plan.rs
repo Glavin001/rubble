@@ -166,7 +166,7 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params (word 87 the parking brakes' base, word 88 the loop
-/// budget, 89..91 padding).
+/// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 padding).
 pub const PARAM_WORDS: usize = 92;
 /// Params word: the loop budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`).
 pub const W_LOOP_BUDGET: usize = 88;
@@ -192,6 +192,14 @@ pub fn loop_budget(unit: u64, steps: u32) -> u32 {
 pub fn loop_budget_override() -> Option<u32> {
     std::env::var("RUBBLE_LOOP_BUDGET").ok().and_then(|v| v.parse().ok())
 }
+/// The grid walk's pairs a vehicle lists per step before it walks again with its tests
+/// (the kernel's `TRI_PAIR_CAP`; 2 gNext words a pair).
+pub const TRI_PAIR_CAP: usize = 8192;
+/// gBeams records per self-collision triangle of its per-step geometry (the kernel's
+/// `TRI_GEO_RECS`, `triGeoFill`).
+pub const TRI_GEO_RECS: usize = 9;
+/// gNext words per proxy shape of its sphere and step frame (the kernel's `CPL_SPHERE_WORDS`).
+pub const CPL_SPHERE_WORDS: u32 = 16;
 /// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
 /// `sleepRec`; after centred damping's word 84). The next word is the awake-list flag.
 pub const W_SLEEP: usize = 85;
@@ -1622,10 +1630,11 @@ impl ExplicitUpload {
                 CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
             acc_init.extend(std::iter::repeat_n(0, layout.acc_words() as usize));
-            // The shape cull's spheres (`explicit_beams_rigid.slang` `cplSpheres`): per
-            // vehicle and shape 4 words of gNext, rewritten every step.
+            // The shape cull's spheres and the shapes' step frames (`explicit_beams_rigid.slang`
+            // `cplSpheres`, `cplFrameStore`): per vehicle and shape CPL_SPHERE_WORDS words of
+            // gNext, rewritten every step.
             let cull_base = next_len as u32;
-            next_len += (4 * cap.shapes * nv as u32) as usize;
+            next_len += (CPL_SPHERE_WORDS * cap.shapes * nv as u32) as usize;
             misc[couple_rec] = [
                 0,
                 layout.misc_base,
@@ -1826,6 +1835,25 @@ impl ExplicitUpload {
             rec[2] = (hit_base + k * SELF_HIT_WORDS) as u32;
             rec[3] = (hit_acc + 2 * k) as u32;
         }
+        // The self-collision triangles' geometry for the grid walk, written once a step
+        // (the kernel's triGeoFill; scratch): TRI_GEO_RECS records per triangle, after
+        // every other region (a snapshot of a layout without it restores unchanged).
+        let tri_geo = if grid != 0 && total_tris > 0 {
+            let at = beams.len() as u32;
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_tris * TRI_GEO_RECS));
+            at
+        } else {
+            0
+        };
+        // The grid walk's (triangle, contacter) pairs per vehicle (the kernel's
+        // triPairsAt; scratch), with the triangles' step geometry.
+        let tri_pairs = if tri_geo != 0 {
+            let at = next_len as u32;
+            next_len += nv * 2 * TRI_PAIR_CAP;
+            at
+        } else {
+            0
+        };
         // The loop budget's unit (explicit_loop_cap.slang): passes one invocation could
         // legitimately take in a step, bounded by the whole fleet's work on one lane
         // (a contact group's lane walks its members; the serial self-collision pass
@@ -2018,10 +2046,11 @@ impl ExplicitUpload {
             // The awake-list flag (written per frame), then the parking brakes.
             0,
             brake_base,
-            // The loop budget (written per frame, FramePlanner::write_params), padding.
+            // The loop budget (written per frame, FramePlanner::write_params), the
+            // triangles' step geometry, the grid walk's pairs, padding.
             0,
-            0,
-            0,
+            tri_geo,
+            tri_pairs,
             0,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));

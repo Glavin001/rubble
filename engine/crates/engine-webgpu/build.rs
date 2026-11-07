@@ -950,7 +950,9 @@ fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
                 // suite's fleets, which have no surface contact: without the surface
                 // pass (EB_NO_SURFACE), as the modules those fleets ship with; native
                 // Metal (naga) runs out of threadgroup slots in a contact module with it.
-                if prefix == "explicit_det_" {
+                // The ablation builds (measurement) likewise: Metal binds at most 31
+                // workgroup variables, which the contact module with every path exceeds.
+                if prefix == "explicit_det_" || prefix == "explicit_ablate_" {
                     d.push(("EB_NO_SURFACE", "1"));
                 }
                 jobs.push((src.clone(), format!("{prefix}frame{tag}"), "explicit_beams_frame".into(), d.clone()));

@@ -1252,3 +1252,19 @@ reproduces. This fix cannot be credited for it.
 | 1 | 60 FPS, 34 World steps/s (GPU shared with another session); 7.2 ms (solo frame 5.4) | 10.4 ms |
 | 4 | 60 FPS, 22 World steps/s; 23.4 ms (contact groups 21.9) | 23.8 ms |
 | 16 | 55 FPS, 19 World steps/s; 26.4 ms (contact groups 24.4, large groups 0); margins 1 m, no bounds reports in 440 steps | 84.6 ms, 11 steps/s |
+**Update (merge of `merge/showcase-main` 1613f7d7, centred damping the BeamNG-profile
+default).** Centred damping acts on JBeam elements only (`ExplicitBeamsSettings` §39),
+so it cannot touch the repo sedan, a `.truck` of plain beams in the RoR profile.
+- *The repo sedan's tyre chatter with it on* (`sleep_probe centred=1`): 0.112 m/s with a
+  57 µm stroke, the same to the bit as with it off.
+- *The JBeam fixture car on pressure wheels with it on* (`sleep_probe fixture=1
+  centred=1`): its slow rocking is the same to the bit (still settled by about 50 s), so
+  the rocking does not come from damped JBeam elements.
+- *Sleep counts after the merge*: 1,000 parked + 10 driving, 992 of 1,010 asleep (987
+  before); idle map at 500 / 1000 / 2000 / 4000 m, 11 of 16, 45 of 64, 183 of 256 and
+  745 of 1,024 asleep, the same as before.
+
+So the parked cars that never sleep are RoR-profile sedans whose residual motion stays
+above the rule's 0.1 mm over 0.5 s; centred damping does not reach them. The step times
+of this run (load 20 to 120 from other agents, a 15-fold slowdown of the baseline's own
+fleet case) are not comparable and are not reported.
