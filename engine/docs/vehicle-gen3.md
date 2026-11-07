@@ -1101,3 +1101,194 @@ raycast wheels. Each car is shown at impact, at +55–58 ms and settled (+1.5 s)
   254 mm pole (above).
 - Parked normal fidelity: 0.98° static and 1.03° at 10 s, against 1°.
 - The residual max (577 mm) and the peak (34.4 g) are each just inside their bands.
+
+## Round 7 (2026-11-06)
+
+Branch `feat/vehicle-gen3-r7`. Surface contact is on unless marked. Full tables:
+`measurements/vehicle-compare-gen3-surface-on.md` and `-off.md`. Stills:
+`media/gen3-r7/`.
+
+### Decisions (deviations first)
+
+- **The pole is not met, and the round-6 hypothesis is refuted by measurement.** A
+  side lattice that folds locally at pole width (below) deepens the pole but takes
+  the MDB with it: every lever moved the two together. It ships **opt-in**
+  (`GEN3_SIDE_R7=1`), not as the default, because the default must keep the MDB,
+  the frontal and the door in band.
+- **Parked fidelity: the mechanism is found and fixed at the source.** The
+  stability bound's row cap softened the members next to the lane nodes. The fix
+  holds behind the rear doors only (where the warp is); everywhere, it moves the
+  round-6 calibration out of band. The greenhouse yield is 0.37 (was 0.38) to keep
+  the roof in band. `gen3_rig` passes. The 0.9° target is met at 10 s but not at
+  every time from 5 to 30 s (below).
+- **The pole harness started the pole inside the car on some lines.** It walked out
+  from the head point to the first clear spot. When the head point itself was clear
+  of nodes, the pole started there, 0.5 m in from the skin. Round 6's 33 mm reading
+  at −10 cm was that. The pole now starts past the last node on its line. The
+  harness's own pole (offset 0) is unchanged.
+
+### Required numbers (surface contact on)
+
+| Measure | Round 6 | Round 7 | Band |
+|---|---|---|---|
+| Frontal dynamic crush (mm) | 651 | 655 | 620–750 ✓ |
+| t_m (ms) | 72 | 72.5 | 63–76 ✓ |
+| Peak, rear cabin (g) | 34.4 | 35.6 | 34–47 ✓ |
+| Residual max / avg (mm) | 577 / 355 | 569 / 386 | 380–580 ✓ |
+| Campbell b1 (1/s) | 37.5 | 34.5 | ≤ 39.2 ✓ |
+| Restitution | 0.193 | 0.190 | ≤ 0.20 ✓ |
+| Feet intrusion (mm) | 62.1 | 60.8 | ≤ 67 ✓ |
+| Roof / weight | 5.25 | 5.31 | 4.48–5.32 ✓ |
+| MDB residual (mm) | 198 | 191 | 126–206 ✓ |
+| FMVSS 214 door: initial / intermediate / peak (kN) | 10.5 / 29.2 / 98 | 10.7 / 28.8 / 96 | ≥ 10.0 / 15.6 / 28.5 ✓ |
+| Side pole residual / dynamic (mm) | 151 / 290 | 147 / 271 | 297–445 ✗ |
+| Parked 10 s: normal fidelity | 1.03° | 0.79° | ≤ 1° ✓ (target 0.9) |
+
+- Mass 1,450 kg, centre of mass 1,216 mm behind the front axle; ω·h 1.919; rest
+  drift ≤ 2.4 mm (body); 0 broken, 0 bent.
+- **Surface contact off:** wall 672 mm, 73 ms, 32.5 g, residual 469 / 345 mm, b1
+  38.6, restitution 0.236; pole 257 / 351 mm with the pole 517 mm past the skin
+  (between nodes); MDB 191 mm.
+- **The ETK (on):** pole 202 / 281 mm, MDB 244 mm, roof 6.02, door 6.5 kN; unchanged.
+
+### The pole
+
+**Measured with `gen3_side`, five pole offsets (−10 to +10 cm) and the MDB at five
+offsets (−10 to +10 cm).** Single readings move ±10–20 mm with no change of physics:
+reordering the door's beam list (summation order) moved the MDB 198 → 210 mm. Means
+over offsets are the numbers to compare.
+
+| | Pole mean (mm) | MDB mean (mm) |
+|---|---|---|
+| Round 6 structure, harness fixed | 136 | 202 |
+| Round 7 default | 128 | 195 |
+| `GEN3_SIDE_R7=1` | 207 | 215 |
+| The ETK | 187 | 290 |
+
+**What `GEN3_SIDE_R7` builds** (each part has its own switch inside it):
+- Front doors at 0.20 m column pitch (`DOOR_PITCH`; 6 columns, not 3), their graph's
+  reach 0.42 m (two bays along the door), not 0.66 m (`GEN3_OLD_DOOR`).
+- The intrusion beam's outer chord on the skin, as the skin's middle row
+  (`GEN3_NO_SKIN_ROW`). The skin between the bottom row (seated on the sill) and the
+  shoulder was one triangle 0.49 m tall. So the pole pushed the sill and the
+  shoulder and never the beam between them.
+- The sill as its own box (`GEN3_OLD_SILL_BOX`): three chords through stations
+  every 0.25 m (`SILL_PITCH`), with its section and wall webs. The body graph no
+  longer joins sill nodes 0.5–0.9 m apart. Those joins braced every station against
+  its neighbours, so a pole met the whole sill.
+- The doors' inner panels bear inward on the hinge pillar, B- or C-pillar and sill
+  (SUPPORT, `GEN3_NO_DOOR_STOPS`). The skin seals ran along the car from the
+  door's edge to the pillar's face and held nothing inward.
+- The window glass carries no collision faces (`GEN3_WINDOW_TRIS` keeps them).
+  Tempered glass breaks at a few kN; as three triangles it was a rigid plate.
+- Rear doors stay as in round 6 (`GEN3_DENSE_REAR`): densified, the light rear door
+  softened under the bound to 1.3 kN yields and the MDB read 290–340 mm on it.
+
+`GEN3_SIDE_R7` in the full harness: pole 216 / 340 mm, MDB 221 mm ✗, peak 34.2 g,
+restitution 0.247 ✗, feet 106 mm ✗, door 10.3 / 18.4 / 75 kN.
+
+**No lever separated the pole from the MDB** (`GEN3_SIDE_R7` on; pole and MDB means;
+the ranges span this round's variants of the lattice as it was built up, some with the
+rear doors dense too):
+
+| Lever | Pole | MDB |
+|---|---|---|
+| none | 207 | 215 |
+| Sill chords × 0.3 (`GEN3_SILL_CHORD_Y`) | 251–293 | 244–261 |
+| Sill chords × 2 | 198 | 298 (3 offsets) |
+| Doors × 1.5 / × 0.5 | 173 / 238 | 340 / 340 |
+| Footwell × 0.2 (`GEN3_FLOOR_Y` 0.6) | 231 | 221 |
+| Cross members × 0.5 or × 2 | 214–223 | 220–222 |
+| B-pillar lower × 3 or × 5 | unchanged | unchanged |
+| Greenhouse × 4 to 5 (`GEN3_ROOF_Y` 1.5–2; out of the roof's band) | 236–264 | 217–252 |
+| Door pitch 0.25 m, reach 0.36–0.6 m, sill pitch 0.34 m | 202–228 | 226–247 |
+
+**What limits it** (`POLE_TRACE=5`, `POLE_FORCES`, `POLE_HALF_H`, `MDB_TRACE`):
+- **The car is stronger to the pole than to the MDB.** Force from the car's momentum:
+  - the pole rises to 300 kN at 25–35 ms (230 mm crush) and the car stops at 62 ms;
+  - the MDB peaks at 140–160 kN, about half the honeycomb's full-face crush force
+    (290 kN, 49 CFR 587).
+  - A real side is the other way round: stiff to a wide load, so the barrier's face
+    crushes, and soft to a narrow one.
+- **The top of the pole carries a third of it.** A pole cut off at 1.0 m reads
+  275–293 mm, at 1.1 m 262 mm, at 1.3 m 206 mm, at full height 210 mm. At the
+  pole's line the door's window frame corner (`door_FL_f0`, 1.18 m) and the
+  A-pillar's middle (`ap1`, 1.15 m) lie within its radius. They are the hot-stamped
+  A-pillar chords and the roof rail, which the roof and the frontal need strong.
+- **The station under the pole is braced in every direction.** At 30 ms the most
+  loaded beams are the sill's station 1 to the tunnel (the seat's front cross
+  member, 22 kN each) and to the floor, firewall and front rail (16–20 kN).
+- **The stability bound sets the springs by mass.** At 2 kHz a node's springs sum to
+  about m · 3.7·10⁶ N/m. Denser nodes on the same door mass get softer springs (door
+  k·L p50 1.6·10⁵ → 8·10⁴ N at 0.20 m pitch) and lower yield forces. So the door's
+  local strength falls and the MDB with it, while a strong section stores
+  F²/2k elastic: a sill chord at its real section (about 26 kN·m plastic moment) on
+  a 3·10⁶ N/m spring would store 12 kJ before it yields.
+
+### Parked fidelity: how lane nodes warp normals
+
+- **Not their skin weight:** lane nodes are outside every mesh's pool, and the frame
+  kernel's width (1.3, 1.6, 2.0 × the position's) changes the parked warp by 0.02°.
+- **Their ties, through the stability bound's row cap** (`GEN3_TRACE_BEAM=a-b` traces
+  one beam's spring):
+  - A structural node's lane ties gave with its shut-line edge ties. The edge nodes
+    carry the skin.
+  - A node over the cap on its members alone scaled them by its whole row, lane ties
+    included.
+  - So the members next to lane nodes kept 0.19–0.38 of their no-lane springs:
+    qt236–ebody93 5.2·10⁵ → 1.0·10⁵ N/m, qs185–qi218 3.9·10⁵ → 1.4·10⁵ N/m at the
+    tail. The tail corner sagged parked.
+- **The fix** (`Car::lane_ties_first`): only lane ties give first; members take the
+  cap on their own row; the power iteration softens lane ties before members.
+  - Everywhere, the parked normal reads 0.80–0.88° at every time from 5 to 30 s, but
+    the frontal peak falls to 30.5 g and the roof rises to 5.66.
+  - So it holds from 0.15 m ahead of the rear door's rear shut line backwards
+    (`LANE_TIES_AHEAD`; `GEN3_LANE_TIES_FROM`, `GEN3_LANE_SOFTENS_PANEL`). The
+    greenhouse yield 0.37 brings the roof back to 5.31.
+- **Parked, the tail corner's normal** (worst vertex: body shell, 0.91, 0.71, −2.38 m):
+
+  | t (s) | 5 | 7.5 | 9.5 | 10 | 12 | 15 | 20 | 30 |
+  |---|---|---|---|---|---|---|---|---|
+  | Round 6 | 1.11° | 0.98° | 0.94° | 1.03° | 1.00° | 0.97° | 0.99° | 0.98° |
+  | Round 7 | 0.73° | 0.97° | 0.99° | 0.79° | 0.73° | 0.91° | 0.97° | 0.81° |
+
+  - The static warp is about 0.85°, but the slow parked bounce is now ±0.13°. The
+    0.9° target holds at 10, 12 and 30 s, not at 7.5, 9.5, 15 and 20 s.
+  - The vertex error is 1.44–1.48 mm at 5 and 7.5 s, while the car settles. Round 6's
+    was 1.19 mm at 5 s. It is 0.45–0.84 mm from 9.5 s on.
+
+### Checks (`gen3_rig`)
+
+| Check | Round 6 | Round 7 | Required |
+|---|---|---|---|
+| Rest fidelity at spawn | 0.16 mm / 0.07° | 0.16 mm / 0.07° | ≤ 1 mm / 1° |
+| Parked 10 s, beyond the nodes' own motion | 0.53 mm / 1.03° ✗ | 0.74 mm / 0.79° | ≤ 1 mm / 1° |
+| Drift, every part | ≤ 2.1 mm | ≤ 2.4 mm | ≤ 5 mm |
+| Broken / bent at rest | 0 / 0 | 0 / 0 | 0 / 0 |
+| wall56 stretch / fold p99 | 1.28 / 6.0° | 1.29 / 6.1° | ≤ 1.6 / ≤ 31° |
+| pole32 stretch / fold p99 | 1.06 / 1.2° | 1.06 / 1.1° | ≤ 1.6 / ≤ 31° |
+
+### Diagnostics added
+
+- `POLE_TRACE=<ms>`: the interval.
+- `POLE_FORCES=<ms>`: the most loaded beams then.
+- `POLE_WRAP`: the struck nodes outboard of the pole's axis.
+- `POLE_HALF_H`: a shorter pole.
+- `MDB_TRACE`: car and barrier velocity every 5 ms.
+- `rebound_vx`: the car's fastest rebound.
+- `scene_mdb_at` and `gen3_side`'s MDB offsets (`SIDE_MDB_SPREAD=wide`).
+- `GEN3_RDOOR_Y`: the rear doors' yield.
+- `GEN3_SILL_CHORD_Y`, `GEN3_SILL_SEC_Y`: the sill box's yields.
+- `GEN3_NO_BODY_LANES`: no lane nodes on the body.
+
+### Open
+
+- **The pole** (147 mm against 297–445). Separating it from the MDB needs the side
+  stiff to wide loads and soft to narrow ones. At the explicit bound the lattice
+  couples the two. Candidates:
+  - heavier structural nodes where the side's strength lives: the intrusion beam has
+    no member mass, and the door's mass sits on its skin;
+  - a pole line that does not land on the A-pillar's middle: the render model's
+    A-pillar may sit further back than the Accord's;
+  - the seat and its cross members as the wide load's path.
+- **Parked fidelity at every time:** remove the slow parked bounce on raycast wheels.
