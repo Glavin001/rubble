@@ -98,10 +98,13 @@ impl RingSpec {
     }
 }
 
-/// The drive's ring (`brick-ring-drive.html`): the demo's layout and brick count.
+/// The drive's ring (`brick-ring-drive.html`): the demo's layout and brick count, its
+/// blocks 100 kg/m³ (25 kg each, a hay bale's density; the demo's 0.25 kg blocks are
+/// nothing to a 1.3 t car), no ball.
 pub fn drive_ring() -> RingSpec {
     RingSpec {
         ball: false,
+        density: 100.0,
         ..RingSpec::demo()
     }
 }

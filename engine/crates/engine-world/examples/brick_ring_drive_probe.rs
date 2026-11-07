@@ -153,7 +153,14 @@ fn main() -> anyhow::Result<()> {
         courses: env_f("BR_COURSES", demo.courses as f32) as u32,
         tier: env_f("BR_TIER", demo.tier as f32) as u32,
         rows: env_f("BR_ROWS", demo.rows as f32) as u32,
-        density: env_f("BR_DENSITY", demo.density),
+        density: env_f(
+            "BR_DENSITY",
+            if template.is_some() {
+                rubble::brick_ring_drive::drive_ring().density
+            } else {
+                demo.density
+            },
+        ),
         ball: env_f("BR_BALL", if template.is_some() { 0.0 } else { 1.0 }) > 0.0,
     };
     let n = env_f("BR_N", 1.0) as usize;
