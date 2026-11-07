@@ -716,7 +716,7 @@ void driveStepMembers(uint off, uint k, uint lane, uint s, uint on)
 {
     if (on == 0u) return;
     uint per = LANES / DRV_MAX_WHEELS;
-    for (uint p = 0u, pStop = EB_END(p, k, per); p < pStop; p += per)
+    for (uint p = 0u, pStop = EB_END_UNIFORM(p, k, per); p < pStop; p += per)
     {
         uint m = p + lane / DRV_MAX_WHEELS;
         bool live = m < k;

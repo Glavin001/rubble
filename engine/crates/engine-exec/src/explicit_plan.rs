@@ -165,8 +165,23 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 /// step word) plus the frame's end, at the uniform offset alignment.
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
-/// Words of the kernel's Params (all 88 used; word 87 the parking brakes' base).
-pub const PARAM_WORDS: usize = 88;
+/// Words of the kernel's Params (word 87 the parking brakes' base, word 88 the loop
+/// budget, 89..91 padding).
+pub const PARAM_WORDS: usize = 92;
+/// Params word: the loop budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`).
+pub const W_LOOP_BUDGET: usize = 88;
+/// The loop budget's floor and ceiling (passes of one invocation in a frame).
+pub const LOOP_BUDGET_MIN: u64 = 1 << 22;
+pub const LOOP_BUDGET_MAX: u64 = 1 << 31;
+
+/// The passes one invocation may take in a frame of `steps` steps
+/// (explicit_loop_cap.slang `EB_LOOP_BUDGET`): twice the fleet's per-step bound
+/// ([`ExplicitLayout::loop_unit`]) for every step and the frame's ends, held to
+/// [`LOOP_BUDGET_MIN`]..=[`LOOP_BUDGET_MAX`]. A loop of a sound state never reaches it;
+/// a corrupt count stops there and fails the frame (the loop-cap flag).
+pub fn loop_budget(unit: u64, steps: u32) -> u32 {
+    (2 * unit * (u64::from(steps) + 2)).clamp(LOOP_BUDGET_MIN, LOOP_BUDGET_MAX) as u32
+}
 /// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
 /// `sleepRec`; after centred damping's word 84). The next word is the awake-list flag.
 pub const W_SLEEP: usize = 85;
@@ -689,6 +704,9 @@ pub struct ExplicitLayout {
     /// The wide passes can run this fleet, and are on by default.
     pub wide_ok: bool,
     pub wide_default: bool,
+    /// The loop budget's unit: one invocation's passes a step at most (the kernel's
+    /// gP.loopBudget is [`loop_budget`] of it).
+    pub loop_unit: u64,
     pub status: StatusWords,
 }
 
@@ -1798,6 +1816,21 @@ impl ExplicitUpload {
             rec[2] = (hit_base + k * SELF_HIT_WORDS) as u32;
             rec[3] = (hit_acc + 2 * k) as u32;
         }
+        // The loop budget's unit (explicit_loop_cap.slang): passes one invocation could
+        // legitimately take in a step, bounded by the whole fleet's work on one lane
+        // (a contact group's lane walks its members; the serial self-collision pass
+        // walks every triangle against every contacter; a node tests every proxy
+        // shape and hull plane).
+        let cpl_work = coupling.as_ref().map_or(0u64, |c| u64::from(c.cap.shapes) + u64::from(c.cap.planes));
+        let loop_unit: u64 = vehicles
+            .iter()
+            .map(|v| {
+                v.nodes.len() as u64 * (cpl_work + 16)
+                    + 4 * v.beams.len() as u64
+                    + v.triangles.len() as u64 * v.candidates.len() as u64
+                    + 1024
+            })
+            .sum();
         let mut next_init = vec![0u32; next_len.max(1)];
         if any_keys {
             for (vi, v) in vehicles.iter().enumerate() {
@@ -1975,6 +2008,11 @@ impl ExplicitUpload {
             // The awake-list flag (written per frame), then the parking brakes.
             0,
             brake_base,
+            // The loop budget (written per frame, FramePlanner::write_params), padding.
+            0,
+            0,
+            0,
+            0,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -2019,6 +2057,7 @@ impl ExplicitUpload {
             lanes,
             wide_ok,
             wide_default,
+            loop_unit,
             contact_force: cf_acc,
             group_spans: group_spans.clone(),
             contact_force_on: vehicles.iter().map(|v| v.contact_force.is_some()).collect(),
@@ -2147,6 +2186,8 @@ pub struct FramePlanner {
     surface: bool,
     /// The host runs the surface pass as its own pipelines ([`Self::set_surface_split`]).
     surface_split: bool,
+    /// [`ExplicitLayout::loop_unit`].
+    loop_unit: u64,
 }
 
 impl FramePlanner {
@@ -2167,6 +2208,7 @@ impl FramePlanner {
             sleep_listing: true,
             surface: layout.surface,
             surface_split: false,
+            loop_unit: layout.loop_unit,
         }
     }
 
@@ -2296,6 +2338,7 @@ impl FramePlanner {
             PARAM_COPIES - 1
         );
         self.words[0] = steps;
+        self.words[W_LOOP_BUDGET] = loop_budget(self.loop_unit, steps);
         self.words[W_VV_ON] = self.contact_active() as u32;
         self.words[W_SLEEP + 1] = self.sleep_listed() as u32;
         self.contact.planning = false;

@@ -195,7 +195,8 @@ fn uncapped_slang_loops(text: &str) -> Vec<(usize, String)> {
             &s[at..end]
         };
         let line = s[..i].matches('\n').count() + 1;
-        let counted = body.trim_start().strip_prefix('{').unwrap_or(body).trim_start().starts_with("EB_PASS(");
+        let first = body.trim_start().strip_prefix('{').unwrap_or(body).trim_start();
+        let counted = first.starts_with("EB_PASS(") || first.starts_with("EB_PASS_UNIFORM(");
         let ok = counted || (kw == 3 && for_capped(header, body, &s[..i]));
         if !ok {
             bad.push((line, header.split_whitespace().collect::<Vec<_>>().join(" ")));
@@ -233,10 +234,13 @@ fn for_capped(header: &str, body: &str, before: &str) -> bool {
     // statement just before the loop.
     let stop = format!("{var}Stop");
     if op == "<" && bound == stop && step_ok(&|_| true) {
-        let def = format!("{stop} = EB_END({var}, ");
         let prev = before.trim_end();
         let prev_stmt = prev[..prev.len().saturating_sub(1)].rsplit(';').next().unwrap_or("");
-        return init.contains(&def) || (init.is_empty() && prev.ends_with(';') && prev_stmt.contains(&def));
+        // EB_END_UNIFORM: the same clamp, for a loop that reaches a barrier (not budgeted).
+        return ["EB_END", "EB_END_UNIFORM"].iter().any(|m| {
+            let def = format!("{stop} = {m}({var}, ");
+            init.contains(&def) || (init.is_empty() && prev.ends_with(';') && prev_stmt.contains(&def))
+        });
     }
     // A constant loop: constant bound and step, the counter assigned only by the step.
     let lit_step = step_ok(&|s| constant(s));
