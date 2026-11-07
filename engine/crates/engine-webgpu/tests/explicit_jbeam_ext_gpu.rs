@@ -180,6 +180,7 @@ fn runs_within_webgpu_uniform_binding_limit() {
         eprintln!("no GPU adapter: skipped");
         return;
     };
+    engine_webgpu::hold_gpu_lock();
     let mut limits = adapter.limits();
     limits.max_uniform_buffer_binding_size =
         wgpu::Limits::default().max_uniform_buffer_binding_size;

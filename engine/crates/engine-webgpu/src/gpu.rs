@@ -647,6 +647,38 @@ fn scratch_words(s: &[u32; 64]) -> [u32; 64] {
     w
 }
 
+/// One GPU job on the machine at a time: before its first native device, a process
+/// takes an exclusive lock on `~/.rubble/gpu.lock` (`RUBBLE_GPU_LOCK` overrides the
+/// path; `RUBBLE_GPU_LOCK=0` turns it off) and holds it until it exits, waiting for
+/// any other process that holds it. Two jobs sharing the GPU made runaway kernels
+/// hard to trace and hung submissions pile up; a job that waits here costs nothing.
+/// Devices of one process share the lock (tests in parallel threads).
+pub fn hold_gpu_lock() {
+    use std::sync::OnceLock;
+    static LOCK: OnceLock<Option<std::fs::File>> = OnceLock::new();
+    LOCK.get_or_init(|| {
+        let path = match std::env::var("RUBBLE_GPU_LOCK") {
+            Ok(v) if v == "0" => return None,
+            Ok(v) if !v.is_empty() => std::path::PathBuf::from(v),
+            _ => std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".rubble/gpu.lock"),
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .ok()?;
+        if file.try_lock().is_err() {
+            eprintln!("rubble: waiting for the GPU lock {} (another GPU job is running)", path.display());
+            file.lock().ok()?;
+        }
+        Some(file)
+    });
+}
+
 /// A high-performance adapter's device with its full limits.
 pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
     default_device_with(false)
@@ -657,6 +689,7 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
 pub fn default_device_with(
     timestamps: bool,
 ) -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
+    hold_gpu_lock();
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL;
     desc.flags = instance_flags();
