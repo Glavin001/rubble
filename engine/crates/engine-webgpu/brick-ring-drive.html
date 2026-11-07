@@ -114,7 +114,7 @@
     const spec = {
       vehicles: [mod ? { jbeam: mod.files, pc: mod.pc } : { truck: visuals[0].truck }],
       count: N,
-      runUp: Number(qs.get('runUp') || 45),
+      runUp: Number(qs.get('runUp') || 100),
       speed: Number(qs.get('speed') || 0),
       sleep: qs.get('sleep') !== '0',
       ring: Object.fromEntries(['scale', 'radius', 'courses', 'tier', 'rows', 'density'].filter((k) => qs.has(k)).map((k) => [k, Number(qs.get(k))])),
@@ -331,7 +331,7 @@
     let impactAt = null;
     function direct(t) {
       const toWall = layout.inner - Math.hypot(carState[0].c[0], carState[0].c[2]);
-      if (!cam.sideAt && toWall < 7 && Math.hypot(...carState[0].v) > 2) cam.sideAt = t;
+      if (!cam.sideAt && toWall < 12 && Math.hypot(...carState[0].v) > 2) cam.sideAt = t;
       if (!cam.sideAt) return 'chase';
       if (t < cam.sideAt + 2.6) return 'side';
       if (t < cam.sideAt + 6.5) return 'orbit';
