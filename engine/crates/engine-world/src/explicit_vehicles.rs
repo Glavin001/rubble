@@ -395,6 +395,26 @@ impl ExplicitVehicles {
         })
     }
 
+    /// The coupling passes' status word (work[1], byte offset): the World reads it with
+    /// every step ([`Self::status_bits_error`]).
+    pub(crate) fn status_word(&self) -> (&wgpu::Buffer, u64) {
+        (&self.work, 4)
+    }
+
+    /// The coupling status bits as an error (none: Ok): a room exceeded, or a loop held
+    /// to its cap or past its pass budget (ST_LOOP).
+    pub(crate) fn status_bits_error(&self, bits: u32) -> Result<(), String> {
+        if bits == 0 {
+            return Ok(());
+        }
+        let names: Vec<&str> = (0..ST_NAMES.len()).filter(|k| bits & (1 << k) != 0).map(|k| ST_NAMES[k]).collect();
+        Err(format!(
+            "explicit vehicles: {} (capacity {:?}; raise ExplicitVehiclesDef::capacity)",
+            names.join(", "),
+            self.layout.cap
+        ))
+    }
+
     /// The vehicle sleep readback (World step's extras): the asleep bits after the frame.
     pub(crate) fn sleep_extra(&self) -> Option<(&wgpu::Buffer, u64, u64)> {
         self.gpu
@@ -682,12 +702,7 @@ impl ExplicitVehicles {
         enc: &mut wgpu::CommandEncoder,
     ) -> anyhow::Result<bool> {
         if let Some(bits) = self.status.lock().unwrap().take() {
-            let names: Vec<&str> = (0..6).filter(|k| bits & (1 << k) != 0).map(|k| ST_NAMES[k]).collect();
-            anyhow::bail!(
-                "explicit vehicles: {} (capacity {:?}; raise ExplicitVehiclesDef::capacity)",
-                names.join(", "),
-                self.layout.cap
-            );
+            self.status_bits_error(bits).map_err(anyhow::Error::msg)?;
         }
         // The explicit solver's own status (loop cap, vehicle-contact limits) is read
         // without waiting inside its frame (it fails the frame that finds an error).
@@ -854,6 +869,11 @@ impl World {
     /// count.
     pub fn explicit_triangles(&self) -> Option<(&wgpu::Buffer, u32)> {
         self.explicit.as_ref().map(|x| (&x.tris, x.tri_count))
+    }
+
+    /// The explicit vehicles as they were added (spawn state: node counts, raycast wheels).
+    pub fn explicit_vehicles_as_added(&self) -> &[ExplicitBeams] {
+        self.explicit.as_ref().map_or(&[], |x| x.sims.as_slice())
     }
 
     /// Mutable access (velocity writes, the grab, vehicle contact settings).

@@ -12,26 +12,33 @@ impl WebWorld {
     /// the copy is mapped: per slot [`BODY_READ_STRIDE`] floats, the solver-frame
     /// (centre of mass) position xyz, rotation xyzw, linear velocity xyz,
     /// angular velocity xyz and 1 if awake. For checks and occasional reads; the
-    /// per-frame path is [`WebWorld::poll`].
+    /// per-frame path is [`WebWorld::poll`]. The copy is submitted before this
+    /// returns (the state after the work submitted so far, not a step taken next
+    /// in the same task); only the mapping is awaited.
     #[wasm_bindgen(js_name = readBodies)]
     pub fn read_bodies(&self, slots: Vec<u32>) -> js_sys::Promise {
-        let device = self.world.device().clone();
-        let queue = self.world.queue().clone();
-        let source = self.world.sim().body_buffer().clone();
+        let device = self.world.device();
+        let source = self.world.sim().body_buffer();
         let record = std::mem::size_of::<engine_schema::BodyState>() as u64;
+        let n = slots.len().max(1) as u64;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readBodies"),
+            size: n * record,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        for (k, &s) in slots.iter().enumerate() {
+            enc.copy_buffer_to_buffer(
+                source,
+                u64::from(s) * record,
+                &staging,
+                k as u64 * record,
+                record,
+            );
+        }
+        self.world.queue().submit([enc.finish()]);
         wasm_bindgen_futures::future_to_promise(async move {
-            let n = slots.len().max(1) as u64;
-            let staging = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("readBodies"),
-                size: n * record,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let mut enc = device.create_command_encoder(&Default::default());
-            for (k, &s) in slots.iter().enumerate() {
-                enc.copy_buffer_to_buffer(&source, u64::from(s) * record, &staging, k as u64 * record, record);
-            }
-            queue.submit([enc.finish()]);
             let (tx, rx) = futures_channel::oneshot::channel();
             staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
                 let _ = tx.send(r);

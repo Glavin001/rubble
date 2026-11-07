@@ -83,6 +83,10 @@ fn is_ident(c: u8) -> bool {
 /// A constant: a literal (`3u`, `16`) or a static const (`GRID_SUBS`).
 fn constant(e: &str) -> bool {
     let e = e.trim();
+    // A sum of constants (`SELF_ROUNDS + HIT_CAP + 1u`).
+    if e.contains('+') {
+        return e.split('+').all(constant);
+    }
     let lit = e.trim_end_matches('u');
     (!lit.is_empty() && lit.bytes().all(|c| c.is_ascii_digit()))
         || (!e.is_empty()

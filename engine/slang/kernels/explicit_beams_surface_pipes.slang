@@ -56,7 +56,7 @@ void explicit_surface_prep(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint4 sr = gStatic[gP.surfSeg + v];
     uint segCount = mine ? sr.y : 0u;
     uint proxies = mine ? surfProxies(v) : 0u;
-    uint bodies = proxies != 0u ? gMisc[cplBase(v)].x : 0u;
+    uint bodies = proxies != 0u ? cplVeh(v).x : 0u;
     bool anyFast = proxies != 0u && surfAnyFast(v, proxies);
     bool pairs = proxies != 0u && surfPairsOn();
     if (lane == 0u) gsUniformSurf = pairs ? 1u : 0u;

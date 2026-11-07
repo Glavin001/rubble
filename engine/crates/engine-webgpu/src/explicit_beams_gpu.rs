@@ -1123,6 +1123,12 @@ impl ExplicitBeamsGpu {
     /// ([`crate::EXPLICIT_LOOP_CAP`]: a runaway loop, stopped; that frame's results
     /// are invalid). Frames also check it on their own every few frames
     /// ([`Self::frame`] and [`Self::wait`] fail on it).
+    /// The loop-cap flag's word (gAcc, byte offset): a host's own readback reads it
+    /// with its step ([`crate::explicit_loop_cap_hit`] of the word), without waiting.
+    pub fn loop_cap_word(&self) -> (&wgpu::Buffer, u64) {
+        (&self.contact.acc, self.contact.cap_at)
+    }
+
     pub fn kernel_status(&self) -> Result<(), String> {
         let raw = self.read(&self.contact.acc);
         let w: &[i32] = bytemuck::cast_slice(&raw);

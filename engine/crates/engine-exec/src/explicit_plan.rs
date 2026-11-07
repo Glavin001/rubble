@@ -165,11 +165,11 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 /// step word) plus the frame's end, at the uniform offset alignment.
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
-/// Words of the kernel's Params (all 91 used; word 90 the loop budget; word 87 the parking brakes' base, word
-/// 88 the triangles' per-step geometry, word 89 the grid walk's pairs).
-pub const PARAM_WORDS: usize = 91;
+/// Words of the kernel's Params (word 87 the parking brakes' base, word 88 the loop
+/// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 padding).
+pub const PARAM_WORDS: usize = 92;
 /// Params word: the loop budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`).
-pub const W_LOOP_BUDGET: usize = 90;
+pub const W_LOOP_BUDGET: usize = 88;
 /// The loop budget's floor and ceiling (passes of one invocation in a frame).
 pub const LOOP_BUDGET_MIN: u64 = 1 << 22;
 pub const LOOP_BUDGET_MAX: u64 = 1 << 31;
@@ -180,7 +180,7 @@ pub const LOOP_BUDGET_MAX: u64 = 1 << 31;
 /// [`LOOP_BUDGET_MIN`]..=[`LOOP_BUDGET_MAX`]. A loop of a sound state never reaches it;
 /// a corrupt count stops there and fails the frame (the loop-cap flag).
 pub fn loop_budget(unit: u64, steps: u32) -> u32 {
-    // RUBBLE_LOOP_BUDGET (tests of the budget itself): a fixed budget instead.
+    // RUBBLE_LOOP_BUDGET (tests of the budget): a fixed budget instead.
     if let Some(b) = loop_budget_override() {
         return b;
     }
@@ -2043,9 +2043,11 @@ impl ExplicitUpload {
             // The awake-list flag (written per frame), then the parking brakes.
             0,
             brake_base,
+            // The loop budget (written per frame, FramePlanner::write_params), the
+            // triangles' step geometry, the grid walk's pairs, padding.
+            0,
             tri_geo,
             tri_pairs,
-            // The loop budget (written per frame, FramePlanner::write_params).
             0,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
@@ -2836,9 +2838,13 @@ pub fn explicit_loop_cap_hit(flag: i32) -> Result<(), String> {
     } else {
         format!("a kernel loop (number {flag} in its WGSL module, counting from 1)")
     };
+    // The flag names the highest stopped loop: past its own cap (EXPLICIT_LOOP_CAP passes,
+    // or a barrier loop's real maximum), or the first to find the frame's pass budget
+    // spent (the passes were taken by all the loops before it).
     Err(format!(
-        "{place} ran {EXPLICIT_LOOP_CAP} passes, its cap, and was stopped: that frame's results \
-         are invalid (a runaway loop: a corrupt count or bound)"
+        "{place} was stopped: at its cap ({EXPLICIT_LOOP_CAP} passes, or a barrier loop's \
+         maximum) or when the frame's pass budget ran out; that frame's results are invalid \
+         (a runaway loop: a corrupt count or bound)"
     ))
 }
 

@@ -7,6 +7,7 @@
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
   hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
+  showcaseLayout, brickRingLayout,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -63,6 +64,43 @@ export async function createVehicleTown(spec) {
   const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) });
   world.flags = solverFlags();
   return { world, layout: vehicleTownLayout(spec.houses ?? 0, spec.count ?? 4) };
+}
+
+/**
+ * The one-World showcase (`rubble::showcase_scene`): `spec` `{ vehicles: [{ truck } |
+ * { jbeam: [[name, text]], pc }] (cycled over the preset's cars), preset: 'house' |
+ * 'crates' | 'twoway' | 'convoy', count, speed, runUp, drag }` (or `truck`: one .truck
+ * vehicle). Returns the world and its layout (`showcaseLayout`).
+ */
+export async function createShowcase(spec) {
+  ready ??= init();
+  await ready;
+  const { truck, vehicles, ...rest } = spec;
+  const layout = showcaseLayout(rest);
+  const world = await WebWorld.createShowcase(spec);
+  world.flags = solverFlags();
+  return { world, layout };
+}
+
+/**
+ * The brick ring drive (`rubble::brick_ring_drive`): the 110k brick ring with drivable
+ * soft-body cars on raycast wheels in one World on its own device (spec as
+ * `WebWorld.createBrickRingDrive`), and its layout (`brickRingLayout`).
+ */
+export async function createBrickRingDrive(spec) {
+  ready ??= init();
+  await ready;
+  const { vehicles, ...rest } = spec;
+  const layout = brickRingLayout(rest);
+  const world = await WebWorld.createBrickRingDrive(spec);
+  world.flags = solverFlags();
+  return { world, layout };
+}
+
+/** The wasm, once loaded (pages that call its free functions before a world). */
+export async function loadWasm() {
+  ready ??= init();
+  await ready;
 }
 
 /**

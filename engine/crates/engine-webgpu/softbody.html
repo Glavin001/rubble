@@ -72,7 +72,8 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, FramePacer } from './rubble-world.mjs';
+    import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, FramePacer } from './rubble-world.mjs';
+    import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
@@ -157,22 +158,9 @@
     } else if (qs.get('mod')) {
       // ?mod=<folder url>: a BeamNG vehicle folder served with a files.json
       // (its files' paths): its .jbeam parts, a .pc (?pc= its name, else the
-      // first) and its .dae meshes (the crash lab draws its flexbodies).
-      const base = qs.get('mod').replace(/\/$/, '');
-      const list = await (await fetch(`${base}/files.json`)).json();
-      const text = async (f) => [f, await (await fetch(`${base}/${f}`)).text()];
-      const files = await Promise.all(list.filter((f) => f.endsWith('.jbeam')).map(text));
-      const pcName = qs.get('pc') ?? list.find((f) => f.endsWith('.pc'));
-      const pc = pcName && list.includes(pcName) ? (await text(pcName))[1] : undefined;
-      const meshes = await Promise.all(list.filter((f) => f.endsWith('.dae')).map(async (f) => [f, new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer())]));
-      const materials = await Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text));
-      // A glTF render model with weighted skins (Rubble's flexskin: gen2/gen3):
-      // the vehicle folder's .glb and .rskin.
-      const bin = async (f) => (f ? new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer()) : null);
-      const skinName = list.find((f) => f.endsWith('.rskin'));
-      const glbName = skinName && list.find((f) => f.endsWith('.glb') && f.includes('/'));
-      const [glb, skin] = await Promise.all([bin(glbName), bin(skinName)]);
-      importSrc = { kind: 'jbeam', files, pc, meshes, materials, base, list, label: base.split('/').pop(), glb, skin };
+      // first) and its .dae meshes (the crash lab draws its flexbodies), or a
+      // glTF render model with weighted skins (beamng-mod.mjs).
+      importSrc = await loadMod(qs.get('mod'), { pc: qs.get('pc') });
     } else if (qs.get('car') === 'import') {
       try { importSrc = JSON.parse(sessionStorage.getItem(IMPORT_KEY) || 'null'); } catch { importSrc = null; }
     }
@@ -1105,7 +1093,12 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
 @group(0) @binding(15) var<storage, read> xtris: array<vec4u>;
 @group(0) @binding(16) var<storage, read> xrecs: array<vec4u>;
 @group(0) @binding(17) var<storage, read> xbeams: array<vec4f>;
-fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xmisc[v].xyz); }
+// frame.opts.z: the frame's lead (FramePacer.lead, simulated seconds past the last
+// step): positions carried forward by their velocity (visual only).
+fn xpos(i: u32, v: u32) -> vec3f {
+  let p = xnodes[i * 3u].xyz + bitcast<vec3f>(xmisc[v].xyz);
+  return select(p, p + xnodes[i * 3u + 1u].xyz * frame.opts.z, frame.opts.z > 0.0);
+}
 // The collision skin: panels go dark with strain, a triangle past 1.8× its spawn
 // edges reads as torn and is dropped.
 @vertex fn vsXSkin(@builtin(vertex_index) vi: u32) -> Out {
@@ -1288,18 +1281,13 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // Or an imported JBeam vehicle's flexbodies and props (?mod=).
     let importVis = null;
     const bodyVisual = () => carKind === 'showcase' ? (() => { const b = showcaseBuilt(); b.visual.lod ??= [b.visualLod, b.visualFar]; return b.visual; })()
-      : (importVis ??= (() => { const spec = { jbeam: importSrc.files, pc: importSrc.pc, native: JBEAM_NATIVE, ...(RAYCAST ? { wheels: 'raycast' } : {}), materials: importSrc.materials ?? [] }; const r = importSrc.skin ? jbeamVisualSkinned(spec, importSrc.meshes, importSrc.glb, importSrc.skin) : jbeamVisual(spec, importSrc.meshes); console.log('flexbodies', r.report); window.__flexReport = r.report; r.visual.lod = r.visualLod ? [r.visualLod, r.visualFar] : []; loadBodyTextures(r.visual); return r.visual; })());
+      : (importVis ??= (() => { const r = modVisual(importSrc, { native: JBEAM_NATIVE, raycast: RAYCAST }); console.log('flexbodies', r.report); window.__flexReport = r.report; loadBodyTextures(r.visual); return r.visual; })());
     // An imported body's colour and data maps (normal, roughness, AO; decoded
     // in the wasm), uploaded once they arrive; until then it shades untextured.
     const loadBodyTextures = (vis) => {
       if (!importSrc.base || qs.get('tex') === '0') return;
-      const load = (names) => Promise.all(names.map(async (t) => {
-        const f = importSrc.list.find((x) => x.split('/').pop().toLowerCase() === t.toLowerCase());
-        if (!f) return null;
-        try { return decodeTexture(new Uint8Array(await (await fetch(`${importSrc.base}/${f}`)).arrayBuffer()), 1024); } catch { return null; }
-      }));
-      if (vis.textures?.length) load(vis.textures).then((layers) => bodyR.setTextures(layers, 1024));
-      if (vis.dataTextures?.length) load(vis.dataTextures).then((layers) => bodyR.setDataTextures(layers, 1024));
+      if (vis.textures?.length) modTextures(importSrc, vis.textures).then((layers) => bodyR.setTextures(layers, 1024));
+      if (vis.dataTextures?.length) modTextures(importSrc, vis.dataTextures).then((layers) => bodyR.setDataTextures(layers, 1024));
     };
     const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length || importSrc?.skin) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
     let bodyFor = { layout: null, pos: null }, bodyIds = [];
@@ -1922,7 +1910,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       frameF.set(vp, 0);
       frameF.set([...camEye, 0], 16);
       frameF.set([...LIGHT, 0], 20);
-      frameF.set([beamView ? 1 : 0, LAB && labR.opts.studio ? 1 : 0, 0, 0], 24);
+      frameF.set([beamView ? 1 : 0, LAB && labR.opts.studio ? 1 : 0, manual ? 0 : xLead, 0], 24);
       frameF.set(lightViewProj(camTarget), 28);
       frameF.set(mat4Inv(vp), 44);
       device.queue.writeBuffer(frameBuf, 0, frameF);
@@ -2106,9 +2094,9 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         // motion stands for (a frame a cap held short moves camera and subject
         // alike); otherwise as stepped, by the frame's wall time.
         const paced = !lab || (!lab.st.paused && lab.st.replay < 0);
-        // (The lab's renderer carries the nodes; the traffic and arena views draw
-        // the stepped state, their camera too.)
-        xLead = paced && lab ? pacer.lead() : 0;
+        // (The lab's gather carries the nodes forward, the page's own explicit
+        // skin and beams do in xpos: traffic and the arena.)
+        xLead = paced ? pacer.lead() : 0;
         // The orbit cameras' subject at the step on display, before the camera moves.
         lab?.followFocus(0, xLead);
         updateCamera(paced ? pacer.shownDt() : dt, false);

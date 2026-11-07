@@ -33,6 +33,8 @@ mod explicit_vehicles;
 /// The explicit vehicles' crash scene (soft vehicles into prefractured houses).
 #[cfg(feature = "stress")]
 pub mod explicit_scene;
+pub mod showcase_scene;
+pub mod brick_ring_drive;
 mod guidance;
 mod handles;
 mod host_state;
@@ -336,6 +338,10 @@ enum Extra {
     TerrainWatch,
     /// The explicit vehicles' asleep bits after this step (vehicle sleep).
     ExplicitSleep,
+    /// The explicit frame's loop-cap flag (gAcc) and the coupling passes' status word
+    /// after this step: nonzero fails the step.
+    ExplicitLoopCap,
+    CouplingStatus,
     /// The live surface's heights, for these views of the ground shape.
     TerrainSurface(ShapeId, Vec<engine_terrain::surface::SurfaceViewRange>),
     /// The surface pass's debris gather.
@@ -2339,6 +2345,14 @@ impl World {
                 }
                 extras.extend(motion::extras(&self.sim, &self.motion, casts));
                 if explicit_read.is_some() {
+                    // The runaway guards, every step: the frame's loop-cap flag and the
+                    // coupling's status (read with the step, no wait).
+                    if let Some(x) = self.explicit.as_ref() {
+                        let (buffer, offset) = x.gpu.loop_cap_word();
+                        extras.push(readback::Extra { kind: Extra::ExplicitLoopCap, buffer, offset, size: 4 });
+                        let (buffer, offset) = x.status_word();
+                        extras.push(readback::Extra { kind: Extra::CouplingStatus, buffer, offset, size: 4 });
+                    }
                     if let Some((buffer, offset, size)) = self.explicit.as_ref().and_then(|x| x.sleep_extra()) {
                         extras.push(readback::Extra {
                             kind: Extra::ExplicitSleep,
@@ -2871,6 +2885,17 @@ impl World {
                 Extra::ExplicitSleep => {
                     if let Some(x) = self.explicit.as_mut() {
                         explicit_sleep = x.sleep_changes(bytemuck::cast_slice(bytes));
+                    }
+                }
+                Extra::ExplicitLoopCap => {
+                    let flag: i32 = bytemuck::pod_read_unaligned(&bytes[..4]);
+                    engine_webgpu::explicit_loop_cap_hit(flag)
+                        .map_err(|e| anyhow::anyhow!("World step {step}: explicit vehicles: {e}"))?;
+                }
+                Extra::CouplingStatus => {
+                    let bits: u32 = bytemuck::pod_read_unaligned(&bytes[..4]);
+                    if let Some(x) = self.explicit.as_ref() {
+                        x.status_bits_error(bits).map_err(|e| anyhow::anyhow!("World step {step}: {e}"))?;
                     }
                 }
                 Extra::TerrainSurface(shape, views) => {

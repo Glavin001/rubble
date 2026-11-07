@@ -176,7 +176,7 @@ void sleepGroupEnd(uint off, uint k, uint lane, uint2 mask, uint steps)
     for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++)
         sleepMark(vvMember(off, m), ((m < 32u ? mask.x : mask.y) & (1u << (m & 31u))) != 0u);
     bool all = true;
-    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u); m < mStop; m++)
+    for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++)
     {
         bool reached = sleepSettle(vvMember(off, m), lane, steps, false);
         all = all && reached;
@@ -205,7 +205,7 @@ void explicit_beams_sleep_list(uint3 lid : SV_GroupThreadID)
     uint base = sleepHdr().x;
     uint list = sleepList();
     uint run = 0u;
-    for (uint c = 0u, cStop = EB_END_UNIFORM(c, (nv + 255u) / 256u, 1u); c < cStop; c++)
+    for (uint c = 0u, cStop = EB_END_UNIFORM(c, (nv + 255u) / 256u, 1u, EB_MAX_CHUNKS); c < cStop; c++)
     {
         uint v = 256u * c + lane;
         bool awake = v < nv && (gMisc[base + v].y & SLEEP_ASLEEP) == 0u;
