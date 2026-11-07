@@ -87,6 +87,8 @@ frame-locked, recorded with `brick-ring-drive-record.mjs`):
 - `brick-ring-drive-etk.mp4`: the ETK's 100 m run-up and the strike, from the chase, the
   wall's side and outside the ring, then the strike again ×4 slower from the wall's side and
   from outside;
-- `brick-ring-drive-etk2.mp4`: the same with two ETKs.
+- `brick-ring-drive-etk2.mp4`: the same with two ETKs;
+- `brick-ring-drive-sedan.mp4`: the authored sedan, `?drag=0`, at 99 km/h. This is the car
+  that runs in real time.
 
 Stills: `docs/media/brick-ring-drive/`.
