@@ -165,8 +165,12 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 /// step word) plus the frame's end, at the uniform offset alignment.
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
-/// Words of the kernel's Params (all 88 used; word 87 the parking brakes' base).
-pub const PARAM_WORDS: usize = 88;
+/// Words of the kernel's Params (all 89 used; word 87 the parking brakes' base, word
+/// 88 the triangles' per-step geometry).
+pub const PARAM_WORDS: usize = 89;
+/// gBeams records per self-collision triangle of its per-step geometry (the kernel's
+/// `TRI_GEO_RECS`, `triGeoFill`).
+pub const TRI_GEO_RECS: usize = 9;
 /// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
 /// `sleepRec`; after centred damping's word 84). The next word is the awake-list flag.
 pub const W_SLEEP: usize = 85;
@@ -1407,6 +1411,15 @@ impl ExplicitUpload {
         let grid_base = beams.len() as u32;
         beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
         let grid = vehicles.iter().any(|v| grid_cell(v) > 0.0) as u32;
+        // The self-collision triangles' geometry for the grid walk, written once a step
+        // (the kernel's triGeoFill; scratch): TRI_GEO_RECS records per triangle.
+        let tri_geo = if grid != 0 && total_tris > 0 {
+            let at = beams.len() as u32;
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_tris * TRI_GEO_RECS));
+            at
+        } else {
+            0
+        };
         debug_assert_eq!(nbr.len(), lists.len());
         let slot_base = lists.len() as u32;
         lists.extend(slots.iter().flatten());
@@ -1975,6 +1988,7 @@ impl ExplicitUpload {
             // The awake-list flag (written per frame), then the parking brakes.
             0,
             brake_base,
+            tri_geo,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
