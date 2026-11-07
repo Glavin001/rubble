@@ -43,7 +43,27 @@ node validate.mjs ../../scenes/vehicles/sedan/sedan.glb
 
 Look-dev helpers: `preview_body.py` (panels only, Workbench or Cycles) and
 `render_blend.py` (views of a built `.blend`; `--quick --wire` for wireframe;
-`at:x,y,z:dx,dy,dz` aims a close-up at a glTF-space point).
+`at:x,y,z:dx,dy,dz` aims a close-up at a glTF-space point; a `--views` list
+holding one separates views with `;`).
+
+### Matching photographs
+
+Reference photos are not committed; `refs/<design>/photos.json` lists their
+URLs and `fetch_refs.sh <design> <dir>` downloads them. Each view's json
+(`refs/mach1_1969/side.json`, `front34.json`, `rear34.json`) pairs photo pixels
+with model points (wheel hubs, tyre contacts) and holds `lines` traced off the
+photo.
+
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender -b ../../scenes/vehicles/mach1_1969/mach1_1969.blend \
+  --python compare.py -- <dir>/front34.jpg refs/mach1_1969/front34.json out/f.png --outdoor --lines
+```
+
+`compare.py` solves the photo's camera, renders the model from it (side by
+side and a 50/50 overlay) and, with `--lines`, draws the model's visible edges
+in cyan over the photo with the traced lines in yellow. `tools/zoom.py` crops
+and enlarges a photo with a pixel grid for tracing; `tools/backproject.py`
+turns pixels into rays from the solved camera, to place a feature in 3D.
 
 ## How a car is built
 

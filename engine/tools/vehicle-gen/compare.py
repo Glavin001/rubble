@@ -148,3 +148,56 @@ def save(arr, path):
 save(np.concatenate([ref, gap, rr], 1), out)
 save(0.5 * ref + 0.5 * rr, out.replace('.png', '_overlay.png'))
 print('wrote', out)
+
+# --- line drawing: the model's visible edges (Freestyle) in cyan and the
+# photo's traced lines in yellow, both over the photo ------------------------
+if '--lines' in argv:
+    sc.render.use_freestyle = True
+    sc.render.line_thickness_mode = 'ABSOLUTE'
+    sc.render.line_thickness = 1.6
+    sc.render.film_transparent = True
+    vl = sc.view_layers[0]
+    fs = vl.freestyle_settings
+    fs.crease_angle = np.radians(140)
+    ls = fs.linesets[0] if fs.linesets else fs.linesets.new('lines')
+    ls.select_silhouette = True
+    ls.select_border = True
+    ls.select_crease = True
+    ls.select_external_contour = True
+    if ls.linestyle is None:
+        ls.linestyle = bpy.data.linestyles.new('lines')
+    ls.linestyle.color = (0.0, 1.0, 1.0)
+    ls.linestyle.thickness = 1.6
+    # surfaces hold out (transparent) but still hide the lines behind them
+    hold = bpy.data.materials.new('_holdout')
+    hold.use_nodes = True
+    nt = hold.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    ho = nt.nodes.new('ShaderNodeHoldout')
+    mo = nt.nodes.new('ShaderNodeOutputMaterial')
+    nt.links.new(ho.outputs[0], mo.inputs['Surface'])
+    for ob in sc.objects:
+        if ob.type == 'MESH':
+            if ob.name.startswith('_floor'):
+                ob.hide_render = True
+                continue
+            for i in range(len(ob.material_slots)):
+                ob.material_slots[i].material = hold
+    sc.cycles.samples = 1
+    tmp2 = out + '.lines.png'
+    sc.render.filepath = tmp2
+    bpy.ops.render.render(write_still=True)
+    li = bpy.data.images.load(tmp2)
+    la = np.array(li.pixels[:]).reshape(H * 2, W * 2, 4)[::-1]
+    la = la.reshape(H, 2, W, 2, 4).mean((1, 3))
+    a = np.clip(la[:, :, 3:4] * 1.6, 0, 1)
+    comp = ref * (1 - a) + np.array([0.0, 1.0, 1.0]) * a
+    for L in spec.get('lines', {}).values():
+        L = np.asarray(L, float)
+        for p0, p1 in zip(L[:-1], L[1:]):
+            n = int(np.ceil(np.linalg.norm(p1 - p0))) + 1
+            for t in np.linspace(0, 1, n):
+                x, y = np.round(p0 + (p1 - p0) * t).astype(int)
+                comp[max(y - 1, 0):y + 1, max(x - 1, 0):x + 1] = (1.0, 0.85, 0.0)
+    save(comp, out.replace('.png', '_lines.png'))

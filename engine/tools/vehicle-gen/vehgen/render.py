@@ -1,4 +1,6 @@
-"""Neutral studio renders (Cycles): front 3/4, side, rear 3/4, top."""
+"""Neutral studio renders (Cycles): front 3/4, side, rear 3/4, top.
+VEHGEN_CPU=1 renders on the CPU (when another job holds the GPU)."""
+import os
 import bpy
 import numpy as np
 from mathutils import Vector
@@ -14,6 +16,8 @@ def studio(samples=96, res=(1600, 900)):
     sc.render.engine = 'CYCLES'
     try:
         prefs = bpy.context.preferences.addons['cycles'].preferences
+        if os.environ.get('VEHGEN_CPU'):
+            raise RuntimeError('CPU render requested')   # VEHGEN_CPU=1: leave the GPU alone
         prefs.compute_device_type = 'METAL'
         prefs.get_devices()
         for d in prefs.devices:
@@ -161,6 +165,8 @@ def outdoor(samples=96, res=(1600, 900), sun_elev=38.0, sun_rot=140.0):
     sc.render.engine = 'CYCLES'
     try:
         prefs = bpy.context.preferences.addons['cycles'].preferences
+        if os.environ.get('VEHGEN_CPU'):
+            raise RuntimeError('CPU render requested')   # VEHGEN_CPU=1: leave the GPU alone
         prefs.compute_device_type = 'METAL'
         prefs.get_devices()
         for d in prefs.devices:

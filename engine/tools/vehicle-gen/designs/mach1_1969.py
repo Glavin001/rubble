@@ -29,7 +29,7 @@ RIM_W = 7 * 0.0254
 WHEEL_Y = TYRE_D / 2
 
 # --- plan width -----------------------------------------------------------------
-_W = table([(2.32, 0.866), (2.24, 0.884), (2.05, 0.896), (1.37, 0.902),
+_W = table([(2.32, 0.885), (2.24, 0.897), (2.05, 0.900), (1.37, 0.902),
             (0.60, 0.902), (-0.70, 0.904), (-1.37, 0.906), (-1.90, 0.901),
             (-2.20, 0.892), (-2.44, 0.874)])
 _ZS = np.linspace(-2.5, 2.4, 50)
@@ -66,7 +66,7 @@ K = [
                         (0.585, 0.862), (-0.24, 0.872), (-0.715, 0.885), (-0.95, 0.908),
                         (-1.37, 0.922), (-1.77, 0.918), (-2.10, 0.910), (-2.45, 0.900)]),
     # 6 belt (side-glass sill, 0.93 m) / bonnet shut line / quarter top
-    key([(2.26, 0.600), (2.15, 0.615), (1.95, 0.690), (1.75, 0.762), (1.37, 0.786),
+    key([(2.26, 0.665), (2.15, 0.672), (1.95, 0.700), (1.75, 0.762), (1.37, 0.786),
          (0.60, 0.782), (0.40, 0.790), (-0.715, 0.800), (-1.37, 0.795), (-2.0, 0.780),
          (-2.45, 0.770)],
         [(2.26, 0.760), (2.10, 0.808), (1.75, 0.840), (1.37, 0.858), (0.60, 0.895),
@@ -163,22 +163,54 @@ VLINES = [0, 1, 2, 3, 4, 5, 5.33, 5.67, 6, 7, 8, 9]
 def front_z(x, y):
     x = np.abs(x)
     lean = 0.095 * np.clip((0.80 - y) / 0.40, 0, 1) ** 1.3
-    corner = 0.050 * (x / 0.87) ** 6
+    corner = 0.040 * (x / 0.905) ** 8      # square nose: corners roll only at the very edge
     vee = 0.012 * (1 - np.clip(x / 0.85, 0, 1) ** 2)
-    return 2.26 - lean - corner + vee
+    w = lamp_tunnel(x, y)
+    return 2.26 - lean - corner * (1 - w) + vee - 0.165 * w
 
 
-def rear_z(x, y):
+def lamp_tunnel(x, y):
+    """The outer headlamps sit at the back of tunnels in the fender ends,
+    open to the side and under a brow; the lamp face is ~0.17 m behind the
+    grille (located from the front 3/4 photograph's solved camera)."""
     x = np.abs(x)
-    dish = 0.022 * (1 - np.clip(x / 0.80, 0, 1) ** 2)      # concave tail panel
+    # the inner wall is the grille opening's edge (x 0.665, the bonnet shut
+    # line): no fender mesh edge then crosses it, and a separate wall panel
+    # closes it (parts())
+    px = smoothstep(0.620, 0.664, x)
+    py = smoothstep(0.497, 0.532, y) * smoothstep(0.752, 0.716, y)
+    return px * py
+
+
+def rear_z_body(x, y):
+    """The tail's outer envelope: quarter-panel ends, lid lip and bumper line."""
+    x = np.abs(x)
     tuck = 0.035 * np.clip((0.52 - y) / 0.18, 0, 1)
+    dish = 0.022 * (1 - np.clip(x / 0.80, 0, 1) ** 2)      # lid lip and bumper bow
     corner = 0.110 * np.clip(x / 0.88, 0, 1.05) ** 4          # corners roll round
     return -2.43 + dish + tuck + corner
 
 
-HEADLIGHT = dict(x=0.748, y=0.622, R=0.085)
-HEADLIGHT_INNER = dict(x=0.500, y=0.615, R=0.058)
-TAILLIGHT = dict(x0=0.40, x1=0.64, y0=0.690, y1=0.835)
+def tail_recess(x, y):
+    """The tail panel is dished ~0.09 m into that envelope, between the
+    quarter-panel ends and under the boot lid's lip, which puts the lamp
+    groups on z = -2.30 (located from the rear 3/4 photograph's solved
+    camera: the two groups mirror about the fuel cap only on that plane)."""
+    x = np.abs(x)
+    px = smoothstep(0.88, 0.72, x)
+    py = smoothstep(0.52, 0.64, y) * smoothstep(0.915, 0.83, y)
+    return 0.090 * px * py
+
+
+def rear_z(x, y):
+    return rear_z_body(x, y) + tail_recess(x, y)
+
+
+# four lamps of one size (measured off a head-on photograph): the outer pair
+# in the fender ends, the inner pair inside the grille surround
+HEADLIGHT = dict(x=0.790, y=0.622, R=0.088)
+HEADLIGHT_INNER = dict(x=0.535, y=0.620, R=0.068)
+TAILLIGHT = dict(x0=0.400, x1=0.685, y0=0.650, y1=0.800)
 GRILLE_X = 0.62
 
 
@@ -370,19 +402,19 @@ def parts(cb):
             mk['wheel_center_' + tag + s] = (c, (sg, 0, 0))
 
     # headlamps: outer in the fender ends, inner in the grille
-    zg = float(front_z(np.array([0.60]), np.array([0.65]))[0]) - 0.040
+    zg = float(front_z(np.array([0.60]), np.array([0.65]))[0]) - 0.045
     for s, sg in (('L', 1), ('R', -1)):
         hl = HEADLIGHT
         zs = float(front_z(np.array([hl['x']]), np.array([hl['y']]))[0])
         nrm = P.graph_normal(front_z, hl['x'], hl['y'], 1) * [sg, 1, 1]
         # the lamp sits at the bottom of a scooped bucket under the fender brow
-        DEEP = 0.042
+        DEEP = 0.020
         cen = np.array([sg * hl['x'], hl['y'], zs]) - nrm * DEEP
         l1, h1 = P.round_lamp(cen, hl['R'] - 0.020, tint=CLEAR, axis=nrm)
         Rt = P.rot_to(nrm)
         rings = []
-        for t, rr, dd in ((0.0, hl['R'] - 0.003, 0.007), (0.5, hl['R'] - 0.007, 0.024),
-                          (1.0, hl['R'] - 0.012, DEEP - 0.010)):
+        for t, rr, dd in ((0.0, hl['R'] - 0.003, 0.003), (0.5, hl['R'] - 0.006, 0.007),
+                          (1.0, hl['R'] - 0.010, 0.011)):
             ring = []
             for a_ in np.linspace(0, 2 * np.pi, 49)[:-1]:
                 off = Rt @ np.array([0.0, rr * np.cos(a_), rr * np.sin(a_)])
@@ -396,10 +428,26 @@ def parts(cb):
         if np.dot(cn, nrm) < 0:
             bucket.flip()
         extras.setdefault('fender_F' + s, Mesh()).add(bucket)
+        # the tunnel's inner wall, from its floor forward to behind the
+        # grille surround
+        ys = np.linspace(0.497, 0.752, 60)
+        zb = front_z(np.full(len(ys), 0.665), ys)
+        zf = np.full(len(ys), zg - 0.008)
+        ok = zf - zb > 0.025
+        ys = np.linspace(ys[ok][0], ys[ok][-1], 11)
+        zb = front_z(np.full(len(ys), 0.665), ys)
+        zf = np.full(len(ys), zg - 0.008)
+        tt = np.linspace(0, 1, 4)
+        Pw = np.stack([np.stack([np.full(len(tt), sg * 0.654), np.full(len(tt), y_), zb_ + (zf_ - zb_) * tt], 1)
+                       for y_, zb_, zf_ in zip(ys, zb, zf)])
+        wall = grid(Pw, mat='paint')
+        if sg < 0:
+            wall.flip()
+        extras['fender_F' + s].add(wall)
         hi = HEADLIGHT_INNER
         l2, h2 = P.round_lamp((sg * hi['x'], hi['y'], zg + 0.020), hi['R'], tint=CLEAR, depth=0.014)
         # side markers: amber at the front of the fender, red at the tail
-        fm, fn = P.surface_point(tube, 2.06, 0.560, sg)
+        fm, fn = P.surface_point(tube, 1.97, 0.560, sg)
         mk_ = rbox((0, 0, 0), (0.004, 0.016, 0.034), 0.003, 1, 'lamp_lens')
         mk_.transform(P.rot_to(fn) @ rot_y(0), fm + fn * 0.005)
         mk_.tint(AMBER)
@@ -409,7 +457,7 @@ def parts(cb):
     # grille: black egg-crate in a thin bright surround, recessed between the
     # fender ends, closed behind by a back plate
     g = Mesh()
-    gx, gy0, gy1 = 0.584, 0.495, 0.735
+    gx, gy0, gy1 = 0.652, 0.495, 0.735
     loop = np.array([[gx, gy0], [gx, gy1], [-gx, gy1], [-gx, gy0]])
     from vehgen.mesh import rrect as _rr
     outline = _rr(2 * gx, gy1 - gy0, 0.035, 5)
@@ -424,7 +472,7 @@ def parts(cb):
         g.add(box((0, y, zg - 0.018), (0.43, 0.0022, 0.022), 'trim_black'))
     # solid black end panels round the inner lamps
     for sg in (1, -1):
-        g.add(box((sg * 0.505, (gy0 + gy1) / 2, zg - 0.006), (0.070, (gy1 - gy0) / 2 - 0.010, 0.004), 'trim_black'))
+        g.add(box((sg * 0.545, (gy0 + gy1) / 2, zg - 0.006), (0.100, (gy1 - gy0) / 2 - 0.010, 0.004), 'trim_black'))
     out['grille'] = g
 
     # front bumper: chrome blade wrapping round to the wheel openings, painted
@@ -449,18 +497,27 @@ def parts(cb):
     k = len(vpath) // 8
     bf.add(orient_outward(sweep(vpath[k:-k] * [0.97, 1, 1], csec, mat='trim_black', up=(0, 1, 0))))
     out['bumper_front'] = bf
+    # parking lamps: wide amber lenses in the valance just under the blade
+    for s, sg in (('L', 1), ('R', -1)):
+        kx = np.argmin(np.abs(vpath[:, 0] - sg * 0.582))
+        zv = vpath[kx, 2]
+        pl = rbox((sg * 0.582, 0.366, zv + 0.017), (0.072, 0.022, 0.004), 0.007, 1, 'lamp_lens')
+        pl.tint(AMBER)
+        out['headlight_%s_lens' % s].add(pl)
+        out['headlight_%s_housing' % s].add(
+            rbox((sg * 0.582, 0.366, zv + 0.009), (0.078, 0.027, 0.0035), 0.008, 1, 'trim_black'))
     for k_, x in enumerate((-0.62, -0.30, 0.30, 0.62)):
         zz = float(front_z(np.array([abs(x)]), np.array([yb]))[0])
         mk['bolt_bumper_front_%d' % (k_ + 1)] = ((x, yb, zz - 0.004), (1, 0, 0))
 
     # rear bumper
     yr = 0.600
-    ols = [full(P.plan_outline(tube, rear_z, y, -1, -2.4, side_len=0.18)) for y in (0.56, 0.60, 0.64)]
+    ols = [full(P.plan_outline(tube, rear_z_body, y, -1, -2.4, side_len=0.15)) for y in (0.56, 0.60, 0.64)]
     pr = P.fit_path(ols, 0.023, -1, step=0.018)[::-1]
     path = np.c_[pr[:, 0], np.full(len(pr), yr), pr[:, 1]]
     out['bumper_rear'] = orient_outward(sweep(path, rrect(0.040, 0.088, 0.018, 4), mat='chrome', up=(0, 1, 0)))
     for k_, x in enumerate((-0.62, -0.30, 0.30, 0.62)):
-        zz = float(rear_z(np.array([abs(x)]), np.array([yr]))[0])
+        zz = float(rear_z_body(np.array([abs(x)]), np.array([yr]))[0])
         mk['bolt_bumper_rear_%d' % (k_ + 1)] = ((x, yr, zz + 0.004), (1, 0, 0))
 
     # taillamps: three lenses each side in a bright bezel, a reflector box behind
@@ -490,9 +547,9 @@ def parts(cb):
                                           up=(0, 0, 1))))
             hous.add(box((sg * x, ym, zk + 0.032), (lw / 2 - 0.006, lh / 2 - 0.006, 0.003), 'lamp_emissive'))
         lens.tint(RED)
-        rm, rn = P.surface_point(tube, -2.20, 0.690, sg)
-        mr = rbox((0, 0, 0), (0.004, 0.014, 0.030), 0.003, 1, 'lamp_lens')
-        mr.transform(P.rot_to(rn), rm + rn * 0.005)
+        rm, rn = P.surface_point(tube, -2.12, 0.605, sg)
+        mr = rbox((0, 0, 0), (0.004, 0.016, 0.040), 0.003, 1, 'lamp_lens')
+        mr.transform(P.rot_to(rn), rm + rn * 0.007)
         lens.add(mr.tint(RED))
         out['taillight_%s_lens' % s] = lens
         out['taillight_%s_housing' % s] = hous
@@ -703,12 +760,20 @@ def parts(cb):
     for sg in (1, -1):
         pts = [(sg * 0.30, 0.34, 1.32), (sg * 0.33, 0.25, 1.13), (sg * 0.31, 0.181, 0.98), (sg * 0.30, 0.178, 0.30),
                (sg * 0.30, 0.175, -0.60), (sg * 0.36, 0.185, -1.15), (sg * 0.40, 0.20, -1.45),
-               (sg * 0.44, 0.22, -1.85), (sg * 0.45, 0.24, -2.20), (sg * 0.45, 0.245, -2.36)]
+               (sg * 0.44, 0.22, -1.85), (sg * 0.50, 0.30, -2.10), (sg * 0.57, 0.415, -2.25),
+               (sg * 0.58, 0.425, -2.355)]
         ex.add(P.tube_pipe(pts, 0.026, n=5))
         ex.add(rbox((sg * 0.30, 0.177, -0.85), (0.10, 0.026, 0.22), 0.02, 2, 'metal_bare'))
-        tip = closed_lathe([(0.033, 0.0), (0.036, 0.0), (0.036, -0.10), (0.033, -0.10)], 20, 'chrome')
-        tip.transform(rot_y(np.pi / 2), (sg * 0.45, 0.245, -2.33))
-        ex.add(tip)
+        # the pipes end behind the rear valance; a bright bezel and a dark
+        # opening on its face mark the cut-outs they leave through (rear 3/4
+        # photo), so no pipe pierces the panel
+        ce = np.array([sg * 0.58, 0.425, float(rear_z(np.array([0.58]), np.array([0.425]))[0])])
+        ne = P.graph_normal(rear_z, 0.58, 0.425, -1) * [sg, 1, 1]
+        ring = closed_lathe([(0.031, 0.0), (0.041, 0.0), (0.041, 0.003), (0.031, 0.003)], 32, 'chrome')
+        hole = closed_lathe([(0.002, 0.0), (0.0305, 0.0), (0.0305, 0.0015), (0.002, 0.0015)], 32, 'trim_black')
+        for m_ in (ring, hole):
+            m_.transform(P.rot_to(ne), ce + ne * 0.0015)
+            ex.add(m_)
     out['exhaust'] = ex
     for tag, zc, R in (('F', ZF_AX, 0.360), ('R', ZR_AX, 0.372)):
         for s, sg in (('L', 1), ('R', -1)):

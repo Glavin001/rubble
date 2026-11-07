@@ -29,7 +29,9 @@ def opt(name, default=None):
 out_dir = opt('--out', os.path.join(REPO, 'engine', 'scenes', 'vehicles', design))
 samples = int(opt('--samples', '128'))
 do_render = '--no-render' not in argv
-views = (opt('--views', 'front34,side,rear34,top')).split(',')
+_v = opt('--views', 'front34,side,rear34,top')
+# 'at:' views carry commas, so a list holding one is separated by ';'
+views = _v.split(';') if 'at:' in _v else _v.split(',')
 os.makedirs(out_dir, exist_ok=True)
 
 from vehgen import assemble, blender, render, uvpack  # noqa: E402

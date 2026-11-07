@@ -397,6 +397,7 @@ alltrees = {k: BVHTree.FromPolygons([tuple(x) for x in parts[k]['p']], [tuple(x)
 names = sorted(parts)
 bb = {k: (parts[k]['p'].min(0) - 0.002, parts[k]['p'].max(0) + 0.002) for k in names}
 cross = {}
+where_cross = {}
 for i, a_ in enumerate(names):
     for b_ in names[i + 1:]:
         if np.any(bb[a_][1] < bb[b_][0]) or np.any(bb[b_][1] < bb[a_][0]):
@@ -404,8 +405,12 @@ for i, a_ in enumerate(names):
         ov = alltrees[a_].overlap(alltrees[b_])
         if ov:
             cross[f'{a_}/{b_}'] = len(ov)
+            # where: centroid of the crossing triangles of the first part
+            ta = np.array([i_ for i_, _ in ov])
+            where_cross[f'{a_}/{b_}'] = np.round(parts[a_]['p'][parts[a_]['t'][ta]].mean((0, 1)), 2).tolist()
+top_cross = sorted(cross.items(), key=lambda x: -x[1])[:12]
 row('no part pairs cross (any depth)', not cross,
-    f'{len(cross)} pairs: ' + str(dict(sorted(cross.items(), key=lambda x: -x[1])[:12])))
+    f'{len(cross)} pairs: ' + str({k: (n, where_cross[k]) for k, n in top_cross}))
 
 # -- UV0 on painted panels --------------------------------------------------------------------
 res = 2048
