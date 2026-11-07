@@ -46,6 +46,14 @@ Look-dev helpers: `preview_body.py` (panels only, Workbench or Cycles) and
 `at:x,y,z:dx,dy,dz` aims a close-up at a glTF-space point; a `--views` list
 holding one separates views with `;`).
 
+Showcase video: `showcase.py` circles the car once in the studio set and
+encodes an mp4 with ffmpeg (frames kept beside it; a rerun resumes).
+
+```bash
+VEHGEN_CPU=1 /Applications/Blender.app/Contents/MacOS/Blender -b ../../scenes/vehicles/mach1_1969/mach1_1969.blend \
+  --python showcase.py -- out/mach1_1969_showcase.mp4 --seconds 10 --samples 32
+```
+
 ### Matching photographs
 
 Reference photos are not committed; `refs/<design>/photos.json` lists their
