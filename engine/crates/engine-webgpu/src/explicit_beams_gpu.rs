@@ -41,6 +41,10 @@ pub struct ExplicitBeamsGpu {
     /// ([`crate::ComputeSpec::deferred`]).
     frame: std::sync::OnceLock<(wgpu::ComputePipeline, wgpu::BindGroup)>,
     frame_module: &'static str,
+    /// Surface contact split from the frame ([`Kernel::FrameSeg`], [`Kernel::Surf`]),
+    /// created at first use; its frame module.
+    split: std::sync::OnceLock<Split>,
+    split_module: &'static str,
     params: wgpu::Buffer,
     nodes: wgpu::Buffer,
     beams: wgpu::Buffer,
@@ -216,6 +220,67 @@ fn wide_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
     ]
 }
 
+/// The split frame's bind group layout entries ([`Kernel::FrameSeg`], [`Kernel::Surf`]):
+/// the wide passes' without their vehicle table (binding 0: the segment's parameter
+/// copy, by the dynamic offset).
+fn split_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    let mut e = wide_entries();
+    e.retain(|x| x.binding != BIND_TABLE);
+    e
+}
+
+/// Whether hosts run surface contact split from the frame (on unless
+/// `RUBBLE_SURFACE_SPLIT=0`, a measurement: the frame with the pass in it).
+pub fn surface_split_default() -> bool {
+    std::env::var("RUBBLE_SURFACE_SPLIT").as_deref() != Ok("0")
+}
+
+/// The split frame's pipelines and bind group ([`FramePlanner::set_surface_split`]).
+struct Split {
+    frame: wgpu::ComputePipeline,
+    surf: Vec<wgpu::ComputePipeline>,
+    group: wgpu::BindGroup,
+}
+
+impl Split {
+    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], frame_module: &str) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("explicit-beams-split"),
+            entries: &split_entries(),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("explicit-beams-split"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipe = |module_name: &str, entry: &str| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(module_name),
+                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(module_name)).into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(module_name),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let frame = pipe(frame_module, plan::FRAME_ENTRY);
+        let surf = plan::SURF_PASSES.iter().map(|&(m, e)| pipe(m, e)).collect();
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams-split"),
+            layout: &layout,
+            entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 0 { params_window(&bufs[0]) } else { bufs[i].as_entire_binding() },
+            }),
+        });
+        Self { frame, surf, group }
+    }
+}
+
 /// A status read: its staging buffer and its map state (0 copied, not yet mapped;
 /// 1 map requested; 2 mapped; 3 map failed).
 struct StatusRead {
@@ -273,6 +338,7 @@ fn module_wgsl(name: &str) -> &'static str {
             .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
             .chain(crate::EXPLICIT_BEAMS_NOSURF.iter())
             .chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter())
+            .chain(crate::EXPLICIT_BEAMS_SURF_SPLIT.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| *w)
             .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
@@ -467,6 +533,8 @@ fn kernel_name(cmd: &Cmd) -> &'static str {
         Kernel::Vv(_) => "explicit vv group plan",
         Kernel::Wide(_) => "explicit wide",
         Kernel::Sleep => "explicit sleep list",
+        Kernel::FrameSeg => "explicit frame segment",
+        Kernel::Surf(_) => "explicit surface pass",
     }
 }
 
@@ -496,16 +564,34 @@ impl ExplicitBeamsGpu {
         let layout = ExplicitUpload::new(vehicles, coupling).layout;
         let (aero, lanes, surface) = (layout.aero, layout.lanes, layout.surface);
         let u = crate::uniformize_workgroup_lanes;
-        let mut specs = vec![crate::ComputeSpec {
-            label: "explicit_beams_frame",
-            module: Kernel::Frame.module_for(aero, lanes, surface),
-            wgsl: u(module_wgsl(Kernel::Frame.module_for(aero, lanes, surface))),
-            entry: plan::FRAME_ENTRY,
-            layout: None,
-            // More than one vehicle: the contact kernels run while contact is on; the
-            // plain frame only once it is turned off (created at first use).
-            deferred: vehicles.len() > 1,
-        }];
+        // More than one vehicle: the contact kernels run while contact is on; the
+        // plain frame only once it is turned off (created at first use).
+        let deferred = vehicles.len() > 1;
+        let mut specs = if surface && surface_split_default() {
+            // Surface contact split from the frame: its segments' module and the
+            // surface pass's pipelines (Split::new's descriptors).
+            let seg = Kernel::FrameSeg.module(aero, lanes);
+            std::iter::once((seg, plan::FRAME_ENTRY))
+                .chain(plan::SURF_PASSES.iter().copied())
+                .map(|(module, entry)| crate::ComputeSpec {
+                    label: module,
+                    module,
+                    wgsl: u(module_wgsl(module)),
+                    entry,
+                    layout: Some(split_entries()),
+                    deferred,
+                })
+                .collect()
+        } else {
+            vec![crate::ComputeSpec {
+                label: "explicit_beams_frame",
+                module: Kernel::Frame.module_for(aero, lanes, surface),
+                wgsl: u(module_wgsl(Kernel::Frame.module_for(aero, lanes, surface))),
+                entry: plan::FRAME_ENTRY,
+                layout: None,
+                deferred,
+            }]
+        };
         if layout.wide_ok {
             specs.extend(plan::WIDE_PASSES.iter().map(|&entry| crate::ComputeSpec {
                 label: entry,
@@ -628,6 +714,7 @@ impl ExplicitBeamsGpu {
             next.clone(),
         ];
         let mut planner = FramePlanner::new(&layout);
+        planner.set_surface_split(surface_split_default());
         if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
             planner.set_sleep_listing(false);
         }
@@ -637,6 +724,8 @@ impl ExplicitBeamsGpu {
             queue: queue.clone(),
             frame: std::sync::OnceLock::new(),
             frame_module,
+            split: std::sync::OnceLock::new(),
+            split_module: Kernel::FrameSeg.module(aero, lanes),
             params,
             nodes,
             beams,
@@ -666,11 +755,21 @@ impl ExplicitBeamsGpu {
             sleep_grab: None,
             sleep_wake: Default::default(),
         };
-        // One vehicle runs the plain frame from the first frame on.
+        // One vehicle runs the plain frame (or, with surface contact, the split one)
+        // from the first frame on.
         if one {
-            gpu.frame_pipe();
+            if gpu.planner.split_frames(true) {
+                gpu.split_pipes();
+            } else {
+                gpu.frame_pipe();
+            }
         }
         gpu
+    }
+
+    /// The split frame's pipelines (see `split`).
+    fn split_pipes(&self) -> &Split {
+        self.split.get_or_init(|| Split::new(&self.device, &self.bufs, self.split_module))
     }
 
     /// The plain frame's pipeline and bind group, created at first use (see `frame`).
@@ -1435,6 +1534,15 @@ impl ExplicitBeamsGpu {
                 let p = c.pipes.as_ref().expect("explicit beams: the sleep list for one vehicle");
                 pass.set_bind_group(0, &c.plan_group, &[]);
                 pass.set_pipeline(&p.sleep);
+            }
+            Kernel::FrameSeg | Kernel::Surf(_) => {
+                let s = self.split_pipes();
+                let Cmd::Dispatch { param_copy, .. } = *cmd else { unreachable!() };
+                pass.set_pipeline(match kernel {
+                    Kernel::Surf(i) => &s.surf[i],
+                    _ => &s.frame,
+                });
+                pass.set_bind_group(0, &s.group, &[param_copy * PARAM_STRIDE as u32]);
             }
             Kernel::Wide(i) => {
                 let w = self.wide.as_ref().expect("explicit beams: wide passes not built");
@@ -2228,6 +2336,10 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
         out.push((n.to_string(), entry, u(w)));
     }
     out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
+    for (n, w) in crate::EXPLICIT_BEAMS_SURF_SPLIT.iter() {
+        let entry = plan::SURF_PASSES.iter().find(|(m, _)| m == n).map_or(plan::FRAME_ENTRY, |(_, e)| *e);
+        out.push((n.to_string(), entry, u(w)));
+    }
     out
 }
 

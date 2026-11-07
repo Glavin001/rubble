@@ -710,6 +710,40 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         )?;
         explicit_post(&out)?;
     }
+    // A fleet with surface contact on the frame modules (no contact groups): the frame
+    // in segments, a step each (EB_FRAME_SEG, `<module>_seg`), with the surface pass
+    // as its own small pipelines between them (EB_SURF_PIPE: the prep, then per kind
+    // its find and its apply; engine_exec::explicit_plan::Kernel::FrameSeg, Surf). A
+    // browser compiles these in seconds; the frame with the pass in it took minutes.
+    let segs: [(&str, &[(&str, &str)]); 4] = [
+        ("explicit_beams_seg", &[W]),
+        ("explicit_beams_wide_seg", &[W, L512]),
+        ("explicit_beams_aero_seg", &[W, L256, AERO]),
+        ("explicit_beams_aero_wide_seg", &[W, L512, AERO]),
+    ];
+    let mut jobs: Vec<(String, &str, Vec<(&str, &str)>)> = segs
+        .iter()
+        .map(|(name, defines)| {
+            let mut d = defines.to_vec();
+            d.push(("EB_FRAME_SEG", "1"));
+            (name.to_string(), F, d)
+        })
+        .collect();
+    jobs.push(("explicit_surface_prep".into(), "explicit_surface_prep", vec![W, ("EB_SURF_PIPE", "1")]));
+    for (kind, tag) in [("1", "tri"), ("2", "seg"), ("3", "point"), ("4", "pair")] {
+        for phase in ["find", "apply"] {
+            jobs.push((
+                format!("explicit_surface_{phase}_{tag}"),
+                if phase == "find" { "explicit_surface_find" } else { "explicit_surface_apply" },
+                vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", kind)],
+            ));
+        }
+    }
+    for (name, entry, defines) in &jobs {
+        let out = wgsl_dir.join(format!("{name}.wgsl"));
+        compile_with_defines(&explicit_beams_source(slang_root), entry, SlangTarget::Wgsl, &out, &[], defines)?;
+        explicit_post(&out)?;
+    }
     // The frozen baseline of the explicit-beams kernel (a test oracle,
     // `explicit_beams_baseline.slang`): every frame-entry variant and the plan passes
     // as `wgsl/explicit_baseline_*.wgsl`, plus the race-probe variants (`EB_RACE_PROBE`).

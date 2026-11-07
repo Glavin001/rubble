@@ -91,6 +91,24 @@ pub const EXPLICIT_BEAMS_NOSURF: [(&str, &str); 16] = [
     ("explicit_beams_contact_big_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_nosurf.wgsl"))),
     ("explicit_beams_contact_big_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_wide_nosurf.wgsl"))),
 ];
+/// Surface contact split from the frame (`engine_exec::explicit_plan::Kernel::FrameSeg`,
+/// `Kernel::Surf`): the frame in segments at its four variants (`EB_FRAME_SEG`), then the
+/// surface pass's pipelines (`EB_SURF_PIPE`, `SURF_PASSES` order).
+pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
+    ("explicit_beams_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_seg.wgsl"))),
+    ("explicit_beams_wide_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_seg.wgsl"))),
+    ("explicit_beams_aero_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_seg.wgsl"))),
+    ("explicit_beams_aero_wide_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide_seg.wgsl"))),
+    ("explicit_surface_prep", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_prep.wgsl"))),
+    ("explicit_surface_find_tri", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_tri.wgsl"))),
+    ("explicit_surface_find_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_seg.wgsl"))),
+    ("explicit_surface_find_point", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_point.wgsl"))),
+    ("explicit_surface_find_pair", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_pair.wgsl"))),
+    ("explicit_surface_apply_tri", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_tri.wgsl"))),
+    ("explicit_surface_apply_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_seg.wgsl"))),
+    ("explicit_surface_apply_point", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_point.wgsl"))),
+    ("explicit_surface_apply_pair", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_pair.wgsl"))),
+];
 /// The build's WGSL directory (native tests read the frozen baseline kernel,
 /// `explicit_baseline_*.wgsl`, from it at run time).
 #[doc(hidden)]

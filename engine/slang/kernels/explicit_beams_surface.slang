@@ -1118,6 +1118,13 @@ uint surfaceOn() { return 0u; }
 uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 #endif
 
+#if defined(EB_FRAME_SEG) || defined(EB_SURF_PIPE)
+// A frame in segments with the surface pass as its own pipelines
+// (explicit_beams_surface_pipes.slang): per vehicle one gMisc record, the wide passes'
+// (unused while the frame runs per vehicle, and the wide passes have no surface contact).
+uint segRec(uint v) { return gP.wideMisc + 1u + v; }
+#endif
+
 // Step's surface pass of vehicle v (uniform `on`), after its self-collision and
 // before its slide nodes (parity: the step's): the barrier, the snapshot (and the casts'
 // gathering when a proxy is fast, and the proxies' bounds on the pair path), the listing
@@ -1128,8 +1135,9 @@ uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 groupshared uint gsUniformSurf;
 void surfaceStep(uint v, uint lane, uint on, uint parity)
 {
-#ifdef EB_NO_SURFACE
-    // Compiled out (on is 0 in this module's uploads: the pass returns here).
+#if defined(EB_NO_SURFACE) || defined(EB_FRAME_SEG)
+    // Compiled out (EB_NO_SURFACE: on is 0 in this module's uploads, the pass returns
+    // here; EB_FRAME_SEG: the pass runs as its own pipelines between the segments).
     return;
 #else
 #ifdef EB_ABLATE

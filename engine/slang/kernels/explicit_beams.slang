@@ -4784,6 +4784,8 @@ void contactGroup(uint g, uint lane);
 #include "explicit_beams_surface.slang"
 // Vehicle sleep (engine_softbody::explicit_sleep).
 #include "explicit_beams_sleep.slang"
+// The surface pass as its own pipelines (EB_SURF_PIPE modules only).
+#include "explicit_beams_surface_pipes.slang"
 
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
@@ -4842,6 +4844,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint4 aero1 = gStatic[gP.aeroBase + v * 3u + 1u];
     uint4 aero2 = gStatic[gP.aeroBase + v * 3u + 2u];
     // The wing break check, once per frame on the positions before the rebase.
+#ifdef EB_FRAME_SEG
+    if (gP.pad2 == 0u)
+#endif
     {
         float3 o = asfloat(gMisc[v].xyz);
         for (uint w = lane, wStop = EB_END(w, aero0.y, LANES); w < wStop; w += LANES) wingCheck(aero0.x + w, o);
@@ -4851,7 +4856,12 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     // Origin rebase: every lane reads node 0 before any lane moves it.
     float3 first = gNodes[nodeOff * 3u].xyz;
     sync();
+#ifdef EB_FRAME_SEG
+    // A frame in segments (EB_FRAME_SEG): the rebase in the first only.
+    if (gP.pad2 == 0u && length(first) > REBASE_RADIUS)
+#else
     if (length(first) > REBASE_RADIUS)
+#endif
     {
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
         {
@@ -4871,7 +4881,12 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint stepBase = misc.w;
     if (lane == 0u)
     {
+#ifdef EB_FRAME_SEG
+        // A later segment: the hit flag the last one and the surface pipelines left.
+        gsHit = gP.pad2 == 0u ? 1u : gMisc[segRec(v)].x;
+#else
         gsHit = 1u;
+#endif
         gsTestedCount[0].store(0u);
         gsTestedCount[1].store(0u);
         // Self-collision hits or pending beams possible (selfApply's barriers).
@@ -4901,7 +4916,27 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint driveOn = gsUniformDrive;
     uint surfOn = surfaceOn();
 
+#ifdef EB_FRAME_SEG
+    // Segment k (gP.pad2) of a frame whose surface pass runs as its own pipelines
+    // between segments: step k-1's rest after its surface pass (the slide nodes and the
+    // step's closing barrier), then step k up to its surface pass. The last segment
+    // (k = steps) runs the frame's end.
+    if (gP.pad2 > 0u)
+    {
+#ifdef EB_AERO
+        if ((flagsV & FLAG_SLIDES) != 0u)
+        {
+            uint parity = (stepBase + gP.pad2 - 1u) & 1u;
+            uint count = min(aero2.y, gP.slideTotal - min(aero2.x, gP.slideTotal));
+            for (uint k = lane, kStop = EB_END(k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, origin, groupOff, parity);
+        }
+#endif
+        sync();
+    }
+    for (uint s = gP.pad2, sStop = min(gP.pad2 + 1u, gP.steps); s < sStop; s++)
+#else
     for (uint s = 0u, sStop = EB_END(s, gP.steps, 1u); s < sStop; s++)
+#endif
     {
         coupleStep(v, lane, s, coupleOn);
         driveStep(v, lane, s, driveOn);
@@ -5144,6 +5179,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parity);
         }
         surfaceStep(v, lane, surfOn, parity);
+#ifdef EB_FRAME_SEG
+        // The surface pipelines next; the rest of this step opens the next segment.
+        continue;
+#endif
 #ifdef EB_AERO
         // Slide nodes, after this step's beams and self-collision, a lane each.
         if ((flagsV & FLAG_SLIDES) != 0u)
@@ -5154,6 +5193,17 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         sync();
     }
+#ifdef EB_FRAME_SEG
+    if (gP.pad2 < gP.steps)
+    {
+        // Before the surface pipelines: the hit flag for them and the next segment,
+        // and this step's motion for the frame end's sleep rule.
+        sync();
+        if (lane == 0u) gMisc[segRec(v)].x = gsHit;
+        if (sleepOn) sleepMark(v, sleepMove);
+        return ebLoopCapFlush();
+    }
+#endif
     coupleEnd(v, lane, coupleOn);
     if (gP.steps > 0u && candCount > 0u)
     {

@@ -396,7 +396,29 @@ pub enum Kernel {
     Wide(usize),
     /// Vehicle sleep: the awake list and the frame's indirect arguments ([`SLEEP_LIST`]).
     Sleep,
+    /// Surface contact on the frame modules, split ([`FramePlanner::set_surface_split`]):
+    /// segment k of the frame (`EB_FRAME_SEG`, parameter copy k): step k − 1's rest after
+    /// its surface pass, then step k up to it; the last (k = steps) the frame's end.
+    FrameSeg,
+    /// The surface pass's pipelines between segments ([`SURF_PASSES`] index: the prep,
+    /// then each kind's find, then each kind's apply).
+    Surf(usize),
 }
+
+/// The surface pass's pipelines ([`Kernel::Surf`]), in dispatch order after a frame
+/// segment: (module, entry). Modules of their own (`EB_SURF_PIPE`), small: a browser
+/// compiles them in seconds, the frame with the pass in it in minutes.
+pub const SURF_PASSES: [(&str, &str); 9] = [
+    ("explicit_surface_prep", "explicit_surface_prep"),
+    ("explicit_surface_find_tri", "explicit_surface_find"),
+    ("explicit_surface_find_seg", "explicit_surface_find"),
+    ("explicit_surface_find_point", "explicit_surface_find"),
+    ("explicit_surface_find_pair", "explicit_surface_find"),
+    ("explicit_surface_apply_tri", "explicit_surface_apply"),
+    ("explicit_surface_apply_seg", "explicit_surface_apply"),
+    ("explicit_surface_apply_point", "explicit_surface_apply"),
+    ("explicit_surface_apply_pair", "explicit_surface_apply"),
+];
 
 impl Kernel {
     /// The module this kernel runs from, for a fleet with or without aero at `lanes`.
@@ -435,6 +457,13 @@ impl Kernel {
             Kernel::Vv(i) => VV_PASSES[i],
             Kernel::Wide(i) => WIDE_PASSES[i],
             Kernel::Sleep => SLEEP_LIST,
+            Kernel::FrameSeg => pick([
+                "explicit_beams_seg",
+                "explicit_beams_wide_seg",
+                "explicit_beams_aero_seg",
+                "explicit_beams_aero_wide_seg",
+            ]),
+            Kernel::Surf(i) => SURF_PASSES[i].0,
         }
     }
 
@@ -458,8 +487,9 @@ impl Kernel {
     /// The Slang entry point.
     pub fn entry(self) -> &'static str {
         match self {
-            Kernel::Frame | Kernel::Solo | Kernel::Contact => FRAME_ENTRY,
+            Kernel::Frame | Kernel::Solo | Kernel::Contact | Kernel::FrameSeg => FRAME_ENTRY,
             Kernel::ContactBig => CONTACT_ENTRY,
+            Kernel::Surf(i) => SURF_PASSES[i].1,
             Kernel::Vv(i) => VV_PASSES[i],
             Kernel::Wide(i) => WIDE_PASSES[i],
             Kernel::Sleep => SLEEP_LIST,
@@ -488,6 +518,8 @@ impl Kernel {
             Kernel::Vv(_) => "vv_group",
             Kernel::Wide(i) => WIDE_PASSES[i],
             Kernel::Sleep => "sleep list",
+            Kernel::FrameSeg => "frame segment",
+            Kernel::Surf(i) => SURF_PASSES[i].0,
         }
     }
 }
@@ -2107,6 +2139,10 @@ pub struct FramePlanner {
     /// Measurement only ([`Self::set_sleep_listing`]): false dispatches every vehicle,
     /// a sleeping one's workgroup returning at once.
     sleep_listing: bool,
+    /// Some vehicle has surface contact ([`ExplicitLayout::surface`]).
+    surface: bool,
+    /// The host runs the surface pass as its own pipelines ([`Self::set_surface_split`]).
+    surface_split: bool,
 }
 
 impl FramePlanner {
@@ -2125,7 +2161,27 @@ impl FramePlanner {
             frames: 0,
             sleep_rec: layout.sleep.map_or(0, |s| s.header),
             sleep_listing: true,
+            surface: layout.surface,
+            surface_split: false,
         }
+    }
+
+    /// A host with the split modules ([`Kernel::FrameSeg`], [`Kernel::Surf`]): frames of
+    /// a fleet with surface contact on the frame modules (no contact groups, not wide)
+    /// run in segments, a step each, with the surface pass's pipelines between them.
+    /// The same results bit for bit; more dispatches, much smaller kernels.
+    pub fn set_surface_split(&mut self, on: bool) {
+        self.surface_split = on;
+    }
+
+    /// This frame runs split (after [`Self::write_params`]), `wide_allowed` as
+    /// [`Self::commands`] takes it.
+    pub fn split_frames(&self, wide_allowed: bool) -> bool {
+        self.surface_split
+            && self.surface
+            && wide_allowed
+            && !self.contact_active()
+            && !self.is_wide()
     }
 
     /// Measurement only: the awake list's dispatch on (the default) or off (every vehicle
@@ -2150,7 +2206,9 @@ impl FramePlanner {
     /// Frames dispatch the awake vehicles only (vehicle sleep on, more than one vehicle:
     /// the awake list's pass, [`Kernel::Sleep`], writes the indirect arguments).
     pub fn sleep_listed(&self) -> bool {
-        self.sleep_on() && self.nv > 1 && self.sleep_listing
+        // Split frames dispatch every vehicle (a sleeping one returns at once): each
+        // segment binds its own parameter copy, which the indirect dispatch has not.
+        self.sleep_on() && self.nv > 1 && self.sleep_listing && !self.split_frames(true)
     }
 
     /// Vehicles in the fleet.
@@ -2308,6 +2366,16 @@ impl FramePlanner {
                 kernel: Kernel::ContactBig,
                 offset: 48,
             });
+            out
+        } else if self.split_frames(wide_allowed) {
+            // Segment k, then (k < steps) the surface pass of step k.
+            let mut out = Vec::with_capacity((steps as usize + 1) * (1 + SURF_PASSES.len()));
+            for k in 0..=steps {
+                out.push(d(Kernel::FrameSeg, nv, k));
+                if k < steps {
+                    out.extend((0..SURF_PASSES.len()).map(|i| d(Kernel::Surf(i), nv, k)));
+                }
+            }
             out
         } else if self.is_wide() && wide_allowed {
             let plan = self.wide_plan(steps);
