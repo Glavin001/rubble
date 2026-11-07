@@ -2471,6 +2471,9 @@ pub fn rig(model: &Model) -> Rig {
             Part::FenderR,
             Part::Body,
         ]
+        .into_iter()
+        .filter(|&p| p != Part::Body || std::env::var("GEN3_NO_BODY_LANES").is_err())
+        .collect()
     };
     for part in lane_parts {
         let backing: Vec<usize> = (0..r.car.nodes.len())
@@ -2657,6 +2660,7 @@ pub fn rig(model: &Model) -> Rig {
     r.car.sheet_area = Some(voronoi_area(model, &r.car));
     r.car.mass_floor = Some(0.7);
     r.car.row_cap_contact_only = false;
+    r.car.lane_ties_first = std::env::var("GEN3_LANE_TIES_FIRST").is_ok();
     r.car.centred_damping = true;
     r.car.assign_masses();
 

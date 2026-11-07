@@ -445,6 +445,18 @@ pub struct Car {
     /// The Gershgorin row cap only on contact-only nodes' ties (the
     /// structure is left to the measured bound, the power iteration).
     pub row_cap_contact_only: bool,
+    /// Round 7 (gen3, opt-in `GEN3_LANE_TIES_FIRST=1`): lane nodes' ties
+    /// stop softening the members around them. In the row cap a structural
+    /// node's lane ties gave with its shut-line edge ties, and a node over
+    /// the cap on its members alone scaled them by its whole row, lane ties
+    /// included: the members next to lane nodes kept 0.19-0.38 of their
+    /// springs without lanes (the quarter's qt, qs and ebody at the tail).
+    /// With this flag only lane ties give first, members take the cap on
+    /// their own row, and the power iteration's mode softens lane ties
+    /// before members. The parked tail corner's normal warp falls from
+    /// 1.03° to 0.80-0.88° (5-30 s), but the round-6 calibration moves
+    /// (frontal peak 34.4 to 30.5 g, roof 5.25 to 5.66): not the default.
+    pub lane_ties_first: bool,
     /// The car runs with centred damping (the BeamNG profile's default,
     /// jbeam-semantics-spec.md §39): the step is stable to ω·h < 2 whatever
     /// the damping, so the bound is the springs' highest mode at
@@ -1048,7 +1060,20 @@ impl Car {
                     over = true;
                     // The lane ties give way first: a structural node keeps its
                     // members' census stiffness while its ties can absorb the excess.
-                    let tie = |j: usize| self.beams[j].role.yields_first();
+                    // Round 7 ([`Car::lane_ties_first`]): only a lane node's
+                    // ties give here, not a shut line's edge ties too. The
+                    // edge nodes carry the skin; the lane nodes do not. At
+                    // the quarter's tail the lanes' ties took the edge ties
+                    // (ebody-qt) down with them to a fifth of their spring,
+                    // the edge sagged parked and the tail corner's normals
+                    // warped about 0.2° more.
+                    let tie = |j: usize| {
+                        if self.lane_ties_first {
+                            matches!(self.beams[j].role, Role::Tie | Role::Backing)
+                        } else {
+                            self.beams[j].role.yields_first()
+                        }
+                    };
                     let part_row = |want_tie: bool| -> f32 {
                         adj[i]
                             .iter()
@@ -1073,6 +1098,15 @@ impl Car {
                         for &j in adj[i].iter().filter(|&&j| tie(j)) {
                             ks[j] *= f;
                         }
+                    } else if self.lane_ties_first && !self.nodes[i].contact && rt > 0.0 {
+                        // The members over the cap alone: they take the
+                        // cap on their own row (not on their row and the
+                        // lane ties', which softened the quarter's members
+                        // around the lanes to a third), the ties a fifth.
+                        let f = (cap / rs).powf(1.05);
+                        for &j in &adj[i] {
+                            ks[j] *= if tie(j) { 0.2 } else { f };
+                        }
                     } else {
                         let f = (cap / row).powf(1.05);
                         for &j in &adj[i] {
@@ -1084,6 +1118,16 @@ impl Car {
             if !over {
                 break;
             }
+        }
+        let dbg_j: Option<usize> = std::env::var("GEN3_TRACE_BEAM").ok().and_then(|t| {
+            let (a, b) = t.split_once('-')?;
+            self.beams.iter().position(|q| {
+                let (x, y) = (&self.nodes[q.a].name, &self.nodes[q.b].name);
+                (x == a && y == b) || (x == b && y == a)
+            })
+        });
+        if let Some(j) = dbg_j {
+            eprintln!("trace beam: after the row cap k {:.3e}", ks[j]);
         }
         // The real bound: the highest mode of M⁻¹K (power iteration), the
         // beams of the nodes that carry it softened until ω_max·h ≤ OMEGA_H.
@@ -1127,6 +1171,7 @@ impl Car {
         }
         let mut omega_h = 0.0;
         let centred = self.centred_damping;
+        let lanes_first = self.lane_ties_first;
         for round in 0..2000 {
             let iters = if round == 0 { 400 } else { 40 };
             let mut lam = 0.0f32;
@@ -1198,15 +1243,26 @@ impl Car {
             let emax = e.iter().copied().fold(0.0, f32::max);
             // Where the mode's carriers include a shut line's edge ties or
             // stops, only those give (the panel keeps its census springs).
-            let edge_first = (0..e.len()).any(|j| {
-                e[j] >= 0.25 * emax && matches!(self.beams[j].role, Role::EdgeTie | Role::EdgeStop)
-            });
+            // Round 7: so do a lane node's ties and backing ties. A lane
+            // node's mode carried the quarter panel's members with it, and
+            // the bound softened them to 0.19-0.38 of their springs without
+            // lanes (qt-ebody, qs-qi at the tail): the tail corner sagged
+            // parked and its normals warped about 0.2° more
+            // (`GEN3_LANE_SOFTENS_PANEL` keeps round 6's rule).
+            let gives = |r: Role| {
+                matches!(r, Role::EdgeTie | Role::EdgeStop)
+                    || (lanes_first && matches!(r, Role::Tie | Role::Backing))
+            };
+            let edge_first = (0..e.len()).any(|j| e[j] >= 0.25 * emax && gives(self.beams[j].role));
             for j in 0..e.len() {
-                let edge = matches!(self.beams[j].role, Role::EdgeTie | Role::EdgeStop);
+                let edge = gives(self.beams[j].role);
                 if e[j] >= 0.25 * emax && (edge || !edge_first) {
                     ks[j] *= 0.97;
                 }
             }
+        }
+        if let Some(j) = dbg_j {
+            eprintln!("trace beam: after the power iteration k {:.3e}", ks[j]);
         }
         // Round 6: a contact-only (lane) node's own bound in any geometry.
         // Its ties spread in 3-D at rest, but a platen or pole pressing it
