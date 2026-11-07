@@ -8,7 +8,7 @@ usage: driver.py OUT_CSV ROUNDS BUILD=BINDIR [BUILD=BINDIR ...]
 BINDIR holds each build's release `rigid_regression_bench` example and `city_scale`
 test binary (engine-world), copied out of its target dir.
 env: RR_ROUND=k numbers the first round k (one bounded round per invocation);
-RR_ONLY=substring filter on scene keys; RR_NO_CITY=1 skips the city runs.
+RR_ONLY=k1,k2 runs only those scene keys (exact; a city key such as city64_sleep runs all its scenarios); RR_NO_CITY=1 skips the city runs.
 """
 import json, os, subprocess, sys, time
 
@@ -41,7 +41,7 @@ CITY = [
     ("city256_sleep", {"CITY_K": "256", "CITY_SLEEP": "1"}),
 ]
 
-only = os.environ.get("RR_ONLY")
+only = [x for x in os.environ.get("RR_ONLY", "").split(",") if x]
 skip_city = os.environ.get("RR_NO_CITY") == "1"
 log = open(out_csv, "a")
 
@@ -61,7 +61,7 @@ first = int(os.environ.get("RR_ROUND", "0"))
 for r in range(first, first + rounds):
     order = builds[r % len(builds):] + builds[: r % len(builds)]
     for key, args, env in BENCH:
-        if only and only not in key:
+        if only and not any(o == key for o in only):
             continue
         for name, d in order:
             rc, so, se, dt = run([os.path.join(d, "rigid_regression_bench")] + args,
@@ -73,7 +73,7 @@ for r in range(first, first + rounds):
     if skip_city:
         continue
     for key, env in CITY:
-        if only and only not in key:
+        if only and not any(o == key for o in only):
             continue
         for name, d in order:
             jp = os.path.join(S, f"city_{name}_{key}_{r}.jsonl")
