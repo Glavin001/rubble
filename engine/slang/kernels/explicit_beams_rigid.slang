@@ -405,8 +405,10 @@ void cplIntegrateBy(uint v, uint lane, uint lanes)
     for (uint j = lane, jStop = EB_END(j, hdr.x, lanes); j < jStop; j += lanes) cplIntegrateBody(v, j);
 }
 // Whether vehicle v's step sums go through workgroup memory (cplReactBy): its every
-// sphere is there (so its shapes fit, 6 words each, in the spheres' and the nodes'
-// ranges' words, free between the node phase and the spheres' pass).
+// sphere is there (so its shapes fit, CPL_REACT_WORDS words each, in the spheres' and
+// the nodes' ranges' words, free between the node phase and the spheres' pass).
+// Per shape: its force, its torque term, its body slot.
+static const uint CPL_REACT_WORDS = 7u;
 bool cplSplit(uint v, uint shapes)
 {
     uint2 gr = cplGsRange(v);
@@ -430,6 +432,9 @@ void cplReactBy(uint v, uint lane, uint lanes)
     {
         uint at = s0 + k * CPL_SHAPE_RECS;
         uint j = gMisc[at].y;
+        // The shape's body slot beside its terms, for every shape: the bodies' sums
+        // (cplIntegrateBodySplit) pick their shapes from workgroup memory.
+        gsCpl[CPL_GS_SPH + CPL_REACT_WORDS * (gr.x + k) + 6u] = j;
         if (j >= bodies) continue;
         float3 c = asfloat(gMisc[cplBody(v, j)].xyz);
         uint s = acc + nb + 6u * k;
@@ -442,7 +447,7 @@ void cplReactBy(uint v, uint lane, uint lanes)
         gMisc[at + 4u] = asuint(float4(imp.xyz + F * STEP, max(imp.w, length(F))));
         gMisc[at + 5u] = asuint(float4(mom.xyz + M * STEP, 0.0));
         float3 t = M + cross(ref - c, F);
-        uint g = CPL_GS_SPH + 6u * (gr.x + k);
+        uint g = CPL_GS_SPH + CPL_REACT_WORDS * (gr.x + k);
         gsCpl[g] = asuint(F.x);
         gsCpl[g + 1u] = asuint(F.y);
         gsCpl[g + 2u] = asuint(F.z);
@@ -535,13 +540,13 @@ void cplIntegrateBodySplit(uint v, uint j)
     uint range = (gsCpl[0] & 4u) != 0u ? 0u : asuint(c4.w);
     uint k0 = range == 0u ? 0u : (range & 0xFFFFu) - 1u;
     uint k1 = range == 0u ? hdr.y : min(range >> 16, hdr.y);
-    uint s0 = cplShape(v, 0u);
-    // The shapes' terms from cplReactBy, summed in shape order.
+    // The shapes' terms from cplReactBy, summed in shape order; each shape's body slot
+    // from workgroup memory (cplReactBy's copy of its record's .y).
     uint gx = cplGsRange(v).x;
     for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
     {
-        if (gMisc[s0 + k * CPL_SHAPE_RECS].y != j) continue;
-        uint g = CPL_GS_SPH + 6u * (gx + k);
+        uint g = CPL_GS_SPH + CPL_REACT_WORDS * (gx + k);
+        if (gsCpl[g + 6u] != j) continue;
         force += asfloat(uint3(gsCpl[g], gsCpl[g + 1u], gsCpl[g + 2u]));
         torque += asfloat(uint3(gsCpl[g + 3u], gsCpl[g + 4u], gsCpl[g + 5u]));
     }
