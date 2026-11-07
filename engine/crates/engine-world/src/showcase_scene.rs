@@ -19,8 +19,8 @@ use crate::{
     BodyDef, DestructibleAssetDesc, DestructibleDef, ExplicitVehiclesDef, Geometry, GpuContext,
     JointBase, JointDef, ShapeDef, SphericalJointDef, StrengthModel, Transform, World, WorldDef,
 };
-use engine_softbody::explicit_beams::ExplicitBeams;
-use glam::Vec3;
+use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, JbeamWheels};
+use glam::{Quat, Vec3};
 
 /// The back wall's outer face (z, house frame): the convoy's cars come from behind the
 /// houses, into the brick pier between the two back windows.
@@ -247,12 +247,57 @@ impl ShowcaseHouses {
     }
 }
 
-/// Builds `preset` on `gpu` with `template`'s vehicles ([`showcase_layout`] for the
-/// arguments). `def`: the vehicles' coupling ([`crate::explicit_scene::town_coupling`]).
+/// A showcase vehicle from a BeamNG JBeam vehicle: its `.jbeam` files (name, text) and
+/// a `.pc` configuration, spawned in JBeam mode (the BeamNG profile, its pressure
+/// wheels) and turned so its forward axis (`engine_softbody::pack::forward_axis`) is
+/// +Z, as [`showcase`] places its vehicles. Returns it and the loader's warnings.
+pub fn jbeam_vehicle(
+    files: &[(&str, &str)],
+    pc: Option<&str>,
+    settings: ExplicitBeamsSettings,
+) -> anyhow::Result<(ExplicitBeams, Vec<String>)> {
+    let desc = engine_softbody::jbeam::load_jbeam(files, pc).map_err(anyhow::Error::msg)?;
+    let (mut sim, warnings) = ExplicitBeams::from_desc_jbeam_with(
+        &desc,
+        JbeamWheels::Pressure,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        settings,
+    )
+    .map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(!sim.nodes.is_empty(), "the vehicle has no nodes");
+    let f = engine_softbody::pack::forward_axis(&desc);
+    let angle = -f.x.atan2(f.z);
+    let quarter = angle / std::f32::consts::FRAC_PI_2;
+    let k = quarter.round();
+    // A quarter turn exactly when it is one (no rounding of the rest pose).
+    let rot = |p: Vec3| -> Vec3 {
+        if (quarter - k).abs() > 1e-6 {
+            return Quat::from_rotation_y(angle) * p;
+        }
+        match (k as i32).rem_euclid(4) {
+            0 => p,
+            1 => Vec3::new(p.z, p.y, -p.x),
+            2 => Vec3::new(-p.x, p.y, -p.z),
+            _ => Vec3::new(-p.z, p.y, p.x),
+        }
+    };
+    for n in &mut sim.nodes {
+        n.pos = rot(n.pos);
+        n.vel = rot(n.vel);
+    }
+    Ok((sim, warnings))
+}
+
+/// Builds `preset` on `gpu` ([`showcase_layout`] for the arguments): vehicle `k` is a
+/// copy of `templates[k % len]`, each facing +Z ([`jbeam_vehicle`]; a `.truck`
+/// vehicle's longer horizontal axis is its length). The two-way preset's parked car has
+/// its parking brake on (pressure wheels with `parkingTorque`). `def`: the vehicles'
+/// coupling ([`crate::explicit_scene::town_coupling`]).
 #[allow(clippy::too_many_arguments)]
 pub fn showcase(
     gpu: GpuContext,
-    template: &ExplicitBeams,
+    templates: &[ExplicitBeams],
     preset: ShowcasePreset,
     count: usize,
     speed: f32,
@@ -260,6 +305,7 @@ pub fn showcase(
     houses: ShowcaseHouses,
     def: &ExplicitVehiclesDef,
 ) -> anyhow::Result<Showcase> {
+    anyhow::ensure!(!templates.is_empty(), "showcase: no vehicle");
     let mut layout = showcase_layout(preset, count, speed, run_up)?;
     let asset = house_asset()?;
     let stress = asset
@@ -409,7 +455,15 @@ pub fn showcase(
     let vehicles: Vec<ExplicitBeams> = layout
         .vehicles
         .iter()
-        .map(|v| place_vehicle(template, Vec3::from(v.front), v.turns, v.speed, ground))
+        .enumerate()
+        .map(|(k, v)| {
+            let template = &templates[k % templates.len()];
+            let mut sim = place_vehicle(template, Vec3::from(v.front), v.turns, v.speed, ground);
+            if preset == ShowcasePreset::TwoWay {
+                sim.parking_brake = 1.0;
+            }
+            sim
+        })
         .collect();
     world.add_explicit_vehicles(&vehicles, def)?;
     Ok(Showcase {

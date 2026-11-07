@@ -67,14 +67,15 @@ export async function createVehicleTown(spec) {
 }
 
 /**
- * The one-World showcase (`rubble::showcase_scene`): `spec` `{ truck, preset: 'house' |
- * 'crates' | 'twoway' | 'convoy', count, speed, runUp, drag }` (`truck` .truck text).
- * Returns the world and its layout (`showcaseLayout`).
+ * The one-World showcase (`rubble::showcase_scene`): `spec` `{ vehicles: [{ truck } |
+ * { jbeam: [[name, text]], pc }] (cycled over the preset's cars), preset: 'house' |
+ * 'crates' | 'twoway' | 'convoy', count, speed, runUp, drag }` (or `truck`: one .truck
+ * vehicle). Returns the world and its layout (`showcaseLayout`).
  */
 export async function createShowcase(spec) {
   ready ??= init();
   await ready;
-  const { truck, ...rest } = spec;
+  const { truck, vehicles, ...rest } = spec;
   const layout = showcaseLayout(rest);
   const world = await WebWorld.createShowcase(spec);
   world.flags = solverFlags();

@@ -55,18 +55,34 @@
   <script type="module">
     // Thin page: the scenes are rubble::showcase_scene (Rust), all physics is Rust/Slang
     // in one World. This page orchestrates (preset, pacing, camera) and draws: the
-    // World's colliders and sky (one-world-render.mjs), the cars' skinned bodies on the
-    // World's explicit node buffer (showcase-car-render.mjs).
+    // World's colliders and sky (one-world-render.mjs), the cars' textured bodies skinned
+    // on the World's explicit node buffer (showcase-car-render.mjs). The cars: converted
+    // BeamNG community vehicles (beamng-mod.mjs: the files are fetched here, parsed and
+    // built in Rust), or Rubble's authored sedan.
     import { createShowcase, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
+    import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
 
     const qs = new URLSearchParams(location.search);
     const PRESETS = {
-      house: { label: 'Into the house', title: 'Into the house', sub: '120 km/h soft-body sedan into a prefractured brick wall' },
-      crates: { label: 'Crate wall', title: 'Crate wall', sub: '50 km/h into a wall of 30 loose crates' },
-      twoway: { label: 'Two-way', title: 'Rigid on soft', sub: 'a 3 t slab and a 4.5 t wrecking ball on a parked car' },
-      convoy: { label: 'Convoy', title: 'Convoy', sub: 'four cars side by side, each into its own house' },
+      house: { label: 'Into the house', title: 'Into the house', sub: (car) => `${car} at 120 km/h into a prefractured brick wall` },
+      crates: { label: 'Crate wall', title: 'Crate wall', sub: (car) => `${car} at 50 km/h into a wall of 30 loose crates` },
+      twoway: { label: 'Two-way', title: 'Rigid on soft', sub: (car) => `a 3 t slab and a 4.5 t wrecking ball on a parked ${car}` },
+      convoy: { label: 'Convoy', title: 'Convoy', sub: (car, n, cars) => `${['', '', 'two', 'three', 'four'][n]} ${cars} side by side, each into its own house` },
+    };
+    // The cars (?car=): a converted BeamNG community vehicle in __mods (community_cache;
+    // never committed) on its JBeam pressure wheels in JBeam mode, or ?car=sedan
+    // Rubble's authored sedan. ?pc= another configuration. A missing vehicle folder
+    // falls back to the sedan. (The Hirochi CCF does not fit: into a house it meets more
+    // than a vehicle's 1,024 proxy shapes, CouplingCapacity's limit.)
+    // `strength`: the houses' bond capacity scale for these cars. The authored sedan's
+    // houses have ShowcaseHouses::showcase()'s lime mortar (0.25, 75 kPa in tension);
+    // a 1.3 t ETK at 120 km/h goes through that wall whole and out of sight (and at the
+    // cuboid house's own 0.3 MPa nearly so), so its houses have a cement mortar's
+    // 0.45 MPa (1.5): it stops with its front in the wall.
+    const MODS = {
+      etk: { base: './__mods/etkk_tex', pc: 'etkk/kc6.pc', name: 'ETK K-series', strength: 1.5 },
     };
     const PRESET = PRESETS[qs.get('preset')] ? qs.get('preset') : 'house';
     const N = PRESET === 'convoy' ? Math.max(2, Math.min(4, Number(qs.get('n')) || 4)) : 1;
@@ -78,7 +94,6 @@
     const errEl = document.getElementById('err');
     const fail = (e) => { errEl.textContent = errorText(e); window.__failed = String(e?.message ?? e); console.error(e); };
     document.getElementById('capTitle').textContent = PRESETS[PRESET].title;
-    document.getElementById('capSub').textContent = PRESETS[PRESET].sub;
 
     // ---------------------------------------------------------------- controls
     const go = (k, v) => { qs.set(k, v); location.search = qs.toString(); };
@@ -115,18 +130,35 @@
     statusEl.textContent = 'building the car and the scene…';
     const t0 = performance.now();
     await loadWasm();
-    // Rubble's authored sedan: its node–beam skeleton runs in the World, its skin is
-    // drawn bound to those nodes. Convoy cars get their own paint (visual only).
-    const RES = qs.get('res') || 'low';
+    // The car, and each one's paint (a convoy's cars differ; visual only).
     const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42], [0.85, 0.55, 0.05], [0.05, 0.3, 0.12]];
-    const car = showcaseCar({ style: qs.get('style') || 'sedan', resolution: RES, paint: PAINTS[0] });
-    const visuals = [car];
-    for (let i = 1; i < N; i++) visuals.push(showcaseCar({ style: qs.get('style') || 'sedan', resolution: RES, paint: PAINTS[i % PAINTS.length] }));
-    const spec = { truck: car.truck, preset: PRESET, count: N };
+    let kind = MODS[qs.get('car')] || qs.get('car') === 'sedan' ? qs.get('car') : 'etk';
+    let mod = null;
+    if (kind !== 'sedan') {
+      statusEl.textContent = `loading the ${MODS[kind].name}…`;
+      try { mod = await loadMod(MODS[kind].base, { pc: qs.get('pc') || MODS[kind].pc }); } catch (e) { console.warn(`${MODS[kind].base}: ${e.message}; the sedan instead`); kind = 'sedan'; }
+    }
+    const NAMES = { sedan: ['soft-body sedan', 'soft-body sedans'], etk: ['ETK K-series', 'ETK K-series cars'] };
+    document.getElementById('capSub').textContent = PRESETS[PRESET].sub(NAMES[kind][0], N, NAMES[kind][1]);
+    // Each car's visual: the sedan's (wasm showcaseCar) or the vehicle's flexbodies
+    // bound to its solver nodes (wasm jbeamVisual), in its paint.
+    statusEl.textContent = 'building the cars\' bodies…';
+    const RES = qs.get('res') || 'low';
+    const visuals = Array.from({ length: N }, (_, i) => {
+      const paint = PAINTS[i % PAINTS.length];
+      if (kind === 'sedan') { const c = showcaseCar({ style: qs.get('style') || 'sedan', resolution: RES, paint }); c.visual.lod = [c.visualLod, c.visualFar]; return c; }
+      const r = modVisual(mod, { native: true, paint });
+      if (i === 0) console.log('flexbodies', r.report);
+      return r;
+    });
+    // The World's vehicle: the mod's files (Rust parses and builds it), or the sedan's .truck.
+    const spec = { vehicles: [mod ? { jbeam: mod.files, pc: mod.pc } : { truck: visuals[0].truck }], preset: PRESET, count: N };
     if (qs.has('speed')) spec.speed = Number(qs.get('speed'));
     if (qs.has('runUp')) spec.runUp = Number(qs.get('runUp'));
     if (qs.has('strength')) spec.strength = Number(qs.get('strength'));
+    else if (mod) spec.strength = MODS[kind].strength;
     if (qs.has('supportLoss')) spec.supportLoss = qs.get('supportLoss') === '1';
+    statusEl.textContent = 'building the scene…';
     const { world, layout } = await createShowcase(spec);
     const buildMs = performance.now() - t0;
     const device = world.device();
@@ -155,11 +187,16 @@
     const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'] });
     cars.setSolver(world.explicitNodesBuffer(), world.explicitMiscBuffer(), world.explicitBeamsBuffer());
     const spans = world.explicitSpans();
-    const nodesPer = car.visual.nodeCount, beamsPer = car.visual.beamRest0.length;
-    for (let i = 0; i < N; i++) {
-      const v = visuals[i];
-      cars.addCar(v.visual, { nodeOffset: spans[2 * i], beamOffset: spans[2 * i + 1], vehicle: i, lod: [v.visualLod, v.visualFar] });
+    const nodesPer = visuals.map((v) => v.visual.nodeCount), beamsPer = visuals.map((v) => v.visual.beamRest0.length);
+    // The vehicle's colour and data maps (decoded in the wasm), shared by every car.
+    if (mod && qs.get('tex') !== '0') {
+      statusEl.textContent = 'decoding the textures…';
+      const vis = visuals[0].visual;
+      const [colour, data] = await Promise.all([modTextures(mod, vis.textures), modTextures(mod, vis.dataTextures)]);
+      if (colour.length) cars.setTextures(colour, 1024);
+      if (data.length) cars.setDataTextures(data, 1024);
     }
+    for (let i = 0; i < N; i++) cars.addCar(visuals[i].visual, { nodeOffset: spans[2 * i], beamOffset: spans[2 * i + 1], vehicle: i, lod: visuals[i].visual.lod });
     const G = layout.ground;
     // The road under the cars (the convoy: a wide apron).
     const xs = layout.vehicles.map((v) => v.front[0]);
@@ -169,8 +206,8 @@
     // ---------------------------------------------------------------- readbacks
     // The cars' nodes (the camera follows their centroid) and beams (the HUD's broken
     // beams), copied to mappable buffers; one map in flight each.
-    const nodeBytes = (spans[2 * (N - 1)] + nodesPer) * 48;
-    const beamBytes = (spans[2 * (N - 1) + 1] + beamsPer) * 32;
+    const nodeBytes = (spans[2 * (N - 1)] + nodesPer[N - 1]) * 48;
+    const beamBytes = (spans[2 * (N - 1) + 1] + beamsPer[N - 1]) * 32;
     const nodeRead = device.createBuffer({ size: nodeBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const miscRead = device.createBuffer({ size: 16 * N, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const beamRead = device.createBuffer({ size: beamBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -190,8 +227,8 @@
         for (let i = 0; i < N; i++) {
           const c = [0, 0, 0], v = [0, 0, 0];
           const a = spans[2 * i];
-          for (let k = 0; k < nodesPer; k++) for (let j = 0; j < 3; j++) { c[j] += f[(a + k) * 12 + j]; v[j] += f[(a + k) * 12 + 4 + j]; }
-          carState[i] = { c: c.map((x, j) => x / nodesPer + o[4 * i + j]), v: v.map((x) => x / nodesPer) };
+          for (let k = 0; k < nodesPer[i]; k++) for (let j = 0; j < 3; j++) { c[j] += f[(a + k) * 12 + j]; v[j] += f[(a + k) * 12 + 4 + j]; }
+          carState[i] = { c: c.map((x, j) => x / nodesPer[i] + o[4 * i + j]), v: v.map((x) => x / nodesPer[i]) };
         }
         nodeRead.unmap(); miscRead.unmap();
         nodeBusy = false;
@@ -205,7 +242,7 @@
         await beamRead.mapAsync(GPUMapMode.READ);
         const f = new Float32Array(beamRead.getMappedRange());
         let n = 0;
-        for (let i = 0; i < N; i++) { const a = spans[2 * i + 1]; for (let k = 0; k < beamsPer; k++) if (f[(a + k) * 8 + 6] !== 0) n++; }
+        for (let i = 0; i < N; i++) { const a = spans[2 * i + 1]; for (let k = 0; k < beamsPer[i]; k++) if (f[(a + k) * 8 + 6] !== 0) n++; }
         beamsBroken = n;
         beamRead.unmap();
         beamBusy = false;

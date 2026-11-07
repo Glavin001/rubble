@@ -6,7 +6,7 @@ use crate::{err, gpu_buffer, res, WebWorld};
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use rubble::explicit_scene::town_coupling;
 use rubble::showcase_scene::{
-    showcase, showcase_layout, ShowcaseHouses, ShowcaseLayout, ShowcasePreset,
+    jbeam_vehicle, showcase, showcase_layout, ShowcaseHouses, ShowcaseLayout, ShowcasePreset,
 };
 use rubble::GpuContext;
 use wasm_bindgen::prelude::*;
@@ -58,17 +58,16 @@ pub fn showcase_layout_js(spec: JsValue) -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 impl WebWorld {
-    /// A showcase preset on a new device. `spec`: `{ truck: <.truck text>, preset:
+    /// A showcase preset on a new device. `spec`: `{ vehicles: [vehicle] (vehicle k of
+    /// the preset is `vehicles[k % len]`), or truck: <.truck text> (one vehicle), preset:
     /// 'house' | 'crates' | 'twoway' | 'convoy', count (convoy: 2 to 4), speed (m/s, 0:
     /// the preset's), runUp (m, 0: the preset's), drag (default true), strength (× every
     /// house bond's capacity) and supportLoss (default: `ShowcaseHouses::showcase()`) }`.
+    /// A vehicle: `{ truck: <.truck text> }` or a BeamNG JBeam vehicle `{ jbeam: [[name,
+    /// text]], pc: <.pc text> }` (JBeam mode, its pressure wheels: [`jbeam_vehicle`]).
     #[wasm_bindgen(js_name = createShowcase)]
     pub async fn create_showcase(spec: JsValue) -> Result<WebWorld, JsValue> {
         let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
-        let truck = spec
-            .get("truck")
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| err("createShowcase: spec.truck (.truck text)"))?;
         let drag = spec.get("drag").and_then(|x| x.as_bool()).unwrap_or(true);
         let settings = ExplicitBeamsSettings {
             fast_inv_sqrt: true,
@@ -76,9 +75,41 @@ impl WebWorld {
             turbulence: drag,
             ..Default::default()
         };
-        let template =
-            ExplicitBeams::from_truck(truck, glam::Vec3::ZERO, glam::Vec3::ZERO, settings)
-                .map_err(err)?;
+        let one = spec
+            .get("truck")
+            .map(|t| vec![serde_json::json!({ "truck": t })]);
+        let list = spec
+            .get("vehicles")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .or(one)
+            .filter(|l| !l.is_empty())
+            .ok_or_else(|| {
+                err("createShowcase: spec.vehicles ([{ truck } | { jbeam, pc }]) or spec.truck")
+            })?;
+        let mut templates = Vec::with_capacity(list.len());
+        for v in &list {
+            templates.push(
+                if let Some(truck) = v.get("truck").and_then(|t| t.as_str()) {
+                    ExplicitBeams::from_truck(truck, glam::Vec3::ZERO, glam::Vec3::ZERO, settings)
+                        .map_err(err)?
+                } else if let Some(files) = v.get("jbeam").and_then(|f| f.as_array()) {
+                    let files: Vec<(&str, &str)> = files
+                        .iter()
+                        .map(|f| {
+                            (
+                                f.get(0).and_then(|x| x.as_str()).unwrap_or(""),
+                                f.get(1).and_then(|x| x.as_str()).unwrap_or(""),
+                            )
+                        })
+                        .collect();
+                    let pc = v.get("pc").and_then(|t| t.as_str());
+                    res(jbeam_vehicle(&files, pc, settings))?.0
+                } else {
+                    return Err(err("createShowcase: a vehicle needs `truck` or `jbeam`"));
+                },
+            );
+        }
         let p = preset(&spec)?;
         let count = num(&spec, "count", 1.0) as usize;
         let speed = num(&spec, "speed", 0.0) as f32;
@@ -88,7 +119,9 @@ impl WebWorld {
             .len();
         let (info, device, queue) = crate::web_device().await?;
         // The vehicles' kernels compiled without blocking first (as `createVehicleTown`).
-        let fleet = vec![template.clone(); n];
+        let fleet: Vec<ExplicitBeams> = (0..n)
+            .map(|k| templates[k % templates.len()].clone())
+            .collect();
         let specs =
             engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(town_coupling().capacity));
         crate::warm_pipelines(&device, &specs, std::rc::Rc::new(|_: &str, _: f64| {})).await;
@@ -98,7 +131,7 @@ impl WebWorld {
                 device,
                 queue,
             },
-            &template,
+            &templates,
             p,
             count,
             speed,
