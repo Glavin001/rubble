@@ -101,6 +101,11 @@ function measure(car) {
     return `${along}, ${side}`;
   };
   const over = (d) => mag.filter((m) => m > d).length;
+  // Nodes more than 1.5 m from their place: torn off and left behind (in the wall or
+  // the debris), not crush; the body's largest displacement leaves them out.
+  const DETACHED = 1.5;
+  const detached = mag.map((m, i) => i).filter((i) => mag[i] > DETACHED).map((i) => ({ node: i, disp: +mag[i].toFixed(3), dir: disp[i].map((x) => +x.toFixed(3)), where: where(R[i]) }));
+  let bi = -1; for (let i = 0; i < n; i++) if (mag[i] <= DETACHED && (bi < 0 || mag[i] > mag[bi])) bi = i;
   // Displacement by fifth of the car's length (rest position): mean and max.
   const bands = [0, 1, 2, 3, 4].map((b) => { const ids = R.map((p, i) => i).filter((i) => Math.min(4, Math.floor(5 * (R[i][2] - zlo) / len)) === b); return { from: +(b / 5).toFixed(1), nodes: ids.length, mean: +(ids.reduce((s, i) => s + mag[i], 0) / ids.length).toFixed(4), max: +Math.max(...ids.map((i) => mag[i])).toFixed(4) }; });
   const metrics = {
@@ -111,6 +116,7 @@ function measure(car) {
     frontCrushMax: +Math.max(...back).toFixed(4),
     lengthLoss: +(zhi - azhi).toFixed(4),
     maxDisp: +mag[mi].toFixed(4), maxNode: mi, maxAt: R[mi].map((x) => +x.toFixed(3)), maxDir: disp[mi].map((x) => +x.toFixed(3)), maxWhere: where(R[mi]),
+    bodyMaxDisp: +mag[bi].toFixed(4), bodyMaxNode: bi, bodyMaxDir: disp[bi].map((x) => +x.toFixed(3)), bodyMaxWhere: where(R[bi]), detached,
     nodesMoved: { over5cm: over(0.05), over10cm: over(0.1), over20cm: over(0.2), of: n },
     bands,
   };

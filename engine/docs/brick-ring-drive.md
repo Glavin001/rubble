@@ -92,3 +92,48 @@ frame-locked, recorded with `brick-ring-drive-record.mjs`):
   that runs in real time.
 
 Stills: `docs/media/brick-ring-drive/`.
+
+## The cars after the wall (crash orbit)
+
+`crash-orbit.mjs` (engine-webgpu) runs the scripted drive frame-locked, saves the car at
+rest and after the wall (`window.__snapshot`: world node positions, broken beams, and the
+node, beam, misc and render-state buffers the renderer skins from), measures the crush, and
+records `crash-orbit.html`: the snapshot drawn by the drive's own renderer
+(`showcase-car-render.mjs`, same visual mesh, tears, glass and paint wear), alone on plain
+asphalt, one 360° orbit in 12 s. `?snap=a.json,b.json` puts two side by side (before /
+after). Snapshots live in `out/crash-orbit/` (gitignored; the ETK's are community content,
+never committed) and `~/Development/rubble-artifacts/crash-orbit/`, with the videos.
+Every browser run goes through `engine/scripts/with-gpu-lock.py`.
+
+    node crash-orbit.mjs capture etk sedan     # <car>-rest.json, <car>-crash.json
+    node crash-orbit.mjs measure etk sedan     # metrics into <car>-crash.json
+    node crash-orbit.mjs record crash-orbit-etk etk-crash.json
+    node crash-orbit.mjs record crash-orbit-etk-before-after etk-rest.json,etk-crash.json
+
+**Crush** (2026-11-07). Measured in the rest car's frame: the crashed nodes rigidly aligned
+(Kabsch) on the rear two fifths, iterated on the nodes within 3 cm (RMS 5–6 mm). Front
+crush: how far back the nodes within 10 cm of the rest nose went. Nodes more than 1.5 m from
+their place are counted as torn off, not crush.
+
+| | ETK K-series | Soft-body sedan (`?drag=0`) |
+|---|---|---|
+| Impact speed (frame of the strike) | 113 km/h | 105 km/h |
+| Snapshot | 2.8 s after the strike, out of the ring, stopped | 8.9 s after, at rest in the brick pile |
+| Beams broken | 43 / 3,800 (1.1 %) | 175 / 6,865 (2.5 %) |
+| Front crush, mean (max) of the nose nodes | 15 cm (29 cm) | 50 cm (88 cm) |
+| Overall length lost | 9 cm of 3.92 m | 24 cm of 4.69 m |
+| Largest body displacement | 1.20 m, rear quarter, right | 1.02 m, front, left |
+| Nodes moved > 10 cm | 42 of 457 | 178 of 987 |
+| Torn off | 5 nodes (a small part), left 9.5 m behind | none |
+
+- The sedan is wrecked: the bonnet and wings are gone, the engine block is bare, the
+  windscreen shattered, the front wheels splayed. Its rear is crushed too (up to 61 cm in the
+  rear fifth): bricks came down on it in the pile.
+- The ETK is hurt but whole: the bonnet buckled up and split, the grille and lamps pushed
+  in, the cabin, doors and rear untouched. 15 cm of crush at 113 km/h into 25 kg blocks is
+  little (a real car loses most of its crumple zone, 0.5–0.8 m, into a rigid wall at that
+  speed, though this wall gives way). The converted car looks too strong in this crash.
+
+![ETK after the wall](media/crash-orbit/crash-orbit-etk-0.jpg)
+![ETK before and after](media/crash-orbit/crash-orbit-etk-before-after-0.jpg)
+![Sedan before and after](media/crash-orbit/crash-orbit-sedan-before-after-0.jpg)
