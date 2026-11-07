@@ -76,6 +76,7 @@
         c.visual.lod = [c.visualLod, c.visualFar];
         return (built[kind] = { visual: c.visual, mod: null });
       }
+      // The snapshot's nodes are this vehicle's: no stand-in; loadMod's error says why.
       const mod = await loadMod(MODS[kind].base, { pc: MODS[kind].pc });
       return (built[kind] = { visual: modVisual(mod, { native: true, raycast: true, paint: PAINT }).visual, mod });
     }

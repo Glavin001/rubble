@@ -13,10 +13,13 @@ import { jbeamVisual, jbeamVisualSkinned, decodeTexture } from './rubble-world.m
  * render model with weighted skins: the folder's .glb and .rskin, else null), base,
  * list, label }`.
  */
+/** Why a converted vehicle can be missing: they live only in a developer's checkout. */
+export const LOCAL_MODS = 'Converted community vehicles are local only (engine-webgpu/__mods, never committed or deployed); CONTRIBUTING.md "Local BeamNG vehicles" says how to make one with community_cache.';
+
 export async function loadMod(base, { pc = null } = {}) {
   base = base.replace(/\/$/, '');
   const r = await fetch(`${base}/files.json`);
-  if (!r.ok) throw new Error(`${base}/files.json: ${r.status} ${r.statusText}`);
+  if (!r.ok) throw new Error(`${base}/files.json: ${r.status} ${r.statusText}. ${LOCAL_MODS}`);
   const list = await r.json();
   const text = async (f) => [f, await (await fetch(`${base}/${f}`)).text()];
   const bin = async (f) => (f ? new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer()) : null);

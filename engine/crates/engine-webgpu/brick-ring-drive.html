@@ -68,7 +68,7 @@
     // (the recorder); ?runUp= m; ?speed= m/s at spawn.
     import { createBrickRingDrive, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
-    import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
+    import { loadMod, modVisual, modTextures, LOCAL_MODS } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
 
     const qs = new URLSearchParams(location.search);
@@ -97,7 +97,9 @@
     let mod = null;
     if (kind !== 'sedan') {
       statusEl.textContent = `loading the ${MODS[kind].name}…`;
-      try { mod = await loadMod(MODS[kind].base, { pc: qs.get('pc') || MODS[kind].pc }); } catch (e) { console.warn(`${MODS[kind].base}: ${e.message}; the sedan instead`); kind = 'sedan'; }
+      try { mod = await loadMod(MODS[kind].base, { pc: qs.get('pc') || MODS[kind].pc }); } catch (e) { console.warn(`${e.message} The sedan instead.`); kind = 'sedan'; }
+      // Without the local mod (a deployed site, a fresh clone): the sedan, and the menu says so.
+      if (kind === 'sedan') { carSel.value = 'sedan'; const o = carSel.options[0]; o.text += ' (local mod not found)'; o.disabled = true; carSel.title = LOCAL_MODS; }
     }
     const NAME = { sedan: ['soft-body sedan', 'soft-body sedans'], etk: ['ETK K-series', 'ETK K-series cars'] }[kind];
     const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42]];

@@ -73,7 +73,7 @@
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
     import { createWorld, pollFrame as poll, drain, macrotask, softCalibratedSettings, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, FramePacer } from './rubble-world.mjs';
-    import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
+    import { loadMod, modVisual, modTextures, LOCAL_MODS } from './beamng-mod.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, duneBuggySoft, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
@@ -160,7 +160,7 @@
       // (its files' paths): its .jbeam parts, a .pc (?pc= its name, else the
       // first) and its .dae meshes (the crash lab draws its flexbodies), or a
       // glTF render model with weighted skins (beamng-mod.mjs).
-      importSrc = await loadMod(qs.get('mod'), { pc: qs.get('pc') });
+      try { importSrc = await loadMod(qs.get('mod'), { pc: qs.get('pc') }); } catch (e) { console.warn(`${e.message} The sedan instead.`); const note = document.createElement('div'); note.className = 'panel'; note.style.cssText = 'bottom: 80px; left: 10px; max-width: 60ch; font: 12px system-ui, sans-serif'; note.textContent = `?mod=${qs.get('mod')} not found: the sedan instead. ${LOCAL_MODS}`; errEl.before(note); }
     } else if (qs.get('car') === 'import') {
       try { importSrc = JSON.parse(sessionStorage.getItem(IMPORT_KEY) || 'null'); } catch { importSrc = null; }
     }

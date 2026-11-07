@@ -26,6 +26,7 @@
 import { createWorld } from './rubble-world.mjs';
 import { showcaseCar, jbeamVisual, glbVisual, decodeTexture } from './generated/world-wasm/engine_world_wasm.js';
 import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
+import { LOCAL_MODS } from './beamng-mod.mjs';
 
 const qs = new URLSearchParams(location.search);
 const hud = document.getElementById('hud');
@@ -111,7 +112,9 @@ try {
   }
   if (qs.has('mod')) {
     const base = qs.get('mod').replace(/\/$/, '');
-    const list = await (await fetch(`${base}/files.json`)).json();
+    const lr = await fetch(`${base}/files.json`);
+    if (!lr.ok) throw new Error(`?mod=${base}: ${base}/files.json ${lr.status}. ${LOCAL_MODS}`);
+    const list = await lr.json();
     const text = async (f) => [f, await (await fetch(`${base}/${f}`)).text()];
     const jb = await Promise.all(list.filter((f) => f.endsWith('.jbeam')).map(text));
     const pcName = qs.get('pc') ?? list.find((f) => f.endsWith('.pc'));

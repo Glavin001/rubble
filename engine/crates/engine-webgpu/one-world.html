@@ -136,7 +136,7 @@
     let mod = null;
     if (kind !== 'sedan') {
       statusEl.textContent = `loading the ${MODS[kind].name}…`;
-      try { mod = await loadMod(MODS[kind].base, { pc: qs.get('pc') || MODS[kind].pc }); } catch (e) { console.warn(`${MODS[kind].base}: ${e.message}; the sedan instead`); kind = 'sedan'; }
+      try { mod = await loadMod(MODS[kind].base, { pc: qs.get('pc') || MODS[kind].pc }); } catch (e) { console.warn(`${e.message} The sedan instead.`); kind = 'sedan'; }
     }
     const NAMES = { sedan: ['soft-body sedan', 'soft-body sedans'], etk: ['ETK K-series', 'ETK K-series cars'] };
     document.getElementById('capSub').textContent = PRESETS[PRESET].sub(NAMES[kind][0], N, NAMES[kind][1]);
