@@ -99,7 +99,7 @@
       statusEl.textContent = `loading the ${MODS[kind].name}…`;
       try { mod = await loadMod(MODS[kind].base, { pc: qs.get('pc') || MODS[kind].pc }); } catch (e) { console.warn(`${MODS[kind].base}: ${e.message}; the sedan instead`); kind = 'sedan'; }
     }
-    const NAME = { sedan: 'soft-body sedan', etk: 'ETK K-series' }[kind];
+    const NAME = { sedan: ['soft-body sedan', 'soft-body sedans'], etk: ['ETK K-series', 'ETK K-series cars'] }[kind];
     const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42]];
     statusEl.textContent = 'building the car\'s body…';
     // Each car's visual on its raycast-wheel spawn (the wheels ride the drive state).
@@ -124,7 +124,7 @@
     statusEl.textContent = 'building 110,440 bricks and the car…';
     const { world, layout } = await createBrickRingDrive(spec);
     const buildMs = performance.now() - t0;
-    document.getElementById('capSub').textContent = `${N > 1 ? 'two ' + NAME + 's' : 'the ' + NAME} through ${layout.bricks.toLocaleString('en-US')} rigid bricks`;
+    document.getElementById('capSub').textContent = `${N > 1 ? 'two ' + NAME[1] : 'the ' + NAME[0]} through ${layout.bricks.toLocaleString('en-US')} rigid bricks`;
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));

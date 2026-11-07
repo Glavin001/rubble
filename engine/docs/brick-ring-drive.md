@@ -34,6 +34,54 @@ raycast wheels, and 110,440 AVBD rigid bricks, coupled both ways
 - **The ground slab** is the demo's static box, in its own collision category that the
   vehicles' mask leaves out (the cars keep their own ground plane at its top).
 
-## Results
+## Results (2026-11-07, M3 Max, other agents' jobs on the machine)
 
-(see below)
+**Baseline: the ring alone.**
+
+| Run | Per World step |
+|---|---|
+| Chrome, demo.html `?scene=ring110k` (no sleep, the ball), frame-locked wall time | 10.6 ms |
+| Chrome, the same with `&sleep=on` | 4.8 ms |
+| Native, the demo's ring (no sleep, the ball), GPU | 13.0 ms (16–17 under load) |
+| Native, the drive's ring alone (sleep on, no ball, 25 kg blocks), GPU, two runs | 4.5, 4.7 ms |
+
+**With a car, in Chrome** (`brick-ring-drive-record.mjs --probe`, `?auto=1&timing=phases`,
+headless, 60 Hz):
+
+| Car | World steps/s | GPU per step (rigid · vehicle) |
+|---|---|---|
+| Soft-body sedan, cruising, ring asleep | 60 (100 %) | 4.2 ms (1.4 · 2.8) |
+| Soft-body sedan, the first 3 s (the ring settling, 110k → 27k awake) | 56–60 | 7.7–12.1 ms |
+| Soft-body sedan, pressed into the wall | 60 (100 %) | 9.7–10.7 ms (1.9 · 8.9) |
+| ETK K-series, cruising | 47–54 (78–90 %) | 16.4–19 ms (2.3–7 · 13.5–14) |
+| ETK K-series, through the wall | 39–53 | 16.7–19.7 ms (2.4 · 15–17.4) |
+
+- The sedan drives, strikes and pushes bricks in real time. The rigid side's cost with the
+  car (1.4 ms asleep, 1.9 ms with the struck bricks awake) is the ring's own.
+- The ETK's own 2 kHz frame is 13.5 ms a World step in Chrome (457 nodes and 3,800 beams on
+  one workgroup), so it is not real time on its own. That waits on `perf/explicit-2khz`.
+
+**What the cars do.**
+- The ETK at 111 km/h goes through the 5.2 m base and comes out at 40 km/h, with 43–72
+  beams broken. A tunnel of blocks bursts out of the far face, and the wall above stands.
+- The authored sedan on raycast wheels tops out at about 41 km/h and stops in the wall
+  (31–35 beams). The drive's limit for that car is a follow-up.
+- Coupling room: at most 122 proxy shapes per car were seen (sampled every 15 steps, the
+  ETK at 28 m/s into the wall), of the 1,024 it has. So the room was not raised.
+
+**Correctness.**
+- `engine-world/tests/explicit_drive_world.rs`: the sedan on raycast wheels, driven through
+  the World's explicit vehicles, matches the CPU reference bit for bit over 170 World steps.
+  The run crosses the origin rebase.
+- The origin rebase of a coupled vehicle (100 m from the origin) hung the GPU on this
+  branch. The fix was `feat/vehicle-sleep`'s `cplRebase` header fix, now merged. The
+  repro, the ETK driven past 100 m, now runs to 180 m.
+
+**Videos** (`~/Development/rubble-artifacts/brick-ring-drive/`, 1280 × 720, 60 fps,
+frame-locked, recorded with `brick-ring-drive-record.mjs`):
+- `brick-ring-drive-etk.mp4`: the ETK's 100 m run-up and the strike, from the chase, the
+  wall's side and outside the ring, then the strike again ×4 slower from the wall's side and
+  from outside;
+- `brick-ring-drive-etk2.mp4`: the same with two ETKs.
+
+Stills: `docs/media/brick-ring-drive/`.
