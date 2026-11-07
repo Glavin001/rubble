@@ -220,11 +220,15 @@ float4 drvSlot(uint slot, float3 p, float3 d)
     return drvSphere(p, d, p0.xyz, p0.w);
 }
 
-float4 drvRay(float3 p, float3 d, float tMax, float ground, uint boxOff, uint boxCount)
+// `p` in the vehicle's frame (origin `ow`): the ground's height in that frame; the box
+// slots in the World's (the ray's start moved to the World).
+float4 drvRay(float3 p, float3 ow, float3 d, float tMax, float worldGround, uint boxOff, uint boxCount)
 {
     float4 best = drvNone();
+    float ground = nf(worldGround - ow.y);
     if (d.y < -DRV_PARALLEL && p.y >= ground) best = float4(0.0, 1.0, 0.0, sdiv(nf(ground - p.y), d.y));
-    for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++) best = drvCloser(best, drvSlot(boxOff + b, p, d));
+    float3 pw = sadd3(ow, p);
+    for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++) best = drvCloser(best, drvSlot(boxOff + b, pw, d));
     if (best.w > tMax) return drvNone();
     return best;
 }
@@ -284,7 +288,10 @@ struct DrvCtx
     uint c5y;
     uint arCount;
     float ground;
+    // The wheels' frame: the vehicle's (o is 0: positions relative to its origin); ow
+    // its origin, added at the World's boundary (ground, box slots, reported centres).
     float3 o;
+    float3 ow;
     float3 fw;
     float3 up;
     float3 left;
@@ -349,7 +356,8 @@ bool drvCtx(uint v, out DrvCtx c)
     c.groupOff = r2.z;
     c.groupCount = r2.w;
     c.ground = asfloat(r3.y);
-    c.o = asfloat(gMisc[v].xyz);
+    c.ow = asfloat(gMisc[v].xyz);
+    c.o = float3(0.0, 0.0, 0.0);
     float h = STEP;
     float3 xc = sadd3(c.o, gNodes[(c.nodeOff + c2.y) * 3u].xyz);
     float3 xb = sadd3(c.o, gNodes[(c.nodeOff + c2.z) * 3u].xyz);
@@ -443,7 +451,7 @@ void drvRays(DrvCtx c, uint k)
     float3 xh, vh;
     drvHub(c, k, m, xh, vh);
     float3 hp = sadd3(xh, sscale(c.up, w2.z));
-    float4 ht = drvRay(hp, -c.up, nf(w2.y + w1.x), c.ground, c.boxOff, c.boxCount);
+    float4 ht = drvRay(hp, c.ow, -c.up, nf(w2.y + w1.x), c.ground, c.boxOff, c.boxCount);
     float len = w2.y;
     float load = 0.0;
     float4 hit = drvNone();
@@ -627,7 +635,7 @@ void drvTyre(DrvCtx c, uint k, uint step)
     else if (spin <= -asfloat(0x40490fdbu)) spin = nf(spin + asfloat(0x40c90fdbu));
     DSet(wr + 15u, float4(wNew, spin, angle, lenK));
     DSet(wr + 16u, float4(fnOut, kappa, alpha, contact ? 1.0 : 0.0));
-    DSet(wr + 17u, float4(sadd3(xh, sscale(c.up, nf(w2.z - lenK))), 0.0));
+    DSet(wr + 17u, float4(sadd3(c.ow, sadd3(xh, sscale(c.up, nf(w2.z - lenK)))), 0.0));
     DSet(wr + 18u, float4(scross(uw, fwd), 0.0));
     DSet(wr + 19u, float4(uw, 0.0));
     // 4. Onto the hub nodes, by mass (fixed point, read by the node phase).

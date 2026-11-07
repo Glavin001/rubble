@@ -260,6 +260,50 @@ fn far_from_the_origin_the_coupling_is_the_origins_bit_for_bit() {
     );
 }
 
+/// The same crash spawned the way the World spawns vehicles: origin 0 and the nodes and
+/// the box at (4096, 0, 2048) m, so the first frame re-bases the origin onto node 0 and
+/// the proxy records (relative to the origin) must move with it (`cplRebase`). The box
+/// ends with the speed it reaches at the origin (the re-based node positions round
+/// differently, so not bit for bit), and the frame completes (a stale header read once
+/// sent the re-base's loop over garbage bounds).
+#[test]
+fn a_rebase_moves_the_proxy_records_with_the_origin() {
+    let Some((device, queue)) = device() else {
+        eprintln!("skip: no GPU");
+        return;
+    };
+    let far = Vec3::new(4096.0, 0.0, 2048.0);
+    let (sim, mut set, _) = setup(1200.0);
+    let grid = |v: Vec3| (v * 2048.0).round() / 2048.0;
+    set.bodies[0].pos = grid(set.bodies[0].pos);
+    set.begin_window();
+    let run = |shift: Vec3| {
+        let mut s = sim.clone();
+        for n in &mut s.nodes {
+            n.pos += shift;
+        }
+        let mut b = set.clone();
+        b.bodies[0].pos += shift;
+        b.begin_window();
+        let mut gpu = ExplicitBeamsGpu::with_coupling(&device, &queue, std::slice::from_ref(&s), Some(CAP));
+        write_proxies(&gpu, &queue, 0, &b).unwrap();
+        gpu.set_coupling_on(true);
+        for _ in 0..48 {
+            gpu.frame(STEPS);
+        }
+        let origin = gpu.origins()[0];
+        let mut g = b.clone();
+        read_proxies(&gpu, &device, &queue, 0, &mut g);
+        (g.bodies[0].vel, origin)
+    };
+    let (v0, o0) = run(Vec3::ZERO);
+    let (v1, o1) = run(far);
+    println!("box at the origin {v0:?}; spawned at 4 km {v1:?} (origin re-based to {o1:?}, was {o0:?})");
+    assert!(o0 == Vec3::ZERO && o1.length() > 4000.0, "the far run re-based");
+    assert!(v0.z > 1.0, "the box was struck");
+    assert!((v1 - v0).length() < 1e-2 * v0.length(), "box {v1:?} against {v0:?}");
+}
+
 /// Built with coupling room but off: every frame bit for bit the plain build's.
 #[test]
 fn coupling_off_is_bit_for_bit() {
@@ -275,4 +319,29 @@ fn coupling_off_is_bit_for_bit() {
     }
     assert_eq!(a.positions(), b.positions());
     assert_eq!(a.velocities(), b.velocities());
+}
+
+/// A corrupt proxy record header (body and shape counts past the region's B and S, as
+/// an unset or overwritten record would hold) fails loudly and fast: the coupling's
+/// loops stay within the vehicle's records (`explicit_beams_rigid.slang` `cplVeh`) and
+/// the frame reports the loop cap, instead of looping over millions of garbage records
+/// in one GPU submission.
+#[test]
+fn a_corrupt_proxy_header_fails_loudly_not_slowly() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let (sim, set, _) = setup(1200.0);
+    let mut gpu = ExplicitBeamsGpu::with_coupling(&device, &queue, std::slice::from_ref(&sim), Some(CAP));
+    write_proxies(&gpu, &queue, 0, &set).unwrap();
+    let at = u64::from(gpu.coupling().unwrap().vehicle(0)) * 16;
+    queue.write_buffer(gpu.misc_buffer(), at, bytemuck::cast_slice(&[u32::MAX, u32::MAX]));
+    gpu.set_coupling_on(true);
+    let t = std::time::Instant::now();
+    gpu.frame(STEPS);
+    let status = gpu.kernel_status();
+    let secs = t.elapsed().as_secs_f64();
+    println!("corrupt header: {status:?} in {secs:.2} s");
+    assert!(status.is_err(), "the loop cap is raised");
+    assert!(secs < 10.0, "bounded: {secs:.1} s");
 }

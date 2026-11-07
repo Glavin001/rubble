@@ -74,8 +74,13 @@ uint cplHdr(uint i)
     uint4 h1 = gMisc[coupleRec() + 1u];
     return i == 0u ? h.y : (i == 1u ? h.z : (i == 2u ? h.w : (i == 3u ? h1.x : h1.y)));
 }
-uint cplB() { return cplHdr(1u); }
-uint cplS() { return cplHdr(2u) & 0xFFFFu; }
+// The host allows at most CPL_MAX_SHAPES shapes and no more bodies per vehicle
+// (explicit_plan CouplingLayout::new), so these bounds never change a valid header;
+// they keep a bad one (an unset copy, a corrupt record) from driving a loop over
+// millions of records: the loops fail loudly (the loop-cap flag) and stay short.
+static const uint CPL_MAX_SHAPES = 1024u;
+uint cplB() { return min(cplHdr(1u), CPL_MAX_SHAPES); }
+uint cplS() { return min(cplHdr(2u) & 0xFFFFu, CPL_MAX_SHAPES); }
 uint cplPlanes() { return cplHdr(2u) >> 16; }
 uint cplRecs() { return 1u + cplB() * CPL_BODY_RECS + cplS() * CPL_SHAPE_RECS + cplPlanes(); }
 uint cplBase(uint v) { return cplHdr(0u) + v * cplRecs(); }
@@ -83,6 +88,22 @@ uint cplBody(uint v, uint j) { return cplBase(v) + 1u + j * CPL_BODY_RECS; }
 uint cplShape(uint v, uint k) { return cplBase(v) + 1u + cplB() * CPL_BODY_RECS + k * CPL_SHAPE_RECS; }
 uint cplPlane(uint v, uint i) { return cplBase(v) + 1u + cplB() * CPL_BODY_RECS + cplS() * CPL_SHAPE_RECS + i; }
 uint cplAcc(uint v) { return cplHdr(3u) + v * (cplB() + 6u * cplS()); }
+// Vehicle v's record header (bodies, shapes, ...) with its counts held to the
+// region's B and S: a count past them is a bad record (raised as a loop cap, the
+// frame an error), never a loop past the vehicle's records.
+uint4 cplVeh(uint v)
+{
+    uint4 h = gMisc[cplBase(v)];
+    uint nb = cplB();
+    uint ns = cplS();
+    if (h.x > nb || h.y > ns)
+    {
+        ebLoopCapHit(__LINE__);
+        h.x = min(h.x, nb);
+        h.y = min(h.y, ns);
+    }
+    return h;
+}
 
 float3 cplRot(float4 q, float3 v)
 {
@@ -201,7 +222,7 @@ void cplGsAdd(uint e, uint v, uint base, uint nodeBase)
 {
     // The header's .x bit 2 (tests): no workgroup copies, every read from the buffers.
     if ((gsCpl[0] & 4u) != 0u) return;
-    uint shapes = gsCpl[0] != 0u ? gMisc[cplBase(v)].y : 0u;
+    uint shapes = gsCpl[0] != 0u ? cplVeh(v).y : 0u;
     uint nodes = gStatic[v * 4u].y;
     gsCpl[CPL_GS_TAB + 5u * e + 0u] = v;
     gsCpl[CPL_GS_TAB + 5u * e + 1u] = base;
@@ -243,7 +264,7 @@ void cplSpheres(uint v, uint lane)
 }
 void cplSpheresBy(uint v, uint lane, uint lanes)
 {
-    uint shapes = cplCullOn() ? gMisc[cplBase(v)].y : 0u;
+    uint shapes = cplCullOn() ? cplVeh(v).y : 0u;
     uint2 gr = cplGsRange(v);
     for (uint k = lane, kStop = EB_END(k, shapes, lanes); k < kStop; k += lanes)
     {
@@ -325,7 +346,7 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
 #else
     bool fastSide = (gStatic[v * 4u + 3u].x & 131072u) != 0u && gP.surfSplit != 0u;
 #endif
-    uint4 hdr = gMisc[cplBase(v)];
+    uint4 hdr = cplVeh(v);
     uint acc = cplAcc(v);
     uint nb = cplB();
     bool cull = cplCullOn();
@@ -395,13 +416,13 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
 // cleared.
 void cplIntegrate(uint v, uint lane)
 {
-    uint4 hdr = gMisc[cplBase(v)];
+    uint4 hdr = cplVeh(v);
     for (uint j = lane, jStop = EB_END(j, hdr.x, LANES); j < jStop; j += LANES) cplIntegrateBody(v, j);
 }
 // The same bodies (every j < B), body j by lane j of `lanes`, then j + lanes, ...
 void cplIntegrateBy(uint v, uint lane, uint lanes)
 {
-    uint4 hdr = gMisc[cplBase(v)];
+    uint4 hdr = cplVeh(v);
     for (uint j = lane, jStop = EB_END(j, hdr.x, lanes); j < jStop; j += lanes) cplIntegrateBody(v, j);
 }
 // Whether vehicle v's step sums go through workgroup memory (cplReactBy): its every
@@ -419,7 +440,7 @@ bool cplSplit(uint v, uint shapes)
 // about the body's centre left in workgroup memory for the body's sum in shape order.
 void cplReactBy(uint v, uint lane, uint lanes)
 {
-    uint4 hdr = gMisc[cplBase(v)];
+    uint4 hdr = cplVeh(v);
     if (!cplSplit(v, hdr.y)) return;
     uint2 gr = cplGsRange(v);
     uint bodies = min(hdr.x, LANES);
@@ -456,12 +477,12 @@ void cplIntegrateBody(uint v, uint j)
 {
     // The split path its own function behind an early return (Metal's codegen of
     // the path below stays as it was).
-    if (cplSplit(v, gMisc[cplBase(v)].y))
+    if (cplSplit(v, cplVeh(v).y))
     {
         cplIntegrateBodySplit(v, j);
         return;
     }
-    uint4 hdr = gMisc[cplBase(v)];
+    uint4 hdr = cplVeh(v);
     uint b = cplBody(v, j);
     uint acc = cplAcc(v);
     uint nb = cplB();
@@ -518,7 +539,7 @@ void cplIntegrateBody(uint v, uint j)
 
 void cplIntegrateBodySplit(uint v, uint j)
 {
-    uint4 hdr = gMisc[cplBase(v)];
+    uint4 hdr = cplVeh(v);
     uint b = cplBody(v, j);
     uint acc = cplAcc(v);
     uint nb = cplB();
@@ -571,17 +592,24 @@ void cplIntegrateBodySplit(uint v, uint j)
 // lane, inside the rebase's branch (no barrier; the rebase's own follows).
 void cplRebase(uint v, uint lane, float3 first)
 {
-    if (gMisc[coupleRec()].x == 0u) return;
-    uint4 hdr = gMisc[cplBase(v)];
-    for (uint j = lane, jStop = EB_END(j, hdr.x, LANES); j < jStop; j += LANES)
+    // The header from the buffer: the rebase runs before coupleBegin copies it to
+    // workgroup memory (cplHdr's copies are not yet written here).
+    uint4 h = gMisc[coupleRec()];
+    if (h.x == 0u) return;
+    uint nb = h.z;
+    uint ns = h.w & 0xFFFFu;
+    uint recs = 1u + nb * CPL_BODY_RECS + ns * CPL_SHAPE_RECS + (h.w >> 16);
+    uint base = h.y + v * recs;
+    uint4 hdr = gMisc[base];
+    for (uint j = lane, jStop = EB_END(j, min(hdr.x, nb), LANES); j < jStop; j += LANES)
     {
-        uint b = cplBody(v, j);
+        uint b = base + 1u + j * CPL_BODY_RECS;
         float4 c = asfloat(gMisc[b]);
         gMisc[b] = asuint(float4(c.xyz - first, c.w));
     }
-    for (uint k = lane, kStop = EB_END(k, hdr.y, LANES); k < kStop; k += LANES)
+    for (uint k = lane, kStop = EB_END(k, min(hdr.y, ns), LANES); k < kStop; k += LANES)
     {
-        uint at = cplShape(v, k) + 6u;
+        uint at = base + 1u + nb * CPL_BODY_RECS + k * CPL_SHAPE_RECS + 6u;
         float4 r = asfloat(gMisc[at]);
         gMisc[at] = asuint(float4(r.xyz - first, r.w));
     }
@@ -595,7 +623,7 @@ void cplCount(uint v, uint lane)
 // The same over `lanes` lanes.
 void cplCountBy(uint v, uint lane, uint lanes)
 {
-    uint4 hdr = gMisc[cplBase(v)];
+    uint4 hdr = cplVeh(v);
     if (hdr.y == 0u) return;
     uint4 r0 = gStatic[v * 4u];
     float3 origin = asfloat(gMisc[v].xyz);

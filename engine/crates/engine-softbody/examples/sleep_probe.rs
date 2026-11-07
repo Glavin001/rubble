@@ -37,6 +37,7 @@ fn main() {
         let settings = ExplicitBeamsSettings {
             turbulence: false,
             drag: false,
+            centred_damping: args.iter().any(|a| a == "centred=1"),
             ..Default::default()
         };
         ExplicitBeams::from_desc_jbeam_with(
@@ -75,6 +76,10 @@ fn main() {
         )
         .unwrap()
     };
+    // centred=1: centred damping on (the BeamNG profile's default; JBeam elements only).
+    if args.iter().any(|a| a == "centred=1") {
+        sim.settings.centred_damping = true;
+    }
     let lift = sim.spawn_clearance() - sim.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
     // x=<m>: the vehicle moved along x (the rounding of every position changes).
     let dx: f32 = args

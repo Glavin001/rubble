@@ -2508,7 +2508,7 @@ impl ExplicitBeams {
                 self.segments.push(RailSegment { beam, prev, next });
             }
             // The nearest segment (ties: the earliest).
-            let x = self.origin + self.nodes[sn.node as usize].pos;
+            let x = Vec3::ZERO + self.nodes[sn.node as usize].pos;
             let mut best = (base, f32::INFINITY);
             for seg in base..base + n {
                 let d = self.segment_distance(seg, x).1;
@@ -2521,12 +2521,12 @@ impl ExplicitBeams {
         }
     }
 
-    /// The nearest point of segment `seg` to world point `x`, its distance and its
-    /// ratio along the segment.
+    /// The nearest point of segment `seg` to point `x` (in the vehicle's frame: relative
+    /// to its origin), its distance and its ratio along the segment.
     fn segment_distance(&self, seg: u32, x: Vec3) -> (Vec3, f32, f32) {
         let b = &self.beams[self.segments[seg as usize].beam as usize];
-        let p1 = self.origin + self.nodes[b.a as usize].pos;
-        let p2 = self.origin + self.nodes[b.b as usize].pos;
+        let p1 = Vec3::ZERO + self.nodes[b.a as usize].pos;
+        let p2 = Vec3::ZERO + self.nodes[b.b as usize].pos;
         segment_point(p1, p2, x)
     }
 
@@ -3835,7 +3835,10 @@ impl ExplicitBeams {
             if self.beams[self.segments[cur as usize].beam as usize].broken {
                 continue;
             }
-            let x = self.origin + self.nodes[self.slides[i].node as usize].pos;
+            // The vehicle's frame (positions relative to its origin, as the kernel's
+            // SLIDE_FRAME): the rail distance keeps its precision far from the World's
+            // origin (World positions at 4 km are 0.24 mm apart).
+            let x = Vec3::ZERO + self.nodes[self.slides[i].node as usize].pos;
             // At most one segment's hop: the previous one if nearer, then the next
             // one if nearer still.
             let mut best = (cur, self.segment_distance(cur, x));

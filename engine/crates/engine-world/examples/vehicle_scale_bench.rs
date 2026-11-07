@@ -20,7 +20,8 @@
 //!
 //! Environment: VS_WARM (steps before the measured ones, default 120), VS_STEPS (measured,
 //! 120), VS_SETTLE (steps parked cars settle before the measured ones, 480), VS_HZ (120),
-//! VS_SLEEP=0 (vehicle sleep off; the World's default is on), VS_LABEL (a CSV column).
+//! VS_SLEEP=0 (vehicle sleep off; the World's default is on), VS_LABEL (a CSV column),
+//! VS_CAR (sedan, etkk or fixture: [`template`]).
 //!
 //! cargo run --release -p engine-world --example vehicle_scale_bench -- fleet 64 128
 //! (one run at a time; bounded: perl -e 'alarm 900; exec @ARGV' ...).
@@ -29,6 +30,57 @@ use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
 use glam::Vec3;
 use rubble::explicit_scene::place_vehicle;
 use rubble::*;
+
+/// The template car: VS_CAR=sedan (the repo sedan, RoR profile, beam tyres: default),
+/// etkk (the ETK K-series kr6, community JBeam, BeamNG profile, raycast wheels, as the
+/// vehicle-compare harness spawns it; RUBBLE_ETK: its `vehicles` directory, default
+/// ~/Downloads/jbeams/etkk_lucasbe/vehicles) or fixture (the JBeam fixture car, BeamNG
+/// profile, pressure wheels; the harness's settings, as the ETK).
+fn template() -> ExplicitBeams {
+    match std::env::var("VS_CAR").as_deref() {
+        Ok("etkk") => {
+            let dir = std::env::var("RUBBLE_ETK").unwrap_or_else(|_| {
+                format!(
+                    "{}/Downloads/jbeams/etkk_lucasbe/vehicles",
+                    std::env::var("HOME").unwrap()
+                )
+            });
+            let dir = std::path::Path::new(&dir);
+            let files = engine_softbody::jbeam::read_vehicle_dir(dir, "etkk").expect("etkk");
+            let refs: Vec<(&str, &str)> = files
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect();
+            let pc = std::fs::read_to_string(dir.join("etkk/kr6.pc")).expect("kr6.pc");
+            let desc = engine_softbody::jbeam::load_jbeam(&refs, Some(&pc)).unwrap();
+            ExplicitBeams::from_desc_jbeam_raycast(
+                &desc,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                engine_softbody::vehicle_compare::settings(),
+            )
+            .unwrap()
+            .0
+        }
+        Ok("fixture") => {
+            let d = engine_softbody::jbeam::load_jbeam(
+                &[("t.jbeam", engine_softbody::jbeam_fixture::PART2_CAR)],
+                None,
+            )
+            .unwrap();
+            ExplicitBeams::from_desc_jbeam_with(
+                &d,
+                engine_softbody::explicit_beams::JbeamWheels::Pressure,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                engine_softbody::vehicle_compare::settings(),
+            )
+            .unwrap()
+            .0
+        }
+        _ => sedan(),
+    }
+}
 
 fn sedan() -> ExplicitBeams {
     let text = std::fs::read_to_string(concat!(
@@ -185,7 +237,7 @@ fn main() -> anyhow::Result<()> {
     let warm: u32 = env("VS_WARM", 120);
     let steps: u32 = env("VS_STEPS", 120);
     let settle: u32 = env("VS_SETTLE", 480);
-    let t = sedan();
+    let t = template();
     let len = {
         let (lo, hi) = t.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| {
             (a.min(n.pos), b.max(n.pos))
@@ -327,12 +379,16 @@ fn main() -> anyhow::Result<()> {
                 let cp = l / cc as f32;
                 let cars: Vec<ExplicitBeams> = (0..nc)
                     .map(|i| {
-                        // Between the buildings.
-                        let at = Vec3::new(
-                            (i % cc) as f32 * cp - 0.5 * l + 0.5 * pitch,
-                            0.0,
-                            (i / cc) as f32 * cp - 0.5 * l + 0.5 * pitch,
-                        );
+                        // Between the buildings: the car's middle at the middle of a
+                        // building cell (its lattice point snapped to the cell it falls
+                        // in). Before 2026-11-06 the cars sat at multiples of the car
+                        // pitch plus half a building pitch, which put one car in four on a
+                        // building (the car pitch is 2.5 building pitches): those cars
+                        // never slept.
+                        let cell = |k: usize| {
+                            ((k as f32 * cp / pitch).floor() + 0.5) * pitch - 0.5 * l
+                        };
+                        let at = Vec3::new(cell(i % cc), 0.0, cell(i / cc) + 0.5 * len);
                         place_vehicle(&t, at, 0, 0.0, 0.0)
                     })
                     .collect();
