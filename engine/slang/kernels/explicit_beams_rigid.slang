@@ -117,23 +117,45 @@ float4 cplQmul(float4 a, float4 b)
     return float4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz));
 }
 
+// A proxy shape's rotation in the vehicle frame: its body's, then its own.
+float4 cplShapeRot(float4 q, float4 lq)
+{
+    return normalize(cplQmul(q, lq));
+}
+
+// --- The shapes' step frames (lossless; with the shape cull) ---
+// cplFace read a shape's record, then its body's, and turned its position and rotation
+// for every node it tested, the same each time within a step (the bodies move only in
+// the step's integration). The spheres' pass (cplSpheresBy, a lane a shape, after the
+// integration) computes them once with the same expressions and writes them beside
+// the shape's sphere (CPL_SPHERE_WORDS words of gNext a shape): centre (the sphere's
+// words 0..2), rotation (4..7), the shape's p1, p2, cull radius (8..11, its record 3),
+// p0 (12), kind (13), planes (14). With the cull on, cplFace reads them (cplFaceFrame).
+static const uint CPL_SPHERE_WORDS = 16u;
+uint cplSphere(uint v, uint k);
+float4 cplFaceFrame(uint v, uint k, float3 x);
+bool cplCullOn();
+void cplFrameStore(uint s, uint4 h, float4 lp, float4 pr, float4 r)
+{
+    gNext[s + 4u] = asuint(r.x);
+    gNext[s + 5u] = asuint(r.y);
+    gNext[s + 6u] = asuint(r.z);
+    gNext[s + 7u] = asuint(r.w);
+    gNext[s + 8u] = asuint(pr.x);
+    gNext[s + 9u] = asuint(pr.y);
+    gNext[s + 10u] = asuint(pr.z);
+    gNext[s + 11u] = asuint(pr.w);
+    gNext[s + 12u] = asuint(lp.w);
+    gNext[s + 13u] = h.x;
+    gNext[s + 14u] = h.w;
+}
+
 // The outward normal (.w 1) of the proxy shape's surface nearest x, for x strictly
 // inside the shape, else .w 0 (the box rule; CPU `ProxySet::face`).
-float4 cplFace(uint v, uint k, float3 x)
+// cplFace past the cull: x's offset d from the shape's centre, its rotation r, kind
+// and planes h (.x, .w), p0 (lp.w) and p1, p2 (pr.x, pr.y).
+float4 cplFaceLocal(uint v, uint4 h, float4 lp, float4 pr, float4 r, float3 d)
 {
-    uint at = cplShape(v, k);
-    uint4 h = gMisc[at];
-    uint b = cplBody(v, h.y);
-    float3 c = asfloat(gMisc[b].xyz);
-    float4 q = asfloat(gMisc[b + 1u]);
-    float4 lp = asfloat(gMisc[at + 1u]);
-    float4 lq = asfloat(gMisc[at + 2u]);
-    float4 pr = asfloat(gMisc[at + 3u]);
-    float3 p = c + cplRot(q, lp.xyz);
-    float3 d = x - p;
-    // Cull: the shape's bounding sphere.
-    if (dot(d, d) >= pr.z * pr.z) return float4(0.0, 0.0, 0.0, 0.0);
-    float4 r = normalize(cplQmul(q, lq));
     float3 l = cplRot(float4(-r.xyz, r.w), d);
     if (h.x == CPL_BOX)
     {
@@ -184,6 +206,40 @@ float4 cplFace(uint v, uint k, float3 x)
     return float4(cplRot(r, n), 1.0);
 }
 
+float4 cplFace(uint v, uint k, float3 x)
+{
+    if (cplCullOn()) return cplFaceFrame(v, k, x);
+    uint at = cplShape(v, k);
+    uint4 h = gMisc[at];
+    uint b = cplBody(v, h.y);
+    float3 c = asfloat(gMisc[b].xyz);
+    float4 q = asfloat(gMisc[b + 1u]);
+    float4 lp = asfloat(gMisc[at + 1u]);
+    float4 lq = asfloat(gMisc[at + 2u]);
+    float4 pr = asfloat(gMisc[at + 3u]);
+    float3 p = c + cplRot(q, lp.xyz);
+    float3 d = x - p;
+    // Cull: the shape's bounding sphere.
+    if (dot(d, d) >= pr.z * pr.z) return float4(0.0, 0.0, 0.0, 0.0);
+    float4 r = cplShapeRot(q, lq);
+    return cplFaceLocal(v, h, lp, pr, r, d);
+}
+
+// cplFace from the step frames (cplFrameStore): the same values, read, not recomputed.
+float4 cplFaceFrame(uint v, uint k, float3 x)
+{
+    uint s = cplSphere(v, k);
+    float3 p = asfloat(uint3(gNext[s], gNext[s + 1u], gNext[s + 2u]));
+    float4 pr = asfloat(uint4(gNext[s + 8u], gNext[s + 9u], gNext[s + 10u], gNext[s + 11u]));
+    float3 d = x - p;
+    // Cull: the shape's bounding sphere.
+    if (dot(d, d) >= pr.z * pr.z) return float4(0.0, 0.0, 0.0, 0.0);
+    float4 r = asfloat(uint4(gNext[s + 4u], gNext[s + 5u], gNext[s + 6u], gNext[s + 7u]));
+    uint4 h = uint4(gNext[s + 13u], 0u, 0u, gNext[s + 14u]);
+    float4 lp = float4(0.0, 0.0, 0.0, asfloat(gNext[s + 12u]));
+    return cplFaceLocal(v, h, lp, pr, r, d);
+}
+
 // --- The per-step shape cull (lossless; engine/docs/explicit-vehicles-in-world.md §6) ---
 // Every node tests every proxy shape of its vehicle (cplCount, cplContacts), and a
 // shape whose bounding sphere does not hold the node returns nothing at once
@@ -198,7 +254,7 @@ float4 cplFace(uint v, uint k, float3 x)
 //
 // gNext at gMisc[coupleRec() + 1].y, per vehicle S x 4 words: per shape (centre,
 // grown radius squared) (engine_exec::explicit_plan coupling layout).
-uint cplSphere(uint v, uint k) { return cplHdr(4u) + (v * cplS() + k) * 4u; }
+uint cplSphere(uint v, uint k) { return cplHdr(4u) + (v * cplS() + k) * CPL_SPHERE_WORDS; }
 bool cplCullOn() { return (gsCpl[0] & 2u) == 0u; }
 
 // The spheres in workgroup memory as well (the same words): the frame's vehicle, or a
@@ -287,6 +343,7 @@ void cplSpheresBy(uint v, uint lane, uint lanes)
         gNext[s + 1u] = w.y;
         gNext[s + 2u] = w.z;
         gNext[s + 3u] = w.w;
+        cplFrameStore(s, h, lp, pr, cplShapeRot(q, asfloat(gMisc[at + 2u])));
         if (k < gr.y)
         {
             uint g = CPL_GS_SPH + 4u * (gr.x + k);

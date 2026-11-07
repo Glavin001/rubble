@@ -198,6 +198,8 @@ pub const TRI_PAIR_CAP: usize = 8192;
 /// gBeams records per self-collision triangle of its per-step geometry (the kernel's
 /// `TRI_GEO_RECS`, `triGeoFill`).
 pub const TRI_GEO_RECS: usize = 9;
+/// gNext words per proxy shape of its sphere and step frame (the kernel's `CPL_SPHERE_WORDS`).
+pub const CPL_SPHERE_WORDS: u32 = 16;
 /// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
 /// `sleepRec`; after centred damping's word 84). The next word is the awake-list flag.
 pub const W_SLEEP: usize = 85;
@@ -1628,10 +1630,11 @@ impl ExplicitUpload {
                 CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
             acc_init.extend(std::iter::repeat_n(0, layout.acc_words() as usize));
-            // The shape cull's spheres (`explicit_beams_rigid.slang` `cplSpheres`): per
-            // vehicle and shape 4 words of gNext, rewritten every step.
+            // The shape cull's spheres and the shapes' step frames (`explicit_beams_rigid.slang`
+            // `cplSpheres`, `cplFrameStore`): per vehicle and shape CPL_SPHERE_WORDS words of
+            // gNext, rewritten every step.
             let cull_base = next_len as u32;
-            next_len += (4 * cap.shapes * nv as u32) as usize;
+            next_len += (CPL_SPHERE_WORDS * cap.shapes * nv as u32) as usize;
             misc[couple_rec] = [
                 0,
                 layout.misc_base,
