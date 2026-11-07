@@ -93,6 +93,59 @@ fn main() -> anyhow::Result<()> {
             Some(s)
         }
     };
+    // BR_CPU=1: the car alone on the CPU reference (no World, no GPU): from z = 60 at
+    // BR_SPEED on full throttle across the origin rebase radius (100 m), each frame
+    // checked for non-finite nodes.
+    if std::env::var("BR_CPU").as_deref() == Ok("1") {
+        let t = template
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("BR_CPU needs BR_CAR"))?;
+        let speed = env_f("BR_SPEED", 20.0);
+        let mut sim = rubble::explicit_scene::place_vehicle(
+            t,
+            glam::Vec3::new(0.0, 0.5, 60.0),
+            0,
+            speed,
+            0.5,
+        );
+        if let Some(d) = sim.drive.as_mut() {
+            d.roll(speed);
+        }
+        sim.set_drive_input(DriveInput {
+            forward: 1.0,
+            ..Default::default()
+        });
+        for f in 1..=(env_f("BR_SECS", 4.0) * 60.0) as u32 {
+            let o0 = sim.origin;
+            sim.frame();
+            let bad = sim
+                .nodes
+                .iter()
+                .filter(|n| !n.pos.is_finite() || !n.vel.is_finite())
+                .count();
+            let c = sim.nodes.iter().map(|n| n.pos).sum::<glam::Vec3>() / sim.nodes.len() as f32
+                + sim.origin;
+            if f % 15 == 0 || bad > 0 || sim.origin != o0 {
+                println!(
+                    "frame {f}: centroid ({:.2}, {:.2}, {:.2}), origin {:?}{}{}",
+                    c.x,
+                    c.y,
+                    c.z,
+                    sim.origin,
+                    if sim.origin != o0 { " REBASED" } else { "" },
+                    if bad > 0 {
+                        format!(" {bad} NON-FINITE")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            if bad > 0 {
+                break;
+            }
+        }
+        return Ok(());
+    }
     let demo = RingSpec::demo();
     let ring = RingSpec {
         scale: env_f("BR_SCALE", demo.scale),
