@@ -93,6 +93,64 @@ frame-locked, recorded with `brick-ring-drive-record.mjs`):
 
 Stills: `docs/media/brick-ring-drive/`.
 
+## The ETK in real time: with perf/explicit-2khz (2026-11-07)
+
+Branch `demo/brick-ring-etk-realtime`: `demo/crash-orbit` with `perf/explicit-2khz` merged
+(the explicit 2 kHz frame's lossless speed-ups, bit-identical). There were no conflicts: the
+ring drive does not touch the explicit Params (88 loop budget, 89 triangle geometry, 90
+grid-walk pairs, 91 pad). Checks on the merge, each under the GPU lock and a kill timer:
+`engine-world` `explicit_drive_world` (the sedan driven through the World matches the CPU
+reference bit for bit across the origin rebase) and `explicit_vehicles`, and `engine-webgpu`
+`explicit_beams_bitwise`, `explicit_contact_gpu` and `explicit_loop_cap`. All pass.
+
+**Chrome, headless, interleaved A/B** (`tools/brick-ring-drive/chrome-ab.sh`: two rounds,
+base then merged, each run its own Chrome under `with-gpu-lock.py`). The base is the
+a86e3f52 build. Each case is the page's own real-time loop (`?auto=1&timing=phases`). GPU
+times are per World step, rigid · vehicle, read each second.
+
+| Case | Base a86e3f52: steps/s | GPU ms | Merged: steps/s | GPU ms |
+|---|---|---|---|---|
+| ETK, cruising (ring asleep, 85–110 km/h) | 55–58 | 15.5–16.4 (2.2–3.5 · 13.2–13.5) | **60** | 9.5–10.6 (1.7–2.8 · 7.8–8.0) |
+| ETK, through the wall to rest | 39–59 | 15.4–19.5 (1.6–2.5 · 14.5–17.2) | **58–60** | 9.5–14.7 (1.7–2.4 · 8.5–12.5) |
+| Two ETKs, cruising | 44–56 | 15.1–16.7 (1.3–2.3 · 13.4–14.3) | **60** | 9.5–11.0 (1.3–3.6 · 7.9–8.1) |
+| Two ETKs, through the wall (touching) | 20–48 | 15.2–19.5 (1.2–1.8 · 15–21) | 26–57 | 9.4–29.9 (1.5–2.7 · 10–21.3) |
+| Sedan, cruising | 60 | 2.9–3.0 (0.6–0.7 · 2.4–2.6) | 60 | 2.9–3.0 (0.6–0.7 · 2.4–2.5) |
+| Sedan, in the wall | 60 | 9.0–9.5 (1.6–2.2 · 5.5–7.5) | 60 | 9.0–9.5 (1.6–2.2 · 5.6–7.5) |
+| The ring alone, demo.html `?scene=ring110k&sleep=on`, wall ms a step (`ring-alone-chrome.mjs`, still settling: 65k → 26k awake) | | 5.3–9.2 | | 5.0–9.5 |
+
+- **The ETK is real time in Chrome.** On the merged build, live and not frame-locked, the
+  single ETK holds 60 World steps/s from the run-up through the strike to rest (58–60).
+  Its own frame went from 13.2–13.5 to 7.8–8.0 ms a step cruising. With the crushed car in
+  the bricks it costs 8.5–12.5 ms, against 14.5–17.2 ms before.
+- **Not real time: the first 2–3 s of a fresh page.** The 110k ring is settling into sleep
+  (110k → 30k awake, rigid 20–30 ms a step) and runs at 15–50 steps/s on both builds. That
+  is the ring's own cost, not the car's.
+- **Two ETKs** run in real time on the run-up. Through the wall, the two cars touch and are
+  solved as one explicit contact group, and the rate falls to 26–57 steps/s.
+  `?timing=phases` segments after the wall (Chrome): "explicit contact groups" 21.3 ms a
+  step, against 3.4 ms for "explicit solo vehicles" and 2.5 ms for the rigid passes.
+  Natively the same (`tools/brick-ring-drive/native-wall.sh`, struck at 30 m/s): one ETK's
+  solo frame is 12.8 ms; two ETKs touching cost 28.1 ms in "explicit large contact groups"
+  and 24.4 ms in "explicit contact groups" (means over the steps that have them), a median
+  of 75 ms a step. Native Metal is worse than Chrome there. The next step is a lossless
+  parallel solve of a contact group: the group's vehicles spread over workgroups and
+  exchange contacts, so they are not solved on one workgroup.
+  `perf/explicit-2khz` measured the same kind of cost for the page car's group of four
+  (18 ms).
+- The sedan and the ring alone are unchanged (within the runs' spread).
+
+**Videos v2** (`~/Development/rubble-artifacts/brick-ring-drive/`, recorded on the merged
+build; the old clips are kept):
+- `brick-ring-drive-etk-v2.mp4`: the ETK (strike at 6.43 s, 15.4 s real time plus 12.3 s
+  of ×4 replays);
+- `brick-ring-drive-etk2-v2.mp4`: two ETKs, the same script.
+
+The recorder steps the World frame-locked (one 1/60 s step per video frame), so a clip's
+pacing does not depend on the machine. What changed is that the single-ETK clip now matches
+what the live page does in Chrome: 60 World steps/s, wall clock. The two-car clip is
+real time up to the strike. After the cars touch, the live page runs at 26–57 steps/s.
+Stills: `out/stills-v2/` in the worktree (not committed; community car).
+
 ## The cars after the wall (crash orbit)
 
 `crash-orbit.mjs` (engine-webgpu) runs the scripted drive frame-locked, saves the car at
