@@ -1018,6 +1018,53 @@ per World step median; native: `EV_PAGE=1 explicit_vehicles_bench`, the first 2 
 | 4 | 2 FPS, frame 758 ms | 56 FPS, 34 steps/s (56 %); 25 ms (frame 22) | 60 FPS, 34 steps/s | 17.2 ms (not real time either) |
 | 16 | 1 FPS, frame 1,458 ms | 20 FPS, 12 steps/s (20 %); 78 ms (frame 76) | 20 FPS, 12 steps/s | 9.1 ms |
 
+### 12.1 Round 2: n = 4 and 16, `cpl_emit` (2026-11-07)
+
+**n = 16 is not a Chrome compiler pathology.** The large contact groups' kernel bisected
+in Chrome (one edited module, phases switched off at run time, same pipeline): the
+coupling, the members' steps and the contact pass each cost their share (73 → 53–61 ms
+with any one off); none dominates. What differs from native is the groups: natively the
+town keeps 8 groups of 2 (1 m frame-bounds margin throughout, `EV_GROUPS=1`); in Chrome
+the four cars that enter their houses from −x (vehicles 3, 7, 11, 15) report "left its
+frame bounds" from about World step 50, and each report doubled the fleet's margin to
+4 m, which groups all 16 cars into one large group stepped by one workgroup. Natively a
+4 m margin does the same: one group of 16, the large groups' kernel 69 ms
+(`EV_MARGIN=4 EV_PHASES=1`), Chrome's 73–83 ms. Chrome's Metal compile runs without fast
+math (naga's MSL on native wgpu compiles with Metal's default fast math), so the crash
+diverges; native never reports a bounds error in 300 steps of this town. Why those four
+cars' nodes leave their bounds in Chrome (sampled between steps, no car is outside its
+box: the excursions are within frames) is open.
+
+**Per-vehicle margins (lossless).** A frame-bounds error now widens only that vehicle's
+margin (`ExplicitBeamsGpu::set_vehicle_contact_margin`; `VV_MEMBER .y`, read by
+`explicit_beams_vv_bounds` in its own function behind an early return, so the fleet's
+path keeps its codegen: the frozen-reference bitwise suite still passes). A margin
+changes only which vehicles step together: `a_vehicle_contact_margin_changes_no_result`
+(16 cars, groups [2, 2, 2, 2] against [16], every state and coupling word equal).
+Natively with vehicle 15 at 4 m the town keeps 6 groups ([2 ×5, 6]): large groups
+13.6 ms against 69 ms with the fleet's margin at 4 m. In Chrome the four −x cars still
+widen to 4–8 m each, so the groups still merge: 83 ms.
+
+**`cpl_emit` a lane a shape (lossless).** 64 lanes a vehicle, shape k by lane k % 64; each
+record its pair's first shape's, its sums in shape order as before; the rigid step sums a
+body's records by key, so the append order does not matter
+(`the_coupling_emit_in_parallel_is_the_serial_walk`: the records word for word against
+the one-lane walk). Native 1.08 → 0.08 ms; Chrome 1.6 → 0.11 ms.
+
+**n = 4 natively (17–18 ms).** `EV_SPAN=1`: 18.3 ms; without vehicle–vehicle contact
+5.6 ms; without the coupling 13.2 ms. The four cars meet inside one house and form one
+contact group of four (`EV_GROUPS=1`), which one workgroup steps for all four cars with
+the contact pass between them: about 12.7 ms of the 18.3. A group's members on one
+workgroup is the design's limit here; no lossless change was found this round (options:
+more lanes for a group's workgroup, or a group's members' independent phases across
+workgroups between its contact passes). Chrome: the same group, 22.3 ms.
+
+| n | Chrome (headless, after round 2) | native (`EV_PAGE=1`) |
+|---|---|---|
+| 1 | 60 FPS, 60 World steps/s; GPU 10.4 ms (`?timing=phases`; frame 8.0, `cpl_emit` 0.12) | 4.15 ms |
+| 4 | 60 FPS, 37 World steps/s (62 %); 23.8 ms (contact group 22.3) | 18.3 ms |
+| 16 | 19 FPS, 11 World steps/s (18 %); 84.6 ms (large group 83.0) | 9.1 ms (groups of 2) |
+
 **Remaining (n ≥ 4).** With `?timing=phases` the explicit frame is timed per dispatch:
 at 16 cars the large contact groups' kernel (`explicit_beams_contact`, groups of more than
 four) is 73 ms a step in Chrome against 6.9 ms natively (`EV_PHASES=1`); the coupling is
@@ -1025,3 +1072,53 @@ not the cause there (73 → 47 ms with it off, in a different state). The next s
 same-pipeline switch bisection (`debugSetExplicitContactBigWgsl`) on that kernel. At 4 cars
 in one house the town is over a 60 Hz step's budget natively too (17 ms). `cpl_emit` (one
 lane per vehicle over its proxy shapes, O(shapes²)) is 1.1 ms natively, 1.6 ms in Chrome.
+
+### 12.2 The −x cars' bounds errors: a wrong box from the node loop (2026-11-07)
+
+**Symptom.** In Chrome at 16 cars the small contact groups' kernel (groups of two, 512
+lanes, 256 a member) reported frame-bounds errors for vehicles 3, 7, 11 and 15. Each
+report widened that vehicle's margin to 4–8 m, the groups merged, and the large groups'
+kernel took 73–83 ms a step. Native wgpu never reported one.
+
+**What was wrong.** Each member's box was kept as the node loop's running min and max,
+read back after each node's update. In Chrome's build of that loop the lanes past the
+last full stride returned a box that held one more point: the position of global node 0
+(vehicle 0's first node). This happened in every member, every step, from the lane of
+local node 208 (463 nodes, 256 lanes a member: lanes 0–206 take two nodes, the rest one).
+The positions stored between steps were right. Evidence, all in Chrome on one build:
+- the bogus extreme, (−0.80, 0.31, 17.3), was the same world point for every member, and
+  matched global node 0 within 5 cm when read from the node buffer;
+- it needed Dawn's bounds-checked MSL: `--enable-dawn-features=disable_robustness`
+  (diagnosis only) gave no reports;
+- it needed the coupled node path to scan the proxy shapes. The runtime knob
+  `coupling:0` gave no reports, and neither did `couplingRanges:1` (most nodes return
+  early). `couplingCache:0` and `couplingCull:0` still reported;
+- extra code in paths that never run here kept the reports: an atomic in
+  `selfSerialMerge`, in `vvTriangleCandsApply`, or in `contactMemberEnd` (same pipeline,
+  through `debugSetExplicitContactWgsl`). Moving the box out of the node loop removed them.
+
+No undefined behaviour was found in the source. The audit covered the per-lane node
+loops and their bounds, the coupling's workgroup words and their barriers, the uniform
+loads, the thread-local arrays and the integer conversions. The front end's AIR of
+Tint's MSL (`xcrun metal -emit-llvm`) computes the box correctly. So the fault is in how
+Apple's back end compiles that loop in the bounds-checked form; it was not reduced
+further.
+
+**Fix (lossless).** `memberBox` (the former `centredBox`) builds the box in its own pass
+after the node phase, each lane reading back the positions it wrote. Both member steps
+use it (the small groups' `contactMembersStep` and the large groups' `contactMemberStep`).
+It has the same positions, keys and bounds check as before. The bitwise and parity
+suites pass: engine-webgpu bitwise, contact, `explicit_beams_gpu`, rigid and sleep;
+engine-world `explicit_vehicles`; Metal `explicit_parity`, `vehicle_parity` and
+`explicit_drive_parity`.
+
+**§8.3's split.** e3db9c96's form (the small module calls `contactMembersStep` and
+`vvPassSmall` with no `k` guard) now passes the five two-body tests, with this fix and
+without it. The split itself landed in 953a34df, so the 0.19 m failure no longer
+reproduces. This fix cannot be credited for it.
+
+| n | Chrome (headless, `?timing=phases`, after the fix) | before |
+|---|---|---|
+| 1 | 60 FPS, 34 World steps/s (GPU shared with another session); 7.2 ms (solo frame 5.4) | 10.4 ms |
+| 4 | 60 FPS, 22 World steps/s; 23.4 ms (contact groups 21.9) | 23.8 ms |
+| 16 | 55 FPS, 19 World steps/s; 26.4 ms (contact groups 24.4, large groups 0); margins 1 m, no bounds reports in 440 steps | 84.6 ms, 11 steps/s |

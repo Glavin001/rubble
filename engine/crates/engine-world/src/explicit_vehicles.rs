@@ -568,6 +568,40 @@ impl ExplicitVehicles {
         out
     }
 
+    /// Tests: the last window's impulse records as `cpl_emit` writes them (`serial`: on one
+    /// lane, the shapes in order), sorted by key; the impulse list left as it was. Blocking.
+    pub fn emit_records(
+        &mut self,
+        sim: &engine_webgpu::WgpuSim,
+        steps: u32,
+        ingest: Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u32)>,
+        serial: bool,
+    ) -> Vec<[u32; 8]> {
+        use engine_schema::{IMPULSE_BASE, IMPULSE_COUNT};
+        let read = |at: u32, words: u32| {
+            engine_webgpu::explicit_coupling::read_words(sim.device(), sim.queue(), sim.scratch_buffer(), u64::from(at) * 4, u64::from(words) * 4)
+        };
+        let count0 = read(IMPULSE_COUNT, 1)[0];
+        self.serial_plan = serial;
+        self.write_params(sim, steps, ingest.map_or(0, |i| i.3), None);
+        self.serial_plan = false;
+        let group = self.bind(sim, ingest);
+        let mut enc = sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_bind_group(0, &group, &[]);
+            pass.set_pipeline(&self.pipes[5]);
+            pass.dispatch_workgroups_indirect(&self.list_args, 0);
+        }
+        sim.queue().submit([enc.finish()]);
+        let count1 = read(IMPULSE_COUNT, 1)[0].min(engine_schema::IMPULSE_CAP);
+        let words = read(IMPULSE_BASE + 8 * count0, 8 * count1.saturating_sub(count0).max(1));
+        sim.queue().write_buffer(sim.scratch_buffer(), u64::from(IMPULSE_COUNT) * 4, bytemuck::bytes_of(&count0));
+        let mut recs: Vec<[u32; 8]> = words.chunks_exact(8).take(count1.saturating_sub(count0) as usize).map(|c| c.try_into().unwrap()).collect();
+        recs.sort_by_key(|r| (r[1], r[0]));
+        recs
+    }
+
     fn cand_cap(&self) -> u32 {
         3 * self.layout.cap.shapes
     }
@@ -866,6 +900,19 @@ impl World {
         };
         let steps = (f64::from(self.sim.params().dt) / f64::from(engine_softbody::explicit_beams::STEP)).round() as u32;
         let out = x.replan_words(&self.sim, steps, self.fracture.vehicle_ingest().ok().flatten(), serial);
+        self.explicit = Some(x);
+        out
+    }
+
+    /// Tests: the last window's impulse records from `cpl_emit` (lane-parallel, or
+    /// `serial` on one lane), sorted by key, the World's impulse list left as it was.
+    #[doc(hidden)]
+    pub fn explicit_emit_records(&mut self, serial: bool) -> Vec<[u32; 8]> {
+        let Some(mut x) = self.explicit.take() else {
+            return Vec::new();
+        };
+        let steps = (f64::from(self.sim.params().dt) / f64::from(engine_softbody::explicit_beams::STEP)).round() as u32;
+        let out = x.emit_records(&self.sim, steps, self.fracture.vehicle_ingest().ok().flatten(), serial);
         self.explicit = Some(x);
         out
     }

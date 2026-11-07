@@ -196,6 +196,10 @@ const VV_PLAN_STEPS: u32 = 34;
 /// Params words of vehicle contact: on, the frame bounds margin.
 const W_VV_ON: usize = 39;
 const W_VV_MARGIN: usize = 57;
+/// The Params word of the vehicle-contact records' base in gMisc (the kernel's vvVeh).
+const W_VV_VEH: usize = 43;
+/// The kernel's VV_MEMBER record (`.y`: the vehicle's own frame-bounds margin, f32 bits).
+pub const VV_MEMBER_REC: u32 = 5;
 /// The kernel's VV_RECS, VV_SLOTS and the counters' words (VV_CTL_WORDS).
 pub const VV_RECS: usize = 6;
 const VV_SLOTS: usize = 8;
@@ -2244,6 +2248,11 @@ impl FramePlanner {
         );
         self.words[W_VV_MARGIN] = metres.to_bits();
         self.contact.left = 0;
+    }
+
+    /// The gMisc record `r` of vehicle `v`'s vehicle-contact records (the kernel's vvRec).
+    pub fn vv_record(&self, v: u32, r: u32) -> u32 {
+        self.words[W_VV_VEH] + v * VV_RECS as u32 + r
     }
 
     /// The frame bounds margin (m).

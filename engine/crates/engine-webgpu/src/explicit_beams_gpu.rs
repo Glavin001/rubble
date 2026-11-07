@@ -72,6 +72,12 @@ pub struct ExplicitBeamsGpu {
     /// Diagnostic: the large contact groups' pipeline from an edited module
     /// ([`Self::debug_set_contact_big_wgsl`]).
     debug_big: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    /// Diagnostic: the solo and the contact groups' pipelines from edited modules.
+    debug_solo: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    debug_groups: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    /// Per vehicle its own frame-bounds margin (m, 0: the fleet's), widened when it
+    /// left its frame bounds ([`Self::vehicle_contact_margin`]).
+    vehicle_margins: Vec<f32>,
     surface_pairs_off: bool,
     surface_culls_off: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
@@ -364,6 +370,12 @@ fn module_wgsl(name: &str) -> &'static str {
             .map(|(_, w)| *w)
             .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
     }
+}
+
+/// The vehicle a "left its frame bounds" error names.
+fn left_vehicle(e: &str) -> Option<u32> {
+    let head = e.split(" left its frame bounds").next()?;
+    head.rsplit(' ').next()?.parse().ok()
 }
 
 /// The most a frame-bounds error widens the contact margin to (m).
@@ -707,6 +719,7 @@ impl ExplicitBeamsGpu {
         let buffers = [
             &params, &statics, &lists, &nodes, &beams, &acc, &groups, &misc, &next,
         ];
+        let vehicles_n = layout.spans.len();
         let wide = layout
             .wide_ok
             .then(|| Wide::new(device, queue, &buffers, upload.table_records()));
@@ -762,6 +775,9 @@ impl ExplicitBeamsGpu {
             debug_coupling_bits: 0,
             coupling_ranges_off: coupling_node_ranges_off_default(),
             debug_big: None,
+            debug_solo: None,
+            debug_groups: None,
+            vehicle_margins: vec![0.0; vehicles_n],
             surface_pairs_off: std::env::var("RUBBLE_SURFACE_PAIRS").as_deref() == Ok("0"),
             surface_culls_off: std::env::var("RUBBLE_SURFACE_CULLS").as_deref() == Ok("0"),
             wide,
@@ -844,35 +860,72 @@ impl ExplicitBeamsGpu {
     /// Diagnostic: the large contact groups' module's WGSL as its pipeline compiles it.
     #[doc(hidden)]
     pub fn debug_contact_big_wgsl(&self) -> String {
+        self.debug_contact_wgsl("big")
+    }
+
+    /// Diagnostic: a contact module's WGSL (`which`: "solo", "groups" or "big").
+    #[doc(hidden)]
+    pub fn debug_contact_wgsl(&self, which: &str) -> String {
         let (aero, _, lanes) = self.module_kind;
-        crate::uniformize_workgroup_lanes(module_wgsl(Kernel::ContactBig.module_for(aero, lanes, self.layout.surface)))
+        let k = match which {
+            "solo" => Kernel::Solo,
+            "groups" => Kernel::Contact,
+            _ => Kernel::ContactBig,
+        };
+        crate::uniformize_workgroup_lanes(module_wgsl(k.module_for(aero, lanes, self.layout.surface)))
+    }
+
+    /// Diagnostic: run `src` as a contact module ("solo", "groups" or "big") from now on.
+    #[doc(hidden)]
+    pub fn debug_set_contact_wgsl(&mut self, which: &str, src: &str) {
+        let entry = if which == "big" { plan::CONTACT_ENTRY } else { plan::FRAME_ENTRY };
+        let made = self.debug_contact_pipe(src, entry);
+        match which {
+            "solo" => self.debug_solo = Some(made),
+            "groups" => self.debug_groups = Some(made),
+            _ => self.debug_big = Some(made),
+        }
     }
 
     /// Diagnostic: run `src` as the large contact groups' module from now on.
     #[doc(hidden)]
     pub fn debug_set_contact_big_wgsl(&mut self, src: &str) {
+        self.debug_set_contact_wgsl("big", src);
+    }
+
+    fn debug_contact_pipe(&self, src: &str, entry: &str) -> (wgpu::ComputePipeline, wgpu::BindGroup) {
         let device = &self.device;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explicit_beams_contact (debug)"),
             source: wgpu::ShaderSource::Wgsl(src.into()),
         });
+        // The contact entry's own layout (as Contact::new builds it).
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("explicit-beams-vv (debug)"),
+            entries: &contact_entries(false),
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("explicit-beams-vv (debug)"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("explicit_beams_contact (debug)"),
-            layout: None,
+            layout: Some(&pl),
             module: &module,
-            entry_point: Some(plan::CONTACT_ENTRY),
+            entry_point: Some(entry),
             compilation_options: Default::default(),
             cache: None,
         });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("explicit-beams-vv (debug)"),
-            layout: &pipeline.get_bind_group_layout(0),
+            layout: &bgl,
             entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
                 binding: i as u32,
                 resource: if i == 0 { params_window(&self.bufs[0]) } else { self.bufs[i].as_entire_binding() },
             }),
         });
-        self.debug_big = Some((pipeline, group));
+        (pipeline, group)
     }
 
     /// Diagnostic: the byte size of each state binding's buffer (bindings 0..=8).
@@ -1034,6 +1087,27 @@ impl ExplicitBeamsGpu {
     /// (slower), never changes results.
     pub fn set_contact_margin(&mut self, metres: f32) {
         self.planner.set_contact_margin(metres);
+    }
+
+    /// The fleet's frame bounds margin (m): [`Self::set_contact_margin`]'s.
+    pub fn contact_margin(&self) -> f32 {
+        self.planner.contact_margin()
+    }
+
+    /// Vehicle `v`'s own frame bounds margin (m; the fleet's applies when wider): the
+    /// host's after `v` left its frame bounds, or a host setting.
+    pub fn set_vehicle_contact_margin(&mut self, v: usize, metres: f32) {
+        assert!(metres >= 0.0 && metres.is_finite(), "contact margin {metres}");
+        self.vehicle_margins[v] = metres;
+        let rec = self.planner.vv_record(v as u32, plan::VV_MEMBER_REC);
+        self.queue.write_buffer(&self.misc, u64::from(rec) * 16 + 4, bytemuck::bytes_of(&metres));
+        self.planner.request_replan();
+    }
+
+    /// Vehicle `v`'s frame bounds margin (m): the fleet's, or its own when it left its
+    /// frame bounds (each time doubled, at most [`MAX_AUTO_CONTACT_MARGIN`]).
+    pub fn vehicle_contact_margin(&self, v: usize) -> f32 {
+        self.vehicle_margins[v].max(self.planner.contact_margin())
     }
 
     /// The contact status (blocking): `Err` when a vehicle left its frame bounds,
@@ -1679,8 +1753,14 @@ impl ExplicitBeamsGpu {
                     },
                     |a| (&a.solo, &a.groups, &a.group),
                 );
-                pass.set_pipeline(if kernel == Kernel::Solo { solo } else { groups });
-                pass.set_bind_group(0, g, &[]);
+                let dbg = if kernel == Kernel::Solo { &self.debug_solo } else { &self.debug_groups };
+                if let (Some((p, dg)), None) = (dbg, alt) {
+                    pass.set_pipeline(p);
+                    pass.set_bind_group(0, dg, &[]);
+                } else {
+                    pass.set_pipeline(if kernel == Kernel::Solo { solo } else { groups });
+                    pass.set_bind_group(0, g, &[]);
+                }
             }
             Kernel::ContactBig => {
                 // A test variant's contact module steps every group (no split): nothing
@@ -1691,11 +1771,11 @@ impl ExplicitBeamsGpu {
                 if let Some((p, g)) = &self.debug_big {
                     pass.set_pipeline(p);
                     pass.set_bind_group(0, g, &[]);
-                    return;
+                } else {
+                    let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
+                    pass.set_pipeline(&p.big);
+                    pass.set_bind_group(0, &c.contact_group, &[]);
                 }
-                let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
-                pass.set_pipeline(&p.big);
-                pass.set_bind_group(0, &c.contact_group, &[]);
             }
             Kernel::Vv(i) => {
                 let (p, g) = alt.map_or_else(
@@ -2087,6 +2167,15 @@ impl ExplicitBeamsGpu {
         ]
     }
 
+    /// Tests only: the words of [`Self::state_words`]' `misc` holding the vehicle-contact
+    /// plan's records (frame boxes, flags, margins: planning state, which a margin
+    /// changes): `start..end`.
+    #[doc(hidden)]
+    pub fn vv_record_words(&self) -> std::ops::Range<usize> {
+        let at = self.planner.words[43] as usize * 4;
+        at..at + self.layout.spans.len() * VV_RECS * 4
+    }
+
     /// Tests only: the World coupling's state, beside [`Self::state_words`]: every proxy
     /// record (bodies as integrated in the frames, shapes, planes) and the coupling's
     /// gAcc sums (per body its count, per shape its step and window reactions). Empty
@@ -2153,8 +2242,19 @@ impl ExplicitBeamsGpu {
         self.queue
             .write_buffer(&self.contact.acc, self.contact.status_at + 16, &[0u8; 16]);
         if e.contains("left its frame bounds") {
-            let m = (2.0 * self.planner.contact_margin()).clamp(0.5, MAX_AUTO_CONTACT_MARGIN);
-            self.planner.set_contact_margin(m);
+            // That vehicle's own margin doubles (its frame bounds cover more travel); the
+            // others keep theirs, so one fast vehicle does not group the whole fleet. A
+            // margin only changes which vehicles step together, never results.
+            match left_vehicle(&e).filter(|&v| (v as usize) < self.vehicle_margins.len()) {
+                Some(v) => {
+                    let own = self.vehicle_contact_margin(v as usize);
+                    self.set_vehicle_contact_margin(v as usize, (2.0 * own).clamp(0.5, MAX_AUTO_CONTACT_MARGIN));
+                }
+                None => {
+                    let m = (2.0 * self.planner.contact_margin()).clamp(0.5, MAX_AUTO_CONTACT_MARGIN);
+                    self.planner.set_contact_margin(m);
+                }
+            }
             self.planner.request_replan();
         }
         let mut errors = self.contact_errors.lock().unwrap();

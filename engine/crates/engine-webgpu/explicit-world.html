@@ -316,6 +316,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
       } catch (e) { fail(e); return; }
       requestAnimationFrame(frame);
     }
+    window.__pause = (p) => { paused = p; };
     window.__world = world;
     window.__state = () => ({ broken, steps: world.explicitSteps(), bodies: world.bodyCount() });
     window.__ready = true;

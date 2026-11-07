@@ -72,7 +72,7 @@ struct Params
     uint step;
     uint filter;         // the vehicles' collision filter: categories | mask << 16
     uint rowCap;         // chunk records at most (the ingest merges this many of slot 1)
-    uint serialPlan;     // tests: cpl_plan's lane-0 walk even within every room
+    uint serialPlan;     // tests: cpl_plan's lane-0 walk even within every room; cpl_emit on lane 0
     uint sleepBase;      // vehicle sleep: gMisc record of vehicle 0's sleep record (0 off)
     uint listBase;       // gWork word of the proxied list's count (0: every vehicle, gid.x)
     uint hullGeom;       // nonzero: hull proxies carry their vertices and edges (surface contact)
@@ -963,14 +963,21 @@ void emitPair(uint v, uint j, uint body, uint key)
     gScratch[w + 7u].store(asuint(L.z));
 }
 
+// A lane a shape (64 lanes, shape k by lane k % 64): each shape that is its pair's first
+// (in shape order) emits that pair's record, its sums in shape order as one lane wrote
+// them before. The records' order in the list is the appends', which the rigid step
+// never reads: it sums a body's records by key (ccd_step.slang apply_impulses).
 [shader("compute")]
-[numthreads(1, 1, 1)]
-void cpl_emit(uint3 gid : SV_GroupID)
+[numthreads(64, 1, 1)]
+void cpl_emit(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = listed(gid.x);
     if (v == NONE) return;
     uint ns = gMisc[vrec(v)].y;
-    for (uint k = 0u; k < ns; k++)
+    // (Tests, gP.serialPlan: lane 0 alone, the shapes one after another.)
+    uint lanes = gP.serialPlan != 0u ? 1u : 64u;
+    if (lid.x >= lanes) return;
+    for (uint k = lid.x; k < ns; k += lanes)
     {
         uint at = srec(v, k);
         uint j = gMisc[at].y;
