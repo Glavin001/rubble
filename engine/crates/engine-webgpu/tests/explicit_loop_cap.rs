@@ -571,3 +571,40 @@ fn main() {\n\
     let e = explicit_loop_cap_hit(a[3] as i32).unwrap_err();
     assert!(e.contains("number 1"), "{e}");
 }
+
+/// The pass budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`): a frame whose loops need
+/// more passes than the budget stops at it, fast, and the status reports it; with the
+/// host's budget the same frame runs as written. A budget of 8 passes stands in for a
+/// runaway (a frame of a sound fleet needs far more).
+#[test]
+fn the_pass_budget_ends_a_frame_and_reports_it() {
+    use engine_softbody::explicit_beams::ExplicitBeams;
+    use engine_softbody::procedural::{car_truck_bare, CarParams};
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let text = car_truck_bare(&CarParams {
+        minimass: 10.0,
+        ..CarParams::sedan()
+    });
+    let car = ExplicitBeams::from_truck(&text, glam::Vec3::new(0.0, 0.5, 0.0), glam::Vec3::ZERO, Default::default())
+        .unwrap();
+    let fleet = vec![car];
+    let mut gpu = engine_webgpu::ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    // The per-vehicle frame (a large car takes the wide passes, a dispatch per phase).
+    gpu.set_wide(false);
+    gpu.frame(34);
+    gpu.wait();
+    assert!(gpu.kernel_status().is_ok(), "the host's budget: no stop");
+    // SAFETY: this test's own process state; the planner reads it at each frame.
+    unsafe { std::env::set_var("RUBBLE_LOOP_BUDGET", "8") };
+    let t = std::time::Instant::now();
+    gpu.frame(34);
+    gpu.wait();
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    unsafe { std::env::remove_var("RUBBLE_LOOP_BUDGET") };
+    let e = gpu.kernel_status().expect_err("a frame past its budget reports the stop");
+    assert!(e.contains("cap"), "{e}");
+    assert!(ms < 2000.0, "the stopped frame took {ms} ms");
+}
