@@ -64,6 +64,11 @@ Context is in [soft-rigid-world.md](soft-rigid-world.md).
 ### N2. The converted ETK has no tyres (Confirmed)
 The BeamNG mod's shared tyre content isn't converted. On pressure wheels it rides on its rims, so the ring drive uses raycast wheels.
 
+### S1. Surface contact injects energy with light nodes as triangle corners (Confirmed, CPU)
+- **Seen:** a generated sedan whose collision triangles had the 0.15 kg contact-only pole-lane nodes as corners diverged at the 32 km/h side pole with `SURFACE_CONTACT=1` (energy rise 3.7e29 J); without the lanes, or with surface contact off, the ledger closes. Sliver triangles lying across their neighbours did the same (police sedan, 1.97e12 J).
+- **Authoring answer (in place):** generated cars have no lanes, and their collision skin drops sliver and off-skin triangles (`generated-vehicles.md`).
+- **Engine question (the user's):** whether surface contact's force on a triangle should be limited by its corners' masses (as ground contact is, spec §28).
+
 ## Capacity and performance
 
 ### C1. Coupling shape room: 1,024 shapes per car can be exceeded (Confirmed)

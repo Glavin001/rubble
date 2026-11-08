@@ -153,7 +153,7 @@ if orbit:
         path = os.path.join(pngdir, 'f%04d.png' % k)
         if not os.path.exists(path):
             a = 2 * math.pi * k / frames + math.radians(30)
-            r = 1.25 * span
+            r = 1.5 * span
             look((c[0], c[1], 0.6), (c[0] + r * math.cos(a), c[1] + r * math.sin(a), 0.45 * span))
             sc.render.filepath = path
             bpy.ops.render.render(write_still=True)

@@ -170,6 +170,13 @@ the working procedures for agents; `.cursor/skills` links to them.
    materials (the spec's ten names) and empties, saves the `.blend`, and
    exports the `.glb` with beauty-triangulated quads.
 
+## Crash physics
+
+The vehicle rigger turns a design into a deformable node–beam car (JBeam,
+weighted skins, hardware from the markers): `build.py` writes the
+`<design>.rig.json` it reads beside the `.glb`. See
+[engine/docs/generated-vehicles.md](../../docs/generated-vehicles.md).
+
 ## Known limits
 
 - **Triangle aspect at multi-panel corners.** A few hundred triangles of
