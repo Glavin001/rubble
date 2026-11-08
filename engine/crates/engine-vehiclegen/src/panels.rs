@@ -7,7 +7,8 @@
 //! feeds means, so [`neighbours`] returns sorted lists and results agree with
 //! Python up to floating-point summation order.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx::{FxHashMap, FxHashSet};
+
 
 use glam::{DVec2, DVec3};
 
@@ -81,7 +82,7 @@ fn mean_of(v: &[DVec3], ix: &[u32]) -> DVec3 {
 pub fn boundary_loops(m: &Mesh) -> Vec<Vec<u32>> {
     // `cnt` as a Python dict: insertion-ordered edges plus a lookup
     let mut order: Vec<(u32, u32)> = Vec::new();
-    let mut cnt: HashMap<(u32, u32), usize> = HashMap::new();
+    let mut cnt: FxHashMap<(u32, u32), usize> = FxHashMap::default();
     for f in m.faces() {
         let k = f.len();
         for i in 0..k {
@@ -94,11 +95,11 @@ pub fn boundary_loops(m: &Mesh) -> Vec<Vec<u32>> {
         }
     }
     let bnd: Vec<(u32, u32)> = order.iter().copied().filter(|&(a, b)| !cnt.contains_key(&(b, a))).collect();
-    let mut nxt: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut nxt: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
     for &(a, b) in &bnd {
         nxt.entry(a).or_default().push(b);
     }
-    let mut used: HashSet<(u32, u32)> = HashSet::new();
+    let mut used: FxHashSet<(u32, u32)> = FxHashSet::default();
     let mut loops = Vec::new();
     for &(a, b) in &bnd {
         if used.contains(&(a, b)) {
@@ -222,7 +223,7 @@ pub fn inset_boundary(
         let mut newf = Vec::new();
         // dict insertion order: keys in first-seen order
         let mut acc_order: Vec<usize> = Vec::new();
-        let mut acc: HashMap<usize, Vec<DVec3>> = HashMap::new();
+        let mut acc: FxHashMap<usize, Vec<DVec3>> = FxHashMap::default();
         for &vi in &frontier {
             for &u in &nb[vi] {
                 let u = u as usize;
@@ -521,7 +522,7 @@ pub fn panel(
     hem: bool,
     inner: Option<f64>,
     island0: i32,
-    shut: Option<&HashSet<Key>>,
+    shut: Option<&FxHashSet<Key>>,
 ) -> Mesh {
     let mut m = Mesh::new();
     for (g, isl) in block_meshes {
@@ -554,7 +555,7 @@ pub fn panel(
 /// Glass from its opening: grown under the body flange, sunk `depth` below
 /// the skin; edges shared with another pane are pulled back 3 mm. Python
 /// defaults: depth 0.012, grow 0.006.
-pub fn glass_from(block_meshes: &[(Mesh, i32)], depth: f64, grow: f64, shared: Option<&HashSet<Key>>) -> Mesh {
+pub fn glass_from(block_meshes: &[(Mesh, i32)], depth: f64, grow: f64, shared: Option<&FxHashSet<Key>>) -> Mesh {
     let mut m = Mesh::new();
     for (g, _) in block_meshes {
         m.add(g);
@@ -672,9 +673,9 @@ mod tests {
         }
     }
 
-    fn shut_keys() -> HashSet<Key> {
+    fn shut_keys() -> FxHashSet<Key> {
         let (pa, _) = pts(0, 6);
-        let mut s = HashSet::new();
+        let mut s = FxHashSet::default();
         for a in 0..pa.nu {
             s.insert(key3(pa.at(a, 0), 1e-6));
         }
@@ -692,7 +693,7 @@ mod tests {
         // Python: [[0, 4, 8, 12, 13, 14, 15, 11, 7, 3, 2, 1]]
         assert_eq!(loops, vec![vec![0, 4, 8, 12, 13, 14, 15, 11, 7, 3, 2, 1]]);
         // consistent orientation: every step is a directed face edge
-        let mut fe = HashSet::new();
+        let mut fe = FxHashSet::default();
         for f in m.faces() {
             for i in 0..f.len() {
                 fe.insert((f[i], f[(i + 1) % f.len()]));

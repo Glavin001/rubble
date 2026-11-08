@@ -4,7 +4,8 @@
 //! degrees and split across sharper edges (the Blender exporter's
 //! `set_sharp_from_angle(42)`); triangles are grouped by material.
 
-use std::collections::HashMap;
+use crate::fx::FxHashMap;
+
 
 use glam::{DQuat, DVec3};
 use serde_json::{json, Value};
@@ -83,7 +84,7 @@ pub fn render_part(name: &str, m: &Mesh) -> RenderPart {
     order.sort_by_key(|&k| tris[k].2);
     let mut rp = RenderPart { name: name.into(), ..Default::default() };
     let mut colors: Vec<f32> = Vec::new();
-    let mut vmap: HashMap<(u32, (i64, i64, i64), (i64, i64)), u32> = HashMap::new();
+    let mut vmap: FxHashMap<(u32, (i64, i64, i64), (i64, i64)), u32> = FxHashMap::default();
     let mut cur: Option<Mat> = None;
     for &k in &order {
         let (f, uv, mat) = &tris[k];

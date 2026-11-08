@@ -4,7 +4,8 @@
 //! Node ids: T(i, j) for z-line i and ring line j; C(cap, r, c) for cap
 //! nodes.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::fx::{FxHashMap, FxHashSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use glam::DVec2;
@@ -46,21 +47,21 @@ pub type PartFn<'a> = &'a dyn Fn(usize, usize) -> Option<String>;
 pub struct CarBody {
     pub l: Layout,
     pub zn: Vec<String>,
-    pub zi: HashMap<String, usize>,
+    pub zi: FxHashMap<String, usize>,
     pub z0: Vec<f64>,
     pub vl: Vec<f64>,
     pub nl: usize,
     pub ring: Vec<f64>,
     pub jn: usize,
-    zover: HashMap<(usize, usize), f64>,
-    vover: HashMap<(usize, usize), f64>,
-    pub holes: HashSet<(usize, usize)>,
+    zover: FxHashMap<(usize, usize), f64>,
+    vover: FxHashMap<(usize, usize), f64>,
+    pub holes: FxHashSet<(usize, usize)>,
     pub arcs: Vec<(NodeId, NodeId, Curve)>,
     caps: Vec<String>,
     /// the welded raw skins of every part (lamp housings follow them)
     pub skins: BTreeMap<String, Mesh>,
     /// design scratch values passed from caps to parts (grille columns ...)
-    pub extra: HashMap<String, Vec<f64>>,
+    pub extra: FxHashMap<String, Vec<f64>>,
 }
 
 impl CarBody {
@@ -85,13 +86,13 @@ impl CarBody {
             nl,
             ring,
             jn,
-            zover: HashMap::new(),
-            vover: HashMap::new(),
-            holes: HashSet::new(),
+            zover: FxHashMap::default(),
+            vover: FxHashMap::default(),
+            holes: FxHashSet::default(),
             arcs: vec![],
             caps: vec![],
             skins: BTreeMap::new(),
-            extra: HashMap::new(),
+            extra: FxHashMap::default(),
         }
     }
 
@@ -266,10 +267,10 @@ impl CarBody {
         bottom: &[CapPt],
         top: &[CapPt],
         part: PartFn,
-        holes: &HashSet<(usize, usize)>,
-        overrides: &HashMap<(usize, usize), DVec2>,
+        holes: &FxHashSet<(usize, usize)>,
+        overrides: &FxHashMap<(usize, usize), DVec2>,
         arcs: Vec<((usize, usize), (usize, usize), Curve)>,
-    ) -> (HashMap<(usize, usize), NodeId>, Vec<Vec<DVec2>>) {
+    ) -> (FxHashMap<(usize, usize), NodeId>, Vec<Vec<DVec2>>) {
         let ch = self.l.add_chart(name, Chart::Graph { fz, facing });
         let ci = match self.caps.iter().position(|c| c == name) {
             Some(i) => i,
@@ -281,9 +282,9 @@ impl CarBody {
         let rr = left.len() - 1;
         let cc = bottom.len() - 1;
         assert!(right.len() == rr + 1 && top.len() == cc + 1);
-        let mut ids: HashMap<(usize, usize), NodeId> = HashMap::new();
+        let mut ids: FxHashMap<(usize, usize), NodeId> = FxHashMap::default();
         let mut xy = vec![vec![DVec2::ZERO; cc + 1]; rr + 1];
-        let setb = |r: usize, c: usize, e: CapPt, ids: &mut HashMap<(usize, usize), NodeId>, xy: &mut Vec<Vec<DVec2>>| match e {
+        let setb = |r: usize, c: usize, e: CapPt, ids: &mut FxHashMap<(usize, usize), NodeId>, xy: &mut Vec<Vec<DVec2>>| match e {
             CapPt::N(id) => {
                 let p = self.l.node_pos(id);
                 xy[r][c] = DVec2::new(p.x, p.y);

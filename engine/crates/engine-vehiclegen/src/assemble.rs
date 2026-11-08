@@ -1,7 +1,8 @@
 //! Design -> finished part meshes (the Python `assemble.body_parts` plus
 //! `build.py`'s merging and UV steps).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::fx::{FxHashMap, FxHashSet};
+use std::collections::BTreeMap;
 
 use crate::carbody::{CarBody, Side};
 use crate::export::Marker;
@@ -37,8 +38,8 @@ fn closure_inner(name: &str) -> Option<f64> {
     }
 }
 
-fn boundary_keys(sk: &Mesh) -> HashSet<Key> {
-    let mut ks = HashSet::new();
+fn boundary_keys(sk: &Mesh) -> FxHashSet<Key> {
+    let mut ks = FxHashSet::default();
     for lp in boundary_loops(sk) {
         for i in lp {
             ks.insert(key3(sk.v[i as usize], 1e-6));
@@ -65,7 +66,7 @@ pub fn body_parts(d: &dyn Design, h: f64, uv: bool) -> (Parts, CarBody) {
     // blocks grouped by part, in order of first appearance; chart names
     // decide the UV island numbering (sorted, as in the Python)
     let mut order: Vec<String> = Vec::new();
-    let mut groups: HashMap<String, Vec<(Mesh, String)>> = HashMap::new();
+    let mut groups: FxHashMap<String, Vec<(Mesh, String)>> = FxHashMap::default();
     let blocks = cb.l.blocks.clone();
     for bl in &blocks {
         let (mut g, _, _) = if uv {
@@ -90,8 +91,8 @@ pub fn body_parts(d: &dyn Design, h: f64, uv: bool) -> (Parts, CarBody) {
     };
     let is_glassy = |n: &str| n.starts_with("glass") || n.ends_with("_lens");
     // boundary vertices shared by two panes (or two panels): shut lines
-    let mut gcount: HashMap<Key, usize> = HashMap::new();
-    let mut pcount: HashMap<Key, usize> = HashMap::new();
+    let mut gcount: FxHashMap<Key, usize> = FxHashMap::default();
+    let mut pcount: FxHashMap<Key, usize> = FxHashMap::default();
     let mut skins: BTreeMap<String, Mesh> = BTreeMap::new();
     for name in &order {
         let sk = skin_of(&groups[name]);
@@ -101,8 +102,8 @@ pub fn body_parts(d: &dyn Design, h: f64, uv: bool) -> (Parts, CarBody) {
         }
         skins.insert(name.clone(), sk);
     }
-    let shared_glass: HashSet<Key> = gcount.into_iter().filter(|(_, c)| *c > 1).map(|(k, _)| k).collect();
-    let shut: HashSet<Key> = pcount.into_iter().filter(|(_, c)| *c > 1).map(|(k, _)| k).collect();
+    let shared_glass: FxHashSet<Key> = gcount.into_iter().filter(|(_, c)| *c > 1).map(|(k, _)| k).collect();
+    let shut: FxHashSet<Key> = pcount.into_iter().filter(|(_, c)| *c > 1).map(|(k, _)| k).collect();
     let mut parts = Parts::default();
     for name in &order {
         let blocks = &groups[name];

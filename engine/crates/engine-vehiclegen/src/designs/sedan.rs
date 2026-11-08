@@ -6,7 +6,8 @@
 //! requested proportions. At the reference parameters the output matches
 //! the Python generator.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx::{FxHashMap, FxHashSet};
+
 use std::rc::Rc;
 
 use glam::{DVec2, DVec3};
@@ -87,6 +88,45 @@ impl Default for SedanParams {
     }
 }
 
+impl SedanParams {
+    /// Ranges the design holds together in (each wheel arch keeps its
+    /// undistorted zone, the cabin keeps its door lines in order).
+    pub fn validate(&self) -> Result<(), String> {
+        let chk = |name: &str, v: f64, lo: f64, hi: f64| {
+            if v.is_finite() && v >= lo && v <= hi {
+                Ok(())
+            } else {
+                Err(format!("{name} = {v} is outside {lo}..{hi}"))
+            }
+        };
+        chk("wheelbase", self.wheelbase, 2.2, 3.4)?;
+        chk("front_overhang", self.front_overhang, 0.70, 1.30)?;
+        chk("rear_overhang", self.rear_overhang, 0.75, 1.40)?;
+        chk("width", self.width, 1.55, 2.10)?;
+        chk("track", self.track, 1.35, 1.85)?;
+        chk("height", self.height, 1.20, 1.80)?;
+        // lowering uses up the gap between the tyre and the wheel-well liner
+        // (it grows with the tyre: 33.5 mm at every tyre size; keep 13.5)
+        chk("ride", self.ride, -0.020, 0.20)?;
+        chk("tyre_d", self.tyre_d, 0.55, 0.85)?;
+        chk("tyre_w", self.tyre_w, 0.15, 0.35)?;
+        chk("rim_in", self.rim_in, 13.0, 22.0)?;
+        chk("rim_w_in", self.rim_w_in, 5.0, 11.0)?;
+        chk("metallic", self.metallic, 0.0, 1.0)?;
+        chk("roughness", self.roughness, 0.0, 1.0)?;
+        if self.rim_in * 0.0254 > self.tyre_d - 0.12 {
+            return Err(format!("rim {} in leaves no tyre sidewall on a {} m tyre", self.rim_in, self.tyre_d));
+        }
+        if self.track / 2.0 + self.tyre_w / 2.0 > self.width / 2.0 + 0.03 {
+            return Err("the wheels stick out of the body: widen the body or narrow the track".into());
+        }
+        if self.track / 2.0 - self.tyre_w / 2.0 < 0.56 * self.width / 1.86 + 0.04 {
+            return Err("the wheels hit the wheel wells: widen the track or narrow the tyres".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct Sedan {
     pub p: SedanParams,
@@ -105,6 +145,7 @@ impl Sedan {
         let y0 = 0.95;
         let blend = |y: f64| if y <= y0 { 0.0 } else if y < y0 + 0.1 { (y - y0).powi(2) / 0.2 } else { y - y0 - 0.05 };
         let kr = 1.0 + (p.height - R_HEIGHT) / blend(R_HEIGHT);
+        let arch_r = R_ARCH_R + (p.tyre_d - R_TYRE_D) / 2.0;
         let f = Frame::new(
             refdims(),
             Target {
@@ -115,9 +156,9 @@ impl Sedan {
                 dy,
                 kr,
                 y0,
+                arch_k: arch_r / R_ARCH_R,
             },
         );
-        let arch_r = R_ARCH_R + (p.tyre_d - R_TYRE_D) / 2.0;
         Sedan { zf_ax: p.wheelbase / 2.0, zr_ax: -p.wheelbase / 2.0, wheel_y, arch_r, f, p }
     }
 
@@ -540,7 +581,7 @@ impl Sedan {
             }
             Some("bumper_front".into())
         };
-        cb.cap("capF", self.front_fn(), 1.0, &left, &right, &bottom, &top, &fpart, &HashSet::new(), &HashMap::new(), vec![]);
+        cb.cap("capF", self.front_fn(), 1.0, &left, &right, &bottom, &top, &fpart, &FxHashSet::default(), &FxHashMap::default(), vec![]);
         cb.extra.insert("grille_cols".into(), vec![xs[3], xs[c - 3], xs[4], xs[c - 4]]);
     }
 
@@ -612,7 +653,7 @@ impl Sedan {
             }
             Some("body_shell".into())
         };
-        cb.cap("capR", self.rear_fn(), -1.0, &left, &right, &bottom, &top, &rpart, &HashSet::new(), &HashMap::new(), arcs);
+        cb.cap("capR", self.rear_fn(), -1.0, &left, &right, &bottom, &top, &rpart, &FxHashSet::default(), &FxHashMap::default(), arcs);
     }
 
     fn make_parts(&self, cb: &CarBody) -> (Parts, Parts, Vec<Marker>) {
@@ -793,10 +834,16 @@ impl Sedan {
         rad.add(&box_(f.p(0.0, 0.735, 2.12), DVec3::new(f.x(0.37), 0.014, 0.030), Mat::MetalBare, None));
         out.insert("radiator", rad);
         out.insert("firewall", box_(f.p(0.0, 0.60, 0.94), DVec3::new(f.x(0.60), 0.28, 0.003), Mat::TrimBlack, None));
+        // boxes along the car span their mapped ends (a shorter overhang
+        // shortens the tray under it)
+        let zspan = |zc: f64, hz: f64| ((f.z(zc - hz) + f.z(zc + hz)) / 2.0, (f.z(zc + hz) - f.z(zc - hz)) / 2.0);
         let mut ub = Mesh::new();
-        ub.add(&box_(f.p(0.0, 0.150, 1.60), DVec3::new(f.x(0.46), 0.003, 0.45), Mat::TrimBlack, None));
-        ub.add(&box_(f.p(0.0, 0.330, -2.05), DVec3::new(f.x(0.50), 0.004, 0.28), Mat::TrimBlack, None));
-        ub.add(&rbox(f.p(-0.09, 0.30, -1.90), DVec3::new(0.21, 0.05, 0.22), 0.02, 2, Mat::MetalBare));
+        let (zc, hz) = zspan(1.60, 0.45);
+        ub.add(&box_(DVec3::new(0.0, f.y(0.150), zc), DVec3::new(f.x(0.46), 0.003, hz), Mat::TrimBlack, None));
+        let (zc, hz) = zspan(-2.05, 0.28);
+        ub.add(&box_(DVec3::new(0.0, f.y(0.330), zc), DVec3::new(f.x(0.50), 0.004, hz), Mat::TrimBlack, None));
+        let (zc, hz) = zspan(-1.90, 0.22);
+        ub.add(&rbox(DVec3::new(f.x(-0.09), f.y(0.30), zc), DVec3::new(0.21, 0.05, hz), 0.02, 2, Mat::MetalBare));
         out.insert("underbody", ub);
         let mut ex = Mesh::new();
         let pts: Vec<DVec3> = [(0.10, 0.36, 1.30), (0.12, 0.25, 1.12), (0.10, 0.168, 0.95), (0.10, 0.166, -0.70), (0.16, 0.175, -1.20), (0.30, 0.20, -1.60), (0.42, 0.25, -2.10), (0.48, 0.26, -2.42)]
@@ -805,14 +852,15 @@ impl Sedan {
             .collect();
         ex.add(&p::tube_pipe(&pts, 0.022, Mat::MetalBare, 5, 14));
         ex.add(&rbox(f.p(0.12, 0.168, -0.20), DVec3::new(0.09, 0.016, 0.25), 0.012, 2, Mat::MetalBare));
-        ex.add(&rbox(f.p(0.36, 0.230, -1.92), DVec3::new(0.20, 0.06, 0.13), 0.04, 2, Mat::MetalBare));
+        let (zc, hz) = zspan(-1.92, 0.13);
+        ex.add(&rbox(DVec3::new(f.x(0.36), f.y(0.230), zc), DVec3::new(0.20, 0.06, hz), 0.04, 2, Mat::MetalBare));
         out.insert("exhaust", ex);
         let dr = self.arch_r - R_ARCH_R;
         for (tag, zc) in [("F", self.zf_ax), ("R", self.zr_ax)] {
             for (s, sg) in sides {
                 out.insert(
                     &format!("wheel_well_{tag}{s}"),
-                    p::wheel_well(DVec3::new(0.0, self.wheel_y + (f.y(R_TYRE_D / 2.0) - self.wheel_y), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0),
+                    p::wheel_well(DVec3::new(0.0, f.y(R_TYRE_D / 2.0), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0),
                 );
             }
         }

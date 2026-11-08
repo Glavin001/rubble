@@ -9,6 +9,7 @@
 //! ([`assemble`]), UV packing ([`uvpack`]) and glTF export ([`export`]).
 
 pub mod curves;
+pub mod fx;
 pub mod mesh;
 pub mod tube;
 pub mod layout;
@@ -30,8 +31,17 @@ pub fn design_from_json(name: &str, params: &str) -> Result<Box<dyn Design>, Str
     match name {
         "sedan" => {
             let p: designs::sedan::SedanParams = serde_json::from_str(params).map_err(|e| format!("sedan parameters: {e}"))?;
+            p.validate()?;
             Ok(Box::new(designs::sedan::Sedan::new(p)))
         }
+        _ => Err(format!("unknown design '{name}' (have: sedan)")),
+    }
+}
+
+/// A design's default parameters as JSON.
+pub fn default_params_json(name: &str) -> Result<String, String> {
+    match name {
+        "sedan" => Ok(serde_json::to_string_pretty(&designs::sedan::SedanParams::default()).unwrap()),
         _ => Err(format!("unknown design '{name}' (have: sedan)")),
     }
 }

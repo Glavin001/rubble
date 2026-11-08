@@ -49,6 +49,9 @@ pub struct Target {
     pub dy: f64,
     pub kr: f64,
     pub y0: f64,
+    /// the zone round each axle scales by this (the arch radius ratio), so
+    /// the panel lines round an arch keep their distance from it
+    pub arch_k: f64,
 }
 
 fn pl(q: f64, xs: &[f64], ys: &[f64]) -> f64 {
@@ -73,7 +76,8 @@ impl Frame {
         let a = r.arch_zone;
         let (hf, hr) = (t.wheelbase / 2.0, t.wheelbase / 2.0);
         let zr = vec![r.tail, r.axle_r - a, r.axle_r + a, r.axle_f - a, r.axle_f + a, r.tip];
-        let zn = vec![-hr - t.rear_overhang, -hr - a, -hr + a, hf - a, hf + a, hf + t.front_overhang];
+        let an = a * t.arch_k;
+        let zn = vec![-hr - t.rear_overhang, -hr - an, -hr + an, hf - an, hf + an, hf + t.front_overhang];
         let ident = zr.iter().zip(&zn).all(|(a, b)| (a - b).abs() < 1e-12) && t.sx == 1.0 && t.dy == 0.0 && t.kr == 1.0;
         for w in zn.windows(2) {
             assert!(w[1] > w[0] + 1e-3, "proportions out of range: z knots {zn:?}");
@@ -178,7 +182,7 @@ mod tests {
     #[test]
     fn maps_invert_and_keep_axle_zones() {
         let r = RefDims { axle_f: 1.415, axle_r: -1.415, tip: 2.385, tail: -2.495, arch_zone: 0.55 };
-        let f = Frame::new(r, Target { wheelbase: 2.6, front_overhang: 0.85, rear_overhang: 0.9, sx: 0.95, dy: 0.03, kr: 0.9, y0: 0.95 });
+        let f = Frame::new(r, Target { wheelbase: 2.6, front_overhang: 0.85, rear_overhang: 0.9, sx: 0.95, dy: 0.03, kr: 0.9, y0: 0.95, arch_k: 1.0 });
         for z in [-2.6, -1.9, -1.2, 0.0, 1.0, 1.5, 2.4] {
             assert!((f.zi(f.z(z)) - z).abs() < 1e-12);
         }
@@ -189,7 +193,10 @@ mod tests {
         assert!((f.z(1.415 + 0.3) - f.z(1.415) - 0.3).abs() < 1e-12);
         assert!((f.z(1.415) - 1.3).abs() < 1e-12);
         assert!((f.z(2.385) - (1.3 + 0.85)).abs() < 1e-12);
-        let id = Frame::new(r, Target { wheelbase: 2.83, front_overhang: 0.97, rear_overhang: 1.08, sx: 1.0, dy: 0.0, kr: 1.0, y0: 0.95 });
+        let id = Frame::new(r, Target { wheelbase: 2.83, front_overhang: 0.97, rear_overhang: 1.08, sx: 1.0, dy: 0.0, kr: 1.0, y0: 0.95, arch_k: 1.0 });
+        // a bigger arch scales its zone: lines round it keep their relative place
+        let k = Frame::new(r, Target { wheelbase: 2.83, front_overhang: 0.97, rear_overhang: 1.08, sx: 1.0, dy: 0.0, kr: 1.0, y0: 0.95, arch_k: 1.1 });
+        assert!((k.z(-1.415 + 0.445) - (-1.415 + 0.445 * 1.1)).abs() < 1e-12);
         assert!(id.is_identity());
     }
 }

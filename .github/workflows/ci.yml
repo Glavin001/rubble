@@ -86,7 +86,7 @@ jobs:
       # real adapter (Metal or a hardware wgpu backend) and run locally; see
       # engine/crates/engine-webgpu/README.md and engine/docs/softbody.md.
       - name: cargo test
-        run: cargo test --release -p engine-schema -p engine-exec -p engine-scenes -p engine-vehicle -p engine-softbody -p engine-fracture --no-default-features
+        run: cargo test --release -p engine-schema -p engine-exec -p engine-scenes -p engine-vehicle -p engine-softbody -p engine-fracture -p engine-vehiclegen --no-default-features
 
   # The C library a game engine links (engine/crates/engine-ffi): built, its header
   # checked, packaged with engine/scripts/build-ffi.sh, and examples/hello.c compiled

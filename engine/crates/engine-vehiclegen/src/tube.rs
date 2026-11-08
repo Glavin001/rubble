@@ -7,6 +7,7 @@
 //! point's (x, y) is a monotone spline of z. v in [0, n-1] runs along the
 //! left half, v in [n-1, 2(n-1)] mirrors it down the right side.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use glam::{DVec2, DVec3};
@@ -65,6 +66,31 @@ pub struct Tube {
     pub tan: Vec<(usize, Fz)>,
     pub disp: Vec<Displace>,
     gt: Option<GirthTable>,
+    /// the key points at the last z evaluated: evaluations come in runs at
+    /// one z (block rows, height searches), and the keys are a pure
+    /// function of z, so this changes nothing but the time
+    kcache: RefCell<(f64, u32, [DVec2; MAX_KEYS])>,
+    /// the Bezier segments at the last z (same reasoning)
+    scache: RefCell<(f64, [Option<Seg>; MAX_KEYS])>,
+}
+
+const MAX_KEYS: usize = 16;
+
+#[derive(Clone, Copy)]
+struct Seg {
+    a: DVec2,
+    b: DVec2,
+    p1: DVec2,
+    p2: DVec2,
+    cum: [f64; 17],
+}
+
+impl Seg {
+    #[inline]
+    fn bez(&self, s: f64) -> DVec2 {
+        let u = 1.0 - s;
+        self.a * (u * u * u) + self.p1 * (3.0 * u * u * s) + self.p2 * (3.0 * u * s * s) + self.b * (s * s * s)
+    }
 }
 
 #[derive(Clone)]
@@ -81,17 +107,22 @@ impl Tube {
     pub fn new(keys: Vec<Key>, handles: Vec<(Handle, Handle)>, disp: Vec<Displace>) -> Tube {
         let nk = keys.len();
         assert_eq!(handles.len(), nk);
-        Tube { keys, nk, vm: 2.0 * (nk as f64 - 1.0), h: handles, tan: vec![], disp, gt: None }
+        assert!(nk <= MAX_KEYS);
+        Tube { keys, nk, vm: 2.0 * (nk as f64 - 1.0), h: handles, tan: vec![], disp, gt: None, kcache: RefCell::new((f64::NAN, 0, [DVec2::ZERO; MAX_KEYS])), scache: RefCell::new((f64::NAN, [None; MAX_KEYS])) }
     }
 
-    /// Left-frame section point, derivative wrt v, and mirror flag.
-    fn section(&self, z: f64, v: f64) -> (DVec2, DVec2, bool) {
+    /// The Bezier segment k at z: end points, control points and its
+    /// normalised arc-length table (17 samples).
+    fn segment(&self, z: f64, k: usize) -> Seg {
+        {
+            let c = self.scache.borrow();
+            if c.0.to_bits() == z.to_bits() {
+                if let Some(sg) = c.1[k] {
+                    return sg;
+                }
+            }
+        }
         let nk = self.nk;
-        let v = v.rem_euclid(self.vm);
-        let mir = v > (nk - 1) as f64;
-        let vm = if mir { self.vm - v } else { v };
-        let k = (vm.floor() as isize).clamp(0, nk as isize - 2) as usize;
-        let t = vm - k as f64;
         // key points needed: k-1 .. k+2 (with mirrored ends)
         let kp = |i: isize| -> DVec2 {
             if i < 0 {
@@ -123,25 +154,40 @@ impl Tube {
         let hin = self.h[k + 1].0.at(z);
         let p1 = a + ta * hout * l;
         let p2 = b - tb * hin * l;
+        let mut sg = Seg { a, b, p1, p2, cum: [0.0; 17] };
         // arc-length parametrisation within the segment (17 samples)
-        let bez = |s: f64| {
-            let u = 1.0 - s;
-            a * (u * u * u) + p1 * (3.0 * u * u * s) + p2 * (3.0 * u * s * s) + b * (s * s * s)
-        };
-        let mut cum = [0.0f64; 17];
-        let mut prev = bez(0.0);
-        for (j, c) in cum.iter_mut().enumerate().skip(1) {
-            let p = bez(j as f64 / 16.0);
-            *c = (p - prev).length();
+        let mut prev = sg.bez(0.0);
+        for j in 1..17 {
+            let p = sg.bez(j as f64 / 16.0);
+            sg.cum[j] = (p - prev).length();
             prev = p;
         }
         for j in 1..17 {
-            cum[j] += cum[j - 1];
+            sg.cum[j] += sg.cum[j - 1];
         }
-        let tot = cum[16].max(1e-12);
-        for c in &mut cum {
+        let tot = sg.cum[16].max(1e-12);
+        for c in &mut sg.cum {
             *c /= tot;
         }
+        let mut c = self.scache.borrow_mut();
+        if c.0.to_bits() != z.to_bits() {
+            c.0 = z;
+            c.1 = [None; MAX_KEYS];
+        }
+        c.1[k] = Some(sg);
+        sg
+    }
+
+    /// Left-frame section point, derivative wrt v, and mirror flag.
+    fn section(&self, z: f64, v: f64) -> (DVec2, DVec2, bool) {
+        let nk = self.nk;
+        let v = v.rem_euclid(self.vm);
+        let mir = v > (nk - 1) as f64;
+        let vm = if mir { self.vm - v } else { v };
+        let k = (vm.floor() as isize).clamp(0, nk as isize - 2) as usize;
+        let t = vm - k as f64;
+        let sg = self.segment(z, k);
+        let cum = &sg.cum;
         let mut j = 0usize;
         for c in cum.iter() {
             if *c < t {
@@ -152,15 +198,24 @@ impl Tube {
         let (c0, c1) = (cum[j], cum[j + 1]);
         let tt = (j as f64 + ((t - c0) / (c1 - c0).max(1e-12)).clamp(0.0, 1.0)) / 16.0;
         let u = 1.0 - tt;
-        let pt = bez(tt);
-        let d = (p1 - a) * (3.0 * u * u) + (p2 - p1) * (6.0 * u * tt) + (b - p2) * (3.0 * tt * tt);
+        let pt = sg.bez(tt);
+        let d = (sg.p1 - sg.a) * (3.0 * u * u) + (sg.p2 - sg.p1) * (6.0 * u * tt) + (sg.b - sg.p2) * (3.0 * tt * tt);
         (pt, d, mir)
     }
 
     #[inline]
     pub fn key(&self, k: usize, z: f64) -> DVec2 {
-        let key = &self.keys[k];
-        DVec2::new((key.x)(z), (key.y)(z))
+        let mut c = self.kcache.borrow_mut();
+        if c.0.to_bits() != z.to_bits() {
+            c.0 = z;
+            c.1 = 0;
+        }
+        if c.1 & (1 << k) == 0 {
+            let key = &self.keys[k];
+            c.2[k] = DVec2::new((key.x)(z), (key.y)(z));
+            c.1 |= 1 << k;
+        }
+        c.2[k]
     }
 
     /// Surface point and (undisplaced) outward normal.

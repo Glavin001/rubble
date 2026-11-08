@@ -8,7 +8,8 @@
 //! exactly. Edges are sampled evenly by 3D arc length; block interiors come
 //! from transfinite (Coons) interpolation in the block's chart.
 
-use std::collections::HashMap;
+use crate::fx::{FxHashMap, FxHashSet};
+
 use std::rc::Rc;
 
 use glam::{DVec2, DVec3};
@@ -59,11 +60,11 @@ pub struct Layout {
     pub h_max: f64,
     pub tube: Tube,
     pub charts: Vec<(String, Chart)>,
-    pub nodes: HashMap<NodeId, (usize, DVec2)>,
-    edges: HashMap<EKey, EdgeDef>,
+    pub nodes: FxHashMap<NodeId, (usize, DVec2)>,
+    edges: FxHashMap<EKey, EdgeDef>,
     pub blocks: Vec<Block>,
-    counts: HashMap<EKey, usize>,
-    cache: HashMap<(EKey, usize), (usize, Vec<DVec2>, Vec<DVec3>)>,
+    counts: FxHashMap<EKey, usize>,
+    cache: FxHashMap<(EKey, usize), (usize, Vec<DVec2>, Vec<DVec3>)>,
 }
 
 pub const TUBE: usize = 0;
@@ -75,11 +76,11 @@ impl Layout {
             h_max: 0.029,
             tube,
             charts: vec![("tube".into(), Chart::Tube)],
-            nodes: HashMap::new(),
-            edges: HashMap::new(),
+            nodes: FxHashMap::default(),
+            edges: FxHashMap::default(),
             blocks: vec![],
-            counts: HashMap::new(),
-            cache: HashMap::new(),
+            counts: FxHashMap::default(),
+            cache: FxHashMap::default(),
         }
     }
 
@@ -245,8 +246,8 @@ impl Layout {
 
     // -- counts -------------------------------------------------------------------
     pub fn solve(&mut self) {
-        let mut parent: HashMap<EKey, EKey> = HashMap::new();
-        fn find(parent: &mut HashMap<EKey, EKey>, x: EKey) -> EKey {
+        let mut parent: FxHashMap<EKey, EKey> = FxHashMap::default();
+        fn find(parent: &mut FxHashMap<EKey, EKey>, x: EKey) -> EKey {
             parent.entry(x).or_insert(x);
             let mut x = x;
             while parent[&x] != x {
@@ -273,9 +274,9 @@ impl Layout {
         }
         // a chord's count: its median edge at the target size, unless that
         // would stretch its longest edge past h_max
-        let mut lens: HashMap<EKey, Vec<f64>> = HashMap::new();
-        let mut mins: HashMap<EKey, usize> = HashMap::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut lens: FxHashMap<EKey, Vec<f64>> = FxHashMap::default();
+        let mut mins: FxHashMap<EKey, usize> = FxHashMap::default();
+        let mut seen = FxHashSet::default();
         for bl in &blocks {
             let [a, b, c, d] = bl.c;
             for (x, y) in [(a, b), (b, c), (d, c), (a, d)] {
@@ -291,7 +292,7 @@ impl Layout {
                 *e = (*e).max(mn);
             }
         }
-        let mut need: HashMap<EKey, usize> = HashMap::new();
+        let mut need: FxHashMap<EKey, usize> = FxHashMap::default();
         for (r, ls) in &lens {
             let mut s = ls.clone();
             s.sort_by(|a, b| a.partial_cmp(b).unwrap());

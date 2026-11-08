@@ -24,8 +24,18 @@ fn main() {
         eprintln!("{e}");
         std::process::exit(2)
     });
+    let uv = !args.iter().any(|a| a == "--no-uv");
+    // --bench N: build N extra times (profiling, timing)
+    if let Some(n) = opt("--bench") {
+        let n: usize = n.parse().unwrap();
+        let t = Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(build(d.as_ref(), BuildOpts { uv, ..Default::default() }));
+        }
+        eprintln!("bench: {:.1} ms per build", t.elapsed().as_secs_f64() * 1000.0 / n as f64);
+    }
     let t0 = Instant::now();
-    let b = build(d.as_ref(), BuildOpts { uv: !args.iter().any(|a| a == "--no-uv"), ..Default::default() });
+    let b = build(d.as_ref(), BuildOpts { uv, ..Default::default() });
     let t_build = t0.elapsed().as_secs_f64();
     let rp = render_parts(&b.parts);
     let bytes = glb(&rp, &b.markers, b.paint, b.metallic, b.roughness);
