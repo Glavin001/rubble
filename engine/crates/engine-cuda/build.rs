@@ -66,7 +66,7 @@ fn main() -> Result<()> {
     ])?;
 
     // world_step entries are large and nvcc is slow: compile in parallel.
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let threads = engine_slang_build::build_jobs();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut compiled: Vec<(usize, Compiled)> = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads)

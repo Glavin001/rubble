@@ -88,14 +88,27 @@ fn which(bin: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(s))
 }
 
-/// `f` over `items` on every core, results in input order. Build scripts compile
-/// hundreds of entries at about a second of `slangc` each; one at a time that is minutes.
+/// Worker threads for a build script's parallel compiles: every core, or at most
+/// `RUBBLE_BUILD_JOBS` when set (a small CI runner can run out of memory with one
+/// `nvcc` per core on the large kernels). Only the build's speed depends on it.
+pub fn build_jobs() -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    match std::env::var("RUBBLE_BUILD_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(n) if n > 0 => n.min(cores),
+        _ => cores,
+    }
+}
+
+/// `f` over `items` on [`build_jobs`] threads, results in input order. Build scripts
+/// compile hundreds of entries at about a second of `slangc` each; one at a time that
+/// is minutes.
 pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(items.len().max(1));
+    let threads = build_jobs().min(items.len().max(1));
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
     std::thread::scope(|s| {

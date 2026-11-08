@@ -100,7 +100,7 @@ jobs:
       matrix:
         include:
           - name: macos
-            os: macos-14
+            os: macos-15
             run_example: 1
           - name: linux
             os: ubuntu-latest
