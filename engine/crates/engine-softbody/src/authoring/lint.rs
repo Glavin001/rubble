@@ -931,6 +931,28 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
         q(&mut te, 0.5),
         Some((0.36, 0.54)),
     ));
+    // Sliver collision triangles (height under 1/10 of the longest edge):
+    // a surface contact's normal there is ill-defined.
+    let slivers: Vec<String> = ct
+        .iter()
+        .filter(|t| {
+            let [a, b, c] = t.nodes.map(|i| pos(i as usize));
+            let l = (a - b).length().max((b - c).length()).max((c - a).length());
+            let h = (b - a).cross(c - a).length() / l.max(1e-9);
+            h < 0.1 * l
+        })
+        .take(1000)
+        .map(|t| t.nodes.map(|i| nname(i as usize)).join("-"))
+        .collect();
+    out.push(Finding {
+        rule: "sliver_tris",
+        hard: false,
+        part: "car".into(),
+        level: if slivers.is_empty() { Level::Pass } else { Level::Warn },
+        value: format!("{} of {}", slivers.len(), ct.len()),
+        band: "0 (height < 0.1 × longest edge)".into(),
+        offenders: slivers.into_iter().take(6).collect(),
+    });
     let mut dc: Vec<f64> = ct.iter().map(|t| t.aero[0] as f64).collect();
     let mut lc: Vec<f64> = ct.iter().map(|t| t.aero[1] as f64).collect();
     out.push(Finding {

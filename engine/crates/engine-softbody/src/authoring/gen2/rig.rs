@@ -702,6 +702,16 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
             if nn.length() < 1e-6 {
                 continue;
             }
+            // No slivers (height under a tenth of the longest edge) and no
+            // triangle leaning far off the skin it stands for (|cos| < 0.7):
+            // both come of nodes the nearest-node map strings along a fold,
+            // and such a triangle lies across its neighbours.
+            let l = (qa - qb).length().max((qb - qc).length()).max((qc - qa).length());
+            if nn.length() / l < 0.1 * l
+                || nn.normalize().dot(nr.normalize_or_zero()).abs() < 0.7
+            {
+                continue;
+            }
             // (glTF to JBeam is a rotation: the winding carries over.)
             tris.push(Tri {
                 n: if nn.dot(nr) < 0.0 { [a, c, b] } else { [a, b, c] },
