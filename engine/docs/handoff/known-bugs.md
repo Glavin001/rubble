@@ -11,15 +11,37 @@ Context is in [soft-rigid-world.md](soft-rigid-world.md).
 
 ### B1. Car and bricks interpenetrate on a slow push (Reported, high severity)
 - **Where:** `brick-ring-drive.html`, deployed preview, authored sedan. Pushing slowly into the wall, bricks end up inside the car body, under its floor and through its wheels. Solids must never overlap. The user's screenshots are in the PR #105 thread.
-- **Suspected causes:**
-  1. **The ring drive uses node-only coupling contact.** Only car nodes collide with brick boxes. Nodes are 0.3–0.5 m apart and bricks are 1 × 0.5 × 0.5 m, so a brick corner or edge can pass between nodes, and nothing pushes it back out of a car triangle. Triangle-against-shape surface contact exists, opt-in, and is not enabled in this scene.
-  2. **Raycast wheels ignore rigid bodies** (F7), so wheels drive through loose bricks.
-- **Status:** diagnosis running on branch `diag/ring-phase-through`, with a reproduction at 2, 5 and 10 km/h, surface contact off and on, and a rigid-only control. Its report belongs here.
+- **Root causes: Confirmed and reproduced** (branch `diag/ring-phase-through` 1a302062; probe `engine-world/examples/ring_phase_probe.rs`; batch `engine/tools/ring-phase/gpu-batch.sh`; logs in `~/Development/rubble-artifacts/ring-phase-through/`). There are two independent mechanisms.
+  1. **No penetration correction against moving rigid bodies** (the main one). `node_contact_with` (CPU `explicit_rigid.rs`, GPU `explicit_beams_rigid.slang`, bit-identical) calls the contact force with penetration 0 and the plain BOX surface. The only push is `−0.8·vn` while a node approaches, and nothing pushes a node back out once it's inside. A brick's proxy moves as a free body inside the coupling window (no gravity, ground or neighbours); then the World's rigid step moves it differently, and each mismatch becomes penetration that's never undone.
+     - **Measured** (sedan, GPU World, wall of 25 kg bricks): nodes reach 0.25 m deep (a brick's centre), bricks 0.64 m inside the car's hull, the same at 2, 5 and 10 km/h, with sleep on or off. The bricks are then carried inside the car: 5–6 bricks still inside at z = 57 m.
+     - **Static-brick control:** 0.003–0.009 m. A 1,300 kg rigid box pushed into the same wall overlaps at most 3 cm, so the rigid side is fine.
+     - **Partial evidence about the window:** at a 240 Hz World, depth falls only from 0.21 to 0.13 m.
+  2. **Node-only contact.** The ring drive never turns on surface contact (`ExplicitBeams::surface_contact` defaults to false). A 45°-turned static brick pushed into the nose ends 21 cm inside the car with surface contact off, 0.000 with it on (CPU). Against dynamic bricks surface contact helps but isn't enough (hull 0.64 → 0.15–0.22 m), because mechanism 1 remains.
+  - **Wheels:** F7 (raycast wheels don't see rigid bodies). Bricks reached up to 11 cm inside the wheel cylinders; only hub nodes collide.
+- **Fixes, ranked; each changes physics and needs the user's decision:**
+  1. Turn on surface contact in the ring drive (exists and is tested; cost unmeasured here).
+  2. Give proxy node contact the penetration response ground and soft↔soft contact already have (the §37 position step or `0.2·p/h`), CPU and Slang. This is the root fix for mechanism 1, and ties in with F1.
+  3. Make the proxy's motion inside a window match the World's (ground and contact-connected neighbours in the window, or the World adopting the window's prediction). This is a larger design change.
+  4. F7: wheels that query the World broadphase once per window.
 
-### B2. Authored sedan: about 41 km/h top speed and jittery, draggy driving (partly Confirmed)
-- **Confirmed:** with the explicit solver's air drag on, the sedan tops out near 41 km/h, on the CPU reference too. With `?drag=0` it passes 33 m/s and keeps accelerating. The fast demo videos use `?drag=0`.
-- **Suspected:** the drag is too large for the car's frontal area (to be checked against ½ρC_dAv²). The jitter is unexplained; physical and frame-pacing causes still need separating.
-- **Note:** the soft car does **not** use the smooth rigid raycast vehicle from `vehicle.html`. It has its own raycast wheels on hub nodes inside the 2 kHz solver (`engine-softbody/src/explicit_drive.rs`).
+### B2. Authored sedan: about 41 km/h top speed and "dragging" (Confirmed, root cause found)
+- **Cause:** the deployed `?car=sedan` (the two-tier showcase sedan) isn't in the BeamNG profile. Its truck text has no `rubble_beamng_profile` or `rubble_drag_coef`, so it runs Rigs of Rods' per-node air drag: F = −0.05·|v|·v **on every node**. 987 nodes give 49.4·v² N in total, against a physical ½ρC_dAv² = 0.39·v² (C_d 0.30, A 2.16 m²): **127× too much**.
+  - At 40 km/h that's 6.1 kN against 48 N, a 0.43 g deceleration.
+  - Coast-down on the CPU confirms it: 5.63 kN measured against 5.64 kN from the formula.
+  - Top speed is where the traction limit (about 6.9 kN) meets this drag: √(6.9 kN / 49.4) = 42.6 km/h, and 41.1 km/h was measured. With drag off it reaches 229 km/h.
+- **Not the cause:** per-triangle drag (`dragCoef` 100). That path applies only to the one-tier sedan.
+- **Fix:** at the source (authoring), not at load time. Give the two-tier sedan the BeamNG-profile triangle aero, or C_d·A-calibrated drag. This changes the car's physics, so it's the user's decision. `?drag=0` is the workaround.
+- **No break-through at 40 km/h** follows from this: the drag caps impact speed, and bricks absorbed by B1 never load the front.
+
+### B3. Driving looks jittery (partly measured)
+- **Measured: no physical shake.** On flat ground the car's vertical rms is 0.15–0.25 mm.
+- **Proven, small:** the solver steps 33 or 34 times per 1/60 s frame, carrying the remainder. That gives a ±3–6 mm, 20 Hz sawtooth in position per drawn frame at 41 km/h. It's probably too small to be what the user sees.
+- **Hypothesis** (not measured in Chrome): the page's camera follows the car from an asynchronous node readback, not extrapolated by the readback's age, while the car is drawn at the current step. Skipped readbacks make the car move unevenly against the camera, and so do frames under 60 World steps/s (the ring settling, slower GPUs).
+  - **Next:** measure rAF dt, World steps per rAF and readback age in Chrome.
+  - **The fix would be lossless and render-only:** extrapolate the camera target by the readback's age, or interpolate by simulated time.
+- **Wheel model:** the soft car does **not** use `main`'s rigid raycast vehicle (`engine-vehicle`, `vehicle_step.slang`; implicit wheel rows inside the AVBD solve of a rigid chassis, with rays against the World broadphase including dynamic bodies). It uses the explicit solver's own raycast wheels on hub nodes, in direct drive (`explicit_drive.rs`, `explicit_beams_drive.slang`).
+  - **Minimal path to `main`'s behaviour:** cast wheel rays once per World window against the World broadphase, and use the hits as moving contact planes for that window's 33 steps.
+  - **Full parity:** a fitted rigid frame carrying AVBD wheel rows. That's a larger design.
 
 ### F1. Coupling uses the wrong contact rule for BeamNG-profile cars (Confirmed, small effect)
 - **The difference:** contact with World rigid bodies always uses the plain Rigs of Rods rule, `ContactSurface::BOX`. Static boxes and shapes use the vehicle's profile, which for JBeam cars is BeamNG's: exact friction, no positive work.

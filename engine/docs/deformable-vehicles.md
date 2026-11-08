@@ -121,6 +121,8 @@ Each switch is a separate setting (jbeam-semantics-spec §36).
 
 **Limit to know:** with node-only contact, anything narrower than the node spacing (about 0.3–0.5 m) can slip between nodes: a lamp post, or a brick corner pressed in slowly. BeamNG and Rigs of Rods share this limit. Rubble's surface contact is how we intend to beat it; it isn't on by default yet (cost and calibration, jbeam-semantics-spec §38.7).
 
+**Second limit, a current bug:** contact against *moving* World rigid bodies has no penetration correction. Nothing pushes a node back out once it's inside a brick, and the brick's motion inside a coupling window differs from the World's. So slow pushes let bricks sink into the car (known-bugs B1).
+
 ## 5. Layer 3: what you see
 
 The visual model is separate, detailed meshes (from `.dae` files in JBeam vehicles). Each mesh vertex is **bound to nearby nodes once, at load**, and **recomputed from the node positions every frame** on the GPU. Rubble has two bindings:
@@ -151,7 +153,9 @@ Two wheel models:
 
 Per triangle (BeamNG profile): drag ½ρ·C·(`dragCoef`/100)·A·|u|²·sin α along the flow, lift by angle of attack up to a stall angle, each node of the triangle taking a third (jbeam-semantics-spec §31). The documented default `dragCoef` is 100, a flat plate; about 10 is typical for body panels.
 
-Content that leaves it at 100 on every triangle gets far too much drag. That's being checked as the cause of the authored sedan's 41 km/h top speed (known-bugs B2).
+Content that leaves it at 100 on every triangle gets far too much drag.
+
+The Rigs of Rods profile instead puts drag on **every node** (F = −0.05·|v|·v each, independent of shape). That grows with the node count, not the frontal area: a 987-node car gets 127× a physical car's drag and tops out near 41 km/h (known-bugs B2). Dense Rubble cars need triangle aero or C_d·A-calibrated drag, set in the car's source.
 
 ## 8. Vehicles in the rigid World
 
@@ -235,4 +239,4 @@ Physical accuracy and mathematical soundness come first; how it looks comes last
 
 ## Changelog
 
-- 2026-11-07: first version, written for the PR #105 handoff.
+- 2026-11-07: first version, written for the PR #105 handoff. Same day: node drag vs triangle aero, and the moving-body penetration bug (from `diag/ring-phase-through`).
