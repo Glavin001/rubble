@@ -355,7 +355,11 @@ def zigzag_cap(ring, P, outward):
                 continue
             L = max(np.linalg.norm(B - A), np.linalg.norm(C - B), np.linalg.norm(A - C))
             qual = cr / (L * L)
-            if qual > best:
+            # ears of a regular section tie exactly; sin/cos differ in the
+            # last bit between platforms, so only a clearly better ear wins
+            # and ties go to the first: the same caps everywhere (the Rust
+            # port, engine-vehiclegen mesh.rs, does the same)
+            if qual > best + 1e-9:
                 best, bi = qual, i
         if bi is None:
             bi = 1

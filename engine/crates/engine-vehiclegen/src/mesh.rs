@@ -671,7 +671,11 @@ pub fn zigzag_cap(ring: &[u32], p: &[DVec3], outward: DVec3) -> Vec<[u32; 3]> {
             }
             let l = (bb - aa).length().max((c2 - bb).length()).max((aa - c2).length());
             let qual = cr / (l * l);
-            if qual > best {
+            // ears of a regular section tie exactly; sin/cos differ in the
+            // last bit between platforms (glibc vs macOS libm), so only a
+            // clearly better ear wins and ties go to the first (Python's
+            // pick on an exact tie): the same caps on every platform
+            if qual > best + 1e-9 {
                 best = qual;
                 bi = Some(i);
             }
