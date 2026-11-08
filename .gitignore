@@ -3,7 +3,9 @@
 engine/target/
 Cargo.lock
 *.spv
-.claude/
+.claude/*
+# project agent skills are shared (Claude Code; .cursor/skills links to them)
+!.claude/skills/
 inspiration/
 
 # Web build artifacts

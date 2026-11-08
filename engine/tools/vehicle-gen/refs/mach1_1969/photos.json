@@ -1,0 +1,6 @@
+{
+ "note": "Reference photographs of a real 1969 Mach 1 (auction listing). Not stored in the repo; fetch_refs.sh downloads them to a scratch folder.",
+ "side":    "https://barrettjacksoncdn.azureedge.net/staging/carlist/items/Fullsize/Cars/201678/201678_Side_Profile_Web.jpg",
+ "front34": "https://barrettjacksoncdn.azureedge.net/staging/carlist/items/Fullsize/Cars/201678/201678_Front_3-4_Web.jpg",
+ "rear34":  "https://barrettjacksoncdn.azureedge.net/staging/carlist/items/Fullsize/Cars/201678/201678_Rear_3-4_Web.jpg"
+}
