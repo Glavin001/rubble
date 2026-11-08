@@ -266,6 +266,9 @@ fn spawn_yaw(text: &str, at: Vec3, yaw: f32, vel: Vec3) -> ExplicitBeams {
     if ROLL.load(std::sync::atomic::Ordering::Relaxed) {
         sim.roll_tyres(vel);
     }
+    if FULL_CONTACT.load(std::sync::atomic::Ordering::Relaxed) {
+        sim.opt_in_full_contact();
+    }
     sim
 }
 
@@ -309,6 +312,9 @@ static ROLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
 /// `drag=0`: no per-node aerodynamic drag or turbulence on both engines (that model
 /// gives every node the same force, so a vehicle of many light nodes brakes hard).
 static DRAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// `full_contact=1`: JBeam contact semantics on a `.truck` vehicle (every node a
+/// contacter, spawn self-collision exclusions; jbeam-semantics-spec.md §10.1–10.2).
+static FULL_CONTACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 struct Scene {
     /// Spawn point (y unused) and velocity.
@@ -1312,6 +1318,10 @@ fn main() -> anyhow::Result<()> {
     }
     DRAG.store(
         kv(&args, "drag") != Some("0"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    FULL_CONTACT.store(
+        kv(&args, "full_contact") == Some("1"),
         std::sync::atomic::Ordering::Relaxed,
     );
 

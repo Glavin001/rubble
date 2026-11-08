@@ -278,6 +278,8 @@ fn free(truck: &str, nodes_csv: &str, args: &[String]) {
         drag,
         turbulence: drag,
         fast_inv_sqrt: kv(args, "fastinv") != Some("0"),
+        triangle_throttle: true,
+        centred_damping: false,
     };
     let mut sim = ExplicitBeams::from_truck(&text, v3("pos"), v3("vel"), settings).unwrap();
     if kv(args, "roll") == Some("1") {

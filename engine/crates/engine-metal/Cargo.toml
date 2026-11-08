@@ -9,9 +9,10 @@ description = "Metal compute backend and M3 proof path (Slang → MSL)"
 engine-schema.workspace = true
 engine-exec.workspace = true
 engine-vehicle.workspace = true
+engine-softbody.workspace = true
 engine-slang-build.workspace = true
 engine-terrain.workspace = true
-bytemuck.workspace = true
+bytemuck = { workspace = true, features = ["extern_crate_alloc"] } # pod_collect_to_vec (src/explicit.rs)
 glam.workspace = true
 metal.workspace = true
 objc.workspace = true

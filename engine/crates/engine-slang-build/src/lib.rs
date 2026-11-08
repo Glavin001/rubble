@@ -88,14 +88,27 @@ fn which(bin: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(s))
 }
 
-/// `f` over `items` on every core, results in input order. Build scripts compile
-/// hundreds of entries at about a second of `slangc` each; one at a time that is minutes.
+/// Worker threads for a build script's parallel compiles: every core, or at most
+/// `RUBBLE_BUILD_JOBS` when set (a small CI runner can run out of memory with one
+/// `nvcc` per core on the large kernels). Only the build's speed depends on it.
+pub fn build_jobs() -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    match std::env::var("RUBBLE_BUILD_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(n) if n > 0 => n.min(cores),
+        _ => cores,
+    }
+}
+
+/// `f` over `items` on [`build_jobs`] threads, results in input order. Build scripts
+/// compile hundreds of entries at about a second of `slangc` each; one at a time that
+/// is minutes.
 pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(items.len().max(1));
+    let threads = build_jobs().min(items.len().max(1));
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
     std::thread::scope(|s| {
@@ -306,6 +319,36 @@ pub mod msl_layout {
         Ok(out)
     }
 
+    /// `[[vk::binding(n, 0)]] <type> gName;` → slot n, from kernel sources that
+    /// number their globals with Vulkan bindings (the explicit-beams kernels,
+    /// `engine_exec::explicit_plan`'s `BIND_*`).
+    pub fn vk_binding_slots(sources: &[PathBuf]) -> Result<HashMap<String, u32>> {
+        let mut map = HashMap::new();
+        for path in sources {
+            for line in std::fs::read_to_string(path)?.lines() {
+                let Some(rest) = line.trim_start().strip_prefix("[[vk::binding(") else {
+                    continue;
+                };
+                let Some((n, decl)) = rest.split_once(')') else {
+                    continue;
+                };
+                let slot: u32 = n.split(',').next().unwrap_or_default().trim().parse()?;
+                let Some(decl) = decl.trim_start_matches(']').split(';').next() else {
+                    continue;
+                };
+                let Some(name) = decl.split_whitespace().last() else {
+                    continue;
+                };
+                if let Some(old) = map.insert(name.to_string(), slot) {
+                    if old != slot {
+                        bail!("{name} is bound to both {old} and {slot}");
+                    }
+                }
+            }
+        }
+        Ok(map)
+    }
+
     /// Compile one compute entry to MSL (`-DENGINE_WGSL=1`) with reflection;
     /// returns (msl, thread-group size).
     pub fn compile_kernel(
@@ -315,18 +358,24 @@ pub mod msl_layout {
         entry: &str,
         dest: &Path,
     ) -> Result<(String, [u32; 3])> {
+        compile_kernel_with_defines(slangc, root, source, entry, dest, &[("ENGINE_WGSL", "1")])
+    }
+
+    /// [`compile_kernel`] with `-D NAME=VALUE` for each define (`ENGINE_WGSL=1`
+    /// among them for the browser's layout).
+    pub fn compile_kernel_with_defines(
+        slangc: &Path,
+        root: &Path,
+        source: &Path,
+        entry: &str,
+        dest: &Path,
+        defines: &[(&str, &str)],
+    ) -> Result<(String, [u32; 3])> {
         let reflection = dest.with_extension("json");
         let output = std::process::Command::new(slangc)
-            .args([
-                "-target",
-                "metal",
-                "-stage",
-                "compute",
-                "-entry",
-                entry,
-                "-DENGINE_WGSL=1",
-                "-I",
-            ])
+            .args(["-target", "metal", "-stage", "compute", "-entry", entry])
+            .args(defines.iter().map(|(n, v)| format!("-D{n}={v}")))
+            .arg("-I")
             .arg(root.join("physics"))
             .arg("-I")
             .arg(root.join("kernels"))
@@ -403,18 +452,24 @@ pub mod cuda_layout {
         entry: &str,
         dest: &Path,
     ) -> Result<CudaKernel> {
+        compile_kernel_with_defines(slangc, root, source, entry, dest, &[("ENGINE_WGSL", "1")])
+    }
+
+    /// [`compile_kernel`] with `-D NAME=VALUE` for each define (`ENGINE_WGSL=1`
+    /// among them for the browser's layout).
+    pub fn compile_kernel_with_defines(
+        slangc: &Path,
+        root: &Path,
+        source: &Path,
+        entry: &str,
+        dest: &Path,
+        defines: &[(&str, &str)],
+    ) -> Result<CudaKernel> {
         let reflection = dest.with_extension("json");
         let output = std::process::Command::new(slangc)
-            .args([
-                "-target",
-                "cuda",
-                "-stage",
-                "compute",
-                "-entry",
-                entry,
-                "-DENGINE_WGSL=1",
-                "-I",
-            ])
+            .args(["-target", "cuda", "-stage", "compute", "-entry", entry])
+            .args(defines.iter().map(|(n, v)| format!("-D{n}={v}")))
+            .arg("-I")
             .arg(root.join("physics"))
             .arg("-I")
             .arg(root.join("kernels"))

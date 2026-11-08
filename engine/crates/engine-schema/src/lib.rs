@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub mod character;
 pub mod commands;
 pub mod convex;
+pub mod feature_query;
 pub mod guidance;
 pub mod handles;
 pub mod heightfield;

@@ -6,7 +6,11 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 #[cfg(feature = "gpu")]
+mod compute_spec;
+#[cfg(feature = "gpu")]
 mod explicit_beams_gpu;
+#[cfg(feature = "gpu")]
+pub mod explicit_coupling;
 #[cfg(feature = "gpu")]
 mod features;
 #[cfg(feature = "gpu")]
@@ -20,8 +24,11 @@ pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]
+pub use compute_spec::ComputeSpec;
+#[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
-    explicit_beams_shipped_wgsl, render_scene_json, ExplicitBeamsGpu, GpuBeam, GpuSnapshot, KernelVariant,
+    explicit_beams_shipped_wgsl, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu, GpuBeam,
+    GpuSnapshot, KernelVariant,
 };
 #[cfg(feature = "gpu")]
 pub use features::{
@@ -30,9 +37,12 @@ pub use features::{
 };
 #[cfg(feature = "gpu")]
 pub use gpu::creation_errors;
+/// The explicit kernels' loop-cap error (every target writes the flag): see
+/// `engine_exec::explicit_plan::EXPLICIT_LOOP_CAP`.
+pub use engine_exec::explicit_plan::{explicit_loop_cap_hit, loop_budget_override};
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    default_device, default_device_with, instance_flags, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING,
+    default_device, default_device_with, hold_gpu_lock, instance_flags, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING, RestView,
     POSES_BINDING, POSE_HEADER_BINDING, POSE_RECORD_BYTES,
 };
 #[cfg(feature = "gpu")]
@@ -40,6 +50,8 @@ pub use poses::PoseRecord;
 #[cfg(feature = "gpu")]
 pub use soft_skin::SoftSkinner;
 
+/// The explicit vehicles' World coupling (`slang/kernels/vehicle_coupling.slang`).
+pub const VEHICLE_COUPLING_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/vehicle_coupling.wgsl"));
 /// The skinning kernels as one WGSL module (entries `soft_skin_vertices`,
 /// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
 pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
@@ -49,6 +61,54 @@ pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/so
 /// ([`ExplicitBeamsGpu`]), as `generated/wgsl/explicit_beams.wgsl`.
 pub const EXPLICIT_BEAMS_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams.wgsl"));
+/// The larger contact groups' modules (`EB_VV_BIG_ONLY`, entry
+/// `explicit_beams_contact`; `engine_exec::explicit_plan::Kernel::ContactBig`), at the
+/// frame module's four variants.
+pub const EXPLICIT_BEAMS_CONTACT_BIG: [(&str, &str); 4] = [
+    ("explicit_beams_contact_big", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big.wgsl"))),
+    ("explicit_beams_contact_big_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_wide.wgsl"))),
+    ("explicit_beams_contact_big_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero.wgsl"))),
+    ("explicit_beams_contact_big_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_wide.wgsl"))),
+];
+/// The sixteen frame and contact modules without surface contact (`EB_NO_SURFACE`,
+/// name `<module>_nosurf`; `engine_exec::explicit_plan::Kernel::module_for`): the host
+/// runs them when no vehicle of the upload has surface contact.
+pub const EXPLICIT_BEAMS_NOSURF: [(&str, &str); 16] = [
+    ("explicit_beams_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_nosurf.wgsl"))),
+    ("explicit_beams_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nosurf.wgsl"))),
+    ("explicit_beams_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_nosurf.wgsl"))),
+    ("explicit_beams_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide_nosurf.wgsl"))),
+    ("explicit_beams_solo_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_nosurf.wgsl"))),
+    ("explicit_beams_solo_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_wide_nosurf.wgsl"))),
+    ("explicit_beams_solo_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_nosurf.wgsl"))),
+    ("explicit_beams_solo_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide_nosurf.wgsl"))),
+    ("explicit_beams_contact_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_nosurf.wgsl"))),
+    ("explicit_beams_contact_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_wide_nosurf.wgsl"))),
+    ("explicit_beams_contact_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_nosurf.wgsl"))),
+    ("explicit_beams_contact_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide_nosurf.wgsl"))),
+    ("explicit_beams_contact_big_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_nosurf.wgsl"))),
+    ("explicit_beams_contact_big_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_wide_nosurf.wgsl"))),
+    ("explicit_beams_contact_big_aero_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_nosurf.wgsl"))),
+    ("explicit_beams_contact_big_aero_wide_nosurf", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_wide_nosurf.wgsl"))),
+];
+/// Surface contact split from the frame (`engine_exec::explicit_plan::Kernel::FrameSeg`,
+/// `Kernel::Surf`): the frame in segments at its four variants (`EB_FRAME_SEG`), then the
+/// surface pass's pipelines (`EB_SURF_PIPE`, `SURF_PASSES` order).
+pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
+    ("explicit_beams_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_seg.wgsl"))),
+    ("explicit_beams_wide_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_seg.wgsl"))),
+    ("explicit_beams_aero_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_seg.wgsl"))),
+    ("explicit_beams_aero_wide_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide_seg.wgsl"))),
+    ("explicit_surface_prep", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_prep.wgsl"))),
+    ("explicit_surface_find_tri", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_tri.wgsl"))),
+    ("explicit_surface_find_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_seg.wgsl"))),
+    ("explicit_surface_find_point", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_point.wgsl"))),
+    ("explicit_surface_find_pair", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_find_pair.wgsl"))),
+    ("explicit_surface_apply_tri", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_tri.wgsl"))),
+    ("explicit_surface_apply_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_seg.wgsl"))),
+    ("explicit_surface_apply_point", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_point.wgsl"))),
+    ("explicit_surface_apply_pair", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_pair.wgsl"))),
+];
 /// The build's WGSL directory (native tests read the frozen baseline kernel,
 /// `explicit_baseline_*.wgsl`, from it at run time).
 #[doc(hidden)]
@@ -56,7 +116,7 @@ pub const EXPLICIT_BEAMS_WGSL_DIR: &str = concat!(env!("OUT_DIR"), "/wgsl");
 
 /// The explicit-beams wide passes (entry, WGSL), one module each: one thread per
 /// element over every vehicle, a dispatch per pass ([`ExplicitBeamsGpu::set_wide`]).
-pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 8] = [
+pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 10] = [
     ("explicit_beams_wide_begin", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_begin.wgsl"))),
     ("explicit_beams_wide_rebase", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_rebase.wgsl"))),
     ("explicit_beams_wide_nodes", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nodes.wgsl"))),
@@ -65,6 +125,8 @@ pub const EXPLICIT_BEAMS_WIDE_PASSES: [(&str, &str); 8] = [
     ("explicit_beams_wide_end", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_end.wgsl"))),
     ("explicit_beams_wide_close", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_close.wgsl"))),
     ("explicit_beams_wide_hits", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_hits.wgsl"))),
+    ("explicit_beams_wide_centred_beams", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_centred_beams.wgsl"))),
+    ("explicit_beams_wide_centred_nodes", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_centred_nodes.wgsl"))),
 ];
 
 /// [`EXPLICIT_BEAMS_WGSL`] with 512 lanes per vehicle, for large vehicles.
@@ -84,6 +146,9 @@ pub const EXPLICIT_BEAMS_VV_PASSES: [(&str, &str); 3] = [
     ("explicit_beams_vv_pairs", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_pairs.wgsl"))),
     ("explicit_beams_vv_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_vv_group.wgsl"))),
 ];
+/// Vehicle sleep's awake list (`engine_exec::explicit_plan::SLEEP_LIST`).
+pub const EXPLICIT_BEAMS_SLEEP_LIST_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_sleep_list.wgsl"));
 pub const EXPLICIT_BEAMS_CONTACT_WGSL: &str =
     include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact.wgsl"));
 pub const EXPLICIT_BEAMS_CONTACT_WIDE_WGSL: &str =
@@ -381,8 +446,8 @@ include!("wgsl_loop_cap.rs");
 
 /// Chrome treats a storage/workgroup load as non-uniform, so a later barrier
 /// inside `if (lanes == 1)` is rejected. `workgroupUniformLoad` makes it uniform.
-fn uniformize_workgroup_lanes(src: &str) -> String {
-    const NAMES: [&str; 3] = ["gsUniformLanes_0", "gsUniformHits_0", "gsUniformOpen_0"];
+pub fn uniformize_workgroup_lanes(src: &str) -> String {
+    const NAMES: [&str; 8] = ["gsUniformLanes_0", "gsUniformHits_0", "gsUniformOpen_0", "gsUniformCouple_0", "gsUniformDrive_0", "gsUniformSurf_0", "gsUniformCpl_0", "gsUniformCplKeep_0"];
     let mut out = src.to_string();
     for name in NAMES {
         if !out.contains(name) {

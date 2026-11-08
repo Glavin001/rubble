@@ -8,19 +8,31 @@
 //! [`SoftBackend`] ([`SoftHost`]). [`cpu`] is a reference solver of the same
 //! particle and beam model for tests and calibration.
 
+pub mod authoring;
 pub mod buggy;
 pub mod calibrate;
 pub mod color;
 pub mod cpu;
+pub mod crash_rigs;
 pub mod damage;
 pub mod desc;
 pub mod elements;
 pub mod explicit_aero;
 pub mod explicit_beams;
 pub mod explicit_contact;
+pub mod explicit_drive;
+pub mod explicit_jbeam_ext;
 pub mod explicit_ref;
+pub mod explicit_rigid;
+pub mod explicit_skin;
+pub mod explicit_surface;
+pub mod explicit_sleep;
 pub mod explicit_triggers;
 pub mod flexbody;
+pub mod flexmesh;
+pub mod flexskin;
+pub mod glb;
+pub mod flextex;
 pub mod hires;
 pub mod host;
 pub mod jbeam;
@@ -30,8 +42,10 @@ pub mod metrics;
 pub mod model;
 pub mod pack;
 pub mod procedural;
+pub mod reference_cars;
 pub mod truck;
 pub mod truck_export;
+pub mod vehicle_compare;
 pub mod visual;
 
 pub use damage::{damage_summary, SoftDamage};

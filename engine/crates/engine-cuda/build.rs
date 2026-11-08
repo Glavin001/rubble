@@ -66,7 +66,7 @@ fn main() -> Result<()> {
     ])?;
 
     // world_step entries are large and nvcc is slow: compile in parallel.
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let threads = engine_slang_build::build_jobs();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut compiled: Vec<(usize, Compiled)> = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads)
@@ -160,6 +160,118 @@ fn main() -> Result<()> {
     table.push_str("];\n");
     std::fs::write(out_dir.join("cuda_kernels.rs"), table)?;
     terrain_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
+    explicit_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
+    Ok(())
+}
+
+/// The explicit-beams solver's modules (`engine_exec::explicit_plan::MODULES`:
+/// name, entry, defines), Slang → CUDA from `explicit_beams.slang` with the same
+/// hazard check as the rigid kernels and fatbins when nvcc is present; each
+/// `SLANG_globalParams` field mapped to the plan's binding (its
+/// `[[vk::binding]]`). Emits `cuda_explicit_kernels.rs`
+/// (`CUDA_EXPLICIT_KERNELS`, `CudaExplicitBeams`).
+fn explicit_kernels(
+    slangc: &std::path::Path,
+    nvcc: Option<&std::path::Path>,
+    arch: &str,
+    sass: &[&str],
+    root: &std::path::Path,
+    out_dir: &std::path::Path,
+) -> Result<()> {
+    use engine_exec::explicit_plan::MODULES;
+    use engine_slang_build::cuda_layout::compile_kernel_with_defines;
+    use engine_slang_build::msl_layout::vk_binding_slots;
+    let dir = out_dir.join("cuda_explicit");
+    std::fs::create_dir_all(&dir)?;
+    let source = root.join("kernels/explicit_beams.slang");
+    let slots = vk_binding_slots(std::slice::from_ref(&source))?;
+    let compiled = engine_slang_build::par_map(MODULES, |m| -> Compiled {
+        let cu = dir.join(format!("{}.cu", m.name));
+        let kernel = compile_kernel_with_defines(slangc, root, &source, m.entry, &cu, m.defines)?;
+        let text = std::fs::read_to_string(&cu)?;
+        let hazards = deferred_load_hazards(&text);
+        if !hazards.is_empty() {
+            anyhow::bail!(
+                "{}: Slang's CUDA output reads a buffer element after storing to it \
+                 (use the value before the store in the .slang source):\n  {}",
+                m.name,
+                hazards.join("\n  ")
+            );
+        }
+        // The kernel caps its loops in its source (explicit_loop_cap.slang): every
+        // module with a loop carries them on this target too.
+        // (The kernel's code: past Slang's CUDA prelude, which has loops of its own.)
+        let code = text.split_once("SLANG_globalParams;").map_or(text.as_str(), |x| x.1);
+        anyhow::ensure!(
+            code.contains("ebLoopCapHit") || only_constant_loops(code),
+            "{}: the CUDA source has no loop caps (explicit_loop_cap.slang)",
+            m.name
+        );
+        if let Some(nvcc) = nvcc {
+            fatbin(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass)?;
+        }
+        Ok((kernel, text.len() as u64, nvcc.is_some(), false))
+    });
+    let mut table = String::from(
+        "/// Explicit-beams modules: plan module, entry, CUDA source bytes, fatbin, threads, globals.\n\
+         pub static CUDA_EXPLICIT_KERNELS: &[ExplicitCudaKernel] = &[\n",
+    );
+    for (m, r) in MODULES.iter().zip(compiled) {
+        let (kernel, cu_bytes, has_image, _) = r?;
+        let mut binds = String::new();
+        let mut params_bytes = 0;
+        for f in &kernel.fields {
+            let slot = slots
+                .get(&f.name)
+                .ok_or_else(|| anyhow!("{}: global {} has no vk::binding", m.name, f.name))?;
+            write!(binds, "({}, {}, {slot}), ", f.offset, f.size)?;
+            params_bytes = params_bytes.max(f.offset + f.size);
+        }
+        let image = if has_image {
+            format!(
+                "include_bytes!({:?})",
+                dir.join(format!("{}.fatbin", m.name)).display().to_string()
+            )
+        } else {
+            "&[]".into()
+        };
+        writeln!(
+            table,
+            "    ExplicitCudaKernel {{ name: {:?}, entry: {:?}, cu_bytes: {cu_bytes}, image: {image}, threads: {:?}, params_bytes: {params_bytes}, binds: &[{binds}] }},",
+            m.name, m.entry, kernel.threads
+        )?;
+    }
+    table.push_str("];\n");
+    // Tests only: the loop caps on a runaway (tests/explicit_loop_cap.rs).
+    let test_source = root.join("kernels/explicit_loop_cap_test.slang");
+    let test_slots = vk_binding_slots(std::slice::from_ref(&test_source))?;
+    let entry = "explicit_loop_cap_test";
+    let cu = dir.join(format!("{entry}.cu"));
+    let kernel = compile_kernel_with_defines(slangc, root, &test_source, entry, &cu, &[])?;
+    let cu_bytes = std::fs::metadata(&cu)?.len();
+    let image = match nvcc {
+        Some(nvcc) => {
+            fatbin(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass)?;
+            format!("include_bytes!({:?})", cu.with_extension("fatbin").display().to_string())
+        }
+        None => "&[]".into(),
+    };
+    let mut binds = String::new();
+    let mut params_bytes = 0;
+    for f in &kernel.fields {
+        let slot = test_slots
+            .get(&f.name)
+            .ok_or_else(|| anyhow!("{entry}: global {} has no vk::binding", f.name))?;
+        write!(binds, "({}, {}, {slot}), ", f.offset, f.size)?;
+        params_bytes = params_bytes.max(f.offset + f.size);
+    }
+    writeln!(
+        table,
+        "/// Tests only: `explicit_loop_cap_test.slang` (bindings 0 gAcc, 1 gOut).\n\
+         pub static CUDA_LOOP_CAP_TEST: ExplicitCudaKernel = ExplicitCudaKernel {{ name: {entry:?}, entry: {entry:?}, cu_bytes: {cu_bytes}, image: {image}, threads: {:?}, params_bytes: {params_bytes}, binds: &[{binds}] }};",
+        kernel.threads
+    )?;
+    std::fs::write(out_dir.join("cuda_explicit_kernels.rs"), table)?;
     Ok(())
 }
 
@@ -273,4 +385,26 @@ fn terrain_kernels(
     table.push_str("];\n");
     std::fs::write(out_dir.join("cuda_terrain_kernels.rs"), table)?;
     Ok(())
+}
+
+/// Every loop of Slang's CUDA `code` is constant: `for(;;)` whose first test is
+/// `if(i < int(N))` or `if(i < NU)` (Slang's own helpers, e.g. a vector's lanes).
+fn only_constant_loops(code: &str) -> bool {
+    if code.contains("while") || code.contains("for (") {
+        return false;
+    }
+    code.split("for(;;)").skip(1).all(|rest| {
+        let first = rest
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && *l != "{" && !l.starts_with("#line"))
+            .unwrap_or("");
+        let Some(cond) = first.strip_prefix("if(").and_then(|c| c.strip_suffix(')')) else {
+            return false;
+        };
+        let Some((_, bound)) = cond.split_once(" < ") else { return false };
+        let n = bound.strip_prefix("int(").and_then(|b| b.strip_suffix(')')).unwrap_or(bound);
+        let n = n.strip_suffix('U').unwrap_or(n);
+        !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())
+    })
 }

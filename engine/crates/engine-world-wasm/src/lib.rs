@@ -30,7 +30,10 @@ mod city;
 mod defs;
 mod demo;
 mod explicit;
+mod explicit_world;
 mod frame;
+/// Real-time pacing of the explicit solver's fixed steps on a display.
+mod frame_pacer;
 mod guidance;
 /// The fracture lab (`fracture/`): its scenes as destructibles, its shots.
 mod lab;
@@ -38,17 +41,21 @@ mod motion;
 mod presets;
 mod read;
 mod scene;
+mod showcase;
+mod showcase_world;
+mod ring_drive;
 mod soft;
 mod terrain;
 mod vehicle;
 
 pub use city::WebCity;
 pub use frame::WebFrame;
+pub use frame_pacer::FramePacer;
 pub use lab::{check_lab_chunk_order, LabRun, LabScene, LabSettleJob};
 /// The lab's scene bindings (`engine-fracture-wasm`), exported from this module too.
 pub use engine_fracture_wasm;
 pub use scene::WebSnapshot;
-pub use explicit::ExplicitSim;
+pub use explicit::{explicit_sedan_truck, ExplicitSim};
 
 fn err(e: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&e.to_string()).into()
@@ -135,6 +142,174 @@ pub(crate) async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgp
     device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| note_gpu_error(e.to_string())));
     device.set_device_lost_callback(|reason, message| note_gpu_error(format!("device lost ({reason:?}): {message}")));
     Ok((info, device, queue))
+}
+
+/// Compile `specs` with `createComputePipelineAsync`, all at once, and wait for
+/// them (`engine_webgpu::ComputeSpec`): the host's synchronous creation of the same
+/// descriptors afterwards is a cache hit. Chrome compiles an async pipeline on a
+/// worker thread; a synchronous one on the GPU process's main thread, where a
+/// kernel compiling for longer than the GPU watchdog (the explicit contact frame:
+/// about a minute cold on Metal) kills the GPU process in a windowed browser.
+/// A spec this cannot express, or a compile the browser rejects, is left to the
+/// synchronous creation, which reports it as before. `done(module, ms)` hears each
+/// pipeline as it finishes (in completion order; `ms` since the compiles started).
+/// A deferred spec ([`engine_webgpu::ComputeSpec::deferred`]) starts once the others
+/// are done and is not waited for: the host creates it at first use.
+pub(crate) async fn warm_pipelines(
+    device: &wgpu::Device,
+    specs: &[engine_webgpu::ComputeSpec],
+    done: std::rc::Rc<dyn Fn(&str, f64)>,
+) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use js_sys::{Array, Function, Object, Promise, Reflect};
+        use wasm_bindgen::JsCast;
+        let Some(gpu) = device.as_webgpu() else {
+            return;
+        };
+        let gpu: &JsValue = gpu.as_ref();
+        let call = |obj: &JsValue, name: &str, arg: &JsValue| -> Result<JsValue, JsValue> {
+            let f: Function = Reflect::get(obj, &name.into())?.dyn_into()?;
+            f.call1(obj, arg)
+        };
+        let object = |fields: &[(&str, JsValue)]| -> Result<JsValue, JsValue> {
+            let o = Object::new();
+            for (k, v) in fields {
+                Reflect::set(&o, &(*k).into(), v)?;
+            }
+            Ok(o.into())
+        };
+        let entry = |e: &wgpu::BindGroupLayoutEntry| -> Option<Result<JsValue, JsValue>> {
+            let wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset,
+                min_binding_size,
+            } = e.ty
+            else {
+                return None;
+            };
+            let kind = match ty {
+                wgpu::BufferBindingType::Uniform => "uniform",
+                wgpu::BufferBindingType::Storage { read_only: true } => "read-only-storage",
+                wgpu::BufferBindingType::Storage { read_only: false } => "storage",
+            };
+            Some((|| {
+                let buffer = object(&[
+                    ("type", kind.into()),
+                    ("hasDynamicOffset", has_dynamic_offset.into()),
+                    (
+                        "minBindingSize",
+                        (min_binding_size.map_or(0, |n| n.get()) as f64).into(),
+                    ),
+                ])?;
+                object(&[
+                    ("binding", e.binding.into()),
+                    ("visibility", e.visibility.bits().into()),
+                    ("buffer", buffer),
+                ])
+            })())
+        };
+        let start = |s: &engine_webgpu::ComputeSpec| -> Result<Option<Promise>, JsValue> {
+            let layout = match &s.layout {
+                None => JsValue::from_str("auto"),
+                Some(entries) => {
+                    let list = Array::new();
+                    for e in entries {
+                        match entry(e) {
+                            Some(v) => list.push(&v?),
+                            None => return Ok(None),
+                        };
+                    }
+                    let bgl = call(
+                        gpu,
+                        "createBindGroupLayout",
+                        &object(&[("entries", list.into())])?,
+                    )?;
+                    let groups = Array::of1(&bgl);
+                    call(
+                        gpu,
+                        "createPipelineLayout",
+                        &object(&[("bindGroupLayouts", groups.into())])?,
+                    )?
+                }
+            };
+            let module = call(
+                gpu,
+                "createShaderModule",
+                &object(&[("label", s.label.into()), ("code", s.wgsl.as_str().into())])?,
+            )?;
+            let compute = object(&[("module", module), ("entryPoint", s.entry.into())])?;
+            let desc = object(&[
+                ("label", s.label.into()),
+                ("layout", layout),
+                ("compute", compute),
+            ])?;
+            Ok(Some(
+                call(gpu, "createComputePipelineAsync", &desc)?.dyn_into()?,
+            ))
+        };
+        let now = || js_sys::Date::now();
+        let t0 = now();
+        // The pipelines the first frame needs, all at once; then (not waited for) the
+        // deferred ones, so they do not hold up the others' compiles.
+        let mut pending = Vec::new();
+        let mut later = Vec::new();
+        for s in specs.iter().filter(|s| !s.deferred) {
+            match start(s) {
+                Ok(Some(p)) => {
+                    // Each pipeline's completion, as it lands (settled either way).
+                    let (done, module) = (done.clone(), s.module);
+                    let hear = wasm_bindgen::closure::Closure::once_into_js(move |_: JsValue| {
+                        done(module, now() - t0);
+                    });
+                    // p.then(hear, hear): one of the two runs; the derived promise only
+                    // reports.
+                    if let Ok(then) = Reflect::get(&p, &"then".into()).and_then(|f| f.dyn_into::<Function>()) {
+                        let _ = then.call2(&p, &hear, &hear);
+                    }
+                    pending.push((s.label, wasm_bindgen_futures::JsFuture::from(p)));
+                }
+                Ok(None) => {}
+                Err(e) => web_sys::console::warn_2(
+                    &format!("pipeline warm-up skipped ({})", s.label).into(),
+                    &e,
+                ),
+            }
+        }
+        for (label, p) in pending {
+            if let Err(e) = p.await {
+                web_sys::console::warn_2(
+                    &format!(
+                        "pipeline warm-up failed ({label}); the synchronous creation reports it"
+                    )
+                    .into(),
+                    &e,
+                );
+            }
+        }
+        for s in specs.iter().filter(|s| s.deferred) {
+            match start(s) {
+                Ok(Some(p)) => {
+                    let (done, module) = (done.clone(), s.module);
+                    let hear = wasm_bindgen::closure::Closure::once_into_js(move |_: JsValue| {
+                        done(module, now() - t0);
+                    });
+                    if let Ok(then) = Reflect::get(&p, &"then".into()).and_then(|f| f.dyn_into::<Function>()) {
+                        let _ = then.call2(&p, &hear, &hear);
+                    }
+                    later.push(p);
+                }
+                Ok(None) => {}
+                Err(e) => web_sys::console::warn_2(
+                    &format!("pipeline warm-up skipped ({})", s.label).into(),
+                    &e,
+                ),
+            }
+        }
+        drop(later);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (device, specs, done);
 }
 
 /// The limits a world's buffers and kernels run into, as one line.

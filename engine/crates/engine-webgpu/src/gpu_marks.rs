@@ -12,6 +12,12 @@ pub struct GpuMarks {
     noop: wgpu::ComputePipeline,
     names: Mutex<Vec<&'static str>>,
     cap: u32,
+    /// `RUBBLE_GPU_TIMING_SYNC=1` (diagnostic): every mark ends the command buffer, submits
+    /// it and waits, and the segment's time is the host's wall time of that wait. Slower
+    /// (a submit and a wait per mark) but immune to the GPU overlapping a mark's empty pass
+    /// with the work before it (Metal starts a pass with no dependencies early, so an empty
+    /// pass's begin timestamp can precede the end of the passes encoded before it).
+    sync: Option<(wgpu::Device, wgpu::Queue, Mutex<Vec<std::time::Instant>>)>,
 }
 
 impl GpuMarks {
@@ -45,7 +51,17 @@ impl GpuMarks {
             }),
             names: Mutex::new(Vec::new()),
             cap,
+            sync: None,
         }
+    }
+
+    /// As [`Self::new`], in the submit-and-wait mode when `RUBBLE_GPU_TIMING_SYNC=1`.
+    pub fn new_for(device: &wgpu::Device, queue: &wgpu::Queue, cap: u32) -> Self {
+        let mut m = Self::new(device, cap);
+        if std::env::var("RUBBLE_GPU_TIMING_SYNC").is_ok_and(|v| v == "1") {
+            m.sync = Some((device.clone(), queue.clone(), Mutex::new(Vec::new())));
+        }
+        m
     }
 
     /// The end of segment `name` (and the start of the next).
@@ -56,6 +72,18 @@ impl GpuMarks {
             return;
         }
         names.push(name);
+        if let Some((device, queue, times)) = &self.sync {
+            let done = std::mem::replace(
+                enc,
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("gpu marks sync"),
+                }),
+            );
+            queue.submit([done.finish()]);
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            times.lock().expect("marks").push(std::time::Instant::now());
+            return;
+        }
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(name),
             timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
@@ -72,6 +100,14 @@ impl GpuMarks {
     /// [`Self::report`] once `enc` is submitted).
     pub fn resolve(&self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder) -> wgpu::Buffer {
         let n = self.names.lock().expect("marks").len().max(1) as u64;
+        if self.sync.is_some() {
+            return device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu marks read (sync)"),
+                size: 8,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
         let resolve = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gpu marks resolve"),
             size: 8 * n,
@@ -96,6 +132,13 @@ impl GpuMarks {
         queue: &wgpu::Queue,
         staging: &wgpu::Buffer,
     ) -> Vec<(&'static str, f64)> {
+        if let Some((_, _, times)) = &self.sync {
+            let t = times.lock().expect("marks");
+            let names = self.names.lock().expect("marks");
+            return (1..names.len().min(t.len()))
+                .map(|k| (names[k], (t[k] - t[k - 1]).as_secs_f64() * 1e3))
+                .collect();
+        }
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = device.poll(wgpu::PollType::wait_indefinitely());

@@ -10,6 +10,11 @@
 //! ([`engine_softbody::explicit_beams::FrameClock`]), and read state back with
 //! [`ExplicitBeamsGpu::positions`], [`ExplicitBeamsGpu::velocities`] and
 //! [`ExplicitBeamsGpu::beams`].
+//!
+//! This is the WebGPU host of the shared plan (`engine_exec::explicit_plan`): the
+//! buffers' contents, the module choice and each frame's commands come from there,
+//! as on the Metal and CUDA hosts; this file only creates the wgpu objects and
+//! replays the commands.
 
 use crate::{
     EXPLICIT_BEAMS_AERO_WGSL, EXPLICIT_BEAMS_AERO_WIDE_WGSL, EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
@@ -18,65 +23,69 @@ use crate::{
     EXPLICIT_BEAMS_SOLO_WGSL, EXPLICIT_BEAMS_SOLO_WIDE_WGSL, EXPLICIT_BEAMS_VV_PASSES, EXPLICIT_BEAMS_WGSL,
     EXPLICIT_BEAMS_WIDE_PASSES, EXPLICIT_BEAMS_WIDE_WGSL,
 };
-use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
+use engine_exec::explicit_plan::{
+    self as plan, Cmd, ExplicitLayout, ExplicitUpload, FramePlanner, Kernel, PlannerState, BIND_TABLE,
+    PARAM_STRIDE, VV_RECS,
+};
+pub use engine_exec::explicit_plan::{CouplingCapacity, CouplingLayout, GpuBeam};
+use engine_softbody::explicit_beams::ExplicitBeams;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
-
-/// A beam's state as read back: broken, and its rest length (m).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GpuBeam {
-    pub broken: bool,
-    pub rest: f32,
-    /// Spawn rest length (m).
-    pub rest0: f32,
-}
-
-impl GpuBeam {
-    /// Yielded, as [`engine_softbody::explicit_beams::Beam::bent`].
-    pub fn bent(&self) -> bool {
-        !self.broken && (self.rest - self.rest0).abs() > 1e-3 * self.rest0.abs()
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Span {
-    node_off: u32,
-    nodes: u32,
-    beam_off: u32,
-    beams: u32,
-    /// First slide node and rail segment (global) and the slide node count.
-    slide_off: u32,
-    slides: u32,
-    seg_off: u32,
-    tris: u32,
-}
 
 pub struct ExplicitBeamsGpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
-    group: wgpu::BindGroup,
+    /// The plain frame's pipeline and bind group ([`Kernel::Frame`]), created at first
+    /// use: a fleet of more than one vehicle runs the contact kernels while vehicle
+    /// contact is on, so a browser host compiles this one after the first frame
+    /// ([`crate::ComputeSpec::deferred`]).
+    frame: std::sync::OnceLock<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    frame_module: &'static str,
+    /// Surface contact split from the frame ([`Kernel::FrameSeg`], [`Kernel::Surf`]),
+    /// created at first use; its frame module.
+    split: std::sync::OnceLock<Split>,
+    split_module: &'static str,
     params: wgpu::Buffer,
     nodes: wgpu::Buffer,
     beams: wgpu::Buffer,
     misc: wgpu::Buffer,
     /// gNext (grid ranks, wide-pass scratch, trigger inputs).
     next: wgpu::Buffer,
-    spans: Vec<Span>,
-    rest0: Vec<f32>,
-    words: [u32; PARAM_WORDS],
-    /// gBeams record of the aero state and per vehicle its first wing and count.
-    aero_state: u32,
-    /// gBeams record of the slide node states; gNext word of the trigger inputs.
-    slide_state: u32,
-    key_base: u32,
-    wing_spans: Vec<(u32, u32)>,
-    /// The wide passes (one thread per element over every vehicle), when used.
+    /// Where every record lives (the shared plan's).
+    layout: ExplicitLayout,
+    /// Each frame's parameters and commands (the shared plan's).
+    planner: FramePlanner,
+    /// The wide passes (one thread per element over every vehicle), when possible.
     wide: Option<Wide>,
-    total: [u32; 5],
     timing: Option<FrameTiming>,
+    /// Diagnostic marks after each of the frame's dispatches (`RUBBLE_GPU_TIMING_DISPATCH`,
+    /// a host's [`crate::gpu_marks::GpuMarks`]).
+    marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>,
+    /// The coupling header's state ([`Self::set_coupling_on`], [`Self::set_coupling_cull`]).
+    coupling_on: bool,
+    coupling_cull_off: bool,
+    coupling_cache_off: bool,
+    /// Diagnostic: extra bits OR-ed into the coupling header word ([`Self::debug_coupling_bits`]).
+    debug_coupling_bits: u32,
+    /// The coupling's per-node shape ranges off ([`Self::set_coupling_node_ranges`]).
+    coupling_ranges_off: bool,
+    /// Diagnostic: the large contact groups' pipeline from an edited module
+    /// ([`Self::debug_set_contact_big_wgsl`]).
+    debug_big: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    /// Diagnostic: the solo and the contact groups' pipelines from edited modules.
+    debug_solo: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    debug_groups: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    /// Per vehicle its own frame-bounds margin (m, 0: the fleet's), widened when it
+    /// left its frame bounds ([`Self::vehicle_contact_margin`]).
+    vehicle_margins: Vec<f32>,
+    surface_pairs_off: bool,
+    surface_culls_off: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
+    /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
+    /// `wait` saw, not yet handled.
+    contact_errors: std::sync::Mutex<Vec<String>>,
+    contact_errors_seen: std::sync::Mutex<Vec<String>>,
     /// The bound buffers (bindings 0..8) and the module choice (aero, 512 lanes),
     /// for the test-only kernel variants ([`Self::set_kernel_variant`]).
     bufs: [wgpu::Buffer; 9],
@@ -87,6 +96,12 @@ pub struct ExplicitBeamsGpu {
     probe: Option<wgpu::Buffer>,
     /// The `EB_DET_HITS` variants' hit lists (binding 12).
     det: Option<wgpu::Buffer>,
+    acc: wgpu::Buffer,
+    /// Vehicle sleep's host side: the last drive input per vehicle (a change wakes it),
+    /// the grabbed vehicle (kept awake), the vehicles to wake before the next frame.
+    sleep_inputs: Vec<Option<engine_softbody::explicit_drive::DriveInput>>,
+    sleep_grab: Option<usize>,
+    sleep_wake: std::sync::Mutex<Vec<usize>>,
 }
 
 /// Which kernel runs the frames: the shipped one, or (tests only) the frozen
@@ -125,21 +140,16 @@ struct AltPipes {
 #[doc(hidden)]
 pub struct GpuSnapshot {
     copies: Vec<wgpu::Buffer>,
-    left: u32,
-    fresh: bool,
-    frames: u64,
-    replan: bool,
+    state: PlannerState,
 }
 
-/// Vehicle–vehicle contact's pipelines, buffers and state.
+/// Vehicle–vehicle contact's pipelines, buffers and status reads.
 struct Contact {
-    /// On (the default); it runs only with more than one vehicle.
-    on: bool,
-    /// The plan passes (bounds, pairs, group) and the contact groups' entry.
-    plan: [wgpu::ComputePipeline; 3],
-    groups: wgpu::ComputePipeline,
-    /// The solo vehicles' frame (`EB_VV_SOLO`).
-    solo: wgpu::ComputePipeline,
+    /// Its pipelines: built only for a fleet of more than one vehicle (a single
+    /// vehicle never runs the contact passes: [`FramePlanner`]'s `contact_active`),
+    /// which spares a one-vehicle scene the contact frame's compile (the largest
+    /// kernel, about a minute cold in Chrome on Metal).
+    pipes: Option<ContactPipes>,
     plan_group: wgpu::BindGroup,
     contact_group: wgpu::BindGroup,
     /// Indirect arguments: the solo vehicles (word 0) and the groups (word 4).
@@ -148,21 +158,154 @@ struct Contact {
     /// staging buffer and checked once mapped, a frame or two later (no waiting).
     acc: wgpu::Buffer,
     status_at: u64,
-    /// The loop-cap flag (gAcc's last word, byte offset): see `cap_explicit_loops`.
+    /// The loop-cap flag (gAcc's last word, byte offset): see
+    /// `engine_exec::explicit_plan::EXPLICIT_LOOP_CAP`.
     cap_at: u64,
     status: std::sync::Mutex<StatusRing>,
-    /// Frames submitted (every STATUS_EVERY-th reads the status).
-    frames: u64,
-    /// Steps the current plan still covers; a new plan is due when a frame needs
-    /// more (or `replan` is set: velocities written by the host).
-    left: u32,
-    replan: std::sync::atomic::AtomicBool,
-    /// This frame runs the plan passes.
-    planning: bool,
-    /// No plan has run since contact (re)started.
-    fresh: bool,
-    /// The contact throttles' first record in gMisc.
-    tri_base: u32,
+}
+
+/// Vehicle–vehicle contact's pipelines.
+struct ContactPipes {
+    /// The plan passes (bounds, pairs, group) and the contact groups' entry.
+    plan: [wgpu::ComputePipeline; 3],
+    /// Vehicle sleep's awake list ([`plan::SLEEP_LIST`]).
+    sleep: wgpu::ComputePipeline,
+    groups: wgpu::ComputePipeline,
+    /// The solo vehicles' frame (`EB_VV_SOLO`).
+    solo: wgpu::ComputePipeline,
+    /// The groups of more than four members ([`Kernel::ContactBig`]).
+    big: wgpu::ComputePipeline,
+}
+
+/// The vehicle-contact passes' bind group layout entries: the frame's bindings,
+/// and for the plan passes the indirect arguments ([`plan::BIND_ARGS`]).
+fn contact_entries(args: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
+    let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let rw = wgpu::BufferBindingType::Storage { read_only: false };
+    let ro = wgpu::BufferBindingType::Storage { read_only: true };
+    let mut entries = vec![
+        entry(0, wgpu::BufferBindingType::Uniform),
+        entry(1, ro),
+        entry(2, ro),
+    ];
+    entries.extend((3..9).map(|b| entry(b, rw)));
+    if args {
+        entries.push(entry(plan::BIND_ARGS, rw));
+    }
+    entries
+}
+
+/// The wide passes' bind group layout entries (binding 0: one parameter copy per
+/// step, picked by the dynamic offset).
+fn wide_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: binding == 0,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let rw = wgpu::BufferBindingType::Storage { read_only: false };
+    let ro = wgpu::BufferBindingType::Storage { read_only: true };
+    vec![
+        entry(0, wgpu::BufferBindingType::Uniform),
+        entry(1, ro),
+        entry(2, ro),
+        entry(3, rw),
+        entry(4, rw),
+        entry(5, rw),
+        entry(6, rw),
+        entry(7, rw),
+        entry(8, rw),
+        entry(BIND_TABLE, wgpu::BufferBindingType::Uniform),
+    ]
+}
+
+/// The split frame's bind group layout entries ([`Kernel::FrameSeg`], [`Kernel::Surf`]):
+/// the wide passes' without their vehicle table (binding 0: the segment's parameter
+/// copy, by the dynamic offset).
+fn split_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    let mut e = wide_entries();
+    e.retain(|x| x.binding != BIND_TABLE);
+    e
+}
+
+/// Whether hosts run surface contact split from the frame (on unless
+/// `RUBBLE_SURFACE_SPLIT=0`, a measurement: the frame with the pass in it).
+pub fn surface_split_default() -> bool {
+    std::env::var("RUBBLE_SURFACE_SPLIT").as_deref() != Ok("0")
+}
+
+/// Whether the coupling's per-node shape ranges start off
+/// ([`ExplicitBeamsGpu::set_coupling_node_ranges`]): in browsers' WebGPU (wasm32), where
+/// Chrome's compile of the range lookup for Metal (Tint's bounds-checked MSL) runs the
+/// coupled frame hundreds of times slower (the crash town's car against a crate:
+/// 755 ms a 1/60 s frame with them, 0.87 ms without; `engine/docs/explicit-vehicles-in-world.md`).
+/// `RUBBLE_COUPLING_RANGES=0|1` overrides it natively.
+pub fn coupling_node_ranges_off_default() -> bool {
+    match std::env::var("RUBBLE_COUPLING_RANGES").as_deref() {
+        Ok("0") => true,
+        Ok("1") => false,
+        _ => cfg!(target_arch = "wasm32"),
+    }
+}
+
+/// The split frame's pipelines and bind group ([`FramePlanner::set_surface_split`]).
+struct Split {
+    frame: wgpu::ComputePipeline,
+    surf: Vec<wgpu::ComputePipeline>,
+    group: wgpu::BindGroup,
+}
+
+impl Split {
+    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], frame_module: &str) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("explicit-beams-split"),
+            entries: &split_entries(),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("explicit-beams-split"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipe = |module_name: &str, entry: &str| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(module_name),
+                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(module_name)).into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(module_name),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let frame = pipe(frame_module, plan::FRAME_ENTRY);
+        let surf = plan::SURF_PASSES.iter().map(|&(m, e)| pipe(m, e)).collect();
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams-split"),
+            layout: &layout,
+            entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 0 { params_window(&bufs[0]) } else { bufs[i].as_entire_binding() },
+            }),
+        });
+        Self { frame, surf, group }
+    }
 }
 
 /// A status read: its staging buffer and its map state (0 copied, not yet mapped;
@@ -182,88 +325,85 @@ struct StatusRing {
 
 /// Staging buffers for status reads at most.
 const STATUS_READS: usize = 4;
-/// Fleets up to this size find their overlapping pairs in the grouping pass (one
-/// dispatch fewer per frame).
-const FUSED_PAIRS_MAX: usize = 2048;
-/// Frames between status reads.
-const STATUS_EVERY: u64 = 16;
 
 /// The error a status read reports: the loop-cap flag (`w[4]`), then the contact
 /// counters (outside, overflow, unconverged, too big).
 fn status_error(w: &[i32]) -> Result<(), String> {
     crate::explicit_loop_cap_hit(w[4]).map_err(|e| format!("explicit beams kernel: {e}"))?;
-    contact_error(&w[..4]).map_err(|e| format!("explicit beams vehicle contact: {e}"))
+    plan::contact_error(&w[..4]).map_err(|e| format!("explicit beams vehicle contact: {e}"))
 }
 
-/// The contact error the status counters (outside, overflow, unconverged, too big)
-/// report.
-fn contact_error(w: &[i32]) -> Result<(), String> {
-    if w[0] > 0 {
-        return Err(format!(
-            "vehicle {} left its frame bounds (a node moved past the travel the frame's \
-             contact plan allowed, so a contact may have been missed); raise \
-             ExplicitBeamsGpu::set_contact_margin",
-            w[0] - 1
-        ));
-    }
-    if w[1] != 0 {
-        return Err("the overlapping-pair list overflowed".into());
-    }
-    if w[2] != 0 {
-        return Err("the contact grouping did not converge".into());
-    }
-    if w[3] != 0 {
-        return Err(
-            "a contact group had more than 64 vehicles (they ran without contact that frame)"
-                .into(),
-        );
-    }
-    Ok(())
+/// The parameter buffer as the non-wide passes bind it: its first copy only (the
+/// whole buffer, PARAM_STRIDE × PARAM_COPIES, is past WebGPU's 64 KiB uniform
+/// binding limit; those passes read copy 0, the wide ones a dynamic offset).
+fn params_window(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
+    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+        buffer: b,
+        offset: 0,
+        size: std::num::NonZeroU64::new(PARAM_STRIDE),
+    })
 }
+
+/// The WGSL of a plan module ([`engine_exec::explicit_plan::MODULES`]).
+fn module_wgsl(name: &str) -> &'static str {
+    match name {
+        "explicit_beams" => EXPLICIT_BEAMS_WGSL,
+        "explicit_beams_wide" => EXPLICIT_BEAMS_WIDE_WGSL,
+        "explicit_beams_aero" => EXPLICIT_BEAMS_AERO_WGSL,
+        "explicit_beams_aero_wide" => EXPLICIT_BEAMS_AERO_WIDE_WGSL,
+        "explicit_beams_solo" => EXPLICIT_BEAMS_SOLO_WGSL,
+        "explicit_beams_solo_wide" => EXPLICIT_BEAMS_SOLO_WIDE_WGSL,
+        "explicit_beams_solo_aero" => EXPLICIT_BEAMS_SOLO_AERO_WGSL,
+        "explicit_beams_solo_aero_wide" => EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL,
+        "explicit_beams_contact" => EXPLICIT_BEAMS_CONTACT_WGSL,
+        "explicit_beams_contact_wide" => EXPLICIT_BEAMS_CONTACT_WIDE_WGSL,
+        "explicit_beams_contact_aero" => EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
+        "explicit_beams_contact_aero_wide" => EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL,
+        "explicit_beams_sleep_list" => crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL,
+        _ => EXPLICIT_BEAMS_VV_PASSES
+            .iter()
+            .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
+            .chain(crate::EXPLICIT_BEAMS_NOSURF.iter())
+            .chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter())
+            .chain(crate::EXPLICIT_BEAMS_SURF_SPLIT.iter())
+            .find(|(n, _)| *n == name)
+            .map(|(_, w)| *w)
+            .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
+    }
+}
+
+/// The vehicle a "left its frame bounds" error names.
+fn left_vehicle(e: &str) -> Option<u32> {
+    let head = e.split(" left its frame bounds").next()?;
+    head.rsplit(' ').next()?.parse().ok()
+}
+
+/// The most a frame-bounds error widens the contact margin to (m).
+pub const MAX_AUTO_CONTACT_MARGIN: f32 = 16.0;
 
 impl Contact {
     #[allow(clippy::too_many_arguments)]
     fn new(
         device: &wgpu::Device,
         buffers: &[&wgpu::Buffer; 9],
-        (contact_wgsl, solo_wgsl): (&str, &str),
+        (contact_wgsl, solo_wgsl, big_wgsl): (&str, &str, &str),
         acc: &wgpu::Buffer,
         (status_at, cap_at): (u64, u64),
-        tri_base: u32,
+        args_init: &[u8],
+        build_pipes: bool,
     ) -> Self {
-        let args_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let args_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("explicit-beams-vv-args"),
-            size: 32,
+            contents: args_init,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
-        let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let rw = wgpu::BufferBindingType::Storage { read_only: false };
-        let ro = wgpu::BufferBindingType::Storage { read_only: true };
         // The plan passes bind the indirect arguments (binding 10); the contact
         // entry, dispatched from them, must not.
         let layout_with = |args: bool| {
-            let mut entries = vec![
-                entry(0, wgpu::BufferBindingType::Uniform),
-                entry(1, ro),
-                entry(2, ro),
-            ];
-            entries.extend((3..9).map(|b| entry(b, rw)));
-            if args {
-                entries.push(entry(10, rw));
-            }
+            let entries = contact_entries(args);
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("explicit-beams-vv"),
                 entries: &entries,
@@ -278,12 +418,12 @@ impl Contact {
                 .enumerate()
                 .map(|(i, b)| wgpu::BindGroupEntry {
                     binding: i as u32,
-                    resource: b.as_entire_binding(),
+                    resource: if i == 0 { params_window(b) } else { b.as_entire_binding() },
                 })
                 .collect();
             if args {
                 bind.push(wgpu::BindGroupEntry {
-                    binding: 10,
+                    binding: plan::BIND_ARGS,
                     resource: args_buffer.as_entire_binding(),
                 });
             }
@@ -310,14 +450,15 @@ impl Contact {
         };
         let (plan_layout, plan_group) = layout_with(true);
         let (contact_layout, contact_group) = layout_with(false);
-        let plan = EXPLICIT_BEAMS_VV_PASSES.map(|(entry, wgsl)| make(entry, wgsl, &plan_layout));
-        let groups = make("explicit_beams_frame", contact_wgsl, &contact_layout);
-        let solo = make("explicit_beams_frame", solo_wgsl, &contact_layout);
+        let pipes = build_pipes.then(|| ContactPipes {
+            plan: plan::VV_PASSES.map(|entry| make(entry, module_wgsl(entry), &plan_layout)),
+            sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), &plan_layout),
+            groups: make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout),
+            solo: make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout),
+            big: make(plan::CONTACT_ENTRY, big_wgsl, &contact_layout),
+        });
         Self {
-            on: true,
-            plan,
-            groups,
-            solo,
+            pipes,
             plan_group,
             contact_group,
             args: args_buffer,
@@ -325,13 +466,6 @@ impl Contact {
             status_at,
             cap_at,
             status: Default::default(),
-            frames: 0,
-            left: 0,
-            replan: Default::default(),
-            planning: false,
-            fresh: true,
-            tri_base,
-
         }
     }
 
@@ -408,60 +542,6 @@ impl Contact {
     }
 }
 
-/// The wide passes' pipelines and bind group ([`ExplicitBeamsGpu::set_wide`]).
-struct Wide {
-    passes: Vec<wgpu::ComputePipeline>,
-    group: wgpu::BindGroup,
-    enabled: bool,
-    /// The kernel's vehicle table (constant memory): static records, then per
-    /// vehicle (origin, steps) copied from the misc buffer each frame.
-    table: wgpu::Buffer,
-}
-
-/// Wide pass entry points, in [`EXPLICIT_BEAMS_WIDE_PASSES`] order.
-const WIDE_BEGIN: usize = 0;
-const WIDE_REBASE: usize = 1;
-const WIDE_NODES: usize = 2;
-const WIDE_BEAMS_PASS: usize = 3;
-const WIDE_TRIS: usize = 4;
-const WIDE_END: usize = 5;
-const WIDE_CLOSE: usize = 6;
-const WIDE_HITS: usize = 7;
-
-/// Parameter copies for the wide passes: one per step of a frame (its index in the
-/// step word) plus the frame's end, at the uniform offset alignment.
-const PARAM_STRIDE: u64 = 256;
-const PARAM_COPIES: u32 = 129;
-/// Words of the kernel's Params.
-const PARAM_WORDS: usize = 64;
-/// Params word: the phases a measurement build skips (`EB_ABLATE`).
-const W_ABLATE: usize = 63;
-/// Params word: the steps the contact plan's frame bounds cover.
-const W_VV_PLAN_STEPS: usize = 60;
-/// Steps a contact plan covers at least (frames shorter than this share a plan):
-/// fewer plan passes, frame bounds a little wider.
-const VV_PLAN_STEPS: u32 = 34;
-/// Params words of vehicle contact: on, the frame bounds margin.
-const W_VV_ON: usize = 39;
-const W_VV_MARGIN: usize = 57;
-/// The kernel's VV_RECS, VV_SLOTS and the counters' words (VV_CTL_WORDS).
-const VV_RECS: usize = 6;
-const VV_SLOTS: usize = 8;
-const VV_CTL_WORDS: u32 = 8;
-/// Frame bounds margin past the travel of a vehicle's fastest node (m): see
-/// [`ExplicitBeamsGpu::set_contact_margin`].
-pub const DEFAULT_CONTACT_MARGIN: f32 = 1.0;
-/// The kernel's KEYS (trigger inputs per vehicle and step parity), NONE and node
-/// info flags shift of the slide slots.
-const KEYS: usize = engine_softbody::explicit_triggers::KEYS;
-const NONE: u32 = u32::MAX;
-const NODE_SLOT_SHIFT: u32 = 8;
-/// Per vehicle the kernel's self-collision hit list (HIT_CAP records of HIT_WORDS
-/// words) and pending-beam list (PEND_CAP) in gNext.
-const SELF_HIT_WORDS: usize = 256 * 24 + 64;
-/// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
-const WIDE_MAX_VEHICLES: usize = 256;
-
 /// Timestamps around each frame's pass ([`ExplicitBeamsGpu::enable_frame_timing`]).
 struct FrameTiming {
     set: wgpu::QuerySet,
@@ -470,885 +550,191 @@ struct FrameTiming {
     used: u32,
 }
 
+/// A plan command's kernel, for diagnostic marks.
+fn kernel_name(cmd: &Cmd) -> &'static str {
+    let k = match *cmd {
+        Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => kernel,
+        Cmd::Copy { .. } => return "copy",
+    };
+    match k {
+        Kernel::Frame => "explicit frame (solo)",
+        Kernel::Solo => "explicit solo vehicles",
+        Kernel::Contact => "explicit contact groups",
+        Kernel::ContactBig => "explicit large contact groups",
+        Kernel::Vv(0) => "explicit vv bounds",
+        Kernel::Vv(1) => "explicit vv pairs",
+        Kernel::Vv(_) => "explicit vv group plan",
+        Kernel::Wide(_) => "explicit wide",
+        Kernel::Sleep => "explicit sleep list",
+        Kernel::FrameSeg => "explicit frame segment",
+        Kernel::Surf(_) => "explicit surface pass",
+    }
+}
+
+/// The wide passes' pipelines and bind group ([`ExplicitBeamsGpu::set_wide`]).
+struct Wide {
+    passes: Vec<wgpu::ComputePipeline>,
+    group: wgpu::BindGroup,
+    /// The kernel's vehicle table (constant memory): static records, then per
+    /// vehicle (origin, steps) copied from the misc buffer each frame.
+    table: wgpu::Buffer,
+}
+
 impl ExplicitBeamsGpu {
     /// Upload `vehicles` (their current state: positions, velocities, forces, beam
     /// state, throttles, origin).
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, vehicles: &[ExplicitBeams]) -> Self {
-        let nv = vehicles.len();
-        // Beam records carry the vehicle index in 16 bits.
-        assert!(nv <= 1 << 16, "explicit beams GPU: at most 65536 vehicles, got {nv}");
-        let total_nodes: usize = vehicles.iter().map(|v| v.nodes.len()).sum();
-        let total_beams: usize = vehicles.iter().map(|v| v.beams.len()).sum();
-        let total_tris: usize = vehicles.iter().map(|v| v.triangles.len()).sum();
-        let node_info_base = nv * 4;
-        let beam_base = node_info_base + total_nodes;
-        let tri_base = beam_base + 3 * total_beams;
-        let box_base = tri_base + total_tris;
+        Self::with_coupling(device, queue, vehicles, None)
+    }
 
-        let mut vehicle_recs: Vec<[u32; 4]> = Vec::with_capacity(nv * 4);
-        let mut node_info: Vec<[u32; 4]> = Vec::with_capacity(total_nodes);
-        let mut beam_recs: Vec<[u32; 4]> = Vec::with_capacity(total_beams * 3);
-        let mut tri_recs: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
-        let mut box_recs: Vec<[u32; 4]> = Vec::new();
-        let mut shape_recs: Vec<[u32; 4]> = Vec::new();
-        let mut shape_patches: Vec<usize> = Vec::new();
-        let mut lists: Vec<u32> = Vec::new();
-        let mut nodes: Vec<[f32; 4]> = Vec::with_capacity(total_nodes * 3);
-        let mut beams: Vec<[f32; 4]> = Vec::with_capacity(total_beams * 2);
-        let mut groups: Vec<u32> = Vec::new();
-        let mut misc: Vec<[u32; 4]> = Vec::with_capacity(nv + total_tris);
-        let mut tri_misc: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
-        let mut spans = Vec::with_capacity(nv);
-        let mut rest0 = Vec::with_capacity(total_beams);
-        // JBeam damping filters (global) and the beam records to point at them.
-        let mut filters: Vec<engine_softbody::explicit_beams::DampFilter> = Vec::new();
-        let mut filter_patches: Vec<(usize, usize)> = Vec::new();
-        let (mut node_off, mut beam_off, mut tri_off, mut box_off) = (0u32, 0u32, 0u32, 0u32);
-        // shocks2 rates (EB_AERO modules), 2 records per shock, global indices.
-        let mut shock_recs: Vec<[u32; 4]> = Vec::new();
-        let bits = |v: Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits(), 0];
-        // Per beam, the lists positions of its end a's and end b's incidence entries.
-        let mut slots: Vec<[u32; 2]> = vec![[u32::MAX; 2]; total_beams];
-        let mut cand_table: Vec<u32> = Vec::new();
-        // Slide-force slots over every vehicle (1-based in the node info).
-        let mut slot_count = 0u32;
-        assert!(
-            total_nodes < (1 << (32 - NODE_SLOT_SHIFT)),
-            "explicit beams GPU: too many nodes for the slide slots"
-        );
-        let mut vv_static: Vec<[u32; 4]> = Vec::with_capacity(nv);
-        // Per lists position (incidence entries) the entry's far end.
-        let mut nbr: Vec<u32> = Vec::new();
-        let mut vv_tri: Vec<[u32; 4]> = Vec::with_capacity(total_tris);
-        // Per vehicle its slide slots (node → 1-based global slot) and slot range.
-        let mut slot_maps: Vec<Vec<u32>> = Vec::with_capacity(nv);
-        let mut slot_ranges: Vec<(u32, u32)> = Vec::with_capacity(nv);
-        for (vi, v) in vehicles.iter().enumerate() {
-            // The kernel packs a (triangle, candidate) pair into 16 bits each.
-            assert!(
-                v.triangles.len() < 1 << 16 && v.candidates.len() < 1 << 16,
-                "explicit beams GPU: at most 65535 collision triangles and contacters per vehicle"
-            );
-            let group_count = v
-                .beams
-                .iter()
-                .map(|b| b.group.unsigned_abs() + 1)
-                .max()
-                .filter(|&g| g > 1)
-                .unwrap_or(0);
-            let group_off = groups.len() as u32;
-            groups.extend(std::iter::repeat_n(u32::MAX, group_count as usize));
-            // Slide targets (slide nodes and their rails' beam ends): a slot each,
-            // in the node info flags above NODE_SLOT_SHIFT (1-based).
-            let mut slot_of = vec![0u32; v.nodes.len()];
-            let targets = v
-                .slides
-                .iter()
-                .map(|sl| sl.node)
-                .chain(v.segments.iter().flat_map(|seg| {
-                    let b = &v.beams[seg.beam as usize];
-                    [b.a, b.b]
-                }));
-            let slot_first = slot_count;
-            for t in targets {
-                if slot_of[t as usize] == 0 {
-                    slot_count += 1;
-                    slot_of[t as usize] = slot_count;
-                }
-            }
-            slot_ranges.push((slot_first, slot_count - slot_first));
-            // Incidence lists, then the candidates.
-            for (i, inc) in v.incidence.iter().enumerate() {
-                let n = &v.nodes[i];
-                let flags = n.flags | slot_of[i] << NODE_SLOT_SHIFT;
-                node_info.push([flags, lists.len() as u32, inc.len() as u32, vi as u32]);
-                for &j in inc {
-                    let b = &v.beams[j as usize];
-                    let is_b = (b.b == i as u32 && b.a != i as u32) as u32;
-                    let slot = &mut slots[(beam_off + j) as usize];
-                    // A beam from a node to itself has both entries in one list.
-                    let end = if is_b == 1 || slot[0] != u32::MAX {
-                        1
-                    } else {
-                        0
-                    };
-                    slot[end] = lists.len() as u32;
-                    lists.push(((beam_off + j) << 1) | is_b);
-                    // Vehicle contact's side vote: the entry's far end.
-                    nbr.push(node_off + if is_b == 1 { b.a } else { b.b });
-                }
-            }
-            let cand_off = lists.len() as u32;
-            cand_table.extend(cand_off..cand_off + v.candidates.len() as u32);
-            lists.extend(v.candidates.iter().map(|&c| node_off + c));
-            nbr.extend(std::iter::repeat_n(0, v.candidates.len()));
-            // Vehicle contact: the contact points (global nodes).
-            vv_static.push([lists.len() as u32, v.contact_points.len() as u32, 0, 0]);
-            lists.extend(v.contact_points.iter().map(|&c| node_off + c));
-            nbr.extend(std::iter::repeat_n(0, v.contact_points.len()));
-            vv_tri.extend((0..v.triangles.len()).map(|t| {
-                let c = v.contact_throttle.get(t).copied().unwrap_or([0, 0]);
-                [c[0] as u32, c[1] as u32, 0, 0]
-            }));
-            let flags = v.settings.fast_inv_sqrt as u32
-                | (v.settings.drag as u32) << 1
-                | (v.settings.turbulence as u32) << 2
-                | (v.fusedrag.is_some() as u32) << 3
-                | (!v.triggers.is_empty() as u32) << 4
-                | (!v.slides.is_empty() as u32) << 5
-                | (!v.shapes.is_empty() as u32) << 6;
-            vehicle_recs.push([
-                node_off,
-                v.nodes.len() as u32,
-                beam_off,
-                v.beams.len() as u32,
-            ]);
-            vehicle_recs.push([
-                tri_off,
-                v.triangles.len() as u32,
-                box_off,
-                (v.boxes.len() + v.shapes.len()) as u32,
-            ]);
-            vehicle_recs.push([cand_off, v.candidates.len() as u32, group_off, group_count]);
-            vehicle_recs.push([
-                flags,
-                v.ground.to_bits(),
-                v.collision_range.to_bits(),
-                grid_cell(v).to_bits(),
-            ]);
-            for (i, n) in v.nodes.iter().enumerate() {
-                nodes.push([n.pos.x, n.pos.y, n.pos.z, n.mass]);
-                nodes.push([n.vel.x, n.vel.y, n.vel.z, n.friction]);
-                // .w: the node's JBeam self-collision group (0 none).
-                let group = v.self_groups.get(i).copied().unwrap_or(0);
-                nodes.push([n.force.x, n.force.y, n.force.z, group as f32]);
-            }
-            let shock_off = (shock_recs.len() / 2) as u32;
-            for sh in &v.shocks2 {
-                shock_recs.push([
-                    sh.k_out.to_bits(),
-                    sh.c_out.to_bits(),
-                    sh.pk_in.to_bits(),
-                    sh.pc_in.to_bits(),
-                ]);
-                shock_recs.push([
-                    sh.pk_out.to_bits(),
-                    sh.pc_out.to_bits(),
-                    (sh.soft as u32 as f32).to_bits(),
-                    0,
-                ]);
-            }
-            for b in &v.beams {
-                beam_recs.push([
-                    node_off + b.a,
-                    node_off + b.b,
-                    b.kind.code() | b.ty.code() << 8 | (vi as u32) << 16,
-                    b.group as u32,
-                ]);
-                beam_recs.push([
-                    b.k.to_bits(),
-                    b.c.to_bits(),
-                    b.limit_k.to_bits(),
-                    b.limit_c.to_bits(),
-                ]);
-                // A shocks2 beam has no plastic coefficient: its shock's index; a
-                // trigger its keys and enabled flag.
-                let third = if b.kind == ExplicitKind::Shock2 {
-                    shock_off + b.shock
-                } else if b.kind == ExplicitKind::Trigger {
-                    let t = &v.triggers[b.shock as usize];
-                    t.short_key.min(KEYS as u32 - 1)
-                        | t.long_key.min(KEYS as u32 - 1) << 8
-                        | (t.enabled as u32) << 16
-                } else {
-                    b.plastic.to_bits()
-                };
-                // JBeam-mode kinds: the damping filter's gBeams record + 1 (0 none),
-                // patched once the filter region's place is known.
-                let fourth = if b.kind == ExplicitKind::JbeamTorsion {
-                    // The watched break groups (the kernel's jtorsionUpdate).
-                    let w = v.torsion_watch[b.shock as usize - 1];
-                    beam_recs.push([w[0], w[1], w[2], 0]);
-                    beams.push([b.rest, b.tc, b.tt, b.gate]);
-                    beams.push([b.strength, b.force, b.broken as u32 as f32, 0.0]);
-                    rest0.push(b.rest0);
-                    continue;
-                } else if b.kind.is_jbeam() {
-                    if b.shock > 0 {
-                        filter_patches.push((beam_recs.len(), filters.len()));
-                        filters.push(v.damp_filters[b.shock as usize - 1]);
-                    }
-                    0
-                } else {
-                    b.rest0.to_bits()
-                };
-                beam_recs.push([
-                    b.short_bound.to_bits(),
-                    b.long_bound.to_bits(),
-                    third,
-                    fourth,
-                ]);
-                beams.push([b.rest, b.tc, b.tt, b.gate]);
-                beams.push([b.strength, b.force, b.broken as u32 as f32, 0.0]);
-                rest0.push(b.rest0);
-            }
-            for t in &v.triangles {
-                tri_recs.push([
-                    node_off + t.nodes[0],
-                    node_off + t.nodes[1],
-                    node_off + t.nodes[2],
-                    vi as u32,
-                ]);
-                tri_misc.push([t.wait as u32, t.idle as u32, 0, 0]);
-            }
-            // JBeam self-collision groups: per triangle in gMisc .z.
-            let first_tri = tri_misc.len() - v.triangles.len();
-            for t in 0..v.triangles.len() {
-                tri_misc[first_tri + t][2] = v.triangle_self_group(t);
-            }
-            for bx in &v.boxes {
-                box_recs.push(bits(bx.lo));
-                box_recs.push(bits(bx.hi));
-            }
-            // Static shapes (the kernel's nodeUpdateShapes): a slot each after the
-            // boxes, (lo, kind) and (hi, parameter record), the records placed after
-            // every slot (patched below). An identity-rotation box is a box slot.
-            for sh in &v.shapes {
-                if let Some(bx) = sh.as_aabb() {
-                    box_recs.push(bits(bx.lo));
-                    box_recs.push(bits(bx.hi));
-                    continue;
-                }
-                let bd = sh.bounds();
-                let mut lo = bits(bd.lo);
-                lo[3] = sh.kind();
-                let mut hi = bits(bd.hi);
-                hi[3] = shape_recs.len() as u32;
-                shape_patches.push(box_recs.len() + 1);
-                box_recs.push(lo);
-                box_recs.push(hi);
-                shape_recs.extend(shape_params(sh));
-            }
-            let mut m = bits(v.origin);
-            m[3] = v.steps as u32;
-            misc.push(m);
-            slot_maps.push(slot_of);
-            spans.push(Span {
-                node_off,
-                nodes: v.nodes.len() as u32,
-                beam_off,
-                beams: v.beams.len() as u32,
-                slide_off: 0,
-                slides: v.slides.len() as u32,
-                seg_off: 0,
-                tris: v.triangles.len() as u32,
-            });
-            node_off += v.nodes.len() as u32;
-            beam_off += v.beams.len() as u32;
-            tri_off += v.triangles.len() as u32;
-            box_off += v.boxes.len() as u32;
-        }
-        // Shape parameter records after every box slot (offsets from the box base).
-        let shape_at = box_recs.len() as u32;
-        for at in shape_patches {
-            box_recs[at][3] += shape_at;
-        }
-        box_recs.extend(shape_recs);
-        misc.extend(tri_misc);
-        // Wings, the fuselage drag, self-centering commands and shocks2 (the EB_AERO
-        // modules).
-        let aero = vehicles.iter().any(|v| {
-            !v.wings.is_empty()
-                || v.fusedrag.is_some()
-                || !v.centering.is_empty()
-                || !v.shocks2.is_empty()
-                || !v.triggers.is_empty()
-                || !v.commands.is_empty()
-                || !v.slides.is_empty()
-        });
-        // Command records: with triggers every command line (keyed), else the
-        // self-centering ones.
-        let cmd_count = |v: &ExplicitBeams| {
-            if v.commands.is_empty() {
-                v.centering.len()
-            } else {
-                v.commands.len()
-            }
-        };
-        let mut aero_recs: Vec<[u32; 4]> = Vec::new();
-        let mut wing_recs: Vec<[u32; 4]> = Vec::new();
-        let mut cmd_recs: Vec<[u32; 4]> = Vec::new();
-        let mut table_recs_aero: Vec<[u32; 4]> = Vec::new();
-        let mut wing_state: Vec<[f32; 4]> = Vec::new();
-        let mut cmd_state: Vec<[f32; 4]> = Vec::new();
-        let mut fuse_state: Vec<[f32; 4]> = Vec::new();
-        let mut wing_spans = Vec::with_capacity(nv);
-        let base_static = (box_base + box_recs.len()) as u32;
-        let aero_base = base_static;
-        let wing_base = aero_base + 3 * nv as u32;
-        let total_wings: usize = vehicles.iter().map(|v| v.wings.len()).sum();
-        let total_cmds: usize = vehicles.iter().map(cmd_count).sum();
-        let cmd_base = wing_base + 4 * total_wings as u32;
-        let table_base = cmd_base + 2 * total_cmds as u32;
-        // Airfoil tables shared by name across vehicles.
-        let mut tables: Vec<(String, u32)> = Vec::new();
-        let (mut node_off, mut beam_off) = (0u32, 0u32);
-        let mut slide_recs: Vec<[u32; 4]> = Vec::new();
-        let mut seg_recs: Vec<[u32; 4]> = Vec::new();
-        let mut slide_state: Vec<[f32; 4]> = Vec::new();
-        for (vi, v) in vehicles.iter().enumerate() {
-            let table_of = |t: u32, tables: &mut Vec<(String, u32)>, recs: &mut Vec<[u32; 4]>| {
-                let a = &v.airfoils[t as usize];
-                if let Some((_, at)) = tables.iter().find(|(n, _)| *n == a.name) {
-                    return *at;
-                }
-                let at = table_base + recs.len() as u32;
-                for i in 0..engine_softbody::explicit_aero::AIRFOIL_ENTRIES {
-                    recs.push([a.cl[i].to_bits(), a.cd[i].to_bits(), a.cm[i].to_bits(), 0]);
-                }
-                tables.push((a.name.clone(), at));
-                at
-            };
-            aero_recs.push([
-                (wing_recs.len() / 4) as u32,
-                v.wings.len() as u32,
-                (cmd_recs.len() / 2) as u32,
-                cmd_count(v) as u32,
-            ]);
-            wing_spans.push(((wing_recs.len() / 4) as u32, v.wings.len() as u32));
-            let fd = v.fusedrag.as_ref();
-            aero_recs.push([
-                node_off + fd.map_or(0, |f| f.front),
-                fd.map_or(0.0f32, |f| f.width).to_bits(),
-                v.nodes.len() as u32,
-                0,
-            ]);
-            let slide_off = (slide_recs.len() / 2) as u32;
-            let seg_off = seg_recs.len() as u32;
-            aero_recs.push([slide_off, v.slides.len() as u32, 0, 0]);
-            spans[vi].slide_off = slide_off;
-            spans[vi].seg_off = seg_off;
-            let seg_global = |s: Option<u32>| s.map_or(NONE, |s| seg_off + s);
-            for sl in &v.slides {
-                slide_recs.push([node_off + sl.node, seg_global(sl.segment), 0, 0]);
-                slide_recs.push([
-                    sl.spring.to_bits(),
-                    sl.break_force.to_bits(),
-                    sl.tolerance.to_bits(),
-                    0,
-                ]);
-                slide_state.push([
-                    sl.segment.map_or(-1.0, |s| (seg_off + s) as f32),
-                    sl.broken_away as u32 as f32,
-                    0.0,
-                    0.0,
-                ]);
-            }
-            for seg in &v.segments {
-                seg_recs.push([
-                    beam_off + seg.beam,
-                    seg_global(seg.prev),
-                    seg_global(seg.next),
-                    0,
-                ]);
-            }
-            fuse_state.push([v.fuse_force.x, v.fuse_force.y, v.fuse_force.z, 0.0]);
-            for w in &v.wings {
-                let g = |s: usize| node_off + w.nodes[s];
-                wing_recs.push([g(0), g(1), g(2), g(3)]);
-                wing_recs.push([g(4), g(5), g(6), g(7)]);
-                let table = table_of(w.airfoil, &mut tables, &mut table_recs_aero);
-                let (side, span, area) = match w.induced {
-                    None => (0, 0.0f32, 0.0f32),
-                    Some(i) => (
-                        if i.side == engine_softbody::explicit_aero::WingSide::Left { 1 } else { 2 },
-                        i.span,
-                        i.area,
-                    ),
-                };
-                wing_recs.push([w.efficacy.to_bits(), w.break_ref.to_bits(), table, side]);
-                wing_recs.push([span.to_bits(), area.to_bits(), 0, 0]);
-                wing_state.push([w.broken as u32 as f32, 0.0, 0.0, 0.0]);
-                wing_state.extend([[0.0f32; 4]; 3]);
-            }
-            if v.commands.is_empty() {
-                for c in &v.centering {
-                    cmd_recs.push([
-                        beam_off + c.beam,
-                        c.contract_first as u32,
-                        c.centre.to_bits(),
-                        0,
-                    ]);
-                    cmd_recs.push([
-                        c.shorten_rate.to_bits(),
-                        c.lengthen_rate.to_bits(),
-                        c.max_contraction.to_bits(),
-                        c.max_extension.to_bits(),
-                    ]);
-                    cmd_state.push([c.mode as f32, 0.0, 0.0, 0.0]);
-                }
-            }
-            for c in &v.commands {
-                let keys = c.contract_key.min(KEYS as u32 - 1)
-                    | c.extend_key.min(KEYS as u32 - 1) << 8
-                    | (c.centering as u32) << 16
-                    | 1 << 17;
-                cmd_recs.push([
-                    beam_off + c.beam,
-                    c.contract_first as u32,
-                    c.centre.to_bits(),
-                    keys,
-                ]);
-                cmd_recs.push([
-                    c.shorten_rate.to_bits(),
-                    c.lengthen_rate.to_bits(),
-                    c.max_contraction.to_bits(),
-                    c.max_extension.to_bits(),
-                ]);
-                cmd_state.push([c.mode as f32, 0.0, 0.0, 0.0]);
-            }
-            node_off += v.nodes.len() as u32;
-            beam_off += v.beams.len() as u32;
-        }
-        debug_assert!(slots.iter().flatten().all(|&s| s != u32::MAX));
-        // Slide nodes in parallel (the kernel's slideNode): per slot every
-        // contribution it can get in one step (its own slide nodes, and the ends of
-        // every segment of the rails its slide nodes can reach), as list capacity.
-        let mut slot_caps = vec![0u32; slot_count as usize];
-        for (vi, v) in vehicles.iter().enumerate() {
-            let slot_of = &slot_maps[vi];
-            for sl in &v.slides {
-                let mut seen = std::collections::BTreeSet::new();
-                if slot_of[sl.node as usize] != 0 {
-                    seen.insert((slot_of[sl.node as usize], 0));
-                }
-                let mut stack: Vec<u32> = sl.segment.into_iter().collect();
-                let mut visited = std::collections::BTreeSet::new();
-                while let Some(si) = stack.pop() {
-                    if !visited.insert(si) {
-                        continue;
-                    }
-                    let seg = &v.segments[si as usize];
-                    let b = &v.beams[seg.beam as usize];
-                    for (end, which) in [(b.a, 1), (b.b, 2)] {
-                        if slot_of[end as usize] != 0 {
-                            seen.insert((slot_of[end as usize], which));
-                        }
-                    }
-                    stack.extend(seg.prev);
-                    stack.extend(seg.next);
-                }
-                for (slot, _) in seen {
-                    slot_caps[slot as usize - 1] += 1;
-                }
-            }
-        }
-        let mut slot_recs: Vec<[u32; 4]> = Vec::with_capacity(slot_caps.len());
-        let mut slot_list_len = 0u32;
-        for &c in &slot_caps {
-            slot_recs.push([slot_list_len, c, 0, 0]);
-            slot_list_len += c;
-        }
-        // Wing forces per node (the kernel's wingGather): per wing node its entries
-        // (global wing << 2 | 0 induced, 1 front, 2 back) in wingApply's order.
-        let mut wing_nodes: Vec<(u32, Vec<u32>)> = Vec::new();
-        let mut wing_node_ranges: Vec<(u32, u32)> = Vec::with_capacity(nv);
-        {
-            let (mut node_off, mut wing_off) = (0u32, 0u32);
-            for v in vehicles {
-                let first = wing_nodes.len();
-                let mut at: std::collections::HashMap<u32, usize> = Default::default();
-                for (wi, w) in v.wings.iter().enumerate() {
-                    let gw = (wing_off + wi as u32) << 2;
-                    let n = |slot: usize| node_off + w.nodes[slot];
-                    let mut order: Vec<(u32, u32)> = Vec::new();
-                    match w.induced.map(|i| i.side) {
-                        Some(engine_softbody::explicit_aero::WingSide::Left) => order.extend([(n(6), 0), (n(4), 0)]),
-                        Some(_) => order.extend([(n(7), 0), (n(5), 0)]),
-                        None => {}
-                    }
-                    order.extend([(n(0), 1), (n(2), 1), (n(1), 1), (n(3), 1)]);
-                    order.extend([(n(4), 2), (n(6), 2), (n(5), 2), (n(7), 2)]);
-                    for (node, kind) in order {
-                        let i = *at.entry(node).or_insert_with(|| {
-                            wing_nodes.push((node, Vec::new()));
-                            wing_nodes.len() - 1
-                        });
-                        wing_nodes[i].1.push(gw | kind);
-                    }
-                }
-                wing_node_ranges.push(((first) as u32, (wing_nodes.len() - first) as u32));
-                node_off += v.nodes.len() as u32;
-                wing_off += v.wings.len() as u32;
-            }
-        }
-        let veh_ext: Vec<[u32; 4]> = slot_ranges
-            .iter()
-            .zip(&wing_node_ranges)
-            .map(|(&(a, n), &(wo, wn))| [a, n, wo, wn])
-            .collect();
-        let inc_base = beams.len() as u32;
-        beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
-        // The self-collision grid's sorted runs, at each vehicle's candidate offset.
-        let grid_base = beams.len() as u32;
-        beams.extend(std::iter::repeat_n([0.0f32; 4], lists.len()));
-        let grid = vehicles.iter().any(|v| grid_cell(v) > 0.0) as u32;
-        debug_assert_eq!(nbr.len(), lists.len());
-        let slot_base = lists.len() as u32;
-        lists.extend(slots.iter().flatten());
-        let vv_nbr = lists.len() as u32;
-        lists.extend(nbr);
-        let cand_table_base = lists.len() as u32;
-        let total_cands = cand_table.len() as u32;
-        lists.extend(cand_table);
-        // The wide passes' step counter and per-vehicle rebase shift.
-        let wide_misc = misc.len() as u32;
-        misc.extend(std::iter::repeat_n([0u32; 4], 1 + nv));
-        // Vehicle contact: per triangle its contact throttle; per vehicle its records;
-        // per group its record.
-        let vv_tri_base = misc.len() as u32;
-        misc.extend(vv_tri);
-        let vv_veh = misc.len() as u32;
-        misc.extend(std::iter::repeat_n([0u32; 4], VV_RECS * nv));
-        let vv_groups = misc.len() as u32;
-        misc.extend(std::iter::repeat_n([0u32; 4], nv.max(1)));
-        // gAcc: the accumulators, then the wide passes' grid counts and tested
-        // counts (atomic).
-        let grid_count_base = (total_nodes * 3) as u32;
-        let tested_base = grid_count_base + (nv * WIDE_GRID_BUCKETS) as u32;
-        let overflow_base = tested_base + 2 * nv as u32;
-        let acc_len = overflow_base as usize + nv;
-        // Vehicle contact: per vehicle 2 parities of box keys, the counters, labels
-        // and group sums, the vehicle grid's bucket counts.
-        let vv_acc = acc_len as u32;
-        let vv_label = vv_acc + 12 * nv as u32 + VV_CTL_WORDS;
-        let vv_grid_count = vv_label + 4 * nv as u32;
-        let vv_buckets = (8 * nv).max(1024).next_power_of_two();
-        // Then the slide slots' contribution counts.
-        let slot_cnt_base = (vv_grid_count as usize + vv_buckets) as u32;
-        let mut acc_init = vec![0i32; slot_cnt_base as usize + slot_count as usize];
-        for v in 0..nv {
-            for k in 0..12 {
-                acc_init[vv_acc as usize + 12 * v + k] = if k % 6 < 3 { i32::MAX } else { i32::MIN };
-            }
-        }
-        // gBeams: the wide grid's bucket slots, for vehicles on the wide passes.
-        let slot_base16 = beams.len() as u32;
-        if vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS) {
-            beams.extend(std::iter::repeat_n(
-                [0.0f32; 4],
-                nv * WIDE_GRID_BUCKETS * WIDE_SLOTS,
-            ));
-        }
-        // gBeams: the aero state (fuselage drag, wings, commands).
-        let aero_state = beams.len() as u32;
-        beams.extend(fuse_state);
-        beams.extend(wing_state);
-        beams.extend(cmd_state);
-        // The slide node states, then the slide-force slots.
-        let slide_state_base = beams.len() as u32;
-        let slide_total = slide_state.len() as u32;
-        beams.extend(slide_state);
-        let slide_acc = beams.len() as u32;
-        beams.extend(std::iter::repeat_n([0.0f32; 4], slot_count as usize));
-        // The slide nodes' contributions (3 each; the kernel's slideContribBase).
-        beams.extend(std::iter::repeat_n([0.0f32; 4], 3 * slide_total as usize));
-        // Vehicle contact: the groups' contact points sorted by cell.
-        let total_cp: usize = vehicles.iter().map(|v| v.contact_points.len()).sum();
-        // (Four times: a small group's owners each have their own run, the
-        // kernel's vvPassSmall.)
-        let vv_run = beams.len() as u32;
-        beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * total_cp));
-        // JBeam damping filters: (last rate, last output, a, b) each.
-        let filter_base = beams.len();
-        beams.extend(filters.iter().map(|f| [f.u, f.y, f.a, f.b]));
-        for &(rec, i) in &filter_patches {
-            beam_recs[rec][3] = (filter_base + i + 1) as u32;
-        }
-        // gNext: per list position the grid rank, then the wide passes' grid
-        // offsets and tested lists (plain words: only the counters are atomic).
-        let grid_off_base = lists.len() as u32;
-        let tested_list_base = grid_off_base + (nv * (WIDE_GRID_BUCKETS + 1)) as u32;
-        // Then per vehicle and step parity the trigger inputs: those the next
-        // step's command pass reads (the last step's) at parity (steps & 1) ^ 1.
-        let key_base = tested_list_base + total_tris as u32;
-        let any_keys = vehicles.iter().any(|v| !v.triggers.is_empty());
-        let next_len = key_base as usize + if any_keys { nv * 2 * KEYS } else { 0 };
-        // Vehicle contact: the solo list, members (5 words per vehicle: lists,
-        // sorted, run prefixes, partner and reset flags) and the tested triangles,
-        // the tested triangles' marks (two words per triangle: the kernel's
-        // vvMarkAt), the pairs, the vehicle grid's slots, the big list, the run
-        // ranks.
-        let vv_solo = next_len as u32;
-        let vv_members = vv_solo + nv as u32;
-        let vv_pairs = vv_members + 5 * nv as u32 + 3 * total_tris as u32;
-        let vv_pair_cap = (16 * nv).max(1024) as u32;
-        let vv_grid = vv_pairs + 2 * vv_pair_cap;
-        let vv_big = vv_grid + (vv_buckets * VV_SLOTS) as u32;
-        let vv_rank = vv_big + nv as u32;
-        // Then the hit lists: per group two hits (two words each) per contact point.
-        let vv_hits = vv_rank + total_cp as u32;
-        // Then the slide slots' contribution lists.
-        // (Hits: per group 8 × its points hits of two words: the kernel's vvHitAt,
-        // and vvPassSmall's lists, twice the group's points for each of up to four
-        // owners.)
-        let slot_list_base = (vv_hits as usize + 16 * total_cp) as u32;
-        // Then per vehicle its self-collision hit list and pending beams (the
-        // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
-        let hit_base = slot_list_base as usize + slot_list_len as usize;
-        let next_len = hit_base + nv * SELF_HIT_WORDS;
-        let hit_acc = acc_init.len();
-        acc_init.extend(std::iter::repeat_n(0, 2 * nv));
-        // Last: the loop-cap flag (the WGSL post-process's `cap_explicit_loops`
-        // writes gAcc's last word).
-        let cap_at = acc_init.len();
-        acc_init.push(0);
-        for (k, rec) in vv_static.iter_mut().enumerate() {
-            rec[2] = (hit_base + k * SELF_HIT_WORDS) as u32;
-            rec[3] = (hit_acc + 2 * k) as u32;
-        }
-        let mut next_init = vec![0u32; next_len.max(1)];
-        if any_keys {
-            for (vi, v) in vehicles.iter().enumerate() {
-                let parity = (v.steps as usize & 1) ^ 1;
-                let at = key_base as usize + (vi * 2 + parity) * KEYS;
-                for (k, &x) in v.key_input.iter().enumerate() {
-                    next_init[at + k] = (x != 0.0) as u32;
-                }
-            }
-        }
-        let table_recs = vehicle_recs.clone();
-        let mut statics = vehicle_recs;
-        statics.extend(node_info);
-        statics.extend(beam_recs);
-        statics.extend(tri_recs);
-        statics.extend(box_recs);
-        debug_assert_eq!(statics.len() as u32, aero_base);
-        statics.extend(aero_recs);
-        statics.extend(wing_recs);
-        statics.extend(cmd_recs);
-        statics.extend(table_recs_aero);
-        let shock2_base = statics.len() as u32;
-        let shock2_count = (shock_recs.len() / 2) as u32;
-        statics.extend(shock_recs);
-        let slide_base = statics.len() as u32;
-        statics.extend(slide_recs);
-        let seg_base = statics.len() as u32;
-        let seg_total = seg_recs.len() as u32;
-        statics.extend(seg_recs);
-        let vv_static_base = statics.len() as u32;
-        statics.extend(vv_static);
-        // Per vehicle its slide slots, then per slot its list (the kernel's
-        // slotRecBase is veh_ext_base + vehicles).
-        let veh_ext_base = statics.len() as u32;
-        statics.extend(veh_ext);
-        statics.extend(slot_recs);
-        // Then the wing node records (the kernel's wingNodeBase), their entries at
-        // the end of the lists.
-        for (node, entries) in &wing_nodes {
-            statics.push([*node, lists.len() as u32, entries.len() as u32, 0]);
-            lists.extend(entries);
-        }
-
-        let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
-        let lanes = frame_lanes(vehicles);
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("explicit_beams"),
-            // Large vehicles get twice the lanes (more loads in flight per step), a
-            // small fleet 1024 (frame_lanes).
-            source: wgpu::ShaderSource::Wgsl(
-                crate::uniformize_workgroup_lanes(match (aero, lanes) {
-                    (false, 512) => EXPLICIT_BEAMS_WIDE_WGSL,
-                    (false, _) => EXPLICIT_BEAMS_WGSL,
-                    (true, 512) => EXPLICIT_BEAMS_AERO_WIDE_WGSL,
-                    (true, _) => EXPLICIT_BEAMS_AERO_WGSL,
+    /// Every compute pipeline [`Self::with_coupling`] creates for `vehicles`, as
+    /// plain descriptors: a browser host compiles them ahead with
+    /// `createComputePipelineAsync` (see [`crate::ComputeSpec`]), largest first.
+    pub fn compute_specs(
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+    ) -> Vec<crate::ComputeSpec> {
+        let layout = ExplicitUpload::new(vehicles, coupling).layout;
+        let (aero, lanes, surface) = (layout.aero, layout.lanes, layout.surface);
+        let u = crate::uniformize_workgroup_lanes;
+        // More than one vehicle: the contact kernels run while contact is on; the
+        // plain frame only once it is turned off (created at first use).
+        let deferred = vehicles.len() > 1;
+        let mut specs = if surface && surface_split_default() {
+            // Surface contact split from the frame: its segments' module and the
+            // surface pass's pipelines (Split::new's descriptors).
+            let seg = Kernel::FrameSeg.module(aero, lanes);
+            std::iter::once((seg, plan::FRAME_ENTRY))
+                .chain(plan::SURF_PASSES.iter().copied())
+                .map(|(module, entry)| crate::ComputeSpec {
+                    label: module,
+                    module,
+                    wgsl: u(module_wgsl(module)),
+                    entry,
+                    layout: Some(split_entries()),
+                    deferred,
                 })
-                .into(),
-            ),
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("explicit_beams_frame"),
-            layout: None,
-            module: &module,
-            entry_point: Some("explicit_beams_frame"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let pad = |b: &[u8]| {
-            if b.is_empty() {
-                vec![0u8; 16]
-            } else {
-                b.to_vec()
-            }
+                .collect()
+        } else {
+            vec![crate::ComputeSpec {
+                label: "explicit_beams_frame",
+                module: Kernel::Frame.module_for(aero, lanes, surface),
+                wgsl: u(module_wgsl(Kernel::Frame.module_for(aero, lanes, surface))),
+                entry: plan::FRAME_ENTRY,
+                layout: None,
+                deferred,
+            }]
         };
-        // Two parities of group slots.
-        let group_total = groups.len() as u32;
-        let groups: Vec<u32> = groups.iter().chain(groups.iter()).copied().collect();
-        let init = |label: &str, contents: &[u8], usage| {
+        if layout.wide_ok {
+            specs.extend(plan::WIDE_PASSES.iter().map(|&entry| crate::ComputeSpec {
+                label: entry,
+                module: entry,
+                wgsl: u(module_wgsl(entry)),
+                entry,
+                layout: Some(wide_entries()),
+                deferred: false,
+            }));
+        }
+        if vehicles.len() > 1 {
+            specs.extend(plan::VV_PASSES.iter().chain([&plan::SLEEP_LIST]).map(|&entry| crate::ComputeSpec {
+                label: entry,
+                module: entry,
+                wgsl: u(module_wgsl(entry)),
+                entry,
+                layout: Some(contact_entries(true)),
+                deferred: false,
+            }));
+            for kernel in [Kernel::Contact, Kernel::Solo, Kernel::ContactBig] {
+                specs.push(crate::ComputeSpec {
+                    label: kernel.entry(),
+                    module: kernel.module_for(aero, lanes, surface),
+                    wgsl: u(module_wgsl(kernel.module_for(aero, lanes, surface))),
+                    entry: kernel.entry(),
+                    layout: Some(contact_entries(false)),
+                    deferred: false,
+                });
+            }
+        }
+        specs.sort_by(|a, b| b.wgsl.len().cmp(&a.wgsl.len()));
+        specs
+    }
+
+    /// [`Self::new`] with room for rigid-body proxies per vehicle (the World coupling,
+    /// `slang/kernels/explicit_beams_rigid.slang`, [`CouplingLayout`]); off until the
+    /// host writes the coupling header's `on` word.
+    pub fn with_coupling(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+    ) -> Self {
+        Self::with_sleep(device, queue, vehicles, coupling, None)
+    }
+
+    /// [`Self::with_coupling`] with vehicle sleep (`engine_softbody::explicit_sleep`, on
+    /// from the first frame) when `sleep` is set. `None`: no room; frames as without it,
+    /// bit for bit.
+    pub fn with_sleep(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+        sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
+    ) -> Self {
+        let upload = ExplicitUpload::with_sleep(vehicles, coupling, sleep);
+        let layout = upload.layout.clone();
+        let (aero, big, lanes) = (layout.aero, layout.big, layout.lanes);
+        // Large vehicles get twice the lanes (more loads in flight per step), a
+        // small fleet 512 (frame_lanes).
+        let frame_module = Kernel::Frame.module_for(aero, lanes, layout.surface);
+        let storage = wgpu::BufferUsages::STORAGE;
+        let state = storage | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+        let init = |label: &str, b: u32, usage| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
-                contents: &pad(contents),
+                contents: &upload.bytes(b),
                 usage,
             })
         };
-        let storage = wgpu::BufferUsages::STORAGE;
-        let state = storage | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
-        let words = [
-            0,
-            nv as u32,
-            node_info_base as u32,
-            beam_base as u32,
-            tri_base as u32,
-            box_base as u32,
-            group_total,
-            inc_base,
-            slot_base,
-            grid_base,
-            grid,
-            0,
-            total_nodes as u32,
-            total_beams as u32,
-            total_tris as u32,
-            total_cands,
-            wide_misc,
-            grid_count_base,
-            grid_off_base,
-            tested_base,
-            tested_list_base,
-            cand_table_base,
-            slot_base16,
-            overflow_base,
-            aero_base,
-            wing_base,
-            cmd_base,
-            aero_state,
-            total_wings as u32,
-            shock2_base,
-            shock2_count,
-            key_base,
-            slide_base,
-            seg_base,
-            slide_state_base,
-            slide_acc,
-            slide_total,
-            seg_total,
-            slot_count,
-            // Vehicle contact (vvOn is set per frame).
-            0,
-            veh_ext_base,
-            vv_static_base,
-            vv_tri_base,
-            vv_veh,
-            vv_acc,
-            vv_label,
-            vv_groups,
-            vv_members,
-            vv_pairs,
-            vv_pair_cap,
-            vv_grid,
-            vv_grid_count,
-            vv_buckets as u32 - 1,
-            vv_cell(vehicles).to_bits(),
-            vv_run,
-            slot_cnt_base,
-            slot_list_base,
-            DEFAULT_CONTACT_MARGIN.to_bits(),
-            vv_big,
-            (nv <= FUSED_PAIRS_MAX) as u32,
-            0,
-            vv_nbr,
-            vv_hits,
-            0,
-        ];
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-params"),
-            size: PARAM_STRIDE * u64::from(PARAM_COPIES),
+            size: plan::params_bytes(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&params, 0, bytemuck::cast_slice(&words));
+        queue.write_buffer(&params, 0, bytemuck::cast_slice(&layout.words));
+        // (COPY_DST: the parking brake input lives in its records.)
         let statics = init(
             "explicit-beams-static",
-            bytemuck::cast_slice(&statics),
-            storage,
+            plan::BIND_STATIC,
+            storage | wgpu::BufferUsages::COPY_DST,
         );
-        let lists = init(
-            "explicit-beams-lists",
-            bytemuck::cast_slice(&lists),
-            storage,
-        );
-        let nodes = init("explicit-beams-nodes", bytemuck::cast_slice(&nodes), state);
-        let beams = init("explicit-beams-beams", bytemuck::cast_slice(&beams), state);
-        let acc = init(
-            "explicit-beams-acc",
-            bytemuck::cast_slice(&acc_init),
-            state,
-        );
-        let groups = init(
-            "explicit-beams-groups",
-            bytemuck::cast_slice(&groups),
-            state,
-        );
-        let misc = init("explicit-beams-misc", bytemuck::cast_slice(&misc), state);
-        let next = init(
-            "explicit-beams-grid-next",
-            bytemuck::cast_slice(&next_init),
-            state,
-        );
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("explicit-beams"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                (0, &params),
-                (1, &statics),
-                (2, &lists),
-                (3, &nodes),
-                (4, &beams),
-                (5, &acc),
-                (6, &groups),
-                (7, &misc),
-                (8, &next),
-            ]
-            .map(|(binding, b)| wgpu::BindGroupEntry {
-                binding,
-                resource: b.as_entire_binding(),
-            }),
-        });
+        let lists = init("explicit-beams-lists", plan::BIND_LISTS, storage);
+        let nodes = init("explicit-beams-nodes", plan::BIND_NODES, state);
+        let beams = init("explicit-beams-beams", plan::BIND_BEAMS, state);
+        let acc = init("explicit-beams-acc", plan::BIND_ACC, state);
+        let groups = init("explicit-beams-groups", plan::BIND_GROUPS, state);
+        let misc = init("explicit-beams-misc", plan::BIND_MISC, state);
+        let next = init("explicit-beams-grid-next", plan::BIND_NEXT, state);
         let buffers = [
             &params, &statics, &lists, &nodes, &beams, &acc, &groups, &misc, &next,
         ];
-        // The wide passes do not run wings, the fuselage drag, commands or shocks2.
-        let wide = (nv <= WIDE_MAX_VEHICLES && !aero)
-            .then(|| Wide::new(device, queue, &buffers, &table_recs));
-        let total = [
-            total_nodes as u32,
-            total_beams as u32,
-            total_tris as u32,
-            total_cands,
-            group_total,
-        ];
-        // Every vehicle must have run the same steps for the wide passes (one
-        // step parity for the group slots).
-        let same_steps = vehicles.windows(2).all(|w| w[0].steps == w[1].steps);
-        let wide = wide.map(|mut w| {
-            w.enabled = same_steps && vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
-            w
-        });
+        let vehicles_n = layout.spans.len();
+        let wide = layout
+            .wide_ok
+            .then(|| Wide::new(device, queue, &buffers, upload.table_records()));
         let contact = Contact::new(
             device,
             &buffers,
-            match (aero, lanes) {
-                (false, 512) => (EXPLICIT_BEAMS_CONTACT_WIDE_WGSL, EXPLICIT_BEAMS_SOLO_WIDE_WGSL),
-                (false, _) => (EXPLICIT_BEAMS_CONTACT_WGSL, EXPLICIT_BEAMS_SOLO_WGSL),
-                (true, 512) => (EXPLICIT_BEAMS_CONTACT_AERO_WIDE_WGSL, EXPLICIT_BEAMS_SOLO_AERO_WIDE_WGSL),
-                (true, _) => (
-                    EXPLICIT_BEAMS_CONTACT_AERO_WGSL,
-                    EXPLICIT_BEAMS_SOLO_AERO_WGSL,
-                ),
-            },
+            (
+                module_wgsl(Kernel::Contact.module_for(aero, lanes, layout.surface)),
+                module_wgsl(Kernel::Solo.module_for(aero, lanes, layout.surface)),
+                module_wgsl(Kernel::ContactBig.module_for(aero, lanes, layout.surface)),
+            ),
             &acc,
-            (u64::from(vv_acc + 12 * nv as u32) * 4, cap_at as u64 * 4),
-            vv_tri_base,
+            (layout.status.base, layout.status.cap),
+            &upload.bytes(plan::BIND_ARGS),
+            vehicles.len() > 1,
         );
         let bufs = [
             params.clone(),
@@ -1361,34 +747,315 @@ impl ExplicitBeamsGpu {
             misc.clone(),
             next.clone(),
         ];
-        Self {
+        let mut planner = FramePlanner::new(&layout);
+        planner.set_surface_split(surface_split_default());
+        if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
+            planner.set_sleep_listing(false);
+        }
+        let one = vehicles.len() <= 1;
+        let gpu = Self {
             device: device.clone(),
             queue: queue.clone(),
-            pipeline,
-            group,
+            frame: std::sync::OnceLock::new(),
+            frame_module,
+            split: std::sync::OnceLock::new(),
+            split_module: Kernel::FrameSeg.module(aero, lanes),
             params,
             nodes,
             beams,
             misc,
-            spans,
-            rest0,
-            words,
-            aero_state,
-            slide_state: slide_state_base,
-            key_base,
             next,
-            wing_spans,
+            layout,
+            planner,
             timing: None,
+            marks: None,
+            coupling_on: false,
+            coupling_cull_off: false,
+            coupling_cache_off: false,
+            debug_coupling_bits: 0,
+            coupling_ranges_off: coupling_node_ranges_off_default(),
+            debug_big: None,
+            debug_solo: None,
+            debug_groups: None,
+            vehicle_margins: vec![0.0; vehicles_n],
+            surface_pairs_off: std::env::var("RUBBLE_SURFACE_PAIRS").as_deref() == Ok("0"),
+            surface_culls_off: std::env::var("RUBBLE_SURFACE_CULLS").as_deref() == Ok("0"),
             wide,
-            total,
             contact,
+            contact_errors: Default::default(),
+            contact_errors_seen: Default::default(),
             bufs,
             module_kind: (aero, big, lanes),
             variant: KernelVariant::Current,
             alts: Vec::new(),
             probe: None,
             det: None,
+            acc,
+            sleep_inputs: vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect(),
+            sleep_grab: None,
+            sleep_wake: Default::default(),
+        };
+        // One vehicle runs the plain frame (or, with surface contact, the split one)
+        // from the first frame on.
+        if one {
+            if gpu.planner.split_frames(true) {
+                gpu.split_pipes();
+            } else {
+                gpu.frame_pipe();
+            }
         }
+        gpu
+    }
+
+    /// The split frame's pipelines (see `split`).
+    fn split_pipes(&self) -> &Split {
+        self.split.get_or_init(|| Split::new(&self.device, &self.bufs, self.split_module))
+    }
+
+    /// The plain frame's pipeline and bind group, created at first use (see `frame`).
+    fn frame_pipe(&self) -> &(wgpu::ComputePipeline, wgpu::BindGroup) {
+        self.frame.get_or_init(|| {
+            let device = &self.device;
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("explicit_beams"),
+                source: wgpu::ShaderSource::Wgsl(
+                    crate::uniformize_workgroup_lanes(module_wgsl(self.frame_module)).into(),
+                ),
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("explicit_beams_frame"),
+                layout: None,
+                module: &module,
+                entry_point: Some(plan::FRAME_ENTRY),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("explicit-beams"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: if i == 0 { params_window(&self.bufs[0]) } else { self.bufs[i].as_entire_binding() },
+                }),
+            });
+            (pipeline, group)
+        })
+    }
+
+    /// Diagnostic: the per-vehicle frame module's WGSL as the frame compiles it.
+    #[doc(hidden)]
+    pub fn debug_frame_wgsl(&self) -> String {
+        crate::uniformize_workgroup_lanes(module_wgsl(self.frame_module))
+    }
+
+    /// Diagnostic (ablations of an edited frame module, [`Self::debug_set_frame_wgsl`]):
+    /// bits OR-ed into the coupling header word from the next frame (the shipped kernel
+    /// reads bits 1 to 32 only).
+    #[doc(hidden)]
+    pub fn debug_coupling_bits(&mut self, bits: u32) {
+        self.debug_coupling_bits = bits;
+        self.write_coupling_header();
+    }
+
+    /// Diagnostic: the large contact groups' module's WGSL as its pipeline compiles it.
+    #[doc(hidden)]
+    pub fn debug_contact_big_wgsl(&self) -> String {
+        self.debug_contact_wgsl("big")
+    }
+
+    /// Diagnostic: a contact module's WGSL (`which`: "solo", "groups" or "big").
+    #[doc(hidden)]
+    pub fn debug_contact_wgsl(&self, which: &str) -> String {
+        let (aero, _, lanes) = self.module_kind;
+        let k = match which {
+            "solo" => Kernel::Solo,
+            "groups" => Kernel::Contact,
+            _ => Kernel::ContactBig,
+        };
+        crate::uniformize_workgroup_lanes(module_wgsl(k.module_for(aero, lanes, self.layout.surface)))
+    }
+
+    /// Diagnostic: run `src` as a contact module ("solo", "groups" or "big") from now on.
+    #[doc(hidden)]
+    pub fn debug_set_contact_wgsl(&mut self, which: &str, src: &str) {
+        let entry = if which == "big" { plan::CONTACT_ENTRY } else { plan::FRAME_ENTRY };
+        let made = self.debug_contact_pipe(src, entry);
+        match which {
+            "solo" => self.debug_solo = Some(made),
+            "groups" => self.debug_groups = Some(made),
+            _ => self.debug_big = Some(made),
+        }
+    }
+
+    /// Diagnostic: run `src` as the large contact groups' module from now on.
+    #[doc(hidden)]
+    pub fn debug_set_contact_big_wgsl(&mut self, src: &str) {
+        self.debug_set_contact_wgsl("big", src);
+    }
+
+    fn debug_contact_pipe(&self, src: &str, entry: &str) -> (wgpu::ComputePipeline, wgpu::BindGroup) {
+        let device = &self.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("explicit_beams_contact (debug)"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+        // The contact entry's own layout (as Contact::new builds it).
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("explicit-beams-vv (debug)"),
+            entries: &contact_entries(false),
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("explicit-beams-vv (debug)"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("explicit_beams_contact (debug)"),
+            layout: Some(&pl),
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams-vv (debug)"),
+            layout: &bgl,
+            entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 0 { params_window(&self.bufs[0]) } else { self.bufs[i].as_entire_binding() },
+            }),
+        });
+        (pipeline, group)
+    }
+
+    /// Diagnostic: the byte size of each state binding's buffer (bindings 0..=8).
+    #[doc(hidden)]
+    pub fn debug_binding_sizes(&self) -> Vec<u64> {
+        self.bufs.iter().map(|b| b.size()).collect()
+    }
+
+    /// Diagnostic (browser ablations without a rebuild): frames run `src` as the
+    /// per-vehicle frame module from now on (its entry point and bindings as the
+    /// shipped one's). An invalid module is the device's error.
+    #[doc(hidden)]
+    pub fn debug_set_frame_wgsl(&mut self, src: &str) {
+        let device = &self.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("explicit_beams (debug)"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("explicit_beams_frame (debug)"),
+            layout: None,
+            module: &module,
+            entry_point: Some(plan::FRAME_ENTRY),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams (debug)"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 0 { params_window(&self.bufs[0]) } else { self.bufs[i].as_entire_binding() },
+            }),
+        });
+        self.frame = std::sync::OnceLock::new();
+        let _ = self.frame.set((pipeline, group));
+    }
+
+    /// Vehicle sleep's layout (`None`: built without room, [`Self::with_sleep`]).
+    pub fn sleep_layout(&self) -> Option<plan::SleepLayout> {
+        self.layout.sleep
+    }
+
+    /// Vehicle sleep on or off (only with room; on from the start). Turning it on wakes
+    /// every vehicle (still counts from 0). Returns whether it is on.
+    pub fn set_sleep(&mut self, on: bool) -> bool {
+        let Some(s) = self.layout.sleep else {
+            return false;
+        };
+        if on && !self.planner.sleep_on() {
+            let zeros = vec![[0u32; 4]; self.layout.vehicles()];
+            self.queue
+                .write_buffer(&self.misc, s.record_offset(0), bytemuck::cast_slice(&zeros));
+        }
+        self.planner.set_sleep(on)
+    }
+
+    /// Whether vehicle sleep runs.
+    pub fn sleep_on(&self) -> bool {
+        self.planner.sleep_on()
+    }
+
+    /// Measurement only: dispatch through the awake list (the default) or every vehicle
+    /// with a sleeping one's workgroup returning at once (`RUBBLE_SLEEP_LIST=0` at
+    /// creation). The same results.
+    pub fn set_sleep_listing(&mut self, on: bool) {
+        self.planner.set_sleep_listing(on);
+    }
+
+    /// Wake vehicle `v` before the next frame (a scripted force or any host write the
+    /// GPU does not see as motion). Without sleep, nothing.
+    pub fn wake(&self, v: usize) {
+        if self.layout.sleep.is_some() && v < self.layout.vehicles() {
+            self.sleep_wake.lock().unwrap().push(v);
+        }
+    }
+
+    /// The host's wakes, written before a frame: those queued, the grabbed vehicle and
+    /// every vehicle with throttle (an engine driving wheels is not still).
+    fn write_wakes(&self) {
+        let Some(s) = self.layout.sleep else {
+            return;
+        };
+        if !self.planner.sleep_on() {
+            return;
+        }
+        let mut list = std::mem::take(&mut *self.sleep_wake.lock().unwrap());
+        list.extend(self.sleep_grab);
+        list.extend(
+            self.sleep_inputs
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| i.is_some_and(|i| i.forward != 0.0))
+                .map(|(v, _)| v),
+        );
+        list.sort_unstable();
+        list.dedup();
+        for v in list {
+            self.queue
+                .write_buffer(&self.misc, s.record_offset(v), bytemuck::cast_slice(&[0u32; 4]));
+        }
+    }
+
+    /// Host writes that will wake a vehicle before the next frame (queued wakes, a grab,
+    /// throttle held).
+    pub fn wakes_pending(&self) -> bool {
+        self.planner.sleep_on()
+            && (!self.sleep_wake.lock().unwrap().is_empty()
+                || self.sleep_grab.is_some()
+                || self.sleep_inputs.iter().any(|i| i.is_some_and(|i| i.forward != 0.0)))
+    }
+
+    /// Blocking read: per vehicle its sleep record (still steps, asleep); empty without
+    /// room.
+    pub fn sleep_states(&self) -> Vec<(u32, bool)> {
+        let Some(s) = self.layout.sleep else {
+            return Vec::new();
+        };
+        let misc = self.read_u4(&self.misc);
+        (0..self.layout.vehicles())
+            .map(|v| {
+                let r = misc[s.base as usize + v];
+                (r[0], r[1] & engine_softbody::explicit_sleep::SLEEP_ASLEEP != 0)
+            })
+            .collect()
+    }
+
+    /// The shared plan's layout of this fleet (where every record lives).
+    pub fn layout(&self) -> &ExplicitLayout {
+        &self.layout
     }
 
     /// Vehicle–vehicle contact between every vehicle of the fleet
@@ -1396,24 +1063,20 @@ impl ExplicitBeamsGpu {
     /// runs when the fleet has more than one vehicle. Off, every vehicle steps
     /// alone (the one-dispatch frame).
     pub fn set_vehicle_contact(&mut self, on: bool) {
-        if on && !self.contact.on {
-            self.contact.fresh = true;
-        }
-        self.contact.on = on;
-        self.contact.left = 0;
+        self.planner.set_vehicle_contact(on);
     }
 
     /// Whether vehicle contact is on ([`Self::set_vehicle_contact`]).
     pub fn vehicle_contact(&self) -> bool {
-        self.contact.on
+        self.planner.vehicle_contact()
     }
 
     /// Whether frames run the vehicle contact passes (on, more than one vehicle).
     pub fn contact_active(&self) -> bool {
-        self.contact.on && self.spans.len() > 1
+        self.planner.contact_active()
     }
 
-    /// The frame bounds margin (m, default [`DEFAULT_CONTACT_MARGIN`]). A contact
+    /// The frame bounds margin (m, default [`plan::DEFAULT_CONTACT_MARGIN`]). A contact
     /// plan covers the next frames of at least 34 steps (every frame at 60 fps,
     /// every other at 120): a vehicle whose box, grown by twice the travel of its
     /// fastest node over those steps plus this margin, overlaps no other's is
@@ -1423,9 +1086,28 @@ impl ExplicitBeamsGpu {
     /// ([`Self::contact_status`] at once). A larger margin groups more vehicles
     /// (slower), never changes results.
     pub fn set_contact_margin(&mut self, metres: f32) {
+        self.planner.set_contact_margin(metres);
+    }
+
+    /// The fleet's frame bounds margin (m): [`Self::set_contact_margin`]'s.
+    pub fn contact_margin(&self) -> f32 {
+        self.planner.contact_margin()
+    }
+
+    /// Vehicle `v`'s own frame bounds margin (m; the fleet's applies when wider): the
+    /// host's after `v` left its frame bounds, or a host setting.
+    pub fn set_vehicle_contact_margin(&mut self, v: usize, metres: f32) {
         assert!(metres >= 0.0 && metres.is_finite(), "contact margin {metres}");
-        self.words[W_VV_MARGIN] = metres.to_bits();
-        self.contact.left = 0;
+        self.vehicle_margins[v] = metres;
+        let rec = self.planner.vv_record(v as u32, plan::VV_MEMBER_REC);
+        self.queue.write_buffer(&self.misc, u64::from(rec) * 16 + 4, bytemuck::bytes_of(&metres));
+        self.planner.request_replan();
+    }
+
+    /// Vehicle `v`'s frame bounds margin (m): the fleet's, or its own when it left its
+    /// frame bounds (each time doubled, at most [`MAX_AUTO_CONTACT_MARGIN`]).
+    pub fn vehicle_contact_margin(&self, v: usize) -> f32 {
+        self.vehicle_margins[v].max(self.planner.contact_margin())
     }
 
     /// The contact status (blocking): `Err` when a vehicle left its frame bounds,
@@ -1433,20 +1115,24 @@ impl ExplicitBeamsGpu {
     pub fn contact_status(&self) -> Result<(), String> {
         let raw = self.read(&self.contact.acc);
         let w: &[i32] = bytemuck::cast_slice(&raw);
-        let at = (self.contact.status_at / 4) as usize;
-        let cap = (self.contact.cap_at / 4) as usize;
-        crate::explicit_loop_cap_hit(w[cap])?;
-        contact_error(&w[at + 4..at + 8])
+        crate::explicit_loop_cap_hit(self.layout.loop_cap_flag(w))?;
+        self.layout.contact_status(w)
     }
 
     /// The kernel status (blocking): `Err` when a kernel loop reached its cap
     /// ([`crate::EXPLICIT_LOOP_CAP`]: a runaway loop, stopped; that frame's results
     /// are invalid). Frames also check it on their own every few frames
     /// ([`Self::frame`] and [`Self::wait`] fail on it).
+    /// The loop-cap flag's word (gAcc, byte offset): a host's own readback reads it
+    /// with its step ([`crate::explicit_loop_cap_hit`] of the word), without waiting.
+    pub fn loop_cap_word(&self) -> (&wgpu::Buffer, u64) {
+        (&self.contact.acc, self.contact.cap_at)
+    }
+
     pub fn kernel_status(&self) -> Result<(), String> {
         let raw = self.read(&self.contact.acc);
         let w: &[i32] = bytemuck::cast_slice(&raw);
-        crate::explicit_loop_cap_hit(w[(self.contact.cap_at / 4) as usize])
+        crate::explicit_loop_cap_hit(self.layout.loop_cap_flag(w))
     }
 
     /// The contact groups of the current plan (blocking read; 0 when contact is
@@ -1459,52 +1145,71 @@ impl ExplicitBeamsGpu {
         bytemuck::cast_slice::<u8, u32>(&raw)[4]
     }
 
+    /// Diagnostic (blocking): the member count of each contact group of the current
+    /// plan.
+    #[doc(hidden)]
+    pub fn contact_group_sizes(&self) -> Vec<u32> {
+        if !self.contact_active() {
+            return Vec::new();
+        }
+        // The plan's group count (indirect-arguments word 3; word 4 is the frame's
+        // workgroups, vehicles + groups).
+        let n = bytemuck::cast_slice::<u8, u32>(&self.read(&self.contact.args))[3] as usize;
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        let at = self.planner.words[46] as usize;
+        (0..n).map(|g| misc[(at + g) * 4 + 1]).collect()
+    }
+
+    /// Per vehicle with the contact-force log (jbeam-semantics-spec.md §32;
+    /// blocking read): per node its last complete step's contact force and the
+    /// largest since [`Self::clear_contact_force_peaks`] (N), and per break group
+    /// its contact-break state (0 idle, 1 set off, 2 done); `None` for the others.
+    #[allow(clippy::type_complexity)]
+    pub fn contact_forces(&self) -> Vec<Option<(Vec<f32>, Vec<f32>, Vec<u8>)>> {
+        let raw = self.read(&self.contact.acc);
+        self.layout.contact_forces(bytemuck::cast_slice(&raw))
+    }
+
+    /// Restarts every node's contact-force peak (queued, before the next frame).
+    pub fn clear_contact_force_peaks(&self) {
+        let Some((at, n)) = self.layout.contact_force_peaks() else {
+            return;
+        };
+        let acc = self.read(&self.contact.acc);
+        let mut w: Vec<i32> = bytemuck::cast_slice(&acc).to_vec();
+        for i in 0..n as usize {
+            w[at as usize + 3 * i] = 0;
+        }
+        let lo = at as usize;
+        let hi = lo + 3 * n as usize;
+        self.queue.write_buffer(&self.contact.acc, lo as u64 * 4, bytemuck::cast_slice(&w[lo..hi]));
+    }
+
     /// Per vehicle, its triangles' contact throttles (cwait, cidle).
     pub fn contact_throttles(&self) -> Vec<Vec<[i32; 2]>> {
         let raw = self.read(&self.misc);
-        let m: &[[u32; 4]] = bytemuck::cast_slice(&raw);
-        let mut out = Vec::with_capacity(self.spans.len());
-        let mut t0 = self.contact.tri_base as usize;
-        for &n in &self.tri_counts() {
-            out.push(m[t0..t0 + n].iter().map(|r| [r[0] as i32, r[1] as i32]).collect());
-            t0 += n;
-        }
-        out
+        self.layout.contact_throttles(bytemuck::cast_slice(&raw))
     }
 
     /// Per vehicle, its triangles' self-collision throttles (wait, idle).
     pub fn self_collision_throttles(&self) -> Vec<Vec<[i32; 2]>> {
         let raw = self.read(&self.misc);
-        let m: &[[u32; 4]] = bytemuck::cast_slice(&raw);
-        let mut out = Vec::with_capacity(self.spans.len());
-        let mut t0 = self.spans.len();
-        for &n in &self.tri_counts() {
-            out.push(m[t0..t0 + n].iter().map(|r| [r[0] as i32, r[1] as i32]).collect());
-            t0 += n;
-        }
-        out
-    }
-
-    fn tri_counts(&self) -> Vec<usize> {
-        self.spans.iter().map(|s| s.tris as usize).collect()
+        self.layout.self_collision_throttles(bytemuck::cast_slice(&raw))
     }
 
     /// Run frames as the wide passes (one thread per element over every vehicle,
     /// a dispatch per pass) or as one workgroup per vehicle. Wide is the default
-    /// when a vehicle has more than [`WIDE_BEAMS`] beams. Returns whether wide is on.
+    /// when a vehicle has more than [`plan::WIDE_BEAMS`] beams. Returns whether wide is on.
     /// The wide passes do not run vehicle contact: while it is active
     /// ([`Self::contact_active`]) frames run one workgroup per vehicle.
     pub fn is_wide(&self) -> bool {
-        self.wide.as_ref().is_some_and(|w| w.enabled) && !self.contact_active()
+        self.planner.is_wide()
     }
 
     /// Run frames as the wide passes or one workgroup per vehicle (see
     /// [`Self::is_wide`]); returns whether wide is on.
     pub fn set_wide(&mut self, on: bool) -> bool {
-        if let Some(w) = &mut self.wide {
-            w.enabled = on;
-        }
-        self.is_wide()
+        self.planner.set_wide(on)
     }
 
     /// One wide frame with each dispatch in its own timed pass (a diagnostic: the
@@ -1521,9 +1226,8 @@ impl ExplicitBeamsGpu {
             return Vec::new();
         }
         self.write_params(steps);
-        let plan = self.wide_plan(steps);
-        let w = self.wide.as_ref().unwrap();
-        let count = 2 * plan.len() as u32;
+        let cmds = self.planner.commands(steps, true);
+        let count = 2 * cmds.len() as u32;
         let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("explicit-beams-wide-profile"),
             ty: wgpu::QueryType::Timestamp,
@@ -1538,30 +1242,26 @@ impl ExplicitBeamsGpu {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        for (i, &(step, kind, x)) in plan.iter().enumerate() {
-            if i == 2 {
-                let nv = self.spans.len() as u64;
-                enc.copy_buffer_to_buffer(
-                    &self.misc,
-                    0,
-                    &w.table,
-                    (WIDE_MAX_VEHICLES * 4 * 16) as u64,
-                    nv * 16,
-                );
+        let mut kinds = Vec::new();
+        for cmd in &cmds {
+            if let Cmd::Dispatch { kernel: Kernel::Wide(kind), .. } = cmd {
+                let k = 2 * kinds.len() as u32;
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("explicit_beams_wide_profile"),
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: &set,
+                        beginning_of_pass_write_index: Some(k),
+                        end_of_pass_write_index: Some(k + 1),
+                    }),
+                });
+                self.dispatch(&mut pass, cmd, None);
+                kinds.push(*kind);
+            } else {
+                self.copy(&mut enc, cmd);
             }
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("explicit_beams_wide_profile"),
-                timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
-                    query_set: &set,
-                    beginning_of_pass_write_index: Some(2 * i as u32),
-                    end_of_pass_write_index: Some(2 * i as u32 + 1),
-                }),
-            });
-            pass.set_pipeline(&w.passes[kind]);
-            pass.set_bind_group(0, &w.group, &[step * PARAM_STRIDE as u32]);
-            pass.dispatch_workgroups(x, 1, 1);
         }
-        enc.resolve_query_set(&set, 0..count, &resolve, 0);
+        let used = 2 * kinds.len() as u32;
+        enc.resolve_query_set(&set, 0..used, &resolve, 0);
         self.queue.submit([enc.finish()]);
         let period = f64::from(self.queue.get_timestamp_period()) * 1e-6;
         let raw = self.read(&resolve);
@@ -1570,7 +1270,7 @@ impl ExplicitBeamsGpu {
             .iter()
             .map(|(n, _)| (*n, 0.0))
             .collect();
-        for (i, &(_, kind, _)) in plan.iter().enumerate() {
+        for (i, &kind) in kinds.iter().enumerate() {
             out[kind].1 += ticks[2 * i + 1].saturating_sub(ticks[2 * i]) as f64 * period;
         }
         out
@@ -1585,13 +1285,13 @@ impl ExplicitBeamsGpu {
             .device
             .features()
             .contains(wgpu::Features::TIMESTAMP_QUERY)
-            || self.spans.is_empty()
+            || self.layout.spans.is_empty()
         {
             return Vec::new();
         }
         self.check_contact_status();
         self.write_params(steps);
-        let nv = self.spans.len() as u32;
+        let cmds = self.planner.commands(steps, false);
         let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("explicit-beams-profile"),
             ty: wgpu::QueryType::Timestamp,
@@ -1607,60 +1307,25 @@ impl ExplicitBeamsGpu {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         let mut labels: Vec<&'static str> = Vec::new();
-        {
-            let mut run = |label: &'static str,
-                           f: &mut dyn FnMut(&mut wgpu::ComputePass)| {
-                let k = 2 * labels.len() as u32;
-                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some(label),
-                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
-                        query_set: &set,
-                        beginning_of_pass_write_index: Some(k),
-                        end_of_pass_write_index: Some(k + 1),
-                    }),
-                });
-                f(&mut pass);
-                labels.push(label);
-            };
-            if self.contact_active() {
-                let c = &self.contact;
-                if c.planning {
-                    run("vv_bounds", &mut |p| {
-                        p.set_bind_group(0, &c.plan_group, &[]);
-                        p.set_pipeline(&c.plan[0]);
-                        p.dispatch_workgroups(nv, 1, 1);
-                    });
-                    if nv as usize > FUSED_PAIRS_MAX {
-                        run("vv_pairs", &mut |p| {
-                            p.set_bind_group(0, &c.plan_group, &[]);
-                            p.set_pipeline(&c.plan[1]);
-                            p.dispatch_workgroups(nv.div_ceil(256), 1, 1);
-                        });
-                    }
-                    run("vv_group", &mut |p| {
-                        p.set_bind_group(0, &c.plan_group, &[]);
-                        p.set_pipeline(&c.plan[2]);
-                        p.dispatch_workgroups(1, 1, 1);
-                    });
+        for cmd in &cmds {
+            let kernel = match cmd {
+                Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => *kernel,
+                Cmd::Copy { .. } => {
+                    self.copy(&mut enc, cmd);
+                    continue;
                 }
-                run("solo frame", &mut |p| {
-                    p.set_pipeline(&c.solo);
-                    p.set_bind_group(0, &c.contact_group, &[]);
-                    p.dispatch_workgroups_indirect(&c.args, 0);
-                });
-                run("frame with groups", &mut |p| {
-                    p.set_pipeline(&c.groups);
-                    p.set_bind_group(0, &c.contact_group, &[]);
-                    p.dispatch_workgroups_indirect(&c.args, 16);
-                });
-            } else {
-                let (pipeline, group) = (&self.pipeline, &self.group);
-                run("frame", &mut |p| {
-                    p.set_pipeline(pipeline);
-                    p.set_bind_group(0, group, &[]);
-                    p.dispatch_workgroups(nv, 1, 1);
-                });
-            }
+            };
+            let k = 2 * labels.len() as u32;
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(kernel.label()),
+                timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                    query_set: &set,
+                    beginning_of_pass_write_index: Some(k),
+                    end_of_pass_write_index: Some(k + 1),
+                }),
+            });
+            self.dispatch(&mut pass, cmd, None);
+            labels.push(kernel.label());
         }
         let n = 2 * labels.len() as u32;
         enc.resolve_query_set(&set, 0..n, &resolve, 0);
@@ -1782,24 +1447,134 @@ impl ExplicitBeamsGpu {
         &self.misc
     }
 
+    /// The rigid coupling's layout, when built [`Self::with_coupling`].
+    pub fn coupling(&self) -> Option<CouplingLayout> {
+        self.layout.coupling
+    }
+
+    /// The accumulators `GPUBuffer` (gAcc; the coupling's sums, [`CouplingLayout`]).
+    pub fn acc_buffer(&self) -> &wgpu::Buffer {
+        &self.acc
+    }
+
+    /// Turn the rigid coupling on or off from the next frame (its header's `on` word).
+    /// Panics without [`Self::with_coupling`]. On, the frames run on the per-vehicle
+    /// workgroups (the wide passes do not run the coupling; the same steps, as
+    /// [`Self::set_wide`] off).
+    pub fn set_coupling_on(&mut self, on: bool) {
+        assert!(self.layout.coupling.is_some(), "explicit beams: built without coupling room");
+        if on {
+            self.set_wide(false);
+        }
+        self.coupling_on = on;
+        self.write_coupling_header();
+    }
+
+    /// Tests and measurement: the coupling's per-step shape cull (on by default; lossless,
+    /// `explicit_beams_rigid.slang` `cplMay`) off, every node testing every proxy shape.
+    #[doc(hidden)]
+    pub fn set_coupling_cull(&mut self, on: bool) {
+        self.coupling_cull_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// Tests and measurement: the surface contact's pair path for the proxies
+    /// (`explicit_beams_surface.slang` surfPairFind; lossless) on or off (the coupling
+    /// header's bit 16; `RUBBLE_SURFACE_PAIRS=0` starts it off). Off, the per-element
+    /// loops meet every proxy.
+    #[doc(hidden)]
+    pub fn set_surface_pairs(&mut self, on: bool) {
+        self.surface_pairs_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// Tests and measurement: the shared feature queries' edge culls
+    /// (`feature_query.slang` fqFar; lossless) on or off (the coupling header's bit 32;
+    /// `RUBBLE_SURFACE_CULLS=0` starts them off).
+    #[doc(hidden)]
+    pub fn set_surface_culls(&mut self, on: bool) {
+        self.surface_culls_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// The coupling's per-node shape ranges (`explicit_beams_rigid.slang` `cplGsAdd`, the
+    /// header's bit 64): each node's contacts start at the first proxy shape its count
+    /// pass found it inside and stop after the last (on), or scan every shape (off; the
+    /// same shapes pass the cull and the face test, in the same order: the same results).
+    /// Off by default in browsers' WebGPU ([`coupling_node_ranges_off_default`]), on
+    /// elsewhere.
+    pub fn set_coupling_node_ranges(&mut self, on: bool) {
+        self.coupling_ranges_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// Tests and measurement: the coupling's workgroup copies and ranges (on by default;
+    /// lossless, `explicit_beams_rigid.slang`: the header words, the proxy spheres and
+    /// each node's shape range from the count pass in workgroup memory, the shapes'
+    /// step reactions a lane a shape before each body sums them in shape order, a body's
+    /// shapes scanned over the range the plan wrote, a small contact group's members'
+    /// coupling side by side) off: every read from the buffers, every scan over every
+    /// shape, as before them.
+    #[doc(hidden)]
+    pub fn set_coupling_workgroup_cache(&mut self, on: bool) {
+        self.coupling_cache_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// Measurement only: the raycast wheels' pass on or off (off, the frames skip it and
+    /// results are meaningless: time only). No-op without wheels.
+    #[doc(hidden)]
+    pub fn set_drive_pass_for_timing(&mut self, on: bool) {
+        if let Some(d) = self.layout.drive {
+            self.queue.write_buffer(&self.misc, u64::from(d.header) * 16, bytemuck::bytes_of(&u32::from(on)));
+        }
+    }
+
+    fn write_coupling_header(&self) {
+        // Bit 8 (measurement only, `RUBBLE_SURFACE_CAST=0`): the surface contact's casts of
+        // fast proxies off (explicit_beams_surface.slang surfProxyFast).
+        let casts_off = engine_softbody::explicit_surface::casts_off();
+        let word = u32::from(self.coupling_on)
+            | if self.coupling_on && self.coupling_cull_off { 2 } else { 0 }
+            | if self.coupling_on && self.coupling_cache_off { 4 } else { 0 }
+            | if self.coupling_on && casts_off { 8 } else { 0 }
+            | if self.coupling_on && self.surface_pairs_off {
+                16
+            } else {
+                0
+            }
+            | if self.coupling_on && self.surface_culls_off {
+                32
+            } else {
+                0
+            }
+            | if self.coupling_on && self.coupling_ranges_off { 64 } else { 0 }
+            | if self.coupling_on { self.debug_coupling_bits } else { 0 };
+        self.queue.write_buffer(
+            &self.misc,
+            self.layout.coupling_on_offset(),
+            bytemuck::bytes_of(&word),
+        );
+    }
+
     /// The first node of vehicle `v` in [`Self::nodes_buffer`] (in nodes).
     pub fn node_offset(&self, v: usize) -> u32 {
-        self.spans[v].node_off
+        self.layout.spans[v].node_off
     }
 
     /// The first beam of vehicle `v` in [`Self::beams_buffer`] (in beams).
     pub fn beam_offset(&self, v: usize) -> u32 {
-        self.spans[v].beam_off
+        self.layout.spans[v].beam_off
     }
 
     /// Spawn rest lengths of every beam, in buffer order.
     pub fn rest0(&self) -> &[f32] {
-        &self.rest0
+        &self.layout.rest0
     }
 
     /// Vehicles simulated.
     pub fn vehicle_count(&self) -> usize {
-        self.spans.len()
+        self.layout.spans.len()
     }
 
     /// Submit one frame: the origin rebase, then `steps` fixed steps, for every
@@ -1809,14 +1584,79 @@ impl ExplicitBeamsGpu {
     }
 
     fn submit(&mut self, steps: u32) {
-        if self.spans.is_empty() {
+        if self.layout.spans.is_empty() {
             return;
         }
-        self.check_contact_status();
-        self.write_params(steps);
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let read = self.encode(&mut enc, steps, None, None).0;
+        self.queue.submit([enc.finish()]);
+        if read {
+            self.contact.map_status();
+        }
+    }
+
+    /// [`Self::frame`] encoded into `enc` (a host's own submission, such as the World's
+    /// step). Submit it, then call [`Self::frame_submitted`] with the result.
+    pub fn frame_encode(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32) -> bool {
+        self.frame_encode_timed(enc, steps, None)
+    }
+
+    /// [`Self::frame_encode`], its GPU time written to a host's query set: timestamp
+    /// `stamp.1` as the frame's first pass begins and `stamp.1 + 1` as its last ends
+    /// (wasm-safe: the host resolves and reads them with its own readback).
+    pub fn frame_encode_timed(&mut self, enc: &mut wgpu::CommandEncoder, steps: u32, stamp: Option<(&wgpu::QuerySet, u32)>) -> bool {
+        if self.layout.spans.is_empty() || steps == 0 {
+            return false;
+        }
+        self.encode(enc, steps, stamp, None).0
+    }
+
+    /// [`Self::frame_encode`] with each dispatch in its own pass, timed in a host's
+    /// query set: dispatch i (while i < `cap`) writes timestamps `2 (first + i)` and
+    /// `2 (first + i) + 1`. Returns the status-read flag and the timed dispatches'
+    /// kernel labels, in order (the passes add their own cost: a diagnostic).
+    pub fn frame_encode_per_dispatch(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        steps: u32,
+        set: &wgpu::QuerySet,
+        first: u32,
+        cap: u32,
+    ) -> (bool, Vec<&'static str>) {
+        if self.layout.spans.is_empty() || steps == 0 {
+            return (false, Vec::new());
+        }
+        self.encode(enc, steps, None, Some((set, first, cap)))
+    }
+
+    /// Diagnostic: a mark after each of the frame's dispatches, named by kernel (`None`:
+    /// stop).
+    pub fn set_marks(&mut self, marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>) {
+        self.marks = marks;
+    }
+
+    /// After the submission holding a [`Self::frame_encode`]: its status read mapped.
+    pub fn frame_submitted(&self, read: bool) {
+        if read {
+            self.contact.map_status();
+        }
+    }
+
+    /// The frame's commands (the shared plan's), replayed: a compute pass per run of
+    /// dispatches, a copy between them; whether they copy the status for a read.
+    fn encode(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        steps: u32,
+        ext: Option<(&wgpu::QuerySet, u32)>,
+        per: Option<(&wgpu::QuerySet, u32, u32)>,
+    ) -> (bool, Vec<&'static str>) {
+        let mut labels = Vec::new();
+        self.check_contact_status();
+        self.write_wakes();
+        self.write_params(steps);
         // Timestamps at the start of the frame's first pass and the end of its last.
         let slot = self.timing.as_mut().and_then(|t| {
             (t.used < t.capacity).then(|| {
@@ -1824,104 +1664,174 @@ impl ExplicitBeamsGpu {
                 2 * t.used - 2
             })
         });
+        let alt = self.alt_pipes();
+        let cmds = self.planner.commands(steps, alt.is_none());
         let set = self.timing.as_ref().map(|t| &t.set);
         let stamps = |begin: bool, end: bool| {
-            set.zip(slot)
+            ext.or(set.zip(slot))
                 .map(|(q, k)| wgpu::ComputePassTimestampWrites {
                     query_set: q,
                     beginning_of_pass_write_index: begin.then_some(k),
                     end_of_pass_write_index: end.then_some(k + 1),
                 })
         };
-        let alt = self.alt_pipes();
-        if self.contact_active() {
-            let c = &self.contact;
-            let (plan, plan_group, solo, groups, contact_group) = match alt {
-                Some(a) => (&a.plan, &a.plan_group, &a.solo, &a.groups, &a.group),
-                None => (&c.plan, &c.plan_group, &c.solo, &c.groups, &c.contact_group),
-            };
-            let nv = self.spans.len() as u32;
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("explicit_beams_contact"),
-                timestamp_writes: stamps(true, true),
-            });
-            if c.planning {
-                pass.set_bind_group(0, plan_group, &[]);
-                pass.set_pipeline(&plan[0]);
-                pass.dispatch_workgroups(nv, 1, 1);
-                if nv as usize > FUSED_PAIRS_MAX {
-                    pass.set_pipeline(&plan[1]);
-                    pass.dispatch_workgroups(nv.div_ceil(256), 1, 1);
+        let runs: Vec<&[Cmd]> = cmds.split(|c| matches!(c, Cmd::Copy { .. })).collect();
+        let copies: Vec<&Cmd> = cmds.iter().filter(|c| matches!(c, Cmd::Copy { .. })).collect();
+        for (i, run) in runs.iter().enumerate() {
+            if i > 0 {
+                self.copy(enc, copies[i - 1]);
+            }
+            if let Some((q, first, cap)) = per {
+                for cmd in *run {
+                    let k = first + labels.len() as u32;
+                    let timed = (labels.len() as u32) < cap;
+                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("explicit_beams"),
+                        timestamp_writes: timed.then_some(wgpu::ComputePassTimestampWrites {
+                            query_set: q,
+                            beginning_of_pass_write_index: Some(2 * k),
+                            end_of_pass_write_index: Some(2 * k + 1),
+                        }),
+                    });
+                    self.dispatch(&mut pass, cmd, alt);
+                    if timed {
+                        labels.push(kernel_name(cmd));
+                    }
                 }
-                pass.set_pipeline(&plan[2]);
-                pass.dispatch_workgroups(1, 1, 1);
+                continue;
             }
-            // The vehicles (grouped ones return at once) and, past them, the
-            // contact groups, side by side.
-            // The plan wrote one of the two non-empty: with no group the plain solo
-            // frame, else the frame with the groups past the vehicles.
-            pass.set_pipeline(solo);
-            pass.set_bind_group(0, contact_group, &[]);
-            pass.dispatch_workgroups_indirect(&c.args, 0);
-            pass.set_pipeline(groups);
-            pass.dispatch_workgroups_indirect(&c.args, 16);
-        } else if let Some(w) = self.wide.as_ref().filter(|w| w.enabled && alt.is_none()) {
-            let plan = self.wide_plan(steps);
-            // Begin and rebase, then the vehicles' origins and steps into the
-            // table, then the steps.
-            let (head, rest) = plan.split_at(2);
-            {
-                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("explicit_beams_wide_begin"),
-                    timestamp_writes: stamps(true, false),
-                });
-                for &(k, kind, x) in head {
-                    pass.set_pipeline(&w.passes[kind]);
-                    pass.set_bind_group(0, &w.group, &[k * PARAM_STRIDE as u32]);
-                    pass.dispatch_workgroups(x, 1, 1);
+            if let Some(m) = self.marks.clone() {
+                for cmd in *run {
+                    {
+                        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("explicit_beams"),
+                            timestamp_writes: None,
+                        });
+                        self.dispatch(&mut pass, cmd, alt);
+                    }
+                    m.mark(enc, kernel_name(cmd));
                 }
+                continue;
             }
-            let nv = self.spans.len() as u64;
-            enc.copy_buffer_to_buffer(
-                &self.misc,
-                0,
-                &w.table,
-                (WIDE_MAX_VEHICLES * 4 * 16) as u64,
-                nv * 16,
-            );
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("explicit_beams_wide"),
-                timestamp_writes: stamps(false, true),
-            });
-            for &(k, kind, x) in rest {
-                pass.set_pipeline(&w.passes[kind]);
-                pass.set_bind_group(0, &w.group, &[k * PARAM_STRIDE as u32]);
-                pass.dispatch_workgroups(x, 1, 1);
-            }
-        } else {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("explicit_beams"),
-                timestamp_writes: stamps(true, true),
+                timestamp_writes: stamps(i == 0, i + 1 == runs.len()),
             });
-            let (pipeline, group) = alt.map_or((&self.pipeline, &self.group), |a| (&a.frame, &a.group));
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(self.spans.len() as u32, 1, 1);
+            for cmd in *run {
+                self.dispatch(&mut pass, cmd, alt);
+            }
         }
         // The status every STATUS_EVERY frames (the counters and the loop-cap
         // flag keep an error), with or without contact.
-        let read = {
-            self.contact.frames += 1;
-            self.contact.frames % STATUS_EVERY == 1
-        };
+        let read = self.planner.status_due();
         if read {
-            self.contact.read_status(&self.device, &mut enc);
+            self.contact.read_status(&self.device, enc);
         }
-        self.queue.submit([enc.finish()]);
-        if read {
-            self.contact.map_status();
-        }
+        (read, labels)
+    }
 
+    /// One plan dispatch: its pipeline (the variant's, when one is set) and bind
+    /// group.
+    fn dispatch(&self, pass: &mut wgpu::ComputePass, cmd: &Cmd, alt: Option<&AltPipes>) {
+        let c = &self.contact;
+        let (kernel, groups) = match *cmd {
+            Cmd::Dispatch { kernel, groups, .. } => (kernel, Some(groups)),
+            Cmd::Indirect { kernel, .. } => (kernel, None),
+            Cmd::Copy { .. } => unreachable!("copies end the pass"),
+        };
+        match kernel {
+            Kernel::Frame => {
+                let (p, g) = alt.map_or_else(
+                    || {
+                        let f = self.frame_pipe();
+                        (&f.0, &f.1)
+                    },
+                    |a| (&a.frame, &a.group),
+                );
+                pass.set_pipeline(p);
+                pass.set_bind_group(0, g, &[]);
+            }
+            Kernel::Solo | Kernel::Contact => {
+                let (solo, groups, g) = alt.map_or_else(
+                    || {
+                        let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
+                        (&p.solo, &p.groups, &c.contact_group)
+                    },
+                    |a| (&a.solo, &a.groups, &a.group),
+                );
+                let dbg = if kernel == Kernel::Solo { &self.debug_solo } else { &self.debug_groups };
+                if let (Some((p, dg)), None) = (dbg, alt) {
+                    pass.set_pipeline(p);
+                    pass.set_bind_group(0, dg, &[]);
+                } else {
+                    pass.set_pipeline(if kernel == Kernel::Solo { solo } else { groups });
+                    pass.set_bind_group(0, g, &[]);
+                }
+            }
+            Kernel::ContactBig => {
+                // A test variant's contact module steps every group (no split): nothing
+                // to dispatch here.
+                if alt.is_some() {
+                    return;
+                }
+                if let Some((p, g)) = &self.debug_big {
+                    pass.set_pipeline(p);
+                    pass.set_bind_group(0, g, &[]);
+                } else {
+                    let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
+                    pass.set_pipeline(&p.big);
+                    pass.set_bind_group(0, &c.contact_group, &[]);
+                }
+            }
+            Kernel::Vv(i) => {
+                let (p, g) = alt.map_or_else(
+                    || {
+                        let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
+                        (&p.plan[i], &c.plan_group)
+                    },
+                    |a| (&a.plan[i], &a.plan_group),
+                );
+                pass.set_bind_group(0, g, &[]);
+                pass.set_pipeline(p);
+            }
+            Kernel::Sleep => {
+                let p = c.pipes.as_ref().expect("explicit beams: the sleep list for one vehicle");
+                pass.set_bind_group(0, &c.plan_group, &[]);
+                pass.set_pipeline(&p.sleep);
+            }
+            Kernel::FrameSeg | Kernel::Surf(_) => {
+                let s = self.split_pipes();
+                let Cmd::Dispatch { param_copy, .. } = *cmd else { unreachable!() };
+                pass.set_pipeline(match kernel {
+                    Kernel::Surf(i) => &s.surf[i],
+                    _ => &s.frame,
+                });
+                pass.set_bind_group(0, &s.group, &[param_copy * PARAM_STRIDE as u32]);
+            }
+            Kernel::Wide(i) => {
+                let w = self.wide.as_ref().expect("explicit beams: wide passes not built");
+                let Cmd::Dispatch { param_copy, .. } = *cmd else { unreachable!() };
+                pass.set_pipeline(&w.passes[i]);
+                pass.set_bind_group(0, &w.group, &[param_copy * PARAM_STRIDE as u32]);
+            }
+        }
+        match (*cmd, groups) {
+            (Cmd::Indirect { offset, .. }, _) => pass.dispatch_workgroups_indirect(&c.args, offset),
+            (_, Some(x)) => pass.dispatch_workgroups(x, 1, 1),
+            _ => unreachable!(),
+        }
+    }
+
+    /// One plan copy.
+    fn copy(&self, enc: &mut wgpu::CommandEncoder, cmd: &Cmd) {
+        let Cmd::Copy { src, src_offset, dst, dst_offset, size } = *cmd else {
+            unreachable!()
+        };
+        let buffer = |b: u32| match b {
+            BIND_TABLE => &self.wide.as_ref().expect("explicit beams: no wide table").table,
+            b => &self.bufs[b as usize],
+        };
+        enc.copy_buffer_to_buffer(buffer(src), src_offset, buffer(dst), dst_offset, size);
     }
 
     fn alt_pipes(&self) -> Option<&AltPipes> {
@@ -1941,9 +1851,13 @@ impl ExplicitBeamsGpu {
         if variant == KernelVariant::Current || self.alts.iter().any(|(v, _)| *v == variant) {
             return;
         }
+        assert!(
+            !(variant == KernelVariant::CurrentDet && self.layout.surface),
+            "explicit beams: the EB_DET_HITS build has no surface pass (EB_NO_SURFACE): a fleet without surface contact only"
+        );
         let probe = variant == KernelVariant::BaselineProbe;
         if probe && self.probe.is_none() {
-            let words = 1 + 2 * self.total[0] as u64;
+            let words = 1 + 2 * self.layout.total[0] as u64;
             self.probe = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("explicit-beams-race-probe"),
                 size: (words * 4).max(16),
@@ -1956,7 +1870,7 @@ impl ExplicitBeamsGpu {
         let det = matches!(variant, KernelVariant::BaselineDet | KernelVariant::CurrentDet);
         if det && self.det.is_none() {
             // The kernel's DET_CAP hits per vehicle.
-            let words = self.spans.len() as u64 * (1 + 2 * 8192) + 1;
+            let words = self.layout.spans.len() as u64 * (1 + 2 * 8192) + 1;
             self.det = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("explicit-beams-det-hits"),
                 size: words * 4,
@@ -2025,7 +1939,7 @@ impl ExplicitBeamsGpu {
                 .enumerate()
                 .map(|(i, b)| wgpu::BindGroupEntry {
                     binding: i as u32,
-                    resource: b.as_entire_binding(),
+                    resource: if i == 0 { params_window(b) } else { b.as_entire_binding() },
                 })
                 .collect();
             bind.extend(extra.iter().map(|(b, buf)| wgpu::BindGroupEntry {
@@ -2086,7 +2000,7 @@ impl ExplicitBeamsGpu {
     /// the shipped kernel. Results are meaningless with a mask: time only.
     #[doc(hidden)]
     pub fn set_ablation(&mut self, mask: u32) {
-        self.words[W_ABLATE] = mask;
+        self.planner.set_ablation(mask);
         self.set_kernel_variant(if mask == 0 { KernelVariant::Current } else { KernelVariant::Ablate });
     }
 
@@ -2139,11 +2053,49 @@ impl ExplicitBeamsGpu {
         self.queue.submit([enc.finish()]);
         GpuSnapshot {
             copies,
-            left: self.contact.left,
-            fresh: self.contact.fresh,
-            frames: self.contact.frames,
-            replan: self.contact.replan.load(std::sync::atomic::Ordering::Relaxed),
+            state: self.planner.state(),
         }
+    }
+
+    /// Tests only: a [`Self::snapshot`] as bytes (blocking), for [`Self::snapshot_from_bytes`]
+    /// in another process: a kernel's frames compared with another build's from one state.
+    #[doc(hidden)]
+    pub fn snapshot_to_bytes(&self, snap: &GpuSnapshot) -> Vec<u8> {
+        let mut out: Vec<u32> = snap.state.to_words().to_vec();
+        out.push(snap.copies.len() as u32);
+        for c in &snap.copies {
+            let words: Vec<u32> = bytemuck::pod_collect_to_vec(&self.read(c));
+            out.push(words.len() as u32);
+            out.extend(words);
+        }
+        bytemuck::cast_slice(&out).to_vec()
+    }
+
+    /// Tests only: a snapshot from [`Self::snapshot_to_bytes`] (the same fleet and layout).
+    #[doc(hidden)]
+    pub fn snapshot_from_bytes(&self, bytes: &[u8]) -> GpuSnapshot {
+        let w: Vec<u32> = bytemuck::pod_collect_to_vec(bytes);
+        let state = plan::PlannerState::from_words([w[0], w[1], w[2], w[3], w[4]]);
+        let n = w[5] as usize;
+        let mut at = 6;
+        let mut copies = Vec::new();
+        for b in self.snapshot_sources().iter().take(n) {
+            let len = w[at] as usize;
+            at += 1;
+            // (A shorter buffer: the indirect arguments of a build with fewer dispatches,
+            // the rest zero.)
+            assert!(len as u64 * 4 <= b.size(), "explicit beams: a snapshot of another layout");
+            let c = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("explicit-beams-snapshot"),
+                size: b.size(),
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue.write_buffer(&c, 0, bytemuck::cast_slice(&w[at..at + len]));
+            at += len;
+            copies.push(c);
+        }
+        GpuSnapshot { copies, state }
     }
 
     /// Tests only: put back a [`Self::snapshot`].
@@ -2156,12 +2108,7 @@ impl ExplicitBeamsGpu {
             enc.copy_buffer_to_buffer(c, 0, b, 0, b.size());
         }
         self.queue.submit([enc.finish()]);
-        self.contact.left = snap.left;
-        self.contact.fresh = snap.fresh;
-        self.contact.frames = snap.frames;
-        self.contact
-            .replan
-            .store(snap.replan, std::sync::atomic::Ordering::Relaxed);
+        self.planner.restore(snap.state);
     }
 
     fn snapshot_sources(&self) -> Vec<wgpu::Buffer> {
@@ -2178,7 +2125,7 @@ impl ExplicitBeamsGpu {
     /// the lanes (grid runs, tested lists, candidate lists) is left out.
     #[doc(hidden)]
     pub fn state_words(&self) -> Vec<(&'static str, Vec<u32>)> {
-        let w = &self.words;
+        let w = &self.planner.words;
         let words = |b: &wgpu::Buffer| -> Vec<u32> { bytemuck::cast_slice(&self.read(b)).to_vec() };
         let nodes = words(&self.bufs[3]);
         let beams = words(&self.bufs[4]);
@@ -2186,7 +2133,7 @@ impl ExplicitBeamsGpu {
         let groups = words(&self.bufs[6]);
         let mut misc = words(&self.bufs[7]);
         let next = words(&self.bufs[8]);
-        let nv = self.spans.len();
+        let nv = self.layout.spans.len();
         let (grid_base, aero_state) = (w[9] as usize, w[27] as usize);
         // The aero, slide state and slide-force slots (the contributions after them
         // are scratch).
@@ -2201,14 +2148,23 @@ impl ExplicitBeamsGpu {
         let mut beam_words = beams[..grid_base * 4].to_vec();
         // A beam's "broke in the last beam phase" mark (.w of its second record) is
         // read only within that step (the next beam phase clears it first).
-        for j in 0..self.total[1] as usize {
+        for j in 0..self.layout.total[1] as usize {
             beam_words[(2 * j + 1) * 4 + 3] = 0;
         }
         beam_words.extend_from_slice(&beams[aero_state * 4..slide_end * 4]);
         vec![
             ("nodes", nodes),
             ("beams", beam_words),
-            ("acc", acc[..3 * self.total[0] as usize].to_vec()),
+            ("acc", acc[..3 * self.layout.total[0] as usize].to_vec()),
+            // Anti-clip's side memory (order free; jbeam-semantics-spec.md §36).
+            ("clip", {
+                let at = w[78] as usize;
+                if at == 0 {
+                    Vec::new()
+                } else {
+                    acc[at..at + 4 * self.layout.total[0] as usize].to_vec()
+                }
+            }),
             ("groups", groups),
             ("misc", misc[..vv_groups * 4].to_vec()),
             // The trigger inputs: from keyBase to the contact lists (vvMembers −
@@ -2217,84 +2173,124 @@ impl ExplicitBeamsGpu {
         ]
     }
 
-    /// Fail on a contact error a finished frame reported ([`Self::contact_status`]),
-    /// without waiting for frames in flight.
+    /// Tests only: the words of [`Self::state_words`]' `misc` holding the vehicle-contact
+    /// plan's records (frame boxes, flags, margins: planning state, which a margin
+    /// changes): `start..end`.
+    #[doc(hidden)]
+    pub fn vv_record_words(&self) -> std::ops::Range<usize> {
+        let at = self.planner.words[43] as usize * 4;
+        at..at + self.layout.spans.len() * VV_RECS * 4
+    }
+
+    /// Tests only: the World coupling's state, beside [`Self::state_words`]: every proxy
+    /// record (bodies as integrated in the frames, shapes, planes) and the coupling's
+    /// gAcc sums (per body its count, per shape its step and window reactions). Empty
+    /// without the coupling.
+    #[doc(hidden)]
+    pub fn coupling_words(&self) -> Vec<(&'static str, Vec<u32>)> {
+        let Some(c) = self.layout.coupling else {
+            return Vec::new();
+        };
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
+        let m0 = c.misc_base as usize * 4;
+        let a0 = c.acc_base as usize;
+        vec![
+            (
+                "coupling records",
+                misc[m0..m0 + c.misc_words() as usize * 4].to_vec(),
+            ),
+            (
+                "coupling sums",
+                acc[a0..a0 + c.acc_words() as usize].to_vec(),
+            ),
+        ]
+    }
+
+    /// Tests and measurement: per vehicle, the surface pair path's last step (pairs
+    /// listed, hits found; `explicit_beams_surface.slang` surfPairFind). A vehicle that
+    /// took the per-element loops that step reads as it was last listed.
+    #[doc(hidden)]
+    pub fn surface_pair_stats(&self) -> Vec<(u32, u32)> {
+        let Some(c) = self.layout.coupling else {
+            return Vec::new();
+        };
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        let h = (self.layout.couple_rec as usize + 1) * 4;
+        let (body, pairs) = (misc[h + 2] as usize, misc[h + 3] as usize);
+        if pairs == 0 {
+            return Vec::new();
+        }
+        let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
+        let nv = self.layout.spans.len();
+        let at = body + 3 * c.cap.bodies as usize * nv;
+        (0..nv).map(|v| (acc[at + v], acc[at + nv + v])).collect()
+    }
+
+    /// Take in a contact error a finished frame reported ([`Self::contact_status`]),
+    /// without waiting for frames in flight; the sim keeps running
+    /// ([`Self::take_contact_errors`]).
     fn check_contact_status(&mut self) {
         if let Some(e) = self.contact.poll_status(&self.device) {
-            panic!("{e}");
+            self.contact_error(e);
+        }
+        let pending = std::mem::take(&mut *self.contact_errors_seen.lock().unwrap());
+        for e in pending {
+            self.contact_error(e);
         }
     }
 
-    /// The parameters for a frame of `steps` steps: copy k (at k × PARAM_STRIDE)
-    /// carries step k of the frame (k = steps: the frame's end).
-    fn write_params(&mut self, steps: u32) {
-        assert!(
-            steps < PARAM_COPIES,
-            "at most {} steps per frame",
-            PARAM_COPIES - 1
-        );
-        self.words[0] = steps;
-        self.words[W_VV_ON] = self.contact_active() as u32;
-        self.contact.planning = false;
-        if self.contact_active() {
-            let replan = self
-                .contact
-                .replan
-                .swap(false, std::sync::atomic::Ordering::Relaxed);
-            if replan || self.contact.left < steps {
-                let budget = steps.max(VV_PLAN_STEPS);
-                self.words[W_VV_PLAN_STEPS] = budget;
-                self.contact.left = budget;
-                self.contact.planning = true;
-                // The first plan since contact (re)started has no earlier bounds to
-                // check the positions against.
-                if self.contact.fresh {
-                    self.words[W_VV_ON] |= 4;
-                    self.contact.fresh = false;
+    /// A contact error: recorded for the host, the status counters cleared, and for a
+    /// vehicle that left its frame bounds the margin doubled (at most
+    /// [`MAX_AUTO_CONTACT_MARGIN`] m) and a new plan made, so later frames cover it.
+    /// The frame that reported it may have missed a contact; the error says so.
+    fn contact_error(&mut self, e: String) {
+        self.queue
+            .write_buffer(&self.contact.acc, self.contact.status_at + 16, &[0u8; 16]);
+        if e.contains("left its frame bounds") {
+            // That vehicle's own margin doubles (its frame bounds cover more travel); the
+            // others keep theirs, so one fast vehicle does not group the whole fleet. A
+            // margin only changes which vehicles step together, never results.
+            match left_vehicle(&e).filter(|&v| (v as usize) < self.vehicle_margins.len()) {
+                Some(v) => {
+                    let own = self.vehicle_contact_margin(v as usize);
+                    self.set_vehicle_contact_margin(v as usize, (2.0 * own).clamp(0.5, MAX_AUTO_CONTACT_MARGIN));
+                }
+                None => {
+                    let m = (2.0 * self.planner.contact_margin()).clamp(0.5, MAX_AUTO_CONTACT_MARGIN);
+                    self.planner.set_contact_margin(m);
                 }
             }
-            self.contact.left = self.contact.left.saturating_sub(steps);
+            self.planner.request_replan();
         }
-        let mut bytes = vec![0u8; (PARAM_STRIDE * u64::from(steps + 1)) as usize];
-        for k in 0..=steps {
-            let mut w = self.words;
-            w[11] = k;
-            let at = (PARAM_STRIDE * u64::from(k)) as usize;
-            bytes[at..at + 4 * PARAM_WORDS].copy_from_slice(bytemuck::cast_slice(&w));
+        let mut errors = self.contact_errors.lock().unwrap();
+        if errors.last() != Some(&e) {
+            errors.push(e);
         }
-        self.queue.write_buffer(&self.params, 0, &bytes);
     }
 
-    /// The wide passes of a frame: (parameter copy, pass, workgroups).
-    fn wide_plan(&self, steps: u32) -> Vec<(u32, usize, u32)> {
-        let groups = |n: u32| n.div_ceil(256).max(1);
-        let nv = self.spans.len() as u32;
-        let [nodes, beams, tris, cands, slots] = self.total;
-        let buckets = nv * WIDE_GRID_BUCKETS as u32;
-        let mut plan = vec![(0, WIDE_BEGIN, groups(nv)), (0, WIDE_REBASE, groups(nodes))];
-        for k in 0..steps {
-            plan.push((k, WIDE_NODES, groups(nodes + slots + buckets)));
-            plan.push((k, WIDE_BEAMS_PASS, groups(beams + cands + tris)));
-            plan.push((k, WIDE_TRIS, groups(tris * WIDE_SUBS)));
-            // One workgroup per vehicle: deferred breaks and self-collision hits.
-            plan.push((k, WIDE_HITS, nv));
-        }
-        plan.push((steps, WIDE_END, groups(tris + beams)));
-        plan.push((steps, WIDE_CLOSE, groups(nv)));
-        plan
+    /// The contact errors since the last call (empty: none). A running sim never
+    /// panics on one; the host surfaces them.
+    pub fn take_contact_errors(&mut self) -> Vec<String> {
+        self.check_contact_status();
+        std::mem::take(&mut *self.contact_errors.lock().unwrap())
+    }
+
+    /// The parameters for a frame of `steps` steps (the plan's copies, one per step).
+    fn write_params(&mut self, steps: u32) {
+        let bytes = self.planner.write_params(steps);
+        self.queue.write_buffer(&self.params, 0, &bytes);
     }
 
     /// Submit `dispatches` dispatches of `steps` steps each in one compute pass (the
     /// same simulation as one frame of their product): measures what a dispatch per
     /// step costs. Does not wait.
     pub fn frame_split(&mut self, steps: u32, dispatches: u32) {
-        if self.spans.is_empty() {
+        if self.layout.spans.is_empty() {
             return;
         }
-        self.words[0] = steps;
-        self.words[W_VV_ON] = 0;
-        self.queue
-            .write_buffer(&self.params, 0, bytemuck::cast_slice(&self.words));
+        let bytes = self.planner.split_params(steps);
+        self.queue.write_buffer(&self.params, 0, &bytes);
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -2303,10 +2299,11 @@ impl ExplicitBeamsGpu {
                 label: Some("explicit_beams_split"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.group, &[]);
+            let (pipeline, group) = self.frame_pipe();
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
             for _ in 0..dispatches {
-                pass.dispatch_workgroups(self.spans.len() as u32, 1, 1);
+                pass.dispatch_workgroups(self.layout.spans.len() as u32, 1, 1);
             }
         }
         self.queue.submit([enc.finish()]);
@@ -2317,20 +2314,104 @@ impl ExplicitBeamsGpu {
     pub fn wait(&self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         if let Some(e) = self.contact.ready_error() {
-            panic!("{e}");
+            // Handled at the next frame ([`Self::take_contact_errors`]).
+            self.contact_errors_seen.lock().unwrap().push(e);
+        }
+    }
+
+    /// Grab a node (Rubble only, [`engine_softbody::explicit_beams::Grab`]): from
+    /// the next frame on, every step adds `k·(target − x) − c·v` to node
+    /// `grab.node` of `vehicle` after its node phase, as the CPU reference's node
+    /// pass does; `None` releases it. One grab for the whole fleet; set it again
+    /// each frame to move the target.
+    pub fn set_grab(&mut self, grab: Option<(usize, engine_softbody::explicit_beams::Grab)>) {
+        let rec = self.layout.grab_records(grab);
+        self.queue
+            .write_buffer(&self.misc, self.layout.grab_rec() * 16, bytemuck::cast_slice(&rec));
+        // Vehicle sleep: a grabbed vehicle is kept awake (and one let go wakes).
+        if let Some(v) = self.sleep_grab.take() {
+            self.wake(v);
+        }
+        self.sleep_grab = grab.map(|(v, _)| v);
+        // The contact plan's frame bounds assumed the forces without it.
+        self.planner.request_replan();
+    }
+
+    /// Set vehicle `vehicle`'s driver input for its raycast wheels
+    /// (`engine_softbody::explicit_drive`) from the next frame on; a vehicle without
+    /// them (or a fleet without any) ignores it.
+    pub fn set_drive_input(&mut self, vehicle: usize, input: engine_softbody::explicit_drive::DriveInput) {
+        let Some(d) = self.layout.drive else {
+            return;
+        };
+        if vehicle >= self.layout.vehicles() {
+            return;
+        }
+        let words = plan::drive::input_words(input);
+        self.queue
+            .write_buffer(&self.misc, d.input_offset(vehicle), bytemuck::cast_slice(&words));
+        // Vehicle sleep: a changed input (brake released, steering, throttle) wakes it.
+        if self.sleep_inputs.get(vehicle).copied().flatten() != Some(input) {
+            self.wake(vehicle);
+        }
+        if let Some(i) = self.sleep_inputs.get_mut(vehicle) {
+            *i = Some(input);
+        }
+        // Drive forces change the speeds the contact plan's frame bounds assumed.
+        self.planner.request_replan();
+    }
+
+    /// Per vehicle its raycast wheels' state read back into a copy of `drive`
+    /// (`None` where the vehicle has none).
+    pub fn drive_states(
+        &self,
+        vehicles: &[Option<engine_softbody::explicit_drive::Drive>],
+    ) -> Vec<Option<engine_softbody::explicit_drive::Drive>> {
+        let Some(l) = self.layout.drive else {
+            return vec![None; vehicles.len()];
+        };
+        let misc = self.read_u4(&self.misc);
+        vehicles
+            .iter()
+            .enumerate()
+            .map(|(v, d)| {
+                let mut d = d.clone()?;
+                let at = l.vehicle(v) as usize;
+                let words: Vec<u32> = misc[at..at + l.stride as usize].iter().flatten().copied().collect();
+                plan::drive::decode(&words, &mut d);
+                Some(d)
+            })
+            .collect()
+    }
+
+    /// The next frame re-plans vehicle contact (a host's external forces, such as the
+    /// World's rigid coupling, change the speeds the plan's frame bounds assumed).
+    pub fn request_contact_replan(&self) {
+        self.planner.request_replan();
+    }
+
+    /// Set a vehicle's parking brake input (0 released to 1 applied, as
+    /// `ExplicitBeams::parking_brake`; jbeam-semantics-spec.md §25.1).
+    pub fn set_parking_brake(&self, vehicle: usize, input: f32) {
+        let Some(&(off, count)) = self.layout.brake_spans.get(vehicle) else {
+            return;
+        };
+        let u = input.min(1.0);
+        for k in 0..count {
+            let rec = u64::from(self.layout.brake_base + 2 * (off + k) + 1);
+            self.queue
+                .write_buffer(&self.bufs[1], rec * 16 + 8, bytemuck::bytes_of(&u.to_bits()));
         }
     }
 
     /// Set one node's velocity (vehicle index, node index within it).
     pub fn set_velocity(&self, vehicle: usize, node: u32, v: Vec3) {
-        let s = self.spans[vehicle];
-        let offset = ((s.node_off + node) as u64 * 3 + 1) * 16;
+        let offset = self.layout.velocity_offset(vehicle, node);
         self.queue
             .write_buffer(&self.nodes, offset, bytemuck::cast_slice(&v.to_array()));
+        self.wake(vehicle);
         // The contact plan's frame bounds assumed the old speeds.
-        self.contact
-            .replan
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.planner.request_replan();
     }
 
     fn read(&self, buffer: &wgpu::Buffer) -> Vec<u8> {
@@ -2358,151 +2439,90 @@ impl ExplicitBeamsGpu {
         out
     }
 
-    fn node_field(&self, field: usize) -> Vec<Vec<Vec3>> {
-        let raw = self.read(&self.nodes);
-        let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
-        self.spans
-            .iter()
-            .map(|s| {
-                (0..s.nodes)
-                    .map(|i| {
-                        let r = v[(s.node_off + i) as usize * 3 + field];
-                        Vec3::new(r[0], r[1], r[2])
-                    })
-                    .collect()
-            })
-            .collect()
+    fn read_f4(&self, buffer: &wgpu::Buffer) -> Vec<[f32; 4]> {
+        bytemuck::cast_slice(&self.read(buffer)).to_vec()
+    }
+
+    fn read_u4(&self, buffer: &wgpu::Buffer) -> Vec<[u32; 4]> {
+        bytemuck::cast_slice(&self.read(buffer)).to_vec()
     }
 
     /// Per vehicle, the origins nodes are relative to.
     pub fn origins(&self) -> Vec<Vec3> {
-        let raw = self.read(&self.misc);
-        let m: &[[u32; 4]] = bytemuck::cast_slice(&raw);
-        (0..self.spans.len())
-            .map(|i| {
-                Vec3::new(
-                    f32::from_bits(m[i][0]),
-                    f32::from_bits(m[i][1]),
-                    f32::from_bits(m[i][2]),
-                )
-            })
-            .collect()
+        self.layout.origins(&self.read_u4(&self.misc))
     }
 
     /// Per vehicle, world node positions.
     pub fn positions(&self) -> Vec<Vec<Vec3>> {
-        let origins = self.origins();
-        let mut rel = self.node_field(0);
-        for (o, nodes) in origins.iter().zip(&mut rel) {
-            for p in nodes.iter_mut() {
-                *p += *o;
-            }
-        }
-        rel
+        self.layout
+            .positions(&self.read_f4(&self.nodes), &self.read_u4(&self.misc))
     }
 
     /// Per vehicle, node velocities.
     pub fn velocities(&self) -> Vec<Vec<Vec3>> {
-        self.node_field(1)
+        self.layout.velocities(&self.read_f4(&self.nodes))
     }
 
     /// Per vehicle, its wings' broken flags (file order).
     pub fn wings_broken(&self) -> Vec<Vec<bool>> {
-        let raw = self.read(&self.beams);
-        let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
-        let nv = self.spans.len() as u32;
-        self.wing_spans
-            .iter()
-            .map(|&(first, count)| {
-                (first..first + count)
-                    .map(|gw| v[(self.aero_state + nv + 4 * gw) as usize][0] != 0.0)
-                    .collect()
-            })
-            .collect()
+        self.layout.wings_broken(&self.read_f4(&self.beams))
     }
 
     /// Per vehicle, the fuselage drag force on each node (the last step's D).
     pub fn fuse_forces(&self) -> Vec<Vec3> {
-        let raw = self.read(&self.beams);
-        let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
-        (0..self.spans.len())
-            .map(|i| {
-                let r = v[self.aero_state as usize + i];
-                Vec3::new(r[0], r[1], r[2])
-            })
-            .collect()
+        self.layout.fuse_forces(&self.read_f4(&self.beams))
     }
 
     /// Per vehicle, each slide node's current segment (an index into its
     /// `segments`; `None`: no rail) and broken-away flag.
     pub fn slides(&self) -> Vec<Vec<(Option<u32>, bool)>> {
-        let raw = self.read(&self.beams);
-        let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
-        self.spans
-            .iter()
-            .map(|s| {
-                (0..s.slides)
-                    .map(|k| {
-                        let r = v[(self.slide_state + s.slide_off + k) as usize];
-                        let seg = (r[0] >= 0.0).then(|| r[0] as u32 - s.seg_off);
-                        (seg, r[1] != 0.0)
-                    })
-                    .collect()
-            })
-            .collect()
+        self.layout.slides(&self.read_f4(&self.beams))
     }
 
     /// Per vehicle, the trigger inputs the next step's command pass reads (key
     /// 0…84, 1.0 held), as [`ExplicitBeams::key_input`]; zeros for a vehicle
     /// without triggers. `steps` is the steps every vehicle has run.
-    pub fn key_inputs(&self, steps: u64) -> Vec<[f32; KEYS]> {
+    pub fn key_inputs(&self, steps: u64) -> Vec<[f32; plan::KEYS]> {
         let raw = self.read(&self.next);
-        let w: &[u32] = bytemuck::cast_slice(&raw);
-        let parity = (steps as usize & 1) ^ 1;
-        (0..self.spans.len())
-            .map(|vi| {
-                let mut out = [0.0f32; KEYS];
-                let at = self.key_base as usize + (vi * 2 + parity) * KEYS;
-                if at + KEYS <= w.len() {
-                    for (k, o) in out.iter_mut().enumerate() {
-                        *o = (w[at + k] != 0) as u32 as f32;
-                    }
-                }
-                out
+        self.layout.key_inputs(bytemuck::cast_slice(&raw), steps)
+    }
+
+    /// Per vehicle its triggered JBeam deform groups (0 or 1, in
+    /// `ExplicitBeams::deform_names` order; jbeam-semantics-spec.md §19).
+    pub fn deform_triggered(&self) -> Vec<Vec<u32>> {
+        let raw = self.read(&self.bufs[6]);
+        self.layout.deform_triggered(bytemuck::cast_slice(&raw))
+    }
+
+    /// Per vehicle, each node's anti-clip side memory (held, recorded; as
+    /// [`ExplicitBeams::clip_sides`], jbeam-semantics-spec.md §36); empty for an
+    /// upload without anti-clip.
+    pub fn clip_sides(&self) -> Vec<Vec<[u32; 4]>> {
+        let at = self.planner.words[78] as usize;
+        let nv = self.layout.spans.len();
+        if at == 0 {
+            return vec![Vec::new(); nv];
+        }
+        let raw = self.read(&self.acc);
+        let acc: &[u32] = bytemuck::cast_slice(&raw);
+        (0..nv)
+            .map(|v| {
+                let sp = &self.layout.spans[v];
+                (0..sp.nodes as usize)
+                    .map(|i| {
+                        let k = at + 4 * (sp.node_off as usize + i);
+                        [acc[k], acc[k + 1], acc[k + 2], acc[k + 3]]
+                    })
+                    .collect()
             })
             .collect()
     }
 
     /// Per vehicle, every beam's broken flag and rest length.
     pub fn beams(&self) -> Vec<Vec<GpuBeam>> {
-        let raw = self.read(&self.beams);
-        let v: &[[f32; 4]] = bytemuck::cast_slice(&raw);
-        self.spans
-            .iter()
-            .map(|s| {
-                (0..s.beams)
-                    .map(|j| {
-                        let g = (s.beam_off + j) as usize;
-                        GpuBeam {
-                            broken: v[g * 2 + 1][2] != 0.0,
-                            rest: v[g * 2][0],
-                            rest0: self.rest0[g],
-                        }
-                    })
-                    .collect()
-            })
-            .collect()
+        self.layout.beams(&self.read_f4(&self.beams))
     }
 }
-
-/// Beams above which a vehicle runs on the 512-lane module, and wide passes are the
-/// default.
-const WIDE_BEAMS: usize = 2048;
-/// The kernel's GRID_BUCKETS and GRID_SUBS.
-const WIDE_GRID_BUCKETS: usize = 1024;
-const WIDE_SUBS: u32 = 8;
-/// The kernel's WIDE_SLOTS (grid bucket slots of the wide passes).
-const WIDE_SLOTS: usize = 16;
 
 impl Wide {
     fn new(
@@ -2513,51 +2533,26 @@ impl Wide {
     ) -> Self {
         let table = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-vehicle-table"),
-            size: (WIDE_MAX_VEHICLES * 5 * 16) as u64,
+            size: plan::TABLE_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let n = vehicle_recs.len().min(WIDE_MAX_VEHICLES * 4);
-        queue.write_buffer(&table, 0, bytemuck::cast_slice(&vehicle_recs[..n]));
-        let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty,
-                // The parameters: one copy per step, picked by the offset.
-                has_dynamic_offset: binding == 0,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let rw = wgpu::BufferBindingType::Storage { read_only: false };
-        let ro = wgpu::BufferBindingType::Storage { read_only: true };
+        queue.write_buffer(&table, 0, bytemuck::cast_slice(vehicle_recs));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("explicit-beams-wide"),
-            entries: &[
-                entry(0, wgpu::BufferBindingType::Uniform),
-                entry(1, ro),
-                entry(2, ro),
-                entry(3, rw),
-                entry(4, rw),
-                entry(5, rw),
-                entry(6, rw),
-                entry(7, rw),
-                entry(8, rw),
-                entry(9, wgpu::BufferBindingType::Uniform),
-            ],
+            entries: &wide_entries(),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("explicit-beams-wide"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let passes = EXPLICIT_BEAMS_WIDE_PASSES
+        let passes = plan::WIDE_PASSES
             .iter()
-            .map(|(entry, wgsl)| {
+            .map(|&entry| {
                 let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(entry),
-                    source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(wgsl).into()),
+                    source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(entry)).into()),
                 });
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
@@ -2588,17 +2583,12 @@ impl Wide {
                     },
                 })
                 .chain(std::iter::once(wgpu::BindGroupEntry {
-                    binding: 9,
+                    binding: BIND_TABLE,
                     resource: table.as_entire_binding(),
                 }))
                 .collect::<Vec<_>>(),
         });
-        Self {
-            passes,
-            group,
-            enabled: false,
-            table,
-        }
+        Self { passes, group, table }
     }
 }
 
@@ -2625,71 +2615,16 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));
     }
+    for (n, w) in crate::EXPLICIT_BEAMS_NOSURF.iter().chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter()) {
+        let entry = if n.contains("contact_big") { plan::CONTACT_ENTRY } else { plan::FRAME_ENTRY };
+        out.push((n.to_string(), entry, u(w)));
+    }
+    out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
+    for (n, w) in crate::EXPLICIT_BEAMS_SURF_SPLIT.iter() {
+        let entry = plan::SURF_PASSES.iter().find(|(m, _)| m == n).map_or(plan::FRAME_ENTRY, |(_, e)| *e);
+        out.push((n.to_string(), entry, u(w)));
+    }
     out
-}
-
-/// Fleets of at most this many vehicles run 512 lanes per vehicle (about one
-/// workgroup per GPU core: a vehicle's step latency sets the frame, and more lanes
-/// shorten it); larger fleets keep 256 (512 for large vehicles) for throughput.
-/// Measured on an M3 Max, one vehicle, GPU µs per step (drive, 256 / 512 / 1024
-/// lanes): Viper 23.0 / 20.3 / 24.6, E36 39.4 / 31.0 / 38.8, Mustang 44.6 / 40.4 /
-/// 46.0 (1024 lanes is slower: wider barriers, a longer serial grid scan).
-const SMALL_FLEET: usize = 32;
-
-/// Lanes per vehicle workgroup for this fleet. `RUBBLE_EXPLICIT_LANES` (256 or
-/// 512; measurement) overrides the choice.
-fn frame_lanes(vehicles: &[ExplicitBeams]) -> u32 {
-    let big = vehicles.iter().any(|v| v.beams.len() > WIDE_BEAMS);
-    let default = if vehicles.len() <= SMALL_FLEET || big { 512 } else { 256 };
-    match std::env::var("RUBBLE_EXPLICIT_LANES").ok().and_then(|v| v.parse().ok()) {
-        Some(n @ (256 | 512)) => n,
-        _ => default,
-    }
-}
-
-/// The self-collision grid's cell size for a vehicle (0: all pairs): the
-/// solver's own ([`ExplicitBeams::grid_cell`]), so CPU and GPU share it.
-/// A static shape's parameter records (the kernel's `shapeNormal`): an oriented box
-/// (centre, half.x), (axis x, half.y), (axis y, half.z), (axis z, 0); a cylinder
-/// (centre, radius), (half height, 0, 0, 0); a capsule (a, radius), (b, 0); a
-/// sphere (centre, radius), (0).
-fn shape_params(sh: &StaticShape) -> Vec<[u32; 4]> {
-    let rec = |v: Vec3, w: f32| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits(), w.to_bits()];
-    match *sh {
-        StaticShape::OrientedBox {
-            centre, half, axes, ..
-        } => vec![
-            rec(centre, half.x),
-            rec(axes[0], half.y),
-            rec(axes[1], half.z),
-            rec(axes[2], 0.0),
-        ],
-        StaticShape::Cylinder {
-            centre,
-            radius,
-            half_height,
-        } => vec![rec(centre, radius), rec(Vec3::new(half_height, 0.0, 0.0), 0.0)],
-        StaticShape::Capsule { a, b, radius } => vec![rec(a, radius), rec(b, 0.0)],
-        StaticShape::Sphere { centre, radius } => vec![rec(centre, radius), [0; 4]],
-    }
-}
-
-fn grid_cell(v: &ExplicitBeams) -> f32 {
-    v.grid_cell
-}
-
-/// The vehicle grid's cell size: the largest vehicle extent (at upload), plus room
-/// for the frame bounds and the box margin.
-fn vv_cell(vehicles: &[ExplicitBeams]) -> f32 {
-    let extent = vehicles
-        .iter()
-        .map(|v| {
-            let (lo, hi) = v.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));
-            (hi - lo).max_element()
-        })
-        .filter(|e| e.is_finite())
-        .fold(0.0f32, f32::max);
-    extent + 2.0 * (DEFAULT_CONTACT_MARGIN + 0.05) + 1.0
 }
 
 /// What a renderer needs besides a trace of `copies` vehicles of one `.truck` file,

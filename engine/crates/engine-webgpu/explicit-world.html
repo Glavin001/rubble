@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Rubble crash town</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #10131a; color: #dfe4ee; font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel { position: fixed; background: rgba(16, 19, 26, 0.82); border: 1px solid #2c3346; border-radius: 8px; padding: 10px 12px; }
+    #hud { top: 12px; left: 12px; width: 26rem; max-width: calc(100vw - 48px); }
+    #hud h1 { font-size: 15px; margin: 0 0 6px; font-weight: 650; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+    .muted { color: #8d96aa; }
+    select, button { background: #1d2333; color: #dfe4ee; border: 1px solid #3a4360; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
+    #stats { display: grid; grid-template-columns: auto 1fr; column-gap: 12px; font-variant-numeric: tabular-nums; margin: 6px 0; }
+    #stats .k { color: #8d96aa; }
+    #err { color: #ff8e8e; white-space: pre-wrap; }
+    a { color: #b8d7ff; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud" class="panel">
+    <h1>Rubble crash town · soft vehicles into prefractured houses</h1>
+    <div class="row">
+      <label class="muted" for="nSel">Vehicles</label><select id="nSel"></select>
+      <button id="again">Again</button>
+      <a href="./">All demos</a>
+    </div>
+    <div class="muted">One World on the GPU: 2 kHz node–beam soft vehicles (the explicit solver) crash two way into rigid crates and into the fracture lab's cuboid houses, prefractured and stress-solved (threshold); their strikes break bonds before the engine steps (<code>engine/docs/explicit-vehicles-in-world.md</code>). <code>?n=</code> vehicles, <code>?speed=</code> m/s, <code>?runUp=</code> m. Drag to orbit, right-drag to pan, scroll to zoom.</div>
+    <div id="stats"></div>
+    <div id="status" class="muted">starting…</div>
+    <div id="err"></div>
+  </div>
+  <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
+  <script type="module">
+    // Thin page: the scene is rubble::explicit_scene::crash_town (the native benchmark's
+    // builder) and all physics is Rust/Slang; this draws the world's colliders and the
+    // vehicles' collision skins from the GPU buffers in place.
+    import { createVehicleTown, pollFrame, errorText, FramePacer } from './rubble-world.mjs';
+    const qs = new URLSearchParams(location.search);
+    const N = Math.max(1, Number(qs.get('n')) || 16);
+    const SPEED = Number(qs.get('speed')) || 15;
+    const RUNUP = Number(qs.get('runUp')) || 8;
+    const statusEl = document.getElementById('status');
+    const errEl = document.getElementById('err');
+    const fail = (e) => { errEl.textContent = errorText(e); window.__failed = String(e?.message ?? e); };
+    const nSel = document.getElementById('nSel');
+    for (const n of [1, 4, 16, 64]) nSel.add(new Option(String(n), String(n), n === N, n === N));
+    nSel.onchange = () => { qs.set('n', nSel.value); location.search = qs.toString(); };
+    document.getElementById('again').onclick = () => location.reload();
+    if (!navigator.gpu) { fail('WebGPU is not available in this browser'); throw new Error('no WebGPU'); }
+
+    statusEl.textContent = `building ${N} vehicles and ${Math.ceil(N / 4)} houses…`;
+    const t0 = performance.now();
+    const { world, layout } = await createVehicleTown({ count: N, speed: SPEED, runUp: RUNUP });
+    const buildMs = performance.now() - t0;
+    const device = world.device();
+    // ?timing=step|phases: the World's GPU time per step, by segment, in the HUD.
+    const TIMING = qs.get('timing');
+    if (TIMING) { try { world.setGpuTiming(TIMING); } catch (e) { console.warn('gpu timing', e); } }
+    // ?wide=0|1 (ablation): the explicit frame as the wide passes or a workgroup per vehicle.
+    if (qs.has('wide')) world.setExplicitWide(qs.get('wide') === '1');
+    // ?knobs=coupling:0,couplingCache:0 (ablation; see setExplicitKnob).
+    for (const kv of (qs.get('knobs') || '').split(',').filter(Boolean)) { const [k, v] = kv.split(':'); if (!world.setExplicitKnob(k, v === '1')) console.warn('unknown knob', k); }
+    const gpuSeg = new Map(); let gpuTotal = [];
+    window.__gpuReset = () => { gpuSeg.clear(); gpuTotal = []; };
+    window.__gpu = () => ({ total: [...gpuTotal], segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+
+    const canvas = document.getElementById('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    const configure = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      context.configure({ device, format, alphaMode: 'opaque' });
+    };
+    configure();
+    addEventListener('resize', configure);
+    const SHADER = /* wgsl */`
+struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
+  linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
+struct Collider { body: u32, shape: u32, material: u32, generation: u32, localPos: vec3f, density: f32, localRot: vec4f, params: vec4f };
+struct Frame { viewProj: mat4x4f, eye: vec4f, ground: vec4f };
+@group(0) @binding(0) var<storage, read> bodies: array<Body>;
+@group(0) @binding(1) var<uniform> frame: Frame;
+@group(0) @binding(2) var<storage, read> cols: array<Collider>;
+@group(0) @binding(3) var<storage, read> hulls: array<vec4u>;
+@group(0) @binding(4) var<storage, read> nodes: array<vec4f>;
+@group(0) @binding(5) var<storage, read> misc: array<vec4u>;
+@group(0) @binding(6) var<storage, read> tris: array<vec4u>;
+
+fn qrot(q: vec4f, v: vec3f) -> vec3f {
+  let u = q.xyz;
+  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
+}
+fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
+struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1) c: vec3f };
+
+// Every collider as a box (a hull: its bounds), as city.html draws them.
+@vertex fn vsCol(@builtin(vertex_index) vi: u32, @builtin(instance_index) ci: u32) -> Out {
+  let col = cols[ci];
+  var o: Out;
+  if (col.shape > 3u || col.shape == 1u) { o.clip = vec4f(2.0, 2.0, 2.0, 1.0); return o; }
+  let b = bodies[col.body];
+  var half = col.params.xyz;
+  var centre = vec3f(0.0);
+  if (col.shape == 0u) { half = vec3f(col.params.x); }
+  if (col.shape == 3u) {
+    let base = bitcast<u32>(col.params.x) & 0x1FFFFFFFu;
+    centre = bitcast<vec3f>(hulls[base + 1u].xyz) * col.params.y;
+    half = bitcast<vec3f>(hulls[base + 2u].xyz) * col.params.y;
+  }
+  let corner = vec3f(f32(vi & 1u), f32((vi >> 1u) & 1u), f32((vi >> 2u) & 1u)) * 2.0 - 1.0;
+  let w = b.position + qrot(b.orientation, col.localPos + qrot(col.localRot, centre + corner * half));
+  o.w = w;
+  o.clip = frame.viewProj * vec4f(w, 1.0);
+  let h = hash(col.body * 7u + 3u);
+  var c = mix(vec3f(0.62, 0.55, 0.48), vec3f(0.78, 0.7, 0.6), h);
+  if (b.invMass > 0.0) { c = mix(vec3f(0.95, 0.55, 0.15), vec3f(1.0, 0.75, 0.3), h); }
+  if (col.shape == 2u && b.invMass > 0.0 && all(col.params.xyz == vec3f(0.5))) { c = vec3f(0.35, 0.6, 0.9); }
+  o.c = c;
+  return o;
+}
+// The vehicles' collision triangles at their nodes' current positions.
+@vertex fn vsSkin(@builtin(vertex_index) vi: u32) -> Out {
+  let t = tris[vi / 3u];
+  let n = select(select(t.z, t.y, vi % 3u == 1u), t.x, vi % 3u == 0u);
+  let origin = bitcast<vec3f>(misc[t.w].xyz);
+  let w = origin + nodes[3u * n].xyz;
+  var o: Out;
+  o.w = w;
+  o.clip = frame.viewProj * vec4f(w, 1.0);
+  let h = hash(t.w * 13u + 1u);
+  o.c = mix(vec3f(0.75, 0.12, 0.12), vec3f(0.15, 0.3, 0.8), h);
+  return o;
+}
+@fragment fn fsLit(i: Out) -> @location(0) vec4f {
+  var n = normalize(cross(dpdx(i.w), dpdy(i.w)));
+  if (dot(n, frame.eye.xyz - i.w) < 0.0) { n = -n; }
+  let l = normalize(vec3f(0.45, 0.85, 0.3));
+  return vec4f(i.c * (0.35 + 0.15 * n.y + 0.6 * max(dot(n, l), 0.0)), 1.0);
+}
+@vertex fn vsGround(@builtin(vertex_index) vi: u32) -> Out {
+  let s = frame.ground.y;
+  let xz = array(vec2f(-1, -1), vec2f(1, -1), vec2f(1, 1), vec2f(-1, -1), vec2f(1, 1), vec2f(-1, 1))[vi] * s + frame.ground.zw;
+  var o: Out;
+  o.w = vec3f(xz.x, frame.ground.x, xz.y);
+  o.clip = frame.viewProj * vec4f(o.w, 1.0);
+  o.c = vec3f(0.0);
+  return o;
+}
+@fragment fn fsGround(i: Out) -> @location(0) vec4f {
+  let g = abs(fract(i.w.xz / 4.0 + 0.5) - 0.5) * 4.0;
+  let px = fwidth(i.w.xz) * 1.2;
+  let line = 1.0 - min(1.0, min(g.x / px.x, g.y / px.y));
+  return vec4f(vec3f(0.24, 0.27, 0.24) + line * 0.05, 1.0);
+}`;
+    const mod = device.createShaderModule({ label: 'crash town', code: SHADER });
+    const cerr = (await mod.getCompilationInfo()).messages.find((m) => m.type === 'error');
+    if (cerr) throw new Error(`shader: ${cerr.message}`);
+    const depthStencil = { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less' };
+    const pipe = (vs) => device.createRenderPipeline({ layout: 'auto', vertex: { module: mod, entryPoint: vs }, fragment: { module: mod, entryPoint: vs === 'vsGround' ? 'fsGround' : 'fsLit', targets: [{ format }] }, primitive: { cullMode: 'none' }, depthStencil });
+    const colPipe = pipe('vsCol'), skinPipe = pipe('vsSkin'), groundPipe = pipe('vsGround');
+    const cubeIdx = new Uint16Array([0, 1, 3, 0, 3, 2, 4, 6, 7, 4, 7, 5, 0, 4, 5, 0, 5, 1, 2, 3, 7, 2, 7, 6, 0, 2, 6, 0, 6, 4, 1, 5, 7, 1, 7, 3]);
+    const indexBuf = device.createBuffer({ size: cubeIdx.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(indexBuf, 0, cubeIdx);
+    const frameBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const frameData = new Float32Array(24);
+    const entries = (p, list) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: list.map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
+    let binds = null, bound = [];
+    const rebind = () => {
+      const bufs = [world.bodyBuffer(), world.colliderBuffer(), world.hullArenaBuffer()];
+      if (binds && bufs.every((b, i) => b === bound[i])) return;
+      bound = bufs;
+      binds = {
+        col: entries(colPipe, [[0, bufs[0]], [1, frameBuf], [2, bufs[1]], [3, bufs[2]]]),
+        skin: entries(skinPipe, [[1, frameBuf], [4, world.explicitNodesBuffer()], [5, world.explicitMiscBuffer()], [6, world.explicitTrianglesBuffer()]]),
+        ground: entries(groundPipe, [[1, frameBuf]]),
+      };
+    };
+    const triCount = world.explicitTriangleCount();
+    let depth = null;
+    // Camera: orbit about the town's middle.
+    const cs = layout.centres;
+    const mid = [0, 2].map((k) => cs.reduce((a, c) => a + c[k], 0) / cs.length);
+    const span = Math.max(30, ...cs.map((c) => Math.hypot(c[0] - mid[0], c[2] - mid[1]))) + 25;
+    const cam = { yaw: 0.7, pitch: 0.5, dist: N === 1 ? 26 : span * 1.6, target: [mid[0], layout.ground + 1.5, mid[1]] };
+    if (N === 1) { cam.target = [cs[0][0], layout.ground + 1.5, cs[0][2] + 6]; cam.yaw = 1.0; }
+    let drag = null;
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey }; });
+    addEventListener('pointerup', () => { drag = null; });
+    addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      drag.x = e.clientX; drag.y = e.clientY;
+      if (drag.pan) {
+        const s = cam.dist * 0.0016, cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+        cam.target[0] -= (cy * dx - sy * dy) * s;
+        cam.target[2] -= (-sy * dx - cy * dy) * s;
+      } else {
+        cam.yaw -= dx * 0.005;
+        cam.pitch = Math.max(0.05, Math.min(1.5, cam.pitch + dy * 0.005));
+      }
+    });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); cam.dist = Math.max(3, Math.min(2000, cam.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+    const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    function viewProj(eye, at, aspect, near, far) {
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const v = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+        -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
+      const f = 1 / Math.tan(Math.PI / 8), nf = 1 / (near - far);
+      const p = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far * nf, -1, 0, 0, far * near * nf, 0];
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = p[r] * v[c * 4] + p[4 + r] * v[c * 4 + 1] + p[8 + r] * v[c * 4 + 2] + p[12 + r] * v[c * 4 + 3];
+      return o;
+    }
+    const eyeOf = () => {
+      const cp = Math.cos(cam.pitch);
+      return [cam.target[0] + cam.dist * cp * Math.sin(cam.yaw), cam.target[1] + cam.dist * Math.sin(cam.pitch), cam.target[2] + cam.dist * cp * Math.cos(cam.yaw)];
+    };
+    function draw() {
+      if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
+        depth?.destroy();
+        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      }
+      rebind();
+      const eye = eyeOf();
+      frameData.set(viewProj(eye, cam.target, canvas.width / canvas.height, Math.max(0.1, cam.dist * 0.003), Math.max(2000, cam.dist * 4)));
+      frameData.set([...eye, 0], 16);
+      frameData.set([layout.ground, span * 3, mid[0], mid[1]], 20);
+      device.queue.writeBuffer(frameBuf, 0, frameData);
+      const enc = device.createCommandEncoder();
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.52, 0.6, 0.7, 1], loadOp: 'clear', storeOp: 'store' }],
+        depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      rp.setPipeline(groundPipe); rp.setBindGroup(0, binds.ground); rp.draw(6);
+      rp.setPipeline(colPipe); rp.setBindGroup(0, binds.col); rp.setIndexBuffer(indexBuf, 'uint16'); rp.drawIndexed(36, world.colliderCount());
+      rp.setPipeline(skinPipe); rp.setBindGroup(0, binds.skin); rp.draw(3 * triCount);
+      rp.end();
+      device.queue.submit([enc.finish()]);
+    }
+
+    // ---------------------------------------------------------------- loop
+    const statsEl = document.getElementById('stats');
+    let broken = 0, splits = 0, fps = 0, frames = 0, fpsAt = performance.now(), stepMs = [];
+    // World steps paced to wall time by Rust's FramePacer (frame_pacer.rs), not one per
+    // displayed frame: a 120 Hz display draws every frame and takes a 1/60 s step every
+    // other one; a slow frame takes the steps it owes (at most 4). ?minFps=N: a frame-rate
+    // floor with the World step's GPU time as its budget (needs ?timing=).
+    const RATE = 1 / world.solver().dt;
+    const pacer = new FramePacer(RATE, Number(qs.get('minFps')) || 0);
+    let lastNow = null, owedMissed = 0, simSteps = 0, simAt = performance.now(), simRate = 0, hudAt = 0;
+    const onFrame = (f) => {
+      broken += f.bondsBroken();
+      if (TIMING) for (const t of f.gpuTimes() || []) {
+        gpuTotal.push(t.totalMs); if (gpuTotal.length > 120) gpuTotal.shift();
+        pacer.reportGpu(t.totalMs, 1);
+        // A segment name can repeat in a step: summed per step.
+        const per = new Map();
+        for (const [n, ms] of t.segments) per.set(n, (per.get(n) || 0) + ms);
+        for (const [n, ms] of per) { const a = gpuSeg.get(n) || []; a.push(ms); if (a.length > 120) a.shift(); gpuSeg.set(n, a); }
+      }
+    };
+    function hud() {
+      const [xs, ws] = world.explicitSteps();
+      const med = stepMs.length ? [...stepMs].sort((a, b) => a - b)[stepMs.length >> 1] : NaN;
+      const rows = [
+        ['vehicles', `${N} · ${triCount.toLocaleString()} skin triangles`],
+        ['houses', `${layout.houses} cuboid houses (threshold, prefractured)`],
+        ['World steps', `${ws} (1/60 s) · explicit steps ${xs.toLocaleString()} (2 kHz)`],
+        ['real time', `${(100 * simRate / RATE).toFixed(0)} % (${simRate.toFixed(1)} World steps/s)${owedMissed ? ` · ${owedMissed} steps behind (readback)` : ''}`],
+        ['bonds broken', broken.toLocaleString()],
+        ['explicit frame', world.explicitWide() ? 'wide passes' : 'a workgroup per vehicle'],
+        ['bodies', world.bodyCount().toLocaleString()],
+        ['step wall', Number.isFinite(med) ? `${med.toFixed(2)} ms (median, step + poll)` : '—'],
+        ['FPS', fps.toFixed(0)],
+        ...(TIMING ? [['GPU / step', gpuTotal.length ? `${[...gpuTotal].sort((a, b) => a - b)[gpuTotal.length >> 1].toFixed(2)} ms median` : '—'],
+          ...[...gpuSeg].map(([n, v]) => [n, `${(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2)} ms`]).sort((a, b) => parseFloat(b[1]) - parseFloat(a[1])).slice(0, 8)] : []),
+        ['build', `${(buildMs / 1000).toFixed(1)} s`],
+      ];
+      statsEl.innerHTML = rows.map(([k, v]) => `<span class="k">${k}</span><span>${v}</span>`).join('');
+    }
+    let paused = false;
+    async function frame(now) {
+      frames++;
+      if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
+      const dt = lastNow === null ? 0 : (now - lastNow) / 1000;
+      lastNow = now;
+      try {
+        const owed = paused ? 0 : pacer.advance(dt, 1, 4);
+        for (let k = 0; k < owed; k++) {
+          // A step waits for a free readback slot (never blocks): one owed past it is
+          // dropped, and the HUD's real time says so.
+          if (!world.canStep()) { owedMissed += owed - k; break; }
+          const t = performance.now();
+          world.step();
+          stepMs.push(performance.now() - t);
+          if (stepMs.length > 120) stepMs.shift();
+          simSteps++;
+        }
+        if (now - simAt > 1000) { simRate = simSteps * 1000 / (now - simAt); simSteps = 0; simAt = now; }
+        pollFrame(world, onFrame);
+        draw();
+        if (now - hudAt > 250) { hud(); hudAt = now; }
+        statusEl.textContent = 'running';
+      } catch (e) { fail(e); return; }
+      requestAnimationFrame(frame);
+    }
+    window.__pause = (p) => { paused = p; };
+    window.__world = world;
+    window.__state = () => ({ broken, steps: world.explicitSteps(), bodies: world.bodyCount() });
+    window.__ready = true;
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

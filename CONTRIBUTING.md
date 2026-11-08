@@ -113,6 +113,34 @@ wasm and `scene_export` (the Rust-built scenes as GPU snapshots), then copies th
 into `engine/web-dist/`. `demo.html` takes `?scene=`: `ring110k`, `wall`, `joints`,
 `ragdolls10k`, `legacyPyramid`, `legacyGrid10k`, and the rest of its scene menu.
 
+### Local BeamNG vehicles (`__mods/`)
+
+Some soft-body pages can also drive a converted BeamNG vehicle: `brick-ring-drive.html`
+and `one-world.html` (`?car=etk`, their default), `softbody.html` (`?mod=<folder>` and
+its converted-vehicles menu), `showcase-car.html?mod=` and `crash-orbit.html` (ETK
+snapshots). These vehicles are other people's content: they are **never committed or
+deployed**. They live only in your checkout, in the gitignored
+`engine/crates/engine-webgpu/__mods/`, and the site build does not copy that folder.
+Without it (the deployed site, a fresh clone) the pages fall back to Rubble's own
+soft-body sedan and say so (`softbody.html`, the car menu), or, where no stand-in makes
+sense (`showcase-car.html?mod=`, an ETK snapshot in `crash-orbit.html`), show an
+on-page message.
+
+To make one locally, point `community_cache` at an unpacked BeamNG `vehicles` folder
+(the vehicle's folder and `common/` side by side, for example unzipped from your own
+copy of the game's `content/vehicles/<vehicle>.zip` and `common.zip`):
+
+```bash
+cd engine
+cargo run --release -p engine-softbody --example community_cache -- \
+  <vehicles-dir> etkk all crates/engine-webgpu/__mods/etkk_tex size=1024 label="ETK K-series"
+```
+
+That writes the folder the pages load (`__mods/etkk_tex`, configuration `etkk/kc6.pc`),
+its `files.json`, and `__mods/index.json` (the `softbody.html` menu). Only data files
+are copied (JBeam, `.pc`, Collada meshes, materials, downscaled textures); nothing in a
+mod runs. `git status` must never show anything under `__mods/`.
+
 ### Legacy scenes on the new engine
 
 [`engine-scenes/src/legacy.rs`](engine/crates/engine-scenes/src/legacy.rs) rebuilds the

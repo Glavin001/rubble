@@ -108,6 +108,10 @@ impl Fracture {
         false
     }
     pub fn body_destroyed(&mut self, _body: u32) {}
+    #[allow(clippy::type_complexity)]
+    pub fn vehicle_ingest(&self) -> anyhow::Result<Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u32)>> {
+        Ok(None)
+    }
 }
 
 #[cfg(feature = "stress")]
@@ -2010,6 +2014,15 @@ mod imp {
                 65_535 * 32,
                 capacity.max_contacts
             );
+            // The fracture's split ranks chunks and body slots with a two-level scan (one
+            // group of 1024 blocks of 1024): at most 2^20 body slots, an engine-wide bound
+            // checked here by its WorldCapacity name (a chunk room past it is clamped:
+            // chunks beyond 2^20 fail when placed).
+            anyhow::ensure!(
+                capacity.max_bodies <= 1 << 20,
+                "threshold destructibles: WorldCapacity::max_bodies {} is past the fracture's 2^20 body slots (its split's two-level scans); size the world's capacity to the destructibles it holds",
+                capacity.max_bodies
+            );
             // A chunk per collider at most, bonds at four per chunk (a brick's six faces,
             // shared), a part per collider.
             let room = fracture::Capacity {
@@ -2020,10 +2033,12 @@ mod imp {
                 events: EVENT_ROOM,
             };
             let table = vec![static_info; capacity.max_colliders as usize];
+            // Two substep slots: the engine's contacts, then the explicit vehicles'
+            // chunk loads (`explicit_vehicles.rs`; merged only while vehicles are coupled).
             let ingest = EngineIngest::new(
                 gpu,
                 capacity.max_contacts,
-                1,
+                2,
                 capacity.max_bodies,
                 room.chunks,
                 &table,
@@ -2383,9 +2398,14 @@ mod imp {
             let offset = self.sim.last_contact_offset();
             let dt = self.sim.params().dt as f64;
             let step = self.sim.steps_done();
+            // Explicit vehicles: their chunk records in slot 1, at most this many rows.
+            let vehicle_rows = self.explicit.as_ref().map(|x| x.ingest_rows());
             if let Some(sh) = self.fracture.shared.as_mut() {
                 sh.ingest.substep(&gpu, enc, &e, offset, 0, dt);
-                sh.ingest.merge(&gpu, enc, &e, 1);
+                match vehicle_rows {
+                    Some(rows) => sh.ingest.merge_with_rows(&gpu, enc, &e, rows),
+                    None => sh.ingest.merge(&gpu, enc, &e, 1),
+                }
                 sh.fracture.encode_frame(&gpu, enc, step);
                 sh.stepped = true;
             }
@@ -2404,6 +2424,24 @@ mod imp {
     }
 
     impl Fracture {
+        /// The shared threshold ingest the explicit vehicles' chunk loads go into (slot
+        /// 1): its records, per-slot row counts, collider table and rows per slot. Err
+        /// when a destructible has its own fracture (crushing, blast loading): vehicle
+        /// strikes do not reach those (an explicit limit).
+        pub(crate) fn vehicle_ingest(
+            &self,
+        ) -> anyhow::Result<Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, u32)>> {
+            if self.slots.iter().flatten().any(|t| t.own.is_some()) {
+                anyhow::bail!(
+                    "explicit vehicles: a threshold destructible with its own fracture (crushing or blast loading) cannot take vehicle strikes"
+                );
+            }
+            Ok(self.shared.as_ref().map(|sh| {
+                let (rows, _) = sh.ingest.capacity();
+                (&sh.ingest.records, sh.ingest.row_counts_buffer(), &sh.ingest.collider_info, rows)
+            }))
+        }
+
         /// The readback copies of every threshold destructible's state after a step: the
         /// shared fracture's counters and event lists (nothing that scales with the
         /// destructibles placed), and each own fracture's counters, chunk owners, bond

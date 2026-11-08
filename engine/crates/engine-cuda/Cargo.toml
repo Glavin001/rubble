@@ -3,11 +3,13 @@ name = "engine-cuda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CUDA replay of the shared rigid step graph (Slang → CUDA → PTX, NVIDIA Linux)"
+description = "CUDA replay of the shared rigid step graph and explicit-beams plan (Slang → CUDA → PTX, NVIDIA Linux)"
 
 [dependencies]
 engine-schema.workspace = true
 engine-exec.workspace = true
+engine-softbody.workspace = true
+glam.workspace = true
 anyhow.workspace = true
 bytemuck.workspace = true
 log.workspace = true

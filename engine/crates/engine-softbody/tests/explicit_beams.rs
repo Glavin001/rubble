@@ -11,6 +11,8 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     fast_inv_sqrt: false,
     drag: false,
     turbulence: false,
+    triangle_throttle: true,
+    centred_damping: false,
 };
 
 /// Unit-mass nodes at `points`, no ground contact, no drag.
@@ -133,6 +135,8 @@ fn frames_carry_the_remainder() {
             fast_inv_sqrt: true,
             drag: true,
             turbulence: true,
+            triangle_throttle: true,
+            centred_damping: false,
         }
     );
 }
@@ -677,7 +681,7 @@ fn self_collision_pushes_a_contacter_out_of_a_triangle() {
         n.flags |= NODE_IMMOVABLE | NODE_ON_TRIANGLE;
     }
     s.nodes[3].flags |= NODE_CONTACTER;
-    s.nodes[3].vel = Vec3::new(0.0, -1.0, 0.0);
+    s.nodes[3].vel = Vec3::new(0.0, -10.0, 0.0);
     s.triangles.push(Triangle {
         nodes: [0, 1, 2],
         wait: 0,
@@ -817,4 +821,234 @@ end
     assert_eq!(s.tyres[0].axle, [1, 0]);
     assert!(s.nodes[first].pos.distance(Vec3::new(0.0, 0.6, 0.0)) < 1e-6);
     assert!((s.nodes[first + 1].pos.z - 1.0).abs() < 1e-6);
+}
+
+/// The BeamNG profile tests every triangle every step (jbeam-semantics-spec.md §36):
+/// an unhit triangle never backs off.
+#[test]
+fn without_the_throttle_a_triangle_is_tested_every_step() {
+    let mut s = world(&[
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(5.0, 5.0, 5.0),
+    ]);
+    s.settings.triangle_throttle = false;
+    for n in &mut s.nodes {
+        n.flags |= NODE_IMMOVABLE;
+    }
+    s.nodes[3].flags |= NODE_CONTACTER;
+    s.triangles.push(Triangle {
+        nodes: [0, 1, 2],
+        wait: 0,
+        idle: 0,
+    });
+    s.finish();
+    for _ in 0..40 {
+        s.step();
+        assert_eq!((s.triangles[0].wait, s.triangles[0].idle), (0, 0));
+    }
+}
+
+/// What the throttle can cost (§36): a contacter arriving at 10 m/s (5 mm a step) at
+/// a triangle that has been idle for a second. With the throttle the triangle is
+/// waiting while the node crosses its band (it falls through: y −1.40 m after
+/// 0.2 s); without it the node is caught (y 0.020 m, the band's edge).
+/// Returns the node's height after it arrives.
+fn fast_arrival(throttle: bool) -> f32 {
+    let mut s = world(&[
+        Vec3::new(-1.0, 0.0, -1.0),
+        Vec3::new(1.0, 0.0, -1.0),
+        Vec3::new(0.0, 0.0, 2.0),
+        Vec3::new(0.0, 0.8, 0.0),
+    ]);
+    s.settings.triangle_throttle = throttle;
+    for n in &mut s.nodes[..3] {
+        n.flags |= NODE_IMMOVABLE | NODE_ON_TRIANGLE;
+    }
+    s.nodes[3].flags |= NODE_CONTACTER | NODE_NO_GROUND;
+    s.triangles.push(Triangle {
+        nodes: [0, 1, 2],
+        wait: 0,
+        idle: 0,
+    });
+    s.finish();
+    // Idle for a second: the node held still far above.
+    for _ in 0..2000 {
+        s.nodes[3].vel = Vec3::ZERO;
+        s.nodes[3].force = Vec3::ZERO;
+        s.step();
+    }
+    s.nodes[3].vel = Vec3::new(0.0, -10.0, 0.0);
+    for _ in 0..400 {
+        s.step();
+    }
+    s.nodes[3].pos.y
+}
+
+#[test]
+fn the_throttle_lets_a_fast_node_through_and_the_beamng_profile_does_not() {
+    let (ror, beamng) = (fast_arrival(true), fast_arrival(false));
+    println!("node after arrival: with the throttle y = {ror}, without y = {beamng}");
+    assert!(beamng > 0.0, "caught without the throttle: {beamng}");
+    assert!(ror < 0.0, "the RoR profile's throttle misses it: {ror}");
+}
+
+/// The BeamNG profile's exact exp, ln and pow (jbeam-semantics-spec.md §36) against
+/// f64: exp within 2 ulp over [−87, 88], ln within 2 ulp over [10⁻³⁷·⁹, 10³⁸], pow
+/// on the friction law's range (x ∈ [0, 100], y ∈ {1.75, 2}) within 1.5·10⁻⁶ (the
+/// argument y·ln x carries ln's rounding times up to 9).
+#[test]
+fn exact_exp_is_the_exponential() {
+    let ulp = |a: f32, b: f64| ((a as f64 - b) / (b.abs() * f32::EPSILON as f64)).abs();
+    let mut worst = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..200_001 {
+        let x = -87.0 + 175.0 * i as f32 / 200_000.0;
+        worst.0 = worst.0.max(ulp(exact_exp(x), (x as f64).exp()));
+    }
+    for i in 0..200_001 {
+        let x = 10f32.powf(-37.9 + 75.9 * i as f32 / 200_000.0);
+        let e = (x as f64).ln();
+        if e.abs() > 1e-3 {
+            worst.1 = worst.1.max(ulp(exact_ln(x), e));
+        }
+    }
+    for y in [1.75f32, 2.0] {
+        for i in 1..20_001 {
+            let x = 100.0 * i as f32 / 20_000.0;
+            let e = (x as f64).powf(y as f64);
+            worst.2 = worst.2.max(((exact_pow(x, y) as f64 - e) / e).abs());
+        }
+    }
+    println!("exp {:.2} ulp, ln {:.2} ulp, pow {:.2e} relative", worst.0, worst.1, worst.2);
+    assert!(worst.0 <= 2.0 && worst.1 <= 2.0 && worst.2 < 1.5e-6);
+    assert_eq!(exact_pow(0.0, 2.0), 0.0);
+    assert_eq!(exact_exp(-100.0), 0.0);
+}
+
+/// A small BeamNG-profile `.truck`: a tetrahedron (beams 0–1 … 2–3), a
+/// damping-only beam 0–3 (spring 0), cab triangles 0-1-2 (contact) and 0-1-3.
+const PROFILE_TRUCK: &str = "profile test
+globals
+100, 0, tracks/semi
+rubble_beamng_profile
+nodes
+0, 0, 0.5, 0
+1, 1, 0.5, 0
+2, 0, 0.5, 1
+3, 0, 1.5, 0
+set_beam_defaults 1000000, 500, 50000, 1000000
+beams
+0, 1
+0, 2
+1, 2
+1, 3
+2, 3
+set_beam_defaults 0, 2000, 50000, 1000000
+beams
+0, 3
+submesh
+cab
+0, 1, 2, c
+0, 1, 3
+end
+";
+
+fn profile_truck(extra: &str) -> Result<ExplicitBeams, String> {
+    let text = PROFILE_TRUCK.replace("end\n", &format!("{extra}end\n"));
+    let settings = ExplicitBeamsSettings::default();
+    ExplicitBeams::from_truck(&text, Vec3::new(0.0, 10.0, 0.0), Vec3::ZERO, settings)
+}
+
+/// BeamNG-profile `.truck` damping (jbeam-semantics-spec.md §36): a damping-only beam
+/// (spring 0) pulls only against its rate and never yields; `rubble_damp_cutoff`
+/// gives a JBeam beam JBeam's dampCutoffHz filter, and names no other beam.
+#[test]
+fn profile_truck_damping_only_beams_and_damp_cutoff() {
+    let mut s = profile_truck("").unwrap();
+    let j = s.beams.iter().position(|b| (b.a, b.b) == (0, 3)).unwrap();
+    assert_eq!(s.beams[j].kind, ExplicitKind::JbeamPlain);
+    assert_eq!(s.beams[j].k, 0.0);
+    let rest = s.beams[j].rest;
+    // Stretch it at 1 m/s: a pull of c·u (tension negative), rest length kept.
+    s.nodes[3].vel = Vec3::new(0.0, 1.0, 0.0);
+    let (na, nb) = (s.nodes[0], s.nodes[3]);
+    let out = jbeam_force(&mut s.beams[j], &na, &nb, false);
+    assert!((out.force + 2000.0).abs() < 1e-3, "{}", out.force);
+    assert_eq!(s.beams[j].rest, rest);
+    let s = profile_truck("rubble_damp_cutoff\n0, 3, 50\n").unwrap();
+    let j = s.beams.iter().position(|b| (b.a, b.b) == (0, 3)).unwrap();
+    assert_ne!(s.beams[j].shock, 0);
+    let f = s.damp_filters[s.beams[j].shock as usize - 1];
+    let a = 1.0 - (-2.0 * std::f64::consts::PI * 50.0 * STEP as f64).exp();
+    assert!((f.a as f64 - a).abs() < 1e-6, "{} {a}", f.a);
+    assert!(profile_truck("rubble_damp_cutoff\n0, 4, 50\n").is_err());
+}
+
+/// BeamNG-profile `.truck` aerodynamics (§31, §36): every cab triangle at BeamNG's
+/// default dragCoef, or per triangle with `rubble_aero_tri` (others none), and the
+/// per-node drag off.
+#[test]
+fn profile_truck_aero_triangles() {
+    let count = |s: &ExplicitBeams| {
+        s.beams.iter().filter(|b| b.kind == ExplicitKind::JbeamAeroTri).count()
+    };
+    let s = profile_truck("").unwrap();
+    assert!(!s.settings.drag && !s.settings.turbulence);
+    assert_eq!(count(&s), 2);
+    let s = profile_truck("rubble_aero_tri\n3, 1, 0, 10, 10\n").unwrap();
+    assert_eq!(count(&s), 1);
+    assert!(profile_truck("rubble_aero_tri\n0, 2, 3, 10, 10\n").is_err());
+}
+
+
+/// BeamNG-profile ropes and tearing (jbeam-semantics-spec.md §36): a `.truck` rope
+/// is a tension-only JBeam beam (no spring in compression) that keeps its strength
+/// as it yields; `rubble_jbeam_plastic`'s sixth field tears a beam (rope or plain)
+/// the step its rest length reaches (1 + deformLimitExpansion)·L, in tension only.
+#[test]
+fn profile_truck_ropes_and_break_at_expansion() {
+    let rope = PROFILE_TRUCK
+        .replace("3, 0, 1.5, 0\n", "3, 0, 1.5, 0\n4, 0, 2.5, 0\n")
+        .replace(
+            "0, 3\nsubmesh",
+            "0, 3\nset_beam_defaults 1000000, 500, 50000, 1000000\nbeams\n3, 4, r\nsubmesh",
+        );
+    let load = |extra: &str| {
+        let text = rope.replace("end\n", &format!("{extra}end\n"));
+        ExplicitBeams::from_truck(&text, Vec3::new(0.0, 10.0, 0.0), Vec3::ZERO, ExplicitBeamsSettings::default())
+            .unwrap()
+    };
+    let mut s = load("");
+    let j = s.beams.iter().position(|b| (b.a, b.b) == (3, 4)).unwrap();
+    assert_eq!(s.beams[j].kind, ExplicitKind::JbeamRope);
+    let pull = |s: &mut ExplicitBeams, dy: f32| {
+        let (na, mut nb) = (s.nodes[3], s.nodes[4]);
+        nb.pos.y += dy;
+        let keep = !s.plastic_strength_drop;
+        jbeam_force_filtered(&mut s.beams[j], &na, &nb, false, None, keep)
+    };
+    // Compressed: no force (at rest, no damping).
+    let mut c = s.clone();
+    let (na, mut nb) = (c.nodes[3], c.nodes[4]);
+    nb.pos = na.pos + (nb.pos - na.pos) * 0.5;
+    assert_eq!(jbeam_force(&mut c.beams[j], &na, &nb, false).force, 0.0);
+    // Stretched past its threshold: it yields, keeps its strength (the profile).
+    let strength = s.beams[j].strength;
+    let rest = s.beams[j].rest;
+    let o = pull(&mut s, 0.5);
+    assert!(!o.check_break && s.beams[j].rest > rest, "yields");
+    assert_eq!(s.beams[j].strength, strength);
+    // With breakAtExpansion (dₑ 0.5): pulled to 2·L it tears (its threshold 400 kN: RoR's minimum deform).
+    let mut s = load("rubble_jbeam_plastic\n3, 4, -1, -1, 0.5, 1\n");
+    assert_eq!(s.beams[j].kind, ExplicitKind::JbeamRope);
+    let o = pull(&mut s, 0.2);
+    assert!(!o.check_break, "below the limit");
+    let o = pull(&mut s, 1.0);
+    assert!(o.check_break, "past the limit: tears");
+    // Without the flag the same pull holds at the limit.
+    let mut s = load("rubble_jbeam_plastic\n3, 4, -1, -1, 0.5\n");
+    let o = pull(&mut s, 1.0);
+    assert!(!o.check_break);
+    assert!((s.beams[j].rest - 1.5 * rest).abs() < 1e-5);
 }
