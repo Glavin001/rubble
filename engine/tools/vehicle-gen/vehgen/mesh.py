@@ -250,6 +250,10 @@ def rbox(center, half, radius, n=3, mat='trim_black'):
     for axis in range(3):
         for sgn in (-1, 1):
             u_ax, v_ax = [a for a in range(3) if a != axis]
+            # (u, v) must be right-handed about the face's outward normal:
+            # e_u x e_v = sgn e_axis (for the y faces the pair is (z, x))
+            if axis == 1:
+                u_ax, v_ax = v_ax, u_ax
             if sgn < 0:
                 u_ax, v_ax = v_ax, u_ax
             nu, nv = divs[u_ax], divs[v_ax]
