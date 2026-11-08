@@ -22,12 +22,54 @@ use glam::Vec3;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// The mod folder (`<tmp>/gen3`, vehicle `gen2`).
+/// The car under test: gen3 (the Rust render model, vehicle `gen2`), or a
+/// vehicle-gen design when `GEN3_RIG_DESIGN=<design>` is set (its `.glb` and
+/// `rig.json` from `GEN3_RIG_DIR`, default `engine/tools/vehicle-gen/out/<design>`
+/// then `engine/scenes/vehicles/<design>`; `engine/docs/generated-vehicles.md`).
+struct Target {
+    vehicle: String,
+    glb: String,
+    skin: String,
+}
+
+fn target() -> Target {
+    match std::env::var("GEN3_RIG_DESIGN") {
+        Ok(d) => Target {
+            glb: gen2::vg_input::glb_file(&d),
+            skin: gen2::vg_input::skin_file(&d),
+            vehicle: d,
+        },
+        Err(_) => Target {
+            vehicle: "gen2".into(),
+            glb: gen3::GLB_FILE.into(),
+            skin: gen3::SKIN_FILE.into(),
+        },
+    }
+}
+
+/// The mod folder (`<tmp>/gen3`, or `<tmp>/vg_<design>`).
 fn mod_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("gen3");
-        for (p, bytes) in gen2::files() {
+        let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+        let (dir, files) = match std::env::var("GEN3_RIG_DESIGN") {
+            Ok(d) => {
+                let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+                let built = root.join("tools/vehicle-gen/out").join(&d);
+                let src = std::env::var("GEN3_RIG_DIR").map(PathBuf::from).unwrap_or_else(|_| {
+                    if built.join(format!("{d}.rig.json")).exists() {
+                        built
+                    } else {
+                        root.join("scenes/vehicles").join(&d)
+                    }
+                });
+                let inp = gen2::vg_input::VgInput::load(&src, &d).unwrap();
+                let b = gen2::vg_input::build(inp).unwrap();
+                (tmp.join(format!("vg_{d}")), gen2::vg_input::files(&b))
+            }
+            Err(_) => (tmp.join("gen3"), gen2::files()),
+        };
+        for (p, bytes) in files {
             let path = dir.join(&p);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, bytes).unwrap();
@@ -45,8 +87,10 @@ struct Loaded {
 /// The car on raycast wheels (surface contact on) and its skinned visual.
 fn load() -> Loaded {
     let dir = mod_dir();
-    let files = engine_softbody::jbeam::read_vehicle_dir(dir, "gen2").unwrap();
-    let pc = std::fs::read_to_string(dir.join("gen2/gen2.pc")).ok();
+    let t = target();
+    let v = t.vehicle.as_str();
+    let files = engine_softbody::jbeam::read_vehicle_dir(dir, v).unwrap();
+    let pc = std::fs::read_to_string(dir.join(v).join(format!("{v}.pc"))).ok();
     let refs: Vec<(&str, &str)> = files
         .iter()
         .map(|(a, b)| (a.as_str(), b.as_str()))
@@ -63,15 +107,14 @@ fn load() -> Loaded {
     sim.surface_contact = true;
     let flex = engine_softbody::jbeam::assembled_rows(&refs, pc.as_deref(), "flexbodies").unwrap();
     let g =
-        engine_softbody::glb::read(&std::fs::read(dir.join("gen2").join(gen3::GLB_FILE)).unwrap())
-            .unwrap();
+        engine_softbody::glb::read(&std::fs::read(dir.join(v).join(&t.glb)).unwrap()).unwrap();
     let meshes: Vec<_> = g
         .meshes
         .iter()
         .map(|m| engine_softbody::flexskin::glb_mesh(&g, m))
         .collect();
     let skin = engine_softbody::flexskin::Skin::decode(
-        &std::fs::read(dir.join("gen2").join(gen3::SKIN_FILE)).unwrap(),
+        &std::fs::read(dir.join(v).join(&t.skin)).unwrap(),
     )
     .unwrap();
     let (vis, rep) = engine_softbody::flexmesh::jbeam_visual_skinned(
@@ -223,13 +266,18 @@ fn rest_drift_every_part_within_5_mm() {
     let bent = l.sim.beams.iter().filter(|b| b.bent()).count();
     let mut worst = Vec::new();
     for p in &l.desc.parts {
-        let mx = p
+        let (mx, at) = p
             .nodes
             .iter()
             .filter(|&&i| (i as usize) < nd && !susp(&l.desc.nodes[i as usize].name))
-            .map(|&i| (fit.to_rest(now[i as usize]) - design[i as usize]).length())
-            .fold(0.0f32, f32::max);
-        println!("{:<16} {:.1} mm", p.name, mx * 1e3);
+            .map(|&i| ((fit.to_rest(now[i as usize]) - design[i as usize]).length(), i))
+            .fold((0.0f32, 0u32), |a, b| if b.0 > a.0 { b } else { a });
+        println!(
+            "{:<16} {:.1} mm (worst node {})",
+            p.name,
+            mx * 1e3,
+            l.desc.nodes.get(at as usize).map_or("-", |n| n.name.as_str())
+        );
         worst.push((p.name.clone(), mx));
     }
     println!("broken {broken}, bent {bent}");
@@ -249,8 +297,11 @@ fn rest_drift_every_part_within_5_mm() {
 }
 
 fn spec() -> CarSpec {
+    let t = target();
+    let name = if t.vehicle == "gen2" { "gen3" } else { t.vehicle.as_str() };
     serde_json::from_value(serde_json::json!({
-        "name": "gen3", "mod": mod_dir().to_string_lossy(), "vehicle": "gen2", "pc": "gen2.pc"
+        "name": name, "mod": mod_dir().to_string_lossy(), "vehicle": t.vehicle,
+        "pc": format!("{}.pc", t.vehicle)
     }))
     .unwrap()
 }

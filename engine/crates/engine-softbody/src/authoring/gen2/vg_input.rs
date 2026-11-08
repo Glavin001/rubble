@@ -1,0 +1,473 @@
+//! A vehicle-gen design as the rigger's input ([`super::rig::RigInput`]):
+//! the art `.glb` (part meshes and the art spec's markers) and the design's
+//! `rig.json` (`engine/tools/vehicle-gen/vehgen/rigexport.py`): its key lines,
+//! the body tube's sections, the nose and tail faces, the wheel arches, the
+//! running gear's dimensions and its `PHYSICS` block.
+//!
+//! The body surface is the design's own: a signed field from the tube's
+//! section at z (the left half's polyline, mirrored) cut by the end faces
+//! (`front_z`, `rear_z`). Section rays (`side`, `top`, `corner`) march it as
+//! gen3 marches the Rust surface. The belt and shoulder are the design's key
+//! lines; the arches are its wheel openings.
+//!
+//! [`build`] rigs the design and binds the art `.glb` to it; [`files`] writes
+//! the mod folder (JBeam parts, `.pc`, the `.glb`, the `.rskin`), named after
+//! the design. Guide: `engine/docs/generated-vehicles.md`.
+
+use super::build::Part;
+use super::gen3;
+use super::model::{Marker, Model, Part as MPart};
+use super::rig::{self, Dims, Physics, Rig, RigInput};
+use crate::flexskin::Skin;
+use crate::glb::Glb;
+use glam::{Quat, Vec3};
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::path::Path;
+
+#[derive(Deserialize)]
+pub struct RigDims {
+    pub wheelbase: f32,
+    pub track: f32,
+    pub axle_f: f32,
+    pub axle_r: f32,
+    pub tyre_d: f32,
+    pub tyre_w: f32,
+    pub rim_d: f32,
+    pub wheel_y: f32,
+    pub z_front: f32,
+    pub z_rear: f32,
+    pub doors: Vec<String>,
+    pub rear_closure: String,
+}
+
+#[derive(Deserialize)]
+pub struct Arch {
+    pub center: [f32; 2],
+    #[serde(rename = "R")]
+    pub r: f32,
+}
+
+#[derive(Deserialize)]
+pub struct Keys {
+    pub z0: f32,
+    pub dz: f32,
+    pub n: usize,
+    /// Per key line, per station: (x, y).
+    pub lines: BTreeMap<String, Vec<[f32; 2]>>,
+}
+
+#[derive(Deserialize)]
+pub struct Sections {
+    pub z0: f32,
+    pub dz: f32,
+    pub nz: usize,
+    pub dv: f32,
+    pub nv: usize,
+    /// Per station, per v: (x, y) of the tube's left half.
+    pub xy: Vec<Vec<[f32; 2]>>,
+}
+
+#[derive(Deserialize)]
+pub struct Ends {
+    pub x0: f32,
+    pub y0: f32,
+    pub d: f32,
+    pub nx: usize,
+    pub ny: usize,
+    pub front_z: Vec<Vec<f32>>,
+    pub rear_z: Vec<Vec<f32>>,
+}
+
+#[derive(Deserialize)]
+pub struct MarkerJson {
+    pub pos: [f32; 3],
+    pub axis: [f32; 3],
+}
+
+/// `<design>.rig.json`.
+#[derive(Deserialize)]
+pub struct RigJson {
+    pub format: u32,
+    pub design: String,
+    pub base: Option<String>,
+    pub title: String,
+    pub dims: RigDims,
+    pub arches: Vec<Arch>,
+    pub keys: Keys,
+    pub zlines: Vec<(String, f32)>,
+    pub vlines: Vec<f32>,
+    pub sections: Sections,
+    pub ends: Ends,
+    /// Each part's welded skin boundary loops (glTF points).
+    pub skins: BTreeMap<String, Vec<Vec<[f32; 3]>>>,
+    pub markers: BTreeMap<String, MarkerJson>,
+    #[serde(default)]
+    pub physics: serde_json::Value,
+}
+
+/// A vehicle-gen design, ready to rig.
+pub struct VgInput {
+    pub rig: RigJson,
+    pub model: Model,
+    pub glb: Glb,
+    /// The art `.glb` as built (written to the mod unchanged).
+    pub glb_bytes: Vec<u8>,
+    pub physics: Physics,
+    ray_y: f32,
+    /// The key line the rig's middle panel row follows (`shoulder_y`).
+    crease: String,
+}
+
+impl VgInput {
+    /// Reads `<dir>/<design>.glb` and `<dir>/<design>.rig.json`.
+    pub fn load(dir: &Path, design: &str) -> Result<Self, String> {
+        let gp = dir.join(format!("{design}.glb"));
+        let rp = dir.join(format!("{design}.rig.json"));
+        let glb_bytes = std::fs::read(&gp).map_err(|e| format!("{}: {e}", gp.display()))?;
+        if glb_bytes.starts_with(b"version https://git-lfs") {
+            return Err(format!(
+                "{} is a Git LFS pointer: run `git lfs pull` or rebuild the design",
+                gp.display()
+            ));
+        }
+        let text = std::fs::read_to_string(&rp).map_err(|e| format!("{}: {e}", rp.display()))?;
+        let rig: RigJson =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", rp.display()))?;
+        Self::new(rig, glb_bytes)
+    }
+
+    pub fn new(rig: RigJson, glb_bytes: Vec<u8>) -> Result<Self, String> {
+        if rig.format != 1 {
+            return Err(format!("rig.json format {} (this reads 1)", rig.format));
+        }
+        let glb = crate::glb::read(&glb_bytes)?;
+        let physics: Physics = if rig.physics.is_null() {
+            Physics::default()
+        } else {
+            serde_json::from_value(rig.physics.clone())
+                .map_err(|e| format!("{}: PHYSICS: {e}", rig.design))?
+        };
+        let model = model_of(&glb);
+        for name in rig.markers.keys() {
+            if !model.markers.iter().any(|m| &m.name == name) {
+                return Err(format!("rig.json marker {name} is not in the .glb"));
+            }
+        }
+        let mut me = Self {
+            rig,
+            model,
+            glb,
+            glb_bytes,
+            physics,
+            ray_y: 0.0,
+            crease: String::new(),
+        };
+        // The section rays start between the sill and the belt at mid car.
+        me.ray_y = 0.5 * (me.key("sill", 0.0)[1] + me.key("belt", 0.0)[1]);
+        // The rig's side crease (gen3's shoulder line: the middle row of the
+        // doors', fenders' and quarters' grids) is the design's character
+        // line nearest the middle of the door at mid car, between its bottom
+        // and the belt: the waist crease on the sedan (its shoulder line runs
+        // 6 cm under the belt, where the grid's rule drops a row).
+        let mid = 0.5 * (me.key("door_bottom", 0.0)[1] + me.key("belt", 0.0)[1]);
+        me.crease = ["waist", "shoulder"]
+            .into_iter()
+            .filter(|k| me.rig.keys.lines.contains_key(*k))
+            .min_by(|a, b| {
+                (me.key(a, 0.0)[1] - mid)
+                    .abs()
+                    .total_cmp(&(me.key(b, 0.0)[1] - mid).abs())
+            })
+            .unwrap_or("shoulder")
+            .to_string();
+        Ok(me)
+    }
+
+    pub fn design(&self) -> &str {
+        &self.rig.design
+    }
+
+    /// A key line's (x, y) at z.
+    pub fn key(&self, line: &str, z: f32) -> [f32; 2] {
+        let k = &self.rig.keys;
+        let v = k
+            .lines
+            .get(line)
+            .unwrap_or_else(|| panic!("rig.json has no key line {line}"));
+        let t = ((z - k.z0) / k.dz).clamp(0.0, (k.n - 1) as f32);
+        let i = (t.floor() as usize).min(k.n - 2);
+        let f = t - i as f32;
+        [
+            v[i][0] + (v[i + 1][0] - v[i][0]) * f,
+            v[i][1] + (v[i + 1][1] - v[i][1]) * f,
+        ]
+    }
+
+    /// The tube's signed 2-D distance at (x ≥ 0, y) on section z: negative
+    /// inside the section (the left half's polyline closed on the centre line).
+    fn section_d(&self, x: f32, y: f32, z: f32) -> f32 {
+        let s = &self.rig.sections;
+        let t = ((z - s.z0) / s.dz).clamp(0.0, (s.nz - 1) as f32);
+        let i = (t.floor() as usize).min(s.nz - 2);
+        let f = t - i as f32;
+        let (ra, rb) = (&s.xy[i], &s.xy[i + 1]);
+        let at = |k: usize| -> (f32, f32) {
+            (
+                ra[k][0] + (rb[k][0] - ra[k][0]) * f,
+                ra[k][1] + (rb[k][1] - ra[k][1]) * f,
+            )
+        };
+        let mut best = f32::MAX;
+        let mut inside = false;
+        let mut p0 = at(0);
+        for k in 1..s.nv {
+            let p1 = at(k);
+            // Distance to the segment.
+            let (ex, ey) = (p1.0 - p0.0, p1.1 - p0.1);
+            let l2 = ex * ex + ey * ey;
+            let u = if l2 > 0.0 {
+                (((x - p0.0) * ex + (y - p0.1) * ey) / l2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let (dx, dy) = (x - (p0.0 + ex * u), y - (p0.1 + ey * u));
+            best = best.min(dx * dx + dy * dy);
+            // Crossings of the ray toward +x.
+            if (p0.1 > y) != (p1.1 > y) {
+                let xc = p0.0 + (y - p0.1) / (p1.1 - p0.1) * ex;
+                if xc > x {
+                    inside = !inside;
+                }
+            }
+            p0 = p1;
+        }
+        let d = best.sqrt();
+        if inside {
+            -d
+        } else {
+            d
+        }
+    }
+
+    /// An end face's z at (x ≥ 0, y) (bilinear on its table) and its slopes.
+    fn end_z(&self, front: bool, x: f32, y: f32) -> (f32, f32, f32) {
+        let e = &self.rig.ends;
+        let tab = if front { &e.front_z } else { &e.rear_z };
+        let tx = ((x - e.x0) / e.d).clamp(0.0, (e.nx - 1) as f32);
+        let ty = ((y - e.y0) / e.d).clamp(0.0, (e.ny - 1) as f32);
+        let (i, j) = (
+            (tx.floor() as usize).min(e.nx - 2),
+            (ty.floor() as usize).min(e.ny - 2),
+        );
+        let (a, b) = (tx - i as f32, ty - j as f32);
+        let (z00, z10, z01, z11) = (tab[i][j], tab[i + 1][j], tab[i][j + 1], tab[i + 1][j + 1]);
+        let z = z00 * (1.0 - a) * (1.0 - b) + z10 * a * (1.0 - b) + z01 * (1.0 - a) * b + z11 * a * b;
+        let zx = ((z10 - z00) * (1.0 - b) + (z11 - z01) * b) / e.d;
+        let zy = ((z01 - z00) * (1.0 - a) + (z11 - z10) * a) / e.d;
+        (z, zx, zy)
+    }
+
+    /// The physics part a vehicle-gen mesh rides.
+    pub fn vg_part_of(mesh: &str) -> Option<Part> {
+        if mesh.starts_with("glass_quarter_") {
+            // vehicle-gen's quarter light is in the body's C-pillar, not in
+            // the rear door's frame (gen3's model).
+            return Some(Part::Body);
+        }
+        if mesh == "tailgate" || mesh.starts_with("glass_tailgate") {
+            return Some(Part::Trunk);
+        }
+        gen3::part_of(mesh)
+    }
+}
+
+/// A `.glb`'s meshes and markers as a render model (world space).
+pub fn model_of(g: &Glb) -> Model {
+    let mut parts = Vec::new();
+    for m in &g.meshes {
+        let mut p = MPart {
+            name: m.name.clone(),
+            ..Default::default()
+        };
+        for pr in &m.prims {
+            let base = p.pos.len() as u32;
+            p.pos.extend(pr.pos.iter().map(|q| Vec3::from_array(*q)));
+            p.nrm.extend(pr.nrm.iter().map(|q| Vec3::from_array(*q)));
+            for t in pr.idx.chunks_exact(3) {
+                p.tris.push([base + t[0], base + t[1], base + t[2]]);
+            }
+        }
+        parts.push(p);
+    }
+    let markers = g
+        .markers
+        .iter()
+        .map(|k| Marker {
+            name: k.name.clone(),
+            pos: Vec3::from_array(k.pos),
+            rot: Quat::from_array(k.rot),
+        })
+        .collect();
+    Model { parts, markers }
+}
+
+impl RigInput for VgInput {
+    fn model(&self) -> &Model {
+        &self.model
+    }
+    fn dims(&self) -> Dims {
+        let d = &self.rig.dims;
+        Dims {
+            axle_f: d.axle_f,
+            axle_r: d.axle_r,
+            tyre_r: d.wheel_y,
+            track_half: 0.5 * d.track,
+            arch_r: self.rig.arches.first().map_or(0.4, |a| a.r),
+        }
+    }
+    fn physics(&self) -> &Physics {
+        &self.physics
+    }
+    fn part_of(&self, mesh: &str) -> Option<Part> {
+        Self::vg_part_of(mesh)
+    }
+    fn sdf(&self, q: Vec3) -> f32 {
+        let (x, y, z) = (q.x.abs(), q.y, q.z);
+        let ds = self.section_d(x, y, z);
+        let (zf, fx, fy) = self.end_z(true, x, y);
+        let df = (z - zf) / (1.0 + fx * fx + fy * fy).sqrt();
+        let (zr, rx, ry) = self.end_z(false, x, y);
+        let dr = (zr - z) / (1.0 + rx * rx + ry * ry).sqrt();
+        ds.max(df).max(dr)
+    }
+    fn belt(&self, z: f32) -> f32 {
+        self.key("belt", z)[1]
+    }
+    fn shoulder_y(&self, z: f32) -> f32 {
+        self.key(&self.crease, z)[1]
+    }
+    fn arch_y(&self, z: f32) -> Option<f32> {
+        for a in &self.rig.arches {
+            let d = z - a.center[0];
+            if d.abs() <= a.r {
+                return Some(a.center[1] + (a.r * a.r - d * d).max(0.0).sqrt());
+            }
+        }
+        None
+    }
+    fn end_pt(&self, front: bool, x: f32, y: f32) -> Vec3 {
+        Vec3::new(x, y, self.end_z(front, x, y).0)
+    }
+    fn ray_y(&self) -> f32 {
+        self.ray_y
+    }
+    /// The greenhouse's corner is the design's roof-rail key line (the
+    /// daylight opening's top, down the A- and C-pillars), not gen3's
+    /// "normal 50° from up" (a raked windscreen leans past that at its
+    /// centre, so the search found the belt's shoulder).
+    fn theta_corner(&self, z: f32) -> f32 {
+        let [x, y] = self.key("roof_rail", z);
+        x.atan2(y - self.ray_y)
+    }
+    fn seam_points(&self) -> Option<Vec<(Vec3, Vec3, usize, usize)>> {
+        // Points two parts' welded skins share (the skins are cut from one
+        // surface, so a shut line's points coincide exactly).
+        let key = |p: &[f32; 3]| {
+            (
+                (p[0] * 1e4).round() as i64,
+                (p[1] * 1e4).round() as i64,
+                (p[2] * 1e4).round() as i64,
+            )
+        };
+        let mut at: std::collections::HashMap<(i64, i64, i64), Vec<usize>> = Default::default();
+        let mesh = |name: &str| self.model.parts.iter().position(|p| p.name == name);
+        for (name, loops) in &self.rig.skins {
+            let Some(k) = mesh(name) else { continue };
+            for lp in loops {
+                for p in lp {
+                    let e = at.entry(key(p)).or_default();
+                    if !e.contains(&k) {
+                        e.push(k);
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        let mut keys: Vec<_> = at.keys().copied().collect();
+        keys.sort();
+        for kk in keys {
+            let ks = &at[&kk];
+            let q = Vec3::new(kk.0 as f32, kk.1 as f32, kk.2 as f32) * 1e-4;
+            for &a in ks {
+                for &b in ks {
+                    if a != b {
+                        out.push((q, q, a, b));
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+}
+
+/// The skin sidecar's and render model's file names for a design.
+pub fn skin_file(design: &str) -> String {
+    format!("{design}.rskin")
+}
+pub fn glb_file(design: &str) -> String {
+    format!("{design}.glb")
+}
+
+/// A design rigged and bound.
+pub struct Built {
+    pub input: VgInput,
+    pub rig: Rig,
+    pub skin: Skin,
+}
+
+/// Rig a design and bind its art `.glb` to the lattice.
+pub fn build(input: VgInput) -> Result<Built, String> {
+    let rig = rig::rig_with(&input);
+    let axle_f = input.rig.dims.axle_f;
+    let skin = gen3::skins_with(&input.glb, &rig.car, axle_f, &VgInput::vg_part_of)?;
+    skin.packable()?;
+    Ok(Built { input, rig, skin })
+}
+
+/// The mod folder's files (paths relative to it): `<design>/` JBeam parts and
+/// `.pc` (parts named `<design>_body` …), the art `.glb` and its `.rskin`,
+/// then `files.json`.
+pub fn files(b: &Built) -> Vec<(String, Vec<u8>)> {
+    let name = b.input.design().to_string();
+    let axle_f = b.input.rig.dims.axle_f;
+    let flex = gen3::flex_rows_with(
+        &b.input.glb,
+        axle_f,
+        &VgInput::vg_part_of,
+        &skin_file(&name),
+    );
+    let groups = gen3::deform_groups_with(&b.input.glb, &b.rig.car, axle_f, &VgInput::vg_part_of);
+    let mut out: Vec<(String, Vec<u8>)> = super::export::jbeam_files(&b.rig.car, &flex, &groups)
+        .into_iter()
+        .map(|(p, t)| (rename_path(&p, &name), rename(&t, &name).into_bytes()))
+        .collect();
+    out.push((format!("{name}/{}", glb_file(&name)), b.input.glb_bytes.clone()));
+    out.push((format!("{name}/{}", skin_file(&name)), b.skin.encode()));
+    let list: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
+    let index = serde_json::to_string(&list).unwrap();
+    out.push(("files.json".into(), index.into_bytes()));
+    out
+}
+
+/// gen2's export names (vehicle `gen2`, parts `gen2_*`) as the design's.
+fn rename(s: &str, name: &str) -> String {
+    s.replace("gen2_", &format!("{name}_"))
+        .replace("\"gen2\"", &format!("\"{name}\""))
+        .replace("Rubble gen2 sedan", &format!("Rubble {name} (vehicle-gen)"))
+}
+
+/// `gen2/gen2_body.jbeam` as `<name>/<name>_body.jbeam`.
+fn rename_path(p: &str, name: &str) -> String {
+    p.replace("gen2", name)
+}

@@ -127,10 +127,6 @@ pub fn end_pt(front: bool, x: f32, y: f32) -> Vec3 {
     sf::hit(param, 0.5 * (lo + hi), y)
 }
 
-fn belt(z: f32) -> f32 {
-    sf::with_profiles(|p| p.belt.at(z))
-}
-
 fn mirror(p: Vec3, s: f32) -> Vec3 {
     Vec3::new(p.x * s, p.y, p.z)
 }
@@ -211,11 +207,398 @@ fn marker(m: &Model, name: &str) -> Vec3 {
         .pos
 }
 
+/// A number as JSON: an integer when it is one (as the rig's literals were).
+fn json_num(x: f32) -> serde_json::Value {
+    if x.fract() == 0.0 && x.abs() < 1e9 {
+        serde_json::json!(x as i64)
+    } else {
+        serde_json::json!(x)
+    }
+}
+
 /// Evenly spaced values from `a` to `b` (both included), `n` of them.
 fn span(a: f32, b: f32, n: usize) -> Vec<f32> {
     (0..n)
         .map(|k| a + (b - a) * k as f32 / (n - 1).max(1) as f32)
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// The rigger's input: the render model, its body surface and the physics
+// block. Two implementations: [`Gen3Input`] (the Rust render model on its
+// analytic surface, [`super::surface`]) and [`super::vg_input::VgInput`] (a
+// vehicle-gen design's `.glb` and `rig.json`).
+// ---------------------------------------------------------------------------
+
+/// The running gear's dimensions (glTF metres).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Dims {
+    /// Front and rear axle z.
+    pub axle_f: f32,
+    pub axle_r: f32,
+    /// Tyre radius (the wheel centre's height at design).
+    pub tyre_r: f32,
+    /// Half the track.
+    pub track_half: f32,
+    /// The wheel-arch opening's radius.
+    pub arch_r: f32,
+}
+
+/// The editable physics of a design: masses, zone yields, hardware and the
+/// lattice's reach. Every field has the census / 2011 Accord default gen3 was
+/// calibrated with, so an empty block gives a valid car; a vehicle-gen
+/// design states only what differs (`PHYSICS = {...}` in its design file,
+/// exported in `rig.json`; `engine/docs/generated-vehicles.md`). Unknown keys
+/// are an error, so a typo fails loudly.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Physics {
+    /// Kerb mass with the driver (kg). What the parts and named masses do not
+    /// account for goes to the front-end module.
+    pub kerb: f32,
+    /// Part masses (kg): body in white, each front and rear door, each
+    /// fender, hood, decklid (or tailgate), engine, transaxle, bumper
+    /// assemblies (beam and fascia).
+    pub biw: f32,
+    pub door_f: f32,
+    pub door_r: f32,
+    pub fender: f32,
+    pub hood: f32,
+    pub decklid: f32,
+    pub engine: f32,
+    pub transaxle: f32,
+    pub bumper_f: f32,
+    pub bumper_r: f32,
+    /// Overrides of the named masses (kg) by name: driver, front_seats,
+    /// rear_seat, dashboard_steering, fuel, interior, exhaust, spare_wheel,
+    /// battery, radiator_cooling, windshield, rear_glass,
+    /// front_subframe_steering, rear_subframe, hvac_wiring.
+    pub named: std::collections::BTreeMap<String, f32>,
+    /// The powertrain's faces ahead of and behind the front axle (m), the
+    /// dash line behind the axle (m) and what stays crushed between them.
+    pub pt_ahead: f32,
+    pub pt_behind: f32,
+    pub dash_behind: [f32; 2],
+    pub pt_clearance: f32,
+    /// Zone yields as multiples of the census yield (1.15 %), with the steel
+    /// each stands for: the crush zones (DP600 rails and cans), the
+    /// suspension towers, the footwell, the greenhouse, the A-pillar's chords
+    /// (22MnB5), the floor's cross members, the floor pan (0.7 mm HC220B),
+    /// the B-pillar above and below its tailored split, the doors' intrusion
+    /// beams, the side below the belt, the doors.
+    pub crush_yield: f32,
+    pub tower_yield: f32,
+    pub footwell_yield: f32,
+    pub greenhouse_yield: f32,
+    pub apillar_yield: f32,
+    pub cross_member_yield: f32,
+    pub floor_pan_yield: f32,
+    pub bpillar_upper_yield: f32,
+    pub bpillar_lower_yield: f32,
+    pub intrusion_yield: f32,
+    pub side_yield: f32,
+    pub door_yield: f32,
+    /// Hardware strengths per beam (N).
+    pub door_hinge: f32,
+    pub door_latch: f32,
+    pub hood_hinge: f32,
+    pub hood_latch: f32,
+    pub trunk_hinge: f32,
+    pub trunk_latch: f32,
+    pub fender_bolt: f32,
+    pub fender_row_bolt: f32,
+    pub bumper_bolt: f32,
+    pub bumper_side_bolt: f32,
+    pub engine_mount: f32,
+    /// Stacks (m): the cooling module crushed solid; a front wheel's hub to
+    /// the hinge pillar once its tyre is crushed onto the rim.
+    pub cooling_stack: f32,
+    pub wheel_stack: f32,
+    /// The beam graph's reach (m): the body's members, each closure's frame.
+    pub reach_body: f32,
+    pub reach_panel: f32,
+    /// Shut-line edge nodes' spacing (m).
+    pub edge_spacing: f32,
+}
+
+impl Default for Physics {
+    fn default() -> Self {
+        Self {
+            kerb: KERB,
+            biw: ACCORD_BIW,
+            door_f: ACCORD_DOOR_F,
+            door_r: ACCORD_DOOR_R,
+            fender: ACCORD_FENDER,
+            hood: ACCORD_HOOD,
+            decklid: ACCORD_DECKLID,
+            engine: ACCORD_ENGINE_KG,
+            transaxle: ACCORD_TRANSAXLE_KG,
+            bumper_f: BUMPER_F_KG,
+            bumper_r: BUMPER_R_KG,
+            named: Default::default(),
+            pt_ahead: ACCORD_PT_AHEAD,
+            pt_behind: ACCORD_PT_BEHIND,
+            dash_behind: ACCORD_DASH_BEHIND,
+            pt_clearance: POWERTRAIN_CLEARANCE,
+            crush_yield: CRUSH_YIELD,
+            tower_yield: TOWER_YIELD,
+            footwell_yield: FOOTWELL_YIELD,
+            greenhouse_yield: GREENHOUSE_YIELD,
+            apillar_yield: APILLAR_YIELD,
+            cross_member_yield: CROSS_MEMBER_YIELD,
+            floor_pan_yield: FLOOR_PAN_YIELD,
+            bpillar_upper_yield: BPILLAR_UPPER_YIELD,
+            bpillar_lower_yield: BPILLAR_LOWER_YIELD,
+            intrusion_yield: INTRUSION_YIELD,
+            side_yield: 1.0,
+            door_yield: 1.0,
+            door_hinge: 40e3,
+            door_latch: 50e3,
+            hood_hinge: 40e3,
+            hood_latch: 30e3,
+            trunk_hinge: 25e3,
+            trunk_latch: 45e3,
+            fender_bolt: FENDER_BOLT,
+            fender_row_bolt: FENDER_ROW_BOLT,
+            bumper_bolt: BUMPER_BOLT,
+            bumper_side_bolt: BUMPER_SIDE_BOLT,
+            engine_mount: ENGINE_MOUNT,
+            cooling_stack: COOLING_STACK,
+            wheel_stack: WHEEL_STACK,
+            reach_body: REACH_BODY,
+            reach_panel: REACH_PANEL,
+            edge_spacing: EDGE_SPACING,
+        }
+    }
+}
+
+/// What the rigger reads: the render model (part meshes and markers), the
+/// body surface (a signed field, the belt and shoulder lines, the arches and
+/// the end faces) and the physics block. The section queries have default
+/// implementations on the field (ray marching, as the Rust surface does);
+/// [`Gen3Input`] forwards them to the analytic surface's own functions, so
+/// gen3 is unchanged bit for bit.
+pub trait RigInput {
+    fn model(&self) -> &Model;
+    fn dims(&self) -> Dims;
+    fn physics(&self) -> &Physics;
+    /// The physics part a mesh rides (None: a wheel's piece).
+    fn part_of(&self, mesh: &str) -> Option<Part> {
+        super::gen3::part_of(mesh)
+    }
+    /// The body's signed field (negative inside, about metres near the skin).
+    fn sdf(&self, q: Vec3) -> f32;
+    /// Height of the belt (glass base) and shoulder lines at z.
+    fn belt(&self, z: f32) -> f32;
+    fn shoulder_y(&self, z: f32) -> f32;
+    /// Height of the wheel-arch opening's edge at z (None outside it).
+    fn arch_y(&self, z: f32) -> Option<f32>;
+    /// The nose (`front`) or tail surface at half width `x`, height `y`.
+    fn end_pt(&self, front: bool, x: f32, y: f32) -> Vec3;
+    /// The section rays' origin height.
+    fn ray_y(&self) -> f32;
+
+    fn grad(&self, q: Vec3) -> Vec3 {
+        let e = 2e-4;
+        let f = |d: Vec3| self.sdf(q + d);
+        Vec3::new(
+            f(Vec3::X * e) - f(-Vec3::X * e),
+            f(Vec3::Y * e) - f(-Vec3::Y * e),
+            f(Vec3::Z * e) - f(-Vec3::Z * e),
+        ) / (2.0 * e)
+    }
+    fn normal(&self, q: Vec3) -> Vec3 {
+        self.grad(q).normalize_or(Vec3::Y)
+    }
+    /// Pull a point near the surface onto it (Newton along the gradient).
+    fn project(&self, mut q: Vec3) -> Vec3 {
+        for _ in 0..6 {
+            let f = self.sdf(q);
+            let g = self.grad(q);
+            let l2 = g.length_squared().max(1e-8);
+            q -= g * (f / l2);
+            if f.abs() < 1e-6 {
+                break;
+            }
+        }
+        q
+    }
+    /// The section ray on plane z at angle θ from straight up (toward +X):
+    /// its first crossing out of the body.
+    fn hit(&self, z: f32, th: f32) -> Vec3 {
+        let o = Vec3::new(0.0, self.ray_y(), z);
+        let d = Vec3::new(th.sin(), th.cos(), 0.0);
+        let f = |t: f32| self.sdf(o + d * t);
+        let mut t0 = 0.0;
+        let mut f0 = f(0.0);
+        if f0 >= 0.0 {
+            return o;
+        }
+        let mut t1;
+        loop {
+            t1 = t0 + (-f0 * 0.8).max(0.002);
+            let f1 = f(t1);
+            if f1 >= 0.0 || t1 > 4.0 {
+                break;
+            }
+            t0 = t1;
+            f0 = f1;
+        }
+        for _ in 0..30 {
+            let m = 0.5 * (t0 + t1);
+            if f(m) < 0.0 {
+                t0 = m;
+            } else {
+                t1 = m;
+            }
+        }
+        o + d * (0.5 * (t0 + t1))
+    }
+    /// θ on section `z` where the surface (left side) is at height `y`.
+    fn theta_at_y(&self, z: f32, y: f32) -> f32 {
+        let (mut lo, mut hi) = (0.02f32, 3.12f32);
+        for _ in 0..40 {
+            let m = 0.5 * (lo + hi);
+            if self.hit(z, m).y > y {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        0.5 * (lo + hi)
+    }
+    /// θ on section `z` where the top (left) is at half width `x`.
+    fn theta_at_x(&self, z: f32, x: f32) -> f32 {
+        let (mut lo, mut hi) = (0.0f32, 1.55f32);
+        for _ in 0..40 {
+            let m = 0.5 * (lo + hi);
+            if self.hit(z, m).x < x {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        0.5 * (lo + hi)
+    }
+    /// θ of the greenhouse's corner: where the normal leans 50° from up.
+    fn theta_corner(&self, z: f32) -> f32 {
+        let (mut lo, mut hi) = (0.05f32, 1.5f32);
+        for _ in 0..40 {
+            let m = 0.5 * (lo + hi);
+            let n = self.normal(self.hit(z, m));
+            if n.y > 50f32.to_radians().cos() {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        0.5 * (lo + hi)
+    }
+    /// The surface on section `z` at height `y` (left side).
+    fn side(&self, z: f32, y: f32) -> Vec3 {
+        self.hit(z, self.theta_at_y(z, y))
+    }
+    /// The top surface on section `z` at half width `x`.
+    fn top(&self, z: f32, x: f32) -> Vec3 {
+        self.hit(z, self.theta_at_x(z, x))
+    }
+    /// The greenhouse's corner (roof rail, A/C-pillar edge) on section `z`.
+    fn corner(&self, z: f32) -> Vec3 {
+        self.hit(z, self.theta_corner(z))
+    }
+    /// A point `d` metres inside the surface from the surface point `p`.
+    fn inward(&self, p: Vec3, d: f32) -> Vec3 {
+        p - self.normal(p) * d
+    }
+    /// The shut lines' points, when the input knows them: (point on mesh
+    /// `k`, the matching point on mesh `k2`, k, k2), model part indices.
+    /// None: the rigger pairs the meshes' boundary vertices within 1 cm.
+    fn seam_points(&self) -> Option<Vec<(Vec3, Vec3, usize, usize)>> {
+        None
+    }
+}
+
+/// gen3's own input: the Rust render model ([`super::model`]) on its analytic
+/// surface ([`super::surface`]), with the census / Accord physics.
+pub struct Gen3Input<'a> {
+    pub model: &'a Model,
+    pub physics: Physics,
+}
+
+impl<'a> Gen3Input<'a> {
+    pub fn new(model: &'a Model) -> Self {
+        Self {
+            model,
+            physics: Physics::default(),
+        }
+    }
+}
+
+impl RigInput for Gen3Input<'_> {
+    fn model(&self) -> &Model {
+        self.model
+    }
+    fn dims(&self) -> Dims {
+        Dims {
+            axle_f: AXLE_F,
+            axle_r: AXLE_R,
+            tyre_r: TYRE_R,
+            track_half: TRACK_HALF,
+            arch_r: ARCH_R,
+        }
+    }
+    fn physics(&self) -> &Physics {
+        &self.physics
+    }
+    fn sdf(&self, q: Vec3) -> f32 {
+        sf::sdf(q)
+    }
+    fn belt(&self, z: f32) -> f32 {
+        sf::with_profiles(|p| p.belt.at(z))
+    }
+    fn shoulder_y(&self, z: f32) -> f32 {
+        sf::shoulder_y(z)
+    }
+    fn arch_y(&self, z: f32) -> Option<f32> {
+        sf::arch_y(z)
+    }
+    fn end_pt(&self, front: bool, x: f32, y: f32) -> Vec3 {
+        let param = if front { Param::Nose } else { Param::Tail };
+        let (mut lo, mut hi) = (0.0f32, std::f32::consts::FRAC_PI_2);
+        for _ in 0..40 {
+            let m = 0.5 * (lo + hi);
+            if sf::hit(param, m, y).x < x {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        sf::hit(param, 0.5 * (lo + hi), y)
+    }
+    fn ray_y(&self) -> f32 {
+        sf::YC
+    }
+    fn grad(&self, q: Vec3) -> Vec3 {
+        sf::grad(q)
+    }
+    fn normal(&self, q: Vec3) -> Vec3 {
+        sf::normal(q)
+    }
+    fn project(&self, q: Vec3) -> Vec3 {
+        sf::project(q)
+    }
+    fn hit(&self, z: f32, th: f32) -> Vec3 {
+        sf::hit(Param::Section, z, th)
+    }
+    fn theta_at_y(&self, z: f32, y: f32) -> f32 {
+        sf::theta_at_y(z, y)
+    }
+    fn theta_at_x(&self, z: f32, x: f32) -> f32 {
+        sf::theta_at_x(z, x)
+    }
+    fn theta_corner(&self, z: f32) -> f32 {
+        sf::theta_corner(z)
+    }
 }
 
 /// The builder's car plus the rig's per-node member tags.
@@ -225,17 +608,27 @@ pub struct Rig {
     pub member: Vec<Option<Role>>,
     /// Per node: an outer skin node (on the panel surface).
     pub skin: Vec<bool>,
+    /// The front axle's glTF z (the JBeam frame's origin along the car).
+    pub axle_f: f32,
 }
 
 impl Rig {
     fn node(&mut self, name: &str, g: Vec3, part: Part, member: Option<Role>, skin: bool) -> usize {
-        let i = self.car.node(name, to_jbeam(g), part);
+        let i = self.car.node(name, self.to_jbeam(g), part);
         self.member.push(member);
         self.skin.push(skin);
         i
     }
     fn g(&self, i: usize) -> Vec3 {
-        to_gltf(self.car.p(i))
+        self.to_gltf(self.car.p(i))
+    }
+    /// glTF (model) to JBeam (car) coordinates, about this car's front axle.
+    pub fn to_jbeam(&self, g: Vec3) -> Vec3 {
+        Vec3::new(g.x, self.axle_f - g.z, g.y)
+    }
+    /// JBeam to glTF.
+    pub fn to_gltf(&self, j: Vec3) -> Vec3 {
+        Vec3::new(j.x, j.z, self.axle_f - j.y)
     }
     /// Nodes of `part` (structural) nearest a glTF point.
     fn nearest(&self, part: Part, g: Vec3, k: usize, filter: impl Fn(usize) -> bool) -> Vec<usize> {
@@ -300,20 +693,23 @@ impl Aperture {
 
 /// Regions a body beam may not cross (glTF): the door apertures, the cabin,
 /// the engine bay's top and the trunk opening.
-fn body_blocked(p: Vec3, doors: &[Aperture], trunk_z: (f32, f32)) -> bool {
+fn body_blocked(inp: &dyn RigInput, p: Vec3, doors: &[Aperture], trunk_z: (f32, f32)) -> bool {
     let x = p.x.abs();
     if doors.iter().any(|d| d.inside(p, 0.055)) {
         return true;
     }
-    // The cabin's volume (8 cm in from the skin: beams along the bonded
-    // glass and the roof are the shell's, not across the cabin).
-    let cabin =
-        x < 0.62 && p.y > 0.46 && p.y < 1.28 && p.z > -1.72 && p.z < 0.78 && sf::sdf(p) < -0.08;
+    let cabin = in_cabin(inp, p);
     let bay = x < 0.48 && p.y > 0.72 && p.z > 0.98 && p.z < 1.98;
     // The trunk opening (under the lid, from its mesh), clear of the shelf
     // and tail panel at its ends.
     let trunk = x < 0.58 && p.y > 0.86 && p.y < 1.06 && p.z > trunk_z.0 && p.z < trunk_z.1;
     cabin || bay || trunk
+}
+
+/// The cabin's volume (8 cm in from the skin: beams along the bonded glass
+/// and the roof are the shell's, not across the cabin).
+fn in_cabin(inp: &dyn RigInput, p: Vec3) -> bool {
+    p.x.abs() < 0.62 && p.y > 0.46 && p.y < 1.28 && p.z > -1.72 && p.z < 0.78 && inp.sdf(p) < -0.08
 }
 
 fn segment_blocked(a: Vec3, b: Vec3, blocked: &dyn Fn(Vec3) -> bool) -> bool {
@@ -365,10 +761,68 @@ fn graph_pairs(
 
 /// The rigged sedan from the render model.
 pub fn rig(model: &Model) -> Rig {
+    rig_with(&Gen3Input::new(model))
+}
+
+/// The rig of any input ([`RigInput`]): a render model, its body surface and
+/// its physics block.
+pub fn rig_with(inp: &dyn RigInput) -> Rig {
+    let model = inp.model();
+    let dims = inp.dims();
+    let ph = inp.physics();
+    // The surface queries and the running gear, from the input (the local
+    // closures shadow the module's gen3 surface functions in this body).
+    let (axle_f, axle_r, tyre_r, track_half, arch_r) = (
+        dims.axle_f,
+        dims.axle_r,
+        dims.tyre_r,
+        dims.track_half,
+        dims.arch_r,
+    );
+    let side = |z: f32, y: f32| inp.side(z, y);
+    let top = |z: f32, x: f32| inp.top(z, x);
+    let corner = |z: f32| inp.corner(z);
+    let inward = |p: Vec3, d: f32| inp.inward(p, d);
+    let end_pt = |front: bool, x: f32, y: f32| inp.end_pt(front, x, y);
+    let belt = |z: f32| inp.belt(z);
+    let to_jbeam = |g: Vec3| Vec3::new(g.x, axle_f - g.z, g.y);
+    let to_gltf = |j: Vec3| Vec3::new(j.x, j.z, axle_f - j.y);
+    // The physics block (the module's constants are its defaults).
+    let (kerb, accord_biw, accord_door_f, accord_door_r, accord_fender) =
+        (ph.kerb, ph.biw, ph.door_f, ph.door_r, ph.fender);
+    let (accord_hood, accord_decklid, accord_engine_kg, accord_transaxle_kg) =
+        (ph.hood, ph.decklid, ph.engine, ph.transaxle);
+    let (bumper_f_kg, bumper_r_kg) = (ph.bumper_f, ph.bumper_r);
+    let (accord_pt_ahead, accord_pt_behind, accord_dash_behind, powertrain_clearance) =
+        (ph.pt_ahead, ph.pt_behind, ph.dash_behind, ph.pt_clearance);
+    let (crush_yield, tower_yield, footwell_yield, greenhouse_yield, apillar_yield) = (
+        ph.crush_yield,
+        ph.tower_yield,
+        ph.footwell_yield,
+        ph.greenhouse_yield,
+        ph.apillar_yield,
+    );
+    let (cross_member_yield, floor_pan_yield, bpillar_upper_yield, bpillar_lower_yield) = (
+        ph.cross_member_yield,
+        ph.floor_pan_yield,
+        ph.bpillar_upper_yield,
+        ph.bpillar_lower_yield,
+    );
+    let intrusion_yield = ph.intrusion_yield;
+    let (fender_bolt, fender_row_bolt, bumper_bolt, bumper_side_bolt, engine_mount) = (
+        ph.fender_bolt,
+        ph.fender_row_bolt,
+        ph.bumper_bolt,
+        ph.bumper_side_bolt,
+        ph.engine_mount,
+    );
+    let (cooling_stack, wheel_stack, reach_body, reach_panel) =
+        (ph.cooling_stack, ph.wheel_stack, ph.reach_body, ph.reach_panel);
     let mut r = Rig {
         car: Car::default(),
         member: Vec::new(),
         skin: Vec::new(),
+        axle_f: axle_f,
     };
     let body = Part::Body;
 
@@ -516,7 +970,7 @@ pub fn rig(model: &Model) -> Rig {
         // about 20 cm deep fore and aft, not a line of nodes at one station
         // (it rotated back about the sill under the upper load path).
         if std::env::var("GEN3_NO_HPF").is_err() {
-            let zf = (AXLE_F - ARCH_R - 0.08).max(hp_z + 0.12);
+            let zf = (axle_f - arch_r - 0.08).max(hp_z + 0.12);
             for (k, &y) in [0.45f32, 0.80].iter().enumerate() {
                 put(
                     &mut r,
@@ -604,10 +1058,17 @@ pub fn rig(model: &Model) -> Rig {
                 );
             }
             let o = side(z_b, *y);
+            // 15 cm in, but outside the cabin's volume (a node inside it has
+            // every beam blocked: a greenhouse with more tumblehome than
+            // gen3's puts the upper one there).
+            let mut din = 0.15f32;
+            while din > 0.06 && in_cabin(inp, inward(o, din)) {
+                din -= 0.005;
+            }
             put(
                 &mut r,
                 format!("bpi{k}{x}"),
-                inward(o, 0.15),
+                inward(o, din),
                 Some(Role::PillarB),
                 false,
             );
@@ -617,7 +1078,7 @@ pub fn rig(model: &Model) -> Rig {
             let z = 0.5 * (-1.05 + z_c);
             let c = corner(z);
             let p = inward(
-                sf::hit(Param::Section, z, sf::theta_corner(z) + 0.12),
+                inp.hit(z, inp.theta_corner(z) + 0.12),
                 0.015,
             );
             let _ = c;
@@ -644,7 +1105,7 @@ pub fn rig(model: &Model) -> Rig {
         // Quarter panel: rows (the arch or bumper line, the shoulder, the
         // belt/deck edge) at stations behind the rear door.
         for &z in &qz {
-            let bottom = sf::arch_y(z)
+            let bottom = inp.arch_y(z)
                 .map(|a| a + 0.03)
                 .unwrap_or(br_hi.y.min(0.80) + 0.03)
                 .max(y_rocker + 0.02);
@@ -656,7 +1117,7 @@ pub fn rig(model: &Model) -> Rig {
                 Some(Role::Sheet),
                 true,
             ))];
-            let sh = sf::shoulder_y(z);
+            let sh = inp.shoulder_y(z);
             if sh > bottom + 0.06 && sh < top_y - 0.06 {
                 col.push(Some(put(
                     &mut r,
@@ -689,7 +1150,7 @@ pub fn rig(model: &Model) -> Rig {
         put(
             &mut r,
             format!("wh{x}"),
-            Vec3::new(0.60, 0.72, AXLE_R),
+            Vec3::new(0.60, 0.72, axle_r),
             Some(Role::RearRail),
             false,
         );
@@ -723,7 +1184,7 @@ pub fn rig(model: &Model) -> Rig {
         put(
             &mut r,
             format!("tw{x}"),
-            Vec3::new(0.56, 0.80, AXLE_F),
+            Vec3::new(0.56, 0.80, axle_f),
             Some(Role::Apron),
             false,
         );
@@ -969,6 +1430,19 @@ pub fn rig(model: &Model) -> Rig {
     let _ = (
         &rail_lo, &rail_hi, &apron, &floor_r, &sill_b, &rrail, &tunnel,
     );
+    if std::env::var("RIG_DEBUG").is_ok() {
+        for n in ["bpi3L", "bpi3R", "ap1L", "ap1R", "api1L", "rr0L", "rr1L", "bpi2L"] {
+            if let Some(&i) = named_ids.get(n) {
+                let g = r.g(i);
+                eprintln!("{n} {g:?} cabin {} sdf {:.3}", in_cabin(inp, g), inp.sdf(g));
+            }
+        }
+        let ap = [Aperture::of(&door_f.pos), Aperture::of(&door_r.pos)];
+        for a in &ap {
+            eprintln!("aperture z {:.3}..{:.3}", a.z0, a.z1);
+        }
+        eprintln!("z_a {z_a:.3} z_b {z_b:.3} z_c {z_c:.3}");
+    }
     // The body's member graph.
     let body_ids: Vec<usize> = (0..r.car.nodes.len()).collect();
     let apertures = [Aperture::of(&door_f.pos), Aperture::of(&door_r.pos)];
@@ -991,10 +1465,10 @@ pub fn rig(model: &Model) -> Rig {
     graph_pairs(
         &mut r,
         &body_ids,
-        REACH_BODY,
+        reach_body,
         body,
         Role::Web,
-        &|p| body_blocked(p, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06)),
+        &|p| body_blocked(inp, p, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06)),
         &|r, a, b| {
             !split
                 || !((front_member(r, a) && greenhouse(r, b))
@@ -1032,7 +1506,7 @@ pub fn rig(model: &Model) -> Rig {
     let pt_z: [f32; 3] = if old_pt {
         [1.40, 1.61, 1.82]
     } else {
-        let (r0, f0) = (AXLE_F - ACCORD_PT_BEHIND, AXLE_F + ACCORD_PT_AHEAD);
+        let (r0, f0) = (axle_f - accord_pt_behind, axle_f + accord_pt_ahead);
         [r0, 0.5 * (r0 + f0), f0]
     };
     let eng = {
@@ -1076,7 +1550,7 @@ pub fn rig(model: &Model) -> Rig {
                 let st = std::env::var("GEN3_MOUNT")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(ENGINE_MOUNT);
+                    .unwrap_or(engine_mount);
                 r.car.hardware(e, b, Role::Mount, body, &group, st);
             }
         }
@@ -1085,10 +1559,10 @@ pub fn rig(model: &Model) -> Rig {
     // the firewall's nodes): the Accord's dash line is 0.27-0.30 m behind
     // the front axle, so the block's rear face meets it after closing
     // 0.15-0.18 m, less what stays crushed between them (manifold shield
-    // and hoses, POWERTRAIN_CLEARANCE).
-    let dash_gap = 0.5 * (ACCORD_DASH_BEHIND[0] + ACCORD_DASH_BEHIND[1])
-        - ACCORD_PT_BEHIND
-        - POWERTRAIN_CLEARANCE;
+    // and hoses, powertrain_clearance).
+    let dash_gap = 0.5 * (accord_dash_behind[0] + accord_dash_behind[1])
+        - accord_pt_behind
+        - powertrain_clearance;
     let rear_eng: Vec<usize> = eng
         .iter()
         .copied()
@@ -1119,7 +1593,7 @@ pub fn rig(model: &Model) -> Rig {
             for (k, &z) in cols.iter().enumerate() {
                 let bottom = low_at(pts, z, 0.04).unwrap_or(lo.y) + 0.03;
                 let bt = belt(z) - 0.02;
-                let sh = sf::shoulder_y(z);
+                let sh = inp.shoulder_y(z);
                 let rows = [bottom, sh, bt];
                 for (row, &y) in rows.iter().enumerate() {
                     if row == 1 && (y < bottom + 0.06 || y > bt - 0.05) {
@@ -1235,7 +1709,7 @@ pub fn rig(model: &Model) -> Rig {
             let mut below: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
             below.extend(&inner);
             // Below the belt: everything to everything in reach.
-            graph(&mut r, &below, REACH_PANEL, part, Role::DoorFrame, &|_| {
+            graph(&mut r, &below, reach_panel, part, Role::DoorFrame, &|_| {
                 false
             });
             // The frame: front and rear legs from the belt, and the top.
@@ -1461,10 +1935,10 @@ pub fn rig(model: &Model) -> Rig {
             let xi = inner_x_at(&fen, z, 0.04).unwrap_or(0.6) + 0.025;
             let topp = top(z, xi);
             let mut bottom = low_at(&fen, z, 0.04).unwrap_or(0.4) + 0.025;
-            if let Some(a) = sf::arch_y(z) {
+            if let Some(a) = inp.arch_y(z) {
                 bottom = bottom.max(a + 0.025);
             }
-            let sh = sf::shoulder_y(z);
+            let sh = inp.shoulder_y(z);
             let pts = [
                 Some(side(z, bottom)),
                 (sh > bottom + 0.06 && sh < topp.y - 0.05).then(|| side(z, sh)),
@@ -1485,7 +1959,7 @@ pub fn rig(model: &Model) -> Rig {
         r.car
             .panel(&grid, part, &[Role::Sheet; 3], Role::Sheet, true);
         let all: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
-        graph(&mut r, &all, REACH_PANEL, part, Role::Sheet, &|_| false);
+        graph(&mut r, &all, reach_panel, part, Role::Sheet, &|_| false);
         fender_ids.insert(part, all);
     }
 
@@ -1603,11 +2077,11 @@ pub fn rig(model: &Model) -> Rig {
     }
     // The front stack (round 5): the block's front face meets the bumper
     // beam through the cooling module once what lies between is crushed
-    // solid (COOLING_STACK), as a frontal pulse's late peak is the engine
+    // solid (cooling_stack), as a frontal pulse's late peak is the engine
     // stopped against the barrier through the radiator support. BOUNDED
     // stops from the block's front nodes to their two nearest beam nodes.
     if !old_pt && std::env::var("GEN3_NO_STACK").is_err() {
-        let stack = env_f("GEN3_COOLING_STACK", COOLING_STACK);
+        let stack = env_f("GEN3_COOLING_STACK", cooling_stack);
         let front_eng: Vec<usize> = eng
             .iter()
             .copied()
@@ -1635,7 +2109,7 @@ pub fn rig(model: &Model) -> Rig {
     let mut rims = Vec::new();
     for s in [1.0f32, -1.0] {
         let x = lr(s);
-        for (w, za) in [("F", AXLE_F), ("R", AXLE_R)] {
+        for (w, za) in [("F", axle_f), ("R", axle_r)] {
             let wc = marker(model, &format!("wheel_center_{w}{x}"));
             let hi = r.node(
                 &format!("hub{w}i{x}"),
@@ -1675,8 +2149,8 @@ pub fn rig(model: &Model) -> Rig {
             for k in 0..RIM_NODES {
                 let a = (k as f32 + 0.5) * std::f32::consts::TAU / RIM_NODES as f32;
                 let q = Vec3::new(
-                    s * TRACK_HALF,
-                    TYRE_R + RIM_R * a.sin(),
+                    s * track_half,
+                    tyre_r + RIM_R * a.sin(),
                     za + RIM_R * a.cos(),
                 );
                 let rn = r.node(&format!("rim{w}{k}{x}"), q, body, None, false);
@@ -1738,7 +2212,7 @@ pub fn rig(model: &Model) -> Rig {
                             Role::Hinge,
                             part,
                             &format!("{dn}_hinge_{which}"),
-                            40e3,
+                            ph.door_hinge,
                         );
                     }
                 }
@@ -1753,7 +2227,7 @@ pub fn rig(model: &Model) -> Rig {
             let ltag = format!("{dn}_latch");
             r.car.nodes[latch].opts = vec![
                 ("couplerTag".into(), serde_json::json!(ltag)),
-                ("couplerStrength".into(), serde_json::json!(50000)),
+                ("couplerStrength".into(), json_num(ph.door_latch)),
                 ("couplerStartRadius".into(), serde_json::json!(0.02)),
                 (
                     "breakGroup".into(),
@@ -1845,7 +2319,7 @@ pub fn rig(model: &Model) -> Rig {
                     Role::Hinge,
                     Part::Hood,
                     &format!("hood_hinge_{x}"),
-                    40e3,
+                    ph.hood_hinge,
                 );
             }
         }
@@ -1893,7 +2367,7 @@ pub fn rig(model: &Model) -> Rig {
                 mk + Vec3::X * *dx,
                 Part::Hood,
                 &hood_ids,
-                30000.0,
+                ph.hood_latch,
                 &|i, r| r.member[i] == Some(Role::Cross),
             );
         }
@@ -1904,7 +2378,7 @@ pub fn rig(model: &Model) -> Rig {
             mk,
             Part::Trunk,
             &trunk_ids,
-            45000.0,
+            ph.trunk_latch,
             &|i, r| r.member[i] == Some(Role::Cross),
         );
     }
@@ -1937,7 +2411,7 @@ pub fn rig(model: &Model) -> Rig {
                     Role::Hinge,
                     Part::Trunk,
                     &format!("trunk_hinge_{x}"),
-                    25e3,
+                    ph.trunk_hinge,
                 );
             }
         }
@@ -1964,7 +2438,7 @@ pub fn rig(model: &Model) -> Rig {
                         Role::Bolt,
                         part,
                         &format!("fender_{x}_bolt{q}"),
-                        FENDER_BOLT,
+                        fender_bolt,
                     );
                 }
             }
@@ -2002,7 +2476,7 @@ pub fn rig(model: &Model) -> Rig {
                     Role::Bolt,
                     part,
                     &format!("fender_{x}_bracket"),
-                    FENDER_BOLT,
+                    fender_bolt,
                 );
             }
         }
@@ -2044,7 +2518,7 @@ pub fn rig(model: &Model) -> Rig {
                         mount,
                         part,
                         &format!("bumper_{nm}_bolt{q}"),
-                        BUMPER_BOLT,
+                        bumper_bolt,
                     );
                 }
             }
@@ -2081,7 +2555,7 @@ pub fn rig(model: &Model) -> Rig {
                     mount,
                     part,
                     &format!("bumper_{nm}_side"),
-                    BUMPER_SIDE_BOLT,
+                    bumper_side_bolt,
                 );
             }
         }
@@ -2120,7 +2594,7 @@ pub fn rig(model: &Model) -> Rig {
                             Role::Clip,
                             part,
                             &format!("bumper_{nm}_top{k}"),
-                            BUMPER_SIDE_BOLT,
+                            bumper_side_bolt,
                         );
                     }
                 }
@@ -2132,7 +2606,7 @@ pub fn rig(model: &Model) -> Rig {
     // Shut lines: structural edge nodes along both sides of every shut line.
     // ------------------------------------------------------------------
     if std::env::var("GEN3_NO_EDGES").is_err() {
-        edge_nodes(&mut r, model, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06));
+        edge_nodes(&mut r, inp, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06), ph.edge_spacing);
     }
 
     // ------------------------------------------------------------------
@@ -2193,7 +2667,7 @@ pub fn rig(model: &Model) -> Rig {
                         Role::Bolt,
                         part,
                         &format!("fender_{x}_row{k}"),
-                        FENDER_ROW_BOLT,
+                        fender_row_bolt,
                     );
                 }
             }
@@ -2203,13 +2677,13 @@ pub fn rig(model: &Model) -> Rig {
     // ------------------------------------------------------------------
     // Pole lanes: light contact-only nodes on the side-facing skin edges.
     // ------------------------------------------------------------------
-    let surf = |p: Vec3| -> Vec3 { to_jbeam(sf::project(to_gltf(p))) };
+    let surf = |p: Vec3| -> Vec3 { to_jbeam(inp.project(to_gltf(p))) };
     let side_edge = |a: Vec3, b: Vec3| {
         let m = to_gltf(0.5 * (a + b));
         // On the outer skin only (an edge behind another part's skin, such
         // as the sill's top under a door, would put lane nodes in that
         // part's contact band).
-        sf::normal(sf::project(m)).x.abs() > 0.55 && sf::sdf(m) > -0.02
+        inp.normal(inp.project(m)).x.abs() > 0.55 && inp.sdf(m) > -0.02
     };
     let lane_parts: Vec<Part> = if std::env::var("GEN3_NOLANES").is_ok() {
         vec![]
@@ -2298,6 +2772,7 @@ pub fn rig(model: &Model) -> Rig {
         ("hvac_wiring", 40.0, j(Vec3::new(0.0, 0.65, 0.60)), 0.6),
     ];
     for (name, kg, at, radius) in named {
+        let kg = ph.named.get(name).copied().unwrap_or(kg);
         r.car.named.push(Named {
             name,
             kg,
@@ -2323,28 +2798,28 @@ pub fn rig(model: &Model) -> Rig {
         }
     }
     for s in [1.0f32, -1.0] {
-        for (za, kg) in [(AXLE_F, UNSPRUNG_KG + 6.0), (AXLE_R, UNSPRUNG_KG - 6.0)] {
+        for (za, kg) in [(axle_f, UNSPRUNG_KG + 6.0), (axle_r, UNSPRUNG_KG - 6.0)] {
             r.car.named.push(Named {
                 name: "unsprung",
                 kg,
-                at: j(Vec3::new(TRACK_HALF * s, TYRE_R, za)),
+                at: j(Vec3::new(track_half * s, tyre_r, za)),
                 radius: 0.15,
                 part: body,
             });
         }
     }
-    let fixed: f32 = BUMPER_F_KG
-        + BUMPER_R_KG
-        + 2.0 * (ACCORD_DOOR_F + ACCORD_DOOR_R + ACCORD_FENDER)
-        + ACCORD_HOOD
-        + ACCORD_DECKLID
-        + ACCORD_ENGINE_KG
-        + ACCORD_TRANSAXLE_KG
-        + ACCORD_BIW
+    let fixed: f32 = bumper_f_kg
+        + bumper_r_kg
+        + 2.0 * (accord_door_f + accord_door_r + accord_fender)
+        + accord_hood
+        + accord_decklid
+        + accord_engine_kg
+        + accord_transaxle_kg
+        + accord_biw
         + 4.0 * RIM_NODES as f32 * RIM_NODE_KG
         + r.car.named.iter().map(|m| m.kg).sum::<f32>()
         + 4.0 * WHEEL_KG;
-    let module = KERB - fixed;
+    let module = kerb - fixed;
     assert!(module >= 0.0, "masses exceed the kerb by {} kg", -module);
     r.car.named.push(Named {
         name: "front_end_module",
@@ -2354,33 +2829,33 @@ pub fn rig(model: &Model) -> Rig {
         part: body,
     });
     r.car.part_mass = [
-        (Part::Body, ACCORD_BIW),
-        (Part::Engine, ACCORD_ENGINE_KG + ACCORD_TRANSAXLE_KG),
-        (Part::DoorFL, ACCORD_DOOR_F),
-        (Part::DoorFR, ACCORD_DOOR_F),
-        (Part::DoorRL, ACCORD_DOOR_R),
-        (Part::DoorRR, ACCORD_DOOR_R),
-        (Part::Hood, ACCORD_HOOD),
-        (Part::Trunk, ACCORD_DECKLID),
-        (Part::FenderL, ACCORD_FENDER),
-        (Part::FenderR, ACCORD_FENDER),
-        (Part::BumperF, BUMPER_F_KG),
-        (Part::BumperR, BUMPER_R_KG),
+        (Part::Body, accord_biw),
+        (Part::Engine, accord_engine_kg + accord_transaxle_kg),
+        (Part::DoorFL, accord_door_f),
+        (Part::DoorFR, accord_door_f),
+        (Part::DoorRL, accord_door_r),
+        (Part::DoorRR, accord_door_r),
+        (Part::Hood, accord_hood),
+        (Part::Trunk, accord_decklid),
+        (Part::FenderL, accord_fender),
+        (Part::FenderR, accord_fender),
+        (Part::BumperF, bumper_f_kg),
+        (Part::BumperR, bumper_r_kg),
     ]
     .into_iter()
     .collect();
-    r.car.sheet_area = Some(voronoi_area(model, &r.car));
+    r.car.sheet_area = Some(voronoi_area(inp, &r.car));
     r.car.mass_floor = Some(0.7);
     r.car.row_cap_contact_only = false;
     r.car.centred_damping = true;
     r.car.assign_masses();
 
     // The wheel stack (round 5): a front wheel pushed back meets the hinge
-    // pillar's base once its tyre is crushed onto the rim (WHEEL_STACK from
+    // pillar's base once its tyre is crushed onto the rim (wheel_stack from
     // the hub's centre), and loads the sill and A-pillar. BOUNDED stops from
     // both hub nodes to the pillar's base nodes.
     if std::env::var("GEN3_NO_WHEEL_STACK").is_err() {
-        let stack = env_f("GEN3_WHEEL_STACK", WHEEL_STACK);
+        let stack = env_f("GEN3_WHEEL_STACK", wheel_stack);
         for s in [1.0f32, -1.0] {
             let x = lr(s);
             for hub in [format!("hubFi{x}"), format!("hubFo{x}")] {
@@ -2486,11 +2961,11 @@ pub fn rig(model: &Model) -> Rig {
             .unwrap_or(d)
     };
     let (fy, ry, dy) = (
-        env("GEN3_FLOOR_Y", FOOTWELL_YIELD),
-        env("GEN3_ROOF_Y", GREENHOUSE_YIELD),
-        env("GEN3_DOOR_Y", 1.0),
+        env("GEN3_FLOOR_Y", footwell_yield),
+        env("GEN3_ROOF_Y", greenhouse_yield),
+        env("GEN3_DOOR_Y", ph.door_yield),
     );
-    let (sy, cy) = (env("GEN3_SIDE_Y", 1.0), env("GEN3_CRUSH_Y", CRUSH_YIELD));
+    let (sy, cy) = (env("GEN3_SIDE_Y", ph.side_yield), env("GEN3_CRUSH_Y", crush_yield));
     let belt_h = to_jbeam(Vec3::new(0.0, 0.95, 0.0)).z;
     // The door above its crease (the upper inner panel and the belt
     // reinforcement): `GEN3_DOOR_UP_Y` times the door's yield.
@@ -2551,7 +3026,7 @@ pub fn rig(model: &Model) -> Rig {
                 n.starts_with("tw") || n.starts_with("wh") || n.starts_with("hpf")
             };
             b.deform *= if tower(b.a) || tower(b.b) {
-                cy.max(env("GEN3_TOWER_Y", TOWER_YIELD))
+                cy.max(env("GEN3_TOWER_Y", tower_yield))
             } else if mid.y < fw_y - 0.05 {
                 cy * front_grade(mid.y)
             } else {
@@ -2568,7 +3043,7 @@ pub fn rig(model: &Model) -> Rig {
         }
     }
     // The doors' side intrusion beams: `GEN3_INTRUSION_Y` times their yield.
-    let iy = env("GEN3_INTRUSION_Y", INTRUSION_YIELD);
+    let iy = env("GEN3_INTRUSION_Y", intrusion_yield);
     for b in &mut r.car.beams {
         if b.role == Role::Intrusion && b.deform.is_finite() {
             b.deform *= iy;
@@ -2577,7 +3052,7 @@ pub fn rig(model: &Model) -> Rig {
     // The A-pillar's chords (hinge pillar top to the header, outer and inner
     // walls): a hot-stamped section, its yield `GEN3_APILLAR_Y` times the
     // greenhouse's.
-    let ay = env("GEN3_APILLAR_Y", APILLAR_YIELD);
+    let ay = env("GEN3_APILLAR_Y", apillar_yield);
     let chord_ends = ["hp2", "hpi1", "rr0", "rri0"];
     for b in &mut r.car.beams {
         let na = &r.car.nodes[b.a].name;
@@ -2600,8 +3075,8 @@ pub fn rig(model: &Model) -> Rig {
     // end on.
     if std::env::var("GEN3_OLD_SILL").is_err() {
         let (cmy, pany) = (
-            env("GEN3_CM_Y", CROSS_MEMBER_YIELD),
-            env("GEN3_PAN_Y", FLOOR_PAN_YIELD),
+            env("GEN3_CM_Y", cross_member_yield),
+            env("GEN3_PAN_Y", floor_pan_yield),
         );
         // (station, kind): kind 0 sill, 1 floor rail or tunnel.
         let station = |n: &str| -> Option<(usize, u8)> {
@@ -2661,8 +3136,8 @@ pub fn rig(model: &Model) -> Rig {
         // The B-pillar: hot-stamped above the door's crease, the tailored
         // blank's soft zone below it.
         let (bu, bl) = (
-            env("GEN3_BP_UP", BPILLAR_UPPER_YIELD),
-            env("GEN3_BP_LO", BPILLAR_LOWER_YIELD),
+            env("GEN3_BP_UP", bpillar_upper_yield),
+            env("GEN3_BP_LO", bpillar_lower_yield),
         );
         let split = to_jbeam(Vec3::new(0.0, 0.60, 0.0)).z;
         for b in &mut r.car.beams {
@@ -2673,7 +3148,19 @@ pub fn rig(model: &Model) -> Rig {
             b.deform *= if mid.z > split { bu } else { bl };
         }
     }
-    let _ = (ARCH_R, &eng);
+    let _ = (arch_r, &eng);
+    if std::env::var("RIG_DEBUG").is_ok() {
+        let mut cnt = vec![0usize; r.car.nodes.len()];
+        for b in &r.car.beams {
+            cnt[b.a] += 1;
+            cnt[b.b] += 1;
+        }
+        for (i, n) in r.car.nodes.iter().enumerate() {
+            if cnt[i] < 4 {
+                eprintln!("few beams: {} {} {:?}", n.name, cnt[i], r.g(i));
+            }
+        }
+    }
     r
 }
 
@@ -2802,7 +3289,7 @@ fn push_links(r: &mut Rig) {
         (Part::FenderR, Part::Body),
         (Part::Hood, Part::Body),
     ];
-    let axle = AXLE_F;
+    let axle = r.axle_f;
     let reach = env_f("GEN3_PUSH_REACH", PUSH_REACH);
     let cone = (35f32).to_radians().tan();
     for (pa, pb) in pairs {
@@ -2848,10 +3335,12 @@ pub const PUSH_REACH: f32 = 0.30;
 
 fn edge_nodes(
     r: &mut Rig,
-    model: &Model,
+    inp: &dyn RigInput,
     apertures: &[Aperture],
     trunk_z: (f32, f32),
+    edge_spacing: f32,
 ) -> Vec<usize> {
+    let model = inp.model();
     // Skinned and rigid pieces of the parts (glass excluded: it sits in its
     // own part's frame), their boundary vertices.
     let meshes: Vec<(usize, Part, bool)> = model
@@ -2860,7 +3349,7 @@ fn edge_nodes(
         .enumerate()
         .filter(|(_, p)| !p.name.starts_with("glass_"))
         .filter_map(|(k, p)| {
-            super::gen3::part_of(&p.name).map(|part| (k, part, super::gen3::rigid(&p.name)))
+            inp.part_of(&p.name).map(|part| (k, part, super::gen3::rigid(&p.name)))
         })
         .collect();
     let cell = 0.01f32;
@@ -2885,7 +3374,21 @@ fn edge_nodes(
     // Seam points per part pair (lower part first): each side's point and mesh.
     type Pts = Vec<(Vec3, Vec3, usize, usize)>;
     let mut seams: std::collections::BTreeMap<(Part, Part), Pts> = Default::default();
-    for &(k, pa, _) in &meshes {
+    // An input that knows its shut lines (vehicle-gen: the welded skins'
+    // shared boundary points, before the shut-line inset and hems) gives
+    // them directly.
+    if let Some(pairs) = inp.seam_points() {
+        for (q, q2, k, k2) in pairs {
+            let (Some((pa, _)), Some((pb, _))) = (info(k), info(k2)) else {
+                continue;
+            };
+            if pa < pb {
+                seams.entry((pa, pb)).or_default().push((q, q2, k, k2));
+            }
+        }
+    }
+    let derive = inp.seam_points().is_none();
+    for &(k, pa, _) in meshes.iter().filter(|_| derive) {
         for &v in &bnd[k] {
             let q = model.parts[k].pos[v];
             let (x, y, z) = ck(q);
@@ -2955,7 +3458,7 @@ fn edge_nodes(
         });
         let mut picked: Pts = Vec::new();
         for s in &pts {
-            if picked.iter().all(|p| p.0.distance(s.0) >= EDGE_SPACING) {
+            if picked.iter().all(|p| p.0.distance(s.0) >= edge_spacing) {
                 picked.push(*s);
             }
         }
@@ -2973,7 +3476,7 @@ fn edge_nodes(
                     .filter(|m| m.1 == part)
                     .min_by(|x, y| r.g(x.0).distance(g).total_cmp(&r.g(y.0).distance(g)))
                 {
-                    if r.g(near).distance(g) < 0.5 * EDGE_SPACING {
+                    if r.g(near).distance(g) < 0.5 * edge_spacing {
                         pair[side] = Some(near);
                         continue;
                     }
@@ -3016,7 +3519,7 @@ fn edge_nodes(
                 && !r.car.nodes[j].name.starts_with("hub")
                 && !r.car.nodes[j].name.starts_with("rim")
                 && (part != Part::Body
-                    || !segment_blocked(g, r.g(j), &|p| body_blocked(p, apertures, trunk_z)))
+                    || !segment_blocked(g, r.g(j), &|p| body_blocked(inp, p, apertures, trunk_z)))
         };
         let mut frame: Vec<usize> = r
             .nearest(part, g, 12, |j| !edge.contains(&j) && ok(j, r))
@@ -3089,7 +3592,7 @@ fn edge_nodes(
             }
         }
         for j in r.nearest(part, g, 2, |j| edge.contains(&j) && ok(j, r)) {
-            if r.g(j).distance(g) < 1.6 * EDGE_SPACING {
+            if r.g(j).distance(g) < 1.6 * edge_spacing {
                 tie(r, j);
             }
         }
@@ -3110,7 +3613,9 @@ pub fn hub_extra(c: &Car) -> HashMap<usize, f32> {
 /// Each structural node's share of its part's render surface (m²): every
 /// mesh triangle's area, a third to each corner, to the nearest structural
 /// node of the part the mesh rides (wheels' pieces excluded).
-pub fn voronoi_area(model: &Model, car: &Car) -> Vec<f32> {
+pub fn voronoi_area(inp: &dyn RigInput, car: &Car) -> Vec<f32> {
+    let model = inp.model();
+    let axle_f = inp.dims().axle_f;
     let mut area = vec![0.0f32; car.nodes.len()];
     let mut pools: HashMap<Part, Vec<usize>> = HashMap::new();
     for (i, n) in car.nodes.iter().enumerate() {
@@ -3119,7 +3624,7 @@ pub fn voronoi_area(model: &Model, car: &Car) -> Vec<f32> {
         }
     }
     for p in &model.parts {
-        let Some(part) = super::gen3::part_of(&p.name) else {
+        let Some(part) = inp.part_of(&p.name) else {
             continue;
         };
         let Some(pool) = pools.get(&part) else {
@@ -3137,7 +3642,7 @@ pub fn voronoi_area(model: &Model, car: &Car) -> Vec<f32> {
             if a == 0.0 {
                 continue;
             }
-            let q = to_jbeam(p.pos[k]);
+            let q = Vec3::new(p.pos[k].x, axle_f - p.pos[k].z, p.pos[k].y);
             let best = pool
                 .iter()
                 .min_by(|&&x, &&y| {

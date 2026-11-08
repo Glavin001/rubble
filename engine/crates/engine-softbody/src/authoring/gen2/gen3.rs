@@ -72,6 +72,11 @@ pub fn rigid(mesh: &str) -> bool {
 /// The nodes a mesh binds to: its part's structural nodes (no contact-only
 /// lane nodes, latch hardware or wheel nodes), or a wheel's hub and rim nodes.
 pub fn pool(car: &Car, mesh: &str) -> Vec<u32> {
+    pool_with(car, mesh, &part_of)
+}
+
+/// [`pool`] with the meshes on parts by `part_of`.
+pub fn pool_with(car: &Car, mesh: &str, part_of: &dyn Fn(&str) -> Option<Part>) -> Vec<u32> {
     match part_of(mesh) {
         Some(p) => (0..car.nodes.len() as u32)
             .filter(|&i| {
@@ -96,17 +101,29 @@ pub fn pool(car: &Car, mesh: &str) -> Vec<u32> {
 
 /// The skins of every mesh of `glb` over the rig's nodes (JBeam frame).
 pub fn skins(glb: &Glb, car: &Car) -> Result<Skin, String> {
+    skins_with(glb, car, super::surface::AXLE_F, &part_of)
+}
+
+/// [`skins`] about a front axle at glTF z `axle_f`, meshes on parts by
+/// `part_of`.
+pub fn skins_with(
+    glb: &Glb,
+    car: &Car,
+    axle_f: f32,
+    part_of: &dyn Fn(&str) -> Option<Part>,
+) -> Result<Skin, String> {
+    let to_jbeam = |g: Vec3| Vec3::new(g.x, axle_f - g.z, g.y);
     let nodes: Vec<String> = car.nodes.iter().map(|n| n.name.clone()).collect();
     let mut meshes = Vec::new();
     for m in &glb.meshes {
-        let ids = pool(car, &m.name);
+        let ids = pool_with(car, &m.name, part_of);
         if ids.len() < 3 {
             return Err(format!("{}: {} nodes to bind to", m.name, ids.len()));
         }
         let pos: Vec<Vec3> = ids.iter().map(|&i| car.nodes[i as usize].p).collect();
         let (mut vp, mut vn) = (Vec::new(), Vec::new());
         for p in &m.prims {
-            vp.extend(p.pos.iter().map(|q| rig::to_jbeam(Vec3::from_array(*q))));
+            vp.extend(p.pos.iter().map(|q| to_jbeam(Vec3::from_array(*q))));
             vn.extend(p.nrm.iter().map(|q| {
                 let n = Vec3::from_array(*q);
                 Vec3::new(n.x, -n.z, n.y)
@@ -130,6 +147,17 @@ pub fn skins(glb: &Glb, car: &Car) -> Result<Skin, String> {
 /// in [`SKIN_FILE`], placed at the front axle: the mesh's origin is midway
 /// between the axles).
 pub fn flex_rows(glb: &Glb) -> Vec<(Part, Flex)> {
+    flex_rows_with(glb, super::surface::AXLE_F, &part_of, SKIN_FILE)
+}
+
+/// [`flex_rows`] about a front axle at glTF z `axle_f`, meshes on parts by
+/// `part_of`, skins in `skin_file`.
+pub fn flex_rows_with(
+    glb: &Glb,
+    axle_f: f32,
+    part_of: &dyn Fn(&str) -> Option<Part>,
+    skin_file: &str,
+) -> Vec<(Part, Flex)> {
     glb.meshes
         .iter()
         .map(|m| {
@@ -141,8 +169,8 @@ pub fn flex_rows(glb: &Glb) -> Vec<(Part, Flex)> {
                     mesh: m.name.clone(),
                     groups: vec![part.name().to_string()],
                     deform_group: deform,
-                    skin: Some(SKIN_FILE.into()),
-                    pos: Some([0.0, super::surface::AXLE_F, 0.0]),
+                    skin: Some(skin_file.into()),
+                    pos: Some([0.0, axle_f, 0.0]),
                 },
             )
         })
@@ -164,6 +192,18 @@ fn deform_group(mesh: &str) -> Option<String> {
 /// The deform groups (glass and lamps): the nodes of the mesh's part nearest
 /// it carry it; it breaks once their beams yield (ratio).
 pub fn deform_groups(glb: &Glb, car: &Car) -> Vec<(String, Vec<usize>, f32)> {
+    deform_groups_with(glb, car, super::surface::AXLE_F, &part_of)
+}
+
+/// [`deform_groups`] about a front axle at glTF z `axle_f`, meshes on parts
+/// by `part_of`.
+pub fn deform_groups_with(
+    glb: &Glb,
+    car: &Car,
+    axle_f: f32,
+    part_of: &dyn Fn(&str) -> Option<Part>,
+) -> Vec<(String, Vec<usize>, f32)> {
+    let to_jbeam = |g: Vec3| Vec3::new(g.x, axle_f - g.z, g.y);
     let mut out: Vec<(String, Vec<usize>, f32)> = Vec::new();
     for m in &glb.meshes {
         let Some(g) = deform_group(&m.name) else {
@@ -175,9 +215,9 @@ pub fn deform_groups(glb: &Glb, car: &Car) -> Vec<(String, Vec<usize>, f32)> {
         let pts: Vec<Vec3> = m
             .prims
             .iter()
-            .flat_map(|p| p.pos.iter().map(|q| rig::to_jbeam(Vec3::from_array(*q))))
+            .flat_map(|p| p.pos.iter().map(|q| to_jbeam(Vec3::from_array(*q))))
             .collect();
-        let ids = pool(car, &m.name);
+        let ids = pool_with(car, &m.name, part_of);
         let near: Vec<usize> = ids
             .iter()
             .map(|&i| i as usize)

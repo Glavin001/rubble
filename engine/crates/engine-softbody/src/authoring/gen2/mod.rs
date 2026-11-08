@@ -18,6 +18,7 @@ pub mod rig;
 pub mod sedan;
 pub mod shape;
 pub mod surface;
+pub mod vg_input;
 
 pub use build::{Car, Part, Role};
 
