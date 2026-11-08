@@ -36,6 +36,7 @@ fn ram_scene() -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = 0.5;
     s.sim.methods = Methods::established();

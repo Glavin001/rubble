@@ -113,6 +113,7 @@ fn chunks_refine_on_demand_near_an_impact_only() {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = 0.02;
     s.sim.frame_dt = 1e-3;

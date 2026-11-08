@@ -197,7 +197,8 @@ pub fn pack_with(m: &ReferenceSolver, exclude: &[bool]) -> Result<StructureTable
                         s as u32,
                         c as u32,
                     ],
-                    load_range: [0; 4],
+                    // w: its structure is CCD (spawn.slang: its free pieces are CCD bodies).
+                    load_range: [0, 0, 0, m.structures[s].ccd as u32],
                     ..Default::default()
                 });
                 let r = cs.reaction.0;

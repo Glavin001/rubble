@@ -45,7 +45,7 @@ struct SpawnParams_std140_0
     @align(8) island_cap_0 : u32,
     @align(4) moments_base_0 : u32,
     @align(16) info_base_0 : u32,
-    @align(4) pad0_0 : u32,
+    @align(4) ccd_flag_0 : u32,
     @align(8) pad1_0 : u32,
     @align(4) pad2_0 : u32,
 };
@@ -912,6 +912,15 @@ fn child_record_0( slot_2 : u32,  p_4 : u32,  anchored_1 : bool,  mass_1 : f32, 
     {
         spin_0 = to_rubble_0(children_0[u32(8) * slot_2 + u32(6)].xyz);
     }
+    var ccd_0 : u32;
+    if((chunks_0[islands_of_0[p_4].x].load_range_0.w) != u32(0))
+    {
+        ccd_0 = params_0.ccd_flag_0;
+    }
+    else
+    {
+        ccd_0 = u32(0);
+    }
     var flags_0 : u32;
     if(anchored_1)
     {
@@ -919,18 +928,18 @@ fn child_record_0( slot_2 : u32,  p_4 : u32,  anchored_1 : bool,  mass_1 : f32, 
     }
     else
     {
-        flags_0 = u32(9);
+        flags_0 = (u32(9) | (ccd_0));
     }
     var _S48 : array<vec4<f32>, i32(7)> = array<vec4<f32>, i32(7)>( vec4<f32>(to_rubble_0(pose_pos_2 + rotate_0(pose_rot_1, com_1)), inv_mass_0), quat_vec_0(orientation_0), vec4<f32>(inv_inertia_0, (bitcast<f32>((flags_0)))), vec4<f32>(velocity_0, 0.0f), vec4<f32>(spin_0, 0.0f), vec4<f32>(0.0f), vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f) );
     if((params_0.live_0) != u32(0))
     {
-        flags_0 = at_2.x;
+        ccd_0 = at_2.x;
     }
     else
     {
-        flags_0 = at_2.x - control_0[u32(4)];
+        ccd_0 = at_2.x - control_0[u32(4)];
     }
-    var _S49 : u32 = u32(7) * flags_0;
+    var _S49 : u32 = u32(7) * ccd_0;
     var w_1 : u32 = u32(0);
     loop
     {

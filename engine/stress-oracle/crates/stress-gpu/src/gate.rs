@@ -227,6 +227,7 @@ pub fn with_impactor(mut scene: Scene, shape: ImpactorShape, mass: f64, speed: f
         angular_velocity: [0.0; 3],
         material,
         crush: None,
+        ccd: true,
     });
     scene.probes.push(ProbeDesc { name: "ram_velocity".into(), kind: ProbeKind::ImpactorVelocity { impactor: "ram".into(), axis: [1.0, 0.0, 0.0] } });
     with_chunk_probes(scene)

@@ -149,6 +149,7 @@ pub fn body(name: &str, chunks: Vec<ChunkDesc>, bonds: Vec<BondDesc>) -> BodyDes
         angular_velocity: [0.0; 3],
         chunks,
         bonds,
+        ccd: false,
     }
 }
 
@@ -531,6 +532,7 @@ pub fn wall_impact(speed: f64, name: &str) -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = if speed >= 20.0 { 0.04 } else if speed >= 8.0 { 0.1 } else { 0.3 };
     s.sim.sample_interval = Some(5e-4);
@@ -680,6 +682,7 @@ pub fn masonry_wall(speed: f64, name: &str) -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = 0.1;
     s.sim.sample_interval = Some(5e-4);

@@ -51,6 +51,7 @@ fn run(gpu: &Gpu, read_every: usize) -> (usize, usize) {
         angular_velocity: [0.0; 3],
         material: "projectile".into(),
         crush: None,
+        ccd: true,
     };
     let (mut entries, mut reads) = (0usize, 0usize);
     for frame in 0..48 {

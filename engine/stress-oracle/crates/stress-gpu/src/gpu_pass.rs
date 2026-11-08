@@ -307,7 +307,8 @@ impl GpuPass {
                 island_cap: cap,
                 moments_base: 2 * self.chunk_cap.max(1) as u32,
                 info_base: self.chunk_cap.max(1) as u32,
-                pad: [0; 3],
+                ccd_flag: t.target.ccd_flag,
+                pad: [0; 2],
             },
         );
         let spawn_bind = |k: &Kernel| {

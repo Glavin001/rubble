@@ -293,8 +293,11 @@ impl EngineIngest {
         }
         let records = (2 * self.max_rows * substeps.max(1)) as usize;
         let n = self.chunk_count as usize;
+        // The record kernels stride over the records past 65535 groups (coupling.slang
+        // `RECORD_GROUPS`): many substeps' records fit one dispatch.
+        let record_groups = groups(records, 64).min(65535);
         let kernels = [&self.clear, &self.count, &self.scan, &self.scan_top, &self.scan_add, &self.scatter, &self.merge];
-        let sizes = [groups(2 * n, 64), groups(records, 64), groups(n, 1024), 1, groups(n, 64), groups(records, 64), groups(n, 64)];
+        let sizes = [groups(2 * n, 64), record_groups, groups(n, 1024), 1, groups(n, 64), record_groups, groups(n, 64)];
         let labels = ["ingest clear", "ingest count", "ingest scan", "ingest scan blocks", "ingest scan add", "ingest scatter", "ingest merge"];
         let binds = self.binds(gpu, &kernels, [1, 0, 0, 0, substeps], e, || params);
         for (((k, size), label), bind) in kernels.into_iter().zip(sizes).zip(labels).zip(binds) {

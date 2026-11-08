@@ -38,6 +38,7 @@ fn ram_into_free_wall() -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s.sim.duration = 0.5;
     s
@@ -65,6 +66,7 @@ fn rammed(mut scene: Scene, name: &str) -> Scene {
         angular_velocity: [0.0; 3],
         material,
         crush: None,
+        ccd: true,
     });
     scene.name = name.into();
     scene
@@ -92,6 +94,7 @@ fn wrecking_ball(mut scene: Scene, name: &str) -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     scene.sim.duration = 0.3;
     scene.name = name.into();

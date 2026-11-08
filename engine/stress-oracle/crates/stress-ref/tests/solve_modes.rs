@@ -136,6 +136,7 @@ fn wall_and_ram(speed: f64, gap: f64) -> Scene {
         angular_velocity: [0.0; 3],
         material: "steel".into(),
         crush: None,
+        ccd: true,
     });
     s
 }
