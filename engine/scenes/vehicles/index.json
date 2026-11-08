@@ -1,0 +1,103 @@
+{
+ "vehicles": [
+  {
+   "name": "mach1_1969",
+   "title": "1969 fastback Mach 1 (electric blue)",
+   "glb": "mach1_1969/mach1_1969.glb",
+   "thumb": "mach1_1969/renders/mach1_1969_front34.jpg",
+   "design": "engine/tools/vehicle-gen/designs/mach1_1969.py",
+   "size_mm": {
+    "length": 4722,
+    "width": 1870,
+    "height": 1300,
+    "wheelbase": 2743
+   },
+   "triangles": 285290,
+   "parts": 60,
+   "checks_failed": 3
+  },
+  {
+   "name": "mach1_gasser",
+   "title": "Fastback gasser",
+   "glb": "mach1_gasser/mach1_gasser.glb",
+   "thumb": "mach1_gasser/renders/mach1_gasser_front34.jpg",
+   "design": "engine/tools/vehicle-gen/designs/mach1_gasser.py",
+   "base": "mach1_1969",
+   "size_mm": {
+    "length": 4711,
+    "width": 1870,
+    "height": 1381,
+    "wheelbase": 2743
+   },
+   "triangles": 285482,
+   "parts": 61,
+   "checks_failed": 3
+  },
+  {
+   "name": "police_sedan",
+   "title": "Police interceptor",
+   "glb": "police_sedan/police_sedan.glb",
+   "thumb": "police_sedan/renders/police_sedan_front34.jpg",
+   "design": "engine/tools/vehicle-gen/designs/police_sedan.py",
+   "base": "sedan",
+   "size_mm": {
+    "length": 4985,
+    "width": 1882,
+    "height": 1766,
+    "wheelbase": 2830
+   },
+   "triangles": 285948,
+   "parts": 73,
+   "checks_failed": 5
+  },
+  {
+   "name": "sedan",
+   "title": "Mid-size four-door sedan (the art spec's car)",
+   "glb": "sedan/sedan.glb",
+   "thumb": "sedan/renders/sedan_front34.jpg",
+   "design": "engine/tools/vehicle-gen/designs/sedan.py",
+   "size_mm": {
+    "length": 4880,
+    "width": 1882,
+    "height": 1450,
+    "wheelbase": 2830
+   },
+   "triangles": 289196,
+   "parts": 68,
+   "checks_failed": 4
+  },
+  {
+   "name": "suv_4x4",
+   "title": "Off-road 4x4 SUV",
+   "glb": "suv_4x4/suv_4x4.glb",
+   "thumb": "suv_4x4/renders/suv_4x4_front34.jpg",
+   "design": "engine/tools/vehicle-gen/designs/suv_4x4.py",
+   "size_mm": {
+    "length": 4877,
+    "width": 2002,
+    "height": 1907,
+    "wheelbase": 2700
+   },
+   "triangles": 325374,
+   "parts": 69,
+   "checks_failed": 6
+  },
+  {
+   "name": "wagon",
+   "title": "Estate wagon",
+   "glb": "wagon/wagon.glb",
+   "thumb": "wagon/renders/wagon_front34.jpg",
+   "design": "engine/tools/vehicle-gen/designs/wagon.py",
+   "base": "sedan",
+   "size_mm": {
+    "length": 4855,
+    "width": 1882,
+    "height": 1483,
+    "wheelbase": 2830
+   },
+   "triangles": 293554,
+   "parts": 69,
+   "checks_failed": 4
+  }
+ ]
+}

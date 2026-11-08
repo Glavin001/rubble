@@ -4,7 +4,8 @@ engine/target/
 Cargo.lock
 *.spv
 .claude/*
-# Project skills for Claude Code (links to .cursor/skills) are shared.
+# Project agent skills are shared between Claude Code (.claude/skills) and Cursor
+# (.cursor/skills); each skill lives in one and is linked from the other.
 !.claude/skills/
 inspiration/
 

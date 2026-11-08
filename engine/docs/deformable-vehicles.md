@@ -186,7 +186,7 @@ Details: [explicit-vehicles-in-world.md](explicit-vehicles-in-world.md).
 
 - **JBeam (BeamNG format):** parts, slots, `.pc` configs, nodes, beams (all kinds above), triangles, break and deform groups, flexbodies and props. Community vehicles are local-only data: never committed, never executed. See the `beamng-community-content` skill.
 - **`.truck` (Rigs of Rods format):** for Rigs of Rods content and black-box comparison. Rubble's extensions (`rubble_*` lines) carry JBeam features `.truck` can't express.
-- **Rubble's own cars:** the authored sedan and the generated cars (paused; `vehicle-gen2.md`, `vehicle-gen3.md`, branches `feat/vehicle-gen3*`).
+- **Rubble's own cars:** the authored sedan and the vehicle generator (`engine/tools/vehicle-gen`, art models; gen3 physics paused).
 
 **Authoring rules that matter:**
 - lay nodes along the real load paths (rails, pillars, crumple zones), and give parts realistic masses;
