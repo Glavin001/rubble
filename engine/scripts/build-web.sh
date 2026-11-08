@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the WebGPU demos into one static site: the demo scenes (demo.html), the vehicle
 # demo (vehicle.html), soft-body vehicles (softbody.html), heightfield terrain (terrain.html), the meteor impact (impact.html), the meteor run (showcase.html), Broadside (broadside.html), the timber yard (timber.html), the large-maps city (city.html), the motion demo (motion.html:
-# CCD, characters, bullets), the fracture lab (fracture/) and a landing page (index.html).
+# CCD, characters, bullets), the fracture lab (fracture/), the generated vehicle models viewer (models/) and a landing page (index.html).
 # The one command Vercel, CI and local builds use. Runs on Linux and macOS; no GPU needed.
 #
 #   bash engine/scripts/build-web.sh            # output: engine/web-dist/
@@ -207,6 +207,17 @@ cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "
 cp "$WEB"/*.mjs "$OUT"/
 cp -R "$WEB"/generated "$OUT"/generated
 cp -R "$WEB"/fracture "$OUT"/fracture
+# the vehicle-gen model viewer, with the generated vehicles' .glb files and thumbnails
+mkdir -p "$OUT"/models/vehicles
+cp "$ENGINE"/tools/vehicle-gen/viewer/index.html "$OUT"/models/index.html
+cp "$ENGINE"/scenes/vehicles/index.json "$OUT"/models/vehicles/index.json
+for v in "$ENGINE"/scenes/vehicles/*/; do
+  n="$(basename "$v")"
+  [[ -f "$v/$n.glb" ]] || continue
+  mkdir -p "$OUT/models/vehicles/$n/renders"
+  cp "$v/$n.glb" "$OUT/models/vehicles/$n/"
+  if [[ -f "$v/renders/${n}_front34.jpg" ]]; then cp "$v/renders/${n}_front34.jpg" "$OUT/models/vehicles/$n/renders/"; fi
+done
 find "$OUT" \( -name '*.test.mjs' -o -name '.gitignore' -o -name '*-check.mjs' \) -delete
 rm -rf "$OUT"/generated/*/.gitignore "$OUT"/generated/*/package.json
 echo "==> Done: $OUT ($(du -sh "$OUT" | cut -f1))"
