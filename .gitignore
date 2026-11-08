@@ -3,7 +3,9 @@
 engine/target/
 Cargo.lock
 *.spv
-.claude/
+.claude/*
+# Project skills for Claude Code (links to .cursor/skills) are shared.
+!.claude/skills/
 inspiration/
 
 # Web build artifacts
