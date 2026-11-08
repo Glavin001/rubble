@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the WebGPU demos into one static site: the demo scenes (demo.html), the vehicle
 # demo (vehicle.html), soft-body vehicles (softbody.html), heightfield terrain (terrain.html), the meteor impact (impact.html), the meteor run (showcase.html), Broadside (broadside.html), the timber yard (timber.html), the large-maps city (city.html), the motion demo (motion.html:
-# CCD, characters, bullets), the fracture lab (fracture/), the generated vehicle models viewer (models/) and a landing page (index.html).
+# CCD, characters, bullets), the fracture lab (fracture/), the generated vehicle models viewer (models/), the live vehicle designer (vehicle-designer.html) and a landing page (index.html).
 # The one command Vercel, CI and local builds use. Runs on Linux and macOS; no GPU needed.
 #
 #   bash engine/scripts/build-web.sh            # output: engine/web-dist/
@@ -137,6 +137,9 @@ step "Fracture scene wasm (the unit tests; the page loads it inside the world wa
 wasm-pack build crates/engine-fracture-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
 step "World wasm (engine-world-wasm: the pages' physics host, the fracture lab's scenes, Broadside)"
+# the vehicle generator (engine-vehiclegen) for the vehicle designer page
+wasm-pack build crates/engine-vehiclegen-wasm --release --target web \
+  --out-dir ../engine-webgpu/generated/vehiclegen-wasm --no-typescript
 CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
 step "Stress-solver wasm (the Fracture lab's blast_parity, load path and local impact modes)"
@@ -203,7 +206,7 @@ step "Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
 step "Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$OUT"/
+cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$WEB"/vehicle-designer.html "$OUT"/
 cp "$WEB"/*.mjs "$OUT"/
 cp -R "$WEB"/generated "$OUT"/generated
 cp -R "$WEB"/fracture "$OUT"/fracture
