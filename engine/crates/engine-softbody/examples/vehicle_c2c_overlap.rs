@@ -765,6 +765,23 @@ fn main() -> Result<(), String> {
             slab_vol_max = slab_vol_max.max(svol);
         }
         let dead = |s: &ExplicitBeams| s.tri_dead.iter().filter(|&&x| x).count();
+        if std::env::var("PITCH").is_ok() && full {
+            // The front hubs' height (car A, B): a nose lifting or diving.
+            let hy = |s: &ExplicitBeams| {
+                ["hubFiL", "hubFiR"]
+                    .iter()
+                    .filter_map(|n| l.desc.nodes.iter().position(|x| x.name == *n))
+                    .map(|i| s.origin.y + s.nodes[i].pos.y)
+                    .sum::<f32>()
+                    / 2.0
+            };
+            println!(
+                "  {:4.0} ms front hubs y A {:.3} B {:.3} m",
+                k as f32 * 0.5,
+                hy(&w.vehicles[0]),
+                hy(&w.vehicles[1])
+            );
+        }
         if full {
             let f = |r: &Dir| {
                 format!(

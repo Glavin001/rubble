@@ -82,6 +82,18 @@ Python designs (not yet ported to Rust) build their `.glb` and
   each render triangle on three nodes gives that triangle. It covers glass,
   pillars, floor and tail face, and never spans an opening. Sliver and
   off-skin triangles are dropped.
+  - The pool is the nodes on the skin (|sdf| < 3 cm: no bumper beam or inner
+    frames); a triangle is judged by its three cells' area-weighted normal,
+    not the one render triangle at their junction; a quad of four meeting
+    cells keeps its shorter diagonal.
+  - The front cover carries a row on the grille's top edge; seam bridges
+    (the same triangulation over all parts' skin nodes and the grille, plus
+    a zipper from the open edges) close the strips between parts' patches
+    (cover, grille, hood, lamps, fenders), owned by the moving part, with no
+    break group (`handoff/known-bugs.md` S2); doors and the boot lid get none.
+  - Each wheel has a cone from its rim ring to the outer hub node.
+  - Head on, the collision skin is within 15 cm of the first render surface
+    over 92 % of the frontal area (was 68 %; `vehicle_c2c_overlap`).
 - **Aerodynamics.** Triangle drag only (no per-node drag): `dragCoef` sized so
   the skin drags ½ρ·Cd·A·v² head on, A the model's rasterised frontal area.
 - **Visual binding.** Every render vertex is bound by construction (moving
@@ -126,14 +138,14 @@ any JBeam car; the ETK is linted only to check the bands' self-consistency.
 
 | Check | Result | Target |
 |---|---|---|
-| Lattice | 739 nodes, 491 collision triangles, ω·h 1.918, 1,450 kg, CoM 1,176 mm behind the front axle | |
-| Rest fidelity at spawn / parked 10 s | 0.26 mm, 0.06° / 0.52 mm, 0.71° | ≤ 1 mm, 1° |
-| Rest drift, every part / broken, bent | ≤ 3.0 mm / 0, 0 | ≤ 5 mm / 0, 0 |
-| Lint hard rules | mechanism, mass, hardware pass; stability 1.926 (warn, bound 1.92 without the wheels' hub mass); skin coverage p99 0.136 m (just over 0.127) | |
+| Lattice | 744 nodes, 629 collision triangles, ω·h 1.924, 1,450 kg, CoM 1,176 mm behind the front axle | |
+| Rest fidelity at spawn / parked 10 s | 0.26 mm, 0.06° / 0.83 mm, 0.74° | ≤ 1 mm, 1° |
+| Rest drift, every part / broken, bent | ≤ 4.8 mm (rear rail; 5.6 mm without self-collision before the change too) / 0, 0 | ≤ 5 mm / 0, 0 |
+| Lint hard rules | mechanism, mass, hardware pass; stability 1.926 (warn, bound 1.92 without the wheels' hub mass); skin coverage p99 0.116 m (end faces now checked) | |
 | Drive, raycast wheels | 213 km/h top speed (drive setting 237), 0–100 km/h about 7 s; coast-down 1.9 kN at 209 km/h | not drag-capped |
-| Wall 56 km/h: dynamic crush, t_m | 707 mm, 76.5 ms | 620–750, 63–76 |
-| peak g (100 Hz, rear cabin), residual max / avg | 31.3 g, 515 / 301 mm | 34–47, 380–580 / 261–512 |
-| Campbell b1, restitution, feet intrusion | 44.3 /s, 0.255, 176 mm | 22.9–39.2, 0.13–0.20, 1–67 |
+| Wall 56 km/h: dynamic crush, t_m | 713 mm, 77 ms | 620–750, 63–76 |
+| peak g (100 Hz, rear cabin), residual max / avg | 33.2 g, 636 / 553 mm (the nose's middle zones now on the skin; before they had no skin node and read 0) | 34–47, 380–580 / 261–512 |
+| Campbell b1, restitution, feet intrusion | 24.1 /s, 0.256, 173 mm | 22.9–39.2, 0.13–0.20, 1–67 |
 | broken beams, energy ledger | 1 (a hinge group), closes (largest rise 12 J) | |
 | Mesh after the wall: stretch p99, fold p99, seams > 5 cm | 1.37, 6.3°, 81 of 2,770 pairs | ≤ 1.6, ≤ 31° |
 | Side pole 32 km/h 75°: residual / dynamic | 64 / 158 mm (the car slides along the pole) | 297–445 residual |
@@ -141,7 +153,8 @@ any JBeam car; the ETK is linted only to check the bands' self-consistency.
 | MDB 214 residual | 376 mm | 126–206 |
 | Roof FMVSS 216a | 4.84 × weight | 4.48–5.32 |
 | Door FMVSS 214 initial / intermediate / peak | 12.5 / 15.6 / 53.5 kN | ≥ 10.0 / 15.6 / 28.5 |
-| Head on, sedan into sedan, 50 + 50 km/h | dynamic crush 586 / 451 mm, residual 438 / 390 mm, 13 / 9 beams broken, both stop | (≈ the 50 km/h wall) |
+| Head on, sedan into sedan, 50 + 50 km/h | dynamic crush 544 / 519 mm, residual 416 / 402 mm (2 s), cabin peak 27.9 / 28.4 g, 9 / 6 beams broken, both stop | (≈ the 50 km/h wall) |
+| Head on: the other car inside the collision hull, peak / at 0.6 s (`vehicle_c2c_overlap`) | contact nodes 29 / 34, deepest 302 / 331 mm; paint vertices p99 220 / 196 mm; 98 L / 8 / 10 nodes, paint p99 67 / 59 mm | 0 (was 147 / 130 nodes, 450 mm, 1,256 L) |
 
 **On the GPU, in the World** (`engine-world` example `coupling_wall_gpu`,
 `CW_MOD=crates/engine-webgpu/__mods/sedan CW_PC=sedan/sedan.pc`, 60 Hz World,
@@ -178,8 +191,10 @@ The rigger takes any design through the same input trait. What each needs:
   nodes as collision triangle corners made the side pole inject energy
   (3.7e29 J) with surface contact on; generated cars have no lanes. An engine
   question for the user (`handoff/known-bugs.md`).
-- **Collision skin:** p99 just over the coverage rule at the bumper corners by
-  the arches and the fender's lower rear corner; one pole-sweep pass-through.
+- **Collision skin:** one pole-sweep pass-through; below the bumper's lower
+  row (under 0.29 m) and the tread beyond the rim ring stay open; the front
+  corners (hood, fender, lamp, cover) still take most of the remaining
+  head-on entries. Engine-side remainder: `handoff/known-bugs.md` S2.
 - **Lattice from the design.** Member stations and heights are still sedan
   numbers (rails, floor, roof stations): derive them from the key lines so
   any proportion (the designer's sliders, the SUV) rigs right.

@@ -1093,6 +1093,7 @@ fn bridge_seams(
                         | Part::Engine
                 )
             }) || (parts[0] == parts[1] && parts[1] == parts[2])
+                || (std::env::var("RIG_BRIDGE_NO_BODY").is_ok() && parts.contains(&Part::Body))
             {
                 return false;
             }
