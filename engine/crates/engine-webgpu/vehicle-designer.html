@@ -239,7 +239,18 @@ function show(msg) {
   const s = bodyBox.getSize(new THREE.Vector3());
   $('dims').textContent = `${s.z.toFixed(2)} × ${s.x.toFixed(2)} × ${box.max.y.toFixed(2)} m`;
   $('stats').textContent = `built in ${msg.ms.toFixed(0)} ms (Rust → wasm) · ${msg.parts.length} parts · ${msg.markers.length} markers · ${msg.triangles.toLocaleString()} triangles`;
-  if (!framed) { framed = true; controls.target.set(0, box.getCenter(new THREE.Vector3()).y, 0); }
+  if (!framed) {
+    // frame the first car: back off along the view until its bounding
+    // sphere fits the narrower field of view (later builds keep your view)
+    framed = true;
+    const sph = box.getBoundingSphere(new THREE.Sphere());
+    const vf = THREE.MathUtils.degToRad(camera.fov) / 2;
+    const hf = Math.atan(Math.tan(vf) * camera.aspect);
+    const d = sph.radius / Math.sin(Math.min(vf, hf)) * 1.05;
+    controls.target.set(0, sph.center.y, 0);
+    const dir = camera.position.clone().sub(controls.target).normalize();
+    camera.position.copy(controls.target).addScaledVector(dir, d);
+  }
 }
 worker.onmessage = (e) => {
   const m = e.data;
