@@ -143,10 +143,19 @@ any JBeam car; the ETK is linted only to check the bands' self-consistency.
 | Door FMVSS 214 initial / intermediate / peak | 12.5 / 15.6 / 53.5 kN | ≥ 10.0 / 15.6 / 28.5 |
 | Head on, sedan into sedan, 50 + 50 km/h | dynamic crush 586 / 451 mm, residual 438 / 390 mm, 13 / 9 beams broken, both stop | (≈ the 50 km/h wall) |
 
+**On the GPU, in the World** (`engine-world` example `coupling_wall_gpu`,
+`CW_MOD=crates/engine-webgpu/__mods/sedan CW_PC=sedan/sedan.pc`, 60 Hz World,
+raycast wheels, 50 km/h): it loads and runs the generated car unchanged.
+Into a free 1,500 kg box the box leaves at 3.9 m/s; into a wall of 192
+loose 25 kg bricks the car goes through at 6.8 m/s with 98 bricks moving
+and 0 beams broken.
+
 Clips (CPU reference, frame-locked; crashes at 7.5× slow motion):
 `~/Development/rubble-artifacts/vehicle-gen-physics/sedan-{drive,wall,pole,c2c,wall-orbit,c2c-orbit}.mp4`,
 stills in `stills/`. After the wall the hood buckles, the fender tears at the
-arch, the front doors gap at the A-pillar and the cabin stays whole.
+arch, the front doors gap at the A-pillar and the cabin stays whole. At the
+pole the struck front door's leading edge stands open from the A-pillar (a
+visible follow-up).
 
 ## Other designs
 
@@ -179,5 +188,6 @@ The rigger takes any design through the same input trait. What each needs:
   (the named masses ride the body).
 - **Mod size:** the Rust sedan's mod is about 85 MB, mostly the `.rskin`
   (308k render vertices).
-- **On the GPU page:** load and record `softbody.html?mod=/__mods/sedan` and a
-  World scene with rigid bodies (not done here; the clips are CPU reference).
+- **On the GPU page:** record `softbody.html?mod=/__mods/sedan` in Chrome (the
+  GPU World run is native here; the clips are CPU reference rendered in
+  Blender).

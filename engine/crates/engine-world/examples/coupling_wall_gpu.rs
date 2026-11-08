@@ -39,17 +39,21 @@ fn main() -> anyhow::Result<()> {
         turbulence: false,
         ..Default::default()
     };
-    let dir = std::path::PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../engine-webgpu/__mods/etkk_tex"
-    ));
+    // CW_MOD: another mod folder (a generated car's, `vehicle_gen_rig`),
+    // CW_PC its `.pc` under the folder (default the ETK's).
+    let dir = std::env::var("CW_MOD").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../engine-webgpu/__mods/etkk_tex"
+        ))
+    });
     let list: Vec<String> =
         serde_json::from_str(&std::fs::read_to_string(dir.join("files.json"))?)?;
     let mut files = Vec::new();
     for f in list.iter().filter(|f| f.ends_with(".jbeam")) {
         files.push((f.clone(), std::fs::read_to_string(dir.join(f))?));
     }
-    let pc = std::fs::read_to_string(dir.join("etkk/kc6.pc"))?;
+    let pc = std::fs::read_to_string(dir.join(std::env::var("CW_PC").unwrap_or_else(|_| "etkk/kc6.pc".into())))?;
     let refs: Vec<(&str, &str)> = files
         .iter()
         .map(|(n, t)| (n.as_str(), t.as_str()))
