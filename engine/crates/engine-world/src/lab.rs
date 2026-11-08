@@ -750,9 +750,10 @@ pub struct Lab {
     props: Option<DestructibleId>,
     /// Per scene body, its world slot (`u32::MAX`: none). Bond models only.
     slot_of: Vec<u32>,
-    /// Bond models: the parked ball bodies, one per ball slot. Stress models: the live
-    /// balls, oldest first.
+    /// Bond models: the parked ball bodies, one per ball slot.
     shots: Vec<BodyId>,
+    /// Stress models: the live balls, oldest first (the shared pool, `play::balls`).
+    balls: crate::play::balls::Balls,
     fired: u32,
     shooting: Shooting,
     material: SurfaceMaterial,
@@ -876,6 +877,7 @@ impl Lab {
             props: None,
             slot_of,
             shots,
+            balls: crate::play::balls::Balls::new(1, 1),
             fired: 0,
             shooting: Shooting::of(s, &plan.def.settings),
             material,
@@ -964,6 +966,10 @@ impl Lab {
             props,
             slot_of: Vec::new(),
             shots: Vec::new(),
+            balls: crate::play::balls::Balls::new(
+                s.projectile_count.max(1).min(STRESS_SHOTS) as usize,
+                usize::MAX,
+            ),
             fired: 0,
             shooting: sh,
             material,
@@ -1182,29 +1188,14 @@ impl Lab {
             world.body_set_type(body, BodyType::Dynamic, at, f3(v), f3(w))?;
             world.body_set_mass_data(body, mass_data)?;
         } else {
-            if self.shots.len() >= count.min(STRESS_SHOTS) as usize {
-                let old = self.shots.remove(0);
-                world.destroy_body(old)?;
-            }
-            let ball = world.create_body(&BodyDef {
-                linear_velocity: f3(v),
-                angular_velocity: f3(w),
-                is_bullet: self.shooting.ccd,
-                ..BodyDef::dynamic(at.position)
-            })?;
-            world.create_sphere_shape(
-                ball,
-                &ShapeDef {
-                    material: self.material,
-                    update_body_mass: false,
-                    ..ShapeDef::default()
-                },
-                [0.0; 3],
-                r,
-            )?;
-            world.body_set_mass_data(ball, mass_data)?;
-            world.body_set_projectile(ball, Some(Projectile::default()))?;
-            self.shots.push(ball);
+            let ball = crate::play::balls::Ball {
+                mass: m,
+                radius: r,
+                material: self.material,
+                ccd: self.shooting.ccd,
+            };
+            let step = world.step_count();
+            self.balls.fire(world, &ball, at.position, f3(v), f3(w), step)?;
         }
         self.fired += 1;
         Ok(slot)
@@ -1373,8 +1364,8 @@ impl Lab {
             }
         }
         let count = self.scene.projectile_count.max(1) as usize;
-        let first = self.fired as usize - self.shots.len();
-        for (k, &b) in self.shots.iter().enumerate() {
+        let first = self.fired as usize - self.balls.len();
+        for (k, &(b, _)) in self.balls.live().iter().enumerate() {
             let slot = self.scene.projectile_start as usize + (first + k) % count;
             if let Some(t) = world.body_transform(b).ok().flatten() {
                 if slot < n {

@@ -16,15 +16,8 @@ use engine_schema::guidance::{ZoneDesc, ZoneMotion, ZoneShape, GUIDE_PATH_KEYS};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-/// Lane centres (x): steered, then unsteered (the steered lane is on the
-/// left of a camera looking down the range, +Z).
-pub const LANES: [f32; 2] = [15.0, -15.0];
-/// Pad centres within a lane (x offset, z) and their half size (m).
-pub const PADS: [[f32; 2]; 3] = [[-4.0, 10.0], [4.0, 18.0], [0.0, 28.0]];
-pub const PAD_HALF: f32 = 1.0;
-/// Meteor radius (m) and mass (kg).
-pub const RADIUS: f32 = 0.5;
-pub const MASS: f32 = 500.0;
+pub use engine_vehicle::streets::meteors::*;
+
 /// Launch point (lane-relative x, y, z) and flight time (s).
 const LAUNCH: [f32; 3] = [0.0, 30.0, -50.0];
 const FLIGHT: f32 = 3.0;
@@ -38,13 +31,6 @@ const CART_PHASE: f32 = 2.3;
 /// How far ahead (s) a known route reaches: past every flight's landing.
 const ROUTE_AHEAD: f32 = 8.0;
 
-#[derive(Clone, Copy, Debug, Serialize)]
-pub struct Pad {
-    pub p: [f32; 3],
-    pub half: [f32; 3],
-    pub lane: u32,
-}
-
 /// One meteor of a volley: its lane, pad, launch state and the tag mask that
 /// steers it toward its pad's zone (0: not steered).
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -54,21 +40,6 @@ pub struct Launch {
     pub p: [f32; 3],
     pub v: [f32; 3],
     pub tags: u32,
-}
-
-/// Pad centres on the ground, both lanes.
-pub fn pads() -> Vec<Pad> {
-    LANES
-        .iter()
-        .enumerate()
-        .flat_map(|(l, &x)| {
-            PADS.iter().map(move |p| Pad {
-                p: [x + p[0], 0.0, p[1]],
-                half: [PAD_HALF, 0.02, PAD_HALF],
-                lane: l as u32,
-            })
-        })
-        .collect()
 }
 
 /// Pad `pad`'s centre x in lane `lane` at time `t` (s).

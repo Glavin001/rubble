@@ -6,7 +6,7 @@
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
-  hiresCarJbeam, explicitSedanTruck,
+  hiresCarJbeam, explicitSedanTruck, sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -28,6 +28,34 @@ export async function createWorld(def = {}) {
   const world = await WebWorld.create(def);
   world.flags = solverFlags();
   return world;
+}
+
+/**
+ * A demo scene placed in Rust (`rubble::play::SceneDef`: `{ family, ... }` from
+ * `sceneFromQuery(family, location.search)` or `presetScene(name)`), its world on its own
+ * device with `settings` (`WorldDef` fields, as `createWorld` takes them) over the scene's
+ * own; place it with `world.placeScene(def)`.
+ */
+export async function createScene(def, settings = undefined) {
+  ready ??= init();
+  await ready;
+  const world = await WebWorld.createScene(def, settings);
+  world.flags = solverFlags();
+  return world;
+}
+
+/** The scene a family's page builds from its URL query (`rubble::play::SceneDef::from_query`). */
+export async function sceneFromQuery(family, query) {
+  ready ??= init();
+  await ready;
+  return wasmSceneFromQuery(family, query);
+}
+
+/** Preset `name`'s scene (`rubble::play::Preset::scene_def`). */
+export async function presetScene(name) {
+  ready ??= init();
+  await ready;
+  return wasmPresetScene(name);
 }
 
 /**

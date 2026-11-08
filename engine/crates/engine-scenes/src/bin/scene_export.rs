@@ -8,7 +8,8 @@
 //! records) and `<id>.json` (counts, interaction slots, joint field offsets).
 //! Scenes are built on the host (`build_host`), so this needs no GPU and runs on any
 //! platform; `--no-default-features` leaves out the Metal world (the Linux web build).
-//! The page uploads the records as-is; scene logic stays in Rust.
+//! The page uploads the records as-is; scene logic stays in Rust. Also writes `demo.json`:
+//! the demo page's scene table (`engine_scenes::web::scenes`).
 
 use engine_scenes::build_host;
 use engine_schema::*;
@@ -55,6 +56,12 @@ fn main() -> anyhow::Result<()> {
     };
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine-webgpu/generated/scenes");
     std::fs::create_dir_all(&out)?;
+    // The demo page's scene table (engine_scenes::web): names, cameras, solver constants,
+    // capacities; its built scenes are made in Rust when placed (engine-world play::rigid).
+    std::fs::write(
+        out.join("demo.json"),
+        serde_json::to_string_pretty(&engine_scenes::web::scenes_json())?,
+    )?;
     for (name, id) in pairs {
         let (world, info) = build_host(&name)?;
         let mut snap = world.snapshot();
@@ -138,6 +145,11 @@ fn main() -> anyhow::Result<()> {
             "dragJoint": drag_joint,
             "motors": motors,
             "servos": servos,
+            // The world's capacities for its counts (the demo page's `WorldDef`).
+            "cap": engine_scenes::web::Capacity::for_bodies(
+                snap.bodies.len() as u32,
+                64.max(snap.joints.len() as u32 + 1),
+            ),
             "params": { "dt": params.dt, "sleepTime": params.sleep_time, "gravityY": params.gravity_y },
             "jointLayout": {
                 "stride": std::mem::size_of::<Joint>(),

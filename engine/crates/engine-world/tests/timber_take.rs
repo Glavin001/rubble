@@ -1,8 +1,9 @@
+#![cfg(feature = "stress")]
 //! The timber yard natively: a cannonball volley breaks the plank wall it hits and nothing
 //! it misses, a volley into the house's front breaks the front while its back stands, and
 //! the raze wrecks the whole yard.
 
-use engine_world_wasm::timber_yard::*;
+use rubble::play::timber_yard::*;
 use rubble::GpuContext;
 use std::time::Instant;
 
