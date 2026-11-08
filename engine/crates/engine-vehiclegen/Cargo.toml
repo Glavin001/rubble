@@ -1,0 +1,11 @@
+[package]
+name = "engine-vehiclegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Procedural part-based vehicle models to the vehicle art spec (the Rust port of engine/tools/vehicle-gen): body surface, block-structured panel mesher, parts, glb export"
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true

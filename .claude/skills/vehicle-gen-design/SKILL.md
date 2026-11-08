@@ -10,6 +10,15 @@ description: Build, vary and debug part-based vehicle models with engine/tools/v
 Read its README section "How a car is built" once; this skill is the working
 procedure. For matching a real car's photos use the `vehicle-from-photos` skill.
 
+## Rust or Python
+
+The generator core is ported to Rust: `engine/crates/engine-vehiclegen` (CLI `vehiclegen`, wasm
+`engine-vehiclegen-wasm`, the live page `engine-webgpu/vehicle-designer.html`). Ported designs
+(the sedan) are changed there; Python designs not yet ported stay in `designs/`. A port must
+match the Python part for part before it replaces it: `tools/stats.py <design>` and the CLI's
+`--stats`, compared with `tools/compare_stats.py`. Speed work on the Rust side must not change
+the output (rerun that comparison).
+
 ## Commands (from engine/tools/vehicle-gen)
 
 ```bash
