@@ -21,6 +21,7 @@ pub mod hatchback;
 pub mod material;
 pub mod members;
 pub mod parts;
+pub mod rig;
 pub mod sedan;
 pub mod skeleton;
 pub mod skin;

@@ -586,6 +586,43 @@ fn body_blocked(inp: &dyn RigInput, p: Vec3, doors: &[Aperture], trunk_z: (f32, 
     cabin || bay || trunk
 }
 
+/// The collision skin's `dragCoef` for a car drag coefficient `cd`. A
+/// triangle's drag is ½ρ·1.28·(dragCoef/100)·A·|u|²·|cos α|
+/// (`explicit_jbeam_ext::aero_tri_force`, both faces), so a skin of
+/// triangles drags ½ρ|u|²·1.28·(dragCoef/100)·Σ A|n·ẑ| head on; the car
+/// should drag ½ρ|u|²·cd·A_f, A_f its frontal area (the render model's
+/// silhouette on the x-y plane, rasterised at 1 cm).
+fn hull_drag_coef(r: &Rig, inp: &dyn RigInput, cd: f32) -> f32 {
+    let s: f32 = r
+        .car
+        .tris
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.n.map(|i| r.g(i));
+            let n = (b - a).cross(c - a);
+            0.5 * n.z.abs()
+        })
+        .sum();
+    let cell = 0.01f32;
+    let mut on: std::collections::HashSet<(i32, i32)> = Default::default();
+    for m in &inp.model().parts {
+        for t in &m.tris {
+            let [a, b, c] = t.map(|k| m.pos[k as usize]);
+            let span = (a - b).length().max((b - c).length()).max((c - a).length());
+            let k = ((span / cell).ceil() as usize).clamp(1, 64);
+            for i in 0..=k {
+                for j in 0..=k - i {
+                    let (u, v) = (i as f32 / k as f32, j as f32 / k as f32);
+                    let p = a + (b - a) * u + (c - a) * v;
+                    on.insert(((p.x / cell).floor() as i32, (p.y / cell).floor() as i32));
+                }
+            }
+        }
+    }
+    let af = on.len() as f32 * cell * cell;
+    100.0 * cd * af / (crate::explicit_jbeam_ext::FLAT_PLATE_CD * s.max(1e-3))
+}
+
 /// Render meshes on the hull (outer skin, glass and lenses), by name.
 fn hull_mesh(name: &str) -> bool {
     name == "body_shell"
@@ -2660,6 +2697,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // ------------------------------------------------------------------
     if inp.hull_triangles() {
         skin_hull(&mut r, inp);
+        r.car.tri_aero = Some((hull_drag_coef(&r, inp, ph.drag_cd), 0.0));
     }
     // ------------------------------------------------------------------
     // Pole lanes: light contact-only nodes on the side-facing skin edges.

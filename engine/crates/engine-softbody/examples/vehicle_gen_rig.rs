@@ -1,9 +1,7 @@
-//! Rigs a vehicle-gen design with crash physics: reads its art `.glb` and
-//! `rig.json` (`engine/tools/vehicle-gen`, `build.py`), builds the gen3
-//! lattice on it (`authoring::gen2::vg_input`), binds every render vertex
+//! Rigs a vehicle design with crash physics (`authoring::rig`, the vehicle
+//! rigger): builds the lattice on the design's render model, binds every render vertex
 //! (`.rskin`) and writes a BeamNG mod folder (JBeam parts, `.pc`, the `.glb`,
-//! the `.rskin`). Then it prints the car's mass, centre of mass and lattice,
-//! and its rest fidelity at spawn (the skinned mesh against the design).
+//! the `.rskin`). Then it prints the car's mass, centre of mass and lattice.
 //!
 //! ```bash
 //! cargo run --release -p engine-softbody --example vehicle_gen_rig -- <design> [--params FILE] [--in DIR] [--out DIR]
@@ -16,7 +14,8 @@
 //! `engine/crates/engine-webgpu/__mods/<design>` (gitignored), which the page
 //! loads as `softbody.html?solver=explicit&mod=/__mods/<design>&pc=<design>/<design>.pc&wheels=raycast`.
 //! Guide: `engine/docs/generated-vehicles.md`.
-use engine_softbody::authoring::gen2::{rig, vg_input};
+use engine_softbody::authoring::gen2::rig as lattice;
+use engine_softbody::authoring::rig;
 use std::path::{Path, PathBuf};
 
 fn pct(v: &mut [f32], q: f32) -> f32 {
@@ -30,7 +29,12 @@ fn pct(v: &mut [f32], q: f32) -> f32 {
 fn main() -> Result<(), String> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let design = a.first().cloned().unwrap_or_else(|| "sedan".into());
-    let opt = |k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).cloned();
+    let opt = |k: &str| {
+        a.iter()
+            .position(|x| x == k)
+            .and_then(|i| a.get(i + 1))
+            .cloned()
+    };
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out: PathBuf = opt("--out")
         .map(PathBuf::from)
@@ -38,7 +42,7 @@ fn main() -> Result<(), String> {
     let params = opt("--params").map(|p| std::fs::read_to_string(p).expect("--params file"));
     let input_dir = opt("--in").map(PathBuf::from);
     let t0 = std::time::Instant::now();
-    let inp = vg_input::VgInput::find(&design, params.as_deref(), input_dir.as_deref())?;
+    let inp = rig::DesignInput::find(&design, params.as_deref(), input_dir.as_deref())?;
     println!(
         "{design}: {} meshes, {} markers ({})",
         inp.model.parts.len(),
@@ -51,7 +55,7 @@ fn main() -> Result<(), String> {
             None => "a Python build's rig.json".into(),
         }
     );
-    let b = vg_input::build(inp)?;
+    let b = engine_softbody::authoring::gen2::vg_input::build(inp)?;
     let nv: usize = b.skin.meshes.iter().map(|m| m.verts.len()).sum();
     let ne: usize = b
         .skin
@@ -65,7 +69,7 @@ fn main() -> Result<(), String> {
         t0.elapsed().as_secs_f32(),
         ne as f32 / nv.max(1) as f32
     );
-    let files = vg_input::files(&b);
+    let files = rig::mod_files(&b);
     let mut bytes = 0usize;
     for (p, data) in &files {
         let path = out.join(p);
@@ -81,7 +85,7 @@ fn main() -> Result<(), String> {
     );
 
     let car = &b.rig.car;
-    let hub = rig::hub_extra(car);
+    let hub = lattice::hub_extra(car);
     let total: f32 = car.nodes.iter().map(|n| n.mass).sum::<f32>() + hub.values().sum::<f32>();
     let com = car
         .nodes

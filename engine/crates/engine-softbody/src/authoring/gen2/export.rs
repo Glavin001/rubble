@@ -228,6 +228,14 @@ pub fn jbeam_files(
             .filter(|t| t.part == part)
             .map(|t| json!([n(t.n[0]), n(t.n[1]), n(t.n[2])]))
             .collect();
+        let trows: Vec<Value> = match car.tri_aero {
+            Some((d, l)) if !trows.is_empty() => {
+                let mut v = vec![json!({"dragCoef": num(d), "liftCoef": num(l)})];
+                v.extend(trows);
+                v
+            }
+            _ => trows,
+        };
         if !trows.is_empty() {
             sec.push(format!(
                 "    \"triangles\": {}",

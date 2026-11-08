@@ -447,6 +447,9 @@ pub struct Car {
     /// the damping, so the bound is the springs' highest mode at
     /// [`OMEGA_H_CENTRED`], damping not counted.
     pub centred_damping: bool,
+    /// The collision triangles' aerodynamics (JBeam `dragCoef`, `liftCoef`),
+    /// written as a modifier row before them; None: the JBeam defaults.
+    pub tri_aero: Option<(f32, f32)>,
     /// Per [`Role::Stop`] beam: the closure (m) after which it engages
     /// (absent: [`super::export::STOP_LEFT`] of its length left).
     pub stop_close: HashMap<usize, f32>,

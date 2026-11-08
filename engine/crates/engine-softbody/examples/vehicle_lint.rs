@@ -22,7 +22,11 @@ fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mods = root.join("crates/engine-webgpu/__mods");
     let other = std::env::var("RUBBLE_LINT_MODS").ok().map(PathBuf::from);
-    let names = if a.is_empty() { vec!["sedan".to_string()] } else { a };
+    let names = if a.is_empty() {
+        vec!["sedan".to_string()]
+    } else {
+        a
+    };
     let mut hard_total = 0;
     for name in names {
         let (label, dir, vehicle, pc, generated) = if let Some((l, rest)) = name.split_once('=') {
@@ -35,10 +39,22 @@ fn main() {
                 false,
             )
         } else if name == "gen3" {
-            ("gen3".into(), mods.join("gen2"), "gen2".into(), Some("gen2.pc".into()), true)
+            (
+                "gen3".into(),
+                mods.join("gen2"),
+                "gen2".into(),
+                Some("gen2.pc".into()),
+                true,
+            )
         } else if name == "etkk" {
             let d = other.clone().unwrap_or(mods.clone()).join("etkk");
-            ("etkk".into(), d, "etkk".into(), Some("kr6.pc".into()), false)
+            (
+                "etkk".into(),
+                d,
+                "etkk".into(),
+                Some("kr6.pc".into()),
+                false,
+            )
         } else {
             (
                 name.clone(),

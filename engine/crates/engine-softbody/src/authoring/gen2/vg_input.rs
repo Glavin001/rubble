@@ -195,11 +195,15 @@ impl VgInput {
         let spec = d
             .rig_spec()
             .ok_or_else(|| format!("design {name} has no rig spec"))?;
-        let (b, cb) = engine_vehiclegen::build_with_body(
-            d.as_ref(),
-            engine_vehiclegen::BuildOpts::default(),
+        let (b, cb) =
+            engine_vehiclegen::build_with_body(d.as_ref(), engine_vehiclegen::BuildOpts::default());
+        let bytes = glb(
+            &render_parts(&b.parts),
+            &b.markers,
+            b.paint,
+            b.metallic,
+            b.roughness,
         );
-        let bytes = glb(&render_parts(&b.parts), &b.markers, b.paint, b.metallic, b.roughness);
         let rig = rig_json_of(name, d.as_ref(), &cb, &b.markers, &spec);
         Self::new(rig, bytes)
     }
@@ -305,7 +309,8 @@ impl VgInput {
         );
         let (a, b) = (tx - i as f32, ty - j as f32);
         let (z00, z10, z01, z11) = (tab[i][j], tab[i + 1][j], tab[i][j + 1], tab[i + 1][j + 1]);
-        let z = z00 * (1.0 - a) * (1.0 - b) + z10 * a * (1.0 - b) + z01 * (1.0 - a) * b + z11 * a * b;
+        let z =
+            z00 * (1.0 - a) * (1.0 - b) + z10 * a * (1.0 - b) + z01 * (1.0 - a) * b + z11 * a * b;
         let zx = ((z10 - z00) * (1.0 - b) + (z11 - z01) * b) / e.d;
         let zy = ((z01 - z00) * (1.0 - a) + (z11 - z10) * a) / e.d;
         (z, zx, zy)
@@ -511,7 +516,10 @@ pub fn files(b: &Built) -> Vec<(String, Vec<u8>)> {
         .into_iter()
         .map(|(p, t)| (rename_path(&p, &name), rename(&t, &name).into_bytes()))
         .collect();
-    out.push((format!("{name}/{}", glb_file(&name)), b.input.glb_bytes.clone()));
+    out.push((
+        format!("{name}/{}", glb_file(&name)),
+        b.input.glb_bytes.clone(),
+    ));
     out.push((format!("{name}/{}", skin_file(&name)), b.skin.encode()));
     let list: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
     let index = serde_json::to_string(&list).unwrap();
@@ -541,8 +549,16 @@ fn rig_json_of(
     spec: &engine_vehiclegen::RigSpec,
 ) -> RigJson {
     const KEYLINES: [&str; 10] = [
-        "floor", "sill", "door_bottom", "widest", "waist", "shoulder", "belt", "roof_rail",
-        "glass_edge", "centre",
+        "floor",
+        "sill",
+        "door_bottom",
+        "widest",
+        "waist",
+        "shoulder",
+        "belt",
+        "roof_rail",
+        "glass_edge",
+        "centre",
     ];
     let (dz, dv, dxy) = (0.02f64, 1.0 / 16.0, 0.02f64);
     let tube = &cb.l.tube;
@@ -577,7 +593,11 @@ fn rig_json_of(
     let (nx, ny) = (61usize, 111usize);
     let tab = |g: &dyn Fn(f64, f64) -> f64| -> Vec<Vec<f32>> {
         (0..nx)
-            .map(|i| (0..ny).map(|j| f(g(dxy * i as f64, dxy * j as f64))).collect())
+            .map(|i| {
+                (0..ny)
+                    .map(|j| f(g(dxy * i as f64, dxy * j as f64)))
+                    .collect()
+            })
             .collect()
     };
     let skins = cb
@@ -647,7 +667,11 @@ fn rig_json_of(
             n: nz,
             lines,
         },
-        zlines: d.zlines().iter().map(|(n, z)| (n.to_string(), f(*z))).collect(),
+        zlines: d
+            .zlines()
+            .iter()
+            .map(|(n, z)| (n.to_string(), f(*z)))
+            .collect(),
         vlines: d.vlines().iter().map(|&v| f(v)).collect(),
         sections: Sections {
             z0: f(z0),

@@ -80,6 +80,10 @@ pub struct Physics {
     pub reach_panel: f32,
     /// Shut-line edge nodes' spacing (m).
     pub edge_spacing: f32,
+    /// The car's drag coefficient on its frontal area (the collision skin's
+    /// triangle aerodynamics are set to give it: no per-node drag). 0.30: a
+    /// current mid-size sedan (the 2011 Accord's published Cd is 0.30-0.31).
+    pub drag_cd: f32,
 }
 
 impl Default for Physics {
@@ -134,6 +138,7 @@ impl Default for Physics {
             reach_body: 0.90,
             reach_panel: 0.66,
             edge_spacing: 0.22,
+            drag_cd: 0.30,
         }
     }
 }

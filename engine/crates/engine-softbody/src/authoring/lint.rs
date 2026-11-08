@@ -110,7 +110,11 @@ impl Cat {
             Cat::Door
         } else if p.contains("hood") || p.contains("bonnet") {
             Cat::Bonnet
-        } else if p.contains("trunk") || p.contains("tailgate") || p.contains("boot") || p.contains("decklid") {
+        } else if p.contains("trunk")
+            || p.contains("tailgate")
+            || p.contains("boot")
+            || p.contains("decklid")
+        {
             Cat::Boot
         } else if p.contains("fender") {
             Cat::Fender
@@ -457,7 +461,11 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             format!(
                 "loose piece of {} nodes ({})",
                 c.len(),
-                c.iter().take(3).map(|&i| nname(i)).collect::<Vec<_>>().join(",")
+                c.iter()
+                    .take(3)
+                    .map(|&i| nname(i))
+                    .collect::<Vec<_>>()
+                    .join(",")
             )
         }));
     }
@@ -534,7 +542,11 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             .filter(|b| b.break_group != 0)
             .map(|b| (pos(b.a), pos(b.b)))
             .collect();
-        let cp: Vec<Vec3> = d.couplers.iter().flat_map(|c| [pos(c.a), pos(c.b)]).collect();
+        let cp: Vec<Vec3> = d
+            .couplers
+            .iter()
+            .flat_map(|c| [pos(c.a), pos(c.b)])
+            .collect();
         let mut missing = Vec::new();
         let mut checked = 0;
         for (name, at) in &ex.markers {
@@ -542,9 +554,12 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             let ok = if name.starts_with("latch_") {
                 cp.iter().any(|&p| near(p))
             } else if name.starts_with("hinge_") || name.starts_with("bolt_") {
-                hw.iter().any(|&(a, b)| near(a) || near(b) || near(0.5 * (a + b)))
+                hw.iter()
+                    .any(|&(a, b)| near(a) || near(b) || near(0.5 * (a + b)))
             } else if name.starts_with("wheel_center_") {
-                d.nodes.iter().any(|n| n.name.starts_with("hub") && near(Vec3::from_array(n.position)))
+                d.nodes
+                    .iter()
+                    .any(|n| n.name.starts_with("hub") && near(Vec3::from_array(n.position)))
             } else {
                 continue;
             };
@@ -631,8 +646,19 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             let pc = piece_of(i as u32);
             let bare = pc.rsplit(':').next().unwrap_or(pc);
             if [
-                "rim", "tyre", "brake", "engine", "wheel", "seat", "dash", "steering",
-                "console", "headliner", "door_trim", "interior", "mirror",
+                "rim",
+                "tyre",
+                "brake",
+                "engine",
+                "wheel",
+                "seat",
+                "dash",
+                "steering",
+                "console",
+                "headliner",
+                "door_trim",
+                "interior",
+                "mirror",
             ]
             .iter()
             .any(|w| bare.starts_with(w))
@@ -701,7 +727,10 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
                 .take(8)
                 .map(|(k, (m, n, c))| {
                     let c = *c / *n as f32;
-                    format!("{k}: {n} vertices, to {m:.2} m, about ({:.2}, {:.2}, {:.2})", c.x, c.y, c.z)
+                    format!(
+                        "{k}: {n} vertices, to {m:.2} m, about ({:.2}, {:.2}, {:.2})",
+                        c.x, c.y, c.z
+                    )
                 })
                 .collect(),
         });
@@ -742,10 +771,25 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
         let part_kg: f64 = own.iter().map(|&i| mass(i)).sum();
         let structural: Vec<usize> = own.iter().copied().filter(|&i| !contact_only(i)).collect();
         let mut nk: Vec<f64> = structural.iter().map(|&i| mass(i)).collect();
-        out.push(banded("nodes", &p.name, structural.len() as f64, band("nodes", c)));
-        out.push(banded("node_kg_p50", &p.name, q(&mut nk, 0.5), band("node_kg", c)));
+        out.push(banded(
+            "nodes",
+            &p.name,
+            structural.len() as f64,
+            band("nodes", c),
+        ));
+        out.push(banded(
+            "node_kg_p50",
+            &p.name,
+            q(&mut nk, 0.5),
+            band("node_kg", c),
+        ));
         let mut en: Vec<f64> = structural.iter().map(|&i| ends[i] as f64).collect();
-        out.push(banded("spring_ends_p50", &p.name, q(&mut en, 0.5), band("ends", c)));
+        out.push(banded(
+            "spring_ends_p50",
+            &p.name,
+            q(&mut en, 0.5),
+            band("ends", c),
+        ));
         let (mut kl, mut eps, mut zeta) = (Vec::new(), Vec::new(), Vec::new());
         for b in &d.beams {
             let (a, bb) = (b.a as usize, b.b as usize);
@@ -767,8 +811,18 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             }
         }
         out.push(banded("kL_p50", &p.name, q(&mut kl, 0.5), band("kl", c)));
-        out.push(banded("yield_strain_p50", &p.name, q(&mut eps, 0.5), band("eps", c)));
-        out.push(banded("zeta_p50", &p.name, q(&mut zeta, 0.5), band("zeta", c)));
+        out.push(banded(
+            "yield_strain_p50",
+            &p.name,
+            q(&mut eps, 0.5),
+            band("eps", c),
+        ));
+        out.push(banded(
+            "zeta_p50",
+            &p.name,
+            q(&mut zeta, 0.5),
+            band("zeta", c),
+        ));
         if c == Cat::Body {
             out.push(banded(
                 "body_mass_share",
@@ -794,7 +848,12 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
                     seals += 1;
                 }
             }
-            let name_of = |g: u32| d.break_groups.get(g as usize - 1).cloned().unwrap_or_default();
+            let name_of = |g: u32| {
+                d.break_groups
+                    .get(g as usize - 1)
+                    .cloned()
+                    .unwrap_or_default()
+            };
             let hinge: Vec<usize> = groups
                 .iter()
                 .filter(|(g, _)| name_of(**g).contains("hinge"))
@@ -813,7 +872,9 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             let latch: Vec<f32> = d
                 .couplers
                 .iter()
-                .filter(|cc| np.get(cc.a as usize) == Some(&pi) || np.get(cc.b as usize) == Some(&pi))
+                .filter(|cc| {
+                    np.get(cc.a as usize) == Some(&pi) || np.get(cc.b as usize) == Some(&pi)
+                })
                 .map(|cc| cc.strength)
                 .collect();
             out.push(Finding {
@@ -829,13 +890,21 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
                 band: "≥ 1 at 35–85 kN".into(),
                 offenders: vec![],
             });
-            out.push(banded("seals_support", &p.name, seals as f64, Some((4.0, 30.0))));
+            out.push(banded(
+                "seals_support",
+                &p.name,
+                seals as f64,
+                Some((4.0, 30.0)),
+            ));
         }
     }
 
     // --- Car-wide bands ------------------------------------------------------
     let springs: Vec<_> = d.beams.iter().collect();
-    let sup = springs.iter().filter(|b| b.kind == BeamKind::Support).count();
+    let sup = springs
+        .iter()
+        .filter(|b| b.kind == BeamKind::Support)
+        .count();
     out.push(banded(
         "support_share",
         "car",
@@ -843,7 +912,12 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
         Some((0.10, 0.17)),
     ));
     let ct: Vec<_> = d.triangles.iter().filter(|t| t.collision).collect();
-    out.push(banded("collision_tris", "car", ct.len() as f64, Some((519.0, 611.0))));
+    out.push(banded(
+        "collision_tris",
+        "car",
+        ct.len() as f64,
+        Some((519.0, 611.0)),
+    ));
     let mut te: Vec<f64> = ct
         .iter()
         .flat_map(|t| {
@@ -851,7 +925,27 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             [(a - b).length(), (b - c).length(), (c - a).length()]
         })
         .collect();
-    out.push(banded("tri_edge_p50", "car", q(&mut te, 0.5), Some((0.36, 0.54))));
+    out.push(banded(
+        "tri_edge_p50",
+        "car",
+        q(&mut te, 0.5),
+        Some((0.36, 0.54)),
+    ));
+    let mut dc: Vec<f64> = ct.iter().map(|t| t.aero[0] as f64).collect();
+    let mut lc: Vec<f64> = ct.iter().map(|t| t.aero[1] as f64).collect();
+    out.push(Finding {
+        rule: "tri_aero",
+        hard: false,
+        part: "car".into(),
+        level: Level::Na,
+        value: format!(
+            "dragCoef p50 {}, liftCoef p50 {}",
+            fmt(q(&mut dc, 0.5)),
+            fmt(q(&mut lc, 0.5))
+        ),
+        band: "JBeam default 100 / 100".into(),
+        offenders: vec![],
+    });
 
     // --- Render mesh bands -----------------------------------------------------
     if let Some(v) = vis {
@@ -878,7 +972,8 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
                     }
                 }
             }
-            let Some((&pp, _)) = votes.iter().max_by_key(|x| (*x.1, std::cmp::Reverse(*x.0))) else {
+            let Some((&pp, _)) = votes.iter().max_by_key(|x| (*x.1, std::cmp::Reverse(*x.0)))
+            else {
                 continue;
             };
             if pp == usize::MAX || Cat::of(&d.parts[pp].name) == Cat::Other {
@@ -889,7 +984,9 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             if !painted {
                 continue;
             }
-            let verts: Vec<Vec3> = (f..f + n).map(|i| Vec3::from_array(v.positions[i])).collect();
+            let verts: Vec<Vec3> = (f..f + n)
+                .map(|i| Vec3::from_array(v.positions[i]))
+                .collect();
             part_verts.entry(pp).or_default().extend(&verts);
             for i in f..f + n {
                 let p = Vec3::from_array(v.positions[i]);
@@ -913,7 +1010,9 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             }
             let ws = weights(i);
             let Some(&w) = ws.first() else { continue };
-            let Some(&pp) = np.get(w as usize) else { continue };
+            let Some(&pp) = np.get(w as usize) else {
+                continue;
+            };
             let [a, b, c] = [t[0], t[1], t[2]].map(|k| Vec3::from_array(v.positions[k as usize]));
             *part_area.entry(pp).or_default() += 0.5 * (b - a).cross(c - a).length() as f64;
         }
@@ -949,10 +1048,20 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
                             .fold(f32::MAX, f32::min) as f64
                     })
                     .collect();
-                out.push(banded("node_to_skin_p50", &p.name, q(&mut dd, 0.5), band("node_dist", c)));
+                out.push(banded(
+                    "node_to_skin_p50",
+                    &p.name,
+                    q(&mut dd, 0.5),
+                    band("node_dist", c),
+                ));
             }
             if let Some(r) = reach.get_mut(&pi) {
-                out.push(banded("vertex_reach_p50", &p.name, q(r, 0.5), band("reach", c)));
+                out.push(banded(
+                    "vertex_reach_p50",
+                    &p.name,
+                    q(r, 0.5),
+                    band("reach", c),
+                ));
             }
         }
     }
