@@ -5,6 +5,13 @@ Each design is a Python file; the generator turns it into a `.glb` that
 follows the [vehicle art spec](../../../docs/vehicle-art-spec.md) (part names, markers, metres,
 +Y up, +Z forward), plus the `.blend` source and studio renders.
 
+**The generator is moving to Rust:** [engine-vehiclegen](../../crates/engine-vehiclegen) is a
+line-for-line port (its sedan matches this one part for part) that runs natively and in the
+browser, where [vehicle-designer.html](../../crates/engine-webgpu/vehicle-designer.html) rebuilds
+the car live as sliders move. Designs not yet ported (Mach 1, 4x4, variants) and the
+photo-matching and Blender render tools stay here; `tools/stats.py` + `tools/compare_stats.py`
+compare the two generators, `tools/render_glb.py` renders any `.glb` in the studio.
+
 The point of generating rather than hand-modelling: the panel layout, edge
 loops, shut lines and markers are exactly what the node/beam builder will
 need next, and we know every vertex's surface parameters.
