@@ -17,8 +17,10 @@
  :root { --bg: #15181d; --panel: #11141a; --line: #2c3340; --fg: #e7eaef; --muted: #9aa3b2; --accent: #5aa9ff; --err: #ff8e8e; }
  * { box-sizing: border-box; }
  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif; overflow: hidden; }
- #app { display: grid; grid-template-columns: 300px 1fr; height: 100%; }
- #side { overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 12px 14px 20px; }
+ #app { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: minmax(0, 1fr); height: 100%; }
+ /* min-height 0: the panel keeps the window's height and scrolls inside
+    (a grid item otherwise grows to its content and nothing scrolls) */
+ #side { min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 12px 14px 20px; }
  h1 { font-size: 15px; margin: 0 0 2px; }
  .sub { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 6px; }
