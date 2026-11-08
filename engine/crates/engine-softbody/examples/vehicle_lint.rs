@@ -12,7 +12,6 @@
 //! and reported for the bands' self-consistency only.
 //! Exit status 1 when a generated car has a hard failure.
 use engine_softbody::authoring::gen2::rig::WHEEL_KG;
-use engine_softbody::authoring::gen2::vg_input::RigJson;
 use engine_softbody::authoring::lint::{self, Expect};
 use engine_softbody::vehicle_compare::{Car, CarSpec, Source};
 use glam::Vec3;
@@ -70,27 +69,18 @@ fn main() {
         // A vehicle-gen design's rig.json (from its build) gives its design
         // mass and its markers.
         let mut ex = Expect::default();
-        let rj = [
-            root.join("tools/vehicle-gen/out").join(&label),
-            root.join("scenes/vehicles").join(&label),
-        ]
-        .into_iter()
-        .map(|d| d.join(format!("{label}.rig.json")))
-        .find(|p| p.exists());
-        if let Some(p) = rj.filter(|_| generated && label != "gen3") {
-            let r: RigJson = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-            let ph: engine_softbody::authoring::gen2::rig::Physics =
-                serde_json::from_value(if r.physics.is_null() {
-                    serde_json::json!({})
-                } else {
-                    r.physics.clone()
-                })
-                .unwrap();
-            ex.mass = Some(ph.kerb - 4.0 * WHEEL_KG);
+        let vg = if generated && label != "gen3" {
+            engine_softbody::authoring::gen2::vg_input::VgInput::find(&label, None, None).ok()
+        } else {
+            None
+        };
+        if let Some(inp) = vg {
+            ex.mass = Some(inp.physics.kerb - 4.0 * WHEEL_KG);
             // glTF to the loader's frame (Rubble: +Y up, +Z forward, the
             // origin at the front axle).
-            let af = r.dims.axle_f;
-            ex.markers = r
+            let af = inp.rig.dims.axle_f;
+            ex.markers = inp
+                .rig
                 .markers
                 .iter()
                 .map(|(n, m)| (n.clone(), Vec3::new(m.pos[0], m.pos[1], m.pos[2] - af)))

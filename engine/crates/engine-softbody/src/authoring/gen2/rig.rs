@@ -244,133 +244,8 @@ pub struct Dims {
     pub arch_r: f32,
 }
 
-/// The editable physics of a design: masses, zone yields, hardware and the
-/// lattice's reach. Every field has the census / 2011 Accord default gen3 was
-/// calibrated with, so an empty block gives a valid car; a vehicle-gen
-/// design states only what differs (`PHYSICS = {...}` in its design file,
-/// exported in `rig.json`; `engine/docs/generated-vehicles.md`). Unknown keys
-/// are an error, so a typo fails loudly.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Physics {
-    /// Kerb mass with the driver (kg). What the parts and named masses do not
-    /// account for goes to the front-end module.
-    pub kerb: f32,
-    /// Part masses (kg): body in white, each front and rear door, each
-    /// fender, hood, decklid (or tailgate), engine, transaxle, bumper
-    /// assemblies (beam and fascia).
-    pub biw: f32,
-    pub door_f: f32,
-    pub door_r: f32,
-    pub fender: f32,
-    pub hood: f32,
-    pub decklid: f32,
-    pub engine: f32,
-    pub transaxle: f32,
-    pub bumper_f: f32,
-    pub bumper_r: f32,
-    /// Overrides of the named masses (kg) by name: driver, front_seats,
-    /// rear_seat, dashboard_steering, fuel, interior, exhaust, spare_wheel,
-    /// battery, radiator_cooling, windshield, rear_glass,
-    /// front_subframe_steering, rear_subframe, hvac_wiring.
-    pub named: std::collections::BTreeMap<String, f32>,
-    /// The powertrain's faces ahead of and behind the front axle (m), the
-    /// dash line behind the axle (m) and what stays crushed between them.
-    pub pt_ahead: f32,
-    pub pt_behind: f32,
-    pub dash_behind: [f32; 2],
-    pub pt_clearance: f32,
-    /// Zone yields as multiples of the census yield (1.15 %), with the steel
-    /// each stands for: the crush zones (DP600 rails and cans), the
-    /// suspension towers, the footwell, the greenhouse, the A-pillar's chords
-    /// (22MnB5), the floor's cross members, the floor pan (0.7 mm HC220B),
-    /// the B-pillar above and below its tailored split, the doors' intrusion
-    /// beams, the side below the belt, the doors.
-    pub crush_yield: f32,
-    pub tower_yield: f32,
-    pub footwell_yield: f32,
-    pub greenhouse_yield: f32,
-    pub apillar_yield: f32,
-    pub cross_member_yield: f32,
-    pub floor_pan_yield: f32,
-    pub bpillar_upper_yield: f32,
-    pub bpillar_lower_yield: f32,
-    pub intrusion_yield: f32,
-    pub side_yield: f32,
-    pub door_yield: f32,
-    /// Hardware strengths per beam (N).
-    pub door_hinge: f32,
-    pub door_latch: f32,
-    pub hood_hinge: f32,
-    pub hood_latch: f32,
-    pub trunk_hinge: f32,
-    pub trunk_latch: f32,
-    pub fender_bolt: f32,
-    pub fender_row_bolt: f32,
-    pub bumper_bolt: f32,
-    pub bumper_side_bolt: f32,
-    pub engine_mount: f32,
-    /// Stacks (m): the cooling module crushed solid; a front wheel's hub to
-    /// the hinge pillar once its tyre is crushed onto the rim.
-    pub cooling_stack: f32,
-    pub wheel_stack: f32,
-    /// The beam graph's reach (m): the body's members, each closure's frame.
-    pub reach_body: f32,
-    pub reach_panel: f32,
-    /// Shut-line edge nodes' spacing (m).
-    pub edge_spacing: f32,
-}
+pub use engine_vehiclegen::physics::Physics;
 
-impl Default for Physics {
-    fn default() -> Self {
-        Self {
-            kerb: KERB,
-            biw: ACCORD_BIW,
-            door_f: ACCORD_DOOR_F,
-            door_r: ACCORD_DOOR_R,
-            fender: ACCORD_FENDER,
-            hood: ACCORD_HOOD,
-            decklid: ACCORD_DECKLID,
-            engine: ACCORD_ENGINE_KG,
-            transaxle: ACCORD_TRANSAXLE_KG,
-            bumper_f: BUMPER_F_KG,
-            bumper_r: BUMPER_R_KG,
-            named: Default::default(),
-            pt_ahead: ACCORD_PT_AHEAD,
-            pt_behind: ACCORD_PT_BEHIND,
-            dash_behind: ACCORD_DASH_BEHIND,
-            pt_clearance: POWERTRAIN_CLEARANCE,
-            crush_yield: CRUSH_YIELD,
-            tower_yield: TOWER_YIELD,
-            footwell_yield: FOOTWELL_YIELD,
-            greenhouse_yield: GREENHOUSE_YIELD,
-            apillar_yield: APILLAR_YIELD,
-            cross_member_yield: CROSS_MEMBER_YIELD,
-            floor_pan_yield: FLOOR_PAN_YIELD,
-            bpillar_upper_yield: BPILLAR_UPPER_YIELD,
-            bpillar_lower_yield: BPILLAR_LOWER_YIELD,
-            intrusion_yield: INTRUSION_YIELD,
-            side_yield: 1.0,
-            door_yield: 1.0,
-            door_hinge: 40e3,
-            door_latch: 50e3,
-            hood_hinge: 40e3,
-            hood_latch: 30e3,
-            trunk_hinge: 25e3,
-            trunk_latch: 45e3,
-            fender_bolt: FENDER_BOLT,
-            fender_row_bolt: FENDER_ROW_BOLT,
-            bumper_bolt: BUMPER_BOLT,
-            bumper_side_bolt: BUMPER_SIDE_BOLT,
-            engine_mount: ENGINE_MOUNT,
-            cooling_stack: COOLING_STACK,
-            wheel_stack: WHEEL_STACK,
-            reach_body: REACH_BODY,
-            reach_panel: REACH_PANEL,
-            edge_spacing: EDGE_SPACING,
-        }
-    }
-}
 
 /// What the rigger reads: the render model (part meshes and markers), the
 /// body surface (a signed field, the belt and shoulder lines, the arches and
@@ -509,6 +384,11 @@ pub trait RigInput {
     /// A point `d` metres inside the surface from the surface point `p`.
     fn inward(&self, p: Vec3, d: f32) -> Vec3 {
         p - self.normal(p) * d
+    }
+    /// The collision skin from the render skin (`skin_hull`) instead of the
+    /// panel grids' triangles; gen3's lattice predates it.
+    fn hull_triangles(&self) -> bool {
+        false
     }
     /// The shut lines' points, when the input knows them: (point on mesh
     /// `k`, the matching point on mesh `k2`, k, k2), model part indices.
@@ -704,6 +584,90 @@ fn body_blocked(inp: &dyn RigInput, p: Vec3, doors: &[Aperture], trunk_z: (f32, 
     // and tail panel at its ends.
     let trunk = x < 0.58 && p.y > 0.86 && p.y < 1.06 && p.z > trunk_z.0 && p.z < trunk_z.1;
     cabin || bay || trunk
+}
+
+/// Render meshes on the hull (outer skin, glass and lenses), by name.
+fn hull_mesh(name: &str) -> bool {
+    name == "body_shell"
+        || name == "hood"
+        || name == "trunk_lid"
+        || name == "tailgate"
+        || name.starts_with("glass_")
+        || name.starts_with("fender_")
+        || name.starts_with("bumper_")
+        || (name.starts_with("door_") && !name.starts_with("door_trim"))
+        || name.ends_with("_lens")
+}
+
+/// The collision skin as the render skin's restricted Delaunay triangulation
+/// over each part's skin nodes (see the call). Replaces the panel grids'
+/// triangles.
+fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
+    let model = inp.model();
+    // Each part's nodes at its skin: structural, within 10 cm of the surface.
+    let mut pool: HashMap<Part, Vec<usize>> = HashMap::new();
+    for i in 0..r.car.nodes.len() {
+        let n = &r.car.nodes[i];
+        if n.contact || n.no_group || n.name.starts_with("hub") || n.name.starts_with("rim") {
+            continue;
+        }
+        if inp.sdf(r.g(i)).abs() < 0.10 {
+            pool.entry(n.part).or_default().push(i);
+        }
+    }
+    let mut tris: Vec<Tri> = Vec::new();
+    let mut seen: std::collections::HashSet<[usize; 3]> = Default::default();
+    for m in &model.parts {
+        if !hull_mesh(&m.name) {
+            continue;
+        }
+        let Some(part) = inp.part_of(&m.name) else {
+            continue;
+        };
+        let Some(ids) = pool.get(&part) else { continue };
+        let gs: Vec<Vec3> = ids.iter().map(|&i| r.g(i)).collect();
+        // The outer surface's vertices only (inner panels and hems are
+        // under it).
+        let near: Vec<Option<usize>> = m
+            .pos
+            .iter()
+            .map(|&p| {
+                (inp.sdf(p).abs() < 0.02).then(|| {
+                    let k = (0..gs.len())
+                        .min_by(|&a, &b| gs[a].distance_squared(p).total_cmp(&gs[b].distance_squared(p)))
+                        .unwrap();
+                    ids[k]
+                })
+            })
+            .collect();
+        for t in &m.tris {
+            let [a, b, c] = t.map(|k| near[k as usize]);
+            let (Some(a), Some(b), Some(c)) = (a, b, c) else {
+                continue;
+            };
+            if a == b || b == c || a == c {
+                continue;
+            }
+            let mut key = [a, b, c];
+            key.sort();
+            if !seen.insert(key) {
+                continue;
+            }
+            let [pa, pb, pc] = t.map(|k| m.pos[k as usize]);
+            let nr = (pb - pa).cross(pc - pa);
+            let (qa, qb, qc) = (r.g(a), r.g(b), r.g(c));
+            let nn = (qb - qa).cross(qc - qa);
+            if nn.length() < 1e-6 {
+                continue;
+            }
+            // (glTF to JBeam is a rotation: the winding carries over.)
+            tris.push(Tri {
+                n: if nn.dot(nr) < 0.0 { [a, c, b] } else { [a, b, c] },
+                part,
+            });
+        }
+    }
+    r.car.tris = tris;
 }
 
 /// The cabin's volume (8 cm in from the skin: beams along the bonded glass
@@ -1245,6 +1209,19 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             Some(Role::Cross),
             false,
         );
+        // The tail panel's face (between the bumper cover and the lid), on
+        // the skin: the skin hull's triangles need nodes there (the tail
+        // panel's member is 10 cm in).
+        if inp.hull_triangles() {
+            let y = 0.5 * (br_hi.y.min(0.85) + tk_lo.y);
+            put(
+                &mut r,
+                format!("tfa{x}"),
+                inward(end_pt(false, 0.45, y), 0.01),
+                Some(Role::Cross),
+                true,
+            );
+        }
         put(
             &mut r,
             format!("tf{x}"),
@@ -1365,6 +1342,16 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         Some(Role::Cross),
         false,
     );
+    if inp.hull_triangles() {
+        let y = 0.5 * (br_hi.y.min(0.85) + tk_lo.y);
+        cput(
+            &mut r,
+            "tfaC",
+            inward(end_pt(false, 0.0, y), 0.01),
+            Some(Role::Cross),
+            true,
+        );
+    }
     cput(
         &mut r,
         "tfC",
@@ -1430,19 +1417,6 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let _ = (
         &rail_lo, &rail_hi, &apron, &floor_r, &sill_b, &rrail, &tunnel,
     );
-    if std::env::var("RIG_DEBUG").is_ok() {
-        for n in ["bpi3L", "bpi3R", "ap1L", "ap1R", "api1L", "rr0L", "rr1L", "bpi2L"] {
-            if let Some(&i) = named_ids.get(n) {
-                let g = r.g(i);
-                eprintln!("{n} {g:?} cabin {} sdf {:.3}", in_cabin(inp, g), inp.sdf(g));
-            }
-        }
-        let ap = [Aperture::of(&door_f.pos), Aperture::of(&door_r.pos)];
-        for a in &ap {
-            eprintln!("aperture z {:.3}..{:.3}", a.z0, a.z1);
-        }
-        eprintln!("z_a {z_a:.3} z_b {z_b:.3} z_c {z_c:.3}");
-    }
     // The body's member graph.
     let body_ids: Vec<usize> = (0..r.car.nodes.len()).collect();
     let apertures = [Aperture::of(&door_f.pos), Aperture::of(&door_r.pos)];
@@ -2675,6 +2649,19 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     }
 
     // ------------------------------------------------------------------
+    // The collision skin from the render skin (an input that opts in,
+    // `RigInput::hull_triangles`): every part's triangles are the render
+    // surface's restricted Delaunay triangulation over the part's nodes at
+    // its skin. Each outer render vertex goes to its nearest such node; each
+    // render triangle whose corners went to three nodes gives that triangle,
+    // facing as the render triangle does. The collision skin then covers the
+    // render skin wherever the part has one (glass, pillars, floor, tail
+    // face) and nowhere else (no triangle across an opening).
+    // ------------------------------------------------------------------
+    if inp.hull_triangles() {
+        skin_hull(&mut r, inp);
+    }
+    // ------------------------------------------------------------------
     // Pole lanes: light contact-only nodes on the side-facing skin edges.
     // ------------------------------------------------------------------
     let surf = |p: Vec3| -> Vec3 { to_jbeam(inp.project(to_gltf(p))) };
@@ -2708,6 +2695,21 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                     && !r.car.nodes[i].edge
             })
             .collect();
+        // A part with no inner nodes (the fenders) backs its lanes on its
+        // skin and edge nodes: with none, a lane node on a flat triangle had
+        // its ties in one plane and hung free across it (the skin-hull's
+        // fender triangles; gen3's grids happen to fold).
+        let backing = if backing.is_empty() && inp.hull_triangles() {
+            (0..r.car.nodes.len())
+                .filter(|&i| {
+                    r.car.nodes[i].part == part
+                        && !r.car.nodes[i].no_group
+                        && !r.car.nodes[i].contact
+                })
+                .collect()
+        } else {
+            backing
+        };
         let before = r.car.nodes.len();
         r.car.lanes(part, &backing, &surf, &side_edge);
         for _ in before..r.car.nodes.len() {
@@ -3149,18 +3151,6 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         }
     }
     let _ = (arch_r, &eng);
-    if std::env::var("RIG_DEBUG").is_ok() {
-        let mut cnt = vec![0usize; r.car.nodes.len()];
-        for b in &r.car.beams {
-            cnt[b.a] += 1;
-            cnt[b.b] += 1;
-        }
-        for (i, n) in r.car.nodes.iter().enumerate() {
-            if cnt[i] < 4 {
-                eprintln!("few beams: {} {} {:?}", n.name, cnt[i], r.g(i));
-            }
-        }
-    }
     r
 }
 

@@ -28,6 +28,36 @@ pub trait Design {
     /// (new parts, extras merged into existing parts, markers)
     fn parts(&self, cb: &CarBody) -> (Parts, Parts, Vec<Marker>);
     fn post(&self, _parts: &mut Parts) {}
+    /// What the physics rigger needs besides the meshes (None: not rigged).
+    fn rig_spec(&self) -> Option<RigSpec> {
+        None
+    }
+}
+
+/// A design's running gear, ends and physics for the crash rigger
+/// (`engine-softbody` `authoring::gen2::vg_input`; the Python generator
+/// writes the same data as `<design>.rig.json`). glTF metres.
+#[derive(Clone)]
+pub struct RigSpec {
+    pub wheelbase: f64,
+    pub track: f64,
+    pub axle_f: f64,
+    pub axle_r: f64,
+    pub tyre_d: f64,
+    pub tyre_w: f64,
+    pub rim_d: f64,
+    pub wheel_y: f64,
+    pub z_front: f64,
+    pub z_rear: f64,
+    pub doors: Vec<String>,
+    /// "trunk_lid" or "tailgate"
+    pub rear_closure: String,
+    /// Wheel openings: (centre z, centre y, radius).
+    pub arches: Vec<(f64, f64, f64)>,
+    /// The nose and tail faces: z at (x, y).
+    pub front_z: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
+    pub rear_z: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
+    pub physics: crate::physics::Physics,
 }
 
 fn closure_inner(name: &str) -> Option<f64> {
@@ -162,6 +192,12 @@ impl Default for BuildOpts {
 }
 
 pub fn build(d: &dyn Design, o: BuildOpts) -> Built {
+    build_with_body(d, o).0
+}
+
+/// [`build`], also returning the CarBody (the tube, the layout and the
+/// welded skins the physics rigger reads).
+pub fn build_with_body(d: &dyn Design, o: BuildOpts) -> (Built, CarBody) {
     reset_islands();
     let (mut parts, cb) = body_parts(d, o.h, o.uv);
     let (new, extras, markers) = d.parts(&cb);
@@ -177,7 +213,7 @@ pub fn build(d: &dyn Design, o: BuildOpts) -> Built {
         normalise_other(&mut parts);
     }
     let (paint, metallic, roughness) = d.paint();
-    Built { name: d.name(), parts, markers, paint, metallic, roughness, atlas }
+    (Built { name: d.name(), parts, markers, paint, metallic, roughness, atlas }, cb)
 }
 
 /// Part names in a stable order with their triangle counts (for tests and

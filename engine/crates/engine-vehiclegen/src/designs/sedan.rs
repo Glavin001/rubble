@@ -13,7 +13,8 @@ use std::rc::Rc;
 use glam::{DVec2, DVec3};
 use serde::{Deserialize, Serialize};
 
-use crate::assemble::Design;
+use crate::assemble::{Design, RigSpec};
+use crate::physics::Physics;
 use crate::carbody::{CapPt, CarBody, Side};
 use crate::curves::{bump, interp, linspace, sign, smoothstep, Pchip};
 use crate::export::Marker;
@@ -64,6 +65,9 @@ pub struct SedanParams {
     pub paint: [f64; 3],
     pub metallic: f64,
     pub roughness: f64,
+    /// The crash physics block (masses, zone yields, hardware; census
+    /// defaults): `engine/docs/generated-vehicles.md`.
+    pub physics: Physics,
 }
 
 impl Default for SedanParams {
@@ -84,6 +88,7 @@ impl Default for SedanParams {
             paint: [0.22, 0.006, 0.012],
             metallic: 0.5,
             roughness: 0.24,
+            physics: Physics::default(),
         }
     }
 }
@@ -551,6 +556,28 @@ impl Design for Sedan {
 
     fn parts(&self, cb: &CarBody) -> (Parts, Parts, Vec<Marker>) {
         self.make_parts(cb)
+    }
+    fn rig_spec(&self) -> Option<RigSpec> {
+        let (a, b) = (self.clone(), self.clone());
+        let [(zf, yf), (zr, yr)] = self.arch_centres();
+        Some(RigSpec {
+            wheelbase: self.p.wheelbase,
+            track: self.p.track,
+            axle_f: self.zf_ax,
+            axle_r: self.zr_ax,
+            tyre_d: self.p.tyre_d,
+            tyre_w: self.p.tyre_w,
+            rim_d: self.p.rim_in * 0.0254,
+            wheel_y: self.wheel_y,
+            z_front: self.f.z(R_FRONT),
+            z_rear: self.f.z(R_REAR),
+            doors: ["FL", "FR", "RL", "RR"].iter().map(|s| s.to_string()).collect(),
+            rear_closure: "trunk_lid".into(),
+            arches: vec![(zf, yf, self.arch_r), (zr, yr, self.arch_r)],
+            front_z: Rc::new(move |x, y| a.front_z(x, y)),
+            rear_z: Rc::new(move |x, y| b.rear_z(x, y)),
+            physics: self.p.physics.clone(),
+        })
     }
 }
 

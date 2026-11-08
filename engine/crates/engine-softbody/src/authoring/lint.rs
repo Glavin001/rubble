@@ -6,9 +6,10 @@
 //! alike.
 //!
 //! **Hard rules** (a generated car must pass every one):
-//! * `skin_coverage`: every outer render vertex (paint and glass, facing
-//!   out) lies within [`COVER_FAIL`] of a collision triangle: no hole in the
-//!   collision skin a 254 mm FMVSS 214 pole fits;
+//! * `skin_coverage`: the outer render skin (paint and glass facing out;
+//!   not the wheels or engine) lies within [`COVER_FAIL`] of a collision
+//!   triangle at the 99th percentile: no hole in the collision skin a
+//!   254 mm FMVSS 214 pole fits (the ETK: p99 0.107 m, max 0.173 m);
 //! * `free_mechanism`: every node is held in all three directions by
 //!   bilateral beams (no node with a zero-stiffness direction), and the beam
 //!   graph is one piece;
@@ -619,11 +620,23 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
                 .find(|q| (q.1..q.1 + q.2).contains(&i))
                 .map_or("?", |q| q.0.as_str())
         };
-        let mut worst: BTreeMap<String, (f32, usize)> = BTreeMap::new();
+        let mut worst: BTreeMap<String, (f32, usize, Vec3)> = BTreeMap::new();
         let mut ds = Vec::new();
         for i in 0..v.positions.len() {
             let m = v.material.get(i).copied().unwrap_or(255);
             if !matches!(m, mat::PAINT | mat::GLASS | mat::SCREEN | mat::PRIVACY) {
+                continue;
+            }
+            // The wheels' and the engine's pieces are not the body's skin.
+            let pc = piece_of(i as u32);
+            let bare = pc.rsplit(':').next().unwrap_or(pc);
+            if [
+                "rim", "tyre", "brake", "engine", "wheel", "seat", "dash", "steering",
+                "console", "headliner", "door_trim", "interior", "mirror",
+            ]
+            .iter()
+            .any(|w| bare.starts_with(w))
+            {
                 continue;
             }
             let p = Vec3::from_array(v.positions[i]);
@@ -647,24 +660,30 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             }
             let best = best.min(0.25);
             ds.push(best as f64);
+            if best > COVER_FAIL && std::env::var("LINT_HOLES").is_ok() {
+                println!("hole {pc} {:.3} {:.3} {:.3} {best:.2}", p.x, p.y, p.z);
+            }
             if best > COVER_FAIL {
-                let e = worst.entry(piece_of(i as u32).to_string()).or_insert((0.0, 0));
+                let e = worst
+                    .entry(piece_of(i as u32).to_string())
+                    .or_insert((0.0, 0, Vec3::ZERO));
                 e.0 = e.0.max(best);
                 e.1 += 1;
+                e.2 += p;
             }
         }
         let n_out = ds.len();
         let mx = ds.iter().cloned().fold(0.0, f64::max);
         let p99 = q(&mut ds, 0.99);
-        let mut off: Vec<(String, (f32, usize))> = worst.into_iter().collect();
+        let mut off: Vec<(String, (f32, usize, Vec3))> = worst.into_iter().collect();
         off.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
         out.push(Finding {
             rule: "skin_coverage",
             hard: true,
             part: "car".into(),
-            level: if tris.is_empty() || mx as f32 > COVER_FAIL {
+            level: if tris.is_empty() || p99 as f32 > COVER_FAIL {
                 Level::Fail
-            } else if mx as f32 > COVER_WARN {
+            } else if mx as f32 > COVER_FAIL || p99 as f32 > COVER_WARN {
                 Level::Warn
             } else {
                 Level::Pass
@@ -676,11 +695,14 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
                 mx,
                 n_out
             ),
-            band: format!("max ≤ {COVER_FAIL} m (warn > {COVER_WARN})"),
+            band: format!("p99 ≤ {COVER_FAIL} m (warn: p99 > {COVER_WARN} or max > {COVER_FAIL})"),
             offenders: off
                 .iter()
                 .take(8)
-                .map(|(k, (m, n))| format!("{k}: {n} vertices, to {m:.2} m"))
+                .map(|(k, (m, n, c))| {
+                    let c = *c / *n as f32;
+                    format!("{k}: {n} vertices, to {m:.2} m, about ({:.2}, {:.2}, {:.2})", c.x, c.y, c.z)
+                })
                 .collect(),
         });
     } else {

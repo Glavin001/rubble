@@ -21,8 +21,9 @@ pub mod uvpack;
 pub mod assemble;
 pub mod export;
 pub mod designs;
+pub mod physics;
 
-pub use assemble::{build, BuildOpts, Built, Design};
+pub use assemble::{build, build_with_body, BuildOpts, Built, Design, RigSpec};
 
 /// Build a design by name from JSON parameters (missing fields take the
 /// design's defaults).

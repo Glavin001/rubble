@@ -101,16 +101,17 @@ pub fn pool_with(car: &Car, mesh: &str, part_of: &dyn Fn(&str) -> Option<Part>) 
 
 /// The skins of every mesh of `glb` over the rig's nodes (JBeam frame).
 pub fn skins(glb: &Glb, car: &Car) -> Result<Skin, String> {
-    skins_with(glb, car, super::surface::AXLE_F, &part_of)
+    skins_with(glb, car, super::surface::AXLE_F, &part_of, &rigid)
 }
 
 /// [`skins`] about a front axle at glTF z `axle_f`, meshes on parts by
-/// `part_of`.
+/// `part_of`, rigid pieces by `rigid`.
 pub fn skins_with(
     glb: &Glb,
     car: &Car,
     axle_f: f32,
     part_of: &dyn Fn(&str) -> Option<Part>,
+    rigid: &dyn Fn(&str) -> bool,
 ) -> Result<Skin, String> {
     let to_jbeam = |g: Vec3| Vec3::new(g.x, axle_f - g.z, g.y);
     let nodes: Vec<String> = car.nodes.iter().map(|n| n.name.clone()).collect();

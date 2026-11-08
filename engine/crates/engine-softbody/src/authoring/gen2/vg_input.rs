@@ -184,6 +184,49 @@ impl VgInput {
         Ok(me)
     }
 
+    /// A design of the Rust generator (`engine-vehiclegen`), built in memory
+    /// from its parameters (JSON, any subset; the rest the design's
+    /// defaults): its meshes and markers, and the same data as a Python
+    /// design's `rig.json` taken straight from the build (tube, key lines,
+    /// skins, the design's [`engine_vehiclegen::RigSpec`] and physics).
+    pub fn from_rust(name: &str, params: &str) -> Result<Self, String> {
+        use engine_vehiclegen::export::{glb, render_parts};
+        let d = engine_vehiclegen::design_from_json(name, params)?;
+        let spec = d
+            .rig_spec()
+            .ok_or_else(|| format!("design {name} has no rig spec"))?;
+        let (b, cb) = engine_vehiclegen::build_with_body(
+            d.as_ref(),
+            engine_vehiclegen::BuildOpts::default(),
+        );
+        let bytes = glb(&render_parts(&b.parts), &b.markers, b.paint, b.metallic, b.roughness);
+        let rig = rig_json_of(name, d.as_ref(), &cb, &b.markers, &spec);
+        Self::new(rig, bytes)
+    }
+
+    /// A design by name: the Rust generator's when it has it (`params` its
+    /// JSON parameters), else a Python build's `.glb` and `rig.json` from
+    /// `dir`, or by default `engine/tools/vehicle-gen/out/<design>` (a local
+    /// build) then `engine/scenes/vehicles/<design>` (a committed one).
+    pub fn find(design: &str, params: Option<&str>, dir: Option<&Path>) -> Result<Self, String> {
+        if dir.is_none() && engine_vehiclegen::default_params_json(design).is_ok() {
+            return Self::from_rust(design, params.unwrap_or(""));
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir = match dir {
+            Some(d) => d.to_path_buf(),
+            None => {
+                let built = root.join("tools/vehicle-gen/out").join(design);
+                if built.join(format!("{design}.rig.json")).exists() {
+                    built
+                } else {
+                    root.join("scenes/vehicles").join(design)
+                }
+            }
+        };
+        Self::load(&dir, design)
+    }
+
     pub fn design(&self) -> &str {
         &self.rig.design
     }
@@ -266,6 +309,13 @@ impl VgInput {
         let zx = ((z10 - z00) * (1.0 - b) + (z11 - z01) * b) / e.d;
         let zy = ((z01 - z00) * (1.0 - a) + (z11 - z10) * a) / e.d;
         (z, zx, zy)
+    }
+
+    /// vehicle-gen's rigid pieces: gen3's, and the wheel-well liners
+    /// (moulded plastic clipped into the arch: skinned, the liner beside the
+    /// rear suspension's tower warped 4.6 mm parked).
+    pub fn vg_rigid(mesh: &str) -> bool {
+        gen3::rigid(mesh) || mesh.starts_with("wheel_well_")
     }
 
     /// The physics part a vehicle-gen mesh rides.
@@ -370,6 +420,9 @@ impl RigInput for VgInput {
         let [x, y] = self.key("roof_rail", z);
         x.atan2(y - self.ray_y)
     }
+    fn hull_triangles(&self) -> bool {
+        true
+    }
     fn seam_points(&self) -> Option<Vec<(Vec3, Vec3, usize, usize)>> {
         // Points two parts' welded skins share (the skins are cut from one
         // surface, so a shut line's points coincide exactly).
@@ -430,7 +483,13 @@ pub struct Built {
 pub fn build(input: VgInput) -> Result<Built, String> {
     let rig = rig::rig_with(&input);
     let axle_f = input.rig.dims.axle_f;
-    let skin = gen3::skins_with(&input.glb, &rig.car, axle_f, &VgInput::vg_part_of)?;
+    let skin = gen3::skins_with(
+        &input.glb,
+        &rig.car,
+        axle_f,
+        &VgInput::vg_part_of,
+        &VgInput::vg_rigid,
+    )?;
     skin.packable()?;
     Ok(Built { input, rig, skin })
 }
@@ -470,4 +529,145 @@ fn rename(s: &str, name: &str) -> String {
 /// `gen2/gen2_body.jbeam` as `<name>/<name>_body.jbeam`.
 fn rename_path(p: &str, name: &str) -> String {
     p.replace("gen2", name)
+}
+
+/// The rig data of a Rust-generated design (what `rigexport.py` writes for a
+/// Python one), in memory.
+fn rig_json_of(
+    name: &str,
+    d: &dyn engine_vehiclegen::Design,
+    cb: &engine_vehiclegen::carbody::CarBody,
+    markers: &[engine_vehiclegen::export::Marker],
+    spec: &engine_vehiclegen::RigSpec,
+) -> RigJson {
+    const KEYLINES: [&str; 10] = [
+        "floor", "sill", "door_bottom", "widest", "waist", "shoulder", "belt", "roof_rail",
+        "glass_edge", "centre",
+    ];
+    let (dz, dv, dxy) = (0.02f64, 1.0 / 16.0, 0.02f64);
+    let tube = &cb.l.tube;
+    let z0 = spec.z_rear - 0.06;
+    let nz = (((spec.z_front + 0.06) - z0) / dz + 0.5).floor() as usize + 1;
+    let zs: Vec<f64> = (0..nz).map(|i| z0 + dz * i as f64).collect();
+    let f = |x: f64| x as f32;
+    let mut lines = BTreeMap::new();
+    for (k, n) in KEYLINES.iter().enumerate().take(tube.nk) {
+        lines.insert(
+            n.to_string(),
+            zs.iter()
+                .map(|&z| {
+                    let p = tube.key(k, z);
+                    [f(p.x), f(p.y)]
+                })
+                .collect(),
+        );
+    }
+    let nv = ((tube.nk - 1) as f64 / dv).round() as usize + 1;
+    let xy: Vec<Vec<[f32; 2]>> = zs
+        .iter()
+        .map(|&z| {
+            (0..nv)
+                .map(|j| {
+                    let p = tube.eval(z, dv * j as f64);
+                    [f(p.x), f(p.y)]
+                })
+                .collect()
+        })
+        .collect();
+    let (nx, ny) = (61usize, 111usize);
+    let tab = |g: &dyn Fn(f64, f64) -> f64| -> Vec<Vec<f32>> {
+        (0..nx)
+            .map(|i| (0..ny).map(|j| f(g(dxy * i as f64, dxy * j as f64))).collect())
+            .collect()
+    };
+    let skins = cb
+        .skins
+        .iter()
+        .map(|(n, m)| {
+            let loops = engine_vehiclegen::panels::boundary_loops(m)
+                .into_iter()
+                .filter(|l| l.len() >= 3)
+                .map(|l| {
+                    l.iter()
+                        .map(|&i| {
+                            let p = m.v[i as usize];
+                            // 0.1 mm, as rigexport.py rounds (shut lines'
+                            // points coincide across parts).
+                            let r = |x: f64| ((x * 1e4).round() * 1e-4) as f32;
+                            [r(p.x), r(p.y), r(p.z)]
+                        })
+                        .collect()
+                })
+                .collect();
+            (n.clone(), loops)
+        })
+        .collect();
+    let mk = markers
+        .iter()
+        .map(|m| {
+            (
+                m.name.clone(),
+                MarkerJson {
+                    pos: [f(m.pos.x), f(m.pos.y), f(m.pos.z)],
+                    axis: [f(m.xaxis.x), f(m.xaxis.y), f(m.xaxis.z)],
+                },
+            )
+        })
+        .collect();
+    RigJson {
+        format: 1,
+        design: name.to_string(),
+        base: None,
+        title: d.name(),
+        dims: RigDims {
+            wheelbase: f(spec.wheelbase),
+            track: f(spec.track),
+            axle_f: f(spec.axle_f),
+            axle_r: f(spec.axle_r),
+            tyre_d: f(spec.tyre_d),
+            tyre_w: f(spec.tyre_w),
+            rim_d: f(spec.rim_d),
+            wheel_y: f(spec.wheel_y),
+            z_front: f(spec.z_front),
+            z_rear: f(spec.z_rear),
+            doors: spec.doors.clone(),
+            rear_closure: spec.rear_closure.clone(),
+        },
+        arches: spec
+            .arches
+            .iter()
+            .map(|a| Arch {
+                center: [f(a.0), f(a.1)],
+                r: f(a.2),
+            })
+            .collect(),
+        keys: Keys {
+            z0: f(z0),
+            dz: f(dz),
+            n: nz,
+            lines,
+        },
+        zlines: d.zlines().iter().map(|(n, z)| (n.to_string(), f(*z))).collect(),
+        vlines: d.vlines().iter().map(|&v| f(v)).collect(),
+        sections: Sections {
+            z0: f(z0),
+            dz: f(dz),
+            nz,
+            dv: f(dv),
+            nv,
+            xy,
+        },
+        ends: Ends {
+            x0: 0.0,
+            y0: 0.0,
+            d: f(dxy),
+            nx,
+            ny,
+            front_z: tab(&|x, y| (spec.front_z)(x, y)),
+            rear_z: tab(&|x, y| (spec.rear_z)(x, y)),
+        },
+        skins,
+        markers: mk,
+        physics: serde_json::to_value(&spec.physics).unwrap(),
+    }
 }

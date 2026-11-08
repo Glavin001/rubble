@@ -23,9 +23,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// The car under test: gen3 (the Rust render model, vehicle `gen2`), or a
-/// vehicle-gen design when `GEN3_RIG_DESIGN=<design>` is set (its `.glb` and
-/// `rig.json` from `GEN3_RIG_DIR`, default `engine/tools/vehicle-gen/out/<design>`
-/// then `engine/scenes/vehicles/<design>`; `engine/docs/generated-vehicles.md`).
+/// vehicle-gen design when `GEN3_RIG_DESIGN=<design>` is set (the Rust
+/// generator's, in memory; a Python design's `.glb` and `rig.json` from
+/// `GEN3_RIG_DIR` or its default build folders: `VgInput::find`,
+/// `engine/docs/generated-vehicles.md`).
 struct Target {
     vehicle: String,
     glb: String,
@@ -54,16 +55,8 @@ fn mod_dir() -> &'static PathBuf {
         let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
         let (dir, files) = match std::env::var("GEN3_RIG_DESIGN") {
             Ok(d) => {
-                let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-                let built = root.join("tools/vehicle-gen/out").join(&d);
-                let src = std::env::var("GEN3_RIG_DIR").map(PathBuf::from).unwrap_or_else(|_| {
-                    if built.join(format!("{d}.rig.json")).exists() {
-                        built
-                    } else {
-                        root.join("scenes/vehicles").join(&d)
-                    }
-                });
-                let inp = gen2::vg_input::VgInput::load(&src, &d).unwrap();
+                let dir = std::env::var("GEN3_RIG_DIR").ok().map(PathBuf::from);
+                let inp = gen2::vg_input::VgInput::find(&d, None, dir.as_deref()).unwrap();
                 let b = gen2::vg_input::build(inp).unwrap();
                 (tmp.join(format!("vg_{d}")), gen2::vg_input::files(&b))
             }
