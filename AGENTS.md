@@ -32,7 +32,8 @@
     behind `STRESS_CORRECTION_LIMIT=1`, off by default.
   - Do not enable it in a profile or in production code.
 
-- Soft-body vehicles in the World: start with `engine/docs/handoff/soft-rigid-world.md`
+- Deformable vehicles: `engine/docs/deformable-vehicles.md` explains the model (keep it
+  current when the model changes). Soft-body vehicles in the World: start with `engine/docs/handoff/soft-rigid-world.md`
   (what exists, lessons, how to run and measure) and `engine/docs/handoff/known-bugs.md`.
   Project skills live in `.cursor/skills/` (linked from `.claude/skills/`): read
   `gpu-safe-runs` before any GPU run and `physics-evidence-first` before changing physics.

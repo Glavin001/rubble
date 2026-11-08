@@ -24,12 +24,13 @@ The pieces, by crate:
 
 **Read these docs, in order:**
 1. `AGENTS.md`, then `CONTRIBUTING.md`.
-2. `engine/docs/explicit-beams.md`: the solver's specification. It is clean-room: written from public docs, never from Rigs of Rods or BeamNG code.
-3. `engine/docs/jbeam-semantics-spec.md`: how JBeam fields map to the solver, with citations to BeamNG's public documentation.
-4. `engine/docs/explicit-vehicles-in-world.md`: the coupling design.
-5. `engine/docs/vehicle-test-strategy.md` and `engine/docs/verification-plan.md`: how we know it's right, and what isn't proven yet.
-6. `engine/docs/brick-ring-drive.md`: the flagship demo, its measurements and its tools.
-7. `engine/docs/measurements/explicit-2khz.md`: where the vehicle GPU time goes, and what was optimised.
+2. `engine/docs/deformable-vehicles.md`: the plain-language model of a Rubble vehicle (a living doc; start here).
+3. `engine/docs/explicit-beams.md`: the solver's specification. It is clean-room: written from public docs, never from Rigs of Rods or BeamNG code.
+4. `engine/docs/jbeam-semantics-spec.md`: how JBeam fields map to the solver, with citations to BeamNG's public documentation.
+5. `engine/docs/explicit-vehicles-in-world.md`: the coupling design.
+6. `engine/docs/vehicle-test-strategy.md` and `engine/docs/verification-plan.md`: how we know it's right, and what isn't proven yet.
+7. `engine/docs/brick-ring-drive.md`: the flagship demo, its measurements and its tools.
+8. `engine/docs/measurements/explicit-2khz.md`: where the vehicle GPU time goes, and what was optimised.
 
 ## 2. How the coupling works (and why it behaves the way it does)
 

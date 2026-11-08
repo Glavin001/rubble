@@ -92,4 +92,4 @@ That pass does trivial work, so the timestamps are probably attributed to the wr
 ## Paused or abandoned
 
 - **AVBD vehicles** (`feat/avbd-vehicles`): rejected. They look like jello at affordable settings and cost 4–9× at good ones.
-- **Generated gen3 showcase car:** paused by the user (`vehicle-gen3.md`, `engine/tools/vehicle-gen`).
+- **Generated gen3 showcase car:** paused by the user (`vehicle-gen3.md`; branches `feat/vehicle-gen3*`).
