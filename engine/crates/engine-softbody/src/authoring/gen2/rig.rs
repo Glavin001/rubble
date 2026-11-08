@@ -2725,7 +2725,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         // part's contact band).
         inp.normal(inp.project(m)).x.abs() > 0.55 && inp.sdf(m) > -0.02
     };
-    let lane_parts: Vec<Part> = if std::env::var("GEN3_NOLANES").is_ok() {
+    // No lanes on a skin hull: its triangles are already 0.24 m apart at the
+    // median, and with surface contact the lanes' light nodes (0.15 kg) as
+    // triangle corners made the side pole inject energy (3.7e29 J; without
+    // lanes 0 J). `generated-vehicles.md`, follow-ups.
+    let lane_parts: Vec<Part> = if std::env::var("GEN3_NOLANES").is_ok() || inp.hull_triangles() {
         vec![]
     } else {
         vec![
