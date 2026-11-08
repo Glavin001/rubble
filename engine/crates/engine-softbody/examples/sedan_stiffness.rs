@@ -633,6 +633,11 @@ fn spawn(car: &Car) -> ExplicitBeams {
             .unwrap();
             (s, 0.0)
         }
+        Source::Jbeam { desc, .. } if std::env::var("RAYCAST").is_ok_and(|v| v == "1") => {
+            let (s, _) = ExplicitBeams::from_desc_jbeam_raycast(desc, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+            let f = engine_softbody::pack::forward_axis(desc);
+            (s, -f.x.atan2(f.z))
+        }
         Source::Jbeam { desc, .. } => {
             let (s, _) = ExplicitBeams::from_desc_jbeam_with(
                 desc,
@@ -981,6 +986,7 @@ fn report_series(label: &str, s: &Series, from: usize) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let no_dyn = args.iter().any(|a| a == "--no-dyn");
+    let only_rest = args.iter().any(|a| a == "--rest-only");
     let no_modes = args.iter().any(|a| a == "--no-modes");
     if args.iter().any(|a| a == "--rig") {
         rig_report("sedan");
@@ -1014,7 +1020,16 @@ fn main() {
         for (pname, ids) in &car.parts {
             let c = cat_of(pname);
             let Some(ci) = CATS.iter().position(|x| *x == c) else { continue };
-            let ids: Vec<u32> = ids.iter().copied().filter(|&i| cat[i as usize] == usize::MAX).collect();
+            // Wheel hubs and rims riding the body part (the generated sedan's) are running gear, not shell.
+            let ids: Vec<u32> = ids
+                .iter()
+                .copied()
+                .filter(|&i| cat[i as usize] == usize::MAX)
+                .filter(|&i| {
+                    let nm = car.node_name(i as usize);
+                    !(ci == 0 && (nm.starts_with("rim") || nm.starts_with("hub")))
+                })
+                .collect();
             if ids.len() < 3 {
                 continue;
             }
@@ -1204,7 +1219,8 @@ fn main() {
         // (a) Spawn and settle 4 s.
         let mut sp = spawn(&car);
         let t1 = std::time::Instant::now();
-        let r = run(&car, &sets, &mut sp, 4.0, &zero, true);
+        let vis_on = !std::env::var("RAYCAST").is_ok_and(|v| v == "1");
+        let r = run(&car, &sets, &mut sp, 4.0, &zero, vis_on);
         eprintln!("{name}: spawn run {:.1} s", t1.elapsed().as_secs_f32());
         report_series(&format!("{name}: spawn (2 cm drop on its own wheels), settle 4 s"), &r, 3);
         // showcase_rest_wobble-style: RMS / max of each node about its own mean over 3–4 s (world frame).
@@ -1239,6 +1255,44 @@ fn main() {
                 dmax * 1e3
             );
         }
+
+        // Where the rest wobble lives: each node's amplitude (√2·σ about the body's fit, 4–5 s).
+        {
+            let mut snap = sp.clone();
+            let rest: Vec<Vec3> = car.template.nodes.iter().map(|n| n.pos).collect();
+            let mut w = Win::new(nn);
+            for k in 0..2000 {
+                snap.step();
+                if k % 4 == 0 {
+                    let now: Vec<Vec3> = snap.nodes.iter().map(|n| n.pos).collect();
+                    let fb = rigid_fit(&rest, &now, &sets.body);
+                    for i in 0..now.len() {
+                        w.0[i].push(fb.to_rest(now[i]));
+                    }
+                }
+            }
+            let amp: Vec<f64> = w
+                .0
+                .iter()
+                .map(|v| {
+                    let m = v.iter().map(|p| p.as_dvec3()).sum::<DVec3>() / v.len() as f64;
+                    (2.0 * v.iter().map(|d| (d.as_dvec3() - m).length_squared()).sum::<f64>() / v.len() as f64).sqrt()
+                })
+                .collect();
+            for (lo, hi) in [(0.0f32, 0.3f32), (0.3, 1.0), (1.0, 3.0), (3.0, 1e9)] {
+                let mut v: Vec<f64> = sets.nontyre.iter().map(|&i| i as usize).filter(|&i| s.nodes[i].mass >= lo && s.nodes[i].mass < hi).map(|i| amp[i]).collect();
+                let n = v.len();
+                if n == 0 { continue; }
+                println!("rest 4–5 s, nodes {lo}–{hi} kg: {n}, amplitude about body p50 {:.2} / p90 {:.2} / max {:.2} mm", pct(&mut v, 0.5) * 1e3, pct(&mut v, 0.9) * 1e3, pct(&mut v, 1.0) * 1e3);
+            }
+            let mut idx: Vec<usize> = sets.nontyre.iter().map(|&i| i as usize).collect();
+            idx.sort_by(|&a, &b| amp[b].total_cmp(&amp[a]));
+            let part_of = |i: usize| car.parts.iter().find(|(_, v)| v.contains(&(i as u32))).map(|(p, _)| p.clone()).unwrap_or_default();
+            println!("top nodes: {}", idx.iter().take(10).map(|&i| format!("{} {} {:.2} kg {:.1} mm at ({:.2},{:.2},{:.2})", car.node_name(i), part_of(i), s.nodes[i].mass, amp[i] * 1e3, rest[i].x, rest[i].y, rest[i].z)).collect::<Vec<_>>().join("; "));
+        }
+        if only_rest {
+            continue;
+        }
         // Settled state at 4 s for the load cases.
         let base = sp;
         let g = -GRAVITY;
@@ -1251,7 +1305,7 @@ fn main() {
                     Vec3::ZERO
                 }
             };
-            let r = run(&car, &sets, &mut s2, 2.5, &pulse, true);
+            let r = run(&car, &sets, &mut s2, 2.5, &pulse, vis_on);
             report_series(&format!("{name}: {label} (from settled), 2.5 s"), &r, 0);
         }
         // 5 cm bump at 30 km/h (both axles cross it).
@@ -1262,11 +1316,14 @@ fn main() {
                 n.vel += v;
             }
             s2.roll_tyres(v);
+            if let Some(d) = s2.drive.as_mut() {
+                d.roll(v.z);
+            }
             let front = s2.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
             // Bump 0.5 m long, 5 cm high, 0.6 m ahead of the front bumper.
             let z0 = front + 0.6;
             s2.boxes.push(StaticBox::centered(Vec3::new(0.0, -0.45, z0 + 0.25), Vec3::new(4.0, 0.5, 0.25)));
-            let r = run(&car, &sets, &mut s2, 3.0, &zero, true);
+            let r = run(&car, &sets, &mut s2, 3.0, &zero, vis_on);
             report_series(&format!("{name}: 5 cm × 0.5 m bump at 30 km/h (coasting), 3 s"), &r, 0);
         }
         eprintln!("{name}: done in {:.0} s", t0.elapsed().as_secs_f32());
