@@ -222,12 +222,22 @@ pub fn jbeam_files(
             rows(json!(["id1:", "id2:"]), brows)
         ));
         // Collision triangles.
-        let trows: Vec<Value> = car
-            .tris
-            .iter()
-            .filter(|t| t.part == part)
-            .map(|t| json!([n(t.n[0]), n(t.n[1]), n(t.n[2])]))
-            .collect();
+        // A triangle with a break group sits between modifier rows setting
+        // it and clearing it (triangles without one first, unchanged).
+        let mut trows: Vec<Value> = Vec::new();
+        let mut cur: Option<&String> = None;
+        let mut own: Vec<&super::build::Tri> = car.tris.iter().filter(|t| t.part == part).collect();
+        own.sort_by_key(|t| t.group.is_some());
+        for t in own {
+            if t.group.as_ref() != cur {
+                cur = t.group.as_ref();
+                trows.push(json!({"breakGroup": cur.cloned().unwrap_or_default()}));
+            }
+            trows.push(json!([n(t.n[0]), n(t.n[1]), n(t.n[2])]));
+        }
+        if cur.is_some() {
+            trows.push(json!({"breakGroup": ""}));
+        }
         let trows: Vec<Value> = match car.tri_aero {
             Some((d, l)) if !trows.is_empty() => {
                 let mut v = vec![json!({"dragCoef": num(d), "liftCoef": num(l)})];

@@ -246,7 +246,6 @@ pub struct Dims {
 
 pub use engine_vehiclegen::physics::Physics;
 
-
 /// What the rigger reads: the render model (part meshes and markers), the
 /// body surface (a signed field, the belt and shoulder lines, the arches and
 /// the end faces) and the physics block. The section queries have default
@@ -653,7 +652,20 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
         if n.contact || n.no_group || n.name.starts_with("hub") || n.name.starts_with("rim") {
             continue;
         }
-        if inp.sdf(r.g(i)).abs() < 0.10 {
+        let within = std::env::var("RIG_HULL_POOL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.03f32);
+        if inp.sdf(r.g(i)).abs() < within {
+            if std::env::var("RIG_HULL_DEBUG").is_ok() {
+                eprintln!(
+                    "pool {:?} {} sdf {:.3} skin {}",
+                    n.part,
+                    n.name,
+                    inp.sdf(r.g(i)),
+                    r.skin[i]
+                );
+            }
             pool.entry(n.part).or_default().push(i);
         }
     }
@@ -676,27 +688,121 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
             .map(|&p| {
                 (inp.sdf(p).abs() < 0.02).then(|| {
                     let k = (0..gs.len())
-                        .min_by(|&a, &b| gs[a].distance_squared(p).total_cmp(&gs[b].distance_squared(p)))
+                        .min_by(|&a, &b| {
+                            gs[a]
+                                .distance_squared(p)
+                                .total_cmp(&gs[b].distance_squared(p))
+                        })
                         .unwrap();
                     ids[k]
                 })
             })
             .collect();
+        if std::env::var("RIG_HULL_DEBUG").is_ok() {
+            let outer = near.iter().filter(|x| x.is_some()).count();
+            let mut sd: Vec<f32> = m.pos.iter().map(|&p| inp.sdf(p)).collect();
+            sd.sort_by(|a, b| a.total_cmp(b));
+            let q = |f: f32| sd[((sd.len() - 1) as f32 * f) as usize];
+            eprintln!(
+                "skin_hull {:<20} {:?}: {} skin nodes, {} of {} vertices outer (|sdf| < 2 cm); sdf p10 {:.3} p50 {:.3} p90 {:.3}",
+                m.name,
+                part,
+                ids.len(),
+                outer,
+                m.pos.len(),
+                q(0.1),
+                q(0.5),
+                q(0.9)
+            );
+        }
+        // Each node's cell normal on this mesh: the area-weighted normal of
+        // the render surface whose vertices went to it (a third of each
+        // triangle to each corner's node). A node triangle stands for its
+        // three cells, so their sum is the surface it must face (a single
+        // render triangle at the cells' junction can lie on a fold: the
+        // bumper face's triangles were judged by the lip's).
+        let mut cell: HashMap<usize, Vec3> = HashMap::new();
         for t in &m.tris {
             let [a, b, c] = t.map(|k| near[k as usize]);
             let (Some(a), Some(b), Some(c)) = (a, b, c) else {
                 continue;
             };
-            if a == b || b == c || a == c {
-                continue;
+            let [pa, pb, pc] = t.map(|k| m.pos[k as usize]);
+            let nr = (pb - pa).cross(pc - pa) / 3.0;
+            for i in [a, b, c] {
+                *cell.entry(i).or_default() += nr;
             }
-            let mut key = [a, b, c];
-            key.sort();
+        }
+        // The candidates: every triple of nodes whose cells meet pairwise on
+        // this mesh (a render edge between each two: the restricted Delaunay
+        // triangles). A render triangle on three cells is one; a four-cell
+        // junction (a grid of nodes) gives a quad's triangles only through
+        // the pairwise rule, as a render triangle there may touch three of
+        // the four cells or none. A quad whose four cells all meet keeps the
+        // triangulation on its shorter diagonal.
+        let mut adj: HashMap<usize, std::collections::BTreeSet<usize>> = HashMap::new();
+        let mut cands: std::collections::BTreeSet<[usize; 3]> = Default::default();
+        for t in &m.tris {
+            let [a, b, c] = t.map(|k| near[k as usize]);
+            let (Some(a), Some(b), Some(c)) = (a, b, c) else {
+                continue;
+            };
+            for (x, y) in [(a, b), (b, c), (c, a)] {
+                if x != y {
+                    adj.entry(x).or_default().insert(y);
+                    adj.entry(y).or_default().insert(x);
+                }
+            }
+            if a != b && b != c && a != c {
+                let mut key = [a, b, c];
+                key.sort();
+                cands.insert(key);
+            }
+        }
+        let pairwise = std::env::var("RIG_HULL_JUNCTIONS_ONLY").is_err();
+        if pairwise {
+            for (&a, na) in &adj {
+                for &b in na.range(a + 1..) {
+                    for &c in adj[&b].range(b + 1..) {
+                        if na.contains(&c) {
+                            cands.insert([a, b, c]);
+                        }
+                    }
+                }
+            }
+            let mut drop: std::collections::HashSet<(usize, usize)> = Default::default();
+            for &[a, b, c] in &cands {
+                for &d in adj[&c].range(c + 1..) {
+                    if !(adj[&a].contains(&d) && adj[&b].contains(&d)) {
+                        continue;
+                    }
+                    let q = [a, b, c, d];
+                    let dd = |i: usize, j: usize| r.g(q[i]).distance(r.g(q[j]));
+                    // The diagonals: the disjoint pairing of largest sum.
+                    let pairings = [((0, 1), (2, 3)), ((0, 2), (1, 3)), ((0, 3), (1, 2))];
+                    let ((i0, j0), (i1, j1)) = *pairings
+                        .iter()
+                        .max_by(|x, y| {
+                            (dd(x.0 .0, x.0 .1) + dd(x.1 .0, x.1 .1))
+                                .total_cmp(&(dd(y.0 .0, y.0 .1) + dd(y.1 .0, y.1 .1)))
+                        })
+                        .unwrap();
+                    let long = if dd(i0, j0) > dd(i1, j1) {
+                        (q[i0], q[j0])
+                    } else {
+                        (q[i1], q[j1])
+                    };
+                    drop.insert((long.0.min(long.1), long.0.max(long.1)));
+                }
+            }
+            cands.retain(|t| !drop.iter().any(|&(p, q)| t.contains(&p) && t.contains(&q)));
+        }
+        for key in cands {
+            let [a, b, c] = key;
             if !seen.insert(key) {
                 continue;
             }
-            let [pa, pb, pc] = t.map(|k| m.pos[k as usize]);
-            let nr = (pb - pa).cross(pc - pa);
+            let nr = cell[&a] + cell[&b] + cell[&c];
             let (qa, qb, qc) = (r.g(a), r.g(b), r.g(c));
             let nn = (qb - qa).cross(qc - qa);
             if nn.length() < 1e-6 {
@@ -706,20 +812,430 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
             // triangle leaning far off the skin it stands for (|cos| < 0.7):
             // both come of nodes the nearest-node map strings along a fold,
             // and such a triangle lies across its neighbours.
-            let l = (qa - qb).length().max((qb - qc).length()).max((qc - qa).length());
-            if nn.length() / l < 0.1 * l
-                || nn.normalize().dot(nr.normalize_or_zero()).abs() < 0.7
-            {
+            let l = (qa - qb)
+                .length()
+                .max((qb - qc).length())
+                .max((qc - qa).length());
+            if nn.length() / l < 0.1 * l || nn.normalize().dot(nr.normalize_or_zero()).abs() < 0.7 {
+                if std::env::var("RIG_HULL_DEBUG").is_ok() {
+                    eprintln!(
+                        "  dropped {} {:?}: sliver {} lean {:.2}",
+                        m.name,
+                        [a, b, c].map(|i| r.car.nodes[i].name.clone()),
+                        nn.length() / l < 0.1 * l,
+                        nn.normalize().dot(nr.normalize_or_zero()).abs()
+                    );
+                }
                 continue;
+            }
+            if std::env::var("RIG_HULL_DEBUG").is_ok() {
+                eprintln!(
+                    "  kept {} {:?}",
+                    m.name,
+                    [a, b, c].map(|i| r.car.nodes[i].name.clone())
+                );
             }
             // (glTF to JBeam is a rotation: the winding carries over.)
             tris.push(Tri {
-                n: if nn.dot(nr) < 0.0 { [a, c, b] } else { [a, b, c] },
+                n: if nn.dot(nr) < 0.0 {
+                    [a, c, b]
+                } else {
+                    [a, b, c]
+                },
                 part,
+                group: None,
             });
         }
     }
+    if std::env::var("RIG_HULL_NOBRIDGE").is_err() {
+        let n = bridge_seams(r, inp, &pool, &mut tris);
+        if std::env::var("RIG_HULL_DEBUG").is_ok() {
+            eprintln!("skin_hull: {n} triangles bridge seams");
+        }
+    }
+    // The wheels: a cone over each rim ring (six rim nodes at 0.25 m) to its
+    // outer hub node. Raycast wheels have no collision geometry of their
+    // own, so a head-on partner's wheel and arch went through this wheel;
+    // now its nodes meet these triangles. (The inner cone too,
+    // `RIG_WHEEL_BOTH`, closes the wheel but moved the parked car's rear
+    // rails past the rest-drift rule: 7.4 mm, parked 1.12 mm.)
+    if std::env::var("RIG_NO_WHEEL_TRIS").is_err() {
+        let id = |n: &str| r.car.nodes.iter().position(|x| x.name == n);
+        for w in ["F", "R"] {
+            for x in ["L", "R"] {
+                let (Some(hi), Some(ho)) = (id(&format!("hub{w}i{x}")), id(&format!("hub{w}o{x}")))
+                else {
+                    continue;
+                };
+                let ring: Vec<usize> = (0..6)
+                    .filter_map(|k| id(&format!("rim{w}{k}{x}")))
+                    .collect();
+                if ring.len() != 6 {
+                    continue;
+                }
+                let c = 0.5 * (r.g(hi) + r.g(ho));
+                for k in 0..6 {
+                    let (a, b) = (ring[k], ring[(k + 1) % 6]);
+                    let hubs: &[usize] = if std::env::var("RIG_WHEEL_BOTH").is_ok() {
+                        &[hi, ho]
+                    } else {
+                        &[ho]
+                    };
+                    for &h in hubs {
+                        let (pa, pb, ph) = (r.g(a), r.g(b), r.g(h));
+                        let n = (pb - pa).cross(ph - pa);
+                        let out = (pa + pb + ph) / 3.0 - c;
+                        tris.push(Tri {
+                            n: if n.dot(out) < 0.0 {
+                                [a, h, b]
+                            } else {
+                                [a, b, h]
+                            },
+                            part: r.car.nodes[hi].part,
+                            group: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
     r.car.tris = tris;
+}
+
+/// Seams between the parts' collision patches. Each part's patch ends half
+/// a node spacing inside its outline, so the skin had a strip open along
+/// every seam, 10–20 cm wide where the parts meet at the nose (cover to
+/// grille to hood to lamps to fender): a head-on partner's nodes went in
+/// there. The bridges are the restricted Delaunay triangles of all the
+/// parts' skin nodes together (the grille's surface included) that join two
+/// or more parts: each node's cell is the outer render surface nearest it
+/// on any part, cells meet along render edges and, across a seam between
+/// two meshes, where their surfaces come within 3 cm. Kept: bridges off the
+/// patches (no bridge edge is a patch's inner edge), at most 0.5 m a side,
+/// no sliver, facing their cells (|cos| ≥ 0.7), within 0.9 m of one of the
+/// moving part's main mounts (bolts, hinges). A bridge belongs to its moving
+/// part (bumper, then fender, then hood). It has no break group: one JBeam
+/// triangle takes one group, and with the nearest main mount's
+/// (`RIG_BRIDGE_GROUPS=main`; `nearest` takes any fastening) a 50 km/h
+/// head-on broke the left front bumper bolt at 40 ms and its 19 bridges
+/// died with it while the cover stayed on, reopening the corner. A part that
+/// comes off whole would drag its bridges (an engine question: a triangle
+/// that dies when its part separates, `handoff/known-bugs.md` S2). Doors and
+/// the boot lid get none (they open; their shut lines are their patches'
+/// edges).
+fn bridge_seams(
+    r: &Rig,
+    inp: &dyn RigInput,
+    pool: &HashMap<Part, Vec<usize>>,
+    tris: &mut Vec<Tri>,
+) -> usize {
+    let model = inp.model();
+    let mut nodes: Vec<usize> = pool.values().flatten().copied().collect();
+    nodes.sort();
+    let gs: Vec<Vec3> = nodes.iter().map(|&i| r.g(i)).collect();
+    // Outer vertices of every hull mesh and the grille, each to its nearest
+    // skin node of any part.
+    let mut verts: Vec<(Vec3, usize, usize)> = Vec::new(); // (position, mesh, node)
+    let mut adj: HashMap<usize, std::collections::BTreeSet<usize>> = HashMap::new();
+    let mut cell: HashMap<usize, Vec3> = HashMap::new();
+    let link = |adj: &mut HashMap<usize, std::collections::BTreeSet<usize>>, x: usize, y: usize| {
+        if x != y {
+            adj.entry(x).or_default().insert(y);
+            adj.entry(y).or_default().insert(x);
+        }
+    };
+    for (mi, m) in model.parts.iter().enumerate() {
+        if !(hull_mesh(&m.name) || m.name == "grille") || inp.part_of(&m.name).is_none() {
+            continue;
+        }
+        let near: Vec<Option<usize>> = m
+            .pos
+            .iter()
+            .map(|&p| {
+                (inp.sdf(p).abs() < 0.02).then(|| {
+                    let k = (0..gs.len())
+                        .min_by(|&a, &b| {
+                            gs[a]
+                                .distance_squared(p)
+                                .total_cmp(&gs[b].distance_squared(p))
+                        })
+                        .unwrap();
+                    nodes[k]
+                })
+            })
+            .collect();
+        for (k, p) in m.pos.iter().enumerate() {
+            if let Some(n) = near[k] {
+                verts.push((*p, mi, n));
+            }
+        }
+        for t in &m.tris {
+            let [a, b, c] = t.map(|k| near[k as usize]);
+            let (Some(a), Some(b), Some(c)) = (a, b, c) else {
+                continue;
+            };
+            link(&mut adj, a, b);
+            link(&mut adj, b, c);
+            link(&mut adj, c, a);
+            let [pa, pb, pc] = t.map(|k| m.pos[k as usize]);
+            let nr = (pb - pa).cross(pc - pa) / 3.0;
+            for i in [a, b, c] {
+                *cell.entry(i).or_default() += nr;
+            }
+        }
+    }
+    // Across seams: cells on two meshes whose surfaces come within 3 cm.
+    let h = std::env::var("RIG_HULL_SEAM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.03f32);
+    let key = |p: Vec3| {
+        (
+            (p.x / h).floor() as i32,
+            (p.y / h).floor() as i32,
+            (p.z / h).floor() as i32,
+        )
+    };
+    let mut grid: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
+    for (k, v) in verts.iter().enumerate() {
+        grid.entry(key(v.0)).or_default().push(k);
+    }
+    for (p, mi, n) in &verts {
+        let (x, y, z) = key(*p);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(l) = grid.get(&(x + dx, y + dy, z + dz)) {
+                        for &j in l {
+                            let (q, mj, nj) = verts[j];
+                            if mj != *mi && nj != *n && q.distance(*p) < h {
+                                link(&mut adj, *n, nj);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let part = |i: usize| r.car.nodes[i].part;
+    // Pairwise-adjacent triples joining two or more parts; a quad whose four
+    // cells all meet keeps its shorter diagonal.
+    let mut cands: std::collections::BTreeSet<[usize; 3]> = Default::default();
+    for (&a, na) in &adj {
+        for &b in na.range(a + 1..) {
+            for &c in adj[&b].range(b + 1..) {
+                if na.contains(&c) && !(part(a) == part(b) && part(b) == part(c)) {
+                    cands.insert([a, b, c]);
+                }
+            }
+        }
+    }
+    let mut drop: std::collections::HashSet<(usize, usize)> = Default::default();
+    for &[a, b, c] in &cands {
+        for &d in adj[&c].range(c + 1..) {
+            if !(adj[&a].contains(&d) && adj[&b].contains(&d)) {
+                continue;
+            }
+            let q = [a, b, c, d];
+            let dd = |i: usize, j: usize| r.g(q[i]).distance(r.g(q[j]));
+            let pairings = [((0, 1), (2, 3)), ((0, 2), (1, 3)), ((0, 3), (1, 2))];
+            let ((i0, j0), (i1, j1)) = *pairings
+                .iter()
+                .max_by(|x, y| {
+                    (dd(x.0 .0, x.0 .1) + dd(x.1 .0, x.1 .1))
+                        .total_cmp(&(dd(y.0 .0, y.0 .1) + dd(y.1 .0, y.1 .1)))
+                })
+                .unwrap();
+            let long = if dd(i0, j0) > dd(i1, j1) {
+                (q[i0], q[j0])
+            } else {
+                (q[i1], q[j1])
+            };
+            drop.insert((long.0.min(long.1), long.0.max(long.1)));
+        }
+    }
+    cands.retain(|t| !drop.iter().any(|&(p, q)| t.contains(&p) && t.contains(&q)));
+    // The fastenings: each break group's beams with an end on a part.
+    let mut fast: Vec<(Part, Vec3, String)> = Vec::new();
+    for b in &r.car.beams {
+        if let Some(g) = &b.break_group {
+            for e in [b.a, b.b] {
+                fast.push((part(e), r.g(e), g.clone()));
+            }
+        }
+    }
+    let mut uses: HashMap<(usize, usize), usize> = HashMap::new();
+    for t in tris.iter() {
+        for e in 0..3 {
+            let (a, b) = (t.n[e], t.n[(e + 1) % 3]);
+            *uses.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let per = |t: &[usize; 3]| {
+        let [a, b, c] = t.map(|i| r.g(i));
+        a.distance(b) + b.distance(c) + c.distance(a)
+    };
+    let mut order: Vec<[usize; 3]> = cands.into_iter().collect();
+    order.sort_by(|x, y| per(x).total_cmp(&per(y)).then(x.cmp(y)));
+    let debug = std::env::var("RIG_HULL_DEBUG").is_ok();
+    // Adds bridge t when it passes the rules; true when added.
+    let try_add =
+        |t: [usize; 3], tris: &mut Vec<Tri>, uses: &mut HashMap<(usize, usize), usize>| -> bool {
+            let parts: Vec<Part> = t.iter().map(|&i| part(i)).collect();
+            if parts.iter().any(|p| {
+                matches!(
+                    p,
+                    Part::DoorFL
+                        | Part::DoorFR
+                        | Part::DoorRL
+                        | Part::DoorRR
+                        | Part::Trunk
+                        | Part::Engine
+                )
+            }) || (parts[0] == parts[1] && parts[1] == parts[2])
+            {
+                return false;
+            }
+            let Some(owner) = [
+                Part::BumperF,
+                Part::BumperR,
+                Part::FenderL,
+                Part::FenderR,
+                Part::Hood,
+            ]
+            .into_iter()
+            .find(|p| parts.contains(p)) else {
+                return false;
+            };
+            let [qa, qb, qc] = t.map(|i| r.g(i));
+            let l = (qa - qb)
+                .length()
+                .max((qb - qc).length())
+                .max((qc - qa).length());
+            let nn = (qb - qa).cross(qc - qa);
+            let nr = cell.get(&t[0]).copied().unwrap_or_default()
+                + cell.get(&t[1]).copied().unwrap_or_default()
+                + cell.get(&t[2]).copied().unwrap_or_default();
+            if l > 0.5
+                || nn.length() / l < 0.1 * l
+                || nn.normalize().dot(nr.normalize_or_zero()).abs() < 0.7
+            {
+                return false;
+            }
+            let edges: Vec<(usize, usize)> = (0..3)
+                .map(|e| (t[e].min(t[(e + 1) % 3]), t[e].max(t[(e + 1) % 3])))
+                .collect();
+            if edges.iter().any(|e| uses.get(e).copied().unwrap_or(0) >= 2) {
+                return false;
+            }
+            let cen = (qa + qb + qc) / 3.0;
+            // The part's main mounts (its bolts and hinges, not the clips and
+            // row screws that let go while the part stays on in a crash).
+            let main = |g: &str| {
+                let g = g.rsplit('_').next().unwrap_or(g);
+                g.starts_with("bolt") || g.starts_with("hinge") || g == "L" || g == "R"
+            };
+            let mode = std::env::var("RIG_BRIDGE_GROUPS").unwrap_or_default();
+            let Some(group) = fast
+                .iter()
+                .filter(|f| {
+                    f.0 == owner && (mode == "nearest" || main(&f.2)) && f.1.distance(cen) < 0.9
+                })
+                .min_by(|x, y| {
+                    x.1.distance(cen)
+                        .total_cmp(&y.1.distance(cen))
+                        .then(x.2.cmp(&y.2))
+                })
+                .map(|f| f.2.clone())
+            else {
+                return false;
+            };
+            for e in edges {
+                *uses.entry(e).or_default() += 1;
+            }
+            if debug {
+                eprintln!(
+                    "  bridge {owner:?} {:?} ({group})",
+                    t.map(|i| r.car.nodes[i].name.clone())
+                );
+            }
+            let [a, b, c] = t;
+            tris.push(Tri {
+                n: if nn.dot(nr) < 0.0 {
+                    [a, c, b]
+                } else {
+                    [a, b, c]
+                },
+                part: owner,
+                group: (mode == "main" || mode == "nearest").then_some(group),
+            });
+            true
+        };
+    let mut added = 0;
+    for t in order {
+        if try_add(t, tris, &mut uses) {
+            added += 1;
+        }
+    }
+    // The zipper: a seam the cells do not reach across (surfaces more than
+    // 3 cm apart, as the grille's top under the hood's front edge) closes
+    // from the open edges. Each open edge of the skin takes the nearest open
+    // node of another part across it (on the far side of the edge from its
+    // triangle, within 0.3 m of its middle) whose triangle passes the
+    // bridges' rules; repeated while any closes.
+    for _ in 0..6 {
+        let mut open: Vec<(usize, usize, usize)> = Vec::new();
+        for t in tris.iter() {
+            for e in 0..3 {
+                let (a, b, o) = (t.n[e], t.n[(e + 1) % 3], t.n[(e + 2) % 3]);
+                if uses.get(&(a.min(b), a.max(b))).copied().unwrap_or(0) == 1 {
+                    open.push((a, b, o));
+                }
+            }
+        }
+        let mut rim: Vec<usize> = open.iter().flat_map(|&(a, b, _)| [a, b]).collect();
+        rim.sort();
+        rim.dedup();
+        open.sort_by(|x, y| {
+            r.g(x.0)
+                .distance(r.g(x.1))
+                .total_cmp(&r.g(y.0).distance(r.g(y.1)))
+                .then(x.cmp(y))
+        });
+        let mut any = false;
+        for (a, b, o) in open {
+            if uses.get(&(a.min(b), a.max(b))).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let (pa, pb, po) = (r.g(a), r.g(b), r.g(o));
+            let tn = (pb - pa).cross(po - pa);
+            let across = tn.cross(pb - pa).normalize_or_zero();
+            let so = across.dot(po - pa);
+            let mid = 0.5 * (pa + pb);
+            let mut cs: Vec<(f32, usize)> = rim
+                .iter()
+                .copied()
+                .filter(|&c| c != a && c != b && c != o)
+                .filter(|&c| {
+                    let s = across.dot(r.g(c) - pa);
+                    r.g(c).distance(mid) < 0.3 && s * so < 0.0 && s.abs() > 0.01
+                })
+                .map(|c| (pa.distance(r.g(c)) + pb.distance(r.g(c)), c))
+                .collect();
+            cs.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+            for (_, c) in cs {
+                if try_add([a, b, c], tris, &mut uses) {
+                    added += 1;
+                    any = true;
+                    break;
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    added
 }
 
 /// The cabin's volume (8 cm in from the skin: beams along the bonded glass
@@ -832,8 +1348,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         ph.bumper_side_bolt,
         ph.engine_mount,
     );
-    let (cooling_stack, wheel_stack, reach_body, reach_panel) =
-        (ph.cooling_stack, ph.wheel_stack, ph.reach_body, ph.reach_panel);
+    let (cooling_stack, wheel_stack, reach_body, reach_panel) = (
+        ph.cooling_stack,
+        ph.wheel_stack,
+        ph.reach_body,
+        ph.reach_panel,
+    );
     let mut r = Rig {
         car: Car::default(),
         member: Vec::new(),
@@ -1093,10 +1613,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         {
             let z = 0.5 * (-1.05 + z_c);
             let c = corner(z);
-            let p = inward(
-                inp.hit(z, inp.theta_corner(z) + 0.12),
-                0.015,
-            );
+            let p = inward(inp.hit(z, inp.theta_corner(z) + 0.12), 0.015);
             let _ = c;
             put(&mut r, format!("cp1{x}"), p, Some(Role::PillarC), true);
             put(
@@ -1121,7 +1638,8 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         // Quarter panel: rows (the arch or bumper line, the shoulder, the
         // belt/deck edge) at stations behind the rear door.
         for &z in &qz {
-            let bottom = inp.arch_y(z)
+            let bottom = inp
+                .arch_y(z)
                 .map(|a| a + 0.03)
                 .unwrap_or(br_hi.y.min(0.80) + 0.03)
                 .max(y_rocker + 0.02);
@@ -2068,6 +2586,70 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 }
             }
         }
+        // The grille's top edge (front, when the design has a grille): a row
+        // of the cover's nodes on the grille's upper edge, so the collision
+        // skin reaches from the cover's top row to the hood's front edge
+        // (without it the band between them, the grille and the cover's
+        // upper lip, 0.19 m tall across the car, had no collision triangle
+        // within 0.6 m behind it, and a head-on partner's hood and lamps
+        // went into the engine bay). Tied to the cover (sheet) and to the
+        // radiator support's upper tie bar behind it, which carries a real
+        // grille.
+        if front && std::env::var("RIG_NO_GRILLE_ROW").is_err() {
+            if let Some(gm) = model.parts.iter().find(|p| p.name == "grille") {
+                let tie: Vec<usize> = (0..r.car.nodes.len())
+                    .filter(|&i| {
+                        r.car.nodes[i].part == body
+                            && r.member[i] == Some(Role::Cross)
+                            && r.g(i).z > hi.z - 0.5
+                            && r.g(i).y > 0.6
+                    })
+                    .collect();
+                let mut row = Vec::new();
+                for (k, xx) in [-0.58f32, -0.386, 0.0, 0.386, 0.58].into_iter().enumerate() {
+                    let near: Vec<&Vec3> =
+                        gm.pos.iter().filter(|q| (q.x - xx).abs() < 0.03).collect();
+                    let Some(top) = near.iter().map(|q| q.y).reduce(f32::max) else {
+                        continue;
+                    };
+                    let y = top - 0.02;
+                    let Some(z) = near
+                        .iter()
+                        .filter(|q| (q.y - y).abs() < 0.03)
+                        .map(|q| q.z)
+                        .reduce(f32::max)
+                    else {
+                        continue;
+                    };
+                    row.push(r.node(
+                        &format!("{tag}_g{k}"),
+                        Vec3::new(xx, y, z),
+                        part,
+                        Some(Role::Sheet),
+                        true,
+                    ));
+                }
+                for &gn in &row {
+                    let g = r.g(gn);
+                    let mut v: Vec<(f32, usize)> = cover
+                        .iter()
+                        .chain(&row)
+                        .filter(|&&i| i != gn)
+                        .map(|&i| (r.g(i).distance(g), i))
+                        .collect();
+                    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    for &(_, c) in v.iter().take(4) {
+                        r.car.beam(gn, c, Role::Sheet, part);
+                    }
+                    let mut v: Vec<(f32, usize)> =
+                        tie.iter().map(|&i| (r.g(i).distance(g), i)).collect();
+                    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    for &(_, b) in v.iter().take(2) {
+                        r.car.beam(gn, b, Role::Sheet, part);
+                    }
+                }
+            }
+        }
         bumper_ids.insert(part, (cover, beam));
         let _ = all;
     }
@@ -2632,7 +3214,13 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // Shut lines: structural edge nodes along both sides of every shut line.
     // ------------------------------------------------------------------
     if std::env::var("GEN3_NO_EDGES").is_err() {
-        edge_nodes(&mut r, inp, &apertures, (tk_lo.z + 0.06, tk_hi.z - 0.06), ph.edge_spacing);
+        edge_nodes(
+            &mut r,
+            inp,
+            &apertures,
+            (tk_lo.z + 0.06, tk_hi.z - 0.06),
+            ph.edge_spacing,
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2786,8 +3374,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         // Lane nodes meet the world (poles, walls, other cars) but not the
         // car's own skin: on light ties beside a shut line they would ride
         // the neighbouring part's contact band at rest.
+        // (The hub nodes stay out: they are corners of the wheels' collision
+        // cones only, and inside the arch beside the rails.)
         nd.self_collision = (on_tri[i] || nd.part == Part::Engine || nd.name.starts_with("rim"))
             && !nd.contact
+            && !nd.name.starts_with("hub")
             && std::env::var("GEN3_NOSELF").is_err()
             && std::env::var("GEN3_NOSELF_PART").map_or(true, |p| !nd.name.contains(&p));
     }
@@ -3024,7 +3615,10 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         env("GEN3_ROOF_Y", greenhouse_yield),
         env("GEN3_DOOR_Y", ph.door_yield),
     );
-    let (sy, cy) = (env("GEN3_SIDE_Y", ph.side_yield), env("GEN3_CRUSH_Y", crush_yield));
+    let (sy, cy) = (
+        env("GEN3_SIDE_Y", ph.side_yield),
+        env("GEN3_CRUSH_Y", crush_yield),
+    );
     let belt_h = to_jbeam(Vec3::new(0.0, 0.95, 0.0)).z;
     // The door above its crease (the upper inner panel and the belt
     // reinforcement): `GEN3_DOOR_UP_Y` times the door's yield.
@@ -3396,7 +3990,8 @@ fn edge_nodes(
         .enumerate()
         .filter(|(_, p)| !p.name.starts_with("glass_"))
         .filter_map(|(k, p)| {
-            inp.part_of(&p.name).map(|part| (k, part, super::gen3::rigid(&p.name)))
+            inp.part_of(&p.name)
+                .map(|part| (k, part, super::gen3::rigid(&p.name)))
         })
         .collect();
     let cell = 0.01f32;

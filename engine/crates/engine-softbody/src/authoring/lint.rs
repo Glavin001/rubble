@@ -624,11 +624,13 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
         // Rubble's frame is +Y up: the car's length is the longer of x and z.
         let e = hi - lo;
         let len_axis = if e.x > e.z { 0 } else { 2 };
-        let outer = |p: Vec3, n: Vec3| {
-            let mut a = p - c;
-            a[len_axis] = 0.0;
-            n.dot(a) > 0.0
-        };
+        // Outward from the car's box-scaled centre, the end faces included
+        // (zeroing the length axis left the nose and tail out of the check:
+        // the generated sedan's front face had no collision triangle within
+        // 0.6 m over a fifth of its area and passed).
+        let half = (e * 0.5).max(Vec3::splat(1e-3));
+        let outer = |p: Vec3, n: Vec3| n.dot((p - c) / (half * half)) > 0.0;
+        let _ = len_axis;
         let piece_of = |i: u32| {
             v.pieces
                 .iter()
@@ -948,7 +950,11 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
         rule: "sliver_tris",
         hard: false,
         part: "car".into(),
-        level: if slivers.is_empty() { Level::Pass } else { Level::Warn },
+        level: if slivers.is_empty() {
+            Level::Pass
+        } else {
+            Level::Warn
+        },
         value: format!("{} of {}", slivers.len(), ct.len()),
         band: "0 (height < 0.1 × longest edge)".into(),
         offenders: slivers.into_iter().take(6).collect(),

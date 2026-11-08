@@ -398,6 +398,9 @@ pub struct Beam {
 pub struct Tri {
     pub n: [usize; 3],
     pub part: Part,
+    /// JBeam `breakGroup`: the triangle dies with that group (a collision
+    /// skin triangle bridging a seam dies with its part's fastening).
+    pub group: Option<String>,
 }
 
 /// A point mass the structure carries.
@@ -592,9 +595,17 @@ impl Car {
             cen - axis
         };
         if n.dot(out) >= 0.0 {
-            self.tris.push(Tri { n: [a, b, c], part });
+            self.tris.push(Tri {
+                n: [a, b, c],
+                part,
+                group: None,
+            });
         } else {
-            self.tris.push(Tri { n: [a, c, b], part });
+            self.tris.push(Tri {
+                n: [a, c, b],
+                part,
+                group: None,
+            });
         }
     }
 
