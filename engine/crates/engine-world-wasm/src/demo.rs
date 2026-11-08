@@ -8,9 +8,6 @@ use crate::{bits, err, handle, id, res, WebWorld};
 use rubble::*;
 use wasm_bindgen::prelude::*;
 
-/// Floats per body in [`WebWorld::create_bodies`].
-pub const BODY_RECORD: usize = 24;
-
 #[wasm_bindgen]
 impl WebWorld {
     /// Build a RUBSNAP1 snapshot's scene (`engine_schema::WorldSnapshot`, as
@@ -38,7 +35,7 @@ impl WebWorld {
 
     /// Many single-shape bodies in one call (`World::create_bodies`, then
     /// one shape and the mass data each), in record order. Per body,
-    /// [`BODY_RECORD`] floats: type (0 static, 1 kinematic, 2 dynamic),
+    /// [`rubble::play::rigid::BODY_RECORD`] floats: type (0 static, 1 kinematic, 2 dynamic),
     /// bullet (0 / 1), position xyz, rotation xyzw, linear and angular
     /// velocity, mass, principal inertia xyz (centre at the origin, axes
     /// aligned; ignored unless dynamic), shape (0 sphere: radius; 2 box:
@@ -47,60 +44,12 @@ impl WebWorld {
     /// the body handles.
     #[wasm_bindgen(js_name = createBodies)]
     pub fn create_bodies(&mut self, records: &[f32], shape: JsValue) -> Result<Vec<f64>, JsValue> {
-        if records.len() % BODY_RECORD != 0 {
-            return Err(err(format!(
-                "createBodies: {} floats is not whole records of {BODY_RECORD}",
-                records.len()
-            )));
-        }
         let shape = defs::shape_def(shape)?;
-        let rows: Vec<&[f32]> = records.chunks(BODY_RECORD).collect();
-        let mut defs = Vec::with_capacity(rows.len());
-        for r in &rows {
-            let body_type = match r[0] as u32 {
-                0 => BodyType::Static,
-                1 => BodyType::Kinematic,
-                2 => BodyType::Dynamic,
-                t => return Err(err(format!("createBodies: body type {t}"))),
-            };
-            defs.push(BodyDef {
-                body_type,
-                is_bullet: r[1] != 0.0,
-                position: [r[2], r[3], r[4]],
-                rotation: [r[5], r[6], r[7], r[8]],
-                linear_velocity: [r[9], r[10], r[11]],
-                angular_velocity: [r[12], r[13], r[14]],
-                ..BodyDef::default()
-            });
-        }
-        let ids = res(self.world.create_bodies(&defs))?;
-        // The records carry the mass: shapes leave it alone.
-        let shape = ShapeDef {
-            update_body_mass: false,
-            ..shape
-        };
-        for (b, r) in ids.iter().zip(&rows) {
-            let geometry = match r[19] as u32 {
-                0 => Geometry::Sphere {
-                    center: [0.0; 3],
-                    radius: r[20],
-                },
-                2 => Geometry::Box {
-                    half: [r[20], r[21], r[22]],
-                    transform: Transform::IDENTITY,
-                },
-                s => return Err(err(format!("createBodies: shape {s}"))),
-            };
-            let def = ShapeDef {
-                density: r[23],
-                ..shape.clone()
-            };
-            res(self.world.create_shape(*b, &def, geometry))?;
-            if r[0] as u32 == 2 {
-                let mass = MassData::principal(r[15], [0.0; 3], [r[16], r[17], r[18]]);
-                res(self.world.body_set_mass_data(*b, mass))?;
-            }
-        }
+        let ids = res(rubble::play::rigid::create_bodies(
+            &mut self.world,
+            records,
+            &shape,
+        ))?;
         Ok(ids.iter().map(|b| handle(b.to_bits())).collect())
     }
 

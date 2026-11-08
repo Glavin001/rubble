@@ -21,8 +21,8 @@
 use core_graphics_types::geometry::CGSize;
 use engine_fracture::scene::Scene;
 use engine_viewer::fracture::{Orbit, Renderer};
-use engine_world_wasm::play::{Play, POSE_FLOATS};
-use engine_world_wasm::range::{BALL_RADIUS, CRUSH_BUDGET, MAX_BALLS};
+use rubble::play::stage::{Play, POSE_FLOATS};
+use rubble::play::range::{BALL_RADIUS, CRUSH_BUDGET, MAX_BALLS};
 use metal::*;
 use objc::runtime::{Object, YES};
 use objc::{msg_send, sel, sel_impl};

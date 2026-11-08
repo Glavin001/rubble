@@ -6,10 +6,10 @@
 //! far), interpolated between steps. `lib.rs` binds it for the browser;
 //! `engine-viewer`'s `world_viewer` draws it natively.
 
-use crate::broadside::{self, Broadside, Director, Take};
-use crate::range::{Range, Splinter, BALL_RADIUS, BALL_SPEED, MAX_BALLS};
-use crate::timber_yard::{TimberYard, YardTake};
-use rubble::{GpuContext, Transform};
+use super::broadside::{self, Broadside, Director, Take};
+use super::range::{Range, Splinter, BALL_RADIUS, BALL_SPEED, MAX_BALLS};
+use super::timber_yard::{TimberYard, YardTake};
+use crate::{GpuContext, Transform};
 
 /// Floats a body takes in the draw shader's pose buffer (`fracture_draw.slang` `BodyPose`:
 /// seven float4; it reads the position and the rotation).

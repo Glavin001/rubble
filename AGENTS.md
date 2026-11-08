@@ -6,8 +6,8 @@
 - Never make tests, builds or runtime code depend on `inspiration/`: it is
   gitignored and absent in CI, fresh clones and worktrees. Read it to
   understand an algorithm, then write our own tests from its definition and
-  physical invariants (see `engine/crates/engine-webgpu/tests/spatial_order.test.mjs`
-  and `scene_builders.test.mjs`); do not import or record its outputs.
+  physical invariants (see `engine/crates/engine-scenes/tests/web_scenes.rs`); do not
+  import or record its outputs.
 - Performance work must not trade away physics quality or accuracy. Never make
   lossy changes on our own initiative: simplifying or decimating collision
   shapes, dropping contacts or solver iterations, coarsening timesteps,

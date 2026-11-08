@@ -37,7 +37,7 @@
   </div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
-    import { createWorld, Poses, pollFrame, stepFrames, errorText } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, Poses, pollFrame, stepFrames, errorText } from './rubble-world.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -54,11 +54,9 @@
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
     // The world opens the device; the page renders on it and reads the world's buffers in place.
-    const world = await createWorld({
-      gravity: [0, -9.81, 0],
-      contacts: 'canonical',
-      capacity: { maxBodies: N + 8, maxColliders: N + 8, maxCommands: 4 * (N + 8), maxHullVertices: 65536 },
-    });
+    // The scene (rubble::play::hills, engine-world): its world, solver, heightfield and bodies.
+    const sceneDef = await sceneFromQuery('terrain', location.search);
+    const world = await createScene(sceneDef);
     const device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
@@ -74,62 +72,19 @@
     configure();
     addEventListener('resize', configure);
 
-    // ---------------------------------------------------------------- terrain
-    // 161 × 161 samples, 0.25 m cells: 40 m square. Rolling hills and a ridge.
-    const NX = 161, NZ = 161, DX = 0.25, DZ = 0.25;
-    const X0 = -0.5 * (NX - 1) * DX, Z0 = -0.5 * (NZ - 1) * DZ;
-    const hills = (x, z) => 1.4 * Math.sin(0.22 * x) * Math.cos(0.18 * z) + 0.5 * Math.sin(0.55 * x + 1.0) * Math.sin(0.43 * z)
-      + 0.9 * Math.exp(-((x - 6) ** 2) / 8) * Math.cos(0.15 * z);
-    const initialHeights = new Float32Array(NX * NZ);
-    for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) initialHeights[j * NX + i] = hills(X0 + i * DX, Z0 + j * DZ);
-    let heights = initialHeights.slice();
-
     // ---------------------------------------------------------------- world
-    const DT = 1 / 60;
-    world.setSolver({ dt: DT, iterations: 10, flags: world.flags.SPEC_VELOCITY });
-    const material = { friction: 0.8 };
-
-    // The terrain: a static heightfield (its first collider).
-    const ground = world.createBody({});
-    const terrain = world.createHeightField(ground, { material }, NX, NZ, DX, DZ, heights);
-    if (world.shapeCollider(terrain) !== 0) throw new Error('the terrain must be collider 0');
-
-    // Bodies: boxes, spheres and capsules on a jittered grid above the hills. Each has
-    // mass 1 and the inertia given here (not derived from its shape).
-    const rand = (() => { let s = 12345; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); })();
-    const boxI = (m, hx, hy, hz) => [(m * (hy * hy + hz * hz)) / 3, (m * (hx * hx + hz * hz)) / 3, (m * (hx * hx + hy * hy)) / 3];
-    const qRand = () => { const a = rand() * 6.283, b = rand() * 6.283; const s = Math.sin(a / 2); return [Math.cos(b) * s, Math.sin(b) * s * 0.5, 0.6 * s, Math.cos(a / 2)]; };
-    const norm4 = (q) => { const l = Math.hypot(...q); return q.map((x) => x / l); };
-    const side = Math.ceil(Math.sqrt(N / 6));
-    const spacing = 1.1;
-    const bodies = []; // { id, slot, p, q }
-    for (let k = 0; k < N; k++) {
-      const layer = Math.floor(k / (side * side));
-      const cell = k % (side * side);
-      const x = (cell % side - side / 2 + 0.5) * spacing + (rand() - 0.5) * 0.3;
-      const z = (Math.floor(cell / side) - side / 2 + 0.5) * spacing + (rand() - 0.5) * 0.3;
-      const y = 4 + layer * 1.0 + hills(x, z);
-      const q = norm4(qRand());
-      const m = 1;
-      const kind = k % 3;
-      const id = world.createBody({ type: 'dynamic', position: [x, y, z], rotation: q });
-      let inertia;
-      if (kind === 0) {
-        const h = [0.15 + 0.15 * rand(), 0.12 + 0.12 * rand(), 0.15 + 0.15 * rand()];
-        world.createShape(id, { material }, { box: { half: h } });
-        inertia = boxI(m, ...h);
-      } else if (kind === 1) {
-        const r = 0.15 + 0.1 * rand(), i = (m * r * r) / 2.5;
-        world.createShape(id, { material }, { sphere: { radius: r } });
-        inertia = [i, i, i];
-      } else {
-        const r = 0.12, hh = 0.18 + 0.1 * rand(), len = 2 * (hh + r);
-        world.createShape(id, { material }, { capsule: { radius: r, halfLen: hh } });
-        inertia = [(m * (3 * r * r + len * len)) / 12, (m * r * r) / 2, (m * (3 * r * r + len * len)) / 12];
-      }
-      world.bodySetMassData(id, m, [0, 0, 0], inertia);
-      bodies.push({ id, slot: world.bodySlot(id), p: [x, y, z], q });
-    }
+    const placed = world.placeScene(sceneDef);
+    // The terrain: a static heightfield (collider 0), 161 × 161 samples, 0.25 m cells: 40 m
+    // square of rolling hills and a ridge.
+    const terrain = placed.terrain;
+    const NX = placed.nx, NZ = placed.nz, DX = placed.dx, DZ = placed.dz;
+    const X0 = -0.5 * (NX - 1) * DX, Z0 = -0.5 * (NZ - 1) * DZ;
+    const initialHeights = Float32Array.from(world.heightFieldHeights(terrain));
+    let heights = initialHeights.slice();
+    // The page's random sequence, continued from where placement left it.
+    const rand = (() => { let s = placed.seed; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); })();
+    // Bodies: boxes, spheres and capsules on a jittered grid above the hills ({ id, slot, p, q }).
+    const bodies = placed.bodies;
     // Every body's pose as the last polled frame left it.
     const poses = new Poses(N + 8);
     for (const b of bodies) poses.pose.set([...b.p, ...b.q], b.slot * 7);
