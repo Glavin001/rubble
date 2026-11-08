@@ -148,7 +148,24 @@ impl VgInput {
             serde_json::from_value(rig.physics.clone())
                 .map_err(|e| format!("{}: PHYSICS: {e}", rig.design))?
         };
-        let model = model_of(&glb);
+        let mut model = model_of(&glb);
+        // A tailgate's markers under the boot lid's names (the rigger's).
+        if rig.dims.rear_closure != "trunk_lid" {
+            let rc = rig.dims.rear_closure.clone();
+            let alias: Vec<Marker> = model
+                .markers
+                .iter()
+                .filter_map(|m| {
+                    let n = m.name.replace(&format!("_{rc}"), "_trunk");
+                    (n != m.name).then(|| Marker {
+                        name: n,
+                        pos: m.pos,
+                        rot: m.rot,
+                    })
+                })
+                .collect();
+            model.markers.extend(alias);
+        }
         for name in rig.markers.keys() {
             if !model.markers.iter().any(|m| &m.name == name) {
                 return Err(format!("rig.json marker {name} is not in the .glb"));
@@ -427,6 +444,9 @@ impl RigInput for VgInput {
     }
     fn hull_triangles(&self) -> bool {
         true
+    }
+    fn rear_closure(&self) -> String {
+        self.rig.dims.rear_closure.clone()
     }
     fn seam_points(&self) -> Option<Vec<(Vec3, Vec3, usize, usize)>> {
         // Points two parts' welded skins share (the skins are cut from one

@@ -385,6 +385,11 @@ pub trait RigInput {
     fn inward(&self, p: Vec3, d: f32) -> Vec3 {
         p - self.normal(p) * d
     }
+    /// The rear closure's mesh: the boot lid, or a tailgate (its markers
+    /// are the input's `hinge_trunk_*` and `latch_trunk` then).
+    fn rear_closure(&self) -> String {
+        "trunk_lid".into()
+    }
     /// The collision skin from the render skin (`skin_hull`) instead of the
     /// panel grids' triangles; gen3's lattice predates it.
     fn hull_triangles(&self) -> bool {
@@ -831,7 +836,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let door_f = Skin::of(model, "door_FL");
     let door_r = Skin::of(model, "door_RL");
     let hood_m = Skin::of(model, "hood");
-    let trunk_m = Skin::of(model, "trunk_lid");
+    let trunk_m = Skin::of(model, &inp.rear_closure());
     let fender_m = Skin::of(model, "fender_FL");
     let bf_m = Skin::of(model, "bumper_front");
     let br_m = Skin::of(model, "bumper_rear");

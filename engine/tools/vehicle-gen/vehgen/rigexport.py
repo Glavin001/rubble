@@ -42,7 +42,10 @@ def _r(a, q=1e-4):
 
 def export(D, cb, markers, path):
     tube = cb.tube
-    zf, zr = float(D.ZFRONT), float(D.ZREAR)
+    # the ends: the design's stated tips, else its first and last stations
+    zl = [z for _, z in D.ZLINES]
+    zf = float(getattr(D, 'ZFRONT', max(zl)))
+    zr = float(getattr(D, 'ZREAR', min(zl)))
     zs = np.arange(zr - 0.06, zf + 0.06 + DZ / 2, DZ)
     # key lines: (x, y) of every key point at every station
     kp = tube.keypoints(zs)                       # (nz, NK, 2)
