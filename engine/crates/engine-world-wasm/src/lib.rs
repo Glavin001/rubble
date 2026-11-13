@@ -43,6 +43,7 @@ mod read;
 mod scene;
 mod showcase;
 mod showcase_world;
+mod stability;
 mod ring_drive;
 mod soft;
 mod terrain;
@@ -161,6 +162,26 @@ static DEVICE_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// - `compiled <name> <ms>`: it finished, `ms` after it started;
 /// - `failed <name> <ms> <message>`: the browser rejected it (or lost the device).
 pub(crate) type Hear = std::rc::Rc<dyn Fn(String)>;
+
+/// Whether the browser has lost the world's device (nothing more may be created
+/// or submitted on it: wgpu panics on a lost device's errors).
+pub(crate) fn device_lost() -> bool {
+    DEVICE_LOST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the browser has lost the world's WebGPU device. A page checks this
+/// before stepping and stops for good when it is set (no rebuild by itself).
+#[wasm_bindgen(js_name = deviceLost)]
+pub fn device_lost_js() -> bool {
+    device_lost()
+}
+
+/// World steps a page keeps in flight (submitted, their readback not yet back) in
+/// a world with explicit vehicles: the queue stays this short whatever a step
+/// costs, so a slow or broken state cannot pile up GPU work behind it. A step not
+/// taken is not owed later (the simulation runs slower instead). Pacing only: the
+/// steps taken are the same steps.
+pub const EXPLICIT_STEPS_IN_FLIGHT: usize = 2;
 
 /// A page's optional progress function as a [`Hear`].
 pub(crate) fn hear_fn(progress: Option<js_sys::Function>) -> Hear {
@@ -527,12 +548,27 @@ impl WebWorld {
     #[wasm_bindgen(js_name = canStep)]
     pub fn can_step(&self) -> bool {
         self.world.can_step_without_waiting()
+            && !device_lost()
+            && (self.world.explicit_vehicles().is_none() || self.world.readbacks_in_flight() < EXPLICIT_STEPS_IN_FLIGHT)
+    }
+
+    /// The stability check of this world's explicit vehicles (`stability.rs`:
+    /// read-only; the page stops stepping when it reports), `undefined` without
+    /// explicit vehicles.
+    #[wasm_bindgen(js_name = explicitHealth)]
+    pub fn explicit_health(&self) -> Option<stability::VehicleHealth> {
+        self.world
+            .explicit_vehicles()
+            .map(|g| stability::VehicleHealth::new(self.world.device(), self.world.queue(), g))
     }
 
     /// One fixed step if it can be taken without waiting (see [`Self::can_step`]);
     /// `false`: nothing happened, try again after a poll.
     pub fn step(&mut self) -> Result<bool, JsValue> {
-        if !self.world.can_step_without_waiting() {
+        if device_lost() {
+            return Err(err(format!("the browser lost the GPU device: {}", gpu_error())));
+        }
+        if !self.can_step() {
             let _ = self.world.device().poll(wgpu::PollType::Poll);
             return Ok(false);
         }

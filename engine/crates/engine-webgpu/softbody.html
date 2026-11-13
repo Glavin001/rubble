@@ -89,6 +89,7 @@
     import { createCrashLab, LAB_PRESETS } from './crash-lab.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createLoading, showFatal } from './load-progress.mjs';
+    import { createStabilityStop } from './stability-stop.mjs';
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     // Loading: each stage named where it runs (load-progress.mjs draws the card).
@@ -640,6 +641,10 @@
     // world's device), at the soft scene's spawn facing +Z; the world holds the
     // scene's ground and static boxes (the wall) and renders them.
     let xsim = null, xlayout = null;
+    // The stop on an unstable simulation or a lost device (stability-stop.mjs; the
+    // judgement is Rust's, read-only): once stopped, no more steps and no more frames.
+    let xstop = null;
+    const watchExplicit = () => { xstop = createStabilityStop(xsim.health(), { params: { scene, query: location.search } }); };
     const XSPEED = (Number(qs.get('xspeed')) || 100) / 3.6;
     const XSPAWN = { wall: [0, -2 - runup], pole: [0, -2 - runup], limbo: [0, -2 - runup], headon: [0, -3 - runup / 2] };
     // Its front face where the sedan's would be (CAR_FRONT ahead of the spawn).
@@ -698,6 +703,7 @@
         loadCancel.run = () => fail(new Error('Loading cancelled.'));
       }
       xsim = await world.explicitSimAsync(explicitSpec(x, z), loading.progress);
+      watchExplicit();
       xlayout = xsim.layout();
       labelProfile();
       // The explicit solver collides with its own copies; these only render (not soft
@@ -1602,7 +1608,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
     }
     function resetScene() {
       resetGen++;
-      if (EXPLICIT) { buildExplicit(); pacer.reset(1); xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; if (lab) { lab.rebuilt(); lab.read(); } return; }
+      if (EXPLICIT) { if (xstop?.stopped) return; buildExplicit(); watchExplicit(); pacer.reset(1); xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; if (lab) { lab.rebuilt(); lab.read(); } return; }
       if (crusher) { crusher.start = null; crusher.reading = false; crusher.heavy = false; }
       world.restoreState(initial);
       while (softs.length > initialSoftCount) softs.pop();
@@ -1827,6 +1833,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
           damageRead = null;
           if (sim !== xsim) return damage;
           damage = d.map((x, i) => ({ name: xlayout.vehicles[i].name, beams: x.beams, yielded: x.bent, broken: x.broken }));
+          d.forEach((x, i) => xstop?.damage(i, x.broken, x.bent, x.beams));
           breaks = d.reduce((n, x) => n + x.broken, 0);
           return damage;
         }, (e) => { damageRead = null; throw e; });
@@ -2114,7 +2121,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
       }
       return steps;
     }
-    const launchExplicit = () => xsim.launch(XSPEED).catch(fail);
+    const launchExplicit = () => { xstop?.launched(XSPEED); return xsim.launch(XSPEED).catch(fail); };
     // Explicit frames in flight on the GPU: at most two, as a game loop keeps it, so
     // the fps and real-time readouts count finished work, not submissions running ahead.
     let xInFlight = 0;
@@ -2123,6 +2130,10 @@ fn xpos(i: u32, v: u32) -> vec3f {
     let frameTrace = null;
     window.__frameTrace = (on = true) => { const t = frameTrace; frameTrace = on ? { frames: [], poses: [] } : null; return t; };
     function frame(now) {
+      // Stopped (an unstable state, a lost device, a failure): nothing more is
+      // submitted; the canvas keeps its last frame.
+      if (xstop?.stopped || (EXPLICIT && window.__failed)) return;
+      if (EXPLICIT && !manual) xstop?.check(xsim.steps() / XRATE);
       if (EXPLICIT && !manual && xInFlight >= 2) { frameTrace?.frames.push({ now, skipped: 1 }); requestAnimationFrame(frame); return; }
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;

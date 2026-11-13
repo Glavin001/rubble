@@ -41,6 +41,7 @@
     // vehicles' collision skins from the GPU buffers in place.
     import { createVehicleTown, pollFrame, errorText, FramePacer } from './rubble-world.mjs';
     import { createLoading } from './load-progress.mjs';
+    import { createStabilityStop } from './stability-stop.mjs';
     const qs = new URLSearchParams(location.search);
     const N = Math.max(1, Number(qs.get('n')) || 16);
     const SPEED = Number(qs.get('speed')) || 15;
@@ -74,7 +75,11 @@
     const gpuSeg = new Map(); let gpuTotal = [];
     window.__gpuReset = () => { gpuSeg.clear(); gpuTotal = []; };
     window.__gpu = () => ({ total: [...gpuTotal], segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
-    device.lost.then((i) => fail('device lost: ' + i.message));
+    // The stop on an unstable simulation or a lost device (stability-stop.mjs; the
+    // judgement is Rust's, read-only): once stopped the page takes no more steps and
+    // draws no more frames, and never rebuilds by itself.
+    const stop = createStabilityStop(world.explicitHealth() ?? null, { params: { query: location.search } });
+    device.lost.then((i) => { stop.lost(`${i.reason}: ${i.message}`); fail('device lost: ' + i.message); });
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
 
     const canvas = document.getElementById('c');
@@ -302,6 +307,8 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
       if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
       const dt = lastNow === null ? 0 : (now - lastNow) / 1000;
       lastNow = now;
+      if (stop.stopped) { statusEl.textContent = 'stopped'; return; }
+      stop.check(world.explicitSteps()[0] / 2000);
       try {
         const owed = paused ? 0 : pacer.advance(dt, 1, 4);
         for (let k = 0; k < owed; k++) {

@@ -61,6 +61,7 @@
     // built in Rust), or Rubble's authored sedan.
     import { createShowcase, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
     import { createLoading } from './load-progress.mjs';
+    import { createStabilityStop } from './stability-stop.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
@@ -178,7 +179,11 @@
     const gpuSeg = new Map(); let gpuTotal = [];
     window.__gpu = () => ({ total: [...gpuTotal], segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
     window.__gpuReset = () => { gpuSeg.clear(); gpuTotal = []; };
-    device.lost.then((i) => fail('device lost: ' + i.message));
+    // The stop on an unstable simulation or a lost device (stability-stop.mjs; the
+    // judgement is Rust's, read-only): once stopped the page takes no more steps and
+    // draws no more frames, and never rebuilds by itself.
+    const stop = createStabilityStop(world.explicitHealth() ?? null, { params: { query: location.search } });
+    device.lost.then((i) => { stop.lost(`${i.reason}: ${i.message}`); fail('device lost: ' + i.message); });
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
 
     // ---------------------------------------------------------------- renderers
@@ -497,6 +502,8 @@
         if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
         const dt = lastNow === null ? 0 : (now - lastNow) / 1000;
         lastNow = now;
+        if (stop.stopped) return;
+        stop.check(simSteps / RATE);
         try {
           const scale = slowAt(simSteps / RATE);
           const owed = pacer.advance(dt, scale, 4);

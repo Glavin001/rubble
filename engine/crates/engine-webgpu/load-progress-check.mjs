@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // The loading card (load-progress.mjs) driven with a scripted load in headless
 // Chrome, no GPU (--disable-gpu): the kernel list's states, the estimate from the
-// stored times, the Cancel button, and the device-lost state with its Retry.
+// stored times, the Cancel button, and the device-lost state with its Retry. Then
+// the stop panel (stability-stop.mjs) with a scripted health check.
 //
 //   node --experimental-websocket load-progress-check.mjs [shots-dir]
 //
@@ -21,6 +22,10 @@ const CHROME = process.env.CHROME || (process.platform === 'darwin'
 const PAGE = `<!doctype html><meta charset="utf-8"><title>loading card</title>
 <body style="margin:0;height:100vh;background:#223"><script type="module">
 import { createLoading, isDeviceLost } from './load-progress.mjs';
+import { createStabilityStop } from './stability-stop.mjs';
+// A scripted VehicleHealth: healthy until __health.message is set.
+window.__health = { message: null, checks: 0, damages: 0, stopped() { return undefined; }, check() { this.checks++; return Promise.resolve(this.message ?? undefined); }, damage() { this.damages++; }, launched() {} };
+window.__stop = createStabilityStop(window.__health, { params: { xscene: 'sidepole', speed: 186 }, onStop: () => { window.__onStop = (window.__onStop ?? 0) + 1; } });
 window.__make = (withCancel) => {
   document.getElementById('loading')?.remove();
   document.getElementById('fatal')?.remove();
@@ -36,6 +41,7 @@ window.__ready = true;
 const server = createServer((req, res) => {
   const p = new URL(req.url, 'http://x').pathname;
   if (p === '/') { res.writeHead(200, { 'content-type': 'text/html' }).end(PAGE); return; }
+  if (p === '/stability-stop.mjs') { res.writeHead(200, { 'content-type': 'text/javascript' }).end(readFileSync(join(ROOT, 'stability-stop.mjs'))); return; }
   if (p === '/load-progress.mjs') { res.writeHead(200, { 'content-type': 'text/javascript' }).end(readFileSync(join(ROOT, 'load-progress.mjs'))); return; }
   res.writeHead(404).end();
 });
@@ -170,6 +176,24 @@ await shot('3-device-lost');
 await evaluate(`[...document.querySelectorAll('#fatal button')].find((b) => b.textContent === 'Retry').click()`);
 check('Retry runs', (await evaluate('window.__retried')) === 1);
 check('isDeviceLost', (await evaluate(`window.__lost('A valid external Instance reference no longer exists') && !window.__lost('shader error')`)) === true);
+
+// 5. The stop panel: healthy checks show nothing; a message stops for good.
+await evaluate(`document.getElementById('fatal')?.remove()`);
+await evaluate('window.__stop.check(0.5); window.__stop.damage(0, 1, 2, 3)');
+await sleep(50);
+check('healthy: no panel, not stopped', (await evaluate(`window.__stop.stopped === null && !document.getElementById('stopped')`)) === true);
+const MSG = 'ENGINE ERROR: instability detected at t = 1.050 s: the vehicles\' kinetic energy rose from 1,935 kJ to 32,460 kJ, past 8,854 kJ. This is a simulation bug, not a limit: the simulation was stopped so the broken state does not overload the GPU. Please report it with the scene link and the numbers below.\nvehicle 0: finite true, speed 12.0 km/h';
+await evaluate(`window.__health.message = ${JSON.stringify(MSG)}; window.__stop.check(1.05)`);
+await sleep(100);
+t = await evaluate(`document.getElementById('stopped')?.innerText ?? ''`);
+check('unstable: an engine error panel, loud', /^Engine error: the simulation became unstable and was stopped/.test(t) && /This is a bug in the simulation, not a limit/.test(t), t);
+check('unstable: the evidence, the scene link and the parameters are in the report', /kinetic energy rose from 1,935 kJ to 32,460 kJ/.test(t) && /scene: http:\/\/127\.0\.0\.1/.test(t) && /"xscene":"sidepole"/.test(t), t);
+check('unstable: Restart and Copy offered', /Restart \(reload the scene\)/.test(t) && /Copy the report/.test(t), t);
+check('unstable: stopped for good, the page told once', (await evaluate(`window.__stop.stopped === ${JSON.stringify(MSG)} && window.__stopped === window.__stop.stopped && window.__onStop === 1`)) === true);
+const before = await evaluate('window.__health.checks + window.__health.damages');
+await evaluate('window.__stop.check(2); window.__stop.check(3); window.__stop.damage(0, 1, 2, 3)');
+check('unstable: no further checks once stopped', (await evaluate('window.__health.checks + window.__health.damages')) === before);
+await shot('4-engine-error');
 
 console.log(failed ? `${failed} check(s) failed` : 'all checks passed');
 process.exit(failed ? 1 : 0);

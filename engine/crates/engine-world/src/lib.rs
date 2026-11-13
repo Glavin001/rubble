@@ -2181,6 +2181,12 @@ impl World {
         self.readback.has_free()
     }
 
+    /// Steps whose readback is still in flight (a host's back-pressure: it may hold
+    /// the queue shorter than the readback slots allow).
+    pub fn readbacks_in_flight(&self) -> usize {
+        self.readback.in_flight()
+    }
+
     /// Advance one fixed step (queued commands first). Never waits on a
     /// readback unless every readback slot is in flight and
     /// `Backpressure::Block`; collect results with [`World::poll`].

@@ -1150,6 +1150,9 @@ impl ExplicitSim {
     /// contact error (a vehicle past its frame bounds: the margin widens by itself)
     /// is a console warning and the sim keeps stepping; other errors are returned.
     pub fn frame(&mut self, steps: u32) -> Result<(), JsValue> {
+        if crate::device_lost() {
+            return Err(err(format!("the browser lost the GPU device: {}", crate::gpu_error())));
+        }
         self.frame_steps(steps).map_err(err)?;
         for e in self.gpu.take_contact_errors() {
             let note = format!("explicit beams vehicle contact (the sim continues): {e}");
@@ -1201,6 +1204,12 @@ impl ExplicitSim {
 
 #[wasm_bindgen]
 impl ExplicitSim {
+
+    /// The stability check of this sim's vehicles (`stability.rs`: read-only; the
+    /// page stops stepping when it reports).
+    pub fn health(&self) -> crate::stability::VehicleHealth {
+        crate::stability::VehicleHealth::new(&self.device, &self.queue, &self.gpu)
+    }
 
     /// Steps run since spawn.
     pub fn steps(&self) -> f64 {

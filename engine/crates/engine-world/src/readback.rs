@@ -104,6 +104,11 @@ impl<K: Clone> ReadbackRing<K> {
         !self.free.is_empty()
     }
 
+    /// Slots in flight (encoded, not yet taken back).
+    pub fn in_flight(&self) -> usize {
+        self.slots.len() - self.free.len()
+    }
+
     /// Encode this step's copies into a free slot (the caller made sure one is
     /// free). Returns the slot.
     pub fn encode(
