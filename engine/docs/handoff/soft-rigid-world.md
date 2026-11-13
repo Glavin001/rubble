@@ -84,6 +84,13 @@ Where the vehicle time goes:
   - run the CPU reference first, then a tiny GPU run with a low budget, then the real run;
   - one GPU job on the machine at a time, through `~/.rubble/gpu.lock`. Native binaries take it via `hold_gpu_lock()`; wrap anything else with `engine/scripts/with-gpu-lock.py`. Set `RUBBLE_GPU_LOCK=0` in the child to avoid deadlocking on your own wrapper.
 
+### GPU overload (2026-11-13: not solved)
+The loop budget ends a runaway loop; it does not bound time. The vehicle lab lost the device in Mountain mode, the GPU stayed at 100 % with no process, and macOS logged the user out. Read [gpu-overload.md](../gpu-overload.md) before running or writing a GPU page:
+- **No step has a time limit.** The budget is 2^22–2^31 passes for each of up to 512 lanes; the readback gate limits steps in flight by count (3; 8 in the lab), not by time.
+- **Pages keep stepping a broken state.** On the CPU reference the lab's default mountain run goes non-finite at 54.6 s (the rockslide striking a car at rest); the page shows a HUD line and goes on.
+- **A second failure the same night was a compile stall,** not overload: `softbody.html` with two cars lost the device while Metal compiled 0.6–0.8 MB kernels for over two minutes.
+- The options, a recommended order and the operating rules until it is solved are in that document. A prototype of three guards is on `fix/gpu-overload-guards` (not adopted).
+
 ### Chrome / WebGPU is stricter than native wgpu
 - **Barriers need uniform control flow (Tint).** A branch on a per-lane value before `workgroupBarrier()` fails to compile. Broadcast through workgroup memory with `workgroupUniformLoad`. `uniformize_workgroup_lanes` in `engine-webgpu/src/lib.rs` rewrites the `gsUniform*` names; add new names to its `NAMES`. Check pages with `softbody-check.mjs`.
 - **At most 10 storage buffers per shader stage.** The coupling broadphase needed its own bind group layout (`bgl_q`/`pl_q`, bindings 0, 1, 2, 8, 9, 13–16).

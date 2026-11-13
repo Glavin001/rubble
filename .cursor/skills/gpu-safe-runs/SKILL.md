@@ -30,5 +30,12 @@ Rules for every run:
 - **Never `pgrep -f`/`pkill -f`:** it matches unrelated processes. Wait on PIDs.
 - **Benchmark one thing at a time.** Two GPU jobs make both timings meaningless.
 
+## The budget does not bound time (2026-11-13)
+The loop budget ends a runaway loop, but a frame at its budget is seconds to minutes of GPU time, and pages limit steps in flight by count, not by time. A page lost the device and ended the user's session this way. Until that is solved, follow the operating rules in `engine/docs/gpu-overload.md` §7:
+- **Never open a new or changed GPU page in the user's browser first.** CPU reference for the page's full run length, then a tiny-budget native run, then headless Chrome under the lock with a harness that stops on the first error, NaN or slow step.
+- **A NaN or an error on the CPU reference is a stop,** not a note.
+- **No GPU job while the user has a GPU page open,** and none during a cold kernel compile (two-car scenes with surface contact compile for minutes).
+- **Check for a wedge with** `ioreg -r -d 1 -w 0 -c IOAccelerator | grep -o '"Device Utilization %"=[0-9]*'`: 100 with no GPU process running means stop and wait; do not start a job "to check".
+
 ## If the GPU is already wedged
 Symptoms: tests that used to pass stall, and Activity Monitor shows GPU at 100 % with nothing running. Don't keep launching jobs; they queue behind the wedge and look like new bugs. Tell the user it needs a reboot.

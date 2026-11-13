@@ -11,6 +11,8 @@ One soft-body car (the 2 kHz explicit solver) in a GPU World, and the things a t
 
 The lab changes no solver or kernel behaviour. It places bodies, reads state and counts. The two engine additions are a state reset (`ExplicitBeamsGpu::reset_state`, `World::reset_explicit_vehicles`) and an option of the scene renderer; neither changes what a step computes.
 
+> **Warning (2026-11-13): Mountain mode lost the GPU device and ended the user's macOS session.** Not solved. Read [gpu-overload.md](gpu-overload.md) before opening this page; until then run Mountain with the rockslide off, and never unattended. The "8 steps in flight" and "steps owed" pacing described below is part of the problem.
+
 ## Using the page
 
 Build the World wasm (CONTRIBUTING.md), serve `engine/crates/engine-webgpu` (or the built site) and open `vehicle-lab.html`.
@@ -175,6 +177,7 @@ Cost: surface contact with the generated sedan is 3.7–4.0 ms of GPU per step i
 - **The lab's own limits** are refused with a message, not degraded: 48 live projectiles (the oldest is removed for a new one), 64 queued shots, bursts of 32, 240 obstacle bodies, brick stacks of 200, 1,000 script events, shot sizes of 2 cm to 4 m, speeds to 100 m/s.
 - **Kernel loops** take the engine's per-frame pass budgets (`explicit_loop_cap`); a stop fails `World::step`, which the page shows. The lab adds no kernel loop.
 - **Device loss** shows a message with a Rebuild button.
+- **None of these bounds GPU time.** A pass budget is 2^27 or more passes per invocation for this car, and the page does not stop on a non-finite state: [gpu-overload.md](gpu-overload.md).
 
 ## What the engine must change for the lab to be physically right
 

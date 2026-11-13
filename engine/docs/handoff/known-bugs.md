@@ -106,6 +106,20 @@ The static-shape rule's surface has static friction 1.2 (50°) and kinetic 0.75 
 ### L5. brick-ring-drive.html may pass the pacer its slow factor upside down (Suspected)
 `FramePacer::advance(dt, slow, max)` takes how many times slower than real time (4 for ×¼). The ring page passes 0.25 for its slow motion. Seen while writing the lab's loop, which had the same mistake (live slow motion ran at ×1); not checked on the ring page.
 
+## GPU overload (see [gpu-overload.md](../gpu-overload.md))
+
+### G1. A page can hold the GPU until the device is lost and the session ends (Observed 2026-11-13, root cause not confirmed, not fixed)
+`vehicle-lab.html`, Mountain mode, generated sedan: device lost, GPU at 100 % with no process for 10 s or more, "no WebGPU adapter", macOS logout. No World step has a time limit (the loop budget is 2^22–2^31 passes per invocation, up to 512 invocations), steps in flight are limited by count only (8 in the lab, with refused steps owed), and errors arrive with the readback, that many steps late. Most likely chain: the state degraded and the page kept submitting. Every explicit-vehicle page shares the gate; native `World::step` in Drop mode has none.
+
+### G2. The lab's page keeps stepping a non-finite car (Confirmed by reading; the NaN confirmed on the CPU reference)
+On the CPU reference the default mountain run (authored sedan, surface contact on, rockslide on) reaches a non-finite node state at 54.6 s, after boulders strike the car at rest and parts fly 323 m. With the rockslide off it stays finite for 90 s. The CPU lab and the offline GPU example stop on it; the page only shows "NON-FINITE (NaN)" in the HUD. The kernels have no NaN test.
+
+### G3. Cold kernel compiles can lose the device (Observed 2026-11-13, `softbody.html`, two cars, surface contact)
+One frame module took 127.8 s to compile (the frame modules are 0.37–0.81 MB of WGSL each, one entry point with everything inlined); the device was lost during the async warm-up, GPU utilisation about 27 %. A device lost mid-load then panics the wasm (wgpu unwraps a `createBuffer` error) instead of failing cleanly. Whether Chrome's watchdog or memory killed the GPU process is not known.
+
+### G4. `cpl_query` counts grid cells in integers (Confirmed by reading, not reproduced)
+`vehicle_coupling.slang` multiplies the box's three cell spans as `uint`; for a box past about 1,600 cells a side (a flung part, an exploded state) the product can wrap and the query walks too few cells, silently missing colliders. The explicit kernels count in floating point for this reason. Bounded (no hang).
+
 ## Capacity and performance
 
 ### C1. Coupling shape room: 1,024 shapes per car can be exceeded (Confirmed)
