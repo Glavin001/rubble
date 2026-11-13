@@ -7,7 +7,7 @@ struct IngestParams_std140_0
     @align(16) record_count_0 : u32,
     @align(4) max_bodies_0 : u32,
     @align(8) h_0 : f32,
-    @align(4) pad_0 : u32,
+    @align(4) gate_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : IngestParams_std140_0;
@@ -80,6 +80,8 @@ struct ColliderInfo_std430_0
 @binding(12) @group(0) var<storage, read_write> scan_blocks_0 : array<u32>;
 
 @binding(9) @group(0) var<storage, read_write> manifolds_0 : array<Record_std430_0>;
+
+@binding(13) @group(0) var<storage, read_write> gate_1 : array<u32>;
 
 fn isinf_0( x_0 : f32) -> bool
 {
@@ -749,6 +751,144 @@ fn ingest_merge(@builtin(global_invocation_id) id_5 : vec3<u32>)
         a_2 = a_2 + u32(1);
     }
     sort_0[n_2 + u32(1) + k_2] = b_3;
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn ingest_any(@builtin(global_invocation_id) id_6 : vec3<u32>)
+{
+    var _S56 : u32 = id_6.x;
+    var _S57 : bool;
+    if(_S56 >= (params_0.record_count_0))
+    {
+        _S57 = true;
+    }
+    else
+    {
+        var _S58 : bool = record_live_0(_S56);
+        _S57 = !_S58;
+    }
+    if(_S57)
+    {
+        return;
+    }
+    if((records_0[_S56].ids_0.w) != u32(0))
+    {
+        atomicStore(&(counts_0[u32(2) * params_0.chunk_count_0]), u32(1));
+    }
+    return;
+}
+
+fn gate_size_0( slot_1 : u32,  groups_0 : u32)
+{
+    var at_1 : u32 = u32(3) * (params_0.gate_0 + slot_1);
+    gate_1[at_1] = groups_0;
+    gate_1[at_1 + u32(1)] = u32(1);
+    gate_1[at_1 + u32(2)] = u32(1);
+    return;
+}
+
+@compute
+@workgroup_size(1, 1, 1)
+fn ingest_gate(@builtin(global_invocation_id) id_7 : vec3<u32>)
+{
+    var n_3 : u32 = params_0.chunk_count_0;
+    var _S59 : u32 = u32(2) * params_0.chunk_count_0;
+    var _S60 : u32 = atomicLoad(&(counts_0[_S59]));
+    var any_0 : bool = _S60 != u32(0);
+    atomicStore(&(counts_0[_S59]), u32(0));
+    var state_0 : u32 = u32(3) * (params_0.gate_0 + u32(7));
+    var _S61 : u32 = state_0 + u32(1);
+    var streak_0 : u32 = gate_1[_S61];
+    var zero_0 : bool;
+    if(gate_1[state_0] != u32(0))
+    {
+        zero_0 = !any_0;
+    }
+    else
+    {
+        zero_0 = false;
+    }
+    var skip_0 : bool;
+    if(zero_0)
+    {
+        skip_0 = streak_0 >= u32(2);
+    }
+    else
+    {
+        skip_0 = false;
+    }
+    var _S62 : u32;
+    if(zero_0)
+    {
+        _S62 = min(streak_0 + u32(1), u32(2));
+    }
+    else
+    {
+        _S62 = u32(0);
+    }
+    gate_1[_S61] = _S62;
+    var _S63 : i32;
+    if(skip_0)
+    {
+        _S63 = i32(1);
+    }
+    else
+    {
+        _S63 = i32(0);
+    }
+    gate_1[state_0 + u32(2)] = u32(_S63);
+    if(skip_0)
+    {
+        gate_1[u32(3) * params_0.gate_0] = u32(0);
+        gate_1[u32(3) * (params_0.gate_0 + u32(1))] = u32(0);
+    }
+    if(skip_0)
+    {
+        _S62 = u32(0);
+    }
+    else
+    {
+        _S62 = (_S59 + u32(63)) / u32(64);
+    }
+    gate_size_0(u32(2), _S62);
+    if(skip_0)
+    {
+        _S62 = u32(0);
+    }
+    else
+    {
+        _S62 = (params_0.record_count_0 + u32(63)) / u32(64);
+    }
+    gate_size_0(u32(3), _S62);
+    if(skip_0)
+    {
+        _S62 = u32(0);
+    }
+    else
+    {
+        _S62 = (n_3 + u32(1023)) / u32(1024);
+    }
+    gate_size_0(u32(4), _S62);
+    if(skip_0)
+    {
+        _S63 = i32(0);
+    }
+    else
+    {
+        _S63 = i32(1);
+    }
+    gate_size_0(u32(5), u32(_S63));
+    if(skip_0)
+    {
+        _S62 = u32(0);
+    }
+    else
+    {
+        _S62 = (n_3 + u32(63)) / u32(64);
+    }
+    gate_size_0(u32(6), _S62);
     return;
 }
 

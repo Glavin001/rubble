@@ -15,6 +15,7 @@ pub mod asset;
 pub mod bonds;
 pub mod cook;
 pub mod cuboid;
+pub mod district;
 pub mod glass_tower;
 pub mod guidance;
 pub mod math;

@@ -106,6 +106,13 @@ impl WebCity {
         self.def.houses as u32
     }
 
+    /// The most houses one world holds (`CityDef::max_houses`: a world's fracture chunk
+    /// limit). A page offers no more, and `capacity` refuses more with a message to show.
+    #[wasm_bindgen(js_name = maxHouses)]
+    pub fn max_houses(&self) -> Result<u32, JsValue> {
+        Ok(res(self.def.max_houses(&self.house))? as u32)
+    }
+
     /// Houses placed so far.
     pub fn placed(&self) -> u32 {
         self.city.as_ref().map_or(0, |c| c.houses.len() as u32)

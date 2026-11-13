@@ -703,7 +703,7 @@ pub const LP_BODY: u32 = 7;
 /// The shots strike prediction checks, at most.
 pub const MAX_SHOTS: usize = 64;
 const BODY_WORDS: u32 = 7;
-const ARGS: u64 = 17;
+const ARGS: u64 = 25;
 const ARG_CHUNKS: u64 = 0;
 const ARG_BONDS: u64 = 1;
 const ARG_BODIES: u64 = 2;
@@ -721,6 +721,11 @@ const ARG_CS_SAVE: u64 = 13;
 const ARG_CRUSH_CHUNKS: u64 = 14;
 const ARG_CRUSH_SCAN: u64 = 15;
 const ARG_CRUSH_ONE: u64 = 16;
+// The quiet gate's (`fr_quiet`, coupling.slang `ingest_gate`): the frame's loads and
+// threshold breaks; the ingest's own slots follow (19..23), then the gate's state.
+const ARG_Q_CHUNKS: u64 = 17;
+const ARG_Q_BONDS: u64 = 18;
+const ARG_Q_STATE: u64 = 24;
 
 /// The counters (`fracture.slang` `C_*`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -904,7 +909,7 @@ pub fn entries() -> &'static [&'static str] {
     &ENTRIES
 }
 
-const ENTRIES: [&str; 89] = [
+const ENTRIES: [&str; 90] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -994,6 +999,7 @@ const ENTRIES: [&str; 89] = [
     "fr_strike_claim",
     "fr_host_breaks",
     "fr_frame_begin",
+    "fr_quiet",
 ];
 
 #[repr(C)]
@@ -1089,6 +1095,10 @@ pub struct GpuFracture {
     /// This step's event lists were opened by the in-step contact fracture (which records
     /// its breaks and splits into them before the frame's own): the frame keeps them.
     events_opened: bool,
+    /// The quiet gate's streak starts over at the next gated frame: the host changed what
+    /// the skipped passes read (chunks or bonds placed or retired, a rebind), or a frame ran
+    /// without the gate.
+    quiet_reset: std::sync::atomic::AtomicBool,
     engine_counters: Option<wgpu::Buffer>,
     /// Chunk crushing's tables, state and params (placeholders without it).
     pub crush_tab: wgpu::Buffer,
@@ -1399,6 +1409,7 @@ impl GpuFracture {
             lp,
             cs_timing: CsTiming::new(gpu),
             events_opened: false,
+            quiet_reset: std::sync::atomic::AtomicBool::new(true),
             engine_counters: None,
             binds: Vec::new(),
             scan_binds: Vec::new(),
@@ -1428,6 +1439,7 @@ impl GpuFracture {
 
     /// The bind groups, against the engine's and the ingest's buffers as they are now.
     pub fn rebind(&mut self, gpu: &Gpu, engine: &EngineBuffers, ingest: &EngineIngest) {
+        self.quiet_reset.store(true, std::sync::atomic::Ordering::Relaxed);
         let group = |scan: &wgpu::Buffer, k: &Kernel| {
             let buffers: [&wgpu::Buffer; 29] = [
                 &self.params_buf,
@@ -1498,6 +1510,7 @@ impl GpuFracture {
         free: &[u32],
         scales: Option<[f32; 3]>,
     ) -> Result<(), String> {
+        self.quiet_reset.store(true, std::sync::atomic::Ordering::Relaxed);
         let (n, e, p) = (t.chunk_count(), t.bond_count(), t.parts.len() as u32);
         let l = self.layout;
         let parts_room = self.parts.size() / 32;
@@ -1623,6 +1636,7 @@ impl GpuFracture {
     /// chunk's body is NONE, a free bond broken) and take `slots` out of the body slots a
     /// split may use. Written before the next submission.
     pub fn retire(&self, gpu: &Gpu, at: Base, chunks: u32, bonds: u32, slots: &[u32]) {
+        self.quiet_reset.store(true, std::sync::atomic::Ordering::Relaxed);
         let l = self.layout;
         if chunks > 0 {
             gpu.write_buffer(
@@ -1775,12 +1789,47 @@ impl GpuFracture {
     /// The frame's loads and breaks, then its splits (gated on the GPU). `step` is the
     /// engine's next step (a re-parented body's generation).
     pub fn encode_frame(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32) {
+        self.frame(gpu, encoder, step, None);
+    }
+
+    /// The ingest's merge of `substeps` substeps and [`Self::encode_frame`], behind the quiet
+    /// gate (`fr_quiet`, coupling.slang `ingest_gate`). A frame in which no contact row
+    /// touches a chunk and no chunk carries a pulse, after two such frames, leaves every
+    /// word the merge, the loads and the threshold's breaks write as it already is: those
+    /// passes then dispatch no group, and every other pass runs as in any frame. Decided on
+    /// the GPU, nothing read back. `STRESS_QUIET_GATE=0`: without the gate (an A/B).
+    pub fn encode_frame_merged(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, ingest: &EngineIngest, engine: &EngineBuffers, substeps: u32) {
+        if std::env::var("STRESS_QUIET_GATE").is_ok_and(|v| v == "0") {
+            ingest.merge(gpu, encoder, engine, substeps);
+            self.frame(gpu, encoder, step, None);
+        } else {
+            self.frame(gpu, encoder, step, Some((ingest, engine, substeps)));
+        }
+    }
+
+    fn frame(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, merge: Option<(&EngineIngest, &EngineBuffers, u32)>) {
+        use std::sync::atomic::Ordering;
         // The pool's halves swap every frame, and the step and log stamp move on: on the GPU
         // (`fr_frame_begin`), the host writing them only off the expected sequence.
         self.sync_frame(gpu, step, true);
+        let gated = merge.is_some();
+        if gated && self.quiet_reset.swap(false, Ordering::Relaxed) {
+            // The streak (`ARG_Q_STATE`'s second word), before this submission.
+            gpu.write_buffer(&self.sizes, 12 * ARG_Q_STATE + 4, bytemuck::bytes_of(&0u32));
+        }
+        if !gated {
+            // A frame the gate does not see: its streak no longer describes the state.
+            self.quiet_reset.store(true, Ordering::Relaxed);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             self.direct(&mut pass, "fr_frame_begin", 1);
+            if gated {
+                self.direct(&mut pass, "fr_quiet", 1);
+            }
+        }
+        if let Some((ingest, engine, substeps)) = merge {
+            ingest.merge_gated(gpu, encoder, engine, substeps, &self.sizes, &self.args, ARG_Q_CHUNKS as u32);
         }
         // The chunks and bonds in use (a shared fracture's tables are sized for its room).
         let (n, e, b) = (self.params.chunk_used as usize, self.params.bond_used as usize, self.layout.b as usize);
@@ -1832,7 +1881,11 @@ impl GpuFracture {
             if self.params.load_model == 1 && self.cs_timing.is_some() {
                 // Done above, timed.
             } else {
-            self.direct(&mut pass, "fr_loads", n);
+            if gated {
+                self.indirect(&mut pass, "fr_loads", ARG_Q_CHUNKS, None);
+            } else {
+                self.direct(&mut pass, "fr_loads", n);
+            }
             if crush && self.blast.is_none() {
                 // Before the breaks: the chunk's bonds as the frame's loads met them.
                 self.direct(&mut pass, "fr_crush_loads", n);
@@ -1840,7 +1893,11 @@ impl GpuFracture {
             if self.blast.is_some() {
                 // Blast's solver decides the bonds, between the passes.
             } else if self.params.load_model == 0 {
-                self.direct(&mut pass, "fr_breaks", e);
+                if gated {
+                    self.indirect(&mut pass, "fr_breaks", ARG_Q_BONDS, None);
+                } else {
+                    self.direct(&mut pass, "fr_breaks", e);
+                }
             } else {
                 self.direct(&mut pass, "fr_lp_clear", b);
                 self.direct(&mut pass, "fr_lp_sum", n);
@@ -1913,6 +1970,28 @@ impl GpuFracture {
             self.record_crush(encoder);
         }
         self.record_log(gpu, encoder, step);
+    }
+
+    /// Diagnostic (waits on the GPU; after a frame of [`Self::encode_frame_merged`]): whether
+    /// the quiet gate skipped the frame's merge, loads and threshold breaks, and then how
+    /// many words those passes write are not what they would have written (zero: every
+    /// chunk's load, its carried pulses in both halves, and the merge's per-chunk words).
+    pub fn quiet_frame(&self, gpu: &Gpu, ingest: &EngineIngest) -> (bool, usize) {
+        let state: Vec<u32> = gpu.read_range(&self.sizes, 3 * ARG_Q_STATE as usize, 3);
+        if state[2] == 0 {
+            return (false, 0);
+        }
+        let n = self.params.chunk_used as usize;
+        let live: Vec<u32> = gpu.read_range(&self.work, self.layout.w_body() as usize, n);
+        let loads: Vec<[f32; 4]> = gpu.read_range(&self.loads, 0, n);
+        let pulses: Vec<u32> = gpu.read_range(&self.work, self.layout.w_pulses() as usize, 4 * n);
+        let mut wrong = ingest.merged_nonzero(gpu);
+        for k in (0..n).filter(|&k| live[k] != NONE) {
+            wrong += loads[k].iter().filter(|x| x.to_bits() != 0).count();
+            // Each half's carried count (its start is 0 when the frame is run).
+            wrong += pulses[4 * k..4 * k + 4].iter().filter(|&&w| w != 0).count();
+        }
+        (true, wrong)
     }
 
     /// The step the next frames' log entries carry (`None`: the engine's step).
@@ -2395,6 +2474,7 @@ impl GpuFracture {
         chunk_body: &[u32],
         bond_table: &[[u32; 4]],
     ) {
+        self.quiet_reset.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut alive: Vec<u32> = intact.iter().map(|&b| b as u32).collect();
         let mut dirty = vec![0u32; self.layout.b as usize];
         let mut count = 0u32;

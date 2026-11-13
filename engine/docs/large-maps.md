@@ -255,6 +255,23 @@ scenarios:
 
 L1, L2 and L5 are independent.
 
+## Known limit: chunks per world
+
+Every threshold destructible of a world shares one fracture on the GPU, and its scans hold
+2^20 = 1,048,576 chunks (`rubble::THRESHOLD_CHUNKS_MAX`). That is 1,269 of the city's houses
+(826 chunks each). No `WorldCapacity` field raises it.
+
+- Placing past it is an error that names the limit; nothing is dropped or simplified.
+- `rubble::city` refuses a city that cannot fit before it makes a world
+  (`CityDef::max_houses`, `CityDef::capacity`).
+- `city.html` offers the benchmark's sizes (16 to 1,024 houses), all within the limit, and
+  shows rubble's message in plain words for a `?k=` past it.
+- Sizes just under the limit are not yet a supported demo size: 1,152 houses settle cleanly,
+  but 1,269 broke 2 bonds while settling (2026-11-13, native), with the step's contacts at
+  523,153 of the 524,288 the world holds. Not explained yet; use 1,024 or fewer for now.
+- Lifting it is §3's shared prototypes plus a third scan level (stage S7 of
+  `lattice-demo-audit-2026-11-12.md`); not built.
+
 ## Not needed now
 
 A separate dormant or streaming tier, which kept buildings out of the world

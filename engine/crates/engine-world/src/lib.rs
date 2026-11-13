@@ -169,6 +169,12 @@ impl KillBounds {
     }
 }
 
+/// The chunks every threshold destructible of one world may have together: they share one
+/// fracture on the GPU, whose scans hold 2^20 chunks. Placing more is an error that says so
+/// (never a silent drop), and no [`WorldCapacity`] field raises it. Known limit, see
+/// `engine/docs/large-maps.md` ("Known limit: chunks per world").
+pub const THRESHOLD_CHUNKS_MAX: u32 = 1 << 20;
+
 /// A world (Box3D `b3WorldDef`, plus what a GPU world fixes at creation).
 #[derive(Clone, Debug)]
 pub struct WorldDef {
@@ -1036,11 +1042,17 @@ impl World {
             );
         }
         self.dirty = true;
+        // What slept on it must not be left in the air: taking a support away is no touch,
+        // so nothing else would wake them.
+        let resting = self.sleepers_reaching(i);
         for j in std::mem::take(&mut self.bodies[i].joints) {
             self.release_joint(j);
         }
         for s in std::mem::take(&mut self.bodies[i].shapes) {
             self.release_shape(s);
+        }
+        if !resting.is_empty() {
+            self.sim.push_body_commands(&resting)?;
         }
         let index = id.index();
         self.fracture.body_destroyed(index);
@@ -1526,6 +1538,96 @@ impl World {
         self.shapes[s].geometry = Geometry::HeightField { field, transform };
         self.dirty = true;
         Ok(())
+    }
+
+    /// Every collider of body `i`: the farthest its bounding sphere reaches from the body's
+    /// origin (m), and whether any is unbounded (a plane, a heightfield).
+    fn body_reach(&self, i: usize) -> (f32, bool) {
+        let mut unbounded = false;
+        let reach = self.bodies[i]
+            .shapes
+            .iter()
+            .map(|&k| {
+                let shape = &self.shapes[k as usize];
+                unbounded |= matches!(shape.geometry, Geometry::Plane { .. } | Geometry::HeightField { .. });
+                let c = self.sim.collider_record(shape.collider);
+                Vec3::from(c.local_pos).length() + engine_schema::convex::collider_radius(&c)
+            })
+            .fold(0.0, f32::max);
+        (reach, unbounded)
+    }
+
+    /// Wake commands for the sleeping pile on body `i` (as of the last polled frame): what
+    /// rests on it, when it is taken away ([`Self::sleeping_pile`]).
+    fn sleepers_reaching(&self, i: usize) -> Vec<GpuCommand> {
+        let b = &self.bodies[i];
+        let (reach, unbounded) = self.body_reach(i);
+        let centre = b.last_transform.unwrap_or(b.origin).p();
+        self.sleeping_pile(Some(i), &[(centre, reach)], unbounded)
+    }
+
+    /// Wake commands for the sleeping piles on the `removed` volumes (centre, bounding
+    /// radius; `everywhere`: an unbounded one), as of the last polled frame: the dynamic
+    /// bodies asleep whose bounds reach one, and in turn those whose bounds reach theirs.
+    /// The whole pile, not its first layer: a body woken under a sleeper drops away from it
+    /// under gravity too slowly to wake it by contact, and the sleeper would hang.
+    /// Bounding spheres about the bodies' origins, so some that only stand near wake too;
+    /// they fall asleep again. `skip`: a body slot that is not a sleeper here (the one
+    /// being removed).
+    pub(crate) fn sleeping_pile(&self, skip: Option<usize>, removed: &[(Vec3, f32)], everywhere: bool) -> Vec<GpuCommand> {
+        /// Bodies this close count as touching (m): past any contact margin.
+        const PAD: f32 = 0.05;
+        let at = |b: &BodySlot| b.last_transform.unwrap_or(b.origin).p();
+        // The dynamic sleepers: slot, centre, reach.
+        let sleepers: Vec<(usize, Vec3, f32)> = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|&(k, b)| Some(k) != skip && b.alive && b.last_asleep && b.body_type == BodyType::Dynamic)
+            .map(|(k, b)| (k, at(b), self.body_reach(k).0))
+            .collect();
+        if sleepers.is_empty() {
+            return Vec::new();
+        }
+        if everywhere {
+            return sleepers.iter().map(|s| GpuCommand::wake(s.0 as u32)).collect();
+        }
+        // A grid whose cell holds any two sleepers that touch in neighbouring cells.
+        let cell = 2.0 * sleepers.iter().map(|s| s.2).fold(0.0, f32::max) + PAD;
+        let key = |p: Vec3| (p / cell.max(1e-3)).floor().as_ivec3().to_array();
+        let mut grid: std::collections::HashMap<[i32; 3], Vec<usize>> = std::collections::HashMap::new();
+        for (n, s) in sleepers.iter().enumerate() {
+            grid.entry(key(s.1)).or_default().push(n);
+        }
+        let mut woken = vec![false; sleepers.len()];
+        let mut front: Vec<usize> = Vec::new();
+        for (n, s) in sleepers.iter().enumerate() {
+            if removed.iter().any(|&(centre, reach)| s.1.distance(centre) <= reach + s.2 + PAD) {
+                woken[n] = true;
+                front.push(n);
+            }
+        }
+        let mut next = 0;
+        while next < front.len() {
+            let (_, p, r) = sleepers[front[next]];
+            next += 1;
+            let c = key(p);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let Some(list) = grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) else { continue };
+                        for &m in list {
+                            if !woken[m] && sleepers[m].1.distance(p) <= r + sleepers[m].2 + PAD {
+                                woken[m] = true;
+                                front.push(m);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        front.sort_unstable();
+        front.iter().map(|&n| GpuCommand::wake(sleepers[n].0 as u32)).collect()
     }
 
     /// Wake commands for the bodies asleep (as of the last polled frame) over
@@ -2220,7 +2322,9 @@ impl World {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
         }
-        let fracture = self.fracture.active();
+        // RUBBLE_AB_SKIP_FRACTURE=1 (measurement only, a scene where nothing breaks): no
+        // fracture frame, to size what it costs.
+        let fracture = self.fracture.active() && std::env::var("RUBBLE_AB_SKIP_FRACTURE").is_err();
         #[cfg(feature = "stress")]
         if fracture && self.fracture_projectiles_dirty() {
             self.sync_projectiles()?;

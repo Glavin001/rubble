@@ -245,6 +245,12 @@ static const uint ARG_CS_CHUNKS = 10; // every chunk when a structure is struck
 static const uint ARG_CS_BONDS = 11;  // every bond when a structure is struck
 static const uint ARG_CS_SLOTS = 12;  // every body slot when a structure is struck
 static const uint ARG_CS_SAVE = 13;   // the step's contact rows when a bond broke
+// (14..16: chunk crushing's.) The quiet gate's (`fr_quiet`; coupling.slang `ingest_gate`
+// zeroes them on a quiet frame, and has its own slots between): every chunk in use, every
+// bond in use, and (whether no chunk carries a pulse, the streak, whether skipped).
+static const uint ARG_Q_CHUNKS = 17;
+static const uint ARG_Q_BONDS = 18;
+static const uint ARG_Q_STATE = 24;
 
 uint body_of(uint c) { return work[w_body() + c]; }
 bool dirty(uint body) { return atom[a_dirty() + body].load() != 0; }
@@ -392,6 +398,18 @@ void fr_frame_begin(uint3 id: SV_DispatchThreadID)
     work[w_frame()] = 1 - work[w_frame()];
     work[w_frame() + 1] = work[w_frame() + 1] + 1;
     work[w_frame() + 2] = work[w_frame() + 2] + 1;
+}
+
+// One thread, after `fr_frame_begin` and before the ingest's merge: the sizes of the frame's
+// loads and threshold breaks, and whether no chunk carries a pulse into this frame (the half
+// it reads had none claimed). coupling.slang `ingest_gate` zeroes the sizes on a quiet frame.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void fr_quiet(uint3 id: SV_DispatchThreadID)
+{
+    set_args(ARG_Q_CHUNKS, groups_of(params.chunk_used, 64));
+    set_args(ARG_Q_BONDS, groups_of(params.bond_used, 64));
+    args[3 * ARG_Q_STATE] = atom[a_counters() + C_POOL_TOP + frame_parity()].load() == 0 ? 1 : 0;
 }
 
 [shader("compute")]
