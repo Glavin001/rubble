@@ -457,4 +457,6 @@ Measured on the CPU reference with the centred damping's objective form on (`RUB
 
 The hood now lands on the engine instead of passing through it. `tests/sedan_energy.rs`: 6 of 6.
 
-**Not done:** the kerb at the ETK's level; the fender and bumper mounts in the wall and offset (flipped triangles, bolt groups); the hub cap's retention at a 25 km/h bump and the parked normal under 1° (a front lower arm, 1.09°); the head-on (`vehicle_c2c_overlap`); `feat/sedan-complete`'s 68 parts in the rigger; lint rules 2, 8, 11, 14–24 and the "nothing faked" rules; the remaining single-step energy rises; the skin's coverage at the body's tail (p99 0.149 m against 0.127).
+**Hub caps at the 25 km/h bump** (`sedan_energy`, both offsets): no joint breaks on either car. The cap left before because it rocked on its nine clips, not because 600 N a clip is too little. Twelve beams of 600 N hold far more than a real centre cap's pull-off force; lowering the per-beam strength to a measured clip is open.
+
+**Not done:** the kerb at the ETK's level; the fender and bumper mounts in the wall and offset (flipped triangles, bolt groups); the parked normal under 1° (a front lower arm, 1.09°; `rest_fidelity_at_spawn_and_parked` still fails on it); the head-on (`vehicle_c2c_overlap`); `feat/sedan-complete`'s 68 parts in the rigger; lint rules 2, 8, 11, 14–24 and the "nothing faked" rules; the remaining single-step energy rises; the skin's coverage at the body's tail (p99 0.149 m against 0.127).
