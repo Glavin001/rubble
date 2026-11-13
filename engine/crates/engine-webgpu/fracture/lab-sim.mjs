@@ -69,6 +69,8 @@ export function labSimulation(world,lab,scene){
    this.queue({shot:{origin:Array.from(origin),direction:Array.from(direction)}});return slot},
   launch(origin,direction){return this.shoot(origin,direction)},
   clearQueue(){world.labClearQueue(lab)},
+  // The stress view's colour scale (Rust: `lab::StressScale`), redrawn at once.
+  setStressScale(scale){world.labSetStressScale(lab,scale);writePoses()},
   // Called with each ball's scene body as the step that fires it is taken.
   onLaunch(f){launchListeners.add(f);return()=>launchListeners.delete(f)},
   get packShots(){return lab.packShots()},

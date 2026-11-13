@@ -484,6 +484,15 @@ impl WebWorld {
         self.world.set_stress_view(on);
     }
 
+    /// The stress view's colour scale: `'absolute'` (load over strength), `'log'` (decades
+    /// from 10^-8 to 1) or `'relative'` (over the frame's largest). Display only.
+    #[wasm_bindgen(js_name = labSetStressScale)]
+    pub fn lab_set_stress_scale(&mut self, lab: &mut LabScene, scale: &str) -> Result<(), JsValue> {
+        let s = rubble::lab::StressScale::parse(scale).ok_or_else(|| err(format!("stress scale {scale}: absolute, log or relative")))?;
+        lab.lab.set_stress_scale(s);
+        Ok(())
+    }
+
     /// The bond models' reset (the stress models reload).
     #[wasm_bindgen(js_name = labReset)]
     pub fn lab_reset(&mut self, lab: &mut LabScene) -> Result<(), JsValue> {

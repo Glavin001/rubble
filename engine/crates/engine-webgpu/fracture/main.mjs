@@ -87,7 +87,7 @@ let learned=null,learnedMs=0,learnedBusy=false;
 const viewMode=()=>Number($('view-mode').value);
 // The stress view (value 3) is the World's (lab-world): each step then carries every chunk's
 // load over strength; the separate stress engine has no such mode and draws materials.
-function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode()===3?0:viewMode());sim?.world?.setStressView?.(viewMode()===3)}
+function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode()===3?0:viewMode());sim?.world?.setStressView?.(viewMode()===3);$('stress-scale').disabled=viewMode()!==3;if(sim?.poseDraw)sim.setStressScale?.($('stress-scale').value)}
 // The Camera menu (engine-fracture view.rs ViewMode: 0 orbit, 1 first-person walk, 2 fly),
 // remembered per viewer and kept across loads. V cycles it.
 const CAMERA_KEY='fracture-lab.camera';
@@ -354,6 +354,7 @@ $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>i
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('view-mode').onchange=()=>{if(renderer)renderer.colorMode=viewMode();applyView()};
 $('show-bonds').onchange=applyView;
+$('stress-scale').onchange=applyView;
 const reload=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('strike-prediction').onchange=reload;
 $('contact-fracture').onchange=reload;
@@ -495,6 +496,7 @@ try{
  if(q.has('scene')&&samples[q.get('scene')])$('scene').value=q.get('scene');
  if(q.has('bonds'))$('bond-mode').value=q.get('bonds');
  if(q.has('view'))$('view-mode').value=q.get('view');
+ if(q.has('stressScale'))$('stress-scale').value=q.get('stressScale');
  if(q.has('strike'))$('strike-rule').value=q.get('strike');
  if(q.has('radius'))$('strike-radius').value=q.get('radius');
  if(q.has('response'))$('impact-response').value=q.get('response');

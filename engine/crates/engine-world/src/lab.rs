@@ -45,6 +45,41 @@ pub const READBACK_FRAMES: u32 = 8;
 /// runs at the rate the settings give; none picks its own.
 pub const DEFAULT_PHYSICS_HZ: f32 = 60.0;
 
+/// How the stress view's load over strength `u` becomes the renderer's colour ramp (0 blue
+/// to 1 at strength). A display choice: the solve and the breaks do not see it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StressScale {
+    /// `u` itself: blue unloaded, red at strength.
+    #[default]
+    Absolute,
+    /// Decades of `u` from 10^-8 (blue) to 1 (red, at strength): a structure loaded far
+    /// below its strength (a scene authored with very strong bonds) still shows its load
+    /// pattern, and a strike's rise.
+    Log,
+    /// `u` over the frame's largest among the drawn chunks: where the load is, whatever its
+    /// size. Not comparable from frame to frame.
+    Relative,
+}
+
+impl StressScale {
+    pub const ALL: [StressScale; 3] = [StressScale::Absolute, StressScale::Log, StressScale::Relative];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StressScale::Absolute => "absolute",
+            StressScale::Log => "log",
+            StressScale::Relative => "relative",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<StressScale> {
+        Self::ALL.into_iter().find(|s| s.name() == name)
+    }
+
+    /// The decades [`StressScale::Log`] spans below 1.
+    pub const LOG_DECADES: f32 = 8.0;
+}
+
 /// How the lab's bonds hold: none, D6 joints, or a stress model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LabBonds {
@@ -778,6 +813,8 @@ pub struct Lab {
     schedule: Vec<Due>,
     /// Directed debris: on, and its zones (scene body anchors).
     guidance: Option<(GuidanceSettings, Vec<engine_schema::guidance::ZoneDesc>)>,
+    /// The stress view's colour scale ([`Lab::poses`]).
+    stress_scale: StressScale,
 }
 
 impl Lab {
@@ -898,6 +935,7 @@ impl Lab {
             saved,
             schedule: Vec::new(),
             guidance: None,
+            stress_scale: StressScale::Absolute,
         })
     }
 
@@ -992,6 +1030,7 @@ impl Lab {
             saved: None,
             schedule: Vec::new(),
             guidance: None,
+            stress_scale: StressScale::Absolute,
         })
     }
 
@@ -1402,10 +1441,30 @@ impl Lab {
                 }
             }
         }
+        let peak = stressed.iter().map(|s| s.1 - 1.0).fold(0.0f32, f32::max);
         for (i, u) in stressed {
-            out[RECORD_FLOATS * i + 12] = u;
+            let u = u - 1.0;
+            let shown = match self.stress_scale {
+                StressScale::Absolute => u,
+                StressScale::Log => {
+                    if u >= 1.0 {
+                        1.0
+                    } else if u > 0.0 {
+                        ((u.log10() + StressScale::LOG_DECADES) / StressScale::LOG_DECADES).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                }
+                StressScale::Relative => if peak > 0.0 { u / peak } else { 0.0 },
+            };
+            out[RECORD_FLOATS * i + 12] = 1.0 + shown;
         }
         Ok(out)
+    }
+
+    /// The stress view's colour scale from the next [`Lab::poses`] on.
+    pub fn set_stress_scale(&mut self, scale: StressScale) {
+        self.stress_scale = scale;
     }
 }
 
