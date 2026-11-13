@@ -288,6 +288,8 @@ Streaming is not a candidate for the crash.
 
 ## 4. Root cause of the 2026-11-13 lab crash
 
+> **User's observation (added 2026-11-13, after this analysis).** "It got really corrupted looking a moment before it froze and crashed." The car was visibly corrupted on screen just before the freeze. That is direct evidence for hypothesis 1 (the page kept stepping an invalid state) and against a pure compile stall. It does not show which kernel then ran long. Confidence in hypothesis 1 is raised from moderate to high.
+
 Not confirmed. Ranked by the evidence:
 
 **H1. The page kept stepping a degraded state (most likely; moderate confidence).**
