@@ -31,8 +31,9 @@ const SOLIDS: [(&str, f64, f64, usize); 14] = [
     // (a thin row of the skin is offset along one direction, not its own
     // normals: a 5 mm sheet measures down to 4.3 mm across it)
     ("bumper_", 4.0, 30.0, 1),
-    // the shell, two sill strips and the windscreen reveal (two pieces)
-    ("body_shell", 2.5, 50.0, 5),
+    // the shell, two sill strips, the windscreen reveal (two pieces) and
+    // the B-pillars
+    ("body_shell", 2.5, 50.0, 7),
     ("glass_", 4.4, 4.6, 1),
     ("headlight_", 0.5, 4.3, 1),
     ("door_trim_F", 5.9, 18.1, 2),
@@ -73,9 +74,9 @@ fn reference_sedan_is_pinned() {
     assert_eq!(b.parts.len(), 68);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 441_228);
+    assert_eq!(total, 444_356);
     for (name, n) in [
-        ("body_shell", 111_428),
+        ("body_shell", 114_556),
         ("hood", 39_408),
         ("door_FL", 15_664),
         ("door_RL", 13_822),

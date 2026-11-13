@@ -813,6 +813,13 @@ impl Sedan {
             .map(|&(z, v)| DVec2::new(f.z(z), v))
             .collect();
         bx.add(&p::molding(tube, &ws, 0.0015, (0.008, 0.004), true, 6));
+        // solid build: the B-pillar, behind the doors' shut line (the doors
+        // meet over it; an open door shows it, not the cabin)
+        if solid {
+            for side in [1.0, -1.0] {
+                bx.add(&b_pillar(tube, f.z(-0.22), side));
+            }
+        }
         extras.insert("body_shell", bx);
 
         // interior
@@ -937,6 +944,94 @@ impl Sedan {
 }
 
 /// numpy.arange(a, b, step) for floats.
+/// The B-pillar: a closed box section down the body side at z0, from the
+/// sill to the roof rail, behind the doors. Its outer face sits 64 mm in
+/// from the skin (the doors' inner panels are 50 mm deep), reaches out to
+/// the sill's inner face at the foot and runs up into the roof rail; each
+/// jamb face has a seal land, a step in 16 mm down; the inner face is
+/// 126 mm in. 72 mm wide: the slot between the door cards.
+fn b_pillar(tube: &Tube, z0: f64, side: f64) -> Mesh {
+    // (v: 1 the sill, 2 the doors' bottom edge, 7 the roof rail)
+    let (v0, v1) = (1.60, 6.95);
+    let at = |v: f64, dz: f64, depth: f64| {
+        // (in from the skin level with the ground, not along the normal:
+        // a section this deep would fold behind the shoulder's bend)
+        let p = tube.eval(z0 + dz, if side > 0.0 { v } else { tube.vm - v });
+        p - DVec3::X * (side * depth)
+    };
+    // stations every 22 mm up the side
+    let fine: Vec<f64> = linspace(v0, v1, 280);
+    let mut len = vec![0.0];
+    for k in 1..fine.len() {
+        let d = (at(fine[k], 0.0, 0.0) - at(fine[k - 1], 0.0, 0.0)).length();
+        len.push(len[k - 1] + d);
+    }
+    let total = len[len.len() - 1];
+    let ns = (total / 0.022).round() as usize;
+    let vs: Vec<f64> = (0..=ns).map(|i| interp(total * i as f64 / ns as f64, &len, &fine)).collect();
+    // the section: (along the car, below the skin), outer face first
+    let (hw, land, face, step, back) = (0.036, 0.029, 0.064, 0.080, 0.126);
+    let ring = |v: f64| -> Vec<DVec3> {
+        // the outer face meets the sill's inner face
+        let up = smoothstep(1.95, v0, v);
+        let o = face + (0.031 - face) * up;
+        let s = step + (0.047 - step) * up;
+        [
+            (-hw, o),
+            (-0.012, o),
+            (0.012, o),
+            (hw, o),
+            (hw, s),
+            (land, s + 0.002),
+            (land, 0.5 * (s + back)),
+            (land, back),
+            (0.010, back),
+            (-0.010, back),
+            (-land, back),
+            (-land, 0.5 * (s + back)),
+            (-land, s + 0.002),
+            (-hw, s),
+        ]
+        .iter()
+        .map(|&(dz, d)| at(v, dz, d))
+        .collect()
+    };
+    let mut rings: Vec<Vec<DVec3>> = vs.iter().map(|&v| ring(v)).collect();
+    // the head runs straight up into the roof rail's section
+    let head: Vec<DVec3> = rings[rings.len() - 1].iter().map(|p| *p + DVec3::Y * 0.028).collect();
+    rings.push(head);
+    let nr = rings[0].len();
+    let g = Grid2::from_fn(rings.len(), nr, |i, j| rings[i][j]);
+    let mut m = grid(&g, None, Mat::Paint, false, true, -1);
+    // end caps: the section cut into well shaped cells (the wide part as
+    // three, the stem as two with a triangle each side of its foot)
+    for i in [0, rings.len() - 1] {
+        let id = |j: usize| (i * nr + j) as u32;
+        for f in [[0, 1, 12, 13], [1, 2, 5, 12], [2, 3, 4, 5], [12, 5, 6, 11], [11, 6, 8, 9]] {
+            let mut f = f.map(id);
+            if i != 0 {
+                f.reverse();
+            }
+            m.q.push(f);
+            m.qm.push(Mat::Paint);
+            m.quv.push([DVec2::ZERO; 4]);
+            m.qi.push(-1);
+        }
+        for f in [[6, 7, 8], [11, 9, 10]] {
+            let mut f = f.map(id);
+            if i != 0 {
+                f.reverse();
+            }
+            m.push_tris(&[f], Mat::Paint);
+        }
+    }
+    let mut m = orient_outward(m);
+    m.set_islands(-1);
+    // not skin: the rigger and the collision skin leave it alone
+    m.surf = Some(vec![crate::mesh::Surf::Edge; m.v.len()]);
+    m
+}
+
 fn arange(a: f64, b: f64, step: f64) -> Vec<f64> {
     let n = ((b - a) / step).ceil().max(0.0) as usize;
     (0..n).map(|i| a + i as f64 * step).collect()
