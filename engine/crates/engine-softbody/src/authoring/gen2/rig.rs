@@ -1362,6 +1362,10 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         axle_f: axle_f,
     };
     let body = Part::Body;
+    // The census lattice (BeamNG's node counts and masses per part: doors
+    // about 13 nodes, hood 23, lid 15, no light edge nodes on the closures);
+    // `RIG_OLD_CENSUS=1` builds the earlier, denser closures.
+    let census = std::env::var("RIG_OLD_CENSUS").is_err();
 
     // Part extents from the meshes.
     let door_f = Skin::of(model, "door_FL");
@@ -2149,9 +2153,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                     let i = r.node(&format!("{dn}_o{row}{k}"), p, part, Some(Role::Sheet), true);
                     grid[row].push(Some(i));
                 }
-                // The inner frame: bottom and belt, 8 cm in, and the inner
-                // panel's middle between them.
-                for (row, &y) in [bottom + 0.02, bt - 0.03].iter().enumerate() {
+                // The inner frame: bottom and belt, 8 cm in (the old lattice),
+                // and the inner panel's middle between them (the census door:
+                // its outer skin's three rows and this middle row are its
+                // depth, 13-14 nodes as a BeamNG door).
+                let rows_in: &[f32] = if census { &[] } else { &[bottom + 0.02, bt - 0.03] };
+                for (row, &y) in rows_in.iter().enumerate() {
                     let p = mirror(inward(side(z, y), 0.08), s);
                     inner.push(r.node(
                         &format!("{dn}_i{row}{k}"),
@@ -2175,7 +2182,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             // tube can form a plastic hinge where a narrow object strikes it
             // (a pole between two columns otherwise met a 0.5 m straight
             // span). On the inner panel's middle row, between its columns.
-            let split_beam = std::env::var("GEN3_OLD_INTRUSION").is_err();
+            let split_beam = std::env::var("GEN3_OLD_INTRUSION").is_err() && !census;
             // The tube's outer chord, 2 cm under the skin at every station
             // (the inner chord is the middle row, 8 cm in): a 6 cm deep
             // truss, so the beam resists a load across the door by bending.
@@ -2236,6 +2243,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             // The frame's section: an inner node under each top corner.
             let frame_in: Vec<usize> = frame
                 .iter()
+                .filter(|_| !census)
                 .enumerate()
                 .map(|(k, &f)| {
                     let g = r.g(f);
@@ -2262,13 +2270,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             let ib: Vec<usize> = inner
                 .iter()
                 .copied()
-                .filter(|&i| r.car.nodes[i].name.contains("_i1"))
+                .filter(|&i| r.car.nodes[i].name.contains(if census { "_im" } else { "_i1" }))
                 .collect();
             let (bf, br) = (belt_row[0], *belt_row.last().unwrap());
             let (ibf, ibr) = (ib[0], *ib.last().unwrap());
             let (f0, f1) = (frame[0], frame[1]);
-            let (fi0, fi1) = (frame_in[0], frame_in[1]);
-            for (a, b) in [
+            let mut legs = vec![
                 (bf, f0),
                 (ibf, f0),
                 (br, f1),
@@ -2276,16 +2283,21 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 (f0, f1),
                 (belt_row[1], f0),
                 (belt_row[1], f1),
-                (f0, fi0),
-                (f1, fi1),
-                (fi0, fi1),
-                (f0, fi1),
-                (f1, fi0),
-                (ibf, fi0),
-                (ibr, fi1),
-                (bf, fi0),
-                (br, fi1),
-            ] {
+            ];
+            if let [fi0, fi1] = frame_in[..] {
+                legs.extend([
+                    (f0, fi0),
+                    (f1, fi1),
+                    (fi0, fi1),
+                    (f0, fi1),
+                    (f1, fi0),
+                    (ibf, fi0),
+                    (ibr, fi1),
+                    (bf, fi0),
+                    (br, fi1),
+                ]);
+            }
+            for (a, b) in legs {
                 r.car.beam(a, b, Role::DoorFrame, part);
             }
             // The side intrusion beam: a tube along the door at its middle,
@@ -2303,7 +2315,10 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 let j = r.car.beam(w[0], w[1], Role::Intrusion, part);
                 r.car.beams[j].role = Role::Intrusion;
             }
-            if split_beam {
+            if census {
+                outer_chord = grid[1].iter().flatten().copied().collect();
+            }
+            if split_beam || census {
                 outer_chord.sort_by(|&a, &b| r.g(b).z.total_cmp(&r.g(a).z));
                 let mut pairs: Vec<(usize, usize)> = Vec::new();
                 for w in outer_chord.windows(2) {

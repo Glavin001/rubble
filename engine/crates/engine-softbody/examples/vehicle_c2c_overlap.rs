@@ -634,9 +634,181 @@ fn main() -> Result<(), String> {
     let steps = (secs / 0.0005).round() as usize;
     let every = 8; // 4 ms
     println!("  t ms | A in B: nodes (deepest mm) face/gap, paint n p99/max mm, tyre n max, edges | B in A: same | slab max mm, volume L | dead tris A/B");
+    // FORCES=1: the vehicle-contact force on each car by height band and by
+    // part (rearward push along the car, vertical), its nose-up moment about
+    // the car's centre of mass, per 50 ms and integrated (impulse).
+    let forces = std::env::var("FORCES").is_ok();
+    if forces {
+        w.enable_ledger();
+    }
+    let part_of: HashMap<String, String> = l
+        .built
+        .rig
+        .car
+        .nodes
+        .iter()
+        .map(|n| (n.name.clone(), n.part.name().trim_start_matches("gen2_").to_string()))
+        .collect();
+    const BANDS: [f32; 5] = [0.30, 0.45, 0.60, 0.80, 9.0];
+    let band = |y: f32| BANDS.iter().position(|&b| y < b).unwrap_or(4);
+    // [car][band] (push, up), [car] part → (push, up), [car] nose-up moment.
+    let mut win_band = [[[0.0f64; 2]; 5]; 2];
+    let mut tot_band = [[[0.0f64; 2]; 5]; 2];
+    let mut win_part: [std::collections::BTreeMap<String, [f64; 2]>; 2] = Default::default();
+    let mut tot_part: [std::collections::BTreeMap<String, [f64; 2]>; 2] = Default::default();
+    let mut win_m = [0.0f64; 2];
+    // The load path: beams crossing a transverse section SECTION m behind the
+    // nose at spawn (default 0.55), their compression's component along the
+    // car, by the beam's spawn height band and by member (node-name prefix).
+    let section: f32 = std::env::var("SECTION").ok().and_then(|v| v.parse().ok()).unwrap_or(0.55);
+    let member = |n: &str| -> String {
+        let t = n.trim_end_matches(['L', 'R']);
+        t.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end_matches('_').to_string()
+    };
+    let cross: Vec<Vec<(usize, usize, String)>> = (0..2)
+        .map(|c| {
+            let s = &w.vehicles[c];
+            let fwd = if c == 0 { 1.0f32 } else { -1.0 };
+            let p0: Vec<Vec3> = s.nodes.iter().map(|n| s.origin + n.pos).collect();
+            let nose = p0.iter().map(|p| fwd * p.z).fold(f32::MIN, f32::max);
+            let behind = |p: Vec3| nose - fwd * p.z;
+            s.beams
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| !b.broken && b.k > 0.0)
+                .filter(|(_, b)| {
+                    let (ba, bb) = (behind(p0[b.a as usize]), behind(p0[b.b as usize]));
+                    (ba - section) * (bb - section) < 0.0
+                })
+                .map(|(j, b)| {
+                    let y = 0.5 * (p0[b.a as usize].y + p0[b.b as usize].y);
+                    let (na, nb) = (&l.desc.nodes[b.a as usize].name, &l.desc.nodes[b.b as usize].name);
+                    let (ma, mb) = (member(na), member(nb));
+                    let m = if ma <= mb { format!("{ma}-{mb}") } else { format!("{mb}-{ma}") };
+                    (j, band(y), m)
+                })
+                .collect()
+        })
+        .collect();
+    let mut sec_band = [[0.0f64; 5]; 2];
+    let mut sec_mem: [std::collections::BTreeMap<String, f64>; 2] = Default::default();
+    let mut sec_band_tot = [[0.0f64; 5]; 2];
+    let mut sec_mem_tot: [std::collections::BTreeMap<String, f64>; 2] = Default::default();
+    if forces {
+        println!("  section {section} m behind the nose: {} / {} beams cross it", cross[0].len(), cross[1].len());
+    }
+    if forces {
+        println!("  FORCES: per 50 ms window, mean kN pushing each car back / up, by node height band {BANDS:?} m; nose-up moment kN·m about its centre of mass");
+    }
     for k in 0..=steps {
         if k > 0 {
             w.step();
+            if forces {
+                for c in 0..2 {
+                    let s = &w.vehicles[c];
+                    let fwd = if c == 0 { 1.0f32 } else { -1.0 };
+                    let lg = w.ledger.as_ref().unwrap();
+                    let (mut cm, mut mm) = (Vec3::ZERO, 0.0f32);
+                    for n in &s.nodes {
+                        cm += n.pos * n.mass;
+                        mm += n.mass;
+                    }
+                    let cm = s.origin + cm / mm;
+                    for i in 0..s.nodes.len() {
+                        let f = lg.vehicle_contact(c, i);
+                        if f == Vec3::ZERO {
+                            continue;
+                        }
+                        let p = s.origin + s.nodes[i].pos;
+                        let push = (-fwd * f.z) as f64 * 0.0005;
+                        let up = f.y as f64 * 0.0005;
+                        let bi = band(p.y);
+                        for (b, x) in [(&mut win_band[c][bi], 0), (&mut tot_band[c][bi], 0)] {
+                            let _ = x;
+                            b[0] += push;
+                            b[1] += up;
+                        }
+                        let pn = part_of
+                            .get(&l.desc.nodes[i].name)
+                            .cloned()
+                            .unwrap_or_else(|| "?".into());
+                        for m in [&mut win_part[c], &mut tot_part[c]] {
+                            let e = m.entry(pn.clone()).or_default();
+                            e[0] += push;
+                            e[1] += up;
+                        }
+                        let mx = (p - cm).cross(f).x;
+                        win_m[c] += (-fwd * mx) as f64 * 0.0005;
+                    }
+                    for (j, bi, m) in &cross[c] {
+                        let b = &s.beams[*j];
+                        if b.broken {
+                            continue;
+                        }
+                        let d = s.nodes[b.a as usize].pos - s.nodes[b.b as usize].pos;
+                        let ax = (b.force * d.z.abs() / d.length().max(1e-6)) as f64 * 0.0005;
+                        sec_band[c][*bi] += ax;
+                        sec_band_tot[c][*bi] += ax;
+                        *sec_mem[c].entry(m.clone()).or_default() += ax;
+                        *sec_mem_tot[c].entry(m.clone()).or_default() += ax;
+                    }
+                }
+            }
+            if forces && k % 100 == 0 {
+                let t = k as f32 * 0.0005;
+                for c in 0..2 {
+                    let bands: Vec<String> = win_band[c]
+                        .iter()
+                        .map(|b| format!("{:5.0}/{:4.0}", b[0] / 0.05 / 1e3, b[1] / 0.05 / 1e3))
+                        .collect();
+                    let parts: Vec<String> = win_part[c]
+                        .iter()
+                        .filter(|(_, v)| v[0].abs() > 0.05 * 0.05 * 1e3)
+                        .map(|(p, v)| format!("{p} {:.0}/{:.0}", v[0] / 0.05 / 1e3, v[1] / 0.05 / 1e3))
+                        .collect();
+                    println!(
+                        "  F {:3.0} ms car {} bands [{}] nose-up {:6.1} kN·m | {}",
+                        t * 1e3,
+                        ["A", "B"][c],
+                        bands.join(" "),
+                        win_m[c] / 0.05 / 1e3,
+                        parts.join(", ")
+                    );
+                    let mut mem: Vec<(&String, &f64)> = sec_mem[c].iter().collect();
+                    mem.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+                    println!(
+                        "      section: compression kN by band [{}] | {}",
+                        sec_band[c].iter().map(|v| format!("{:.0}", v / 0.05 / 1e3)).collect::<Vec<_>>().join(" "),
+                        mem.iter().take(10).map(|(m, v)| format!("{m} {:.0}", *v / 0.05 / 1e3)).collect::<Vec<_>>().join(", ")
+                    );
+                    sec_band[c] = [0.0; 5];
+                    sec_mem[c].clear();
+                    win_band[c] = [[0.0; 2]; 5];
+                    win_part[c].clear();
+                    win_m[c] = 0.0;
+                }
+            }
+            if forces && k == steps {
+                for c in 0..2 {
+                    println!(
+                        "  impulse car {} (kN·s push/up) by band: {:?}; by part: {:?}",
+                        ["A", "B"][c],
+                        tot_band[c].iter().map(|b| format!("{:.2}/{:.2}", b[0] / 1e3, b[1] / 1e3)).collect::<Vec<_>>(),
+                        tot_part[c].iter().map(|(p, v)| format!("{p} {:.2}/{:.2}", v[0] / 1e3, v[1] / 1e3)).collect::<Vec<_>>()
+                    );
+                    println!(
+                        "  section impulse car {} (kN·s compression along the car) by band: {:?}",
+                        ["A", "B"][c],
+                        sec_band_tot[c].iter().map(|v| format!("{:.2}", v / 1e3)).collect::<Vec<_>>()
+                    );
+                    let mut mem: Vec<(&String, &f64)> = sec_mem_tot[c].iter().collect();
+                    mem.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+                    println!(
+                        "    by member: {}",
+                        mem.iter().take(24).map(|(m, v)| format!("{m} {:.2}", *v / 1e3)).collect::<Vec<_>>().join(", ")
+                    );
+                }
+            }
         }
         if k % every != 0 {
             continue;

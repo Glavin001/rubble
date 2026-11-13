@@ -1291,6 +1291,14 @@ impl EnergyLedger {
             - self.discretisation
     }
 
+    /// Vehicle `v`'s node `i`: the vehicle-contact force on it this step
+    /// (normal and friction; read after [`ExplicitBeamsWorld::step`]).
+    pub fn vehicle_contact(&self, v: usize, i: usize) -> Vec3 {
+        self.vc
+            .get(v)
+            .map_or(Vec3::ZERO, |c| c[0].get(i).copied().unwrap_or_default() + c[1].get(i).copied().unwrap_or_default())
+    }
+
     fn account(&mut self, k: usize, v: &ExplicitBeams, before: &[(Vec3, Vec3, Vec3)]) {
         let prev = &self.prev[k].trace.parts;
         let vc = &self.vc[k];
