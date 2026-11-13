@@ -691,6 +691,14 @@ impl Sedan {
         let mut out = Parts::default();
         let mut extras = Parts::default();
         let mut mk: Vec<Marker> = Vec::new();
+        // solid build: liners, door cards and the headliner are closed slabs
+        // too, not sheets. Still sheets: the lamp reflectors (an inner panel
+        // of the lens with its squeezed faces dropped, which can leave two
+        // faces meeting at a point: a slab is not manifold there) and the
+        // grille's back plates (closing them takes the lamps-glass-trim
+        // group 552 triangles over the art spec's 60,000)
+        let solid = cb.extra.contains_key("solid");
+        let thick = |m: Mesh, th: f64| if solid { crate::solid::slab(&m, th) } else { m };
         let mut marker = |name: String, pos: DVec3, xa: DVec3| mk.push(Marker { name, pos, xaxis: xa });
         let sides = [("L", 1.0f64), ("R", -1.0f64)];
 
@@ -837,7 +845,7 @@ impl Sedan {
             }
             let trim = inner_panel(&sk, &isb, 0.085, -1_000_000, 2, Mat::InteriorPlastic);
             // solid: a moulded card 18 mm thick, its back 17 mm off the door's inner panel
-            out.insert(&format!("door_trim_{s}"), if cb.extra.contains_key("solid") { crate::solid::slab(&trim, 0.018) } else { trim });
+            out.insert(&format!("door_trim_{s}"), thick(trim, 0.018));
         }
         let zz: Vec<f64> = linspace(-0.05, -0.95, 46).into_iter().map(|z| f.z(z)).collect();
         let vv = linspace(7.35, vm - 7.35, 60);
@@ -850,7 +858,7 @@ impl Sedan {
         if my > 0.0 {
             hl.flip();
         }
-        out.insert("headliner", hl);
+        out.insert("headliner", thick(hl, 0.008));
 
         // bay: transverse four with gearbox, radiator, firewall
         let mut eb = Mesh::new();
@@ -890,7 +898,7 @@ impl Sedan {
             for (s, sg) in sides {
                 out.insert(
                     &format!("wheel_well_{tag}{s}"),
-                    p::wheel_well(DVec3::new(0.0, f.y(R_TYRE_D / 2.0), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0),
+                    thick(p::wheel_well(DVec3::new(0.0, f.y(R_TYRE_D / 2.0), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0), 0.004),
                 );
             }
         }

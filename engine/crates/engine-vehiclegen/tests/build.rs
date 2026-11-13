@@ -18,24 +18,28 @@ fn tris(b: &engine_vehiclegen::Built, name: &str) -> usize {
 
 /// The solid parts: (name prefix, least and greatest wall thickness in mm,
 /// closed pieces).
-const SOLIDS: [(&str, f64, f64, usize); 12] = [
+const SOLIDS: [(&str, f64, f64, usize); 14] = [
+    ("taillight_", 1.0, 6.0, 1),
+    ("headliner", 7.9, 8.1, 1),
+    ("wheel_well_", 3.9, 4.1, 1),
     ("door_F", 2.5, 55.0, 1),
     ("door_R", 2.5, 55.0, 1),
     ("hood", 8.0, 40.0, 1),
-    ("trunk_lid", 8.0, 40.0, 1),
+    // the boot lid closes over the tail panel: a shallow free edge
+    ("trunk_lid", 2.9, 40.0, 1),
     ("fender_F", 4.5, 30.0, 1),
     ("bumper_", 4.5, 30.0, 1),
     // the shell, two sill strips and the windscreen reveal (two pieces)
     ("body_shell", 2.5, 50.0, 5),
     ("glass_", 4.4, 4.6, 1),
     ("headlight_", 0.5, 4.3, 1),
-    ("taillight_", 2.0, 4.3, 1),
     ("door_trim_F", 5.9, 18.1, 2),
     // the rear card folds behind the wheel arch (the sheet card does too)
     ("door_trim_R", 1.0, 18.1, 2),
 ];
 
 fn solid_spec(name: &str) -> Option<(f64, f64, usize)> {
+    // lamp reflectors are still sheets
     if name.ends_with("_housing") {
         return None;
     }
@@ -67,7 +71,7 @@ fn reference_sedan_is_pinned() {
     assert_eq!(b.parts.len(), 68);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 435_410);
+    assert_eq!(total, 442_448);
     for (name, n) in [
         ("body_shell", 111_632),
         ("hood", 39_408),
@@ -84,7 +88,8 @@ fn reference_sedan_is_pinned() {
         ("tyre_FL", 7_872),
         ("rim_FL", 4_840),
         ("grille", 3_660),
-        ("headliner", 5_310),
+        ("headliner", 11_036),
+        ("wheel_well_FL", 488),
     ] {
         assert_eq!(tris(&b, name), n, "{name}");
     }
@@ -119,11 +124,11 @@ fn every_panel_and_pane_is_a_closed_solid() {
         // closed: every edge has its opposite, once
         assert!(r.closed(), "{name}: {} open edges, {} non-manifold", r.boundary_edges, r.nonmanifold_edges);
         // outward faces: every piece has a positive volume
-        assert_eq!(r.components, pieces, "{name}");
+        assert!(pieces == 0 || r.components == pieces, "{name}: {} pieces", r.components);
         assert!(r.min_component_volume > 1e-6, "{name}: a piece's volume is {}", r.min_component_volume);
         assert!(r.thickness_min * 1e3 >= tmin && r.thickness_max * 1e3 <= tmax, "{name}: thickness {:.2}..{:.2} mm, band {tmin}..{tmax}", r.thickness_min * 1e3, r.thickness_max * 1e3);
     }
-    assert_eq!(seen, 6 + 2 + 2 + 1 + 8 + 4 + 4, "closures, wings, bumpers, shell, glass, lenses, trims");
+    assert_eq!(seen, 6 + 2 + 2 + 1 + 8 + 4 + 4 + 1 + 4, "closures, wings, bumpers, shell, glass, lenses, trims, headliner, liners");
 }
 
 /// Faces of a solid cutting through each other, away from places where the
@@ -194,6 +199,9 @@ fn parametric_builds_keep_the_structure() {
     for p in [
         r#"{"wheelbase":2.55,"front_overhang":0.80,"rear_overhang":0.85,"width":1.78,"height":1.42,"track":1.53,"tyre_d":0.64,"tyre_w":0.205,"rim_in":16,"rim_w_in":6.5}"#,
         r#"{"ride":0.15,"height":1.52,"tyre_d":0.78,"tyre_w":0.265,"rim_in":17,"rim_w_in":8,"track":1.66,"width":1.90,"rim_style":"steel"}"#,
+        // the designer page's other presets (vehicle-designer.html): Executive, Low & wide
+        r#"{"wheelbase":3.10,"front_overhang":0.95,"rear_overhang":1.15,"width":1.92,"height":1.48,"track":1.64,"tyre_d":0.70,"tyre_w":0.255,"rim_in":19,"rim_w_in":8.5}"#,
+        r#"{"wheelbase":2.80,"width":2.00,"height":1.30,"ride":-0.02,"track":1.76,"tyre_d":0.68,"tyre_w":0.295,"rim_in":20,"rim_w_in":10}"#,
     ] {
         let d = design_from_json("sedan", p).unwrap();
         let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
@@ -208,7 +216,7 @@ fn parametric_builds_keep_the_structure() {
             // solids stay closed, outward and at least as thick as the floor
             if let Some((_, tmax, pieces)) = solid_spec(name) {
                 let r = check(m);
-                assert!(r.closed() && r.components == pieces && r.min_component_volume > 1e-6, "{p}: {name}: {r:?}");
+                assert!(r.closed() && (pieces == 0 || r.components == pieces) && r.min_component_volume > 1e-6, "{p}: {name}: {r:?}");
                 assert!(r.thickness_min > 4e-4 && r.thickness_max * 1e3 <= tmax + 5.0, "{p}: {name}: {r:?}");
             }
         }

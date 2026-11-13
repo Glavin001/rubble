@@ -145,7 +145,7 @@ for c in children:
         if nd.get('scale') and np.any(np.array(nd['scale']) < 0):
             row('no negative scale', False, nd['name'])
         me = js['meshes'][nd['mesh']]
-        P, N, T, TM, UV = [], [], [], [], []
+        P, N, T, TM, UV, S = [], [], [], [], [], []
         base = 0
         for pr in me['primitives']:
             pos = accessor(js, bin_, pr['attributes']['POSITION'])
@@ -157,11 +157,14 @@ for c in children:
             P.append(pos)
             N.append(nrm)
             UV.append(uv)
+            # solid parts tag every vertex: 0 outer skin, 1 edge wall, 2 inner face
+            S.append(accessor(js, bin_, pr['attributes']['_SURFACE']).reshape(-1).astype(int)
+                     if '_SURFACE' in pr['attributes'] else np.zeros(len(pos), int))
             T.append(idx + base)
             TM += [mats[pr.get('material', 0)]] * len(idx)
             base += len(pos)
         parts[nd['name']] = dict(p=np.concatenate(P), n=np.concatenate(N), t=np.concatenate(T),
-                                 tm=np.array(TM), uv=np.concatenate(UV))
+                                 tm=np.array(TM), uv=np.concatenate(UV), s=np.concatenate(S))
     else:
         xa = quat_rot(r, np.array([1.0, 0, 0]))
         markers[nd['name']] = (t, xa)
@@ -221,6 +224,7 @@ row('tyres touch y = 0; wheel centres within 5 mm of markers',
 
 # -- topology ---------------------------------------------------------------------------
 nonman = {}
+openb = {}
 where_inv = {}
 where_asp = {}
 zero = {}
@@ -251,6 +255,7 @@ for name, d in parts.items():
     e = e[e[:, 0] != e[:, 1]]
     _, cnt = np.unique(e, axis=0, return_counts=True)
     nonman[name] = int((cnt > 2).sum())
+    openb[name] = int((cnt == 1).sum())
     a, b, c = p[t[:, 0]], p[t[:, 1]], p[t[:, 2]]
     cr = np.cross(b - a, c - a)
     area = 0.5 * np.linalg.norm(cr, axis=1)
@@ -277,6 +282,9 @@ for name, d in parts.items():
             cl = Counter(tuple((np.round(x / 0.1) / 10).tolist()) for x in cen).most_common(3)
             where_asp[name] = (round(float(asp[w]), 1), np.round((a[w] + b[w] + c[w]) / 3, 3).tolist(), cl)
 row('no non-manifold edges', sum(nonman.values()) == 0, str({k: v for k, v in nonman.items() if v}))
+solid = [k for k in parts if parts[k]['s'].any()]
+row('solid parts are closed (no open border)', all(openb[k] == 0 for k in solid),
+    f'{len(solid)} solid parts; open edges {dict((k, openb[k]) for k in solid if openb[k])}')
 row('no zero-area triangles', sum(zero.values()) == 0, str({k: v for k, v in zero.items() if v}))
 row('no inverted normals', sum(inverted.values()) == 0, str({k: (v, where_inv.get(k)) for k, v in inverted.items() if v}))
 E = np.concatenate(edges_panel)
@@ -303,8 +311,14 @@ pen_max = (0.0, '')
 
 
 def border_zone(d, rings=3):
-    """Vertices within `rings` of an open border (the hem): where shut lines are."""
+    """Vertices within `rings` of an open border (the hem): where shut lines are.
+    A solid part has no open border: its shut lines are where its skin meets its edge
+    walls, so the zone is the skin and the walls (not the inner face) within `rings` of
+    the skin's border, the same rows as a sheet's hem and skin edge."""
     p, t = d['p'], d['t']
+    solid = d['s'].any()
+    t_all = t[(d['s'][t] < 2).all(1)]
+    t = t[(d['s'][t] == 0).all(1)]
     key = np.round(p / 1e-6).astype(np.int64)
     _, inv = np.unique(key, axis=0, return_inverse=True)
     inv = inv.reshape(-1)
@@ -314,6 +328,13 @@ def border_zone(d, rings=3):
     u, cnt = np.unique(es, axis=0, return_counts=True)
     zone = np.zeros(inv.max() + 1, bool)
     zone[u[cnt == 1].reshape(-1)] = True
+    if solid:
+        # spread over the skin and the walls two rings: the skin's border rows and the hem
+        # roll (deeper wall rows part where the shut line turns a corner)
+        tw = inv[t_all]
+        e = np.concatenate([tw[:, [0, 1]], tw[:, [1, 2]], tw[:, [2, 0]]])
+        es = np.sort(e, 1)
+        rings = 2
     for _ in range(rings):
         hit = zone[es].any(1)
         zone[es[hit].reshape(-1)] = True

@@ -209,20 +209,56 @@ impl VgInput {
     pub fn from_rust(name: &str, params: &str) -> Result<Self, String> {
         use engine_vehiclegen::export::{glb, render_parts};
         let d = engine_vehiclegen::design_from_json(name, params)?;
-        let spec = d
-            .rig_spec()
+        // `VG_SHEET=1`: the legacy sheet parts (single-sided skins, hems,
+        // loose inner panels), to compare a binding against.
+        let opts = engine_vehiclegen::BuildOpts {
+            solid: std::env::var("VG_SHEET").map_or(true, |v| v != "1"),
+            ..Default::default()
+        };
+        let (b, cb) = engine_vehiclegen::build_with_body(d.as_ref(), opts);
+        // The art: every panel and pane a closed solid (skin, edge walls,
+        // inner face; `engine_vehiclegen::solid`). The flexbody binds all of
+        // it; `spec.surfaces` tags every vertex outer / edge / inner.
+        let rp = render_parts(&b.parts);
+        let spec = engine_vehiclegen::assemble::rig_spec_with(d.as_ref(), &rp)
             .ok_or_else(|| format!("design {name} has no rig spec"))?;
-        let (b, cb) =
-            engine_vehiclegen::build_with_body(d.as_ref(), engine_vehiclegen::BuildOpts::default());
-        let bytes = glb(
-            &render_parts(&b.parts),
+        let bytes = glb(&rp, &b.markers, b.paint, b.metallic, b.roughness);
+        let rig = rig_json_of(name, d.as_ref(), &cb, &b.markers, &spec);
+        let mut me = Self::new(rig, bytes)?;
+        if !opts.solid {
+            return Ok(me);
+        }
+        // The lattice and the collision skin do not follow the solid's edge
+        // walls and inner faces. The rigger's model (same parts, same order)
+        // is the design's legacy sheets: the same outer skins with their
+        // hems and loose inner panels, which the rigger's edge nodes and
+        // areas were built on, so the rig is the one the sheet car had.
+        // `VG_RIG_OUTER=1`: each solid's `Outer` faces only (the bare
+        // skins); the hood's edge nodes then drift 16 mm parked
+        // (`gen3_rig`), so it waits for the rigger to read the tags itself.
+        let sheets = if std::env::var("VG_RIG_OUTER").is_ok_and(|v| v == "1") {
+            engine_vehiclegen::assemble::outer_parts(&b.parts)
+        } else {
+            let o = engine_vehiclegen::BuildOpts {
+                solid: false,
+                ..opts
+            };
+            engine_vehiclegen::build(d.as_ref(), o).parts
+        };
+        let outer = glb(
+            &render_parts(&sheets),
             &b.markers,
             b.paint,
             b.metallic,
             b.roughness,
         );
-        let rig = rig_json_of(name, d.as_ref(), &cb, &b.markers, &spec);
-        Self::new(rig, bytes)
+        let parts = model_of(&crate::glb::read(&outer)?).parts;
+        debug_assert!(parts
+            .iter()
+            .map(|p| &p.name)
+            .eq(me.model.parts.iter().map(|p| &p.name)));
+        me.model.parts = parts;
+        Ok(me)
     }
 
     /// A design by name: the Rust generator's when it has it (`params` its

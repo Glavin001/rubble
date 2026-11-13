@@ -114,8 +114,8 @@ pub fn profile(style: Style, kind: EdgeKind) -> ([(f64, f64); WALL_ROWS], (f64, 
     // the rebate glass sits in: a lip, back under the skin, down past the
     // pane, then a flange out under it
     let rebate = [
-        (-0.0012, 0.0035),
-        (0.0075, 0.0060),
+        (-0.0012, 0.0050),
+        (0.0075, 0.0070),
         (0.0075, 0.0205),
         (-0.0060, 0.0215),
     ];
@@ -125,12 +125,23 @@ pub fn profile(style: Style, kind: EdgeKind) -> ([(f64, f64); WALL_ROWS], (f64, 
         // (which reaches under the skin edge) clears it
         (Sheet, Glazed) => (
             [
-                (-0.0012, 0.0035),
-                (0.0035, 0.0070),
-                (0.0035, 0.0135),
-                (0.0035, 0.0200),
+                (-0.0012, 0.0050),
+                (0.0065, 0.0085),
+                (0.0065, 0.0145),
+                (0.0065, 0.0205),
             ],
-            (0.0035, 0.0260),
+            (0.0065, 0.0260),
+        ),
+        // a lid's free edge (the boot lid's, over the tail panel): the hem
+        // and a flat return, shallow enough to close over the body's edge
+        (Lid, Open) => (
+            [
+                (-0.0025, 0.0040),
+                (-0.0012, 0.0085),
+                (0.0045, 0.0090),
+                (0.0100, 0.0090),
+            ],
+            (0.0155, 0.0090),
         ),
         // the rolled hem, then the shut face
         (Door | Lid, _) => (
@@ -166,27 +177,27 @@ pub fn profile(style: Style, kind: EdgeKind) -> ([(f64, f64); WALL_ROWS], (f64, 
                 (-0.0025, 0.0040),
                 (-0.0010, 0.0120),
                 (0.0, 0.0200),
-                (0.0045, 0.0200),
+                (0.0050, 0.0200),
             ],
-            (0.0045, SHEET + 0.0005),
+            (0.0050, SHEET + 0.0005),
         ),
         (Sheet, Arch) => (
             [
                 (-0.0025, 0.0040),
                 (-0.0040, 0.0200),
                 (-0.0080, 0.0400),
-                (-0.0035, 0.0400),
+                (-0.0030, 0.0400),
             ],
-            (0.0045, SHEET + 0.0005),
+            (0.0050, SHEET + 0.0005),
         ),
         (Sheet, Open) => (
             [
                 (-0.0025, 0.0040),
                 (-0.0010, 0.0095),
                 (0.0, 0.0150),
-                (0.0045, 0.0150),
+                (0.0050, 0.0150),
             ],
-            (0.0045, SHEET + 0.0005),
+            (0.0050, SHEET + 0.0005),
         ),
     }
 }
@@ -209,13 +220,13 @@ pub fn depth(style: Style, s: &Site) -> f64 {
         }
         Style::Lid => {
             let (frame, pocket) = (0.034, 0.009);
-            let band = 1.0 - smoothstep(0.060, 0.090, s.edge);
+            let band = 1.0 - smoothstep(0.055, 0.095, s.edge);
             // a spine down the centre, a cross member and two braces from
             // the centre of the rear edge to the front corners
             let a = (s.p.x - 0.5 * (s.lo.x + s.hi.x)).abs();
             let b = s.p.z - s.lo.z;
             let (hw, len) = (0.5 * size.x, size.z);
-            let rib = |dist: f64| 1.0 - smoothstep(0.028, 0.056, dist);
+            let rib = |dist: f64| 1.0 - smoothstep(0.024, 0.062, dist);
             let spine = rib(a);
             let cross = rib((b - 0.5 * len).abs());
             let (p0, p1) = (DVec2::new(0.0, 0.12 * len), DVec2::new(hw, 0.88 * len));
@@ -223,6 +234,12 @@ pub fn depth(style: Style, s: &Site) -> f64 {
             let r = DVec2::new(a, b) - p0;
             let brace = rib((r - e * r.dot(e)).length());
             let d = pocket + (frame - pocket) * band.max(spine).max(cross).max(brace);
+            // behind a shallow free edge the frame starts further in
+            let ramp = if s.rim < 0.012 {
+                smoothstep(0.035, 0.080, s.edge)
+            } else {
+                ramp
+            };
             s.rim + (d - s.rim) * ramp
         }
         // a thick land round a lamp opening (its rebate is cut into it),
