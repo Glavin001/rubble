@@ -526,6 +526,15 @@ fn main() -> Result<(), String> {
             rest * 1e3
         );
     }
+    // ---- the nodes behind the cowl that moved most along the car (either way)
+    let mut inside: Vec<usize> = (0..nd).filter(|&i| ahead0[i] < cowl).collect();
+    let fin = local(s);
+    let moved = |i: usize| (fin[i].z - rest[i].z).abs().max(back_max[i]);
+    inside.sort_by(|&a, &b| moved(b).total_cmp(&moved(a)));
+    println!(
+        "\nnodes behind the cowl, most moved along the car (name, part, peak driven back mm, end shift mm): {}",
+        inside.iter().take(14).map(|&i| format!("{} {} {:.0} {:+.0}", d.nodes[i].name, node_label[i], back_max[i] * 1e3, (fin[i].z - rest[i].z) * 1e3)).collect::<Vec<_>>().join("; ")
+    );
     // ---- groups
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     for j in 0..nb.min(s.beams.len()) {

@@ -587,11 +587,18 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         p.node("c", DVec3::new(x, h + 0.17, zc), 2.7);
         p.node("bo", DVec3::new(x + sg * 0.20, h + 0.66, zc - 0.42), 2.7);
         p.node("bi", DVec3::new(x - sg * 0.20, h + 0.66, zc - 0.42), 2.7);
-        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 38.0, 6000.0, INF), deform_group: None });
+        // The frame and the feet carry a belted occupant: FMVSS 210's
+        // anchorage loads (13.3 kN at the lap belt and 13.3 kN at the torso
+        // belt, together) with FMVSS 207's 20 times the seat's weight are
+        // about 30 kN forward at the cushion. The cushion node's four beams
+        // to the feet lean about 0.6 along the car: 15 kN each holds 36 kN.
+        // (At the study's 6 kN, an empty BeamNG seat's value, the driver's
+        // seat slid 18 cm forward in the 56 km/h wall.)
+        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 38.0, 15_000.0, INF), deform_group: None });
         for (foot, (row, lane)) in feet.iter().zip([(3, "o"), (3, "t"), (4, "o"), (4, "t")]) {
             let to = vec![format!("sh_c1_{row}{lane}{s}"), format!("sh_c1_{row}{}{s}", if lane == "o" { "t" } else { "o" }), format!("sh_c2_{row}{s}"), format!("sh_c3_{row}")];
             let from = vec![foot.clone(), p.nodes[4].name.clone()];
-            p.mounts.push(Mount { group: format!("seat_{}_{}", cn.to_lowercase(), &foot[foot.len() - 2..]), from, to, beams: 6, kind: BeamKind::Normal, v: vals(2.8e5, 38.0, 6000.0, 30e3), precomp: 1.0 });
+            p.mounts.push(Mount { group: format!("seat_{}_{}", cn.to_lowercase(), &foot[foot.len() - 2..]), from, to, beams: 6, kind: BeamKind::Normal, v: vals(2.8e5, 38.0, 12_000.0, 45e3), precomp: 1.0 });
         }
         out.push(p);
     }

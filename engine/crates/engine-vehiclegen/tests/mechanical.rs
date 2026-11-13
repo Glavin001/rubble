@@ -39,7 +39,7 @@ fn node_counts_and_masses_follow_the_study() {
         ("hub_RR", 4, 24.0),
         ("steering_rack", 2, 10.0),
         ("wheel_FL", 5, 19.0),
-        ("hub_cap_RL", 3, 0.6),
+        ("hub_cap_RL", 3, 0.12),
         ("engine", 10, 170.0),
         ("transmission", 2, 45.0),
         ("driveshaft", 2, 1.0),
