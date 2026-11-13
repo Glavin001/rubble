@@ -14,7 +14,8 @@
 //   // each displayed frame, before stepping:
 //   if (stop.stopped) return;            // no more steps, no more frames
 //   stop.check(simulatedSeconds);
-//   // optional: stop.damage(i, broken, bent, beams); stop.launched(speed);
+//   // optional (what the check cannot see for itself): stop.damage(i, broken, bent, beams);
+//   // stop.launched(speed); stop.supplied(joules); stop.disturbed();
 
 const STYLE = `
 .rb-stop { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 30;
@@ -52,6 +53,11 @@ export function createStabilityStop(health, { params = {}, onStop = null } = {})
     damage(i, broken, bent, beams) { if (!api.stopped) health?.damage(i, broken, bent, beams); },
     /** The page launched the vehicles at `speed` m/s (energy the scene supplied). */
     launched(speed) { if (!api.stopped) health?.launched(speed); },
+    /** Something outside the vehicles put up to `joules` into them (a shot's energy). */
+    supplied(joules) { if (!api.stopped) health?.supplied(joules); },
+    /** An input the check cannot bound acts this frame (a hand's grab): call it
+     * every frame while it does. */
+    disturbed() { if (!api.stopped) health?.disturbed(); },
     /** The device was lost (the page's `device.lost`): stop with that message. */
     lost(message) { stop(`The browser lost the GPU device (${message}). Nothing on this page is running; the simulation was not restarted.`); },
   };

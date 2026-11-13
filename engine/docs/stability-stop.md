@@ -23,19 +23,19 @@ Only states correct physics cannot reach. The thresholds are named constants at 
 |---|---|---|
 | Non-finite | a node's position, velocity or mass is NaN or infinite | none |
 | Energy | the read vehicles' kinetic energy is past 3 × what the scene can have supplied + 50 kJ, for 3 readbacks in a row | `ENERGY_FACTOR`, `ENERGY_FLOOR`, `ENERGY_SUSTAIN` |
-| Rebound | after the kinetic energy has fallen from a peak to a low (an impact, coming to rest), it is past the low + 0.5 × what was lost + 3 × the sources since the low (the fall's work, the drive allowance, launches) + 50 kJ, and past 2 × the low, for 3 readbacks in a row | `REBOUND_SHARE`, `REBOUND_RISE` |
+| Rebound | over the last second of readbacks: the kinetic energy is past its lowest there + 0.5 × what was lost from the peak before it + the sources since (the fall's work, what the tyres can have delivered, launches, reported inputs) + 50 kJ, and past 2 × that low, for 2 readbacks in a row | `REBOUND_SHARE`, `REBOUND_RISE`, `REBOUND_FLOOR`, `REBOUND_SUSTAIN`, `REBOUND_WINDOW` |
 | Box | a vehicle's bounding box is past 10 × its spawn size + 50 m while its kinetic energy is above 50 kJ and 1.5 × its lowest since the last launch | `BOX_FACTOR`, `BOX_MARGIN`, `BOX_ENERGY_RISE` |
 
-What the scene "can have supplied" is the vehicles' kinetic energy at the first readback, the launches the page reports (`launched(speed)`), the work of gravity over each vehicle's fall from its start to its lowest point, and a drive allowance of 1 MW per vehicle for the simulated time (`DRIVE_POWER_MAX`).
+What the scene "can have supplied" is the vehicles' kinetic energy at the first readback, the launches the page reports (`launched(speed)`), the work of gravity over each vehicle's fall from its start to its lowest point, and a drive allowance: a traction force of 2 × the vehicle's weight over the distance its centre of mass moved (`TRACTION_MAX`; a car at rest gets none). Inputs the guard cannot see are reported by the page: a shot's energy (`supplied`), a hand's grab (`disturbed`, each frame it acts), a pulling rig (`setUnbounded`, which turns the rebound check off).
 
 A 200 km/h pole crash, a spawn at 3,000 km/h, a launch at 1,000 km/h, a 500 m fall and a car rammed from rest do not trip it (tests in `stability.rs`). Nor do a springy rebound off a wall, a car bouncing after a 10 m drop, rolling 60 m downhill after a stop, driving off after a crash, a part thrown 80 m, or a launch from rest.
 
-The rebound check was added after the guard's first real trip on 2026-11-13 (a 31 m drop at 189 km/h on the user's GPU). The kinetic energy fell to 681 kJ at the impact and then rose to 4,413 kJ in 0.4 s. The whole-run energy budget (about 22,000 kJ from the scene's height and speed) was far above that, so the box check stopped it, at 112 m across. The rebound check stops the same run at about 3,000 kJ, a third of a second after the low.
+The rebound check was added after the guard's first real trip on 2026-11-13 (a 31 m drop at 189 km/h on the user's GPU). The kinetic energy fell to 681 kJ at the impact and then rose to 4,413 kJ in 0.4 s. The whole-run energy budget (about 22,000 kJ from the scene's height and speed) was far above that, so the box check stopped it, at 112 m across. The rebound check stops the same run within its first doublings.
 
 ## Limits of the detection
 
 - Kinetic energy only. Energy stored in stretched beams is not read, so the check is late by however long an instability stays elastic. The factor of 3 covers preloaded beams.
-- The drive allowance grows with time, so the energy check gets weaker in a long run (after 60 s the budget of one car is 180 MJ above its start). Non-finite values and the box check do not weaken.
+- The whole-run energy budget grows with the distance driven, so it is weak in a long drive. The rebound check looks at the last second only and does not weaken (the 2026-11-13 yard run, 155 kJ to 7,569 kJ in 0.65 s after 35 s of driving, trips at 760 kJ; the first version's fixed 1 MW allowance had put the budget at 315,000 kJ, and only the box check caught it, at 161 m).
 - With more than 8 vehicles only the non-finite check runs: an unread vehicle can hand a read one its energy in a collision, which would look like energy from nowhere.
 - Rigid bodies are not read. A heavy body that falls on a vehicle adds energy the budget does not count; the factor of 3 and the floor cover the scenes shipped.
 - Readbacks arrive a frame or two late, so a few more steps of the broken state are already submitted when the page stops. For that reason these pages also keep at most 2 steps in flight (`EXPLICIT_STEPS_IN_FLIGHT` for a World with explicit vehicles; `softbody.html` already did) and never catch up on steps not taken.

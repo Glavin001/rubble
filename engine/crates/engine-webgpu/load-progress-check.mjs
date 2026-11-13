@@ -24,7 +24,7 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>loading card</title>
 import { createLoading, isDeviceLost } from './load-progress.mjs';
 import { createStabilityStop } from './stability-stop.mjs';
 // A scripted VehicleHealth: healthy until __health.message is set.
-window.__health = { message: null, checks: 0, damages: 0, stopped() { return undefined; }, check() { this.checks++; return Promise.resolve(this.message ?? undefined); }, damage() { this.damages++; }, launched() {} };
+window.__health = { message: null, checks: 0, damages: 0, stopped() { return undefined; }, check() { this.checks++; return Promise.resolve(this.message ?? undefined); }, damage() { this.damages++; }, launched() {}, supplied() {}, disturbed() {} };
 window.__stop = createStabilityStop(window.__health, { params: { xscene: 'sidepole', speed: 186 }, onStop: () => { window.__onStop = (window.__onStop ?? 0) + 1; } });
 window.__make = (withCancel) => {
   document.getElementById('loading')?.remove();

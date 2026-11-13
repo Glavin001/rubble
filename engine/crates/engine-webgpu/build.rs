@@ -710,6 +710,21 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         )?;
         explicit_post(&out)?;
     }
+    // Twelve of the sixteen with surface contact but without the World's coupling
+    // (EB_NO_COUPLING, the `_nocpl` names; explicit_beams_gpu::frame_module): the surface
+    // pass without its proxy paths, for an upload that has no coupling room.
+    for (name, entry, defines) in frames {
+        // (Not the large groups' modules: a fleet of more than four vehicles without
+        // coupling runs the shipped ones.)
+        if name.contains("contact_big") {
+            continue;
+        }
+        let out = wgsl_dir.join(format!("{name}_nocpl.wgsl"));
+        let mut d = defines.to_vec();
+        d.push(("EB_NO_COUPLING", "1"));
+        compile_with_defines(&explicit_beams_source(slang_root), entry, SlangTarget::Wgsl, &out, &[], &d)?;
+        explicit_post(&out)?;
+    }
     // A fleet with surface contact on the frame modules (no contact groups): the frame
     // in segments, a step each (EB_FRAME_SEG, `<module>_seg`), with the surface pass
     // as its own small pipelines between them (EB_SURF_PIPE: the prep, then per kind

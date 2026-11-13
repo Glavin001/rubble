@@ -20,8 +20,8 @@
 //! - a node's position, velocity or mass is not a finite number;
 //! - the vehicles' kinetic energy is far past what the scene can have supplied
 //!   (their energy at the start, what the page launched them with, the work of
-//!   gravity over the height they fell, and a drive allowance), for several
-//!   readbacks in a row;
+//!   gravity over the height they fell, and what their tyres can have delivered at
+//!   the speeds they drove), for several readbacks in a row;
 //! - the vehicles' kinetic energy rises again after it has fallen (an impact, coming
 //!   to rest) by more than a rebound and the scene's sources since then can explain,
 //!   for several readbacks in a row;
@@ -44,18 +44,30 @@ pub const ENERGY_FLOOR: f64 = 5.0e4;
 /// Past the budget for this many readbacks in a row before the guard trips (one
 /// readback is a frame: 3 is 50 ms at 60 Hz).
 pub const ENERGY_SUSTAIN: u32 = 3;
-/// The drive allowance: work a vehicle's own drive may have done, watts × the
-/// simulated time. 1 MW (1,341 hp) is past every vehicle the engine ships.
-pub const DRIVE_POWER_MAX: f64 = 1.0e6;
-/// The rebound check: once the kinetic energy has fallen from a peak to a low, it may
+/// The drive allowance: the most work a vehicle's tyres can have done on it, a
+/// traction force of `TRACTION_MAX` × its weight times the distance its centre of
+/// mass moved (the integral of its speed over the readbacks). No tyre holds 2 g; a
+/// car at rest gets no allowance, one at 100 km/h 790 kW per 1,450 kg. (A fixed power
+/// allowance grew without bound: 1 MW over a 35 s drive was 315,000 kJ, and a blow-up
+/// from 155 kJ to 7,569 kJ in the 2026-11-13 yard run was nowhere near it.)
+pub const TRACTION_MAX: f64 = 2.0;
+/// The rebound check, over the last `REBOUND_WINDOW` seconds of readbacks: from the
+/// lowest kinetic energy in that window (and the peak before it there), it may
 /// come back by at most `REBOUND_SHARE` of what was lost (energy stored in bent
 /// beams and tyres: a restitution of 0.7, far springier than a car), plus
-/// `ENERGY_FACTOR` × the sources since the low (gravity's work over the fall since
-/// then, the drive allowance, launches) + `ENERGY_FLOOR`. Past that, and past
-/// `REBOUND_RISE` × the low, for `ENERGY_SUSTAIN` readbacks in a row, it trips: energy
-/// from nowhere after an impact, long before it reaches the whole-run budget.
+/// the sources since the low (gravity's work over the fall since then, the drive
+/// allowance, launches) + `REBOUND_FLOOR`. Past that, and past `REBOUND_RISE` × the
+/// low, for `REBOUND_SUSTAIN` readbacks in a row, it trips: energy multiplying from
+/// nowhere, within its first two or three doublings and long before it reaches the
+/// whole-run budget. (The sources are bounds already, so they are not multiplied
+/// again here.)
 pub const REBOUND_SHARE: f64 = 0.5;
 pub const REBOUND_RISE: f64 = 2.0;
+pub const REBOUND_FLOOR: f64 = 5.0e4;
+pub const REBOUND_SUSTAIN: u32 = 2;
+/// A rebound returns its energy within a fraction of a second; a window keeps the
+/// sources counted to the ones that acted during the rise (not a whole drive's).
+pub const REBOUND_WINDOW: f64 = 1.0;
 /// Gravity (m/s²) for the work of a fall.
 pub const GRAVITY: f64 = 9.81;
 /// The box check: a vehicle's bounding box diagonal past `BOX_FACTOR` × its first
@@ -206,16 +218,20 @@ pub struct StabilityGuard {
     fleet: usize,
     /// Kinetic energy the page's launches may have added (J).
     launched: f64,
+    /// Energy the page said something outside the vehicles put in (J): shots, rigs.
+    external: f64,
+    /// The rebound check is off (the scene has an input the guard cannot bound).
+    unbounded: bool,
+    /// The drive allowance so far (J) and the time of the last readback.
+    traction: f64,
+    last_t: Option<f64>,
     /// Readbacks in a row past the budget, and the energy of the first of them.
     over: u32,
     over_first: (f64, f64),
-    /// The rebound check: the lowest kinetic energy since the start or the last
-    /// launch (t, energy, each vehicle's height then, the launches' energy then), the
-    /// highest seen so far and the highest seen before that low; readbacks in a row
-    /// past the rebound budget.
-    low: Option<(f64, f64, Vec<f64>, f64)>,
-    seen: f64,
-    peak: f64,
+    /// The rebound check: the readbacks of the last REBOUND_WINDOW seconds (t, kinetic
+    /// energy, each vehicle's height, the launches' energy and the drive allowance
+    /// then), and the readbacks in a row past the rebound budget.
+    window: std::collections::VecDeque<(f64, f64, Vec<f64>, f64, f64)>,
     rebound_over: u32,
     /// Recent (t, kinetic energy, budget), newest last: the trip's evidence.
     history: std::collections::VecDeque<(f64, f64, f64)>,
@@ -257,9 +273,29 @@ impl StabilityGuard {
             }
         }
         // The rebound check starts over from the next readback.
-        self.low = None;
-        self.seen = 0.0;
+        self.window.clear();
         self.rebound_over = 0;
+    }
+
+    /// Something outside the vehicles put up to `joules` into them (a shot's kinetic
+    /// energy, a plate's work): an input of the scene from now on.
+    pub fn supplied(&mut self, joules: f64) {
+        if joules.is_finite() && joules > 0.0 {
+            self.external += joules;
+        }
+    }
+
+    /// The scene has an input the guard cannot bound right now (a hand's grab, a
+    /// pulling rig): the rebound check starts over from the next readback. Called
+    /// every frame while the input acts, it keeps that check off; the others stay on.
+    pub fn disturbed(&mut self) {
+        self.window.clear();
+        self.rebound_over = 0;
+    }
+
+    /// The scene has such an input for good: the rebound check is off.
+    pub fn set_unbounded(&mut self, on: bool) {
+        self.unbounded = on;
     }
 
     /// Vehicle `vehicle`'s damage as the page read it (beams broken, bent, in all):
@@ -326,6 +362,16 @@ impl StabilityGuard {
                 samples,
             );
         }
+        // The drive allowance: each vehicle's weight × TRACTION_MAX × the distance its
+        // centre of mass moved since the last readback (the mean of the two speeds).
+        if let Some(t0) = self.last_t {
+            let dt = (t - t0).max(0.0);
+            for (s, v) in samples.iter().zip(&self.vehicles) {
+                let before = v.last.map_or(s.speed, |l| l.speed);
+                self.traction += TRACTION_MAX * s.mass * GRAVITY * 0.5 * f64::from(before + s.speed) * dt;
+            }
+        }
+        self.last_t = Some(t);
         for (s, v) in samples.iter().zip(&mut self.vehicles) {
             if v.first.is_none() {
                 v.first = Some(*s);
@@ -340,16 +386,17 @@ impl StabilityGuard {
             // Unread vehicles can hand these their energy: no energy or box check.
             return None;
         }
-        // What the scene can have supplied: the start's energy, the launches, the
-        // fall's work (from each vehicle's start to its lowest point) and the drive
-        // allowance.
+        // What the scene can have supplied: the start's energy, the launches and other
+        // reported inputs, the fall's work (from each vehicle's start to its lowest
+        // point) and the drive allowance.
         let supplied: f64 = self.launched
+            + self.external
             + self
                 .vehicles
                 .iter()
                 .filter_map(|v| v.first.map(|f| f.kinetic + f.mass * GRAVITY * (f.height - v.lowest).max(0.0)))
                 .sum::<f64>()
-            + DRIVE_POWER_MAX * self.vehicles.len() as f64 * t.max(0.0);
+            + self.traction;
         let budget = ENERGY_FACTOR * supplied + ENERGY_FLOOR;
         let kinetic: f64 = samples.iter().map(|s| s.kinetic).sum();
         self.history.push_back((t, kinetic, budget));
@@ -380,27 +427,34 @@ impl StabilityGuard {
         } else {
             self.over = 0;
         }
-        // The rebound check.
-        self.seen = self.seen.max(kinetic);
-        if self.low.as_ref().is_none_or(|low| kinetic <= low.1) {
-            self.low = Some((t, kinetic, samples.iter().map(|s| s.height).collect(), self.launched));
-            self.peak = self.seen;
+        // The rebound check: from the lowest energy of the last REBOUND_WINDOW seconds.
+        self.window
+            .push_back((t, kinetic, samples.iter().map(|s| s.height).collect(), self.launched, self.traction));
+        while self.window.front().is_some_and(|w| w.0 < t - REBOUND_WINDOW) {
+            self.window.pop_front();
+        }
+        let at = (0..self.window.len())
+            .min_by(|&a, &b| self.window[a].1.total_cmp(&self.window[b].1))
+            .unwrap_or(0);
+        if self.unbounded || at + 1 == self.window.len() {
             self.rebound_over = 0;
-        } else if let Some((t_low, low, heights, launched)) = &self.low {
+        } else {
+            let (t_low, low, heights, launched, traction) = &self.window[at];
+            let peak = self.window.iter().take(at + 1).map(|w| w.1).fold(*low, f64::max);
             let fall: f64 = samples
                 .iter()
                 .zip(heights)
                 .map(|(s, h)| s.mass * GRAVITY * (h - s.height).max(0.0))
                 .sum();
-            let sources = fall + DRIVE_POWER_MAX * samples.len() as f64 * (t - t_low).max(0.0) + (self.launched - launched);
-            let allowed = low + REBOUND_SHARE * (self.peak - low).max(0.0) + ENERGY_FACTOR * sources + ENERGY_FLOOR;
+            let sources = fall + (self.traction - traction) + (self.launched - launched) + self.external;
+            let allowed = low + REBOUND_SHARE * (peak - low).max(0.0) + sources + REBOUND_FLOOR;
             if kinetic > allowed && kinetic > REBOUND_RISE * low {
                 self.rebound_over += 1;
-                if self.rebound_over >= ENERGY_SUSTAIN {
+                if self.rebound_over >= REBOUND_SUSTAIN {
                     let reason = format!(
-                        "the vehicles' kinetic energy rose from {} (its low at t = {t_low:.3} s, after a peak of {}) to {}, past the {} a rebound ({REBOUND_SHARE} × the energy lost) and the scene's sources since then ({ENERGY_FACTOR} × {}: the fall, the drive allowance, launches) can explain, for {ENERGY_SUSTAIN} readbacks",
+                        "the vehicles' kinetic energy rose from {} (its low at t = {t_low:.3} s, after a peak of {}) to {}, past the {} a rebound ({REBOUND_SHARE} × the energy lost) and the scene's sources since then ({}: the fall, what the tyres can have delivered, launches and reported inputs) can explain, for {REBOUND_SUSTAIN} readbacks",
                         kj(*low),
-                        kj(self.peak),
+                        kj(peak),
                         kj(kinetic),
                         kj(allowed),
                         kj(sources)
@@ -522,6 +576,24 @@ impl VehicleHealth {
     /// The page launched the vehicles at `speed` (m/s): energy the scene supplied.
     pub fn launched(&self, speed: f32) {
         self.guard.borrow_mut().launched(speed);
+    }
+
+    /// Something outside the vehicles put up to `joules` into them (a shot's kinetic
+    /// energy): an input of the scene from now on.
+    pub fn supplied(&self, joules: f64) {
+        self.guard.borrow_mut().supplied(joules);
+    }
+
+    /// An input the guard cannot bound acts this frame (a hand's grab): the rebound
+    /// check starts over. Call it every frame while the input acts.
+    pub fn disturbed(&self) {
+        self.guard.borrow_mut().disturbed();
+    }
+
+    /// The scene has such an input for good (a pulling rig): the rebound check is off.
+    #[wasm_bindgen(js_name = setUnbounded)]
+    pub fn set_unbounded(&self, on: bool) {
+        self.guard.borrow_mut().set_unbounded(on);
     }
 
     /// The stop message once the guard has tripped or the device is lost
@@ -684,11 +756,11 @@ mod tests {
         }
         let (k, energy, trip) = tripped.expect("tripped");
         // The rebound check sees it first (nothing was lost, so nothing may come back):
-        // tripped at the 4th frame of the growth, at 6.6 × the start's energy, long
+        // tripped at the 3rd frame of the growth, at 4.1 × the start's energy, long
         // before 680 ×. (The whole-run budget, 3 × 1,935 kJ + the drive allowance +
         // the floor, would have tripped 2 frames later.)
-        assert_eq!(k, 63, "{}", trip.message());
-        assert!(energy < 7.0 * 0.5 * MASS * f64::from(v0 * v0));
+        assert_eq!(k, 62, "{}", trip.message());
+        assert!(energy < 4.2 * 0.5 * MASS * f64::from(v0 * v0));
         assert!(trip.reason.starts_with("the vehicles' kinetic energy rose from"), "{}", trip.reason);
         let message = trip.message();
         assert!(message.contains("373 broken and 2017 bent of 4228 beams"), "{message}");
@@ -697,9 +769,9 @@ mod tests {
         let mut g = StabilityGuard::new(1);
         assert_eq!(g.observe(0.0, &[car(v0, 0.6, 5.0, 0.0)]), None);
         assert_eq!(g.observe(0.1, &[car(v0, 0.6, 5.0, 1.0e8)]), None);
-        assert_eq!(g.observe(0.2, &[car(v0, 0.6, 5.0, 1.0e8)]), None);
-        assert_eq!(g.observe(0.3, &[car(v0, 0.6, 5.0, 0.0)]), None);
-        assert_eq!(g.observe(0.4, &[car(v0, 0.6, 5.0, 1.0e8)]), None);
+        assert_eq!(g.observe(0.2, &[car(v0, 0.6, 5.0, 0.0)]), None);
+        assert_eq!(g.observe(0.3, &[car(v0, 0.6, 5.0, 1.0e8)]), None);
+        assert_eq!(g.observe(0.4, &[car(v0, 0.6, 5.0, 0.0)]), None);
     }
 
     /// The 2026-11-13 mountain run on the user's GPU: a 31 m drop at 189 km/h; after
@@ -798,6 +870,98 @@ mod tests {
             }
             let v = if k < 30 { 40.0 } else if k < 120 { 0.0 } else { 60.0 };
             assert_eq!(g.observe(k as f64 / 60.0, &[car(v, 0.6, 5.0, 0.0)]), None, "launch, frame {k}");
+        }
+    }
+
+    /// The 2026-11-13 drive yard run (3 cars, 35 s of driving, a 25 km/h bump into a
+    /// parked car): the player's car went from 155 kJ to 7,569 kJ in 0.65 s. The old
+    /// budget (a 1 MW allowance per car) stood at 315,000 kJ; only the box check
+    /// caught it, at 161 m. Readbacks 0.1 s apart, as that page's were.
+    #[test]
+    fn energy_multiplying_in_a_long_drive_trips_within_three_doublings() {
+        let mut g = StabilityGuard::new(3);
+        let rest = car(0.0, 0.6, 5.4, 0.0);
+        // 35 s of driving the player's car between 40 and 60 km/h.
+        for k in 0..350 {
+            let t = k as f64 * 0.1;
+            let v = (50.0 + 10.0 * (t * 0.5).sin()) / 3.6;
+            assert_eq!(g.observe(t, &[car(v as f32, 0.6, 5.4, 0.0), rest, rest]), None, "t = {t}");
+        }
+        // The bump: 25 km/h, the parked car shoved to 24 km/h (31 kJ), the player's car
+        // at 155 kJ in all; then its energy as the report listed it.
+        let bumped = car(23.7 / 3.6, 0.6, 6.4, 0.0);
+        let v = 25.4f32 / 3.6;
+        let own = 0.5 * MASS * f64::from(v * v);
+        let mut tripped = None;
+        for (k, kj) in [155.0, 230.0, 401.0, 760.0, 1510.0, 2900.0, 4271.0, 7569.0].into_iter().enumerate() {
+            let t = 35.021 + k as f64 * 0.1;
+            if let Some(trip) = g.observe(t, &[car(v, 0.52, 6.0 + 2.0 * k as f32, kj * 1000.0 - own), bumped, rest]) {
+                tripped = Some((kj, trip.clone()));
+                break;
+            }
+        }
+        let (kj, trip) = tripped.expect("tripped");
+        // Within the first three doublings: 760 kJ, the car still 12 m across (the
+        // run went on to 7,569 kJ and 161 m).
+        assert_eq!(kj, 760.0, "{}", trip.message());
+        assert!(trip.reason.contains("what the tyres can have delivered"), "{}", trip.reason);
+    }
+
+    /// A minute of ordinary driving does not trip: three cars accelerating hard,
+    /// braking to a stop, cornering, bumping into each other at 30 km/h and pulling
+    /// away again, readbacks at 60 Hz and at 10 Hz.
+    #[test]
+    fn a_minute_of_driving_braking_and_bumps_does_not_trip() {
+        for hz in [60.0, 10.0] {
+            let mut g = StabilityGuard::new(3);
+            let n = (60.0 * hz) as usize;
+            for k in 0..n {
+                let t = k as f64 / hz;
+                // A 12 s cycle per car, out of phase: 0.9 g up to 130 km/h, 1.1 g
+                // braking to rest, a pause; every third cycle ends in a 30 km/h bump
+                // that throws 15 % of the energy into the other car and some debris.
+                let cars: Vec<Sample> = (0..3)
+                    .map(|i| {
+                        let phase = (t + 4.0 * i as f64) % 12.0;
+                        let v = if phase < 4.0 { (0.9 * GRAVITY * phase).min(130.0 / 3.6) } else { (130.0 / 3.6 - 1.1 * GRAVITY * (phase - 4.0)).max(0.0) };
+                        let bump = ((t + 4.0 * i as f64) / 12.0) as u32 % 3 == 2 && (8.0..8.3).contains(&phase);
+                        let extra = if bump { 0.15 * 0.5 * MASS * (30.0f64 / 3.6).powi(2) } else { 0.0 };
+                        car(if bump { 8.3 * (8.3 - phase) as f32 / 0.3 } else { v as f32 }, 0.6, if bump { 9.0 } else { 5.4 }, extra)
+                    })
+                    .collect();
+                assert_eq!(g.observe(t, &cars), None, "{hz} Hz, t = {t}");
+            }
+        }
+    }
+
+    /// Inputs the guard cannot see are reported by the page: a shot's energy
+    /// (`supplied`), a hand's grab (`disturbed` each frame), a pulling rig
+    /// (`set_unbounded`).
+    #[test]
+    fn reported_inputs_do_not_trip() {
+        // A 400 kJ shot hits a car at rest.
+        let mut g = StabilityGuard::new(1);
+        assert_eq!(g.observe(0.0, &[car(0.0, 0.6, 5.0, 0.0)]), None);
+        g.supplied(4.0e5);
+        for k in 1..60 {
+            assert_eq!(g.observe(k as f64 / 60.0, &[car(20.0, 0.6, 5.0, 0.0)]), None, "shot, frame {k}");
+        }
+        // The same without the report is energy from nowhere.
+        let mut g = StabilityGuard::new(1);
+        assert_eq!(g.observe(0.0, &[car(0.0, 0.6, 5.0, 0.0)]), None);
+        assert_eq!(g.observe(0.1, &[car(0.0, 0.6, 5.0, 3.0e5)]), None);
+        assert!(g.observe(0.2, &[car(0.0, 0.6, 5.0, 3.0e5)]).is_some());
+        // A hand drags a car from rest to 15 m/s over a second.
+        let mut g = StabilityGuard::new(1);
+        for k in 0..120 {
+            g.disturbed();
+            assert_eq!(g.observe(k as f64 / 60.0, &[car((15.0 * k as f32 / 60.0).min(15.0), 0.6, 5.0, 0.0)]), None, "grab, frame {k}");
+        }
+        // A rig pulls a car to 56 km/h.
+        let mut g = StabilityGuard::new(1);
+        g.set_unbounded(true);
+        for k in 0..120 {
+            assert_eq!(g.observe(k as f64 / 60.0, &[car((15.6 * k as f32 / 60.0).min(15.6), 0.6, 5.0, 0.0)]), None, "rig, frame {k}");
         }
     }
 

@@ -70,6 +70,27 @@ pub const EXPLICIT_BEAMS_CONTACT_BIG: [(&str, &str); 4] = [
     ("explicit_beams_contact_big_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero.wgsl"))),
     ("explicit_beams_contact_big_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_wide.wgsl"))),
 ];
+/// The twelve frame and contact modules (not the large groups' four, which a fleet of
+/// more than four without coupling falls back to as shipped) with surface contact but
+/// without the World's coupling (`EB_NO_COUPLING`, name `<module>_nocpl`): the surface pass without its
+/// proxy paths (the per-element proxy loops, the casts, the pair path), which no
+/// upload without coupling room can reach. The host runs them for such an upload
+/// with surface contact (`explicit_beams_gpu::frame_module`); what executes is the
+/// same code, and a browser compiles a kernel a third the size.
+pub const EXPLICIT_BEAMS_NOCPL: [(&str, &str); 12] = [
+    ("explicit_beams_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_nocpl.wgsl"))),
+    ("explicit_beams_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nocpl.wgsl"))),
+    ("explicit_beams_aero_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_nocpl.wgsl"))),
+    ("explicit_beams_aero_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide_nocpl.wgsl"))),
+    ("explicit_beams_solo_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_nocpl.wgsl"))),
+    ("explicit_beams_solo_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_wide_nocpl.wgsl"))),
+    ("explicit_beams_solo_aero_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_nocpl.wgsl"))),
+    ("explicit_beams_solo_aero_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide_nocpl.wgsl"))),
+    ("explicit_beams_contact_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_nocpl.wgsl"))),
+    ("explicit_beams_contact_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_wide_nocpl.wgsl"))),
+    ("explicit_beams_contact_aero_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_nocpl.wgsl"))),
+    ("explicit_beams_contact_aero_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide_nocpl.wgsl"))),
+];
 /// The sixteen frame and contact modules without surface contact (`EB_NO_SURFACE`,
 /// name `<module>_nosurf`; `engine_exec::explicit_plan::Kernel::module_for`): the host
 /// runs them when no vehicle of the upload has surface contact.

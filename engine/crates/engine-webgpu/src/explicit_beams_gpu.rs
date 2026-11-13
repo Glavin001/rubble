@@ -366,12 +366,37 @@ fn module_wgsl(name: &str) -> &'static str {
             .iter()
             .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
             .chain(crate::EXPLICIT_BEAMS_NOSURF.iter())
+            .chain(crate::EXPLICIT_BEAMS_NOCPL.iter())
             .chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter())
             .chain(crate::EXPLICIT_BEAMS_SURF_SPLIT.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| *w)
             .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
     }
+}
+
+/// A frame kernel's module for an upload: [`Kernel::module_for`], and with surface
+/// contact but without the World's coupling (`coupled` false) its `_nocpl` twin
+/// ([`crate::EXPLICIT_BEAMS_NOCPL`]): the surface pass without the proxy paths no such
+/// upload can reach. The same results; a much smaller kernel for a browser to compile.
+fn frame_module(kernel: Kernel, aero: bool, lanes: u32, surface: bool, coupled: bool) -> &'static str {
+    let name = kernel.module_for(aero, lanes, surface);
+    if surface && !coupled {
+        if let Some((twin, _)) = crate::EXPLICIT_BEAMS_NOCPL
+            .iter()
+            .find(|(n, _)| n.strip_suffix("_nocpl") == Some(name))
+        {
+            return twin;
+        }
+    }
+    name
+}
+
+/// Whether an upload's surface contact runs split from the frame
+/// ([`surface_split_default`]): only with the World's coupling. Without it the frame
+/// with the pass in it (the `_nocpl` module) is small enough, and one pipeline.
+fn surface_split_for(coupled: bool) -> bool {
+    coupled && surface_split_default()
 }
 
 /// The vehicle a "left its frame bounds" error names.
@@ -603,7 +628,8 @@ impl ExplicitBeamsGpu {
         // More than one vehicle: the contact kernels run while contact is on; the
         // plain frame only once it is turned off (created at first use).
         let deferred = vehicles.len() > 1;
-        let mut specs = if surface && surface_split_default() {
+        let coupled = coupling.is_some();
+        let mut specs = if surface && surface_split_for(coupled) {
             // Surface contact split from the frame: its segments' module and the
             // surface pass's pipelines (Split::new's descriptors).
             let seg = Kernel::FrameSeg.module(aero, lanes);
@@ -621,8 +647,8 @@ impl ExplicitBeamsGpu {
         } else {
             vec![crate::ComputeSpec {
                 label: "explicit_beams_frame",
-                module: Kernel::Frame.module_for(aero, lanes, surface),
-                wgsl: u(module_wgsl(Kernel::Frame.module_for(aero, lanes, surface))),
+                module: frame_module(Kernel::Frame, aero, lanes, surface, coupled),
+                wgsl: u(module_wgsl(frame_module(Kernel::Frame, aero, lanes, surface, coupled))),
                 entry: plan::FRAME_ENTRY,
                 layout: None,
                 deferred,
@@ -652,8 +678,8 @@ impl ExplicitBeamsGpu {
             for kernel in [Kernel::Contact, Kernel::Solo].into_iter().chain(big) {
                 specs.push(crate::ComputeSpec {
                     label: kernel.entry(),
-                    module: kernel.module_for(aero, lanes, surface),
-                    wgsl: u(module_wgsl(kernel.module_for(aero, lanes, surface))),
+                    module: frame_module(kernel, aero, lanes, surface, coupled),
+                    wgsl: u(module_wgsl(frame_module(kernel, aero, lanes, surface, coupled))),
                     entry: kernel.entry(),
                     layout: Some(contact_entries(false)),
                     deferred: false,
@@ -691,7 +717,8 @@ impl ExplicitBeamsGpu {
         let (aero, big, lanes) = (layout.aero, layout.big, layout.lanes);
         // Large vehicles get twice the lanes (more loads in flight per step), a
         // small fleet 512 (frame_lanes).
-        let frame_module = Kernel::Frame.module_for(aero, lanes, layout.surface);
+        let coupled = coupling.is_some();
+        let frame_module = frame_module(Kernel::Frame, aero, lanes, layout.surface, coupled);
         let storage = wgpu::BufferUsages::STORAGE;
         let state = storage | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
         let init = |label: &str, b: u32, usage| {
@@ -732,9 +759,9 @@ impl ExplicitBeamsGpu {
             device,
             &buffers,
             (
-                module_wgsl(Kernel::Contact.module_for(aero, lanes, layout.surface)),
-                module_wgsl(Kernel::Solo.module_for(aero, lanes, layout.surface)),
-                module_wgsl(Kernel::ContactBig.module_for(aero, lanes, layout.surface)),
+                module_wgsl(self::frame_module(Kernel::Contact, aero, lanes, layout.surface, coupled)),
+                module_wgsl(self::frame_module(Kernel::Solo, aero, lanes, layout.surface, coupled)),
+                module_wgsl(self::frame_module(Kernel::ContactBig, aero, lanes, layout.surface, coupled)),
             ),
             &acc,
             (layout.status.base, layout.status.cap),
@@ -754,7 +781,7 @@ impl ExplicitBeamsGpu {
             next.clone(),
         ];
         let mut planner = FramePlanner::new(&layout);
-        planner.set_surface_split(surface_split_default());
+        planner.set_surface_split(surface_split_for(coupled));
         if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
             planner.set_sleep_listing(false);
         }
@@ -878,7 +905,7 @@ impl ExplicitBeamsGpu {
             "groups" => Kernel::Contact,
             _ => Kernel::ContactBig,
         };
-        crate::uniformize_workgroup_lanes(module_wgsl(k.module_for(aero, lanes, self.layout.surface)))
+        crate::uniformize_workgroup_lanes(module_wgsl(frame_module(k, aero, lanes, self.layout.surface, self.layout.coupling.is_some())))
     }
 
     /// Diagnostic: run `src` as a contact module ("solo", "groups" or "big") from now on.
@@ -2624,7 +2651,7 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));
     }
-    for (n, w) in crate::EXPLICIT_BEAMS_NOSURF.iter().chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter()) {
+    for (n, w) in crate::EXPLICIT_BEAMS_NOSURF.iter().chain(crate::EXPLICIT_BEAMS_NOCPL.iter()).chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter()) {
         let entry = if n.contains("contact_big") { plan::CONTACT_ENTRY } else { plan::FRAME_ENTRY };
         out.push((n.to_string(), entry, u(w)));
     }

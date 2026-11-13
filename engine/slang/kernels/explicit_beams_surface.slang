@@ -112,11 +112,21 @@ uint surfBodyBase() { return gMisc[coupleRec() + 1u].z; }
 
 // Vehicle v's proxy shapes the surface pass meets this window (0 without the coupling's
 // surface room, the coupling off or no proxies).
+//
+// A module built with EB_NO_COUPLING (the host picks it for an upload without the
+// World's coupling: no proxy can exist, this would return 0 for every vehicle) has
+// none of the proxy paths: the per-element proxy loops, the casts' gathering and the
+// pair path are compiled out, and the browser compiles the kernel without them (most
+// of the surface pass's size). What runs is the same code either way.
+#ifdef EB_NO_COUPLING
+uint surfProxies(uint v) { return 0u; }
+#else
 uint surfProxies(uint v)
 {
     if (surfBodyBase() == 0u || !cplHas(v)) return 0u;
     return cplVeh(v).y;
 }
+#endif
 
 // Proxy shape k of vehicle v at its body's pose now, its body slot j: the strict pose
 // (fqPose), a box's axes, a capsule's ends along its local y, a hull's records.
@@ -554,9 +564,11 @@ void surfTriangle(uint v, uint gt, float3 origin, float r, uint boxOff, uint box
     }
     // Proxy records are vehicle-local (relative to the origin): so are the positions
     // tested against them.
+#ifndef EB_NO_COUPLING
     if (proxies != 0u)
         found = surfTriangleProxies(v, tn, nf3(gNodes[tn.x * 3u].xyz), nf3(gNodes[tn.y * 3u].xyz),
                                     nf3(gNodes[tn.z * 3u].xyz), r, boxCount, proxies, parity, apply, mask, found);
+#endif
     surfMaskOut(mk, apply, found);
 }
 
@@ -682,7 +694,9 @@ void surfSegment(uint v, uint gj, uint mk, float3 origin, float r, uint boxOff, 
             if (two) surfApply(v, uint4(bn.x, bn.y, bn.x, 0u), w2, nn, g, r);
         }
     }
+#ifndef EB_NO_COUPLING
     if (proxies != 0u) found = surfSegmentProxies(v, bn, l0, l1, r, boxCount, proxies, parity, apply, mask, found);
+#endif
     surfMaskOut(mk, apply, found);
 }
 
@@ -771,7 +785,9 @@ void surfPoint(uint v, uint gi, uint mk, float3 origin, float r, uint boxOff, ui
         else
             surfApply(v, uint4(gi, gi, gi, 0u), float3(1.0, 0.0, 0.0), nn, g, r);
     }
+#ifndef EB_NO_COUPLING
     if (proxies != 0u) found = surfPointProxies(v, gi, xl, r, boxCount, proxies, parity, apply, mask, found);
+#endif
     surfMaskOut(mk, apply, found);
 }
 
@@ -1157,6 +1173,12 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
     uint4 sr = gStatic[gP.surfSeg + v];
     uint segCount = mine ? sr.y : 0u;
     uint proxies = mine ? surfProxies(v) : 0u;
+#ifdef EB_NO_COUPLING
+    // No proxies in this module's uploads: no bodies, no casts, no pair path.
+    uint bodies = 0u;
+    bool anyFast = false;
+    bool pairs = false;
+#else
     uint bodies = proxies != 0u ? cplVeh(v).x : 0u;
     bool anyFast = proxies != 0u && surfAnyFast(v, proxies);
     // The pair path when the vehicle meets proxies and has its region (measurement:
@@ -1164,6 +1186,7 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
     bool pairs = proxies != 0u && surfPairsOn();
 #ifdef EB_ABLATE
     if ((gP.ablate & 1073741824u) != 0u) pairs = false;
+#endif
 #endif
     // Barriers sit under `if (pairs)`: lane 0's flag through workgroup memory
     // (gsUniformSurf, read as workgroupUniformLoad), uniform for Chrome.
@@ -1177,6 +1200,7 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
         gBeams[gP.surfSnap + gi] = float4(sadd3(f, accForce(gi)), 0.0);
         gAcc[gP.surfSplit + gi].store(0);
     }
+#ifndef EB_NO_COUPLING
     for (uint j = lane, jStop = EB_END(j, bodies, LANES); j < jStop; j += LANES)
     {
         gAcc[surfBodyBase() + v * cplB() + j].store(0);
@@ -1192,11 +1216,13 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
             surfGatherPoint(v, r0.x + i, origin, r, proxies, parity);
     }
     if (pairs) surfPairBounds(v, lane, proxies);
+#endif
     sync();
     // The proxies the per-element loops meet: every one, the fast ones only (the top
     // bit) beside the pairs, or none.
     uint px = proxies;
     uint listed = 0u;
+#ifndef EB_NO_COUPLING
     if (pairs)
     {
         surfPairCull(v, lane, origin, r, r0, r1, sr, r2.z, parity, triCount, segCount, nodeCount, proxies);
@@ -1206,6 +1232,7 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
         if (listed <= SURF_PAIR_CAP) px = anyFast ? (proxies | 0x80000000u) : 0u;
         else pairs = false;
     }
+#endif
     // Without static slots nor proxies for them the per-element loops find nothing.
     bool loops = r1.w != 0u || px != 0u;
     // The find (phase 0), the barrier, the apply (phase 1): the same calls per phase as
@@ -1224,6 +1251,7 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
             for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
                 surfPoint(v, r0.x + i, sr.w + i, origin, r, r1.z, r1.w, px, parity, apply);
         }
+#ifndef EB_NO_COUPLING
         if (pairs && !apply)
         {
             for (uint p = lane, pStop = EB_END(p, listed, LANES); p < pStop; p += LANES)
@@ -1243,6 +1271,7 @@ void surfaceStep(uint v, uint lane, uint on, uint parity)
                     surfPairApply(v, p, origin, r, r0, r1, sr);
             }
         }
+#endif
         if (!apply) sync();
     }
     if (lane == 0u && mine) gsHit = 1u;

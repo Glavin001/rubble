@@ -1208,7 +1208,10 @@ impl ExplicitSim {
     /// The stability check of this sim's vehicles (`stability.rs`: read-only; the
     /// page stops stepping when it reports).
     pub fn health(&self) -> crate::stability::VehicleHealth {
-        crate::stability::VehicleHealth::new(&self.device, &self.queue, &self.gpu)
+        let health = crate::stability::VehicleHealth::new(&self.device, &self.queue, &self.gpu);
+        // A pulling rig puts in energy the guard cannot bound: no rebound check.
+        health.set_unbounded(self.pull.is_some());
+        health
     }
 
     /// Steps run since spawn.

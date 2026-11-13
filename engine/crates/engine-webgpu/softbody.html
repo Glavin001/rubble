@@ -2133,7 +2133,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
       // Stopped (an unstable state, a lost device, a failure): nothing more is
       // submitted; the canvas keeps its last frame.
       if (xstop?.stopped || (EXPLICIT && window.__failed)) return;
-      if (EXPLICIT && !manual) xstop?.check(xsim.steps() / XRATE);
+      if (EXPLICIT && !manual) { if (lab?.st.grab) xstop?.disturbed(); xstop?.check(xsim.steps() / XRATE); }
       if (EXPLICIT && !manual && xInFlight >= 2) { frameTrace?.frames.push({ now, skipped: 1 }); requestAnimationFrame(frame); return; }
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
