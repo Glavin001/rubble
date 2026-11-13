@@ -1,0 +1,62 @@
+truck__data__thin_box_plate__origin_fast	identical
+truck__data__thin_box_plate__far_fast	identical
+truck__data__thin_box_plate__origin_exact	DIFFERS	spawn[0]: 0/24 floats differ, max |dp| 0e0 m, sum v^2 2.000000e1 vs main 2.000000e1, other state same	final[1]: 15/24 floats differ, max |dp| 3.6135316e-7 m, sum v^2 3.528281e1 vs main 3.528280e1, other state differs
+truck__explicit_aero__block__origin_fast	identical
+truck__explicit_aero__block__far_fast	identical
+truck__explicit_aero__block__origin_exact	DIFFERS	spawn[0]: 0/30 floats differ, max |dp| 0e0 m, sum v^2 2.500000e1 vs main 2.500000e1, other state same	final[1]: 29/30 floats differ, max |dp| 7.1525574e-7 m, sum v^2 4.410351e1 vs main 4.410351e1, other state differs
+truck__explicit_aero__commands__origin_fast	identical
+truck__explicit_aero__commands__far_fast	identical
+truck__explicit_aero__commands__origin_exact	DIFFERS	spawn[0]: 0/30 floats differ, max |dp| 0e0 m, sum v^2 2.500000e1 vs main 2.500000e1, other state same	final[1]: 21/30 floats differ, max |dp| 5.9604645e-7 m, sum v^2 4.413480e1 vs main 4.413478e1, other state differs
+truck__explicit_beams__order_truck__origin_fast	identical
+truck__explicit_beams__order_truck__far_fast	identical
+truck__explicit_beams__order_truck__origin_exact	DIFFERS	spawn[0]: 0/54 floats differ, max |dp| 0e0 m, sum v^2 4.500000e1 vs main 4.500000e1, other state same	final[1]: 42/54 floats differ, max |dp| 5.9604645e-7 m, sum v^2 7.965365e1 vs main 7.965364e1, other state differs
+truck__explicit_beams__tyre_truck__origin_fast	identical
+truck__explicit_beams__tyre_truck__far_fast	identical
+truck__explicit_beams__tyre_truck__origin_exact	DIFFERS	spawn[0]: 0/96 floats differ, max |dp| 0e0 m, sum v^2 8.000000e1 vs main 8.000000e1, other state same	final[1]: 86/96 floats differ, max |dp| 2.3841858e-7 m, sum v^2 1.336853e2 vs main 1.336852e2, other state differs
+truck__explicit_contact__contact_truck__origin_fast	identical
+truck__explicit_contact__contact_truck__far_fast	identical
+truck__explicit_contact__contact_truck__origin_exact	DIFFERS	spawn[0]: 0/114 floats differ, max |dp| 0e0 m, sum v^2 9.500000e1 vs main 9.500000e1, other state same	final[1]: 102/114 floats differ, max |dp| 7.1525574e-7 m, sum v^2 1.585627e2 vs main 1.585626e2, other state differs
+truck__explicit_triggers__sections__origin_fast	identical
+truck__explicit_triggers__sections__far_fast	identical
+truck__explicit_triggers__sections__origin_exact	DIFFERS	spawn[0]: 0/30 floats differ, max |dp| 0e0 m, sum v^2 2.500000e1 vs main 2.500000e1, other state same	final[1]: 12/30 floats differ, max |dp| 4.7683716e-7 m, sum v^2 4.410352e1 vs main 4.410351e1, other state differs
+truck__rig__meshwheels__origin_fast	identical
+truck__rig__meshwheels__far_fast	identical
+truck__rig__meshwheels__origin_exact	DIFFERS	spawn[0]: 0/72 floats differ, max |dp| 0e0 m, sum v^2 6.000000e1 vs main 6.000000e1, other state same	final[1]: 70/72 floats differ, max |dp| 3.7252903e-7 m, sum v^2 1.073564e2 vs main 1.073562e2, other state differs
+truck__rig__meshwheels2__origin_fast	identical
+truck__rig__meshwheels2__far_fast	identical
+truck__rig__meshwheels2__origin_exact	DIFFERS	spawn[0]: 0/72 floats differ, max |dp| 0e0 m, sum v^2 6.000000e1 vs main 6.000000e1, other state same	final[1]: 72/72 floats differ, max |dp| 7.2430456e-1 m, sum v^2 2.360266e4 vs main 2.406276e4, other state differs
+truck__rig__shock2__origin_fast	identical
+truck__rig__shock2__far_fast	identical
+truck__rig__shock2__origin_exact	identical
+truck__rig__slide_free__origin_fast	identical
+truck__rig__slide_free__far_fast	DIFFERS	spawn[0]: 0/30 floats differ, max |dp| 0e0 m, sum v^2 5.000000e0 vs main 5.000000e0, other state same	final[1]: 6/30 floats differ, max |dp| 7.5727003e-6 m, sum v^2 4.800175e0 vs main 4.800582e0, other state same
+truck__rig__slide_free__origin_exact	identical
+truck__rig__slide_two_on_one_rail__origin_fast	identical
+truck__rig__slide_two_on_one_rail__far_fast	DIFFERS	spawn[0]: 0/36 floats differ, max |dp| 0e0 m, sum v^2 1.000000e1 vs main 1.000000e1, other state same	final[1]: 11/36 floats differ, max |dp| 6.1707105e-6 m, sum v^2 9.589395e0 vs main 9.589320e0, other state same
+truck__rig__slide_two_on_one_rail__origin_exact	identical
+truck__rig__triggers__origin_fast	identical
+truck__rig__triggers__far_fast	identical
+truck__rig__triggers__origin_exact	DIFFERS	spawn[0]: 0/24 floats differ, max |dp| 0e0 m, sum v^2 1.000000e1 vs main 1.000000e1, other state same	final[1]: 12/24 floats differ, max |dp| 5.9604645e-7 m, sum v^2 1.434253e1 vs main 1.434252e1, other state differs
+truck__rig__wheels__origin_fast	identical
+truck__rig__wheels__far_fast	identical
+truck__rig__wheels__origin_exact	DIFFERS	spawn[0]: 0/72 floats differ, max |dp| 0e0 m, sum v^2 6.000000e1 vs main 6.000000e1, other state same	final[1]: 70/72 floats differ, max |dp| 3.7252903e-7 m, sum v^2 1.073564e2 vs main 1.073562e2, other state differs
+sedan_drop_rest__origin_fast	identical
+sedan_drive__origin_fast	identical
+sedan_wall__origin_fast	identical
+sedan_pole__origin_fast	identical
+sedan_drop_rest__far_fast	identical
+sedan_drive__far_fast	identical
+sedan_wall__far_fast	identical
+sedan_pole__far_fast	identical
+sedan_drop_rest__origin_exact	DIFFERS	spawn[0]: 0/2202 floats differ, max |dp| 0e0 m, sum v^2 0.000000e0 vs main 0.000000e0, other state same	final[1]: 2202/2202 floats differ, max |dp| 4.5145876e-3 m, sum v^2 8.264936e1 vs main 8.209834e1, other state differs
+sedan_drive__origin_exact	DIFFERS	spawn[0]: 0/2202 floats differ, max |dp| 0e0 m, sum v^2 5.284800e4 vs main 5.284800e4, other state same	final[1]: 1820/2202 floats differ, max |dp| 9.536743e-7 m, sum v^2 4.214066e4 vs main 4.214067e4, other state differs
+sedan_wall__origin_exact	DIFFERS	spawn[0]: 0/2202 floats differ, max |dp| 0e0 m, sum v^2 8.257500e4 vs main 8.257500e4, other state same	final[1]: 2197/2202 floats differ, max |dp| 1.09910965e-4 m, sum v^2 1.803172e3 vs main 1.803137e3, other state differs
+sedan_pole__origin_exact	DIFFERS	spawn[0]: 0/2202 floats differ, max |dp| 0e0 m, sum v^2 8.257500e4 vs main 8.257500e4, other state same	final[1]: 2181/2202 floats differ, max |dp| 4.7683716e-6 m, sum v^2 2.357520e4 vs main 2.357527e4, other state differs
+hires_truck_drop__origin_fast	identical
+hires_truck_drop__far_fast	identical
+pair_head_on__origin_fast	identical
+pair_head_on__far_fast	DIFFERS	spawn[0]: 2202/2202 floats differ, max |dp| 2.9487103e-2 m, sum v^2 8.500720e2 vs main 8.578567e2, other state differs	final[1]: 2202/2202 floats differ, max |dp| 1.15963936e-1 m, sum v^2 1.178714e3 vs main 1.251954e3, other state differs
+pair_head_on__origin_exact	DIFFERS	spawn[0]: 2202/2202 floats differ, max |dp| 2.0899147e-2 m, sum v^2 7.898251e2 vs main 8.331676e2, other state differs	final[1]: 2202/2202 floats differ, max |dp| 4.4047654e-2 m, sum v^2 1.193061e3 vs main 1.198516e3, other state differs
+jbeam_native__latched_box	DIFFERS	spawn[0]: 0/102 floats differ, max |dp| 0e0 m, sum v^2 1.700000e1 vs main 1.700000e1, other state differs	final[1]: 102/102 floats differ, max |dp| 2.0793676e-2 m, sum v^2 1.235429e0 vs main 7.232152e-1, other state differs
+jbeam_native__hires	DIFFERS	spawn[0]: 0/6660 floats differ, max |dp| 0e0 m, sum v^2 0.000000e0 vs main 0.000000e0, other state differs	final[1]: 6616/6660 floats differ, max |dp| 2.1276611e-1 m, sum v^2 2.116169e3 vs main 6.128268e6, other state differs
+jbeam_as_truck__hires	DIFFERS	spawn[0]: 0/6660 floats differ, max |dp| 0e0 m, sum v^2 0.000000e0 vs main 0.000000e0, other state same	final[1]: 6623/6660 floats differ, max |dp| 1.477744e1 m, sum v^2 4.522986e7 vs main 1.790576e9, other state differs

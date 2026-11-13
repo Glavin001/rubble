@@ -327,6 +327,21 @@ fn sedans_head_on_and_t_bone_bitwise() {
     compare_steps("sedan T-bone", &pair(&s, o, 0.85 * SPEED, 1.0, true), &[(2, STEPS), (300, 1), (40, STEPS)], true);
 }
 
+/// As `sedans_head_on_and_t_bone_bitwise` was on main (30ab0e1d): the same two crashes
+/// 100 m from the World origin, against the frozen main-era reference. The branch moved
+/// that test to the origin because vehicle contact now runs in the owner's frame, which
+/// is the reference's arithmetic only while no vehicle has re-based (PR #105 regression
+/// audit, S6). Kept so the difference from main stays measurable: run it with
+/// `--ignored`; when it passes, vehicle contact away from the origin equals main again.
+#[test]
+#[ignore = "regression vs main: vehicle contact 100 m from the World origin is not bit-identical to the frozen main-era reference (owner-frame contact); expected to fail until that is decided"]
+fn main_sedans_head_on_and_t_bone_at_100_m_bitwise() {
+    let s = repo_sedan();
+    let o = Vec3::new(100.0, 0.0, 100.0);
+    compare_steps("sedan head-on at 100 m (main)", &pair(&s, o, 0.85 * SPEED, 1.5, false), &[(2, STEPS), (300, 1), (40, STEPS)], true);
+    compare_steps("sedan T-bone at 100 m (main)", &pair(&s, o, 0.85 * SPEED, 1.0, true), &[(2, STEPS), (300, 1), (40, STEPS)], true);
+}
+
 fn real_single(rel: &str, name: &str) {
     let Some(t) = ror(rel) else { return };
     let o = Vec3::new(100.0, 0.0, 100.0);
