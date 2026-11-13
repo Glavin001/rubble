@@ -657,26 +657,84 @@ pub fn hold_gpu_lock() {
     use std::sync::OnceLock;
     static LOCK: OnceLock<Option<std::fs::File>> = OnceLock::new();
     LOCK.get_or_init(|| {
-        let path = match std::env::var("RUBBLE_GPU_LOCK") {
-            Ok(v) if v == "0" => return None,
-            Ok(v) if !v.is_empty() => std::path::PathBuf::from(v),
-            _ => std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".rubble/gpu.lock"),
-        };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .ok()?;
-        if file.try_lock().is_err() {
-            eprintln!("rubble: waiting for the GPU lock {} (another GPU job is running)", path.display());
-            file.lock().ok()?;
-        }
-        Some(file)
+        let env = std::env::var("RUBBLE_GPU_LOCK").ok();
+        let home = std::env::var("HOME").ok();
+        take_gpu_lock(&device_gpu_lock_path(env.as_deref(), home.as_deref())?)
     });
+}
+
+/// The lock file a process takes before its first default device, from the value of
+/// `RUBBLE_GPU_LOCK` and of `HOME`; `None` is no lock.
+pub fn device_gpu_lock_path(env: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
+    match env {
+        Some("0") => None,
+        Some(v) if !v.is_empty() => Some(std::path::PathBuf::from(v)),
+        _ => Some(std::path::PathBuf::from(home?).join(".rubble/gpu.lock")),
+    }
+}
+
+/// Opens `path` and takes an exclusive lock on it, waiting for any holder.
+fn take_gpu_lock(path: &std::path::Path) -> Option<std::fs::File> {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .ok()?;
+    if file.try_lock().is_err() {
+        eprintln!("rubble: waiting for the GPU lock {} (another GPU job is running)", path.display());
+        file.lock().ok()?;
+    }
+    Some(file)
+}
+
+#[cfg(test)]
+mod gpu_lock_tests {
+    use super::*;
+
+    /// A library user (a game, the FFI, the Unreal plugin) sets nothing: making a
+    /// device takes no lock, as on main, so two processes run side by side.
+    #[test]
+    fn a_default_device_takes_no_lock_unless_asked() {
+        assert_eq!(device_gpu_lock_path(None, Some("/home/u")), None);
+        assert_eq!(device_gpu_lock_path(Some(""), Some("/home/u")), None);
+        assert_eq!(device_gpu_lock_path(Some("0"), Some("/home/u")), None);
+    }
+
+    /// `RUBBLE_GPU_LOCK=1` (the repo's own cargo runs) is the machine-wide lock; any
+    /// other value is the lock file's path.
+    #[test]
+    fn the_lock_is_opt_in_by_env() {
+        let home = std::path::PathBuf::from("/home/u/.rubble/gpu.lock");
+        assert_eq!(device_gpu_lock_path(Some("1"), Some("/home/u")), Some(home));
+        assert_eq!(device_gpu_lock_path(Some("1"), None), None);
+        assert_eq!(
+            device_gpu_lock_path(Some("/tmp/x.lock"), None),
+            Some(std::path::PathBuf::from("/tmp/x.lock"))
+        );
+    }
+
+    /// With the lock file held elsewhere, the unset-env decision does not wait on it.
+    #[test]
+    fn an_unset_env_does_not_wait_on_a_held_lock() {
+        let dir = std::env::temp_dir().join(format!("rubble-gpu-lock-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gpu.lock");
+        let held = take_gpu_lock(&path).expect("the test's own lock");
+        // A second open of a held file would block in `take_gpu_lock`.
+        let again = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        assert!(again.try_lock().is_err(), "the lock is exclusive");
+        let home = dir.to_str().unwrap();
+        // What `default_device_with` does with nothing set, with HOME's lock file held.
+        std::fs::create_dir_all(dir.join(".rubble")).unwrap();
+        let _held_home = take_gpu_lock(&dir.join(".rubble/gpu.lock")).unwrap();
+        assert_eq!(device_gpu_lock_path(None, Some(home)), None);
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// A high-performance adapter's device with its full limits.
