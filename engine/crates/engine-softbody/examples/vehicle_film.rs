@@ -71,7 +71,13 @@ fn visual(l: &Loaded, desc: &SoftVehicleDesc, sim: &ExplicitBeams) -> Result<Sho
 }
 
 fn spawn(desc: &SoftVehicleDesc, at: Vec3, vel: Vec3) -> Result<ExplicitBeams, String> {
-    let lift = 0.02 - desc.nodes.iter().map(|n| n.position[1]).fold(f32::MAX, f32::min);
+    // The lowest point: a node, or a raycast wheel's tyre (it has no nodes).
+    let low = desc.nodes.iter().map(|n| n.position[1]).fold(f32::MAX, f32::min);
+    let low = desc.wheels.iter().fold(low, |m, w| {
+        let y = |i: u32| desc.nodes[i as usize].position[1];
+        m.min(0.5 * (y(w.node1) + y(w.node2)) - w.radius)
+    });
+    let lift = 0.02 - low;
     let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(
         desc,
         at + Vec3::Y * lift,
@@ -164,6 +170,31 @@ fn main() -> Result<(), String> {
             sims.push(s);
             descs.push(d.clone());
             (0.004, 160, "side")
+        }
+        "polefront" => {
+            // Frontal, a 254 mm pole on the centre line, 50 km/h.
+            let v = 50.0 / 3.6;
+            let mut s = spawn(d, Vec3::ZERO, Vec3::Z * v)?;
+            let centre = Vec3::new(0.0, 1.0, zmax + 0.05 + 0.127);
+            s.shapes.push(StaticShape::cylinder(centre, 0.127, 2.0));
+            obstacles.push(json!({"cylinder": {"centre": centre.to_array(), "radius": 0.127, "half_height": 2.0}}));
+            sims.push(s);
+            descs.push(d.clone());
+            (0.004, 110, "side")
+        }
+        "offset" => {
+            // A rigid barrier over 40 % of the car's width (the driver's
+            // side, +x), 64 km/h.
+            let v = 64.0 / 3.6;
+            let mut s = spawn(d, Vec3::ZERO, Vec3::Z * v)?;
+            let wall_z = zmax + 0.05;
+            let edge = half_w - 0.4 * 2.0 * half_w;
+            let (c, h) = (Vec3::new(edge + 1.0, 1.0, wall_z + 0.5), Vec3::new(1.0, 1.0, 0.5));
+            s.boxes.push(StaticBox::centered(c, h));
+            obstacles.push(json!({"box": {"centre": c.to_array(), "half": h.to_array()}}));
+            sims.push(s);
+            descs.push(d.clone());
+            (0.004, 110, "side")
         }
         "pole" => {
             // Sideways: the car turned a quarter so its left side leads along +Z.
