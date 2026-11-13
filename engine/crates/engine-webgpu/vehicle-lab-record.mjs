@@ -147,7 +147,7 @@ if (PROBE) {
     if (opt('--eval', null)) console.log(await evaluate(readFileSync(opt('--eval'), 'utf8')));
     for (let s = 1; s <= Number(opt('--secs', '10')); s++) {
       await new Promise((r) => setTimeout(r, 1000));
-      console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, bodies, readsSkipped, gpu }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), bodies, readsSkipped,
+      console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, bodies, readsSkipped, gpu, frameMs }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), frameP50: +frameMs.p50.toFixed(1), frameP95: +frameMs.p95.toFixed(1), bodies, readsSkipped,
         gpu: gpu && gpu.total.length ? { total: +gpu.split.total.toFixed(2), rigid: +gpu.split.rigid.toFixed(2), vehicle: +gpu.split.vehicle.toFixed(2) } : null }))(window.__state()))`)}`);
     }
     await grabTo(join(OUT, 'stills', `probe-${name}.jpg`), 85);

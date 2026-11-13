@@ -1414,8 +1414,8 @@ impl Bench {
         }
     }
 
-    /// The car now, for a camera: centre (world), velocity, heading, speed, peak node
-    /// depth, readings taken.
+    /// The car now, for a camera: centre (world), velocity, heading, speed, the reading's
+    /// World time (s), readings taken.
     pub fn pose(&self) -> [f64; 12] {
         let c = &self.car;
         [
@@ -1429,7 +1429,7 @@ impl Bench {
             c.heading.y.into(),
             c.heading.z.into(),
             c.speed.into(),
-            c.node_depth.into(),
+            c.t,
             c.readings as f64,
         ]
     }

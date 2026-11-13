@@ -38,7 +38,9 @@
     #caption { left: 22px; bottom: 22px; padding: 10px 16px; display: none; max-width: 40rem; }
     #caption b { font-size: 19px; font-weight: 750; display: block; }
     #caption span { color: #c3cbd9; font-size: 13.5px; }
-    #cross { position: fixed; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; pointer-events: none; display: none; border: 1.5px solid rgba(255, 255, 255, 0.7); border-radius: 50%; }
+    #cross { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; display: none; border: 2px solid rgba(255, 209, 102, 0.95); border-radius: 50%; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
+    #cross::after { content: ''; position: absolute; left: 9px; top: 9px; width: 4px; height: 4px; background: rgba(255, 209, 102, 0.95); border-radius: 50%; }
+    body.shoot canvas#c { cursor: crosshair; }
     body.shoot #cross { display: block; }
     body.clean #controls, body.clean #about, body.clean #status, body.clean #cross { display: none; }
     body.clean #caption { display: block; }
@@ -116,6 +118,7 @@
       <div class="row"><span class="muted">GPU timing</span><select id="timing" data-opt="build"><option value="off">off</option><option value="step">per step</option><option value="phases">rigid · vehicle</option></select>
         <span class="muted">coupling room</span><input type="number" id="shapes" data-opt="build" value="256" min="8" max="1024" step="8" />
         <label><input type="checkbox" id="clean" data-opt="live" /> clean layout</label></div>
+      <div class="row"><span class="muted">Measurements</span><select id="monitor" data-opt="live"><option value="1">every step (exact shot and plate impulses)</option><option value="4">15 times a second</option><option value="0">off (no readback)</option></select></div>
       <div class="note">These five and the car rebuild the simulation in place (its kernels differ; no page reload). Wheels: raycast (the lab's cars drive on raycast wheels and draw their own). Everything else applies as it runs.</div>
       <h2>Cutaway</h2>
       <div class="row" id="cutaway"></div>
@@ -137,6 +140,7 @@
   <div id="slowTag" class="panel"></div>
   <div id="busy" class="panel"></div>
   <div id="cross"></div>
+  <svg id="tracer" style="position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;opacity:0"></svg>
   <div id="caption" class="panel"><b id="capTitle">Vehicle Lab</b><span id="capSub"></span></div>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
@@ -268,15 +272,16 @@
       let entry;
       if (kind === 'sedan') {
         progress('building the sedan\'s body…'); await new Promise((r) => setTimeout(r));
-        const visuals = PAINTS.map((paint) => { const c = showcaseCar({ style: 'sedan', resolution: 'low', paint, wheels: 'raycast' }); c.visual.lod = [c.visualLod, c.visualFar]; return c; });
-        entry = { kind, name: 'soft-body sedan', visuals, vehicle: { truck: visuals[0].truck }, mod: null };
+        const make = (paint) => { const c = showcaseCar({ style: 'sedan', resolution: 'low', paint, wheels: 'raycast' }); c.visual.lod = [c.visualLod, c.visualFar]; return c; };
+        const first = make(PAINTS[0]);
+        entry = { kind, name: 'soft-body sedan', visuals: [first], make, vehicle: { truck: first.truck }, mod: null };
       } else {
         const m = MODS[kind];
         progress(`downloading the ${m.name}…`);
         const mod = await loadMod(m.base, { pc: m.pc });
         progress(`binding the ${m.name}'s body to its nodes…`); await new Promise((r) => setTimeout(r));
-        const visuals = PAINTS.map((paint) => modVisual(mod, { native: true, raycast: true, paint }));
-        entry = { kind, name: m.name, visuals, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: (mod.glb?.length || 0) + (mod.skin?.length || 0) };
+        const make = (paint) => modVisual(mod, { native: true, raycast: true, paint });
+        entry = { kind, name: m.name, visuals: [make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: (mod.glb?.length || 0) + (mod.skin?.length || 0) };
       }
       entry.loadMs = performance.now() - t;
       carCache.set(kind, entry);
@@ -305,6 +310,8 @@
       try {
         const car = await carOf(get('car'));
         const n = get('parked') ? 2 : 1;
+        // The second car's paint: built when first asked for (kept, like the first).
+        if (n > 1 && car.visuals.length < 2) { progress(`building the second ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(car.make(PAINTS[1])); }
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
@@ -318,7 +325,7 @@
         const { world, lab, materials } = await createVehicleLab(spec);
         try { old?.cars.destroy(); old?.lab.free(); old?.world.free(); } catch (e) { console.warn(e); }
         const device = world.device();
-        device.lost.then((i) => { if (W?.device === device) fail('device lost: ' + i.message); });
+        device.lost.then((i) => { if (W?.device === device) lost(i.message); });
         device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
         // The ground slab (the World's first collider) is left to the renderer's ground.
         const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, firstCollider: 1, sphereCols: 2048 });
@@ -358,6 +365,15 @@
         progress('');
         window.__ready = true;
       } catch (e) { progress(''); fail(e); } finally { building = false; if (buildAgain) { buildAgain = false; build(); } }
+    }
+    // The GPU device was lost (a driver reset, the GPU process restarted, memory): the
+    // simulation is gone with it. Say so, and offer the rebuild (the parsed car is kept).
+    function lost(message) {
+      W = null; window.__lost = message;
+      errEl.textContent = `The GPU device was lost (${message || 'no reason given'}). `;
+      const b = document.createElement('button'); b.textContent = 'Rebuild'; b.onclick = () => { errEl.textContent = ''; window.__failed = null; build(); };
+      errEl.append(b);
+      console.warn('device lost: ' + message);
     }
     const without = (w, v) => {
       if (!w.hidden.size || !v?.material) return v;
@@ -412,7 +428,8 @@
       enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), cOff, slot.buf, nSize + oSize, cSize);
       if (wantBeams) enc.copyBufferToBuffer(w.world.explicitBeamsBuffer(), bOff, slot.buf, nSize + oSize + cSize, bSize);
       return async () => {
-        await slot.buf.mapAsync(GPUMapMode.READ);
+        // (A map that fails because its world was rebuilt or its device lost is not an error.)
+        try { await slot.buf.mapAsync(GPUMapMode.READ); } catch (e) { slot.busy = false; if (W === w) console.warn(e); return; }
         try {
           // (A reading taken before a restart is not the new run's.)
           if (W === w && !slot.stale) {
@@ -428,8 +445,28 @@
     const cmd = (c) => { if (!W) return null; try { return W.lab.command(W.world, c); } catch (e) { warn(errorText(e)); return null; } };
     const shotSpec = () => ({ shape: get('shape'), size: [get('bx'), get('by'), get('bz')], radius: get('radius'), length: get('length'), material: get('material'),
       ...(get('mass') ? { mass: get('mass') } : {}), speed: get('speed'), spinRate: get('spin'), count: Math.max(1, get('burst')), interval: 0.12, axis: get('cylAxis') });
-    function fire(origin, dir) { cmd({ fire: { ...shotSpec(), origin, dir } }); canvas.focus(); }
-    $('fire').onclick = () => { const d = norm3(sub3(cam.at, cam.eye)); fire(add3(cam.eye, mul3(d, 1.2)), d); };
+    // A shot along the view ray `d` through screen point (sx, sy): it leaves the launcher
+    // (below the camera, so it is seen flying) toward the ray's point at the car's distance.
+    function fire(d, sx, sy) {
+      if (!W) return;
+      const reach = Math.max(2, Math.hypot(...sub3(cam.target, cam.eye)));
+      const aim = add3(cam.eye, mul3(d, reach));
+      const right = norm3(cross3(d, [0, 1, 0])), up = cross3(right, d);
+      const muzzle = add3(cam.eye, add3(mul3(d, 1.6), mul3(up, -0.45)));
+      const r = cmd({ fire: { ...shotSpec(), origin: muzzle, dir: norm3(sub3(aim, muzzle)) } });
+      tracer(sx, sy, !!r);
+      hud();
+      canvas.focus();
+    }
+    const tracerEl = $('tracer');
+    function tracer(sx, sy, ok) {
+      const r = canvas.getBoundingClientRect();
+      tracerEl.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
+      tracerEl.innerHTML = `<line x1="${r.width / 2}" y1="${r.height}" x2="${sx}" y2="${sy}" stroke="${ok ? '#ffd166' : '#ff6b6b'}" stroke-width="2.5" stroke-dasharray="10 7"/><circle cx="${sx}" cy="${sy}" r="13" fill="none" stroke="${ok ? '#ffd166' : '#ff6b6b'}" stroke-width="2.5"/>`;
+      tracerEl.style.transition = 'none'; tracerEl.style.opacity = '1';
+      requestAnimationFrame(() => { tracerEl.style.transition = 'opacity 0.7s'; tracerEl.style.opacity = '0'; });
+    }
+    $('fire').onclick = () => { const r = canvas.getBoundingClientRect(); fire(norm3(sub3(cam.at, cam.eye)), r.width / 2, r.height / 2); };
     $('clearShots').onclick = () => cmd({ clear: 'shots' });
     $('pstart').onclick = () => cmd({ plates: { axis: get('axis'), speed: get('pspeed'), gap: get('gap') } });
     $('ppause').onclick = () => { const held = $('ppause').textContent === 'Resume'; cmd({ plateControl: held ? 'resume' : 'pause' }); $('ppause').textContent = held ? 'Pause' : 'Resume'; };
@@ -508,38 +545,42 @@
     let pose = { c: [0, 0.6, 0], v: [0, 0, 0], h: [0, 0, 1], speed: 0 };
     function readPose() {
       const p = W.lab.pose();
-      if (p[11] > 0 && p.every(Number.isFinite)) pose = { c: [p[0], p[1], p[2]], v: [p[3], p[4], p[5]], h: [p[6], p[7], p[8]], speed: p[9] };
+      if (p[11] > 0 && p.every(Number.isFinite)) pose = { c: [p[0], p[1], p[2]], v: [p[3], p[4], p[5]], h: [p[6], p[7], p[8]], speed: p[9], t: p[10] };
     }
     const cam = { eye: [6, 3, -7], at: [0, 0.6, 0], init: false, target: [0, 0.6, 0] };
     const orbit = { yaw: 0.9, pitch: 0.3, dist: 8.5, auto: RECORD ? 0.35 : 0 };
     let chaseHead = [0, 0, 1];
     let drag = null;
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-    canvas.addEventListener('pointerdown', (e) => { canvas.focus(); drag = { x: e.clientX, y: e.clientY, moved: 0, button: e.button }; canvas.setPointerCapture(e.pointerId); });
+    canvas.addEventListener('pointerdown', (e) => { canvas.focus(); drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: 0, button: e.button }; try { canvas.setPointerCapture(e.pointerId); } catch {} });
     canvas.addEventListener('pointerup', (e) => {
       // A click without a drag in Shoot: fire along the ray through the pixel.
-      if (drag && drag.moved < 5 && drag.button === 0 && mode === 'shoot') {
+      if (drag && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 8 && drag.button === 0 && mode === 'shoot') {
         const r = canvas.getBoundingClientRect();
         const nx = ((e.clientX - r.left) / r.width) * 2 - 1, ny = 1 - ((e.clientY - r.top) / r.height) * 2;
         const inv = lastInv;
         const un = (z) => { const w = inv[3] * nx + inv[7] * ny + inv[11] * z + inv[15]; return [0, 1, 2].map((k) => (inv[k] * nx + inv[4 + k] * ny + inv[8 + k] * z + inv[12 + k]) / w); };
-        const d = norm3(sub3(un(0.9), un(0.1)));
-        fire(add3(cam.eye, mul3(d, 1.2)), d);
+        fire(norm3(sub3(un(0.9), un(0.1))), e.clientX - r.left, e.clientY - r.top);
       }
       drag = null;
     });
     canvas.addEventListener('pointermove', (e) => {
+      // The reticle follows the pointer in Shoot (a click fires through it).
+      $('cross').style.left = `${e.clientX}px`; $('cross').style.top = `${e.clientY}px`;
       if (!drag) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.x = e.clientX; drag.y = e.clientY; drag.moved += Math.abs(dx) + Math.abs(dy);
-      if (drag.moved < 5) return;
+      if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 8) return;
       if (get('cam') !== 'orbit') { const d = sub3(cam.eye, cam.at); orbit.dist = Math.hypot(...d); orbit.yaw = Math.atan2(d[0], d[2]); orbit.pitch = Math.asin(d[1] / orbit.dist); put('cam', 'orbit'); syncUrl(); }
       orbit.yaw -= dx * 0.005; orbit.pitch = Math.max(-0.2, Math.min(1.5, orbit.pitch + dy * 0.005)); orbit.auto = 0;
     });
     canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = Math.max(2.5, Math.min(120, orbit.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
     let lastInv = new Float32Array(16);
     function updateCamera(lead, wallDt) {
-      const c = add3(pose.c, mul3(pose.v, lead));
+      // The reading is of an earlier step: carried forward by its age in simulated time
+      // (and the frame's lead), so the camera moves with the car drawn, not behind it.
+      const age = Math.max(0, Math.min(0.25, (W.lab.time() - (pose.t ?? W.lab.time())))) + lead;
+      const c = add3(pose.c, mul3(pose.v, age));
       // The target follows the car: tightly, so a tumbling car stays framed.
       cam.target = cam.init ? mix3(cam.target, c, 1 - Math.exp(-wallDt / 0.12)) : c;
       const t = cam.target;
@@ -610,7 +651,8 @@
       env.drawGhosts(pass, world);
       pass.end();
       let finish = null;
-      if (read) {
+      const every = RECORD ? 1 : Number(get('monitor'));
+      if (read && every > 0 && (simSteps % every === 0 || simDt === 0)) {
         const now = performance.now();
         const wantBeams = RECORD ? simSteps % 6 === 0 : now - lastBeamRead > 250;
         finish = readback(w, enc, wantBeams);
@@ -621,6 +663,8 @@
     }
 
     // ---------------------------------------------------------------- HUD
+    const stepHist = [];
+    const pct = (q) => { const a = [...stepHist].sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(q * a.length))] : 0; };
     let fps = 0, frames = 0, fpsAt = performance.now(), simAt = performance.now(), simCount = 0, simRate = 0;
     const gpuSeg = new Map(); let gpuTotal = [];
     const median = (a) => a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : 0;
@@ -675,7 +719,7 @@
         ['mass on the main body', `${nf(100 * c.attachedMass, 1)} %`, c.attachedMass < 0.995],
         ['energy ledger', 'CPU reference only'],
         ['World steps/s', RECORD ? `${Math.round(RATE)} (frame-locked)` : paused ? 'paused' : `${simRate.toFixed(0)} · ${Math.min(100, 100 * rt).toFixed(0)} % real time`, !RECORD && !paused && rt < 0.9],
-        ...(RECORD ? [] : [['FPS', fps.toFixed(0)]]),
+        ...(RECORD ? [] : [['FPS · frame p50 / p95', `${fps.toFixed(0)} · ${pct(0.5).toFixed(1)} / ${pct(0.95).toFixed(1)} ms`]]),
         ...(W.timing !== 'off' && gpuTotal.length ? [['GPU / step', `${g.total.toFixed(2)} ms`]] : []),
         ...(W.timing === 'phases' && gpuTotal.length ? [['  rigid · vehicle', `${g.rigid.toFixed(2)} · ${g.vehicle.toFixed(2)} ms`]] : []),
         ['coupling: shapes (peak)', `${c.coupling.shapes} (${c.coupling.peak[1]}) of ${s.limits.coupling.shapes}`, c.coupling.peak[1] > 0.8 * s.limits.coupling.shapes],
@@ -719,7 +763,7 @@
     window.__set = async (o) => { for (const [k, v] of Object.entries(o)) { if (k === 'mode') setMode(v); else put(k, v); } showOuts(); shapeUi(); syncUrl(); };
     window.__build = () => build();
     window.__gpu = () => ({ total: [...gpuTotal], split: gpuSplit(), segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
-    window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
+    window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95) }, carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
 
     // ---------------------------------------------------------------- loops
     const before = () => { runPageEvents(W.lab.time()); applyDrive(); W.lab.beforeStep(W.world); };
@@ -754,7 +798,7 @@
       };
       hud();
     } else {
-      let lastNow = null, hudAt = 0;
+      let lastNow = null, hudAt = 0, debt = 0;
       function frame(now) {
         requestAnimationFrame(frame);
         const w = W;
@@ -766,7 +810,7 @@
         try {
           const scale = paused ? 0 : slow();
           // (The pacer takes how many times slower than real time.)
-          let owed = scale > 0 ? w.pacer.advance(dt, 1 / scale, 4) : 0;
+          let owed = scale > 0 ? w.pacer.advance(dt, 1 / scale, 4) + debt : 0;
           if (stepOnce) { owed = 1; stepOnce = false; }
           let taken = 0;
           for (let k = 0; k < owed; k++) {
@@ -775,6 +819,10 @@
             w.world.step();
             taken++;
           }
+          // A step the World was not ready for (its last readback still out) is owed to
+          // the next frame, up to three: the run keeps real time at any display rate.
+          debt = Math.min(3, owed - taken);
+          stepHist.push(dt * 1000); if (stepHist.length > 600) stepHist.shift();
           if (taken && restartAt != null) { againMs = performance.now() - restartAt; restartAt = null; }
           simSteps += taken; simCount += taken;
           if (now - simAt > 1000) { simRate = simCount * 1000 / (now - simAt); simCount = 0; simAt = now; }
