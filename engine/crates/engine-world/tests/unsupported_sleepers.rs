@@ -6,11 +6,11 @@
 //! fires on a touch from an awake body misses it, and the piece above hangs. The cases here
 //! are that failure's simplest forms, each stated as what must be true afterwards.
 //!
-//! **All three fail today (2026-11-12) and are ignored until the engine wakes what rested on
-//! a destroyed body:** each sleeper stays exactly where it was, in the air
-//! (`engine/docs/lattice-demo-audit-2026-11-12.md`, "Finding: sleepers left in the air").
+//! `World::destroy_body` wakes the sleeping pile on the body it removes (`sleepers_reaching`).
+//! Not covered here, and still open: a support removed on the GPU (a crushed chunk, a body
+//! past the kill bounds).
 //!
-//!   cargo test --release -p engine-world --test unsupported_sleepers -- --ignored --test-threads=1 --nocapture
+//!   cargo test --release -p engine-world --test unsupported_sleepers -- --test-threads=1 --nocapture
 
 use rubble::*;
 
@@ -72,7 +72,6 @@ fn settle(w: &mut World, bodies: &[BodyId]) {
 /// A cube asleep on a static pedestal; the pedestal is destroyed. The cube comes down to the
 /// ground.
 #[test]
-#[ignore = "fails: a sleeper is left in the air when its support is destroyed"]
 fn a_sleeper_falls_when_its_static_support_is_destroyed() {
     let mut w = world();
     let pedestal = cube(&mut w, HALF, BodyType::Static);
@@ -90,7 +89,6 @@ fn a_sleeper_falls_when_its_static_support_is_destroyed() {
 /// Three cubes stacked and asleep; the bottom one (dynamic, asleep) is destroyed. Both above
 /// come down by its height: the wake-up reaches the one that never touched it.
 #[test]
-#[ignore = "fails: a sleeper is left in the air when its support is destroyed"]
 fn a_sleeping_stack_falls_when_its_bottom_sleeper_is_destroyed() {
     let mut w = world();
     let bottom = cube(&mut w, HALF + 0.01, BodyType::Dynamic);
@@ -109,7 +107,6 @@ fn a_sleeping_stack_falls_when_its_bottom_sleeper_is_destroyed() {
 /// A plank asleep across two static posts; one post is destroyed. The plank cannot stay
 /// level on one post: its free end comes down.
 #[test]
-#[ignore = "fails: a sleeper is left in the air when its support is destroyed"]
 fn a_sleeping_plank_tips_when_one_of_its_two_posts_is_destroyed() {
     let mut w = world();
     let post = |w: &mut World, x: f32| {

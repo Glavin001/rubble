@@ -224,21 +224,33 @@ trapped and left the page's world unusable. The page's Rocket option is disabled
 stop blocking (S5). `rubble::lab`'s `LabAction::BlastRay` works natively
 (`lab_api::a_rocket_breaks_a_blast_loaded_building`).
 
-### Finding: sleepers left in the air
-
-`tests/unsupported_sleepers.rs` (three cases, all failing, ignored so the suite stays green):
-
-| Case | Expected | Measured |
-|---|---|---|
-| A cube asleep on a static pedestal; the pedestal is destroyed (`World::destroy_body`) | falls to 0.5 m | stays at 1.492 m |
-| Three cubes stacked and asleep; the bottom one is destroyed | both above drop by 1 m | stay at 1.489 m and 2.483 m |
-| A plank asleep across two static posts; one post is destroyed | the free end comes down | stays level at 2.092 m |
+### Finding and fix: sleepers left in the air
 
 The engine wakes a sleeper on a touch from an awake body. Removing a support is not a touch,
-so nothing wakes what rested on it. This is the failure the lattice demo documents and fixed
-with explicit rules. Not fixed here: the wake rule is a behaviour change to decide on. The
-likely fix is for `destroy_body` (and a crushed chunk's removal) to wake the bodies whose
-contacts name the removed body, on the GPU from the contact rows it already holds.
+so nothing woke what rested on it. `tests/unsupported_sleepers.rs`, before and after:
+
+| Case | Before | After |
+|---|---|---|
+| A cube asleep on a static pedestal; the pedestal is destroyed (`World::destroy_body`) | stays at 1.492 m | lands at 0.455 m |
+| Three cubes stacked and asleep; the bottom one is destroyed | stay at 1.489 m and 2.483 m | land at 0.459 m and 1.453 m |
+| A plank asleep across two static posts; one post is destroyed | stays level at 2.092 m | tips, centre at 1.169 m |
+
+**Fix (2026-11-12).** `destroy_body` wakes the sleeping pile on the body it removes
+(`World::sleepers_reaching`): the dynamic sleepers whose bounding spheres reach the removed
+body's, and in turn those that reach theirs, from the host's last polled poses (a sleeper's
+pose is exact). This follows what a heightfield edit already does
+(`sleepers_over_height_field`). The pile, not the first layer: waking only the middle cube
+left the top one hanging, because a body that drops away under gravity separates too slowly
+to wake its neighbour by contact. Bodies that only stand near wake too and sleep again.
+
+**Still open.**
+- A support removed on the GPU with no host call: a crushed chunk removed as dust, a body
+  past the kill bounds. Neither goes through `destroy_body`.
+- The general case behind the stack: any sleeper whose supporter wakes and falls away from
+  rest. A hit supporter moves fast enough to wake it by contact; one that only starts to
+  fall does not.
+- The cubes come to rest about 4.5 cm into the ground plane after a 1 m drop (0.455 m for a
+  0.5 m half extent). Seen while checking; not looked into.
 
 ### Pre-existing test failures seen while checking (not from this work)
 
