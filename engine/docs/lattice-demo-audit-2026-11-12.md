@@ -270,6 +270,8 @@ are written awake and, in the case tested, wake what they touch.
 
 ### Pre-existing test failures seen while checking (not from this work)
 
+(Also: the recorded destruction digests are out of date on main, see the quiet gate below.)
+
 - `engine-world` `threshold::cuboid_house_breaks_and_splits_as_in_the_lab` fails the same way
   with these changes set aside: first break at frame 95 in `World` against frame 2 in the lab.
 - Tests that load `fracture/assets/*.glb` fail in a worktree without the LFS files.
@@ -323,3 +325,55 @@ nothing breaking. A frame where anything touches a chunk still pays in full unti
 run over lists of loaded chunks. Both touch `coupling.slang` and `fracture.slang`, whose
 regenerated Metal changes for every kernel in the file, so each needs the full digest guard.
 
+
+### The quiet gate (2026-11-13)
+
+Built: `GpuFracture::encode_frame_merged` (stress-gpu), used by the World for the shared and
+the own fractures. Three one-thread or early-exit kernels decide on the GPU, with nothing
+read back, whether a frame is quiet:
+
+- `fr_quiet` (fracture.slang): no chunk carries a pulse into this frame (the pool half it
+  reads had none claimed), and the sizes of the loads and the threshold breaks;
+- `ingest_any` (coupling.slang): whether any live contact record is a chunk's;
+- `ingest_gate`: the streak of such frames. From the third in a row, the ingest's seven merge
+  passes, `fr_loads` and `fr_breaks` dispatch zero groups (indirect sizes).
+
+**Why it is exact, and why two frames.** With no record and no carried pulse, the merge
+writes zero counts and starts, `fr_loads` writes a zero load and an empty pulse run per live
+chunk, and `fr_breaks` breaks nothing (a bond below zero capacity broke in the first of the
+frames). The pulse pool has two halves, written on alternate frames, so after two such frames
+every word those passes write already holds what they would write. Every other pass (crush,
+load path, blast, strikes, the split's gate) runs as before and reads the same state it would
+have, so the gate needs no exception for them. The host starts the streak over whenever it
+changes what the skipped passes read (chunks or bonds placed or retired, a rebind) or runs a
+frame without the gate. `STRESS_QUIET_GATE=0` runs without it.
+
+**Checked.** `engine-world/tests/quiet_gate.rs` reads back every skipped frame of a small
+city (a drive past sleeping houses, a war, the quiet after it) and counts the words the
+skipped passes would have changed: zero in all 410 skipped frames; the war's frames ran in
+full. `city_scale` gives the same awake and broken counts with the gate on and off (demolish
+35 / 107 and 51 / 80, war 1,017 / 2,329 and 1,058 / 2,312 at K = 64 and 1,024).
+
+The destruction digest guard (`stress-oracle/scripts/destruction_peak.py guard`, 32 scenes)
+gives the same 32 digests on main, on this branch before the gate, and with it (the gate's
+regenerated Metal included). 18 of them differ from the recorded file, on main too: the record
+is out of date there, which is not from this work and is not fixed here.
+
+**Measured** (`drive`, wall median ms, four runs each, gate off / on):
+
+| K | chunks | gate off | gate on |
+|---|---|---|---|
+| 1 | 715 | 1.22 to 1.31 | 1.28 to 1.32 |
+| 64 | 45,760 | 1.56 to 1.64 | 1.51 to 1.68 |
+| 1,024 | 732,160 | 2.74 to 2.81 | 2.01 to 2.08 |
+
+So the idle tax at K = 1,024 over one house is now about 0.75 ms, down from 1.5. `demolish`
+and `war` do not change (5.6 and 9.1 ms): a frame in which anything touches a chunk still pays
+in full, which is what the lists of loaded chunks (S2 proper) are for. Note that a world with
+every body asleep already ran no fracture frame at all; the gate is for the common case of
+something moving that touches no chunk.
+
+**The 2^20 chunk ceiling, met in the browser.** `city.html?k=4096` stopped at house 1,269 with
+a message that named the wrong remedy (`max_bodies`). The limit is the shared fracture's
+(row 10: its scans hold 2^20 chunks, 1,466 of these houses). The message now says so, and
+`CityDef::capacity` refuses a city that cannot fit before a world is made. Lifting it is S7.

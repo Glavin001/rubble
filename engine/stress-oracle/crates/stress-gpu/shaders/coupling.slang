@@ -27,7 +27,7 @@ struct IngestParams
     uint record_count;  // records in the frame (substeps x 2 x max_rows)
     uint max_bodies;    // the engine's body capacity (its previous rows follow)
     float h;            // the substep's duration (s)
-    uint pad;
+    uint gate;          // the quiet gate's first slot in `gate` (`ingest_gate`)
 };
 
 // An engine body (engine-schema `BodyState`, 112 B).
@@ -108,13 +108,17 @@ struct Record
 // Per record slot (in sorted position): the manifold, as a record (point, impulse with
 // closing speed, other).
 [[vk::binding(9, 0)]] RWStructuredBuffer<Record> manifolds;
-// Per chunk: [0, n) record counts, [n, 2n) fill cursors.
+// Per chunk: [0, n) record counts, [n, 2n) fill cursors. Then one word: whether the frame
+// has a chunk's record (`ingest_any` sets it, `ingest_gate` takes it).
 [[vk::binding(10, 0)]] RWStructuredBuffer<Atomic<uint>> counts;
 // Per substep: the engine's contact rows it had (`ingest_rows`); the records of rows past
 // them are stale and not read (`record_live`).
 [[vk::binding(11, 0)]] RWStructuredBuffer<uint> row_counts;
 // Per block of 1024 chunks: its count total, then its first segment start (`ingest_scan`).
 [[vk::binding(12, 0)]] RWStructuredBuffer<uint> scan_blocks;
+// The fracture's indirect sizes (fracture.slang `args`, 3 words a slot): the quiet gate's
+// slots from `params.gate` (`ingest_gate`).
+[[vk::binding(13, 0)]] RWStructuredBuffer<uint> gate;
 
 // Whether record `slot` belongs to a row of its substep (rows past the substep's count are
 // neither written nor read).
@@ -382,4 +386,67 @@ void ingest_merge(uint3 id: SV_DispatchThreadID)
         manifolds[begin + m] = acc;
     }
     sort[n + 1 + k] = count;
+}
+
+// The quiet gate (fracture.rs `encode_frame_merged`): a frame in which no contact row touches
+// a chunk and no chunk carries a pulse, after two such frames, leaves every word the merge,
+// the loads and the threshold's breaks write as it already is (counts, starts and loads of
+// zero, twice over: the pulse pool has two halves). Those passes then dispatch no group.
+//   ingest_any    one thread per record: whether the frame has a chunk's record;
+//   ingest_gate   one thread: the streak of such frames, and the sizes of the passes.
+// Slots from `params.gate`: the fracture's per chunk and per bond (set by `fr_quiet`, zeroed
+// here), the merge's (twice the chunks, the records, the scan's blocks, one, the chunks),
+// then (whether no chunk carries a pulse (`fr_quiet`), the streak, whether this frame is
+// skipped).
+static const uint GATE_CHUNKS = 0;
+static const uint GATE_BONDS = 1;
+static const uint GATE_IG_CLEAR = 2;
+static const uint GATE_IG_RECORDS = 3;
+static const uint GATE_IG_SCAN = 4;
+static const uint GATE_IG_ONE = 5;
+static const uint GATE_IG_CHUNKS = 6;
+static const uint GATE_STATE = 7;
+static const uint GATE_STREAK = 2;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ingest_any(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x >= params.record_count || !record_live(id.x))
+        return;
+    if (records[id.x].ids.w != 0)
+        counts[2 * params.chunk_count].store(1u);
+}
+
+void gate_size(uint slot, uint groups)
+{
+    uint at = 3 * (params.gate + slot);
+    gate[at] = groups;
+    gate[at + 1] = 1;
+    gate[at + 2] = 1;
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void ingest_gate(uint3 id: SV_DispatchThreadID)
+{
+    uint n = params.chunk_count;
+    bool any = counts[2 * n].load() != 0;
+    counts[2 * n].store(0u);
+    uint state = 3 * (params.gate + GATE_STATE);
+    uint streak = gate[state + 1];
+    bool zero = gate[state] != 0 && !any;
+    bool skip = zero && streak >= GATE_STREAK;
+    gate[state + 1] = zero ? min(streak + 1, GATE_STREAK) : 0;
+    gate[state + 2] = skip ? 1 : 0;
+    if (skip)
+    {
+        gate[3 * (params.gate + GATE_CHUNKS)] = 0;
+        gate[3 * (params.gate + GATE_BONDS)] = 0;
+    }
+    gate_size(GATE_IG_CLEAR, skip ? 0 : (2 * n + 63) / 64);
+    gate_size(GATE_IG_RECORDS, skip ? 0 : (params.record_count + 63) / 64);
+    gate_size(GATE_IG_SCAN, skip ? 0 : (n + 1023) / 1024);
+    gate_size(GATE_IG_ONE, skip ? 0 : 1);
+    gate_size(GATE_IG_CHUNKS, skip ? 0 : (n + 63) / 64);
 }

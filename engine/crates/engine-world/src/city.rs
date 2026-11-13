@@ -115,6 +115,14 @@ impl CityDef {
             .ok_or_else(|| anyhow::anyhow!("the city's house has no threshold solver"))?;
         let scene = stress.threshold_scene(1.0, solver.dt)?;
         let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum::<usize>() * k;
+        // A world's threshold destructibles share one fracture, which holds 2^20 chunks:
+        // said here, before a world is made and a thousand houses placed.
+        anyhow::ensure!(
+            chunks <= 1 << 20,
+            "{k} houses are {chunks} chunks; a world's threshold destructibles hold at most {} ({} of these houses)",
+            1u32 << 20,
+            (1usize << 20) / (chunks / k.max(1)).max(1)
+        );
         let one = stress_rubble::capacity_for(&scene);
         let mut c = one.clone();
         c.max_bodies = match self.pool {

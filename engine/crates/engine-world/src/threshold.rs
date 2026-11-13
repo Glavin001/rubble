@@ -693,10 +693,16 @@ mod imp {
             let Some(i) = self.free.iter().position(|r| r.1 >= n) else {
                 let left: u32 = self.free.iter().map(|r| r.1).sum();
                 anyhow::bail!(
-                    "threshold destructibles: {n} more {} do not fit (room for {} in this world, {left} free{}); raise WorldCapacity::max_bodies",
+                    "threshold destructibles: {n} more {} do not fit (room for {} in this world, {left} free{}); {}",
                     self.what,
                     self.room,
-                    if left >= n { ", but not in one range" } else { "" }
+                    if left >= n { ", but not in one range" } else { "" },
+                    // The shared fracture's own ceiling, which no capacity raises.
+                    if self.what == "chunks" && self.room == 1 << 20 {
+                        "a world's threshold destructibles hold at most 2^20 chunks"
+                    } else {
+                        "raise WorldCapacity::max_bodies"
+                    }
                 );
             };
             let at = self.free[i].0;
@@ -2326,6 +2332,16 @@ mod imp {
             Some(sh.fracture.blast()?.solver.impulses())
         }
 
+        /// Diagnostic (waits on the GPU): whether the quiet gate skipped the shared
+        /// fracture's last frame, and how many words its skipped passes would have changed
+        /// (stress-gpu `GpuFracture::quiet_frame`; zero when the skip is exact).
+        #[doc(hidden)]
+        pub fn stress_quiet_frame(&self) -> Option<(bool, usize)> {
+            let sh = self.fracture.shared.as_ref()?;
+            let gpu = self.fracture.gpu.as_ref()?;
+            Some(sh.fracture.quiet_frame(gpu, &sh.ingest))
+        }
+
         /// Whether a fracture runs the in-step contact fracture
         /// (`FractureOptions::contact_fracture`): the rigid step is then encoded with it
         /// ([`Self::step_encode_contact`]).
@@ -2392,8 +2408,9 @@ mod imp {
             let step = self.sim.steps_done();
             if let Some(sh) = self.fracture.shared.as_mut() {
                 sh.ingest.substep(&gpu, enc, &e, offset, 0, dt);
-                sh.ingest.merge(&gpu, enc, &e, 1);
-                sh.fracture.encode_frame(&gpu, enc, step);
+                // The merge and the frame behind the quiet gate: a step in which nothing
+                // touches a chunk dispatches none of their per-chunk and per-bond passes.
+                sh.fracture.encode_frame_merged(&gpu, enc, step, &sh.ingest, &e, 1);
                 sh.stepped = true;
             }
             for o in self
@@ -2404,8 +2421,7 @@ mod imp {
                 .filter_map(|t| t.own.as_mut())
             {
                 o.ingest.substep(&gpu, enc, &e, offset, 0, dt);
-                o.ingest.merge(&gpu, enc, &e, 1);
-                o.fracture.encode_frame(&gpu, enc, step);
+                o.fracture.encode_frame_merged(&gpu, enc, step, &o.ingest, &e, 1);
             }
         }
     }
