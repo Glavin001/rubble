@@ -680,7 +680,7 @@ fn spawn(car: &Car) -> ExplicitBeams {
         (Vec3::MAX, Vec3::MIN),
         |(a, b), p| (a.min(p), b.max(p)),
     );
-    let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let low = engine_softbody::vehicle_compare::lowest_point(&s);
     let mid = 0.5 * (lo + hi);
     for n in &mut s.nodes {
         n.pos.x -= mid.x;

@@ -557,9 +557,13 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
                 hw.iter()
                     .any(|&(a, b)| near(a) || near(b) || near(0.5 * (a + b)))
             } else if name.starts_with("wheel_center_") {
-                d.nodes
+                // (a wheel's axle there, or a hub node)
+                d.wheels
                     .iter()
-                    .any(|n| n.name.starts_with("hub") && near(Vec3::from_array(n.position)))
+                    .any(|w| near(0.5 * (pos(w.node1) + pos(w.node2))))
+                    || d.nodes.iter().any(|n| {
+                        n.name.starts_with("hub") && near(Vec3::from_array(n.position))
+                    })
             } else {
                 continue;
             };

@@ -730,6 +730,7 @@ pub fn build(car: &Car) -> Visual {
                 deform_group: m.deform.clone(),
                 skin: None,
                 pos: None,
+                owner: None,
             },
         ));
     }

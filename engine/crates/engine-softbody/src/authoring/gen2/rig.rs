@@ -400,6 +400,14 @@ pub trait RigInput {
     fn seam_points(&self) -> Option<Vec<(Vec3, Vec3, usize, usize)>> {
         None
     }
+    /// The design's body-in-white and mechanical parts, each defined once
+    /// (`engine_vehiclegen::{structure, mechanical}`), when it has them: the
+    /// rigger then builds the body, the powertrain, the running gear and the
+    /// interior from those definitions ([`super::body2`]) instead of laying
+    /// its own members on the skin.
+    fn definitions(&self) -> Option<super::body2::Defs<'_>> {
+        None
+    }
 }
 
 /// gen3's own input: the Rust render model ([`super::model`]) on its analytic
@@ -497,13 +505,13 @@ pub struct Rig {
 }
 
 impl Rig {
-    fn node(&mut self, name: &str, g: Vec3, part: Part, member: Option<Role>, skin: bool) -> usize {
+    pub(super) fn node(&mut self, name: &str, g: Vec3, part: Part, member: Option<Role>, skin: bool) -> usize {
         let i = self.car.node(name, self.to_jbeam(g), part);
         self.member.push(member);
         self.skin.push(skin);
         i
     }
-    fn g(&self, i: usize) -> Vec3 {
+    pub(super) fn g(&self, i: usize) -> Vec3 {
         self.to_gltf(self.car.p(i))
     }
     /// glTF (model) to JBeam (car) coordinates, about this car's front axle.
@@ -515,7 +523,7 @@ impl Rig {
         Vec3::new(j.x, j.z, self.axle_f - j.y)
     }
     /// Nodes of `part` (structural) nearest a glTF point.
-    fn nearest(&self, part: Part, g: Vec3, k: usize, filter: impl Fn(usize) -> bool) -> Vec<usize> {
+    pub(super) fn nearest(&self, part: Part, g: Vec3, k: usize, filter: impl Fn(usize) -> bool) -> Vec<usize> {
         let mut v: Vec<(f32, usize)> = (0..self.car.nodes.len())
             .filter(|&i| self.car.nodes[i].part == part && !self.car.nodes[i].contact && filter(i))
             .map(|i| (self.g(i).distance(g), i))
@@ -649,7 +657,12 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
     let mut pool: HashMap<Part, Vec<usize>> = HashMap::new();
     for i in 0..r.car.nodes.len() {
         let n = &r.car.nodes[i];
-        if n.contact || n.no_group || n.name.starts_with("hub") || n.name.starts_with("rim") {
+        if n.contact
+            || n.no_group
+            || n.sub.is_some()
+            || n.name.starts_with("hub")
+            || n.name.starts_with("rim")
+        {
             continue;
         }
         let within = std::env::var("RIG_HULL_POOL")
@@ -863,19 +876,38 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
         let id = |n: &str| r.car.nodes.iter().position(|x| x.name == n);
         for w in ["F", "R"] {
             for x in ["L", "R"] {
-                let (Some(hi), Some(ho)) = (id(&format!("hub{w}i{x}")), id(&format!("hub{w}o{x}")))
-                else {
-                    continue;
+                // (A defined wheel part: its two axle nodes and its three
+                // frame nodes.)
+                let c2 = format!("{}{}", w.to_lowercase(), x.to_lowercase());
+                let (hi, ho, ring): (usize, usize, Vec<usize>) = match (
+                    id(&format!("hub{w}i{x}")),
+                    id(&format!("hub{w}o{x}")),
+                    id(&format!("whe{c2}_ai")),
+                    id(&format!("whe{c2}_ao")),
+                ) {
+                    (Some(hi), Some(ho), _, _) => (
+                        hi,
+                        ho,
+                        (0..6)
+                            .filter_map(|k| id(&format!("rim{w}{k}{x}")))
+                            .collect(),
+                    ),
+                    (_, _, Some(hi), Some(ho)) => (
+                        hi,
+                        ho,
+                        (1..=3)
+                            .filter_map(|k| id(&format!("whe{c2}_f{k}")))
+                            .collect(),
+                    ),
+                    _ => continue,
                 };
-                let ring: Vec<usize> = (0..6)
-                    .filter_map(|k| id(&format!("rim{w}{k}{x}")))
-                    .collect();
-                if ring.len() != 6 {
+                let nr = ring.len();
+                if nr != 6 && nr != 3 {
                     continue;
                 }
                 let c = 0.5 * (r.g(hi) + r.g(ho));
-                for k in 0..6 {
-                    let (a, b) = (ring[k], ring[(k + 1) % 6]);
+                for k in 0..nr {
+                    let (a, b) = (ring[k], ring[(k + 1) % nr]);
                     let hubs: &[usize] = if std::env::var("RIG_WHEEL_BOTH").is_ok() {
                         &[hi, ho]
                     } else {
@@ -1397,6 +1429,21 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let z_trunk_f = tk_hi.z;
     let z_tail = br_lo.z;
 
+    // The body, powertrain, running gear and interior from the design's own
+    // definitions when it has them (`RIG_OLD_BODY=1`: the members below, the
+    // rigger's own, for comparison).
+    let defs = inp
+        .definitions()
+        .filter(|_| std::env::var("RIG_OLD_BODY").map_or(true, |v| v != "1"));
+    let mut named_ids: HashMap<String, usize> = HashMap::new();
+    let defined = defs.as_ref().map(|d| super::body2::build(&mut r, inp, d));
+    let apertures = [Aperture::of(&door_f.pos), Aperture::of(&door_r.pos)];
+    let mut eng: Vec<usize> = Vec::new();
+    let old_pt = std::env::var("GEN3_OLD_POWERTRAIN").is_ok();
+    let mut pt_z = [0.0f32; 3];
+    // (The rigger's own body and engine: not re-indented, so the definitions'
+    // path reads as a diff beside it.)
+    if defined.is_none() {
     // ------------------------------------------------------------------
     // Body: members per side.
     // ------------------------------------------------------------------
@@ -1426,7 +1473,6 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let mut roof_mid = [Vec::new(), Vec::new()];
     let mut quarter: [Vec<Vec<Option<usize>>>; 2] = [Vec::new(), Vec::new()];
     let mut rrail = [Vec::new(), Vec::new()];
-    let mut named_ids: HashMap<String, usize> = HashMap::new();
     let rail_z = [0.95f32, 1.32, 1.70, 2.05];
     let rrail_z = [-1.60f32, -1.95, -2.25];
     let qz = [z_c - 0.03, -1.85, -2.18, z_tail + 0.12];
@@ -1994,7 +2040,6 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     );
     // The body's member graph.
     let body_ids: Vec<usize> = (0..r.car.nodes.len()).collect();
-    let apertures = [Aperture::of(&door_f.pos), Aperture::of(&door_r.pos)];
     // The front structure's upper rails and towers meet the cabin at the
     // A-pillar's base (the hinge pillar and cowl), not the greenhouse: no
     // beam from them to a node above the belt (they were struts from the
@@ -2105,14 +2150,13 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // The powertrain's faces where the 2011 Accord's are: 0.39 m ahead of
     // and 0.12 m behind the front axle (DOT HS 811 666 fig. 87). Round 3
     // had its rear face at the axle.
-    let old_pt = std::env::var("GEN3_OLD_POWERTRAIN").is_ok();
-    let pt_z: [f32; 3] = if old_pt {
+    pt_z = if old_pt {
         [1.40, 1.61, 1.82]
     } else {
         let (r0, f0) = (axle_f - accord_pt_behind, axle_f + accord_pt_ahead);
         [r0, 0.5 * (r0 + f0), f0]
     };
-    let eng = {
+    eng = {
         let mut ids = Vec::new();
         for (kz, &z) in pt_z.iter().enumerate() {
             for (ky, &y) in [0.38f32, 0.78].iter().enumerate() {
@@ -2181,6 +2225,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             }
         }
     }
+    } // (the rigger's own body and engine)
 
     // ------------------------------------------------------------------
     // Closures.
@@ -2675,7 +2720,17 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         let bz =
             |x: f32| face - (0.13 + 0.10 * (x / 0.75).powi(2)) * if front { 1.0 } else { -1.0 };
         let mut beam = Vec::new();
-        for (k, &xx) in [-0.72f32, -0.40, 0.0, 0.40, 0.72].iter().enumerate() {
+        // (Defined: the impact beam is its own part, already built; the
+        // cover's foam bears on it.)
+        if let Some(b) = &defined {
+            beam = b.impact[if front { 0 } else { 1 }].clone();
+        }
+        let own_beam = defined.is_none();
+        for (k, &xx) in [-0.72f32, -0.40, 0.0, 0.40, 0.72]
+            .iter()
+            .enumerate()
+            .filter(|_| own_beam)
+        {
             for (kh, &y) in [0.40f32, 0.56].iter().enumerate() {
                 beam.push(r.node(
                     &format!("{tag}_b{kh}{k}"),
@@ -2695,13 +2750,26 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 false,
             ));
         }
-        graph(&mut r, &beam, 0.50, part, Role::BumperBeam, &|_| false);
+        if own_beam {
+            graph(&mut r, &beam, 0.50, part, Role::BumperBeam, &|_| false);
+        }
         let mut all = cover.clone();
         all.extend(&beam);
+        // The beam's nodes nearest a point (its own part's when defined).
+        let beam_near = |r: &Rig, g: Vec3, k: usize| -> Vec<usize> {
+            let mut v: Vec<(f32, usize)> = beam.iter().map(|&i| (r.g(i).distance(g), i)).collect();
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v.into_iter().take(k).map(|q| q.1).collect()
+        };
         // Cover to beam: the foam (sheet role, soft).
         for &c in &cover {
             let g = r.g(c);
-            for b in r.nearest(part, g, 3, |i| beam.contains(&i)) {
+            let near = if own_beam {
+                r.nearest(part, g, 3, |i| beam.contains(&i))
+            } else {
+                beam_near(&r, g, 3)
+            };
+            for b in near {
                 r.car.beam(c, b, Role::Sheet, part);
             }
         }
@@ -2717,7 +2785,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 if (g.z - face_z).abs() > 0.25 {
                     continue;
                 }
-                if let Some(&b) = r.nearest(part, g, 1, |i| beam.contains(&i)).first() {
+                let near = if own_beam {
+                    r.nearest(part, g, 1, |i| beam.contains(&i))
+                } else {
+                    beam_near(&r, g, 1)
+                };
+                if let Some(&b) = near.first() {
                     let l = r.g(b).distance(g);
                     if l > FOAM_SOLID + 0.02 {
                         let j = r.car.beam(c, b, Role::Stop, part);
@@ -2807,6 +2880,8 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // ------------------------------------------------------------------
     // Crush cans and rear rails onto the bumper beams.
     // ------------------------------------------------------------------
+    let mut rims = Vec::new();
+    if defined.is_none() {
     for (si, s) in [1.0f32, -1.0].into_iter().enumerate() {
         let x = lr(s);
         let (fb, rb) = (&bumper_ids[&Part::BumperF].1, &bumper_ids[&Part::BumperR].1);
@@ -2864,7 +2939,6 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // ------------------------------------------------------------------
     // Suspension: hubs on the body, and rim proxies.
     // ------------------------------------------------------------------
-    let mut rims = Vec::new();
     for s in [1.0f32, -1.0] {
         let x = lr(s);
         for (w, za) in [("F", axle_f), ("R", axle_r)] {
@@ -2935,6 +3009,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             body,
         );
     }
+    } // (the rigger's own crush cans, hubs and rim proxies)
 
     // ------------------------------------------------------------------
     // Hardware from the markers.
@@ -3615,7 +3690,8 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         // the neighbouring part's contact band at rest.
         // (The hub nodes stay out: they are corners of the wheels' collision
         // cones only, and inside the arch beside the rails.)
-        nd.self_collision = (on_tri[i] || nd.part == Part::Engine || nd.name.starts_with("rim"))
+        let block = nd.part == Part::Engine && nd.sub.as_deref().map_or(true, |s| s == "engine");
+        nd.self_collision = (on_tri[i] || block || nd.name.starts_with("rim"))
             && !nd.contact
             && !nd.name.starts_with("hub")
             && std::env::var("GEN3_NOSELF").is_err()
@@ -3628,6 +3704,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let hpf = marker(model, "seat_H_point_FL");
     let hpr = marker(model, "seat_H_point_FR");
     let j = to_jbeam;
+    if let Some(b) = &defined {
+        // Every mass is its part's own (the shell's nodes, the mechanical
+        // and interior parts'); the closures keep the design's part masses.
+        super::body2::masses(&mut r, inp, b);
+    } else {
     let named = vec![
         ("driver", 75.0, j(hpf + Vec3::new(0.0, 0.05, 0.0)), 0.6),
         ("front_seats", 35.0, j(0.5 * (hpf + hpr)), 0.75),
@@ -3733,6 +3814,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     ]
     .into_iter()
     .collect();
+    } // (the rigger's own masses)
     r.car.sheet_area = Some(voronoi_area(inp, &r.car));
     r.car.mass_floor = Some(0.7);
     r.car.row_cap_contact_only = false;
@@ -3746,6 +3828,9 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // pillar's base once its tyre is crushed onto the rim (wheel_stack from
     // the hub's centre), and loads the sill and A-pillar. BOUNDED stops from
     // both hub nodes to the pillar's base nodes.
+    if let Some(b) = &defined {
+        super::body2::wheels(&mut r, b, env_f("GEN3_WHEEL_STACK", wheel_stack));
+    } else {
     if std::env::var("GEN3_NO_WHEEL_STACK").is_err() {
         let stack = env_f("GEN3_WHEEL_STACK", wheel_stack);
         for s in [1.0f32, -1.0] {
@@ -3797,7 +3882,14 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         r.car.id("slt1L"),
         r.car.id("rc1"),
     ];
-    let hub = hub_extra(&r.car);
+    } // (the rigger's own wheels and reference nodes)
+    // (Defined wheels: the bound without the raycast wheels' mass, so the
+    // car is stable on pressure wheels too, where the axle nodes are bare.)
+    let hub = if defined.is_some() {
+        HashMap::new()
+    } else {
+        hub_extra(&r.car)
+    };
     r.car.assign_springs(&hub);
     // Zones: the crush zones' members stack (deformLimit) and carry the crush
     // yield multiple; the cabin's the cabin multiple.
@@ -4125,6 +4217,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         }
     }
     let _ = (arch_r, &eng);
+    // Defined beams keep their definitions' yield forces (the zone rules
+    // above are the rigger's own members').
+    for (&j, f) in &r.car.fixed {
+        r.car.beams[j].deform = f.deform;
+        r.car.beams[j].deform_limit = 0.0;
+    }
     r
 }
 

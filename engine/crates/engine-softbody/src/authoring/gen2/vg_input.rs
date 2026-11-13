@@ -117,6 +117,10 @@ pub struct VgInput {
     ray_y: f32,
     /// The key line the rig's middle panel row follows (`shoulder_y`).
     crease: String,
+    /// The design's body-in-white and its mechanical and interior parts
+    /// (`engine_vehiclegen::RigSpec`), when it defines them.
+    pub structure: Option<engine_vehiclegen::structure::Structure>,
+    pub mechanical: Vec<engine_vehiclegen::mechanical::MechPart>,
 }
 
 impl VgInput {
@@ -179,6 +183,8 @@ impl VgInput {
             physics,
             ray_y: 0.0,
             crease: String::new(),
+            structure: None,
+            mechanical: Vec::new(),
         };
         // The section rays start between the sill and the belt at mid car.
         me.ray_y = 0.5 * (me.key("sill", 0.0)[1] + me.key("belt", 0.0)[1]);
@@ -225,6 +231,8 @@ impl VgInput {
         let bytes = glb(&rp, &b.markers, b.paint, b.metallic, b.roughness);
         let rig = rig_json_of(name, d.as_ref(), &cb, &b.markers, &spec);
         let mut me = Self::new(rig, bytes)?;
+        me.structure = spec.structure.as_deref().cloned();
+        me.mechanical = spec.mechanical.as_ref().clone();
         if !opts.solid {
             return Ok(me);
         }
@@ -253,11 +261,22 @@ impl VgInput {
             b.roughness,
         );
         let parts = model_of(&crate::glb::read(&outer)?).parts;
-        debug_assert!(parts
-            .iter()
-            .map(|p| &p.name)
-            .eq(me.model.parts.iter().map(|p| &p.name)));
-        me.model.parts = parts;
+        if !me.defined() {
+            // (The rigger's own body: the sheet build's parts alone, as
+            // before the design defined its structure.)
+            me.model.parts = parts;
+            return Ok(me);
+        }
+        // The sheet build has no body-in-white and no mechanical parts: the
+        // solid build's stay in the rigger's model under their own names
+        // (same order as the `.glb`).
+        let mut sheet: std::collections::HashMap<String, MPart> =
+            parts.into_iter().map(|p| (p.name.clone(), p)).collect();
+        for p in &mut me.model.parts {
+            if let Some(s) = sheet.remove(&p.name) {
+                *p = s;
+            }
+        }
         Ok(me)
     }
 
@@ -286,6 +305,12 @@ impl VgInput {
 
     pub fn design(&self) -> &str {
         &self.rig.design
+    }
+
+    /// The rigger builds the body and the mechanical parts from the
+    /// design's definitions (`RIG_OLD_BODY=1`: its own members instead).
+    pub fn defined(&self) -> bool {
+        self.structure.is_some() && std::env::var("RIG_OLD_BODY").map_or(true, |v| v != "1")
     }
 
     /// A key line's (x, y) at z.
@@ -484,6 +509,12 @@ impl RigInput for VgInput {
     fn rear_closure(&self) -> String {
         self.rig.dims.rear_closure.clone()
     }
+    fn definitions(&self) -> Option<super::body2::Defs<'_>> {
+        self.structure.as_ref().map(|s| super::body2::Defs {
+            structure: s,
+            parts: &self.mechanical,
+        })
+    }
     fn seam_points(&self) -> Option<Vec<(Vec3, Vec3, usize, usize)>> {
         // Points two parts' welded skins share (the skins are cut from one
         // surface, so a shut line's points coincide exactly).
@@ -549,7 +580,11 @@ pub fn build(input: VgInput) -> Result<Built, String> {
         &rig.car,
         axle_f,
         &VgInput::vg_part_of,
-        &VgInput::vg_rigid,
+        // (a solid whose part's definition names its nodes: rigid as defined)
+        &|m| match rig.car.bind.get(m) {
+            Some(b) => b.rigid,
+            None => VgInput::vg_rigid(m),
+        },
     )?;
     skin.packable()?;
     Ok(Built { input, rig, skin })
@@ -561,13 +596,30 @@ pub fn build(input: VgInput) -> Result<Built, String> {
 pub fn files(b: &Built) -> Vec<(String, Vec<u8>)> {
     let name = b.input.design().to_string();
     let axle_f = b.input.rig.dims.axle_f;
-    let flex = gen3::flex_rows_with(
+    let mut flex = gen3::flex_rows_with(
         &b.input.glb,
         axle_f,
         &VgInput::vg_part_of,
         &skin_file(&name),
     );
-    let groups = gen3::deform_groups_with(&b.input.glb, &b.rig.car, axle_f, &VgInput::vg_part_of);
+    // A definition part's solid is listed in that part's own JBeam part.
+    for (_, f) in &mut flex {
+        if let Some(owner) = b.rig.car.bind.get(&f.mesh).and_then(|x| x.owner.clone()) {
+            f.groups = vec![super::export::sub_name(&owner)];
+            f.owner = Some(owner);
+        }
+    }
+    // (A pane with trigger beams of its own keeps those.)
+    let own: Vec<&str> = b
+        .rig
+        .car
+        .fixed
+        .values()
+        .filter_map(|f| f.deform_group.as_ref().map(|g| g.0.as_str()))
+        .collect();
+    let mut groups =
+        gen3::deform_groups_with(&b.input.glb, &b.rig.car, axle_f, &VgInput::vg_part_of);
+    groups.retain(|g| !own.contains(&g.0.as_str()));
     let mut out: Vec<(String, Vec<u8>)> = super::export::jbeam_files(&b.rig.car, &flex, &groups)
         .into_iter()
         .map(|(p, t)| (rename_path(&p, &name), rename(&t, &name).into_bytes()))

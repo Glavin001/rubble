@@ -46,6 +46,33 @@ pub struct Flex {
     /// [`crate::flexskin`]) and the mesh's placement (`"pos"`, JBeam frame).
     pub skin: Option<String>,
     pub pos: Option<[f32; 3]>,
+    /// The definition part whose JBeam part carries the row
+    /// ([`super::build::Bind::owner`]); None: its [`Part`]'s.
+    pub owner: Option<String>,
+}
+
+/// A definition part's JBeam part name.
+pub fn sub_name(sub: &str) -> String {
+    format!("{NAME}_{sub}")
+}
+
+/// The definition parts, in node order, then those that are beams only (an
+/// arm's legs, a strut, a tie rod, a shaft) in beam order.
+pub fn subs(car: &Car) -> Vec<(Part, String)> {
+    let mut out: Vec<(Part, String)> = Vec::new();
+    let named = car
+        .nodes
+        .iter()
+        .map(|n| (n.part, &n.sub))
+        .chain(car.beams.iter().map(|b| (b.part, &b.sub)));
+    for (part, sub) in named {
+        if let Some(s) = sub {
+            if !out.iter().any(|o| &o.1 == s) {
+                out.push((part, s.clone()));
+            }
+        }
+    }
+    out
 }
 
 fn rows(header: Value, rows: Vec<Value>) -> String {
@@ -67,9 +94,12 @@ pub fn jbeam_files(
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     // Main part: slots and the reference nodes.
+    let subs = subs(car);
     let slots: Vec<Value> = Part::ALL
         .iter()
-        .map(|p| json!([p.name(), p.name(), p.name()]))
+        .map(|p| p.name().to_string())
+        .chain(subs.iter().map(|s| sub_name(&s.1)))
+        .map(|p| json!([p, p, p]))
         .collect();
     let mut main = String::new();
     main += "{\n\"gen2\": {\n";
@@ -95,18 +125,25 @@ pub fn jbeam_files(
     main += "}\n}\n";
     out.push((format!("{NAME}/{NAME}.jbeam"), main));
 
-    for &part in &Part::ALL {
+    let units: Vec<(Part, Option<&str>)> = Part::ALL
+        .iter()
+        .map(|&p| (p, None))
+        .chain(subs.iter().map(|s| (s.0, Some(s.1.as_str()))))
+        .collect();
+    for (part, sub) in units {
+        let pname = sub.map_or(part.name().to_string(), sub_name);
+        let pname = pname.as_str();
         let mut sec: Vec<String> = Vec::new();
         sec.push(
             "    \"information\": {\"authors\": \"Rubble (generated)\", \"name\": \"".to_string()
-                + part.name()
+                + pname
                 + "\"}",
         );
-        sec.push(format!("    \"slotType\": \"{}\"", part.name()));
+        sec.push(format!("    \"slotType\": \"{}\"", pname));
         // Nodes.
         let mut nrows = Vec::new();
         for (i, nd) in car.nodes.iter().enumerate() {
-            if nd.part != part {
+            if nd.part != part || nd.sub.as_deref() != sub {
                 continue;
             }
             let _ = i;
@@ -120,7 +157,7 @@ pub fn jbeam_files(
                 if nd.no_group {
                     json!("")
                 } else {
-                    json!(part.name())
+                    json!(pname)
                 },
             );
             for (k, v) in &nd.opts {
@@ -141,13 +178,65 @@ pub fn jbeam_files(
         // Beams.
         let mut brows = Vec::new();
         let mut list: Vec<usize> = (0..car.beams.len())
-            .filter(|&j| car.beams[j].part == part)
+            .filter(|&j| car.beams[j].part == part && car.beams[j].sub.as_deref() == sub)
             .collect();
         list.sort_by_key(|&j| (car.beams[j].role, car.beams[j].break_group.clone()));
         for j in list {
             let b = &car.beams[j];
             let sp = b.role.spec(b.part);
             let mut o = Map::new();
+            if let Some(f) = car.fixed.get(&j) {
+                // A defined beam: its own values and kind.
+                use super::build::FixedKind;
+                o.insert(
+                    "beamType".into(),
+                    json!(match f.kind {
+                        FixedKind::Normal => "|NORMAL",
+                        FixedKind::Support => "|SUPPORT",
+                        FixedKind::Bounded { .. } => "|BOUNDED",
+                    }),
+                );
+                o.insert("beamSpring".into(), num(b.k));
+                o.insert("beamDamp".into(), num(b.c));
+                o.insert("beamDeform".into(), num(b.deform));
+                o.insert("beamStrength".into(), num(b.strength));
+                match f.kind {
+                    FixedKind::Normal => {}
+                    FixedKind::Support => {
+                        o.insert("beamLongBound".into(), json!(100.0));
+                    }
+                    FixedKind::Bounded {
+                        travel,
+                        limit_k,
+                        limit_c,
+                    } => {
+                        o.insert("beamShortBound".into(), num(travel));
+                        o.insert("beamLongBound".into(), num(travel));
+                        o.insert("beamLimitSpring".into(), num(limit_k));
+                        o.insert("beamLimitDamp".into(), num(limit_c));
+                        o.insert("boundZone".into(), json!(0.02));
+                    }
+                }
+                if f.limit_expansion > 0.0 {
+                    o.insert("deformLimitExpansion".into(), num(f.limit_expansion));
+                }
+                if let Some(pc) = car.precomp.get(&j) {
+                    o.insert(
+                        "beamPrecompression".into(),
+                        json!((*pc as f64 * 1e6).round() / 1e6),
+                    );
+                }
+                o.insert(
+                    "breakGroup".into(),
+                    json!(b.break_group.clone().unwrap_or_default()),
+                );
+                if let Some((g, ratio)) = &f.deform_group {
+                    o.insert("deformGroup".into(), json!(g));
+                    o.insert("deformationTriggerRatio".into(), json!(ratio));
+                }
+                brows.push(json!([n(b.a), n(b.b), Value::Object(o)]));
+                continue;
+            }
             o.insert(
                 "beamType".into(),
                 json!(if sp.support { "|SUPPORT" } else { "|NORMAL" }),
@@ -229,7 +318,11 @@ pub fn jbeam_files(
         // it and clearing it (triangles without one first, unchanged).
         let mut trows: Vec<Value> = Vec::new();
         let mut cur: Option<&String> = None;
-        let mut own: Vec<&super::build::Tri> = car.tris.iter().filter(|t| t.part == part).collect();
+        let mut own: Vec<&super::build::Tri> = car
+            .tris
+            .iter()
+            .filter(|t| t.part == part && sub.is_none())
+            .collect();
         own.sort_by_key(|t| t.group.is_some());
         for t in own {
             if t.group.as_ref() != cur {
@@ -256,7 +349,27 @@ pub fn jbeam_files(
             ));
         }
         // Wheels (raycast on the body's hub nodes).
-        if part == Part::Body && !car.wheels.is_empty() {
+        // Torsion bars (the shell's floor rows).
+        if part == Part::Body && sub.is_none() && !car.torsion.is_empty() {
+            let trows: Vec<Value> = car
+                .torsion
+                .iter()
+                .map(|t| {
+                    json!([
+                        n(t.n[0]),
+                        n(t.n[1]),
+                        n(t.n[2]),
+                        n(t.n[3]),
+                        {"spring": num(t.k), "damp": num(t.c), "deform": num(t.deform), "strength": "FLT_MAX"}
+                    ])
+                })
+                .collect();
+            sec.push(format!(
+                "    \"torsionbars\": {}",
+                rows(json!(["id1:", "id2:", "id3:", "id4:"]), trows)
+            ));
+        }
+        if part == Part::Body && sub.is_none() && !car.wheels.is_empty() {
             // A 215/60 R16 on a 16" rim, for JBeam pressure wheels (spec §25)
             // as well as raycast wheels (which read radius and width): Rubble's
             // own values (the PART2_CAR fixture's, at a 20 kg wheel: 16 rays,
@@ -302,7 +415,11 @@ pub fn jbeam_files(
         // Flexbodies.
         let frows: Vec<Value> = flex
             .iter()
-            .filter(|(p, _)| *p == part)
+            .filter(|(p, f)| match (&f.owner, sub) {
+                (Some(o), Some(s)) => o == s,
+                (None, None) => *p == part,
+                _ => false,
+            })
             .map(|(_, f)| {
                 let mut o = Map::new();
                 if let Some(g) = &f.deform_group {
@@ -323,13 +440,16 @@ pub fn jbeam_files(
                 rows(json!(["mesh", "[group]:", "nonFlexMaterials"]), frows)
             ));
         }
-        let text = format!("{{\n\"{}\": {{\n{}\n}}\n}}\n", part.name(), sec.join(",\n"));
-        out.push((format!("{NAME}/{}.jbeam", part.name()), text));
+        let text = format!("{{\n\"{}\": {{\n{}\n}}\n}}\n", pname, sec.join(",\n"));
+        out.push((format!("{NAME}/{}.jbeam", pname), text));
     }
     // The configuration.
     let mut parts = Map::new();
     for p in Part::ALL {
         parts.insert(p.name().into(), json!(p.name()));
+    }
+    for s in &subs {
+        parts.insert(sub_name(&s.1), json!(sub_name(&s.1)));
     }
     let pc = json!({"format": 2, "mainPartName": NAME, "model": NAME, "parts": parts, "vars": {}});
     out.push((

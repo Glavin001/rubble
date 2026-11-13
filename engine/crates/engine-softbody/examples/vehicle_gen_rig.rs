@@ -132,5 +132,23 @@ fn main() -> Result<(), String> {
             pct(&mut rw, 1.0)
         );
     }
+    // The defined parts: what each asked for and what the step's bound left.
+    let rep = engine_softbody::authoring::gen2::body2::report(car);
+    if !rep.is_empty() {
+        println!("defined beams: part, beams, rule sum k (N/m), built sum k, built / rule");
+        let (mut rule, mut built) = (0.0, 0.0);
+        for (name, n, kr, kb) in &rep {
+            rule += kr;
+            built += kb;
+            if (kb / kr - 1.0).abs() > 0.005 || name == "shell" {
+                println!("  {name:<20} {n:>4} {kr:>10.3e} {kb:>10.3e} {:.3}", kb / kr);
+            }
+        }
+        println!(
+            "  all {} parts: built / rule {:.3} (parts not listed: 1.000)",
+            rep.len(),
+            built / rule
+        );
+    }
     Ok(())
 }

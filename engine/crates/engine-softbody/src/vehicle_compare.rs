@@ -164,8 +164,23 @@ fn skin_nodes(s: &ExplicitBeams) -> Vec<u32> {
     v
 }
 
+/// The car's lowest point (world y): its lowest node, or the bottom of a
+/// raycast wheel's tyre when that is lower. A raycast wheel has no nodes, so
+/// a car whose lowest node is its exhaust or a rim would be placed with its
+/// tyres that far into the ground and thrown up by its bump stops.
+pub fn lowest_point(s: &ExplicitBeams) -> f32 {
+    let node = |i: u32| s.origin.y + s.nodes[i as usize].pos.y;
+    let mut low = (0..s.nodes.len() as u32).map(node).fold(f32::MAX, f32::min);
+    if let Some(d) = &s.drive {
+        for w in &d.config.wheels {
+            low = low.min(0.5 * (node(w.node1) + node(w.node2)) - w.radius);
+        }
+    }
+    low
+}
+
 /// Turn about +Y by `angle` and place: skin box centred on x = z = 0, the
-/// lowest node `lift` above the ground.
+/// lowest point ([`lowest_point`]) `lift` above the ground.
 fn place(s: &mut ExplicitBeams, angle: f32, lift: f32) {
     flatten_origin(s);
     let q = Quat::from_rotation_y(angle);
@@ -175,7 +190,7 @@ fn place(s: &mut ExplicitBeams, angle: f32, lift: f32) {
     }
     let skin = skin_nodes(s);
     let (lo, hi) = bounds(s, &skin);
-    let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let low = lowest_point(s);
     let mid = 0.5 * (lo + hi);
     for n in &mut s.nodes {
         n.pos.x -= mid.x;

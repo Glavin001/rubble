@@ -77,11 +77,19 @@ pub fn pool(car: &Car, mesh: &str) -> Vec<u32> {
 
 /// [`pool`] with the meshes on parts by `part_of`.
 pub fn pool_with(car: &Car, mesh: &str, part_of: &dyn Fn(&str) -> Option<Part>) -> Vec<u32> {
+    // A mesh whose part's definition names its nodes binds to those.
+    if let Some(b) = car.bind.get(mesh) {
+        return b.nodes.iter().map(|&i| i as u32).collect();
+    }
     match part_of(mesh) {
         Some(p) => (0..car.nodes.len() as u32)
             .filter(|&i| {
                 let n = &car.nodes[i as usize];
-                n.part == p && !n.contact && !n.no_group && !n.name.starts_with("hub")
+                n.part == p
+                    && !n.contact
+                    && !n.no_group
+                    && n.sub.is_none()
+                    && !n.name.starts_with("hub")
             })
             .collect(),
         None => {
@@ -172,6 +180,7 @@ pub fn flex_rows_with(
                     deform_group: deform,
                     skin: Some(skin_file.into()),
                     pos: Some([0.0, axle_f, 0.0]),
+                    owner: None,
                 },
             )
         })

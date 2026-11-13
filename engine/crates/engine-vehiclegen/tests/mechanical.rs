@@ -92,7 +92,10 @@ fn mounts_and_links_land_on_real_nodes_in_named_groups() {
             assert!(i.v.deform > 0.0 && i.v.strength > i.v.deform);
         }
         for mt in &p.mounts {
-            assert!(groups.insert(mt.group.clone()), "group {} twice", mt.group);
+            // (a part may give one group beams of two kinds: a wheel's six
+            // axle beams and its two softer ones)
+            let again = p.mounts.iter().filter(|o| o.group == mt.group).count() > 1;
+            assert!(groups.insert(mt.group.clone()) || again, "group {} twice", mt.group);
             for n in mt.from.iter().chain(&mt.to) {
                 assert!(pos.contains_key(n), "{}: mount {} names {n}", p.name, mt.group);
             }
@@ -133,9 +136,11 @@ fn each_hub_is_held_by_six_members_and_the_ladder_is_ordered() {
         let hub = part(&m, &format!("hub_{c}"));
         let held: Vec<_> = links.iter().filter(|l| hub.nodes.iter().any(|n| n.name == l.a || n.name == l.b)).collect();
         assert_eq!(held.len(), 6, "hub_{c}: {:?}", held.iter().map(|l| &l.name).collect::<Vec<_>>());
-        // one wheel group of 8 beams
+        // one wheel group
         let w = part(&m, &format!("wheel_{c}"));
-        assert_eq!((w.mounts.len(), w.mounts[0].beams), (1, 8));
+        assert!(w.mounts.iter().all(|mt| mt.group == w.mounts[0].group));
+        // (eight from the axle's two nodes, two from a frame node)
+        assert_eq!(w.mounts.iter().map(|mt| mt.beams).collect::<Vec<_>>(), [8, 2]);
     }
     // toe link bends < arm bends < wheel leaves < strut breaks < toe link
     // breaks < arm breaks < front subframe leaves (§4.4, §10.5)

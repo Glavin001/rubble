@@ -273,7 +273,9 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         p.node("r", r(-0.28, y_rack, z_rack), 5.0);
         p.mesh = cyl(r(-0.30, y_rack, z_rack), r(0.30, y_rack, z_rack), 0.024);
         p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 100.0, 85e3, INF), deform_group: None });
-        p.mounts.push(Mount { group: "steering_rack".into(), from: p.names(), to: vec!["subf_kl".into(), "subf_kr".into()], beams: 4, kind: BeamKind::Normal, v: vals(0.0, 100.0, 85e3, INF), precomp: 1.0 });
+        // (the front corners too: four beams to the two rack mounts alone lie
+        // in one plane and let the rack swing about them)
+        p.mounts.push(Mount { group: "steering_rack".into(), from: p.names(), to: vec!["subf_kl".into(), "subf_kr".into(), "subf_fl".into(), "subf_fr".into()], beams: 6, kind: BeamKind::Normal, v: vals(0.0, 100.0, 85e3, INF), precomp: 1.0 });
         out.push(p);
     }
 
@@ -358,7 +360,13 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
             wh.node(&format!("f{}", k + 1), at(0.0, rr * a.sin(), rr * a.cos()), 3.0);
         }
         wh.internal.push(Internal { pairs: wh.complete(), v: vals(0.0, 100.0, 168e3, INF), deform_group: None });
+        // one group: each axle node to the hub's four (eight beams), and two
+        // softer ones from a frame node, which hold the wheel's nodes against
+        // turning about the axle (the raycast wheel does the rolling). Six
+        // from the axle left the hub's upper joint out and the wheel leaned
+        // 1.1 degrees under the car's weight.
         wh.mounts.push(Mount { group: format!("wheel_{c}"), from: vec![wh.nodes[0].name.clone(), wh.nodes[1].name.clone()], to: hub.names(), beams: 8, kind: BeamKind::Normal, v: vals(6e6, 100.0, 168e3, 168e3), precomp: 1.0 });
+        wh.mounts.push(Mount { group: format!("wheel_{c}"), from: vec![wh.nodes[2].name.clone()], to: hub.names(), beams: 2, kind: BeamKind::Normal, v: vals(1e6, 100.0, 168e3, 168e3), precomp: 1.0 });
         wh.meshes.extend([format!("rim_{cn}"), format!("tyre_{cn}")]);
         // hub cap: a pressed disc clipped into the rim's centre
         let mut cap = MechPart::new(&format!("hub_cap_{cn}"), "wheel");
@@ -374,7 +382,10 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         disc.transform(None, at(xc, 0.0, 0.0));
         cap.mesh = disc;
         cap.internal.push(Internal { pairs: cap.complete(), v: vals(0.0, 20.0, 300.0, INF), deform_group: None });
-        cap.mounts.push(Mount { group: format!("hub_cap_{c}"), from: cap.names(), to: wh.names(), beams: 6, kind: BeamKind::Normal, v: vals(0.0, 20.0, 300.0, 600.0), precomp: 1.0 });
+        // (nine clips: each corner to the outer axle node, the frame node at
+        // its own angle and one beside it; six to the first two alone are all
+        // radial and leave the cap free to turn in the rim)
+        cap.mounts.push(Mount { group: format!("hub_cap_{c}"), from: cap.names(), to: wh.names()[1..].to_vec(), beams: 9, kind: BeamKind::Normal, v: vals(0.0, 20.0, 300.0, 600.0), precomp: 1.0 });
         out.extend([hub, arm, strut]);
         if !upper.links.is_empty() {
             out.push(upper);
@@ -437,7 +448,10 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         p.node("r", b, 0.5);
         p.mesh = cyl(a - DVec3::Z * 0.01, b + DVec3::Z * 0.01, 0.030);
         p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 50.0, 1500.0, INF), deform_group: None });
-        p.mounts.push(Mount { group: "driveshaft_front".into(), from: vec!["dri_f".into()], to: vec!["tra_t".into(), "tra_b".into()], beams: 2, kind: BeamKind::Normal, v: vals(0.0, 50.0, 1500.0, 3500.0), precomp: 1.0 });
+        // (the bellhousing's lower corners too: the transmission's two nodes
+        // are on the centre line, and beams to them alone leave the yoke free
+        // sideways)
+        p.mounts.push(Mount { group: "driveshaft_front".into(), from: vec!["dri_f".into()], to: vec!["tra_t".into(), "tra_b".into(), "eng_5".into(), "eng_6".into()], beams: 4, kind: BeamKind::Normal, v: vals(0.0, 50.0, 1500.0, 3500.0), precomp: 1.0 });
         p.mounts.push(Mount { group: "driveshaft_rear".into(), from: vec!["dri_r".into()], to: vec!["dif_n".into(), "dif_l".into(), "dif_r".into()], beams: 3, kind: BeamKind::Normal, v: vals(0.0, 50.0, 1500.0, 3500.0), precomp: 1.0 });
         out.push(p);
     }
@@ -483,8 +497,16 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
             (0.31, 0.285, f.zi((g.z_tail)(f.x(0.31), f.y(0.30))) + 0.05),
         ];
         let path: Vec<DVec3> = pts.iter().map(|&(x, y, z)| r(x, y, z)).collect();
+        // The nodes: on the pipe, and at the resonator and the silencer on
+        // opposite sides of the box (a chain of nodes all on one line has no
+        // direction across it: its skin would turn freely about the pipe).
+        let side = [(5usize, 0.055, 0.0), (10, -0.055, -0.11), (11, 0.055, 0.06)];
         for (i, q) in path.iter().enumerate() {
-            p.node(&format!("{}", i + 1), *q, 1.4);
+            let q = match side.iter().find(|s| s.0 == i) {
+                Some(&(_, dx, dz)) => DVec3::new(q.x + dx, q.y, q.z + dz),
+                None => *q,
+            };
+            p.node(&format!("{}", i + 1), q, 1.4);
         }
         p.mesh.add(&cyl_along(&path, 0.022, 10, Mat::MetalBare));
         // a resonator under the floor and the rear silencer

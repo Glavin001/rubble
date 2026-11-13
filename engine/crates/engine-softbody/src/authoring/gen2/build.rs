@@ -282,6 +282,10 @@ pub const ZETA: f32 = 0.04;
 pub const OMEGA_H: f32 = 1.85;
 /// The bound under centred damping (§39: stable below 2 at any ζ), with margin.
 pub const OMEGA_H_CENTRED: f32 = 1.92;
+/// Per-node stiffness budget Σk/m (s⁻²) for defined beams with no spring of
+/// their own (the measured cars sit at 7–10e6: `beamng-structure-study.md`
+/// §7.1).
+pub const NODE_BUDGET: f32 = 8.5e6;
 
 impl Role {
     /// Lane ties and shut-line edge ties: the springs the stability bound
@@ -377,6 +381,10 @@ pub struct Node {
     /// edge nodes does not lighten them; the edge ties give way to the
     /// step's bound instead).
     pub edge: bool,
+    /// The definition part it belongs to (a mechanical or interior part of
+    /// `engine_vehiclegen::mechanical`, a pane's centre node): its own JBeam
+    /// part and node group. None: its [`Part`]'s.
+    pub sub: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -392,6 +400,60 @@ pub struct Beam {
     pub break_group: Option<String>,
     /// JBeam deformLimit (compression: L ≥ (1 − d)·L₀), 0 for none.
     pub deform_limit: f32,
+    /// The definition part whose JBeam part lists it (see [`Node::sub`]).
+    pub sub: Option<String>,
+}
+
+/// How a defined beam acts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FixedKind {
+    Normal,
+    /// Pushes only (a stop, a rest).
+    Support,
+    /// A rubber mount: its spring within `travel` (a share of its length
+    /// either way), then the limit spring and damping.
+    Bounded {
+        travel: f32,
+        limit_k: f32,
+        limit_c: f32,
+    },
+}
+
+/// A beam whose values come from its part's definition
+/// (`engine_vehiclegen::{structure, mechanical}`, [`super::shell`]), not from
+/// its role's census band: spring (None: from the node budget), damping and
+/// yield force as defined. [`Car::assign_springs`] keeps them; only the
+/// step's bound may lower the spring, and [`Car::k_rule`] records what it
+/// was asked for.
+#[derive(Clone, Debug)]
+pub struct Fixed {
+    pub k: Option<f32>,
+    pub c: f32,
+    pub deform: f32,
+    pub kind: FixedKind,
+    /// JBeam deformLimitExpansion (0: none).
+    pub limit_expansion: f32,
+    /// (deform group, trigger ratio).
+    pub deform_group: Option<(String, f32)>,
+}
+
+/// A torsion bar over four nodes (twist about 2–3).
+#[derive(Clone, Debug)]
+pub struct Torsion {
+    pub n: [usize; 4],
+    pub k: f32,
+    pub c: f32,
+    pub deform: f32,
+}
+
+/// The nodes a render mesh binds to, when its part's definition names them.
+#[derive(Clone, Debug, Default)]
+pub struct Bind {
+    pub nodes: Vec<usize>,
+    /// The definition part whose JBeam part carries the flexbody row.
+    pub owner: Option<String>,
+    /// One frame for the piece.
+    pub rigid: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -461,6 +523,20 @@ pub struct Car {
     pub bumper_zeta: Option<f32>,
     /// Per beam: JBeam `beamPrecompression` (a preloaded seal or bump stop).
     pub precomp: HashMap<usize, f32>,
+    /// Per beam: values from its part's definition ([`Fixed`]).
+    pub fixed: HashMap<usize, Fixed>,
+    /// Per beam: the spring it was given before the step's bound (the row
+    /// cap and the power iteration) lowered any ([`Car::assign_springs`]).
+    pub k_rule: Vec<f32>,
+    /// The power iteration's bound on ω·h (None: [`OMEGA_H`], or
+    /// [`OMEGA_H_CENTRED`] under centred damping).
+    pub omega_limit: Option<f32>,
+    /// Per node stiffness budget Σk/m (s⁻²) for the defined beams whose
+    /// spring is left to it (0: [`NODE_BUDGET`]).
+    pub node_budget: f32,
+    pub torsion: Vec<Torsion>,
+    /// Render mesh name: the nodes it binds to ([`Bind`]).
+    pub bind: BTreeMap<String, Bind>,
     by_name: HashMap<String, usize>,
     pair: HashMap<(usize, usize), usize>,
 }
@@ -480,6 +556,7 @@ impl Car {
             no_group: false,
             fixed_mass: 0.0,
             edge: false,
+            sub: None,
         });
         let i = self.nodes.len() - 1;
         self.by_name.insert(name.to_string(), i);
@@ -522,6 +599,7 @@ impl Car {
             strength: sp.strength,
             break_group: None,
             deform_limit: 0.0,
+            sub: None,
         });
         let j = self.beams.len() - 1;
         self.pair.insert(key, j);
@@ -1021,11 +1099,41 @@ impl Car {
             .collect();
         let mu = |b: &Beam| m[b.a] * m[b.b] / (m[b.a] + m[b.b]);
         let mult = stiff_mult();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (j, b) in self.beams.iter().enumerate() {
+            adj[b.a].push(j);
+            adj[b.b].push(j);
+        }
+        // A defined beam with no spring of its own takes its nodes' budget:
+        // Σk/m shared by the bilateral beams at its lighter-loaded end.
+        let budget = if self.node_budget > 0.0 {
+            self.node_budget
+        } else {
+            NODE_BUDGET
+        };
+        let fixed = &self.fixed;
+        let ends = |i: usize| {
+            adj[i]
+                .iter()
+                .filter(|j| {
+                    fixed.get(j).map_or(true, |f| {
+                        !matches!(f.kind, FixedKind::Support | FixedKind::Bounded { .. })
+                    })
+                })
+                .count()
+                .max(1) as f32
+        };
         let mut ks: Vec<f32> = self
             .beams
             .iter()
             .zip(&len)
-            .map(|(b, &l)| {
+            .enumerate()
+            .map(|(j, (b, &l))| {
+                if let Some(f) = fixed.get(&j) {
+                    return f
+                        .k
+                        .unwrap_or_else(|| budget * (m[b.a] / ends(b.a)).min(m[b.b] / ends(b.b)));
+                }
                 let sp = b.role.spec(b.part);
                 mult * if sp.k_fixed > 0.0 {
                     sp.k_fixed
@@ -1034,17 +1142,19 @@ impl Car {
                 }
             })
             .collect();
+        let k_rule = ks.clone();
         let bz = self.bumper_zeta;
         let zeta_of = move |b: &Beam| match (b.part, bz) {
             (Part::BumperF | Part::BumperR, Some(z)) => z,
             _ => ZETA,
         };
-        let damp = |k: f32, b: &Beam| 2.0 * zeta_of(b) * (k * mu(b)).sqrt();
-        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (j, b) in self.beams.iter().enumerate() {
-            adj[b.a].push(j);
-            adj[b.b].push(j);
-        }
+        let fixed_c: Vec<Option<f32>> = (0..self.beams.len())
+            .map(|j| fixed.get(&j).map(|f| f.c))
+            .collect();
+        let damp = |j: usize, k: f32, b: &Beam| match fixed_c[j] {
+            Some(c) => c,
+            None => 2.0 * zeta_of(b) * (k * mu(b)).sqrt(),
+        };
         // The cap: rows past row_cap × sedan1's bound scale their beams back
         // (the lane nodes' ties, mostly).
         let cap = row_cap() * ROW_BOUND;
@@ -1056,7 +1166,7 @@ impl Car {
                     .map(|&j| {
                         let b = &self.beams[j];
                         let o = if b.a == i { b.b } else { b.a };
-                        let q = H * H * ks[j] + 2.0 * H * damp(ks[j], b);
+                        let q = H * H * ks[j] + 2.0 * H * damp(j, ks[j], b);
                         q * (1.0 / m[i] + 1.0 / (m[i] * m[o]).sqrt())
                     })
                     .sum();
@@ -1075,7 +1185,7 @@ impl Car {
                             .map(|&j| {
                                 let b = &self.beams[j];
                                 let o = if b.a == i { b.b } else { b.a };
-                                let q = H * H * ks[j] + 2.0 * H * damp(ks[j], b);
+                                let q = H * H * ks[j] + 2.0 * H * damp(j, ks[j], b);
                                 q * (1.0 / m[i] + 1.0 / (m[i] * m[o]).sqrt())
                             })
                             .sum()
@@ -1157,7 +1267,7 @@ impl Car {
                         + if centred {
                             0.0
                         } else {
-                            2.0 * damp(ks[j], b) / H
+                            2.0 * damp(j, ks[j], b) / H
                         };
                     let f = d * (keff * d.dot(x[b.a] - x[b.b]));
                     y[b.a] += f;
@@ -1177,7 +1287,9 @@ impl Car {
                 x = y.into_iter().map(|v| v / ny.max(1e-30)).collect();
             }
             omega_h = lam.sqrt() * H;
-            let limit = if centred { OMEGA_H_CENTRED } else { OMEGA_H };
+            let limit = self
+                .omega_limit
+                .unwrap_or(if centred { OMEGA_H_CENTRED } else { OMEGA_H });
             if std::env::var("GEN3_MODE").is_ok()
                 && (round < 3 || round % 50 == 0 || omega_h <= OMEGA_H)
             {
@@ -1209,7 +1321,7 @@ impl Car {
                         + if centred {
                             0.0
                         } else {
-                            2.0 * damp(ks[j], b) / H
+                            2.0 * damp(j, ks[j], b) / H
                         };
                     keff * dirs[j].dot(x[b.a] - x[b.b]).powi(2)
                 })
@@ -1228,9 +1340,15 @@ impl Car {
             }
         }
         self.omega_h = omega_h;
+        self.k_rule = k_rule;
         for (j, b) in self.beams.iter_mut().enumerate() {
             let sp = b.role.spec(b.part);
             b.k = ks[j];
+            if let Some(f) = self.fixed.get(&j) {
+                b.c = f.c;
+                b.deform = f.deform;
+                continue;
+            }
             let z = match (b.part, bz) {
                 (Part::BumperF | Part::BumperR, Some(z)) => z,
                 _ => ZETA,

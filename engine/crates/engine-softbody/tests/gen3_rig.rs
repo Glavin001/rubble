@@ -16,7 +16,7 @@
 //! `CARGO_TARGET_TMPDIR/gen3`. Run in release:
 //! `cargo test --release -p engine-softbody --test gen3_rig -- --nocapture`.
 use engine_softbody::authoring::gen2::{self, gen3};
-use engine_softbody::explicit_beams::{ExplicitBeams, JbeamWheels};
+use engine_softbody::explicit_beams::ExplicitBeams;
 use engine_softbody::vehicle_compare::{rigid_fit, settings, Car, CarSpec};
 use glam::Vec3;
 use std::path::PathBuf;
@@ -89,14 +89,10 @@ fn load() -> Loaded {
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
     let desc = engine_softbody::jbeam::load_jbeam(&refs, pc.as_deref()).unwrap();
-    let (mut sim, _) = ExplicitBeams::from_desc_jbeam_with(
-        &desc,
-        JbeamWheels::Raycast,
-        Vec3::ZERO,
-        Vec3::ZERO,
-        settings(),
-    )
-    .unwrap();
+    // (On its raycast wheels: `from_desc_jbeam_with(.., Raycast, ..)` alone
+    // spawns the car without them, resting on whatever nodes are lowest.)
+    let (mut sim, _) =
+        ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
     sim.surface_contact = true;
     let flex = engine_softbody::jbeam::assembled_rows(&refs, pc.as_deref(), "flexbodies").unwrap();
     let g =
@@ -131,13 +127,10 @@ fn load() -> Loaded {
     Loaded { desc, sim, vis }
 }
 
-/// As the harness places a car: its lowest node 2 cm above the ground.
+/// As the harness places a car: its lowest point (a node, or a raycast
+/// wheel's tyre) 2 cm above the ground.
 fn lift(sim: &mut ExplicitBeams) {
-    let low = sim
-        .nodes
-        .iter()
-        .map(|n| sim.origin.y + n.pos.y)
-        .fold(f32::MAX, f32::min);
+    let low = engine_softbody::vehicle_compare::lowest_point(sim);
     for n in &mut sim.nodes {
         n.pos.y += 0.02 - low;
     }
@@ -247,7 +240,10 @@ fn rest_drift_every_part_within_5_mm() {
         .iter()
         .map(|n| Vec3::from(n.position))
         .collect();
-    let susp = |name: &str| name.starts_with("hub") || name.starts_with("rim");
+    // The running gear's nodes (hubs, wheels: `hub…`, `rim…`, a defined
+    // wheel part's `whe…`) carry the car and deflect under it.
+    let susp =
+        |name: &str| name.starts_with("hub") || name.starts_with("rim") || name.starts_with("whe");
     let fit_ids: Vec<u32> = (0..nd as u32)
         .filter(|&i| !susp(&l.desc.nodes[i as usize].name))
         .collect();
@@ -257,6 +253,16 @@ fn rest_drift_every_part_within_5_mm() {
     let fit = rigid_fit(&design, &now, &fit_ids);
     let broken = l.sim.beams.iter().filter(|b| b.broken).count();
     let bent = l.sim.beams.iter().filter(|b| b.bent()).count();
+    // `GEN3_DRIFT_NODES=eng_,tra_`: each such node's drift (mm, the solver's
+    // frame: x left, y up, z forward).
+    if let Ok(list) = std::env::var("GEN3_DRIFT_NODES") {
+        for (i, n) in l.desc.nodes.iter().enumerate() {
+            if list.split(',').any(|p| n.name.starts_with(p)) {
+                let d = (fit.to_rest(now[i]) - design[i]) * 1e3;
+                println!("  {:<14} {:+7.1} {:+7.1} {:+7.1} mm", n.name, d.x, d.y, d.z);
+            }
+        }
+    }
     let mut worst = Vec::new();
     for p in &l.desc.parts {
         let (mx, at) = p
