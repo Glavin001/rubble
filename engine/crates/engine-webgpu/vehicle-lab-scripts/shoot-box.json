@@ -1,0 +1,12 @@
+{
+  "title": "Steel cuboid into the left door",
+  "mode": "shoot",
+  "scene": "flat",
+  "duration": 4,
+  "events": [
+    { "t": 0.5, "cam": "orbit" },
+    { "t": 1.0, "slow": 0.25 },
+    { "t": 1.0, "fire": { "shape": "box", "size": [0.3, 0.2, 0.4], "material": "steel", "speed": 30, "aim": { "side": "left", "height": 0.8, "along": 0.2, "distance": 5 } } },
+    { "t": 1.8, "slow": 1 }
+  ]
+}
