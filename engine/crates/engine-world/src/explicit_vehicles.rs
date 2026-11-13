@@ -855,6 +855,9 @@ impl World {
         anyhow::ensure!(self.explicit.is_none(), "explicit vehicles are already in this world");
         let x = ExplicitVehicles::new(self, vehicles, def)?;
         self.explicit = Some(Box::new(x));
+        // A threshold ingest made before the vehicles has no slot for their loads yet.
+        #[cfg(feature = "stress")]
+        self.grow_vehicle_ingest();
         Ok(())
     }
 

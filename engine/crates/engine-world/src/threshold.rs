@@ -2033,12 +2033,10 @@ mod imp {
                 events: EVENT_ROOM,
             };
             let table = vec![static_info; capacity.max_colliders as usize];
-            // Two substep slots: the engine's contacts, then the explicit vehicles'
-            // chunk loads (`explicit_vehicles.rs`; merged only while vehicles are coupled).
             let ingest = EngineIngest::new(
                 gpu,
                 capacity.max_contacts,
-                2,
+                shared_ingest_slots(self.explicit.is_some()),
                 capacity.max_bodies,
                 room.chunks,
                 &table,
@@ -2100,6 +2098,7 @@ mod imp {
         /// split or loaded yet, so nothing is lost.
         fn rebuild_shared(&mut self, gpu: &Gpu) -> anyhow::Result<()> {
             let capacity = self.sim.capacity();
+            let vehicles = self.explicit.is_some();
             let sh = self.fracture.shared.as_mut().expect("shared fracture");
             anyhow::ensure!(sh.rebuild && !sh.stepped, "rebuild_shared: a fracture that steps");
             let mut chunks = Ranges::new("chunks", sh.chunks.room);
@@ -2211,7 +2210,7 @@ mod imp {
             sh.ingest = EngineIngest::new(
                 gpu,
                 capacity.max_contacts,
-                1,
+                shared_ingest_slots(vehicles),
                 capacity.max_bodies,
                 room.chunks,
                 &table,
@@ -2423,7 +2422,39 @@ mod imp {
         }
     }
 
+    /// Substep slots of the shared threshold ingest: the engine's contacts (slot 0), and
+    /// with explicit vehicles in the World their chunk loads (slot 1,
+    /// `explicit_vehicles.rs`). Without vehicles its per-substep buffers are the size
+    /// they always were.
+    fn shared_ingest_slots(vehicles: bool) -> u32 {
+        if vehicles {
+            2
+        } else {
+            1
+        }
+    }
+
     impl World {
+        /// Room for the explicit vehicles' chunk loads in a shared threshold ingest made
+        /// before they were added: its per-substep buffers grown to two slots, the
+        /// fracture's bind groups made over them (both are rewritten every frame; nothing
+        /// is carried in them from one step to the next).
+        pub(crate) fn grow_vehicle_ingest(&mut self) {
+            let Some(gpu) = self.fracture.gpu.clone() else { return };
+            let Some(sh) = self.fracture.shared.as_mut() else { return };
+            if sh.ingest.substeps() >= shared_ingest_slots(true) {
+                return;
+            }
+            sh.ingest.grow_substeps(&gpu, shared_ingest_slots(true));
+            let engine = EngineBuffers {
+                bodies: self.sim.body_buffer(),
+                colliders: self.sim.collider_buffer(),
+                contacts: self.sim.contact_buffer(),
+                counters: self.sim.counters_buffer(),
+            };
+            sh.fracture.rebind(&gpu, &engine, &sh.ingest);
+        }
+
         /// The substep slots of the shared threshold ingest (its records, sort and
         /// manifolds buffers scale with it), once a threshold destructible made it.
         #[doc(hidden)]
