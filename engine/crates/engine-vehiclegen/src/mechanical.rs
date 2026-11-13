@@ -182,7 +182,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
     let (t, wy) = (g.half_track, g.wheel_y);
 
     // ---- bumper beams: 5 across × 2 heights
-    for (front, name, kg, yb, h, dz, dep, strength) in [(true, "impact_beam_front", 8.0, 0.47, 0.110, -0.105, 20e3, 60e3), (false, "impact_beam_rear", 6.0, 0.414, 0.090, 0.105, 15e3, 40e3)] {
+    for (front, name, kg, yb, h, dz, dep, strength) in [(true, "impact_beam_front", 8.0, 0.45, 0.110, -0.105, 20e3, 60e3), (false, "impact_beam_rear", 6.0, 0.414, 0.090, 0.105, 15e3, 40e3)] {
         let mut p = MechPart::new(name, "bumper");
         let face = if front { &g.z_nose } else { &g.z_tail };
         let zc = |x: f64| face(f.x(x.abs()), f.y(yb)) + dz;

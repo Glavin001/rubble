@@ -572,7 +572,7 @@ const SIDES: [(&str, f64); 2] = [("l", 1.0), ("r", -1.0)];
 /// A sedan-type steel unibody inside `skin`, placed from `l`.
 ///
 /// Reference dimensions used below (m, before the frame's mapping): the
-/// front rails' lane x 0.43 at bumper height (y 0.47), the rear rails' lane
+/// front rails' lane x 0.43 at bumper height (y 0.44), the rear rails' lane
 /// x 0.49, the floor pan at y 0.222, the firewall at the door's front line
 /// + 0.07.
 pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
@@ -583,7 +583,7 @@ pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
     let rows = l.rows();
 
     // ---- front: crash boxes, rails, radiator support, upper rails, towers, aprons
-    let (xr, yr) = (0.43, 0.47);
+    let (xr, yr) = (0.43, 0.44);
     let (rw, rh) = (0.070, 0.110);
     // the bumper beam's rear face (the beam is its own part): 0.13 behind
     // the nose at the rail lane

@@ -77,7 +77,7 @@ fn reference_sedan_is_pinned() {
     assert_eq!(b.parts.len(), 103);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 466_046);
+    assert_eq!(total, 465_998);
     for (name, n) in [
         ("body_shell", 114_520),
         ("hood", 39_408),

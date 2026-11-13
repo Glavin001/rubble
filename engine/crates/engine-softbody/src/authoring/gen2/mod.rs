@@ -17,6 +17,7 @@ pub mod model;
 pub mod rig;
 pub mod sedan;
 pub mod shape;
+pub mod shell;
 pub mod surface;
 pub mod vg_input;
 
