@@ -1,0 +1,31 @@
+sections
+globals
+100, 0, mat
+nodes
+0, 0, 1, 0
+1, 1, 1, 0
+2, 0, 2, 0
+beams
+0, 1
+sectionconfig 0 zeta
+sectionconfig 0 alpha
+section 0 zeta
+set_beam_defaults_scale 3, 3, 3, 3
+set_node_defaults -1, 1.5, -1, -1
+beams
+1, 2
+end_section
+beams
+0, 2
+section 0 alpha
+nodes
+4, 2, 2, 0
+beams
+2, 4
+set_beam_defaults_scale 2, 2, 2, 2
+end_section
+nodes
+5, 3, 3, 0
+beams
+1, 5
+end

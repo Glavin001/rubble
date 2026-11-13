@@ -1,0 +1,24 @@
+slide rig
+globals
+100, 0, mat
+minimass
+1
+nodes
+0, 0, 1, 0
+1, 1, 1, 0
+2, 2, 1, 0
+3, 3, 1, 0
+4, 0.5, 1.01, 0
+fixes
+0
+1
+2
+3
+
+beams
+0, 1
+2, 1
+2, 3
+slidenodes
+4, 0, 1, 2, 3, s9000
+end
