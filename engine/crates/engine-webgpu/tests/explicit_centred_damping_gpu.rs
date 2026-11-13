@@ -159,6 +159,179 @@ fn breaking_elements_step_bit_for_bit() {
     bit_for_bit("node couplers", cpu, 800);
 }
 
+/// A free body 30 m up, no contact: `points` (m) joined by `beams`, every node
+/// `kg`, every beam `k` N/m and `c` N·s/m, never yielding or breaking (the CPU
+/// test's body, `engine-softbody/tests/centred_damping_objective.rs`), spun about
+/// `axis` through its centre at `rim` m/s at the farthest node. Centred damping
+/// with the objective form (`centred_objective`, spec §39.6).
+fn spinning(
+    points: &[[f32; 3]],
+    beams: &[(usize, usize)],
+    kg: f32,
+    k: f32,
+    c: f32,
+    axis: Vec3,
+    rim: f32,
+) -> ExplicitBeams {
+    let nodes: Vec<String> = points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| format!(r#"["n{i}",{},{},{}]"#, p[0], p[1], p[2]))
+        .collect();
+    let rows: Vec<String> = beams
+        .iter()
+        .map(|(a, b)| format!(r#"["n{a}","n{b}"]"#))
+        .collect();
+    let text = format!(
+        r#"{{"probe":{{"information":{{"name":"probe"}},"slotType":"main",
+        "nodes":[["id","posX","posY","posZ"],{{"nodeWeight":{kg},"collision":false,"selfCollision":false}},{}],
+        "beams":[["id1:","id2:"],{{"beamSpring":{k},"beamDamp":{c},"beamDeform":"FLT_MAX","beamStrength":"FLT_MAX"}},{}]}}}}"#,
+        nodes.join(","),
+        rows.join(",")
+    );
+    let d = load_jbeam(&[("probe.jbeam", &text)], None).unwrap();
+    let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(
+        &d,
+        JbeamWheels::Pressure,
+        Vec3::Y * 30.0,
+        Vec3::ZERO,
+        settings(),
+    )
+    .unwrap();
+    s.settings.centred_objective = true;
+    spin(&mut s, axis, rim);
+    s
+}
+
+fn centre(s: &ExplicitBeams) -> Vec3 {
+    s.nodes.iter().map(|n| n.pos).sum::<Vec3>() / s.nodes.len() as f32
+}
+
+/// Adds a spin about `axis` through the nodes' centre, `rim` m/s at the farthest.
+fn spin(s: &mut ExplicitBeams, axis: Vec3, rim: f32) {
+    let c = centre(s);
+    let far = s
+        .nodes
+        .iter()
+        .map(|n| axis.cross(n.pos - c).length())
+        .fold(0.0f32, f32::max);
+    for n in &mut s.nodes {
+        n.vel += axis.cross(n.pos - c) * (rim / far);
+    }
+}
+
+/// Kinetic energy about the centre of mass (J).
+fn spin_energy(mass: &[f32], vel: &[Vec3]) -> f64 {
+    let m: f64 = mass.iter().map(|&m| m as f64).sum();
+    let vc = mass
+        .iter()
+        .zip(vel)
+        .map(|(&m, v)| v.as_dvec3() * m as f64)
+        .sum::<glam::DVec3>()
+        / m;
+    mass.iter()
+        .zip(vel)
+        .map(|(&m, v)| 0.5 * m as f64 * (v.as_dvec3() - vc).length_squared())
+        .sum()
+}
+
+/// The objective form (`ExplicitBeamsSettings::centred_objective`, spec §39.6;
+/// known-bugs S3) on the GPU. The end-direction form reads a beam that only turns
+/// as shortening and a spinning part gains energy: on the kernels, per-vehicle
+/// frame and wide passes, a free spinning body's kinetic energy about its centre
+/// of mass never rises above its start (the invariant of the CPU test), and every
+/// step is the CPU reference's bit for bit: plain beams (a hub-cap triangle, a
+/// tumbling tetrahedron), a torsion bar and a coupler latch (the latched box
+/// thrown spinning), and the pressure-wheel car rolling (its wheels turn).
+#[test]
+fn objective_form_steps_bit_for_bit_and_a_spinning_part_gains_no_energy() {
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    // The hub cap of known-bugs S3: three 0.1 kg nodes 9.5 cm apart, k 68,000 N/m,
+    // c 20 N·s/m, 20 m/s at the rim (0.18 rad a step). 0.25 s.
+    let r = 0.095 / 3f32.sqrt();
+    let tri: Vec<[f32; 3]> = (0..3)
+        .map(|i| {
+            let a = i as f32 * std::f32::consts::TAU / 3.0;
+            [r * a.cos(), r * a.sin(), 0.0]
+        })
+        .collect();
+    let cap = || {
+        spinning(
+            &tri,
+            &[(0, 1), (1, 2), (2, 0)],
+            0.1,
+            68_000.0,
+            20.0,
+            Vec3::Y,
+            20.0,
+        )
+    };
+    // The energy invariant on the GPU alone, both paths (it does not need the CPU).
+    {
+        let cpu = cap();
+        let mass: Vec<f32> = cpu.nodes.iter().map(|n| n.mass).collect();
+        let start: Vec<Vec3> = cpu.nodes.iter().map(|n| n.vel).collect();
+        let e0 = spin_energy(&mass, &start);
+        for wide in [false, true] {
+            let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+            gpu.set_vehicle_contact(false);
+            assert_eq!(gpu.set_wide(wide), wide);
+            let mut most = e0;
+            for _ in 0..50 {
+                for _ in 0..10 {
+                    gpu.frame(1);
+                }
+                let e = spin_energy(&mass, &gpu.velocities()[0]);
+                assert!(e.is_finite(), "hub cap (wide {wide}): energy not finite");
+                most = most.max(e);
+            }
+            eprintln!("hub cap (wide {wide}): spin energy {e0:.3} J at the start, at most {most:.3} J over 0.25 s");
+            assert!(
+                most <= e0 * 1.001,
+                "hub cap (wide {wide}): a free spinning body gained energy on the GPU: {e0:.3} J to {most:.3} J"
+            );
+        }
+    }
+    bit_for_bit("hub cap spinning at 20 m/s", cap(), 500);
+    let s = 0.6 / 8f32.sqrt();
+    let tet = spinning(
+        &[[s, s, s], [s, -s, -s], [-s, s, -s], [-s, -s, s]],
+        &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
+        1.2,
+        400_000.0,
+        80.0,
+        Vec3::new(0.3, 1.0, 0.5).normalize(),
+        30.0,
+    );
+    bit_for_bit("tetrahedron tumbling at 30 m/s", tet, 1000);
+
+    // A torsion bar, bounded beams, supports and a coupler latch, thrown spinning
+    // 30 m up.
+    let mut boxed = spawn(&latched_box_jbeam(), None, Vec3::new(0.0, 0.0, 5.0));
+    boxed.settings.centred_objective = true;
+    for n in &mut boxed.nodes {
+        n.pos.y += 30.0;
+    }
+    spin(&mut boxed, Vec3::new(1.0, 0.4, 0.2).normalize(), 15.0);
+    bit_for_bit("latched box thrown spinning", boxed, 1000);
+
+    let v = Vec3::new(0.0, 0.0, 10.0);
+    let mut car = spawn(PART2_CAR, Some(JbeamWheels::Pressure), v);
+    car.settings.centred_objective = true;
+    // The form changes the motion of a rolling car (its wheels' beams turn).
+    let (mut on, mut off) = (car.clone(), car.clone());
+    off.settings.centred_objective = false;
+    for _ in 0..200 {
+        on.step();
+        off.step();
+    }
+    assert_ne!(on.positions(), off.positions());
+    bit_for_bit("fixture car at 10 m/s, objective form", car, 2000);
+}
+
 /// Opt-in (`RUBBLE_COMPARE_MODS`): the full-size SUV (`fullsuv_tex`,
 /// `mid-sport.pc`) on its hubs, which does not rest without centred damping (spec
 /// §29.1): 2,000 steps bit for bit, and at rest at the end.
