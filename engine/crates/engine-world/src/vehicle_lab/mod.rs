@@ -1779,11 +1779,11 @@ fn deg(v: &Value, k: &str, d: f64) -> f32 {
 }
 
 impl Lab {
+    /// The scene's own bodies, made once (the ground slab is the World's first collider:
+    /// the page's renderer leaves it to its own ground): the flat arena's slab, which the
+    /// rigid bodies stand on (the car has its own plane), and its ramp and kerb for the
+    /// rigid bodies and the renderer. On the mountain they stand far away.
     fn scene_bodies(world: &mut World, opts: &LabOptions) -> anyhow::Result<Vec<BodyId>> {
-        let mut out = Vec::new();
-        if opts.scene != Scene::Flat {
-            return Ok(out);
-        }
         let fixture = |friction: f32| ShapeDef {
             material: crate::SurfaceMaterial {
                 friction,
@@ -1796,10 +1796,10 @@ impl Lab {
             },
             ..ShapeDef::default()
         };
-        // The ground the rigid bodies stand on (the car has its own plane), and the
-        // arena's ramp and kerb for the rigid bodies and the renderer.
+        let mut out = Vec::new();
+        let poses = Self::scene_poses(opts);
         let g = world.create_body(&BodyDef {
-            position: [0.0, GROUND - 0.5, 0.0],
+            position: poses[0].position,
             ..BodyDef::default()
         })?;
         out.push(g);
@@ -1811,16 +1811,26 @@ impl Lab {
             },
             [400.0, 0.5, 400.0],
         )?;
-        for (centre, half, rot) in arena_fixtures() {
+        for (k, (_, half, _)) in arena_fixtures().into_iter().enumerate() {
             let b = world.create_body(&BodyDef {
-                position: centre.to_array(),
-                rotation: rot.to_array(),
+                position: poses[k + 1].position,
+                rotation: poses[k + 1].rotation,
                 ..BodyDef::default()
             })?;
             out.push(b);
             world.create_box_shape(b, &fixture(0.6), half.to_array())?;
         }
         Ok(out)
+    }
+
+    /// Where the scene's bodies stand: the slab, then the fixtures.
+    fn scene_poses(opts: &LabOptions) -> Vec<Transform> {
+        let away = if opts.scene == Scene::Flat { 0.0 } else { 2.0e5 };
+        let mut out = vec![Transform::new([0.0, GROUND - 0.5 - away, 0.0], Quat::IDENTITY.to_array())];
+        for (centre, _, rot) in arena_fixtures() {
+            out.push(Transform::new((centre - Vec3::new(0.0, away, 0.0)).to_array(), rot.to_array()));
+        }
+        out
     }
 
     fn cars(
@@ -1980,12 +1990,9 @@ impl Lab {
                 let _ = world.destroy_body(b);
             }
         }
-        for b in self.scene_bodies.drain(..) {
-            if world.body_is_valid(b) {
-                let _ = world.destroy_body(b);
-            }
+        for (b, pose) in self.scene_bodies.iter().zip(Self::scene_poses(&opts)) {
+            world.body_set_transform(*b, pose)?;
         }
-        self.scene_bodies = Self::scene_bodies(world, &opts)?;
         if let Some(x) = world.explicit_vehicles_mut() {
             x.set_drive_input(0, DriveInput::default());
         }
