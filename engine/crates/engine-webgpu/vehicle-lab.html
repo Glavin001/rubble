@@ -95,6 +95,7 @@
         <div class="row"><span class="muted">roughness</span><input type="range" id="roughness" data-opt="restart" min="0" max="1" step="0.05" value="0.6" /><b id="roughnessOut"></b></div>
         <div class="row"><span class="muted">launch</span><input type="range" id="launch" data-opt="restart" min="0" max="40" step="1" value="14" /><b id="launchOut"></b>
           <span class="muted">loose rocks per chunk</span><input type="number" id="loose" data-opt="restart" value="0" min="0" max="16" /></div>
+        <div class="row"><span class="muted">start</span><input type="number" id="start" data-opt="restart" value="0" min="0" max="100000" step="1000" style="width:5.5rem" /> m down the fall line <span class="note">(far from the origin: a precision check)</span></div>
       </div>
       <div class="mode drive">
         <h2>Obstacles, ahead of the car</h2>
@@ -295,7 +296,7 @@
     const DEPTH = 'depth32float', SAMPLES = 4;
     let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0;
     const scene = () => (mode === 'mountain' ? 'mountain' : 'flat');
-    const mountainSpec = () => ({ seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide') });
+    const mountainSpec = () => ({ seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide'), start: get('start') });
     const configure = () => {
       const dpr = Math.min(devicePixelRatio || 1, 2);
       canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));

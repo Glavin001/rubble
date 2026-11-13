@@ -38,6 +38,9 @@ pub struct MountainSpec {
     /// When the car comes to rest on the mountain, a boulder is thrown at it from up the
     /// slope (a dynamic rigid body), so the fall goes on.
     pub rockslide: bool,
+    /// Where the run starts, metres down the fall line from the lip (0: off the lip). A
+    /// start kilometres down tests the mountain far from the World's origin.
+    pub start: f32,
 }
 
 impl Default for MountainSpec {
@@ -55,6 +58,7 @@ impl Default for MountainSpec {
             launch: 14.0,
             loose: 0,
             rockslide: true,
+            start: 0.0,
         }
     }
 }
@@ -132,6 +136,7 @@ impl MountainSpec {
         self.behind = self.behind.clamp(1, 8);
         self.launch = self.launch.clamp(0.0, 60.0);
         self.loose = self.loose.min(16);
+        self.start = if self.start.is_finite() { self.start.clamp(0.0, 100_000.0) } else { 0.0 };
         self
     }
 

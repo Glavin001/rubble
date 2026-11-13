@@ -172,6 +172,7 @@ impl LabOptions {
                 behind: num(&m, "behind", f64::from(dm.behind)) as u32,
                 launch: num(&m, "launch", f64::from(dm.launch)) as f32,
                 loose: num(&m, "loose", f64::from(dm.loose)) as u32,
+                start: num(&m, "start", f64::from(dm.start)) as f32,
                 rockslide: m
                     .get("rockslide")
                     .and_then(Value::as_bool)
@@ -1602,6 +1603,12 @@ pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>
         hi = hi.max(n.pos);
     }
     let mid = 0.5 * (lo + hi);
+    let mountain_start = Start {
+        speed: opts.mountain.launch,
+        at: [0.0, 0.5 * (hi.z - lo.z) + 0.3],
+        lift: 0.3,
+        ..Start::default()
+    };
     let start = start.unwrap_or(if mountain {
         // Just off the lip (its rear clear of it), at the launch speed.
         Start {
@@ -1626,6 +1633,11 @@ pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>
         n.vel = vel;
     }
     car.origin = Vec3::ZERO;
+    if mountain && opts.mountain.start > 0.0 && start == mountain_start {
+        // A run that starts down the mountain: the car 2 m over the fall line there, its
+        // nodes about its own origin (as the solver's rebase leaves them).
+        car.origin = (opts.mountain.line(f64::from(opts.mountain.start)) + DVec3::new(0.0, 2.0, 0.0)).as_vec3();
+    }
     car.ground = ground;
     if start.speed != 0.0 && start.lateral == 0.0 {
         if let Some(d) = car.drive.as_mut() {
@@ -1652,6 +1664,9 @@ pub fn lab_world_def(opts: &LabOptions) -> WorldDef {
     def.gravity = [0.0, GRAVITY, 0.0];
     // The mountain run goes down for kilometres.
     def.kill_bounds = Some(KillBounds::below(-1.0e6));
+    // Eight steps' results may be in flight (3 by default): a page whose frames run
+    // late, or whose readbacks arrive late, can still take every step real time owes.
+    def.readback_frames = 8;
     let _ = opts;
     def.contacts = ContactStorage::Persistent;
     if opts.sleep {

@@ -87,6 +87,25 @@ The BeamNG mod's shared tyre content isn't converted. On pressure wheels it ride
   - *Still open:* the front hubs still leave the ground (+19 cm). Weaker upper structure trades against overlap (upper band × 0.2: 117 L); a stiffer cross-section lifts more (× 6: 0.96 m). What is left is the floor striking the ground and the contact's height, which the node-only vehicle contact (item 1 above) sets as much as the lattice does.
 - **Not measured:** the ETK pair and the old sedan1 head on (hypothesis 5).
 
+### L1. A small projectile passes through a car with node-only contact (Confirmed, CPU and GPU World)
+- **Measured** (`vehicle_lab --measure spheres`, [vehicle-lab.md](../vehicle-lab.md)): a 0.1 m steel sphere (32.9 kg) into the authored sedan's side passes through at 20, 40 and 60 m/s with surface contact off, giving 5–45 % of its momentum. With surface contact on it is stopped or bounces at every speed, never inside the hull.
+- **This is B1's second mechanism** (node-only contact) for projectiles. Not tunnelling: the result is the same at 20 m/s.
+- **Decision (the user's):** surface contact as the default for cars that meet small or sharp bodies; it costs 2–5 ms of GPU per step while in contact (generated sedan, Chrome).
+
+### L2. The World and the CPU reference disagree on a heavy projectile (Confirmed)
+- **Measured:** a 188 kg steel cuboid at 30 m/s into the door, surface contact off: the CPU reference (the proxy carries on from where its window ended) gives the car 98 % of its momentum; the GPU World gives 70 % and the cuboid leaves at 9 m/s. Its corners end 0.44–0.58 m inside the car's hull either way.
+- **Cause (hypothesis, from B1's first mechanism):** the World's rigid step moves the body from its own pose with the window's impulse applied a step later.
+
+### L3. Kinematic plates do not sink into the car (Confirmed: not a bug)
+- **Measured** (`vehicle_lab --measure plates`): at 0.02–0.5 m/s the deepest node inside a top or side plate is 0–15 mm, CPU reference and GPU World, with no growth with speed. B1's 25 cm needs a dynamic body. The slow press test (plan 2e) can use kinematic World plates as they are.
+- **The explicit solver's own static shapes cannot be the plates:** they have no velocity and are fixed at upload on the GPU. Teleported each step on the CPU, nodes pass through (118–150 mm of a 150 mm half thickness).
+
+### L4. A car comes to rest on a 42–46° rock slope (Confirmed: the contact surface's friction)
+The static-shape rule's surface has static friction 1.2 (50°) and kinetic 0.75 (37°). The lab's mountain defaults to 50° and throws a boulder at a car at rest. Not a defect; recorded because it sets the mountain's design.
+
+### L5. brick-ring-drive.html may pass the pacer its slow factor upside down (Suspected)
+`FramePacer::advance(dt, slow, max)` takes how many times slower than real time (4 for ×¼). The ring page passes 0.25 for its slow motion. Seen while writing the lab's loop, which had the same mistake (live slow motion ran at ×1); not checked on the ring page.
+
 ## Capacity and performance
 
 ### C1. Coupling shape room: 1,024 shapes per car can be exceeded (Confirmed)
