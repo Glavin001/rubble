@@ -264,8 +264,10 @@ fn modes(
             // Mode shape (mass-weighted coords) → kinetic share per label.
             let mut sh = vec![0.0f64; nlabels];
             let mut per_node = vec![0.0f64; nf];
+            let mut shape = vec![0.0f64; n];
             for i in 0..n {
                 let y: f64 = (0..p).map(|a| vecs[a * p + m] * x[a][i]).sum();
+                shape[i] = y;
                 let lb = label[free[i / 3]];
                 if lb < nlabels {
                     sh[lb] += y * y;
@@ -284,7 +286,16 @@ fn modes(
                 v.sort_by(|a, b| b.0.total_cmp(&a.0));
                 eprintln!(
                     "  mode {f:.1} Hz (of {nf} nodes): {}",
-                    v.iter().take(5).map(|&(e, i)| format!("{} {:.2}", names.get(i).map_or("?", |s| s.as_str()), e)).collect::<Vec<_>>().join(", ")
+                    v.iter()
+                        .take(5)
+                        .map(|&(e, i)| {
+                            // The node's direction of motion (solver frame).
+                            let k = at[i];
+                            let d = DVec3::new(shape[3 * k], shape[3 * k + 1], shape[3 * k + 2]).normalize_or_zero();
+                            format!("{} {:.2} ({:+.1},{:+.1},{:+.1})", names.get(i).map_or("?", |s| s.as_str()), e, d.x, d.y, d.z)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
             let mut out: Vec<f64> = sh.into_iter().map(|v| v / t).collect();
@@ -844,13 +855,24 @@ fn run(
             }
             if let Some(v) = v {
                 if k % 10 == 9 {
-                    let beams: Vec<BeamState> = s
-                        .beams
-                        .iter()
-                        .map(|b| BeamState { broken: b.broken, rest: b.rest })
-                        .collect();
+                    // On raycast wheels the solver's beam list is not the
+                    // template's (no tyre beams): the mesh then follows the
+                    // nodes with every damage unit intact, which holds while
+                    // nothing bends or breaks (the run reports both).
+                    let beams: Vec<BeamState> = if s.beams.len() == rest_beams.len() {
+                        s.beams
+                            .iter()
+                            .map(|b| BeamState { broken: b.broken, rest: b.rest })
+                            .collect()
+                    } else {
+                        rest_beams.clone()
+                    };
                     let u = unit_states(v, &beams);
-                    let (pv, _) = deform_beams(v, &now, Some(&u), Some(&beams));
+                    // Tyre nodes a raycast car does not have stay at the
+                    // template's (wheel vertices are not sampled).
+                    let mut now_v = now.clone();
+                    now_v.extend_from_slice(&rest[now.len().min(rest.len())..]);
+                    let (pv, _) = deform_beams(v, &now_v, Some(&u), Some(&beams));
                     for (c, verts) in sets.vcats.iter().enumerate() {
                         for (j, &i) in verts.iter().enumerate() {
                             if pv[i].is_finite() {
@@ -1239,7 +1261,10 @@ fn main() {
         // (a) Spawn and settle 4 s.
         let mut sp = spawn(&car);
         let t1 = std::time::Instant::now();
-        let vis_on = !std::env::var("RAYCAST").is_ok_and(|v| v == "1");
+        // The visible mesh is measured on pressure wheels by default; `VIS=1`
+        // measures it on raycast wheels too (the bindings are by non-tyre node).
+        let vis_on = !std::env::var("RAYCAST").is_ok_and(|v| v == "1")
+            || std::env::var("VIS").is_ok_and(|v| v == "1");
         let r = run(&car, &sets, &mut sp, 4.0, &zero, vis_on);
         eprintln!("{name}: spawn run {:.1} s", t1.elapsed().as_secs_f32());
         report_series(&format!("{name}: spawn (2 cm drop on its own wheels), settle 4 s"), &r, 3);

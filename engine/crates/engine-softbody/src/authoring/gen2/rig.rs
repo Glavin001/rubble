@@ -3819,6 +3819,8 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     r.car.mass_floor = Some(0.7);
     r.car.row_cap_contact_only = false;
     r.car.centred_damping = true;
+    // (`RIG_BOUNDED_STOPS=1`: the stops as BOUNDED beams, as before.)
+    r.car.stops_in_bound = std::env::var("RIG_BOUNDED_STOPS").map_or(true, |v| v != "1");
     if census {
         r.car.bumper_zeta = Some(BUMPER_ZETA);
     }
