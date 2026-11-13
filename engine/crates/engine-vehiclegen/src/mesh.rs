@@ -49,6 +49,17 @@ impl Mat {
     }
 }
 
+/// What a vertex of a solid part is: the drawn skin (the surface the body
+/// was cut from), a hem or edge wall, or the inner face behind the skin.
+/// Parts that are not built as skin + walls + inner face are all `Outer`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Surf {
+    Outer = 0,
+    Edge = 1,
+    Inner = 2,
+}
+
 thread_local! {
     static ISLAND: Cell<i32> = const { Cell::new(100000) };
 }
@@ -80,6 +91,8 @@ pub struct Mesh {
     pub ti: Vec<i32>,
     /// per-vertex colour (lamp lens tints) or None
     pub col: Option<Vec<[f64; 4]>>,
+    /// per-vertex surface tag of a solid part (None: every vertex `Outer`)
+    pub surf: Option<Vec<Surf>>,
 }
 
 /// Round half to even, as `np.round` does.
@@ -119,6 +132,7 @@ impl Mesh {
             ti: vec![island; nt],
             t: tris,
             col: None,
+            surf: None,
         }
     }
 
@@ -131,6 +145,14 @@ impl Mesh {
                 None => a.extend(std::iter::repeat_n([1.0; 4], o.v.len())),
             }
             self.col = Some(a);
+        }
+        if self.surf.is_some() || o.surf.is_some() {
+            let mut a = self.surf.take().unwrap_or_else(|| vec![Surf::Outer; self.v.len()]);
+            match &o.surf {
+                Some(b) => a.extend_from_slice(b),
+                None => a.extend(std::iter::repeat_n(Surf::Outer, o.v.len())),
+            }
+            self.surf = Some(a);
         }
         self.v.extend_from_slice(&o.v);
         self.q.extend(o.q.iter().map(|f| f.map(|i| i + n)));
@@ -236,6 +258,9 @@ impl Mesh {
         if let Some(c) = &self.col {
             self.col = Some(first.iter().map(|&i| c[i]).collect());
         }
+        if let Some(c) = &self.surf {
+            self.surf = Some(first.iter().map(|&i| c[i]).collect());
+        }
         for f in &mut self.q {
             *f = f.map(|i| inv[i as usize]);
         }
@@ -320,6 +345,58 @@ impl Mesh {
     /// Faces as index lists (quads then triangles), the Python `faces_list`.
     pub fn faces(&self) -> Vec<Vec<u32>> {
         self.q.iter().map(|f| f.to_vec()).chain(self.t.iter().map(|f| f.to_vec())).collect()
+    }
+
+    /// The surface tag of vertex i.
+    #[inline]
+    pub fn surf_of(&self, i: usize) -> Surf {
+        self.surf.as_ref().map_or(Surf::Outer, |s| s[i])
+    }
+
+    /// Only the faces whose vertices are all `Outer` (a solid part's drawn
+    /// skin, as the sheet it was cut as), unused vertices dropped.
+    pub fn outer_only(&self) -> Mesh {
+        let Some(surf) = &self.surf else { return self.clone() };
+        // the skin's vertices keep their order
+        let mut remap = vec![u32::MAX; self.v.len()];
+        let mut m = Mesh::new();
+        let mut col: Option<Vec<[f64; 4]>> = self.col.as_ref().map(|_| Vec::new());
+        let outer = |f: &[u32]| f.iter().all(|&i| surf[i as usize] == Surf::Outer);
+        for f in self.q.iter().map(|f| &f[..]).chain(self.t.iter().map(|f| &f[..])).filter(|f| outer(f)) {
+            for &i in f {
+                remap[i as usize] = 0;
+            }
+        }
+        for i in 0..self.v.len() {
+            if remap[i] == 0 {
+                remap[i] = m.v.len() as u32;
+                m.v.push(self.v[i]);
+                if let (Some(c), Some(src)) = (&mut col, &self.col) {
+                    c.push(src[i]);
+                }
+            }
+        }
+        let id = |i: u32, _: &mut Mesh| -> u32 { remap[i as usize] };
+        for (k, f) in self.q.iter().enumerate() {
+            if f.iter().all(|&i| surf[i as usize] == Surf::Outer) {
+                let g = [id(f[0], &mut m), id(f[1], &mut m), id(f[2], &mut m), id(f[3], &mut m)];
+                m.q.push(g);
+                m.qm.push(self.qm[k]);
+                m.quv.push(self.quv[k]);
+                m.qi.push(self.qi[k]);
+            }
+        }
+        for (k, f) in self.t.iter().enumerate() {
+            if f.iter().all(|&i| surf[i as usize] == Surf::Outer) {
+                let g = [id(f[0], &mut m), id(f[1], &mut m), id(f[2], &mut m)];
+                m.t.push(g);
+                m.tm.push(self.tm[k]);
+                m.tuv.push(self.tuv[k]);
+                m.ti.push(self.ti[k]);
+            }
+        }
+        m.col = col;
+        m
     }
 
     pub fn set_islands(&mut self, id: i32) {

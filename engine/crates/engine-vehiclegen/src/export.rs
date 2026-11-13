@@ -24,6 +24,8 @@ pub struct RenderPart {
     pub uvs: Vec<f32>,
     /// RGBA per vertex, when the part has vertex colours (lamp lenses)
     pub colors: Option<Vec<f32>>,
+    /// surface tag per vertex (outer skin / edge wall / inner face)
+    pub surf: Vec<crate::mesh::Surf>,
     pub indices: Vec<u32>,
     /// (material, first index, index count)
     pub groups: Vec<(Mat, u32, u32)>,
@@ -58,6 +60,12 @@ fn tri_corners(m: &Mesh) -> Vec<([u32; 3], [glam::DVec2; 3], Mat)> {
         out.push((*f, m.tuv[i], m.tm[i]));
     }
     out
+}
+
+/// A mesh as the triangles the export writes (quads split along their
+/// shorter diagonal).
+pub fn split_triangles(m: &Mesh) -> Vec<[u32; 3]> {
+    tri_corners(m).into_iter().map(|t| t.0).collect()
 }
 
 /// Flatten a part to render buffers.
@@ -107,6 +115,7 @@ pub fn render_part(name: &str, m: &Mesh) -> RenderPart {
                 rp.positions.extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
                 rp.normals.extend_from_slice(&[n.x as f32, n.y as f32, n.z as f32]);
                 rp.uvs.extend_from_slice(&[uv[c].x as f32, uv[c].y as f32]);
+                rp.surf.push(m.surf_of(vi as usize));
                 if let Some(col) = &m.col {
                     let c = col[vi as usize];
                     colors.extend_from_slice(&[c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32]);
@@ -218,12 +227,20 @@ pub fn glb(parts: &[RenderPart], markers: &[Marker], paint: [f64; 3], metallic: 
         let nrm = bin.f32_attr(&p.normals, 3, "VEC3", false);
         let uv = bin.f32_attr(&p.uvs, 2, "VEC2", false);
         let col = p.colors.as_ref().map(|c| bin.f32_attr(c, 4, "VEC4", false));
+        // solid parts: 0 outer skin, 1 edge wall, 2 inner face
+        let surf = p.surf.iter().any(|s| *s != crate::mesh::Surf::Outer).then(|| {
+            let d: Vec<f32> = p.surf.iter().map(|s| *s as u8 as f32).collect();
+            bin.f32_attr(&d, 1, "SCALAR", false)
+        });
         let mut prims = Vec::new();
         for &(mat, start, count) in &p.groups {
             let idx = bin.indices(&p.indices[start as usize..(start + count) as usize]);
             let mut attrs = json!({ "POSITION": pos, "NORMAL": nrm, "TEXCOORD_0": uv });
             if let Some(c) = col {
                 attrs["COLOR_0"] = json!(c);
+            }
+            if let Some(s) = surf {
+                attrs["_SURFACE"] = json!(s);
             }
             prims.push(json!({ "attributes": attrs, "indices": idx, "material": mat as usize }));
         }

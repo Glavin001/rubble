@@ -31,7 +31,7 @@ fn nrm(x: DVec3) -> DVec3 {
 }
 
 /// Python's float floor division `a // b` (CPython `float_floor_div`).
-fn py_floordiv(vx: f64, wx: f64) -> f64 {
+pub(crate) fn py_floordiv(vx: f64, wx: f64) -> f64 {
     let m = vx % wx; // C fmod
     let mut div = (vx - m) / wx;
     if m != 0.0 && ((wx < 0.0) != (m < 0.0)) {

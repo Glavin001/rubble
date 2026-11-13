@@ -1,18 +1,51 @@
-//! Whole-vehicle builds: the reference sedan is pinned to the Python
-//! generator's output (counts below come from engine/tools/vehicle-gen,
-//! `tools/stats.py sedan`, and match it part for part), and parametric
-//! builds keep the art spec's structure.
+//! Whole-vehicle builds.
+//!
+//! The reference sedan as solid parts (the default) is pinned to this
+//! generator's own output, and every panel and pane is checked to be a closed
+//! solid: no open border, faces outward, a positive volume, walls within a
+//! thickness band, no face cutting through another, the art spec's triangle
+//! budgets. The legacy sheet build (`BuildOpts::solid = false`) stays pinned
+//! to the Python generator (counts from engine/tools/vehicle-gen,
+//! `tools/stats.py sedan`). Parametric builds keep the structure.
 
+use engine_vehiclegen::mesh::Surf;
+use engine_vehiclegen::solid::{check, self_intersections};
 use engine_vehiclegen::{build, design_from_json, BuildOpts};
 
 fn tris(b: &engine_vehiclegen::Built, name: &str) -> usize {
     b.parts.get(name).unwrap_or_else(|| panic!("no part {name}")).ntris()
 }
 
+/// The solid parts: (name prefix, least and greatest wall thickness in mm,
+/// closed pieces).
+const SOLIDS: [(&str, f64, f64, usize); 12] = [
+    ("door_F", 2.5, 55.0, 1),
+    ("door_R", 2.5, 55.0, 1),
+    ("hood", 8.0, 40.0, 1),
+    ("trunk_lid", 8.0, 40.0, 1),
+    ("fender_F", 4.5, 30.0, 1),
+    ("bumper_", 4.5, 30.0, 1),
+    // the shell, two sill strips and the windscreen reveal (two pieces)
+    ("body_shell", 2.5, 50.0, 5),
+    ("glass_", 4.4, 4.6, 1),
+    ("headlight_", 0.5, 4.3, 1),
+    ("taillight_", 2.0, 4.3, 1),
+    ("door_trim_F", 5.9, 18.1, 2),
+    // the rear card folds behind the wheel arch (the sheet card does too)
+    ("door_trim_R", 1.0, 18.1, 2),
+];
+
+fn solid_spec(name: &str) -> Option<(f64, f64, usize)> {
+    if name.ends_with("_housing") {
+        return None;
+    }
+    SOLIDS.iter().find(|s| name.starts_with(s.0)).map(|s| (s.1, s.2, s.3))
+}
+
 #[test]
-fn reference_sedan_matches_the_python_generator() {
+fn reference_sedan_legacy_sheets_match_the_python_generator() {
     let d = design_from_json("sedan", "{}").unwrap();
-    let b = build(d.as_ref(), BuildOpts::default());
+    let b = build(d.as_ref(), BuildOpts { solid: false, ..Default::default() });
     assert_eq!(b.parts.len(), 68);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
@@ -20,10 +53,140 @@ fn reference_sedan_matches_the_python_generator() {
     for (name, n) in [("body_shell", 55_160), ("hood", 34_008), ("door_FL", 11_376), ("door_RL", 9_872), ("trunk_lid", 13_552), ("glass_windshield", 5_280), ("tyre_FL", 7_872), ("rim_FL", 4_840), ("grille", 3_660), ("door_trim_FL", 3_814), ("headliner", 5_310)] {
         assert_eq!(tris(&b, name), n, "{name}");
     }
+    assert!(b.parts.0.iter().all(|(_, m)| m.surf.is_none()));
     // the body is symmetric about x = 0 (to microns: relaxation and insets
     // run over the welded mesh, as in the Python)
     let (lo, hi) = b.parts.get("body_shell").unwrap().bbox();
     assert!((lo.x + hi.x).abs() < 1e-5, "{lo} {hi}");
+}
+
+#[test]
+fn reference_sedan_is_pinned() {
+    let d = design_from_json("sedan", "{}").unwrap();
+    let b = build(d.as_ref(), BuildOpts::default());
+    assert_eq!(b.parts.len(), 68);
+    assert_eq!(b.markers.len(), 42);
+    let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
+    assert_eq!(total, 435_410);
+    for (name, n) in [
+        ("body_shell", 111_632),
+        ("hood", 39_408),
+        ("door_FL", 15_704),
+        ("door_RL", 13_880),
+        ("trunk_lid", 17_512),
+        ("fender_FL", 11_140),
+        ("bumper_front", 15_596),
+        ("bumper_rear", 13_260),
+        ("glass_windshield", 10_976),
+        ("glass_door_FL", 2_740),
+        ("headlight_L_lens", 1_088),
+        ("door_trim_FL", 8_188),
+        ("tyre_FL", 7_872),
+        ("rim_FL", 4_840),
+        ("grille", 3_660),
+        ("headliner", 5_310),
+    ] {
+        assert_eq!(tris(&b, name), n, "{name}");
+    }
+    let (lo, hi) = b.parts.get("body_shell").unwrap().bbox();
+    assert!((lo.x + hi.x).abs() < 1e-5, "{lo} {hi}");
+    // the skin of every solid panel is the legacy sheet's skin
+    let sheet = build(d.as_ref(), BuildOpts { solid: false, ..Default::default() });
+    for name in ["door_FL", "hood", "fender_FR", "bumper_rear", "glass_rear"] {
+        let (a, s) = (b.parts.get(name).unwrap().outer_only(), sheet.parts.get(name).unwrap());
+        for (i, p) in a.v.iter().enumerate() {
+            assert!((*p - s.v[i]).length() < 1e-12, "{name} skin vertex {i}");
+        }
+    }
+}
+
+#[test]
+fn every_panel_and_pane_is_a_closed_solid() {
+    let d = design_from_json("sedan", "{}").unwrap();
+    let b = build(d.as_ref(), BuildOpts::default());
+    let mut seen = 0;
+    for (name, m) in &b.parts.0 {
+        let Some((tmin, tmax, pieces)) = solid_spec(name) else {
+            assert!(m.surf.is_none(), "{name} is tagged but not in the solids table");
+            continue;
+        };
+        seen += 1;
+        let surf = m.surf.as_ref().unwrap_or_else(|| panic!("{name} has no surface tags"));
+        assert_eq!(surf.len(), m.v.len(), "{name}");
+        let count = |s: Surf| surf.iter().filter(|x| **x == s).count();
+        assert!(count(Surf::Inner) > 0 && count(Surf::Outer) >= count(Surf::Inner), "{name}");
+        let r = check(m);
+        // closed: every edge has its opposite, once
+        assert!(r.closed(), "{name}: {} open edges, {} non-manifold", r.boundary_edges, r.nonmanifold_edges);
+        // outward faces: every piece has a positive volume
+        assert_eq!(r.components, pieces, "{name}");
+        assert!(r.min_component_volume > 1e-6, "{name}: a piece's volume is {}", r.min_component_volume);
+        assert!(r.thickness_min * 1e3 >= tmin && r.thickness_max * 1e3 <= tmax, "{name}: thickness {:.2}..{:.2} mm, band {tmin}..{tmax}", r.thickness_min * 1e3, r.thickness_max * 1e3);
+    }
+    assert_eq!(seen, 6 + 2 + 2 + 1 + 8 + 4 + 4, "closures, wings, bumpers, shell, glass, lenses, trims");
+}
+
+/// Faces of a solid cutting through each other, away from places where the
+/// drawn skin already crosses itself (a fold at a tight corner of the sheet,
+/// there in the legacy build too).
+fn new_crossings(m: &engine_vehiclegen::mesh::Mesh) -> usize {
+    let skin = self_intersections(&m.outer_only(), 1);
+    self_intersections(m, 1).into_iter().filter(|p| !skin.iter().any(|s| (*s - *p).length() < 0.03)).count()
+}
+
+#[test]
+fn solids_do_not_cut_through_themselves() {
+    let d = design_from_json("sedan", "{}").unwrap();
+    let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
+    for (name, m) in &b.parts.0 {
+        if m.surf.is_none() {
+            continue;
+        }
+        let n = new_crossings(m);
+        // Known, pinned as ceilings (edge-through-face crossings, each a few
+        // millimetres deep, at tight corners): the headlamp lens where it
+        // wraps the nose's corner (its sheet is creased there), the rear
+        // door cards behind the wheel arch (the sheet card folds there),
+        // and a few wall rows at the lamp openings' and the screen's corners.
+        let ceiling = match name.as_str() {
+            "headlight_L_lens" | "headlight_R_lens" => 80,
+            "door_trim_RL" | "door_trim_RR" => 90,
+            "body_shell" => 20,
+            "door_FL" | "door_FR" => 6,
+            "fender_FL" | "fender_FR" | "bumper_front" => 4,
+            _ => 0,
+        };
+        assert!(n <= ceiling, "{name}: {n} crossings (ceiling {ceiling})");
+    }
+}
+
+#[test]
+fn triangle_budgets_hold() {
+    // docs/vehicle-art-spec.md "Triangle budget", grouped as check.py groups
+    let d = design_from_json("sedan", "{}").unwrap();
+    let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
+    let (mut body, mut interior, mut other, mut total) = (0, 0, 0, 0);
+    let mut wheel = std::collections::BTreeMap::new();
+    for (name, m) in &b.parts.0 {
+        let n = m.ntris();
+        total += n;
+        if ["rim", "tyre", "brake"].iter().any(|p| name.starts_with(p)) {
+            *wheel.entry(name.rsplit('_').next().unwrap().to_string()).or_insert(0) += n;
+        } else if ["body_shell", "hood", "trunk_lid", "tailgate", "door_F", "door_R", "fender_", "bumper_"].iter().any(|p| name.starts_with(p)) {
+            body += n;
+        } else if ["dash", "steering", "seat", "console", "door_trim", "headliner"].iter().any(|p| name.starts_with(p)) {
+            interior += n;
+        } else {
+            other += n;
+        }
+    }
+    let wmax = wheel.values().copied().max().unwrap();
+    println!("body {body}, wheel {wmax}, interior {interior}, other {other}, total {total}");
+    assert!((150_000..=300_000).contains(&body), "body {body}");
+    assert!(wmax <= 15_000, "wheel {wmax}");
+    assert!(interior <= 80_000, "interior {interior}");
+    assert!(other <= 60_000, "lamps, glass, trim, under-bonnet {other}");
+    assert!(total <= 500_000, "total {total}");
 }
 
 #[test]
@@ -40,8 +203,14 @@ fn parametric_builds_keep_the_structure() {
         let want = wb.get("wheelbase").and_then(|v| v.as_f64()).unwrap_or(2.83);
         let z = |n: &str| b.markers.iter().find(|m| m.name == n).unwrap().pos.z;
         assert!((z("wheel_center_FL") - z("wheel_center_RL") - want).abs() < 1e-9, "{p}");
-        for (_, m) in &b.parts.0 {
+        for (name, m) in &b.parts.0 {
             assert!(m.v.iter().all(|v| v.is_finite()), "{p}");
+            // solids stay closed, outward and at least as thick as the floor
+            if let Some((_, tmax, pieces)) = solid_spec(name) {
+                let r = check(m);
+                assert!(r.closed() && r.components == pieces && r.min_component_volume > 1e-6, "{p}: {name}: {r:?}");
+                assert!(r.thickness_min > 4e-4 && r.thickness_max * 1e3 <= tmax + 5.0, "{p}: {name}: {r:?}");
+            }
         }
     }
 }

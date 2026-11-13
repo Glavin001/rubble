@@ -577,6 +577,7 @@ impl Design for Sedan {
             front_z: Rc::new(move |x, y| a.front_z(x, y)),
             rear_z: Rc::new(move |x, y| b.rear_z(x, y)),
             physics: self.p.physics.clone(),
+            surfaces: Vec::new(),
         })
     }
 }
@@ -834,7 +835,9 @@ impl Sedan {
                     isb[i as usize] = true;
                 }
             }
-            out.insert(&format!("door_trim_{s}"), inner_panel(&sk, &isb, 0.085, -1_000_000, 2, Mat::InteriorPlastic));
+            let trim = inner_panel(&sk, &isb, 0.085, -1_000_000, 2, Mat::InteriorPlastic);
+            // solid: a moulded card 18 mm thick, its back 17 mm off the door's inner panel
+            out.insert(&format!("door_trim_{s}"), if cb.extra.contains_key("solid") { crate::solid::slab(&trim, 0.018) } else { trim });
         }
         let zz: Vec<f64> = linspace(-0.05, -0.95, 46).into_iter().map(|z| f.z(z)).collect();
         let vv = linspace(7.35, vm - 7.35, 60);
