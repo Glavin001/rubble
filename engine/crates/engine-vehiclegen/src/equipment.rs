@@ -307,6 +307,7 @@ pub(crate) fn sedan_equipment(g: &Gear, st: &Structure, out: &mut Vec<MechPart>)
     engine_bay(g, st, out);
     body_hardware(g, st, out);
     running_gear(g, st, out);
+    controls(g, st, out);
     for p in &mut out[n0..] {
         p.from_trim = !p.nodes.is_empty();
     }
@@ -1248,4 +1249,80 @@ pub(crate) fn exhaust_mesh(path: &[DVec3], hang: &[usize]) -> Mesh {
         m.add(&box_(p + side * 0.066, DVec3::new(0.012, 0.012, 0.018) + side * 0.004, Mat::Rubber, None));
     }
     m
+}
+
+// ---- 4. steering column and pedals ---------------------------------------------------------
+
+/// The firewall's openings (reference x and y of each one's centre): the
+/// steering shaft's and the brake push rod's. [`crate::structure::unibody`]
+/// leaves the panel's cells there out.
+pub const FIREWALL_HOLES: [(f64, f64); 2] = [(0.38, 0.493), (0.38, 0.665)];
+
+fn controls(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
+    let f = &g.f;
+    let steel = Mat::MetalBare;
+    let z_fw = sh(st, "sh_b1_ol").z;
+    let x = f.x(FIREWALL_HOLES[0].0);
+    // ---- steering column: the tube from under the instrument panel to the
+    // firewall on the wheel's axis, a joint each side of the firewall, and
+    // the intermediate shaft down to the rack's pinion
+    {
+        let mut p = MechPart::new("steering_column", "controls");
+        // (the wheel's centre and axis: `Sedan::make_parts`)
+        let wheel = DVec3::new(x, f.y(0.84), f.z(0.17));
+        let tilt = 24.0f64.to_radians();
+        let d = DVec3::new(0.0, -tilt.sin(), tilt.cos());
+        let on = |z: f64| wheel + d * ((z - wheel.z) / d.z);
+        // from under the panel (its underside is 0.144 m below the wheel's centre)
+        let top = wheel + d * (0.186 / tilt.sin());
+        let (wall_in, wall_out) = (on(z_fw - 0.050), on(z_fw + 0.045));
+        p.mesh.add(&drum(top, wall_in, 0.022, 12, Mat::TrimBlack));
+        p.mesh.add(&cyl(wall_in, wall_out, 0.010));
+        p.mesh.add(&drum(wall_in - d * 0.004, wall_in + d * 0.010, 0.026, 12, steel));
+        // the pinion on the rack, left of the engine; the shaft drops to a
+        // second joint and runs in under the engine's mount ear
+        let rack = f.p(0.262, 0.338, g.axle_f + 0.135);
+        let pin = rack + DVec3::new(0.0, 0.024, -0.014);
+        p.mesh.add(&drum(rack, pin, 0.017, 10, steel));
+        let mid = f.p(0.33, 0.360, g.axle_f - 0.115);
+        let run = [wall_out, mid, pin];
+        for w in run.windows(2) {
+            let dj = (w[1] - w[0]).normalize();
+            p.mesh.add(&cyl(w[0] + dj * 0.012, w[1] - dj * 0.012, 0.010));
+        }
+        for j in [wall_out, mid] {
+            p.mesh.add(&box_(j, DVec3::splat(0.015), steel, None));
+        }
+        let nu = p.node("u", top + d * 0.03, 2.2);
+        let nf = p.node("f", on(z_fw), 1.6);
+        let np = p.node("p", pin, 1.2);
+        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 60.0, 4e3, INF), deform_group: None });
+        let dash: Vec<String> = ["das_ml", "das_tl", "das_c", "das_bl"].iter().map(|n| n.to_string()).collect();
+        p.hold_from("steering_column_dash", vec![nu], &dash, 3, vals(0.0, 60.0, 4e3, 8e3));
+        p.hold_from("steering_column_firewall", vec![nf], &shn(&["b1_ol".into(), "b1_il".into(), "c1_1tl".into()]), 3, vals(0.0, 60.0, 3e3, 6e3));
+        let gear: Vec<String> = ["ster_l", "subf_kl", "subf_fl"].iter().map(|n| n.to_string()).collect();
+        p.hold_from("steering_column_rack", vec![np], &gear, 3, vals(0.0, 60.0, 5e3, 10e3));
+        out.push(p);
+    }
+    // ---- pedal box on the firewall: bracket, pivot shaft, the brake pedal
+    // with its push rod through to the booster, the accelerator
+    {
+        let mut p = MechPart::new("pedal_box", "controls");
+        let (yb, zb) = (f.y(FIREWALL_HOLES[1].1), z_fw - 0.045);
+        let (xb, xa) = (f.x(0.33), f.x(0.215));
+        p.mesh.add(&span((xa - 0.025, x + 0.020), (yb - 0.022, yb + 0.030), (zb + 0.012, z_fw - 0.008), steel));
+        p.mesh.add(&drum(DVec3::new(xa - 0.020, yb, zb), DVec3::new(x + 0.015, yb, zb), 0.008, 8, steel));
+        // brake: the arm down to its pad, a lever to the push rod
+        let pad = DVec3::new(xb, f.y(0.40), zb - 0.105);
+        p.mesh.add(&strap(DVec3::new(xb, yb, zb), pad, DVec3::X, 0.016, 0.008, steel));
+        p.mesh.add(&box_(pad, DVec3::new(0.032, 0.026, 0.006), Mat::Rubber, Some(crate::mesh::rot_x(-0.38))));
+        p.mesh.add(&cyl(DVec3::new(x, yb, zb + 0.004), DVec3::new(x, yb, z_fw + 0.006), 0.006));
+        // accelerator: a slim arm and a long pad
+        let pad_a = DVec3::new(xa, f.y(0.37), zb - 0.060);
+        p.mesh.add(&strap(DVec3::new(xa, yb - 0.004, zb), pad_a, DVec3::X, 0.010, 0.006, steel));
+        p.mesh.add(&box_(pad_a, DVec3::new(0.020, 0.050, 0.005), Mat::Rubber, Some(crate::mesh::rot_x(-0.30))));
+        p.tetra(DVec3::new(0.5 * (xa + x), 0.5 * (yb + pad.y), zb - 0.04), DVec3::new(0.5 * (x - xa), 0.5 * (yb - pad.y), 0.045), 3.2, vals(0.0, 40.0, 2e3, INF));
+        p.hold("pedal_box", &["b1_ol", "b1_il", "c1_1tl", "b2_ol", "c2_1l"], 6, BeamKind::Normal, vals(0.0, 60.0, 2500.0, 5000.0));
+        out.push(p);
+    }
 }

@@ -722,7 +722,9 @@ pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
             // the transmission's opening: the tunnel's mouth
             let xm = 0.5 * (xs[i] + xs[i + 1]);
             let ym = 0.5 * (prof[j].1 + prof[j + 1].1);
-            xm.abs() < tun_w / 2.0 + 0.045 && ym < y_pan + tun_h + 0.02
+            // and the steering shaft's and the brake push rod's
+            let hole = crate::equipment::FIREWALL_HOLES.iter().any(|&(x, y)| xs[i] < x + 0.02 && xs[i + 1] > x - 0.02 && prof[j].1 < y + 0.02 && prof[j + 1].1 > y - 0.02 && prof[j].0 == prof[j + 1].0);
+            hole || (xm.abs() < tun_w / 2.0 + 0.045 && ym < y_pan + tun_h + 0.02)
         };
         let (mesh, area) = panel(xs.len(), prof.len(), |i, j| r(xs[i], prof[j].1, prof[j].0), |i, j| !notch(i, j));
         let m = b.solid("firewall", "firewall", "structure_cabin", Section::Panel, mesh, 0.0, area, 0.9, Grade::Mild);

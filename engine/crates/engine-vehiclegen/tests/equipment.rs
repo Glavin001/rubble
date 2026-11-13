@@ -74,6 +74,9 @@ const PARTS: &[(&str, usize, f64, f64)] = &[
     ("brake_caliper_RR", 0, 0.0, 3.2),
     ("antiroll_bar_front", 4, 5.5, 0.0),
     ("antiroll_bar_rear", 4, 3.5, 0.0),
+    // 4. controls
+    ("steering_column", 3, 5.0, 0.0),
+    ("pedal_box", 4, 3.2, 0.0),
 ];
 
 #[test]
