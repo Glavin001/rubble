@@ -136,9 +136,9 @@ pub enum Scenario {
     Balcony,
     /// A canopy on two pillars; one pillar is shot out.
     Pillar,
-    /// One wall, the same ball at four speeds, side by side.
+    /// Four walls alike, the same ball at four speeds, a wall each.
     SpeedLadder,
-    /// One wall, two shots of equal momentum: light and fast, heavy and slow.
+    /// Two walls alike, two shots of equal momentum: light and fast, heavy and slow.
     EqualMomentum,
 }
 
@@ -273,11 +273,23 @@ impl Blocks {
     }
 }
 
-/// The struck wall of the speed scenarios: 4 m wide (x), 3 m tall, 0.25 m thick (z from 0),
-/// its bottom row anchored.
-fn wall() -> Blocks {
+/// A struck wall's width and the gap to the next (m).
+const WALL_WIDTH: f64 = 2.0;
+const WALL_GAP: f64 = 0.5;
+
+/// Where wall `i` of `n` is centred along x.
+fn wall_x(i: usize, n: usize) -> f64 {
+    (i as f64 - 0.5 * (n as f64 - 1.0)) * (WALL_WIDTH + WALL_GAP)
+}
+
+/// The struck walls of the speed scenarios, one a shot: each 2 m wide (x), 3 m tall, 0.25 m
+/// thick (z from 0), its bottom row anchored, half a metre from the next (no bond between
+/// them: what one shot does to its wall leaves the others as they were).
+fn walls(n: usize) -> Blocks {
     let mut b = Blocks::default();
-    b.grid([-2.0, 0.0, 0.0], [16, 12, 1], |c| c[1] == 0);
+    for i in 0..n {
+        b.grid([wall_x(i, n) - 0.5 * WALL_WIDTH, 0.0, 0.0], [(WALL_WIDTH / B) as usize, 12, 1], |c| c[1] == 0);
+    }
     b
 }
 
@@ -328,8 +340,8 @@ impl Scenario {
         match self {
             Scenario::Balcony => "A balcony should hold a person and snap at the wall under a wrecking ball. Without a load solve it holds anything, forever.",
             Scenario::Pillar => "Take out one of two pillars and the canopy should come down. Without weight in the model it hangs off the other pillar.",
-            Scenario::SpeedLadder => "A thrown ball should bounce, a cannonball should punch a hole and keep going. Without an impact model the wall stops every shot.",
-            Scenario::EqualMomentum => "Two shots with the same momentum: the fast light one holes the wall, the slow heavy one shoves it. Force alone cannot tell them apart.",
+            Scenario::SpeedLadder => "The same ball at four walls: slow, it should stop and crack its wall; fast, it should punch a hole and keep going. Without an impact model every wall stops it; with a damage radius every shot goes through.",
+            Scenario::EqualMomentum => "Two shots with the same momentum, a wall each: the fast light one holes its wall, the slow heavy one shoves its wall over. Force alone cannot tell them apart.",
         }
     }
 
@@ -384,7 +396,7 @@ impl Scenario {
                 [20.0, 100.0, 250.0, 500.0]
                     .into_iter()
                     .enumerate()
-                    .map(|(i, speed)| at_wall(format!("{speed:.0} m/s"), "the same steel ball", -1.5 + i as f64, 1.6, r, steel_ball(r), speed, 0.5 + 1.25 * i as f64))
+                    .map(|(i, speed)| at_wall(format!("{speed:.0} m/s"), "the same steel ball, a wall of its own", wall_x(i, 4), 1.6, r, steel_ball(r), speed, 0.5 + 1.25 * i as f64))
                     .collect()
             }
             Scenario::EqualMomentum => {
@@ -393,8 +405,8 @@ impl Scenario {
                 let heavy_r = 0.4;
                 let heavy = steel_ball(heavy_r);
                 vec![
-                    at_wall(format!("{light:.0} kg at {speed:.0} m/s"), "light and fast", -1.0, 1.6, r, light, speed, 0.5),
-                    at_wall(format!("{heavy:.0} kg at {:.1} m/s", light * speed / heavy), "heavy and slow, the same momentum", 1.0, 1.6, heavy_r, heavy, light * speed / heavy, 2.0),
+                    at_wall(format!("{light:.0} kg at {speed:.0} m/s"), "light and fast", wall_x(0, 2), 1.6, r, light, speed, 0.5),
+                    at_wall(format!("{heavy:.0} kg at {:.1} m/s", light * speed / heavy), "heavy and slow, the same momentum", wall_x(1, 2), 1.6, heavy_r, heavy, light * speed / heavy, 2.0),
                 ]
             }
         }
@@ -420,7 +432,8 @@ impl Scenario {
                 b.grid([-2.0, 2.75, -0.75], [16, 1, 6], |_| false);
                 b
             }
-            Scenario::SpeedLadder | Scenario::EqualMomentum => wall(),
+            Scenario::SpeedLadder => walls(4),
+            Scenario::EqualMomentum => walls(2),
         };
         blocks.pack(self.name(), self.title(), &self.shots())
     }
@@ -450,6 +463,9 @@ pub struct ShotResult {
     pub through: bool,
     /// Bonds broken from its launch until the next shot's.
     pub broke: u32,
+    /// The wall scenarios: its wall came down (the wall's top over where it struck dropped
+    /// more than half a metre).
+    pub wall_fell: bool,
 }
 
 /// A run's numbers so far.
@@ -480,6 +496,9 @@ pub struct Tracker {
     first_break: Option<f64>,
     /// The watched chunk (destructible 0) and its height when placed.
     watch: (u32, f32),
+    /// The wall scenarios: every chunk's (x, height) when placed (a shot's wall is the one
+    /// whose top is over where the shot was launched).
+    placed: Vec<[f32; 2]>,
 }
 
 impl Tracker {
@@ -497,13 +516,31 @@ impl Tracker {
                 watch = (c as u32, poses[o + 1], x);
             }
         }
+        // The wall scenarios: every chunk's (x, height) as placed.
+        let placed = if matches!(scenario, Scenario::SpeedLadder | Scenario::EqualMomentum) {
+            (0..chunks).map(|c| [poses[RECORD_FLOATS * (1 + c)], poses[RECORD_FLOATS * (1 + c) + 1]]).collect()
+        } else {
+            Vec::new()
+        };
         Ok(Tracker {
+            placed,
             scenario,
             flying: Vec::new(),
             broken: 0,
             first_break: None,
             watch: (watch.0, watch.1),
         })
+    }
+
+    /// The wall scenarios: the highest placed chunk nearest `x`, and its height then.
+    fn top_over(&self, x: f32) -> Option<(usize, f32)> {
+        let top = self.placed.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+        self.placed
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| top - p[1] < 1e-3)
+            .min_by(|a, b| (a.1[0] - x).abs().total_cmp(&(b.1[0] - x).abs()))
+            .map(|(c, p)| (c, p[1]))
     }
 
     /// Take in the last polled step: new shots, each shot's motion, the breaks.
@@ -562,6 +599,7 @@ impl Tracker {
                 along,
                 through: wall && travelled > to_back,
                 broke: self.flying.get(n + 1).map_or(self.broken, |next| next.3) - f.3,
+                wall_fell: self.top_over(f.4[0]).is_some_and(|(c, y0)| y0 - poses[RECORD_FLOATS * (1 + c) + 1] > 0.5),
             });
         }
         Ok(Verdict {

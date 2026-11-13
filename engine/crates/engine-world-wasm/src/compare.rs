@@ -102,7 +102,7 @@ impl WebWorld {
             "drop": v.drop, "fell": v.fell,
             "shots": v.shots.iter().map(|s| serde_json::json!({
                 "label": s.label, "launchSpeed": s.launch_speed, "speed": s.speed, "along": s.along,
-                "through": s.through, "broke": s.broke,
+                "through": s.through, "broke": s.broke, "wallFell": s.wall_fell,
             })).collect::<Vec<_>>(),
         }))
     }

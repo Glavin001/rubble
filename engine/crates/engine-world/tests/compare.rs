@@ -21,7 +21,7 @@ fn run(scenario: Scenario, approach: Approach) -> Verdict {
     let r = v.report.as_ref().unwrap();
     println!("{:>34}  bounce {} crater {} spall {} perforate {}; peak utilization {:.2}; {:?}", "", r.bounces, r.craters, r.spalls, r.perforations, r.peak_utilization, r.strikes);
     for s in &v.shots {
-        println!("{:>34}: in {:.0} m/s, now {:.1} m/s ({:+.1} along), broke {}{}", s.label, s.launch_speed, s.speed, s.along, s.broke, if s.through { ", through" } else { "" });
+        println!("{:>34}: in {:.0} m/s, now {:.1} m/s ({:+.1} along), broke {}{}", s.label, s.launch_speed, s.speed, s.along, s.broke, if s.through { ", through" } else { "" }.to_string() + if s.wall_fell { ", wall down" } else { "" });
     }
     v
 }

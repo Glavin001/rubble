@@ -42,7 +42,8 @@ function card(col,v,stats){
  const rows=[];
  for(const s of v.shots){
   const moving=s.launchSpeed>0;
-  const what=!moving?`${s.broke} bonds`:s.through?`through at ${fmt(s.along,0)} m/s · ${s.broke} bonds`:`stopped · ${s.broke} bonds`;
+  const down=s.wallFell?' · wall down':'';
+  const what=(!moving?`${s.broke} bonds`:s.through?`through at ${fmt(s.along,0)} m/s · ${s.broke} bonds`:`stopped · ${s.broke} bonds`)+down;
   rows.push([s.label,what]);
  }
  rows.push(['Bonds broken',`${v.bondsBroken} of ${v.bonds}`]);
