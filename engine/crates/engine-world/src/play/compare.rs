@@ -313,6 +313,35 @@ fn at_wall(label: String, note: &'static str, x: f64, y: f64, radius: f64, mass:
     }
 }
 
+/// The scale scene: `walls` walls of 16 by 16 blocks (256 pieces each; 40 walls are 10,240
+/// pieces), eight to a row, the rows 8 m apart, and a shot at every wall, alternately 100
+/// and 300 m/s, a twentieth of a second apart from a quarter second in. Not one of the
+/// page's scenarios (five columns of it on one GPU measure nothing): a host measures one
+/// approach at a time (`tests/compare.rs` `scale_solo`).
+pub fn scale_pack(walls: usize) -> Vec<u8> {
+    let r = 0.12;
+    let mut b = Blocks::default();
+    let mut shots = Vec::new();
+    for i in 0..walls {
+        let (x, z) = ((i % 8) as f64 * 4.5 - 15.75, -((i / 8) as f64) * 8.0);
+        b.grid([x - 2.0, 0.0, z], [16, 16, 1], |c| c[1] == 0);
+        let speed = if i % 2 == 0 { 100.0 } else { 300.0 };
+        let mut s = at_wall(format!("wall {} at {speed:.0} m/s", i + 1), "the same steel ball", x, 2.0, r, steel_ball(r), speed, 0.25 + 0.05 * i as f64);
+        s.origin[2] += z;
+        shots.push(s);
+    }
+    b.pack("scale", "Forty walls, a shot at each", &shots)
+}
+
+/// The scale scene's lab run under `approach`, at 120 Hz.
+pub fn scale_def(approach: Approach, walls: usize) -> LabDef {
+    LabDef {
+        source: LabSource::Pack { bytes: Arc::new(scale_pack(walls)) },
+        arrangement: LabArrangement::One,
+        settings: approach.settings(120.0),
+    }
+}
+
 impl Scenario {
     pub const ALL: [Scenario; 4] = [Scenario::Balcony, Scenario::Pillar, Scenario::SpeedLadder, Scenario::EqualMomentum];
 

@@ -199,3 +199,48 @@ fn the_blast_gpu_stress_view_shows_the_load_and_changes_nothing() {
     assert!(on.1 > 0.0 && on.1 < 1.0, "its own weight loads it below the fatal limit ({})", on.1);
     assert!(on.2 > on.1, "the weights load it further ({} after {})", on.2, on.1);
 }
+
+/// Each approach alone on the scale scene (10,240 pieces, a shot at every wall), one world on
+/// the GPU at a time: wall time a step with the step's frame read back, against the 8.33 ms
+/// a 120 Hz step has. A measurement, not a check; run it with nothing else on the GPU:
+///
+///   cargo test --release -p engine-world --features stress --test compare scale_solo -- --ignored --nocapture
+///
+/// `COMPARE_APPROACH`: one of them; `COMPARE_WALLS`: the wall count (default 40).
+#[test]
+#[ignore = "a solo performance measurement"]
+fn scale_solo() {
+    use rubble::lab::{Lab, LabAction, LabPlan};
+    let walls: usize = std::env::var("COMPARE_WALLS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let one = std::env::var("COMPARE_APPROACH").ok();
+    println!("{:<17} {:>7} {:>7} {:>7} {:>8} {:>9} {:>9} {:>9} {:>10}", "approach", "pieces", "bonds", "broken", "bodies", "mean ms", "p95 ms", "worst ms", "real time");
+    for a in Approach::ALL {
+        if one.as_deref().is_some_and(|o| o != a.name()) {
+            continue;
+        }
+        let plan = LabPlan::new(&scale_def(a, walls)).unwrap();
+        let mut world = World::new(GpuContext::Default, &plan.world_def().unwrap()).unwrap();
+        let mut lab = Lab::place(&mut world, &plan).unwrap();
+        let shots: Vec<f64> = lab.pack_shots().iter().map(|s| s.launch_at).collect();
+        for (i, at) in shots.iter().enumerate() {
+            lab.queue(&world, &LabAction::PackShot(i as u32), (at * 120.0).round() as u64).unwrap();
+        }
+        // Through the last launch and two seconds on.
+        let steps = ((shots.last().unwrap() + 2.0) * 120.0) as usize;
+        let mut ms = Vec::with_capacity(steps);
+        let mut bodies = 0;
+        for _ in 0..steps {
+            let t = std::time::Instant::now();
+            lab.step(&mut world).unwrap();
+            world.poll_blocking().unwrap();
+            ms.push(t.elapsed().as_secs_f64() * 1e3);
+            bodies = bodies.max(lab.stats(&world).unwrap().bodies);
+        }
+        let st = lab.stats(&world).unwrap();
+        // The first steps build pipelines and upload the scene: not the steady cost.
+        ms.drain(..10);
+        let mean = ms.iter().sum::<f64>() / ms.len() as f64;
+        ms.sort_by(f64::total_cmp);
+        println!("{:<17} {:>7} {:>7} {:>7} {:>8} {:>9.2} {:>9.2} {:>9.2} {:>9.2}x", a.name(), st.chunks, st.bonds, st.bonds - st.bonds_intact, bodies, mean, ms[ms.len() * 95 / 100], ms[ms.len() - 1], 1e3 / 120.0 / mean);
+    }
+}
