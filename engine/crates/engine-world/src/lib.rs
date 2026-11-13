@@ -347,6 +347,8 @@ enum Extra {
     /// after this step: nonzero fails the step.
     ExplicitLoopCap,
     CouplingStatus,
+    /// The explicit vehicles' bounds records (`ExplicitVehicles::bounds_error`).
+    ExplicitBounds,
     /// The live surface's heights, for these views of the ground shape.
     TerrainSurface(ShapeId, Vec<engine_terrain::surface::SurfaceViewRange>),
     /// The surface pass's debris gather.
@@ -2386,6 +2388,10 @@ impl World {
                         extras.push(readback::Extra { kind: Extra::ExplicitLoopCap, buffer, offset, size: 4 });
                         let (buffer, offset) = x.status_word();
                         extras.push(readback::Extra { kind: Extra::CouplingStatus, buffer, offset, size: 4 });
+                        // The state guard: each vehicle's node box and fastest speed as the
+                        // plan saw them (non-finite, or past what the query counts: an error).
+                        let (buffer, offset, size) = x.bounds_extra();
+                        extras.push(readback::Extra { kind: Extra::ExplicitBounds, buffer, offset, size });
                     }
                     if let Some((buffer, offset, size)) = self.explicit.as_ref().and_then(|x| x.sleep_extra()) {
                         extras.push(readback::Extra {
@@ -2992,6 +2998,12 @@ impl World {
                     let bits: u32 = bytemuck::pod_read_unaligned(&bytes[..4]);
                     if let Some(x) = self.explicit.as_ref() {
                         x.status_bits_error(bits).map_err(|e| anyhow::anyhow!("World step {step}: {e}"))?;
+                    }
+                }
+                Extra::ExplicitBounds => {
+                    if let Some(x) = self.explicit.as_ref() {
+                        let words: Vec<u32> = bytemuck::pod_collect_to_vec(bytes);
+                        x.bounds_error(&words).map_err(|e| anyhow::anyhow!("World step {step}: {e}"))?;
                     }
                 }
                 Extra::TerrainSurface(shape, views) => {

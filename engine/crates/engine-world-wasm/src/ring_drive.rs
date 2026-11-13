@@ -170,7 +170,7 @@ impl WebWorld {
             &coupling,
         ))?;
         crate::creation_check(&s.world).await?;
-        Ok(WebWorld { world: s.world })
+        Ok(WebWorld::of(s.world))
     }
 
     /// Whether explicit vehicle `vehicle` drives on raycast wheels.

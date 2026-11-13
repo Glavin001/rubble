@@ -3376,6 +3376,46 @@ impl ExplicitBeams {
         (extents[extents.len() / 2] + 2.0 * self.collision_range).max(0.05)
     }
 
+    /// Diagnostic (reads only): the self-collision pass's load in the current state:
+    /// (live collision triangles, those whose padded box covers more than the grid
+    /// walk's 64 cells, the node box's largest extent in metres). A triangle past the
+    /// 64 cells tests every candidate (`CollisionGrid::gather`, the kernel's
+    /// `GRID_MAX_CELLS`): its cost is the candidate count instead of a few buckets, so
+    /// a car with flung nodes costs up to triangles × candidates tests a step.
+    pub fn self_collision_load(&self) -> (usize, usize, f32) {
+        let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+        for n in &self.nodes {
+            lo = lo.min(n.pos);
+            hi = hi.max(n.pos);
+        }
+        let extent = (hi - lo).max_element();
+        if self.grid_cell <= 0.0 {
+            return (self.triangles.len(), self.triangles.len(), extent);
+        }
+        let vmax = if self.anti_clip { self.max_speed() } else { 0.0 };
+        let (mut live, mut every) = (0, 0);
+        for (t, tri) in self.triangles.iter().enumerate() {
+            if !self.tri_dead.is_empty() && self.tri_dead[t] {
+                continue;
+            }
+            live += 1;
+            let p = tri.nodes.map(|n| self.nodes[n as usize].pos);
+            let reach = if self.anti_clip {
+                let tv = tri.nodes.iter().map(|&i| self.nodes[i as usize].vel.length()).fold(0.0f32, f32::max);
+                self.collision_range + (tv + vmax) * STEP + crate::explicit_contact::CLIP_DEPTH
+            } else {
+                self.collision_range
+            };
+            let f0 = ((p[0].min(p[1]).min(p[2]) - Vec3::splat(reach)) / self.grid_cell).floor();
+            let f1 = ((p[0].max(p[1]).max(p[2]) + Vec3::splat(reach)) / self.grid_cell).floor();
+            let span = f1 - f0 + Vec3::ONE;
+            if !(span.cmple(Vec3::splat(64.0)).all() && span.x * span.y * span.z <= 64.0) {
+                every += 1;
+            }
+        }
+        (live, every, extent)
+    }
+
     /// Collision triangle `t`'s self-collision group: its nodes' group when all
     /// three share one (and the vehicle has [`Self::self_groups`]), else 0.
     pub fn triangle_self_group(&self, t: usize) -> u32 {

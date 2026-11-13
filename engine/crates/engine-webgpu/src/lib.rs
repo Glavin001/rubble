@@ -39,7 +39,10 @@ pub use features::{
 pub use gpu::creation_errors;
 /// The explicit kernels' loop-cap error (every target writes the flag): see
 /// `engine_exec::explicit_plan::EXPLICIT_LOOP_CAP`.
-pub use engine_exec::explicit_plan::{explicit_loop_cap_hit, loop_budget_override};
+pub use engine_exec::explicit_plan::{
+    budget_under, explicit_loop_cap_hit, frame_pass_ceiling, loop_budget, loop_budget_need, loop_budget_override, set_frame_pass_ceiling,
+    worst_case_frame_passes, LOOP_BUDGET_MAX, LOOP_BUDGET_MIN, PASS_CEILING_DEFAULT,
+};
 #[cfg(feature = "gpu")]
 pub use gpu::{
     default_device, default_device_with, hold_gpu_lock, instance_flags, CharacterHandle, MotionEvent, Prewarm, RingEvents, SimSnapshot, SoftEvents, StateMeasure, TerrainStepReport, TerrainStrike, TerrainWatch, WgpuSim, MOVED_BINDING, RestView,

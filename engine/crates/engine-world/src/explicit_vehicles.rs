@@ -71,7 +71,7 @@ const ST_NAMES: [&str; 6] = [
     "more hull planes than the planes room",
     "more impulse records than IMPULSE_CAP",
     "more chunk records than the threshold ingest's rows",
-    "a coupling loop past its cap or pass budget (a corrupt count; the frame is invalid)",
+    "a coupling loop past its cap or pass budget (a corrupt count, or more than the engine's frame pass ceiling allows; the frame is invalid)",
 ];
 /// Windows between status reads.
 const STATUS_EVERY: u64 = 8;
@@ -126,15 +126,22 @@ struct Params {
     loop_budget: u32,
 }
 
-/// The coupling passes' pass budget: four times a bound on one invocation's passes
-/// (every collider; every resting-table head on each of 33 levels; shapes against
-/// shapes, planes and bodies; candidates against candidates; the vehicles), held to
-/// 2^22..2^31. A sound state never reaches it; a corrupt count stops there and sets
-/// ST_LOOP.
+/// The coupling passes' own bound on one invocation's passes: four times (every
+/// collider; every resting-table head on each of 33 levels; shapes against shapes,
+/// planes and bodies; candidates against candidates; the vehicles).
+pub fn coupling_loop_need(colliders: u32, hash_size: u32, shapes: u32, planes: u32, bodies: u32, cand_cap: u32, vehicles: u32) -> u64 {
+    let [c, h, s, pl, b, k, v] = [colliders, hash_size, shapes, planes, bodies, cand_cap, vehicles].map(u64::from);
+    4 * (c + 33 * h + s * (s + pl + b) + k * k + 64 * v + 4096)
+}
+
+/// The coupling passes' pass budget: their bound ([`coupling_loop_need`]), at least
+/// 2^22 and at most the engine's frame pass ceiling
+/// (`engine_exec::explicit_plan::frame_pass_ceiling`). A sound state never reaches it;
+/// a corrupt count stops there and sets ST_LOOP.
 fn coupling_loop_budget(p: &Params) -> u32 {
-    let [c, h, s, pl, b, k, v] = [p.colliders, p.hash_size, p.s, p.planes, p.b, p.cand_cap, p.vehicles].map(u64::from);
-    let unit = c + 33 * h + s * (s + pl + b) + k * k + 64 * v + 4096;
-    engine_webgpu::loop_budget_override().unwrap_or_else(|| (4 * unit).clamp(1 << 22, 1 << 31) as u32)
+    let need = coupling_loop_need(p.colliders, p.hash_size, p.s, p.planes, p.b, p.cand_cap, p.vehicles);
+    engine_webgpu::loop_budget_override()
+        .unwrap_or_else(|| engine_webgpu::budget_under(need, engine_webgpu::frame_pass_ceiling()))
 }
 
 pub(crate) struct ExplicitVehicles {
@@ -193,6 +200,52 @@ pub(crate) struct ExplicitVehicles {
     pub(crate) sleep_mask: Vec<u32>,
     /// Some vehicle was awake in the last delivered frame (or none delivered yet).
     pub(crate) any_awake: bool,
+    /// The smallest cell of the World broadphase table the last plan queried (m; 0: the
+    /// plan scanned every collider), for [`Self::bounds_error`].
+    query_cell: f32,
+}
+
+/// The most broadphase cells a vehicle's swept box may span on an axis
+/// ([`vehicle_bounds_error`]). cpl_query counts the box's cells as a `u32` product of
+/// its three spans: at most 1,027 a side (this, and the query's own padding) the
+/// product stays under 2^32, so the count is the box's and the query visits every cell
+/// or every table head. Past it the product can wrap to a small number and the query
+/// would silently miss colliders.
+pub const MAX_QUERY_SPAN_CELLS: f32 = 1024.0;
+
+/// cpl_bounds' ordered key back to its float (`vehicle_coupling.slang` `unordered`).
+fn unordered(u: u32) -> f32 {
+    f32::from_bits(if u & 0x8000_0000 != 0 { u & 0x7FFF_FFFF } else { !u })
+}
+
+/// A vehicle's bounds record as cpl_bounds left it (7 words: its nodes' box as ordered
+/// keys, lo then hi, and the fastest node's speed), checked before anything is planned
+/// from it again: `Err` when a node's position or speed is not finite (NaN or
+/// infinity: the state is garbage and every later frame would compute from it), or
+/// when the box spans more than [`MAX_QUERY_SPAN_CELLS`] cells of `cell` metres on an
+/// axis (`cell` 0: no cell limit). A box no node was folded into (a vehicle with no
+/// awake step yet) passes.
+pub fn vehicle_bounds_error(vehicle: usize, words: &[u32], cell: f32) -> Result<(), String> {
+    // (Never written: the buffer's zeros; or cpl_bounds' start values with no node.)
+    if words[..7].iter().all(|&w| w == 0) || (words[..3].iter().all(|&w| w == u32::MAX) && words[3..6].iter().all(|&w| w == 0)) {
+        return Ok(());
+    }
+    let lo = glam::Vec3::new(unordered(words[0]), unordered(words[1]), unordered(words[2]));
+    let hi = glam::Vec3::new(unordered(words[3]), unordered(words[4]), unordered(words[5]));
+    let speed = f32::from_bits(words[6]);
+    if !(lo.is_finite() && hi.is_finite() && speed.is_finite()) {
+        return Err(format!(
+            "explicit vehicle {vehicle}: non-finite node state (box {lo:?}..{hi:?}, fastest node {speed} m/s):              a NaN or infinity in its positions or velocities; the vehicle's state is invalid"
+        ));
+    }
+    let span = (hi - lo).max_element();
+    if cell > 0.0 && span / cell > MAX_QUERY_SPAN_CELLS {
+        return Err(format!(
+            "explicit vehicle {vehicle}: its nodes span {span:.0} m (box {lo:?}..{hi:?}), more than the {} m              ({MAX_QUERY_SPAN_CELLS} broadphase cells of {cell} m) the coupling's query can count: a part has flown that far              from the rest of the vehicle",
+            MAX_QUERY_SPAN_CELLS * cell
+        ));
+    }
+    Ok(())
 }
 
 fn storage(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
@@ -392,7 +445,25 @@ impl ExplicitVehicles {
             sleep_mask_word,
             sleep_mask: vec![0; mask_words as usize],
             any_awake: true,
+            query_cell: 0.0,
         })
+    }
+
+    /// The vehicles' bounds records (cpl_bounds: 8 words each), read with every step
+    /// ([`Self::bounds_error`]).
+    pub(crate) fn bounds_extra(&self) -> (&wgpu::Buffer, u64, u64) {
+        (&self.work, self.cleared, 32 * self.sims.len() as u64)
+    }
+
+    /// A delivered frame's bounds records, checked ([`vehicle_bounds_error`]): a
+    /// vehicle out of the broadphase has none.
+    pub(crate) fn bounds_error(&self, words: &[u32]) -> Result<(), String> {
+        for (v, rec) in words.chunks_exact(8).enumerate().take(self.sims.len()) {
+            if self.flags[v] & PROXY_OUT == 0 {
+                vehicle_bounds_error(v, rec, self.query_cell)?;
+            }
+        }
+        Ok(())
     }
 
     /// The coupling passes' status word (work[1], byte offset): the World reads it with
@@ -715,6 +786,8 @@ impl ExplicitVehicles {
         // per vehicle); else every collider is scanned.
         let rest = if self.force_scan { None } else { sim.rest_view() };
         self.last_query = rest.is_some();
+        // (cpl_query's cells: the hierarchy's level 0, or the uniform grid's, at least 0.5 m.)
+        self.query_cell = rest.map_or(0.0, |r| if r.levels > 0 { r.cell } else { r.cell.max(0.5) });
         self.write_params(sim, steps, rows, rest);
         enc.clear_buffer(&self.work, 0, Some(self.cleared));
         enc.clear_buffer(&self.work, 4 * self.list_word, Some(4));

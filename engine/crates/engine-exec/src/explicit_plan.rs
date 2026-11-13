@@ -170,21 +170,80 @@ pub const PARAM_COPIES: u32 = 129;
 pub const PARAM_WORDS: usize = 92;
 /// Params word: the loop budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`).
 pub const W_LOOP_BUDGET: usize = 88;
-/// The loop budget's floor and ceiling (passes of one invocation in a frame).
+/// The loop budget's floor (passes of one invocation in a frame).
 pub const LOOP_BUDGET_MIN: u64 = 1 << 22;
+/// The most a pass ceiling can be (the budget is a `u32` parameter word).
 pub const LOOP_BUDGET_MAX: u64 = 1 << 31;
+/// The pass ceiling's default ([`frame_pass_ceiling`]): 2^26 passes of one invocation
+/// in a frame. The largest legitimate count measured is about 6 million (a BeamNG
+/// community car's serial self-collision fallback, one lane, one 33-step frame); a
+/// frame's own bound ([`loop_budget_need`]) is a loose product of capacities and for
+/// one coupled sedan is already past 2^27, so before this ceiling a corrupt or
+/// pathological state could run 3 to 32 times longer before its frame failed.
+pub const PASS_CEILING_DEFAULT: u64 = 1 << 26;
+
+static PASS_CEILING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The frame pass ceiling, an engine-wide setting: the most passes one kernel
+/// invocation may take in one frame, whatever the fleet's own bound
+/// ([`loop_budget_need`]). It is the bound on the GPU time one submitted frame can
+/// hold (a submitted kernel cannot be aborted, so the work a frame may do has a
+/// ceiling the content cannot raise). A frame that reaches it stops and fails with the
+/// loop-cap error ([`explicit_loop_cap_hit`]), which names this setting; nothing is
+/// dropped silently. [`PASS_CEILING_DEFAULT`] unless [`set_frame_pass_ceiling`] or the
+/// environment's `RUBBLE_PASS_CEILING` says otherwise.
+pub fn frame_pass_ceiling() -> u64 {
+    use std::sync::atomic::Ordering;
+    let set = PASS_CEILING.load(Ordering::Relaxed);
+    if set != 0 {
+        return set;
+    }
+    let from_env = std::env::var("RUBBLE_PASS_CEILING").ok().and_then(|v| v.parse::<u64>().ok());
+    let c = from_env.unwrap_or(PASS_CEILING_DEFAULT).clamp(1, LOOP_BUDGET_MAX);
+    PASS_CEILING.store(c, Ordering::Relaxed);
+    c
+}
+
+/// Set the frame pass ceiling ([`frame_pass_ceiling`]; 1..=2^31 passes) for every frame
+/// planned from now on, in every explicit solver and coupling of the process.
+pub fn set_frame_pass_ceiling(passes: u64) {
+    PASS_CEILING.store(passes.clamp(1, LOOP_BUDGET_MAX), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The passes a fleet's own bound allows one invocation in a frame of `steps` steps:
+/// twice the fleet's per-step bound ([`ExplicitLayout::loop_unit`]) for every step and
+/// the frame's ends. A bound, not a count: the product of the capacities (every node
+/// against every proxy shape and hull plane the coupling has room for, every triangle
+/// against every contacter), far above what a sound frame takes.
+pub fn loop_budget_need(unit: u64, steps: u32) -> u64 {
+    2u64.saturating_mul(unit).saturating_mul(u64::from(steps) + 2)
+}
+
+/// A bound's budget under `ceiling`: at least [`LOOP_BUDGET_MIN`] (unless the ceiling
+/// is lower), at most the ceiling.
+pub fn budget_under(need: u64, ceiling: u64) -> u32 {
+    need.max(LOOP_BUDGET_MIN).min(ceiling.clamp(1, LOOP_BUDGET_MAX)) as u32
+}
 
 /// The passes one invocation may take in a frame of `steps` steps
-/// (explicit_loop_cap.slang `EB_LOOP_BUDGET`): twice the fleet's per-step bound
-/// ([`ExplicitLayout::loop_unit`]) for every step and the frame's ends, held to
-/// [`LOOP_BUDGET_MIN`]..=[`LOOP_BUDGET_MAX`]. A loop of a sound state never reaches it;
-/// a corrupt count stops there and fails the frame (the loop-cap flag).
+/// (explicit_loop_cap.slang `EB_LOOP_BUDGET`): the fleet's own bound
+/// ([`loop_budget_need`]), at least [`LOOP_BUDGET_MIN`] and at most the engine's
+/// [`frame_pass_ceiling`]. A loop of a sound state never reaches it; a corrupt count,
+/// or a frame that would hold the GPU longer than the ceiling allows, stops there and
+/// fails the frame (the loop-cap flag).
 pub fn loop_budget(unit: u64, steps: u32) -> u32 {
     // RUBBLE_LOOP_BUDGET (tests of the budget): a fixed budget instead.
     if let Some(b) = loop_budget_override() {
         return b;
     }
-    (2 * unit * (u64::from(steps) + 2)).clamp(LOOP_BUDGET_MIN, LOOP_BUDGET_MAX) as u32
+    budget_under(loop_budget_need(unit, steps), frame_pass_ceiling())
+}
+
+/// The most passes a frame can take on the whole GPU: every lane of every vehicle
+/// workgroup at its budget (the worst case of a state that sends every lane's loops to
+/// the budget). Multiply by the GPU's time per pass for the frame's worst GPU time.
+pub fn worst_case_frame_passes(budget: u32, vehicles: u32, lanes: u32) -> u64 {
+    u64::from(budget) * u64::from(vehicles) * u64::from(lanes)
 }
 
 /// `RUBBLE_LOOP_BUDGET`: a fixed pass budget for every frame (tests of the budget: a
@@ -2847,7 +2906,10 @@ pub fn explicit_loop_cap_hit(flag: i32) -> Result<(), String> {
     Err(format!(
         "{place} was stopped: at its cap ({EXPLICIT_LOOP_CAP} passes, or a barrier loop's \
          maximum) or when the frame's pass budget ran out; that frame's results are invalid \
-         (a runaway loop: a corrupt count or bound)"
+         (a runaway loop: a corrupt count or bound; or a frame that needs more than the \
+         engine's frame pass ceiling of {} passes an invocation: \
+         engine_exec::explicit_plan::set_frame_pass_ceiling, RUBBLE_PASS_CEILING)",
+        frame_pass_ceiling()
     ))
 }
 

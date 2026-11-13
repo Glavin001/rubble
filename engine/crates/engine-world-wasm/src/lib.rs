@@ -35,6 +35,7 @@ mod explicit_world;
 mod frame;
 /// Real-time pacing of the explicit solver's fixed steps on a display.
 mod frame_pacer;
+pub mod step_gate;
 mod guidance;
 /// The fracture lab (`fracture/`): its scenes as destructibles, its shots.
 mod lab;
@@ -352,6 +353,29 @@ pub(crate) async fn creation_check(world: &World) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub struct WebWorld {
     world: World,
+    /// Back-pressure on completed GPU work for a world with explicit vehicles
+    /// ([`step_gate::StepGate`]; shared with the queue's work-done callbacks).
+    gate: std::sync::Arc<std::sync::Mutex<step_gate::StepGate>>,
+}
+
+/// Milliseconds on a monotonic clock (the step gate's).
+fn now_ms() -> f64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<web_time::Instant> = OnceLock::new();
+    START.get_or_init(web_time::Instant::now).elapsed().as_secs_f64() * 1e3
+}
+
+impl WebWorld {
+    pub(crate) fn of(world: World) -> WebWorld {
+        WebWorld { world, gate: Default::default() }
+    }
+
+    /// Whether the step gate applies: a world with explicit vehicles (their 2 kHz
+    /// frame is the GPU work that cannot be taken back; rigid-only worlds keep their
+    /// readback gate alone, unchanged).
+    fn gated(&self) -> bool {
+        self.world.explicit_vehicles().is_some()
+    }
 }
 
 #[wasm_bindgen]
@@ -362,7 +386,7 @@ impl WebWorld {
         let (info, device, queue) = web_device().await?;
         let world = res(World::new(GpuContext::Shared { info, device, queue }, &def))?;
         creation_check(&world).await?;
-        Ok(WebWorld { world })
+        Ok(WebWorld::of(world))
     }
 
     /// The device's limits that size a world (requested as the adapter's): for a page's
@@ -399,7 +423,7 @@ impl WebWorld {
     /// Whether a step can be taken now without waiting on a readback.
     #[wasm_bindgen(js_name = canStep)]
     pub fn can_step(&self) -> bool {
-        self.world.can_step_without_waiting()
+        self.world.can_step_without_waiting() && (!self.gated() || self.gate.lock().unwrap().may_step(now_ms()))
     }
 
     /// One fixed step if it can be taken without waiting (see [`Self::can_step`]);
@@ -409,8 +433,56 @@ impl WebWorld {
             let _ = self.world.device().poll(wgpu::PollType::Poll);
             return Ok(false);
         }
+        let gated = self.gated();
+        if gated && !self.gate.lock().unwrap().may_step(now_ms()) {
+            let _ = self.world.device().poll(wgpu::PollType::Poll);
+            return Ok(false);
+        }
         res(self.world.step())?;
+        if gated {
+            // In flight until the queue reports this submission done.
+            self.gate.lock().unwrap().submitted(now_ms());
+            let gate = self.gate.clone();
+            self.world.queue().on_submitted_work_done(move || gate.lock().unwrap().completed(now_ms()));
+        }
         Ok(true)
+    }
+
+    /// The step gate's pause message (a world with explicit vehicles: steps over the
+    /// GPU budget twice in a row, a step that does not finish, or a lost device), or
+    /// `undefined` while it runs. While set, [`Self::can_step`] is false: the page
+    /// shows the message and offers [`Self::resume_steps`].
+    #[wasm_bindgen(js_name = overload)]
+    pub fn overload(&self) -> Option<String> {
+        self.gate.lock().unwrap().paused().map(str::to_string)
+    }
+
+    /// Step again after [`Self::overload`] (the user's decision).
+    #[wasm_bindgen(js_name = resumeSteps)]
+    pub fn resume_steps(&self) {
+        self.gate.lock().unwrap().resume(now_ms());
+    }
+
+    /// The device was lost: nothing is submitted through this world again.
+    #[wasm_bindgen(js_name = stopSteps)]
+    pub fn stop_steps(&self, reason: &str) {
+        self.gate.lock().unwrap().stop(reason);
+    }
+
+    /// The step gate's readout: `[steps in flight, last step's GPU service time (ms),
+    /// the worst since the last resume (ms), steps refused, budget (ms)]`.
+    #[wasm_bindgen(js_name = stepPace)]
+    pub fn step_pace(&self) -> Vec<f64> {
+        let g = self.gate.lock().unwrap();
+        let p = g.pace();
+        vec![f64::from(p.in_flight), p.last_ms, p.worst_ms, p.refused as f64, g.budget_ms()]
+    }
+
+    /// The step budget (ms; default 50): a step's GPU service time over it twice in a
+    /// row pauses stepping ([`Self::overload`]).
+    #[wasm_bindgen(js_name = setStepBudget)]
+    pub fn set_step_budget(&self, ms: f64) {
+        self.gate.lock().unwrap().set_budget_ms(ms);
     }
 
     /// Every ready frame folded into one (never waits).

@@ -28,6 +28,7 @@ stress-gpu = { path = "../../stress-oracle/crates/stress-gpu" }
 stress-ref = { path = "../../stress-oracle/crates/stress-ref" }
 stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-features = false, features = ["gpu"] }
 wgpu.workspace = true
+web-time.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 anyhow.workspace = true

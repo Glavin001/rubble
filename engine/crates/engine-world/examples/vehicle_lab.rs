@@ -155,14 +155,20 @@ fn run(
             lab.step()?;
             if every > 0 && k % every == 0 {
                 let c = &lab.bench.car;
+                // The load a GPU frame of this state carries (engine/docs/vehicle-lab.md,
+                // "GPU overload"): the node box that sizes the proxy query, and the
+                // triangles past the grid walk's 64 cells (each tests every candidate).
+                let (live, every_tri, extent) = lab.sim.self_collision_load();
                 println!(
-                    "  t {:6.2}  y {:9.2}  {:6.1} km/h  broken {:4}  depth {:.3}  proxies {:?}",
+                    "  t {:6.2}  y {:9.2}  {:6.1} km/h  broken {:4}  depth {:.3}  proxies {:?}  box {:8.1} m  triangles {live} ({every_tri} test every one of {} candidates)",
                     lab.bench.t,
                     c.centre.y,
                     c.speed * 3.6,
                     c.beams_broken,
                     c.node_depth,
-                    c.proxies
+                    c.proxies,
+                    extent,
+                    lab.sim.candidates.len()
                 );
             }
         }

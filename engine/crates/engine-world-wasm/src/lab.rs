@@ -383,9 +383,7 @@ impl WebWorld {
         if full_broadphase == Some(true) {
             def.features.awake_broadphase = false;
         }
-        Ok(WebWorld {
-            world: res(World::new(other.world.gpu_context(), &def))?,
-        })
+        Ok(WebWorld::of(res(World::new(other.world.gpu_context(), &def))?))
     }
 
     /// The joint records (binding 5), by joint slot: bond lines hide once broken.
