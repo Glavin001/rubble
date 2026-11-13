@@ -1187,27 +1187,10 @@ fn drop_faces(m: &mut Mesh, gone: impl Fn(&[u32]) -> bool) {
 /// tightly for a face that far behind it (a rear door's dogleg round the
 /// wheel arch) the card stops short.
 pub fn door_card(skin: &Mesh, depth: f64, th: f64, mat: Mat) -> Mesh {
-    let nv = skin.v.len();
-    let nb = neighbours(skin);
-    let mut ring = vec![false; nv];
-    for lp in boundary_loops(skin) {
-        for i in lp {
-            ring[i as usize] = true;
-        }
-    }
-    for _ in 0..2 {
-        let prev = ring.clone();
-        for i in 0..nv {
-            if !prev[i] && nb[i].iter().any(|&j| prev[j as usize]) {
-                ring[i] = true;
-            }
-        }
-    }
-    let n = smooth_normals(skin, 6);
     let (lo, hi) = skin.bbox();
     let size = hi - lo;
     let (ya, zc) = (lo.y + 0.47 * size.y, lo.z + 0.60 * size.z);
-    let mut d: Vec<f64> = skin
+    let d: Vec<f64> = skin
         .v
         .iter()
         .map(|p| {
@@ -1222,6 +1205,48 @@ pub fn door_card(skin: &Mesh, depth: f64, th: f64, mat: Mat) -> Mesh {
             depth + arm - cup + pocket
         })
         .collect();
+    behind(skin, 2, &d, th, mat, 300, true)
+}
+
+/// A lamp's reflector: a moulding `th` thick, `depth` behind the lens,
+/// facing it, one ring in from the lens's edge.
+pub fn reflector(lens: &Mesh, depth: f64, th: f64, mat: Mat) -> Mesh {
+    behind(lens, 1, &vec![depth; lens.v.len()], th, mat, 8, false)
+}
+
+/// A closed moulding on a skin's cells, `rings` in from its edges: its face
+/// `d` below the skin (smoothed over the mesh), `th` thick. `away`: the face
+/// looks away from the skin (a trim card towards the cabin) and the
+/// thickness is towards it; otherwise it looks at the skin (a reflector at
+/// its lens). Left out wherever the skin bends too tightly for a surface
+/// that far behind it; islands of fewer than `least` faces are dropped.
+fn behind(
+    skin: &Mesh,
+    rings: usize,
+    d: &[f64],
+    th: f64,
+    mat: Mat,
+    least: usize,
+    away: bool,
+) -> Mesh {
+    let nv = skin.v.len();
+    let nb = neighbours(skin);
+    let mut ring = vec![false; nv];
+    for lp in boundary_loops(skin) {
+        for i in lp {
+            ring[i as usize] = true;
+        }
+    }
+    for _ in 0..rings {
+        let prev = ring.clone();
+        for i in 0..nv {
+            if !prev[i] && nb[i].iter().any(|&j| prev[j as usize]) {
+                ring[i] = true;
+            }
+        }
+    }
+    let n = smooth_normals(skin, 6);
+    let mut d = d.to_vec();
     for _ in 0..2 {
         let prev = d.clone();
         for i in 0..nv {
@@ -1232,9 +1257,11 @@ pub fn door_card(skin: &Mesh, depth: f64, th: f64, mat: Mat) -> Mesh {
             }
         }
     }
-    // no card where its face would fold behind a bend of the skin
+    // (a face looking at the skin has its back deeper still, and keeps
+    // further from a fold)
+    let deep = |x: f64| if away { x } else { 1.5 * (x + th) };
     let cap = convex_cap(skin, &n, &nb);
-    let fold: Vec<bool> = (0..nv).map(|i| cap[i] < d[i]).collect();
+    let fold: Vec<bool> = (0..nv).map(|i| cap[i] < deep(d[i])).collect();
     let keep: Vec<bool> = (0..nv)
         .map(|i| !ring[i] && !fold[i] && !nb[i].iter().any(|&j| fold[j as usize]))
         .collect();
@@ -1245,7 +1272,7 @@ pub fn door_card(skin: &Mesh, depth: f64, th: f64, mat: Mat) -> Mesh {
         if keep[i] {
             remap[i] = m.v.len() as u32;
             m.v.push(skin.v[i] - n[i] * d[i]);
-            back.push(skin.v[i] - n[i] * (d[i] - th));
+            back.push(skin.v[i] - n[i] * if away { d[i] - th } else { d[i] + th });
         }
     }
     for (k, f) in skin.q.iter().enumerate() {
@@ -1264,9 +1291,10 @@ pub fn door_card(skin: &Mesh, depth: f64, th: f64, mat: Mat) -> Mesh {
             m.ti.push(-1);
         }
     }
-    // it faces the cabin
-    m.flip();
-    single_sheet(&mut m, 300);
+    if away {
+        m.flip();
+    }
+    single_sheet(&mut m, least);
     slab_to(&m, &back)
 }
 

@@ -691,12 +691,10 @@ impl Sedan {
         let mut out = Parts::default();
         let mut extras = Parts::default();
         let mut mk: Vec<Marker> = Vec::new();
-        // solid build: liners, door cards and the headliner are closed slabs
-        // too, not sheets. Still sheets: the lamp reflectors (an inner panel
-        // of the lens with its squeezed faces dropped, which can leave two
-        // faces meeting at a point: a slab is not manifold there) and the
-        // grille's back plates (closing them takes the lamps-glass-trim
-        // group 552 triangles over the art spec's 60,000)
+        // solid build: liners, door cards, the headliner and the lamp
+        // reflectors are closed too, not sheets. Still sheets: the grille's
+        // back plates (closing them takes the lamps-glass-trim group over
+        // the art spec's 60,000 triangles)
         let solid = cb.extra.contains_key("solid");
         let thick = |m: Mesh, th: f64| if solid { crate::solid::slab(&m, th) } else { m };
         let mut marker = |name: String, pos: DVec3, xa: DVec3| mk.push(Marker { name, pos, xaxis: xa });
@@ -725,8 +723,14 @@ impl Sedan {
                         isb[i as usize] = true;
                     }
                 }
-                let mut h = inner_panel(&sk, &isb, 0.032, -1_000_000, 1, Mat::LampEmissive);
-                h.flip();
+                // (solid: a 3 mm moulding)
+                let mut h = if solid {
+                    crate::solid::reflector(&sk, 0.032, 0.003, Mat::LampEmissive)
+                } else {
+                    let mut h = inner_panel(&sk, &isb, 0.032, -1_000_000, 1, Mat::LampEmissive);
+                    h.flip();
+                    h
+                };
                 if kind == "headlight" {
                     let c0 = sk.v.iter().copied().sum::<DVec3>() / sk.v.len() as f64;
                     let vn = sk.vertex_normals();

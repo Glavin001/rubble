@@ -42,9 +42,10 @@ const SOLIDS: [(&str, f64, f64, usize); 13] = [
 ];
 
 fn solid_spec(name: &str) -> Option<(f64, f64, usize)> {
-    // lamp reflectors are still sheets
+    // a lamp's reflector: a 3 mm moulding, in a piece each side of a bend
+    // of the lens too tight to follow (with the headlamps' projector cups)
     if name.ends_with("_housing") {
-        return None;
+        return Some((2.9, 3.1, 0));
     }
     SOLIDS.iter().find(|s| name.starts_with(s.0)).map(|s| (s.1, s.2, s.3))
 }
@@ -74,7 +75,7 @@ fn reference_sedan_is_pinned() {
     assert_eq!(b.parts.len(), 68);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 438_236);
+    assert_eq!(total, 439_260);
     for (name, n) in [
         ("body_shell", 114_556),
         ("hood", 39_408),
@@ -133,7 +134,7 @@ fn every_panel_and_pane_is_a_closed_solid() {
         assert!(r.min_component_volume > 1e-6, "{name}: a piece's volume is {}", r.min_component_volume);
         assert!(r.thickness_min * 1e3 >= tmin && r.thickness_max * 1e3 <= tmax, "{name}: thickness {:.2}..{:.2} mm, band {tmin}..{tmax}", r.thickness_min * 1e3, r.thickness_max * 1e3);
     }
-    assert_eq!(seen, 6 + 2 + 2 + 1 + 8 + 4 + 4 + 1 + 4, "closures, wings, bumpers, shell, glass, lenses, trims, headliner, liners");
+    assert_eq!(seen, 6 + 2 + 2 + 1 + 8 + 4 + 4 + 4 + 1 + 4, "closures, wings, bumpers, shell, glass, lenses, reflectors, trims, headliner, liners");
 }
 
 #[test]
