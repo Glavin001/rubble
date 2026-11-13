@@ -21,7 +21,7 @@ Build the World wasm (CONTRIBUTING.md), serve `engine/crates/engine-webgpu` (or 
 
 | Mode | What it does |
 |---|---|
-| Shoot | The launcher is the camera. Click the scene (or `F`, or Fire) to fire through the reticle. Shape: cuboid with its three sizes, sphere, cylinder (end on or side on). Material: steel 7850, aluminium 2700, concrete 2400, wood 600, rubber 1100 kg/m³, or a mass in kg. Speed 1–100 m/s, spin, bursts of up to 32. Projectiles are World rigid bodies. |
+| Shoot | The launcher is the camera. Click the scene (or `F`, or Fire, through the reticle): the lab picks what the view ray meets (the car's collision skin as last read, else the ground) and launches from the camera at the elevation that carries the shot, falling under gravity, through that point. A ring marks the aimed point; a speed that cannot reach it is said so. Shape: cuboid with its three sizes, sphere, cylinder (end on or side on). Material: steel 7850, aluminium 2700, concrete 2400, wood 600, rubber 1100 kg/m³, or a mass in kg. Speed 1–100 m/s, spin, bursts of up to 32. Projectiles are World rigid bodies. |
 | Compactor | Kinematic plates close on the car: top down, the two sides, or front and rear. Speed 0.02–0.5 m/s, a stop gap, pause, reverse, remove. Force against travel is plotted per plate, with the work done. |
 | Crash test | Offset wall (overlap slider, default 40 %), full wall, pole (offset slider), side pole on a sled. Speed, overlap, offset and wall angle are sliders; each change restarts the test in place. |
 | Mountain | The car leaves a cliff and falls down an endless rocky slope. Seed, steepness, roughness, launch speed, loose rocks, a start depth. |
@@ -188,6 +188,32 @@ Each is the user's decision; none was made here.
 6. **A World on an existing device from the wasm host**, so a rebuild does not compile every pipeline again (21 s).
 7. **An energy ledger on the GPU**, to close plate work against energy absorbed in the page.
 8. **The authored sedan's drag (B2)** takes 1.3–2.0 km/h off a crash test's stated speed over a 1 m run-up; the generated sedan arrives at 56.0 of 56 km/h.
+
+## Pacing and what the page does each frame
+
+- **The car is drawn from the solver's GPU buffers**; drawing never waits on a readback. Only the HUD's numbers, the click's pick and the camera's target use readbacks.
+- **Readbacks ("Measurements")**: 15 times a second by default, and every step while a projectile is in its first 4 s, a plate exists, a crash preset has not yet touched, or a scenario runs (exact impulses when they matter). "Every step", "15 Hz" and "off" are options. The HUD's text is rebuilt 4 times a second.
+- **The camera's target is carried forward by the reading's age in simulated time** and the frame's lead, so it moves with the car drawn (the cause of the brick ring page's camera jitter, B3).
+- **Steps are owed, not lost.** `World::step` is refused while every readback slot is in flight (3 by default). On a late frame the page lost that step: 42 steps/s at 75 FPS and 29 at 48 FPS were seen on a real display. The lab's World now allows 8 steps' results in flight and a refused step is owed to the next frame (up to 3 beyond the pacer's 4 a frame). On the user's display afterwards: 60 steps/s (100 % real time) at 50 FPS.
+- **`FramePacer::advance` takes how many times slower than real time** (4 for ×¼), not the time scale.
+
+Headless Chrome, M3 Max, generated sedan (554 nodes, 4,228 beams, 1,492 kg), surface contact on, per-phase GPU timing on (which adds cost), **before** the 8-slot gate:
+
+| Mode | World steps/s | FPS | Frame p50 / p95 | GPU per step (rigid · vehicle) |
+|---|---|---|---|---|
+| Shoot, idle | 60 | 60 | 16.7 / 16.8 ms | 3.7–4.0 ms (0.2–0.8 · 3.4–3.6) |
+| Compactor, top plate pressing | 33 (×1) | 46–58 | 16.7 / 33.4 ms | 7.4–7.6 ms (1.0 · 6.3–6.7) |
+| Crash, 56 km/h offset wall, after the strike | 26–29 | 43–44 | 16.7 / 33–50 ms | 8.7–8.9 ms (0.7–0.9 · 7.5–7.9) |
+| Mountain | 27–33 | 43–50 | 16.7 / 50 ms | 6.5–8.3 ms (0.9–1.1 · 6.2–6.9) |
+| Drive into a wall | 54 before, 30 after the strike | 51–60 | 16.7 / 16.8–33 ms | 3.8 → 6.9 ms |
+
+In contact the car's frame costs 6–8 ms of GPU with surface contact on, which with drawing left the old 3-slot gate closed every other frame. These rows must be measured again with the 8-slot gate; that run was held back while the user tested live.
+
+## Status
+
+Verified: the Rust unit tests (`cargo test -p engine-world --lib vehicle_lab`), the restart tests on the GPU (`--test vehicle_lab_reset`), the offline scenarios and measurements on the CPU reference and the GPU World, and in headless Chrome: Shoot (clicks fire and log), the scenario runs, the restart and rebuild timings, flat to mountain in place, 60 steps/s idle, no console errors.
+
+Not yet verified (held while the machine was in use): click aim in Chrome (verified on the CPU reference: three picks at 20, 20 and 8 m/s struck the car); every mode's pace with the 8-slot gate; the coupling-room error shown on the page; a tiny loop budget ending a step with its error; the mountain for 5 minutes and from 8 km down on the GPU (on the CPU reference a 20 s run from 8 km down had no non-finite state); the clips of each mode; the full `build-web.sh` (this worktree's fracture assets are Git LFS pointers, so only the World wasm was built).
 
 ## Verified
 
