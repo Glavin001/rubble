@@ -45,7 +45,7 @@ const BLAST_PARITY='stress';
 const labBonds=()=>({learned:'none',blast:'blast_gpu',rubble:'load_path'})[bondMode()]??bondMode();
 const STRESS_MODELS=new Set(['threshold','load_path','impact_local','blast_gpu']);
 const stressModel=()=>STRESS_MODELS.has(labBonds());
-const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps',blast_gpu:"vibe-land's GPU stress solver (Blast's model, Slang)",d6:'breakable D6 joints',none:'loose pieces',rubble:'Rubble (full): load path for sustained load, analytic impact for strikes, predicted before the engine steps'};
+const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps',blast_gpu:"vibe-land's GPU stress solver (Blast's model, Slang)",d6:'breakable D6 joints',none:'loose pieces',rubble:'Rubble (full): load path for sustained load, analytic impact for strikes with their structural response, predicted before the engine steps'};
 // The controls panel collapses for a full view (remembered per viewer; phones start
 // collapsed). Collapsed, a quick button mirrors Start / Pause.
 const PANEL_KEY='fracture-lab.panel';
@@ -142,12 +142,15 @@ function showFractureSwitches(){
  }
  // Rubble (full): the compare page's Rubble column (Rust: `play::compare::Approach::Rubble`).
  const full=bondMode()==='rubble';
- if(full){$('strike-prediction').checked=true;$('contact-fracture').checked=false;$('strike-rule').value='analytic';$('ball-ccd').checked=false}
- else if(wasFull){$('strike-rule').value='';$('ball-ccd').checked=true}
+ if(full){$('strike-prediction').checked=true;$('contact-fracture').checked=false;$('strike-rule').value='analytic';$('impact-response').value='dynamic';$('ball-ccd').checked=false}
+ else if(wasFull){$('strike-rule').value='';$('impact-response').value='off';$('ball-ccd').checked=true}
  wasFull=full;
  $('crush').disabled=!stressModel();
  $('strike-rule').disabled=$('support-loss').disabled=!own;
  $('strike-radius').disabled=!own||$('strike-rule').value!=='radial';
+ // A strike's structural response is the load path's (Rust: `FractureOptions::impact_response`).
+ const lp=labBonds()==='load_path';if(!lp)$('impact-response').value='off';
+ $('impact-response').disabled=!lp;$('impact-scale').disabled=!lp||$('impact-response').value==='off';
 }
 const stepHz=()=>Math.round(sim?1/sim.dt:physicsHz());
 const rates=createRates(value=>{
@@ -192,6 +195,7 @@ function labDef(level){
  if(stressModel()){def.strikePrediction=$('strike-prediction').checked;def.contactFracture=$('contact-fracture').checked;
   // The strike rule apart from the bond model's load rule (Rust: `FractureOptions::strike`), and support loss.
   const strike=$('strike-rule').value;if(strike){def.strike=strike;if(strike==='radial')def.strikeRadius=Number($('strike-radius').value)}
+  const response=$('impact-response').value;if(response!=='off'){def.impactResponse=response;def.impactScale=Number($('impact-scale').value)}
   def.supportLoss=$('support-loss').checked}
  return {def,bytes:source==='glb'?assetBytes:source==='pack'?packBytes:null};
 }
@@ -353,6 +357,8 @@ $('show-bonds').onchange=applyView;
 const reload=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('strike-prediction').onchange=reload;
 $('contact-fracture').onchange=reload;
+$('impact-response').onchange=()=>{$('impact-scale').disabled=$('impact-response').value==='off';reload()};
+$('impact-scale').onchange=reload;
 // A chosen strike rule only acts on predicted strikes: picking one turns prediction on.
 $('strike-rule').onchange=()=>{$('strike-radius').disabled=$('strike-rule').value!=='radial';if($('strike-rule').value)$('strike-prediction').checked=true;reload()};
 $('strike-radius').onchange=reload;
@@ -491,6 +497,8 @@ try{
  if(q.has('view'))$('view-mode').value=q.get('view');
  if(q.has('strike'))$('strike-rule').value=q.get('strike');
  if(q.has('radius'))$('strike-radius').value=q.get('radius');
+ if(q.has('response'))$('impact-response').value=q.get('response');
+ if(q.has('responseScale'))$('impact-scale').value=q.get('responseScale');
  if(q.has('support'))$('support-loss').checked=q.get('support')==='1';
  if(q.has('crush'))$('crush').value=q.get('crush');
  if(q.has('hz'))$('physics-hz').value=q.get('hz');

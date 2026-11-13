@@ -13,7 +13,7 @@
 //! Fracture is forward only under every approach (AGENTS.md).
 
 use crate::lab::{Lab, RECORD_FLOATS, LabAction, LabArrangement, LabBonds, LabDef, LabPlan, LabSettings, LabSource};
-use crate::{BodyId, FractureOptions, FractureReport, GpuContext, StrengthModel, StrikeRule, World};
+use crate::{BodyId, FractureOptions, FractureReport, GpuContext, ImpactResponse, StrengthModel, StrikeRule, World};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -85,6 +85,7 @@ impl Approach {
             contact_fracture: Some(false),
             strike_prediction: Some(false),
             strike: None,
+            impact_response: None,
         };
         let (model, fracture, support_loss) = match self {
             Approach::ImpactThreshold => (StrengthModel::Threshold, after_the_step, false),
@@ -98,6 +99,7 @@ impl Approach {
                     strike: Some(StrikeRule::Radial {
                         radius_mm: StrikeRule::RADIAL_DEFAULT_MM,
                     }),
+                    impact_response: None,
                 },
                 false,
             ),
@@ -107,6 +109,9 @@ impl Approach {
                     contact_fracture: Some(false),
                     strike_prediction: Some(true),
                     strike: Some(StrikeRule::Analytic),
+                    // What a strike leaves in the structure, solved through its bonds: a
+                    // heavy slow shot that does not get through still breaks the wall.
+                    impact_response: Some(ImpactResponse::default()),
                 },
                 false,
             ),

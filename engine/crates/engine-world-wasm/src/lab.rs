@@ -62,6 +62,12 @@ struct DefJs {
     strike: Option<String>,
     #[serde(default)]
     strike_radius: Option<f64>,
+    /// Load path: a strike's structural response, `'static'` or `'dynamic'` (absent or
+    /// `'off'`: none), and a factor on its load (absent: 1).
+    #[serde(default)]
+    impact_response: Option<String>,
+    #[serde(default)]
+    impact_scale: Option<f64>,
     /// Stress models: support loss, and its dynamic factor (1 to 2).
     #[serde(default)]
     support_loss: bool,
@@ -138,6 +144,13 @@ fn def_of(v: JsValue, bytes: Option<Vec<u8>>, prebuilt: Option<(&JsScene, bool)>
                             radius_mm: d.strike_radius.map_or(radius_mm, |r| (r * 1e3).round().max(0.0) as u32),
                         },
                         r => r,
+                    }),
+                },
+                impact_response: match d.impact_response.as_deref().filter(|s| stress && *s != "off") {
+                    None => None,
+                    Some(s) => Some(rubble::ImpactResponse {
+                        pulse: rubble::ImpactPulse::parse(s).ok_or_else(|| anyhow::anyhow!("impactResponse {s}: off, static or dynamic"))?,
+                        scale_pct: (d.impact_scale.unwrap_or(1.0) * 100.0).round().max(0.0) as u32,
                     }),
                 },
             },

@@ -30,6 +30,7 @@ pub mod crush;
 pub mod engine;
 pub mod hull;
 pub mod impact_local;
+pub mod impact_response;
 pub mod implicit;
 pub mod joint;
 pub mod load_path;

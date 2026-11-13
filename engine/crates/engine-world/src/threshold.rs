@@ -161,6 +161,13 @@ mod imp {
                 crate::StrikeRule::Analytic => stress_ref::capability::StrikeModel::Analytic { fracture_work: true },
                 crate::StrikeRule::Radial { radius_mm } => stress_ref::capability::StrikeModel::Radial { radius_mm },
             }),
+            impact_response: def.fracture.impact_response.map(|r| stress_ref::capability::ImpactResponse {
+                pulse: match r.pulse {
+                    crate::ImpactPulse::Static => stress_ref::capability::PulseModel::Static,
+                    crate::ImpactPulse::Dynamic => stress_ref::capability::PulseModel::Dynamic,
+                },
+                scale_pct: r.scale_pct,
+            }),
             ..Default::default()
         };
         ProfileSetup::new(profile_of(def.model)?, &options).map_err(|e| anyhow::anyhow!("{e}"))
@@ -2129,6 +2136,7 @@ mod imp {
                     // Every member runs the same model (`threshold_shared`).
                     t.load_model = l.load_model;
                     t.strike_model = l.strike_model;
+                    t.impact_response = l.impact_response;
                     t.contact_sweeps = l.contact_sweeps;
                     t.max_contacts = l.max_contacts;
                     t.impact_peak = l.impact_peak;

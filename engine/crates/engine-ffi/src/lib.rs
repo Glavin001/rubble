@@ -3211,6 +3211,7 @@ pub unsafe extern "C" fn rbCreateDestructible(
                 contact_fracture: switch_in(d.contact_fracture),
                 strike_prediction: switch_in(d.strike_prediction),
                 strike: None,
+                impact_response: None,
             },
             ..base
         };

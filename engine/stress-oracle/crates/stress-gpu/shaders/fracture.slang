@@ -94,6 +94,11 @@ struct FractureParams
     uint cs_row_offset;  // this step's first contact row (rubble's contacts' parity)
     uint ext_sides;      // `ext` offset (float4s): the load path's bond sides (`lp_side`)
     float strike_radius; // radial damage's radius (m; strike_model 2)
+    // A strike's structural response (`capability::ImpactResponse`, `fr_gi_solve`).
+    uint gi_mode;        // 0 off, 1 the pulse's peak as a static load, 2 its dynamic response
+    float gi_scale;      // a factor on the structural load (1: as computed)
+    uint gi_sweeps;      // its solve's sweeps (even)
+    uint gi_pad;
 };
 
 struct ScanParams
@@ -1956,7 +1961,7 @@ static const uint IL_PERFORATE = 8;
 // effective mass along it, the striker's face radius, its Young's modulus, its engine body
 // as bits); (the struck chunk as bits, the Hertz rule's force `J / tau`, the striker's mass,
 // when within the step they meet); (the striker's collider, its launch (a shot's, else 0),
-// as bits).
+// as bits; the pulse's duration; the structure's frequency as `fr_gi_solve` found it).
 // `atom` per body slot 12 words, all 0 for a body not struck (as the buffer starts, and as
 // `fr_cs_clean` leaves a struck one): the largest strike impulse (float bits), the struck
 // chunk + 1, the complement of the strike's collider (`cs_pick`); the complement of the
@@ -2366,6 +2371,11 @@ void il_strike<let SRC : uint>(uint b)
         for (uint region = 0; region < 2; region++)
             bodies[BODY_WORDS * (sb + region * params.max_bodies)].xyz += step;
     }
+    // The structural response (opt-in): what the strike leaves in the structure, for the
+    // load path (`fr_gi_solve`). An elastic strike is the engine's contact: the in-step
+    // contact fracture's when that is on.
+    if (SRC == 0 && params.gi_mode != 0 && (damage || params.cs_sweeps == 0))
+        gi_record(b, entry, contact, d, v, m * (v - (perforate ? sqrt(max(v * v - v_bl * v_bl, 0.0)) : 0.0)), max(t_c, 2.0 * (perforate ? h : depth) / max(v + v_res, 1e-9)));
 }
 
 struct IlPlace
@@ -2984,7 +2994,7 @@ void fr_cs_record(uint3 id: SV_DispatchThreadID)
     lp[lp_body(s) + 3] = float4(from_rubble(u), v);
     lp[lp_body(s) + 4] = float4(m_eff, face, e_o, asfloat(ob));
     lp[lp_body(s) + 5] = float4(asfloat(k), j / tau, 1.0 / bodies[BODY_WORDS * ob].w, t_in);
-    lp[lp_body(s) + 6] = float4(asfloat(co), asfloat(other.w), 0.0, 0.0);
+    lp[lp_body(s) + 6] = float4(asfloat(co), asfloat(other.w), tau, 0.0);
     atom[a_cs(s) + 1].store(k + 1);
     atom[a_counters() + C_CS_STRIKES].add(1u);
 }
@@ -3262,6 +3272,283 @@ void fr_cs_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     }
 }
 
+
+// ---- A strike's structural response (stress-ref impact_response.rs, `capability::ImpactResponse`) ----
+//
+// Opt-in (`gi_mode`), with the load path. A strike is a half-sine force pulse carrying the
+// impulse `J` the structure takes, over `tau`: peak `pi J / (2 tau)`. The load path solves
+// the peak as a static load on the struck structure (the in-step contact fracture's solve,
+// `cs_load`, `st_sweep`); mode 2 then scales that solution by the dynamic load factor of
+// the pulse at the structure's own frequency, Rayleigh's quotient of the solved shape,
+// `omega^2 = (f . x) / (x . M x)`: a pulse much shorter than the period loads the
+// structure by its impulse (`J omega`), a long one by its peak. Each bond is then checked
+// under the structure's own state plus the scaled increment.
+//
+// Two sources of strikes:
+//   a predicted analytic strike (`fr_il_strike` records it, `gi_record`): the frame's
+//     kernels are fr_gi_begin, fr_il_strike, fr_cs_count, fr_cs_base, fr_cs_collect,
+//     fr_gi_solve, fr_cs_clean, before the local outcome's breaks (the structural response
+//     is the intact member's, the local one beside it);
+//   an in-step contact strike (`fr_cs_record`): `fr_gi_solve` in place of `fr_cs_solve`.
+// The sums are 64-bit fixed point, of terms scaled by the group's maxima: they do not
+// depend on the order the structure's chunks are listed in.
+
+// A predicted strike as the solve's record (the in-step contact strike's words).
+void gi_record(uint b, uint entry, float3 contact, float3 d, float v, float j, float tau)
+{
+    lp[lp_body(b) + 2] = float4(contact, 3.14159265358979 * j / (2.0 * max(tau, 1e-9)));
+    lp[lp_body(b) + 3] = float4(d, v);
+    lp[lp_body(b) + 6] = float4(0.0, 0.0, tau, 0.0);
+    atom[a_cs(b) + 1].store(entry + 1);
+    if (atom[a_cs(b) + 8].exchange(1u) == 0u)
+        work[w_cs_bodies() + atom[a_counters() + C_CS_BODIES].add(1u)] = b;
+}
+
+// impact_response.rs `dlf_half_sine`.
+float gi_dlf(float r)
+{
+    float pi = 3.14159265358979;
+    if (!(r > 0.0))
+        return 0.0;
+    if (r > 33.0)
+        return r / (r - 1.0);
+    if (abs(r - 1.0) < 1e-4)
+        return 0.5 * pi;
+    float best = abs(2.0 * r * cos(0.5 * pi * r) / (1.0 - r * r));
+    uint peaks = uint(floor(0.5 * (r + 1.0)));
+    for (uint l = 1; l <= peaks; l++)
+    {
+        float a = 2.0 * pi * float(l) / (r + 1.0);
+        best = max(best, abs((sin(a) - sin(r * a) / r) / (1.0 - 1.0 / (r * r))));
+    }
+    return best;
+}
+
+static const uint GI_GROUP = 256;
+static const uint GI_SUMS = 5;
+static const float GI_FIXED = 1073741824.0; // 2^30
+groupshared float g_gi_x[GI_GROUP];
+groupshared float g_gi_m[GI_GROUP];
+groupshared uint g_gi_lo[GI_SUMS * GI_GROUP];
+groupshared uint g_gi_hi[GI_SUMS * GI_GROUP];
+
+// `value` (a term of magnitude under 2^31) added to a 64-bit fixed-point sum.
+void gi_acc(inout uint lo, inout uint hi, float value)
+{
+    float x = round(value * GI_FIXED);
+    if (!(abs(x) < 4.0e18))
+        x = 0.0;
+    float u = abs(x);
+    float h = floor(u * (1.0 / 4294967296.0));
+    uint l = uint(u - h * 4294967296.0);
+    uint g = uint(h);
+    if (x < 0.0)
+    {
+        l = ~l + 1u;
+        g = ~g + (l == 0u ? 1u : 0u);
+    }
+    uint sum = lo + l;
+    hi += g + (sum < lo ? 1u : 0u);
+    lo = sum;
+}
+
+float gi_value(uint lo, uint hi)
+{
+    bool negative = (hi & 0x80000000u) != 0;
+    if (negative)
+    {
+        lo = ~lo + 1u;
+        hi = ~hi + (lo == 0u ? 1u : 0u);
+    }
+    float v = (float(hi) * 4294967296.0 + float(lo)) / GI_FIXED;
+    return negative ? -v : v;
+}
+
+// The dynamic load factor of struck structure `s`'s strike (thread `t` of its group; its
+// chunks `count` from `base` in the list), from its solved increment; its frequency
+// recorded. 1 when the shape is none (nothing moved: the load is static to it). Call in
+// uniform control flow: it has barriers.
+float gi_factor(uint s, uint t, uint base, uint count)
+{
+    float x2 = 0.0;
+    float mm = 0.0;
+    for (uint j = t; j < count; j += GI_GROUP)
+    {
+        uint k = work[w_cs_list() + base + j];
+        float3 u = lp[st_x(k, CS_STATE, 0)].xyz;
+        x2 = max(x2, dot(u, u));
+        mm = max(mm, chunks[4 * k].w);
+    }
+    g_gi_x[t] = x2;
+    g_gi_m[t] = mm;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint step = GI_GROUP / 2; step > 0; step >>= 1)
+    {
+        if (t < step)
+        {
+            g_gi_x[t] = max(g_gi_x[t], g_gi_x[t + step]);
+            g_gi_m[t] = max(g_gi_m[t], g_gi_m[t + step]);
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    x2 = g_gi_x[0];
+    mm = g_gi_m[0];
+    float xn = sqrt(x2);
+    float f0 = lp[lp_body(s) + 2].w;
+    bool any = x2 > 0.0 && mm > 0.0 && f0 > 0.0;
+    uint lo[GI_SUMS];
+    uint hi[GI_SUMS];
+    for (uint i = 0; i < GI_SUMS; i++)
+    {
+        lo[i] = 0u;
+        hi[i] = 0u;
+    }
+    for (uint j2 = t; any && j2 < count; j2 += GI_GROUP)
+    {
+        uint k = work[w_cs_list() + base + j2];
+        float3 u = lp[st_x(k, CS_STATE, 0)].xyz;
+        float3 th = lp[st_x(k, CS_STATE, 0) + 1].xyz;
+        float3 f = lp[st_f(k, CS_STATE)].xyz;
+        float3 tq = lp[st_f(k, CS_STATE) + 1].xyz;
+        float4 c0 = chunks[4 * k];
+        float4 c1 = chunks[4 * k + 1];
+        float4 c2 = chunks[4 * k + 2];
+        float3 ith = float3(c1.x * th.x + c1.w * th.y + c2.x * th.z, c1.w * th.x + c1.y * th.y + c2.y * th.z, c2.x * th.x + c2.y * th.y + c1.z * th.z);
+        gi_acc(lo[0], hi[0], (dot(f, u) + dot(tq, th)) / (f0 * xn));
+        gi_acc(lo[1], hi[1], (c0.w * dot(u, u) + dot(th, ith)) / (mm * x2));
+        float3 p = u * (c0.w / (mm * xn));
+        gi_acc(lo[2], hi[2], p.x);
+        gi_acc(lo[3], hi[3], p.y);
+        gi_acc(lo[4], hi[4], p.z);
+    }
+    for (uint i2 = 0; i2 < GI_SUMS; i2++)
+    {
+        g_gi_lo[GI_SUMS * t + i2] = lo[i2];
+        g_gi_hi[GI_SUMS * t + i2] = hi[i2];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    for (uint step2 = GI_GROUP / 2; step2 > 0; step2 >>= 1)
+    {
+        if (t < step2)
+        {
+            for (uint i3 = 0; i3 < GI_SUMS; i3++)
+            {
+                uint a = GI_SUMS * t + i3;
+                uint o = GI_SUMS * (t + step2) + i3;
+                uint sum = g_gi_lo[a] + g_gi_lo[o];
+                g_gi_hi[a] += g_gi_hi[o] + (sum < g_gi_lo[a] ? 1u : 0u);
+                g_gi_lo[a] = sum;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    float work_sum = gi_value(g_gi_lo[0], g_gi_hi[0]);
+    float inertia = gi_value(g_gi_lo[1], g_gi_hi[1]);
+    float3 p_sum = float3(gi_value(g_gi_lo[2], g_gi_hi[2]), gi_value(g_gi_lo[3], g_gi_hi[3]), gi_value(g_gi_lo[4], g_gi_hi[4]));
+    // A free body's shape less its mean translation (the rigid part is no deformation).
+    float inv_mass = bodies[BODY_WORDS * s].w;
+    if (atom[a_cs(s) + 4].load() == 0 && inv_mass > 0.0)
+        inertia -= mm * inv_mass * dot(p_sum, p_sum);
+    float w = f0 * xn * work_sum;
+    float m = mm * x2 * inertia;
+    float omega = any && w > 0.0 && m > 0.0 ? sqrt(w / m) : 0.0;
+    float tau = lp[lp_body(s) + 6].z;
+    if (t == 0 && count > 0)
+        lp[lp_body(s) + 6].w = omega;
+    return omega > 0.0 && tau > 0.0 ? gi_dlf(omega * tau / 3.14159265358979) : 1.0;
+}
+
+// `cs_break` with the strike's increment scaled by `scale`.
+void gi_break(uint i, uint s, float scale)
+{
+    uint4 bond = bonds[i];
+    LpBond b = lp_bond(i);
+    float3 q_lin;
+    float3 q_ang;
+    st_force(b, bond.x, bond.y, CS_STATE, 0, q_lin, q_ang);
+    q_lin *= scale;
+    q_ang *= scale;
+    if (params.load_model == 1)
+    {
+        float3 b_lin;
+        float3 b_ang;
+        lp_force(b, bond.x, bond.y, 0, b_lin, b_ang);
+        q_lin += b_lin;
+        q_ang += b_ang;
+    }
+    Measures m = stress_measures(b.law, q_lin, q_ang);
+    float4 idx = failure_indices(lp_material(b.law.ids.x), b.law, m, b.law.geom1.w);
+    if (max(max(idx.x, idx.y), max(idx.z, idx.w)) >= 1.0)
+    {
+        work[w_alive() + i] = 0;
+        atom[a_dirty() + s].or(1u);
+        atom[a_counters() + C_FRAME_BROKEN].add(1u);
+        atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
+        atom[a_counters() + C_CS_BREAKS].add(1u);
+    }
+}
+
+// The frame's structural strikes start empty (the in-step list's words, free between steps).
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void fr_gi_begin(uint3 id: SV_DispatchThreadID)
+{
+    atom[a_counters() + C_CS_BODIES].store(0u);
+    atom[a_counters() + C_CS_CURSOR].store(0u);
+}
+
+// A group per struck structure (a group past the list leaves at once): `fr_cs_solve` with
+// the structural response's factor on the increment.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void fr_gi_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint t = thread.x;
+    if (group_uniform(group.x < atom[a_counters() + C_CS_BODIES].load() ? 1u : 0u, t) == 0)
+        return;
+    uint s = work[w_cs_bodies() + group.x];
+    uint base = atom[a_cs(s) + 6].load();
+    uint count = atom[a_cs(s) + 5].load();
+    for (uint j = t; j < count; j += GI_GROUP)
+        cs_load(work[w_cs_list() + base + j], s);
+    device_group_barrier();
+    for (uint j2 = t; j2 < count; j2 += GI_GROUP)
+    {
+        uint k = work[w_cs_list() + base + j2];
+        if (lp[st_f(k, CS_STATE)].w == 0.0 && !lp_factor(k))
+        {
+            lp[st_f(k, CS_STATE)].w = 1.0;
+            atom[a_counters() + C_ERROR].or(64u);
+        }
+    }
+    device_group_barrier();
+    for (uint sweep = 0; sweep < params.gi_sweeps; sweep++)
+    {
+        for (uint j3 = t; j3 < count; j3 += GI_GROUP)
+            st_sweep(work[w_cs_list() + base + j3], CS_STATE, sweep % 2, params.cs_c1, params.cs_c2);
+        device_group_barrier();
+    }
+    float scale = params.gi_scale;
+    if (params.gi_mode == 2)
+    {
+        scale *= gi_factor(s, t, base, count);
+        device_group_barrier();
+    }
+    for (uint j4 = t; j4 < count; j4 += GI_GROUP)
+    {
+        uint k = work[w_cs_list() + base + j4];
+        float4 range = ext[params.ext_chunks + 4 * k];
+        uint first = asuint(range.x);
+        uint n = asuint(range.y);
+        for (uint e = 0; e < n; e++)
+        {
+            uint i = adj_bond(first + e);
+            if (bonds[i].x == k && work[w_alive() + i] != 0)
+                gi_break(i, s, scale);
+        }
+    }
+}
 
 // ---- Chunk crushing (engine/docs/destruction-reactions.md section 1; crush.slang) ----
 //

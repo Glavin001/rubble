@@ -46,6 +46,9 @@ pub struct FractureOptions {
     /// `StrikeModel::Analytic` is the load path and the analytic local impact together.
     /// Not `blast_gpu`'s (an error).
     pub strike: Option<StrikeModel>,
+    /// A strike's structural response through the load path (`None`: off;
+    /// `capability::ImpactResponse`). Load-path profiles only (an error otherwise).
+    pub impact_response: Option<stress_ref::capability::ImpactResponse>,
 }
 
 /// The fracture models a profile runs, with a world's options resolved: the one place a
@@ -55,6 +58,8 @@ pub struct ProfileSetup {
     pub profile: Profile,
     pub load_model: LoadModel,
     pub strike_model: StrikeModel,
+    /// A strike's structural response (`FractureOptions::impact_response`).
+    pub impact_response: Option<stress_ref::capability::ImpactResponse>,
     /// The in-step contact fracture's sweeps (0: off).
     pub contact_sweeps: u32,
     /// Whether a strike is predicted at the end of the frame before it.
@@ -85,7 +90,10 @@ impl ProfileSetup {
         };
         let strike_off = std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0");
         let predict_strikes = options.strike_prediction.unwrap_or(contact_sweeps == 0) && !strike_off;
-        Ok(ProfileSetup { profile, load_model, strike_model, contact_sweeps, predict_strikes })
+        if options.impact_response.is_some() && (profile != Profile::LoadPath || load_model == LoadModel::Threshold) {
+            return Err(format!("a strike's structural response is solved by the load path: the load_path profile, not {}", profile.name()));
+        }
+        Ok(ProfileSetup { profile, load_model, strike_model, impact_response: options.impact_response, contact_sweeps, predict_strikes })
     }
 
     /// Whether the tables need the per-bond and per-chunk records beyond the threshold
@@ -152,6 +160,7 @@ pub fn apply_profile(t: &mut FractureTables, setup: &ProfileSetup, scene: &Scene
     }
     t.load_model = setup.load_model;
     t.strike_model = setup.strike_model;
+    t.impact_response = setup.impact_response;
     t.contact_sweeps = setup.contact_sweeps;
     t.max_contacts = max_contacts;
     // The load path takes each impact's mean over the frame (a load, as Blast's solver

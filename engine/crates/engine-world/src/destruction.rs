@@ -509,6 +509,64 @@ pub struct FractureOptions {
     /// prediction on) is the quasi-static load solve and the dynamic impact together.
     /// `BlastGpu` takes `Hertz` or `Radial` (`Analytic` is an error there).
     pub strike: Option<StrikeRule>,
+    /// A strike's structural response, `LoadPath` only (an error on another model). `None`:
+    /// off. See [`ImpactResponse`].
+    pub impact_response: Option<ImpactResponse>,
+}
+
+/// A strike's structural response ([`FractureOptions::impact_response`]): what the whole
+/// member does when a shot's momentum goes into it, beside the local outcome at the point
+/// struck. The impulse the strike leaves in the structure (all of it when the shot stops;
+/// what the shot and its plug do not carry on with when it goes through) is a force pulse,
+/// solved through the bonds by the load path; a bond breaks under the structure's standing
+/// load plus the strike's.
+///
+/// With `StrikeRule::Analytic` and strike prediction it is what a predicted strike does
+/// past the point struck: without it a shot that does not get through breaks nothing
+/// beyond its crater, however heavy. With the in-step contact fracture it replaces the
+/// contact's static peak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImpactResponse {
+    pub pulse: ImpactPulse,
+    /// A factor on the structural load, percent (100: as computed). A tuning knob, not
+    /// physics.
+    pub scale_pct: u32,
+}
+
+impl Default for ImpactResponse {
+    fn default() -> Self {
+        ImpactResponse { pulse: ImpactPulse::Dynamic, scale_pct: 100 }
+    }
+}
+
+/// How the structure takes a strike's force pulse ([`ImpactResponse::pulse`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImpactPulse {
+    /// The pulse's peak force as a static load: a quasi-static solver's treatment of a
+    /// contact force. It ignores how long the pulse lasts against how fast the structure
+    /// can answer, so a short hard knock counts like a sustained push.
+    Static,
+    /// The structure's dynamic response: the static solution times the dynamic load factor
+    /// of the pulse at the structure's own frequency (Rayleigh's quotient of the solved
+    /// shape). A pulse much shorter than the structure's period loads it by its impulse;
+    /// a long one by its peak; up to 1.77 times the peak between.
+    #[default]
+    Dynamic,
+}
+
+impl ImpactPulse {
+    pub const ALL: [ImpactPulse; 2] = [ImpactPulse::Static, ImpactPulse::Dynamic];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ImpactPulse::Static => "static",
+            ImpactPulse::Dynamic => "dynamic",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<ImpactPulse> {
+        Self::ALL.into_iter().find(|m| m.name() == name)
+    }
 }
 
 /// How a predicted strike breaks bonds ([`FractureOptions::strike`]).

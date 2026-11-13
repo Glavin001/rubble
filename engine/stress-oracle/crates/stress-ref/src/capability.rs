@@ -110,6 +110,37 @@ pub enum StrikeModel {
     Radial { radius_mm: u32 },
 }
 
+/// How a strike's force pulse is taken by the structure (`impact_response`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PulseModel {
+    /// The pulse's peak as a static load (a quasi-static solver's treatment of a contact
+    /// force; the load path's in-step contact fracture by itself).
+    Static,
+    /// The structure's dynamic response to the pulse: the static solution times the
+    /// dynamic load factor at the structure's own frequency (`impact_response`).
+    #[default]
+    Dynamic,
+}
+
+/// A strike's structural response, an option on the load path (`impact_response`;
+/// fracture.slang `fr_gi_solve`): the impulse a strike leaves in the structure, solved
+/// through its bonds. With the analytic strike it is what a predicted strike does beyond
+/// the point struck (without it a shot that does not get through breaks nothing past its
+/// crater); with the in-step contact fracture it replaces the static peak. No profile runs
+/// it by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImpactResponse {
+    pub pulse: PulseModel,
+    /// A factor on the structural load, percent (100: as computed). Tuning, not physics.
+    pub scale_pct: u32,
+}
+
+impl Default for ImpactResponse {
+    fn default() -> Self {
+        ImpactResponse { pulse: PulseModel::Dynamic, scale_pct: 100 }
+    }
+}
+
 /// The load path's sweeps a frame in the `LoadPath` profile.
 pub const LOAD_PATH_SWEEPS: u32 = 16;
 

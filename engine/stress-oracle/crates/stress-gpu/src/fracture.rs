@@ -65,6 +65,9 @@ pub struct FractureTables {
     /// How a frame's loads and a strike break bonds (stress-ref `capability`).
     pub load_model: LoadModel,
     pub strike_model: StrikeModel,
+    /// A strike's structural response through the load path (`capability::ImpactResponse`;
+    /// `None`: off). Needs the load path.
+    pub impact_response: Option<stress_ref::capability::ImpactResponse>,
     /// Gravity (the stress frame), for the load path.
     pub gravity: [f32; 3],
     /// The load path's and the analytic strike's tables (empty for neither).
@@ -477,6 +480,10 @@ struct FractureParams {
     cs_row_offset: u32,
     ext_sides: u32,
     strike_radius: f32,
+    gi_mode: u32,
+    gi_scale: f32,
+    gi_sweeps: u32,
+    gi_pad: u32,
 }
 
 /// What a fracture's tables hold room for (`GpuFracture::with_capacity`): its layout is
@@ -858,7 +865,9 @@ pub const CRUSH_ENTRIES: [&str; 13] = [
 /// fracture run (`FractureTables::load_model`, `strike_model`, `contact_sweeps`): built only
 /// with one of them, so the threshold rule needs no more storage buffers per stage than its
 /// core kernels bind (8, WebGPU's default limit; `fr_cs_solve` binds 10).
-pub const MODEL_ENTRIES: [&str; 45] = [
+pub const MODEL_ENTRIES: [&str; 47] = [
+    "fr_gi_begin",
+    "fr_gi_solve",
     "fr_lp_view",
     "fr_lp_clear",
     "fr_lp_sum",
@@ -914,7 +923,7 @@ pub fn entries() -> &'static [&'static str] {
     &ENTRIES
 }
 
-const ENTRIES: [&str; 93] = [
+const ENTRIES: [&str; 95] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -1008,6 +1017,8 @@ const ENTRIES: [&str; 93] = [
     "fr_stress_clear",
     "fr_stress_breaks",
     "fr_strike_radial",
+    "fr_gi_begin",
+    "fr_gi_solve",
 ];
 
 #[repr(C)]
@@ -1216,6 +1227,12 @@ impl GpuFracture {
         if !t.lp_init.is_empty() && t.lp_init.len() != n as usize {
             return Err("fracture: the load path's warm start does not match the chunks".into());
         }
+        if t.impact_response.is_some() && !matches!(t.load_model, LoadModel::LoadPath { .. }) {
+            return Err("fracture: a strike's structural response is solved by the load path; this fracture runs the threshold rule".into());
+        }
+        if t.impact_response.is_some() && t.geometry.len() != n as usize {
+            return Err("fracture: a strike's structural response needs the strike geometry".into());
+        }
         if t.contact_sweeps % 2 != 0 {
             return Err(format!("fracture: {} contact-fracture sweeps; an even count", t.contact_sweeps));
         }
@@ -1278,6 +1295,13 @@ impl GpuFracture {
             cs_row_cap: t.max_contacts,
             cs_c1: cs_c1 as f32,
             cs_c2: cs_c2 as f32,
+            gi_mode: match t.impact_response.map(|r| r.pulse) {
+                None => 0,
+                Some(stress_ref::capability::PulseModel::Static) => 1,
+                Some(stress_ref::capability::PulseModel::Dynamic) => 2,
+            },
+            gi_scale: t.impact_response.map_or(1.0, |r| r.scale_pct as f32 * 0.01),
+            gi_sweeps: stress_ref::capability::CONTACT_SWEEPS,
             ..Default::default()
         };
         if !t.geometry.is_empty() && t.geometry.len() != used_n as usize {
@@ -1918,6 +1942,10 @@ impl GpuFracture {
                 } else if self.params.strike_model == 2 {
                     self.direct(&mut pass, "fr_strike_radial", e);
                 } else {
+                    let gi = self.params.gi_mode != 0;
+                    if gi {
+                        self.direct(&mut pass, "fr_gi_begin", 1);
+                    }
                     self.direct(&mut pass, "fr_il_first_reset", MAX_SHOTS);
                     self.direct(&mut pass, "fr_il_first", b);
                     self.direct(&mut pass, "fr_il_begin", b);
@@ -1928,6 +1956,17 @@ impl GpuFracture {
                     // largest dispatch dimension).
                     self.direct_rows(&mut pass, "fr_il_run", b, IL_RUN_ROW);
                     self.direct(&mut pass, "fr_il_strike", b);
+                    if gi {
+                        // The structural response of what the strikes left in their
+                        // structures (a shot strikes one body a frame: a group per shot,
+                        // those past the struck ones leave at once), before the local
+                        // outcome's breaks.
+                        self.direct(&mut pass, "fr_cs_count", n);
+                        self.direct(&mut pass, "fr_cs_base", MAX_SHOTS);
+                        self.direct(&mut pass, "fr_cs_collect", n);
+                        self.direct_rows(&mut pass, "fr_gi_solve", (self.params.shot_count as usize).min(MAX_SHOTS), IL_RUN_ROW);
+                        self.direct(&mut pass, "fr_cs_clean", MAX_SHOTS);
+                    }
                     self.direct(&mut pass, "fr_il_mark", n);
                     self.direct(&mut pass, "fr_il_breaks", e);
                 }
@@ -2134,7 +2173,7 @@ impl GpuFracture {
                 self.indirect(&mut p, "fr_cs_base", ARG_CS_LIST, None);
                 self.indirect(&mut p, "fr_cs_collect", ARG_CS_CHUNKS, None);
                 // A group per struck structure, all its sweeps in the one dispatch.
-                self.indirect(&mut p, "fr_cs_solve", ARG_CS_BODIES, None);
+                self.indirect(&mut p, if self.params.gi_mode != 0 { "fr_gi_solve" } else { "fr_cs_solve" }, ARG_CS_BODIES, None);
             } else if analytic {
                 self.indirect(&mut p, "fr_csl_begin", ARG_CS_SLOTS, None);
                 self.indirect(&mut p, "fr_csl_tube_count", ARG_CS_CHUNKS, None);
@@ -2374,6 +2413,14 @@ impl GpuFracture {
     pub fn lp_loads(&self, gpu: &Gpu) -> Vec<[[f32; 4]; 2]> {
         let w: Vec<[f32; 4]> = gpu.read_range(&self.lp, 0, (LP_CHUNK * self.layout.n) as usize);
         w.chunks_exact(LP_CHUNK as usize).map(|c| [c[6], c[7]]).collect()
+    }
+
+    /// Diagnostic read: each body slot's last structural strike (`fr_gi_solve`): the pulse's
+    /// peak force (N), its duration (s) and the structure's frequency as the solve found it
+    /// (rad/s; 0: none, or the static pulse model).
+    pub fn impact_responses(&self, gpu: &Gpu) -> Vec<[f32; 3]> {
+        let w: Vec<[f32; 4]> = gpu.read_range(&self.lp, (LP_CHUNK * self.layout.n) as usize, (LP_BODY * self.layout.b) as usize);
+        w.chunks_exact(LP_BODY as usize).map(|c| [c[2][3], c[6][2], c[6][3]]).collect()
     }
 
     /// Diagnostic read: each body slot's analytic strike record (meaningful for a body
