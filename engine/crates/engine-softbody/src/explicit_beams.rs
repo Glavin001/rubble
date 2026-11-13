@@ -118,6 +118,14 @@ pub struct ExplicitBeamsSettings {
     /// correction after the node update. Lifts the damped explicit step's limit
     /// from ω·h ≤ 2(√(1+ζ²) − ζ) to 2 and past it; JBeam elements only.
     pub centred_damping: bool,
+    /// The centred damping's correction from each beam's change of extension
+    /// rate, each rate along the beam's own direction at its time
+    /// (jbeam-semantics-spec.md §39.6): Δu = (v′_a − v′_b)·d̂′ − (v_a − v_b)·d̂.
+    /// Off (the default until the GPU kernels follow): the change of the
+    /// relative velocity along the end direction alone, which reads a beam
+    /// that only turns as shortening at ω²·L·h and adds energy to anything
+    /// that spins (known-bugs S3).
+    pub centred_objective: bool,
 }
 
 impl Default for ExplicitBeamsSettings {
@@ -128,6 +136,7 @@ impl Default for ExplicitBeamsSettings {
             turbulence: true,
             triangle_throttle: true,
             centred_damping: false,
+            centred_objective: false,
         }
     }
 }

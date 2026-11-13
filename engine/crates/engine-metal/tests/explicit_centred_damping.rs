@@ -18,6 +18,7 @@ fn spawn(text: &str, wheels: Option<JbeamWheels>, v: Vec3) -> ExplicitBeams {
         turbulence: false,
         drag: false,
         centred_damping: true,
+        centred_objective: false,
         ..Default::default()
     };
     let (mut s, _) =

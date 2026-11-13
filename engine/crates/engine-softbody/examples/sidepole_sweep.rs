@@ -14,7 +14,8 @@
 //! ```bash
 //! cargo run --release -p engine-softbody --example sidepole_sweep -- \
 //!     --mod <mods dir>/<mod> --vehicle sedan [--pc sedan.pc] [--kmh 186] [--at 1.05] \
-//!     [--angle 90] [--surface 1] [--secs 1.2] [--run-up M] [--self 1] [--min-kg K]
+//!     [--angle 90] [--surface 1] [--secs 1.2] [--run-up M] [--self 1] [--min-kg K] \\
+//!     [--drop H] [--centred 1] [--rise J] [--series 1]
 //! ```
 //! `--self 0` turns self-collision off and `--min-kg K` raises every lighter
 //! node to K kg (diagnostics: they change the car).
@@ -116,7 +117,17 @@ fn main() -> Result<(), String> {
     for n in &mut s.nodes {
         n.pos += shift;
     }
-    let (pole_c, vel) = if angle == 90.0 {
+    // `--drop H`: the crash lab's `drop` scene instead (dropped flat from H
+    // metres, moving along its forward axis at `--kmh`; no pole, no carrier).
+    let drop = arg("--drop").and_then(|v| v.parse::<f32>().ok());
+    if let Some(h) = drop {
+        for n in &mut s.nodes {
+            n.pos.y += h;
+        }
+    }
+    let (pole_c, vel) = if drop.is_some() {
+        (Vec3::new(0.0, -1e4, 1e4), forward * v)
+    } else if angle == 90.0 {
         (
             Vec3::new(at, 2.0, 0.5 * width + gap + 0.1),
             Vec3::new(0.0, 0.0, v),
@@ -138,9 +149,11 @@ fn main() -> Result<(), String> {
         let fw = (s.nodes[c as usize].pos - s.nodes[b as usize].pos).normalize_or_zero();
         d.roll(vel.dot(fw));
     }
-    engine_softbody::crash_rigs::on_carrier(&mut s);
-    s.boxes
-        .push(StaticBox::centered(pole_c, Vec3::new(0.1, 2.0, 0.1)));
+    if drop.is_none() {
+        engine_softbody::crash_rigs::on_carrier(&mut s);
+        s.boxes
+            .push(StaticBox::centered(pole_c, Vec3::new(0.1, 2.0, 0.1)));
+    }
     s.surface_contact = surface;
     if num("--self", 1.0) == 0.0 {
         for n in &mut s.nodes {

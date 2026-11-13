@@ -19,6 +19,7 @@ const SETTINGS: ExplicitBeamsSettings = ExplicitBeamsSettings {
     turbulence: false,
     triangle_throttle: true,
     centred_damping: false,
+    centred_objective: false,
 };
 
 /// Throttle, then a turn, the handbrake, the brakes.

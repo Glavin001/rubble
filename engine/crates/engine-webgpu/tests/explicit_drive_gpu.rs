@@ -17,6 +17,7 @@ const SETTINGS: ExplicitBeamsSettings = ExplicitBeamsSettings {
     turbulence: false,
     triangle_throttle: true,
     centred_damping: false,
+    centred_objective: false,
 };
 
 fn sedan() -> String {
