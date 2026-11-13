@@ -251,7 +251,7 @@ impl ExplicitSim {
             ));
         }
         let step = self.steps as f64;
-        Ok(crate::read::read_ranges_on(
+        Ok(crate::read::read_ranges_now_on(
             self.device.clone(),
             self.queue.clone(),
             ranges,

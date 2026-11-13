@@ -94,8 +94,10 @@ pub(crate) enum CopyAt {
 }
 
 /// The order of every read that pages already use (`readBodies` and the `read_ranges*`
-/// family: poses, damage, terrain, guidance, mount loads, ...).
-pub(crate) const EXISTING_READS: CopyAt = CopyAt::Call;
+/// family: poses, damage, terrain, guidance, mount loads, ...): as it has always been.
+/// Pages issue these un-awaited inside a frame, before or after the step they submit
+/// in the same task; changing the order moves what they see by a frame.
+pub(crate) const EXISTING_READS: CopyAt = CopyAt::Polled;
 
 /// `submit`'s result, with `submit` run now ([`CopyAt::Call`]) or when the returned
 /// future is first polled ([`CopyAt::Polled`]).

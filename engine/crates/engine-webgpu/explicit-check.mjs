@@ -171,30 +171,39 @@ const RUNS = [
     const ok = steps > 1000 && /GPU [≈0-9]/.test(hud) && kmh > 20;
     return { ok, msg: `${live.fps.toFixed(0)} fps, ${(live.realTime * 100).toFixed(0)}% real time, ${steps} steps, launched to ${kmh.toFixed(0)} km/h; HUD: ${hud}` };
   }],
-  // Reads hold the state their step says: reads issued between frames submitted in
-  // one task, none awaited, return different states (the copy is submitted before
-  // the read returns; it once ran after every frame of the task). The explicit
-  // solver's readPoses (read_ranges_on) and the World's readBodies.
+  // Read order. The new reads (readFrameState, readDrive) submit their copy before
+  // they return: issued between frames submitted in one task, none awaited, each holds
+  // its own step's state. Every read that existed before (readPoses, readBodies, ...)
+  // keeps its order: the copy runs after the task, so reads issued in one task all hold
+  // the state after everything that task submitted (pages depend on it: a read issued
+  // before the frame's step sees that step).
   ['reads', async (v) => {
     await open(`solver=explicit&scene=wall&stopAt=0&${v.query}`, 'explicit');
     await evaluate('window.__step(40)');
+    const fs = await evaluate(`(async () => {
+      const x = window.__explicit.sim(), rs = [];
+      for (let i = 0; i < 4; i++) { x.frame(8); rs.push(x.readFrameState().then((f) => [f.step, f.pos[2]])); }
+      return Promise.all(rs);
+    })()`);
     const xz = await evaluate(`(async () => {
       const x = window.__explicit.sim(), rs = [];
       for (let i = 0; i < 4; i++) { x.frame(8); rs.push(x.readPoses().then((f) => f[2])); }
       return Promise.all(rs);
     })()`);
-    // The World's body buffer, written between reads (World.step panics on wasm32
-    // at std::time::Instant::now, so the soft solver cannot step here: the writes
-    // a pose change makes stand in for steps).
+    // The World's body buffer, written between reads (the writes a pose change makes
+    // stand in for steps).
     const sz = await evaluate(`(async () => {
       const w = window.__world, b = w.createBody({ position: [0, 50, 0] }), slot = w.bodySlot(b), rs = [];
       for (let i = 0; i < 4; i++) { w.bodySetType(b, 'static', [0, 50, i], [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]); rs.push(w.readBodies([slot]).then((f) => f[2])); }
       return Promise.all(rs);
     })()`);
     const distinct = (z) => z.length >= 2 && z.every((x, i) => i === 0 || x !== z[i - 1]);
-    const ok = distinct(xz) && distinct(sz);
+    const same = (z) => z.length >= 2 && z.every((x) => x === z[0]);
+    const steps = fs.map((f) => f[0]);
+    const ok = distinct(fs.map((f) => f[1])) && steps.every((s, i) => i === 0 || s === steps[i - 1] + 8)
+      && same(xz) && same(sz) && sz[0] === 3;
     const f = (z) => z.map((x) => x.toFixed(4)).join(', ');
-    return { ok, msg: `explicit readPoses z: ${f(xz)}; World readBodies z: ${f(sz)}` };
+    return { ok, msg: `readFrameState steps ${steps.join(', ')} z: ${f(fs.map((q) => q[1]))}; readPoses z (one task): ${f(xz)}; World readBodies z (one task): ${f(sz)}` };
   }],
   // The button rebuilds the scene on the soft solver (same vehicle, same spawn), and back.
   ['toggle', async (v) => {

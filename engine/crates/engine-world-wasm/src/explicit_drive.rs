@@ -309,7 +309,7 @@ impl ExplicitSim {
         let stride = l.stride as usize * 4;
         let step = self.steps as f64;
         let poses = self.drive_poses.clone();
-        Ok(crate::read::read_ranges_on(
+        Ok(crate::read::read_ranges_now_on(
             self.device.clone(),
             self.queue.clone(),
             vec![(misc, at, len)],
