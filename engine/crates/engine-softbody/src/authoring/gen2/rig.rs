@@ -2641,29 +2641,34 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         } else {
             (br_lo, br_hi)
         };
-        let ys = [lo.y + 0.06, hi.y - 0.06];
+        // Census: a third row across the face at the bumper beam's height
+        // ([`BUMPER_BEAM_Y`]), so the cover's contact with a car ahead is at
+        // the beam and the rails, below the centre of mass (the two rows
+        // alone met it at the cover's lower lip and at its top, level with
+        // the centre of mass: both noses rose, known-bugs S2).
+        let ys: Vec<(usize, f32, bool)> = if census {
+            vec![(0, lo.y + 0.06, true), (2, BUMPER_BEAM_Y, false), (1, hi.y - 0.06, true)]
+        } else {
+            vec![(0, lo.y + 0.06, true), (1, hi.y - 0.06, true)]
+        };
         let side_z = if front { lo.z + 0.05 } else { hi.z - 0.05 };
-        let mut grid: Vec<Vec<Option<usize>>> = vec![Vec::new(), Vec::new()];
-        for (row, &y) in ys.iter().enumerate() {
-            let mut cols: Vec<Vec3> = Vec::new();
-            cols.push(mirror(side(side_z, y), -1.0));
+        let mut grid: Vec<Vec<Option<usize>>> = vec![Vec::new(); ys.len()];
+        for (gi, &(row, y, wrap)) in ys.iter().enumerate() {
+            let mut cols: Vec<Option<Vec3>> = Vec::new();
+            cols.push(wrap.then(|| mirror(side(side_z, y), -1.0)));
             for f in [-0.80f32, -0.42, 0.0, 0.42, 0.80] {
                 let p = end_pt(front, f.abs() * 0.92, y);
-                cols.push(mirror(p, if f < 0.0 { -1.0 } else { 1.0 }));
+                cols.push(Some(mirror(p, if f < 0.0 { -1.0 } else { 1.0 })));
             }
-            cols.push(side(side_z, y));
+            cols.push(wrap.then(|| side(side_z, y)));
             for (k, p) in cols.into_iter().enumerate() {
-                grid[row].push(Some(r.node(
-                    &format!("{tag}_o{row}{k}"),
-                    p,
-                    part,
-                    Some(Role::Sheet),
-                    true,
-                )));
+                grid[gi].push(p.map(|p| {
+                    r.node(&format!("{tag}_o{row}{k}"), p, part, Some(Role::Sheet), true)
+                }));
             }
         }
         r.car
-            .panel(&grid, part, &[Role::Sheet; 2], Role::Sheet, true);
+            .panel(&grid, part, &vec![Role::Sheet; grid.len()], Role::Sheet, true);
         let cover: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
         // The beam: 0.13 m behind the face, five stations, two heights.
         let face = if front { hi.z } else { lo.z };
@@ -2698,6 +2703,28 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             let g = r.g(c);
             for b in r.nearest(part, g, 3, |i| beam.contains(&i)) {
                 r.car.beam(c, b, Role::Sheet, part);
+            }
+        }
+        // Census: the foam crushed solid. Each face node of the cover meets
+        // the beam (a BOUNDED stop to its nearest beam node) once the gap
+        // between them has closed to [`FOAM_SOLID`], so a load on the cover
+        // goes into the bumper beam, the crush cans and the rails, at bumper
+        // height, not round them.
+        if census {
+            let face_z = if front { hi.z } else { lo.z };
+            for &c in &cover {
+                let g = r.g(c);
+                if (g.z - face_z).abs() > 0.25 {
+                    continue;
+                }
+                if let Some(&b) = r.nearest(part, g, 1, |i| beam.contains(&i)).first() {
+                    let l = r.g(b).distance(g);
+                    if l > FOAM_SOLID + 0.02 {
+                        let j = r.car.beam(c, b, Role::Stop, part);
+                        r.car.beams[j].role = Role::Stop;
+                        r.car.stop_close.insert(j, l - FOAM_SOLID);
+                    }
+                }
             }
         }
         graph(&mut r, &cover, 0.62, part, Role::Sheet, &|_| false);
@@ -3446,7 +3473,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // 35° of the car's axis. SUPPORT ([`Role::Bearing`]).
     // ------------------------------------------------------------------
     if std::env::var("GEN3_NO_PUSH").is_err() {
-        push_links(&mut r);
+        push_links(&mut r, census);
     }
 
     // ------------------------------------------------------------------
@@ -3710,6 +3737,9 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     r.car.mass_floor = Some(0.7);
     r.car.row_cap_contact_only = false;
     r.car.centred_damping = true;
+    if census {
+        r.car.bumper_zeta = Some(BUMPER_ZETA);
+    }
     r.car.assign_masses();
 
     // The wheel stack (round 5): a front wheel pushed back meets the hinge
@@ -3856,9 +3886,15 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     for b in &mut r.car.beams {
         // Census: the body's edge nodes carry real mass, so their ties keep
         // the rule's spring where the light nodes' were softened to about a
-        // third; their yield keeps that share (a flange, not a member: at
-        // the full yield they braced the roof rail, FMVSS 216a 6.2 × weight).
-        if census && b.part == body && b.role == Role::EdgeTie && b.deform.is_finite() {
+        // third. Ahead of the strut towers (the hood's and lamps' apertures,
+        // the front's upper band) they yield at [`EDGE_TIE_YIELD`] of the
+        // sheet's, a flange's: at the full yield they carried the head-on
+        // load high (front hubs to 0.61 m against 0.51) and stiffened the
+        // wall (crush 564 mm, b1 42). Behind the towers they keep the full
+        // yield (at 0.35 two bent in the parked car at the B-pillar and six
+        // on a kerb; the price is the roof, 6.2 × weight against 4.9).
+        let ahead = 0.5 * (r.car.nodes[b.a].p.y + r.car.nodes[b.b].p.y) < -0.25;
+        if census && ahead && b.part == body && b.role == Role::EdgeTie && b.deform.is_finite() {
             b.deform *= env("RIG_EDGE_TIE_Y", EDGE_TIE_YIELD);
         }
         if !b.deform.is_finite()
@@ -3880,7 +3916,21 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         }
         let mid = 0.5 * (r.car.nodes[b.a].p + r.car.nodes[b.b].p);
         let crush_zone = mid.y < fw_y - 0.05 || mid.y > rear_y;
-        if b.part.is_door() {
+        if census && b.part == Part::Hood {
+            // The hood buckles: its sheet and inner frame yield in their
+            // plane at [`HOOD_YIELD`] of the census's (a beam at 9.9-10.9 kN
+            // against a rail beam's 2.8 kN made the hood the stiffer path).
+            b.deform *= env("RIG_HOOD_Y", HOOD_YIELD);
+        } else if census
+            && b.part == body
+            && crush_zone
+            && mid.y < fw_y - 0.05
+            && matches!(b.role, Role::Rail | Role::CrushCan)
+        {
+            // The primary frontal load path: the front rails and crush cans
+            // at [`RAIL_YIELD`] times the crush zone's yield.
+            b.deform *= cy * front_grade(mid.y) * env("RIG_RAIL_Y", RAIL_YIELD);
+        } else if b.part.is_door() {
             b.deform *= dy;
             if mid.z > door_up_h {
                 b.deform *= duy;
@@ -3913,12 +3963,48 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             // its beams (2.3 mm, the whole front clip left 2-3 mm off the
             // body); it takes [`APRON_REAR_YIELD`].
             let apron_rear = |i: usize| census && r.car.nodes[i].name.starts_with("ar") && r.car.nodes[i].p.y > -0.15;
-            b.deform *= if apron_rear(b.a) || apron_rear(b.b) {
+            // Census: the front's upper band (the apron tips, the radiator
+            // support's upper tie bar, the lamp pockets, above
+            // [`UPPER_BAND_Y`]) at [`UPPER_YIELD`] of the crush zone's yield:
+            // sheet-metal brackets that fold, where the rails carry.
+            let upper = census
+                && mid.y < -0.15
+                && mid.z > to_jbeam(Vec3::new(0.0, UPPER_BAND_Y, 0.0)).z;
+            // Census: the crush zone's anchorage on the cabin (the rails'
+            // kick-down onto the floor, the sills and the firewall's base:
+            // a front beam with an end on a floor, sill or tunnel node) at
+            // [`KICKDOWN_YIELD`]. At the crush yield it folded first: head
+            // on, the rails drove the toe board's floor and sill nodes down
+            // onto the ground by 60 ms, and the ground threw both cars up
+            // (1.2 m/s, every wheel in the air: known-bugs S2's nose lift).
+            let cabin_floor = |i: usize| {
+                let n = &r.car.nodes[i].name;
+                ["slo", "slt", "slb", "flr", "tn"].iter().any(|p| n.starts_with(p))
+            };
+            let kick = census && mid.y < fw_y - 0.05 && (cabin_floor(b.a) || cabin_floor(b.b));
+            b.deform *= if kick {
+                env("RIG_KICKDOWN_Y", KICKDOWN_YIELD)
+            } else if apron_rear(b.a) || apron_rear(b.b) {
                 env("RIG_APRON_REAR_Y", APRON_REAR_YIELD)
             } else if tower(b.a) || tower(b.b) {
                 cy.max(env("GEN3_TOWER_Y", tower_yield))
+            } else if upper {
+                cy * front_grade(mid.y) * env("RIG_UPPER_Y", UPPER_YIELD)
             } else if mid.y < fw_y - 0.05 {
-                cy * front_grade(mid.y)
+                // The front zone's beams across the car's axis (the rails'
+                // and aprons' webs and diagonals) against the beams along it
+                // ([`CROSS_SECTION_YIELD`], 1: alike). Measured head on: a
+                // stiffer section (3, 6) passes more of the contact's moment
+                // to the cabin and lifts the nose more (front hubs to 0.60,
+                // 0.96 m against 0.47 at 1).
+                let d = r.car.nodes[b.a].p - r.car.nodes[b.b].p;
+                let along = d.y.abs() / d.length().max(1e-6);
+                let sec = if census && along < 0.8 {
+                    env("RIG_SECTION_Y", CROSS_SECTION_YIELD)
+                } else {
+                    1.0
+                };
+                cy * front_grade(mid.y) * sec
             } else {
                 cy
             };
@@ -4096,7 +4182,28 @@ pub const INTRUSION_YIELD: f32 = 1.0;
 /// Spacing of the shut lines' edge nodes (m): a real closure's flange is
 /// bolted, hinged or stopped every 15-25 cm along it.
 pub const EDGE_SPACING: f32 = 0.22;
-/// The body's shut-line edge ties: their yield against the sheet's.
+/// The front crush zone's beams across the car's axis: their yield against
+/// the beams along it.
+pub const CROSS_SECTION_YIELD: f32 = 1.0;
+/// The bumpers' damping ratio (plastic covers on foam: the census's bumper
+/// beams run at ζ 0.07-0.33, the ETK's at 0.16).
+pub const BUMPER_ZETA: f32 = 0.16;
+/// The rails' anchorage on the cabin floor: its yield (× the census 1.15 %).
+pub const KICKDOWN_YIELD: f32 = 1.0;
+/// The bumper beam's centre height (m, model): the cover's middle row.
+pub const BUMPER_BEAM_Y: f32 = 0.48;
+/// The front's upper band starts here (m, model) and yields at this share
+/// of the crush zone's yield.
+pub const UPPER_BAND_Y: f32 = 0.62;
+pub const UPPER_YIELD: f32 = 0.7;
+/// The bumper foam's solid thickness (m): a cover node's stop on the beam.
+pub const FOAM_SOLID: f32 = 0.03;
+/// The hood's yield against the census sheet's (it buckles in a frontal).
+pub const HOOD_YIELD: f32 = 0.4;
+/// The front rails' and crush cans' yield against the crush zone's.
+pub const RAIL_YIELD: f32 = 4.0;
+/// The body's shut-line edge ties ahead of the strut towers: their yield
+/// against the sheet's.
 pub const EDGE_TIE_YIELD: f32 = 0.35;
 /// A door's window frame: its yield against the door frame's.
 pub const WINDOW_FRAME_YIELD: f32 = 0.3;
@@ -4170,7 +4277,7 @@ fn boundary_points(p: &super::model::Part) -> Vec<usize> {
 /// part's lattice; the stops carry a closure's edge onto its neighbour as a
 /// flange does. Returns the edge nodes.
 /// The push links (see the call): (front part, part behind) pairs.
-fn push_links(r: &mut Rig) {
+fn push_links(r: &mut Rig, census: bool) {
     let pairs = [
         (Part::BumperF, Part::Body),
         (Part::BumperF, Part::FenderL),
@@ -4184,6 +4291,12 @@ fn push_links(r: &mut Rig) {
     let reach = env_f("GEN3_PUSH_REACH", PUSH_REACH);
     let cone = (35f32).to_radians().tan();
     for (pa, pb) in pairs {
+        // Census: the cover does not push the hood (an unyielding stop from
+        // the cover's top row into the hood's front edge put the head-on
+        // load through the hood, above the centre of mass: known-bugs S2).
+        if census && pa == Part::BumperF && pb == Part::Hood {
+            continue;
+        }
         let fronts: Vec<usize> = (0..r.car.nodes.len())
             .filter(|&i| {
                 let n = &r.car.nodes[i];

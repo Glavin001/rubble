@@ -170,6 +170,42 @@ arch, the front doors gap at the A-pillar and the cabin stays whole. At the
 pole the struck front door's leading edge stands open from the A-pillar (a
 visible follow-up).
 
+## The census lattice (2026-11-12, `feat/sedan-stiff`): measured against the ETK
+
+BeamNG's node counts and masses on the closures (`RIG_OLD_CENSUS=1` builds
+the earlier lattice): doors 17 nodes as a closed box, hood 24, lid 18,
+fenders 11, bumpers 39 / 34; no light edge nodes; 3 × 3 hinges; every closure
+node bears on two body members (SUPPORT), the latch side preloaded; bumpers at
+ζ 0.16. `sedan_stiffness` (CPU reference; logs in
+`~/Development/rubble-artifacts/sedan-stiffness/v3/`):
+
+| | before | now | ETK |
+|---|---|---|---|
+| Closure Σk kept by the stability pass: door / hood / lid / fender | 0.35 / 0.55 / 0.46 / 0.56 | 0.92 / 0.79 / 0.82 / 0.89 | |
+| SUPPORT share of beams (lint) | 3.0 % | 5.6 % | 11 % |
+| First mode, held at neighbours (Hz): door F / door R / hood / lid / fender | 7.8 / 5.1 / 8.0 / 7.9 / 19.5 | 14.7 / 16.3 / 8.7 / 15.1 / 12.7 | 34.9 / – / 12.5 / 27.0 / 41.8 |
+| 5 cm kerb at 30 km/h, raycast wheels, peak about the body (mm): body / door / hood / lid / fender / bumper | 0.87 / 1.18 / 1.75 / 0.82 / 1.36 / 1.35 | 0.41 / 0.55 / 0.64 / 0.44 / 0.51 / 0.70 | 0.09 / 0.14 / 0.23 / 0.21 / 0.09 / 0.17 |
+| the same, settle under 0.2 mm (s) | 1.4–2.9 | 0.7–1.4 | 0–0.6 |
+| the same on pressure wheels (mm) | 8.1 / 9.3 / 15.2 / 9.9 / 11.4 / 11.3 | 4.0 / 4.5 / 9.2 / 3.2 / 6.2 / 7.2 | 1.0 / 1.2 / 2.4 / 3.0 / 1.6 / 3.5 |
+| beams the kerb bent (pressure wheels) | 42 (the aprons) | 0 | |
+| Rest drift / parked fidelity | 4.8 mm / 0.83 mm, 0.74° | 3.1 mm / 0.41 mm, 0.30° | |
+| Wall 56: crush, t_m, peak, residual max / avg, b1, restitution, feet | 713 mm, 77 ms, 33.2 g, 632 / 557 mm, 23.9, 0.256, 173 mm | 579 mm, 64.5 ms, 37.8 g, 438 / 329 mm, 40.5, 0.221, 83 mm | |
+| Pole 32 km/h residual / sweep through / MDB / roof / door static | 128 mm / 2 / 367 mm / 4.9 / 12.4, 15.6, 44.1 kN | 170 mm / 1 / 407 mm / 6.2 / 16.9, 20.5, 58.1 kN | |
+| Head on: peak nodes inside, overlap, front hubs' peak | 29 / 34, 98 L, 0.93 m | 24 / 24, 86 L, 0.46 m | |
+
+**Not at the ETK's level** (the bar): the kerb's wobble is 2–6 × the ETK's on
+raycast wheels and 1–4 × on pressure wheels, the doors' first mode is under
+half of it. What limits it: the body (346 nodes at 1.6 kg against 124 at
+4.0; the stability pass still keeps only 72 % of its springs, and its own
+ripple, 0.41 mm, is under every closure's), SUPPORT at 5.6 % (the body has no
+internal stops) and the hood's and fenders' few depth members. The body's
+lattice is the next step; the hubs, strut tops and mounts must stay explicit
+named beams when it is rebuilt. Not done: the visual binding's reach (the
+kernel radii are shared by every skin; at 0.3–0.5 m node spacing the reach
+cannot go under about 0.25 m). Head-on coverage rays more than 15 cm behind
+the render surface rose from 9 % to 15 % with the coarser closures (the lint's
+coverage p99 is 0.118 m, passing). The nose lift: `handoff/known-bugs.md` S2.
+
 ## Other designs
 
 The rigger takes any design through the same input trait. What each needs:

@@ -657,6 +657,7 @@ fn main() -> Result<(), String> {
     let mut win_part: [std::collections::BTreeMap<String, [f64; 2]>; 2] = Default::default();
     let mut tot_part: [std::collections::BTreeMap<String, [f64; 2]>; 2] = Default::default();
     let mut win_m = [0.0f64; 2];
+    let mut node_imp: HashMap<String, (f64, f32)> = HashMap::new();
     // The load path: beams crossing a transverse section SECTION m behind the
     // nose at spawn (default 0.55), their compression's component along the
     // car, by the beam's spawn height band and by member (node-name prefix).
@@ -737,6 +738,10 @@ fn main() -> Result<(), String> {
                             e[0] += push;
                             e[1] += up;
                         }
+                        if c == 0 {
+                            let e = node_imp.entry(l.desc.nodes[i].name.clone()).or_insert((0.0, p.y));
+                            e.0 += push;
+                        }
                         let mx = (p - cm).cross(f).x;
                         win_m[c] += (-fwd * mx) as f64 * 0.0005;
                     }
@@ -789,6 +794,12 @@ fn main() -> Result<(), String> {
                 }
             }
             if forces && k == steps {
+                let mut v: Vec<(&String, &(f64, f32))> = node_imp.iter().collect();
+                v.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
+                println!(
+                    "  car A nodes by push impulse (kN·s, first contact height m): {}",
+                    v.iter().take(30).map(|(n, (i, y))| format!("{n} {:.2} @{y:.2}", i / 1e3)).collect::<Vec<_>>().join(", ")
+                );
                 for c in 0..2 {
                     println!(
                         "  impulse car {} (kN·s push/up) by band: {:?}; by part: {:?}",
@@ -947,11 +958,51 @@ fn main() -> Result<(), String> {
                     .sum::<f32>()
                     / 2.0
             };
+            // Car A's rear hubs and its cabin's pitch (the sill's front
+            // station above its rear one over their distance; nose up > 0).
+            let at = |s: &ExplicitBeams, n: &str| {
+                l.desc.nodes.iter().position(|x| x.name == n).map(|i| s.origin + s.nodes[i].pos)
+            };
+            let a = &w.vehicles[0];
+            let rear = ["hubRiL", "hubRiR"].iter().filter_map(|n| at(a, n)).map(|p| p.y).sum::<f32>() / 2.0;
+            let pitch = match (at(a, "slt0L"), at(a, "slt4L")) {
+                (Some(f), Some(r)) => ((f.y - r.y) / (f.z - r.z).abs().max(1e-3)).atan().to_degrees(),
+                _ => f32::NAN,
+            };
+            // Car A's nodes on the ground (within 3 cm) and its vertical speed (centre of mass).
+            let mut low: Vec<(f32, &str)> = (0..a.nodes.len())
+                .map(|i| (a.origin.y + a.nodes[i].pos.y, l.desc.nodes[i].name.as_str()))
+                .filter(|x| x.0 < 0.03)
+                .collect();
+            low.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let (mut py, mut mm) = (0.0f32, 0.0f32);
+            for n in &a.nodes {
+                py += n.vel.y * n.mass;
+                mm += n.mass;
+            }
+            if let Ok(list) = std::env::var("HEIGHTS") {
+                // HEIGHTS=a,b,c: those nodes' heights (car A), m.
+                println!(
+                    "       heights: {}",
+                    list.split(',')
+                        .filter_map(|n| at(a, n).map(|p| format!("{n} {:.3}", p.y)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             println!(
-                "  {:4.0} ms front hubs y A {:.3} B {:.3} m",
+                "       A vy {:.2} m/s; on the ground {}: {}",
+                py / mm,
+                low.len(),
+                low.iter().take(8).map(|x| format!("{} {:.3}", x.1, x.0)).collect::<Vec<_>>().join(", ")
+            );
+            println!(
+                "  {:4.0} ms front hubs y A {:.3} B {:.3} m; A rear hubs {:.3} m, sill pitch {:.2} deg",
                 k as f32 * 0.5,
                 hy(&w.vehicles[0]),
-                hy(&w.vehicles[1])
+                hy(&w.vehicles[1]),
+                rear,
+                pitch
             );
         }
         if full {

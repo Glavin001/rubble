@@ -456,6 +456,9 @@ pub struct Car {
     /// Per [`Role::Stop`] beam: the closure (m) after which it engages
     /// (absent: [`super::export::STOP_LEFT`] of its length left).
     pub stop_close: HashMap<usize, f32>,
+    /// Damping ratio of the bumpers' beams (None: [`ZETA`] as every part;
+    /// the census's bumper covers run at 0.07-0.33).
+    pub bumper_zeta: Option<f32>,
     /// Per beam: JBeam `beamPrecompression` (a preloaded seal or bump stop).
     pub precomp: HashMap<usize, f32>,
     by_name: HashMap<String, usize>,
@@ -1031,7 +1034,12 @@ impl Car {
                 }
             })
             .collect();
-        let damp = |k: f32, b: &Beam| 2.0 * ZETA * (k * mu(b)).sqrt();
+        let bz = self.bumper_zeta;
+        let zeta_of = move |b: &Beam| match (b.part, bz) {
+            (Part::BumperF | Part::BumperR, Some(z)) => z,
+            _ => ZETA,
+        };
+        let damp = |k: f32, b: &Beam| 2.0 * zeta_of(b) * (k * mu(b)).sqrt();
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (j, b) in self.beams.iter().enumerate() {
             adj[b.a].push(j);
@@ -1223,7 +1231,11 @@ impl Car {
         for (j, b) in self.beams.iter_mut().enumerate() {
             let sp = b.role.spec(b.part);
             b.k = ks[j];
-            b.c = 2.0 * ZETA * (ks[j] * (m[b.a] * m[b.b] / (m[b.a] + m[b.b]))).sqrt();
+            let z = match (b.part, bz) {
+                (Part::BumperF | Part::BumperR, Some(z)) => z,
+                _ => ZETA,
+            };
+            b.c = 2.0 * z * (ks[j] * (m[b.a] * m[b.b] / (m[b.a] + m[b.b]))).sqrt();
             b.deform = if sp.eps.is_finite() {
                 sp.eps * ks[j] * len[j].max(SPRING_LENGTH)
             } else {
