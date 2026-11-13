@@ -308,6 +308,7 @@ pub(crate) fn sedan_equipment(g: &Gear, st: &Structure, out: &mut Vec<MechPart>)
     body_hardware(g, st, out);
     running_gear(g, st, out);
     controls(g, st, out);
+    interior(g, st, out);
     for p in &mut out[n0..] {
         p.from_trim = !p.nodes.is_empty();
     }
@@ -1323,6 +1324,271 @@ fn controls(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         p.mesh.add(&box_(pad_a, DVec3::new(0.020, 0.050, 0.005), Mat::Rubber, Some(crate::mesh::rot_x(-0.30))));
         p.tetra(DVec3::new(0.5 * (xa + x), 0.5 * (yb + pad.y), zb - 0.04), DVec3::new(0.5 * (x - xa), 0.5 * (yb - pad.y), 0.045), 3.2, vals(0.0, 40.0, 2e3, INF));
         p.hold("pedal_box", &["b1_ol", "b1_il", "c1_1tl", "b2_ol", "c2_1l"], 6, BeamKind::Normal, vals(0.0, 60.0, 2500.0, 5000.0));
+        out.push(p);
+    }
+}
+
+// ---- 6. the interior's trim ----------------------------------------------------------------
+
+/// A formed sheet as a closed solid: `nu` × `nv` points `p(i, j)` on one
+/// face, the other face `off(i, j)` away, the cells where `keep(i, j)`.
+fn sheet_solid(nu: usize, nv: usize, p: impl Fn(usize, usize) -> DVec3, off: impl Fn(usize, usize) -> DVec3, keep: impl Fn(usize, usize) -> bool, mat: Mat) -> Mesh {
+    let mut ids: Vec<Option<(u32, u32)>> = vec![None; nu * nv];
+    let mut v: Vec<DVec3> = Vec::new();
+    let mut q: Vec<[u32; 4]> = Vec::new();
+    let kept = |i: isize, j: isize| i >= 0 && j >= 0 && (i as usize) < nu - 1 && (j as usize) < nv - 1 && keep(i as usize, j as usize);
+    let mut id = |i: usize, j: usize, v: &mut Vec<DVec3>| {
+        *ids[i * nv + j].get_or_insert_with(|| {
+            let a = p(i, j);
+            v.push(a);
+            v.push(a + off(i, j));
+            (v.len() as u32 - 2, v.len() as u32 - 1)
+        })
+    };
+    for i in 0..nu - 1 {
+        for j in 0..nv - 1 {
+            if !kept(i as isize, j as isize) {
+                continue;
+            }
+            let c = [id(i, j, &mut v), id(i + 1, j, &mut v), id(i + 1, j + 1, &mut v), id(i, j + 1, &mut v)];
+            q.push([c[0].0, c[1].0, c[2].0, c[3].0]);
+            q.push([c[3].1, c[2].1, c[1].1, c[0].1]);
+            let nb = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+            for k in 0..4 {
+                if !kept(i as isize + nb[k].0, j as isize + nb[k].1) {
+                    let (a, b) = (c[k], c[(k + 1) % 4]);
+                    q.push([b.0, a.0, a.1, b.1]);
+                }
+            }
+        }
+    }
+    crate::mesh::orient_outward(Mesh::from_faces(v, q, vec![], mat, None, -1))
+}
+
+fn lin(a: f64, b: f64, i: usize, n: usize) -> f64 {
+    a + (b - a) * i as f64 / (n - 1) as f64
+}
+
+/// The instrument panel's features on its rear face (`zr`, towards the
+/// cabin) at height `yp`: the cluster's two dials under its hood, the centre
+/// screen and vents, the glovebox door with its handle.
+pub(crate) fn dash_features(f: &Frame, yp: f64, zr: f64) -> Mesh {
+    let mut m = Mesh::new();
+    let xd = f.x(0.38);
+    m.add(&box_(DVec3::new(xd, yp + 0.060, zr - 0.003), DVec3::new(0.135, 0.040, 0.004), Mat::TrimBlack, None));
+    for dx in [-0.062, 0.062] {
+        m.add(&lathe_at(&[(0.0, 0.0), (0.046, 0.0), (0.050, 0.006), (0.044, 0.008), (0.0, 0.005)], 20, Mat::Chrome, -DVec3::Z, DVec3::new(xd + dx, yp + 0.060, zr - 0.007)));
+    }
+    m.add(&box_(DVec3::new(0.0, yp + 0.040, zr - 0.004), DVec3::new(0.105, 0.060, 0.005), Mat::TrimBlack, None));
+    for dx in [-0.165, 0.165] {
+        m.add(&box_(DVec3::new(dx, yp + 0.060, zr - 0.003), DVec3::new(0.035, 0.022, 0.004), Mat::TrimBlack, None));
+    }
+    m.add(&box_(DVec3::new(-xd, yp - 0.020, zr - 0.003), DVec3::new(0.170, 0.055, 0.004), Mat::InteriorPlastic, None));
+    m.add(&box_(DVec3::new(-xd, yp + 0.018, zr - 0.009), DVec3::new(0.040, 0.006, 0.003), Mat::Chrome, None));
+    m
+}
+
+fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
+    let f = &g.f;
+    let clip = |deform: f64, strength: f64| vals(0.0, 30.0, deform, strength);
+    let tube = &g.tube;
+    let rows: Vec<DVec3> = (1..=5).map(|k| sh(st, &format!("sh_c3_{k}"))).collect();
+    let z_fw = sh(st, "sh_b1_ol").z;
+    let yp = sh(st, "sh_c1_3tl").y + 0.004;
+    // ---- floor carpet: one moulding over the pan, up the toe board, over
+    // the tunnel and the floor's longitudinals; cut out round the seat cross
+    // members and the console
+    {
+        let mut p = MechPart::new("carpet", "interior");
+        let xs = (1..=5).map(|k| sh(st, &format!("sh_c1_{k}ol")).x).fold(f64::INFINITY, f64::min) - 0.0325 - 0.016;
+        let (z0, z1) = (z_fw - 0.016, rows[4].z + 0.014);
+        let toe = (f.y(0.42) - f.y(0.222)) / (z_fw - rows[0].z);
+        let xl = f.x(0.43);
+        let height = |x: f64, z: f64| {
+            let mut h = yp;
+            if z > rows[0].z {
+                h = yp + (z - rows[0].z) * toe;
+            }
+            if x.abs() < 0.090 || (z > rows[0].z - 0.02 && x.abs() < 0.125) {
+                h = h.max(yp + 0.166);
+            }
+            if (x.abs() - xl).abs() < 0.052 && z > rows[2].z + 0.04 && z < rows[0].z {
+                h = h.max(yp + 0.050);
+            }
+            h
+        };
+        let (nu, nv) = (61, 66);
+        let (dx, dz) = (2.0 * xs / (nu - 1) as f64, (z1 - z0) / (nv - 1) as f64);
+        let dza = dz.abs();
+        let (xa, za) = (|i: usize| -xs + dx * i as f64, |j: usize| z0 + dz * j as f64);
+        // (the highest of a point's neighbourhood: the moulding bridges
+        // every step instead of cutting its corner)
+        let hd = |i: usize, j: usize| {
+            let mut h: f64 = 0.0;
+            for a in [-1.0, 0.0, 1.0] {
+                for b in [-1.0, 0.0, 1.0] {
+                    h = h.max(height(xa(i) + a * dx, za(j) + b * dz));
+                }
+            }
+            h
+        };
+        let (c2, c4) = (rows[1].z, rows[3].z);
+        let bench_front = sh(st, "sh_e3_1").z + 0.185 + 0.20;
+        let keep = |i: usize, j: usize| {
+            let (x, z) = (xa(i) + 0.5 * dx, za(j) + 0.5 * dz);
+            let member = x.abs() > 0.110 && ((z - rows[2].z).abs() < 0.062 + dza || (z - rows[3].z).abs() < 0.062 + dza);
+            let console = x.abs() < 0.100 + dx && z < c2 - 0.10 + 0.02 + dza && z > c4 + 0.05 - 0.02 - dza;
+            // (the rear bench's cushion sits 4 mm over the tunnel)
+            let bench = x.abs() < 0.125 + 2.0 * dx && z < bench_front + 0.02 + dza;
+            !member && !console && !bench
+        };
+        p.mesh = sheet_solid(nu, nv, |i, j| DVec3::new(xa(i), hd(i, j) + 0.006, za(j)), |_, _| DVec3::Y * 0.006, keep, Mat::InteriorFabric);
+        for (k, z) in [0.5 * (rows[0].z + rows[1].z), 0.5 * (rows[2].z + rows[3].z), 0.5 * (rows[3].z + rows[4].z)].into_iter().enumerate() {
+            for (s, sg) in [("l", 1.0), ("r", -1.0)] {
+                p.node(&format!("{}{s}", k + 1), DVec3::new(sg * 0.40, yp + 0.009, z), 1.5);
+            }
+        }
+        p.internal.push(Internal { pairs: p.complete(), v: clip(300.0, INF), deform_group: None });
+        p.hold("carpet", &["c1_1tl", "c1_1tr", "c1_2tl", "c1_2tr", "c1_3tl", "c1_3tr", "c1_4tl", "c1_4tr", "c1_5tl", "c1_5tr"], 12, BeamKind::Normal, clip(300.0, 600.0));
+        out.push(p);
+    }
+    // ---- pillar trims: A and C under the shell's own section, B on the
+    // pillar's cabin face
+    let zb = f.z(-0.22);
+    for (s, sg) in [("L", 1.0), ("R", -1.0)] {
+        let sl = s.to_lowercase();
+        let vv = |v: f64| if sg > 0.0 { v } else { tube.vm - v };
+        for (nm, za, zc, to) in [("a", 0.74, -0.03, [format!("d1_m{sl}"), format!("d1_t{sl}"), format!("b2_o{sl}")]), ("c", -0.99, -1.42, [format!("d3_t{sl}"), format!("d3_b{sl}"), format!("e5_1u{sl}")])] {
+            let mut p = MechPart::new(&format!("pillar_trim_{nm}_{s}"), "interior");
+            let (nu, nv) = (13, 4);
+            let at = |i: usize, j: usize| tube.eval_n(f.z(lin(za, zc, i, nu)), vv(lin(7.12, 7.88, j, nv)));
+            p.mesh = sheet_solid(nu, nv, |i, j| at(i, j).0 - at(i, j).1 * 0.036, |i, j| -at(i, j).1 * 0.005, |_, _| true, Mat::InteriorPlastic);
+            for (t, i) in [("t", 1), ("m", 6), ("b", 11)] {
+                p.node(t, at(i, 1).0 - at(i, 1).1 * 0.038, 0.2);
+            }
+            p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
+            let to: Vec<&str> = to.iter().map(|x| x.as_str()).collect();
+            p.hold(&*format!("pillar_trim_{nm}_{sl}"), &to, 5, BeamKind::Normal, clip(200.0, 400.0));
+            out.push(p);
+        }
+        {
+            let mut p = MechPart::new(&format!("pillar_trim_b_{s}"), "interior");
+            let (nu, nv) = (17, 3);
+            let at = |i: usize, j: usize| tube.eval(zb + lin(-0.033, 0.033, j, nv), vv(lin(2.3, 6.8, i, nu))) - DVec3::X * (sg * 0.138);
+            p.mesh = sheet_solid(nu, nv, at, |_, _| -DVec3::X * (sg * 0.005), |_, _| true, Mat::InteriorPlastic);
+            for (t, i) in [("t", 14), ("m", 8), ("b", 2)] {
+                p.node(t, at(i, 1) - DVec3::X * (sg * 0.002), 0.2);
+            }
+            p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
+            p.hold(&*format!("pillar_trim_b_{sl}"), &[&*format!("d2_b{sl}"), &*format!("d2_t{sl}"), &*format!("c2_3{sl}")], 5, BeamKind::Normal, clip(200.0, 400.0));
+            out.push(p);
+        }
+        // ---- sun visor under the header
+        {
+            let mut p = MechPart::new(&format!("sun_visor_{s}"), "interior");
+            let (nu, nv) = (9, 5);
+            let at = |i: usize, j: usize| {
+                let (x, z) = (sg * f.x(lin(0.20, 0.54, i, nu)), f.z(lin(-0.075, -0.19, j, nv)));
+                DVec3::new(x, top_y(g, z, x) - 0.074, z)
+            };
+            p.mesh = sheet_solid(nu, nv, at, |_, _| DVec3::Y * 0.014, |_, _| true, Mat::InteriorFabric);
+            for (t, i, j) in [("o", 7, 0), ("i", 1, 0), ("r", 4, 4)] {
+                p.node(t, at(i, j) + DVec3::Y * 0.007, 0.35 / 3.0);
+            }
+            p.internal.push(Internal { pairs: p.complete(), v: clip(100.0, INF), deform_group: None });
+            p.hold(&*format!("sun_visor_{sl}"), &["d4_h", &*format!("d1_t{sl}"), &*format!("d2_t{sl}")], 4, BeamKind::Normal, clip(100.0, 250.0));
+            out.push(p);
+        }
+        // ---- front seat belt: the reel at the B-pillar's foot, the webbing
+        // up the pillar to its ring, the buckle on its stalk by the tunnel
+        {
+            let mut p = MechPart::new(&format!("seat_belt_F{s}"), "interior");
+            let reel = inside(g, zb, f.y(0.42), sg, 0.178);
+            p.mesh.add(&box_(reel, DVec3::new(0.020, 0.040, 0.030), Mat::TrimBlack, None));
+            let web: Vec<DVec3> = (0..14).map(|k| inside(g, zb, f.y(0.47 + 0.03 * k as f64), sg, 0.1490)).collect();
+            let mut w = crate::structure::box_along(&web, DVec3::X, 0.046, 0.002);
+            w.set_mat(Mat::InteriorFabric);
+            p.mesh.add(&w);
+            let ring = inside(g, zb, f.y(0.875), sg, 0.157);
+            p.mesh.add(&box_(ring, DVec3::new(0.006, 0.018, 0.026), Mat::TrimBlack, None));
+            let zs = 0.5 * (rows[2].z + rows[3].z) - 0.18;
+            let buckle = DVec3::new(sg * 0.110, yp + 0.255, zs);
+            p.mesh.add(&box_(buckle, DVec3::new(0.011, 0.030, 0.018), Mat::TrimBlack, None));
+            p.mesh.add(&box_(buckle + DVec3::Y * 0.033, DVec3::new(0.008, 0.004, 0.012), Mat::Paint, None));
+            p.mesh.add(&box_(buckle - DVec3::Y * 0.050, DVec3::new(0.003, 0.021, 0.010), Mat::MetalBare, None));
+            let nr = p.node("r", reel, 1.0);
+            let ng = p.node("g", ring, 0.2);
+            let nb = p.node("b", buckle, 0.3);
+            p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 30.0, 4e3, INF), deform_group: None });
+            let anchor = vals(0.0, 60.0, 8e3, 15e3);
+            p.hold_from(&format!("seat_belt_f{sl}_reel"), vec![nr], &shn(&[format!("c2_3{sl}"), format!("c1_3o{sl}"), format!("d2_b{sl}")]), 3, anchor);
+            p.hold_from(&format!("seat_belt_f{sl}_ring"), vec![ng], &shn(&[format!("d2_b{sl}"), format!("d2_t{sl}")]), 2, anchor);
+            p.hold_from(&format!("seat_belt_f{sl}_buckle"), vec![nb], &shn(&["c3_3".into(), "c3_4".into(), format!("c1_3t{sl}")]), 3, anchor);
+            out.push(p);
+        }
+        // ---- boot side trim: a board inboard of the wheel well and tower
+        {
+            let mut p = MechPart::new(&format!("boot_trim_{s}"), "interior");
+            let x = sg * f.x(0.505);
+            let (za, zc) = (g.zr - 0.085, sh(st, "sh_e4_dc").z + 0.040);
+            let (ya, yc) = (sh(st, "sh_e3_2").y + 0.020, sh(st, "sh_e6_ol").y - 0.060);
+            let (nu, nv) = (10, 6);
+            let at = |i: usize, j: usize| DVec3::new(x, lin(ya, yc, j, nv), lin(za, zc, i, nu));
+            p.mesh = sheet_solid(nu, nv, at, |_, _| -DVec3::X * (sg * 0.006), |_, _| true, Mat::InteriorFabric);
+            for (t, i, j) in [("f", 1, 1), ("r", 8, 1), ("t", 4, 4)] {
+                p.node(t, at(i, j), 1.4 / 3.0);
+            }
+            p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
+            p.hold(&*format!("boot_trim_{sl}"), &[&*format!("e2_{sl}"), &*format!("e1_2u{sl}"), &*format!("e1_3u{sl}"), &*format!("e5_3u{sl}"), &*format!("e5_4u{sl}")], 6, BeamKind::Normal, clip(200.0, 500.0));
+            out.push(p);
+        }
+    }
+    // ---- interior mirror under the windscreen's top edge
+    {
+        let mut p = MechPart::new("interior_mirror", "interior");
+        let z = f.z(-0.02);
+        let c = DVec3::new(0.0, tube.eval(z, 9.0).y - 0.085, z - 0.010);
+        p.mesh.add(&rbox(c, DVec3::new(0.110, 0.030, 0.010), 0.008, 2, Mat::TrimBlack));
+        p.mesh.add(&box_(c - DVec3::Z * 0.0115, DVec3::new(0.100, 0.024, 0.001), Mat::Chrome, None));
+        p.mesh.add(&cyl(c + DVec3::new(0.0, 0.020, 0.008), c + DVec3::new(0.0, 0.052, 0.022), 0.006));
+        for (t, x) in [("l", 0.09), ("r", -0.09), ("s", 0.0)] {
+            p.node(t, c + DVec3::new(x, if x == 0.0 { 0.045 } else { 0.0 }, 0.0), 0.1);
+        }
+        p.internal.push(Internal { pairs: p.complete(), v: clip(100.0, INF), deform_group: None });
+        p.hold("interior_mirror", &["d4_h", "d1_tl", "d1_tr"], 3, BeamKind::Normal, clip(100.0, 250.0));
+        out.push(p);
+    }
+    // ---- parcel shelf trim with its two speaker grilles
+    let (e6, e6r, e7) = (sh(st, "sh_e6_ol"), sh(st, "sh_e6_rl"), sh(st, "sh_e7_l"));
+    {
+        let mut p = MechPart::new("parcel_shelf_trim", "interior");
+        let (hx, za, zc) = (e6.x - 0.010, e7.z - 0.014, e6r.z + 0.010);
+        let (nu, nv) = (21, 6);
+        let at = |i: usize, j: usize| DVec3::new(lin(-hx, hx, i, nu), e6.y + 0.008, lin(za, zc, j, nv));
+        p.mesh = sheet_solid(nu, nv, at, |_, _| DVec3::Y * 0.008, |_, _| true, Mat::InteriorFabric);
+        for sg in [1.0, -1.0] {
+            p.mesh.add(&lathe_at(&[(0.0, 0.0), (0.068, 0.0), (0.064, 0.005), (0.0, 0.007)], 18, Mat::TrimBlack, DVec3::Y, DVec3::new(sg * 0.40, e6.y + 0.0165, 0.5 * (za + zc))));
+        }
+        for (t, i, j) in [("fl", 19, 0), ("fr", 1, 0), ("rl", 19, 5), ("rr", 1, 5)] {
+            p.node(t, at(i, j) + DVec3::Y * 0.004, 0.5);
+        }
+        p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
+        p.hold("parcel_shelf_trim", &["e6_ol", "e6_or", "e6_rl", "e6_rr", "e7_l", "e7_r"], 8, BeamKind::Normal, clip(200.0, 500.0));
+        out.push(p);
+    }
+    // ---- boot floor lining
+    {
+        let mut p = MechPart::new("boot_lining", "interior");
+        let e3 = sh(st, "sh_e3_2");
+        let (hx, za, zc) = (f.x(0.497), g.zr - 0.012, sh(st, "sh_e4_dc").z + 0.036);
+        let (nu, nv) = (15, 12);
+        let at = |i: usize, j: usize| DVec3::new(lin(-hx, hx, i, nu), e3.y + 0.008, lin(za, zc, j, nv));
+        p.mesh = sheet_solid(nu, nv, at, |_, _| DVec3::Y * 0.008, |_, _| true, Mat::InteriorFabric);
+        for (t, i, j) in [("fl", 13, 1), ("fr", 1, 1), ("rl", 13, 10), ("rr", 1, 10)] {
+            p.node(t, at(i, j) + DVec3::Y * 0.004, 0.75);
+        }
+        p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
+        p.hold("boot_lining", &["e3_2", "e3_3", "e1_2ul", "e1_2ur", "e1_3ul", "e1_3ur"], 8, BeamKind::Normal, clip(200.0, 500.0));
         out.push(p);
     }
 }

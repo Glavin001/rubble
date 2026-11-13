@@ -610,6 +610,8 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         for sgn in [1.0, -1.0] {
             p.mesh.add(&bar(DVec3::new(sgn * 0.30, yb, zb - 0.03), DVec3::new(sgn * 0.30, yp - 0.02, zp + 0.155), 0.03, 0.03));
         }
+        // the cluster's dials, the centre screen and vents, the glovebox
+        p.mesh.add(&crate::equipment::dash_features(f, yp, zp - 0.15));
         for (tg, x, y, z, kg) in [("bl", hx, yb, zb, 6.0), ("br", -hx, yb, zb, 6.0), ("ml", 0.30, yb, zb, 7.0), ("mr", -0.30, yb, zb, 7.0), ("tl", 0.45, yp + 0.09, zp, 6.0), ("tr", -0.45, yp + 0.09, zp, 6.0), ("c", 0.0, yp - 0.07, zp - 0.10, 7.0)] {
             p.node(tg, DVec3::new(x, y, z), kg);
         }

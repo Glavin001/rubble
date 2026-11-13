@@ -77,6 +77,24 @@ const PARTS: &[(&str, usize, f64, f64)] = &[
     // 4. controls
     ("steering_column", 3, 5.0, 0.0),
     ("pedal_box", 4, 3.2, 0.0),
+    // 6. interior trim (the cluster's dials, the screen and the glovebox are
+    // features of the instrument panel; no spare wheel: `generated-vehicles.md`)
+    ("carpet", 6, 9.0, 0.0),
+    ("pillar_trim_a_L", 3, 0.6, 0.0),
+    ("pillar_trim_b_L", 3, 0.6, 0.0),
+    ("pillar_trim_c_L", 3, 0.6, 0.0),
+    ("pillar_trim_a_R", 3, 0.6, 0.0),
+    ("pillar_trim_b_R", 3, 0.6, 0.0),
+    ("pillar_trim_c_R", 3, 0.6, 0.0),
+    ("sun_visor_L", 3, 0.35, 0.0),
+    ("sun_visor_R", 3, 0.35, 0.0),
+    ("seat_belt_FL", 3, 1.5, 0.0),
+    ("seat_belt_FR", 3, 1.5, 0.0),
+    ("boot_trim_L", 3, 1.4, 0.0),
+    ("boot_trim_R", 3, 1.4, 0.0),
+    ("interior_mirror", 3, 0.3, 0.0),
+    ("parcel_shelf_trim", 4, 2.0, 0.0),
+    ("boot_lining", 4, 3.0, 0.0),
 ];
 
 #[test]
@@ -143,7 +161,7 @@ fn the_fixed_trim_shrinks_and_the_kerb_mass_stays() {
         "fixed trim {trim:.1} kg (was {:.1}), parts from it {new:.1} kg",
         trim + new
     );
-    assert!((50.0..=150.0).contains(&trim), "{trim}");
+    assert!((40.0..=150.0).contains(&trim), "{trim}");
     let table = s.mass_table();
     for (class, kg, nodes) in &table {
         println!("{class:<30} {kg:>7.1} kg  {nodes:>3} nodes");
