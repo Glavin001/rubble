@@ -23,11 +23,14 @@ Only states correct physics cannot reach. The thresholds are named constants at 
 |---|---|---|
 | Non-finite | a node's position, velocity or mass is NaN or infinite | none |
 | Energy | the read vehicles' kinetic energy is past 3 × what the scene can have supplied + 50 kJ, for 3 readbacks in a row | `ENERGY_FACTOR`, `ENERGY_FLOOR`, `ENERGY_SUSTAIN` |
+| Rebound | after the kinetic energy has fallen from a peak to a low (an impact, coming to rest), it is past the low + 0.5 × what was lost + 3 × the sources since the low (the fall's work, the drive allowance, launches) + 50 kJ, and past 2 × the low, for 3 readbacks in a row | `REBOUND_SHARE`, `REBOUND_RISE` |
 | Box | a vehicle's bounding box is past 10 × its spawn size + 50 m while its kinetic energy is above 50 kJ and 1.5 × its lowest since the last launch | `BOX_FACTOR`, `BOX_MARGIN`, `BOX_ENERGY_RISE` |
 
 What the scene "can have supplied" is the vehicles' kinetic energy at the first readback, the launches the page reports (`launched(speed)`), the work of gravity over each vehicle's fall from its start to its lowest point, and a drive allowance of 1 MW per vehicle for the simulated time (`DRIVE_POWER_MAX`).
 
-A 200 km/h pole crash, a spawn at 3,000 km/h, a launch at 1,000 km/h, a 500 m fall and a car rammed from rest do not trip it (tests in `stability.rs`).
+A 200 km/h pole crash, a spawn at 3,000 km/h, a launch at 1,000 km/h, a 500 m fall and a car rammed from rest do not trip it (tests in `stability.rs`). Nor do a springy rebound off a wall, a car bouncing after a 10 m drop, rolling 60 m downhill after a stop, driving off after a crash, a part thrown 80 m, or a launch from rest.
+
+The rebound check was added after the guard's first real trip on 2026-11-13 (a 31 m drop at 189 km/h on the user's GPU). The kinetic energy fell to 681 kJ at the impact and then rose to 4,413 kJ in 0.4 s. The whole-run energy budget (about 22,000 kJ from the scene's height and speed) was far above that, so the box check stopped it, at 112 m across. The rebound check stops the same run at about 3,000 kJ, a third of a second after the low.
 
 ## Limits of the detection
 
