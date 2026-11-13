@@ -59,6 +59,11 @@ struct DefJs {
     /// 0 off, 1 the scene's parameters, 2 with presets.
     #[serde(default)]
     crush: u32,
+    /// Stress models: support loss, and blast loading (a blast action needs it).
+    #[serde(default)]
+    support_loss: bool,
+    #[serde(default)]
+    blast_loading: bool,
     /// `'step'` (default) or `'phases'`.
     #[serde(default)]
     gpu_timing: Option<String>,
@@ -127,6 +132,8 @@ fn def_of(v: JsValue, bytes: Option<Vec<u8>>, prebuilt: Option<(&JsScene, bool)>
                 2 => LabCrush::Presets,
                 n => anyhow::bail!("crush {n}: 0, 1 or 2"),
             },
+            support_loss: d.support_loss,
+            blast_loading: d.blast_loading,
             gpu_timing: match d.gpu_timing.as_deref() {
                 None | Some("step") => GpuTiming::Step,
                 Some("phases") => GpuTiming::Phases,
@@ -360,6 +367,26 @@ fn action_of(v: JsValue) -> anyhow::Result<LabAction> {
     let j: serde_json::Value = serde_wasm_bindgen::from_value(v).map_err(|e| anyhow::anyhow!("lab action: {e}"))?;
     if let Some(i) = j.get("pack").and_then(|i| i.as_u64()) {
         return Ok(LabAction::PackShot(i as u32));
+    }
+    // `{ rocket: { origin, direction, tntKg } }`: a charge where the ray meets a structure.
+    if let Some(b) = j.get("rocket") {
+        let v3 = |k: &str| -> anyhow::Result<[f64; 3]> {
+            let a = b[k].as_array().filter(|a| a.len() == 3).ok_or_else(|| anyhow::anyhow!("rocket {k}: 3 numbers"))?;
+            Ok([0, 1, 2].map(|i| a[i].as_f64().unwrap_or(f64::NAN)))
+        };
+        return Ok(LabAction::BlastRay {
+            origin: v3("origin")?,
+            direction: v3("direction")?,
+            tnt_kg: b["tntKg"].as_f64().ok_or_else(|| anyhow::anyhow!("rocket tntKg: a number"))?,
+        });
+    }
+    // `{ blast: { position: [x, y, z], tntKg } }`: a charge.
+    if let Some(b) = j.get("blast") {
+        let a = b["position"].as_array().filter(|a| a.len() == 3).ok_or_else(|| anyhow::anyhow!("blast position: 3 numbers"))?;
+        return Ok(LabAction::Blast {
+            position: [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(f64::NAN)),
+            tnt_kg: b["tntKg"].as_f64().ok_or_else(|| anyhow::anyhow!("blast tntKg: a number"))?,
+        });
     }
     let shot = j.get("shot").ok_or_else(|| anyhow::anyhow!("lab action: {j}"))?;
     let v3 = |k: &str| -> anyhow::Result<[f64; 3]> {

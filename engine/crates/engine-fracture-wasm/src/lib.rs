@@ -208,6 +208,19 @@ impl Scene {
     pub fn glass_tower_pack() -> Result<Vec<u8>, JsError> {
         serde_json::to_vec(&engine_fracture::glass_tower::felling_scene_pack()).map_err(err)
     }
+    /// A district scene as a scene pack's bytes (engine-fracture `district.rs`; load it with
+    /// `fromPack`). `key` is one of `districtScenes`'s.
+    #[wasm_bindgen(js_name = districtPack)]
+    pub fn district_pack(key: &str) -> Result<Vec<u8>, JsError> {
+        let scene = engine_fracture::district::DistrictScene::from_key(key).ok_or_else(|| JsError::new(&format!("unknown district scene {key}")))?;
+        serde_json::to_vec(&engine_fracture::district::district_scene_pack(scene)).map_err(err)
+    }
+    /// The district scenes, as JSON: `[{"key", "title"}]`, in menu order.
+    #[wasm_bindgen(js_name = districtScenes)]
+    pub fn district_scenes() -> String {
+        let list: Vec<serde_json::Value> = engine_fracture::district::DistrictScene::ALL.iter().map(|s| serde_json::json!({"key": s.key(), "title": s.title()})).collect();
+        serde_json::Value::Array(list).to_string()
+    }
     /// Collision-cost benchmark scene (`count` stacks of shape `a` under `b`).
     #[wasm_bindgen(js_name = pairs)]
     pub fn pairs(a: &str, b: &str, count: u32) -> Result<Scene, JsError> {

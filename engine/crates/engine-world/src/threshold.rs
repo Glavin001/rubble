@@ -1213,7 +1213,12 @@ mod imp {
                     // broadphase's resting table and moved-only bounds would not see it
                     // (city: a static chunk's bounds and cell went stale and a pair was
                     // missed). Worlds with a GPU fracture take the full pass.
-                    self.sim.set_awake_broadphase(false);
+                    // RUBBLE_FRACTURE_AWAKE_BROADPHASE=1 (measurement only): keep the
+                    // awake-indexed pass, to size what the full pass costs. Unsafe: it can
+                    // miss the pairs described above.
+                    if std::env::var("RUBBLE_FRACTURE_AWAKE_BROADPHASE").is_err() {
+                        self.sim.set_awake_broadphase(false);
+                    }
                     g
                 }
             };

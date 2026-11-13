@@ -54,6 +54,9 @@ export const buildCuboidHouse=({colliders='box',pitchDeg}={})=>sceneObject(Scene
 export const buildPackScene=bytes=>sceneObject(Scene.fromPack(new Uint8Array(bytes)));
 // The glass tower and its pavilion (engine-fracture glass_tower.rs) as scene-pack bytes.
 export const glassTowerPack=()=>Scene.glassTowerPack();
+// The district scenes (engine-fracture district.rs): their list, and one as a pack's bytes.
+export const districtScenes=()=>JSON.parse(Scene.districtScenes());
+export const districtPack=key=>Scene.districtPack(key);
 export const buildPairScene=({a='box',b='box',count=4096}={})=>sceneObject(Scene.pairs(a,b,count));
 // Copies of one house: {columns, rows} grid/row, {suburb:true}, or null.
 export const layoutScene=(one,layout,procedural=false)=>sceneObject(sceneHandle(one).layout(layout??null,procedural));

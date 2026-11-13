@@ -129,6 +129,12 @@ pub struct LabSettings {
     pub fracture: FractureOptions,
     /// Chunk crushing (stress models; an error where no chunk can crush).
     pub crush: LabCrush,
+    /// The stress models' support loss (`DestructibleDef::support_loss`): a structure whose
+    /// supports are shot away gives way under its own weight.
+    pub support_loss: bool,
+    /// The stress models' blast loading (`DestructibleDef::blast_loading`): the scene's
+    /// destructibles feel [`LabAction::Blast`]. Without it a blast is an error.
+    pub blast_loading: bool,
     /// Time each step on the GPU.
     pub gpu_timing: GpuTiming,
 }
@@ -145,6 +151,8 @@ impl Default for LabSettings {
             ccd: false,
             fracture: FractureOptions::default(),
             crush: LabCrush::Off,
+            support_loss: false,
+            blast_loading: false,
             gpu_timing: GpuTiming::Step,
         }
     }
@@ -173,6 +181,15 @@ impl LabSource {
     /// The glass tower and the pavilion beside it (engine-fracture `glass_tower.rs`).
     pub fn glass_tower() -> anyhow::Result<LabSource> {
         let pack = serde_json::to_vec(&engine_fracture::glass_tower::felling_scene_pack())?;
+        Ok(LabSource::Pack {
+            bytes: Arc::new(pack),
+        })
+    }
+
+    /// A district scene: bearing-wall and framed buildings, towers and chimneys
+    /// (engine-fracture `district.rs`).
+    pub fn district(scene: engine_fracture::district::DistrictScene) -> anyhow::Result<LabSource> {
+        let pack = serde_json::to_vec(&engine_fracture::district::district_scene_pack(scene))?;
         Ok(LabSource::Pack {
             bytes: Arc::new(pack),
         })
@@ -242,6 +259,17 @@ pub enum LabAction {
     Meteor,
     /// A pack's authored shot `index`, as authored (its scales do not apply).
     PackShot(u32),
+    /// A charge of `tnt_kg` of TNT at `position` (`World::detonate`): a rocket's warhead, or
+    /// a charge placed inside a building. Needs [`LabSettings::blast_loading`].
+    Blast { position: [f64; 3], tnt_kg: f64 },
+    /// A charge where a ray first meets a structure (a rocket's warhead; the stress
+    /// models): just off the surface, no nearer than the blast model's fits reach. A ray
+    /// that meets no chunk lands on the ground; one that meets neither is an error.
+    BlastRay {
+        origin: [f64; 3],
+        direction: [f64; 3],
+        tnt_kg: f64,
+    },
 }
 
 /// A pack's authored shot.
@@ -312,6 +340,11 @@ impl LabPlan {
         anyhow::ensure!(
             s.crush == LabCrush::Off || s.bonds.stress().is_some(),
             "crushing is a stress model's (Threshold, LoadPath, ImpactLocal, BlastGpu); the {} bonds have none",
+            s.bonds.name()
+        );
+        anyhow::ensure!(
+            !(s.support_loss || s.blast_loading) || s.bonds.stress().is_some(),
+            "support loss and blast loading are the stress models'; the {} bonds have neither",
             s.bonds.name()
         );
         anyhow::ensure!(
@@ -764,6 +797,11 @@ pub struct Lab {
     saved: Option<WorldSnapshot>,
     /// Shots queued, by step.
     schedule: Vec<Due>,
+    /// Charges queued, by step.
+    blasts: Vec<(u64, crate::BlastDef)>,
+    /// Stress models: each lab chunk's bounding box in its own frame (a frame and half
+    /// extents), for [`LabAction::BlastRay`].
+    chunk_bounds: Vec<(Transform, [f32; 3])>,
     /// Directed debris: on, and its zones (scene body anchors).
     guidance: Option<(GuidanceSettings, Vec<engine_schema::guidance::ZoneDesc>)>,
 }
@@ -885,6 +923,8 @@ impl Lab {
             pack_shots: plan.pack_shots.clone(),
             saved,
             schedule: Vec::new(),
+            blasts: Vec::new(),
+            chunk_bounds: Vec::new(),
             guidance: None,
         })
     }
@@ -921,6 +961,8 @@ impl Lab {
                 asleep: false,
                 crush: crush.clone(),
                 fracture: o.fracture,
+                support_loss: o.support_loss,
+                blast_loading: o.blast_loading,
                 shape: ShapeDef {
                     material,
                     update_body_mass: false,
@@ -977,6 +1019,8 @@ impl Lab {
             pack_shots: plan.pack_shots.clone(),
             saved: None,
             schedule: Vec::new(),
+            blasts: Vec::new(),
+            chunk_bounds: desc.chunks.iter().map(chunk_bound).collect(),
             guidance: None,
         })
     }
@@ -1080,6 +1124,35 @@ impl Lab {
         };
         let mut due = Vec::new();
         match action {
+            LabAction::Blast { position, tnt_kg } => {
+                anyhow::ensure!(
+                    self.settings.blast_loading,
+                    "a blast needs the lab's blast loading (LabSettings::blast_loading): nothing here would feel it"
+                );
+                anyhow::ensure!(
+                    position.iter().all(|x| x.is_finite()) && tnt_kg.is_finite() && *tnt_kg > 0.0,
+                    "invalid blast: a finite position and a positive TNT mass"
+                );
+                let def = crate::BlastDef {
+                    position: f3(*position),
+                    tnt_kg: *tnt_kg as f32,
+                    radial: None,
+                };
+                self.blasts.push((base, def));
+                self.blasts.sort_by_key(|b| b.0);
+            }
+            LabAction::BlastRay {
+                origin,
+                direction,
+                tnt_kg,
+            } => {
+                anyhow::ensure!(
+                    origin.iter().chain(direction).all(|x| x.is_finite()) && tnt_kg.is_finite() && *tnt_kg > 0.0,
+                    "invalid blast ray"
+                );
+                let position = self.blast_point(world, *origin, *direction, *tnt_kg)?;
+                return self.queue(world, &LabAction::Blast { position, tnt_kg: *tnt_kg }, delay);
+            }
             LabAction::Shot { origin, direction } => {
                 anyhow::ensure!(
                     origin.iter().chain(direction).all(|x| x.is_finite()),
@@ -1132,13 +1205,59 @@ impl Lab {
         Ok(())
     }
 
-    /// Shots queued and not yet launched.
+    /// Where a charge of `tnt_kg` fired along a ray goes off: just short of the first chunk
+    /// the ray meets (their bounding boxes at their poses as of the last polled step), else
+    /// on the ground.
+    fn blast_point(&self, world: &World, origin: [f64; 3], direction: [f64; 3], tnt_kg: f64) -> anyhow::Result<[f64; 3]> {
+        let (o, d) = (glam::Vec3::from(f3(origin)), glam::Vec3::from(f3(direction)).normalize_or_zero());
+        anyhow::ensure!(d != glam::Vec3::ZERO, "a blast ray needs a direction");
+        let mut hit = f32::INFINITY;
+        for drawn in &self.drawn {
+            let Drawn::Chunk { copy, chunk, rest } = *drawn else { continue };
+            let body = world.destructible_chunk_body(self.destructibles[copy as usize], chunk)?;
+            if !world.body_is_valid(body) {
+                continue;
+            }
+            let t = world.body_transform(body)?.unwrap_or(world.body_initial_transform(body)?);
+            let (frame, half) = self.chunk_bounds[chunk as usize];
+            let pose = compose(&compose(&t, &rest), &frame);
+            // The ray in the box's frame, against its slabs.
+            let q = glam::Quat::from_array(pose.rotation).inverse();
+            let (lo, ld) = (q * (o - glam::Vec3::from(pose.position)), q * d);
+            let (mut near, mut far) = (0.0f32, hit);
+            for k in 0..3 {
+                if ld[k].abs() < 1e-9 {
+                    if lo[k].abs() > half[k] {
+                        near = f32::INFINITY;
+                    }
+                    continue;
+                }
+                let (a, b) = ((-half[k] - lo[k]) / ld[k], (half[k] - lo[k]) / ld[k]);
+                near = near.max(a.min(b));
+                far = far.min(a.max(b));
+            }
+            if near <= far {
+                hit = hit.min(near);
+            }
+        }
+        if !hit.is_finite() {
+            anyhow::ensure!(d.y < -1e-6 && o.y > 0.0, "the blast ray meets no structure and no ground");
+            hit = -o.y / d.y;
+        }
+        // No face nearer than the blast model's fits reach (`blast::MIN_SCALED_DISTANCE`).
+        let standoff = 0.1 + 2.0 * crate::blast::MIN_SCALED_DISTANCE as f32 * (tnt_kg as f32).cbrt();
+        let p = o + d * (hit - standoff).max(0.0);
+        Ok([p.x as f64, p.y as f64, p.z as f64])
+    }
+
+    /// Shots and charges queued and not yet launched.
     pub fn queued(&self) -> usize {
-        self.schedule.len()
+        self.schedule.len() + self.blasts.len()
     }
 
     /// Clear the queue.
     pub fn clear_queue(&mut self) {
+        self.blasts.clear();
         self.schedule.clear();
     }
 
@@ -1146,6 +1265,10 @@ impl Lab {
     /// (scene bodies), in order.
     pub fn launch_due(&mut self, world: &mut World) -> anyhow::Result<Vec<u32>> {
         let now = world.step_count();
+        let charges = self.blasts.iter().take_while(|b| b.0 <= now).count();
+        for (_, def) in self.blasts.drain(..charges) {
+            world.detonate(&def)?;
+        }
         let n = self.schedule.iter().take_while(|d| d.step <= now).count();
         let due: Vec<Due> = self.schedule.drain(..n).collect();
         let mut out = Vec::with_capacity(due.len());
@@ -1375,6 +1498,50 @@ impl Lab {
         }
         Ok(out)
     }
+}
+
+/// A chunk's bounding box in its own (principal) frame: the box's frame and half extents.
+/// A single box's is its own; anything else gets the frame-aligned box around its shapes.
+fn chunk_bound(c: &ChunkDesc) -> (Transform, [f32; 3]) {
+    if let [Geometry::Box { half, transform }] = &c.shapes[..] {
+        return (*transform, *half);
+    }
+    let (mut lo, mut hi) = (glam::Vec3::splat(f32::INFINITY), glam::Vec3::splat(f32::NEG_INFINITY));
+    let mut take = |t: &Transform, p: glam::Vec3| {
+        let w = glam::Vec3::from(t.position) + glam::Quat::from_array(t.rotation) * p;
+        lo = lo.min(w);
+        hi = hi.max(w);
+    };
+    for shape in &c.shapes {
+        match shape {
+            Geometry::Box { half, transform } => {
+                for i in 0..8 {
+                    let s = glam::Vec3::new(if i & 1 == 0 { -1.0 } else { 1.0 }, if i & 2 == 0 { -1.0 } else { 1.0 }, if i & 4 == 0 { -1.0 } else { 1.0 });
+                    take(transform, s * glam::Vec3::from(*half));
+                }
+            }
+            Geometry::Hull { hull, transform } => {
+                for v in &hull.vertices {
+                    take(transform, glam::Vec3::from(<[f32; 3]>::from(*v)));
+                }
+            }
+            Geometry::Sphere { center, radius } => {
+                for s in [-1.0, 1.0] {
+                    take(&Transform::IDENTITY, glam::Vec3::from(*center) + glam::Vec3::splat(s * radius));
+                }
+            }
+            Geometry::Capsule { center, radius, half_len } => {
+                for s in [-1.0, 1.0] {
+                    take(&Transform::IDENTITY, glam::Vec3::from(*center) + glam::Vec3::splat(s * (radius + half_len)));
+                }
+            }
+            Geometry::Plane { .. } | Geometry::HeightField { .. } => {}
+        }
+    }
+    if !lo.is_finite() {
+        return (Transform::IDENTITY, [0.0; 3]);
+    }
+    (Transform::new((0.5 * (lo + hi)).to_array(), [0.0, 0.0, 0.0, 1.0]), (0.5 * (hi - lo)).to_array())
 }
 
 /// The street props as a destructible of loose pieces (no bonds), each a dynamic body.

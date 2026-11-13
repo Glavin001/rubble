@@ -1,4 +1,4 @@
-import {parseFractureGlb,sceneHandle,glassTowerPack,nearMissSettings,labFractureDefaults,labDefaultPhysicsHz,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,sceneHandle,glassTowerPack,districtScenes,districtPack,nearMissSettings,labFractureDefaults,labDefaultPhysicsHz,SAMPLES} from './wasm.mjs';
 import {createLab,labDevice} from './lab-world.mjs';
 import {createRenderer} from './render.mjs';
 import {createRates} from './rates.mjs';
@@ -116,6 +116,8 @@ const physicsHz=()=>Number($('physics-hz').value)||labDefaultPhysicsHz();
 // Chunk crushing (the stress models): 0 off, 1 the scene's own crush parameters, 2 those
 // and the cited presets.
 const crushMode=()=>stressModel()?Number($('crush').value):0;
+// The rocket needs the stress models' blast loading; a cannonball needs neither.
+const rocket=()=>stressModel()&&$('weapon').value==='rocket';
 const scaleLabel=k=>`×${k>=1?k:`1/${1/k}`}`;
 // The ball settings for the next shots (Rust: `Lab::set_ball`).
 function applyBall(){
@@ -136,7 +138,7 @@ function showFractureSwitches(){
  for(const [id,key] of [['strike-prediction','strikePrediction'],['contact-fracture','contactFracture']]){
   $(id).disabled=!own;if(own)$(id).checked=own[key];
  }
- $('crush').disabled=!stressModel();
+ $('crush').disabled=!stressModel();for(const id of ['support-loss','weapon','tnt'])$(id).disabled=!stressModel();
 }
 const stepHz=()=>Math.round(sim?1/sim.dt:physicsHz());
 const rates=createRates(value=>{
@@ -168,7 +170,9 @@ function shoot(ray){
  if(loading)return;
  if(stressOn)return;
  if(!sim)return;
- try{placeCrowd(ray);sim.shoot(ray.origin,ray.direction);if(!running)rates.reset();released=true;running=true;accumulator=0;$('release').textContent='Pause'}catch(e){fail(e)}
+ try{placeCrowd(ray);
+  if(rocket())sim.queue({rocket:{origin:Array.from(ray.origin),direction:Array.from(ray.direction),tntKg:Number($('tnt').value)}});
+  else sim.shoot(ray.origin,ray.direction);if(!running)rates.reset();released=true;running=true;accumulator=0;$('release').textContent='Pause'}catch(e){fail(e)}
 }
 // Run the queued actions now: start the simulation if it is paused.
 function go(){released=true;running=true;accumulator=0;$('release').textContent='Pause'}
@@ -178,7 +182,7 @@ function labDef(level){
  const def={source,level,maxHullVertices,bonds:labBonds(),physicsHz:physicsHz(),strengthScale:strengthScale(),
   ballRadiusScale:radiusScale(),ballMassScale:massScale(),ballSpeedScale:speedScale(),ccd:$('ball-ccd').checked,crush:crushMode(),gpuTiming:GPU_TIMING,
   arrangement:towers?towers:layout?'layout':'one',...(layout&&!towers?{layout}:{})};
- if(stressModel()){def.strikePrediction=$('strike-prediction').checked;def.contactFracture=$('contact-fracture').checked}
+ if(stressModel()){def.strikePrediction=$('strike-prediction').checked;def.contactFracture=$('contact-fracture').checked;def.supportLoss=$('support-loss').checked;def.blastLoading=rocket()}
  return {def,bytes:source==='glb'?assetBytes:source==='pack'?packBytes:null};
 }
 async function loadLevel(level){
@@ -250,6 +254,9 @@ const sceneGroups=[...new Set(SAMPLES.map(s=>s.group))].map(label=>optgroup(labe
 // Generated in Rust (engine-fracture glass_tower.rs): a pack built on the spot, no file.
 samples['glass-tower']={key:'glass-tower',label:'glass tower and pavilion',generated:glassTowerPack};
 $('scene').replaceChildren(...sceneGroups,optgroup('Generated',[new Option('Glass tower · 10 storeys of shattering glass, a pavilion beside it','glass-tower')]),optgroup('Your file',[Object.assign(new Option('Custom GLB (choose or drop one below)',''),{disabled:true})]));
+// The district scenes, generated in Rust (engine-fracture district.rs): the list is Rust's.
+{const group=optgroup('Districts (generated)',districtScenes().map(s=>{samples[s.key]={key:s.key,label:s.title.toLowerCase(),generated:()=>districtPack(s.key),source:'district.rs'};return new Option(s.title,s.key)}));
+ $('scene').insertBefore(group,$('scene').lastElementChild);}
 // The punch-through wall (ScenePack v3 with crush blocks): chunk crushing's showcase.
 samples['crush-wall']={key:'crush-wall',label:'punch-through wall',pack:'./packs/crush-wall.json',nodes:216,bonds:464};
 $('scene').insertBefore(optgroup('Chunk crushing (ScenePack v3)',[new Option('Punch-through wall · 12×8×2 blocks','crush-wall')]),$('scene').lastElementChild);
@@ -299,7 +306,7 @@ const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
   }
   // Selecting a scene never changes the bond model or the settings: the tower block's
   // suggested ones are a button (Use the scene's suggested settings).
-  assetBytes=null;layout=null;procedural='pack';towers=entry.towers??null;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack?entry.pack.split('/').pop():'generated in Rust (glass_tower.rs)';
+  assetBytes=null;layout=null;procedural='pack';towers=entry.towers??null;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack?entry.pack.split('/').pop():`generated in Rust (${entry.source??'glass_tower.rs'})`;
   $('level').replaceChildren(new Option(entry.nodes!=null?`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`:'Scene pack · generated',0));$('level').value='0';
   await loadLevel(0);return;
  }
@@ -347,7 +354,7 @@ $('ball-radius').onchange=reload;
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
 $('bond-strength').onchange=()=>{if(bondMode()!=='none')reload()};
 $('bond-mode').onchange=()=>{showFractureSwitches();reload()};
-$('crush').onchange=reload;
+$('crush').onchange=reload;$('support-loss').onchange=reload;$('weapon').onchange=reload;
 $('physics-hz').onchange=reload;
 $('release').onclick=()=>{if(stressOn&&stress){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 // Reset: the bond models restore the placed scene; the stress models place it again.
@@ -471,6 +478,8 @@ try{
  if(q.has('scene')&&samples[q.get('scene')])$('scene').value=q.get('scene');
  if(q.has('bonds'))$('bond-mode').value=q.get('bonds');
  if(q.has('crush'))$('crush').value=q.get('crush');
+ if(q.has('support'))$('support-loss').checked=q.get('support')==='1';
+ if(q.has('weapon'))$('weapon').value=q.get('weapon');
  if(q.has('hz'))$('physics-hz').value=q.get('hz');
  showFractureSwitches();
  await sample();requestAnimationFrame(tick);
