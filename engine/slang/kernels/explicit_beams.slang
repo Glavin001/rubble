@@ -148,6 +148,11 @@ static const uint FLAG_SHIFT_MEM = 65536u;
 // entry's .w, and after the node phase each record corrects its damping by
 // −½·slope·Δu (centredBeam, centredNode). gP.centredDv nonzero: some vehicle has it.
 static const uint FLAG_CENTRED = 262144u;
+// Centred damping's objective form (jbeam-semantics-spec.md §39.6,
+// ExplicitBeamsSettings::centred_objective; with FLAG_CENTRED): a record's Δu is the
+// change of its extension rate itself, each rate along the beam's direction at its
+// own time, so a beam that only turns reads zero (centredKeep, centredBeamObjective).
+static const uint FLAG_CENTRED_OBJECTIVE = 524288u;
 // The contact position steps' fixed point, units per metre (explicit_beams.rs
 // SHIFT_FIXED, 2^24).
 static const float SHIFT_FIXED = 16777216.0;
@@ -252,7 +257,7 @@ struct Params
     uint surfSplit; // gAcc: per node its surface hit count this step
     uint surfSeg; // gStatic: per vehicle (segment start in gLists, segments); gLists the global beam indices
     uint surfMark; // gAcc: the find's slot masks: per triangle (global), then segments, nodes (their records' .z, .w)
-    uint centredDv; // gBeams: per node its step-start velocity, then its node phase's Δv (centred damping, §39; 0: no vehicle)
+    uint centredDv; // gBeams: per node its node phase's Δv (centred damping, §39; 0: no vehicle); with the objective form (§39.6) then per node its position, then its velocity, before the node phase
     // Vehicle sleep (explicit_beams_sleep.slang): gMisc record of its header, 0 off; the
     // awake-list dispatch flag.
     uint sleepRec;
@@ -2288,9 +2293,113 @@ void centredDelta(uint gi, float3 v0)
     gBeams[gP.centredDv + gi] = float4(ssub3(gNodes[gi * 3u + 1u].xyz, v0), 0.0);
 }
 
+// --- The objective form (jbeam-semantics-spec.md §39.6, FLAG_CENTRED_OBJECTIVE; the
+// CPU reference's centred_correction with x0). Its own functions, so the
+// end-direction form's code is as it was.
+// Node gi's position and velocity before its node phase (the CPU's x0, v0), after
+// the Δv region.
+void centredKeep(uint gi)
+{
+    float4 P = gNodes[gi * 3u];
+    float4 V = gNodes[gi * 3u + 1u];
+    gBeams[gP.centredDv + gP.totalNodes + gi] = float4(P.xyz, 0.0);
+    gBeams[gP.centredDv + 2u * gP.totalNodes + gi] = float4(V.xyz, 0.0);
+}
+
+// The dihedral's gradient at four positions (centredBeam's, explicit_beams.rs
+// dihedral_jacobian).
+void centredGrad(float3 x1, float3 x2, float3 x3, float3 x4, out float3 g1, out float3 g2, out float3 g3, out float3 g4)
+{
+    g1 = float3(0.0, 0.0, 0.0);
+    g2 = g1;
+    g3 = g1;
+    g4 = g1;
+    float3 b1 = ssub3(x2, x1);
+    float3 b2 = ssub3(x3, x2);
+    float3 b3 = ssub3(x4, x3);
+    float3 n1 = scross(b1, b2);
+    float3 n2 = scross(b2, b3);
+    float l1 = sdot(n1, n1);
+    float l2 = sdot(n2, n2);
+    float ll = sdot(b2, b2);
+    if (!(l1 < 1e-12 || l2 < 1e-12 || ll < 1e-12))
+    {
+        float lb = ssqrt(ll);
+        g1 = sscale(n1, sdiv(-lb, l1));
+        g4 = sscale(n2, sdiv(lb, l2));
+        float p = sdiv(-sdot(b1, b2), ll);
+        float q = sdiv(-sdot(b3, b2), ll);
+        g2 = ssub3(sscale(g1, nf(p - 1.0)), sscale(g4, q));
+        g3 = ssub3(sscale(g4, nf(q - 1.0)), sscale(g1, p));
+    }
+}
+
+// centredBeam for a vehicle with the objective form: a plain beam's Δu is
+// (v′_a − v′_b)·d̂′ − (v_a − v_b)·d̂, a torsion bar's Δφ̇ is g′·v′ − g·v with each
+// gradient at its own positions; a coupler's correction is on the relative velocity
+// itself, as before.
+void centredBeamObjective(uint gj, uint4 bn, uint kind, uint sa, uint sb, float slope)
+{
+    uint xo = gP.centredDv + gP.totalNodes;
+    uint vo = xo + gP.totalNodes;
+    float3 fa = float3(0.0, 0.0, 0.0);
+    float3 fb = fa;
+    if (kind == KIND_JTORSION)
+    {
+        uint4 bn2 = gStatic[gP.beamBase + (gj + 1u) * 3u];
+        float3 f3 = fa;
+        float3 f4 = fa;
+        if (slope != 0.0)
+        {
+            float3 g1, g2, g3, g4, h1, h2, h3, h4;
+            centredGrad(gNodes[bn.x * 3u].xyz, gNodes[bn.y * 3u].xyz, gNodes[bn2.x * 3u].xyz, gNodes[bn2.y * 3u].xyz, g1, g2, g3, g4);
+            centredGrad(gBeams[xo + bn.x].xyz, gBeams[xo + bn.y].xyz, gBeams[xo + bn2.x].xyz, gBeams[xo + bn2.y].xyz, h1, h2, h3, h4);
+            float t1 = nf(sdot(g1, gNodes[bn.x * 3u + 1u].xyz) - sdot(h1, gBeams[vo + bn.x].xyz));
+            float t2 = nf(sdot(g2, gNodes[bn.y * 3u + 1u].xyz) - sdot(h2, gBeams[vo + bn.y].xyz));
+            float t3 = nf(sdot(g3, gNodes[bn2.x * 3u + 1u].xyz) - sdot(h3, gBeams[vo + bn2.x].xyz));
+            float t4 = nf(sdot(g4, gNodes[bn2.y * 3u + 1u].xyz) - sdot(h4, gBeams[vo + bn2.y].xyz));
+            float dr = nf(nf(nf(t1 + t2) + t3) + t4);
+            float t = smul(smul(-0.5, slope), dr);
+            fa = sscale(g1, t);
+            fb = sscale(g2, t);
+            f3 = sscale(g3, t);
+            f4 = sscale(g4, t);
+        }
+        gBeams[sa] = float4(fa, 0.0);
+        gBeams[sb] = float4(fb, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u]] = float4(f3, 0.0);
+        gBeams[gP.incBase + gLists[gP.slotBase + (gj + 1u) * 2u + 1u]] = float4(f4, 0.0);
+        return;
+    }
+    if (slope != 0.0)
+    {
+        if (kind == KIND_JCOUPLER)
+        {
+            float3 dva = gBeams[gP.centredDv + bn.x].xyz;
+            float3 dvb = gBeams[gP.centredDv + bn.y].xyz;
+            fa = sscale(ssub3(dva, dvb), smul(-0.5, slope));
+        }
+        else
+        {
+            float3 d = ssub3(gNodes[bn.x * 3u].xyz, gNodes[bn.y * 3u].xyz);
+            float inv = sExactInvSqrt(sdot(d, d));
+            float3 d0 = ssub3(gBeams[xo + bn.x].xyz, gBeams[xo + bn.y].xyz);
+            float inv0 = sExactInvSqrt(sdot(d0, d0));
+            float u1 = smul(sdot(ssub3(gNodes[bn.x * 3u + 1u].xyz, gNodes[bn.y * 3u + 1u].xyz), d), inv);
+            float u0 = smul(sdot(ssub3(gBeams[vo + bn.x].xyz, gBeams[vo + bn.y].xyz), d0), inv0);
+            float du = nf(u1 - u0);
+            fa = sscale(d, smul(smul(smul(-0.5, slope), du), inv));
+        }
+        fb = -fa;
+    }
+    gBeams[sa] = float4(fa, 0.0);
+    gBeams[sb] = float4(fb, 0.0);
+}
+
 // Record gj's correction into its entries (a torsion bar's first record also the
-// second's; the second writes nothing). No slope: zero.
-void centredBeam(uint gj)
+// second's; the second writes nothing). No slope: zero. `objective`: its vehicle
+// has FLAG_CENTRED_OBJECTIVE.
+void centredBeam(uint gj, bool objective)
 {
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
     uint kind = bn.z & 0xFFu;
@@ -2298,6 +2407,11 @@ void centredBeam(uint gj)
     uint sa = gP.incBase + gLists[gP.slotBase + gj * 2u];
     uint sb = gP.incBase + gLists[gP.slotBase + gj * 2u + 1u];
     float slope = gBeams[sa].w;
+    if (objective)
+    {
+        centredBeamObjective(gj, bn, kind, sa, sb, slope);
+        return;
+    }
     float3 fa = float3(0.0, 0.0, 0.0);
     float3 fb = fa;
     if (kind == KIND_JTORSION)
@@ -2399,7 +2513,8 @@ void centredPhase(uint flagsV, uint nodeOff, uint nodeCount, uint beamOff, uint 
     sync();
     if (on)
     {
-        for (uint j = lane, jStop = EB_END(j, beamCount, lanes); j < jStop; j += lanes) centredBeam(beamOff + j);
+        bool objective = (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u;
+        for (uint j = lane, jStop = EB_END(j, beamCount, lanes); j < jStop; j += lanes) centredBeam(beamOff + j, objective);
     }
     sync();
     if (on)
@@ -5184,6 +5299,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
         {
+            if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(nodeOff + i);
             float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdateSolo(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
@@ -5198,6 +5314,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeEnd, LANES); i < iStop; i += LANES)
         {
+            if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(nodeOff + i);
             float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdate(nodeOff + i, i == lane ? myInfo : gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
                        groupCount, hits);
@@ -5608,6 +5725,7 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
         Vehicle x = vehicleAt(v);
         float3 origin = vehicleOrigin(v);
         bool centred = gP.centredDv != 0u && (x.flags & FLAG_CENTRED) != 0u;
+        if (centred && (x.flags & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(i);
         float3 v0 = centred ? gNodes[i * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
         nodeUpdate(i, info, v, i - x.nodeOff, vehicleStep(v), origin, x.flags, x.ground, x.boxOff, x.boxCount,
                    x.beamOff, x.groupOff, x.groupCount, true);
@@ -5646,7 +5764,8 @@ void explicit_beams_wide_centred_beams(uint3 id : SV_DispatchThreadID)
     uint j = id.x;
     if (j >= gP.totalBeams) return;
     uint v = gStatic[gP.beamBase + j * 3u].z >> 16;
-    if ((vehicleAt(v).flags & FLAG_CENTRED) != 0u) centredBeam(j);
+    uint flagsV = vehicleAt(v).flags;
+    if ((flagsV & FLAG_CENTRED) != 0u) centredBeam(j, (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u);
 }
 
 [shader("compute")]
@@ -6462,6 +6581,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
         {
+            if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(nodeOff + i);
             float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
                        boxOff, boxCount, beamOff, groupOff, groupCount, true);
@@ -6795,6 +6915,7 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = pl, iStop = EB_END(i, nodeCount, P); i < iStop; i += P)
         {
+            if (centredV && (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u) centredKeep(nodeOff + i);
             float3 v0 = centredV ? gNodes[(nodeOff + i) * 3u + 1u].xyz : float3(0.0, 0.0, 0.0);
             nodeUpdate(nodeOff + i, gStatic[gP.nodeInfoBase + nodeOff + i], v, i, step, origin, flagsV, ground,
                        boxOff, boxCount, beamOff, groupOff, groupCount, true);

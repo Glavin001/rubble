@@ -934,7 +934,8 @@ impl ExplicitUpload {
                 | (v.dissipative_contact as u32) << 15
                 | (any_shift as u32) << 16
                 | (v.surface_contact as u32) << 17
-                | (v.settings.centred_damping as u32) << 18;
+                | (v.settings.centred_damping as u32) << 18
+                | ((v.settings.centred_damping && v.settings.centred_objective) as u32) << 19;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1545,10 +1546,16 @@ impl ExplicitUpload {
         };
         // The tread contact (jbeam-semantics-spec.md §34): per node (z, the depth
         // the step before, 0, 0) for every vehicle when any has tread nodes.
-        // Centred damping (§39): per node its step-start velocity, then its Δv.
+        // Centred damping (§39): per node its node phase's Δv; with the objective form
+        // (§39.6, some vehicle's `centred_objective`) then per node its position, then
+        // its velocity, before the node phase.
         let centred_dv = if any_centred {
             let at = beams.len() as u32;
-            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
+            let objective = vehicles
+                .iter()
+                .any(|v| v.settings.centred_damping && v.settings.centred_objective);
+            let per_node = if objective { 3 } else { 1 };
+            beams.extend(std::iter::repeat_n([0.0f32; 4], per_node * total_nodes));
             at
         } else {
             0
