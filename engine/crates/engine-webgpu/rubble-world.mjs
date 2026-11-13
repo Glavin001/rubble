@@ -74,6 +74,17 @@ export async function createCity(opts, page = {}) {
 }
 
 /**
+ * The most houses a city of `opts` holds in one world (`CityDef::max_houses`: the world's
+ * fracture chunk limit, `rubble::THRESHOLD_CHUNKS_MAX`). A page offers no more.
+ */
+export async function cityMaxHouses(opts = {}) {
+  ready ??= init();
+  await ready;
+  const city = new WebCity(opts);
+  try { return city.maxHouses(); } finally { city.free(); }
+}
+
+/**
  * A compact snapshot for `world.restoreState` (`World::measure_state`): each GPU
  * buffer copied up to its last non-zero word, the same bytes on restore. A scene
  * saved before it runs needs a fraction of `world.saveState()`'s GPU memory, which

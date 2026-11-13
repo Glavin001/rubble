@@ -102,6 +102,21 @@ impl CityDef {
         .ok_or_else(|| anyhow::anyhow!("the city's house has no threshold solver"))
     }
 
+    /// The most houses one world holds: its threshold destructibles share
+    /// [`crate::THRESHOLD_CHUNKS_MAX`] fracture chunks.
+    pub fn max_houses(&self, house: &DestructibleAssetDesc) -> anyhow::Result<usize> {
+        let stress = house
+            .stress
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("the city's house has no stress source"))?;
+        let solver = house
+            .solver_for(StrengthModel::Threshold)
+            .ok_or_else(|| anyhow::anyhow!("the city's house has no threshold solver"))?;
+        let scene = stress.threshold_scene(1.0, solver.dt)?;
+        let per: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
+        Ok(crate::THRESHOLD_CHUNKS_MAX as usize / per.max(1))
+    }
+
     /// Room for K houses: clusters (a few dozen a house) and the pool, or a slot per
     /// chunk without one; the houses' own shapes; contacts for every chunk.
     pub fn capacity(&self, house: &DestructibleAssetDesc) -> anyhow::Result<WorldCapacity> {
@@ -115,19 +130,24 @@ impl CityDef {
             .ok_or_else(|| anyhow::anyhow!("the city's house has no threshold solver"))?;
         let scene = stress.threshold_scene(1.0, solver.dt)?;
         let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum::<usize>() * k;
-        // A world's threshold destructibles share one fracture, which holds 2^20 chunks:
+        // A world's threshold destructibles share one fracture (`THRESHOLD_CHUNKS_MAX`):
         // said here, before a world is made and a thousand houses placed.
+        let most = self.max_houses(house)?;
         anyhow::ensure!(
-            chunks <= 1 << 20,
-            "{k} houses are {chunks} chunks; a world's threshold destructibles hold at most {} ({} of these houses)",
-            1u32 << 20,
-            (1usize << 20) / (chunks / k.max(1)).max(1)
+            k <= most,
+            "Known limit: {k} houses are too many for one world. A city holds at most {most} of these houses ({chunks} fracture chunks asked for, {} at most in a world). Pick {most} houses or fewer.",
+            crate::THRESHOLD_CHUNKS_MAX
         );
         let one = stress_rubble::capacity_for(&scene);
         let mut c = one.clone();
         c.max_bodies = match self.pool {
-            // Clusters (a few dozen a house) and the pool, not a slot per chunk.
-            Some(p) => ((64 * k) as u32 + p + 64).next_power_of_two(),
+            // Clusters (a body each when placed, counted from the house as the world builds
+            // it: 86, where an assumed 64 ran out at 1,269 houses) and the pool, not a slot
+            // per chunk.
+            Some(p) => {
+                let clusters = stress_ref::world::World::new(&scene).solver.clusters.len();
+                ((clusters * k) as u32 + p + 64).next_power_of_two()
+            }
             None => ((chunks + 64 + 4) as u32).next_power_of_two(),
         };
         // The houses' own shapes (a collider each), not k copies of one scene's headroom.
@@ -355,4 +375,33 @@ pub fn bonds_broken<'a>(events: impl IntoIterator<Item = &'a DestructionEvent>) 
             _ => 0,
         })
         .sum()
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    /// One world holds `THRESHOLD_CHUNKS_MAX` fracture chunks: the largest city that fits is
+    /// sized, and one house more is refused by name before any world is made.
+    #[test]
+    fn a_city_past_the_chunk_limit_is_refused_by_name() {
+        let house = city_house().unwrap();
+        let def = |houses| CityDef {
+            houses,
+            map: CITY_MAP,
+            sleep: true,
+            pool: Some(32768),
+        };
+        let most = def(1).max_houses(&house).unwrap();
+        assert!(most >= 1024, "the benchmark's 1,024 houses must fit ({most})");
+        let c = def(most).capacity(&house).unwrap();
+        // Room for every house's bodies and the whole pool (64 a house was too few at 1,269).
+        let scene = house.stress.as_ref().unwrap().threshold_scene(1.0, 1.0 / 60.0).unwrap();
+        let bodies = stress_ref::world::World::new(&scene).solver.clusters.len();
+        assert!(bodies > 64, "{bodies} clusters a house");
+        assert!(c.max_bodies as usize >= bodies * most + 32768, "{} bodies of room for {most} houses of {bodies}", c.max_bodies);
+        assert_eq!(def(1024).capacity(&house).unwrap().max_bodies, 131072, "the benchmark's world is unchanged");
+        let e = def(most + 1).capacity(&house).unwrap_err().to_string();
+        assert!(e.starts_with("Known limit:") && e.contains(&most.to_string()), "{e}");
+    }
 }

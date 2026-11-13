@@ -169,6 +169,12 @@ impl KillBounds {
     }
 }
 
+/// The chunks every threshold destructible of one world may have together: they share one
+/// fracture on the GPU, whose scans hold 2^20 chunks. Placing more is an error that says so
+/// (never a silent drop), and no [`WorldCapacity`] field raises it. Known limit, see
+/// `engine/docs/large-maps.md` ("Known limit: chunks per world").
+pub const THRESHOLD_CHUNKS_MAX: u32 = 1 << 20;
+
 /// A world (Box3D `b3WorldDef`, plus what a GPU world fixes at creation).
 #[derive(Clone, Debug)]
 pub struct WorldDef {

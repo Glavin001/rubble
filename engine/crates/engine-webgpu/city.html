@@ -50,12 +50,20 @@
     // rubble::city): same houses, layout, capacity, sleep policy, piece pool, scenarios
     // and shots. The page places the houses a few per frame, settles the city, starts a
     // scenario, and draws every collider from the world's buffers in place.
-    import { createCity, wasmHeapBytes, Poses, pollFrame, stepFrames, drain, macrotask, errorText } from './rubble-world.mjs';
+    import { createCity, cityMaxHouses, wasmHeapBytes, Poses, pollFrame, stepFrames, drain, macrotask, errorText } from './rubble-world.mjs';
     import { lastPanic } from './generated/world-wasm/engine_world_wasm.js';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
+    // A known limit the page states plainly (no stack: nothing went wrong in the code).
+    class Notice extends Error {}
     const fail = (e) => {
+      if (e instanceof Notice) {
+        errEl.textContent = e.message;
+        statusEl.textContent = 'not started';
+        window.__failed = e.message;
+        return;
+      }
       const panic = (() => { try { return lastPanic(); } catch { return ''; } })();
       errEl.textContent = errorText(e) + (panic ? `\n${panic}` : '');
       statusEl.textContent = 'stopped';
@@ -89,8 +97,13 @@
     const SCENARIOS = ['still', 'drive', 'war'];
     if (!SCENARIOS.includes(scenario)) throw new Error(`scenario=${scenario}: ${SCENARIOS.join(', ')}`);
     const kSel = document.getElementById('kSel');
-    for (const n of [16, 64, 256, 1024, 2048, 4096]) kSel.add(new Option(n.toLocaleString(), n, false, n === K));
-    if (![16, 64, 256, 1024, 2048, 4096].includes(K)) kSel.add(new Option(K.toLocaleString(), K, true, true));
+    // The sizes on offer are the ones the benchmark runs, all within what one world holds
+    // (its fracture chunk limit, from rubble::city). Another ?k= is shown as it is; past the
+    // limit it is refused below with rubble's message.
+    const MAX_K = await cityMaxHouses();
+    const sizes = [16, 64, 256, 1024].filter((n) => n <= MAX_K);
+    for (const n of sizes) kSel.add(new Option(n.toLocaleString(), n, false, n === K));
+    if (!sizes.includes(K)) kSel.add(new Option(K.toLocaleString() + (K > MAX_K ? ' (too many)' : ''), K, true, true));
     kSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('k', kSel.value); location.href = u.href; };
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
@@ -116,8 +129,10 @@
       // ?rest=carry: the resting-pair carry instead of the sleep archive (World::set_carry_rest).
       if (qs.get('rest') === 'carry') world.setCarryRest(true);
     } catch (e) {
-      // World::new checks every buffer against the device: say which limit the city passes.
-      throw new Error(`${K} houses do not fit this browser's WebGPU limits (maxBufferSize ${mb(limits.maxBufferSize)}, maxStorageBufferBindingSize ${mb(limits.maxStorageBufferBindingSize)}): ${e.message ?? e}`);
+      // More houses than one world holds: rubble's own message, and the size that fits.
+      if (K > MAX_K) throw new Notice(String(e.message ?? e));
+      // World::new checks every buffer against the device: its message names the limit.
+      throw new Error(`could not create the world for ${K} houses (this browser's WebGPU limits: maxBufferSize ${mb(limits.maxBufferSize)}, maxStorageBufferBindingSize ${mb(limits.maxStorageBufferBindingSize)}): ${e.message ?? e}`);
     }
     device = world.device();
     device.lost.then((i) => fail('device lost: ' + i.message));

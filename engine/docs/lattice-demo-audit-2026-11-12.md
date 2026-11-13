@@ -377,3 +377,11 @@ something moving that touches no chunk.
 a message that named the wrong remedy (`max_bodies`). The limit is the shared fracture's
 (row 10: its scans hold 2^20 chunks, 1,466 of these houses). The message now says so, and
 `CityDef::capacity` refuses a city that cannot fit before a world is made. Lifting it is S7.
+
+Follow-up the same day: the limit is public (`rubble::THRESHOLD_CHUNKS_MAX`) and written up in
+`large-maps.md` ("Known limit: chunks per world"); `city.html` offers 16 to 1,024 houses and
+shows the refusal in plain words, without a stack. The city's body room was also wrong past
+1,024: it assumed 64 clusters a house where the house has 86, so 1,269 houses ran out of body
+slots; it is now counted from the house. With that, 1,269 houses place and run, but broke 2
+bonds while settling (contacts at 523,153 of 524,288), where 1,152 settle cleanly. Unexplained,
+so the page does not offer sizes past 1,024.

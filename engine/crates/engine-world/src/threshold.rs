@@ -698,8 +698,8 @@ mod imp {
                     self.room,
                     if left >= n { ", but not in one range" } else { "" },
                     // The shared fracture's own ceiling, which no capacity raises.
-                    if self.what == "chunks" && self.room == 1 << 20 {
-                        "a world's threshold destructibles hold at most 2^20 chunks"
+                    if self.what == "chunks" && self.room == crate::THRESHOLD_CHUNKS_MAX {
+                        "known limit: one world's threshold destructibles hold at most 1,048,576 chunks together (rubble::THRESHOLD_CHUNKS_MAX); place fewer or coarser destructibles"
                     } else {
                         "raise WorldCapacity::max_bodies"
                     }
@@ -2027,8 +2027,8 @@ mod imp {
             // shared), a part per collider.
             let room = fracture::Capacity {
                 // A chunk has at least one collider; the split's scans hold 2^20.
-                chunks: capacity.max_colliders.min(1 << 20),
-                bonds: capacity.max_colliders.min(1 << 20).saturating_mul(4),
+                chunks: capacity.max_colliders.min(crate::THRESHOLD_CHUNKS_MAX),
+                bonds: capacity.max_colliders.min(crate::THRESHOLD_CHUNKS_MAX).saturating_mul(4),
                 parts: capacity.max_colliders,
                 events: EVENT_ROOM,
             };
