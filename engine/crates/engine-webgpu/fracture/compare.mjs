@@ -33,7 +33,13 @@ let columns=[],running=true,generation=0,last=0,credit=0;
 const fmt=(x,d=1)=>Number(x).toFixed(d);
 // A column's card: the verdict's headline for the scenario, then its numbers.
 function headline(name,v){
- if(name==='balcony')return v.fell?`Snapped ${fmt(v.firstBreak??0,2)} s in`:v.bondsBroken?'Cracked, still hanging':'Holds';
+ if(name==='balcony'){
+  // The weight on it when the first bond broke, and how many it carries or carried.
+  const n=v.shots.length,first=v.shots.findIndex(s=>s.broke>0);
+  if(v.fell)return `Cracked at weight ${first+1}, snapped at weight ${v.shots.reduce((best,s,i)=>s.broke>v.shots[best].broke?i:best,0)+1}`;
+  if(v.bondsBroken)return `Cracked at weight ${first+1}, still hanging`;
+  return n?`Holding ${n} weight${n>1?'s':''} (${fmt(n*0.3,1)} t)`:'Holds its own weight';
+ }
  if(name==='pillar')return v.fell?'Canopy came down':'Canopy still up';
  const through=v.shots.filter(s=>s.through).length;
  return v.shots.length?`${through} of ${v.shots.length} shots went through`:'Waiting for the first shot';

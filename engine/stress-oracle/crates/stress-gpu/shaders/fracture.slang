@@ -3296,6 +3296,10 @@ void fr_cs_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 // A predicted strike as the solve's record (the in-step contact strike's words).
 void gi_record(uint b, uint entry, float3 contact, float3 d, float v, float j, float tau)
 {
+    // A structure whose bonds broke this frame is not split yet: its pieces are still one
+    // body, and a solve across them is not the structure's. Its strike is the local one.
+    if (dirty(b))
+        return;
     lp[lp_body(b) + 2] = float4(contact, 3.14159265358979 * j / (2.0 * max(tau, 1e-9)));
     lp[lp_body(b) + 3] = float4(d, v);
     lp[lp_body(b) + 6] = float4(0.0, 0.0, tau, 0.0);
@@ -3518,8 +3522,11 @@ void fr_gi_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         uint k = work[w_cs_list() + base + j2];
         if (lp[st_f(k, CS_STATE)].w == 0.0 && !lp_factor(k))
         {
+            // A chunk with no intact bond carries nothing: it holds still. Any other block
+            // that does not factor is an error.
             lp[st_f(k, CS_STATE)].w = 1.0;
-            atom[a_counters() + C_ERROR].or(64u);
+            if (lp_intact(k) != 0)
+                atom[a_counters() + C_ERROR].or(64u);
         }
     }
     device_group_barrier();

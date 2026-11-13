@@ -132,7 +132,8 @@ impl Approach {
 /// A player's moment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scenario {
-    /// A concrete balcony fixed along one edge; weights are set down on its tip.
+    /// A concrete balcony fixed along one edge; weights are set down on it one at a time,
+    /// walking out from the wall.
     Balcony,
     /// A canopy on two pillars; one pillar is shot out.
     Pillar,
@@ -145,6 +146,8 @@ pub enum Scenario {
 /// Density of the scenarios' concrete and steel (kg/m³).
 const CONCRETE: f64 = 2400.0;
 const STEEL: f64 = 7850.0;
+/// A balcony weight (kg).
+const BALCONY_WEIGHT: f64 = 300.0;
 /// Block edge (m).
 const B: f64 = 0.25;
 /// The struck wall's thickness (m).
@@ -338,7 +341,7 @@ impl Scenario {
     /// What a player notices.
     pub fn caption(self) -> &'static str {
         match self {
-            Scenario::Balcony => "A balcony should hold a person and snap at the wall under a wrecking ball. Without a load solve it holds anything, forever.",
+            Scenario::Balcony => "Weights go onto a balcony one at a time, each further from the wall. Where the load is solved the root heats up step by step and snaps at a weight you can count; without a load solve it holds anything, forever.",
             Scenario::Pillar => "Take out one of two pillars and the canopy should come down. Without weight in the model it hangs off the other pillar.",
             Scenario::SpeedLadder => "The same ball at four walls: slow, it should stop and crack its wall; fast, it should punch a hole and keep going. Without an impact model every wall stops it; with a damage radius every shot goes through.",
             Scenario::EqualMomentum => "Two shots with the same momentum, a wall each: the fast light one holes its wall, the slow heavy one shoves its wall over. Force alone cannot tell them apart.",
@@ -353,7 +356,7 @@ impl Scenario {
     /// Seconds the script runs.
     pub fn seconds(self) -> f64 {
         match self {
-            Scenario::Balcony => 5.0,
+            Scenario::Balcony => 8.0,
             Scenario::Pillar => 5.0,
             Scenario::SpeedLadder => 6.0,
             Scenario::EqualMomentum => 5.0,
@@ -363,20 +366,25 @@ impl Scenario {
     fn shots(self) -> Vec<Shot> {
         match self {
             Scenario::Balcony => {
-                // Set down on the tip from 1 mm: a sustained load, not an impact.
-                let rest = |label: &str, note, radius: f64, mass: f64, at: f64| Shot {
-                    label: label.into(),
-                    note,
-                    radius,
-                    mass,
-                    origin: [1.85, 3.0 + B + radius + 1e-3, 0.0],
-                    velocity: [0.0; 3],
-                    at,
-                };
-                vec![
-                    rest("a person (90 kg)", "holds under every approach", 0.2, 90.0, 0.5),
-                    rest("a wrecking ball (1.6 t)", "snaps the root where the load is solved", 0.365, 1600.0, 2.0),
-                ]
+                // Weights set down one at a time (from 1 mm: a sustained load, not an
+                // impact), in rows of two walking out from the wall: each adds its weight
+                // times its distance from the wall to the bending at the root, so the root
+                // loads up step by step until it gives.
+                let (r, mass) = (0.18, BALCONY_WEIGHT);
+                (0..10)
+                    .map(|i| {
+                        let x = 0.3 + 0.4 * (i / 2) as f64;
+                        Shot {
+                            label: format!("weight {} ({:.1} m out)", i + 1, x),
+                            note: "300 kg, set down",
+                            radius: r,
+                            mass,
+                            origin: [x.min(1.82), 3.0 + B + r + 1e-3, if i % 2 == 0 { -0.25 } else { 0.25 }],
+                            velocity: [0.0; 3],
+                            at: 0.5 + 0.6 * i as f64,
+                        }
+                    })
+                    .collect()
             }
             Scenario::Pillar => {
                 let r = 0.25;
