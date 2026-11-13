@@ -9,7 +9,7 @@
 //! `tools/stats.py sedan`). Parametric builds keep the structure.
 
 use engine_vehiclegen::mesh::Surf;
-use engine_vehiclegen::solid::{check, self_intersections};
+use engine_vehiclegen::solid::{aspect_over, check, new_crossings};
 use engine_vehiclegen::{build, design_from_json, BuildOpts};
 
 fn tris(b: &engine_vehiclegen::Built, name: &str) -> usize {
@@ -26,9 +26,11 @@ const SOLIDS: [(&str, f64, f64, usize); 14] = [
     ("door_R", 2.5, 55.0, 1),
     ("hood", 8.0, 40.0, 1),
     // the boot lid closes over the tail panel: a shallow free edge
-    ("trunk_lid", 2.9, 40.0, 1),
+    ("trunk_lid", 8.0, 40.0, 1),
     ("fender_F", 4.5, 30.0, 1),
-    ("bumper_", 4.5, 30.0, 1),
+    // (a thin row of the skin is offset along one direction, not its own
+    // normals: a 5 mm sheet measures down to 4.3 mm across it)
+    ("bumper_", 4.0, 30.0, 1),
     // the shell, two sill strips and the windscreen reveal (two pieces)
     ("body_shell", 2.5, 50.0, 5),
     ("glass_", 4.4, 4.6, 1),
@@ -71,15 +73,15 @@ fn reference_sedan_is_pinned() {
     assert_eq!(b.parts.len(), 68);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 442_448);
+    assert_eq!(total, 441_228);
     for (name, n) in [
-        ("body_shell", 111_632),
+        ("body_shell", 111_428),
         ("hood", 39_408),
-        ("door_FL", 15_704),
-        ("door_RL", 13_880),
-        ("trunk_lid", 17_512),
-        ("fender_FL", 11_140),
-        ("bumper_front", 15_596),
+        ("door_FL", 15_664),
+        ("door_RL", 13_822),
+        ("trunk_lid", 17_490),
+        ("fender_FL", 10_990),
+        ("bumper_front", 15_096),
         ("bumper_rear", 13_260),
         ("glass_windshield", 10_976),
         ("glass_door_FL", 2_740),
@@ -131,14 +133,6 @@ fn every_panel_and_pane_is_a_closed_solid() {
     assert_eq!(seen, 6 + 2 + 2 + 1 + 8 + 4 + 4 + 1 + 4, "closures, wings, bumpers, shell, glass, lenses, trims, headliner, liners");
 }
 
-/// Faces of a solid cutting through each other, away from places where the
-/// drawn skin already crosses itself (a fold at a tight corner of the sheet,
-/// there in the legacy build too).
-fn new_crossings(m: &engine_vehiclegen::mesh::Mesh) -> usize {
-    let skin = self_intersections(&m.outer_only(), 1);
-    self_intersections(m, 1).into_iter().filter(|p| !skin.iter().any(|s| (*s - *p).length() < 0.03)).count()
-}
-
 #[test]
 fn solids_do_not_cut_through_themselves() {
     let d = design_from_json("sedan", "{}").unwrap();
@@ -147,22 +141,43 @@ fn solids_do_not_cut_through_themselves() {
         if m.surf.is_none() {
             continue;
         }
-        let n = new_crossings(m);
+        let n = new_crossings(m).len();
         // Known, pinned as ceilings (edge-through-face crossings, each a few
-        // millimetres deep, at tight corners): the headlamp lens where it
-        // wraps the nose's corner (its sheet is creased there), the rear
-        // door cards behind the wheel arch (the sheet card folds there),
-        // and a few wall rows at the lamp openings' and the screen's corners.
+        // millimetres deep): the headlamp lens where it wraps the nose's
+        // corner (its sheet is creased there) and the body shell at the
+        // rear arch's and the tail lamp's corners.
         let ceiling = match name.as_str() {
-            "headlight_L_lens" | "headlight_R_lens" => 80,
-            "door_trim_RL" | "door_trim_RR" => 90,
-            "body_shell" => 20,
-            "door_FL" | "door_FR" => 6,
-            "fender_FL" | "fender_FR" | "bumper_front" => 4,
+            "headlight_L_lens" | "headlight_R_lens" => 70,
+            "body_shell" => 12,
             _ => 0,
         };
         assert!(n <= ceiling, "{name}: {n} crossings (ceiling {ceiling})");
     }
+}
+
+#[test]
+fn panel_triangles_keep_their_aspect() {
+    // docs/vehicle-art-spec.md: painted panel triangles no longer than 6:1
+    // (longest edge squared over twice the area, as check.py measures it).
+    // The drawn skins have 369 past it (thin rows at tight corners; the
+    // legacy sheets have them too, 600 with their hems); the solids' walls
+    // and inner faces are pinned as ceilings.
+    let d = design_from_json("sedan", "{}").unwrap();
+    let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
+    let mut n = [0; 3];
+    for (name, m) in &b.parts.0 {
+        if m.surf.is_some() {
+            let a = aspect_over(m, 6.0);
+            println!("{name}: {a:?}");
+            for k in 0..3 {
+                n[k] += a[k];
+            }
+        }
+    }
+    println!("skin {}, walls {}, inner faces {}", n[0], n[1], n[2]);
+    assert_eq!(n[0], 369, "skin");
+    assert!(n[1] <= 131, "walls {}", n[1]);
+    assert!(n[2] <= 595, "inner faces {}", n[2]);
 }
 
 #[test]

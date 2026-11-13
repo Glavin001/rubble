@@ -2,8 +2,9 @@
 
     Blender -b --python tools/render_parts.py -- <car.glb> <out_dir> [shot ...] [--samples N]
 
-A shot is `name=part[,part...]:view[:zoom]`: only the named parts (prefixes ending in `*` match),
-framed from `view`: a direction the camera looks from, in glTF axes (+x left, +y up, +z front), as
+A shot is `name=part[,part...]:view[:zoom[:x,y,z]]`: only the named parts (prefixes ending in `*`
+match), framed from `view` (the whole of them in shot at zoom 1; `x,y,z`, in glTF axes, aims the
+camera at that point instead of their centre): a direction the camera looks from, in glTF axes (+x left, +y up, +z front), as
 `x,y,z` or one of out, in, front, rear, top, under, and their mixes `out-front`, `in-rear-top` ...
 (out/in are relative to the first part's side of the car). `explode` as the part list moves every
 panel away from the body along its direction from the car's centre. Without shots: the standard
@@ -120,6 +121,7 @@ for shot in shots or DEFAULT:
     name, spec = shot.split('=')
     f = spec.split(':')
     names, view, zoom = f[0].split(','), f[1], float(f[2]) if len(f) > 2 else 1.0
+    aim = gl([float(x) for x in f[3].split(',')]) if len(f) > 3 else None
     for n, o in objs.items():
         o.location = home[n]
     if names == ['explode']:
@@ -141,8 +143,19 @@ for shot in shots or DEFAULT:
     c = (lo + hi) / 2
     side = 1.0 if c.x >= -1e-6 else -1.0
     d = gl(direction(view, side))
+    # the parts' silhouette from the view fits the frame (both ways: the frame is wider than tall)
+    q = (c - (c + d)).to_track_quat('-Z', 'Y')
+    right, up = q @ Vector((1, 0, 0)), q @ Vector((0, 1, 0))
+    corners = [Vector((x, y, z)) - c for x in (lo.x, hi.x) for y in (lo.y, hi.y) for z in (lo.z, hi.z)]
+    half_w = max(abs(p.dot(right)) for p in corners)
+    half_h = max(abs(p.dot(up)) for p in corners)
+    depth = max(abs(p.dot(d)) for p in corners)
     r = (hi - lo).length / 2
-    dist = r / math.tan(cam.data.angle / 2) * 1.15 / zoom
+    tx = math.tan(cam.data.angle / 2)
+    ty = tx * sc.render.resolution_y / sc.render.resolution_x
+    dist = (max(half_w / tx, half_h / ty) * 1.08 + depth) / zoom
+    if aim is not None:
+        c = aim
     cam.location = c + d * dist
     cam.rotation_euler = (c - cam.location).to_track_quat('-Z', 'Y').to_euler()
     cam.data.clip_start, cam.data.clip_end = 0.01, dist + 4 * r + 10

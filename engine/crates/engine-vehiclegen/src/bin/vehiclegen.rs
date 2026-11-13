@@ -54,12 +54,11 @@ fn main() {
                 continue;
             }
             let r = engine_vehiclegen::solid::check(m);
-            let x = engine_vehiclegen::solid::self_intersections(m, 1);
-            let skin = engine_vehiclegen::solid::self_intersections(&m.outer_only(), 1);
-            let x: Vec<_> = x.into_iter().filter(|p| !skin.iter().any(|s| (*s - *p).length() < 0.03)).collect();
+            let x = engine_vehiclegen::solid::new_crossings(m);
+            let skin = engine_vehiclegen::solid::skin_folds(m);
             print!("{:>4} skin ", skin.len());
             println!(
-                "{:<22} {:>8} {:>6} {:>5} {:>10.3} {:>6.1}..{:<6.1} {:>6}{}",
+                "{:<22} {:>8} {:>6} {:>5} {:>10.3} {:>6.1}..{:<6.1} {:>6} asp{:?}{}",
                 n,
                 r.triangles,
                 if r.closed() { "yes" } else { "NO" },
@@ -68,6 +67,7 @@ fn main() {
                 r.thickness_min * 1000.0,
                 r.thickness_max * 1000.0,
                 x.len(),
+                engine_vehiclegen::solid::aspect_over(m, 6.0),
                 x.first().map(|p| format!("  first at ({:.3}, {:.3}, {:.3})", p.x, p.y, p.z)).unwrap_or_default()
             );
             if std::env::var("SOLID_DEBUG").is_ok() && !x.is_empty() {
@@ -87,6 +87,65 @@ fn main() {
                 let mut hv: Vec<_> = h.into_iter().collect();
                 hv.sort_by_key(|e| std::cmp::Reverse(e.1));
                 println!("    {:?}", &hv[..hv.len().min(8)]);
+            }
+            if std::env::var("SOLID_ASPECT").is_ok() {
+                // where the slivers are: (kind, position to 5 cm) -> count
+                let mut h = std::collections::BTreeMap::new();
+                for (k, p, _) in engine_vehiclegen::solid::slivers(m, 6.0) {
+                    *h.entry((k, (p.x * 20.0).round() as i32 * 5, (p.y * 20.0).round() as i32 * 5, (p.z * 20.0).round() as i32 * 5)).or_insert(0) += 1;
+                }
+                let mut hv: Vec<_> = h.into_iter().collect();
+                hv.sort_by_key(|e| std::cmp::Reverse(e.1));
+                println!("    {:?}", &hv[..hv.len().min(14)]);
+            }
+            if std::env::var("SOLID_ASPECT2").is_ok() {
+                // inner-face slivers: each corner's depth and the edges' lengths, inner / skin
+                let nouter = m.surf.as_ref().unwrap().iter().filter(|s| **s == engine_vehiclegen::mesh::Surf::Outer).count();
+                let off = m.v.len() - nouter;
+                let mut shown = 0;
+                let mut isb = vec![false; nouter];
+                for lp in engine_vehiclegen::panels::boundary_loops(&m.outer_only()) {
+                    for i in lp {
+                        isb[i as usize] = true;
+                    }
+                }
+                for f in engine_vehiclegen::export::split_triangles(m) {
+                    if shown >= 10 || f.iter().any(|&i| (i as usize) < off) {
+                        continue;
+                    }
+                    let p = f.map(|i| m.v[i as usize]);
+                    let s = f.map(|i| m.v[i as usize - off]);
+                    let l2 = (0..3).map(|k| (p[(k + 1) % 3] - p[k]).length_squared()).fold(0.0, f64::max);
+                    let a2 = (p[1] - p[0]).cross(p[2] - p[0]).length();
+                    if l2 > 6.0 * a2 && (f[0] as usize * 7919) % 13 == 0 {
+                        shown += 1;
+                        let e = |q: &[glam::DVec3; 3]| [0, 1, 2].map(|k| ((q[(k + 1) % 3] - q[k]).length() * 1e4).round() / 10.0);
+                        println!("    border {:?} at ({:.3},{:.3},{:.3}) depth {:?} inner edges {:?} skin edges {:?}", f.map(|i| isb[i as usize - off]), p[0].x, p[0].y, p[0].z, [0, 1, 2].map(|k| ((p[k] - s[k]).length() * 1e4).round() / 10.0), e(&p), e(&s));
+                        if shown < 3 { println!("      skin {:.4?}\n      inner {:.4?}", s, p); }
+                    }
+                }
+            }
+            if std::env::var("SOLID_WALL").is_ok() {
+                let mut shown = 0;
+                for f in engine_vehiclegen::export::split_triangles(m) {
+                    let t = f.map(|i| m.surf_of(i as usize));
+                    if shown >= 14 || t.iter().all(|x| *x == t[0] && *x != engine_vehiclegen::mesh::Surf::Edge) {
+                        continue;
+                    }
+                    let p = f.map(|i| m.v[i as usize]);
+                    let l2 = (0..3).map(|k| (p[(k + 1) % 3] - p[k]).length_squared()).fold(0.0, f64::max);
+                    let a2 = (p[1] - p[0]).cross(p[2] - p[0]).length();
+                    if l2 > 6.0 * a2 && (f[0] as usize * 7919) % 5 == 0 {
+                        shown += 1;
+                        println!("    wall at ({:.3},{:.3},{:.3}) {:?} edges {:?}", p[0].x, p[0].y, p[0].z, t, [0, 1, 2].map(|k| ((p[(k + 1) % 3] - p[k]).length() * 1e4).round() / 10.0));
+                    }
+                }
+            }
+            if std::env::var("SOLID_KINDS").is_ok() {
+                let o = |i: u32| m.surf_of(i as usize) == engine_vehiclegen::mesh::Surf::Outer;
+                let c = engine_vehiclegen::solid::crossings(m, 1);
+                let sk = c.iter().filter(|(a, b, t, _)| (o(*a) && o(*b)) || t.iter().all(|i| o(*i))).count();
+                println!("    {} crossings, {} with a skin edge or a skin triangle", c.len(), sk);
             }
             if std::env::var("SOLID_DEBUG2").is_ok() {
                 for (a, b, t, p) in engine_vehiclegen::solid::crossings(m, 1).into_iter().step_by(7).take(6) {

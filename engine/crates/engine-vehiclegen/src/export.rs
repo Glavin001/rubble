@@ -41,7 +41,7 @@ pub struct Marker {
 
 /// Triangles of a mesh with per-corner uv and the face's material: quads
 /// split along the shorter diagonal.
-fn tri_corners(m: &Mesh) -> Vec<([u32; 3], [glam::DVec2; 3], Mat)> {
+pub(crate) fn tri_corners(m: &Mesh) -> Vec<([u32; 3], [glam::DVec2; 3], Mat)> {
     let mut out = Vec::with_capacity(m.ntris());
     for (i, f) in m.q.iter().enumerate() {
         let uv = m.quv[i];

@@ -114,18 +114,20 @@ pub fn profile(style: Style, kind: EdgeKind) -> ([(f64, f64); WALL_ROWS], (f64, 
     // the rebate glass sits in: a lip, back under the skin, down past the
     // pane, then a flange out under it
     let rebate = [
-        (-0.0012, 0.0050),
-        (0.0075, 0.0070),
+        (-0.0015, 0.0055),
+        (0.0075, 0.0075),
         (0.0075, 0.0205),
         (-0.0060, 0.0215),
     ];
+    // (every step of a section is at least 5.2 mm: a wall row is no thinner
+    // than a 27 mm border segment over ROW_ASPECT)
     match (style, kind) {
         (Door | Lid | Structure, Glazed) => (rebate, (-0.0060, 0.0290)),
         // a lamp opening in a pressing: a plain land, undercut so the lens
         // (which reaches under the skin edge) clears it
         (Sheet, Glazed) => (
             [
-                (-0.0012, 0.0050),
+                (-0.0015, 0.0055),
                 (0.0065, 0.0085),
                 (0.0065, 0.0145),
                 (0.0065, 0.0205),
@@ -136,26 +138,26 @@ pub fn profile(style: Style, kind: EdgeKind) -> ([(f64, f64); WALL_ROWS], (f64, 
         // and a flat return, shallow enough to close over the body's edge
         (Lid, Open) => (
             [
-                (-0.0025, 0.0040),
-                (-0.0012, 0.0085),
-                (0.0045, 0.0090),
-                (0.0100, 0.0090),
+                (-0.0026, 0.0045),
+                (0.0015, 0.0090),
+                (0.0075, 0.0090),
+                (0.0135, 0.0090),
             ],
-            (0.0155, 0.0090),
+            (0.0195, 0.0090),
         ),
         // the rolled hem, then the shut face
         (Door | Lid, _) => (
             [
-                (-0.0025, 0.0040),
-                (-0.0012, 0.0085),
-                (0.0, 0.0150),
-                (0.0, 0.0215),
+                (-0.0025, 0.0048),
+                (-0.0012, 0.0102),
+                (0.0, 0.0161),
+                (0.0, 0.0220),
             ],
             (0.0, 0.0280),
         ),
         (Structure, Arch) => (
             [
-                (-0.0025, 0.0040),
+                (-0.0025, 0.0048),
                 (-0.0040, 0.0160),
                 (-0.0070, 0.0300),
                 (-0.0100, 0.0440),
@@ -164,40 +166,40 @@ pub fn profile(style: Style, kind: EdgeKind) -> ([(f64, f64); WALL_ROWS], (f64, 
         ),
         (Structure, _) => (
             [
-                (-0.0025, 0.0040),
-                (-0.0012, 0.0085),
-                (0.0, 0.0160),
-                (0.0, 0.0230),
+                (-0.0025, 0.0048),
+                (-0.0012, 0.0102),
+                (0.0, 0.0168),
+                (0.0, 0.0234),
             ],
             (0.0, 0.0300),
         ),
         // return flanges: down the outside, across the tip, back up the inside
         (Sheet, Shut) => (
             [
-                (-0.0025, 0.0040),
+                (-0.0025, 0.0048),
                 (-0.0010, 0.0120),
                 (0.0, 0.0200),
-                (0.0050, 0.0200),
+                (0.0055, 0.0200),
             ],
-            (0.0050, SHEET + 0.0005),
+            (0.0055, SHEET + 0.0005),
         ),
         (Sheet, Arch) => (
             [
-                (-0.0025, 0.0040),
+                (-0.0025, 0.0048),
                 (-0.0040, 0.0200),
                 (-0.0080, 0.0400),
-                (-0.0030, 0.0400),
+                (-0.0025, 0.0400),
             ],
-            (0.0050, SHEET + 0.0005),
+            (0.0055, SHEET + 0.0005),
         ),
         (Sheet, Open) => (
             [
-                (-0.0025, 0.0040),
-                (-0.0010, 0.0095),
-                (0.0, 0.0150),
-                (0.0050, 0.0150),
+                (-0.0025, 0.0048),
+                (-0.0010, 0.0102),
+                (0.0, 0.0160),
+                (0.0055, 0.0160),
             ],
-            (0.0050, SHEET + 0.0005),
+            (0.0055, SHEET + 0.0005),
         ),
     }
 }
@@ -211,32 +213,37 @@ pub fn depth(style: Style, s: &Site) -> f64 {
             let (frame, pocket) = (0.050, 0.036);
             // the frame round the perimeter, the belt reinforcement under
             // the window and a beam across the lower panel
-            let band = 1.0 - smoothstep(0.075, 0.105, s.edge);
-            let belt = 1.0 - smoothstep(0.110, 0.140, s.glass);
+            let band = 1.0 - smoothstep(0.070, 0.115, s.edge);
+            let belt = 1.0 - smoothstep(0.105, 0.150, s.glass);
             let yb = s.lo.y + 0.21 * size.y;
-            let beam = 1.0 - smoothstep(0.022, 0.050, (s.p.y - yb).abs());
+            let beam = 1.0 - smoothstep(0.018, 0.060, (s.p.y - yb).abs());
             let d = pocket + (frame - pocket) * band.max(belt).max(beam);
             s.rim + (d - s.rim) * ramp
         }
         Style::Lid => {
             let (frame, pocket) = (0.034, 0.009);
-            let band = 1.0 - smoothstep(0.055, 0.095, s.edge);
-            // a spine down the centre, a cross member and two braces from
-            // the centre of the rear edge to the front corners
+            let band = 1.0 - smoothstep(0.052, 0.098, s.edge);
             let a = (s.p.x - 0.5 * (s.lo.x + s.hi.x)).abs();
             let b = s.p.z - s.lo.z;
             let (hw, len) = (0.5 * size.x, size.z);
-            let rib = |dist: f64| 1.0 - smoothstep(0.024, 0.062, dist);
+            let rib = |dist: f64| 1.0 - smoothstep(0.020, 0.066, dist);
             let spine = rib(a);
-            let cross = rib((b - 0.5 * len).abs());
-            let (p0, p1) = (DVec2::new(0.0, 0.12 * len), DVec2::new(hw, 0.88 * len));
-            let e = (p1 - p0).normalize();
-            let r = DVec2::new(a, b) - p0;
-            let brace = rib((r - e * r.dot(e)).length());
-            let d = pocket + (frame - pocket) * band.max(spine).max(cross).max(brace);
+            let ribs = if len > 0.9 {
+                // a bonnet: a cross member and two braces from the centre
+                // of the rear edge to the front corners
+                let cross = rib((b - 0.5 * len).abs());
+                let (p0, p1) = (DVec2::new(0.0, 0.12 * len), DVec2::new(hw, 0.88 * len));
+                let e = (p1 - p0).normalize();
+                let r = DVec2::new(a, b) - p0;
+                cross.max(rib((r - e * r.dot(e)).length()))
+            } else {
+                // a boot lid: a rib each side, half way out
+                rib((a - 0.5 * hw).abs())
+            };
+            let d = pocket + (frame - pocket) * band.max(spine).max(ribs);
             // behind a shallow free edge the frame starts further in
             let ramp = if s.rim < 0.012 {
-                smoothstep(0.035, 0.080, s.edge)
+                smoothstep(0.030, 0.085, s.edge)
             } else {
                 ramp
             };
@@ -365,9 +372,57 @@ struct Rim {
     w: DVec3,
     rows: [(f64, f64); WALL_ROWS],
     inner: (f64, f64),
-    /// the wall's depth scale (reduced where the offset would fold)
-    f: f64,
+    /// the longer of the two border segments at the vertex
+    seg: f64,
 }
+
+/// The skin's neighbours plus the far corner of every quad (distances over
+/// the mesh then run diagonally too, not only along the grid).
+fn neighbours8(m: &Mesh, nb: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    let mut o = nb.to_vec();
+    for f in &m.q {
+        o[f[0] as usize].push(f[2]);
+        o[f[2] as usize].push(f[0]);
+        o[f[1] as usize].push(f[3]);
+        o[f[3] as usize].push(f[1]);
+    }
+    for s in &mut o {
+        s.sort_unstable();
+        s.dedup();
+    }
+    o
+}
+
+/// Lower `d` until it rises no faster than `slope` per metre over the mesh
+/// from any of the `seeds` (all vertices: the whole field).
+fn limit_slope(m: &Mesh, nb: &[Vec<u32>], d: &mut [f64], slope: f64, seeds: &[u32]) {
+    let key = |x: f64| Reverse((x * 1e9) as u64);
+    let mut heap: BinaryHeap<(Reverse<u64>, u32)> =
+        seeds.iter().map(|&i| (key(d[i as usize]), i)).collect();
+    while let Some((Reverse(dk), u)) = heap.pop() {
+        let du = d[u as usize];
+        if dk > (du * 1e9) as u64 {
+            continue;
+        }
+        for &w in &nb[u as usize] {
+            let x = du + slope * (m.v[w as usize] - m.v[u as usize]).length();
+            if x < d[w as usize] - 1e-9 {
+                d[w as usize] = x;
+                heap.push((key(x), w));
+            }
+        }
+    }
+}
+
+/// The steepest the inner face's depth may change over the skin (a 42
+/// degree slope: features stay features, a depth reduced at one place to
+/// keep the face from folding spreads into a dish, not a spike).
+const SLOPE: f64 = 0.9;
+/// A wall row is at least a border segment over this (the art spec's 6:1
+/// triangle aspect, with room for skew).
+const ROW_ASPECT: f64 = 5.3;
+/// Passes evening out the inner face's cells along the surface.
+const EVEN_PASSES: usize = 4;
 
 /// Skin + edge walls + inner face.
 fn shell(
@@ -379,11 +434,137 @@ fn shell(
     style: Style,
 ) -> Mesh {
     let nv = skin.v.len();
-    let n = smooth_normals(skin, 6);
+    let mut n = smooth_normals(skin, 6);
     let nb = neighbours(skin);
+    let nb8 = neighbours8(skin, &nb);
+    let faces = skin.faces();
+    // A thin cell of the skin (a row a quarter as wide as it is long: a
+    // tight bend drawn as its own row, the rows of a narrow pillar) has no
+    // width to lose: offset along normals that converge it would be a
+    // sliver. Thin rows are offset along one direction across their width
+    // (the normals averaged along the thin edges), and the wider cells
+    // beside them take up the bend.
+    let mut across: Vec<(u32, u32)> = Vec::new();
+    for f in &faces {
+        let k = f.len();
+        let len = |j: usize| (skin.v[f[(j + 1) % k] as usize] - skin.v[f[j % k] as usize]).length();
+        let long = (0..k).map(len).fold(0.0, f64::max);
+        for j in 0..k {
+            if len(j) * 2.5 < long {
+                across.push((f[j], f[(j + 1) % k]));
+            }
+        }
+    }
+    if !across.is_empty() {
+        let mut parent: Vec<u32> = (0..nv as u32).collect();
+        fn find(p: &mut [u32], mut i: u32) -> u32 {
+            while p[i as usize] != i {
+                p[i as usize] = p[p[i as usize] as usize];
+                i = p[i as usize];
+            }
+            i
+        }
+        for &(a, b) in &across {
+            let (a, b) = (find(&mut parent, a), find(&mut parent, b));
+            parent[a as usize] = b;
+        }
+        let mut sum: FxHashMap<u32, DVec3> = FxHashMap::default();
+        for &(a, b) in &across {
+            for i in [a, b] {
+                let r = find(&mut parent, i);
+                sum.entry(r).or_insert(DVec3::ZERO);
+            }
+        }
+        for i in 0..nv as u32 {
+            let r = find(&mut parent, i);
+            if let Some(x) = sum.get_mut(&r) {
+                *x += n[i as usize];
+            }
+        }
+        for i in 0..nv as u32 {
+            let r = find(&mut parent, i);
+            if let Some(x) = sum.get(&r) {
+                n[i as usize] = x.normalize_or(n[i as usize]);
+            }
+        }
+    }
+    let n = n;
     let loops: Vec<&Vec<u32>> = loops.iter().filter(|l| l.len() >= 3).collect();
     // the wall section at every border vertex: its kind's, blended along
     // the loop where the kind changes
+    let border: Vec<u32> = (0..nv as u32).filter(|&i| isb[i as usize]).collect();
+    let (edge, from) = geodesic(skin, &nb8, &border);
+    // the width of the panel at each border vertex: how far the nearest
+    // other border is (another loop, or the same one further round than
+    // straight across), where that is under 30 mm
+    let mut width: FxHashMap<u32, f64> = FxHashMap::default();
+    {
+        let cell = 0.03;
+        let ck = |p: DVec3| {
+            (
+                (p.x / cell).floor() as i32,
+                (p.y / cell).floor() as i32,
+                (p.z / cell).floor() as i32,
+            )
+        };
+        // (loop, arc length along it, the loop's length, vertex)
+        let mut grid: FxHashMap<(i32, i32, i32), Vec<(usize, f64, f64, u32)>> =
+            FxHashMap::default();
+        let mut all = Vec::new();
+        for (li, lp) in loops.iter().enumerate() {
+            let l = lp.len();
+            let mut arc = vec![0.0; l + 1];
+            for i in 0..l {
+                arc[i + 1] =
+                    arc[i] + (skin.v[lp[(i + 1) % l] as usize] - skin.v[lp[i] as usize]).length();
+            }
+            for (i, &vi) in lp.iter().enumerate() {
+                let e = (li, arc[i], arc[l], vi);
+                grid.entry(ck(skin.v[vi as usize])).or_default().push(e);
+                all.push(e);
+            }
+        }
+        for (li, a, total, vi) in all {
+            let p = skin.v[vi as usize];
+            let k = ck(p);
+            let mut best = f64::INFINITY;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let Some(c) = grid.get(&(k.0 + dx, k.1 + dy, k.2 + dz)) else {
+                            continue;
+                        };
+                        for &(lj, b, _, vj) in c {
+                            let dist = (skin.v[vj as usize] - p).length();
+                            let round = (a - b).abs().min(total - (a - b).abs());
+                            if dist < best && (lj != li || round > 1.8 * dist) {
+                                best = dist;
+                            }
+                        }
+                    }
+                }
+            }
+            if best < cell {
+                width.insert(vi, best);
+            }
+        }
+        // (along a border the width grows no faster than the border runs:
+        // the tip of a spike is as narrow as its sides)
+        for lp in &loops {
+            let l = lp.len();
+            for _ in 0..2 {
+                for i in (0..l).chain((0..l).rev()) {
+                    for j in [(i + 1) % l, (i + l - 1) % l] {
+                        if let Some(&wj) = width.get(&lp[j]) {
+                            let x = wj + (skin.v[lp[j] as usize] - skin.v[lp[i] as usize]).length();
+                            let e = width.entry(lp[i]).or_insert(f64::INFINITY);
+                            *e = e.min(x);
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut rim: FxHashMap<u32, Rim> = FxHashMap::default();
     for lp in &loops {
         let l = lp.len();
@@ -408,26 +589,38 @@ fn shell(
         let seg: Vec<f64> = (0..l)
             .map(|i| (skin.v[lp[(i + 1) % l] as usize] - skin.v[lp[i] as usize]).length())
             .collect();
-        // how sharply the border turns at each vertex (0: under 15 degrees,
-        // 1: 60 and over), spread to its neighbours
-        let turn: Vec<f64> = (0..l)
-            .map(|i| {
-                let p = |k: usize| skin.v[lp[k % l] as usize];
-                let (t0, t1) = (
-                    (p(i) - p(i + l - 1)).normalize_or_zero(),
-                    (p(i + 1) - p(i)).normalize_or_zero(),
-                );
-                ((t0.dot(t1).clamp(-1.0, 1.0).acos().to_degrees() - 15.0) / 45.0).clamp(0.0, 1.0)
-            })
-            .collect();
-        let sharp = |i: usize| {
-            let t = |k: isize| turn[(i as isize + k).rem_euclid(l as isize) as usize];
-            t(0).max(0.7 * t(1).max(t(-1))).max(0.4 * t(2).max(t(-2)))
-        };
+        // A row s into the panel shortens where the border turns towards
+        // the panel and lengthens where it turns away (and the reverse for
+        // a row out past the edge): how far a row may go each way before
+        // its segments lose over half their length, eased along the loop.
+        // A section narrowed to nothing is a plain straight wall.
+        let mut lim = [vec![f64::INFINITY; l], vec![f64::INFINITY; l]];
         for i in 0..l {
-            // short border segments and tight corners take a narrower
-            // section (its rows would cross inside the corner)
-            let sc = (seg[i].min(seg[(i + l - 1) % l]) / 0.012).min(1.0) * (1.0 - 0.85 * sharp(i));
+            let p = |k: usize| skin.v[lp[k % l] as usize];
+            let (t0, t1) = (
+                (p(i) - p(i + l - 1)).normalize_or_zero(),
+                (p(i + 1) - p(i)).normalize_or_zero(),
+            );
+            let half = 0.5 * t0.dot(t1).clamp(-1.0, 1.0).acos();
+            let tan = half.tan().min(50.0);
+            if tan > 1e-3 {
+                let side = usize::from((t1 - t0).dot(w[i]) < 0.0);
+                lim[side][i] = 0.3 * seg[i].min(seg[(i + l - 1) % l]) / tan;
+            }
+        }
+        for lim in &mut lim {
+            for _ in 0..2 {
+                for i in 0..l {
+                    let j = (i + 1) % l;
+                    lim[j] = lim[j].min(lim[i] + 0.6 * seg[i]);
+                }
+                for i in (0..l).rev() {
+                    let j = (i + 1) % l;
+                    lim[i] = lim[i].min(lim[j] + 0.6 * seg[i]);
+                }
+            }
+        }
+        for i in 0..l {
             let mut rows = [(0.0, 0.0); WALL_ROWS];
             let mut inner = (0.0, 0.0);
             for (k, kd) in [
@@ -441,41 +634,54 @@ fn shell(
             {
                 let (r, q) = profile(style, kd);
                 for j in 0..WALL_ROWS {
-                    rows[j].0 += wt[i][k] * r[j].0 * sc;
+                    rows[j].0 += wt[i][k] * r[j].0;
                     rows[j].1 += wt[i][k] * r[j].1;
                 }
-                inner.0 += wt[i][k] * q.0 * sc;
+                inner.0 += wt[i][k] * q.0;
                 inner.1 += wt[i][k] * q.1;
             }
+            let (mut far_in, mut far_out) = (inner.0.max(0.0), (-inner.0).max(0.0));
+            for r in &rows {
+                far_in = far_in.max(r.0);
+                far_out = far_out.max(-r.0);
+            }
+            // (and a row goes no further in than 0.3 of the panel's width)
+            let wide = width.get(&lp[i]).map_or(f64::INFINITY, |w| 0.3 * w);
+            let sc_in = (lim[0][i].min(wide) / far_in.max(1e-9)).min(1.0);
+            // (nor out past the edge: the other border may be the far side of a slit)
+            let sc_out = (lim[1][i].min(wide) / far_out.max(1e-9)).min(1.0);
+            let narrow = |s: f64| if s > 0.0 { s * sc_in } else { s * sc_out };
+            for r in &mut rows {
+                r.0 = narrow(r.0);
+            }
+            inner.0 = narrow(inner.0);
             rim.insert(
                 lp[i],
                 Rim {
                     w: w[i],
                     rows,
                     inner,
-                    f: 1.0,
+                    seg: seg[i].max(seg[(i + l - 1) % l]),
                 },
             );
         }
     }
-    // the depth field
-    let border: Vec<u32> = (0..nv as u32).filter(|&i| isb[i as usize]).collect();
+    // the depth field (at a border vertex: the depth of the inner face's rim)
     let glazed: Vec<u32> = border
         .iter()
         .copied()
         .filter(|&i| kind[i as usize] == EdgeKind::Glazed)
         .collect();
-    let (edge, from) = geodesic(skin, &nb, &border);
     let glass = if glazed.is_empty() {
         vec![f64::INFINITY; nv]
     } else {
-        geodesic(skin, &nb, &glazed).0
+        geodesic(skin, &nb8, &glazed).0
     };
     let (lo, hi) = skin.bbox();
     let mut d: Vec<f64> = (0..nv)
         .map(|i| {
             if isb[i] {
-                return 0.0;
+                return rim.get(&(i as u32)).map_or(MIN_THICKNESS, |r| r.inner.1);
             }
             let r = rim.get(&from[i]).map_or(0.02, |r| r.inner.1);
             depth(
@@ -493,114 +699,210 @@ fn shell(
             .max(MIN_THICKNESS)
         })
         .collect();
-    // behind a convex bend an offset surface shrinks, and folds where it is
-    // deeper than the bend's radius: no deeper than 0.65 of it there, the
-    // limit eased into the neighbourhood
-    let designed = d.clone();
-    let cap = convex_cap(skin, &n, &nb);
-    for i in 0..nv {
-        match rim.get_mut(&(i as u32)) {
-            Some(r) => r.f = (cap[i] / r.inner.1).min(1.0),
-            None => d[i] = d[i].min(cap[i]).max(MIN_THICKNESS),
-        }
-    }
-    for _ in 0..3 {
+    // the field is sampled once per skin vertex: smooth it over the mesh so
+    // a feature's rim running across the grid is a ramp, not stairs
+    for _ in 0..2 {
         let prev = d.clone();
         for i in 0..nv {
             if !isb[i] && !nb[i].is_empty() {
-                let mean = nb[i]
-                    .iter()
-                    .map(|&j| {
-                        if isb[j as usize] {
-                            rim.get(&j).map_or(prev[i], |r| r.inner.1 * r.f)
-                        } else {
-                            prev[j as usize]
-                        }
-                    })
-                    .sum::<f64>()
-                    / nb[i].len() as f64;
-                d[i] = d[i].min(1.25 * mean).max(MIN_THICKNESS);
+                let mean =
+                    nb[i].iter().map(|&j| prev[j as usize]).sum::<f64>() / nb[i].len() as f64;
+                d[i] = 0.5 * (prev[i] + mean);
             }
         }
     }
+    // behind a convex bend an offset surface shrinks, and folds where it is
+    // deeper than the bend's radius: no deeper than 0.65 of it there (the
+    // estimate is not asked for less than a sheet's thickness)
+    let cap = convex_cap(skin, &n, &nb);
+    for i in 0..nv {
+        d[i] = d[i].min(cap[i].max(SHEET)).max(MIN_THICKNESS);
+        // a tip tapering to nothing (a mirror sail) is a blade no deeper
+        // than twice its width (or a sheet)
+        if let Some(w) = width.get(&(i as u32)) {
+            d[i] = d[i].min((2.0 * w).max(SHEET)).max(MIN_THICKNESS);
+        }
+    }
+    let all: Vec<u32> = (0..nv as u32).collect();
+    limit_slope(skin, &nb8, &mut d, SLOPE, &all);
     // inner positions; where the offset still squeezes or folds a face the
     // depth is reduced there until it does not
-    let place = |d: &[f64], rim: &FxHashMap<u32, Rim>| -> Vec<DVec3> {
-        (0..nv)
-            .map(|i| match rim.get(&(i as u32)) {
-                Some(r) => {
-                    skin.v[i] + r.w * r.inner.0 - n[i] * (r.inner.1 * r.f).max(MIN_THICKNESS)
-                }
-                None => skin.v[i] - n[i] * d[i],
+    // A border's inner rim may sit in from the edge (a return flange): the
+    // rows behind it make room, the move fading over 60 mm. Then the inner
+    // face's cells are evened out along the surface (a thin row of the skin,
+    // or one squeezed behind a bend, would be a row of slivers).
+    let shift: Vec<DVec3> = (0..nv)
+        .map(|i| match rim.get(&from[i]) {
+            Some(r) => r.w * (r.inner.0 * (1.0 - edge[i] / 0.06).max(0.0)),
+            None => DVec3::ZERO,
+        })
+        .collect();
+    // (no vertex moves over a third of its shortest edge: a small cell stays a cell)
+    let reach: Vec<f64> = (0..nv)
+        .map(|i| {
+            0.35 * nb[i]
+                .iter()
+                .map(|&j| (skin.v[j as usize] - skin.v[i]).length())
+                .fold(f64::INFINITY, f64::min)
+        })
+        .collect();
+    let place = |d: &[f64], shift: &[DVec3]| -> Vec<DVec3> {
+        // (a rim squashed to a fraction of its depth sits in from the edge
+        // by that fraction too)
+        let q0: Vec<DVec3> = (0..nv)
+            .map(|i| {
+                let f = rim.get(&from[i]).map_or(1.0, |r| {
+                    (d[from[i] as usize] / r.inner.1.max(1e-9)).min(1.0)
+                });
+                skin.v[i] + shift[i] * f - n[i] * d[i]
             })
-            .collect()
-    };
-    let faces = skin.faces();
-    let mut q = place(&d, &rim);
-    for _ in 0..60 {
-        let mut bad = vec![false; nv];
-        let mut any = false;
-        for f in &faces {
-            let k = f.len();
-            let p = |j: usize| skin.v[f[j % k] as usize];
-            let g = |j: usize| q[f[j % k] as usize];
-            let mut squeezed = false;
-            for j in 0..k {
-                // every corner keeps its turn, every edge a third of its length
-                let no = (p(j + 1) - p(j)).cross(p(j + k - 1) - p(j));
-                let ni = (g(j + 1) - g(j)).cross(g(j + k - 1) - g(j));
-                if ni.dot(no) < 0.2 * ni.length() * no.length()
-                    || (g(j + 1) - g(j)).length() < 0.34 * (p(j + 1) - p(j)).length()
-                {
-                    squeezed = true;
-                    break;
+            .collect();
+        let mut q = q0.clone();
+        for _ in 0..EVEN_PASSES {
+            let prev = q.clone();
+            for i in 0..nv {
+                if !isb[i] && !nb[i].is_empty() {
+                    let mean =
+                        nb[i].iter().map(|&j| prev[j as usize]).sum::<DVec3>() / nb[i].len() as f64;
+                    let mv = mean - prev[i];
+                    let x = prev[i] + 0.5 * (mv - n[i] * mv.dot(n[i]));
+                    q[i] = q0[i] + (x - q0[i]).clamp_length_max(reach[i]);
                 }
             }
-            if squeezed {
-                any = true;
-                for &i in f {
+        }
+        q
+    };
+    // (a face is squeezed when a corner loses its turn or an edge two
+    // thirds of its length)
+    let squeezed = |q: &[DVec3], f: &[u32]| -> bool {
+        let k = f.len();
+        let p = |j: usize| skin.v[f[j % k] as usize];
+        let g = |j: usize| q[f[j % k] as usize];
+        (0..k).any(|j| {
+            let no = (p(j + 1) - p(j)).cross(p(j + k - 1) - p(j));
+            let ni = (g(j + 1) - g(j)).cross(g(j + k - 1) - g(j));
+            ni.dot(no) < 0.2 * ni.length() * no.length()
+                || (g(j + 1) - g(j)).length() < 0.34 * (p(j + 1) - p(j)).length()
+        })
+    };
+    // a pinched cell of the skin (an edge under 2.5 mm) that no depth
+    // helps is left as it is
+    let flat = place(&vec![MIN_THICKNESS; nv], &shift);
+    let pinched = |f: &[u32]| {
+        (0..f.len()).any(|j| {
+            (skin.v[f[(j + 1) % f.len()] as usize] - skin.v[f[j] as usize]).length() < 0.0025
+        })
+    };
+    let live: Vec<&Vec<u32>> = faces
+        .iter()
+        .filter(|f| !(pinched(f) && squeezed(&flat, f)))
+        .collect();
+    let mut q = place(&d, &shift);
+    for _ in 0..60 {
+        let mut bad = vec![false; nv];
+        for f in &live {
+            if squeezed(&q, f) {
+                for &i in f.iter() {
                     bad[i as usize] = true;
                 }
             }
         }
-        if !any {
+        let seeds: Vec<u32> = (0..nv as u32).filter(|&i| bad[i as usize]).collect();
+        let mut moved = false;
+        for &i in &seeds {
+            let x = (d[i as usize] * 0.88).max(MIN_THICKNESS);
+            moved |= x < d[i as usize];
+            d[i as usize] = x;
+        }
+        if !moved {
             break;
         }
-        for i in 0..nv {
-            if !bad[i] {
-                continue;
-            }
-            match rim.get_mut(&(i as u32)) {
-                Some(r) => r.f = (r.f * 0.88).max(MIN_THICKNESS / r.inner.1.max(MIN_THICKNESS)),
-                None => d[i] = (d[i] * 0.88).max(MIN_THICKNESS),
-            }
-        }
-        q = place(&d, &rim);
+        limit_slope(skin, &nb8, &mut d, SLOPE, &seeds);
+        q = place(&d, &shift);
     }
-    // a wall no deeper than the inner face beside it (its rows would come
-    // through it where the depth was reduced)
-    let ids: Vec<u32> = rim.keys().copied().collect();
-    for i in ids {
-        let mut lim = f64::INFINITY;
-        for &j in &nb[i as usize] {
-            if !isb[j as usize] {
-                if d[j as usize] < designed[j as usize] - 1e-4 {
-                    lim = lim.min(d[j as usize]);
+    // the walls. A section that fits (every row at least a border segment
+    // over ROW_ASPECT from the next) is built as drawn; where the wall is
+    // too shallow for it (the depth was reduced, the section narrowed at a
+    // corner) it is a plain wall of as many evenly spaced rows as fit.
+    let mut wall: FxHashMap<u32, (usize, [DVec3; WALL_ROWS])> = FxHashMap::default();
+    for lp in &loops {
+        let l = lp.len();
+        let section = |vi: u32| -> ([DVec3; WALL_ROWS], bool) {
+            let r = &rim[&vi];
+            let (p, qq) = (skin.v[vi as usize], q[vi as usize]);
+            let f = d[vi as usize] / r.inner.1.max(1e-9);
+            let x: [DVec3; WALL_ROWS] = std::array::from_fn(|k| {
+                p + r.w * (r.rows[k].0 * f.min(1.0)) - n[vi as usize] * (r.rows[k].1 * f)
+            });
+            let mut least = (x[0] - p).length().min((qq - x[WALL_ROWS - 1]).length());
+            for k in 1..WALL_ROWS {
+                least = least.min((x[k] - x[k - 1]).length());
+            }
+            (x, least * ROW_ASPECT >= r.seg)
+        };
+        let mut sec: Vec<([DVec3; WALL_ROWS], bool)> = lp.iter().map(|&vi| section(vi)).collect();
+        // drawn sections ease into a plain stretch over two vertices (and
+        // an eased section that no longer fits is plain too)
+        let ease = |sec: &[([DVec3; WALL_ROWS], bool)], i: usize| -> f64 {
+            let at = |k: isize| {
+                f64::from(u8::from(
+                    !sec[(i as isize + k).rem_euclid(l as isize) as usize].1,
+                ))
+            };
+            at(0)
+                .max(0.6 * at(1).max(at(-1)))
+                .max(0.25 * at(2).max(at(-2)))
+        };
+        let eased = |sec: &[([DVec3; WALL_ROWS], bool)], i: usize| -> (usize, [DVec3; WALL_ROWS]) {
+            let vi = lp[i];
+            let r = &rim[&vi];
+            let (p, qq) = (skin.v[vi as usize], q[vi as usize]);
+            let b = ease(sec, i);
+            let rows = if b >= 1.0 {
+                (((qq - p).length() * ROW_ASPECT / r.seg) as usize)
+                    .saturating_sub(1)
+                    .min(WALL_ROWS)
+            } else {
+                WALL_ROWS
+            };
+            let x: [DVec3; WALL_ROWS] = std::array::from_fn(|k| {
+                let straight = p + (qq - p) * ((k + 1) as f64 / (rows + 1) as f64);
+                if k >= rows {
+                    qq
+                } else {
+                    sec[i].0[k].lerp(straight, b)
                 }
-                for &k in &nb[j as usize] {
-                    if !isb[k as usize] && d[k as usize] < designed[k as usize] - 1e-4 {
-                        lim = lim.min(d[k as usize]);
-                    }
+            });
+            (rows, x)
+        };
+        for _ in 0..4 {
+            let mut more = Vec::new();
+            for i in 0..l {
+                if !sec[i].1 {
+                    continue;
+                }
+                let (_, x) = eased(&sec, i);
+                let vi = lp[i];
+                let (p, qq) = (skin.v[vi as usize], q[vi as usize]);
+                let mut least = (x[0] - p).length().min((qq - x[WALL_ROWS - 1]).length());
+                for k in 1..WALL_ROWS {
+                    least = least.min((x[k] - x[k - 1]).length());
+                }
+                if least * ROW_ASPECT < rim[&vi].seg {
+                    more.push(i);
                 }
             }
+            if more.is_empty() {
+                break;
+            }
+            for i in more {
+                sec[i].1 = false;
+            }
         }
-        let r = rim.get_mut(&i).unwrap();
-        let tmax = r.rows.iter().map(|x| x.1).fold(r.inner.1, f64::max);
-        if lim.is_finite() {
-            r.f = r.f.min((lim - 0.0015) / tmax).max(MIN_THICKNESS / tmax);
+        for (i, &vi) in lp.iter().enumerate() {
+            wall.insert(vi, eased(&sec, i));
         }
     }
-    let q = place(&d, &rim);
     // assemble: skin, walls, inner face
     let mat = skin
         .qm
@@ -609,33 +911,32 @@ fn shell(
         .copied()
         .unwrap_or(Mat::Paint);
     let mut out = skin.clone();
-    let mut surf = vec![Surf::Outer; nv];
-    let nrows: usize = loops.iter().map(|l| l.len() * WALL_ROWS).sum();
+    let nrows: usize = wall.values().map(|w| w.0).sum();
     let inner_of = |i: u32| (nv + nrows) as u32 + i;
     let mut island = island0 + 100;
     let chunk = 1.2;
     for lp in &loops {
         let l = lp.len();
-        let base = out.v.len() as u32;
-        let row = |k: usize, i: usize| base + (k * l + i) as u32;
+        // row k of loop vertex i: its own vertex, or (a dropped row) the
+        // inner face's border vertex
+        let mut id = vec![[0u32; WALL_ROWS + 2]; l];
         let mut step = [0.0f64; WALL_ROWS + 1];
-        for k in 0..WALL_ROWS {
-            for (i, &vi) in lp.iter().enumerate() {
-                let r = &rim[&vi];
-                let (s, t) = r.rows[k];
-                let t = t * r.f;
-                let x = skin.v[vi as usize] + r.w * s - n[vi as usize] * t;
-                let prev = if k == 0 {
-                    skin.v[vi as usize]
+        for (i, &vi) in lp.iter().enumerate() {
+            let (rows, x) = &wall[&vi];
+            id[i][0] = vi;
+            let mut prev = skin.v[vi as usize];
+            for k in 0..WALL_ROWS {
+                id[i][k + 1] = if k < *rows {
+                    out.v.push(x[k]);
+                    out.v.len() as u32 - 1
                 } else {
-                    out.v[row(k - 1, i) as usize]
+                    inner_of(vi)
                 };
-                step[k] += (x - prev).length() / l as f64;
-                if k == WALL_ROWS - 1 {
-                    step[k + 1] += (q[vi as usize] - x).length() / l as f64;
-                }
-                out.v.push(x);
+                step[k] += (x[k] - prev).length() / l as f64;
+                prev = x[k];
             }
+            id[i][WALL_ROWS + 1] = inner_of(vi);
+            step[WALL_ROWS] += (q[vi as usize] - prev).length() / l as f64;
         }
         let mut vv = [0.0f64; WALL_ROWS + 2];
         for k in 0..=WALL_ROWS {
@@ -652,29 +953,39 @@ fn shell(
             let (ua, ub) = (s[i] - cf * chunk, s[i + 1] - cf * chunk);
             for k in 0..=WALL_ROWS {
                 // the ring above (towards the skin) and the ring below
-                let (a0, b0) = if k == 0 {
-                    (lp[i], lp[j])
-                } else {
-                    (row(k - 1, i), row(k - 1, j))
-                };
-                let (a1, b1) = if k == WALL_ROWS {
-                    (inner_of(lp[i]), inner_of(lp[j]))
-                } else {
-                    (row(k, i), row(k, j))
-                };
-                out.q.push([b0, a0, a1, b1]);
-                out.quv.push([
+                let (a0, b0, a1, b1) = (id[i][k], id[j][k], id[i][k + 1], id[j][k + 1]);
+                let uv = [
                     DVec2::new(ub, vv[k]),
                     DVec2::new(ua, vv[k]),
                     DVec2::new(ua, vv[k + 1]),
                     DVec2::new(ub, vv[k + 1]),
-                ]);
-                out.qi.push(island + cf as i32);
-                out.qm.push(mat);
+                ];
+                match (a0 == a1, b0 == b1) {
+                    (false, false) => {
+                        out.q.push([b0, a0, a1, b1]);
+                        out.quv.push(uv);
+                        out.qi.push(island + cf as i32);
+                        out.qm.push(mat);
+                    }
+                    (true, true) => {}
+                    (ta, _) => {
+                        // a row ends here: a triangle
+                        let (f, u) = if ta {
+                            ([b0, a0, b1], [uv[0], uv[1], uv[3]])
+                        } else {
+                            ([b0, a0, a1], [uv[0], uv[1], uv[2]])
+                        };
+                        out.t.push(f);
+                        out.tuv.push(u);
+                        out.ti.push(island + cf as i32);
+                        out.tm.push(mat);
+                    }
+                }
             }
         }
         island += py_floordiv(s[l], chunk) as i32 + 1;
     }
+    let mut surf = vec![Surf::Outer; nv];
     surf.resize(out.v.len(), Surf::Edge);
     debug_assert_eq!(out.v.len(), nv + nrows);
     out.v.extend_from_slice(&q);
@@ -901,11 +1212,77 @@ pub fn check(m: &Mesh) -> Report {
     r
 }
 
+/// Painted triangles of a part past the art spec's aspect limit (longest
+/// edge squared over twice the area, `check.py`'s definition), counted by
+/// what they are: [skin, edge walls, inner face].
+pub fn aspect_over(m: &Mesh, limit: f64) -> [usize; 3] {
+    let mut n = [0; 3];
+    for (k, _, _) in slivers(m, limit) {
+        n[k] += 1;
+    }
+    n
+}
+
+/// The triangles [`aspect_over`] counts: (0 skin, 1 wall, 2 inner face;
+/// centroid; aspect).
+pub fn slivers(m: &Mesh, limit: f64) -> Vec<(usize, DVec3, f64)> {
+    let mut out = Vec::new();
+    for (f, _, mat) in crate::export::tri_corners(m) {
+        if mat != Mat::Paint {
+            continue;
+        }
+        let p = f.map(|i| m.v[i as usize]);
+        let l2 = (p[1] - p[0])
+            .length_squared()
+            .max((p[2] - p[1]).length_squared())
+            .max((p[0] - p[2]).length_squared());
+        let a2 = (p[1] - p[0]).cross(p[2] - p[0]).length().max(2e-14);
+        if l2 > limit * a2 {
+            let s = f.map(|i| m.surf_of(i as usize));
+            let k = if s.iter().all(|x| *x == Surf::Outer) {
+                0
+            } else if s.iter().all(|x| *x == Surf::Inner) {
+                2
+            } else {
+                1
+            };
+            out.push((k, (p[0] + p[1] + p[2]) / 3.0, l2 / a2));
+        }
+    }
+    out
+}
+
 /// Faces of a part that cut through each other: edges of every `stride`-th
 /// triangle against the triangles near them (sharing no vertex). Returns the
 /// crossings' points.
 pub fn self_intersections(m: &Mesh, stride: usize) -> Vec<DVec3> {
     crossings(m, stride).into_iter().map(|c| c.3).collect()
+}
+
+/// Where a part's drawn skin is folded: where it cuts through itself, and
+/// where one of its edges passes through a wall hanging from its own border
+/// (a cell of the skin turned over the border: a spike or a slit a couple
+/// of millimetres wide at a tight corner of the sheet).
+pub fn skin_folds(m: &Mesh) -> Vec<DVec3> {
+    let mut out = self_intersections(&m.outer_only(), 1);
+    let o = |i: u32| m.surf_of(i as usize) == Surf::Outer;
+    out.extend(
+        crossings(m, 1)
+            .into_iter()
+            .filter(|(a, b, t, _)| o(*a) && o(*b) && t.iter().filter(|i| o(**i)).count() == 2)
+            .map(|c| c.3),
+    );
+    out
+}
+
+/// Faces of a solid cutting through each other away from the folds of its
+/// drawn skin ([`skin_folds`]; 30 mm).
+pub fn new_crossings(m: &Mesh) -> Vec<DVec3> {
+    let folds = skin_folds(m);
+    self_intersections(m, 1)
+        .into_iter()
+        .filter(|p| !folds.iter().any(|s| (*s - *p).length() < 0.03))
+        .collect()
 }
 
 /// [`self_intersections`] with the edge and the triangle of each crossing.
