@@ -26,6 +26,65 @@ fn run(scenario: Scenario, approach: Approach) -> Verdict {
     v
 }
 
+/// What tells the approaches apart, scenario by scenario: the claims the compare page makes.
+fn check(scenario: Scenario, approach: Approach, v: &Verdict) {
+    use Approach::*;
+    let at = format!("{} / {}", scenario.name(), approach.name());
+    let through: Vec<bool> = v.shots.iter().map(|s| s.through).collect();
+    // Whether the approach solves sustained load through the bonds' own strengths.
+    let solves_load = matches!(approach, StressSolver | Rubble);
+    match scenario {
+        Scenario::Balcony => {
+            if solves_load {
+                // Beam theory: the root is at 0.91 of its strength under seven weights and
+                // 1.06 under eight. No break under the first five; down by the end.
+                let first = v.shots.iter().position(|s| s.broke > 0).unwrap_or_else(|| panic!("{at}: the balcony never cracked"));
+                assert!((5..=7).contains(&first), "{at}: first crack at weight {}", first + 1);
+                assert!(v.fell, "{at}: the balcony came down");
+            } else {
+                assert_eq!(v.bonds_broken, 0, "{at}: nothing weighs on a bond");
+                assert!(!v.fell, "{at}");
+            }
+        }
+        // The canopy comes down where its weight is solved through the bonds (bending
+        // included: the radial column's stress solver too); the threshold rule leaves it
+        // hanging off the other pillar. The support graph is not asserted: its weight flow
+        // carries no bending, and the canopy stays up there as well.
+        Scenario::Pillar => match approach {
+            ImpactThreshold => assert!(!v.fell, "{at}"),
+            SupportFlow => {}
+            StressSolver | StressRadial | Rubble => assert!(v.fell, "{at}: the canopy comes down"),
+        },
+        Scenario::SpeedLadder => match approach {
+            // The engine has stopped the shot before anything breaks.
+            ImpactThreshold | SupportFlow | StressSolver => assert_eq!(through, [false; 4], "{at}"),
+            // The same hole at 20 and at 100 m/s, and every shot through it.
+            StressRadial => {
+                assert_eq!(through, [true; 4], "{at}");
+                assert_eq!(v.shots[0].broke, v.shots[1].broke, "{at}: speed does not enter");
+            }
+            // Below the ballistic limit it stops and the wall takes its momentum; above, it
+            // goes through, faster the faster it came.
+            Rubble => {
+                assert_eq!(through, [false, false, true, true], "{at}");
+                assert!(v.shots[0].broke > 0 && v.shots[1].broke > v.shots[0].broke, "{at}: a harder stop breaks more");
+                assert!(v.shots[3].along > v.shots[2].along && v.shots[2].along > 5.0, "{at}: exit speeds {} and {}", v.shots[2].along, v.shots[3].along);
+            }
+        },
+        Scenario::EqualMomentum => match approach {
+            ImpactThreshold | SupportFlow | StressSolver => assert_eq!(through, [false; 2], "{at}"),
+            StressRadial => assert_eq!(through, [true; 2], "{at}"),
+            // The fast light shot holes its wall; the slow heavy one stops and wrecks its.
+            Rubble => {
+                assert_eq!(through, [true, false], "{at}");
+                assert!(v.shots[1].broke > v.shots[0].broke, "{at}: the slow heavy shot breaks more of its wall");
+            }
+        },
+    }
+}
+
+/// Every scenario under every approach, printed and checked (`COMPARE_SCENARIO`,
+/// `COMPARE_APPROACH`: one of them).
 #[test]
 fn print_the_matrix() {
     let only = std::env::var("COMPARE_SCENARIO").ok();
@@ -38,7 +97,8 @@ fn print_the_matrix() {
             if one.as_deref().is_some_and(|o| o != a.name()) {
                 continue;
             }
-            run(s, a);
+            let v = run(s, a);
+            check(s, a, &v);
         }
     }
 }
