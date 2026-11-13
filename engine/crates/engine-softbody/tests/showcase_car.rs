@@ -3887,6 +3887,13 @@ fn contacts_do_no_positive_work() {
             w.vehicles.iter().all(|v| v.dissipative_contact),
             "the BeamNG profile"
         );
+        // (`CW_OBJECTIVE=0`, a measurement: the centred damping's end-direction form,
+        // the default before spec §39.6.)
+        if std::env::var("CW_OBJECTIVE").as_deref() == Ok("0") {
+            for v in &mut w.vehicles {
+                v.settings.centred_objective = false;
+            }
+        }
         let [sc, vc, sh, all, rest] = contact_work_tenths(&mut w, seconds, settle);
         eprintln!(
             "({what}) most over a tenth: self-contact work {sc:+.4} J, vehicle contact {vc:+.4} J, position steps' stored energy {sh:+.4} J; together {all:+.4} J; together after {settle} s {rest:+.4} J"

@@ -15,7 +15,7 @@
 //! cargo run --release -p engine-softbody --example sidepole_sweep -- \
 //!     --mod <mods dir>/<mod> --vehicle sedan [--pc sedan.pc] [--kmh 186] [--at 1.05] \
 //!     [--angle 90] [--surface 1] [--secs 1.2] [--run-up M] [--self 1] [--min-kg K] \\
-//!     [--drop H] [--wall DEG] [--centred 1] [--objective 0] [--rise J] [--series 1]
+//!     [--drop H] [--wall DEG] [--centred 1] [--objective 1] [--rise J] [--series 1]
 //! ```
 //! `--self 0` turns self-collision off and `--min-kg K` raises every lighter
 //! node to K kg (diagnostics: they change the car).
@@ -189,9 +189,9 @@ fn main() -> Result<(), String> {
     if num("--centred", 1.0) == 0.0 {
         s.settings.centred_damping = false;
     }
-    // `--objective 1`: the centred damping's objective form
-    // (`ExplicitBeamsSettings::centred_objective`).
-    s.settings.centred_objective = num("--objective", 0.0) != 0.0;
+    // `--objective 0`: the centred damping's end-direction form
+    // (`ExplicitBeamsSettings::centred_objective` off; the default is on).
+    s.settings.centred_objective = num("--objective", 1.0) != 0.0;
     let min_kg = num("--min-kg", 0.0);
     if min_kg > 0.0 {
         for n in &mut s.nodes {

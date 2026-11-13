@@ -3083,8 +3083,9 @@ cars' masses, so "off" here is not §39's "current"):
 
 ### 39.6 The correction must not see a beam turn (2026-11-13)
 
-`ExplicitBeamsSettings::centred_objective` (CPU reference; **off by default until
-the kernels carry it**, so CPU and GPU still agree; known-bugs S3).
+`ExplicitBeamsSettings::centred_objective` (known-bugs S3). **On by default since
+2026-11-13, on the CPU reference and in the GPU kernels together** (see "The
+kernels" below); off selects the earlier end-direction form, unchanged bit for bit.
 
 **What was wrong.** The rule above takes Δu = (Δv_a − Δv_b)·d̂′, the change of the
 ends' relative velocity w = v_a − v_b along the beam's direction at the end of the
@@ -3123,8 +3124,8 @@ along the beam's direction at its own time:
 
     Δu = (v′_a − v′_b)·d̂′ − (v_a − v_b)·d̂,
 
-d̂ from the positions before the node update (the CPU reference keeps them; a kernel
-needs the start direction or the start rate per beam record, one float more). A
+d̂ from the positions before the node update (the CPU reference keeps them; the
+kernels keep each node's position and velocity before its update). A
 torsion bar takes the change of its dihedral rate the same way, g′·v′ − g·v with
 each gradient at its own positions. A coupler's correction is on the relative
 velocity itself and is unchanged. The push is still −½·s·Δu along d̂′, equal and
@@ -3140,6 +3141,27 @@ opposite, so momentum stays exact.
   second order in h (1.2e-3 of the momentum over one ring-down).
 * **Energy:** a free spinning or tumbling body never gains (the tests' bodies, 5 to
   50 m/s at the rim).
+
+**The kernels** (`explicit_beams.slang`; WGSL, Metal and CUDA are built from it). A
+vehicle with centred damping and the objective form carries `FLAG_CENTRED_OBJECTIVE`
+(vehicle flag bit 19, beside `FLAG_CENTRED`). Before each node's update `centredKeep`
+writes its position and velocity after the Δv region (`gP.centredDv`: one record a
+node, three when some vehicle of the upload has the form), and `centredBeam` hands a
+flagged vehicle's records to `centredBeamObjective`, which computes the Δu above (a
+torsion bar through `centredGrad` at both sets of positions). The per-vehicle frame
+(solo and plain), the contact groups' step and the wide passes share these
+functions. The end-direction form's code is untouched, so a vehicle without the flag
+steps as before.
+
+* **Test** (`engine-webgpu/tests/explicit_centred_damping_gpu.rs`,
+  `objective_form_steps_bit_for_bit_and_a_spinning_part_gains_no_energy`; Metal:
+  `engine-metal/tests/explicit_centred_damping.rs`): the hub cap at 20 m/s keeps its
+  60.000 J on the GPU on both paths (2.9e12 J in 0.25 s before the port), and the hub
+  cap, a tumbling tetrahedron, the latched box thrown spinning (torsion bar, coupler)
+  and the rolling pressure-wheel car step bit for bit with the CPU reference, frame
+  and wide.
+* **Cost:** two more writes a node and, per damped beam, two more node reads and one
+  more inverse square root, each step. Not timed.
 
 ## 40. Fuel-tank mass (2026-11-06)
 

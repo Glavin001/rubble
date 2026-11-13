@@ -97,3 +97,30 @@ fn metal_centred_damping_steps_bit_for_bit() {
     let broken = bit_for_bit("latched box into a wall", boxed, 1500).unwrap();
     assert!(broken > 0);
 }
+
+/// The objective form (`ExplicitBeamsSettings::centred_objective`, spec §39.6) on
+/// Metal: the pressure-wheel car rolling (its wheels' beams turn) and the latched
+/// box (a torsion bar, a coupler latch) thrown spinning 30 m up.
+#[test]
+fn metal_centred_objective_steps_bit_for_bit() {
+    let v = Vec3::new(0.0, 0.0, 10.0);
+    let mut car = spawn(PART2_CAR, Some(JbeamWheels::Pressure), v);
+    car.settings.centred_objective = true;
+    if bit_for_bit("fixture car at 10 m/s, objective form", car, 2000).is_none() {
+        return;
+    }
+    let mut boxed = spawn(&latched_box_jbeam(), None, Vec3::new(0.0, 0.0, 5.0));
+    boxed.settings.centred_objective = true;
+    let c = boxed.nodes.iter().map(|n| n.pos).sum::<Vec3>() / boxed.nodes.len() as f32;
+    let axis = Vec3::new(1.0, 0.4, 0.2).normalize();
+    let far = boxed
+        .nodes
+        .iter()
+        .map(|n| axis.cross(n.pos - c).length())
+        .fold(0.0f32, f32::max);
+    for n in &mut boxed.nodes {
+        n.vel += axis.cross(n.pos - c) * (15.0 / far);
+        n.pos.y += 30.0;
+    }
+    bit_for_bit("latched box thrown spinning", boxed, 1000).unwrap();
+}

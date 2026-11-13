@@ -81,9 +81,9 @@ pub fn surface_contact() -> bool {
 pub fn settings() -> ExplicitBeamsSettings {
     ExplicitBeamsSettings {
         turbulence: false,
-        // `RUBBLE_CENTRED_OBJECTIVE=1`: the centred damping's objective form
-        // (spec §39.6), to measure what it moves while it is off by default.
-        centred_objective: std::env::var("RUBBLE_CENTRED_OBJECTIVE").is_ok_and(|v| v == "1"),
+        // `RUBBLE_CENTRED_OBJECTIVE=0`: the centred damping's end-direction form
+        // (before spec §39.6), to measure what the objective form (the default) moved.
+        centred_objective: !std::env::var("RUBBLE_CENTRED_OBJECTIVE").is_ok_and(|v| v == "0"),
         ..Default::default()
     }
 }

@@ -138,7 +138,8 @@ fn frames_carry_the_remainder() {
             turbulence: true,
             triangle_throttle: true,
             centred_damping: false,
-            centred_objective: false,
+            // (Acts only with centred damping; spec §39.6.)
+            centred_objective: true,
         }
     );
 }

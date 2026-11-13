@@ -121,10 +121,11 @@ pub struct ExplicitBeamsSettings {
     /// The centred damping's correction from each beam's change of extension
     /// rate, each rate along the beam's own direction at its time
     /// (jbeam-semantics-spec.md §39.6): Δu = (v′_a − v′_b)·d̂′ − (v_a − v_b)·d̂.
-    /// Off (the default until the GPU kernels follow): the change of the
-    /// relative velocity along the end direction alone, which reads a beam
-    /// that only turns as shortening at ω²·L·h and adds energy to anything
-    /// that spins (known-bugs S3).
+    /// On by default (it acts only with [`Self::centred_damping`]; the CPU
+    /// reference and the GPU kernels, `FLAG_CENTRED_OBJECTIVE`). Off: the
+    /// change of the relative velocity along the end direction alone, which
+    /// reads a beam that only turns as shortening at ω²·L·h and adds energy to
+    /// anything that spins (known-bugs S3); kept for comparison.
     pub centred_objective: bool,
 }
 
@@ -136,7 +137,7 @@ impl Default for ExplicitBeamsSettings {
             turbulence: true,
             triangle_throttle: true,
             centred_damping: false,
-            centred_objective: false,
+            centred_objective: true,
         }
     }
 }

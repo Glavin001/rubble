@@ -5,7 +5,7 @@
 //!
 //! ```bash
 //! cargo run --release -p engine-softbody --example spin_probe -- \
-//!     [--kg 0.1] [--side 0.095] [--k 68000] [--c 20] [--rim 20] [--centred 1] [--secs 2]
+//!     [--kg 0.1] [--side 0.095] [--k 68000] [--c 20] [--rim 20] [--centred 1] [--objective 1] [--secs 2]
 //! ```
 //! `--rim`: the nodes' speed about the centre (m/s). Prints the rotation per
 //! step, the beams' ω·h and damping share, and the energy every 0.25 s.
@@ -61,6 +61,8 @@ fn main() -> Result<(), String> {
     )?;
     // The JBeam (BeamNG) profile turns centred damping on; `--centred 0` turns it off.
     s.settings.centred_damping = centred;
+    // `--objective 0`: the end-direction form (before spec §39.6), which gains energy.
+    s.settings.centred_objective = num("--objective", 1.0) != 0.0;
     let centre = s.nodes.iter().map(|n| n.pos).sum::<Vec3>() / 3.0;
     // The triangle's normal, and a spin about it.
     let nrm = (s.nodes[1].pos - s.nodes[0].pos)
