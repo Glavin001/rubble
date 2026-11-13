@@ -768,6 +768,9 @@ mod imp {
         rebuild: bool,
         /// It has run a step.
         stepped: bool,
+        /// The stress view's last readback (`World::set_stress_view`): per chunk of the
+        /// shared tables, its largest failure index by mode. Empty until a frame brings one.
+        view: Vec<[f32; 4]>,
     }
 
     /// The world's threshold destructibles.
@@ -776,6 +779,8 @@ mod imp {
         gpu: Option<Gpu>,
         pub slots: Vec<Option<ThresholdSlot>>,
         shared: Option<Shared>,
+        /// `World::set_stress_view`: kept for a shared fracture made or rebuilt later.
+        stress_view: bool,
         /// Reserved body slots no piece has taken yet: one pool for every destructible
         /// (a split takes the lowest free slot, whoever reserved it).
         spare: std::collections::BTreeSet<u32>,
@@ -857,6 +862,8 @@ mod imp {
         Broken,
         Moved,
         Frames,
+        /// The stress view: per chunk, its largest failure index by mode.
+        View,
         /// A destructible with its own fracture (crushing, blast loading): its counters,
         /// chunk owners, bond states, body frames and this frame's crush events
         /// (`GpuFracture::crush_events_range`).
@@ -2055,9 +2062,10 @@ mod imp {
                 free: vec![0; capacity.max_bodies as usize],
                 ..Default::default()
             };
-            let fracture =
+            let mut fracture =
                 GpuFracture::with_capacity(gpu, &empty, made, &buffers(&self.sim), &ingest)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+            fracture.stress_view = self.fracture.stress_view;
             self.fracture.shared = Some(Shared {
                 ingest,
                 fracture,
@@ -2072,6 +2080,7 @@ mod imp {
                 setup,
                 rebuild,
                 stepped: false,
+                view: Vec::new(),
             });
             if let Some(n) = self.fracture_pieces {
                 // The world's piece pool: parked static slots any split may take.
@@ -2212,6 +2221,7 @@ mod imp {
                 let frame = b.frame(gpu, g).map_err(|e| anyhow::anyhow!("{e}"))?;
                 f.set_blast(gpu, frame).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
+            f.stress_view = sh.fracture.stress_view;
             sh.fracture = f;
             sh.chunks = chunks;
             sh.bonds = bonds;
@@ -2451,6 +2461,9 @@ mod imp {
                     16 * l.f_events() as u64,
                     48 * l.events.frames as u64,
                 );
+                if f.stress_view && sh.setup.load_model != stress_ref::capability::LoadModel::Threshold {
+                    push(FractureRead::View, &f.lp, 16 * l.lp_view() as u64, 16 * l.n as u64);
+                }
             }
             for (k, t) in self.slots.iter().enumerate() {
                 let Some(o) = t.as_ref().and_then(|t| t.own.as_ref()) else {
@@ -2523,6 +2536,10 @@ mod imp {
                     .find(|(r, _)| std::mem::discriminant(r) == std::mem::discriminant(&want))
                     .map(|(_, b)| *b)
             };
+            if let (Some(view), Some(sh)) = (find(FractureRead::View), self.fracture.shared.as_mut()) {
+                sh.view.clear();
+                sh.view.extend_from_slice(bytemuck::cast_slice::<u8, [f32; 4]>(view));
+            }
             let Some(counters) = find(FractureRead::Counters) else {
                 return Ok(out);
             };
@@ -3270,6 +3287,44 @@ mod imp {
             }
         }
 
+        /// The stress view: from the next step on, each step also brings every chunk's
+        /// load against its strength (`Self::destructible_chunk_stress`), for a host to
+        /// draw. The load-path model only (the others solve no load); off by default, and
+        /// the steps' breaks are the same with it or without.
+        pub fn set_stress_view(&mut self, on: bool) {
+            self.fracture.stress_view = on;
+            if let Some(sh) = self.fracture.shared.as_mut() {
+                sh.fracture.stress_view = on;
+                if !on {
+                    sh.view.clear();
+                }
+            }
+        }
+
+        /// Per chunk of a stress destructible, the largest failure index of its intact
+        /// bonds as of the last polled step (0: unloaded; 1: a bond at its strength), by
+        /// mode in the load path's order and overall. `None` until the stress view
+        /// (`Self::set_stress_view`) has brought a frame, and for a model that solves no
+        /// load.
+        pub fn destructible_chunk_stress(
+            &self,
+            id: DestructibleId,
+        ) -> anyhow::Result<Option<&[[f32; 4]]>> {
+            let i = self.live_destructible(id)?;
+            let k = self.destructibles[i].threshold.ok_or_else(|| {
+                anyhow::anyhow!("destructible {} is not a threshold one", id.index())
+            })? as usize;
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            if t.own.is_some() {
+                return Ok(None);
+            }
+            let Some(sh) = self.fracture.shared.as_ref() else {
+                return Ok(None);
+            };
+            let (from, n) = (t.base.chunk as usize, t.chunk_body.len());
+            Ok(sh.view.get(from..from + n))
+        }
+
         /// What a stress destructible's fracture has decided so far (blocking: for tools,
         /// tests and a host's readout): its analytic strikes by outcome, the strikes'
         /// records of the last frame that had one, the load path's largest failure index
@@ -3701,7 +3756,8 @@ mod imp {
             FractureRead::Counters
             | FractureRead::Broken
             | FractureRead::Moved
-            | FractureRead::Frames => u32::MAX,
+            | FractureRead::Frames
+            | FractureRead::View => u32::MAX,
         }
     }
 

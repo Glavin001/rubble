@@ -42,3 +42,34 @@ fn print_the_matrix() {
         }
     }
 }
+
+/// The stress view: on the balcony under the load path, the root chunks carry the largest
+/// load over strength and it rises when the weight lands; the breaks are the same with the
+/// view on or off.
+#[test]
+fn the_stress_view_shows_the_root_and_changes_nothing() {
+    let run = |view: bool| -> (u32, Option<f64>, f32, f32) {
+        let (mut world, mut c) = Compare::new(GpuContext::Default, Scenario::Balcony, Approach::StressSolver).unwrap();
+        world.set_stress_view(view);
+        c.queue_script(&world).unwrap();
+        let d = c.lab.destructibles()[0];
+        let (mut idle, mut loaded) = (0.0f32, 0.0f32);
+        for step in 0..360 {
+            c.step(&mut world).unwrap();
+            let peak = world.destructible_chunk_stress(d).unwrap().map_or(0.0, |v| v.iter().flatten().fold(0.0f32, |a, &b| a.max(b)));
+            if step == 40 {
+                idle = peak;
+            }
+            loaded = loaded.max(peak);
+        }
+        let v = c.verdict(&world).unwrap();
+        (v.bonds_broken, v.first_break, idle, loaded)
+    };
+    let off = run(false);
+    let on = run(true);
+    println!("view off {off:?}; on {on:?}");
+    assert_eq!((off.0, off.1), (on.0, on.1), "the same breaks at the same time");
+    assert_eq!((off.2, off.3), (0.0, 0.0), "no view, no numbers");
+    assert!(on.2 > 0.05 && on.2 < 1.0, "the balcony's own weight loads its root below strength ({})", on.2);
+    assert!(on.3 >= 1.0, "the wrecking ball takes a bond to its strength ({})", on.3);
+}

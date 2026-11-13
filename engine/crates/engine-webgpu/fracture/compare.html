@@ -25,6 +25,7 @@ button:disabled{opacity:.5;cursor:default}
 .card td{padding:2px 0;border-top:1px solid #1b2a36;vertical-align:top}
 .card td:last-child{text-align:right;color:#cfe0ea}
 .card td:first-child{color:#8fa6b7;padding-right:8px}
+.legend{display:inline-flex;align-items:center;gap:6px;color:#8fa6b7;font-size:12px}.legend i{display:inline-block;width:120px;height:10px;border-radius:5px;background:linear-gradient(90deg,#1a52db,#1abddb,#4dd15c,#f5d629,#ed5c1a)}
 .perf{color:#8fa6b7;font:11px ui-monospace,monospace;margin-top:8px}
 #status{padding:8px 24px;font:12px ui-monospace,monospace;color:#8fa6b7;border-top:1px solid #2b3c4a}
 #status.error{color:#ff8a8a}
@@ -39,7 +40,9 @@ button:disabled{opacity:.5;cursor:default}
   <label>Scenario <select id="scenario"></select></label>
   <span id="approaches" class="bar" style="margin:0"></span>
   <label>Speed <select id="speed"><option value="1">real time</option><option value="0.25" selected>1/4</option><option value="0.05">1/20</option></select></label>
+  <label>View <select id="view"><option value="3" selected>stress (load / strength)</option><option value="0">materials</option><option value="2">pieces</option></select></label>
   <button id="run" class="primary">Run again</button><button id="pause">Pause</button>
+  <span class="legend" id="legend">unloaded <i></i> at strength</span>
  </div>
  <p id="caption"></p>
 </header>

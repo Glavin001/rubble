@@ -77,6 +77,7 @@ async function load(){
    // A click shoots the scene's ball along the same ray in every column.
    col.renderer=await createRenderer(device,el.querySelector('canvas'),sim,sim.scene,ray=>{for(const c of columns)c.sim.shoot(ray.origin,ray.direction)});
    col.tracker=sim.world.compareTrack(sim.lab,sc.name);
+   sim.world.setStressView($('view').value==='3');col.renderer.colorMode=Number($('view').value);
    built.push(col);
   }
   if(mine!==generation){for(const c of built){c.renderer.dispose();c.tracker.free();c.sim.dispose()}return}
@@ -106,6 +107,8 @@ function frame(now){
 }
 
 scenarioPick.onchange=()=>load();
+// The view: stress asks each World for its chunks' load over strength from the next step on.
+$('view').onchange=()=>{const m=Number($('view').value);$('legend').style.visibility=m===3?'visible':'hidden';for(const c of columns){c.sim.world.setStressView(m===3);c.renderer.colorMode=m}};
 $('run').onclick=()=>load();
 $('pause').onclick=()=>{running=!running;$('pause').textContent=running?'Pause':'Resume'};
 // Checks and recordings: the columns' verdicts, and stepping without the frame clock.

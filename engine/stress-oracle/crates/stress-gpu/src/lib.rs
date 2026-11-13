@@ -303,6 +303,7 @@ pub mod shaders {
             ("fr_lp_sweep_even", (64, 1, 1)),
             ("fr_lp_sweep_odd", (64, 1, 1)),
             ("fr_lp_breaks", (64, 1, 1)),
+            ("fr_lp_view", (64, 1, 1)),
             ("fr_il_first_reset", (64, 1, 1)),
             ("fr_il_first", (64, 1, 1)),
             ("fr_il_begin", (64, 1, 1)),

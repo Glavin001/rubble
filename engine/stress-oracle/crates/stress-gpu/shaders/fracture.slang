@@ -1342,7 +1342,11 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
 [[vk::binding(25, 0)]] RWStructuredBuffer<float4> engine_contacts;
 // In `lp`, per contact row 2 float4: where each side on a chunk of a broken structure
 // touches, in the world (w 1; `fr_cs_save`), for `fr_cs_fix` after the split.
-uint lp_anchor(uint r, uint side) { return LP_CHUNK * params.chunk_count + 7 * params.body_count + 2 * r + side; }
+// Per chunk 1 float4 after the body records: the stress view (`fr_lp_view`, opt-in), the
+// largest failure index of the chunk's intact bonds by mode (`failure_indices`' order) as the
+// frame's sweeps left it. Read by a host to draw; no kernel reads it.
+uint lp_view(uint k) { return LP_CHUNK * params.chunk_count + 7 * params.body_count + k; }
+uint lp_anchor(uint r, uint side) { return LP_CHUNK * params.chunk_count + 7 * params.body_count + params.chunk_count + 2 * r + side; }
 // In `ext` at `ext_sides`, per entry of `ext_adj` (a chunk's bond, in its chunk's order) 5
 // float4, what a sweep takes of the bond (`fracture.rs` `sides`): (the bond's centroid less
 // its first chunk's centre, the bond as bits); (less its second chunk's, the other chunk as
@@ -1811,6 +1815,37 @@ void fr_lp_breaks(uint3 id: SV_DispatchThreadID)
         atom[a_counters() + C_BROKEN].add(1u);
         event_broken(i);
     }
+}
+
+// The stress view (opt-in, `GpuFracture::stress_view`; dispatched after the sweeps and before
+// `fr_lp_breaks`, so a bond about to break shows at 1 or above): one thread per chunk, the
+// largest failure index of its intact bonds by mode. It writes only `lp_view`: the frame's
+// breaks are the same with it or without.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_lp_view(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count)
+        return;
+    float4 range = ext[params.ext_chunks + 4 * k];
+    uint first = asuint(range.x);
+    uint count = asuint(range.y);
+    float4 worst = float4(0.0);
+    for (uint e = 0; e < count; e++)
+    {
+        uint i = asuint(lp_side(5 * (first + e)).w);
+        if (work[w_alive() + i] == 0)
+            continue;
+        uint4 bond = bonds[i];
+        LpBond b = lp_bond(i);
+        float3 q_lin;
+        float3 q_ang;
+        lp_force(b, bond.x, bond.y, 0, q_lin, q_ang);
+        Measures m = stress_measures(b.law, q_lin, q_ang);
+        worst = max(worst, failure_indices(lp_material(b.law.ids.x), b.law, m, b.law.geom1.w));
+    }
+    lp[lp_view(k)] = worst;
 }
 
 // ---- Local impact (stress-ref impact_local.rs, `capability::StrikeModel::Analytic`) ----

@@ -684,6 +684,11 @@ impl Layout {
     pub const EVENT_COUNTERS: [u32; 3] = [20, 21, 22];
     /// `lp` (float4s): per chunk [`LP_CHUNK`], then per body slot [`LP_BODY`].
     pub fn lp_words(&self) -> u32 {
+        self.lp_view() + self.n
+    }
+    /// The stress view (`fracture.slang` `lp_view`): a float4 per chunk, after the body
+    /// records; the contact rows' anchors follow it.
+    pub fn lp_view(&self) -> u32 {
         LP_CHUNK * self.n + LP_BODY * self.b
     }
 }
@@ -849,7 +854,8 @@ pub const CRUSH_ENTRIES: [&str; 13] = [
 /// fracture run (`FractureTables::load_model`, `strike_model`, `contact_sweeps`): built only
 /// with one of them, so the threshold rule needs no more storage buffers per stage than its
 /// core kernels bind (8, WebGPU's default limit; `fr_cs_solve` binds 10).
-pub const MODEL_ENTRIES: [&str; 44] = [
+pub const MODEL_ENTRIES: [&str; 45] = [
+    "fr_lp_view",
     "fr_lp_clear",
     "fr_lp_sum",
     "fr_lp_relief",
@@ -904,7 +910,7 @@ pub fn entries() -> &'static [&'static str] {
     &ENTRIES
 }
 
-const ENTRIES: [&str; 89] = [
+const ENTRIES: [&str; 90] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -994,6 +1000,7 @@ const ENTRIES: [&str; 89] = [
     "fr_strike_claim",
     "fr_host_breaks",
     "fr_frame_begin",
+    "fr_lp_view",
 ];
 
 #[repr(C)]
@@ -1083,6 +1090,10 @@ pub struct GpuFracture {
     pub shots: wgpu::Buffer,
     pub ext: wgpu::Buffer,
     pub lp: wgpu::Buffer,
+    /// The stress view (`fr_lp_view`): each frame, every chunk's largest failure index by
+    /// mode into `lp` at [`Layout::lp_view`], for a host to draw. Off by default; the load
+    /// path only. The frame's breaks are the same with it or without.
+    pub stress_view: bool,
     /// Per engine contact row the in-step contact fracture's saved anchors (2 float4).
     /// `STRESS_CS_TIMING=1`: its stages' timestamps.
     cs_timing: Option<CsTiming>,
@@ -1373,6 +1384,7 @@ impl GpuFracture {
             .map(|entry| ((crush_on || !CRUSH_ENTRIES.contains(entry)) && (models_on || !MODEL_ENTRIES.contains(entry))).then(|| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS)))
             .collect();
         let mut f = GpuFracture {
+            stress_view: false,
             layout,
             kernels,
             params,
@@ -1848,6 +1860,9 @@ impl GpuFracture {
                 self.direct(&mut pass, "fr_lp_block", n);
                 for s in 0..self.params.sweeps {
                     self.direct(&mut pass, if s % 2 == 0 { "fr_lp_sweep_even" } else { "fr_lp_sweep_odd" }, n);
+                }
+                if self.stress_view {
+                    self.direct(&mut pass, "fr_lp_view", n);
                 }
                 self.direct(&mut pass, "fr_lp_breaks", e);
             }

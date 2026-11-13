@@ -1361,6 +1361,11 @@ impl Lab {
             out[o + 11] = f32::from_bits(flags);
         };
         let parked = Transform::new(PARKED, [0.0, 0.0, 0.0, 1.0]);
+        let mut stress = Vec::with_capacity(self.destructibles.len());
+        for &d in &self.destructibles {
+            stress.push(world.destructible_chunk_stress(d)?);
+        }
+        let mut stressed: Vec<(usize, f32)> = Vec::new();
         for (i, d) in self.drawn.iter().enumerate() {
             match *d {
                 Drawn::Ground => put(i, Transform::IDENTITY, 0, None),
@@ -1379,6 +1384,11 @@ impl Lab {
                     }
                     let t = world.body_transform(body)?.unwrap_or(world.body_initial_transform(body)?);
                     put(i, compose(&t, &rest), body_flags(world, body), Some(body));
+                    // The stress view (`World::set_stress_view`): 1 + the chunk's largest
+                    // bond load over strength in word 12 (0: none solved).
+                    if let Some(v) = stress.get(copy as usize).and_then(|s| s.as_ref()).and_then(|s| s.get(chunk as usize)) {
+                        stressed.push((i, 1.0 + v[0].max(v[1]).max(v[2]).max(v[3]).max(0.0)));
+                    }
                 }
             }
         }
@@ -1391,6 +1401,9 @@ impl Lab {
                     put(slot, t, body_flags(world, b), Some(b));
                 }
             }
+        }
+        for (i, u) in stressed {
+            out[RECORD_FLOATS * i + 12] = u;
         }
         Ok(out)
     }

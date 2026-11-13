@@ -455,6 +455,14 @@ impl WebWorld {
         res(lab.lab.set_guidance(&mut self.world, settings, &zones))
     }
 
+    /// The stress view (`World::set_stress_view`): from the next step on, `labPoses`
+    /// carries each chunk's load over strength for the renderer's stress colours. The
+    /// load-path model only.
+    #[wasm_bindgen(js_name = setStressView)]
+    pub fn set_stress_view(&mut self, on: bool) {
+        self.world.set_stress_view(on);
+    }
+
     /// The bond models' reset (the stress models reload).
     #[wasm_bindgen(js_name = labReset)]
     pub fn lab_reset(&mut self, lab: &mut LabScene) -> Result<(), JsValue> {
