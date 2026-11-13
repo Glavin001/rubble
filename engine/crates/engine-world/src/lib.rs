@@ -1551,26 +1551,39 @@ impl World {
         (reach, unbounded)
     }
 
-    /// Wake commands for the sleeping pile on body `i` (as of the last polled frame): the
-    /// bodies asleep whose bounds reach body `i`'s, and in turn those whose bounds reach
-    /// theirs. The whole pile, not its first layer: a body woken under a sleeper drops away
-    /// from it under gravity too slowly to wake it by contact, and the sleeper would hang.
-    /// Bounding spheres about the bodies' origins, so some that only stand near wake too;
-    /// they fall asleep again.
+    /// Wake commands for the sleeping pile on body `i` (as of the last polled frame): what
+    /// rests on it, when it is taken away ([`Self::sleeping_pile`]).
     fn sleepers_reaching(&self, i: usize) -> Vec<GpuCommand> {
+        let b = &self.bodies[i];
+        let (reach, unbounded) = self.body_reach(i);
+        let centre = b.last_transform.unwrap_or(b.origin).p();
+        self.sleeping_pile(Some(i), &[(centre, reach)], unbounded)
+    }
+
+    /// Wake commands for the sleeping piles on the `removed` volumes (centre, bounding
+    /// radius; `everywhere`: an unbounded one), as of the last polled frame: the dynamic
+    /// bodies asleep whose bounds reach one, and in turn those whose bounds reach theirs.
+    /// The whole pile, not its first layer: a body woken under a sleeper drops away from it
+    /// under gravity too slowly to wake it by contact, and the sleeper would hang.
+    /// Bounding spheres about the bodies' origins, so some that only stand near wake too;
+    /// they fall asleep again. `skip`: a body slot that is not a sleeper here (the one
+    /// being removed).
+    pub(crate) fn sleeping_pile(&self, skip: Option<usize>, removed: &[(Vec3, f32)], everywhere: bool) -> Vec<GpuCommand> {
         /// Bodies this close count as touching (m): past any contact margin.
         const PAD: f32 = 0.05;
         let at = |b: &BodySlot| b.last_transform.unwrap_or(b.origin).p();
-        let (reach, unbounded) = self.body_reach(i);
         // The dynamic sleepers: slot, centre, reach.
         let sleepers: Vec<(usize, Vec3, f32)> = self
             .bodies
             .iter()
             .enumerate()
-            .filter(|&(k, b)| k != i && b.alive && b.last_asleep && b.body_type == BodyType::Dynamic)
+            .filter(|&(k, b)| Some(k) != skip && b.alive && b.last_asleep && b.body_type == BodyType::Dynamic)
             .map(|(k, b)| (k, at(b), self.body_reach(k).0))
             .collect();
-        if unbounded {
+        if sleepers.is_empty() {
+            return Vec::new();
+        }
+        if everywhere {
             return sleepers.iter().map(|s| GpuCommand::wake(s.0 as u32)).collect();
         }
         // A grid whose cell holds any two sleepers that touch in neighbouring cells.
@@ -1580,11 +1593,10 @@ impl World {
         for (n, s) in sleepers.iter().enumerate() {
             grid.entry(key(s.1)).or_default().push(n);
         }
-        let centre = at(&self.bodies[i]);
         let mut woken = vec![false; sleepers.len()];
         let mut front: Vec<usize> = Vec::new();
         for (n, s) in sleepers.iter().enumerate() {
-            if s.1.distance(centre) <= reach + s.2 + PAD {
+            if removed.iter().any(|&(centre, reach)| s.1.distance(centre) <= reach + s.2 + PAD) {
                 woken[n] = true;
                 front.push(n);
             }

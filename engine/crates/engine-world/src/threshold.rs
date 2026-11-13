@@ -2989,6 +2989,21 @@ mod imp {
             let d = t.destructible as usize;
             let id = DestructibleId::new(d as u32, self.destructibles[d].generation);
             let mut out = Vec::with_capacity(crushes.len());
+            // What slept on a crushed chunk must not be left in the air: the chunk is gone,
+            // not moved, so no awake body is left where it was to wake them by touch
+            // (`World::sleeping_pile`; a frame or two late, as the crush is read back).
+            let gone: Vec<(Vec3, f32)> = crushes
+                .iter()
+                .map(|e| {
+                    let b = self.fracture.slots[k].as_ref().expect("live slot").chunk_body[e.chunk as usize];
+                    (Vec3::from(e.position), self.body_reach(b as usize).0)
+                })
+                .collect();
+            let resting = self.sleeping_pile(None, &gone, false);
+            if !resting.is_empty() {
+                self.dirty = true;
+                self.sim.push_body_commands(&resting)?;
+            }
             for e in crushes {
                 let t = self.fracture.slots[k].as_ref().expect("live slot");
                 let c = e.chunk as usize;

@@ -243,12 +243,28 @@ pose is exact). This follows what a heightfield edit already does
 left the top one hanging, because a body that drops away under gravity separates too slowly
 to wake its neighbour by contact. Bodies that only stand near wake too and sleep again.
 
+**Supports removed on the GPU (2026-11-12).** Checked each way a support can go without a
+`destroy_body` call from the host:
+
+| Removal | Result | Test |
+|---|---|---|
+| A chunk crushed to dust (`CrushMass::Remove`) under a sleeping cube | Hung at 3.720 m; now drops to 3.310 m | `a_sleeper_drops_when_the_chunk_under_it_is_crushed_to_dust` |
+| A building blown up under a cube asleep on its roof | Comes down (15.90 m to 3.59 m), with and without wake-on-touch | `a_sleeper_on_a_roof_comes_down_with_the_building` |
+| A body past the kill bounds | Goes through `destroy_body` on the host, so it is covered | (by construction) |
+
+The crushed chunk was the gap: it is gone, not moved, so no awake body is left where it was.
+`apply_crush` now wakes the sleeping pile over each crushed chunk (`World::sleeping_pile`), a
+frame or two after the crush, when its event is read back. A split needed nothing: its pieces
+are written awake and, in the case tested, wake what they touch.
+
 **Still open.**
-- A support removed on the GPU with no host call: a crushed chunk removed as dust, a body
-  past the kill bounds. Neither goes through `destroy_body`.
-- The general case behind the stack: any sleeper whose supporter wakes and falls away from
-  rest. A hit supporter moves fast enough to wake it by contact; one that only starts to
-  fall does not.
+- A sleeper whose supporter wakes and falls away from rest, where nothing was removed and
+  nothing hit it (the middle of the stack, before the pile was woken as a whole). The blown
+  building does not show it, because a blast throws the pieces. A piece freed by support loss
+  alone, under a sleeper, is the case to try; no test of it yet.
+- The lab's stress worlds never sleep (the threshold solver's own settings), so none of this
+  shows there. It matters in worlds that sleep: large maps
+  (`DestructibleAssetDesc::sleeping_solver_for`).
 - The cubes come to rest about 4.5 cm into the ground plane after a 1 m drop (0.455 m for a
   0.5 m half extent). Seen while checking; not looked into.
 
