@@ -32,6 +32,8 @@
     behind `STRESS_CORRECTION_LIMIT=1`, off by default.
   - Do not enable it in a profile or in production code.
 
+- Generated vehicles: read `engine/docs/generated-vehicles-lessons.md` first (lessons,
+  measurements, decisions; add to it rather than redoing research).
 - Deformable vehicles: `engine/docs/deformable-vehicles.md` explains the model (keep it
   current when the model changes). Soft-body vehicles in the World: start with `engine/docs/handoff/soft-rigid-world.md`
   (what exists, lessons, how to run and measure) and `engine/docs/handoff/known-bugs.md`.

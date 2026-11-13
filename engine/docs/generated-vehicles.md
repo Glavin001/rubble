@@ -1,5 +1,7 @@
 # Generated vehicles: design in, crash-ready car out
 
+> Lessons, conclusions and decisions from this work: [generated-vehicles-lessons.md](generated-vehicles-lessons.md).
+
 A living doc. The vehicle generator draws a car; the **vehicle rigger** turns
 it into a deformable node–beam car that Rubble's explicit solver, the GPU
 pages and the World load like any BeamNG JBeam vehicle, with Rubble's own
