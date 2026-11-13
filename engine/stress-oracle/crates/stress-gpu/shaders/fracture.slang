@@ -75,7 +75,7 @@ struct FractureParams
     uint ev_frames_cap;
     // The load and strike models (stress-ref `capability::LoadModel`, `StrikeModel`).
     uint load_model;     // 0 threshold (`fr_breaks`), 1 load path (`fr_lp_*`)
-    uint strike_model;   // 0 Hertz (`fr_strike_breaks`), 1 analytic (`fr_il_*`)
+    uint strike_model;   // 0 Hertz (`fr_strike_breaks`), 1 analytic (`fr_il_*`), 2 radial damage (`fr_strike_radial`)
     uint fracture_work;  // the analytic model's: a perforating shot gives up the ballistic limit's energy
     uint sweeps;         // the load path's sweeps a frame (even)
     float gx;            // gravity (the stress frame)
@@ -93,7 +93,7 @@ struct FractureParams
     float cs_c2;
     uint cs_row_offset;  // this step's first contact row (rubble's contacts' parity)
     uint ext_sides;      // `ext` offset (float4s): the load path's bond sides (`lp_side`)
-    float pad8;          // to a multiple of 16 bytes (a uniform's size on WebGPU)
+    float strike_radius; // radial damage's radius (m; strike_model 2)
 };
 
 struct ScanParams
@@ -1327,6 +1327,35 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
     }
 }
 
+// Radial damage (stress-ref radial_damage.rs, `capability::StrikeModel::Radial`; in place of
+// `fr_strike_breaks`): a bond of a struck body breaks when its chunks' midpoint is within
+// `strike_radius` of the point struck. The shot's speed and mass and the bond's strength do
+// not enter: the comparison rule.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_radial(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= params.bond_used || params.shot_count == 0 || work[w_alive() + i] == 0)
+        return;
+    uint4 bond = bonds[i];
+    uint b = body_of(bond.x);
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    float3 contact = frames[strike_at(b) + 2].xyz;
+    Quat q;
+    float3 pa = chunk_box_world(bond.x, q);
+    float3 pb = chunk_box_world(bond.y, q);
+    if (length(0.5 * (pa + pb) - contact) <= params.strike_radius)
+    {
+        work[w_alive() + i] = 0;
+        atom[a_dirty() + b].or(1u);
+        atom[a_counters() + C_FRAME_BROKEN].add(1u);
+        atom[a_counters() + C_BROKEN].add(1u);
+        event_broken(i);
+    }
+}
 
 // ---- Load path (stress-ref load_path.rs, `capability::LoadModel::LoadPath`) ----
 //

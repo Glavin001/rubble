@@ -476,7 +476,7 @@ struct FractureParams {
     cs_c2: f32,
     cs_row_offset: u32,
     ext_sides: u32,
-    pad8: f32,
+    strike_radius: f32,
 }
 
 /// What a fracture's tables hold room for (`GpuFracture::with_capacity`): its layout is
@@ -914,7 +914,7 @@ pub fn entries() -> &'static [&'static str] {
     &ENTRIES
 }
 
-const ENTRIES: [&str; 92] = [
+const ENTRIES: [&str; 93] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -1007,6 +1007,7 @@ const ENTRIES: [&str; 92] = [
     "fr_lp_view",
     "fr_stress_clear",
     "fr_stress_breaks",
+    "fr_strike_radial",
 ];
 
 #[repr(C)]
@@ -1208,7 +1209,7 @@ impl GpuFracture {
         };
         let [scale_m, scale_s, scale_j] = t.scales();
         let (ext_words, ext_chunks, ext_adj, ext_mat) = t.ext.words();
-        let needs_ext = t.load_model != LoadModel::Threshold || t.strike_model != StrikeModel::Hertz;
+        let needs_ext = t.load_model != LoadModel::Threshold || matches!(t.strike_model, StrikeModel::Analytic { .. });
         if needs_ext && (t.ext.bonds.len() != e as usize || t.ext.chunks.len() != n as usize) {
             return Err("fracture: the load path's and analytic strike's tables do not match the bonds and chunks".into());
         }
@@ -1252,7 +1253,15 @@ impl GpuFracture {
             scale_j,
             strike_speed: t.strike_speed,
             load_model: matches!(t.load_model, LoadModel::LoadPath { .. }) as u32,
-            strike_model: matches!(t.strike_model, StrikeModel::Analytic { .. }) as u32,
+            strike_model: match t.strike_model {
+                StrikeModel::Hertz => 0,
+                StrikeModel::Analytic { .. } => 1,
+                StrikeModel::Radial { .. } => 2,
+            },
+            strike_radius: match t.strike_model {
+                StrikeModel::Radial { radius_mm } => radius_mm as f32 * 1e-3,
+                _ => 0.0,
+            },
             fracture_work: matches!(t.strike_model, StrikeModel::Analytic { fracture_work: true }) as u32,
             sweeps,
             gx: t.gravity[0],
@@ -1906,6 +1915,8 @@ impl GpuFracture {
                 self.direct(&mut pass, "fr_strike_force", b);
                 if self.params.strike_model == 0 {
                     self.direct(&mut pass, "fr_strike_breaks", e);
+                } else if self.params.strike_model == 2 {
+                    self.direct(&mut pass, "fr_strike_radial", e);
                 } else {
                     self.direct(&mut pass, "fr_il_first_reset", MAX_SHOTS);
                     self.direct(&mut pass, "fr_il_first", b);
@@ -1931,7 +1942,7 @@ impl GpuFracture {
             self.direct(&mut pass, "fr_gate", 1);
         }
         self.record_split(encoder);
-        if self.params.strike_model != 0 && self.params.shot_count > 0 {
+        if self.params.strike_model == 1 && self.params.shot_count > 0 {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             self.direct(&mut pass, "fr_il_carry", n);
         }

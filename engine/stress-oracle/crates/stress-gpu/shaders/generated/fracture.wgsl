@@ -39,7 +39,7 @@ struct FractureParams_std140_0
     @align(16) cs_c2_0 : f32,
     @align(4) cs_row_offset_0 : u32,
     @align(8) ext_sides_0 : u32,
-    @align(4) pad8_0 : f32,
+    @align(4) strike_radius_0 : f32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : FractureParams_std140_0;
@@ -5309,21 +5309,71 @@ fn fr_strike_breaks(@builtin(global_invocation_id) id_35 : vec3<u32>)
     return;
 }
 
-fn a_lp_0( b_61 : u32) -> u32
+@compute
+@workgroup_size(64, 1, 1)
+fn fr_strike_radial(@builtin(global_invocation_id) id_36 : vec3<u32>)
 {
-    return a_strike_0() + u32(9) * params_0.body_count_0 + u32(14) * b_61;
+    var i_17 : u32 = id_36.x;
+    var _S491 : bool;
+    if(i_17 >= (params_0.bond_used_0))
+    {
+        _S491 = true;
+    }
+    else
+    {
+        _S491 = (params_0.shot_count_0) == u32(0);
+    }
+    if(_S491)
+    {
+        _S491 = true;
+    }
+    else
+    {
+        _S491 = work_0[w_alive_0() + i_17] == u32(0);
+    }
+    if(_S491)
+    {
+        return;
+    }
+    var bond_9 : vec4<u32> = bonds_0[i_17];
+    var _S492 : u32 = bond_9.x;
+    var b_61 : u32 = body_of_0(_S492);
+    var shot_10 : u32;
+    if(!struck_2(b_61, &(shot_10)))
+    {
+        return;
+    }
+    var contact_20 : vec3<f32> = frames_0[strike_at_0(b_61) + u32(2)].xyz;
+    var q_33 : Quat_0;
+    var pa_3 : vec3<f32> = chunk_box_world_3(_S492, &(q_33));
+    var pb_4 : vec3<f32> = chunk_box_world_3(bond_9.y, &(q_33));
+    if((length(vec3<f32>(0.5f) * (pa_3 + pb_4) - contact_20)) <= (params_0.strike_radius_0))
+    {
+        work_0[w_alive_0() + i_17] = u32(0);
+        var _S493 : u32 = atomicOr(&(atom_0[a_dirty_0() + b_61]), u32(1));
+        var _S494 : u32 = a_counters_0();
+        var _S495 : u32 = atomicAdd(&(atom_0[_S494]), u32(1));
+        var _S496 : u32 = atomicAdd(&(atom_0[_S494 + u32(1)]), u32(1));
+        event_broken_0(i_17);
+    }
+    return;
+}
+
+fn a_lp_0( b_62 : u32) -> u32
+{
+    return a_strike_0() + u32(9) * params_0.body_count_0 + u32(14) * b_62;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_lp_clear(@builtin(global_invocation_id) id_36 : vec3<u32>)
+fn fr_lp_clear(@builtin(global_invocation_id) id_37 : vec3<u32>)
 {
-    var b_62 : u32 = id_36.x;
-    if(b_62 >= (params_0.body_count_0))
+    var b_63 : u32 = id_37.x;
+    if(b_63 >= (params_0.body_count_0))
     {
         return;
     }
-    var at_21 : u32 = a_lp_0(b_62);
+    var at_21 : u32 = a_lp_0(b_63);
     var w_7 : u32 = u32(0);
     loop
     {
@@ -5358,7 +5408,7 @@ fn add64w_0( at_22 : u32,  value_3 : f32,  scale_2 : f32)
     var x_9 : f32;
     if(!((abs(x_8)) < 3.99999993722699776e+18f))
     {
-        var _S491 : u32 = atomicOr(&(atom_0[a_counters_0() + u32(3)]), u32(2));
+        var _S497 : u32 = atomicOr(&(atom_0[a_counters_0() + u32(3)]), u32(2));
         x_9 = 0.0f;
     }
     else
@@ -5374,7 +5424,7 @@ fn add64w_0( at_22 : u32,  value_3 : f32,  scale_2 : f32)
     if(x_9 < 0.0f)
     {
         var lo_5 : u32 = ~lo_3 + u32(1);
-        var _S492 : u32 = ~hi_3;
+        var _S498 : u32 = ~hi_3;
         if(lo_5 == u32(0))
         {
             lo_4 = u32(1);
@@ -5383,9 +5433,9 @@ fn add64w_0( at_22 : u32,  value_3 : f32,  scale_2 : f32)
         {
             lo_4 = u32(0);
         }
-        var _S493 : u32 = _S492 + lo_4;
+        var _S499 : u32 = _S498 + lo_4;
         lo_4 = lo_5;
-        hi_4 = _S493;
+        hi_4 = _S499;
     }
     else
     {
@@ -5405,33 +5455,33 @@ fn add64w_0( at_22 : u32,  value_3 : f32,  scale_2 : f32)
     var hi_5 : u32 = hi_4 + carry_1;
     if(hi_5 != u32(0))
     {
-        var _S494 : u32 = atomicAdd(&(atom_0[at_22 + u32(1)]), hi_5);
+        var _S500 : u32 = atomicAdd(&(atom_0[at_22 + u32(1)]), hi_5);
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_lp_sum(@builtin(global_invocation_id) id_37 : vec3<u32>)
+fn fr_lp_sum(@builtin(global_invocation_id) id_38 : vec3<u32>)
 {
-    var k_39 : u32 = id_37.x;
+    var k_39 : u32 = id_38.x;
     if(k_39 >= (params_0.chunk_count_0))
     {
         return;
     }
     var slot_19 : u32 = body_of_0(k_39);
-    var q_33 : Quat_0;
+    var q_34 : Quat_0;
     var origin_15 : vec3<f32>;
-    structure_pose_5(slot_19, u32(7) * slot_19, &(q_33), &(origin_15));
-    var qi_0 : Quat_0 = conj_0(q_33);
+    structure_pose_5(slot_19, u32(7) * slot_19, &(q_34), &(origin_15));
+    var qi_0 : Quat_0 = conj_0(q_34);
     var c0_3 : vec4<f32> = chunks_0[u32(4) * k_39];
-    var _S495 : u32 = l_vec_0() + u32(2) * k_39;
-    var f_10 : vec3<f32> = rotate_0(qi_0, loads_0[_S495].xyz) + vec3<f32>(c0_3.w) * rotate_0(qi_0, vec3<f32>(params_0.gx_0, params_0.gy_0, params_0.gz_0));
-    var t_13 : vec3<f32> = rotate_0(qi_0, loads_0[_S495 + u32(1)].xyz);
-    var _S496 : u32 = lp_f_0(k_39);
-    lp_0[_S496] = vec4<f32>(f_10, 0.0f);
-    lp_0[_S496 + u32(1)] = vec4<f32>(t_13, 0.0f);
-    var _S497 : vec3<f32> = t_13 + cross(c0_3.xyz - frames_0[u32(2) * slot_19].xyz, f_10);
+    var _S501 : u32 = l_vec_0() + u32(2) * k_39;
+    var f_10 : vec3<f32> = rotate_0(qi_0, loads_0[_S501].xyz) + vec3<f32>(c0_3.w) * rotate_0(qi_0, vec3<f32>(params_0.gx_0, params_0.gy_0, params_0.gz_0));
+    var t_13 : vec3<f32> = rotate_0(qi_0, loads_0[_S501 + u32(1)].xyz);
+    var _S502 : u32 = lp_f_0(k_39);
+    lp_0[_S502] = vec4<f32>(f_10, 0.0f);
+    lp_0[_S502 + u32(1)] = vec4<f32>(t_13, 0.0f);
+    var _S503 : vec3<f32> = t_13 + cross(c0_3.xyz - frames_0[u32(2) * slot_19].xyz, f_10);
     var at_23 : u32 = a_lp_0(slot_19);
     var a_11 : u32 = u32(0);
     loop
@@ -5443,12 +5493,12 @@ fn fr_lp_sum(@builtin(global_invocation_id) id_37 : vec3<u32>)
         {
             break;
         }
-        var _S498 : u32 = u32(2) * a_11;
-        add64w_0(at_23 + _S498, f_10[a_11], params_0.lp_scale_0);
-        add64w_0(at_23 + u32(6) + _S498, _S497[a_11], params_0.lp_scale_0);
+        var _S504 : u32 = u32(2) * a_11;
+        add64w_0(at_23 + _S504, f_10[a_11], params_0.lp_scale_0);
+        add64w_0(at_23 + u32(6) + _S504, _S503[a_11], params_0.lp_scale_0);
         a_11 = a_11 + u32(1);
     }
-    var _S499 : u32 = atomicMin(&(atom_0[at_23 + u32(12)]), k_39);
+    var _S505 : u32 = atomicMin(&(atom_0[at_23 + u32(12)]), k_39);
     if(((info_0[k_39] & (u32(1)))) != u32(0))
     {
         atomicStore(&(atom_0[at_23 + u32(13)]), u32(1));
@@ -5458,25 +5508,25 @@ fn fr_lp_sum(@builtin(global_invocation_id) id_37 : vec3<u32>)
 
 fn read64w3_0( at_24 : u32,  scale_3 : f32) -> vec3<f32>
 {
-    var _S500 : f32 = read64_0(at_24, scale_3);
-    var _S501 : f32 = read64_0(at_24 + u32(2), scale_3);
-    var _S502 : f32 = read64_0(at_24 + u32(4), scale_3);
-    return vec3<f32>(_S500, _S501, _S502);
+    var _S506 : f32 = read64_0(at_24, scale_3);
+    var _S507 : f32 = read64_0(at_24 + u32(2), scale_3);
+    var _S508 : f32 = read64_0(at_24 + u32(4), scale_3);
+    return vec3<f32>(_S506, _S507, _S508);
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_lp_relief(@builtin(global_invocation_id) id_38 : vec3<u32>)
+fn fr_lp_relief(@builtin(global_invocation_id) id_39 : vec3<u32>)
 {
-    var k_40 : u32 = id_38.x;
+    var k_40 : u32 = id_39.x;
     if(k_40 >= (params_0.chunk_count_0))
     {
         return;
     }
     var slot_20 : u32 = body_of_0(k_40);
     var at_25 : u32 = a_lp_0(slot_20);
-    var _S503 : u32 = atomicLoad(&(atom_0[at_25 + u32(13)]));
-    var supported_0 : bool = _S503 != u32(0);
+    var _S509 : u32 = atomicLoad(&(atom_0[at_25 + u32(13)]));
+    var supported_0 : bool = _S509 != u32(0);
     var fixed_1 : bool;
     if(((info_0[k_40] & (u32(1)))) != u32(0))
     {
@@ -5486,67 +5536,67 @@ fn fr_lp_relief(@builtin(global_invocation_id) id_38 : vec3<u32>)
     {
         if(!supported_0)
         {
-            var _S504 : u32 = atomicLoad(&(atom_0[at_25 + u32(12)]));
-            fixed_1 = _S504 == k_40;
+            var _S510 : u32 = atomicLoad(&(atom_0[at_25 + u32(12)]));
+            fixed_1 = _S510 == k_40;
         }
         else
         {
             fixed_1 = false;
         }
     }
-    var _S505 : u32 = lp_f_0(k_40);
-    var f_11 : vec4<f32> = lp_0[_S505];
-    var _S506 : u32 = _S505 + u32(1);
-    var t_14 : vec4<f32> = lp_0[_S506];
-    var b_63 : u32 = u32(7) * slot_20;
-    var inv_mass_6 : f32 = bodies_0[b_63].w;
-    var _S507 : bool;
+    var _S511 : u32 = lp_f_0(k_40);
+    var f_11 : vec4<f32> = lp_0[_S511];
+    var _S512 : u32 = _S511 + u32(1);
+    var t_14 : vec4<f32> = lp_0[_S512];
+    var b_64 : u32 = u32(7) * slot_20;
+    var inv_mass_6 : f32 = bodies_0[b_64].w;
+    var _S513 : bool;
     if(!supported_0)
     {
-        _S507 = inv_mass_6 > 0.0f;
+        _S513 = inv_mass_6 > 0.0f;
     }
     else
     {
-        _S507 = false;
+        _S513 = false;
     }
-    if(_S507)
+    if(_S513)
     {
         var force_3 : vec3<f32> = read64w3_0(at_25, params_0.lp_scale_0);
         var moment_0 : vec3<f32> = read64w3_0(at_25 + u32(6), params_0.lp_scale_0);
-        var _S508 : u32 = u32(2) * slot_20;
-        var p_17 : Quat_0 = quat_of_0(frames_0[_S508 + u32(1)]);
-        var alpha_0 : vec3<f32> = rotate_0(p_17, bodies_0[b_63 + u32(2)].xyz * rotate_0(conj_0(p_17), moment_0));
-        var _S509 : u32 = u32(4) * k_40;
-        var c0_4 : vec4<f32> = chunks_0[_S509];
-        var c1_2 : vec4<f32> = chunks_0[_S509 + u32(1)];
-        var c2_3 : vec4<f32> = chunks_0[_S509 + u32(2)];
-        var _S510 : vec3<f32> = f_11.xyz - vec3<f32>(c0_4.w) * (force_3 * vec3<f32>(inv_mass_6) + cross(alpha_0, c0_4.xyz - frames_0[_S508].xyz));
-        f_11.x = _S510.x;
-        f_11.y = _S510.y;
-        f_11.z = _S510.z;
-        var _S511 : f32 = alpha_0.x;
-        var _S512 : f32 = c1_2.w;
-        var _S513 : f32 = alpha_0.y;
-        var _S514 : f32 = c2_3.x;
-        var _S515 : f32 = alpha_0.z;
-        var _S516 : f32 = c2_3.y;
-        var _S517 : vec3<f32> = t_14.xyz - vec3<f32>(c1_2.x * _S511 + _S512 * _S513 + _S514 * _S515, _S512 * _S511 + c1_2.y * _S513 + _S516 * _S515, _S514 * _S511 + _S516 * _S513 + c1_2.z * _S515);
-        t_14.x = _S517.x;
-        t_14.y = _S517.y;
-        t_14.z = _S517.z;
+        var _S514 : u32 = u32(2) * slot_20;
+        var p_17 : Quat_0 = quat_of_0(frames_0[_S514 + u32(1)]);
+        var alpha_0 : vec3<f32> = rotate_0(p_17, bodies_0[b_64 + u32(2)].xyz * rotate_0(conj_0(p_17), moment_0));
+        var _S515 : u32 = u32(4) * k_40;
+        var c0_4 : vec4<f32> = chunks_0[_S515];
+        var c1_2 : vec4<f32> = chunks_0[_S515 + u32(1)];
+        var c2_3 : vec4<f32> = chunks_0[_S515 + u32(2)];
+        var _S516 : vec3<f32> = f_11.xyz - vec3<f32>(c0_4.w) * (force_3 * vec3<f32>(inv_mass_6) + cross(alpha_0, c0_4.xyz - frames_0[_S514].xyz));
+        f_11.x = _S516.x;
+        f_11.y = _S516.y;
+        f_11.z = _S516.z;
+        var _S517 : f32 = alpha_0.x;
+        var _S518 : f32 = c1_2.w;
+        var _S519 : f32 = alpha_0.y;
+        var _S520 : f32 = c2_3.x;
+        var _S521 : f32 = alpha_0.z;
+        var _S522 : f32 = c2_3.y;
+        var _S523 : vec3<f32> = t_14.xyz - vec3<f32>(c1_2.x * _S517 + _S518 * _S519 + _S520 * _S521, _S518 * _S517 + c1_2.y * _S519 + _S522 * _S521, _S520 * _S517 + _S522 * _S519 + c1_2.z * _S521);
+        t_14.x = _S523.x;
+        t_14.y = _S523.y;
+        t_14.z = _S523.z;
     }
-    var _S518 : f32;
+    var _S524 : f32;
     if(fixed_1)
     {
-        _S518 = 1.0f;
+        _S524 = 1.0f;
     }
     else
     {
-        _S518 = 0.0f;
+        _S524 = 0.0f;
     }
-    f_11[i32(3)] = _S518;
-    lp_0[_S505] = f_11;
-    lp_0[_S506] = t_14;
+    f_11[i32(3)] = _S524;
+    lp_0[_S511] = f_11;
+    lp_0[_S512] = t_14;
     return;
 }
 
@@ -5558,29 +5608,29 @@ fn adj_bond_0( at_26 : u32) -> u32
 fn lp_intact_0( k_41 : u32) -> u32
 {
     var range_0 : vec4<f32> = ext_0[params_0.ext_chunks_0 + u32(4) * k_41];
-    var _S519 : u32 = (bitcast<u32>((range_0.x)));
-    var _S520 : u32 = (bitcast<u32>((range_0.y)));
+    var _S525 : u32 = (bitcast<u32>((range_0.x)));
+    var _S526 : u32 = (bitcast<u32>((range_0.y)));
     var e_4 : u32 = u32(0);
     var intact_0 : u32 = u32(0);
     loop
     {
-        if(e_4 < _S520)
+        if(e_4 < _S526)
         {
         }
         else
         {
             break;
         }
-        var _S521 : u32;
-        if(work_0[w_alive_0() + adj_bond_0(_S519 + e_4)] != u32(0))
+        var _S527 : u32;
+        if(work_0[w_alive_0() + adj_bond_0(_S525 + e_4)] != u32(0))
         {
-            _S521 = u32(1);
+            _S527 = u32(1);
         }
         else
         {
-            _S521 = u32(0);
+            _S527 = u32(0);
         }
-        var intact_1 : u32 = intact_0 + _S521;
+        var intact_1 : u32 = intact_0 + _S527;
         e_4 = e_4 + u32(1);
         intact_0 = intact_1;
     }
@@ -5612,42 +5662,42 @@ struct LpBond_0
      law_0 : JointBond_0,
 };
 
-fn lp_bond_0( i_17 : u32) -> LpBond_0
+fn lp_bond_0( i_18 : u32) -> LpBond_0
 {
-    var o_8 : u32 = u32(10) * i_17;
-    var b_64 : LpBond_0;
-    b_64.centroid_0 = ext_0[o_8].xyz;
-    var _S522 : vec3<f32> = ext_0[o_8 + u32(1)].xyz;
-    b_64.n_4 = _S522;
-    var _S523 : vec3<f32> = ext_0[o_8 + u32(2)].xyz;
-    b_64.t1_2 = _S523;
-    b_64.t2_0 = cross(_S522, _S523);
-    b_64.law_0.geom0_0 = ext_0[o_8 + u32(3)];
-    b_64.law_0.geom1_0 = ext_0[o_8 + u32(4)];
-    b_64.law_0.stiff0_0 = ext_0[o_8 + u32(5)];
-    b_64.law_0.stiff1_0 = ext_0[o_8 + u32(6)];
-    b_64.law_0.rebar0_0 = ext_0[o_8 + u32(7)];
-    b_64.law_0.rebar1_0 = ext_0[o_8 + u32(8)];
-    b_64.law_0.ids_3 = (bitcast<vec4<u32>>((ext_0[o_8 + u32(9)])));
-    return b_64;
+    var o_8 : u32 = u32(10) * i_18;
+    var b_65 : LpBond_0;
+    b_65.centroid_0 = ext_0[o_8].xyz;
+    var _S528 : vec3<f32> = ext_0[o_8 + u32(1)].xyz;
+    b_65.n_4 = _S528;
+    var _S529 : vec3<f32> = ext_0[o_8 + u32(2)].xyz;
+    b_65.t1_2 = _S529;
+    b_65.t2_0 = cross(_S528, _S529);
+    b_65.law_0.geom0_0 = ext_0[o_8 + u32(3)];
+    b_65.law_0.geom1_0 = ext_0[o_8 + u32(4)];
+    b_65.law_0.stiff0_0 = ext_0[o_8 + u32(5)];
+    b_65.law_0.stiff1_0 = ext_0[o_8 + u32(6)];
+    b_65.law_0.rebar0_0 = ext_0[o_8 + u32(7)];
+    b_65.law_0.rebar1_0 = ext_0[o_8 + u32(8)];
+    b_65.law_0.ids_3 = (bitcast<vec4<u32>>((ext_0[o_8 + u32(9)])));
+    return b_65;
 }
 
-fn tri_0( i_18 : u32,  j_6 : u32) -> u32
+fn tri_0( i_19 : u32,  j_6 : u32) -> u32
 {
-    return i_18 * (i_18 + u32(1)) / u32(2) + j_6;
+    return i_19 * (i_19 + u32(1)) / u32(2) + j_6;
 }
 
 fn lp_factor_0( k_43 : u32) -> bool
 {
-    var q_34 : u32;
+    var q_35 : u32;
     var a_12 : u32;
     var p2_0 : u32;
     var q2_0 : u32;
     var a2_0 : u32;
     var s_13 : f32;
-    var _S524 : u32 = lp_l_0(k_43);
-    var _S525 : u32 = lp_intact_0(k_43) + u32(1);
-    if((bitcast<u32>((lp_0[_S524 + u32(5)].w))) == _S525)
+    var _S530 : u32 = lp_l_0(k_43);
+    var _S531 : u32 = lp_intact_0(k_43) + u32(1);
+    if((bitcast<u32>((lp_0[_S530 + u32(5)].w))) == _S531)
     {
         return true;
     }
@@ -5662,46 +5712,46 @@ fn lp_factor_0( k_43 : u32) -> bool
         {
             break;
         }
-        q_34 = u32(0);
+        q_35 = u32(0);
         loop
         {
-            if(q_34 < u32(6))
+            if(q_35 < u32(6))
             {
             }
             else
             {
                 break;
             }
-            d_23[p_18][q_34] = 0.0f;
-            q_34 = q_34 + u32(1);
+            d_23[p_18][q_35] = 0.0f;
+            q_35 = q_35 + u32(1);
         }
         p_18 = p_18 + u32(1);
     }
-    var _S526 : u32 = u32(4) * k_43;
-    var range_1 : vec4<f32> = ext_0[params_0.ext_chunks_0 + _S526];
-    var _S527 : u32 = (bitcast<u32>((range_1.x)));
-    var _S528 : u32 = (bitcast<u32>((range_1.y)));
-    q_34 = u32(0);
+    var _S532 : u32 = u32(4) * k_43;
+    var range_1 : vec4<f32> = ext_0[params_0.ext_chunks_0 + _S532];
+    var _S533 : u32 = (bitcast<u32>((range_1.x)));
+    var _S534 : u32 = (bitcast<u32>((range_1.y)));
+    q_35 = u32(0);
     loop
     {
-        if(q_34 < _S528)
+        if(q_35 < _S534)
         {
         }
         else
         {
             break;
         }
-        var i_19 : u32 = adj_bond_0(_S527 + q_34);
-        if(work_0[w_alive_0() + i_19] == u32(0))
+        var i_20 : u32 = adj_bond_0(_S533 + q_35);
+        if(work_0[w_alive_0() + i_20] == u32(0))
         {
-            q_34 = q_34 + u32(1);
+            q_35 = q_35 + u32(1);
             continue;
         }
-        var b_65 : LpBond_0 = lp_bond_0(i_19);
-        var _S529 : vec3<f32> = b_65.centroid_0 - chunks_0[_S526].xyz;
-        var _S530 : f32 = b_65.law_0.stiff0_0.y;
-        var _S531 : array<f32, i32(6)> = array<f32, i32(6)>( _S530, _S530, b_65.law_0.stiff0_0.x, b_65.law_0.stiff0_0.z, b_65.law_0.stiff0_0.w, b_65.law_0.stiff1_0.x );
-        var _S532 : array<vec3<f32>, i32(3)> = array<vec3<f32>, i32(3)>( b_65.t1_2, b_65.t2_0, b_65.n_4 );
+        var b_66 : LpBond_0 = lp_bond_0(i_20);
+        var _S535 : vec3<f32> = b_66.centroid_0 - chunks_0[_S532].xyz;
+        var _S536 : f32 = b_66.law_0.stiff0_0.y;
+        var _S537 : array<f32, i32(6)> = array<f32, i32(6)>( _S536, _S536, b_66.law_0.stiff0_0.x, b_66.law_0.stiff0_0.z, b_66.law_0.stiff0_0.w, b_66.law_0.stiff1_0.x );
+        var _S538 : array<vec3<f32>, i32(3)> = array<vec3<f32>, i32(3)>( b_66.t1_2, b_66.t2_0, b_66.n_4 );
         var j_7 : array<array<f32, i32(6)>, i32(6)>;
         a_12 = u32(0);
         loop
@@ -5713,22 +5763,22 @@ fn lp_factor_0( k_43 : u32) -> bool
             {
                 break;
             }
-            var c_21 : vec3<f32> = cross(_S529, _S532[a_12]);
-            var _S533 : f32 = _S532[a_12].x;
-            j_7[a_12][i32(0)] = _S533;
-            var _S534 : f32 = _S532[a_12].y;
-            j_7[a_12][i32(1)] = _S534;
-            var _S535 : f32 = _S532[a_12].z;
-            j_7[a_12][i32(2)] = _S535;
+            var c_21 : vec3<f32> = cross(_S535, _S538[a_12]);
+            var _S539 : f32 = _S538[a_12].x;
+            j_7[a_12][i32(0)] = _S539;
+            var _S540 : f32 = _S538[a_12].y;
+            j_7[a_12][i32(1)] = _S540;
+            var _S541 : f32 = _S538[a_12].z;
+            j_7[a_12][i32(2)] = _S541;
             j_7[a_12][i32(3)] = c_21.x;
             j_7[a_12][i32(4)] = c_21.y;
             j_7[a_12][i32(5)] = c_21.z;
             j_7[u32(3) + a_12][i32(0)] = 0.0f;
             j_7[u32(3) + a_12][i32(1)] = 0.0f;
             j_7[u32(3) + a_12][i32(2)] = 0.0f;
-            j_7[u32(3) + a_12][i32(3)] = _S533;
-            j_7[u32(3) + a_12][i32(4)] = _S534;
-            j_7[u32(3) + a_12][i32(5)] = _S535;
+            j_7[u32(3) + a_12][i32(3)] = _S539;
+            j_7[u32(3) + a_12][i32(4)] = _S540;
+            j_7[u32(3) + a_12][i32(5)] = _S541;
             a_12 = a_12 + u32(1);
         }
         p2_0 = u32(0);
@@ -5762,7 +5812,7 @@ fn lp_factor_0( k_43 : u32) -> bool
                     {
                         break;
                     }
-                    var s_14 : f32 = s_13 + j_7[a2_0][p2_0] * _S531[a2_0] * j_7[a2_0][q2_0];
+                    var s_14 : f32 = s_13 + j_7[a2_0][p2_0] * _S537[a2_0] * j_7[a2_0][q2_0];
                     a2_0 = a2_0 + u32(1);
                     s_13 = s_14;
                 }
@@ -5771,7 +5821,7 @@ fn lp_factor_0( k_43 : u32) -> bool
             }
             p2_0 = p2_0 + u32(1);
         }
-        q_34 = q_34 + u32(1);
+        q_35 = q_35 + u32(1);
     }
     var l_1 : array<f32, i32(21)>;
     a_12 = u32(0);
@@ -5826,17 +5876,17 @@ fn lp_factor_0( k_43 : u32) -> bool
             }
             if(p2_0 == q2_0)
             {
-                var _S536 : bool;
+                var _S542 : bool;
                 if(ok_1)
                 {
-                    _S536 = s_13 > 0.0f;
+                    _S542 = s_13 > 0.0f;
                 }
                 else
                 {
-                    _S536 = false;
+                    _S542 = false;
                 }
                 l_1[tri_0(p2_0, p2_0)] = sqrt(max(s_13, 1.00000000317107685e-30f));
-                ok_1 = _S536;
+                ok_1 = _S542;
             }
             else
             {
@@ -5844,9 +5894,9 @@ fn lp_factor_0( k_43 : u32) -> bool
             }
             q2_0 = q2_0 + u32(1);
         }
-        var _S537 : u32 = p2_0 + u32(1);
+        var _S543 : u32 = p2_0 + u32(1);
         ok_0 = ok_1;
-        p2_0 = _S537;
+        p2_0 = _S543;
     }
     if(!ok_0)
     {
@@ -5862,37 +5912,37 @@ fn lp_factor_0( k_43 : u32) -> bool
         {
             break;
         }
-        var _S538 : u32 = u32(4) * q2_0;
-        var _S539 : f32 = l_1[_S538];
-        var _S540 : u32 = _S538 + u32(1);
-        if(_S540 < u32(21))
+        var _S544 : u32 = u32(4) * q2_0;
+        var _S545 : f32 = l_1[_S544];
+        var _S546 : u32 = _S544 + u32(1);
+        if(_S546 < u32(21))
         {
-            s_13 = l_1[_S540];
+            s_13 = l_1[_S546];
         }
         else
         {
             s_13 = 0.0f;
         }
-        var _S541 : u32 = _S538 + u32(2);
-        var _S542 : f32;
-        if(_S541 < u32(21))
+        var _S547 : u32 = _S544 + u32(2);
+        var _S548 : f32;
+        if(_S547 < u32(21))
         {
-            _S542 = l_1[_S541];
+            _S548 = l_1[_S547];
         }
         else
         {
-            _S542 = 0.0f;
+            _S548 = 0.0f;
         }
-        var _S543 : f32;
+        var _S549 : f32;
         if(q2_0 == u32(5))
         {
-            _S543 = (bitcast<f32>((_S525)));
+            _S549 = (bitcast<f32>((_S531)));
         }
         else
         {
-            _S543 = l_1[_S538 + u32(3)];
+            _S549 = l_1[_S544 + u32(3)];
         }
-        lp_0[_S524 + q2_0] = vec4<f32>(_S539, s_13, _S542, _S543);
+        lp_0[_S530 + q2_0] = vec4<f32>(_S545, s_13, _S548, _S549);
         q2_0 = q2_0 + u32(1);
     }
     return true;
@@ -5900,27 +5950,27 @@ fn lp_factor_0( k_43 : u32) -> bool
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_lp_block(@builtin(global_invocation_id) id_39 : vec3<u32>)
+fn fr_lp_block(@builtin(global_invocation_id) id_40 : vec3<u32>)
 {
-    var k_44 : u32 = id_39.x;
-    var _S544 : bool;
+    var k_44 : u32 = id_40.x;
+    var _S550 : bool;
     if(k_44 >= (params_0.chunk_count_0))
     {
-        _S544 = true;
+        _S550 = true;
     }
     else
     {
-        _S544 = (lp_0[lp_f_0(k_44)].w) != 0.0f;
+        _S550 = (lp_0[lp_f_0(k_44)].w) != 0.0f;
     }
-    if(_S544)
+    if(_S550)
     {
         return;
     }
-    var _S545 : bool = lp_factor_0(k_44);
-    if(!_S545)
+    var _S551 : bool = lp_factor_0(k_44);
+    if(!_S551)
     {
         lp_0[lp_f_0(k_44)][i32(3)] = 1.0f;
-        var _S546 : u32 = atomicOr(&(atom_0[a_counters_0() + u32(3)]), u32(64));
+        var _S552 : u32 = atomicOr(&(atom_0[a_counters_0() + u32(3)]), u32(64));
     }
     return;
 }
@@ -5935,9 +5985,9 @@ fn st_d_0( k_46 : u32,  state_2 : u32) -> u32
     return u32(22) * k_46 + state_2 + u32(4);
 }
 
-fn lp_side_0( i_20 : u32) -> vec4<f32>
+fn lp_side_0( i_21 : u32) -> vec4<f32>
 {
-    return ext_0[params_0.ext_sides_0 + i_20];
+    return ext_0[params_0.ext_sides_0 + i_21];
 }
 
 fn st_sweep_0( k_47 : u32,  state_3 : u32,  from_2 : u32,  c1_3 : f32,  c2_4 : f32)
@@ -5946,59 +5996,59 @@ fn st_sweep_0( k_47 : u32,  state_3 : u32,  from_2 : u32,  c1_3 : f32,  c2_4 : f
     var kb_0 : u32;
     var s_16 : f32;
     var to_1 : u32 = u32(1) - from_2;
-    var _S547 : u32 = st_x_0(k_47, state_3, from_2);
-    var x0_0 : vec4<f32> = lp_0[_S547];
-    var x1_0 : vec4<f32> = lp_0[_S547 + u32(1)];
-    var _S548 : u32 = st_f_0(k_47, state_3);
-    var f_12 : vec4<f32> = lp_0[_S548];
-    if((lp_0[_S548].w) != 0.0f)
+    var _S553 : u32 = st_x_0(k_47, state_3, from_2);
+    var x0_0 : vec4<f32> = lp_0[_S553];
+    var x1_0 : vec4<f32> = lp_0[_S553 + u32(1)];
+    var _S554 : u32 = st_f_0(k_47, state_3);
+    var f_12 : vec4<f32> = lp_0[_S554];
+    if((lp_0[_S554].w) != 0.0f)
     {
-        var _S549 : u32 = st_x_0(k_47, state_3, to_1);
-        lp_0[_S549] = x0_0;
-        lp_0[_S549 + u32(1)] = x1_0;
-        var _S550 : u32 = st_d_0(k_47, state_3);
-        var _S551 : vec4<f32> = vec4<f32>(0.0f);
-        lp_0[_S550] = _S551;
-        lp_0[_S550 + u32(1)] = _S551;
+        var _S555 : u32 = st_x_0(k_47, state_3, to_1);
+        lp_0[_S555] = x0_0;
+        lp_0[_S555 + u32(1)] = x1_0;
+        var _S556 : u32 = st_d_0(k_47, state_3);
+        var _S557 : vec4<f32> = vec4<f32>(0.0f);
+        lp_0[_S556] = _S557;
+        lp_0[_S556 + u32(1)] = _S557;
         return;
     }
-    var _S552 : f32 = f_12.y;
-    var _S553 : f32 = f_12.z;
+    var _S558 : f32 = f_12.y;
+    var _S559 : f32 = f_12.z;
     var r_23 : array<f32, i32(6)>;
     r_23[i32(0)] = f_12.x;
-    r_23[i32(1)] = _S552;
-    r_23[i32(2)] = _S553;
+    r_23[i32(1)] = _S558;
+    r_23[i32(2)] = _S559;
     r_23[i32(3)] = 0.0f;
     r_23[i32(4)] = 0.0f;
     r_23[i32(5)] = 0.0f;
-    var t_15 : vec3<f32> = lp_0[_S548 + u32(1)].xyz;
+    var t_15 : vec3<f32> = lp_0[_S554 + u32(1)].xyz;
     r_23[i32(3)] = t_15.x;
     r_23[i32(4)] = t_15.y;
     r_23[i32(5)] = t_15.z;
     var range_2 : vec4<f32> = ext_0[params_0.ext_chunks_0 + u32(4) * k_47];
-    var _S554 : u32 = (bitcast<u32>((range_2.x)));
-    var _S555 : u32 = (bitcast<u32>((range_2.y)));
+    var _S560 : u32 = (bitcast<u32>((range_2.x)));
+    var _S561 : u32 = (bitcast<u32>((range_2.y)));
     var e_5 : u32 = u32(0);
     loop
     {
-        if(e_5 < _S555)
+        if(e_5 < _S561)
         {
         }
         else
         {
             break;
         }
-        var _S556 : u32 = u32(5) * (_S554 + e_5);
-        var s0_4 : vec4<f32> = lp_side_0(_S556);
+        var _S562 : u32 = u32(5) * (_S560 + e_5);
+        var s0_4 : vec4<f32> = lp_side_0(_S562);
         if(work_0[w_alive_0() + (bitcast<u32>((s0_4.w)))] == u32(0))
         {
             e_5 = e_5 + u32(1);
             continue;
         }
-        var s1_5 : vec4<f32> = lp_side_0(_S556 + u32(1));
-        var s2_0 : vec4<f32> = lp_side_0(_S556 + u32(2));
-        var s3_0 : vec4<f32> = lp_side_0(_S556 + u32(3));
-        var s4_0 : vec4<f32> = lp_side_0(_S556 + u32(4));
+        var s1_5 : vec4<f32> = lp_side_0(_S562 + u32(1));
+        var s2_0 : vec4<f32> = lp_side_0(_S562 + u32(2));
+        var s3_0 : vec4<f32> = lp_side_0(_S562 + u32(3));
+        var s4_0 : vec4<f32> = lp_side_0(_S562 + u32(4));
         var first_side_0 : bool = (s4_0.w) != 0.0f;
         if(first_side_0)
         {
@@ -6021,14 +6071,14 @@ fn st_sweep_0( k_47 : u32,  state_3 : u32,  from_2 : u32,  c1_3 : f32,  c2_4 : f
         var t1_3 : vec3<f32> = s2_0.xyz;
         var n_5 : vec3<f32> = s3_0.xyz;
         var t2_1 : vec3<f32> = cross(n_5, t1_3);
-        var _S557 : u32 = st_x_0(ka_0, state_3, from_2);
-        var _S558 : u32 = st_x_0(kb_0, state_3, from_2);
-        var _S559 : vec3<f32> = lp_0[_S558 + u32(1)].xyz;
-        var _S560 : vec3<f32> = lp_0[_S557 + u32(1)].xyz;
-        var delta_0 : vec3<f32> = lp_0[_S558].xyz + cross(_S559, rb_1) - (lp_0[_S557].xyz + cross(_S560, ra_1));
-        var phi_0 : vec3<f32> = _S559 - _S560;
-        var _S561 : f32 = s2_0.w;
-        var fb_0 : vec3<f32> = t1_3 * vec3<f32>((_S561 * dot(delta_0, t1_3))) + t2_1 * vec3<f32>((_S561 * dot(delta_0, t2_1))) + n_5 * vec3<f32>((s3_0.w * dot(delta_0, n_5)));
+        var _S563 : u32 = st_x_0(ka_0, state_3, from_2);
+        var _S564 : u32 = st_x_0(kb_0, state_3, from_2);
+        var _S565 : vec3<f32> = lp_0[_S564 + u32(1)].xyz;
+        var _S566 : vec3<f32> = lp_0[_S563 + u32(1)].xyz;
+        var delta_0 : vec3<f32> = lp_0[_S564].xyz + cross(_S565, rb_1) - (lp_0[_S563].xyz + cross(_S566, ra_1));
+        var phi_0 : vec3<f32> = _S565 - _S566;
+        var _S567 : f32 = s2_0.w;
+        var fb_0 : vec3<f32> = t1_3 * vec3<f32>((_S567 * dot(delta_0, t1_3))) + t2_1 * vec3<f32>((_S567 * dot(delta_0, t2_1))) + n_5 * vec3<f32>((s3_0.w * dot(delta_0, n_5)));
         var mb_0 : vec3<f32> = t1_3 * vec3<f32>((s4_0.x * dot(phi_0, t1_3))) + t2_1 * vec3<f32>((s4_0.y * dot(phi_0, t2_1))) + n_5 * vec3<f32>((s4_0.z * dot(phi_0, n_5)));
         var arm_0 : vec3<f32>;
         if(first_side_0)
@@ -6048,16 +6098,16 @@ fn st_sweep_0( k_47 : u32,  state_3 : u32,  from_2 : u32,  c1_3 : f32,  c2_4 : f
         {
             lf_0 = (vec3<f32>(0) - fb_0);
         }
-        var _S562 : vec3<f32>;
+        var _S568 : vec3<f32>;
         if(first_side_0)
         {
-            _S562 = mb_0;
+            _S568 = mb_0;
         }
         else
         {
-            _S562 = (vec3<f32>(0) - mb_0);
+            _S568 = (vec3<f32>(0) - mb_0);
         }
-        var lm_0 : vec3<f32> = _S562 + cross(arm_0, lf_0);
+        var lm_0 : vec3<f32> = _S568 + cross(arm_0, lf_0);
         r_23[i32(0)] = r_23[i32(0)] + lf_0.x;
         r_23[i32(1)] = r_23[i32(1)] + lf_0.y;
         r_23[i32(2)] = r_23[i32(2)] + lf_0.z;
@@ -6091,22 +6141,22 @@ fn st_sweep_0( k_47 : u32,  state_3 : u32,  from_2 : u32,  c1_3 : f32,  c2_4 : f
             break;
         }
         var v_14 : vec4<f32> = lp_0[lp_l_0(k_47) + kb_0];
-        var _S563 : u32 = u32(4) * kb_0;
-        l_2[_S563] = lp_0[lp_l_0(k_47) + kb_0].x;
-        var _S564 : u32 = _S563 + u32(1);
-        if(_S564 < u32(21))
+        var _S569 : u32 = u32(4) * kb_0;
+        l_2[_S569] = lp_0[lp_l_0(k_47) + kb_0].x;
+        var _S570 : u32 = _S569 + u32(1);
+        if(_S570 < u32(21))
         {
-            l_2[_S564] = v_14.y;
+            l_2[_S570] = v_14.y;
         }
-        var _S565 : u32 = _S563 + u32(2);
-        if(_S565 < u32(21))
+        var _S571 : u32 = _S569 + u32(2);
+        if(_S571 < u32(21))
         {
-            l_2[_S565] = v_14.z;
+            l_2[_S571] = v_14.z;
         }
-        var _S566 : u32 = _S563 + u32(3);
-        if(_S566 < u32(21))
+        var _S572 : u32 = _S569 + u32(3);
+        if(_S572 < u32(21))
         {
-            l_2[_S566] = v_14.w;
+            l_2[_S572] = v_14.w;
         }
         kb_0 = kb_0 + u32(1);
     }
@@ -6177,29 +6227,29 @@ fn st_sweep_0( k_47 : u32,  state_3 : u32,  from_2 : u32,  c1_3 : f32,  c2_4 : f
             p2_1 = p2_1 + i32(1);
             s_16 = s_18;
         }
-        var _S567 : u32 = u32(i3_0);
-        z_4[i3_0] = s_16 / l_2[tri_0(_S567, _S567)];
+        var _S573 : u32 = u32(i3_0);
+        z_4[i3_0] = s_16 / l_2[tri_0(_S573, _S573)];
         i3_0 = i3_0 - i32(1);
     }
-    var _S568 : u32 = st_d_0(k_47, state_3);
-    var d0_0 : vec4<f32> = lp_0[_S568];
-    var _S569 : u32 = _S568 + u32(1);
-    var d1_0 : vec4<f32> = lp_0[_S569];
-    var _S570 : vec3<f32> = vec3<f32>(c1_3);
-    var _S571 : vec3<f32> = vec3<f32>(c2_4);
-    var _S572 : vec3<f32> = _S570 * lp_0[_S568].xyz + _S571 * vec3<f32>(z_4[i32(0)], z_4[i32(1)], z_4[i32(2)]);
-    d0_0.x = _S572.x;
-    d0_0.y = _S572.y;
-    d0_0.z = _S572.z;
-    var _S573 : vec3<f32> = _S570 * lp_0[_S569].xyz + _S571 * vec3<f32>(z_4[i32(3)], z_4[i32(4)], z_4[i32(5)]);
-    d1_0.x = _S573.x;
-    d1_0.y = _S573.y;
-    d1_0.z = _S573.z;
-    lp_0[_S568] = d0_0;
-    lp_0[_S569] = d1_0;
-    var _S574 : u32 = st_x_0(k_47, state_3, to_1);
-    lp_0[_S574] = vec4<f32>(x0_0.xyz + d0_0.xyz, 0.0f);
-    lp_0[_S574 + u32(1)] = vec4<f32>(x1_0.xyz + d1_0.xyz, 0.0f);
+    var _S574 : u32 = st_d_0(k_47, state_3);
+    var d0_0 : vec4<f32> = lp_0[_S574];
+    var _S575 : u32 = _S574 + u32(1);
+    var d1_0 : vec4<f32> = lp_0[_S575];
+    var _S576 : vec3<f32> = vec3<f32>(c1_3);
+    var _S577 : vec3<f32> = vec3<f32>(c2_4);
+    var _S578 : vec3<f32> = _S576 * lp_0[_S574].xyz + _S577 * vec3<f32>(z_4[i32(0)], z_4[i32(1)], z_4[i32(2)]);
+    d0_0.x = _S578.x;
+    d0_0.y = _S578.y;
+    d0_0.z = _S578.z;
+    var _S579 : vec3<f32> = _S576 * lp_0[_S575].xyz + _S577 * vec3<f32>(z_4[i32(3)], z_4[i32(4)], z_4[i32(5)]);
+    d1_0.x = _S579.x;
+    d1_0.y = _S579.y;
+    d1_0.z = _S579.z;
+    lp_0[_S574] = d0_0;
+    lp_0[_S575] = d1_0;
+    var _S580 : u32 = st_x_0(k_47, state_3, to_1);
+    lp_0[_S580] = vec4<f32>(x0_0.xyz + d0_0.xyz, 0.0f);
+    lp_0[_S580 + u32(1)] = vec4<f32>(x1_0.xyz + d1_0.xyz, 0.0f);
     return;
 }
 
@@ -6211,82 +6261,82 @@ fn lp_sweep_0( k_48 : u32,  from_3 : u32)
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_lp_sweep_even(@builtin(global_invocation_id) id_40 : vec3<u32>)
+fn fr_lp_sweep_even(@builtin(global_invocation_id) id_41 : vec3<u32>)
 {
-    var _S575 : u32 = id_40.x;
-    if(_S575 < (params_0.chunk_count_0))
+    var _S581 : u32 = id_41.x;
+    if(_S581 < (params_0.chunk_count_0))
     {
-        lp_sweep_0(_S575, u32(0));
+        lp_sweep_0(_S581, u32(0));
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_lp_sweep_odd(@builtin(global_invocation_id) id_41 : vec3<u32>)
+fn fr_lp_sweep_odd(@builtin(global_invocation_id) id_42 : vec3<u32>)
 {
-    var _S576 : u32 = id_41.x;
-    if(_S576 < (params_0.chunk_count_0))
+    var _S582 : u32 = id_42.x;
+    if(_S582 < (params_0.chunk_count_0))
     {
-        lp_sweep_0(_S576, u32(1));
+        lp_sweep_0(_S582, u32(1));
     }
     return;
 }
 
-fn st_force_0( b_66 : LpBond_0,  ka_1 : u32,  kb_1 : u32,  state_4 : u32,  c_22 : u32,  q_lin_0 : ptr<function, vec3<f32>>,  q_ang_0 : ptr<function, vec3<f32>>)
+fn st_force_0( b_67 : LpBond_0,  ka_1 : u32,  kb_1 : u32,  state_4 : u32,  c_22 : u32,  q_lin_0 : ptr<function, vec3<f32>>,  q_ang_0 : ptr<function, vec3<f32>>)
 {
-    var _S577 : u32 = st_x_0(ka_1, state_4, c_22);
-    var _S578 : u32 = st_x_0(kb_1, state_4, c_22);
-    var _S579 : vec3<f32> = lp_0[_S578 + u32(1)].xyz;
-    var _S580 : vec3<f32> = lp_0[_S577 + u32(1)].xyz;
-    var delta_1 : vec3<f32> = lp_0[_S578].xyz + cross(_S579, b_66.centroid_0 - chunks_0[u32(4) * kb_1].xyz) - (lp_0[_S577].xyz + cross(_S580, b_66.centroid_0 - chunks_0[u32(4) * ka_1].xyz));
-    var phi_1 : vec3<f32> = _S579 - _S580;
-    var kt_0 : f32 = b_66.law_0.stiff1_0.x;
-    var _S581 : f32 = b_66.law_0.stiff0_0.y;
-    (*q_lin_0) = vec3<f32>(_S581 * dot(delta_1, b_66.t1_2), _S581 * dot(delta_1, b_66.t2_0), b_66.law_0.stiff0_0.x * dot(delta_1, b_66.n_4));
-    (*q_ang_0) = vec3<f32>(b_66.law_0.stiff0_0.z * dot(phi_1, b_66.t1_2), b_66.law_0.stiff0_0.w * dot(phi_1, b_66.t2_0), kt_0 * dot(phi_1, b_66.n_4));
+    var _S583 : u32 = st_x_0(ka_1, state_4, c_22);
+    var _S584 : u32 = st_x_0(kb_1, state_4, c_22);
+    var _S585 : vec3<f32> = lp_0[_S584 + u32(1)].xyz;
+    var _S586 : vec3<f32> = lp_0[_S583 + u32(1)].xyz;
+    var delta_1 : vec3<f32> = lp_0[_S584].xyz + cross(_S585, b_67.centroid_0 - chunks_0[u32(4) * kb_1].xyz) - (lp_0[_S583].xyz + cross(_S586, b_67.centroid_0 - chunks_0[u32(4) * ka_1].xyz));
+    var phi_1 : vec3<f32> = _S585 - _S586;
+    var kt_0 : f32 = b_67.law_0.stiff1_0.x;
+    var _S587 : f32 = b_67.law_0.stiff0_0.y;
+    (*q_lin_0) = vec3<f32>(_S587 * dot(delta_1, b_67.t1_2), _S587 * dot(delta_1, b_67.t2_0), b_67.law_0.stiff0_0.x * dot(delta_1, b_67.n_4));
+    (*q_ang_0) = vec3<f32>(b_67.law_0.stiff0_0.z * dot(phi_1, b_67.t1_2), b_67.law_0.stiff0_0.w * dot(phi_1, b_67.t2_0), kt_0 * dot(phi_1, b_67.n_4));
     return;
 }
 
-fn st_force_1( b_67 : LpBond_0,  ka_2 : u32,  kb_2 : u32,  state_5 : u32,  c_23 : u32,  q_lin_1 : ptr<function, vec3<f32>>,  q_ang_1 : ptr<function, vec3<f32>>)
+fn st_force_1( b_68 : LpBond_0,  ka_2 : u32,  kb_2 : u32,  state_5 : u32,  c_23 : u32,  q_lin_1 : ptr<function, vec3<f32>>,  q_ang_1 : ptr<function, vec3<f32>>)
 {
-    var _S582 : u32 = st_x_0(ka_2, state_5, c_23);
-    var _S583 : u32 = st_x_0(kb_2, state_5, c_23);
-    var _S584 : vec3<f32> = lp_0[_S583 + u32(1)].xyz;
-    var _S585 : vec3<f32> = lp_0[_S582 + u32(1)].xyz;
-    var delta_2 : vec3<f32> = lp_0[_S583].xyz + cross(_S584, b_67.centroid_0 - chunks_0[u32(4) * kb_2].xyz) - (lp_0[_S582].xyz + cross(_S585, b_67.centroid_0 - chunks_0[u32(4) * ka_2].xyz));
-    var phi_2 : vec3<f32> = _S584 - _S585;
-    var kt_1 : f32 = b_67.law_0.stiff1_0.x;
-    var _S586 : f32 = b_67.law_0.stiff0_0.y;
-    (*q_lin_1) = vec3<f32>(_S586 * dot(delta_2, b_67.t1_2), _S586 * dot(delta_2, b_67.t2_0), b_67.law_0.stiff0_0.x * dot(delta_2, b_67.n_4));
-    (*q_ang_1) = vec3<f32>(b_67.law_0.stiff0_0.z * dot(phi_2, b_67.t1_2), b_67.law_0.stiff0_0.w * dot(phi_2, b_67.t2_0), kt_1 * dot(phi_2, b_67.n_4));
+    var _S588 : u32 = st_x_0(ka_2, state_5, c_23);
+    var _S589 : u32 = st_x_0(kb_2, state_5, c_23);
+    var _S590 : vec3<f32> = lp_0[_S589 + u32(1)].xyz;
+    var _S591 : vec3<f32> = lp_0[_S588 + u32(1)].xyz;
+    var delta_2 : vec3<f32> = lp_0[_S589].xyz + cross(_S590, b_68.centroid_0 - chunks_0[u32(4) * kb_2].xyz) - (lp_0[_S588].xyz + cross(_S591, b_68.centroid_0 - chunks_0[u32(4) * ka_2].xyz));
+    var phi_2 : vec3<f32> = _S590 - _S591;
+    var kt_1 : f32 = b_68.law_0.stiff1_0.x;
+    var _S592 : f32 = b_68.law_0.stiff0_0.y;
+    (*q_lin_1) = vec3<f32>(_S592 * dot(delta_2, b_68.t1_2), _S592 * dot(delta_2, b_68.t2_0), b_68.law_0.stiff0_0.x * dot(delta_2, b_68.n_4));
+    (*q_ang_1) = vec3<f32>(b_68.law_0.stiff0_0.z * dot(phi_2, b_68.t1_2), b_68.law_0.stiff0_0.w * dot(phi_2, b_68.t2_0), kt_1 * dot(phi_2, b_68.n_4));
     return;
 }
 
-fn st_force_2( b_68 : LpBond_0,  ka_3 : u32,  kb_3 : u32,  state_6 : u32,  c_24 : u32,  q_lin_2 : ptr<function, vec3<f32>>,  q_ang_2 : ptr<function, vec3<f32>>)
+fn st_force_2( b_69 : LpBond_0,  ka_3 : u32,  kb_3 : u32,  state_6 : u32,  c_24 : u32,  q_lin_2 : ptr<function, vec3<f32>>,  q_ang_2 : ptr<function, vec3<f32>>)
 {
-    var _S587 : u32 = st_x_0(ka_3, state_6, c_24);
-    var _S588 : u32 = st_x_0(kb_3, state_6, c_24);
-    var _S589 : vec3<f32> = lp_0[_S588 + u32(1)].xyz;
-    var _S590 : vec3<f32> = lp_0[_S587 + u32(1)].xyz;
-    var delta_3 : vec3<f32> = lp_0[_S588].xyz + cross(_S589, b_68.centroid_0 - chunks_0[u32(4) * kb_3].xyz) - (lp_0[_S587].xyz + cross(_S590, b_68.centroid_0 - chunks_0[u32(4) * ka_3].xyz));
-    var phi_3 : vec3<f32> = _S589 - _S590;
-    var kt_2 : f32 = b_68.law_0.stiff1_0.x;
-    var _S591 : f32 = b_68.law_0.stiff0_0.y;
-    (*q_lin_2) = vec3<f32>(_S591 * dot(delta_3, b_68.t1_2), _S591 * dot(delta_3, b_68.t2_0), b_68.law_0.stiff0_0.x * dot(delta_3, b_68.n_4));
-    (*q_ang_2) = vec3<f32>(b_68.law_0.stiff0_0.z * dot(phi_3, b_68.t1_2), b_68.law_0.stiff0_0.w * dot(phi_3, b_68.t2_0), kt_2 * dot(phi_3, b_68.n_4));
+    var _S593 : u32 = st_x_0(ka_3, state_6, c_24);
+    var _S594 : u32 = st_x_0(kb_3, state_6, c_24);
+    var _S595 : vec3<f32> = lp_0[_S594 + u32(1)].xyz;
+    var _S596 : vec3<f32> = lp_0[_S593 + u32(1)].xyz;
+    var delta_3 : vec3<f32> = lp_0[_S594].xyz + cross(_S595, b_69.centroid_0 - chunks_0[u32(4) * kb_3].xyz) - (lp_0[_S593].xyz + cross(_S596, b_69.centroid_0 - chunks_0[u32(4) * ka_3].xyz));
+    var phi_3 : vec3<f32> = _S595 - _S596;
+    var kt_2 : f32 = b_69.law_0.stiff1_0.x;
+    var _S597 : f32 = b_69.law_0.stiff0_0.y;
+    (*q_lin_2) = vec3<f32>(_S597 * dot(delta_3, b_69.t1_2), _S597 * dot(delta_3, b_69.t2_0), b_69.law_0.stiff0_0.x * dot(delta_3, b_69.n_4));
+    (*q_ang_2) = vec3<f32>(b_69.law_0.stiff0_0.z * dot(phi_3, b_69.t1_2), b_69.law_0.stiff0_0.w * dot(phi_3, b_69.t2_0), kt_2 * dot(phi_3, b_69.n_4));
     return;
 }
 
-fn lp_force_0( b_69 : LpBond_0,  ka_4 : u32,  kb_4 : u32,  c_25 : u32,  q_lin_3 : ptr<function, vec3<f32>>,  q_ang_3 : ptr<function, vec3<f32>>)
+fn lp_force_0( b_70 : LpBond_0,  ka_4 : u32,  kb_4 : u32,  c_25 : u32,  q_lin_3 : ptr<function, vec3<f32>>,  q_ang_3 : ptr<function, vec3<f32>>)
 {
-    st_force_1(b_69, ka_4, kb_4, u32(0), c_25, &((*q_lin_3)), &((*q_ang_3)));
+    st_force_1(b_70, ka_4, kb_4, u32(0), c_25, &((*q_lin_3)), &((*q_ang_3)));
     return;
 }
 
-fn lp_force_1( b_70 : LpBond_0,  ka_5 : u32,  kb_5 : u32,  c_26 : u32,  q_lin_4 : ptr<function, vec3<f32>>,  q_ang_4 : ptr<function, vec3<f32>>)
+fn lp_force_1( b_71 : LpBond_0,  ka_5 : u32,  kb_5 : u32,  c_26 : u32,  q_lin_4 : ptr<function, vec3<f32>>,  q_ang_4 : ptr<function, vec3<f32>>)
 {
-    st_force_2(b_70, ka_5, kb_5, u32(0), c_26, &((*q_lin_4)), &((*q_ang_4)));
+    st_force_2(b_71, ka_5, kb_5, u32(0), c_26, &((*q_lin_4)), &((*q_ang_4)));
     return;
 }
 
@@ -6304,22 +6354,22 @@ struct Measures_0
      compressive_force_0 : f32,
 };
 
-fn stress_measures_0( b_71 : JointBond_0,  q_lin_5 : vec3<f32>,  q_ang_5 : vec3<f32>) -> Measures_0
+fn stress_measures_0( b_72 : JointBond_0,  q_lin_5 : vec3<f32>,  q_ang_5 : vec3<f32>) -> Measures_0
 {
-    var area_0 : f32 = b_71.geom0_0.x;
-    var _S592 : f32 = q_lin_5.z;
-    var axial_0 : f32 = fdiv_0(_S592, area_0);
-    var bending_0 : f32 = fdiv_0(abs(q_ang_5.x), b_71.geom1_0.x) + fdiv_0(abs(q_ang_5.y), b_71.geom1_0.y);
-    var _S593 : f32 = q_lin_5.x;
-    var _S594 : f32 = q_lin_5.y;
-    var shear_1 : f32 = fdiv_0(fsqrt_0(_S593 * _S593 + _S594 * _S594), area_0) + fdiv_0(abs(q_ang_5.z), b_71.geom0_0.w);
+    var area_0 : f32 = b_72.geom0_0.x;
+    var _S598 : f32 = q_lin_5.z;
+    var axial_0 : f32 = fdiv_0(_S598, area_0);
+    var bending_0 : f32 = fdiv_0(abs(q_ang_5.x), b_72.geom1_0.x) + fdiv_0(abs(q_ang_5.y), b_72.geom1_0.y);
+    var _S599 : f32 = q_lin_5.x;
+    var _S600 : f32 = q_lin_5.y;
+    var shear_1 : f32 = fdiv_0(fsqrt_0(_S599 * _S599 + _S600 * _S600), area_0) + fdiv_0(abs(q_ang_5.z), b_72.geom0_0.w);
     var m_3 : Measures_0;
     m_3.tension_0 = axial_0 + bending_0;
     m_3.shear_0 = shear_1;
-    var _S595 : f32 = - axial_0;
-    m_3.normal_compression_0 = max(_S595, 0.0f);
-    m_3.compression_0 = _S595 + bending_0;
-    m_3.compressive_force_0 = max(- _S592, 0.0f);
+    var _S601 : f32 = - axial_0;
+    m_3.normal_compression_0 = max(_S601, 0.0f);
+    m_3.compression_0 = _S601 + bending_0;
+    m_3.compressive_force_0 = max(- _S598, 0.0f);
     return m_3;
 }
 
@@ -6340,71 +6390,71 @@ fn infinity_0() -> f32
     return float_bits_0(u32(2139095040));
 }
 
-fn failure_indices_0( mat_1 : JointMaterial_0,  b_72 : JointBond_0,  m_5 : Measures_0,  multiplier_0 : f32) -> vec4<f32>
+fn failure_indices_0( mat_1 : JointMaterial_0,  b_73 : JointBond_0,  m_5 : Measures_0,  multiplier_0 : f32) -> vec4<f32>
 {
     var fc_2 : f32 = mat_1.strength_0.y * multiplier_0;
-    var _S596 : f32 = min(mat_1.strength_0.z * multiplier_0 + mat_1.strength_0.w * m_5.normal_compression_0, mat_1.energy_0.x * multiplier_0);
+    var _S602 : f32 = min(mat_1.strength_0.z * multiplier_0 + mat_1.strength_0.w * m_5.normal_compression_0, mat_1.energy_0.x * multiplier_0);
     var idx_0 : vec4<f32>;
     idx_0[i32(0)] = max(fdiv_0(m_5.tension_0, mat_1.strength_0.x * multiplier_0), 0.0f);
-    var _S597 : f32;
-    if(_S596 > 0.0f)
+    var _S603 : f32;
+    if(_S602 > 0.0f)
     {
-        _S597 = fdiv_0(m_5.shear_0, _S596);
+        _S603 = fdiv_0(m_5.shear_0, _S602);
     }
     else
     {
-        _S597 = infinity_0();
+        _S603 = infinity_0();
     }
-    idx_0[i32(1)] = _S597;
+    idx_0[i32(1)] = _S603;
     idx_0[i32(2)] = max(fdiv_0(m_5.compression_0, fc_2), 0.0f);
-    var _S598 : f32 = b_72.stiff1_0.y;
-    if(_S598 > 0.0f)
+    var _S604 : f32 = b_73.stiff1_0.y;
+    if(_S604 > 0.0f)
     {
-        _S597 = fdiv_0(m_5.compressive_force_0, _S598);
+        _S603 = fdiv_0(m_5.compressive_force_0, _S604);
     }
     else
     {
-        _S597 = 0.0f;
+        _S603 = 0.0f;
     }
-    idx_0[i32(3)] = _S597;
+    idx_0[i32(3)] = _S603;
     return idx_0;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_lp_breaks(@builtin(global_invocation_id) id_42 : vec3<u32>)
+fn fr_lp_breaks(@builtin(global_invocation_id) id_43 : vec3<u32>)
 {
-    var i_21 : u32 = id_42.x;
-    var _S599 : bool;
-    if(i_21 >= (params_0.bond_count_0))
+    var i_22 : u32 = id_43.x;
+    var _S605 : bool;
+    if(i_22 >= (params_0.bond_count_0))
     {
-        _S599 = true;
+        _S605 = true;
     }
     else
     {
-        _S599 = work_0[w_alive_0() + i_21] == u32(0);
+        _S605 = work_0[w_alive_0() + i_22] == u32(0);
     }
-    if(_S599)
+    if(_S605)
     {
         return;
     }
-    var bond_9 : vec4<u32> = bonds_0[i_21];
-    var b_73 : LpBond_0 = lp_bond_0(i_21);
-    var _S600 : u32 = bond_9.x;
+    var bond_10 : vec4<u32> = bonds_0[i_22];
+    var b_74 : LpBond_0 = lp_bond_0(i_22);
+    var _S606 : u32 = bond_10.x;
     var q_lin_6 : vec3<f32>;
     var q_ang_6 : vec3<f32>;
-    lp_force_1(b_73, _S600, bond_9.y, u32(0), &(q_lin_6), &(q_ang_6));
-    var idx_1 : vec4<f32> = failure_indices_0(lp_material_0(b_73.law_0.ids_3.x), b_73.law_0, stress_measures_0(b_73.law_0, q_lin_6, q_ang_6), b_73.law_0.geom1_0.w);
-    var _S601 : f32 = max(max(idx_1.x, idx_1.y), max(idx_1.z, idx_1.w));
-    var _S602 : u32 = a_counters_0();
-    var _S603 : u32 = atomicMax(&(atom_0[_S602 + u32(15)]), (bitcast<u32>((max(_S601, 0.0f)))));
-    if(_S601 >= 1.0f)
+    lp_force_1(b_74, _S606, bond_10.y, u32(0), &(q_lin_6), &(q_ang_6));
+    var idx_1 : vec4<f32> = failure_indices_0(lp_material_0(b_74.law_0.ids_3.x), b_74.law_0, stress_measures_0(b_74.law_0, q_lin_6, q_ang_6), b_74.law_0.geom1_0.w);
+    var _S607 : f32 = max(max(idx_1.x, idx_1.y), max(idx_1.z, idx_1.w));
+    var _S608 : u32 = a_counters_0();
+    var _S609 : u32 = atomicMax(&(atom_0[_S608 + u32(15)]), (bitcast<u32>((max(_S607, 0.0f)))));
+    if(_S607 >= 1.0f)
     {
-        work_0[w_alive_0() + i_21] = u32(0);
-        var _S604 : u32 = atomicOr(&(atom_0[a_dirty_0() + body_of_0(_S600)]), u32(1));
-        var _S605 : u32 = atomicAdd(&(atom_0[_S602]), u32(1));
-        var _S606 : u32 = atomicAdd(&(atom_0[_S602 + u32(1)]), u32(1));
-        event_broken_0(i_21);
+        work_0[w_alive_0() + i_22] = u32(0);
+        var _S610 : u32 = atomicOr(&(atom_0[a_dirty_0() + body_of_0(_S606)]), u32(1));
+        var _S611 : u32 = atomicAdd(&(atom_0[_S608]), u32(1));
+        var _S612 : u32 = atomicAdd(&(atom_0[_S608 + u32(1)]), u32(1));
+        event_broken_0(i_22);
     }
     return;
 }
@@ -6416,39 +6466,39 @@ fn lp_view_0( k_49 : u32) -> u32
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_lp_view(@builtin(global_invocation_id) id_43 : vec3<u32>)
+fn fr_lp_view(@builtin(global_invocation_id) id_44 : vec3<u32>)
 {
-    var k_50 : u32 = id_43.x;
+    var k_50 : u32 = id_44.x;
     if(k_50 >= (params_0.chunk_count_0))
     {
         return;
     }
     var range_3 : vec4<f32> = ext_0[params_0.ext_chunks_0 + u32(4) * k_50];
-    var _S607 : u32 = (bitcast<u32>((range_3.x)));
-    var _S608 : u32 = (bitcast<u32>((range_3.y)));
+    var _S613 : u32 = (bitcast<u32>((range_3.x)));
+    var _S614 : u32 = (bitcast<u32>((range_3.y)));
     var worst_0 : vec4<f32> = vec4<f32>(0.0f);
     var e_6 : u32 = u32(0);
     loop
     {
-        if(e_6 < _S608)
+        if(e_6 < _S614)
         {
         }
         else
         {
             break;
         }
-        var i_22 : u32 = (bitcast<u32>((lp_side_0(u32(5) * (_S607 + e_6)).w)));
-        if(work_0[w_alive_0() + i_22] == u32(0))
+        var i_23 : u32 = (bitcast<u32>((lp_side_0(u32(5) * (_S613 + e_6)).w)));
+        if(work_0[w_alive_0() + i_23] == u32(0))
         {
             e_6 = e_6 + u32(1);
             continue;
         }
-        var bond_10 : vec4<u32> = bonds_0[i_22];
-        var b_74 : LpBond_0 = lp_bond_0(i_22);
+        var bond_11 : vec4<u32> = bonds_0[i_23];
+        var b_75 : LpBond_0 = lp_bond_0(i_23);
         var q_lin_7 : vec3<f32>;
         var q_ang_7 : vec3<f32>;
-        lp_force_1(b_74, bond_10.x, bond_10.y, u32(0), &(q_lin_7), &(q_ang_7));
-        worst_0 = max(worst_0, failure_indices_0(lp_material_0(b_74.law_0.ids_3.x), b_74.law_0, stress_measures_0(b_74.law_0, q_lin_7, q_ang_7), b_74.law_0.geom1_0.w));
+        lp_force_1(b_75, bond_11.x, bond_11.y, u32(0), &(q_lin_7), &(q_ang_7));
+        worst_0 = max(worst_0, failure_indices_0(lp_material_0(b_75.law_0.ids_3.x), b_75.law_0, stress_measures_0(b_75.law_0, q_lin_7, q_ang_7), b_75.law_0.geom1_0.w));
         e_6 = e_6 + u32(1);
     }
     lp_0[lp_view_0(k_50)] = worst_0;
@@ -6457,89 +6507,89 @@ fn fr_lp_view(@builtin(global_invocation_id) id_43 : vec3<u32>)
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_first_reset(@builtin(global_invocation_id) id_44 : vec3<u32>)
+fn fr_il_first_reset(@builtin(global_invocation_id) id_45 : vec3<u32>)
 {
-    var _S609 : u32 = id_44.x;
-    if(_S609 == u32(0))
+    var _S615 : u32 = id_45.x;
+    if(_S615 == u32(0))
     {
         atomicStore(&(atom_0[a_il_cursor_0()]), u32(0));
     }
-    if(_S609 < (params_0.shot_count_0))
+    if(_S615 < (params_0.shot_count_0))
     {
-        atomicStore(&(atom_0[a_first_0(_S609)]), u32(2139095040));
+        atomicStore(&(atom_0[a_first_0(_S615)]), u32(2139095040));
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_first(@builtin(global_invocation_id) id_45 : vec3<u32>)
+fn fr_il_first(@builtin(global_invocation_id) id_46 : vec3<u32>)
 {
-    var b_75 : u32 = id_45.x;
-    var _S610 : bool;
-    if(b_75 >= (params_0.body_count_0))
+    var b_76 : u32 = id_46.x;
+    var _S616 : bool;
+    if(b_76 >= (params_0.body_count_0))
     {
-        _S610 = true;
+        _S616 = true;
     }
     else
     {
-        _S610 = (params_0.shot_count_0) == u32(0);
+        _S616 = (params_0.shot_count_0) == u32(0);
     }
-    if(_S610)
+    if(_S616)
     {
         return;
     }
-    var shot_10 : u32;
-    var _S611 : bool = struck_2(b_75, &(shot_10));
-    if(!_S611)
+    var shot_11 : u32;
+    var _S617 : bool = struck_2(b_76, &(shot_11));
+    if(!_S617)
     {
         return;
     }
-    var _S612 : u32 = atomicLoad(&(atom_0[a_strike_0() + u32(9) * b_75 + u32(6)]));
-    var _S613 : u32 = atomicMin(&(atom_0[a_first_0(shot_10)]), _S612);
+    var _S618 : u32 = atomicLoad(&(atom_0[a_strike_0() + u32(9) * b_76 + u32(6)]));
+    var _S619 : u32 = atomicMin(&(atom_0[a_first_0(shot_11)]), _S618);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_begin(@builtin(global_invocation_id) id_46 : vec3<u32>)
+fn fr_il_begin(@builtin(global_invocation_id) id_47 : vec3<u32>)
 {
     if((params_0.shot_count_0) > u32(0))
     {
-        il_begin_1(id_46.x);
+        il_begin_1(id_47.x);
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_tube_count(@builtin(global_invocation_id) id_47 : vec3<u32>)
+fn fr_il_tube_count(@builtin(global_invocation_id) id_48 : vec3<u32>)
 {
     if((params_0.shot_count_0) > u32(0))
     {
-        il_tube_count_1(id_47.x);
+        il_tube_count_1(id_48.x);
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_tube_base(@builtin(global_invocation_id) id_48 : vec3<u32>)
+fn fr_il_tube_base(@builtin(global_invocation_id) id_49 : vec3<u32>)
 {
     if((params_0.shot_count_0) > u32(0))
     {
-        il_tube_base_1(id_48.x);
+        il_tube_base_1(id_49.x);
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_tube_collect(@builtin(global_invocation_id) id_49 : vec3<u32>)
+fn fr_il_tube_collect(@builtin(global_invocation_id) id_50 : vec3<u32>)
 {
     if((params_0.shot_count_0) > u32(0))
     {
-        il_tube_collect_1(id_49.x);
+        il_tube_collect_1(id_50.x);
     }
     return;
 }
@@ -6548,96 +6598,96 @@ fn fr_il_tube_collect(@builtin(global_invocation_id) id_49 : vec3<u32>)
 @workgroup_size(64, 1, 1)
 fn fr_il_run(@builtin(workgroup_id) group_1 : vec3<u32>, @builtin(local_invocation_id) thread_4 : vec3<u32>)
 {
-    var b_76 : u32 = group_1.y * u32(65535) + group_1.x;
-    var _S614 : bool;
+    var b_77 : u32 = group_1.y * u32(65535) + group_1.x;
+    var _S620 : bool;
     if((params_0.shot_count_0) > u32(0))
     {
-        _S614 = b_76 < (params_0.body_count_0);
+        _S620 = b_77 < (params_0.body_count_0);
     }
     else
     {
-        _S614 = false;
+        _S620 = false;
     }
-    if(_S614)
+    if(_S620)
     {
-        il_run_1(b_76, thread_4.x);
+        il_run_1(b_77, thread_4.x);
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_strike(@builtin(global_invocation_id) id_50 : vec3<u32>)
+fn fr_il_strike(@builtin(global_invocation_id) id_51 : vec3<u32>)
 {
     if((params_0.shot_count_0) > u32(0))
     {
-        il_strike_1(id_50.x);
+        il_strike_1(id_51.x);
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_mark(@builtin(global_invocation_id) id_51 : vec3<u32>)
+fn fr_il_mark(@builtin(global_invocation_id) id_52 : vec3<u32>)
 {
     if((params_0.shot_count_0) > u32(0))
     {
-        il_mark_1(id_51.x);
+        il_mark_1(id_52.x);
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_carry(@builtin(global_invocation_id) id_52 : vec3<u32>)
+fn fr_il_carry(@builtin(global_invocation_id) id_53 : vec3<u32>)
 {
     if((params_0.shot_count_0) > u32(0))
     {
-        il_carry_1(id_52.x);
+        il_carry_1(id_53.x);
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_il_breaks(@builtin(global_invocation_id) id_53 : vec3<u32>)
+fn fr_il_breaks(@builtin(global_invocation_id) id_54 : vec3<u32>)
 {
     if((params_0.shot_count_0) > u32(0))
     {
-        il_breaks_1(id_53.x);
+        il_breaks_1(id_54.x);
     }
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_csl_begin(@builtin(global_invocation_id) id_54 : vec3<u32>)
+fn fr_csl_begin(@builtin(global_invocation_id) id_55 : vec3<u32>)
 {
-    il_begin_0(id_54.x);
+    il_begin_0(id_55.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_csl_tube_count(@builtin(global_invocation_id) id_55 : vec3<u32>)
+fn fr_csl_tube_count(@builtin(global_invocation_id) id_56 : vec3<u32>)
 {
-    il_tube_count_0(id_55.x);
+    il_tube_count_0(id_56.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_csl_tube_base(@builtin(global_invocation_id) id_56 : vec3<u32>)
+fn fr_csl_tube_base(@builtin(global_invocation_id) id_57 : vec3<u32>)
 {
-    il_tube_base_0(id_56.x);
+    il_tube_base_0(id_57.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_csl_tube_collect(@builtin(global_invocation_id) id_57 : vec3<u32>)
+fn fr_csl_tube_collect(@builtin(global_invocation_id) id_58 : vec3<u32>)
 {
-    il_tube_collect_0(id_57.x);
+    il_tube_collect_0(id_58.x);
     return;
 }
 
@@ -6661,46 +6711,46 @@ fn fr_csl_run(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(local_invocat
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_csl_strike(@builtin(global_invocation_id) id_58 : vec3<u32>)
+fn fr_csl_strike(@builtin(global_invocation_id) id_59 : vec3<u32>)
 {
-    il_strike_0(id_58.x);
+    il_strike_0(id_59.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_csl_mark(@builtin(global_invocation_id) id_59 : vec3<u32>)
+fn fr_csl_mark(@builtin(global_invocation_id) id_60 : vec3<u32>)
 {
-    il_mark_0(id_59.x);
+    il_mark_0(id_60.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_csl_carry(@builtin(global_invocation_id) id_60 : vec3<u32>)
+fn fr_csl_carry(@builtin(global_invocation_id) id_61 : vec3<u32>)
 {
-    il_carry_0(id_60.x);
+    il_carry_0(id_61.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_csl_breaks(@builtin(global_invocation_id) id_61 : vec3<u32>)
+fn fr_csl_breaks(@builtin(global_invocation_id) id_62 : vec3<u32>)
 {
-    il_breaks_0(id_61.x);
+    il_breaks_0(id_62.x);
     return;
 }
 
 @compute
 @workgroup_size(1, 1, 1)
-fn fr_cs_begin(@builtin(global_invocation_id) id_62 : vec3<u32>)
+fn fr_cs_begin(@builtin(global_invocation_id) id_63 : vec3<u32>)
 {
-    var _S615 : u32 = a_counters_0();
-    atomicStore(&(atom_0[_S615 + u32(18)]), u32(0));
-    atomicStore(&(atom_0[_S615 + u32(19)]), u32(0));
+    var _S621 : u32 = a_counters_0();
+    atomicStore(&(atom_0[_S621 + u32(18)]), u32(0));
+    atomicStore(&(atom_0[_S621 + u32(19)]), u32(0));
     atomicStore(&(atom_0[a_il_cursor_0()]), u32(0));
-    var _S616 : u32 = groups_of_0(cs_rows_0(), u32(64));
-    set_args_0(u32(7), _S616);
+    var _S622 : u32 = groups_of_0(cs_rows_0(), u32(64));
+    set_args_0(u32(7), _S622);
     return;
 }
 
@@ -6711,9 +6761,9 @@ fn cs_side_1( r_24 : u32,  side_6 : u32,  k_51 : ptr<function, u32>,  s_19 : ptr
     (*s_19) = u32(4294967295);
     (*ob_5) = u32(4294967295);
     (*co_5) = u32(4294967295);
-    var _S617 : vec3<f32> = vec3<f32>(0.0f);
-    (*p_20) = _S617;
-    (*u_10) = _S617;
+    var _S623 : vec3<f32> = vec3<f32>(0.0f);
+    (*p_20) = _S623;
+    (*u_10) = _S623;
     (*v_15) = 0.0f;
     (*m_eff_7) = 0.0f;
     var row_2 : u32 = cs_row_0(r_24);
@@ -6722,9 +6772,9 @@ fn cs_side_1( r_24 : u32,  side_6 : u32,  k_51 : ptr<function, u32>,  s_19 : ptr
     {
         return false;
     }
-    var _S618 : bool = side_6 == u32(0);
+    var _S624 : bool = side_6 == u32(0);
     var cm_1 : u32;
-    if(_S618)
+    if(_S624)
     {
         cm_1 = ids_4.x;
     }
@@ -6732,64 +6782,64 @@ fn cs_side_1( r_24 : u32,  side_6 : u32,  k_51 : ptr<function, u32>,  s_19 : ptr
     {
         cm_1 = ids_4.y;
     }
-    var _S619 : u32;
-    if(_S618)
+    var _S625 : u32;
+    if(_S624)
     {
-        _S619 = ids_4.y;
+        _S625 = ids_4.y;
     }
     else
     {
-        _S619 = ids_4.x;
+        _S625 = ids_4.x;
     }
-    (*co_5) = _S619;
-    var _S620 : u32 = collider_info_0[u32(2) * cm_1].x;
-    (*k_51) = _S620;
-    var _S621 : bool;
-    if(_S620 == u32(4294967295))
+    (*co_5) = _S625;
+    var _S626 : u32 = collider_info_0[u32(2) * cm_1].x;
+    (*k_51) = _S626;
+    var _S627 : bool;
+    if(_S626 == u32(4294967295))
     {
-        _S621 = true;
+        _S627 = true;
     }
     else
     {
-        _S621 = (*k_51) >= (params_0.chunk_count_0);
+        _S627 = (*k_51) >= (params_0.chunk_count_0);
     }
-    if(_S621)
+    if(_S627)
     {
-        _S621 = true;
+        _S627 = true;
     }
     else
     {
-        _S621 = (collider_info_0[u32(2) * (*co_5)].z) != u32(2);
+        _S627 = (collider_info_0[u32(2) * (*co_5)].z) != u32(2);
     }
-    if(_S621)
+    if(_S627)
     {
         return false;
     }
     (*s_19) = body_of_0((*k_51));
-    var _S622 : u32 = (bitcast<u32>((colliders_0[u32(4) * (*co_5)].x)));
-    (*ob_5) = _S622;
-    if(_S622 == (*s_19))
+    var _S628 : u32 = (bitcast<u32>((colliders_0[u32(4) * (*co_5)].x)));
+    (*ob_5) = _S628;
+    if(_S628 == (*s_19))
     {
-        _S621 = true;
+        _S627 = true;
     }
     else
     {
-        _S621 = (*ob_5) >= (params_0.max_bodies_0);
+        _S627 = (*ob_5) >= (params_0.max_bodies_0);
     }
-    if(_S621)
+    if(_S627)
     {
         return false;
     }
     var launch_2 : u32 = collider_info_0[u32(2) * (*co_5) + u32(1)].w;
     if(launch_2 != u32(0))
     {
-        _S621 = work_0[w_marks_0() + (*k_51)] == launch_2;
+        _S627 = work_0[w_marks_0() + (*k_51)] == launch_2;
     }
     else
     {
-        _S621 = false;
+        _S627 = false;
     }
-    if(_S621)
+    if(_S627)
     {
         return false;
     }
@@ -6801,42 +6851,42 @@ fn cs_side_1( r_24 : u32,  side_6 : u32,  k_51 : ptr<function, u32>,  s_19 : ptr
         return false;
     }
     var n_6 : vec3<f32> = engine_contacts_0[row_2 + u32(1)].xyz;
-    var _S623 : vec3<f32>;
-    if(_S618)
+    var _S629 : vec3<f32>;
+    if(_S624)
     {
-        _S623 = (vec3<f32>(0) - n_6);
+        _S629 = (vec3<f32>(0) - n_6);
     }
     else
     {
-        _S623 = n_6;
+        _S629 = n_6;
     }
-    (*u_10) = _S623;
-    var _S624 : Quat_0 = quat_of_0(bodies_0[bs_1 + u32(1)]);
-    if(_S618)
+    (*u_10) = _S629;
+    var _S630 : Quat_0 = quat_of_0(bodies_0[bs_1 + u32(1)]);
+    if(_S624)
     {
-        _S623 = engine_contacts_0[row_2 + u32(2)].xyz;
+        _S629 = engine_contacts_0[row_2 + u32(2)].xyz;
     }
     else
     {
-        _S623 = engine_contacts_0[row_2 + u32(3)].xyz;
+        _S629 = engine_contacts_0[row_2 + u32(3)].xyz;
     }
-    var rs_1 : vec3<f32> = rotate_0(_S624, _S623);
-    var _S625 : Quat_0 = quat_of_0(bodies_0[bo_1 + u32(1)]);
-    if(_S618)
+    var rs_1 : vec3<f32> = rotate_0(_S630, _S629);
+    var _S631 : Quat_0 = quat_of_0(bodies_0[bo_1 + u32(1)]);
+    if(_S624)
     {
-        _S623 = engine_contacts_0[row_2 + u32(3)].xyz;
+        _S629 = engine_contacts_0[row_2 + u32(3)].xyz;
     }
     else
     {
-        _S623 = engine_contacts_0[row_2 + u32(2)].xyz;
+        _S629 = engine_contacts_0[row_2 + u32(2)].xyz;
     }
-    var ro_1 : vec3<f32> = rotate_0(_S625, _S623);
-    var _S626 : vec3<f32> = bodies_0[bs_1].xyz + rs_1;
-    (*p_20) = _S626;
-    var gap_1 : f32 = dot(_S626 - (bodies_0[bo_1].xyz + ro_1), (*u_10));
-    var _S627 : f32 = dot(bodies_0[bo_1 + u32(3)].xyz + cross(bodies_0[bo_1 + u32(4)].xyz, ro_1) - (bodies_0[bs_1 + u32(3)].xyz + cross(bodies_0[bs_1 + u32(4)].xyz, rs_1)), (*u_10));
-    (*v_15) = _S627;
-    if(!(_S627 > (params_0.strike_speed_0)))
+    var ro_1 : vec3<f32> = rotate_0(_S631, _S629);
+    var _S632 : vec3<f32> = bodies_0[bs_1].xyz + rs_1;
+    (*p_20) = _S632;
+    var gap_1 : f32 = dot(_S632 - (bodies_0[bo_1].xyz + ro_1), (*u_10));
+    var _S633 : f32 = dot(bodies_0[bo_1 + u32(3)].xyz + cross(bodies_0[bo_1 + u32(4)].xyz, ro_1) - (bodies_0[bs_1 + u32(3)].xyz + cross(bodies_0[bs_1 + u32(4)].xyz, rs_1)), (*u_10));
+    (*v_15) = _S633;
+    if(!(_S633 > (params_0.strike_speed_0)))
     {
         return false;
     }
@@ -6852,9 +6902,9 @@ fn cs_side_1( r_24 : u32,  side_6 : u32,  k_51 : ptr<function, u32>,  s_19 : ptr
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_contacts(@builtin(global_invocation_id) id_63 : vec3<u32>)
+fn fr_cs_contacts(@builtin(global_invocation_id) id_64 : vec3<u32>)
 {
-    var r_25 : u32 = id_63.x;
+    var r_25 : u32 = id_64.x;
     if(r_25 >= (cs_rows_0()))
     {
         return;
@@ -6878,16 +6928,16 @@ fn fr_cs_contacts(@builtin(global_invocation_id) id_63 : vec3<u32>)
         var v_16 : f32;
         var m_eff_8 : f32;
         var t_in_11 : f32;
-        var _S628 : bool = cs_side_1(r_25, side_7, &(k_52), &(s_20), &(ob_6), &(co_6), &(p_21), &(u_11), &(v_16), &(m_eff_8), &(t_in_11));
-        if(_S628)
+        var _S634 : bool = cs_side_1(r_25, side_7, &(k_52), &(s_20), &(ob_6), &(co_6), &(p_21), &(u_11), &(v_16), &(m_eff_8), &(t_in_11));
+        if(_S634)
         {
-            var _S629 : u32 = atomicMax(&(atom_0[a_cs_0(s_20)]), (bitcast<u32>((m_eff_8 * v_16))));
-            var _S630 : u32 = atomicExchange(&(atom_0[a_cs_0(s_20) + u32(8)]), u32(1));
-            if(_S630 == u32(0))
+            var _S635 : u32 = atomicMax(&(atom_0[a_cs_0(s_20)]), (bitcast<u32>((m_eff_8 * v_16))));
+            var _S636 : u32 = atomicExchange(&(atom_0[a_cs_0(s_20) + u32(8)]), u32(1));
+            if(_S636 == u32(0))
             {
-                var _S631 : u32 = w_cs_bodies_0();
-                var _S632 : u32 = atomicAdd(&(atom_0[a_counters_0() + u32(18)]), u32(1));
-                work_0[_S631 + _S632] = s_20;
+                var _S637 : u32 = w_cs_bodies_0();
+                var _S638 : u32 = atomicAdd(&(atom_0[a_counters_0() + u32(18)]), u32(1));
+                work_0[_S637 + _S638] = s_20;
             }
         }
         side_7 = side_7 + u32(1);
@@ -6897,104 +6947,104 @@ fn fr_cs_contacts(@builtin(global_invocation_id) id_63 : vec3<u32>)
 
 @compute
 @workgroup_size(1, 1, 1)
-fn fr_cs_gate(@builtin(global_invocation_id) id_64 : vec3<u32>)
+fn fr_cs_gate(@builtin(global_invocation_id) id_65 : vec3<u32>)
 {
     var struck_3 : u32 = atomicLoad(&(atom_0[a_counters_0() + u32(18)]));
     var any_0 : bool = struck_3 > u32(0);
-    var _S633 : u32;
+    var _S639 : u32;
     if(any_0)
     {
-        var _S634 : u32 = groups_of_0(cs_rows_0(), u32(64));
-        _S633 = _S634;
+        var _S640 : u32 = groups_of_0(cs_rows_0(), u32(64));
+        _S639 = _S640;
     }
     else
     {
-        _S633 = u32(0);
+        _S639 = u32(0);
     }
-    set_args_0(u32(8), _S633);
-    var _S635 : u32 = groups_of_0(struck_3, u32(64));
-    set_args_0(u32(9), _S635);
+    set_args_0(u32(8), _S639);
+    var _S641 : u32 = groups_of_0(struck_3, u32(64));
+    set_args_0(u32(9), _S641);
     set_args_0(u32(6), struck_3);
     if(any_0)
     {
-        var _S636 : u32 = groups_of_0(params_0.chunk_count_0, u32(64));
-        _S633 = _S636;
+        var _S642 : u32 = groups_of_0(params_0.chunk_count_0, u32(64));
+        _S639 = _S642;
     }
     else
     {
-        _S633 = u32(0);
+        _S639 = u32(0);
     }
-    set_args_0(u32(10), _S633);
+    set_args_0(u32(10), _S639);
     if(any_0)
     {
-        var _S637 : u32 = groups_of_0(params_0.bond_count_0, u32(64));
-        _S633 = _S637;
+        var _S643 : u32 = groups_of_0(params_0.bond_count_0, u32(64));
+        _S639 = _S643;
     }
     else
     {
-        _S633 = u32(0);
+        _S639 = u32(0);
     }
-    set_args_0(u32(11), _S633);
+    set_args_0(u32(11), _S639);
     if(any_0)
     {
-        var _S638 : u32 = groups_of_0(params_0.body_count_0, u32(64));
-        _S633 = _S638;
+        var _S644 : u32 = groups_of_0(params_0.body_count_0, u32(64));
+        _S639 = _S644;
     }
     else
     {
-        _S633 = u32(0);
+        _S639 = u32(0);
     }
-    set_args_0(u32(12), _S633);
+    set_args_0(u32(12), _S639);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_pick_a(@builtin(global_invocation_id) id_65 : vec3<u32>)
+fn fr_cs_pick_a(@builtin(global_invocation_id) id_66 : vec3<u32>)
 {
-    cs_pick_3(id_65.x);
+    cs_pick_3(id_66.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_pick_b(@builtin(global_invocation_id) id_66 : vec3<u32>)
+fn fr_cs_pick_b(@builtin(global_invocation_id) id_67 : vec3<u32>)
 {
-    cs_pick_2(id_66.x);
+    cs_pick_2(id_67.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_pick_c(@builtin(global_invocation_id) id_67 : vec3<u32>)
+fn fr_cs_pick_c(@builtin(global_invocation_id) id_68 : vec3<u32>)
 {
-    cs_pick_1(id_67.x);
+    cs_pick_1(id_68.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_pick_d(@builtin(global_invocation_id) id_68 : vec3<u32>)
+fn fr_cs_pick_d(@builtin(global_invocation_id) id_69 : vec3<u32>)
 {
-    cs_pick_0(id_68.x);
+    cs_pick_0(id_69.x);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_record(@builtin(global_invocation_id) id_69 : vec3<u32>)
+fn fr_cs_record(@builtin(global_invocation_id) id_70 : vec3<u32>)
 {
-    var _S639 : u32 = id_69.x;
-    var _S640 : u32 = a_counters_0();
-    var _S641 : u32 = atomicLoad(&(atom_0[_S640 + u32(18)]));
-    if(_S639 >= _S641)
+    var _S645 : u32 = id_70.x;
+    var _S646 : u32 = a_counters_0();
+    var _S647 : u32 = atomicLoad(&(atom_0[_S646 + u32(18)]));
+    if(_S645 >= _S647)
     {
         return;
     }
-    var s_21 : u32 = work_0[w_cs_bodies_0() + _S639];
-    var _S642 : u32 = a_cs_0(work_0[w_cs_bodies_0() + _S639]);
-    var _S643 : u32 = atomicLoad(&(atom_0[_S642 + u32(11)]));
-    var key_2 : u32 = _S643 - u32(1);
+    var s_21 : u32 = work_0[w_cs_bodies_0() + _S645];
+    var _S648 : u32 = a_cs_0(work_0[w_cs_bodies_0() + _S645]);
+    var _S649 : u32 = atomicLoad(&(atom_0[_S648 + u32(11)]));
+    var key_2 : u32 = _S649 - u32(1);
     var k_53 : u32;
     var s2_1 : u32;
     var ob_7 : u32;
@@ -7004,82 +7054,82 @@ fn fr_cs_record(@builtin(global_invocation_id) id_69 : vec3<u32>)
     var v_17 : f32;
     var m_eff_9 : f32;
     var t_in_12 : f32;
-    var _S644 : bool = cs_side_1(key_2 / u32(2), key_2 % u32(2), &(k_53), &(s2_1), &(ob_7), &(co_7), &(p_22), &(u_12), &(v_17), &(m_eff_9), &(t_in_12));
-    if(!_S644)
+    var _S650 : bool = cs_side_1(key_2 / u32(2), key_2 % u32(2), &(k_53), &(s2_1), &(ob_7), &(co_7), &(p_22), &(u_12), &(v_17), &(m_eff_9), &(t_in_12));
+    if(!_S650)
     {
         return;
     }
     var other_1 : vec4<u32> = collider_info_0[u32(2) * co_7 + u32(1)];
     var e_o_0 : f32 = (bitcast<f32>((collider_info_0[u32(2) * co_7 + u32(1)].y)));
-    var _S645 : f32 = max((bitcast<f32>((collider_info_0[u32(2) * co_7 + u32(1)].z))), 0.00100000004749745f);
+    var _S651 : f32 = max((bitcast<f32>((collider_info_0[u32(2) * co_7 + u32(1)].z))), 0.00100000004749745f);
     var j_9 : f32 = m_eff_9 * v_17;
-    var tau_2 : f32 = hertz_duration_0(m_eff_9, _S645, 1.0f / (1.0f / max(e_o_0, 1.0f) + 1.0f / geometry_0[u32(3) * k_53 + u32(1)].w), v_17);
-    var _S646 : u32 = lp_body_0(s_21);
-    lp_0[_S646 + u32(2)] = vec4<f32>(from_rubble_0(p_22), 3.14159274101257324f * j_9 / (2.0f * tau_2));
-    lp_0[_S646 + u32(3)] = vec4<f32>(from_rubble_0(u_12), v_17);
-    lp_0[_S646 + u32(4)] = vec4<f32>(m_eff_9, _S645, e_o_0, (bitcast<f32>((ob_7))));
-    lp_0[_S646 + u32(5)] = vec4<f32>((bitcast<f32>((k_53))), j_9 / tau_2, 1.0f / bodies_0[u32(7) * ob_7].w, t_in_12);
-    lp_0[_S646 + u32(6)] = vec4<f32>((bitcast<f32>((co_7))), (bitcast<f32>((other_1.w))), 0.0f, 0.0f);
-    atomicStore(&(atom_0[_S642 + u32(1)]), k_53 + u32(1));
-    var _S647 : u32 = atomicAdd(&(atom_0[_S640 + u32(16)]), u32(1));
+    var tau_2 : f32 = hertz_duration_0(m_eff_9, _S651, 1.0f / (1.0f / max(e_o_0, 1.0f) + 1.0f / geometry_0[u32(3) * k_53 + u32(1)].w), v_17);
+    var _S652 : u32 = lp_body_0(s_21);
+    lp_0[_S652 + u32(2)] = vec4<f32>(from_rubble_0(p_22), 3.14159274101257324f * j_9 / (2.0f * tau_2));
+    lp_0[_S652 + u32(3)] = vec4<f32>(from_rubble_0(u_12), v_17);
+    lp_0[_S652 + u32(4)] = vec4<f32>(m_eff_9, _S651, e_o_0, (bitcast<f32>((ob_7))));
+    lp_0[_S652 + u32(5)] = vec4<f32>((bitcast<f32>((k_53))), j_9 / tau_2, 1.0f / bodies_0[u32(7) * ob_7].w, t_in_12);
+    lp_0[_S652 + u32(6)] = vec4<f32>((bitcast<f32>((co_7))), (bitcast<f32>((other_1.w))), 0.0f, 0.0f);
+    atomicStore(&(atom_0[_S648 + u32(1)]), k_53 + u32(1));
+    var _S653 : u32 = atomicAdd(&(atom_0[_S646 + u32(16)]), u32(1));
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_hertz(@builtin(global_invocation_id) id_70 : vec3<u32>)
+fn fr_cs_hertz(@builtin(global_invocation_id) id_71 : vec3<u32>)
 {
-    var i_23 : u32 = id_70.x;
-    var _S648 : bool;
-    if(i_23 >= (params_0.bond_count_0))
+    var i_24 : u32 = id_71.x;
+    var _S654 : bool;
+    if(i_24 >= (params_0.bond_count_0))
     {
-        _S648 = true;
+        _S654 = true;
     }
     else
     {
-        _S648 = work_0[w_alive_0() + i_23] == u32(0);
+        _S654 = work_0[w_alive_0() + i_24] == u32(0);
     }
-    if(_S648)
+    if(_S654)
     {
         return;
     }
-    var bond_11 : vec4<u32> = bonds_0[i_23];
-    var b_77 : u32 = body_of_0(bond_11.x);
-    var _S649 : bool = cs_struck_0(b_77);
-    if(!_S649)
+    var bond_12 : vec4<u32> = bonds_0[i_24];
+    var b_78 : u32 = body_of_0(bond_12.x);
+    var _S655 : bool = cs_struck_0(b_78);
+    if(!_S655)
     {
         return;
     }
-    var _S650 : u32 = lp_body_0(b_77);
-    if(strike_share_breaks_0(bond_11, lp_0[_S650 + u32(2)].xyz, lp_0[_S650 + u32(5)].y))
+    var _S656 : u32 = lp_body_0(b_78);
+    if(strike_share_breaks_0(bond_12, lp_0[_S656 + u32(2)].xyz, lp_0[_S656 + u32(5)].y))
     {
-        work_0[w_alive_0() + i_23] = u32(0);
-        var _S651 : u32 = atomicOr(&(atom_0[a_dirty_0() + b_77]), u32(1));
-        var _S652 : u32 = a_counters_0();
-        var _S653 : u32 = atomicAdd(&(atom_0[_S652]), u32(1));
-        var _S654 : u32 = atomicAdd(&(atom_0[_S652 + u32(1)]), u32(1));
-        event_broken_0(i_23);
-        var _S655 : u32 = atomicAdd(&(atom_0[_S652 + u32(17)]), u32(1));
+        work_0[w_alive_0() + i_24] = u32(0);
+        var _S657 : u32 = atomicOr(&(atom_0[a_dirty_0() + b_78]), u32(1));
+        var _S658 : u32 = a_counters_0();
+        var _S659 : u32 = atomicAdd(&(atom_0[_S658]), u32(1));
+        var _S660 : u32 = atomicAdd(&(atom_0[_S658 + u32(1)]), u32(1));
+        event_broken_0(i_24);
+        var _S661 : u32 = atomicAdd(&(atom_0[_S658 + u32(17)]), u32(1));
     }
     return;
 }
 
 @compute
 @workgroup_size(1, 1, 1)
-fn fr_cs_gate2(@builtin(global_invocation_id) id_71 : vec3<u32>)
+fn fr_cs_gate2(@builtin(global_invocation_id) id_72 : vec3<u32>)
 {
-    var _S656 : u32 = atomicLoad(&(atom_0[a_counters_0()]));
-    var _S657 : u32;
-    if(_S656 > u32(0))
+    var _S662 : u32 = atomicLoad(&(atom_0[a_counters_0()]));
+    var _S663 : u32;
+    if(_S662 > u32(0))
     {
-        var _S658 : u32 = groups_of_0(cs_rows_0(), u32(64));
-        _S657 = _S658;
+        var _S664 : u32 = groups_of_0(cs_rows_0(), u32(64));
+        _S663 = _S664;
     }
     else
     {
-        _S657 = u32(0);
+        _S663 = u32(0);
     }
-    set_args_0(u32(13), _S657);
+    set_args_0(u32(13), _S663);
     return;
 }
 
@@ -7090,15 +7140,15 @@ fn lp_anchor_0( r_26 : u32,  side_8 : u32) -> u32
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_save(@builtin(global_invocation_id) id_72 : vec3<u32>)
+fn fr_cs_save(@builtin(global_invocation_id) id_73 : vec3<u32>)
 {
-    var r_27 : u32 = id_72.x;
+    var r_27 : u32 = id_73.x;
     if(r_27 >= (cs_rows_0()))
     {
         return;
     }
     var row_3 : u32 = cs_row_0(r_27);
-    var _S659 : vec4<u32> = (bitcast<vec4<u32>>((engine_contacts_0[row_3])));
+    var _S665 : vec4<u32> = (bitcast<vec4<u32>>((engine_contacts_0[row_3])));
     var side_9 : u32 = u32(0);
     loop
     {
@@ -7109,19 +7159,19 @@ fn fr_cs_save(@builtin(global_invocation_id) id_72 : vec3<u32>)
         {
             break;
         }
-        var _S660 : vec4<f32> = vec4<f32>(0.0f);
-        var _S661 : bool = side_9 == u32(0);
+        var _S666 : vec4<f32> = vec4<f32>(0.0f);
+        var _S667 : bool = side_9 == u32(0);
         var col_1 : u32;
-        if(_S661)
+        if(_S667)
         {
-            col_1 = _S659.x;
+            col_1 = _S665.x;
         }
         else
         {
-            col_1 = _S659.y;
+            col_1 = _S665.y;
         }
         var k_54 : u32;
-        if((_S659.w) != u32(0))
+        if((_S665.w) != u32(0))
         {
             k_54 = collider_info_0[u32(2) * col_1].x;
         }
@@ -7129,31 +7179,31 @@ fn fr_cs_save(@builtin(global_invocation_id) id_72 : vec3<u32>)
         {
             k_54 = u32(4294967295);
         }
-        var _S662 : bool;
+        var _S668 : bool;
         if(k_54 != u32(4294967295))
         {
-            _S662 = k_54 < (params_0.chunk_count_0);
+            _S668 = k_54 < (params_0.chunk_count_0);
         }
         else
         {
-            _S662 = false;
+            _S668 = false;
         }
-        var _S663 : bool;
-        if(_S662)
+        var _S669 : bool;
+        if(_S668)
         {
-            var _S664 : bool = dirty_0(body_of_0(k_54));
-            _S663 = _S664;
+            var _S670 : bool = dirty_0(body_of_0(k_54));
+            _S669 = _S670;
         }
         else
         {
-            _S663 = false;
+            _S669 = false;
         }
         var saved_0 : vec4<f32>;
-        if(_S663)
+        if(_S669)
         {
             var at_27 : u32 = u32(7) * body_of_0(k_54);
             var anchor_0 : vec3<f32>;
-            if(_S661)
+            if(_S667)
             {
                 anchor_0 = engine_contacts_0[row_3 + u32(2)].xyz;
             }
@@ -7165,7 +7215,7 @@ fn fr_cs_save(@builtin(global_invocation_id) id_72 : vec3<u32>)
         }
         else
         {
-            saved_0 = _S660;
+            saved_0 = _S666;
         }
         lp_0[lp_anchor_0(r_27, side_9)] = saved_0;
         side_9 = side_9 + u32(1);
@@ -7175,15 +7225,15 @@ fn fr_cs_save(@builtin(global_invocation_id) id_72 : vec3<u32>)
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_clean(@builtin(global_invocation_id) id_73 : vec3<u32>)
+fn fr_cs_clean(@builtin(global_invocation_id) id_74 : vec3<u32>)
 {
-    var _S665 : u32 = id_73.x;
-    var _S666 : u32 = atomicLoad(&(atom_0[a_counters_0() + u32(18)]));
-    if(_S665 >= _S666)
+    var _S671 : u32 = id_74.x;
+    var _S672 : u32 = atomicLoad(&(atom_0[a_counters_0() + u32(18)]));
+    if(_S671 >= _S672)
     {
         return;
     }
-    var _S667 : u32 = a_cs_0(work_0[w_cs_bodies_0() + _S665]);
+    var _S673 : u32 = a_cs_0(work_0[w_cs_bodies_0() + _S671]);
     var w_9 : u32 = u32(0);
     loop
     {
@@ -7194,7 +7244,7 @@ fn fr_cs_clean(@builtin(global_invocation_id) id_73 : vec3<u32>)
         {
             break;
         }
-        atomicStore(&(atom_0[_S667 + w_9]), u32(0));
+        atomicStore(&(atom_0[_S673 + w_9]), u32(0));
         w_9 = w_9 + u32(1);
     }
     return;
@@ -7202,15 +7252,15 @@ fn fr_cs_clean(@builtin(global_invocation_id) id_73 : vec3<u32>)
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_fix(@builtin(global_invocation_id) id_74 : vec3<u32>)
+fn fr_cs_fix(@builtin(global_invocation_id) id_75 : vec3<u32>)
 {
-    var r_28 : u32 = id_74.x;
+    var r_28 : u32 = id_75.x;
     if(r_28 >= (cs_rows_0()))
     {
         return;
     }
     var row_4 : u32 = cs_row_0(r_28);
-    var _S668 : vec4<u32> = (bitcast<vec4<u32>>((engine_contacts_0[row_4])));
+    var _S674 : vec4<u32> = (bitcast<vec4<u32>>((engine_contacts_0[row_4])));
     var moved_0 : bool = false;
     var side_10 : u32 = u32(0);
     loop
@@ -7231,11 +7281,11 @@ fn fr_cs_fix(@builtin(global_invocation_id) id_74 : vec3<u32>)
         var col_2 : u32;
         if(side_10 == u32(0))
         {
-            col_2 = _S668.x;
+            col_2 = _S674.x;
         }
         else
         {
-            col_2 = _S668.y;
+            col_2 = _S674.y;
         }
         var at_28 : u32 = u32(7) * (bitcast<u32>((colliders_0[u32(4) * col_2].x)));
         var anchor_1 : vec3<f32> = rotate_0(conj_0(quat_of_0(bodies_0[at_28 + u32(1)])), saved_1.xyz - bodies_0[at_28].xyz);
@@ -7249,8 +7299,8 @@ fn fr_cs_fix(@builtin(global_invocation_id) id_74 : vec3<u32>)
     {
         engine_contacts_0[row_4 + u32(4)][i32(3)] = 0.0f;
         engine_contacts_0[row_4 + u32(5)][i32(3)] = 0.0f;
-        var _S669 : u32 = row_4 + u32(6);
-        engine_contacts_0[_S669] = vec4<f32>(1.0f, 1.0f, 0.0f, engine_contacts_0[_S669].w);
+        var _S675 : u32 = row_4 + u32(6);
+        engine_contacts_0[_S675] = vec4<f32>(1.0f, 1.0f, 0.0f, engine_contacts_0[_S675].w);
         engine_contacts_0[row_4 + u32(7)][i32(1)] = 0.0f;
     }
     return;
@@ -7258,76 +7308,76 @@ fn fr_cs_fix(@builtin(global_invocation_id) id_74 : vec3<u32>)
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_count(@builtin(global_invocation_id) id_75 : vec3<u32>)
+fn fr_cs_count(@builtin(global_invocation_id) id_76 : vec3<u32>)
 {
-    var k_55 : u32 = id_75.x;
+    var k_55 : u32 = id_76.x;
     if(k_55 >= (params_0.chunk_count_0))
     {
         return;
     }
     var s_22 : u32 = body_of_0(k_55);
-    var _S670 : bool = cs_struck_0(s_22);
-    if(!_S670)
+    var _S676 : bool = cs_struck_0(s_22);
+    if(!_S676)
     {
         return;
     }
-    var _S671 : u32 = a_cs_0(s_22);
-    var _S672 : u32 = atomicMax(&(atom_0[_S671 + u32(3)]), ~k_55);
+    var _S677 : u32 = a_cs_0(s_22);
+    var _S678 : u32 = atomicMax(&(atom_0[_S677 + u32(3)]), ~k_55);
     if(((info_0[k_55] & (u32(1)))) != u32(0))
     {
-        atomicStore(&(atom_0[_S671 + u32(4)]), u32(1));
+        atomicStore(&(atom_0[_S677 + u32(4)]), u32(1));
     }
-    var _S673 : u32 = atomicAdd(&(atom_0[_S671 + u32(5)]), u32(1));
+    var _S679 : u32 = atomicAdd(&(atom_0[_S677 + u32(5)]), u32(1));
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_base(@builtin(global_invocation_id) id_76 : vec3<u32>)
+fn fr_cs_base(@builtin(global_invocation_id) id_77 : vec3<u32>)
 {
-    var _S674 : u32 = id_76.x;
-    var _S675 : u32 = a_counters_0();
-    var _S676 : u32 = atomicLoad(&(atom_0[_S675 + u32(18)]));
-    if(_S674 >= _S676)
+    var _S680 : u32 = id_77.x;
+    var _S681 : u32 = a_counters_0();
+    var _S682 : u32 = atomicLoad(&(atom_0[_S681 + u32(18)]));
+    if(_S680 >= _S682)
     {
         return;
     }
-    var _S677 : u32 = a_cs_0(work_0[w_cs_bodies_0() + _S674]);
-    var _S678 : u32 = atomicLoad(&(atom_0[_S677 + u32(5)]));
-    var _S679 : u32 = atomicAdd(&(atom_0[_S675 + u32(19)]), _S678);
-    atomicStore(&(atom_0[_S677 + u32(6)]), _S679);
+    var _S683 : u32 = a_cs_0(work_0[w_cs_bodies_0() + _S680]);
+    var _S684 : u32 = atomicLoad(&(atom_0[_S683 + u32(5)]));
+    var _S685 : u32 = atomicAdd(&(atom_0[_S681 + u32(19)]), _S684);
+    atomicStore(&(atom_0[_S683 + u32(6)]), _S685);
     return;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_cs_collect(@builtin(global_invocation_id) id_77 : vec3<u32>)
+fn fr_cs_collect(@builtin(global_invocation_id) id_78 : vec3<u32>)
 {
-    var k_56 : u32 = id_77.x;
+    var k_56 : u32 = id_78.x;
     if(k_56 >= (params_0.chunk_count_0))
     {
         return;
     }
     var s_23 : u32 = body_of_0(k_56);
-    var _S680 : bool = cs_struck_0(s_23);
-    if(!_S680)
+    var _S686 : bool = cs_struck_0(s_23);
+    if(!_S686)
     {
         return;
     }
-    var _S681 : u32 = w_cs_list_0();
-    var _S682 : u32 = a_cs_0(s_23);
-    var _S683 : u32 = atomicLoad(&(atom_0[_S682 + u32(6)]));
-    var _S684 : u32 = _S681 + _S683;
-    var _S685 : u32 = atomicAdd(&(atom_0[_S682 + u32(7)]), u32(1));
-    work_0[_S684 + _S685] = k_56;
+    var _S687 : u32 = w_cs_list_0();
+    var _S688 : u32 = a_cs_0(s_23);
+    var _S689 : u32 = atomicLoad(&(atom_0[_S688 + u32(6)]));
+    var _S690 : u32 = _S687 + _S689;
+    var _S691 : u32 = atomicAdd(&(atom_0[_S688 + u32(7)]), u32(1));
+    work_0[_S690 + _S691] = k_56;
     return;
 }
 
 fn cs_load_0( k_57 : u32,  s_24 : u32)
 {
-    var _S686 : u32 = a_cs_0(s_24);
-    var _S687 : u32 = atomicLoad(&(atom_0[_S686 + u32(4)]));
-    var supported_1 : bool = _S687 != u32(0);
+    var _S692 : u32 = a_cs_0(s_24);
+    var _S693 : u32 = atomicLoad(&(atom_0[_S692 + u32(4)]));
+    var supported_1 : bool = _S693 != u32(0);
     var fixed_2 : bool;
     if(((info_0[k_57] & (u32(1)))) != u32(0))
     {
@@ -7337,79 +7387,79 @@ fn cs_load_0( k_57 : u32,  s_24 : u32)
     {
         if(!supported_1)
         {
-            var _S688 : u32 = atomicLoad(&(atom_0[_S686 + u32(3)]));
-            fixed_2 = (~_S688) == k_57;
+            var _S694 : u32 = atomicLoad(&(atom_0[_S692 + u32(3)]));
+            fixed_2 = (~_S694) == k_57;
         }
         else
         {
             fixed_2 = false;
         }
     }
-    var _S689 : u32 = lp_body_0(s_24);
-    var _S690 : u32 = u32(7) * s_24;
-    var q_35 : Quat_0;
+    var _S695 : u32 = lp_body_0(s_24);
+    var _S696 : u32 = u32(7) * s_24;
+    var q_36 : Quat_0;
     var origin_16 : vec3<f32>;
-    structure_pose_4(s_24, _S690, &(q_35), &(origin_16));
-    var qi_1 : Quat_0 = conj_0(q_35);
-    var force_4 : vec3<f32> = rotate_0(qi_1, lp_0[_S689 + u32(3)].xyz * vec3<f32>(lp_0[_S689 + u32(2)].w));
-    var contact_20 : vec3<f32> = rotate_0(qi_1, lp_0[_S689 + u32(2)].xyz - origin_16);
-    var _S691 : u32 = u32(4) * k_57;
-    var c0_5 : vec4<f32> = chunks_0[_S691];
-    var _S692 : vec3<f32> = vec3<f32>(0.0f);
-    var _S693 : u32 = atomicLoad(&(atom_0[_S686 + u32(1)]));
+    structure_pose_4(s_24, _S696, &(q_36), &(origin_16));
+    var qi_1 : Quat_0 = conj_0(q_36);
+    var force_4 : vec3<f32> = rotate_0(qi_1, lp_0[_S695 + u32(3)].xyz * vec3<f32>(lp_0[_S695 + u32(2)].w));
+    var contact_21 : vec3<f32> = rotate_0(qi_1, lp_0[_S695 + u32(2)].xyz - origin_16);
+    var _S697 : u32 = u32(4) * k_57;
+    var c0_5 : vec4<f32> = chunks_0[_S697];
+    var _S698 : vec3<f32> = vec3<f32>(0.0f);
+    var _S699 : u32 = atomicLoad(&(atom_0[_S692 + u32(1)]));
     var f_13 : vec3<f32>;
     var t_16 : vec3<f32>;
-    if(_S693 == (k_57 + u32(1)))
+    if(_S699 == (k_57 + u32(1)))
     {
-        var _S694 : vec3<f32> = cross(contact_20 - c0_5.xyz, force_4);
+        var _S700 : vec3<f32> = cross(contact_21 - c0_5.xyz, force_4);
         f_13 = force_4;
-        t_16 = _S694;
+        t_16 = _S700;
     }
     else
     {
-        f_13 = _S692;
-        t_16 = _S692;
+        f_13 = _S698;
+        t_16 = _S698;
     }
-    var inv_mass_7 : f32 = bodies_0[_S690].w;
-    var _S695 : bool;
+    var inv_mass_7 : f32 = bodies_0[_S696].w;
+    var _S701 : bool;
     if(!supported_1)
     {
-        _S695 = inv_mass_7 > 0.0f;
+        _S701 = inv_mass_7 > 0.0f;
     }
     else
     {
-        _S695 = false;
+        _S701 = false;
     }
-    if(_S695)
+    if(_S701)
     {
-        var _S696 : u32 = u32(2) * s_24;
-        var com_7 : vec3<f32> = frames_0[_S696].xyz;
-        var p_23 : Quat_0 = quat_of_0(frames_0[_S696 + u32(1)]);
-        var alpha_1 : vec3<f32> = rotate_0(p_23, bodies_0[_S690 + u32(2)].xyz * rotate_0(conj_0(p_23), cross(contact_20 - com_7, force_4)));
-        var c1_4 : vec4<f32> = chunks_0[_S691 + u32(1)];
-        var c2_5 : vec4<f32> = chunks_0[_S691 + u32(2)];
-        var _S697 : f32 = alpha_1.x;
-        var _S698 : f32 = c1_4.w;
-        var _S699 : f32 = alpha_1.y;
-        var _S700 : f32 = c2_5.x;
-        var _S701 : f32 = alpha_1.z;
-        var _S702 : f32 = c2_5.y;
-        var t_17 : vec3<f32> = t_16 - vec3<f32>(c1_4.x * _S697 + _S698 * _S699 + _S700 * _S701, _S698 * _S697 + c1_4.y * _S699 + _S702 * _S701, _S700 * _S697 + _S702 * _S699 + c1_4.z * _S701);
+        var _S702 : u32 = u32(2) * s_24;
+        var com_7 : vec3<f32> = frames_0[_S702].xyz;
+        var p_23 : Quat_0 = quat_of_0(frames_0[_S702 + u32(1)]);
+        var alpha_1 : vec3<f32> = rotate_0(p_23, bodies_0[_S696 + u32(2)].xyz * rotate_0(conj_0(p_23), cross(contact_21 - com_7, force_4)));
+        var c1_4 : vec4<f32> = chunks_0[_S697 + u32(1)];
+        var c2_5 : vec4<f32> = chunks_0[_S697 + u32(2)];
+        var _S703 : f32 = alpha_1.x;
+        var _S704 : f32 = c1_4.w;
+        var _S705 : f32 = alpha_1.y;
+        var _S706 : f32 = c2_5.x;
+        var _S707 : f32 = alpha_1.z;
+        var _S708 : f32 = c2_5.y;
+        var t_17 : vec3<f32> = t_16 - vec3<f32>(c1_4.x * _S703 + _S704 * _S705 + _S706 * _S707, _S704 * _S703 + c1_4.y * _S705 + _S708 * _S707, _S706 * _S703 + _S708 * _S705 + c1_4.z * _S707);
         f_13 = f_13 - vec3<f32>(c0_5.w) * (force_4 * vec3<f32>(inv_mass_7) + cross(alpha_1, c0_5.xyz - com_7));
         t_16 = t_17;
     }
-    var _S703 : u32 = st_f_0(k_57, u32(14));
-    var _S704 : f32;
+    var _S709 : u32 = st_f_0(k_57, u32(14));
+    var _S710 : f32;
     if(fixed_2)
     {
-        _S704 = 1.0f;
+        _S710 = 1.0f;
     }
     else
     {
-        _S704 = 0.0f;
+        _S710 = 0.0f;
     }
-    lp_0[_S703] = vec4<f32>(f_13, _S704);
-    lp_0[_S703 + u32(1)] = vec4<f32>(t_16, 0.0f);
+    lp_0[_S709] = vec4<f32>(f_13, _S710);
+    lp_0[_S709 + u32(1)] = vec4<f32>(t_16, 0.0f);
     var c_27 : u32 = u32(0);
     loop
     {
@@ -7420,16 +7470,16 @@ fn cs_load_0( k_57 : u32,  s_24 : u32)
         {
             break;
         }
-        var _S705 : u32 = st_x_0(k_57, u32(14), c_27);
-        var _S706 : vec4<f32> = vec4<f32>(0.0f);
-        lp_0[_S705] = _S706;
-        lp_0[_S705 + u32(1)] = _S706;
+        var _S711 : u32 = st_x_0(k_57, u32(14), c_27);
+        var _S712 : vec4<f32> = vec4<f32>(0.0f);
+        lp_0[_S711] = _S712;
+        lp_0[_S711 + u32(1)] = _S712;
         c_27 = c_27 + u32(1);
     }
-    var _S707 : u32 = st_d_0(k_57, u32(14));
-    var _S708 : vec4<f32> = vec4<f32>(0.0f);
-    lp_0[_S707] = _S708;
-    lp_0[_S707 + u32(1)] = _S708;
+    var _S713 : u32 = st_d_0(k_57, u32(14));
+    var _S714 : vec4<f32> = vec4<f32>(0.0f);
+    lp_0[_S713] = _S714;
+    lp_0[_S713 + u32(1)] = _S714;
     return;
 }
 
@@ -7439,33 +7489,33 @@ fn device_group_barrier_0()
     return;
 }
 
-fn cs_break_0( i_24 : u32,  s_25 : u32)
+fn cs_break_0( i_25 : u32,  s_25 : u32)
 {
-    var bond_12 : vec4<u32> = bonds_0[i_24];
-    var b_78 : LpBond_0 = lp_bond_0(i_24);
-    var _S709 : u32 = bond_12.x;
-    var _S710 : u32 = bond_12.y;
+    var bond_13 : vec4<u32> = bonds_0[i_25];
+    var b_79 : LpBond_0 = lp_bond_0(i_25);
+    var _S715 : u32 = bond_13.x;
+    var _S716 : u32 = bond_13.y;
     var q_lin_8 : vec3<f32>;
     var q_ang_8 : vec3<f32>;
-    st_force_0(b_78, _S709, _S710, u32(14), u32(0), &(q_lin_8), &(q_ang_8));
+    st_force_0(b_79, _S715, _S716, u32(14), u32(0), &(q_lin_8), &(q_ang_8));
     if((params_0.load_model_0) == u32(1))
     {
         var b_lin_0 : vec3<f32>;
         var b_ang_0 : vec3<f32>;
-        lp_force_0(b_78, _S709, _S710, u32(0), &(b_lin_0), &(b_ang_0));
+        lp_force_0(b_79, _S715, _S716, u32(0), &(b_lin_0), &(b_ang_0));
         q_lin_8 = q_lin_8 + b_lin_0;
         q_ang_8 = q_ang_8 + b_ang_0;
     }
-    var idx_2 : vec4<f32> = failure_indices_0(lp_material_0(b_78.law_0.ids_3.x), b_78.law_0, stress_measures_0(b_78.law_0, q_lin_8, q_ang_8), b_78.law_0.geom1_0.w);
+    var idx_2 : vec4<f32> = failure_indices_0(lp_material_0(b_79.law_0.ids_3.x), b_79.law_0, stress_measures_0(b_79.law_0, q_lin_8, q_ang_8), b_79.law_0.geom1_0.w);
     if((max(max(idx_2.x, idx_2.y), max(idx_2.z, idx_2.w))) >= 1.0f)
     {
-        work_0[w_alive_0() + i_24] = u32(0);
-        var _S711 : u32 = atomicOr(&(atom_0[a_dirty_0() + s_25]), u32(1));
-        var _S712 : u32 = a_counters_0();
-        var _S713 : u32 = atomicAdd(&(atom_0[_S712]), u32(1));
-        var _S714 : u32 = atomicAdd(&(atom_0[_S712 + u32(1)]), u32(1));
-        event_broken_0(i_24);
-        var _S715 : u32 = atomicAdd(&(atom_0[_S712 + u32(17)]), u32(1));
+        work_0[w_alive_0() + i_25] = u32(0);
+        var _S717 : u32 = atomicOr(&(atom_0[a_dirty_0() + s_25]), u32(1));
+        var _S718 : u32 = a_counters_0();
+        var _S719 : u32 = atomicAdd(&(atom_0[_S718]), u32(1));
+        var _S720 : u32 = atomicAdd(&(atom_0[_S718 + u32(1)]), u32(1));
+        event_broken_0(i_25);
+        var _S721 : u32 = atomicAdd(&(atom_0[_S718 + u32(17)]), u32(1));
     }
     return;
 }
@@ -7474,52 +7524,52 @@ fn cs_break_0( i_24 : u32,  s_25 : u32)
 @workgroup_size(256, 1, 1)
 fn fr_cs_solve(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local_invocation_id) thread_6 : vec3<u32>)
 {
-    var _S716 : bool;
+    var _S722 : bool;
     var j3_0 : u32;
     var s_26 : u32 = work_0[w_cs_bodies_0() + group_3.x];
     var t_18 : u32 = thread_6.x;
-    var _S717 : u32 = a_cs_0(work_0[w_cs_bodies_0() + group_3.x]);
-    var _S718 : u32 = atomicLoad(&(atom_0[_S717 + u32(6)]));
-    var _S719 : u32 = atomicLoad(&(atom_0[_S717 + u32(5)]));
+    var _S723 : u32 = a_cs_0(work_0[w_cs_bodies_0() + group_3.x]);
+    var _S724 : u32 = atomicLoad(&(atom_0[_S723 + u32(6)]));
+    var _S725 : u32 = atomicLoad(&(atom_0[_S723 + u32(5)]));
     var j_10 : u32 = t_18;
     loop
     {
-        if(j_10 < _S719)
+        if(j_10 < _S725)
         {
         }
         else
         {
             break;
         }
-        cs_load_0(work_0[w_cs_list_0() + _S718 + j_10], s_26);
+        cs_load_0(work_0[w_cs_list_0() + _S724 + j_10], s_26);
         j_10 = j_10 + u32(256);
     }
     device_group_barrier_0();
     var j2_0 : u32 = t_18;
     loop
     {
-        if(j2_0 < _S719)
+        if(j2_0 < _S725)
         {
         }
         else
         {
             break;
         }
-        var k_58 : u32 = work_0[w_cs_list_0() + _S718 + j2_0];
-        var _S720 : u32 = st_f_0(work_0[w_cs_list_0() + _S718 + j2_0], u32(14));
-        if((lp_0[_S720].w) == 0.0f)
+        var k_58 : u32 = work_0[w_cs_list_0() + _S724 + j2_0];
+        var _S726 : u32 = st_f_0(work_0[w_cs_list_0() + _S724 + j2_0], u32(14));
+        if((lp_0[_S726].w) == 0.0f)
         {
-            var _S721 : bool = lp_factor_0(k_58);
-            _S716 = !_S721;
+            var _S727 : bool = lp_factor_0(k_58);
+            _S722 = !_S727;
         }
         else
         {
-            _S716 = false;
+            _S722 = false;
         }
-        if(_S716)
+        if(_S722)
         {
-            lp_0[_S720][i32(3)] = 1.0f;
-            var _S722 : u32 = atomicOr(&(atom_0[a_counters_0() + u32(3)]), u32(64));
+            lp_0[_S726][i32(3)] = 1.0f;
+            var _S728 : u32 = atomicOr(&(atom_0[a_counters_0() + u32(3)]), u32(64));
         }
         j2_0 = j2_0 + u32(256);
     }
@@ -7537,14 +7587,14 @@ fn fr_cs_solve(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local_invoca
         j3_0 = t_18;
         loop
         {
-            if(j3_0 < _S719)
+            if(j3_0 < _S725)
             {
             }
             else
             {
                 break;
             }
-            st_sweep_0(work_0[w_cs_list_0() + _S718 + j3_0], u32(14), sweep_0 % u32(2), params_0.cs_c1_0, params_0.cs_c2_0);
+            st_sweep_0(work_0[w_cs_list_0() + _S724 + j3_0], u32(14), sweep_0 % u32(2), params_0.cs_c1_0, params_0.cs_c2_0);
             j3_0 = j3_0 + u32(256);
         }
         device_group_barrier_0();
@@ -7553,39 +7603,39 @@ fn fr_cs_solve(@builtin(workgroup_id) group_3 : vec3<u32>, @builtin(local_invoca
     j3_0 = t_18;
     loop
     {
-        if(j3_0 < _S719)
+        if(j3_0 < _S725)
         {
         }
         else
         {
             break;
         }
-        var k_59 : u32 = work_0[w_cs_list_0() + _S718 + j3_0];
-        var range_4 : vec4<f32> = ext_0[params_0.ext_chunks_0 + u32(4) * work_0[w_cs_list_0() + _S718 + j3_0]];
-        var _S723 : u32 = (bitcast<u32>((range_4.x)));
-        var _S724 : u32 = (bitcast<u32>((range_4.y)));
+        var k_59 : u32 = work_0[w_cs_list_0() + _S724 + j3_0];
+        var range_4 : vec4<f32> = ext_0[params_0.ext_chunks_0 + u32(4) * work_0[w_cs_list_0() + _S724 + j3_0]];
+        var _S729 : u32 = (bitcast<u32>((range_4.x)));
+        var _S730 : u32 = (bitcast<u32>((range_4.y)));
         var e_7 : u32 = u32(0);
         loop
         {
-            if(e_7 < _S724)
+            if(e_7 < _S730)
             {
             }
             else
             {
                 break;
             }
-            var i_25 : u32 = adj_bond_0(_S723 + e_7);
-            if((bonds_0[i_25].x) == k_59)
+            var i_26 : u32 = adj_bond_0(_S729 + e_7);
+            if((bonds_0[i_26].x) == k_59)
             {
-                _S716 = work_0[w_alive_0() + i_25] != u32(0);
+                _S722 = work_0[w_alive_0() + i_26] != u32(0);
             }
             else
             {
-                _S716 = false;
+                _S722 = false;
             }
-            if(_S716)
+            if(_S722)
             {
-                cs_break_0(i_25, s_26);
+                cs_break_0(i_26, s_26);
             }
             e_7 = e_7 + u32(1);
         }
@@ -7623,58 +7673,58 @@ fn crush_record_0( k_62 : u32,  step_6 : vec4<f32>,  cause_0 : u32)
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_crush_blast(@builtin(global_invocation_id) id_78 : vec3<u32>)
+fn fr_crush_blast(@builtin(global_invocation_id) id_79 : vec3<u32>)
 {
-    var k_63 : u32 = id_78.x;
-    var _S725 : bool;
+    var k_63 : u32 = id_79.x;
+    var _S731 : bool;
     if(k_63 >= (params_0.chunk_count_0))
     {
-        _S725 = true;
+        _S731 = true;
     }
     else
     {
-        _S725 = (crush_0.enabled_0) == u32(0);
+        _S731 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S725)
+    if(_S731)
     {
         return;
     }
     var w_10 : vec4<f32> = crush_rw_0[crush_0.r_blast_0 + k_63];
-    var _S726 : f32 = crush_rw_0[crush_0.r_blast_0 + k_63].x;
-    if(!(_S726 > 0.0f))
+    var _S732 : f32 = crush_rw_0[crush_0.r_blast_0 + k_63].x;
+    if(!(_S732 > 0.0f))
     {
-        _S725 = !((w_10.y) > 0.0f);
+        _S731 = !((w_10.y) > 0.0f);
     }
     else
     {
-        _S725 = false;
+        _S731 = false;
     }
-    if(_S725)
+    if(_S731)
     {
-        _S725 = !((w_10.z) > 0.0f);
+        _S731 = !((w_10.z) > 0.0f);
     }
     else
     {
-        _S725 = false;
+        _S731 = false;
     }
-    if(_S725)
+    if(_S731)
     {
         return;
     }
     crush_rw_0[crush_0.r_blast_0 + k_63] = vec4<f32>(0.0f);
     if(!crushable_0(k_63))
     {
-        _S725 = true;
+        _S731 = true;
     }
     else
     {
-        _S725 = (((crush_flags_0(k_63)) & (u32(1)))) != u32(0);
+        _S731 = (((crush_flags_0(k_63)) & (u32(1)))) != u32(0);
     }
-    if(_S725)
+    if(_S731)
     {
         return;
     }
-    var d_24 : f32 = crush_rw_0[k_63].x + _S726;
+    var d_24 : f32 = crush_rw_0[k_63].x + _S732;
     var step_7 : vec4<f32>;
     if(d_24 >= 1.0f)
     {
@@ -7697,9 +7747,9 @@ struct Sym_0
 fn sym_zero_0() -> Sym_0
 {
     var s_27 : Sym_0;
-    var _S727 : vec3<f32> = vec3<f32>(0.0f);
-    s_27.d_25 = _S727;
-    s_27.o_10 = _S727;
+    var _S733 : vec3<f32> = vec3<f32>(0.0f);
+    s_27.d_25 = _S733;
+    s_27.o_10 = _S733;
     return s_27;
 }
 
@@ -7707,21 +7757,21 @@ fn sym_outer_0( r_29 : vec3<f32>,  f_14 : vec3<f32>) -> Sym_0
 {
     var s_28 : Sym_0;
     s_28.d_25 = r_29 * f_14;
-    var _S728 : f32 = r_29.x;
-    var _S729 : f32 = f_14.y;
-    var _S730 : f32 = r_29.y;
-    var _S731 : f32 = f_14.x;
-    var _S732 : f32 = f_14.z;
-    var _S733 : f32 = r_29.z;
-    s_28.o_10 = vec3<f32>(0.5f) * vec3<f32>(_S728 * _S729 + _S730 * _S731, _S728 * _S732 + _S733 * _S731, _S730 * _S732 + _S733 * _S729);
+    var _S734 : f32 = r_29.x;
+    var _S735 : f32 = f_14.y;
+    var _S736 : f32 = r_29.y;
+    var _S737 : f32 = f_14.x;
+    var _S738 : f32 = f_14.z;
+    var _S739 : f32 = r_29.z;
+    s_28.o_10 = vec3<f32>(0.5f) * vec3<f32>(_S734 * _S735 + _S736 * _S737, _S734 * _S738 + _S739 * _S737, _S736 * _S738 + _S739 * _S735);
     return s_28;
 }
 
-fn sym_add_0( a_14 : Sym_0,  b_79 : Sym_0) -> Sym_0
+fn sym_add_0( a_14 : Sym_0,  b_80 : Sym_0) -> Sym_0
 {
     var s_29 : Sym_0;
-    s_29.d_25 = a_14.d_25 + b_79.d_25;
-    s_29.o_10 = a_14.o_10 + b_79.o_10;
+    s_29.d_25 = a_14.d_25 + b_80.d_25;
+    s_29.o_10 = a_14.o_10 + b_80.o_10;
     return s_29;
 }
 
@@ -7743,17 +7793,17 @@ fn add_load_1( w_12 : ptr<function, Sym_0>,  f_sum_1 : ptr<function, vec3<f32>>,
     return;
 }
 
-fn flow_virial_0( k_64 : u32,  q_36 : Quat_0,  origin_17 : vec3<f32>,  centre_1 : vec3<f32>,  wf_0 : ptr<function, Sym_0>,  total_0 : ptr<function, f32>)
+fn flow_virial_0( k_64 : u32,  q_37 : Quat_0,  origin_17 : vec3<f32>,  centre_1 : vec3<f32>,  wf_0 : ptr<function, Sym_0>,  total_0 : ptr<function, f32>)
 {
     (*wf_0) = sym_zero_0();
     (*total_0) = 0.0f;
     var adj_0 : vec4<f32> = crush_tab_0[crush_0.t_adj_0 + k_64];
     var first_2 : u32 = (bitcast<u32>((adj_0.x)));
-    var _S734 : u32 = (bitcast<u32>((adj_0.y)));
+    var _S740 : u32 = (bitcast<u32>((adj_0.y)));
     var j_11 : u32 = first_2;
     loop
     {
-        if(j_11 < (first_2 + _S734))
+        if(j_11 < (first_2 + _S740))
         {
         }
         else
@@ -7772,8 +7822,8 @@ fn flow_virial_0( k_64 : u32,  q_36 : Quat_0,  origin_17 : vec3<f32>,  centre_1 
             j_11 = j_11 + u32(1);
             continue;
         }
-        var r_32 : vec3<f32> = origin_17 + rotate_0(q_36, crush_tab_0[crush_0.t_bonds_0 + bi_0].xyz) - centre_1;
-        var n_7 : vec3<f32> = rotate_0(q_36, crush_tab_0[crush_0.t_normal_0 + bi_0].xyz);
+        var r_32 : vec3<f32> = origin_17 + rotate_0(q_37, crush_tab_0[crush_0.t_bonds_0 + bi_0].xyz) - centre_1;
+        var n_7 : vec3<f32> = rotate_0(q_37, crush_tab_0[crush_0.t_normal_0 + bi_0].xyz);
         var out_n_0 : vec3<f32>;
         if((dot(n_7, r_32)) >= 0.0f)
         {
@@ -7790,18 +7840,18 @@ fn flow_virial_0( k_64 : u32,  q_36 : Quat_0,  origin_17 : vec3<f32>,  centre_1 
     return;
 }
 
-fn bond_centroid_0( k_65 : u32,  q_37 : Quat_0,  origin_18 : vec3<f32>,  centre_2 : vec3<f32>) -> vec4<f32>
+fn bond_centroid_0( k_65 : u32,  q_38 : Quat_0,  origin_18 : vec3<f32>,  centre_2 : vec3<f32>) -> vec4<f32>
 {
     var adj_1 : vec4<f32> = crush_tab_0[crush_0.t_adj_0 + k_65];
     var first_3 : u32 = (bitcast<u32>((adj_1.x)));
-    var _S735 : u32 = (bitcast<u32>((adj_1.y)));
-    var _S736 : vec3<f32> = vec3<f32>(0.0f);
+    var _S741 : u32 = (bitcast<u32>((adj_1.y)));
+    var _S742 : vec3<f32> = vec3<f32>(0.0f);
     var j_12 : u32 = first_3;
-    var sum_4 : vec3<f32> = _S736;
+    var sum_4 : vec3<f32> = _S742;
     var area_1 : f32 = 0.0f;
     loop
     {
-        if(j_12 < (first_3 + _S735))
+        if(j_12 < (first_3 + _S741))
         {
         }
         else
@@ -7815,9 +7865,9 @@ fn bond_centroid_0( k_65 : u32,  q_37 : Quat_0,  origin_18 : vec3<f32>,  centre_
             continue;
         }
         var bc_0 : vec4<f32> = crush_tab_0[crush_0.t_bonds_0 + bi_1];
-        var _S737 : f32 = bc_0.w;
-        var area_2 : f32 = area_1 + _S737;
-        sum_4 = sum_4 + vec3<f32>(_S737) * (origin_18 + rotate_0(q_37, bc_0.xyz) - centre_2);
+        var _S743 : f32 = bc_0.w;
+        var area_2 : f32 = area_1 + _S743;
+        sum_4 = sum_4 + vec3<f32>(_S743) * (origin_18 + rotate_0(q_38, bc_0.xyz) - centre_2);
         area_1 = area_2;
         j_12 = j_12 + u32(1);
     }
@@ -7827,7 +7877,7 @@ fn bond_centroid_0( k_65 : u32,  q_37 : Quat_0,  origin_18 : vec3<f32>,  centre_
     }
     else
     {
-        sum_4 = _S736;
+        sum_4 = _S742;
     }
     return vec4<f32>(sum_4, area_1);
 }
@@ -7841,10 +7891,10 @@ fn balanced_0( w_13 : Sym_0,  f_17 : vec3<f32>,  spread_2 : vec4<f32>,  bonds_1 
     }
     else
     {
-        var _S738 : f32 = spread_2.w;
-        if(_S738 > 0.0f)
+        var _S744 : f32 = spread_2.w;
+        if(_S744 > 0.0f)
         {
-            at_29 = spread_2.xyz / vec3<f32>(_S738);
+            at_29 = spread_2.xyz / vec3<f32>(_S744);
         }
         else
         {
@@ -7856,9 +7906,9 @@ fn balanced_0( w_13 : Sym_0,  f_17 : vec3<f32>,  spread_2 : vec4<f32>,  bonds_1 
 
 fn sym_norm2_0( s_30 : Sym_0) -> f32
 {
-    var _S739 : vec3<f32> = s_30.d_25;
-    var _S740 : vec3<f32> = s_30.o_10;
-    return dot(_S739, _S739) + 2.0f * dot(_S740, _S740);
+    var _S745 : vec3<f32> = s_30.d_25;
+    var _S746 : vec3<f32> = s_30.o_10;
+    return dot(_S745, _S745) + 2.0f * dot(_S746, _S746);
 }
 
 fn crush_invariants_0( v_18 : Sym_0,  volume_0 : f32) -> vec2<f32>
@@ -7879,38 +7929,38 @@ fn crush_invariants_0( v_18 : Sym_0,  volume_0 : f32) -> vec2<f32>
 
 fn crush_excess_0( pq_0 : vec2<f32>,  m0_0 : vec4<f32>) -> f32
 {
-    var _S741 : f32 = pq_0.x;
-    if(!(_S741 > 0.0f))
+    var _S747 : f32 = pq_0.x;
+    if(!(_S747 > 0.0f))
     {
         return 0.0f;
     }
-    var _S742 : f32 = max(pq_0.y - (m0_0.y + m0_0.z * _S741), _S741 - m0_0.x);
-    var _S743 : f32;
-    if(_S742 > 0.0f)
+    var _S748 : f32 = max(pq_0.y - (m0_0.y + m0_0.z * _S747), _S747 - m0_0.x);
+    var _S749 : f32;
+    if(_S748 > 0.0f)
     {
-        _S743 = _S742;
+        _S749 = _S748;
     }
     else
     {
-        _S743 = 0.0f;
+        _S749 = 0.0f;
     }
-    return _S743;
+    return _S749;
 }
 
-fn crush_two_0( a_15 : Sym_0,  dt_a_0 : f32,  b_80 : Sym_0,  dt_b_0 : f32,  k_66 : u32,  damage_2 : f32) -> vec4<f32>
+fn crush_two_0( a_15 : Sym_0,  dt_a_0 : f32,  b_81 : Sym_0,  dt_b_0 : f32,  k_66 : u32,  damage_2 : f32) -> vec4<f32>
 {
-    var _S744 : u32 = u32(2) * k_66;
-    var m0_1 : vec4<f32> = crush_tab_0[_S744];
-    var m1_1 : vec4<f32> = crush_tab_0[_S744 + u32(1)];
-    var _S745 : f32 = m1_1.y;
-    var pa_3 : vec2<f32> = crush_invariants_0(a_15, _S745);
-    var pb_4 : vec2<f32> = crush_invariants_0(b_80, _S745);
-    var ea_0 : f32 = crush_excess_0(pa_3, m0_1);
-    var _S746 : bool = dt_b_0 > 0.0f;
+    var _S750 : u32 = u32(2) * k_66;
+    var m0_1 : vec4<f32> = crush_tab_0[_S750];
+    var m1_1 : vec4<f32> = crush_tab_0[_S750 + u32(1)];
+    var _S751 : f32 = m1_1.y;
+    var pa_4 : vec2<f32> = crush_invariants_0(a_15, _S751);
+    var pb_5 : vec2<f32> = crush_invariants_0(b_81, _S751);
+    var ea_0 : f32 = crush_excess_0(pa_4, m0_1);
+    var _S752 : bool = dt_b_0 > 0.0f;
     var eb_0 : f32;
-    if(_S746)
+    if(_S752)
     {
-        eb_0 = crush_excess_0(pb_4, m0_1);
+        eb_0 = crush_excess_0(pb_5, m0_1);
     }
     else
     {
@@ -7918,13 +7968,13 @@ fn crush_two_0( a_15 : Sym_0,  dt_a_0 : f32,  b_80 : Sym_0,  dt_b_0 : f32,  k_66
     }
     var d_26 : f32 = damage_2 + (ea_0 * ea_0 * dt_a_0 + eb_0 * eb_0 * dt_b_0) / (m1_1.x * m0_1.w);
     var peak_2 : vec2<f32>;
-    if(_S746)
+    if(_S752)
     {
-        peak_2 = max(pa_3, pb_4);
+        peak_2 = max(pa_4, pb_5);
     }
     else
     {
-        peak_2 = pa_3;
+        peak_2 = pa_4;
     }
     if(d_26 >= 1.0f)
     {
@@ -7936,58 +7986,58 @@ fn crush_two_0( a_15 : Sym_0,  dt_a_0 : f32,  b_80 : Sym_0,  dt_b_0 : f32,  k_66
 fn crush_loads_flow_0( k_67 : u32)
 {
     var slot_21 : u32 = body_of_0(k_67);
-    var b_81 : u32 = u32(7) * slot_21;
-    var q_38 : Quat_0;
+    var b_82 : u32 = u32(7) * slot_21;
+    var q_39 : Quat_0;
     var origin_19 : vec3<f32>;
-    structure_pose_4(slot_21, b_81, &(q_38), &(origin_19));
-    var _S747 : u32 = u32(4) * k_67;
-    var c0_6 : vec4<f32> = chunks_0[_S747];
-    var _S748 : vec4<f32> = chunks_0[_S747 + u32(3)];
-    var centre_3 : vec3<f32> = origin_19 + rotate_0(q_38, c0_6.xyz);
-    var inv_mass_8 : f32 = bodies_0[b_81].w;
-    var _S749 : f32;
+    structure_pose_4(slot_21, b_82, &(q_39), &(origin_19));
+    var _S753 : u32 = u32(4) * k_67;
+    var c0_6 : vec4<f32> = chunks_0[_S753];
+    var _S754 : vec4<f32> = chunks_0[_S753 + u32(3)];
+    var centre_3 : vec3<f32> = origin_19 + rotate_0(q_39, c0_6.xyz);
+    var inv_mass_8 : f32 = bodies_0[b_82].w;
+    var _S755 : f32;
     if(inv_mass_8 > 0.0f)
     {
-        _S749 = 1.0f / inv_mass_8;
+        _S755 = 1.0f / inv_mass_8;
     }
     else
     {
-        _S749 = float_bits_0(u32(2139095040));
+        _S755 = float_bits_0(u32(2139095040));
     }
     var dt_2 : f32 = params_0.dt_0;
-    var _S750 : Sym_0 = sym_zero_0();
-    var wa_0 : Sym_0 = _S750;
-    var _S751 : vec3<f32> = vec3<f32>(0.0f);
-    var fa_0 : vec3<f32> = _S751;
-    var _S752 : vec4<f32> = vec4<f32>(0.0f);
-    var sa_0 : vec4<f32> = _S752;
-    var wb_0 : Sym_0 = _S750;
-    var fb_1 : vec3<f32> = _S751;
-    var sb_2 : vec4<f32> = _S752;
-    var _S753 : u32 = sort_0[k_67];
-    var _S754 : u32 = sort_0[params_0.chunk_count_0 + u32(1) + k_67];
+    var _S756 : Sym_0 = sym_zero_0();
+    var wa_0 : Sym_0 = _S756;
+    var _S757 : vec3<f32> = vec3<f32>(0.0f);
+    var fa_0 : vec3<f32> = _S757;
+    var _S758 : vec4<f32> = vec4<f32>(0.0f);
+    var sa_0 : vec4<f32> = _S758;
+    var wb_0 : Sym_0 = _S756;
+    var fb_1 : vec3<f32> = _S757;
+    var sb_2 : vec4<f32> = _S758;
+    var _S759 : u32 = sort_0[k_67];
+    var _S760 : u32 = sort_0[params_0.chunk_count_0 + u32(1) + k_67];
     var tau_3 : f32 = 0.0f;
-    var i_26 : u32 = u32(0);
+    var i_27 : u32 = u32(0);
     loop
     {
-        if(i_26 < _S754)
+        if(i_27 < _S760)
         {
         }
         else
         {
             break;
         }
-        var r_33 : Record_std430_0 = manifolds_0[_S753 + i_26];
-        var _S755 : vec3<f32> = r_33.impulse_0.xyz;
-        var j_13 : f32 = length(_S755);
+        var r_33 : Record_std430_0 = manifolds_0[_S759 + i_27];
+        var _S761 : vec3<f32> = r_33.impulse_0.xyz;
+        var j_13 : f32 = length(_S761);
         if(j_13 == 0.0f)
         {
-            i_26 = i_26 + u32(1);
+            i_27 = i_27 + u32(1);
             continue;
         }
         var m_other_2 : f32 = r_33.other_0.x;
         var m_8 : f32;
-        if(isinf_0(_S749))
+        if(isinf_0(_S755))
         {
             if(isinf_0(m_other_2))
             {
@@ -8002,27 +8052,27 @@ fn crush_loads_flow_0( k_67 : u32)
         {
             if(isinf_0(m_other_2))
             {
-                m_8 = _S749;
+                m_8 = _S755;
             }
             else
             {
-                m_8 = _S749 * m_other_2 / (_S749 + m_other_2);
+                m_8 = _S755 * m_other_2 / (_S755 + m_other_2);
             }
         }
-        var _S756 : f32 = r_33.impulse_0.w;
-        var _S757 : f32 = min(j_13, 2.0f * m_8 * max(_S756 - params_0.band_0, 0.0f));
+        var _S762 : f32 = r_33.impulse_0.w;
+        var _S763 : f32 = min(j_13, 2.0f * m_8 * max(_S762 - params_0.band_0, 0.0f));
         var rr_0 : vec3<f32> = r_33.point_0.xyz - centre_3;
-        var dir_1 : vec3<f32> = _S755 / vec3<f32>(j_13);
-        if(_S757 < j_13)
+        var dir_1 : vec3<f32> = _S761 / vec3<f32>(j_13);
+        if(_S763 < j_13)
         {
-            add_load_0(&(wa_0), &(fa_0), &(sa_0), rr_0, dir_1 * vec3<f32>(((j_13 - _S757) / dt_2)));
+            add_load_0(&(wa_0), &(fa_0), &(sa_0), rr_0, dir_1 * vec3<f32>(((j_13 - _S763) / dt_2)));
         }
         var tau_4 : f32;
-        if(_S757 > 0.0f)
+        if(_S763 > 0.0f)
         {
-            var _S758 : f32 = _S748.y;
-            var duration_2 : f32 = hertz_duration_0(m_8, min(r_33.other_0.z, _S748.z), 1.0f / ((1.0f - _S758 * _S758) / _S748.x + 1.0f / r_33.other_0.y), _S756);
-            add_load_0(&(wb_0), &(fb_1), &(sb_2), rr_0, dir_1 * vec3<f32>((3.14159274101257324f * _S757 / (2.0f * duration_2))));
+            var _S764 : f32 = _S754.y;
+            var duration_2 : f32 = hertz_duration_0(m_8, min(r_33.other_0.z, _S754.z), 1.0f / ((1.0f - _S764 * _S764) / _S754.x + 1.0f / r_33.other_0.y), _S762);
+            add_load_0(&(wb_0), &(fb_1), &(sb_2), rr_0, dir_1 * vec3<f32>((3.14159274101257324f * _S763 / (2.0f * duration_2))));
             tau_4 = max(tau_3, min(duration_2, dt_2));
         }
         else
@@ -8030,26 +8080,26 @@ fn crush_loads_flow_0( k_67 : u32)
             tau_4 = tau_3;
         }
         tau_3 = tau_4;
-        i_26 = i_26 + u32(1);
+        i_27 = i_27 + u32(1);
     }
     var from_4 : u32 = frame_parity_0();
-    var _S759 : u32 = w_pulses_0() + _S747 + u32(2) * from_4;
-    var _S760 : u32 = work_0[_S759 + u32(1)];
-    var _S761 : u32 = l_pool_0(from_4) + u32(3) * work_0[_S759];
+    var _S765 : u32 = w_pulses_0() + _S753 + u32(2) * from_4;
+    var _S766 : u32 = work_0[_S765 + u32(1)];
+    var _S767 : u32 = l_pool_0(from_4) + u32(3) * work_0[_S765];
     var p_25 : u32 = u32(0);
     loop
     {
-        if(p_25 < _S760)
+        if(p_25 < _S766)
         {
         }
         else
         {
             break;
         }
-        var _S762 : u32 = _S761 + u32(3) * p_25;
-        var bb_0 : vec4<f32> = loads_0[_S762 + u32(1)];
-        var c_28 : vec4<f32> = loads_0[_S762 + u32(2)];
-        var mean_2 : f32 = pulse_mean_0(loads_0[_S762].x, loads_0[_S762].y, loads_0[_S762].z, loads_0[_S762].w, loads_0[_S762 + u32(1)].w, dt_2);
+        var _S768 : u32 = _S767 + u32(3) * p_25;
+        var bb_0 : vec4<f32> = loads_0[_S768 + u32(1)];
+        var c_28 : vec4<f32> = loads_0[_S768 + u32(2)];
+        var mean_2 : f32 = pulse_mean_0(loads_0[_S768].x, loads_0[_S768].y, loads_0[_S768].z, loads_0[_S768].w, loads_0[_S768 + u32(1)].w, dt_2);
         if(mean_2 != 0.0f)
         {
             add_load_0(&(wa_0), &(fa_0), &(sa_0), bb_0.xyz - centre_3, c_28.xyz * vec3<f32>(mean_2));
@@ -8058,49 +8108,49 @@ fn crush_loads_flow_0( k_67 : u32)
     }
     var wf_1 : Sym_0;
     var flow_total_0 : f32;
-    flow_virial_0(k_67, q_38, origin_19, centre_3, &(wf_1), &(flow_total_0));
-    var contact_21 : bool;
+    flow_virial_0(k_67, q_39, origin_19, centre_3, &(wf_1), &(flow_total_0));
+    var contact_22 : bool;
     if((sa_0.w) > 0.0f)
     {
-        contact_21 = true;
+        contact_22 = true;
     }
     else
     {
-        contact_21 = (sb_2.w) > 0.0f;
+        contact_22 = (sb_2.w) > 0.0f;
     }
-    var _S763 : bool;
-    if(!contact_21)
+    var _S769 : bool;
+    if(!contact_22)
     {
-        _S763 = !(flow_total_0 > 0.0f);
+        _S769 = !(flow_total_0 > 0.0f);
     }
     else
     {
-        _S763 = false;
+        _S769 = false;
     }
-    if(_S763)
+    if(_S769)
     {
         return;
     }
-    var _S764 : Sym_0 = wf_1;
-    var _S765 : Sym_0 = wf_1;
+    var _S770 : Sym_0 = wf_1;
+    var _S771 : Sym_0 = wf_1;
     var peak_contact_0 : Sym_0;
     var base_3 : Sym_0;
     var peak_3 : Sym_0;
-    if(contact_21)
+    if(contact_22)
     {
-        var bonds_2 : vec4<f32> = bond_centroid_0(k_67, q_38, origin_19, centre_3);
-        var _S766 : Sym_0 = sym_add_0(balanced_0(wa_0, fa_0, sa_0, bonds_2), wf_1);
+        var bonds_2 : vec4<f32> = bond_centroid_0(k_67, q_39, origin_19, centre_3);
+        var _S772 : Sym_0 = sym_add_0(balanced_0(wa_0, fa_0, sa_0, bonds_2), wf_1);
         var peak_contact_1 : Sym_0 = balanced_0(sym_add_0(wa_0, wb_0), fa_0 + fb_1, sa_0 + sb_2, bonds_2);
-        var _S767 : Sym_0 = sym_add_0(peak_contact_1, wf_1);
+        var _S773 : Sym_0 = sym_add_0(peak_contact_1, wf_1);
         peak_contact_0 = peak_contact_1;
-        base_3 = _S766;
-        peak_3 = _S767;
+        base_3 = _S772;
+        peak_3 = _S773;
     }
     else
     {
-        peak_contact_0 = _S750;
-        base_3 = _S764;
-        peak_3 = _S765;
+        peak_contact_0 = _S756;
+        base_3 = _S770;
+        peak_3 = _S771;
     }
     var cause_1 : u32;
     if((sym_norm2_0(wf_1)) >= (sym_norm2_0(peak_contact_0)))
@@ -8115,16 +8165,16 @@ fn crush_loads_flow_0( k_67 : u32)
     return;
 }
 
-fn sym_rotated_0( q_39 : Quat_0,  d_27 : vec3<f32>,  o_11 : vec3<f32>) -> Sym_0
+fn sym_rotated_0( q_40 : Quat_0,  d_27 : vec3<f32>,  o_11 : vec3<f32>) -> Sym_0
 {
-    var _S768 : f32 = o_11.x;
-    var _S769 : f32 = o_11.y;
-    var _S770 : f32 = o_11.z;
-    var c0_7 : vec3<f32> = rotate_0(q_39, vec3<f32>(1.0f, 0.0f, 0.0f));
-    var c1_5 : vec3<f32> = rotate_0(q_39, vec3<f32>(0.0f, 1.0f, 0.0f));
-    var c2_6 : vec3<f32> = rotate_0(q_39, vec3<f32>(0.0f, 0.0f, 1.0f));
+    var _S774 : f32 = o_11.x;
+    var _S775 : f32 = o_11.y;
+    var _S776 : f32 = o_11.z;
+    var c0_7 : vec3<f32> = rotate_0(q_40, vec3<f32>(1.0f, 0.0f, 0.0f));
+    var c1_5 : vec3<f32> = rotate_0(q_40, vec3<f32>(0.0f, 1.0f, 0.0f));
+    var c2_6 : vec3<f32> = rotate_0(q_40, vec3<f32>(0.0f, 0.0f, 1.0f));
     var r_34 : mat3x3<f32> = mat3x3<f32>(c0_7.x, c1_5.x, c2_6.x, c0_7.y, c1_5.y, c2_6.y, c0_7.z, c1_5.z, c2_6.z);
-    var w_14 : mat3x3<f32> = (((transpose(r_34)) * ((((mat3x3<f32>(d_27.x, _S768, _S769, _S768, d_27.y, _S770, _S769, _S770, d_27.z)) * (r_34))))));
+    var w_14 : mat3x3<f32> = (((transpose(r_34)) * ((((mat3x3<f32>(d_27.x, _S774, _S775, _S774, d_27.y, _S776, _S775, _S776, d_27.z)) * (r_34))))));
     var out_s_0 : Sym_0;
     out_s_0.d_25 = vec3<f32>(w_14[i32(0)][i32(0)], w_14[i32(1)][i32(1)], w_14[i32(2)][i32(2)]);
     out_s_0.o_10 = vec3<f32>(w_14[i32(0)][i32(1)], w_14[i32(0)][i32(2)], w_14[i32(1)][i32(2)]);
@@ -8133,35 +8183,35 @@ fn sym_rotated_0( q_39 : Quat_0,  d_27 : vec3<f32>,  o_11 : vec3<f32>) -> Sym_0
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_crush_loads(@builtin(global_invocation_id) id_79 : vec3<u32>)
+fn fr_crush_loads(@builtin(global_invocation_id) id_80 : vec3<u32>)
 {
-    var k_68 : u32 = id_79.x;
-    var _S771 : bool;
+    var k_68 : u32 = id_80.x;
+    var _S777 : bool;
     if(k_68 >= (params_0.chunk_count_0))
     {
-        _S771 = true;
+        _S777 = true;
     }
     else
     {
-        _S771 = (crush_0.enabled_0) == u32(0);
+        _S777 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S771)
+    if(_S777)
     {
-        _S771 = true;
+        _S777 = true;
     }
     else
     {
-        _S771 = !crushable_0(k_68);
+        _S777 = !crushable_0(k_68);
     }
-    if(_S771)
+    if(_S777)
     {
-        _S771 = true;
+        _S777 = true;
     }
     else
     {
-        _S771 = (((crush_flags_0(k_68)) & (u32(1)))) != u32(0);
+        _S777 = (((crush_flags_0(k_68)) & (u32(1)))) != u32(0);
     }
-    if(_S771)
+    if(_S777)
     {
         return;
     }
@@ -8171,58 +8221,58 @@ fn fr_crush_loads(@builtin(global_invocation_id) id_79 : vec3<u32>)
         return;
     }
     var slot_22 : u32 = body_of_0(k_68);
-    var b_82 : u32 = u32(7) * slot_22;
-    var q_40 : Quat_0;
+    var b_83 : u32 = u32(7) * slot_22;
+    var q_41 : Quat_0;
     var origin_20 : vec3<f32>;
-    structure_pose_5(slot_22, b_82, &(q_40), &(origin_20));
-    var _S772 : u32 = u32(4) * k_68;
-    var c0_8 : vec4<f32> = chunks_0[_S772];
-    var _S773 : vec4<f32> = chunks_0[_S772 + u32(3)];
-    var centre_4 : vec3<f32> = origin_20 + rotate_0(q_40, c0_8.xyz);
-    var inv_mass_9 : f32 = bodies_0[b_82].w;
-    var _S774 : f32;
+    structure_pose_5(slot_22, b_83, &(q_41), &(origin_20));
+    var _S778 : u32 = u32(4) * k_68;
+    var c0_8 : vec4<f32> = chunks_0[_S778];
+    var _S779 : vec4<f32> = chunks_0[_S778 + u32(3)];
+    var centre_4 : vec3<f32> = origin_20 + rotate_0(q_41, c0_8.xyz);
+    var inv_mass_9 : f32 = bodies_0[b_83].w;
+    var _S780 : f32;
     if(inv_mass_9 > 0.0f)
     {
-        _S774 = 1.0f / inv_mass_9;
+        _S780 = 1.0f / inv_mass_9;
     }
     else
     {
-        _S774 = float_bits_0(u32(2139095040));
+        _S780 = float_bits_0(u32(2139095040));
     }
     var dt_3 : f32 = params_0.dt_0;
-    var _S775 : Sym_0 = sym_zero_0();
-    var wa_1 : Sym_0 = _S775;
-    var _S776 : vec3<f32> = vec3<f32>(0.0f);
-    var fa_1 : vec3<f32> = _S776;
-    var _S777 : vec4<f32> = vec4<f32>(0.0f);
-    var sa_1 : vec4<f32> = _S777;
-    var wb_1 : Sym_0 = _S775;
-    var fb_2 : vec3<f32> = _S776;
-    var sb_3 : vec4<f32> = _S777;
-    var _S778 : u32 = sort_0[k_68];
-    var _S779 : u32 = sort_0[params_0.chunk_count_0 + u32(1) + k_68];
+    var _S781 : Sym_0 = sym_zero_0();
+    var wa_1 : Sym_0 = _S781;
+    var _S782 : vec3<f32> = vec3<f32>(0.0f);
+    var fa_1 : vec3<f32> = _S782;
+    var _S783 : vec4<f32> = vec4<f32>(0.0f);
+    var sa_1 : vec4<f32> = _S783;
+    var wb_1 : Sym_0 = _S781;
+    var fb_2 : vec3<f32> = _S782;
+    var sb_3 : vec4<f32> = _S783;
+    var _S784 : u32 = sort_0[k_68];
+    var _S785 : u32 = sort_0[params_0.chunk_count_0 + u32(1) + k_68];
     var tau_5 : f32 = 0.0f;
-    var i_27 : u32 = u32(0);
+    var i_28 : u32 = u32(0);
     loop
     {
-        if(i_27 < _S779)
+        if(i_28 < _S785)
         {
         }
         else
         {
             break;
         }
-        var r_35 : Record_std430_0 = manifolds_0[_S778 + i_27];
-        var _S780 : vec3<f32> = r_35.impulse_0.xyz;
-        var j_14 : f32 = length(_S780);
+        var r_35 : Record_std430_0 = manifolds_0[_S784 + i_28];
+        var _S786 : vec3<f32> = r_35.impulse_0.xyz;
+        var j_14 : f32 = length(_S786);
         if(j_14 == 0.0f)
         {
-            i_27 = i_27 + u32(1);
+            i_28 = i_28 + u32(1);
             continue;
         }
         var m_other_3 : f32 = r_35.other_0.x;
         var m_9 : f32;
-        if(isinf_0(_S774))
+        if(isinf_0(_S780))
         {
             if(isinf_0(m_other_3))
             {
@@ -8237,27 +8287,27 @@ fn fr_crush_loads(@builtin(global_invocation_id) id_79 : vec3<u32>)
         {
             if(isinf_0(m_other_3))
             {
-                m_9 = _S774;
+                m_9 = _S780;
             }
             else
             {
-                m_9 = _S774 * m_other_3 / (_S774 + m_other_3);
+                m_9 = _S780 * m_other_3 / (_S780 + m_other_3);
             }
         }
-        var _S781 : f32 = r_35.impulse_0.w;
-        var _S782 : f32 = min(j_14, 2.0f * m_9 * max(_S781 - params_0.band_0, 0.0f));
+        var _S787 : f32 = r_35.impulse_0.w;
+        var _S788 : f32 = min(j_14, 2.0f * m_9 * max(_S787 - params_0.band_0, 0.0f));
         var rr_1 : vec3<f32> = r_35.point_0.xyz - centre_4;
-        var dir_2 : vec3<f32> = _S780 / vec3<f32>(j_14);
-        if(_S782 < j_14)
+        var dir_2 : vec3<f32> = _S786 / vec3<f32>(j_14);
+        if(_S788 < j_14)
         {
-            add_load_1(&(wa_1), &(fa_1), &(sa_1), rr_1, dir_2 * vec3<f32>(((j_14 - _S782) / dt_3)));
+            add_load_1(&(wa_1), &(fa_1), &(sa_1), rr_1, dir_2 * vec3<f32>(((j_14 - _S788) / dt_3)));
         }
         var tau_6 : f32;
-        if(_S782 > 0.0f)
+        if(_S788 > 0.0f)
         {
-            var _S783 : f32 = _S773.y;
-            var duration_3 : f32 = hertz_duration_0(m_9, min(r_35.other_0.z, _S773.z), 1.0f / ((1.0f - _S783 * _S783) / _S773.x + 1.0f / r_35.other_0.y), _S781);
-            add_load_1(&(wb_1), &(fb_2), &(sb_3), rr_1, dir_2 * vec3<f32>((3.14159274101257324f * _S782 / (2.0f * duration_3))));
+            var _S789 : f32 = _S779.y;
+            var duration_3 : f32 = hertz_duration_0(m_9, min(r_35.other_0.z, _S779.z), 1.0f / ((1.0f - _S789 * _S789) / _S779.x + 1.0f / r_35.other_0.y), _S787);
+            add_load_1(&(wb_1), &(fb_2), &(sb_3), rr_1, dir_2 * vec3<f32>((3.14159274101257324f * _S788 / (2.0f * duration_3))));
             tau_6 = max(tau_5, min(duration_3, dt_3));
         }
         else
@@ -8265,26 +8315,26 @@ fn fr_crush_loads(@builtin(global_invocation_id) id_79 : vec3<u32>)
             tau_6 = tau_5;
         }
         tau_5 = tau_6;
-        i_27 = i_27 + u32(1);
+        i_28 = i_28 + u32(1);
     }
     var from_5 : u32 = frame_parity_0();
-    var _S784 : u32 = w_pulses_0() + _S772 + u32(2) * from_5;
-    var _S785 : u32 = work_0[_S784 + u32(1)];
-    var _S786 : u32 = l_pool_0(from_5) + u32(3) * work_0[_S784];
+    var _S790 : u32 = w_pulses_0() + _S778 + u32(2) * from_5;
+    var _S791 : u32 = work_0[_S790 + u32(1)];
+    var _S792 : u32 = l_pool_0(from_5) + u32(3) * work_0[_S790];
     var p_26 : u32 = u32(0);
     loop
     {
-        if(p_26 < _S785)
+        if(p_26 < _S791)
         {
         }
         else
         {
             break;
         }
-        var _S787 : u32 = _S786 + u32(3) * p_26;
-        var bb_1 : vec4<f32> = loads_0[_S787 + u32(1)];
-        var c_29 : vec4<f32> = loads_0[_S787 + u32(2)];
-        var mean_3 : f32 = pulse_mean_0(loads_0[_S787].x, loads_0[_S787].y, loads_0[_S787].z, loads_0[_S787].w, loads_0[_S787 + u32(1)].w, dt_3);
+        var _S793 : u32 = _S792 + u32(3) * p_26;
+        var bb_1 : vec4<f32> = loads_0[_S793 + u32(1)];
+        var c_29 : vec4<f32> = loads_0[_S793 + u32(2)];
+        var mean_3 : f32 = pulse_mean_0(loads_0[_S793].x, loads_0[_S793].y, loads_0[_S793].z, loads_0[_S793].w, loads_0[_S793 + u32(1)].w, dt_3);
         if(mean_3 != 0.0f)
         {
             add_load_1(&(wa_1), &(fa_1), &(sa_1), bb_1.xyz - centre_4, c_29.xyz * vec3<f32>(mean_3));
@@ -8293,24 +8343,24 @@ fn fr_crush_loads(@builtin(global_invocation_id) id_79 : vec3<u32>)
     }
     if((crush_0.bond_virial_0) != u32(0))
     {
-        var _S788 : u32 = u32(2) * k_68;
-        var v_19 : Sym_0 = sym_rotated_0(q_40, crush_rw_0[crush_0.r_virial_0 + _S788].xyz, crush_rw_0[crush_0.r_virial_0 + _S788 + u32(1)].xyz);
+        var _S794 : u32 = u32(2) * k_68;
+        var v_19 : Sym_0 = sym_rotated_0(q_41, crush_rw_0[crush_0.r_virial_0 + _S794].xyz, crush_rw_0[crush_0.r_virial_0 + _S794 + u32(1)].xyz);
         crush_record_0(k_68, crush_two_0(sym_add_0(wa_1, v_19), dt_3 - tau_5, sym_add_0(sym_add_0(wa_1, wb_1), v_19), tau_5, k_68, crush_rw_0[k_68].x), u32(1));
         return;
     }
     if(!((sa_1.w) > 0.0f))
     {
-        _S771 = !((sb_3.w) > 0.0f);
+        _S777 = !((sb_3.w) > 0.0f);
     }
     else
     {
-        _S771 = false;
+        _S777 = false;
     }
-    if(_S771)
+    if(_S777)
     {
         return;
     }
-    var bonds_3 : vec4<f32> = bond_centroid_0(k_68, q_40, origin_20, centre_4);
+    var bonds_3 : vec4<f32> = bond_centroid_0(k_68, q_41, origin_20, centre_4);
     crush_record_0(k_68, crush_two_0(balanced_0(wa_1, fa_1, sa_1, bonds_3), dt_3 - tau_5, balanced_0(sym_add_0(wa_1, wb_1), fa_1 + fb_2, sa_1 + sb_3, bonds_3), tau_5, k_68, crush_rw_0[k_68].x), u32(1));
     return;
 }
@@ -8322,70 +8372,70 @@ fn a_cover_0() -> u32
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_strike_patch(@builtin(global_invocation_id) id_80 : vec3<u32>)
+fn fr_strike_patch(@builtin(global_invocation_id) id_81 : vec3<u32>)
 {
-    var b_83 : u32 = id_80.x;
-    var _S789 : bool;
-    if(b_83 >= (params_0.body_count_0))
+    var b_84 : u32 = id_81.x;
+    var _S795 : bool;
+    if(b_84 >= (params_0.body_count_0))
     {
-        _S789 = true;
+        _S795 = true;
     }
     else
     {
-        _S789 = (params_0.shot_count_0) == u32(0);
+        _S795 = (params_0.shot_count_0) == u32(0);
     }
-    if(_S789)
+    if(_S795)
     {
-        _S789 = true;
+        _S795 = true;
     }
     else
     {
-        _S789 = (crush_0.enabled_0) == u32(0);
+        _S795 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S789)
+    if(_S795)
     {
         return;
     }
-    var bill_0 : u32 = crush_0.r_bill_0 + u32(4) * b_83;
-    var _S790 : vec4<f32> = vec4<f32>(0.0f);
-    crush_rw_0[bill_0] = _S790;
-    var _S791 : u32 = bill_0 + u32(3);
-    crush_rw_0[_S791] = _S790;
-    var shot_11 : u32;
-    var _S792 : bool = struck_2(b_83, &(shot_11));
-    if(!_S792)
+    var bill_0 : u32 = crush_0.r_bill_0 + u32(4) * b_84;
+    var _S796 : vec4<f32> = vec4<f32>(0.0f);
+    crush_rw_0[bill_0] = _S796;
+    var _S797 : u32 = bill_0 + u32(3);
+    crush_rw_0[_S797] = _S796;
+    var shot_12 : u32;
+    var _S798 : bool = struck_2(b_84, &(shot_12));
+    if(!_S798)
     {
         return;
     }
-    var _S793 : u32 = a_strike_0() + u32(9) * b_83;
-    var k_69 : u32 = atomicLoad(&(atom_0[_S793 + u32(8)]));
-    var _S794 : u32 = atomicLoad(&(atom_0[_S793 + u32(6)]));
-    var t_in_13 : f32 = (bitcast<f32>((_S794)));
+    var _S799 : u32 = a_strike_0() + u32(9) * b_84;
+    var k_69 : u32 = atomicLoad(&(atom_0[_S799 + u32(8)]));
+    var _S800 : u32 = atomicLoad(&(atom_0[_S799 + u32(6)]));
+    var t_in_13 : f32 = (bitcast<f32>((_S800)));
     if(!(t_in_13 <= (params_0.dt_0)))
     {
-        _S789 = true;
+        _S795 = true;
     }
     else
     {
-        _S789 = k_69 == u32(4294967295);
+        _S795 = k_69 == u32(4294967295);
     }
-    if(_S789)
+    if(_S795)
     {
         return;
     }
-    var st_7 : u32 = strike_at_0(b_83);
+    var st_7 : u32 = strike_at_0(b_84);
     var s0_5 : vec4<f32> = frames_0[st_7];
-    var _S795 : vec3<f32> = frames_0[st_7 + u32(1)].xyz;
-    var speed_17 : f32 = length(_S795);
-    var d_28 : vec3<f32> = _S795 / vec3<f32>(max(speed_17, 9.999999960041972e-13f));
-    var info_4 : vec4<f32> = shots_0[u32(2) * shot_11];
+    var _S801 : vec3<f32> = frames_0[st_7 + u32(1)].xyz;
+    var speed_17 : f32 = length(_S801);
+    var d_28 : vec3<f32> = _S801 / vec3<f32>(max(speed_17, 9.999999960041972e-13f));
+    var info_4 : vec4<f32> = shots_0[u32(2) * shot_12];
     var radius_1 : f32 = info_4.y;
-    var _S796 : f32 = max(info_4.z, 0.00100000004749745f);
+    var _S802 : f32 = max(info_4.z, 0.00100000004749745f);
     var m_imp_1 : f32 = info_4.w;
-    var inv_mass_10 : f32 = bodies_0[u32(7) * b_83].w;
-    var _S797 : bool = inv_mass_10 == 0.0f;
+    var inv_mass_10 : f32 = bodies_0[u32(7) * b_84].w;
+    var _S803 : bool = inv_mass_10 == 0.0f;
     var m_body_2 : f32;
-    if(_S797)
+    if(_S803)
     {
         m_body_2 = 0.0f;
     }
@@ -8394,7 +8444,7 @@ fn fr_strike_patch(@builtin(global_invocation_id) id_80 : vec3<u32>)
         m_body_2 = 1.0f / inv_mass_10;
     }
     var m_eff_10 : f32;
-    if(_S797)
+    if(_S803)
     {
         m_eff_10 = m_imp_1;
     }
@@ -8402,12 +8452,12 @@ fn fr_strike_patch(@builtin(global_invocation_id) id_80 : vec3<u32>)
     {
         m_eff_10 = m_imp_1 * m_body_2 / (m_imp_1 + m_body_2);
     }
-    var modulus_2 : f32 = 1.0f / (1.0f / shots_0[u32(2) * shot_11 + u32(1)].x + 1.0f / geometry_0[u32(3) * k_69 + u32(1)].w);
-    var _S798 : f32 = max(speed_17, 0.00100000004749745f);
-    var tau_7 : f32 = 2.86999988555908203f * pow(m_eff_10 * m_eff_10 / (_S796 * modulus_2 * modulus_2 * _S798), 0.20000000298023224f);
+    var modulus_2 : f32 = 1.0f / (1.0f / shots_0[u32(2) * shot_12 + u32(1)].x + 1.0f / geometry_0[u32(3) * k_69 + u32(1)].w);
+    var _S804 : f32 = max(speed_17, 0.00100000004749745f);
+    var tau_7 : f32 = 2.86999988555908203f * pow(m_eff_10 * m_eff_10 / (_S802 * modulus_2 * modulus_2 * _S804), 0.20000000298023224f);
     var force_5 : f32 = m_eff_10 * speed_17 / tau_7;
-    var contact_22 : vec3<f32> = s0_5.xyz + _S795 * vec3<f32>(t_in_13) + d_28 * vec3<f32>(radius_1);
-    var delta_4 : f32 = pow(15.0f * m_eff_10 * _S798 * _S798 / (16.0f * modulus_2 * sqrt(_S796)), 0.40000000596046448f);
+    var contact_23 : vec3<f32> = s0_5.xyz + _S801 * vec3<f32>(t_in_13) + d_28 * vec3<f32>(radius_1);
+    var delta_4 : f32 = pow(15.0f * m_eff_10 * _S804 * _S804 / (16.0f * modulus_2 * sqrt(_S802)), 0.40000000596046448f);
     var a_h_0 : f32 = sqrt(radius_1 * delta_4);
     var p_cap_0 : f32;
     if(crushable_0(k_69))
@@ -8427,12 +8477,12 @@ fn fr_strike_patch(@builtin(global_invocation_id) id_80 : vec3<u32>)
     {
         a_p_0 = 0.0f;
     }
-    var _S799 : f32 = min(radius_1, max(a_h_0, a_p_0));
-    var _S800 : f32 = max(delta_4, radius_1 - sqrt(max(radius_1 * radius_1 - _S799 * _S799, 0.0f)));
-    crush_rw_0[bill_0 + u32(1)] = vec4<f32>(contact_22, 0.0f);
-    crush_rw_0[bill_0 + u32(2)] = vec4<f32>(d_28, _S799);
-    crush_rw_0[_S791] = vec4<f32>(force_5, tau_7, _S800, f32(k_69 + u32(1)));
-    var _S801 : u32 = a_cover_0() + u32(128) * b_83;
+    var _S805 : f32 = min(radius_1, max(a_h_0, a_p_0));
+    var _S806 : f32 = max(delta_4, radius_1 - sqrt(max(radius_1 * radius_1 - _S805 * _S805, 0.0f)));
+    crush_rw_0[bill_0 + u32(1)] = vec4<f32>(contact_23, 0.0f);
+    crush_rw_0[bill_0 + u32(2)] = vec4<f32>(d_28, _S805);
+    crush_rw_0[_S797] = vec4<f32>(force_5, tau_7, _S806, f32(k_69 + u32(1)));
+    var _S807 : u32 = a_cover_0() + u32(128) * b_84;
     var s_31 : u32 = u32(0);
     loop
     {
@@ -8443,41 +8493,41 @@ fn fr_strike_patch(@builtin(global_invocation_id) id_80 : vec3<u32>)
         {
             break;
         }
-        var _S802 : u32 = _S801 + u32(2) * s_31;
-        atomicStore(&(atom_0[_S802]), u32(4294967295));
-        atomicStore(&(atom_0[_S802 + u32(1)]), u32(4294967295));
+        var _S808 : u32 = _S807 + u32(2) * s_31;
+        atomicStore(&(atom_0[_S808]), u32(4294967295));
+        atomicStore(&(atom_0[_S808 + u32(1)]), u32(4294967295));
         s_31 = s_31 + u32(1);
     }
     return;
 }
 
-fn cover_patch_0( k_70 : u32,  b_84 : ptr<function, u32>,  p1_0 : ptr<function, vec4<f32>>,  p2_2 : ptr<function, vec4<f32>>) -> bool
+fn cover_patch_0( k_70 : u32,  b_85 : ptr<function, u32>,  p1_0 : ptr<function, vec4<f32>>,  p2_2 : ptr<function, vec4<f32>>) -> bool
 {
-    (*b_84) = body_of_0(k_70);
-    var _S803 : vec4<f32> = vec4<f32>(0.0f);
-    (*p1_0) = _S803;
-    (*p2_2) = _S803;
-    var shot_12 : u32;
-    var _S804 : bool = struck_2((*b_84), &(shot_12));
-    var _S805 : bool;
-    if(!_S804)
+    (*b_85) = body_of_0(k_70);
+    var _S809 : vec4<f32> = vec4<f32>(0.0f);
+    (*p1_0) = _S809;
+    (*p2_2) = _S809;
+    var shot_13 : u32;
+    var _S810 : bool = struck_2((*b_85), &(shot_13));
+    var _S811 : bool;
+    if(!_S810)
     {
-        _S805 = true;
+        _S811 = true;
     }
     else
     {
-        _S805 = (((crush_flags_0(k_70)) & (u32(1)))) != u32(0);
+        _S811 = (((crush_flags_0(k_70)) & (u32(1)))) != u32(0);
     }
-    if(_S805)
+    if(_S811)
     {
         return false;
     }
-    var bill_1 : u32 = crush_0.r_bill_0 + u32(4) * (*b_84);
+    var bill_1 : u32 = crush_0.r_bill_0 + u32(4) * (*b_85);
     if((crush_rw_0[bill_1 + u32(3)].w) == 0.0f)
     {
         return false;
     }
-    (*p1_0) = vec4<f32>(crush_rw_0[bill_1 + u32(1)].xyz, shots_0[u32(2) * shot_12].y);
+    (*p1_0) = vec4<f32>(crush_rw_0[bill_1 + u32(1)].xyz, shots_0[u32(2) * shot_13].y);
     (*p2_2) = crush_rw_0[bill_1 + u32(2)];
     return true;
 }
@@ -8534,16 +8584,16 @@ fn cover_offset_1( s_33 : u32,  d_30 : vec3<f32>,  a_17 : f32,  rho_1 : ptr<func
     return vec3<f32>((*rho_1)) * (vec3<f32>(cos(theta_2)) * u_14 + vec3<f32>(sin(theta_2)) * cross(d_30, u_14));
 }
 
-fn cover_depth_0( k_71 : u32,  s_34 : u32,  contact_23 : vec3<f32>,  d_31 : vec3<f32>,  a_18 : f32,  radius_2 : f32) -> f32
+fn cover_depth_0( k_71 : u32,  s_34 : u32,  contact_24 : vec3<f32>,  d_31 : vec3<f32>,  a_18 : f32,  radius_2 : f32) -> f32
 {
     var rho_2 : f32;
-    var _S806 : f32 = 2.0f * radius_2;
-    var _S807 : vec3<f32> = contact_23 + cover_offset_0(s_34, d_31, a_18, &(rho_2)) - d_31 * vec3<f32>(_S806);
-    var q_41 : Quat_0;
-    var _S808 : vec3<f32> = chunk_box_world_2(k_71, &(q_41));
-    var _S809 : u32 = u32(3) * k_71;
-    var _S810 : Quat_0 = normalized_0(quat_mul_0(q_41, quat_of_0(geometry_0[_S809 + u32(2)])));
-    var _S811 : vec3<f32> = geometry_0[_S809 + u32(1)].xyz;
+    var _S812 : f32 = 2.0f * radius_2;
+    var _S813 : vec3<f32> = contact_24 + cover_offset_0(s_34, d_31, a_18, &(rho_2)) - d_31 * vec3<f32>(_S812);
+    var q_42 : Quat_0;
+    var _S814 : vec3<f32> = chunk_box_world_2(k_71, &(q_42));
+    var _S815 : u32 = u32(3) * k_71;
+    var _S816 : Quat_0 = normalized_0(quat_mul_0(q_42, quat_of_0(geometry_0[_S815 + u32(2)])));
+    var _S817 : vec3<f32> = geometry_0[_S815 + u32(1)].xyz;
     var t0_3 : f32 = -1.00000001504746622e+30f;
     var t1_4 : f32 = 1.00000001504746622e+30f;
     var ax_4 : u32 = u32(0);
@@ -8558,76 +8608,76 @@ fn cover_depth_0( k_71 : u32,  s_34 : u32,  contact_23 : vec3<f32>,  d_31 : vec3
         }
         var e_10 : vec3<f32> = vec3<f32>(0.0f);
         e_10[ax_4] = 1.0f;
-        var axis_2 : vec3<f32> = rotate_0(_S810, e_10);
-        var o_12 : f32 = dot(_S807 - _S808, axis_2);
+        var axis_2 : vec3<f32> = rotate_0(_S816, e_10);
+        var o_12 : f32 = dot(_S813 - _S814, axis_2);
         var dv_2 : f32 = dot(d_31, axis_2);
         if((abs(dv_2)) < 9.99999971718068537e-10f)
         {
-            if((abs(o_12)) > (_S811[ax_4]))
+            if((abs(o_12)) > (_S817[ax_4]))
             {
                 return 1.00000001504746622e+30f;
             }
             ax_4 = ax_4 + u32(1);
             continue;
         }
-        var ta_3 : f32 = (- _S811[ax_4] - o_12) / dv_2;
-        var tb_3 : f32 = (_S811[ax_4] - o_12) / dv_2;
-        var _S812 : f32 = min(t1_4, max(ta_3, tb_3));
+        var ta_3 : f32 = (- _S817[ax_4] - o_12) / dv_2;
+        var tb_3 : f32 = (_S817[ax_4] - o_12) / dv_2;
+        var _S818 : f32 = min(t1_4, max(ta_3, tb_3));
         t0_3 = max(t0_3, min(ta_3, tb_3));
-        t1_4 = _S812;
+        t1_4 = _S818;
         ax_4 = ax_4 + u32(1);
     }
-    var _S813 : bool;
+    var _S819 : bool;
     if(!(t0_3 <= t1_4))
     {
-        _S813 = true;
+        _S819 = true;
     }
     else
     {
-        _S813 = t1_4 < 0.0f;
+        _S819 = t1_4 < 0.0f;
     }
-    if(_S813)
+    if(_S819)
     {
         return 1.00000001504746622e+30f;
     }
-    return t0_3 - _S806;
+    return t0_3 - _S812;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_strike_cover(@builtin(global_invocation_id) id_81 : vec3<u32>)
+fn fr_strike_cover(@builtin(global_invocation_id) id_82 : vec3<u32>)
 {
-    var k_72 : u32 = id_81.x;
-    var _S814 : bool;
+    var k_72 : u32 = id_82.x;
+    var _S820 : bool;
     if(k_72 >= (params_0.chunk_count_0))
     {
-        _S814 = true;
+        _S820 = true;
     }
     else
     {
-        _S814 = (params_0.shot_count_0) == u32(0);
+        _S820 = (params_0.shot_count_0) == u32(0);
     }
-    if(_S814)
+    if(_S820)
     {
-        _S814 = true;
+        _S820 = true;
     }
     else
     {
-        _S814 = (crush_0.enabled_0) == u32(0);
+        _S820 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S814)
+    if(_S820)
     {
         return;
     }
-    var b_85 : u32;
+    var b_86 : u32;
     var p1_1 : vec4<f32>;
     var p2_3 : vec4<f32>;
-    var _S815 : bool = cover_patch_0(k_72, &(b_85), &(p1_1), &(p2_3));
-    if(!_S815)
+    var _S821 : bool = cover_patch_0(k_72, &(b_86), &(p1_1), &(p2_3));
+    if(!_S821)
     {
         return;
     }
-    var _S816 : u32 = a_cover_0() + u32(128) * b_85;
+    var _S822 : u32 = a_cover_0() + u32(128) * b_86;
     var s_35 : u32 = u32(0);
     loop
     {
@@ -8641,7 +8691,7 @@ fn fr_strike_cover(@builtin(global_invocation_id) id_81 : vec3<u32>)
         var t_19 : f32 = cover_depth_0(k_72, s_35, p1_1.xyz, p2_3.xyz, p2_3.w, p1_1.w);
         if(t_19 < 5.0000000752373311e+29f)
         {
-            var _S817 : u32 = atomicMin(&(atom_0[_S816 + u32(2) * s_35]), ordered_0(t_19));
+            var _S823 : u32 = atomicMin(&(atom_0[_S822 + u32(2) * s_35]), ordered_0(t_19));
         }
         s_35 = s_35 + u32(1);
     }
@@ -8650,39 +8700,39 @@ fn fr_strike_cover(@builtin(global_invocation_id) id_81 : vec3<u32>)
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_strike_claim(@builtin(global_invocation_id) id_82 : vec3<u32>)
+fn fr_strike_claim(@builtin(global_invocation_id) id_83 : vec3<u32>)
 {
-    var k_73 : u32 = id_82.x;
-    var _S818 : bool;
+    var k_73 : u32 = id_83.x;
+    var _S824 : bool;
     if(k_73 >= (params_0.chunk_count_0))
     {
-        _S818 = true;
+        _S824 = true;
     }
     else
     {
-        _S818 = (params_0.shot_count_0) == u32(0);
+        _S824 = (params_0.shot_count_0) == u32(0);
     }
-    if(_S818)
+    if(_S824)
     {
-        _S818 = true;
+        _S824 = true;
     }
     else
     {
-        _S818 = (crush_0.enabled_0) == u32(0);
+        _S824 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S818)
+    if(_S824)
     {
         return;
     }
-    var b_86 : u32;
+    var b_87 : u32;
     var p1_2 : vec4<f32>;
     var p2_4 : vec4<f32>;
-    var _S819 : bool = cover_patch_0(k_73, &(b_86), &(p1_2), &(p2_4));
-    if(!_S819)
+    var _S825 : bool = cover_patch_0(k_73, &(b_87), &(p1_2), &(p2_4));
+    if(!_S825)
     {
         return;
     }
-    var _S820 : u32 = a_cover_0() + u32(128) * b_86;
+    var _S826 : u32 = a_cover_0() + u32(128) * b_87;
     var s_36 : u32 = u32(0);
     loop
     {
@@ -8693,8 +8743,8 @@ fn fr_strike_claim(@builtin(global_invocation_id) id_82 : vec3<u32>)
         {
             break;
         }
-        var _S821 : u32 = _S820 + u32(2) * s_36;
-        var first_4 : u32 = atomicLoad(&(atom_0[_S821]));
+        var _S827 : u32 = _S826 + u32(2) * s_36;
+        var first_4 : u32 = atomicLoad(&(atom_0[_S827]));
         if(first_4 == u32(4294967295))
         {
             s_36 = s_36 + u32(1);
@@ -8703,15 +8753,15 @@ fn fr_strike_claim(@builtin(global_invocation_id) id_82 : vec3<u32>)
         var t_20 : f32 = cover_depth_0(k_73, s_36, p1_2.xyz, p2_4.xyz, p2_4.w, p1_2.w);
         if(t_20 < 5.0000000752373311e+29f)
         {
-            _S818 = t_20 <= (unordered_0(first_4) + 0.00009999999747379f);
+            _S824 = t_20 <= (unordered_0(first_4) + 0.00009999999747379f);
         }
         else
         {
-            _S818 = false;
+            _S824 = false;
         }
-        if(_S818)
+        if(_S824)
         {
-            var _S822 : u32 = atomicMin(&(atom_0[_S821 + u32(1)]), k_73);
+            var _S828 : u32 = atomicMin(&(atom_0[_S827 + u32(1)]), k_73);
         }
         s_36 = s_36 + u32(1);
     }
@@ -8720,32 +8770,32 @@ fn fr_strike_claim(@builtin(global_invocation_id) id_82 : vec3<u32>)
 
 fn strike_load_0( k_74 : u32,  slot_23 : u32,  f_18 : vec3<f32>,  at_30 : vec3<f32>,  tau_8 : f32,  budget_0 : f32) -> f32
 {
-    var _S823 : bool;
+    var _S829 : bool;
     if(!crushable_0(k_74))
     {
-        _S823 = true;
+        _S829 = true;
     }
     else
     {
-        _S823 = (((crush_flags_0(k_74)) & (u32(1)))) != u32(0);
+        _S829 = (((crush_flags_0(k_74)) & (u32(1)))) != u32(0);
     }
-    if(_S823)
+    if(_S829)
     {
-        _S823 = true;
+        _S829 = true;
     }
     else
     {
-        _S823 = !(budget_0 > 0.0f);
+        _S829 = !(budget_0 > 0.0f);
     }
-    if(_S823)
+    if(_S829)
     {
         return 0.0f;
     }
-    var q_42 : Quat_0;
+    var q_43 : Quat_0;
     var origin_21 : vec3<f32>;
-    structure_pose_2(slot_23, u32(7) * slot_23, &(q_42), &(origin_21));
-    var centre_5 : vec3<f32> = origin_21 + rotate_0(q_42, chunks_0[u32(4) * k_74].xyz);
-    var bonds_4 : vec4<f32> = bond_centroid_0(k_74, q_42, origin_21, centre_5);
+    structure_pose_2(slot_23, u32(7) * slot_23, &(q_43), &(origin_21));
+    var centre_5 : vec3<f32> = origin_21 + rotate_0(q_43, chunks_0[u32(4) * k_74].xyz);
+    var bonds_4 : vec4<f32> = bond_centroid_0(k_74, q_43, origin_21, centre_5);
     if(!((bonds_4.w) > 0.0f))
     {
         return 0.0f;
@@ -8753,17 +8803,17 @@ fn strike_load_0( k_74 : u32,  slot_23 : u32,  f_18 : vec3<f32>,  at_30 : vec3<f
     var w_15 : Sym_0 = sym_add_0(sym_outer_0(at_30 - centre_5, f_18), sym_outer_0(bonds_4.xyz, (vec3<f32>(0) - f_18)));
     var before_0 : f32 = crush_rw_0[k_74].x;
     var step_8 : vec4<f32> = crush_two_0(w_15, min(tau_8, params_0.dt_0), w_15, 0.0f, k_74, before_0);
-    var _S824 : u32 = u32(2) * k_74;
-    var per_0 : f32 = crush_tab_0[_S824].w * crush_tab_0[_S824 + u32(1)].y;
+    var _S830 : u32 = u32(2) * k_74;
+    var per_0 : f32 = crush_tab_0[_S830].w * crush_tab_0[_S830 + u32(1)].y;
     var energy_1 : f32 = (step_8.x - before_0) * per_0;
     var energy_2 : f32;
     var step_9 : vec4<f32>;
     if(energy_1 > budget_0)
     {
         var d_32 : f32 = before_0 + budget_0 / per_0;
-        var _S825 : f32 = min(d_32, 1.0f);
-        var _S826 : f32 = step_8.y;
-        var _S827 : f32 = step_8.z;
+        var _S831 : f32 = min(d_32, 1.0f);
+        var _S832 : f32 = step_8.y;
+        var _S833 : f32 = step_8.z;
         if(d_32 >= 1.0f)
         {
             energy_2 = 1.0f;
@@ -8772,7 +8822,7 @@ fn strike_load_0( k_74 : u32,  slot_23 : u32,  f_18 : vec3<f32>,  at_30 : vec3<f
         {
             energy_2 = 0.0f;
         }
-        step_9 = vec4<f32>(_S825, _S826, _S827, energy_2);
+        step_9 = vec4<f32>(_S831, _S832, _S833, energy_2);
         energy_2 = budget_0;
     }
     else
@@ -8789,18 +8839,18 @@ fn cell_in_0( mask_0 : vec2<u32>,  c_30 : u32) -> bool
     return (((((mask_0[c_30 / u32(32)]) >> ((c_30 % u32(32))))) & (u32(1)))) != u32(0);
 }
 
-fn strike_crush_body_0( b_87 : u32,  s_37 : u32,  budget_1 : f32) -> f32
+fn strike_crush_body_0( b_88 : u32,  s_37 : u32,  budget_1 : f32) -> f32
 {
     var total_1 : u32;
-    var _S828 : bool;
-    var bill_2 : u32 = crush_0.r_bill_0 + u32(4) * b_87;
-    var _S829 : u32 = bill_2 + u32(1);
+    var _S834 : bool;
+    var bill_2 : u32 = crush_0.r_bill_0 + u32(4) * b_88;
+    var _S835 : u32 = bill_2 + u32(1);
     var p3_0 : vec4<f32> = crush_rw_0[bill_2 + u32(3)];
-    var contact_24 : vec3<f32> = crush_rw_0[_S829].xyz;
+    var contact_25 : vec3<f32> = crush_rw_0[_S835].xyz;
     var d_33 : vec3<f32> = crush_rw_0[bill_2 + u32(2)].xyz;
-    var _S830 : f32 = crush_rw_0[bill_2 + u32(2)].w;
-    var _S831 : f32 = shots_0[u32(2) * s_37].y;
-    var _S832 : u32 = a_cover_0() + u32(128) * b_87;
+    var _S836 : f32 = crush_rw_0[bill_2 + u32(2)].w;
+    var _S837 : f32 = shots_0[u32(2) * s_37].y;
+    var _S838 : u32 = a_cover_0() + u32(128) * b_88;
     var first_5 : f32 = 1.00000001504746622e+30f;
     var c_31 : u32 = u32(0);
     loop
@@ -8812,17 +8862,17 @@ fn strike_crush_body_0( b_87 : u32,  s_37 : u32,  budget_1 : f32) -> f32
         {
             break;
         }
-        var _S833 : u32 = _S832 + u32(2) * c_31;
-        var _S834 : u32 = atomicLoad(&(atom_0[_S833 + u32(1)]));
-        if(_S834 == u32(4294967295))
+        var _S839 : u32 = _S838 + u32(2) * c_31;
+        var _S840 : u32 = atomicLoad(&(atom_0[_S839 + u32(1)]));
+        if(_S840 == u32(4294967295))
         {
             c_31 = c_31 + u32(1);
             continue;
         }
         var rho_3 : f32;
-        var _S835 : vec3<f32> = cover_offset_1(c_31, d_33, _S830, &(rho_3));
-        var _S836 : u32 = atomicLoad(&(atom_0[_S833]));
-        first_5 = min(first_5, unordered_0(_S836) + _S831 - sqrt(max(_S831 * _S831 - rho_3 * rho_3, 0.0f)));
+        var _S841 : vec3<f32> = cover_offset_1(c_31, d_33, _S836, &(rho_3));
+        var _S842 : u32 = atomicLoad(&(atom_0[_S839]));
+        first_5 = min(first_5, unordered_0(_S842) + _S837 - sqrt(max(_S837 * _S837 - rho_3 * rho_3, 0.0f)));
         c_31 = c_31 + u32(1);
     }
     var counted_0 : vec2<u32> = vec2<u32>(u32(0));
@@ -8837,17 +8887,17 @@ fn strike_crush_body_0( b_87 : u32,  s_37 : u32,  budget_1 : f32) -> f32
         {
             break;
         }
-        var _S837 : u32 = _S832 + u32(2) * c_31;
-        var _S838 : u32 = atomicLoad(&(atom_0[_S837 + u32(1)]));
-        if(_S838 == u32(4294967295))
+        var _S843 : u32 = _S838 + u32(2) * c_31;
+        var _S844 : u32 = atomicLoad(&(atom_0[_S843 + u32(1)]));
+        if(_S844 == u32(4294967295))
         {
             c_31 = c_31 + u32(1);
             continue;
         }
         var rho_4 : f32;
-        var _S839 : vec3<f32> = cover_offset_1(c_31, d_33, _S830, &(rho_4));
-        var _S840 : u32 = atomicLoad(&(atom_0[_S837]));
-        if((unordered_0(_S840) + _S831 - sqrt(max(_S831 * _S831 - rho_4 * rho_4, 0.0f)) - first_5) <= (p3_0.z))
+        var _S845 : vec3<f32> = cover_offset_1(c_31, d_33, _S836, &(rho_4));
+        var _S846 : u32 = atomicLoad(&(atom_0[_S843]));
+        if((unordered_0(_S846) + _S837 - sqrt(max(_S837 * _S837 - rho_4 * rho_4, 0.0f)) - first_5) <= (p3_0.z))
         {
             counted_0[c_31 / u32(32)] = ((counted_0[c_31 / u32(32)]) | (((u32(1) << ((c_31 % u32(32)))))));
             total_1 = total_2 + u32(1);
@@ -8859,20 +8909,20 @@ fn strike_crush_body_0( b_87 : u32,  s_37 : u32,  budget_1 : f32) -> f32
         total_2 = total_1;
         c_31 = c_31 + u32(1);
     }
-    var _S841 : vec3<f32> = vec3<f32>(0.0f);
+    var _S847 : vec3<f32> = vec3<f32>(0.0f);
     var energy_3 : f32;
     var point_1 : vec3<f32>;
     if(total_2 == u32(0))
     {
-        var energy_4 : f32 = strike_load_0(u32(p3_0.w) - u32(1), b_87, d_33 * vec3<f32>(p3_0.x), contact_24, p3_0.y, budget_1);
-        var _S842 : vec3<f32> = vec3<f32>(energy_4) * contact_24;
+        var energy_4 : f32 = strike_load_0(u32(p3_0.w) - u32(1), b_88, d_33 * vec3<f32>(p3_0.x), contact_25, p3_0.y, budget_1);
+        var _S848 : vec3<f32> = vec3<f32>(energy_4) * contact_25;
         energy_3 = energy_4;
-        point_1 = _S842;
+        point_1 = _S848;
     }
     else
     {
         energy_3 = 0.0f;
-        point_1 = _S841;
+        point_1 = _S847;
     }
     c_31 = u32(0);
     loop
@@ -8889,7 +8939,7 @@ fn strike_crush_body_0( b_87 : u32,  s_37 : u32,  budget_1 : f32) -> f32
             c_31 = c_31 + u32(1);
             continue;
         }
-        var k_75 : u32 = atomicLoad(&(atom_0[_S832 + u32(2) * c_31 + u32(1)]));
+        var k_75 : u32 = atomicLoad(&(atom_0[_S838 + u32(2) * c_31 + u32(1)]));
         var seen_0 : bool = false;
         total_1 = u32(0);
         loop
@@ -8909,14 +8959,14 @@ fn strike_crush_body_0( b_87 : u32,  s_37 : u32,  budget_1 : f32) -> f32
             {
                 if(cell_in_0(counted_0, total_1))
                 {
-                    var _S843 : u32 = atomicLoad(&(atom_0[_S832 + u32(2) * total_1 + u32(1)]));
-                    _S828 = _S843 == k_75;
+                    var _S849 : u32 = atomicLoad(&(atom_0[_S838 + u32(2) * total_1 + u32(1)]));
+                    _S834 = _S849 == k_75;
                 }
                 else
                 {
-                    _S828 = false;
+                    _S834 = false;
                 }
-                seen_0 = _S828;
+                seen_0 = _S834;
             }
             total_1 = total_1 + u32(1);
         }
@@ -8926,7 +8976,7 @@ fn strike_crush_body_0( b_87 : u32,  s_37 : u32,  budget_1 : f32) -> f32
             continue;
         }
         var e_11 : u32 = c_31;
-        var at_31 : vec3<f32> = _S841;
+        var at_31 : vec3<f32> = _S847;
         var n_8 : u32 = u32(0);
         loop
         {
@@ -8939,29 +8989,29 @@ fn strike_crush_body_0( b_87 : u32,  s_37 : u32,  budget_1 : f32) -> f32
             }
             if(!cell_in_0(counted_0, e_11))
             {
-                _S828 = true;
+                _S834 = true;
             }
             else
             {
-                var _S844 : u32 = atomicLoad(&(atom_0[_S832 + u32(2) * e_11 + u32(1)]));
-                _S828 = _S844 != k_75;
+                var _S850 : u32 = atomicLoad(&(atom_0[_S838 + u32(2) * e_11 + u32(1)]));
+                _S834 = _S850 != k_75;
             }
-            if(_S828)
+            if(_S834)
             {
                 e_11 = e_11 + u32(1);
                 continue;
             }
             var rho_5 : f32;
-            var _S845 : vec3<f32> = contact_24 + cover_offset_1(e_11, d_33, _S830, &(rho_5));
-            var _S846 : u32 = atomicLoad(&(atom_0[_S832 + u32(2) * e_11]));
-            var _S847 : u32 = n_8 + u32(1);
-            at_31 = at_31 + (_S845 + d_33 * vec3<f32>(unordered_0(_S846)));
-            n_8 = _S847;
+            var _S851 : vec3<f32> = contact_25 + cover_offset_1(e_11, d_33, _S836, &(rho_5));
+            var _S852 : u32 = atomicLoad(&(atom_0[_S838 + u32(2) * e_11]));
+            var _S853 : u32 = n_8 + u32(1);
+            at_31 = at_31 + (_S851 + d_33 * vec3<f32>(unordered_0(_S852)));
+            n_8 = _S853;
             e_11 = e_11 + u32(1);
         }
-        var _S848 : f32 = f32(n_8);
-        var at_32 : vec3<f32> = at_31 / vec3<f32>(_S848);
-        var took_0 : f32 = strike_load_0(k_75, b_87, d_33 * vec3<f32>((p3_0.x * _S848 / f32(total_2))), at_32, p3_0.y, budget_1 - energy_3);
+        var _S854 : f32 = f32(n_8);
+        var at_32 : vec3<f32> = at_31 / vec3<f32>(_S854);
+        var took_0 : f32 = strike_load_0(k_75, b_88, d_33 * vec3<f32>((p3_0.x * _S854 / f32(total_2))), at_32, p3_0.y, budget_1 - energy_3);
         var point_2 : vec3<f32> = point_1 + vec3<f32>(took_0) * at_32;
         energy_3 = energy_3 + took_0;
         point_1 = point_2;
@@ -8970,26 +9020,26 @@ fn strike_crush_body_0( b_87 : u32,  s_37 : u32,  budget_1 : f32) -> f32
     crush_rw_0[bill_2] = vec4<f32>(energy_3, f32(s_37 + u32(1)), 0.0f, 0.0f);
     if(energy_3 > 0.0f)
     {
-        crush_rw_0[_S829] = vec4<f32>(point_1 / vec3<f32>(energy_3), 0.0f);
+        crush_rw_0[_S835] = vec4<f32>(point_1 / vec3<f32>(energy_3), 0.0f);
     }
     return energy_3;
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_strike_crush(@builtin(global_invocation_id) id_83 : vec3<u32>)
+fn fr_strike_crush(@builtin(global_invocation_id) id_84 : vec3<u32>)
 {
-    var s_38 : u32 = id_83.x;
-    var _S849 : bool;
+    var s_38 : u32 = id_84.x;
+    var _S855 : bool;
     if(s_38 >= (params_0.shot_count_0))
     {
-        _S849 = true;
+        _S855 = true;
     }
     else
     {
-        _S849 = (crush_0.enabled_0) == u32(0);
+        _S855 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S849)
+    if(_S855)
     {
         return;
     }
@@ -9005,67 +9055,7 @@ fn fr_strike_crush(@builtin(global_invocation_id) id_83 : vec3<u32>)
     {
         budget_2 = 1.00000001504746622e+30f;
     }
-    var b_88 : u32 = u32(0);
-    loop
-    {
-        if(b_88 < (params_0.body_count_0))
-        {
-        }
-        else
-        {
-            break;
-        }
-        var shot_13 : u32;
-        var _S850 : bool = struck_2(b_88, &(shot_13));
-        if(!_S850)
-        {
-            _S849 = true;
-        }
-        else
-        {
-            _S849 = shot_13 != s_38;
-        }
-        var _S851 : bool;
-        if(_S849)
-        {
-            _S851 = true;
-        }
-        else
-        {
-            _S851 = (crush_rw_0[crush_0.r_bill_0 + u32(4) * b_88 + u32(3)].w) == 0.0f;
-        }
-        if(_S851)
-        {
-            b_88 = b_88 + u32(1);
-            continue;
-        }
-        var _S852 : f32 = strike_crush_body_0(b_88, s_38, budget_2);
-        budget_2 = budget_2 - _S852;
-        b_88 = b_88 + u32(1);
-    }
-    return;
-}
-
-@compute
-@workgroup_size(64, 1, 1)
-fn fr_crush_bill(@builtin(global_invocation_id) id_84 : vec3<u32>)
-{
-    var s_39 : u32 = id_84.x;
-    var _S853 : bool;
-    if(s_39 >= (params_0.shot_count_0))
-    {
-        _S853 = true;
-    }
-    else
-    {
-        _S853 = (crush_0.enabled_0) == u32(0);
-    }
-    if(_S853)
-    {
-        return;
-    }
     var b_89 : u32 = u32(0);
-    var energy_5 : f32 = 0.0f;
     loop
     {
         if(b_89 < (params_0.body_count_0))
@@ -9075,12 +9065,72 @@ fn fr_crush_bill(@builtin(global_invocation_id) id_84 : vec3<u32>)
         {
             break;
         }
-        var bill_3 : vec4<f32> = crush_rw_0[crush_0.r_bill_0 + u32(4) * b_89];
-        if((crush_rw_0[crush_0.r_bill_0 + u32(4) * b_89].y) == f32(s_39 + u32(1)))
+        var shot_14 : u32;
+        var _S856 : bool = struck_2(b_89, &(shot_14));
+        if(!_S856)
+        {
+            _S855 = true;
+        }
+        else
+        {
+            _S855 = shot_14 != s_38;
+        }
+        var _S857 : bool;
+        if(_S855)
+        {
+            _S857 = true;
+        }
+        else
+        {
+            _S857 = (crush_rw_0[crush_0.r_bill_0 + u32(4) * b_89 + u32(3)].w) == 0.0f;
+        }
+        if(_S857)
+        {
+            b_89 = b_89 + u32(1);
+            continue;
+        }
+        var _S858 : f32 = strike_crush_body_0(b_89, s_38, budget_2);
+        budget_2 = budget_2 - _S858;
+        b_89 = b_89 + u32(1);
+    }
+    return;
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn fr_crush_bill(@builtin(global_invocation_id) id_85 : vec3<u32>)
+{
+    var s_39 : u32 = id_85.x;
+    var _S859 : bool;
+    if(s_39 >= (params_0.shot_count_0))
+    {
+        _S859 = true;
+    }
+    else
+    {
+        _S859 = (crush_0.enabled_0) == u32(0);
+    }
+    if(_S859)
+    {
+        return;
+    }
+    var b_90 : u32 = u32(0);
+    var energy_5 : f32 = 0.0f;
+    loop
+    {
+        if(b_90 < (params_0.body_count_0))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var bill_3 : vec4<f32> = crush_rw_0[crush_0.r_bill_0 + u32(4) * b_90];
+        if((crush_rw_0[crush_0.r_bill_0 + u32(4) * b_90].y) == f32(s_39 + u32(1)))
         {
             energy_5 = energy_5 + bill_3.x;
         }
-        b_89 = b_89 + u32(1);
+        b_90 = b_90 + u32(1);
     }
     crush_rw_0[crush_0.r_shot_0 + s_39] = vec4<f32>(0.0f);
     if(!(energy_5 > 0.0f))
@@ -9097,15 +9147,15 @@ fn fr_crush_bill(@builtin(global_invocation_id) id_84 : vec3<u32>)
     var v_21 : vec3<f32> = bodies_0[sb_5 + u32(3)].xyz;
     var speed_18 : f32 = length(v_21);
     var j_15 : f32 = m_10 * (speed_18 - sqrt(max(speed_18 * speed_18 - 2.0f * energy_5 / m_10, 0.0f)));
-    var _S854 : bool = speed_18 > 0.0f;
-    var _S855 : vec3<f32>;
-    if(_S854)
+    var _S860 : bool = speed_18 > 0.0f;
+    var _S861 : vec3<f32>;
+    if(_S860)
     {
-        _S855 = (vec3<f32>(0) - v_21) * vec3<f32>((j_15 / (m_10 * speed_18)));
+        _S861 = (vec3<f32>(0) - v_21) * vec3<f32>((j_15 / (m_10 * speed_18)));
     }
     else
     {
-        _S855 = vec3<f32>(0.0f);
+        _S861 = vec3<f32>(0.0f);
     }
     var region_6 : u32 = u32(0);
     loop
@@ -9118,83 +9168,83 @@ fn fr_crush_bill(@builtin(global_invocation_id) id_84 : vec3<u32>)
             break;
         }
         var w_16 : u32 = sb_5 + region_6 * u32(7) * params_0.max_bodies_0 + u32(3);
-        bodies_0[w_16] = vec4<f32>(bodies_0[w_16].xyz + _S855, bodies_0[w_16].w);
+        bodies_0[w_16] = vec4<f32>(bodies_0[w_16].xyz + _S861, bodies_0[w_16].w);
         region_6 = region_6 + u32(1);
     }
-    if(_S854)
+    if(_S860)
     {
-        _S855 = v_21 * vec3<f32>((j_15 / speed_18));
+        _S861 = v_21 * vec3<f32>((j_15 / speed_18));
     }
     else
     {
-        _S855 = vec3<f32>(0.0f);
+        _S861 = vec3<f32>(0.0f);
     }
-    crush_rw_0[crush_0.r_shot_0 + s_39] = vec4<f32>(_S855, energy_5);
+    crush_rw_0[crush_0.r_shot_0 + s_39] = vec4<f32>(_S861, energy_5);
     return;
 }
 
-fn inverse_rotate_0( q_43 : Quat_0,  v_22 : vec3<f32>) -> vec3<f32>
+fn inverse_rotate_0( q_44 : Quat_0,  v_22 : vec3<f32>) -> vec3<f32>
 {
     var c_32 : Quat_0;
-    c_32.w_0 = q_43.w_0;
-    c_32.x_0 = - q_43.x_0;
-    c_32.y_0 = - q_43.y_0;
-    c_32.z_0 = - q_43.z_0;
+    c_32.w_0 = q_44.w_0;
+    c_32.x_0 = - q_44.x_0;
+    c_32.y_0 = - q_44.y_0;
+    c_32.z_0 = - q_44.z_0;
     return rotate_0(c_32, v_22);
 }
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_crush_push(@builtin(global_invocation_id) id_85 : vec3<u32>)
+fn fr_crush_push(@builtin(global_invocation_id) id_86 : vec3<u32>)
 {
-    var b_90 : u32 = id_85.x;
-    var _S856 : bool;
-    if(b_90 >= (params_0.body_count_0))
+    var b_91 : u32 = id_86.x;
+    var _S862 : bool;
+    if(b_91 >= (params_0.body_count_0))
     {
-        _S856 = true;
+        _S862 = true;
     }
     else
     {
-        _S856 = (params_0.shot_count_0) == u32(0);
+        _S862 = (params_0.shot_count_0) == u32(0);
     }
-    if(_S856)
+    if(_S862)
     {
-        _S856 = true;
+        _S862 = true;
     }
     else
     {
-        _S856 = (crush_0.enabled_0) == u32(0);
+        _S862 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S856)
+    if(_S862)
     {
         return;
     }
-    var _S857 : u32 = u32(4) * b_90;
-    var bill_4 : vec4<f32> = crush_rw_0[crush_0.r_bill_0 + _S857];
-    var _S858 : f32 = crush_rw_0[crush_0.r_bill_0 + _S857].x;
-    if(!(_S858 > 0.0f))
+    var _S863 : u32 = u32(4) * b_91;
+    var bill_4 : vec4<f32> = crush_rw_0[crush_0.r_bill_0 + _S863];
+    var _S864 : f32 = crush_rw_0[crush_0.r_bill_0 + _S863].x;
+    if(!(_S864 > 0.0f))
     {
         return;
     }
     var paid_0 : vec4<f32> = crush_rw_0[crush_0.r_shot_0 + (u32(bill_4.y) - u32(1))];
-    var bw_0 : u32 = u32(7) * b_90;
+    var bw_0 : u32 = u32(7) * b_91;
     var inv_mass_13 : f32 = bodies_0[bw_0].w;
-    var _S859 : f32 = crush_rw_0[crush_0.r_shot_0 + (u32(bill_4.y) - u32(1))].w;
-    if(!(_S859 > 0.0f))
+    var _S865 : f32 = crush_rw_0[crush_0.r_shot_0 + (u32(bill_4.y) - u32(1))].w;
+    if(!(_S865 > 0.0f))
     {
-        _S856 = true;
+        _S862 = true;
     }
     else
     {
-        _S856 = inv_mass_13 == 0.0f;
+        _S862 = inv_mass_13 == 0.0f;
     }
-    if(_S856)
+    if(_S862)
     {
         return;
     }
-    var j_16 : vec3<f32> = paid_0.xyz * vec3<f32>((_S858 / _S859));
+    var j_16 : vec3<f32> = paid_0.xyz * vec3<f32>((_S864 / _S865));
     var o_13 : Quat_0 = quat_of_0(bodies_0[bw_0 + u32(1)]);
-    var _S860 : vec3<f32> = rotate_0(o_13, bodies_0[bw_0 + u32(2)].xyz * inverse_rotate_0(o_13, cross(to_rubble_0(crush_rw_0[crush_0.r_bill_0 + _S857 + u32(1)].xyz) - bodies_0[bw_0].xyz, j_16)));
+    var _S866 : vec3<f32> = rotate_0(o_13, bodies_0[bw_0 + u32(2)].xyz * inverse_rotate_0(o_13, cross(to_rubble_0(crush_rw_0[crush_0.r_bill_0 + _S863 + u32(1)].xyz) - bodies_0[bw_0].xyz, j_16)));
     var region_7 : u32 = u32(0);
     loop
     {
@@ -9206,10 +9256,10 @@ fn fr_crush_push(@builtin(global_invocation_id) id_85 : vec3<u32>)
             break;
         }
         var w_17 : u32 = bw_0 + region_7 * u32(7) * params_0.max_bodies_0;
-        var _S861 : u32 = w_17 + u32(3);
-        bodies_0[_S861] = vec4<f32>(bodies_0[_S861].xyz + j_16 * vec3<f32>(inv_mass_13), bodies_0[_S861].w);
-        var _S862 : u32 = w_17 + u32(4);
-        bodies_0[_S862] = vec4<f32>(bodies_0[_S862].xyz + _S860, bodies_0[_S862].w);
+        var _S867 : u32 = w_17 + u32(3);
+        bodies_0[_S867] = vec4<f32>(bodies_0[_S867].xyz + j_16 * vec3<f32>(inv_mass_13), bodies_0[_S867].w);
+        var _S868 : u32 = w_17 + u32(4);
+        bodies_0[_S868] = vec4<f32>(bodies_0[_S868].xyz + _S866, bodies_0[_S868].w);
         region_7 = region_7 + u32(1);
     }
     return;
@@ -9217,42 +9267,42 @@ fn fr_crush_push(@builtin(global_invocation_id) id_85 : vec3<u32>)
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_crush_bonds(@builtin(global_invocation_id) id_86 : vec3<u32>)
+fn fr_crush_bonds(@builtin(global_invocation_id) id_87 : vec3<u32>)
 {
-    var i_28 : u32 = id_86.x;
-    var _S863 : bool;
-    if(i_28 >= (params_0.bond_count_0))
+    var i_29 : u32 = id_87.x;
+    var _S869 : bool;
+    if(i_29 >= (params_0.bond_count_0))
     {
-        _S863 = true;
+        _S869 = true;
     }
     else
     {
-        _S863 = (crush_0.enabled_0) == u32(0);
+        _S869 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S863)
+    if(_S869)
     {
-        _S863 = true;
+        _S869 = true;
     }
     else
     {
-        _S863 = work_0[w_alive_0() + i_28] == u32(0);
+        _S869 = work_0[w_alive_0() + i_29] == u32(0);
     }
-    if(_S863)
+    if(_S869)
     {
         return;
     }
-    var bond_13 : vec4<u32> = bonds_0[i_28];
-    var _S864 : u32 = bond_13.x;
-    if((((((bitcast<u32>((crush_rw_0[_S864].w))) | ((bitcast<u32>((crush_rw_0[bond_13.y].w)))))) & (u32(2)))) == u32(0))
+    var bond_14 : vec4<u32> = bonds_0[i_29];
+    var _S870 : u32 = bond_14.x;
+    if((((((bitcast<u32>((crush_rw_0[_S870].w))) | ((bitcast<u32>((crush_rw_0[bond_14.y].w)))))) & (u32(2)))) == u32(0))
     {
         return;
     }
-    work_0[w_alive_0() + i_28] = u32(0);
-    var _S865 : u32 = atomicOr(&(atom_0[a_dirty_0() + body_of_0(_S864)]), u32(1));
-    var _S866 : u32 = a_counters_0();
-    var _S867 : u32 = atomicAdd(&(atom_0[_S866]), u32(1));
-    var _S868 : u32 = atomicAdd(&(atom_0[_S866 + u32(1)]), u32(1));
-    event_broken_0(i_28);
+    work_0[w_alive_0() + i_29] = u32(0);
+    var _S871 : u32 = atomicOr(&(atom_0[a_dirty_0() + body_of_0(_S870)]), u32(1));
+    var _S872 : u32 = a_counters_0();
+    var _S873 : u32 = atomicAdd(&(atom_0[_S872]), u32(1));
+    var _S874 : u32 = atomicAdd(&(atom_0[_S872 + u32(1)]), u32(1));
+    event_broken_0(i_29);
     return;
 }
 
@@ -9271,19 +9321,19 @@ fn crush_pieces_0( k_76 : u32) -> u32
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_crush_mark(@builtin(global_invocation_id) id_87 : vec3<u32>)
+fn fr_crush_mark(@builtin(global_invocation_id) id_88 : vec3<u32>)
 {
-    var c_33 : u32 = id_87.x;
-    var _S869 : bool;
+    var c_33 : u32 = id_88.x;
+    var _S875 : bool;
     if(c_33 >= (params_0.chunk_count_0))
     {
-        _S869 = true;
+        _S875 = true;
     }
     else
     {
-        _S869 = (crush_0.enabled_0) == u32(0);
+        _S875 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S869)
+    if(_S875)
     {
         return;
     }
@@ -9296,8 +9346,8 @@ fn fr_crush_mark(@builtin(global_invocation_id) id_87 : vec3<u32>)
     {
         now_0 = u32(0);
     }
-    var _S870 : bool = now_0 != u32(0);
-    if(_S870)
+    var _S876 : bool = now_0 != u32(0);
+    if(_S876)
     {
         now_0 = (u32(1048576) | ((crush_pieces_0(c_33))));
     }
@@ -9306,61 +9356,61 @@ fn fr_crush_mark(@builtin(global_invocation_id) id_87 : vec3<u32>)
         now_0 = u32(0);
     }
     work_0[w_new_0() + c_33] = now_0;
-    if(_S870)
+    if(_S876)
     {
-        var _S871 : u32 = atomicAdd(&(atom_0[a_counters_0() + u32(10)]), u32(1));
+        var _S877 : u32 = atomicAdd(&(atom_0[a_counters_0() + u32(10)]), u32(1));
     }
     return;
 }
 
 @compute
 @workgroup_size(1, 1, 1)
-fn fr_crush_gate(@builtin(global_invocation_id) id_88 : vec3<u32>)
+fn fr_crush_gate(@builtin(global_invocation_id) id_89 : vec3<u32>)
 {
     var run_2 : bool;
     if((crush_0.enabled_0) != u32(0))
     {
-        var _S872 : u32 = atomicLoad(&(atom_0[a_counters_0() + u32(10)]));
-        run_2 = _S872 != u32(0);
+        var _S878 : u32 = atomicLoad(&(atom_0[a_counters_0() + u32(10)]));
+        run_2 = _S878 != u32(0);
     }
     else
     {
         run_2 = false;
     }
-    var _S873 : u32 = a_counters_0();
-    atomicStore(&(atom_0[_S873 + u32(10)]), u32(0));
-    atomicStore(&(atom_0[_S873 + u32(7)]), u32(0));
-    var _S874 : u32;
+    var _S879 : u32 = a_counters_0();
+    atomicStore(&(atom_0[_S879 + u32(10)]), u32(0));
+    atomicStore(&(atom_0[_S879 + u32(7)]), u32(0));
+    var _S880 : u32;
     if(run_2)
     {
-        var _S875 : u32 = groups_of_0(params_0.chunk_count_0, u32(64));
-        _S874 = _S875;
+        var _S881 : u32 = groups_of_0(params_0.chunk_count_0, u32(64));
+        _S880 = _S881;
     }
     else
     {
-        _S874 = u32(0);
+        _S880 = u32(0);
     }
-    set_args_0(u32(14), _S874);
+    set_args_0(u32(14), _S880);
     if(run_2)
     {
-        var _S876 : u32 = groups_of_0(params_0.chunk_count_0, u32(1024));
-        _S874 = _S876;
+        var _S882 : u32 = groups_of_0(params_0.chunk_count_0, u32(1024));
+        _S880 = _S882;
     }
     else
     {
-        _S874 = u32(0);
+        _S880 = u32(0);
     }
-    set_args_0(u32(15), _S874);
-    var _S877 : i32;
+    set_args_0(u32(15), _S880);
+    var _S883 : i32;
     if(run_2)
     {
-        _S877 = i32(1);
+        _S883 = i32(1);
     }
     else
     {
-        _S877 = i32(0);
+        _S883 = i32(0);
     }
-    set_args_0(u32(16), u32(_S877));
+    set_args_0(u32(16), u32(_S883));
     return;
 }
 
@@ -9376,22 +9426,22 @@ fn write_body_0( slot_24 : u32,  pos_1 : vec3<f32>,  inv_mass_14 : f32,  orienta
         {
             break;
         }
-        var b_91 : u32 = u32(7) * (slot_24 + region_8 * params_0.max_bodies_0);
-        bodies_0[b_91] = vec4<f32>(pos_1, inv_mass_14);
-        bodies_0[b_91 + u32(1)] = quat_vec_0(orientation_1);
-        bodies_0[b_91 + u32(2)] = vec4<f32>(inv_inertia_1, (bitcast<f32>((flags_3))));
-        bodies_0[b_91 + u32(3)] = vec4<f32>(v_23, 0.0f);
-        bodies_0[b_91 + u32(4)] = vec4<f32>(w_18, (bitcast<f32>((frame_step_0()))));
-        bodies_0[b_91 + u32(5)] = vec4<f32>(0.0f);
-        bodies_0[b_91 + u32(6)] = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
+        var b_92 : u32 = u32(7) * (slot_24 + region_8 * params_0.max_bodies_0);
+        bodies_0[b_92] = vec4<f32>(pos_1, inv_mass_14);
+        bodies_0[b_92 + u32(1)] = quat_vec_0(orientation_1);
+        bodies_0[b_92 + u32(2)] = vec4<f32>(inv_inertia_1, (bitcast<f32>((flags_3))));
+        bodies_0[b_92 + u32(3)] = vec4<f32>(v_23, 0.0f);
+        bodies_0[b_92 + u32(4)] = vec4<f32>(w_18, (bitcast<f32>((frame_step_0()))));
+        bodies_0[b_92 + u32(5)] = vec4<f32>(0.0f);
+        bodies_0[b_92 + u32(6)] = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
         region_8 = region_8 + u32(1);
     }
     return;
 }
 
-fn crush_particle_spot_0( k_77 : u32,  i_29 : u32) -> vec3<f32>
+fn crush_particle_spot_0( k_77 : u32,  i_30 : u32) -> vec3<f32>
 {
-    var h_7 : u32 = ((k_77 * u32(2654435761)) ^ ((i_29 * u32(2246822519))));
+    var h_7 : u32 = ((k_77 * u32(2654435761)) ^ ((i_30 * u32(2246822519))));
     var h_8 : u32 = ((h_7 ^ (((h_7 >> (u32(15))))))) * u32(739982445);
     var h_9 : u32 = ((h_8 ^ (((h_8 >> (u32(12))))))) * u32(695872825);
     var h_10 : u32 = (h_9 ^ (((h_9 >> (u32(15))))));
@@ -9400,19 +9450,19 @@ fn crush_particle_spot_0( k_77 : u32,  i_29 : u32) -> vec3<f32>
 
 @compute
 @workgroup_size(64, 1, 1)
-fn fr_crush_apply(@builtin(global_invocation_id) id_89 : vec3<u32>)
+fn fr_crush_apply(@builtin(global_invocation_id) id_90 : vec3<u32>)
 {
-    var k_78 : u32 = id_89.x;
-    var _S878 : bool;
+    var k_78 : u32 = id_90.x;
+    var _S884 : bool;
     if(k_78 >= (params_0.chunk_count_0))
     {
-        _S878 = true;
+        _S884 = true;
     }
     else
     {
-        _S878 = (crush_0.enabled_0) == u32(0);
+        _S884 = (crush_0.enabled_0) == u32(0);
     }
-    if(_S878)
+    if(_S884)
     {
         return;
     }
@@ -9429,50 +9479,50 @@ fn fr_crush_apply(@builtin(global_invocation_id) id_89 : vec3<u32>)
     var orientation_2 : Quat_0 = quat_of_0(bodies_0[bw_1 + u32(1)]);
     var v_24 : vec3<f32> = bodies_0[bw_1 + u32(3)].xyz;
     var w_19 : vec3<f32> = bodies_0[bw_1 + u32(4)].xyz;
-    var _S879 : u32 = u32(4) * k_78;
-    var mass_2 : f32 = chunks_0[_S879].w;
+    var _S885 : u32 = u32(4) * k_78;
+    var mass_2 : f32 = chunks_0[_S885].w;
     var volume_1 : f32 = crush_tab_0[u32(2) * k_78 + u32(1)].y;
     var scanned_0 : u32 = work_0[w_rank_0() + k_78];
     var rank_0 : u32 = work_0[w_rank_0() + k_78] / u32(1048576);
     var pieces_0 : u32 = crush_pieces_0(k_78);
     if(rank_0 >= (crush_0.max_events_0))
     {
-        var _S880 : u32 = atomicOr(&(atom_0[a_counters_0() + u32(3)]), u32(32));
+        var _S886 : u32 = atomicOr(&(atom_0[a_counters_0() + u32(3)]), u32(32));
     }
-    var _S881 : vec3<f32> = vec3<f32>(0.0f);
+    var _S887 : vec3<f32> = vec3<f32>(0.0f);
     if((crush_0.mode_1) == u32(1))
     {
-        _S878 = (crush_0.fragments_0) > u32(0);
+        _S884 = (crush_0.fragments_0) > u32(0);
     }
     else
     {
-        _S878 = false;
+        _S884 = false;
     }
     var first_6 : u32;
     var n_9 : u32;
-    var i_30 : u32;
+    var i_31 : u32;
     var half_2 : vec3<f32>;
-    if(_S878)
+    if(_S884)
     {
-        var _S882 : u32 = a_counters_0();
-        var _S883 : u32 = atomicLoad(&(atom_0[_S882 + u32(8)]));
-        var base_4 : u32 = _S883 + ((scanned_0 & (u32(1048575))));
+        var _S888 : u32 = a_counters_0();
+        var _S889 : u32 = atomicLoad(&(atom_0[_S888 + u32(8)]));
+        var base_4 : u32 = _S889 + ((scanned_0 & (u32(1048575))));
         if((base_4 + crush_0.fragments_0) > (crush_0.pool_size_0))
         {
-            var _S884 : u32 = atomicOr(&(atom_0[_S882 + u32(3)]), u32(16));
+            var _S890 : u32 = atomicOr(&(atom_0[_S888 + u32(3)]), u32(16));
             first_6 = u32(4294967295);
         }
         else
         {
             first_6 = base_4;
         }
-        var q_44 : Quat_0;
+        var q_45 : Quat_0;
         var origin_22 : vec3<f32>;
-        structure_pose_5(slot_25, bw_1, &(q_44), &(origin_22));
-        var _S885 : vec3<f32> = origin_22 + rotate_0(q_44, chunks_0[_S879].xyz);
-        var _S886 : u32 = u32(3) * k_78;
-        var box_0 : Quat_0 = normalized_0(quat_mul_0(q_44, quat_of_0(geometry_0[_S886 + u32(2)])));
-        var h_11 : vec3<f32> = geometry_0[_S886 + u32(1)].xyz;
+        structure_pose_5(slot_25, bw_1, &(q_45), &(origin_22));
+        var _S891 : vec3<f32> = origin_22 + rotate_0(q_45, chunks_0[_S885].xyz);
+        var _S892 : u32 = u32(3) * k_78;
+        var box_0 : Quat_0 = normalized_0(quat_mul_0(q_45, quat_of_0(geometry_0[_S892 + u32(2)])));
+        var h_11 : vec3<f32> = geometry_0[_S892 + u32(1)].xyz;
         var g_0 : vec3<u32> = vec3<u32>(vec3<i32>(i32(1)));
         var cell_0 : vec3<f32> = h_11;
         n_9 = crush_0.fragments_0;
@@ -9487,29 +9537,29 @@ fn fr_crush_apply(@builtin(global_invocation_id) id_89 : vec3<u32>)
             }
             if((cell_0.x) >= (cell_0.y))
             {
-                _S878 = (cell_0.x) >= (cell_0.z);
+                _S884 = (cell_0.x) >= (cell_0.z);
             }
             else
             {
-                _S878 = false;
+                _S884 = false;
             }
-            if(_S878)
+            if(_S884)
             {
-                i_30 = u32(0);
+                i_31 = u32(0);
             }
             else
             {
                 if((cell_0.y) >= (cell_0.z))
                 {
-                    i_30 = u32(1);
+                    i_31 = u32(1);
                 }
                 else
                 {
-                    i_30 = u32(2);
+                    i_31 = u32(2);
                 }
             }
-            g_0[i_30] = g_0[i_30] * u32(2);
-            cell_0[i_30] = cell_0[i_30] * 0.5f;
+            g_0[i_31] = g_0[i_31] * u32(2);
+            cell_0[i_31] = cell_0[i_31] * 0.5f;
             n_9 = (n_9 >> (u32(1)));
         }
         var box_volume_0 : f32 = 8.0f * h_11.x * h_11.y * h_11.z;
@@ -9524,136 +9574,136 @@ fn fr_crush_apply(@builtin(global_invocation_id) id_89 : vec3<u32>)
         }
         var half_3 : vec3<f32> = cell_0 * vec3<f32>(shrink_0);
         var mf_0 : f32 = mass_2 / f32(crush_0.fragments_0);
-        var _S887 : f32 = half_3.y;
-        var _S888 : f32 = _S887 * _S887;
-        var _S889 : f32 = half_3.z;
-        var _S890 : f32 = _S889 * _S889;
-        var _S891 : f32 = half_3.x;
-        var _S892 : f32 = _S891 * _S891;
-        var inertia_0 : vec3<f32> = vec3<f32>((mf_0 / 3.0f)) * vec3<f32>(_S888 + _S890, _S892 + _S890, _S892 + _S888);
-        var _S893 : vec3<f32> = vec3<f32>(1.0f / inertia_0.x, 1.0f / inertia_0.y, 1.0f / inertia_0.z);
-        var _S894 : Quat_0 = rot_to_rubble_0(box_0);
-        var _S895 : f32 = chunks_0[_S879 + u32(3)].x;
-        var _S896 : f32 = min(_S891, min(_S887, _S889));
-        i_30 = u32(0);
+        var _S893 : f32 = half_3.y;
+        var _S894 : f32 = _S893 * _S893;
+        var _S895 : f32 = half_3.z;
+        var _S896 : f32 = _S895 * _S895;
+        var _S897 : f32 = half_3.x;
+        var _S898 : f32 = _S897 * _S897;
+        var inertia_0 : vec3<f32> = vec3<f32>((mf_0 / 3.0f)) * vec3<f32>(_S894 + _S896, _S898 + _S896, _S898 + _S894);
+        var _S899 : vec3<f32> = vec3<f32>(1.0f / inertia_0.x, 1.0f / inertia_0.y, 1.0f / inertia_0.z);
+        var _S900 : Quat_0 = rot_to_rubble_0(box_0);
+        var _S901 : f32 = chunks_0[_S885 + u32(3)].x;
+        var _S902 : f32 = min(_S897, min(_S893, _S895));
+        i_31 = u32(0);
         loop
         {
-            if(i_30 < (crush_0.fragments_0))
+            if(i_31 < (crush_0.fragments_0))
             {
-                _S878 = first_6 != u32(4294967295);
+                _S884 = first_6 != u32(4294967295);
             }
             else
             {
-                _S878 = false;
+                _S884 = false;
             }
-            if(_S878)
+            if(_S884)
             {
             }
             else
             {
                 break;
             }
-            var _S897 : u32 = i_30 % g_0.x;
-            var _S898 : u32 = i_30 / g_0.x;
-            var _S899 : u32 = _S898 % g_0.y;
-            var _S900 : u32 = i_30 / (g_0.x * g_0.y);
-            var x_10 : vec3<f32> = to_rubble_0(_S885 + rotate_0(box_0, (vec3<f32>(0) - h_11) + cell_0 * (vec3<f32>(2.0f) * vec3<f32>(vec3<u32>(_S897, _S899, _S900)) + vec3<f32>(1.0f))));
-            var entry_9 : vec4<f32> = crush_tab_0[crush_0.t_pool_0 + first_6 + i_30];
+            var _S903 : u32 = i_31 % g_0.x;
+            var _S904 : u32 = i_31 / g_0.x;
+            var _S905 : u32 = _S904 % g_0.y;
+            var _S906 : u32 = i_31 / (g_0.x * g_0.y);
+            var x_10 : vec3<f32> = to_rubble_0(_S891 + rotate_0(box_0, (vec3<f32>(0) - h_11) + cell_0 * (vec3<f32>(2.0f) * vec3<f32>(vec3<u32>(_S903, _S905, _S906)) + vec3<f32>(1.0f))));
+            var entry_9 : vec4<f32> = crush_tab_0[crush_0.t_pool_0 + first_6 + i_31];
             var fs_0 : u32 = (bitcast<u32>((entry_9.x)));
             var fc_3 : u32 = (bitcast<u32>((entry_9.y)));
-            write_body_0(fs_0, x_10, 1.0f / mf_0, _S894, _S893, u32(9), v_24 + cross(w_19, x_10 - b0_2.xyz), w_19);
-            var _S901 : u32 = u32(4) * fc_3;
-            var _S902 : u32 = _S901 + u32(1);
-            colliders_0[_S902] = vec4<f32>(0.0f, 0.0f, 0.0f, colliders_0[_S902].w);
-            colliders_0[_S901 + u32(2)] = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
-            colliders_0[_S901 + u32(3)] = vec4<f32>(half_3, length(half_3));
-            var _S903 : u32 = u32(2) * fc_3;
-            collider_info_0[_S903] = vec4<u32>(u32(4294967295), fs_0, u32(2), collider_info_0[_S903].w);
-            collider_info_0[_S903 + u32(1)] = vec4<u32>((bitcast<u32>((mf_0))), (bitcast<u32>((_S895))), (bitcast<u32>((_S896))), u32(0));
-            i_30 = i_30 + u32(1);
+            write_body_0(fs_0, x_10, 1.0f / mf_0, _S900, _S899, u32(9), v_24 + cross(w_19, x_10 - b0_2.xyz), w_19);
+            var _S907 : u32 = u32(4) * fc_3;
+            var _S908 : u32 = _S907 + u32(1);
+            colliders_0[_S908] = vec4<f32>(0.0f, 0.0f, 0.0f, colliders_0[_S908].w);
+            colliders_0[_S907 + u32(2)] = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
+            colliders_0[_S907 + u32(3)] = vec4<f32>(half_3, length(half_3));
+            var _S909 : u32 = u32(2) * fc_3;
+            collider_info_0[_S909] = vec4<u32>(u32(4294967295), fs_0, u32(2), collider_info_0[_S909].w);
+            collider_info_0[_S909 + u32(1)] = vec4<u32>((bitcast<u32>((mf_0))), (bitcast<u32>((_S901))), (bitcast<u32>((_S902))), u32(0));
+            i_31 = i_31 + u32(1);
         }
         half_2 = half_3;
     }
     else
     {
         first_6 = u32(4294967295);
-        half_2 = _S881;
+        half_2 = _S887;
     }
     if((crush_0.mode_1) == u32(2))
     {
-        _S878 = pieces_0 > u32(0);
+        _S884 = pieces_0 > u32(0);
     }
     else
     {
-        _S878 = false;
+        _S884 = false;
     }
-    if(_S878)
+    if(_S884)
     {
-        var _S904 : u32 = a_counters_0();
-        var _S905 : u32 = atomicLoad(&(atom_0[_S904 + u32(8)]));
-        var base_5 : u32 = _S905 + ((scanned_0 & (u32(1048575))));
+        var _S910 : u32 = a_counters_0();
+        var _S911 : u32 = atomicLoad(&(atom_0[_S910 + u32(8)]));
+        var base_5 : u32 = _S911 + ((scanned_0 & (u32(1048575))));
         if((base_5 + pieces_0) > (crush_0.pool_size_0))
         {
-            var _S906 : u32 = atomicOr(&(atom_0[_S904 + u32(3)]), u32(16));
+            var _S912 : u32 = atomicOr(&(atom_0[_S910 + u32(3)]), u32(16));
         }
         else
         {
             first_6 = base_5;
         }
-        var q_45 : Quat_0;
+        var q_46 : Quat_0;
         var origin_23 : vec3<f32>;
-        structure_pose_5(slot_25, bw_1, &(q_45), &(origin_23));
-        var _S907 : vec3<f32> = origin_23 + rotate_0(q_45, chunks_0[_S879].xyz);
-        var _S908 : u32 = u32(3) * k_78;
-        var _S909 : Quat_0 = normalized_0(quat_mul_0(q_45, quat_of_0(geometry_0[_S908 + u32(2)])));
-        var h_12 : vec3<f32> = geometry_0[_S908 + u32(1)].xyz;
-        var _S910 : f32 = f32(pieces_0);
-        var _S911 : f32 = max(pow(0.75f * volume_1 / (3.14159274101257324f * _S910), 0.3333333432674408f), 0.0020000000949949f);
-        var _S912 : vec3<f32> = vec3<f32>(_S911, _S911, _S911);
-        var _S913 : f32 = mass_2 / _S910;
-        var _S914 : f32 = chunks_0[_S879 + u32(3)].x;
-        var _S915 : vec3<f32> = max(h_12 - vec3<f32>(_S911), vec3<f32>(0.25f) * h_12);
-        i_30 = u32(0);
-        var mean_4 : vec3<f32> = _S881;
+        structure_pose_5(slot_25, bw_1, &(q_46), &(origin_23));
+        var _S913 : vec3<f32> = origin_23 + rotate_0(q_46, chunks_0[_S885].xyz);
+        var _S914 : u32 = u32(3) * k_78;
+        var _S915 : Quat_0 = normalized_0(quat_mul_0(q_46, quat_of_0(geometry_0[_S914 + u32(2)])));
+        var h_12 : vec3<f32> = geometry_0[_S914 + u32(1)].xyz;
+        var _S916 : f32 = f32(pieces_0);
+        var _S917 : f32 = max(pow(0.75f * volume_1 / (3.14159274101257324f * _S916), 0.3333333432674408f), 0.0020000000949949f);
+        var _S918 : vec3<f32> = vec3<f32>(_S917, _S917, _S917);
+        var _S919 : f32 = mass_2 / _S916;
+        var _S920 : f32 = chunks_0[_S885 + u32(3)].x;
+        var _S921 : vec3<f32> = max(h_12 - vec3<f32>(_S917), vec3<f32>(0.25f) * h_12);
+        i_31 = u32(0);
+        var mean_4 : vec3<f32> = _S887;
         loop
         {
-            if(i_30 < pieces_0)
+            if(i_31 < pieces_0)
             {
             }
             else
             {
                 break;
             }
-            var mean_5 : vec3<f32> = mean_4 + crush_particle_spot_0(k_78, i_30);
-            i_30 = i_30 + u32(1);
+            var mean_5 : vec3<f32> = mean_4 + crush_particle_spot_0(k_78, i_31);
+            i_31 = i_31 + u32(1);
             mean_4 = mean_5;
         }
-        var mean_6 : vec3<f32> = mean_4 / vec3<f32>(_S910);
-        i_30 = u32(0);
+        var mean_6 : vec3<f32> = mean_4 / vec3<f32>(_S916);
+        i_31 = u32(0);
         loop
         {
-            if(i_30 < pieces_0)
+            if(i_31 < pieces_0)
             {
-                _S878 = first_6 != u32(4294967295);
+                _S884 = first_6 != u32(4294967295);
             }
             else
             {
-                _S878 = false;
+                _S884 = false;
             }
-            if(_S878)
+            if(_S884)
             {
             }
             else
             {
                 break;
             }
-            var x_11 : vec3<f32> = to_rubble_0(_S907 + rotate_0(_S909, _S915 * (crush_particle_spot_0(k_78, i_30) - mean_6)));
-            var entry_10 : vec4<f32> = crush_tab_0[crush_0.t_pool_0 + first_6 + i_30];
+            var x_11 : vec3<f32> = to_rubble_0(_S913 + rotate_0(_S915, _S921 * (crush_particle_spot_0(k_78, i_31) - mean_6)));
+            var entry_10 : vec4<f32> = crush_tab_0[crush_0.t_pool_0 + first_6 + i_31];
             var fs_1 : u32 = (bitcast<u32>((entry_10.x)));
             var fc_4 : u32 = (bitcast<u32>((entry_10.y)));
-            var _S916 : f32 = 1.0f / _S913;
-            const _S917 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
-            var _S918 : Quat_0 = quat_of_0(_S917);
+            var _S922 : f32 = 1.0f / _S919;
+            const _S923 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f);
+            var _S924 : Quat_0 = quat_of_0(_S923);
             if((crush_0.particle_ccd_0) != u32(0))
             {
                 n_9 = u32(33024);
@@ -9662,18 +9712,18 @@ fn fr_crush_apply(@builtin(global_invocation_id) id_89 : vec3<u32>)
             {
                 n_9 = u32(0);
             }
-            write_body_0(fs_1, x_11, _S916, _S918, _S881, (u32(9) | (n_9)), v_24 + cross(w_19, x_11 - b0_2.xyz), _S881);
-            var _S919 : u32 = u32(4) * fc_4;
-            var _S920 : u32 = _S919 + u32(1);
-            colliders_0[_S920] = vec4<f32>(0.0f, 0.0f, 0.0f, colliders_0[_S920].w);
-            colliders_0[_S919 + u32(2)] = _S917;
-            colliders_0[_S919 + u32(3)] = vec4<f32>(_S911, 0.0f, 0.0f, _S911);
-            var _S921 : u32 = u32(2) * fc_4;
-            collider_info_0[_S921] = vec4<u32>(u32(4294967295), fs_1, u32(2), collider_info_0[_S921].w);
-            collider_info_0[_S921 + u32(1)] = vec4<u32>((bitcast<u32>((_S913))), (bitcast<u32>((_S914))), (bitcast<u32>((_S911))), u32(0));
-            i_30 = i_30 + u32(1);
+            write_body_0(fs_1, x_11, _S922, _S924, _S887, (u32(9) | (n_9)), v_24 + cross(w_19, x_11 - b0_2.xyz), _S887);
+            var _S925 : u32 = u32(4) * fc_4;
+            var _S926 : u32 = _S925 + u32(1);
+            colliders_0[_S926] = vec4<f32>(0.0f, 0.0f, 0.0f, colliders_0[_S926].w);
+            colliders_0[_S925 + u32(2)] = _S923;
+            colliders_0[_S925 + u32(3)] = vec4<f32>(_S917, 0.0f, 0.0f, _S917);
+            var _S927 : u32 = u32(2) * fc_4;
+            collider_info_0[_S927] = vec4<u32>(u32(4294967295), fs_1, u32(2), collider_info_0[_S927].w);
+            collider_info_0[_S927 + u32(1)] = vec4<u32>((bitcast<u32>((_S919))), (bitcast<u32>((_S920))), (bitcast<u32>((_S917))), u32(0));
+            i_31 = i_31 + u32(1);
         }
-        half_2 = _S912;
+        half_2 = _S918;
     }
     if(rank_0 < (crush_0.max_events_0))
     {
@@ -9685,20 +9735,20 @@ fn fr_crush_apply(@builtin(global_invocation_id) id_89 : vec3<u32>)
         crush_rw_0[ev_0 + u32(4)] = vec4<f32>(w_19, cs_0.z);
         crush_rw_0[ev_0 + u32(5)] = vec4<f32>(half_2, volume_1);
     }
-    write_body_0(slot_25, vec3<f32>(f32(slot_25 % u32(1024)) * crush_0.park_step_0, crush_0.park_y_0, f32(slot_25 / u32(1024)) * crush_0.park_step_0), 0.0f, orientation_2, _S881, u32(0), _S881, _S881);
+    write_body_0(slot_25, vec3<f32>(f32(slot_25 % u32(1024)) * crush_0.park_step_0, crush_0.park_y_0, f32(slot_25 / u32(1024)) * crush_0.park_step_0), 0.0f, orientation_2, _S887, u32(0), _S887, _S887);
     return;
 }
 
 @compute
 @workgroup_size(1, 1, 1)
-fn fr_crush_end(@builtin(global_invocation_id) id_90 : vec3<u32>)
+fn fr_crush_end(@builtin(global_invocation_id) id_91 : vec3<u32>)
 {
     var total_3 : u32 = work_0[scan_new_blocks_0() + (params_0.chunk_count_0 + u32(1023)) / u32(1024)];
     var events_0 : u32 = work_0[scan_new_blocks_0() + (params_0.chunk_count_0 + u32(1023)) / u32(1024)] / u32(1048576);
-    var _S922 : u32 = a_counters_0();
-    atomicStore(&(atom_0[_S922 + u32(7)]), events_0);
-    var _S923 : u32 = atomicAdd(&(atom_0[_S922 + u32(9)]), events_0);
-    var _S924 : u32 = atomicAdd(&(atom_0[_S922 + u32(8)]), (total_3 & (u32(1048575))));
+    var _S928 : u32 = a_counters_0();
+    atomicStore(&(atom_0[_S928 + u32(7)]), events_0);
+    var _S929 : u32 = atomicAdd(&(atom_0[_S928 + u32(9)]), events_0);
+    var _S930 : u32 = atomicAdd(&(atom_0[_S928 + u32(8)]), (total_3 & (u32(1048575))));
     return;
 }
 

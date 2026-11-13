@@ -31,6 +31,10 @@ pub enum Approach {
     /// bonds, each checked in tension, shear, compression and bending. Statics only: an
     /// impact is the force the engine's step already produced.
     StressSolver,
+    /// What a stress-solver pipeline commonly pairs with it for impacts: the GPU stress
+    /// solver (Blast's quasi-static model) for the load, and radial damage for a hit: every
+    /// bond within the weapon's radius of the point struck breaks, at any speed or mass.
+    StressRadial,
     /// Rubble: the quasi-static load solve, and a strike decided before the step by the
     /// analytic local impact (ballistic limit, plug, spall, strain rate), so speed and
     /// mass decide whether a shot bounces, craters or goes through.
@@ -38,13 +42,14 @@ pub enum Approach {
 }
 
 impl Approach {
-    pub const ALL: [Approach; 4] = [Approach::ImpactThreshold, Approach::SupportFlow, Approach::StressSolver, Approach::Rubble];
+    pub const ALL: [Approach; 5] = [Approach::ImpactThreshold, Approach::SupportFlow, Approach::StressSolver, Approach::StressRadial, Approach::Rubble];
 
     pub fn name(self) -> &'static str {
         match self {
             Approach::ImpactThreshold => "impact_threshold",
             Approach::SupportFlow => "support_flow",
             Approach::StressSolver => "stress_solver",
+            Approach::StressRadial => "stress_radial",
             Approach::Rubble => "rubble",
         }
     }
@@ -58,6 +63,7 @@ impl Approach {
             Approach::ImpactThreshold => "Impact threshold",
             Approach::SupportFlow => "Support graph",
             Approach::StressSolver => "Stress solver (statics)",
+            Approach::StressRadial => "Stress solver + radial damage",
             Approach::Rubble => "Rubble",
         }
     }
@@ -68,6 +74,7 @@ impl Approach {
             Approach::ImpactThreshold => "Hit hard enough and a bond breaks; anything still tied to an anchor stays up.",
             Approach::SupportFlow => "Adds weight flowing down to the supports: overloaded members crush, unsupported pieces tip.",
             Approach::StressSolver => "Solves the static load through every bond, bending included. Impacts are whatever force the step produced.",
+            Approach::StressRadial => "A static stress solve for load, and for a hit every bond within half a metre breaks, at any speed or mass.",
             Approach::Rubble => "The static load solve plus an impact decided before the step from the shot's speed and mass.",
         }
     }
@@ -83,6 +90,17 @@ impl Approach {
             Approach::ImpactThreshold => (StrengthModel::Threshold, after_the_step, false),
             Approach::SupportFlow => (StrengthModel::Threshold, after_the_step, true),
             Approach::StressSolver => (StrengthModel::LoadPath, after_the_step, false),
+            Approach::StressRadial => (
+                StrengthModel::BlastGpu,
+                FractureOptions {
+                    contact_fracture: Some(false),
+                    strike_prediction: Some(true),
+                    strike: Some(StrikeRule::Radial {
+                        radius_mm: StrikeRule::RADIAL_DEFAULT_MM,
+                    }),
+                },
+                false,
+            ),
             Approach::Rubble => (
                 StrengthModel::LoadPath,
                 FractureOptions {

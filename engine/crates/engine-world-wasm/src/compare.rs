@@ -50,6 +50,10 @@ pub fn compare_def(scenario_name: &str, approach_name: &str) -> Result<JsValue, 
         "contactFracture": s.fracture.contact_fracture,
         "strikePrediction": s.fracture.strike_prediction,
         "strike": s.fracture.strike.map(|r| r.name()),
+        "strikeRadius": match s.fracture.strike {
+            Some(rubble::StrikeRule::Radial { radius_mm }) => Some(radius_mm as f64 * 1e-3),
+            _ => None,
+        },
         "supportLoss": s.support_loss,
         "supportLossDynamicFactor": s.support_loss_dynamic_factor,
     }))

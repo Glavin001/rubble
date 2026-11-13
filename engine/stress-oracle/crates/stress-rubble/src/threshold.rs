@@ -70,8 +70,11 @@ impl ProfileSetup {
         }
         let (load_model, mut strike_model) = profile.fracture_models()?;
         if let Some(s) = options.strike {
-            if profile == Profile::BlastGpu && s != strike_model {
-                return Err("blast_gpu predicts its strikes by the Hertz force; it takes no other strike model".into());
+            if profile == Profile::BlastGpu && matches!(s, StrikeModel::Analytic { .. }) {
+                return Err("blast_gpu takes the Hertz or the radial strike, not the analytic one (its tables are the load path's)".into());
+            }
+            if let StrikeModel::Radial { radius_mm: 0 } = s {
+                return Err("radial damage needs a radius above 0".into());
             }
             strike_model = s;
         }
@@ -88,7 +91,7 @@ impl ProfileSetup {
     /// Whether the tables need the per-bond and per-chunk records beyond the threshold
     /// rule's (`FractureTables::ext`): the load path, the analytic strike.
     pub fn needs_ext(&self) -> bool {
-        self.load_model != LoadModel::Threshold || self.strike_model != StrikeModel::Hertz
+        self.load_model != LoadModel::Threshold || matches!(self.strike_model, StrikeModel::Analytic { .. })
     }
 
     /// Whether every one of the profile's records can be appended to a running fracture

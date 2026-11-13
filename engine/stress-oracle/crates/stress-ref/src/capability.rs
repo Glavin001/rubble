@@ -103,6 +103,11 @@ pub enum StrikeModel {
     /// `impact_local`). `fracture_work`: a perforating shot gives up the ballistic limit's
     /// energy before the step.
     Analytic { fracture_work: bool },
+    /// Radial damage, the common game rule, for comparison (`radial_damage::breaks`,
+    /// fracture.slang `fr_strike_radial`): every bond within `radius_mm` millimetres of the
+    /// point struck breaks, whatever the shot's speed or mass. The radius is the weapon's,
+    /// set by the host. No profile runs it by itself: an option.
+    Radial { radius_mm: u32 },
 }
 
 /// The load path's sweeps a frame in the `LoadPath` profile.

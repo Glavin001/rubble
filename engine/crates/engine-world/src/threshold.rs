@@ -159,6 +159,7 @@ mod imp {
             strike: def.fracture.strike.map(|s| match s {
                 crate::StrikeRule::Hertz => stress_ref::capability::StrikeModel::Hertz,
                 crate::StrikeRule::Analytic => stress_ref::capability::StrikeModel::Analytic { fracture_work: true },
+                crate::StrikeRule::Radial { radius_mm } => stress_ref::capability::StrikeModel::Radial { radius_mm },
             }),
             ..Default::default()
         };

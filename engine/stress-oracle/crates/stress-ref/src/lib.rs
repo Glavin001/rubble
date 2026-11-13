@@ -40,6 +40,7 @@ pub mod observation;
 pub mod par;
 pub mod polytope;
 pub mod profile;
+pub mod radial_damage;
 pub mod refine;
 pub mod rng;
 pub mod scene;

@@ -507,7 +507,7 @@ pub struct FractureOptions {
     /// How a predicted strike's breaks are decided. `None`: the model's own (`Analytic`
     /// for `ImpactLocal`, `Hertz` for the others). `LoadPath` with `Analytic` (and strike
     /// prediction on) is the quasi-static load solve and the dynamic impact together.
-    /// `BlastGpu` takes only its own (an error otherwise).
+    /// `BlastGpu` takes `Hertz` or `Radial` (`Analytic` is an error there).
     pub strike: Option<StrikeRule>,
 }
 
@@ -520,15 +520,23 @@ pub enum StrikeRule {
     /// energy ballistic limit with a plug cone, back-face spall, strain-rate strength;
     /// a perforating shot gives up the limit's energy and leaves with its plug.
     Analytic,
+    /// Radial damage, the common game rule, kept for comparison: every bond within
+    /// `radius_mm` millimetres of the point struck breaks, whatever the shot's speed or
+    /// mass and whatever the bond's strength. The radius is the weapon's. Not `Analytic`'s
+    /// physics: a setting to show what that rule looks like.
+    Radial { radius_mm: u32 },
 }
 
 impl StrikeRule {
-    pub const ALL: [StrikeRule; 2] = [StrikeRule::Hertz, StrikeRule::Analytic];
+    /// Radial damage's radius where a host gives none (0.5 m).
+    pub const RADIAL_DEFAULT_MM: u32 = 500;
+    pub const ALL: [StrikeRule; 3] = [StrikeRule::Hertz, StrikeRule::Analytic, StrikeRule::Radial { radius_mm: Self::RADIAL_DEFAULT_MM }];
 
     pub fn name(self) -> &'static str {
         match self {
             StrikeRule::Hertz => "hertz",
             StrikeRule::Analytic => "analytic",
+            StrikeRule::Radial { .. } => "radial",
         }
     }
 

@@ -56,9 +56,12 @@ struct DefJs {
     contact_fracture: Option<bool>,
     #[serde(default)]
     strike_prediction: Option<bool>,
-    /// Stress models: `'hertz'` or `'analytic'` (absent: the model's own).
+    /// Stress models: `'hertz'`, `'analytic'` or `'radial'` (absent: the model's own), and
+    /// radial damage's radius (m; absent: 0.5).
     #[serde(default)]
     strike: Option<String>,
+    #[serde(default)]
+    strike_radius: Option<f64>,
     /// Stress models: support loss, and its dynamic factor (1 to 2).
     #[serde(default)]
     support_loss: bool,
@@ -130,7 +133,12 @@ fn def_of(v: JsValue, bytes: Option<Vec<u8>>, prebuilt: Option<(&JsScene, bool)>
                 strike_prediction: d.strike_prediction.filter(|_| stress),
                 strike: match d.strike.as_deref().filter(|_| stress) {
                     None => None,
-                    Some(s) => Some(rubble::StrikeRule::parse(s).ok_or_else(|| anyhow::anyhow!("strike {s}: hertz or analytic"))?),
+                    Some(s) => Some(match rubble::StrikeRule::parse(s).ok_or_else(|| anyhow::anyhow!("strike {s}: hertz, analytic or radial"))? {
+                        rubble::StrikeRule::Radial { radius_mm } => rubble::StrikeRule::Radial {
+                            radius_mm: d.strike_radius.map_or(radius_mm, |r| (r * 1e3).round().max(0.0) as u32),
+                        },
+                        r => r,
+                    }),
                 },
             },
             support_loss: d.support_loss,

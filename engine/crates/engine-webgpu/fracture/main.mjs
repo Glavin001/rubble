@@ -139,6 +139,8 @@ function showFractureSwitches(){
   $(id).disabled=!own;if(own)$(id).checked=own[key];
  }
  $('crush').disabled=!stressModel();
+ $('strike-rule').disabled=$('support-loss').disabled=!own;
+ $('strike-radius').disabled=!own||$('strike-rule').value!=='radial';
 }
 const stepHz=()=>Math.round(sim?1/sim.dt:physicsHz());
 const rates=createRates(value=>{
@@ -180,7 +182,10 @@ function labDef(level){
  const def={source,level,maxHullVertices,bonds:labBonds(),physicsHz:physicsHz(),strengthScale:strengthScale(),
   ballRadiusScale:radiusScale(),ballMassScale:massScale(),ballSpeedScale:speedScale(),ccd:$('ball-ccd').checked,crush:crushMode(),gpuTiming:GPU_TIMING,
   arrangement:towers?towers:layout?'layout':'one',...(layout&&!towers?{layout}:{})};
- if(stressModel()){def.strikePrediction=$('strike-prediction').checked;def.contactFracture=$('contact-fracture').checked}
+ if(stressModel()){def.strikePrediction=$('strike-prediction').checked;def.contactFracture=$('contact-fracture').checked;
+  // The strike rule apart from the bond model's load rule (Rust: `FractureOptions::strike`), and support loss.
+  const strike=$('strike-rule').value;if(strike){def.strike=strike;if(strike==='radial')def.strikeRadius=Number($('strike-radius').value)}
+  def.supportLoss=$('support-loss').checked}
  return {def,bytes:source==='glb'?assetBytes:source==='pack'?packBytes:null};
 }
 async function loadLevel(level){
@@ -341,6 +346,10 @@ $('show-bonds').onchange=applyView;
 const reload=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('strike-prediction').onchange=reload;
 $('contact-fracture').onchange=reload;
+// A chosen strike rule only acts on predicted strikes: picking one turns prediction on.
+$('strike-rule').onchange=()=>{$('strike-radius').disabled=$('strike-rule').value!=='radial';if($('strike-rule').value)$('strike-prediction').checked=true;reload()};
+$('strike-radius').onchange=reload;
+$('support-loss').onchange=reload;
 $('ball-mass').oninput=applyBall;
 $('ball-speed').oninput=applyBall;
 $('ball-ccd').onchange=applyBall;
@@ -473,6 +482,9 @@ try{
  if(q.has('scene')&&samples[q.get('scene')])$('scene').value=q.get('scene');
  if(q.has('bonds'))$('bond-mode').value=q.get('bonds');
  if(q.has('view'))$('view-mode').value=q.get('view');
+ if(q.has('strike'))$('strike-rule').value=q.get('strike');
+ if(q.has('radius'))$('strike-radius').value=q.get('radius');
+ if(q.has('support'))$('support-loss').checked=q.get('support')==='1';
  if(q.has('crush'))$('crush').value=q.get('crush');
  if(q.has('hz'))$('physics-hz').value=q.get('hz');
  showFractureSwitches();
