@@ -857,6 +857,8 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
                 },
                 part,
                 group: None,
+                sub: None,
+                inner: false,
             });
         }
     }
@@ -925,6 +927,8 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
                             },
                             part: r.car.nodes[hi].part,
                             group: None,
+                sub: None,
+                inner: false,
                         });
                     }
                 }
@@ -1201,6 +1205,8 @@ fn bridge_seams(
                 },
                 part: owner,
                 group: (mode == "main" || mode == "nearest").then_some(group),
+                sub: None,
+                inner: false,
             });
             true
         };
@@ -3732,6 +3738,15 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         r.car.tri_aero = Some((hull_drag_coef(&r, inp, ph.drag_cd), 0.0));
     }
     // ------------------------------------------------------------------
+    // Collision faces inside the car (the defined body): the parts of one
+    // car meet each other as its outside meets the world.
+    // ------------------------------------------------------------------
+    let inner_skins =
+        defined.is_some() && std::env::var("RIG_NO_INNER_SKINS").map_or(true, |v| v != "1");
+    if inner_skins {
+        interior_skins(&mut r);
+    }
+    // ------------------------------------------------------------------
     // Pole lanes: light contact-only nodes on the side-facing skin edges.
     // ------------------------------------------------------------------
     let surf = |p: Vec3| -> Vec3 { to_jbeam(inp.project(to_gltf(p))) };
@@ -3806,7 +3821,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         // (The hub nodes stay out: they are corners of the wheels' collision
         // cones only, and inside the arch beside the rails.)
         let block = nd.part == Part::Engine && nd.sub.as_deref().map_or(true, |s| s == "engine");
-        nd.self_collision = (on_tri[i] || block || nd.name.starts_with("rim"))
+        // Every node of the defined shell is a contacter (as a BeamNG
+        // shell's: the study's §10.3), so a door driven into its opening
+        // meets the sill's and the pillars' nodes, not only the outer skin's.
+        let shell = inner_skins && nd.name.starts_with("sh_");
+        nd.self_collision = (on_tri[i] || block || shell || nd.name.starts_with("rim"))
             && !nd.contact
             && !nd.name.starts_with("hub")
             && std::env::var("GEN3_NOSELF").is_err()
@@ -4653,6 +4672,181 @@ fn rigidifier(r: &mut Rig, name: &str, at: Vec3, part: Part, own: &[usize]) -> u
         }
     }
     i
+}
+
+/// The parts whose own solid is a collision skin: the convex hull of their
+/// nodes ([`interior_skins`]).
+pub const HULL_PARTS: [&str; 8] = [
+    "seat_FL",
+    "seat_FR",
+    "seat_rear",
+    "dash",
+    "console",
+    "engine",
+    "fuel_tank",
+    "radiator",
+];
+
+/// The convex hull of `p` as polygons (indices into `p`, in order around
+/// each face): every plane through three points with all the others on one
+/// side, its coplanar points taken together. A flat set is one polygon.
+fn hull_faces(p: &[Vec3]) -> Vec<Vec<usize>> {
+    let eps = 2e-3;
+    let mut seen: std::collections::BTreeSet<Vec<usize>> = Default::default();
+    let mut out = Vec::new();
+    for a in 0..p.len() {
+        for b in a + 1..p.len() {
+            for c in b + 1..p.len() {
+                let n = (p[b] - p[a]).cross(p[c] - p[a]);
+                if n.length() < 1e-5 {
+                    continue;
+                }
+                let n = n.normalize();
+                let d: Vec<f32> = p.iter().map(|q| n.dot(*q - p[a])).collect();
+                if !(d.iter().all(|&x| x <= eps) || d.iter().all(|&x| x >= -eps)) {
+                    continue;
+                }
+                let mut on: Vec<usize> = (0..p.len()).filter(|&i| d[i].abs() <= eps).collect();
+                if !seen.insert(on.clone()) {
+                    continue;
+                }
+                let cen = on.iter().map(|&i| p[i]).sum::<Vec3>() / on.len() as f32;
+                let u = (p[on[0]] - cen).normalize_or_zero();
+                let v = n.cross(u);
+                on.sort_by(|&i, &j| {
+                    let f = |k: usize| (p[k] - cen).dot(v).atan2((p[k] - cen).dot(u));
+                    f(i).total_cmp(&f(j))
+                });
+                out.push(on);
+            }
+        }
+    }
+    out
+}
+
+/// The collision faces inside the defined car. Each is a triangle on its
+/// part's own nodes, marked [`Tri::inner`] (no air on it); its nodes become
+/// contacters with the rest of the skin's.
+///
+/// - **The cabin's structure** (the shell): each sill's outer face (bottom
+///   to top), the floor pan, the tunnel's walls, and the firewall from the
+///   cowl to the toe board.
+/// - **Each door's box:** its inner panel, its bottom, its belt and its two
+///   end walls, so a door is a solid on both faces.
+/// - **Interior and engine-bay parts** ([`HULL_PARTS`]): the convex hull of
+///   the part's nodes, the solid they are the corners of.
+///
+/// Before this only the outer skin had triangles: a door T-boned at 50 km/h
+/// went through the sill's top edge and the A-pillar, and nothing in the
+/// cabin could stop it or be pushed by it.
+fn interior_skins(r: &mut Rig) {
+    let ix: HashMap<String, usize> = r
+        .car
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.name.clone(), i))
+        .collect();
+    let mut have: std::collections::BTreeSet<[usize; 3]> = r
+        .car
+        .tris
+        .iter()
+        .map(|t| {
+            let mut k = t.n;
+            k.sort_unstable();
+            k
+        })
+        .collect();
+    let mut add: Vec<Tri> = Vec::new();
+    let pos: Vec<Vec3> = (0..r.car.nodes.len()).map(|i| r.g(i)).collect();
+    let mut poly = |ids: &[usize], part: Part, sub: Option<&str>| {
+        for k in 1..ids.len().saturating_sub(1) {
+            let n = [ids[0], ids[k], ids[k + 1]];
+            let area = (pos[n[1]] - pos[n[0]]).cross(pos[n[2]] - pos[n[0]]).length();
+            let mut key = n;
+            key.sort_unstable();
+            if area < 1e-5 || !have.insert(key) {
+                continue;
+            }
+            add.push(Tri {
+                n,
+                part,
+                group: None,
+                sub: sub.map(str::to_string),
+                inner: true,
+            });
+        }
+    };
+    let named = |names: &[String]| -> Option<Vec<usize>> {
+        names.iter().map(|n| ix.get(n).copied()).collect()
+    };
+    // The shell.
+    for s in ["l", "r"] {
+        for row in 1..=4 {
+            let (a, b) = (row, row + 1);
+            for q in [
+                // the sill's outer face
+                [format!("sh_c1_{a}o{s}"), format!("sh_c1_{b}o{s}"), format!("sh_c2_{b}{s}"), format!("sh_c2_{a}{s}")],
+                // the floor pan
+                [format!("sh_c1_{a}o{s}"), format!("sh_c1_{b}o{s}"), format!("sh_c1_{b}t{s}"), format!("sh_c1_{a}t{s}")],
+                // the tunnel's wall
+                [format!("sh_c1_{a}t{s}"), format!("sh_c1_{b}t{s}"), format!("sh_c3_{b}"), format!("sh_c3_{a}")],
+            ] {
+                if let Some(ids) = named(&q) {
+                    poly(&ids, Part::Body, None);
+                }
+            }
+        }
+    }
+    let across = ["ol", "il", "ir", "or"];
+    let floor1 = ["ol", "tl", "tr", "or"];
+    for k in 0..3 {
+        for q in [
+            [format!("sh_b2_{}", across[k]), format!("sh_b2_{}", across[k + 1]), format!("sh_b1_{}", across[k + 1]), format!("sh_b1_{}", across[k])],
+            [format!("sh_b1_{}", across[k]), format!("sh_b1_{}", across[k + 1]), format!("sh_c1_1{}", floor1[k + 1]), format!("sh_c1_1{}", floor1[k])],
+        ] {
+            if let Some(ids) = named(&q) {
+                poly(&ids, Part::Body, None);
+            }
+        }
+    }
+    // The doors.
+    for part in [Part::DoorFL, Part::DoorFR, Part::DoorRL, Part::DoorRR] {
+        let dn = part.name().trim_start_matches("gen2_").to_string();
+        let o = |row: usize, k: usize| format!("{dn}_o{row}{k}");
+        let i = |row: usize, k: usize| format!("{dn}_i{row}{k}");
+        for k in 0..2 {
+            for q in [
+                [i(0, k), i(0, k + 1), i(1, k + 1), i(1, k)],
+                [o(0, k), o(0, k + 1), i(0, k + 1), i(0, k)],
+                [o(2, k), o(2, k + 1), i(1, k + 1), i(1, k)],
+            ] {
+                if let Some(ids) = named(&q) {
+                    poly(&ids, part, None);
+                }
+            }
+        }
+        for k in [0, 2] {
+            if let Some(ids) = named(&[o(0, k), i(0, k), i(1, k), o(2, k)]) {
+                poly(&ids, part, None);
+            }
+        }
+    }
+    // The parts that are solids of their own.
+    for sub in HULL_PARTS {
+        let ids: Vec<usize> = (0..r.car.nodes.len())
+            .filter(|&i| r.car.nodes[i].sub.as_deref() == Some(sub))
+            .collect();
+        if ids.len() < 3 {
+            continue;
+        }
+        let pts: Vec<Vec3> = ids.iter().map(|&i| pos[i]).collect();
+        for face in hull_faces(&pts) {
+            let f: Vec<usize> = face.iter().map(|&k| ids[k]).collect();
+            poly(&f, Part::Engine, Some(sub));
+        }
+    }
+    r.car.tris.extend(add);
 }
 
 /// The least share of an edge node's ties' directions along their weakest

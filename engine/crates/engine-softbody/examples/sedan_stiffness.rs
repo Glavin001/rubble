@@ -1427,6 +1427,42 @@ fn main() {
                 d.config.wheels.iter().map(|w| format!("{:.0} / {:.0} / {:.0} / {:.3}..{:.3} / {:.3}", w.k, w.c, w.bump_k, w.susp_min, w.susp_max, w.radius)).collect::<Vec<_>>().join("; ")
             );
         }
+        // `--time`: the cost of a step at rest (self-collision included): 4,000
+        // steps after 1 s, single thread.
+        if args.iter().any(|a| a == "--time") {
+            let mut t = sp.clone();
+            for _ in 0..2000 {
+                t.step();
+            }
+            let t2 = std::time::Instant::now();
+            let mut contacts = 0u64;
+            for _ in 0..4000 {
+                t.step();
+                contacts += t.last_contacts as u64;
+            }
+            println!(
+                "\nstep cost at rest: {:.4} ms a step ({} nodes, {} beams, {} collision triangles, {} self-collision contacters, {} never-colliding pairs from spawn, {:.1} self contacts a step)",
+                t2.elapsed().as_secs_f64() * 1e3 / 4000.0,
+                t.nodes.len(),
+                t.beams.len(),
+                t.triangles.len(),
+                t.candidates.len(),
+                t.tri_excl.iter().map(|v| v.len()).sum::<usize>(),
+                contacts as f64 / 4000.0
+            );
+            let pairs: Vec<String> = sp
+                .tri_excl
+                .iter()
+                .enumerate()
+                .flat_map(|(ti, v)| v.iter().map(move |&nd| (ti, nd)))
+                .map(|(ti, nd)| {
+                    let tr = sp.triangles[ti].nodes;
+                    format!("{} | {} {} {}", car.node_name(nd as usize), car.node_name(tr[0] as usize), car.node_name(tr[1] as usize), car.node_name(tr[2] as usize))
+                })
+                .collect();
+            println!("never-colliding pairs (node | triangle): {}", pairs.join("; "));
+            continue;
+        }
         let t1 = std::time::Instant::now();
         // The visible mesh is measured on pressure wheels by default; `VIS=1`
         // measures it on raycast wheels too (the bindings are by non-tyre node).
