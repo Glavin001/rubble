@@ -16,6 +16,7 @@ pub mod layout;
 pub mod carbody;
 pub mod panels;
 pub mod solid;
+pub mod structure;
 pub mod parts;
 pub mod frame;
 pub mod uvpack;

@@ -97,7 +97,11 @@ Place empties (glTF nodes without a mesh) at the real mounting points. We use th
 | Each wheel (rim, tyre, disc) | at most 15,000 |
 | Interior | at most 80,000 |
 | Lamps, glass, trim, under-bonnet | at most 60,000 |
-| **Total** | **at most 500,000** |
+| Body structure (the body-in-white's members: rails, sills, floor, firewall, towers) | at most 40,000 |
+| Mechanical parts (subframes, suspension, engine, driveline, exhaust, tank, radiator) | at most 60,000 |
+| **Total** | **at most 600,000** |
+
+The structure and mechanical groups were added on 2026-11-12, and the total raised from 500,000 to 600,000 with them: the physics is built one-to-one on visible members (`engine/docs/beamng-structure-study.md` §10), so the body-in-white and the mechanical parts are modelled as closed solids instead of placeholder boxes. Budgets are raised, never met by decimating.
 
 ## Materials and textures
 

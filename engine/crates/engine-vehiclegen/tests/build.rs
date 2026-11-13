@@ -71,10 +71,12 @@ fn reference_sedan_legacy_sheets_match_the_python_generator() {
 fn reference_sedan_is_pinned() {
     let d = design_from_json("sedan", "{}").unwrap();
     let b = build(d.as_ref(), BuildOpts::default());
-    assert_eq!(b.parts.len(), 68);
+    // (the sheet build's 68, less its firewall box, plus the body-in-white's
+    // four parts: `tests/structure.rs`)
+    assert_eq!(b.parts.len(), 71);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 439_258);
+    assert_eq!(total, 456_442);
     for (name, n) in [
         ("body_shell", 114_520),
         ("hood", 39_408),
@@ -233,7 +235,7 @@ fn triangle_budgets_hold() {
     // docs/vehicle-art-spec.md "Triangle budget", grouped as check.py groups
     let d = design_from_json("sedan", "{}").unwrap();
     let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
-    let (mut body, mut interior, mut other, mut total) = (0, 0, 0, 0);
+    let (mut body, mut interior, mut other, mut total, mut structure) = (0, 0, 0, 0, 0);
     let mut wheel = std::collections::BTreeMap::new();
     for (name, m) in &b.parts.0 {
         let n = m.ntris();
@@ -242,6 +244,8 @@ fn triangle_budgets_hold() {
             *wheel.entry(name.rsplit('_').next().unwrap().to_string()).or_insert(0) += n;
         } else if ["body_shell", "hood", "trunk_lid", "tailgate", "door_F", "door_R", "fender_", "bumper_"].iter().any(|p| name.starts_with(p)) {
             body += n;
+        } else if name.starts_with("structure_") {
+            structure += n;
         } else if ["dash", "steering", "seat", "console", "door_trim", "headliner"].iter().any(|p| name.starts_with(p)) {
             interior += n;
         } else {
@@ -249,12 +253,15 @@ fn triangle_budgets_hold() {
         }
     }
     let wmax = wheel.values().copied().max().unwrap();
-    println!("body {body}, wheel {wmax}, interior {interior}, other {other}, total {total}");
+    println!("body {body}, wheel {wmax}, interior {interior}, structure {structure}, other {other}, total {total}");
     assert!((150_000..=300_000).contains(&body), "body {body}");
     assert!(wmax <= 15_000, "wheel {wmax}");
     assert!(interior <= 80_000, "interior {interior}");
     assert!(other <= 60_000, "lamps, glass, trim, under-bonnet {other}");
-    assert!(total <= 500_000, "total {total}");
+    // the body-in-white and the mechanical parts have budgets of their own,
+    // and the total rose with them (docs/vehicle-art-spec.md)
+    assert!(structure <= 40_000, "body structure {structure}");
+    assert!(total <= 600_000, "total {total}");
 }
 
 #[test]
@@ -268,7 +275,7 @@ fn parametric_builds_keep_the_structure() {
     ] {
         let d = design_from_json("sedan", p).unwrap();
         let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
-        assert_eq!(b.parts.len(), 68, "{p}");
+        assert_eq!(b.parts.len(), 71, "{p}");
         assert_eq!(b.markers.len(), 42, "{p}");
         let wb: serde_json::Value = serde_json::from_str(p).unwrap();
         let want = wb.get("wheelbase").and_then(|v| v.as_f64()).unwrap_or(2.83);

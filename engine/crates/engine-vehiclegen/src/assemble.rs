@@ -33,6 +33,11 @@ pub trait Design {
     fn rig_spec(&self) -> Option<RigSpec> {
         None
     }
+    /// The body-in-white ([`crate::structure`]): members and shell nodes
+    /// (None: the design has no modelled structure).
+    fn structure(&self) -> Option<crate::structure::Structure> {
+        None
+    }
     /// How a body panel is built as a solid ([`crate::solid`]).
     fn solid_style(&self, name: &str) -> Style {
         if name.starts_with("door_") {
@@ -87,6 +92,10 @@ pub struct RigSpec {
     /// [`Design::rig_spec`], which has no build). The lattice and the
     /// collision skin follow `Outer` only.
     pub surfaces: Vec<PartSurface>,
+    /// The body-in-white: every member (section, gauge, grade, its solid)
+    /// and the shell's named nodes with their masses. Filled by
+    /// [`rig_spec_with`].
+    pub structure: Option<std::rc::Rc<crate::structure::Structure>>,
 }
 
 /// A design's rig spec with the build's surface tags.
@@ -100,6 +109,7 @@ pub fn rig_spec_with(d: &dyn Design, parts: &[crate::export::RenderPart]) -> Opt
             surf: p.surf.clone(),
         })
         .collect();
+    spec.structure = d.structure().map(std::rc::Rc::new);
     Some(spec)
 }
 

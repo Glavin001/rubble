@@ -23,6 +23,7 @@ use crate::layout::{Curve, FaceFn};
 use crate::mesh::{box_, closed_lathe, grid, orient_outward, rbox, rot_x, rrect, sweep, Grid2, Mat, Mesh, SweepOpts};
 use crate::panels::{boundary_loops, inner_panel};
 use crate::parts::{self as p, RimStyle, WheelSpec};
+use crate::structure::{self, Structure};
 use crate::tube::{Handle, Key, Tube};
 use crate::uvpack::Parts;
 
@@ -578,11 +579,45 @@ impl Design for Sedan {
             rear_z: Rc::new(move |x, y| b.rear_z(x, y)),
             physics: self.p.physics.clone(),
             surfaces: Vec::new(),
+            structure: None,
         })
+    }
+
+    fn structure(&self) -> Option<Structure> {
+        Some(self.unibody())
     }
 }
 
 impl Sedan {
+    /// The lines the body-in-white is placed from ([`structure::unibody`]).
+    pub fn structure_lines(&self) -> structure::Lines {
+        let z = |n: &str| ZLINES.iter().find(|l| l.0 == n).unwrap().1;
+        structure::Lines {
+            f: self.f.clone(),
+            axle_f: R_WHEELBASE / 2.0,
+            axle_r: -R_WHEELBASE / 2.0,
+            z_door_front: z("DF"),
+            z_screen_base: z("WB"),
+            z_screen_top: z("WT"),
+            z_b: z("BP"),
+            z_door_rear: z("AR1"),
+            // (the back light's top and base on the centre line: `build_layout`)
+            z_rear_top: -1.00,
+            z_rear_base: -1.70,
+            well_x: 0.56,
+            well_r: 0.375 + self.arch_r - R_ARCH_R,
+            wheel_y: self.f.y(R_TYRE_D / 2.0),
+        }
+    }
+
+    /// The body-in-white: members (solids) and shell nodes.
+    pub fn unibody(&self) -> Structure {
+        let tube = self.tube();
+        let (a, b) = (self.clone(), self.clone());
+        let (fz, rz) = (move |x: f64, y: f64| a.front_z(x, y), move |x: f64, y: f64| b.rear_z(x, y));
+        structure::unibody(&self.structure_lines(), &structure::Skin { tube: &tube, front_z: &fz, rear_z: &rz })
+    }
+
     fn build_nose(&self, cb: &mut CarBody) {
         let i0 = cb.zi("F");
         let j = cb.jn;
@@ -887,7 +922,15 @@ impl Sedan {
         rad.add(&box_(f.p(0.0, 0.56, 2.12), DVec3::new(f.x(0.36), 0.16, 0.024), Mat::TrimBlack, None));
         rad.add(&box_(f.p(0.0, 0.735, 2.12), DVec3::new(f.x(0.37), 0.014, 0.030), Mat::MetalBare, None));
         out.insert("radiator", rad);
-        out.insert("firewall", box_(f.p(0.0, 0.60, 0.94), DVec3::new(f.x(0.60), 0.28, 0.003), Mat::TrimBlack, None));
+        if solid {
+            // the body-in-white: every member a closed solid (the firewall,
+            // the boot floor and the rest replace the sheet build's boxes)
+            for (name, m) in self.unibody().parts() {
+                out.insert(&name, m);
+            }
+        } else {
+            out.insert("firewall", box_(f.p(0.0, 0.60, 0.94), DVec3::new(f.x(0.60), 0.28, 0.003), Mat::TrimBlack, None));
+        }
         // boxes along the car span their mapped ends (a shorter overhang
         // shortens the tray under it)
         let zspan = |zc: f64, hz: f64| ((f.z(zc - hz) + f.z(zc + hz)) / 2.0, (f.z(zc + hz) - f.z(zc - hz)) / 2.0);
