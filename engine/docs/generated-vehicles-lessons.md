@@ -223,7 +223,25 @@ State and tables: [generated-vehicles.md](generated-vehicles.md), "Body structur
 - **(Measurement) The merged base fails one existing test.** With the solid parts and the census rigger together, `gen3_rig`'s wall test gives stretch p99 1.64 against 1.6 (`VG_SHEET=1`: passes). Each branch passed alone. It is the binding of the solids' walls (plan step 2b), not the structure.
 - **Process:** zsh expands `$M:u` as a modifier. Write `${M}:view` when a shot list is a shell variable.
 
+## 13. The new body crashed, against the ETK (2026-11-13, `feat/sedan-body`)
+
+Tables: [generated-vehicles.md](generated-vehicles.md), "Crash character and the frontal crashes against the ETK".
+
+- **(Decision, the user's) The primary bar is the ETK's look and feel; the real crash bands are the guard.** The crash character is one setting, `Physics.crash`, with presets `beamng_feel` (default) and `real_crash`.
+- **(Measurement) The sedan as defined is nearer NHTSA's wall bands than the ETK is,** and crushes 15–20 % deeper than the ETK with 40–70 % more residual crush. Front members at 1.8 times their defined crush force, towers and cabin at 1.5 and panels at twice the census yield strain bring the three frontal scenes within 25–60 mm of the ETK's dynamic crush.
+- **(Measurement) Part of an "over-crush" seen on the page was the contact mode.** With node contact only, a 40 % barrier's edge passes between nodes and the offset's cabin travel is 900 mm against 720 mm with surface contact. Generated cars have a closed collision skin; the page turns surface contact on for them.
+- **(Measurement) Measure intrusion in the cabin's own frame.** An offset hit turns the car about 7°; against the rear floor's centre that reads as 85 mm of "intrusion" on the struck side and −60 mm on the other. `sedan_frontal` fits the rear floor's nodes rigidly first.
+- **(Measurement) A side impact needs a carrier.** A car launched sideways on raycast wheels is stopped by its tyres' lateral grip before the pole.
+- **(Measurement) Mass a part by its geometry.** A 136 mm centre cap at a full wheel cover's 0.6 kg broke its own clips in every frontal crash, at the far wheels too.
+- **(Measurement) An occupant's mass belongs where the belt takes it.** A quarter of the driver on each top corner of the seat's back folded the back 240 mm forward in the wall.
+- **(Measurement) "The exhaust's skin" was not the parked normal's fault.** Print the worst mesh (`GEN3_WORST=1`) before fixing: it is a hub cap following the wheel's frame nodes.
+- **(Measurement) A stronger front breaks the fenders' bolts.** Both front bolt groups break in the full wall at `beamng_feel`; none did as defined. Hardware has to be checked whenever the character changes.
+- **(Fact) The page's beam count is the solver's records:** 3,467 JBeam beams + 2 aero records per collision triangle (726) + 2 per torsion bar (24) + 7 couplers + 4 raycast-wheel ties = 4,228.
+- **Process:** a web build reads the sources while it runs; do not edit Rust until its host and wasm compiles have finished. Never use the shared Browser pane while the user tests; `engine/crates/engine-webgpu/page-shot.mjs` opens a URL headless.
+
 ## Changelog
+
+- 2026-11-13: section 13, the new body crashed against the ETK; the crash character setting.
 
 - 2026-11-12: first version.
 - 2026-11-12: linked the BeamNG structure study (`beamng-structure-study.md`): every node at Σk/m ≈ 7–10e6 s⁻² (whole-car ω·h 1.80–1.90), the 131-node shell specification and 24 lint rules.

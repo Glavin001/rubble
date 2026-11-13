@@ -317,3 +317,49 @@ The specification is [beamng-structure-study.md](beamng-structure-study.md) §10
 **Not done:** the rigger on these definitions (shell, mechanical parts, wheels on axle nodes, glass triggers, engine stops, SUPPORT between parts), lint rules 2, 8, 11, 14–24 on the rigged car, every measurement of the plan's step D (parked fidelity, rest drift, modes, kerb wobble, settle, head-on overlap and pitch, wall, pole, MDB, roof, door), and the `-v4` clips.
 
 **Stills** (`~/Development/rubble-artifacts/sedan-body/stills/`, Blender, all inspected): `structure_top`, `structure_under`, `structure_mechanical_top`, `structure_mechanical_under`, `mechanical_only`, `front_end`, `interior_on_floor`, `explode_all`.
+
+## Crash character and the frontal crashes against the ETK (2026-11-13, `feat/sedan-body`)
+
+**State: the rigger builds the car on the body definitions** (554 nodes, 3,467 JBeam beams, 131-node shell, 48 mechanical parts; shell and parts at built / rule stiffness 1.000, ω·h 1.85; 1,447.7 kg against a kerb mass of 1,450). The "not done" list of the section above is superseded by this one.
+
+**The setting.** `Physics.crash` (`engine_vehiclegen::physics::CrashFeel`) is the car's crash character: multiples on the definitions' mean crush forces by zone and on the panels' yield strain, applied before the lattice is built (never beam by beam). A multiple `s` on a box section's crush force is the same section in a gauge `s^0.6` times as thick.
+
+| Preset | Front crush | Towers | Cabin | Rear | Panel yield strain | What it is |
+|---|---|---|---|---|---|---|
+| `beamng_feel` (default) | 1.8 (crash box 1.5 → 2.1 mm, rail 1.8 → 2.6 mm, or DP980-class steel) | 1.5 | 1.5 | 1.0 (not measured yet) | 2.0 (hood, fenders 6 %; doors 2.9 %) | the ETK's level in the same scenes |
+| `real_crash` | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | the members as defined; nearest the NHTSA full-frontal bands |
+
+**Side by side** (`examples/frontal_compare`, CPU reference, surface contact on, pressure wheels, 0.6 s after contact; ETK K-series `kc6`). There is no offset or centre-pole reference in `crash-reference-targets.md`; the full wall's NHTSA bands are crush 620–750 mm, peak 34–47 g, restitution 0.13–0.20.
+
+| Scene | Measure | Sedan as defined (`real_crash`) | Sedan `beamng_feel` | ETK (target) | Delta to the ETK |
+|---|---|---|---|---|---|
+| Wall 56 km/h | dynamic crush (mm) | 578 | 474 | 499 | −25 |
+| | peak g / restitution | 33.4 / 0.22 | 47.7 / 0.30 | 71.9 / 0.38 | −24 g / −0.08 |
+| | residual crush max / mean (mm) | 396 / 296 | 296 / 212 | 228 / 192 | +68 / +20 |
+| | beams bent / broken | 438 / 0 | 373 / 16 | 335 / 4 | |
+| | beams yielded; of those over 1.2 m behind the front | 15.6 % ; 6.8 % | 13.2 % ; 7.0 % | 13.7 % ; 6.4 % | |
+| | mesh: stretch p99, fold p99, flipped triangles | 1.44, 12.6°, 65 | 1.32, 10.6°, 1,116 | 1.46, 27.9°, 178 | flipped: worse |
+| Offset 40 %, 64 km/h | dynamic crush (mm) | 788 | 682 | 659 | +23 |
+| | peak g / restitution | 39.2 / 0.17 | 46.3 / 0.26 | 47.6 / 0.18 | −1 g / +0.08 |
+| | residual crush max / mean (mm) | 626 / 304 | 522 / 242 | 430 / 250 | +92 / −8 |
+| | beams bent / broken | 540 / 21 | 428 / 10 | 322 / 18 | |
+| | yielded; far | 19.2 % ; 10.5 % | 15.1 % ; 8.0 % | 12.8 % ; 5.0 % | far: worse |
+| | mesh: stretch p99, fold p99, flipped | 1.66, 15.4°, 147 | 1.45, 15.5°, 1,063 | 1.56, 31.9°, 167 | flipped: worse |
+| Centre pole 50 km/h | dynamic crush (mm) | 599 | 542 | 601 | −59 |
+| | peak g / restitution | 38.1 / 0.29 | 49.9 / 0.42 | 56.6 / 0.33 | −7 g / +0.08 |
+| | residual crush max / mean (mm) | 505 / 226 | 347 / 148 | 364 / 138 | −17 / +10 |
+| | beams bent / broken | 407 / 20 | 336 / 4 | 287 / 3 | |
+| | mesh: stretch p99, fold p99, flipped | 1.40, 9.8°, 124 | 1.36, 8.1°, 0 | 1.47, 26.9°, 110 | |
+
+(The "as defined" column is the export before this work; it also had the 0.6 kg hub caps, the driver on the seat's back and the 6 kN seat frame.)
+
+- **Parts leaving.** As defined, both front hub caps left in the offset and the pole. Their mass was a full wheel cover's (0.6 kg) on a 136 mm centre cap; from its geometry it is 0.12 kg and they stay. Nothing detaches on the ETK in these scenes; it breaks its driveshaft, one fender bolt group and a door glass.
+- **Worse than the ETK now:** both fenders' front bolt groups break in the full wall and the left one in the offset (the ETK loses one fender group, in the offset only), which is where the flipped triangles come from; residual crush at the struck corner in the offset (+92 mm); the fenders' ripple at the end (17–46 mm; the ETK's worst parts are suspension arms at 10–45 mm); peak g in the wall (48 against 72: the ETK's front stack is stiffer than ours and than real cars).
+- **Which is nearer the real bands.** In the wall the sedan as defined (578 mm, 33 g, 0.22) is nearer NHTSA's than either the ETK (499 mm, 72 g, 0.38) or `beamng_feel`.
+- **Where the offset's load goes** (`examples/sedan_frontal offset`, as defined, raycast wheels, in the rear floor's own frame): cabin travel 720 mm with surface contact and 900 mm with node contact only (the barrier's edge passes between nodes; the page now turns surface contact on for generated cars). Toe board and sill front 30–38 mm, firewall 102 mm peak / 40 residual, A-pillar base 171 / 75, strut tower 176. The struck rail folds (its front 236 mm up, the subframe mount 103 mm down) more than it shortens. Plastic work: front structure 65 %, hood, fenders and bumper cover 13 %, cabin 8 %.
+- **Seats.** The driver's 75 kg sits on the cushion node (a belted driver loads the lap belt's anchors, not the seat's back), and the frame and feet are sized for FMVSS 207 / 210 anchorage loads (frame 15 kN a beam, feet 12 kN yield and 45 kN break). At the study's 6 kN the driver's seat slid 18 cm forward in the wall.
+- **Mass.** The raycast wheel carries the defined wheel less the wheel part's own nodes (`raycastWheelMass` 9.5 kg on the pressure-wheel row; the loader's default stays 20 kg): 1,447.7 kg. Its spin inertia follows that 9.5 kg (0.52 kg·m², about half a real wheel's): open.
+- **Rest.** Parked 10 s: 0 bent, 0 broken, drift within 5 mm, vertex 0.53 mm; the parked normal is 1.72° (limit 1°) at a hub cap, not the exhaust: the cap's fit takes wheel nodes, and the wheel's frame nodes lean against its axle under the car's weight. `rest_fidelity_at_spawn_and_parked` still fails on it.
+- **Side pole on raycast wheels.** A car launched sideways rides a carrier (`crash_rigs::on_carrier`, tyre grip 0.01): 31.7 km/h at the pole from a 32 km/h launch; before, its own tyres stopped it.
+
+**Not done:** stiffness against the ETK on the new body (`sedan_stiffness`: modes, kerb wobble, settle), the head-on (`vehicle_c2c_overlap` needs the new hub names and placement by the tyre's bottom), lint rules 2, 8, 11, 14–24 and the "nothing faked" rules, matched stills against the ETK, the rear's crash character, the fender bolts.
