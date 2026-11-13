@@ -2,8 +2,8 @@
 //! on the scenes the equivalence harness runs: before every compared step, on the same GPU
 //! state, both ways (`WgpuSim::debug_broadphase_pairs`), with bit-identical collider
 //! bounds. The demo's 100k Grid (uniform grid, sleep on, a CCD ball at step 300) and Brick
-//! Ring 28k (its rolling ball, sleep on). The city (threshold houses: a GPU fracture that
-//! re-parents colliders and re-frames bodies between steps) takes the full pass.
+//! Ring 28k (its rolling ball, sleep on), and the city at war (threshold houses: a GPU
+//! fracture that re-parents colliders and re-frames bodies between steps).
 
 use rubble::*;
 
@@ -102,6 +102,27 @@ fn compare_steps(
                 let stale = (0..ab.len() / 8)
                     .filter(|&c| ab[c * 8..c * 8 + 8] != fb[c * 8..c * 8 + 8])
                     .count();
+                if stale > 0 {
+                    let cols = sim.download_colliders();
+                    let bodies = sim.download_bodies();
+                    let f = |w: &[u32]| w.iter().map(|&x| f32::from_bits(x)).collect::<Vec<_>>();
+                    let differ: Vec<usize> = (0..ab.len() / 8)
+                        .filter(|&c| ab[c * 8..c * 8 + 8] != fb[c * 8..c * 8 + 8])
+                        .collect();
+                    let mut by_body = std::collections::BTreeMap::new();
+                    for &c in &differ {
+                        *by_body.entry(cols[c].body).or_insert(0usize) += 1;
+                    }
+                    eprintln!("{label} step {s}: {} bodies hold the {stale} differing colliders: {:?}", by_body.len(), by_body.iter().take(12).collect::<Vec<_>>());
+                    for &c in differ.iter().take(4) {
+                        let b = &bodies[cols[c].body as usize];
+                        eprintln!(
+                            "  c{c}: body {} flags {:#x} inv_mass {} sleep timer {} pos {:?} vel {:?}\n    awake pass {:?}\n    full pass  {:?}",
+                            cols[c].body, b.flags, b.inv_mass, b.sleep_timer, b.position, b.linear_vel,
+                            f(&ab[c * 8..c * 8 + 8]), f(&fb[c * 8..c * 8 + 8])
+                        );
+                    }
+                }
                 assert_eq!(
                     stale, 0,
                     "{label} step {s}: {stale} colliders' bounds differ"
@@ -197,9 +218,14 @@ fn grid_awake_broadphase_pairs_equal_the_full_pass_at_every_awake_fraction() {
     assert!(n >= 149, "compared {n}");
 }
 
+/// The city (threshold houses: a GPU fracture that re-parents colliders and re-frames
+/// bodies between steps, with no host write): every step of a war compared with the full
+/// pass, pairs and bounds. A struck house's static remainder is re-framed by its split; the
+/// step after it bounds every collider and rebuilds the resting table
+/// (`StepModes::gpu_reframes`).
 #[test]
-fn city_takes_the_full_pass() {
-    for sleep in [false, true] {
+fn city_awake_broadphase_pairs_equal_the_full_pass() {
+    for sleep in [true, false] {
         let house = rubble::city::city_house().unwrap();
         let def = rubble::city::CityDef {
             houses: 16,
@@ -213,17 +239,12 @@ fn city_takes_the_full_pass() {
             w.step().unwrap();
             w.poll_blocking().unwrap();
         }
-        c.start(
-            &mut w,
-            rubble::city::CityScenario::from_name("war").unwrap(),
-        )
-        .unwrap();
-        for _ in 0..60 {
-            assert!(
-                !w.sim().awake_broadphase_planned(),
-                "city (sleep {sleep}): the awake pass is planned"
-            );
-            w.step().unwrap();
-        }
+        c.start(&mut w, rubble::city::CityScenario::from_name("war").unwrap())
+            .unwrap();
+        let label = format!("city (sleep {sleep})");
+        assert!(w.sim().awake_broadphase_planned(), "{label}: the awake pass is planned");
+        let n = compare_steps(&mut w, 150, 1, &label, |_, _| {});
+        eprintln!("{label}: {n} steps compared");
+        assert!(n > 140, "{label}: compared {n}");
     }
 }

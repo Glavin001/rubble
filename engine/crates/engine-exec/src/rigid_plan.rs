@@ -125,6 +125,12 @@ pub struct StepModes {
     /// With `awake_broadphase`: bound every collider this step (`build_aabbs`), not
     /// only the moving ones (a host write may have moved a static).
     pub full_bounds: bool,
+    /// With `awake_broadphase`: a GPU fracture re-frames bodies and re-points colliders
+    /// between steps with no host write (stress-gpu fracture.slang). A step that sees a
+    /// re-framed body at rest (world_step.slang noteReframed) bounds every collider and
+    /// rebuilds the resting table, as a host write would have it; other steps dispatch
+    /// nothing more.
+    pub gpu_reframes: bool,
     /// Size `broadphase_fast` from the fast list's count (`write_fast_args`, work
     /// slot 82) instead of dispatching all FAST_CAP workgroups (the same groups do
     /// the work; the rest returned at once).
@@ -492,10 +498,18 @@ pub fn encode_step(
         // (slots 79/80 are empty otherwise), its lists published, CCD lists reset.
         e.d("list_moving_colliders", n_cols);
         e.d("write_awake_collider_args", 64);
+        if m.gpu_reframes {
+            // Before the bounds: slot 80 is every collider on a step that rebuilds the
+            // table (a re-framed body at rest, a sleep event, the host), else empty.
+            e.d("write_moved_args", 64);
+        }
         if m.full_bounds {
             e.d("build_aabbs", n_cols);
         } else {
             e.w("build_aabbs_listed", 81);
+            if m.gpu_reframes {
+                e.w("build_aabbs", 80);
+            }
         }
         if i.joint_count > 0 {
             e.d("joint_hash_clear", u64::from(i.joint_hash_slots));
@@ -503,8 +517,10 @@ pub fn encode_step(
         }
         // The uniform table with incremental inserts is rebuilt only when the host asks
         // (nothing on the GPU asks for it): otherwise these three would dispatch nothing.
-        if !(m.rest_uniform && m.rest_incremental && !m.rest_rebuild) {
-            e.d("write_moved_args", 64);
+        if m.gpu_reframes || !(m.rest_uniform && m.rest_incremental && !m.rest_rebuild) {
+            if !m.gpu_reframes {
+                e.d("write_moved_args", 64);
+            }
             e.w("rest_clear", 79);
             e.w(if m.rest_uniform { "rest_insert_uniform" } else { "rest_insert" }, 80);
         }
@@ -1648,10 +1664,12 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
         // reads the uniform).
         // Bit 4: the uniform grid's rest tables (world_step.slang restUniform).
         // Bit 5: incremental inserts (world_step.slang restIncremental).
+        // Bit 6: a GPU fracture re-frames bodies (world_step.slang gpuReframes).
         s[25] = 1
             | (u32::from(m.rest_rebuild) << 1)
             | (u32::from(m.rest_uniform) << 4)
-            | (u32::from(m.rest_incremental) << 5);
+            | (u32::from(m.rest_incremental) << 5)
+            | (u32::from(m.gpu_reframes) << 6);
         s[5] = i.last.sleep_events;
     }
     s

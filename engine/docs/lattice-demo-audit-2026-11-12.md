@@ -135,4 +135,116 @@ exact. It changes authored strengths, so it belongs in the exporter, by the user
 
 ## Measurements
 
-Added as each stage closes.
+### S0 baseline (2026-11-12, M3 Max, one GPU job at a time)
+
+`CITY_SLEEP=1 CITY_POOL=32768 CITY_K=1,64,256,1024 cargo test -p engine-world --release
+--test city_scale -- --ignored --nocapture --test-threads=1`. Wall time per step, median ms
+(step, then waiting for its frame). K houses of 715 chunks; `demolish` strikes one house,
+`war` strikes 20, `drive` moves one kinematic car that touches nothing.
+
+| K | chunks | drive | demolish | war | war: host part |
+|---|---|---|---|---|---|
+| 1 | 715 | 1.75 | 2.77 | 2.77 | 0.32 |
+| 64 | 45,760 | 1.45 | 3.25 | 4.21 | 0.40 |
+| 256 | 183,040 | 1.87 | 4.33 | 5.48 | 0.58 |
+| 1,024 | 732,160 | 3.53 | 9.80 | 17.11 | 6.83 |
+
+**Idle tax at K = 1,024:** 7.0 ms on `demolish` (9.80 against 2.77), with the same 31 to 51
+bodies awake.
+
+**What it is made of.** Timestamp marks could not attribute it: per-phase marks put the growth
+in `coloring` (+3.1 ms), per-dispatch marks put it in `ccd_pick_key` (+2.6 ms), and neither
+kernel's work grows with K. Switching one thing at a time and reading wall time did:
+
+| K = 1,024, wall median ms | drive | demolish | war |
+|---|---|---|---|
+| Full broadphase (today, forced in fracture worlds) | 3.86 to 3.95 | 8.31 to 8.36 | 15.20 to 15.42 |
+| Awake-only broadphase (`RUBBLE_FRACTURE_AWAKE_BROADPHASE=1`, measurement only) | 2.70 to 2.82 | 5.09 to 5.15 | 11.27 to 11.88 |
+
+Two runs each; bonds broken and bodies awake were equal across the pair. **The forced full
+broadphase (row 1) is 3.2 to 3.9 ms of the idle tax**, the largest single part.
+
+Corrections to the table above, from these numbers:
+
+- **Rows 2 to 5 (fracture passes over every chunk and bond) are small at this scale:** the
+  `fracture` mark is 0.3 to 0.6 ms at both K = 1 and K = 1,024. They are whole-world passes,
+  but cheap ones. S2 moves down the order.
+- **`war` has a host cost that grows with K:** `World::step` alone is 6.8 ms at K = 1,024
+  against 0.3 ms at K = 1. Not yet traced.
+- About 2.3 ms of `demolish`'s idle tax remains after the broadphase and is not attributed.
+
+**Order after measuring:** S3 (broadphase) first, then the host cost in `war`, then the
+remainder; S2 only if a larger map shows it.
+
+### S3: the awake broadphase stays on in fracture worlds
+
+**Cause, found by comparing the two passes step by step.** A split re-frames the struck
+building's static remainder: a new centre of mass and principal axes, and every collider's
+local pose rewritten to match. The pieces do not move, but bounds rebuilt from the new frame
+differ from the stored ones in the last bits (9,945 colliders in a 16-house war), and a cell
+can differ with them.
+
+**Fix.** The fracture already stamps every body it writes with the engine's next step as its
+generation, and the engine never stamps a static body. So `list_moving_colliders` (which
+reads each collider's body anyway) sees a body at rest whose generation is this step's and
+asks for what a host write would get: every collider bounded and the resting table rebuilt,
+on that step only (`StepModes::gpu_reframes`, `world_step.slang` `noteReframed`). No new
+buffer, binding or host signal.
+
+**A second, older inexactness, in the awake pass on hierarchical grids.** A coarse mover's
+scan of finer resting colliders (`hierScanFiner`) ran the face-axis test with the mover as
+the probe, where the full pass runs it with the resting collider as the probe. The axes are
+the same; the order of operations is not, and pieces sharing a face plane sit on the test's
+threshold. It now runs as the full pass runs it (`finerSeparatedOnFaceAxis`). This changes
+which pairs the awake pass accepts at that threshold in any hull world, to the full pass's.
+
+**Gate.** `tests/awake_broadphase_scenes.rs`: the city at war, sleep on and off, 150 steps
+each, every step: candidate pairs equal as sets and every collider's bounds bit-identical
+between the awake pass and the full pass on the same GPU state. The grid and ring scenes
+still pass.
+
+### Host: the grid's sizing kept between steps
+
+Every step that adopted a split dropped the cached grid sizing and recomputed it: a median
+over every collider's diameter, 4.9 ms at 732,160 colliders (`refresh_cell`). The part that
+depends only on shapes and sizes is now kept (`HierGridGeometry`: base cell, colliders per
+level) until a collider is added or its shape or size changes; a split changes neither. With
+a reserved movable radius at or above every collider's level, the levels follow without a
+scan. Checked against the one-pass sizing on 2,000 random cases.
+
+### Finding: sleepers left in the air
+
+`tests/unsupported_sleepers.rs` (three cases, all failing, ignored so the suite stays green):
+
+| Case | Expected | Measured |
+|---|---|---|
+| A cube asleep on a static pedestal; the pedestal is destroyed (`World::destroy_body`) | falls to 0.5 m | stays at 1.492 m |
+| Three cubes stacked and asleep; the bottom one is destroyed | both above drop by 1 m | stay at 1.489 m and 2.483 m |
+| A plank asleep across two static posts; one post is destroyed | the free end comes down | stays level at 2.092 m |
+
+The engine wakes a sleeper on a touch from an awake body. Removing a support is not a touch,
+so nothing wakes what rested on it. This is the failure the lattice demo documents and fixed
+with explicit rules. Not fixed here: the wake rule is a behaviour change to decide on. The
+likely fix is for `destroy_body` (and a crushed chunk's removal) to wake the bodies whose
+contacts name the removed body, on the GPU from the contact rows it already holds.
+
+### Pre-existing test failures seen while checking (not from this work)
+
+- `engine-world` `threshold::cuboid_house_breaks_and_splits_as_in_the_lab` fails the same way
+  with these changes set aside: first break at frame 95 in `World` against frame 2 in the lab.
+- Tests that load `fracture/assets/*.glb` fail in a worktree without the LFS files.
+
+### After S3 and the host fix (K = 1,024, wall median ms)
+
+| | drive | demolish | demolish p95 | war | war: host part |
+|---|---|---|---|---|---|
+| Before | 3.53 to 3.92 | 8.07 to 8.36 | 14.0 to 14.7 | 14.79 to 15.42 | 5.35 to 5.89 |
+| S3 | 2.50 to 2.52 | 4.88 to 5.05 | 11.8 to 12.0 | 12.46 to 12.71 | 5.38 to 5.42 |
+| S3 and host fix | 2.47 | 4.76 | 7.11 | 8.08 | 1.20 |
+| K = 1 (the active set alone) | 1.08 | 2.93 | 3.56 | 2.75 | 0.37 |
+
+Bonds broken and bodies awake are the same in every row (80 and 51; 2,312 and 1,058).
+
+**Idle tax now:** 1.8 ms on `demolish` (was 5.2 to 7.0), 5.3 ms on `war` (was 12.1). `war` at
+K = 1 strikes one house, so its row is not the same active set; a fair `war` baseline needs
+20 houses alone.

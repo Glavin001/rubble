@@ -1839,16 +1839,23 @@ uint hierFinerCellCount(Aabb ma, uint own)
 // overlap and m's cell lies in j's range at m's level; the same test runs
 // here on the same values, so the accepted pairs are identical. Every j that
 // overlaps m has its centre in one of the cells finerSpan lists.
+// The face-axis test runs as hierQuery runs it for j: j the probe, m the other
+// (finerSeparatedOnFaceAxis). With m the probe the same axes are tested in
+// another order of operations, and pieces that share a face plane (a wall's
+// neighbours) sit on the test's threshold: the last bit decided differently.
+bool finerSeparatedOnFaceAxis(uint j, Collider b, uint m)
+{
+    if (!shapeHasHull(b.shape)) return false;
+    float faceGap = max(0.001, speculativeMargin()) + cachedReach(j);
+    return boxesSeparatedOnFaceAxis(worldObbFromCache(j), m, faceGap);
+}
+
 void hierScanFiner(uint m, uint first, uint stride, uint end)
 {
     uint base = HOST_S(1);
     Aabb ma = gAabbs[base + m];
     uint own = hierLevel(ma._pad0);
     Collider cm = gColliders[m];
-    bool probeHasObb = shapeHasHull(cm.shape);
-    BoxObb probe = probeHasObb ? worldObbFromCache(m)
-                               : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
-    float faceGap = max(0.001, speculativeMargin()) + (probeHasObb ? cachedReach(m) : 0.0);
     uint mask = finerLevelMask(own);
     uint count = gCounters[0].colliderCount;
     float csM = hierCellSize(own);
@@ -1889,7 +1896,7 @@ void hierScanFiner(uint m, uint first, uint stride, uint end)
                     Collider b = gColliders[j];
                     if (b.body != cm.body && !bodyMoving(gBodies[b.body]) &&
                         !bodiesJointed(cm.body, b.body) &&
-                        !(probeHasObb && boxesSeparatedOnFaceAxis(probe, j, faceGap)))
+                        !finerSeparatedOnFaceAxis(j, b, m))
                         emitCandidate(j, m);
                 }
             }
@@ -1975,6 +1982,17 @@ void write_finer_args(uint3 tid : SV_DispatchThreadID)
     writeDispatchArgs(77u, min(ALOAD(gScratchAtomics[FINER_COUNT_SLOT]), finerItemCapacity()) * 64u);
 }
 
+// Whether a re-framed body at rest was seen this step (list_moving_colliders, below).
+bool reframedPending()
+{
+#if defined(ENGINE_WGSL)
+    if ((HOST_S(25) & 64u) == 0u) return false;
+    return ALOAD(gConstraintIds[restBase() + 27u]) != 0u;
+#else
+    return false;
+#endif
+}
+
 // Work slot 78: last step's awake list (HOST_S(6) entries), for moved-only
 // bounds and awake-only queries. Slot 67 is reused by the sleep pass.
 // Slots 79/80: the resting-table rebuild (clear, insert), dispatched only
@@ -1990,7 +2008,7 @@ void write_moved_args(uint3 tid : SV_DispatchThreadID)
     // sleeper (header word 31); otherwise after any sleep event (HOST_S(5)).
     bool due = restIncremental() ? ALOAD(gConstraintIds[restBase() + REST_REBUILD_WORD]) != 0u
                                  : HOST_S(5) != 0u;
-    bool rebuild = restTables() && (due || (HOST_S(25) & 2u) != 0u);
+    bool rebuild = restTables() && (due || (HOST_S(25) & 2u) != 0u || reframedPending());
     writeDispatchArgs(79u, rebuild ? REST_HEADER + 2u * gridHashSize() : 0u);
     writeDispatchArgs(80u, rebuild ? gCounters[0].colliderCount : 0u);
 }
@@ -2129,6 +2147,29 @@ void broadphase_clear_awake(uint3 tid : SV_DispatchThreadID)
 groupshared uint gsMoverFlags[64];
 groupshared uint gsMoverBase;
 
+// A GPU fracture between steps (stress-gpu fracture.slang fr_commit, fr_reparent) re-frames
+// bodies and re-points colliders with no host write. A piece that moves is listed and
+// bounded like any mover. A static one (a struck building's anchored remainder) keeps its
+// place, but its body's frame and its colliders' local poses are new, so bounds built from
+// them differ in the last bits from the ones stored, and its cell can differ with them.
+// The fracture stamps every body it writes with the engine's next step as its generation
+// (the engine itself never stamps a static body: update_refs), so a body at rest whose
+// generation is this step's index was re-framed since the last step. Seeing one asks for
+// what a host write would: every collider bounded and the resting table rebuilt, this
+// step (header word 27, which rest_clear empties). HOST_S(25) bit 6: the world has such a
+// fracture. WGSL hosts only, as the rest tables are.
+static const uint REST_REFRAMED_WORD = 27u;
+#if defined(ENGINE_WGSL)
+bool gpuReframes() { return (HOST_S(25) & 64u) != 0u; }
+#else
+bool gpuReframes() { return false; }
+#endif
+void noteReframed(BodyState b)
+{
+    if (b.generation != HOST_S(17)) return;
+    ASTORE(gConstraintIds[restBase() + REST_REFRAMED_WORD], 1u);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void list_moving_colliders(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
@@ -2137,7 +2178,11 @@ void list_moving_colliders(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_Group
     uint local = lid.x;
     bool moving = false;
     if (c < gCounters[0].colliderCount)
-        moving = bodyMovingOrKinematic(gBodies[gColliders[c].body]);
+    {
+        BodyState b = gBodies[gColliders[c].body];
+        moving = bodyMovingOrKinematic(b);
+        if (!moving && gpuReframes()) noteReframed(b);
+    }
     gsMoverFlags[local] = moving ? 1u : 0u;
     GROUP_SYNC();
     if (local == 0u)

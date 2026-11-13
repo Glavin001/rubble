@@ -1211,12 +1211,14 @@ mod imp {
                     // The fracture re-parents colliders, re-frames and retires bodies on
                     // the GPU between steps, with no host write: the awake-indexed
                     // broadphase's resting table and moved-only bounds would not see it
-                    // (city: a static chunk's bounds and cell went stale and a pair was
-                    // missed). Worlds with a GPU fracture take the full pass.
-                    // RUBBLE_FRACTURE_AWAKE_BROADPHASE=1 (measurement only): keep the
-                    // awake-indexed pass, to size what the full pass costs. Unsafe: it can
-                    // miss the pairs described above.
-                    if std::env::var("RUBBLE_FRACTURE_AWAKE_BROADPHASE").is_err() {
+                    // (city: a struck house's static remainder is re-framed, its bounds
+                    // rebuilt from the new frame differ in the last bits, and a pair was
+                    // missed). The engine watches for re-framed bodies at rest and rebuilds
+                    // both on the steps that have one (`StepModes::gpu_reframes`).
+                    // RUBBLE_FRACTURE_FULL_BROADPHASE=1 (A/B measurement): the full pass
+                    // on every step instead, as before.
+                    self.sim.set_gpu_reframes(true);
+                    if std::env::var("RUBBLE_FRACTURE_FULL_BROADPHASE").is_ok() {
                         self.sim.set_awake_broadphase(false);
                     }
                     g
