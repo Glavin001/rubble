@@ -84,7 +84,9 @@ let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0,gaps:[],cpuMs:0
 let learned=null,learnedMs=0,learnedBusy=false;
 // The View menu (0 materials, 1 sleep state, 2 bodies).
 const viewMode=()=>Number($('view-mode').value);
-function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode())}
+// The stress view (value 3) is the World's (lab-world): each step then carries every chunk's
+// load over strength; the separate stress engine has no such mode and draws materials.
+function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode()===3?0:viewMode());sim?.world?.setStressView?.(viewMode()===3)}
 // The Camera menu (engine-fracture view.rs ViewMode: 0 orbit, 1 first-person walk, 2 fly),
 // remembered per viewer and kept across loads. V cycles it.
 const CAMERA_KEY='fracture-lab.camera';
@@ -191,7 +193,7 @@ async function loadLevel(level){
  try{sim=await createLab(def,bytes,setStatus)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  scene=sim.scene;sim.onLaunch(trailLaunched);
  renderer=await createRenderer(device,$('view'),sim,scene,shoot);resetTrails();
- renderer.colorMode=viewMode();applyCamera();applyBall();showBallRadius();
+ renderer.colorMode=viewMode();applyView();applyCamera();applyBall();showBallRadius();
  bystanders=towers?sceneHandle(scene).cityZones():[];applyGuide();$('near').textContent='—';
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
@@ -466,10 +468,11 @@ try{
  // World's device (lab-world.mjs): the physics and this page's renderer share it.
  device=await labDevice();
  device.addEventListener('uncapturederror',e=>fail(e.error));device.lost.then(info=>fail(new Error(`GPU device lost: ${info.message}. Reload this page.`)));
- // ?scene=<key>&bonds=<mode>&crush=<0|1|2>&hz=<60|120> preselect the panel.
+ // ?scene=<key>&bonds=<mode>&crush=<0|1|2>&hz=<60|120>&view=<0..3> preselect the panel.
  const q=new URLSearchParams(location.search);
  if(q.has('scene')&&samples[q.get('scene')])$('scene').value=q.get('scene');
  if(q.has('bonds'))$('bond-mode').value=q.get('bonds');
+ if(q.has('view'))$('view-mode').value=q.get('view');
  if(q.has('crush'))$('crush').value=q.get('crush');
  if(q.has('hz'))$('physics-hz').value=q.get('hz');
  showFractureSwitches();
