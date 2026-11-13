@@ -9,7 +9,7 @@
 //! `tools/stats.py sedan`). Parametric builds keep the structure.
 
 use engine_vehiclegen::mesh::Surf;
-use engine_vehiclegen::solid::{aspect_over, check, new_crossings};
+use engine_vehiclegen::solid::{aspect_over, check, neighbours_to_check, new_crossings, pair_crossings};
 use engine_vehiclegen::{build, design_from_json, BuildOpts};
 
 fn tris(b: &engine_vehiclegen::Built, name: &str) -> usize {
@@ -35,7 +35,7 @@ const SOLIDS: [(&str, f64, f64, usize); 14] = [
     // the B-pillars
     ("body_shell", 2.5, 50.0, 7),
     ("glass_", 4.4, 4.6, 1),
-    ("headlight_", 0.5, 4.3, 1),
+    ("headlight_", 4.1, 4.3, 1),
     ("door_trim_F", 5.9, 18.1, 2),
     // the rear card folds behind the wheel arch (the sheet card does too)
     ("door_trim_R", 1.0, 18.1, 2),
@@ -100,7 +100,9 @@ fn reference_sedan_is_pinned() {
     assert!((lo.x + hi.x).abs() < 1e-5, "{lo} {hi}");
     // the skin of every solid panel is the legacy sheet's skin
     let sheet = build(d.as_ref(), BuildOpts { solid: false, ..Default::default() });
-    for name in ["door_FL", "hood", "fender_FR", "bumper_rear", "glass_rear"] {
+    // (panes and lenses are not: the solid build rounds their corners with
+    // their openings' and sinks them along smoothed normals)
+    for name in ["door_FL", "hood", "fender_FR", "bumper_rear", "trunk_lid"] {
         let (a, s) = (b.parts.get(name).unwrap().outer_only(), sheet.parts.get(name).unwrap());
         for (i, p) in a.v.iter().enumerate() {
             assert!((*p - s.v[i]).length() < 1e-12, "{name} skin vertex {i}");
@@ -144,16 +146,64 @@ fn solids_do_not_cut_through_themselves() {
         }
         let n = new_crossings(m).len();
         // Known, pinned as ceilings (edge-through-face crossings, each a few
-        // millimetres deep): the headlamp lens where it wraps the nose's
-        // corner (its sheet is creased there) and the body shell at the
-        // rear arch's and the tail lamp's corners.
+        // millimetres deep): the body shell at the rear arch's and the tail
+        // lamp's corners.
         let ceiling = match name.as_str() {
-            "headlight_L_lens" | "headlight_R_lens" => 70,
             "body_shell" => 12,
             _ => 0,
         };
         assert!(n <= ceiling, "{name}: {n} crossings (ceiling {ceiling})");
     }
+}
+
+#[test]
+fn parts_cut_through_their_neighbours_no_more_than_pinned() {
+    // A pane against its rebate, a lens against its land, a door against
+    // its jamb, a door card against its door, the B-pillar against the
+    // doors: edges of one through faces of the other. Known, pinned as
+    // ceilings: where a wall is squashed behind a tight bend (a window
+    // frame, a pillar) the rebate closes on the pane's edge, and the walls
+    // either side of a shut line lean into its 4.6 mm gap.
+    let d = design_from_json("sedan", "{}").unwrap();
+    let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
+    let names: Vec<&String> = b.parts.0.iter().map(|p| &p.0).collect();
+    let mut total = 0;
+    for (i, a) in names.iter().enumerate() {
+        for c in &names[i + 1..] {
+            if !neighbours_to_check(a, c) {
+                continue;
+            }
+            let n = pair_crossings(b.parts.get(a).unwrap(), b.parts.get(c).unwrap()).len();
+            let is = |x: &str, y: &str| (a.starts_with(x) && c.starts_with(y)) || (c.starts_with(x) && a.starts_with(y));
+            let ceiling = if is("headlight_", "fender_F") {
+                190
+            } else if is("headlight_", "hood") {
+                25
+            } else if is("body_shell", "door_F") {
+                381
+            } else if is("body_shell", "door_R") {
+                325
+            } else if is("body_shell", "glass_windshield") {
+                250
+            } else if is("body_shell", "taillight_") {
+                200
+            } else if is("door_F", "glass_door_F") {
+                217
+            } else if is("door_R", "glass_door_R") {
+                163
+            } else if is("trunk_lid", "taillight_") {
+                20
+            } else {
+                0
+            };
+            if n > 0 {
+                println!("{a} / {c}: {n}");
+            }
+            assert!(n <= ceiling, "{a} / {c}: {n} crossings (ceiling {ceiling})");
+            total += n;
+        }
+    }
+    println!("{total} in all");
 }
 
 #[test]

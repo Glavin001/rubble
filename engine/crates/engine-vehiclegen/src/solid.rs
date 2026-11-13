@@ -1348,6 +1348,70 @@ pub fn crossings(m: &Mesh, stride: usize) -> Vec<(u32, u32, [u32; 3], DVec3)> {
     hits
 }
 
+/// Pairs of parts [`pair_crossings`] is worth checking for: a pane or a lens
+/// against a panel or another pane, a door card or the body shell (its
+/// B-pillar, its jambs) against a door.
+pub fn neighbours_to_check(a: &str, b: &str) -> bool {
+    let glassy = |n: &str| n.starts_with("glass") || n.ends_with("_lens");
+    let panel = |n: &str| crate::uvpack::is_panel(n);
+    let door = |n: &str| n.starts_with("door_F") || n.starts_with("door_R");
+    let inner = |n: &str| n.starts_with("door_trim") || n == "body_shell";
+    (glassy(a) && (panel(b) || glassy(b)))
+        || (glassy(b) && panel(a))
+        || (inner(a) && door(b))
+        || (inner(b) && door(a))
+}
+
+/// Edges of either part passing through a face of the other (two parts
+/// cutting through each other: a pane through its rebate).
+pub fn pair_crossings(a: &Mesh, b: &Mesh) -> Vec<DVec3> {
+    let mut hits = Vec::new();
+    for (a, b) in [(a, b), (b, a)] {
+        let tris = crate::export::split_triangles(b);
+        let cell = 0.04;
+        let ck = |x: f64| (x / cell).floor() as i32;
+        let mut grid: FxHashMap<(i32, i32, i32), Vec<u32>> = FxHashMap::default();
+        for (ti, f) in tris.iter().enumerate() {
+            let p = f.map(|i| b.v[i as usize]);
+            let (lo, hi) = (p[0].min(p[1]).min(p[2]), p[0].max(p[1]).max(p[2]));
+            for x in ck(lo.x)..=ck(hi.x) {
+                for y in ck(lo.y)..=ck(hi.y) {
+                    for z in ck(lo.z)..=ck(hi.z) {
+                        grid.entry((x, y, z)).or_default().push(ti as u32);
+                    }
+                }
+            }
+        }
+        let mut seen: FxHashSet<(u32, u32, u32)> = FxHashSet::default();
+        for f in crate::export::split_triangles(a) {
+            for e in 0..3 {
+                let (ia, ib) = (f[e], f[(e + 1) % 3]);
+                let (p, q) = (a.v[ia as usize], a.v[ib as usize]);
+                let (lo, hi) = (p.min(q), p.max(q));
+                for x in ck(lo.x)..=ck(hi.x) {
+                    for y in ck(lo.y)..=ck(hi.y) {
+                        for z in ck(lo.z)..=ck(hi.z) {
+                            let Some(c) = grid.get(&(x, y, z)) else {
+                                continue;
+                            };
+                            for &tj in c {
+                                if !seen.insert((ia.min(ib), ia.max(ib), tj)) {
+                                    continue;
+                                }
+                                let g = tris[tj as usize].map(|i| b.v[i as usize]);
+                                if let Some(x) = segment_triangle(p, q, g[0], g[1], g[2]) {
+                                    hits.push(x);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    hits
+}
+
 /// Each vertex's connected piece (a label per vertex).
 fn components(m: &Mesh) -> Vec<u32> {
     let mut parent: Vec<u32> = (0..m.v.len() as u32).collect();

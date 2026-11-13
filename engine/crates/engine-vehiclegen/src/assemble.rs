@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use crate::carbody::{CarBody, Side};
 use crate::export::Marker;
 use crate::mesh::{key3, reset_islands, Mat, Mesh};
-use crate::panels::{boundary_loops, glass_from, panel, Key};
+use crate::panels::{boundary_loops, glass_from_with, panel, Key};
 use crate::solid::{slab, slab_drawn, solid_panel, SolidOpts, Style, GLASS, LENS};
 use crate::tube::Tube;
 use crate::uvpack::{normalise_other, pack, Parts};
@@ -207,14 +207,14 @@ pub fn body_parts_with(d: &dyn Design, h: f64, uv: bool, solid: bool) -> (Parts,
             .map(|(g, c)| (g.clone(), charts.iter().position(|x| *x == c).unwrap() as i32))
             .collect();
         let m = if name.starts_with("glass") {
-            let g = glass_from(&bm, 0.012, 0.006, Some(&shared_glass));
+            let g = glass_from_with(&bm, 0.012, if solid { 0.0045 } else { 0.006 }, Some(&shared_glass), solid);
             if solid {
                 slab(&g, GLASS)
             } else {
                 g
             }
         } else if name.ends_with("_lens") {
-            let mut lens = glass_from(&bm, 0.013, 0.003, None);
+            let mut lens = glass_from_with(&bm, 0.013, 0.003, None, solid);
             lens.set_mat(Mat::LampLens);
             lens.tint(d.lens_tint(name));
             if solid {

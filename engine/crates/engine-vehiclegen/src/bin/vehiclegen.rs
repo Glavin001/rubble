@@ -158,6 +158,34 @@ fn main() {
             }
         }
     }
+    // --pairs: parts cutting through each other (panes and lenses against
+    // the panels round them, door cards and the B-pillar against the doors)
+    if args.iter().any(|a| a == "--pairs") {
+        let mut total = 0;
+        let names: Vec<&String> = b.parts.0.iter().map(|p| &p.0).collect();
+        for (i, a) in names.iter().enumerate() {
+            for c in &names[i + 1..] {
+                if !engine_vehiclegen::solid::neighbours_to_check(a, c) {
+                    continue;
+                }
+                let n = engine_vehiclegen::solid::pair_crossings(b.parts.get(a).unwrap(), b.parts.get(c).unwrap());
+                if !n.is_empty() {
+                    if std::env::var("PAIR_HIST").is_ok() {
+                        let mut h = std::collections::BTreeMap::new();
+                        for p in &n {
+                            *h.entry(((p.x * 20.0).round() as i32 * 5, (p.y * 20.0).round() as i32 * 5, (p.z * 20.0).round() as i32 * 5)).or_insert(0) += 1;
+                        }
+                        let mut hv: Vec<_> = h.into_iter().collect();
+                        hv.sort_by_key(|e| std::cmp::Reverse(e.1));
+                        println!("    {:?}", &hv[..hv.len().min(12)]);
+                    }
+                    println!("{a} / {c}: {} at ({:.3}, {:.3}, {:.3})", n.len(), n[0].x, n[0].y, n[0].z);
+                    total += n.len();
+                }
+            }
+        }
+        println!("pairs: {total} crossings");
+    }
     if let Some(path) = opt("--stats") {
         let parts: Vec<_> = b
             .parts

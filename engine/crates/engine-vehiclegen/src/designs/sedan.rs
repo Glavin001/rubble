@@ -945,11 +945,11 @@ impl Sedan {
 
 /// numpy.arange(a, b, step) for floats.
 /// The B-pillar: a closed box section down the body side at z0, from the
-/// sill to the roof rail, behind the doors. Its outer face sits 64 mm in
+/// sill to the roof rail, behind the doors. Its outer face sits 72 mm in
 /// from the skin (the doors' inner panels are 50 mm deep), reaches out to
 /// the sill's inner face at the foot and runs up into the roof rail; each
 /// jamb face has a seal land, a step in 16 mm down; the inner face is
-/// 126 mm in. 72 mm wide: the slot between the door cards.
+/// 132 mm in. 72 mm wide: the slot between the door cards.
 fn b_pillar(tube: &Tube, z0: f64, side: f64) -> Mesh {
     // (v: 1 the sill, 2 the doors' bottom edge, 7 the roof rail)
     let (v0, v1) = (1.60, 6.95);
@@ -970,7 +970,7 @@ fn b_pillar(tube: &Tube, z0: f64, side: f64) -> Mesh {
     let ns = (total / 0.022).round() as usize;
     let vs: Vec<f64> = (0..=ns).map(|i| interp(total * i as f64 / ns as f64, &len, &fine)).collect();
     // the section: (along the car, below the skin), outer face first
-    let (hw, land, face, step, back) = (0.036, 0.029, 0.064, 0.080, 0.126);
+    let (hw, land, face, step, back) = (0.036, 0.029, 0.072, 0.088, 0.132);
     let ring = |v: f64| -> Vec<DVec3> {
         // the outer face meets the sill's inner face
         let up = smoothstep(1.95, v0, v);
