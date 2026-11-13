@@ -1,0 +1,6 @@
+# Kernels whose generated code differs from main (30ab0e1d) on purpose: <pattern>\t<reason>.
+# Everything else in pr105-main-shaders.tsv must be byte-identical (shader-golden.py check,
+# engine-webgpu/tests/main_wgsl_golden.rs). Every rigid, terrain, fracture and soft kernel is.
+wgsl/explicit_beams*.wgsl	the shipped explicit-beams kernel (explicit_beams.slang) changed: loop caps in source, owner-frame vehicle contact, exact lengths, self-collision pair list, contact groups split small/big (PR #105 audit S2-S7, S13-S18)
+wgsl/explicit_det_*.wgsl	test build of the current explicit kernel (deterministic hits), now without the surface pass
+wgsl/explicit_ablate_*.wgsl	measurement build of the current explicit kernel
