@@ -82,7 +82,11 @@ fn mounts_and_links_land_on_real_nodes_in_named_groups() {
     let mut pos: HashMap<String, DVec3> = st.nodes.iter().map(|n| (n.name.clone(), n.pos)).collect();
     pos.extend(m.iter().flat_map(|p| &p.nodes).map(|n| (n.name.clone(), n.pos)));
     let mut groups = HashSet::new();
+    let panels = build(design_from_json("sedan", "{}").unwrap().as_ref(), BuildOpts { uv: false, ..Default::default() }).parts;
     for p in &m {
+        if let Some(h) = &p.host {
+            assert!(p.nodes.is_empty() && panels.get(h).is_some() && p.carried_kg > 0.0, "{}", p.name);
+        }
         for i in &p.internal {
             assert!(!i.pairs.is_empty());
             for &(a, b) in &i.pairs {
@@ -93,6 +97,13 @@ fn mounts_and_links_land_on_real_nodes_in_named_groups() {
         }
         for mt in &p.mounts {
             assert!(groups.insert(mt.group.clone()), "group {} twice", mt.group);
+            if let Some(panel) = &mt.to_part {
+                // a mount to a body panel's own lattice (a hinge, a latch)
+                assert!(mt.to.is_empty() && panels.get(panel).is_some(), "{}: {panel}", mt.group);
+                assert!(mt.from.iter().all(|n| p.nodes.iter().any(|x| &x.name == n)) && mt.beams >= mt.from.len(), "{}", mt.group);
+                assert!(mt.v.strength.is_finite() && mt.v.strength >= mt.v.deform, "{}", mt.group);
+                continue;
+            }
             for n in mt.from.iter().chain(&mt.to) {
                 assert!(pos.contains_key(n), "{}: mount {} names {n}", p.name, mt.group);
             }

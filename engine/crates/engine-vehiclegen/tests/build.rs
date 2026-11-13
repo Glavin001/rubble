@@ -74,10 +74,10 @@ fn reference_sedan_is_pinned() {
     // (the sheet build's 68, less its placeholder boxes, plus the
     // body-in-white's four parts and the mechanical and interior parts:
     // `tests/structure.rs`, `tests/mechanical.rs`)
-    assert_eq!(b.parts.len(), 112);
+    assert_eq!(b.parts.len(), 147);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 473_210);
+    assert_eq!(total, 479_214);
     for (name, n) in [
         ("body_shell", 114_520),
         ("hood", 39_408),
@@ -283,7 +283,7 @@ fn parametric_builds_keep_the_structure() {
     ] {
         let d = design_from_json("sedan", p).unwrap();
         let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
-        assert_eq!(b.parts.len(), 112, "{p}");
+        assert_eq!(b.parts.len(), 147, "{p}");
         assert_eq!(b.markers.len(), 42, "{p}");
         let wb: serde_json::Value = serde_json::from_str(p).unwrap();
         let want = wb.get("wheelbase").and_then(|v| v.as_f64()).unwrap_or(2.83);

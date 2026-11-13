@@ -155,7 +155,7 @@ SYSTEMS = [
     (('headliner', 'sun_visor', 'interior_mirror', 'pillar_trim'), (0, 1.25, 0), 0.3, 0.0),
     (('door_trim_', 'hinge_door', 'latch_door', 'door_beam', 'window_regulator'), (0, 0, 0), 0.0, 0.75),
     (('door_', 'fender_', 'handle_', 'mirror_', 'fuel_flap'), (0, 0, 0), 0.0, 1.25),
-    (('hood', 'hinge_hood', 'latch_hood', 'hood_strut'), (0, 1.0, 0.7), 0.0, 0.0),
+    (('hood', 'hinge_hood', 'latch_hood', 'gas_strut'), (0, 1.0, 0.7), 0.0, 0.0),
     (('trunk_lid', 'hinge_trunk', 'latch_trunk'), (0, 1.0, -0.7), 0.0, 0.0),
     (('bumper_front', 'grille', 'headlight', 'plate_front', 'absorber_front', 'impact_beam_front'), (0, 0, 1.0), 0.6, 0.0),
     (('bumper_rear', 'taillight', 'plate_rear', 'absorber_rear', 'impact_beam_rear'), (0, 0, -1.0), 0.6, 0.0),
