@@ -317,3 +317,131 @@ The specification is [beamng-structure-study.md](beamng-structure-study.md) §10
 **Not done:** the rigger on these definitions (shell, mechanical parts, wheels on axle nodes, glass triggers, engine stops, SUPPORT between parts), lint rules 2, 8, 11, 14–24 on the rigged car, every measurement of the plan's step D (parked fidelity, rest drift, modes, kerb wobble, settle, head-on overlap and pitch, wall, pole, MDB, roof, door), and the `-v4` clips.
 
 **Stills** (`~/Development/rubble-artifacts/sedan-body/stills/`, Blender, all inspected): `structure_top`, `structure_under`, `structure_mechanical_top`, `structure_mechanical_under`, `mechanical_only`, `front_end`, `interior_on_floor`, `explode_all`.
+
+## The complete sedan: equipment, hardware and trim (2026-11-13, `feat/sedan-complete`)
+
+The question was: does the car have everything a real one has, so that nothing is hollow or empty when pieces break off? This step adds what was missing as parts, each defined once in `engine-vehiclegen::equipment` in the style of `mechanical` (a closed solid, nodes with real masses, internal beams, mounts in named break groups with finite strengths), carried to the rigger in `RigSpec.mechanical`. **State: generator only.** The rigger does not read the new fields yet, and nothing here is a crash or stiffness measurement.
+
+**The sedan is 171 render parts and 116 part definitions** (was 103 and 48); 502,942 triangles.
+
+**What was added**
+
+| Item | Parts |
+|---|---|
+| Engine bay | Engine detail as sub-solids of the engine (head, cam cover with coils and filler cap, sump, intake plenum with runners and throttle body, exhaust manifold, crank and pump pulleys, alternator, compressor, belt). Battery on its tray, air box with duct and snorkel, fan with shroud, condenser with receiver-drier, coolant and washer reservoirs, brake booster with master cylinder, fuse box, strut-tower brace. |
+| Body hardware | Eight door hinges (pillar leaf, pin, door leaf), four door latches with strikers, hood hinges, hood latch, two gas struts, boot hinges (goosenecks) and latch, foam absorbers between each bumper cover and its beam, an intrusion beam and a window regulator inside each door, fuel filler neck and flap, undertray, number plates. |
+| Running gear | Brake calipers astride the discs (the disc lost its block), coil springs on the four struts, front and rear anti-roll bars with bushes and drop links, wheel bearings through the discs' hats. |
+| Exhaust | The same 13-node chain drawn as sections: flanged downpipe, catalytic converter, centre pipe, resonator, pipe over the axle, rear silencer, tailpipe with tip, four rubber hangers at the hanger mounts. |
+| Controls | Steering column from under the instrument panel through the firewall, two joints and the intermediate shaft to a pinion on the rack; pedal box with brake and accelerator pedals and the push rod through the firewall to the booster. The firewall has an opening for each. |
+| Interior | Moulded carpet over the floor, toe board, tunnel and longitudinals (cut out round the seat cross members and the console); A, B and C pillar trims; sun visors; interior mirror; front seat belts (reel, webbing, ring, buckle); parcel shelf trim with speaker grilles; boot floor lining and side trims; dials, centre screen, vents and glovebox door on the instrument panel. |
+
+**New fields the rigger must honour** (`mechanical.rs`):
+
+- `Mount.to_part`: the mount's far ends are nodes of a body panel's own lattice (`door_FL`, `hood`, `trunk_lid`), the nearest to `from`; `to` is empty. A hinge, a latch or a gas strut is a part mounted to the shell with one group and to its panel with another.
+- `MechPart.host` and `carried_kg`: a part with no nodes that is fixed inside or onto a body panel (door beam, window regulator, fuel flap, number plate). Its solid follows the host's nodes and its mass is part of the host's listed mass. A caliper has no host: it binds to its hub's nodes, and its mass is in the hub's.
+- `MechPart.from_trim`: its mass came out of the shell's fixed-trim allowance.
+- `Structure.trim_removed`, `Structure::take_trim`, `TRIM_GROUPS`: the shell's floor, tunnel, firewall, boot-floor and quarter nodes (groups C1, C3, B1, E3, E5) are lighter by the mass that became parts, in proportion to their mass (each is 53 % lighter). The study's §10.1 puts the fixed trim on these nodes.
+
+**Mass by class** (kg; `Sedan::mass_table`, `tests/equipment.rs`). Kerb mass stays 1,450 kg.
+
+| Class | Before | After | Study's band (§10.1) |
+|---|---|---|---|
+| Shell: body-in-white | 339.0 | 339.0 | shell 430–500 with its trim |
+| Shell: fixed trim (no part of its own) | 148.1 | 46.0 | (100–150 before trim was parts) |
+| Bumper beams and absorbers | 14.0 | 15.4 | |
+| Suspension, subframes, hubs, steering | 180.5 | 191.9 | 240–270 |
+| Wheels | 78.4 | 78.4 | 72–80 |
+| Engine | 170.0 | 170.0 | 150–190 |
+| Driveline | 88.0 | 88.0 | 60–70 |
+| Exhaust, fuel, cooling | 63.8 | 73.5 | 70–80 |
+| Interior | 106.2 | 130.6 | 80–110 (seats, panel, console only) |
+| Electrical, engine bay, controls | 0 | 36.4 | |
+| Hardware and body (hinges, latches, struts, undertray) | 0 | 18.8 | |
+| Panels, glass, lamps, driver | 262.0 | 262.0 | |
+
+102.1 kg moved from the shell's nodes to 53 parts with nodes of their own (157 nodes, none lighter than 0.1 kg); 15 more parts have no nodes and ride a panel or a hub. The 46 kg left on the shell is what still has no part: wiring, the heater unit, sealer and sound deadening, paint, fluids.
+
+**Parts inventory** (every part definition; a family's row gives its first member: rear hubs are 24 kg, rear calipers carry 3.2 kg). Regenerate with `cargo test --release -p engine-vehiclegen --test equipment inventory -- --nocapture --ignored`.
+
+| System | Part | kg each (nodes) | Held by (beams × break force per beam) |
+|---|---|---|---|
+| bumper | `impact_beam_front` | 8.00 (10) | shell A1 8×60.0 kN |
+| bumper | `impact_beam_rear` | 6.00 (10) | shell E1 8×40.0 kN |
+| bumper | `absorber_front` | 0.70 (4) | impbf 8×0.8 kN |
+| bumper | `absorber_rear` | 0.70 (4) | impbr 8×0.8 kN |
+| suspension | `subframe_front` | 46.50 (7) | shell A4 16×400.0 kN |
+| suspension | `subframe_rear` | 42.00 (6) | shell E1 10×150.0 kN |
+| suspension | `steering_rack` | 10.00 (2) | subf 4×inf kN |
+| suspension | `hub` ×4 | 17.00 (4) | follows its joints |
+| suspension | `arm_lower` ×4 | in its joints' parts | link 300 kN |
+| suspension | `strut` ×4 | in its joints' parts | link 180 kN; link 300 kN |
+| suspension | `toe_link` ×4 | in its joints' parts | link 250 kN |
+| suspension | `arm_upper` ×2 | in its joints' parts | link 300 kN |
+| suspension | `tower_brace` | 2.40 (2) | shell A6 4×32.0 kN |
+| suspension | `brake_caliper` ×4 | 4.50 in its host | follows its joints |
+| suspension | `antiroll_bar_front` | 5.50 (4) | subf 3×12.0 kN; hub 1×8.0 kN |
+| suspension | `antiroll_bar_rear` | 3.50 (4) | subr 3×12.0 kN; hub 1×8.0 kN |
+| wheel | `wheel` ×4 | 19.00 (5) | hub 8×168.0 kN |
+| wheel | `hub_cap` ×4 | 0.60 (3) | whe 6×0.6 kN |
+| engine | `engine` | 170.00 (10) | subf 3×90.0 kN |
+| driveline | `transmission` | 45.00 (2) | eng 8×inf kN; shell C1 9×160.0 kN |
+| driveline | `driveshaft` | 1.00 (2) | tra 2×3.5 kN; dif 3×3.5 kN |
+| driveline | `differential` | 42.00 (3) | subr 18×200.0 kN |
+| driveline | `halfshaft` ×2 | in its joints' parts | link 10 kN |
+| exhaust | `exhaust` | 18.20 (13) | eng 4×65.0 kN; shell C1 8×15.0 kN; shell E1 8×15.0 kN |
+| fuel | `fuel_tank` | 40.00 (8) | shell E1 28×35.0 kN |
+| fuel | `fuel_filler` | 1.30 (3) | fuet 4×4.0 kN; shell E5 4×4.0 kN |
+| cooling | `radiator` | 5.60 (4) | shell A3 12×20.0 kN |
+| cooling | `fan_shroud` | 4.20 (4) | rad 8×3.0 kN |
+| cooling | `condenser` | 2.60 (4) | rad 8×3.0 kN |
+| cooling | `coolant_reservoir` | 1.60 (4) | shell A7 6×1.5 kN |
+| interior | `seat` ×2 | 18.90 (7) | shell C1 6×30.0 kN |
+| interior | `seat_rear` | 18.40 (8) | shell C1 14×30.0 kN; shell E7 10×30.0 kN |
+| interior | `dash` | 45.00 (7) | shell B2 10×60.0 kN; shell C3 10×60.0 kN |
+| interior | `console` | 5.00 (4) | shell C3 12×10.0 kN |
+| interior | `carpet` | 9.00 (6) | shell C1 12×0.6 kN |
+| interior | `pillar_trim_a` ×2 | 0.60 (3) | shell D1 5×0.4 kN |
+| interior | `pillar_trim_c` ×2 | 0.60 (3) | shell D3 5×0.4 kN |
+| interior | `pillar_trim_b` ×2 | 0.60 (3) | shell D2 5×0.4 kN |
+| interior | `sun_visor` ×2 | 0.35 (3) | shell D4 4×0.2 kN |
+| interior | `seat_belt` ×2 | 1.50 (3) | shell C2 3×15.0 kN; shell D2 2×15.0 kN; shell C3 3×15.0 kN |
+| interior | `boot_trim` ×2 | 1.40 (3) | shell E2 6×0.5 kN |
+| interior | `interior_mirror` | 0.30 (3) | shell D4 3×0.2 kN |
+| interior | `parcel_shelf_trim` | 2.00 (4) | shell E6 8×0.5 kN |
+| interior | `boot_lining` | 3.00 (4) | shell E3 8×0.5 kN |
+| electrical | `battery` | 17.00 (4) | shell A8 8×9.0 kN |
+| electrical | `fuse_box` | 1.40 (4) | shell B1 6×1.2 kN |
+| engine_bay | `airbox` | 2.40 (4) | shell A8 8×2.5 kN |
+| engine_bay | `washer_reservoir` | 3.00 (4) | shell A7 6×2.2 kN |
+| controls | `brake_booster` | 4.40 (4) | shell B1 8×6.0 kN |
+| controls | `steering_column` | 5.00 (3) | das 3×8.0 kN; shell B1 3×6.0 kN; ster 3×10.0 kN |
+| controls | `pedal_box` | 3.20 (4) | shell B1 6×5.0 kN |
+| hardware | `hinge_door_upper` ×4 | 0.80 (2) | shell B2 4×16.0 kN; door 4×16.0 kN |
+| hardware | `hinge_door_lower` ×4 | 0.80 (2) | shell C2 4×16.0 kN; door 4×16.0 kN |
+| hardware | `latch_door` ×4 | 0.90 (2) | shell D2 3×11.0 kN; door 3×11.0 kN |
+| hardware | `door_beam` ×4 | 2.20 in its host | rides door |
+| hardware | `window_regulator` ×4 | 1.80 in its host | rides door |
+| hardware | `hinge_hood` ×2 | 1.10 (2) | shell B2 4×10.0 kN; hood 4×10.0 kN |
+| hardware | `gas_strut` ×2 | 0.35 (2) | shell A8 3×2.0 kN; hood 3×2.0 kN |
+| hardware | `hinge_trunk` ×2 | 0.90 (2) | shell E6 4×9.0 kN; trunk_lid 4×9.0 kN |
+| hardware | `latch_hood` | 0.80 (2) | shell A3 3×9.0 kN; hood 3×9.0 kN |
+| hardware | `latch_trunk` | 0.70 (2) | shell E4 3×9.0 kN; trunk_lid 3×9.0 kN |
+| body | `undertray` | 2.60 (4) | shell A1 10×1.5 kN |
+| body | `fuel_flap` | 0.25 in its host | rides body_shell |
+| body | `plate_front` | 0.20 in its host | rides bumper_front |
+| body | `plate_rear` | 0.20 in its host | rides body_shell |
+
+**Checks** (`tests/mechanical.rs`, `tests/equipment.rs`, `tests/build.rs`): every new solid is closed with positive volume, above the road in every preset, and cuts through no other part or member (the pair test runs over all 116 definitions against all 171 render parts: 0 crossings). Every mount lands on real nodes or names a real panel, and every part with nodes can break loose. The four presets build the same parts. The Khronos validator reports 0 errors and 0 warnings.
+
+**Triangle budgets** (unchanged, `docs/vehicle-art-spec.md`): body 280,762 of 300,000; wheel 14,420 of 15,000; interior 62,316 of 80,000; structure 17,292 of 40,000; mechanical 29,592 of 60,000; lamps, glass and trim 54,532 of 60,000; total 502,942 of 600,000.
+
+**Build time:** 0.30 s native without panel UVs (was 0.28 s) and 0.65 s with them; in wasm (Node) 380 ms without UVs and 474 ms with them.
+
+**Not added, and why**
+
+- **Spare wheel:** the structure has no room for a well. The tank (to y 0.44 m) and the rear silencer are directly under the boot floor (y 0.47 m).
+- **Radiator hoses, wiring, heater unit, horn, lamp back housings:** not modelled. Behind each front bumper corner there is only the wheel-well liner.
+- **Rear seat belts.**
+- **The door's inner parts are inside a closed door solid**, so they show only in a cutaway.
+
+**Stills** (`~/Development/rubble-artifacts/sedan-complete/`, all inspected; made by `tools/vehicle-gen/tools/render_complete.sh`): `exploded_systems`, `exploded_systems_rear`, `hood_off`, `door_FL_off`, `door_RL_off`, `door_FR_off`, `door_RR_off`, `trunk_off`, `bumper_front_off`, `bumper_rear_off`, `fender_FL_off`, `wheel_FL_off`, `wheel_RL_off`, `roof_cutaway`, `underside`. `render_parts.py` gained `all` with `-part` exclusions, `systems` (the exploded view by system) and `cut@y<1.02` cutaways.

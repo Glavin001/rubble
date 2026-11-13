@@ -199,3 +199,112 @@ fn every_preset_builds_the_same_parts() {
         }
     }
 }
+
+/// The parts inventory of `engine/docs/generated-vehicles.md` (system, part,
+/// mass, mounts): `cargo test --release -p engine-vehiclegen --test equipment
+/// inventory -- --nocapture --ignored`.
+#[test]
+#[ignore]
+fn inventory() {
+    let s = sedan("");
+    let st = s.unibody();
+    let m = s.mechanical(&st);
+    // one row per family: the name without its corner or side
+    let family = |n: &str| {
+        let mut f = n.to_string();
+        for suf in ["_FL", "_FR", "_RL", "_RR", "_L", "_R"] {
+            f = f
+                .replace(&format!("{suf}_"), "_")
+                .trim_end_matches(suf)
+                .to_string();
+        }
+        f
+    };
+    let mut rows: Vec<(String, String, usize, f64, usize, f64, String)> = Vec::new();
+    for p in &m {
+        let fam = family(&p.name);
+        let mounts: Vec<String> = p
+            .mounts
+            .iter()
+            .map(|x| {
+                let to = match &x.to_part {
+                    Some(panel) => family(panel),
+                    None => {
+                        let t = &x.to[0];
+                        if t.starts_with("sh_") {
+                            format!("shell {}", t[3..5].to_uppercase())
+                        } else {
+                            ["fl", "fr", "rl", "rr"].iter().fold(
+                                t.split('_').next().unwrap().to_string(),
+                                |n, c| {
+                                    if n.len() > 4 {
+                                        n.trim_end_matches(c).to_string()
+                                    } else {
+                                        n
+                                    }
+                                },
+                            )
+                        }
+                    }
+                };
+                format!("{to} {}×{:.1} kN", x.beams, x.v.strength / 1e3)
+            })
+            .chain(
+                p.links
+                    .iter()
+                    .map(|l| format!("link {:.0} kN", l.v.strength / 1e3)),
+            )
+            .collect();
+        let mut seen = Vec::new();
+        for x in mounts {
+            if !seen.contains(&x) {
+                seen.push(x);
+            }
+        }
+        let mounts = seen;
+        let held = if let Some(h) = &p.host {
+            format!("rides {}", family(h))
+        } else if mounts.is_empty() {
+            "follows its joints".to_string()
+        } else {
+            mounts.join("; ")
+        };
+        match rows.iter_mut().find(|r| r.1 == fam && r.0 == p.class) {
+            Some(r) => r.2 += 1,
+            None => rows.push((
+                p.class.to_string(),
+                fam,
+                1,
+                p.mass(),
+                p.nodes.len(),
+                p.carried_kg,
+                held,
+            )),
+        }
+    }
+    let mut classes: Vec<String> = Vec::new();
+    for r in &rows {
+        if !classes.contains(&r.0) {
+            classes.push(r.0.clone());
+        }
+    }
+    println!("| System | Part | kg each (nodes) | Held by (beams × break force per beam) |");
+    println!("|---|---|---|---|");
+    for c in classes {
+        for r in rows.iter().filter(|r| r.0 == c) {
+            let n = if r.2 > 1 {
+                format!(" ×{}", r.2)
+            } else {
+                String::new()
+            };
+            let kg = if r.4 > 0 {
+                format!("{:.2} ({})", r.3, r.4)
+            } else if r.5 > 0.0 {
+                format!("{:.2} in its host", r.5)
+            } else {
+                "in its joints' parts".to_string()
+            };
+            println!("| {} | `{}`{} | {} | {} |", r.0, r.1, n, kg, r.6);
+        }
+    }
+}

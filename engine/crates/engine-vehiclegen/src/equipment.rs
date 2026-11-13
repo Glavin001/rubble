@@ -777,7 +777,11 @@ fn top_y(g: &Gear, z: f64, x: f64) -> f64 {
 fn span(x: (f64, f64), y: (f64, f64), z: (f64, f64), mat: Mat) -> Mesh {
     box_(
         DVec3::new(0.5 * (x.0 + x.1), 0.5 * (y.0 + y.1), 0.5 * (z.0 + z.1)),
-        DVec3::new(0.5 * (x.1 - x.0).abs(), 0.5 * (y.1 - y.0).abs(), 0.5 * (z.1 - z.0).abs()),
+        DVec3::new(
+            0.5 * (x.1 - x.0).abs(),
+            0.5 * (y.1 - y.0).abs(),
+            0.5 * (z.1 - z.0).abs(),
+        ),
         mat,
         None,
     )
@@ -787,10 +791,28 @@ impl MechPart {
     /// A mount from the named nodes of this part to a body panel's own
     /// lattice.
     fn hold_panel(&mut self, group: &str, from: Vec<String>, panel: &str, beams: usize, v: Vals) {
-        self.mounts.push(Mount { group: group.into(), from, to: Vec::new(), beams, kind: BeamKind::Normal, v, precomp: 1.0, to_part: Some(panel.into()) });
+        self.mounts.push(Mount {
+            group: group.into(),
+            from,
+            to: Vec::new(),
+            beams,
+            kind: BeamKind::Normal,
+            v,
+            precomp: 1.0,
+            to_part: Some(panel.into()),
+        });
     }
     fn hold_from(&mut self, group: &str, from: Vec<String>, to: &[String], beams: usize, v: Vals) {
-        self.mounts.push(Mount { group: group.into(), from, to: to.to_vec(), beams, kind: BeamKind::Normal, v, precomp: 1.0, to_part: None });
+        self.mounts.push(Mount {
+            group: group.into(),
+            from,
+            to: to.to_vec(),
+            beams,
+            kind: BeamKind::Normal,
+            v,
+            precomp: 1.0,
+            to_part: None,
+        });
     }
 }
 
@@ -826,7 +848,13 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
                 // ahead of the shut line, the B-pillar's at 69 mm either
                 // side of it; the door's edge is 28 mm deep)
                 let pin = if pillar {
-                    p.mesh.add(&slab(0.003, 0.031, 0.059, if nm == "lower" { 0.065 } else { 0.0675 }, 0.035));
+                    p.mesh.add(&slab(
+                        0.003,
+                        0.031,
+                        0.059,
+                        if nm == "lower" { 0.065 } else { 0.0675 },
+                        0.035,
+                    ));
                     p.mesh.add(&slab(-0.006, 0.010, 0.059, 0.063, 0.020));
                     -0.004
                 } else {
@@ -835,21 +863,68 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
                     0.004
                 };
                 let c = at(pin, 0.0555);
-                p.mesh.add(&drum(c - DVec3::Y * 0.036, c + DVec3::Y * 0.036, 0.004, 8, steel));
-                p.mesh.add(&slab(pin - 0.079, pin - 0.010, 0.0585, 0.0625, 0.028));
-                p.mesh.add(&slab(pin - 0.012, pin + 0.002, 0.054, 0.0595, 0.028));
-                let (a, b) = (p.node("u", c + DVec3::Y * 0.03, 0.4), p.node("d", c - DVec3::Y * 0.03, 0.4));
-                p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 50.0, 20e3, INF), deform_group: None });
+                p.mesh.add(&drum(
+                    c - DVec3::Y * 0.036,
+                    c + DVec3::Y * 0.036,
+                    0.004,
+                    8,
+                    steel,
+                ));
+                p.mesh
+                    .add(&slab(pin - 0.079, pin - 0.010, 0.0585, 0.0625, 0.028));
+                p.mesh
+                    .add(&slab(pin - 0.012, pin + 0.002, 0.054, 0.0595, 0.028));
+                let (a, b) = (
+                    p.node("u", c + DVec3::Y * 0.03, 0.4),
+                    p.node("d", c - DVec3::Y * 0.03, 0.4),
+                );
+                p.internal.push(Internal {
+                    pairs: vec![(0, 1)],
+                    v: vals(0.0, 50.0, 20e3, INF),
+                    deform_group: None,
+                });
                 let to: Vec<String> = match (pillar, nm) {
-                    (false, "upper") => vec![format!("b2_o{sl}"), format!("c2_1{sl}"), format!("b1_o{sl}"), format!("a8_m{sl}")],
-                    (false, _) => vec![format!("c2_1{sl}"), format!("c1_1o{sl}"), format!("b2_o{sl}"), format!("b1_o{sl}")],
-                    (true, "upper") => vec![format!("d2_b{sl}"), format!("c2_3{sl}"), format!("d2_t{sl}"), format!("c1_3o{sl}")],
-                    (true, _) => vec![format!("c2_3{sl}"), format!("c1_3o{sl}"), format!("d2_b{sl}"), format!("c2_2{sl}")],
+                    (false, "upper") => vec![
+                        format!("b2_o{sl}"),
+                        format!("c2_1{sl}"),
+                        format!("b1_o{sl}"),
+                        format!("a8_m{sl}"),
+                    ],
+                    (false, _) => vec![
+                        format!("c2_1{sl}"),
+                        format!("c1_1o{sl}"),
+                        format!("b2_o{sl}"),
+                        format!("b1_o{sl}"),
+                    ],
+                    (true, "upper") => vec![
+                        format!("d2_b{sl}"),
+                        format!("c2_3{sl}"),
+                        format!("d2_t{sl}"),
+                        format!("c1_3o{sl}"),
+                    ],
+                    (true, _) => vec![
+                        format!("c2_3{sl}"),
+                        format!("c1_3o{sl}"),
+                        format!("d2_b{sl}"),
+                        format!("c2_2{sl}"),
+                    ],
                 };
                 let grp = format!("hinge_door_{}{sl}_{nm}", door.to_lowercase());
                 let v = vals(0.0, 100.0, 9e3, 16e3);
-                p.hold_from(&format!("{grp}_body"), vec![a.clone(), b.clone()], &shn(&to), 4, v);
-                p.hold_panel(&format!("{grp}_door"), vec![a, b], &format!("door_{door}{s}"), 4, v);
+                p.hold_from(
+                    &format!("{grp}_body"),
+                    vec![a.clone(), b.clone()],
+                    &shn(&to),
+                    4,
+                    v,
+                );
+                p.hold_panel(
+                    &format!("{grp}_door"),
+                    vec![a, b],
+                    &format!("door_{door}{s}"),
+                    4,
+                    v,
+                );
                 out.push(p);
             }
         }
@@ -857,7 +932,10 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         // on the pillar behind
         // (the rear door's rear edge leans back round the wheel arch: under
         // the shoulder it is 0.296 m ahead of the axle, and leaning)
-        for (door, zl, y, shell) in [("F", f.z(z_b), 0.64, false), ("R", g.zr + 0.296, 0.85, true)] {
+        for (door, zl, y, shell) in [
+            ("F", f.z(z_b), 0.64, false),
+            ("R", g.zr + 0.296, 0.85, true),
+        ] {
             let mut p = MechPart::new(&format!("latch_door_{door}{s}"), "hardware");
             let yy = f.y(y);
             let at = |dz: f64, d: f64| {
@@ -865,38 +943,103 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
                 DVec3::new(q.x, yy, zl + dz)
             };
             // (the door is 28 mm deep at its edge and 50 mm from 35 mm in)
-            let (b0, b1, bd, bh) = if shell { (0.034, 0.059, 0.030, 0.020) } else { (0.020, 0.050, 0.034, 0.035) };
+            let (b0, b1, bd, bh) = if shell {
+                (0.034, 0.059, 0.030, 0.020)
+            } else {
+                (0.020, 0.050, 0.034, 0.035)
+            };
             let (a, b) = (at(0.5 * (b0 + b1), 0.010), at(0.5 * (b0 + b1), bd));
-            p.mesh.add(&span((a.x, b.x), (yy - bh, yy + bh), (zl + b0, zl + b1), steel));
+            p.mesh.add(&span(
+                (a.x, b.x),
+                (yy - bh, yy + bh),
+                (zl + b0, zl + b1),
+                steel,
+            ));
             // the striker: a plate and a loop standing towards the door
-            let (d0, d1, dl) = if shell { (0.038, 0.0415, 0.046) } else { (0.064, 0.0675, 0.056) };
-            let (z0, z1) = if shell { (-0.053, -0.029) } else { (0.006, 0.030) };
+            let (d0, d1, dl) = if shell {
+                (0.038, 0.0415, 0.046)
+            } else {
+                (0.064, 0.0675, 0.056)
+            };
+            let (z0, z1) = if shell {
+                (-0.053, -0.029)
+            } else {
+                (0.006, 0.030)
+            };
             let (a, b) = (at(0.5 * (z0 + z1), d0), at(0.5 * (z0 + z1), d1));
-            p.mesh.add(&span((a.x, b.x), (yy - 0.025, yy + 0.025), (zl + z0, zl + z1), steel));
+            p.mesh.add(&span(
+                (a.x, b.x),
+                (yy - 0.025, yy + 0.025),
+                (zl + z0, zl + z1),
+                steel,
+            ));
             let (q0, q1) = (at(z0 + 0.005, dl), at(z1 - 0.005, dl));
             for q in [q0, q1] {
-                p.mesh.add(&cyl(DVec3::new(at(q.z - zl, d0 + 0.001).x, yy, q.z), q, 0.0035));
+                p.mesh.add(&cyl(
+                    DVec3::new(at(q.z - zl, d0 + 0.001).x, yy, q.z),
+                    q,
+                    0.0035,
+                ));
             }
-            p.mesh.add(&cyl(q0 - DVec3::Z * 0.003, q1 + DVec3::Z * 0.003, 0.0035));
+            p.mesh
+                .add(&cyl(q0 - DVec3::Z * 0.003, q1 + DVec3::Z * 0.003, 0.0035));
             let latch = p.node("l", at(0.5 * (b0 + b1), 0.020), 0.7);
             let strike = p.node("s", at(0.5 * (z0 + z1), dl), 0.2);
-            p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 50.0, 7e3, 11e3 * 1.5), deform_group: None });
-            let to: Vec<String> = if shell { vec![format!("e5_1d{sl}"), format!("e5_1u{sl}"), format!("c2_5{sl}"), format!("d3_b{sl}")] } else { vec![format!("d2_b{sl}"), format!("c2_3{sl}"), format!("c1_3o{sl}"), format!("d2_t{sl}")] };
+            p.internal.push(Internal {
+                pairs: vec![(0, 1)],
+                v: vals(0.0, 50.0, 7e3, 11e3 * 1.5),
+                deform_group: None,
+            });
+            let to: Vec<String> = if shell {
+                vec![
+                    format!("e5_1d{sl}"),
+                    format!("e5_1u{sl}"),
+                    format!("c2_5{sl}"),
+                    format!("d3_b{sl}"),
+                ]
+            } else {
+                vec![
+                    format!("d2_b{sl}"),
+                    format!("c2_3{sl}"),
+                    format!("c1_3o{sl}"),
+                    format!("d2_t{sl}"),
+                ]
+            };
             let grp = format!("latch_door_{}{sl}", door.to_lowercase());
             let v = vals(0.0, 100.0, 7e3, 11e3);
             p.hold_from(&format!("{grp}_body"), vec![strike], &shn(&to), 3, v);
-            p.hold_panel(&format!("{grp}_door"), vec![latch], &format!("door_{door}{s}"), 3, v);
+            p.hold_panel(
+                &format!("{grp}_door"),
+                vec![latch],
+                &format!("door_{door}{s}"),
+                3,
+                v,
+            );
             out.push(p);
         }
         // ---- inside each door: the intrusion beam and the window regulator
-        for (door, z0, z1) in [("F", z_df - 0.07, z_b + 0.07), ("R", z_b - 0.08, z_dr + 0.07)] {
+        for (door, z0, z1) in [
+            ("F", z_df - 0.07, z_b + 0.07),
+            ("R", z_b - 0.08, z_dr + 0.07),
+        ] {
             let mut p = MechPart::new(&format!("door_beam_{door}{s}"), "hardware");
             let n = 9;
-            let path: Vec<DVec3> = (0..=n).map(|i| inside(g, f.z(z0 + (z1 - z0) * i as f64 / n as f64), f.y(0.500), sg, 0.026)).collect();
+            let path: Vec<DVec3> = (0..=n)
+                .map(|i| {
+                    inside(
+                        g,
+                        f.z(z0 + (z1 - z0) * i as f64 / n as f64),
+                        f.y(0.500),
+                        sg,
+                        0.026,
+                    )
+                })
+                .collect();
             // (in the pressed beam band of the door's inner panel, 50 mm deep)
             p.mesh.add(&cyl_along(&path, 0.012, 8, steel));
             for e in [path[0], path[n]] {
-                p.mesh.add(&box_(e, DVec3::new(0.004, 0.016, 0.022), steel, None));
+                p.mesh
+                    .add(&box_(e, DVec3::new(0.004, 0.016, 0.022), steel, None));
             }
             p.host = Some(format!("door_{door}{s}"));
             p.carried_kg = 2.2;
@@ -905,11 +1048,23 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
             let zc = 0.5 * (z0 + z1);
             // (in the pocket of the door's inner panel, 36 mm deep)
             let c = inside(g, f.z(zc), f.y(0.70), sg, 0.022);
-            p.mesh.add(&box_(c, DVec3::new(0.0015, 0.055, 0.150), steel, None));
+            p.mesh
+                .add(&box_(c, DVec3::new(0.0015, 0.055, 0.150), steel, None));
             for dz in [-0.11, 0.11] {
-                p.mesh.add(&box_(c + DVec3::new(0.0, 0.01, dz), DVec3::new(0.003, 0.070, 0.010), steel, None));
+                p.mesh.add(&box_(
+                    c + DVec3::new(0.0, 0.01, dz),
+                    DVec3::new(0.003, 0.070, 0.010),
+                    steel,
+                    None,
+                ));
             }
-            p.mesh.add(&drum(c + DVec3::new(-sg * 0.002, -0.02, 0.0), c + DVec3::new(-sg * 0.008, -0.02, 0.0), 0.030, 12, Mat::TrimBlack));
+            p.mesh.add(&drum(
+                c + DVec3::new(-sg * 0.002, -0.02, 0.0),
+                c + DVec3::new(-sg * 0.008, -0.02, 0.0),
+                0.030,
+                12,
+                Mat::TrimBlack,
+            ));
             p.host = Some(format!("door_{door}{s}"));
             p.carried_kg = 1.8;
             out.push(p);
@@ -922,16 +1077,50 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
             let zr = f.z(z_df);
             let yu = |z: f64| top_y(g, z, x) - 0.047;
             let base = DVec3::new(x, b2.y + 0.006, zr + 0.02);
-            p.mesh.add(&box_(base, DVec3::new(0.014, 0.004, 0.030), steel, None));
+            p.mesh
+                .add(&box_(base, DVec3::new(0.014, 0.004, 0.030), steel, None));
             let pivot = DVec3::new(x, (yu(zr + 0.03) - 0.006).min(b2.y + 0.030), zr + 0.03);
-            p.mesh.add(&span((x - 0.004, x + 0.004), (b2.y + 0.008, pivot.y + 0.006), (zr + 0.018, zr + 0.042), steel));
-            let arm: Vec<DVec3> = [0.03, 0.09, 0.16, 0.24].iter().map(|dz| DVec3::new(x, if *dz < 0.05 { pivot.y } else { yu(zr + dz) - 0.004 }, zr + dz)).collect();
-            p.mesh.add(&crate::structure::box_along(&arm, DVec3::Y, 0.022, 0.006));
+            p.mesh.add(&span(
+                (x - 0.004, x + 0.004),
+                (b2.y + 0.008, pivot.y + 0.006),
+                (zr + 0.018, zr + 0.042),
+                steel,
+            ));
+            let arm: Vec<DVec3> = [0.03, 0.09, 0.16, 0.24]
+                .iter()
+                .map(|dz| {
+                    DVec3::new(
+                        x,
+                        if *dz < 0.05 {
+                            pivot.y
+                        } else {
+                            yu(zr + dz) - 0.004
+                        },
+                        zr + dz,
+                    )
+                })
+                .collect();
+            p.mesh
+                .add(&crate::structure::box_along(&arm, DVec3::Y, 0.022, 0.006));
             let a = p.node("p", pivot, 0.6);
             let b = p.node("a", arm[3], 0.5);
-            p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 50.0, 8e3, INF), deform_group: None });
+            p.internal.push(Internal {
+                pairs: vec![(0, 1)],
+                v: vals(0.0, 50.0, 8e3, INF),
+                deform_group: None,
+            });
             let v = vals(0.0, 100.0, 6e3, 10e3);
-            p.hold_from(&format!("hinge_hood_{sl}_body"), vec![a.clone(), b.clone()], &shn(&[format!("b2_o{sl}"), format!("a8_m{sl}"), format!("b2_i{sl}")]), 4, v);
+            p.hold_from(
+                &format!("hinge_hood_{sl}_body"),
+                vec![a.clone(), b.clone()],
+                &shn(&[
+                    format!("b2_o{sl}"),
+                    format!("a8_m{sl}"),
+                    format!("b2_i{sl}"),
+                ]),
+                4,
+                v,
+            );
             p.hold_panel(&format!("hinge_hood_{sl}_hood"), vec![a, b], "hood", 4, v);
             out.push(p);
         }
@@ -940,19 +1129,37 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
             let mut p = MechPart::new(&format!("gas_strut_{s}"), "hardware");
             let x = sg * f.x(0.635);
             let (za, zb) = (f.z(1.03), f.z(1.50));
-            let (a, b) = (DVec3::new(x, top_y(g, za, x) - 0.100, za), DVec3::new(x - sg * 0.015, top_y(g, zb, x) - 0.058, zb));
+            let (a, b) = (
+                DVec3::new(x, top_y(g, za, x) - 0.100, za),
+                DVec3::new(x - sg * 0.015, top_y(g, zb, x) - 0.058, zb),
+            );
             let d = (b - a).normalize();
             let mid = a + (b - a) * 0.58;
             p.mesh.add(&cyl(a, mid, 0.010));
             p.mesh.add(&cyl(mid, b, 0.0045));
             for (e, dir) in [(a, -1.0), (b, 1.0)] {
-                p.mesh.add(&box_(e + d * dir * 0.008, DVec3::new(0.008, 0.008, 0.008), steel, None));
+                p.mesh.add(&box_(
+                    e + d * dir * 0.008,
+                    DVec3::new(0.008, 0.008, 0.008),
+                    steel,
+                    None,
+                ));
             }
             let na = p.node("b", a, 0.2);
             let nb = p.node("r", b, 0.15);
-            p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 30.0, 900.0, INF), deform_group: None });
+            p.internal.push(Internal {
+                pairs: vec![(0, 1)],
+                v: vals(0.0, 30.0, 900.0, INF),
+                deform_group: None,
+            });
             let v = vals(0.0, 30.0, 800.0, 2000.0);
-            p.hold_from(&format!("gas_strut_{sl}_body"), vec![na], &shn(&[format!("a8_m{sl}"), format!("a6_{sl}"), format!("b2_o{sl}")]), 3, v);
+            p.hold_from(
+                &format!("gas_strut_{sl}_body"),
+                vec![na],
+                &shn(&[format!("a8_m{sl}"), format!("a6_{sl}"), format!("b2_o{sl}")]),
+                3,
+                v,
+            );
             p.hold_panel(&format!("gas_strut_{sl}_hood"), vec![nb], "hood", 3, v);
             out.push(p);
         }
@@ -964,16 +1171,47 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
             let x = sg * f.x(0.55);
             let z0 = sh(st, &format!("sh_e6_r{sl}")).z - 0.030;
             let ys = e6.y;
-            p.mesh.add(&span((x - 0.015, x + 0.015), (ys - 0.050, ys - 0.012), (z0 - 0.020, z0 + 0.012), steel));
+            p.mesh.add(&span(
+                (x - 0.015, x + 0.015),
+                (ys - 0.050, ys - 0.012),
+                (z0 - 0.020, z0 + 0.012),
+                steel,
+            ));
             let yl = |z: f64| top_y(g, z, x) - 0.050;
-            let neck: Vec<DVec3> = [(0.0, ys - 0.031), (-0.07, ys - 0.085), (-0.16, ys - 0.085), (-0.22, yl(z0 - 0.22) - 0.010), (-0.30, yl(z0 - 0.30) - 0.010)].iter().map(|&(dz, y)| DVec3::new(x, y, z0 - 0.02 + dz)).collect();
-            p.mesh.add(&crate::structure::box_along(&neck, DVec3::Y, 0.020, 0.010));
+            let neck: Vec<DVec3> = [
+                (0.0, ys - 0.031),
+                (-0.07, ys - 0.085),
+                (-0.16, ys - 0.085),
+                (-0.22, yl(z0 - 0.22) - 0.010),
+                (-0.30, yl(z0 - 0.30) - 0.010),
+            ]
+            .iter()
+            .map(|&(dz, y)| DVec3::new(x, y, z0 - 0.02 + dz))
+            .collect();
+            p.mesh
+                .add(&crate::structure::box_along(&neck, DVec3::Y, 0.020, 0.010));
             let a = p.node("p", neck[0], 0.5);
             let b = p.node("a", neck[4], 0.4);
-            p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 50.0, 6e3, INF), deform_group: None });
+            p.internal.push(Internal {
+                pairs: vec![(0, 1)],
+                v: vals(0.0, 50.0, 6e3, INF),
+                deform_group: None,
+            });
             let v = vals(0.0, 100.0, 5e3, 9e3);
-            p.hold_from(&format!("hinge_trunk_{sl}_body"), vec![a.clone(), b.clone()], &shn(&[format!("e6_o{sl}"), format!("e6_r{sl}"), format!("e7_{sl}")]), 4, v);
-            p.hold_panel(&format!("hinge_trunk_{sl}_lid"), vec![a, b], "trunk_lid", 4, v);
+            p.hold_from(
+                &format!("hinge_trunk_{sl}_body"),
+                vec![a.clone(), b.clone()],
+                &shn(&[format!("e6_o{sl}"), format!("e6_r{sl}"), format!("e7_{sl}")]),
+                4,
+                v,
+            );
+            p.hold_panel(
+                &format!("hinge_trunk_{sl}_lid"),
+                vec![a, b],
+                "trunk_lid",
+                4,
+                v,
+            );
             out.push(p);
         }
     }
@@ -982,13 +1220,34 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let mut p = MechPart::new("latch_hood", "hardware");
         let a3 = sh(st, "sh_a3_uc");
         let top = (top_y(g, a3.z, 0.0) - 0.050).min(a3.y + 0.040);
-        p.mesh.add(&span((-0.035, 0.035), (a3.y + 0.002, top - 0.006), (a3.z - 0.018, a3.z + 0.018), steel));
-        p.mesh.add(&drum(DVec3::new(0.0, top - 0.008, a3.z), DVec3::new(0.0, top, a3.z), 0.006, 8, steel));
+        p.mesh.add(&span(
+            (-0.035, 0.035),
+            (a3.y + 0.002, top - 0.006),
+            (a3.z - 0.018, a3.z + 0.018),
+            steel,
+        ));
+        p.mesh.add(&drum(
+            DVec3::new(0.0, top - 0.008, a3.z),
+            DVec3::new(0.0, top, a3.z),
+            0.006,
+            8,
+            steel,
+        ));
         let a = p.node("l", DVec3::new(0.0, a3.y + 0.015, a3.z), 0.6);
         let b = p.node("s", DVec3::new(0.0, top, a3.z), 0.2);
-        p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 50.0, 5e3, INF), deform_group: None });
+        p.internal.push(Internal {
+            pairs: vec![(0, 1)],
+            v: vals(0.0, 50.0, 5e3, INF),
+            deform_group: None,
+        });
         let v = vals(0.0, 100.0, 5e3, 9e3);
-        p.hold_from("latch_hood_body", vec![a], &shn(&["a3_uc".into(), "a3_ul".into(), "a3_ur".into()]), 3, v);
+        p.hold_from(
+            "latch_hood_body",
+            vec![a],
+            &shn(&["a3_uc".into(), "a3_ul".into(), "a3_ur".into()]),
+            3,
+            v,
+        );
         p.hold_panel("latch_hood_hood", vec![b], "hood", 3, v);
         out.push(p);
     }
@@ -998,34 +1257,76 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let e4 = sh(st, "sh_e4_uc");
         let zt = f.z(-2.38);
         let top = top_y(g, zt, 0.0) - 0.055;
-        p.mesh.add(&span((-0.030, 0.030), (top - 0.045, top), (zt - 0.012, zt + 0.012), steel));
-        p.mesh.add(&crate::structure::box_along(&[DVec3::new(0.0, top - 0.040, zt), DVec3::new(0.0, e4.y + 0.06, 0.5 * (zt + e4.z) + 0.01), DVec3::new(0.0, e4.y + 0.024, e4.z + 0.012)], DVec3::Z, 0.030, 0.005));
+        p.mesh.add(&span(
+            (-0.030, 0.030),
+            (top - 0.045, top),
+            (zt - 0.012, zt + 0.012),
+            steel,
+        ));
+        p.mesh.add(&crate::structure::box_along(
+            &[
+                DVec3::new(0.0, top - 0.040, zt),
+                DVec3::new(0.0, e4.y + 0.06, 0.5 * (zt + e4.z) + 0.01),
+                DVec3::new(0.0, e4.y + 0.024, e4.z + 0.012),
+            ],
+            DVec3::Z,
+            0.030,
+            0.005,
+        ));
         let a = p.node("l", DVec3::new(0.0, top - 0.02, zt), 0.5);
         let b = p.node("s", DVec3::new(0.0, top, zt), 0.2);
-        p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 50.0, 5e3, INF), deform_group: None });
+        p.internal.push(Internal {
+            pairs: vec![(0, 1)],
+            v: vals(0.0, 50.0, 5e3, INF),
+            deform_group: None,
+        });
         let v = vals(0.0, 100.0, 5e3, 9e3);
-        p.hold_from("latch_trunk_body", vec![a], &shn(&["e4_uc".into(), "e4_ul".into(), "e4_ur".into()]), 3, v);
+        p.hold_from(
+            "latch_trunk_body",
+            vec![a],
+            &shn(&["e4_uc".into(), "e4_ul".into(), "e4_ur".into()]),
+            3,
+            v,
+        );
         p.hold_panel("latch_trunk_lid", vec![b], "trunk_lid", 3, v);
         out.push(p);
     }
     // ---- bumper absorbers: foam between each cover and its beam
-    for (front, name, yb, h, dz, w, kg) in [(true, "absorber_front", 0.465, 0.050, -0.0635, 0.026, 0.7), (false, "absorber_rear", 0.430, 0.060, 0.060, 0.034, 0.7)] {
+    for (front, name, yb, h, dz, w, kg) in [
+        (true, "absorber_front", 0.465, 0.050, -0.0635, 0.026, 0.7),
+        (false, "absorber_rear", 0.430, 0.060, 0.060, 0.034, 0.7),
+    ] {
         let mut p = MechPart::new(name, "bumper");
         // (the front one behind the lower intake's back plate, which leans
         // with the nose; the rear one above the cover's tuck)
         let face = if front { &g.z_nose } else { &g.z_tail };
         let yf = if front { 0.45 } else { 0.414 };
         let at = |x: f64| DVec3::new(f.x(x), f.y(yb), face(f.x(x.abs()), f.y(yf)) + dz);
-        let path: Vec<DVec3> = (0..=16).map(|i| at(-0.60 + 1.20 * i as f64 / 16.0)).collect();
+        let path: Vec<DVec3> = (0..=16)
+            .map(|i| at(-0.60 + 1.20 * i as f64 / 16.0))
+            .collect();
         let mut m = crate::structure::box_along(&path, DVec3::Y, w, h);
         m.set_mat(Mat::TrimBlack);
         p.mesh = m;
-        for (i, (x, dy)) in [(-0.55, 1.0), (-0.18, -1.0), (0.18, 1.0), (0.55, -1.0)].into_iter().enumerate() {
-            p.node(&format!("{}", i + 1), at(x) + DVec3::Y * dy * 0.4 * h, kg / 4.0);
+        for (i, (x, dy)) in [(-0.55, 1.0), (-0.18, -1.0), (0.18, 1.0), (0.55, -1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            p.node(
+                &format!("{}", i + 1),
+                at(x) + DVec3::Y * dy * 0.4 * h,
+                kg / 4.0,
+            );
         }
-        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 30.0, 300.0, INF), deform_group: None });
+        p.internal.push(Internal {
+            pairs: p.complete(),
+            v: vals(0.0, 30.0, 300.0, INF),
+            deform_group: None,
+        });
         let beam = if front { "impbf" } else { "impbr" };
-        let to: Vec<String> = (1..=5).flat_map(|i| [format!("{beam}_{i}u"), format!("{beam}_{i}d")]).collect();
+        let to: Vec<String> = (1..=5)
+            .flat_map(|i| [format!("{beam}_{i}u"), format!("{beam}_{i}d")])
+            .collect();
         p.hold_from(name, p.names(), &to, 8, vals(0.0, 30.0, 300.0, 800.0));
         out.push(p);
     }
@@ -1047,11 +1348,26 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         );
         m.set_mat(Mat::TrimBlack);
         p.mesh = m;
-        for (tg, x, z) in [("fl", hx, z1), ("fr", -hx, z1), ("rl", hx, z0), ("rr", -hx, z0)] {
+        for (tg, x, z) in [
+            ("fl", hx, z1),
+            ("fr", -hx, z1),
+            ("rl", hx, z0),
+            ("rr", -hx, z0),
+        ] {
             p.node(tg, f.p(x, y(z), z), 0.65);
         }
-        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 30.0, 500.0, INF), deform_group: None });
-        p.hold("undertray", &["a1_dl", "a1_dr", "a2_dl", "a2_dr", "a3_dc", "a4_l", "a4_r"], 10, BeamKind::Normal, vals(0.0, 30.0, 500.0, 1500.0));
+        p.internal.push(Internal {
+            pairs: p.complete(),
+            v: vals(0.0, 30.0, 500.0, INF),
+            deform_group: None,
+        });
+        p.hold(
+            "undertray",
+            &["a1_dl", "a1_dr", "a2_dl", "a2_dr", "a3_dc", "a4_l", "a4_r"],
+            10,
+            BeamKind::Normal,
+            vals(0.0, 30.0, 500.0, 1500.0),
+        );
         out.push(p);
     }
     // ---- fuel filler: the neck from the tank up to the right quarter, and
@@ -1060,31 +1376,120 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let zf = g.axle_r - 0.535;
         let (cup, n) = crate::parts::surface_point(&g.tube, f.z(zf), f.y(0.80), -1.0, (1.5, 5.5));
         let mut p = MechPart::new("fuel_filler", "fuel");
-        let mut path: Vec<DVec3> = [(-0.424, 0.368), (-0.447, 0.337), (-0.560, 0.337), (-0.630, 0.430), (-0.700, 0.600)].iter().map(|&(x, y)| f.p(x, y, zf)).collect();
+        let mut path: Vec<DVec3> = [
+            (-0.424, 0.368),
+            (-0.447, 0.337),
+            (-0.560, 0.337),
+            (-0.630, 0.430),
+            (-0.700, 0.600),
+        ]
+        .iter()
+        .map(|&(x, y)| f.p(x, y, zf))
+        .collect();
         path.push(cup - n * 0.120 - DVec3::Y * 0.02);
         path.push(cup - n * 0.062);
         p.mesh.add(&cyl_along(&path, 0.021, 10, steel));
-        p.mesh.add(&lathe_at(&[(0.0, 0.0), (0.030, 0.0), (0.045, 0.014), (0.045, 0.020), (0.0, 0.020)], 14, Mat::TrimBlack, n, cup - n * 0.066));
-        let nn: Vec<String> = [("b", path[1], 0.5), ("m", path[4], 0.4), ("t", cup - n * 0.06, 0.4)].into_iter().map(|(t, q, kg)| p.node(t, q, kg)).collect();
-        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 30.0, 1500.0, INF), deform_group: None });
-        let tank: Vec<String> = ["fuet_1", "fuet_3", "fuet_5", "fuet_7"].iter().map(|n| n.to_string()).collect();
-        p.hold_from("fuel_filler_tank", vec![nn[0].clone(), nn[1].clone()], &tank, 4, vals(0.0, 30.0, 1500.0, 4000.0));
-        p.hold_from("fuel_filler_body", vec![nn[2].clone(), nn[1].clone()], &shn(&["e5_4ur".into(), "e5_5ur".into(), "e5_4dr".into(), "e5_3ur".into()]), 4, vals(0.0, 30.0, 1500.0, 4000.0));
+        p.mesh.add(&lathe_at(
+            &[
+                (0.0, 0.0),
+                (0.030, 0.0),
+                (0.045, 0.014),
+                (0.045, 0.020),
+                (0.0, 0.020),
+            ],
+            14,
+            Mat::TrimBlack,
+            n,
+            cup - n * 0.066,
+        ));
+        let nn: Vec<String> = [
+            ("b", path[1], 0.5),
+            ("m", path[4], 0.4),
+            ("t", cup - n * 0.06, 0.4),
+        ]
+        .into_iter()
+        .map(|(t, q, kg)| p.node(t, q, kg))
+        .collect();
+        p.internal.push(Internal {
+            pairs: p.complete(),
+            v: vals(0.0, 30.0, 1500.0, INF),
+            deform_group: None,
+        });
+        let tank: Vec<String> = ["fuet_1", "fuet_3", "fuet_5", "fuet_7"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        p.hold_from(
+            "fuel_filler_tank",
+            vec![nn[0].clone(), nn[1].clone()],
+            &tank,
+            4,
+            vals(0.0, 30.0, 1500.0, 4000.0),
+        );
+        p.hold_from(
+            "fuel_filler_body",
+            vec![nn[2].clone(), nn[1].clone()],
+            &shn(&[
+                "e5_4ur".into(),
+                "e5_5ur".into(),
+                "e5_4dr".into(),
+                "e5_3ur".into(),
+            ]),
+            4,
+            vals(0.0, 30.0, 1500.0, 4000.0),
+        );
         out.push(p);
         let mut p = MechPart::new("fuel_flap", "body");
-        p.mesh = lathe_at(&[(0.0, 0.0025), (0.068, 0.0025), (0.070, 0.0045), (0.068, 0.0065), (0.0, 0.0065)], 20, Mat::Paint, n, cup);
+        p.mesh = lathe_at(
+            &[
+                (0.0, 0.0025),
+                (0.068, 0.0025),
+                (0.070, 0.0045),
+                (0.068, 0.0065),
+                (0.0, 0.0065),
+            ],
+            20,
+            Mat::Paint,
+            n,
+            cup,
+        );
         p.host = Some("body_shell".into());
         p.carried_kg = 0.25;
         out.push(p);
     }
     // ---- number plates
-    for (name, host, face, sgn, y) in [("plate_front", "bumper_front", &g.z_nose, 1.0, 0.585), ("plate_rear", "body_shell", &g.z_tail, -1.0, 0.68)] {
+    for (name, host, face, sgn, y) in [
+        ("plate_front", "bumper_front", &g.z_nose, 1.0, 0.585),
+        ("plate_rear", "body_shell", &g.z_tail, -1.0, 0.68),
+    ] {
         let mut p = MechPart::new(name, "body");
         let (hx, hy) = (0.155, 0.0775);
-        let zs = [(0.0, y - hy), (0.0, y), (0.0, y + hy), (hx, y - hy), (hx, y), (hx, y + hy)].map(|(x, yy)| face(x, f.y(yy)));
-        let zo = if sgn > 0.0 { zs.iter().cloned().fold(f64::NEG_INFINITY, f64::max) } else { zs.iter().cloned().fold(f64::INFINITY, f64::min) };
-        p.mesh.add(&box_(DVec3::new(0.0, f.y(y), zo + sgn * 0.0045), DVec3::new(hx, hy, 0.0015), Mat::Chrome, None));
-        p.mesh.add(&box_(DVec3::new(0.0, f.y(y), zo + sgn * 0.0020), DVec3::new(hx + 0.006, hy + 0.006, 0.0010), Mat::TrimBlack, None));
+        let zs = [
+            (0.0, y - hy),
+            (0.0, y),
+            (0.0, y + hy),
+            (hx, y - hy),
+            (hx, y),
+            (hx, y + hy),
+        ]
+        .map(|(x, yy)| face(x, f.y(yy)));
+        let zo = if sgn > 0.0 {
+            zs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            zs.iter().cloned().fold(f64::INFINITY, f64::min)
+        };
+        p.mesh.add(&box_(
+            DVec3::new(0.0, f.y(y), zo + sgn * 0.0045),
+            DVec3::new(hx, hy, 0.0015),
+            Mat::Chrome,
+            None,
+        ));
+        p.mesh.add(&box_(
+            DVec3::new(0.0, f.y(y), zo + sgn * 0.0020),
+            DVec3::new(hx + 0.006, hy + 0.006, 0.0010),
+            Mat::TrimBlack,
+            None,
+        ));
         p.host = Some(host.into());
         p.carried_kg = 0.2;
         out.push(p);
@@ -1102,19 +1507,36 @@ pub(crate) fn coil_spring(a: DVec3, b: DVec3, rc: f64, rw: f64, turns: f64) -> M
     let v = d.cross(u);
     let n = (turns * 12.0).round() as usize;
     let sides = 6;
-    let pts: Vec<glam::DVec2> = (0..sides).map(|k| glam::DVec2::from_angle(std::f64::consts::TAU * (k as f64 + 0.5) / sides as f64) * rw).collect();
+    let pts: Vec<glam::DVec2> = (0..sides)
+        .map(|k| {
+            glam::DVec2::from_angle(std::f64::consts::TAU * (k as f64 + 0.5) / sides as f64) * rw
+        })
+        .collect();
     let rings: Vec<Ring> = (0..=n)
         .map(|i| {
             let t = i as f64 / n as f64;
             let phi = std::f64::consts::TAU * turns * t;
             let e = u * phi.cos() + v * phi.sin();
-            Ring { c: a + (b - a) * t + e * rc, a: e, b: d, pts: pts.clone() }
+            Ring {
+                c: a + (b - a) * t + e * rc,
+                a: e,
+                b: d,
+                pts: pts.clone(),
+            }
         })
         .collect();
-    let caps: Vec<[usize; 4]> = (0..sides / 2 - 1).map(|k| [sides - 1 - k, k, k + 1, sides - 2 - k]).collect();
+    let caps: Vec<[usize; 4]> = (0..sides / 2 - 1)
+        .map(|k| [sides - 1 - k, k, k + 1, sides - 2 - k])
+        .collect();
     let mut m = sweep_rings(&rings, &caps, Mat::MetalBare);
     for (e, s) in [(a, -1.0), (b, 1.0)] {
-        m.add(&drum(e + d * s * (rw + 0.001), e + d * s * (rw + 0.007), rc + rw + 0.002, 14, Mat::MetalBare));
+        m.add(&drum(
+            e + d * s * (rw + 0.001),
+            e + d * s * (rw + 0.007),
+            rc + rw + 0.002,
+            14,
+            Mat::MetalBare,
+        ));
     }
     m
 }
@@ -1125,26 +1547,64 @@ fn running_gear(g: &Gear, _st: &Structure, out: &mut Vec<MechPart>) {
     let disc_r = 0.16;
     // ---- calipers: a floating caliper astride each disc, on the knuckle's
     // bracket (behind the axle in front, ahead of it at the rear)
-    for (cn, sg, front) in [("FL", 1.0, true), ("FR", -1.0, true), ("RL", 1.0, false), ("RR", -1.0, false)] {
+    for (cn, sg, front) in [
+        ("FL", 1.0, true),
+        ("FR", -1.0, true),
+        ("RL", 1.0, false),
+        ("RR", -1.0, false),
+    ] {
         let c = cn.to_lowercase();
         let mut p = MechPart::new(&format!("brake_caliper_{cn}"), "suspension");
-        let (hz, body) = if front { (0.058, 0.020) } else { (0.046, 0.016) };
+        let (hz, body) = if front {
+            (0.058, 0.020)
+        } else {
+            (0.046, 0.016)
+        };
         // (built on top of the disc in the wheel's frame, x outboard: the
         // disc is x -52..-28 mm; then turned round the axle)
         let mut m = Mesh::new();
         let xi = -0.052 - 0.004 - body;
-        m.add(&rbox(DVec3::new(xi, disc_r - 0.026, 0.0), DVec3::new(body, 0.030, hz), 0.006, 2, Mat::Paint));
-        m.add(&drum(DVec3::new(xi - body + 0.002, disc_r - 0.030, 0.0), DVec3::new(xi - body - 0.016, disc_r - 0.030, 0.0), 0.026, 12, Mat::MetalBare));
-        m.add(&box_(DVec3::new(0.5 * (xi - body - 0.004), disc_r + 0.012, 0.0), DVec3::new(0.5 * (-0.004 - (xi - body)), 0.008, hz - 0.006), Mat::Paint, None));
-        m.add(&rbox(DVec3::new(-0.014, disc_r - 0.026, 0.0), DVec3::new(0.010, 0.030, hz - 0.006), 0.005, 2, Mat::Paint));
+        m.add(&rbox(
+            DVec3::new(xi, disc_r - 0.026, 0.0),
+            DVec3::new(body, 0.030, hz),
+            0.006,
+            2,
+            Mat::Paint,
+        ));
+        m.add(&drum(
+            DVec3::new(xi - body + 0.002, disc_r - 0.030, 0.0),
+            DVec3::new(xi - body - 0.016, disc_r - 0.030, 0.0),
+            0.026,
+            12,
+            Mat::MetalBare,
+        ));
+        m.add(&box_(
+            DVec3::new(0.5 * (xi - body - 0.004), disc_r + 0.012, 0.0),
+            DVec3::new(0.5 * (-0.004 - (xi - body)), 0.008, hz - 0.006),
+            Mat::Paint,
+            None,
+        ));
+        m.add(&rbox(
+            DVec3::new(-0.014, disc_r - 0.026, 0.0),
+            DVec3::new(0.010, 0.030, hz - 0.006),
+            0.005,
+            2,
+            Mat::Paint,
+        ));
         let a = (if front { -1.0f64 } else { 1.0 }) * 55.0f64.to_radians();
         m.transform(Some(crate::mesh::rot_x(a)), DVec3::ZERO);
         if sg < 0.0 {
             m.mirror_x();
         }
-        m.transform(None, DVec3::new(sg * t, wy, if front { g.zf } else { g.zr }));
+        m.transform(
+            None,
+            DVec3::new(sg * t, wy, if front { g.zf } else { g.zr }),
+        );
         p.mesh = m;
-        p.binds = ["lo", "up", "toe", "n4"].iter().map(|n| format!("hub{c}_{n}")).collect();
+        p.binds = ["lo", "up", "toe", "n4"]
+            .iter()
+            .map(|n| format!("hub{c}_{n}"))
+            .collect();
         p.carried_kg = if front { 4.5 } else { 3.2 };
         out.push(p);
     }
@@ -1152,12 +1612,42 @@ fn running_gear(g: &Gear, _st: &Structure, out: &mut Vec<MechPart>) {
     // drop links to the lower joints
     let rod = Mat::MetalBare;
     for (front, name, sub, z_bar, y_bar, x_bush, ends, kg) in [
-        (true, "antiroll_bar_front", "subf", g.axle_f + 0.280, 0.300, 0.30, [(0.46, 0.300, 0.280), (0.52, 0.262, 0.185), (0.55, 0.250, 0.085)], 5.5),
-        (false, "antiroll_bar_rear", "subr", g.axle_r + 0.265, 0.215, 0.33, [(0.46, 0.215, 0.265), (0.50, 0.222, 0.200), (0.53, 0.230, 0.145)], 3.5),
+        (
+            true,
+            "antiroll_bar_front",
+            "subf",
+            g.axle_f + 0.280,
+            0.300,
+            0.30,
+            [
+                (0.46, 0.300, 0.280),
+                (0.52, 0.262, 0.185),
+                (0.55, 0.250, 0.085),
+            ],
+            5.5,
+        ),
+        (
+            false,
+            "antiroll_bar_rear",
+            "subr",
+            g.axle_r + 0.265,
+            0.215,
+            0.33,
+            [
+                (0.46, 0.215, 0.265),
+                (0.50, 0.222, 0.200),
+                (0.53, 0.230, 0.145),
+            ],
+            3.5,
+        ),
     ] {
         let mut p = MechPart::new(name, "suspension");
         let ax = if front { g.axle_f } else { g.axle_r };
-        let mut path: Vec<DVec3> = ends.iter().rev().map(|&(x, y, dz)| f.p(-x, y, ax + dz)).collect();
+        let mut path: Vec<DVec3> = ends
+            .iter()
+            .rev()
+            .map(|&(x, y, dz)| f.p(-x, y, ax + dz))
+            .collect();
         path.extend(ends.iter().map(|&(x, y, dz)| f.p(x, y, ax + dz)));
         let r_bar = if front { 0.011 } else { 0.009 };
         p.mesh.add(&cyl_along(&path, r_bar, 8, rod));
@@ -1165,25 +1655,75 @@ fn running_gear(g: &Gear, _st: &Structure, out: &mut Vec<MechPart>) {
         let mut names = Vec::new();
         for (s, sg) in [("l", 1.0), ("r", -1.0)] {
             let bush = f.p(sg * x_bush, y_bar, z_bar);
-            p.mesh.add(&box_(bush, DVec3::new(0.016, r_bar + 0.008, r_bar + 0.008), Mat::Rubber, None));
-            p.mesh.add(&box_(bush + DVec3::Y * (r_bar + 0.010), DVec3::new(0.020, 0.002, r_bar + 0.020), rod, None));
+            p.mesh.add(&box_(
+                bush,
+                DVec3::new(0.016, r_bar + 0.008, r_bar + 0.008),
+                Mat::Rubber,
+                None,
+            ));
+            p.mesh.add(&box_(
+                bush + DVec3::Y * (r_bar + 0.010),
+                DVec3::new(0.020, 0.002, r_bar + 0.020),
+                rod,
+                None,
+            ));
             // the drop link: from the bar's end down towards the lower joint
             let end = path[if sg > 0.0 { path.len() - 1 } else { 0 }];
             let lo = DVec3::new(sg * (t - 0.16), wy - 0.14, wheel_z);
             let foot = end + (lo - end).normalize() * 0.055;
             p.mesh.add(&cyl(end, foot, 0.006));
-            p.mesh.add(&drum(end - DVec3::X * 0.010, end + DVec3::X * 0.010, 0.012, 8, rod));
+            p.mesh.add(&drum(
+                end - DVec3::X * 0.010,
+                end + DVec3::X * 0.010,
+                0.012,
+                8,
+                rod,
+            ));
             let nb = p.node(&format!("b{s}"), bush, 0.28 * kg);
             let ne = p.node(&format!("e{s}"), end, 0.22 * kg);
             names.push((s, nb, ne));
         }
-        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 60.0, 9e3, INF), deform_group: None });
+        p.internal.push(Internal {
+            pairs: p.complete(),
+            v: vals(0.0, 60.0, 9e3, INF),
+            deform_group: None,
+        });
         for (s, nb, ne) in names {
             let c = format!("{}{s}", if front { "f" } else { "r" });
-            let to: Vec<String> = if front { vec![format!("{sub}_f{s}"), format!("{sub}_k{s}"), format!("sh_a4_{s}")] } else { vec![format!("{sub}_f{s}"), "subr_cf".to_string(), format!("sh_e1_1d{s}")] };
+            let to: Vec<String> = if front {
+                vec![
+                    format!("{sub}_f{s}"),
+                    format!("{sub}_k{s}"),
+                    format!("sh_a4_{s}"),
+                ]
+            } else {
+                vec![
+                    format!("{sub}_f{s}"),
+                    "subr_cf".to_string(),
+                    format!("sh_e1_1d{s}"),
+                ]
+            };
             let tag = if front { "front" } else { "rear" };
-            p.mounts.push(Mount { group: format!("antiroll_bush_{tag}_{s}"), from: vec![nb], to, beams: 3, kind: BeamKind::Bounded, v: vals(0.0, 80.0, 6e3, 12e3), precomp: 1.0, to_part: None });
-            p.mounts.push(Mount { group: format!("antiroll_link_{c}"), from: vec![ne], to: vec![format!("hub{c}_lo")], beams: 1, kind: BeamKind::Normal, v: vals(0.0, 60.0, 4e3, 8e3), precomp: 1.0, to_part: None });
+            p.mounts.push(Mount {
+                group: format!("antiroll_bush_{tag}_{s}"),
+                from: vec![nb],
+                to,
+                beams: 3,
+                kind: BeamKind::Bounded,
+                v: vals(0.0, 80.0, 6e3, 12e3),
+                precomp: 1.0,
+                to_part: None,
+            });
+            p.mounts.push(Mount {
+                group: format!("antiroll_link_{c}"),
+                from: vec![ne],
+                to: vec![format!("hub{c}_lo")],
+                beams: 1,
+                kind: BeamKind::Normal,
+                v: vals(0.0, 60.0, 4e3, 8e3),
+                precomp: 1.0,
+                to_part: None,
+            });
         }
         out.push(p);
     }
@@ -1199,12 +1739,16 @@ fn running_gear(g: &Gear, _st: &Structure, out: &mut Vec<MechPart>) {
 pub(crate) fn exhaust_mesh(path: &[DVec3], hang: &[usize]) -> Mesh {
     let steel = Mat::MetalBare;
     let mut m = cyl_along(path, 0.022, 10, steel);
-    let dir = |i: usize| (path[(i + 1).min(path.len() - 1)] - path[i.saturating_sub(1)]).normalize();
+    let dir =
+        |i: usize| (path[(i + 1).min(path.len() - 1)] - path[i.saturating_sub(1)]).normalize();
     let flange = |m: &mut Mesh, at: DVec3, d: DVec3| {
         if at.y < 0.22 {
             // (under the floor: a two-bolt flange lying flat)
             let x = DVec3::Y.cross(d).normalize();
-            let mut k = box_stations(&[(at - d * 0.005, x, d.cross(x), 0.080, 0.046), (at + d * 0.005, x, d.cross(x), 0.080, 0.046)]);
+            let mut k = box_stations(&[
+                (at - d * 0.005, x, d.cross(x), 0.080, 0.046),
+                (at + d * 0.005, x, d.cross(x), 0.080, 0.046),
+            ]);
             k.set_mat(steel);
             m.add(&k);
         } else {
@@ -1220,7 +1764,15 @@ pub(crate) fn exhaust_mesh(path: &[DVec3], hang: &[usize]) -> Mesh {
         let d = (b - a).normalize();
         let x = DVec3::Y.cross(d).normalize();
         let y = d.cross(x);
-        let st: Vec<(DVec3, DVec3, DVec3, f64, f64)> = [(0.0, 0.050, 0.042), (cone, w, h), ((b - a).length() - cone, w, h), ((b - a).length(), 0.050, 0.042)].iter().map(|&(s, ww, hh)| (a + d * s, x, y, ww, hh)).collect();
+        let st: Vec<(DVec3, DVec3, DVec3, f64, f64)> = [
+            (0.0, 0.050, 0.042),
+            (cone, w, h),
+            ((b - a).length() - cone, w, h),
+            ((b - a).length(), 0.050, 0.042),
+        ]
+        .iter()
+        .map(|&(s, ww, hh)| (a + d * s, x, y, ww, hh))
+        .collect();
         let mut k = box_stations(&st);
         k.set_mat(steel);
         m.add(&k);
@@ -1228,26 +1780,46 @@ pub(crate) fn exhaust_mesh(path: &[DVec3], hang: &[usize]) -> Mesh {
         flange(m, b + d * 0.012, d);
     };
     // catalytic converter between nodes 3 and 4
-    let (a, b) = (path[2] + (path[3] - path[2]) * 0.10, path[2] + (path[3] - path[2]) * 0.92);
+    let (a, b) = (
+        path[2] + (path[3] - path[2]) * 0.10,
+        path[2] + (path[3] - path[2]) * 0.92,
+    );
     body(&mut m, a, b, 0.130, 0.043, 0.035);
     // resonator between nodes 5 and 7
-    let (a, b) = (path[4] + (path[5] - path[4]) * 0.55, path[5] + (path[6] - path[5]) * 0.70);
+    let (a, b) = (
+        path[4] + (path[5] - path[4]) * 0.55,
+        path[5] + (path[6] - path[5]) * 0.70,
+    );
     body(&mut m, a, b, 0.150, 0.043, 0.050);
     // rear silencer between nodes 11 and 12
-    let (a, b) = (path[10] + (path[11] - path[10]) * 0.12, path[10] + (path[11] - path[10]) * 0.92);
+    let (a, b) = (
+        path[10] + (path[11] - path[10]) * 0.12,
+        path[10] + (path[11] - path[10]) * 0.92,
+    );
     body(&mut m, a, b, 0.190, 0.095, 0.045);
     // the joint ahead of the axle, and the tailpipe's tip
     flange(&mut m, path[7], dir(7));
     let n = path.len() - 1;
     let dt = (path[n] - path[n - 1]).normalize();
-    m.add(&drum(path[n] - dt * 0.070, path[n] + dt * 0.012, 0.027, 14, Mat::Chrome));
+    m.add(&drum(
+        path[n] - dt * 0.070,
+        path[n] + dt * 0.012,
+        0.027,
+        14,
+        Mat::Chrome,
+    ));
     // hangers: a rod off the pipe into a rubber block (sideways under the
     // floor, where there is no room above)
     for &i in hang {
         let p = path[i];
         let side = if p.y < 0.22 { DVec3::X } else { DVec3::Y };
         m.add(&cyl(p + side * 0.018, p + side * 0.062, 0.005));
-        m.add(&box_(p + side * 0.066, DVec3::new(0.012, 0.012, 0.018) + side * 0.004, Mat::Rubber, None));
+        m.add(&box_(
+            p + side * 0.066,
+            DVec3::new(0.012, 0.012, 0.018) + side * 0.004,
+            Mat::Rubber,
+            None,
+        ));
     }
     m
 }
@@ -1279,7 +1851,13 @@ fn controls(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let (wall_in, wall_out) = (on(z_fw - 0.050), on(z_fw + 0.045));
         p.mesh.add(&drum(top, wall_in, 0.022, 12, Mat::TrimBlack));
         p.mesh.add(&cyl(wall_in, wall_out, 0.010));
-        p.mesh.add(&drum(wall_in - d * 0.004, wall_in + d * 0.010, 0.026, 12, steel));
+        p.mesh.add(&drum(
+            wall_in - d * 0.004,
+            wall_in + d * 0.010,
+            0.026,
+            12,
+            steel,
+        ));
         // the pinion on the rack, left of the engine; the shaft drops to a
         // second joint and runs in under the engine's mount ear
         let rack = f.p(0.262, 0.338, g.axle_f + 0.135);
@@ -1289,7 +1867,8 @@ fn controls(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let run = [wall_out, mid, pin];
         for w in run.windows(2) {
             let dj = (w[1] - w[0]).normalize();
-            p.mesh.add(&cyl(w[0] + dj * 0.012, w[1] - dj * 0.012, 0.010));
+            p.mesh
+                .add(&cyl(w[0] + dj * 0.012, w[1] - dj * 0.012, 0.010));
         }
         for j in [wall_out, mid] {
             p.mesh.add(&box_(j, DVec3::splat(0.015), steel, None));
@@ -1297,12 +1876,40 @@ fn controls(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let nu = p.node("u", top + d * 0.03, 2.2);
         let nf = p.node("f", on(z_fw), 1.6);
         let np = p.node("p", pin, 1.2);
-        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 60.0, 4e3, INF), deform_group: None });
-        let dash: Vec<String> = ["das_ml", "das_tl", "das_c", "das_bl"].iter().map(|n| n.to_string()).collect();
-        p.hold_from("steering_column_dash", vec![nu], &dash, 3, vals(0.0, 60.0, 4e3, 8e3));
-        p.hold_from("steering_column_firewall", vec![nf], &shn(&["b1_ol".into(), "b1_il".into(), "c1_1tl".into()]), 3, vals(0.0, 60.0, 3e3, 6e3));
-        let gear: Vec<String> = ["ster_l", "subf_kl", "subf_fl"].iter().map(|n| n.to_string()).collect();
-        p.hold_from("steering_column_rack", vec![np], &gear, 3, vals(0.0, 60.0, 5e3, 10e3));
+        p.internal.push(Internal {
+            pairs: p.complete(),
+            v: vals(0.0, 60.0, 4e3, INF),
+            deform_group: None,
+        });
+        let dash: Vec<String> = ["das_ml", "das_tl", "das_c", "das_bl"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        p.hold_from(
+            "steering_column_dash",
+            vec![nu],
+            &dash,
+            3,
+            vals(0.0, 60.0, 4e3, 8e3),
+        );
+        p.hold_from(
+            "steering_column_firewall",
+            vec![nf],
+            &shn(&["b1_ol".into(), "b1_il".into(), "c1_1tl".into()]),
+            3,
+            vals(0.0, 60.0, 3e3, 6e3),
+        );
+        let gear: Vec<String> = ["ster_l", "subf_kl", "subf_fl"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        p.hold_from(
+            "steering_column_rack",
+            vec![np],
+            &gear,
+            3,
+            vals(0.0, 60.0, 5e3, 10e3),
+        );
         out.push(p);
     }
     // ---- pedal box on the firewall: bracket, pivot shaft, the brake pedal
@@ -1311,19 +1918,69 @@ fn controls(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let mut p = MechPart::new("pedal_box", "controls");
         let (yb, zb) = (f.y(FIREWALL_HOLES[1].1), z_fw - 0.045);
         let (xb, xa) = (f.x(0.33), f.x(0.215));
-        p.mesh.add(&span((xa - 0.025, x + 0.020), (yb - 0.022, yb + 0.030), (zb + 0.012, z_fw - 0.008), steel));
-        p.mesh.add(&drum(DVec3::new(xa - 0.020, yb, zb), DVec3::new(x + 0.015, yb, zb), 0.008, 8, steel));
+        p.mesh.add(&span(
+            (xa - 0.025, x + 0.020),
+            (yb - 0.022, yb + 0.030),
+            (zb + 0.012, z_fw - 0.008),
+            steel,
+        ));
+        p.mesh.add(&drum(
+            DVec3::new(xa - 0.020, yb, zb),
+            DVec3::new(x + 0.015, yb, zb),
+            0.008,
+            8,
+            steel,
+        ));
         // brake: the arm down to its pad, a lever to the push rod
         let pad = DVec3::new(xb, f.y(0.40), zb - 0.105);
-        p.mesh.add(&strap(DVec3::new(xb, yb, zb), pad, DVec3::X, 0.016, 0.008, steel));
-        p.mesh.add(&box_(pad, DVec3::new(0.032, 0.026, 0.006), Mat::Rubber, Some(crate::mesh::rot_x(-0.38))));
-        p.mesh.add(&cyl(DVec3::new(x, yb, zb + 0.004), DVec3::new(x, yb, z_fw + 0.006), 0.006));
+        p.mesh.add(&strap(
+            DVec3::new(xb, yb, zb),
+            pad,
+            DVec3::X,
+            0.016,
+            0.008,
+            steel,
+        ));
+        p.mesh.add(&box_(
+            pad,
+            DVec3::new(0.032, 0.026, 0.006),
+            Mat::Rubber,
+            Some(crate::mesh::rot_x(-0.38)),
+        ));
+        p.mesh.add(&cyl(
+            DVec3::new(x, yb, zb + 0.004),
+            DVec3::new(x, yb, z_fw + 0.006),
+            0.006,
+        ));
         // accelerator: a slim arm and a long pad
         let pad_a = DVec3::new(xa, f.y(0.37), zb - 0.060);
-        p.mesh.add(&strap(DVec3::new(xa, yb - 0.004, zb), pad_a, DVec3::X, 0.010, 0.006, steel));
-        p.mesh.add(&box_(pad_a, DVec3::new(0.020, 0.050, 0.005), Mat::Rubber, Some(crate::mesh::rot_x(-0.30))));
-        p.tetra(DVec3::new(0.5 * (xa + x), 0.5 * (yb + pad.y), zb - 0.04), DVec3::new(0.5 * (x - xa), 0.5 * (yb - pad.y), 0.045), 3.2, vals(0.0, 40.0, 2e3, INF));
-        p.hold("pedal_box", &["b1_ol", "b1_il", "c1_1tl", "b2_ol", "c2_1l"], 6, BeamKind::Normal, vals(0.0, 60.0, 2500.0, 5000.0));
+        p.mesh.add(&strap(
+            DVec3::new(xa, yb - 0.004, zb),
+            pad_a,
+            DVec3::X,
+            0.010,
+            0.006,
+            steel,
+        ));
+        p.mesh.add(&box_(
+            pad_a,
+            DVec3::new(0.020, 0.050, 0.005),
+            Mat::Rubber,
+            Some(crate::mesh::rot_x(-0.30)),
+        ));
+        p.tetra(
+            DVec3::new(0.5 * (xa + x), 0.5 * (yb + pad.y), zb - 0.04),
+            DVec3::new(0.5 * (x - xa), 0.5 * (yb - pad.y), 0.045),
+            3.2,
+            vals(0.0, 40.0, 2e3, INF),
+        );
+        p.hold(
+            "pedal_box",
+            &["b1_ol", "b1_il", "c1_1tl", "b2_ol", "c2_1l"],
+            6,
+            BeamKind::Normal,
+            vals(0.0, 60.0, 2500.0, 5000.0),
+        );
         out.push(p);
     }
 }
@@ -1332,11 +1989,24 @@ fn controls(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
 
 /// A formed sheet as a closed solid: `nu` × `nv` points `p(i, j)` on one
 /// face, the other face `off(i, j)` away, the cells where `keep(i, j)`.
-fn sheet_solid(nu: usize, nv: usize, p: impl Fn(usize, usize) -> DVec3, off: impl Fn(usize, usize) -> DVec3, keep: impl Fn(usize, usize) -> bool, mat: Mat) -> Mesh {
+fn sheet_solid(
+    nu: usize,
+    nv: usize,
+    p: impl Fn(usize, usize) -> DVec3,
+    off: impl Fn(usize, usize) -> DVec3,
+    keep: impl Fn(usize, usize) -> bool,
+    mat: Mat,
+) -> Mesh {
     let mut ids: Vec<Option<(u32, u32)>> = vec![None; nu * nv];
     let mut v: Vec<DVec3> = Vec::new();
     let mut q: Vec<[u32; 4]> = Vec::new();
-    let kept = |i: isize, j: isize| i >= 0 && j >= 0 && (i as usize) < nu - 1 && (j as usize) < nv - 1 && keep(i as usize, j as usize);
+    let kept = |i: isize, j: isize| {
+        i >= 0
+            && j >= 0
+            && (i as usize) < nu - 1
+            && (j as usize) < nv - 1
+            && keep(i as usize, j as usize)
+    };
     let mut id = |i: usize, j: usize, v: &mut Vec<DVec3>| {
         *ids[i * nv + j].get_or_insert_with(|| {
             let a = p(i, j);
@@ -1350,7 +2020,12 @@ fn sheet_solid(nu: usize, nv: usize, p: impl Fn(usize, usize) -> DVec3, off: imp
             if !kept(i as isize, j as isize) {
                 continue;
             }
-            let c = [id(i, j, &mut v), id(i + 1, j, &mut v), id(i + 1, j + 1, &mut v), id(i, j + 1, &mut v)];
+            let c = [
+                id(i, j, &mut v),
+                id(i + 1, j, &mut v),
+                id(i + 1, j + 1, &mut v),
+                id(i, j + 1, &mut v),
+            ];
             q.push([c[0].0, c[1].0, c[2].0, c[3].0]);
             q.push([c[3].1, c[2].1, c[1].1, c[0].1]);
             let nb = [(0, -1), (1, 0), (0, 1), (-1, 0)];
@@ -1375,16 +2050,53 @@ fn lin(a: f64, b: f64, i: usize, n: usize) -> f64 {
 pub(crate) fn dash_features(f: &Frame, yp: f64, zr: f64) -> Mesh {
     let mut m = Mesh::new();
     let xd = f.x(0.38);
-    m.add(&box_(DVec3::new(xd, yp + 0.060, zr - 0.003), DVec3::new(0.135, 0.040, 0.004), Mat::TrimBlack, None));
+    m.add(&box_(
+        DVec3::new(xd, yp + 0.060, zr - 0.003),
+        DVec3::new(0.135, 0.040, 0.004),
+        Mat::TrimBlack,
+        None,
+    ));
     for dx in [-0.062, 0.062] {
-        m.add(&lathe_at(&[(0.0, 0.0), (0.046, 0.0), (0.050, 0.006), (0.044, 0.008), (0.0, 0.005)], 20, Mat::Chrome, -DVec3::Z, DVec3::new(xd + dx, yp + 0.060, zr - 0.007)));
+        m.add(&lathe_at(
+            &[
+                (0.0, 0.0),
+                (0.046, 0.0),
+                (0.050, 0.006),
+                (0.044, 0.008),
+                (0.0, 0.005),
+            ],
+            20,
+            Mat::Chrome,
+            -DVec3::Z,
+            DVec3::new(xd + dx, yp + 0.060, zr - 0.007),
+        ));
     }
-    m.add(&box_(DVec3::new(0.0, yp + 0.040, zr - 0.004), DVec3::new(0.105, 0.060, 0.005), Mat::TrimBlack, None));
+    m.add(&box_(
+        DVec3::new(0.0, yp + 0.040, zr - 0.004),
+        DVec3::new(0.105, 0.060, 0.005),
+        Mat::TrimBlack,
+        None,
+    ));
     for dx in [-0.165, 0.165] {
-        m.add(&box_(DVec3::new(dx, yp + 0.060, zr - 0.003), DVec3::new(0.035, 0.022, 0.004), Mat::TrimBlack, None));
+        m.add(&box_(
+            DVec3::new(dx, yp + 0.060, zr - 0.003),
+            DVec3::new(0.035, 0.022, 0.004),
+            Mat::TrimBlack,
+            None,
+        ));
     }
-    m.add(&box_(DVec3::new(-xd, yp - 0.020, zr - 0.003), DVec3::new(0.170, 0.055, 0.004), Mat::InteriorPlastic, None));
-    m.add(&box_(DVec3::new(-xd, yp + 0.018, zr - 0.009), DVec3::new(0.040, 0.006, 0.003), Mat::Chrome, None));
+    m.add(&box_(
+        DVec3::new(-xd, yp - 0.020, zr - 0.003),
+        DVec3::new(0.170, 0.055, 0.004),
+        Mat::InteriorPlastic,
+        None,
+    ));
+    m.add(&box_(
+        DVec3::new(-xd, yp + 0.018, zr - 0.009),
+        DVec3::new(0.040, 0.006, 0.003),
+        Mat::Chrome,
+        None,
+    ));
     m
 }
 
@@ -1400,7 +2112,11 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
     // members and the console
     {
         let mut p = MechPart::new("carpet", "interior");
-        let xs = (1..=5).map(|k| sh(st, &format!("sh_c1_{k}ol")).x).fold(f64::INFINITY, f64::min) - 0.0325 - 0.016;
+        let xs = (1..=5)
+            .map(|k| sh(st, &format!("sh_c1_{k}ol")).x)
+            .fold(f64::INFINITY, f64::min)
+            - 0.0325
+            - 0.016;
         let (z0, z1) = (z_fw - 0.016, rows[4].z + 0.014);
         let toe = (f.y(0.42) - f.y(0.222)) / (z_fw - rows[0].z);
         let xl = f.x(0.43);
@@ -1420,7 +2136,10 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let (nu, nv) = (61, 66);
         let (dx, dz) = (2.0 * xs / (nu - 1) as f64, (z1 - z0) / (nv - 1) as f64);
         let dza = dz.abs();
-        let (xa, za) = (|i: usize| -xs + dx * i as f64, |j: usize| z0 + dz * j as f64);
+        let (xa, za) = (
+            |i: usize| -xs + dx * i as f64,
+            |j: usize| z0 + dz * j as f64,
+        );
         // (the highest of a point's neighbourhood: the moulding bridges
         // every step instead of cutting its corner)
         let hd = |i: usize, j: usize| {
@@ -1436,20 +2155,53 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let bench_front = sh(st, "sh_e3_1").z + 0.185 + 0.20;
         let keep = |i: usize, j: usize| {
             let (x, z) = (xa(i) + 0.5 * dx, za(j) + 0.5 * dz);
-            let member = x.abs() > 0.110 && ((z - rows[2].z).abs() < 0.062 + dza || (z - rows[3].z).abs() < 0.062 + dza);
-            let console = x.abs() < 0.100 + dx && z < c2 - 0.10 + 0.02 + dza && z > c4 + 0.05 - 0.02 - dza;
+            let member = x.abs() > 0.110
+                && ((z - rows[2].z).abs() < 0.062 + dza || (z - rows[3].z).abs() < 0.062 + dza);
+            let console =
+                x.abs() < 0.100 + dx && z < c2 - 0.10 + 0.02 + dza && z > c4 + 0.05 - 0.02 - dza;
             // (the rear bench's cushion sits 4 mm over the tunnel)
             let bench = x.abs() < 0.125 + 2.0 * dx && z < bench_front + 0.02 + dza;
             !member && !console && !bench
         };
-        p.mesh = sheet_solid(nu, nv, |i, j| DVec3::new(xa(i), hd(i, j) + 0.006, za(j)), |_, _| DVec3::Y * 0.006, keep, Mat::InteriorFabric);
-        for (k, z) in [0.5 * (rows[0].z + rows[1].z), 0.5 * (rows[2].z + rows[3].z), 0.5 * (rows[3].z + rows[4].z)].into_iter().enumerate() {
+        p.mesh = sheet_solid(
+            nu,
+            nv,
+            |i, j| DVec3::new(xa(i), hd(i, j) + 0.006, za(j)),
+            |_, _| DVec3::Y * 0.006,
+            keep,
+            Mat::InteriorFabric,
+        );
+        for (k, z) in [
+            0.5 * (rows[0].z + rows[1].z),
+            0.5 * (rows[2].z + rows[3].z),
+            0.5 * (rows[3].z + rows[4].z),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             for (s, sg) in [("l", 1.0), ("r", -1.0)] {
-                p.node(&format!("{}{s}", k + 1), DVec3::new(sg * 0.40, yp + 0.009, z), 1.5);
+                p.node(
+                    &format!("{}{s}", k + 1),
+                    DVec3::new(sg * 0.40, yp + 0.009, z),
+                    1.5,
+                );
             }
         }
-        p.internal.push(Internal { pairs: p.complete(), v: clip(300.0, INF), deform_group: None });
-        p.hold("carpet", &["c1_1tl", "c1_1tr", "c1_2tl", "c1_2tr", "c1_3tl", "c1_3tr", "c1_4tl", "c1_4tr", "c1_5tl", "c1_5tr"], 12, BeamKind::Normal, clip(300.0, 600.0));
+        p.internal.push(Internal {
+            pairs: p.complete(),
+            v: clip(300.0, INF),
+            deform_group: None,
+        });
+        p.hold(
+            "carpet",
+            &[
+                "c1_1tl", "c1_1tr", "c1_2tl", "c1_2tr", "c1_3tl", "c1_3tr", "c1_4tl", "c1_4tr",
+                "c1_5tl", "c1_5tr",
+            ],
+            12,
+            BeamKind::Normal,
+            clip(300.0, 600.0),
+        );
         out.push(p);
     }
     // ---- pillar trims: A and C under the shell's own section, B on the
@@ -1458,29 +2210,93 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
     for (s, sg) in [("L", 1.0), ("R", -1.0)] {
         let sl = s.to_lowercase();
         let vv = |v: f64| if sg > 0.0 { v } else { tube.vm - v };
-        for (nm, za, zc, to) in [("a", 0.74, -0.03, [format!("d1_m{sl}"), format!("d1_t{sl}"), format!("b2_o{sl}")]), ("c", -0.99, -1.42, [format!("d3_t{sl}"), format!("d3_b{sl}"), format!("e5_1u{sl}")])] {
+        for (nm, za, zc, to) in [
+            (
+                "a",
+                0.74,
+                -0.03,
+                [
+                    format!("d1_m{sl}"),
+                    format!("d1_t{sl}"),
+                    format!("b2_o{sl}"),
+                ],
+            ),
+            (
+                "c",
+                -0.99,
+                -1.42,
+                [
+                    format!("d3_t{sl}"),
+                    format!("d3_b{sl}"),
+                    format!("e5_1u{sl}"),
+                ],
+            ),
+        ] {
             let mut p = MechPart::new(&format!("pillar_trim_{nm}_{s}"), "interior");
             let (nu, nv) = (13, 4);
-            let at = |i: usize, j: usize| tube.eval_n(f.z(lin(za, zc, i, nu)), vv(lin(7.12, 7.88, j, nv)));
-            p.mesh = sheet_solid(nu, nv, |i, j| at(i, j).0 - at(i, j).1 * 0.036, |i, j| -at(i, j).1 * 0.005, |_, _| true, Mat::InteriorPlastic);
+            let at = |i: usize, j: usize| {
+                tube.eval_n(f.z(lin(za, zc, i, nu)), vv(lin(7.12, 7.88, j, nv)))
+            };
+            p.mesh = sheet_solid(
+                nu,
+                nv,
+                |i, j| at(i, j).0 - at(i, j).1 * 0.036,
+                |i, j| -at(i, j).1 * 0.005,
+                |_, _| true,
+                Mat::InteriorPlastic,
+            );
             for (t, i) in [("t", 1), ("m", 6), ("b", 11)] {
                 p.node(t, at(i, 1).0 - at(i, 1).1 * 0.038, 0.2);
             }
-            p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
+            p.internal.push(Internal {
+                pairs: p.complete(),
+                v: clip(200.0, INF),
+                deform_group: None,
+            });
             let to: Vec<&str> = to.iter().map(|x| x.as_str()).collect();
-            p.hold(&*format!("pillar_trim_{nm}_{sl}"), &to, 5, BeamKind::Normal, clip(200.0, 400.0));
+            p.hold(
+                &*format!("pillar_trim_{nm}_{sl}"),
+                &to,
+                5,
+                BeamKind::Normal,
+                clip(200.0, 400.0),
+            );
             out.push(p);
         }
         {
             let mut p = MechPart::new(&format!("pillar_trim_b_{s}"), "interior");
             let (nu, nv) = (17, 3);
-            let at = |i: usize, j: usize| tube.eval(zb + lin(-0.033, 0.033, j, nv), vv(lin(2.3, 6.8, i, nu))) - DVec3::X * (sg * 0.138);
-            p.mesh = sheet_solid(nu, nv, at, |_, _| -DVec3::X * (sg * 0.005), |_, _| true, Mat::InteriorPlastic);
+            let at = |i: usize, j: usize| {
+                tube.eval(zb + lin(-0.033, 0.033, j, nv), vv(lin(2.3, 6.8, i, nu)))
+                    - DVec3::X * (sg * 0.138)
+            };
+            p.mesh = sheet_solid(
+                nu,
+                nv,
+                at,
+                |_, _| -DVec3::X * (sg * 0.005),
+                |_, _| true,
+                Mat::InteriorPlastic,
+            );
             for (t, i) in [("t", 14), ("m", 8), ("b", 2)] {
                 p.node(t, at(i, 1) - DVec3::X * (sg * 0.002), 0.2);
             }
-            p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
-            p.hold(&*format!("pillar_trim_b_{sl}"), &[&*format!("d2_b{sl}"), &*format!("d2_t{sl}"), &*format!("c2_3{sl}")], 5, BeamKind::Normal, clip(200.0, 400.0));
+            p.internal.push(Internal {
+                pairs: p.complete(),
+                v: clip(200.0, INF),
+                deform_group: None,
+            });
+            p.hold(
+                &*format!("pillar_trim_b_{sl}"),
+                &[
+                    &*format!("d2_b{sl}"),
+                    &*format!("d2_t{sl}"),
+                    &*format!("c2_3{sl}"),
+                ],
+                5,
+                BeamKind::Normal,
+                clip(200.0, 400.0),
+            );
             out.push(p);
         }
         // ---- sun visor under the header
@@ -1488,15 +2304,35 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
             let mut p = MechPart::new(&format!("sun_visor_{s}"), "interior");
             let (nu, nv) = (9, 5);
             let at = |i: usize, j: usize| {
-                let (x, z) = (sg * f.x(lin(0.20, 0.54, i, nu)), f.z(lin(-0.075, -0.19, j, nv)));
+                let (x, z) = (
+                    sg * f.x(lin(0.20, 0.54, i, nu)),
+                    f.z(lin(-0.075, -0.19, j, nv)),
+                );
                 DVec3::new(x, top_y(g, z, x) - 0.074, z)
             };
-            p.mesh = sheet_solid(nu, nv, at, |_, _| DVec3::Y * 0.014, |_, _| true, Mat::InteriorFabric);
+            p.mesh = sheet_solid(
+                nu,
+                nv,
+                at,
+                |_, _| DVec3::Y * 0.014,
+                |_, _| true,
+                Mat::InteriorFabric,
+            );
             for (t, i, j) in [("o", 7, 0), ("i", 1, 0), ("r", 4, 4)] {
                 p.node(t, at(i, j) + DVec3::Y * 0.007, 0.35 / 3.0);
             }
-            p.internal.push(Internal { pairs: p.complete(), v: clip(100.0, INF), deform_group: None });
-            p.hold(&*format!("sun_visor_{sl}"), &["d4_h", &*format!("d1_t{sl}"), &*format!("d2_t{sl}")], 4, BeamKind::Normal, clip(100.0, 250.0));
+            p.internal.push(Internal {
+                pairs: p.complete(),
+                v: clip(100.0, INF),
+                deform_group: None,
+            });
+            p.hold(
+                &*format!("sun_visor_{sl}"),
+                &["d4_h", &*format!("d1_t{sl}"), &*format!("d2_t{sl}")],
+                4,
+                BeamKind::Normal,
+                clip(100.0, 250.0),
+            );
             out.push(p);
         }
         // ---- front seat belt: the reel at the B-pillar's foot, the webbing
@@ -1504,26 +2340,79 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         {
             let mut p = MechPart::new(&format!("seat_belt_F{s}"), "interior");
             let reel = inside(g, zb, f.y(0.42), sg, 0.178);
-            p.mesh.add(&box_(reel, DVec3::new(0.020, 0.040, 0.030), Mat::TrimBlack, None));
-            let web: Vec<DVec3> = (0..14).map(|k| inside(g, zb, f.y(0.47 + 0.03 * k as f64), sg, 0.1490)).collect();
+            p.mesh.add(&box_(
+                reel,
+                DVec3::new(0.020, 0.040, 0.030),
+                Mat::TrimBlack,
+                None,
+            ));
+            let web: Vec<DVec3> = (0..14)
+                .map(|k| inside(g, zb, f.y(0.47 + 0.03 * k as f64), sg, 0.1490))
+                .collect();
             let mut w = crate::structure::box_along(&web, DVec3::X, 0.046, 0.002);
             w.set_mat(Mat::InteriorFabric);
             p.mesh.add(&w);
             let ring = inside(g, zb, f.y(0.875), sg, 0.157);
-            p.mesh.add(&box_(ring, DVec3::new(0.006, 0.018, 0.026), Mat::TrimBlack, None));
+            p.mesh.add(&box_(
+                ring,
+                DVec3::new(0.006, 0.018, 0.026),
+                Mat::TrimBlack,
+                None,
+            ));
             let zs = 0.5 * (rows[2].z + rows[3].z) - 0.18;
             let buckle = DVec3::new(sg * 0.110, yp + 0.255, zs);
-            p.mesh.add(&box_(buckle, DVec3::new(0.011, 0.030, 0.018), Mat::TrimBlack, None));
-            p.mesh.add(&box_(buckle + DVec3::Y * 0.033, DVec3::new(0.008, 0.004, 0.012), Mat::Paint, None));
-            p.mesh.add(&box_(buckle - DVec3::Y * 0.050, DVec3::new(0.003, 0.021, 0.010), Mat::MetalBare, None));
+            p.mesh.add(&box_(
+                buckle,
+                DVec3::new(0.011, 0.030, 0.018),
+                Mat::TrimBlack,
+                None,
+            ));
+            p.mesh.add(&box_(
+                buckle + DVec3::Y * 0.033,
+                DVec3::new(0.008, 0.004, 0.012),
+                Mat::Paint,
+                None,
+            ));
+            p.mesh.add(&box_(
+                buckle - DVec3::Y * 0.050,
+                DVec3::new(0.003, 0.021, 0.010),
+                Mat::MetalBare,
+                None,
+            ));
             let nr = p.node("r", reel, 1.0);
             let ng = p.node("g", ring, 0.2);
             let nb = p.node("b", buckle, 0.3);
-            p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 30.0, 4e3, INF), deform_group: None });
+            p.internal.push(Internal {
+                pairs: p.complete(),
+                v: vals(0.0, 30.0, 4e3, INF),
+                deform_group: None,
+            });
             let anchor = vals(0.0, 60.0, 8e3, 15e3);
-            p.hold_from(&format!("seat_belt_f{sl}_reel"), vec![nr], &shn(&[format!("c2_3{sl}"), format!("c1_3o{sl}"), format!("d2_b{sl}")]), 3, anchor);
-            p.hold_from(&format!("seat_belt_f{sl}_ring"), vec![ng], &shn(&[format!("d2_b{sl}"), format!("d2_t{sl}")]), 2, anchor);
-            p.hold_from(&format!("seat_belt_f{sl}_buckle"), vec![nb], &shn(&["c3_3".into(), "c3_4".into(), format!("c1_3t{sl}")]), 3, anchor);
+            p.hold_from(
+                &format!("seat_belt_f{sl}_reel"),
+                vec![nr],
+                &shn(&[
+                    format!("c2_3{sl}"),
+                    format!("c1_3o{sl}"),
+                    format!("d2_b{sl}"),
+                ]),
+                3,
+                anchor,
+            );
+            p.hold_from(
+                &format!("seat_belt_f{sl}_ring"),
+                vec![ng],
+                &shn(&[format!("d2_b{sl}"), format!("d2_t{sl}")]),
+                2,
+                anchor,
+            );
+            p.hold_from(
+                &format!("seat_belt_f{sl}_buckle"),
+                vec![nb],
+                &shn(&["c3_3".into(), "c3_4".into(), format!("c1_3t{sl}")]),
+                3,
+                anchor,
+            );
             out.push(p);
         }
         // ---- boot side trim: a board inboard of the wheel well and tower
@@ -1534,12 +2423,35 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
             let (ya, yc) = (sh(st, "sh_e3_2").y + 0.020, sh(st, "sh_e6_ol").y - 0.060);
             let (nu, nv) = (10, 6);
             let at = |i: usize, j: usize| DVec3::new(x, lin(ya, yc, j, nv), lin(za, zc, i, nu));
-            p.mesh = sheet_solid(nu, nv, at, |_, _| -DVec3::X * (sg * 0.006), |_, _| true, Mat::InteriorFabric);
+            p.mesh = sheet_solid(
+                nu,
+                nv,
+                at,
+                |_, _| -DVec3::X * (sg * 0.006),
+                |_, _| true,
+                Mat::InteriorFabric,
+            );
             for (t, i, j) in [("f", 1, 1), ("r", 8, 1), ("t", 4, 4)] {
                 p.node(t, at(i, j), 1.4 / 3.0);
             }
-            p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
-            p.hold(&*format!("boot_trim_{sl}"), &[&*format!("e2_{sl}"), &*format!("e1_2u{sl}"), &*format!("e1_3u{sl}"), &*format!("e5_3u{sl}"), &*format!("e5_4u{sl}")], 6, BeamKind::Normal, clip(200.0, 500.0));
+            p.internal.push(Internal {
+                pairs: p.complete(),
+                v: clip(200.0, INF),
+                deform_group: None,
+            });
+            p.hold(
+                &*format!("boot_trim_{sl}"),
+                &[
+                    &*format!("e2_{sl}"),
+                    &*format!("e1_2u{sl}"),
+                    &*format!("e1_3u{sl}"),
+                    &*format!("e5_3u{sl}"),
+                    &*format!("e5_4u{sl}"),
+                ],
+                6,
+                BeamKind::Normal,
+                clip(200.0, 500.0),
+            );
             out.push(p);
         }
     }
@@ -1548,14 +2460,43 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let mut p = MechPart::new("interior_mirror", "interior");
         let z = f.z(-0.02);
         let c = DVec3::new(0.0, tube.eval(z, 9.0).y - 0.085, z - 0.010);
-        p.mesh.add(&rbox(c, DVec3::new(0.110, 0.030, 0.010), 0.008, 2, Mat::TrimBlack));
-        p.mesh.add(&box_(c - DVec3::Z * 0.0115, DVec3::new(0.100, 0.024, 0.001), Mat::Chrome, None));
-        p.mesh.add(&cyl(c + DVec3::new(0.0, 0.020, 0.008), c + DVec3::new(0.0, 0.052, 0.022), 0.006));
+        p.mesh.add(&rbox(
+            c,
+            DVec3::new(0.110, 0.030, 0.010),
+            0.008,
+            2,
+            Mat::TrimBlack,
+        ));
+        p.mesh.add(&box_(
+            c - DVec3::Z * 0.0115,
+            DVec3::new(0.100, 0.024, 0.001),
+            Mat::Chrome,
+            None,
+        ));
+        p.mesh.add(&cyl(
+            c + DVec3::new(0.0, 0.020, 0.008),
+            c + DVec3::new(0.0, 0.052, 0.022),
+            0.006,
+        ));
         for (t, x) in [("l", 0.09), ("r", -0.09), ("s", 0.0)] {
-            p.node(t, c + DVec3::new(x, if x == 0.0 { 0.045 } else { 0.0 }, 0.0), 0.1);
+            p.node(
+                t,
+                c + DVec3::new(x, if x == 0.0 { 0.045 } else { 0.0 }, 0.0),
+                0.1,
+            );
         }
-        p.internal.push(Internal { pairs: p.complete(), v: clip(100.0, INF), deform_group: None });
-        p.hold("interior_mirror", &["d4_h", "d1_tl", "d1_tr"], 3, BeamKind::Normal, clip(100.0, 250.0));
+        p.internal.push(Internal {
+            pairs: p.complete(),
+            v: clip(100.0, INF),
+            deform_group: None,
+        });
+        p.hold(
+            "interior_mirror",
+            &["d4_h", "d1_tl", "d1_tr"],
+            3,
+            BeamKind::Normal,
+            clip(100.0, 250.0),
+        );
         out.push(p);
     }
     // ---- parcel shelf trim with its two speaker grilles
@@ -1564,16 +2505,40 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let mut p = MechPart::new("parcel_shelf_trim", "interior");
         let (hx, za, zc) = (e6.x - 0.010, e7.z - 0.014, e6r.z + 0.010);
         let (nu, nv) = (21, 6);
-        let at = |i: usize, j: usize| DVec3::new(lin(-hx, hx, i, nu), e6.y + 0.008, lin(za, zc, j, nv));
-        p.mesh = sheet_solid(nu, nv, at, |_, _| DVec3::Y * 0.008, |_, _| true, Mat::InteriorFabric);
+        let at =
+            |i: usize, j: usize| DVec3::new(lin(-hx, hx, i, nu), e6.y + 0.008, lin(za, zc, j, nv));
+        p.mesh = sheet_solid(
+            nu,
+            nv,
+            at,
+            |_, _| DVec3::Y * 0.008,
+            |_, _| true,
+            Mat::InteriorFabric,
+        );
         for sg in [1.0, -1.0] {
-            p.mesh.add(&lathe_at(&[(0.0, 0.0), (0.068, 0.0), (0.064, 0.005), (0.0, 0.007)], 18, Mat::TrimBlack, DVec3::Y, DVec3::new(sg * 0.40, e6.y + 0.0165, 0.5 * (za + zc))));
+            p.mesh.add(&lathe_at(
+                &[(0.0, 0.0), (0.068, 0.0), (0.064, 0.005), (0.0, 0.007)],
+                18,
+                Mat::TrimBlack,
+                DVec3::Y,
+                DVec3::new(sg * 0.40, e6.y + 0.0165, 0.5 * (za + zc)),
+            ));
         }
         for (t, i, j) in [("fl", 19, 0), ("fr", 1, 0), ("rl", 19, 5), ("rr", 1, 5)] {
             p.node(t, at(i, j) + DVec3::Y * 0.004, 0.5);
         }
-        p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
-        p.hold("parcel_shelf_trim", &["e6_ol", "e6_or", "e6_rl", "e6_rr", "e7_l", "e7_r"], 8, BeamKind::Normal, clip(200.0, 500.0));
+        p.internal.push(Internal {
+            pairs: p.complete(),
+            v: clip(200.0, INF),
+            deform_group: None,
+        });
+        p.hold(
+            "parcel_shelf_trim",
+            &["e6_ol", "e6_or", "e6_rl", "e6_rr", "e7_l", "e7_r"],
+            8,
+            BeamKind::Normal,
+            clip(200.0, 500.0),
+        );
         out.push(p);
     }
     // ---- boot floor lining
@@ -1582,13 +2547,31 @@ fn interior(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         let e3 = sh(st, "sh_e3_2");
         let (hx, za, zc) = (f.x(0.497), g.zr - 0.012, sh(st, "sh_e4_dc").z + 0.036);
         let (nu, nv) = (15, 12);
-        let at = |i: usize, j: usize| DVec3::new(lin(-hx, hx, i, nu), e3.y + 0.008, lin(za, zc, j, nv));
-        p.mesh = sheet_solid(nu, nv, at, |_, _| DVec3::Y * 0.008, |_, _| true, Mat::InteriorFabric);
+        let at =
+            |i: usize, j: usize| DVec3::new(lin(-hx, hx, i, nu), e3.y + 0.008, lin(za, zc, j, nv));
+        p.mesh = sheet_solid(
+            nu,
+            nv,
+            at,
+            |_, _| DVec3::Y * 0.008,
+            |_, _| true,
+            Mat::InteriorFabric,
+        );
         for (t, i, j) in [("fl", 13, 1), ("fr", 1, 1), ("rl", 13, 10), ("rr", 1, 10)] {
             p.node(t, at(i, j) + DVec3::Y * 0.004, 0.75);
         }
-        p.internal.push(Internal { pairs: p.complete(), v: clip(200.0, INF), deform_group: None });
-        p.hold("boot_lining", &["e3_2", "e3_3", "e1_2ul", "e1_2ur", "e1_3ul", "e1_3ur"], 8, BeamKind::Normal, clip(200.0, 500.0));
+        p.internal.push(Internal {
+            pairs: p.complete(),
+            v: clip(200.0, INF),
+            deform_group: None,
+        });
+        p.hold(
+            "boot_lining",
+            &["e3_2", "e3_3", "e1_2ul", "e1_2ur", "e1_3ul", "e1_3ur"],
+            8,
+            BeamKind::Normal,
+            clip(200.0, 500.0),
+        );
         out.push(p);
     }
 }

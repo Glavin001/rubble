@@ -223,8 +223,20 @@ State and tables: [generated-vehicles.md](generated-vehicles.md), "Body structur
 - **(Measurement) The merged base fails one existing test.** With the solid parts and the census rigger together, `gen3_rig`'s wall test gives stretch p99 1.64 against 1.6 (`VG_SHEET=1`: passes). Each branch passed alone. It is the binding of the solids' walls (plan step 2b), not the structure.
 - **Process:** zsh expands `$M:u` as a modifier. Write `${M}:view` when a shot list is a shell variable.
 
+## 13. Completing the car: equipment, hardware and trim (2026-11-13, `feat/sedan-complete`)
+
+- **(Fact) Placement by test, not by eye.** `pair_crossings` over every part definition against every render part finds a cut in 6 s and prints its box. Each new part was placed from the design's own lines, then moved until the count was 0. `tests/probe.rs` prints where a part's surface is inside a box (the rear door's rear edge, a pillar's face).
+- **(Fact) `pair_crossings` does not see a part wholly inside another.** It tests edges through faces. Containment has to be checked on stills.
+- **(Measurement) A door is thinner than its nominal depth near its edge.** Its inner face is 28 mm deep at the edge and reaches 50 mm at 35 mm in; the pocket is 36 mm; the pressed beam band is at 21 % of the door's height. A latch block has to sit 20–50 mm in from the shut line, and an intrusion beam in the band.
+- **(Measurement) Depths "in from the skin" must follow the skin.** Measured level with the ground, the door's inner face is within 57 mm, the hinge pillar's outer face at 61 mm and the B-pillar's at 69 mm. A box placed from the skin at one height cuts a leaning surface a few centimetres higher: sample every 3 cm.
+- **(Measurement) The rear door's rear edge is not on its shut line.** It leans back round the wheel arch: 0.17 m behind the line at y 0.70 m, on it at the belt. The existing `latch_door_R*` markers are 0.19 m ahead of the edge at their height. The rear latch and striker are at y 0.85 m, where the shell has a jamb.
+- **(Fact) Under the cabin the exhaust has 7 mm to the floor.** Bodies there are flat (43 mm high) and flanges lie flat. A round flange of 34 mm radius cut the floor skin.
+- **(Fact) Mass that becomes a part must leave the shell.** The study's shell carried 148 kg of fixed trim on its floor, firewall and quarter nodes. 102 kg of it is now parts, and those nodes are 53 % lighter. The rigger fits springs to node mass, so the floor's springs will follow: re-measure the shell lattice's bands with it.
+- **(Process) The scratchpad is shared by the session's agents.** Give temporary scripts a folder of their own; generic names get overwritten.
+
 ## Changelog
 
 - 2026-11-12: first version.
 - 2026-11-12: linked the BeamNG structure study (`beamng-structure-study.md`): every node at Σk/m ≈ 7–10e6 s⁻² (whole-car ω·h 1.80–1.90), the 131-node shell specification and 24 lint rules.
 - 2026-11-13: section 12, the body rebuilt from definitions (structure, mechanical parts, shell lattice); the rigger integration and all measurements still to do.
+- 2026-11-13: section 13, completing the car (equipment, hardware, trim; placement by the crossing test; the shell's trim mass moved to parts).
