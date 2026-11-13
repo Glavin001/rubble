@@ -1,0 +1,10 @@
+{
+  "title": "Compactor: the end plates in at 0.25 m/s to a 2.5 m gap",
+  "mode": "compactor",
+  "scene": "flat",
+  "duration": 8,
+  "events": [
+    { "t": 0.3, "cam": "orbit" },
+    { "t": 0.5, "plates": { "axis": "ends", "speed": 0.25, "gap": 2.5 } }
+  ]
+}

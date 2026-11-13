@@ -1,0 +1,14 @@
+{
+  "title": "0.1 m steel spheres at 20, 40 and 60 m/s into the left side",
+  "mode": "shoot",
+  "scene": "flat",
+  "duration": 6,
+  "events": [
+    { "t": 0.5, "cam": "orbit" },
+    { "t": 1.0, "slow": 0.25 },
+    { "t": 1.0, "fire": { "shape": "sphere", "radius": 0.1, "material": "steel", "speed": 20, "aim": { "side": "left", "height": 0.8, "along": -0.9, "distance": 5 } } },
+    { "t": 2.0, "fire": { "shape": "sphere", "radius": 0.1, "material": "steel", "speed": 40, "aim": { "side": "left", "height": 0.8, "along": 0.0, "distance": 5 } } },
+    { "t": 3.0, "fire": { "shape": "sphere", "radius": 0.1, "material": "steel", "speed": 60, "aim": { "side": "left", "height": 0.8, "along": 0.9, "distance": 5 } } },
+    { "t": 3.8, "slow": 1 }
+  ]
+}

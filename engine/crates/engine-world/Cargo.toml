@@ -51,5 +51,9 @@ name = "reaction_replay"
 required-features = ["stress"]
 
 [[example]]
+name = "vehicle_lab"
+required-features = ["stress"]
+
+[[example]]
 name = "showcase_probe"
 required-features = ["stress"]

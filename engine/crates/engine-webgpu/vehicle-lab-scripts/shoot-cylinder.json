@@ -1,0 +1,13 @@
+{
+  "title": "Steel cylinder, end on, into the rear; a wooden one side on into the roof",
+  "mode": "shoot",
+  "scene": "flat",
+  "duration": 5,
+  "events": [
+    { "t": 0.5, "cam": "orbit" },
+    { "t": 1.0, "slow": 0.25 },
+    { "t": 1.0, "fire": { "shape": "cylinder", "radius": 0.12, "length": 0.6, "material": "steel", "speed": 25, "spinRate": 20, "aim": { "side": "rear", "height": 0.8, "distance": 5 } } },
+    { "t": 2.2, "fire": { "shape": "cylinder", "radius": 0.15, "length": 1.2, "material": "wood", "speed": 15, "axis": "cross", "aim": { "side": "top", "distance": 4 } } },
+    { "t": 3.2, "slow": 1 }
+  ]
+}

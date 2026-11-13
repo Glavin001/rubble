@@ -840,6 +840,84 @@ impl ExplicitBeamsGpu {
         gpu
     }
 
+    /// Put the fleet back to `vehicles`' state in place: every state buffer rewritten as a
+    /// new upload of them would hold it, the contact plan as at the first frame. No buffer,
+    /// pipeline or bind group is made (a restart costs a few buffer writes). `vehicles`
+    /// must be the fleet this was built for (the same vehicles in the same order, the
+    /// same statics count, coupling room and sleep setting): only their state may differ
+    /// (node positions and velocities, beam state, the origin, the ground's height, the
+    /// static shapes' places, the drive state). A fleet of another layout is an error and
+    /// changes nothing. Host settings made since the build (coupling on, vehicle contact,
+    /// margins, variants) stay.
+    pub fn reset_state(
+        &mut self,
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+        sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
+    ) -> Result<(), String> {
+        let upload = ExplicitUpload::with_sleep(vehicles, coupling, sleep);
+        let new = &upload.layout;
+        let old = &self.layout;
+        let key = |l: &ExplicitLayout| -> Vec<[u32; 8]> { l.spans.iter().map(|s| [s.node_off, s.nodes, s.beam_off, s.beams, s.slide_off, s.slides, s.seg_off, s.tris]).collect() };
+        let same = key(new) == key(old)
+            && new.rest0.len() == old.rest0.len()
+            && new.total == old.total
+            && (new.aero, new.big, new.lanes, new.surface, new.wide_ok) == (old.aero, old.big, old.lanes, old.surface, old.wide_ok);
+        if !same {
+            return Err("explicit beams: reset_state needs the fleet this was built for (another layout)".into());
+        }
+        // (binding, buffer index): statics, nodes, beams, acc, groups, misc, next. The
+        // lists (topology) are not state.
+        let writes = [
+            (plan::BIND_STATIC, 1usize),
+            (plan::BIND_NODES, 3),
+            (plan::BIND_BEAMS, 4),
+            (plan::BIND_ACC, 5),
+            (plan::BIND_GROUPS, 6),
+            (plan::BIND_MISC, 7),
+            (plan::BIND_NEXT, 8),
+        ];
+        let data: Vec<Vec<u8>> = writes.iter().map(|(b, _)| upload.bytes(*b)).collect();
+        let args = upload.bytes(plan::BIND_ARGS);
+        if writes.iter().zip(&data).any(|((_, i), d)| d.len() as u64 != self.bufs[*i].size()) || args.len() as u64 != self.contact.args.size() {
+            return Err("explicit beams: reset_state needs the fleet this was built for (another buffer size)".into());
+        }
+        for ((_, i), d) in writes.iter().zip(&data) {
+            self.queue.write_buffer(&self.bufs[*i], 0, d);
+        }
+        self.queue.write_buffer(&self.contact.args, 0, &args);
+        if let Some(w) = &self.wide {
+            self.queue.write_buffer(&w.table, 0, bytemuck::cast_slice(upload.table_records()));
+        }
+        // The parameter words the new state changes (the ground, the statics' ranges),
+        // over the planner's (which hold the host's settings in other words).
+        for k in 0..new.words.len() {
+            if new.words[k] != old.words[k] {
+                self.planner.words[k] = new.words[k];
+            }
+        }
+        self.planner.restore(FramePlanner::new(new).state());
+        self.layout = upload.layout.clone();
+        self.sleep_inputs = vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect();
+        self.sleep_grab = None;
+        self.sleep_wake.lock().unwrap().clear();
+        self.contact_errors.lock().unwrap().clear();
+        self.contact_errors_seen.lock().unwrap().clear();
+        // The host settings that live in the rewritten misc records: the coupling's
+        // header and the vehicles' contact margins.
+        if self.layout.coupling.is_some() {
+            self.write_coupling_header();
+        }
+        for v in 0..self.vehicle_margins.len() {
+            let m = self.vehicle_margins[v];
+            if m != 0.0 {
+                self.set_vehicle_contact_margin(v, m);
+            }
+        }
+        self.planner.request_replan();
+        Ok(())
+    }
+
     /// The split frame's pipelines (see `split`).
     fn split_pipes(&self) -> &Split {
         self.split.get_or_init(|| Split::new(&self.device, &self.bufs, self.split_module))

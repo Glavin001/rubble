@@ -858,6 +858,35 @@ impl World {
         Ok(())
     }
 
+    /// Put the explicit vehicles back to `vehicles`' state in place (a restart: the same
+    /// fleet placed anew, at new speeds, undamaged), without making a device, buffer or
+    /// pipeline: `ExplicitBeamsGpu::reset_state`, and the coupling's clock, pending
+    /// impulses and proxies as after [`World::add_explicit_vehicles`]. The vehicles
+    /// step again with the next step. `vehicles` must be the fleet that was added (only
+    /// its state may differ); another is an error and changes nothing.
+    pub fn reset_explicit_vehicles(&mut self, vehicles: &[ExplicitBeams]) -> anyhow::Result<()> {
+        let queue = self.sim.queue().clone();
+        let x = self.explicit.as_mut().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        anyhow::ensure!(vehicles.len() == x.sims.len(), "reset_explicit_vehicles: {} vehicles, {} were added", vehicles.len(), x.sims.len());
+        x.gpu.reset_state(vehicles, Some(x.def.capacity), x.def.sleep).map_err(anyhow::Error::msg)?;
+        x.sims = vehicles.to_vec();
+        x.carry = 0.0;
+        x.emit_pending = false;
+        x.emit_wakes = false;
+        x.read_pending = false;
+        *x.status.lock().unwrap() = None;
+        x.any_awake = true;
+        for m in &mut x.sleep_mask {
+            *m = 0;
+        }
+        queue.write_buffer(&x.work, 4 * x.sleep_mask_word, bytemuck::cast_slice(&x.sleep_mask));
+        for v in 0..vehicles.len() as u32 {
+            // Its proxy in the broadphase is rebuilt at the next window.
+            queue.write_buffer(&x.work, x.work_proxy(v) + 28, bytemuck::bytes_of(&0u32));
+        }
+        Ok(())
+    }
+
     /// The explicit vehicles' GPU state (nodes, beams, the coupling's records), once added.
     pub fn explicit_vehicles(&self) -> Option<&ExplicitBeamsGpu> {
         self.explicit.as_ref().map(|x| &x.gpu)

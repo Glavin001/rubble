@@ -7,7 +7,7 @@
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
   hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
-  showcaseLayout, brickRingLayout,
+  showcaseLayout, brickRingLayout, createVehicleLab as createVehicleLabWasm, vehicleLabMaterials,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -97,6 +97,19 @@ export async function createBrickRingDrive(spec, progress) {
   const world = await WebWorld.createBrickRingDrive(spec, progress);
   world.flags = solverFlags();
   return { world, layout };
+}
+
+/**
+ * The vehicle test lab (`rubble::vehicle_lab`, vehicle-lab.html): one soft-body car on a
+ * flat arena or the infinite mountain in one World on its own device, and the lab's
+ * state beside it (spec as the wasm's `createVehicleLab`).
+ */
+export async function createVehicleLab(spec) {
+  ready ??= init();
+  await ready;
+  const [world, lab] = await createVehicleLabWasm(spec);
+  world.flags = solverFlags();
+  return { world, lab, materials: vehicleLabMaterials() };
 }
 
 /** The wasm, once loaded (pages that call its free functions before a world). */

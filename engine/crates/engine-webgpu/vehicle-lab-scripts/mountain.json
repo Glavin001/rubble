@@ -1,0 +1,14 @@
+{
+  "title": "Infinite mountain: seed 1, 50°, roughness 0.6",
+  "mode": "mountain",
+  "scene": "mountain",
+  "mountain": { "seed": 1, "steepness": 50, "roughness": 0.6 },
+  "duration": 40,
+  "events": [
+    { "t": 0.0, "cam": "tumble" },
+    { "t": 6.0, "slow": 0.25 },
+    { "t": 8.0, "slow": 1 },
+    { "t": 20.0, "slow": 0.0625 },
+    { "t": 20.5, "slow": 1 }
+  ]
+}

@@ -45,6 +45,7 @@ mod showcase;
 mod showcase_world;
 mod stability;
 mod ring_drive;
+mod vehicle_lab;
 mod soft;
 mod terrain;
 mod vehicle;
