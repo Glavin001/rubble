@@ -1098,6 +1098,7 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
         }
     }
     out.extend(energy_bombs(d));
+    out.push(rest_penetration(d));
     let _ = HashSet::<u8>::new();
     out
 }
@@ -1229,6 +1230,145 @@ pub fn energy_bombs(d: &SoftVehicleDesc) -> Vec<Finding> {
         offenders: tethers.into_iter().take(8).collect(),
     });
     out
+}
+
+/// The solver's self-collision range (m): `explicit_beams::DEFAULT_COLLISION_RANGE`.
+pub const CONTACT_RANGE: f32 = 0.02;
+/// A node counts as inside a solid from this depth (m).
+pub const PENETRATION_MIN: f32 = 0.005;
+
+/// **Parts do not start inside each other** (hard, 2026-11-13).
+///
+/// A part whose collision triangles close (every edge shared by exactly two
+/// of them, all in one self-collision group) is a solid. A contacter node of
+/// another group that stands inside one at rest, deeper than
+/// [`PENETRATION_MIN`], fails: the car is built interpenetrating, and the
+/// solver would either throw the two apart or, inside its contact range,
+/// never collide them.
+///
+/// Reported with it (a warning, not a failure): the contacter-triangle pairs
+/// of different groups that start within [`CONTACT_RANGE`] of each other.
+/// The solver never collides such a pair (jbeam-semantics-spec.md §10.1), so
+/// each is a place where two parts can pass through each other later. Shut
+/// lines put some there by construction (a real gap is 4-6 mm).
+pub fn rest_penetration(d: &SoftVehicleDesc) -> Finding {
+    let pos: Vec<Vec3> = d.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+    let group = |i: u32| d.nodes[i as usize].self_group;
+    let tri_group = |t: &crate::desc::SoftTriangle| {
+        let g = t.nodes.map(group);
+        if g[0] == g[1] && g[1] == g[2] {
+            g[0]
+        } else {
+            0
+        }
+    };
+    // The solids: groups whose triangles close.
+    let mut by: BTreeMap<u32, Vec<[u32; 3]>> = BTreeMap::new();
+    for t in &d.triangles {
+        let g = tri_group(t);
+        if g != 0 {
+            by.entry(g).or_default().push(t.nodes);
+        }
+    }
+    let closed = |tris: &[[u32; 3]]| {
+        let mut edges: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        for t in tris {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        tris.len() >= 4 && edges.values().all(|&c| c == 2)
+    };
+    let solids: Vec<(u32, &Vec<[u32; 3]>)> = by.iter().filter(|(_, t)| closed(t)).map(|(g, t)| (*g, t)).collect();
+    // Inside: a ray along a skew direction crosses the solid's triangles an
+    // odd number of times.
+    let inside = |q: Vec3, tris: &[[u32; 3]]| {
+        let dir = Vec3::new(0.577, 0.211, 0.789).normalize();
+        let mut n = 0;
+        for t in tris {
+            let [a, b, c] = t.map(|i| pos[i as usize]);
+            let (e1, e2) = (b - a, c - a);
+            let h = dir.cross(e2);
+            let det = e1.dot(h);
+            if det.abs() < 1e-9 {
+                continue;
+            }
+            let s = q - a;
+            let u = s.dot(h) / det;
+            let qv = s.cross(e1);
+            let v = dir.dot(qv) / det;
+            let t = e2.dot(qv) / det;
+            if u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 0.0 {
+                n += 1;
+            }
+        }
+        n % 2 == 1
+    };
+    let contacter = |i: usize| d.nodes[i].collision && d.nodes[i].self_collision;
+    let mut inside_of: Vec<(f32, String)> = Vec::new();
+    for i in (0..d.nodes.len()).filter(|&i| contacter(i)) {
+        for (g, tris) in &solids {
+            if d.nodes[i].self_group == *g || !inside(pos[i], tris) {
+                continue;
+            }
+            let depth = tris
+                .iter()
+                .map(|t| tri_dist(pos[i], pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]))
+                .fold(f32::MAX, f32::min);
+            if depth > PENETRATION_MIN {
+                let owner = tris[0][0];
+                inside_of.push((depth, format!("{} {:.0} mm inside the solid of {}", d.nodes[i].name, depth * 1e3, d.nodes[owner as usize].name)));
+            }
+        }
+    }
+    inside_of.sort_by(|a, b| b.0.total_cmp(&a.0));
+    // Pairs in the contact range at rest.
+    let mut near: Vec<String> = Vec::new();
+    for t in d.triangles.iter().filter(|t| t.collision) {
+        let g = tri_group(t);
+        let [a, b, c] = t.nodes.map(|i| pos[i as usize]);
+        let (lo, hi) = (a.min(b).min(c) - CONTACT_RANGE, a.max(b).max(c) + CONTACT_RANGE);
+        for i in (0..d.nodes.len()).filter(|&i| contacter(i)) {
+            let q = pos[i];
+            if t.nodes.contains(&(i as u32)) || (g != 0 && d.nodes[i].self_group == g) {
+                continue;
+            }
+            if q.cmplt(lo).any() || q.cmpgt(hi).any() {
+                continue;
+            }
+            if tri_dist(q, a, b, c) < CONTACT_RANGE {
+                near.push(format!("{} at {}", d.nodes[i].name, d.nodes[t.nodes[0] as usize].name));
+            }
+        }
+    }
+    let n_inside = inside_of.len();
+    let level = if !inside_of.is_empty() {
+        Level::Fail
+    } else if !near.is_empty() {
+        Level::Warn
+    } else {
+        Level::Pass
+    };
+    let mut offenders: Vec<String> = inside_of.into_iter().map(|x| x.1).take(8).collect();
+    if offenders.is_empty() {
+        offenders = near.iter().take(8).cloned().collect();
+    }
+    Finding {
+        rule: "rest_penetration",
+        hard: true,
+        part: "car".into(),
+        level,
+        value: format!(
+            "{} nodes inside another part's solid ({} closed solids); {} contacter-triangle pairs start inside the {:.0} mm contact range and never collide",
+            n_inside,
+            solids.len(),
+            near.len(),
+            CONTACT_RANGE * 1e3
+        ),
+        band: "0 nodes inside (warn: any pair inside the contact range)".into(),
+        offenders,
+    }
 }
 
 /// Print findings as a table; returns the number of hard failures.
