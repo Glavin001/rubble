@@ -18,7 +18,7 @@ fn tris(b: &engine_vehiclegen::Built, name: &str) -> usize {
 
 /// The solid parts: (name prefix, least and greatest wall thickness in mm,
 /// closed pieces).
-const SOLIDS: [(&str, f64, f64, usize); 14] = [
+const SOLIDS: [(&str, f64, f64, usize); 13] = [
     ("taillight_", 1.0, 6.0, 1),
     ("headliner", 7.9, 8.1, 1),
     ("wheel_well_", 3.9, 4.1, 1),
@@ -36,9 +36,9 @@ const SOLIDS: [(&str, f64, f64, usize); 14] = [
     ("body_shell", 2.5, 50.0, 7),
     ("glass_", 4.4, 4.6, 1),
     ("headlight_", 4.1, 4.3, 1),
-    ("door_trim_F", 5.9, 18.1, 2),
-    // the rear card folds behind the wheel arch (the sheet card does too)
-    ("door_trim_R", 1.0, 18.1, 2),
+    // (a card stops short of a bend its face would fold behind: the rear
+    // door's dogleg round the wheel arch)
+    ("door_trim_", 9.0, 18.1, 1),
 ];
 
 fn solid_spec(name: &str) -> Option<(f64, f64, usize)> {
@@ -74,7 +74,7 @@ fn reference_sedan_is_pinned() {
     assert_eq!(b.parts.len(), 68);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 444_356);
+    assert_eq!(total, 438_236);
     for (name, n) in [
         ("body_shell", 114_556),
         ("hood", 39_408),
@@ -87,7 +87,7 @@ fn reference_sedan_is_pinned() {
         ("glass_windshield", 10_976),
         ("glass_door_FL", 2_740),
         ("headlight_L_lens", 1_088),
-        ("door_trim_FL", 8_188),
+        ("door_trim_FL", 6_524),
         ("tyre_FL", 7_872),
         ("rim_FL", 4_840),
         ("grille", 3_660),
@@ -228,7 +228,7 @@ fn panel_triangles_keep_their_aspect() {
     println!("skin {}, walls {}, inner faces {}", n[0], n[1], n[2]);
     assert_eq!(n[0], 369, "skin");
     assert!(n[1] <= 131, "walls {}", n[1]);
-    assert!(n[2] <= 595, "inner faces {}", n[2]);
+    assert!(n[2] <= 596, "inner faces {}", n[2]);
 }
 
 #[test]

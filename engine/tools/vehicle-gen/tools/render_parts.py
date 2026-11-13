@@ -15,6 +15,7 @@ import os
 import sys
 
 import bpy
+import numpy as np
 from mathutils import Vector
 
 a = sys.argv[sys.argv.index('--') + 1:]
@@ -143,17 +144,21 @@ for shot in shots or DEFAULT:
     c = (lo + hi) / 2
     side = 1.0 if c.x >= -1e-6 else -1.0
     d = gl(direction(view, side))
-    # the parts' silhouette from the view fits the frame (both ways: the frame is wider than tall)
-    q = (c - (c + d)).to_track_quat('-Z', 'Y')
+    # the camera backs off until every vertex of the parts is in the frame (the frame is wider
+    # than tall), with a margin
+    q = (-d).to_track_quat('-Z', 'Y')
     right, up = q @ Vector((1, 0, 0)), q @ Vector((0, 1, 0))
-    corners = [Vector((x, y, z)) - c for x in (lo.x, hi.x) for y in (lo.y, hi.y) for z in (lo.z, hi.z)]
-    half_w = max(abs(p.dot(right)) for p in corners)
-    half_h = max(abs(p.dot(up)) for p in corners)
-    depth = max(abs(p.dot(d)) for p in corners)
     r = (hi - lo).length / 2
     tx = math.tan(cam.data.angle / 2)
     ty = tx * sc.render.resolution_y / sc.render.resolution_x
-    dist = (max(half_w / tx, half_h / ty) * 1.08 + depth) / zoom
+    dist = 0.0
+    for o in sel:
+        co = np.empty(len(o.data.vertices) * 3)
+        o.data.vertices.foreach_get('co', co)
+        p = co.reshape(-1, 3) @ np.array(o.matrix_world.to_3x3()).T + np.array(o.matrix_world.translation) - np.array(c)
+        need = np.maximum(np.abs(p @ np.array(right)) / tx, np.abs(p @ np.array(up)) / ty) + p @ np.array(d)
+        dist = max(dist, float(need.max()))
+    dist = dist * 1.06 / zoom
     if aim is not None:
         c = aim
     cam.location = c + d * dist

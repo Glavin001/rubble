@@ -249,9 +249,40 @@ pub fn depth(style: Style, s: &Site) -> f64 {
             };
             s.rim + (d - s.rim) * ramp
         }
-        // a thick land round a lamp opening (its rebate is cut into it),
-        // tapering to the sheet
-        Style::Sheet => SHEET + (s.rim - SHEET).max(0.0) * (1.0 - smoothstep(0.012, 0.045, s.edge)),
+        Style::Sheet => {
+            // a thick land round a lamp opening (its rebate is cut into it),
+            // tapering to the sheet
+            let land = (s.rim - SHEET).max(0.0) * (1.0 - smoothstep(0.012, 0.045, s.edge));
+            // a mount flange: the sheet doubled in a band along every edge
+            let flange =
+                0.004 * (1.0 - smoothstep(0.024, 0.048, s.edge)) * smoothstep(0.0, 0.018, s.edge);
+            // stiffening ribs, clear of the edges
+            let rib = |dist: f64| 1.0 - smoothstep(0.008, 0.034, dist);
+            let t = (s.p.y - s.lo.y) / size.y.max(1e-9);
+            let ribs = if size.x > 1.0 {
+                // a bumper cover: the pocket the bumper beam sits in (two
+                // rails across the middle) and two webs down each cheek
+                let a = (s.p.x - 0.5 * (s.lo.x + s.hi.x)).abs();
+                let hw = 0.5 * size.x;
+                let (y0, y1) = (s.lo.y + 0.58 * size.y, s.lo.y + 0.86 * size.y);
+                let across = 1.0 - smoothstep(0.62 * hw, 0.62 * hw + 0.03, a);
+                let rails = rib((s.p.y - y0).abs()).max(rib((s.p.y - y1).abs())) * across;
+                let webs = rib((a - 0.62 * hw).abs()).max(rib((a - 0.50 * hw).abs()));
+                0.022 * rails.max(webs)
+            } else {
+                // a wing: a brace under the top flange and two stiffeners
+                // down it
+                let brace = rib((t - 0.80).abs() * size.y);
+                let (z0, z1) = (s.lo.z + 0.22 * size.z, s.lo.z + 0.80 * size.z);
+                let down = rib((s.p.z - z0).abs()).max(rib((s.p.z - z1).abs()))
+                    * smoothstep(0.30, 0.40, t);
+                0.016 * brace.max(down)
+            };
+            SHEET
+                + land
+                    .max(flange)
+                    .max(ribs * smoothstep(0.024, 0.050, s.edge))
+        }
         Style::Structure => {
             // the floor pan is a single pressing: the cabin sits on it
             let base = if s.n.y < -0.6 { 0.014 } else { 0.030 };
@@ -1034,22 +1065,32 @@ pub fn slab_drawn(m: &Mesh, th: f64) -> Mesh {
 }
 
 fn slab_with(m: &Mesh, th: f64, drawn: bool) -> Mesh {
+    let mut back: Vec<DVec3> = Vec::with_capacity(m.v.len());
+    {
+        let out = &mut back;
+        if drawn {
+            let n = m.vertex_normals();
+            let dir = n.iter().copied().sum::<DVec3>().normalize_or_zero();
+            // one move for every vertex (a varying one would cross where the
+            // surface runs along the draw): 1.4 th, so the lens is th thick
+            // where it faces 45 degrees off the draw
+            out.extend(m.v.iter().map(|p| *p - dir * (1.4 * th)));
+        } else {
+            let n = smooth_normals(m, 8);
+            let cap = convex_cap(m, &n, &neighbours(m));
+            // thinner (down to a third) behind a bend tighter than the slab is thick
+            out.extend((0..m.v.len()).map(|i| m.v[i] - n[i] * th.min(cap[i]).max(th / 3.0)));
+        }
+    }
+    slab_to(m, &back)
+}
+
+/// A single-sided surface closed with a given back (one point per vertex)
+/// and a wall round every border.
+pub fn slab_to(m: &Mesh, back: &[DVec3]) -> Mesh {
     let nv = m.v.len() as u32;
     let mut out = m.clone();
-    if drawn {
-        let n = m.vertex_normals();
-        let dir = n.iter().copied().sum::<DVec3>().normalize_or_zero();
-        // one move for every vertex (a varying one would cross where the
-        // surface runs along the draw): 1.4 th, so the lens is th thick
-        // where it faces 45 degrees off the draw
-        out.v.extend(m.v.iter().map(|p| *p - dir * (1.4 * th)));
-    } else {
-        let n = smooth_normals(m, 8);
-        let cap = convex_cap(m, &n, &neighbours(m));
-        // thinner (down to a third) behind a bend tighter than the slab is thick
-        out.v
-            .extend((0..m.v.len()).map(|i| m.v[i] - n[i] * th.min(cap[i]).max(th / 3.0)));
-    }
+    out.v.extend_from_slice(back);
     let mut surf = vec![Surf::Outer; nv as usize];
     surf.resize(out.v.len(), Surf::Inner);
     for (k, f) in m.q.iter().enumerate() {
@@ -1092,6 +1133,141 @@ fn slab_with(m: &Mesh, th: f64, drawn: bool) -> Mesh {
     }
     out.surf = Some(surf);
     out
+}
+
+/// Drop the faces that keep a single-sided mesh from being closed as a
+/// slab: those round a vertex where two sheets of faces meet at a point
+/// (more than two border edges there), then any island of fewer than
+/// `least` faces.
+pub fn single_sheet(m: &mut Mesh, least: usize) {
+    for _ in 0..12 {
+        let mut dir: FxHashSet<(u32, u32)> = FxHashSet::default();
+        for f in m.faces() {
+            for i in 0..f.len() {
+                dir.insert((f[i], f[(i + 1) % f.len()]));
+            }
+        }
+        let mut open = vec![0u8; m.v.len()];
+        for &(a, b) in &dir {
+            if !dir.contains(&(b, a)) {
+                open[a as usize] += 1;
+                open[b as usize] += 1;
+            }
+        }
+        if open.iter().all(|c| *c <= 2) {
+            break;
+        }
+        drop_faces(m, |f| f.iter().any(|&i| open[i as usize] > 2));
+    }
+    let comp = components(m);
+    let mut size: FxHashMap<u32, usize> = FxHashMap::default();
+    for f in m.faces() {
+        *size.entry(comp[f[0] as usize]).or_insert(0) += 1;
+    }
+    drop_faces(m, |f| size[&comp[f[0] as usize]] < least);
+}
+
+fn drop_faces(m: &mut Mesh, gone: impl Fn(&[u32]) -> bool) {
+    let kq: Vec<bool> = m.q.iter().map(|f| !gone(f)).collect();
+    crate::mesh::retain_by(&mut m.q, &kq);
+    crate::mesh::retain_by(&mut m.qm, &kq);
+    crate::mesh::retain_by(&mut m.quv, &kq);
+    crate::mesh::retain_by(&mut m.qi, &kq);
+    let kt: Vec<bool> = m.t.iter().map(|f| !gone(f)).collect();
+    crate::mesh::retain_by(&mut m.t, &kt);
+    crate::mesh::retain_by(&mut m.tm, &kt);
+    crate::mesh::retain_by(&mut m.tuv, &kt);
+    crate::mesh::retain_by(&mut m.ti, &kt);
+}
+
+/// A door's trim card: a moulding `th` thick facing the cabin, `depth`
+/// below the door's skin, with an armrest standing out of it, a pull cup
+/// let into the armrest and a map pocket along the bottom. Built on the
+/// door skin's cells, two rings in from its edges; where the skin bends too
+/// tightly for a face that far behind it (a rear door's dogleg round the
+/// wheel arch) the card stops short.
+pub fn door_card(skin: &Mesh, depth: f64, th: f64, mat: Mat) -> Mesh {
+    let nv = skin.v.len();
+    let nb = neighbours(skin);
+    let mut ring = vec![false; nv];
+    for lp in boundary_loops(skin) {
+        for i in lp {
+            ring[i as usize] = true;
+        }
+    }
+    for _ in 0..2 {
+        let prev = ring.clone();
+        for i in 0..nv {
+            if !prev[i] && nb[i].iter().any(|&j| prev[j as usize]) {
+                ring[i] = true;
+            }
+        }
+    }
+    let n = smooth_normals(skin, 6);
+    let (lo, hi) = skin.bbox();
+    let size = hi - lo;
+    let (ya, zc) = (lo.y + 0.47 * size.y, lo.z + 0.60 * size.z);
+    let mut d: Vec<f64> = skin
+        .v
+        .iter()
+        .map(|p| {
+            let along = smoothstep(lo.z + 0.10 * size.z, lo.z + 0.18 * size.z, p.z)
+                * (1.0 - smoothstep(hi.z - 0.18 * size.z, hi.z - 0.10 * size.z, p.z));
+            let arm = 0.045 * (1.0 - smoothstep(0.040, 0.066, (p.y - ya).abs())) * along;
+            let cup = 0.030
+                * (1.0 - smoothstep(0.010, 0.040, (p.y - ya).abs()))
+                * (1.0 - smoothstep(0.050, 0.090, (p.z - zc).abs()));
+            let pocket =
+                0.016 * (1.0 - smoothstep(lo.y + 0.17 * size.y, lo.y + 0.24 * size.y, p.y)) * along;
+            depth + arm - cup + pocket
+        })
+        .collect();
+    for _ in 0..2 {
+        let prev = d.clone();
+        for i in 0..nv {
+            if !nb[i].is_empty() {
+                let mean =
+                    nb[i].iter().map(|&j| prev[j as usize]).sum::<f64>() / nb[i].len() as f64;
+                d[i] = 0.5 * (prev[i] + mean);
+            }
+        }
+    }
+    // no card where its face would fold behind a bend of the skin
+    let cap = convex_cap(skin, &n, &nb);
+    let fold: Vec<bool> = (0..nv).map(|i| cap[i] < d[i]).collect();
+    let keep: Vec<bool> = (0..nv)
+        .map(|i| !ring[i] && !fold[i] && !nb[i].iter().any(|&j| fold[j as usize]))
+        .collect();
+    let mut remap = vec![u32::MAX; nv];
+    let mut m = Mesh::new();
+    let mut back = Vec::new();
+    for i in 0..nv {
+        if keep[i] {
+            remap[i] = m.v.len() as u32;
+            m.v.push(skin.v[i] - n[i] * d[i]);
+            back.push(skin.v[i] - n[i] * (d[i] - th));
+        }
+    }
+    for (k, f) in skin.q.iter().enumerate() {
+        if f.iter().all(|&i| keep[i as usize]) {
+            m.q.push(f.map(|i| remap[i as usize]));
+            m.qm.push(mat);
+            m.quv.push(skin.quv[k]);
+            m.qi.push(-1);
+        }
+    }
+    for (k, f) in skin.t.iter().enumerate() {
+        if f.iter().all(|&i| keep[i as usize]) {
+            m.t.push(f.map(|i| remap[i as usize]));
+            m.tm.push(mat);
+            m.tuv.push(skin.tuv[k]);
+            m.ti.push(-1);
+        }
+    }
+    // it faces the cabin
+    m.flip();
+    single_sheet(&mut m, 300);
+    slab_to(&m, &back)
 }
 
 // -- checks ----------------------------------------------------------------------------

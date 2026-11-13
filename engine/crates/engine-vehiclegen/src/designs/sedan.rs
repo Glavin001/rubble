@@ -850,9 +850,14 @@ impl Sedan {
                     isb[i as usize] = true;
                 }
             }
-            let trim = inner_panel(&sk, &isb, 0.085, -1_000_000, 2, Mat::InteriorPlastic);
-            // solid: a moulded card 18 mm thick, its back 17 mm off the door's inner panel
-            out.insert(&format!("door_trim_{s}"), thick(trim, 0.018));
+            // solid: a moulded card 18 mm thick, its back 17 mm off the
+            // door's inner panel, with an armrest, a pull cup and a pocket
+            let trim = if solid {
+                crate::solid::door_card(&sk, 0.085, 0.018, Mat::InteriorPlastic)
+            } else {
+                inner_panel(&sk, &isb, 0.085, -1_000_000, 2, Mat::InteriorPlastic)
+            };
+            out.insert(&format!("door_trim_{s}"), trim);
         }
         let zz: Vec<f64> = linspace(-0.05, -0.95, 46).into_iter().map(|z| f.z(z)).collect();
         let vv = linspace(7.35, vm - 7.35, 60);
