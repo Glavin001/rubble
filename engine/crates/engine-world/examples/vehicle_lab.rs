@@ -78,6 +78,7 @@ fn options(script: &Value) -> LabOptions {
         ("--steepness", "steepness"),
         ("--roughness", "roughness"),
         ("--loose", "loose"),
+        ("--start", "start"),
     ] {
         if let Some(x) = arg(flag).and_then(|x| x.parse::<f64>().ok()) {
             m[key] = if key == "seed" || key == "loose" {

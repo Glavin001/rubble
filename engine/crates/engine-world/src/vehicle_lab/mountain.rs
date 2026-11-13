@@ -136,7 +136,11 @@ impl MountainSpec {
         self.behind = self.behind.clamp(1, 8);
         self.launch = self.launch.clamp(0.0, 60.0);
         self.loose = self.loose.min(16);
-        self.start = if self.start.is_finite() { self.start.clamp(0.0, 100_000.0) } else { 0.0 };
+        self.start = if self.start.is_finite() {
+            self.start.clamp(0.0, 100_000.0)
+        } else {
+            0.0
+        };
         self
     }
 

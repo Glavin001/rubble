@@ -549,6 +549,9 @@ pub struct Bench {
     /// The car's extents about its centre of mass along (left, up, forward) at the last
     /// reading.
     ext: [Vec3; 2],
+    /// The car's nodes at the last reading (about `last_origin`): what a click picks.
+    last: Vec<Vec3>,
+    last_origin: DVec3,
 }
 
 const KIND_SHOT: u8 = 0;
@@ -587,6 +590,8 @@ impl Bench {
             target: None,
             arrival: None,
             ext: [Vec3::splat(-1.0), Vec3::splat(1.0)],
+            last: Vec::new(),
+            last_origin: DVec3::ZERO,
         }
     }
 
@@ -1022,6 +1027,34 @@ impl Bench {
     /// forward, steer, brake, handbrake } }`.
     pub fn command(&mut self, rig: &mut dyn Rig, cmd: &Value) -> anyhow::Result<Value> {
         if let Some(f) = cmd.get("fire") {
+            // { pick: { origin, dir } }: a shot at what lies under a view ray (the page's
+            // click): launched from the ray's origin at the elevation that carries it,
+            // falling under gravity, through the picked point.
+            let mut aimed = f.clone();
+            let mut picked = Value::Null;
+            if let Some(pick) = f.get("pick") {
+                let o = pick
+                    .get("origin")
+                    .and_then(Value::as_array)
+                    .filter(|o| o.len() == 3)
+                    .ok_or_else(|| anyhow::anyhow!("vehicle lab: pick needs origin [x, y, z]"))?;
+                let o = DVec3::new(
+                    o[0].as_f64().unwrap_or(0.0),
+                    o[1].as_f64().unwrap_or(0.0),
+                    o[2].as_f64().unwrap_or(0.0),
+                );
+                let d = vec3(pick, "dir")
+                    .filter(|d| d.length() > 1e-6)
+                    .ok_or_else(|| anyhow::anyhow!("vehicle lab: pick needs a direction"))?
+                    .normalize();
+                let (target, on) = self.pick(o, d);
+                let speed = num(f, "speed", 20.0) as f32;
+                let (dir, reachable) = ballistic(target - o, speed);
+                aimed["origin"] = json!([o.x, o.y, o.z]);
+                aimed["dir"] = json!([dir.x, dir.y, dir.z]);
+                picked = json!({ "target": [target.x, target.y, target.z], "on": on, "reachable": reachable });
+            }
+            let f = &aimed;
             let spec = self.shot_spec(f)?;
             let count = (num(f, "count", 1.0) as usize).clamp(1, 32);
             let interval = num(f, "interval", 0.15).max(0.0);
@@ -1034,7 +1067,7 @@ impl Bench {
                 self.queue
                     .push((self.t + interval * k as f64, spec.clone()));
             }
-            return Ok(json!({ "shot": id, "queued": count - 1 }));
+            return Ok(json!({ "shot": id, "queued": count - 1, "pick": picked }));
         }
         if let Some(p) = cmd.get("plates") {
             self.add_plates(rig, p)?;
@@ -1340,6 +1373,8 @@ impl Bench {
             hi = hi.max(e);
         }
         self.ext = [lo, hi];
+        self.last = car.pos.to_vec();
+        self.last_origin = car.origin;
         if let Some(m) = self.mountain.as_mut() {
             m.start.get_or_insert(self.car.centre);
             m.rest = if self.car.speed < 0.7 || m.rest < 0.0 {
@@ -1433,6 +1468,56 @@ impl Bench {
             c.t,
             c.readings as f64,
         ]
+    }
+
+    /// What a ray from `o` along `d` (world) meets first: the car's collision skin as last
+    /// read ("car"), else the flat arena's ground ("ground"), else the point of the ray
+    /// nearest the car's centre ("air").
+    pub fn pick(&self, o: DVec3, d: Vec3) -> (DVec3, &'static str) {
+        let ro = (o - self.last_origin).as_vec3();
+        let mut best = f32::INFINITY;
+        for t in &self.model.triangles {
+            let [a, b, c] = t.map(|k| self.last.get(k as usize).copied().unwrap_or(Vec3::NAN));
+            // Möller–Trumbore, either side.
+            let (e1, e2) = (b - a, c - a);
+            let h = d.cross(e2);
+            let det = e1.dot(h);
+            if !(det.abs() > 1e-9) {
+                continue;
+            }
+            let s = ro - a;
+            let u = s.dot(h) / det;
+            let q = s.cross(e1);
+            let v = d.dot(q) / det;
+            let hit = e2.dot(q) / det;
+            if u >= 0.0 && v >= 0.0 && u + v <= 1.0 && hit > 0.05 && hit < best {
+                best = hit;
+            }
+        }
+        if best.is_finite() {
+            return (o + (d * best).as_dvec3(), "car");
+        }
+        if self.opts.scene == Scene::Flat && d.y < -1e-4 {
+            let t = (f64::from(GROUND) - o.y) / f64::from(d.y);
+            if t > 0.0 && t < 500.0 {
+                return (o + d.as_dvec3() * t, "ground");
+            }
+        }
+        let along = ((self.car.centre - o).as_vec3().dot(d)).max(2.0);
+        (o + (d * along).as_dvec3(), "air")
+    }
+
+    /// Whether something the per-step readings matter for is going on: a projectile in
+    /// its first seconds, a plate, a crash preset before its first contact, a script.
+    pub fn busy(&self) -> bool {
+        !self.plates.is_empty()
+            || !self.queue.is_empty()
+            || self.script_at < self.script.len()
+            || (self.target.is_some() && self.arrival.is_none())
+            || self
+                .shots
+                .iter()
+                .any(|s| s.key.is_some() && self.t - s.fired < 4.0)
     }
 
     /// Plate `i`'s (travel, force) samples, flat.
@@ -1543,6 +1628,22 @@ impl Bench {
     }
 }
 
+/// The launch direction that carries a projectile of `speed` (m/s), falling under gravity,
+/// from the origin through `to` (the low trajectory), and whether the speed reaches it
+/// (if not: straight at it).
+pub fn ballistic(to: DVec3, speed: f32) -> (Vec3, bool) {
+    let g = f64::from(-GRAVITY);
+    let (dx, dy) = ((to.x * to.x + to.z * to.z).sqrt(), to.y);
+    let v2 = f64::from(speed) * f64::from(speed);
+    let disc = v2 * v2 - g * (g * dx * dx + 2.0 * dy * v2);
+    if dx < 1e-6 || disc < 0.0 || speed <= 0.0 {
+        return (to.as_vec3().normalize_or_zero(), dx < 1e-6 && speed > 0.0);
+    }
+    let tan = (v2 - disc.sqrt()) / (g * dx);
+    let h = DVec3::new(to.x / dx, 0.0, to.z / dx);
+    ((h + DVec3::Y * tan).normalize().as_vec3(), true)
+}
+
 /// The flat arena's fixtures, in the car's own solver (its raycast wheels see them, and
 /// its nodes get the solver's static contact): a ramp to the car's left and a kerb to its
 /// right, 10 m ahead of its start.
@@ -1636,7 +1737,9 @@ pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>
     if mountain && opts.mountain.start > 0.0 && start == mountain_start {
         // A run that starts down the mountain: the car 2 m over the fall line there, its
         // nodes about its own origin (as the solver's rebase leaves them).
-        car.origin = (opts.mountain.line(f64::from(opts.mountain.start)) + DVec3::new(0.0, 2.0, 0.0)).as_vec3();
+        car.origin = (opts.mountain.line(f64::from(opts.mountain.start))
+            + DVec3::new(0.0, 2.0, 0.0))
+        .as_vec3();
     }
     car.ground = ground;
     if start.speed != 0.0 && start.lateral == 0.0 {
@@ -1840,10 +1943,20 @@ impl Lab {
 
     /// Where the scene's bodies stand: the slab, then the fixtures.
     fn scene_poses(opts: &LabOptions) -> Vec<Transform> {
-        let away = if opts.scene == Scene::Flat { 0.0 } else { 2.0e5 };
-        let mut out = vec![Transform::new([0.0, GROUND - 0.5 - away, 0.0], Quat::IDENTITY.to_array())];
+        let away = if opts.scene == Scene::Flat {
+            0.0
+        } else {
+            2.0e5
+        };
+        let mut out = vec![Transform::new(
+            [0.0, GROUND - 0.5 - away, 0.0],
+            Quat::IDENTITY.to_array(),
+        )];
         for (centre, _, rot) in arena_fixtures() {
-            out.push(Transform::new((centre - Vec3::new(0.0, away, 0.0)).to_array(), rot.to_array()));
+            out.push(Transform::new(
+                (centre - Vec3::new(0.0, away, 0.0)).to_array(),
+                rot.to_array(),
+            ));
         }
         out
     }

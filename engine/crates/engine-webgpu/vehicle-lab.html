@@ -78,7 +78,8 @@
         <div class="row"><span class="muted">speed</span><input type="range" id="speed" data-opt="live" min="1" max="100" value="20" /><b id="speedOut"></b></div>
         <div class="row"><span class="muted">spin</span><input type="number" id="spin" data-opt="live" value="0" step="5" min="0" max="600" /> rad/s <span class="muted">burst</span><input type="number" id="burst" data-opt="live" value="1" min="1" max="32" />
           <select id="cylAxis" data-opt="live"><option value="flight">end on</option><option value="cross">side on</option></select></div>
-        <div class="row"><button id="fire">Fire <kbd>F</kbd></button><button id="clearShots">Clear shots</button><span class="muted">or click the scene: the launcher is the camera</span></div>
+        <div class="row"><button id="fire">Fire <kbd>F</kbd></button><button id="clearShots">Clear shots</button><span class="muted">or click the scene: the shot goes to what is under the pointer</span></div>
+        <div class="note" id="aimOut"></div>
       </div>
       <div class="mode compactor">
         <h2>Compactor</h2>
@@ -119,7 +120,7 @@
       <div class="row"><span class="muted">GPU timing</span><select id="timing" data-opt="build"><option value="off">off</option><option value="step">per step</option><option value="phases">rigid · vehicle</option></select>
         <span class="muted">coupling room</span><input type="number" id="shapes" data-opt="build" value="256" min="8" max="1024" step="8" />
         <label><input type="checkbox" id="clean" data-opt="live" /> clean layout</label></div>
-      <div class="row"><span class="muted">Measurements</span><select id="monitor" data-opt="live"><option value="1">every step (exact shot and plate impulses)</option><option value="4">15 times a second</option><option value="0">off (no readback)</option></select></div>
+      <div class="row"><span class="muted">Measurements</span><select id="monitor" data-opt="live"><option value="auto">15 times a second; every step while a shot, plate or crash is live</option><option value="1">every step</option><option value="4">15 times a second</option><option value="0">off (no readback: no numbers, no click aim)</option></select></div>
       <div class="note">These five and the car rebuild the simulation in place (its kernels differ; no page reload). Wheels: raycast (the lab's cars drive on raycast wheels and draw their own). Everything else applies as it runs.</div>
       <h2>Cutaway</h2>
       <div class="row" id="cutaway"></div>
@@ -450,12 +451,14 @@
     // (below the camera, so it is seen flying) toward the ray's point at the car's distance.
     function fire(d, sx, sy) {
       if (!W) return;
-      const reach = Math.max(2, Math.hypot(...sub3(cam.target, cam.eye)));
-      const aim = add3(cam.eye, mul3(d, reach));
-      const right = norm3(cross3(d, [0, 1, 0])), up = cross3(right, d);
-      const muzzle = add3(cam.eye, add3(mul3(d, 1.6), mul3(up, -0.45)));
-      const r = cmd({ fire: { ...shotSpec(), origin: muzzle, dir: norm3(sub3(aim, muzzle)) } });
-      tracer(sx, sy, !!r);
+      // The lab (Rust) picks what the ray meets (the car's skin as last read, else the
+      // ground) and launches from just ahead of the camera at the elevation that carries
+      // the shot, falling under gravity, through that point.
+      const r = cmd({ fire: { ...shotSpec(), pick: { origin: add3(cam.eye, mul3(d, 0.8)), dir: d } } });
+      const pk = r?.pick;
+      if (pk && !pk.reachable) warn(`${get('speed')} m/s does not reach that point: fired straight at it`);
+      $('aimOut').textContent = pk ? `aimed at the ${pk.on === 'air' ? 'air beside the car' : pk.on}, ${Math.hypot(...sub3(pk.target, cam.eye)).toFixed(1)} m away${pk.reachable ? '' : ' (out of reach at this speed)'}` : '';
+      tracer(sx, sy, !!r && (pk?.reachable ?? true));
       hud();
       canvas.focus();
     }
@@ -463,9 +466,10 @@
     function tracer(sx, sy, ok) {
       const r = canvas.getBoundingClientRect();
       tracerEl.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
-      tracerEl.innerHTML = `<line x1="${r.width / 2}" y1="${r.height}" x2="${sx}" y2="${sy}" stroke="${ok ? '#ffd166' : '#ff6b6b'}" stroke-width="2.5" stroke-dasharray="10 7"/><circle cx="${sx}" cy="${sy}" r="13" fill="none" stroke="${ok ? '#ffd166' : '#ff6b6b'}" stroke-width="2.5"/>`;
+      // A ring where the shot is aimed (the predicted impact: the picked point).
+      tracerEl.innerHTML = `<circle cx="${sx}" cy="${sy}" r="14" fill="none" stroke="${ok ? '#ffd166' : '#ff6b6b'}" stroke-width="2.5"/><circle cx="${sx}" cy="${sy}" r="3" fill="${ok ? '#ffd166' : '#ff6b6b'}"/>`;
       tracerEl.style.transition = 'none'; tracerEl.style.opacity = '1';
-      requestAnimationFrame(() => { tracerEl.style.transition = 'opacity 0.7s'; tracerEl.style.opacity = '0'; });
+      requestAnimationFrame(() => { tracerEl.style.transition = 'opacity 1.6s'; tracerEl.style.opacity = '0'; });
     }
     $('fire').onclick = () => { const r = canvas.getBoundingClientRect(); fire(norm3(sub3(cam.at, cam.eye)), r.width / 2, r.height / 2); };
     $('clearShots').onclick = () => cmd({ clear: 'shots' });
@@ -652,7 +656,7 @@
       env.drawGhosts(pass, world);
       pass.end();
       let finish = null;
-      const every = RECORD ? 1 : Number(get('monitor'));
+      const every = RECORD ? 1 : get('monitor') === 'auto' ? (w.lab.busy() ? 1 : 4) : Number(get('monitor'));
       if (read && every > 0 && (simSteps % every === 0 || simDt === 0)) {
         const now = performance.now();
         const wantBeams = RECORD ? simSteps % 6 === 0 : now - lastBeamRead > 250;

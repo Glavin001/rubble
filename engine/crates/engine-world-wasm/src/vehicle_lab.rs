@@ -193,6 +193,12 @@ impl WebVehicleLab {
         self.lab.bench.pose().to_vec()
     }
 
+    /// Whether per-step readings matter now (`Bench::busy`): a projectile in its first
+    /// seconds, a plate, a crash before its first contact, a script.
+    pub fn busy(&self) -> bool {
+        self.lab.bench.busy()
+    }
+
     /// The lab's World time (s).
     pub fn time(&self) -> f64 {
         self.lab.bench.t
