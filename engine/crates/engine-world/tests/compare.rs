@@ -104,7 +104,7 @@ fn print_the_matrix() {
 }
 
 /// The stress view: on the balcony under the load path, the root chunks carry the largest
-/// load over strength and it rises when the weight lands; the breaks are the same with the
+/// load over strength and it rises as the weights go on; the breaks are the same with the
 /// view on or off.
 #[test]
 fn the_stress_view_shows_the_root_and_changes_nothing() {
@@ -114,7 +114,8 @@ fn the_stress_view_shows_the_root_and_changes_nothing() {
         c.queue_script(&world).unwrap();
         let d = c.lab.destructibles()[0];
         let (mut idle, mut loaded) = (0.0f32, 0.0f32);
-        for step in 0..360 {
+        // Through the eighth weight (set down at 4.7 s): the root cracks under the seventh.
+        for step in 0..600 {
             c.step(&mut world).unwrap();
             let peak = world.destructible_chunk_stress(d).unwrap().map_or(0.0, |v| v.iter().flatten().fold(0.0f32, |a, &b| a.max(b)));
             if step == 40 {
@@ -131,7 +132,7 @@ fn the_stress_view_shows_the_root_and_changes_nothing() {
     assert_eq!((off.0, off.1), (on.0, on.1), "the same breaks at the same time");
     assert_eq!((off.2, off.3), (0.0, 0.0), "no view, no numbers");
     assert!(on.2 > 0.05 && on.2 < 1.0, "the balcony's own weight loads its root below strength ({})", on.2);
-    assert!(on.3 >= 1.0, "the wrecking ball takes a bond to its strength ({})", on.3);
+    assert!(on.3 >= 1.0, "the weights take a bond to its strength ({})", on.3);
 }
 
 /// The contact-force rule's stress view: nothing until something presses on the wall, the

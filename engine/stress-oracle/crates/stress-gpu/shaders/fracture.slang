@@ -1735,10 +1735,58 @@ bool lp_factor(uint k)
                 l[tri(i2, j2)] = s / l[tri(j2, j2)];
         }
     if (!ok)
-        return false;
+        return lp_factor_shifted(k, d, intact);
     for (uint w = 0; w < 6; w++)
         lp[lp_l(k) + w] = float4(l[4 * w], 4 * w + 1 < 21 ? l[4 * w + 1] : 0.0, 4 * w + 2 < 21 ? l[4 * w + 2] : 0.0, w == 5 ? asfloat(intact + 1) : l[4 * w + 3]);
     return true;
+}
+
+// A block that single precision cannot factor: a chunk held by sliver bonds, whose block is
+// positive definite but so near singular (a bond's bending stiffness against its axial
+// one times its lever arm squared, parts in 10^7 and less) that the factor's pivots round
+// to nothing. Factored with its diagonal shifted, the translations by a part `shift` of
+// their largest stiffness and the rotations of theirs, from a part in 10^6 up by tens to a
+// part in 10^3 until it factors: a stiffness that small beside the block's own. Only a
+// block the plain factor fails takes this path; every other block's factor is unchanged.
+// False when there is nothing to shift (no intact bond) or it still does not factor.
+bool lp_factor_shifted(uint k, float d[6][6], uint intact)
+{
+    float lin = max(d[0][0], max(d[1][1], d[2][2]));
+    float ang = max(d[3][3], max(d[4][4], d[5][5]));
+    if (!(lin > 0.0) || !(ang > 0.0))
+        return false;
+    float shift = 1e-6;
+    for (uint attempt = 0; attempt < 4; attempt++)
+    {
+        float l[21];
+        for (uint z0 = 0; z0 < 21; z0++)
+            l[z0] = 0.0;
+        bool ok = true;
+        for (uint i2 = 0; i2 < 6; i2++)
+            for (uint j2 = 0; j2 <= i2; j2++)
+            {
+                float s = d[i2][j2];
+                if (i2 == j2)
+                    s += shift * (i2 < 3 ? lin : ang);
+                for (uint p3 = 0; p3 < j2; p3++)
+                    s -= l[tri(i2, p3)] * l[tri(j2, p3)];
+                if (i2 == j2)
+                {
+                    ok = ok && s > 0.0;
+                    l[tri(i2, i2)] = sqrt(max(s, 1e-30));
+                }
+                else
+                    l[tri(i2, j2)] = s / l[tri(j2, j2)];
+            }
+        if (ok)
+        {
+            for (uint w = 0; w < 6; w++)
+                lp[lp_l(k) + w] = float4(l[4 * w], 4 * w + 1 < 21 ? l[4 * w + 1] : 0.0, 4 * w + 2 < 21 ? l[4 * w + 2] : 0.0, w == 5 ? asfloat(intact + 1) : l[4 * w + 3]);
+            return true;
+        }
+        shift *= 10.0;
+    }
+    return false;
 }
 
 void lp_sweep(uint k, uint from)
