@@ -156,6 +156,10 @@ mod imp {
         let options = stress_rubble::threshold::FractureOptions {
             contact: def.fracture.contact_fracture,
             strike_prediction: def.fracture.strike_prediction,
+            strike: def.fracture.strike.map(|s| match s {
+                crate::StrikeRule::Hertz => stress_ref::capability::StrikeModel::Hertz,
+                crate::StrikeRule::Analytic => stress_ref::capability::StrikeModel::Analytic { fracture_work: true },
+            }),
             ..Default::default()
         };
         ProfileSetup::new(profile_of(def.model)?, &options).map_err(|e| anyhow::anyhow!("{e}"))

@@ -41,6 +41,11 @@ pub struct FractureOptions {
     /// which then takes the strikes). `STRESS_THRESHOLD_STRIKE=0` turns it off (a
     /// measurement).
     pub strike_prediction: Option<bool>,
+    /// How a predicted strike's breaks are decided (`None`: the profile's own,
+    /// `Profile::fracture_models`). The load model stays the profile's: `load_path` with
+    /// `StrikeModel::Analytic` is the load path and the analytic local impact together.
+    /// Not `blast_gpu`'s (an error).
+    pub strike: Option<StrikeModel>,
 }
 
 /// The fracture models a profile runs, with a world's options resolved: the one place a
@@ -63,7 +68,13 @@ impl ProfileSetup {
         if !matches!(profile, Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal | Profile::BlastGpu) {
             return Err(format!("the fracture world runs threshold, load_path, impact_local or blast_gpu, not {}", profile.name()));
         }
-        let (load_model, strike_model) = profile.fracture_models()?;
+        let (load_model, mut strike_model) = profile.fracture_models()?;
+        if let Some(s) = options.strike {
+            if profile == Profile::BlastGpu && s != strike_model {
+                return Err("blast_gpu predicts its strikes by the Hertz force; it takes no other strike model".into());
+            }
+            strike_model = s;
+        }
         let contact_sweeps = match (options.contact, profile.contact_fracture()?) {
             (Some(false), _) => 0,
             (Some(true), 0) => stress_ref::capability::CONTACT_SWEEPS,

@@ -206,7 +206,10 @@ unsafe fn lab_def(d: &RbLabDef) -> anyhow::Result<LabDef> {
             fracture: FractureOptions {
                 contact_fracture: switch_in(d.contact_fracture),
                 strike_prediction: switch_in(d.strike_prediction),
+                strike: None,
             },
+            support_loss: false,
+            support_loss_dynamic_factor: 1.0,
             crush: match d.crush {
                 RbLabCrush::RB_LAB_CRUSH_OFF => LabCrush::Off,
                 RbLabCrush::RB_LAB_CRUSH_SCENE => LabCrush::Scene,

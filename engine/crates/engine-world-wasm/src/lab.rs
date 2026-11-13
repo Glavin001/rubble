@@ -56,6 +56,14 @@ struct DefJs {
     contact_fracture: Option<bool>,
     #[serde(default)]
     strike_prediction: Option<bool>,
+    /// Stress models: `'hertz'` or `'analytic'` (absent: the model's own).
+    #[serde(default)]
+    strike: Option<String>,
+    /// Stress models: support loss, and its dynamic factor (1 to 2).
+    #[serde(default)]
+    support_loss: bool,
+    #[serde(default)]
+    support_loss_dynamic_factor: Option<f32>,
     /// 0 off, 1 the scene's parameters, 2 with presets.
     #[serde(default)]
     crush: u32,
@@ -120,7 +128,13 @@ fn def_of(v: JsValue, bytes: Option<Vec<u8>>, prebuilt: Option<(&JsScene, bool)>
             fracture: FractureOptions {
                 contact_fracture: d.contact_fracture.filter(|_| stress),
                 strike_prediction: d.strike_prediction.filter(|_| stress),
+                strike: match d.strike.as_deref().filter(|_| stress) {
+                    None => None,
+                    Some(s) => Some(rubble::StrikeRule::parse(s).ok_or_else(|| anyhow::anyhow!("strike {s}: hertz or analytic"))?),
+                },
             },
+            support_loss: d.support_loss,
+            support_loss_dynamic_factor: d.support_loss_dynamic_factor.unwrap_or(1.0),
             crush: match d.crush {
                 0 => LabCrush::Off,
                 1 => LabCrush::Scene,

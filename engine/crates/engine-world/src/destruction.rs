@@ -504,6 +504,37 @@ pub struct FractureOptions {
     /// step, so the step meets the pieces. `None`: on, unless the in-step contact fracture
     /// is (it then takes the strikes).
     pub strike_prediction: Option<bool>,
+    /// How a predicted strike's breaks are decided. `None`: the model's own (`Analytic`
+    /// for `ImpactLocal`, `Hertz` for the others). `LoadPath` with `Analytic` (and strike
+    /// prediction on) is the quasi-static load solve and the dynamic impact together.
+    /// `BlastGpu` takes only its own (an error otherwise).
+    pub strike: Option<StrikeRule>,
+}
+
+/// How a predicted strike breaks bonds ([`FractureOptions::strike`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrikeRule {
+    /// Every bond whose share of the impact's Hertz peak force beats its tensile capacity.
+    Hertz,
+    /// The analytic local impact (`StrengthModel::ImpactLocal`'s): Hertz contact, an
+    /// energy ballistic limit with a plug cone, back-face spall, strain-rate strength;
+    /// a perforating shot gives up the limit's energy and leaves with its plug.
+    Analytic,
+}
+
+impl StrikeRule {
+    pub const ALL: [StrikeRule; 2] = [StrikeRule::Hertz, StrikeRule::Analytic];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StrikeRule::Hertz => "hertz",
+            StrikeRule::Analytic => "analytic",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<StrikeRule> {
+        Self::ALL.into_iter().find(|m| m.name() == name)
+    }
 }
 
 /// How a destructible is anchored to the world.

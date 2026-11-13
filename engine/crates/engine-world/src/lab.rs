@@ -127,6 +127,11 @@ pub struct LabSettings {
     pub ccd: bool,
     /// The stress models' in-step contact fracture and strike prediction.
     pub fracture: FractureOptions,
+    /// The stress models' support loss (`DestructibleDef::support_loss`): weight flows
+    /// through the bond graph to the anchors, overloaded bonds break, unsupported pieces tip.
+    pub support_loss: bool,
+    /// With `support_loss`: `DestructibleDef::support_loss_dynamic_factor` (1 to 2).
+    pub support_loss_dynamic_factor: f32,
     /// Chunk crushing (stress models; an error where no chunk can crush).
     pub crush: LabCrush,
     /// Time each step on the GPU.
@@ -144,6 +149,8 @@ impl Default for LabSettings {
             ball_speed_scale: 1.0,
             ccd: false,
             fracture: FractureOptions::default(),
+            support_loss: false,
+            support_loss_dynamic_factor: 1.0,
             crush: LabCrush::Off,
             gpu_timing: GpuTiming::Step,
         }
@@ -317,6 +324,11 @@ impl LabPlan {
         anyhow::ensure!(
             s.fracture == FractureOptions::default() || s.bonds.stress().is_some(),
             "the contact fracture and strike prediction switches are the stress models'; the {} bonds have none",
+            s.bonds.name()
+        );
+        anyhow::ensure!(
+            !s.support_loss || s.bonds.stress().is_some(),
+            "support loss is a stress model's (Threshold, LoadPath, ImpactLocal, BlastGpu); the {} bonds have none",
             s.bonds.name()
         );
         let dt = 1.0 / s.physics_hz as f64;
@@ -921,6 +933,8 @@ impl Lab {
                 asleep: false,
                 crush: crush.clone(),
                 fracture: o.fracture,
+                support_loss: o.support_loss,
+                support_loss_dynamic_factor: o.support_loss_dynamic_factor,
                 shape: ShapeDef {
                     material,
                     update_body_mass: false,
