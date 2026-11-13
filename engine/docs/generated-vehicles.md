@@ -136,6 +136,27 @@ latch and seal patterns, body mass share, collision triangle count and edge,
 sliver triangles, node distance to skin, nodes per m², vertex reach. It reads
 any JBeam car; the ETK is linted only to check the bands' self-consistency.
 
+**Energy bombs** (hard, 2026-11-13; known-bugs S3). A car must not be able to
+create energy, whatever hits it.
+
+| Check | What fails | Where |
+|---|---|---|
+| `bound_wall` | A BOUNDED beam whose bound the step cannot integrate. Its limit spring acts on the whole extension once a bound is crossed, so the force steps by ΔF = \|k_limit − k\| × bound × L across the bound zone z. Fails when ΔF·h²/(m·z) > 1 for the lighter end (the force step moves the node more than the zone in one step, and ½·ΔF·bound·L appears from nothing). | `lint::energy_bombs` |
+| `tether` | A beam between two parts that holds nothing at rest (no base spring), can pull, and never breaks, where every beam that does hold the two parts can break: once they part it pulls on a free part. A stop is push-only (SUPPORT, rest length = the length it engages at) or lets go. | `lint::energy_bombs` |
+| Stops, statically | Every gapped stop of the rigged sedan: no force however far its ends part (to 1,000 lengths), and no step of 1 mm changes its force by more than 5 kN. | `tests/sedan_energy.rs` |
+| Tear-off and fling | Every part that can leave is torn off the standing car, flung at 15 m/s and spun at 5 and 20 m/s at its rim, 1 s: the ledger never rises (2 % of the part's own kinetic energy). A wheel thrown 90 m. | `tests/sedan_energy.rs` |
+| Whole-car scenes | Side pole 186 km/h, 42° wall 106 km/h, a 25 km/h bump between two sedans: never above the starting energy. | `tests/sedan_energy.rs` |
+
+On the cars (2026-11-13): the sedan as exported at 32cbc954 fails both rules
+(84 bounds over, the worst 1,592 zones a step, 6.5e9 J; 12 tethers: the front
+wheels' stops). The sedan now passes (worst 0.26: the engine mounts; largest
+energy step 1.3 kJ). The five community cars pass both (ETK 0.67, Vertex 0.22,
+CCF 0.25, full-size SUV 0.75, boathauler 0.03 zones a step; none has a
+spring-less bounded beam between separable parts). The whole-car scenes and
+the fling run with the objective damping form on
+(`ExplicitBeamsSettings::centred_objective`); with it off a spinning part
+gains energy from its own beams' damping (the solver's, not the car's).
+
 ## Results: the Rust sedan (2026-11-08, CPU reference, surface contact on)
 
 | Check | Result | Target |

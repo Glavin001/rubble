@@ -414,3 +414,111 @@ fn measure_the_25_kmh_bump_with_the_end_direction_form() {
         eprintln!("offset {offset}: finite {finite}, rise {rise:.3e} J of {e0:.0} J");
     }
 }
+
+/// One part torn off the standing car and flung: every beam that holds it to
+/// another part broken (gapped stops left as they are), the part leaving at
+/// 15 m/s, outward and up, spinning at `rim` m/s at its farthest node. Runs
+/// 1 s; returns (largest rise J, the part's own kinetic energy at the start
+/// J, finite), or None when the part cannot leave (a beam that holds it
+/// never breaks) or is not a part of its own (fewer than 3 nodes).
+fn fling(part: &str, rim: f32, objective: bool) -> Option<(f64, f64, bool)> {
+    let d = sedan();
+    let p = d.parts.iter().position(|p| p.name == part)?;
+    let mut owner = vec![usize::MAX; d.nodes.len()];
+    for (k, q) in d.parts.iter().enumerate() {
+        for &i in &q.nodes {
+            if owner[i as usize] == usize::MAX {
+                owner[i as usize] = k;
+            }
+        }
+    }
+    let mut s = spawn(0.0);
+    s.settings.centred_objective = objective;
+    let own: Vec<usize> = (0..s.nodes.len())
+        .filter(|&i| owner.get(i) == Some(&p))
+        .collect();
+    if own.len() < 3 {
+        return None;
+    }
+    let on = |i: u32| owner.get(i as usize) == Some(&p);
+    let l0: Vec<f32> = s
+        .beams
+        .iter()
+        .map(|b| {
+            s.nodes[b.a as usize]
+                .pos
+                .distance(s.nodes[b.b as usize].pos)
+        })
+        .collect();
+    for (j, b) in s.beams.iter_mut().enumerate() {
+        if on(b.a) == on(b.b) || b.broken {
+            continue;
+        }
+        let holds = !matches!(
+            b.kind,
+            ExplicitKind::JbeamBounded | ExplicitKind::JbeamSupport
+        ) || (b.kind == ExplicitKind::JbeamBounded && b.k > 0.0)
+            || (b.kind == ExplicitKind::JbeamSupport && b.rest >= l0[j]);
+        if holds {
+            if !b.strength.is_finite() && b.group == 0 {
+                // It never breaks: the part cannot leave.
+                return None;
+            }
+            b.broken = true;
+        }
+    }
+    let n = own.len() as f32;
+    let centre = own.iter().map(|&i| s.nodes[i].pos).sum::<Vec3>() / n;
+    let car = s.nodes.iter().map(|x| x.pos).sum::<Vec3>() / s.nodes.len() as f32;
+    let out = Vec3::new(centre.x - car.x, 0.0, centre.z - car.z).normalize_or(Vec3::X);
+    let away = out * 15.0 + Vec3::Y * 4.0;
+    let axis = (out + Vec3::Y * 0.5).normalize();
+    let far = own
+        .iter()
+        .map(|&i| axis.cross(s.nodes[i].pos - centre).length())
+        .fold(1e-6f32, f32::max);
+    let mut ke = 0.0f64;
+    for &i in &own {
+        let v = away + axis.cross(s.nodes[i].pos - centre) * (rim / far);
+        s.nodes[i].vel = v;
+        ke += 0.5 * f64::from(s.nodes[i].mass) * f64::from(v.length_squared());
+    }
+    let (rise, _, finite) = run(s, 1.0);
+    Some((rise, ke, finite))
+}
+
+/// **The lint's dynamic check** (`engine/docs/generated-vehicles.md`, energy
+/// bombs): every part that can leave the car is torn off, flung and spun
+/// (5 and 20 m/s at its rim), and nothing may add energy: not a stop that
+/// still reaches for it, not its own beams' damping as it turns. The rise
+/// allowed is 2 % of the part's own kinetic energy (it lands on the car and
+/// the ground: contacts and the plain step's own single-precision wander).
+/// **Fails with the end-direction damping** (the last assertion keeps the
+/// record: the front left hub cap, spun at 20 m/s, is not finite).
+#[test]
+fn every_part_torn_off_and_spun_adds_no_energy() {
+    let parts: Vec<String> = sedan().parts.iter().map(|p| p.name.clone()).collect();
+    let mut flung = 0;
+    for part in &parts {
+        for rim in [5.0f32, 20.0] {
+            let Some((rise, ke, finite)) = fling(part, rim, true) else {
+                continue;
+            };
+            flung += 1;
+            assert!(finite, "{part} spun at {rim} m/s: not finite");
+            assert!(
+                rise <= 0.02 * ke + 20.0,
+                "{part} spun at {rim} m/s: energy rose {rise:.0} J (its own kinetic energy {ke:.0} J)"
+            );
+        }
+    }
+    assert!(
+        flung >= 40,
+        "{flung} part runs: the doors, lids, fenders, bumpers, wheels and caps alone are 36"
+    );
+    let (rise, ke, finite) = fling("sedan_hub_cap_FL", 20.0, false).expect("the hub cap leaves");
+    assert!(
+        !finite || rise > 10.0 * ke,
+        "the end-direction form no longer pumps a flung hub cap (rise {rise:.0} J of {ke:.0} J): update known-bugs S3"
+    );
+}
