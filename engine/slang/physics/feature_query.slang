@@ -9,6 +9,18 @@
 // Every operation is strict single precision (strict.slang) in the twin's order, so the
 // GPU and the CPU agree bit for bit. No workgroup memory.
 //
+// One call site. Metal's compiler (and so Chrome on macOS) inlines every call into the
+// kernel's entry point, and its compile time grows faster than that function's size.
+// A query called from five places that each sit in a function called from four is
+// twenty copies. So each heavy query here has exactly one call site: where the twin
+// calls a function several times in a row (seg_triangle's candidates, the candidate
+// walk's shape edges, a contact's passes, the overlap axes), this file runs one loop
+// over the same calls in the same order, selecting the arguments by index. The
+// operations and their order are the twin's, so the results are the same bits; only
+// the number of copies changes (the surface pass's inlined size fell about tenfold;
+// engine/scripts/wgsl-inline-size.py measures it). Keep it so: add a case to a loop
+// rather than a second call.
+//
 // Hulls: the shape holds its pose (c, ax0..ax2) and a handle; the includer defines the
 // accessors of its local records (vertices and planes with the collider's scale
 // applied, edges as vertex pairs), as the World's hull arena (engine_schema::convex)
@@ -369,50 +381,52 @@ float4 fqPierce(float3 p0, float3 p1, float3 t0, float3 t1, float3 t2, out float
     return float4(c, 1.0);
 }
 
-// seg_triangle: segment p0–p1's candidate pairs against triangle x0 x1 x2.
+// seg_triangle: segment p0–p1's candidate pairs against triangle x0 x1 x2: the
+// segment's two ends on the triangle (i = 0, 1), the triangle's three edges against
+// the segment (2..4), the pierce point (5), in the twin's order. One loop with one
+// call site of each query (see "One call site" above).
 void fqSegTri(FqShape s, float3 p0, float3 p1, float3 x0, float3 x1, float3 x2, inout FqAcc a)
 {
-    for (uint e = 0u; e < 2u; e++)
+    for (uint i = 0u; i < 6u; i++)
     {
-        float3 pe = e == 0u ? p0 : p1;
         FqPair p;
-        p.q = fqClosestTri(pe, x0, x1, x2, p.w);
-        p.cs = pe;
-        p.d = fqLen(ssub3(p.q, pe));
-        float g = fqMap(s, p);
-        fqVisit(a, p, g);
-    }
-    for (uint k = 0u; k < 3u; k++)
-    {
-        float3 ea = fqX(x0, x1, x2, k);
-        float3 eb = fqX(x0, x1, x2, (k + 1u) % 3u);
-        float2 st = fqSegSeg(p0, p1, ea, eb);
-        float3 pa = sadd3(p0, sscale(ssub3(p1, p0), st.x));
-        float3 y = sadd3(ea, sscale(ssub3(eb, ea), st.y));
-        FqPair p;
-        p.w = fqEdgeW(k, st.y);
-        p.q = y;
-        p.cs = pa;
-        p.d = fqLen(ssub3(pa, y));
-        float g = fqMap(s, p);
-        fqVisit(a, p, g);
-    }
-    float3 n = scross(ssub3(x1, x0), ssub3(x2, x0));
-    float d0 = sdot(ssub3(p0, x0), n);
-    float d1 = sdot(ssub3(p1, x0), n);
-    if ((d0 < 0.0 && d1 > 0.0) || (d0 > 0.0 && d1 < 0.0))
-    {
-        float3 c = sadd3(p0, sscale(ssub3(p1, p0), sdiv(d0, nf(d0 - d1))));
-        FqPair p;
-        p.q = fqClosestTri(c, x0, x1, x2, p.w);
-        float3 qc = ssub3(p.q, c);
-        if (sdot(qc, qc) < 1e-10)
+        if (i >= 2u && i < 5u)
         {
-            p.cs = c;
-            p.d = 0.0;
-            float g = fqMap(s, p);
-            fqVisit(a, p, g);
+            uint k = i - 2u;
+            float3 ea = fqX(x0, x1, x2, k);
+            float3 eb = fqX(x0, x1, x2, (k + 1u) % 3u);
+            float2 st = fqSegSeg(p0, p1, ea, eb);
+            float3 pa = sadd3(p0, sscale(ssub3(p1, p0), st.x));
+            float3 y = sadd3(ea, sscale(ssub3(eb, ea), st.y));
+            p.w = fqEdgeW(k, st.y);
+            p.q = y;
+            p.cs = pa;
+            p.d = fqLen(ssub3(pa, y));
         }
+        else
+        {
+            float3 pe = i == 0u ? p0 : p1;
+            if (i == 5u)
+            {
+                float3 n = scross(ssub3(x1, x0), ssub3(x2, x0));
+                float d0 = sdot(ssub3(p0, x0), n);
+                float d1 = sdot(ssub3(p1, x0), n);
+                if (!((d0 < 0.0 && d1 > 0.0) || (d0 > 0.0 && d1 < 0.0))) continue;
+                pe = sadd3(p0, sscale(ssub3(p1, p0), sdiv(d0, nf(d0 - d1))));
+            }
+            p.q = fqClosestTri(pe, x0, x1, x2, p.w);
+            p.cs = pe;
+            if (i == 5u)
+            {
+                float3 qc = ssub3(p.q, pe);
+                if (!(sdot(qc, qc) < 1e-10)) continue;
+                p.d = 0.0;
+            }
+            else
+                p.d = fqLen(ssub3(p.q, pe));
+        }
+        float g = fqMap(s, p);
+        fqVisit(a, p, g);
     }
 }
 
@@ -478,6 +492,61 @@ void fqEdgesInside(FqShape s, float3 x0, float3 x1, float3 x2, inout FqAcc a)
     }
 }
 
+// The edges the candidate walks take of a shape, in the twin's order: a capsule's
+// axis, a cylinder's axis, a triangle's 3 edges, a hull's edges, a box's 12 (axis i,
+// corner k: e = 4 i + k). A sphere has none.
+static const uint FQ_WALK_EDGES = 192u; // FQ_HULL_EDGES, the most
+uint fqWalkEdges(FqShape s)
+{
+    if (s.kind == FQ_SPH) return 0u;
+    if (s.kind == FQ_CAP || s.kind == FQ_CYL) return 1u;
+    if (s.kind == FQ_TRI) return 3u;
+    if (s.kind == FQ_HULL) return min(s.ne, FQ_HULL_EDGES);
+    return 12u;
+}
+void fqWalkEdge(FqShape s, uint e, out float3 e0, out float3 e1)
+{
+    if (s.kind == FQ_CAP)
+    {
+        e0 = s.c;
+        e1 = s.b;
+        return;
+    }
+    if (s.kind == FQ_CYL)
+    {
+        float3 h = float3(0.0, s.half.y, 0.0);
+        e0 = ssub3(s.c, h);
+        e1 = sadd3(s.c, h);
+        return;
+    }
+    if (s.kind == FQ_TRI)
+    {
+        e0 = fqTriV(s, e);
+        e1 = fqTriV(s, (e + 1u) % 3u);
+        return;
+    }
+    if (s.kind == FQ_HULL)
+    {
+        uint2 ve = fqHullEdge(s, e);
+        e0 = fqHullV(s, ve.x);
+        e1 = fqHullV(s, ve.y);
+        return;
+    }
+    uint i = e / 4u;
+    uint k = e % 4u;
+    uint u = (i + 1u) % 3u;
+    uint v = (i + 2u) % 3u;
+    float su = (k & 1u) != 0u ? fqHalf(s, u) : -fqHalf(s, u);
+    float sv = (k & 2u) != 0u ? fqHalf(s, v) : -fqHalf(s, v);
+    float3 m = sadd3(sadd3(s.c, sscale(fqAxis(s, u), su)), sscale(fqAxis(s, v), sv));
+    float3 h = sscale(fqAxis(s, i), fqHalf(s, i));
+    e0 = ssub3(m, h);
+    e1 = sadd3(m, h);
+}
+// A capsule or a cylinder: its one edge is always taken (no fqFar cull) and it has no
+// faces to be inside of.
+bool fqWalkAxisOnly(FqShape s) { return s.kind == FQ_CAP || s.kind == FQ_CYL; }
+
 // x_candidates.
 void fqCandidates(FqShape s, float3 x0, float3 x1, float3 x2, inout FqAcc a)
 {
@@ -490,28 +559,21 @@ void fqCandidates(FqShape s, float3 x0, float3 x1, float3 x2, inout FqAcc a)
         fqVisit(a, p, nf(p.d - s.half.x));
         return;
     }
-    if (s.kind == FQ_CAP)
-    {
-        fqSegTri(s, s.c, s.b, x0, x1, x2, a);
-        return;
-    }
-    if (s.kind == FQ_CYL)
-    {
-        float3 h = float3(0.0, s.half.y, 0.0);
-        fqSegTri(s, ssub3(s.c, h), sadd3(s.c, h), x0, x1, x2, a);
-        return;
-    }
     float3 tlo = min(min(x0, x1), x2);
     float3 thi = max(max(x0, x1), x2);
+    bool culls = !fqWalkAxisOnly(s);
+    uint ne = fqWalkEdges(s);
+    for (uint e = 0u; e < FQ_WALK_EDGES; e++)
+    {
+        if (e >= ne) break;
+        float3 e0;
+        float3 e1;
+        fqWalkEdge(s, e, e0, e1);
+        if (culls && fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
+        fqSegTri(s, e0, e1, x0, x1, x2, a);
+    }
     if (s.kind == FQ_TRI)
     {
-        for (uint k = 0u; k < 3u; k++)
-        {
-            float3 e0 = fqTriV(s, k);
-            float3 e1 = fqTriV(s, (k + 1u) % 3u);
-            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
-            fqSegTri(s, e0, e1, x0, x1, x2, a);
-        }
         for (uint k = 0u; k < 3u; k++)
         {
             float3 p0 = fqX(x0, x1, x2, k);
@@ -528,37 +590,7 @@ void fqCandidates(FqShape s, float3 x0, float3 x1, float3 x2, inout FqAcc a)
         }
         return;
     }
-    if (s.kind == FQ_HULL)
-    {
-        for (uint e = 0u; e < FQ_HULL_EDGES; e++)
-        {
-            if (e >= s.ne) break;
-            uint2 ve = fqHullEdge(s, e);
-            float3 e0 = fqHullV(s, ve.x);
-            float3 e1 = fqHullV(s, ve.y);
-            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
-            fqSegTri(s, e0, e1, x0, x1, x2, a);
-        }
-        fqEdgesInside(s, x0, x1, x2, a);
-        return;
-    }
-    for (uint i = 0u; i < 3u; i++)
-    {
-        uint u = (i + 1u) % 3u;
-        uint v = (i + 2u) % 3u;
-        for (uint k = 0u; k < 4u; k++)
-        {
-            float su = (k & 1u) != 0u ? fqHalf(s, u) : -fqHalf(s, u);
-            float sv = (k & 2u) != 0u ? fqHalf(s, v) : -fqHalf(s, v);
-            float3 m = sadd3(sadd3(s.c, sscale(fqAxis(s, u), su)), sscale(fqAxis(s, v), sv));
-            float3 e = sscale(fqAxis(s, i), fqHalf(s, i));
-            float3 e0 = ssub3(m, e);
-            float3 e1 = sadd3(m, e);
-            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
-            fqSegTri(s, e0, e1, x0, x1, x2, a);
-        }
-    }
-    fqEdgesInside(s, x0, x1, x2, a);
+    if (!fqWalkAxisOnly(s)) fqEdgesInside(s, x0, x1, x2, a);
 }
 
 // point_distance: x's distance to the shape when outside (.y 1), else .y 0.
@@ -710,52 +742,65 @@ float4 fqTriNormal(FqShape s)
     return float4(sdiv3(n, l), 1.0);
 }
 
-// overlap_axis.
+// The shape's own axes overlap_axis tests after the element's (the twin's order): a
+// box's 3, a cylinder's y, a hull's face normals, a triangle's normal (.w 0 when it is
+// degenerate: skipped). A capsule and a sphere have none.
+static const uint FQ_OWN_AXES = 128u; // FQ_HULL_FACES, the most
+uint fqOwnAxes(FqShape s)
+{
+    if (s.kind == FQ_BOX) return 3u;
+    if (s.kind == FQ_CYL || s.kind == FQ_TRI) return 1u;
+    if (s.kind == FQ_HULL) return min(s.nf, FQ_HULL_FACES);
+    return 0u;
+}
+float4 fqOwnAxis(FqShape s, uint j)
+{
+    if (s.kind == FQ_BOX) return float4(fqAxis(s, j), 1.0);
+    if (s.kind == FQ_CYL) return float4(0.0, 1.0, 0.0, 1.0);
+    if (s.kind == FQ_HULL) return float4(fqHullP(s, j).xyz, 1.0);
+    return fqTriNormal(s);
+}
+
+// overlap_axis: the axes in the twin's order through one fqAxisTest call site: the
+// triangle's normal n (j = 0), the shape's own (1..), then each triangle edge crossed
+// with each of the shape's edge directions.
 float3 fqOverlapAxis(FqShape s, float3 x0, float3 x1, float3 x2, float3 n)
 {
     float best = 0.0;
     float3 axis = n;
     bool first = true;
-    fqAxisTest(s, n, x0, x1, x2, best, axis, first);
-    if (s.kind == FQ_BOX)
+    uint own = fqOwnAxes(s);
+    uint nd = min(fqDirCount(s), FQ_HULL_EDGES);
+    uint count = 1u + own + 3u * nd;
+    for (uint j = 0u; j < 1u + FQ_OWN_AXES + 3u * FQ_HULL_EDGES; j++)
     {
-        fqAxisTest(s, s.ax0, x0, x1, x2, best, axis, first);
-        fqAxisTest(s, s.ax1, x0, x1, x2, best, axis, first);
-        fqAxisTest(s, s.ax2, x0, x1, x2, best, axis, first);
-    }
-    else if (s.kind == FQ_CYL)
-        fqAxisTest(s, float3(0.0, 1.0, 0.0), x0, x1, x2, best, axis, first);
-    else if (s.kind == FQ_HULL)
-    {
-        for (uint f = 0u; f < FQ_HULL_FACES; f++)
+        if (j >= count) break;
+        float3 u = n;
+        if (j > own)
         {
-            if (f >= s.nf) break;
-            fqAxisTest(s, fqHullP(s, f).xyz, x0, x1, x2, best, axis, first);
-        }
-    }
-    else if (s.kind == FQ_TRI)
-    {
-        float4 tn = fqTriNormal(s);
-        if (tn.w != 0.0) fqAxisTest(s, tn.xyz, x0, x1, x2, best, axis, first);
-    }
-    uint nd = fqDirCount(s);
-    for (uint k = 0u; k < 3u; k++)
-    {
-        float3 e = ssub3(fqX(x0, x1, x2, (k + 1u) % 3u), fqX(x0, x1, x2, k));
-        for (uint j = 0u; j < FQ_HULL_EDGES; j++)
-        {
-            if (j >= nd) break;
-            float3 d = fqDir(s, j);
+            uint k = (j - 1u - own) / nd;
+            float3 e = ssub3(fqX(x0, x1, x2, (k + 1u) % 3u), fqX(x0, x1, x2, k));
+            float3 d = fqDir(s, (j - 1u - own) % nd);
             float3 c = scross(e, d);
             float l2 = sdot(c, c);
             if (!(l2 > smul(1e-12, smul(sdot(e, e), sdot(d, d))))) continue;
-            fqAxisTest(s, sdiv3(c, ssqrt(l2)), x0, x1, x2, best, axis, first);
+            u = sdiv3(c, ssqrt(l2));
         }
+        else if (j > 0u)
+        {
+            float4 o = fqOwnAxis(s, j - 1u);
+            if (o.w == 0.0) continue;
+            u = o.xyz;
+        }
+        fqAxisTest(s, u, x0, x1, x2, best, axis, first);
     }
     return axis;
 }
 
-// triangle_contact: a hit (weights w, normal n, gap g, point q).
+// triangle_contact: a hit (weights w, normal n, gap g, point q). The candidate walk
+// runs up to four times (the least gap, the pairs at it, then for a deep contact the
+// support along the overlap axis and the pairs at it): one loop, one fqCandidates
+// call site, the twin's steps between the walks.
 bool fqContact(FqShape s, float3 x0, float3 x1, float3 x2, float r, out float3 w, out float3 n, out float g,
                out float3 q)
 {
@@ -769,39 +814,52 @@ bool fqContact(FqShape s, float3 x0, float3 x1, float3 x2, float r, out float3 w
     float3 tn = sdiv3(nc, nl);
     FqAcc a = fqAccNew();
     a.lim = r;
-    fqCandidates(s, x0, x1, x2, a);
-    float gx = a.gx;
-    if (!(gx <= r)) return false;
-    for (uint k = 0u; k < 3u; k++)
+    float gx = 0.0;
+    for (uint walk = 0u; walk < 4u; walk++)
     {
-        float2 pd = fqPointDist(s, fqX(x0, x1, x2, k));
-        if (pd.y != 0.0 && pd.x <= nf(gx + FQ_TIE)) return false;
+        fqCandidates(s, x0, x1, x2, a);
+        if (walk == 0u)
+        {
+            gx = a.gx;
+            if (!(gx <= r)) return false;
+            for (uint k = 0u; k < 3u; k++)
+            {
+                float2 pd = fqPointDist(s, fqX(x0, x1, x2, k));
+                if (pd.y != 0.0 && pd.x <= nf(gx + FQ_TIE)) return false;
+            }
+            a.pass = 1u;
+        }
+        else if (walk == 1u)
+        {
+            float kf = float(a.k);
+            w = float3(sdiv(a.w.x, kf), sdiv(a.w.y, kf), sdiv(a.w.z, kf));
+            q = sdiv3(a.q, kf);
+            float3 cs = sdiv3(a.cs, kf);
+            uint nz = (w.x > 0.0 ? 1u : 0u) + (w.y > 0.0 ? 1u : 0u) + (w.z > 0.0 ? 1u : 0u);
+            if (nz <= 1u) return false;
+            float3 dv = ssub3(cs, q);
+            float dl = fqLen(dv);
+            g = gx;
+            if (gx > FQ_PIERCE && dl > FQ_PIERCE)
+            {
+                n = sdiv3(dv, dl);
+                return true;
+            }
+            n = fqOverlapAxis(s, x0, x1, x2, tn);
+            fqAccDeep(a, n, 2u);
+        }
+        else if (walk == 2u)
+        {
+            if (a.any == 0u) return true;
+            fqAccDeep(a, n, 3u);
+        }
+        else
+        {
+            float kf = float(a.k);
+            w = float3(sdiv(a.w.x, kf), sdiv(a.w.y, kf), sdiv(a.w.z, kf));
+            q = sdiv3(a.q, kf);
+        }
     }
-    a.pass = 1u;
-    fqCandidates(s, x0, x1, x2, a);
-    float kf = float(a.k);
-    w = float3(sdiv(a.w.x, kf), sdiv(a.w.y, kf), sdiv(a.w.z, kf));
-    q = sdiv3(a.q, kf);
-    float3 cs = sdiv3(a.cs, kf);
-    uint nz = (w.x > 0.0 ? 1u : 0u) + (w.y > 0.0 ? 1u : 0u) + (w.z > 0.0 ? 1u : 0u);
-    if (nz <= 1u) return false;
-    float3 dv = ssub3(cs, q);
-    float dl = fqLen(dv);
-    g = gx;
-    if (gx > FQ_PIERCE && dl > FQ_PIERCE)
-    {
-        n = sdiv3(dv, dl);
-        return true;
-    }
-    n = fqOverlapAxis(s, x0, x1, x2, tn);
-    fqAccDeep(a, n, 2u);
-    fqCandidates(s, x0, x1, x2, a);
-    if (a.any == 0u) return true;
-    fqAccDeep(a, n, 3u);
-    fqCandidates(s, x0, x1, x2, a);
-    kf = float(a.k);
-    w = float3(sdiv(a.w.x, kf), sdiv(a.w.y, kf), sdiv(a.w.z, kf));
-    q = sdiv3(a.q, kf);
     return true;
 }
 
@@ -809,31 +867,34 @@ bool fqContact(FqShape s, float3 x0, float3 x1, float3 x2, float r, out float3 w
 
 float fqSegParam(float3 p0, float3 d, float dd, float3 x) { return fqClamp01(sdiv(sdot(ssub3(x, p0), d), dd)); }
 
-// edge_beam: shape edge e0–e1 against beam p0–p1 (d = p1 − p0, dd = d·d).
+// edge_beam: shape edge e0–e1 against beam p0–p1 (d = p1 − p0, dd = d·d): the two
+// lines' closest points unless parallel (i = 0), then the edge's two ends on the beam
+// (1, 2), in the twin's order; one call site of each query.
 void fqEdgeBeam(FqShape s, float3 e0, float3 e1, float3 p0, float3 p1, float3 d, float dd, inout FqAcc a)
 {
     float3 de = ssub3(e1, e0);
-    float3 c = scross(d, de);
-    if (sdot(c, c) > smul(1e-12, smul(dd, sdot(de, de))))
+    for (uint i = 0u; i < 3u; i++)
     {
-        float2 st = fqSegSeg(p0, p1, e0, e1);
         FqPair p;
-        p.q = sadd3(p0, sscale(d, st.x));
-        p.cs = sadd3(e0, sscale(de, st.y));
-        p.w = float3(nf(1.0 - st.x), st.x, 0.0);
-        p.d = fqLen(ssub3(p.q, p.cs));
-        float g = fqMap(s, p);
-        fqVisit(a, p, g);
-    }
-    for (uint e = 0u; e < 2u; e++)
-    {
-        float3 pe = e == 0u ? e0 : e1;
-        float t = fqSegParam(p0, d, dd, pe);
-        FqPair p;
-        p.q = sadd3(p0, sscale(d, t));
-        p.cs = pe;
-        p.w = float3(nf(1.0 - t), t, 0.0);
-        p.d = fqLen(ssub3(p.q, pe));
+        if (i == 0u)
+        {
+            float3 c = scross(d, de);
+            if (!(sdot(c, c) > smul(1e-12, smul(dd, sdot(de, de))))) continue;
+            float2 st = fqSegSeg(p0, p1, e0, e1);
+            p.q = sadd3(p0, sscale(d, st.x));
+            p.cs = sadd3(e0, sscale(de, st.y));
+            p.w = float3(nf(1.0 - st.x), st.x, 0.0);
+            p.d = fqLen(ssub3(p.q, p.cs));
+        }
+        else
+        {
+            float3 pe = i == 1u ? e0 : e1;
+            float t = fqSegParam(p0, d, dd, pe);
+            p.q = sadd3(p0, sscale(d, t));
+            p.cs = pe;
+            p.w = float3(nf(1.0 - t), t, 0.0);
+            p.d = fqLen(ssub3(p.q, pe));
+        }
         float g = fqMap(s, p);
         fqVisit(a, p, g);
     }
@@ -873,28 +934,21 @@ void fqSegCandidates(FqShape s, float3 p0, float3 p1, inout FqAcc a)
         fqVisit(a, p, nf(p.d - s.half.x));
         return;
     }
-    if (s.kind == FQ_CAP)
-    {
-        fqEdgeBeam(s, s.c, s.b, p0, p1, d, dd, a);
-        return;
-    }
-    if (s.kind == FQ_CYL)
-    {
-        float3 h = float3(0.0, s.half.y, 0.0);
-        fqEdgeBeam(s, ssub3(s.c, h), sadd3(s.c, h), p0, p1, d, dd, a);
-        return;
-    }
     float3 tlo = min(p0, p1);
     float3 thi = max(p0, p1);
+    bool culls = !fqWalkAxisOnly(s);
+    uint ne = fqWalkEdges(s);
+    for (uint e = 0u; e < FQ_WALK_EDGES; e++)
+    {
+        if (e >= ne) break;
+        float3 e0;
+        float3 e1;
+        fqWalkEdge(s, e, e0, e1);
+        if (culls && fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
+        fqEdgeBeam(s, e0, e1, p0, p1, d, dd, a);
+    }
     if (s.kind == FQ_TRI)
     {
-        for (uint k = 0u; k < 3u; k++)
-        {
-            float3 e0 = fqTriV(s, k);
-            float3 e1 = fqTriV(s, (k + 1u) % 3u);
-            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
-            fqEdgeBeam(s, e0, e1, p0, p1, d, dd, a);
-        }
         float t;
         float4 c = fqPierce(p0, p1, s.c, s.b, s.ax0, t);
         if (c.w != 0.0)
@@ -908,37 +962,7 @@ void fqSegCandidates(FqShape s, float3 p0, float3 p1, inout FqAcc a)
         }
         return;
     }
-    if (s.kind == FQ_HULL)
-    {
-        for (uint e = 0u; e < FQ_HULL_EDGES; e++)
-        {
-            if (e >= s.ne) break;
-            uint2 ve = fqHullEdge(s, e);
-            float3 e0 = fqHullV(s, ve.x);
-            float3 e1 = fqHullV(s, ve.y);
-            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
-            fqEdgeBeam(s, e0, e1, p0, p1, d, dd, a);
-        }
-        fqBeamInside(s, p0, p1, a);
-        return;
-    }
-    for (uint i = 0u; i < 3u; i++)
-    {
-        uint u = (i + 1u) % 3u;
-        uint v = (i + 2u) % 3u;
-        for (uint k = 0u; k < 4u; k++)
-        {
-            float su = (k & 1u) != 0u ? fqHalf(s, u) : -fqHalf(s, u);
-            float sv = (k & 2u) != 0u ? fqHalf(s, v) : -fqHalf(s, v);
-            float3 m = sadd3(sadd3(s.c, sscale(fqAxis(s, u), su)), sscale(fqAxis(s, v), sv));
-            float3 e = sscale(fqAxis(s, i), fqHalf(s, i));
-            float3 e0 = ssub3(m, e);
-            float3 e1 = sadd3(m, e);
-            if (fqFar(e0, e1, tlo, thi, fqPrune(a))) continue;
-            fqEdgeBeam(s, e0, e1, p0, p1, d, dd, a);
-        }
-    }
-    fqBeamInside(s, p0, p1, a);
+    if (!fqWalkAxisOnly(s)) fqBeamInside(s, p0, p1, a);
 }
 
 // One axis of seg_overlap_axis.
@@ -961,55 +985,51 @@ void fqSegAxisTest(FqShape s, float3 u, float3 x0, float3 x1, inout float best, 
     }
 }
 
-// seg_overlap_axis.
+// seg_overlap_axis: the axes in the twin's order through one fqSegAxisTest call site:
+// the shape's own (fqOwnAxis), the beam crossed with each of the shape's edge
+// directions, and, when none of those was a valid axis, a perpendicular of the beam.
 float3 fqSegOverlapAxis(FqShape s, float3 x0, float3 x1)
 {
     float3 d = ssub3(x1, x0);
     float best = 0.0;
     float3 axis = float3(0.0, 0.0, 0.0);
     bool first = true;
-    if (s.kind == FQ_BOX)
+    uint own = fqOwnAxes(s);
+    uint nd = min(fqDirCount(s), FQ_HULL_EDGES);
+    uint count = own + nd + 1u;
+    for (uint j = 0u; j < FQ_OWN_AXES + FQ_HULL_EDGES + 1u; j++)
     {
-        fqSegAxisTest(s, s.ax0, x0, x1, best, axis, first);
-        fqSegAxisTest(s, s.ax1, x0, x1, best, axis, first);
-        fqSegAxisTest(s, s.ax2, x0, x1, best, axis, first);
-    }
-    else if (s.kind == FQ_CYL)
-        fqSegAxisTest(s, float3(0.0, 1.0, 0.0), x0, x1, best, axis, first);
-    else if (s.kind == FQ_HULL)
-    {
-        for (uint f = 0u; f < FQ_HULL_FACES; f++)
+        if (j >= count) break;
+        float3 u;
+        if (j < own)
         {
-            if (f >= s.nf) break;
-            fqSegAxisTest(s, fqHullP(s, f).xyz, x0, x1, best, axis, first);
+            float4 o = fqOwnAxis(s, j);
+            if (o.w == 0.0) continue;
+            u = o.xyz;
         }
-    }
-    else if (s.kind == FQ_TRI)
-    {
-        float4 tn = fqTriNormal(s);
-        if (tn.w != 0.0) fqSegAxisTest(s, tn.xyz, x0, x1, best, axis, first);
-    }
-    uint nd = fqDirCount(s);
-    for (uint j = 0u; j < FQ_HULL_EDGES; j++)
-    {
-        if (j >= nd) break;
-        float3 e = fqDir(s, j);
-        float3 c = scross(d, e);
-        float l2 = sdot(c, c);
-        if (!(l2 > smul(1e-12, smul(sdot(d, d), sdot(e, e))))) continue;
-        fqSegAxisTest(s, sdiv3(c, ssqrt(l2)), x0, x1, best, axis, first);
-    }
-    if (first)
-    {
-        float3 ax = abs(d.x) <= max(abs(d.y), abs(d.z)) ? float3(1.0, 0.0, 0.0) : float3(0.0, 1.0, 0.0);
-        float3 c = scross(d, ax);
-        fqSegAxisTest(s, sdiv3(c, fqLen(c)), x0, x1, best, axis, first);
+        else if (j < own + nd)
+        {
+            float3 e = fqDir(s, j - own);
+            float3 c = scross(d, e);
+            float l2 = sdot(c, c);
+            if (!(l2 > smul(1e-12, smul(sdot(d, d), sdot(e, e))))) continue;
+            u = sdiv3(c, ssqrt(l2));
+        }
+        else
+        {
+            if (!first) break;
+            float3 ax = abs(d.x) <= max(abs(d.y), abs(d.z)) ? float3(1.0, 0.0, 0.0) : float3(0.0, 1.0, 0.0);
+            float3 c = scross(d, ax);
+            u = sdiv3(c, fqLen(c));
+        }
+        fqSegAxisTest(s, u, x0, x1, best, axis, first);
     }
     return axis;
 }
 
 // segment_contact: a hit of beam x0–x1 (weights (w0, w1, 0), normal n, gap g, point q),
-// and when `two` a second (w2, q2; the same normal and gap).
+// and when `two` a second (w2, q2; the same normal and gap). The candidate walk runs up
+// to four times, as fqContact's: one loop, one fqSegCandidates call site.
 bool fqSegContact(FqShape s, float3 x0, float3 x1, float r, out float3 w, out float3 n, out float g, out float3 q,
                   out bool two, out float3 w2, out float3 q2)
 {
@@ -1024,41 +1044,55 @@ bool fqSegContact(FqShape s, float3 x0, float3 x1, float r, out float3 w, out fl
     if (!(sdot(d, d) > 1e-12)) return false;
     FqAcc a = fqAccNew();
     a.lim = r;
-    fqSegCandidates(s, x0, x1, a);
-    float gx = a.gx;
-    if (!(gx <= r)) return false;
-    float2 pd = fqPointDist(s, x0);
-    if (pd.y != 0.0 && pd.x <= nf(gx + FQ_TIE)) return false;
-    pd = fqPointDist(s, x1);
-    if (pd.y != 0.0 && pd.x <= nf(gx + FQ_TIE)) return false;
-    a.pass = 1u;
-    fqSegCandidates(s, x0, x1, a);
-    float kf = float(a.k);
-    w = float3(sdiv(a.w.x, kf), sdiv(a.w.y, kf), 0.0);
-    q = sdiv3(a.q, kf);
-    float3 cs = sdiv3(a.cs, kf);
-    if (!(w.x > 0.0 && w.y > 0.0)) return false;
-    float3 dv = ssub3(cs, q);
-    float dl = fqLen(dv);
-    g = gx;
-    if (gx > FQ_PIERCE && dl > FQ_PIERCE)
+    float gx = 0.0;
+    for (uint walk = 0u; walk < 4u; walk++)
     {
-        n = sdiv3(dv, dl);
-        return true;
-    }
-    n = fqSegOverlapAxis(s, x0, x1);
-    fqAccDeep(a, n, 2u);
-    fqSegCandidates(s, x0, x1, a);
-    if (a.any == 0u) return true;
-    fqAccDeep(a, n, 4u);
-    fqSegCandidates(s, x0, x1, a);
-    w = a.lw;
-    q = a.lq;
-    if (a.hw.y > a.lw.y)
-    {
-        two = true;
-        w2 = a.hw;
-        q2 = a.hq;
+        fqSegCandidates(s, x0, x1, a);
+        if (walk == 0u)
+        {
+            gx = a.gx;
+            if (!(gx <= r)) return false;
+            for (uint k = 0u; k < 2u; k++)
+            {
+                float2 pd = fqPointDist(s, k == 0u ? x0 : x1);
+                if (pd.y != 0.0 && pd.x <= nf(gx + FQ_TIE)) return false;
+            }
+            a.pass = 1u;
+        }
+        else if (walk == 1u)
+        {
+            float kf = float(a.k);
+            w = float3(sdiv(a.w.x, kf), sdiv(a.w.y, kf), 0.0);
+            q = sdiv3(a.q, kf);
+            float3 cs = sdiv3(a.cs, kf);
+            if (!(w.x > 0.0 && w.y > 0.0)) return false;
+            float3 dv = ssub3(cs, q);
+            float dl = fqLen(dv);
+            g = gx;
+            if (gx > FQ_PIERCE && dl > FQ_PIERCE)
+            {
+                n = sdiv3(dv, dl);
+                return true;
+            }
+            n = fqSegOverlapAxis(s, x0, x1);
+            fqAccDeep(a, n, 2u);
+        }
+        else if (walk == 2u)
+        {
+            if (a.any == 0u) return true;
+            fqAccDeep(a, n, 4u);
+        }
+        else
+        {
+            w = a.lw;
+            q = a.lq;
+            if (a.hw.y > a.lw.y)
+            {
+                two = true;
+                w2 = a.hw;
+                q2 = a.hq;
+            }
+        }
     }
     return true;
 }

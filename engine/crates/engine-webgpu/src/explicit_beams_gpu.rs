@@ -173,8 +173,10 @@ struct ContactPipes {
     groups: wgpu::ComputePipeline,
     /// The solo vehicles' frame (`EB_VV_SOLO`).
     solo: wgpu::ComputePipeline,
-    /// The groups of more than four members ([`Kernel::ContactBig`]).
-    big: wgpu::ComputePipeline,
+    /// The groups of more than four members ([`Kernel::ContactBig`]); `None` for a
+    /// fleet of at most [`plan::VV_PART`] vehicles, which cannot form one (the
+    /// plan then never gives that dispatch a workgroup): its module is not compiled.
+    big: Option<wgpu::ComputePipeline>,
 }
 
 /// The vehicle-contact passes' bind group layout entries: the frame's bindings,
@@ -391,6 +393,7 @@ impl Contact {
         (status_at, cap_at): (u64, u64),
         args_init: &[u8],
         build_pipes: bool,
+        big_groups: bool,
     ) -> Self {
         let args_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("explicit-beams-vv-args"),
@@ -455,7 +458,7 @@ impl Contact {
             sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), &plan_layout),
             groups: make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout),
             solo: make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout),
-            big: make(plan::CONTACT_ENTRY, big_wgsl, &contact_layout),
+            big: big_groups.then(|| make(plan::CONTACT_ENTRY, big_wgsl, &contact_layout)),
         });
         Self {
             pipes,
@@ -644,7 +647,9 @@ impl ExplicitBeamsGpu {
                 layout: Some(contact_entries(true)),
                 deferred: false,
             }));
-            for kernel in [Kernel::Contact, Kernel::Solo, Kernel::ContactBig] {
+            // (The larger groups' module only for a fleet that can form one.)
+            let big = (vehicles.len() > plan::VV_PART).then_some(Kernel::ContactBig);
+            for kernel in [Kernel::Contact, Kernel::Solo].into_iter().chain(big) {
                 specs.push(crate::ComputeSpec {
                     label: kernel.entry(),
                     module: kernel.module_for(aero, lanes, surface),
@@ -735,6 +740,7 @@ impl ExplicitBeamsGpu {
             (layout.status.base, layout.status.cap),
             &upload.bytes(plan::BIND_ARGS),
             vehicles.len() > 1,
+            vehicles.len() > plan::VV_PART,
         );
         let bufs = [
             params.clone(),
@@ -1779,7 +1785,10 @@ impl ExplicitBeamsGpu {
                     pass.set_bind_group(0, g, &[]);
                 } else {
                     let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
-                    pass.set_pipeline(&p.big);
+                    // At most VV_PART vehicles: no group this dispatch steps can
+                    // exist (its indirect count is always 0), and it has no pipeline.
+                    let Some(big) = &p.big else { return };
+                    pass.set_pipeline(big);
                     pass.set_bind_group(0, &c.contact_group, &[]);
                 }
             }

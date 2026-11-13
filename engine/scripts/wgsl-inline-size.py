@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How big each WGSL module's entry point is once every call is inlined.
 
-    engine/scripts/wgsl-inline-size.py <dir-or-files...> [--top N] [--callers N] [--entry NAME]
+    engine/scripts/wgsl-inline-size.py <dir-or-files...> [--top N] [--callers N] [--subtrees N] [--entry NAME]
 
 Metal's compiler (and so Chrome on macOS) inlines every function into the entry
 point, and its compile time grows faster than linearly with that one function's
@@ -9,7 +9,8 @@ size. A module's bytes say little: a helper called from five places counts five
 times. This prints, per module, its bytes, functions, and the entry point's
 inlined size (lines, loops, barriers, buffer accesses), then the functions that
 contribute most (own lines x the number of times they end up inlined), and with
---callers the most copied functions with the callers that multiply them.
+--callers the most copied functions with the callers that multiply them, with
+--subtrees the largest functions as inlined (a function with all it calls).
 
 Pure text analysis (no GPU, no compiler): function bodies are found by brace
 matching, calls by name. Good for ranking and for seeing what a change does to
@@ -44,7 +45,7 @@ def functions(src):
     return out
 
 
-def analyse(path, top, entry_name, callers=0):
+def analyse(path, top, entry_name, callers=0, subtrees=0):
     src = open(path).read()
     fns = functions(src)
     names = set(fns)
@@ -94,6 +95,12 @@ def analyse(path, top, entry_name, callers=0):
             heavy = sorted(((own[f]['lines'] * n, n, own[f]['lines'], f) for f, n in copies.items()), reverse=True)[:top]
             for total, n, lines, f in heavy:
                 print(f'        {total:8d} lines = {lines:5d} x {n:4d} copies  {f}')
+        if subtrees:
+            # The biggest functions as inlined (their whole subtree), with their copies.
+            copies = times(e)
+            big = sorted(((dict(inlined(f))['lines'], f) for f in copies), reverse=True)[:subtrees]
+            for lines, f in big:
+                print(f'        {lines:8d} inlined lines x {copies[f]:4d} copies  {f}')
         if callers:
             # Why a function has its copies: each caller's call sites x its own copies.
             copies = times(e)
@@ -106,7 +113,11 @@ def analyse(path, top, entry_name, callers=0):
 
 def main():
     args = sys.argv[1:]
-    top, entry, callers = 0, None, 0
+    top, entry, callers, subtrees = 0, None, 0, 0
+    if '--subtrees' in args:
+        i = args.index('--subtrees')
+        subtrees = int(args[i + 1])
+        del args[i:i + 2]
     if '--callers' in args:
         i = args.index('--callers')
         callers = int(args[i + 1])
@@ -132,9 +143,9 @@ def main():
     print(f'{"module":44s} {"KB":>6s} {"fns":>5s} {"inlined lines":>14s} {"loops":>7s} {"barriers":>9s} {"accesses":>9s}')
     all_rows = []
     for p in paths:
-        if top or callers:
+        if top or callers or subtrees:
             print(os.path.basename(p))
-        all_rows += analyse(p, top, entry, callers)
+        all_rows += analyse(p, top, entry, callers, subtrees)
     for name, e, size, nf, t in sorted(all_rows, key=lambda r: r[4]['lines']):
         print(f'{name[:-5]:44s} {size / 1024:6.0f} {nf:5d} {t["lines"]:14d} {t["loops"]:7d} {t["barriers"]:9d} {t["access"]:9d}')
     return 0

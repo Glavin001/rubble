@@ -203,6 +203,10 @@ pub const CPL_SPHERE_WORDS: u32 = 16;
 /// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
 /// `sleepRec`; after centred damping's word 84). The next word is the awake-list flag.
 pub const W_SLEEP: usize = 85;
+/// Members of a contact group stepped side by side (the kernel's `VV_PART`): larger
+/// groups run in their own dispatch ([`Kernel::ContactBig`]), so a fleet of at most
+/// this many vehicles never needs that module.
+pub const VV_PART: usize = 4;
 /// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
 pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
