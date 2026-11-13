@@ -2948,6 +2948,7 @@ mod tests {
             fast_inv_sqrt: true,
             triangle_throttle: true,
             centred_damping: false,
+            centred_objective: false,
         };
         let mut vs = Vec::new();
         for k in 0..2 {

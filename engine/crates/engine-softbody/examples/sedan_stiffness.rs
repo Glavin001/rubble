@@ -31,9 +31,9 @@ use std::collections::BTreeMap;
 
 static NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-const CATS: [&str; 6] = ["body", "door", "hood", "trunk", "fender", "bumper"];
+pub const CATS: [&str; 6] = ["body", "door", "hood", "trunk", "fender", "bumper"];
 
-fn cat_of(part: &str) -> &'static str {
+pub fn cat_of(part: &str) -> &'static str {
     let p = part.to_lowercase();
     if p.contains("door") {
         "door"
@@ -62,7 +62,7 @@ fn pct(v: &mut [f64], q: f64) -> f64 {
 
 /// A linear spring for the modal model: nodes, unit direction, k, isotropic.
 #[derive(Clone, Copy)]
-struct Spring {
+pub struct Spring {
     a: usize,
     b: usize,
     d: DVec3,
@@ -87,7 +87,7 @@ fn bilateral(kind: ExplicitKind) -> Option<bool> {
     }
 }
 
-fn springs_of(s: &ExplicitBeams, k_override: Option<&[f32]>) -> Vec<Spring> {
+pub fn springs_of(s: &ExplicitBeams, k_override: Option<&[f32]>) -> Vec<Spring> {
     let mut out = Vec::new();
     for (j, b) in s.beams.iter().enumerate() {
         if b.broken {
@@ -110,7 +110,7 @@ fn springs_of(s: &ExplicitBeams, k_override: Option<&[f32]>) -> Vec<Spring> {
 /// `mass`), springs to nodes outside `free` held at the far end (`held`) or
 /// dropped (`!held`). Returns (freq, per mode the share of kinetic energy per
 /// label of the free nodes).
-fn modes(
+pub fn modes(
     mass: &[f64],
     springs: &[Spring],
     free: &[usize],
@@ -264,8 +264,10 @@ fn modes(
             // Mode shape (mass-weighted coords) → kinetic share per label.
             let mut sh = vec![0.0f64; nlabels];
             let mut per_node = vec![0.0f64; nf];
+            let mut shape = vec![0.0f64; n];
             for i in 0..n {
                 let y: f64 = (0..p).map(|a| vecs[a * p + m] * x[a][i]).sum();
+                shape[i] = y;
                 let lb = label[free[i / 3]];
                 if lb < nlabels {
                     sh[lb] += y * y;
@@ -284,7 +286,16 @@ fn modes(
                 v.sort_by(|a, b| b.0.total_cmp(&a.0));
                 eprintln!(
                     "  mode {f:.1} Hz (of {nf} nodes): {}",
-                    v.iter().take(5).map(|&(e, i)| format!("{} {:.2}", names.get(i).map_or("?", |s| s.as_str()), e)).collect::<Vec<_>>().join(", ")
+                    v.iter()
+                        .take(5)
+                        .map(|&(e, i)| {
+                            // The node's direction of motion (solver frame).
+                            let k = at[i];
+                            let d = DVec3::new(shape[3 * k], shape[3 * k + 1], shape[3 * k + 2]).normalize_or_zero();
+                            format!("{} {:.2} ({:+.1},{:+.1},{:+.1})", names.get(i).map_or("?", |s| s.as_str()), e, d.x, d.y, d.z)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
             let mut out: Vec<f64> = sh.into_iter().map(|v| v / t).collect();
@@ -631,7 +642,7 @@ fn rig_report(design: &str) {
 
 // --- Spawn (the crash path, as vehicle_compare's, visual indices match) ----------
 
-fn spawn(car: &Car) -> ExplicitBeams {
+pub fn spawn(car: &Car) -> ExplicitBeams {
     let (mut s, angle) = match &car.source {
         Source::Authored(b) => {
             let probe = ExplicitBeams::from_truck(&b.truck, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
@@ -692,23 +703,23 @@ fn spawn(car: &Car) -> ExplicitBeams {
 
 // --- Dynamics measurement --------------------------------------------------------
 
-struct Sets {
+pub struct Sets {
     /// Per category: (part name, nodes) of its parts.
-    cats: Vec<Vec<(String, Vec<u32>)>>,
-    body: Vec<u32>,
-    nontyre: Vec<u32>,
+    pub cats: Vec<Vec<(String, Vec<u32>)>>,
+    pub body: Vec<u32>,
+    pub nontyre: Vec<u32>,
     /// Visual vertices (subsampled) per category.
-    vcats: Vec<Vec<usize>>,
+    pub vcats: Vec<Vec<usize>>,
 }
 
 #[derive(Default, Clone)]
-struct Series {
+pub struct Series {
     /// Per category per 0.1 s window: ripple (own part fit), about the body fit.
-    own: Vec<Vec<f64>>,
-    body: Vec<Vec<f64>>,
-    vis: Vec<Vec<f64>>,
+    pub own: Vec<Vec<f64>>,
+    pub body: Vec<Vec<f64>>,
+    pub vis: Vec<Vec<f64>>,
     /// Internal kinetic energy (J) every 10 ms, and the time.
-    ke: Vec<f64>,
+    pub ke: Vec<f64>,
 }
 
 fn internal_ke(s: &ExplicitBeams, ids: &[u32]) -> f64 {
@@ -779,7 +790,7 @@ impl Win {
 
 /// Run `seconds` from `s`, applying `accel(t)` (m/s², every node) before each
 /// step; measure.
-fn run(
+pub fn run(
     car: &Car,
     sets: &Sets,
     s: &mut ExplicitBeams,
@@ -844,13 +855,24 @@ fn run(
             }
             if let Some(v) = v {
                 if k % 10 == 9 {
-                    let beams: Vec<BeamState> = s
-                        .beams
-                        .iter()
-                        .map(|b| BeamState { broken: b.broken, rest: b.rest })
-                        .collect();
+                    // On raycast wheels the solver's beam list is not the
+                    // template's (no tyre beams): the mesh then follows the
+                    // nodes with every damage unit intact, which holds while
+                    // nothing bends or breaks (the run reports both).
+                    let beams: Vec<BeamState> = if s.beams.len() == rest_beams.len() {
+                        s.beams
+                            .iter()
+                            .map(|b| BeamState { broken: b.broken, rest: b.rest })
+                            .collect()
+                    } else {
+                        rest_beams.clone()
+                    };
                     let u = unit_states(v, &beams);
-                    let (pv, _) = deform_beams(v, &now, Some(&u), Some(&beams));
+                    // Tyre nodes a raycast car does not have stay at the
+                    // template's (wheel vertices are not sampled).
+                    let mut now_v = now.clone();
+                    now_v.extend_from_slice(&rest[now.len().min(rest.len())..]);
+                    let (pv, _) = deform_beams(v, &now_v, Some(&u), Some(&beams));
                     for (c, verts) in sets.vcats.iter().enumerate() {
                         for (j, &i) in verts.iter().enumerate() {
                             if pv[i].is_finite() {
@@ -924,8 +946,121 @@ fn run(
     out
 }
 
+// --- The measurements as functions (`tests/sedan_jello.rs` asserts on them) -------
+
+/// Category per node (first part wins) and, per category, its parts' nodes.
+/// Wheel hubs and rims riding the body part are running gear, not shell.
+pub fn classify(car: &Car) -> (Vec<usize>, Vec<Vec<(String, Vec<u32>)>>) {
+    let nn = car.template.nodes.len();
+    let mut cat = vec![usize::MAX; nn];
+    let mut cats: Vec<Vec<(String, Vec<u32>)>> = vec![Vec::new(); CATS.len()];
+    for (pname, ids) in &car.parts {
+        let c = cat_of(pname);
+        let Some(ci) = CATS.iter().position(|x| *x == c) else { continue };
+        let ids: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|&i| cat[i as usize] == usize::MAX)
+            .filter(|&i| {
+                let nm = car.node_name(i as usize);
+                !(ci == 0 && (nm.starts_with("rim") || nm.starts_with("hub")))
+            })
+            .collect();
+        if ids.len() < 3 {
+            continue;
+        }
+        for &i in &ids {
+            cat[i as usize] = ci;
+        }
+        cats[ci].push((pname.clone(), ids));
+    }
+    (cat, cats)
+}
+
+/// Each closure's and panel's first mode (Hz) with its neighbours held:
+/// (category, part, Hz). A part with a mode under 1 Hz (a mechanism) reports
+/// that.
+pub fn panel_first_modes(car: &Car, cats: &[Vec<(String, Vec<u32>)>]) -> Vec<(usize, String, f64)> {
+    let s = &car.template;
+    let mass: Vec<f64> = s.nodes.iter().map(|n| n.mass as f64).collect();
+    let sp = springs_of(s, None);
+    let label = vec![CATS.len(); s.nodes.len()];
+    let mut out = Vec::new();
+    for (ci, parts) in cats.iter().enumerate().skip(1) {
+        for (pname, ids) in parts {
+            let free: Vec<usize> = ids.iter().map(|&i| i as usize).collect();
+            let m = modes(&mass, &sp, &free, true, 12, &label, CATS.len() + 1);
+            out.push((ci, pname.clone(), m.first().map_or(0.0, |x| x.0)));
+        }
+    }
+    out
+}
+
+/// The node sets of the dynamic measurements (no visible mesh).
+pub fn sets_of(car: &Car, cats: &[Vec<(String, Vec<u32>)>]) -> Sets {
+    let s = &car.template;
+    let body: Vec<u32> = cats[0].iter().flat_map(|(_, v)| v.iter().copied()).collect();
+    let nontyre: Vec<u32> = (0..s.nodes.len() as u32)
+        .filter(|&i| s.nodes[i as usize].flags & NODE_TYRE == 0)
+        .collect();
+    Sets { cats: cats.to_vec(), body, nontyre, vcats: vec![Vec::new(); CATS.len()] }
+}
+
+/// RMS and largest distance (m) of each of `ids` from its own mean over the
+/// next second (world frame, 100 Hz).
+pub fn rest_wobble(sp: &ExplicitBeams, ids: &[u32]) -> (f64, f64) {
+    let mut snap = sp.clone();
+    let n = snap.nodes.len();
+    let mut sum = vec![Vec3::ZERO; n];
+    let mut samples = Vec::new();
+    for k in 0..2000 {
+        snap.step();
+        if k % 20 == 0 {
+            let p: Vec<Vec3> = snap.nodes.iter().map(|x| x.pos).collect();
+            for i in 0..n {
+                sum[i] += p[i];
+            }
+            samples.push(p);
+        }
+    }
+    let f = samples.len() as f32;
+    let mean: Vec<Vec3> = sum.iter().map(|v| *v / f).collect();
+    let (mut sq, mut dmax) = (0.0f64, 0.0f32);
+    for p in &samples {
+        for &i in ids {
+            let d = p[i as usize].distance(mean[i as usize]);
+            sq += (d * d) as f64;
+            dmax = dmax.max(d);
+        }
+    }
+    ((sq / (ids.len() as f64 * f as f64)).sqrt(), dmax as f64)
+}
+
+/// The kerb scene's start: `base` (settled) coasting at 30 km/h toward a bump
+/// 5 cm high and 0.5 m long, 0.6 m ahead of its front (both axles cross it).
+pub fn kerb_start(base: &ExplicitBeams) -> ExplicitBeams {
+    let mut s2 = base.clone();
+    let v = Vec3::Z * (30.0 / 3.6);
+    for n in s2.nodes.iter_mut() {
+        n.vel += v;
+    }
+    s2.roll_tyres(v);
+    if let Some(d) = s2.drive.as_mut() {
+        d.roll(v.z);
+    }
+    let front = s2.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+    let z0 = front + 0.6;
+    s2.boxes.push(StaticBox::centered(Vec3::new(0.0, -0.45, z0 + 0.25), Vec3::new(4.0, 0.5, 0.25)));
+    s2
+}
+
+/// Largest finite value of a per-window series.
+pub fn peak(v: &[f64]) -> f64 {
+    v.iter().copied().filter(|x| x.is_finite()).fold(0.0, f64::max)
+}
+
 /// Time (s, from `from`) after which a per-window series stays below `thr`.
-fn settle_time(series: &[f64], from: usize, thr: f64) -> f64 {
+pub fn settle_time(series: &[f64], from: usize, thr: f64) -> f64 {
     let mut last = None;
     for (i, &a) in series.iter().enumerate().skip(from) {
         if a.is_finite() && a > thr {
@@ -1034,30 +1169,7 @@ fn main() {
         let nn = s.nodes.len();
         *NAMES.lock().unwrap() = (0..nn).map(|i| car.node_name(i).to_string()).collect();
         let tyre = |i: usize| s.nodes[i].flags & NODE_TYRE != 0;
-        // Category per node (first part wins).
-        let mut cat = vec![usize::MAX; nn];
-        let mut cats: Vec<Vec<(String, Vec<u32>)>> = vec![Vec::new(); CATS.len()];
-        for (pname, ids) in &car.parts {
-            let c = cat_of(pname);
-            let Some(ci) = CATS.iter().position(|x| *x == c) else { continue };
-            // Wheel hubs and rims riding the body part (the generated sedan's) are running gear, not shell.
-            let ids: Vec<u32> = ids
-                .iter()
-                .copied()
-                .filter(|&i| cat[i as usize] == usize::MAX)
-                .filter(|&i| {
-                    let nm = car.node_name(i as usize);
-                    !(ci == 0 && (nm.starts_with("rim") || nm.starts_with("hub")))
-                })
-                .collect();
-            if ids.len() < 3 {
-                continue;
-            }
-            for &i in &ids {
-                cat[i as usize] = ci;
-            }
-            cats[ci].push((pname.clone(), ids));
-        }
+        let (cat, cats) = classify(&car);
         println!("\n## {name}\n");
         println!(
             "{} nodes ({} tyre), {} beams, {:.0} kg; parts: {}",
@@ -1239,40 +1351,19 @@ fn main() {
         // (a) Spawn and settle 4 s.
         let mut sp = spawn(&car);
         let t1 = std::time::Instant::now();
-        let vis_on = !std::env::var("RAYCAST").is_ok_and(|v| v == "1");
+        // The visible mesh is measured on pressure wheels by default; `VIS=1`
+        // measures it on raycast wheels too (the bindings are by non-tyre node).
+        let vis_on = !std::env::var("RAYCAST").is_ok_and(|v| v == "1")
+            || std::env::var("VIS").is_ok_and(|v| v == "1");
         let r = run(&car, &sets, &mut sp, 4.0, &zero, vis_on);
         eprintln!("{name}: spawn run {:.1} s", t1.elapsed().as_secs_f32());
         report_series(&format!("{name}: spawn (2 cm drop on its own wheels), settle 4 s"), &r, 3);
-        // showcase_rest_wobble-style: RMS / max of each node about its own mean over 3–4 s (world frame).
         {
-            let mut snap = sp.clone();
-            let n = snap.nodes.len();
-            let mut sum = vec![Vec3::ZERO; n];
-            let mut samples = Vec::new();
-            for k in 0..2000 {
-                snap.step();
-                if k % 20 == 0 {
-                    let p: Vec<Vec3> = snap.nodes.iter().map(|x| x.pos).collect();
-                    for i in 0..n {
-                        sum[i] += p[i];
-                    }
-                    samples.push(p);
-                }
-            }
-            let f = samples.len() as f32;
-            let mean: Vec<Vec3> = sum.iter().map(|v| *v / f).collect();
-            let (mut sq, mut dmax) = (0.0f64, 0.0f32);
-            for p in &samples {
-                for &i in &sets.nontyre {
-                    let d = p[i as usize].distance(mean[i as usize]);
-                    sq += (d * d) as f64;
-                    dmax = dmax.max(d);
-                }
-            }
+            let (rms, max) = rest_wobble(&sp, &sets.nontyre);
             println!(
                 "\nrest wobble 4–5 s (each non-tyre node about its own mean, world frame): RMS {:.3} mm, max {:.2} mm",
-                (sq / (sets.nontyre.len() as f64 * f as f64)).sqrt() * 1e3,
-                dmax * 1e3
+                rms * 1e3,
+                max * 1e3
             );
         }
 
@@ -1330,19 +1421,7 @@ fn main() {
         }
         // 5 cm bump at 30 km/h (both axles cross it).
         {
-            let mut s2 = base.clone();
-            let v = Vec3::Z * (30.0 / 3.6);
-            for n in s2.nodes.iter_mut() {
-                n.vel += v;
-            }
-            s2.roll_tyres(v);
-            if let Some(d) = s2.drive.as_mut() {
-                d.roll(v.z);
-            }
-            let front = s2.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
-            // Bump 0.5 m long, 5 cm high, 0.6 m ahead of the front bumper.
-            let z0 = front + 0.6;
-            s2.boxes.push(StaticBox::centered(Vec3::new(0.0, -0.45, z0 + 0.25), Vec3::new(4.0, 0.5, 0.25)));
+            let mut s2 = kerb_start(&base);
             let r = run(&car, &sets, &mut s2, 3.0, &zero, vis_on);
             report_series(&format!("{name}: 5 cm × 0.5 m bump at 30 km/h (coasting), 3 s"), &r, 0);
             // Beams the bump bent (rest length changed by more than 0.1 mm) or broke, by member pair.

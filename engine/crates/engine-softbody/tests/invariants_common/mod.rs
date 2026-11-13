@@ -24,6 +24,7 @@ pub fn exact() -> ExplicitBeamsSettings {
         turbulence: false,
         triangle_throttle: true,
         centred_damping: false,
+        centred_objective: false,
     }
 }
 

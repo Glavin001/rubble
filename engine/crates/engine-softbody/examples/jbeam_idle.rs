@@ -4,7 +4,7 @@
 //! limits at that step, then the totals.
 //!
 //! ```bash
-//! cargo run --release -p engine-softbody --example jbeam_idle -- <vehicles-dir> <name> <config.pc> [secs=3] [path=native|truck]
+//! cargo run --release -p engine-softbody --example jbeam_idle -- <vehicles-dir> <name> <config.pc> [secs=3] [path=native|truck] [objective=1]
 //! ```
 use engine_softbody::explicit_beams::{beam_force, ExplicitBeams, ExplicitBeamsSettings};
 use glam::Vec3;
@@ -26,6 +26,8 @@ fn main() {
         drag: false,
         turbulence: false,
         fast_inv_sqrt: opt("fast=").as_deref() != Some("0"),
+        // `objective=1`: the centred damping's objective form (spec §39.6).
+        centred_objective: opt("objective=").as_deref() == Some("1"),
         ..Default::default()
     };
     let desc = engine_softbody::jbeam::load_jbeam(&files, Some(&pcs)).unwrap();

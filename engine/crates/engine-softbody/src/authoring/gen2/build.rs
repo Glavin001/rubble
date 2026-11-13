@@ -518,6 +518,18 @@ pub struct Car {
     /// Per [`Role::Stop`] beam: the closure (m) after which it engages
     /// (absent: [`super::export::STOP_LEFT`] of its length left).
     pub stop_close: HashMap<usize, f32>,
+    /// Gapped stops ([`Role::Stop`]) as push-only springs inside the step's
+    /// bound: each takes [`super::export::STOP_SPRING`] where its nodes can
+    /// carry it engaged and less where they cannot (the power iteration
+    /// counts every stop as engaged and softens the stops first), and is
+    /// written as a SUPPORT beam whose rest length is the length at which it
+    /// engages, so its force starts from zero there and it lets go when the
+    /// parts have separated. False (the earlier cars): a BOUNDED beam with no
+    /// base spring, whose limit spring acts on the beam's whole extension
+    /// the moment a bound is crossed (jbeam-semantics-spec.md section 5): about
+    /// 1 MN at the short bound and, a hundred lengths away, 1e8 N on a part
+    /// that had left the car.
+    pub stops_in_bound: bool,
     /// Damping ratio of the bumpers' beams (None: [`ZETA`] as every part;
     /// the census's bumper covers run at 0.07-0.33).
     pub bumper_zeta: Option<f32>,
@@ -1221,6 +1233,15 @@ impl Car {
                 break;
             }
         }
+        // Gapped stops count engaged, at their own spring.
+        if self.stops_in_bound {
+            let k_stop = env_f("GEN3_STOP_SPRING", super::export::STOP_SPRING);
+            for (j, b) in self.beams.iter().enumerate() {
+                if b.role == Role::Stop && !fixed.contains_key(&j) {
+                    ks[j] = k_stop;
+                }
+            }
+        }
         // The real bound: the highest mode of M⁻¹K (power iteration), the
         // beams of the nodes that carry it softened until ω_max·h ≤ OMEGA_H.
         let dirs: Vec<Vec3> = self
@@ -1336,11 +1357,15 @@ impl Car {
             let emax = e.iter().copied().fold(0.0, f32::max);
             // Where the mode's carriers include a shut line's edge ties or
             // stops, only those give (the panel keeps its census springs).
-            let edge_first = (0..e.len()).any(|j| {
-                e[j] >= 0.25 * emax && matches!(self.beams[j].role, Role::EdgeTie | Role::EdgeStop)
-            });
+            // (A gapped stop gives before anything else does: it is not part
+            // of the structure at rest.)
+            let stops = self.stops_in_bound;
+            let gives =
+                |r: Role| matches!(r, Role::EdgeTie | Role::EdgeStop) || (stops && r == Role::Stop);
+            let edge_first =
+                (0..e.len()).any(|j| e[j] >= 0.25 * emax && gives(self.beams[j].role));
             for j in 0..e.len() {
-                let edge = matches!(self.beams[j].role, Role::EdgeTie | Role::EdgeStop);
+                let edge = gives(self.beams[j].role);
                 if e[j] >= 0.25 * emax && (edge || !edge_first) {
                     ks[j] *= 0.97;
                 }

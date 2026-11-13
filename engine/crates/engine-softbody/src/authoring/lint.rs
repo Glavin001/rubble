@@ -1097,7 +1097,137 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
             }
         }
     }
+    out.extend(energy_bombs(d));
     let _ = HashSet::<u8>::new();
+    out
+}
+
+/// A bound's force step may move its lighter node this share of the bound
+/// zone in one step, at most ([`energy_bombs`], `bound_wall`).
+pub const BOUND_WALL_MAX: f64 = 1.0;
+
+/// **Energy bombs** (known-bugs S3; hard): beams whose force law the step
+/// cannot integrate or that outlive the separation of the parts they join.
+///
+/// * `bound_wall`: a BOUNDED beam's limit spring acts on its whole extension
+///   once a bound is crossed (jbeam-semantics-spec.md §5), so its force steps
+///   by ΔF = |k_limit − k|·(bound·L) across the bound zone z. A node of mass m
+///   moves ΔF·h²/m in a step under that force; past z the step jumps the zone
+///   and the energy ½·ΔF·(bound·L) appears from nothing. Fails when
+///   ΔF·h²/(m·z) > [`BOUND_WALL_MAX`] for the lighter end at either bound (a
+///   short bound of 1 or more is never reached). The sedan's old gapped stops:
+///   2e6 N/m, no base spring, bounds at 0.6 and 100 lengths: 8 and 1,400.
+/// * `tether`: a beam between two parts that holds nothing at rest (no base
+///   spring), can pull (not SUPPORT), never breaks (no strength, no break
+///   group), where every beam that does hold the two parts together can break.
+///   When they part it is a tether on a free part. A stop must be push-only
+///   or let go.
+pub fn energy_bombs(d: &SoftVehicleDesc) -> Vec<Finding> {
+    let part = node_parts(d);
+    let name = |i: u32| d.nodes[i as usize].name.clone();
+    let len = |b: &crate::desc::SoftBeam| {
+        (Vec3::from_array(d.nodes[b.a as usize].position) - Vec3::from_array(d.nodes[b.b as usize].position))
+            .length() as f64
+    };
+    // --- bound_wall
+    let mut walls: Vec<(f64, f64, String)> = Vec::new();
+    let mut bounded = 0;
+    for b in &d.beams {
+        let (BeamKind::Bounded, Some(j)) = (b.kind, b.jbeam.as_ref()) else { continue };
+        bounded += 1;
+        let l = len(b) * f64::from(if j.precompression > 0.0 { j.precompression } else { 1.0 });
+        let m = f64::from(d.nodes[b.a as usize].mass.min(d.nodes[b.b as usize].mass)).max(1e-6);
+        let z = f64::from(j.bound_zone).max(1e-3);
+        let dk = (f64::from(j.limit_spring) - f64::from(b.spring)).abs();
+        for (which, bound) in [("short", j.short_bound), ("long", j.long_bound)] {
+            if which == "short" && bound >= 1.0 {
+                continue;
+            }
+            let e = f64::from(bound) * l;
+            let df = dk * e;
+            let x = df * STEP * STEP / (m * z);
+            if x.is_finite() {
+                walls.push((
+                    x,
+                    0.5 * df * e,
+                    format!(
+                        "{}-{} {which} bound at {:.3} m: force step {:.3e} N over {:.3} m on {:.2} kg ({:.1} zones a step), {:.3e} J",
+                        name(b.a),
+                        name(b.b),
+                        e,
+                        df,
+                        z,
+                        m,
+                        x,
+                        0.5 * df * e
+                    ),
+                ));
+            }
+        }
+    }
+    walls.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let worst = walls.first().map_or(0.0, |w| w.0);
+    let over: Vec<&(f64, f64, String)> = walls.iter().filter(|w| w.0 > BOUND_WALL_MAX).collect();
+    let mut out = vec![Finding {
+        rule: "bound_wall",
+        hard: true,
+        part: "car".into(),
+        level: if over.is_empty() { Level::Pass } else { Level::Fail },
+        value: format!(
+            "{} bounds over on {bounded} bounded beams; worst {} zones a step; largest energy step {} J",
+            over.len(),
+            fmt(worst),
+            fmt(walls.iter().map(|w| w.1).fold(0.0, f64::max))
+        ),
+        band: format!("force step × h² / (m × zone) ≤ {BOUND_WALL_MAX}"),
+        offenders: over.iter().take(6).map(|w| w.2.clone()).collect(),
+    }];
+    // --- tether
+    // Per pair of parts: whether a beam that holds them at rest never breaks.
+    let breakable = |b: &crate::desc::SoftBeam| {
+        b.strength.is_finite()
+            || b.break_group != 0
+            || b.jbeam.as_ref().is_some_and(|j| j.extra_break_groups != [0, 0])
+    };
+    let pair = |b: &crate::desc::SoftBeam| {
+        let (pa, pb) = (part[b.a as usize], part[b.b as usize]);
+        (pa != pb && pa != usize::MAX && pb != usize::MAX).then(|| (pa.min(pb), pa.max(pb)))
+    };
+    let mut welded: HashSet<(usize, usize)> = HashSet::new();
+    for b in &d.beams {
+        if let Some(k) = pair(b) {
+            if b.spring > 0.0 && bilateral(b.kind) && !breakable(b) {
+                welded.insert(k);
+            }
+        }
+    }
+    let mut tethers: Vec<String> = Vec::new();
+    for b in &d.beams {
+        let Some(k) = pair(b) else { continue };
+        if welded.contains(&k) || breakable(b) || b.kind == BeamKind::Support || b.spring > 0.0 {
+            continue;
+        }
+        // (Only kinds that can pull once stretched: a bounded beam's limit spring.)
+        let pulls = b.kind == BeamKind::Bounded && b.jbeam.as_ref().is_some_and(|j| j.limit_spring > 0.0);
+        if pulls {
+            tethers.push(format!(
+                "{}-{} ({} to {})",
+                name(b.a),
+                name(b.b),
+                d.parts[k.0].name,
+                d.parts[k.1].name
+            ));
+        }
+    }
+    out.push(Finding {
+        rule: "tether",
+        hard: true,
+        part: "car".into(),
+        level: if tethers.is_empty() { Level::Pass } else { Level::Fail },
+        value: format!("{} beams", tethers.len()),
+        band: "0 unbreakable pulling beams with no base spring between parts that can separate".into(),
+        offenders: tethers.into_iter().take(8).collect(),
+    });
     out
 }
 

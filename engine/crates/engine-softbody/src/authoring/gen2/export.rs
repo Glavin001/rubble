@@ -241,6 +241,33 @@ pub fn jbeam_files(
                 "beamType".into(),
                 json!(if sp.support { "|SUPPORT" } else { "|NORMAL" }),
             );
+            if b.role == Role::Stop && car.stops_in_bound {
+                // A gapped stop: a push-only spring whose rest length is the
+                // length it engages at (its force rises from zero there), at
+                // the spring the step's bound left it; it lets go once
+                // stretched to twice its length (the parts have separated).
+                let l = car.nodes[b.a].p.distance(car.nodes[b.b].p);
+                let close = std::env::var("GEN3_STOP_CLOSE")
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .or_else(|| car.stop_close.get(&j).copied())
+                    .unwrap_or(l - STOP_LEFT);
+                let ratio = (close / l).clamp(0.05, 0.95);
+                let mut s = Map::new();
+                s.insert("beamType".into(), json!("|SUPPORT"));
+                s.insert("beamSpring".into(), num(b.k));
+                s.insert("beamDamp".into(), num(STOP_DAMP * (b.k / STOP_SPRING).sqrt()));
+                s.insert(
+                    "beamPrecompression".into(),
+                    json!(((1.0 - ratio) as f64 * 1e6).round() / 1e6),
+                );
+                s.insert("beamLongBound".into(), json!(1.0));
+                s.insert("beamDeform".into(), json!("FLT_MAX"));
+                s.insert("beamStrength".into(), json!("FLT_MAX"));
+                s.insert("breakGroup".into(), json!(""));
+                brows.push(json!([n(b.a), n(b.b), Value::Object(s)]));
+                continue;
+            }
             if b.role == Role::Stop {
                 // A gapped stop (spec §5): free until it has shortened to
                 // STOP_LEFT of its length, then the limit spring.

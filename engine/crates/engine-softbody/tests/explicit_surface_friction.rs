@@ -15,6 +15,7 @@ const QUIET: ExplicitBeamsSettings = ExplicitBeamsSettings {
     turbulence: false,
     triangle_throttle: false,
     centred_damping: false,
+    centred_objective: false,
 };
 const R: f32 = 0.025;
 

@@ -239,7 +239,21 @@ Tables: [generated-vehicles.md](generated-vehicles.md), "Crash character and the
 - **(Fact) The page's beam count is the solver's records:** 3,467 JBeam beams + 2 aero records per collision triangle (726) + 2 per torsion bar (24) + 7 couplers + 4 raycast-wheel ties = 4,228.
 - **Process:** a web build reads the sources while it runs; do not edit Rust until its host and wasm compiles have finished. Never use the shared Browser pane while the user tests; `engine/crates/engine-webgpu/page-shot.mjs` opens a URL headless.
 
+## 14. The car that flew apart: energy bombs (2026-11-13, `feat/sedan-body`)
+
+Record: [handoff/known-bugs.md](handoff/known-bugs.md) S3; spec §39.6; `examples/sidepole_sweep`, `examples/spin_probe`; `tests/sedan_energy.rs`, `tests/centred_damping_objective.rs`.
+
+- **(Measurement) Two causes, found with the energy ledger on the CPU reference.** The page's reports (side pole 186 km/h, a 31 m drop at 189 km/h, a 42° wall at 106 km/h, a 25 km/h bump in the yard) all reproduce: 20 of 59 runs of the scene matrix diverge on the 32cbc954 export.
+- **(Fact) A BOUNDED beam's limit spring acts on its whole extension.** A "gapped stop" written as a bounded beam with no base spring is a force wall where it engages (2e6 N/m × 0.34 m over a 2 cm zone) and a tether at its long bound: 100 lengths is 55 m, and a torn-off wheel gets there in 0.7 s. Write a stop as a push-only spring whose rest length is the length it engages at (SUPPORT, `beamPrecompression` = that share), inside the step's bound, that lets go when stretched.
+- **(Measurement) The solver's centred damping added energy to anything that spins** (a hub cap: 3.75 J to 1,800 J in 0.75 s). Its correction read a turning beam as shortening. The objective form fixes it on the CPU reference (off by default until the kernels follow).
+- **(Measurement) With both, 82 runs never exceed their starting energy** (walls ±20/42/60° at 56/106/150 km/h, side poles 32-320 km/h at two places, drops 5/15/31 m at 0/100/189 km/h, surface contact on and off). What is left are single-step rises of the discrete energy, in the beams: 0.3-4 kJ where an engine mount's bound is crossed in one step (the lint's `bound_wall` gives 1.3 kJ a beam), and up to 28 kJ at 320 km/h on a 0.47 kg body edge node (`ebody13`): the light edge nodes on soft ties that the jello work removes.
+- **(Decision, the user's) Catch the class in the lint,** statically (`bound_wall`, `tether`) and dynamically (tear every part off, fling and spin it; the ledger never rises).
+- **(Measurement) A hub cap leaves at a 25 km/h bump onto its wheel** (9 clips of 600 N a beam, the study's value). Not changed: open whether real clip retention holds at that load.
+- **Process:** write the test from the physical invariant first and commit it failing. Set energy bounds against the plain step on the same body: single precision alone moves an undamped body's energy by 0.3 % a second.
+
 ## Changelog
+
+- 2026-11-13: section 14, energy bombs: the gapped stops, the centred damping on spinning parts, the lint's rules and the tests.
 
 - 2026-11-13: section 13, the new body crashed against the ETK; the crash character setting.
 

@@ -17,6 +17,7 @@ fn settings() -> ExplicitBeamsSettings {
         turbulence: false,
         drag: false,
         centred_damping: true,
+        centred_objective: false,
         ..Default::default()
     }
 }
