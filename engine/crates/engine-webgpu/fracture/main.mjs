@@ -41,10 +41,11 @@ function updateTrails(){
 // compute and timing only, the pieces loose on World).
 const bondMode=()=>$('bond-mode').value;
 const BLAST_PARITY='stress';
-const labBonds=()=>({learned:'none',blast:'blast_gpu'})[bondMode()]??bondMode();
+// 'rubble' is a panel preset over load_path (see showFractureSwitches), not a model of its own.
+const labBonds=()=>({learned:'none',blast:'blast_gpu',rubble:'load_path'})[bondMode()]??bondMode();
 const STRESS_MODELS=new Set(['threshold','load_path','impact_local','blast_gpu']);
 const stressModel=()=>STRESS_MODELS.has(labBonds());
-const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps',blast_gpu:"vibe-land's GPU stress solver (Blast's model, Slang)",d6:'breakable D6 joints',none:'loose pieces'};
+const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps',blast_gpu:"vibe-land's GPU stress solver (Blast's model, Slang)",d6:'breakable D6 joints',none:'loose pieces',rubble:'Rubble (full): load path for sustained load, analytic impact for strikes, predicted before the engine steps'};
 // The controls panel collapses for a full view (remembered per viewer; phones start
 // collapsed). Collapsed, a quick button mirrors Start / Pause.
 const PANEL_KEY='fracture-lab.panel';
@@ -133,11 +134,17 @@ function showBallRadius(){
 }
 // The stress models' fracture switches: each starts at the model's own (Rust:
 // `fracture_defaults`), the panel's choice sent explicitly.
+let wasFull=false;
 function showFractureSwitches(){
  const own=labFractureDefaults(labBonds());
  for(const [id,key] of [['strike-prediction','strikePrediction'],['contact-fracture','contactFracture']]){
   $(id).disabled=!own;if(own)$(id).checked=own[key];
  }
+ // Rubble (full): the compare page's Rubble column (Rust: `play::compare::Approach::Rubble`).
+ const full=bondMode()==='rubble';
+ if(full){$('strike-prediction').checked=true;$('contact-fracture').checked=false;$('strike-rule').value='analytic';$('ball-ccd').checked=false}
+ else if(wasFull){$('strike-rule').value='';$('ball-ccd').checked=true}
+ wasFull=full;
  $('crush').disabled=!stressModel();
  $('strike-rule').disabled=$('support-loss').disabled=!own;
  $('strike-radius').disabled=!own||$('strike-rule').value!=='radial';
@@ -221,7 +228,7 @@ async function loadLevel(level){
  const what=towers?`4 towers and the city · `:scene.copies>1?`${scene.copies} copies · `:'';
  const source=procedural==='pack'?`scene pack · ${scene.pieces} nodes`:procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials`;
  const learnedNote=learned?` · learned-impact ${learnedMs.toFixed(2)} ms/fwd (${learned.graph.nNodes} chunks, ${learned.params} weights, compute only)`:'';
- setStatus(`${PROFILE_NOTES[labBonds()]??labBonds()} · ${stepHz()} Hz · ${what}${st.chunks} chunks · ${st.bonds} bonds · ${source}${learnedNote} · ${towers?'fire the volley or click to shoot':scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
+ setStatus(`${PROFILE_NOTES[bondMode()]??PROFILE_NOTES[labBonds()]??labBonds()} · ${stepHz()} Hz · ${what}${st.chunks} chunks · ${st.bonds} bonds · ${source}${learnedNote} · ${towers?'fire the volley or click to shoot':scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
 // blast_parity: its own engine (stress-web), one structure, labelled as such.
 async function loadStress(level){
