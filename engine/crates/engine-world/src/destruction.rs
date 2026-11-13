@@ -705,6 +705,37 @@ pub struct ActorInfo {
     pub mass: f32,
 }
 
+/// An analytic strike's verdict (`StrikeRule::Analytic`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrikeReport {
+    /// The target's thickness along the shot's path (m).
+    pub thickness: f32,
+    /// The speed at and above which this shot goes through (m/s), and the speed it leaves
+    /// with (Recht and Ipson's; 0 when it does not go through).
+    pub ballistic_speed: f32,
+    pub residual_speed: f32,
+    pub crater: bool,
+    pub spall: bool,
+    pub perforation: bool,
+}
+
+/// What a stress destructible's fracture has decided (`World::destructible_fracture_report`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FractureReport {
+    /// Analytic strikes by outcome, in all.
+    pub bounces: u32,
+    pub craters: u32,
+    pub spalls: u32,
+    pub perforations: u32,
+    /// The load path's largest failure index so far (1: a bond at its strength).
+    pub peak_utilization: f32,
+    /// The in-step contact fracture's strikes solved and the bonds they broke.
+    pub contact_strikes: u32,
+    pub contact_breaks: u32,
+    /// The analytic strikes of the last frame that had one.
+    pub strikes: Vec<StrikeReport>,
+}
+
 /// Counts for one destructible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DestructibleStats {

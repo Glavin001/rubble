@@ -1056,6 +1056,11 @@ impl Lab {
         &self.slot_of
     }
 
+    /// Stress models: the live balls, oldest first, with the step each was fired.
+    pub fn balls(&self) -> &[(BodyId, u64)] {
+        self.balls.live()
+    }
+
     /// The pack's authored shots.
     pub fn pack_shots(&self) -> &[PackShot] {
         &self.pack_shots

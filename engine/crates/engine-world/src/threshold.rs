@@ -3270,6 +3270,60 @@ mod imp {
             }
         }
 
+        /// What a stress destructible's fracture has decided so far (blocking: for tools,
+        /// tests and a host's readout): its analytic strikes by outcome, the strikes'
+        /// records of the last frame that had one, the load path's largest failure index
+        /// and the in-step contact fracture's counts. Of the fracture it runs in: a
+        /// shared one's numbers are all its destructibles'.
+        pub fn destructible_fracture_report(
+            &self,
+            id: DestructibleId,
+        ) -> anyhow::Result<crate::FractureReport> {
+            let i = self.live_destructible(id)?;
+            let k = self.destructibles[i].threshold.ok_or_else(|| {
+                anyhow::anyhow!("destructible {} is not a threshold one", id.index())
+            })? as usize;
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            let gpu = self
+                .fracture
+                .gpu
+                .as_ref()
+                .expect("a threshold destructible's GPU");
+            let fracture = match &t.own {
+                Some(o) => &o.fracture,
+                None => &self.fracture.shared.as_ref().expect("shared fracture").fracture,
+            };
+            let c = fracture.counters(gpu);
+            let analytic = c.bounces + c.craters + c.spalls + c.perforations > 0;
+            let strikes = if analytic {
+                fracture
+                    .strike_records(gpu)
+                    .into_iter()
+                    .filter(|r| r.ballistic_speed > 0.0)
+                    .map(|r| crate::StrikeReport {
+                        thickness: r.thickness,
+                        ballistic_speed: r.ballistic_speed,
+                        residual_speed: r.residual_speed,
+                        crater: r.outcome & 2 != 0,
+                        spall: r.outcome & 4 != 0,
+                        perforation: r.outcome & 8 != 0,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            Ok(crate::FractureReport {
+                bounces: c.bounces,
+                craters: c.craters,
+                spalls: c.spalls,
+                perforations: c.perforations,
+                peak_utilization: c.peak_utilization,
+                contact_strikes: c.contact_strikes,
+                contact_breaks: c.contact_breaks,
+                strikes,
+            })
+        }
+
         /// A changed body's mass, solver frame (from the GPU's frame record), type and
         /// shapes, from `from_step` on.
         fn reframe_piece(
