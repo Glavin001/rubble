@@ -10,6 +10,8 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     fast_inv_sqrt: false,
     drag: false,
     turbulence: false,
+    triangle_throttle: true,
+    centred_damping: false,
 };
 
 /// One unit-mass node with ground contact on (the ground far below), no drag.

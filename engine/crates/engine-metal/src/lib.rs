@@ -1,12 +1,14 @@
 //! Metal backend: Slang → MSL, GPU-resident AVBD world.
 
 mod device;
+mod explicit;
 mod pipelines;
 mod sim;
 pub mod terrain;
 mod world;
 
 pub use device::MetalDevice;
+pub use explicit::{ExplicitKernel, MetalExplicitBeams, EXPLICIT_KERNELS, LOOP_CAP_TEST};
 pub use sim::MetalSim;
 pub use terrain::{TerrainCaps, TerrainTiming};
 pub use engine_schema::scene::SceneBuilder;

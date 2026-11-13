@@ -17,7 +17,10 @@
 //! Vehicles whose boxes never overlap are not touched: their results are
 //! bit-identical to stepping each alone.
 
-use crate::explicit_beams::{contact_force, ContactSurface, ExplicitBeams, STEP};
+use crate::explicit_beams::{
+    contact_response, shift_depth, ContactSurface, ExplicitBeams, ExplicitKind, ForceTrace, Node,
+    GRAVITY, NODE_IMMOVABLE, STEP,
+};
 use glam::Vec3;
 
 /// Each face of a vehicle's box is moved out by this much (m).
@@ -55,6 +58,151 @@ pub struct ContactFrame {
     /// Rows of the inverse of the matrix with columns (u, w, n), or `None` when its
     /// determinant's magnitude is at most 1e-6 (the zero matrix).
     pub inv: Option<[Vec3; 3]>,
+}
+
+/// The swept crossing (anti-clip, spec §36): point x_prev → x against the triangle
+/// whose frame was `prev` and is `now` over the step. When the point went from one
+/// side of the plane to the other and the crossing (linear in the step) is inside
+/// the triangle: the weights (α, β, γ) at the crossing and the side it came from
+/// (+1: the normal's side). α and β are interpolated, γ = (1 − α) − β (the weights
+/// sum to one, and the GPU keeps α and β only).
+pub fn swept_crossing(
+    prev: &ContactFrame,
+    now: &ContactFrame,
+    x_prev: Vec3,
+    x: Vec3,
+) -> Option<([f32; 3], f32)> {
+    let (a0, b0, _, d0) = prev.local(x_prev);
+    let (a1, b1, _, d1) = now.local(x);
+    crossing_weights(a0, b0, d0, a1, b1, d1)
+}
+
+/// The crossing of a point between two frames' local coordinates (α, β, δ before
+/// and after): the weights at the plane, if inside, and the side it came from.
+pub fn crossing_weights(
+    a0: f32,
+    b0: f32,
+    d0: f32,
+    a1: f32,
+    b1: f32,
+    d1: f32,
+) -> Option<([f32; 3], f32)> {
+    if !((d0 > 0.0 && d1 < 0.0) || (d0 < 0.0 && d1 > 0.0)) {
+        return None;
+    }
+    let s = d0 / (d0 - d1);
+    let a = a0 + (a1 - a0) * s;
+    let b = b0 + (b1 - b0) * s;
+    let w = [a, b, (1.0 - a) - b];
+    if w.iter().all(|&c| c >= 0.0) {
+        Some((w, if d0 > 0.0 { 1.0 } else { -1.0 }))
+    } else {
+        None
+    }
+}
+
+/// Anti-clip's side memory depth (§36): a remembered node is pushed back to its side
+/// while it is at most this far behind the triangle (m). **Choice** (the soft-body
+/// solver's anti-clip keeps 30 cm; a node 10 cm through a panel is a failure; BeamNG
+/// documents that a triangle with no node within 10 cm goes inactive).
+pub const CLIP_DEPTH: f32 = 0.1;
+
+/// Anti-clip's side memory (§36), per node four words: the sides it holds this
+/// step (m0, m1: last step's contacts) and those it records this step (p0, p1),
+/// each a [`clip_word`] or [`CLIP_EMPTY`]. Memory is the node's contacts of the
+/// step before: a contact (a hit, or an anti-clip-only triangle's side check)
+/// records its triangle and side; the node phase makes the recorded words the
+/// held ones. Two slots, the two smallest words recorded (an order-free rule, as
+/// the GPU's lanes record in any order: a node in contact with three triangles at
+/// once keeps the two of smallest key).
+pub const CLIP_EMPTY: u32 = 0x7FFF_FFFF;
+/// The owner of self-collision keys (vehicle contact keys: the owner vehicle).
+pub const CLIP_SELF: u32 = 1023;
+/// Triangles per vehicle anti-clip keys can name (the last key is CLIP_EMPTY's).
+pub const CLIP_MAX_TRIANGLES: u32 = (1 << 20) - 1;
+
+/// The memory word of triangle `t` of owner `owner` (a vehicle below 1023, or
+/// [`CLIP_SELF`]) on side `side` (±1): owner << 21 | t << 1 | (side > 0).
+pub fn clip_word(owner: u32, t: u32, side: f32) -> u32 {
+    owner << 21 | t << 1 | (side > 0.0) as u32
+}
+
+/// The held side (±1) of node memory `c` for triangle `t` of `owner`, if any.
+pub fn clip_side(c: &[u32; 4], owner: u32, t: u32) -> Option<f32> {
+    let key = owner << 20 | t;
+    for &w in &c[..2] {
+        if w != CLIP_EMPTY && w >> 1 == key {
+            return Some(if w & 1 != 0 { 1.0 } else { -1.0 });
+        }
+    }
+    None
+}
+
+/// Records `word` for the next step (the two smallest of the step's words).
+pub fn clip_record(c: &mut [u32; 4], word: u32) {
+    if word < c[2] {
+        c[3] = c[2];
+        c[2] = word;
+    } else if word < c[3] {
+        c[3] = word;
+    }
+}
+
+/// The node phase: the recorded words become the held ones.
+pub fn clip_roll(c: &mut [u32; 4]) {
+    c[0] = c[2];
+    c[1] = c[3];
+    c[2] = CLIP_EMPTY;
+    c[3] = CLIP_EMPTY;
+}
+
+/// The anti-clip test (§36) of a point against a triangle, from the point's local
+/// coordinates now (α, β, γ, δ) and, when it holds no side for the triangle, its
+/// crossing of the plane over the step: the side it is kept on (held, or the one
+/// it came from, or, new and in the band over the triangle, the one it is on),
+/// the weights (the crossing's when it crossed) and its distance in front of that
+/// side, d = side·δ. A contact when the weights are inside and −CLIP_DEPTH ≤ d ≤ r.
+pub struct ClipTest {
+    pub side: f32,
+    pub w: [f32; 3],
+    pub d: f32,
+}
+
+/// The depth an anti-clip contact pushes with (§36): r − d in the band (an
+/// anti-clip-only triangle: −d behind its plane), at most r. **Choice:** a node held
+/// behind the plane is pushed as one at the plane, not by its whole depth: the
+/// contact rule's push grows with depth (0.2·p/h, 10 m/s of separation at 2.5 cm),
+/// so a node 10 cm through was kicked out at 40 m/s and the BX coupe's side-pole
+/// run went non-finite.
+pub fn clip_depth(only: bool, d: f32, r: f32) -> f32 {
+    let p = if only { -d } else { r - d };
+    p.min(r)
+}
+
+/// [`ClipTest`]: `held` the remembered side, `crossing` the swept crossing (only
+/// asked for when nothing is held); `None` when the point is not in contact.
+pub fn clip_test(
+    local: (f32, f32, f32, f32),
+    held: Option<f32>,
+    crossing: impl FnOnce() -> Option<([f32; 3], f32)>,
+    r: f32,
+    band_side: impl FnOnce() -> f32,
+) -> Option<ClipTest> {
+    let (alpha, beta, gamma, delta) = local;
+    let over = alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0;
+    let (side, w) = match held {
+        Some(s) => (s, over.then_some([alpha, beta, gamma])),
+        None => match crossing() {
+            Some((w, s)) => (s, Some(w)),
+            None if over && delta.abs() <= r => (band_side(), Some([alpha, beta, gamma])),
+            None => return None,
+        },
+    };
+    let d = side * delta;
+    match w {
+        Some(w) if d <= r && d >= -CLIP_DEPTH => Some(ClipTest { side, w, d }),
+        _ => None,
+    }
 }
 
 impl ContactFrame {
@@ -103,6 +251,24 @@ pub fn vote_behind(
     score < 0
 }
 
+/// The inverse mass of a triangle's point at barycentric weights `w` (spec §10.3)
+/// from its nodes' inverse masses `im`: the reaction J is shared out as w_k·J, so
+/// the point's velocity changes by J·Σ w_k²·im_k (terms with w_k = 0 left out). The
+/// weighted mean Σ w_k·m_k (RoR's rule) overstates the mass wherever a light node
+/// carries most of the weight beside a heavy one (0.07 kg at 0.77 next to 10 kg at
+/// 0.14: 1.5 kg against 0.12 kg), and the light node is then thrown off at hundreds
+/// of m/s. In the order n₁, n₂, n₀ (α, β, γ), summed left to right.
+pub fn two_body_inverse_mass(im: [f32; 3], w: [f32; 3]) -> f32 {
+    let term = |k: usize| {
+        if w[k] > 0.0 {
+            (w[k] * w[k]) * im[k]
+        } else {
+            0.0
+        }
+    };
+    (term(0) + term(1)) + term(2)
+}
+
 /// Statistics of the last contact pass (not simulated state).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ContactStats {
@@ -136,7 +302,24 @@ pub struct ExplicitBeamsWorld {
     pub first_hit_step: Option<u64>,
     /// Scratch: world positions per vehicle and padded boxes.
     world: Vec<Vec<Vec3>>,
+    /// Scratch: the current owner's and its partners' positions in the owner's frame
+    /// (relative to its origin: the contact's geometry; the boxes stay in the World's).
+    frame: Vec<Vec<Vec3>>,
+    /// Scratch: every node's force at the contact pass's start (two-body hits).
+    pass_force: Vec<Vec<Vec3>>,
+    /// The energy ledger (None: off; [`Self::enable_ledger`]).
+    pub ledger: Option<EnergyLedger>,
     boxes: Vec<(Vec3, Vec3)>,
+    /// Vehicle sleep ([`crate::explicit_sleep`]): `None` (the default) off, every frame
+    /// as before.
+    pub sleep: Option<crate::explicit_sleep::VehicleSleep>,
+    /// Vehicles the contact pass leaves out (sleeping; empty: none).
+    skip: Vec<bool>,
+    /// Vehicle sleep's proximity wake: the GPU contact plan's frame bounds margin (m,
+    /// `engine_exec::explicit_plan::DEFAULT_CONTACT_MARGIN`) and the steps a plan covers
+    /// at least (`VV_PLAN_STEPS`).
+    pub plan_margin: f32,
+    pub plan_steps: u32,
 }
 
 impl ExplicitBeamsWorld {
@@ -159,13 +342,25 @@ impl ExplicitBeamsWorld {
             total: ContactStats::default(),
             first_hit_step: None,
             world: Vec::new(),
+            frame: Vec::new(),
+            ledger: None,
+            pass_force: Vec::new(),
             boxes: Vec::new(),
+            sleep: None,
+            skip: Vec::new(),
+            plan_margin: 1.0,
+            plan_steps: 34,
         }
     }
 
     /// One frame: every vehicle's wing check and origin rebase, then `steps` world
-    /// steps.
+    /// steps. With [`Self::sleep`], sleeping vehicles are not stepped
+    /// ([`Self::frame_sleeping`]).
     pub fn frame(&mut self, steps: u32) {
+        if let Some(cfg) = self.sleep {
+            self.frame_sleeping(steps, &cfg);
+            return;
+        }
         for v in &mut self.vehicles {
             v.check_wings();
             v.rebase_origin();
@@ -189,20 +384,198 @@ impl ExplicitBeamsWorld {
         steps
     }
 
+    /// The GPU contact plan's padded frame boxes (`explicit_beams_vv_bounds`) of a frame
+    /// of `steps` steps, from the current state: each vehicle's node box grown by twice
+    /// the travel at its extreme velocities over the plan's steps, the margin, and
+    /// [`BOX_MARGIN`].
+    pub fn plan_boxes(&self, steps: u32) -> Vec<(Vec3, Vec3)> {
+        let time = 2.0 * steps.max(self.plan_steps) as f32 * STEP;
+        let m = Vec3::splat(self.plan_margin);
+        self.vehicles
+            .iter()
+            .map(|v| {
+                let (mut lo, mut hi) = (Vec3::splat(3.0e38), Vec3::splat(-3.0e38));
+                let (mut vl, mut vh) = (Vec3::ZERO, Vec3::ZERO);
+                for n in &v.nodes {
+                    let x = v.origin + n.pos;
+                    lo = lo.min(x);
+                    hi = hi.max(x);
+                    vl = vl.min(n.vel);
+                    vh = vh.max(n.vel);
+                }
+                let alo = lo - (-vl * time + m);
+                let ahi = hi + (vh * time + m);
+                (alo - Vec3::splat(BOX_MARGIN), ahi + Vec3::splat(BOX_MARGIN))
+            })
+            .collect()
+    }
+
+    /// Vehicle sleep's groups: vehicles whose [`Self::plan_boxes`] overlap, connected
+    /// (the GPU plan's contact groups), as a label (smallest member) per vehicle. Without
+    /// vehicle contact (or one vehicle) every vehicle is its own group.
+    pub fn sleep_groups(&self, steps: u32) -> Vec<usize> {
+        let nv = self.vehicles.len();
+        let mut label: Vec<usize> = (0..nv).collect();
+        if !self.contact || nv < 2 {
+            return label;
+        }
+        fn root(l: &mut [usize], mut x: usize) -> usize {
+            while l[x] != x {
+                l[x] = l[l[x]];
+                x = l[x];
+            }
+            x
+        }
+        let b = self.plan_boxes(steps);
+        for i in 0..nv {
+            for j in i + 1..nv {
+                let apart = b[i].1.cmplt(b[j].0).any() || b[j].1.cmplt(b[i].0).any();
+                if !apart {
+                    let (ri, rj) = (root(&mut label, i), root(&mut label, j));
+                    let m = ri.min(rj);
+                    label[ri] = m;
+                    label[rj] = m;
+                }
+            }
+        }
+        for i in 0..nv {
+            label[i] = root(&mut label, i);
+        }
+        label
+    }
+
+    /// Wake vehicle `v` (a host write: input, velocities, a force).
+    pub fn wake(&mut self, v: usize) {
+        self.vehicles[v].sleep.wake();
+    }
+
+    /// One frame with vehicle sleep ([`crate::explicit_sleep`]): a group with an awake
+    /// member wakes its sleeping members; the awake vehicles are stepped (the contact
+    /// pass among them), their stillness tracked each step after the node pass; at the
+    /// frame's end the rule updates each one, and a group whose every member reached the
+    /// dwell falls asleep.
+    pub fn frame_sleeping(&mut self, steps: u32, cfg: &crate::explicit_sleep::VehicleSleep) {
+        let nv = self.vehicles.len();
+        let groups = self.sleep_groups(steps);
+        for g in 0..nv {
+            let members = (0..nv).filter(|&v| groups[v] == g);
+            let any_awake = members.clone().any(|v| !self.vehicles[v].sleep.asleep);
+            if any_awake {
+                for v in members {
+                    if self.vehicles[v].sleep.asleep {
+                        self.vehicles[v].sleep.wake();
+                    }
+                }
+            }
+        }
+        let awake: Vec<bool> = self.vehicles.iter().map(|v| !v.sleep.asleep).collect();
+        for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
+            v.check_wings();
+            v.rebase_origin();
+            v.sleep.track = Some(cfg.speed);
+            v.sleep.moving = v.grab.is_some();
+        }
+        for _ in 0..steps {
+            for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
+                v.step();
+            }
+            self.steps += 1;
+            if self.contact && nv > 1 {
+                self.skip = self.vehicles.iter().map(|v| v.sleep.asleep).collect();
+                self.contact_pass();
+                self.skip.clear();
+            }
+        }
+        let mut eligible = vec![false; nv];
+        for (i, v) in self.vehicles.iter_mut().enumerate() {
+            if !awake[i] {
+                continue;
+            }
+            let moving = v.sleep.moving;
+            v.sleep.track = None;
+            v.sleep.moving = false;
+            let pos: Vec<Vec3> = v.nodes.iter().map(|n| n.pos).collect();
+            eligible[i] = crate::explicit_sleep::frame_end(&mut v.sleep, &pos, moving, steps, cfg);
+        }
+        for g in 0..nv {
+            let members: Vec<usize> = (0..nv).filter(|&v| groups[v] == g && awake[v]).collect();
+            if !members.is_empty() && members.iter().all(|&v| eligible[v]) {
+                for v in members {
+                    self.vehicles[v].sleep.asleep = true;
+                }
+            }
+        }
+    }
+
     /// One step: every vehicle's own step in vehicle order, then the contact pass.
     pub fn step(&mut self) {
-        for v in &mut self.vehicles {
+        let Some(mut ledger) = self.ledger.take() else {
+            for v in &mut self.vehicles {
+                v.step();
+            }
+            self.steps += 1;
+            if self.contact && self.vehicles.len() > 1 {
+                self.contact_pass();
+            }
+            return;
+        };
+        for (k, v) in self.vehicles.iter_mut().enumerate() {
+            let before: Vec<(Vec3, Vec3, Vec3)> = v
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (v.origin + n.pos, n.vel, v.force_now(i)))
+                .collect();
             v.step();
+            ledger.account(k, v, &before);
         }
         self.steps += 1;
+        ledger.vc_reset(&self.vehicles);
+        self.ledger = Some(ledger);
         if self.contact && self.vehicles.len() > 1 {
             self.contact_pass();
         }
+        if let Some(l) = self.ledger.as_mut() {
+            l.refresh(&self.vehicles);
+        }
+    }
+
+    /// Turns the energy ledger on from the current state (its start energy).
+    pub fn enable_ledger(&mut self) {
+        for v in &mut self.vehicles {
+            v.trace = Some(Box::default());
+        }
+        let mut l = EnergyLedger::default();
+        l.prev = self
+            .vehicles
+            .iter()
+            .map(|v| ForceSplit::new(v.nodes.len()))
+            .collect();
+        l.vc = self
+            .vehicles
+            .iter()
+            .map(|v| {
+                [
+                    vec![Vec3::ZERO; v.nodes.len()],
+                    vec![Vec3::ZERO; v.nodes.len()],
+                ]
+            })
+            .collect();
+        l.refresh(&self.vehicles);
+        l.start = l.mechanical();
+        self.ledger = Some(l);
     }
 
     /// The bounding boxes (spec §4.1) and the vehicle-contact pass (§3.1 3).
     pub fn contact_pass(&mut self) {
         let nv = self.vehicles.len();
+        if self.vehicles.iter().any(|v| v.two_body_contact) {
+            self.pass_force.resize(nv, Vec::new());
+            for (pf, v) in self.pass_force.iter_mut().zip(&self.vehicles) {
+                pf.clear();
+                pf.extend(v.forces_now());
+            }
+        }
         self.world.resize(nv, Vec::new());
         self.boxes.clear();
         for (v, w) in self.vehicles.iter().zip(&mut self.world) {
@@ -221,9 +594,12 @@ impl ExplicitBeamsWorld {
         let mut partners: Vec<usize> = Vec::new();
         for a in 0..nv {
             partners.clear();
+            if self.skip.get(a).copied().unwrap_or(false) {
+                continue;
+            }
             let (alo, ahi) = self.boxes[a];
             for b in 0..nv {
-                if b == a {
+                if b == a || self.skip.get(b).copied().unwrap_or(false) {
                     continue;
                 }
                 let (blo, bhi) = self.boxes[b];
@@ -256,6 +632,7 @@ impl ExplicitBeamsWorld {
                 .map(|&b| self.vehicles[b].contact_points.len())
                 .sum();
             if offered > 0 {
+                self.owner_frame(a, &partners);
                 self.triangle_loop(a, &partners, &mut stats);
             }
         }
@@ -270,11 +647,38 @@ impl ExplicitBeamsWorld {
         self.last = stats;
     }
 
-    /// Owner `a`'s triangle loop against `partners` (§3.3, §4.2, §5, §6).
+    /// The owner `a`'s and its partners' node positions in `a`'s frame: each vehicle's
+    /// origin less `a`'s, plus its node positions (the GPU's `vvRel`; exactly the world
+    /// positions while every origin is 0).
+    fn owner_frame(&mut self, a: usize, partners: &[usize]) {
+        let nv = self.vehicles.len();
+        self.frame.resize(nv, Vec::new());
+        let oa = self.vehicles[a].origin;
+        for &x in std::iter::once(&a).chain(partners) {
+            let v = &self.vehicles[x];
+            let rel = v.origin - oa;
+            let f = &mut self.frame[x];
+            f.clear();
+            f.extend(v.nodes.iter().map(|n| rel + n.pos));
+        }
+    }
+
+    /// Owner `a`'s triangle loop against `partners` (§3.3, §4.2, §5, §6): the walk
+    /// (throttles, boxes, hit tests and side votes, all from positions), then the
+    /// hits' forces in the walk's order (triangles in list order, candidates in
+    /// order). The walk reads no force, so the two phases are the specification's
+    /// single loop.
     fn triangle_loop(&mut self, a: usize, partners: &[usize], stats: &mut ContactStats) {
         let r = self.vehicles[a].collision_range;
         let rr = Vec3::splat(r);
         let mut cands: Vec<(usize, u32)> = Vec::new();
+        let mut hits: Vec<Hit> = Vec::new();
+        // The owner's profile without the throttle (§36): a triangle never waits.
+        let cap = if self.vehicles[a].settings.triangle_throttle {
+            i32::MAX
+        } else {
+            0
+        };
         for t in 0..self.vehicles[a].triangles.len() {
             let [mut cwait, mut cidle] = self.vehicles[a].contact_throttle[t];
             if self.throttle {
@@ -289,16 +693,47 @@ impl ExplicitBeamsWorld {
             }
             stats.triangles_tested += 1;
             let [i0, i1, i2] = self.vehicles[a].triangles[t].nodes;
-            let wa = &self.world[a];
+            let wa = &self.frame[a];
             let (p0, p1, p2) = (wa[i0 as usize], wa[i1 as usize], wa[i2 as usize]);
-            let lo = p0.min(p1).min(p2) - rr;
-            let hi = p0.max(p1).max(p2) + rr;
+            // A broken triangle, or an anti-clip-only one while its vehicle's
+            // anti-clip is off: no candidates.
+            let dead = self.vehicles[a].tri_dead.get(t).copied().unwrap_or(false)
+                || (self.vehicles[a].tri_anti_only(t) && !self.vehicles[a].anti_clip);
+            let (lo, hi) = if dead {
+                // A broken JBeam triangle (jbeam-semantics-spec.md §18): no candidates.
+                (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY))
+            } else {
+                (p0.min(p1).min(p2) - rr, p0.max(p1).max(p2) + rr)
+            };
             cands.clear();
+            // Anti-clip (§36): the box also reaches what crossed it over the step
+            // (with anti-clip on the owner or the partner).
+            let anti_a = self.vehicles[a].anti_clip && !dead;
+            let tri_travel = if !dead {
+                let va = &self.vehicles[a];
+                [i0, i1, i2]
+                    .iter()
+                    .map(|&i| va.nodes[i as usize].vel.length())
+                    .fold(0.0f32, f32::max)
+                    * STEP
+            } else {
+                0.0
+            };
             for &b in partners {
-                let wb = &self.world[b];
+                let wb = &self.frame[b];
+                let anti = anti_a || (self.vehicles[b].anti_clip && !dead);
                 for &h in &self.vehicles[b].contact_points {
                     let x = wb[h as usize];
-                    if x.cmpge(lo).all() && x.cmple(hi).all() {
+                    let pad = if anti {
+                        Vec3::splat(
+                            tri_travel
+                                + self.vehicles[b].nodes[h as usize].vel.length() * STEP
+                                + CLIP_DEPTH,
+                        )
+                    } else {
+                        Vec3::ZERO
+                    };
+                    if x.cmpge(lo - pad).all() && x.cmple(hi + pad).all() {
                         cands.push((b, h));
                     }
                 }
@@ -309,8 +744,76 @@ impl ExplicitBeamsWorld {
                 let frame = ContactFrame::new(p0, p1, p2);
                 for &(b, h) in &cands {
                     stats.candidates += 1;
-                    let x = self.world[b][h as usize];
+                    let x = self.frame[b][h as usize];
                     let (alpha, beta, gamma, delta) = frame.local(x);
+                    // Anti-clip (§36): the side a point is kept on is the one it
+                    // held for this triangle last step (it was in contact), or the
+                    // one it came from when it crossed the plane over the step
+                    // inside the triangle, or (new, in the band) the side vote's;
+                    // it is pushed back to that side from up to CLIP_DEPTH behind.
+                    // Each contact records its side for the next step.
+                    let anti = self.vehicles[a].anti_clip || self.vehicles[b].anti_clip;
+                    if anti {
+                        if self.vehicles[b].clip_sides.len() != self.vehicles[b].nodes.len() {
+                            let n = self.vehicles[b].nodes.len();
+                            self.vehicles[b].clip_sides = vec![[CLIP_EMPTY; 4]; n];
+                        }
+                        let held =
+                            clip_side(&self.vehicles[b].clip_sides[h as usize], a as u32, t as u32);
+                        let va = &self.vehicles[a];
+                        let vb = &self.vehicles[b];
+                        let wb = &self.frame[b];
+                        let crossing = || {
+                            let back = |i: u32, p: Vec3| p - va.nodes[i as usize].vel * STEP;
+                            let pf = ContactFrame::new(back(i0, p0), back(i1, p1), back(i2, p2));
+                            let x_prev = x - vb.nodes[h as usize].vel * STEP;
+                            swept_crossing(&pf, &frame, x_prev, x)
+                        };
+                        let vote = || {
+                            let (s, e) = (
+                                vb.neighbour_start[h as usize] as usize,
+                                vb.neighbour_start[h as usize + 1] as usize,
+                            );
+                            let behind = vote_behind(
+                                delta,
+                                frame.n,
+                                p0,
+                                vb.neighbours[s..e].iter().map(|&j| wb[j as usize]),
+                            );
+                            if behind {
+                                -1.0
+                            } else {
+                                1.0
+                            }
+                        };
+                        let only = va.tri_anti_only(t);
+                        let Some(c) =
+                            clip_test((alpha, beta, gamma, delta), held, crossing, r, vote)
+                        else {
+                            continue;
+                        };
+                        clip_record(
+                            &mut self.vehicles[b].clip_sides[h as usize],
+                            clip_word(a as u32, t as u32, c.side),
+                        );
+                        // An anti-clip-only triangle (BeamNG NONCOLLIDABLE): no force
+                        // in front of its plane; behind it, pushed back to the plane.
+                        let p = clip_depth(only, c.d, r);
+                        if only && c.d >= 0.0 {
+                            continue;
+                        }
+                        stats.hits += 1;
+                        cwait = 0;
+                        hits.push(Hit {
+                            tri: [i0, i1, i2],
+                            w: c.w,
+                            b,
+                            h,
+                            n: frame.n * c.side,
+                            p,
+                        });
+                        continue;
+                    }
                     if !(alpha >= 0.0 && beta >= 0.0 && gamma >= 0.0 && delta.abs() <= r) {
                         continue;
                     }
@@ -321,7 +824,7 @@ impl ExplicitBeamsWorld {
                         vb.neighbour_start[h as usize] as usize,
                         vb.neighbour_start[h as usize + 1] as usize,
                     );
-                    let wb = &self.world[b];
+                    let wb = &self.frame[b];
                     let behind = vote_behind(
                         delta,
                         frame.n,
@@ -333,35 +836,682 @@ impl ExplicitBeamsWorld {
                     } else {
                         (frame.n, delta)
                     };
-                    let p = r - delta;
-                    let node = vb.nodes[h as usize];
-                    let va = &self.vehicles[a];
-                    let (n0, n1, n2) = (
-                        va.nodes[i0 as usize],
-                        va.nodes[i1 as usize],
-                        va.nodes[i2 as usize],
-                    );
-                    let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
-                    let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
-                    let m = (node.mass * mt) / (node.mass + mt);
-                    let f = contact_force(
-                        node.force,
-                        v,
-                        m,
+                    hits.push(Hit {
+                        tri: [i0, i1, i2],
+                        w: [alpha, beta, gamma],
+                        b,
+                        h,
                         n,
-                        STEP,
-                        &ContactSurface::BOX,
-                        p,
-                        node.friction,
-                    );
-                    self.vehicles[b].nodes[h as usize].force += f;
-                    let va = &mut self.vehicles[a];
-                    va.nodes[i1 as usize].force -= f * alpha;
-                    va.nodes[i2 as usize].force -= f * beta;
-                    va.nodes[i0 as usize].force -= f * gamma;
+                        p: r - delta,
+                    });
                 }
             }
-            self.vehicles[a].contact_throttle[t] = [cwait, cidle];
+            self.vehicles[a].contact_throttle[t] = [cwait.min(cap), cidle];
+        }
+        if hits.is_empty() {
+            return;
+        }
+        // Two-body hits' mass splitting (spec §10.3): per node, the two-body hits of
+        // this turn it takes part in (as the contacter, or a vertex of the hit's
+        // triangle); and each contacter's force before its first hit of the turn.
+        let tb: Vec<bool> = self.vehicles.iter().map(|v| v.two_body_contact).collect();
+        let two_body = |b: usize| tb[a] || tb[b];
+        let mut split_a: Vec<u32> = Vec::new();
+        let mut split_b: Vec<Vec<u32>> = vec![Vec::new(); self.vehicles.len()];
+        if hits.iter().any(|x| two_body(x.b)) {
+            split_a = vec![0; self.vehicles[a].nodes.len()];
+            for x in hits.iter().filter(|x| two_body(x.b)) {
+                for &i in &x.tri {
+                    split_a[i as usize] += 1;
+                }
+                if split_b[x.b].is_empty() {
+                    split_b[x.b] = vec![0; self.vehicles[x.b].nodes.len()];
+                }
+                split_b[x.b][x.h as usize] += 1;
+            }
+        }
+        // §37.1: the dissipative two-body hits' sums are a staging the residual
+        // pass and the work guard read; each hit's total is added once at the end
+        // (explicit_beams' self-hit order).
+        let on: Vec<bool> = hits
+            .iter()
+            .map(|x| {
+                two_body(x.b)
+                    && (self.vehicles[a].dissipative_contact
+                        || self.vehicles[x.b].dissipative_contact)
+            })
+            .collect();
+        let staged = on.iter().any(|&x| x);
+        let snapshot: Vec<Option<(Vec<[i32; 3]>, Option<Vec<(glam::DVec3, u32)>>)>> = (0
+            ..self.vehicles.len())
+            .map(|v| {
+                (staged && (v == a || hits.iter().any(|x| x.b == v))).then(|| {
+                    (
+                        self.vehicles[v].contact_acc.clone(),
+                        self.vehicles[v].contact_exact.clone(),
+                    )
+                })
+            })
+            .collect();
+        let mut first: Vec<Vec3> = Vec::with_capacity(hits.len());
+        for (j, x) in hits.iter().enumerate() {
+            let (b, h) = (x.b, x.h);
+            let [i0, i1, i2] = x.tri;
+            let [alpha, beta, gamma] = x.w;
+            let node = self.vehicles[b].nodes[h as usize];
+            let va = &self.vehicles[a];
+            let (n0, n1, n2) = (
+                va.nodes[i0 as usize],
+                va.nodes[i1 as usize],
+                va.nodes[i2 as usize],
+            );
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let dissipative =
+                self.vehicles[a].dissipative_contact || self.vehicles[b].dissipative_contact;
+            // (§37's position step shares: the sub-bodies' inverse masses; none
+            // outside the two-body rule.)
+            let (m, fh, ims) = if two_body(b) {
+                // Each node of the hit is one of its k sub-bodies (mass m/k); an
+                // immovable node is of infinite mass. The triangle point's inverse
+                // mass is Σ w²·k/m; the pair's relative normal acceleration from the
+                // forces at the pass's start (the contacter's F/m less the point's
+                // Σ w·F/m) is cancelled with their reduced mass.
+                let im = |n: &Node, k: f32| {
+                    if n.has(NODE_IMMOVABLE) {
+                        0.0
+                    } else {
+                        k / n.mass
+                    }
+                };
+                let acc = |f: Vec3, n: &Node| {
+                    if n.has(NODE_IMMOVABLE) {
+                        Vec3::ZERO
+                    } else {
+                        f / n.mass
+                    }
+                };
+                let k = |i: u32| split_a[i as usize] as f32;
+                let imh = im(&node, split_b[b][h as usize] as f32);
+                let imt = two_body_inverse_mass(
+                    [im(&n1, k(i1)), im(&n2, k(i2)), im(&n0, k(i0))],
+                    [alpha, beta, gamma],
+                );
+                let inv = imh + imt;
+                let m = if inv > 0.0 { 1.0 / inv } else { 0.0 };
+                let pf = &self.pass_force[a];
+                let at = acc(pf[i1 as usize], &n1) * alpha
+                    + acc(pf[i2 as usize], &n2) * beta
+                    + acc(pf[i0 as usize], &n0) * gamma;
+                (
+                    m,
+                    (acc(self.pass_force[b][h as usize], &node) - at) * m,
+                    // (§37's position step: the sub-bodies' inverse masses k/m.
+                    // Self contact shares by the nodes' own masses; here own masses
+                    // let the 80 km/h T-bone leak 15–17 of 1,026 striker nodes, k/m
+                    // 6–7.)
+                    Some([imh, im(&n1, k(i1)), im(&n2, k(i2)), im(&n0, k(i0))]),
+                )
+            } else {
+                let mt = n1.mass * alpha + n2.mass * beta + n0.mass * gamma;
+                (
+                    (node.mass * mt) / (node.mass + mt),
+                    self.vehicles[b].force_now(h as usize),
+                    None,
+                )
+            };
+            let (f, budget) = contact_response(
+                fh,
+                v,
+                m,
+                x.n,
+                STEP,
+                &ContactSurface::BOX
+                    .exact_if(self.vehicles[b].exact_friction)
+                    .dissipative_if(dissipative),
+                x.p,
+                node.friction,
+            );
+            if let (true, Some([imh, im1, im2, im0])) = (f != Vec3::ZERO && dissipative, ims) {
+                // §37: the position step, a position impulse δ·m shared by the
+                // sub-bodies' inverse masses (explicit_beams' self-hit order).
+                let delta = shift_depth(x.p, budget, fh.dot(x.n));
+                if delta > 0.0 {
+                    let q = delta * m;
+                    self.vehicles[b].add_shift(h as usize, x.n * (q * imh));
+                    let va = &mut self.vehicles[a];
+                    for (i, w, imk) in [(i1, alpha, im1), (i2, beta, im2), (i0, gamma, im0)] {
+                        if w > 0.0 {
+                            va.add_shift(i as usize, x.n * -(w * (q * imk)));
+                        }
+                    }
+                }
+            }
+            first.push(f);
+            if on[j] {
+                self.vehicles[b].add_contact(h as usize, f);
+                let va = &mut self.vehicles[a];
+                va.add_contact(i1 as usize, -(f * alpha));
+                va.add_contact(i2 as usize, -(f * beta));
+                va.add_contact(i0 as usize, -(f * gamma));
+            } else {
+                self.apply_vehicle_hit(a, x, f);
+            }
+        }
+        if !staged {
+            return;
+        }
+        let res = if vehicle_residual() {
+            self.residual_vehicle_pass(a, &hits, &on, &split_a, &split_b)
+        } else {
+            vec![None; hits.len()]
+        };
+        let with_res: Vec<Vec3> = hits
+            .iter()
+            .zip(&first)
+            .zip(&res)
+            .map(|((x, &f), r)| match r {
+                Some(r) => f + x.n * *r,
+                None => f,
+            })
+            .collect();
+        let guard = self.guard_vehicle_pass(a, &hits, &on, &with_res);
+        for (v, snap) in snapshot.into_iter().enumerate() {
+            if let Some((acc, exact)) = snap {
+                self.vehicles[v].contact_acc = acc;
+                self.vehicles[v].contact_exact = exact;
+            }
+        }
+        for (j, x) in hits.iter().enumerate() {
+            if !on[j] {
+                continue;
+            }
+            let mut f = with_res[j];
+            if let Some(g) = guard[j] {
+                f = f + g;
+            }
+            self.apply_vehicle_hit(a, x, f);
         }
     }
+
+    /// Owner `a`'s hit `x` adds force `f` (on its contact point; its share to the
+    /// triangle's nodes), with the ledger's and the contact-force log's shares.
+    fn apply_vehicle_hit(&mut self, a: usize, x: &Hit, f: Vec3) {
+        let (b, h) = (x.b, x.h);
+        let [i0, i1, i2] = x.tri;
+        let [alpha, beta, gamma] = x.w;
+        if let Some(l) = self.ledger.as_mut() {
+            let fnorm = x.n * f.dot(x.n);
+            let ft = f - fnorm;
+            for (v, i, w) in [
+                (b, h, -1.0f32),
+                (a, i1, alpha),
+                (a, i2, beta),
+                (a, i0, gamma),
+            ] {
+                l.vc[v][0][i as usize] -= fnorm * w;
+                l.vc[v][1][i as usize] -= ft * w;
+            }
+        }
+        self.vehicles[b].add_contact(h as usize, f);
+        let va = &mut self.vehicles[a];
+        va.add_contact(i1 as usize, -(f * alpha));
+        va.add_contact(i2 as usize, -(f * beta));
+        va.add_contact(i0 as usize, -(f * gamma));
+        if let Some(l) = self.vehicles[a].contact_force.as_mut() {
+            l.add(i1 as usize, f * alpha);
+            l.add(i2 as usize, f * beta);
+            l.add(i0 as usize, f * gamma);
+        }
+        if let Some(l) = self.vehicles[b].contact_force.as_mut() {
+            l.add(h as usize, f);
+        }
+    }
+
+    /// §37.1's work guard over owner `a`'s staged hits (`on`; forces `first`,
+    /// each with its residual), as `ExplicitBeams::friction_guard_pass` takes self
+    /// hits: at the pair's realised mean velocity over the step (the forces now,
+    /// the turn's staging sums with them, on the nodes' own masses) a hit whose
+    /// force would do positive work is scaled to zero work; returns each hit's
+    /// −(1 − s)·t. All found from the same sums.
+    fn guard_vehicle_pass(&self, a: usize, hits: &[Hit], on: &[bool], first: &[Vec3]) -> Vec<Option<Vec3>> {
+        let mut out = vec![None; hits.len()];
+        if !crate::explicit_beams::friction_guard() {
+            return out;
+        }
+        let node = |v: usize, i: u32| &self.vehicles[v].nodes[i as usize];
+        let acc = |v: usize, i: u32| {
+            let n = node(v, i);
+            if n.has(NODE_IMMOVABLE) {
+                Vec3::ZERO
+            } else {
+                self.vehicles[v].force_now(i as usize) / n.mass
+            }
+        };
+        let im = |v: usize, i: u32| {
+            let n = node(v, i);
+            if n.has(NODE_IMMOVABLE) {
+                0.0
+            } else {
+                1.0 / n.mass
+            }
+        };
+        for (j, x) in hits.iter().enumerate() {
+            let t = first[j];
+            if !on[j] || t == Vec3::ZERO {
+                continue;
+            }
+            let [i0, i1, i2] = x.tri;
+            let [alpha, beta, gamma] = x.w;
+            let v = node(x.b, x.h).vel
+                - (node(a, i1).vel * alpha + node(a, i2).vel * beta + node(a, i0).vel * gamma);
+            let ac = acc(x.b, x.h) - (acc(a, i1) * alpha + acc(a, i2) * beta + acc(a, i0) * gamma);
+            let inv = im(x.b, x.h)
+                + two_body_inverse_mass([im(a, i1), im(a, i2), im(a, i0)], [alpha, beta, gamma]);
+            let a_rest = ac - t * inv;
+            let aa = t.dot(v + v + a_rest * STEP);
+            let bb = STEP * t.dot(t) * inv;
+            if aa + bb > 0.0 && bb > 0.0 {
+                let s = if aa < 0.0 { (-aa / bb).min(1.0) } else { 0.0 };
+                out[j] = Some(t * -(1.0 - s));
+            }
+        }
+        out
+    }
+
+    /// §37.1's residual pass over owner `a`'s staged hits (`on`), as
+    /// `ExplicitBeams::residual_self_pass` takes self hits: each pair approaching
+    /// and still approaching at the forces now (the turn's staging sums with them)
+    /// takes a normal force r with the first pass's reduced mass (its counts
+    /// `split_a`, `split_b`), into the staging sums; returns each hit's r.
+    fn residual_vehicle_pass(
+        &mut self,
+        a: usize,
+        hits: &[Hit],
+        on: &[bool],
+        split_a: &[u32],
+        split_b: &[Vec<u32>],
+    ) -> Vec<Option<f32>> {
+        let acc = |v: usize, i: u32| {
+            let n = &self.vehicles[v].nodes[i as usize];
+            if n.has(NODE_IMMOVABLE) {
+                Vec3::ZERO
+            } else {
+                self.vehicles[v].force_now(i as usize) / n.mass
+            }
+        };
+        let im = |n: &Node, k: u32| {
+            if n.has(NODE_IMMOVABLE) {
+                0.0
+            } else {
+                k as f32 / n.mass
+            }
+        };
+        let mut out = vec![None; hits.len()];
+        for (j, x) in hits.iter().enumerate() {
+            if !on[j] {
+                continue;
+            }
+            let [i0, i1, i2] = x.tri;
+            let [alpha, beta, gamma] = x.w;
+            let va = &self.vehicles[a];
+            let node = &self.vehicles[x.b].nodes[x.h as usize];
+            let (n0, n1, n2) = (
+                &va.nodes[i0 as usize],
+                &va.nodes[i1 as usize],
+                &va.nodes[i2 as usize],
+            );
+            let v = node.vel - (n1.vel * alpha + n2.vel * beta + n0.vel * gamma);
+            let at = acc(a, i1) * alpha + acc(a, i2) * beta + acc(a, i0) * gamma;
+            let an = (acc(x.b, x.h) - at).dot(x.n);
+            let vn = v.dot(x.n);
+            if !(vn < 0.0 && an * STEP + vn < 0.0) {
+                continue;
+            }
+            let inv = im(node, split_b[x.b][x.h as usize])
+                + two_body_inverse_mass(
+                    [
+                        im(n1, split_a[i1 as usize]),
+                        im(n2, split_a[i2 as usize]),
+                        im(n0, split_a[i0 as usize]),
+                    ],
+                    x.w,
+                );
+            if inv <= 0.0 {
+                continue;
+            }
+            let m = 1.0 / inv;
+            let r = -(an * m) - vn * m / STEP;
+            if r > 0.0 {
+                out[j] = Some(r);
+            }
+        }
+        for (j, x) in hits.iter().enumerate() {
+            let Some(r) = out[j] else { continue };
+            let f = x.n * r;
+            let [i0, i1, i2] = x.tri;
+            let [alpha, beta, gamma] = x.w;
+            self.vehicles[x.b].add_contact(x.h as usize, f);
+            let va = &mut self.vehicles[a];
+            va.add_contact(i1 as usize, -(f * alpha));
+            va.add_contact(i2 as usize, -(f * beta));
+            va.add_contact(i0 as usize, -(f * gamma));
+        }
+        out
+    }
+
+}
+
+/// A vehicle's per-node forces of the last step by source, for the ledger.
+#[derive(Clone, Debug, Default)]
+struct ForceSplit {
+    trace: ForceTrace,
+}
+
+impl ForceSplit {
+    fn new(n: usize) -> Self {
+        let mut trace = ForceTrace::default();
+        for p in &mut trace.parts {
+            p.resize(n, Vec3::ZERO);
+        }
+        Self { trace }
+    }
+}
+
+/// The energy ledger of an [`ExplicitBeamsWorld`] (CPU, opt-in): the state's
+/// kinetic, gravitational and elastic energy, and the work every force source
+/// has done on the nodes since it was enabled (J). The node pass integrates
+/// v' = v + h·F/m, x' = x + h·v'; a force's work is F·(v + v')/2·h per step, so the
+/// sources' work sums to the kinetic energy's change exactly (`discretisation`
+/// stays 0; the positions' step differs from it by ½m|v' − v|², the symplectic
+/// step's term, which the elastic energy's change carries). Sources: gravity; the air
+/// (drag, turbulence, wings; gravity taken out); beams (every beam record); self-
+/// collision; slide nodes; vehicle contact (normal along each hit's normal, and
+/// tangential: friction); and the node pass's own contacts (ground, boxes, static
+/// shapes, rigid partners: m·(v' − v)/h less the accumulated force), split into
+/// vertical and horizontal. Elastic energy is every conservative record's stored
+/// energy ([`elastic_energy`]: the linear beam kinds, bounded beams across their
+/// bounds, torsion elements, pressure groups' gas); aerodynamic and trigger records
+/// store none. The beams' dissipation, −(W_beams + ΔU), is then damping, yield and
+/// fracture only, and a rise of kinetic + gravitational + elastic is created energy.
+#[derive(Clone, Debug, Default)]
+pub struct EnergyLedger {
+    pub kinetic: f64,
+    pub gravity_pe: f64,
+    pub elastic: f64,
+    /// Kinetic + gravitational + elastic when enabled.
+    pub start: f64,
+    pub elastic_start: f64,
+    pub w_gravity: f64,
+    pub w_air: f64,
+    pub w_beams: f64,
+    pub w_self_contact: f64,
+    pub w_slides: f64,
+    pub w_contact_normal: f64,
+    pub w_contact_friction: f64,
+    pub w_ground_vertical: f64,
+    pub w_ground_horizontal: f64,
+    /// The contact position steps' energy (§37, self- and vehicle contact): per
+    /// step Σ −F·Δx over the nodes they moved, F the node's air, beam and slide
+    /// forces of the step (the first-order change of the potential and elastic
+    /// energy they store). Not a work on the velocities: not in kinetic_change.
+    pub w_contact_shift: f64,
+    /// The ground's position steps' energy (§37), as [`Self::w_contact_shift`]
+    /// (−F·Δx over the nodes they lifted).
+    pub w_ground_shift: f64,
+    pub discretisation: f64,
+    prev: Vec<ForceSplit>,
+    vc: Vec<[Vec<Vec3>; 2]>,
+    started: bool,
+}
+
+impl EnergyLedger {
+    /// Kinetic + gravitational + elastic now.
+    pub fn mechanical(&self) -> f64 {
+        self.kinetic + self.gravity_pe + self.elastic
+    }
+
+    /// The beams' dissipation so far (damping, yield, fracture, and the
+    /// non-linear records' storage): −(W_beams + ΔU).
+    pub fn beam_dissipation(&self) -> f64 {
+        -(self.w_beams + self.elastic - self.elastic_start)
+    }
+
+    /// The work of every source so far, less the discretisation term: the kinetic
+    /// energy's change, to rounding.
+    pub fn kinetic_change(&self) -> f64 {
+        self.w_gravity
+            + self.w_air
+            + self.w_beams
+            + self.w_self_contact
+            + self.w_slides
+            + self.w_contact_normal
+            + self.w_contact_friction
+            + self.w_ground_vertical
+            + self.w_ground_horizontal
+            - self.discretisation
+    }
+
+    fn account(&mut self, k: usize, v: &ExplicitBeams, before: &[(Vec3, Vec3, Vec3)]) {
+        let prev = &self.prev[k].trace.parts;
+        let vc = &self.vc[k];
+        for (i, (n, &(x0, v0, f_acc))) in v.nodes.iter().zip(before).enumerate() {
+            if n.has(NODE_IMMOVABLE) || i >= prev[0].len() {
+                continue;
+            }
+            // The work over the step at its mean velocity, (v + v')/2·h: the
+            // kinetic energy's change exactly (the position step v'·h would add
+            // ½m|v' − v|², large for the stiff modes of a crash).
+            let _ = x0;
+            let dx = ((n.vel + v0) * (0.5 * STEP)).as_dvec3();
+            let w = |f: Vec3| f.as_dvec3().dot(dx);
+            let g = Vec3::new(0.0, n.mass * GRAVITY, 0.0);
+            let dv = n.vel - v0;
+            let f_tot = dv * (n.mass / STEP);
+            let ground = f_tot - f_acc;
+            self.w_gravity += w(g);
+            self.w_air += w(prev[0][i] - g);
+            self.w_beams += w(prev[1][i]);
+            self.w_self_contact += w(prev[2][i]);
+            self.w_slides += w(prev[3][i]);
+            self.w_contact_normal += w(vc[0][i]);
+            self.w_contact_friction += w(vc[1][i]);
+            self.w_ground_vertical += w(Vec3::new(0.0, ground.y, 0.0));
+            self.w_ground_horizontal += w(Vec3::new(ground.x, 0.0, ground.z));
+            let held = (prev[0][i] + prev[1][i] + prev[3][i]).as_dvec3();
+            if let Some(&d) = v.shift_applied.get(i) {
+                self.w_contact_shift -= held.dot(d.as_dvec3());
+            }
+            if let Some(&y) = v.ground_lift.get(i) {
+                self.w_ground_shift -= held.y * f64::from(y);
+            }
+        }
+        if let Some(t) = v.trace.as_ref() {
+            self.prev[k].trace = (**t).clone();
+        }
+    }
+
+    fn vc_reset(&mut self, vehicles: &[ExplicitBeams]) {
+        for (vc, v) in self.vc.iter_mut().zip(vehicles) {
+            for a in vc.iter_mut() {
+                a.clear();
+                a.resize(v.nodes.len(), Vec3::ZERO);
+            }
+        }
+    }
+
+    fn refresh(&mut self, vehicles: &[ExplicitBeams]) {
+        let (mut ke, mut pe, mut u) = (0.0f64, 0.0f64, 0.0f64);
+        for v in vehicles {
+            for n in &v.nodes {
+                let m = f64::from(n.mass);
+                ke += 0.5 * m * f64::from(n.vel.length_squared());
+                pe -= m * f64::from(GRAVITY) * f64::from(v.origin.y + n.pos.y);
+            }
+            u += elastic_energy(v);
+        }
+        (self.kinetic, self.gravity_pe, self.elastic) = (ke, pe, u);
+        if !self.started {
+            self.elastic_start = u;
+            self.started = true;
+        }
+    }
+}
+
+/// The stored energy (J) of `v`'s conservative records (see [`EnergyLedger`]): ½k·e²
+/// of the linear beam kinds (plain, support in compression, ropes in tension,
+/// couplers, anisotropic at their base rate, LBEAMs at their arm-following rest);
+/// bounded beams' ∫k(x)·x dx across their bound zone and limit spring; torsion
+/// elements' ½k·wrap(φ − φ₀)²; and pressure groups' gas, ∫ p_gauge dV from the
+/// spawn volume (isothermal, capped as the force is). With every stored term in, a
+/// rise of kinetic + gravitational + this is energy the step created.
+pub fn elastic_energy(v: &ExplicitBeams) -> f64 {
+    let mut u = 0.0f64;
+    for (j, b) in v.beams.iter().enumerate() {
+        if b.broken {
+            continue;
+        }
+        if b.kind == ExplicitKind::JbeamTorsion {
+            let (c, d) = (v.beams[j + 1].a, v.beams[j + 1].b);
+            let x = [b.a, b.b, c, d].map(|i| v.nodes[i as usize].pos);
+            let dphi = crate::explicit_beams::wrap_angle(crate::explicit_beams::dihedral(x) - b.rest);
+            u += 0.5 * f64::from(b.k) * f64::from(dphi) * f64::from(dphi);
+            continue;
+        }
+        if b.kind == ExplicitKind::JbeamPressureGroup {
+            u += gas_energy(v, j);
+            continue;
+        }
+        let (pa, pb) = (v.nodes[b.a as usize].pos, v.nodes[b.b as usize].pos);
+        let len = pa.distance(pb);
+        let e = match b.kind {
+            ExplicitKind::Plain
+            | ExplicitKind::LimitedSpring
+            | ExplicitKind::Shock2
+            | ExplicitKind::JbeamPlain
+            | ExplicitKind::JbeamCoupler
+            | ExplicitKind::JbeamAniso => len - b.rest,
+            ExplicitKind::JbeamBounded => {
+                u += bounded_energy(b, len - b.rest);
+                continue;
+            }
+            ExplicitKind::Support | ExplicitKind::JbeamSupport => (len - b.rest).min(0.0),
+            ExplicitKind::Rope | ExplicitKind::JbeamRope => (len - b.rest).max(0.0),
+            ExplicitKind::JbeamLbeam => {
+                let c = v.beam_ext[v.ext_of[j] as usize - 1].index(0) as usize;
+                let (a, bb) = (pa.distance(v.nodes[c].pos), pb.distance(v.nodes[c].pos));
+                len - (a * a + bb * bb - 2.0 * a * bb * b.rest).max(0.0).sqrt()
+            }
+            _ => 0.0,
+        };
+        u += 0.5 * f64::from(b.k) * f64::from(e) * f64::from(e);
+    }
+    u
+}
+
+/// A bounded beam's spring energy at extension `e`: ∫₀ᵉ k(x)·x dx with the rate
+/// `jbeam_force_filtered` gives it (the base rate inside the bounds, blending to the
+/// limit rate across the bound zone past them).
+fn bounded_energy(b: &crate::explicit_beams::Beam, e: f32) -> f64 {
+    let (long, short) = (b.long_bound * b.rest, b.short_bound * b.rest);
+    let rate = |x: f64| -> f64 {
+        let o = if x > f64::from(long) {
+            x - f64::from(long)
+        } else if x < -f64::from(short) {
+            -x - f64::from(short)
+        } else {
+            0.0
+        };
+        let k = f64::from(b.k);
+        if o > 0.0 {
+            let zone = f64::from(b.plastic);
+            let s = if zone > 0.0 { (o / zone).min(1.0) } else { 1.0 };
+            k + (f64::from(b.limit_k) - k) * s
+        } else {
+            k
+        }
+    };
+    let e = f64::from(e);
+    let inside = if e >= 0.0 { f64::from(long) } else { -f64::from(short) };
+    if (e >= 0.0 && e <= inside) || (e < 0.0 && e >= inside) {
+        return 0.5 * f64::from(b.k) * e * e;
+    }
+    // Inside the bound at the base rate, then Simpson's rule beyond it.
+    let mut u = 0.5 * f64::from(b.k) * inside * inside;
+    let n = 64;
+    let h = (e - inside) / n as f64;
+    let f = |x: f64| rate(x) * x;
+    let mut acc = f(inside) + f(e);
+    for i in 1..n {
+        acc += f(inside + h * i as f64) * if i % 2 == 1 { 4.0 } else { 2.0 };
+    }
+    u += acc * h / 3.0;
+    u
+}
+
+/// A pressure group's gas energy: ∫_V^{V₀} p(V') dV', p the gauge pressure the group
+/// applies (`pressure_group_gauge`: isothermal p_abs = p_abs,0·V₀/V, the volume held
+/// at 1 % of V₀ or more, the gauge capped).
+fn gas_energy(v: &ExplicitBeams, j: usize) -> f64 {
+    let ext = &v.beam_ext[v.ext_of[j] as usize - 1];
+    let c = v.nodes[v.beams[j].a as usize].pos;
+    let first = ext.index(0) as usize;
+    let count = ext.index(1) as usize;
+    let mut vol = 0.0f64;
+    for t in 0..count {
+        let r = first + 2 * t;
+        let x0 = (v.nodes[v.beams[r].a as usize].pos - c).as_dvec3();
+        let x1 = (v.nodes[v.beams[r].b as usize].pos - c).as_dvec3();
+        let x2 = (v.nodes[v.beams[r + 1].a as usize].pos - c).as_dvec3();
+        vol += x0.dot(x1.cross(x2));
+    }
+    let vol = vol / 6.0;
+    let v0 = f64::from(ext.e1[2]);
+    let cst = f64::from(ext.e1[3]) * v0;
+    let atm = f64::from(crate::explicit_jbeam_ext::ATMOSPHERE);
+    let cap = f64::from(ext.e2[0]);
+    let p = |x: f64| (cst / x.max(0.01 * v0) - atm).min(cap);
+    // Breakpoints: the volume floor and where the cap starts.
+    let (lo, hi, sign) = if vol < v0 { (vol, v0, 1.0) } else { (v0, vol, -1.0) };
+    let mut cuts = vec![lo, hi, 0.01 * v0];
+    if cap.is_finite() {
+        cuts.push(cst / (atm + cap));
+    }
+    cuts.retain(|&x| x >= lo && x <= hi);
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let mut u = 0.0;
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let m = 0.5 * (a + b);
+        u += if m < 0.01 * v0 || p(m) >= cap {
+            p(m) * (b - a)
+        } else {
+            cst * (b / a).ln() - atm * (b - a)
+        };
+    }
+    sign * u
+}
+
+/// One hit of an owner's walk: the triangle's nodes (n₀, n₁, n₂) and weights
+/// (α, β, γ), the partner and its contact point, the normal after the side vote and
+/// the penetration r − δ.
+struct Hit {
+    tri: [u32; 3],
+    w: [f32; 3],
+    b: usize,
+    h: u32,
+    n: Vec3,
+    p: f32,
+}
+
+/// Vehicle contact's residual pass (§37.1; on, `VEHICLE_RESIDUAL=0` a measurement
+/// switch: off). Measured, the 80 km/h T-bone's leak at the five offsets: off
+/// 8 / 9 / 5 / 2 / 2 of 1,026 striker nodes, on 3 / 4 / 6 / 0 / 2; the contact-work
+/// invariant holds either way.
+fn vehicle_residual() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("VEHICLE_RESIDUAL").is_ok_and(|v| v == "0")
+            && crate::explicit_beams::residual_on()
+    })
 }

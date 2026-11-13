@@ -7,6 +7,9 @@ description = "Phase graph and backend trait"
 
 [dependencies]
 engine-schema.workspace = true
+# The explicit-beams plan packs the solver's records (explicit_plan.rs).
+engine-softbody.workspace = true
+glam.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
 serde.workspace = true

@@ -7,12 +7,15 @@
 #[allow(dead_code)]
 pub const WGSL_LOOP_CAP: u32 = 1 << 16;
 
-/// The explicit-beams modules' loop cap (`slang/kernels/explicit_beams*.slang`):
-/// higher than [`WGSL_LOOP_CAP`] since a few of their loops run on one lane over a
-/// whole vehicle's beams (tens of thousands for a large vehicle). Far above any
-/// legitimate count, so a capped module computes what an uncapped one does; a loop
-/// that reaches it sets the sticky flag in the last word of `gAcc`
-/// ([`explicit_loop_cap_hit`]) and stops, and the host reports the error.
+/// The explicit-beams loop cap (`engine_exec::explicit_plan::EXPLICIT_LOOP_CAP`,
+/// `EB_LOOP_CAP` in `slang/kernels/explicit_beams.slang`): higher than
+/// [`WGSL_LOOP_CAP`] since a few of the kernel's loops run on one lane over a whole
+/// vehicle's beams (tens of thousands for a large vehicle). The shipped kernel caps
+/// its loops in its Slang source (every target); [`cap_explicit_loops`] caps the
+/// frozen test modules' (`explicit_beams_baseline.slang`, `explicit_beams_ref.slang`,
+/// WGSL only) to the same count: a loop that reaches it sets the sticky flag in the
+/// last word of `gAcc` (`engine_exec::explicit_plan::explicit_loop_cap_hit`) and
+/// stops, and the host reports the error.
 #[allow(dead_code)]
 pub const EXPLICIT_LOOP_CAP: u32 = 1 << 20;
 
@@ -584,18 +587,4 @@ fn count_assigns(body: &str, id: &str) -> usize {
         }
     }
     n
-}
-
-/// The error for a loop-cap flag word read back from `gAcc`'s last word (0: none).
-#[allow(dead_code)]
-pub fn explicit_loop_cap_hit(flag: i32) -> Result<(), String> {
-    if flag == 0 {
-        return Ok(());
-    }
-    Err(format!(
-        "a kernel loop (number {} in its module, counting from 1) ran {} passes, its \
-         cap, and was stopped: that frame's results are invalid (a runaway loop: a \
-         corrupt count or bound)",
-        flag, EXPLICIT_LOOP_CAP
-    ))
 }

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="380" font-family="sans-serif" font-size="12">
+<rect width="640" height="380" fill="white"/>
+<text x="70" y="22" font-size="14" font-weight="bold">Map side (m), nothing active</text>
+<line x1="70" x2="490" y1="330.0" y2="330.0" stroke="#e9ecef"/>
+<text x="64" y="334.0" text-anchor="end">0.0</text>
+<line x1="70" x2="490" y1="272.0" y2="272.0" stroke="#e9ecef"/>
+<text x="64" y="276.0" text-anchor="end">9.3</text>
+<line x1="70" x2="490" y1="214.0" y2="214.0" stroke="#e9ecef"/>
+<text x="64" y="218.0" text-anchor="end">18.6</text>
+<line x1="70" x2="490" y1="156.0" y2="156.0" stroke="#e9ecef"/>
+<text x="64" y="160.0" text-anchor="end">27.9</text>
+<line x1="70" x2="490" y1="98.0" y2="98.0" stroke="#e9ecef"/>
+<text x="64" y="102.0" text-anchor="end">37.2</text>
+<line x1="70" x2="490" y1="40.0" y2="40.0" stroke="#e9ecef"/>
+<text x="64" y="44.0" text-anchor="end">46.5</text>
+<text x="16" y="185.0" transform="rotate(-90 16 185.0)" text-anchor="middle">ms per World step (120 Hz)</text>
+<text x="122.5" y="348" text-anchor="middle">500</text>
+<text x="227.5" y="348" text-anchor="middle">1000</text>
+<text x="332.5" y="348" text-anchor="middle">2000</text>
+<text x="437.5" y="348" text-anchor="middle">4000</text>
+<text x="280.0" y="370" text-anchor="middle">map side (m)</text>
+<polyline points="122.5,319.1 227.5,313.6 332.5,299.3 437.5,228.8" fill="none" stroke="#2a6fdb" stroke-width="2"/>
+<polyline points="122.5,318.6 227.5,311.6 332.5,297.3 437.5,66.4" fill="none" stroke="#2a6fdb" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="122.5" cy="319.1" r="3" fill="#2a6fdb"/>
+<text x="127.5" y="314.1" fill="#2a6fdb" font-size="10">1.74</text>
+<circle cx="227.5" cy="313.6" r="3" fill="#2a6fdb"/>
+<text x="232.5" y="308.6" fill="#2a6fdb" font-size="10">2.63</text>
+<circle cx="332.5" cy="299.3" r="3" fill="#2a6fdb"/>
+<text x="337.5" y="294.3" fill="#2a6fdb" font-size="10">4.92</text>
+<circle cx="437.5" cy="228.8" r="3" fill="#2a6fdb"/>
+<text x="442.5" y="223.8" fill="#2a6fdb" font-size="10">16.24</text>
+<line x1="502" x2="522" y1="40" y2="40" stroke="#2a6fdb" stroke-width="2"/>
+<text x="526" y="44">before p50</text>
+<polyline points="122.5,315.9 227.5,314.7 332.5,310.4 437.5,284.4" fill="none" stroke="#d9480f" stroke-width="2"/>
+<polyline points="122.5,312.8 227.5,312.8 332.5,305.4 437.5,282.7" fill="none" stroke="#d9480f" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="122.5" cy="315.9" r="3" fill="#d9480f"/>
+<text x="127.5" y="310.9" fill="#d9480f" font-size="10">2.27</text>
+<circle cx="227.5" cy="314.7" r="3" fill="#d9480f"/>
+<text x="232.5" y="309.7" fill="#d9480f" font-size="10">2.46</text>
+<circle cx="332.5" cy="310.4" r="3" fill="#d9480f"/>
+<text x="337.5" y="305.4" fill="#d9480f" font-size="10">3.14</text>
+<circle cx="437.5" cy="284.4" r="3" fill="#d9480f"/>
+<text x="442.5" y="279.4" fill="#d9480f" font-size="10">7.31</text>
+<line x1="502" x2="522" y1="56" y2="56" stroke="#d9480f" stroke-width="2"/>
+<text x="526" y="60">after p50</text>
+<polyline points="122.5,307.0 227.5,306.7 332.5,297.0 437.5,239.0" fill="none" stroke="#2b8a3e" stroke-width="2"/>
+<polyline points="122.5,300.3 227.5,302.4 332.5,292.9 437.5,234.3" fill="none" stroke="#2b8a3e" stroke-width="2" stroke-dasharray="3 3"/>
+<circle cx="122.5" cy="307.0" r="3" fill="#2b8a3e"/>
+<text x="127.5" y="302.0" fill="#2b8a3e" font-size="10">3.69</text>
+<circle cx="227.5" cy="306.7" r="3" fill="#2b8a3e"/>
+<text x="232.5" y="301.7" fill="#2b8a3e" font-size="10">3.74</text>
+<circle cx="332.5" cy="297.0" r="3" fill="#2b8a3e"/>
+<text x="337.5" y="292.0" fill="#2b8a3e" font-size="10">5.29</text>
+<circle cx="437.5" cy="239.0" r="3" fill="#2b8a3e"/>
+<text x="442.5" y="234.0" fill="#2b8a3e" font-size="10">14.60</text>
+<line x1="502" x2="522" y1="72" y2="72" stroke="#2b8a3e" stroke-width="2"/>
+<text x="526" y="76">after-sleep-off p50</text>
+<line x1="502" x2="522" y1="88" y2="88" stroke="#495057" stroke-width="2" stroke-dasharray="3 3"/>
+<text x="526" y="92">p95</text>
+</svg>

@@ -517,6 +517,20 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             }
         }
     }
+    // Explicit vehicles in the World (engine-world `explicit_vehicles.rs`): one
+    // standalone module.
+    let coupling = wgsl_dir.join("vehicle_coupling.wgsl");
+    let mut cmd = std::process::Command::new(find_slangc()?);
+    cmd.args(["-target", "wgsl"]);
+    for e in ["cpl_bounds", "cpl_plan", "cpl_share", "cpl_loads", "cpl_loads_end", "cpl_emit", "cpl_emit_end", "cpl_query", "cpl_sleep_mask"] {
+        cmd.args(["-entry", e, "-stage", "compute"]);
+    }
+    let status = cmd
+        .arg("-o")
+        .arg(&coupling)
+        .arg(slang_root.join("kernels/vehicle_coupling.slang"))
+        .status()?;
+    anyhow::ensure!(status.success(), "slangc failed for vehicle_coupling.slang");
     // Soft-body skinning: one standalone WGSL module, three entries.
     let skin = wgsl_dir.join("soft_skin.wgsl");
     let status = std::process::Command::new(find_slangc()?)
@@ -554,7 +568,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     )?;
     explicit_post(&beams)?;
     // The wide passes: one module per entry point.
-    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits"] {
+    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits", "centred_beams", "centred_nodes"] {
         let entry = format!("explicit_beams_wide_{pass}");
         let out = wgsl_dir.join(format!("{entry}.wgsl"));
         compile_with_defines(
@@ -598,6 +612,12 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             )
         })
         .collect();
+    // Vehicle sleep's awake list (engine_exec::explicit_plan::SLEEP_LIST).
+    vv.push((
+        "explicit_beams_sleep_list".to_string(),
+        "",
+        vec![("ENGINE_WGSL", "1"), ("EB_SLEEP_LIST", "1")],
+    ));
     for (name, lanes, aero) in [
         ("explicit_beams_contact", "256", false),
         ("explicit_beams_contact_wide", "512", false),
@@ -617,7 +637,14 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             d.clone(),
         ));
         d.push(("EB_VV_GROUPS", "1"));
-        vv.push((name.to_string(), "explicit_beams_frame", d));
+        // The groups of at most four members here (EB_VV_SMALL_ONLY), the larger ones
+        // in their own module (EB_VV_BIG_ONLY, entry explicit_beams_contact):
+        // engine_exec::explicit_plan Kernel::ContactBig.
+        let mut small = d.clone();
+        small.push(("EB_VV_SMALL_ONLY", "1"));
+        vv.push((name.to_string(), "explicit_beams_frame", small));
+        d.push(("EB_VV_BIG_ONLY", "1"));
+        vv.push((name.replace("contact", "contact_big"), "explicit_beams_contact", d));
     }
     for (name, entry, defines) in &vv {
         let out = wgsl_dir.join(format!("{name}.wgsl"));
@@ -636,11 +663,102 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         )?;
         explicit_post(&out)?;
     }
+    // The sixteen frame and contact modules again without surface contact
+    // (EB_NO_SURFACE, the `_nosurf` names; engine_exec::explicit_plan::Kernel::module_for):
+    // the host runs them when no vehicle of the upload has it, so a browser's first
+    // load compiles the frame kernels without the surface pass (feature_query and the
+    // pair path).
+    const W: (&str, &str) = ("ENGINE_WGSL", "1");
+    const L256: (&str, &str) = ("EB_LANES", "256");
+    const L512: (&str, &str) = ("EB_LANES", "512");
+    const AERO: (&str, &str) = ("EB_AERO", "1");
+    const SOLO: (&str, &str) = ("EB_VV_SOLO", "1");
+    const GROUPS: (&str, &str) = ("EB_VV_GROUPS", "1");
+    const SMALL: (&str, &str) = ("EB_VV_SMALL_ONLY", "1");
+    const BIG: (&str, &str) = ("EB_VV_BIG_ONLY", "1");
+    const F: &str = "explicit_beams_frame";
+    const C: &str = "explicit_beams_contact";
+    let frames: [(&str, &str, &[(&str, &str)]); 16] = [
+        ("explicit_beams", F, &[W]),
+        ("explicit_beams_wide", F, &[W, L512]),
+        ("explicit_beams_aero", F, &[W, L256, AERO]),
+        ("explicit_beams_aero_wide", F, &[W, L512, AERO]),
+        ("explicit_beams_solo", F, &[W, L256, SOLO]),
+        ("explicit_beams_solo_wide", F, &[W, L512, SOLO]),
+        ("explicit_beams_solo_aero", F, &[W, L256, AERO, SOLO]),
+        ("explicit_beams_solo_aero_wide", F, &[W, L512, AERO, SOLO]),
+        ("explicit_beams_contact", F, &[W, L256, SOLO, GROUPS, SMALL]),
+        ("explicit_beams_contact_wide", F, &[W, L512, SOLO, GROUPS, SMALL]),
+        ("explicit_beams_contact_aero", F, &[W, L256, AERO, SOLO, GROUPS, SMALL]),
+        ("explicit_beams_contact_aero_wide", F, &[W, L512, AERO, SOLO, GROUPS, SMALL]),
+        ("explicit_beams_contact_big", C, &[W, L256, SOLO, GROUPS, BIG]),
+        ("explicit_beams_contact_big_wide", C, &[W, L512, SOLO, GROUPS, BIG]),
+        ("explicit_beams_contact_big_aero", C, &[W, L256, AERO, SOLO, GROUPS, BIG]),
+        ("explicit_beams_contact_big_aero_wide", C, &[W, L512, AERO, SOLO, GROUPS, BIG]),
+    ];
+    for (name, entry, defines) in frames {
+        let out = wgsl_dir.join(format!("{name}_nosurf.wgsl"));
+        let mut d = defines.to_vec();
+        d.push(("EB_NO_SURFACE", "1"));
+        compile_with_defines(
+            &explicit_beams_source(slang_root),
+            entry,
+            SlangTarget::Wgsl,
+            &out,
+            &[],
+            &d,
+        )?;
+        explicit_post(&out)?;
+    }
+    // A fleet with surface contact on the frame modules (no contact groups): the frame
+    // in segments, a step each (EB_FRAME_SEG, `<module>_seg`), with the surface pass
+    // as its own small pipelines between them (EB_SURF_PIPE: the prep, then per kind
+    // its find and its apply; engine_exec::explicit_plan::Kernel::FrameSeg, Surf). A
+    // browser compiles these in seconds; the frame with the pass in it took minutes.
+    let segs: [(&str, &[(&str, &str)]); 4] = [
+        ("explicit_beams_seg", &[W]),
+        ("explicit_beams_wide_seg", &[W, L512]),
+        ("explicit_beams_aero_seg", &[W, L256, AERO]),
+        ("explicit_beams_aero_wide_seg", &[W, L512, AERO]),
+    ];
+    let mut jobs: Vec<(String, &str, Vec<(&str, &str)>)> = segs
+        .iter()
+        .map(|(name, defines)| {
+            let mut d = defines.to_vec();
+            d.push(("EB_FRAME_SEG", "1"));
+            (name.to_string(), F, d)
+        })
+        .collect();
+    jobs.push(("explicit_surface_prep".into(), "explicit_surface_prep", vec![W, ("EB_SURF_PIPE", "1")]));
+    for (kind, tag) in [("1", "tri"), ("2", "seg"), ("3", "point"), ("4", "pair")] {
+        for phase in ["find", "apply"] {
+            jobs.push((
+                format!("explicit_surface_{phase}_{tag}"),
+                if phase == "find" { "explicit_surface_find" } else { "explicit_surface_apply" },
+                vec![W, ("EB_SURF_PIPE", "1"), ("EB_SURF_KIND", kind)],
+            ));
+        }
+    }
+    for (name, entry, defines) in &jobs {
+        let out = wgsl_dir.join(format!("{name}.wgsl"));
+        compile_with_defines(&explicit_beams_source(slang_root), entry, SlangTarget::Wgsl, &out, &[], defines)?;
+        explicit_post(&out)?;
+    }
     // The frozen baseline of the explicit-beams kernel (a test oracle,
     // `explicit_beams_baseline.slang`): every frame-entry variant and the plan passes
     // as `wgsl/explicit_baseline_*.wgsl`, plus the race-probe variants (`EB_RACE_PROBE`).
     // Read from OUT_DIR at run time by the bit-identity tests only (not embedded).
     explicit_baseline(slang_root, &wgsl_dir)?;
+    // Tests only (tests/explicit_loop_cap.rs): the explicit kernels' Slang loop caps
+    // (explicit_loop_cap.slang) on a runaway, read at run time.
+    compile_with_defines(
+        &slang_root.join("kernels/explicit_loop_cap_test.slang"),
+        "explicit_loop_cap_test",
+        SlangTarget::Wgsl,
+        &wgsl_dir.join("loop_cap_test.wgsl"),
+        &[],
+        &[],
+    )?;
     // Compact snapshots' buffer extents (WgpuSim::measure_state): standalone.
     let extent = wgsl_dir.join("state_extent.wgsl");
     let status = std::process::Command::new(find_slangc()?)
@@ -753,12 +871,15 @@ fn store(dir: &Path, out_dir: &Path, compiled: &Compiled) -> Result<()> {
 
 /// An explicit-beams module as slangc wrote it, made ready to ship. Slang's storage
 /// barrier carries a texture barrier naga rejects (and an empty statement Safari's
-/// parser rejects): keep the storage and workgroup barriers. Every loop is capped
-/// (`src/wgsl_loop_cap.rs`, `cap_explicit_loops`): a runaway loop stops, flagged,
-/// instead of holding the GPU. Measurement builds only (in their own target
-/// directory): `RUBBLE_EB_REF_UNCAPPED=1` leaves the frozen reference modules
-/// (`explicit_ref_*`) uncapped, so `tests/explicit_beams_bitwise.rs` compares the
-/// capped kernel with the uncapped one bit for bit.
+/// parser rejects): keep the storage and workgroup barriers. Every loop is capped:
+/// a runaway loop stops, flagged, instead of holding the GPU. The shipped kernel
+/// (`explicit_beams.slang`) caps its loops in its source (`EB_LOOP_CAP`, every
+/// target; its modules call `ebLoopCapHit`); a module without them (the frozen
+/// baseline and reference, or a measurement build of another source) is capped
+/// here (`src/wgsl_loop_cap.rs`, `cap_explicit_loops`). Measurement builds only (in
+/// their own target directory): `RUBBLE_EB_REF_UNCAPPED=1` leaves the frozen
+/// reference modules (`explicit_ref_*`) uncapped, so `tests/explicit_beams_bitwise.rs`
+/// compares the capped kernel with the uncapped one bit for bit.
 fn explicit_post(out: &Path) -> Result<()> {
     let text = std::fs::read_to_string(out)?
         .replace(
@@ -772,7 +893,7 @@ fn explicit_post(out: &Path) -> Result<()> {
     let name = out.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let uncapped = name.starts_with("explicit_ref_")
         && std::env::var("RUBBLE_EB_REF_UNCAPPED").is_ok_and(|v| v == "1");
-    let text = if uncapped {
+    let text = if uncapped || text.contains("ebLoopCapHit") {
         text
     } else {
         cap_explicit_loops(&text).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?
@@ -824,6 +945,15 @@ fn explicit_baseline(slang_root: &Path, dir: &Path) -> Result<()> {
                 }
                 if let Some(x) = extra {
                     d.push((x, "1"));
+                }
+                // The current kernel's deterministic-hits build serves the bitwise
+                // suite's fleets, which have no surface contact: without the surface
+                // pass (EB_NO_SURFACE), as the modules those fleets ship with; native
+                // Metal (naga) runs out of threadgroup slots in a contact module with it.
+                // The ablation builds (measurement) likewise: Metal binds at most 31
+                // workgroup variables, which the contact module with every path exceeds.
+                if prefix == "explicit_det_" || prefix == "explicit_ablate_" {
+                    d.push(("EB_NO_SURFACE", "1"));
                 }
                 jobs.push((src.clone(), format!("{prefix}frame{tag}"), "explicit_beams_frame".into(), d.clone()));
                 d.push(("EB_VV_SOLO", "1"));

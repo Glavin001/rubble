@@ -31,6 +31,25 @@ use std::sync::Arc;
 pub const POSES_BINDING: usize = BIND_COUNT;
 pub const POSE_HEADER_BINDING: usize = BIND_COUNT + 1;
 pub const MOVED_BINDING: usize = BIND_COUNT + 2;
+
+/// Where the last step left the awake-indexed broadphase's resting table
+/// ([`WgpuSim::rest_view`]), in binding 14's words.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RestView {
+    /// world_step.slang restBase(): the 32-word header, then the resting heads
+    /// (`hash_size`), the awake heads (`hash_size`), a resting link per collider, then
+    /// the moving-collider list (its count: scratch word 6).
+    pub rest_base: u32,
+    pub hash_size: u32,
+    /// gAabbs index of collider 0's bounds (HOST_S(1)).
+    pub aabb_base: u32,
+    /// The hierarchical grid's levels (0: the uniform split grid's table).
+    pub levels: u32,
+    /// The grid's base cell size (m).
+    pub cell: f32,
+    pub uniform: bool,
+    pub colliders: u32,
+}
 /// Bytes of one [`crate::PoseRecord`].
 pub const POSE_RECORD_BYTES: u64 = 32;
 
@@ -424,6 +443,9 @@ pub struct WgpuSim {
     step_queries: Option<StepQueries>,
     /// Segments the last encoded step timed (empty: not timed), in pass order.
     timed_segments: Vec<&'static str>,
+    /// Host passes timed before the next step's ([`WgpuSim::host_segment_before_step`]):
+    /// the step's own segments follow them.
+    pre_segments: Vec<&'static str>,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
     last_timings: PhaseTimingsMs,
@@ -625,6 +647,38 @@ fn scratch_words(s: &[u32; 64]) -> [u32; 64] {
     w
 }
 
+/// One GPU job on the machine at a time: before its first native device, a process
+/// takes an exclusive lock on `~/.rubble/gpu.lock` (`RUBBLE_GPU_LOCK` overrides the
+/// path; `RUBBLE_GPU_LOCK=0` turns it off) and holds it until it exits, waiting for
+/// any other process that holds it. Two jobs sharing the GPU made runaway kernels
+/// hard to trace and hung submissions pile up; a job that waits here costs nothing.
+/// Devices of one process share the lock (tests in parallel threads).
+pub fn hold_gpu_lock() {
+    use std::sync::OnceLock;
+    static LOCK: OnceLock<Option<std::fs::File>> = OnceLock::new();
+    LOCK.get_or_init(|| {
+        let path = match std::env::var("RUBBLE_GPU_LOCK") {
+            Ok(v) if v == "0" => return None,
+            Ok(v) if !v.is_empty() => std::path::PathBuf::from(v),
+            _ => std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".rubble/gpu.lock"),
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .ok()?;
+        if file.try_lock().is_err() {
+            eprintln!("rubble: waiting for the GPU lock {} (another GPU job is running)", path.display());
+            file.lock().ok()?;
+        }
+        Some(file)
+    });
+}
+
 /// A high-performance adapter's device with its full limits.
 pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
     default_device_with(false)
@@ -635,6 +689,7 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
 pub fn default_device_with(
     timestamps: bool,
 ) -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue)> {
+    hold_gpu_lock();
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::GL;
     desc.flags = instance_flags();
@@ -1104,6 +1159,7 @@ impl WgpuSim {
             gpu_timing: crate::GpuTiming::Off,
             step_queries: None,
             timed_segments: Vec::new(),
+            pre_segments: Vec::new(),
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
             last_timings: PhaseTimingsMs::default(),
@@ -1286,6 +1342,27 @@ impl WgpuSim {
     /// rides on it) until changed.
     pub fn set_kinematic_velocity(&mut self, body: u32, linear: [f32; 3], angular: [f32; 3]) {
         self.queue_impulses(&[ImpulseRecord::set_velocity(body, linear, angular)]);
+    }
+
+    /// A host's GPU pass appends impulse records for the next step after the host's
+    /// (as the terrain coupling does, `IMPULSE_COUNT` atomics, then `IMPULSE_FIRST` set
+    /// to the count): the step schedules `apply_impulses` and wakes.
+    pub fn mark_gpu_impulses(&mut self) {
+        self.terrain_impulses_pending = true;
+        self.wake_pending = true;
+    }
+
+    /// [`Self::mark_gpu_impulses`] without the wake: the next step that runs applies the
+    /// records, and a step with nothing awake may still be skipped (a host whose pass
+    /// can only have appended records while some body is awake: explicit vehicles with
+    /// every one asleep).
+    pub fn schedule_gpu_impulses(&mut self) {
+        self.terrain_impulses_pending = true;
+    }
+
+    /// The scratch atomics buffer (binding 21: the impulse records at `IMPULSE_BASE`).
+    pub fn scratch_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[21]
     }
 
     /// Queue impulse records for the next step. Panics past `IMPULSE_CAP` records
@@ -2491,6 +2568,36 @@ impl WgpuSim {
         (total, largest, at)
     }
 
+    /// The persistent resting table (world_step.slang restBase: statics and sleepers,
+    /// each at its cell) and the moving-collider list as the last step left them, for
+    /// walkers outside the step (the explicit vehicles' proxy query,
+    /// `engine-world/src/explicit_vehicles.rs`). `None` when that step did not keep the
+    /// table (the full pass, reused manifolds, a fracture world) or a host write since
+    /// made it stale: then a walker must look at every collider.
+    pub fn rest_view(&self) -> Option<RestView> {
+        if self.rest_stale || !self.pose_output_enabled() {
+            return None;
+        }
+        let (base, hash) = self.debug_rest_layout();
+        let base = u32::try_from(base).ok()?;
+        Some(RestView {
+            rest_base: base,
+            hash_size: hash,
+            aabb_base: self.capacity.max_bodies,
+            levels: self.grid_levels,
+            cell: self.params.grid_cell_size,
+            uniform: self.grid_levels == 0,
+            colliders: self.collider_count,
+        })
+    }
+
+    /// Binding 14 (constraint ids: the resting table, the moving-collider list) and
+    /// binding 9 (collider bounds at [`RestView::aabb_base`]), for [`Self::rest_view`]'s
+    /// walkers.
+    pub fn rest_buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
+        (&self.bufs[14], &self.bufs[9])
+    }
+
     /// Whether the next step runs the awake-indexed broadphase (its gates on the
     /// grid, kinematics, characters and soft bodies all met). For tests.
     pub fn awake_broadphase_planned(&self) -> bool {
@@ -2691,6 +2798,7 @@ impl WgpuSim {
             self.last_timings.total_gpu = 0.0;
             self.last_step_ran = false;
             self.timed_segments.clear();
+            self.pre_segments.clear();
             return Ok(self.last_counters);
         }
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
@@ -3066,6 +3174,11 @@ impl WgpuSim {
         self.marks = marks;
     }
 
+    /// The marks [`Self::set_marks`] set (hosts' own passes mark into the same timeline).
+    pub fn marks(&self) -> Option<&std::sync::Arc<crate::gpu_marks::GpuMarks>> {
+        self.marks.as_ref()
+    }
+
     /// The plan's dispatches in one compute pass of `enc` (its copies are encoded before).
     fn encode_dispatches(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
         self.encode_dispatches_hooked(enc, cmds, None);
@@ -3076,6 +3189,7 @@ impl WgpuSim {
     fn encode_dispatches_hooked(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd], hook: Option<(&str, &mut dyn FnMut(&mut wgpu::CommandEncoder))>) {
         let segments = self.encode_passes(enc, cmds, hook);
         self.timed_segments = segments;
+        self.pre_segments.clear();
     }
 
     /// The plan's dispatches in compute passes of `enc`; returns the segments
@@ -3091,7 +3205,8 @@ impl WgpuSim {
         // anyway (then the step's time is the sum of its segments).
         let per_phase = queries.is_some()
             && (self.gpu_timing == crate::GpuTiming::Phases || split || hook.is_some());
-        let mut segments: Vec<&'static str> = Vec::new();
+        // Host passes timed before the step come first (`host_segment_before_step`).
+        let mut segments: Vec<&'static str> = if queries.is_some() { self.pre_segments.clone() } else { Vec::new() };
         // `RUBBLE_SKIP_KERNELS=a,b` (diagnostic, A/B timing): leave those out.
         let skip = std::env::var("RUBBLE_SKIP_KERNELS").unwrap_or_default();
         let skipped = |k: &str| !skip.is_empty() && skip.split(',').any(|s| s == k);
@@ -3099,7 +3214,7 @@ impl WgpuSim {
         // empty pass need not write its timestamps (Dawn and Metal leave them
         // zero), and a phase with no work has no time to report.
         let mut dispatched = false;
-        let mut pass = Some(begin_timed(enc, queries, 0));
+        let mut pass = Some(begin_timed(enc, queries, segments.len()));
         for (k, c) in cmds.iter().enumerate() {
             match *c {
                 rigid_plan::Cmd::Dispatch { kernel, .. }
@@ -3240,6 +3355,7 @@ impl WgpuSim {
             self.last_timings.total_gpu = 0.0;
             self.last_step_ran = false;
             self.timed_segments.clear();
+            self.pre_segments.clear();
             return Ok(false);
         }
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
@@ -3876,6 +3992,63 @@ impl WgpuSim {
             return None;
         }
         Some((&q.resolve, 16 * self.timed_segments.len() as u64, &self.timed_segments))
+    }
+
+    /// A host's own work timed as a segment of the step's GPU times (with
+    /// [`WgpuSim::set_gpu_timing`] on), after the step's segments: encoded after
+    /// [`Self::step_encode`] in the same frame. Returns the segment's index `k`: the
+    /// host's first pass writes timestamp `2k` as it begins and its last `2k + 1` as it
+    /// ends ([`Self::segment_writes`]). `None`: timing off, the step skipped, or no room.
+    pub fn host_segment(&mut self, name: &'static str) -> Option<u32> {
+        let q = self.step_queries.as_ref().filter(|_| self.gpu_timing != crate::GpuTiming::Off)?;
+        let k = self.timed_segments.len() as u32;
+        if !self.last_step_ran || self.timed_segments.is_empty() || k >= q.segments {
+            return None;
+        }
+        self.timed_segments.push(name);
+        Some(k)
+    }
+
+    /// [`Self::host_segment`] for work encoded before the next [`Self::step_encode`]
+    /// in the same frame: its segment precedes the step's. If the step is then skipped,
+    /// nothing is reported.
+    pub fn host_segment_before_step(&mut self, name: &'static str) -> Option<u32> {
+        let q = self.step_queries.as_ref().filter(|_| self.gpu_timing != crate::GpuTiming::Off)?;
+        let k = self.pre_segments.len() as u32;
+        if k + 1 >= q.segments {
+            return None;
+        }
+        self.pre_segments.push(name);
+        Some(k)
+    }
+
+    /// Timestamp writes of a pass of host segment `segment` ([`Self::host_segment`]):
+    /// at its begin when `begin`, at its end when `end`.
+    pub fn segment_writes(&self, segment: Option<u32>, begin: bool, end: bool) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        let (q, k) = (self.step_queries.as_ref()?, segment?);
+        Some(wgpu::ComputePassTimestampWrites {
+            query_set: &q.set,
+            beginning_of_pass_write_index: begin.then_some(2 * k),
+            end_of_pass_write_index: end.then_some(2 * k + 1),
+        })
+    }
+
+    /// Room for host segments after the step's (see [`Self::host_segment`]).
+    pub fn host_segments_left(&self) -> u32 {
+        match self.step_queries.as_ref().filter(|_| self.gpu_timing != crate::GpuTiming::Off) {
+            Some(q) if self.last_step_ran && !self.timed_segments.is_empty() => q.segments.saturating_sub(self.timed_segments.len() as u32),
+            _ => 0,
+        }
+    }
+
+    /// The next host segment's index ([`Self::host_segment`] returns it when called).
+    pub fn next_host_segment(&self) -> u32 {
+        self.timed_segments.len() as u32
+    }
+
+    /// The step's timestamp query set (with timing on).
+    pub fn step_query_set(&self) -> Option<&wgpu::QuerySet> {
+        self.step_queries.as_ref().filter(|_| self.gpu_timing != crate::GpuTiming::Off).map(|q| &q.set)
     }
 
     /// Nanoseconds per timestamp tick.

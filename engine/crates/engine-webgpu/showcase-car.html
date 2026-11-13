@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Showcase car</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #20242a; color: #dde; font: 13px system-ui, sans-serif; overflow: hidden; }
+  canvas { width: 100%; height: 100%; display: block; }
+  #hud { position: fixed; left: 10px; top: 8px; background: rgba(0, 0, 0, 0.45); padding: 6px 9px; border-radius: 5px; white-space: pre; line-height: 1.4; }
+  #err { position: fixed; left: 10px; bottom: 10px; color: #f88; white-space: pre-wrap; }
+</style>
+<script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">loading…</div>
+<div id="err"></div>
+<script type="module">
+// Test page of the authored showcase car: its .truck on the explicit solver
+// (WebWorld.explicitSim), its visual skin deformed on the GPU from the solver's
+// nodes (showcase-car-render.mjs). Query: ?res=low|medium|high, ?scene=idle|coast|
+// wall|pole|sidepole|drop, ?speed= km/h, ?offset= / ?at= m (pole, sidepole),
+// ?height= m (drop), ?style=sedan|hatchback, ?paint=r,g,b, ?freeze= s (stop the
+// simulation there), ?cam=front|side|rear|top|three, ?dist= m, ?drag=0, ?n= cars (idle row).
+import { createWorld } from './rubble-world.mjs';
+import { showcaseCar, jbeamVisual, glbVisual, decodeTexture } from './generated/world-wasm/engine_world_wasm.js';
+import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
+import { LOCAL_MODS } from './beamng-mod.mjs';
+
+const qs = new URLSearchParams(location.search);
+const hud = document.getElementById('hud');
+let failed = false;
+const fail = (e) => { if (failed) return; failed = true; document.getElementById('err').textContent = String(e?.stack ?? e); window.__state = { error: String(e) }; };
+window.__state = { ready: false };
+
+try {
+  const res = qs.get('res') ?? 'medium';
+  const scene = qs.get('scene') ?? 'idle';
+  const kmh = Number(qs.get('speed') ?? (scene === 'idle' ? 0 : 56));
+  const paint = qs.get('paint')?.split(',').map(Number);
+  const freeze = qs.has('freeze') ? Number(qs.get('freeze')) : Infinity;
+  const n = Math.max(1, Number(qs.get('n')) || 1);
+  const t0 = performance.now();
+  const world = await createWorld({ gravity: [0, -9.81, 0], capacity: { maxBodies: 1024, maxColliders: 2048, maxContacts: 65536, maxJoints: 64, maxCandidates: 131072, maxColors: 32, maxCommands: 256, maxHullVertices: 64 } });
+  const car = showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: res, ...(paint ? { paint } : {}),
+    // Measurement switches (a visual A/B on identical physics).
+    ...(qs.get('bind') ? { bind: qs.get('bind') } : {}), ...(qs.get('alt') === '0' ? { alt: false } : {}) });
+  const buildMs = performance.now() - t0;
+  const device = world.device();
+  device.addEventListener('uncapturederror', (e) => fail('gpu: ' + (e.error?.message ?? e.error)));
+  const spec = { vehicles: Array.from({ length: n }, (_, i) => ({ truck: car.truck, at: [(i - (n - 1) / 2) * 3, 0], yaw: 0 })), scene, speed: kmh / 3.6, drag: qs.get('drag') !== '0',
+    // ?centredDamping=0/1 (BeamNG profile vehicles, jbeam-semantics-spec.md §39).
+    ...(qs.has('centredDamping') ? { centredDamping: qs.get('centredDamping') !== '0' } : {}) };
+  for (const k of ['offset', 'at', 'height', 'angle', 'runUp']) if (qs.has(k)) spec[k] = Number(qs.get(k));
+  // ?mod=: the imported vehicle's visual alone (no solver: a stand-in).
+  const sim = (qs.has('mod') || qs.has('glb')) ? { layout: () => ({ vehicles: [], boxes: [], beams: 0 }), stepRate: () => 2000, maxFrameSteps: () => 0, frame() {}, timed: () => false, readDamage: async () => [null], readPoses: async () => [0, 0, 0] }
+    : world.explicitSim(spec);
+  const layout = sim.layout();
+
+  const canvas = document.getElementById('c');
+  const context = canvas.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  // 4× MSAA: panel gaps and trim are a few millimetres wide.
+  const SAMPLES = Number(qs.get('samples')) || 4;
+  let depth = null, msaa = null;
+  const configure = () => {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    context.configure({ device, format, alphaMode: 'opaque' });
+    depth?.destroy();
+    msaa?.destroy();
+    depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    msaa = device.createTexture({ size: [canvas.width, canvas.height], format, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  };
+  configure();
+  addEventListener('resize', configure);
+
+  // ?perf: time the car's render pass (needs the device's timestamp-query).
+  const tq = qs.has('perf') && device.features.has('timestamp-query') ? {
+    set: device.createQuerySet({ type: 'timestamp', count: 2 }),
+    resolve: device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+    read: device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+    pending: false, ms: [],
+  } : null;
+  let batchPending = false;
+  const adapterInfo = await navigator.gpu.requestAdapter().then((a) => a?.info ? `${a.info.vendor} ${a.info.architecture} ${a.info.description}` : '?');
+  const batchMs = [];
+  const r = createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES, zebra: Number(qs.get('zebra')) || 0, creaseSharp: Number(qs.get('crease')) || 0, splitDeg: Number(qs.get('splitDeg')) || 0, perfFlat: qs.has('perfFlat'), perfNoDiscard: qs.has('perfNoDiscard'), lodPx: Number(qs.get('lodPx')) || 0, debugWear: qs.has('debugWear'), perfSkip: qs.get('perfSkip')?.split(',') });
+  if (!qs.has('mod') && !qs.has('glb')) r.setSolver(sim.nodesBuffer(), sim.miscBuffer(), sim.beamsBuffer());
+  // ?mod=<folder>: an imported BeamNG vehicle's flexbodies and props at rest
+  // (its files.json lists the folder: .jbeam, .pc (?pc=), .dae,
+  // .materials.json), skinned from its JBeam-mode rest nodes: the visual
+  // layer on its own, no simulation.
+  let modVis = null;
+  // A texture layer's size (?texSize=), and the folder's file for each
+  // texture name (case-insensitive, by file name): null where missing.
+  const TEX_SIZE = Number(qs.get('texSize')) || 1024;
+  const loadTextures = (names, list, base) => Promise.all(names.map(async (t) => {
+    const f = list.find((x) => x.split('/').pop().toLowerCase() === t.toLowerCase());
+    if (!f) return null;
+    try { return decodeTexture(new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer()), TEX_SIZE); } catch (e) { console.warn('texture', f, e); return null; }
+  }));
+  // ?glb=<url>: a vehicle model in the vehicle art spec's glTF binary (an
+  // artist's delivery or gen2's sedan.glb) at rest, the same way.
+  if (qs.has('glb')) {
+    const bytes = new Uint8Array(await (await fetch(qs.get('glb'))).arrayBuffer());
+    const out = glbVisual(bytes, paint ? { paint } : {});
+    modVis = out.visual; modVis.lod = [];
+    window.__glbReport = { parts: out.parts, markers: out.markers, triangles: out.triangles };
+  }
+  if (qs.has('mod')) {
+    const base = qs.get('mod').replace(/\/$/, '');
+    const lr = await fetch(`${base}/files.json`);
+    if (!lr.ok) throw new Error(`?mod=${base}: ${base}/files.json ${lr.status}. ${LOCAL_MODS}`);
+    const list = await lr.json();
+    const text = async (f) => [f, await (await fetch(`${base}/${f}`)).text()];
+    const jb = await Promise.all(list.filter((f) => f.endsWith('.jbeam')).map(text));
+    const pcName = qs.get('pc') ?? list.find((f) => f.endsWith('.pc'));
+    const pc = pcName && list.includes(pcName) ? (await text(pcName))[1] : undefined;
+    const meshes = await Promise.all(list.filter((f) => f.endsWith('.dae')).map(async (f) => [f, new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer())]));
+    const materials = await Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text));
+    const out = jbeamVisual({ jbeam: jb, pc, native: true, materials, ...(paint ? { paint } : {}), ...(qs.has('farCell') ? { farCell: Number(qs.get('farCell')) } : {}) }, meshes);
+    modVis = out.visual; modVis.lod = [out.visualLod, out.visualFar];
+    // Its colour maps (?tex=0 without), decoded in the wasm, one layer each.
+    if (qs.get('tex') !== '0' && modVis.textures.length) {
+      const layers = await loadTextures(modVis.textures, list, base);
+      r.setTextures(layers, TEX_SIZE);
+      modVis.texLoaded = layers.filter(Boolean).length;
+    }
+    // Its data maps (normal, roughness, AO), linear (?dataTex=0 without).
+    if (qs.get('tex') !== '0' && qs.get('dataTex') !== '0' && modVis.dataTextures?.length) {
+      const layers = await loadTextures(modVis.dataTextures, list, base);
+      r.setDataTextures(layers, TEX_SIZE);
+      modVis.dataLoaded = layers.filter(Boolean).length;
+    }
+    window.__flexReport = out.report;
+  }
+  if (modVis) {
+    // ?n= copies in a row, 3 m apart (the cost check).
+    const nr0 = modVis.nodeRest, r00 = modVis.beamRest0;
+    const nr = new Float32Array(nr0.length * n), r0 = new Float32Array(r00.length * n);
+    for (let i = 0; i < n; i++) {
+      for (let k = 0; k < nr0.length; k++) nr[i * nr0.length + k] = nr0[k] + (k % 3 === 0 ? (i - (n - 1) / 2) * 3 : 0);
+      r0.set(r00, i * r00.length);
+    }
+    const posBuf = device.createBuffer({ size: Math.max(16, nr.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(posBuf, 0, nr);
+    const restBuf = device.createBuffer({ size: Math.max(16, r0.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(restBuf, 0, r0);
+    r.setPositions(posBuf, restBuf);
+  }
+  // ?lod=0 the full mesh only, ?lod=1 the first two levels; ?lodPx= the switch (pixels a median edge spans).
+  const levels = (l) => qs.get('lod') === '0' ? null : qs.get('lod') === '1' ? l.slice(0, 1) : l;
+  const carIds = modVis ? Array.from({ length: n }, (_, i) => r.addCar(modVis, { nodeOffset: i * modVis.nodeCount, beamOffset: i * modVis.beamRest0.length, vehicle: i, lod: levels(modVis.lod) })) : layout.vehicles.map((v, i) => r.addCar(car.visual, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: i, lod: levels([car.visualLod, car.visualFar]) }));
+  // ?check=damage: every frame, the renderer's damage units against the
+  // solver's beams read back in the same submission (the units' rule:
+  // skin.rs unit_states()): any difference is a mismatch.
+  const visual = car.visual;
+  const damageCheck = qs.get('check') === 'damage' ? { frames: 0, mismatches: 0, broken: new Set(), pending: false, first: null } : null;
+  const expectUnits = (beams, beamOffset) => {
+    const out = [];
+    for (let u = 0; u < visual.unitKind.length; u++) {
+      let broken = false, strain = 0;
+      for (let k = visual.unitStart[u]; k < visual.unitStart[u + 1]; k++) {
+        const j = visual.unitBeams[k];
+        const g = (beamOffset + j) * 8;
+        if (beams[g + 6] !== 0) { broken = true; continue; }
+        const r0 = Math.fround(visual.beamRest0[j]);
+        strain = Math.max(strain, Math.fround(Math.abs(Math.fround(beams[g] - r0)) / Math.max(Math.abs(r0), 1e-6)));
+      }
+      out.push(broken || strain > visual.unitStrain[u]);
+    }
+    return out;
+  };
+
+  // Ground and the scene's static shapes: flat-shaded boxes and cylinders.
+  const SCENE_WGSL = `
+    struct F { vp: mat4x4f, eye: vec4f, light: vec4f, shadow: vec4f, right: vec4f, up: vec4f, fwd: vec4f };
+    @group(0) @binding(0) var<uniform> f: F;
+    // The showroom's palette (showcase-car-render.mjs's studio).
+    const HORIZON = vec3f(0.5, 0.52, 0.56);
+    const CEILING = vec3f(0.045, 0.05, 0.06);
+    const FLOOR_NEAR = vec3f(0.13, 0.135, 0.145);
+    fn tonemap(c: vec3f) -> vec3f {
+      let x = c * 0.8;
+      let m = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+      return pow(m, vec3f(1.0 / 2.2));
+    }
+    struct O { @builtin(position) p: vec4f, @location(0) w: vec3f, @location(1) n: vec3f, @location(2) c: vec3f };
+    @vertex fn vs(@location(0) p: vec3f, @location(1) n: vec3f, @location(2) c: vec3f) -> O {
+      var o: O; o.p = f.vp * vec4f(p, 1.0); o.w = p; o.n = n; o.c = c; return o;
+    }
+    @fragment fn fs(i: O) -> @location(0) vec4f {
+      var c = i.c;
+      let fw = fwidth(i.w.xz);
+      let l = max(dot(normalize(i.n), normalize(f.light.xyz)), 0.0);
+      if (i.n.y > 0.99 && i.w.y < 0.001) {
+        // The studio floor: a faint metre grid, a pool of light round the
+        // car, fading into the cyclorama's horizon with distance.
+        let g = abs(fract(i.w.xz) - 0.5);
+        let gl = smoothstep(vec2f(0.5) - fw * 1.5, vec2f(0.5), g);
+        let line = 1.0 - 0.08 * max(gl.x, gl.y);
+        let dc = length(i.w.xz - f.shadow.xy);
+        var fl = FLOOR_NEAR * line + vec3f(0.07) * exp(-dc * dc / 25.0);
+        // A soft contact shadow under the car (f.shadow.z: its heading): a
+        // rounded footprint, darkest at its core.
+        let q = i.w.xz - f.shadow.xy;
+        let cs = cos(f.shadow.z); let sn = sin(f.shadow.z);
+        let lq = vec2f(cs * q.x - sn * q.y, sn * q.x + cs * q.y);
+        let fp = length(max(abs(lq) - vec2f(0.72, 2.05), vec2f(0.0))) - 0.18;
+        fl *= 1.0 - 0.6 * exp(-max(fp, 0.0) * 6.0) * (0.75 + 0.25 * (1.0 - smoothstep(-0.6, 0.0, fp)));
+        let far = smoothstep(6.0, 45.0, length(i.w.xz - f.eye.xz));
+        return vec4f(tonemap(mix(fl, HORIZON * 0.8, far)), 1.0);
+      }
+      return vec4f(tonemap(c * (0.35 + 0.75 * l)), 1.0);
+    }
+    // The cyclorama behind everything: a bright horizon band fading to a dark
+    // ceiling (the car's reflections show the same studio).
+    struct B { @builtin(position) p: vec4f, @location(0) ndc: vec2f };
+    @vertex fn vsBg(@builtin(vertex_index) vi: u32) -> B {
+      let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+      var o: B; o.p = vec4f(p, 0.0, 1.0); o.ndc = p; return o;
+    }
+    @fragment fn fsBg(i: B) -> @location(0) vec4f {
+      let d = normalize(f.fwd.xyz + i.ndc.x * f.right.xyz + i.ndc.y * f.up.xyz);
+      let up = max(d.y, 0.0);
+      var c = mix(HORIZON, CEILING, smoothstep(0.0, 0.75, up)) + vec3f(0.3) * exp(-up * 22.0);
+      c = mix(HORIZON * 0.8, c, smoothstep(-0.01, 0.03, d.y));
+      return vec4f(tonemap(c), 1.0);
+    }`;
+  const sm = device.createShaderModule({ code: SCENE_WGSL });
+  const scenePipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: sm, entryPoint: 'vs', buffers: [{ arrayStride: 36, attributes: [0, 1, 2].map((l) => ({ shaderLocation: l, offset: 12 * l, format: 'float32x3' })) }] },
+    fragment: { module: sm, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: SAMPLES },
+  });
+  // The floor alone, without depth: the cars' reflection is drawn over it.
+  const floorPipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: sm, entryPoint: 'vs', buffers: [{ arrayStride: 36, attributes: [0, 1, 2].map((l) => ({ shaderLocation: l, offset: 12 * l, format: 'float32x3' })) }] },
+    fragment: { module: sm, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: SAMPLES },
+  });
+  const bgPipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: sm, entryPoint: 'vsBg' },
+    fragment: { module: sm, entryPoint: 'fsBg', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: SAMPLES },
+  });
+  const verts = [];
+  const quad = (a, b, c, d, nrm, col) => { for (const p of [a, b, c, a, c, d]) verts.push(...p, ...nrm, ...col); };
+  quad([-200, 0, -200], [200, 0, -200], [200, 0, 200], [-200, 0, 200], [0, 1, 0], [0.26, 0.265, 0.275]);
+  const conc = [0.62, 0.6, 0.56];
+  for (const b of layout.boxes) {
+    const [cx, cy, cz, hx, hy, hz, qx, qy, qz, qw, kind] = b;
+    if (kind === 2) {
+      const N = 24;
+      for (let i = 0; i < N; i++) {
+        const a0 = (i / N) * 2 * Math.PI, a1 = ((i + 1) / N) * 2 * Math.PI;
+        const p = (a, y) => [cx + hx * Math.cos(a), cy + y, cz + hx * Math.sin(a)];
+        quad(p(a0, -hy), p(a1, -hy), p(a1, hy), p(a0, hy), [Math.cos((a0 + a1) / 2), 0, Math.sin((a0 + a1) / 2)], conc);
+      }
+      continue;
+    }
+    // Boxes (rotation ignored: the scenes' boxes are axis-aligned).
+    const c = [cx, cy, cz], h = [hx, hy, hz];
+    for (let ax = 0; ax < 3; ax++) for (const s of [-1, 1]) {
+      const u = (ax + 1) % 3, v = (ax + 2) % 3;
+      const corner = (du, dv) => { const p = [...c]; p[ax] += s * h[ax]; p[u] += du * h[u]; p[v] += dv * h[v]; return p; };
+      const nrm = [0, 0, 0]; nrm[ax] = s;
+      quad(corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1), nrm, conc);
+    }
+  }
+  const sceneBuf = device.createBuffer({ size: verts.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(sceneBuf, 0, new Float32Array(verts));
+  const frameBuf = device.createBuffer({ size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const sceneBind = device.createBindGroup({ layout: scenePipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
+  const bgBind = device.createBindGroup({ layout: bgPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
+  const floorBind = device.createBindGroup({ layout: floorPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }] });
+  // ?reflect=0: no floor reflection (on by default; ?reflect=0.3 sets the
+  // floor's reflectance at the contact).
+  const reflect = qs.get('reflect') === '0' ? 0 : Number(qs.get('reflect')) || 0.22;
+  // The backdrop, the floor (no depth: the reflection goes over it) and the
+  // scene's shapes. The reflection, when on, is drawn by the caller between
+  // drawFloor and drawShapes, or after drawScene in another pass (the floor
+  // leaves no depth behind).
+  const drawFloor = (p) => {
+    p.setPipeline(bgPipe); p.setBindGroup(0, bgBind); p.draw(3);
+    p.setPipeline(floorPipe); p.setBindGroup(0, floorBind); p.setVertexBuffer(0, sceneBuf); p.draw(6);
+  };
+  const drawShapes = (p) => {
+    if (verts.length / 9 <= 6) return;
+    p.setPipeline(scenePipe); p.setBindGroup(0, sceneBind); p.setVertexBuffer(0, sceneBuf); p.draw(verts.length / 9 - 6, 1, 6);
+  };
+  const drawScene = (p) => { drawFloor(p); drawShapes(p); };
+
+  // Camera: orbits the first car's reference node.
+  const mat = {
+    persp(fovy, aspect, near, far) { const f = 1 / Math.tan(fovy / 2); return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far / (near - far), -1, 0, 0, (near * far) / (near - far), 0]; },
+    look(e, t) {
+      const sub = (a, b) => a.map((x, i) => x - b[i]); const norm = (a) => { const l = Math.hypot(...a); return a.map((x) => x / l); };
+      const cr = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      const z = norm(sub(e, t)); const x = norm(cr([0, 1, 0], z)); const y = cr(z, x);
+      return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, e), -dot(y, e), -dot(z, e), 1];
+    },
+    mul(a, b) { const o = new Array(16).fill(0); for (let c = 0; c < 4; c++) for (let r2 = 0; r2 < 4; r2++) for (let k = 0; k < 4; k++) o[c * 4 + r2] += a[k * 4 + r2] * b[c * 4 + k]; return o; },
+  };
+  const cams = { three: [0.8, 0.32, 0.75], front: [0.1, 0.25, 1], rear: [-0.6, 0.35, -0.8], side: [1, 0.2, 0.05], top: [0.3, 1, 0.3], left: [-1, 0.25, 0.25] };
+  // ?cam= a named view or a direction x,y,z; ?look=x,y,z offsets the target
+  // from the car's reference point; ?fov= radians.
+  const camQ = qs.get('cam') ?? 'three';
+  let camDir = cams[camQ] ?? (camQ.includes(',') ? camQ.split(',').map(Number) : cams.three);
+  const lookOff = qs.get('look')?.split(',').map(Number) ?? [0, 0, 0];
+  const fov = Number(qs.get('fov')) || 0.75;
+  const dist = Number(qs.get('dist')) || 6.2;
+  let target = [0, 0.6, 0];
+  // The car's reference point on the floor (the contact shadow's centre:
+  // not moved by ?look).
+  let carXZ = [0, 0];
+  let yaw = Math.atan2(camDir[0], camDir[2]), pitch = Math.asin(camDir[1] / Math.hypot(...camDir));
+  let drag = null;
+  canvas.addEventListener('pointerdown', (e) => { drag = [e.clientX, e.clientY]; });
+  addEventListener('pointerup', () => { drag = null; });
+  addEventListener('pointermove', (e) => { if (!drag) return; yaw -= (e.clientX - drag[0]) * 0.006; pitch = Math.min(1.4, Math.max(-0.1, pitch + (e.clientY - drag[1]) * 0.006)); drag = [e.clientX, e.clientY]; });
+
+  const rate = sim.stepRate();
+  let simTime = 0, carry = 0, last = performance.now(), frames = 0, gpuMs = [], damage = null, posePending = false, timesPending = false;
+  const poll = () => {
+    if (modVis) {
+      if (frames === 0) {
+        const nr = modVis.nodeRest; let c = [0, 0, 0];
+        for (let i = 0; i < nr.length; i += 3) for (let k = 0; k < 3; k++) c[k] += nr[i + k] / (nr.length / 3);
+        target = [c[0] + lookOff[0], c[1] + lookOff[1], c[2] + lookOff[2]]; carXZ = [c[0], c[2]];
+      }
+      return;
+    }
+    if (!posePending) { posePending = true; sim.readPoses().then((p) => { target = [p[0] + lookOff[0], Math.max(0.5, p[1]) + lookOff[1], p[2] + lookOff[2]]; carXZ = [p[0], p[2]]; posePending = false; }); }
+    if (!timesPending && sim.timed()) { timesPending = true; sim.readFrameTimes().then((t) => { if (t.length) gpuMs = [...t].slice(-60); timesPending = false; }); }
+    if (frames % 30 === 0) sim.readDamage(1).then((d) => { damage = d[0]; });
+  };
+  const frame = () => {
+    const now = performance.now();
+    let dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (simTime + dt > freeze) dt = Math.max(0, freeze - simTime);
+    carry += dt * rate;
+    let steps = Math.min(sim.maxFrameSteps(), Math.floor(carry));
+    carry -= steps;
+    // ?check=damage checks every simulated frame: no steps while one is read.
+    if (damageCheck?.pending) { carry += steps; steps = 0; }
+    if (steps > 0) { sim.frame(steps); simTime += steps / rate; }
+    const enc = device.createCommandEncoder();
+    if (!qs.has('noskin') || frames < 3) r.update(enc, { dt: steps / rate, floorY: 0, boxes: layout.boxes });
+    let checkRead = null;
+    if (damageCheck && !damageCheck.pending) {
+      // The beams as the units pass saw them (no steps between).
+      const bytes = layout.beams * 32;
+      const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      enc.copyBufferToBuffer(sim.beamsBuffer(), 0, rb, 0, bytes);
+      checkRead = { rb, units: r.readUnits(enc) };
+    }
+    const aspect = canvas.width / canvas.height;
+    const eye = [target[0] + dist * Math.sin(yaw) * Math.cos(pitch), target[1] + dist * Math.sin(pitch), target[2] + dist * Math.cos(yaw) * Math.cos(pitch)];
+    const vp = mat.mul(mat.persp(fov, aspect, 0.05, 500), mat.look(eye, target));
+    const light = [0.45, 0.8, 0.4];
+    // The camera's basis for the backdrop's rays (scaled to the view).
+    const fw = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]].map((x) => x / dist);
+    const rt = [-fw[2], 0, fw[0]].map((x, _, a) => x / Math.hypot(a[0], a[2]));
+    const upv = [rt[1] * fw[2] - rt[2] * fw[1], rt[2] * fw[0] - rt[0] * fw[2], rt[0] * fw[1] - rt[1] * fw[0]];
+    const th = Math.tan(fov / 2);
+    const fr = new Float32Array(40); fr.set(vp, 0); fr.set([...eye, 1], 16); fr.set([...light, 0], 20); fr.set([carXZ[0], carXZ[1], 0, 0], 24);
+    fr.set([...rt.map((x) => x * th * aspect), 0], 28); fr.set([...upv.map((x) => x * th), 0], 32); fr.set([...fw, 0], 36);
+    device.queue.writeBuffer(frameBuf, 0, fr);
+    const outView = context.getCurrentTexture().createView();
+    if (tq) {
+      // ?perf: the car in its own pass, timed (GPU timestamps).
+      const p0 = enc.beginRenderPass({
+        colorAttachments: [{ view: msaa.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0.40, g: 0.415, b: 0.44, a: 1 } }],
+        depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'clear', depthClearValue: 1, depthStoreOp: 'store' },
+      });
+      drawScene(p0);
+      p0.end();
+      const p1 = enc.beginRenderPass({
+        colorAttachments: [{ view: msaa.createView(), resolveTarget: outView, loadOp: 'load', storeOp: 'discard' }],
+        depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
+        timestampWrites: { querySet: tq.set, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 },
+      });
+      if (qs.get('perf') !== 'pass') {
+        if (reflect > 0) r.drawReflection(p1, { viewProj: vp, eye, light, strength: reflect });
+        r.draw(p1, { viewProj: vp, eye, light, height: canvas.height });
+      }
+      p1.end();
+      enc.resolveQuerySet(tq.set, 0, 2, tq.resolve, 0);
+      if (!tq.pending) enc.copyBufferToBuffer(tq.resolve, 0, tq.read, 0, 16);
+    } else {
+      const pass = enc.beginRenderPass({
+        colorAttachments: [{ view: msaa.createView(), resolveTarget: outView, loadOp: 'clear', storeOp: 'discard', clearValue: { r: 0.40, g: 0.415, b: 0.44, a: 1 } }],
+        depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'clear', depthClearValue: 1, depthStoreOp: 'store' },
+      });
+      drawFloor(pass);
+      if (reflect > 0) r.drawReflection(pass, { viewProj: vp, eye, light, strength: reflect });
+      drawShapes(pass);
+      r.draw(pass, { viewProj: vp, eye, light, height: canvas.height });
+      pass.end();
+    }
+    device.queue.submit([enc.finish()]);
+    if (checkRead) {
+      damageCheck.pending = true;
+      Promise.all([checkRead.rb.mapAsync(GPUMapMode.READ), checkRead.units()]).then(([, units]) => {
+        const beams = new Float32Array(checkRead.rb.getMappedRange().slice(0));
+        checkRead.rb.destroy();
+        layout.vehicles.forEach((v, i) => {
+          const want = expectUnits(beams, v.beamOffset);
+          const got = units.get(carIds[i]).state;
+          want.forEach((w, u) => {
+            if (w !== (got[4 * u] > 0.5)) { damageCheck.mismatches++; damageCheck.first ??= `car ${i} ${visual.unitNames[u]}: physics ${w} visual ${got[4 * u] > 0.5}`; }
+            if (w) damageCheck.broken.add(visual.unitNames[u]);
+          });
+        });
+        damageCheck.frames++;
+        damageCheck.pending = false;
+      });
+    }
+    // ?perf without timestamp queries: time a batch of 20 car-only passes
+    // (skin + draw) by the queue's completion, now and then.
+    if (qs.has('perf') && !tq && !batchPending && frames % 20 === 10) {
+      batchPending = true;
+      device.queue.onSubmittedWorkDone().then(() => {
+        const t0 = performance.now();
+        const e2 = device.createCommandEncoder();
+        // ?perf=skin: the compute pass only; ?perf=draw: the draw only; ?perf=pass:
+        // an empty pass (the load/store overhead to subtract).
+        const mode = qs.get('perf');
+        for (let k = 0; k < 20; k++) {
+          if (mode !== 'draw' && mode !== 'pass') r.update(e2);
+          if (mode === 'skin') continue;
+          const p = e2.beginRenderPass({
+            colorAttachments: [{ view: msaa.createView(), loadOp: 'load', storeOp: 'store' }],
+            depthStencilAttachment: { view: depth.createView(), depthLoadOp: 'load', depthStoreOp: 'store' },
+          });
+          if (mode !== 'pass') {
+            if (reflect > 0) r.drawReflection(p, { viewProj: vp, eye, light, strength: reflect });
+            r.draw(p, { viewProj: vp, eye, light, height: canvas.height });
+          }
+          p.end();
+        }
+        device.queue.submit([e2.finish()]);
+        return device.queue.onSubmittedWorkDone().then(() => {
+          batchMs.push((performance.now() - t0) / 20);
+          if (batchMs.length > 5) batchMs.shift();
+          batchPending = false;
+        });
+      });
+    }
+    if (tq && !tq.pending) {
+      tq.pending = true;
+      tq.read.mapAsync(GPUMapMode.READ).then(() => {
+        const t = new BigInt64Array(tq.read.getMappedRange().slice(0));
+        tq.read.unmap();
+        const ms = Number(t[1] - t[0]) / 1e6;
+        if (ms > 0 && ms < 100) { tq.ms.push(ms); if (tq.ms.length > 60) tq.ms.shift(); }
+        tq.pending = false;
+      });
+    }
+    frames++;
+    poll();
+    const c = car.counts;
+    const gm = gpuMs.length ? gpuMs.reduce((a, b) => a + b, 0) / gpuMs.length : NaN;
+    hud.textContent = (modVis ? `mod: textures ${modVis.texLoaded ?? 0}/${modVis.textures.length} · ${[modVis, ...modVis.lod].map((l) => `${l.indices.length / 3} tris (edge ${(l.edgeLength * 100).toFixed(1)} cm)`).join(' · ')}\n` : '') + `${qs.get('style') ?? 'sedan'} ${res}: ${c.nodes} nodes, ${c.beams} beams, ${c.collisionTriangles} collision tris, ${car.visual.indices.length / 3} visual tris (levels ${[car.visualLod, car.visualFar].map((l) => l ? l.indices.length / 3 : '–').join(', ')}), ${c.mass.toFixed(0)} kg\n` +
+      `scene ${scene} ${kmh} km/h × ${n}   t ${simTime.toFixed(2)} s   GPU ${isNaN(gm) ? '–' : gm.toFixed(2)} ms/frame   build ${buildMs.toFixed(0)} ms` +
+      (damage ? `\nbroken ${damage.broken}  bent ${damage.bent}` : '') +
+      (tq?.ms.length ? `\ncar render ${(tq.ms.reduce((a, b) => a + b, 0) / tq.ms.length).toFixed(3)} ms (GPU pass)` : '') +
+      (batchMs.length ? `\ncar skin + render ${Math.min(...batchMs).toFixed(3)} ms (batch of 20, queue time) on ${adapterInfo}` : '');
+    const renderMs = tq?.ms.length >= 30 ? [...tq.ms].sort((a, b) => a - b)[Math.floor(tq.ms.length * 0.1)] : batchMs.length ? Math.min(...batchMs) : undefined;
+    window.__state = { ready: frames > 3 && (!qs.has('perf') || renderMs !== undefined), time: simTime, frozen: simTime >= freeze, gpuMs: gm, renderMs, damage, counts: c, features: [...device.features].join(',') + ' ' + adapterInfo,
+      ...(damageCheck ? { damageCheck: { frames: damageCheck.frames, mismatches: damageCheck.mismatches, first: damageCheck.first, broken: [...damageCheck.broken] } } : {}) };
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+} catch (e) { fail(e); }
+</script>
+</body>
+</html>
