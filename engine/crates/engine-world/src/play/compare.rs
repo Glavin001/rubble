@@ -442,148 +442,157 @@ pub struct Verdict {
     /// The watched part came down (dropped more than half a metre).
     pub fell: bool,
     /// The fracture's own tallies (analytic strikes, the load path's peak utilization).
-    pub report: FractureReport,
+    pub report: Option<FractureReport>,
     pub shots: Vec<ShotResult>,
 }
 
-/// A scenario placed under an approach.
-pub struct Compare {
-    pub scenario: Scenario,
-    pub approach: Approach,
-    pub lab: Lab,
-    /// Each launched shot: its body, its index in the pack's shots, its last two positions.
-    flying: Vec<(BodyId, usize, [f32; 3], [f32; 3])>,
-    /// Bonds broken when each shot launched (the flying shots' order).
-    broken_at_launch: Vec<u32>,
+/// What a run's verdict is read from: the shots as they fly, the first break, the watched
+/// part. Kept beside a placed [`Lab`]; [`Self::observe`] after each polled step.
+pub struct Tracker {
+    scenario: Scenario,
+    /// Each launched shot, in launch order: its body, its last two positions, the bonds
+    /// broken when it launched, where it was first seen.
+    flying: Vec<(BodyId, [f32; 3], [f32; 3], u32, [f32; 3])>,
     broken: u32,
     first_break: Option<f64>,
     /// The watched chunk (destructible 0) and its height when placed.
     watch: (u32, f32),
-    script_queued: bool,
 }
 
-impl Compare {
-    /// The world definition and plan (a host makes the world, then [`Self::place`]).
-    pub fn plan(scenario: Scenario, approach: Approach) -> anyhow::Result<LabPlan> {
-        LabPlan::new(&scenario.lab_def(approach))
-    }
-
-    pub fn place(world: &mut World, plan: &LabPlan, scenario: Scenario, approach: Approach) -> anyhow::Result<Compare> {
-        let lab = Lab::place(world, plan)?;
+impl Tracker {
+    pub fn new(scenario: Scenario, lab: &Lab, world: &World) -> anyhow::Result<Tracker> {
         let chunks = world.destructible_stats(lab.destructibles()[0])?.chunks as usize;
-        // The watched chunk: the highest, then farthest out along +x (the balcony's tip,
-        // the canopy's end). Chunk c is scene body 1 + c.
+        // The watched chunk: the highest, then farthest out along +x (the balcony's tip);
+        // the pillar scenario watches the canopy's end over the pillar shot out (-x).
+        // Chunk c is scene body 1 + c.
         let poses = lab.poses(world)?;
         let mut watch = (0u32, f32::MIN, f32::MIN);
         for c in 0..chunks {
             let o = RECORD_FLOATS * (1 + c);
-            // The pillar scenario watches the canopy's end over the pillar shot out (-x).
             let x = if scenario == Scenario::Pillar { -poses[o] } else { poses[o] };
             if (poses[o + 1], x) > (watch.1, watch.2) {
                 watch = (c as u32, poses[o + 1], x);
             }
         }
-        Ok(Compare {
+        Ok(Tracker {
             scenario,
-            approach,
-            lab,
             flying: Vec::new(),
-            broken_at_launch: Vec::new(),
             broken: 0,
             first_break: None,
             watch: (watch.0, watch.1),
-            script_queued: false,
         })
     }
 
-    /// A new world with the scenario placed (native hosts and tests).
-    pub fn new(gpu: GpuContext, scenario: Scenario, approach: Approach) -> anyhow::Result<(World, Compare)> {
-        let plan = Self::plan(scenario, approach)?;
-        let mut world = World::new(gpu, &plan.world_def()?)?;
-        let c = Self::place(&mut world, &plan, scenario, approach)?;
-        Ok((world, c))
-    }
-
-    /// Queue the scenario's script: every authored shot at its time.
-    pub fn queue_script(&mut self, world: &World) -> anyhow::Result<()> {
+    /// Take in the last polled step: new shots, each shot's motion, the breaks.
+    pub fn observe(&mut self, lab: &Lab, world: &World) -> anyhow::Result<()> {
         let hz = self.scenario.physics_hz() as f64;
-        let shots: Vec<f64> = self.lab.pack_shots().iter().map(|s| s.launch_at).collect();
-        for (i, at) in shots.into_iter().enumerate() {
-            self.lab.queue(world, &LabAction::PackShot(i as u32), (at * hz).round() as u64)?;
+        let st = lab.stats(world)?;
+        self.broken = st.bonds - st.bonds_intact;
+        if self.broken > 0 && self.first_break.is_none() {
+            self.first_break = Some(world.step_count() as f64 / hz);
         }
-        self.script_queued = true;
-        Ok(())
-    }
-
-    /// One step (the due shots launched first). The caller polls the world.
-    pub fn step(&mut self, world: &mut World) -> anyhow::Result<()> {
-        let before = self.lab.balls().len();
-        let launched = self.lab.shots_fired() as usize;
-        self.lab.step(world)?;
-        let live = self.lab.balls();
-        for (k, &(body, _)) in live.iter().enumerate().skip(before) {
-            let p = world.body_transform(body)?.map_or([0.0; 3], |t| t.position);
-            self.flying.push((body, launched + k - before, p, p));
-            self.broken_at_launch.push(self.broken);
+        for &(body, _) in lab.balls() {
+            let Some(t) = world.body_transform(body)? else { continue };
+            match self.flying.iter_mut().find(|f| f.0 == body) {
+                Some(f) => {
+                    if t.position != f.2 {
+                        f.1 = f.2;
+                        f.2 = t.position;
+                    }
+                }
+                None => self.flying.push((body, t.position, t.position, self.broken, t.position)),
+            }
         }
         Ok(())
     }
 
-    /// The run's numbers, from the last polled step.
-    pub fn verdict(&mut self, world: &World) -> anyhow::Result<Verdict> {
+    /// The run's numbers as of the last [`Self::observe`]. `report`: with the fracture's
+    /// own tallies (`World::destructible_fracture_report`, a blocking read: native hosts).
+    pub fn verdict(&self, lab: &Lab, world: &World, report: bool) -> anyhow::Result<Verdict> {
         let hz = self.scenario.physics_hz() as f64;
-        let seconds = world.step_count() as f64 / hz;
-        let st = self.lab.stats(world)?;
-        let broken = st.bonds - st.bonds_intact;
-        self.broken = broken;
-        if broken > 0 && self.first_break.is_none() {
-            self.first_break = Some(seconds);
-        }
-        let poses = self.lab.poses(world)?;
+        let st = lab.stats(world)?;
+        let poses = lab.poses(world)?;
         let y = poses[RECORD_FLOATS * (1 + self.watch.0 as usize) + 1];
         let drop = (self.watch.1 - y) as f64;
-        let report = world.destructible_fracture_report(self.lab.destructibles()[0])?;
-        let authored = self.lab.pack_shots().to_vec();
+        let report = if report { Some(world.destructible_fracture_report(lab.destructibles()[0])?) } else { None };
+        let authored = lab.pack_shots();
+        let wall = matches!(self.scenario, Scenario::SpeedLadder | Scenario::EqualMomentum);
         let mut shots = Vec::new();
-        let launches = self.broken_at_launch.clone();
-        for (n, f) in self.flying.iter_mut().enumerate() {
-            if let Some(t) = world.body_transform(f.0)? {
-                if t.position != f.3 {
-                    f.2 = f.3;
-                    f.3 = t.position;
-                }
-            }
-            let s = &authored[f.1];
+        for (n, f) in self.flying.iter().enumerate() {
+            let Some(s) = authored.get(n) else { break };
             let launch_speed = s.velocity.iter().map(|v| v * v).sum::<f64>().sqrt();
-            let v: Vec<f64> = (0..3).map(|k| (f.3[k] - f.2[k]) as f64 * hz).collect();
+            let v: Vec<f64> = (0..3).map(|k| (f.2[k] - f.1[k]) as f64 * hz).collect();
             let speed = v.iter().map(|v| v * v).sum::<f64>().sqrt();
             let along = if launch_speed > 0.0 {
                 (0..3).map(|k| v[k] * s.velocity[k]).sum::<f64>() / launch_speed
             } else {
                 0.0
             };
-            // The wall scenarios fire along -z at a wall from z = 0 to WALL (pack frame; the
-            // lab centres packs on x and z, so read it against the ball's own start).
-            let travelled = (f.3[2] as f64 - s.origin[2]).abs();
-            let to_back = (s.origin[2] - 0.0).abs() + s.radius;
+            // The wall scenarios fire along -z at a wall WALL thick, from `origin[2]` in front
+            // of its back face (the pack's frame): through once it has travelled past that.
+            let travelled = (f.2[2] - f.4[2]).abs() as f64;
+            let to_back = s.origin[2] + s.radius;
             shots.push(ShotResult {
                 label: s.label.clone(),
                 launch_speed,
                 speed,
                 along,
-                through: matches!(self.scenario, Scenario::SpeedLadder | Scenario::EqualMomentum) && travelled > to_back,
-                broke: launches.get(n + 1).copied().unwrap_or(broken) - launches[n],
+                through: wall && travelled > to_back,
+                broke: self.flying.get(n + 1).map_or(self.broken, |next| next.3) - f.3,
             });
         }
         Ok(Verdict {
-            seconds,
+            seconds: world.step_count() as f64 / hz,
             bonds: st.bonds,
-            bonds_broken: broken,
+            bonds_broken: self.broken,
             first_break: self.first_break,
             drop,
             fell: drop > 0.5,
             report,
             shots,
         })
+    }
+}
+
+/// Queue a scenario's script on its lab: every authored shot at its time.
+pub fn queue_script(scenario: Scenario, lab: &mut Lab, world: &World) -> anyhow::Result<()> {
+    let hz = scenario.physics_hz() as f64;
+    let shots: Vec<f64> = lab.pack_shots().iter().map(|s| s.launch_at).collect();
+    for (i, at) in shots.into_iter().enumerate() {
+        lab.queue(world, &LabAction::PackShot(i as u32), (at * hz).round() as u64)?;
+    }
+    Ok(())
+}
+
+/// A scenario placed under an approach in a new world (native hosts and tests).
+pub struct Compare {
+    pub scenario: Scenario,
+    pub approach: Approach,
+    pub lab: Lab,
+    pub tracker: Tracker,
+}
+
+impl Compare {
+    pub fn new(gpu: GpuContext, scenario: Scenario, approach: Approach) -> anyhow::Result<(World, Compare)> {
+        let plan = LabPlan::new(&scenario.lab_def(approach))?;
+        let mut world = World::new(gpu, &plan.world_def()?)?;
+        let lab = Lab::place(&mut world, &plan)?;
+        let tracker = Tracker::new(scenario, &lab, &world)?;
+        Ok((world, Compare { scenario, approach, lab, tracker }))
+    }
+
+    pub fn queue_script(&mut self, world: &World) -> anyhow::Result<()> {
+        queue_script(self.scenario, &mut self.lab, world)
+    }
+
+    /// One step, blocking for its frame, observed.
+    pub fn step(&mut self, world: &mut World) -> anyhow::Result<()> {
+        self.lab.step(world)?;
+        world.poll_blocking()?;
+        self.tracker.observe(&self.lab, world)
+    }
+
+    pub fn verdict(&self, world: &World) -> anyhow::Result<Verdict> {
+        self.tracker.verdict(&self.lab, world, true)
     }
 }

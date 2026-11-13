@@ -269,7 +269,7 @@ impl LabSettleJob {
 /// A placed lab run.
 #[wasm_bindgen]
 pub struct LabScene {
-    lab: Lab,
+    pub(crate) lab: Lab,
 }
 
 #[wasm_bindgen]

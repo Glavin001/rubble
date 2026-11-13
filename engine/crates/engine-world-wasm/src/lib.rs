@@ -27,6 +27,7 @@ pub use rubble::play::stage as play;
 
 /// The large-maps city (`city.html`): `rubble::city` placed over frames.
 mod city;
+mod compare;
 mod defs;
 mod demo;
 mod explicit;

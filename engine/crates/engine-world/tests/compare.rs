@@ -14,12 +14,11 @@ fn run(scenario: Scenario, approach: Approach) -> Verdict {
     let mut v = None;
     for _ in 0..steps {
         c.step(&mut world).unwrap();
-        world.poll_blocking().unwrap();
         v = Some(c.verdict(&world).unwrap());
     }
     let v = v.unwrap();
     println!("{:>15} / {:<16}: {} of {} bonds broken, first at {:?} s, drop {:.2} m{}", scenario.name(), approach.name(), v.bonds_broken, v.bonds, v.first_break.map(|t| (t * 100.0).round() / 100.0), v.drop, if v.fell { " (fell)" } else { "" });
-    let r = &v.report;
+    let r = v.report.as_ref().unwrap();
     println!("{:>34}  bounce {} crater {} spall {} perforate {}; peak utilization {:.2}; {:?}", "", r.bounces, r.craters, r.spalls, r.perforations, r.peak_utilization, r.strikes);
     for s in &v.shots {
         println!("{:>34}: in {:.0} m/s, now {:.1} m/s ({:+.1} along), broke {}{}", s.label, s.launch_speed, s.speed, s.along, s.broke, if s.through { ", through" } else { "" });
