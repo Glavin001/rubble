@@ -17,6 +17,8 @@ Measured 2026-11-13 on an M3 Max, Chrome (Metal), branch `perf/kernel-compile-ti
 | the same, `_nocpl` | none | 437,011 |
 | large contact groups, with surface (`explicit_beams_contact_big_wide`) | 1,586,149 | 534,536 |
 
+Later the same day the centred damping's objective form (spec §39.6: `centredKeep`, `centredBeamObjective`) added about 2,056 inlined lines per frame loop, about 1 %: `explicit_beams_wide_nosurf` 147,708, `explicit_beams_wide_nocpl` 201,557, `explicit_beams_contact_wide_nocpl` 441,123. Chrome's compile time was not measured again.
+
 The surface pass was ten times the rest of the frame. Inside it, the closest-feature queries (`slang/physics/feature_query.slang`) were copied hundreds of times: `fqSegTri` 80 times (5 call sites in `fqCandidates`, itself at 4 call sites in `fqContact`), `fqClosestTri` 208, `fqSegSeg` 300, `fqVisit` 528, and the strict multiply 72,000 times against 7,200 in a frame without surface contact. The contact module holds the surface pass twice (the solo vehicles' path and the groups' path).
 
 ## What changed (all lossless)

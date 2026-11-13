@@ -135,7 +135,7 @@ That pass does trivial work, so the timestamps are probably attributed to the wr
 
 | Item | Status |
 |---|---|
-| Metal `explicit_surface_proxy_parity` | Hits the 15-minute kill; open in `explicit-vehicles-in-world.md` |
+| Metal `explicit_surface_proxy_parity` | 2026-11-13: 3 passed, 1 ignored (turned proxies, §38.3) in 313 s under a 600 s limit, after the `feature_query.slang` restructure and the objective damping form. It used to hit the 15-minute kill (`explicit-vehicles-in-world.md`) |
 | `engine-softbody showcase_car contacts_do_no_positive_work` | Fails since the objective damping form became the default (2026-11-13), in the 80 km/h T-bone only: vehicle contact did +0.076 J in the tenth ending at 1.0 s (friction +0.090 J, normal −0.013 J; bound +0.01 J). The crash runs differently and in that tenth the two cars barely touch; in every other tenth vehicle contact does −6 to −49,000 J. With `CW_OBJECTIVE=0` (the old form) the same run passes (never above −38.6 J). The bound was not changed. Open: whether vehicle-contact friction can do positive work on a nearly idle contact (reproduce: `CW_SKIP_SWEEP=1 CW_TENTHS=1`) |
 | `engine-softbody showcase_car`, 4 tests | `#[ignore = "known failure"]`: 120 km/h ledger 13.03 J, latch 78.1 kN, restitution 0.2018, T-bone 13 of 1,165 nodes. Numbers in `vehicle-authoring.md` |
 | `engine-world threshold cuboid_house_breaks_and_splits_as_in_the_lab` | Fails on `main` too |
