@@ -9,7 +9,7 @@ A reference so this research never has to be repeated. It records what we learne
 | How Rubble vehicles work (the model) | [deformable-vehicles.md](deformable-vehicles.md) |
 | The pipeline, how to run it, results tables | [generated-vehicles.md](generated-vehicles.md) |
 | BeamNG cars measured (five cars, per-part bands) | [beamng-authoring-census.md](beamng-authoring-census.md) |
-| BeamNG structure study: docs audit + five cars + the body specification | `beamng-structure-study.md` (branch `docs/beamng-structure-study`, in progress) |
+| BeamNG structure study: sourced guidance, five cars measured, glossary, and the Step 2d body specification (§10) | [beamng-structure-study.md](beamng-structure-study.md) |
 | Real crash targets (NHTSA, FMVSS) | [crash-reference-targets.md](crash-reference-targets.md) |
 | Known bugs (B1–B3, S1, S2, F1, F7…) | [handoff/known-bugs.md](handoff/known-bugs.md) |
 | Soft bodies in the rigid World (the engine side) | [handoff/soft-rigid-world.md](handoff/soft-rigid-world.md) |
@@ -209,3 +209,4 @@ Our first sedan was an outer shell with panels and placeholder boxes; its struct
 ## Changelog
 
 - 2026-11-12: first version.
+- 2026-11-12: linked the BeamNG structure study (`beamng-structure-study.md`): every node at Σk/m ≈ 7–10e6 s⁻² (whole-car ω·h 1.80–1.90), the 131-node shell specification and 24 lint rules.

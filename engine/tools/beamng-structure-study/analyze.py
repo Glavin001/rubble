@@ -7,7 +7,8 @@ repository). Output: Markdown tables on stdout. Standard library only.
 
     python3 -I engine/tools/beamng-structure-study/analyze.py <dump dir> [car ...] [--only SECTION]
 
-Sections: parts, attach, body, grade, brace, mech, wheelpath, glass, flex, stab, types;
+Sections: parts, attach, body, grade, brace, mech, wheelpath, glass, flex, stab, types,
+panels, height, counts;
 `--only summary` prints the cross-car tables instead.
 Frame: JBeam (+X left, +Y rear, +Z up), metres, kg, N, N/m.
 The output holds per-car detail (part and node-group names); the committed
@@ -1281,8 +1282,111 @@ def summary(cars):
     table(["class"] + L, rows)
 
 
+
+def sec_panels(car):
+    """Closures and bolt-on panels as node clouds: depth and rigidifier nodes."""
+    print(f"## {car.label}: panels (depth and non-colliding nodes)\n")
+    inst = defaultdict(list)
+    for i, p in enumerate(car.npart):
+        cl = classify(p or "?")[0]
+        if cl in ("door", "hood", "trunk", "fender", "bumper", "roof"):
+            root = p
+            while car.parent.get(root) and classify(car.parent[root])[0] == cl:
+                root = car.parent[root]
+            inst[(cl, root)].append(i)
+    deg = Counter()
+    for b in car.beams:
+        deg[b["a"]] += 1
+        deg[b["b"]] += 1
+    rows = []
+    for (cl, root), ids in sorted(inst.items()):
+        P = [car.pos[i] for i in ids]
+        if len(P) < 4:
+            continue
+        best = None
+        for t in range(0, 180, 6):
+            for u in range(0, 180, 6):
+                a, b = math.radians(t), math.radians(u)
+                d = (math.sin(a) * math.cos(b), math.sin(a) * math.sin(b), math.cos(a))
+                pr = [dot(x, d) for x in P]
+                r = max(pr) - min(pr)
+                if best is None or r < best:
+                    best = r
+        off = [i for i in ids if not car.coll[i]]
+        S = set(ids)
+        internal = sum(1 for b in car.beams if b["a"] in S and b["b"] in S)
+        ext = sum(1 for b in car.beams if (b["a"] in S) != (b["b"] in S))
+        rows.append([cl, root, len(ids), fmt(sum(car.mass[i] for i in ids), 1), fmt(best), len(off), " ".join(str(deg[i]) for i in off),
+                     internal, fmt(internal / len(ids), 1), ext, sum(1 for t in car.tris if all(i in S for i in t[0]))])
+    print("Depth is the node cloud's smallest extent over all directions (6° steps): for a single-layer panel, the offset of its rigidifier nodes.\n")
+    table(["class", "part (with same-class children)", "nodes", "kg", "depth (m)", "non-colliding nodes", "their beam counts", "internal beams", "per node", "beams to other parts", "triangles"], rows)
+
+
+def sec_height(car):
+    """Longitudinal yield ahead of s 0.2 and behind s 0.95, by the height of each beam's midpoint."""
+    print(f"## {car.label}: longitudinal load path by height\n")
+    if len(car.axle_y) < 2 or not car.wheels:
+        return
+    print(f"Wheel centre height {sum(car.pos[w['n1']][2] for w in car.wheels) / len(car.wheels):.2f} m. "
+          "NORMAL beams of any part within 45° of the car's axis; bands by midpoint height in the model's own z.\n")
+    rows = []
+    for name, lo, hi in (("front (s < 0.2)", -9, 0.2), ("rear (s > 0.95)", 0.95, 9)):
+        bands = defaultdict(list)
+        for b in car.beams:
+            if b["ty"] != "NORMAL":
+                continue
+            pa, pb = car.pos[b["a"]], car.pos[b["b"]]
+            if not (lo <= car.s_of(0.5 * (pa[1] + pb[1])) < hi) or abs(pa[1] - pb[1]) < 0.7 * b["L"]:
+                continue
+            zm = 0.5 * (pa[2] + pb[2])
+            bands["low (z < 0.45)" if zm < 0.45 else ("middle (0.45–0.75)" if zm < 0.75 else "high (> 0.75)")].append(b)
+        tot = sum(b["deform"] for v in bands.values() for b in v if b["deform"] < INF)
+        for band in ("low (z < 0.45)", "middle (0.45–0.75)", "high (> 0.75)"):
+            v = bands.get(band, [])
+            if not v:
+                continue
+            fin = [b["deform"] for b in v if b["deform"] < INF]
+            cl = Counter(classify(car.npart[b["a"]] or "?")[0] + "–" + classify(car.npart[b["b"]] or "?")[0] for b in v)
+            rows.append([name, band, len(v), fmt(sum(fin)), fmt(100 * sum(fin) / tot, 1), fmt(q([b["k"] for b in v], 0.5)), fmt(q(fin, 0.5)),
+                         " ".join(f"{k}:{n}" for k, n in cl.most_common(4))])
+    table(["end", "band", "longitudinal beams", "Σ deform (N)", "% of the end", "k p50", "deform p50", "between classes"], rows)
+    m = defaultdict(float)
+    for i in range(len(car.pos)):
+        if car.s_of(car.pos[i][1]) < 0.2:
+            m[classify(car.npart[i] or "?")[0]] += car.mass[i]
+    print("Mass ahead of s 0.2 by class (kg): " + ", ".join(f"{k} {v:.0f}" for k, v in sorted(m.items(), key=lambda x: -x[1])) + "\n")
+    com = [sum(car.mass[i] * car.pos[i][k] for i in range(len(car.pos))) / car.total for k in range(3)]
+    print(f"Centre of mass (tyres excluded): s {car.s_of(com[1]):.2f}, z {com[2]:.2f} m\n")
+
+
+def sec_counts(car):
+    """Part and group counts; the engine's internals and stops; SUPPORT and damping-only beams."""
+    print(f"## {car.label}: counts\n")
+    own = set(p for p in car.npart if p)
+    bg = set(g for b in car.beams for g in b["bg"])
+    print(f"Parts {len(car.parts)}; that own nodes {len(own)} ({dict(Counter(classify(p)[1] for p in own))}); "
+          f"break groups {len(bg)}; deepest slot level below the root {max(car.depth(p) for p in car.parts)}\n")
+    eng = set(i for i, p in enumerate(car.npart) if p and classify(p)[0] == "engine")
+    if eng:
+        ib = [b for b in car.beams if b["a"] in eng and b["b"] in eng]
+        heavy = [i for i in eng if car.mass[i] >= 10]
+        print(f"Engine: {len(eng)} nodes, {len(heavy)} of 10 kg or more ({sorted(set(round(car.mass[i], 1) for i in heavy))}); "
+              f"{len(ib)} beams among them, k p50 {fmt(q([b['k'] for b in ib], 0.5))}, k max {fmt(max(b['k'] for b in ib))}\n")
+        sup = [b for b in car.beams if b["ty"] == "SUPPORT" and ((b["a"] in eng) != (b["b"] in eng))]
+        print(f"Engine stops (SUPPORT from an engine node to any other part): {len(sup)}; precompressed {sum(1 for b in sup if abs(b['pre'] - 1) > 1e-6)} "
+              f"({sorted(Counter(round(b['pre'], 2) for b in sup).items())}); k p50 {fmt(q([b['k'] for b in sup], 0.5))}, L p50 {fmt(q([b['L'] for b in sup], 0.5))}\n")
+    sup = [b for b in car.beams if b["ty"] == "SUPPORT"]
+    if sup:
+        print(f"SUPPORT: {len(sup)}; precompression ≠ 1 on {sum(1 for b in sup if abs(b['pre'] - 1) > 1e-6)}; finite strength on {sum(1 for b in sup if b['strength'] < INF)}; "
+              f"k p50 {fmt(q([b['k'] for b in sup], 0.5))}; beamLongBound {Counter(b['lb'] for b in sup).most_common(4)}\n")
+    z = [b for b in car.beams if b["k"] == 0]
+    cl = Counter((b["ty"], " – ".join(sorted((classify(car.npart[b["a"]] or "?")[0], classify(car.npart[b["b"]] or "?")[0])))) for b in z)
+    print(f"Beams with no spring (k = 0): {len(z)}: " + "; ".join(f"{t} {c} ×{n}" for (t, c), n in cl.most_common(12)) + "\n")
+
+
 SECTIONS = dict(parts=sec_parts, attach=sec_attach, body=sec_body, grade=sec_grade, brace=sec_brace, mech=sec_mech,
-                wheelpath=sec_wheelpath, glass=sec_glass, flex=sec_flex, stab=sec_stab, types=sec_types)
+                wheelpath=sec_wheelpath, glass=sec_glass, flex=sec_flex, stab=sec_stab, types=sec_types,
+                panels=sec_panels, height=sec_height, counts=sec_counts)
 
 
 def main():

@@ -19,8 +19,11 @@ if [ "${SKIP_DUMP:-0}" != "1" ]; then
 fi
 for f in "$OUT"/dump/*.json; do
   car="$(basename "$f" .json)"
-  for s in parts attach body grade brace mech wheelpath glass flex stab types; do
+  for s in parts attach body grade brace mech wheelpath glass flex stab types panels height counts; do
     python3 -I "$HERE/analyze.py" "$OUT/dump" "$car" --only "$s" > "$OUT/$car.$s.md"
   done
   echo "wrote $OUT/$car.*.md"
 done
+# The cross-car tables.
+python3 -I "$HERE/analyze.py" "$OUT/dump" --only summary > "$OUT/summary.md"
+echo "wrote $OUT/summary.md"

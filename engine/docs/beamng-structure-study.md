@@ -28,7 +28,7 @@ it) or **beyond BeamNG** (they do not; we need it for our own goals).
    floor, sills, rails, towers, cowl, pillars and quarter panels. There is no
    hidden frame.
 3. **The shell is a braced space frame, not a grid of skin:** 5.0–5.8 beams per
-   node, 9–11 neighbours per node, every node a corner of a tetrahedron, 12–28 %
+   node, 9–11 neighbours per node, 93–99 % of nodes a corner of a tetrahedron, 12–28 %
    of beams skipping a node, 8–10 % crossing the car. No SUPPORT beams inside
    it (0–4 of 600–800).
 4. **Heavy nodes where loads enter:** strut towers 8.5 kg, subframe mounts 6 kg,
@@ -38,8 +38,9 @@ it) or **beyond BeamNG** (they do not; we need it for our own goals).
 5. **The crush path is graded by yield force, not by spring.** Front and rear
    beams are the stiffest (k 3–7e6 N/m) with the lowest `beamDeform`
    (4–13 kN); cabin beams are softer (1.5e6) with the highest (15–32 kN, up to
-   65 kN). Along the car, the shell's longitudinal yield sums to 0.2–0.5 MN in
-   the front, 0.7–0.9 MN at the firewall and 1.1–1.3 MN in the cabin.
+   65 kN). On the ETK and the CCF the shell's longitudinal yield sums to
+   0.2–0.3 MN in the front, 0.7–0.9 MN at the firewall and 1.1–1.3 MN in the
+   cabin.
 6. **Every class of node sits at the same stiffness-to-mass ratio:**
    Σk/m ≈ 7–10e6 s⁻² per node, ω·h = h·√(Σk/m) ≈ 1.3–1.6 at 2 kHz, whether the
    node is a 22 kg engine corner or a 0.5 kg fender node. That is the stability
@@ -50,11 +51,11 @@ it) or **beyond BeamNG** (they do not; we need it for our own goals).
 8. **Parts hang on small named break groups** of 5–14 beams: fenders 12 kN per
    beam, bumpers 6–22 kN, hinges 8–55 kN, subframe mounts 80 kN–1.2 MN, wheel
    to hub 57–240 kN. 97–99 % of shell beams are unbreakable.
-9. **11 % of beams are SUPPORT, all between parts:** engine to body (36–56 per
-   car), closures to their openings, bumpers, lamps, exhaust. 36–46 % of them
+9. **6–15 % of beams are SUPPORT (ETK 11 %), all between parts:** engine to
+   body (36–56 per car), closures to their openings, bumpers, lamps, exhaust. 36–46 % of them
    are precompressed.
-10. **Mechanical parts are few heavy nodes:** engine 8–10 block nodes of
-    12–28 kg, fully cross-braced at k 2e7; a hub is 4 nodes of 4–5 kg in a
+10. **Mechanical parts are few heavy nodes:** an engine is 8 block nodes of
+    12–28 kg, cross-braced (ETK k 2e7); a hub is 4 nodes of 4–5 kg in a
     tetrahedron; a suspension arm is two beams, not a part with nodes; the
     driveshaft is one breakable beam.
 11. **A wheel reaches the shell in two hops** (axle nodes → hub tetrahedron →
@@ -64,7 +65,7 @@ it) or **beyond BeamNG** (they do not; we need it for our own goals).
 12. **Glass is a deform group, not a body:** 4–62 beams across the opening with
     a trigger ratio of 0.005–0.1, a mesh material swap, and (ETK, CCF) one
     centre node carrying the pane's mass.
-13. **Flexbodies bind to one node group (60–75 % of rows),** each vertex to 3–4
+13. **Flexbodies bind to one node group (58–76 % of rows),** each vertex to 3–4
     of its nodes; a vertex's nearest node is 7–16 cm away and its third nearest
     24–40 cm. Both faces of a panel mesh ride the same single layer of nodes.
 14. **Weaknesses we can beat:** no interior structure beyond seats and a dash
@@ -77,7 +78,7 @@ it) or **beyond BeamNG** (they do not; we need it for our own goals).
     90–95 % of the step's bound.
 16. **The specification (§10):** a 131-node shell on a modelled body-in-white,
     mechanical parts as few heavy nodes, a 4-node hub per wheel with a
-    breakable 8-beam wheel group, and 20 lint rules, each traced to a number
+    breakable 8-beam wheel group, and 24 lint rules, each traced to a number
     here.
 
 ## Contents
@@ -993,3 +994,807 @@ The same field also carries **mechanical damage triggers** with no visual:
 engine block (trigger 0.001), oil pan (0.005), intake (0.01), radiator (0.05),
 hoses (0.01), driveshaft and half-shafts.
 
+---
+
+## 6. Flexbody binding
+
+All **[Measured]** (`--only flex`, `summary`) except where a doc is cited.
+
+### 6.1 Groups
+
+| | ETK | CCF | Vertex | SUV | Trailer |
+|---|---|---|---|---|---|
+| Flexbody rows / with a mesh found / props | 116 / 98 / 30 | 242 / 218 / 26 | 179 / 158 / 25 | 227 / 201 / 13 | 120 / 55 / 0 |
+| Rows naming 1 / 2 / 3 or more node groups | 83 / 33 / 0 | 140 / 47 / 55 | 133 / 34 / 12 | 173 / 42 / 12 | 74 / 46 / 0 |
+| Node groups | 61 | 85 | 73 | 88 | 63 |
+| Nodes that belong to two or more groups | 24 % | 23 % | 21 % | 23 % | 1 % |
+| Rows with a `deformGroup` (material swap) | 17 | 82 | 52 | 58 | 39 |
+
+- **One mesh, one group** is the rule (58–76 % of rows). A second group is
+  named where a mesh spans two structures: a wheel on wheel and hub, the dash
+  on dash and console, a subframe on its mounts.
+- **A node carries several groups** when it is shared hardware: a strut-tower
+  node is in the body's group, the engine bay's, the damper's and the strut
+  brace's, so each of those meshes can use it.
+- **The body mesh binds to the whole shell** (101–137 nodes). Sub-assemblies
+  of the body get smaller named groups: engine bay 13 nodes, dash and console
+  9, windscreen frame 12.
+- Small non-detachable meshes ride the body's group (carpet, pedal box, mount
+  brackets), as the tutorial allows.
+
+### 6.2 Distances
+
+Per class: meshes / nodes in the pool (median) / vertex to **nearest** pool
+node, median over vertices (m) / to the **third nearest** (m) / the worst
+vertex's nearest node (m). A vertex needs three or four nodes [D-flex], so the
+third-nearest distance is the reach the binding really uses.
+
+| Class | ETK | CCF | Vertex | SUV |
+|---|---|---|---|---|
+| Body | 11 / 114 / 0.15 / 0.36 / 0.41 | 1 / 129 / 0.11 / 0.24 / 0.37 | 7 / 137 / 0.12 / 0.28 / 0.46 | 2 / 101 / 0.14 / 0.36 / 0.79 |
+| Door | 4 / 12 / 0.14 / 0.32 / 0.24 | 7 / 13 / 0.13 / 0.28 / 0.28 | 12 / 12 / 0.14 / 0.35 / 0.41 | 12 / 13 / 0.16 / 0.40 / 0.38 |
+| Hood | 1 / 20 / 0.07 / 0.30 / 0.34 | 1 / 18 / 0.12 / 0.40 / 0.29 | 2 / 12 / 0.13 / 0.38 / 0.36 | 1 / 26 / 0.11 / 0.36 / 0.32 |
+| Boot lid | 1 / 13 / 0.10 / 0.28 / 0.31 | 1 / 14 / 0.13 / 0.26 / 0.23 | 3 / 15 / 0.11 / 0.33 / 0.26 | 2 / 15 / 0.11 / 0.32 / 0.30 |
+| Fender | 3 / 12 / 0.08 / 0.28 / 0.30 | 4 / 69 / 0.10 / 0.27 / 0.26 | 2 / 11 / 0.10 / 0.32 / 0.23 | 6 / 6 / 0.10 / 0.38 / 0.31 |
+| Bumper | 3 / 25 / 0.08 / 0.24 / 0.20 | 6 / 23 / 0.08 / 0.23 / 0.23 | 3 / 18 / 0.11 / 0.26 / 0.28 | 5 / 26 / 0.12 / 0.30 / 0.37 |
+| Lights | 8 / 6 / 0.09 / 0.17 / 0.27 | 12 / 6 / 0.09 / 0.20 / 0.24 | 14 / 7 / 0.09 / 0.22 / 0.21 | 15 / 5 / 0.09 / 0.26 / 0.30 |
+| Glass | 4 / 12 / 0.14 / 0.38 / 0.39 | 2 / 13 / 0.10 / 0.31 / 0.20 | 6 / 74 / 0.18 / 0.47 / 0.38 | 9 / 13 / 0.12 / 0.36 / 0.51 |
+| Interior | 7 / 26 / 0.16 / 0.37 / 0.44 | 16 / 14 / 0.13 / 0.31 / 0.40 | 17 / 29 / 0.16 / 0.45 / 0.50 | 16 / 10 / 0.17 / 0.43 / 0.77 |
+| Suspension | 17 / 6 / 0.05 / 0.27 / 0.46 | 25 / 4 / 0.06 / 0.33 / 0.46 | 10 / 8 / 0.10 / 0.32 / 0.31 | 15 / 13 / 0.12 / 0.37 / 0.56 |
+| Engine | 4 / 8 / 0.21 / 0.43 / 0.40 | 6 / 12 / 0.12 / 0.25 / 0.39 | 12 / 9 / 0.16 / 0.33 / 0.41 | 11 / 8 / 0.31 / 0.54 / 0.69 |
+| Exhaust | 2 / 14 / 0.11 / 0.29 / 0.27 | 2 / 25 / 0.07 / 0.32 / 0.35 | 1 / 9 / 0.24 / 1.12 / 0.27 | 3 / 9 / 0.14 / 0.44 / 0.55 |
+
+- **A vertex's nearest node is 7–16 cm away on panels** and its third nearest
+  24–40 cm. BeamNG's binding reaches about a third of a metre as a matter of
+  course; the worst vertices are 0.2–0.5 m from any node of their group.
+- **Rigid machinery rides few nodes:** an engine mesh on 8–12, a hub on 4–6, a
+  lamp on 5–7.
+- **Inner and outer faces:** a door, hood or lid is one mesh (or a skin mesh
+  and a trim mesh) bound to the same group, and that group is a single layer
+  of nodes plus its rigidifiers (§5.1). Thickness is carried by the binding's
+  local frame at each vertex, not by a second layer of nodes.
+  **[Hypothesis]** That is why BeamNG panels keep their thickness when bent:
+  both faces follow the same three or four nodes.
+- **Visual swaps** are per mesh: a `deformGroup` on the flexbody row, one
+  material per such mesh. Glass and lamp lenses are split from their frames so
+  only the lens swaps.
+- Node to surface, and nodes on creases: `beamng-authoring-census.md` §5.
+
+---
+
+## 7. Stability and stiffness
+
+### 7.1 Every node is tuned to the same stiffness-to-mass ratio
+
+**[Measured]** (`--only stab`, `summary`). Per node: Σk over all its spring
+beams, divided by its mass (1e6 s⁻²), and ω·h = h·√(Σk/m) at h = 0.5 ms:
+median Σk/m / ω·h p50 / p90 / max.
+
+| Class | ETK | CCF | Vertex | SUV |
+|---|---|---|---|---|
+| Body | 9.1 / 1.51 / 2.00 / 2.21 | 8.4 / 1.45 / 1.89 / 2.12 | 9.8 / 1.56 / 1.91 / 2.68 | 9.4 / 1.53 / 2.05 / 2.68 |
+| Frame | – | – | – | 7.4 / 1.36 / 1.85 / 2.06 |
+| Door | 7.1 / 1.33 / 2.02 / 2.36 | 9.0 / 1.50 / 1.76 / 1.85 | 10.5 / 1.62 / 2.04 / 2.09 | 10.6 / 1.63 / 1.98 / 2.13 |
+| Hood | 4.6 / 1.07 / 1.19 / 2.17 | 11.5 / 1.69 / 1.98 / 2.20 | 7.4 / 1.36 / 1.73 / 2.04 | 7.9 / 1.40 / 1.57 / 1.97 |
+| Boot lid | 10.2 / 1.60 / 1.77 / 1.80 | 10.5 / 1.62 / 1.73 / 1.87 | 11.0 / 1.66 / 1.78 / 2.00 | 7.0 / 1.32 / 1.76 / 2.00 |
+| Fender | 9.2 / 1.52 / 1.60 / 1.66 | 9.8 / 1.57 / 1.87 / 2.10 | 13.0 / 1.80 / 1.98 / 2.03 | 7.6 / 1.38 / 1.72 / 1.93 |
+| Bumper | 6.0 / 1.22 / 1.49 / 1.72 | 6.2 / 1.25 / 1.56 / 1.86 | 5.0 / 1.12 / 1.57 / 1.92 | 3.4 / 0.92 / 1.35 / 1.97 |
+| Lights | 9.3 / 1.53 / 1.92 / 1.92 | 10.2 / 1.60 / 1.77 / 1.82 | 6.9 / 1.32 / 1.54 / 1.56 | 10.7 / 1.63 / 1.88 / 1.97 |
+| Suspension | 8.3 / 1.44 / 1.71 / 1.84 | 11.0 / 1.66 / 1.97 / 2.14 | 11.8 / 1.72 / 1.94 / 2.16 | 8.0 / 1.41 / 1.81 / 2.24 |
+| Wheel axle nodes | 5.4 / 1.16 / 1.35 / 1.35 | 6.6 / 1.28 / 1.32 / 1.32 | – | 7.1 / 1.33 / 1.91 / 1.91 |
+| Engine | 7.1 / 1.34 / 1.49 / 1.51 | 7.1 / 1.33 / 1.41 / 1.85 | 8.8 / 1.48 / 1.60 / 1.77 | 6.2 / 1.24 / 1.41 / 1.57 |
+| Exhaust | 5.0 / 1.12 / 1.29 / 1.32 | 4.0 / 1.01 / 1.23 / 1.36 | – | 4.8 / 1.10 / 1.72 / 1.75 |
+| Fuel tank | 0.02 / 0.07 | 0.2 / 0.24 | 0.04 / 0.10 | 0.03 / 0.09 |
+
+- **Structure sits at Σk/m ≈ 7–11e6 s⁻²** on every car and nearly every
+  class, with node masses from 0.5 kg (fenders) to 28 kg (engine). A 0.5 kg
+  fender node carries Σk 4.6e6; a 22 kg engine node 1.4e8.
+- **That is the edge of the step.** For a lattice of equal masses the largest
+  eigenvalue is at most 2·Σk/m (Gershgorin), and the explicit step needs
+  ω_max·h ≤ 2, so the safe per-node value is ω·h ≤ 1.41. The cars' medians are
+  1.3–1.7 and their p90 1.6–2.0. They hold because a node's beams point in
+  different directions, which the bound ignores.
+- **Whole-car ω·h by power iteration** (the car's true top frequency on
+  Rubble's CPU reference, springs only): **ETK 1.80, CCF 1.82, Vertex 1.80,
+  SUV 1.90.** The limit is 2. This is the measured meaning of the developer's
+  remark that spring values are very close to the maximum [F-goosah].
+- **Soft things are deliberately far below it:** bumper covers 3–6e6, exhaust
+  4–5e6, the fuel tank 0.02–0.2e6.
+- **Damping:** h·Σc/m is 0.29 on the ETK's shell (median), 0.55–0.66 on its
+  light bolt-on panels; per-beam ζ 0.03–0.04 on structure, 0.07–0.33 on
+  bumpers (census).
+- The census's "row" (the same sum with damping and unequal masses, over
+  Rubble's cap) reads 1.1–1.6 at the median for these parts. Rubble's
+  generated car is capped at 1.0. **Adopting BeamNG's level is an engine-wide
+  setting and the user's decision** (`generated-vehicles-lessons.md` §11.6).
+
+**The design rule that follows [Hypothesis]:** give each node a stiffness
+budget Σk ≈ (6.8–9)e6 × m N/m (ω·h 1.3–1.5) and share it among its spring
+ends. A 4 kg shell node with 15 ends gets a mean k of 1.8–2.4e6; a 1.5 kg door
+node with 12 ends 0.85–1.1e6; a 0.5 kg fender node with 10 ends 3.4–4.5e5.
+Those are the cars' actual medians (1.6e6, 1.0e6, 4e5). **Stiffness is bought
+with node mass and nothing else.** Fewer, heavier nodes are stiffer over a
+distance because k·L ∝ m·L/n.
+
+### 7.2 Modes, wobble and settle
+
+**[Measured]** `sedan_stiffness` on the CPU reference, JBeam mode, pressure
+wheels, lids latched by their couplers. First mode of each part with its
+neighbours held (Hz):
+
+| Part | ETK kc6 | CCF | Vertex | SUV |
+|---|---|---|---|---|
+| Front door | 34.9 | 31.5–31.9 | 15.7–15.9 | 20.4–20.6 |
+| Rear door | – | – | 20.5–20.6 | 15.5–26.4 |
+| Hood | 12.5 | 19.2 | 11.1 | 15.1 |
+| Boot lid / tailgate | 27.0 | 26.0 | 23.3 | 30.3–40.1 |
+| Fender | 41.8 | 17.2–20.4 | 40.3 | 54.5–55.4 |
+| Front / rear bumper cover | 23.8 / 9.2 | 16.8 / 8.5 | 19.5 / 13.4 | 14.5 / 19.1 |
+| Bumper bar | – | 61–73 | 68–81 | 89 |
+| Body shell alone, free, first global mode | 5.6 | 11.9 | 19.6 | 27.1 |
+| Whole-car ω·h | 1.80 | 1.82 | 1.80 | 1.90 |
+| SUPPORT share of loaded beams (tyres included) | 7.2 % | 3.5 % | 10.3 % | 5.1 % |
+
+5 cm × 0.5 m bump at 30 km/h on pressure wheels: peak movement of each
+category about the body's rigid fit (mm).
+
+| | ETK kc6 | CCF | Vertex | SUV |
+|---|---|---|---|---|
+| Body (own ripple) | 1.37 | 0.56 | 8.4 | 0.42 |
+| Doors | 1.70 | 0.74 | 10.6 | 1.02 |
+| Hood | 3.44 | 1.13 | 16.1 | 0.95 |
+| Boot lid | 3.61 | 1.41 | 13.3 | 0.52 |
+| Fenders | 2.21 | 0.76 | 7.8 | 0.77 |
+| Bumpers | 4.24 | 1.22 | 21.3 | 0.79 |
+| Beams bent by the bump | 0 | 0 | 157 | 0 |
+
+- **Baseline bands:** doors 16–35 Hz, hood 11–19 Hz, lid 23–40 Hz, fender
+  17–55 Hz, bumper covers 9–24 Hz, bumper bars 60–90 Hz. Bump wobble 0.4–4 mm
+  on pressure wheels. On raycast wheels the ETK reads 0.09–0.23 mm and
+  settles within 0.6 s (`generated-vehicles.md`, kr6).
+- **The Vertex's numbers are not a baseline.** The bump bent 157 of its beams
+  on Rubble (front floor and subframe mounts), so its wobble includes
+  permanent set. Its content is tuned for BeamNG's solver, not ours
+  (`physics-evidence-first`). Its modes are valid; its bump row is not.
+- **Body torsion is soft everywhere:** the bare shells' first global mode is
+  5.6–27 Hz. Real unibodies are 25–50 Hz (general engineering knowledge, not
+  from a source read here). The open ETK and CCF shells are the softest.
+- After a 2 cm spawn drop the ETK's categories ripple 0.25–0.84 mm and are
+  under 0.2 mm in 0.1–0.4 s (bumpers 1.3 s).
+
+### 7.3 Why these cars are not jello
+
+**[Hypothesis, ranked by the evidence above]**
+
+1. **Every node is at the step's bound** (§7.1). There is no stiffness left on
+   the table anywhere; ours had a stability pass removing 44–65 % of closure
+   stiffness.
+2. **Mass is concentrated:** 118–138 shell nodes of 3–4 kg, 10–13 door nodes
+   of 1.2–1.9 kg. Half the nodes means twice the mass each, twice the k each,
+   and beams twice as long: about four times the stiffness over a distance.
+3. **Topology first:** tetrahedra everywhere, 12–28 % skip beams, double-layer
+   floor, torsion bars along the floor.
+4. **Panels get depth from a rigidifier,** 0.2–0.4 m off the surface: bending
+   stiffness goes as k·d².
+5. **Closures are preloaded on SUPPORT rests** and held by one strong coupler.
+6. **Mounts land on the heaviest nodes** (§3.3), so mount beams can be stiff.
+
+---
+
+## 8. The guidance against the cars
+
+| Topic | The guidance [Doc] | The five cars [Measured] | Verdict |
+|---|---|---|---|
+| Nodes on the mesh, evenly spaced | W-construct | shell nodes 0.5–1.6 cm from the mesh (median); spacing p10–p90 0.09–0.39 m, so not even | followed for position; spacing is by member, not uniform |
+| "3–4 nodes across" | D-tutorial | 4 across the floor plus a centre line; 5 on bumper bars | followed |
+| Body about a hundred nodes | W-intro | 118–138 | followed |
+| Double-grid floor, both diagonals, skip rigidifiers | W-construct | double layer; 38–41 % diagonals; 12–28 % skip beams | followed |
+| Do not span the cabin with beams | W-construct | 6 (ETK, Vertex); 23 (CCF); 34 (SUV) | followed by two, bent by two |
+| Deform hierarchy: grid > diagonal > skip | W-construct | ETK edge 13,500 / diagonal 12,000 / skip 12,000; ε_y 1.9 / 1.1 / 0.37 % | followed in strain, weakly in force |
+| Main shape unbreakable | W-construct | 97–99 % FLT_MAX | followed |
+| Rigidifier 0.5 m off, non-colliding, weaker beams | D-tutorial | 1–4 per panel, 0.2–0.4 m off, non-colliding | followed, at a smaller offset |
+| Panels at least 3 × 3 | D-tutorial | doors 8–13 nodes, fenders 10–16 | followed |
+| Same weight on all frame nodes except shock mounts | F-agenty-w | 11–18 distinct masses per shell; mounts 1.3–4× heavier | the cars grade mass more finely |
+| Node weights 2–3 kg (tutorial), 10 kg (old starter) | D-tutorial, W-intro | shell median 3.0–4.0; panels 0.5–1.7 | between the two |
+| Frame beams 1.2e6 / 150 / 50,000 | D-tutorial | 1.5–3e6 / 120–140 / 10,000–14,000 | similar spring and damping; **yield 4–5 × lower** on real cars |
+| Springs "very close to the max" | F-goosah | whole-car ω·h 1.80–1.90 of 2 | confirmed, quantified |
+| Beam length does not change the limit | F-goosah | Σk/m is the same across parts with L from 0.3 to 1.2 m | consistent |
+| `deformLimitExpansion` 1.05–1.1 | F-agenty-dle | 1.1 and 1.2, on 26–35 % of beams | higher than the stated typical |
+| Hinge strongest, latch breaks first | D-tutorial | hinges 8–98 kN per beam, sums 0.2–0.95 MN; latch one coupler at 30–40 kN | followed |
+| Latch = coupler, 12 kN in the example | D-couplers | 30–40 kN, radius 1.35 m, `couplerLock` | followed, stronger |
+| Support beams for self-collision | W-construct, D-support | 6–15 % of beams, 36–46 % precompressed | followed |
+| Long wobble: damping-only beams | D-tips | 69–74 beams with k = 0 per car: 40–55 are BOUNDED dampers and limiters; **15–32 are NORMAL damping-only beams** (mirror to door 14, door to body 4–8, lids, seats; 8–10 inside the CCF's and the Vertex's shells, none inside the ETK's) | used sparingly: about 1 % of beams. (The census's "no damping-only beams" should read "almost none".) |
+| Torsion bars for flat structures | D-torsion | 4–20 across shell floors | followed |
+| Engine: 8-node cube, soft mounts, stops | W-construct | 8 block nodes; mounts k 32,000; 42–78 stops | followed exactly |
+| Brake and torque nodes ≥ 2 kg | D-wheels | hub nodes 3.8–8 kg, axle nodes 4.5–5.8 kg | followed |
+| Flexbody group ≥ 3 non-collinear nodes, regular grid | D-flex | pools of 4–137; single-layer panels plus an off-plane rigidifier | followed |
+| Nodes ≥ 3 cm from triangles | D-tips | not measured | unknown (§12) |
+| Glass: trigger ratio under 0.1 | D-beams | 0.0001–0.1 | followed |
+| Roof at about 2 × IIHS | D-debug | ETK hardtop 9.6–9.8 × weight, soft top 1.6–6.1 × (`etkk-audit.md`) | not met either way on Rubble |
+
+---
+
+## 9. Weaknesses
+
+Things the baseline does poorly, each with its evidence. These are where the
+generated car can be better.
+
+| # | Weakness | Evidence |
+|---|---|---|
+| 1 | **No interior structure.** Seats and a dash ballast only: no cross-car beam, console, column, B-pillar trim structure or occupants | §5.3; `etkk-audit.md` finding 7 |
+| 2 | **Seats cannot detach** on three of four cars; radiators and dashes never | §5.3, §2.3: all mount beams FLT_MAX |
+| 3 | **Sparse greenhouse.** A sedan roof is 4 nodes; pillars are 2–3 nodes each; the roof is out of band both ways | §3.2; `etkk-audit.md` finding 5 |
+| 4 | **A pole passes between shell nodes.** Beams are 0.44–0.65 m long; a 254 mm pole reaches 1–1.6 m into the ETK | §3.1; `etkk-audit.md` finding 4 |
+| 5 | **Frontal crush too stiff and too short** against NHTSA bands: 489–511 mm against 620–750, 56–66 g against 34–47, restitution 0.26–0.35 against 0.13–0.20 | `etkk-audit.md` finding 3 (on Rubble; the car is also a short compact) |
+| 6 | **Soft body torsion:** first global shell mode 5.6–27 Hz | §7.2 |
+| 7 | **Suspension arms and the front subframe cannot break** (FLT_MAX; subframe mounts 1.24 MN per beam × 64) | §4.3 |
+| 8 | **Arms, driveshaft and half-shafts have no nodes:** their meshes ride other parts' nodes or are props that vanish | §4.2, §4.3 |
+| 9 | **The fuel tank has no internal structure** (9 nodes, no beams among them) and would collapse if freed | §4.2 |
+| 10 | **Panels have no inner layer:** a torn-off door is a sheet with a floating rigidifier node, not a closed solid; its collision surface is one-sided | §5.1; D-tri |
+| 11 | **Hand-tuned values:** 49–77 distinct beam settings and 11–18 node masses per shell; nothing derives from section or material | §3.1 |
+| 12 | **Ballast instead of parts:** 60 kg of dash nodes (ETK), 400 kg on skirts (SUV), a 12 kg windscreen node | §2.2, §5.4 |
+| 13 | **Glass does not exist as an object** on two cars (trigger beams only); none has fragments | §5.4 |
+| 14 | **Not at rest on our solver:** the ETK keeps 0.5 J and 0.15 m/s after 10 s; the Vertex bends 157 beams on a 5 cm bump | `etkk-audit.md` finding 2; §7.2 |
+| 15 | **Rear subframe held by 40 beams at 80–150 kN** against the front's 1.24 MN: an order of magnitude apart with no physical reason given | §4.3 |
+| 16 | **Mesh faceting under crush:** 418 edges change by more than 60° in the wall | `etkk-audit.md` finding 9 |
+
+Weaknesses 4, 5, 14 and 16 were measured on Rubble, not in BeamNG. They are
+weaknesses of this content on our solver.
+
+---
+
+## 10. Specification for the sedan (Step 2d)
+
+The deliverable. Every item is marked **[B]** BeamNG baseline (the five cars do
+it; the number comes from the section cited) or **[+]** beyond BeamNG (needed
+for our principles: closed solids, nothing faked, real crash bands). All of it
+is **[Hypothesis]** until built and measured side by side with the ETK.
+
+Positions are given as stations s and as members of the body-in-white, so the
+generator derives them from its own key lines. Masses assume a kerb mass of
+about 1,450 kg.
+
+### 10.1 Mass budget
+
+| Class | Target | Share | Baseline (§2.2) |
+|---|---|---|---|
+| Body shell (body-in-white plus the fixed trim it carries) | 430–500 kg | 30–35 % | 30–38 % **[B]** |
+| Closures, fenders, bumpers, lights, trim | 130–160 kg | 9–11 % | 8–13 % **[B]** |
+| Glass | 30–40 kg | 2–3 % | real mass **[+]** (cars: 1–8 %) |
+| Interior (seats, instrument panel, console) | 80–110 kg | 6–8 % | 2–7 % **[B]**; as parts, not ballast **[+]** |
+| Suspension, subframes, hubs, steering | 240–270 kg | 17–19 % | 17–19 % **[B]** |
+| Wheels (rim, tyre, as axle nodes) | 4 × 18–20 kg | 5 % | axle nodes 3 % plus generated tyre **[B]** |
+| Engine | 150–190 kg | 10–13 % | 10–16 % **[B]** |
+| Transmission, driveshaft, differential | 60–70 kg | 4–5 % | 2–5 % **[B]** |
+| Exhaust, tank (with fuel), radiator | 70–80 kg | 5 % | 5–6 % **[B]** |
+
+The body-in-white's steel weighs about 300–350 kg. The shell's nodes also
+carry sealer, wiring, carpet, insulation and paint, which have no part of
+their own: 100–150 kg, spread over the floor, firewall and quarter nodes in
+proportion to panel area. It is listed as "fixed trim" in the mass report,
+not hidden **[+]**.
+
+### 10.2 Body-in-white members
+
+Closed solids in the generator, one-to-one with the shell's nodes. Section
+sizes are typical steel-unibody values (general engineering practice, not
+from a source read here): **starting values for the generator, to be replaced
+by its own key lines.** Gauge sets the visual wall and the real yield force;
+the physics lattice takes its masses and yield forces from them.
+
+| Member | Count | Section (mm), gauge | Shell nodes on it |
+|---|---|---|---|
+| Front crash boxes | 2 | 70 × 110 box, 1.5; 0.15–0.20 m long | 4 at the front face, 4 at the rear face |
+| Front rails | 2 | 70 × 110 box, 1.8 | 2 at the subframe's front mount, 2 at its rear mount (kick-down) |
+| Radiator support: upper tie bar, lower crossmember, two uprights | 1 | 40 × 60, 1.0 | 3 on top, 1 lower centre |
+| Upper fender rails | 2 | 40 × 60, 1.2 | 2 each (front, middle) |
+| Strut towers with inner aprons | 2 | pressed, 2.0 (tower), 0.9 (apron) | 1 at the top, 1 at the base each |
+| Firewall and toe board | 1 | panel, 0.9 | 4 across at mid height; its foot is floor row 1 |
+| Cowl box | 1 | 100 × 150, 0.9 | 4 across (the outer two are the A-pillar bases) |
+| Floor pan with tunnel | 1 | panel 0.8; tunnel 180 wide × 160 high, 1.0 | 5 rows × 2 tunnel sides at pan height; 5 tunnel-top nodes |
+| Sills | 2 | 110 × 140 box, 1.4, with reinforcement | 5 rows × (bottom, top) each |
+| Seat crossmembers | 2 | 50 × 60 hat, 1.2 | on floor rows 2 and 3 (no extra nodes) |
+| A-pillars | 2 | 60 × 80, 1.6 | base (in the cowl), middle, top |
+| B-pillars | 2 | 60 × 140 tapering, 1.6, reinforced | foot (sill top, row 3), belt, top |
+| C-pillars | 2 | 80 × 120, 1.2 | foot (quarter, upper row), belt, top |
+| Roof rails | 2 | 50 × 70, 1.2 | the A, B and C tops |
+| Windscreen header, rear header, roof bow at the B-pillar | 3 | 40 × 80, 1.0; bow 25 × 60, 0.9 | 1 centre node each |
+| Roof panel | 1 | 0.75 | none of its own |
+| Rear seat bulkhead and parcel shelf | 1 | panel, 0.8 | 2 bulkhead top, 4 shelf |
+| Rear rails | 2 | 60 × 90 box, 1.6 | 3 stations × (lower, upper) each |
+| Rear strut towers and inner arches | 2 | pressed, 1.8 | 1 each |
+| Boot floor | 1 | panel, 0.8 | 3 on the centre line |
+| Tail panel | 1 | panel, 0.8 | 3 across × 2 heights |
+| Quarter panels (outer and inner, part of the shell) | 2 | 0.75 | 5 stations × 2 heights each |
+
+Separate parts mounted to it (§10.5): bumper beams, subframes, and everything
+mechanical.
+
+### 10.3 The shell lattice: 131 nodes, about 487 kg
+
+| Group | Location (station s) | Nodes | kg each | kg | Baseline |
+|---|---|---|---|---|---|
+| A1 | Crash-box front faces: upper and lower edge, left and right (−0.30) | 4 | 3.5 | 14 | ETK bumper-beam rows, 4.0 **[B]** |
+| A2 | Crash-box rear faces / rail front at the radiator support (−0.20) | 4 | 4.0 | 16 | **[B]** |
+| A3 | Radiator support: top left, centre, right; lower centre (−0.18) | 4 | 3.0 | 12 | ETK 3 at 4.0 **[B]** |
+| A4 | Rails at the subframe's front mount (−0.08) | 2 | 6.0 | 12 | ETK 5.0–6.0 **[B]** |
+| A5 | Rails at the subframe's rear mount, kick-down (0.08) | 2 | 6.0 | 12 | ETK 6.0 **[B]** |
+| A6 | Strut tower tops (0.02) | 2 | 8.5 | 17 | ETK 8.5 **[B]** |
+| A7 | Tower bases on the inner apron (0.02) | 2 | 4.0 | 8 | **[B]** |
+| A8 | Upper fender rails: front (−0.12), middle (0.05) | 4 | 3.5 | 14 | ETK 3.5 **[B]** |
+| B1 | Firewall at mid height, 4 across (0.20) | 4 | 3.5 | 14 | ETK 3.5 **[B]** |
+| B2 | Cowl top, 4 across; the outer two are the A-pillar bases (0.28) | 4 | 4.2 | 16.8 | ETK 4.2 **[B]** |
+| C1 | Floor rows 1–5 at pan height: sill, tunnel side, tunnel side, sill (0.20, 0.36, 0.53, 0.70, 0.86) | 20 | 4.5 | 90 | ETK 4.5 **[B]** |
+| C2 | Sill tops over rows 1–5 | 10 | 3.5 | 35 | ETK 3.5 **[B]** |
+| C3 | Tunnel top over rows 1–5 | 5 | 3.5 | 17.5 | ETK 3.5 **[B]** |
+| D1 | A-pillar middle and top (0.36, 0.48) | 4 | 1.75 | 7 | ETK 1.5–1.7 **[B]** |
+| D2 | B-pillar belt and top (0.55) | 4 | 2.5 | 10 | Vertex 1.6–2.2 **[B]**; heavier **[+]** |
+| D3 | C-pillar belt and top (0.90) | 4 | 2.5 | 10 | **[+]** |
+| D4 | Header centre, B-bow centre, rear header centre | 3 | 1.7 | 5.1 | ETK 1.7 **[B]** |
+| E1 | Rear rails: 3 stations (0.92, 1.08, 1.26) × lower and upper × left and right | 12 | 5.0 | 60 | ETK 4.6–5.5 **[B]** |
+| E2 | Rear strut towers (1.00) | 2 | 6.0 | 12 | ETK 5.5 **[B]** |
+| E3 | Boot floor centre line (0.95, 1.10, 1.26) | 3 | 4.5 | 13.5 | ETK 4.6 **[B]** |
+| E4 | Tail panel: 3 across × 2 heights (1.30) | 6 | 3.0 | 18 | ETK 2.6–4.6 **[B]** |
+| E5 | Quarter panels: 5 stations (0.80–1.25) × 2 heights × left and right | 20 | 2.8 | 56 | ETK 2.8 **[B]** |
+| E6 | Parcel shelf (1.00–1.10) | 4 | 2.8 | 11.2 | ETK 2.8 **[B]** |
+| E7 | Rear seat bulkhead top (0.92) | 2 | 3.0 | 6 | **[B]** |
+| | **Total** | **131** | p50 3.5 | **487** | 118–138 nodes, 426–515 kg |
+
+Rules for placing them:
+
+- **On the member's visible surface,** within 2 cm (80 % of nodes) and never
+  over 5 cm (§3.1) **[B]**. A boxed member's two nodes sit on opposite faces
+  (rail lower and upper, sill bottom and top), so the box has depth.
+- **Four across at the floor** plus tunnel top; lateral lanes as §3.2 **[B]**.
+- **Spacing** along members 0.25–0.50 m; nearest-neighbour p50 0.16–0.22 m
+  **[B]**.
+- **All self-colliding and colliding** except declared rigidifiers **[B]**.
+- **Node mass is assigned by location, not by tributary area alone:** mount
+  nodes first (their mount beams fix a minimum mass, §10.6), then members by
+  section, then the fixed trim. At most 12 distinct values **[B]** (§8).
+- Optional **[+]**: side contact rows on the sills and roof rails at
+  ≤ 0.25 m, as light nodes (1 kg, k from the Σk/m rule), for the pole lane
+  (weakness 4). They add about 16 nodes and are not counted in the 131. Decide
+  after the pole sweep is measured on the new shell.
+
+### 10.4 Bracing and beam values
+
+Topology **[B]** (§3.1, §3.5):
+
+- Edges along and across every member; both diagonals in every rectangle;
+  boxed members and the double floor closed into tetrahedra.
+- Skip beams along rails, sills, roof rails and across the floor: 12–28 % of
+  beams.
+- Cross-car beams at each floor row, the cowl, the radiator support, the
+  shelf and the tail panel: 8–10 % of beams.
+- At most 6 beams over 0.9 m through the cabin volume.
+- 10–20 torsion bars along the floor rows (5–8e5 N·m/rad, deform
+  7,000–8,000).
+- Targets: 650–760 beams (5.0–5.8 per node); 9–11 neighbours per node at the
+  median, 5 at least; every node a corner of a non-flat tetrahedron;
+  direction spread ≥ 0.02 at every node.
+- No SUPPORT beams inside the shell. No damping-only beams inside it either
+  (ETK 0; CCF 8, Vertex 10): damp each spring beam.
+
+Values by zone (k N/m, c N·s/m, deform N; strength FLT_MAX except as §10.5)
+**[B]** (§3.4):
+
+| Zone | k | c | deform | `deformLimitExpansion` | ε_y target |
+|---|---|---|---|---|---|
+| Crash boxes (A1–A2) | 3–7e6 | 110–120 | 4,000–6,000 | 1.2 | 0.35–0.5 % |
+| Front rails, radiator support, upper rails (A2–A8) | 3–7e6 | 110–120 | 8,000–13,500 | 1.2 | 0.4–0.7 % |
+| Towers and subframe mount nodes (A4–A7) | 3.5–7e6 | 120–160 | 26,000–29,000 | 1.2 | – |
+| Firewall, cowl, floor, sills (B, C) | 1.5–2.0e6 | 120–135 | 15,000–32,000 | 1.1 | 1–2.4 % |
+| Sill and door-frame primaries | 2.1e6 | 400 | 50,000–65,000 | 1.1 | – |
+| Pillars, roof rails, headers (D) | from the Σk/m rule | 100–125 | 15,000–24,000 pillars; 8,000–12,000 bows | 1.1 | 1–2 % |
+| Rear rails, towers, boot floor (E1–E3) | 1.5–4.5e6 | 125–160 | 8,600–12,500 | 1.2 | 0.8–1.2 % |
+| Quarter panels, shelf, tail (E4–E7) | 1.5e6 | 125 | 6,000–9,000 | 1.2 | 1–2 % |
+| Skip beams in any zone | the zone's, up to 5.5e6 | the zone's | 0.5–0.9 × the zone's edges | as the zone | 0.35–0.4 % |
+
+Every k is then checked against the node budget (§10.6) and lowered where a
+node would exceed it; the budget, not the table, is the rule.
+
+Crush-path force **[+]** (the cars' fronts are too stiff for the NHTSA band,
+weakness 5): the sum of `beamDeform` over all longitudinal beams of all parts
+crossing a station, at bumper-to-rail height, should rise along the car:
+
+| Station | Target Σ deform (all parts, low band) | Why |
+|---|---|---|
+| Bumper beam and crash boxes | 120–180 kN | a 1,450 kg car at 56 km/h holds 175 kJ; over 0.62–0.75 m that is a mean of 235–280 kN |
+| Rails, ahead of the towers | 200–300 kN | |
+| Towers to firewall (rails, subframe, engine stacked) | 400–570 kN | peak 34–47 g × 1,450 kg = 480–670 kN |
+| Cabin (sills, tunnel, floor) | ≥ 1.2 MN | ≥ 2 × the front's peak; ETK and CCF 1.1–1.3 MN **[B]** |
+| Rear rails | 250–400 kN | ETK 0.42 MN **[B]** |
+
+- **The low band carries at least 55 % of the front's longitudinal yield;
+  the hood band at most 6 %** **[B]** (§3.4: ETK 63 % / 3.6 %, CCF 55 % /
+  2.1 %). This is the authoring answer to the nose lift (S2).
+- These are force targets for authoring. The crash bands themselves
+  (`crash-reference-targets.md`) remain the acceptance test.
+
+### 10.5 Parts mounted to the shell
+
+Nodes, masses and mounts. "Group" = a named break group. Mount values are per
+beam.
+
+**Structure and running gear**
+
+| Part | Nodes | kg | Internal | Mounts to | Mount beams: k / c / deform / strength | Groups | Mark |
+|---|---|---|---|---|---|---|---|
+| Front bumper beam | 10 (5 across × 2 heights) | 8 | 27 beams, k from budget, deform 6–10 kN | A1 | 2 × 8 NORMAL: 1e6 / 100 / 20 kN / 60 kN | 2 | **[B]** CCF, Vertex, SUV |
+| Rear bumper beam | 10 | 6 | as front | E4, E1 | 2 × 8: 1e6 / 100 / 15 kN / 40 kN | 2 | **[B]** |
+| Front subframe | 7 (4 corners 7 kg, 2 rack mounts 7 kg, 1 centre 4.5 kg) | 46.5 | 21 beams: 5–6.5e6 / 120–180 / 80–96 kN / FLT_MAX | A4, A5 | 2 × 32 NORMAL: 1.3–1.8e6 / 180 / 157 kN / **400 kN** | 2 | **[B]** layout; strength **[+]** (ETK 1.24 MN, weakness 7, 15) |
+| Rear subframe (or axle carrier) | 6 (4 corners, 2 centre) at 7 kg | 42 | 15 beams as front | E1 (first two stations) | 4 × 10 NORMAL: 2.1e6 / 500 / 18–26 kN / 150 kN | 4 | **[B]** |
+| Hub / knuckle, each wheel | 4 in a tetrahedron (lower joint, upper joint or strut foot, toe arm, one more) | front 17, rear 24 | 6 beams: 6e6 / 100 / 129 kN / FLT_MAX | arms, strut, toe link | see below | – | **[B]** |
+| Lower arm, each wheel | none (2 beams) | in the subframe and hub | – | subframe corners → hub lower joint | 2: 1.0–1.4e7 / 2,000 / 155 kN / **300 kN** | 1 per arm | **[B]** beams; strength **[+]** |
+| Upper arm, each wheel (or the strut on a MacPherson front) | none (2 beams) | – | – | shell mount nodes → hub upper joint | 2: 1.0–1.4e7 / 2,000 / 155 kN / 300 kN | 1 per arm | as above |
+| Strut, each wheel | none (1 beam) | in the hub and tower | – | hub → tower top (A6, E2) | 1: from budget / 200 / 17 kN / 180 kN | 1 per strut | **[B]** strength; a rigid link in place of the spring because the raycast wheel owns the travel **[+]** |
+| Toe link or tie rod, each wheel | none (1 beam) | – | – | rack end or subframe → hub toe arm | 1: 1.7e7 or budget / 100 / 85 kN / 250 kN | – | **[B]** |
+| Steering rack | 2 at 5 kg | 10 | 1 beam | subframe rack mounts | 4 beams, unbreakable | – | **[B]** |
+| Wheel (rim and tyre mass) | 2 axle nodes on the spin axis, 0.25–0.27 m apart, plus 3 frame nodes | 18–20 | 10 beams (rigid) | hub's 4 nodes | 8: 6e6 (two at 1e6) / 100 / 168 kN / **168 kN** | 1 per wheel | **[B]** axle nodes and group; frame nodes **[+]** |
+| Hub cap | 3 at 0.2 kg | 0.6 | 3 beams | the wheel's outer nodes | 6: budget / 20 / 300 / 600 N | 1 per cap | **[B]** (the wheel data's hubcap group) |
+
+- **Six beams hold each hub:** two lower-arm beams, two upper-arm beams (or
+  one strut-foot pair), the strut and the toe link. A four-node rigid body
+  needs six, so the hub is held exactly, each beam is a visible member, and
+  bending any one changes camber, caster, toe or ride height. **[+]** in
+  being exact; the ETK adds 8 limiters per side.
+- **Arms have no nodes of their own [B].** The arm's solid binds to its three
+  joint nodes plus one hub node for the out-of-plane direction (a flexbody
+  group needs non-collinear nodes, §1.6). When the arm's group breaks, the
+  arm's mesh stays with the side that still holds two of its nodes.
+- **The wheel's raycast frame follows the two axle nodes** (as today it
+  follows the hub). When the wheel group breaks, the five wheel nodes are a
+  free rigid part with the rim and tyre mesh **[+]**.
+- **Rim damage [+], a decision for later (§12):** with 5 nodes the rim cannot
+  dent locally; a bent wheel shows as its frame nodes yielding (wobble).
+  BeamNG's dent-able rim is 32 generated nodes per wheel at 0.4 kg (§4.4),
+  which only makes sense with a node-beam tyre.
+- **Failure order to verify (§4.4):** toe link bends (85 kN) → hub and arms
+  bend (129–155 kN) → wheel leaves (168 kN) → strut breaks (180 kN) → toe
+  link breaks (250 kN) → arms break (300 kN) → subframe leaves (400 kN per
+  beam).
+
+**Powertrain and services**
+
+| Part | Nodes | kg | Internal | Mounts to | Mount beams: k / c / deform / strength | Groups | Mark |
+|---|---|---|---|---|---|---|---|
+| Engine | 8 block corners + 2 (mount ears) | 150–190 (block nodes 18–22 kg) | 40 beams, box with all diagonals, 2e7 / – / 250 kN / FLT_MAX, deform group at ratio 0.001 | front subframe corners | 2 mounts × 3 BOUNDED: 32,000 / 600 / 20 kN / 90 kN | 2 | **[B]** |
+| Engine stops | – | – | – | firewall, rails, tower bases, radiator support, subframe | 40–50 SUPPORT: 1–3e6 / 150 / 20–50 kN / FLT_MAX, precompression 0.85–0.95 | – | **[B]** |
+| Transmission | 2 (case tail, one more for the frame) | 45 | 24 beams to the engine's rear face: 4.8e6 / 150 / 27 kN / FLT_MAX | tunnel nodes (C1, C3) | 1 mount × 9 BOUNDED: 1.4e5 / 2,700 / 5,000 / 160 kN | 1 | **[B]** (ETK: 1 heavy node) |
+| Driveshaft (if rear or all-wheel drive) | 2 light end nodes (0.5 kg) | 8 (in the ends' neighbours) | 1 beam | transmission tail, differential | 1 each end: budget / – / 1,500 / 3,500 | 1 | nodes **[+]** (ETK: one beam, a prop) |
+| Differential (if rear drive) | 3 at 14 kg | 42 | 3 beams | rear subframe | 24: 4.8e6 / 150 / 27 kN / **200 kN** | 1 | **[B]**; strength **[+]** |
+| Half-shafts | none (1 beam each) | – | – | differential or transmission → axle node | 1: no spring / – / 3,600 / 9,500 | 1 each | **[B]** |
+| Exhaust | 12–15 in a chain at 1.4 kg | 17–21 | chain with diagonals, 1.5e6 | E1, C1, tunnel; engine | 4 hanger groups × 4–16: 47,000 / 370 / 4,000 / 15 kN; 20–27 SUPPORT rests; 4 to the engine at 65 kN | 4 | **[B]** |
+| Fuel tank | 8, boxed, at 4.5–5.5 kg (fuel included) | 36–44 | 28 beams, soft: budget / – / 5,000 / FLT_MAX | floor rows 4–5, E1 | 26–30 straps: 30,000 / 500 / 5,000 / 35 kN | 1, passive | straps **[B]**; internal box **[+]** (weakness 9) |
+| Radiator and condenser | 4 at 1.4 kg | 5.6 | 6 beams | A3 | 12: 1e6 / 150 / 7,500 / **20 kN**, deform group at 0.05 (leak) | 1 | **[B]** 2 nodes unbreakable; 4 nodes and a break **[+]** |
+
+**Interior and glass**
+
+| Part | Nodes | kg | Mounts to | Mount beams | Groups | Mark |
+|---|---|---|---|---|---|---|
+| Front seat, each | 6–8 at 2.5–3 kg | 18–20 | floor rows 2–3 (4 feet) | 26: 2.8e5 / 38 / 6,000 / **30 kN** | 4 (one per foot) | **[B]** nodes and softness; break **[+]** |
+| Rear bench | 6–9 at 2.3 kg | 16–21 | floor row 5, bulkhead | 18–40: 2.8e5 / 38 / 6,000 / 30 kN | 2 | **[B]**; break **[+]** |
+| Instrument panel with cross-car beam and column | 6–8; the beam's ends at the A-pillar bases | 40–50 | B2, B1, tunnel top | 28–35: 4e6 / – / 22–42 kN / **60 kN** | 3 | mass **[B]**; a real cross beam and a break **[+]** (weakness 1) |
+| Console | 3–4 at 1.5 kg | 5 | tunnel top | 12, 10 kN | 1 | **[+]** |
+| Windscreen, rear screen | 1 centre node with the pane's mass (12 and 8 kg) | – | the aperture's shell nodes | 40–62 trigger beams across the aperture: 1.5e6 / 120 / 7,000–12,000, ratio 0.005–0.03; 5–10 % with strength 12–26 kN | deform group, shared break group | **[B]** ETK, CCF |
+| Door and quarter glass | 1 node (1.7 kg) each | – | the door's frame nodes | 12 trigger beams: ratio 0.02; 2 at 4,000 N | deform group and break group | **[B]** |
+
+Glass is visual only by the user's decision: when its group fires the pane's
+mesh switches to shattered. The trigger-beam pattern does exactly that and
+needs no fragment physics.
+
+**Closures and panels** keep the census's bands
+(`beamng-authoring-census.md`, Authoring rules), with two changes from this
+study:
+
+- **[B]** each closure and fender gets 1–3 **rigidifier nodes** 0.2–0.4 m
+  inside its surface, non-colliding, beamed to at least half its nodes with
+  beams that yield below the surface beams (§5.1). On our solid parts the
+  rigidifier sits on the inner frame, so it is a visible point of the part.
+- **[+]** our doors are closed boxes (the parts lab needs a free door to be
+  rigid and collidable on both faces): keep the 17-node box, and make sure
+  its inner-face nodes are the rigidifier row.
+- **[B]** bolt-on panels in several small groups: fender 4 groups of 5–6
+  beams at 12 kN; bumper cover 3 to the body and 2 to the fenders at 6–12 kN;
+  lamps 1 group of 12–16 at 15–26 kN (§5.2).
+- **[B]** SUPPORT: 7–11 % of the car's beams, all between parts, 36–46 % of
+  them precompressed at 0.85–0.95 (§3.6).
+
+### 10.6 Per-part target bands
+
+Node budget **[B]**: Σk/m per node within the band, checked on the assembled
+car (every beam at the node, any part). ω·h = h·√(Σk/m).
+
+| Part | Nodes | kg | Node kg p50 | Σk/m p50 (1e6 s⁻²) [ω·h] | k·L p50 (N) | ε_y p50 | ζ p50 | First mode, neighbours held (Hz) |
+|---|---|---|---|---|---|---|---|---|
+| Shell | 131 (118–138) | 430–500 | 3.0–4.0 | 7–9.5 [1.3–1.55] | 0.8–1.1e6 | 1.0–1.3 % (front 0.35–0.7 %, cabin 1–2.4 %) | 0.03–0.04 | free shell ≥ 12 **[B]** CCF; ≥ 20 **[+]** Vertex |
+| Door | 13–17 | 17–22 | 1.2–1.9 | 7–10.5 [1.3–1.6] | 0.4–1.0e6 | 1.3–1.6 % | 0.03–0.05 | 16–35; aim ≥ 30 |
+| Hood | 21–30 | 18–35 | 0.8–1.5 | 4.6–11.5 [1.1–1.7] | 2.2–4.7e5 | 1.5–5.5 % | 0.03–0.06 | 11–19; aim ≥ 12.5 |
+| Boot lid | 12–17 | 12–16 | 0.8–0.9 | 7–11 [1.3–1.65] | 2.2–5e5 | 2–5 % | 0.04–0.06 | 23–40; aim ≥ 26 |
+| Fender | 10–13 | 6.5–9 | 0.5–0.8 | 7.6–13 [1.4–1.8] | 1.5–4.3e5 | 1.4–4.6 % | 0.04–0.07 | 17–55; aim ≥ 40 |
+| Bumper cover | 19–28 | 9.5–18 | 0.5–0.7 | 3.4–6.2 [0.9–1.25] | 0.4–1.3e5 | 2.7–21 % | 0.07–0.33 | 9–24 |
+| Bumper beam | 10 | 6–8 | 0.6–0.8 | 7–9 | – | 1–2 % | 0.03 | 60–90 |
+| Subframe | 6–7 | 42–47 | 7 | 8–12 [1.4–1.7] | – | – | 0.03 | – |
+| Hub | 4 | 17–24 | 4–6 | 8–12 | – | – | – | – |
+| Wheel | 5 | 18–20 | 5 (axle) | 5.4–7.1 [1.15–1.35] | – | – | – | – |
+| Engine | 10 | 150–190 | 18–22 | 6.2–8.8 [1.25–1.5] | – | – | – | – |
+| Exhaust | 12–15 | 17–21 | 1.4 | 4–5 [1.0–1.1] | – | – | – | – |
+| Fuel tank | 8 | 36–44 | 4.5–5.5 | 0.02–0.2 for its straps | – | – | – | – |
+| Seat | 6–8 | 18–20 | 2.5–3 | 5–9 [1.1–1.5] | – | – | – | – |
+
+- **If the row cap stays at 1.0,** the reachable Σk/m is about 6.5–7.5e6
+  (ω·h 1.27–1.37) at BeamNG's damping, which is 75–80 % of the ETK's shell.
+  The mode targets then scale by √0.78 ≈ 0.88: door ≥ 30 Hz, hood ≥ 11 Hz, lid
+  ≥ 24 Hz, fender ≥ 37 Hz. **At the cars' own level (rows 1.1–1.6) the "aim"
+  column applies.** The choice is the user's (§7.1).
+- **Whole-car ω·h** (power iteration, `sedan_stiffness`): 1.6–1.9. Under 1.5
+  means stiffness was left unused; the cars are 1.80–1.90.
+- **Dynamic bar (the plan's exit criterion):** kerb wobble and settle at the
+  ETK's level measured side by side on the same wheels: 0.09–0.23 mm and
+  ≤ 0.6 s on raycast wheels; 1.4–4.2 mm on pressure wheels (§7.2).
+
+### 10.7 Lint rules to add
+
+Each is a check on the rigged car, with the measurement it comes from. "Hard"
+fails the build; "report" prints the number beside the band.
+
+| # | Rule | Band | Level | From |
+|---|---|---|---|---|
+| 1 | Shell node count | 110–140 | hard | §3.1 |
+| 2 | Shell nodes within 2 cm of their member's surface; none over 5 cm unless a declared rigidifier | ≥ 80 % / 0 | hard | §3.1 |
+| 3 | Every shell node is a corner of a non-flat tetrahedron of shell beams | all | hard | §3.1 |
+| 4 | Shell beams per node; neighbours per node (min) | 5.0–5.8; ≥ 5 | hard | §3.1 |
+| 5 | Beam-direction spread at every shell node | ≥ 0.02 | hard | §3.1 |
+| 6 | Skip beams / beams crossing the centre plane, share of shell beams | 12–28 % / 8–10 % | report | §3.1 |
+| 7 | Shell beams over 0.9 m through the cabin volume | ≤ 6 | hard | §3.1; W-construct |
+| 8 | No SUPPORT inside the shell; damping-only beams in the whole car | 0; ≤ 1 % of beams | hard | §3.1, §8 |
+| 9 | Node budget: Σk/m at every structural node | ≤ the cap's equivalent; p50 ≥ 6.5e6 | hard / report | §7.1 |
+| 10 | Whole-car ω·h (power iteration) | 1.6–1.95 | report; hard above 1.95 | §7.2 |
+| 11 | Mount nodes heavier than the shell median: nodes that subframe, strut, engine or transmission mounts land on | ≥ 1.3 × | hard | §3.3, §4.4 |
+| 12 | Crush grading: Σ deform of longitudinal beams by station rises nose → firewall; cabin ≥ 2 × the front's peak | monotone; ≥ 2 | hard | §3.4, §10.4 |
+| 13 | Front load path by height: low band's share / hood band's share of longitudinal yield ahead of s 0.2 | ≥ 55 % / ≤ 6 % | hard | §3.4 |
+| 14 | Yield strain by zone: front, cabin | 0.35–0.7 %; 1–2.4 % | report | §3.4 |
+| 15 | Shell beams with finite strength (glass triggers excepted) | ≤ 3 % | hard | §3.1 |
+| 16 | Each hub is held by exactly six named beams (or a listed limiter), all visible members; each wheel has one break group of 8 beams | 6; 1 × 8 | hard | §4.3, §10.5 |
+| 17 | Failure ladder: toe link deform < arm deform < wheel strength < strut strength < arm strength < subframe mount strength | ordered | hard | §4.4 |
+| 18 | Every part that owns nodes has a mount with finite strength in a named break group (the shell excepted); no group over 16 beams except subframe mounts | all | hard | §5.2; plan 2e |
+| 19 | SUPPORT share of beams; share precompressed; engine stops | 7–11 %; 36–46 %; ≥ 36 | report | §3.6 |
+| 20 | Each closure and fender has 1–3 off-surface nodes 0.2–0.4 m behind its skin, beamed to at least half its nodes | 1–3 | hard | §5.1; D-tutorial |
+| 21 | Mass shares by class | §10.1 bands | report | §2.2 |
+| 22 | Flexbody reach: vertex to third-nearest node of its part, median / worst | ≤ 0.40 / ≤ 0.60 m | report | §6.2 |
+| 23 | Every mesh binds to its own part's nodes only (shared hardware nodes excepted and listed) | all | hard | §6.1 |
+| 24 | Glass: each pane has a deform group of ≥ 12 beams, trigger ratio 0.005–0.05 | all | hard | §5.4 |
+
+Existing rules that this study confirms and leaves as they are: closure
+node counts and masses, hinge and latch groups, the collision skin's
+closure.
+
+### 10.8 How to accept it
+
+1. `vehicle_lint` with rules 1–24.
+2. `structure_dump` and `analyze.py` on the generated sedan's own JBeam beside
+   the ETK and the Vertex: the tables of §3.1, §3.4, §4.4 and §7.1 side by
+   side. (Add the sedan to `RUBBLE_CENSUS_CARS`; it is JBeam like the others.)
+3. `sedan_stiffness sedan etkk`: modes, ω·h, kerb wobble and settle against
+   §10.6.
+4. The crash scenes of `vehicle_compare` against
+   `crash-reference-targets.md`; head-on pitch for the nose lift.
+5. The parts lab and the press test (plan 2c, 2e) for each new part.
+
+---
+
+## 11. Glossary of JBeam fields
+
+What the documentation says, and what the five cars use. "Cars" are the four
+road cars unless the trailer is named. Rubble's implementation of each field:
+`jbeam-semantics-spec.md`.
+
+### Nodes
+
+| Field | Documentation [Doc] | Use in the five cars [Measured] |
+|---|---|---|
+| `nodeWeight` | kg; default 25 (D-nodes) | 11–18 distinct values on a shell; 0.25–28 kg overall; medians: car 1.2–2.0, shell 3–4, door 1.2–1.9, fender 0.5–0.8, engine block 12–28 |
+| `group` | one or more groups; used to bind flexbodies (D-nodes) | 61–88 groups per car; 21–24 % of nodes in two or more |
+| `collision` | default true (D-nodes) | on for 88–93 % of nodes; off for rigidifiers and some mounts |
+| `selfCollision` | default false (D-nodes) | on for 61–78 % (shells 73–92 %) |
+| `staticCollision` | follows `collision` (D-nodes) | set false on a handful of nodes |
+| `frictionCoef` | default 1 (D-nodes) | 0.5 on 55–87 % of nodes; 0.7–0.8 on 10–37 %; 1.0 on a few |
+| `nodeMaterial` | sound and particles only (D-nodes) | metal 68–72 %, plastic 23–30 %, a few glass, rubber, cloth |
+| `couplerTag`, `tag`, `couplerStrength`, `couplerRadius`, `couplerStartRadius`, `couplerLock`, `couplerLatchSpeed` | latch pairs; strength default FLT_MAX; lock radius 0.025 m, latch speed 0.3 m/s (D-couplers) | 2–7 coupler nodes per car: doors 35 kN, hood 2 × 30 kN, boot 40–50 kN, roof latches; radius 1.35, start radius 0.1, lock on; the trailer's hitch 1.5 MN |
+| `breakGroup` on a node | breaks a coupling for good (D-couplers) | on latch nodes, tied to the hinge groups |
+| `engineGroup` | `engine_block`, `radiator`, `engine_intake`, `fuel` (D-nodes) | block 4–8, radiator 2, intake 1–5, fuel 6–13 nodes |
+| `nodeOffset`, `nodeMove`, `nodeRotate` | slot-level transforms (D-nodes) | not examined (the loader applies them before the dump) |
+
+### Beams
+
+| Field | Documentation [Doc] | Use in the five cars [Measured] |
+|---|---|---|
+| `beamSpring` | N/m; default 4.3e6 (D-beams) | over 70 distinct values per car (ETK 72, Vertex 78); shell median 1.5–3e6; 2e5 (covers) to 2e7 (engine); 69–74 beams with 0 (§8) |
+| `beamDamp` | N·s/m; default 580 (D-beams) | about 40 distinct; 50–150 common; shell 120–140; ζ 0.03–0.04 on structure |
+| `beamDeform` | N; default 220,000 (D-beams) | 86–100 distinct (ETK, Vertex); shell median 10,000–14,000; front 4,000–13,500; cabin up to 65,000; front subframe mounts 157,000 |
+| `beamStrength` | N; default FLT_MAX (D-beams) | FLT_MAX on 57–63 % of beams (shell 97–99 %); finite values 3–1,240 kN in break groups |
+| `beamType` | NORMAL, SUPPORT, BOUNDED, ANISOTROPIC, PRESSURED, LBEAM, HYDRO (D-beams) | NORMAL 83–92 %, SUPPORT 6–15 %, BOUNDED 1.7–2.4 %; ANISOTROPIC only the ETK's soft top (1.2 %); no PRESSURED or LBEAM in the body (tyres generate them) |
+| `beamPrecompression` | spawn-length ratio; default 1 (D-beams) | ≠ 1 on 3–7 % of beams, 36–46 % of SUPPORT: 0.5–0.95; a few 1.01–1.1 (preloaded seals) |
+| `precompressionRange`, `beamPrecompressionTime` | metres; seconds of ramp (D-beams, D-issues) | range on 4 beams (suspension springs); time 0.5 on 6–16 beams (ETK, Vertex) |
+| `deformLimitExpansion` | cap on permanent stretch (D-beams); typical 1.05–1.1 (F-agenty-dle) | 26–35 % of beams, 39–53 % of shell beams; values 1.1 and 1.2 only; none on the trailer |
+| `deformLimit`, `deformLimitStress` | caps on compression set and on deform growth (D-beams) | not used |
+| `beamLongBound`, `beamShortBound` | fractions of length for BOUNDED; break extent for SUPPORT (D-bounded, D-support) | on SUPPORT mostly 2 or 4; larger (12–150) where a rest must never break |
+| `longBoundRange`, `shortBoundRange`, `boundZone`, `beamLimitSpring`, `beamLimitDamp` | metres; limit stiffness (D-bounded) | 4–6 % of beams: suspension travel, bump stops, mounts |
+| `beamDampFast`, `beamDampRebound`, `beamDampVelocitySplit` | damper curve (D-bounded) | the 4 dampers only |
+| `dampCutoffHz` | damping above a frequency; costly (D-beams) | 500 on 51–73 beams, 750 on 4–8 (ETK, Vertex) |
+| `breakGroup` | all members break together (D-beams) | 17–26 % of beams in 62–105 groups of 5–14 (median) |
+| `breakGroupType` | 1 = broken by the group, does not trigger it (D-beams) | 3–10 % of grouped beams |
+| `deformGroup` | fires material swaps and damage (D-beams) | 10–19 % of beams in 18–42 groups |
+| `deformationTriggerRatio` | fraction of length that fires the group; under 0.1 (D-beams) | 0.0001–0.1; glass 0.005–0.05; engine 0.001 |
+| `optional` | no error if a node is missing (D-beams) | 227–257 beams (ETK, Vertex): the beams between optional parts |
+| `disableMeshBreaking`, `disableTriangleBreaking` | keep mesh and triangles when the beam breaks (D-beams) | 78–115 and 466–480 beams (ETK, Vertex) |
+
+### Other sections
+
+| Field or section | Documentation [Doc] | Use in the five cars [Measured] |
+|---|---|---|
+| `triangles` | one-sided collision and aero surfaces; NORMALTYPE or NONCOLLIDABLE; `dragCoef`; `groundModel` (D-tri) | 508–611 per car, 25–46 NONCOLLIDABLE; 88–97 % of unibody shell nodes are on one |
+| `flexbodies` | `mesh`, `[group]`, `deformGroup`, `deformMaterialBase`, `deformMaterialDamaged` (D-flex) | 116–242 rows; 58–76 % name one group; 17–82 with a deform group |
+| `props` | rigid meshes on three nodes, driven by a function (D-props) | 13–30: steering wheel, gauge needles, lamp lights, the driveshaft |
+| `slots` / `slots2` | part tree; `coreSlot`; `slots2` adds allow and deny lists (D-slots) | 67–158 parts per configuration; the ETK uses `slots` with a few `slots2`, the trailer `slots2` only |
+| `torsionbars` | four nodes; N·m/rad; cannot break alone (D-torsion, D-tips) | 8–41 per car: anti-roll bars, wheel alignment, 4–20 across shell floors |
+| `slidenodes`, `rails` | a node held on a line of nodes (D-rails) | 2–10 slidenodes (steering rack first); 32 on the trailer |
+| `hydros` | beams driven by an input (D-hydros) | 2–10 (steering first) |
+| `pressureWheels` | hub and tyre generated around two axle nodes; reaction nodes; `axleBeams` (D-wheels) | 4 (trailer 10); on the ETK 16 rays, hub nodes 0.40–0.42 kg, `hubcapBreakGroup` named, caps disabled |
+| `powertrain` | no reference page found | 12 devices on the ETK (engine, clutch, gearbox, shafts, differential, torsion reactor) |
+| `energyStorage` | fuel capacity; `fuel` nodes share the mass (D-energy) | tank nodes 6–13 |
+| `glowMap` | material swap from electrics (D-glow) | no rows found by the dump on the ETK or the trailer; not examined further |
+| `refNodes` | the vehicle's axes (D-refnodes) | not examined |
+
+---
+
+## 12. What we still do not know
+
+1. **BeamNG's integrator and its exact stability bound.** No public source
+   names them. We infer the bound from the cars (ω·h 1.80–1.90).
+2. **How BeamNG's flexbody binding weighs its 3–4 nodes** and whether there is
+   a maximum distance. The page gives the roles only.
+3. **How these cars behave in BeamNG itself.** Every dynamic number here is
+   from Rubble's CPU reference. The Vertex bending on a kerb is our solver
+   with BeamNG content, not a property of the car.
+4. **Node-to-triangle clearance at spawn** (the 3 cm rule) on the five cars:
+   not measured.
+5. **Official cars.** The corpus is five community mods, all recent and well
+   made, but not BeamNG's own. The BX in the earlier census agreed with them
+   per part.
+6. **Which values are deliberate.** We see 49–77 beam settings per shell and
+   cannot tell tuning from history. The rear subframe at a tenth of the
+   front's strength (weakness 15) may be either.
+7. **Self-collision groups and the cost model** (the 10 cm and 50 cm rules)
+   against our contact: not examined.
+8. **The old wiki's remaining pages** (JBeam reference, PressureWheels,
+   Slidenodes) and the BeamNG.tech technical PDF (over the fetch limit) were
+   not read.
+9. **Real section sizes** in §10.2 are typical values from general practice,
+   not from a source read for this study; the generator's key lines should
+   set them.
+10. **Rim deformation** on a raycast wheel (§10.5): 5 rigid nodes, or a ring
+    that co-rotates. Needs a design decision and a measurement.
+11. **The pole lane** (weakness 4): whether light contact rows on sills and
+    roof rails fix it without costing stiffness. To be measured on the new
+    shell.
+12. **The row cap** (§7.1): at 1.0 the shell reaches about 78 % of the ETK's
+    stiffness-to-mass. Whether that meets "ETK level, side by side" is not
+    known until measured.
+13. **Whether a six-beam, exactly held hub is stable enough** under raycast
+    wheel loads without the ETK's extra limiters.
+
+---
+
+## Appendix A. Sources read
+
+All read on 2026-11-12. `D` = `https://documentation.beamng.com/modding/vehicle`.
+Web Archive pages give the snapshot in the URL. Nothing here is source code.
+
+| Key | Source | What it holds |
+|---|---|---|
+| D-intro | `D/intro_jbeam/` | The model: nodes, beams, spring, damp, deform, strength; typical values; the 6 kg / 7 kg instability picture |
+| D-tips | `D/intro_jbeam/jbeamtips/` | Triangle thickness 2.5 cm, 3 cm clearance, self-collision groups, collision cost, slidenode edge collision, damping-only beams, the stress check, dummy beams for rails |
+| D-issues | `D/intro_jbeam/common_issues/` | Instability grades, collapsing panels and rigidifiers, precompression time, flexbody errors, property leaks |
+| D-debug | `D/intro_jbeam/debugtools/` | Debug views; roof crush at 2 × IIHS; self-collision detector |
+| D-slots | `D/intro_jbeam/partslotsystem/`, `D/sections/slots/`, `D/sections/slots/slots2/` | Part tree, `slotType`, `coreSlot`, `slots2` |
+| D-nodes | `D/sections/nodes/` | Every node field and default; collision distances; engine groups |
+| D-couplers | `D/sections/nodes/couplers/` | Coupler fields, defaults, hood-latch and hitch examples |
+| D-beams | `D/sections/beams/` | Every beam field and default; break and deform groups; mesh breaking |
+| D-bounded | `D/sections/beams/bounded/` | Bounded beams, ranges, limit spring and damp, damper curve; cost note |
+| D-support | `D/sections/beams/support/` | Support beams, precompression, long bound; steering-limiter example |
+| D-aniso, D-pressured, D-lbeam | `D/sections/beams/anisotropic/`, `…/pressured/`, `…/l-beam/` | The other beam types (tyres, ropes, soft tops, air springs) |
+| D-tri | `D/sections/triangles/`, `…/triangles/quads/` | Triangles, winding, types, drag, pressure groups |
+| D-flex | `D/sections/flexbodies/` | Binding to groups; 3–4 nodes per vertex; errors; deform materials |
+| D-props | `D/sections/props/` | Props on three nodes |
+| D-torsion | `D/sections/torsionbars/`, `D/sections/torsionhydros/` | Torsion bars and torsion actuators; examples |
+| D-rails | `D/sections/rails/` | Rails and slidenodes; steering rack recipe |
+| D-hydros | `D/sections/hydros/` | Hydros; steering example |
+| D-wheels | `D/sections/wheels/` | pressureWheels fields, reaction nodes, axle beams, ray counts |
+| D-rotators | `D/sections/rotators/` | Reaction-node rules: far apart, heavy, non-collinear |
+| D-energy | `D/sections/energystorage/`, `D/sections/nodes/fire/`, `D/sections/nodes/exhaust/` | Fuel nodes, rupture beams, exhaust node flags |
+| D-glow | `D/sections/glowmaps/` | Material swap from electrics |
+| D-vars | `D/sections/variables/`, `D/sections/components/` | Tuning variables driving node positions and beam values; shared keys between parts |
+| D-refnodes | `D/sections/refnodes/` | The reference axes |
+| D-tutorial | `D/tutorials/basic_car_tutorial/` | **The official build guide:** 3–4 nodes across, weight budget, tripod rule, rigidifiers, frame and mount values, hinges and latches, coilover recipe |
+| D-model | `D/vehicle_modeling/` | Mesh rules: origin, detachable parts as separate meshes |
+| D-split | `D/vehicle-art/final-mesh-splitting/` | What to split a car's model into |
+| D-glass | `D/vehicle-art/texturing/glass-damage-textures/` | Glass damage is a binary material swap |
+| D-modsupport | `https://documentation.beamng.com/modding/mod-support/` | Repository rules; procedural only |
+| D-tight | `https://documentation.beamng.com/beamng_tech/tools/cosimulationeditor/tight_coupling/` | 0.5 ms physics step; own thread |
+| D-args | `https://documentation.beamng.com/beamng_tech/arguments_and_settings/` | 2,000 steps per second default |
+| W-construct | `https://web.archive.org/web/20170611113451/http://wiki.beamng.com/Construction_Guide` | **The best single authoring source:** lattice on the mesh, double-grid floor, deform hierarchy, no cabin spans, engine cube, suspension, panels, support beams |
+| W-theory | `https://web.archive.org/web/20211220124859/https://wiki.beamng.com/JBeam_Physics_Theory` | The model and typical values (as D-intro) |
+| W-problems | `https://web.archive.org/web/20210827030712/https://wiki.beamng.com/Vehicle_Modding_Common_Problems` | Instability causes; mesh spikes |
+| W-intro | `https://web.archive.org/web/20220125134611/https://wiki.beamng.com/Introduction_to_Vehicle_Creation` | Starter values; "about a hundred nodes"; axle layout |
+| W-beams | `https://web.archive.org/web/20161127173956/http://wiki.beamng.com/Beams` | Material character; strength against deform |
+| W-tri | `https://web.archive.org/web/20240805113753/https://wiki.beamng.com/Collision_Triangles` | Triangle winding; drag coefficients |
+| W-engine | `https://web.archive.org/web/20211016013251/https://wiki.beamng.com/CombustionEngine`, `https://web.archive.org/web/20220103002018/https://wiki.beamng.com/Powertrain` | Torque reaction nodes; device tree; `breakTriggerBeam` |
+| W-flex | `https://web.archive.org/web/20170613054113/http://wiki.beamng.com/Flexbodies` | Groups; mesh breaking |
+| W-deform | `https://web.archive.org/web/20161128061438/http://wiki.beamng.com/DeformGroups` | Windscreen trigger ratio 0.03; one material per swapped mesh |
+| B-physics | `https://www.beamng.com/game/about/physics/` | The public description of the model |
+| B-tire21 | `https://beamng.com/game/news/blog/tire-physics-changes/` | Tyres are node-beam; rolling resistance history |
+| B-tire15 | `https://www.beamng.com/game/news/blog/a-look-at-tire-development-in-beamng-part-2/` | pressureWheels; 16 rays |
+| F-goosah | `https://www.beamng.com/goto/post?id=898127` | **Staff: springs are very close to the maximum; the limit is stiffness to mass; length does not matter** |
+| F-agenty-w | `https://www.beamng.com/goto/post?id=1511689` | Staff: equal frame node weights except shock mounts |
+| F-agenty-dle | `https://www.beamng.com/posts/1313359/` | Staff: `deformLimitExpansion` 1.05–1.1 |
+| F-rate | `https://www.beamng.com/threads/is-there-a-way-to-turn-up-physics.51381/` | Developer: the rate is compiled in |
+| G-blender | `https://github.com/BeamNG/Blender-JBeam-Editor/blob/main/docs/user/user_docs.md` | The editor's user manual (documentation, not code): import, export; no structural guidance |
+| R-concepts | `https://docs.rigsofrods.org/vehicle-creation/vehicle-concepts/` | Rigs of Rods: the same model |
+| R-truck | `https://docs.rigsofrods.org/vehicle-creation/fileformat-truck/` | Its defaults, minimum mass, detacher groups, flexbody `forset`, contacters |
+| R-weight | `https://docs.rigsofrods.org/vehicle-creation/weight-tuning/` | Its method for curing spawn explosions |
+| R-panels | `https://docs.rigsofrods.org/vehicle-creation/flexbody-deforming-detaching-parts/` | Hood as a 4 × 4 grid with stabiliser nodes 0.3 m off; hinge and latch |
+| R-wheels | `https://docs.rigsofrods.org/vehicle-creation/wheels-axles-steering/`, `…/suspension/` | Ray counts; reaction arm node |
+| P-icse | `inspiration/research-ror-beamng/gambi-icse-seip-softbody.pdf` (local) | The BeamNG authors' paper: 2 kHz loop, beam model, node-triangle collision, 714-node example, one thread per vehicle |
+| P-itec | `https://air.unipr.it/handle/11381/2870805` | Abstract only: a soft-body vehicle model validated against multibody |
+
+Not found or not readable: a `powertrain` reference page (404); a hubWheels
+page; the live old wiki (redirects); the BeamNG.tech technical PDF (too
+large); several blog posts with no text in the fetch.
+
+## Appendix B. Reproducing every number
+
+Corpus: the five unpacked mods under `~/Downloads/jbeams/` (override with
+`JBEAMS`). Raw outputs go to `~/Development/rubble-artifacts/beamng-structure-study/`
+(override with `OUT`); they hold per-car detail and are not committed.
+
+```bash
+# Everything in §2–§6 and §7.1: dumps the cars, then writes <car>.<section>.md
+engine/tools/beamng-structure-study/run.sh
+
+# The cross-car tables
+python3 -I engine/tools/beamng-structure-study/analyze.py \
+  ~/Development/rubble-artifacts/beamng-structure-study/dump \
+  etkk_kc6 etkk_kr6 ccf vertex fullsuv boathauler --only summary
+
+# One section of one car: parts, attach, body, grade, brace, mech, wheelpath, glass, flex, stab, types
+python3 -I engine/tools/beamng-structure-study/analyze.py <dump dir> etkk_kc6 --only wheelpath
+
+# The dump alone (opt-in test; skipped unless both variables are set)
+cd engine && RUBBLE_STRUCTURE_OUT=<dir> \
+  RUBBLE_CENSUS_CARS="etkk_kc6=$HOME/Downloads/jbeams/etkk_lucasbe/vehicles,etkk,kc6.pc" \
+  cargo test --release -p engine-softbody --test authoring_census -- --ignored --nocapture structure_dump
+
+# §7.2: modes, whole-car ω·h, spawn, half-sine loads and the bump (CPU, about 4 minutes for four cars).
+# RUBBLE_COMPARE_MODS is a folder of links: <label> -> the mod's vehicles/ folder.
+cd engine && RUBBLE_COMPARE_MODS=<mods> cargo run --release -p engine-softbody --example sedan_stiffness -- \
+  etkk=etkk,kc6.pc ccf=ccf,f4_sport_M.pc vertex=gavril_vertex,gavril_vertex.pc fullsuv=fullsuv,mid-sport.pc
+```
+
+| Section | Command output |
+|---|---|
+| §2.1, §2.2, §3.1, §3.4 (table), §4.1, §4.4 (table), §5.2, §5.4, §6, §7.1 | `--only summary` |
+| §2.3 | `etkk_kc6.parts.md`, `etkk_kc6.attach.md`, `etkk_kc6.mech.md` |
+| §3.2, §3.3 | `<car>.body.md` |
+| §3.4 beam classes, §3.5, §3.6 | `<car>.grade.md`, `<car>.brace.md` |
+| §4.2, §4.3 | `etkk_kc6.mech.md`, `etkk_kc6.wheelpath.md`, `etkk_kc6.attach.md` |
+| §5.1 (depth, non-colliding nodes) | `<car>.panels.md` |
+| §3.4 (load path by height), centre of mass | `<car>.height.md` |
+| §2.1 (parts, break groups, slot depth), §3.6 and §4.2 (engine stops), §8 (beams with no spring) | `<car>.counts.md` |
+| §7.2 | `sedan_stiffness` |
+| §11 | `<car>.types.md` |
+
+Two readings are not from these tools and are cited where used: the ETK's
+wheel options (ray count, hub node weight; read from its wheel files' rows as
+data) and the crash-scene numbers (`etkk-audit.md`).
