@@ -432,3 +432,69 @@ fn an_unbreakable_pulling_stop_on_a_detachable_part_fails_tether() {
     let f = lint(&cube_with_panel(breakable), None, &expect());
     assert_eq!(rule(&f, "tether"), Level::Pass);
 }
+
+/// The sound cube with a second part: a closed box (its own collision
+/// triangles, its own self-collision group) bolted beside it, and one of the
+/// cube's contacter nodes moved by `shift` along x toward and into that box.
+fn cube_and_box(shift: f32) -> SoftVehicleDesc {
+    let mut d = cube(1e5);
+    for n in d.nodes.iter_mut() {
+        n.collision = true;
+        n.self_collision = true;
+        n.self_group = 1;
+    }
+    // The box: x 1.5 to 2.5, the cube's size.
+    for i in 0..8 {
+        let p = [1.5 + (i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32];
+        d.nodes.push(SoftNode {
+            name: format!("b{i}"),
+            position: p,
+            mass: 10.0,
+            collision: true,
+            self_collision: true,
+            self_group: 2,
+            ..Default::default()
+        });
+    }
+    let beam = |a: u32, b: u32| SoftBeam {
+        a,
+        b,
+        kind: BeamKind::Normal,
+        spring: 1e5,
+        damp: 10.0,
+        deform: 1e4,
+        strength: f32::INFINITY,
+        ..Default::default()
+    };
+    for a in 8..16u32 {
+        for b in a + 1..16 {
+            d.beams.push(beam(a, b));
+        }
+        d.beams.push(beam(a - 8, a));
+    }
+    for (ax, s) in [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)] {
+        let c: Vec<u32> = (8..16u32).filter(|i| ((i - 8) >> ax) & 1 == s).collect();
+        d.triangles.push(SoftTriangle { nodes: [c[0], c[1], c[3]], ..Default::default() });
+        d.triangles.push(SoftTriangle { nodes: [c[0], c[3], c[2]], ..Default::default() });
+    }
+    d.parts.push(SoftPart { name: "test_box".into(), nodes: (8..16).collect() });
+    // The cube's node 7 (1, 1, 1) leans toward the box.
+    d.nodes[7].position = [1.0 + shift, 0.6, 0.6];
+    d
+}
+
+#[test]
+fn a_node_inside_another_parts_solid_fails_rest_penetration() {
+    use engine_softbody::authoring::lint::rest_penetration;
+    // 0.3 m short of the box: clear.
+    let f = rest_penetration(&cube_and_box(0.2));
+    assert_eq!(f.level, Level::Pass, "{f:?}");
+    // 0.3 m inside it.
+    let f = rest_penetration(&cube_and_box(0.8));
+    assert!(f.hard && f.level == Level::Fail, "{f:?}");
+    assert!(f.offenders.iter().any(|o| o.contains("n7")), "{f:?}");
+    // 1 cm outside its face: not inside, but in the contact range, where the
+    // solver never collides the pair: reported, not failed.
+    let f = rest_penetration(&cube_and_box(0.49));
+    assert_eq!(f.level, Level::Warn, "{f:?}");
+}
