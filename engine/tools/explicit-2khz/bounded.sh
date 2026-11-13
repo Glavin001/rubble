@@ -2,14 +2,17 @@
 # Runs a GPU job with a hard kill timer, holding the machine's GPU lock:
 #   bounded.sh <seconds> <program> [args...]
 # The lock is engine-webgpu's (`hold_gpu_lock`): an exclusive flock on
-# $RUBBLE_GPU_LOCK (default ~/.rubble/gpu.lock). This wrapper waits for it first (the
+# ~/.rubble/gpu.lock (a $RUBBLE_GPU_LOCK other than 0 or 1 is the lock file's path). This wrapper waits for it first (the
 # wait does not count against the timer), holds it for the whole run and runs the
 # program with RUBBLE_GPU_LOCK=0 (it must not wait on the lock its parent holds). The
 # timer then kills the program when it runs out (at most 20 minutes).
 secs="$1"
 shift
 [ "$secs" -le 1200 ] || secs=1200
-lock="${RUBBLE_GPU_LOCK:-$HOME/.rubble/gpu.lock}"
+case "${RUBBLE_GPU_LOCK:-}" in
+  ""|0|1) lock="$HOME/.rubble/gpu.lock" ;;
+  *) lock="$RUBBLE_GPU_LOCK" ;;
+esac
 mkdir -p "$(dirname "$lock")"
 exec perl -e '
   use Fcntl qw(:flock);

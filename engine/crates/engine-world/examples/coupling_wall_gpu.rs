@@ -11,8 +11,8 @@
 //! - CW_HZ: World steps per second (60, 120, 240; default 60), CW_KMH (50), CW_SECS (1.0),
 //!   CW_RUNUP (m from the nose to the wall at spawn, default 1.0).
 //!
-//! Run as the one GPU job: `engine/scripts/with-gpu-lock.py --limit 300 -- env
-//! RUBBLE_GPU_LOCK=0 target/release/examples/coupling_wall_gpu`.
+//! Run as the one GPU job: `engine/scripts/with-gpu-lock.py --limit 300 --
+//! target/release/examples/coupling_wall_gpu`.
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, JbeamWheels};
 use glam::{Quat, Vec3};
 use rubble::brick_ring_drive::{ring_coupling, ring_world_def};

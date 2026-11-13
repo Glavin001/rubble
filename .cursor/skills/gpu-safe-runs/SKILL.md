@@ -20,12 +20,12 @@ On macOS, Metal cannot abort a kernel that is already running. A runaway loop ke
 3. **Then the real run.**
 
 Rules for every run:
-- **One GPU job on the machine at a time.** Native binaries take `~/.rubble/gpu.lock` via `hold_gpu_lock()` (override the path with `RUBBLE_GPU_LOCK`; `RUBBLE_GPU_LOCK=0` turns it off).
-- **Wrap everything else,** including headless Chrome and GPU cargo tests:
+- **One GPU job on the machine at a time.** Anything cargo runs from inside the repo takes `~/.rubble/gpu.lock` via `hold_gpu_lock()`: `.cargo/config.toml` sets `RUBBLE_GPU_LOCK=1` (`0` turns it off; any other value is the lock file's path). The library takes no lock when the variable is unset, so a binary started directly (`target/release/...`), a game or the Unreal plugin does not: wrap those.
+- **Wrap every GPU run,** including headless Chrome and GPU cargo tests:
   ```bash
-  python3 engine/scripts/with-gpu-lock.py --limit 900 -- env RUBBLE_GPU_LOCK=0 cargo test -p engine-world --release --test explicit_vehicles
+  python3 engine/scripts/with-gpu-lock.py --limit 900 -- cargo test -p engine-world --release --test explicit_vehicles
   ```
-  Set `RUBBLE_GPU_LOCK=0` inside the wrapper, or a binary that takes the lock itself deadlocks waiting on yours.
+  The wrapper holds the lock and runs its command with `RUBBLE_GPU_LOCK=0`, so the command does not wait on the wrapper's own lock.
 - **Hard kill timer on every run, 10–20 minutes at most.** The wrapper kills the whole process group.
 - **Never `pgrep -f`/`pkill -f`:** it matches unrelated processes. Wait on PIDs.
 - **Benchmark one thing at a time.** Two GPU jobs make both timings meaningless.

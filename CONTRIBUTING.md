@@ -55,6 +55,13 @@ the cross-engine review it comes from and the phase plan are in
   cargo test --release -p engine-world -p engine-ffi -- --test-threads=1
   ```
 
+  Inside this repo cargo also sets `RUBBLE_GPU_LOCK=1` (`.cargo/config.toml`): each
+  native process it starts waits for `~/.rubble/gpu.lock` before its first default
+  device, so two GPU jobs never overlap (`RUBBLE_GPU_LOCK=0` turns that off). The
+  library itself takes no lock when the variable is unset; applications built on it
+  are not affected. `engine/scripts/with-gpu-lock.py --limit <s> -- <command>` holds
+  the same lock around any command and kills it at the time limit.
+
 - **The C header is generated.** After changing the ABI, regenerate
   `include/rubble.h` and commit it; `tests/header.rs` fails when it is stale:
 

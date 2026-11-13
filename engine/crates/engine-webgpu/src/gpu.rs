@@ -647,12 +647,19 @@ fn scratch_words(s: &[u32; 64]) -> [u32; 64] {
     w
 }
 
-/// One GPU job on the machine at a time: before its first native device, a process
-/// takes an exclusive lock on `~/.rubble/gpu.lock` (`RUBBLE_GPU_LOCK` overrides the
-/// path; `RUBBLE_GPU_LOCK=0` turns it off) and holds it until it exits, waiting for
-/// any other process that holds it. Two jobs sharing the GPU made runaway kernels
-/// hard to trace and hung submissions pile up; a job that waits here costs nothing.
-/// Devices of one process share the lock (tests in parallel threads).
+/// One GPU job on the machine at a time, for this repo's own development runs: with
+/// `RUBBLE_GPU_LOCK=1` (or a lock file's path) in the environment, a process takes an
+/// exclusive lock on `~/.rubble/gpu.lock` (or that path) before its first default
+/// device and holds it until it exits, waiting for any other process that holds it.
+/// Two jobs sharing the GPU made runaway kernels hard to trace and hung submissions
+/// pile up; a job that waits here costs nothing. Devices of one process share the lock
+/// (tests in parallel threads).
+///
+/// Off unless asked: a library user (a game, `engine-ffi`, the Unreal plugin) sets
+/// nothing and takes no lock, so any number of processes run side by side. The repo
+/// opts in for everything cargo runs from inside it (`.cargo/config.toml` `[env]`);
+/// `engine/scripts/with-gpu-lock.py` holds the lock itself and gives its command
+/// `RUBBLE_GPU_LOCK=0`.
 pub fn hold_gpu_lock() {
     use std::sync::OnceLock;
     static LOCK: OnceLock<Option<std::fs::File>> = OnceLock::new();
@@ -664,12 +671,13 @@ pub fn hold_gpu_lock() {
 }
 
 /// The lock file a process takes before its first default device, from the value of
-/// `RUBBLE_GPU_LOCK` and of `HOME`; `None` is no lock.
+/// `RUBBLE_GPU_LOCK` and of `HOME`; `None` is no lock (unset, empty or `0`). `1` is
+/// `$HOME/.rubble/gpu.lock`; anything else is the lock file's path.
 pub fn device_gpu_lock_path(env: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
     match env {
-        Some("0") => None,
-        Some(v) if !v.is_empty() => Some(std::path::PathBuf::from(v)),
-        _ => Some(std::path::PathBuf::from(home?).join(".rubble/gpu.lock")),
+        None | Some("") | Some("0") => None,
+        Some("1") => Some(std::path::PathBuf::from(home?).join(".rubble/gpu.lock")),
+        Some(v) => Some(std::path::PathBuf::from(v)),
     }
 }
 

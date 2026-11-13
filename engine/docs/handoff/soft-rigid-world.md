@@ -82,7 +82,7 @@ Where the vehicle time goes:
   - a static census test (`explicit_loop_cap`) fails CI on an uncapped loop.
 - **Process rules:**
   - run the CPU reference first, then a tiny GPU run with a low budget, then the real run;
-  - one GPU job on the machine at a time, through `~/.rubble/gpu.lock`. Native binaries take it via `hold_gpu_lock()`; wrap anything else with `engine/scripts/with-gpu-lock.py`. Set `RUBBLE_GPU_LOCK=0` in the child to avoid deadlocking on your own wrapper.
+  - one GPU job on the machine at a time, through `~/.rubble/gpu.lock`. Cargo runs inside the repo take it via `hold_gpu_lock()` (`.cargo/config.toml` sets `RUBBLE_GPU_LOCK=1`; the library takes no lock when it is unset, so games and the Unreal plugin are not affected); wrap everything with `engine/scripts/with-gpu-lock.py`, which holds the lock, runs its command with `RUBBLE_GPU_LOCK=0` and kills it at the time limit.
 
 ### Chrome / WebGPU is stricter than native wgpu
 - **Barriers need uniform control flow (Tint).** A branch on a per-lane value before `workgroupBarrier()` fails to compile. Broadcast through workgroup memory with `workgroupUniformLoad`. `uniformize_workgroup_lanes` in `engine-webgpu/src/lib.rs` rewrites the `gsUniform*` names; add new names to its `NAMES`. Check pages with `softbody-check.mjs`.

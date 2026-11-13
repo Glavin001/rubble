@@ -1,0 +1,9 @@
+# Development runs in this repo take the machine's GPU lock: every native process cargo
+# starts from inside it (tests, benches, bins, examples) waits for ~/.rubble/gpu.lock
+# before its first default device, so one GPU job runs at a time
+# (engine-webgpu `hold_gpu_lock`). The library itself takes no lock unless this is set:
+# games, engine-ffi and the Unreal plugin are not affected. A value already in the
+# environment wins (`RUBBLE_GPU_LOCK=0` turns it off; with-gpu-lock.py sets that for the
+# command it runs under its own hold of the lock).
+[env]
+RUBBLE_GPU_LOCK = "1"
