@@ -1012,6 +1012,13 @@ fn main() {
         let spec: CarSpec = match name.as_str() {
             "sedan1" => serde_json::from_value(serde_json::json!({"name": "sedan1", "style": "sedan1"})).unwrap(),
             "etkk" => serde_json::from_value(serde_json::json!({"name": "etkk", "mod": "etkk", "vehicle": "etkk", "pc": "kr6.pc"})).unwrap(),
+            // `label=vehicle,config.pc`: any JBeam vehicle under `<mods>/<label>/`
+            // (`RUBBLE_COMPARE_MODS` sets the mods folder), e.g. `ccf=ccf,f4_sport_M.pc`.
+            n if n.contains('=') => {
+                let (label, rest) = n.split_once('=').unwrap();
+                let (vehicle, pc) = rest.split_once(',').unwrap_or((rest, ""));
+                serde_json::from_value(serde_json::json!({"name": label, "mod": label, "vehicle": vehicle, "pc": pc})).unwrap()
+            }
             n => serde_json::from_value(serde_json::json!({"name": n, "mod": n, "vehicle": n, "pc": format!("{n}.pc")})).unwrap(),
         };
         let t0 = std::time::Instant::now();
