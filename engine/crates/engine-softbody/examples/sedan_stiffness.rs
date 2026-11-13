@@ -298,6 +298,35 @@ pub fn modes(
                         .join(", ")
                 );
             }
+            // MODE_BEAMS=1: the springs that hold each mode (share of its strain energy).
+            if f >= 1.0 && std::env::var("MODE_BEAMS").is_ok() {
+                let names = NAMES.lock().unwrap();
+                let u = |i: usize| -> DVec3 {
+                    let k = at[i];
+                    if k == usize::MAX {
+                        DVec3::ZERO
+                    } else {
+                        DVec3::new(shape[3 * k], shape[3 * k + 1], shape[3 * k + 2]) / ms[3 * k]
+                    }
+                };
+                let mut v: Vec<(f64, usize)> = springs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, sp)| at[sp.a] != usize::MAX || at[sp.b] != usize::MAX)
+                    .filter(|(_, sp)| held || (at[sp.a] != usize::MAX && at[sp.b] != usize::MAX))
+                    .map(|(j, sp)| {
+                        let d = u(sp.a) - u(sp.b);
+                        (sp.k * if sp.iso { d.length_squared() } else { sp.d.dot(d).powi(2) }, j)
+                    })
+                    .collect();
+                let tot: f64 = v.iter().map(|x| x.0).sum::<f64>().max(1e-300);
+                v.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let nm = |i: usize| names.get(i).map_or("?", |s| s.as_str());
+                eprintln!(
+                    "  mode {f:.1} Hz springs: {}",
+                    v.iter().take(10).map(|&(e, j)| format!("{}-{} {:.2} (k {:.1e})", nm(springs[j].a), nm(springs[j].b), e / tot, springs[j].k)).collect::<Vec<_>>().join(", ")
+                );
+            }
             let mut out: Vec<f64> = sh.into_iter().map(|v| v / t).collect();
             out.push(pr);
             (f, out)
@@ -720,6 +749,12 @@ pub struct Series {
     pub vis: Vec<Vec<f64>>,
     /// Internal kinetic energy (J) every 10 ms, and the time.
     pub ke: Vec<f64>,
+    /// Per node: its largest window amplitude about the body's fit (m), and
+    /// the window (0.1 s) it fell in.
+    pub node_peak: Vec<(f64, usize)>,
+    /// Per node: its amplitude about the body's fit in window `KERB_AT`
+    /// (default 15: 1.5-1.6 s).
+    pub node_late: Vec<f64>,
 }
 
 fn internal_ke(s: &ExplicitBeams, ids: &[u32]) -> f64 {
@@ -805,7 +840,11 @@ pub fn run(
         body: vec![Vec::new(); nc],
         vis: vec![Vec::new(); nc],
         ke: Vec::new(),
+        node_peak: vec![(0.0, 0); rest.len()],
+        node_late: vec![0.0; rest.len()],
     };
+    let late_at = std::env::var("KERB_AT").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(15);
+    let mut w_node: Vec<Vec<Vec3>> = vec![Vec::new(); s.nodes.len()];
     let mut w_own: Vec<Vec<Win>> = sets
         .cats
         .iter()
@@ -843,6 +882,9 @@ pub fn run(
         if k % 2 == 1 {
             let now: Vec<Vec3> = s.nodes.iter().map(|n| n.pos).collect();
             let fb = rigid_fit(&rest, &now, &sets.body);
+            for (i, p) in now.iter().enumerate() {
+                w_node[i].push(fb.to_rest(*p));
+            }
             for (c, parts) in sets.cats.iter().enumerate() {
                 for (pi, (_, ids)) in parts.iter().enumerate() {
                     let fo = rigid_fit(&rest, &now, ids);
@@ -887,6 +929,17 @@ pub fn run(
             out.ke.push(internal_ke(s, &sets.nontyre));
         }
         if k % 200 == 199 {
+            for (i, v) in w_node.iter_mut().enumerate() {
+                let m = v.iter().map(|p| p.as_dvec3()).sum::<DVec3>() / v.len().max(1) as f64;
+                let a = (2.0 * v.iter().map(|d| (d.as_dvec3() - m).length_squared()).sum::<f64>() / v.len().max(1) as f64).sqrt();
+                if a > out.node_peak[i].0 {
+                    out.node_peak[i] = (a, k / 200);
+                }
+                if k / 200 == late_at {
+                    out.node_late[i] = a;
+                }
+                v.clear();
+            }
             for c in 0..nc {
                 let n: usize = w_own[c].len();
                 if n == 0 {
@@ -1286,6 +1339,14 @@ fn main() {
                     println!("| {pname} | {} | {:.1} | {} | {} | {sf:.1}, {sz:.3}, {sd:.0}, {sa:.2} |", free.len(), kg, zero, el.join(", "));
                 }
             }
+            // `PART_MODES=text`: the same for every other part whose name has it.
+            if let Ok(pat) = std::env::var("PART_MODES") {
+                for (pname, ids) in car.parts.iter().filter(|(p, _)| p.contains(&pat)) {
+                    let free: Vec<usize> = ids.iter().map(|&i| i as usize).collect();
+                    let m = modes(&mass, &sp, &free, true, 6, &label, CATS.len() + 1);
+                    println!("| {pname} | {} | | | {} |", free.len(), m.iter().map(|x| format!("{:.1}", x.0)).collect::<Vec<_>>().join(", "));
+                }
+            }
             // Body shell free-free.
             for (pname, ids) in &cats[0] {
                 let free: Vec<usize> = ids.iter().map(|&i| i as usize).collect();
@@ -1350,6 +1411,22 @@ fn main() {
         let zero = |_: f32| Vec3::ZERO;
         // (a) Spawn and settle 4 s.
         let mut sp = spawn(&car);
+        // A diagnostic, never a result: `SUSP_SCALE=k,c` scales the raycast
+        // wheels' spring and damper, to see how much of a ripple is the
+        // suspension's input and how much the body's stiffness.
+        if let (Some(d), Ok(v)) = (sp.drive.as_mut(), std::env::var("SUSP_SCALE")) {
+            let f: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+            for w in d.config.wheels.iter_mut() {
+                w.k *= f[0];
+                w.c *= f[1];
+            }
+        }
+        if let Some(d) = &sp.drive {
+            println!(
+                "\nraycast wheels (k N/m, c N·s/m, bump k, travel min..max m, radius): {}",
+                d.config.wheels.iter().map(|w| format!("{:.0} / {:.0} / {:.0} / {:.3}..{:.3} / {:.3}", w.k, w.c, w.bump_k, w.susp_min, w.susp_max, w.radius)).collect::<Vec<_>>().join("; ")
+            );
+        }
         let t1 = std::time::Instant::now();
         // The visible mesh is measured on pressure wheels by default; `VIS=1`
         // measures it on raycast wheels too (the bindings are by non-tyre node).
@@ -1380,6 +1457,19 @@ fn main() {
                     for i in 0..now.len() {
                         w.0[i].push(fb.to_rest(now[i]));
                     }
+                }
+            }
+            // `REST_TRACE=node`: that node about the body's fit (mm from its
+            // first sample), every 2 ms for 80 ms, then every 50 ms.
+            if let Ok(nm) = std::env::var("REST_TRACE") {
+                if let Some(i) = (0..nn).find(|&i| car.node_name(i) == nm) {
+                    let v = &w.0[i];
+                    let f = |k: usize| {
+                        let d = (v[k] - v[0]) * 1e3;
+                        format!("({:+.2},{:+.2},{:+.2})", d.x, d.y, d.z)
+                    };
+                    println!("trace {nm} 2 ms: {}", (0..40).map(f).collect::<Vec<_>>().join(" "));
+                    println!("trace {nm} 50 ms: {}", (0..20).map(|k| f(k * 25)).collect::<Vec<_>>().join(" "));
                 }
             }
             let amp: Vec<f64> = w
@@ -1424,6 +1514,16 @@ fn main() {
             let mut s2 = kerb_start(&base);
             let r = run(&car, &sets, &mut s2, 3.0, &zero, vis_on);
             report_series(&format!("{name}: 5 cm × 0.5 m bump at 30 km/h (coasting), 3 s"), &r, 0);
+            // `KERB_NODES=N`: the N nodes that ripple most about the body's fit.
+            if let Some(n) = std::env::var("KERB_NODES").ok().and_then(|v| v.parse::<usize>().ok()) {
+                let part_of = |i: usize| car.parts.iter().find(|(_, v)| v.contains(&(i as u32))).map(|(p, _)| p.clone()).unwrap_or_default();
+                let mut idx: Vec<usize> = sets.nontyre.iter().map(|&i| i as usize).filter(|&i| cat[i] < CATS.len()).collect();
+                idx.sort_by(|&a, &b| r.node_peak[b].0.total_cmp(&r.node_peak[a].0));
+                let mut late: Vec<usize> = sets.nontyre.iter().map(|&i| i as usize).collect();
+                late.sort_by(|&a, &b| r.node_late[b].total_cmp(&r.node_late[a]));
+                println!("\nkerb, nodes still moving late (all parts): {}", late.iter().take(n).map(|&i| format!("{} {} {:.2} kg {:.2} mm", car.node_name(i), part_of(i).trim_start_matches("sedan_"), s.nodes[i].mass, r.node_late[i] * 1e3)).collect::<Vec<_>>().join("; "));
+                println!("\nkerb, nodes by peak ripple about the body: {}", idx.iter().take(n).map(|&i| format!("{} {} {:.2} kg {:.2} mm at {:.1} s", car.node_name(i), part_of(i).trim_start_matches("sedan_"), s.nodes[i].mass, r.node_peak[i].0 * 1e3, r.node_peak[i].1 as f64 * 0.1)).collect::<Vec<_>>().join("; "));
+            }
             // Beams the bump bent (rest length changed by more than 0.1 mm) or broke, by member pair.
             let mut bent: BTreeMap<String, (usize, f32)> = BTreeMap::new();
             let (mut nb, mut nbr) = (0, 0);

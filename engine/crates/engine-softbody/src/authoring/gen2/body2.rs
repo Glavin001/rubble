@@ -419,6 +419,8 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
     // back: with a quarter of him on each of the back's top corners the back
     // folded forward 240 mm in the 56 km/h wall (its frame yields at 6 kN).
     let driver = inp.physics().named.get("driver").copied().unwrap_or(75.0);
+    // (`RIG_DRIVER_KG`: a measurement, the car without him.)
+    let driver = super::build::env_f("RIG_DRIVER_KG", driver);
     for (node, share) in [("seafl_c", 1.0)] {
         if let Some(&i) = ids.get(node) {
             r.car.nodes[i].fixed_mass += driver * share;
@@ -901,6 +903,15 @@ pub fn masses(r: &mut Rig, inp: &dyn RigInput, b: &Built) {
         (Part::BumperR, ph.bumper_r),
     ]
     .into_iter()
+    // (a closure's nodes with a mass of their own, its latch's, are part of
+    // its total)
+    .map(|(part, kg)| {
+        let fixed: f32 = (0..n)
+            .filter(|&i| part != Part::Body && r.car.nodes[i].part == part)
+            .map(|i| r.car.nodes[i].fixed_mass)
+            .sum();
+        (part, kg - fixed)
+    })
     .filter(|x| x.1 > 0.0)
     .collect();
     r.car.omega_limit = Some(super::build::env_f("RIG_OMEGA_H", OMEGA_H));

@@ -1154,10 +1154,21 @@ impl Car {
                         .unwrap_or_else(|| budget * (m[b.a] / ends(b.a)).min(m[b.b] / ends(b.b)));
                 }
                 let sp = b.role.spec(b.part);
-                mult * if sp.k_fixed > 0.0 {
-                    sp.k_fixed
+                let k = mult
+                    * if sp.k_fixed > 0.0 {
+                        sp.k_fixed
+                    } else {
+                        sp.kl / l.max(SPRING_LENGTH)
+                    };
+                // On a car built to a node budget, a shut line's edge node
+                // is tied within its own: the sheet's rule on a 0.5 kg node
+                // is six times its budget, and the stability pass then
+                // stripped those ties until the node rang at 6-20 Hz and
+                // never settled.
+                if self.node_budget > 0.0 && matches!(b.role, Role::EdgeTie) {
+                    k.min(budget * (m[b.a] / ends(b.a)).min(m[b.b] / ends(b.b)))
                 } else {
-                    sp.kl / l.max(SPRING_LENGTH)
+                    k
                 }
             })
             .collect();
