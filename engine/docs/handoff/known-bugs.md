@@ -109,7 +109,7 @@ That pass does trivial work, so the timestamps are probably attributed to the wr
 
 ## Content and licensing
 
-- **ETK screenshots are committed:** about 25 Rubble renders of the BeamNG ETK, in `engine/docs/media/brick-ring-drive/etk*.jpg`, `engine/docs/media/crash-orbit/crash-orbit-etk-*.jpg` and `engine/docs/media/gen3-r3`, `gen3-r4`, `gen3-r5` (`*etk*`). No mod files are committed, but the renders show the mod's design. Keeping them or replacing them is the user's decision.
+- **No ETK renders are committed:** a Rubble render of the BeamNG ETK shows the mod's design, so the ETK stills (the brick ring, the crash orbits, the one-World presets, the gen3 side-by-sides) stay out of git, as the mod's files do (`recording-physics-demos`). The docs keep their numbers; record the stills again locally when needed.
 
 ## Paused or abandoned
 

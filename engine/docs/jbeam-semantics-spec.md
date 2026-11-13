@@ -3024,7 +3024,7 @@ cars' masses, so "off" here is not §39's "current"):
   (feat/jbeam-community 81283d5e) and surface contact r2: off 144 / 46 / 8, **on
   176 / 22 / 0**.
 * **`vehicle_compare`** (sedan1, ETK kr6 and kc6, CCF, Vertex;
-  `engine/docs/measurements/vehicle-compare.{md,json}` is the new baseline, the old
+  `engine/docs/measurements/vehicle-compare.md` is the new baseline, the old
   one had sedan1 and the ETKs only). Every reference that moved, off → on:
 
 | car | measure | off | on |

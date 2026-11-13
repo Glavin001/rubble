@@ -40,3 +40,6 @@ engine/ffi-dist/
 
 # Local outputs (renders, snapshots, frames)
 /out/
+
+# The comparison harness's full output (examples/vehicle_compare.rs); the .md beside it is committed
+engine/docs/measurements/vehicle-compare*.json

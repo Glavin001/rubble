@@ -91,7 +91,7 @@ frame-locked, recorded with `brick-ring-drive-record.mjs`):
 - `brick-ring-drive-sedan.mp4`: the authored sedan, `?drag=0`, at 99 km/h. This is the car
   that runs in real time.
 
-Stills: `docs/media/brick-ring-drive/`.
+Stills: `docs/media/brick-ring-drive/` (the sedan; the ETK's are not included).
 
 ## The ETK in real time: with perf/explicit-2khz (2026-11-07)
 
@@ -192,8 +192,6 @@ their place are counted as torn off, not crush.
   little (a real car loses most of its crumple zone, 0.5–0.8 m, into a rigid wall at that
   speed, though this wall gives way). The converted car looks too strong in this crash.
 
-![ETK after the wall](media/crash-orbit/crash-orbit-etk-0.jpg)
-![ETK before and after](media/crash-orbit/crash-orbit-etk-before-after-0.jpg)
 ![Sedan before and after](media/crash-orbit/crash-orbit-sedan-before-after-0.jpg)
 
 ## After the crash: stills and inspect mode (2026-11-07)

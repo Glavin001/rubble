@@ -424,14 +424,14 @@ The marker is 3 cm in from the rear door's shut line at 0.70 m, as the front doo
 | pole32 stretch / fold p99 | 1.06 / 1.2° |
 | Seams > 5 cm wall / pole | 1,138 / 237 (ignored test) |
 
-Stills (GPU page, gen3 beside the ETK, same preset, camera and time):
-`media/gen3-r3/`.
+Stills (GPU page, gen3 beside the ETK, same preset, camera and time): not included
+(superseded by rounds 4 and 5; the ETK's are never committed).
 
 ## Round 4 (2026-11-06)
 
 Branch `feat/vehicle-gen3-r4`. Surface contact is on unless marked. Full tables:
 `measurements/vehicle-compare-gen3-surface-on.md` and `-off.md`. Stills:
-`media/gen3-r4/`.
+`media/gen3-r4/` (gen3's pole and MDB; the ETK's are not included).
 
 ### Decisions
 
@@ -653,8 +653,9 @@ fixed here.
 
 ### On the GPU page
 
-`media/gen3-r4/` shows gen3 beside the ETK: same preset, camera and step, surface
-contact on, raycast wheels.
+The stills showed gen3 beside the ETK: same preset, camera and step, surface
+contact on, raycast wheels. `media/gen3-r4/` keeps gen3's pole29 and mdb214 stills (the
+ETK's are not included; gen3's wall56 stills are round 5's).
 - **wall56, side view:** at impact, +60 ms and settled (+1.5 s).
 - **pole29, threeFront view:** +60 ms and settled.
 - **mdb214:** +60 ms and settled.
@@ -699,7 +700,7 @@ leaves its hinges.
 Branch `feat/vehicle-gen3-r5`, merged with `feat/surface-contact-perf` (908e1187:
 surface friction's true stick). Surface contact is on unless marked. Full tables:
 `measurements/vehicle-compare-gen3-surface-on.md` and `-off.md`. Stills:
-`media/gen3-r5/`.
+`media/gen3-r5/` (gen3; the ETK's are not included).
 
 ### Decisions
 
@@ -841,9 +842,9 @@ load (the ETK and gen3 alike, raycast wheels). `crash-lab-record.mjs` now waits 
 
 ### On the GPU page
 
-`media/gen3-r5/`: wall56 in the `three` view, gen3 beside the ETK, same preset,
-camera and timing (surface contact on, raycast wheels): at impact, +60 ms and settled
-(+1.5 s).
+`media/gen3-r5/`: wall56 in the `three` view, gen3 (recorded beside the ETK, same preset,
+camera and timing; the ETK's stills are not included), surface contact on, raycast
+wheels: at impact, +60 ms and settled (+1.5 s).
 - Both hoods fold up at the wall. The ETK's tents the way gen3's does, as measured.
 - gen3's bumper cover and lamps stay with the fenders' fronts instead of diving
   under them.
