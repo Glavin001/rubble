@@ -55,6 +55,9 @@ export function createStabilityStop(health, { params = {}, onStop = null } = {})
     launched(speed) { if (!api.stopped) health?.launched(speed); },
     /** Something outside the vehicles put up to `joules` into them (a shot's energy). */
     supplied(joules) { if (!api.stopped) health?.supplied(joules); },
+    /** The scene has inputs the check cannot bound (rigid bodies shot or pressed at
+     * the vehicles): only non-finite values stop it while `on`. */
+    unbounded(on) { if (!api.stopped) health?.setUnbounded(on); },
     /** An input the check cannot bound acts this frame (a hand's grab): call it
      * every frame while it does. */
     disturbed() { if (!api.stopped) health?.disturbed(); },

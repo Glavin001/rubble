@@ -220,7 +220,7 @@ pub struct StabilityGuard {
     launched: f64,
     /// Energy the page said something outside the vehicles put in (J): shots, rigs.
     external: f64,
-    /// The rebound check is off (the scene has an input the guard cannot bound).
+    /// Only the non-finite check runs (the scene has inputs the guard cannot bound).
     unbounded: bool,
     /// The drive allowance so far (J) and the time of the last readback.
     traction: f64,
@@ -293,7 +293,8 @@ impl StabilityGuard {
         self.rebound_over = 0;
     }
 
-    /// The scene has such an input for good: the rebound check is off.
+    /// The scene has inputs the guard cannot bound for good (rigid bodies shot or
+    /// pressed at the vehicles, a pulling rig): only the non-finite check runs.
     pub fn set_unbounded(&mut self, on: bool) {
         self.unbounded = on;
     }
@@ -382,8 +383,9 @@ impl StabilityGuard {
             v.lowest = v.lowest.min(s.height);
             v.kinetic_low = v.kinetic_low.min(s.kinetic);
         }
-        if self.fleet > self.vehicles.len() {
-            // Unread vehicles can hand these their energy: no energy or box check.
+        if self.fleet > self.vehicles.len() || self.unbounded {
+            // Unread vehicles, or bodies and rigs the guard does not read, can hand
+            // these their energy (and throw their parts far): no energy or box check.
             return None;
         }
         // What the scene can have supplied: the start's energy, the launches and other
@@ -436,7 +438,7 @@ impl StabilityGuard {
         let at = (0..self.window.len())
             .min_by(|&a, &b| self.window[a].1.total_cmp(&self.window[b].1))
             .unwrap_or(0);
-        if self.unbounded || at + 1 == self.window.len() {
+        if at + 1 == self.window.len() {
             self.rebound_over = 0;
         } else {
             let (t_low, low, heights, launched, traction) = &self.window[at];
@@ -590,7 +592,8 @@ impl VehicleHealth {
         self.guard.borrow_mut().disturbed();
     }
 
-    /// The scene has such an input for good (a pulling rig): the rebound check is off.
+    /// The scene has inputs the guard cannot bound (rigid bodies shot or pressed at the
+    /// vehicles, a pulling rig): only the non-finite check runs while `on`.
     #[wasm_bindgen(js_name = setUnbounded)]
     pub fn set_unbounded(&self, on: bool) {
         self.guard.borrow_mut().set_unbounded(on);
@@ -957,12 +960,17 @@ mod tests {
             g.disturbed();
             assert_eq!(g.observe(k as f64 / 60.0, &[car((15.0 * k as f32 / 60.0).min(15.0), 0.6, 5.0, 0.0)]), None, "grab, frame {k}");
         }
-        // A rig pulls a car to 56 km/h.
+        // A rig pulls a car to 56 km/h; a boulder throws its parts 300 m. Unbounded:
+        // only a non-finite value stops it.
         let mut g = StabilityGuard::new(1);
         g.set_unbounded(true);
         for k in 0..120 {
             assert_eq!(g.observe(k as f64 / 60.0, &[car((15.6 * k as f32 / 60.0).min(15.6), 0.6, 5.0, 0.0)]), None, "rig, frame {k}");
         }
+        assert_eq!(g.observe(2.1, &[car(40.0, 0.6, 300.0, 2.0e6)]), None);
+        let mut bad = car(40.0, 0.6, 300.0, 2.0e6);
+        bad.finite = false;
+        assert!(g.observe(2.2, &[bad]).is_some());
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub struct WebVehicleLab {
 /// coupling's room per car), sleep, mountain: { seed, steepness, roughness, … }, parts:
 /// { names, start, beams } }` (`rubble::vehicle_lab::LabOptions::from_json`).
 #[wasm_bindgen(js_name = createVehicleLab)]
-pub async fn create_vehicle_lab(spec: JsValue) -> Result<js_sys::Array, JsValue> {
+pub async fn create_vehicle_lab(spec: JsValue, progress: Option<js_sys::Function>) -> Result<js_sys::Array, JsValue> {
     let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
     let drag = spec.get("drag").and_then(|x| x.as_bool()).unwrap_or(true);
     let d = ExplicitBeamsSettings::default();
@@ -86,7 +86,7 @@ pub async fn create_vehicle_lab(spec: JsValue) -> Result<js_sys::Array, JsValue>
         let car = lab_car(&template, &opts, None);
         let fleet = vec![car; if opts.parked { 2 } else { 1 }];
         let specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(opts.capacity));
-        crate::warm_pipelines(&device, &specs, std::rc::Rc::new(|_: &str, _: f64| {})).await;
+        crate::warm_pipelines(&device, &specs, crate::hear_fn(progress)).await.map_err(err)?;
     }
     let (world, lab) = res(Lab::build(
         GpuContext::Shared {

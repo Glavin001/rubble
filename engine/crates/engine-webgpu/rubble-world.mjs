@@ -104,10 +104,10 @@ export async function createBrickRingDrive(spec, progress) {
  * flat arena or the infinite mountain in one World on its own device, and the lab's
  * state beside it (spec as the wasm's `createVehicleLab`).
  */
-export async function createVehicleLab(spec) {
+export async function createVehicleLab(spec, progress) {
   ready ??= init();
   await ready;
-  const [world, lab] = await createVehicleLabWasm(spec);
+  const [world, lab] = await createVehicleLabWasm(spec, progress);
   world.flags = solverFlags();
   return { world, lab, materials: vehicleLabMaterials() };
 }

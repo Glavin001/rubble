@@ -91,7 +91,7 @@
       </div>
       <div class="mode mountain">
         <h2>Infinite mountain</h2>
-        <div class="row"><span class="muted">seed</span><input type="number" id="seed" data-opt="restart" value="1" min="0" step="1" /><label><input type="checkbox" id="rockslide" data-opt="restart" checked /> rockslide when at rest</label></div>
+        <div class="row"><span class="muted">seed</span><input type="number" id="seed" data-opt="restart" value="1" min="0" step="1" /><label><input type="checkbox" id="rockslide" data-opt="restart" /> rockslide when at rest</label></div>
         <div class="row"><span class="muted">steepness</span><input type="range" id="steepness" data-opt="restart" min="35" max="55" step="1" value="50" /><b id="steepnessOut"></b></div>
         <div class="row"><span class="muted">roughness</span><input type="range" id="roughness" data-opt="restart" min="0" max="1" step="0.05" value="0.6" /><b id="roughnessOut"></b></div>
         <div class="row"><span class="muted">launch</span><input type="range" id="launch" data-opt="restart" min="0" max="40" step="1" value="14" /><b id="launchOut"></b>
@@ -166,6 +166,8 @@
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
+    import { createLoading } from './load-progress.mjs';
+    import { createStabilityStop } from './stability-stop.mjs';
 
     const qs = new URLSearchParams(location.search);
     const RECORD = qs.has('record');
@@ -309,6 +311,9 @@
       if (building) { buildAgain = true; return; }
       building = true;
       const t0 = performance.now();
+      // The loading card: each kernel's compile as Rust reports it (load-progress.mjs).
+      const loading = createLoading({ title: 'Loading the vehicle lab' });
+      loading.stage('Building the car');
       try {
         const car = await carOf(get('car'));
         const n = get('parked') ? 2 : 1;
@@ -324,7 +329,8 @@
         };
         progress(`compiling the ${car.name}'s kernels and building the lab…`);
         const old = W; W = null;
-        const { world, lab, materials } = await createVehicleLab(spec);
+        const { world, lab, materials } = await createVehicleLab(spec, loading.progress);
+        loading.stage('Building the renderers');
         try { old?.cars.destroy(); old?.lab.free(); old?.world.free(); } catch (e) { console.warn(e); }
         const device = world.device();
         device.lost.then((i) => { if (W?.device === device) lost(i.message); });
@@ -357,6 +363,7 @@
         if (!$('material').options.length) for (const [name, density] of materials) $('material').add(new Option(`${name} (${density} kg/m³)`, name));
         if (qs.has('material')) put('material', qs.get('material'));
         W = w;
+        W.spec = spec;
         configure();
         gpuSeg.clear(); gpuTotal = [];
         window.__world = world; window.__lab = lab;
@@ -365,8 +372,9 @@
         firstLoadMs ??= performance.now() - tLoad;
         statusEl.textContent = `built in ${(lastBuildMs / 1000).toFixed(1)} s (first load ${(firstLoadMs / 1000).toFixed(1)} s${car.bytes ? `; the car's model ${(car.bytes / 1e6).toFixed(0)} MB, parsed once` : ''})`;
         progress('');
+        window.__loadTimes = loading.done();
         window.__ready = true;
-      } catch (e) { progress(''); fail(e); } finally { building = false; if (buildAgain) { buildAgain = false; build(); } }
+      } catch (e) { progress(''); if (loading.active()) loading.fail({ detail: errorText(e) }); fail(e); } finally { building = false; if (buildAgain) { buildAgain = false; build(); } }
     }
     // The GPU device was lost (a driver reset, the GPU process restarted, memory): the
     // simulation is gone with it. Say so, and offer the rebuild (the parsed car is kept).
@@ -390,6 +398,15 @@
 
     // ---------------------------------------------------------------- restart (in place)
     let restartMs = 0, againMs = 0, restartAt = null, restarts = 0;
+    // The stop on an unstable simulation (stability-stop.mjs; Rust judges, read-only):
+    // a new one per restart, since a restart moves the car. Modes where rigid bodies
+    // put energy into the car that the check does not read (shots, the compactor's
+    // plates, a crash sled, the rockslide's boulders) keep only its non-finite check.
+    function watch() {
+      document.getElementById('stopped')?.remove();
+      W.stop = createStabilityStop(W.world.explicitHealth() ?? null, { params: { mode, script: script?.name ?? null, spec: { ...W.spec, vehicle: undefined, parts: undefined } } });
+      W.stop.unbounded(mode === 'shoot' || mode === 'compactor' || mode === 'crash' || (mode === 'mountain' && get('rockslide')));
+    }
     async function restart(first = false) {
       if (!W) return;
       const t0 = performance.now();
@@ -401,6 +418,7 @@
         W.lab.restart(W.world, spec);
         if (script) W.lab.setScript(script);
       } catch (e) { warn(errorText(e)); return; }
+      watch();
       simSteps = 0; pageAt = 0; lastDrive = ''; paused = false; $('pause').classList.remove('on'); cam.init = false; window.__done = false;
       pose = { c: scene() === 'mountain' ? [0, 1, 3] : [0, 0.6, 0], v: [0, 0, 0], h: [0, 0, 1], speed: 0 };
       if (RECORD) orbit.auto = 0.35;
@@ -803,11 +821,13 @@
       };
       hud();
     } else {
-      let lastNow = null, hudAt = 0, debt = 0;
+      let lastNow = null, hudAt = 0;
       function frame(now) {
         requestAnimationFrame(frame);
         const w = W;
-        if (!w || window.__failed) { lastNow = null; return; }
+        // Stopped (an unstable state): no more steps or frames until a restart.
+        if (!w || window.__failed || w.stop?.stopped) { lastNow = null; return; }
+        w.stop?.check(w.lab.time());
         frames++;
         if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
         const dt = lastNow === null ? 0 : (now - lastNow) / 1000;
@@ -815,7 +835,7 @@
         try {
           const scale = paused ? 0 : slow();
           // (The pacer takes how many times slower than real time.)
-          let owed = scale > 0 ? w.pacer.advance(dt, 1 / scale, 4) + debt : 0;
+          let owed = scale > 0 ? w.pacer.advance(dt, 1 / scale, 4) : 0;
           if (stepOnce) { owed = 1; stepOnce = false; }
           let taken = 0;
           for (let k = 0; k < owed; k++) {
@@ -824,9 +844,9 @@
             w.world.step();
             taken++;
           }
-          // A step the World was not ready for (its last readback still out) is owed to
-          // the next frame, up to three: the run keeps real time at any display rate.
-          debt = Math.min(3, owed - taken);
+          // A step the World was not ready for (its last readback still out) is not
+          // owed later: a GPU that falls behind shows the run slower, it is never
+          // sent more work to catch up (at most 2 steps in flight, WebWorld.canStep).
           stepHist.push(dt * 1000); if (stepHist.length > 600) stepHist.shift();
           if (taken && restartAt != null) { againMs = performance.now() - restartAt; restartAt = null; }
           simSteps += taken; simCount += taken;
