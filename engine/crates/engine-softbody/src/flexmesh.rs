@@ -644,6 +644,11 @@ pub struct FlexReport {
     /// Meshes a row names that no Collada file has, and vertices with no frame.
     pub missing: Vec<String>,
     pub unbound: usize,
+    /// The desc's raycast wheels that a weighted skin (`.rskin`) draws: a
+    /// skinned vertex follows one of the wheel's axle nodes. A vehicle whose
+    /// wheels are parts with their own nodes and meshes (the generated cars)
+    /// draws its wheels this way; the page then adds no stand-in wheels.
+    pub wheels_skinned: usize,
 }
 
 /// The visual of a loaded JBeam vehicle: `flex` and `props` its assembled
@@ -780,6 +785,7 @@ pub fn jbeam_visual_skinned(
         ..Default::default()
     };
     let mut rep = FlexReport::default();
+    let mut skinned_nodes: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut wt_cnt: Vec<u32> = Vec::new();
     let mut add = |name: &str,
                    m: &DaeMesh,
@@ -1035,6 +1041,11 @@ pub fn jbeam_visual_skinned(
                     .map(|n| by_name.get(n.as_str()).and_then(|&i| sim_of[i as usize]).ok_or_else(|| format!("{mesh}: skin node {n} is not the vehicle's")))
                     .collect::<Result<_, _>>()?;
                 let first = out.positions.len() as u32;
+                for sv in &ms.verts {
+                    for e in &sv.w {
+                        skinned_nodes.insert(map[e.0 as usize]);
+                    }
+                }
                 for (k, sv) in ms.verts.iter().enumerate() {
                     let p = to_r(xf.transform_point3(m.pos[k]));
                     let n = to_r(xf.transform_vector3(m.nrm[k])).normalize_or(Vec3::Y);
@@ -1258,6 +1269,15 @@ pub fn jbeam_visual_skinned(
     if !out.wheel.is_empty() {
         out.wheel.resize(out.positions.len(), u32::MAX);
     }
+    rep.wheels_skinned = desc
+        .wheels
+        .iter()
+        .filter(|w| {
+            [w.node1, w.node2]
+                .iter()
+                .any(|&i| sim_of.get(i as usize).copied().flatten().is_some_and(|k| skinned_nodes.contains(&k)))
+        })
+        .count();
     Ok((out, rep))
 }
 

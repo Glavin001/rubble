@@ -1698,8 +1698,10 @@ fn xpos(i: u32, v: u32) -> vec3f {
       wheelsDrawn = d.vehicles.reduce((n, v) => n + (v?.wheels.length ?? 0), 0);
       // The showcase body draws its own wheels from the drive state (skin.rs
       // bind_raycast_wheels): no stand-in boxes.
-      // An imported body with wheel pieces on the raycast wheels (flexmesh) too.
-      if (bodyR && (carKind === 'showcase' || (importSrc && bodyVisual().rigid?.some((r) => r >= 2)))) return;
+      // An imported body with wheel pieces on the raycast wheels (flexmesh) too,
+      // and one whose wheels are parts of its own, skinned to their axle nodes
+      // (the generated cars: the report's wheelsSkinned).
+      if (bodyR && (carKind === 'showcase' || (importSrc && (bodyVisual().rigid?.some((r) => r >= 2) || window.__flexReport?.wheelsSkinned > 0)))) return;
       d.vehicles.forEach((v, i) => {
         if (!v) return;
         wheelBodies[i] ??= [];

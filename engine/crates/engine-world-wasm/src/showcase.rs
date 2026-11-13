@@ -513,7 +513,7 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
 /// materials: [[name, text]] (the `*.materials.json` files) }`; `meshes`: `[[name, Uint8Array]]`, the vehicle's `.dae`
 /// files. Returns `{ visual, visualLod (the distant level: the meshes
 /// clustered on a 3 cm grid), lodDistance (m: where a cluster is about 2.6
-/// pixels), lodTriangles, report: { flexbodies, props, vertices, triangles,
+/// pixels), lodTriangles, report: { flexbodies, props, vertices, triangles, wheelsSkinned (the raycast wheels a weighted skin draws),
 /// unbound, missing } }`.
 #[wasm_bindgen(js_name = jbeamVisual)]
 pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
@@ -639,6 +639,7 @@ fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Opt
         set(&r, "vertices", &JsValue::from(rep.vertices as u32));
         set(&r, "triangles", &JsValue::from(rep.triangles as u32));
         set(&r, "unbound", &JsValue::from(rep.unbound as u32));
+        set(&r, "wheelsSkinned", &JsValue::from(rep.wheels_skinned as u32));
         let missing = Array::new();
         for m in &rep.missing {
             missing.push(&JsValue::from_str(m));

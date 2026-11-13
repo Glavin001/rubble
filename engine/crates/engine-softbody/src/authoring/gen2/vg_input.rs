@@ -590,40 +590,46 @@ pub fn build(input: VgInput) -> Result<Built, String> {
     Ok(Built { input, rig, skin })
 }
 
-/// The mod folder's files (paths relative to it): `<design>/` JBeam parts and
-/// `.pc` (parts named `<design>_body` …), the art `.glb` and its `.rskin`,
-/// then `files.json`.
-pub fn files(b: &Built) -> Vec<(String, Vec<u8>)> {
-    let name = b.input.design().to_string();
-    let axle_f = b.input.rig.dims.axle_f;
+/// The JBeam parts and the `.pc` alone (no render model, no skins): what the
+/// solver reads. A crash measurement needs no more, and skips the binding.
+pub fn physics_files(input: &VgInput, rig: &Rig) -> Vec<(String, Vec<u8>)> {
+    let name = input.design().to_string();
+    let axle_f = input.rig.dims.axle_f;
     let mut flex = gen3::flex_rows_with(
-        &b.input.glb,
+        &input.glb,
         axle_f,
         &VgInput::vg_part_of,
         &skin_file(&name),
     );
     // A definition part's solid is listed in that part's own JBeam part.
     for (_, f) in &mut flex {
-        if let Some(owner) = b.rig.car.bind.get(&f.mesh).and_then(|x| x.owner.clone()) {
+        if let Some(owner) = rig.car.bind.get(&f.mesh).and_then(|x| x.owner.clone()) {
             f.groups = vec![super::export::sub_name(&owner)];
             f.owner = Some(owner);
         }
     }
     // (A pane with trigger beams of its own keeps those.)
-    let own: Vec<&str> = b
-        .rig
+    let own: Vec<&str> = rig
         .car
         .fixed
         .values()
         .filter_map(|f| f.deform_group.as_ref().map(|g| g.0.as_str()))
         .collect();
     let mut groups =
-        gen3::deform_groups_with(&b.input.glb, &b.rig.car, axle_f, &VgInput::vg_part_of);
+        gen3::deform_groups_with(&input.glb, &rig.car, axle_f, &VgInput::vg_part_of);
     groups.retain(|g| !own.contains(&g.0.as_str()));
-    let mut out: Vec<(String, Vec<u8>)> = super::export::jbeam_files(&b.rig.car, &flex, &groups)
+    super::export::jbeam_files(&rig.car, &flex, &groups)
         .into_iter()
         .map(|(p, t)| (rename_path(&p, &name), rename(&t, &name).into_bytes()))
-        .collect();
+        .collect()
+}
+
+/// The mod folder's files (paths relative to it): `<design>/` JBeam parts and
+/// `.pc` (parts named `<design>_body` …), the art `.glb` and its `.rskin`,
+/// then `files.json`.
+pub fn files(b: &Built) -> Vec<(String, Vec<u8>)> {
+    let name = b.input.design().to_string();
+    let mut out = physics_files(&b.input, &b.rig);
     out.push((
         format!("{name}/{}", glb_file(&name)),
         b.input.glb_bytes.clone(),

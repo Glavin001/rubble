@@ -10,7 +10,15 @@
 //! ```text
 //! cargo run --release -p engine-world-wasm --example surface_pole -- \
 //!     --car sedan1|etkk [--scene side|oblique|front] [--kmh 32] [--at 0] \
-//!     [--surface 0|1] [--gpu] [--secs 0.6] [--etk <vehicles dir>]
+//!     [--surface 0|1] [--gpu] [--secs 0.6] [--etk <vehicles dir>] \
+//!     [--wheels raycast] [--run-up 0.3]
+//! ```
+//! `--car mod:<mods dir>/<mod>:<vehicle>` loads a mod folder's vehicle (a generated
+//! car); `--wheels raycast` spawns it on raycast wheels as the page's `wheels=raycast`.
+//! The line ends with the speed at the pole (the last frame before the approach
+//! momentum falls by 1 %) against the launch speed: the side pole's carrier
+//! (`crash_scene`) must deliver the car at the stated speed.
+//! ```text
 //! ```
 //! The ETK (an imported BeamNG mod, never committed) is read from `--etk` or
 //! `RUBBLE_ETK` (the `vehicles` directory holding `etkk/`), as the page's
@@ -57,7 +65,17 @@ fn car(name: &str) -> serde_json::Value {
             let pc = std::fs::read_to_string(dir.join("etkk/kr6.pc")).expect("kr6.pc");
             serde_json::json!({ "jbeam": files, "pc": pc })
         }
-        _ => panic!("--car sedan1|etkk"),
+        // A mod folder's vehicle as the page loads it: `mod:<mods dir>/<mod>:<vehicle>`
+        // with `<vehicle>/<vehicle>.pc` (the generated cars: `mod:…/sedan_new:sedan`).
+        m if m.starts_with("mod:") => {
+            let mut it = m[4..].rsplitn(2, ':');
+            let (vehicle, dir) = (it.next().unwrap(), it.next().expect("mod:<dir>:<vehicle>"));
+            let dir = std::path::Path::new(dir);
+            let files = engine_softbody::jbeam::read_vehicle_dir(dir, vehicle).expect("the mod's jbeam");
+            let pc = std::fs::read_to_string(dir.join(vehicle).join(format!("{vehicle}.pc"))).expect("the .pc");
+            serde_json::json!({ "jbeam": files, "pc": pc, "native": true })
+        }
+        _ => panic!("--car sedan1|etkk|mod:<dir>:<vehicle>"),
     }
 }
 
@@ -177,8 +195,11 @@ fn main() {
         "speed": kmh / 3.6,
         "timing": false,
         "surfaceContact": surface,
-        "runUp": 0.3,
+        "runUp": arg("--run-up").map(|x| x.parse::<f64>().unwrap()).unwrap_or(0.3),
     });
+    if let Some(w) = arg("--wheels") {
+        spec["vehicles"][0]["wheels"] = w.into();
+    }
     match scene.as_str() {
         "side" => {
             spec["scene"] = "sidepole".into();
@@ -288,6 +309,8 @@ fn main() {
     let mut peak = 0.0f32;
     let mut crush_max = 0.0f32;
     let mut p_prev = momentum(&cpu.nodes.iter().map(|n| n.vel).collect::<Vec<_>>());
+    let p_launch = p_prev;
+    let mut v_impact = None::<f32>;
     let mut surf_hits = 0u64;
     let mut last_p = p0.clone();
     for _ in 0..frames {
@@ -324,6 +347,11 @@ fn main() {
         dt = dt.max(d.tri);
         all.extend(d.samples);
         let pm = momentum(&vel);
+        // The pole takes momentum at hundreds of kN (over 1 % in a frame); a
+        // carrier's pads take under 0.1 %.
+        if v_impact.is_none() && pm < p_prev - 0.01 * p_launch {
+            v_impact = Some(p_prev / total_mass);
+        }
         peak = peak.max(-(pm - p_prev) * 60.0);
         p_prev = pm;
         crush_max = crush_max.max(crush(&p));
@@ -361,7 +389,7 @@ fn main() {
     let along = |p: &[Vec3], a: Vec3| (pole_c - com(p)).dot(a);
     let pole_slide = along(&last_p, a1) - along(&p0, a0);
     println!(
-        "{car_name} {scene} {kmh} km/h at {at} surface {} {}: depth max node {:.1} beam {:.1} tri {:.1} mm, p99 {:.1} mm ({} samples); peak {:.0} kN; crush max {:.0} end {:.0} mm; {:.1} µs/step ({} steps, {} surface hits); approach KE left {:.1} kJ; slide {:.0} mm; pole slide along the car {:.0} mm",
+        "{car_name} {scene} {kmh} km/h at {at} surface {} {}: depth max node {:.1} beam {:.1} tri {:.1} mm, p99 {:.1} mm ({} samples); peak {:.0} kN; crush max {:.0} end {:.0} mm; {:.1} µs/step ({} steps, {} surface hits); approach KE left {:.1} kJ; slide {:.0} mm; pole slide along the car {:.0} mm; at the pole {:.1} km/h (launched at {:.1}); end speed {:.2} m/s; beams broken {}",
         surface as u8,
         if gpu { "gpu" } else { "cpu" },
         dn * 1e3,
@@ -378,6 +406,10 @@ fn main() {
         ke_end / 1e3,
         slide * 1e3,
         pole_slide * 1e3,
+        v_impact.unwrap_or(f32::NAN) * 3.6,
+        p_launch / total_mass * 3.6,
+        p_prev / total_mass,
+        if gpu { "n/a".to_string() } else { cpu.beams.iter().filter(|b| b.broken).count().to_string() },
     );
     let _ = STEP;
 }
