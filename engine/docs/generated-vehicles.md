@@ -269,3 +269,51 @@ binding: spawn 0.26 mm / 0.06°, parked 10 s 0.83 mm / 0.71° (the sheets:
 0.83 mm / 0.74°); after the 56 km/h wall, stretch p99 1.51 and fold p99 7.6°
 (the sheets: 1.36 and 6.3°). Binding the inner faces and walls to their own
 part's nodes, with thickness kept, is the next step.
+
+## Body structure and mechanical parts (Step 2d, 2026-11-13, `feat/sedan-body`)
+
+The specification is [beamng-structure-study.md](beamng-structure-study.md) §10. **State: the definitions and the shell's lattice are built and tested; the rigger does not use them yet,** so the rigged car is still the census lattice above and nothing below is a crash or stiffness measurement of the new body.
+
+**One definition per part** (the Rust generator, solid build only; the legacy sheet build is unchanged):
+
+| Module | What it defines | Tests |
+|---|---|---|
+| `engine-vehiclegen::structure` | 50 body-in-white members of the study's 22 types: section, gauge, grade, a closed solid (`structure_front`, `_floor`, `_cabin`, `_rear`), and the shell's 131 named nodes on them (24 groups, 487 kg). Steel mass, squash load and mean crush force per member. | `tests/structure.rs` |
+| `engine-vehiclegen::mechanical` | 48 mechanical and interior parts: nodes and masses, internal beams, mounts as named break groups, beam-only members (arm legs, struts, tie rods, half-shafts), and a closed solid through the same points. | `tests/mechanical.rs` |
+| `engine-softbody` `gen2::shell` | The shell's beams on those nodes, braced to the study's rules, with springs fitted to the node budget; the rules measured. | `tests/shell_lattice.rs` |
+
+`RigSpec.structure` and `RigSpec.mechanical` carry the first two to the rigger.
+
+**Structure.** Every member is closed, one piece, at least 8 mm inside the skin, and cuts through no other part or member. All 131 nodes are within 2 cm of their member's surface. The upper A-pillars, C-pillars, roof rails, headers and roof bow have no solid of their own: the shell's solid there is already a closed section 30 mm deep, with the headliner straight below it and the door frames beside it. Their nodes sit inside that section. Modelled steel is 158 kg; the rest of the shell's 487 kg is the outer skin's own solids and the fixed trim.
+
+| Member | Section (mm), gauge, grade | Mean crush force |
+|---|---|---|
+| Crash box | 70 × 110, 1.5, HSLA | 45 kN |
+| Front rail | 70 × 110, 1.8, HSLA | 62 kN |
+| Rear rail | 60 × 90, 1.6, HSLA | 48 kN |
+| Sill (inner box) | 65 × 140, 1.4, HSLA | 42 kN |
+| Hinge pillar | 120 × 89, 1.6, DP600 | 66 kN |
+
+**Mechanical parts** (kg by class): engine 170, driveline 88 (transmission 45, differential 42, shaft 1), suspension 180.5 (subframes 46.5 and 42, hubs 17 and 24, rack 10), wheels 78.4 (4 × 19 plus caps), exhaust 18.2, fuel tank 40, radiator 5.6, impact beams 14, interior 106.2 (seats 2 × 18.9, bench 18.4, instrument panel 45, console 5). Each hub is four nodes held by exactly six links. The failure ladder is ordered: toe link bends (85 kN) < arm bends (155) < wheel leaves (168) < strut breaks (180) < toe link breaks (250) < arm breaks (300) < front subframe leaves (400 per beam).
+
+**Shell lattice** (reference sedan; bands from the study's §10.7):
+
+| Measure | Ours | Band |
+|---|---|---|
+| Nodes / beams / beams per node | 131 / 699 / 5.34 | 110–140 / 650–760 / 5.0–5.8 |
+| Neighbours per node, median / least | 11 / 6 | 9–11 / ≥ 5 |
+| Nodes not in a tetrahedron | 0 | 0 |
+| Least beam-direction spread | 0.028 | ≥ 0.02 |
+| Skip beams / cross-car beams | 12.4 % / 6.4 % | 12–28 % / 8–10 % (cross-car is under its band) |
+| Braces over 0.9 m through the cabin | 6 | ≤ 6 |
+| Floor torsion bars | 12 | 10–20 |
+| Σk/m per node, median | 8.5e6 s⁻² | 7–9.5e6 (ETK shell) |
+| Shell alone, ω·h (power iteration on k + 2c/h) | 1.73 | ≤ 1.90; whole car to be measured |
+| Σ yield of longitudinal beams by station (kN): nose / front axle / firewall / cabin front / cabin rear / rear axle / tail | 132 / 523 / 1,374 / 1,272 / 1,618 / 782 / 365 | rising nose to firewall; cabin ≥ 2 × the front's peak |
+| Front yield under 0.45 m / over 0.75 m (shell and mechanical parts) | 59 % / 2 % | ≥ 55 % / ≤ 6 % |
+
+**Triangles:** 465,998 in 103 parts (structure 17.3k, mechanical 13.3k). The art spec gained structure (40k) and mechanical (60k) budgets and its total rose from 500k to 600k.
+
+**Not done:** the rigger on these definitions (shell, mechanical parts, wheels on axle nodes, glass triggers, engine stops, SUPPORT between parts), lint rules 2, 8, 11, 14–24 on the rigged car, every measurement of the plan's step D (parked fidelity, rest drift, modes, kerb wobble, settle, head-on overlap and pitch, wall, pole, MDB, roof, door), and the `-v4` clips.
+
+**Stills** (`~/Development/rubble-artifacts/sedan-body/stills/`, Blender, all inspected): `structure_top`, `structure_under`, `structure_mechanical_top`, `structure_mechanical_under`, `mechanical_only`, `front_end`, `interior_on_floor`, `explode_all`.

@@ -206,7 +206,25 @@ Our first sedan was an outer shell with panels and placeholder boxes; its struct
    - surface contact as the default;
    - the stiffness row cap (BeamNG content runs at rows 1.1–4; ours is capped at 1.0).
 
+## 12. The body rebuilt from definitions: first findings (2026-11-13, `feat/sedan-body`)
+
+State and tables: [generated-vehicles.md](generated-vehicles.md), "Body structure and mechanical parts". The definitions and the shell's lattice exist and are tested. The rigger does not use them yet, so there is no stiffness or crash measurement of the new body.
+
+- **(Fact) There is no room for a second pillar or roof-rail box.** At the roof rail the shell's solid is already 30 mm deep, the headliner sits 40 mm under the skin, and the door frame closes beside it. The upper A-pillars, C-pillars, roof rails, headers and bow are that section; their nodes sit inside it. Redrawing the shell's own walls as channel sections (section 6) is still open.
+- **(Fact) The floor pan's skin is the shell's.** Its solid has an end wall 30 mm high at each door line. Members on the pan stop inside those walls; the heel kick stands on the rear one.
+- **(Measurement) A wheel-well liner with a small centre hole blocks every arm.** The inner wall's opening was 0.55 r (0.206 m). Arm legs from the rail's stations cross that wall at 0.21–0.22 m. The solid build opens it to 0.74 r.
+- **(Measurement) The rear rail has to arch over the half-shaft.** With the floor step where the bench allowed, the rail cut the shaft. The step moved 3 cm forward and the rail rises with it in upright sections.
+- **(Measurement) Inner bumper ribs reach 71 mm behind the rear skin.** The rear impact beam sits 80–130 mm in, and the rails stop behind it.
+- **(Measurement) A k-nearest lattice leaves roofs and pillar middles flat.** After bracing each node to ten neighbours, the roof bow's centre had a direction spread of 0.003 and four nodes were in no tetrahedron. Each flat node needs a fourth corner along its weakest axis, and the study's six long cabin braces are exactly enough on the reference car when the flattest nodes take them first.
+- **(Measurement) The zone table's springs sit under the node budget in the cabin and tail.** With the table's values the median Σk/m was 5.5e6 s⁻² and the shell's ω·h 1.64. Letting each beam rise to the budget (8.5e6 per node, at most 7e6 N/m per beam) gives a median of 8.5e6 and ω·h 1.73 for the shell alone, with no global softening needed.
+- **(Fact) Where the stiffness cap is.** `Car::assign_springs` (`engine-softbody/src/authoring/gen2/build.rs`) has two limits. The row cap is `row_cap()` × `ROW_BOUND` (line 252: `GEN2_ROW`, default 3.0; `ROW_BOUND` 4.8). The whole-car limit is `OMEGA_H` 1.85 (line 282), enforced by power iteration that softens the beams carrying the top mode by 3 % a round. On this branch the row cap is 3.0, not 1.0, so the binding limit is the whole-car 1.85. A row of 1.0 is Σ(h²k + 2hc)(1/m + 1/√(m·m′)) = 4.8, which for equal masses and no damping is Σk/m = 9.6e6.
+- **(Measurement) The front's load path by height depends on the band's edge.** Rule 13's low band ends at 0.45 m, the ETK's rail and engine height. With rails centred at 0.47 m half of each rail counted as middle band (39 % low for the shell alone). With rails at 0.44 m and the mechanical parts counted, the reference car is at 59 % low and 2 % high. The short preset is at 52 %.
+  - **Open (the user's decision):** whether the band should follow the car's own centre of mass.
+- **(Measurement) The merged base fails one existing test.** With the solid parts and the census rigger together, `gen3_rig`'s wall test gives stretch p99 1.64 against 1.6 (`VG_SHEET=1`: passes). Each branch passed alone. It is the binding of the solids' walls (plan step 2b), not the structure.
+- **Process:** zsh expands `$M:u` as a modifier. Write `${M}:view` when a shot list is a shell variable.
+
 ## Changelog
 
 - 2026-11-12: first version.
 - 2026-11-12: linked the BeamNG structure study (`beamng-structure-study.md`): every node at Σk/m ≈ 7–10e6 s⁻² (whole-car ω·h 1.80–1.90), the 131-node shell specification and 24 lint rules.
+- 2026-11-13: section 12, the body rebuilt from definitions (structure, mechanical parts, shell lattice); the rigger integration and all measurements still to do.
