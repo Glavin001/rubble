@@ -633,11 +633,45 @@ impl Sedan {
             axle_r: -R_WHEELBASE / 2.0,
             z_nose: Rc::new(move |x, y| a.front_z(x, y)),
             z_tail: Rc::new(move |x, y| b.rear_z(x, y)),
+            tube: Rc::new(self.tube()),
         }
     }
 
-    /// The body-in-white: members (solids) and shell nodes.
+    /// The body-in-white: members (solids) and shell nodes. The nodes that
+    /// carry the fixed trim are lighter by the equipment and trim that are
+    /// parts of their own ([`crate::equipment`]).
     pub fn unibody(&self) -> Structure {
+        let mut st = self.unibody_raw();
+        let kg: f64 = mechanical::sedan_parts(&self.gear(), &st).iter().filter(|p| p.from_trim).map(|p| p.mass()).sum();
+        st.take_trim(kg);
+        st
+    }
+
+    /// Mass by class (kg): the shell's nodes (the body-in-white's
+    /// `physics.biw` and the fixed trim left on them), every class of part,
+    /// and what the panels, glass, lamps and the driver make up to the kerb
+    /// mass. (class, kg, nodes).
+    pub fn mass_table(&self) -> Vec<(String, f64, usize)> {
+        let st = self.unibody();
+        let parts = self.mechanical(&st);
+        let biw = self.p.physics.biw as f64;
+        let mut out = vec![("shell: body-in-white".to_string(), biw, st.nodes.len()), ("shell: fixed trim".to_string(), st.fixed_trim(biw), 0)];
+        let mut classes: Vec<&str> = Vec::new();
+        for p in &parts {
+            if !classes.contains(&p.class) {
+                classes.push(p.class);
+            }
+        }
+        for c in classes {
+            let of: Vec<&MechPart> = parts.iter().filter(|p| p.class == c).collect();
+            out.push((c.to_string(), of.iter().map(|p| p.mass()).sum(), of.iter().map(|p| p.nodes.len()).sum()));
+        }
+        let sum: f64 = out.iter().map(|r| r.1).sum();
+        out.push(("panels, glass, lamps, driver".to_string(), self.p.physics.kerb as f64 - sum, 0));
+        out
+    }
+
+    fn unibody_raw(&self) -> Structure {
         let tube = self.tube();
         let (a, b) = (self.clone(), self.clone());
         let (fz, rz) = (move |x: f64, y: f64| a.front_z(x, y), move |x: f64, y: f64| b.rear_z(x, y));

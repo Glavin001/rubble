@@ -74,10 +74,10 @@ fn reference_sedan_is_pinned() {
     // (the sheet build's 68, less its placeholder boxes, plus the
     // body-in-white's four parts and the mechanical and interior parts:
     // `tests/structure.rs`, `tests/mechanical.rs`)
-    assert_eq!(b.parts.len(), 103);
+    assert_eq!(b.parts.len(), 112);
     assert_eq!(b.markers.len(), 42);
     let total: usize = b.parts.0.iter().map(|(_, m)| m.ntris()).sum();
-    assert_eq!(total, 465_998);
+    assert_eq!(total, 473_210);
     for (name, n) in [
         ("body_shell", 114_520),
         ("hood", 39_408),
@@ -237,7 +237,10 @@ fn triangle_budgets_hold() {
     let d = design_from_json("sedan", "{}").unwrap();
     let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
     let (mut body, mut interior, mut other, mut total, mut structure, mut mech) = (0, 0, 0, 0, 0, 0);
-    let mechanical = ["impact_beam_", "subframe_", "hub_", "arm_", "strut_", "toe_link_", "steering_rack", "engine", "transmission", "driveshaft", "differential", "halfshaft_", "exhaust", "fuel_tank", "radiator"];
+    // (a mechanical part's class decides its group: the interior's parts
+    // and trim count as interior, the rest as mechanical)
+    let st = d.structure().unwrap();
+    let class: std::collections::HashMap<String, &str> = d.mechanical(&st).iter().map(|p| (p.name.clone(), p.class)).collect();
     let mut wheel = std::collections::BTreeMap::new();
     for (name, m) in &b.parts.0 {
         let n = m.ntris();
@@ -248,9 +251,9 @@ fn triangle_budgets_hold() {
             body += n;
         } else if name.starts_with("structure_") {
             structure += n;
-        } else if mechanical.iter().any(|p| name.starts_with(p)) {
+        } else if class.get(name).is_some_and(|c| *c != "interior" && *c != "wheel") {
             mech += n;
-        } else if ["dash", "steering", "seat", "console", "door_trim", "headliner"].iter().any(|p| name.starts_with(p)) {
+        } else if class.get(name) == Some(&"interior") || ["dash", "steering", "seat", "console", "door_trim", "headliner"].iter().any(|p| name.starts_with(p)) {
             interior += n;
         } else {
             other += n;
@@ -280,7 +283,7 @@ fn parametric_builds_keep_the_structure() {
     ] {
         let d = design_from_json("sedan", p).unwrap();
         let b = build(d.as_ref(), BuildOpts { uv: false, ..Default::default() });
-        assert_eq!(b.parts.len(), 103, "{p}");
+        assert_eq!(b.parts.len(), 112, "{p}");
         assert_eq!(b.markers.len(), 42, "{p}");
         let wb: serde_json::Value = serde_json::from_str(p).unwrap();
         let want = wb.get("wheelbase").and_then(|v| v.as_f64()).unwrap_or(2.83);

@@ -186,7 +186,15 @@ pub fn group_mass(g: &str) -> f64 {
 pub struct Structure {
     pub members: Vec<Member>,
     pub nodes: Vec<ShellNode>,
+    /// Fixed trim that became parts of its own (kg): taken off the nodes
+    /// that carried it ([`Structure::take_trim`]).
+    pub trim_removed: f64,
 }
+
+/// The groups whose nodes carry the fixed trim (carpet, insulation, wiring,
+/// small equipment): the floor and tunnel, the firewall, the boot floor and
+/// the quarters.
+pub const TRIM_GROUPS: [&str; 5] = ["C1", "C3", "B1", "E3", "E5"];
 
 impl Structure {
     /// The members' solids merged per render part, in a stable order.
@@ -217,6 +225,26 @@ impl Structure {
     /// Σ node mass (kg).
     pub fn node_mass(&self) -> f64 {
         self.nodes.iter().map(|n| n.mass).sum()
+    }
+
+    /// Trim and equipment that had no part of its own was mass on the
+    /// shell's nodes (the study's "fixed trim", §10.1). When `kg` of it
+    /// becomes parts with their own nodes, the nodes of [`TRIM_GROUPS`] give
+    /// it up in proportion to their mass, so the car's mass stays.
+    pub fn take_trim(&mut self, kg: f64) {
+        let carried: f64 = self.nodes.iter().filter(|n| TRIM_GROUPS.contains(&n.group)).map(|n| n.mass).sum();
+        assert!(kg < 0.6 * carried, "{kg} kg of trim is more than the floor, firewall and quarter nodes can give ({carried} kg)");
+        let k = 1.0 - kg / carried;
+        for n in self.nodes.iter_mut().filter(|n| TRIM_GROUPS.contains(&n.group)) {
+            n.mass *= k;
+        }
+        self.trim_removed += kg;
+    }
+
+    /// The fixed trim still on the shell's nodes (kg), for a body-in-white
+    /// of `biw` kg (the design's `physics.biw`).
+    pub fn fixed_trim(&self, biw: f64) -> f64 {
+        self.node_mass() - biw
     }
 
     /// Σ steel of the members that have a section or a face here (kg): the

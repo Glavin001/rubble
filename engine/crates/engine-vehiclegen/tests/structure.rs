@@ -109,13 +109,15 @@ fn check_structure(st: &Structure, what: &str) {
     for (g, n, kg) in GROUPS {
         let of: Vec<_> = st.nodes.iter().filter(|x| x.group == g).collect();
         assert_eq!(of.len(), n, "{what}: group {g}");
-        assert!(of.iter().all(|x| x.mass == kg));
+        // (the trim groups' nodes are lighter by the trim that is now parts)
+        let trim = engine_vehiclegen::structure::TRIM_GROUPS.contains(&g);
+        assert!(of.iter().all(|x| if trim { x.mass < kg && x.mass > 0.4 * kg } else { x.mass == kg }), "{what}: group {g}");
     }
     let mut names: Vec<&str> = st.nodes.iter().map(|n| n.name.as_str()).collect();
     names.sort();
     names.dedup();
     assert_eq!(names.len(), 131);
-    assert!((st.node_mass() - 487.1).abs() < 0.11);
+    assert!((st.node_mass() + st.trim_removed - 487.1).abs() < 0.11);
     // symmetric: every node has its mirror
     for n in &st.nodes {
         let m = DVec3::new(-n.pos.x, n.pos.y, n.pos.z);

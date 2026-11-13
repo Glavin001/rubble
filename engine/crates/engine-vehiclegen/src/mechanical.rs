@@ -20,7 +20,7 @@ use crate::frame::Frame;
 use crate::mesh::{box_, closed_lathe, rbox, rot_x, Mat, Mesh};
 use crate::structure::{box_along, box_stations, cyl_along, Structure};
 
-const INF: f64 = f64::INFINITY;
+pub(crate) const INF: f64 = f64::INFINITY;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BeamKind {
@@ -77,6 +77,11 @@ pub struct Mount {
     pub v: Vals,
     /// rest length over spawn length (SUPPORT rests: 0.85–0.95)
     pub precomp: f64,
+    /// The far ends are nodes of this body panel's own lattice (a door, the
+    /// hood, the boot lid, a bumper cover: the rigger's nodes for it, which
+    /// have no names here), the nearest ones to `from`; `to` is then empty.
+    /// A hinge or a latch is a part mounted to the shell and to its panel.
+    pub to_part: Option<String>,
 }
 
 /// A member that is one beam between two nodes of other parts (an arm's
@@ -107,32 +112,43 @@ pub struct MechPart {
     pub binds: Vec<String>,
     /// other render parts that ride this part (a wheel's rim and tyre)
     pub meshes: Vec<String>,
+    /// The body panel this part is fixed inside or onto (a door's intrusion
+    /// beam, a number plate): it has no nodes, its solid follows that
+    /// panel's own nodes.
+    pub host: Option<String>,
+    /// Mass (kg) of a part without nodes: carried by its host panel's or its
+    /// bound part's listed mass (a caliper on its hub), not added to the car.
+    pub carried_kg: f64,
+    /// Its mass was part of the shell's fixed-trim allowance before it was a
+    /// part ([`crate::structure::Structure::take_trim`]): the study's parts
+    /// (§10.5) are not, the equipment and trim of [`crate::equipment`] are.
+    pub from_trim: bool,
 }
 
 impl MechPart {
     pub fn mass(&self) -> f64 {
         self.nodes.iter().map(|n| n.mass).sum()
     }
-    fn new(name: &str, class: &'static str) -> MechPart {
-        MechPart { name: name.into(), class, mesh: Mesh::new(), nodes: Vec::new(), internal: Vec::new(), mounts: Vec::new(), links: Vec::new(), binds: Vec::new(), meshes: Vec::new() }
+    pub(crate) fn new(name: &str, class: &'static str) -> MechPart {
+        MechPart { name: name.into(), class, mesh: Mesh::new(), nodes: Vec::new(), internal: Vec::new(), mounts: Vec::new(), links: Vec::new(), binds: Vec::new(), meshes: Vec::new(), host: None, carried_kg: 0.0, from_trim: false }
     }
-    fn node(&mut self, tag: &str, pos: DVec3, mass: f64) -> String {
+    pub(crate) fn node(&mut self, tag: &str, pos: DVec3, mass: f64) -> String {
         let name = format!("{}_{tag}", self.prefix());
         self.nodes.push(PartNode { name: name.clone(), pos, mass, collide: true });
         name
     }
     /// Node names are short: the part's initials and its corner.
-    fn prefix(&self) -> String {
+    pub(crate) fn prefix(&self) -> String {
         let mut it = self.name.split('_');
         let head: String = it.next().unwrap().chars().take(3).collect();
         let rest: String = it.map(|w| if w.len() <= 2 { w.to_lowercase() } else { w.chars().take(1).collect() }).collect();
         format!("{head}{rest}")
     }
-    fn names(&self) -> Vec<String> {
+    pub(crate) fn names(&self) -> Vec<String> {
         self.nodes.iter().map(|n| n.name.clone()).collect()
     }
     /// Every pair of the part's nodes.
-    fn complete(&self) -> Vec<(usize, usize)> {
+    pub(crate) fn complete(&self) -> Vec<(usize, usize)> {
         let n = self.nodes.len();
         (0..n).flat_map(|i| (i + 1..n).map(move |j| (i, j))).collect()
     }
@@ -157,18 +173,20 @@ pub struct Gear {
     /// the tail and nose faces (as built): z at (x, y)
     pub z_nose: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
     pub z_tail: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
+    /// the body's surface
+    pub tube: std::rc::Rc<crate::tube::Tube>,
 }
 
-fn cyl(a: DVec3, b: DVec3, r: f64) -> Mesh {
+pub(crate) fn cyl(a: DVec3, b: DVec3, r: f64) -> Mesh {
     cyl_along(&[a, b], r, 10, Mat::MetalBare)
 }
 
-fn bar(a: DVec3, b: DVec3, w: f64, h: f64) -> Mesh {
+pub(crate) fn bar(a: DVec3, b: DVec3, w: f64, h: f64) -> Mesh {
     let up = if (b - a).normalize().dot(DVec3::Y).abs() > 0.9 { DVec3::Z } else { DVec3::Y };
     box_along(&[a, b], up, w, h)
 }
 
-fn sh(st: &Structure, name: &str) -> DVec3 {
+pub(crate) fn sh(st: &Structure, name: &str) -> DVec3 {
     st.node(name).unwrap_or_else(|| panic!("no shell node {name}")).pos
 }
 
@@ -209,7 +227,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         for (s, lo) in [("l", 3), ("r", 0)] {
             let from: Vec<String> = (lo..lo + 2).flat_map(|i| [p.nodes[2 * i].name.clone(), p.nodes[2 * i + 1].name.clone()]).collect();
             let to = if front { vec![format!("sh_a1_u{s}"), format!("sh_a1_d{s}")] } else { vec![format!("sh_e1_3u{s}"), format!("sh_e1_3d{s}")] };
-            p.mounts.push(Mount { group: format!("{name}_{s}"), from, to, beams: 8, kind: BeamKind::Normal, v: vals(1e6, 100.0, dep, strength), precomp: 1.0 });
+            p.mounts.push(Mount { group: format!("{name}_{s}"), from, to, beams: 8, kind: BeamKind::Normal, v: vals(1e6, 100.0, dep, strength), precomp: 1.0, to_part: None });
         }
         out.push(p);
     }
@@ -237,7 +255,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         for (s, sg) in [("l", 1.0), ("r", -1.0)] {
             let from: Vec<String> = p.nodes.iter().filter(|n| n.pos.x * sg > -0.01).map(|n| n.name.clone()).collect();
             let to = vec![format!("sh_a4_{s}"), format!("sh_a5_{s}"), format!("sh_a2_d{s}"), format!("sh_a2_u{s}"), format!("sh_a7_{s}"), format!("sh_c1_1t{s}"), format!("sh_b1_i{s}"), format!("sh_a3_dc")];
-            p.mounts.push(Mount { group: format!("subframe_front_{s}"), from, to, beams: 16, kind: BeamKind::Normal, v: vals(1.5e6, 180.0, 157e3, 400e3), precomp: 1.0 });
+            p.mounts.push(Mount { group: format!("subframe_front_{s}"), from, to, beams: 16, kind: BeamKind::Normal, v: vals(1.5e6, 180.0, 157e3, 400e3), precomp: 1.0, to_part: None });
         }
         out.push(p);
     }
@@ -259,7 +277,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
             for (e, k, zc) in [("f", 1, zq_f), ("r", 2, zq_r)] {
                 let from: Vec<String> = p.nodes.iter().filter(|n| n.pos.x * sg > -0.01 && (n.pos.z - f.z(zc)).abs() < 0.05).map(|n| n.name.clone()).collect();
                 let to = vec![format!("sh_e1_{k}d{s}"), format!("sh_e1_{k}u{s}"), format!("sh_e1_{}d{s}", 3 - k), format!("sh_e3_{k}"), format!("sh_e2_{s}")];
-                p.mounts.push(Mount { group: format!("subframe_rear_{e}{s}"), from, to, beams: 10, kind: BeamKind::Normal, v: vals(2.1e6, 500.0, 22e3, 150e3), precomp: 1.0 });
+                p.mounts.push(Mount { group: format!("subframe_rear_{e}{s}"), from, to, beams: 10, kind: BeamKind::Normal, v: vals(2.1e6, 500.0, 22e3, 150e3), precomp: 1.0, to_part: None });
             }
         }
         out.push(p);
@@ -273,7 +291,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         p.node("r", r(-0.28, y_rack, z_rack), 5.0);
         p.mesh = cyl(r(-0.30, y_rack, z_rack), r(0.30, y_rack, z_rack), 0.024);
         p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 100.0, 85e3, INF), deform_group: None });
-        p.mounts.push(Mount { group: "steering_rack".into(), from: p.names(), to: vec!["subf_kl".into(), "subf_kr".into()], beams: 4, kind: BeamKind::Normal, v: vals(0.0, 100.0, 85e3, INF), precomp: 1.0 });
+        p.mounts.push(Mount { group: "steering_rack".into(), from: p.names(), to: vec!["subf_kl".into(), "subf_kr".into()], beams: 4, kind: BeamKind::Normal, v: vals(0.0, 100.0, 85e3, INF), precomp: 1.0, to_part: None });
         out.push(p);
     }
 
@@ -358,7 +376,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
             wh.node(&format!("f{}", k + 1), at(0.0, rr * a.sin(), rr * a.cos()), 3.0);
         }
         wh.internal.push(Internal { pairs: wh.complete(), v: vals(0.0, 100.0, 168e3, INF), deform_group: None });
-        wh.mounts.push(Mount { group: format!("wheel_{c}"), from: vec![wh.nodes[0].name.clone(), wh.nodes[1].name.clone()], to: hub.names(), beams: 8, kind: BeamKind::Normal, v: vals(6e6, 100.0, 168e3, 168e3), precomp: 1.0 });
+        wh.mounts.push(Mount { group: format!("wheel_{c}"), from: vec![wh.nodes[0].name.clone(), wh.nodes[1].name.clone()], to: hub.names(), beams: 8, kind: BeamKind::Normal, v: vals(6e6, 100.0, 168e3, 168e3), precomp: 1.0, to_part: None });
         wh.meshes.extend([format!("rim_{cn}"), format!("tyre_{cn}")]);
         // hub cap: a pressed disc clipped into the rim's centre
         let mut cap = MechPart::new(&format!("hub_cap_{cn}"), "wheel");
@@ -374,7 +392,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         disc.transform(None, at(xc, 0.0, 0.0));
         cap.mesh = disc;
         cap.internal.push(Internal { pairs: cap.complete(), v: vals(0.0, 20.0, 300.0, INF), deform_group: None });
-        cap.mounts.push(Mount { group: format!("hub_cap_{c}"), from: cap.names(), to: wh.names(), beams: 6, kind: BeamKind::Normal, v: vals(0.0, 20.0, 300.0, 600.0), precomp: 1.0 });
+        cap.mounts.push(Mount { group: format!("hub_cap_{c}"), from: cap.names(), to: wh.names(), beams: 6, kind: BeamKind::Normal, v: vals(0.0, 20.0, 300.0, 600.0), precomp: 1.0, to_part: None });
         out.extend([hub, arm, strut]);
         if !upper.links.is_empty() {
             out.push(upper);
@@ -399,18 +417,10 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         }
         p.internal.push(Internal { pairs, v: vals(2e7, 0.0, 250e3, INF), deform_group: Some(("engine".into(), 0.001)) });
         for (s, ear) in [("l", "eng_ml"), ("r", "eng_mr")] {
-            p.mounts.push(Mount { group: format!("engine_mount_{s}"), from: vec![ear.into()], to: vec![format!("subf_f{s}"), format!("subf_r{s}"), format!("subf_k{s}")], beams: 3, kind: BeamKind::Bounded, v: vals(32_000.0, 600.0, 20e3, 90e3), precomp: 1.0 });
+            p.mounts.push(Mount { group: format!("engine_mount_{s}"), from: vec![ear.into()], to: vec![format!("subf_f{s}"), format!("subf_r{s}"), format!("subf_k{s}")], beams: 3, kind: BeamKind::Bounded, v: vals(32_000.0, 600.0, 20e3, 90e3), precomp: 1.0, to_part: None });
         }
-        // block, head with its cover, sump, intake, and the mount ears
-        let zc = 0.5 * (ez0 + ez1);
-        let hz = 0.5 * (ez1 - ez0);
-        p.mesh.add(&rbox(r(0.0, 0.50, zc), DVec3::new(f.x(ex), 0.115, hz), 0.02, 2, Mat::MetalBare));
-        p.mesh.add(&rbox(r(0.0, 0.675, zc), DVec3::new(f.x(0.16), 0.058, hz - 0.01), 0.02, 2, Mat::TrimBlack));
-        p.mesh.add(&rbox(r(0.0, 0.358, zc + 0.03), DVec3::new(f.x(0.15), 0.025, hz - 0.06), 0.012, 2, Mat::MetalBare));
-        p.mesh.add(&rbox(r(-0.245, 0.56, zc), DVec3::new(0.040, 0.045, hz - 0.05), 0.02, 2, Mat::TrimBlack));
-        for sgn in [1.0, -1.0] {
-            p.mesh.add(&box_(r(sgn * 0.262, 0.40, zm), DVec3::new(0.058, 0.02, 0.04), Mat::MetalBare, None));
-        }
+        // block, head and cover, sump, intake, manifold, accessory drive, ears
+        p.mesh = crate::equipment::engine_mesh(f, ex, ez0, ez1);
         out.push(p);
     }
     // ---- transmission behind it, into the tunnel's mouth
@@ -420,8 +430,8 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         p.node("t", r(0.0, y_tt, z_tt), 20.0);
         p.node("b", r(0.0, 0.40, ez0 - 0.10), 25.0);
         p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(4.8e6, 150.0, 27e3, INF), deform_group: None });
-        p.mounts.push(Mount { group: "transmission_engine".into(), from: p.names(), to: (5..=8).map(|i| format!("eng_{i}")).collect(), beams: 8, kind: BeamKind::Normal, v: vals(4.8e6, 150.0, 27e3, INF), precomp: 1.0 });
-        p.mounts.push(Mount { group: "transmission_mount".into(), from: vec![p.nodes[0].name.clone()], to: ["c1_1tl", "c1_1tr", "c1_2tl", "c1_2tr", "c3_1", "c3_2", "c1_3tl", "c1_3tr", "c3_3"].iter().map(|n| format!("sh_{n}")).collect(), beams: 9, kind: BeamKind::Bounded, v: vals(1.4e5, 2700.0, 5000.0, 160e3), precomp: 1.0 });
+        p.mounts.push(Mount { group: "transmission_engine".into(), from: p.names(), to: (5..=8).map(|i| format!("eng_{i}")).collect(), beams: 8, kind: BeamKind::Normal, v: vals(4.8e6, 150.0, 27e3, INF), precomp: 1.0, to_part: None });
+        p.mounts.push(Mount { group: "transmission_mount".into(), from: vec![p.nodes[0].name.clone()], to: ["c1_1tl", "c1_1tr", "c1_2tl", "c1_2tr", "c3_1", "c3_2", "c1_3tl", "c1_3tr", "c3_3"].iter().map(|n| format!("sh_{n}")).collect(), beams: 9, kind: BeamKind::Bounded, v: vals(1.4e5, 2700.0, 5000.0, 160e3), precomp: 1.0, to_part: None });
         // bellhousing, then the case tapering into the tunnel
         let stn = [(ez0 - 0.004, 0.44, 0.34, 0.30), (ez0 - 0.20, 0.42, 0.30, 0.26), (ez0 - 0.24, 0.315, 0.17, 0.11), (z_tt - 0.06, 0.305, 0.13, 0.115)];
         let rings: Vec<(DVec3, DVec3, DVec3, f64, f64)> = stn.iter().map(|&(z, y, w, h)| (r(0.0, y, z), DVec3::X, DVec3::Y, w, h)).collect();
@@ -437,8 +447,8 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         p.node("r", b, 0.5);
         p.mesh = cyl(a - DVec3::Z * 0.01, b + DVec3::Z * 0.01, 0.030);
         p.internal.push(Internal { pairs: vec![(0, 1)], v: vals(0.0, 50.0, 1500.0, INF), deform_group: None });
-        p.mounts.push(Mount { group: "driveshaft_front".into(), from: vec!["dri_f".into()], to: vec!["tra_t".into(), "tra_b".into()], beams: 2, kind: BeamKind::Normal, v: vals(0.0, 50.0, 1500.0, 3500.0), precomp: 1.0 });
-        p.mounts.push(Mount { group: "driveshaft_rear".into(), from: vec!["dri_r".into()], to: vec!["dif_n".into(), "dif_l".into(), "dif_r".into()], beams: 3, kind: BeamKind::Normal, v: vals(0.0, 50.0, 1500.0, 3500.0), precomp: 1.0 });
+        p.mounts.push(Mount { group: "driveshaft_front".into(), from: vec!["dri_f".into()], to: vec!["tra_t".into(), "tra_b".into()], beams: 2, kind: BeamKind::Normal, v: vals(0.0, 50.0, 1500.0, 3500.0), precomp: 1.0, to_part: None });
+        p.mounts.push(Mount { group: "driveshaft_rear".into(), from: vec!["dri_r".into()], to: vec!["dif_n".into(), "dif_l".into(), "dif_r".into()], beams: 3, kind: BeamKind::Normal, v: vals(0.0, 50.0, 1500.0, 3500.0), precomp: 1.0, to_part: None });
         out.push(p);
     }
     {
@@ -449,7 +459,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         p.mesh.add(&rbox(r(0.0, y_d, g.axle_r - 0.02), DVec3::new(0.105, 0.065, 0.07), 0.05, 3, Mat::MetalBare));
         p.mesh.add(&cyl(r(0.0, y_d, g.axle_r + 0.054), r(0.0, y_d, z_dn + 0.008), 0.024));
         p.internal.push(Internal { pairs: p.complete(), v: vals(4.8e6, 150.0, 27e3, INF), deform_group: None });
-        p.mounts.push(Mount { group: "differential".into(), from: p.names(), to: ["fl", "fr", "rl", "rr", "cf", "cr"].iter().map(|n| format!("subr_{n}")).collect(), beams: 18, kind: BeamKind::Normal, v: vals(4.8e6, 150.0, 27e3, 200e3), precomp: 1.0 });
+        p.mounts.push(Mount { group: "differential".into(), from: p.names(), to: ["fl", "fr", "rl", "rr", "cf", "cr"].iter().map(|n| format!("subr_{n}")).collect(), beams: 18, kind: BeamKind::Normal, v: vals(4.8e6, 150.0, 27e3, 200e3), precomp: 1.0, to_part: None });
         for (cn, sg) in [("RL", 1.0), ("RR", -1.0)] {
             let c = cn.to_lowercase();
             let s = if sg > 0.0 { "l" } else { "r" };
@@ -495,14 +505,14 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         pairs.extend((0..n - 2).map(|i| (i, i + 2)));
         pairs.extend((0..n - 3).map(|i| (i, i + 3)));
         p.internal.push(Internal { pairs, v: vals(1.5e6, 50.0, 12e3, INF), deform_group: None });
-        p.mounts.push(Mount { group: "exhaust_manifold".into(), from: vec!["exh_1".into(), "exh_2".into()], to: vec!["eng_1".into(), "eng_3".into(), "eng_5".into(), "eng_7".into()], beams: 4, kind: BeamKind::Normal, v: vals(1.5e6, 50.0, 12e3, 65e3), precomp: 1.0 });
+        p.mounts.push(Mount { group: "exhaust_manifold".into(), from: vec!["exh_1".into(), "exh_2".into()], to: vec!["eng_1".into(), "eng_3".into(), "eng_5".into(), "eng_7".into()], beams: 4, kind: BeamKind::Normal, v: vals(1.5e6, 50.0, 12e3, 65e3), precomp: 1.0, to_part: None });
         for (grp, from, to) in [
             ("exhaust_hanger_1", vec![4, 5], vec!["c1_1tl", "c1_2tl", "c1_2ol", "c3_2"]),
             ("exhaust_hanger_2", vec![6, 7], vec!["c1_3tl", "c1_4tl", "c1_3ol", "c1_4ol"]),
             ("exhaust_hanger_3", vec![9, 10], vec!["e1_1dl", "e1_1ul", "e3_1", "c1_5tl"]),
             ("exhaust_hanger_4", vec![12, 13], vec!["e1_3dl", "e1_3ul", "e3_3", "e1_2dl"]),
         ] {
-            p.mounts.push(Mount { group: grp.into(), from: from.iter().map(|i| format!("exh_{i}")).collect(), to: to.iter().map(|n| format!("sh_{n}")).collect(), beams: 8, kind: BeamKind::Normal, v: vals(47_000.0, 370.0, 4000.0, 15e3), precomp: 1.0 });
+            p.mounts.push(Mount { group: grp.into(), from: from.iter().map(|i| format!("exh_{i}")).collect(), to: to.iter().map(|n| format!("sh_{n}")).collect(), beams: 8, kind: BeamKind::Normal, v: vals(47_000.0, 370.0, 4000.0, 15e3), precomp: 1.0, to_part: None });
         }
         out.push(p);
     }
@@ -516,7 +526,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         }
         p.mesh = rbox(r(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1)), DVec3::new(0.5 * (f.x(x1) - f.x(x0)), 0.5 * (y1 - y0), 0.5 * (z1 - z0)), 0.03, 3, Mat::TrimBlack);
         p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 50.0, 5000.0, INF), deform_group: None });
-        p.mounts.push(Mount { group: "fuel_tank".into(), from: p.names(), to: ["e1_2dl", "e1_2ul", "e1_2dr", "e1_2ur", "e1_3dl", "e1_3dr", "e3_2", "e3_3"].iter().map(|n| format!("sh_{n}")).collect(), beams: 28, kind: BeamKind::Normal, v: vals(30_000.0, 500.0, 5000.0, 35e3), precomp: 1.0 });
+        p.mounts.push(Mount { group: "fuel_tank".into(), from: p.names(), to: ["e1_2dl", "e1_2ul", "e1_2dr", "e1_2ur", "e1_3dl", "e1_3dr", "e3_2", "e3_3"].iter().map(|n| format!("sh_{n}")).collect(), beams: 28, kind: BeamKind::Normal, v: vals(30_000.0, 500.0, 5000.0, 35e3), precomp: 1.0, to_part: None });
         out.push(p);
     }
     // ---- radiator on the radiator support
@@ -530,7 +540,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         }
         p.mesh = box_(DVec3::new(0.0, 0.5 * (y0 + y1), z), DVec3::new(hx, 0.5 * (y1 - y0), 0.018), Mat::TrimBlack, None);
         p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 50.0, 7500.0, INF), deform_group: Some(("radiator".into(), 0.05)) });
-        p.mounts.push(Mount { group: "radiator".into(), from: p.names(), to: ["a3_ul", "a3_uc", "a3_ur", "a3_dc", "a2_ul", "a2_ur"].iter().map(|n| format!("sh_{n}")).collect(), beams: 12, kind: BeamKind::Normal, v: vals(1e6, 150.0, 7500.0, 20e3), precomp: 1.0 });
+        p.mounts.push(Mount { group: "radiator".into(), from: p.names(), to: ["a3_ul", "a3_uc", "a3_ur", "a3_dc", "a2_ul", "a2_ur"].iter().map(|n| format!("sh_{n}")).collect(), beams: 12, kind: BeamKind::Normal, v: vals(1e6, 150.0, 7500.0, 20e3), precomp: 1.0, to_part: None });
         out.push(p);
     }
 
@@ -564,7 +574,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         for (foot, (row, lane)) in feet.iter().zip([(3, "o"), (3, "t"), (4, "o"), (4, "t")]) {
             let to = vec![format!("sh_c1_{row}{lane}{s}"), format!("sh_c1_{row}{}{s}", if lane == "o" { "t" } else { "o" }), format!("sh_c2_{row}{s}"), format!("sh_c3_{row}")];
             let from = vec![foot.clone(), p.nodes[4].name.clone()];
-            p.mounts.push(Mount { group: format!("seat_{}_{}", cn.to_lowercase(), &foot[foot.len() - 2..]), from, to, beams: 6, kind: BeamKind::Normal, v: vals(2.8e5, 38.0, 6000.0, 30e3), precomp: 1.0 });
+            p.mounts.push(Mount { group: format!("seat_{}_{}", cn.to_lowercase(), &foot[foot.len() - 2..]), from, to, beams: 6, kind: BeamKind::Normal, v: vals(2.8e5, 38.0, 6000.0, 30e3), precomp: 1.0, to_part: None });
         }
         out.push(p);
     }
@@ -581,8 +591,8 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
             p.node(tg, DVec3::new(x, y, z), 2.3);
         }
         p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 38.0, 6000.0, INF), deform_group: None });
-        p.mounts.push(Mount { group: "seat_rear_front".into(), from: vec!["sear_fl".into(), "sear_fr".into(), "sear_c".into(), "sear_rl".into(), "sear_rr".into()], to: ["c1_5tl", "c1_5tr", "c1_5ol", "c1_5or", "c3_5", "e3_1", "e1_1ul", "e1_1ur"].iter().map(|n| format!("sh_{n}")).collect(), beams: 14, kind: BeamKind::Normal, v: vals(2.8e5, 38.0, 6000.0, 30e3), precomp: 1.0 });
-        p.mounts.push(Mount { group: "seat_rear_back".into(), from: vec!["sear_bl".into(), "sear_br".into(), "sear_bc".into()], to: ["e7_l", "e7_r", "e2_l", "e2_r", "e6_ol", "e6_or"].iter().map(|n| format!("sh_{n}")).collect(), beams: 10, kind: BeamKind::Normal, v: vals(2.8e5, 38.0, 6000.0, 30e3), precomp: 1.0 });
+        p.mounts.push(Mount { group: "seat_rear_front".into(), from: vec!["sear_fl".into(), "sear_fr".into(), "sear_c".into(), "sear_rl".into(), "sear_rr".into()], to: ["c1_5tl", "c1_5tr", "c1_5ol", "c1_5or", "c3_5", "e3_1", "e1_1ul", "e1_1ur"].iter().map(|n| format!("sh_{n}")).collect(), beams: 14, kind: BeamKind::Normal, v: vals(2.8e5, 38.0, 6000.0, 30e3), precomp: 1.0, to_part: None });
+        p.mounts.push(Mount { group: "seat_rear_back".into(), from: vec!["sear_bl".into(), "sear_br".into(), "sear_bc".into()], to: ["e7_l", "e7_r", "e2_l", "e2_r", "e6_ol", "e6_or"].iter().map(|n| format!("sh_{n}")).collect(), beams: 10, kind: BeamKind::Normal, v: vals(2.8e5, 38.0, 6000.0, 30e3), precomp: 1.0, to_part: None });
         out.push(p);
     }
     {
@@ -607,7 +617,7 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
             ("dash_r", vec!["das_br", "das_mr", "das_tr"], vec!["b2_or", "b2_ir", "b1_or", "b1_ir", "c2_1r"]),
             ("dash_c", vec!["das_c", "das_ml", "das_mr"], vec!["c3_1", "c3_2", "b1_il", "b1_ir"]),
         ] {
-            p.mounts.push(Mount { group: grp.into(), from: from.iter().map(|n| n.to_string()).collect(), to: to.iter().map(|n| format!("sh_{n}")).collect(), beams: 10, kind: BeamKind::Normal, v: vals(4e6, 60.0, 32e3, 60e3), precomp: 1.0 });
+            p.mounts.push(Mount { group: grp.into(), from: from.iter().map(|n| n.to_string()).collect(), to: to.iter().map(|n| format!("sh_{n}")).collect(), beams: 10, kind: BeamKind::Normal, v: vals(4e6, 60.0, 32e3, 60e3), precomp: 1.0, to_part: None });
         }
         p.meshes.push("steering_wheel".into());
         out.push(p);
@@ -621,9 +631,10 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
             p.node(tg, DVec3::new(0.0, y, z), 1.25);
         }
         p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 30.0, 3000.0, INF), deform_group: None });
-        p.mounts.push(Mount { group: "console".into(), from: p.names(), to: ["c3_2", "c3_3", "c3_4", "c1_2tl", "c1_2tr", "c1_3tl", "c1_3tr", "c1_4tl", "c1_4tr"].iter().map(|n| format!("sh_{n}")).collect(), beams: 12, kind: BeamKind::Normal, v: vals(0.0, 30.0, 3000.0, 10e3), precomp: 1.0 });
+        p.mounts.push(Mount { group: "console".into(), from: p.names(), to: ["c3_2", "c3_3", "c3_4", "c1_2tl", "c1_2tr", "c1_3tl", "c1_3tr", "c1_4tl", "c1_4tr"].iter().map(|n| format!("sh_{n}")).collect(), beams: 12, kind: BeamKind::Normal, v: vals(0.0, 30.0, 3000.0, 10e3), precomp: 1.0, to_part: None });
         out.push(p);
     }
+    crate::equipment::sedan_equipment(g, st, &mut out);
     out
 }
 
