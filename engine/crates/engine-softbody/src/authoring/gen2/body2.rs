@@ -517,7 +517,62 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
     for (name, beams) in &soft {
         // (not the exhaust: a chain is not one body; its hangers carry
         // 18 kg and it sags 4 mm)
-        if done.contains(&name.as_str()) || name == "exhaust" {
+        if done.contains(&name.as_str()) {
+            continue;
+        }
+        if name == "exhaust" {
+            // A chain is not one body: each node its hangers hold carries
+            // itself and the chain nodes nearest it, and its hangers are
+            // precompressed for that weight alone (the least strain energy
+            // with the right vertical sum). Without it the chain sagged 4 mm
+            // between hangers and its skin turned 1.5 degrees parked.
+            let chain = nodes_of(r, &[name.as_str()]);
+            let mut hung: BTreeMap<usize, Vec<(usize, f64)>> = BTreeMap::new();
+            for &(j, k) in beams {
+                let b = &r.car.beams[j];
+                let i = if chain.contains(&b.a) { b.a } else { b.b };
+                hung.entry(i).or_default().push((j, k));
+            }
+            let mut weight: BTreeMap<usize, f64> = BTreeMap::new();
+            for &i in &chain {
+                let Some(&h) = hung.keys().min_by(|&&a, &&b| {
+                    r.car.p(a).distance(r.car.p(i)).total_cmp(&r.car.p(b).distance(r.car.p(i)))
+                }) else {
+                    continue;
+                };
+                *weight.entry(h).or_default() += r.car.nodes[i].fixed_mass as f64 * 9.81;
+            }
+            for (i, list) in &hung {
+                // (JBeam frame: z up) each beam's pull on the node per metre
+                // of rest length added, along the beam from its other end
+                let up: Vec<f64> = list
+                    .iter()
+                    .map(|&(j, _)| {
+                        let b = &r.car.beams[j];
+                        let o = if b.a == *i { b.b } else { b.a };
+                        (r.car.p(*i) - r.car.p(o)).normalize_or_zero().z as f64
+                    })
+                    .collect();
+                let den: f64 = list.iter().zip(&up).map(|(&(_, k), u)| k * u * u).sum();
+                if den < 1.0 {
+                    continue;
+                }
+                let lam = weight.get(i).copied().unwrap_or(0.0) / den;
+                for (&(j, _), u) in list.iter().zip(&up) {
+                    let b = &r.car.beams[j];
+                    let l = r.car.p(b.a).distance(r.car.p(b.b)) as f64;
+                    let pc = ((l + lam * u) / l).clamp(0.8, 1.25) as f32;
+                    let old = r.car.precomp.get(&j).copied().unwrap_or(1.0);
+                    r.car.precomp.insert(j, old * pc);
+                    if let Some(Fixed {
+                        kind: FixedKind::Bounded { travel, .. },
+                        ..
+                    }) = r.car.fixed.get_mut(&j)
+                    {
+                        *travel = travel.max((pc - 1.0).abs() + MOUNT_TRAVEL);
+                    }
+                }
+            }
             continue;
         }
         let body = nodes_of(r, &[name.as_str()]);
@@ -707,6 +762,13 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
             let (lam, _) = super::build::weakest_axis(m);
             (lam.max(0.0) / nodes.len() as f32).sqrt() < THICK
         };
+        // (Open: a hub cap's three nodes lie in one plane, so its fit takes
+        // wheel nodes too, and the wheel's frame nodes lean about a degree
+        // against its axle under the car's weight: the cap's skin turns
+        // 1.7 degrees against its nodes' rigid motion, parked. The fit over
+        // the cap's three and the two axle nodes gives 1.8. It needs a
+        // triangle-frame rigid bind for a three-node part, or wheel frame
+        // nodes heavy enough to hold their beams' springs.)
         'grow: {
             for m in &p.mounts {
                 for t in &m.to {
