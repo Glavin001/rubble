@@ -31,7 +31,10 @@ fn low_pass(x: &[f32], dt: f32, hz: f32) -> Vec<f32> {
     let w = (std::f32::consts::PI * hz * dt).tan();
     let n = 1.0 / (1.0 + std::f32::consts::SQRT_2 * w + w * w);
     let (b0, b1, b2) = (w * w * n, 2.0 * w * w * n, w * w * n);
-    let (a1, a2) = (2.0 * (w * w - 1.0) * n, (1.0 - std::f32::consts::SQRT_2 * w + w * w) * n);
+    let (a1, a2) = (
+        2.0 * (w * w - 1.0) * n,
+        (1.0 - std::f32::consts::SQRT_2 * w + w * w) * n,
+    );
     let pass = |x: &[f32]| {
         let mut y = vec![0.0f32; x.len()];
         let (mut x1, mut x2, mut y1, mut y2) = (x[0], x[0], x[0], x[0]);
@@ -66,7 +69,11 @@ fn label(d: &SoftVehicleDesc, part_of: &[usize], i: usize) -> String {
         let g = rest.split('_').next().unwrap_or("");
         return format!("{}{side}", g.to_uppercase());
     }
-    let p = d.parts.get(part_of[i]).map(|p| p.name.as_str()).unwrap_or("?");
+    let p = d
+        .parts
+        .get(part_of[i])
+        .map(|p| p.name.as_str())
+        .unwrap_or("?");
     let p = p.trim_start_matches("sedan_");
     // (a part on the centre line that spans both sides keeps no side)
     if p.ends_with("_l") || p.ends_with("_r") || p.len() > 3 && p[p.len() - 3..].starts_with('_') {
@@ -91,13 +98,21 @@ struct Group {
 fn main() -> Result<(), String> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let scene = a.first().cloned().unwrap_or_else(|| "offset".into());
-    let kmh: f32 = a.get(1).and_then(|x| x.parse().ok()).unwrap_or(match scene.as_str() {
-        "wall" => 56.0,
-        "pole" => 50.0,
-        _ => 64.0,
-    });
+    let kmh: f32 = a
+        .get(1)
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(match scene.as_str() {
+            "wall" => 56.0,
+            "pole" => 50.0,
+            _ => 64.0,
+        });
     let design = a.get(2).cloned().unwrap_or_else(|| "sedan".into());
-    let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let env = |k: &str, d: f32| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
     let (ms, top) = (env("FR_MS", 160.0), env("FR_TOP", 34.0) as usize);
     let t0 = std::time::Instant::now();
     let inp = rig::DesignInput::find(&design, None, None)?;
@@ -112,7 +127,10 @@ fn main() -> Result<(), String> {
         .filter(|(p, _)| p.ends_with(".jbeam"))
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
-    let pc = texts.iter().find(|(p, _)| p.ends_with(".pc")).map(|(_, b)| b.as_str());
+    let pc = texts
+        .iter()
+        .find(|(p, _)| p.ends_with(".pc"))
+        .map(|(_, b)| b.as_str());
     let d = engine_softbody::jbeam::load_jbeam(&refs, pc)?;
     let mut part_of = vec![usize::MAX; d.nodes.len()];
     for (k, p) in d.parts.iter().enumerate() {
@@ -121,34 +139,84 @@ fn main() -> Result<(), String> {
         }
     }
     // ---- the scene, placed as `vehicle_film` places it
-    let low = d.nodes.iter().map(|n| n.position[1]).fold(f32::MAX, f32::min);
+    let low = d
+        .nodes
+        .iter()
+        .map(|n| n.position[1])
+        .fold(f32::MAX, f32::min);
     let low = d.wheels.iter().fold(low, |m, w| {
         let y = |i: u32| d.nodes[i as usize].position[1];
         m.min(0.5 * (y(w.node1) + y(w.node2)) - w.radius)
     });
     let v0 = kmh / 3.6;
-    let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(&d, Vec3::Y * (0.02 - low), Vec3::Z * v0, settings())?;
+    let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(
+        &d,
+        Vec3::Y * (0.02 - low),
+        Vec3::Z * v0,
+        settings(),
+    )?;
     s.surface_contact = std::env::var("FR_SURFACE").map_or(true, |v| v != "0");
     s.finish();
-    let zmax = d.nodes.iter().map(|n| n.position[2]).fold(f32::MIN, f32::max);
-    let half_w = d.nodes.iter().map(|n| n.position[0].abs()).fold(0.0f32, f32::max);
+    {
+        // What the page's beam count is: the solver's records, by kind.
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for b in &s.beams {
+            *kinds.entry(format!("{:?}", b.kind)).or_default() += 1;
+        }
+        println!(
+            "JBeam beams {} (+ {} torsion bars, {} couplers); solver beam records {}: {kinds:?}",
+            d.beams.len(),
+            d.elements.len(),
+            d.couplers.len(),
+            s.beams.len()
+        );
+    }
+    let zmax = d
+        .nodes
+        .iter()
+        .map(|n| n.position[2])
+        .fold(f32::MIN, f32::max);
+    let half_w = d
+        .nodes
+        .iter()
+        .map(|n| n.position[0].abs())
+        .fold(0.0f32, f32::max);
     let wall_z = zmax + 0.05;
     match scene.as_str() {
-        "wall" => s.boxes.push(StaticBox::centered(Vec3::new(0.0, 1.0, wall_z + 0.5), Vec3::new(2.0, 1.0, 0.5))),
+        "wall" => s.boxes.push(StaticBox::centered(
+            Vec3::new(0.0, 1.0, wall_z + 0.5),
+            Vec3::new(2.0, 1.0, 0.5),
+        )),
         "offset" => {
             let edge = half_w - 0.4 * 2.0 * half_w;
-            s.boxes.push(StaticBox::centered(Vec3::new(edge + 1.0, 1.0, wall_z + 0.5), Vec3::new(1.0, 1.0, 0.5)));
+            s.boxes.push(StaticBox::centered(
+                Vec3::new(edge + 1.0, 1.0, wall_z + 0.5),
+                Vec3::new(1.0, 1.0, 0.5),
+            ));
         }
-        "pole" => s.shapes.push(StaticShape::cylinder(Vec3::new(0.0, 1.0, wall_z + 0.127), 0.127, 2.0)),
+        "pole" => s.shapes.push(StaticShape::cylinder(
+            Vec3::new(0.0, 1.0, wall_z + 0.127),
+            0.127,
+            2.0,
+        )),
         _ => return Err(format!("unknown scene {scene}")),
     }
-    let name_of: BTreeMap<&str, usize> = d.nodes.iter().enumerate().map(|(i, n)| (n.name.as_str(), i)).collect();
+    let name_of: BTreeMap<&str, usize> = d
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.name.as_str(), i))
+        .collect();
     let cabin: Vec<usize> = d
         .nodes
         .iter()
         .enumerate()
         .filter(|(_, n)| {
-            ["sh_c1_4", "sh_c1_5", "sh_c2_4", "sh_c2_5", "sh_c3_4", "sh_c3_5"].iter().any(|p| n.name.starts_with(p))
+            [
+                "sh_c1_4", "sh_c1_5", "sh_c2_4", "sh_c2_5", "sh_c3_4", "sh_c3_5",
+            ]
+            .iter()
+            .any(|p| n.name.starts_with(p))
         })
         .map(|(i, _)| i)
         .collect();
@@ -165,11 +233,19 @@ fn main() -> Result<(), String> {
         }
         (p / cm, v / cm)
     };
-    let pz = |s: &ExplicitBeams| s.nodes.iter().map(|n| f64::from(n.mass) * f64::from(n.vel.z)).sum::<f64>();
+    let pz = |s: &ExplicitBeams| {
+        s.nodes
+            .iter()
+            .map(|n| f64::from(n.mass) * f64::from(n.vel.z))
+            .sum::<f64>()
+    };
     // ---- the nodes whose place ahead of the rear floor is followed
     let mut watch: Vec<(String, usize)> = Vec::new();
     for side in ["l", "r"] {
-        for n in ["a1_d", "a2_d", "a4_", "a5_", "a6_", "a8_m", "b1_o", "b2_o", "c1_1o", "c1_1t", "c2_1", "d1_m", "c2_2"] {
+        for n in [
+            "a1_d", "a2_d", "a4_", "a5_", "a6_", "a8_m", "b1_o", "b2_o", "c1_1o", "c1_1t", "c2_1",
+            "d1_m", "c2_2",
+        ] {
             let name = format!("sh_{n}{side}");
             if let Some(&i) = name_of.get(name.as_str()) {
                 watch.push((format!("{n}{side}"), i));
@@ -190,14 +266,26 @@ fn main() -> Result<(), String> {
     let local = |s: &ExplicitBeams| -> Vec<Vec3> {
         let now: Vec<Vec3> = s.nodes.iter().map(|n| n.pos + s.origin).collect();
         let fit = rigid_fit(&rest, &now, &cabin_u);
-        now.iter().take(nd).map(|&p| if p.is_finite() { fit.to_rest(p) } else { Vec3::NAN }).collect()
+        now.iter()
+            .take(nd)
+            .map(|&p| {
+                if p.is_finite() {
+                    fit.to_rest(p)
+                } else {
+                    Vec3::NAN
+                }
+            })
+            .collect()
     };
     // ---- beams by the members they join
     let nb = s.beams.len();
     let labels: Vec<String> = (0..nb)
         .map(|j| {
             let b = &s.beams[j];
-            let (mut x, mut y) = (label(&d, &part_of, b.a as usize), label(&d, &part_of, b.b as usize));
+            let (mut x, mut y) = (
+                label(&d, &part_of, b.a as usize),
+                label(&d, &part_of, b.b as usize),
+            );
             if x > y {
                 std::mem::swap(&mut x, &mut y);
             }
@@ -242,7 +330,9 @@ fn main() -> Result<(), String> {
         k += 1;
         let s = &w.vehicles[0];
         if contact.is_none() {
-            let reach = (0..d.nodes.len()).map(|i| s.nodes[i].pos.z + s.origin.z).fold(f32::MIN, f32::max);
+            let reach = (0..d.nodes.len())
+                .map(|i| s.nodes[i].pos.z + s.origin.z)
+                .fold(f32::MIN, f32::max);
             if reach >= wall_z - 0.03 {
                 contact = Some(k);
                 z_contact = cab(s).0.z;
@@ -302,9 +392,15 @@ fn main() -> Result<(), String> {
     }
     let s = &w.vehicles[0];
     let a100 = low_pass(&acc, STEP, 100.0);
-    let (ia, peak_g) = a100.iter().enumerate().fold((0, 0.0f32), |b, (i, &x)| if -x > b.1 { (i, -x) } else { b });
+    let (ia, peak_g) =
+        a100.iter()
+            .enumerate()
+            .fold((0, 0.0f32), |b, (i, &x)| if -x > b.1 { (i, -x) } else { b });
     let f100 = low_pass(&force, STEP, 100.0);
-    let (ifo, peak_force) = f100.iter().enumerate().fold((0, 0.0f32), |b, (i, &x)| if x > b.1 { (i, x) } else { b });
+    let (ifo, peak_force) =
+        f100.iter()
+            .enumerate()
+            .fold((0, 0.0f32), |b, (i, &x)| if x > b.1 { (i, x) } else { b });
     let ke0 = 0.5 * total * v0 * v0;
     println!(
         "{design} {scene} {kmh} km/h: {:.0} kg, {:.1} kJ; rigged and run in {:.1} s (surface contact {})",
@@ -326,37 +422,109 @@ fn main() -> Result<(), String> {
     );
     let broken = s.beams.iter().filter(|b| b.broken).count();
     let yielded = first.iter().filter(|f| f.is_some()).count();
-    println!("beams: {} yielded, {broken} broken; plastic work {:.1} kJ of {:.1}", yielded, work.iter().sum::<f64>() / 1e3, ke0 / 1e3);
-    println!("barrier force (kN, 100 Hz) every 10 ms: {}", f100.iter().step_by(20).map(|x| format!("{:.0}", x / 1e3)).collect::<Vec<_>>().join(" "));
-    println!("cabin deceleration (g, 100 Hz) every 10 ms: {}", a100.iter().step_by(20).map(|x| format!("{:.0}", -x / 9.81)).collect::<Vec<_>>().join(" "));
+    println!(
+        "beams: {} yielded, {broken} broken; plastic work {:.1} kJ of {:.1}",
+        yielded,
+        work.iter().sum::<f64>() / 1e3,
+        ke0 / 1e3
+    );
+    println!(
+        "barrier force (kN, 100 Hz) every 10 ms: {}",
+        f100.iter()
+            .step_by(20)
+            .map(|x| format!("{:.0}", x / 1e3))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    println!(
+        "cabin deceleration (g, 100 Hz) every 10 ms: {}",
+        a100.iter()
+            .step_by(20)
+            .map(|x| format!("{:.0}", -x / 9.81))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     // ---- intrusion
     println!("\nnode in the rear floor's frame, change from rest along the car (mm; negative: driven back). Columns: t ms, cabin speed m/s, cabin travel mm, then");
-    println!("  {}", watch.iter().map(|w| w.0.as_str()).collect::<Vec<_>>().join(" "));
+    println!(
+        "  {}",
+        watch
+            .iter()
+            .map(|w| w.0.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     for (t, v, dz, row, _) in &rows {
-        println!("  {t:>4.0} {v:>5.1} {:>5.0} | {}", dz * 1e3, row.iter().map(|x| format!("{:>5.0}", x * 1e3)).collect::<Vec<_>>().join(" "));
+        println!(
+            "  {t:>4.0} {v:>5.1} {:>5.0} | {}",
+            dz * 1e3,
+            row.iter()
+                .map(|x| format!("{:>5.0}", x * 1e3))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
-    println!("  max driven back (mm): {}", watch.iter().zip(&intr_max).map(|(w, m)| format!("{} {:.0}", w.0, m * 1e3)).collect::<Vec<_>>().join(", "));
+    println!(
+        "  max driven back (mm): {}",
+        watch
+            .iter()
+            .zip(&intr_max)
+            .map(|(w, m)| format!("{} {:.0}", w.0, m * 1e3))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     if let Some((_, _, _, _, xs)) = rows.last() {
-        println!("  sideways at the end, in that frame (mm, + is the offset barrier's side): {}", watch.iter().zip(xs).map(|(w, m)| format!("{} {:.0}", w.0, m * 1e3)).collect::<Vec<_>>().join(", "));
+        println!(
+            "  sideways at the end, in that frame (mm, + is the offset barrier's side): {}",
+            watch
+                .iter()
+                .zip(xs)
+                .map(|(w, m)| format!("{} {:.0}", w.0, m * 1e3))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
-    println!("  height at the end (mm, + up): {}", watch.iter().zip(&last_y).map(|(w, y)| format!("{} {:.0}", w.0, y * 1e3)).collect::<Vec<_>>().join(", "));
+    println!(
+        "  height at the end (mm, + up): {}",
+        watch
+            .iter()
+            .zip(&last_y)
+            .map(|(w, y)| format!("{} {:.0}", w.0, y * 1e3))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     // ---- how far each part's nodes were driven back, and how far behind
     // the cowl (the A-pillars' bases at rest, the windscreen's foot) they got
-    let cowl = ["sh_b2_ol", "sh_b2_or"].iter().filter_map(|n| name_of.get(n)).map(|&i| ahead0[i]).fold(f32::MAX, f32::min);
+    let cowl = ["sh_b2_ol", "sh_b2_or"]
+        .iter()
+        .filter_map(|n| name_of.get(n))
+        .map(|&i| ahead0[i])
+        .fold(f32::MAX, f32::min);
     let mut parts: BTreeMap<&str, (usize, f32, f32, f32, f32)> = BTreeMap::new();
     for i in 0..nd {
-        let e = parts.entry(node_label[i].as_str()).or_insert((0, 0.0, f32::MAX, f32::MIN, f32::MAX));
+        let e =
+            parts
+                .entry(node_label[i].as_str())
+                .or_insert((0, 0.0, f32::MAX, f32::MIN, f32::MAX));
         e.0 += 1;
         e.1 = e.1.max(back_max[i]);
         e.2 = e.2.min(rearmost[i] - cowl);
         e.3 = e.3.max(ahead0[i] - cowl);
         e.4 = e.4.min(ahead0[i] - cowl);
     }
-    let mut pv: Vec<(&&str, &(usize, f32, f32, f32, f32))> = parts.iter().filter(|p| p.1 .3 > 0.0 && p.1 .1 > 0.05).collect();
+    let mut pv: Vec<(&&str, &(usize, f32, f32, f32, f32))> = parts
+        .iter()
+        .filter(|p| p.1 .3 > 0.0 && p.1 .1 > 0.05)
+        .collect();
     pv.sort_by(|a, b| b.1 .1.total_cmp(&a.1 .1));
     println!("\nparts ahead of the cowl at rest: nodes, furthest driven back (mm), rearmost place reached against the cowl line at rest (mm; negative: behind it, in the cabin's length), its rearmost node's place at rest");
     for (name, (n, back, rear, _, rest)) in pv.iter().take(top) {
-        println!("  {name:<22} {n:>3} {:>6.0} {:>6.0} {:>6.0}", back * 1e3, rear * 1e3, rest * 1e3);
+        println!(
+            "  {name:<22} {n:>3} {:>6.0} {:>6.0} {:>6.0}",
+            back * 1e3,
+            rear * 1e3,
+            rest * 1e3
+        );
     }
     // ---- groups
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
@@ -378,6 +546,73 @@ fn main() -> Result<(), String> {
         g.shorten_mm += f64::from(b.rest0 - b.rest) * 1e3;
         g.work_j += work[j];
     }
+    // ---- the plastic work by class of part (a beam between two classes: half each)
+    let class = |l: &str| -> &'static str {
+        let l = l.trim_end_matches(['+', '-', '0']);
+        let shell = l.len() == 2 && l.as_bytes()[1].is_ascii_digit();
+        match l {
+            _ if shell && l.starts_with('A') => {
+                "front structure (crash boxes, rails, towers, upper rails, radiator support)"
+            }
+            _ if shell && l.starts_with('E') => "rear structure",
+            _ if shell => "cabin (firewall, cowl, floor, sills, pillars, roof)",
+            _ if l.starts_with("hood") || l.starts_with("fender") || l.starts_with("bumper") => {
+                "hood, fenders, bumper covers"
+            }
+            _ if l.starts_with("door") || l.starts_with("trunk") || l.starts_with("body") => {
+                "doors, lid, body hardware"
+            }
+            _ if l.starts_with("impact_beam") || l.starts_with("radiator") => {
+                "impact beams, radiator"
+            }
+            _ if l.starts_with("engine")
+                || l.starts_with("transmission")
+                || l.starts_with("driveshaft")
+                || l.starts_with("differential")
+                || l.starts_with("exhaust")
+                || l.starts_with("fuel") =>
+            {
+                "engine, driveline, exhaust, tank"
+            }
+            _ if l.starts_with("subframe")
+                || l.starts_with("hub")
+                || l.starts_with("wheel")
+                || l.starts_with("steering")
+                || l.starts_with("arm")
+                || l.starts_with("strut") =>
+            {
+                "subframes, hubs, wheels, steering"
+            }
+            _ if l.starts_with("seat")
+                || l.starts_with("dash")
+                || l.starts_with("console")
+                || l.starts_with("bench")
+                || l.starts_with("glass") =>
+            {
+                "interior, glass"
+            }
+            _ => "other",
+        }
+    };
+    let mut by_class: BTreeMap<&str, f64> = BTreeMap::new();
+    for (name, g) in &groups {
+        let mut it = name.split(" ~ ");
+        let a = it.next().unwrap();
+        let b = it.next().unwrap_or(a);
+        *by_class.entry(class(a)).or_default() += 0.5 * g.work_j;
+        *by_class.entry(class(b)).or_default() += 0.5 * g.work_j;
+    }
+    let all: f64 = by_class.values().sum();
+    let mut cv: Vec<(&&str, &f64)> = by_class.iter().collect();
+    cv.sort_by(|a, b| b.1.total_cmp(a.1));
+    println!("\nplastic work by class (kJ, share):");
+    for (c, w) in cv {
+        println!(
+            "  {:>6.1} {:>4.0} %  {c}",
+            w / 1e3,
+            100.0 * w / all.max(1.0)
+        );
+    }
     let mut v: Vec<(&String, &Group)> = groups.iter().collect();
     v.sort_by(|a, b| b.1.work_j.total_cmp(&a.1.work_j));
     println!("\nbeam groups by plastic work: beams (along the car), Σ yield of those along (kN), yielded, broken, first yield ms, Σ shortening mm, work kJ");
@@ -396,11 +631,22 @@ fn main() -> Result<(), String> {
     }
     let mut v: Vec<(&String, &Group)> = groups.iter().filter(|g| g.1.first_ms.is_some()).collect();
     v.sort_by(|a, b| a.1.first_ms.unwrap().total_cmp(&b.1.first_ms.unwrap()));
-    println!("\nthe first groups to yield (ms): {}", v.iter().take(top).map(|(n, g)| format!("{n} {:.0}", g.first_ms.unwrap())).collect::<Vec<_>>().join("; "));
+    println!(
+        "\nthe first groups to yield (ms): {}",
+        v.iter()
+            .take(top)
+            .map(|(n, g)| format!("{n} {:.0}", g.first_ms.unwrap()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
     // ---- the single beams that did the most work, and those that broke
     let mut bj: Vec<usize> = (0..nb.min(s.beams.len())).collect();
     bj.sort_by(|&a, &b| work[b].total_cmp(&work[a]));
-    let nm = |i: u32| d.nodes.get(i as usize).map_or("solver", |n| n.name.as_str());
+    let nm = |i: u32| {
+        d.nodes
+            .get(i as usize)
+            .map_or("solver", |n| n.name.as_str())
+    };
     println!("\nbeams by plastic work: nodes, yield kN, peak force kN, first yield ms, rest change mm, kJ");
     for &j in bj.iter().take(top) {
         let b = &s.beams[j];
@@ -422,6 +668,13 @@ fn main() -> Result<(), String> {
             *by_group.entry(labels[j].clone()).or_default() += 1;
         }
     }
-    println!("\nbroken beams by group: {}", by_group.iter().map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join("; "));
+    println!(
+        "\nbroken beams by group: {}",
+        by_group
+            .iter()
+            .map(|(n, c)| format!("{n} {c}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
     Ok(())
 }

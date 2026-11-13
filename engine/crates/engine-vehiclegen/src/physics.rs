@@ -5,6 +5,110 @@
 //! set (the designer's) carries its physics; every field defaults to the
 //! census / 2011 Accord value, so an empty block is a valid car.
 
+/// The crash character of a design: how strong its crush members and panels
+/// are against the body's definitions (`structure`: sections, gauges, grades).
+/// One setting, two documented presets, every number editable:
+///
+/// * [`CrashFeel::beamng_feel`] (the default): the look and feel of a good
+///   BeamNG car (the ETK K-series, measured in the same scenes, same solver):
+///   shallower crush, more spring-back, panels that stay in shape away from
+///   the hit. Its front is stronger than the real crash bands.
+/// * [`CrashFeel::real_crash`]: the members as defined (their own section,
+///   gauge and grade), which is what the NHTSA full-frontal bands
+///   (`engine/docs/crash-reference-targets.md`) are measured against.
+///
+/// Each number is a multiple of a member's mean crush force or of a panel's
+/// yield strain, applied to the definitions before the lattice is built, so it
+/// is a statement about the steel: a thin-walled box's mean crush force goes
+/// as σ₀·t^(5/3), so a multiple `s` is the same section in a gauge `s^0.6`
+/// times as thick ([`CrashFeel::gauge_ratio`]), or the same gauge in a grade
+/// of `s` times the flow stress. Nothing is scaled beam by beam.
+///
+/// In a design's physics block: `"crash": "real_crash"` or
+/// `"crash": {"front_crush": 1.4, ...}` (fields left out take the default
+/// preset's).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "CrashFeelIn")]
+pub struct CrashFeel {
+    /// Front crush members (crash boxes, front rails, radiator support,
+    /// upper rails, the rails' and towers' bracing): mean crush force.
+    pub front_crush: f32,
+    /// Strut towers and the subframe's mount nodes on the rails.
+    pub tower: f32,
+    /// The cabin (firewall, cowl, floor, sills, pillars, roof).
+    pub cabin: f32,
+    /// Rear rails, boot floor, tail and quarter panels.
+    pub rear_crush: f32,
+    /// Bolt-on panels and closures (hood, fenders, doors, lid): yield strain
+    /// of their sheet and frames.
+    pub panel_yield: f32,
+    /// Bumper covers: yield strain.
+    pub bumper_yield: f32,
+}
+
+impl CrashFeel {
+    /// The members as defined.
+    pub fn real_crash() -> Self {
+        Self { front_crush: 1.0, tower: 1.0, cabin: 1.0, rear_crush: 1.0, panel_yield: 1.0, bumper_yield: 1.0 }
+    }
+    /// The ETK's level (see `engine/docs/generated-vehicles.md`, "Crash
+    /// character", for the side-by-side numbers these were set from).
+    pub fn beamng_feel() -> Self {
+        Self { front_crush: 1.0, tower: 1.0, cabin: 1.0, rear_crush: 1.0, panel_yield: 1.0, bumper_yield: 1.0 }
+    }
+    pub fn preset(name: &str) -> Option<Self> {
+        match name {
+            "beamng_feel" => Some(Self::beamng_feel()),
+            "real_crash" => Some(Self::real_crash()),
+            _ => None,
+        }
+    }
+    /// The gauge that gives a box section `scale` times its mean crush force
+    /// at the same grade, over its defined gauge.
+    pub fn gauge_ratio(scale: f32) -> f32 {
+        scale.powf(0.6)
+    }
+}
+
+impl Default for CrashFeel {
+    fn default() -> Self {
+        Self::beamng_feel()
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum CrashFeelIn {
+    Preset(String),
+    Table {
+        front_crush: Option<f32>,
+        tower: Option<f32>,
+        cabin: Option<f32>,
+        rear_crush: Option<f32>,
+        panel_yield: Option<f32>,
+        bumper_yield: Option<f32>,
+    },
+}
+
+impl From<CrashFeelIn> for CrashFeel {
+    fn from(v: CrashFeelIn) -> Self {
+        let d = CrashFeel::default();
+        match v {
+            // (an unknown name is the default: `Physics` has no fallible path
+            // here; `CrashFeel::preset` is the checked lookup)
+            CrashFeelIn::Preset(n) => CrashFeel::preset(&n).unwrap_or(d),
+            CrashFeelIn::Table { front_crush, tower, cabin, rear_crush, panel_yield, bumper_yield } => CrashFeel {
+                front_crush: front_crush.unwrap_or(d.front_crush),
+                tower: tower.unwrap_or(d.tower),
+                cabin: cabin.unwrap_or(d.cabin),
+                rear_crush: rear_crush.unwrap_or(d.rear_crush),
+                panel_yield: panel_yield.unwrap_or(d.panel_yield),
+                bumper_yield: bumper_yield.unwrap_or(d.bumper_yield),
+            },
+        }
+    }
+}
+
 /// The editable physics of a design: masses, zone yields, hardware and the
 /// lattice's reach. Every field has the census / 2011 Accord default gen3 was
 /// calibrated with, so an empty block gives a valid car; a vehicle-gen
@@ -84,6 +188,10 @@ pub struct Physics {
     /// triangle aerodynamics are set to give it: no per-node drag). 0.30: a
     /// current mid-size sedan (the 2011 Accord's published Cd is 0.30-0.31).
     pub drag_cd: f32,
+    /// The crash character ([`CrashFeel`]): `"beamng_feel"` (default),
+    /// `"real_crash"`, or its numbers. Used by cars on the body definitions
+    /// (`structure`); the earlier lattices have the zone yields above.
+    pub crash: CrashFeel,
 }
 
 impl Default for Physics {
@@ -139,6 +247,7 @@ impl Default for Physics {
             reach_panel: 0.66,
             edge_spacing: 0.22,
             drag_cd: 0.30,
+            crash: CrashFeel::default(),
         }
     }
 }

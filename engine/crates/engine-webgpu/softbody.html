@@ -46,6 +46,13 @@
       <select id="presetSel" title="Crash-test presets"></select>
     </div>
     <div class="row" id="paramRow"></div>
+    <div class="row" id="optRow" style="display:none">
+      <label class="p" title="Collision triangles and their edges meet walls, poles and shapes by their surface (not only by their nodes). On by default for a generated car (a mod with weighted skins)."><input type="checkbox" id="optSurface" /> surface contact</label>
+      <label class="p" title="The solver's raycast wheels and suspension on the car's hub nodes (reloads the page: the scene is rebuilt on other wheels)."><input type="checkbox" id="optRaycast" /> raycast wheels</label>
+      <label class="p" title="Air drag and turbulence on the nodes"><input type="checkbox" id="optDrag" /> drag</label>
+      <label class="p" title="Stand-in boxes at the raycast wheels (a car that draws its own wheels needs none)"><input type="checkbox" id="optWheelBoxes" /> wheel boxes</label>
+      <label class="p" title="Beam damping about the pair's centre of mass (the BeamNG profile's)">damping <select id="optCentred"><option value="">profile default</option><option value="1">centred</option><option value="0">not centred</option></select></label>
+    </div>
     <div class="row"><label class="p">camera</label><select id="camSel"></select><select id="camTargetSel" title="what it looks at"></select><label class="p" id="camFromLbl">from</label><select id="camFromSel" title="what it rides on"></select></div>
     <div class="muted" style="margin-top:6px;display:none" id="xkeys">
       Explicit solver: no drivetrain. <kbd>L</kbd> launch at 100 km/h · <kbd>R</kbd> restart · <kbd>V</kbd> beams (green intact, yellow→red bent, magenta broken) · <kbd>C</kbd> camera · drag to orbit, wheel to zoom
@@ -101,7 +108,7 @@
     // What a scene or preset change keeps: the solver, the vehicle (built-in car,
     // .truck, imported mod and configuration, wheels, JBeam mode) and the view and
     // contact options.
-    const KEEP_KEYS = ['solver', 'car', 'style', 'res', 'truck', 'mod', 'pc', 'wheels', 'jbeamMode', 'tyres', 'drag', 'lab', 'drive', 'tex', 'skin', 'surfaceContact', 'fullContact', 'centredDamping'];
+    const KEEP_KEYS = ['solver', 'car', 'style', 'res', 'truck', 'mod', 'pc', 'wheels', 'jbeamMode', 'tyres', 'drag', 'lab', 'drive', 'tex', 'skin', 'surfaceContact', 'fullContact', 'centredDamping', 'wheelBoxes'];
     const keepVehicle = (s) => { for (const k of KEEP_KEYS) if (qs.has(k)) s.set(k, qs.get(k)); return s; };
     window.__keepVehicle = keepVehicle;
     // JBeam imports run in JBeam mode (BeamNG's rules) unless ?jbeamMode=truck.
@@ -256,6 +263,18 @@
     // Raycast wheels: the drive scenes', or any explicit scene with ?wheels=raycast
     // (a crash on the solver's own wheels, the body's rims riding them).
     const RAYCAST = DRIVE || (EXPLICIT && qs.get('wheels') === 'raycast');
+    // The explicit solver's options, each a control in the panel (#optRow) and a URL
+    // key so a link keeps it. Surface contact is on by default for a generated car (a
+    // mod with weighted skins: its collision skin is closed) and off for the others.
+    // Changing one restarts the scene with it (no reload), except the wheels.
+    const OPT = {
+      surfaceContact: qs.has('surfaceContact') ? qs.get('surfaceContact') === '1' : !!importSrc?.skin,
+      drag: qs.get('drag') !== '0',
+      centredDamping: qs.has('centredDamping') ? qs.get('centredDamping') !== '0' : null,
+      // null: boxes unless the car draws its own wheels (drawWheels).
+      wheelBoxes: qs.has('wheelBoxes') ? qs.get('wheelBoxes') === '1' : null,
+    };
+    window.__options = OPT;
     // Whether any vehicle of the explicit sim drives on raycast wheels.
     const anyDrivable = () => !!xsim && !!xlayout && xlayout.vehicles.some((_, i) => xsim.drivable(i));
     // A notice on the page (not an error).
@@ -294,6 +313,24 @@
       xs.onchange = () => { location.href = xsceneUrl(xs.value); };
       if (LAB) xs.style.display = 'none';
       document.getElementById('xkeys').style.display = '';
+      {
+        document.getElementById('optRow').style.display = '';
+        const setUrl = (k, v) => { const u = new URL(location.href); if (v === null) u.searchParams.delete(k); else u.searchParams.set(k, v); history.replaceState(null, '', u.href); qs.delete(k); if (v !== null) qs.set(k, v); };
+        const box = (id, key, get, set) => { const c = document.getElementById(id); c.checked = get(); c.onchange = () => { set(c.checked); setUrl(key, c.checked ? '1' : '0'); resetScene(); }; };
+        box('optSurface', 'surfaceContact', () => OPT.surfaceContact, (v) => { OPT.surfaceContact = v; });
+        box('optDrag', 'drag', () => OPT.drag, (v) => { OPT.drag = v; });
+        const wb = document.getElementById('optWheelBoxes');
+        wb.checked = OPT.wheelBoxes ?? false;
+        wb.onchange = () => { OPT.wheelBoxes = wb.checked; setUrl('wheelBoxes', wb.checked ? '1' : '0'); };
+        const cd = document.getElementById('optCentred');
+        cd.value = OPT.centredDamping === null ? '' : OPT.centredDamping ? '1' : '0';
+        cd.onchange = () => { OPT.centredDamping = cd.value === '' ? null : cd.value === '1'; setUrl('centredDamping', cd.value === '' ? null : cd.value); resetScene(); };
+        // The wheels are the scene's build (hub pieces, poses, the drive pass): a reload.
+        const rc = document.getElementById('optRaycast');
+        rc.checked = RAYCAST;
+        rc.disabled = DRIVE;
+        rc.onchange = () => { const u = new URL(location.href); if (rc.checked) u.searchParams.set('wheels', 'raycast'); else u.searchParams.delete('wheels'); location.href = u.href; };
+      }
       for (const id of ['softKeys', 'presetSel']) document.getElementById(id).style.display = 'none';
       document.getElementById('infoTitle').innerHTML = '<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, Rigs of Rods parity</span>';
       document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams, soft tyres and self-collision, every step of a frame in one GPU submit; rendered from its buffers. Crash scenes with knobs (speeds, angles, overlap), static boxes, vehicle–vehicle contact and no drivetrain: driving, moving rigid bodies and the dune buggy are on the soft solver (button above).';
@@ -614,13 +651,13 @@
         ...(qs.has('runUp') ? { runUp: P('runUp', 0) } : {}),
         ...(xscene === 'traffic' && qs.has('ai') ? { ai: qs.get('ai') } : {}),
         // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
-        drag: qs.get('drag') !== '0',
-        // ?surfaceContact=1: collision triangles meet the boxes and shapes by their
-        // surface too (jbeam-semantics-spec.md §38; off by default).
-        surfaceContact: qs.get('surfaceContact') === '1',
-        // ?centredDamping=0/1: the BeamNG profile's centred damping (jbeam-semantics-spec.md
-        // §39) off or on; absent, the profile's default.
-        ...(qs.has('centredDamping') ? { centredDamping: qs.get('centredDamping') !== '0' } : {}),
+        drag: OPT.drag,
+        // Surface contact: collision triangles meet the boxes and shapes by their
+        // surface too (jbeam-semantics-spec.md §38; the panel's option, OPT).
+        surfaceContact: OPT.surfaceContact,
+        // Centred damping (jbeam-semantics-spec.md §39) off or on; unset, the
+        // profile's default.
+        ...(OPT.centredDamping === null ? {} : { centredDamping: OPT.centredDamping }),
       });
     const buildExplicit = () => {
       xsim?.free();
@@ -1701,7 +1738,13 @@ fn xpos(i: u32, v: u32) -> vec3f {
       // An imported body with wheel pieces on the raycast wheels (flexmesh) too,
       // and one whose wheels are parts of its own, skinned to their axle nodes
       // (the generated cars: the report's wheelsSkinned).
-      if (bodyR && (carKind === 'showcase' || (importSrc && (bodyVisual().rigid?.some((r) => r >= 2) || window.__flexReport?.wheelsSkinned > 0)))) return;
+      const own = !!bodyR && (carKind === 'showcase' || (!!importSrc && (bodyVisual().rigid?.some((r) => r >= 2) || window.__flexReport?.wheelsSkinned > 0)));
+      if (OPT.wheelBoxes === null) document.getElementById('optWheelBoxes').checked = !own;
+      if (!(OPT.wheelBoxes ?? !own)) {
+        // Off: boxes made earlier go out of sight (far below the ground).
+        for (const list of wheelBodies) for (const b of list ?? []) world.bodySetType(b, 'static', [0, -1000, 0], [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]);
+        return;
+      }
       d.vehicles.forEach((v, i) => {
         if (!v) return;
         wheelBodies[i] ??= [];

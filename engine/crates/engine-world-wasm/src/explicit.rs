@@ -387,27 +387,6 @@ fn set_moving(sim: &mut ExplicitBeams, velocity: Vec3) {
     }
 }
 
-/// A tyre's friction on a test carrier (the real one is towed to the test speed and its
-/// pads are PTFE, 0.04–0.1; nothing tows ours, so the pads are slicker: the car loses
-/// under 0.3 km/h over the default run-up).
-const CARRIER_MU: f32 = 0.01;
-
-/// Put the vehicle on a side-impact carrier: its tyres slide on low-friction pads.
-/// Raycast wheels combine the tyre's μ with the surface's as √(μ_tyre · μ_surface),
-/// so the surface is set for a combined [`CARRIER_MU`] at a tyre μ of 1; node tyres
-/// (pressure wheels) take it as their nodes' friction. Nothing else changes: the
-/// body's own nodes keep their friction on the ground and on the pole.
-fn on_carrier(sim: &mut ExplicitBeams) {
-    if let Some(d) = sim.drive.as_mut() {
-        d.config.surface = CARRIER_MU * CARRIER_MU;
-    }
-    for n in &mut sim.nodes {
-        if n.flags & NODE_TYRE != 0 {
-            n.friction = n.friction.min(CARRIER_MU);
-        }
-    }
-}
-
 /// Three numbers at `key` (`default` when absent).
 fn vec3(v: &serde_json::Value, key: &str, default: Vec3) -> Result<Vec3, String> {
     let Some(a) = v.get(key) else {
@@ -544,7 +523,7 @@ struct ArenaSpot {
 ///   side from its centre; `angle` (default 90) the travel's angle from its forward
 ///   axis (75: the oblique pole test). The car rides a carrier, as in the real test
 ///   (its tyres on low-friction pads on a sled, FMVSS 214 S10): its tyres' grip on
-///   the ground is [`CARRIER_MU`] for the whole scene, so it reaches the pole at
+///   the ground is `crash_rigs::CARRIER_MU` for the whole scene, so it reaches the pole at
 ///   `speed` instead of being stopped by its own tyres' lateral grip.
 /// * `limbo`: under a bar 30 cm deep whose underside is `bar` metres up (default 1).
 /// * `drop`: dropped flat from `height` metres (default 8), moving forward at `speed`
@@ -564,7 +543,7 @@ struct ArenaSpot {
 /// Returns the spawns and every box once (for rendering); None for another scene.
 ///
 /// A vehicle launched off its forward axis (`vel` set: the side pole) rides a carrier:
-/// [`on_carrier`].
+/// `engine_softbody::crash_rigs::on_carrier`.
 fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32, axles: (f32, f32)) -> Option<(Vec<ArenaSpot>, Vec<(Vec3, Vec3)>)> {
     use std::f32::consts::PI;
     let deg = |k: &str, d: f64| (num(spec, k, d) as f32).to_radians();
@@ -1020,7 +999,7 @@ impl ExplicitSim {
             }
             set_moving(&mut sim, spots.get(vi).and_then(|s| s.vel).unwrap_or(forward * speed));
             if spots.get(vi).is_some_and(|s| s.vel.is_some() && !s.mdb) {
-                on_carrier(&mut sim);
+                engine_softbody::crash_rigs::on_carrier(&mut sim);
             }
             if let Some(s) = spots.get(vi) {
                 for &(c, h) in &s.boxes {

@@ -1893,6 +1893,25 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
 /// crush, springback, the wall force, energy, ripple, intrusion, damage and
 /// the render mesh after.
 pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
+    scene_front(car, kmh, seconds_after, Front::Wall)
+}
+
+/// What a frontal scene drives into.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Front {
+    /// a rigid wall across the whole width
+    Wall,
+    /// a rigid barrier over this share of the car's width, on the driver's
+    /// side (+x)
+    Offset(f32),
+    /// a rigid 254 mm pole on the centre line
+    Pole,
+}
+
+/// A frontal crash into `barrier` ([`scene_wall`]'s measurements; the
+/// residual crush zones run across the whole width, so an offset's and a
+/// pole's profile shows in them).
+pub fn scene_front(car: &Car, kmh: f32, seconds_after: f32, barrier: Front) -> Value {
     let t0 = Instant::now();
     let v0 = kmh / 3.6;
     let f = car.frame;
@@ -1906,10 +1925,25 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
         .fold(f32::MIN, f32::max);
     let gap = 0.05;
     let wall_z = front + gap;
-    s.boxes.push(StaticBox::centered(
-        Vec3::new(0.0, 2.0, wall_z + 0.5),
-        Vec3::new(0.5 * f.width() + 1.0, 2.0, 0.5),
-    ));
+    match barrier {
+        Front::Wall => s.boxes.push(StaticBox::centered(
+            Vec3::new(0.0, 2.0, wall_z + 0.5),
+            Vec3::new(0.5 * f.width() + 1.0, 2.0, 0.5),
+        )),
+        Front::Offset(share) => {
+            // its inner edge `share` of the width in from the +x side
+            let edge = f.hi.x - share * f.width();
+            s.boxes.push(StaticBox::centered(
+                Vec3::new(edge + 1.5, 2.0, wall_z + 0.5),
+                Vec3::new(1.5, 2.0, 0.5),
+            ));
+        }
+        Front::Pole => s.shapes.push(StaticShape::cylinder(
+            Vec3::new(0.5 * (f.lo.x + f.hi.x), 2.0, wall_z + 0.127),
+            0.127,
+            2.0,
+        )),
+    }
     // The rear cabin (NCAP's rear-seat accelerometers stand in the middle of
     // the cabin's rear): non-tyre nodes over the rear half of the wheelbase.
     let cabin: Vec<u32> = (0..s.nodes.len() as u32)
@@ -2121,7 +2155,7 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     let wall_s = t0.elapsed().as_secs_f32();
     let sim_s = k as f32 * STEP;
     json!({
-        "kmh": kmh, "mass_kg": r1(total),
+        "kmh": kmh, "mass_kg": r1(total), "barrier": format!("{barrier:?}"),
         "dynamic_crush_mm": mm(d_dyn), "t_m_ms": r1(tm * 1e3), "peak_g": r1(peak_g), "mean_g_to_tm": r1(v0 / tm / 9.81),
         "rebound_ms": r3(rebound), "restitution": r3(rebound / v0),
         "residual_crush_zones_mm": c.iter().map(|x| mm(*x)).collect::<Vec<_>>(), "residual_crush_max_mm": mm(c_max), "residual_crush_avg_mm": mm(c_avg),
@@ -2161,6 +2195,8 @@ pub fn scene_pole_at(car: &Car, kmh: f32, seconds: f32, dz: f32) -> Value {
     let mut s = car.template.clone();
     let rest = positions(&s);
     set_moving(&mut s, dir * kmh / 3.6);
+    // On a carrier, as the real test (its tyres' grip must not slow it).
+    crate::crash_rigs::on_carrier(&mut s);
     let r = 0.127;
     let head = occupant_points(&f)
         .iter()

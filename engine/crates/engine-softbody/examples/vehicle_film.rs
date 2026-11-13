@@ -8,8 +8,8 @@
 //! cargo run --release -p engine-softbody --example vehicle_film -- <scene> <out dir> [design]
 //! ```
 //! Scenes: `drive` (raycast wheels: away, then a turn), `wall` (56 km/h into a
-//! rigid wall), `pole` (32 km/h sideways into a 254 mm pole at the front
-//! seat), `c2c` (two cars head on, 50 km/h each). Crash scenes are sampled
+//! rigid wall), `pole` (32 km/h sideways on a carrier into a 254 mm pole at
+//! the front seat), `c2c` (two cars head on, 50 km/h each). Crash scenes are sampled
 //! every 4 ms (7.5× slow motion at 30 fps) and end with the car at rest.
 //! Writes `mesh.bin` (vertex and triangle counts, colours, triangles),
 //! `frame_NNNN.bin` (positions, f32, Rubble's frame: +Y up, +Z forward) and
@@ -201,6 +201,8 @@ fn main() -> Result<(), String> {
             let t = turned(d, 1);
             let v = 32.0 / 3.6;
             let mut s = spawn(&t, Vec3::ZERO, Vec3::Z * v)?;
+            // On a carrier, as the real test: its tyres do not stop it.
+            engine_softbody::crash_rigs::on_carrier(&mut s);
             // The front seat's H-point: about 1.4 m behind the front axle.
             let side = t.nodes.iter().map(|n| n.position[2]).fold(f32::MIN, f32::max);
             let centre = Vec3::new(-1.4, 1.0, side + 0.05 + 0.127);

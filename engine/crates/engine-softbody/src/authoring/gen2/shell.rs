@@ -22,6 +22,7 @@ use std::collections::{BTreeSet, HashMap};
 use engine_vehiclegen::mechanical::MechPart;
 
 use engine_vehiclegen::structure::Structure;
+use engine_vehiclegen::physics::CrashFeel;
 use glam::{DMat3, DVec3};
 
 /// The fixed step (s).
@@ -222,6 +223,31 @@ fn rows_across() -> Vec<Vec<String>> {
 /// Brace the structure's shell nodes: the beams with their zone values under
 /// the node budget, and the floor's torsion bars.
 pub fn lattice(st: &Structure) -> Lattice {
+    lattice_with(st, &CrashFeel::real_crash())
+}
+
+/// A zone's multiple in a crash character.
+fn feel_of(zone: Zone, f: &CrashFeel) -> f64 {
+    f64::from(match zone {
+        Zone::CrashBox | Zone::FrontRail => f.front_crush,
+        Zone::Tower => f.tower,
+        Zone::Cabin | Zone::Primary | Zone::Pillar | Zone::Bow => f.cabin,
+        Zone::RearRail | Zone::Tail => f.rear_crush,
+    })
+}
+
+/// [`lattice`] in a crash character: every beam's yield is its zone's (or its
+/// member's mean crush force) times the character's multiple for that zone.
+/// Springs, damping and topology do not change.
+pub fn lattice_with(st: &Structure, feel: &CrashFeel) -> Lattice {
+    let mut l = lattice_defined(st);
+    for b in &mut l.beams {
+        b.deform *= feel_of(b.zone, feel);
+    }
+    l
+}
+
+fn lattice_defined(st: &Structure) -> Lattice {
     let n = st.nodes.len();
     let id: HashMap<&str, usize> = st
         .nodes

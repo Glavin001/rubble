@@ -534,6 +534,9 @@ pub struct Car {
     /// Per node stiffness budget Σk/m (s⁻²) for the defined beams whose
     /// spring is left to it (0: [`NODE_BUDGET`]).
     pub node_budget: f32,
+    /// The crash character's yield-strain multiples for the panels and the
+    /// bumper covers (`engine_vehiclegen::physics::CrashFeel`; None: 1).
+    pub panel_yield: Option<(f32, f32)>,
     pub torsion: Vec<Torsion>,
     /// Render mesh name: the nodes it binds to ([`Bind`]).
     pub bind: BTreeMap<String, Bind>,
@@ -1354,8 +1357,15 @@ impl Car {
                 _ => ZETA,
             };
             b.c = 2.0 * z * (ks[j] * (m[b.a] * m[b.b] / (m[b.a] + m[b.b]))).sqrt();
+            // (the crash character's panel multiple: a statement about the
+            // panels' sheet, applied to every beam of the part alike)
+            let feel = match b.part {
+                Part::Body | Part::Engine => 1.0,
+                Part::BumperF | Part::BumperR => self.panel_yield.map_or(1.0, |p| p.1),
+                _ => self.panel_yield.map_or(1.0, |p| p.0),
+            };
             b.deform = if sp.eps.is_finite() {
-                sp.eps * ks[j] * len[j].max(SPRING_LENGTH)
+                feel * sp.eps * ks[j] * len[j].max(SPRING_LENGTH)
             } else {
                 f32::INFINITY
             };

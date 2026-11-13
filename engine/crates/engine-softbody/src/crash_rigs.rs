@@ -12,9 +12,32 @@
 //! harden (`deformLimitStress` = the crush force), densifying at 80 % crush.
 //! Everything the open documents do not give is marked **Choice** below.
 
-use crate::explicit_beams::{Beam, ExplicitBeams, ExplicitKind, ExplicitType, Node, NODE_NO_GROUND};
+use crate::explicit_beams::{Beam, ExplicitBeams, ExplicitKind, ExplicitType, Node, NODE_NO_GROUND, NODE_TYRE};
 use glam::Vec3;
 use serde_json::{json, Value};
+
+/// A tyre's friction on a side-impact carrier. The real test (FMVSS 214 S10, the
+/// pole) tows the car sideways on a carrier to the test speed, its tyres on
+/// low-friction pads (PTFE, 0.04–0.1). Nothing tows ours, so the pads are slicker:
+/// the car loses under 0.3 km/h over a 5 m run-up.
+pub const CARRIER_MU: f32 = 0.01;
+
+/// Put a vehicle on a side-impact carrier ([`CARRIER_MU`]): without it a car
+/// launched sideways is stopped by its own tyres' lateral grip before the pole.
+/// Raycast wheels combine the tyre's μ with the surface's as √(μ_tyre · μ_surface),
+/// so the surface is set for a combined [`CARRIER_MU`] at a tyre μ of 1; node tyres
+/// take it as their nodes' friction. Nothing else changes: the body's own nodes keep
+/// their friction on the ground and on the pole.
+pub fn on_carrier(sim: &mut ExplicitBeams) {
+    if let Some(d) = sim.drive.as_mut() {
+        d.config.surface = CARRIER_MU * CARRIER_MU;
+    }
+    for n in &mut sim.nodes {
+        if n.flags & NODE_TYRE != 0 {
+            n.friction = n.friction.min(CARRIER_MU);
+        }
+    }
+}
 
 /// MDB mass (kg): 49 CFR 587.6(c), 3,015 lb.
 pub const MDB_MASS: f32 = 1367.6;

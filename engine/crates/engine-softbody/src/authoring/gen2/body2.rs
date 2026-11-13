@@ -328,7 +328,7 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
         }
     }
     // ---- its lattice: springs, damping and yield as built by `shell`
-    let lat = shell::lattice(st);
+    let lat = shell::lattice_with(st, &inp.physics().crash);
     for b in &lat.beams {
         let j = r
             .car
@@ -833,6 +833,7 @@ pub fn masses(r: &mut Rig, inp: &dyn RigInput, b: &Built) {
     .collect();
     r.car.omega_limit = Some(super::build::env_f("RIG_OMEGA_H", OMEGA_H));
     r.car.node_budget = shell::NODE_BUDGET as f32;
+    r.car.panel_yield = Some((ph.crash.panel_yield, ph.crash.bumper_yield));
 }
 
 /// The raycast wheels on the wheel parts' axle nodes, the wheel stops and
