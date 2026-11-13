@@ -212,6 +212,18 @@ level) until a collider is added or its shape or size changes; a split changes n
 a reserved movable radius at or above every collider's level, the levels follow without a
 scan. Checked against the one-pass sizing on 2,000 random cases.
 
+### S1 in the browser
+
+`fracture/?scene=district&bonds=threshold&support=1` (Chrome WebGPU, 2026-11-12): the district
+loads (9,033 chunks, 22,015 bonds); three cannonballs broke 295 bonds into 75 bodies; the
+physics step was 2.03 ms GPU; no console errors.
+
+**The rocket is native only for now.** A step a blast reaches waits for the GPU
+(`blast_threshold.rs`), and the lab page's step is a plain call that cannot wait: the wait
+trapped and left the page's world unusable. The page's Rocket option is disabled until blasts
+stop blocking (S5). `rubble::lab`'s `LabAction::BlastRay` works natively
+(`lab_api::a_rocket_breaks_a_blast_loaded_building`).
+
 ### Finding: sleepers left in the air
 
 `tests/unsupported_sleepers.rs` (three cases, all failing, ignored so the suite stays green):

@@ -479,7 +479,6 @@ try{
  if(q.has('bonds'))$('bond-mode').value=q.get('bonds');
  if(q.has('crush'))$('crush').value=q.get('crush');
  if(q.has('support'))$('support-loss').checked=q.get('support')==='1';
- if(q.has('weapon'))$('weapon').value=q.get('weapon');
  if(q.has('hz'))$('physics-hz').value=q.get('hz');
  showFractureSwitches();
  await sample();requestAnimationFrame(tick);
