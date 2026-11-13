@@ -207,9 +207,7 @@ fn the_structure_cuts_through_no_other_part() {
         }
         // against every other part, and every later member
         for (on, om) in &b.parts.0 {
-            // (the sheet build's interior and bay boxes are placeholders:
-            // the mechanical step rebuilds them on the structure)
-            if on.starts_with("structure_") || on.starts_with("seat_") || on == "console" || on == "engine_block" {
+            if on.starts_with("structure_") {
                 continue;
             }
             let hits = pair_crossings(&m.mesh, om);

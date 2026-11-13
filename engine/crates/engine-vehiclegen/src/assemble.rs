@@ -38,6 +38,11 @@ pub trait Design {
     fn structure(&self) -> Option<crate::structure::Structure> {
         None
     }
+    /// The mechanical and interior parts on that structure
+    /// ([`crate::mechanical`]).
+    fn mechanical(&self, _st: &crate::structure::Structure) -> Vec<crate::mechanical::MechPart> {
+        Vec::new()
+    }
     /// How a body panel is built as a solid ([`crate::solid`]).
     fn solid_style(&self, name: &str) -> Style {
         if name.starts_with("door_") {
@@ -96,6 +101,9 @@ pub struct RigSpec {
     /// and the shell's named nodes with their masses. Filled by
     /// [`rig_spec_with`].
     pub structure: Option<std::rc::Rc<crate::structure::Structure>>,
+    /// The mechanical and interior parts: nodes, masses, internal beams,
+    /// mounts and links, each with its solid. Filled by [`rig_spec_with`].
+    pub mechanical: std::rc::Rc<Vec<crate::mechanical::MechPart>>,
 }
 
 /// A design's rig spec with the build's surface tags.
@@ -110,6 +118,9 @@ pub fn rig_spec_with(d: &dyn Design, parts: &[crate::export::RenderPart]) -> Opt
         })
         .collect();
     spec.structure = d.structure().map(std::rc::Rc::new);
+    if let Some(st) = &spec.structure {
+        spec.mechanical = std::rc::Rc::new(d.mechanical(st));
+    }
     Some(spec)
 }
 

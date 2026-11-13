@@ -23,6 +23,7 @@ use crate::layout::{Curve, FaceFn};
 use crate::mesh::{box_, closed_lathe, grid, orient_outward, rbox, rot_x, rrect, sweep, Grid2, Mat, Mesh, SweepOpts};
 use crate::panels::{boundary_loops, inner_panel};
 use crate::parts::{self as p, RimStyle, WheelSpec};
+use crate::mechanical::{self, MechPart};
 use crate::structure::{self, Structure};
 use crate::tube::{Handle, Key, Tube};
 use crate::uvpack::Parts;
@@ -580,7 +581,12 @@ impl Design for Sedan {
             physics: self.p.physics.clone(),
             surfaces: Vec::new(),
             structure: None,
+            mechanical: Rc::new(Vec::new()),
         })
+    }
+
+    fn mechanical(&self, st: &Structure) -> Vec<MechPart> {
+        mechanical::sedan_parts(&self.gear(), st)
     }
 
     fn structure(&self) -> Option<Structure> {
@@ -607,6 +613,26 @@ impl Sedan {
             well_x: 0.56,
             well_r: 0.375 + self.arch_r - R_ARCH_R,
             wheel_y: self.f.y(R_TYRE_D / 2.0),
+        }
+    }
+
+    /// The running gear's dimensions for [`mechanical::sedan_parts`].
+    pub fn gear(&self) -> mechanical::Gear {
+        let (a, b) = (self.clone(), self.clone());
+        mechanical::Gear {
+            f: self.f.clone(),
+            half_track: self.p.track / 2.0,
+            wheel_y: self.wheel_y,
+            zf: self.zf_ax,
+            zr: self.zr_ax,
+            tyre_d: self.p.tyre_d,
+            tyre_w: self.p.tyre_w,
+            rim_d: self.p.rim_in * 0.0254,
+            rim_w: self.p.rim_w_in * 0.0254,
+            axle_f: R_WHEELBASE / 2.0,
+            axle_r: -R_WHEELBASE / 2.0,
+            z_nose: Rc::new(move |x, y| a.front_z(x, y)),
+            z_tail: Rc::new(move |x, y| b.rear_z(x, y)),
         }
     }
 
@@ -865,7 +891,11 @@ impl Sedan {
         let hf = f.y(0.215);
         let dhf = hf - 0.215;
         for (s, sg) in sides {
-            out.insert(&format!("seat_F{s}"), p::bucket_seat(sg * f.x(0.38), f.z(-0.40), hf + 0.02, Mat::InteriorFabric, true));
+            // (solid build: the seats, the bench, the dash and the console
+            // are parts on the structure: `mechanical`)
+            if !solid {
+                out.insert(&format!("seat_F{s}"), p::bucket_seat(sg * f.x(0.38), f.z(-0.40), hf + 0.02, Mat::InteriorFabric, true));
+            }
             marker(format!("seat_H_point_F{s}"), f.p(sg * 0.38, 0.215 + 0.20, -0.53) + DVec3::new(0.0, dhf - (f.y(0.415) - 0.415), 0.0), DVec3::X);
         }
         let mut rs = Mesh::new();
@@ -873,14 +903,21 @@ impl Sedan {
         let mut back = rbox(DVec3::ZERO, DVec3::new(f.x(0.52), 0.29, 0.06), 0.05, 3, Mat::InteriorFabric);
         back.transform(Some(rot_x((-22.0f64).to_radians())), DVec3::new(0.0, hf + 0.56, f.z(-1.38)));
         rs.add(&back);
-        out.insert("seat_rear", rs);
+        if !solid {
+            out.insert("seat_rear", rs);
+        }
         let mut dash = Mesh::new();
         dash.add(&rbox(DVec3::new(0.0, f.y(0.78), f.z(0.48)), DVec3::new(f.x(0.76), 0.12, 0.16), 0.06, 3, Mat::InteriorPlastic));
         dash.add(&rbox(DVec3::new(f.x(0.38), f.y(0.92), f.z(0.42)), DVec3::new(0.18, 0.03, 0.08), 0.025, 2, Mat::InteriorPlastic));
         dash.add(&rbox(DVec3::new(0.0, f.y(0.86), f.z(0.33)), DVec3::new(0.13, 0.08, 0.02), 0.01, 2, Mat::TrimBlack));
-        out.insert("dash", dash);
-        out.insert("steering_wheel", p::steering_wheel(DVec3::new(f.x(0.38), f.y(0.84), f.z(0.17)), 0.185, 24.0, Mat::InteriorPlastic, 0.13));
-        out.insert("console", rbox(DVec3::new(0.0, f.y(0.42), f.z(-0.15)), DVec3::new(0.11, 0.12, 0.45), 0.03, 2, Mat::InteriorPlastic));
+        if !solid {
+            out.insert("dash", dash);
+        }
+        // (solid build: the column reaches the instrument panel on its beam)
+        out.insert("steering_wheel", p::steering_wheel(DVec3::new(f.x(0.38), f.y(0.84), f.z(0.17)), 0.185, 24.0, Mat::InteriorPlastic, if solid { 0.19 } else { 0.13 }));
+if !solid {
+                    out.insert("console", rbox(DVec3::new(0.0, f.y(0.42), f.z(-0.15)), DVec3::new(0.11, 0.12, 0.45), 0.03, 2, Mat::InteriorPlastic));
+        }
         for s in ["FL", "FR", "RL", "RR"] {
             let sk = cb.skins[&format!("door_{s}")].clone();
             let mut isb = vec![false; sk.v.len()];
@@ -917,18 +954,27 @@ impl Sedan {
         eb.add(&rbox(f.p(0.05, 0.71, 1.55), DVec3::new(0.28, 0.04, 0.10), 0.02, 2, Mat::TrimBlack));
         eb.add(&rbox(f.p(-0.36, 0.42, 1.52), DVec3::new(0.12, 0.13, 0.12), 0.04, 2, Mat::MetalBare));
         eb.add(&rbox(f.p(0.05, 0.62, 1.74), DVec3::new(0.30, 0.07, 0.04), 0.02, 2, Mat::TrimBlack));
-        out.insert("engine_block", eb);
+        if !solid {
+            out.insert("engine_block", eb);
+        }
         let mut rad = Mesh::new();
         rad.add(&box_(f.p(0.0, 0.56, 2.12), DVec3::new(f.x(0.36), 0.16, 0.024), Mat::TrimBlack, None));
         rad.add(&box_(f.p(0.0, 0.735, 2.12), DVec3::new(f.x(0.37), 0.014, 0.030), Mat::MetalBare, None));
-        out.insert("radiator", rad);
         if solid {
-            // the body-in-white: every member a closed solid (the firewall,
-            // the boot floor and the rest replace the sheet build's boxes)
-            for (name, m) in self.unibody().parts() {
+            // the body-in-white: every member a closed solid, and the
+            // mechanical and interior parts on it (they replace the sheet
+            // build's boxes: firewall, engine, radiator, trays, seats, dash)
+            let st = self.unibody();
+            for (name, m) in st.parts() {
                 out.insert(&name, m);
             }
+            for part in self.mechanical(&st) {
+                if !part.mesh.v.is_empty() {
+                    out.insert(&part.name, part.mesh);
+                }
+            }
         } else {
+            out.insert("radiator", rad);
             out.insert("firewall", box_(f.p(0.0, 0.60, 0.94), DVec3::new(f.x(0.60), 0.28, 0.003), Mat::TrimBlack, None));
         }
         // boxes along the car span their mapped ends (a shorter overhang
@@ -941,7 +987,9 @@ impl Sedan {
         ub.add(&box_(DVec3::new(0.0, f.y(0.330), zc), DVec3::new(f.x(0.50), 0.004, hz), Mat::TrimBlack, None));
         let (zc, hz) = zspan(-1.90, 0.22);
         ub.add(&rbox(DVec3::new(f.x(-0.09), f.y(0.30), zc), DVec3::new(0.21, 0.05, hz), 0.02, 2, Mat::MetalBare));
-        out.insert("underbody", ub);
+        if !solid {
+            out.insert("underbody", ub);
+        }
         let mut ex = Mesh::new();
         let pts: Vec<DVec3> = [(0.10, 0.36, 1.30), (0.12, 0.25, 1.12), (0.10, 0.168, 0.95), (0.10, 0.166, -0.70), (0.16, 0.175, -1.20), (0.30, 0.20, -1.60), (0.42, 0.25, -2.10), (0.48, 0.26, -2.42)]
             .iter()
@@ -951,13 +999,16 @@ impl Sedan {
         ex.add(&rbox(f.p(0.12, 0.168, -0.20), DVec3::new(0.09, 0.016, 0.25), 0.012, 2, Mat::MetalBare));
         let (zc, hz) = zspan(-1.92, 0.13);
         ex.add(&rbox(DVec3::new(f.x(0.36), f.y(0.230), zc), DVec3::new(0.20, 0.06, hz), 0.04, 2, Mat::MetalBare));
-        out.insert("exhaust", ex);
+        if !solid {
+            out.insert("exhaust", ex);
+        }
         let dr = self.arch_r - R_ARCH_R;
         for (tag, zc) in [("F", self.zf_ax), ("R", self.zr_ax)] {
             for (s, sg) in sides {
                 out.insert(
                     &format!("wheel_well_{tag}{s}"),
-                    thick(p::wheel_well(DVec3::new(0.0, f.y(R_TYRE_D / 2.0), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0), 0.004),
+                    // (solid build: the inner wall's opening lets the arms through)
+                    thick(p::wheel_well_with(DVec3::new(0.0, f.y(R_TYRE_D / 2.0), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0, if solid { 0.74 } else { 0.55 }), 0.004),
                 );
             }
         }

@@ -327,16 +327,16 @@ impl Lines {
 /// One station of a swept section: centre, the section's two axes (unit) and
 /// its outline in them.
 #[derive(Clone)]
-struct Ring {
-    c: DVec3,
-    a: DVec3,
-    b: DVec3,
-    pts: Vec<DVec2>,
+pub(crate) struct Ring {
+    pub c: DVec3,
+    pub a: DVec3,
+    pub b: DVec3,
+    pub pts: Vec<DVec2>,
 }
 
 /// Sweep rings into a closed solid; `caps` are the end faces as quads over
 /// ring indices.
-fn sweep_rings(rings: &[Ring], caps: &[[usize; 4]], mat: Mat) -> Mesh {
+pub(crate) fn sweep_rings(rings: &[Ring], caps: &[[usize; 4]], mat: Mat) -> Mesh {
     let n = rings[0].pts.len();
     let mut m = Mesh::new();
     for r in rings {
@@ -361,7 +361,7 @@ fn sweep_rings(rings: &[Ring], caps: &[[usize; 4]], mat: Mat) -> Mesh {
 }
 
 /// Points every `step` or closer along a polyline (its corners kept).
-fn resample(path: &[DVec3], step: f64) -> Vec<DVec3> {
+pub(crate) fn resample(path: &[DVec3], step: f64) -> Vec<DVec3> {
     let mut out = vec![path[0]];
     for w in path.windows(2) {
         let n = ((w[1] - w[0]).length() / step).ceil().max(1.0) as usize;
@@ -378,7 +378,7 @@ fn path_len(p: &[DVec3]) -> f64 {
 
 /// Section frames along a path: `a` across (up × tangent), `b` the up hint
 /// made square to the path.
-fn frames(path: &[DVec3], up: DVec3) -> Vec<(DVec3, DVec3)> {
+pub(crate) fn frames(path: &[DVec3], up: DVec3) -> Vec<(DVec3, DVec3)> {
     (0..path.len())
         .map(|i| {
             let t = (path[(i + 1).min(path.len() - 1)] - path[i.saturating_sub(1)]).normalize();
@@ -390,8 +390,19 @@ fn frames(path: &[DVec3], up: DVec3) -> Vec<(DVec3, DVec3)> {
 
 const STEP: f64 = 0.04;
 
+/// A closed round bar of radius `r` (`n` sides, even) along a path.
+pub(crate) fn cyl_along(path: &[DVec3], r: f64, n: usize, mat: Mat) -> Mesh {
+    let p = resample(path, STEP);
+    let up = if (p[p.len() - 1] - p[0]).normalize().dot(DVec3::Y).abs() > 0.9 { DVec3::Z } else { DVec3::Y };
+    let fr = frames(&p, up);
+    let pts: Vec<DVec2> = (0..n).map(|k| DVec2::from_angle(std::f64::consts::TAU * (k as f64 + 0.5) / n as f64) * r).collect();
+    let caps: Vec<[usize; 4]> = (0..n / 2 - 1).map(|k| [n - 1 - k, k, k + 1, n - 2 - k]).collect();
+    let rings: Vec<Ring> = p.iter().zip(&fr).map(|(c, f)| Ring { c: *c, a: f.0, b: f.1, pts: pts.clone() }).collect();
+    sweep_rings(&rings, &caps, mat)
+}
+
 /// A closed box section `w` across by `h` (along `up`) swept along a path.
-fn box_along(path: &[DVec3], up: DVec3, w: f64, h: f64) -> Mesh {
+pub(crate) fn box_along(path: &[DVec3], up: DVec3, w: f64, h: f64) -> Mesh {
     let p = resample(path, STEP);
     let fr = frames(&p, up);
     let pts = vec![DVec2::new(-w / 2.0, -h / 2.0), DVec2::new(w / 2.0, -h / 2.0), DVec2::new(w / 2.0, h / 2.0), DVec2::new(-w / 2.0, h / 2.0)];
@@ -423,7 +434,7 @@ fn hat_along(path: &[DVec3], up: DVec3, w: f64, h: f64, fl: f64, th: f64) -> Mes
 
 /// A box whose section changes along its length: stations of (centre, across
 /// axis, up axis, w, h).
-fn box_stations(st: &[(DVec3, DVec3, DVec3, f64, f64)]) -> Mesh {
+pub(crate) fn box_stations(st: &[(DVec3, DVec3, DVec3, f64, f64)]) -> Mesh {
     let rings: Vec<Ring> = st
         .iter()
         .map(|&(c, a, b, w, h)| Ring { c, a, b, pts: vec![DVec2::new(-w / 2.0, -h / 2.0), DVec2::new(w / 2.0, -h / 2.0), DVec2::new(w / 2.0, h / 2.0), DVec2::new(-w / 2.0, h / 2.0)] })
@@ -437,7 +448,7 @@ pub const PANEL_WALL: f64 = 0.003;
 
 /// A pressed panel as a closed slab: `nu` × `nv` points from `p(i, j)`, cells
 /// kept where `keep(i, j)` (cell indices).
-fn panel(nu: usize, nv: usize, p: impl Fn(usize, usize) -> DVec3, keep: impl Fn(usize, usize) -> bool) -> (Mesh, f64) {
+pub(crate) fn panel(nu: usize, nv: usize, p: impl Fn(usize, usize) -> DVec3, keep: impl Fn(usize, usize) -> bool) -> (Mesh, f64) {
     let mut v = Vec::with_capacity(nu * nv);
     for i in 0..nu {
         for j in 0..nv {
@@ -484,11 +495,11 @@ fn panel(nu: usize, nv: usize, p: impl Fn(usize, usize) -> DVec3, keep: impl Fn(
     (orient_outward(m), area)
 }
 
-fn linspace(a: f64, b: f64, n: usize) -> Vec<f64> {
+pub(crate) fn linspace(a: f64, b: f64, n: usize) -> Vec<f64> {
     (0..n).map(|i| a + (b - a) * i as f64 / (n - 1) as f64).collect()
 }
 
-fn mx(p: DVec3, sg: f64) -> DVec3 {
+pub(crate) fn mx(p: DVec3, sg: f64) -> DVec3 {
     DVec3::new(p.x * sg, p.y, p.z)
 }
 
@@ -574,9 +585,9 @@ pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
     // ---- front: crash boxes, rails, radiator support, upper rails, towers, aprons
     let (xr, yr) = (0.43, 0.47);
     let (rw, rh) = (0.070, 0.110);
-    // the bumper beam's rear face (the beam is its own part): 0.115 behind
+    // the bumper beam's rear face (the beam is its own part): 0.13 behind
     // the nose at the rail lane
-    let z_cb0 = f.zi((skin.front_z)(f.x(xr), f.y(yr)) - 0.118);
+    let z_cb0 = f.zi((skin.front_z)(f.x(xr), f.y(yr)) - 0.136);
     let z_cb1 = z_cb0 - 0.18;
     let z_fw = l.z_door_front + 0.07;
     let z_kick = l.axle_f - 0.33;
@@ -790,7 +801,7 @@ pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
     let (xq, qw, qh) = (0.49, 0.060, 0.090);
     let z_tail = |x: f64, y: f64| f.zi((skin.rear_z)(f.x(x), f.y(y)));
     let (y_seat, y_boot) = (0.35, 0.47);
-    let (z_k0, z_k1, z_s0, z_s1) = (rows[4], rows[4] - 0.03, l.axle_r + 0.085, l.axle_r + 0.015);
+    let (z_k0, z_k1, z_s0, z_s1) = (rows[4], rows[4] - 0.03, l.axle_r + 0.115, l.axle_r + 0.045);
     let z_end = z_tail(0.3, 0.5) + 0.075;
     // floor profile (z, y) from the heel kick to the tail panel
     let fprof: Vec<(f64, f64)> = {
@@ -812,9 +823,10 @@ pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
         }
         p
     };
-    let x_rf = l.well_x - 0.03;
+    let x_rf = xq + qw / 2.0 + 0.006;
     let xs = linspace(-x_rf, x_rf, 27);
-    let (mesh, area) = panel(xs.len(), fprof.len(), |i, j| r(xs[i], fprof[j].1, fprof[j].0), |_, _| true);
+    // (the heel kick is open at the tunnel's mouth: the driveshaft's way)
+    let (mesh, area) = panel(xs.len(), fprof.len(), |i, j| r(xs[i], fprof[j].1, fprof[j].0), |i, j| !((0.5 * (xs[i] + xs[i + 1])).abs() < tun_w / 2.0 + 0.045 && j < 3));
     let rear_floor = b.solid("rear_floor", "boot_floor", "structure_rear", Section::Panel, mesh, 0.0, area, 0.8, Grade::Mild);
     for (k, st) in [0.95, 1.10, 1.26].into_iter().enumerate() {
         let z = l.station(st);
@@ -823,12 +835,22 @@ pub fn unibody(l: &Lines, skin: &Skin) -> Structure {
     }
     for (s, sg) in SIDES {
         // rear rail under the seat pan and the boot floor
-        // (it rises behind the floor's step, so it stays under the panel)
-        let z_q1 = z_s1 - 0.12;
-        let yq = |z: f64| (if z > z_s0 { y_seat } else if z > z_q1 { y_seat + (y_boot - y_seat) * (z_s0 - z) / (z_s0 - z_q1) } else { y_boot }) - qh / 2.0 - 0.016;
-        let zs = [z_k1 - 0.01, z_s0, z_q1, z_end + 0.02];
-        let path: Vec<DVec3> = zs.iter().map(|&z| mx(r(xq, yq(z), z), sg)).collect();
-        let m = b.boxed(&format!("rear_rail_{s}"), "rear_rail", "structure_rear", &path, up, qw, qh, 1.6, Grade::Hsla);
+        // (it rises with the floor's step, a little behind it so it stays
+        // under the panel, and is at the boot's level over the half-shaft)
+        let (z_q0, z_q1) = (z_s0 - 0.005, z_s1 + 0.005);
+        let yq = |z: f64| (if z > z_q0 { y_seat } else if z > z_q1 { y_seat + (y_boot - y_seat) * (z_q0 - z) / (z_q0 - z_q1) } else { y_boot }) - qh / 2.0 - 0.016;
+        // (upright sections all the way, so its top keeps its distance
+        // under the floor on the step)
+        let (za, zb) = (z_k1 - 0.01, z_tail(xq, y_boot - 0.06) + 0.148);
+        let n = ((za - zb) / 0.03).ceil() as usize;
+        let st: Vec<(DVec3, DVec3, DVec3, f64, f64)> = (0..=n)
+            .map(|i| {
+                let z = za + (zb - za) * i as f64 / n as f64;
+                (mx(r(xq, yq(z), z), sg), DVec3::X, DVec3::Y, qw, qh)
+            })
+            .collect();
+        let len: f64 = st.windows(2).map(|w| (w[1].0 - w[0].0).length()).sum();
+        let m = b.solid(&format!("rear_rail_{s}"), "rear_rail", "structure_rear", Section::Box { w: qw, h: qh }, box_stations(&st), len, 2.0 * (qw + qh) * len, 1.6, Grade::Hsla);
         for (k, st) in [0.92, 1.08, 1.26].into_iter().enumerate() {
             let z = l.station(st);
             b.node("E1", &format!("{}d{s}", k + 1), mx(r(xq, yq(z) - qh / 2.0, z), sg), m);
