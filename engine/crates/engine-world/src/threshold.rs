@@ -2423,6 +2423,15 @@ mod imp {
         }
     }
 
+    impl World {
+        /// The substep slots of the shared threshold ingest (its records, sort and
+        /// manifolds buffers scale with it), once a threshold destructible made it.
+        #[doc(hidden)]
+        pub fn threshold_ingest_slots(&self) -> Option<u32> {
+            self.fracture.shared.as_ref().map(|sh| sh.ingest.substeps())
+        }
+    }
+
     impl Fracture {
         /// The shared threshold ingest the explicit vehicles' chunk loads go into (slot
         /// 1): its records, per-slot row counts, collider table and rows per slot. Err

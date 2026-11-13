@@ -197,6 +197,11 @@ impl EngineIngest {
         &self.row_counts
     }
 
+    /// The substep slots its per-substep buffers (records, sort, manifolds) hold.
+    pub fn substeps(&self) -> u32 {
+        self.max_substeps
+    }
+
     /// The rows and bodies it was made for (`new`).
     pub fn capacity(&self) -> (u32, u32) {
         (self.max_rows, self.max_bodies)
