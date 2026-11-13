@@ -203,6 +203,9 @@ pub fn jbeam_files(
             if sp.support {
                 o.insert("beamLongBound".into(), json!(100.0));
             }
+            if let Some(pc) = car.precomp.get(&j) {
+                o.insert("beamPrecompression".into(), json!((*pc as f64 * 1e6).round() / 1e6));
+            }
             o.insert(
                 "breakGroup".into(),
                 json!(b.break_group.clone().unwrap_or_default()),

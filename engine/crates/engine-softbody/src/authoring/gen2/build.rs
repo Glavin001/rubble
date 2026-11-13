@@ -456,6 +456,8 @@ pub struct Car {
     /// Per [`Role::Stop`] beam: the closure (m) after which it engages
     /// (absent: [`super::export::STOP_LEFT`] of its length left).
     pub stop_close: HashMap<usize, f32>,
+    /// Per beam: JBeam `beamPrecompression` (a preloaded seal or bump stop).
+    pub precomp: HashMap<usize, f32>,
     by_name: HashMap<String, usize>,
     pair: HashMap<(usize, usize), usize>,
 }

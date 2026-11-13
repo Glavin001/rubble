@@ -2045,6 +2045,60 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         }
     }
 
+    // Braces (census): a body member node whose beams leave one direction
+    // nearly free (their directions' second moment has a weak axis: the rear
+    // rail's upper front node hung on three near-coplanar beams and swung at
+    // 3.8 Hz, 30 mm at rest) takes a web to the member node most along that
+    // axis, until its beams span all three.
+    if census {
+        let n0 = r.car.nodes.len();
+        for i in 0..n0 {
+            if r.car.nodes[i].part != body || r.member[i].is_none() {
+                continue;
+            }
+            let g = r.g(i);
+            for _ in 0..3 {
+                let tied: Vec<usize> = r
+                    .car
+                    .beams
+                    .iter()
+                    .filter(|b| b.a == i || b.b == i)
+                    .map(|b| if b.a == i { b.b } else { b.a })
+                    .collect();
+                let m = tied.iter().fold(glam::Mat3::ZERO, |m, &j| {
+                    let d = (r.g(j) - g).normalize_or_zero();
+                    m + glam::Mat3::from_cols(d * d.x, d * d.y, d * d.z)
+                });
+                let (lam, axis) = weakest_axis(m);
+                if tied.len() >= 8 || (tied.len() >= 4 && lam > 0.45) {
+                    break;
+                }
+                let best = r
+                    .nearest(body, g, 24, |j| j != i && r.member[j].is_some() && !tied.contains(&j))
+                    .into_iter()
+                    .filter(|&j| {
+                        let d = r.g(j).distance(g);
+                        d > 0.05 && d < 0.7
+                    })
+                    .max_by(|&a, &b| {
+                        let f = |j: usize| (r.g(j) - g).normalize_or_zero().dot(axis).abs();
+                        f(a).total_cmp(&f(b))
+                    });
+                let Some(j) = best else { break };
+                if std::env::var("RIG_LOG").is_ok() {
+                    eprintln!(
+                        "brace {} ({} beams, weak {:.2}) to {}",
+                        r.car.nodes[i].name,
+                        tied.len(),
+                        lam,
+                        r.car.nodes[j].name
+                    );
+                }
+                r.car.beam(i, j, Role::Web, body);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // Engine: a 12-node block on mounts.
     // ------------------------------------------------------------------
@@ -2153,13 +2207,16 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                     let i = r.node(&format!("{dn}_o{row}{k}"), p, part, Some(Role::Sheet), true);
                     grid[row].push(Some(i));
                 }
-                // The inner frame: bottom and belt, 8 cm in (the old lattice),
-                // and the inner panel's middle between them (the census door:
-                // its outer skin's three rows and this middle row are its
-                // depth, 13-14 nodes as a BeamNG door).
-                let rows_in: &[f32] = if census { &[] } else { &[bottom + 0.02, bt - 0.03] };
+                // The inner panel: bottom and belt, 8 cm in, and its middle
+                // between them. The census door is a closed box of 17 nodes
+                // (a BeamNG door has 13): the skin's three rows and the inner
+                // panel's bottom and belt rows, [`DOOR_DEPTH`] in, so it
+                // resists twist and bending by its section, not by the skin
+                // alone.
+                let rows_in = [bottom + 0.02, bt - 0.03];
+                let depth = if census { DOOR_DEPTH } else { 0.08 };
                 for (row, &y) in rows_in.iter().enumerate() {
-                    let p = mirror(inward(side(z, y), 0.08), s);
+                    let p = mirror(inward(side(z, y), depth), s);
                     inner.push(r.node(
                         &format!("{dn}_i{row}{k}"),
                         p,
@@ -2167,6 +2224,9 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                         Some(Role::DoorFrame),
                         false,
                     ));
+                }
+                if census {
+                    continue;
                 }
                 let ym = 0.5 * (bottom + bt);
                 let p = mirror(inward(side(z, ym), 0.08), s);
@@ -2258,7 +2318,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 })
                 .collect();
             r.car
-                .panel(&grid, part, &[Role::Sheet; 3], Role::Sheet, true);
+                .panel(&grid, part, &vec![Role::Sheet; grid.len()], Role::Sheet, true);
             let mut below: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
             below.extend(&inner);
             // Below the belt: everything to everything in reach.
@@ -2266,11 +2326,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 false
             });
             // The frame: front and rear legs from the belt, and the top.
-            let belt_row: Vec<usize> = grid[2].iter().flatten().copied().collect();
+            let belt_row: Vec<usize> = grid[grid.len() - 1].iter().flatten().copied().collect();
             let ib: Vec<usize> = inner
                 .iter()
                 .copied()
-                .filter(|&i| r.car.nodes[i].name.contains(if census { "_im" } else { "_i1" }))
+                .filter(|&i| r.car.nodes[i].name.contains("_i1"))
                 .collect();
             let (bf, br) = (belt_row[0], *belt_row.last().unwrap());
             let (ibf, ibr) = (ib[0], *ib.last().unwrap());
@@ -2316,9 +2376,46 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 r.car.beams[j].role = Role::Intrusion;
             }
             if census {
-                outer_chord = grid[1].iter().flatten().copied().collect();
+                // The belt reinforcement and the lower intrusion beam: the
+                // inner panel's two rows and the diagonals between them.
+                let row = |r: &Rig, tag: &str| -> Vec<usize> {
+                    let mut v: Vec<usize> = inner
+                        .iter()
+                        .copied()
+                        .filter(|&i| r.car.nodes[i].name.contains(tag))
+                        .collect();
+                    v.sort_by(|&a, &b| r.g(b).z.total_cmp(&r.g(a).z));
+                    v
+                };
+                let (lo_row, hi_row) = (row(&r, "_i0"), row(&r, "_i1"));
+                let mut pairs: Vec<(usize, usize)> = Vec::new();
+                // The skin's crease row is the truss's outer chord (a load at
+                // mid-door meets it and goes to both inner rows): without it
+                // the static door test's initial resistance fell to 7.7 kN.
+                let mut mid: Vec<usize> = grid[1].iter().flatten().copied().collect();
+                mid.sort_by(|&a, &b| r.g(b).z.total_cmp(&r.g(a).z));
+                for k in 0..mid.len() {
+                    if k + 1 < mid.len() {
+                        pairs.push((mid[k], mid[k + 1]));
+                    }
+                    for row in [&lo_row, &hi_row] {
+                        for kk in k.saturating_sub(1)..(k + 2).min(row.len()) {
+                            pairs.push((mid[k], row[kk]));
+                        }
+                    }
+                }
+                for k in 0..lo_row.len().min(hi_row.len()).saturating_sub(1) {
+                    pairs.push((lo_row[k], lo_row[k + 1]));
+                    pairs.push((hi_row[k], hi_row[k + 1]));
+                    pairs.push((lo_row[k], hi_row[k + 1]));
+                    pairs.push((hi_row[k], lo_row[k + 1]));
+                }
+                for (a, b) in pairs {
+                    let j = r.car.beam(a, b, Role::Intrusion, part);
+                    r.car.beams[j].role = Role::Intrusion;
+                }
             }
-            if split_beam || census {
+            if split_beam {
                 outer_chord.sort_by(|&a, &b| r.g(b).z.total_cmp(&r.g(a).z));
                 let mut pairs: Vec<(usize, usize)> = Vec::new();
                 for w in outer_chord.windows(2) {
@@ -2393,7 +2490,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 let p = mirror(top(z, xx.abs()), if xx < 0.0 { -1.0 } else { 1.0 });
                 let i = r.node(&format!("hd_o{kr}{kc}"), p, part, Some(Role::Sheet), true);
                 row.push(Some(i));
-                if kc % 2 == 0 {
+                // The inner frame: under the edges and the centre line (the
+                // old lattice), or the centre spine alone (census: 24
+                // nodes; an inner row under each side edge instead measured
+                // lower, 6.7 Hz against 8.8: the bump stops hold the edges).
+                if if census { kc == 2 } else { kc % 2 == 0 } {
                     inner.push(r.node(
                         &format!("hd_i{kr}{kc}"),
                         inward(p, 0.06),
@@ -2422,7 +2523,8 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     let trunk_ids = {
         let part = Part::Trunk;
         let mut grid = Vec::new();
-        let deck = span(tk_hi.z - 0.03, tk_lo.z + 0.07, 3);
+        // Census: two deck rows and the rear face (18 nodes with the inner row).
+        let deck = span(tk_hi.z - 0.03, tk_lo.z + 0.07, if census { 2 } else { 3 });
         for (kr, &z) in deck.iter().enumerate() {
             let w = half_w_at(&trunk_top, z, 0.04).unwrap_or(0.72) - 0.025;
             let mut row = Vec::new();
@@ -2459,7 +2561,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         }
         grid.push(row);
         let mut inner = Vec::new();
-        for (kr, &z) in [deck[0], deck[2]].iter().enumerate() {
+        let inner_z: Vec<f32> = if census {
+            vec![0.5 * (deck[0] + deck[1])]
+        } else {
+            vec![deck[0], deck[2]]
+        };
+        for (kr, &z) in inner_z.iter().enumerate() {
             for (k, &xx) in [-0.45f32, 0.0, 0.45].iter().enumerate() {
                 let p = top(z, xx.abs()) * Vec3::new(if xx < 0.0 { -1.0 } else { 1.0 }, 1.0, 1.0);
                 inner.push(r.node(
@@ -2472,7 +2579,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             }
         }
         r.car
-            .panel(&grid, part, &[Role::Sheet; 4], Role::Sheet, true);
+            .panel(&grid, part, &vec![Role::Sheet; grid.len()], Role::Sheet, true);
         let mut all: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
         all.extend(&inner);
         graph(&mut r, &all, 0.85, part, Role::Sheet, &|_| false);
@@ -2805,6 +2912,10 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // ------------------------------------------------------------------
     // Hardware from the markers.
     // ------------------------------------------------------------------
+    // A hinge's beams: 2 × 2 nodes (the old lattice) or, census, 3 × 3 (a
+    // BeamNG hinge group is 8-12 beams: they hold the leaf in every
+    // direction, where four near-parallel ones left it to swing on its latch).
+    let hinge_n = if census { 3 } else { 2 };
     let pillar = |i: usize, r: &Rig| {
         matches!(
             r.member[i],
@@ -2827,8 +2938,8 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 let mut dv: Vec<(f32, usize)> =
                     own.iter().map(|&i| (r.g(i).distance(mk), i)).collect();
                 dv.sort_by(|a, b| a.0.total_cmp(&b.0));
-                let bv = r.nearest(body, mk, 2, |i| pillar(i, &r));
-                for &(_, d) in dv.iter().take(2) {
+                let bv = r.nearest(body, mk, hinge_n, |i| pillar(i, &r));
+                for &(_, d) in dv.iter().take(hinge_n) {
                     for &b in &bv {
                         r.car.hardware(
                             d,
@@ -2929,13 +3040,13 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         let mut dv: Vec<(f32, usize)> =
             hood_ids.iter().map(|&i| (r.g(i).distance(mk), i)).collect();
         dv.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let bv = r.nearest(body, mk, 2, |i| {
+        let bv = r.nearest(body, mk, hinge_n, |i| {
             matches!(
                 r.member[i],
                 Some(Role::Apron) | Some(Role::Firewall) | Some(Role::PillarA)
             )
         });
-        for &(_, d) in dv.iter().take(2) {
+        for &(_, d) in dv.iter().take(hinge_n) {
             for &b in &bv {
                 r.car.hardware(
                     d,
@@ -3026,8 +3137,8 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             .map(|&i| (r.g(i).distance(mk), i))
             .collect();
         dv.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let bv = r.nearest(body, mk, 2, |_| true);
-        for &(_, d) in dv.iter().take(2) {
+        let bv = r.nearest(body, mk, hinge_n, |i| r.member[i].is_some());
+        for &(_, d) in dv.iter().take(hinge_n) {
             for &b in &bv {
                 r.car.hardware(
                     d,
@@ -3227,6 +3338,90 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     }
 
     // ------------------------------------------------------------------
+    // Seals and stops (census): as a BeamNG car's 7-11 % of SUPPORT beams.
+    // Every closure and bolted panel node bears on its [`SEAL_K`] nearest
+    // body members within [`SEAL_REACH`] (compression only: the door's seal
+    // on its aperture, the lids' bump stops, a fender on its apron), where
+    // the old lattice had one. Each hung closure's two nodes farthest from
+    // its hinges (the latch side: seal squeeze, the bump stops' preload) are
+    // precompressed by [`SEAL_PRELOAD`] a beam, so the panel sits loaded
+    // against its latch and a small motion meets the stop at once.
+    // ------------------------------------------------------------------
+    if census {
+        let n0 = r.car.nodes.len();
+        let body_ok = |j: usize, r: &Rig| {
+            r.member[j].is_some()
+                && !r.car.nodes[j].no_group
+                && !r.car.nodes[j].name.starts_with("hub")
+                && !r.car.nodes[j].name.starts_with("rim")
+        };
+        let hung = [
+            (Part::DoorFL, "hinge_door_FL_upper", "hinge_door_FL_lower"),
+            (Part::DoorFR, "hinge_door_FR_upper", "hinge_door_FR_lower"),
+            (Part::DoorRL, "hinge_door_RL_upper", "hinge_door_RL_lower"),
+            (Part::DoorRR, "hinge_door_RR_upper", "hinge_door_RR_lower"),
+            (Part::Hood, "hinge_hood_L", "hinge_hood_R"),
+            (Part::Trunk, "hinge_trunk_L", "hinge_trunk_R"),
+        ];
+        for part in [
+            Part::DoorFL,
+            Part::DoorFR,
+            Part::DoorRL,
+            Part::DoorRR,
+            Part::Hood,
+            Part::Trunk,
+            Part::FenderL,
+            Part::FenderR,
+            Part::BumperF,
+            Part::BumperR,
+        ] {
+            let own: Vec<usize> = (0..n0)
+                .filter(|&i| {
+                    let n = &r.car.nodes[i];
+                    n.part == part && !n.no_group && !n.contact
+                })
+                .collect();
+            // The preloaded nodes: the two farthest from the hinge line.
+            let pre: Vec<usize> = hung
+                .iter()
+                .find(|h| h.0 == part)
+                .map(|&(_, a, b)| {
+                    let (ha, hb) = (marker(model, a), marker(model, b));
+                    let mut v: Vec<(f32, usize)> = own
+                        .iter()
+                        .filter(|&&i| r.skin[i])
+                        .map(|&i| {
+                            let g = r.g(i);
+                            (g.distance(ha).min(g.distance(hb)), i)
+                        })
+                        .collect();
+                    v.sort_by(|x, y| y.0.total_cmp(&x.0));
+                    v.into_iter().take(2).map(|x| x.1).collect()
+                })
+                .unwrap_or_default();
+            let k = if matches!(part, Part::BumperF | Part::BumperR) { 1 } else { SEAL_K };
+            for &d in &own {
+                let g = r.g(d);
+                for b in r.nearest(body, g, k, |j| body_ok(j, &r)) {
+                    let l = r.g(b).distance(g);
+                    if l > SEAL_REACH || l < 0.03 {
+                        continue;
+                    }
+                    if r.car.has_beam(d, b) {
+                        continue;
+                    }
+                    let j = r.car.beam(d, b, Role::Bearing, part);
+                    r.car.beams[j].role = Role::Bearing;
+                    if pre.contains(&d) {
+                        let kk = Role::Bearing.spec(part).k_fixed;
+                        r.car.precomp.insert(j, 1.0 + SEAL_PRELOAD / (kk * l));
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Shut lines: structural edge nodes along both sides of every shut line.
     // ------------------------------------------------------------------
     if std::env::var("GEN3_NO_EDGES").is_err() {
@@ -3236,6 +3431,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             &apertures,
             (tk_lo.z + 0.06, tk_hi.z - 0.06),
             ph.edge_spacing,
+            census,
         );
     }
 
@@ -3658,6 +3854,13 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         gr + (gf - gr) * t
     };
     for b in &mut r.car.beams {
+        // Census: the body's edge nodes carry real mass, so their ties keep
+        // the rule's spring where the light nodes' were softened to about a
+        // third; their yield keeps that share (a flange, not a member: at
+        // the full yield they braced the roof rail, FMVSS 216a 6.2 × weight).
+        if census && b.part == body && b.role == Role::EdgeTie && b.deform.is_finite() {
+            b.deform *= env("RIG_EDGE_TIE_Y", EDGE_TIE_YIELD);
+        }
         if !b.deform.is_finite()
             || b.break_group.is_some()
             || matches!(
@@ -3682,6 +3885,16 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             if mid.z > door_up_h {
                 b.deform *= duy;
             }
+            // Census: the window frame is a thin channel, not door structure
+            // (its legs at the door frame's yield propped the roof rail
+            // through their seals: FMVSS 216a 7.05 × weight).
+            let frame = |i: usize| {
+                let n = &r.car.nodes[i].name;
+                n.ends_with("_f0") || n.ends_with("_f1")
+            };
+            if census && (frame(b.a) || frame(b.b)) {
+                b.deform *= env("RIG_WINDOW_FRAME_Y", WINDOW_FRAME_YIELD);
+            }
         } else if b.part == body && crush_zone && b.role != Role::Sheet {
             // The suspension towers (front strut, rear wheelhouse) carry the
             // car's weight into the rails: at the crush zone's 0.28 two of
@@ -3694,7 +3907,15 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 let n = &r.car.nodes[i].name;
                 n.starts_with("tw") || n.starts_with("wh") || n.starts_with("hpf")
             };
-            b.deform *= if tower(b.a) || tower(b.b) {
+            // Census: the apron (upper rail) from the strut tower back to the
+            // cowl and hinge pillar is the suspension's load path, not crush
+            // structure: at the crush yield a 5 cm kerb at 30 km/h bent 42 of
+            // its beams (2.3 mm, the whole front clip left 2-3 mm off the
+            // body); it takes [`APRON_REAR_YIELD`].
+            let apron_rear = |i: usize| census && r.car.nodes[i].name.starts_with("ar") && r.car.nodes[i].p.y > -0.15;
+            b.deform *= if apron_rear(b.a) || apron_rear(b.b) {
+                env("RIG_APRON_REAR_Y", APRON_REAR_YIELD)
+            } else if tower(b.a) || tower(b.b) {
                 cy.max(env("GEN3_TOWER_Y", tower_yield))
             } else if mid.y < fw_y - 0.05 {
                 cy * front_grade(mid.y)
@@ -3875,6 +4096,19 @@ pub const INTRUSION_YIELD: f32 = 1.0;
 /// Spacing of the shut lines' edge nodes (m): a real closure's flange is
 /// bolted, hinged or stopped every 15-25 cm along it.
 pub const EDGE_SPACING: f32 = 0.22;
+/// The body's shut-line edge ties: their yield against the sheet's.
+pub const EDGE_TIE_YIELD: f32 = 0.35;
+/// A door's window frame: its yield against the door frame's.
+pub const WINDOW_FRAME_YIELD: f32 = 0.3;
+/// The apron's yield from the strut tower back (× the census 1.15 %).
+pub const APRON_REAR_YIELD: f32 = 1.0;
+/// Seals and stops: body members a closure node bears on, their reach (m)
+/// and the preload of a precompressed one (N).
+pub const SEAL_K: usize = 2;
+pub const SEAL_REACH: f32 = 0.30;
+pub const SEAL_PRELOAD: f32 = 150.0;
+/// The census door's depth: its inner panel behind its skin (m).
+pub const DOOR_DEPTH: f32 = 0.10;
 /// How far an edge node sits in from its panel's edge, and under its skin (m).
 pub const EDGE_IN: f32 = 0.025;
 pub const EDGE_UNDER: f32 = 0.01;
@@ -3996,6 +4230,7 @@ fn edge_nodes(
     apertures: &[Aperture],
     trunk_z: (f32, f32),
     edge_spacing: f32,
+    census: bool,
 ) -> Vec<usize> {
     let model = inp.model();
     // Skinned and rigid pieces of the parts (glass excluded: it sits in its
@@ -4128,6 +4363,18 @@ fn edge_nodes(
                     continue;
                 }
                 let Some(g) = place(k, q) else { continue };
+                // Census: a closure has no edge nodes of its own (a BeamNG
+                // door's perimeter nodes are its structure); the stop goes to
+                // its nearest skin node. The body's are structural nodes with
+                // their share of its mass (no 0.15 kg nodes on the step).
+                if census && part != Part::Body {
+                    pair[side] = r
+                        .nearest(part, g, 1, |j| r.skin[j] && !r.car.nodes[j].no_group)
+                        .first()
+                        .copied()
+                        .filter(|&j| r.g(j).distance(g) < 0.35);
+                    continue;
+                }
                 // An edge node of the part already within half a spacing serves.
                 if let Some(&(near, _)) = made
                     .iter()
@@ -4148,7 +4395,7 @@ fn edge_nodes(
                 serial += 1;
                 let nm = format!("e{}{serial}", part.name().trim_start_matches("gen2_"));
                 let i = r.node(&nm, g, part, Some(Role::Sheet), false);
-                r.car.nodes[i].edge = true;
+                r.car.nodes[i].edge = !census;
                 made.push((i, part));
                 pair[side] = Some(i);
             }

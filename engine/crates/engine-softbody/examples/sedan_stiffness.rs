@@ -29,6 +29,8 @@ use engine_softbody::vehicle_compare::{rigid_fit, settings, Car, CarSpec, Source
 use glam::{DVec3, Quat, Vec3};
 use std::collections::BTreeMap;
 
+static NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 const CATS: [&str; 6] = ["body", "door", "hood", "trunk", "fender", "bumper"];
 
 fn cat_of(part: &str) -> &'static str {
@@ -275,6 +277,16 @@ fn modes(
             let s2: f64 = per_node.iter().sum();
             let s4: f64 = per_node.iter().map(|v| v * v).sum();
             let pr = s2 * s2 / (nf as f64 * s4.max(1e-300));
+            // MODE_NODES=1: the nodes that carry each mode (share of its kinetic energy).
+            if f >= 1.0 && std::env::var("MODE_NODES").is_ok() {
+                let names = NAMES.lock().unwrap();
+                let mut v: Vec<(f64, usize)> = per_node.iter().enumerate().map(|(k, &e)| (e / s2.max(1e-300), free[k])).collect();
+                v.sort_by(|a, b| b.0.total_cmp(&a.0));
+                eprintln!(
+                    "  mode {f:.1} Hz (of {nf} nodes): {}",
+                    v.iter().take(5).map(|&(e, i)| format!("{} {:.2}", names.get(i).map_or("?", |s| s.as_str()), e)).collect::<Vec<_>>().join(", ")
+                );
+            }
             let mut out: Vec<f64> = sh.into_iter().map(|v| v / t).collect();
             out.push(pr);
             (f, out)
@@ -1013,6 +1025,7 @@ fn main() {
         eprintln!("{name}: loaded in {:.1} s", t0.elapsed().as_secs_f32());
         let s = &car.template;
         let nn = s.nodes.len();
+        *NAMES.lock().unwrap() = (0..nn).map(|i| car.node_name(i).to_string()).collect();
         let tyre = |i: usize| s.nodes[i].flags & NODE_TYRE != 0;
         // Category per node (first part wins).
         let mut cat = vec![usize::MAX; nn];
@@ -1325,6 +1338,29 @@ fn main() {
             s2.boxes.push(StaticBox::centered(Vec3::new(0.0, -0.45, z0 + 0.25), Vec3::new(4.0, 0.5, 0.25)));
             let r = run(&car, &sets, &mut s2, 3.0, &zero, vis_on);
             report_series(&format!("{name}: 5 cm × 0.5 m bump at 30 km/h (coasting), 3 s"), &r, 0);
+            // Beams the bump bent (rest length changed by more than 0.1 mm) or broke, by member pair.
+            let mut bent: BTreeMap<String, (usize, f32)> = BTreeMap::new();
+            let (mut nb, mut nbr) = (0, 0);
+            let member = |n: &str| n.trim_end_matches(['L', 'R']).trim_end_matches(|c: char| c.is_ascii_digit()).trim_end_matches('_').to_string();
+            for b in &s2.beams {
+                if b.broken {
+                    nbr += 1;
+                }
+                let d = (b.rest - b.rest0).abs();
+                if d > 1e-4 {
+                    nb += 1;
+                    let (ma, mb) = (member(&car.node_name(b.a as usize)), member(&car.node_name(b.b as usize)));
+                    let e = bent.entry(if ma <= mb { format!("{ma}-{mb}") } else { format!("{mb}-{ma}") }).or_default();
+                    e.0 += 1;
+                    e.1 = e.1.max(d);
+                }
+            }
+            let mut v: Vec<(&String, &(usize, f32))> = bent.iter().collect();
+            v.sort_by(|a, b| b.1 .1.total_cmp(&a.1 .1));
+            println!(
+                "\nbump: {nb} beams bent, {nbr} broken; worst: {}",
+                v.iter().take(14).map(|(m, (n, d))| format!("{m} ×{n} {:.1} mm", d * 1e3)).collect::<Vec<_>>().join(", ")
+            );
         }
         eprintln!("{name}: done in {:.0} s", t0.elapsed().as_secs_f32());
     }
