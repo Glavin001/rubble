@@ -311,6 +311,8 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         hub.mesh.add(&bar(lo, up, 0.045, 0.060));
         hub.mesh.add(&bar(at(-0.165, -0.035, fwd * 0.034), toe + DVec3::Z * fwd * 0.012, 0.030, 0.025));
         hub.mesh.add(&bar(at(-0.165, 0.02, -fwd * 0.034), n4 - DVec3::Z * fwd * 0.012, 0.030, 0.030));
+        // the wheel bearing and its flange, through the disc's hat
+        hub.mesh.add(&crate::equipment::drum(at(-0.143, 0.0, 0.0), at(-0.004, 0.0, 0.0), 0.036, 14, Mat::MetalBare));
         hub.meshes.push(format!("brake_disc_{cn}"));
         // lower arm: two legs from the subframe's corners to the lower joint
         let sub = if front { "subf" } else { "subr" };
@@ -498,10 +500,8 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         for (i, q) in path.iter().enumerate() {
             p.node(&format!("{}", i + 1), *q, 1.4);
         }
-        p.mesh.add(&cyl_along(&path, 0.022, 10, Mat::MetalBare));
-        // a resonator under the floor and the rear silencer
-        p.mesh.add(&rbox(r(0.24, 0.166, -0.22), DVec3::new(0.065, 0.021, 0.20), 0.018, 2, Mat::MetalBare));
-        p.mesh.add(&rbox(r(0.285, 0.268, zr - 0.45), DVec3::new(0.085, 0.045, 0.125), 0.035, 3, Mat::MetalBare));
+        // the sections, their flanges and the hangers
+        p.mesh = crate::equipment::exhaust_mesh(&path, &[4, 6, 8, 11]);
         let n = p.nodes.len();
         let mut pairs: Vec<(usize, usize)> = (0..n - 1).map(|i| (i, i + 1)).collect();
         pairs.extend((0..n - 2).map(|i| (i, i + 2)));

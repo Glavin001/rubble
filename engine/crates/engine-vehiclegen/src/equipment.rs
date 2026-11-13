@@ -206,7 +206,7 @@ pub(crate) fn engine_mesh(f: &Frame, ex: f64, ez0: f64, ez1: f64) -> Mesh {
     }
     m.add(&cyl(
         DVec3::new(xm, f.y(0.60), f.z(zc - 0.035)),
-        DVec3::new(xm + 0.020, f.y(0.508), f.z(zc - 0.035)),
+        DVec3::new(xm + 0.020, f.y(0.518), f.z(zc - 0.035)),
         0.024,
     ));
     // accessory drive on the front face
@@ -1185,4 +1185,67 @@ fn running_gear(g: &Gear, _st: &Structure, out: &mut Vec<MechPart>) {
         }
         out.push(p);
     }
+}
+
+// ---- 3. the exhaust's sections -------------------------------------------------------------
+
+/// The exhaust's solid along its 13 nodes: the downpipe from the manifold's
+/// flange, the catalytic converter, the centre pipe, the resonator under
+/// the floor, the pipe over the rear axle, the rear silencer and the
+/// tailpipe with its tip; a flange at every joint and a rubber hanger at
+/// each of the four hanger mounts (`hang`: node indices).
+pub(crate) fn exhaust_mesh(path: &[DVec3], hang: &[usize]) -> Mesh {
+    let steel = Mat::MetalBare;
+    let mut m = cyl_along(path, 0.022, 10, steel);
+    let dir = |i: usize| (path[(i + 1).min(path.len() - 1)] - path[i.saturating_sub(1)]).normalize();
+    let flange = |m: &mut Mesh, at: DVec3, d: DVec3| {
+        if at.y < 0.22 {
+            // (under the floor: a two-bolt flange lying flat)
+            let x = DVec3::Y.cross(d).normalize();
+            let mut k = box_stations(&[(at - d * 0.005, x, d.cross(x), 0.080, 0.046), (at + d * 0.005, x, d.cross(x), 0.080, 0.046)]);
+            k.set_mat(steel);
+            m.add(&k);
+        } else {
+            m.add(&drum(at - d * 0.005, at + d * 0.005, 0.034, 12, steel));
+        }
+    };
+    // the downpipe's flange on the manifold
+    let d0 = (path[1] - path[0]).normalize();
+    flange(&mut m, path[0] + d0 * 0.006, d0);
+    // a flat body between two points, tapering to the pipe at each end
+    // (the floor is close above: bodies are oval, wider than high)
+    let body = |m: &mut Mesh, a: DVec3, b: DVec3, w: f64, h: f64, cone: f64| {
+        let d = (b - a).normalize();
+        let x = DVec3::Y.cross(d).normalize();
+        let y = d.cross(x);
+        let st: Vec<(DVec3, DVec3, DVec3, f64, f64)> = [(0.0, 0.050, 0.042), (cone, w, h), ((b - a).length() - cone, w, h), ((b - a).length(), 0.050, 0.042)].iter().map(|&(s, ww, hh)| (a + d * s, x, y, ww, hh)).collect();
+        let mut k = box_stations(&st);
+        k.set_mat(steel);
+        m.add(&k);
+        flange(m, a - d * 0.012, d);
+        flange(m, b + d * 0.012, d);
+    };
+    // catalytic converter between nodes 3 and 4
+    let (a, b) = (path[2] + (path[3] - path[2]) * 0.10, path[2] + (path[3] - path[2]) * 0.92);
+    body(&mut m, a, b, 0.130, 0.043, 0.035);
+    // resonator between nodes 5 and 7
+    let (a, b) = (path[4] + (path[5] - path[4]) * 0.55, path[5] + (path[6] - path[5]) * 0.70);
+    body(&mut m, a, b, 0.150, 0.043, 0.050);
+    // rear silencer between nodes 11 and 12
+    let (a, b) = (path[10] + (path[11] - path[10]) * 0.12, path[10] + (path[11] - path[10]) * 0.92);
+    body(&mut m, a, b, 0.190, 0.095, 0.045);
+    // the joint ahead of the axle, and the tailpipe's tip
+    flange(&mut m, path[7], dir(7));
+    let n = path.len() - 1;
+    let dt = (path[n] - path[n - 1]).normalize();
+    m.add(&drum(path[n] - dt * 0.070, path[n] + dt * 0.012, 0.027, 14, Mat::Chrome));
+    // hangers: a rod off the pipe into a rubber block (sideways under the
+    // floor, where there is no room above)
+    for &i in hang {
+        let p = path[i];
+        let side = if p.y < 0.22 { DVec3::X } else { DVec3::Y };
+        m.add(&cyl(p + side * 0.018, p + side * 0.062, 0.005));
+        m.add(&box_(p + side * 0.066, DVec3::new(0.012, 0.012, 0.018) + side * 0.004, Mat::Rubber, None));
+    }
+    m
 }
