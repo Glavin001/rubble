@@ -67,6 +67,13 @@ const PARTS: &[(&str, usize, f64, f64)] = &[
     ("fuel_flap", 0, 0.0, 0.25),
     ("plate_front", 0, 0.0, 0.2),
     ("plate_rear", 0, 0.0, 0.2),
+    // 2. brakes and anti-roll bars (the coil springs are part of the struts)
+    ("brake_caliper_FL", 0, 0.0, 4.5),
+    ("brake_caliper_FR", 0, 0.0, 4.5),
+    ("brake_caliper_RL", 0, 0.0, 3.2),
+    ("brake_caliper_RR", 0, 0.0, 3.2),
+    ("antiroll_bar_front", 4, 5.5, 0.0),
+    ("antiroll_bar_rear", 4, 3.5, 0.0),
 ];
 
 #[test]

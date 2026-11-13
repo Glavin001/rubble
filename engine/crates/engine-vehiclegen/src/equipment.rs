@@ -306,6 +306,7 @@ pub(crate) fn sedan_equipment(g: &Gear, st: &Structure, out: &mut Vec<MechPart>)
     let n0 = out.len();
     engine_bay(g, st, out);
     body_hardware(g, st, out);
+    running_gear(g, st, out);
     for p in &mut out[n0..] {
         p.from_trim = !p.nodes.is_empty();
     }
@@ -1084,6 +1085,104 @@ fn body_hardware(g: &Gear, st: &Structure, out: &mut Vec<MechPart>) {
         p.mesh.add(&box_(DVec3::new(0.0, f.y(y), zo + sgn * 0.0020), DVec3::new(hx + 0.006, hy + 0.006, 0.0010), Mat::TrimBlack, None));
         p.host = Some(host.into());
         p.carried_kg = 0.2;
+        out.push(p);
+    }
+}
+
+// ---- 2. brakes, springs, anti-roll bars ----------------------------------------------------
+
+/// A coil spring round the axis `a`→`b`: coil radius `rc`, wire radius
+/// `rw`, with a seat disc at each end.
+pub(crate) fn coil_spring(a: DVec3, b: DVec3, rc: f64, rw: f64, turns: f64) -> Mesh {
+    use crate::structure::{sweep_rings, Ring};
+    let d = (b - a).normalize();
+    let u = d.cross(DVec3::Z).normalize();
+    let v = d.cross(u);
+    let n = (turns * 12.0).round() as usize;
+    let sides = 6;
+    let pts: Vec<glam::DVec2> = (0..sides).map(|k| glam::DVec2::from_angle(std::f64::consts::TAU * (k as f64 + 0.5) / sides as f64) * rw).collect();
+    let rings: Vec<Ring> = (0..=n)
+        .map(|i| {
+            let t = i as f64 / n as f64;
+            let phi = std::f64::consts::TAU * turns * t;
+            let e = u * phi.cos() + v * phi.sin();
+            Ring { c: a + (b - a) * t + e * rc, a: e, b: d, pts: pts.clone() }
+        })
+        .collect();
+    let caps: Vec<[usize; 4]> = (0..sides / 2 - 1).map(|k| [sides - 1 - k, k, k + 1, sides - 2 - k]).collect();
+    let mut m = sweep_rings(&rings, &caps, Mat::MetalBare);
+    for (e, s) in [(a, -1.0), (b, 1.0)] {
+        m.add(&drum(e + d * s * (rw + 0.001), e + d * s * (rw + 0.007), rc + rw + 0.002, 14, Mat::MetalBare));
+    }
+    m
+}
+
+fn running_gear(g: &Gear, _st: &Structure, out: &mut Vec<MechPart>) {
+    let f = &g.f;
+    let (t, wy) = (g.half_track, g.wheel_y);
+    let disc_r = 0.16;
+    // ---- calipers: a floating caliper astride each disc, on the knuckle's
+    // bracket (behind the axle in front, ahead of it at the rear)
+    for (cn, sg, front) in [("FL", 1.0, true), ("FR", -1.0, true), ("RL", 1.0, false), ("RR", -1.0, false)] {
+        let c = cn.to_lowercase();
+        let mut p = MechPart::new(&format!("brake_caliper_{cn}"), "suspension");
+        let (hz, body) = if front { (0.058, 0.020) } else { (0.046, 0.016) };
+        // (built on top of the disc in the wheel's frame, x outboard: the
+        // disc is x -52..-28 mm; then turned round the axle)
+        let mut m = Mesh::new();
+        let xi = -0.052 - 0.004 - body;
+        m.add(&rbox(DVec3::new(xi, disc_r - 0.026, 0.0), DVec3::new(body, 0.030, hz), 0.006, 2, Mat::Paint));
+        m.add(&drum(DVec3::new(xi - body + 0.002, disc_r - 0.030, 0.0), DVec3::new(xi - body - 0.016, disc_r - 0.030, 0.0), 0.026, 12, Mat::MetalBare));
+        m.add(&box_(DVec3::new(0.5 * (xi - body - 0.004), disc_r + 0.012, 0.0), DVec3::new(0.5 * (-0.004 - (xi - body)), 0.008, hz - 0.006), Mat::Paint, None));
+        m.add(&rbox(DVec3::new(-0.014, disc_r - 0.026, 0.0), DVec3::new(0.010, 0.030, hz - 0.006), 0.005, 2, Mat::Paint));
+        let a = (if front { -1.0f64 } else { 1.0 }) * 55.0f64.to_radians();
+        m.transform(Some(crate::mesh::rot_x(a)), DVec3::ZERO);
+        if sg < 0.0 {
+            m.mirror_x();
+        }
+        m.transform(None, DVec3::new(sg * t, wy, if front { g.zf } else { g.zr }));
+        p.mesh = m;
+        p.binds = ["lo", "up", "toe", "n4"].iter().map(|n| format!("hub{c}_{n}")).collect();
+        p.carried_kg = if front { 4.5 } else { 3.2 };
+        out.push(p);
+    }
+    // ---- anti-roll bars: a bar in two bushes on the subframe, its ends on
+    // drop links to the lower joints
+    let rod = Mat::MetalBare;
+    for (front, name, sub, z_bar, y_bar, x_bush, ends, kg) in [
+        (true, "antiroll_bar_front", "subf", g.axle_f + 0.280, 0.300, 0.30, [(0.46, 0.300, 0.280), (0.52, 0.262, 0.185), (0.55, 0.250, 0.085)], 5.5),
+        (false, "antiroll_bar_rear", "subr", g.axle_r + 0.265, 0.215, 0.33, [(0.46, 0.215, 0.265), (0.50, 0.222, 0.200), (0.53, 0.230, 0.145)], 3.5),
+    ] {
+        let mut p = MechPart::new(name, "suspension");
+        let ax = if front { g.axle_f } else { g.axle_r };
+        let mut path: Vec<DVec3> = ends.iter().rev().map(|&(x, y, dz)| f.p(-x, y, ax + dz)).collect();
+        path.extend(ends.iter().map(|&(x, y, dz)| f.p(x, y, ax + dz)));
+        let r_bar = if front { 0.011 } else { 0.009 };
+        p.mesh.add(&cyl_along(&path, r_bar, 8, rod));
+        let wheel_z = if front { g.zf } else { g.zr };
+        let mut names = Vec::new();
+        for (s, sg) in [("l", 1.0), ("r", -1.0)] {
+            let bush = f.p(sg * x_bush, y_bar, z_bar);
+            p.mesh.add(&box_(bush, DVec3::new(0.016, r_bar + 0.008, r_bar + 0.008), Mat::Rubber, None));
+            p.mesh.add(&box_(bush + DVec3::Y * (r_bar + 0.010), DVec3::new(0.020, 0.002, r_bar + 0.020), rod, None));
+            // the drop link: from the bar's end down towards the lower joint
+            let end = path[if sg > 0.0 { path.len() - 1 } else { 0 }];
+            let lo = DVec3::new(sg * (t - 0.16), wy - 0.14, wheel_z);
+            let foot = end + (lo - end).normalize() * 0.055;
+            p.mesh.add(&cyl(end, foot, 0.006));
+            p.mesh.add(&drum(end - DVec3::X * 0.010, end + DVec3::X * 0.010, 0.012, 8, rod));
+            let nb = p.node(&format!("b{s}"), bush, 0.28 * kg);
+            let ne = p.node(&format!("e{s}"), end, 0.22 * kg);
+            names.push((s, nb, ne));
+        }
+        p.internal.push(Internal { pairs: p.complete(), v: vals(0.0, 60.0, 9e3, INF), deform_group: None });
+        for (s, nb, ne) in names {
+            let c = format!("{}{s}", if front { "f" } else { "r" });
+            let to: Vec<String> = if front { vec![format!("{sub}_f{s}"), format!("{sub}_k{s}"), format!("sh_a4_{s}")] } else { vec![format!("{sub}_f{s}"), "subr_cf".to_string(), format!("sh_e1_1d{s}")] };
+            let tag = if front { "front" } else { "rear" };
+            p.mounts.push(Mount { group: format!("antiroll_bush_{tag}_{s}"), from: vec![nb], to, beams: 3, kind: BeamKind::Bounded, v: vals(0.0, 80.0, 6e3, 12e3), precomp: 1.0, to_part: None });
+            p.mounts.push(Mount { group: format!("antiroll_link_{c}"), from: vec![ne], to: vec![format!("hub{c}_lo")], beams: 1, kind: BeamKind::Normal, v: vals(0.0, 60.0, 4e3, 8e3), precomp: 1.0, to_part: None });
+        }
         out.push(p);
     }
 }

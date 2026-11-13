@@ -337,6 +337,8 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         let dir = (pt - foot).normalize();
         let len = ((wy + 0.375 + (g.tyre_d - 0.683) / 2.0 - 0.045 - foot.y) / dir.y).min((pt - foot).length() - 0.02);
         strut.mesh = cyl(foot + dir * 0.03, foot + dir * len, 0.032);
+        // the coil spring round it, between its seats (inboard of the tyre)
+        strut.mesh.add(&crate::equipment::coil_spring(foot + dir * 0.075, foot + dir * (len - 0.075), 0.040, 0.005, 4.0));
         strut.links.push(Link { name: format!("strut_{c}"), a: nlo.clone(), b: tower.clone(), v: vals(0.0, 200.0, 17e3, 180e3), group: Some(format!("strut_{c}")) });
         strut.binds.extend([tower.clone(), nlo.clone(), nup.clone(), nn4.clone()]);
         let mut upper = MechPart::new(&format!("arm_upper_{cn}"), "suspension");

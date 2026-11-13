@@ -292,14 +292,22 @@ pub fn rim_steel(rim_d: f64, rim_w: f64, segs: usize) -> Mesh {
 
 pub fn brake_disc(d: f64, segs: usize) -> Mesh {
     let r = d / 2.0;
-    let mut m = closed_lathe(&[(0.075, -0.052), (r, -0.052), (r, -0.028), (0.075, -0.028)], segs, Mat::MetalBare);
-    m.add(&closed_lathe(&[(0.040, -0.030), (0.085, -0.030), (0.085, 0.004), (0.040, 0.004)], 32, Mat::MetalBare));
+    let mut m = brake_disc_bare(d, segs);
     // (the Python also builds a caliper `cal` here and never uses it; it is an
     // rbox, which takes no UV island, so skipping it changes nothing)
     // place on the disc's rim, wrapping it
     let mut cal2 = rbox(DVec3::new(-0.040, r - 0.022, 0.0), DVec3::new(0.024, 0.030, 0.060), 0.010, 2, Mat::TrimBlack);
     cal2.transform(Some(rot_x((-120.0f64).to_radians())), DVec3::ZERO);
     m.add(&cal2);
+    m
+}
+
+/// The disc and its hat alone (the solid build's caliper is a part of its
+/// own: `equipment`).
+pub fn brake_disc_bare(d: f64, segs: usize) -> Mesh {
+    let r = d / 2.0;
+    let mut m = closed_lathe(&[(0.075, -0.052), (r, -0.052), (r, -0.028), (0.075, -0.028)], segs, Mat::MetalBare);
+    m.add(&closed_lathe(&[(0.040, -0.030), (0.085, -0.030), (0.085, 0.004), (0.040, 0.004)], 32, Mat::MetalBare));
     m
 }
 

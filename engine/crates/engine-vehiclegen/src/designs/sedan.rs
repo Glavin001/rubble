@@ -799,7 +799,15 @@ impl Sedan {
         let spec = self.wheel_spec();
         for (tag, z) in [("F", self.zf_ax), ("R", self.zr_ax)] {
             for (s, sg) in sides {
-                let (rim, ty, di, c) = p::wheel(&spec, sg, z);
+                let (rim, ty, mut di, c) = p::wheel(&spec, sg, z);
+                if solid {
+                    // (the caliper is a part of its own on the knuckle)
+                    di = p::brake_disc_bare(spec.disc_d, 48);
+                    if sg < 0.0 {
+                        di.mirror_x();
+                    }
+                    di.transform(None, c);
+                }
                 out.insert(&format!("rim_{tag}{s}"), rim);
                 out.insert(&format!("tyre_{tag}{s}"), ty);
                 out.insert(&format!("brake_disc_{tag}{s}"), di);
