@@ -146,6 +146,8 @@ No. We generate the structure. The inner panels, firewall and wheel wells above 
 
 No. Use a single-sided outer skin plus a hem at the edges, and an inner panel on closures. Solid thick shells double the vertex count without helping.
 
+Our own generator goes further: it builds every panel and pane as a closed solid (outer skin, edge walls, inner face) and tags each vertex, so a part looks whole on its own while the physics follows the outer skin only. See [engine-vehiclegen, "Solid parts"](../engine/crates/engine-vehiclegen/README.md#solid-parts). A delivered model does not have to.
+
 ### Can I go denser than 15 mm?
 
 Only where the curvature needs it, such as tight arch lips or lamp bezels. Very dense panels cost memory at scale (hundreds of cars) without improving how they bend.

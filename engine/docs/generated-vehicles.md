@@ -244,3 +244,28 @@ The rigger takes any design through the same input trait. What each needs:
 - **On the GPU page:** record `softbody.html?mod=/__mods/sedan` in Chrome (the
   GPU World run is native here; the clips are CPU reference rendered in
   Blender).
+
+## Solid parts (the Rust sedan's art)
+
+The Rust generator builds every panel, pane, lens, door card and liner as a
+closed solid: outer skin, edge walls, inner face
+([engine-vehiclegen, "Solid parts"](../crates/engine-vehiclegen/README.md#solid-parts)).
+`VgInput::from_rust` hands the rigger two things:
+
+- **The flexbody** is the solid `.glb` (442k triangles; the sheets were
+  289k), so the `.rskin` binds the edge walls and inner faces too. Every
+  vertex is tagged outer / edge / inner: `_SURFACE` in the `.glb`,
+  `RigSpec::surfaces` in memory.
+- **The rigger's model** (lattice, edge nodes, areas, collision skin) is the
+  same design built as the legacy sheets (`BuildOpts::solid = false`), so the
+  rig is the one the sheet car had. `VG_RIG_OUTER=1` gives it the solids'
+  bare outer skins instead: the hood's edge nodes then drift 16 mm parked
+  (`gen3_rig`), because the rigger's edge nodes were built on the sheets'
+  hems and inner panels. `VG_SHEET=1` builds the whole car as sheets, to
+  compare a binding against.
+
+`GEN3_RIG_DESIGN=sedan gen3_rig` with the solid flexbody on the unchanged
+binding: spawn 0.26 mm / 0.06°, parked 10 s 0.83 mm / 0.71° (the sheets:
+0.83 mm / 0.74°); after the 56 km/h wall, stretch p99 1.51 and fold p99 7.6°
+(the sheets: 1.36 and 6.3°). Binding the inner faces and walls to their own
+part's nodes, with thickness kept, is the next step.

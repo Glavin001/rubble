@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use crate::carbody::{CarBody, Side};
 use crate::export::Marker;
 use crate::mesh::{key3, reset_islands, Mat, Mesh};
-use crate::panels::{boundary_loops, glass_from, panel, Key};
+use crate::panels::{boundary_loops, glass_from_with, panel, Key};
+use crate::solid::{slab, slab_drawn, solid_panel, SolidOpts, Style, GLASS, LENS};
 use crate::tube::Tube;
 use crate::uvpack::{normalise_other, pack, Parts};
 
@@ -32,6 +33,28 @@ pub trait Design {
     fn rig_spec(&self) -> Option<RigSpec> {
         None
     }
+    /// How a body panel is built as a solid ([`crate::solid`]).
+    fn solid_style(&self, name: &str) -> Style {
+        if name.starts_with("door_") {
+            Style::Door
+        } else if matches!(name, "hood" | "trunk_lid" | "tailgate") {
+            Style::Lid
+        } else if name.starts_with("fender_") || name.starts_with("bumper_") {
+            Style::Sheet
+        } else {
+            Style::Structure
+        }
+    }
+}
+
+/// One part's surface tags, per vertex of its render buffers
+/// ([`crate::export::RenderPart`], the `.glb`'s vertex order).
+#[derive(Clone, Debug)]
+pub struct PartSurface {
+    pub name: String,
+    /// true: built as a closed solid (skin + edge walls + inner face)
+    pub solid: bool,
+    pub surf: Vec<crate::mesh::Surf>,
 }
 
 /// A design's running gear, ends and physics for the crash rigger
@@ -58,6 +81,32 @@ pub struct RigSpec {
     pub front_z: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
     pub rear_z: std::rc::Rc<dyn Fn(f64, f64) -> f64>,
     pub physics: crate::physics::Physics,
+    /// Every part's per-vertex surface tags (outer skin / edge wall / inner
+    /// face), in the `.glb`'s part and vertex order; each vertex's surface
+    /// parameters are its UV0. Filled by [`rig_spec_with`] (empty from
+    /// [`Design::rig_spec`], which has no build). The lattice and the
+    /// collision skin follow `Outer` only.
+    pub surfaces: Vec<PartSurface>,
+}
+
+/// A design's rig spec with the build's surface tags.
+pub fn rig_spec_with(d: &dyn Design, parts: &[crate::export::RenderPart]) -> Option<RigSpec> {
+    let mut spec = d.rig_spec()?;
+    spec.surfaces = parts
+        .iter()
+        .map(|p| PartSurface {
+            name: p.name.clone(),
+            solid: p.surf.iter().any(|s| *s != crate::mesh::Surf::Outer),
+            surf: p.surf.clone(),
+        })
+        .collect();
+    Some(spec)
+}
+
+/// The parts as the sheets they were cut as: every solid part's `Outer`
+/// faces only (what the lattice and the collision skin are built from).
+pub fn outer_parts(parts: &Parts) -> Parts {
+    Parts(parts.0.iter().map(|(n, m)| (n.clone(), m.outer_only())).collect())
 }
 
 fn closure_inner(name: &str) -> Option<f64> {
@@ -80,9 +129,20 @@ fn boundary_keys(sk: &Mesh) -> FxHashSet<Key> {
 
 /// The body's panels, glass and lenses, and the CarBody (layout, skins).
 pub fn body_parts(d: &dyn Design, h: f64, uv: bool) -> (Parts, CarBody) {
+    body_parts_with(d, h, uv, true)
+}
+
+/// [`body_parts`]; `solid` false builds the legacy sheets (single-sided
+/// skin, rolled hem, a separate inner panel on closures: the Python
+/// generator's output).
+pub fn body_parts_with(d: &dyn Design, h: f64, uv: bool, solid: bool) -> (Parts, CarBody) {
     let tube = d.tube();
     let zl = d.zlines();
     let mut cb = CarBody::new(tube, &zl, &d.vlines(), h);
+    if solid {
+        cb.extra.insert("solid".into(), vec![1.0]);
+    }
+    let arches = d.rig_spec().map(|s| s.arches).unwrap_or_default();
     d.build_layout(&mut cb);
     cb.build_nodes();
     cb.tube_blocks(&|zf, zt, lo, hi, side| d.assign(zf, zt, lo, hi, side));
@@ -132,6 +192,8 @@ pub fn body_parts(d: &dyn Design, h: f64, uv: bool) -> (Parts, CarBody) {
         }
         skins.insert(name.clone(), sk);
     }
+    // panel borders a pane or a lens sits in
+    let glazed: FxHashSet<Key> = pcount.keys().filter(|k| gcount.contains_key(*k)).copied().collect();
     let shared_glass: FxHashSet<Key> = gcount.into_iter().filter(|(_, c)| *c > 1).map(|(k, _)| k).collect();
     let shut: FxHashSet<Key> = pcount.into_iter().filter(|(_, c)| *c > 1).map(|(k, _)| k).collect();
     let mut parts = Parts::default();
@@ -145,12 +207,23 @@ pub fn body_parts(d: &dyn Design, h: f64, uv: bool) -> (Parts, CarBody) {
             .map(|(g, c)| (g.clone(), charts.iter().position(|x| *x == c).unwrap() as i32))
             .collect();
         let m = if name.starts_with("glass") {
-            glass_from(&bm, 0.012, 0.006, Some(&shared_glass))
+            let g = glass_from_with(&bm, 0.012, if solid { 0.0045 } else { 0.006 }, Some(&shared_glass), solid);
+            if solid {
+                slab(&g, GLASS)
+            } else {
+                g
+            }
         } else if name.ends_with("_lens") {
-            let mut lens = glass_from(&bm, 0.013, 0.003, None);
+            let mut lens = glass_from_with(&bm, 0.013, 0.003, None, solid);
             lens.set_mat(Mat::LampLens);
             lens.tint(d.lens_tint(name));
-            lens
+            if solid {
+                slab_drawn(&lens, LENS)
+            } else {
+                lens
+            }
+        } else if solid {
+            solid_panel(&bm, 0.0046, 0, &SolidOpts { style: d.solid_style(name), shut: Some(&shut), glazed: Some(&glazed), arches: &arches })
         } else {
             panel(&bm, 0.0046, true, closure_inner(name), 0, Some(&shut))
         };
@@ -183,11 +256,14 @@ pub struct BuildOpts {
     pub uv: bool,
     /// target edge length of the body mesh (metres)
     pub h: f64,
+    /// every panel and pane a closed solid ([`crate::solid`]); false: the
+    /// legacy sheets (the Python generator's output)
+    pub solid: bool,
 }
 
 impl Default for BuildOpts {
     fn default() -> Self {
-        BuildOpts { uv: true, h: 0.02 }
+        BuildOpts { uv: true, h: 0.02, solid: true }
     }
 }
 
@@ -199,7 +275,7 @@ pub fn build(d: &dyn Design, o: BuildOpts) -> Built {
 /// welded skins the physics rigger reads).
 pub fn build_with_body(d: &dyn Design, o: BuildOpts) -> (Built, CarBody) {
     reset_islands();
-    let (mut parts, cb) = body_parts(d, o.h, o.uv);
+    let (mut parts, cb) = body_parts_with(d, o.h, o.uv, o.solid);
     let (new, extras, markers) = d.parts(&cb);
     for (k, m) in &extras.0 {
         parts.extend(k, m);

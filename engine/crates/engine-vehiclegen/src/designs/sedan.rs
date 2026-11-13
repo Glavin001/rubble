@@ -577,6 +577,7 @@ impl Design for Sedan {
             front_z: Rc::new(move |x, y| a.front_z(x, y)),
             rear_z: Rc::new(move |x, y| b.rear_z(x, y)),
             physics: self.p.physics.clone(),
+            surfaces: Vec::new(),
         })
     }
 }
@@ -690,6 +691,12 @@ impl Sedan {
         let mut out = Parts::default();
         let mut extras = Parts::default();
         let mut mk: Vec<Marker> = Vec::new();
+        // solid build: liners, door cards, the headliner and the lamp
+        // reflectors are closed too, not sheets. Still sheets: the grille's
+        // back plates (closing them takes the lamps-glass-trim group over
+        // the art spec's 60,000 triangles)
+        let solid = cb.extra.contains_key("solid");
+        let thick = |m: Mesh, th: f64| if solid { crate::solid::slab(&m, th) } else { m };
         let mut marker = |name: String, pos: DVec3, xa: DVec3| mk.push(Marker { name, pos, xaxis: xa });
         let sides = [("L", 1.0f64), ("R", -1.0f64)];
 
@@ -716,8 +723,14 @@ impl Sedan {
                         isb[i as usize] = true;
                     }
                 }
-                let mut h = inner_panel(&sk, &isb, 0.032, -1_000_000, 1, Mat::LampEmissive);
-                h.flip();
+                // (solid: a 3 mm moulding)
+                let mut h = if solid {
+                    crate::solid::reflector(&sk, 0.032, 0.003, Mat::LampEmissive)
+                } else {
+                    let mut h = inner_panel(&sk, &isb, 0.032, -1_000_000, 1, Mat::LampEmissive);
+                    h.flip();
+                    h
+                };
                 if kind == "headlight" {
                     let c0 = sk.v.iter().copied().sum::<DVec3>() / sk.v.len() as f64;
                     let vn = sk.vertex_normals();
@@ -804,6 +817,13 @@ impl Sedan {
             .map(|&(z, v)| DVec2::new(f.z(z), v))
             .collect();
         bx.add(&p::molding(tube, &ws, 0.0015, (0.008, 0.004), true, 6));
+        // solid build: the B-pillar, behind the doors' shut line (the doors
+        // meet over it; an open door shows it, not the cabin)
+        if solid {
+            for side in [1.0, -1.0] {
+                bx.add(&b_pillar(tube, f.z(-0.22), side));
+            }
+        }
         extras.insert("body_shell", bx);
 
         // interior
@@ -834,7 +854,14 @@ impl Sedan {
                     isb[i as usize] = true;
                 }
             }
-            out.insert(&format!("door_trim_{s}"), inner_panel(&sk, &isb, 0.085, -1_000_000, 2, Mat::InteriorPlastic));
+            // solid: a moulded card 18 mm thick, its back 17 mm off the
+            // door's inner panel, with an armrest, a pull cup and a pocket
+            let trim = if solid {
+                crate::solid::door_card(&sk, 0.085, 0.018, Mat::InteriorPlastic)
+            } else {
+                inner_panel(&sk, &isb, 0.085, -1_000_000, 2, Mat::InteriorPlastic)
+            };
+            out.insert(&format!("door_trim_{s}"), trim);
         }
         let zz: Vec<f64> = linspace(-0.05, -0.95, 46).into_iter().map(|z| f.z(z)).collect();
         let vv = linspace(7.35, vm - 7.35, 60);
@@ -847,7 +874,7 @@ impl Sedan {
         if my > 0.0 {
             hl.flip();
         }
-        out.insert("headliner", hl);
+        out.insert("headliner", thick(hl, 0.008));
 
         // bay: transverse four with gearbox, radiator, firewall
         let mut eb = Mesh::new();
@@ -887,7 +914,7 @@ impl Sedan {
             for (s, sg) in sides {
                 out.insert(
                     &format!("wheel_well_{tag}{s}"),
-                    p::wheel_well(DVec3::new(0.0, f.y(R_TYRE_D / 2.0), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0),
+                    thick(p::wheel_well(DVec3::new(0.0, f.y(R_TYRE_D / 2.0), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0), 0.004),
                 );
             }
         }
@@ -926,6 +953,120 @@ impl Sedan {
 }
 
 /// numpy.arange(a, b, step) for floats.
+/// The B-pillar: a closed box section down the body side at z0, from the
+/// sill to the roof rail, behind the doors. Its outer face sits 72 mm in
+/// from the skin (the doors' inner panels are 50 mm deep), reaches out to
+/// the sill's inner face at the foot and stops under the roof rail; each
+/// jamb face has a seal land, a step in 16 mm down; the inner face is
+/// 132 mm in. 72 mm wide: the slot between the door cards.
+fn b_pillar(tube: &Tube, z0: f64, side: f64) -> Mesh {
+    // (v: 1 the sill, 2 the doors' bottom edge, 7 the roof rail)
+    let (v0, v1) = (1.60, 6.95);
+    let at = |v: f64, dz: f64, depth: f64| {
+        // (in from the skin level with the ground, not along the normal:
+        // a section this deep would fold behind the shoulder's bend)
+        let p = tube.eval(z0 + dz, if side > 0.0 { v } else { tube.vm - v });
+        p - DVec3::X * (side * depth)
+    };
+    // stations every 22 mm up the side
+    let fine: Vec<f64> = linspace(v0, v1, 280);
+    let mut len = vec![0.0];
+    for k in 1..fine.len() {
+        let d = (at(fine[k], 0.0, 0.0) - at(fine[k - 1], 0.0, 0.0)).length();
+        len.push(len[k - 1] + d);
+    }
+    let total = len[len.len() - 1];
+    let ns = (total / 0.022).round() as usize;
+    let vs: Vec<f64> = (0..=ns).map(|i| interp(total * i as f64 / ns as f64, &len, &fine)).collect();
+    // the section: (along the car, below the skin), outer face first
+    let (hw, land, face, step, back) = (0.036, 0.029, 0.072, 0.088, 0.132);
+    let ring = |v: f64| -> Vec<DVec3> {
+        // the outer face meets the sill's inner face
+        let up = smoothstep(1.95, v0, v);
+        let o = face + (0.031 - face) * up;
+        let s = step + (0.047 - step) * up;
+        [
+            (-hw, o),
+            (-0.012, o),
+            (0.012, o),
+            (hw, o),
+            (hw, s),
+            (land, s + 0.002),
+            (land, 0.5 * (s + back)),
+            (land, back),
+            (0.010, back),
+            (-0.010, back),
+            (-land, back),
+            (-land, 0.5 * (s + back)),
+            (-land, s + 0.002),
+            (-hw, s),
+        ]
+        .iter()
+        .map(|&(dz, d)| at(v, dz, d))
+        .collect()
+    };
+    // (the head stops at the doors' top edge, under the roof rail and short
+    // of the headliner)
+    let rings: Vec<Vec<DVec3>> = vs.iter().map(|&v| ring(v)).collect();
+    let nr = rings[0].len();
+    // its own UV island (metres: round the section, up the pillar), the end
+    // caps beside it
+    let mut round = vec![0.0; nr + 1];
+    for j in 0..nr {
+        round[j + 1] = round[j] + (rings[2][(j + 1) % nr] - rings[2][j]).length();
+    }
+    let island = if side > 0.0 { 5_000 } else { 5_010 };
+    let mut m = Mesh::new();
+    for r in &rings {
+        m.v.extend_from_slice(r);
+    }
+    let id = |i: usize, j: usize| (i * nr + j % nr) as u32;
+    for i in 0..rings.len() - 1 {
+        let (v0, v1) = (0.022 * i as f64, 0.022 * (i + 1) as f64);
+        for j in 0..nr {
+            m.q.push([id(i, j), id(i, j + 1), id(i + 1, j + 1), id(i + 1, j)]);
+            m.quv.push([DVec2::new(round[j], v0), DVec2::new(round[j + 1], v0), DVec2::new(round[j + 1], v1), DVec2::new(round[j], v1)]);
+            m.qm.push(Mat::Paint);
+            m.qi.push(island);
+        }
+    }
+    // end caps: the section cut into well shaped cells (the wide part as
+    // three, the stem as two with a triangle each side of its foot)
+    let section: [DVec2; 14] = {
+        let (o, s) = (face, step);
+        [(-hw, o), (-0.012, o), (0.012, o), (hw, o), (hw, s), (land, s + 0.002), (land, 0.5 * (s + back)), (land, back), (0.010, back), (-0.010, back), (-land, back), (-land, 0.5 * (s + back)), (-land, s + 0.002), (-hw, s)].map(|(a, b)| DVec2::new(a, b))
+    };
+    for (e, i) in [0, rings.len() - 1].into_iter().enumerate() {
+        let uv = |j: usize| section[j] + DVec2::new(0.0, 0.1 * e as f64);
+        for f in [[0, 1, 12, 13], [1, 2, 5, 12], [2, 3, 4, 5], [12, 5, 6, 11], [11, 6, 8, 9]] {
+            let (mut q, mut u) = (f.map(|j| id(i, j)), f.map(uv));
+            if i == 0 {
+                q.reverse();
+                u.reverse();
+            }
+            m.q.push(q);
+            m.qm.push(Mat::Paint);
+            m.quv.push(u);
+            m.qi.push(island + 1);
+        }
+        for f in [[6, 7, 8], [11, 9, 10]] {
+            let (mut q, mut u) = (f.map(|j| id(i, j)), f.map(uv));
+            if i == 0 {
+                q.reverse();
+                u.reverse();
+            }
+            m.t.push(q);
+            m.tm.push(Mat::Paint);
+            m.tuv.push(u);
+            m.ti.push(island + 1);
+        }
+    }
+    let mut m = orient_outward(m);
+    // not skin: the rigger and the collision skin leave it alone
+    m.surf = Some(vec![crate::mesh::Surf::Edge; m.v.len()]);
+    m
+}
+
 fn arange(a: f64, b: f64, step: f64) -> Vec<f64> {
     let n = ((b - a) / step).ceil().max(0.0) as usize;
     (0..n).map(|i| a + i as f64 * step).collect()
