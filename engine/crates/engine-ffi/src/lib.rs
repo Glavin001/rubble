@@ -2995,6 +2995,68 @@ pub enum RbFractureSwitch {
     RB_FRACTURE_OFF = 2,
 }
 
+/// How a predicted strike breaks bonds (`RbDestructibleDef::strike`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbStrikeRule {
+    /// The model's own.
+    RB_STRIKE_MODEL_DEFAULT = 0,
+    /// Every bond whose share of the impact's Hertz peak force beats its tensile capacity.
+    RB_STRIKE_HERTZ = 1,
+    /// The analytic local impact: a ballistic limit with a plug, back-face spall, crater,
+    /// strain-rate strength, from the shot's speed and mass.
+    RB_STRIKE_ANALYTIC = 2,
+    /// Radial damage, the common game rule, for comparison: every bond within
+    /// `strike_radius` of the point struck breaks, whatever the shot's speed or mass.
+    RB_STRIKE_RADIAL = 3,
+}
+
+/// A strike's structural response (`RbDestructibleDef::impact_response`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbImpactResponse {
+    RB_IMPACT_RESPONSE_OFF = 0,
+    /// The strike's peak force as a static load (a quasi-static solver's treatment).
+    RB_IMPACT_RESPONSE_STATIC = 1,
+    /// The structure's dynamic response to the strike's force pulse: a pulse much shorter
+    /// than the structure's own period loads it by its impulse, a long one by its peak.
+    RB_IMPACT_RESPONSE_DYNAMIC = 2,
+}
+
+/// A def's fracture options (`RbDestructibleDef`'s and `RbLabDef`'s alike).
+pub(crate) fn fracture_in(
+    contact_fracture: RbFractureSwitch,
+    strike_prediction: RbFractureSwitch,
+    strike: RbStrikeRule,
+    strike_radius: f32,
+    impact_response: RbImpactResponse,
+    impact_response_scale: f32,
+) -> anyhow::Result<FractureOptions> {
+    Ok(FractureOptions {
+        contact_fracture: switch_in(contact_fracture),
+        strike_prediction: switch_in(strike_prediction),
+        strike: match strike {
+            RbStrikeRule::RB_STRIKE_MODEL_DEFAULT => None,
+            RbStrikeRule::RB_STRIKE_HERTZ => Some(StrikeRule::Hertz),
+            RbStrikeRule::RB_STRIKE_ANALYTIC => Some(StrikeRule::Analytic),
+            RbStrikeRule::RB_STRIKE_RADIAL => {
+                anyhow::ensure!(strike_radius > 0.0 && strike_radius.is_finite(), "strike_radius {strike_radius}: radial damage needs a radius above 0 (m)");
+                Some(StrikeRule::Radial { radius_mm: (strike_radius * 1e3).round().max(1.0) as u32 })
+            }
+        },
+        impact_response: match impact_response {
+            RbImpactResponse::RB_IMPACT_RESPONSE_OFF => None,
+            r => {
+                anyhow::ensure!(impact_response_scale >= 0.0 && impact_response_scale.is_finite(), "impact_response_scale {impact_response_scale}: a factor of 0 or more");
+                Some(ImpactResponse {
+                    pulse: if r == RbImpactResponse::RB_IMPACT_RESPONSE_STATIC { ImpactPulse::Static } else { ImpactPulse::Dynamic },
+                    scale_pct: (impact_response_scale * 100.0).round() as u32,
+                })
+            }
+        },
+    })
+}
+
 fn switch_in(s: RbFractureSwitch) -> Option<bool> {
     match s {
         RbFractureSwitch::RB_FRACTURE_MODEL_DEFAULT => None,
@@ -3037,6 +3099,21 @@ pub struct RbDestructibleDef {
     /// Stress models only: strike prediction for projectiles (`rbBody_SetProjectile`). The
     /// model's own by default: on unless the contact fracture is.
     pub strike_prediction: RbFractureSwitch,
+    /// Stress models only: how a predicted strike breaks bonds. The model's own by default
+    /// (the analytic local impact for `RB_STRENGTH_IMPACT_LOCAL`, the Hertz force for the
+    /// others). `RB_STRENGTH_LOAD_PATH` with `RB_STRIKE_ANALYTIC` and strike prediction on
+    /// is the quasi-static load solve and the dynamic impact together.
+    /// `RB_STRENGTH_BLAST_GPU` takes Hertz or radial (analytic is an error there).
+    pub strike: RbStrikeRule,
+    /// `RB_STRIKE_RADIAL`'s radius (m, above 0; default 0.5).
+    pub strike_radius: f32,
+    /// `RB_STRENGTH_LOAD_PATH` only (an error on another model): a strike's structural
+    /// response, the impulse a strike leaves in the structure solved through its bonds. Off
+    /// by default: a predicted analytic strike that does not get through then breaks
+    /// nothing past its crater.
+    pub impact_response: RbImpactResponse,
+    /// A factor on the structural load (default 1: as computed). Tuning, not physics.
+    pub impact_response_scale: f32,
     pub internal_value: u32,
 }
 
@@ -3167,6 +3244,10 @@ pub extern "C" fn rbDefaultDestructibleDef() -> RbDestructibleDef {
         crush: RbCrushDef::default(),
         contact_fracture: RbFractureSwitch::RB_FRACTURE_MODEL_DEFAULT,
         strike_prediction: RbFractureSwitch::RB_FRACTURE_MODEL_DEFAULT,
+        strike: RbStrikeRule::RB_STRIKE_MODEL_DEFAULT,
+        strike_radius: StrikeRule::RADIAL_DEFAULT_MM as f32 * 1e-3,
+        impact_response: RbImpactResponse::RB_IMPACT_RESPONSE_OFF,
+        impact_response_scale: 1.0,
         internal_value: COOKIE,
     }
 }
@@ -3207,12 +3288,7 @@ pub unsafe extern "C" fn rbCreateDestructible(
             support_loss_dynamic_factor: d.support_loss_dynamic_factor,
             blast_loading: d.blast_loading,
             crush: crush_in(&d.crush)?,
-            fracture: FractureOptions {
-                contact_fracture: switch_in(d.contact_fracture),
-                strike_prediction: switch_in(d.strike_prediction),
-                strike: None,
-                impact_response: None,
-            },
+            fracture: fracture_in(d.contact_fracture, d.strike_prediction, d.strike, d.strike_radius, d.impact_response, d.impact_response_scale)?,
             ..base
         };
         let id = w.world.create_destructible(&def)?;
