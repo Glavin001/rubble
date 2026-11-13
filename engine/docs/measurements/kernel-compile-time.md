@@ -53,7 +53,14 @@ What a first load compiles on softbody.html (no coupling), one after another:
 | two cars, no surface contact | solo + contact + large groups (about 44 s by the "after" times, not measured before) | 7 + 24 = 31 s |
 | two cars head-on, surface contact | over 243 s with all three compiling at once; device lost on one attempt | 10 + 34 = 44 s |
 
-The targets were 10 s for one car and 20 s for the two-car head-on with surface contact. The first is met. **The second is not: 44 s.**
+Whole page loads, headless Chrome, a fresh profile, the generated sedan (`mod=/__mods/sedan_new`, surface contact on), from the built site (`explicit-load-time.mjs`), with other compiles and the user's page running on the machine:
+
+| Page | Kernels | First frame |
+|---|---|---|
+| `xscene=sidepole` (one car) | `explicit_beams_wide_nocpl` 8.8 s | 13.8 s |
+| the yard (several cars: the same kernels as the two-car head-on) | `explicit_beams_solo_wide_nocpl` 12.2 s, `explicit_beams_contact_wide_nocpl` 40.0 s, four plan passes under 0.1 s each | 59.6 s |
+
+The targets were 10 s of compile for one car and 20 s for the two-car head-on with surface contact. The first is met (8.8 to 10 s). **The second is not: 44 to 52 s.**
 
 ## What is left for the two-car target
 
@@ -69,6 +76,7 @@ On macOS the Metal compiler service (`MTLCompilerService`) goes on compiling a p
 
 ## Not verified
 
-- The end-to-end page load of the two-car head-on in the user's browser after these changes (the per-module times above are from the compile harness).
+- Page loads in the user's own (windowed) browser after these changes, and the `xscene=headon` page itself (the yard above compiles the same kernels).
+- `one-world.html`, `explicit-world.html`, `brick-ring-drive.html` and `vehicle-lab.html` were not loaded in a browser after their loading card and stop were wired in; they build, and the card and the stop panel are tested on their own (`load-progress-check.mjs`).
 - Compile times on other GPUs and browsers. The inlined-size measure is about Metal; other drivers may not inline everything.
 - `explicit_plan_modules` fails on `feat/sedan-body` before these changes (the shared module table lacks the surface split's modules) and still does; the `_nocpl` modules are WGSL only and are not in that table either.
