@@ -403,13 +403,23 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
             ids.insert(n.name.clone(), i);
         }
     }
+    // The raycast wheel carries what the wheel part's own nodes do not: the
+    // defined wheel (rim and tyre) less its axle and frame nodes.
+    if let Some(p) = d.parts.iter().find(|p| p.class == "wheel" && p.name.starts_with("wheel_")) {
+        let defined: f64 = p.nodes.iter().map(|n| n.mass).sum();
+        let own: f32 = p.nodes.iter().map(|n| r.car.nodes[ids[&n.name]].fixed_mass).sum();
+        r.car.raycast_wheel_kg = Some((defined as f32 - own).max(1.0));
+    }
     let id = |ids: &HashMap<String, usize>, n: &str| -> usize {
         *ids.get(n).unwrap_or_else(|| panic!("no defined node {n}"))
     };
-    // The driver (the design's kerb mass is with one): on the driver's seat,
-    // half on the cushion, a quarter on each of the back's corners.
+    // The driver (the design's kerb mass is with one): on the driver's seat
+    // cushion. A belted driver's load in a crash goes through the lap belt
+    // at the pelvis to the seat's feet and the floor, not into the seat's
+    // back: with a quarter of him on each of the back's top corners the back
+    // folded forward 240 mm in the 56 km/h wall (its frame yields at 6 kN).
     let driver = inp.physics().named.get("driver").copied().unwrap_or(75.0);
-    for (node, share) in [("seafl_c", 0.5), ("seafl_bo", 0.25), ("seafl_bi", 0.25)] {
+    for (node, share) in [("seafl_c", 1.0)] {
         if let Some(&i) = ids.get(node) {
             r.car.nodes[i].fixed_mass += driver * share;
         }

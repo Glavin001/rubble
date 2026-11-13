@@ -34,6 +34,52 @@ fn main() -> Result<(), String> {
         &std::fs::read_to_string(default_manifest()).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    // `rig[:design]`: the design rigged here (no skin binding, so no mesh
+    // row), with `--crash preset` or `--crash front_crush=1.5,panel_yield=2`.
+    // Its JBeam goes into a scratch mods folder beside links to the others.
+    if cars.split(',').any(|c| c.starts_with("rig")) {
+        use engine_softbody::authoring::gen2::{rig as lattice, vg_input};
+        use engine_softbody::authoring::rig;
+        let from = engine_softbody::vehicle_compare::mods_dir();
+        let tmp = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/frontal-mods");
+        std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+        if let Ok(rd) = std::fs::read_dir(&from) {
+            for e in rd.flatten() {
+                let link = tmp.join(e.file_name());
+                if link.symlink_metadata().is_err() {
+                    std::os::unix::fs::symlink(e.path(), &link).ok();
+                }
+            }
+        }
+        for name in cars.split(',').filter(|c| c.starts_with("rig")) {
+            let design = name.split_once(':').map_or("sedan", |x| x.1);
+            let mut inp = rig::DesignInput::find(design, None, None)?;
+            if let Some(c) = opt("--crash") {
+                let v: serde_json::Value = if c.contains('=') {
+                    serde_json::Value::Object(
+                        c.split(',')
+                            .filter_map(|kv| kv.split_once('='))
+                            .map(|(k, v)| (k.to_string(), serde_json::json!(v.parse::<f64>().unwrap_or(1.0))))
+                            .collect(),
+                    )
+                } else {
+                    serde_json::json!(c)
+                };
+                inp.physics.crash = serde_json::from_value(v).map_err(|e| e.to_string())?;
+            }
+            eprintln!("{name}: crash character {:?}", inp.physics.crash);
+            let r = lattice::rig_with(&inp);
+            let dir = tmp.join(name.replace(':', "_"));
+            let _ = std::fs::remove_dir_all(&dir);
+            for (path, bytes) in vg_input::physics_files(&inp, &r) {
+                let f = dir.join(&path);
+                std::fs::create_dir_all(f.parent().unwrap()).map_err(|e| e.to_string())?;
+                std::fs::write(f, bytes).map_err(|e| e.to_string())?;
+            }
+        }
+        // (read by `Car::load` below)
+        unsafe { std::env::set_var("RUBBLE_COMPARE_MODS", &tmp) };
+    }
     let mut loaded: Vec<(String, Car)> = Vec::new();
     for name in cars.split(',') {
         let spec: CarSpec = match m.cars.iter().find(|c| c.name == name) {
@@ -41,7 +87,11 @@ fn main() -> Result<(), String> {
             None => {
                 let (label, rest) = name.split_once('=').unwrap_or((name, name));
                 let v: Vec<&str> = rest.split(':').collect();
+                let rigged = rest.starts_with("rig");
+                let design = rest.split_once(':').map_or("sedan", |x| x.1).to_string();
+                let folder = rest.replace(':', "_");
                 let (md, vehicle, pc) = match v[..] {
+                    _ if rigged => (folder.as_str(), design.as_str(), format!("{design}.pc")),
                     [md, vehicle, pc] => (md, vehicle, pc.to_string()),
                     _ => (rest, "sedan", "sedan.pc".to_string()),
                 };
@@ -178,6 +228,13 @@ fn main() -> Result<(), String> {
                 num(v, &["damage", "parts_detached"]),
                 num(v, &["damage", "parts_detached_names"])
             )
+        });
+        row("beams yielded, share; plastic strain p50 / p99", &|v| {
+            format!("{} of {} ({}); {} / {}", num(v, &["plastic", "yielded"]), num(v, &["plastic", "beams"]), num(v, &["plastic", "yielded_share"]), num(v, &["plastic", "strain_p50"]), num(v, &["plastic", "strain_p99"]))
+        });
+        row("yielded more than 1.2 m behind the front", &|v| format!("{} of {} ({})", num(v, &["plastic", "far_yielded"]), num(v, &["plastic", "far_beams"]), num(v, &["plastic", "far_yielded_share"])));
+        row("parts by share yielded (beams, yielded, share, strain p50, p99)", &|v| {
+            v["plastic"]["parts"].as_array().map_or("–".into(), |a| a.iter().take(8).map(|x| format!("{} {}/{} {} {} {}", x[0].as_str().unwrap_or(""), x[2], x[1], x[3], x[4], x[5])).collect::<Vec<_>>().join("; "))
         });
         row("deepest node in the barrier (mm)", &|v| {
             num(v, &["penetration", "nodes", "max_mm"])

@@ -373,7 +373,12 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         let xc = 0.5 * g.rim_w - 0.012;
         for k in 0..3 {
             let a = std::f64::consts::TAU * (k as f64 / 3.0 + 0.25);
-            cap.node(&format!("{}", k + 1), at(xc, 0.055 * a.sin(), 0.055 * a.cos()), 0.2);
+            // (a 136 mm pressed steel disc, 1 mm: π r² t ρ = 0.114 kg, with
+            // its clips 0.12 kg. At 0.6 kg, a full wheel cover's mass on a
+            // centre cap, every frontal crash threw the caps off the far
+            // wheels: the clips hold 600 N each, the cap's own inertia in
+            // the wheel's shock broke them.)
+            cap.node(&format!("{}", k + 1), at(xc, 0.055 * a.sin(), 0.055 * a.cos()), 0.04);
         }
         let mut disc = closed_lathe(&[(0.0, 0.0), (0.068, 0.0), (0.068, 0.006), (0.040, 0.014), (0.0, 0.016)], 24, Mat::Chrome);
         if sg < 0.0 {

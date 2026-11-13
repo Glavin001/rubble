@@ -2026,7 +2026,10 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             arm: node(&f, "nodeArm"),
             radius: radius.clamp(0.05, 3.0),
             width: width.clamp(0.02, 2.0),
-            mass: 20.0,
+            // `raycastWheelMass` (Rubble's key): the raycast wheel's mass on
+            // its axle nodes when those nodes carry part of the wheel
+            // themselves (a wheel part with nodes of its own); 20 kg without.
+            mass: f.get("raycastWheelMass").and_then(as_f32).filter(|m| *m > 0.0).unwrap_or(20.0),
             braked: brake > 0.0,
             propulsion: i32::from(driven_wheel(&name)),
             steerable: false,

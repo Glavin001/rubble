@@ -1896,6 +1896,65 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     scene_front(car, kmh, seconds_after, Front::Wall)
 }
 
+/// Where the car yielded, for "does it crumple like paper": per part the
+/// share of its beams that yielded and their plastic strain (|rest − rest₀| /
+/// rest₀; p50 and p99 of the yielded ones), and the beams that yielded with
+/// both ends behind `far_z` at rest (away from a frontal hit: a solid car
+/// yields where it is struck and stays in shape elsewhere).
+fn plastic_report(car: &Car, s: &ExplicitBeams, rest: &[Vec3], far_z: f32) -> Value {
+    let n = s.nodes.len();
+    let mut part_of = vec![usize::MAX; n];
+    for (k, (_, ids)) in car.parts.iter().enumerate() {
+        for &i in ids {
+            if (i as usize) < n {
+                part_of[i as usize] = k;
+            }
+        }
+    }
+    let mut per: Vec<(usize, Vec<f32>)> = vec![(0, Vec::new()); car.parts.len()];
+    let (mut far, mut far_yielded, mut all, mut yielded) = (0usize, 0usize, 0usize, 0usize);
+    let mut strains: Vec<f32> = Vec::new();
+    for b in &s.beams {
+        let (a, c) = (b.a as usize, b.b as usize);
+        if a >= n || c >= n || is_tyre(s, a) || is_tyre(s, c) || b.rest0 <= 0.0 || !b.tc.is_finite() {
+            continue;
+        }
+        let e = ((b.rest - b.rest0) / b.rest0).abs();
+        let y = e > 1e-4 && !b.broken;
+        all += 1;
+        yielded += usize::from(y);
+        if y {
+            strains.push(e);
+        }
+        if rest[a].z < far_z && rest[c].z < far_z {
+            far += 1;
+            far_yielded += usize::from(y);
+        }
+        if part_of[a] == part_of[c] && part_of[a] != usize::MAX {
+            per[part_of[a]].0 += 1;
+            if y {
+                per[part_of[a]].1.push(e);
+            }
+        }
+    }
+    let mut parts: Vec<Value> = car
+        .parts
+        .iter()
+        .zip(per.iter_mut())
+        .filter(|(_, p)| p.0 >= 8 && !p.1.is_empty())
+        .map(|((name, _), p)| {
+            json!([name, p.0, p.1.len(), r3(p.1.len() as f32 / p.0 as f32), r3(pct(&mut p.1, 0.5)), r3(pct(&mut p.1, 0.99))])
+        })
+        .collect();
+    parts.sort_by(|a, b| b[3].as_f64().unwrap_or(0.0).total_cmp(&a[3].as_f64().unwrap_or(0.0)));
+    json!({
+        "beams": all, "yielded": yielded, "yielded_share": r3(yielded as f32 / all.max(1) as f32),
+        "strain_p50": r3(pct(&mut strains, 0.5)), "strain_p99": r3(pct(&mut strains, 0.99)),
+        "far_beams": far, "far_yielded": far_yielded, "far_yielded_share": r3(far_yielded as f32 / far.max(1) as f32),
+        "parts": parts,
+    })
+}
+
 /// What a frontal scene drives into.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Front {
@@ -2156,6 +2215,7 @@ pub fn scene_front(car: &Car, kmh: f32, seconds_after: f32, barrier: Front) -> V
     let sim_s = k as f32 * STEP;
     json!({
         "kmh": kmh, "mass_kg": r1(total), "barrier": format!("{barrier:?}"),
+        "plastic": plastic_report(car, s, &rest, f.hi.z - 1.2),
         "dynamic_crush_mm": mm(d_dyn), "t_m_ms": r1(tm * 1e3), "peak_g": r1(peak_g), "mean_g_to_tm": r1(v0 / tm / 9.81),
         "rebound_ms": r3(rebound), "restitution": r3(rebound / v0),
         "residual_crush_zones_mm": c.iter().map(|x| mm(*x)).collect::<Vec<_>>(), "residual_crush_max_mm": mm(c_max), "residual_crush_avg_mm": mm(c_avg),

@@ -4719,9 +4719,10 @@ fn edge_nodes(
 /// The raycast wheels' mass on their hub nodes (half a wheel each).
 pub fn hub_extra(c: &Car) -> HashMap<usize, f32> {
     let mut h = HashMap::new();
+    let kg = c.raycast_wheel_kg.unwrap_or(WHEEL_KG);
     for w in &c.wheels {
-        *h.entry(w.n1).or_insert(0.0) += 0.5 * WHEEL_KG;
-        *h.entry(w.n2).or_insert(0.0) += 0.5 * WHEEL_KG;
+        *h.entry(w.n1).or_insert(0.0) += 0.5 * kg;
+        *h.entry(w.n2).or_insert(0.0) += 0.5 * kg;
     }
     h
 }

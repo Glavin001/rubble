@@ -386,6 +386,9 @@ pub fn jbeam_files(
                 "wheelPeripheryBeamDamp": 30, "enableTireLbeams": true, "wheelLbeamSpring": 6000, "wheelLbeamDamp": 5,
                 "enableTreadReinfBeams": true, "wheelTreadReinfBeamSpring": 120000, "wheelTreadReinfBeamDamp": 20
             })];
+            if let Some(kg) = car.raycast_wheel_kg {
+                w[0]["raycastWheelMass"] = json!(kg);
+            }
             for wh in &car.wheels {
                 // The parking brake acts on the rear wheels (spec §25.1).
                 let rear = wh.name.starts_with('R');

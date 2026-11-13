@@ -53,8 +53,16 @@ impl CrashFeel {
     }
     /// The ETK's level (see `engine/docs/generated-vehicles.md`, "Crash
     /// character", for the side-by-side numbers these were set from).
+    ///
+    /// Front members at 1.8 times their defined mean crush force: the crash
+    /// box's 1.5 mm and the rail's 1.8 mm HSLA as 2.1 mm and 2.6 mm, or the
+    /// same gauges in a steel of 710 MPa flow stress (DP980 class). Towers and
+    /// cabin at 1.5 (gauge × 1.28). Panels at twice the census yield strain
+    /// (hood and fenders 6 %, doors 2.9 %), which is what keeps them in shape
+    /// away from the hit. The rear is as defined (not yet measured against
+    /// the ETK).
     pub fn beamng_feel() -> Self {
-        Self { front_crush: 1.0, tower: 1.0, cabin: 1.0, rear_crush: 1.0, panel_yield: 1.0, bumper_yield: 1.0 }
+        Self { front_crush: 1.8, tower: 1.5, cabin: 1.5, rear_crush: 1.0, panel_yield: 2.0, bumper_yield: 1.0 }
     }
     pub fn preset(name: &str) -> Option<Self> {
         match name {

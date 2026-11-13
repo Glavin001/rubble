@@ -537,6 +537,10 @@ pub struct Car {
     /// The crash character's yield-strain multiples for the panels and the
     /// bumper covers (`engine_vehiclegen::physics::CrashFeel`; None: 1).
     pub panel_yield: Option<(f32, f32)>,
+    /// The raycast wheel's mass (kg) when the wheel part's own nodes carry
+    /// the rest of the defined wheel (exported as `raycastWheelMass`; None:
+    /// the solver's 20 kg).
+    pub raycast_wheel_kg: Option<f32>,
     pub torsion: Vec<Torsion>,
     /// Render mesh name: the nodes it binds to ([`Bind`]).
     pub bind: BTreeMap<String, Bind>,
