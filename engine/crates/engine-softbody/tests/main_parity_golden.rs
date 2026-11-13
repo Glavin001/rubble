@@ -44,10 +44,11 @@ const CHANGED: &[(&str, &str, f32)] = &[
     // Vehicle contact runs in the owner's frame (audit S6): differs once an origin has
     // been re-based; a crash amplifies it.
     ("pair_head_on__far_fast", "owner-frame vehicle contact (S6), crash", 0.25),
-    // JBeam mode is the BeamNG profile (audit S1) with a 0.025 m collision range (S9).
+    // JBeam mode is the BeamNG profile (audit S1), its contact band 0.025 m (S9: on this
+    // path only; the JBeam loader's desc, its `.truck` export and the other soft solver
+    // keep main's 0.03 m, so `jbeam_as_truck__hires` is bit-identical again).
     ("jbeam_native__latched_box", "BeamNG profile for JBeam mode (S1)", 0.05),
     ("jbeam_native__hires", "BeamNG profile for JBeam mode (S1)", 0.5),
-    ("jbeam_as_truck__hires", "JBeam collision range 0.03 -> 0.025 m (S9); violent on both sides", 20.0),
 ];
 
 fn dir() -> PathBuf {
@@ -405,11 +406,9 @@ fn digest(v: &serde_json::Value) -> BTreeMap<String, (u64, u64)> {
 
 /// Loader fields the branch changed on purpose: (golden, field path, why).
 const CHANGED_FIELDS: &[(&str, &str, &str)] = &[
-    // audit S9: every JBeam vehicle's collision range, 0.03 m on main, is 0.025 m.
-    ("jbeam_desc__latched_box", "collision_range", "0.03 -> 0.025 m (BEAMNG_COLLISION_RANGE)"),
-    ("jbeam_desc__hires", "collision_range", "0.03 -> 0.025 m (BEAMNG_COLLISION_RANGE)"),
-    ("jbeam_desc__latched_box__truck_export", "truck.set_collision_range", "the exported line carries it"),
-    ("jbeam_desc__hires__truck_export", "truck.set_collision_range", "the exported line carries it"),
+    // None: audit S9 (`collision_range` 0.03 -> 0.025 m for every `load_jbeam` output)
+    // is back to main's 0.03 m; the BeamNG profile's 0.025 m is a new field
+    // (`explicit_collision_range`), read by the explicit JBeam path only.
 ];
 
 /// `got` against the golden digest `name`: every field main produced is still there
