@@ -107,6 +107,17 @@ fn run(
     let (stats, table) = if gpu {
         let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |_| {})?;
         lab.read_blocking(&world, true)?;
+        // `restart` in the script (the page's crash presets and restarts): applied in
+        // place, as the page does, after the build.
+        if let Some(r) = script.get("restart") {
+            let t = std::time::Instant::now();
+            lab.restart(&mut world, r)?;
+            lab.read_blocking(&world, true)?;
+            println!(
+                "restart in place: {:.1} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
         lab.bench.set_script(script)?;
         for k in 0..windows {
             lab.before_step(&mut world)?;
@@ -174,7 +185,7 @@ fn flat(events: Value, surface: bool) -> Value {
 /// each 2 kHz step (the solver has no moving static shapes: the shape is teleported, its
 /// contact knows no velocity). Returns the deepest a node gets inside it.
 fn static_shape_plate(template: &ExplicitBeams, speed: f32, secs: f32) -> (f32, bool) {
-    let mut sim = vehicle_lab::lab_car(template, &LabOptions::default());
+    let mut sim = vehicle_lab::lab_car(template, &LabOptions::default(), None);
     sim.run(0.5);
     let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
     for n in &sim.nodes {
@@ -352,6 +363,21 @@ fn main() -> anyhow::Result<()> {
     );
     if let Some(what) = arg("--measure") {
         return measure(&template, &what, gpu);
+    }
+    if let Some(kind) = arg("--crash") {
+        // A crash preset (the page's): --crash wall|offset|pole|sidepole [--kmh 50]
+        // [--overlap 0.4] [--offset 0] [--angle 0]; GPU World only (the restart is its).
+        let f = |k: &str, d: f64| arg(k).and_then(|x| x.parse().ok()).unwrap_or(d);
+        let script = json!({ "scene": "flat", "surface": arg("--surface").as_deref() == Some("1"), "events": [],
+            "restart": { "crash": { "kind": kind, "kmh": f("--kmh", 50.0), "overlap": f("--overlap", 0.4), "offset": f("--offset", 0.0), "angle": f("--angle", 0.0) } } });
+        anyhow::ensure!(gpu, "--crash runs in the GPU World (--mode gpu)");
+        let (stats, table) = run(&template, &script, true, f("--secs", 1.0))?;
+        print!("{table}");
+        println!(
+            "stated {:?} km/h, arrived at {:?} km/h",
+            stats["targetKmh"], stats["arrivalKmh"]
+        );
+        return Ok(());
     }
     let path = arg("--script").ok_or_else(|| {
         anyhow::anyhow!("--script <file.json> or --measure plates|spheres|mountain")

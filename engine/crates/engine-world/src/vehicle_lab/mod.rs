@@ -541,6 +541,10 @@ pub struct Bench {
     pub script_end: Option<f64>,
     kinds: HashMap<u32, (u8, usize)>,
     pub notes: Vec<String>,
+    /// A crash preset's stated speed (m/s), and the car's speed in the window before an
+    /// obstacle first took an impulse from it.
+    pub target: Option<f32>,
+    pub arrival: Option<f32>,
     /// The car's extents about its centre of mass along (left, up, forward) at the last
     /// reading.
     ext: [Vec3; 2],
@@ -579,6 +583,8 @@ impl Bench {
             script_end: None,
             kinds: HashMap::new(),
             notes: Vec::new(),
+            target: None,
+            arrival: None,
             ext: [Vec3::splat(-1.0), Vec3::splat(1.0)],
         }
     }
@@ -915,8 +921,9 @@ impl Bench {
             }
             "pole" => {
                 let (r, h) = (num(v, "radius", 0.15) as f32, num(v, "height", 4.0) as f32);
+                // A 16-sided prism (the scene renderer draws boxes, hulls and spheres).
                 defs.push(ObjDef::fixed(
-                    LabGeom::Capsule {
+                    LabGeom::Cylinder {
                         radius: r,
                         half_len: 0.5 * h,
                     },
@@ -1303,7 +1310,21 @@ impl Bench {
 
     /// One window's reading of the car and its proxies.
     pub fn read(&mut self, car: &CarRead, frame: &ProxyFrame) {
+        let before = self.car.speed;
         self.car.read(&self.model, car, frame, self.t);
+        if self.arrival.is_none()
+            && self.car.readings > 1
+            && frame
+                .shapes
+                .iter()
+                .any(|s| s.impulse.length_squared() > 0.0)
+        {
+            self.arrival = Some(before);
+            self.car.events.push(monitor::Event {
+                t: self.t,
+                text: format!("first contact at {:.1} km/h", before * 3.6),
+            });
+        }
         if self.car.non_finite {
             return;
         }
@@ -1393,6 +1414,26 @@ impl Bench {
         }
     }
 
+    /// The car now, for a camera: centre (world), velocity, heading, speed, peak node
+    /// depth, readings taken.
+    pub fn pose(&self) -> [f64; 12] {
+        let c = &self.car;
+        [
+            c.centre.x,
+            c.centre.y,
+            c.centre.z,
+            c.velocity.x.into(),
+            c.velocity.y.into(),
+            c.velocity.z.into(),
+            c.heading.x.into(),
+            c.heading.y.into(),
+            c.heading.z.into(),
+            c.speed.into(),
+            c.node_depth.into(),
+            c.readings as f64,
+        ]
+    }
+
     /// Plate `i`'s (travel, force) samples, flat.
     pub fn plate_series(&self, i: usize) -> Vec<f32> {
         self.plates
@@ -1426,6 +1467,7 @@ impl Bench {
             "damage": self.car.damage_series.iter().map(|d| json!([d.0, d.1, d.2])).collect::<Vec<_>>(),
             "limits": { "shots": MAX_SHOTS, "queue": MAX_QUEUE, "obstacleBodies": MAX_OBSTACLE_BODIES,
                 "coupling": { "bodies": self.opts.capacity.bodies, "shapes": self.opts.capacity.shapes, "planes": self.opts.capacity.planes } },
+            "targetKmh": self.target.map(|x| x * 3.6), "arrivalKmh": self.arrival.map(|x| x * 3.6),
             "scriptDone": self.script_done(),
             "notes": self.notes,
         })
@@ -1518,43 +1560,87 @@ pub fn arena_fixtures() -> Vec<(Vec3, Vec3, Quat)> {
     ]
 }
 
-/// The lab's car from `template` for `opts`: placed, its ground and fixtures set, surface
-/// contact as asked.
-pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions) -> ExplicitBeams {
-    let mut car = match opts.scene {
-        Scene::Flat => {
-            let mut c = place_vehicle(template, Vec3::new(0.0, GROUND, 2.3), 0, 0.0, GROUND);
-            for (centre, half, rot) in arena_fixtures() {
-                c.shapes.push(StaticShape::oriented_box(centre, half, rot));
-            }
-            c
+/// Where and how the car starts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Start {
+    /// Speed along its heading (m/s) and to its left (m/s: a sled's sideways launch).
+    pub speed: f32,
+    pub lateral: f32,
+    /// Its heading, turned about +y from +z (rad).
+    pub yaw: f32,
+    /// Its centre (x, z) and how far above its standing height it starts (m: on a sled
+    /// its wheels do not reach the ground until it has dropped).
+    pub at: [f32; 2],
+    pub lift: f32,
+}
+
+impl Default for Start {
+    fn default() -> Self {
+        Self {
+            speed: 0.0,
+            lateral: 0.0,
+            yaw: 0.0,
+            at: [0.0, 0.0],
+            lift: 0.0,
         }
-        Scene::Mountain => {
-            // Just off the lip, at the launch speed; its own ground plane far below (the
-            // mountain is the World's static bodies).
-            let len = template
-                .nodes
-                .iter()
-                .map(|n| n.pos.z)
-                .fold(f32::MIN, f32::max)
-                - template
-                    .nodes
-                    .iter()
-                    .map(|n| n.pos.z)
-                    .fold(f32::MAX, f32::min);
-            let mut c = place_vehicle(
-                template,
-                Vec3::new(0.0, 0.3, len.abs() + 0.3),
-                0,
-                opts.mountain.launch,
-                -1.0e5,
-            );
-            if let Some(d) = c.drive.as_mut() {
-                d.roll(opts.mountain.launch);
-            }
-            c
+    }
+}
+
+/// The lab's car from `template` for `opts`, started as `start` (none: the scene's own
+/// start: standing on the flat arena, or just off the mountain's lip at its launch
+/// speed): placed, its ground and fixtures set, surface contact as asked. Every lab car
+/// of one template has the same layout (the same static shapes: the arena's fixtures,
+/// far overhead on the mountain), so a restart is `World::reset_explicit_vehicles`.
+pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>) -> ExplicitBeams {
+    let mountain = opts.scene == Scene::Mountain;
+    let ground = if mountain { -1.0e5 } else { GROUND };
+    // Facing +z, standing on y = 0, centred on its node box.
+    let mut car = place_vehicle(template, Vec3::ZERO, 0, 0.0, 0.0);
+    let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+    for n in &car.nodes {
+        lo = lo.min(n.pos);
+        hi = hi.max(n.pos);
+    }
+    let mid = 0.5 * (lo + hi);
+    let start = start.unwrap_or(if mountain {
+        // Just off the lip (its rear clear of it), at the launch speed.
+        Start {
+            speed: opts.mountain.launch,
+            at: [0.0, 0.5 * (hi.z - lo.z) + 0.3],
+            lift: 0.3,
+            ..Start::default()
         }
-    };
+    } else {
+        Start::default()
+    });
+    let turn = Quat::from_rotation_y(start.yaw);
+    let (fwd, left) = (turn * Vec3::Z, turn * Vec3::X);
+    let vel = fwd * start.speed + left * start.lateral;
+    let base = if mountain { 0.0 } else { GROUND };
+    for n in &mut car.nodes {
+        let mut p = n.pos - Vec3::new(mid.x, 0.0, mid.z);
+        if start.yaw != 0.0 {
+            p = turn * p;
+        }
+        n.pos = p + Vec3::new(start.at[0], base + start.lift, start.at[1]);
+        n.vel = vel;
+    }
+    car.origin = Vec3::ZERO;
+    car.ground = ground;
+    if start.speed != 0.0 && start.lateral == 0.0 {
+        if let Some(d) = car.drive.as_mut() {
+            d.roll(start.speed);
+        }
+    }
+    for (centre, half, rot) in arena_fixtures() {
+        let up = if mountain {
+            Vec3::new(0.0, 1.0e4, 0.0)
+        } else {
+            Vec3::ZERO
+        };
+        car.shapes
+            .push(StaticShape::oriented_box(centre + up, half, rot));
+    }
     car.surface_contact = opts.surface_contact;
     car
 }
@@ -1565,11 +1651,8 @@ pub fn lab_world_def(opts: &LabOptions) -> WorldDef {
     let mut def = crate::brick_ring_drive::ring_world_def(4096);
     def.gravity = [0.0, GRAVITY, 0.0];
     // The mountain run goes down for kilometres.
-    def.kill_bounds = Some(KillBounds::below(if opts.scene == Scene::Mountain {
-        -1.0e6
-    } else {
-        -50.0
-    }));
+    def.kill_bounds = Some(KillBounds::below(-1.0e6));
+    let _ = opts;
     def.contacts = ContactStorage::Persistent;
     if opts.sleep {
         def.solver.sleep_time = 0.5;
@@ -1682,22 +1765,25 @@ pub struct ReadPlan {
 pub struct Lab {
     pub bench: Bench,
     bodies: HashMap<u32, BodyId>,
+    /// The scene's own bodies (the flat arena's ground slab and fixtures).
+    scene_bodies: Vec<BodyId>,
+    template: ExplicitBeams,
     layout: CouplingLayout,
     plan: ReadPlan,
+    /// Restarts since the build.
+    pub restarts: u32,
+}
+
+fn deg(v: &Value, k: &str, d: f64) -> f32 {
+    (num(v, k, d) as f32).to_radians()
 }
 
 impl Lab {
-    /// A lab World on `gpu` with the car from `template` (a vehicle on raycast wheels,
-    /// facing +z). `tweak` adjusts the World's definition (GPU timing).
-    pub fn build(
-        gpu: GpuContext,
-        template: &ExplicitBeams,
-        opts: LabOptions,
-        tweak: impl FnOnce(&mut WorldDef),
-    ) -> anyhow::Result<(World, Lab)> {
-        let mut def = lab_world_def(&opts);
-        tweak(&mut def);
-        let mut world = World::new(gpu, &def)?;
+    fn scene_bodies(world: &mut World, opts: &LabOptions) -> anyhow::Result<Vec<BodyId>> {
+        let mut out = Vec::new();
+        if opts.scene != Scene::Flat {
+            return Ok(out);
+        }
         let fixture = |friction: f32| ShapeDef {
             material: crate::SurfaceMaterial {
                 friction,
@@ -1710,39 +1796,80 @@ impl Lab {
             },
             ..ShapeDef::default()
         };
-        let car = lab_car(template, &opts);
-        let mut cars = vec![car.clone()];
-        if opts.scene == Scene::Flat {
-            // The ground the rigid bodies stand on (the car has its own plane), and the
-            // arena's ramp and kerb for the rigid bodies and the renderer.
-            let g = world.create_body(&BodyDef {
-                position: [0.0, GROUND - 0.5, 0.0],
+        // The ground the rigid bodies stand on (the car has its own plane), and the
+        // arena's ramp and kerb for the rigid bodies and the renderer.
+        let g = world.create_body(&BodyDef {
+            position: [0.0, GROUND - 0.5, 0.0],
+            ..BodyDef::default()
+        })?;
+        out.push(g);
+        world.create_box_shape(
+            g,
+            &ShapeDef {
+                density: 0.0,
+                ..fixture(0.6)
+            },
+            [400.0, 0.5, 400.0],
+        )?;
+        for (centre, half, rot) in arena_fixtures() {
+            let b = world.create_body(&BodyDef {
+                position: centre.to_array(),
+                rotation: rot.to_array(),
                 ..BodyDef::default()
             })?;
-            world.create_box_shape(
-                g,
-                &ShapeDef {
-                    density: 0.0,
-                    ..fixture(0.6)
-                },
-                [400.0, 0.5, 400.0],
-            )?;
-            for (centre, half, rot) in arena_fixtures() {
-                let b = world.create_body(&BodyDef {
-                    position: centre.to_array(),
-                    rotation: rot.to_array(),
-                    ..BodyDef::default()
-                })?;
-                world.create_box_shape(b, &fixture(0.6), half.to_array())?;
-            }
-            if opts.parked {
-                // Broadside across the car's path.
-                let mut p = place_vehicle(template, Vec3::new(2.3, GROUND, 16.0), 1, 0.0, GROUND);
-                p.shapes = car.shapes.clone();
-                p.surface_contact = opts.surface_contact;
-                cars.push(p);
-            }
+            out.push(b);
+            world.create_box_shape(b, &fixture(0.6), half.to_array())?;
         }
+        Ok(out)
+    }
+
+    fn cars(
+        template: &ExplicitBeams,
+        opts: &LabOptions,
+        start: Option<Start>,
+    ) -> Vec<ExplicitBeams> {
+        let car = lab_car(template, opts, start);
+        let mut cars = vec![car];
+        if opts.parked {
+            // Broadside across the arena, 16 m ahead of the origin (far overhead on the
+            // mountain: the fleet is the same in every scene).
+            let far = if opts.scene == Scene::Mountain {
+                1.0e4
+            } else {
+                0.0
+            };
+            let mut p = lab_car(
+                template,
+                &LabOptions {
+                    scene: Scene::Flat,
+                    ..opts.clone()
+                },
+                Some(Start {
+                    yaw: std::f32::consts::FRAC_PI_2,
+                    at: [0.0, 16.0 + far],
+                    ..Start::default()
+                }),
+            );
+            p.ground = cars[0].ground;
+            p.shapes = cars[0].shapes.clone();
+            cars.push(p);
+        }
+        cars
+    }
+
+    /// A lab World on `gpu` with the car from `template` (a vehicle on raycast wheels,
+    /// facing +z). `tweak` adjusts the World's definition (GPU timing).
+    pub fn build(
+        gpu: GpuContext,
+        template: &ExplicitBeams,
+        opts: LabOptions,
+        tweak: impl FnOnce(&mut WorldDef),
+    ) -> anyhow::Result<(World, Lab)> {
+        let mut def = lab_world_def(&opts);
+        tweak(&mut def);
+        let mut world = World::new(gpu, &def)?;
+        let scene_bodies = Self::scene_bodies(&mut world, &opts)?;
+        let cars = Self::cars(template, &opts, None);
         world.enable_sleep_archive(None)?;
         world.add_explicit_vehicles(
             &cars,
@@ -1769,16 +1896,162 @@ impl Lab {
         };
         let dt = world.solver().dt;
         let mut lab = Lab {
-            bench: Bench::new(opts, &car, dt),
+            bench: Bench::new(opts, &cars[0], dt),
             bodies: HashMap::new(),
+            scene_bodies,
+            template: template.clone(),
             layout,
             plan,
+            restarts: 0,
         };
         lab.bench.begin(&mut WorldRig {
             world: &mut world,
             bodies: &mut lab.bodies,
         })?;
         Ok((world, lab))
+    }
+
+    /// Start over in place, in well under a second: no device, pipeline or buffer is
+    /// made. Every lab body is removed, the car goes back to its rest shape at a new
+    /// start (`World::reset_explicit_vehicles`), the scene is laid out again. `v`:
+    /// `{ scene: 'flat' | 'mountain', mountain: { seed, steepness, roughness, … }, start:
+    /// { kmh, angle (degrees), x, z }, crash: { kind: 'wall' | 'offset' | 'pole' |
+    /// 'sidepole', kmh, overlap (0–1 of the car's width, the offset wall's), offset (m,
+    /// the pole's from the car's centre line; along the car for the side pole), angle
+    /// (degrees, the wall's from square), gap (m to the obstacle at the start) } }`; what
+    /// is left out keeps the lab's setting (the start: the scene's own). The car's
+    /// surface contact and the second car stay as built.
+    pub fn restart(&mut self, world: &mut World, v: &Value) -> anyhow::Result<()> {
+        let mut opts = self.bench.opts.clone();
+        match v.get("scene").and_then(Value::as_str) {
+            Some("mountain") => opts.scene = Scene::Mountain,
+            Some("flat") => opts.scene = Scene::Flat,
+            _ => {}
+        }
+        if v.get("mountain").is_some() {
+            let mut merged = json!({ "mountain": v["mountain"] });
+            merged["scene"] = json!("mountain");
+            let m = LabOptions::from_json(&merged).mountain;
+            opts.mountain = m;
+        }
+        let crash = v.get("crash").filter(|c| !c.is_null());
+        anyhow::ensure!(
+            crash.is_none() || opts.scene == Scene::Flat,
+            "vehicle lab: the crash presets are on the flat arena"
+        );
+        let mut start = v.get("start").filter(|c| !c.is_null()).map(|s| Start {
+            speed: num(s, "kmh", 0.0) as f32 / 3.6,
+            yaw: deg(s, "angle", 0.0),
+            at: [num(s, "x", 0.0) as f32, num(s, "z", 0.0) as f32],
+            ..Start::default()
+        });
+        let mut kind = "";
+        if let Some(c) = crash {
+            kind = c.get("kind").and_then(Value::as_str).unwrap_or("wall");
+            let speed = num(c, "kmh", 50.0) as f32 / 3.6;
+            anyhow::ensure!(
+                (0.0..=70.0).contains(&speed),
+                "vehicle lab: crash speed out of range (0 to 250 km/h)"
+            );
+            start = Some(match kind {
+                "wall" | "offset" | "pole" => Start {
+                    speed,
+                    ..Start::default()
+                },
+                // On a sled: carried sideways with its wheels off the ground (0.5 m up,
+                // past the suspension's droop), so the tyres' grip takes nothing before
+                // the pole does; it starts 0.3 m from the pole and drops as it strikes.
+                "sidepole" => Start {
+                    lateral: speed,
+                    lift: 0.5,
+                    ..Start::default()
+                },
+                other => anyhow::bail!(
+                    "vehicle lab: unknown crash '{other}' (wall, offset, pole, sidepole)"
+                ),
+            });
+        }
+        let cars = Self::cars(&self.template, &opts, start);
+        // The car first: a fleet the World was not built for is refused before anything
+        // else changes.
+        world.reset_explicit_vehicles(&cars)?;
+        for (_, b) in self.bodies.drain() {
+            if world.body_is_valid(b) {
+                let _ = world.destroy_body(b);
+            }
+        }
+        for b in self.scene_bodies.drain(..) {
+            if world.body_is_valid(b) {
+                let _ = world.destroy_body(b);
+            }
+        }
+        self.scene_bodies = Self::scene_bodies(world, &opts)?;
+        if let Some(x) = world.explicit_vehicles_mut() {
+            x.set_drive_input(0, DriveInput::default());
+        }
+        let dt = self.bench.dt;
+        self.bench = Bench::new(opts, &cars[0], dt);
+        self.restarts += 1;
+        let mut rig = WorldRig {
+            world,
+            bodies: &mut self.bodies,
+        };
+        self.bench.begin(&mut rig)?;
+        if let Some(c) = crash {
+            // The car's box as placed (facing +z; its left is +x).
+            let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+            for n in &cars[0].nodes {
+                lo = lo.min(n.pos);
+                hi = hi.max(n.pos);
+            }
+            let gap =
+                (num(c, "gap", if kind == "sidepole" { 0.3 } else { 1.0 }) as f32).clamp(0.2, 50.0);
+            let (wide, cx, cz) = (hi.x - lo.x, 0.5 * (lo.x + hi.x), 0.5 * (lo.z + hi.z));
+            let offset = num(c, "offset", 0.0) as f32;
+            let pole = |x: f32, z: f32| {
+                let (r, h) = (0.127f32, 3.0f32);
+                ObjDef::fixed(
+                    LabGeom::Cylinder {
+                        radius: r,
+                        half_len: 0.5 * h,
+                    },
+                    DVec3::new(f64::from(x), f64::from(GROUND + 0.5 * h), f64::from(z)),
+                    Quat::IDENTITY,
+                    7800.0,
+                )
+            };
+            let def = match kind {
+                "wall" | "offset" => {
+                    let overlap = if kind == "offset" {
+                        (num(c, "overlap", 0.4) as f32).clamp(0.05, 1.0)
+                    } else {
+                        1.0
+                    };
+                    // The offset wall covers the car's left `overlap` of its width, and 4 m
+                    // beyond it; the full wall 4 m either side.
+                    let (x0, x1) = if kind == "offset" {
+                        (hi.x - overlap * wide, hi.x + 4.0)
+                    } else {
+                        (lo.x - 4.0, hi.x + 4.0)
+                    };
+                    let half = Vec3::new(0.5 * (x1 - x0), 1.25, 0.5);
+                    let yaw = Quat::from_rotation_y(deg(c, "angle", 0.0));
+                    // Its face's middle stays `gap` ahead of the nose.
+                    let face = Vec3::new(0.5 * (x0 + x1), 0.0, hi.z + gap);
+                    let centre = face + yaw * Vec3::new(0.0, GROUND + half.y, half.z);
+                    ObjDef::fixed(LabGeom::Box { half }, centre.as_dvec3(), yaw, 2400.0)
+                }
+                "pole" => pole(cx + offset, hi.z + gap + 0.127),
+                _ => pole(hi.x + gap + 0.127, cz + offset),
+            };
+            self.bench.obstacles.push(rig.spawn(&def)?);
+            self.bench.notes.push(format!(
+                "crash preset {kind}: {:.0} km/h",
+                num(c, "kmh", 50.0)
+            ));
+            self.bench.target = Some(num(c, "kmh", 50.0) as f32 / 3.6);
+        }
+        Ok(())
     }
 
     pub fn read_plan(&self) -> ReadPlan {

@@ -136,7 +136,7 @@ pub struct CpuLab {
 impl CpuLab {
     pub fn new(template: &ExplicitBeams, opts: LabOptions) -> anyhow::Result<Self> {
         anyhow::ensure!(!opts.parked, "vehicle lab: the CPU reference runs one car");
-        let sim = lab_car(template, &opts);
+        let sim = lab_car(template, &opts, None);
         let mut lab = Self {
             bench: Bench::new(opts, &sim, 1.0 / 60.0),
             sim,

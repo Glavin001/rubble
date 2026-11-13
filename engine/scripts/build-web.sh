@@ -206,10 +206,12 @@ step "Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
 step "Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$WEB"/vehicle-designer.html "$OUT"/
+cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/vehicle-lab.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$WEB"/vehicle-designer.html "$OUT"/
 cp "$WEB"/*.mjs "$OUT"/
 cp -R "$WEB"/generated "$OUT"/generated
 cp -R "$WEB"/fracture "$OUT"/fracture
+# the vehicle lab's scripted scenarios (vehicle-lab.html?script=<name>)
+cp -R "$WEB"/vehicle-lab-scripts "$OUT"/vehicle-lab-scripts
 # the vehicle-gen model viewer, with the generated vehicles' .glb files and thumbnails
 mkdir -p "$OUT"/models/vehicles
 cp "$ENGINE"/tools/vehicle-gen/viewer/index.html "$OUT"/models/index.html
