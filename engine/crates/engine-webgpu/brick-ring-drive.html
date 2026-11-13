@@ -78,6 +78,7 @@
     // (the recorder); ?runUp= m; ?speed= m/s at spawn; ?inspect=auto the post-crash
     // inspect orbit once the cars stand still (key I by hand; ?inspectSecs= per car).
     import { createBrickRingDrive, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
+    import { createLoading } from './load-progress.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { loadMod, modVisual, modTextures, LOCAL_MODS } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
@@ -104,11 +105,14 @@
     carSel.onchange = () => go('car', carSel.value);
     document.getElementById('again').onclick = () => location.reload();
     statusEl.textContent = 'loading…';
+    const loading = createLoading({ title: 'Loading Rubble' });
+    loading.stage('Loading the physics engine (wasm)');
     const t0 = performance.now();
     await loadWasm();
     let mod = null;
     if (kind !== 'sedan') {
       statusEl.textContent = `loading the ${MODS[kind].name}…`;
+      loading.stage(`Loading the ${MODS[kind].name}`);
       try { mod = await loadMod(MODS[kind].base, { pc: qs.get('pc') || MODS[kind].pc }); } catch (e) { console.warn(`${e.message} The sedan instead.`); kind = 'sedan'; }
       // Without the local mod (a deployed site, a fresh clone): the sedan, and the menu says so.
       if (kind === 'sedan') { carSel.value = 'sedan'; const o = carSel.options[0]; o.text += ' (local mod not found)'; o.disabled = true; carSel.title = LOCAL_MODS; }
@@ -116,6 +120,8 @@
     const NAME = { sedan: ['soft-body sedan', 'soft-body sedans'], etk: ['ETK K-series', 'ETK K-series cars'] }[kind];
     const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42]];
     statusEl.textContent = 'building the car\'s body…';
+    loading.stage('Building the car\'s body (Rust)');
+    await loading.paint();
     // Each car's visual on its raycast-wheel spawn (the wheels ride the drive state).
     const visuals = Array.from({ length: N }, (_, i) => {
       const paint = PAINTS[i % PAINTS.length];
@@ -139,7 +145,12 @@
       ...(TIMING ? { gpuTiming: TIMING } : {}),
     };
     statusEl.textContent = 'building 110,440 bricks and the car…';
-    const { world, layout } = await createBrickRingDrive(spec);
+    loading.stage('Building 110,440 bricks and opening the GPU');
+    await loading.paint();
+    let made;
+    try { made = await createBrickRingDrive(spec, loading.progress); } catch (e) { loading.fail({ detail: errorText(e) }); fail(e); throw e; }
+    const { world, layout } = made;
+    loading.stage('Building the renderers');
     const buildMs = performance.now() - t0;
     document.getElementById('capSub').textContent = `${N > 1 ? 'two ' + NAME[1] : 'the ' + NAME[0]} through ${layout.bricks.toLocaleString('en-US')} rigid bricks`;
     const device = world.device();
@@ -678,6 +689,7 @@
         },
       };
       hud(1);
+      window.__loadTimes = loading.done();
       window.__ready = true;
     } else {
       let lastNow = null, hudAt = 0;
@@ -704,6 +716,7 @@
         } catch (e) { fail(e); return; }
         requestAnimationFrame(frame);
       }
+      window.__loadTimes = loading.done();
       window.__ready = true;
       requestAnimationFrame(frame);
     }

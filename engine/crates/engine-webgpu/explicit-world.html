@@ -40,6 +40,7 @@
     // builder) and all physics is Rust/Slang; this draws the world's colliders and the
     // vehicles' collision skins from the GPU buffers in place.
     import { createVehicleTown, pollFrame, errorText, FramePacer } from './rubble-world.mjs';
+    import { createLoading } from './load-progress.mjs';
     const qs = new URLSearchParams(location.search);
     const N = Math.max(1, Number(qs.get('n')) || 16);
     const SPEED = Number(qs.get('speed')) || 15;
@@ -54,8 +55,13 @@
     if (!navigator.gpu) { fail('WebGPU is not available in this browser'); throw new Error('no WebGPU'); }
 
     statusEl.textContent = `building ${N} vehicles and ${Math.ceil(N / 4)} houses…`;
+    const loading = createLoading({ title: 'Loading Rubble' });
+    loading.stage('Loading the physics engine (wasm) and opening the GPU');
     const t0 = performance.now();
-    const { world, layout } = await createVehicleTown({ count: N, speed: SPEED, runUp: RUNUP });
+    let made;
+    try { made = await createVehicleTown({ count: N, speed: SPEED, runUp: RUNUP }, loading.progress); } catch (e) { loading.fail({ detail: errorText(e) }); fail(e); throw e; }
+    const { world, layout } = made;
+    loading.stage('Building the renderer');
     const buildMs = performance.now() - t0;
     const device = world.device();
     // ?timing=step|phases: the World's GPU time per step, by segment, in the HUD.
@@ -319,6 +325,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1)
     window.__pause = (p) => { paused = p; };
     window.__world = world;
     window.__state = () => ({ broken, steps: world.explicitSteps(), bodies: world.bodyCount() });
+    window.__loadTimes = loading.done();
     window.__ready = true;
     requestAnimationFrame(frame);
   </script>

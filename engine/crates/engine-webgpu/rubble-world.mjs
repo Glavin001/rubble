@@ -58,10 +58,10 @@ export async function createCity(opts, page = {}) {
  * .truck text; absent, the procedural sedan with tyres). Returns the world and
  * `{ houses, ground, centres }`.
  */
-export async function createVehicleTown(spec) {
+export async function createVehicleTown(spec, progress) {
   ready ??= init();
   await ready;
-  const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) });
+  const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) }, progress);
   world.flags = solverFlags();
   return { world, layout: vehicleTownLayout(spec.houses ?? 0, spec.count ?? 4) };
 }
@@ -70,14 +70,16 @@ export async function createVehicleTown(spec) {
  * The one-World showcase (`rubble::showcase_scene`): `spec` `{ vehicles: [{ truck } |
  * { jbeam: [[name, text]], pc }] (cycled over the preset's cars), preset: 'house' |
  * 'crates' | 'twoway' | 'convoy', count, speed, runUp, drag }` (or `truck`: one .truck
- * vehicle). Returns the world and its layout (`showcaseLayout`).
+ * vehicle). Returns the world and its layout (`showcaseLayout`). `progress` (optional,
+ * here and in the other create functions): a loading card's `loading.progress`
+ * (load-progress.mjs), which hears the load's stages and each GPU kernel's compile.
  */
-export async function createShowcase(spec) {
+export async function createShowcase(spec, progress) {
   ready ??= init();
   await ready;
   const { truck, vehicles, ...rest } = spec;
   const layout = showcaseLayout(rest);
-  const world = await WebWorld.createShowcase(spec);
+  const world = await WebWorld.createShowcase(spec, progress);
   world.flags = solverFlags();
   return { world, layout };
 }
@@ -87,12 +89,12 @@ export async function createShowcase(spec) {
  * soft-body cars on raycast wheels in one World on its own device (spec as
  * `WebWorld.createBrickRingDrive`), and its layout (`brickRingLayout`).
  */
-export async function createBrickRingDrive(spec) {
+export async function createBrickRingDrive(spec, progress) {
   ready ??= init();
   await ready;
   const { vehicles, ...rest } = spec;
   const layout = brickRingLayout(rest);
-  const world = await WebWorld.createBrickRingDrive(spec);
+  const world = await WebWorld.createBrickRingDrive(spec, progress);
   world.flags = solverFlags();
   return { world, layout };
 }

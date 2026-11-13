@@ -60,6 +60,7 @@
     // BeamNG community vehicles (beamng-mod.mjs: the files are fetched here, parsed and
     // built in Rust), or Rubble's authored sedan.
     import { createShowcase, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
+    import { createLoading } from './load-progress.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
@@ -128,6 +129,8 @@
 
     // ---------------------------------------------------------------- world
     statusEl.textContent = 'building the car and the scene…';
+    const loading = createLoading({ title: 'Loading Rubble' });
+    loading.stage('Loading the physics engine (wasm)');
     const t0 = performance.now();
     await loadWasm();
     // The car, and each one's paint (a convoy's cars differ; visual only).
@@ -136,6 +139,7 @@
     let mod = null;
     if (kind !== 'sedan') {
       statusEl.textContent = `loading the ${MODS[kind].name}…`;
+      loading.stage(`Loading the ${MODS[kind].name}`);
       try { mod = await loadMod(MODS[kind].base, { pc: qs.get('pc') || MODS[kind].pc }); } catch (e) { console.warn(`${e.message} The sedan instead.`); kind = 'sedan'; }
     }
     const NAMES = { sedan: ['soft-body sedan', 'soft-body sedans'], etk: ['ETK K-series', 'ETK K-series cars'] };
@@ -143,6 +147,8 @@
     // Each car's visual: the sedan's (wasm showcaseCar) or the vehicle's flexbodies
     // bound to its solver nodes (wasm jbeamVisual), in its paint.
     statusEl.textContent = 'building the cars\' bodies…';
+    loading.stage('Building the cars\' bodies (Rust)');
+    await loading.paint();
     const RES = qs.get('res') || 'low';
     const visuals = Array.from({ length: N }, (_, i) => {
       const paint = PAINTS[i % PAINTS.length];
@@ -159,7 +165,12 @@
     else if (mod) spec.strength = MODS[kind].strength;
     if (qs.has('supportLoss')) spec.supportLoss = qs.get('supportLoss') === '1';
     statusEl.textContent = 'building the scene…';
-    const { world, layout } = await createShowcase(spec);
+    loading.stage('Opening the GPU');
+    await loading.paint();
+    let made;
+    try { made = await createShowcase(spec, loading.progress); } catch (e) { loading.fail({ detail: errorText(e) }); fail(e); throw e; }
+    const { world, layout } = made;
+    loading.stage('Building the renderers');
     const buildMs = performance.now() - t0;
     const device = world.device();
     const TIMING = qs.get('timing');
@@ -191,6 +202,7 @@
     // The vehicle's colour and data maps (decoded in the wasm), shared by every car.
     if (mod && qs.get('tex') !== '0') {
       statusEl.textContent = 'decoding the textures…';
+      loading.stage('Decoding the textures');
       const vis = visuals[0].visual;
       const [colour, data] = await Promise.all([modTextures(mod, vis.textures), modTextures(mod, vis.dataTextures)]);
       if (colour.length) cars.setTextures(colour, 1024);
@@ -476,6 +488,7 @@
         set(o) { if ('cam' in o) { camMode = o.cam; cam.init = false; } if ('slow' in o) autoSlow = o.slow; return true; },
       };
       hud(1);
+      window.__loadTimes = loading.done();
       window.__ready = true;
     } else {
       let lastNow = null, hudAt = 0;
@@ -501,6 +514,7 @@
         } catch (e) { fail(e); return; }
         requestAnimationFrame(frame);
       }
+      window.__loadTimes = loading.done();
       window.__ready = true;
       requestAnimationFrame(frame);
     }

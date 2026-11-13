@@ -38,7 +38,7 @@ impl WebWorld {
     /// prefractured cuboid houses (threshold destructibles), one from each side of each,
     /// past a crate each.
     #[wasm_bindgen(js_name = createVehicleTown)]
-    pub async fn create_vehicle_town(spec: JsValue) -> Result<WebWorld, JsValue> {
+    pub async fn create_vehicle_town(spec: JsValue, progress: Option<js_sys::Function>) -> Result<WebWorld, JsValue> {
         let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
         let truck = spec
             .get("truck")
@@ -59,7 +59,7 @@ impl WebWorld {
         let count = num(&spec, "count", 4.0) as usize;
         let fleet = vec![template.clone(); count.max(1)];
         let specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(town_coupling().capacity));
-        crate::warm_pipelines(&device, &specs, std::rc::Rc::new(|_: &str, _: f64| {})).await;
+        crate::warm_pipelines(&device, &specs, crate::hear_fn(progress)).await.map_err(err)?;
         let town = res(crash_town(
             GpuContext::Shared { info, device, queue },
             &template,

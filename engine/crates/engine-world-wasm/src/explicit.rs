@@ -775,10 +775,11 @@ impl WebWorld {
     /// [`Self::explicit_sim`], its GPU kernels compiled first without blocking
     /// (`createComputePipelineAsync`, see `crate::warm_pipelines`): a promise of
     /// the `ExplicitSim`. Load with this; the synchronous call is then a cache hit
-    /// (a restart may use it). `progress(stage)` (optional) hears each stage:
-    /// `"spawn"`, then `"compile N"` with the number of kernels compiling, then
-    /// `"compiled <module> <ms>"` as each one finishes (ms since the compiles began;
-    /// a kernel the first frame does not need compiles after the promise resolves).
+    /// (a restart may use it). `progress(line)` (optional) hears each stage
+    /// (`crate::Hear`: `spawn`, `kernels <json>`, then `compiled`/`failed` per
+    /// kernel; a kernel the first frame does not need compiles after the promise
+    /// resolves). Rejects, without creating anything more, if the browser loses the
+    /// device while the kernels compile.
     #[wasm_bindgen(js_name = explicitSimAsync)]
     pub fn explicit_sim_async(
         &self,
@@ -788,28 +789,12 @@ impl WebWorld {
         let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
         let (device, queue) = (self.world.device().clone(), self.world.queue().clone());
         Ok(wasm_bindgen_futures::future_to_promise(async move {
-            let progress = std::rc::Rc::new(progress);
-            let say = {
-                let progress = progress.clone();
-                move |stage: String| {
-                    if let Some(f) = progress.as_ref() {
-                        let _ = f.call1(&JsValue::NULL, &stage.into());
-                    }
-                }
-            };
-            let say = std::rc::Rc::new(say);
+            let say = crate::hear_fn(progress);
             say("spawn".into());
             let spawn = ExplicitSim::spawn(&spec).map_err(err)?;
             let sims: Vec<ExplicitBeams> = spawn.vehicles.iter().map(|v| v.sim.clone()).collect();
             let specs = ExplicitBeamsGpu::compute_specs(&sims, None);
-            say(format!("compile {}", specs.iter().filter(|s| !s.deferred).count()));
-            let heard = say.clone();
-            crate::warm_pipelines(
-                &device,
-                &specs,
-                std::rc::Rc::new(move |module: &str, ms: f64| heard(format!("compiled {module} {ms:.0}"))),
-            )
-            .await;
+            crate::warm_pipelines(&device, &specs, say).await.map_err(err)?;
             ExplicitSim::assemble(&device, &queue, &spec, spawn)
                 .map(JsValue::from)
                 .map_err(err)

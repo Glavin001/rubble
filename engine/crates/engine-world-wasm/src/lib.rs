@@ -140,34 +140,73 @@ async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), 
         .await
         .map_err(|e| err(format!("WebGPU device: {e}")))?;
     device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| note_gpu_error(e.to_string())));
-    device.set_device_lost_callback(|reason, message| note_gpu_error(format!("device lost ({reason:?}): {message}")));
+    DEVICE_LOST.store(false, std::sync::atomic::Ordering::Relaxed);
+    device.set_device_lost_callback(|reason, message| {
+        DEVICE_LOST.store(true, std::sync::atomic::Ordering::Relaxed);
+        note_gpu_error(format!("device lost ({reason:?}): {message}"))
+    });
     Ok((info, device, queue))
 }
 
-/// Compile `specs` with `createComputePipelineAsync`, all at once, and wait for
-/// them (`engine_webgpu::ComputeSpec`): the host's synchronous creation of the same
-/// descriptors afterwards is a cache hit. Chrome compiles an async pipeline on a
-/// worker thread; a synchronous one on the GPU process's main thread, where a
-/// kernel compiling for longer than the GPU watchdog (the explicit contact frame:
-/// about a minute cold on Metal) kills the GPU process in a windowed browser.
-/// A spec this cannot express, or a compile the browser rejects, is left to the
-/// synchronous creation, which reports it as before. `done(module, ms)` hears each
-/// pipeline as it finishes (in completion order; `ms` since the compiles started).
-/// A deferred spec ([`engine_webgpu::ComputeSpec::deferred`]) starts once the others
-/// are done and is not waited for: the host creates it at first use.
-pub(crate) async fn warm_pipelines(
-    device: &wgpu::Device,
-    specs: &[engine_webgpu::ComputeSpec],
-    done: std::rc::Rc<dyn Fn(&str, f64)>,
-) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        use js_sys::{Array, Function, Object, Promise, Reflect};
-        use wasm_bindgen::JsCast;
-        let Some(gpu) = device.as_webgpu() else {
-            return;
-        };
-        let gpu: &JsValue = gpu.as_ref();
+/// Set by the device-lost callback; cleared when a new device is opened.
+static DEVICE_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a load reports to its page (`load-progress.mjs` `loading.progress`), one
+/// line per event:
+/// - `spawn`: the vehicles are being built;
+/// - `kernels <json>`: the kernels about to compile, `[{name, key, bytes, deferred}]`
+///   (`key`: a hash of the kernel's WGSL and entry, so a page can tell a kernel it
+///   has compiled before from a changed one);
+/// - `compiling <name>`: that kernel's compile starts (they run one at a time);
+/// - `compiled <name> <ms>`: it finished, `ms` after it started;
+/// - `failed <name> <ms> <message>`: the browser rejected it (or lost the device).
+pub(crate) type Hear = std::rc::Rc<dyn Fn(String)>;
+
+/// A page's optional progress function as a [`Hear`].
+pub(crate) fn hear_fn(progress: Option<js_sys::Function>) -> Hear {
+    std::rc::Rc::new(move |line: String| {
+        if let Some(f) = progress.as_ref() {
+            let _ = f.call1(&JsValue::NULL, &line.into());
+        }
+    })
+}
+
+/// Each spec's display name: its module, with the entry point where two specs
+/// share a module.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn kernel_names(specs: &[engine_webgpu::ComputeSpec]) -> Vec<String> {
+    specs
+        .iter()
+        .map(|s| {
+            if specs.iter().filter(|o| o.module == s.module).count() > 1 {
+                format!("{}:{}", s.module, s.entry)
+            } else {
+                s.module.to_string()
+            }
+        })
+        .collect()
+}
+
+/// FNV-1a of a kernel's WGSL and entry point (the `key` of a `kernels` event).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn kernel_key(s: &engine_webgpu::ComputeSpec) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.wgsl.bytes().chain([0]).chain(s.entry.bytes()) {
+        h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Start one spec's `createComputePipelineAsync` (`None`: a layout this cannot
+/// express; the synchronous creation makes it).
+#[cfg(target_arch = "wasm32")]
+fn start_pipeline(device: &wgpu::Device, s: &engine_webgpu::ComputeSpec) -> Result<Option<js_sys::Promise>, JsValue> {
+    use js_sys::{Array, Function, Object, Reflect};
+    use wasm_bindgen::JsCast;
+    let Some(gpu) = device.as_webgpu() else {
+        return Ok(None);
+    };
+    let gpu: &JsValue = gpu.as_ref();
         let call = |obj: &JsValue, name: &str, arg: &JsValue| -> Result<JsValue, JsValue> {
             let f: Function = Reflect::get(obj, &name.into())?.dyn_into()?;
             f.call1(obj, arg)
@@ -209,7 +248,6 @@ pub(crate) async fn warm_pipelines(
                 ])
             })())
         };
-        let start = |s: &engine_webgpu::ComputeSpec| -> Result<Option<Promise>, JsValue> {
             let layout = match &s.layout {
                 None => JsValue::from_str("auto"),
                 Some(entries) => {
@@ -247,69 +285,159 @@ pub(crate) async fn warm_pipelines(
             Ok(Some(
                 call(gpu, "createComputePipelineAsync", &desc)?.dyn_into()?,
             ))
-        };
+}
+
+/// Compile `specs` with `createComputePipelineAsync`, one at a time (the smallest
+/// first), and wait for them (`engine_webgpu::ComputeSpec`): the host's synchronous creation of the same
+/// descriptors afterwards is a cache hit. Chrome compiles an async pipeline on a
+/// worker thread; a synchronous one on the GPU process's main thread, where a
+/// kernel compiling for longer than the GPU watchdog kills the GPU process in a
+/// windowed browser.
+/// A spec this cannot express, or a compile the browser rejects, is left to the
+/// synchronous creation, which reports it as before. `hear` gets the [`Hear`]
+/// events (`kernels`, then per kernel `compiling` and `compiled`/`failed`).
+///
+/// One at a time because a compile cannot be taken back: on macOS the Metal
+/// compiler service (`MTLCompilerService`) goes on compiling a pipeline after the
+/// page that asked is closed, reloaded or has lost its device (seen at 100 % CPU for
+/// 9.5 and 28 minutes after the page was gone), and those leftovers slow every later
+/// load. Started all at once, an abandoned load leaves every kernel compiling;
+/// started in turn, at most the one in flight.
+/// A deferred spec ([`engine_webgpu::ComputeSpec::deferred`]) starts once the others
+/// are done and is not waited for: the host creates it at first use.
+///
+/// `Err`: the browser lost the device while these compiled. The caller must stop
+/// there (creating anything on a lost device panics in wgpu); the page offers a
+/// retry.
+pub(crate) async fn warm_pipelines(
+    device: &wgpu::Device,
+    specs: &[engine_webgpu::ComputeSpec],
+    hear: Hear,
+) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use js_sys::{Promise, Reflect};
+        if device.as_webgpu().is_none() {
+            return Ok(());
+        }
+        let names = kernel_names(specs);
+        hear(format!(
+            "kernels {}",
+            serde_json::Value::Array(
+                specs
+                    .iter()
+                    .zip(&names)
+                    .map(|(s, name)| {
+                        serde_json::json!({
+                            "name": name,
+                            "key": kernel_key(s),
+                            "bytes": s.wgsl.len(),
+                            "deferred": s.deferred,
+                        })
+                    })
+                    .collect()
+            )
+        ));
+        let start = |s: &engine_webgpu::ComputeSpec| start_pipeline(device, s);
         let now = || js_sys::Date::now();
         let t0 = now();
-        // The pipelines the first frame needs, all at once; then (not waited for) the
-        // deferred ones, so they do not hold up the others' compiles.
-        let mut pending = Vec::new();
+        fn text(e: &JsValue) -> String {
+            Reflect::get(e, &"message".into())
+                .ok()
+                .and_then(|m| m.as_string())
+                .or_else(|| e.as_string())
+                .unwrap_or_else(|| format!("{e:?}"))
+                .replace('\n', " ")
+        }
+        let lost = || DEVICE_LOST.load(std::sync::atomic::Ordering::Relaxed);
+        // One at a time, the smallest first: the page shows which one is compiling, and
+        // a load that is cancelled or loses its device leaves at most one compile
+        // behind (see the doc comment).
+        let mut order: Vec<usize> = (0..specs.len()).filter(|&i| !specs[i].deferred).collect();
+        order.sort_by_key(|&i| specs[i].wgsl.len());
+        let total = order.len();
+        for (k, &i) in order.iter().enumerate() {
+            let (s, name) = (&specs[i], &names[i]);
+            hear(format!("compiling {name}"));
+            let at = now();
+            let failed = match start(s) {
+                Ok(Some(p)) => wasm_bindgen_futures::JsFuture::from(p).await.err(),
+                Ok(None) => None,
+                Err(e) => Some(e),
+            };
+            let Some(e) = failed else {
+                hear(format!("compiled {name} {:.0}", now() - at));
+                continue;
+            };
+            hear(format!("failed {name} {:.0} {}", now() - at, text(&e)));
+            // The device-lost callback is a task of its own: let it run before deciding
+            // what this failure was.
+            let _ = wasm_bindgen_futures::JsFuture::from(Promise::resolve(&JsValue::NULL)).await;
+            if lost() {
+                return Err(format!(
+                    "The browser lost the GPU device while compiling the solver's kernels ({k} of {total} done, {name} after {:.0} s; {:.0} s in all): {}",
+                    (now() - at) / 1000.0,
+                    (now() - t0) / 1000.0,
+                    gpu_error()
+                ));
+            }
+            web_sys::console::warn_2(
+                &format!("pipeline warm-up failed ({}); the synchronous creation reports it", s.label).into(),
+                &e,
+            );
+        }
+        if lost() {
+            return Err(format!(
+                "The browser lost the GPU device while compiling the solver's kernels (after {:.0} s): {}",
+                (now() - t0) / 1000.0,
+                gpu_error()
+            ));
+        }
+        // The deferred ones afterwards, also one at a time, not waited for.
         let mut later = Vec::new();
-        for s in specs.iter().filter(|s| !s.deferred) {
-            match start(s) {
-                Ok(Some(p)) => {
-                    // Each pipeline's completion, as it lands (settled either way).
-                    let (done, module) = (done.clone(), s.module);
-                    let hear = wasm_bindgen::closure::Closure::once_into_js(move |_: JsValue| {
-                        done(module, now() - t0);
-                    });
-                    // p.then(hear, hear): one of the two runs; the derived promise only
-                    // reports.
-                    if let Ok(then) = Reflect::get(&p, &"then".into()).and_then(|f| f.dyn_into::<Function>()) {
-                        let _ = then.call2(&p, &hear, &hear);
+        for (s, name) in specs.iter().zip(&names).filter(|(s, _)| s.deferred) {
+            // (The module and layout objects are made now; the compile starts in turn.)
+            let layout = s.layout.clone();
+            later.push((
+                engine_webgpu::ComputeSpec {
+                    label: s.label,
+                    module: s.module,
+                    wgsl: s.wgsl.clone(),
+                    entry: s.entry,
+                    layout,
+                    deferred: true,
+                },
+                name.clone(),
+            ));
+        }
+        if !later.is_empty() {
+            let device = device.clone();
+            let hear = hear.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                for (s, name) in later {
+                    if DEVICE_LOST.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
                     }
-                    pending.push((s.label, wasm_bindgen_futures::JsFuture::from(p)));
-                }
-                Ok(None) => {}
-                Err(e) => web_sys::console::warn_2(
-                    &format!("pipeline warm-up skipped ({})", s.label).into(),
-                    &e,
-                ),
-            }
-        }
-        for (label, p) in pending {
-            if let Err(e) = p.await {
-                web_sys::console::warn_2(
-                    &format!(
-                        "pipeline warm-up failed ({label}); the synchronous creation reports it"
-                    )
-                    .into(),
-                    &e,
-                );
-            }
-        }
-        for s in specs.iter().filter(|s| s.deferred) {
-            match start(s) {
-                Ok(Some(p)) => {
-                    let (done, module) = (done.clone(), s.module);
-                    let hear = wasm_bindgen::closure::Closure::once_into_js(move |_: JsValue| {
-                        done(module, now() - t0);
-                    });
-                    if let Ok(then) = Reflect::get(&p, &"then".into()).and_then(|f| f.dyn_into::<Function>()) {
-                        let _ = then.call2(&p, &hear, &hear);
+                    hear(format!("compiling {name}"));
+                    let at = js_sys::Date::now();
+                    match start_pipeline(&device, &s) {
+                        Ok(Some(p)) => match wasm_bindgen_futures::JsFuture::from(p).await {
+                            Ok(_) => hear(format!("compiled {name} {:.0}", js_sys::Date::now() - at)),
+                            Err(e) => hear(format!("failed {name} {:.0} {}", js_sys::Date::now() - at, text(&e))),
+                        },
+                        Ok(None) => {}
+                        Err(e) => web_sys::console::warn_2(
+                            &format!("pipeline warm-up skipped ({})", s.label).into(),
+                            &e,
+                        ),
                     }
-                    later.push(p);
                 }
-                Ok(None) => {}
-                Err(e) => web_sys::console::warn_2(
-                    &format!("pipeline warm-up skipped ({})", s.label).into(),
-                    &e,
-                ),
-            }
+            });
         }
-        drop(later);
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = (device, specs, done);
+    let _ = (device, specs, hear);
+    Ok(())
 }
 
 /// The limits a world's buffers and kernels run into, as one line.

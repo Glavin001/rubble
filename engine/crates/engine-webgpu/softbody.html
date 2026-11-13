@@ -92,14 +92,18 @@
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     // Loading: each stage named where it runs (load-progress.mjs draws the card).
-    const loading = createLoading({ title: 'Loading Rubble', note: 'The first load compiles the GPU solver (up to about a minute); later loads hit the browser\'s shader cache.' });
+    // (Its Cancel while kernels compile: the same scene without surface contact,
+    // whose kernels are the slow ones; set below once the options are read.)
+    const loadCancel = { label: '', hint: '', run: () => {} };
+    const loading = createLoading({ title: 'Loading Rubble', cancel: loadCancel });
     loading.stage('Reading the scene');
     const fail = (e) => {
       if (!errEl.textContent) errEl.textContent = errorText(e);
       statusEl.textContent = 'stopped';
       window.__failed = String((e && e.message) || e);
-      loading.stop();
-      showFatal({ title: 'The simulation stopped', detail: String((e && e.message) || e), hint: 'Reload to start again. The full error is in the console and at the bottom of the page.' });
+      // While loading: the card stays, with the kernels' states and a retry.
+      if (loading.active()) loading.fail({ detail: String((e && e.message) || e) });
+      else showFatal({ title: 'The simulation stopped', detail: String((e && e.message) || e), hint: 'Reload to start again. The full error is in the console and at the bottom of the page.' });
     };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
     addEventListener('error', (e) => fail(e.error || e.message));
@@ -682,14 +686,18 @@
       // without blocking (explicitSimAsync); a restart's buildExplicit is a cache hit.
       const [x, z] = XSPAWN[scene] ?? [0, 0];
       if (carKind === 'showcase') { loading.stage('Building the car (Rust)'); await loading.paint(); showcaseBuilt(); }
-      let kernels = 0, compiled = 0;
-      xsim = await world.explicitSimAsync(explicitSpec(x, z), (stage) => {
-        const [what, a, b] = stage.split(' ');
-        if (what === 'spawn') loading.stage('Spawning the vehicles (Rust)');
-        else if (what === 'compile') { kernels = Number(a); loading.stage(`Compiling ${kernels} GPU solver kernels`); }
-        // Each module as it finishes (in parallel: ms since the compiles began).
-        else if (what === 'compiled') loading.item(a, Number(b), `Compiling GPU solver kernels (${++compiled} of ${kernels} done)`);
-      });
+      // Cancel: with surface contact on, reload the same scene without it (its
+      // kernels are the slow ones); otherwise there is no lighter variant to offer.
+      if (OPT.surfaceContact) {
+        loadCancel.label = 'Cancel: load without surface contact';
+        loadCancel.hint = 'Stops waiting and reloads this scene with surface contact off (the Surface contact option turns it back on).';
+        loadCancel.run = () => { const s = new URLSearchParams(location.search); s.set('surfaceContact', '0'); location.search = s.toString(); };
+      } else {
+        loadCancel.label = 'Cancel';
+        loadCancel.hint = 'Stops waiting. The kernels keep compiling in the browser until the page is closed or reloaded.';
+        loadCancel.run = () => fail(new Error('Loading cancelled.'));
+      }
+      xsim = await world.explicitSimAsync(explicitSpec(x, z), loading.progress);
       xlayout = xsim.layout();
       labelProfile();
       // The explicit solver collides with its own copies; these only render (not soft
