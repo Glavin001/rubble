@@ -242,6 +242,7 @@ pub mod shaders {
     pub const BLAST_NATIVE_WIDE: ShaderSet = shader_set!("blast_native_wide", [("w_reset", (1, 1, 1)), ("w_classify", (64, 1, 1)), ("w_args", (1, 1, 1)), ("w_init_nodes", (1024, 1, 1)), ("w_init_bonds", (1024, 1, 1)), ("w_setup", (1024, 1, 1)), ("w_warm", (1024, 1, 1)), ("w_proj_part_r", (1024, 1, 1)), ("w_proj_solve", (1024, 1, 1)), ("w_proj_apply_r", (1024, 1, 1)), ("w_proj_part_rb", (1024, 1, 1)), ("w_proj_solve_rb", (1024, 1, 1)), ("w_proj_apply_rb", (1024, 1, 1)), ("w_proj_part_g", (1024, 1, 1)), ("w_proj_apply_g", (1024, 1, 1)), ("w_bond_r", (1024, 1, 1)), ("w_node_rn", (1024, 1, 1)), ("w_bond_rb", (1024, 1, 1)), ("w_node_rnb", (1024, 1, 1)), ("w_test", (1024, 1, 1)), ("w_rebuild", (1024, 1, 1)), ("w_decide", (1024, 1, 1)), ("w_pre1", (1024, 1, 1)), ("w_bond_loc", (1024, 1, 1)), ("w_pre2", (1024, 1, 1)), ("w_max", (1024, 1, 1)), ("w_mag", (1024, 1, 1)), ("w_scale", (1024, 1, 1)), ("w_gamma", (1024, 1, 1)), ("w_dir", (1024, 1, 1)), ("w_bond_p", (1024, 1, 1)), ("w_node_q", (1024, 1, 1)), ("w_den", (1024, 1, 1)), ("w_update", (1024, 1, 1)), ("w_final", (1024, 1, 1)), ("w_report", (1, 1, 1))]);
     pub const BLAST_NATIVE: ShaderSet = shader_set!("blast_native", [("blast_native", (1024, 1, 1))]);
     pub const BLAST_VIRIAL: ShaderSet = shader_set!("blast_virial", [("blast_virial", (64, 1, 1))]);
+    pub const BLAST_VIEW: ShaderSet = shader_set!("blast_view", [("blast_view_clear", (64, 1, 1)), ("blast_view", (64, 1, 1))]);
     pub const BLAST_WIDE_GATE: ShaderSet = shader_set!("blast_wide_gate", [("w_gate", (1, 1, 1))]);
     pub const BLAST_MOTION: ShaderSet = shader_set!("blast_motion", [("blast_motion", (1024, 1, 1)), ("blast_motion_selftest", (64, 1, 1))]);
     pub const BLAST_FRACTURE: ShaderSet = shader_set!("blast_fracture", [("blast_sync", (64, 1, 1)), ("blast_loads", (64, 1, 1)), ("blast_breaks", (64, 1, 1))]);
@@ -304,6 +305,8 @@ pub mod shaders {
             ("fr_lp_sweep_odd", (64, 1, 1)),
             ("fr_lp_breaks", (64, 1, 1)),
             ("fr_lp_view", (64, 1, 1)),
+            ("fr_stress_clear", (64, 1, 1)),
+            ("fr_stress_breaks", (64, 1, 1)),
             ("fr_il_first_reset", (64, 1, 1)),
             ("fr_il_first", (64, 1, 1)),
             ("fr_il_begin", (64, 1, 1)),
@@ -361,7 +364,7 @@ pub mod shaders {
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, CRUSH_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, SHAPES, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD, FRACTURE, BLAST_CGLS, BLAST_MATERIAL, BLAST_TOPOLOGY, BLAST_FRACTURE, BLAST_NATIVE, FRACTURE_LOG, BLAST_NATIVE_WIDE, BLAST_MOTION, BLAST_VIRIAL, BLAST_WIDE_GATE,
+        HUD_OVERLAY, THRESHOLD, FRACTURE, BLAST_CGLS, BLAST_MATERIAL, BLAST_TOPOLOGY, BLAST_FRACTURE, BLAST_NATIVE, FRACTURE_LOG, BLAST_NATIVE_WIDE, BLAST_MOTION, BLAST_VIRIAL, BLAST_WIDE_GATE, BLAST_VIEW,
     ];
 }
 

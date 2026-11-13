@@ -663,8 +663,12 @@ impl Layout {
     pub fn a_moved(&self) -> u32 {
         self.a_events() + self.events.broken
     }
-    pub fn atom_words(&self) -> u32 {
+    /// The contact-force rule's stress view (`fracture.slang` `a_view`): a word per chunk.
+    pub fn a_view(&self) -> u32 {
         self.a_moved() + 2 * self.events.moved
+    }
+    pub fn atom_words(&self) -> u32 {
+        self.a_view() + self.n
     }
     /// With crushing, per body slot 2 words per cell of a strike's contact patch
     /// (`fracture.slang` `a_cover`): the first depth, the chunk there. After `atom_words`.
@@ -910,7 +914,7 @@ pub fn entries() -> &'static [&'static str] {
     &ENTRIES
 }
 
-const ENTRIES: [&str; 90] = [
+const ENTRIES: [&str; 92] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -1001,6 +1005,8 @@ const ENTRIES: [&str; 90] = [
     "fr_host_breaks",
     "fr_frame_begin",
     "fr_lp_view",
+    "fr_stress_clear",
+    "fr_stress_breaks",
 ];
 
 #[repr(C)]
@@ -1852,6 +1858,10 @@ impl GpuFracture {
             if self.blast.is_some() {
                 // Blast's solver decides the bonds, between the passes.
             } else if self.params.load_model == 0 {
+                if self.stress_view {
+                    self.direct(&mut pass, "fr_stress_clear", n);
+                    self.direct(&mut pass, "fr_stress_breaks", e);
+                }
                 self.direct(&mut pass, "fr_breaks", e);
             } else {
                 self.direct(&mut pass, "fr_lp_clear", b);
@@ -1869,6 +1879,7 @@ impl GpuFracture {
             }
         }
         if let Some(blast) = self.blast.as_mut() {
+            blast.stress_view = self.stress_view;
             blast.record(encoder, self.params.dt as f64);
         }
         {

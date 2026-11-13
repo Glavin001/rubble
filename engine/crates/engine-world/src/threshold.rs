@@ -862,8 +862,10 @@ mod imp {
         Broken,
         Moved,
         Frames,
-        /// The stress view: per chunk, its largest failure index by mode.
+        /// The stress view: per chunk, its largest failure index by mode (the load path's),
+        /// or its largest demand over capacity (the contact-force rule's, one word).
         View,
+        ViewWords,
         /// A destructible with its own fracture (crushing, blast loading): its counters,
         /// chunk owners, bond states, body frames and this frame's crush events
         /// (`GpuFracture::crush_events_range`).
@@ -2461,8 +2463,16 @@ mod imp {
                     16 * l.f_events() as u64,
                     48 * l.events.frames as u64,
                 );
-                if f.stress_view && sh.setup.load_model != stress_ref::capability::LoadModel::Threshold {
-                    push(FractureRead::View, &f.lp, 16 * l.lp_view() as u64, 16 * l.n as u64);
+                if f.stress_view {
+                    if let Some(blast) = f.blast() {
+                        // Blast's: a word per node (its chunk), stress over the fatal limit.
+                        push(FractureRead::ViewWords, &blast.view, 0, 4 * l.n as u64);
+                    } else if sh.setup.load_model == stress_ref::capability::LoadModel::Threshold {
+                        // The contact-force rule's: a word per chunk.
+                        push(FractureRead::ViewWords, &f.atom, 4 * l.a_view() as u64, 4 * l.n as u64);
+                    } else {
+                        push(FractureRead::View, &f.lp, 16 * l.lp_view() as u64, 16 * l.n as u64);
+                    }
                 }
             }
             for (k, t) in self.slots.iter().enumerate() {
@@ -2539,6 +2549,10 @@ mod imp {
             if let (Some(view), Some(sh)) = (find(FractureRead::View), self.fracture.shared.as_mut()) {
                 sh.view.clear();
                 sh.view.extend_from_slice(bytemuck::cast_slice::<u8, [f32; 4]>(view));
+            }
+            if let (Some(view), Some(sh)) = (find(FractureRead::ViewWords), self.fracture.shared.as_mut()) {
+                sh.view.clear();
+                sh.view.extend(bytemuck::cast_slice::<u8, f32>(view).iter().map(|&u| [u, 0.0, 0.0, 0.0]));
             }
             let Some(counters) = find(FractureRead::Counters) else {
                 return Ok(out);
@@ -3289,7 +3303,9 @@ mod imp {
 
         /// The stress view: from the next step on, each step also brings every chunk's
         /// load against its strength (`Self::destructible_chunk_stress`), for a host to
-        /// draw. The load-path model only (the others solve no load); off by default, and
+        /// draw: the load path's failure indices, or the contact-force rule's demand over
+        /// capacity (`Threshold`, `ImpactLocal`), or `BlastGpu`'s bond stress over its fatal
+        /// limit. Off by default, and
         /// the steps' breaks are the same with it or without.
         pub fn set_stress_view(&mut self, on: bool) {
             self.fracture.stress_view = on;
@@ -3757,7 +3773,8 @@ mod imp {
             | FractureRead::Broken
             | FractureRead::Moved
             | FractureRead::Frames
-            | FractureRead::View => u32::MAX,
+            | FractureRead::View
+            | FractureRead::ViewWords => u32::MAX,
         }
     }
 

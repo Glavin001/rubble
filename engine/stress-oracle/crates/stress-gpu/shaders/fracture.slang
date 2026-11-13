@@ -355,6 +355,36 @@ void fr_breaks(uint3 id: SV_DispatchThreadID)
     }
 }
 
+// The stress view of the contact-force rule (opt-in, `GpuFracture::stress_view`; before
+// `fr_breaks`, so a bond about to break shows above 1): per chunk in `atom` after the event
+// lists, the largest demand over capacity of its intact bonds (ordered float bits). No
+// kernel reads it: the frame's breaks are the same with it or without.
+uint a_view() { return a_moved() + 2 * params.ev_moved_cap; }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_stress_clear(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x < params.chunk_count)
+        atom[a_view() + id.x].store(0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_stress_breaks(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= params.bond_used || work[w_alive() + i] == 0)
+        return;
+    uint4 bond = bonds[i];
+    float capacity = asfloat(bond.z);
+    if (capacity <= 0.0)
+        return;
+    uint u = asuint(max(max(loads[bond.x].x, loads[bond.y].x), 0.0) / capacity);
+    atom[a_view() + bond.x].max(u);
+    atom[a_view() + bond.y].max(u);
+}
+
 // The host's breaks between frames (support loss), one thread per listed bond, before the
 // frame's own: each still intact breaks and marks its body dirty from the chunk to body
 // map as it is now (a step the host has not read yet may have split it), counted as
@@ -3688,7 +3718,7 @@ static const uint BILL_WORDS = 4;    // crush_rw float4 per body at r_bill
 static const float COVER_MISS = 1e30; // a depth no line reaches (no infinities: fast math)
 
 // Per body slot 2 words per cell: the first depth (ordered float bits), the chunk there.
-uint a_cover() { return a_moved() + 2 * params.ev_moved_cap; }
+uint a_cover() { return a_moved() + 2 * params.ev_moved_cap + params.chunk_count; }
 
 // Cell s of a patch of radius a about the axis d: its offset from the axis, and rho.
 float3 cover_offset(uint s, float3 d, float a, out float rho)
