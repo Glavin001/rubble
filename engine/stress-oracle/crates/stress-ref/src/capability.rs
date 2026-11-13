@@ -148,6 +148,21 @@ pub const LOAD_PATH_SWEEPS: u32 = 16;
 /// load_path.rs `IMPACT_LOWER` says why so many).
 pub const CONTACT_SWEEPS: u32 = 256;
 
+/// The most sweeps a strike's structural response solves with (`response_sweeps`).
+pub const RESPONSE_SWEEPS_MAX: u32 = 4096;
+
+/// The sweeps a strike's structural response solves a structure of `chunks` chunks with
+/// (fracture.slang `fr_gi_solve`): the strike's load has to reach the structure's supports,
+/// and the sweeps that takes grow with the structure's extent in chunks, the cube root of
+/// their count. `CONTACT_SWEEPS` at least (a wall of a few hundred chunks); 64 a chunk of
+/// extent beyond that (a 3,711 chunk tower: 992, where its far bonds' forces have settled:
+/// with 256 the load is still bunched at the hit and bonds 10 m off break by the error);
+/// `RESPONSE_SWEEPS_MAX` at most. Even.
+pub fn response_sweeps(chunks: u32) -> u32 {
+    let n = 2 * (32.0 * (chunks as f64).cbrt()).ceil() as u32;
+    n.clamp(CONTACT_SWEEPS, RESPONSE_SWEEPS_MAX)
+}
+
 /// The model features `BlastParity` turns off (`SimFeatures` names).
 pub const BLAST_PARITY_FEATURES_OFF: [&str; 8] = ["softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping"];
 

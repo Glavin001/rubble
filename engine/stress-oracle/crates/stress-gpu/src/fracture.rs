@@ -1301,7 +1301,7 @@ impl GpuFracture {
                 Some(stress_ref::capability::PulseModel::Dynamic) => 2,
             },
             gi_scale: t.impact_response.map_or(1.0, |r| r.scale_pct as f32 * 0.01),
-            gi_sweeps: stress_ref::capability::CONTACT_SWEEPS,
+            gi_sweeps: stress_ref::capability::RESPONSE_SWEEPS_MAX,
             ..Default::default()
         };
         if !t.geometry.is_empty() && t.geometry.len() != used_n as usize {

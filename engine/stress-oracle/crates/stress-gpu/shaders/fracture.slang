@@ -97,7 +97,7 @@ struct FractureParams
     // A strike's structural response (`capability::ImpactResponse`, `fr_gi_solve`).
     uint gi_mode;        // 0 off, 1 the pulse's peak as a static load, 2 its dynamic response
     float gi_scale;      // a factor on the structural load (1: as computed)
-    uint gi_sweeps;      // its solve's sweeps (even)
+    uint gi_sweeps;      // its solve's sweeps at most (even; `response_sweeps`)
     uint gi_pad;
 };
 
@@ -2423,7 +2423,7 @@ void il_strike<let SRC : uint>(uint b)
     // load path (`fr_gi_solve`). An elastic strike is the engine's contact: the in-step
     // contact fracture's when that is on.
     if (SRC == 0 && params.gi_mode != 0 && (damage || params.cs_sweeps == 0))
-        gi_record(b, entry, contact, d, v, m * (v - (perforate ? sqrt(max(v * v - v_bl * v_bl, 0.0)) : 0.0)), max(t_c, 2.0 * (perforate ? h : depth) / max(v + v_res, 1e-9)));
+        gi_record(b, entry, contact, d, v, m * (v - (perforate ? sqrt(max(v * v - v_bl * v_bl, 0.0)) : 0.0)), max(t_c, 2.0 * (perforate ? h : depth) / max(v + v_res, 1e-9)), h);
 }
 
 struct IlPlace
@@ -3332,6 +3332,14 @@ void fr_cs_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 // structure by its impulse (`J omega`), a long one by its peak. Each bond is then checked
 // under the structure's own state plus the scaled increment.
 //
+// The solve puts the strike's whole force on the struck chunk. Within the member's own
+// thickness of the point struck (Saint-Venant's distance) the stresses are the contact's,
+// not the member's: there the local model has already decided (elastic, crater, spall,
+// plug), and a point load on a lattice says something else, a break at every strike. A
+// predicted strike's structural response therefore checks only the bonds further from the
+// point struck than the thickness the analytic strike measured along its path. (An
+// in-step contact strike has no such measure: every bond is checked, as `fr_cs_solve`.)
+//
 // Two sources of strikes:
 //   a predicted analytic strike (`fr_il_strike` records it, `gi_record`): the frame's
 //     kernels are fr_gi_begin, fr_il_strike, fr_cs_count, fr_cs_base, fr_cs_collect,
@@ -3342,7 +3350,7 @@ void fr_cs_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 // depend on the order the structure's chunks are listed in.
 
 // A predicted strike as the solve's record (the in-step contact strike's words).
-void gi_record(uint b, uint entry, float3 contact, float3 d, float v, float j, float tau)
+void gi_record(uint b, uint entry, float3 contact, float3 d, float v, float j, float tau, float local)
 {
     // A structure whose bonds broke this frame is not split yet: its pieces are still one
     // body, and a solve across them is not the structure's. Its strike is the local one.
@@ -3350,6 +3358,7 @@ void gi_record(uint b, uint entry, float3 contact, float3 d, float v, float j, f
         return;
     lp[lp_body(b) + 2] = float4(contact, 3.14159265358979 * j / (2.0 * max(tau, 1e-9)));
     lp[lp_body(b) + 3] = float4(d, v);
+    lp[lp_body(b) + 4] = float4(local, 0.0, 0.0, 0.0);
     lp[lp_body(b) + 6] = float4(0.0, 0.0, tau, 0.0);
     atom[a_cs(b) + 1].store(entry + 1);
     if (atom[a_cs(b) + 8].exchange(1u) == 0u)
@@ -3510,11 +3519,14 @@ float gi_factor(uint s, uint t, uint base, uint count)
     return omega > 0.0 && tau > 0.0 ? gi_dlf(omega * tau / 3.14159265358979) : 1.0;
 }
 
-// `cs_break` with the strike's increment scaled by `scale`.
-void gi_break(uint i, uint s, float scale)
+// `cs_break` with the strike's increment scaled by `scale`, for a bond further than `local`
+// from `contact` (the structure's frame).
+void gi_break(uint i, uint s, float scale, float3 contact, float local)
 {
     uint4 bond = bonds[i];
     LpBond b = lp_bond(i);
+    if (length(b.centroid - contact) <= local)
+        return;
     float3 q_lin;
     float3 q_ang;
     st_force(b, bond.x, bond.y, CS_STATE, 0, q_lin, q_ang);
@@ -3578,7 +3590,10 @@ void fr_gi_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         }
     }
     device_group_barrier();
-    for (uint sweep = 0; sweep < params.gi_sweeps; sweep++)
+    // capability.rs `response_sweeps`: by the structure's extent in chunks (the group's
+    // count alike in every thread: a uniform bound for the barrier in the loop).
+    uint sweeps = group_uniform(clamp(2u * uint(ceil(32.0 * pow(float(max(count, 1u)), 1.0 / 3.0))), 256u, params.gi_sweeps), t);
+    for (uint sweep = 0; sweep < sweeps; sweep++)
     {
         for (uint j3 = t; j3 < count; j3 += GI_GROUP)
             st_sweep(work[w_cs_list() + base + j3], CS_STATE, sweep % 2, params.cs_c1, params.cs_c2);
@@ -3590,6 +3605,12 @@ void fr_gi_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         scale *= gi_factor(s, t, base, count);
         device_group_barrier();
     }
+    // A predicted strike (no contact row: `gi_record`) keeps its local zone's radius.
+    float local = atom[a_cs(s) + 11].load() == 0 ? lp[lp_body(s) + 4].x : 0.0;
+    Quat sq;
+    float3 s_origin;
+    structure_pose(s, BODY_WORDS * s, sq, s_origin);
+    float3 contact = rotate(conj(sq), lp[lp_body(s) + 2].xyz - s_origin);
     for (uint j4 = t; j4 < count; j4 += GI_GROUP)
     {
         uint k = work[w_cs_list() + base + j4];
@@ -3600,7 +3621,7 @@ void fr_gi_solve(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         {
             uint i = adj_bond(first + e);
             if (bonds[i].x == k && work[w_alive() + i] != 0)
-                gi_break(i, s, scale);
+                gi_break(i, s, scale, contact, local);
         }
     }
 }
