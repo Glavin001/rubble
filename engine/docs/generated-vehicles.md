@@ -146,6 +146,7 @@ create energy, whatever hits it.
 | Stops, statically | Every gapped stop of the rigged sedan: no force however far its ends part (to 1,000 lengths), and no step of 1 mm changes its force by more than 5 kN. | `tests/sedan_energy.rs` |
 | Tear-off and fling | Every part that can leave is torn off the standing car, flung at 15 m/s and spun at 5 and 20 m/s at its rim, 1 s: the ledger never rises (2 % of the part's own kinetic energy). A wheel thrown 90 m. | `tests/sedan_energy.rs` |
 | Whole-car scenes | Side pole 186 km/h, 42° wall 106 km/h, a 25 km/h bump between two sedans: never above the starting energy. | `tests/sedan_energy.rs` |
+| `rest_penetration` | A contacter node inside another part's closed collision solid at rest (deeper than 5 mm). Reported with it: the contacter-triangle pairs that start inside the 2 cm contact range, which never collide. | `lint::rest_penetration` |
 
 On the cars (2026-11-13): the sedan as exported at 32cbc954 fails both rules
 (84 bounds over, the worst 1,592 zones a step, 6.5e9 J; 12 tethers: the front
@@ -384,3 +385,76 @@ The specification is [beamng-structure-study.md](beamng-structure-study.md) §10
 - **Side pole on raycast wheels.** A car launched sideways rides a carrier (`crash_rigs::on_carrier`, tyre grip 0.01): 31.7 km/h at the pole from a 32 km/h launch; before, its own tyres stopped it.
 
 **Not done:** stiffness against the ETK on the new body (`sedan_stiffness`: modes, kerb wobble, settle), the head-on (`vehicle_c2c_overlap` needs the new hub names and placement by the tyre's bottom), lint rules 2, 8, 11, 14–24 and the "nothing faked" rules, matched stills against the ETK, the rear's crash character, the fender bolts.
+
+## Jello against the ETK, and parts that collide inside one car (2026-11-13, `feat/sedan-body`)
+
+Measured on the CPU reference with the centred damping's objective form on (`RUBBLE_CENTRED_OBJECTIVE=1`; `ExplicitBeamsSettings::centred_objective`, off by default), raycast wheels. Tests: `tests/sedan_jello.rs`, `tests/sedan_parts_collide.rs`; harness `examples/sedan_stiffness` (`RAYCAST=1`; diagnostics `KERB_NODES`, `KERB_AT`, `REST_TRACE`, `PART_MODES`, `MODE_BEAMS`, `SUSP_SCALE`, `--time`).
+
+**State: the panels' first modes are inside the BeamNG bands; the kerb wobble and its settle are not at the ETK's level** (1.4 to 2.9 times it). `sedan_jello` passes its mode test and fails its kerb, settle and rest tests.
+
+| | 32cbc954 export | now | ETK `kr6` | Band (study §10.6) |
+|---|---|---|---|---|
+| Door first mode, front / rear (Hz) | 12.6 / 14.4 | 20.4 / 22.7 | 34.9 | 16–35 |
+| Hood | 8.5 | 22.7 | 12.5 | 11–19 |
+| Boot lid | 13.4 | 31.3 | 27.0 | 23–40 |
+| Fender | 8.6 | 38 | 41.8 | 17–55 |
+| Bumper cover, front / rear | 30.7 / 26.4 | 30.8 / 26.4 | 23.8 / 9.1 | 9–24 |
+| Kerb (5 cm at 30 km/h) ripple about the body: body / door / hood / lid / fender / bumper (mm) | 0.30 / 0.37 / 0.52 / 0.74 / 0.39 / 0.51 | 0.19 / 0.26 / 0.33 / 0.36 / 0.26 / 0.53 | 0.09 / 0.15 / 0.23 / 0.21 / 0.09 / 0.18 | the ETK's |
+| Settle under 0.2 mm (s), same order | 1.0 / 1.0 / 1.1 / 1.4 / 0.9 / 1.1 | 0.0 / 0.7 / 0.7 / 0.7 / 0.3 / 0.9 | 0 / 0 / 0.3 / 0.6 / 0 / 0 | the ETK's |
+| Rest, 4–5 s after spawn: largest node move (mm) | 1.08 | 0.08 (an empty seat's back, decaying) | 0.00 | 0 |
+| Parked 10 s: drift worst part / vertex / normal | – / 0.53 mm / 1.72° (a hub cap) | 1.3 mm / 0.81 mm / 1.09° (a front lower arm) | | 5 mm / 1 mm / 1° |
+| Mass, ω·h, shell built / rule | 1,447.7 kg, 1.848, 1.000 | 1,447.7 kg, 1.844, 0.997 | | |
+
+**What was wrong, each found from a mode's shape or its strain energy by spring (`MODE_NODES=1`, `MODE_BEAMS=1`):**
+
+- **Hub caps were pendulums.** Nine clip beams, picked nearest first, took one of each corner's two equally near frame nodes, whichever rounding chose: two corners went to the same node and the cap rocked about the third at 2–22 Hz (a different value on every wheel) and never came to rest. This was the 1 mm rest wobble and the 1.72° parked normal. Twelve beams (each corner to the axle node and all three frame nodes): first mode 103 Hz.
+- **The fender's rear lower leg had a seal where its bolt belonged.** The seals were built before the bolt rows and took the pair. Bolt rows first: 8.6 → 38 Hz.
+- **A latch is as stiff as its two nodes are heavy.** The solver holds a coupled pair with k = 0.16·μ/h² on the pair's reduced mass (`coupler_rates`). Two 0.5 kg tag nodes are a 2e5 N/m latch: 55 % of a rear door's first mode's strain energy, 36 % of the lid's. The latch and striker nodes now carry their hardware's mass (door 2.5 kg, hood 1.0, lid 1.5; striker 2.5 kg taken from the member nodes it stands on).
+- **Hinge and striker body nodes all lay in the pillar's plane** (`spread_pick`: the nearest, then the ones that add the missing direction).
+- **Hood, lid and fenders had no depth, the door's window frame stood on a 10 cm base.** One rigidifier node 0.22 m under each (two under the hood), beamed to the panel's nodes; the door's is inboard of its middle and its latch reaches it (study rule 20).
+- **Body edge nodes on stripped ties.** A sheet-rule tie on a 0.5 kg node is six times the node's budget; the stability pass softened those ties first. Ties are now capped at the node's budget, and an edge node is made only where its ties can span three directions (`EDGE_SPREAD`; on a pillar every node in reach is in the pillar's plane). The edge nodes stay: they are the corners of the body's collision skin (putting the stops on the shell's own nodes cost 126 triangles and took the skin's coverage p99 from 0.16 to 0.25 m).
+
+**Why the kerb numbers are still above the ETK's (measured):**
+
+- Panels move mostly as rigid bodies on their mounts: a door ripples 0.09 mm about its own fit and 0.26 mm about the body's.
+- The body itself ripples 0.19 mm against 0.09: the strut towers most (0.54 mm). Our strut is a rigid link (the study's choice), the ETK keeps its own spring in series with the same raycast spring. Scaling the raycast spring and damper to 0.6 and 0.4 (a diagnostic) gives a body ripple of 0.14 mm.
+- Beam damping is stiffness-proportional: a 20–30 Hz panel mode has a damping ratio near 0.01–0.02 whatever the per-beam ratio.
+- The driver's 75 kg on the seat cushion keeps the floor above 0.2 mm for 0.3 s more (`RIG_DRIVER_KG=0`: a measurement).
+- Open authoring levers: the tower and rail path in `gen2::shell`, the bumper covers' mounts. A solver-side proposal, not applied: the coupler rule (ω·h 0.4 on the reduced mass is about a twentieth of what a beam may carry).
+
+### Parts collide inside one car
+
+**Before:** only the outer skin had collision triangles (335) and contacters (269 nodes). Seats, bench, instrument panel, console, fuel tank, radiator, subframes, impact beams, hubs and exhaust had neither; the sill, floor, tunnel, firewall and hinge-pillar nodes were not contacters; the engine had contacters and no triangles.
+
+**Now** (`rig::interior_skins`; `Tri::inner` faces carry `dragCoef` 0):
+
+| Part | Nodes / contacters / triangles | What its faces are |
+|---|---|---|
+| Body | 198 / 188 / 169 | outer skin; each sill's outer face, the floor pan, the tunnel's walls, the firewall; every shell node a contacter |
+| Door (each) | 19 / 17 / 26–27 | outer skin; inner panel, bottom, belt, both end walls |
+| Seat (each) / bench | 7 / 6 / 8, 8 / 8 / 11 | the convex hull of its nodes |
+| Instrument panel / console | 7 / 7 / 10, 4 / 4 / 2 | hull |
+| Engine / fuel tank / radiator | 10 / 10 / 16, 8 / 8 / 12, 4 / 4 / 2 | hull |
+| Hood, lid, fenders, bumper covers | as before | outer skin |
+| **Car** | **548 / 424 / 528** | the ETK: 467 / 335 / 519 |
+
+- **Cost** (CPU reference, one car at rest, one thread, `sedan_stiffness --time`): 0.184 → 0.258 ms a step; the ETK 0.28 ms.
+- **Test** (`tests/sedan_parts_collide.rs`): a ram at the driver's door at 32 km/h, and a second sedan into the door at 50 km/h. No door node inside the seat's hull or past its outboard face beyond the 4 cm band; no edge of the door opening (sill top, hinge pillar, A-pillar, roof rail, B-pillar) or of the seat through a door triangle; a door that reaches the seat pushes it; the ledger closes. Before, the T-bone failed (the sill's top edge and the A-pillar went through the door). Now both pass; in the T-bone the door reaches the seat and pushes it 197 mm.
+- **Lint** `rest_penetration` (hard): no contacter node inside another part's closed solid at rest (the sedan 0 of 5 solids; the ETK 0 of 6). It reports the contacter–triangle pairs that start inside the 2 cm contact range, which the solver never collides: the sedan 21 (rear doors over the quarters' first station, the fenders' top row at the hood's edge, the rear cover's seam bridges, the instrument panel's mounts), the ETK 14.
+- **What the solver's self-collision cannot do:** it is node against triangle. Two edges cross between nodes (the door's lower edge between two sill nodes 0.4 m apart; closed here by giving the sill a face the door's own nodes meet). A pair inside the range at spawn is excluded for good, and a real shut line is 4–6 mm, so neighbouring panels' edge nodes never collide with each other.
+
+**The frontal crashes again** (`frontal_compare`, `beamng_feel`; the "before" column is the table above):
+
+| Scene | Measure | Before | Now | ETK |
+|---|---|---|---|---|
+| Wall 56 km/h | dynamic crush (mm) / peak g / restitution | 474 / 47.7 / 0.30 | 453 / 49.2 / 0.31 | 499 / 71.9 / 0.38 |
+| | residual crush max / mean (mm) | 296 / 212 | 239 / 169 | 228 / 192 |
+| | fender bolt groups broken; flipped triangles; ripple at the end | both fronts; 1,116; 17–46 mm | 4 groups; 1,073; 9.8 mm | 0; 178; – |
+| Offset 64 km/h | dynamic crush / peak g / restitution | 682 / 46.3 / 0.26 | 632 / 48.7 / 0.30 | 659 / 47.6 / 0.18 |
+| | residual max / mean; yielded far; flipped | 522 / 242; 8.0 %; 1,063 | 472 / 207; 7.8 %; 640 | 430 / 250; 5.0 %; 167 |
+| Centre pole 50 km/h | dynamic crush / peak g / restitution | 542 / 49.9 / 0.42 | 496 / 56.3 / 0.42 | 601 / 56.6 / 0.33 |
+| | residual max / mean; flipped | 347 / 148; 0 | 268 / 114; 80 | 364 / 138; 110 |
+
+The hood now lands on the engine instead of passing through it. `tests/sedan_energy.rs`: 6 of 6.
+
+**Not done:** the kerb at the ETK's level; the fender and bumper mounts in the wall and offset (flipped triangles, bolt groups); the hub cap's retention at a 25 km/h bump and the parked normal under 1° (a front lower arm, 1.09°); the head-on (`vehicle_c2c_overlap`); `feat/sedan-complete`'s 68 parts in the rigger; lint rules 2, 8, 11, 14–24 and the "nothing faked" rules; the remaining single-step energy rises; the skin's coverage at the body's tail (p99 0.149 m against 0.127).
