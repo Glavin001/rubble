@@ -241,6 +241,10 @@ fn main() -> Result<(), String> {
         p.resize(n, Vec3::ZERO);
     }
     let (mut e_min, mut t_first) = (e0, None::<(usize, f64)>);
+    // At the running minimum: its step, every source's sum and the nodes' sums,
+    // so a rise is split by source and node over exactly the steps it rose in.
+    let mut at_min: (usize, [f64; 6], Vec<[f64; 3]>) = (0, [0.0; 6], cum.clone());
+    let mut biggest: (f64, String) = (0.0, String::new());
     let mut e_peak = e0;
     let mut vmax_all = 0.0f32;
     let mut t_hit = None::<usize>;
@@ -322,6 +326,34 @@ fn main() -> Result<(), String> {
                 q[0], q[1], q[2], q[3], q[4], q[5],
                 names[vi], mass[vi], vm,
                 v0.beams.iter().filter(|b| b.broken).count()
+            );
+        }
+        if e <= e_min {
+            at_min = (k, src(l), cum.clone());
+        } else if e - e_min > biggest.0 && e.is_finite() {
+            // The largest rise above the running minimum so far: its split.
+            let s1 = src(l);
+            let d: Vec<f64> = (0..6).map(|q| s1[q] - at_min.1[q]).collect();
+            let mut top: Vec<(f64, usize, usize)> = (0..n)
+                .flat_map(|i| (0..3).map(move |q| (i, q)))
+                .map(|(i, q)| (cum[i][q] - at_min.2[i][q], i, q))
+                .collect();
+            top.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let label = ["contact", "self-collision", "beams"];
+            biggest = (
+                e - e_min,
+                format!(
+                    "+{:.0} J over {:.1} ms from t {:.4} s; sources: contacts h {:+.0}, v {:+.0}, self-collision {:+.0}, beams + elastic {:+.0}, gravity + height {:+.0}; nodes' largest work: {}",
+                    e - e_min,
+                    (k - at_min.0) as f32 * STEP * 1e3,
+                    at_min.0 as f32 * STEP,
+                    d[0], d[1], d[2], d[3], d[4],
+                    top.iter()
+                        .take(4)
+                        .map(|&(w, i, q)| format!("{} ({}, {:.2} kg) {} {w:+.0} J", names[i], part[i], mass[i], label[q]))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
             );
         }
         e_min = e_min.min(e);
@@ -417,5 +449,8 @@ fn main() -> Result<(), String> {
         v0.beams.len(),
         nan_at.map_or(String::new(), |k| format!("; NOT FINITE at {:.4} s", k as f32 * STEP)),
     );
+    if arg("--biggest").is_some() {
+        println!("  largest rise above the running minimum: {}", biggest.1);
+    }
     Ok(())
 }
