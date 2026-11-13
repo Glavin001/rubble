@@ -465,61 +465,10 @@ fn shell(
     style: Style,
 ) -> Mesh {
     let nv = skin.v.len();
-    let mut n = smooth_normals(skin, 6);
+    let n = smooth_normals(skin, 6);
     let nb = neighbours(skin);
     let nb8 = neighbours8(skin, &nb);
     let faces = skin.faces();
-    // A thin cell of the skin (a row a quarter as wide as it is long: a
-    // tight bend drawn as its own row, the rows of a narrow pillar) has no
-    // width to lose: offset along normals that converge it would be a
-    // sliver. Thin rows are offset along one direction across their width
-    // (the normals averaged along the thin edges), and the wider cells
-    // beside them take up the bend.
-    let mut across: Vec<(u32, u32)> = Vec::new();
-    for f in &faces {
-        let k = f.len();
-        let len = |j: usize| (skin.v[f[(j + 1) % k] as usize] - skin.v[f[j % k] as usize]).length();
-        let long = (0..k).map(len).fold(0.0, f64::max);
-        for j in 0..k {
-            if len(j) * 2.5 < long {
-                across.push((f[j], f[(j + 1) % k]));
-            }
-        }
-    }
-    if !across.is_empty() {
-        let mut parent: Vec<u32> = (0..nv as u32).collect();
-        fn find(p: &mut [u32], mut i: u32) -> u32 {
-            while p[i as usize] != i {
-                p[i as usize] = p[p[i as usize] as usize];
-                i = p[i as usize];
-            }
-            i
-        }
-        for &(a, b) in &across {
-            let (a, b) = (find(&mut parent, a), find(&mut parent, b));
-            parent[a as usize] = b;
-        }
-        let mut sum: FxHashMap<u32, DVec3> = FxHashMap::default();
-        for &(a, b) in &across {
-            for i in [a, b] {
-                let r = find(&mut parent, i);
-                sum.entry(r).or_insert(DVec3::ZERO);
-            }
-        }
-        for i in 0..nv as u32 {
-            let r = find(&mut parent, i);
-            if let Some(x) = sum.get_mut(&r) {
-                *x += n[i as usize];
-            }
-        }
-        for i in 0..nv as u32 {
-            let r = find(&mut parent, i);
-            if let Some(x) = sum.get(&r) {
-                n[i as usize] = x.normalize_or(n[i as usize]);
-            }
-        }
-    }
-    let n = n;
     let loops: Vec<&Vec<u32>> = loops.iter().filter(|l| l.len() >= 3).collect();
     // the wall section at every border vertex: its kind's, blended along
     // the loop where the kind changes
@@ -1554,13 +1503,16 @@ pub fn crossings(m: &Mesh, stride: usize) -> Vec<(u32, u32, [u32; 3], DVec3)> {
 
 /// Pairs of parts [`pair_crossings`] is worth checking for: a pane or a lens
 /// against a panel or another pane, a door card or the body shell (its
-/// B-pillar, its jambs) against a door.
+/// B-pillar, its jambs) against a door, the shell against the headliner.
 pub fn neighbours_to_check(a: &str, b: &str) -> bool {
     let glassy = |n: &str| n.starts_with("glass") || n.ends_with("_lens");
     let panel = |n: &str| crate::uvpack::is_panel(n);
     let door = |n: &str| n.starts_with("door_F") || n.starts_with("door_R");
     let inner = |n: &str| n.starts_with("door_trim") || n == "body_shell";
-    (glassy(a) && (panel(b) || glassy(b)))
+    let roof = |x: &str, y: &str| x == "body_shell" && y == "headliner";
+    roof(a, b)
+        || roof(b, a)
+        || (glassy(a) && (panel(b) || glassy(b)))
         || (glassy(b) && panel(a))
         || (inner(a) && door(b))
         || (inner(b) && door(a))

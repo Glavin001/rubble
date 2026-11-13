@@ -28,20 +28,31 @@ DEFAULT = [
     'door_FL_out=door_FL,glass_door_FL:out-front-top',
     'door_FL_in=door_FL:in-rear-top',
     'door_FL_in_trim=door_FL,glass_door_FL,door_trim_FL:in-rear-top',
-    'door_FL_edge=door_FL,glass_door_FL:rear-in:1.0',
-    'door_FL_frame=door_FL,glass_door_FL:in-front-top:2.4',
+    'door_FL_edge=door_FL,glass_door_FL:rear-in',
+    'door_FL_frame=door_FL,glass_door_FL:in-front-top:2.4:0.76,1.0,0.45',
+    'door_FL_sail=door_FL,glass_door_FL:in-rear-top:5:0.72,0.99,0.78',
     'door_RL_in=door_RL,glass_door_RL:in-front-top',
+    'door_RL_in_trim=door_RL,glass_door_RL,door_trim_RL:in-front-top',
+    'door_RL_edge=door_RL,glass_door_RL:front-in',
+    'hood_out=hood:out-front-top',
     'hood_under=hood:under-front-out',
-    'hood_edge=hood:under-rear-out:2.2',
+    'hood_edge=hood:under-rear-out:2.2:0.55,0.95,1.0',
+    'trunk_out=trunk_lid:out-rear-top',
     'trunk_under=trunk_lid:under-rear-out',
+    'trunk_edge=trunk_lid:under-front-out:2.2:0.6,1.05,-1.85',
     'fender_FL_in=fender_FL:in-rear-top',
     'fender_FL_out=fender_FL:out-front-top',
     'bumper_front_in=bumper_front:rear-top-out',
     'bumper_rear_in=bumper_rear:front-top-out',
     'body_shell_door=body_shell:out-front-top',
-    'body_shell_jamb=body_shell:out-rear:2.2',
+    'body_shell_jamb=body_shell:out-front:2.6:0.9,0.75,0.3',
+    'body_shell_b_pillar=body_shell:out-rear-top:3.0:0.85,0.8,-0.22',
     'body_shell_inside=body_shell:under-out-rear',
     'glass=glass_*:out-front-top',
+    'taillight_L=taillight_L_lens,taillight_L_housing:out-rear-top',
+    'taillight_L_back=taillight_L_lens,taillight_L_housing:in-front-top',
+    'headlight_L=headlight_L_lens,headlight_L_housing:out-front-top',
+    'headlight_L_back=headlight_L_lens,headlight_L_housing:in-rear-top',
     'explode=explode:out-front-top',
     'explode_rear=explode:in-rear-top',
 ]
@@ -72,6 +83,10 @@ for m in bpy.data.materials:
     surf = outn.inputs['Surface'].links[0].from_node if outn and outn.inputs['Surface'].links else None
     if surf is None or m.name.startswith(('glass', 'lamp_lens')):
         continue
+    if m.name.startswith('lamp_emissive') and 'Emission Strength' in surf.inputs:
+        # a lit reflector burns out the still: show its shape
+        surf.inputs['Emission Strength'].default_value = 0.0
+        surf.inputs['Base Color'].default_value = (0.3, 0.3, 0.32, 1)
     geo = nt.nodes.new('ShaderNodeNewGeometry')
     red = nt.nodes.new('ShaderNodeEmission')
     red.inputs[0].default_value = (1, 0, 0, 1)
