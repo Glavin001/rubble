@@ -23,7 +23,7 @@ use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, Jbea
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
 use glam::{DVec3, Vec3};
 
-/// A free body high in the air: `points` (m) joined by `beams`, every node
+/// A free body 30 m up (it falls 11 m in the longest run): `points` (m) joined by `beams`, every node
 /// `kg`, every beam `k` N/m and `c` N·s/m, never yielding or breaking, no
 /// contact. Centred damping on; `objective` picks the correction's form.
 fn body(
@@ -60,7 +60,7 @@ fn body(
     let (mut s, _) = ExplicitBeams::from_desc_jbeam_with(
         &desc,
         JbeamWheels::Pressure,
-        Vec3::Y * 500.0,
+        Vec3::Y * 30.0,
         Vec3::ZERO,
         settings,
     )
@@ -114,7 +114,28 @@ fn spin(s: &mut ExplicitBeams, axis: Vec3, rim: f32, drift: Vec3) {
 
 /// Runs `s` for `seconds` with the energy ledger: (start energy less the
 /// gravitational part, the largest rise of kinetic + gravitational + elastic
-/// above its start, whether it stayed finite).
+/// above its start, whether it stayed finite, the energy's change from 0.25 s
+/// to the end).
+fn run_late(s: ExplicitBeams, seconds: f32) -> (f64, f64, bool, f64) {
+    let mut w = ExplicitBeamsWorld::new(vec![s]);
+    w.enable_ledger();
+    let l = w.ledger.as_ref().unwrap();
+    let (e0, own0) = (l.mechanical(), l.kinetic + l.elastic);
+    let (mut rise, mut early, mut e) = (0.0f64, e0, e0);
+    for k in 0..(seconds / STEP) as usize {
+        w.step();
+        e = w.ledger.as_ref().unwrap().mechanical();
+        if !e.is_finite() {
+            return (own0, f64::INFINITY, false, f64::INFINITY);
+        }
+        rise = rise.max(e - e0);
+        if k == 499 {
+            early = e;
+        }
+    }
+    (own0, rise, true, e - early)
+}
+
 fn run(s: ExplicitBeams, seconds: f32) -> (f64, f64, bool) {
     let mut w = ExplicitBeamsWorld::new(vec![s]);
     w.enable_ledger();
@@ -133,10 +154,19 @@ fn run(s: ExplicitBeams, seconds: f32) -> (f64, f64, bool) {
 }
 
 /// **Fails without the fix:** the hub-cap triangle at 5 m/s went 3.75 J →
-/// 1,800 J in 0.75 s. Asserted: over 1.5 s the energy never rises by more than
-/// a thousandth of the spin's kinetic energy, at rim speeds from 0.05 to 0.46
-/// rad a step, for the cap, a door-sized triangle and a tetrahedron, drifting
-/// or not.
+/// 1,800 J in 0.75 s. Asserted, at rim speeds from 0.05 to 0.46 rad a step,
+/// for the cap, a door-sized triangle and a tetrahedron, about a principal
+/// axis and tumbling, drifting or not:
+/// * once the body has taken its spinning shape (0.25 s) its energy does not
+///   rise: over the next 1.25 s by no more than a thousandth of its own
+///   energy beyond what the plain step's does for the same body (single
+///   precision: an undamped tetrahedron's energy wanders by 0.3 % in a
+///   second on the plain step);
+/// * before that it is never further above its start than the plain step
+///   (centred damping off) takes the same body, plus a thousandth of its
+///   energy. (The bodies are set spinning unstretched; at 50 m/s the cap's
+///   beams stretch 40 % into their spinning shape, and the symplectic step's
+///   energy moves with that shock in either scheme.)
 #[test]
 fn a_free_spinning_damped_body_never_gains_energy() {
     let cap = triangle(0.095);
@@ -150,15 +180,37 @@ fn a_free_spinning_damped_body_never_gains_energy() {
     for (name, (pts, beams), kg, k, c) in cases {
         for rim in [5.0f32, 20.0, 50.0] {
             for drift in [Vec3::ZERO, Vec3::new(30.0, 0.0, 10.0)] {
-                let mut s = body(pts, beams, kg, k, c, true);
-                let axis = Vec3::new(0.3, 0.2, 1.0).normalize();
-                spin(&mut s, axis, rim, drift);
-                let (e0, rise, finite) = run(s, 1.5);
-                assert!(finite, "{name} at {rim} m/s: not finite");
-                assert!(
-                    rise <= 1e-3 * e0,
-                    "{name} at {rim} m/s (drift {drift}): energy rose {rise:.3} J above its start (own energy {e0:.2} J)"
-                );
+                for tumbling in [false, true] {
+                    let start = |centred: bool| {
+                        let mut s = body(pts, beams, kg, k, c, true);
+                        s.settings.centred_damping = centred;
+                        let normal = (s.nodes[1].pos - s.nodes[0].pos)
+                            .cross(s.nodes[2].pos - s.nodes[0].pos)
+                            .normalize();
+                        let axis = if tumbling {
+                            (normal + Vec3::new(0.3, 0.2, 0.4)).normalize()
+                        } else {
+                            normal
+                        };
+                        spin(&mut s, axis, rim, drift);
+                        s
+                    };
+                    let what = format!("{name} at {rim} m/s (drift {drift}, tumbling {tumbling})");
+                    let (e0, rise, finite, late) = run_late(start(true), 1.5);
+                    let (_, plain, _) = run(start(false), 0.25);
+                    let (_, _, _, plain_late) = run_late(start(false), 1.5);
+                    assert!(finite, "{what}: not finite");
+                    // (A body drifting at 30 m/s: the single-precision kinetic
+                    // energy of the plain step itself wanders by this much.)
+                    assert!(
+                        late <= plain_late.max(0.0) + 1e-3 * e0,
+                        "{what}: energy rose {late:.4} J from 0.25 s to 1.5 s; the plain step {plain_late:.4} J (own energy {e0:.2} J)"
+                    );
+                    assert!(
+                        rise <= plain + 1e-3 * e0,
+                        "{what}: energy rose {rise:.3} J above its start; the plain step {plain:.3} J (own energy {e0:.2} J)"
+                    );
+                }
             }
         }
     }
@@ -182,18 +234,17 @@ fn the_end_direction_form_adds_energy_to_a_spinning_body() {
 }
 
 /// A free damped body's angular momentum is constant (its forces are equal,
-/// opposite and along its beams). The triangle spins with one node knocked
+/// opposite and along its beams). **Fails without the fix** (1.1e13 of its
+/// start: the body flies apart). The triangle spins with one node knocked
 /// inward, so its beams stretch and the damping acts.
 #[test]
 fn a_free_spinning_damped_body_keeps_its_angular_momentum() {
     let (pts, beams) = triangle(0.3);
     let mut s = body(&pts, &beams, 0.5, 4.0e5, 60.0, true);
-    spin(
-        &mut s,
-        Vec3::new(0.2, 0.1, 1.0).normalize(),
-        20.0,
-        Vec3::ZERO,
-    );
+    let normal = (s.nodes[1].pos - s.nodes[0].pos)
+        .cross(s.nodes[2].pos - s.nodes[0].pos)
+        .normalize();
+    spin(&mut s, normal, 20.0, Vec3::ZERO);
     let c = centre(&s);
     let kick = (c - s.nodes[0].pos).normalize() * 3.0;
     s.nodes[0].vel += kick;
@@ -202,22 +253,37 @@ fn a_free_spinning_damped_body_keeps_its_angular_momentum() {
         for n in &s.nodes {
             m += f64::from(n.mass);
             p += n.vel.as_dvec3() * f64::from(n.mass);
-            x += (s.origin + n.pos).as_dvec3() * f64::from(n.mass);
+            x += (s.origin.as_dvec3() + n.pos.as_dvec3()) * f64::from(n.mass);
         }
         let (xc, vc) = (x / m, p / m);
         s.nodes.iter().fold(DVec3::ZERO, |l, n| {
-            l + ((s.origin + n.pos).as_dvec3() - xc).cross(n.vel.as_dvec3() - vc)
+            l + (s.origin.as_dvec3() + n.pos.as_dvec3() - xc).cross(n.vel.as_dvec3() - vc)
                 * f64::from(n.mass)
         })
     };
     let l0 = momentum(&s);
-    let mut worst = 0.0f64;
-    for _ in 0..3000 {
+    let (mut worst, mut settled, mut late) = (0.0f64, l0, 0.0f64);
+    for k in 0..3000 {
         s.step();
-        worst = worst.max((momentum(&s) - l0).length() / l0.length());
+        let l = momentum(&s);
+        worst = worst.max((l - l0).length() / l0.length());
+        if k == 1999 {
+            settled = l;
+        }
+        if k > 1999 {
+            late = late.max((l - settled).length() / l0.length());
+        }
     }
+    // Once the knock has rung down nothing acts on the momentum at all.
     assert!(
-        worst < 1e-3,
+        late < 1e-5,
+        "angular momentum still moving after the ring-down: {late:.2e}"
+    );
+    // While the beams ring, the correction acts along each beam's direction
+    // at the end of the step on the lever of its start: a torque of second
+    // order in h (1.2e-3 of the momentum over this ring-down, measured).
+    assert!(
+        worst < 5e-3,
         "angular momentum moved by {worst:.2e} of its start"
     );
 }

@@ -15,7 +15,7 @@
 //! cargo run --release -p engine-softbody --example sidepole_sweep -- \
 //!     --mod <mods dir>/<mod> --vehicle sedan [--pc sedan.pc] [--kmh 186] [--at 1.05] \
 //!     [--angle 90] [--surface 1] [--secs 1.2] [--run-up M] [--self 1] [--min-kg K] \\
-//!     [--drop H] [--centred 1] [--rise J] [--series 1]
+//!     [--drop H] [--wall DEG] [--centred 1] [--objective 0] [--rise J] [--series 1]
 //! ```
 //! `--self 0` turns self-collision off and `--min-kg K` raises every lighter
 //! node to K kg (diagnostics: they change the car).
@@ -125,7 +125,27 @@ fn main() -> Result<(), String> {
             n.pos.y += h;
         }
     }
-    let (pole_c, vel) = if drop.is_some() {
+    // `--wall A`: the crash lab's `wall` scene instead: the car turned A
+    // degrees from +Z, its front's middle at the origin, driving along its
+    // heading into a 4 m wall across Z whose face is `--run-up` metres along
+    // that heading (full overlap).
+    let wall = arg("--wall").and_then(|v| v.parse::<f32>().ok());
+    if let Some(a) = wall {
+        let a = a.to_radians();
+        let fw = Vec3::new(a.sin(), 0.0, a.cos());
+        let lat = Vec3::Y.cross(fw);
+        for n in &mut s.nodes {
+            let q = n.pos - Vec3::X * (0.5 * length);
+            n.pos = fw * q.x - lat * q.z + Vec3::Y * q.y;
+        }
+    }
+    let (pole_c, vel) = if let Some(a) = wall {
+        let a = a.to_radians();
+        (
+            Vec3::new(gap * a.sin(), 2.0, gap * a.cos() + 0.5),
+            Vec3::new(a.sin(), 0.0, a.cos()) * v,
+        )
+    } else if drop.is_some() {
         (Vec3::new(0.0, -1e4, 1e4), forward * v)
     } else if angle == 90.0 {
         (
@@ -149,7 +169,12 @@ fn main() -> Result<(), String> {
         let fw = (s.nodes[c as usize].pos - s.nodes[b as usize].pos).normalize_or_zero();
         d.roll(vel.dot(fw));
     }
-    if drop.is_none() {
+    if wall.is_some() {
+        s.boxes.push(StaticBox::centered(
+            pole_c,
+            Vec3::new(0.5 * width + 1.0, 2.0, 0.5),
+        ));
+    } else if drop.is_none() {
         engine_softbody::crash_rigs::on_carrier(&mut s);
         s.boxes
             .push(StaticBox::centered(pole_c, Vec3::new(0.1, 2.0, 0.1)));
@@ -164,6 +189,9 @@ fn main() -> Result<(), String> {
     if num("--centred", 1.0) == 0.0 {
         s.settings.centred_damping = false;
     }
+    // `--objective 1`: the centred damping's objective form
+    // (`ExplicitBeamsSettings::centred_objective`).
+    s.settings.centred_objective = num("--objective", 0.0) != 0.0;
     let min_kg = num("--min-kg", 0.0);
     if min_kg > 0.0 {
         for n in &mut s.nodes {

@@ -3467,8 +3467,13 @@ impl ExplicitBeams {
         }
         if self.settings.centred_damping {
             let v0: Vec<Vec3> = self.nodes.iter().map(|n| n.vel).collect();
+            // The objective form reads each beam's direction before the update too.
+            let x0: Option<Vec<Vec3>> = self
+                .settings
+                .centred_objective
+                .then(|| self.nodes.iter().map(|n| n.pos).collect());
             self.node_pass();
-            self.centred_correction(&v0);
+            self.centred_correction(&v0, x0.as_deref());
         } else {
             self.node_pass();
         }
@@ -3944,7 +3949,16 @@ impl ExplicitBeams {
     /// damping it applied reads the mean of the step's start and end velocities.
     /// Each node sums its incidence entries in order (the kernel's slots), then
     /// v += h·c/m and x += h·(h·c/m).
-    fn centred_correction(&mut self, v0: &[Vec3]) {
+    ///
+    /// `x0` (the positions before the node update;
+    /// [`ExplicitBeamsSettings::centred_objective`], spec §39.6): a plain beam's Δu
+    /// is then the change of its extension rate itself, each rate along the beam's
+    /// direction at its own time, (v′_a − v′_b)·d̂′ − (v_a − v_b)·d̂. Without it Δu is
+    /// (Δv_a − Δv_b)·d̂′, which is the same while the beam keeps its direction and
+    /// reads −ω²·L·h for a beam that only turns at ω (its relative velocity turns
+    /// with it): an outward push on every damped beam of a spinning body, which
+    /// then gains energy (known-bugs S3).
+    fn centred_correction(&mut self, v0: &[Vec3], x0: Option<&[Vec3]>) {
         let h = STEP;
         let nb = self.beams.len();
         self.damp_slopes.resize(nb, 0.0);
@@ -3963,10 +3977,21 @@ impl ExplicitBeams {
                     let n = self.beams[j + 1];
                     let ids = [a, e, n.a as usize, n.b as usize];
                     let g = dihedral_jacobian(ids.map(|i| self.nodes[i].pos));
-                    let dr = g[0].dot(dv[ids[0]])
-                        + g[1].dot(dv[ids[1]])
-                        + g[2].dot(dv[ids[2]])
-                        + g[3].dot(dv[ids[3]]);
+                    let dr = match x0 {
+                        // The dihedral rate's change, each rate with its own gradient.
+                        Some(x0) => {
+                            let g0 = dihedral_jacobian(ids.map(|i| x0[i]));
+                            (0..4)
+                                .map(|q| g[q].dot(self.nodes[ids[q]].vel) - g0[q].dot(v0[ids[q]]))
+                                .sum::<f32>()
+                        }
+                        None => {
+                            g[0].dot(dv[ids[0]])
+                                + g[1].dot(dv[ids[1]])
+                                + g[2].dot(dv[ids[2]])
+                                + g[3].dot(dv[ids[3]])
+                        }
+                    };
                     let t = -0.5 * slope * dr;
                     slot[j] = [g[0] * t, g[1] * t];
                     slot[j + 1] = [g[2] * t, g[3] * t];
@@ -3978,7 +4003,15 @@ impl ExplicitBeams {
                 _ => {
                     let d = self.nodes[a].pos - self.nodes[e].pos;
                     let inv = exact_length(d.dot(d)).1;
-                    let du = (dv[a] - dv[e]).dot(d) * inv;
+                    let du = match x0 {
+                        Some(x0) => {
+                            let d0 = x0[a] - x0[e];
+                            let inv0 = exact_length(d0.dot(d0)).1;
+                            (self.nodes[a].vel - self.nodes[e].vel).dot(d) * inv
+                                - (v0[a] - v0[e]).dot(d0) * inv0
+                        }
+                        None => (dv[a] - dv[e]).dot(d) * inv,
+                    };
                     let push = d * ((-0.5 * slope * du) * inv);
                     slot[j] = [push, -push];
                 }
