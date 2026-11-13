@@ -95,7 +95,8 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
  set viewMode(mode){orbit.setMode(mode|0,aspect());input.modeChanged()},
  // GPU ms of the latest sampled frame's render pass, or null if unsupported.
  get gpuFrameMs(){return frameTimer?.ms??null},
- // 0: materials; 1: sleep state (awake orange, asleep blue, static grey).
+ // 0: materials; 1: sleep state (awake orange, asleep blue, static grey); 2: bodies;
+ // 3: stress (the stress models' chunks by load over strength, World setStressView).
  set colorMode(mode){colorMode=mode|0},
  // GPU time of one frame's render pass (ms), via timestamps.
  async profileDraw(showBonds=false){

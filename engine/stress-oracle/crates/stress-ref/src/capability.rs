@@ -103,6 +103,42 @@ pub enum StrikeModel {
     /// `impact_local`). `fracture_work`: a perforating shot gives up the ballistic limit's
     /// energy before the step.
     Analytic { fracture_work: bool },
+    /// Radial damage, the common game rule, for comparison (`radial_damage::breaks`,
+    /// fracture.slang `fr_strike_radial`): every bond within `radius_mm` millimetres of the
+    /// point struck breaks, whatever the shot's speed or mass. The radius is the weapon's,
+    /// set by the host. No profile runs it by itself: an option.
+    Radial { radius_mm: u32 },
+}
+
+/// How a strike's force pulse is taken by the structure (`impact_response`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PulseModel {
+    /// The pulse's peak as a static load (a quasi-static solver's treatment of a contact
+    /// force; the load path's in-step contact fracture by itself).
+    Static,
+    /// The structure's dynamic response to the pulse: the static solution times the
+    /// dynamic load factor at the structure's own frequency (`impact_response`).
+    #[default]
+    Dynamic,
+}
+
+/// A strike's structural response, an option on the load path (`impact_response`;
+/// fracture.slang `fr_gi_solve`): the impulse a strike leaves in the structure, solved
+/// through its bonds. With the analytic strike it is what a predicted strike does beyond
+/// the point struck (without it a shot that does not get through breaks nothing past its
+/// crater); with the in-step contact fracture it replaces the static peak. No profile runs
+/// it by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImpactResponse {
+    pub pulse: PulseModel,
+    /// A factor on the structural load, percent (100: as computed). Tuning, not physics.
+    pub scale_pct: u32,
+}
+
+impl Default for ImpactResponse {
+    fn default() -> Self {
+        ImpactResponse { pulse: PulseModel::Dynamic, scale_pct: 100 }
+    }
 }
 
 /// The load path's sweeps a frame in the `LoadPath` profile.
@@ -111,6 +147,21 @@ pub const LOAD_PATH_SWEEPS: u32 = 16;
 /// The in-step contact fracture's sweeps for a strike's load (`Profile::contact_fracture`;
 /// load_path.rs `IMPACT_LOWER` says why so many).
 pub const CONTACT_SWEEPS: u32 = 256;
+
+/// The most sweeps a strike's structural response solves with (`response_sweeps`).
+pub const RESPONSE_SWEEPS_MAX: u32 = 4096;
+
+/// The sweeps a strike's structural response solves a structure of `chunks` chunks with
+/// (fracture.slang `fr_gi_solve`): the strike's load has to reach the structure's supports,
+/// and the sweeps that takes grow with the structure's extent in chunks, the cube root of
+/// their count. `CONTACT_SWEEPS` at least (a wall of a few hundred chunks); 64 a chunk of
+/// extent beyond that (a 3,711 chunk tower: 992, where its far bonds' forces have settled:
+/// with 256 the load is still bunched at the hit and bonds 10 m off break by the error);
+/// `RESPONSE_SWEEPS_MAX` at most. Even.
+pub fn response_sweeps(chunks: u32) -> u32 {
+    let n = 2 * (32.0 * (chunks as f64).cbrt()).ceil() as u32;
+    n.clamp(CONTACT_SWEEPS, RESPONSE_SWEEPS_MAX)
+}
 
 /// The model features `BlastParity` turns off (`SimFeatures` names).
 pub const BLAST_PARITY_FEATURES_OFF: [&str; 8] = ["softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping"];

@@ -156,6 +156,18 @@ mod imp {
         let options = stress_rubble::threshold::FractureOptions {
             contact: def.fracture.contact_fracture,
             strike_prediction: def.fracture.strike_prediction,
+            strike: def.fracture.strike.map(|s| match s {
+                crate::StrikeRule::Hertz => stress_ref::capability::StrikeModel::Hertz,
+                crate::StrikeRule::Analytic => stress_ref::capability::StrikeModel::Analytic { fracture_work: true },
+                crate::StrikeRule::Radial { radius_mm } => stress_ref::capability::StrikeModel::Radial { radius_mm },
+            }),
+            impact_response: def.fracture.impact_response.map(|r| stress_ref::capability::ImpactResponse {
+                pulse: match r.pulse {
+                    crate::ImpactPulse::Static => stress_ref::capability::PulseModel::Static,
+                    crate::ImpactPulse::Dynamic => stress_ref::capability::PulseModel::Dynamic,
+                },
+                scale_pct: r.scale_pct,
+            }),
             ..Default::default()
         };
         ProfileSetup::new(profile_of(def.model)?, &options).map_err(|e| anyhow::anyhow!("{e}"))
@@ -764,6 +776,9 @@ mod imp {
         rebuild: bool,
         /// It has run a step.
         stepped: bool,
+        /// The stress view's last readback (`World::set_stress_view`): per chunk of the
+        /// shared tables, its largest failure index by mode. Empty until a frame brings one.
+        view: Vec<[f32; 4]>,
     }
 
     /// The world's threshold destructibles.
@@ -772,6 +787,8 @@ mod imp {
         gpu: Option<Gpu>,
         pub slots: Vec<Option<ThresholdSlot>>,
         shared: Option<Shared>,
+        /// `World::set_stress_view`: kept for a shared fracture made or rebuilt later.
+        stress_view: bool,
         /// Reserved body slots no piece has taken yet: one pool for every destructible
         /// (a split takes the lowest free slot, whoever reserved it).
         spare: std::collections::BTreeSet<u32>,
@@ -853,6 +870,10 @@ mod imp {
         Broken,
         Moved,
         Frames,
+        /// The stress view: per chunk, its largest failure index by mode (the load path's),
+        /// or its largest demand over capacity (the contact-force rule's, one word).
+        View,
+        ViewWords,
         /// A destructible with its own fracture (crushing, blast loading): its counters,
         /// chunk owners, bond states, body frames and this frame's crush events
         /// (`GpuFracture::crush_events_range`).
@@ -2051,9 +2072,10 @@ mod imp {
                 free: vec![0; capacity.max_bodies as usize],
                 ..Default::default()
             };
-            let fracture =
+            let mut fracture =
                 GpuFracture::with_capacity(gpu, &empty, made, &buffers(&self.sim), &ingest)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+            fracture.stress_view = self.fracture.stress_view;
             self.fracture.shared = Some(Shared {
                 ingest,
                 fracture,
@@ -2068,6 +2090,7 @@ mod imp {
                 setup,
                 rebuild,
                 stepped: false,
+                view: Vec::new(),
             });
             if let Some(n) = self.fracture_pieces {
                 // The world's piece pool: parked static slots any split may take.
@@ -2113,6 +2136,7 @@ mod imp {
                     // Every member runs the same model (`threshold_shared`).
                     t.load_model = l.load_model;
                     t.strike_model = l.strike_model;
+                    t.impact_response = l.impact_response;
                     t.contact_sweeps = l.contact_sweeps;
                     t.max_contacts = l.max_contacts;
                     t.impact_peak = l.impact_peak;
@@ -2208,6 +2232,7 @@ mod imp {
                 let frame = b.frame(gpu, g).map_err(|e| anyhow::anyhow!("{e}"))?;
                 f.set_blast(gpu, frame).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
+            f.stress_view = sh.fracture.stress_view;
             sh.fracture = f;
             sh.chunks = chunks;
             sh.bonds = bonds;
@@ -2447,6 +2472,17 @@ mod imp {
                     16 * l.f_events() as u64,
                     48 * l.events.frames as u64,
                 );
+                if f.stress_view {
+                    if let Some(blast) = f.blast() {
+                        // Blast's: a word per node (its chunk), stress over the fatal limit.
+                        push(FractureRead::ViewWords, &blast.view, 0, 4 * l.n as u64);
+                    } else if sh.setup.load_model == stress_ref::capability::LoadModel::Threshold {
+                        // The contact-force rule's: a word per chunk.
+                        push(FractureRead::ViewWords, &f.atom, 4 * l.a_view() as u64, 4 * l.n as u64);
+                    } else {
+                        push(FractureRead::View, &f.lp, 16 * l.lp_view() as u64, 16 * l.n as u64);
+                    }
+                }
             }
             for (k, t) in self.slots.iter().enumerate() {
                 let Some(o) = t.as_ref().and_then(|t| t.own.as_ref()) else {
@@ -2519,6 +2555,14 @@ mod imp {
                     .find(|(r, _)| std::mem::discriminant(r) == std::mem::discriminant(&want))
                     .map(|(_, b)| *b)
             };
+            if let (Some(view), Some(sh)) = (find(FractureRead::View), self.fracture.shared.as_mut()) {
+                sh.view.clear();
+                sh.view.extend_from_slice(bytemuck::cast_slice::<u8, [f32; 4]>(view));
+            }
+            if let (Some(view), Some(sh)) = (find(FractureRead::ViewWords), self.fracture.shared.as_mut()) {
+                sh.view.clear();
+                sh.view.extend(bytemuck::cast_slice::<u8, f32>(view).iter().map(|&u| [u, 0.0, 0.0, 0.0]));
+            }
             let Some(counters) = find(FractureRead::Counters) else {
                 return Ok(out);
             };
@@ -3266,6 +3310,100 @@ mod imp {
             }
         }
 
+        /// The stress view: from the next step on, each step also brings every chunk's
+        /// load against its strength (`Self::destructible_chunk_stress`), for a host to
+        /// draw: the load path's failure indices, or the contact-force rule's demand over
+        /// capacity (`Threshold`, `ImpactLocal`), or `BlastGpu`'s bond stress over its fatal
+        /// limit. Off by default, and
+        /// the steps' breaks are the same with it or without.
+        pub fn set_stress_view(&mut self, on: bool) {
+            self.fracture.stress_view = on;
+            if let Some(sh) = self.fracture.shared.as_mut() {
+                sh.fracture.stress_view = on;
+                if !on {
+                    sh.view.clear();
+                }
+            }
+        }
+
+        /// Per chunk of a stress destructible, the largest failure index of its intact
+        /// bonds as of the last polled step (0: unloaded; 1: a bond at its strength), by
+        /// mode in the load path's order and overall. `None` until the stress view
+        /// (`Self::set_stress_view`) has brought a frame, and for a model that solves no
+        /// load.
+        pub fn destructible_chunk_stress(
+            &self,
+            id: DestructibleId,
+        ) -> anyhow::Result<Option<&[[f32; 4]]>> {
+            let i = self.live_destructible(id)?;
+            let k = self.destructibles[i].threshold.ok_or_else(|| {
+                anyhow::anyhow!("destructible {} is not a threshold one", id.index())
+            })? as usize;
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            if t.own.is_some() {
+                return Ok(None);
+            }
+            let Some(sh) = self.fracture.shared.as_ref() else {
+                return Ok(None);
+            };
+            let (from, n) = (t.base.chunk as usize, t.chunk_body.len());
+            Ok(sh.view.get(from..from + n))
+        }
+
+        /// What a stress destructible's fracture has decided so far (blocking: for tools,
+        /// tests and a host's readout): its analytic strikes by outcome, the strikes'
+        /// records of the last frame that had one, the load path's largest failure index
+        /// and the in-step contact fracture's counts. Of the fracture it runs in: a
+        /// shared one's numbers are all its destructibles'.
+        pub fn destructible_fracture_report(
+            &self,
+            id: DestructibleId,
+        ) -> anyhow::Result<crate::FractureReport> {
+            let i = self.live_destructible(id)?;
+            let k = self.destructibles[i].threshold.ok_or_else(|| {
+                anyhow::anyhow!("destructible {} is not a threshold one", id.index())
+            })? as usize;
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            let gpu = self
+                .fracture
+                .gpu
+                .as_ref()
+                .expect("a threshold destructible's GPU");
+            let fracture = match &t.own {
+                Some(o) => &o.fracture,
+                None => &self.fracture.shared.as_ref().expect("shared fracture").fracture,
+            };
+            let c = fracture.counters(gpu);
+            let analytic = c.bounces + c.craters + c.spalls + c.perforations > 0;
+            let strikes = if analytic {
+                fracture
+                    .strike_records(gpu)
+                    .into_iter()
+                    .filter(|r| r.ballistic_speed > 0.0)
+                    .map(|r| crate::StrikeReport {
+                        thickness: r.thickness,
+                        ballistic_speed: r.ballistic_speed,
+                        residual_speed: r.residual_speed,
+                        crater: r.outcome & 2 != 0,
+                        spall: r.outcome & 4 != 0,
+                        perforation: r.outcome & 8 != 0,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            Ok(crate::FractureReport {
+                bounces: c.bounces,
+                craters: c.craters,
+                spalls: c.spalls,
+                perforations: c.perforations,
+                peak_utilization: c.peak_utilization,
+                contact_strikes: c.contact_strikes,
+                contact_breaks: c.contact_breaks,
+                strikes,
+            })
+        }
+
         /// A changed body's mass, solver frame (from the GPU's frame record), type and
         /// shapes, from `from_step` on.
         fn reframe_piece(
@@ -3643,7 +3781,9 @@ mod imp {
             FractureRead::Counters
             | FractureRead::Broken
             | FractureRead::Moved
-            | FractureRead::Frames => u32::MAX,
+            | FractureRead::Frames
+            | FractureRead::View
+            | FractureRead::ViewWords => u32::MAX,
         }
     }
 

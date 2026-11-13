@@ -56,6 +56,23 @@ struct DefJs {
     contact_fracture: Option<bool>,
     #[serde(default)]
     strike_prediction: Option<bool>,
+    /// Stress models: `'hertz'`, `'analytic'` or `'radial'` (absent: the model's own), and
+    /// radial damage's radius (m; absent: 0.5).
+    #[serde(default)]
+    strike: Option<String>,
+    #[serde(default)]
+    strike_radius: Option<f64>,
+    /// Load path: a strike's structural response, `'static'` or `'dynamic'` (absent or
+    /// `'off'`: none), and a factor on its load (absent: 1).
+    #[serde(default)]
+    impact_response: Option<String>,
+    #[serde(default)]
+    impact_scale: Option<f64>,
+    /// Stress models: support loss, and its dynamic factor (1 to 2).
+    #[serde(default)]
+    support_loss: bool,
+    #[serde(default)]
+    support_loss_dynamic_factor: Option<f32>,
     /// 0 off, 1 the scene's parameters, 2 with presets.
     #[serde(default)]
     crush: u32,
@@ -120,7 +137,25 @@ fn def_of(v: JsValue, bytes: Option<Vec<u8>>, prebuilt: Option<(&JsScene, bool)>
             fracture: FractureOptions {
                 contact_fracture: d.contact_fracture.filter(|_| stress),
                 strike_prediction: d.strike_prediction.filter(|_| stress),
+                strike: match d.strike.as_deref().filter(|_| stress) {
+                    None => None,
+                    Some(s) => Some(match rubble::StrikeRule::parse(s).ok_or_else(|| anyhow::anyhow!("strike {s}: hertz, analytic or radial"))? {
+                        rubble::StrikeRule::Radial { radius_mm } => rubble::StrikeRule::Radial {
+                            radius_mm: d.strike_radius.map_or(radius_mm, |r| (r * 1e3).round().max(0.0) as u32),
+                        },
+                        r => r,
+                    }),
+                },
+                impact_response: match d.impact_response.as_deref().filter(|s| stress && *s != "off") {
+                    None => None,
+                    Some(s) => Some(rubble::ImpactResponse {
+                        pulse: rubble::ImpactPulse::parse(s).ok_or_else(|| anyhow::anyhow!("impactResponse {s}: off, static or dynamic"))?,
+                        scale_pct: (d.impact_scale.unwrap_or(1.0) * 100.0).round().max(0.0) as u32,
+                    }),
+                },
             },
+            support_loss: d.support_loss,
+            support_loss_dynamic_factor: d.support_loss_dynamic_factor.unwrap_or(1.0),
             crush: match d.crush {
                 0 => LabCrush::Off,
                 1 => LabCrush::Scene,
@@ -255,7 +290,7 @@ impl LabSettleJob {
 /// A placed lab run.
 #[wasm_bindgen]
 pub struct LabScene {
-    lab: Lab,
+    pub(crate) lab: Lab,
 }
 
 #[wasm_bindgen]
@@ -439,6 +474,23 @@ impl WebWorld {
         let v: serde_json::Value = serde_wasm_bindgen::from_value(zones).map_err(err)?;
         let zones: Vec<engine_schema::guidance::ZoneDesc> = serde_json::from_value(v).map_err(|e| err(format!("ZoneDesc: {e}")))?;
         res(lab.lab.set_guidance(&mut self.world, settings, &zones))
+    }
+
+    /// The stress view (`World::set_stress_view`): from the next step on, `labPoses`
+    /// carries each chunk's load over strength for the renderer's stress colours. The
+    /// load-path model only.
+    #[wasm_bindgen(js_name = setStressView)]
+    pub fn set_stress_view(&mut self, on: bool) {
+        self.world.set_stress_view(on);
+    }
+
+    /// The stress view's colour scale: `'absolute'` (load over strength), `'log'` (decades
+    /// from 10^-8 to 1) or `'relative'` (over the frame's largest). Display only.
+    #[wasm_bindgen(js_name = labSetStressScale)]
+    pub fn lab_set_stress_scale(&mut self, lab: &mut LabScene, scale: &str) -> Result<(), JsValue> {
+        let s = rubble::lab::StressScale::parse(scale).ok_or_else(|| err(format!("stress scale {scale}: absolute, log or relative")))?;
+        lab.lab.set_stress_scale(s);
+        Ok(())
     }
 
     /// The bond models' reset (the stress models reload).

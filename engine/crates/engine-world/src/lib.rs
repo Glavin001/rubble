@@ -67,7 +67,7 @@ pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
     CRUSH_PARTICLE_GROUP,
     DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructiblePreload,
-    DestructibleStats, FractureOptions, Preload, StrengthModel,
+    DestructibleStats, FractureOptions, FractureReport, ImpactPulse, ImpactResponse, Preload, StrikeReport, StrengthModel, StrikeRule,
 };
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,

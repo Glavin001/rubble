@@ -41,10 +41,11 @@ function updateTrails(){
 // compute and timing only, the pieces loose on World).
 const bondMode=()=>$('bond-mode').value;
 const BLAST_PARITY='stress';
-const labBonds=()=>({learned:'none',blast:'blast_gpu'})[bondMode()]??bondMode();
+// 'rubble' is a panel preset over load_path (see showFractureSwitches), not a model of its own.
+const labBonds=()=>({learned:'none',blast:'blast_gpu',rubble:'load_path'})[bondMode()]??bondMode();
 const STRESS_MODELS=new Set(['threshold','load_path','impact_local','blast_gpu']);
 const stressModel=()=>STRESS_MODELS.has(labBonds());
-const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps',blast_gpu:"vibe-land's GPU stress solver (Blast's model, Slang)",d6:'breakable D6 joints',none:'loose pieces'};
+const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps',blast_gpu:"vibe-land's GPU stress solver (Blast's model, Slang)",d6:'breakable D6 joints',none:'loose pieces',rubble:'Rubble (full): load path for sustained load, analytic impact for strikes with their structural response, predicted before the engine steps'};
 // The controls panel collapses for a full view (remembered per viewer; phones start
 // collapsed). Collapsed, a quick button mirrors Start / Pause.
 const PANEL_KEY='fracture-lab.panel';
@@ -84,7 +85,9 @@ let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0,gaps:[],cpuMs:0
 let learned=null,learnedMs=0,learnedBusy=false;
 // The View menu (0 materials, 1 sleep state, 2 bodies).
 const viewMode=()=>Number($('view-mode').value);
-function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode())}
+// The stress view (value 3) is the World's (lab-world): each step then carries every chunk's
+// load over strength; the separate stress engine has no such mode and draws materials.
+function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode()===3?0:viewMode());sim?.world?.setStressView?.(viewMode()===3);$('stress-scale').disabled=viewMode()!==3;if(sim?.poseDraw)sim.setStressScale?.($('stress-scale').value)}
 // The Camera menu (engine-fracture view.rs ViewMode: 0 orbit, 1 first-person walk, 2 fly),
 // remembered per viewer and kept across loads. V cycles it.
 const CAMERA_KEY='fracture-lab.camera';
@@ -131,12 +134,23 @@ function showBallRadius(){
 }
 // The stress models' fracture switches: each starts at the model's own (Rust:
 // `fracture_defaults`), the panel's choice sent explicitly.
+let wasFull=false;
 function showFractureSwitches(){
  const own=labFractureDefaults(labBonds());
  for(const [id,key] of [['strike-prediction','strikePrediction'],['contact-fracture','contactFracture']]){
   $(id).disabled=!own;if(own)$(id).checked=own[key];
  }
+ // Rubble (full): the compare page's Rubble column (Rust: `play::compare::Approach::Rubble`).
+ const full=bondMode()==='rubble';
+ if(full){$('strike-prediction').checked=true;$('contact-fracture').checked=false;$('strike-rule').value='analytic';$('impact-response').value='dynamic';$('ball-ccd').checked=false}
+ else if(wasFull){$('strike-rule').value='';$('impact-response').value='off';$('ball-ccd').checked=true}
+ wasFull=full;
  $('crush').disabled=!stressModel();
+ $('strike-rule').disabled=$('support-loss').disabled=!own;
+ $('strike-radius').disabled=!own||$('strike-rule').value!=='radial';
+ // A strike's structural response is the load path's (Rust: `FractureOptions::impact_response`).
+ const lp=labBonds()==='load_path';if(!lp)$('impact-response').value='off';
+ $('impact-response').disabled=!lp;$('impact-scale').disabled=!lp||$('impact-response').value==='off';
 }
 const stepHz=()=>Math.round(sim?1/sim.dt:physicsHz());
 const rates=createRates(value=>{
@@ -178,7 +192,11 @@ function labDef(level){
  const def={source,level,maxHullVertices,bonds:labBonds(),physicsHz:physicsHz(),strengthScale:strengthScale(),
   ballRadiusScale:radiusScale(),ballMassScale:massScale(),ballSpeedScale:speedScale(),ccd:$('ball-ccd').checked,crush:crushMode(),gpuTiming:GPU_TIMING,
   arrangement:towers?towers:layout?'layout':'one',...(layout&&!towers?{layout}:{})};
- if(stressModel()){def.strikePrediction=$('strike-prediction').checked;def.contactFracture=$('contact-fracture').checked}
+ if(stressModel()){def.strikePrediction=$('strike-prediction').checked;def.contactFracture=$('contact-fracture').checked;
+  // The strike rule apart from the bond model's load rule (Rust: `FractureOptions::strike`), and support loss.
+  const strike=$('strike-rule').value;if(strike){def.strike=strike;if(strike==='radial')def.strikeRadius=Number($('strike-radius').value)}
+  const response=$('impact-response').value;if(response!=='off'){def.impactResponse=response;def.impactScale=Number($('impact-scale').value)}
+  def.supportLoss=$('support-loss').checked}
  return {def,bytes:source==='glb'?assetBytes:source==='pack'?packBytes:null};
 }
 async function loadLevel(level){
@@ -191,7 +209,7 @@ async function loadLevel(level){
  try{sim=await createLab(def,bytes,setStatus)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  scene=sim.scene;sim.onLaunch(trailLaunched);
  renderer=await createRenderer(device,$('view'),sim,scene,shoot);resetTrails();
- renderer.colorMode=viewMode();applyCamera();applyBall();showBallRadius();
+ renderer.colorMode=viewMode();applyView();applyCamera();applyBall();showBallRadius();
  bystanders=towers?sceneHandle(scene).cityZones():[];applyGuide();$('near').textContent='—';
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
@@ -214,7 +232,7 @@ async function loadLevel(level){
  const what=towers?`4 towers and the city · `:scene.copies>1?`${scene.copies} copies · `:'';
  const source=procedural==='pack'?`scene pack · ${scene.pieces} nodes`:procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials`;
  const learnedNote=learned?` · learned-impact ${learnedMs.toFixed(2)} ms/fwd (${learned.graph.nNodes} chunks, ${learned.params} weights, compute only)`:'';
- setStatus(`${PROFILE_NOTES[labBonds()]??labBonds()} · ${stepHz()} Hz · ${what}${st.chunks} chunks · ${st.bonds} bonds · ${source}${learnedNote} · ${towers?'fire the volley or click to shoot':scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
+ setStatus(`${PROFILE_NOTES[bondMode()]??PROFILE_NOTES[labBonds()]??labBonds()} · ${stepHz()} Hz · ${what}${st.chunks} chunks · ${st.bonds} bonds · ${source}${learnedNote} · ${towers?'fire the volley or click to shoot':scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
 // blast_parity: its own engine (stress-web), one structure, labelled as such.
 async function loadStress(level){
@@ -336,9 +354,16 @@ $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>i
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('view-mode').onchange=()=>{if(renderer)renderer.colorMode=viewMode();applyView()};
 $('show-bonds').onchange=applyView;
+$('stress-scale').onchange=applyView;
 const reload=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('strike-prediction').onchange=reload;
 $('contact-fracture').onchange=reload;
+$('impact-response').onchange=()=>{$('impact-scale').disabled=$('impact-response').value==='off';reload()};
+$('impact-scale').onchange=reload;
+// A chosen strike rule only acts on predicted strikes: picking one turns prediction on.
+$('strike-rule').onchange=()=>{$('strike-radius').disabled=$('strike-rule').value!=='radial';if($('strike-rule').value)$('strike-prediction').checked=true;reload()};
+$('strike-radius').onchange=reload;
+$('support-loss').onchange=reload;
 $('ball-mass').oninput=applyBall;
 $('ball-speed').oninput=applyBall;
 $('ball-ccd').onchange=applyBall;
@@ -466,10 +491,17 @@ try{
  // World's device (lab-world.mjs): the physics and this page's renderer share it.
  device=await labDevice();
  device.addEventListener('uncapturederror',e=>fail(e.error));device.lost.then(info=>fail(new Error(`GPU device lost: ${info.message}. Reload this page.`)));
- // ?scene=<key>&bonds=<mode>&crush=<0|1|2>&hz=<60|120> preselect the panel.
+ // ?scene=<key>&bonds=<mode>&crush=<0|1|2>&hz=<60|120>&view=<0..3> preselect the panel.
  const q=new URLSearchParams(location.search);
  if(q.has('scene')&&samples[q.get('scene')])$('scene').value=q.get('scene');
  if(q.has('bonds'))$('bond-mode').value=q.get('bonds');
+ if(q.has('view'))$('view-mode').value=q.get('view');
+ if(q.has('stressScale'))$('stress-scale').value=q.get('stressScale');
+ if(q.has('strike'))$('strike-rule').value=q.get('strike');
+ if(q.has('radius'))$('strike-radius').value=q.get('radius');
+ if(q.has('response'))$('impact-response').value=q.get('response');
+ if(q.has('responseScale'))$('impact-scale').value=q.get('responseScale');
+ if(q.has('support'))$('support-loss').checked=q.get('support')==='1';
  if(q.has('crush'))$('crush').value=q.get('crush');
  if(q.has('hz'))$('physics-hz').value=q.get('hz');
  showFractureSwitches();

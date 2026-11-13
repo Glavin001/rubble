@@ -639,7 +639,7 @@ fn load(level: u8) -> Result<(), String> {
             let d = d.as_ref().ok_or("stress_init first")?;
             let gpu = &d.gpu;
             let s = SHOOTING.get().expect("shooting set");
-            let options = stress_rubble::threshold::FractureOptions { contact: CONTACT.get(), toi_ccd: None, crush: crush != 0, strike_prediction: None };
+            let options = stress_rubble::threshold::FractureOptions { contact: CONTACT.get(), toi_ccd: None, crush: crush != 0, strike_prediction: None, strike: None, impact_response: None };
             let mut world = stress_rubble::threshold::ThresholdWorld::with_options(gpu, &scene, s.radius, s.mass, profile, options)?;
             STRIKE_PENDING.set(false);
             if let Some(on) = STRIKE.get() {

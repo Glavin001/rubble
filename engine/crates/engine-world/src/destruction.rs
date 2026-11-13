@@ -504,6 +504,103 @@ pub struct FractureOptions {
     /// step, so the step meets the pieces. `None`: on, unless the in-step contact fracture
     /// is (it then takes the strikes).
     pub strike_prediction: Option<bool>,
+    /// How a predicted strike's breaks are decided. `None`: the model's own (`Analytic`
+    /// for `ImpactLocal`, `Hertz` for the others). `LoadPath` with `Analytic` (and strike
+    /// prediction on) is the quasi-static load solve and the dynamic impact together.
+    /// `BlastGpu` takes `Hertz` or `Radial` (`Analytic` is an error there).
+    pub strike: Option<StrikeRule>,
+    /// A strike's structural response, `LoadPath` only (an error on another model). `None`:
+    /// off. See [`ImpactResponse`].
+    pub impact_response: Option<ImpactResponse>,
+}
+
+/// A strike's structural response ([`FractureOptions::impact_response`]): what the whole
+/// member does when a shot's momentum goes into it, beside the local outcome at the point
+/// struck. The impulse the strike leaves in the structure (all of it when the shot stops;
+/// what the shot and its plug do not carry on with when it goes through) is a force pulse,
+/// solved through the bonds by the load path; a bond breaks under the structure's standing
+/// load plus the strike's.
+///
+/// With `StrikeRule::Analytic` and strike prediction it is what a predicted strike does
+/// past the point struck: without it a shot that does not get through breaks nothing
+/// beyond its crater, however heavy. With the in-step contact fracture it replaces the
+/// contact's static peak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImpactResponse {
+    pub pulse: ImpactPulse,
+    /// A factor on the structural load, percent (100: as computed). A tuning knob, not
+    /// physics.
+    pub scale_pct: u32,
+}
+
+impl Default for ImpactResponse {
+    fn default() -> Self {
+        ImpactResponse { pulse: ImpactPulse::Dynamic, scale_pct: 100 }
+    }
+}
+
+/// How the structure takes a strike's force pulse ([`ImpactResponse::pulse`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImpactPulse {
+    /// The pulse's peak force as a static load: a quasi-static solver's treatment of a
+    /// contact force. It ignores how long the pulse lasts against how fast the structure
+    /// can answer, so a short hard knock counts like a sustained push.
+    Static,
+    /// The structure's dynamic response: the static solution times the dynamic load factor
+    /// of the pulse at the structure's own frequency (Rayleigh's quotient of the solved
+    /// shape). A pulse much shorter than the structure's period loads it by its impulse;
+    /// a long one by its peak; up to 1.77 times the peak between.
+    #[default]
+    Dynamic,
+}
+
+impl ImpactPulse {
+    pub const ALL: [ImpactPulse; 2] = [ImpactPulse::Static, ImpactPulse::Dynamic];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ImpactPulse::Static => "static",
+            ImpactPulse::Dynamic => "dynamic",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<ImpactPulse> {
+        Self::ALL.into_iter().find(|m| m.name() == name)
+    }
+}
+
+/// How a predicted strike breaks bonds ([`FractureOptions::strike`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrikeRule {
+    /// Every bond whose share of the impact's Hertz peak force beats its tensile capacity.
+    Hertz,
+    /// The analytic local impact (`StrengthModel::ImpactLocal`'s): Hertz contact, an
+    /// energy ballistic limit with a plug cone, back-face spall, strain-rate strength;
+    /// a perforating shot gives up the limit's energy and leaves with its plug.
+    Analytic,
+    /// Radial damage, the common game rule, kept for comparison: every bond within
+    /// `radius_mm` millimetres of the point struck breaks, whatever the shot's speed or
+    /// mass and whatever the bond's strength. The radius is the weapon's. Not `Analytic`'s
+    /// physics: a setting to show what that rule looks like.
+    Radial { radius_mm: u32 },
+}
+
+impl StrikeRule {
+    /// Radial damage's radius where a host gives none (0.5 m).
+    pub const RADIAL_DEFAULT_MM: u32 = 500;
+    pub const ALL: [StrikeRule; 3] = [StrikeRule::Hertz, StrikeRule::Analytic, StrikeRule::Radial { radius_mm: Self::RADIAL_DEFAULT_MM }];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StrikeRule::Hertz => "hertz",
+            StrikeRule::Analytic => "analytic",
+            StrikeRule::Radial { .. } => "radial",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<StrikeRule> {
+        Self::ALL.into_iter().find(|m| m.name() == name)
+    }
 }
 
 /// How a destructible is anchored to the world.
@@ -672,6 +769,37 @@ pub struct ActorInfo {
     /// Still bonded to the world.
     pub anchored: bool,
     pub mass: f32,
+}
+
+/// An analytic strike's verdict (`StrikeRule::Analytic`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrikeReport {
+    /// The target's thickness along the shot's path (m).
+    pub thickness: f32,
+    /// The speed at and above which this shot goes through (m/s), and the speed it leaves
+    /// with (Recht and Ipson's; 0 when it does not go through).
+    pub ballistic_speed: f32,
+    pub residual_speed: f32,
+    pub crater: bool,
+    pub spall: bool,
+    pub perforation: bool,
+}
+
+/// What a stress destructible's fracture has decided (`World::destructible_fracture_report`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FractureReport {
+    /// Analytic strikes by outcome, in all.
+    pub bounces: u32,
+    pub craters: u32,
+    pub spalls: u32,
+    pub perforations: u32,
+    /// The load path's largest failure index so far (1: a bond at its strength).
+    pub peak_utilization: f32,
+    /// The in-step contact fracture's strikes solved and the bonds they broke.
+    pub contact_strikes: u32,
+    pub contact_breaks: u32,
+    /// The analytic strikes of the last frame that had one.
+    pub strikes: Vec<StrikeReport>,
 }
 
 /// Counts for one destructible.
