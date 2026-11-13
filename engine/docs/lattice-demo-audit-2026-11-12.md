@@ -288,3 +288,38 @@ Bonds broken and bodies awake are the same in every row (80 and 51; 2,312 and 1,
 **Idle tax now:** 1.8 ms on `demolish` (was 5.2 to 7.0), 5.3 ms on `war` (was 12.1). `war` at
 K = 1 strikes one house, so its row is not the same active set; a fair `war` baseline needs
 20 houses alone.
+
+### What remains of the idle tax (2026-11-12, after S3 and the host fix)
+
+`drive` (one kinematic car, nothing touched), wall median ms, with the fracture frame on and
+off (`RUBBLE_AB_SKIP_FRACTURE=1`, a measurement switch for scenes where nothing breaks):
+
+| K | chunks | fracture frame on | off | the frame's cost |
+|---|---|---|---|---|
+| 1 | 715 | 1.21 | 0.75 | 0.46 |
+| 64 | 45,760 | 1.50 | 0.84 | 0.66 |
+| 1,024 | 732,160 | 2.64 | 1.27 | 1.37 |
+
+So at K = 1,024 the remaining tax over one house (1.4 ms) is:
+
+- **0.9 ms: the fracture frame's growth with the world.** Skipping one part at a time put
+  about 0.35 ms in the ingest's per-chunk passes (clear, scan, merge) and about 0.7 ms in the
+  fracture's own per-chunk and per-bond passes (`fr_loads`, `fr_breaks`); the body copy is
+  free. This corrects the S0 note above: the `fracture` mark undercounted.
+- **0.5 ms: the rigid step's growth** (the per-collider mover list and the per-body passes).
+- The frame also costs 0.46 ms in a one-house world, and 0.2 ms of that is on the host.
+
+**Tried and dropped: sizing the ingest's per-row and per-record passes by the live contact
+count** (an indirect dispatch from a one-thread kernel). Results were identical and so was the
+time (2.56 to 2.60 ms against 2.64 to 2.66 ms, two runs each): those threads return on their
+first test without touching memory. The cost is in the passes that read and write a word per
+chunk or per bond, which is memory traffic, not thread count. The change was reverted.
+
+**What would remove the 0.9 ms.** The passes must not run over chunks that carry nothing:
+S2 as planned. The cheap first step is a gate on the GPU: when a frame's contact rows touch
+no chunk, no pulse is carried and no shot or host break is pending, the per-chunk and
+per-bond passes dispatch nothing. That covers a map being driven or walked through with
+nothing breaking. A frame where anything touches a chunk still pays in full until the passes
+run over lists of loaded chunks. Both touch `coupling.slang` and `fracture.slang`, whose
+regenerated Metal changes for every kernel in the file, so each needs the full digest guard.
+

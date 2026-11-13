@@ -2316,7 +2316,9 @@ impl World {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
         }
-        let fracture = self.fracture.active();
+        // RUBBLE_AB_SKIP_FRACTURE=1 (measurement only, a scene where nothing breaks): no
+        // fracture frame, to size what it costs.
+        let fracture = self.fracture.active() && std::env::var("RUBBLE_AB_SKIP_FRACTURE").is_err();
         #[cfg(feature = "stress")]
         if fracture && self.fracture_projectiles_dirty() {
             self.sync_projectiles()?;
