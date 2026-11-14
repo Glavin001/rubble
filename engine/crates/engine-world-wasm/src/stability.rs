@@ -633,6 +633,42 @@ mod tests {
         }
     }
 
+    /// The report of 2026-11-14 (vehicle lab, mountain, generated sedan): the car
+    /// stops on the slope (3 kJ), then tumbles on down it and leaves a torn-off part
+    /// behind, so its box is 104 m across at 441 kJ. The fall since its low (138 m of
+    /// it) explains that energy many times over: not a trip.
+    #[test]
+    fn a_part_left_behind_on_a_long_descent_does_not_trip() {
+        let mut g = StabilityGuard::new(1);
+        // Launched at 12 m/s, it comes to rest 20 m down, then tumbles 118 m further.
+        g.launched(12.0);
+        let mut t = 0.0;
+        for k in 0..=60 {
+            t = k as f64 / 60.0;
+            let s = 12.0 * (1.0 - k as f32 / 60.0);
+            assert_eq!(g.observe(t, &[car(s, 0.68 - 20.0 * k as f64 / 60.0, 5.39, 3.0e3)]), None, "t = {t}");
+        }
+        for k in 1..=660 {
+            t = 1.0 + k as f64 / 60.0;
+            let f = k as f64 / 660.0;
+            // The part comes off a quarter of the way down and stays where it fell.
+            let size = if f < 0.25 { 5.39 } else { 5.39 + (f - 0.25) as f32 * 132.0 };
+            let sample = car((20.6 * f) as f32, -19.32 - 118.63 * f, size, 3.0e3 + 131.0e3 * f);
+            assert_eq!(g.observe(t, &[sample]), None, "t = {t}, {size} m across");
+        }
+    }
+
+    /// The same descent, but the car is 104 m across with far more energy than its
+    /// fall since the low can have given it: that still trips.
+    #[test]
+    fn a_blow_up_on_a_descent_still_trips() {
+        let mut g = StabilityGuard::new(1);
+        assert_eq!(g.observe(0.0, &[car(0.0, 0.68, 5.39, 3.0e3)]), None);
+        // 5 m lower (71 kJ of fall), 104 m across, 2,000 kJ.
+        let trip = g.observe(1.0, &[car(0.0, -4.32, 104.0, 2.0e6)]).cloned();
+        assert!(trip.is_some_and(|t| t.reason.contains("104 m across")), "no trip");
+    }
+
     /// `n` nodes on a line `length` long, all at velocity `v`, 10 kg each.
     fn nodes(n: usize, length: f32, v: [f32; 3]) -> Vec<u32> {
         (0..n)
