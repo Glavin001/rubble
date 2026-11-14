@@ -16,7 +16,7 @@ use engine_softbody::authoring::skin::{
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 fn settings() -> ExplicitBeamsSettings {
     // The page's: drag and turbulence on, fast inverse square root.
@@ -336,14 +336,18 @@ fn skin_stats(
     st
 }
 
-/// A CPU z-buffer render of the drawn skin (the renderer's cut: per pixel,
-/// the tear interpolated across the triangle, discarded past ½), lit flat
-/// from its face normal; back faces in dark red so flips show. `dir` points
-/// from the car toward the eye.
-fn render_png(v: &ShowcaseVisual, pos: &[Vec3], tear: &[f32], path: &str, dir: Vec3) {
-    let (w, h) = (1400usize, 900usize);
+/// The camera: looking at `c` from along `dir` (toward the eye), `rad`
+/// half the view's height (orthographic).
+#[derive(Clone, Copy)]
+struct Cam {
+    c: Vec3,
+    rad: f32,
+    dir: Vec3,
+}
+
+/// A camera framing `pos` (1st–99th percentile) from `dir`.
+fn frame_cam(pos: &[Vec3], dir: Vec3) -> Cam {
     let fin: Vec<Vec3> = pos.iter().copied().filter(|p| p.is_finite()).collect();
-    // Frame the car: the median centre, the 2nd–98th percentile extent.
     let pct = |f: fn(&Vec3) -> f32, q: f32| {
         let mut a: Vec<f32> = fin.iter().map(f).collect();
         a.sort_by(f32::total_cmp);
@@ -351,19 +355,38 @@ fn render_png(v: &ShowcaseVisual, pos: &[Vec3], tear: &[f32], path: &str, dir: V
     };
     let lo = Vec3::new(pct(|p| p.x, 0.01), pct(|p| p.y, 0.01), pct(|p| p.z, 0.01));
     let hi = Vec3::new(pct(|p| p.x, 0.99), pct(|p| p.y, 0.99), pct(|p| p.z, 0.99));
-    let c = 0.5 * (lo + hi);
-    let rad = 0.5 * (hi - lo).length() * 1.25;
-    let fwd = -dir.normalize();
+    Cam {
+        c: 0.5 * (lo + hi),
+        rad: 0.5 * (hi - lo).length() * 1.25,
+        dir,
+    }
+}
+
+/// A CPU z-buffer render of the drawn skin (the renderer's cut: per pixel,
+/// the tear interpolated across the triangle, discarded past ½), lit flat
+/// from its face normal; back faces in dark red so flips show. With `lines`
+/// (node pairs and colours) the skeleton is drawn over it.
+fn raster(
+    v: &ShowcaseVisual,
+    pos: &[Vec3],
+    tear: &[f32],
+    cam: Cam,
+    (w, h): (usize, usize),
+    lines: Option<(&[Vec3], &[(u32, u32, [u8; 3])])>,
+) -> Vec<[u8; 3]> {
+    let fwd = -cam.dir.normalize();
     let right = fwd.cross(Vec3::Y).normalize();
     let up = right.cross(fwd);
-    let scale = (h as f32 * 0.5) / rad;
+    let scale = (h as f32 * 0.5) / cam.rad;
     let proj = |p: Vec3| {
-        let d = p - c;
+        let d = p - cam.c;
         (w as f32 * 0.5 + d.dot(right) * scale, h as f32 * 0.5 - d.dot(up) * scale, d.dot(fwd))
     };
+    let dir = cam.dir.normalize();
     let mut z = vec![f32::MAX; w * h];
     let mut img = vec![[38u8, 42, 52]; w * h];
     let light = Vec3::new(0.4, 0.8, 0.45).normalize();
+    let ghost = lines.is_some();
     for t in v.indices.chunks_exact(3) {
         let ids = [t[0] as usize, t[1] as usize, t[2] as usize];
         let p = ids.map(|i| pos[i]);
@@ -382,20 +405,21 @@ fn render_png(v: &ShowcaseVisual, pos: &[Vec3], tear: &[f32], path: &str, dir: V
         let facing = nn.dot(dir) >= 0.0;
         let col = v.colors[ids[0]];
         let lit = 0.25 + 0.75 * nn.dot(light).max(0.0);
+        let dim = if ghost { 0.45 } else { 1.0 };
         let rgb = if facing {
-            [col[0], col[1], col[2]].map(|x| ((x.powf(1.0 / 2.2) * lit).min(1.0) * 255.0) as u8)
+            [col[0], col[1], col[2]].map(|x| ((x.powf(1.0 / 2.2) * lit * dim).min(1.0) * 255.0) as u8)
         } else {
-            [(110.0 * lit) as u8, 10, 10]
+            [(110.0 * lit * dim) as u8, 10, 10]
         };
         let s = p.map(proj);
-        let (x0, x1) = (s.iter().map(|q| q.0).fold(f32::MAX, f32::min).max(0.0) as usize, s.iter().map(|q| q.0).fold(f32::MIN, f32::max).min(w as f32 - 1.0) as usize);
-        let (y0, y1) = (s.iter().map(|q| q.1).fold(f32::MAX, f32::min).max(0.0) as usize, s.iter().map(|q| q.1).fold(f32::MIN, f32::max).min(h as f32 - 1.0) as usize);
+        let (x0, x1) = (s.iter().map(|q| q.0).fold(f32::MAX, f32::min).max(0.0), s.iter().map(|q| q.0).fold(f32::MIN, f32::max).min(w as f32 - 1.0));
+        let (y0, y1) = (s.iter().map(|q| q.1).fold(f32::MAX, f32::min).max(0.0), s.iter().map(|q| q.1).fold(f32::MIN, f32::max).min(h as f32 - 1.0));
         let area = (s[1].0 - s[0].0) * (s[2].1 - s[0].1) - (s[2].0 - s[0].0) * (s[1].1 - s[0].1);
         if area.abs() < 1e-9 || x0 > x1 || y0 > y1 {
             continue;
         }
-        for y in y0..=y1 {
-            for x in x0..=x1 {
+        for y in y0 as usize..=y1 as usize {
+            for x in x0 as usize..=x1 as usize {
                 let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
                 let w0 = ((s[1].0 - px) * (s[2].1 - py) - (s[2].0 - px) * (s[1].1 - py)) / area;
                 let w1 = ((s[2].0 - px) * (s[0].1 - py) - (s[0].0 - px) * (s[2].1 - py)) / area;
@@ -415,12 +439,182 @@ fn render_png(v: &ShowcaseVisual, pos: &[Vec3], tear: &[f32], path: &str, dir: V
             }
         }
     }
+    if let Some((nodes, beams)) = lines {
+        for &(a, b, col) in beams {
+            let (pa, pb) = (proj(nodes[a as usize]), proj(nodes[b as usize]));
+            let steps = ((pb.0 - pa.0).abs().max((pb.1 - pa.1).abs()) as usize).clamp(1, 4000);
+            for k in 0..=steps {
+                let t = k as f32 / steps as f32;
+                let (x, y) = (pa.0 + (pb.0 - pa.0) * t, pa.1 + (pb.1 - pa.1) * t);
+                if x >= 0.0 && y >= 0.0 && (x as usize) < w && (y as usize) < h {
+                    img[y as usize * w + x as usize] = col;
+                }
+            }
+        }
+    }
+    img
+}
+
+fn write_png(img: &[[u8; 3]], (w, h): (usize, usize), path: &str) {
     let f = std::fs::File::create(path).unwrap();
     let mut e = png::Encoder::new(std::io::BufWriter::new(f), w as u32, h as u32);
     e.set_color(png::ColorType::Rgb);
     e.set_depth(png::BitDepth::Eight);
     let mut wr = e.write_header().unwrap();
     wr.write_image_data(&img.concat()).unwrap();
+}
+
+fn render_png(v: &ShowcaseVisual, pos: &[Vec3], tear: &[f32], path: &str, dir: Vec3) {
+    let size = (1400, 900);
+    let img = raster(v, pos, tear, frame_cam(pos, dir), size, None);
+    write_png(&img, size, path);
+}
+
+/// The skin of `v` for solver `s`: positions and tears as drawn.
+fn drawn_skin(v: &ShowcaseVisual, s: &ExplicitBeams) -> (Vec<Vec3>, Vec<f32>) {
+    let nodes = s.positions();
+    let bs = states(s);
+    let us = unit_states(v, &bs);
+    let (pos, _) = deform_beams(v, &nodes, Some(&us), Some(&bs));
+    let t = vertex_tears(v, &nodes, Some(&bs), &pos);
+    (pos, t)
+}
+
+/// The skeleton's live beams (green; yellow → red by plastic strain).
+fn skeleton(s: &ExplicitBeams) -> Vec<(u32, u32, [u8; 3])> {
+    s.beams
+        .iter()
+        .filter(|b| !b.broken && b.k > 0.0)
+        .map(|b| {
+            let pl = ((b.rest - b.rest0).abs() / b.rest0.max(1e-6) / 0.08).min(1.0);
+            let c = if pl < 0.0125 { [40, 220, 90] } else { [255, (215.0 * (1.0 - pl)) as u8 + 25, 20] };
+            (b.a, b.b, c)
+        })
+        .collect()
+}
+
+/// A side-by-side film frame: the triangle binding (left) and the node-frame
+/// skin (right) of the same solver state, same camera.
+struct Film {
+    dir: String,
+    k: usize,
+    old: ShowcaseVisual,
+    new: ShowcaseVisual,
+}
+
+impl Film {
+    fn frame(&mut self, s: &ExplicitBeams, cam: Cam, overlay: bool) {
+        let path = format!("{}/f{:05}.png", self.dir, self.k);
+        self.k += 1;
+        if std::path::Path::new(&path).exists() {
+            return;
+        }
+        let (w, h) = (960usize, 720usize);
+        let nodes = s.positions();
+        let sk = skeleton(s);
+        let lines = overlay.then_some((&nodes[..], &sk[..]));
+        let (po, to) = drawn_skin(&self.old, s);
+        let (pn, tn) = drawn_skin(&self.new, s);
+        let a = raster(&self.old, &po, &to, cam, (w, h), lines);
+        let b = raster(&self.new, &pn, &tn, cam, (w, h), lines);
+        let mut img = Vec::with_capacity(2 * w * h);
+        for y in 0..h {
+            img.extend_from_slice(&a[y * w..(y + 1) * w]);
+            img.extend_from_slice(&b[y * w..(y + 1) * w]);
+        }
+        write_png(&img, (2 * w, h), &path);
+    }
+
+    /// An orbit of the settled state: `n` frames round the vertical, skin
+    /// then with the skeleton.
+    fn orbit(&mut self, s: &ExplicitBeams, cam: Cam, n: usize) {
+        for overlay in [false, true] {
+            for k in 0..n {
+                let a = std::f32::consts::TAU * k as f32 / n as f32;
+                let d = Quat::from_rotation_y(a) * cam.dir;
+                self.frame(s, Cam { dir: d, ..cam }, overlay);
+            }
+        }
+    }
+}
+
+fn film(b: &Built, scene: &str, out: &str) {
+    let mut old = showcase_visual_triangles_lod(b, 1.0).unwrap();
+    raycast_visual(&mut old, &b.truck).unwrap();
+    let new = visual_frames(b);
+    let dir = format!("{out}/{scene}");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut f = Film { dir, k: 0, old, new };
+    match scene {
+        "wall" => {
+            let vel = Vec3::new(0.0, 0.0, 70.0 / 3.6);
+            let mut s = spawn(b, Vec3::ZERO, 0.0, vel);
+            let front = s.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+            s.boxes.push(StaticBox::centered(Vec3::new(0.0, 1.5, front + 0.6), Vec3::new(8.0, 1.5, 0.3)));
+            // Close on the grille and bonnet: the front, from ahead-left, up.
+            let cam = Cam { c: Vec3::new(0.0, 0.6, front - 0.3), rad: 1.5, dir: Vec3::new(-0.7, 0.55, 1.0).normalize() };
+            for k in 0..90 {
+                s.frame();
+                if k < 45 || k % 3 == 0 {
+                    f.frame(&s, cam, false);
+                }
+            }
+            f.orbit(&s, Cam { c: cam.c - Vec3::Z * 1.0, rad: 2.2, ..cam }, 48);
+        }
+        "side" => {
+            let struck = spawn(b, Vec3::ZERO, 0.0, Vec3::ZERO);
+            let p0 = struck.positions();
+            let rear = b.skeleton.parts.iter().position(|p| p == "door_r_l").unwrap() as u16;
+            let door: Vec<Vec3> = (0..b.skeleton.nodes.len()).filter(|&i| b.skeleton.nodes[i].part == rear).map(|i| p0[i]).collect();
+            let zd = door.iter().map(|p| p.z).sum::<f32>() / door.len() as f32;
+            let hw = p0.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+            let len = b.def.profile.length;
+            let striker = spawn(b, Vec3::new(hw + 0.5 * len + 0.3, 0.0, zd), -90.0, Vec3::new(-60.0 / 3.6, 0.0, 0.0));
+            let mut w = ExplicitBeamsWorld::new(vec![struck, striker]);
+            // The struck car's rear door, from its left, the striker out of view behind the camera's side.
+            let cam = Cam { c: Vec3::new(hw, 0.7, zd), rad: 1.6, dir: Vec3::new(1.0, 0.45, -0.35).normalize() };
+            for k in 0..90 {
+                w.frame_60();
+                if k < 45 || k % 3 == 0 {
+                    f.frame(&w.vehicles[0], cam, false);
+                }
+            }
+            f.orbit(&w.vehicles[0], Cam { c: Vec3::new(0.0, 0.7, 0.0) + centroid(&w.vehicles[0].positions()) * Vec3::new(1.0, 0.0, 1.0), rad: 3.0, ..cam }, 48);
+        }
+        _ => {
+            // The grab: the front left door's outermost node 0.5, 2 and 10 m
+            // outward (50 kN/m, the page's default), each released.
+            use engine_softbody::explicit_beams::{Grab, STEP};
+            let mut s = spawn(b, Vec3::ZERO, 0.0, Vec3::ZERO);
+            s.run(0.3);
+            let part = scene.strip_prefix("grab_").unwrap_or("door_f_l");
+            let pi = b.skeleton.parts.iter().position(|p| p == part).unwrap() as u16;
+            let p = s.positions();
+            let c = centroid(&p);
+            let node = (0..b.skeleton.nodes.len())
+                .filter(|&i| b.skeleton.nodes[i].part == pi)
+                .max_by(|&x, &y| (p[x] - c).length().total_cmp(&(p[y] - c).length()))
+                .unwrap();
+            let dirn = ((p[node] - c) * Vec3::new(1.0, 0.3, 1.0)).normalize();
+            let k = 5.0e4;
+            let m = s.nodes[node].mass;
+            let cd = (2.0 * (k * m).sqrt()).min(0.5 * m / STEP);
+            let cam = Cam { c: c + dirn * 1.5, rad: 3.2, dir: (dirn + Vec3::new(0.0, 0.6, 0.0) + dirn.cross(Vec3::Y) * 0.6).normalize() };
+            for dist in [0.5f32, 2.0, 10.0] {
+                let start = s.positions()[node];
+                for k2 in 0..120u32 {
+                    s.grab = (k2 < 60).then(|| Grab { node: node as u32, target: start + dirn * dist * (k2 as f32 / 30.0).min(1.0), k, c: cd });
+                    s.frame();
+                    if k2 % 2 == 0 {
+                        f.frame(&s, Cam { rad: if dist > 5.0 { 7.0 } else { cam.rad }, c: if dist > 5.0 { c + dirn * 5.0 } else { cam.c }, ..cam }, false);
+                    }
+                }
+            }
+            s.grab = None;
+            f.orbit(&s, Cam { c, rad: 3.0, ..cam }, 48);
+        }
+    }
+    eprintln!("{scene}: {} frames in {out}/{scene}", f.k);
 }
 
 struct Car {
@@ -519,6 +713,12 @@ fn report(tag: &str, v: &ShowcaseVisual, b: &Built, s: &ExplicitBeams, car: &Car
     for (i, _) in fl.iter().enumerate().filter(|(_, &x)| x).take(6) {
         describe_node(s, b, i);
     }
+}
+
+fn visual_frames(b: &Built) -> ShowcaseVisual {
+    let mut v = showcase_visual_lod(b, 1.0).unwrap();
+    raycast_visual(&mut v, &b.truck).unwrap();
+    v
 }
 
 fn visual(b: &Built) -> ShowcaseVisual {
@@ -722,6 +922,10 @@ fn main() {
         std::fs::create_dir_all(d).unwrap();
     }
     let out = out.as_deref();
+    if let Some(sc) = scene.strip_prefix("film:") {
+        film(&b, sc, &std::env::var("FILM").unwrap_or_else(|_| "out/skin-film".into()));
+        return;
+    }
     match scene {
         "wall" => wall(&b, &v, kmh, 1, out),
         "wall2" => wall(&b, &v, kmh, 3, out),
