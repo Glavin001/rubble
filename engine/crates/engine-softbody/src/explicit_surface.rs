@@ -280,6 +280,7 @@ impl ExplicitBeams {
             casts.fast.iter_mut().for_each(|c| *c = None);
         }
         let any_fast = casts.fast.iter().any(Option::is_some);
+        let mut queries = 0u32;
         if self.surface_segs.is_none() {
             self.surface_segs = Some(surface_segments(self));
         }
@@ -302,6 +303,7 @@ impl ExplicitBeams {
                 let x = [i0, i1, i2].map(|i| self.origin + self.nodes[i as usize].pos);
                 for (k, (s, lo, hi)) in shapes.iter().enumerate() {
                     let hit = if near(&x, r, *lo, *hi) {
+                        queries += u32::from(!gather);
                         triangle_contact(&x, s, r)
                     } else {
                         None
@@ -333,6 +335,7 @@ impl ExplicitBeams {
                 let x = [a, bb].map(|i| self.origin + self.nodes[i as usize].pos);
                 for (slot, (s, lo, hi)) in shapes.iter().enumerate() {
                     let pair = if seg_near(&x, r, *lo, *hi) {
+                        queries += u32::from(!gather);
                         segment_contact(&x, s, r)
                     } else {
                         None
@@ -390,6 +393,7 @@ impl ExplicitBeams {
         }
         self.surface_segs = Some(segs);
         self.surface_last = found.len() as u32;
+        self.surface_queries = queries;
         self.surface_force = glam::DVec3::ZERO;
         if found.is_empty() {
             return;

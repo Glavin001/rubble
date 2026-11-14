@@ -984,6 +984,9 @@ pub struct ExplicitBeams {
     pub surface_contact: bool,
     /// The surface pass's hits in the last step (a statistic; not simulated state).
     pub surface_last: u32,
+    /// The surface pass's narrow-phase queries in the last step (triangles and segments
+    /// against a shape, casts aside): a work counter, not simulated state.
+    pub surface_queries: u32,
     /// The surface pass's segments (beam-edge contact, [`crate::explicit_surface::surface_segments`]),
     /// found at its first step.
     pub surface_segs: Option<Vec<u32>>,
@@ -1720,6 +1723,7 @@ impl ExplicitBeams {
             dissipative_contact: false,
             surface_contact: false,
             surface_last: 0,
+            surface_queries: 0,
             surface_segs: None,
             surface_force: glam::DVec3::ZERO,
             contact_shift: Vec::new(),
