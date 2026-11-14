@@ -51,10 +51,25 @@
     .mode { display: none; }
     body.shoot .mode.shoot, body.compactor .mode.compactor, body.mountain .mode.mountain, body.drive .mode.drive, body.crash .mode.crash { display: block; }
     .note { color: #8d96aa; font-size: 11.5px; }
+    .tog { position: fixed; top: 10px; z-index: 6; padding: 6px 12px; font-weight: 650; background: rgba(12, 15, 22, 0.85); backdrop-filter: blur(6px); }
+    #togHud { left: 14px; } #togRight { right: 14px; }
+    #hud, #right { top: 50px; max-height: calc(100vh - 96px); max-height: calc(100dvh - 96px); }
+    body.hideHud #hud, body.hideRight #right, body.clean .tog { display: none; }
+    @media (max-width: 760px) {
+      .tog { top: 8px; padding: 8px 14px; } #togHud { left: 8px; } #togRight { right: 8px; }
+      #hud, #right { left: 8px; right: 8px; top: 50px; width: auto; max-width: none; max-height: calc(100dvh - 130px); }
+      button, select, input[type=number] { padding: 7px 10px; font-size: 14px; }
+      input[type=checkbox] { width: 18px; height: 18px; }
+      #perf { left: 8px; right: 8px; bottom: 8px; transform: none; white-space: normal; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; }
+      #perf canvas { display: none; }
+      #caption { left: 8px; right: 8px; bottom: 8px; max-width: none; }
+    }
   </style>
 </head>
 <body>
   <canvas id="c" tabindex="0"></canvas>
+  <button id="togHud" class="tog" aria-controls="hud" title="Show or hide the controls (H)">☰ Controls</button>
+  <button id="togRight" class="tog" aria-controls="right" title="Show or hide the readouts (J)">Readouts</button>
   <div id="hud" class="panel">
     <h1>Rubble · Vehicle Lab</h1>
     <div class="sub" id="subtitle">one soft-body car, and things to do to it</div>
@@ -553,6 +568,27 @@
     $('pause').onclick = () => { paused = !paused; $('pause').classList.toggle('on', paused); };
     $('step').onclick = () => { paused = true; $('pause').classList.add('on'); stepOnce = true; };
 
+    // ---------------------------------------------------------------- panels
+    // Each panel hides behind its button. A narrow window starts with both hidden and
+    // shows one at a time (they cover the same area there).
+    const narrow = matchMedia('(max-width: 760px)');
+    const panelPref = (k) => { try { return localStorage.getItem('lab.' + k); } catch { return null; } };
+    const setPanel = (cls, hidden, save = true) => {
+      document.body.classList.toggle(cls, hidden);
+      if (!hidden && narrow.matches) document.body.classList.add(cls === 'hideHud' ? 'hideRight' : 'hideHud');
+      for (const [id, c] of [['togHud', 'hideHud'], ['togRight', 'hideRight']]) {
+        const off = document.body.classList.contains(c);
+        document.getElementById(id).classList.toggle('on', !off);
+        document.getElementById(id).setAttribute('aria-expanded', String(!off));
+        if (save && !narrow.matches) try { localStorage.setItem('lab.' + c, off ? '1' : '0'); } catch {}
+      }
+    };
+    const togglePanel = (cls) => setPanel(cls, !document.body.classList.contains(cls));
+    document.getElementById('togHud').onclick = () => togglePanel('hideHud');
+    document.getElementById('togRight').onclick = () => togglePanel('hideRight');
+    for (const c of ['hideHud', 'hideRight']) setPanel(c, narrow.matches ? true : panelPref(c) === '1', false);
+    narrow.addEventListener('change', () => { if (narrow.matches) for (const c of ['hideHud', 'hideRight']) setPanel(c, true, false); });
+
     // ---------------------------------------------------------------- input
     const keys = new Set();
     addEventListener('keydown', (e) => {
@@ -560,6 +596,8 @@
       keys.add(e.code);
       if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
       if (e.code === 'KeyR') restart();
+      if (e.code === 'KeyH') togglePanel('hideHud');
+      if (e.code === 'KeyJ') togglePanel('hideRight');
       if (e.code === 'KeyT') setSlow(slow() === 1 ? 0.25 : slow() === 0.25 ? 0.0625 : 1);
       if (e.code === 'KeyP') $('pause').click();
       if (e.code === 'Period') $('step').click();
