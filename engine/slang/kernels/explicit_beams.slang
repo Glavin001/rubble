@@ -3590,6 +3590,21 @@ void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, flo
     }
 }
 
+// Whether contacter h is provably too far from triangle t's plane for tryContact to do
+// anything: a contact (tryContact's triangleHit, or anti-clip's selfClip, held or
+// crossed) needs the signed distance delta = rn · (p - p0) of triangleHit within
+// max(r, CLIP_DEPTH); computed here as triangleHit computes it, with an allowance for
+// rounding. tryContact has no effect before it returns for such a pair.
+bool pairFar(TriGeo t, uint h, float3 origin, float r)
+{
+    if (!t.solvable) return false;
+    float3 p = nf3(origin + gNodes[h * 3u].xyz);
+    float3 q = nf3(p - t.p0);
+    float delta = sdot(t.rn, q);
+    float reach = max(r, CLIP_DEPTH);
+    return abs(delta) > reach * 1.001 + 1.0e-4;
+}
+
 // A step without the grid finds its self-collision candidates early: the beam
 // phase (positions are final after the node phase) lists the (triangle, candidate)
 // pairs that pass the tests before tryContact's hit test (the box, and for a grid
@@ -3727,6 +3742,7 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
                    uint groupCount, uint parity);
 void piecesClearBuild();
 void piecesEnd(uint v);
+bool pairFar(TriGeo t, uint h, float3 origin, float r);
 void piecesTestTriangle(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff, uint candCount,
                         uint beamOff, uint groupOff, uint groupCount, uint parity);
 
@@ -4073,6 +4089,7 @@ void piecesTestTriangle(uint gt, uint sub, uint subs, float3 origin, float r, fl
                 if (!covered) continue;
             }
         }
+        if (pairFar(t, h, origin, r)) continue;
         tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
     }
 }
@@ -4332,7 +4349,9 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
             if (!covered) return;
         }
     }
-    tryContact(triGeoLoad(gt), h, origin, r, beamOff, groupOff, groupCount, parity);
+    TriGeo t = triGeoLoad(gt);
+    if (pairFar(t, h, origin, r)) return;
+    tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
 }
 
 // The step's tests of the list (uniform; after the build or in its place): a pair a
