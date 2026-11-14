@@ -888,13 +888,19 @@ uint cplCountBuild(uint v, float3 x, float3 vel, uint nl, uint shapes, uint acc,
 }
 
 // cplCountBy with the list (step s; the cull on).
+void cplCountListedGr(uint v, uint lane, uint lanes, uint s, uint2 gr);
 void cplCountListed(uint v, uint lane, uint lanes, uint s)
+{
+    cplCountListedGr(v, lane, lanes, s, cplGsRange(v));
+}
+// The same with the spheres read from workgroup memory for the shapes below gr.y
+// (cplGsRange), from gNext for the rest (gr (0, 0): every one from gNext).
+void cplCountListedGr(uint v, uint lane, uint lanes, uint s, uint2 gr)
 {
     uint4 hdr = cplVeh(v);
     if (hdr.y == 0u) return;
     uint4 r0 = gStatic[v * 4u];
     uint acc = cplAcc(v);
-    uint2 gr = cplGsRange(v);
     uint2 gn = cplGsNodes(v);
     uint la = cplListAcc(v);
     float E = asfloat(gAcc[la].load());
@@ -1008,10 +1014,195 @@ float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, flo
     return f;
 }
 
+// --- The folded step (lossless; 2 barriers a step, not 4) ---
+// The coupling's step was four phases (cplReactBy | cplIntegrate | cplSpheresBy |
+// cplCountBy), a barrier after each. Folded, it is two:
+//  B  each shape's lane computes its body's integration itself (the sums of the body's
+//     shapes read, not cleared, in shape order, the arithmetic of cplReactBy and
+//     cplIntegrateBodySplit: the same bits) and from it the shape's sphere and step
+//     frame (cplSpheresBy's arithmetic) into gNext, and the list's maxima; each body's
+//     lane computes the same integration into registers and clears the body's count;
+//  C  each body's lane writes its record; each shape's lane does cplReactBy's writes
+//     (the window impulse and moment, its sums cleared) and copies its sphere into
+//     workgroup memory; every node is counted (cplCountListedGr, the spheres from
+//     gNext: their workgroup copies are being written in this phase).
+// Nothing in B writes what B reads (the body records, the sums, the spheres' workgroup
+// words); nothing in C reads what C writes. The node phase after C's barrier reads the
+// same records, sums, counts and spheres as after the four phases. Only for the solo
+// frame, with the list and the workgroup copies on, every sphere in workgroup memory
+// (cplSplit) and no more bodies than lanes (one a lane: its registers across the
+// barrier); otherwise the four phases. Off with the coupling header's bit 1024.
+bool cplFoldOn(uint v, uint lanes)
+{
+    if ((gsCpl[0] & 1024u) != 0u || !cplListOn()) return false;
+    uint4 hdr = cplVeh(v);
+    return cplSplit(v, hdr.y) && hdr.x <= lanes;
+}
+
+// Body j's integration over this step's sums (cplReactBy then cplIntegrateBodySplit, the
+// same arithmetic and order; the sums read, not cleared): its new centre (.w 1/M), rotation,
+// velocity (.w its share) and angular velocity.
+void cplBodyStepped(uint v, uint j, uint shapes, out float4 c0, out float4 q, out float4 c2, out float3 w)
+{
+    uint b = cplBody(v, j);
+    uint acc = cplAcc(v);
+    uint nb = cplB();
+    c0 = asfloat(gMisc[b]);
+    q = asfloat(gMisc[b + 1u]);
+    c2 = asfloat(gMisc[b + 2u]);
+    float4 c3 = asfloat(gMisc[b + 3u]);
+    float4 c4 = asfloat(gMisc[b + 4u]);
+    float3 force = float3(0.0, 0.0, 0.0);
+    float3 torque = float3(0.0, 0.0, 0.0);
+    // A body of infinite mass integrates no force: its sums are not read.
+    if (c0.w != 0.0)
+    {
+        uint range = asuint(c4.w);
+        uint k0 = range == 0u ? 0u : (range & 0xFFFFu) - 1u;
+        uint k1 = range == 0u ? shapes : min(range >> 16, shapes);
+        uint s0 = cplShape(v, 0u);
+        for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
+        {
+            uint at = s0 + k * CPL_SHAPE_RECS;
+            if (gMisc[at].y != j) continue;
+            uint s = acc + nb + 6u * k;
+            float3 F = float3(float(gAcc[s].load()), float(gAcc[s + 1u].load()), float(gAcc[s + 2u].load())) * (1.0 / FIXED);
+            float3 M = float3(float(gAcc[s + 3u].load()), float(gAcc[s + 4u].load()), float(gAcc[s + 5u].load())) * (1.0 / FIXED);
+            float3 ref = asfloat(gMisc[at + 6u].xyz);
+            float3 t = M + cross(ref - c0.xyz, F);
+            force += F;
+            torque += t;
+        }
+    }
+    float3 vel = c2.xyz;
+    w = c3.xyz;
+    if (c0.w != 0.0)
+    {
+        vel += force * (c0.w * STEP);
+        float3 lt = cplRot(float4(-q.xyz, q.w), torque);
+        w += cplRot(q, c4.xyz * lt) * STEP;
+    }
+    float3 pos = c0.xyz + vel * STEP;
+    if (any(w != float3(0.0, 0.0, 0.0)))
+    {
+        float4 dq = cplQmul(float4(w, 0.0), q);
+        q = normalize(q + 0.5 * STEP * dq);
+    }
+    c0 = float4(pos, c0.w);
+    c2 = float4(vel, c2.w);
+}
+
+// Phase B for shape k: its sphere and step frame (cplSpheresBy's arithmetic) from its
+// body's pose this step (stepped: cplBodyStepped; else the record's), into gNext only.
+void cplShapeFolded(uint v, uint k, uint shapes, bool stepped)
+{
+    uint at = cplShape(v, k);
+    uint4 h = gMisc[at];
+    float4 c0;
+    float4 q;
+    if (stepped)
+    {
+        float4 c2;
+        float3 w;
+        cplBodyStepped(v, h.y, shapes, c0, q, c2, w);
+    }
+    else
+    {
+        uint b = cplBody(v, h.y);
+        c0 = asfloat(gMisc[b]);
+        q = asfloat(gMisc[b + 1u]);
+    }
+    float3 c = c0.xyz;
+    float4 lp = asfloat(gMisc[at + 1u]);
+    float4 pr = asfloat(gMisc[at + 3u]);
+    float3 p = c + cplRot(q, lp.xyz);
+    float big = max(max(abs(p.x), abs(p.y)), max(abs(p.z), abs(pr.z)));
+    float r = pr.z * 1.001 + 0.01 + 1.0e-4 * big;
+    bool finite = all(abs(p) < 1.0e30) && abs(r) < 1.0e18;
+    uint s = cplSphere(v, k);
+    gNext[s] = asuint(p.x);
+    gNext[s + 1u] = asuint(p.y);
+    gNext[s + 2u] = asuint(p.z);
+    gNext[s + 3u] = asuint(finite ? r * r : 3.0e38);
+    cplFrameStore(s, h, lp, pr, cplShapeRot(q, asfloat(gMisc[at + 2u])));
+}
+
+// The folded step of vehicle v (every lane, uniform: cplFoldOn): phases B and C, the
+// barrier between and after.
+void cplStepFolded(uint v, uint lane, uint lanes, uint s)
+{
+    uint4 hdr = cplVeh(v);
+    bool stepped = s > 0u;
+    // B
+    for (uint k = lane, kStop = EB_END(k, hdr.y, lanes); k < kStop; k += lanes) cplShapeFolded(v, k, hdr.y, stepped);
+    cplListShapes(v, lane, lanes, s);
+    bool body = stepped && lane < hdr.x;
+    float4 c0 = float4(0.0, 0.0, 0.0, 0.0);
+    float4 q = float4(0.0, 0.0, 0.0, 1.0);
+    float4 c2 = float4(0.0, 0.0, 0.0, 0.0);
+    float3 w = float3(0.0, 0.0, 0.0);
+    if (body)
+    {
+        cplBodyStepped(v, lane, hdr.y, c0, q, c2, w);
+        gAcc[cplAcc(v) + lane].store(0);
+    }
+    sync();
+    // C
+    if (body)
+    {
+        uint b = cplBody(v, lane);
+        gMisc[b] = asuint(c0);
+        gMisc[b + 1u] = asuint(q);
+        gMisc[b + 2u] = asuint(c2);
+        gMisc[b + 3u] = uint4(asuint(w), gMisc[b + 3u].w);
+    }
+    uint2 gr = cplGsRange(v);
+    uint acc = cplAcc(v);
+    uint nb = cplB();
+    for (uint k = lane, kStop = EB_END(k, hdr.y, lanes); k < kStop; k += lanes)
+    {
+        if (stepped)
+        {
+            // cplReactBy's writes (every shape's body is below the lanes here).
+            uint at = cplShape(v, k);
+            uint sm = acc + nb + 6u * k;
+            float3 F = float3(float(gAcc[sm].load()), float(gAcc[sm + 1u].load()), float(gAcc[sm + 2u].load())) * (1.0 / FIXED);
+            float3 M = float3(float(gAcc[sm + 3u].load()), float(gAcc[sm + 4u].load()), float(gAcc[sm + 5u].load())) * (1.0 / FIXED);
+            for (uint u = 0u; u < 6u; u++) gAcc[sm + u].store(0);
+            float4 imp = asfloat(gMisc[at + 4u]);
+            float4 mom = asfloat(gMisc[at + 5u]);
+            gMisc[at + 4u] = asuint(float4(imp.xyz + F * STEP, max(imp.w, length(F))));
+            gMisc[at + 5u] = asuint(float4(mom.xyz + M * STEP, 0.0));
+        }
+        if (k < gr.y)
+        {
+            uint sp = cplSphere(v, k);
+            uint g = CPL_GS_SPH + 4u * (gr.x + k);
+            gsCpl[g] = gNext[sp];
+            gsCpl[g + 1u] = gNext[sp + 1u];
+            gsCpl[g + 2u] = gNext[sp + 2u];
+            gsCpl[g + 3u] = gNext[sp + 3u];
+        }
+    }
+    cplCountListedGr(v, lane, lanes, s, uint2(0u, 0u));
+    sync();
+}
+
 // The coupling's part of a step of vehicle v, at the step's start (uniform `on`).
 void coupleStep(uint v, uint lane, uint s, uint on)
 {
     if (on == 0u) return;
+    // Folded (2 barriers; cplStepFolded): the solo frame's usual case.
+    if (cplFoldOn(v, LANES))
+    {
+#ifdef EB_ABLATE
+        if ((gP.ablate & 57344u) == 0u)
+#endif
+        {
+            cplStepFolded(v, lane, LANES, s);
+            return;
+        }
+    }
 #ifdef EB_ABLATE
     // Measurement only: 8192 the bodies' integration, 16384 the spheres, 32768 the count.
     if (s > 0u && (gP.ablate & 8192u) == 0u)

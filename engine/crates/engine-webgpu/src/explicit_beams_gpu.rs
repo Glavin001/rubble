@@ -71,6 +71,8 @@ pub struct ExplicitBeamsGpu {
     coupling_ranges_off: bool,
     /// The coupling's candidate list off ([`Self::set_coupling_candidate_list`]).
     coupling_list_off: bool,
+    /// The coupling's folded step off ([`Self::set_coupling_fold`]).
+    coupling_fold_off: bool,
     /// Diagnostic: the large contact groups' pipeline from an edited module
     /// ([`Self::debug_set_contact_big_wgsl`]).
     debug_big: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
@@ -273,6 +275,9 @@ pub fn surface_split_default() -> bool {
 pub const COUPLING_LIST_OFF: u32 = 128;
 pub const COUPLING_LIST_SKIN_NODES_ONLY: u32 = 256;
 pub const COUPLING_LIST_SKIN_CEILING: u32 = 512;
+/// The coupling's folded step (`explicit_beams_rigid.slang` `cplStepFolded`: 2 barriers a
+/// step, not 4) off: the header's bit 1024.
+pub const COUPLING_FOLD_OFF: u32 = 1024;
 
 pub fn coupling_node_ranges_off_default() -> bool {
     match std::env::var("RUBBLE_COUPLING_RANGES").as_deref() {
@@ -826,6 +831,7 @@ impl ExplicitBeamsGpu {
             debug_coupling_bits: 0,
             coupling_ranges_off: coupling_node_ranges_off_default(),
             coupling_list_off: std::env::var("RUBBLE_COUPLING_LIST").as_deref() == Ok("0"),
+            coupling_fold_off: std::env::var("RUBBLE_COUPLING_FOLD").as_deref() == Ok("0"),
             debug_big: None,
             debug_solo: None,
             debug_groups: None,
@@ -1876,6 +1882,15 @@ impl ExplicitBeamsGpu {
         self.write_coupling_header();
     }
 
+    /// The coupling's folded step (`explicit_beams_rigid.slang` `cplStepFolded`, lossless:
+    /// the bodies' integration, the spheres and the count in two phases, 2 barriers a step
+    /// instead of 4) on (the default; it needs the candidate list), or the four phases (off;
+    /// `RUBBLE_COUPLING_FOLD=0` starts it off).
+    pub fn set_coupling_fold(&mut self, on: bool) {
+        self.coupling_fold_off = !on;
+        self.write_coupling_header();
+    }
+
     /// Tests: per vehicle, the nodes whose candidate list (as the last step left it) holds
     /// at least one shape, and the nodes that keep no list (more than 16 shapes in reach).
     /// Empty without the coupling.
@@ -1948,6 +1963,7 @@ impl ExplicitBeamsGpu {
             }
             | if self.coupling_on && self.coupling_ranges_off { 64 } else { 0 }
             | if self.coupling_on && self.coupling_list_off { COUPLING_LIST_OFF } else { 0 }
+            | if self.coupling_on && self.coupling_fold_off { COUPLING_FOLD_OFF } else { 0 }
             | if self.coupling_on { self.debug_coupling_bits } else { 0 };
         self.queue.write_buffer(
             &self.misc,

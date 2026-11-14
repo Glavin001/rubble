@@ -619,12 +619,13 @@ fn the_coupling_plan_in_parallel_is_the_serial_walk() {
 
 /// One A/B of the coupling's candidate list from the explicit solver's current state:
 /// `frames` frames of `steps` steps with the list off (every node against every shape,
-/// the old path), then on, then on with each test skin (header bits 256, 512); every
+/// the old path), then on (with the folded step, `cplStepFolded`), then on with each test
+/// skin (header bits 256, 512) and on with the step unfolded (bit 1024); every
 /// state word, every proxy record (bodies as integrated in the frames) and every sum the
 /// same. Returns the list's use in the plain on run (per vehicle: nodes listing a shape,
 /// nodes keeping no list).
 fn candidate_list_ab(x: &mut engine_webgpu::ExplicitBeamsGpu, frames: u32, steps: u32, what: &str) -> Vec<(u32, u32)> {
-    use engine_webgpu::{COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY};
+    use engine_webgpu::{COUPLING_FOLD_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY};
     let snap = x.snapshot();
     let mut run = |on: bool, bits: u32| {
         x.restore(&snap);
@@ -646,8 +647,14 @@ fn candidate_list_ab(x: &mut engine_webgpu::ExplicitBeamsGpu, frames: u32, steps
     let (on, stats) = run(true, 0);
     let (nodes_only, _) = run(true, COUPLING_LIST_SKIN_NODES_ONLY);
     let (ceiling, _) = run(true, COUPLING_LIST_SKIN_CEILING);
+    let (unfolded, _) = run(true, COUPLING_FOLD_OFF);
     x.restore(&snap);
-    for (label, other) in [("on", &on), ("skin without the shapes' speed", &nodes_only), ("skin at its ceiling", &ceiling)] {
+    for (label, other) in [
+        ("on", &on),
+        ("skin without the shapes' speed", &nodes_only),
+        ("skin at its ceiling", &ceiling),
+        ("on, the step unfolded (4 barriers)", &unfolded),
+    ] {
         for ((name, a), (_, b)) in off.iter().zip(other) {
             let diff = a.iter().zip(b).filter(|(p, q)| p != q).count();
             assert_eq!(diff, 0, "{what}: {name}: {diff} words differ with the list {label}");

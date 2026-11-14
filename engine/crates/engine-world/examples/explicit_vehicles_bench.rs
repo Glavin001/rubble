@@ -281,6 +281,7 @@ fn main() -> anyhow::Result<()> {
             // ablation build with nothing skipped), 20 frames of 34 steps each.
             if std::env::var("EV_AB_AT").ok().and_then(|v| v.parse::<u64>().ok()) == Some(w.step_count()) {
                 let masks: Vec<u32> = std::env::var("EV_AB_MASKS").unwrap_or_default().split(',').filter_map(|m| m.parse().ok()).collect();
+                let at_step = w.step_count();
                 if let Some(x) = w.explicit_vehicles_mut() {
                     x.wait();
                     let snap = x.snapshot();
@@ -299,6 +300,41 @@ fn main() -> anyhow::Result<()> {
                         line.push(format!("{m}: {:.2}", t.elapsed().as_secs_f64() * 1e3 / 20.0));
                     }
                     x.set_ablation(0);
+                    // EV_AB_COUPLING=1: the coupling's paths from the same snapshot, three
+                    // rounds interleaved, 20 frames each: every node against every shape in
+                    // four phases (old), the candidate list (list), the list and the
+                    // folded step (list+fold, the default). Median ms a frame.
+                    if std::env::var("EV_AB_COUPLING").as_deref() == Ok("1") {
+                        let ways = [("old", false, false), ("list", true, false), ("list+fold", true, true)];
+                        let mut ms = vec![Vec::new(); ways.len()];
+                        for _ in 0..3 {
+                            for (i, &(_, list, fold)) in ways.iter().enumerate() {
+                                x.restore(&snap);
+                                x.set_coupling_candidate_list(list);
+                                x.set_coupling_fold(fold);
+                                x.frame(34);
+                                x.wait();
+                                x.restore(&snap);
+                                let t = std::time::Instant::now();
+                                for _ in 0..20 {
+                                    x.frame(34);
+                                    x.wait();
+                                }
+                                ms[i].push(t.elapsed().as_secs_f64() * 1e3 / 20.0);
+                            }
+                        }
+                        x.set_coupling_candidate_list(true);
+                        x.set_coupling_fold(true);
+                        let line: Vec<String> = ways
+                            .iter()
+                            .zip(&mut ms)
+                            .map(|((name, _, _), m)| {
+                                m.sort_by(f64::total_cmp);
+                                format!("{name} {:.2} ({:.2}..{:.2})", m[1], m[0], m[2])
+                            })
+                            .collect();
+                        println!("  coupling at step {at_step}, ms a frame (median, range of 3): {}", line.join(", "));
+                    }
                     x.restore(&snap);
                     x.wait();
                     let mut g = x.contact_group_sizes();
