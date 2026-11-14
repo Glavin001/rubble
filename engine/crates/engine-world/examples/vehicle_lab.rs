@@ -500,6 +500,17 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         if let Some(on) = flag("--surface-culls") {
             x.set_surface_culls(on);
         }
+        // `--pair-reuse 0|1`, `--pair-margin M` (m): the reused self-collision pair list.
+        if let Some(on) = flag("--pair-reuse") {
+            x.set_pair_reuse(on);
+        }
+        if let Some(m) = arg("--pair-margin").and_then(|m| m.parse::<f32>().ok()) {
+            x.set_pair_reuse_margin(m);
+        }
+        if let Some(n) = arg("--pair-streak").and_then(|n| n.parse::<u32>().ok()) {
+            x.set_pair_reuse_streak(n);
+        }
+        x.take_pair_reuse_stats();
     }
     let ablate: u32 = arg("--ablate").and_then(|x| x.parse().ok()).unwrap_or(0);
     let ablate_at: f64 = arg("--ablate-at")
@@ -519,7 +530,16 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // `--ab T1,T2,…`: at each time, the car's solver alone from one snapshot, the surface
     // culls on then off (`ExplicitBeamsGpu::set_surface_culls`; the coupling's proxies as
     // the World last wrote them): 20 frames of 34 steps each way, their wall time and
-    // whether every state word is the same.
+    // whether every state word is the same. `--ab-switch reuse`: the reused pair list
+    // (`set_pair_reuse`) on then off instead.
+    let reuse_ab = arg("--ab-switch").as_deref() == Some("reuse");
+    let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool| {
+        if reuse_ab {
+            x.set_pair_reuse(on);
+        } else {
+            x.set_surface_culls(on);
+        }
+    };
     let mut ab: Vec<f64> = arg("--ab")
         .map(|x| x.split(',').filter_map(|t| t.parse().ok()).collect())
         .unwrap_or_default();
@@ -559,7 +579,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             let second = std::env::args().any(|a| a == "--ab-same");
             for on in [true, second] {
                 x.restore(&snap);
-                x.set_surface_culls(on);
+                switch(x, on);
                 x.wait();
                 let t = std::time::Instant::now();
                 for _ in 0..20 {
@@ -568,7 +588,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 }
                 let ms = t.elapsed().as_secs_f64() * 1e3 / 20.0;
                 // The switch's own header bit back, so the words compare the state alone.
-                x.set_surface_culls(true);
+                switch(x, true);
                 x.wait();
                 out.push((ms, x.state_words(), x.coupling_words()));
             }
@@ -597,12 +617,15 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 }
             }
             println!(
-                "   A/B at t {:.1}: surface culls on {:.2} ms/frame, off {:.2} ms/frame; state bit for bit: {same}",
-                lab.bench.t, out[0].0, out[1].0
+                "   A/B at t {:.1}: {} on {:.2} ms/frame, off {:.2} ms/frame; state bit for bit: {same}",
+                lab.bench.t,
+                if reuse_ab { "pair reuse" } else { "surface culls" },
+                out[0].0,
+                out[1].0
             );
-            anyhow::ensure!(same, "the surface culls changed the state");
+            anyhow::ensure!(same, "the A/B switch changed the state");
             x.restore(&snap);
-            x.set_surface_culls(true);
+            switch(x, true);
             x.wait();
         }
         if ablate != 0 && lab.bench.t >= ablate_at {
@@ -663,6 +686,19 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
+            }
+            if let Some(x) = world.explicit_vehicles_mut() {
+                let st = x.take_pair_reuse_stats();
+                if st[0] > 0 {
+                    println!(
+                        "   pair list: built {} times, reused on {} steps ({:.0} %), {:.0} pairs a build, most {}",
+                        st[0],
+                        st[1],
+                        100.0 * st[1] as f64 / (st[0] + st[1]) as f64,
+                        st[2] as f64 / st[0] as f64,
+                        st[3]
+                    );
+                }
             }
             if alternate.is_some() {
                 println!(

@@ -105,10 +105,20 @@ impl WebWorld {
         self.world.explicit_vehicles_mut().is_some_and(|g| g.set_wide(on))
     }
 
+    /// Measurement: the reused self-collision pair list's margin (m; 0 off) and backoff
+    /// (a list reused on fewer steps than `streak` sends the next grid steps to the walk).
+    #[wasm_bindgen(js_name = setExplicitPairReuse)]
+    pub fn set_explicit_pair_reuse(&mut self, margin: f32, streak: u32) -> bool {
+        let Some(g) = self.world.explicit_vehicles_mut() else { return false };
+        g.set_pair_reuse_margin(margin);
+        g.set_pair_reuse_streak(streak);
+        true
+    }
+
     /// Measurement knobs of the explicit frame (ablations in a browser): `coupling` (the
     /// rigid coupling in the frame; off, the vehicles no longer feel the bodies),
-    /// `couplingCull`, `couplingCache`, `couplingRanges`, `surfacePairs`, `surfaceCulls` (lossless paths on
-    /// or off). Returns false for an unknown knob.
+    /// `couplingCull`, `couplingCache`, `couplingRanges`, `surfacePairs`, `surfaceCulls`, `pairReuse`
+    /// (lossless paths on or off). Returns false for an unknown knob.
     #[wasm_bindgen(js_name = setExplicitKnob)]
     pub fn set_explicit_knob(&mut self, name: &str, on: bool) -> bool {
         let Some(g) = self.world.explicit_vehicles_mut() else { return false };
@@ -119,6 +129,7 @@ impl WebWorld {
             "surfacePairs" => g.set_surface_pairs(on),
             "surfaceCulls" => g.set_surface_culls(on),
             "couplingRanges" => g.set_coupling_node_ranges(on),
+            "pairReuse" => g.set_pair_reuse(on),
             _ => return false,
         }
         true

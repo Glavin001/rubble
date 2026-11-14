@@ -166,8 +166,40 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params (word 87 the parking brakes' base, word 88 the loop
-/// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 padding).
-pub const PARAM_WORDS: usize = 92;
+/// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 the pair
+/// list's build records, 92 its margin ([`W_PAIR_REUSE`]), 93 its backoff
+/// ([`W_PAIR_STREAK`]), 94..96 padding).
+pub const PARAM_WORDS: usize = 96;
+/// Params word: the grid walk's pair list reused over steps (the kernel's pairReuse*,
+/// lossless): its margin M in metres as float bits, 0 off (the walk lists every step).
+pub const W_PAIR_REUSE: usize = 92;
+/// Params word: a pair list reused on fewer steps than this before it is invalidated
+/// sends the next grid steps back to the walk for a while (the same results; a list
+/// rebuilt nearly every step costs more than the walk). 0: never.
+pub const W_PAIR_STREAK: usize = 93;
+/// [`W_PAIR_STREAK`]'s default (`RUBBLE_PAIR_STREAK=n` another).
+pub const PAIR_REUSE_STREAK: u32 = 1;
+pub fn pair_streak_default() -> u32 {
+    std::env::var("RUBBLE_PAIR_STREAK").ok().and_then(|x| x.parse().ok()).unwrap_or(PAIR_REUSE_STREAK)
+}
+/// The reused pair list's margin (m): each triangle's box padded by this much more when
+/// the list is built; it is reused while no node has moved, relative to the others, by
+/// more than this less the boxes' growth (measured: lab-mountain-perf.md §5).
+pub const PAIR_REUSE_MARGIN: f32 = 0.05;
+
+/// The pair list's margin word at start: [`PAIR_REUSE_MARGIN`], `RUBBLE_PAIR_MARGIN=m`
+/// (measurement) another, `RUBBLE_PAIR_REUSE=0` off.
+pub fn pair_reuse_default() -> u32 {
+    if std::env::var("RUBBLE_PAIR_REUSE").as_deref() == Ok("0") {
+        return 0;
+    }
+    let m = std::env::var("RUBBLE_PAIR_MARGIN")
+        .ok()
+        .and_then(|x| x.parse::<f32>().ok())
+        .filter(|m| *m > 0.0)
+        .unwrap_or(PAIR_REUSE_MARGIN);
+    m.to_bits()
+}
 /// Params word: the loop budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`).
 pub const W_LOOP_BUDGET: usize = 88;
 /// The loop budget's floor and ceiling (passes of one invocation in a frame).
@@ -249,6 +281,9 @@ pub const DEFAULT_CONTACT_MARGIN: f32 = 1.0;
 pub const KEYS: usize = engine_softbody::explicit_triggers::KEYS;
 const NONE: u32 = u32::MAX;
 const NODE_SLOT_SHIFT: u32 = 8;
+/// Node info flag (the kernel's NODE_PAIR_TRACKED): a contacter or a collision triangle's
+/// node, whose motion the reused self-collision pair list tracks.
+const NODE_PAIR_TRACKED: u32 = 128;
 /// Per vehicle the kernel's self-collision hit list (HIT_CAP records of HIT_WORDS
 /// words) and pending-beam list (PEND_CAP) in gNext.
 const SELF_HIT_WORDS: usize = 256 * 24 + 64;
@@ -883,10 +918,21 @@ impl ExplicitUpload {
                 }
             }
             slot_ranges.push((slot_first, slot_count - slot_first));
+            // The nodes a self-collision box test reads (contacters, collision triangles'
+            // nodes): the reused pair list tracks their motion (NODE_PAIR_TRACKED).
+            let mut tracked = vec![false; v.nodes.len()];
+            for &c in &v.candidates {
+                tracked[c as usize] = true;
+            }
+            for t in &v.triangles {
+                for n in t.nodes {
+                    tracked[n as usize] = true;
+                }
+            }
             // Incidence lists, then the candidates.
             for (i, inc) in v.incidence.iter().enumerate() {
                 let n = &v.nodes[i];
-                let flags = n.flags | slot_of[i] << NODE_SLOT_SHIFT;
+                let flags = n.flags | slot_of[i] << NODE_SLOT_SHIFT | if tracked[i] { NODE_PAIR_TRACKED } else { 0 };
                 node_info.push([flags, lists.len() as u32, inc.len() as u32, vi as u32]);
                 for &j in inc {
                     let b = &v.beams[j as usize];
@@ -1865,6 +1911,15 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // The pair list reused over steps (the kernel's pairBuild; scratch): per node its
+        // position and speed at the list's build, then per vehicle its statistics.
+        let pair_build = if tri_pairs != 0 {
+            let at = beams.len() as u32;
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes + nv));
+            at
+        } else {
+            0
+        };
         // The loop budget's unit (explicit_loop_cap.slang): passes one invocation could
         // legitimately take in a step, bounded by the whole fleet's work on one lane
         // (a contact group's lane walks its members; the serial self-collision pass
@@ -2062,7 +2117,9 @@ impl ExplicitUpload {
             0,
             tri_geo,
             tri_pairs,
-            0,
+            pair_build,
+            pair_reuse_default(),
+            pair_streak_default(),
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [

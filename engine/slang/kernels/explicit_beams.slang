@@ -266,7 +266,13 @@ struct Params
     uint loopBudget; // passes one invocation may take in a frame (explicit_loop_cap.slang; 0 none)
     uint triGeo; // gBeams: per triangle TRI_GEO_RECS records of its step geometry (triGeoFill; 0 none)
     uint triPairs; // gNext: per vehicle 2 · TRI_PAIR_CAP words, the grid walk's pairs (0: the walk tests them)
-    uint loopPad2;
+    // The pair list reused over steps (pairReuse*): gBeams per node its build record, then
+    // per vehicle its statistics (0: none); the margin M (float bits; 0: off, the walk).
+    uint pairBuild;
+    uint pairReuse;
+    uint pairStreak; // a list reused on fewer steps than this: the walk for REUSE_BACKOFF grid steps
+    uint pairPad1;
+    uint pairPad2;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -347,7 +353,10 @@ static const uint LANES = EB_LANES;
 static const uint GRID_BUCKETS = 1024u;
 static const uint GRID_MAX_CELLS = 64u;
 static const uint GRID_BLOCKS = 16u;
-groupshared Atomic<uint> gsCount[GRID_BUCKETS];
+// Past the buckets, the reused pair list's words (gsReuse; never cleared by the steps'
+// bucket clears; no workgroup variable of its own: Metal's threadgroup slots are full).
+static const uint REUSE_WORDS = 16u;
+groupshared Atomic<uint> gsCount[GRID_BUCKETS + REUSE_WORDS];
 groupshared uint gsOff[GRID_BUCKETS + 1u];
 groupshared uint gsPart[LANES];
 groupshared uint gsBlk[GRID_BLOCKS];
@@ -3575,6 +3584,349 @@ void trianglePairs(uint t, uint gt, uint sub, uint subs, float3 origin, float r,
     }
 }
 
+// --- The grid walk's pair list, built once and reused over steps (lossless) ---
+// The solo frame's walk listed its (triangle, contacter) pairs every step (the grid's
+// counting sort, five barriers, then every triangle's cells). With gP.pairReuse (a
+// margin M, float bits; 0 off) and gP.pairBuild, a step that builds lists every
+// triangle (waiting or not) against the box padded by M more, and later steps test
+// that list again while it provably holds every pair the walk would test:
+// * A pair absent from the list was outside the padded box at the build. With every
+//   tracked node's displacement since the build (the contacters and the triangles'
+//   nodes, the only nodes a box test reads), per axis, within [m, m + R] (R the
+//   spread of the displacements: the common translation cancels in the box test), the
+//   contacter has moved at most R relative to any of the triangle's nodes, and the
+//   box's reach (triReach: the triangle's fastest node and the vehicle's fastest) has
+//   grown at most h · (2 G + dV) (G the largest growth of a node's speed, dV the
+//   vehicle's fastest node's): the pair cannot be inside its box while
+//   R + h · (2 G + dV) + eps <= M (eps: rounding, from the coordinates' size). Else
+//   the step builds again (and at a frame's first step).
+// * Each listed pair is tested as the walk would test it (pairReuseTest: the waiting
+//   triangle skipped, the walk's cell, bucket and box tests on this step's geometry,
+//   then tryContact), and tryContact itself has no effect outside its box; the hits are
+//   applied in the specification's order whatever order they were found in (selfApply).
+// So the hits are the walk's, bit for bit. A build past TRI_PAIR_CAP walks with its
+// tests that step (as before) and builds again the next.
+// gBeams at pairBuild: per node (position, speed) at the build; then per vehicle the
+// statistics (builds, reused steps, pairs listed, most listed; bits, accumulated). The
+// tracked nodes carry NODE_PAIR_TRACKED in their node info (the host's: contacters and
+// collision triangles' nodes).
+// This step's path rides in gsUniformLanes (the grid flag, bit 0, workgroup-uniform):
+// bits 1..2 the list's mode, 0 the walk, 1 build the list, 2 reuse it. The list's state
+// is in gsCount past its buckets (gsReuse): 0..7 order-preserving
+// keys (pairReuseKey) of the displacements' largest x, y, z and largest negated x, y, z,
+// the largest speed growth, the largest coordinate's size; then the list valid, its
+// pairs, the fastest node's speed at the build (bits), the statistics (4 words).
+static const uint RU_VALID = 8u;
+static const uint RU_COUNT = 9u;
+static const uint RU_VMAX = 10u;
+static const uint RU_STATS = 11u;
+static const uint RU_STREAK = 15u; // steps the current list was reused, then (after a
+// list reused on fewer than gP.pairStreak steps) the grid steps left on the walk, as
+// REUSE_BACKOFF_FLAG | n
+static const uint REUSE_BACKOFF = 8u;
+static const uint REUSE_BACKOFF_FLAG = 0x80000000u;
+
+uint pairReuseKey(float f)
+{
+    uint b = asuint(f);
+    return (b & 0x80000000u) != 0u ? ~b : (b | 0x80000000u);
+}
+float pairReuseVal(uint k) { return asfloat((k & 0x80000000u) != 0u ? (k & 0x7FFFFFFFu) : ~k); }
+bool pairReuseOn() { return gP.pairReuse != 0u && gP.pairBuild != 0u && gP.triPairs != 0u && gP.triGeo != 0u; }
+
+// Lane 0, the frame's start: no list yet.
+void pairReuseBegin()
+{
+    if (!pairReuseOn()) return;
+    for (uint k = 0u; k < 16u; k++) gsCount[GRID_BUCKETS + k].store(0u);
+}
+
+static const uint NODE_PAIR_TRACKED = 128u;
+
+// After the node phase (its last writes to positions and velocities: the lane's own
+// nodes, the centred correction's on the same lanes), before its barrier: the lane's
+// tracked nodes against their build records.
+void pairReuseTrack(uint nodeOff, uint nodeCount, uint lane)
+{
+    if (!pairReuseOn() || gsCount[GRID_BUCKETS + RU_VALID].load() == 0u || lane >= nodeCount) return;
+    float3 dHi = float3(-3.0e38, -3.0e38, -3.0e38);
+    float3 dLo = dHi;
+    float grow = -3.0e38;
+    float size = 0.0;
+    uint bad = 0u;
+    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    {
+        if ((gStatic[gP.nodeInfoBase + nodeOff + i].x & NODE_PAIR_TRACKED) == 0u) continue;
+        float4 B = gBeams[gP.pairBuild + nodeOff + i];
+        float3 P = gNodes[(nodeOff + i) * 3u].xyz;
+        float3 V = gNodes[(nodeOff + i) * 3u + 1u].xyz;
+        float3 d = P - B.xyz;
+        float g = ssqrt(sdot(V, V)) - B.w;
+        // Non-finite (bits, whatever the compiler assumes of NaN): build again.
+        uint3 db = asuint(d) & 0x7F800000u;
+        uint3 pb = asuint(P) & 0x7F800000u;
+        if (any(db == 0x7F800000u) || any(pb == 0x7F800000u) || (asuint(g) & 0x7F800000u) == 0x7F800000u) bad = 1u;
+        dHi = max(dHi, d);
+        dLo = max(dLo, -d);
+        grow = max(grow, g);
+        size = max(size, max(max(abs(P.x), abs(P.y)), abs(P.z)));
+    }
+    uint keys[8] = { pairReuseKey(dHi.x), pairReuseKey(dHi.y), pairReuseKey(dHi.z), pairReuseKey(dLo.x),
+                     pairReuseKey(dLo.y), pairReuseKey(dLo.z), pairReuseKey(grow), pairReuseKey(size) };
+    if (bad != 0u) keys[7] = 0xFFFFFFFFu;
+    for (uint k = 0u; k < 8u; k++)
+    {
+        if (keys[k] > gsCount[GRID_BUCKETS + k].load()) gsCount[GRID_BUCKETS + k].max(keys[k]);
+    }
+}
+
+// Lane 0, after the node phase's barrier, the grid decided (grid): this step's path, the
+// list's mode (0 the walk, 1 build, 2 reuse) for gsUniformLanes' bits 1..2.
+uint pairReuseDecide(uint v, uint grid, uint parity, float3 origin)
+{
+    if (!pairReuseOn()) return 0u;
+    uint mode = 0u;
+    uint streak = gsCount[GRID_BUCKETS + RU_STREAK].load();
+    if (grid != 0u && (streak & REUSE_BACKOFF_FLAG) != 0u)
+    {
+        // Backing off (a list was invalidated before its first reuse, as when falling
+        // debris spreads the tracked nodes every step): the walk (mode 0, the same
+        // results) for REUSE_BACKOFF grid steps, then a list again.
+        uint left = (streak & ~REUSE_BACKOFF_FLAG) - 1u;
+        gsCount[GRID_BUCKETS + RU_STREAK].store(left > 0u ? (REUSE_BACKOFF_FLAG | left) : 0u);
+    }
+    else if (grid != 0u)
+    {
+        mode = 1u;
+        bool finite = gsCount[GRID_BUCKETS + 7].load() < 0xFF800000u;
+        for (uint k = 0u; k < 7u; k++) finite = finite && gsCount[GRID_BUCKETS + k].load() < 0xFF800000u;
+        if (gsCount[GRID_BUCKETS + RU_VALID].load() != 0u && finite)
+        {
+            float rx = pairReuseVal(gsCount[GRID_BUCKETS + 0].load()) + pairReuseVal(gsCount[GRID_BUCKETS + 3].load());
+            float ry = pairReuseVal(gsCount[GRID_BUCKETS + 1].load()) + pairReuseVal(gsCount[GRID_BUCKETS + 4].load());
+            float rz = pairReuseVal(gsCount[GRID_BUCKETS + 2].load()) + pairReuseVal(gsCount[GRID_BUCKETS + 5].load());
+            float grow = max(pairReuseVal(gsCount[GRID_BUCKETS + 6].load()), 0.0);
+            bool anti = (gStatic[v * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u;
+            float dv = anti ? max(clipVmax(v, parity) - asfloat(gsCount[GRID_BUCKETS + RU_VMAX].load()), 0.0) : 0.0;
+            float size = max(max(abs(origin.x), abs(origin.y)), abs(origin.z)) + pairReuseVal(gsCount[GRID_BUCKETS + 7].load());
+            float eps = 1.0e-4 + 4.0e-6 * (size + 1.0);
+            float need = max(max(rx, ry), rz) + STEP * (2.0 * grow + dv) + eps;
+            if (need <= asfloat(gP.pairReuse)) mode = 2u;
+        }
+        if (mode == 2u)
+            gsCount[GRID_BUCKETS + RU_STREAK].add(1u);
+        else if (gsCount[GRID_BUCKETS + RU_VALID].load() != 0u && streak < gP.pairStreak)
+        {
+            // The list was reused on too few steps to pay for its build: back off.
+            mode = 0u;
+            gsCount[GRID_BUCKETS + RU_VALID].store(0u);
+            gsCount[GRID_BUCKETS + RU_STREAK].store(REUSE_BACKOFF_FLAG | REUSE_BACKOFF);
+        }
+        else
+            gsCount[GRID_BUCKETS + RU_STREAK].store(0u);
+    }
+    for (uint k = 0u; k < 8u; k++) gsCount[GRID_BUCKETS + k].store(0u);
+    if (mode == 2u) gsCount[GRID_BUCKETS + RU_STATS + 1u].add(1u);
+    return mode;
+}
+
+// Triangle gt (every one, waiting or not) against the contacters in the cells of its box
+// padded by `margin` more, the walk's list mode (triangleGridWalk) on that box: the
+// pairs inside it into the list at listAt.
+void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
+                   uint parity, uint listAt, float margin)
+{
+    uint4 tn = gStatic[gP.triBase + gt];
+    float3 p0 = nf3(origin + gNodes[tn.x * 3u].xyz);
+    float3 p1 = nf3(origin + gNodes[tn.y * 3u].xyz);
+    float3 p2 = nf3(origin + gNodes[tn.z * 3u].xyz);
+    bool anti = (gStatic[tn.w * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u;
+    float pad = (anti ? triReach(tn, r, parity) : r) + margin;
+    float3 lo = min(min(p0, p1), p2) - float3(pad, pad, pad);
+    float3 hi = max(max(p0, p1), p2) + float3(pad, pad, pad);
+    float3 f0 = floor((lo - origin) / cell);
+    float3 fs = floor((hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
+    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
+    int3 c0 = int3(0, 0, 0);
+    int3 span = int3(1, 1, 1);
+    uint yz = 1u;
+    uint cells = 0u;
+    if (!every)
+    {
+        c0 = int3(f0);
+        span = int3(fs);
+        yz = uint(span.y * span.z);
+        cells = uint(span.x) * yz;
+    }
+    uint outer = every ? candCount : cells;
+    for (uint i = sub, iStop = EB_END(i, outer, LIST_SUBS); i < iStop; i += LIST_SUBS)
+    {
+        uint e0 = 0u;
+        uint e1 = 1u;
+        if (!every)
+        {
+            uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
+            bool dup = false;
+            int3 cj = int3(0, 0, 0);
+            for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+            {
+                if (gridBucket(c0 + cj) == b)
+                {
+                    dup = true;
+                    break;
+                }
+                cj.z += 1;
+                if (cj.z == span.z)
+                {
+                    cj.z = 0;
+                    cj.y += 1;
+                    if (cj.y == span.y)
+                    {
+                        cj.y = 0;
+                        cj.x += 1;
+                    }
+                }
+            }
+            if (dup) continue;
+            e0 = gsOff[b];
+            e1 = gsOff[b + 1u];
+        }
+        for (uint e = e0, eGuard = 0u; e < e1; e++)
+        {
+            EB_PASS(eGuard);
+            uint h;
+            float3 p;
+            if (every)
+            {
+                h = gLists[candOff + i];
+                p = nf3(origin + gNodes[h * 3u].xyz);
+            }
+            else
+            {
+                float4 E = gBeams[gP.gridBase + candOff + e];
+                p = origin + E.xyz;
+                h = asuint(E.w);
+            }
+            if (h == tn.x || h == tn.y || h == tn.z) continue;
+            if (any(p < lo) || any(p > hi)) continue;
+            uint n = triPairAdd();
+            if (n < TRI_PAIR_CAP)
+            {
+                gNext[listAt + 2u * n] = gt;
+                gNext[listAt + 2u * n + 1u] = h;
+            }
+        }
+    }
+}
+
+// A building step's triangle phase (uniform): every triangle's list, then every node's
+// build record (positions and velocities are the step's: the node phase is over).
+void pairReuseBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff, uint nodeCount, float3 origin,
+                    float r, float cell, uint candOff, uint candCount, uint parity)
+{
+    float margin = asfloat(gP.pairReuse);
+    uint at = triPairsAt(v);
+    for (uint p = lane, pStop = EB_END(p, triCount * LIST_SUBS, LANES); p < pStop; p += LANES)
+        pairReuseList(triOff + p / LIST_SUBS, p % LIST_SUBS, origin, r, cell, candOff, candCount, parity, at, margin);
+    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    {
+        float3 P = gNodes[(nodeOff + i) * 3u].xyz;
+        float3 V = gNodes[(nodeOff + i) * 3u + 1u].xyz;
+        gBeams[gP.pairBuild + nodeOff + i] = float4(P, ssqrt(sdot(V, V)));
+    }
+    if (lane == 0u)
+    {
+        bool anti = (gStatic[v * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u;
+        gsCount[GRID_BUCKETS + RU_VMAX].store(asuint(anti ? clipVmax(v, parity) : 0.0));
+    }
+}
+
+// Listed pair (gt, h) as the walk tests it this step: a waiting triangle skips it; the
+// walk's cells and buckets of the triangle's box (or every candidate past
+// GRID_MAX_CELLS) and its box test; then tryContact (whose own box test, on the live
+// triangle's geometry, comes first).
+void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint beamOff, uint groupOff,
+                   uint groupCount, uint parity)
+{
+    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
+    // The box from triGeoFill's records before its liveness (a dead triangle's empty box
+    // fails tryContact's test, as in the walk).
+    uint at = gP.triGeo + gt * TRI_GEO_RECS;
+    float4 r4 = gBeams[at + 4u];
+    float4 r5 = gBeams[at + 5u];
+    float3 lo = r4.xyz;
+    float3 hi = float3(r4.w, r5.xy);
+    float3 f0 = floor((lo - origin) / cell);
+    float3 fs = floor((hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
+    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
+    if (!every)
+    {
+        float3 e = gNodes[h * 3u].xyz;
+        float3 p = origin + e;
+        if (any(p < lo) || any(p > hi)) return;
+        int3 c0 = int3(f0);
+        int3 span = int3(fs);
+        int3 c = int3(floor(e / cell));
+        if (!(all(c >= c0) && all(c < c0 + span)))
+        {
+            // Outside the covered cells: the walk meets it only in a covered cell's bucket.
+            uint yz = uint(span.y * span.z);
+            uint cells = uint(span.x) * yz;
+            uint b = gridBucket(c);
+            bool covered = false;
+            for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
+                covered = covered
+                    || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
+            if (!covered) return;
+        }
+    }
+    tryContact(triGeoLoad(gt), h, origin, r, beamOff, groupOff, groupCount, parity);
+}
+
+// The step's tests of the list (uniform; after the build or in its place): a pair a
+// lane; a build past the list's room walks with its tests instead.
+void pairReuseTests(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
+                    uint candOff, uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    sync();
+    uint listed = mode == 2u ? gsCount[GRID_BUCKETS + RU_COUNT].load() : gsPairCount.load();
+    if (listed <= TRI_PAIR_CAP)
+    {
+        uint at = triPairsAt(v);
+        for (uint i = lane, iStop = EB_END(i, listed, LANES); i < iStop; i += LANES)
+            pairReuseTest(gNext[at + 2u * i], gNext[at + 2u * i + 1u], origin, r, cell, beamOff, groupOff, groupCount,
+                          parity);
+    }
+    else
+    {
+        uint tested = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
+        for (uint p = lane, pStop = EB_END(p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
+        {
+            uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
+            triangleGrid(triOff + t, p % GRID_SUBS, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
+                         parity, 0u);
+        }
+    }
+    if (lane == 0u && mode == 1u)
+    {
+        gsCount[GRID_BUCKETS + RU_VALID].store(listed <= TRI_PAIR_CAP ? 1u : 0u);
+        gsCount[GRID_BUCKETS + RU_COUNT].store(listed);
+        gsCount[GRID_BUCKETS + RU_STATS].add(1u);
+        gsCount[GRID_BUCKETS + RU_STATS + 2u].add(listed);
+        gsCount[GRID_BUCKETS + RU_STATS + 3u].max(listed);
+    }
+}
+
+// Lane 0, the frame's end: the statistics into the vehicle's record.
+void pairReuseEnd(uint v, uint lane)
+{
+    if (!pairReuseOn() || lane != 0u) return;
+    uint at = gP.pairBuild + gP.totalNodes + v;
+    uint4 s = asuint(gBeams[at]);
+    gBeams[at] = asfloat(uint4(s.x + gsCount[GRID_BUCKETS + RU_STATS].load(), s.y + gsCount[GRID_BUCKETS + RU_STATS + 1u].load(),
+                               s.z + gsCount[GRID_BUCKETS + RU_STATS + 2u].load(), max(s.w, gsCount[GRID_BUCKETS + RU_STATS + 3u].load())));
+}
+
 
 // --- Aerodynamics and commands with no input (EB_AERO modules) ---
 // engine/docs/explicit-beams-aero-commands-spec.md; CPU reference
@@ -5268,6 +5620,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsTestedCount[1].store(0u);
         // Self-collision hits or pending beams possible (selfApply's barriers).
         gsUniformLanes = triCount > 0u ? 1u : 0u;
+        pairReuseBegin();
         coupleBegin();
         driveBegin();
         // The coupling's spheres in workgroup memory (cplGsRange).
@@ -5348,6 +5701,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         if (gP.centredDv != 0u) centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
         if (sleepOn) sleepMove = sleepTrack(nodeOff, nodeCount, lane, sleepMove);
+        pairReuseTrack(nodeOff, nodeCount, lane);
 
         for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
         if (candCount > 0u)
@@ -5379,7 +5733,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             gsTestedCount[parity ^ 1u].store(0u);
             // This step's self-collision: the grid, or (few pairs) every candidate.
             uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-            gsUniformLanes = cell > 0.0 && candCount > 0u && listed * candCount > BRUTE_PAIRS_PER_LANE * LANES ? 1u : 0u;
+            uint grid = cell > 0.0 && candCount > 0u && listed * candCount > BRUTE_PAIRS_PER_LANE * LANES ? 1u : 0u;
+            // With the grid, its pair list built, reused or not used (pairReuseDecide).
+            gsUniformLanes = grid | (pairReuseDecide(v, grid, parity, origin) << 1);
         }
         if (cell > 0.0)
         {
@@ -5455,12 +5811,15 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
         sync();
         uint gridOn = gsUniformLanes;
+        // The grid's pair list this step (pairReuseDecide; nonzero only with the grid): 2
+        // reused, no grid to build.
+        uint reuse = gridOn >> 1;
         // This step's deferred breaks, in spawn order (before selfApply's barrier).
         if (lane == 0u) resolvePending(v, parity);
 #ifdef EB_ABLATE
-        if (gridOn != 0u && (gP.ablate & 1u) == 0u)
+        if (gridOn != 0u && reuse != 2u && (gP.ablate & 1u) == 0u)
 #else
-        if (gridOn != 0u)
+        if (gridOn != 0u && reuse != 2u)
 #endif
         {
             // Offsets: per lane its buckets' sum, a scan over blocks of lanes, then
@@ -5527,6 +5886,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                            range, beamOff, groupOff, groupCount, parity);
             }
         }
+        else if (gridOn != 0u && reuse != 0u)
+        {
+            // The pair list kept over steps: built this step, or reused.
+            if (reuse == 1u)
+                pairReuseBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount,
+                               parity);
+        }
         else if (candCount > 0u && cell > 0.0 && gridOn != 0u)
         {
             uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
@@ -5563,7 +5929,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_ABLATE
         if ((gP.ablate & 256u) == 0u)
 #endif
-        if (gridOn != 0u && gP.triPairs != 0u)
+        if (gridOn != 0u && reuse != 0u)
+            pairReuseTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
+                           groupCount, parity);
+        else if (gridOn != 0u && gP.triPairs != 0u)
         {
             // The walk's listed pairs, a pair a lane (triPairsAt); past the list's
             // room, the walk again with its tests.
@@ -5619,6 +5988,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     }
 #endif
     coupleEnd(v, lane, coupleOn);
+    pairReuseEnd(v, lane);
     if (gP.steps > 0u && candCount > 0u)
     {
         for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES) triangleFinish(triOff + t);

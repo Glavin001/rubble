@@ -1608,6 +1608,54 @@ impl ExplicitBeamsGpu {
         self.write_coupling_header();
     }
 
+    /// The self-collision grid walk's pair list built once and reused over steps while
+    /// it provably holds every pair the walk would test (`explicit_beams.slang`
+    /// pairReuse*; lossless: the same hits, bit for bit) on, or listed every step (off).
+    /// On by default ([`plan::PAIR_REUSE_MARGIN`]; `RUBBLE_PAIR_REUSE=0` starts it
+    /// off). No-op for a fleet without the pair list.
+    pub fn set_pair_reuse(&mut self, on: bool) {
+        let m = plan::pair_reuse_default();
+        let m = if m == 0 { plan::PAIR_REUSE_MARGIN.to_bits() } else { m };
+        self.set_pair_reuse_margin(if on { f32::from_bits(m) } else { 0.0 });
+    }
+
+    /// Measurement: the reused pair list's margin in metres (0: off).
+    #[doc(hidden)]
+    pub fn set_pair_reuse_margin(&mut self, metres: f32) {
+        self.planner.words[plan::W_PAIR_REUSE] = if metres > 0.0 { metres.to_bits() } else { 0 };
+    }
+
+    /// Measurement: the reused pair list's backoff ([`plan::W_PAIR_STREAK`]): a list
+    /// reused on fewer steps than `steps` sends the next grid steps to the walk.
+    #[doc(hidden)]
+    pub fn set_pair_reuse_streak(&mut self, steps: u32) {
+        self.planner.words[plan::W_PAIR_STREAK] = steps;
+    }
+
+    /// Measurement: the reused pair list's statistics summed over the vehicles since the
+    /// last call (which clears them): (lists built, steps that reused one, pairs listed
+    /// at the builds, the most listed at one build). Zeros without the pair list.
+    #[doc(hidden)]
+    pub fn take_pair_reuse_stats(&mut self) -> [u64; 4] {
+        let at = self.planner.words[91] as usize;
+        if at == 0 {
+            return [0; 4];
+        }
+        let nv = self.layout.spans.len();
+        let rec = at + self.layout.total[0] as usize;
+        let beams: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[4])).to_vec();
+        let mut out = [0u64; 4];
+        for v in 0..nv {
+            let s = &beams[(rec + v) * 4..(rec + v) * 4 + 4];
+            out[0] += u64::from(s[0]);
+            out[1] += u64::from(s[1]);
+            out[2] += u64::from(s[2]);
+            out[3] = out[3].max(u64::from(s[3]));
+        }
+        self.queue.write_buffer(&self.bufs[4], (rec * 16) as u64, &vec![0u8; nv * 16]);
+        out
+    }
+
     /// The coupling's per-node shape ranges (`explicit_beams_rigid.slang` `cplGsAdd`, the
     /// header's bit 64): each node's contacts start at the first proxy shape its count
     /// pass found it inside and stop after the last (on), or scan every shape (off; the

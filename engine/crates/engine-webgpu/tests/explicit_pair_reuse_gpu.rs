@@ -3,9 +3,9 @@
 //! step: each frame from the same saved state, every state word the same, and the list
 //! reused on most steps (so the reuse path is what was compared).
 //!
-//! Vehicles: the repository's sedan into a wall, and the procedural sedan with anti-clip
-//! (§36: every triangle's box padded by its own and the vehicle's fastest node's travel)
-//! into a wall and dropped onto its roof.
+//! Vehicles: the procedural sedan into a wall, and with anti-clip (§36: every triangle's
+//! box padded by its own and the vehicle's fastest node's travel) into a wall and dropped
+//! tumbling.
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, StaticBox};
 use engine_webgpu::{default_device, ExplicitBeamsGpu};
@@ -58,14 +58,6 @@ fn compare(label: &str, fleet: &[ExplicitBeams], frames: u32, steps: u32) -> Opt
     Some(s)
 }
 
-fn repo_sedan() -> String {
-    std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck"
-    ))
-    .expect("sedan")
-}
-
 fn gen_sedan() -> String {
     use engine_softbody::authoring::{build, style, BuildParams, Resolution};
     build(
@@ -95,21 +87,25 @@ fn spawn(text: &str, at: Vec3, vel: Vec3, lift: f32, wall: bool) -> ExplicitBeam
             Vec3::new(3.0, 2.0, 1.0),
         ));
     }
+    s.finish();
     s
 }
 
-fn assert_reused(label: &str, s: [u64; 4]) {
+/// The list was built and reused (`most`: on more steps than it was built).
+fn assert_reused(label: &str, s: [u64; 4], most: bool) {
     assert!(s[0] > 0, "{label}: no list was built (the grid's pair list is not in use)");
-    assert!(s[1] > s[0], "{label}: reused on {} steps for {} builds", s[1], s[0]);
+    let enough = if most { s[1] > s[0] } else { s[1] > 0 };
+    assert!(enough, "{label}: reused on {} steps for {} builds", s[1], s[0]);
 }
 
 #[test]
 fn reused_pair_list_is_the_walk_bit_for_bit() {
     let o = Vec3::new(20.0, 0.0, -30.0);
-    // The repository's sedan at 100 km/h into a wall: 30 frames of 34 steps.
-    let s = spawn(&repo_sedan(), o, Vec3::new(0.0, 0.0, 27.78), 0.02, true);
-    if let Some(st) = compare("sedan wall", std::slice::from_ref(&s), 30, 34) {
-        assert_reused("sedan wall", st);
+    // The procedural sedan at 100 km/h into a wall: 30 frames of 34 steps. (The
+    // repository's RoR sedan lists no contacters: no self-collision.)
+    let s = spawn(&gen_sedan(), o, Vec3::new(0.0, 0.0, 27.78), 0.02, true);
+    if let Some(st) = compare("procedural sedan wall", std::slice::from_ref(&s), 30, 34) {
+        assert_reused("procedural sedan wall", st, true);
     }
     // The procedural sedan with anti-clip at 72 km/h into a wall.
     let mut g = spawn(&gen_sedan(), o, Vec3::new(0.0, 0.0, 20.0), 0.02, true);
@@ -117,9 +113,11 @@ fn reused_pair_list_is_the_walk_bit_for_bit() {
     g.fixed_contact = true;
     g.finish();
     if let Some(st) = compare("procedural sedan wall, anti-clip", std::slice::from_ref(&g), 30, 34) {
-        assert_reused("procedural sedan wall, anti-clip", st);
+        assert_reused("procedural sedan wall, anti-clip", st, true);
     }
-    // Dropped from 3 m tumbling (spin about z) onto the ground, anti-clip.
+    // Dropped from 3 m tumbling (4 rad/s about z) onto the ground, anti-clip: the spin
+    // moves nodes up to 10 m/s relative to one another (5 mm a step, the 5 cm margin
+    // within a frame), so the list is mostly built again.
     let mut d = spawn(&gen_sedan(), o, Vec3::ZERO, 3.0, false);
     let c = d.nodes.iter().map(|n| n.pos).sum::<Vec3>() / d.nodes.len() as f32;
     for n in &mut d.nodes {
@@ -129,6 +127,6 @@ fn reused_pair_list_is_the_walk_bit_for_bit() {
     d.fixed_contact = true;
     d.finish();
     if let Some(st) = compare("procedural sedan tumbling drop, anti-clip", std::slice::from_ref(&d), 40, 34) {
-        assert_reused("procedural sedan tumbling drop, anti-clip", st);
+        assert_reused("procedural sedan tumbling drop, anti-clip", st, false);
     }
 }
