@@ -1168,9 +1168,17 @@ impl ExplicitBeamsGpu {
         );
         list.sort_unstable();
         list.dedup();
-        for v in list {
+        // One write a run of consecutive vehicles (their records are consecutive): a fleet
+        // with every car under throttle costs one write, not one a car.
+        let mut i = 0;
+        while i < list.len() {
+            let mut j = i + 1;
+            while j < list.len() && list[j] == list[j - 1] + 1 {
+                j += 1;
+            }
             self.queue
-                .write_buffer(&self.misc, s.record_offset(v), bytemuck::cast_slice(&[0u32; 4]));
+                .write_buffer(&self.misc, s.record_offset(list[i]), &vec![0u8; 16 * (j - i)]);
+            i = j;
         }
     }
 
