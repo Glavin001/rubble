@@ -615,7 +615,7 @@ pub mod candidate_list {
     /// the rebuild rate depends on it.
     pub fn margin(speed: f32, shape_speed: f32, left: u32) -> f32 {
         let m = 1.25 * crate::explicit_beams::STEP * left as f32 * (speed + shape_speed) + MIN_MARGIN;
-        // NaN (a non-finite speed) takes the floor.
+        // NaN (a non-finite speed) takes the ceiling.
         if m < MAX_MARGIN {
             m.max(MIN_MARGIN)
         } else {

@@ -6168,6 +6168,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         // The coupling's spheres in workgroup memory (cplGsRange).
         cplGsClear();
         cplGsAdd(0u, v, 0u, 0u);
+        cplListBegin(v);
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
@@ -10049,6 +10050,7 @@ void contactGroup(uint g, uint lane)
         // The coupling's spheres in workgroup memory (cplGsRange): a small group's
         // members one after another.
         cplGsClear();
+        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplListBegin(vvMember(off, m));
         if (k <= CPL_GS_VEHICLES)
         {
             uint base = 0u;
