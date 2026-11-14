@@ -436,7 +436,95 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         "{:>6} {:>8} {:>8} {:>8} {:>7} {:>18} {:>12} {:>16}",
         "t s", "ms/step", "worst", "km/h", "drop m", "box m", "proxies", "surf pairs·hits"
     );
+    // `--ab T1,T2,…`: at each time, the car's solver alone from one snapshot, the surface
+    // culls on then off (`ExplicitBeamsGpu::set_surface_culls`; the coupling's proxies as
+    // the World last wrote them): 20 frames of 34 steps each way, their wall time and
+    // whether every state word is the same.
+    let mut ab: Vec<f64> = arg("--ab")
+        .map(|x| x.split(',').filter_map(|t| t.parse().ok()).collect())
+        .unwrap_or_default();
     for k in 0..windows {
+        if ab.first().is_some_and(|&t| lab.bench.t >= t) {
+            ab.remove(0);
+            let x = world.explicit_vehicles_mut().expect("vehicles");
+            x.wait();
+            let snap = x.snapshot();
+            // `--ab-ablate M1,M2,…`: after the A/B, the same frames under each ablation
+            // mask (time only; 2147483648 is the ablation kernel with nothing skipped).
+            if let Some(masks) = arg("--ab-ablate") {
+                let mut line = Vec::new();
+                for m in masks.split(',').filter_map(|m| m.parse::<u32>().ok()) {
+                    x.restore(&snap);
+                    x.set_ablation(m);
+                    x.wait();
+                    let t = std::time::Instant::now();
+                    for _ in 0..20 {
+                        x.frame(34);
+                        x.wait();
+                    }
+                    line.push(format!(
+                        "{m}: {:.2}",
+                        t.elapsed().as_secs_f64() * 1e3 / 20.0
+                    ));
+                }
+                x.set_ablation(0);
+                println!(
+                    "   ablations at t {:.1} (ms/frame): {}",
+                    lab.bench.t,
+                    line.join(", ")
+                );
+            }
+            let mut out = Vec::new();
+            // `--ab-same`: both runs with the culls on (the harness's own repeatability).
+            let second = std::env::args().any(|a| a == "--ab-same");
+            for on in [true, second] {
+                x.restore(&snap);
+                x.set_surface_culls(on);
+                x.wait();
+                let t = std::time::Instant::now();
+                for _ in 0..20 {
+                    x.frame(34);
+                    x.wait();
+                }
+                let ms = t.elapsed().as_secs_f64() * 1e3 / 20.0;
+                // The switch's own header bit back, so the words compare the state alone.
+                x.set_surface_culls(true);
+                x.wait();
+                out.push((ms, x.state_words(), x.coupling_words()));
+            }
+            let same = out[0].1 == out[1].1 && out[0].2 == out[1].2;
+            for ((name, a), (_, b)) in out[0]
+                .1
+                .iter()
+                .zip(&out[1].1)
+                .chain(out[0].2.iter().zip(&out[1].2))
+            {
+                let diff = a.iter().zip(b).filter(|(p, q)| p != q).count();
+                if diff > 0 || a.len() != b.len() {
+                    let at: Vec<String> = a
+                        .iter()
+                        .zip(b)
+                        .enumerate()
+                        .filter(|(_, (p, q))| p != q)
+                        .take(4)
+                        .map(|(i, (p, q))| format!("[{i}] {p:#x} / {q:#x}"))
+                        .collect();
+                    println!(
+                        "     {name}: {diff} of {} words differ: {}",
+                        a.len(),
+                        at.join(", ")
+                    );
+                }
+            }
+            println!(
+                "   A/B at t {:.1}: surface culls on {:.2} ms/frame, off {:.2} ms/frame; state bit for bit: {same}",
+                lab.bench.t, out[0].0, out[1].0
+            );
+            anyhow::ensure!(same, "the surface culls changed the state");
+            x.restore(&snap);
+            x.set_surface_culls(true);
+            x.wait();
+        }
         if ablate != 0 && lab.bench.t >= ablate_at {
             if let Some(x) = world.explicit_vehicles_mut() {
                 x.set_ablation(ablate);
@@ -447,6 +535,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             match a {
                 "pairs" => x.set_surface_pairs(!odd),
                 "cull" => x.set_coupling_cull(!odd),
+                "culls" => x.set_surface_culls(!odd),
                 m if m.starts_with("ablate=") => {
                     x.set_ablation(if odd { m[7..].parse()? } else { 0 })
                 }

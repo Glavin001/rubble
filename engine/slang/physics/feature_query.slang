@@ -1276,6 +1276,68 @@ void fqBounds(FqShape s, out float3 lo, out float3 hi)
 }
 
 // near: a triangle's box padded by r overlapping lo..hi.
+// The separation cull (lossless; engine_schema::feature_query::separated, the same
+// planes and allowance): whether the element's points (a segment passes x1 twice) lie
+// wholly outside one of the shape's outward face planes by more than r and the rounding
+// allowance (1e-3 m and 1e-4 of the largest coordinate read). The plane then holds every
+// point of the element farther than r from the shape, and the narrow phase (its gaps
+// within 1e-5 of the largest coordinate and 1e-4 m) finds no contact. A box's six planes,
+// a hull's, a cylinder's ends; for a sphere, a capsule and a cylinder's side the gap from
+// the element's box to their core (fqApart). A turned shape's bounding box
+// (fqNear) can hold a whole vehicle: a slab on a slope. Off with the includer's
+// fqCullsOn (tests and measurement).
+static const float FQ_SEP_ABS = 1e-3;
+static const float FQ_SEP_REL = 1e-4;
+bool fqOutside(float4 p, float3 x0, float3 x1, float3 x2, float r, float big)
+{
+    float thr = r + FQ_SEP_ABS + FQ_SEP_REL * max(big, abs(p.w));
+    return dot(p.xyz, x0) - p.w > thr && dot(p.xyz, x1) - p.w > thr && dot(p.xyz, x2) - p.w > thr;
+}
+// A round shape's core (a sphere's or cylinder's centre, a capsule's segment) in lo..hi:
+// the gap from the element's box to it, over the axes `mask` keeps, farther than the
+// shape's radius, r and the allowance.
+bool fqApart(float3 x0, float3 x1, float3 x2, float3 lo, float3 hi, float3 mask, float radius, float r, float big)
+{
+    float3 elo = min(min(x0, x1), x2);
+    float3 ehi = max(max(x0, x1), x2);
+    float3 gap = max(max(elo - hi, lo - ehi), float3(0.0, 0.0, 0.0)) * mask;
+    float3 m = max(abs(lo), abs(hi));
+    float thr = radius + r + FQ_SEP_ABS + FQ_SEP_REL * max(big, max(max(m.x, m.y), m.z));
+    return dot(gap, gap) > thr * thr;
+}
+bool fqSeparated(FqShape s, float3 x0, float3 x1, float3 x2, float r)
+{
+    if (!fqCullsOn()) return false;
+    float3 m = max(max(abs(x0), abs(x1)), abs(x2));
+    float big = max(max(m.x, m.y), m.z);
+    if (s.kind == FQ_BOX)
+    {
+        for (uint j = 0u; j < 6u; j++)
+        {
+            if (fqOutside(fqBoxPlane(s, j), x0, x1, x2, r, big)) return true;
+        }
+        return false;
+    }
+    if (s.kind == FQ_HULL)
+    {
+        for (uint f = 0u; f < FQ_HULL_FACES; f++)
+        {
+            if (f >= s.nf) break;
+            if (fqOutside(fqHullP(s, f), x0, x1, x2, r, big)) return true;
+        }
+        return false;
+    }
+    if (s.kind == FQ_CYL)
+    {
+        return fqOutside(float4(0.0, -1.0, 0.0, s.half.y - s.c.y), x0, x1, x2, r, big)
+            || fqOutside(float4(0.0, 1.0, 0.0, s.c.y + s.half.y), x0, x1, x2, r, big)
+            || fqApart(x0, x1, x2, s.c, s.c, float3(1.0, 0.0, 1.0), s.half.x, r, big);
+    }
+    if (s.kind == FQ_SPH) return fqApart(x0, x1, x2, s.c, s.c, float3(1.0, 1.0, 1.0), s.half.x, r, big);
+    if (s.kind == FQ_CAP) return fqApart(x0, x1, x2, min(s.c, s.b), max(s.c, s.b), float3(1.0, 1.0, 1.0), s.half.x, r, big);
+    return false;
+}
+
 bool fqNear(float3 x0, float3 x1, float3 x2, float r, float3 lo, float3 hi)
 {
     float3 tlo = ssub3(min(min(x0, x1), x2), float3(r, r, r));

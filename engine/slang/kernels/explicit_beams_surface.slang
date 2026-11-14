@@ -499,7 +499,7 @@ uint surfTriangleProxies(uint v, uint4 tn, float3 x0, float3 x1, float3 x2, floa
         float3 nn;
         float g;
         float3 q;
-        bool hit = fqNear(x0, x1, x2, r, lo, hi) && fqContact(s, x0, x1, x2, r, w, nn, g, q);
+        bool hit = fqNear(x0, x1, x2, r, lo, hi) && !fqSeparated(s, x0, x1, x2, r) && fqContact(s, x0, x1, x2, r, w, nn, g, q);
         float3 shift = float3(0.0, 0.0, 0.0);
         if (!hit && fast)
         {
@@ -547,6 +547,7 @@ void surfTriangle(uint v, uint gt, float3 origin, float r, uint boxOff, uint box
         float3 hi;
         FqShape s = surfSlot(boxOff, b, lo, hi);
         if (!fqNear(x0, x1, x2, r, lo, hi)) continue;
+        if (fqSeparated(s, x0, x1, x2, r)) continue;
         float3 w;
         float3 nn;
         float g;
@@ -617,7 +618,7 @@ uint surfSegmentProxies(uint v, uint4 bn, float3 x0, float3 x1, float r, uint bo
         bool two;
         float3 w2;
         float3 q2;
-        bool hit = fqSegNear(x0, x1, r, lo, hi) && fqSegContact(s, x0, x1, r, w, nn, g, q, two, w2, q2);
+        bool hit = fqSegNear(x0, x1, r, lo, hi) && !fqSeparated(s, x0, x1, x1, r) && fqSegContact(s, x0, x1, r, w, nn, g, q, two, w2, q2);
         float3 shift = float3(0.0, 0.0, 0.0);
         if (!hit && fast)
         {
@@ -673,6 +674,7 @@ void surfSegment(uint v, uint gj, uint mk, float3 origin, float r, uint boxOff, 
         float3 hi;
         FqShape s = surfSlot(boxOff, b, lo, hi);
         if (!fqSegNear(x0, x1, r, lo, hi)) continue;
+        if (fqSeparated(s, x0, x1, x1, r)) continue;
         float3 w;
         float3 nn;
         float g;
@@ -814,7 +816,7 @@ void surfGatherTriangle(uint v, uint gt, float3 origin, float r, uint proxies, u
         float3 nn;
         float g;
         float3 q;
-        if (fqNear(x0, x1, x2, r, lo, hi) && fqContact(s, x0, x1, x2, r, w, nn, g, q)) continue;
+        if (fqNear(x0, x1, x2, r, lo, hi) && !fqSeparated(s, x0, x1, x2, r) && fqContact(s, x0, x1, x2, r, w, nn, g, q)) continue;
         float3 ve = sdiv3(sadd3(sadd3(gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz), gNodes[tn.z * 3u + 1u].xyz), 3.0);
         surfGatherAt(v, j, parity, surfCastToi(s, x0, x1, x2, 0u, sscale(ssub3(vb, ve), STEP), r));
     }
@@ -842,7 +844,7 @@ void surfGatherSegment(uint v, uint gj, float3 origin, float r, uint proxies, ui
         bool two;
         float3 w2;
         float3 q2;
-        if (fqSegNear(x0, x1, r, lo, hi) && fqSegContact(s, x0, x1, r, w, nn, g, q, two, w2, q2)) continue;
+        if (fqSegNear(x0, x1, r, lo, hi) && !fqSeparated(s, x0, x1, x1, r) && fqSegContact(s, x0, x1, r, w, nn, g, q, two, w2, q2)) continue;
         float3 ve = sscale(sadd3(gNodes[bn.x * 3u + 1u].xyz, gNodes[bn.y * 3u + 1u].xyz), 0.5);
         surfGatherAt(v, j, parity, surfCastToi(s, x0, x1, x1, 1u, sscale(ssub3(vb, ve), STEP), r));
     }
@@ -956,7 +958,19 @@ void surfPairBounds(uint v, uint lane, uint proxies)
 
 // Element (kind, index i in the vehicle) with box tlo..thi (grown by the band) against
 // every proxy shape's bounds: each that it meets listed (fqNear's test).
-void surfPairList(uint v, uint kind, uint i, float3 tlo, float3 thi, uint proxies)
+bool surfPairSeparated(uint v, uint k, float3 x0, float3 x1, float3 x2, float r)
+{
+    uint j;
+    FqShape s = surfProxyShape(v, k, j);
+    return fqSeparated(s, x0, x1, x2, r);
+}
+
+// A triangle's or segment's points (a segment passes x1 twice; a node is not culled,
+// sep false) not listed against a shape they are separated from (fqSeparated, lossless:
+// its find would find nothing), so a slab on a slope, whose bounds hold the whole
+// vehicle, lists the elements along its face only and the list keeps within its room.
+void surfPairList(uint v, uint kind, uint i, float3 tlo, float3 thi, uint proxies, bool sep, float3 x0, float3 x1,
+                  float3 x2, float r)
 {
     for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
     {
@@ -964,6 +978,7 @@ void surfPairList(uint v, uint kind, uint i, float3 tlo, float3 thi, uint proxie
         float3 lo = surfLoad3(at);
         float3 hi = surfLoad3(at + 3u);
         if (!(all(tlo <= hi) && all(thi >= lo))) continue;
+        if (sep && surfPairSeparated(v, k, x0, x1, x2, r)) continue;
         uint p = uint(gAcc[surfPairCount(v)].add(1));
         if (p < SURF_PAIR_CAP) gNext[surfPairAt(v, p)] = (kind << 30) | (k << 20) | i;
     }
@@ -983,7 +998,7 @@ void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1,
         float3 x2 = nf3(gNodes[tn.z * 3u].xyz);
         float3 tlo = ssub3(min(min(x0, x1), x2), float3(r, r, r));
         float3 thi = sadd3(max(max(x0, x1), x2), float3(r, r, r));
-        surfPairList(v, SURF_TRI, t, tlo, thi, proxies);
+        surfPairList(v, SURF_TRI, t, tlo, thi, proxies, true, x0, x1, x2, r);
     }
     for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
     {
@@ -994,7 +1009,7 @@ void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1,
         float3 x1 = nf3(gNodes[bn.y * 3u].xyz);
         float3 tlo = ssub3(min(x0, x1), float3(r, r, r));
         float3 thi = sadd3(max(x0, x1), float3(r, r, r));
-        surfPairList(v, SURF_SEG, j, tlo, thi, proxies);
+        surfPairList(v, SURF_SEG, j, tlo, thi, proxies, true, x0, x1, x1, r);
     }
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
     {
@@ -1003,7 +1018,7 @@ void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1,
         float3 x = nf3(gNodes[gi * 3u].xyz);
         float3 tlo = ssub3(min(x, x), float3(r, r, r));
         float3 thi = sadd3(max(x, x), float3(r, r, r));
-        surfPairList(v, SURF_PT, i, tlo, thi, proxies);
+        surfPairList(v, SURF_PT, i, tlo, thi, proxies, false, x, x, x, r);
     }
 }
 
@@ -1041,6 +1056,8 @@ bool surfPairContact(uint v, uint code, float3 origin, float r, uint4 tn, out ui
     two = false;
     w2 = float3(0.0, 0.0, 0.0);
     q2 = float3(0.0, 0.0, 0.0);
+    // The separation cull (lossless): the narrow phase would find nothing.
+    if (kind != SURF_PT && fqSeparated(s, x0, x1, kind == SURF_TRI ? x2 : x1, r)) return false;
     if (kind == SURF_TRI) return fqContact(s, x0, x1, x2, r, w, nn, g, q);
     if (kind == SURF_SEG) return fqSegContact(s, x0, x1, r, w, nn, g, q, two, w2, q2);
     return fqPointContact(s, x0, r, nn, g);

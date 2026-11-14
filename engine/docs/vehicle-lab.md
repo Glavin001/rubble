@@ -207,6 +207,8 @@ Headless Chrome, M3 Max, generated sedan (554 nodes, 4,228 beams, 1,492 kg), sur
 | Mountain | 27–33 | 43–50 | 16.7 / 50 ms | 6.5–8.3 ms (0.9–1.1 · 6.2–6.9) |
 | Drive into a wall | 54 before, 30 after the strike | 51–60 | 16.7 / 16.8–33 ms | 3.8 → 6.9 ms |
 
+The mountain's cost per World step, natively, and the separation cull that took the surface pass's share down (the pair path's listing overflowed on turned slabs): `measurements/lab-mountain-perf.md`. Native timings of the lab need `RUBBLE_SURFACE_SPLIT=0` (§1a there).
+
 In contact the car's frame costs 6–8 ms of GPU with surface contact on, which with drawing left the old 3-slot gate closed every other frame. These rows must be measured again with the 8-slot gate; that run was held back while the user tested live.
 
 ## Status

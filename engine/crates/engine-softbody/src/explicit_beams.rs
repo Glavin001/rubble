@@ -987,6 +987,10 @@ pub struct ExplicitBeams {
     /// The surface pass's narrow-phase queries in the last step (triangles and segments
     /// against a shape, casts aside): a work counter, not simulated state.
     pub surface_queries: u32,
+    /// The surface pass's separation cull ([`engine_schema::feature_query::separated`];
+    /// lossless, on by default): off, every element whose box meets a shape's runs the
+    /// narrow phase (tests and measurement).
+    pub surface_separation: bool,
     /// The surface pass's segments (beam-edge contact, [`crate::explicit_surface::surface_segments`]),
     /// found at its first step.
     pub surface_segs: Option<Vec<u32>>,
@@ -1724,6 +1728,7 @@ impl ExplicitBeams {
             surface_contact: false,
             surface_last: 0,
             surface_queries: 0,
+            surface_separation: true,
             surface_segs: None,
             surface_force: glam::DVec3::ZERO,
             contact_shift: Vec::new(),

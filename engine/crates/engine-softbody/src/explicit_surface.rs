@@ -39,8 +39,8 @@ use crate::explicit_beams::{
 use engine_schema::feature_query as fq;
 pub use engine_schema::feature_query::{
     closest_on_triangle, closest_seg_seg, cross3, dot3, near, overlap_axis, point_contact,
-    seg_near, seg_overlap_axis, segment_contact, triangle_contact, SurfaceHit, SurfaceShape,
-    PIERCE, TIE,
+    seg_near, seg_overlap_axis, segment_contact, separated, triangle_contact, SurfaceHit,
+    SurfaceShape, PIERCE, TIE,
 };
 use glam::Vec3;
 
@@ -280,6 +280,7 @@ impl ExplicitBeams {
             casts.fast.iter_mut().for_each(|c| *c = None);
         }
         let any_fast = casts.fast.iter().any(Option::is_some);
+        let cull = self.surface_separation;
         let mut queries = 0u32;
         if self.surface_segs.is_none() {
             self.surface_segs = Some(surface_segments(self));
@@ -302,7 +303,7 @@ impl ExplicitBeams {
                 let [i0, i1, i2] = self.triangles[t].nodes;
                 let x = [i0, i1, i2].map(|i| self.origin + self.nodes[i as usize].pos);
                 for (k, (s, lo, hi)) in shapes.iter().enumerate() {
-                    let hit = if near(&x, r, *lo, *hi) {
+                    let hit = if near(&x, r, *lo, *hi) && !(cull && separated(&x, s, r)) {
                         queries += u32::from(!gather);
                         triangle_contact(&x, s, r)
                     } else {
@@ -334,7 +335,7 @@ impl ExplicitBeams {
                 let (a, bb) = (b.a, b.b);
                 let x = [a, bb].map(|i| self.origin + self.nodes[i as usize].pos);
                 for (slot, (s, lo, hi)) in shapes.iter().enumerate() {
-                    let pair = if seg_near(&x, r, *lo, *hi) {
+                    let pair = if seg_near(&x, r, *lo, *hi) && !(cull && separated(&x, s, r)) {
                         queries += u32::from(!gather);
                         segment_contact(&x, s, r)
                     } else {
