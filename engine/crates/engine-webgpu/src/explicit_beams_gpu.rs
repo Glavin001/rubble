@@ -1378,8 +1378,7 @@ impl ExplicitBeamsGpu {
         {
             return Vec::new();
         }
-        self.write_params(steps);
-        let cmds = self.planner.commands(steps, true);
+        let cmds = self.write_params(steps, true);
         let count = 2 * cmds.len() as u32;
         let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("explicit-beams-wide-profile"),
@@ -1443,8 +1442,7 @@ impl ExplicitBeamsGpu {
             return Vec::new();
         }
         self.check_contact_status();
-        self.write_params(steps);
-        let cmds = self.planner.commands(steps, false);
+        let cmds = self.write_params(steps, false);
         let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("explicit-beams-profile"),
             ty: wgpu::QueryType::Timestamp,
@@ -2079,7 +2077,8 @@ impl ExplicitBeamsGpu {
         let mut labels = Vec::new();
         self.check_contact_status();
         self.write_wakes();
-        self.write_params(steps);
+        let wide_allowed = self.alt_pipes().is_none();
+        let cmds = self.write_params(steps, wide_allowed);
         // Timestamps at the start of the frame's first pass and the end of its last.
         let slot = self.timing.as_mut().and_then(|t| {
             (t.used < t.capacity).then(|| {
@@ -2088,7 +2087,6 @@ impl ExplicitBeamsGpu {
             })
         });
         let alt = self.alt_pipes();
-        let cmds = self.planner.commands(steps, alt.is_none());
         let set = self.timing.as_ref().map(|t| &t.set);
         let stamps = |begin: bool, end: bool| {
             ext.or(set.zip(slot))
@@ -2703,9 +2701,24 @@ impl ExplicitBeamsGpu {
     }
 
     /// The parameters for a frame of `steps` steps (the plan's copies, one per step).
-    fn write_params(&mut self, steps: u32) {
+    /// The frame's parameters and its commands: only the parameter copies the commands
+    /// read are uploaded (a dispatch reads copy `param_copy`; the per-vehicle frame and
+    /// contact kernels copy 0), so a frame on per-vehicle workgroups uploads one copy,
+    /// not one a step.
+    fn write_params(&mut self, steps: u32, wide_allowed: bool) -> Vec<Cmd> {
         let bytes = self.planner.write_params(steps);
-        self.queue.write_buffer(&self.params, 0, &bytes);
+        let cmds = self.planner.commands(steps, wide_allowed);
+        let used = cmds
+            .iter()
+            .map(|c| match *c {
+                Cmd::Dispatch { param_copy, .. } => param_copy,
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        let n = ((u64::from(used) + 1) * PARAM_STRIDE).min(bytes.len() as u64) as usize;
+        self.queue.write_buffer(&self.params, 0, &bytes[..n]);
+        cmds
     }
 
     /// Submit `dispatches` dispatches of `steps` steps each in one compute pass (the
