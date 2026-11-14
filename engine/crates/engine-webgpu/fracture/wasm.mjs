@@ -16,6 +16,11 @@ else{const {JSPI}=await import('./gpu-wait.mjs');await mod.default({module_or_pa
 export const LabRun=mod.LabRun;
 export const labFractureDefaults=bonds=>mod.labFractureDefaults?.(bonds)??null;
 export const labDefaultPhysicsHz=()=>mod.labDefaultPhysicsHz?.()??60;
+// Destruction approaches side by side (engine-world-wasm compare.rs, over engine-world's
+// `rubble::play::compare`): the catalogue, a scenario's scene pack, its lab def under an approach.
+export const compareCatalog=()=>mod.compareCatalog();
+export const comparePack=scenario=>mod.comparePack(scenario);
+export const compareDef=(scenario,approach)=>mod.compareDef(scenario,approach);
 
 export {nearMissSettings,hullBase,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices};
 export const SAMPLES=samples();

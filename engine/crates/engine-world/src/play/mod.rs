@@ -21,10 +21,14 @@
 //!   scripted takes.
 //! - [`stage`]: what a host draws for a range scene (its poses interpolated between steps,
 //!   its extra meshes) and its stats.
+//! - [`compare`]: destruction approaches side by side (impact threshold, support graph,
+//!   stress solver, Rubble) on scenarios built to tell them apart.
 //! - The fracture lab ([`crate::lab`]): every lab scene under every bond model.
 
 pub mod balls;
 pub mod broadside;
+#[cfg(feature = "stress")]
+pub mod compare;
 pub mod hills;
 pub mod motion;
 pub mod presets;

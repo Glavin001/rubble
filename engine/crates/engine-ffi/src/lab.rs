@@ -85,6 +85,24 @@ pub struct RbLabDef {
     /// Stress models: the in-step contact fracture and strike prediction.
     pub contact_fracture: RbFractureSwitch,
     pub strike_prediction: RbFractureSwitch,
+    /// Stress models only: how a predicted strike breaks bonds. The model's own by default
+    /// (the analytic local impact for `RB_STRENGTH_IMPACT_LOCAL`, the Hertz force for the
+    /// others). `RB_STRENGTH_LOAD_PATH` with `RB_STRIKE_ANALYTIC` and strike prediction on
+    /// is the quasi-static load solve and the dynamic impact together.
+    /// `RB_STRENGTH_BLAST_GPU` takes Hertz or radial (analytic is an error there).
+    pub strike: RbStrikeRule,
+    /// `RB_STRIKE_RADIAL`'s radius (m, above 0; default 0.5).
+    pub strike_radius: f32,
+    /// `RB_STRENGTH_LOAD_PATH` only (an error on another model): a strike's structural
+    /// response, the impulse a strike leaves in the structure solved through its bonds. Off
+    /// by default: a predicted analytic strike that does not get through then breaks
+    /// nothing past its crater.
+    pub impact_response: RbImpactResponse,
+    /// A factor on the structural load (default 1: as computed). Tuning, not physics.
+    pub impact_response_scale: f32,
+    /// Stress models: support loss and its dynamic factor (`RbDestructibleDef`'s).
+    pub support_loss: bool,
+    pub support_loss_dynamic_factor: f32,
     pub crush: RbLabCrush,
     pub internal_value: u32,
 }
@@ -151,6 +169,12 @@ pub extern "C" fn rbDefaultLabDef() -> RbLabDef {
         ccd: s.ccd,
         contact_fracture: RbFractureSwitch::RB_FRACTURE_MODEL_DEFAULT,
         strike_prediction: RbFractureSwitch::RB_FRACTURE_MODEL_DEFAULT,
+        strike: RbStrikeRule::RB_STRIKE_MODEL_DEFAULT,
+        strike_radius: rubble::StrikeRule::RADIAL_DEFAULT_MM as f32 * 1e-3,
+        impact_response: RbImpactResponse::RB_IMPACT_RESPONSE_OFF,
+        impact_response_scale: 1.0,
+        support_loss: false,
+        support_loss_dynamic_factor: 1.0,
         crush: RbLabCrush::RB_LAB_CRUSH_OFF,
         internal_value: COOKIE,
     }
@@ -203,10 +227,9 @@ unsafe fn lab_def(d: &RbLabDef) -> anyhow::Result<LabDef> {
             ball_mass_scale: d.ball_mass_scale,
             ball_speed_scale: d.ball_speed_scale,
             ccd: d.ccd,
-            fracture: FractureOptions {
-                contact_fracture: switch_in(d.contact_fracture),
-                strike_prediction: switch_in(d.strike_prediction),
-            },
+            fracture: fracture_in(d.contact_fracture, d.strike_prediction, d.strike, d.strike_radius, d.impact_response, d.impact_response_scale)?,
+            support_loss: d.support_loss,
+            support_loss_dynamic_factor: d.support_loss_dynamic_factor,
             crush: match d.crush {
                 RbLabCrush::RB_LAB_CRUSH_OFF => LabCrush::Off,
                 RbLabCrush::RB_LAB_CRUSH_SCENE => LabCrush::Scene,

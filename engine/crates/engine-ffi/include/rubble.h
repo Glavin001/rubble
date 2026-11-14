@@ -200,6 +200,30 @@ typedef enum RbFractureSwitch {
   RB_FRACTURE_OFF = 2,
 } RbFractureSwitch;
 
+// How a predicted strike breaks bonds (`RbDestructibleDef::strike`).
+typedef enum RbStrikeRule {
+  // The model's own.
+  RB_STRIKE_MODEL_DEFAULT = 0,
+  // Every bond whose share of the impact's Hertz peak force beats its tensile capacity.
+  RB_STRIKE_HERTZ = 1,
+  // The analytic local impact: a ballistic limit with a plug, back-face spall, crater,
+  // strain-rate strength, from the shot's speed and mass.
+  RB_STRIKE_ANALYTIC = 2,
+  // Radial damage, the common game rule, for comparison: every bond within
+  // `strike_radius` of the point struck breaks, whatever the shot's speed or mass.
+  RB_STRIKE_RADIAL = 3,
+} RbStrikeRule;
+
+// A strike's structural response (`RbDestructibleDef::impact_response`).
+typedef enum RbImpactResponse {
+  RB_IMPACT_RESPONSE_OFF = 0,
+  // The strike's peak force as a static load (a quasi-static solver's treatment).
+  RB_IMPACT_RESPONSE_STATIC = 1,
+  // The structure's dynamic response to the strike's force pulse: a pulse much shorter
+  // than the structure's own period loads it by its impulse, a long one by its peak.
+  RB_IMPACT_RESPONSE_DYNAMIC = 2,
+} RbImpactResponse;
+
 typedef enum RbVehicleDamageType {
   // The wheel falls off as a free body.
   RB_DETACH_WHEEL = 0,
@@ -985,6 +1009,21 @@ typedef struct RbDestructibleDef {
   // Stress models only: strike prediction for projectiles (`rbBody_SetProjectile`). The
   // model's own by default: on unless the contact fracture is.
   enum RbFractureSwitch strike_prediction;
+  // Stress models only: how a predicted strike breaks bonds. The model's own by default
+  // (the analytic local impact for `RB_STRENGTH_IMPACT_LOCAL`, the Hertz force for the
+  // others). `RB_STRENGTH_LOAD_PATH` with `RB_STRIKE_ANALYTIC` and strike prediction on
+  // is the quasi-static load solve and the dynamic impact together.
+  // `RB_STRENGTH_BLAST_GPU` takes Hertz or radial (analytic is an error there).
+  enum RbStrikeRule strike;
+  // `RB_STRIKE_RADIAL`'s radius (m, above 0; default 0.5).
+  float strike_radius;
+  // `RB_STRENGTH_LOAD_PATH` only (an error on another model): a strike's structural
+  // response, the impulse a strike leaves in the structure solved through its bonds. Off
+  // by default: a predicted analytic strike that does not get through then breaks
+  // nothing past its crater.
+  enum RbImpactResponse impact_response;
+  // A factor on the structural load (default 1: as computed). Tuning, not physics.
+  float impact_response_scale;
   uint32_t internal_value;
 } RbDestructibleDef;
 
@@ -1238,6 +1277,24 @@ typedef struct RbLabDef {
   // Stress models: the in-step contact fracture and strike prediction.
   enum RbFractureSwitch contact_fracture;
   enum RbFractureSwitch strike_prediction;
+  // Stress models only: how a predicted strike breaks bonds. The model's own by default
+  // (the analytic local impact for `RB_STRENGTH_IMPACT_LOCAL`, the Hertz force for the
+  // others). `RB_STRENGTH_LOAD_PATH` with `RB_STRIKE_ANALYTIC` and strike prediction on
+  // is the quasi-static load solve and the dynamic impact together.
+  // `RB_STRENGTH_BLAST_GPU` takes Hertz or radial (analytic is an error there).
+  enum RbStrikeRule strike;
+  // `RB_STRIKE_RADIAL`'s radius (m, above 0; default 0.5).
+  float strike_radius;
+  // `RB_STRENGTH_LOAD_PATH` only (an error on another model): a strike's structural
+  // response, the impulse a strike leaves in the structure solved through its bonds. Off
+  // by default: a predicted analytic strike that does not get through then breaks
+  // nothing past its crater.
+  enum RbImpactResponse impact_response;
+  // A factor on the structural load (default 1: as computed). Tuning, not physics.
+  float impact_response_scale;
+  // Stress models: support loss and its dynamic factor (`RbDestructibleDef`'s).
+  bool support_loss;
+  float support_loss_dynamic_factor;
   enum RbLabCrush crush;
   uint32_t internal_value;
 } RbLabDef;

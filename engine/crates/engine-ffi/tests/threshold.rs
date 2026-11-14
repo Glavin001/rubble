@@ -216,3 +216,79 @@ fn threshold_destructibles_break_and_split_through_the_abi() {
         eprintln!("arch {arch:?}, house {house:?} (bonds broken, splits, pieces)");
     }
 }
+
+/// A world with the cuboid house under `model` and the def `edit` leaves: the creation's
+/// result (its error text when it fails), and `frames` frames stepped when it succeeds.
+unsafe fn place(model: RbStrengthModel, edit: impl Fn(&mut RbDestructibleDef), frames: usize) -> Result<(), String> {
+    let mut def = rbDefaultWorldDef();
+    def.contacts = RbContacts::RB_CONTACTS_CANONICAL;
+    def.enable_sleep = false;
+    def.max_bodies = 4096;
+    def.max_colliders = 8192;
+    def.max_contacts = 65_536;
+    def.max_candidates = 262_144;
+    def.max_hull_vertices = 1 << 20;
+    let mut w = ptr::null_mut();
+    ok(rbCreateWorld(&def, &mut w));
+    let mut asset = 0;
+    ok(rbCreateDestructibleAssetCuboidHouse(w, &mut asset));
+    let mut dt = 0.0;
+    ok(rbWorld_UseDestructibleAssetSolverFor(w, asset, model, &mut dt));
+    let mut dd = rbDefaultDestructibleDef();
+    dd.asset = asset;
+    dd.model = model;
+    edit(&mut dd);
+    let mut id = 0;
+    let r = rbCreateDestructible(w, &dd, &mut id);
+    let out = if r == RbResult::RB_OK {
+        for _ in 0..frames {
+            ok(rbWorld_Step(w));
+            let mut f = std::mem::zeroed();
+            ok(rbWorld_Poll(w, true, true, &mut f));
+        }
+        Ok(())
+    } else {
+        Err(CStr::from_ptr(rbGetLastError()).to_string_lossy().into_owned())
+    };
+    rbDestroyWorld(w);
+    out
+}
+
+/// The strike rule and the structural response through the ABI: the full combination
+/// (load path, analytic strike, dynamic response) places and steps; a combination a model
+/// cannot run is refused with the reason.
+#[test]
+fn the_strike_rule_and_structural_response_are_set_through_the_abi() {
+    unsafe {
+        let full = |d: &mut RbDestructibleDef| {
+            d.contact_fracture = RbFractureSwitch::RB_FRACTURE_OFF;
+            d.strike_prediction = RbFractureSwitch::RB_FRACTURE_ON;
+            d.strike = RbStrikeRule::RB_STRIKE_ANALYTIC;
+            d.impact_response = RbImpactResponse::RB_IMPACT_RESPONSE_DYNAMIC;
+        };
+        place(RbStrengthModel::RB_STRENGTH_LOAD_PATH, full, 4).expect("the full combination");
+        place(
+            RbStrengthModel::RB_STRENGTH_BLAST_GPU,
+            |d| {
+                d.strike = RbStrikeRule::RB_STRIKE_RADIAL;
+                d.strike_radius = 0.25;
+            },
+            4,
+        )
+        .expect("radial damage on the GPU stress solver");
+        let e = place(RbStrengthModel::RB_STRENGTH_THRESHOLD, |d| d.impact_response = RbImpactResponse::RB_IMPACT_RESPONSE_DYNAMIC, 0).unwrap_err();
+        assert!(e.contains("load path") || e.contains("load_path"), "{e}");
+        let e = place(
+            RbStrengthModel::RB_STRENGTH_LOAD_PATH,
+            |d| {
+                d.strike = RbStrikeRule::RB_STRIKE_RADIAL;
+                d.strike_radius = 0.0;
+            },
+            0,
+        )
+        .unwrap_err();
+        assert!(e.contains("radius"), "{e}");
+        let e = place(RbStrengthModel::RB_STRENGTH_BLAST_GPU, |d| d.strike = RbStrikeRule::RB_STRIKE_ANALYTIC, 0).unwrap_err();
+        assert!(e.contains("analytic"), "{e}");
+    }
+}

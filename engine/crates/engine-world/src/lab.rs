@@ -45,6 +45,41 @@ pub const READBACK_FRAMES: u32 = 8;
 /// runs at the rate the settings give; none picks its own.
 pub const DEFAULT_PHYSICS_HZ: f32 = 60.0;
 
+/// How the stress view's load over strength `u` becomes the renderer's colour ramp (0 blue
+/// to 1 at strength). A display choice: the solve and the breaks do not see it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StressScale {
+    /// `u` itself: blue unloaded, red at strength.
+    #[default]
+    Absolute,
+    /// Decades of `u` from 10^-8 (blue) to 1 (red, at strength): a structure loaded far
+    /// below its strength (a scene authored with very strong bonds) still shows its load
+    /// pattern, and a strike's rise.
+    Log,
+    /// `u` over the frame's largest among the drawn chunks: where the load is, whatever its
+    /// size. Not comparable from frame to frame.
+    Relative,
+}
+
+impl StressScale {
+    pub const ALL: [StressScale; 3] = [StressScale::Absolute, StressScale::Log, StressScale::Relative];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StressScale::Absolute => "absolute",
+            StressScale::Log => "log",
+            StressScale::Relative => "relative",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<StressScale> {
+        Self::ALL.into_iter().find(|s| s.name() == name)
+    }
+
+    /// The decades [`StressScale::Log`] spans below 1.
+    pub const LOG_DECADES: f32 = 8.0;
+}
+
 /// How the lab's bonds hold: none, D6 joints, or a stress model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LabBonds {
@@ -127,6 +162,11 @@ pub struct LabSettings {
     pub ccd: bool,
     /// The stress models' in-step contact fracture and strike prediction.
     pub fracture: FractureOptions,
+    /// The stress models' support loss (`DestructibleDef::support_loss`): weight flows
+    /// through the bond graph to the anchors, overloaded bonds break, unsupported pieces tip.
+    pub support_loss: bool,
+    /// With `support_loss`: `DestructibleDef::support_loss_dynamic_factor` (1 to 2).
+    pub support_loss_dynamic_factor: f32,
     /// Chunk crushing (stress models; an error where no chunk can crush).
     pub crush: LabCrush,
     /// Time each step on the GPU.
@@ -144,6 +184,8 @@ impl Default for LabSettings {
             ball_speed_scale: 1.0,
             ccd: false,
             fracture: FractureOptions::default(),
+            support_loss: false,
+            support_loss_dynamic_factor: 1.0,
             crush: LabCrush::Off,
             gpu_timing: GpuTiming::Step,
         }
@@ -317,6 +359,11 @@ impl LabPlan {
         anyhow::ensure!(
             s.fracture == FractureOptions::default() || s.bonds.stress().is_some(),
             "the contact fracture and strike prediction switches are the stress models'; the {} bonds have none",
+            s.bonds.name()
+        );
+        anyhow::ensure!(
+            !s.support_loss || s.bonds.stress().is_some(),
+            "support loss is a stress model's (Threshold, LoadPath, ImpactLocal, BlastGpu); the {} bonds have none",
             s.bonds.name()
         );
         let dt = 1.0 / s.physics_hz as f64;
@@ -766,6 +813,8 @@ pub struct Lab {
     schedule: Vec<Due>,
     /// Directed debris: on, and its zones (scene body anchors).
     guidance: Option<(GuidanceSettings, Vec<engine_schema::guidance::ZoneDesc>)>,
+    /// The stress view's colour scale ([`Lab::poses`]).
+    stress_scale: StressScale,
 }
 
 impl Lab {
@@ -886,6 +935,7 @@ impl Lab {
             saved,
             schedule: Vec::new(),
             guidance: None,
+            stress_scale: StressScale::Absolute,
         })
     }
 
@@ -921,6 +971,8 @@ impl Lab {
                 asleep: false,
                 crush: crush.clone(),
                 fracture: o.fracture,
+                support_loss: o.support_loss,
+                support_loss_dynamic_factor: o.support_loss_dynamic_factor,
                 shape: ShapeDef {
                     material,
                     update_body_mass: false,
@@ -978,6 +1030,7 @@ impl Lab {
             saved: None,
             schedule: Vec::new(),
             guidance: None,
+            stress_scale: StressScale::Absolute,
         })
     }
 
@@ -1040,6 +1093,11 @@ impl Lab {
     /// The world slot of each scene body (`None`: not a body), bond models.
     pub fn slot_of(&self) -> &[u32] {
         &self.slot_of
+    }
+
+    /// Stress models: the live balls, oldest first, with the step each was fired.
+    pub fn balls(&self) -> &[(BodyId, u64)] {
+        self.balls.live()
     }
 
     /// The pack's authored shots.
@@ -1342,6 +1400,11 @@ impl Lab {
             out[o + 11] = f32::from_bits(flags);
         };
         let parked = Transform::new(PARKED, [0.0, 0.0, 0.0, 1.0]);
+        let mut stress = Vec::with_capacity(self.destructibles.len());
+        for &d in &self.destructibles {
+            stress.push(world.destructible_chunk_stress(d)?);
+        }
+        let mut stressed: Vec<(usize, f32)> = Vec::new();
         for (i, d) in self.drawn.iter().enumerate() {
             match *d {
                 Drawn::Ground => put(i, Transform::IDENTITY, 0, None),
@@ -1360,6 +1423,11 @@ impl Lab {
                     }
                     let t = world.body_transform(body)?.unwrap_or(world.body_initial_transform(body)?);
                     put(i, compose(&t, &rest), body_flags(world, body), Some(body));
+                    // The stress view (`World::set_stress_view`): 1 + the chunk's largest
+                    // bond load over strength in word 12 (0: none solved).
+                    if let Some(v) = stress.get(copy as usize).and_then(|s| s.as_ref()).and_then(|s| s.get(chunk as usize)) {
+                        stressed.push((i, 1.0 + v[0].max(v[1]).max(v[2]).max(v[3]).max(0.0)));
+                    }
                 }
             }
         }
@@ -1373,7 +1441,30 @@ impl Lab {
                 }
             }
         }
+        let peak = stressed.iter().map(|s| s.1 - 1.0).fold(0.0f32, f32::max);
+        for (i, u) in stressed {
+            let u = u - 1.0;
+            let shown = match self.stress_scale {
+                StressScale::Absolute => u,
+                StressScale::Log => {
+                    if u >= 1.0 {
+                        1.0
+                    } else if u > 0.0 {
+                        ((u.log10() + StressScale::LOG_DECADES) / StressScale::LOG_DECADES).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                }
+                StressScale::Relative => if peak > 0.0 { u / peak } else { 0.0 },
+            };
+            out[RECORD_FLOATS * i + 12] = 1.0 + shown;
+        }
         Ok(out)
+    }
+
+    /// The stress view's colour scale from the next [`Lab::poses`] on.
+    pub fn set_stress_scale(&mut self, scale: StressScale) {
+        self.stress_scale = scale;
     }
 }
 

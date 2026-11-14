@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Rubble · Why Rubble</title>
+<style>
+:root{color-scheme:dark;font:14px/1.5 system-ui,sans-serif;color:#e6eef2;background:#091019}*{box-sizing:border-box}
+body{margin:0;min-height:100dvh;display:flex;flex-direction:column}
+header{padding:18px 24px 12px;border-bottom:1px solid #2b3c4a;background:#0d1722}
+.eyebrow{font:11px ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase;color:#83a1b5}
+h1{font-size:22px;margin:4px 0 2px}
+header p{margin:0;color:#b9c9d4;max-width:80ch}
+.bar{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin-top:12px}
+.bar label{display:flex;gap:6px;align-items:center;color:#b9c9d4}
+select,button{font:inherit;color:inherit;background:#20313f;border:1px solid #37495a;border-radius:8px;padding:6px 10px}
+button{cursor:pointer}button.primary{background:#e2643a;border-color:#e2643a;color:#fff;font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+#caption{margin:10px 0 0;font-size:15px;color:#e6eef2}
+#columns{flex:1;display:grid;grid-template-columns:repeat(var(--n,4),minmax(0,1fr));gap:1px;background:#2b3c4a;min-height:0}
+.col{background:#091019;display:flex;flex-direction:column;min-width:0}
+.col h2{font-size:15px;margin:0;padding:10px 14px 0}
+.col.ours h2{color:#ff9a6e}
+.col .blurb{margin:0;padding:2px 14px 8px;color:#8fa6b7;font-size:12px;min-height:4.2em}
+.col canvas{display:block;width:100%;height:42dvh;min-height:220px;touch-action:none;cursor:crosshair;background:#0a131c}
+.card{padding:10px 14px 14px;font-variant-numeric:tabular-nums}
+.card .headline{font-weight:600;font-size:15px;margin:0 0 6px}
+.card table{border-collapse:collapse;width:100%;font-size:12px}
+.card td{padding:2px 0;border-top:1px solid #1b2a36;vertical-align:top}
+.card td:last-child{text-align:right;color:#cfe0ea}
+.card td:first-child{color:#8fa6b7;padding-right:8px}
+.legend{display:inline-flex;align-items:center;gap:6px;color:#8fa6b7;font-size:12px}.legend i{display:inline-block;width:120px;height:10px;border-radius:5px;background:linear-gradient(90deg,#1a52db,#1abddb,#4dd15c,#f5d629,#ed5c1a)}
+.perf{color:#8fa6b7;font:11px ui-monospace,monospace;margin-top:8px}
+#status{padding:8px 24px;font:12px ui-monospace,monospace;color:#8fa6b7;border-top:1px solid #2b3c4a}
+#status.error{color:#ff8a8a}
+@media(max-width:900px){#columns{grid-template-columns:repeat(2,minmax(0,1fr))}.col canvas{height:30dvh}}
+@media(max-width:520px){#columns{grid-template-columns:1fr}header{padding:14px 16px 10px}}
+</style></head><body>
+<header>
+ <div class="eyebrow">Rubble / comparison</div>
+ <h1>Why Rubble</h1>
+ <p>The same structure and the same shots under five ways of deciding what breaks. Each column is this engine with features switched off down to what that approach computes.</p>
+ <div class="bar">
+  <label>Scenario <select id="scenario"></select></label>
+  <span id="approaches" class="bar" style="margin:0"></span>
+  <label>Speed <select id="speed"><option value="1">real time</option><option value="0.25" selected>1/4</option><option value="0.05">1/20</option></select></label>
+  <label>View <select id="view"><option value="3" selected>stress (load / strength)</option><option value="0">materials</option><option value="2">pieces</option></select></label>
+  <button id="run" class="primary">Run again</button><button id="pause">Pause</button>
+  <span class="legend" id="legend">unloaded <i></i> at strength</span>
+ </div>
+ <p id="caption"></p>
+</header>
+<main id="columns"></main>
+<div id="status">Loading…</div>
+<script type="importmap">{"imports":{"rubble-gpu-wait":"./gpu-wait.mjs"}}</script><script type="module" src="./compare.mjs"></script></body></html>
