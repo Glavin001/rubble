@@ -22,8 +22,10 @@
 //!    vehicle's up) down the suspension, against the flat ground, the boxes and
 //!    the static shapes, nearest hit within the travel plus the radius; the spring,
 //!    damper and bump stop give the normal load, then the anti-roll bars;
-//! 3. per wheel the tyre forces with the hub's force as the node pass will see it
-//!    (beams, contact sums): the lateral force that stops the hub's sideways slip
+//! 3. per wheel, with [`DriveConfig::rim_stop`] and a rim radius, the rim stop
+//!    ([`rim_stop`]: the wheel as a solid, its hub never within the rim's radius of
+//!    the hit surface) adds its normal force to the load; then the tyre forces with
+//!    the hub's force as the node pass will see it (beams, contact sums): the lateral force that stops the hub's sideways slip
 //!    this step, the longitudinal force and wheel spin solved exactly with the
 //!    drive and brake torques (a monotone piecewise-linear equation in the new
 //!    spin, the rigid model's spin solve in explicit form), both bounded by
@@ -98,6 +100,11 @@ pub struct DriveWheel {
     /// vehicle frame (forward, up, left components): the build's own toe and camber,
     /// taken out each step so only deformation since spawn turns the wheel.
     pub axle_rest: [f32; 3],
+    /// The rim's radius (m): the wheel's solid part about its hub, from the content
+    /// (JBeam `pressureWheels` `hubRadius`); 0 when the content gives none (RoR
+    /// `wheels`: no rim, nothing to stop on). With [`DriveConfig::rim_stop`] the hub
+    /// never comes closer than this to the surface under the wheel ([`rim_stop`]).
+    pub rim_radius: f32,
 }
 
 /// A vehicle's raycast wheels and drive.
@@ -138,6 +145,15 @@ pub struct DriveConfig {
     /// hubs turned 25° under throttle), which the tyres' rings and rigidity beams
     /// held on beam tyres.
     pub hub_axles: bool,
+    /// The wheel as a solid ([`rim_stop`]): once the hub is within its rim's radius
+    /// of the surface its ray hit, that surface pushes back on the hub as the
+    /// solver's ground pushes a node, so the load goes on into the hub's beams (arms,
+    /// strut, mounts), which yield or break, instead of the hub passing into the
+    /// ground. Acts only on wheels with a rim radius and only while the hub is that
+    /// close: a wheel that never gets there runs bit for bit as without it. Default
+    /// ([`DriveConfig::from_desc`]): on for wheels that are parts of their own (the
+    /// generated cars), off otherwise.
+    pub rim_stop: bool,
 }
 
 /// The driver's input (per vehicle, set per frame by the host).
@@ -590,6 +606,50 @@ fn apply(s: &mut ExplicitBeams, i: u32, f: Vec3) {
     s.nodes[i as usize].force += q;
 }
 
+/// The rim stop ([`DriveConfig::rim_stop`]): the normal force (N, > 0; 0 for none) with
+/// which the surface the ray of wheel `w` hit (at `t` along it, normal `n`, `cos_t` =
+/// n·up) holds the wheel's hub (mass `m`, velocity `vh`, its nodes' force `f_hub` as
+/// the node pass will see it) when the hub is within the rim's radius of it, on top of
+/// the suspension's `load` along `n`.
+///
+/// The wheel is a solid of the rim's radius about its hub: the hub's distance from
+/// the hit plane, (t − rest_len)·cos_t (the ray starts `rest_len` above the hub), may
+/// not go under the rim's radius. There the surface acts on the hub as the solver's
+/// ground acts on a node (jbeam-semantics-spec §37's normal force,
+/// [`crate::explicit_beams::contact_response`] on a dissipative surface): it stops the
+/// approach and at most cancels the inward force, r = −f_n − (v_n + max(v_n, 0))·m/h.
+/// Its work is −(½·m·v_n² + ½·h·f_n·v_n) approaching and 0 otherwise: it adds no energy
+/// and makes no separating speed, and as a velocity-level constraint it needs no
+/// stiffness, so it is stable at any hub mass (no ω·h limit). No position step: a hub
+/// that reached the stop stays where one step's approach left it (at most |v_n|·h in).
+/// A separate function behind its own test, so a wheel that never gets this close runs
+/// the old arithmetic exactly (and the kernels' fast-math codegen is untouched).
+#[allow(clippy::too_many_arguments)]
+pub fn rim_stop(
+    w: &DriveWheel,
+    t: f32,
+    cos_t: f32,
+    m: f32,
+    vh: Vec3,
+    f_hub: Vec3,
+    n: Vec3,
+    load: f32,
+    h: f32,
+) -> f32 {
+    let d = (t - w.rest_len) * cos_t;
+    if d >= w.rim_radius {
+        return 0.0;
+    }
+    let vn = dot(vh, n);
+    let fn_ = dot(f_hub, n) + load;
+    let r = -fn_ - dv((vn + vn.max(0.0)) * m, h);
+    if r > 0.0 {
+        r
+    } else {
+        0.0
+    }
+}
+
 /// One step's raycast wheels of `s` (before its node pass; see the module docs).
 pub fn drive_pass(s: &mut ExplicitBeams) {
     let Some(mut d) = s.drive.take() else {
@@ -756,15 +816,21 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
         let mut force = Vec3::ZERO;
         let (w_new, kappa, alpha) = if let Some(ht) = hits[k] {
             let n = ht.n;
-            let fn_ = load[k];
-            b += w.rolling * fn_ * r;
-            let t = nrm(fwd - n * dot(n, fwd));
-            let sd = n.cross(t);
             let fpre = if w.node1 == w.node2 {
                 s.force_now(w.node1 as usize)
             } else {
                 s.force_now(w.node1 as usize) + s.force_now(w.node2 as usize)
             };
+            let mut fn_ = load[k];
+            if d.config.rim_stop && w.rim_radius > 0.0 {
+                let rs = rim_stop(w, ht.t, dot(n, up), m, vh, fpre, n, fn_, h);
+                if rs > 0.0 {
+                    fn_ += rs;
+                }
+            }
+            b += w.rolling * fn_ * r;
+            let t = nrm(fwd - n * dot(n, fwd));
+            let sd = n.cross(t);
             let vt = dot(vh, t);
             let vs = dot(vh, sd);
             let ft = dot(fpre, t);
@@ -1004,6 +1070,14 @@ impl DriveConfig {
                 tan_peak_alpha: peak_alpha.max(1.5).to_radians().tan(),
                 side: sgn(hub.dot(left_v) - 0.0),
                 axle_rest: [0.0, 0.0, 1.0],
+                // The rim: the content's own (a JBeam pressure wheel's `hubRadius`).
+                rim_radius: desc
+                    .pressure_wheels
+                    .iter()
+                    .find(|p| p.wheel as usize == i)
+                    .and_then(|p| p.values.get("hubRadius").copied())
+                    .filter(|r| r.is_finite() && *r > 0.0 && *r < w.radius)
+                    .unwrap_or(0.0),
             });
         }
         any_driven = wheels.iter().any(|w| w.driven);
@@ -1082,6 +1156,20 @@ impl DriveConfig {
             ));
         }
         let speed_curve = curve_points(&v.steering.speed_curve, "steering")?;
+        // The rim stop's default: on for wheels built as parts of their own (every
+        // wheel's row names `raycastWheelMass`, Rubble's key for a raycast wheel whose
+        // axle nodes carry the wheel's own nodes: the generated cars, whose rims and
+        // tyres ride the hub). Off for other content, where it would change existing
+        // runs (the JBeam fixture car reaches it landing from its 0.8 m spawn); a host
+        // turns it on for any car with a rim radius.
+        let rim_stop = !desc.wheels.is_empty()
+            && (0..desc.wheels.len()).all(|i| {
+                desc.pressure_wheels
+                    .iter()
+                    .find(|p| p.wheel as usize == i)
+                    .and_then(|p| p.values.get("raycastWheelMass"))
+                    .is_some_and(|m| *m > 0.0)
+            });
         Ok((
             Self {
                 wheels,
@@ -1103,6 +1191,7 @@ impl DriveConfig {
                 surface: 1.0,
                 anti_roll,
                 hub_axles: false,
+                rim_stop,
             },
             notes,
         ))

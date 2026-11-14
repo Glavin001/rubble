@@ -69,7 +69,10 @@ fn corners(d: &SoftVehicleDesc, s: &ExplicitBeams) -> Vec<Corner> {
             let pw = d
                 .pressure_wheels
                 .iter()
-                .find(|p| (p.node1, p.node2) == (w.node1, w.node2) || (p.node1, p.node2) == (w.node2, w.node1))
+                .find(|p| {
+                    (p.node1, p.node2) == (w.node1, w.node2)
+                        || (p.node1, p.node2) == (w.node2, w.node1)
+                })
                 .expect("the wheel's pressureWheels row");
             let rim = *pw.values.get("hubRadius").expect("the row's hubRadius");
             // `whefl_ai` → corner `fl`: the wheel's (`whefl_*`) and hub's (`hubfl_*`) nodes.
@@ -80,7 +83,8 @@ fn corners(d: &SoftVehicleDesc, s: &ExplicitBeams) -> Vec<Corner> {
                 .iter()
                 .enumerate()
                 .filter(|(_, n)| {
-                    n.name.starts_with(&format!("whe{c}_")) || n.name.starts_with(&format!("hub{c}_"))
+                    n.name.starts_with(&format!("whe{c}_"))
+                        || n.name.starts_with(&format!("hub{c}_"))
                 })
                 .map(|(i, _)| i)
                 .collect::<Vec<_>>();
@@ -95,15 +99,20 @@ fn corners(d: &SoftVehicleDesc, s: &ExplicitBeams) -> Vec<Corner> {
 }
 
 struct Press {
-    /// Lowest hub height (m) over the ground while the plate was above every
-    /// wheel's own nodes, and that wheel's rim radius.
+    /// Lowest hub height (m) over the ground before the plate, or the body it
+    /// crushed, first reached the wheel's own nodes, and that wheel's rim radius.
+    /// From then the crush bears on the wheel itself: the plate is kinematic (any
+    /// force), and the body's contact with the wheel's nodes separates them by
+    /// position steps (§37), which the rim stop, a force as the solver's ground is,
+    /// does not resist (`known-bugs.md` W1).
     hub_low: f32,
     rim: f32,
     radius: f32,
     /// Largest wheel load (N) and the mounts' downward push on that wheel then (N).
     load_peak: f32,
     mounts_then: f32,
-    /// Per wheel: mount beams yielded or broken at the end.
+    /// Per wheel: mount beams yielded or broken when the crush first reached the
+    /// wheel (or at the end, if it never did).
     folded: Vec<usize>,
     /// Lowest hub (m) at the end, and whether the run stayed finite.
     hub_end: f32,
@@ -115,14 +124,27 @@ fn press(speed: f32, gap: f32, secs: f32) -> Press {
         fast_inv_sqrt: true,
         ..Default::default()
     };
-    let (template, _) = ExplicitBeams::from_desc_jbeam_raycast(&d, Vec3::ZERO, Vec3::ZERO, settings)
-        .expect("spawn");
+    let (template, _) =
+        ExplicitBeams::from_desc_jbeam_raycast(&d, Vec3::ZERO, Vec3::ZERO, settings)
+            .expect("spawn");
     let cs = corners(&d, &template);
     let script = json!({ "mode": "compactor", "scene": "flat", "surface": true,
         "events": [{ "t": 0.5, "plates": { "axis": "top", "speed": speed, "gap": gap } }] });
     let mut lab = CpuLab::new(&template, LabOptions::from_json(&script)).expect("lab");
     lab.bench.set_script(&script).expect("script");
     let rest0: Vec<f32> = lab.sim.beams.iter().map(|b| b.rest).collect();
+    let mut touched = vec![false; cs.len()];
+    let mut folded_at = vec![None; cs.len()];
+    let mounts_moved = |s: &ExplicitBeams, c: &Corner| {
+        s.beams
+            .iter()
+            .zip(&rest0)
+            .filter(|(b, &r0)| {
+                c.own.contains(&(b.a as usize)) != c.own.contains(&(b.b as usize))
+                    && (b.broken || (b.rest - r0).abs() > 1e-3 * r0)
+            })
+            .count()
+    };
     let mut out = Press {
         hub_low: f32::MAX,
         rim: 0.0,
@@ -143,10 +165,24 @@ fn press(speed: f32, gap: f32, secs: f32) -> Press {
             .first()
             .map_or(f32::MAX, |p| gap + p.stroke - p.travel);
         let dr = s.drive.as_ref().unwrap();
-        for (c, (w, st)) in cs.iter().zip(dr.config.wheels.iter().zip(&dr.wheels)) {
+        for (k, (c, (w, st))) in cs
+            .iter()
+            .zip(dr.config.wheels.iter().zip(&dr.wheels))
+            .enumerate()
+        {
             let hub = 0.5 * (y(w.node1 as usize) + y(w.node2 as usize));
             let top = c.own.iter().map(|&i| y(i)).fold(f32::MIN, f32::max);
-            if plate_bottom > top + 0.01 && hub < out.hub_low {
+            // Reached: the plate is at the wheel's nodes, or the body it crushed is on
+            // them (a contact's position step on one of them, §37).
+            let pressed = c
+                .own
+                .iter()
+                .any(|&i| s.contact_shift.get(i).is_some_and(|a| *a != [0, 0, 0]));
+            if !touched[k] && (plate_bottom <= top + 0.01 || pressed) {
+                touched[k] = true;
+                folded_at[k] = Some(mounts_moved(s, c));
+            }
+            if !touched[k] && hub < out.hub_low {
                 out.hub_low = hub;
                 out.rim = c.rim;
                 out.radius = c.radius;
@@ -173,17 +209,9 @@ fn press(speed: f32, gap: f32, secs: f32) -> Press {
     }
     let s = &lab.sim;
     let dr = s.drive.as_ref().unwrap();
-    for (c, w) in cs.iter().zip(&dr.config.wheels) {
-        let n = s
-            .beams
-            .iter()
-            .zip(&rest0)
-            .filter(|(b, &r0)| {
-                c.own.contains(&(b.a as usize)) != c.own.contains(&(b.b as usize))
-                    && (b.broken || (b.rest - r0).abs() > 1e-3 * r0)
-            })
-            .count();
-        out.folded.push(n);
+    for (k, (c, w)) in cs.iter().zip(&dr.config.wheels).enumerate() {
+        out.folded
+            .push(folded_at[k].unwrap_or_else(|| mounts_moved(s, c)));
         let hub = 0.5 * (s.nodes[w.node1 as usize].pos.y + s.nodes[w.node2 as usize].pos.y)
             + s.origin.y
             - s.ground;
@@ -223,12 +251,14 @@ fn pressed_to_a_stop_the_hubs_stay_a_rim_over_the_ground() {
     );
 }
 
-/// The plate down at 0.25 m/s to 5 cm (flat): the rims hold until the mounts give.
+/// The plate down at 0.25 m/s to 5 cm (flat): the rims hold until the crush (the
+/// plate, or the body it flattened) reaches the wheels themselves, and by then the
+/// wheels' mounts have yielded or broken under the load the rims passed into them.
 #[test]
 fn pressed_flat_the_wheels_fold_instead_of_sinking() {
     let p = press(0.25, 0.05, 8.0);
     eprintln!(
-        "hub lowest {:.3} m (rim {:.3}, tyre {:.3}) while the plate was above the wheels; peak load {:.1} kN, mounts {:.1} kN; mounts yielded/broken {:?}; hub at end {:.3}",
+        "hub lowest {:.3} m (rim {:.3}, tyre {:.3}) before the crush reached the wheels; peak load {:.1} kN, mounts {:.1} kN; mounts yielded/broken {:?}; hub at end {:.3}",
         p.hub_low,
         p.rim,
         p.radius,
@@ -239,13 +269,13 @@ fn pressed_flat_the_wheels_fold_instead_of_sinking() {
     );
     assert!(
         p.hub_low >= p.rim - 0.01,
-        "a hub came to {:.3} m over the ground under its rim's {:.3} m before the plate reached the wheel",
+        "a hub came to {:.3} m over the ground under its rim's {:.3} m before the crush reached the wheel",
         p.hub_low,
         p.rim
     );
     assert!(
         p.folded.iter().all(|&n| n > 0),
-        "pressed flat, a wheel's mounts neither yielded nor broke: {:?}",
+        "pressed flat, a wheel's mounts neither yielded nor broke before the crush reached it: {:?}",
         p.folded
     );
 }

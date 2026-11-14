@@ -194,7 +194,11 @@ fn main() -> anyhow::Result<()> {
                 st.length,
                 hub_y,
                 low,
-                if rim_low == f32::MAX { f32::NAN } else { rim_low },
+                if rim_low == f32::MAX {
+                    f32::NAN
+                } else {
+                    rim_low
+                },
                 st.load / 1e3,
                 if st.contact { "c" } else { "-" }
             );

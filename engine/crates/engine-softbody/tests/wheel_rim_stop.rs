@@ -73,7 +73,9 @@ fn spawn(lift: f32) -> ExplicitBeams {
         .config
         .wheels
         .iter()
-        .map(|w| 0.5 * (s.nodes[w.node1 as usize].pos.y + s.nodes[w.node2 as usize].pos.y) - w.radius)
+        .map(|w| {
+            0.5 * (s.nodes[w.node1 as usize].pos.y + s.nodes[w.node2 as usize].pos.y) - w.radius
+        })
         .fold(f32::MAX, f32::min);
     let shift = Vec3::new(
         -0.5 * (lo.x + hi.x),
@@ -99,7 +101,10 @@ fn rims(s: &ExplicitBeams) -> Vec<(f32, f32)> {
             let pw = d
                 .pressure_wheels
                 .iter()
-                .find(|p| (p.node1, p.node2) == (w.node1, w.node2) || (p.node1, p.node2) == (w.node2, w.node1))
+                .find(|p| {
+                    (p.node1, p.node2) == (w.node1, w.node2)
+                        || (p.node1, p.node2) == (w.node2, w.node1)
+                })
                 .expect("the wheel's pressureWheels row");
             (*pw.values.get("hubRadius").expect("hubRadius"), w.radius)
         })
@@ -155,8 +160,8 @@ fn run(s: ExplicitBeams, seconds: f32) -> Run {
         let s = &w.vehicles[0];
         let dr = s.drive.as_ref().unwrap();
         for (wh, &(rim, radius)) in dr.config.wheels.iter().zip(&rims) {
-            let hub = 0.5 * (s.nodes[wh.node1 as usize].pos + s.nodes[wh.node2 as usize].pos)
-                + s.origin;
+            let hub =
+                0.5 * (s.nodes[wh.node1 as usize].pos + s.nodes[wh.node2 as usize].pos) + s.origin;
             let gap = hub.y - surface(s, hub.x, hub.z) - rim;
             if gap < out.worst {
                 out.worst = gap;
@@ -239,5 +244,178 @@ fn a_kerb_strike_at_80_kmh_keeps_the_hubs_a_rim_over_the_kerb() {
         -r.worst,
         r.rim,
         r.at
+    );
+}
+
+/// Steps `a` (the rim stop on) and `b` (off) in lockstep through `phases` (input,
+/// seconds), comparing every node's position and velocity and every wheel's state
+/// bit for bit while no hub of `a` has come within its rim's radius of the surface
+/// under it. Returns (steps compared, whether all were identical, whether the stop
+/// was ever reached).
+fn lockstep(
+    mut a: ExplicitBeams,
+    mut b: ExplicitBeams,
+    rims: &[f32],
+    phases: &[(engine_softbody::explicit_drive::DriveInput, f32)],
+) -> (usize, bool, bool) {
+    a.drive.as_mut().unwrap().config.rim_stop = true;
+    b.drive.as_mut().unwrap().config.rim_stop = false;
+    let mut steps = 0;
+    for &(input, secs) in phases {
+        a.set_drive_input(input);
+        b.set_drive_input(input);
+        for _ in 0..(secs / STEP) as usize {
+            a.step();
+            b.step();
+            let da = a.drive.as_ref().unwrap();
+            let reached = da.config.wheels.iter().zip(rims).any(|(w, &rim)| {
+                let hub = 0.5 * (a.nodes[w.node1 as usize].pos + a.nodes[w.node2 as usize].pos)
+                    + a.origin;
+                rim > 0.0 && hub.y - surface(&a, hub.x, hub.z) < rim
+            });
+            if reached {
+                return (steps, true, true);
+            }
+            let same_nodes = a.origin.to_array().map(f32::to_bits)
+                == b.origin.to_array().map(f32::to_bits)
+                && a.nodes.iter().zip(&b.nodes).all(|(x, y)| {
+                    x.pos.to_array().map(f32::to_bits) == y.pos.to_array().map(f32::to_bits)
+                        && x.vel.to_array().map(f32::to_bits) == y.vel.to_array().map(f32::to_bits)
+                });
+            let db = b.drive.as_ref().unwrap();
+            let same_wheels = da.wheels == db.wheels && da.smoothed == db.smoothed;
+            if !(same_nodes && same_wheels) {
+                return (steps, false, false);
+            }
+            steps += 1;
+        }
+    }
+    (steps, true, false)
+}
+
+fn input(forward: f32, steer: f32, brake: f32) -> engine_softbody::explicit_drive::DriveInput {
+    engine_softbody::explicit_drive::DriveInput {
+        forward,
+        steer,
+        brake,
+        handbrake: 0.0,
+    }
+}
+
+/// Ordinary driving never reaches the stop, and runs bit for bit as without it: the
+/// generated sedan (settle, full throttle, a steady turn, braking to a stop), the
+/// JBeam fixture car in JBeam mode and the procedural sedan (its RoR `wheels` give no
+/// rim: the stop has nothing to act on), as `explicit_drive.rs` drives them.
+#[test]
+fn ordinary_driving_is_bit_identical_with_the_rim_stop() {
+    let drive = [
+        (input(0.0, 0.0, 0.0), 1.0),
+        (input(1.0, 0.0, 0.0), 3.0),
+        (input(0.6, 0.5, 0.0), 2.0),
+        (input(0.0, 0.0, 1.0), 2.0),
+    ];
+    let gen = |_: ()| spawn(0.0);
+    let rims_gen: Vec<f32> = rims(&gen(())).iter().map(|r| r.0).collect();
+    let (n, same, reached) = lockstep(gen(()), gen(()), &rims_gen, &drive);
+    eprintln!("generated sedan: {n} steps compared, identical {same}, stop reached {reached}");
+    assert!(
+        !reached,
+        "the generated sedan reached its rim stop in ordinary driving after {n} steps"
+    );
+    assert!(
+        same,
+        "the generated sedan's run differs after {n} steps with the stop never reached"
+    );
+
+    let settings = ExplicitBeamsSettings {
+        drag: false,
+        turbulence: false,
+        ..Default::default()
+    };
+    let fixture = engine_softbody::jbeam::load_jbeam(
+        &[("t.jbeam", engine_softbody::jbeam_fixture::PART2_CAR)],
+        None,
+    )
+    .unwrap();
+    let fix = || {
+        let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(
+            &fixture,
+            Vec3::new(0.0, 0.8, 0.0),
+            Vec3::ZERO,
+            settings,
+        )
+        .unwrap();
+        s.finish();
+        s
+    };
+    let rims_fix: Vec<f32> = fix()
+        .drive
+        .as_ref()
+        .unwrap()
+        .config
+        .wheels
+        .iter()
+        .map(|w| w.rim_radius)
+        .collect();
+    let (n, same, reached) = lockstep(
+        fix(),
+        fix(),
+        &rims_fix,
+        &[(input(0.0, 0.0, 0.0), 2.0), (input(1.0, 0.0, 0.0), 2.0)],
+    );
+    eprintln!("JBeam fixture (rims {rims_fix:?}): {n} steps compared, identical {same}, stop reached {reached}");
+    assert!(
+        same,
+        "the JBeam fixture's run differs after {n} steps with the stop never reached"
+    );
+
+    let truck = engine_softbody::procedural::car_truck(&engine_softbody::procedural::CarParams {
+        minimass: 10.0,
+        ..engine_softbody::procedural::CarParams::sedan()
+    });
+    let proc_car = || {
+        let (mut s, _) = ExplicitBeams::from_truck_raycast(
+            &truck,
+            None,
+            Vec3::new(0.0, 0.6, 0.0),
+            0.0,
+            Vec3::ZERO,
+            settings,
+        )
+        .unwrap();
+        s.finish();
+        s
+    };
+    let p = proc_car();
+    let rims_proc: Vec<f32> = p
+        .drive
+        .as_ref()
+        .unwrap()
+        .config
+        .wheels
+        .iter()
+        .map(|w| w.rim_radius)
+        .collect();
+    assert!(
+        rims_proc.iter().all(|&r| r == 0.0),
+        "RoR wheels gave a rim: {rims_proc:?}"
+    );
+    let (n, same, _) = lockstep(proc_car(), proc_car(), &rims_proc, &drive);
+    eprintln!("procedural sedan: {n} steps compared, identical {same}");
+    assert!(same, "the procedural sedan's run differs after {n} steps");
+}
+
+/// The stop is what changed the drop: off, the same drop puts a hub 4.9 cm into its
+/// rim's radius (the failure the drop test guards).
+#[test]
+fn without_the_stop_the_drop_goes_through_the_rim() {
+    let mut s = spawn(5.0);
+    s.drive.as_mut().unwrap().config.rim_stop = false;
+    let r = run(s, 2.5);
+    report("5 m drop, stop off", &r);
+    assert!(
+        r.worst < -0.02,
+        "the drop without the stop stayed {:+.3} m from the rim",
+        r.worst
     );
 }
