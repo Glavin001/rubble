@@ -56,6 +56,60 @@ export async function loadMod(base, { pc = null } = {}) {
     modelBytes: (glb?.length ?? 0) + (skin?.length ?? 0) };
 }
 
+// A glTF-skinned vehicle's cost as the vehicle lab measured it
+// (engine/docs/measurements/lab-load-memory.md: the generated sedan, 16 MB glb and
+// 124 MB rskin; the authored sedan for the base): the tab's peak physical footprint
+// (JS and wasm heaps, the browser's own), the GPU memory the lab holds, and the skin's
+// bind buffer (64 bytes a vertex and a slot of 4 entries: about twice the rskin).
+const FOOTPRINT = { tabBase: 450e6, tabPerModelByte: 6.0, gpuBase: 170e6, gpuPerSkinByte: 2.15, bindPerSkinByte: 2.16 };
+// The share of a device's memory a tab can count on (a judgement: browsers kill a
+// tab well before it has the device's whole memory).
+const TAB_SHARE = 0.5;
+
+/**
+ * What loading a glTF-skinned vehicle will cost, estimated from its model files' sizes
+ * (bytes: `modModelSizes`): `{ tab, gpu, largestBuffer }` in bytes.
+ */
+export function modFootprint({ glb = 0, skin = 0 }) {
+  const f = FOOTPRINT;
+  return { tab: f.tabBase + f.tabPerModelByte * (glb + skin), gpu: f.gpuBase + f.gpuPerSkinByte * skin, largestBuffer: f.bindPerSkinByte * skin };
+}
+
+/**
+ * Whether a footprint (`modFootprint`) fits this device: `deviceMemory` (GB,
+ * navigator.deviceMemory where the browser gives it; Safari does not), `limits` (the
+ * WebGPU adapter's, or null). `{ fits, message }`: the message names the vehicle and
+ * the numbers. Without a deviceMemory the memory is not judged (nothing to judge by).
+ */
+export function footprintCheck(fp, { deviceMemory, limits, name }) {
+  const mb = (b) => `${Math.round(b / 2 ** 20)} MB`;
+  const need = `the ${name} needs about ${mb(fp.tab)} of this tab's memory and ${mb(fp.gpu)} of GPU memory to load`;
+  if (limits) {
+    for (const k of ['maxStorageBufferBindingSize', 'maxBufferSize']) {
+      if (limits[k] !== undefined && fp.largestBuffer > limits[k]) {
+        return { fits: false, message: `${need}, with one buffer of ${mb(fp.largestBuffer)}: over this GPU's ${k} of ${mb(limits[k])}.` };
+      }
+    }
+  }
+  if (deviceMemory && fp.tab + fp.gpu > TAB_SHARE * deviceMemory * 2 ** 30) {
+    return { fits: false, message: `${need}; this device reports ${deviceMemory} GB of memory, and a tab can count on about ${Math.round(100 * TAB_SHARE)} % of it. Loading it would likely crash the tab.` };
+  }
+  return { fits: true, message: '' };
+}
+
+/** A vehicle folder's model files' sizes (bytes, from HEAD: nothing is downloaded): `{ glb, skin }`. */
+export async function modModelSizes(base) {
+  base = base.replace(/\/$/, '');
+  const r = await fetch(`${base}/files.json`);
+  if (!r.ok) throw new Error(`${base}/files.json: ${r.status} ${r.statusText}. ${LOCAL_MODS}`);
+  const list = await r.json();
+  const skinName = list.find((f) => f.endsWith('.rskin'));
+  const glbName = skinName && list.find((f) => f.endsWith('.glb') && f.includes('/'));
+  const size = async (f) => (f ? Number((await fetch(`${base}/${f}`, { method: 'HEAD' })).headers.get('Content-Length')) || 0 : 0);
+  const [glb, skin] = await Promise.all([size(glbName), size(skinName)]);
+  return { glb, skin };
+}
+
 /**
  * Drop a glTF-skinned vehicle's model bytes (`mod.glb`, `mod.skin`: a generated car's
  * are ~140 MB) once its visuals are built; `modModels` fetches them again (the HTTP

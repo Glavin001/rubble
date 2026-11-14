@@ -8,7 +8,9 @@
 //
 //   python3 engine/scripts/with-gpu-lock.py --limit 300 -- env RUBBLE_GPU_LOCK=0 \
 //     node engine/tools/vehicle-lab/lab-memory.mjs [--base http://127.0.0.1:8863] \
-//       [--query 'mode=mountain&car=gen'] [--settle 8] [--json out.json]
+//       [--query 'mode=mountain&car=gen'] [--settle 8] [--json out.json] [--deviceMemory GB]
+//
+// --deviceMemory: the page sees this navigator.deviceMemory (the lab's footprint guard).
 //
 // Serves nothing: --base is a running static server over engine/web-dist.
 import { spawn, execFileSync } from 'node:child_process';
@@ -97,6 +99,7 @@ const evaluate = async (expression) => {
 await send('Runtime.enable');
 await send('Page.enable');
 await send('Page.addScriptToEvaluateOnNewDocument', { source: INSTRUMENT });
+if (opt('--deviceMemory')) await send('Page.addScriptToEvaluateOnNewDocument', { source: `Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => ${Number(opt('--deviceMemory'))} });` });
 
 // Chrome's processes under this profile: the renderer(s) and the GPU process.
 const procs = () => execFileSync('ps', ['-A', '-o', 'pid=,command='], { encoding: 'utf8' }).split('\n')
@@ -120,7 +123,7 @@ let ready = false;
 for (;;) {
   await new Promise((r) => setTimeout(r, 300));
   const s = await evaluate('JSON.stringify({ ready: window.__ready === true, failed: window.__failed || "" })').then(JSON.parse).catch(() => ({}));
-  if (s.failed) { console.error('page failed: ' + s.failed); break; }
+  if (s.failed) { console.error('page failed: ' + s.failed); console.error('banner: ' + await evaluate('document.getElementById("fatal").style.display + " | " + document.getElementById("fatal").textContent')); break; }
   if (s.ready) { ready = true; break; }
   if (Date.now() - t0 > (LIMIT_S - 30) * 1000) { console.error('did not start'); break; }
 }

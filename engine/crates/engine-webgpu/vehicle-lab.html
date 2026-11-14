@@ -236,7 +236,7 @@
     import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
-    import { loadMod, modVisual, modModels, releaseModels, modTextures } from './beamng-mod.mjs';
+    import { loadMod, modVisual, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
     import { createStabilityStop } from './stability-stop.mjs';
@@ -347,6 +347,7 @@
     await loadWasm();
     const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42]];
     const carCache = new Map();
+    const waived = new Set();
     async function carOf(kind) {
       if (carCache.has(kind)) return carCache.get(kind);
       const t = performance.now();
@@ -358,6 +359,16 @@
         entry = { kind, name: 'soft-body sedan', visuals: [first], make, vehicle: { truck: first.truck }, mod: null };
       } else {
         const m = MODS[kind];
+        // Before downloading it: whether it fits this device (its estimated footprint
+        // against navigator.deviceMemory, where given, and the GPU's limits). A car
+        // that does not is refused with the numbers (fail(), the banner) and a button
+        // to load it anyway, never loaded smaller.
+        if (!waived.has(kind)) {
+          progress(`checking that the ${m.name} fits this device…`);
+          const adapter = await navigator.gpu.requestAdapter().catch(() => null);
+          const check = footprintCheck(modFootprint(await modModelSizes(m.base)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
+          if (!check.fits) throw Object.assign(new Error(check.message), { footprint: kind });
+        }
         progress(`downloading the ${m.name}…`);
         const mod = await loadMod(m.base, { pc: m.pc });
         progress(`binding the ${m.name}'s body to its nodes…`); await new Promise((r) => setTimeout(r));
@@ -455,7 +466,16 @@
         progress('');
         window.__loadTimes = loading.done();
         window.__ready = true;
-      } catch (e) { progress(''); if (loading.active()) loading.fail({ detail: errorText(e) }); fail(e); } finally { building = false; if (buildAgain) { buildAgain = false; build(); } }
+      } catch (e) {
+        progress(''); if (loading.active()) loading.fail({ detail: e.footprint ? e.message : errorText(e) });
+        if (e.footprint) {
+          // Too big for this device: the reason, and the choice to load it anyway.
+          errEl.textContent = `Not loaded: ${e.message} `; window.__failed = e.message;
+          const b = document.createElement('button'); b.textContent = 'Load it anyway';
+          b.onclick = () => { waived.add(e.footprint); errEl.textContent = ''; window.__failed = null; build(); };
+          errEl.append(b);
+        } else fail(e);
+      } finally { building = false; if (buildAgain) { buildAgain = false; build(); } }
     }
     // The GPU device was lost (a driver reset, the GPU process restarted, memory): the
     // simulation is gone with it. Say so, and offer the rebuild (the parsed car is kept).

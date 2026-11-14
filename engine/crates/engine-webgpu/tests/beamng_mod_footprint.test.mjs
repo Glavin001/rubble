@@ -49,7 +49,7 @@ test('the model files\' sizes come from their headers, before downloading them',
   globalThis.fetch = async (url, init) => {
     seen.push([String(url), init?.method ?? 'GET']);
     if (String(url).endsWith('files.json')) return new Response(JSON.stringify(['car/car.jbeam', 'car/car.glb', 'car/car.rskin']));
-    return new Response(null, { status: 200, headers: { 'Content-Length': String.endsWith ? (String(url).endsWith('.glb') ? '500' : '7000') : '0' } });
+    return new Response(null, { status: 200, headers: { 'Content-Length': String(url).endsWith('.glb') ? '500' : '7000' } });
   };
   assert.deepEqual(await modModelSizes('./m'), { glb: 500, skin: 7000 });
   assert.deepEqual(seen.filter(([u]) => !u.endsWith('files.json')).map(([, m]) => m), ['HEAD', 'HEAD']);
