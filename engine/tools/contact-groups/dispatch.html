@@ -1,0 +1,78 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Contact-group dispatch cost</title>
+<script type="module">
+// The browser half of examples/contact_dispatch_cost.rs (same WGSL, same cases): GPU time
+// of a pass of N dependent dispatches and of k sync()s, from pass timestamps (Chrome's
+// developer features unquantise them) and, as a check, wall time to onSubmittedWorkDone.
+const out = [];
+try {
+  const src = await (await fetch('dispatch_cost.wgsl')).text();
+  const adapter = await navigator.gpu.requestAdapter({powerPreference: 'high-performance'});
+  const ts = adapter.features.has('timestamp-query');
+  const device = await adapter.requestDevice({requiredFeatures: ts ? ['timestamp-query'] : [],
+    requiredLimits: {maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize,
+      maxComputeInvocationsPerWorkgroup: 512, maxComputeWorkgroupSizeX: 512,
+      maxStorageBuffersPerShaderStage: Math.min(10, adapter.limits.maxStorageBuffersPerShaderStage)}});
+  const info = adapter.info ?? {};
+  out.push(`adapter: ${info.vendor} ${info.architecture} ${info.description ?? ''}; timestamps ${ts}`);
+  const qs = ts ? device.createQuerySet({type: 'timestamp', count: 2}) : null;
+  const resolve = ts ? device.createBuffer({size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC}) : null;
+  const storage = Array.from({length: 10}, (_, i) => device.createBuffer({size: (i === 0 ? 512 * 128 : 64) * 4, usage: GPUBufferUsage.STORAGE}));
+  const time = async (pipe, group, groups, n) => {
+    let best = Infinity, bestWall = Infinity;
+    for (let r = 0; r < 7; r++) {
+      const read = ts ? device.createBuffer({size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST}) : null;
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass(ts ? {timestampWrites: {querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1}} : {});
+      pass.setPipeline(pipe);
+      pass.setBindGroup(0, group);
+      for (let i = 0; i < n; i++) pass.dispatchWorkgroups(groups);
+      pass.end();
+      if (ts) { enc.resolveQuerySet(qs, 0, 2, resolve, 0); enc.copyBufferToBuffer(resolve, 0, read, 0, 16); }
+      const t0 = performance.now();
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      bestWall = Math.min(bestWall, performance.now() - t0);
+      if (ts) {
+        await read.mapAsync(GPUMapMode.READ);
+        const t = new BigUint64Array(read.getMappedRange().slice(0));
+        read.unmap();
+        best = Math.min(best, Number(t[1] - t[0]) * 1e-6);
+      }
+    }
+    return {gpu: best, wall: bestWall};
+  };
+  for (const words of [512, 7936]) {
+    if (words * 4 > device.limits.maxComputeWorkgroupStorageSize) { out.push(`skip ${words} words`); continue; }
+    const module = device.createShaderModule({code: src.replaceAll('WG_WORDS', String(words))});
+    const pipe = (entry) => device.createComputePipeline({layout: 'auto', compute: {module, entryPoint: entry}});
+    const group = (p, k) => {
+      const u = device.createBuffer({size: 16, usage: GPUBufferUsage.UNIFORM, mappedAtCreation: true});
+      new Uint32Array(u.getMappedRange()).set([k, 0, 0, 0]);
+      u.unmap();
+      return device.createBindGroup({layout: p.getBindGroupLayout(0), entries: [{binding: 0, resource: {buffer: u}},
+        ...storage.map((b, i) => ({binding: i + 1, resource: {buffer: b}}))]});
+    };
+    const disp = pipe('dispatch');
+    const g = group(disp, 0);
+    for (const groups of [1, 40, 128]) {
+      const one = await time(disp, g, groups, 1);
+      const many = await time(disp, g, groups, 340);
+      out.push(`dispatch: ${words} workgroup words, ${groups} workgroups: one ${(one.gpu * 1e3).toFixed(1)} us (wall ${(one.wall * 1e3).toFixed(0)} us); `
+        + `340 dependent ${many.gpu.toFixed(3)} ms = ${(many.gpu * 1e3 / 340).toFixed(2)} us each (wall ${many.wall.toFixed(2)} ms = ${(many.wall * 1e3 / 340).toFixed(2)} us each)`);
+    }
+    const sy = pipe('syncs');
+    for (const groups of [1, 40]) {
+      const base = await time(sy, group(sy, 0), groups, 1);
+      const k = 4000;
+      const loaded = await time(sy, group(sy, k), groups, 1);
+      out.push(`sync: ${words} workgroup words, ${groups} workgroups: ${((loaded.gpu - base.gpu) * 1e3 / k).toFixed(3)} us a sync `
+        + `(k=0 ${(base.gpu * 1e3).toFixed(1)} us, k=${k} ${loaded.gpu.toFixed(3)} ms; wall ${((loaded.wall - base.wall) * 1e3 / k).toFixed(3)} us a sync)`);
+    }
+  }
+  window.__result = {lines: out};
+} catch (e) {
+  window.__result = {lines: out, error: String(e && e.stack || e)};
+}
+</script>
