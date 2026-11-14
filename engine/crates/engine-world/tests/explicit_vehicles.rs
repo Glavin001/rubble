@@ -616,3 +616,144 @@ fn the_coupling_plan_in_parallel_is_the_serial_walk() {
     }
     assert!(checked >= 2, "the comparison ran with the cars among the house's chunks");
 }
+
+/// One A/B of the coupling's candidate list from the explicit solver's current state:
+/// `frames` frames of `steps` steps with the list off (every node against every shape,
+/// the old path), then on, then on with each test skin (header bits 256, 512); every
+/// state word, every proxy record (bodies as integrated in the frames) and every sum the
+/// same. Returns the list's use in the plain on run (per vehicle: nodes listing a shape,
+/// nodes keeping no list).
+fn candidate_list_ab(x: &mut engine_webgpu::ExplicitBeamsGpu, frames: u32, steps: u32, what: &str) -> Vec<(u32, u32)> {
+    use engine_webgpu::{COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY};
+    let snap = x.snapshot();
+    let mut run = |on: bool, bits: u32| {
+        x.restore(&snap);
+        x.set_coupling_candidate_list(on);
+        x.debug_coupling_bits(bits);
+        for _ in 0..frames {
+            x.frame(steps);
+        }
+        x.wait();
+        let stats = x.coupling_list_stats();
+        // (The header's bits themselves are the one word the runs set apart.)
+        x.set_coupling_candidate_list(true);
+        x.debug_coupling_bits(0);
+        let mut words = x.state_words();
+        words.extend(x.coupling_words());
+        (words, stats)
+    };
+    let (off, _) = run(false, 0);
+    let (on, stats) = run(true, 0);
+    let (nodes_only, _) = run(true, COUPLING_LIST_SKIN_NODES_ONLY);
+    let (ceiling, _) = run(true, COUPLING_LIST_SKIN_CEILING);
+    x.restore(&snap);
+    for (label, other) in [("on", &on), ("skin without the shapes' speed", &nodes_only), ("skin at its ceiling", &ceiling)] {
+        for ((name, a), (_, b)) in off.iter().zip(other) {
+            let diff = a.iter().zip(b).filter(|(p, q)| p != q).count();
+            assert_eq!(diff, 0, "{what}: {name}: {diff} words differ with the list {label}");
+        }
+    }
+    stats
+}
+
+/// The coupling's candidate list (`explicit_beams_rigid.slang` `cplList*`) changes no
+/// result: the same frames with it off and on (and with the tests' skins) are equal bit
+/// for bit. Four cars into one house at 120 Hz, compared once they are among its chunks
+/// (tens of shapes each, contact groups of two), and the lists are used.
+#[test]
+fn the_coupling_candidate_list_is_bit_exact() {
+    let template = sedan(0.0, 0.0, Vec3::ZERO, 0);
+    let mut town = rubble::explicit_scene::crash_town_at(
+        GpuContext::Default,
+        &template,
+        1,
+        4,
+        15.0,
+        8.0,
+        30,
+        &rubble::explicit_scene::town_coupling(),
+        Some(1.0 / 120.0),
+        None,
+    )
+    .unwrap();
+    let w = &mut town.world;
+    let mut checked = 0;
+    for step in 0..150 {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        if step < 60 || step % 30 != 0 {
+            continue;
+        }
+        let shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
+        let x = w.explicit_vehicles_mut().unwrap();
+        let stats = candidate_list_ab(x, 3, 17, &format!("town step {step}"));
+        println!("step {step}: proxy shapes per vehicle {shapes:?}; nodes listing a shape, keeping no list {stats:?}");
+        if shapes.iter().any(|&n| n >= 10) && stats.iter().any(|s| s.0 > 0) {
+            checked += 1;
+        }
+    }
+    assert!(checked >= 2, "the comparison ran with the cars among the house's chunks, the lists in use");
+}
+
+/// The candidate list against the cases its proof must hold for: a car at 30 m/s (fast
+/// nodes, decelerating hard) into a thin free plate (2 cm) and a thin static wall, while
+/// a small ball crosses it at 150 m/s from out of reach (a shape that enters mid-frame,
+/// faster than any node). Every few windows, frames of 34 steps from one state with the
+/// list off and on (and the tests' skins: without the shapes' speed only the check can
+/// catch the ball) are equal bit for bit.
+#[test]
+fn the_coupling_candidate_list_meets_fast_and_thin_bodies() {
+    let mut w = World::new(
+        GpuContext::Default,
+        &WorldDef {
+            gravity: [0.0, engine_softbody::explicit_beams::GRAVITY, 0.0],
+            enable_sleep: false,
+            ..WorldDef::default()
+        },
+    )
+    .unwrap();
+    let car = sedan(30.0, -1.0e4, Vec3::new(0.0, 1.0, 0.0), 0);
+    let (lo, hi) = car.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| (a.min(n.pos), b.max(n.pos)));
+    let mid = 0.5 * (lo + hi);
+    // A thin free plate 0.3 m ahead and a thin static wall 1.5 m ahead.
+    let plate = w
+        .create_body(&BodyDef {
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            ..BodyDef::dynamic([mid.x, mid.y, hi.z + 0.3])
+        })
+        .unwrap();
+    w.create_box_shape(plate, &ShapeDef { density: 2000.0, ..ShapeDef::default() }, [0.8, 0.5, 0.01]).unwrap();
+    let wall = w
+        .create_body(&BodyDef { position: [mid.x, mid.y, hi.z + 1.5], ..BodyDef::default() })
+        .unwrap();
+    w.create_box_shape(wall, &ShapeDef::default(), [3.0, 2.0, 0.01]).unwrap();
+    // The ball: 4 m to the side, crossing the car's path at 150 m/s about 2 windows in.
+    let ball = w
+        .create_body(&BodyDef {
+            linear_velocity: [-150.0, 0.0, 0.0],
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            gravity_scale: 0.0,
+            ..BodyDef::dynamic([hi.x + 4.5, mid.y, mid.z + 1.0])
+        })
+        .unwrap();
+    w.create_sphere_shape(ball, &ShapeDef { density: 7800.0, ..ShapeDef::default() }, [0.0; 3], 0.08).unwrap();
+    w.add_explicit_vehicles(std::slice::from_ref(&car), &ExplicitVehiclesDef::default()).unwrap();
+    let mut used = 0;
+    for step in 0..24 {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        if step % 2 != 0 {
+            continue;
+        }
+        let shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
+        let x = w.explicit_vehicles_mut().unwrap();
+        let stats = candidate_list_ab(x, 2, 34, &format!("fast and thin, step {step}"));
+        println!("step {step}: proxy shapes {shapes:?}; nodes listing a shape, keeping no list {stats:?}");
+        if stats[0].0 > 0 {
+            used += 1;
+        }
+    }
+    assert!(used >= 3, "the lists were in use");
+}

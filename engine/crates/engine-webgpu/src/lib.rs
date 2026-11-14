@@ -28,7 +28,7 @@ pub use compute_spec::ComputeSpec;
 #[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
     explicit_beams_shipped_wgsl, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu, GpuBeam,
-    GpuSnapshot, KernelVariant,
+    GpuSnapshot, KernelVariant, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
 #[cfg(feature = "gpu")]
 pub use features::{

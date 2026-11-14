@@ -76,11 +76,21 @@ pub struct CouplingLayout {
     pub vehicles: u32,
     pub misc_base: u32,
     pub acc_base: u32,
+    /// The candidate list (`explicit_beams_rigid.slang` `cplList*`): gAcc words of its
+    /// per-vehicle maxima ([`Self::LIST_ACC_WORDS`] a vehicle, right after the sums), and
+    /// in gNext right after the shapes' spheres, per vehicle and shape its frame-start
+    /// centre ([`Self::LIST_SHAPE_WORDS`]), then per node its list
+    /// ([`Self::LIST_NODE_WORDS`], by global node index).
+    pub list_acc: u32,
+    pub list_base: u32,
 }
 
 impl CouplingLayout {
     pub const BODY_RECS: u32 = 5;
     pub const SHAPE_RECS: u32 = 7;
+    pub const LIST_ACC_WORDS: u32 = 2;
+    pub const LIST_SHAPE_WORDS: u32 = 4;
+    pub const LIST_NODE_WORDS: u32 = 12;
 
     fn new(cap: CouplingCapacity, vehicles: u32, misc_base: u32, acc_base: u32) -> Self {
         assert!(
@@ -92,6 +102,8 @@ impl CouplingLayout {
             vehicles,
             misc_base,
             acc_base,
+            list_acc: 0,
+            list_base: 0,
         }
     }
     /// Records per vehicle.
@@ -1714,15 +1726,24 @@ impl ExplicitUpload {
         // `loopCapWord`; the frozen WGSL test modules' post-process writes gAcc's
         // last word, the same word).
         let coupling = coupling.map(|cap| {
-            let layout =
+            let mut layout =
                 CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
             acc_init.extend(std::iter::repeat_n(0, layout.acc_words() as usize));
+            // The candidate list's per-vehicle maxima (right after the sums: the kernel
+            // finds them from the sums' base).
+            layout.list_acc = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, (CouplingLayout::LIST_ACC_WORDS * nv as u32) as usize));
             // The shape cull's spheres and the shapes' step frames (`explicit_beams_rigid.slang`
             // `cplSpheres`, `cplFrameStore`): per vehicle and shape CPL_SPHERE_WORDS words of
             // gNext, rewritten every step.
             let cull_base = next_len as u32;
             next_len += (CPL_SPHERE_WORDS * cap.shapes * nv as u32) as usize;
+            // Then the candidate list's shape centres and node lists (rebuilt from each
+            // frame's first step: no initial state).
+            layout.list_base = next_len as u32;
+            next_len += (CouplingLayout::LIST_SHAPE_WORDS * cap.shapes * nv as u32) as usize
+                + CouplingLayout::LIST_NODE_WORDS as usize * total_nodes;
             misc[couple_rec] = [
                 0,
                 layout.misc_base,

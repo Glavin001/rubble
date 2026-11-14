@@ -69,6 +69,8 @@ pub struct ExplicitBeamsGpu {
     debug_coupling_bits: u32,
     /// The coupling's per-node shape ranges off ([`Self::set_coupling_node_ranges`]).
     coupling_ranges_off: bool,
+    /// The coupling's candidate list off ([`Self::set_coupling_candidate_list`]).
+    coupling_list_off: bool,
     /// Diagnostic: the large contact groups' pipeline from an edited module
     /// ([`Self::debug_set_contact_big_wgsl`]).
     debug_big: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
@@ -263,6 +265,15 @@ pub fn surface_split_default() -> bool {
 /// coupled frame hundreds of times slower (the crash town's car against a crate:
 /// 755 ms a 1/60 s frame with them, 0.87 ms without; `engine/docs/explicit-vehicles-in-world.md`).
 /// `RUBBLE_COUPLING_RANGES=0|1` overrides it natively.
+/// The coupling's candidate list (`explicit_beams_rigid.slang` `cplList*`;
+/// [`engine_softbody::explicit_rigid::candidate_list`]): the header's bit 128 turns it off
+/// (every node tests every proxy shape each step, as before it). Bits 256 and 512 are tests'
+/// skins (256: without the shapes' speed, so a body entering mid-frame is caught by the
+/// check alone; 512: the ceiling, so nodes keep their lists through hard accelerations).
+pub const COUPLING_LIST_OFF: u32 = 128;
+pub const COUPLING_LIST_SKIN_NODES_ONLY: u32 = 256;
+pub const COUPLING_LIST_SKIN_CEILING: u32 = 512;
+
 pub fn coupling_node_ranges_off_default() -> bool {
     match std::env::var("RUBBLE_COUPLING_RANGES").as_deref() {
         Ok("0") => true,
@@ -814,6 +825,7 @@ impl ExplicitBeamsGpu {
             coupling_cache_off: false,
             debug_coupling_bits: 0,
             coupling_ranges_off: coupling_node_ranges_off_default(),
+            coupling_list_off: std::env::var("RUBBLE_COUPLING_LIST").as_deref() == Ok("0"),
             debug_big: None,
             debug_solo: None,
             debug_groups: None,
@@ -1853,6 +1865,47 @@ impl ExplicitBeamsGpu {
         self.write_coupling_header();
     }
 
+    /// The coupling's candidate list (`explicit_beams_rigid.slang` `cplList*`, lossless:
+    /// the same contacts, counts and sums, bit for bit) on (the default), or every node
+    /// testing every proxy shape every step (off; `RUBBLE_COUPLING_LIST=0` starts it off).
+    /// Each node lists the shapes within its skin at a frame's first step and keeps the
+    /// list while its own travel and the shapes' travel since stay within the skin
+    /// ([`engine_softbody::explicit_rigid::candidate_list`]); otherwise it rebuilds it.
+    pub fn set_coupling_candidate_list(&mut self, on: bool) {
+        self.coupling_list_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// Tests: per vehicle, the nodes whose candidate list (as the last step left it) holds
+    /// at least one shape, and the nodes that keep no list (more than 16 shapes in reach).
+    /// Empty without the coupling.
+    #[doc(hidden)]
+    pub fn coupling_list_stats(&self) -> Vec<(u32, u32)> {
+        let Some(c) = self.layout.coupling else {
+            return Vec::new();
+        };
+        let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
+        let words = engine_exec::explicit_plan::CouplingLayout::LIST_NODE_WORDS as usize;
+        let base = c.list_base as usize
+            + (engine_exec::explicit_plan::CouplingLayout::LIST_SHAPE_WORDS * c.cap.shapes * c.vehicles) as usize;
+        self.layout
+            .spans
+            .iter()
+            .map(|sp| {
+                let (mut listed, mut over) = (0, 0);
+                for i in 0..sp.nodes as usize {
+                    let at = base + (sp.node_off as usize + i) * words + 4;
+                    match next.get(at).copied() {
+                        Some(w) if w & 0xFFFF == 0xFFFE => over += 1,
+                        Some(w) if w & 0xFFFF != 0xFFFF => listed += 1,
+                        _ => {}
+                    }
+                }
+                (listed, over)
+            })
+            .collect()
+    }
+
     /// Tests and measurement: the coupling's workgroup copies and ranges (on by default;
     /// lossless, `explicit_beams_rigid.slang`: the header words, the proxy spheres and
     /// each node's shape range from the count pass in workgroup memory, the shapes'
@@ -1894,6 +1947,7 @@ impl ExplicitBeamsGpu {
                 0
             }
             | if self.coupling_on && self.coupling_ranges_off { 64 } else { 0 }
+            | if self.coupling_on && self.coupling_list_off { COUPLING_LIST_OFF } else { 0 }
             | if self.coupling_on { self.debug_coupling_bits } else { 0 };
         self.queue.write_buffer(
             &self.misc,
