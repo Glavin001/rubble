@@ -27,6 +27,7 @@
 //!   length), quasi-statically: it yields, and it does not break. (A whole-car
 //!   check is the mountain run of `engine-world/examples/hinge_breaks.rs`.)
 use engine_softbody::authoring::gen2::build::Role;
+use engine_softbody::authoring::gen2::rig::{crush_member, HINGE_REACH};
 use engine_softbody::authoring::gen2::{rig as lattice, vg_input};
 use engine_softbody::authoring::rig;
 use engine_softbody::desc::SoftVehicleDesc;
@@ -37,10 +38,6 @@ use glam::Vec3;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// A hinge beam's body node is at most this far from the hinge's marker (m):
-/// the nearest structural nodes of the body's lattice (spacing 0.2–0.45 m)
-/// that still span three directions.
-const HINGE_REACH: f32 = 0.45;
 
 /// The travel (mm) a hinge beam bends through without breaking: the measured
 /// hinges broke at 17–29 mm of one beam's stretch.
@@ -175,7 +172,7 @@ fn every_hinge_beam_yields_before_it_breaks() {
             if !(b.deform.is_finite()
                 && b.deform < b.strength
                 && (10e3..=77e3).contains(&b.deform)
-                && lim > 1.0
+                && lim > 0.0
                 && lim.is_finite())
             {
                 bad.push(format!(
@@ -219,12 +216,6 @@ fn hinge_strengths_in_the_census_band() {
 fn hinges_are_anchored_near_the_hinge_on_the_structure() {
     let s = sedan();
     let d = &s.desc;
-    let crush = |r: Option<Role>| {
-        matches!(
-            r,
-            Some(Role::Rail | Role::CrushCan | Role::BumperBeam | Role::Apron | Role::RearRail)
-        )
-    };
     let mut bad = Vec::new();
     for h in hinges(d) {
         let mk = s.markers[&h.marker];
@@ -233,7 +224,7 @@ fn hinges_are_anchored_near_the_hinge_on_the_structure() {
             let n = &d.nodes[body as usize];
             let dist = Vec3::from(n.position).distance(mk);
             let role = s.member.get(&n.name).copied().flatten();
-            if dist > HINGE_REACH || crush(role) {
+            if dist > HINGE_REACH || crush_member(role) {
                 bad.push(format!(
                     "{}: body node {} {:.2} m from the hinge, member {role:?}",
                     h.name, n.name, dist

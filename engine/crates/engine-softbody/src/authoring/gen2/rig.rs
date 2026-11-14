@@ -3087,6 +3087,20 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             })
             .collect()
     };
+    // A hinge's body nodes: the shell's structure within [`HINGE_REACH`] of
+    // the hinge, off the crush members (their length changes when that zone
+    // folds, whatever the lid or door does), and at least [`HINGE_MIN_LEN`]
+    // from the hinge's own nodes `own` (the first `hinge_n` of them).
+    let hinge_cands = |r: &Rig, mk: Vec3, own: &[(f32, usize)]| -> Vec<usize> {
+        shell_nodes(r)
+            .into_iter()
+            .filter(|&i| {
+                r.g(i).distance(mk) <= HINGE_REACH
+                    && !crush_member(r.member[i])
+                    && own.iter().take(hinge_n).all(|&(_, d)| hinge_long_enough(r, d, i))
+            })
+            .collect()
+    };
     let pillar = |i: usize, r: &Rig| {
         matches!(
             r.member[i],
@@ -3110,7 +3124,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                     own.iter().map(|&i| (r.g(i).distance(mk), i)).collect();
                 dv.sort_by(|a, b| a.0.total_cmp(&b.0));
                 let bv = if spread {
-                    spread_pick(&r, mk, &shell_nodes(&r), hinge_n)
+                    spread_pick(&r, mk, &hinge_cands(&r, mk, &dv), hinge_n)
                 } else {
                     r.nearest(body, mk, hinge_n, |i| pillar(i, &r))
                 };
@@ -3236,7 +3250,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             hood_ids.iter().map(|&i| (r.g(i).distance(mk), i)).collect();
         dv.sort_by(|a, b| a.0.total_cmp(&b.0));
         let bv = if spread {
-            spread_pick(&r, mk, &shell_nodes(&r), hinge_n)
+            spread_pick(&r, mk, &hinge_cands(&r, mk, &dv), hinge_n)
         } else {
             r.nearest(body, mk, hinge_n, |i| {
                 matches!(
@@ -3342,7 +3356,7 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             .collect();
         dv.sort_by(|a, b| a.0.total_cmp(&b.0));
         let bv = if spread {
-            spread_pick(&r, mk, &shell_nodes(&r), hinge_n)
+            spread_pick(&r, mk, &hinge_cands(&r, mk, &dv), hinge_n)
         } else {
             r.nearest(body, mk, hinge_n, |i| r.member[i].is_some())
         };
@@ -4605,6 +4619,29 @@ fn hardware_mass(r: &mut Rig, latch: usize, strike: usize, latch_kg: f32, ties: 
         r.car.nodes[j].fixed_mass -= each;
     }
     r.car.nodes[strike].fixed_mass = STRIKE_KG;
+}
+
+/// How far a hinge's body nodes may be from its marker (m): the nearest
+/// structural nodes of the shell (spacing 0.2–0.45 m) that still span three
+/// directions. Farther ones made long hinge beams that, at the same spring,
+/// reach their strength first (`engine/docs/measurements/hinge-breaks.md`).
+pub const HINGE_REACH: f32 = 0.6;
+
+/// The shortest hinge beam (m): the solver keeps a JBeam beam's rest length at
+/// 0.1 m or more (`explicit_beams::MIN_REST`), so a shorter one cannot yield
+/// in compression and breaks on its strength instead.
+pub const HINGE_MIN_LEN: f32 = 0.12;
+
+fn hinge_long_enough(r: &Rig, a: usize, b: usize) -> bool {
+    r.g(a).distance(r.g(b)) >= HINGE_MIN_LEN
+}
+
+/// A crush-zone member (front and rear rails, crush cans, bumper beam, aprons).
+pub fn crush_member(m: Option<Role>) -> bool {
+    matches!(
+        m,
+        Some(Role::Rail | Role::CrushCan | Role::BumperBeam | Role::Apron | Role::RearRail)
+    )
 }
 
 /// How far a mount's beams may reach for a body node that gives them a

@@ -193,7 +193,18 @@ pub struct RoleSpec {
     pub support: bool,
     /// Carries deformLimitExpansion 1.2 (BeamNG: on 37–49 % of body beams).
     pub limit_expansion: bool,
+    /// Yield as a share of the beam's strength: beamDeform = share × beamStrength
+    /// (0: by [`Self::eps`]). Hardware whose strength is set per mount (hinges).
+    pub yield_share: f32,
 }
+
+/// A hinge beam yields at this share of its strength (beamDeform = 0.4 ×
+/// beamStrength: doors and hood 16 kN, boot 10 kN, in the census's door band of
+/// 10–77 kN), and carries deformLimitExpansion 1.2 like the body's limited
+/// beams (a bounded bend, then elastic about it until its strength): a hinge
+/// bends before it breaks (`tests/sedan_hinges.rs`; the measurement,
+/// `engine/docs/measurements/hinge-breaks.md`).
+pub const HINGE_YIELD_SHARE: f32 = 0.4;
 
 /// Census k·L bands of a part's sheet (N): body 0.8–1.1e6, doors 0.4–1.0e6,
 /// bonnet 2.2–4.7e5, boot 2.2–5e5, fenders 1.5–4.3e5, bumper covers 0.4–1.3e5.
@@ -306,6 +317,7 @@ impl Role {
             kg_per_m,
             support: false,
             limit_expansion: lim,
+            yield_share: 0.0,
         };
         let fixed = |k: f32, eps: f32, strength: f32| RoleSpec {
             k_fixed: k,
@@ -338,7 +350,11 @@ impl Role {
             // Elastic: a light lane node follows the panel (its own beams yield).
             Role::Tie | Role::Backing => s(sheet_kl(part), f32::INFINITY, 0.0, false),
             // Hardware (census: hinges 30–98 kN a beam, k 0.5–3e6).
-            Role::Hinge => fixed(1.5e6, inf, 40e3),
+            Role::Hinge => RoleSpec {
+                yield_share: HINGE_YIELD_SHARE,
+                limit_expansion: true,
+                ..fixed(1.5e6, inf, 40e3)
+            },
             Role::Bolt => fixed(0.8e6, inf, 9e3),
             Role::Clip => fixed(0.8e6, inf, 9e3),
             Role::EdgeTie => s(sheet_kl(part), e, 0.0, false),
@@ -1410,7 +1426,9 @@ impl Car {
                 Part::BumperF | Part::BumperR => self.panel_yield.map_or(1.0, |p| p.1),
                 _ => self.panel_yield.map_or(1.0, |p| p.0),
             };
-            b.deform = if sp.eps.is_finite() {
+            b.deform = if sp.yield_share > 0.0 {
+                sp.yield_share * b.strength
+            } else if sp.eps.is_finite() {
                 feel * sp.eps * ks[j] * len[j].max(SPRING_LENGTH)
             } else {
                 f32::INFINITY
