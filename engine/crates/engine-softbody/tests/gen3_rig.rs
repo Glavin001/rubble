@@ -362,3 +362,30 @@ fn mesh_quality_after_wall56_and_side_pole() {
 fn seams_stay_shut_after_wall56_and_side_pole() {
     crashes(true);
 }
+
+/// The sidecar read in place (`flexskin::SkinBytes`, what the web loader binds
+/// from) binds the same visual, bit for bit, as the sidecar decoded.
+#[test]
+fn the_sidecar_read_in_place_binds_the_same_visual() {
+    use engine_softbody::flexskin::{Skin, SkinBytes, SkinRef};
+    let dir = mod_dir();
+    let t = target();
+    let v = t.vehicle.as_str();
+    let files = engine_softbody::jbeam::read_vehicle_dir(dir, v).unwrap();
+    let pc = std::fs::read_to_string(dir.join(v).join(format!("{v}.pc"))).ok();
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let desc = engine_softbody::jbeam::load_jbeam(&refs, pc.as_deref()).unwrap();
+    let (sim, _) = ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+    let flex = engine_softbody::jbeam::assembled_rows(&refs, pc.as_deref(), "flexbodies").unwrap();
+    let g = engine_softbody::glb::read(&std::fs::read(dir.join(v).join(&t.glb)).unwrap()).unwrap();
+    let meshes: Vec<_> = g.meshes.iter().map(|m| engine_softbody::flexskin::glb_mesh(&g, m)).collect();
+    let bytes = std::fs::read(dir.join(v).join(&t.skin)).unwrap();
+    let (decoded, in_place) = (Skin::decode(&bytes).unwrap(), SkinBytes::parse(&bytes).unwrap());
+    let visual = |s: SkinRef| {
+        let (vis, rep) = engine_softbody::flexmesh::jbeam_visual_skin(&flex, &[], &desc, &sim, &meshes, &Default::default(), [0.5, 0.05, 0.04], Some(s)).unwrap();
+        format!("{vis:?} {rep:?}")
+    };
+    let (a, b) = (visual(SkinRef::Decoded(&decoded)), visual(SkinRef::Bytes(&in_place)));
+    assert!(a.len() > 1_000_000, "a weighted visual ({} bytes of Debug)", a.len());
+    assert!(a == b, "the visuals differ");
+}

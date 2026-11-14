@@ -72,13 +72,23 @@ fn main() -> Result<(), String> {
     let g = engine_softbody::glb::read(&glb_bytes)?;
     let all: Vec<_> = g.meshes.iter().map(|m| engine_softbody::flexskin::glb_mesh(&g, m)).collect();
     stage("glb parsed (and as flexmesh meshes)");
-    let skin = engine_softbody::flexskin::Skin::decode(&skin_bytes)?;
-    stage("rskin decoded");
-    let (vis, rep) = engine_softbody::flexmesh::jbeam_visual_skinned(&flex, &props, &desc, &sim, &all, &Default::default(), [0.6, 0.04, 0.03], Some(&skin))?;
+    // RSKIN_DECODE=1: the decoded skin (Skin::decode), as the loader read it before
+    // SkinBytes; else read in place.
+    let decoded = std::env::var("RSKIN_DECODE").is_ok_and(|v| v == "1");
+    let skin = if decoded { Some(engine_softbody::flexskin::Skin::decode(&skin_bytes)?) } else { None };
+    let bytes = if decoded { None } else { Some(engine_softbody::flexskin::SkinBytes::parse(&skin_bytes)?) };
+    let sref = match (&skin, &bytes) {
+        (Some(s), _) => engine_softbody::flexskin::SkinRef::Decoded(s),
+        (_, Some(b)) => engine_softbody::flexskin::SkinRef::Bytes(b),
+        _ => unreachable!(),
+    };
+    stage(if decoded { "rskin decoded" } else { "rskin read in place" });
+    let (vis, rep) = engine_softbody::flexmesh::jbeam_visual_skin(&flex, &props, &desc, &sim, &all, &Default::default(), [0.6, 0.04, 0.03], Some(sref))?;
     stage("visual built");
-    // visual_js: each flattened field collected into a Vec, then copied out.
+    // visual_js before: each flattened field collected into a Vec, then copied out
+    // (now copied from the flat slice).
     let flat: Vec<f32> = vis.wt_w.iter().flatten().copied().collect();
-    stage("visual_js's largest temporary (wtW flattened)");
+    stage("(the old visual_js's largest temporary, wtW flattened)");
     drop(flat);
     println!(
         "{} vertices, {} triangles, {} skin entries ({:.1} a vertex)",
@@ -87,7 +97,8 @@ fn main() -> Result<(), String> {
         vis.wt_node.len(),
         vis.wt_node.len() as f64 / vis.positions.len().max(1) as f64
     );
-    drop((vis, skin, all, g, glb_bytes, skin_bytes));
+    drop((vis, bytes, skin, all, g));
+    drop((glb_bytes, skin_bytes));
     stage("all dropped");
     Ok(())
 }

@@ -297,7 +297,9 @@ impl<'a> SkinBytes<'a> {
             *at += n;
             Ok(s)
         };
-        let u32_ = |at: &mut usize| -> Result<u32, String> { Ok(u32::from_le_bytes(take(at, 4)?.try_into().unwrap())) };
+        let u32_ = |at: &mut usize| -> Result<u32, String> {
+            Ok(u32::from_le_bytes(take(at, 4)?.try_into().unwrap()))
+        };
         let str_ = |at: &mut usize| -> Result<String, String> {
             let n = u16::from_le_bytes(take(at, 2)?.try_into().unwrap()) as usize;
             String::from_utf8(take(at, n)?.to_vec()).map_err(|e| e.to_string())
@@ -341,7 +343,14 @@ impl<'a> SkinBytes<'a> {
                     }
                     take(&mut at, 6)?;
                 }
-                meshes.push(MeshBytes { name, ver, nv, ne, verts, entries: &b[e0..at] });
+                meshes.push(MeshBytes {
+                    name,
+                    ver,
+                    nv,
+                    ne,
+                    verts,
+                    entries: &b[e0..at],
+                });
                 continue;
             }
             let v0 = at;
@@ -353,7 +362,10 @@ impl<'a> SkinBytes<'a> {
             starts.push(u32_(&mut at)? as usize);
             let verts = &b[v0..at];
             if starts[nv] != ne {
-                return Err(format!("rskin: {name}: {} entries listed, {ne} stated", starts[nv]));
+                return Err(format!(
+                    "rskin: {name}: {} entries listed, {ne} stated",
+                    starts[nv]
+                ));
             }
             // decode reads starts[k]..starts[k + 1] entries a vertex.
             let read: usize = starts.windows(2).map(|w| w[1].saturating_sub(w[0])).sum();
@@ -365,7 +377,14 @@ impl<'a> SkinBytes<'a> {
                 }
                 take(&mut at, 12)?;
             }
-            meshes.push(MeshBytes { name, ver, nv, ne: read, verts, entries: &b[e0..at] });
+            meshes.push(MeshBytes {
+                name,
+                ver,
+                nv,
+                ne: read,
+                verts,
+                entries: &b[e0..at],
+            });
         }
         Ok(SkinBytes { nodes, meshes })
     }
@@ -400,8 +419,19 @@ impl<'a> MeshBytes<'a> {
             let (count, f0) = if self.ver == 2 {
                 (r[0] as usize, 1)
             } else {
-                let s = |k: usize| u32::from_le_bytes(self.verts[k * rec..k * rec + 4].try_into().unwrap()) as usize;
-                let next = if k + 1 < self.nv { s(k + 1) } else { u32::from_le_bytes(self.verts[self.nv * rec..self.nv * rec + 4].try_into().unwrap()) as usize };
+                let s = |k: usize| {
+                    u32::from_le_bytes(self.verts[k * rec..k * rec + 4].try_into().unwrap())
+                        as usize
+                };
+                let next = if k + 1 < self.nv {
+                    s(k + 1)
+                } else {
+                    u32::from_le_bytes(
+                        self.verts[self.nv * rec..self.nv * rec + 4]
+                            .try_into()
+                            .unwrap(),
+                    ) as usize
+                };
                 (next.saturating_sub(s(k)), 4)
             };
             let f = [0, 1, 2, 3, 4, 5].map(|q| f32_at(r, f0 + 4 * q));
@@ -411,7 +441,12 @@ impl<'a> MeshBytes<'a> {
                     let x = &self.entries[8 * e..8 * e + 8];
                     let i = |q: usize| i16::from_le_bytes(x[q..q + 2].try_into().unwrap()) as f64;
                     let n = u16::from_le_bytes(x[0..2].try_into().unwrap()) as u32;
-                    w.push((n, (i(2) * Q_A) as f32, (i(4) * Q_D) as f32, (i(6) * Q_D) as f32));
+                    w.push((
+                        n,
+                        (i(2) * Q_A) as f32,
+                        (i(4) * Q_D) as f32,
+                        (i(6) * Q_D) as f32,
+                    ));
                 } else {
                     let x = &self.entries[16 * e..16 * e + 16];
                     let n = u32::from_le_bytes(x[0..4].try_into().unwrap());
@@ -419,7 +454,11 @@ impl<'a> MeshBytes<'a> {
                 }
                 e += 1;
             }
-            Vert { w, off: [f[0], f[1], f[2]], nrm: [f[3], f[4], f[5]] }
+            Vert {
+                w,
+                off: [f[0], f[1], f[2]],
+                nrm: [f[3], f[4], f[5]],
+            }
         })
     }
 }
@@ -457,7 +496,12 @@ impl<'a> SkinRef<'a> {
     /// Every mesh's entries.
     pub fn entries(&self) -> usize {
         match *self {
-            SkinRef::Decoded(s) => s.meshes.iter().flat_map(|m| &m.verts).map(|v| v.w.len()).sum(),
+            SkinRef::Decoded(s) => s
+                .meshes
+                .iter()
+                .flat_map(|m| &m.verts)
+                .map(|v| v.w.len())
+                .sum(),
             SkinRef::Bytes(s) => s.meshes.iter().map(|m| m.ne).sum(),
         }
     }
@@ -590,6 +634,25 @@ fn min_eig(a: DMat3) -> f64 {
 /// metre, range ±64 /m): the sidecar stores each as an i16 count of steps.
 pub const Q_A: f64 = 1.0 / 8192.0;
 pub const Q_D: f64 = 1.0 / 512.0;
+
+/// An entry (node, [A, ∂A/∂T, ∂A/∂B]) as the sidecar stores it: the node as u16
+/// and each weight as i16 steps of [`Q_A`], [`Q_D`], when that is exact (the steps
+/// read back as the same f32 bits, as [`Skin::decode`] reads them); None otherwise.
+pub fn steps(node: u32, w: [f32; 3]) -> Option<(u16, [i16; 3])> {
+    let node = u16::try_from(node).ok()?;
+    let mut q = [0i16; 3];
+    for (k, (f, s)) in w.into_iter().zip([Q_A, Q_D, Q_D]).enumerate() {
+        let x = f as f64 / s;
+        if !(x.fract() == 0.0 && x >= i16::MIN as f64 && x <= i16::MAX as f64) {
+            return None;
+        }
+        q[k] = x as i16;
+        if ((q[k] as f64 * s) as f32).to_bits() != f.to_bits() {
+            return None;
+        }
+    }
+    Some((node, q))
+}
 
 /// `x` rounded to multiples of `q` summing exactly to `total` (largest
 /// remainder), as f32 (exact: a step count below 2¹⁵ times a power of two);
@@ -919,8 +982,14 @@ mod tests {
         Skin {
             nodes: ids.iter().map(|i| format!("n{i}")).collect(),
             meshes: vec![
-                MeshSkin { name: "panel".into(), verts: sk[..120].to_vec() },
-                MeshSkin { name: "door".into(), verts: sk[120..].to_vec() },
+                MeshSkin {
+                    name: "panel".into(),
+                    verts: sk[..120].to_vec(),
+                },
+                MeshSkin {
+                    name: "door".into(),
+                    verts: sk[120..].to_vec(),
+                },
             ],
         }
     }
@@ -975,16 +1044,26 @@ mod tests {
             for &(n, a, b, c) in &v.w {
                 let (n16, q) = steps(n, [a, b, c]).expect("a decoded entry is on its grids");
                 assert_eq!(n16 as u32, n);
-                let back = [(q[0] as f64 * Q_A) as f32, (q[1] as f64 * Q_D) as f32, (q[2] as f64 * Q_D) as f32];
+                let back = [
+                    (q[0] as f64 * Q_A) as f32,
+                    (q[1] as f64 * Q_D) as f32,
+                    (q[2] as f64 * Q_D) as f32,
+                ];
                 assert_eq!(back.map(f32::to_bits), [a, b, c].map(f32::to_bits));
             }
         }
         assert!(steps(3, [0.1, 0.0, 0.0]).is_none(), "off the A grid");
-        assert!(steps(3, [0.0, 0.001, 0.0]).is_none(), "off the gradient grid");
+        assert!(
+            steps(3, [0.0, 0.001, 0.0]).is_none(),
+            "off the gradient grid"
+        );
         assert!(steps(3, [4.0, 0.0, 0.0]).is_none(), "past the i16 range");
         assert!(steps(65_536, [0.5, 0.0, 0.0]).is_none(), "a node past u16");
         assert!(steps(3, [f32::NAN, 0.0, 0.0]).is_none());
-        assert_eq!(steps(65_535, [-4.0, -64.0, 0.0]), Some((65_535, [-32_768, -32_768, 0])));
+        assert_eq!(
+            steps(65_535, [-4.0, -64.0, 0.0]),
+            Some((65_535, [-32_768, -32_768, 0]))
+        );
         // -0.0 is not 0 steps' bits.
         assert!(steps(1, [-0.0, 0.0, 0.0]).is_none());
     }
@@ -1002,12 +1081,19 @@ mod tests {
             for (m, dm) in r.meshes.iter().zip(&d.meshes) {
                 assert_eq!(m.name, dm.name);
                 assert_eq!(m.len(), dm.verts.len());
-                assert_eq!(m.entries(), dm.verts.iter().map(|v| v.w.len()).sum::<usize>());
+                assert_eq!(
+                    m.entries(),
+                    dm.verts.iter().map(|v| v.w.len()).sum::<usize>()
+                );
                 let got: Vec<Vert> = m.verts().collect();
                 assert_eq!(format!("{got:?}"), format!("{:?}", dm.verts));
             }
             for cut in (0..b.len()).step_by(7) {
-                assert_eq!(SkinBytes::parse(&b[..cut]).err(), Skin::decode(&b[..cut]).err(), "cut at {cut}");
+                assert_eq!(
+                    SkinBytes::parse(&b[..cut]).err(),
+                    Skin::decode(&b[..cut]).err(),
+                    "cut at {cut}"
+                );
             }
         }
         // A node index past the names: the same error.

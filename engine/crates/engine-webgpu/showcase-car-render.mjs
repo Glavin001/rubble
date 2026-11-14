@@ -2168,6 +2168,12 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         // Weighted skins (flexskin): 4 entries a 64-byte slot after the
         // fallbacks; per vertex its entries' first slot.
         const ws = v.wtStart && v.wtStart.length === n + 1 ? v.wtStart : null;
+        // Each entry's node and (A, dA/dT, dA/dB): f32 (wtNode, wtW), or the sidecar's
+        // grid steps when the wasm found them exact (wtNode16, wtQ: i16 steps of
+        // wtGrid's [A, dA] steps; the same f32 values, in half the memory).
+        const wq = v.wtQ, ga = v.wtGrid?.[0], gd = v.wtGrid?.[1];
+        const wNode = wq ? v.wtNode16 : v.wtNode;
+        const wW = wq ? (k, c) => wq[k] * (c === 0 ? ga : gd) : (k) => v.wtW[k];
         const wslot = ws ? new Uint32Array(n) : null;
         let nslots = 0;
         if (ws) for (let i = 0; i < n; i++) { wslot[i] = n + na + nslots; nslots += Math.ceil((ws[i + 1] - ws[i]) / 4); }
@@ -2208,7 +2214,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
             const k0 = ws[i], k1 = ws[i + 1];
             const ord = [];
             for (let k = k0; k < k1; k++) ord.push(k);
-            ord.sort((x, y) => Math.abs(v.wtW[3 * y]) - Math.abs(v.wtW[3 * x]));
+            ord.sort((x, y) => Math.abs(wW(3 * y, 0)) - Math.abs(wW(3 * x, 0)));
             u[o] = k1 - k0;
             u[o + 3] = wslot[i];
             f[o + 4] = v.wtOff[3 * i]; f[o + 5] = v.wtOff[3 * i + 1]; f[o + 6] = v.wtOff[3 * i + 2];
@@ -2216,8 +2222,8 @@ export function createShowcaseCarRenderer(device, opts = {}) {
             u[o + 15] = (u[o + 15] & ~3) | (1 << 25);
             ord.forEach((k, e) => {
               const q = wslot[i] * 16 + 4 * e;
-              u[q] = v.wtNode[k];
-              f[q + 1] = v.wtW[3 * k]; f[q + 2] = v.wtW[3 * k + 1]; f[q + 3] = v.wtW[3 * k + 2];
+              u[q] = wNode[k];
+              f[q + 1] = wW(3 * k, 0); f[q + 2] = wW(3 * k + 1, 1); f[q + 3] = wW(3 * k + 2, 2);
             });
           }
           const bl = framed && v.blNode && v.blNode[BLEND * i] !== 0xffffffff;

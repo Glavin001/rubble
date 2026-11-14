@@ -55,6 +55,16 @@ fn f32s(v: impl IntoIterator<Item = f32>) -> JsValue {
     Float32Array::from(v.as_slice()).into()
 }
 
+/// A flat list's copy in JS, made from the list in place (no temporary in the wasm
+/// heap, which never shrinks: a generated car's skin weights are 160 MB).
+fn flat<const N: usize>(v: &[[f32; N]]) -> JsValue {
+    Float32Array::from(v.as_flattened()).into()
+}
+
+fn f32v(v: &[f32]) -> JsValue {
+    Float32Array::from(v).into()
+}
+
 /// The showcase vehicle's `.truck` text (the explicit solver's input; Rigs of
 /// Rods format). Its forward axis is +z, centred on its length.
 #[wasm_bindgen(js_name = showcaseCarTruck)]
@@ -216,11 +226,11 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     set(
         &vis,
         "positions",
-        &f32s(v.positions.iter().flatten().copied()),
+        &flat(&v.positions),
     );
-    set(&vis, "normals", &f32s(v.normals.iter().flatten().copied()));
-    set(&vis, "uvs", &f32s(v.uvs.iter().flatten().copied()));
-    set(&vis, "colors", &f32s(v.colors.iter().flatten().copied()));
+    set(&vis, "normals", &flat(&v.normals));
+    set(&vis, "uvs", &flat(&v.uvs));
+    set(&vis, "colors", &flat(&v.colors));
     set(
         &vis,
         "material",
@@ -236,28 +246,27 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         "indices",
         &Uint32Array::from(v.indices.as_slice()).into(),
     );
-    let nodes: Vec<u32> = v.bind_nodes.iter().flatten().copied().collect();
     set(
         &vis,
         "bindNodes",
-        &Uint32Array::from(nodes.as_slice()).into(),
+        &Uint32Array::from(v.bind_nodes.as_flattened()).into(),
     );
     set(
         &vis,
         "bindCoords",
-        &f32s(v.bind_coords.iter().flatten().copied()),
+        &flat(&v.bind_coords),
     );
     set(
         &vis,
         "bindNormal",
-        &f32s(v.bind_normal.iter().flatten().copied()),
+        &flat(&v.bind_normal),
     );
     set(
         &vis,
         "bindRest",
-        &f32s(v.bind_rest.iter().flatten().copied()),
+        &flat(&v.bind_rest),
     );
-    set(&vis, "ao", &f32s(v.ao.iter().copied()));
+    set(&vis, "ao", &f32v(&v.ao));
     set(
         &vis,
         "smooth",
@@ -273,14 +282,14 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     set(
         &vis,
         "altCoords",
-        &f32s(v.alt_coords.iter().flatten().copied()),
+        &flat(&v.alt_coords),
     );
     set(
         &vis,
         "altNormal",
-        &f32s(v.alt_normal.iter().flatten().copied()),
+        &flat(&v.alt_normal),
     );
-    set(&vis, "altRest", &f32s(v.alt_rest.iter().flatten().copied()));
+    set(&vis, "altRest", &flat(&v.alt_rest));
     set(
         &vis,
         "altTri",
@@ -346,7 +355,7 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     set(
         &vis,
         "nodeRest",
-        &f32s(v.node_rest.iter().flatten().copied()),
+        &flat(&v.node_rest),
     );
     let nt: Vec<u32> = v.normal_tris.iter().flatten().copied().collect();
     set(&vis, "normalTris", &Uint32Array::from(nt.as_slice()).into());
@@ -363,7 +372,7 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     set(
         &vis,
         "nodeRestNormal",
-        &f32s(v.node_rest_normal.iter().flatten().copied()),
+        &flat(&v.node_rest_normal),
     );
     // Weighted skins (engine_softbody::flexskin, a Rubble extension): per
     // vertex its entries (CSR wtStart, vertexCount + 1; empty: none), each
@@ -371,10 +380,9 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     // offset and normal coefficients. showcase-car-render.mjs weightedVertex().
     if v.wt_start.len() == v.positions.len() + 1 {
         set(&vis, "wtStart", &Uint32Array::from(v.wt_start.as_slice()).into());
-        set(&vis, "wtNode", &Uint32Array::from(v.wt_node.as_slice()).into());
-        set(&vis, "wtW", &f32s(v.wt_w.iter().flatten().copied()));
-        set(&vis, "wtOff", &f32s(v.wt_off.iter().flatten().copied()));
-        set(&vis, "wtNrm", &f32s(v.wt_nrm.iter().flatten().copied()));
+        wt_entries_js(&vis, v);
+        set(&vis, "wtOff", &flat(&v.wt_off));
+        set(&vis, "wtNrm", &flat(&v.wt_nrm));
     }
     // The node-frame skin (engine_softbody::authoring::node_frames): per node
     // its neighbourhood (CSR frameStart, nodeCount + 1; frameNode, frameW),
@@ -392,16 +400,16 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         use engine_softbody::authoring::node_frames::BLEND;
         set(&vis, "frameStart", &Uint32Array::from(f.start.as_slice()).into());
         set(&vis, "frameNode", &Uint32Array::from(f.node.as_slice()).into());
-        set(&vis, "frameW", &f32s(f.w.iter().copied()));
-        set(&vis, "frameBasis", &f32s(f.basis.iter().flatten().copied()));
+        set(&vis, "frameW", &f32v(&f.w));
+        set(&vis, "frameBasis", &flat(&f.basis));
         let part: Vec<u32> = f.part.iter().map(|&p| p as u32).collect();
         set(&vis, "framePart", &Uint32Array::from(part.as_slice()).into());
         set(&vis, "tearStart", &Uint32Array::from(f.tb_start.as_slice()).into());
         set(&vis, "tearNode", &Uint32Array::from(f.tb_node.as_slice()).into());
-        set(&vis, "tearRest", &f32s(f.tb_rest.iter().copied()));
+        set(&vis, "tearRest", &f32v(&f.tb_rest));
         let bn: Vec<u32> = v.bl_node.iter().flatten().copied().collect();
         set(&vis, "blNode", &Uint32Array::from(bn.as_slice()).into());
-        set(&vis, "blW", &f32s(v.bl_w.iter().flatten().copied()));
+        set(&vis, "blW", &flat(&v.bl_w));
         use engine_softbody::authoring::node_frames as nf;
         // The break graph (node_frames::Binding::Breaks, the renderer's only
         // mode): per node its part's stiff beams (CSR adjStart; adjNode,
@@ -434,6 +442,41 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         &JsValue::from(v.positions.len() as u32),
     );
     vis
+}
+
+/// The weighted skin's entries: their nodes and (A, dA/dT, dA/dB) as the sidecar's
+/// grid steps (`wtNode16`, `wtQ`: i16 steps of `wtGrid`'s [A, dA] steps) when every
+/// entry is exactly that (`flexskin::steps`: the same f32 values from half the
+/// bytes; a generated car's are 110 MB instead of 220), else as `wtNode` (u32) and
+/// `wtW` (f32). Copied out in chunks (no temporary of the whole in the wasm heap).
+fn wt_entries_js(vis: &Object, v: &ShowcaseVisual) {
+    use engine_softbody::flexskin::{steps, Q_A, Q_D};
+    let exact = v.wt_node.iter().zip(&v.wt_w).all(|(&n, &w)| steps(n, w).is_some());
+    if !exact {
+        set(vis, "wtNode", &Uint32Array::from(v.wt_node.as_slice()).into());
+        set(vis, "wtW", &flat(&v.wt_w));
+        return;
+    }
+    let n = v.wt_node.len();
+    let nodes = js_sys::Uint16Array::new_with_length(n as u32);
+    let q = js_sys::Int16Array::new_with_length(3 * n as u32);
+    const CHUNK: usize = 1 << 16;
+    let (mut bn, mut bq) = (Vec::with_capacity(CHUNK), Vec::with_capacity(3 * CHUNK));
+    for (c, (ns, ws)) in v.wt_node.chunks(CHUNK).zip(v.wt_w.chunks(CHUNK)).enumerate() {
+        bn.clear();
+        bq.clear();
+        for (&nd, &w) in ns.iter().zip(ws) {
+            let (a, s) = steps(nd, w).expect("checked above");
+            bn.push(a);
+            bq.extend(s);
+        }
+        let at = (c * CHUNK) as u32;
+        nodes.subarray(at, at + ns.len() as u32).copy_from(&bn);
+        q.subarray(3 * at, 3 * (at + ns.len() as u32)).copy_from(&bq);
+    }
+    set(vis, "wtNode16", &nodes.into());
+    set(vis, "wtQ", &q.into());
+    set(vis, "wtGrid", &f32v(&[Q_A as f32, Q_D as f32]));
 }
 
 /// The visual layer of an imported BeamNG JBeam vehicle (engine_softbody
@@ -545,8 +588,10 @@ fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Opt
         let g = engine_softbody::glb::read(g).map_err(err)?;
         all.extend(g.meshes.iter().map(|m| engine_softbody::flexskin::glb_mesh(&g, m)));
     }
+    // Read in place (flexskin::SkinBytes): the same values as decoded, without the
+    // decoded copy (320 MB for a generated car) in a wasm heap that never shrinks.
     let skin = match skin {
-        Some(b) => Some(engine_softbody::flexskin::Skin::decode(b).map_err(err)?),
+        Some(b) => Some(engine_softbody::flexskin::SkinBytes::parse(b).map_err(err)?),
         None => None,
     };
     let mut mats = std::collections::HashMap::new();
@@ -561,7 +606,7 @@ fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Opt
         ));
     }
     let (vis, rep) =
-        flexmesh::jbeam_visual_skinned(&flex, &props, &desc, &sim, &all, &mats, paint, skin.as_ref()).map_err(err)?;
+        flexmesh::jbeam_visual_skin(&flex, &props, &desc, &sim, &all, &mats, paint, skin.as_ref().map(engine_softbody::flexskin::SkinRef::Bytes)).map_err(err)?;
     if skin.is_some() {
         let out = Object::new();
         set(&out, "visual", &visual_js(&vis).into());
