@@ -3727,6 +3727,8 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
                    uint groupCount, uint parity);
 void piecesClearBuild();
 void piecesEnd(uint v);
+void piecesTestTriangle(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff, uint candCount,
+                        uint beamOff, uint groupOff, uint groupCount, uint parity);
 
 // --- The reused pair list's pieces: parts torn off the vehicle (lossless) ---
 // With one bound for the whole vehicle (the spread R of every tracked node's displacement)
@@ -3779,6 +3781,12 @@ void pieceKeyMax(uint w, float f)
 // A group's six keys (largest x, y, z, then of the negated) present.
 bool pieceKeysSet(uint w) { return gsCount[GRID_BUCKETS + w].load() != 0u; }
 float pieceKey(uint w) { return pairReuseVal(gsCount[GRID_BUCKETS + w].load()); }
+// A triangle with a retired node (nodeRetired): tryContact rejects every pair.
+bool pieceTriRetired(uint t)
+{
+    uint4 tn = gStatic[gP.triBase + t];
+    return nodeRetired(tn.x) || nodeRetired(tn.y) || nodeRetired(tn.z);
+}
 // Triangle t's nodes in different groups, or in the loose group: tested every step.
 bool pieceVolatile(uint t)
 {
@@ -3957,7 +3965,12 @@ bool piecesBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff, ui
         uint t = triOff + p / LIST_SUBS;
         if (pieceVolatile(t))
         {
-            if (p % LIST_SUBS == 0u) gNext[pieceVolAt(triOff + gsCount[GRID_BUCKETS + RU_VOL].add(1u))] = t;
+            // A dead triangle (a break beam broken before this beam phase: dead from now
+            // on, tryContact's box empty) or one with a retired node has no contact to
+            // test: not listed.
+            bool gone = ((gMisc[gP.vehicles + t].z & TRI_BREAKABLE) != 0u && triangleDead(t))
+                || (gP.retireBase != 0u && pieceTriRetired(t));
+            if (p % LIST_SUBS == 0u && !gone) gNext[pieceVolAt(triOff + gsCount[GRID_BUCKETS + RU_VOL].add(1u))] = t;
             continue;
         }
         pairReuseList(t, p % LIST_SUBS, origin, r, cell, candOff, candCount, parity, at, margin);
@@ -4010,11 +4023,57 @@ void piecesTests(uint v, uint lane, uint triOff, float3 origin, float r, float c
 #endif
     uint vol = gsCount[GRID_BUCKETS + RU_VOL].load();
     if (lane == 0u) gsCount[GRID_BUCKETS + RU_VSUM].add(vol);
-    for (uint p = lane, pStop = EB_END(p, vol * PIECE_SUBS, LANES); p < pStop; p += LANES)
+    // Few triangles: more lanes each (the same tests, spread wider).
+    uint subs = max(PIECE_SUBS, min(64u, LANES / max(vol, 1u)));
+    for (uint p = lane, pStop = EB_END(p, vol * subs, LANES); p < pStop; p += LANES)
+        piecesTestTriangle(gNext[pieceVolAt(triOff + p / subs)], p % subs, subs, origin, r, cell, candOff, candCount,
+                           beamOff, groupOff, groupCount, parity);
+}
+
+// pairReuseTest for triangle gt against candidates sub, sub + subs, …: its records loaded
+// once, then each candidate as pairReuseTest takes it (the walk's box and cells).
+void piecesTestTriangle(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff, uint candCount,
+                        uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
+    uint at = gP.triGeo + gt * TRI_GEO_RECS;
+    float4 r4 = gBeams[at + 4u];
+    float4 r5 = gBeams[at + 5u];
+    float3 lo = r4.xyz;
+    float3 hi = float3(r4.w, r5.xy);
+    float3 f0 = floor((lo - origin) / cell);
+    float3 fs = floor((hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
+    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
+    int3 c0 = int3(0, 0, 0);
+    int3 span = int3(1, 1, 1);
+    if (!every)
     {
-        uint t = gNext[pieceVolAt(triOff + p / PIECE_SUBS)];
-        for (uint c = p % PIECE_SUBS, cStop = EB_END(c, candCount, PIECE_SUBS); c < cStop; c += PIECE_SUBS)
-            pairReuseTest(t, gLists[candOff + c], origin, r, cell, beamOff, groupOff, groupCount, parity);
+        c0 = int3(f0);
+        span = int3(fs);
+    }
+    TriGeo t = triGeoLoad(gt);
+    for (uint c = sub, cStop = EB_END(c, candCount, subs); c < cStop; c += subs)
+    {
+        uint h = gLists[candOff + c];
+        if (!every)
+        {
+            float3 e = gNodes[h * 3u].xyz;
+            float3 p = origin + e;
+            if (any(p < lo) || any(p > hi)) continue;
+            int3 cc = int3(floor(e / cell));
+            if (!(all(cc >= c0) && all(cc < c0 + span)))
+            {
+                uint yz = uint(span.y * span.z);
+                uint cells = uint(span.x) * yz;
+                uint b = gridBucket(cc);
+                bool covered = false;
+                for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
+                    covered = covered
+                        || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
+                if (!covered) continue;
+            }
+        }
+        tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
     }
 }
 
