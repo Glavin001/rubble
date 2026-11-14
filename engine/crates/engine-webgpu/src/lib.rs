@@ -132,17 +132,22 @@ pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
 ];
 /// The split group path (`EB_VV_SPLIT`, engine/docs/measurements/contact-groups-design.md):
 /// per frame-module variant (plain, wide, aero, aero wide) the members' step
-/// (`explicit_beams_split_member`) and the groups' pass (`explicit_beams_split_group`).
+/// (`explicit_beams_split_member`), the groups' pass (`explicit_beams_split_group`) and
+/// its triangle tests across workgroups (`explicit_beams_split_tests`).
 /// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 8] = [
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 12] = [
     ("explicit_beams_split_member", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member.wgsl"))),
     ("explicit_beams_split_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group.wgsl"))),
+    ("explicit_beams_split_tests", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests.wgsl"))),
     ("explicit_beams_split_member_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member_wide.wgsl"))),
     ("explicit_beams_split_group_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group_wide.wgsl"))),
+    ("explicit_beams_split_tests_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests_wide.wgsl"))),
     ("explicit_beams_split_member_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member_aero.wgsl"))),
     ("explicit_beams_split_group_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group_aero.wgsl"))),
+    ("explicit_beams_split_tests_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests_aero.wgsl"))),
     ("explicit_beams_split_member_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member_aero_wide.wgsl"))),
     ("explicit_beams_split_group_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group_aero_wide.wgsl"))),
+    ("explicit_beams_split_tests_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests_aero_wide.wgsl"))),
 ];
 /// The build's WGSL directory (native tests read the frozen baseline kernel,
 /// `explicit_baseline_*.wgsl`, from it at run time).
