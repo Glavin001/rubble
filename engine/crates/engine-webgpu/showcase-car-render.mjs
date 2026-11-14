@@ -2145,6 +2145,24 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const stateAt = nodeCount * NS;
       const level = (v, lvIndex) => {
         const n = v.vertexCount;
+        // The bindings, packed in a function of their own: the closures that sort and
+        // pack a vertex's entries hold the packed data's views, and a closure kept on
+        // the level (`pw`) would keep its whole scope, so those views and the data
+        // (hundreds of MB for a generated car's skin) would outlive the upload.
+        const binds = upload('showcase-binds', packBinds(v, n));
+        // Deformed (position | torn, normal | damage, plastic | scrape) per
+        // vertex: the compute pass writes it, the draw reads it as a vertex
+        // buffer. Starts at the rest pose.
+        const out = device.createBuffer({ label: 'showcase-out', size: n * OUT_STRIDE, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+        const rest = new Float32Array(n * 8);
+        for (let i = 0; i < n; i++) {
+          rest.set(v.positions.subarray(3 * i, 3 * i + 3), 8 * i);
+          rest.set(v.normals.subarray(3 * i, 3 * i + 3), 8 * i + 4);
+        }
+        device.queue.writeBuffer(out, 0, rest);
+        return levelRest(v, lvIndex, n, binds, out);
+      };
+      const packBinds = (v, n) => {
         // Shut-line fallbacks after the n bindings (word 3 links them).
         const na = v.alt && v.alt.length === n ? v.altTri.length : 0;
         // Weighted skins (flexskin): 4 entries a 64-byte slot after the
@@ -2229,17 +2247,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
             f[q + 11] = v.altRest[2 * k + 1];
           }
         }
-        const binds = upload('showcase-binds', bindData);
-        // Deformed (position | torn, normal | damage, plastic | scrape) per
-        // vertex: the compute pass writes it, the draw reads it as a vertex
-        // buffer. Starts at the rest pose.
-        const out = device.createBuffer({ label: 'showcase-out', size: n * OUT_STRIDE, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-        const rest = new Float32Array(n * 8);
-        for (let i = 0; i < n; i++) {
-          rest.set(v.positions.subarray(3 * i, 3 * i + 3), 8 * i);
-          rest.set(v.normals.subarray(3 * i, 3 * i + 3), 8 * i + 4);
-        }
-        device.queue.writeBuffer(out, 0, rest);
+        return bindData;
+      };
+      const levelRest = (v, lvIndex, n, binds, out) => {
         // Per vertex: colour, AO, material, rest position (the glass's crack
         // pattern is drawn in rest space so it rides the glass).
         // and texture coordinates (printed parts: tyres, plates, displays).
