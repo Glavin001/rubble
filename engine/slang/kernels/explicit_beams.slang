@@ -3726,6 +3726,7 @@ void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint c
 void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint beamOff, uint groupOff,
                    uint groupCount, uint parity);
 void piecesClearBuild();
+void piecesEnd(uint v);
 
 // --- The reused pair list's pieces: parts torn off the vehicle (lossless) ---
 // With one bound for the whole vehicle (the spread R of every tracked node's displacement)
@@ -3760,6 +3761,7 @@ static const uint RU_K = RU_E + 6u * PIECE_GROUPS;
 static const uint RU_S = RU_K + 6u * PIECE_LOOSE;
 static const uint RU_VALL = RU_S + PIECE_GROUPS;
 static const uint RU_VOL = RU_VALL + 1u;
+static const uint RU_VSUM = RU_VOL + 1u; // volatile triangles tested, summed over the frame's steps
 static const uint PIECE_SUBS = 8u;
 
 uint pieceLabel(uint gi) { return min(gNext[gP.pieceBase + gi] & 0xFFu, PIECE_LOOSE); }
@@ -4001,7 +4003,13 @@ void piecesTests(uint v, uint lane, uint triOff, float3 origin, float r, float c
                  uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     if (!piecesOn(v)) return;
+#ifdef EB_ABLATE
+    // Measurement only (time): 2^28 the volatile triangles' tests (also the surface
+    // pass's, which this scene does not run).
+    if ((gP.ablate & 268435456u) != 0u) return;
+#endif
     uint vol = gsCount[GRID_BUCKETS + RU_VOL].load();
+    if (lane == 0u) gsCount[GRID_BUCKETS + RU_VSUM].add(vol);
     for (uint p = lane, pStop = EB_END(p, vol * PIECE_SUBS, LANES); p < pStop; p += LANES)
     {
         uint t = gNext[pieceVolAt(triOff + p / PIECE_SUBS)];
@@ -4312,6 +4320,15 @@ void pairReuseEnd(uint v, uint lane)
     uint4 s = asuint(gBeams[at]);
     gBeams[at] = asfloat(uint4(s.x + gsCount[GRID_BUCKETS + RU_STATS].load(), s.y + gsCount[GRID_BUCKETS + RU_STATS + 1u].load(),
                                s.z + gsCount[GRID_BUCKETS + RU_STATS + 2u].load(), max(s.w, gsCount[GRID_BUCKETS + RU_STATS + 3u].load())));
+    piecesEnd(v);
+}
+// The volatile triangles tested this frame into the vehicle's second statistics record.
+void piecesEnd(uint v)
+{
+    if (gP.pieceBase == 0u) return;
+    uint at = gP.pairBuild + gP.totalNodes + gP.vehicles + v;
+    uint4 s = asuint(gBeams[at]);
+    gBeams[at] = asfloat(uint4(s.x + gsCount[GRID_BUCKETS + RU_VSUM].load(), s.yzw));
 }
 
 

@@ -172,6 +172,19 @@ fn piece_labels_keep_the_list_bit_for_bit() {
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, fleet);
     gpu.set_wide(false);
     let zeros = vec![0u8; d.nodes.len()];
+    // The volatile triangles (nodes of different labels, or the loose label), live and
+    // dead (a break beam broken: no contact ever again, nothing to test).
+    let (mut vol_live, mut vol_dead) = (0u64, 0u64);
+    for (t, tri) in d.triangles.iter().enumerate() {
+        let a = labels[tri.nodes[0] as usize];
+        if !(a == 7 || tri.nodes.iter().any(|&v| labels[v as usize] != a)) {
+            continue;
+        }
+        let dead = d.tri_breaks.get(t).is_some_and(|k| k.iter().any(|&b| b != u32::MAX && broken[b as usize]));
+        if dead { vol_dead += 1 } else { vol_live += 1 }
+    }
+    assert!(vol_dead > 0 && vol_live > 0, "volatile triangles live {vol_live}, dead {vol_dead}");
+    let (mut vol_tested, mut grid_steps) = (0u64, 0u64);
     let (mut with, mut without) = ([0u64; 4], [0u64; 4]);
     // The first frames the piece is still beside the cut; from frame 8 it is metres away.
     let (mut late_with, mut late_without) = ([0u64; 2], [0u64; 2]);
@@ -182,9 +195,12 @@ fn piece_labels_keep_the_list_bit_for_bit() {
             gpu.set_pair_reuse(reuse);
             gpu.set_piece_labels(0, l);
             gpu.take_pair_reuse_stats();
+            gpu.take_piece_stats();
             gpu.frame(34);
             gpu.wait();
             let st = gpu.take_pair_reuse_stats();
+            let vt = gpu.take_piece_stats();
+            let st = [st[0], st[1], st[2], vt];
             gpu.set_piece_labels(0, &zeros);
             gpu.set_pair_reuse(true);
             (gpu.state_words(), st)
@@ -198,6 +214,8 @@ fn piece_labels_keep_the_list_bit_for_bit() {
         if let Some(diff) = first_diff(&walk, &lab) {
             panic!("torn piece: frame {f}: the list with piece labels differs from the walk at {diff}");
         }
+        vol_tested += s1[3];
+        grid_steps += s1[0] + s1[1];
         for k in 0..2 {
             with[k] += s1[k];
             without[k] += s0[k];
@@ -212,6 +230,9 @@ fn piece_labels_keep_the_list_bit_for_bit() {
         with[0], with[1], without[0], without[1], late_with[0], late_with[1], late_without[0], late_without[1]
     );
     assert!(with[1] > with[0], "with labels the list was reused on {} steps for {} builds", with[1], with[0]);
+    // Dead volatile triangles are not tested: at most the live ones each grid step.
+    eprintln!("volatile triangles: {vol_live} live, {vol_dead} dead; tested {vol_tested} over {grid_steps} grid steps");
+    assert!(vol_tested <= vol_live * grid_steps, "volatile triangles tested {vol_tested} over {grid_steps} steps: more than the {vol_live} live");
     // Once the piece is away, the labelled list is built a few times a frame (the cut
     // body's own ringing; measured 45 builds in 12 frames, 136 without the labels).
     assert!(late_with[0] <= 5 * 12, "frames 8..20 with labels: {} builds", late_with[0]);

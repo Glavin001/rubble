@@ -1734,6 +1734,22 @@ impl ExplicitBeamsGpu {
         out
     }
 
+    /// Measurement: the reused pair list's volatile triangles tested (summed over steps
+    /// and vehicles) since the last call (which clears them). 0 without the pair list.
+    #[doc(hidden)]
+    pub fn take_piece_stats(&mut self) -> u64 {
+        let at = self.planner.words[91] as usize;
+        if at == 0 {
+            return 0;
+        }
+        let nv = self.layout.spans.len();
+        let rec = at + self.layout.total[0] as usize + nv;
+        let beams: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[4])).to_vec();
+        let out = (0..nv).map(|v| u64::from(beams[(rec + v) * 4])).sum();
+        self.queue.write_buffer(&self.bufs[4], (rec * 16) as u64, &vec![0u8; nv * 16]);
+        out
+    }
+
     /// The coupling's per-node shape ranges (`explicit_beams_rigid.slang` `cplGsAdd`, the
     /// header's bit 64): each node's contacts start at the first proxy shape its count
     /// pass found it inside and stop after the last (on), or scan every shape (off; the

@@ -1936,7 +1936,8 @@ impl ExplicitUpload {
         // position and speed at the list's build, then per vehicle its statistics.
         let pair_build = if tri_pairs != 0 {
             let at = beams.len() as u32;
-            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes + nv));
+            // (Then per vehicle the pieces' statistics: volatile triangles tested.)
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes + 2 * nv));
             at
         } else {
             0
