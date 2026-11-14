@@ -28,6 +28,18 @@
 //! - **Flips only where the structure folded**: drawn triangles facing away
 //!   from their rest orientation are at most the share of the skeleton's own
 //!   skin triangles that face away from theirs, plus [`FLIP_SLACK`].
+//! - **Cut only where the structure broke** (coverage): a triangle is cut
+//!   (any of its vertices torn past ½ or dropped) only where a beam has
+//!   actually broken: a broken beam joins two of the nodes that carry one of
+//!   its vertices (its bound nodes at rest), or its glass shattered (its
+//!   damage unit's beams broke). Never for stretch, fold or disagreement:
+//!   dented sheet metal stays a continuous dented panel (BeamNG deforms the
+//!   mesh continuously and removes polygons only where a beam breaks). The
+//!   bound: cut triangles without a broken beam under them = 0; reported per
+//!   part as drawn / rest triangles.
+//! - **No holes without a tear**: a part's drawn mesh has no boundary edge
+//!   it did not have at rest, except beside a cut that a broken beam
+//!   explains.
 
 use engine_softbody::authoring::skin::{
     deform_beams, raycast_visual, showcase_visual_lod, unit_states, vertex_tears, BeamState,
@@ -170,12 +182,46 @@ struct Report {
     flipped: usize,
     lattice_flip: f32,
     nan_nodes: usize,
+    /// Cut triangles (any vertex torn past ½ or dropped).
+    cut: usize,
+    /// Of them with no broken beam on the nodes carrying them (and no
+    /// shattered glass): must be 0.
+    cut_unexplained: usize,
+    /// Boundary edges of the drawn mesh that were not boundary at rest and
+    /// whose cut neighbour no broken beam explains: must be 0.
+    boundary_unexplained: usize,
+    /// Per part (name): rest triangles, drawn (uncut) triangles, cut without
+    /// a broken beam, boundary edges at rest and now.
+    parts: std::collections::BTreeMap<String, [usize; 5]>,
 }
 
 impl Report {
     fn check(&self, tag: &str) {
-        eprintln!("{tag}: {self:?}");
+        let Report { parts, .. } = self;
+        eprintln!(
+            "{tag}: drawn {} shards {} longest {:.2} spans {} jumpy {} flipped {} lattice_flip {:.4} nan {} cut {} cut_unexplained {} boundary_unexplained {}",
+            self.drawn, self.shards, self.longest, self.spans, self.jumpy, self.flipped, self.lattice_flip,
+            self.nan_nodes, self.cut, self.cut_unexplained, self.boundary_unexplained
+        );
+        for (name, [all, drawn, bad, b0, b1]) in parts {
+            if drawn < all {
+                eprintln!(
+                    "    {name}: {drawn}/{all} drawn ({:.1} %), {bad} cut without a break, boundary edges {b0} → {b1}",
+                    100.0 * *drawn as f32 / *all as f32
+                );
+            }
+        }
         assert_eq!(self.nan_nodes, 0, "{tag}: non-finite nodes");
+        assert_eq!(
+            self.cut_unexplained, 0,
+            "{tag}: {} triangles cut with no broken beam under them",
+            self.cut_unexplained
+        );
+        assert_eq!(
+            self.boundary_unexplained, 0,
+            "{tag}: {} new boundary edges (holes) with no broken beam under them",
+            self.boundary_unexplained
+        );
         assert_eq!(self.shards, 0, "{tag}: {} shards (longest {:.2} m)", self.shards, self.longest);
         assert_eq!(self.spans, 0, "{tag}: {} drawn triangles span a break", self.spans);
         assert_eq!(self.jumpy, 0, "{tag}: {} saw-tooth vertices", self.jumpy);
@@ -285,6 +331,61 @@ fn measure(s: &ExplicitBeams) -> Report {
                 eprintln!("  jumpy v{i} on {piece}: off {:.3} m vs mean edge {:.3}, {} neighbours, tear {:.2}, nodes {:?} w {:?}", (d - mean).length(), e, cnt[i], tear[i], v.bl_node[i], v.bl_w[i]);
             }
         }
+    }
+    // Coverage: which triangles are cut, and whether a broken beam explains
+    // each (an end of a broken beam among the nodes carrying it at rest, or
+    // its glass shattered with its damage unit).
+    let broken: std::collections::HashSet<(u32, u32)> = s
+        .beams
+        .iter()
+        .filter(|b| b.broken)
+        .map(|b| (b.a.min(b.b), b.a.max(b.b)))
+        .collect();
+    let zero = vec![0.0f32; nodes.len()];
+    // A vertex is at a break when a broken beam joins two of the nodes that
+    // carry it.
+    let at_break = |i: usize| {
+        let d = drivers(v, i, &zero);
+        d.iter().any(|&a| d.iter().any(|&b| a < b && broken.contains(&(a, b))))
+    };
+    let shattered = |i: usize| {
+        let u = v.unit.get(i).copied().unwrap_or(u32::MAX);
+        u != u32::MAX && us[u as usize].broken
+    };
+    let explained = |i: usize| shattered(i) || at_break(i);
+    let part_name = |i: usize| match v.part.get(i).copied().unwrap_or(u16::MAX) {
+        u16::MAX => "structure".to_string(),
+        p => car().b.skeleton.parts[p as usize].clone(),
+    };
+    let mut edges: std::collections::HashMap<(u32, u32), [u32; 3]> = Default::default();
+    for t in v.indices.chunks_exact(3) {
+        let ids = [t[0] as usize, t[1] as usize, t[2] as usize];
+        let name = part_name(ids[0]);
+        let cut = ids.iter().any(|&i| !pos[i].x.is_finite() || tear[i] >= 0.5);
+        let ok = !cut || ids.iter().any(|&i| explained(i));
+        let e = r.parts.entry(name).or_default();
+        e[0] += 1;
+        e[1] += !cut as usize;
+        e[2] += !ok as usize;
+        r.cut += cut as usize;
+        r.cut_unexplained += !ok as usize;
+        for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+            let key = (t[a].min(t[b]), t[a].max(t[b]));
+            let c = edges.entry(key).or_default();
+            c[0] += 1; // triangles on the edge (all drawn at rest)
+            c[1] += !cut as u32; // drawn now
+            c[2] += !ok as u32; // cut with no broken beam under it
+        }
+    }
+    for (&(a, _), &[n0, d, u]) in &edges {
+        let name = part_name(a as usize);
+        let e = r.parts.get_mut(&name).unwrap();
+        // A boundary edge: exactly one drawn triangle on it.
+        e[3] += (n0 == 1) as usize;
+        e[4] += (d == 1) as usize;
+        // New, and a hole no break explains: it was inside the mesh, and a
+        // triangle beside it was cut without a broken beam.
+        r.boundary_unexplained += (n0 >= 2 && d == 1 && u > 0) as usize;
     }
     // The skeleton's own skin: triangles (of one part) facing away from their
     // rest orientation, by count.
