@@ -31,7 +31,7 @@ const OUT = opt('--out', join(homedir(), 'Development', 'rubble-artifacts', 'veh
 const [W, H] = opt('--size', '1280x720').split('x').map(Number);
 const PROBE = args.includes('--probe'), RESTARTS = args.includes('--restarts');
 const EXTRA = opt('--query', '');
-const FLAGS = ['--probe', '--restarts'];
+const FLAGS = ['--probe', '--restarts', '--segments'];
 const runs = args.filter((a, i) => !a.startsWith('--') && (!args[i - 1]?.startsWith('--') || FLAGS.includes(args[i - 1])));
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
@@ -147,10 +147,12 @@ if (PROBE) {
     if (opt('--eval', null)) console.log(await evaluate(readFileSync(opt('--eval'), 'utf8')));
     for (let s = 1; s <= Number(opt('--secs', '10')); s++) {
       await new Promise((r) => setTimeout(r, 1000));
-      console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, bodies, readsSkipped, gpu, frameMs }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), frameP50: +frameMs.p50.toFixed(1), frameP95: +frameMs.p95.toFixed(1), bodies, readsSkipped,
-        gpu: gpu && gpu.total.length ? { total: +gpu.split.total.toFixed(2), rigid: +gpu.split.rigid.toFixed(2), vehicle: +gpu.split.vehicle.toFixed(2) } : null }))(window.__state()))`)}`);
+      try { console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, bodies, readsSkipped, gpu, frameMs }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), frameP50: +frameMs.p50.toFixed(1), frameP95: +frameMs.p95.toFixed(1), bodies, readsSkipped,
+        gpu: gpu && gpu.total.length ? { total: +gpu.split.total.toFixed(2), rigid: +gpu.split.rigid.toFixed(2), vehicle: +gpu.split.vehicle.toFixed(2) } : null }))(window.__state()))`)}`); } catch (e) { console.log(`  ${s}s (no reading: ${String(e.message).slice(0, 80)})`); }
+      if (args.includes('--segments') && s % 5 === 0) console.log(`     segments ${await evaluate(`JSON.stringify(Object.fromEntries(Object.entries(window.__gpu().segments).map(([k, v]) => [k, +v.toFixed(2)]).filter(([, v]) => v >= 0.05)))`)}`);
     }
     await grabTo(join(OUT, 'stills', `probe-${name}.jpg`), 85);
+    if (opt('--eval', null)) console.log(await evaluate('(window.__abLog || []).join("\\n")'));
     console.log(await evaluate('window.__table()'));
     failOnErrors(name);
   }

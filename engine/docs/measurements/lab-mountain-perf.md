@@ -168,3 +168,61 @@ element) for 43; after: 5.
 4. **The lab's arena fixtures** ride along as the car's static shapes on the mountain (far
    overhead, for one layout per template), so the per-element surface loops always run
    against them (cheap: the box cull rejects them).
+
+## 4. Surface contact off: the self-collision pair list (2026-11-14)
+
+The report: `vehicle-lab.html?mode=mountain&car=gen&steepness=55&roughness=0.25&launch=12&surface=0&drag=0`
+"Mountain (hard)": smooth at first, then slow. Headless Chrome (`vehicle-lab-record.mjs
+--probe`, 60 Hz, GPU idle before each run), GPU time of a World step: 7.6 ms in free fall,
+11–12.6 ms on the slope (t 5–16 s), 13–14 ms to 19 s, then 26–28 ms (30 World steps/s) from
+t ≈ 21 s on. Air drag on gives the same.
+
+**Where it goes (Chrome, the frame's WGSL with one function stubbed at t = 24 s,
+`--eval` + `debugSetExplicitFrameWgsl`):** all of it is `explicit frame (solo)`; without
+`triangleGridWalk` (the self-collision search) the step is 7.1 ms instead of 28.2 ms, with
+120 proxy shapes in the window. Stubbing `selfApply` and `driveStep` as well changes nothing
+(6.8, 7.2 ms). The coupling switched off (`setExplicitKnob('coupling')`) takes 28 to 20–25 ms.
+
+**Why (native GPU World, `--tri-census 1`: the walk's load each second).** With anti-clip
+every triangle's box is padded by r + (its own fastest node + the car's fastest node) × h
++ `CLIP_DEPTH`. Detached nodes left behind fall off the mountain's recycled chunks and
+fall for ever: the car's fastest node gains 9.8 m/s every second (111 m/s at 17 s, 6 nodes;
+228 m/s at 29 s, 14 nodes). The padded boxes then hold more (triangle, candidate) pairs:
+5,200 at the start, 7,800 at 17 s, 9,500 at 23 s, 11,200 at 29 s; with each candidate's own
+travel in place of the fastest node's they would hold 5,200–6,700 throughout. Past the
+pair list's room (`TRI_PAIR_CAP`, 8,192) the frame walks again with its tests in the
+walk's lanes (uneven), and the step waits for the slowest. The collision triangles
+themselves stay small (longest box side 1–2.3 m, none past the grid's 64 cells).
+
+**Fix applied (lossless): `TRI_PAIR_CAP` 8,192 → 32,768** (196 KB more of `gNext` a
+vehicle). The listed pairs' tests and results are the walk's (the same hits, applied in
+the specification's order), so only the path changes.
+
+| t (s) | native ms per World step, before → after | Chrome GPU ms, before → after |
+|---|---|---|
+| 17 | 15.0 → 15.1 | 13.0 → 12.6 |
+| 21 | 17.5 (worst 28.3) → 15.9 | 14.3–17 → 17.2 |
+| 23 | 26.2 → 16.8 | 26.4 → 17.0 |
+| 25 | 28.5 → 17.4 | 28.4 → 18.2 |
+| 29 | 33.1 → 20.0 | 23.0–28.0 → 18.4 |
+
+The native trajectories are the same to every figure printed (speed, drop, box, proxies,
+pair counts each second). `engine-webgpu explicit_beams_bitwise`: 12 passed.
+
+**Not real time yet:** 17–20 ms a step from 20 s on (40 World steps/s in Chrome). The
+rest is the same cause, the fastest node's padding, which the room does not remove:
+more pairs to test and more cells for every triangle's walk. Two changes would, both
+the owner's decision (neither is lossless):
+1. *Each candidate tested against the box padded by its own travel* (the triangle's cells
+   by the triangle's travel, a fast candidate entered in the cells its travel covers). It
+   changes the specification's box (§36): a contact the rule only found because some
+   other node was fast is no longer found. Pairs stay at 5,200–6,700.
+2. *The lab retires debris that has left the mountain* (a node of a detached part more
+   than some distance below the lowest live chunk), as a kill plane does. Lab scene only.
+
+For 120 Hz (8.3 ms) the frame's base cost is the limit: 7.6 ms in free fall, 11–12.6 ms
+in contact, for one car at 34 steps a World step.
+
+Tools: `vehicle-lab-record.mjs --probe --segments` (the GPU split by pass every 5 s),
+`--eval file.js` (a script in the page, its `window.__abLog` printed at the end);
+`examples/vehicle_lab --tri-census N` (CPU and `mountain-perf`).

@@ -3307,7 +3307,7 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
 // a pair each. The tests and their results are the walk's: the hits are applied in
 // the specification's order whatever order they were found in (selfApply). A list past
 // TRI_PAIR_CAP runs the walk again with its tests (the list has no effects).
-static const uint TRI_PAIR_CAP = 8192u;
+static const uint TRI_PAIR_CAP = 32768u;
 uint triPairsAt(uint v) { return gP.triPairs + v * 2u * TRI_PAIR_CAP; }
 uint triPairAdd();
 // Lanes a triangle's walk is spread over when it lists (its cells sub, sub + LIST_SUBS, ...):

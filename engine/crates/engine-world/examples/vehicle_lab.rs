@@ -189,6 +189,15 @@ fn run(
         lab.bench.set_script(script)?;
         for k in 0..windows {
             lab.step()?;
+            // `--tri-census N`: every N windows, the self-collision walk's load.
+            if let Some(n) = arg("--tri-census").and_then(|x| x.parse::<u64>().ok()) {
+                if k % n == n - 1 {
+                    let pos: Vec<glam::Vec3> = lab.sim.nodes.iter().map(|n| n.pos).collect();
+                    let broken: Vec<bool> = lab.sim.beams.iter().map(|b| b.broken).collect();
+                    let vel: Vec<glam::Vec3> = lab.sim.nodes.iter().map(|n| n.vel).collect();
+                    println!("  t {:5.1}: {}", lab.bench.t, tri_census(&lab.sim, &pos, &vel, &broken));
+                }
+            }
             if every > 0 && k % every == 0 {
                 let c = &lab.bench.car;
                 println!(
@@ -384,6 +393,77 @@ fn measure(template: &ExplicitBeams, what: &str, gpu: bool) -> anyhow::Result<()
         }
     }
     Ok(())
+}
+
+/// The self-collision walk's load for the car `s` with its nodes at `pos` and beams
+/// `broken`: live collision triangles (none of the beams that kill it broken) by the
+/// largest side of their box, how many cover more than the grid's 64 cells (they test
+/// every candidate), and the (triangle, candidate) pairs inside the boxes (the kernel's
+/// pair list holds 8,192; anti-clip's speed padding left out, so a lower bound).
+fn tri_census(s: &ExplicitBeams, pos: &[glam::Vec3], vel: &[glam::Vec3], broken: &[bool]) -> String {
+    let (r, cell) = (s.collision_range, s.grid_cell);
+    // Anti-clip pads every triangle's box by its own and the car's fastest node's travel.
+    let vmax = vel.iter().map(|v| v.length()).fold(0.0f32, f32::max);
+    let fast = vel.iter().filter(|v| v.length() > 100.0).count();
+    let (mut padded_pairs, mut padded_every, mut own_pairs) = (0u64, 0u32, 0u64);
+    let (mut live, mut dead, mut over1, mut over3, mut every_c, mut cells, mut pairs, mut longest) =
+        (0u32, 0u32, 0u32, 0u32, 0u32, 0u64, 0u64, 0.0f32);
+    let (mut never, mut big_pairs) = (0u32, 0u64);
+    for (t, tri) in s.triangles.iter().enumerate() {
+        let kills = s.tri_breaks.get(t).copied().unwrap_or([u32::MAX; 4]);
+        if kills.iter().any(|&b| b != u32::MAX && broken.get(b as usize).copied().unwrap_or(false)) {
+            dead += 1;
+            continue;
+        }
+        live += 1;
+        let p = tri.nodes.map(|i| pos[i as usize]);
+        let lo = p[0].min(p[1]).min(p[2]) - glam::Vec3::splat(r);
+        let hi = p[0].max(p[1]).max(p[2]) + glam::Vec3::splat(r);
+        let ext = (hi - lo).max_element() - 2.0 * r;
+        longest = longest.max(ext);
+        over1 += (ext > 1.0) as u32;
+        over3 += (ext > 3.0) as u32;
+        never += (ext > 1.0 && kills.iter().all(|&x| x == u32::MAX)) as u32;
+        let fs = ((hi / cell).floor() - (lo / cell).floor() + glam::Vec3::ONE).max(glam::Vec3::ONE);
+        let c = fs.x * fs.y * fs.z;
+        if c > 64.0 || fs.max_element() > 64.0 {
+            every_c += 1;
+        } else {
+            cells += c as u64;
+        }
+        let n = s.candidates.iter().filter(|&&h| {
+            let q = pos[h as usize];
+            !(q.cmplt(lo).any() || q.cmpgt(hi).any())
+        }).count() as u64;
+        pairs += n;
+        if ext > 1.0 {
+            big_pairs += n;
+        }
+        if s.anti_clip {
+            let tv = tri.nodes.iter().map(|&i| vel[i as usize].length()).fold(0.0f32, f32::max);
+            let pad = glam::Vec3::splat((tv + vmax) * engine_softbody::explicit_beams::STEP + engine_softbody::explicit_contact::CLIP_DEPTH);
+            let (lo, hi) = (lo - pad, hi + pad);
+            let fs = ((hi / cell).floor() - (lo / cell).floor() + glam::Vec3::ONE).max(glam::Vec3::ONE);
+            padded_every += (fs.x * fs.y * fs.z > 64.0 || fs.max_element() > 64.0) as u32;
+            padded_pairs += s.candidates.iter().filter(|&&h| {
+                let q = pos[h as usize];
+                !(q.cmplt(lo).any() || q.cmpgt(hi).any())
+            }).count() as u64;
+            // Each candidate against the box padded by its own travel, not the fastest node's.
+            let (lo0, hi0) = (lo + pad, hi - pad);
+            own_pairs += s.candidates.iter().filter(|&&h| {
+                let q = pos[h as usize];
+                let pad = glam::Vec3::splat((tv + vel[h as usize].length()) * engine_softbody::explicit_beams::STEP + engine_softbody::explicit_contact::CLIP_DEPTH);
+                !(q.cmplt(lo0 - pad).any() || q.cmpgt(hi0 + pad).any())
+            }).count() as u64;
+        }
+    }
+    format!(
+        "anti-clip {}: fastest node {vmax:.0} m/s ({fast} over 100 m/s), padded boxes hold {padded_pairs} pairs ({own_pairs} with each node's own travel), {padded_every} past 64 cells; triangles live {live} dead {dead}; box side > 1 m: {over1}, > 3 m: {over3} (longest {longest:.1} m; {never} that no beam can kill); past 64 cells {every_c}; cells walked {cells}; pairs in boxes {pairs} ({big_pairs} from the > 1 m boxes); candidates {}; broken beams {}",
+        s.anti_clip,
+        s.candidates.len(),
+        broken.iter().filter(|&&b| b).count()
+    )
 }
 
 /// The page's mountain (`vehicle-lab.html?mode=mountain&…`) for its cost: per second of
@@ -591,6 +671,18 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     alt[1].0 / f64::from(alt[1].1.max(1))
                 );
                 alt = [(0.0, 0); 2];
+            }
+            if arg("--tri-census").is_some() {
+                use engine_webgpu::explicit_coupling::read_words;
+                let x = world.explicit_vehicles().expect("vehicles");
+                let p = lab.read_plan();
+                let f = |w: u32| f32::from_bits(w);
+                let nodes = read_words(world.device(), world.queue(), x.nodes_buffer(), p.nodes.0, p.nodes.1);
+                let beams = read_words(world.device(), world.queue(), x.beams_buffer(), p.beams.0, p.beams.1);
+                let pos: Vec<glam::Vec3> = (0..nodes.len() / 12).map(|i| glam::Vec3::new(f(nodes[12 * i]), f(nodes[12 * i + 1]), f(nodes[12 * i + 2]))).collect();
+                let broken: Vec<bool> = (0..beams.len() / 8).map(|j| f(beams[8 * j + 6]) != 0.0).collect();
+                let vel: Vec<glam::Vec3> = (0..nodes.len() / 12).map(|i| glam::Vec3::new(f(nodes[12 * i + 4]), f(nodes[12 * i + 5]), f(nodes[12 * i + 6]))).collect();
+                println!("   census: {}", tri_census(template, &pos, &vel, &broken));
             }
             let c = &lab.bench.car;
             let size = c.hi - c.lo;

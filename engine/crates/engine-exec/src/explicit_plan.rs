@@ -194,7 +194,7 @@ pub fn loop_budget_override() -> Option<u32> {
 }
 /// The grid walk's pairs a vehicle lists per step before it walks again with its tests
 /// (the kernel's `TRI_PAIR_CAP`; 2 gNext words a pair).
-pub const TRI_PAIR_CAP: usize = 8192;
+pub const TRI_PAIR_CAP: usize = 32768;
 /// gBeams records per self-collision triangle of its per-step geometry (the kernel's
 /// `TRI_GEO_RECS`, `triGeoFill`).
 pub const TRI_GEO_RECS: usize = 9;
