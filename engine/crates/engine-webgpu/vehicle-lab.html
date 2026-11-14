@@ -55,6 +55,7 @@
     #togHud { left: 14px; } #togRight { right: 14px; }
     #hud, #right { top: 50px; max-height: calc(100vh - 96px); max-height: calc(100dvh - 96px); }
     body.hideHud #hud, body.hideRight #right, body.clean .tog { display: none; }
+    #fatal { display: none; left: 50%; top: 40%; transform: translate(-50%, -50%); width: min(34rem, calc(100vw - 48px)); color: #ffb4a0; font-size: 14px; font-weight: 600; white-space: pre-wrap; z-index: 4; }
     @media (max-width: 760px) {
       .tog { top: 8px; padding: 8px 14px; } #togHud { left: 8px; } #togRight { right: 8px; }
       #hud, #right { left: 8px; right: 8px; top: 50px; width: auto; max-width: none; max-height: calc(100dvh - 130px); }
@@ -169,6 +170,7 @@
   <div id="slowTag" class="panel"></div>
   <div id="perf" class="panel"></div>
   <div id="busy" class="panel"></div>
+  <div id="fatal" class="panel" role="alert"></div>
   <div id="cross"></div>
   <svg id="tracer" style="position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;opacity:0"></svg>
   <div id="caption" class="panel"><b id="capTitle">Vehicle Lab</b><span id="capSub"></span></div>
@@ -199,7 +201,15 @@
     // (a module that failed to load) is written there too.
     const err = document.getElementById('err');
     const errPanel = err.closest('#hud') ? 'hideHud' : 'hideRight';
-    new MutationObserver(() => { if (err.textContent.trim()) setPanel(errPanel, false, false); }).observe(err, { childList: true, characterData: true, subtree: true });
+    // ... and in a banner over the view, since on a phone the panel's message is below the fold.
+    const fatal = document.getElementById('fatal');
+    new MutationObserver(() => {
+      const t = err.textContent.trim();
+      fatal.style.display = t ? 'block' : 'none';
+      fatal.textContent = t && /WebGPU is not available/.test(t)
+        ? t + '. The simulation runs on the GPU through WebGPU. On an iPhone or iPad that needs iOS 26 or later (every iOS browser uses the system\'s engine); on iOS 18 it can be switched on in Settings → Apps → Safari → Advanced → Feature Flags → WebGPU.'
+        : t;
+    }).observe(err, { childList: true, characterData: true, subtree: true });
     const early = (m) => { if (!err.textContent.trim()) err.textContent = 'The page failed to start: ' + m; };
     addEventListener('error', (e) => early(e.message || 'a script did not load'));
     addEventListener('unhandledrejection', (e) => early(String(e.reason && e.reason.message || e.reason)));
