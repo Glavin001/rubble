@@ -226,3 +226,119 @@ in contact, for one car at 34 steps a World step.
 Tools: `vehicle-lab-record.mjs --probe --segments` (the GPU split by pass every 5 s),
 `--eval file.js` (a script in the page, its `window.__abLog` printed at the end);
 `examples/vehicle_lab --tri-census N` (CPU and `mountain-perf`).
+
+## 5. The pair list reused over steps, and anti-clip padded by each node's own travel (2026-11-14)
+
+Two changes to the self-collision search of the explicit frame, each its own commit.
+
+**A. The grid walk's pair list built once and reused (lossless, on by default).** A
+building step lists every triangle's (triangle, contacter) pairs against its box padded
+by a margin M = 0.05 m more; later steps test that list again while no tracked node (the
+contacters and the collision triangles' nodes, the only nodes a box test reads) has moved,
+relative to the others, by more than M less the boxes' growth: the spread of the nodes'
+displacements since the build, per axis, plus h · (2 · the largest growth of a node's
+speed + the growth of the fastest node's speed) plus a rounding allowance must stay
+within M. Else the step builds again (and so does each frame's first step). A listed pair
+is tested as the walk tests it (a waiting triangle skipped, the walk's cells, buckets and
+box on the step's own geometry), then `tryContact`, so the hits are the walk's, applied in
+the specification's order. A list never reused before it is invalidated sends the next 8
+grid steps to the walk (it never happened on the mountain natively). Knobs:
+`set_pair_reuse` (wasm `setExplicitKnob('pairReuse')`, `RUBBLE_PAIR_REUSE=0`),
+`set_pair_reuse_margin`, `set_pair_reuse_streak`, `take_pair_reuse_stats`;
+`vehicle_lab --pair-reuse 0|1 --pair-margin M --pair-streak N --ab-switch reuse`.
+Metal had no threadgroup slot left for another workgroup variable: the state lives past
+`gsCount`'s buckets, the step's path in `gsUniformLanes`' bits 1..2.
+
+**B. Anti-clip padded by each contacter's own travel (an explicit setting, on in the lab
+only).** `ExplicitBeams::own_travel_reach` (default off): a contacter is tested against
+the triangle's box padded by r + (the triangle's fastest node + the contacter's own speed,
+at most the vehicle's fastest) · h + `CLIP_DEPTH` instead of the vehicle's fastest node's.
+The grid still gathers the cells of the fastest node's box, so a fast contacter is still
+found. CPU and GPU use the same arithmetic. Lab: `LabOptions::own_travel_reach` (on), the
+page's "own-travel anti-clip boxes" checkbox (live), `vehicle_lab --own-travel 0|1`. It is
+not lossless in principle (a contact only the fastest node's padding reached is no longer
+found); on the mountain the trajectory was the same to every printed figure.
+
+### Results
+
+Native (`vehicle_lab --measure mountain-perf`, the command of §4 with `--surface 0`), ms
+per World step:
+
+| t (s) | before (`--pair-reuse 0 --own-travel 0`) | A (M 0.05) | A + B (the defaults) |
+|---|---|---|---|
+| 3 (free fall) | 9.57 | 6.30 | 6.41 |
+| 9 | 13.25 | 9.59 | 9.63 |
+| 13 | 13.83 | 11.66 | 11.91 |
+| 17 | 15.33 | 12.56 | 12.64 |
+| 21 | 16.24 | 12.16 | 11.86 |
+| 25 | 17.83 | 15.04 | 14.49 |
+| 29 | 20.37 | 16.47 | 15.49 |
+
+Native parked (`--scene flat`): 5.9 ms, the list reused on 97 % of grid steps.
+
+The list (native, A): reused on 97 % of grid steps in free fall (4,987 pairs a build), 91 %
+at 9 s, 66 % at 17 s, 57–62 % from 25 s (10,751–12,645 pairs a build). The late builds are
+caused by detached nodes falling off the mountain (the tracked nodes' spread). With B the
+pairs a build fall to 5,283 at 9 s, 6,753 at 17 s and 6,415–7,041 from 25 s, but the time
+hardly changes: the late cost is no longer the pair tests.
+
+The margin (native, A): M 0.025 m loses late (reuse 19–20 % from 25 s, 17.2 / 19.9 ms at
+25 / 29 s); 0.05 and 0.1 m are equal over the run (0.1: 6.62, 9.98, 11.47, 12.45, 12.26,
+14.59, 15.92 ms; more pairs a build, 16,124 at 29 s). 0.05 m kept: shorter lists.
+
+Headless Chrome (`vehicle-lab-record.mjs --probe`, GPU ms per World step, the page's
+mountain with `surface=0&drag=0`; "before" is A's build with `pairReuse` off and
+`ownTravel=0`):
+
+| sim t (s) | before | A + B (defaults) |
+|---|---|---|
+| 2.8 | 7.9 | 5.0 |
+| 5.8 | 10.5 | 7.8 |
+| 8.8 | 12.1 | 10.7 |
+| 11.8 | 12.7 | 10.1 |
+| 14.8 | 12.6 | 9.7 |
+| 17.6–17.8 | 13.6 | 10.2 |
+| 19.8–20.8 | 15.4 | 11.3 |
+| 23–24 | 17.3 | 14.3 |
+| 25–26 | 18.4 | 17.6 |
+| 27–30 | 18.3–18.6 | 18.8 |
+| 31–36 | 20.3–20.9 | 21.1–22.1 |
+
+Parked (`mode=shoot&car=gen&surface=0&drag=0`): 7.0 ms → 4.4–4.9 ms (one earlier run
+read 6.2 ms from 30 s on; not reproduced in two later runs, likely another GPU user then).
+
+**Not a gain late in Chrome.** From t ≈ 25 s the list is no faster than the walk in Chrome,
+and an in-page A/B toggling `pairReuse` every 2 s (one run) read it 1.5–2.5 ms slower from
+26 s on; with the backoff, a later sweep of thresholds 1–4 against the walk read them all
+within ±0.5–1 ms of the walk from 25 s on (and 2–3.5 ms faster before). Natively the list
+still saves 3.6 ms a frame at 29 s. Why a build costs more in Chrome than the walk it
+replaces is not established. Threshold 2 lost 0.5–0.6 ms natively late, so 1 is kept.
+
+### Bit-identity of A
+
+* `engine-webgpu --test explicit_beams_bitwise`: 12 passed (the reuse is on by default:
+  the current kernel against the frozen reference, every frame).
+* `--test explicit_pair_reuse_gpu` (new): reuse on against off from the same state every
+  frame, every state word: the procedural sedan into a wall (31 builds, 48 reused steps),
+  with anti-clip (pairs a build 1,635), and dropped tumbling at 4 rad/s (46 builds, 17
+  reused): all bit for bit.
+* The mountain (native, `--ab 2,8,14,20,26,29 --ab-switch reuse --own-travel 0`): 20 frames
+  of 34 steps each way from one snapshot at each time, every state word the same at every
+  time; on 5.78 / 9.08 / 12.03 / 11.21 / 14.90 / 15.85 ms a frame, off 9.04 / 12.76 /
+  14.10 / 15.50 / 19.18 / 19.50.
+* The native mountain runs with the list on and off: the same speed, drop, box and proxies
+  every second for 30 s.
+
+### Other tests
+
+`--test showcase_car_gpu` 6 passed (1 ignored, as before), `--test explicit_contact_gpu`
+13 passed (with the new `anti_clip_with_own_travel_steps_like_the_cpu`: side memories word
+for word, positions bit for bit), `engine-softbody --test own_travel_reach` passed (a node at
+300 m/s in no triangle and no contacter: 577 → 3,437 pairs tested with the fastest node's
+padding, 577 → 577 with own travel), `engine-world --features stress --test
+vehicle_lab_reset` 3 passed. Chrome: the mountain, the parked car and the authored sedan's
+90 km/h crash (312 beams broken) with no console or WGSL validation error.
+
+**Not verified:** the `engine-metal` suites (not run); contact groups, the wide and big
+modules keep the walk every step (the reuse is the solo frame's only); B on a vehicle
+contact (`explicit_contact.rs`, out of scope).
