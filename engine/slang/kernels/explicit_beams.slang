@@ -3742,6 +3742,7 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
                    uint groupCount, uint parity);
 void piecesClearBuild();
 void piecesEnd(uint v);
+bool pairFarAt(uint at, uint h, float3 origin, float r);
 bool pairFar(TriGeo t, uint h, float3 origin, float r);
 void piecesTestTriangle(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff, uint candCount,
                         uint beamOff, uint groupOff, uint groupCount, uint parity);
@@ -4349,9 +4350,22 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
             if (!covered) return;
         }
     }
-    TriGeo t = triGeoLoad(gt);
-    if (pairFar(t, h, origin, r)) return;
-    tryContact(t, h, origin, r, beamOff, groupOff, groupCount, parity);
+    if (pairFarAt(at, h, origin, r)) return;
+    tryContact(triGeoLoad(gt), h, origin, r, beamOff, groupOff, groupCount, parity);
+}
+
+// pairFar from triangle records at `at` (triGeoFill's: p0 in record 0, rn and the
+// solvable flag in record 3), before the rest of its geometry is loaded.
+bool pairFarAt(uint at, uint h, float3 origin, float r)
+{
+    float4 r3 = gBeams[at + 3u];
+    if ((uint(r3.w) & 1u) == 0u) return false;
+    float3 p0 = gBeams[at].xyz;
+    float3 p = nf3(origin + gNodes[h * 3u].xyz);
+    float3 q = nf3(p - p0);
+    float delta = sdot(r3.xyz, q);
+    float reach = max(r, CLIP_DEPTH);
+    return abs(delta) > reach * 1.001 + 1.0e-4;
 }
 
 // The step's tests of the list (uniform; after the build or in its place): a pair a
