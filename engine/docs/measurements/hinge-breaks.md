@@ -102,5 +102,35 @@ doors 20.4 -> 20.0 Hz, hood 22.7 -> 22.4, boot 31.3 -> 30.0. `sedan_energy`,
 `sedan_parts_collide`, `vehicle_lint` (tests) pass before and after; the lint's
 `skin_coverage` hard failure is the same before and after.
 
-Not measured: the GPU World's mountain (the page itself) before and after; the
-flat-wall crash numbers.
+## On the page (GPU World, headless Chrome, frame-locked recordings)
+
+`vehicle-lab-record.mjs`, `cam=top`, stills at 12-35 s (in `engine/out/hinge/rec-*`,
+gitignored; the old export served from a copy of web-dist whose `__mods/sedan_new` is
+`sedan_new.prev-2026-11-14`):
+
+| run | before (old export) | after |
+|---|---|---|
+| the user's settings (55°, 0.25, 12 m/s, surface off, drag off), 22 s | body torn open, a door off on the slope, 220 beams broken, peak deformation 5.5 m | body whole, hood and boot on, 147 broken |
+| the same, 35 s | car flattened (354 broken), the door lying apart | car at rest, closures on (174 broken), 96.9 % of mass on the body |
+| the lab's defaults (50°, 0.6, 14 m/s, surface on), 22 s | hood standing open, 148 broken, 98.5 % on the body | hood and boot shut, 78 broken, 99.8 % on the body |
+
+## Two render faults on the same page (fixed in the renderer, 2026-11-14)
+
+- **The long black line** from the car down the slope (the lab's defaults, 22-35 s,
+  old export): skin whose vertices are moved by nodes in different pieces (no live beam
+  between them), drawn stretched from the car to a node that had fallen away.
+  `showcase-car-render.mjs` now cuts it: a pass (`cutTris`) collapses every drawn
+  triangle whose vertices' nodes are not all in one piece, from the host's piece labels
+  (`explicit_debris::piece_labels`, already sent to the GPU for the pair list;
+  `explicitPieceLabelRecord`). No stretch threshold. Same run, same state (the labels
+  only change drawing): with the labels off the line is there at 22 and 35 s, with them
+  on it is gone and nothing else in the frame changes. The labels come from the host's
+  beam readings (10 a second), so a fresh tear can show stretched for up to 0.1 s, and
+  only while the lab's "torn pieces apart in the pair list" option is on (default).
+- **Specks in mid-air:** a retired piece's skin was hidden only when one of a vertex's
+  first three nodes was retired; a weighted (generated car) vertex has more. Now any
+  retired node hides the vertex. In the stills looked at after the fix: one red speck
+  far up the slope at 22 s (55° run), none at 35 s; it was not identified (a paint chip
+  from a tear lives 4-8 s; a small piece is retired only after 5 s off the body).
+
+Not measured: the flat-wall crash numbers after the change.
