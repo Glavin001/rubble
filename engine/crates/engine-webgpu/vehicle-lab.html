@@ -911,7 +911,7 @@
       };
       hud();
     } else {
-      let lastNow = null, hudAt = 0;
+      let lastNow = null, hudAt = 0, refusedAt = -1e9;
       function frame(now) {
         requestAnimationFrame(frame);
         const w = W;
@@ -945,7 +945,13 @@
           simSteps += taken; simCount += taken;
           if (now - simAt > 1000) { simRate = simCount * 1000 / (now - simAt); simCount = 0; simAt = now; }
           pollFrame(w.world, onFrame);
-          draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0);
+          // A display faster than the World (120 Hz: a step every other frame) draws
+          // frames between steps. While the GPU is the limit (a step refused in the
+          // last 3 s) those in-between frames are not drawn: they would take the time
+          // the next step needs (measured: 16 steps/s instead of 60). The frames that
+          // owe a step are drawn as on a 60 Hz display.
+          if (refused > 0) refusedAt = now;
+          if (!(owed === 0 && scale > 0 && now - refusedAt < 3000)) draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0);
           if (now - hudAt > 250) { hud(); hudAt = now; if (lastStats?.scriptDone) window.__done = true; }
         } catch (e) { fail(e); }
       }

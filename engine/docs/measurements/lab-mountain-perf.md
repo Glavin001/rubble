@@ -658,3 +658,32 @@ GPU is still busy with the previous 2 loses that step. A 60 Hz display owes 1 st
 and loses the same way less often relative to its rate. That would match the "GPU not ready
 54.7 %, steps a frame 0: 69 %" reading. It needs a measurement, a fixed-rate A/B at 60 and
 120 Hz, before the loop is changed.
+
+## 9. A 120 Hz display: in-between frames starved the steps (2026-11-14)
+
+The owner's visible window (120 Hz, generated sedan, mountain) showed 27 World steps/s at
+22 s with "steps a frame 0: 69 %, GPU not ready 54.7 %" where the 60 Hz headless probe
+holds 58–60. Canvas size is not it (headless 4000×2300 = 1280×720). Reproduced headless
+by driving the page's frame loop from a 120 Hz timer (`tools/explicit-2khz/raf120.js`,
+`vehicle-lab-record.mjs --probe --eval`): 60 steps/s to ~15 s, then **16 steps/s** once a
+step costs more than ~10.4 ms. A 120 Hz display draws two frames a step; two draws and a
+step no longer fit in 16.7 ms, the draws are submitted regardless and the steps are the
+ones refused (`canStep`).
+
+Fix (the page's loop only, no physics): while the GPU is the limit (a step refused in the
+last 3 s) the frames that owe no step are not drawn; the frames that owe one are drawn as
+on a 60 Hz display. Headless, GPU idle, World steps/s (GPU ms):
+
+| page t (s) | 60 Hz | 120 Hz before | 120 Hz after |
+|---|---|---|---|
+| 8 | 60 (9.2) | 60 (9.2) | 60 (9.2) |
+| 16 | 60 (10.5) | 57 (10.5) | 60 (10.5) |
+| 20 | 60 (10.0) | 17 (10.4) | 60 (9.9) |
+| 28 | 60 (10.4) | 16 (10.4) | 59 (9.5) |
+| 36 | 60 (12.0) | – | 59 (13.2) |
+| 40 | 55 (13.3) | – | 53 (14.2) |
+
+Tried and dropped: carrying a refused step to the next frame (60 Hz fell to 39 steps/s
+from the start); skipping the draw of every refused frame (60 Hz fell to 40 late). The
+timer is an emulation: a real 120 Hz window is not measured here. `ioreg`'s first sample
+of "Device Utilization %" is stale (92, then 0, 0): take three.
