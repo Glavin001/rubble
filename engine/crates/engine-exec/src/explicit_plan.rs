@@ -168,7 +168,8 @@ pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params (word 87 the parking brakes' base, word 88 the loop
 /// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 the pair
 /// list's build records, 92 its margin ([`W_PAIR_REUSE`]), 93 its backoff
-/// ([`W_PAIR_STREAK`]), 94 its piece labels ([`W_PIECE_BASE`]), 95 padding).
+/// ([`W_PAIR_STREAK`]), 94 its piece labels ([`W_PIECE_BASE`]), 95 the retired nodes
+/// ([`W_RETIRE_BASE`])).
 pub const PARAM_WORDS: usize = 96;
 /// Params word: the grid walk's pair list reused over steps (the kernel's pairReuse*,
 /// lossless): its margin M in metres as float bits, 0 off (the walk lists every step).
@@ -203,6 +204,9 @@ pub fn pair_reuse_default() -> u32 {
 /// Params word: the reused pair list's piece labels in gNext (the kernel's pieceBase; 0
 /// none): per node its label, then per vehicle its labels-in-use word.
 pub const W_PIECE_BASE: usize = 94;
+/// Params word: the retired nodes' bits in gMisc (the kernel's retireBase; 0: none
+/// retired, the retirement code does not run).
+pub const W_RETIRE_BASE: usize = 95;
 /// Piece labels (the kernel's PIECE_GROUPS, PIECE_LOOSE): 0 the main body, 1..6 pieces
 /// with collision triangles of their own, 7 every other node off the main body.
 pub const PIECE_GROUPS: usize = 8;
@@ -758,6 +762,8 @@ pub struct ExplicitLayout {
     pub sleep: Option<SleepLayout>,
     /// gMisc record of the first triangle's contact throttle.
     pub vv_tri_base: u32,
+    /// gMisc record of the retired nodes' bits ([`W_RETIRE_BASE`] when in use).
+    pub retire_rec: u32,
     /// The fleet runs the aero modules (`EB_AERO`).
     pub aero: bool,
     /// Some vehicle has surface contact: the frame modules with the surface pass
@@ -1896,6 +1902,11 @@ impl ExplicitUpload {
             }
             misc[s.header as usize + 1][1] = s.anchor;
         }
+        // Retired debris (the kernel's nodeRetired; the host's `set_retired`): per node a
+        // bit, 128 a record, after every other gMisc record. Off ([`W_RETIRE_BASE`] 0)
+        // until a host retires a node.
+        let retire_rec = misc.len() as u32;
+        misc.extend(std::iter::repeat_n([0u32; 4], total_nodes.div_ceil(128).max(1)));
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -2184,6 +2195,7 @@ impl ExplicitUpload {
             drive,
             sleep: sleep_layout,
             vv_tri_base,
+            retire_rec,
             aero,
             surface: any_surface,
             big,

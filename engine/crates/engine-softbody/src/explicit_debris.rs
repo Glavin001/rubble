@@ -104,3 +104,122 @@ pub fn piece_labels(s: &ExplicitBeams, pieces: &Pieces, broken: &[bool]) -> Vec<
     }
     pieces.piece.iter().map(|&p| label[p as usize]).collect()
 }
+
+/// Time to live for small debris (an explicit, engine-wide setting; off unless a host
+/// sets it). A piece that has been off the vehicle's main body (no live beam joins
+/// them) for `seconds`, of at most `max_mass_kg` and `max_nodes`, is retired: its nodes
+/// are no longer simulated and cost nothing but their own beams' updates
+/// (`ExplicitBeams::retired`, `ExplicitBeamsGpu::set_retired`). The rule:
+/// - never the main body (the heaviest piece), anything heavier or larger than the
+///   thresholds, nor a piece still joined to the main body by a live beam;
+/// - a piece at rest on the ground beside the car is retired too once its time is up: it
+///   is debris all the same;
+/// - never the piece holding node 0 (the vehicle's frame origin follows node 0);
+/// - a piece's time counts from the reading at which its nodes were first seen off the
+///   main body (its last node to leave), at the host's beam readings (the lab: 10 a
+///   second).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebrisTtl {
+    pub max_mass_kg: f32,
+    pub max_nodes: u32,
+    pub seconds: f32,
+}
+
+impl DebrisTtl {
+    /// Whether a vehicle can retire debris: not with centred damping (its correction
+    /// reads every node) nor with slide nodes (they move nodes along their rails).
+    pub fn check(s: &ExplicitBeams) -> Result<(), String> {
+        if s.settings.centred_damping {
+            return Err("debris time to live needs centred damping off (its correction reads every node)".into());
+        }
+        if !s.slides.is_empty() {
+            return Err("debris time to live needs a vehicle without slide nodes".into());
+        }
+        Ok(())
+    }
+}
+
+/// A piece retired at a reading.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Retired {
+    /// The reading's time (s), the piece's nodes and mass (kg), how long it had been off
+    /// the main body (s).
+    pub t: f64,
+    pub nodes: u32,
+    pub mass: f32,
+    pub off_for: f64,
+}
+
+/// The host's side of [`DebrisTtl`]: which nodes are off the main body since when, and
+/// which are retired. Feed it every beam reading ([`Self::update`]); when it reports a
+/// change, hand [`Self::retired`] to the solver.
+#[derive(Clone, Debug, Default)]
+pub struct DebrisTracker {
+    pub ttl: Option<DebrisTtl>,
+    /// Per node: the reading at which it was first seen off the main body.
+    off_since: Vec<Option<f64>>,
+    /// Per node: retired.
+    pub retired: Vec<bool>,
+    /// Retired so far: pieces, nodes, mass (kg).
+    pub pieces: u32,
+    pub nodes: u32,
+    pub mass: f32,
+    /// Pieces retired since the last [`Self::take_events`].
+    events: Vec<Retired>,
+}
+
+impl DebrisTracker {
+    pub fn new(ttl: Option<DebrisTtl>, nodes: usize) -> Self {
+        Self { ttl, off_since: vec![None; nodes], retired: vec![false; nodes], ..Default::default() }
+    }
+
+    /// One reading at time `t` of `s`'s pieces: true when [`Self::retired`] changed.
+    pub fn update(&mut self, s: &ExplicitBeams, pieces: &Pieces, t: f64) -> bool {
+        let n = s.nodes.len().min(pieces.piece.len());
+        self.off_since.resize(n, None);
+        self.retired.resize(n, false);
+        for i in 0..n {
+            if pieces.attached(i) {
+                self.off_since[i] = None;
+            } else if self.off_since[i].is_none() {
+                self.off_since[i] = Some(t);
+            }
+        }
+        let Some(ttl) = self.ttl else { return false };
+        // Per piece: its latest leave time, whether it holds node 0 or a retired node.
+        let k = pieces.mass.len();
+        let (mut since, mut origin, mut done) = (vec![f64::MIN; k], vec![false; k], vec![false; k]);
+        for i in 0..n {
+            let p = pieces.piece[i] as usize;
+            since[p] = since[p].max(self.off_since[i].unwrap_or(f64::MAX));
+            origin[p] |= i == 0;
+            done[p] |= self.retired[i];
+        }
+        let mut changed = false;
+        for p in 0..k {
+            if p == pieces.main as usize || done[p] || origin[p] {
+                continue;
+            }
+            let small = pieces.mass[p] <= ttl.max_mass_kg && pieces.nodes[p] <= ttl.max_nodes;
+            if !small || since[p] == f64::MAX || t - since[p] < f64::from(ttl.seconds) {
+                continue;
+            }
+            for i in 0..n {
+                if pieces.piece[i] as usize == p {
+                    self.retired[i] = true;
+                }
+            }
+            self.pieces += 1;
+            self.nodes += pieces.nodes[p];
+            self.mass += pieces.mass[p];
+            self.events.push(Retired { t, nodes: pieces.nodes[p], mass: pieces.mass[p], off_for: t - since[p] });
+            changed = true;
+        }
+        changed
+    }
+
+    /// The pieces retired since the last call.
+    pub fn take_events(&mut self) -> Vec<Retired> {
+        std::mem::take(&mut self.events)
+    }
+}

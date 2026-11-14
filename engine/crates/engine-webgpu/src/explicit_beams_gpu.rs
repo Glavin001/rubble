@@ -80,6 +80,8 @@ pub struct ExplicitBeamsGpu {
     vehicle_margins: Vec<f32>,
     surface_pairs_off: bool,
     surface_culls_off: bool,
+    /// The retired nodes' bits as last written ([`Self::set_retired`]; empty: none).
+    retired_bits: Vec<u32>,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
@@ -813,6 +815,7 @@ impl ExplicitBeamsGpu {
             vehicle_margins: vec![0.0; vehicles_n],
             surface_pairs_off: std::env::var("RUBBLE_SURFACE_PAIRS").as_deref() == Ok("0"),
             surface_culls_off: std::env::var("RUBBLE_SURFACE_CULLS").as_deref() == Ok("0"),
+            retired_bits: Vec::new(),
             wide,
             contact,
             contact_errors: Default::default(),
@@ -898,6 +901,9 @@ impl ExplicitBeamsGpu {
         }
         self.planner.restore(FramePlanner::new(new).state());
         self.layout = upload.layout.clone();
+        // Nothing retired (the misc records were rewritten).
+        self.retired_bits.clear();
+        self.planner.words[plan::W_RETIRE_BASE] = 0;
         self.sleep_inputs = vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect();
         self.sleep_grab = None;
         self.sleep_wake.lock().unwrap().clear();
@@ -1639,6 +1645,56 @@ impl ExplicitBeamsGpu {
         self.queue.write_buffer(&self.bufs[8], ((base + span.node_off as usize) * 4) as u64, bytemuck::cast_slice(&words));
         let at = base + self.layout.total[0] as usize + v;
         self.queue.write_buffer(&self.bufs[8], (at * 4) as u64, bytemuck::bytes_of(&active));
+    }
+
+    /// Retire nodes of vehicle `v` (`retired`: one flag per node; `explicit_beams.slang`
+    /// nodeRetired, the CPU reference's [`engine_softbody::explicit_beams::ExplicitBeams::retired`]):
+    /// from the next frame a retired node is no longer simulated (left at rest where it
+    /// is, no contact of any kind, out of the coupling's bounds and the self-collision
+    /// list's). The host decides ([`engine_softbody::explicit_debris::DebrisTracker`]);
+    /// a flag cleared brings a node back as it was left. Fails while vehicle contact is
+    /// active (its contact groups do not read the flags). Nothing retired yet: every
+    /// result as before (the kernel's retirement code is off until a node is retired).
+    pub fn set_retired(&mut self, v: usize, retired: &[bool]) -> Result<(), String> {
+        let Some(span) = self.layout.spans.get(v).copied() else {
+            return Err(format!("set_retired: no vehicle {v}"));
+        };
+        if self.contact_active() && retired.iter().any(|&r| r) {
+            return Err("retired debris needs vehicle contact off (its contact groups do not skip retired nodes)".into());
+        }
+        let total = self.layout.total[0] as usize;
+        if self.retired_bits.is_empty() {
+            self.retired_bits = vec![0u32; total.div_ceil(128).max(1) * 4];
+        }
+        let n = (span.nodes as usize).min(retired.len());
+        let (first, last) = (span.node_off as usize, span.node_off as usize + span.nodes as usize);
+        for i in first..last {
+            let on = i - first < n && retired[i - first];
+            let (w, b) = (i / 32, i % 32);
+            if on {
+                self.retired_bits[w] |= 1 << b;
+            } else {
+                self.retired_bits[w] &= !(1 << b);
+            }
+        }
+        if span.nodes > 0 {
+            let (r0, r1) = (first / 128, (last - 1) / 128);
+            let rec = self.layout.retire_rec as usize;
+            self.queue.write_buffer(
+                &self.misc,
+                ((rec + r0) * 16) as u64,
+                bytemuck::cast_slice(&self.retired_bits[r0 * 4..(r1 + 1) * 4]),
+            );
+        }
+        if self.retired_bits.iter().any(|&w| w != 0) {
+            self.planner.words[plan::W_RETIRE_BASE] = self.layout.retire_rec;
+        }
+        Ok(())
+    }
+
+    /// The retired nodes' gMisc record for the coupling's passes (0: none retired).
+    pub fn retire_base(&self) -> u32 {
+        self.planner.words[plan::W_RETIRE_BASE]
     }
 
     /// Measurement: the reused pair list's margin in metres (0: off).

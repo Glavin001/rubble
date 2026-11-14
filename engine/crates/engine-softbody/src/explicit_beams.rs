@@ -965,6 +965,13 @@ pub struct ExplicitBeams {
     /// only its own and the triangle's travel; the fastest node's padding also catches
     /// what only some other fast node's speed reached. Without anti-clip it does nothing.
     pub own_travel_reach: bool,
+    /// Retired debris (`crate::explicit_debris::DebrisTtl`; the GPU's
+    /// `ExplicitBeamsGpu::set_retired`): per node whether it is retired (empty: none). A
+    /// retired node is no longer simulated: the node pass leaves it at rest where it is,
+    /// and it takes part in no contact (self-collision as contacter or triangle node,
+    /// surface contact as point, segment or triangle node). Its own beams are still
+    /// evaluated (they cannot move it). The host sets it; nothing here changes it.
+    pub retired: Vec<bool>,
     /// Anti-clip's side memory (§36; `explicit_contact::clip_word`): per node the
     /// sides held this step and those recorded for the next. Sized when anti-clip
     /// first runs; rolled by the node pass.
@@ -1734,6 +1741,7 @@ impl ExplicitBeams {
             two_body_contact: false,
             anti_clip: false,
             own_travel_reach: false,
+            retired: Vec::new(),
             clip_sides: Vec::new(),
             anti_only_tris: Vec::new(),
             fixed_contact: false,
@@ -3574,8 +3582,13 @@ impl ExplicitBeams {
 
     fn node_pass(&mut self) {
         let exact = self.exact_friction;
-        // Anti-clip's side memory (§36): last step's contacts are held now.
-        for c in &mut self.clip_sides {
+        // Anti-clip's side memory (§36): last step's contacts are held now (a retired
+        // node's stays as it was: the GPU's node phase skips it).
+        let any_retired = self.retired.iter().any(|&r| r);
+        for (i, c) in self.clip_sides.iter_mut().enumerate() {
+            if any_retired && self.retired.get(i).copied().unwrap_or(false) {
+                continue;
+            }
             crate::explicit_contact::clip_roll(c);
         }
         // Fixed-point contact (§36): last step's contact sums, then its slide forces.
@@ -3620,6 +3633,11 @@ impl ExplicitBeams {
         // (Sized by the pressure wheels' builder: every tread node has a slot.)
         let mut tread = std::mem::take(&mut self.tread);
         for i in 0..self.nodes.len() {
+            if any_retired && self.retired.get(i).copied().unwrap_or(false) {
+                // Retired debris: at rest where it is, nothing else.
+                self.nodes[i].vel = Vec3::ZERO;
+                continue;
+            }
             let mut n = self.nodes[i];
             if let Some(l) = cf.as_mut() {
                 l.roll(i);
@@ -4266,7 +4284,8 @@ impl ExplicitBeams {
                 tri.idle = 0;
             }
             let [i0, i1, i2] = tri.nodes;
-            if (!self.tri_dead.is_empty() && self.tri_dead[t]) || (self.tri_anti_only(t) && !self.anti_clip) {
+            let retired = !self.retired.is_empty() && [i0, i1, i2].iter().any(|&i| self.is_retired(i as usize));
+            if retired || (!self.tri_dead.is_empty() && self.tri_dead[t]) || (self.tri_anti_only(t) && !self.anti_clip) {
                 // A broken triangle (spec §18), or an anti-clip-only one with
                 // anti-clip off: no candidates.
                 self.triangles[t].wait = (self.triangles[t].wait + 1).min(cap);
@@ -4324,6 +4343,9 @@ impl ExplicitBeams {
                 };
                 let hn = self.candidates[k];
                 if hn == i0 || hn == i1 || hn == i2 {
+                    continue;
+                }
+                if !self.retired.is_empty() && self.is_retired(hn as usize) {
                     continue;
                 }
                 if tri_group != 0 && self.self_groups[hn as usize] == tri_group {
@@ -4408,6 +4430,11 @@ impl ExplicitBeams {
         if !found.is_empty() {
             self.apply_two_body_self_hits(&found);
         }
+    }
+
+    /// Whether node `i` is retired ([`Self::retired`]).
+    pub fn is_retired(&self, i: usize) -> bool {
+        self.retired.get(i).copied().unwrap_or(false)
     }
 
     /// The fastest node's speed (m/s).

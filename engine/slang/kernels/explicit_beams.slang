@@ -277,7 +277,9 @@ struct Params
     // The pair list's pieces (pieces*: gNext per node its piece label, then per vehicle
     // its active word, per node its separations, per triangle the volatile list; 0 none).
     uint pieceBase;
-    uint pairPad2;
+    // Debris retired by the host (DebrisTtl, engine_softbody::explicit_debris): gMisc per
+    // node a bit (128 nodes a record; 0: none retired, nothing below runs).
+    uint retireBase;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -1045,6 +1047,36 @@ static const uint NODE_SLOT_SHIFT = 8u;
 float3 slideTake(float3 f, uint slot1);
 #endif
 
+// --- Debris retired by the host (engine_softbody::explicit_debris::DebrisTtl) ---
+// A small piece off the vehicle's main body for its time to live is retired: its nodes
+// (a bit each in gMisc at gP.retireBase, set by the host) are no longer simulated. The
+// node phase leaves them where they were retired, at rest (nodeRetire), and no contact
+// reads them: no self-collision as contacter or triangle node (tryContact), no surface
+// contact (the surface pass's elements), no part in the reused pair list's bounds, the
+// fastest node's speed or the coupling's bounds (vehicle_coupling.slang cpl_bounds).
+// Their own beams are still evaluated (they cannot move them). Off (0): nothing here runs.
+bool nodeRetired(uint gi)
+{
+    uint4 w = gMisc[gP.retireBase + (gi >> 7u)];
+    uint k = (gi >> 5u) & 3u;
+    uint x = k == 0u ? w.x : (k == 1u ? w.y : (k == 2u ? w.z : w.w));
+    return ((x >> (gi & 31u)) & 1u) != 0u;
+}
+// The node phase's work for a retired node: at rest where it is, no contact sums held.
+void nodeRetire(uint gi)
+{
+    float4 V = gNodes[gi * 3u + 1u];
+    gNodes[gi * 3u + 1u] = float4(0.0, 0.0, 0.0, V.w);
+    gAcc[gi * 3u].store(0);
+    gAcc[gi * 3u + 1u].store(0);
+    gAcc[gi * 3u + 2u].store(0);
+}
+// A contact between a triangle and a node either of which is retired: none.
+bool contactRetired(uint4 tn, uint h)
+{
+    return nodeRetired(h) || nodeRetired(tn.x) || nodeRetired(tn.y) || nodeRetired(tn.z);
+}
+
 uint nodeUpdateShapes(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV,
                       float ground, uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits,
                       bool solo);
@@ -1057,6 +1089,11 @@ uint nodeUpdateCoupled(uint gi, uint4 info, uint vehicle, uint local, uint step,
 void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
                 uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits)
 {
+    if (gP.retireBase != 0u && nodeRetired(gi))
+    {
+        nodeRetire(gi);
+        return;
+    }
     if (cplHas(vehicle))
     {
         nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff, groupOff,
@@ -1152,6 +1189,11 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
 uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, float3 origin, uint flagsV, float ground,
                 uint boxOff, uint boxCount, uint beamOff, uint groupOff, uint groupCount, bool hits)
 {
+    if (gP.retireBase != 0u && nodeRetired(gi))
+    {
+        nodeRetire(gi);
+        return 0u;
+    }
     if (cplHas(vehicle))
     {
         return nodeUpdateCoupled(gi, info, vehicle, local, step, origin, flagsV, ground, boxOff, boxCount, beamOff,
@@ -3017,6 +3059,7 @@ bool ownTravelOut(TriGeo t, uint h, float3 p, float3 origin, float r, uint parit
 void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount,
                 uint parity)
 {
+    if (gP.retireBase != 0u && contactRetired(t.tn, h)) return;
     uint4 tn = t.tn;
     if (h == tn.x || h == tn.y || h == tn.z) return;
     // The tests' loads first, together (none waits on another; the tests have no side
@@ -3745,7 +3788,8 @@ bool pieceVolatile(uint t)
 bool piecesTrack(uint nodeOff, uint nodeCount, uint lane)
 {
     if (gP.pieceBase == 0u || !pairReuseOn() || nodeCount == 0u) return false;
-    if (!piecesOn(gStatic[gP.nodeInfoBase + nodeOff].w)) return false;
+    // Retired debris (no contact reads it) stays out of the bounds: this path skips it.
+    if (!piecesOn(gStatic[gP.nodeInfoBase + nodeOff].w) && gP.retireBase == 0u) return false;
     if (lane >= nodeCount) return true;
     bool valid = gsCount[GRID_BUCKETS + RU_VALID].load() != 0u;
     float3 dHi = float3(-3.0e38, -3.0e38, -3.0e38);
@@ -3758,6 +3802,7 @@ bool piecesTrack(uint nodeOff, uint nodeCount, uint lane)
     {
         if ((gStatic[gP.nodeInfoBase + nodeOff + i].x & NODE_PAIR_TRACKED) == 0u) continue;
         uint gi = nodeOff + i;
+        if (gP.retireBase != 0u && nodeRetired(gi)) continue;
         uint g = pieceLabel(gi);
         float3 P = gNodes[gi * 3u].xyz;
         float3 V = gNodes[gi * 3u + 1u].xyz;

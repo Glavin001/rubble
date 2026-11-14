@@ -88,6 +88,7 @@ struct Params
     uint candCap;        // candidates per vehicle
     uint extraBase;      // gWork word of the broadphase region (candidate counts, proxies, candidates)
     uint loopBudget;     // passes one invocation may take (explicit_loop_cap.slang; 0 none)
+    uint retireBase;     // gMisc record of the explicit nodes' retired bits (explicit_beams.slang nodeRetired; 0 none)
 };
 
 static const uint BODY_RECS = 5u;
@@ -207,6 +208,15 @@ bool bodyMoving(uint body)
 
 void sweptBox(uint v, out float3 lo, out float3 hi, bool fresh);
 
+// explicit_beams.slang nodeRetired: node gi's retired bit.
+bool cplRetired(uint gi)
+{
+    uint4 w = gMisc[gP.retireBase + (gi >> 7u)];
+    uint k = (gi >> 5u) & 3u;
+    uint x = k == 0u ? w.x : (k == 1u ? w.y : (k == 2u ? w.z : w.w));
+    return ((x >> (gi & 31u)) & 1u) != 0u;
+}
+
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -232,6 +242,8 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float3 origin = asfloat(gMisc[v].xyz);
     for (uint i = lane, iStop = EB_END(i, nodes, 256u); i < iStop; i += 256u)
     {
+        // Retired debris is not where the vehicle is (it meets nothing).
+        if (gP.retireBase != 0u && cplRetired(vt.x + i)) continue;
         float3 x = origin + gNodes[(vt.x + i) * 3u].xyz;
         float3 u = gNodes[(vt.x + i) * 3u + 1u].xyz;
         gsBox[0].min(ordered(x.x));

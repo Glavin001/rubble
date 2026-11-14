@@ -296,11 +296,16 @@ impl ExplicitBeams {
             found.clear();
             let nodes = &self.nodes;
             let vel = |i: u32| nodes[i as usize].vel;
+            // Retired debris is no element (the GPU's surfTriRetired, surfSegRetired).
+            let gone = |i: u32| self.is_retired(i as usize);
             for t in 0..self.triangles.len() {
                 if (!self.tri_dead.is_empty() && self.tri_dead[t]) || self.tri_anti_only(t) {
                     continue;
                 }
                 let [i0, i1, i2] = self.triangles[t].nodes;
+                if gone(i0) || gone(i1) || gone(i2) {
+                    continue;
+                }
                 let x = [i0, i1, i2].map(|i| self.origin + self.nodes[i as usize].pos);
                 for (k, (s, lo, hi)) in shapes.iter().enumerate() {
                     let hit = if near(&x, r, *lo, *hi) && !(cull && separated(&x, s, r)) {
@@ -329,7 +334,7 @@ impl ExplicitBeams {
             let nt = self.triangles.len() as u32;
             for (k, &j) in segs.iter().enumerate() {
                 let b = &self.beams[j as usize];
-                if b.broken {
+                if b.broken || gone(b.a) || gone(b.b) {
                     continue;
                 }
                 let (a, bb) = (b.a, b.b);
@@ -363,7 +368,7 @@ impl ExplicitBeams {
             // the band of it (a node strictly inside is node contact's), after the segments.
             let ns = nt + segs.len() as u32;
             for i in 0..self.nodes.len() {
-                if self.nodes[i].has(NODE_NO_GROUND) {
+                if self.nodes[i].has(NODE_NO_GROUND) || gone(i as u32) {
                     continue;
                 }
                 let x = self.origin + self.nodes[i].pos;

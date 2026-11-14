@@ -29,6 +29,18 @@
 
 static const uint FLAG_SURFACE = 131072u;
 
+// Retired debris (nodeRetired): a triangle or segment with a retired node is no element.
+bool surfTriRetired(uint gt)
+{
+    uint4 tn = gStatic[gP.triBase + gt];
+    return nodeRetired(tn.x) || nodeRetired(tn.y) || nodeRetired(tn.z);
+}
+bool surfSegRetired(uint gj)
+{
+    uint4 bn = gStatic[gP.beamBase + gj * 3u];
+    return nodeRetired(bn.x) || nodeRetired(bn.y);
+}
+
 // The shared queries' hull records here: a proxy hull's (explicit_beams_rigid.slang
 // coupling region) planes, then its vertices, then its edges four to a record
 // (vehicle_coupling.slang cpl_plan, engine_exec explicit_plan::coupling). s.hull is the
@@ -529,6 +541,11 @@ void surfTriangle(uint v, uint gt, float3 origin, float r, uint boxOff, uint box
 {
     uint mk = gP.surfMark + gt;
     uint mask = surfMaskIn(mk, apply);
+    if (gP.retireBase != 0u && surfTriRetired(gt))
+    {
+        surfMaskOut(mk, apply, 0u);
+        return;
+    }
     if ((gP.triBreak != 0u && triangleDead(gt)) || (gMisc[gP.vehicles + gt].z & TRI_ANTI_ONLY) != 0u
         || (apply && mask == 0u))
     {
@@ -653,6 +670,11 @@ void surfSegment(uint v, uint gj, uint mk, float3 origin, float r, uint boxOff, 
                  uint groupOff, uint parity, bool apply)
 {
     uint mask = surfMaskIn(mk, apply);
+    if (gP.retireBase != 0u && surfSegRetired(gj))
+    {
+        surfMaskOut(mk, apply, 0u);
+        return;
+    }
     if ((apply && mask == 0u) || surfBroken(gj, groupOff, parity))
     {
         surfMaskOut(mk, apply, 0u);
@@ -759,6 +781,11 @@ void surfPoint(uint v, uint gi, uint mk, float3 origin, float r, uint boxOff, ui
                bool apply)
 {
     uint mask = surfMaskIn(mk, apply);
+    if (gP.retireBase != 0u && nodeRetired(gi))
+    {
+        surfMaskOut(mk, apply, 0u);
+        return;
+    }
     if ((apply && mask == 0u) || (gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) != 0u)
     {
         surfMaskOut(mk, apply, 0u);
@@ -798,6 +825,7 @@ void surfPoint(uint v, uint gi, uint mk, float3 origin, float r, uint boxOff, ui
 // body's earliest. Triangle gt, segment beam gj, node gi.
 void surfGatherTriangle(uint v, uint gt, float3 origin, float r, uint proxies, uint parity)
 {
+    if (gP.retireBase != 0u && surfTriRetired(gt)) return;
     if ((gP.triBreak != 0u && triangleDead(gt)) || (gMisc[gP.vehicles + gt].z & TRI_ANTI_ONLY) != 0u) return;
     uint4 tn = gStatic[gP.triBase + gt];
     float3 x0 = nf3(gNodes[tn.x * 3u].xyz);
@@ -824,6 +852,7 @@ void surfGatherTriangle(uint v, uint gt, float3 origin, float r, uint proxies, u
 
 void surfGatherSegment(uint v, uint gj, float3 origin, float r, uint proxies, uint groupOff, uint parity)
 {
+    if (gP.retireBase != 0u && surfSegRetired(gj)) return;
     if (surfBroken(gj, groupOff, parity)) return;
     uint4 bn = gStatic[gP.beamBase + gj * 3u];
     float3 x0 = nf3(gNodes[bn.x * 3u].xyz);
@@ -852,6 +881,7 @@ void surfGatherSegment(uint v, uint gj, float3 origin, float r, uint proxies, ui
 
 void surfGatherPoint(uint v, uint gi, float3 origin, float r, uint proxies, uint parity)
 {
+    if (gP.retireBase != 0u && nodeRetired(gi)) return;
     if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) != 0u) return;
     float3 x = nf3(gNodes[gi * 3u].xyz);
     for (uint k = 0u, kStop = EB_END(k, proxies, 1u); k < kStop; k++)
@@ -991,6 +1021,7 @@ void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1,
     for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
     {
         uint gt = r1.x + t;
+        if (gP.retireBase != 0u && surfTriRetired(gt)) continue;
         if ((gP.triBreak != 0u && triangleDead(gt)) || (gMisc[gP.vehicles + gt].z & TRI_ANTI_ONLY) != 0u) continue;
         uint4 tn = gStatic[gP.triBase + gt];
         float3 x0 = nf3(gNodes[tn.x * 3u].xyz);
@@ -1003,6 +1034,7 @@ void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1,
     for (uint j = lane, jStop = EB_END(j, segCount, LANES); j < jStop; j += LANES)
     {
         uint gj = gLists[sr.x + j];
+        if (gP.retireBase != 0u && surfSegRetired(gj)) continue;
         if (surfBroken(gj, groupOff, parity)) continue;
         uint4 bn = gStatic[gP.beamBase + gj * 3u];
         float3 x0 = nf3(gNodes[bn.x * 3u].xyz);
@@ -1014,6 +1046,7 @@ void surfPairCull(uint v, uint lane, float3 origin, float r, uint4 r0, uint4 r1,
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
     {
         uint gi = r0.x + i;
+        if (gP.retireBase != 0u && nodeRetired(gi)) continue;
         if ((gStatic[gP.nodeInfoBase + gi].x & NODE_NO_GROUND) != 0u) continue;
         float3 x = nf3(gNodes[gi * 3u].xyz);
         float3 tlo = ssub3(min(x, x), float3(r, r, r));

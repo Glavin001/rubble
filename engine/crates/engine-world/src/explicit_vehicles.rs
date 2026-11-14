@@ -124,6 +124,8 @@ struct Params {
     /// Passes one invocation of the plan passes may take (explicit_loop_cap.slang; see
     /// [`coupling_loop_budget`]).
     loop_budget: u32,
+    /// gMisc record of the explicit nodes' retired bits (0: none retired).
+    retire_base: u32,
 }
 
 /// The coupling passes' pass budget: four times a bound on one invocation's passes
@@ -559,6 +561,7 @@ impl ExplicitVehicles {
             cand_cap: self.cand_cap(),
             extra_base: self.extra_word as u32,
             loop_budget: 0,
+            retire_base: self.gpu.retire_base(),
         };
         let p = Params { loop_budget: coupling_loop_budget(&p), ..p };
         sim.queue().write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
