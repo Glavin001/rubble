@@ -364,6 +364,28 @@ up affine reproduction (6.8 cm under a 10 % strain: offsets are turned, not
 sheared) for continuity; the per-vertex affine frame reproduces it exactly
 and is the one that shards.
 
+### Video v2 (CPU, same trajectories: stretch cuts | cut at breaks)
+
+`~/Development/rubble-artifacts/skin-shards/v2/{wall70,side60,grab}_before_after.mp4`
+(`examples/skin_film.rs`; frames in the worktree's `out/skin-film-v2/`):
+left the node frames with the earlier stretch / fold cuts, right cut only at
+breaks; 1920 × 1080 at 60 fps, perspective, smooth shading from normals
+recomputed on the deformed mesh, raycast wheels from the drive state; impacts
+at 1/240 s a frame (4× slow motion); orbits of the settled car, the second
+turn with the depth-tested skeleton (live stiff beams; yellow → red by
+plastic strain). Wall 70: close on the grille and bonnet seam, then the
+orbit. Side 60: the struck car's rear door. Grab: door_f_l, fender_l and
+bumper_f, each pulled 0.5, 2 and 10 m (50 kN/m) and released.
+
+What the stills show (`v2/still_*.png`), honestly: wall 70, the left fender
+and bonnet stay continuous dented panels (before: the fender cut loose); the
+bonnet crumple reads as rounded bulges (node frames are smooth over ~0.4 m:
+no sharp creases); a spike forms at the right front bumper corner (a fold).
+Side 60: the struck doors are drawn pushed into the cabin (before: nearly
+all gone), with openings only along broken beams; the striker is not drawn
+(one car per film). Grab: in the 10 m pulls the camera widens and the car is
+about 40 % of the panel width, under the 60 % aim.
+
 ### GPU check (not run here)
 
 The renderer mirrors `eval_breaks`; both skin modules validate with naga
