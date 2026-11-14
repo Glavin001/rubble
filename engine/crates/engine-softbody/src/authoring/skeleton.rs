@@ -200,6 +200,9 @@ pub struct Skeleton {
     pub full_contact: bool,
     /// Exact beam lengths (spec §33): `rubble_exact_lengths`.
     pub exact_lengths: bool,
+    /// Body dashpots tear when stretched past this ratio of their length
+    /// (`rubble_damper_tear`; `None`: only by force).
+    pub damper_tear: Option<f32>,
     /// Two-body vehicle and self contact on Rigs of Rods' profile (spec
     /// §10.3): `rubble_two_body_contact`. A car with
     /// light skin nodes beside heavy frame nodes needs it: RoR's rule puts a
@@ -1263,6 +1266,9 @@ impl Skeleton {
         let _ = writeln!(s, "enable_advanced_deformation\n");
         if self.exact_lengths {
             let _ = writeln!(s, "rubble_exact_lengths\n");
+        }
+        if let Some(r) = self.damper_tear {
+            let _ = writeln!(s, "rubble_damper_tear {r}\n");
         }
         if self.two_body_contact && !self.beamng_profile {
             let _ = writeln!(s, "rubble_two_body_contact\n");

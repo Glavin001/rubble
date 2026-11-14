@@ -2220,6 +2220,15 @@ impl ExplicitBeams {
             s.dissipative_contact = true;
             s.exact_friction = true;
         }
+        // `rubble_damper_tear` (Rubble's extension): a damper-only beam tears when it
+        // is stretched past the ratio (its `long_bound`, as a support's break factor).
+        if let Some(r) = file.damper_tear.filter(|r| *r > 0.0) {
+            for b in &mut s.beams {
+                if b.kind == ExplicitKind::Plain && b.k == 0.0 && b.c > 0.0 {
+                    b.long_bound = r;
+                }
+            }
+        }
         // `rubble_two_body_contact` (Rubble's extension, spec §10.3): the two-body
         // rule in vehicle and self contact, the profile otherwise unchanged (RoR's
         // normal force and ground contact).
@@ -5272,6 +5281,7 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
     let mut k = beam.k;
     let mut c = beam.c;
     let mut support_broke = false;
+    let mut torn = false;
     match beam.kind {
         ExplicitKind::LimitedSpring => {
             let long = beam.long_bound * beam.rest;
@@ -5309,6 +5319,16 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
                 c *= 0.1;
             }
         }
+        // A damper-only beam with a tear ratio (`rubble_damper_tear`): stretched past
+        // it, the material it damped has parted (the kernel's damperTorn).
+        ExplicitKind::Plain if beam.k == 0.0 && beam.long_bound > 0.0 => {
+            if e > beam.rest * beam.long_bound {
+                // Torn: no force this step (nothing joins its ends any more).
+                beam.broken = true;
+                support_broke = true;
+                torn = true;
+            }
+        }
         // Shock2 beams take `shock2_force`; here they act as plain ones. Triggers
         // have k = c = 0.
         // JBeam-mode kinds take `jbeam_force` (never here).
@@ -5332,7 +5352,7 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         | ExplicitKind::JbeamAeroTri2
         | ExplicitKind::JbeamLbeam2 => {}
     }
-    let mut f = -k * e - c * u;
+    let mut f = if torn { 0.0 } else { -k * e - c * u };
     beam.force = f;
     let mut tau = f.abs();
     let mut check_break = false;

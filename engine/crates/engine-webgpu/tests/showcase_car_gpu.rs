@@ -331,3 +331,48 @@ fn one_tier_at_rest_step_parity() {
     );
     assert!(rms < 1e-2 && max < 0.1);
 }
+
+/// `rubble_damper_tear` on the GPU (the kernel's `damperTorn`) as on the CPU: a skin
+/// node with every spring on it broken, 3 m out and leaving at 5 m/s (the CPU's
+/// `engine-softbody/tests/damper_tear.rs`). After each of 40 single steps the same
+/// dashpots are broken on both, and at the end the node has kept its speed on both.
+#[test]
+fn a_torn_off_nodes_dashpot_tears_as_on_the_cpu() {
+    use engine_softbody::explicit_beams::ExplicitKind;
+    let mut cpu = sedan(Vec3::ZERO);
+    cpu.settings.drag = false;
+    let damper = |bm: &engine_softbody::explicit_beams::Beam| bm.k == 0.0 && bm.c > 0.0 && bm.kind == ExplicitKind::Plain;
+    let i = (0..cpu.nodes.len())
+        .filter(|&i| cpu.incidence[i].iter().any(|&j| damper(&cpu.beams[j as usize])))
+        .min_by(|&a, &c| cpu.nodes[a].mass.total_cmp(&cpu.nodes[c].mass))
+        .unwrap();
+    for &j in &cpu.incidence[i].clone() {
+        if !damper(&cpu.beams[j as usize]) {
+            cpu.beams[j as usize].broken = true;
+        }
+    }
+    let held: Vec<usize> = cpu.incidence[i].iter().map(|&j| j as usize).filter(|&j| damper(&cpu.beams[j])).collect();
+    let centre = cpu.nodes.iter().map(|n| n.pos).sum::<Vec3>() / cpu.nodes.len() as f32;
+    let out = ((cpu.nodes[i].pos - centre) * Vec3::new(1.0, 0.0, 1.0)).normalize();
+    cpu.nodes[i].pos += out * 3.0;
+    cpu.nodes[i].vel = out * 5.0;
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&cpu));
+    for step in 0..40 {
+        cpu.step();
+        gpu.frame(1);
+        gpu.wait();
+        let g = gpu.beams().remove(0);
+        for &j in &held {
+            assert_eq!(g[j].broken, cpu.beams[j].broken, "dashpot {j} at step {step}");
+        }
+    }
+    assert!(held.iter().all(|&j| cpu.beams[j].broken), "the CPU's dashpot did not tear");
+    let (vc, vg) = (cpu.nodes[i].vel.dot(out), gpu.velocities()[0][i].dot(out));
+    eprintln!("torn-off node after 40 steps: CPU {vc:.4} m/s, GPU {vg:.4} m/s outward ({} dashpots)", held.len());
+    assert!(vc > 4.99 && vg > 4.99, "CPU {vc} GPU {vg}");
+    assert_eq!(vc.to_bits(), vg.to_bits(), "the node's speed differs");
+}

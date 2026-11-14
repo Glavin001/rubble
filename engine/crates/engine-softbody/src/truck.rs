@@ -337,6 +337,11 @@ pub struct TruckFile {
     /// whole force and puts it on the triangle's nodes by their weights, whatever
     /// they weigh.
     pub two_body_contact: bool,
+    /// `rubble_damper_tear <ratio>` (Rubble's extension): every damper-only beam
+    /// (no spring: the damping of the material between two nodes) tears when it is
+    /// stretched more than `ratio` × its length. A dashpot's force is its rate's, so
+    /// one that only breaks by force held a torn-off piece to the car at any distance.
+    pub damper_tear: Option<f32>,
     /// `rubble_drag_coef <dragCoef> [<liftCoef>]` (Rubble's extension,
     /// jbeam-semantics-spec.md §36): the BeamNG profile's triangle aerodynamics
     /// with these coefficients on every cab triangle (BeamNG's defaults 100 and
@@ -834,6 +839,7 @@ impl Parser {
             "rubble_exact_lengths" => self.out.exact_lengths = true,
             "rubble_beamng_profile" => self.out.beamng_profile = true,
             "rubble_two_body_contact" => self.out.two_body_contact = true,
+            "rubble_damper_tear" => self.out.damper_tear = Some(f(t, 1, 0.8)),
             "rubble_drag_coef" => {
                 let d = f(t, 1, 100.0);
                 self.out.drag_coef = Some((d, f(t, 2, d)));

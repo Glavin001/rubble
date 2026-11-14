@@ -2527,6 +2527,30 @@ void centredPhase(uint flagsV, uint nodeOff, uint nodeCount, uint beamOff, uint 
     // (memberBox) its lane's own nodes.
 }
 
+// A damper-only beam with a tear ratio (rubble_damper_tear: k = 0, its long bound
+// the ratio) stretched past it: torn this step, with no force (beam_force's Plain arm). True: the beam's records are written. Its own function
+// behind beamUpdate's early return, so every other beam's path is as it was.
+bool damperTorn(uint gj, bool fast, uint4 bn, float4 s1)
+{
+    float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
+    float4 c2 = asfloat(gStatic[gP.beamBase + gj * 3u + 2u]);
+    if (!(c1.x == 0.0 && c2.y > 0.0)) return false;
+    float rest = gBeams[gj * 2u].x;
+    float4 pa = gNodes[bn.x * 3u];
+    float4 pb = gNodes[bn.y * 3u];
+    float3 d = ssub3(pa.xyz, pb.xyz);
+    float q = sdot(d, d);
+    float2 li = fast ? float2(0.0, sFastInvSqrt(q)) : sExactLength(q);
+    if (fast) li.x = smul(q, li.y);
+    float e = nf(li.x - rest);
+    if (!(e > smul(rest, c2.y))) return false;
+    // Torn: no force this step (nothing joins its ends any more).
+    gBeams[gj * 2u + 1u] = float4(s1.x, 0.0, 1.0, 1.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(0.0, 0.0, 0.0, 0.0);
+    gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(0.0, 0.0, 0.0, 0.0);
+    return true;
+}
+
 void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
 {
     cfFire(gj, groupOff, parity);
@@ -2557,6 +2581,7 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
         jbeamUpdate(gj, local, groupOff, parity, bn, s1);
         return;
     }
+    if ((bn.z & 0xFFu) == KIND_PLAIN && damperTorn(gj, fast, bn, s1)) return;
 #ifdef EB_AERO
     if ((bn.z & 0xFFu) == KIND_SHOCK2)
     {

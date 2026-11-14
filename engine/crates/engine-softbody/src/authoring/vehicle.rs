@@ -4268,6 +4268,16 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         }
     }
     shut_line_breaks(&mut sk, &shell, &hardware);
+    // The body dashpots stand for the damping of the material between two nodes
+    // of a part a metre or two apart. Steel sheet parts at 20–40 % elongation
+    // ([`super::node_frames::TEAR_HI`]: by 80 % it certainly has), so a dashpot
+    // stretched that far damps nothing that still exists and tears. Before,
+    // it let go only above its 5 kN (100 m/s of relative speed) and dragged
+    // torn-off pieces along with the car (`tests/damper_tear.rs`).
+    // `DAMPER_TEAR=0` leaves the line out (a measurement switch).
+    if std::env::var("DAMPER_TEAR").map_or(true, |v| v != "0") {
+        sk.damper_tear = Some(super::node_frames::TEAR_HI - 1.0);
+    }
     // Two tiers: 50–150 g skin nodes beside frame nodes of kilograms, so its
     // contact is by the two-body rule (one tier has it by its profile).
     // RoR's rule put a frame node's whole force (tens of kN in a crash) on
