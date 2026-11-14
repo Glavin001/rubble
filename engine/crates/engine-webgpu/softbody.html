@@ -190,7 +190,23 @@
     const buggy = carKind === 'buggy' && !EXPLICIT;
     const carSel = document.getElementById('carSel');
     for (const [id, t] of Object.entries(CARS)) carSel.add(new Option(t, id, false, id === carKind));
-    carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') for (const k of ['truck', 'mod', 'pc', 'wheels']) u.searchParams.delete(k); location.href = u.href; };
+    // Rubble's generated sedan (the vehicle lab's default car; a local export served at
+    // __mods/sedan_new): listed when it is there, loaded as that folder on the explicit
+    // solver with raycast wheels.
+    const GEN = { mod: '/__mods/sedan_new', pc: 'sedan/sedan.pc' };
+    fetch(`${GEN.mod}/files.json`, { method: 'HEAD' }).then((r) => {
+      if (!r.ok) return;
+      carSel.add(new Option('Car: Rubble generated sedan', 'gen', false, qs.get('mod') === GEN.mod));
+      if (qs.get('mod') === GEN.mod) for (const o of [...carSel.options]) if (o.value === 'import') o.remove();
+    }).catch(() => {});
+    carSel.onchange = () => {
+      const u = new URL(location.href);
+      if (carSel.value === 'gen') {
+        for (const k of ['car', 'truck', 'jbeamMode']) u.searchParams.delete(k);
+        u.searchParams.set('solver', 'explicit'); u.searchParams.set('mod', GEN.mod); u.searchParams.set('pc', GEN.pc); u.searchParams.set('wheels', 'raycast');
+        location.href = u.href; return;
+      }
+      u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') for (const k of ['truck', 'mod', 'pc', 'wheels']) u.searchParams.delete(k); location.href = u.href; };
     // Converted community vehicles (community_cache writes __mods/index.json): every
     // car and configuration; picking one loads it in JBeam mode on raycast wheels in
     // this scene (explicit solver).
