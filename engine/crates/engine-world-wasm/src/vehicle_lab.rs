@@ -139,15 +139,18 @@ impl WebVehicleLab {
         res(self.lab.before_step(&mut world.world))
     }
 
-    /// One step's readback ([`Self::read_plan`]'s ranges as words; `beams` when read).
+    /// One step's readback ([`Self::read_plan`]'s ranges as words; `beams` when read),
+    /// copied at the lab's time `taken` ([`Self::time`] when the copy was encoded; none:
+    /// now). A readback arrives frames later: the camera needs the state's own time.
     pub fn ingest(
         &mut self,
         nodes: &[u32],
         origin: &[u32],
         coupling: &[u32],
         beams: Option<Vec<u32>>,
+        taken: Option<f64>,
     ) -> Result<(), JsValue> {
-        res(self.lab.ingest(nodes, origin, coupling, beams.as_deref()))
+        res(self.lab.ingest_at(nodes, origin, coupling, beams.as_deref(), taken))
     }
 
     /// One command (`rubble::vehicle_lab::Bench::command`): fire, plates, plateControl,

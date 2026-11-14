@@ -447,6 +447,8 @@
       enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), oOff, slot.buf, nSize, oSize);
       enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), cOff, slot.buf, nSize + oSize, cSize);
       if (wantBeams) enc.copyBufferToBuffer(w.world.explicitBeamsBuffer(), bOff, slot.buf, nSize + oSize + cSize, bSize);
+      // The state copied is this moment's: the reading carries its time (it arrives later).
+      const taken = w.lab.time();
       return async () => {
         // (A map that fails because its world was rebuilt or its device lost is not an error.)
         try { await slot.buf.mapAsync(GPUMapMode.READ); } catch (e) { slot.busy = false; if (W === w) console.warn(e); return; }
@@ -455,7 +457,7 @@
           if (W === w && !slot.stale) {
             const a = slot.buf.getMappedRange();
             w.lab.ingest(new Uint32Array(a, 0, nSize / 4), new Uint32Array(a, nSize, oSize / 4), new Uint32Array(a, nSize + oSize, cSize / 4),
-              wantBeams ? new Uint32Array(a, nSize + oSize + cSize, bSize / 4) : undefined);
+              wantBeams ? new Uint32Array(a, nSize + oSize + cSize, bSize / 4) : undefined, taken);
           }
         } catch (e) { fail(e); } finally { slot.buf.unmap(); slot.busy = false; }
       };

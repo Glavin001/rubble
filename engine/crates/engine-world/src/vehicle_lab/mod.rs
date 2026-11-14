@@ -1342,10 +1342,18 @@ impl Bench {
         Ok(())
     }
 
-    /// One window's reading of the car and its proxies.
+    /// One window's reading of the car and its proxies, taken now (a host that reads at
+    /// the step).
     pub fn read(&mut self, car: &CarRead, frame: &ProxyFrame) {
+        self.read_at(car, frame, self.t);
+    }
+
+    /// One window's reading of the car and its proxies, copied at the lab's time `taken`
+    /// (s): a page's readback arrives frames after the step it was copied at, and the
+    /// pose a camera carries forward needs the time of the state, not of its arrival.
+    pub fn read_at(&mut self, car: &CarRead, frame: &ProxyFrame, taken: f64) {
         let before = self.car.speed;
-        self.car.read(&self.model, car, frame, self.t);
+        self.car.read(&self.model, car, frame, taken);
         if self.arrival.is_none()
             && self.car.readings > 1
             && frame
@@ -2221,6 +2229,18 @@ impl Lab {
         coupling: &[u32],
         beams: Option<&[u32]>,
     ) -> anyhow::Result<()> {
+        self.ingest_at(nodes, origin, coupling, beams, None)
+    }
+
+    /// [`Self::ingest`] of a state copied at the lab's time `taken` (s; none: now).
+    pub fn ingest_at(
+        &mut self,
+        nodes: &[u32],
+        origin: &[u32],
+        coupling: &[u32],
+        beams: Option<&[u32]>,
+        taken: Option<f64>,
+    ) -> anyhow::Result<()> {
         let n = nodes.len() / 12;
         let f = |w: u32| f32::from_bits(w);
         let pos: Vec<Vec3> = (0..n)
@@ -2247,7 +2267,8 @@ impl Lab {
                 .map(|j| (f(b[8 * j + 6]) != 0.0, f(b[8 * j])))
                 .collect()
         });
-        self.bench.read(
+        let taken = taken.filter(|t| t.is_finite()).unwrap_or(self.bench.t);
+        self.bench.read_at(
             &CarRead {
                 pos: &pos,
                 vel: &vel,
@@ -2255,6 +2276,7 @@ impl Lab {
                 origin: o,
             },
             &frame,
+            taken,
         );
         Ok(())
     }
