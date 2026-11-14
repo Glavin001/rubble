@@ -172,6 +172,39 @@
   <div id="cross"></div>
   <svg id="tracer" style="position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;opacity:0"></svg>
   <div id="caption" class="panel"><b id="capTitle">Vehicle Lab</b><span id="capSub"></span></div>
+  <script>
+  {
+    // ---------------------------------------------------------------- panels
+    // Each panel hides behind its button. A narrow window starts with both hidden and
+    // shows one at a time (they cover the same area there).
+    const narrow = matchMedia('(max-width: 760px)');
+    const panelPref = (k) => { try { return localStorage.getItem('lab.' + k); } catch { return null; } };
+    const setPanel = (cls, hidden, save = true) => {
+      document.body.classList.toggle(cls, hidden);
+      if (!hidden && narrow.matches) document.body.classList.add(cls === 'hideHud' ? 'hideRight' : 'hideHud');
+      for (const [id, c] of [['togHud', 'hideHud'], ['togRight', 'hideRight']]) {
+        const off = document.body.classList.contains(c);
+        document.getElementById(id).classList.toggle('on', !off);
+        document.getElementById(id).setAttribute('aria-expanded', String(!off));
+        if (save && !narrow.matches) try { localStorage.setItem('lab.' + c, off ? '1' : '0'); } catch {}
+      }
+    };
+    window.togglePanel = (cls) => setPanel(cls, !document.body.classList.contains(cls));
+    document.getElementById('togHud').onclick = () => togglePanel('hideHud');
+    document.getElementById('togRight').onclick = () => togglePanel('hideRight');
+    for (const c of ['hideHud', 'hideRight']) setPanel(c, narrow.matches ? true : panelPref(c) === '1', false);
+    narrow.addEventListener('change', () => { if (narrow.matches) for (const c of ['hideHud', 'hideRight']) setPanel(c, true, false); });
+    // A failure must be seen even when the panels start hidden: the panel holding the
+    // message opens when one is written, and an error before the page's own handling
+    // (a module that failed to load) is written there too.
+    const err = document.getElementById('err');
+    const errPanel = err.closest('#hud') ? 'hideHud' : 'hideRight';
+    new MutationObserver(() => { if (err.textContent.trim()) setPanel(errPanel, false, false); }).observe(err, { childList: true, characterData: true, subtree: true });
+    const early = (m) => { if (!err.textContent.trim()) err.textContent = 'The page failed to start: ' + m; };
+    addEventListener('error', (e) => early(e.message || 'a script did not load'));
+    addEventListener('unhandledrejection', (e) => early(String(e.reason && e.reason.message || e.reason)));
+  }
+  </script>
   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
   <script type="module">
     // Thin page: the lab is rubble::vehicle_lab (Rust): the scene, the shots, plates,
@@ -567,27 +600,6 @@
     const setSlow = (s) => { put('slow', s); syncUrl(); };
     $('pause').onclick = () => { paused = !paused; $('pause').classList.toggle('on', paused); };
     $('step').onclick = () => { paused = true; $('pause').classList.add('on'); stepOnce = true; };
-
-    // ---------------------------------------------------------------- panels
-    // Each panel hides behind its button. A narrow window starts with both hidden and
-    // shows one at a time (they cover the same area there).
-    const narrow = matchMedia('(max-width: 760px)');
-    const panelPref = (k) => { try { return localStorage.getItem('lab.' + k); } catch { return null; } };
-    const setPanel = (cls, hidden, save = true) => {
-      document.body.classList.toggle(cls, hidden);
-      if (!hidden && narrow.matches) document.body.classList.add(cls === 'hideHud' ? 'hideRight' : 'hideHud');
-      for (const [id, c] of [['togHud', 'hideHud'], ['togRight', 'hideRight']]) {
-        const off = document.body.classList.contains(c);
-        document.getElementById(id).classList.toggle('on', !off);
-        document.getElementById(id).setAttribute('aria-expanded', String(!off));
-        if (save && !narrow.matches) try { localStorage.setItem('lab.' + c, off ? '1' : '0'); } catch {}
-      }
-    };
-    const togglePanel = (cls) => setPanel(cls, !document.body.classList.contains(cls));
-    document.getElementById('togHud').onclick = () => togglePanel('hideHud');
-    document.getElementById('togRight').onclick = () => togglePanel('hideRight');
-    for (const c of ['hideHud', 'hideRight']) setPanel(c, narrow.matches ? true : panelPref(c) === '1', false);
-    narrow.addEventListener('change', () => { if (narrow.matches) for (const c of ['hideHud', 'hideRight']) setPanel(c, true, false); });
 
     // ---------------------------------------------------------------- input
     const keys = new Set();
