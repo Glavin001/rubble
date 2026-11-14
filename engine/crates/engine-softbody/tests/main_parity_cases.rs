@@ -74,3 +74,33 @@ fn the_exact_length_is_within_two_ulp_of_mains() {
     eprintln!("exact length: {differing}/{n} values differ from main's formula, at most {worst} ulp");
     assert!(worst <= 2, "exact_length is {worst} ulp from main's q * (1 / sqrt(q))");
 }
+
+/// Audit S9: the JBeam loader's collision range is main's 0.03 m everywhere it was
+/// used on main (the desc the other soft solver uploads, `ExplicitBeams::new`, the
+/// `.truck` export and its spawn); only the explicit solver's JBeam mode (the BeamNG
+/// profile, new behaviour of this branch) takes BeamNG's 2.5 cm.
+#[test]
+fn the_jbeam_loaders_collision_range_is_mains_outside_the_beamng_profile() {
+    use engine_softbody::jbeam::load_jbeam;
+    use engine_softbody::truck_export::{desc_to_truck, TyreDefaults};
+    let text = engine_softbody::jbeam_fixture::latched_box_jbeam();
+    let desc = load_jbeam(&[("v.jbeam", text.as_str())], None).unwrap();
+    assert_eq!(desc.collision_range, 0.03, "the desc (the soft solver's upload)");
+    let plain = ExplicitBeams::new(&desc, Vec3::ZERO, Vec3::ZERO, ExplicitBeamsSettings::default());
+    assert_eq!(plain.collision_range, 0.03, "ExplicitBeams::new");
+    let (truck, _) = desc_to_truck(&desc, TyreDefaults::for_vehicle(&desc));
+    assert!(truck.lines().any(|l| l.trim() == "set_collision_range 0.03"), "the export's line");
+    let spawned = ExplicitBeams::from_truck(&truck, Vec3::ZERO, Vec3::ZERO, ExplicitBeamsSettings::default()).unwrap();
+    assert_eq!(spawned.collision_range, 0.03, "the exported .truck, spawned");
+    let (native, _) =
+        ExplicitBeams::from_desc_jbeam(&desc, TyreDefaults::for_vehicle(&desc), Vec3::ZERO, Vec3::ZERO, ExplicitBeamsSettings::default())
+            .unwrap();
+    assert_eq!(native.collision_range, BEAMNG_COLLISION_RANGE, "JBeam mode: the BeamNG profile's band");
+    // A desc without the profile's band (hand-built, or from an older file) keeps its own.
+    let mut own = desc.clone();
+    own.explicit_collision_range = 0.0;
+    let (native, _) =
+        ExplicitBeams::from_desc_jbeam(&own, TyreDefaults::for_vehicle(&own), Vec3::ZERO, Vec3::ZERO, ExplicitBeamsSettings::default())
+            .unwrap();
+    assert_eq!(native.collision_range, 0.03);
+}

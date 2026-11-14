@@ -598,6 +598,13 @@ pub struct SoftVehicleDesc {
     pub refs: Option<RefNodes>,
     /// Triangle collision thickness δ (RoR `set_collision_range`).
     pub collision_range: f32,
+    /// The contact band of the explicit solver's JBeam mode (the BeamNG profile,
+    /// `ExplicitBeams::from_desc_jbeam`), when positive; otherwise that mode uses
+    /// `collision_range` too. `load_jbeam` sets BeamNG's documented 2.5 cm here and
+    /// leaves `collision_range` (the other soft solver's upload, the `.truck` export)
+    /// as it always was.
+    #[serde(default)]
+    pub explicit_collision_range: f32,
     /// Authored rigid core (default: derived from `wheels`).
     pub core: Option<SoftCore>,
     /// Rigid parts bolted to nodes by breakable joints.

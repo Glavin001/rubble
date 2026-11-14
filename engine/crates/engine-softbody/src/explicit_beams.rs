@@ -2888,7 +2888,10 @@ impl ExplicitBeams {
                 ));
             }
         }
-        s.collision_range = if desc.collision_range > 0.0 {
+        // The BeamNG profile's band when the desc carries one (`load_jbeam`: 2.5 cm).
+        s.collision_range = if desc.explicit_collision_range > 0.0 {
+            desc.explicit_collision_range
+        } else if desc.collision_range > 0.0 {
             desc.collision_range
         } else {
             DEFAULT_COLLISION_RANGE
