@@ -935,6 +935,24 @@
     window.__restart = () => restart();
     window.__set = async (o) => { for (const [k, v] of Object.entries(o)) { if (k === 'mode') setMode(v); else put(k, v); } showOuts(); shapeUi(); syncUrl(); };
     window.__build = () => build();
+    // What the page holds on the CPU, by owner (bytes; engine/tools/vehicle-lab/lab-memory.mjs).
+    window.__mem = () => {
+      const bytes = (o, seen = new Set()) => {
+        if (!o || typeof o !== 'object' || seen.has(o)) return typeof o === 'string' ? 2 * o.length : 0;
+        seen.add(o);
+        if (ArrayBuffer.isView(o)) return o.byteLength;
+        if (o instanceof ArrayBuffer) return o.byteLength;
+        let s = 0; for (const v of Array.isArray(o) ? o : Object.values(o)) s += bytes(v, seen); return s;
+      };
+      const out = {};
+      for (const [kind, c] of carCache) {
+        out[`${kind}: model files (glb + rskin)`] = (c.mod?.glb?.byteLength || 0) + (c.mod?.skin?.byteLength || 0);
+        out[`${kind}: jbeam + pc text`] = bytes(c.vehicle);
+        c.visuals.forEach((v, i) => { out[`${kind}: visual ${i} (paint ${i})`] = bytes(v); });
+        out[`${kind}: textures`] = bytes(c.textures);
+      }
+      return out;
+    };
     window.__gpu = () => ({ total: [...gpuTotal], split: gpuSplit(), segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
     window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95), worst: stepHist.length ? Math.max(...stepHist) : 0 }, stepsAFrame: [0, 1, 2].map((k) => takenHist.filter((t) => (k < 2 ? t === k : t >= 2)).length), refused: refusedHist.reduce((a, b) => a + b, 0), carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
 
