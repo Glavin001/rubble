@@ -244,6 +244,29 @@ fn skin_stats(
         st.max_stretch = *stretches.last().unwrap();
         st.p99_stretch = stretches[(stretches.len() as f32 * 0.99) as usize];
     }
+    if std::env::var("PIECES").is_ok() {
+        // Per piece: drawn triangles of its total (the most cut first).
+        let mut rows: Vec<(String, usize, usize)> = Vec::new();
+        for pc in &v.pieces {
+            let r = pc.1..pc.1 + pc.2;
+            let (mut all, mut dr) = (0, 0);
+            for t in v.indices.chunks_exact(3) {
+                if !r.contains(&t[0]) {
+                    continue;
+                }
+                all += 1;
+                let ok = t.iter().all(|&i| pos[i as usize].is_finite()) && t.iter().any(|&i| vt[i as usize] < 0.5);
+                dr += ok as usize;
+            }
+            if all > 0 {
+                rows.push((format!("{} (from v{})", pc.0, pc.1 + pc.2 / 2), dr, all));
+            }
+        }
+        rows.sort_by(|a, b| (a.1 as f32 / a.2 as f32).total_cmp(&(b.1 as f32 / b.2 as f32)));
+        for (n, d, a) in rows.iter().filter(|r| std::env::var("PIECE").map_or(true, |p| r.0.starts_with(&p))).take(12) {
+            eprintln!("  piece {n}: {d} / {a} drawn");
+        }
+    }
     if std::env::var("DUMP").is_ok() && !st.samples.is_empty() {
         let piece = |i: usize| {
             v.pieces
@@ -405,7 +428,7 @@ fn raster(
         let facing = nn.dot(dir) >= 0.0;
         let col = v.colors[ids[0]];
         let lit = 0.25 + 0.75 * nn.dot(light).max(0.0);
-        let dim = if ghost { 0.45 } else { 1.0 };
+        let dim = if ghost { 0.8 } else { 1.0 };
         let rgb = if facing {
             [col[0], col[1], col[2]].map(|x| ((x.powf(1.0 / 2.2) * lit * dim).min(1.0) * 255.0) as u8)
         } else {
@@ -447,7 +470,11 @@ fn raster(
                 let t = k as f32 / steps as f32;
                 let (x, y) = (pa.0 + (pb.0 - pa.0) * t, pa.1 + (pb.1 - pa.1) * t);
                 if x >= 0.0 && y >= 0.0 && (x as usize) < w && (y as usize) < h {
-                    img[y as usize * w + x as usize] = col;
+                    // Blended (35 %), so the skin stays readable under it.
+                    let q = &mut img[y as usize * w + x as usize];
+                    for c in 0..3 {
+                        q[c] = (0.65 * q[c] as f32 + 0.35 * col[c] as f32) as u8;
+                    }
                 }
             }
         }
@@ -528,6 +555,8 @@ impl Film {
     /// An orbit of the settled state: `n` frames round the vertical, skin
     /// then with the skeleton.
     fn orbit(&mut self, s: &ExplicitBeams, cam: Cam, n: usize) {
+        // Round the car's own centre, the whole car in view.
+        let cam = Cam { c: centroid(&s.positions()), rad: 3.0, ..cam };
         for overlay in [false, true] {
             for k in 0..n {
                 let a = std::f32::consts::TAU * k as f32 / n as f32;
@@ -576,7 +605,9 @@ fn film(b: &Built, scene: &str, out: &str) {
             for k in 0..90 {
                 w.frame_60();
                 if k < 45 || k % 3 == 0 {
-                    f.frame(&w.vehicles[0], cam, false);
+                    // Following the struck car (it is shoved sideways).
+                    let c = centroid(&w.vehicles[0].positions());
+                    f.frame(&w.vehicles[0], Cam { c: Vec3::new(c.x + 0.4, 0.8, zd), rad: 2.4, ..cam }, false);
                 }
             }
             f.orbit(&w.vehicles[0], Cam { c: Vec3::new(0.0, 0.7, 0.0) + centroid(&w.vehicles[0].positions()) * Vec3::new(1.0, 0.0, 1.0), rad: 3.0, ..cam }, 48);

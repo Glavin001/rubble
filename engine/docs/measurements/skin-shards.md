@@ -139,6 +139,32 @@ what one sheet can follow (drawn triangles 304,106 → 292,362 of 345,815). It
 never draws a shard there. Finer crumples need a finer lattice (or helper
 nodes) in the car, not a sharper binding.
 
+**Over-cutting, measured:** the 60 km/h striker's front-left fender is cut
+almost whole (45 of 4,857 triangles drawn at 0.33 s; the triangle binding drew
+all of it, as shards): 42 % of its vertices' support sits on nodes whose
+skin triangles, stiff beams or ring neighbours stretched past 35 %, and the
+rest disagree. Whether a coarse lattice's node distances stretching 35 %
+really means the sheet tore there (rather than crumpled between nodes) is
+open; the tear ramp (`TEAR_LO`/`TEAR_HI`) and the cut share are the knobs,
+and they need a reference (crash photos of real fenders at this energy)
+before changing.
+
+**Struck doors over-cut, measured:** in the 60 km/h side hit the struck
+car's front-left outer door skin is half cut at 0.33 s (2,054 of 4,205
+triangles drawn; the triangle binding drew 2,883 of them, as confetti): the
+side video shows a hole into the cabin where a pushed-in, dented door should
+be. Same knobs and the same open question as the fender above.
+
+## Video (CPU, side by side: triangle binding left, node frames right)
+
+`~/Development/rubble-artifacts/skin-shards/*_before_after.mp4`, from
+`skin_shards_probe film:<scene>` (frames in the worktree's `out/skin-film/`).
+The same solver run skinned both ways under one camera each frame; then an
+orbit of the settled car, skin and with the skeleton (live beams, green;
+yellow → red by plastic strain). The CPU rasteriser shades flat, cuts by the
+renderer's tear rule and does not draw the raycast wheels (the page draws them
+from the drive state).
+
 ## How node–beam games keep flexbodies sane (public docs, read 2026-11-13)
 
 Sources (public documentation only; clean-room, no code):
