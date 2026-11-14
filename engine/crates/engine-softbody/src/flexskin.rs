@@ -688,4 +688,98 @@ mod tests {
         };
         assert_eq!(Skin::decode(&s.encode()).unwrap(), s);
     }
+
+    /// Two meshes on the lattice's nodes.
+    fn two_meshes() -> Skin {
+        let (ids, p) = lattice();
+        let (v, n) = verts();
+        let (sk, _) = bind(&ids, &p, &v, &n).unwrap();
+        Skin {
+            nodes: ids.iter().map(|i| format!("n{i}")).collect(),
+            meshes: vec![
+                MeshSkin { name: "panel".into(), verts: sk[..120].to_vec() },
+                MeshSkin { name: "door".into(), verts: sk[120..].to_vec() },
+            ],
+        }
+    }
+
+    /// The version 1 sidecar (f32 entries, per vertex its first entry), as the
+    /// first exports wrote it.
+    fn v1_bytes(s: &Skin) -> Vec<u8> {
+        let mut o = Vec::new();
+        o.extend_from_slice(MAGIC);
+        o.extend_from_slice(&1u32.to_le_bytes());
+        let st = |o: &mut Vec<u8>, t: &str| {
+            o.extend_from_slice(&(t.len() as u16).to_le_bytes());
+            o.extend_from_slice(t.as_bytes());
+        };
+        o.extend_from_slice(&(s.nodes.len() as u32).to_le_bytes());
+        for n in &s.nodes {
+            st(&mut o, n);
+        }
+        o.extend_from_slice(&(s.meshes.len() as u32).to_le_bytes());
+        for m in &s.meshes {
+            st(&mut o, &m.name);
+            let ne: usize = m.verts.iter().map(|v| v.w.len()).sum();
+            o.extend_from_slice(&(m.verts.len() as u32).to_le_bytes());
+            o.extend_from_slice(&(ne as u32).to_le_bytes());
+            let mut at = 0u32;
+            for v in &m.verts {
+                o.extend_from_slice(&at.to_le_bytes());
+                for f in v.off.iter().chain(&v.nrm) {
+                    o.extend_from_slice(&f.to_le_bytes());
+                }
+                at += v.w.len() as u32;
+            }
+            o.extend_from_slice(&at.to_le_bytes());
+            for v in &m.verts {
+                for &(n, a, b, c) in &v.w {
+                    o.extend_from_slice(&n.to_le_bytes());
+                    for f in [a, b, c] {
+                        o.extend_from_slice(&f.to_le_bytes());
+                    }
+                }
+            }
+        }
+        o
+    }
+
+    /// Read in place, a sidecar gives the same bits as decoded, in both versions,
+    /// and fails where decode fails with decode's message.
+    #[test]
+    fn read_in_place_is_decode() {
+        let s = two_meshes();
+        for b in [s.encode(), v1_bytes(&s)] {
+            let d = Skin::decode(&b).unwrap();
+            let r = SkinBytes::parse(&b).unwrap();
+            assert_eq!(r.nodes, d.nodes);
+            assert_eq!(r.meshes.len(), d.meshes.len());
+            for (m, dm) in r.meshes.iter().zip(&d.meshes) {
+                assert_eq!(m.name, dm.name);
+                assert_eq!(m.len(), dm.verts.len());
+                assert_eq!(m.entries(), dm.verts.iter().map(|v| v.w.len()).sum::<usize>());
+                let got: Vec<Vert> = m.verts().collect();
+                assert_eq!(format!("{got:?}"), format!("{:?}", dm.verts));
+            }
+            for cut in (0..b.len()).step_by(7) {
+                assert_eq!(SkinBytes::parse(&b[..cut]).err(), Skin::decode(&b[..cut]).err(), "cut at {cut}");
+            }
+        }
+        // A node index past the names: the same error.
+        let mut bad = v1_bytes(&s);
+        let n = bad.len();
+        bad[n - 16..n - 12].copy_from_slice(&999u32.to_le_bytes());
+        assert_eq!(SkinBytes::parse(&bad).err(), Skin::decode(&bad).err());
+        assert!(SkinBytes::parse(&bad).is_err());
+        // Either reading, through SkinRef, the same meshes.
+        let b = s.encode();
+        let (d, r) = (Skin::decode(&b).unwrap(), SkinBytes::parse(&b).unwrap());
+        for name in ["panel", "door"] {
+            let a: Vec<Vert> = SkinRef::Decoded(&d).mesh(name).unwrap().verts().collect();
+            let c: Vec<Vert> = SkinRef::Bytes(&r).mesh(name).unwrap().verts().collect();
+            assert_eq!(format!("{a:?}"), format!("{c:?}"));
+        }
+        assert!(SkinRef::Bytes(&r).mesh("hood").is_none());
+        assert_eq!(SkinRef::Bytes(&r).nodes(), &d.nodes[..]);
+    }
 }
