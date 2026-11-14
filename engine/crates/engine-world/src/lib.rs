@@ -29,6 +29,12 @@ mod defs;
 mod destruction;
 mod error;
 mod events;
+mod explicit_vehicles;
+/// The explicit vehicles' crash scene (soft vehicles into prefractured houses).
+#[cfg(feature = "stress")]
+pub mod explicit_scene;
+pub mod showcase_scene;
+pub mod brick_ring_drive;
 mod guidance;
 mod handles;
 mod host_state;
@@ -76,7 +82,9 @@ pub use engine_terrain::{
 };
 pub use engine_webgpu::TerrainStepReport;
 pub use error::{StaleHandle, Unsupported};
+pub use explicit_vehicles::{ExplicitVehiclesDef, VehicleProxy, PROXY_SLACK};
 pub use events::{
+    ExplicitSleepEvent,
     coalesce, BodyEvents, BodyLeftWorld, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
     ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,
     RayBatchResult, SensorEvent, SensorEvents, SkinId, SkinOutput, SoftOutput, StepGpuTime,
@@ -335,6 +343,12 @@ enum Extra {
     TerrainHeights(ShapeId),
     /// The terrain look-ahead's pick after this step.
     TerrainWatch,
+    /// The explicit vehicles' asleep bits after this step (vehicle sleep).
+    ExplicitSleep,
+    /// The explicit frame's loop-cap flag (gAcc) and the coupling passes' status word
+    /// after this step: nonzero fails the step.
+    ExplicitLoopCap,
+    CouplingStatus,
     /// The live surface's heights, for these views of the ground shape.
     TerrainSurface(ShapeId, Vec<engine_terrain::surface::SurfaceViewRange>),
     /// The surface pass's debris gather.
@@ -478,6 +492,9 @@ pub struct World {
     tuned: std::collections::BTreeSet<u32>,
     /// The last step's GPU time from its marks (`RUBBLE_GPU_TIMING=1`).
     last_gpu_ms: Option<f64>,
+    /// When the last step's submission went to the queue (for hosts timing the GPU's
+    /// span: submit to completion, [`Self::last_submit_instant`]).
+    last_submit: Option<web_time::Instant>,
     /// The latest delivered step's GPU time (`WorldDef::gpu_timing`).
     last_step_gpu_time: Option<StepGpuTime>,
     /// With `WorldDef::gpu_timing`: the whole tick's GPU time (the rigid step, terrain, the
@@ -544,6 +561,8 @@ pub struct World {
     motion: motion::MotionState,
     /// Deformable terrain, once enabled.
     terrain: Option<terrain::TerrainHost>,
+    /// Explicit soft-body vehicles ([`World::add_explicit_vehicles`]).
+    explicit: Option<Box<explicit_vehicles::ExplicitVehicles>>,
     /// Steps before this were taken before a `restore_state`: their frames
     /// still deliver poses, but their counters and events describe a state
     /// the simulation no longer has.
@@ -628,6 +647,7 @@ impl World {
             free_bodies: Vec::new(),
             tuned: std::collections::BTreeSet::new(),
             last_gpu_ms: None,
+            last_submit: None,
             last_step_gpu_time: None,
             #[cfg(feature = "stress")]
             tick_timer: None,
@@ -674,6 +694,7 @@ impl World {
             fracture: Default::default(),
             blasts: Default::default(),
             terrain: None,
+            explicit: None,
             restored_at: 0,
         })
     }
@@ -891,6 +912,12 @@ impl World {
     /// Whether the resting-pair carry runs ([`Self::set_carry_rest`]).
     pub fn carry_rest(&self) -> bool {
         self.sim.carry_rest()
+    }
+
+    /// When the last step's submission was queued (a host that waits for it, the GPU
+    /// otherwise idle, reads the step's GPU span as the time from here to completion).
+    pub fn last_submit_instant(&self) -> Option<web_time::Instant> {
+        self.last_submit
     }
 
     /// The latest delivered step's GPU time ([`WorldDef::gpu_timing`]; `None` until a
@@ -2181,7 +2208,7 @@ impl World {
         let step = self.step;
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
             .is_ok()
-            .then(std::time::Instant::now);
+            .then(web_time::Instant::now);
         let lap = |what: &str| {
             if let Some(t) = &host_t {
                 eprintln!(
@@ -2241,7 +2268,7 @@ impl World {
             } else {
                 96
             };
-            std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new(self.sim.device(), cap))
+            std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new_for(self.sim.device(), self.sim.queue(), cap))
         });
         if let Some(m) = &marks {
             m.mark(&mut enc, "begin");
@@ -2264,6 +2291,8 @@ impl World {
             }
             self.encode_fracture_begin(&mut enc);
         }
+        // Explicit vehicles: the last window's impulses, applied by the rigid step.
+        self.explicit_before_step(&mut enc)?;
         #[cfg(feature = "stress")]
         let in_step = fracture && self.fracture_in_step();
         #[cfg(not(feature = "stress"))]
@@ -2277,6 +2306,15 @@ impl World {
                 .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
         }
         let ran = self.sim.last_step_ran();
+        // Explicit vehicles: the next window's frame and chunk loads, before the
+        // fracture takes them (forward-only).
+        if let (Some(m), true) = (&marks, ran && self.explicit.is_some()) {
+            m.mark(&mut enc, "rigid step end");
+        }
+        let explicit_read = if ran { self.explicit_after_step(&mut enc)? } else { None };
+        if let (Some(m), Some(_)) = (&marks, explicit_read) {
+            m.mark(&mut enc, "vehicle coupling loads");
+        }
         lap("rigid encoded");
         if let Some(m) = &marks {
             m.mark(&mut enc, "rigid tail");
@@ -2358,6 +2396,24 @@ impl World {
                     });
                 }
                 extras.extend(motion::extras(&self.sim, &self.motion, casts));
+                if explicit_read.is_some() {
+                    // The runaway guards, every step: the frame's loop-cap flag and the
+                    // coupling's status (read with the step, no wait).
+                    if let Some(x) = self.explicit.as_ref() {
+                        let (buffer, offset) = x.gpu.loop_cap_word();
+                        extras.push(readback::Extra { kind: Extra::ExplicitLoopCap, buffer, offset, size: 4 });
+                        let (buffer, offset) = x.status_word();
+                        extras.push(readback::Extra { kind: Extra::CouplingStatus, buffer, offset, size: 4 });
+                    }
+                    if let Some((buffer, offset, size)) = self.explicit.as_ref().and_then(|x| x.sleep_extra()) {
+                        extras.push(readback::Extra {
+                            kind: Extra::ExplicitSleep,
+                            buffer,
+                            offset,
+                            size,
+                        });
+                    }
+                }
                 // The step's timestamps are resolved in a submission of their
                 // own after the step's (Metal: a resolve in the same command
                 // buffer can read the last passes' samples before they land).
@@ -2403,7 +2459,10 @@ impl World {
             let staging = m.resolve(self.sim.device(), &mut enc);
             (m, staging)
         });
-        self.sim.queue().submit([enc.finish()]);
+        let cmd = enc.finish();
+        self.last_submit = Some(web_time::Instant::now());
+        self.sim.queue().submit([cmd]);
+        self.explicit_after_submit(explicit_read);
         #[cfg(feature = "stress")]
         if tick_timed {
             if let Some(t) = &mut self.tick_timer {
@@ -2592,7 +2651,7 @@ impl World {
                 Pending::Mapped { step, slot } => {
                     let timing = std::env::var("RUBBLE_WORLD_TIMING")
                         .is_ok()
-                        .then(std::time::Instant::now);
+                        .then(web_time::Instant::now);
                     if !self.readback.ready(self.sim.device(), slot, wait)? {
                         break;
                     }
@@ -2603,7 +2662,7 @@ impl World {
                         );
                     }
                     self.readback.pending.pop_front();
-                    let timing = timing.map(|_| std::time::Instant::now());
+                    let timing = timing.map(|_| web_time::Instant::now());
                     let raw = self.readback.take(slot);
                     frames.push(self.frame(step, raw)?);
                     if let Some(t) = timing {
@@ -2873,6 +2932,7 @@ impl World {
         let mut cast_results = Vec::new();
         let mut projectiles = Vec::new();
         let mut lost_contacts = 0;
+        let mut explicit_sleep = Vec::new();
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
@@ -2936,6 +2996,22 @@ impl World {
                 Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
                 Extra::TerrainHeights(id) => self.terrain_heights(*id, bytes),
                 Extra::TerrainWatch => self.terrain_strike(step, bytes),
+                Extra::ExplicitSleep => {
+                    if let Some(x) = self.explicit.as_mut() {
+                        explicit_sleep = x.sleep_changes(bytemuck::cast_slice(bytes));
+                    }
+                }
+                Extra::ExplicitLoopCap => {
+                    let flag: i32 = bytemuck::pod_read_unaligned(&bytes[..4]);
+                    engine_webgpu::explicit_loop_cap_hit(flag)
+                        .map_err(|e| anyhow::anyhow!("World step {step}: explicit vehicles: {e}"))?;
+                }
+                Extra::CouplingStatus => {
+                    let bits: u32 = bytemuck::pod_read_unaligned(&bytes[..4]);
+                    if let Some(x) = self.explicit.as_ref() {
+                        x.status_bits_error(bits).map_err(|e| anyhow::anyhow!("World step {step}: {e}"))?;
+                    }
+                }
                 Extra::TerrainSurface(shape, views) => {
                     terrain_surface = Self::terrain_surface_views(*shape, views, bytes)
                 }
@@ -2974,6 +3050,7 @@ impl World {
             terrain_debris,
             terrain_bakes: Vec::new(),
             gpu_time,
+            explicit_sleep,
         })
         .inspect(|f| {
             if f.gpu_time.is_some() {

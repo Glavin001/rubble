@@ -4,7 +4,8 @@ engine/target/
 Cargo.lock
 *.spv
 .claude/*
-# project agent skills are shared (Claude Code; .cursor/skills links to them)
+# Project agent skills are shared between Claude Code (.claude/skills) and Cursor
+# (.cursor/skills); each skill lives in one and is linked from the other.
 !.claude/skills/
 inspiration/
 
@@ -36,3 +37,6 @@ engine/ffi-dist/
 
 # CI: the LFS object list the cached LFS pull keys on (.github/actions/lfs-pull)
 .lfs-objects.txt
+
+# Local outputs (renders, snapshots, frames)
+/out/

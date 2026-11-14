@@ -16,6 +16,8 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     fast_inv_sqrt: false,
     drag: false,
     turbulence: false,
+    triangle_throttle: true,
+    centred_damping: false,
 };
 
 /// A synthetic airfoil file: integer degrees outside ±20, 0.1° steps inside, with

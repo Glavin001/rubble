@@ -1,5 +1,6 @@
 //! Shared phase graph. Backends only encode submission; physics equations live in Slang.
 
+pub mod explicit_plan;
 pub mod rigid_plan;
 
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};

@@ -206,7 +206,7 @@ step "Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
 step "Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/vehicle-designer.html "$OUT"/
+cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/vehicle-designer.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$OUT"/
 cp "$WEB"/*.mjs "$OUT"/
 cp -R "$WEB"/generated "$OUT"/generated
 cp -R "$WEB"/fracture "$OUT"/fracture
@@ -223,6 +223,12 @@ for v in "$ENGINE"/scenes/vehicles/*/; do
 done
 find "$OUT" \( -name '*.test.mjs' -o -name '.gitignore' -o -name '*-check.mjs' \) -delete
 rm -rf "$OUT"/generated/*/.gitignore "$OUT"/generated/*/package.json
+# Every page the landing page links to must be in the site.
+missing=0
+for page in $(grep -oE 'href="\./[^"?#]+\.html' "$OUT"/index.html | sed 's#href="\./##' | sort -u); do
+  if [[ ! -f "$OUT/$page" ]]; then echo "error: index.html links $page, which the site does not contain" >&2; missing=1; fi
+done
+[[ $missing == 0 ]] || exit 1
 echo "==> Done: $OUT ($(du -sh "$OUT" | cut -f1))"
 
 if [[ -n "$CACHE" ]]; then echo "==> Build cache: $(du -sh "$CACHE" | cut -f1)"; fi

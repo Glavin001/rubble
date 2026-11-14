@@ -561,12 +561,20 @@ struct Placed {
     name: String,
     offset: [Value; 3],
     moved: [Value; 3],
+    /// Depth in the slot tree (the main part 0; parts are in depth-first order).
+    depth: u32,
 }
 
 impl JbeamDb {
     /// Add the parts of one `.jbeam` file.
     pub fn add_file(&mut self, name: &str, src: &str) -> Result<(), String> {
-        let v = parse_relaxed(src).map_err(|e| format!("{name}: {e}"))?;
+        // Some community files leave out the outer braces: read them as one object.
+        let v = match parse_relaxed(src) {
+            Ok(v) => v,
+            Err(e) if !src.trim_start().starts_with('{') => parse_relaxed(&format!("{{{src}\n}}"))
+                .map_err(|_| format!("{name}: {e}"))?,
+            Err(e) => return Err(format!("{name}: {e}")),
+        };
         let Value::Object(map) = v else {
             return Err(format!("{name}: top level is not an object"));
         };
@@ -585,6 +593,27 @@ impl JbeamDb {
     /// Resolve the part tree from the main part through each slot's configured
     /// (or default) part, depth first. Returns the parts in assembly order with
     /// their accumulated slot node offsets.
+    /// A local part for wheel slot `slot` whose chosen part is missing: the slot's
+    /// `default` when local, else the first by name of slot type `slot`, else of
+    /// its family (the type without its trailing `_<lug count>`).
+    fn wheel_substitute(&self, slot: &str, default: &str) -> Option<String> {
+        if !default.is_empty() && self.parts.contains_key(default) {
+            return Some(default.to_string());
+        }
+        let mut of = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+            let mut v: Vec<&String> = self
+                .parts
+                .iter()
+                .filter(|(_, p)| p.get("slotType").and_then(Value::as_str).is_some_and(|t| pred(t)))
+                .map(|(k, _)| k)
+                .collect();
+            v.sort();
+            v.first().map(|s| s.to_string())
+        };
+        let family = slot.trim_end_matches(|c: char| c.is_ascii_digit());
+        of(&|t| t == slot).or_else(|| of(&|t| t.starts_with(family) && family.ends_with('_')))
+    }
+
     fn assemble(&mut self, config: &PcConfig) -> Result<Vec<Placed>, String> {
         let main = match &config.main_part {
             Some(m) => m.clone(),
@@ -605,14 +634,16 @@ impl JbeamDb {
                 name: main,
                 offset: zero(),
                 moved: zero(),
+                depth: 0,
             },
             0u32,
         )];
         let mut seen = HashSet::new();
-        while let Some((placed, depth)) = stack.pop() {
+        while let Some((mut placed, depth)) = stack.pop() {
             if depth > 50 || !seen.insert(placed.name.clone()) {
                 continue;
             }
+            placed.depth = depth;
             let part = self.parts[&placed.name].clone();
             let mut children = Vec::new();
             for (key, v2) in [("slots", false), ("slots2", true)] {
@@ -644,17 +675,43 @@ impl JbeamDb {
                         .and_then(Value::as_object)
                         .cloned()
                         .unwrap_or_default();
-                    let chosen = config.parts.get(&slot_name).cloned().unwrap_or(default);
+                    let mut chosen = config.parts.get(&slot_name).cloned().unwrap_or(default.clone());
                     if chosen.is_empty() {
                         continue;
                     }
+                    let mut substitute = false;
                     if !self.parts.contains_key(&chosen) {
-                        self.warnings
-                            .push(format!("slot `{slot_name}`: part `{chosen}` not found"));
-                        continue;
+                        // A wheel slot whose part is BeamNG's stock content (not
+                        // local): the wheel part carries the hub nodes the suspension
+                        // and the wheel rows use, so a local wheel part stands in
+                        // (spec §29.2): the slot's default, else the first by name of
+                        // its slot type, else of its family (`wheel_F_6` → `wheel_F_*`).
+                        // Any other slot whose part is missing (another mod's, or
+                        // stock content) takes its own default when that is local.
+                        let local = if slot_name.starts_with("wheel_") {
+                            self.wheel_substitute(&slot_name, &default)
+                        } else if !default.is_empty() && default != chosen && self.parts.contains_key(&default) {
+                            Some(default.clone())
+                        } else {
+                            None
+                        };
+                        match local {
+                            Some(l) => {
+                                self.warnings.push(format!(
+                                    "slot `{slot_name}`: part `{chosen}` not found: the local `{l}` stands in"
+                                ));
+                                chosen = l;
+                                substitute = true;
+                            }
+                            None => {
+                                self.warnings
+                                    .push(format!("slot `{slot_name}`: part `{chosen}` not found"));
+                                continue;
+                            }
+                        }
                     }
                     let ty = self.slot_type(&chosen).unwrap_or("");
-                    let allowed = if v2 {
+                    let allowed = substitute || if v2 {
                         field("allowTypes")
                             .and_then(Value::as_array)
                             .is_none_or(|a| a.iter().any(|t| t.as_str() == Some(ty)))
@@ -682,6 +739,7 @@ impl JbeamDb {
                         name: chosen,
                         offset,
                         moved,
+                        depth: 0,
                     });
                 }
             }
@@ -806,7 +864,10 @@ fn expand(
                         if let Value::Object(opts) = v {
                             for (k, o) in opts {
                                 if let Some(x) = resolve(o, vars) {
-                                    fields.insert(k.clone(), x);
+                                    // A key written with the header's node-column
+                                    // colon (BeamNG's L-beam page: `{"id3:": …}`)
+                                    // names the same field.
+                                    fields.insert(k.trim_end_matches(':').to_string(), x);
                                 }
                             }
                         } else if let Some(x) = resolve(v, vars) {
@@ -828,9 +889,224 @@ fn expand(
     out
 }
 
+/// The fuel's mass in each `fuelTank` of the parts' `energyStorage` rows [N], [ES]
+/// (jbeam-semantics-spec.md §40): `startingFuelCapacity` (L; default
+/// `fuelCapacity`) × `fuelLiquidDensity` (kg/L; default the `energyType`'s), spread
+/// evenly over the nodes of the tank's `fuel` engine groups and added to their
+/// `nodeWeight`. **Choice** (BeamNG names the presets, not their densities):
+/// gasoline 0.74, diesel 0.84, kerosene 0.80 kg/L, an unnamed type gasoline; a
+/// tank with no density, no fuel or no nodes adds nothing (warned).
+fn fuel_mass(
+    db: &JbeamDb,
+    parts: &[Placed],
+    vars: &HashMap<String, f64>,
+    engine_groups: &HashMap<u32, Vec<String>>,
+    desc: &mut SoftVehicleDesc,
+) {
+    let num = |v: Option<&Value>| v.and_then(|v| resolve(v, vars)).and_then(|v| v.as_f64());
+    for p in parts {
+        let part = &db.parts[&p.name];
+        let Some(rows) = part.get("energyStorage").and_then(Value::as_array) else {
+            continue;
+        };
+        for row in rows.iter().skip(1).filter_map(Value::as_array) {
+            let (Some("fuelTank"), Some(name)) = (row.first().and_then(Value::as_str), row.get(1).and_then(Value::as_str)) else {
+                continue;
+            };
+            let Some(tank) = part.get(name).and_then(Value::as_object) else {
+                continue;
+            };
+            let capacity = num(tank.get("fuelCapacity")).unwrap_or(0.0);
+            let litres = num(tank.get("startingFuelCapacity")).unwrap_or(capacity).max(0.0);
+            let density = num(tank.get("fuelLiquidDensity")).or_else(|| {
+                match tank.get("energyType").and_then(Value::as_str).unwrap_or("gasoline") {
+                    "gasoline" => Some(0.74),
+                    "diesel" => Some(0.84),
+                    "kerosene" => Some(0.80),
+                    _ => None,
+                }
+            });
+            let groups: Vec<&str> = match tank.get("fuel").and_then(|f| f.get("[engineGroup]:")) {
+                Some(Value::String(g)) => vec![g.as_str()],
+                Some(Value::Array(gs)) => gs.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            let mut nodes: Vec<u32> = engine_groups
+                .iter()
+                .filter(|(_, g)| g.iter().any(|g| groups.contains(&g.as_str())))
+                .map(|(&i, _)| i)
+                .collect();
+            nodes.sort_unstable();
+            let Some(density) = density else {
+                desc.warnings.push(format!("fuel tank `{name}`: energy type without a density; its fuel has no mass"));
+                continue;
+            };
+            let mass = litres * density;
+            if mass <= 0.0 {
+                continue;
+            }
+            if nodes.is_empty() {
+                desc.warnings.push(format!("fuel tank `{name}`: no node in its fuel groups {groups:?}; its {mass:.1} kg of fuel has no node"));
+                continue;
+            }
+            let share = (mass / nodes.len() as f64) as f32;
+            for i in nodes {
+                desc.nodes[i as usize].mass += share;
+            }
+        }
+    }
+}
+
 /// JBeam frame (+X left, +Y rear, +Z up) → Rubble (+X left, +Y up, +Z forward).
 pub fn to_rubble(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], -p[1]]
+}
+
+/// A triangle row's aerodynamic fields [T]: `dragCoef` (default 100), `liftCoef`
+/// (default `dragCoef`), `stallAngle` (default 0.58 rad), `skinDragCoef` (default 0).
+fn tri_aero(f: &Map<String, Value>) -> [f32; 4] {
+    let g = |k: &str| f.get(k).and_then(as_f32);
+    let drag = g("dragCoef").unwrap_or(100.0).max(0.0);
+    [
+        drag,
+        // Negative: the lift reversed (spoilers' downforce).
+        g("liftCoef").unwrap_or(drag),
+        g("stallAngle").unwrap_or(0.58).clamp(0.0, std::f32::consts::FRAC_PI_2),
+        g("skinDragCoef").unwrap_or(0.0).max(0.0),
+    ]
+}
+
+/// The node couplers coupled at spawn, and notes on the others.
+struct NodeCouplers {
+    couplers: Vec<SoftCoupler>,
+    warnings: Vec<String>,
+}
+
+/// BeamNG's node couplers (`jbeam-semantics-spec.md` §7.1; [C]): a coupler node
+/// (`couplerTag` t) and a tag node (`tag` t). Only `couplerStartRadius` makes a
+/// coupler Active at spawn; then it couples to the nearest free tag node of its tag
+/// within that radius (lowest index on a tie; one tag node per coupler node and one
+/// coupler node per tag node, coupler nodes in node order). The strength is the
+/// lower of the two nodes' `couplerStrength` (default unbreakable); the break groups
+/// are the coupler node's then the tag node's (`breakGroup`, a name or a table, at
+/// most three), of the coupler node's `breakGroupType` (the tag node's when the
+/// coupler node names none).
+fn node_couplers(
+    desc: &SoftVehicleDesc,
+    fields: &BTreeMap<u32, Map<String, Value>>,
+    groups: &mut HashMap<String, u32>,
+) -> NodeCouplers {
+    let text = |f: &Map<String, Value>, k: &str| {
+        f.get(k)
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    };
+    let num = |f: &Map<String, Value>, k: &str| f.get(k).and_then(as_f32);
+    let names = |f: &Map<String, Value>| -> Vec<String> {
+        match f.get("breakGroup") {
+            Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let pos = |i: u32| glam::Vec3::from_array(desc.nodes[i as usize].position);
+    let mut out = NodeCouplers {
+        couplers: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let mut used: std::collections::BTreeSet<u32> = Default::default();
+    let (mut inactive, mut unmatched, mut latching, mut too_many) = (0, 0, 0, 0);
+    let mut far = 0.0f32;
+    for (&c, cf) in fields {
+        let Some(tag) = text(cf, "couplerTag") else {
+            continue;
+        };
+        let Some(start) = num(cf, "couplerStartRadius").filter(|r| *r > 0.0) else {
+            // Not Active at spawn: only the coupler toggle (a driver input) couples it.
+            inactive += 1;
+            continue;
+        };
+        let best = fields
+            .iter()
+            .filter(|(&t, tf)| t != c && !used.contains(&t) && text(tf, "tag").as_deref() == Some(tag.as_str()))
+            .map(|(&t, tf)| (pos(c).distance(pos(t)), t, tf))
+            .filter(|(d, _, _)| *d <= start)
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let Some((d, t, tf)) = best else {
+            unmatched += 1;
+            continue;
+        };
+        used.insert(t);
+        let lock = num(cf, "couplerLockRadius").unwrap_or(0.025);
+        if d > lock {
+            latching += 1;
+            far = far.max(d);
+        }
+        let strength = num(cf, "couplerStrength")
+            .unwrap_or(f32::INFINITY)
+            .min(num(tf, "couplerStrength").unwrap_or(f32::INFINITY));
+        let own = names(cf);
+        let ty = if own.is_empty() { tf } else { cf };
+        let passive = num(ty, "breakGroupType").is_some_and(|t| t as i32 == 1);
+        let mut gs: Vec<u32> = Vec::new();
+        for g in own.into_iter().chain(names(tf)) {
+            let n = groups.len() as u32 + 1;
+            let gi = *groups.entry(g).or_insert(n);
+            if !gs.contains(&gi) {
+                gs.push(gi);
+            }
+        }
+        if gs.len() > 3 {
+            too_many += 1;
+        }
+        out.couplers.push(SoftCoupler {
+            a: c,
+            b: t,
+            strength,
+            break_group: gs.first().copied().unwrap_or(0),
+            break_group_passive: passive,
+            extra_break_groups: [
+                gs.get(1).copied().unwrap_or(0),
+                gs.get(2).copied().unwrap_or(0),
+            ],
+        });
+    }
+    if !out.couplers.is_empty() {
+        out.warnings.push(format!(
+            "{} node couplers (couplerTag to tag) coupled at spawn",
+            out.couplers.len()
+        ));
+    }
+    if inactive > 0 {
+        out.warnings.push(format!(
+            "{inactive} node couplers have no couplerStartRadius: not Active at spawn, \
+             left uncoupled (BeamNG couples them by the coupler toggle only)"
+        ));
+    }
+    if unmatched > 0 {
+        out.warnings.push(format!(
+            "{unmatched} node couplers have no free tag node within couplerStartRadius: \
+             left uncoupled"
+        ));
+    }
+    if latching > 0 {
+        out.warnings.push(format!(
+            "{latching} node couplers spawn farther apart than couplerLockRadius (up to \
+             {far:.4} m): coupled at spawn, without BeamNG's latching approach"
+        ));
+    }
+    if too_many > 0 {
+        out.warnings.push(format!(
+            "{too_many} node couplers name more than three break groups (first three used)"
+        ));
+    }
+    out
 }
 
 /// A triangle's `externalCollisionBias` (m, ≥ 0).
@@ -865,7 +1141,7 @@ pub fn read_vehicle_dir(
             let p = e.map_err(|e| e.to_string())?.path();
             if p.is_dir() {
                 walk(&p, out)?;
-            } else if p.extension().is_some_and(|x| x == "jbeam") {
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("jbeam")) {
                 out.push(p);
             }
         }
@@ -954,6 +1230,57 @@ pub fn feature_census(
     Ok(out)
 }
 
+/// The physics features a [`feature_census`] lists that the explicit solver's JBeam
+/// mode does not simulate (`engine/docs/jbeam-semantics-spec.md` §11, Part II and
+/// §31), with their counts. Visual, sound, camera, electrics and controller sections
+/// are not physics and are not listed, nor is what [`out_of_scope_features`] lists.
+pub fn unsupported_features(census: &BTreeMap<String, usize>) -> Vec<(String, usize)> {
+    const KEYS: &[&str] = &[
+        "beams.beamShortExtent",
+        "beams.beamLongBoundFunction",
+        "beams.beamShortBoundFunction",
+        "beams.beamLimitSpringFunction",
+        "beams.beamLimitDampFunction",
+        "beams.breakGroup=table>3",
+        "triangles.skinDragCoef",
+        "nodes.slidingFrictionCoef",
+        "nodes.stribeckExponent",
+        "nodes.stribeckVelMult",
+        "nodes.noLoadCoef",
+        "nodes.fullLoadCoef",
+        "nodes.loadSensitivitySlope",
+        "section rotators",
+        "section rigidifier",
+        "section cargoGroups",
+    ];
+    census
+        .iter()
+        .filter(|(k, _)| KEYS.contains(&k.as_str()))
+        .map(|(k, &n)| (k.clone(), n))
+        .collect()
+}
+
+/// What a [`feature_census`] lists that is out of the explicit solver's scope (spec
+/// §31), with why: the powertrain and its reactors, and the inputs controllers drive
+/// (hydros' `inputSource`, thrusters: with no driver their input is zero, so a
+/// hydro holds its spawn length and a thruster pushes nothing, which is what the
+/// solver does), and `beamLimitRebound`, a key BeamNG documents nowhere (its bounded
+/// beams' rebound limit is `beamLimitDampRebound`, simulated; unknown keys are
+/// ignored, as BeamNG's loader does).
+pub fn out_of_scope_features(census: &BTreeMap<String, usize>) -> Vec<(String, usize, &'static str)> {
+    const KEYS: &[(&str, &str)] = &[
+        ("section powertrain", "powertrain (out of scope)"),
+        ("section torsionReactorF", "powertrain reactor (out of scope)"),
+        ("section torsionReactorR", "powertrain reactor (out of scope)"),
+        ("hydros.inputSource", "controller input (zero: the hydro holds its length)"),
+        ("section thrusters", "controller input (zero: no thrust)"),
+        ("beams.beamLimitRebound", "undocumented key (ignored)"),
+    ];
+    KEYS.iter()
+        .filter_map(|&(k, why)| census.get(k).map(|&n| (k.to_string(), n, why)))
+        .collect()
+}
+
 /// Load a vehicle from its `.jbeam` files (`(file name, source)`) and an
 /// optional `.pc` configuration.
 pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVehicleDesc, String> {
@@ -971,7 +1298,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     let vars = collect_vars(&db, &parts, &config);
     let mut desc = SoftVehicleDesc {
         name: parts[0].name.clone(),
-        collision_range: 0.03,
+        // BeamNG's documented band (2.5 cm; spec §36).
+        collision_range: crate::explicit_beams::BEAMNG_COLLISION_RANGE,
         ..Default::default()
     };
     desc.warnings.append(&mut db.warnings);
@@ -986,8 +1314,13 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     // Nodes. Parts: each JBeam part's own nodes (named as the part), and each
     // node `group` (the sets BeamNG flexbodies bind to).
     let mut ids: HashMap<String, u32> = HashMap::new();
+    // Node couplers (spec §7.1): the fields of each node with a `couplerTag` or a
+    // `tag` (a later definition of the node replaces them).
+    let mut coupler_fields: BTreeMap<u32, Map<String, Value>> = BTreeMap::new();
     let mut part_nodes: Vec<(String, Vec<u32>)> = Vec::new();
     let mut group_nodes: Vec<(String, Vec<u32>)> = Vec::new();
+    // Each node's `engineGroup` names (its last definition's), for the tanks' mass.
+    let mut engine_groups: HashMap<u32, Vec<String>> = HashMap::new();
     for (pi, f) in expand(&db, &parts, "nodes", &vars) {
         let Some(id) = f.get("id").and_then(|v| {
             v.as_str()
@@ -1049,6 +1382,18 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             desc.nodes.push(node);
             desc.nodes.len() as u32 - 1
         };
+        let tagged = |k: &str| f.get(k).and_then(Value::as_str).is_some_and(|t| !t.is_empty());
+        if tagged("couplerTag") || tagged("tag") {
+            coupler_fields.insert(index, f.clone());
+        } else {
+            coupler_fields.remove(&index);
+        }
+        let eg: Vec<String> = match f.get("engineGroup") {
+            Some(Value::String(g)) if !g.is_empty() => vec![g.clone()],
+            Some(Value::Array(gs)) => gs.iter().filter_map(Value::as_str).filter(|g| !g.is_empty()).map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+        engine_groups.insert(index, eg);
         let mut add = |list: &mut Vec<(String, Vec<u32>)>, name: &str| match list
             .iter_mut()
             .find(|(n, _)| n == name)
@@ -1075,6 +1420,11 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             _ => {}
         }
     }
+    fuel_mass(&db, &parts, &vars, &engine_groups, &mut desc);
+    desc.node_group_nodes = group_nodes.clone();
+    for g in &mut desc.node_group_nodes {
+        g.1.sort_unstable();
+    }
     for (name, nodes) in part_nodes.into_iter().chain(group_nodes) {
         if !desc.parts.iter().any(|p| p.name == name) {
             desc.parts.push(crate::desc::SoftPart { name, nodes });
@@ -1091,6 +1441,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     let mut skipped: BTreeMap<String, u32> = BTreeMap::new();
     let mut jbeam_unsupported: BTreeMap<&str, u32> = BTreeMap::new();
     let mut missing = 0u32;
+    let mut missing_names: Vec<String> = Vec::new();
     // The `hydros` section's rows are beams of type HYDRO (after the `beams` rows).
     let hydro_rows = expand(&db, &parts, "hydros", &vars)
         .into_iter()
@@ -1105,6 +1456,13 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         let (Some(a), Some(b)) = (node(&f, "id1"), node(&f, "id2")) else {
             if !f.get("optional").and_then(Value::as_bool).unwrap_or(false) {
                 missing += 1;
+                for k in ["id1", "id2"] {
+                    if let Some(n) = f.get(k).and_then(Value::as_str) {
+                        if !ids.contains_key(n) && missing_names.len() < 8 && !missing_names.iter().any(|m: &String| m == n) {
+                            missing_names.push(n.to_string());
+                        }
+                    }
+                }
             }
             continue;
         };
@@ -1147,11 +1505,6 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 continue;
             }
         };
-        if ty == "PRESSURED" {
-            *skipped
-                .entry(format!("beam type {ty} (simulated as NORMAL)"))
-                .or_default() += 1;
-        }
         let group = match f.get("breakGroup") {
             Some(Value::String(s)) if !s.is_empty() => {
                 let n = groups.len() as u32 + 1;
@@ -1240,24 +1593,107 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 damp_cutoff_hz: g("dampCutoffHz", 0.0).max(0.0),
                 deform_limit,
                 deform_limit_expansion,
+                ..Default::default()
             });
-            for key in [
-                "beamDampRebound",
-                "beamDampReboundFast",
-                "beamDampVelocitySplitRebound",
-                "beamLimitDampRebound",
-                "beamPrecompressionTime",
-                "beamLongExtent",
-                "transitionZone",
-            ] {
-                if f.get(key).is_some_and(|v| v.as_str() != Some("")) {
-                    *jbeam_unsupported.entry(key).or_default() += 1;
+            let jb = beam.jbeam.as_mut().unwrap();
+            // Part II (spec §17–§23).
+            let opt = |k: &str| f.get(k).and_then(as_f32).filter(|x| x.is_finite());
+            if let Some(Value::Array(a)) = f.get("breakGroup") {
+                let names: Vec<&str> = a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                for (k, name) in names.iter().skip(1).take(2).enumerate() {
+                    let n = groups.len() as u32 + 1;
+                    let gi = *groups.entry(name.to_string()).or_insert(n);
+                    if gi != beam.break_group {
+                        jb.extra_break_groups[k] = gi;
+                    }
+                }
+                if names.len() > 3 {
+                    *jbeam_unsupported
+                        .entry("breakGroup with more than three groups (first three used)")
+                        .or_default() += 1;
                 }
             }
-            if matches!(f.get("breakGroup"), Some(Value::Array(a)) if a.len() > 1) {
+            jb.disable_triangle_breaking = f
+                .get("disableTriangleBreaking")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let deform_names: Vec<String> = match f.get("deformGroup") {
+                Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if deform_names.len() > 2 {
                 *jbeam_unsupported
-                    .entry("breakGroup with several groups (first used)")
+                    .entry("deformGroup with more than two groups (first two used)")
                     .or_default() += 1;
+            }
+            for (k, name) in deform_names.iter().take(2).enumerate() {
+                jb.deform_groups[k] = match desc.deform_groups.iter().position(|x| x == name) {
+                    Some(i) => i as u32 + 1,
+                    None => {
+                        desc.deform_groups.push(name.clone());
+                        desc.deform_groups.len() as u32
+                    }
+                };
+            }
+            if jb.deform_groups[0] != 0 {
+                if let Some(r) = opt("deformationTriggerRatio").filter(|r| *r >= 0.0) {
+                    jb.deformation_trigger_ratio = r;
+                }
+            }
+            if ty == "ANISOTROPIC" {
+                jb.anisotropic = true;
+                jb.spring_expansion = opt("springExpansion");
+                jb.damp_expansion = opt("dampExpansion");
+                jb.transition_zone = opt("transitionZone").unwrap_or(0.0).max(0.0);
+                // beamLongBound: FLT_MAX by default for anisotropic beams [A].
+                jb.long_bound = g("beamLongBound", f32::INFINITY);
+            }
+            if matches!(ty.as_str(), "SUPPORT" | "ANISOTROPIC") {
+                jb.long_extent = opt("beamLongExtent").filter(|x| *x >= 0.0);
+            }
+            if ty == "PRESSURED" {
+                const PSI: f32 = 6894.757;
+                let pa = |k: &str, kp: &str| opt(k).or_else(|| opt(kp).map(|x| x * PSI));
+                jb.pressured = true;
+                jb.pressure = pa("pressure", "pressurePSI").unwrap_or(0.0);
+                jb.surface = opt("surface").unwrap_or(1.0).max(0.0);
+                jb.volume_coef = opt("volumeCoef").unwrap_or(1.0).max(0.0);
+                jb.pressure_limit = pa("pressureLimit", "pressureLimitPSI").unwrap_or(f32::INFINITY);
+                jb.max_pressure = pa("maxPressure", "maxPressurePSI").unwrap_or(f32::INFINITY);
+            }
+            if ty == "BOUNDED" {
+                jb.damp_rebound = opt("beamDampRebound");
+                jb.damp_rebound_fast = opt("beamDampReboundFast");
+                jb.damp_velocity_split_rebound = opt("beamDampVelocitySplitRebound");
+                jb.limit_damp_rebound = opt("beamLimitDampRebound");
+            } else {
+                for key in [
+                    "beamDampRebound",
+                    "beamDampReboundFast",
+                    "beamDampVelocitySplitRebound",
+                    "beamLimitDampRebound",
+                ] {
+                    if opt(key).is_some() {
+                        *jbeam_unsupported
+                            .entry("rebound damping on a beam that is not BOUNDED (ignored)")
+                            .or_default() += 1;
+                    }
+                }
+            }
+            if let Some(t) = opt("beamPrecompressionTime").filter(|t| *t > 0.0) {
+                if (jb.precompression - 1.0).abs() > 1e-6 {
+                    jb.precompression_time = t;
+                }
             }
         }
         match kind {
@@ -1311,7 +1747,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     }
     if missing > 0 {
         desc.warnings.push(format!(
-            "{missing} beams reference nodes not in this configuration"
+            "{missing} beams reference nodes not in this configuration (such as {})",
+            missing_names.join(", ")
         ));
     }
     // Couplers (door, bonnet and boot latches): each `couplerNodes` table of an
@@ -1319,6 +1756,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     // `couplingStartRadius` at spawn start coupled; the others (and node-level
     // `couplerTag` couplers) need a coupling action and are left out.
     let mut uncoupled = 0usize;
+    let mut uncoupled_pairs: Vec<(u32, u32)> = Vec::new();
     for p in &parts {
         let Some(m) = db.parts[&p.name].as_object() else {
             continue;
@@ -1354,7 +1792,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 let pa = glam::Vec3::from_array(desc.nodes[a as usize].position);
                 let pb = glam::Vec3::from_array(desc.nodes[b as usize].position);
                 if !(start > 0.0 && pa.distance(pb) <= start) {
-                    uncoupled += 1;
+                    uncoupled_pairs.push((a, b));
                     continue;
                 }
                 let opts = row.last().and_then(Value::as_object);
@@ -1378,10 +1816,35 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                         .unwrap_or(f32::INFINITY),
                     break_group,
                     break_group_passive: passive,
+                    ..Default::default()
                 });
             }
         }
     }
+    let node_couplers = node_couplers(&desc, &coupler_fields, &mut groups);
+    for cp in node_couplers.couplers {
+        // A pair an advanced controller already coupled is one coupling (the
+        // weaker strength).
+        match desc
+            .couplers
+            .iter_mut()
+            .find(|c| (c.a, c.b) == (cp.a, cp.b) || (c.a, c.b) == (cp.b, cp.a))
+        {
+            Some(c) => c.strength = c.strength.min(cp.strength),
+            None => desc.couplers.push(cp),
+        }
+    }
+    desc.warnings.extend(node_couplers.warnings);
+    // An advanced pair not coupled at spawn that a node coupler couples is coupled.
+    uncoupled += uncoupled_pairs
+        .iter()
+        .filter(|&&(a, b)| {
+            !desc
+                .couplers
+                .iter()
+                .any(|c| (c.a, c.b) == (a, b) || (c.a, c.b) == (b, a))
+        })
+        .count();
     if !desc.couplers.is_empty() {
         desc.warnings.push(format!(
             "{} coupler node pairs (latches) coupled at spawn: only the explicit solver's \
@@ -1395,9 +1858,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         ));
     }
     for (key, n) in jbeam_unsupported {
-        desc.warnings.push(format!(
-            "{n} beams set `{key}`, which no Rubble solver simulates yet"
-        ));
+        desc.warnings.push(format!("{n} beams: {key}"));
     }
 
     // Triangles and quads.
@@ -1415,6 +1876,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             collision,
             bias: tri_bias(&f),
             break_group: tri_group(&f, &groups),
+            break_sides: 7,
+            aero: tri_aero(&f),
         });
     }
     for (_, f) in expand(&db, &parts, "quads", &vars) {
@@ -1437,6 +1900,8 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 collision,
                 bias,
                 break_group,
+                break_sides: 7,
+                aero: tri_aero(&f),
             });
         }
     }
@@ -1480,8 +1945,43 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             })
     };
 
-    // Wheels.
-    for (_, f) in expand(&db, &parts, "pressureWheels", &vars) {
+    // Wheels. BeamNG's wheel parts split a wheel's settings over parts (a part with
+    // the rows, tyre and rim parts with modifiers only). A row takes the
+    // pressureWheels modifiers of the other parts of each slot subtree around its own
+    // part, from the whole vehicle down to its own part (nearer subtrees override;
+    // in a subtree, assembly order, later wins), then its own part's and its own
+    // options (jbeam-semantics-spec.md §25).
+    let mods_of = |i: usize| -> Map<String, Value> {
+        let mut m = Map::new();
+        if let Some(rows) = db.parts[&parts[i].name].get("pressureWheels").and_then(Value::as_array) {
+            for o in rows.iter().skip(1).filter_map(Value::as_object) {
+                for (k, v) in o {
+                    if let Some(r) = resolve(v, &vars) {
+                        m.insert(k.clone(), r);
+                    }
+                }
+            }
+        }
+        m
+    };
+    let subtree_end = |i: usize| {
+        (i + 1..parts.len())
+            .find(|&j| parts[j].depth <= parts[i].depth)
+            .unwrap_or(parts.len())
+    };
+    let parent = |i: usize| (0..i).rev().find(|&k| parts[k].depth < parts[i].depth);
+    for (pi, own) in expand(&db, &parts, "pressureWheels", &vars) {
+        let mut chain = vec![pi];
+        while let Some(a) = parent(*chain.last().unwrap()) {
+            chain.push(a);
+        }
+        let mut f = Map::new();
+        for &a in chain.iter().rev() {
+            for j in (a..subtree_end(a)).filter(|&j| j != pi) {
+                f.extend(mods_of(j));
+            }
+        }
+        f.extend(own);
         let (Some(n1), Some(n2)) = (node(&f, "node1"), node(&f, "node2")) else {
             continue;
         };
@@ -1501,6 +2001,25 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             .or_else(|| f.get("hubWidth").and_then(as_f32))
             .unwrap_or(0.2);
         let brake = f.get("brakeTorque").and_then(as_f32).unwrap_or(0.0);
+        // The row's own fields, for JBeam mode's pressure wheels (spec §25).
+        {
+            let mut pw = JbeamPressureWheel {
+                wheel: desc.wheels.len() as u32,
+                name: name.clone(),
+                node1: n1,
+                node2: n2,
+                arm: node(&f, "nodeArm"),
+                ..Default::default()
+            };
+            for (k, v) in &f {
+                if let Some(b) = v.as_bool() {
+                    pw.flags.insert(k.clone(), b);
+                } else if let Some(x) = as_f32(v) {
+                    pw.values.insert(k.clone(), x);
+                }
+            }
+            desc.pressure_wheels.push(pw);
+        }
         desc.wheels.push(SoftWheel {
             node1: n1,
             node2: n2,
@@ -1640,6 +2159,7 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             damp: g("damp", 0.0),
             strength: g("strength", f32::INFINITY),
             cap_strength: g("capStrength", f32::INFINITY),
+            fix_to_rail: b("fixToRail"),
         });
     }
 
@@ -1656,8 +2176,63 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     for (what, n) in skipped {
         desc.warnings.push(format!("{what}: {n} skipped"));
     }
+    let mut names: Vec<(u32, String)> = groups.into_iter().map(|(n, g)| (g, n)).collect();
+    names.sort();
+    desc.break_groups = names.into_iter().map(|(_, n)| n).collect();
     desc.repair(0.1);
     Ok(desc)
+}
+
+/// One section's rows from the assembled parts of a vehicle (`files` and an optional
+/// `.pc`), header tables expanded and variables and `$=` expressions resolved as the
+/// loader does for nodes and beams, each with the name of the part it came from (in
+/// assembly order). For the visual layer's `flexbodies` and `props`.
+pub fn assembled_rows(
+    files: &[(&str, &str)],
+    config: Option<&str>,
+    section: &str,
+) -> Result<Vec<(String, Map<String, Value>)>, String> {
+    let mut db = JbeamDb::default();
+    for (name, src) in files {
+        if let Err(e) = db.add_file(name, src) {
+            db.warnings.push(e);
+        }
+    }
+    let config = match config {
+        Some(c) => PcConfig::parse(c)?,
+        None => PcConfig::default(),
+    };
+    let parts = db.assemble(&config)?;
+    let vars = collect_vars(&db, &parts, &config);
+    Ok(expand(&db, &parts, section, &vars)
+        .into_iter()
+        .map(|(pi, f)| (parts[pi].name.clone(), f))
+        .collect())
+}
+
+/// The assembled parts of a vehicle in assembly order: (part name, its `slotType`).
+pub fn assembled_parts(
+    files: &[(&str, &str)],
+    config: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut db = JbeamDb::default();
+    for (name, src) in files {
+        if let Err(e) = db.add_file(name, src) {
+            db.warnings.push(e);
+        }
+    }
+    let config = match config {
+        Some(c) => PcConfig::parse(c)?,
+        None => PcConfig::default(),
+    };
+    let parts = db.assemble(&config)?;
+    Ok(parts
+        .iter()
+        .map(|p| {
+            let ty = db.slot_type(&p.name).unwrap_or("").to_string();
+            (p.name.clone(), ty)
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -1755,6 +2330,34 @@ mod tests {
     }
     "#;
 
+    /// A fuel tank's fuel (`energyStorage`, spec §40): its starting volume × its
+    /// type's density, spread evenly over its `fuel` engine-group nodes; a variable
+    /// sets the volume; nodes outside the group keep their weight.
+    #[test]
+    fn fuel_tank_mass_spreads_over_its_fuel_nodes() {
+        let tank = |rows: &str| {
+            format!(
+                r#"{{"t": {{"slotType": "main",
+                "variables": [["name", "type", "unit", "category", "default", "min", "max"], ["$fuel", "range", "L", "c", 40, 0, 60]],
+                {rows}
+                "nodes": [["id", "posX", "posY", "posZ"], {{"nodeWeight": 5}},
+                    ["a", 0, 0, 0], {{"engineGroup": ["fuel"]}}, ["f1", 1, 0, 0], ["f2", 0, 1, 0],
+                    {{"engineGroup": ""}}, ["b", 0, 0, 1]],
+                "beams": [["id1:", "id2:"], ["a", "f1"], ["f1", "f2"], ["f2", "b"]]}}}}"#
+            )
+        };
+        let plain = load_jbeam(&[("t.jbeam", &tank(""))], None).unwrap();
+        assert!(plain.nodes.iter().all(|n| n.mass == 5.0));
+        let with = tank(
+            r#""energyStorage": [["type", "name"], ["fuelTank", "main"]],
+               "main": {"energyType": "diesel", "fuelCapacity": 60, "startingFuelCapacity": "$fuel", "fuel": {"[engineGroup]:": ["fuel"]}},"#,
+        );
+        let d = load_jbeam(&[("t.jbeam", &with)], None).unwrap();
+        let m: Vec<f32> = d.nodes.iter().map(|n| n.mass).collect();
+        let share = (40.0 * 0.84 / 2.0) as f32;
+        assert_eq!(m, vec![5.0, 5.0 + share, 5.0 + share, 5.0]);
+    }
+
     #[test]
     fn loads_parts_slots_variables_and_tables() {
         let pc = r#"{"format": 2, "mainPartName": "toycar", "parts": {"toycar_body": "toycar_body_soft"}, "vars": {"$stiff": 3}}"#;
@@ -1823,5 +2426,18 @@ mod tests {
         let d = load_jbeam(&[("toycar.jbeam", CAR)], Some(pc)).unwrap();
         assert_eq!(d.nodes.len(), 3, "stiff body, no wheels");
         assert!(d.wheels.is_empty());
+    }
+
+    #[test]
+    fn lbeam_third_node_in_row_options_with_the_node_colon() {
+        // BeamNG's L-beam page writes the third node as `{"id3:": …}` in the row.
+        let text = r#"{"lb": {"slotType": "main",
+            "nodes": [["id", "posX", "posY", "posZ"], ["a", 0, 0, 1], ["b", 1, 0, 1], ["c", 0, 1, 1]],
+            "beams": [["id1:", "id2:"], ["a", "c"], ["b", "c"], {"beamType": "|LBEAM"}, ["a", "b", {"id3:": "c"}]]}}"#;
+        let d = load_jbeam(&[("lb.jbeam", text)], None).unwrap();
+        let l: Vec<_> = d.elements.iter().filter(|e| e.kind == ElementKind::Lbeam).collect();
+        assert_eq!(l.len(), 1, "{:?}", d.warnings);
+        assert_eq!(l[0].nodes[2], 2);
+        assert!(!d.warnings.iter().any(|w| w.contains("LBEAM without id3")));
     }
 }

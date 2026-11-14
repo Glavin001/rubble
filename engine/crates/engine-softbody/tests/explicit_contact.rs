@@ -12,12 +12,18 @@ const EXACT: ExplicitBeamsSettings = ExplicitBeamsSettings {
     fast_inv_sqrt: false,
     drag: false,
     turbulence: false,
+    triangle_throttle: true,
+    centred_damping: false,
 };
 
 /// Unit-mass nodes at `points` with ground contact on (the ground far below), no
 /// drag.
+/// A vehicle of `points` with RoR's contact rule (these tests are the RoR
+/// reference specification's; two-body contact is spec §10.3's, tested in
+/// `explicit_contact_gpu.rs` and `energy_ledger.rs`).
 fn vehicle(points: &[Vec3]) -> ExplicitBeams {
     let mut s = ExplicitBeams::empty(EXACT);
+    s.two_body_contact = false;
     s.ground = -1.0e3;
     for &p in points {
         s.nodes.push(Node {
@@ -554,4 +560,106 @@ fn a_turned_spawn_turns_every_node_about_the_spawn_point() {
     assert!(q.distance(Vec3::new(0.0, 2.0, -1.0)) < 1e-6, "{q}");
     let q = yaw_offset(Vec3::new(0.0, 0.0, 1.0), 90.0);
     assert!(q.distance(Vec3::new(1.0, 0.0, 0.0)) < 1e-6, "{q}");
+}
+
+/// Anti-clip's side memory (jbeam-semantics-spec.md §36) is order free: a node keeps
+/// the two smallest words of the step's contacts whatever order they come in, and
+/// the node pass makes them the held ones.
+#[test]
+fn anti_clip_memory_keeps_the_two_smallest_whatever_the_order() {
+    let words = [
+        clip_word(3, 7, 1.0),
+        clip_word(0, 9, -1.0),
+        clip_word(CLIP_SELF, 2, 1.0),
+    ];
+    let mut held = Vec::new();
+    for order in [[0, 1, 2], [2, 1, 0], [1, 2, 0], [2, 0, 1]] {
+        let mut c = [CLIP_EMPTY; 4];
+        for k in order {
+            clip_record(&mut c, words[k]);
+        }
+        clip_roll(&mut c);
+        assert_eq!(c[2..], [CLIP_EMPTY; 2]);
+        held.push([c[0], c[1]]);
+    }
+    assert!(held.windows(2).all(|w| w[0] == w[1]));
+    let c = [held[0][0], held[0][1], CLIP_EMPTY, CLIP_EMPTY];
+    assert_eq!(clip_side(&c, 0, 9), Some(-1.0));
+    assert_eq!(clip_side(&c, 3, 7), Some(1.0));
+    assert_eq!(clip_side(&c, CLIP_SELF, 2), None);
+}
+
+/// A point at `speed` straight down through the immovable floor triangle of another
+/// vehicle (from 0.3 m above): where it is after 0.1 s.
+fn through_the_floor(speed: f32, anti: bool) -> f32 {
+    let mut owner = floor(Vec3::new(3.0, 3.0, 3.0));
+    owner.anti_clip = anti;
+    let mut p = point(Vec3::new(0.2, 0.3, 0.3), Vec3::new(0.0, -speed, 0.0));
+    p.nodes[0].flags |= NODE_NO_GROUND;
+    let mut w = ExplicitBeamsWorld::new(vec![owner, p]);
+    for _ in 0..200 {
+        w.step();
+    }
+    w.vehicles[1].origin.y + w.vehicles[1].nodes[0].pos.y
+}
+
+/// The anti-clip's swept test (§36): a point faster than the band per step (2 cm at
+/// 0.5 ms: 40 m/s) can step over the band and through the triangle; RoR's band test
+/// misses it, anti-clip catches it on the side it came from.
+#[test]
+fn anti_clip_catches_a_point_faster_than_the_band_per_step() {
+    for speed in [70.0, 100.0, 150.0] {
+        let (ror, anti) = (
+            through_the_floor(speed, false),
+            through_the_floor(speed, true),
+        );
+        println!("{speed} m/s: RoR y {ror:.3} m, anti-clip y {anti:.3} m");
+        assert!(
+            ror < -1.0,
+            "{speed} m/s: the band test lets it through ({ror})"
+        );
+        assert!(
+            anti > -0.01,
+            "{speed} m/s: anti-clip keeps it above ({anti})"
+        );
+    }
+}
+
+/// Self-collision's anti-clip (§36) and an anti-clip-only (NONCOLLIDABLE) triangle: a
+/// node falling onto a collision triangle rests at the band's edge; onto an
+/// anti-clip-only one it takes no force in front and is held at the plane.
+#[test]
+fn an_anti_clip_only_triangle_holds_a_node_at_its_plane() {
+    let rest = |only: bool, anti: bool| {
+        let mut s = vehicle(&[
+            Vec3::new(-1.0, 0.0, -1.0),
+            Vec3::new(1.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.05, 0.0),
+        ]);
+        s.settings.triangle_throttle = false;
+        for n in &mut s.nodes[..3] {
+            n.flags |= NODE_IMMOVABLE | NODE_ON_TRIANGLE;
+        }
+        s.nodes[3].flags |= NODE_CONTACTER | NODE_NO_GROUND;
+        s.nodes[3].vel = Vec3::new(0.0, -1.0, 0.0);
+        s.triangles.push(triangle([0, 1, 2]));
+        if only {
+            s.anti_only_tris = vec![true];
+        }
+        s.anti_clip = anti;
+        s.finish();
+        for _ in 0..2000 {
+            s.step();
+        }
+        s.nodes[3].pos.y
+    };
+    let (solid, only, off) = (rest(false, true), rest(true, true), rest(true, false));
+    println!("collision triangle y {solid:.4} m; anti-clip only {only:.4} m; its anti-clip off {off:.2} m");
+    assert!((solid - 0.02).abs() < 0.005, "at the band's edge: {solid}");
+    assert!(only.abs() < 0.005, "at the plane: {only}");
+    assert!(
+        off < -1.0,
+        "an anti-clip-only triangle does nothing without anti-clip: {off}"
+    );
 }

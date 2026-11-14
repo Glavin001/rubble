@@ -35,6 +35,7 @@
     <div class="row">
       <select id="sceneSel"></select>
       <select id="carSel" title="The vehicle every scene crashes"></select>
+      <select id="modSel" title="Converted BeamNG vehicles (community_cache: engine-webgpu/__mods)" hidden></select>
       <select id="xsceneSel" title="The explicit solver's scene" style="display:none"></select>
       <label class="file">Load .truck <input id="truckFile" type="file" accept=".truck,.load,.car,.trailer,.boat,.airplane,.fixed,.train" hidden /></label>
       <label class="file" title="A BeamNG vehicle folder (.jbeam parts, optional .pc config)">Load JBeam folder <input id="jbeamDir" type="file" webkitdirectory multiple hidden /></label>
@@ -71,18 +72,52 @@
     // This page keeps rendering, input, UI and its scene scripts; the .truck and JBeam
     // importers and the procedural vehicles (engine-vehicle-wasm via soft.mjs) are Rust
     // that only describe vehicles, which the page spawns through World.
-    import { createScene, sceneFromQuery, pollFrame as poll, drain, macrotask, saveState, errorText, hiresCarJbeam, explicitSedanTruck } from './rubble-world.mjs';
+    import { createScene, sceneFromQuery, pollFrame as poll, drain, macrotask, saveState, errorText, hiresCarJbeam, explicitSedanTruck, showcaseCar, FramePacer } from './rubble-world.mjs';
+    import { loadMod, modVisual, modTextures, LOCAL_MODS } from './beamng-mod.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
     import { loadTruck, loadJbeam, proceduralCarVisual, SOFT } from './soft.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
     import { createCarRenderer, LIGHTING_WGSL } from './car-render.mjs';
+    import { createCrashLabRenderer } from './crash-lab-render.mjs';
+    import { createCrashLab, LAB_PRESETS } from './crash-lab.mjs';
+    import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
+    import { createLoading, showFatal } from './load-progress.mjs';
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
-    const fail = (e) => { if (!errEl.textContent) errEl.textContent = errorText(e); statusEl.textContent = 'stopped'; window.__failed = String((e && e.message) || e); };
+    // Loading: each stage named where it runs (load-progress.mjs draws the card).
+    const loading = createLoading({ title: 'Loading Rubble', note: 'The first load compiles the GPU solver (up to about a minute); later loads hit the browser\'s shader cache.' });
+    loading.stage('Reading the scene');
+    const fail = (e) => {
+      if (!errEl.textContent) errEl.textContent = errorText(e);
+      statusEl.textContent = 'stopped';
+      window.__failed = String((e && e.message) || e);
+      loading.stop();
+      showFatal({ title: 'The simulation stopped', detail: String((e && e.message) || e), hint: 'Reload to start again. The full error is in the console and at the bottom of the page.' });
+    };
     addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
     addEventListener('error', (e) => fail(e.error || e.message));
 
     const qs = new URLSearchParams(location.search);
+    // What a scene or preset change keeps: the solver, the vehicle (built-in car,
+    // .truck, imported mod and configuration, wheels, JBeam mode) and the view and
+    // contact options.
+    const KEEP_KEYS = ['solver', 'car', 'style', 'res', 'truck', 'mod', 'pc', 'wheels', 'jbeamMode', 'tyres', 'drag', 'lab', 'drive', 'tex', 'skin', 'surfaceContact', 'fullContact', 'centredDamping'];
+    const keepVehicle = (s) => { for (const k of KEEP_KEYS) if (qs.has(k)) s.set(k, qs.get(k)); return s; };
+    window.__keepVehicle = keepVehicle;
+    // JBeam imports run in JBeam mode (BeamNG's rules) unless ?jbeamMode=truck.
+    const JBEAM_NATIVE = qs.get('jbeamMode') !== 'truck';
+    // Crash-lab presets (?preset=, crash-lab.mjs): the explicit solver's scene and
+    // its fields (the query's own values win), labels and camera.
+    // A ?xscene= other than the preset's own wins: the preset is dropped (it would
+    // otherwise force its scene back).
+    const LAB_PRESET = LAB_PRESETS[qs.get('preset')] && (!qs.has('xscene') || qs.get('xscene') === LAB_PRESETS[qs.get('preset')].xscene)
+      ? qs.get('preset') : null;
+    if (LAB_PRESET) {
+      const p = LAB_PRESETS[LAB_PRESET];
+      qs.set('solver', 'explicit');
+      qs.set('xscene', p.xscene);
+      for (const [k, v] of Object.entries(p.params)) if (!qs.has(k)) qs.set(k, String(v));
+    }
     const SCENES = {
       yard: 'Crash yard (drive)',
       wall: 'Crash test: rigid wall, 54 km/h',
@@ -120,26 +155,75 @@
       const r = await fetch(url);
       if (!r.ok) throw new Error(`?truck=${url}: ${r.status} ${r.statusText}`);
       importSrc = { kind: 'truck', text: await r.text(), label: url.split('/').pop() };
+    } else if (qs.get('mod')) {
+      // ?mod=<folder url>: a BeamNG vehicle folder served with a files.json
+      // (its files' paths): its .jbeam parts, a .pc (?pc= its name, else the
+      // first) and its .dae meshes (the crash lab draws its flexbodies), or a
+      // glTF render model with weighted skins (beamng-mod.mjs).
+      try { importSrc = await loadMod(qs.get('mod'), { pc: qs.get('pc') }); } catch (e) { console.warn(`${e.message} The sedan instead.`); const note = document.createElement('div'); note.className = 'panel'; note.style.cssText = 'bottom: 80px; left: 10px; max-width: 60ch; font: 12px system-ui, sans-serif'; note.textContent = `?mod=${qs.get('mod')} not found: the sedan instead. ${LOCAL_MODS}`; errEl.before(note); }
     } else if (qs.get('car') === 'import') {
       try { importSrc = JSON.parse(sessionStorage.getItem(IMPORT_KEY) || 'null'); } catch { importSrc = null; }
     }
     const CARS = { sedan: 'Car: procedural sedan (soft body)', buggy: 'Car: dune buggy (soft frame + rigid parts)', hires: 'Car: hi-res JBeam test car (1,110 nodes)' };
+    // Rubble's own authored sedan (engine_softbody::authoring; explicit solver only):
+    // its textured body skinned to the nodes. ?res= low|medium|high.
+    if (EXPLICIT) CARS.showcase = 'Car: Rubble showcase sedan (authored)';
     if (importSrc) CARS.import = `Car: ${importSrc.label} (imported)`;
     const carKind = importSrc ? 'import' : CARS[qs.get('car')] ? qs.get('car') : 'sedan';
     const buggy = carKind === 'buggy' && !EXPLICIT;
     const carSel = document.getElementById('carSel');
     for (const [id, t] of Object.entries(CARS)) carSel.add(new Option(t, id, false, id === carKind));
-    carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') u.searchParams.delete('truck'); location.href = u.href; };
+    carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') for (const k of ['truck', 'mod', 'pc', 'wheels']) u.searchParams.delete(k); location.href = u.href; };
+    // Converted community vehicles (community_cache writes __mods/index.json): every
+    // car and configuration; picking one loads it in JBeam mode on raycast wheels in
+    // this scene (explicit solver).
+    const modSel = document.getElementById('modSel');
+    fetch('/__mods/index.json').then((r) => (r.ok ? r.json() : [])).then((cars) => {
+      if (!cars.length) return;
+      modSel.hidden = false;
+      modSel.add(new Option('Converted BeamNG vehicles…', ''));
+      for (const c of cars) {
+        const g = document.createElement('optgroup');
+        g.label = `${c.label} (${c.megabytes} MB)${c.note ? ` · ${c.note}` : ''}`;
+        for (const k of c.configs) {
+          const mod = `/__mods/${c.folder}`;
+          g.appendChild(new Option(`${c.label} · ${k.pc.split('/').pop().replace(/\.pc$/, '')} (${k.nodes} nodes)${c.note || (k.rest && (k.rest.broken > 0 || k.rest.fastest > 1 || !k.rest.finite)) ? ' · marginal at rest' : ''}`, `${mod}|${k.pc}|${k.wheels ?? 1}`, false, qs.get('mod') === mod && qs.get('pc') === k.pc));
+        }
+        modSel.appendChild(g);
+      }
+    }).catch(() => {});
+    modSel.onchange = () => {
+      if (!modSel.value) return;
+      const [mod, pc, wheels] = modSel.value.split('|');
+      const u = new URL(location.href);
+      for (const k of ['car', 'truck', 'jbeamMode']) u.searchParams.delete(k);
+      u.searchParams.set('solver', 'explicit');
+      u.searchParams.set('mod', mod);
+      u.searchParams.set('pc', pc);
+      // Raycast wheels when it has wheels (a boat has none).
+      if (Number(wheels) > 0) u.searchParams.set('wheels', 'raycast');
+      else {
+        // No wheels (the yacht): its scene is the 15 m drop.
+        u.searchParams.delete('wheels');
+        u.searchParams.delete('xscene');
+        u.searchParams.set('preset', 'drop15');
+      }
+      location.href = u.href;
+    };
     // Query parameters a scene change keeps: the solver and the vehicle.
-    const keep = (u) => { for (const k of ['solver', 'car', 'truck']) if (qs.has(k)) u.searchParams.set(k, qs.get(k)); return u; };
+    const keep = (u) => { keepVehicle(u.searchParams); return u; };
     sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = keep(u).href; };
     const solverBtn = document.getElementById('solverBtn');
-    solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz (RoR parity) ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
+    // (The explicit label names its profile once the vehicles spawn: labelProfile.)
+    solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
     solverBtn.onclick = () => { const u = new URL(location.href); if (EXPLICIT) u.searchParams.delete('solver'); else u.searchParams.set('solver', 'explicit'); location.href = u.href; };
     // The explicit solver's scenes; each soft scene maps to the nearest.
-    const XSCENES = { idle: 'Explicit: at rest (L launches at 100 km/h)', coast: 'Explicit: coasting at 100 km/h', wall: 'Explicit: 100 km/h into a rigid wall', arena: 'Explicit: fleet arena (?n= vehicles, ?headOn= share)',
-      headon: 'Explicit: head-on, two cars (overlap)', tbone: 'Explicit: T-bone into a standing car', pole: 'Explicit: into a 20 cm pole',
-      sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar', drop: 'Explicit: drop test' };
+    // Speeds, angles and the rest are each scene's knobs (XPARAMS), not part of its name.
+    const XSCENES = { idle: 'Explicit: at rest (L launches)', coast: 'Explicit: coasting', wall: 'Explicit: into a rigid wall',
+      headon: 'Explicit: head-on, two cars', tbone: 'Explicit: T-bone into a car', pole: 'Explicit: into a 20 cm pole',
+      sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar', drop: 'Explicit: drop test',
+      arena: 'Explicit: fleet arena (many vehicles)', mdb214: 'Explicit: FMVSS 214 moving barrier', doorpull: 'Explicit: door pull',
+      yard: 'Explicit: drive yard (WASD, raycast wheels)', traffic: 'Explicit: traffic derby (self-driving, raycast wheels)' };
     // Explicit scenes' knobs (the solver's crash_scene and arena): [url key, label,
     // default, [min, max, step]]. km/h knobs go to the solver in m/s; angles in degrees.
     const KMH = [0, 200, 1], OVERLAP = [0.05, 1, 0.05], ANGLE = [-90, 90, 1], ALONG = [-2.5, 2.5, 0.05];
@@ -149,25 +233,74 @@
       headon: [['speed', 'car 1 km/h', 56, KMH], ['speed2', 'car 2 km/h', 56, KMH], ['overlap', 'overlap', 1, OVERLAP], ['angle', 'car 2 angle °', 0, ANGLE]],
       tbone: [['speed', 'striking km/h', 50, KMH], ['carSpeed', 'struck km/h', 0, KMH], ['at', 'hit at m', 0, ALONG], ['angle', 'angle °', 90, [0, 180, 1]]],
       pole: [['speed', 'km/h', 60, KMH], ['offset', 'offset m', 0, [-1.5, 1.5, 0.01]], ['angle', 'angle °', 0, ANGLE]],
-      sidepole: [['speed', 'km/h', 32, KMH], ['at', 'hit at m', 0, ALONG]],
+      sidepole: [['speed', 'km/h', 32, KMH], ['at', 'hit at m', 0, ALONG], ['angle', 'angle °', 90, [0, 180, 1]]],
       limbo: [['speed', 'km/h', 60, KMH], ['bar', 'bar height m', 1, [0.3, 2, 0.05]]],
       drop: [['height', 'height m', 8, [0.5, 40, 0.5]], ['speed', 'forward km/h', 0, KMH]],
       arena: [['n', 'vehicles', 256, [1, 4096, 1]], ['headOn', 'head-on share', 0, [0, 1, 0.05]], ['speedMin', 'min km/h', 90, KMH], ['speedMax', 'max km/h', 150, KMH]],
+      // FMVSS 214 S7: 33.5 mph (53.9 km/h), the barrier crabbed 27°.
+      mdb214: [['speed', 'barrier km/h', 53.9, KMH], ['crab', 'crab °', 27, [0, 45, 1]]],
+      doorpull: [['pullSpeed', 'pull m/s', 0.5, [0.05, 3, 0.05]], ['doorNodes', 'door nodes', 6, [1, 24, 1]], ['pullStiffness', 'pull N/m', 100000, [10000, 1000000, 10000]]],
+      traffic: [['cars', 'cars', 20, [1, 64, 1]]],
     };
-    const XCRASH = new Set(['wall', 'headon', 'tbone', 'pole', 'sidepole', 'limbo', 'drop']);
-    const XMAP = { yard: 'idle', crates: 'idle', traffic: 'idle', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
+    const XCRASH = new Set(['wall', 'headon', 'tbone', 'pole', 'sidepole', 'limbo', 'drop', 'mdb214', 'doorpull']);
+    const XMAP = { yard: 'yard', crates: 'idle', traffic: 'traffic', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
       wall: 'wall', pole: 'pole', sidepole: 'sidepole', tbone: 'tbone', headon: 'headon', limbo: 'limbo', sandwich: 'wall', import: 'wall', drop: 'drop' };
     const xscene = XSCENES[qs.get('xscene')] ? qs.get('xscene') : XMAP[scene];
     const ARENA = EXPLICIT && xscene === 'arena';
+    // Driving on the explicit solver: raycast wheels (engine_softbody::explicit_drive)
+    // in place of the beam tyres, WASD / gamepad, chase camera. The drive scenes use
+    // them; ?drive=1 turns them on in any explicit scene (beam tyres stay the crash
+    // scenes' default).
+    const XDRIVE = new Set(['yard', 'traffic']);
+    const DRIVE = EXPLICIT && (qs.has('drive') ? qs.get('drive') === '1' : XDRIVE.has(xscene));
+    // Raycast wheels: the drive scenes', or any explicit scene with ?wheels=raycast
+    // (a crash on the solver's own wheels, the body's rims riding them).
+    const RAYCAST = DRIVE || (EXPLICIT && qs.get('wheels') === 'raycast');
+    // Whether any vehicle of the explicit sim drives on raycast wheels.
+    const anyDrivable = () => !!xsim && !!xlayout && xlayout.vehicles.some((_, i) => xsim.drivable(i));
+    // A notice on the page (not an error).
+    const showNotice = (text) => {
+      const d = document.createElement('div');
+      d.textContent = text;
+      d.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:50;padding:8px 14px;border-radius:8px;background:rgba(20,28,48,.92);color:#fff;font:13px system-ui;';
+      document.body.appendChild(d);
+      console.warn(text);
+    };
+    // The page for an explicit scene with its default knobs: keeps the solver and the
+    // vehicle (and the lab's view options), drops any preset and the old scene's knobs.
+    const xsceneUrl = (id) => {
+      const u = new URL(location.href), s = new URLSearchParams();
+      keepVehicle(s);
+      s.set('solver', 'explicit'); s.set('xscene', id);
+      u.search = s.toString();
+      return u.href;
+    };
+    // The lab's pills for a scene from its knobs (presets carry their own).
+    const XPILL = { idle: () => 'AT REST', coast: () => `COASTING · ${P('xspeed', 100)} KM/H`, wall: () => `WALL · ${P('speed', 100)} KM/H`,
+      headon: () => `HEAD-ON · ${P('speed', 56)} + ${P('speed2', 56)} KM/H`, tbone: () => `T-BONE · ${P('speed', 50)} KM/H`,
+      pole: () => `POLE · ${P('speed', 60)} KM/H`, sidepole: () => `SIDE POLE · ${P('speed', 32)} KM/H · ${P('angle', 90)}°`,
+      limbo: () => `LOW BAR · ${P('speed', 60)} KM/H`, drop: () => `DROPPED FROM ${P('height', 8)} M`,
+      mdb214: () => `FMVSS 214 MDB · ${P('speed', 53.9)} KM/H · ${P('crab', 27)}° CRAB`, doorpull: () => `DOOR PULL · ${P('pullSpeed', 0.5)} M/S`,
+      yard: () => 'DRIVE YARD · WASD · SPACE HANDBRAKE', traffic: () => `TRAFFIC DERBY · ${P('cars', 20)} CARS` };
+    // The crash-test lab (crash-lab.mjs, crash-lab-render.mjs): the explicit solver's
+    // view with tube beams, node spheres, a ghost body, time control, impact time and
+    // node grabbing; ?lab=0 keeps the plain view (the arena always does).
+    // (The traffic derby has more cars than the lab reads per frame: the plain view.)
+    const LAB = EXPLICIT && !ARENA && xscene !== 'traffic' && qs.get('lab') !== '0';
     if (EXPLICIT) {
       const xs = document.getElementById('xsceneSel');
       for (const [id, t] of Object.entries(XSCENES)) xs.add(new Option(t, id, false, id === xscene));
       xs.style.display = '';
-      xs.onchange = () => { const u = new URL(location.href); u.searchParams.set('xscene', xs.value); location.href = u.href; };
+      xs.onchange = () => { location.href = xsceneUrl(xs.value); };
+      if (LAB) xs.style.display = 'none';
       document.getElementById('xkeys').style.display = '';
       for (const id of ['softKeys', 'presetSel']) document.getElementById(id).style.display = 'none';
       document.getElementById('infoTitle').innerHTML = '<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, Rigs of Rods parity</span>';
       document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams, soft tyres and self-collision, every step of a frame in one GPU submit; rendered from its buffers. Crash scenes with knobs (speeds, angles, overlap), static boxes, vehicle–vehicle contact and no drivetrain: driving, moving rigid bodies and the dune buggy are on the soft solver (button above).';
+      if (DRIVE) {
+        document.getElementById('infoText').textContent = 'Fixed 0.5 ms steps (2 kHz) of springs, plastic and breakable beams and self-collision, on raycast wheels (no tyre nodes: the soft solver\'s raycast vehicle as forces on the hub nodes, so the body bends and stays bent; the wheels are drawn from its state), every step of a frame in one GPU submit.';
+        document.getElementById('xkeys').innerHTML = '<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>R</kbd> restart · <kbd>V</kbd> beams · <kbd>C</kbd> camera · drag to orbit, wheel to zoom';
+      }
       // Only the explicit solver's own scenes and vehicles are offered: the soft
       // scenes (poles, moving barriers, ramps, drivers) need the World's rigid
       // bodies and drivetrains, which it does not couple to.
@@ -232,7 +365,8 @@
       for (const [k, unit, d, range] of fields) {
         const l = document.createElement('label'); l.className = 'p'; l.textContent = unit + ' ';
         const inp = document.createElement('input'); inp.id = 'p_' + k;
-        const v = here.has(k) ? here.get(k) : d;
+        // The query's value, or a lab preset's (merged into qs above), or the default.
+        const v = here.has(k) ? here.get(k) : qs.has(k) ? qs.get(k) : d;
         if (range) {
           // A slider with its value beside it; the scene rebuilds on release.
           const [min, max, step] = range;
@@ -249,7 +383,12 @@
         }
         row.appendChild(l);
       }
-      const run = () => { const u = new URLSearchParams(location.search); u.set(EXPLICIT ? 'xscene' : 'scene', pscene); for (const [k] of fields) u.set(k, document.getElementById('p_' + k).value); location.search = u.toString(); };
+      const run = () => {
+        const u = new URLSearchParams(location.search); u.set(EXPLICIT ? 'xscene' : 'scene', pscene);
+        for (const [k] of fields) u.set(k, document.getElementById('p_' + k).value);
+        if (LAB_PRESET) { const p = LAB_PRESETS[LAB_PRESET]; u.delete('preset'); for (const [k, v] of Object.entries(p.params)) if (!u.has(k)) u.set(k, String(v)); if (p.cam && !u.has('cam3')) u.set('cam3', p.cam); }
+        location.search = u.toString();
+      };
       if (fields.length) { const b = document.createElement('button'); b.textContent = EXPLICIT ? 'restart' : 'run'; b.onclick = run; row.appendChild(b); }
     }
 
@@ -270,13 +409,25 @@
     // and the traffic count), solver, material slots, soft settings and bodies. ?threshold=
     // scales the deform/break thresholds (1: the file's raw values), ?sweeps= particle
     // sweeps per iteration, ?rigid=0 turns off rigid mode (quiet cars riding their cores).
-    const sceneDef = await sceneFromQuery('soft', location.search);
+    // (qs, not location.search: a crash-lab ?preset= has set its solver, scene and knobs there.)
+    const sceneDef = await sceneFromQuery('soft', qs.toString());
     // A loaded vehicle (?truck=, or a file kept for this tab) is the scene's car.
     if (importSrc) Object.assign(sceneDef, { car: 'import', import: importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc ?? null } : { truck: importSrc.text } });
     // The world opens the device; the page renders on it and reads the world's buffers in place.
+    loading.stage('Loading the physics engine (wasm) and opening the GPU');
+    await loading.paint();
     const world = await createScene(sceneDef);
     const device = world.device();
-    device.lost.then((i) => fail('device lost: ' + i.message));
+    // A lost device (the GPU process restarted, a GPU reset or watchdog, memory):
+    // say so with the browser's reason, and offer the reload that makes a new one.
+    device.lost.then((i) => {
+      showFatal({
+        title: 'The GPU device was lost',
+        detail: `${i.reason}: ${i.message || '(no message)'}`,
+        hint: 'The browser took the WebGPU device away (its GPU process restarted, the GPU reset, or it ran out of memory). Reloading opens a new device. If it happens again, chrome://gpu has the browser\'s log.',
+      });
+      fail('device lost: ' + i.message);
+    });
     device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
     const canvas = document.getElementById('c');
     const context = canvas.getContext('webgpu');
@@ -296,11 +447,21 @@
     const simSteps = () => EXPLICIT ? Math.floor((xsim?.steps() ?? 0) * HZ / 2000) : world.simSteps();
     const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
 
-    // The vehicle's source for the explicit solver: `.truck` text or JBeam files. The
-    // procedural sedan is the same `.truck` text as on the soft solver.
+    // The vehicle's source for the explicit solver: `.truck` text or JBeam files (the
+    // procedural sedan is the same `.truck` text as on the soft solver), or the authored
+    // showcase sedan (?style=, ?res=; ?bind=, ?alt=0 measurement switches).
+    let showcaseCache = null;
+    const showcaseBuilt = () => showcaseCache ??= showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: qs.get('res') ?? 'medium',
+      ...(RAYCAST ? { wheels: 'raycast' } : {}),
+      // Measurement switches (a visual A/B on identical physics).
+      ...(qs.get('bind') ? { bind: qs.get('bind') } : {}), ...(qs.get('alt') === '0' ? { alt: false } : {}) });
     const hiresJbeam = carKind === 'hires' ? [['hires.jbeam', hiresCarJbeam()]] : null;
-    const vehicleSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
-      : carKind === 'import' ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc } : { truck: importSrc.text })
+    const vehicleSource = () => RAYCAST ? { ...baseSource(), wheels: 'raycast' } : baseSource();
+    const baseSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
+      // JBeam content runs in JBeam mode (BeamNG's rules: desc order, pressure wheels
+      // or raycast wheels); ?jbeamMode=truck: through the .truck export (RoR's rules).
+      : carKind === 'import' ? (importSrc.kind === 'jbeam' ? { jbeam: importSrc.files, pc: importSrc.pc, native: JBEAM_NATIVE } : { truck: importSrc.text })
+      : carKind === 'showcase' ? { truck: showcaseBuilt().truck }
       // The sedan as the acceptance runs build it (?tyres=0: its bare body).
       : { truck: explicitSedanTruck(qs.get('tyres') !== '0') };
     const softs = []; // {h, name, core, car, buggy}
@@ -326,11 +487,8 @@
     let xsim = null, xlayout = null;
     const XSPEED = (Number(qs.get('xspeed')) || 100) / 3.6;
     const XSPAWN = { wall: [0, -2 - runup], pole: [0, -2 - runup], limbo: [0, -2 - runup], headon: [0, -3 - runup / 2] };
-    const buildExplicit = () => {
-      xsim?.free();
-      // Its front face where the sedan's would be (CAR_FRONT ahead of the spawn).
-      const [x, z] = XSPAWN[scene] ?? [0, 0];
-      xsim = world.explicitSim({
+    // Its front face where the sedan's would be (CAR_FRONT ahead of the spawn).
+    const explicitSpec = (x, z) => ({
         vehicles: [{ ...vehicleSource(), at: [x, z + CAR_FRONT], front: true, yaw: 0 }], scene: xscene, speed: XSPEED,
         // arena: ?n= copies of the vehicle at 90–150 km/h into walls, poles and (?headOn=
         // share of lanes) each other, or (?layout=ring) all at the centre from concentric
@@ -338,15 +496,56 @@
         // The scene's fields (XPARAMS), km/h to m/s.
         ...Object.fromEntries((XPARAMS[xscene] || []).filter(([k]) => k !== 'n' && k !== 'xspeed').map(([k, label, d]) => [k, P(k, d) / (label.includes('km/h') ? 3.6 : 1)])),
         ...(xscene === 'arena' ? { count: P('n', 256), headOn: P('headOn', 0), ...(qs.has('cols') ? { cols: P('cols', 0) } : {}), ...(qs.has('hitMax') ? { hitMax: P('hitMax', 1.2) } : {}), layout: qs.get('layout') === 'ring' ? 'ring' : 'rows', ringRadius: P('ringRadius', 30) } : {}),
+        // ?runUp= m: the crash scenes' gap to what they hit (default 1 + v/2 s).
+        ...(qs.has('runUp') ? { runUp: P('runUp', 0) } : {}),
+        ...(xscene === 'traffic' && qs.has('ai') ? { ai: qs.get('ai') } : {}),
         // ?drag=0: no per-node air drag or turbulence (as the acceptance runs).
         drag: qs.get('drag') !== '0',
+        // ?surfaceContact=1: collision triangles meet the boxes and shapes by their
+        // surface too (jbeam-semantics-spec.md §38; off by default).
+        surfaceContact: qs.get('surfaceContact') === '1',
+        // ?centredDamping=0/1: the BeamNG profile's centred damping (jbeam-semantics-spec.md
+        // §39) off or on; absent, the profile's default.
+        ...(qs.has('centredDamping') ? { centredDamping: qs.get('centredDamping') !== '0' } : {}),
       });
+    const buildExplicit = () => {
+      xsim?.free();
+      const [x, z] = XSPAWN[scene] ?? [0, 0];
+      xsim = world.explicitSim(explicitSpec(x, z));
       xlayout = xsim.layout();
+      labelProfile();
+      // Raycast wheels asked for but the vehicle has none (a boat, a bare body):
+      // it spawned without them; say so (not an error).
+      if (RAYCAST && !anyDrivable()) showNotice('This vehicle has no wheels: it is not drivable here (try the 15 m drop).');
       return xsim;
     };
+    // The profile each vehicle actually runs (layout.vehicles[].profile), on the
+    // solver button and the title: after the first (async) build and every restart.
+    const labelProfile = () => {
+      const prof = [...new Set(xlayout.vehicles.map((v) => ({ beamng: 'BeamNG profile', ror: 'RoR parity' })[v.profile] ?? v.profile))].join(' + ');
+      solverBtn.textContent = `solver: explicit 2 kHz (${prof}) ⇄ soft`;
+      document.getElementById('infoTitle').innerHTML = `<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, ${prof}</span>`;
+    };
     if (EXPLICIT) {
-      buildExplicit();
-      camMode = 'orbit'; orbit = ARENA ? { yaw: 0.7, pitch: 0.55, dist: 650, target: [0, 1, xlayout.boxes.length ? xlayout.boxes.reduce((a, b) => a + b[2], 0) / xlayout.boxes.length : 0] } : { yaw: 2.2, pitch: 0.3, dist: 11, target: null };
+      // First build: the vehicle spawned in Rust, then its GPU kernels compiled
+      // without blocking (explicitSimAsync, so Chrome's GPU watchdog never fires);
+      // a restart's buildExplicit is a cache hit. The world renders the sim's static
+      // shapes (placeScene's explicitBoxes, below).
+      const [x, z] = XSPAWN[scene] ?? [0, 0];
+      if (carKind === 'showcase') { loading.stage('Building the car (Rust)'); await loading.paint(); showcaseBuilt(); }
+      let kernels = 0, compiled = 0;
+      xsim = await world.explicitSimAsync(explicitSpec(x, z), (stage) => {
+        const [what, a, b] = stage.split(' ');
+        if (what === 'spawn') loading.stage('Spawning the vehicles (Rust)');
+        else if (what === 'compile') { kernels = Number(a); loading.stage(`Compiling ${kernels} GPU solver kernels`); }
+        // Each module as it finishes (in parallel: ms since the compiles began).
+        else if (what === 'compiled') loading.item(a, Number(b), `Compiling GPU solver kernels (${++compiled} of ${kernels} done)`);
+      });
+      xlayout = xsim.layout();
+      labelProfile();
+      if (RAYCAST && !anyDrivable()) showNotice('This vehicle has no wheels: it is not drivable here (try the 15 m drop).');
+      // Driving: the chase camera behind the player (C cycles, as on the soft solver).
+      camMode = DRIVE ? 'chase' : 'orbit'; orbit = ARENA ? { yaw: 0.7, pitch: 0.55, dist: 650, target: [0, 1, xlayout.boxes.length ? xlayout.boxes.reduce((a, b) => a + b[2], 0) / xlayout.boxes.length : 0] } : { yaw: 2.2, pitch: 0.3, dist: 11, target: null };
     }
     // The explicit solver collides with its own copies of its static shapes; the world
     // holds them only to render (not soft obstacles: the arena has hundreds).
@@ -378,7 +577,10 @@
     if (!EXPLICIT && scene === 'limbo') camMode = 'left'; // third person from the left, to watch the roof go
     else if (!EXPLICIT && CAMS[scene]) { camMode = 'orbit'; orbit = CAMS[scene]; }
     const truckInfo = document.getElementById('truckInfo');
+    loading.stage('Saving the initial state (waits for the GPU)');
     const initial = await saveState(world);
+    loading.stage('Building the renderers');
+    await loading.paint();
 
     // ---------------------------------------------------------------- render data
     // Skin: every soft triangle (global particle indices) with its rest edge lengths.
@@ -486,6 +688,8 @@ const HIDE = vec4f(0.0, 0.0, 2.0, 1.0);
   let dyn = b.invMass > 0.0 && (b.flags & 1u) != 0u;
   if (!dyn) {
     o.c = select(vec3f(0.55, 0.56, 0.6), vec3f(0.85, 0.75, 0.2), col.shape == 1u);
+    // The crash lab's studio (opts.y): dark slate obstacles.
+    if (frame.opts.y > 0.5) { o.c = vec3f(0.2, 0.24, 0.32); }
   } else if (col.shape == 0u) {
     o.c = vec3f(0.2, 0.22, 0.25);
   } else {
@@ -665,7 +869,12 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
 @group(0) @binding(15) var<storage, read> xtris: array<vec4u>;
 @group(0) @binding(16) var<storage, read> xrecs: array<vec4u>;
 @group(0) @binding(17) var<storage, read> xbeams: array<vec4f>;
-fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xmisc[v].xyz); }
+// frame.opts.z: the frame's lead (FramePacer.lead, simulated seconds past the last
+// step): positions carried forward by their velocity (visual only).
+fn xpos(i: u32, v: u32) -> vec3f {
+  let p = xnodes[i * 3u].xyz + bitcast<vec3f>(xmisc[v].xyz);
+  return select(p, p + xnodes[i * 3u + 1u].xyz * frame.opts.z, frame.opts.z > 0.0);
+}
 // The collision skin: panels go dark with strain, a triangle past 1.8× its spawn
 // edges reads as torn and is dropped.
 @vertex fn vsXSkin(@builtin(vertex_index) vi: u32) -> Out {
@@ -842,6 +1051,58 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       };
       return xBinds;
     };
+    const labR = LAB ? createCrashLabRenderer({ device, format, sampleCount: SAMPLES, frameBuf, shadowView, shadowSampler }) : null;
+    labR?.setSim(xsim, xlayout);
+    // The showcase sedan's body, skinned from the lab's node positions (live and replay).
+    // Or an imported JBeam vehicle's flexbodies and props (?mod=).
+    let importVis = null;
+    const bodyVisual = () => carKind === 'showcase' ? (() => { const b = showcaseBuilt(); b.visual.lod ??= [b.visualLod, b.visualFar]; return b.visual; })()
+      : (importVis ??= (() => { const r = modVisual(importSrc, { native: JBEAM_NATIVE, raycast: RAYCAST }); console.log('flexbodies', r.report); window.__flexReport = r.report; loadBodyTextures(r.visual); return r.visual; })());
+    // An imported body's colour and data maps (normal, roughness, AO; decoded
+    // in the wasm), uploaded once they arrive; until then it shades untextured.
+    const loadBodyTextures = (vis) => {
+      if (!importSrc.base || qs.get('tex') === '0') return;
+      if (vis.textures?.length) modTextures(importSrc, vis.textures).then((layers) => bodyR.setTextures(layers, 1024));
+      if (vis.dataTextures?.length) modTextures(importSrc, vis.dataTextures).then((layers) => bodyR.setDataTextures(layers, 1024));
+    };
+    const bodyR = LAB && (carKind === 'showcase' || importSrc?.meshes?.length || importSrc?.skin) ? createShowcaseCarRenderer(device, { format, depthFormat: 'depth24plus', sampleCount: SAMPLES }) : null;
+    let bodyFor = { layout: null, pos: null }, bodyIds = [];
+    const syncBody = () => {
+      const pos = labR.positionsBuffer();
+      if (!pos) return false;
+      if (bodyFor.layout !== xlayout) {
+        for (const id of bodyIds) bodyR.removeCar(id);
+        // The body goes on the vehicles it was built for (vehicle 0's kind): a
+        // scene's other bodies (the FMVSS 214 barrier) are drawn solid, and
+        // beams a rig added past the body's own (the door pull's cables) as cables.
+        const vis = bodyVisual();
+        const own = (v) => v.name === xlayout.vehicles[0].name && v.nodes >= vis.nodeCount;
+        bodyIds = xlayout.vehicles.filter(own).map((v) => bodyR.addCar(vis, { nodeOffset: v.nodeOffset, beamOffset: v.beamOffset, vehicle: xlayout.vehicles.indexOf(v), lod: vis.lod ?? null,
+          // Drive mode: the wheels' pieces ride the raycast wheels' records.
+          wheelRecords: RAYCAST ? xsim.wheelRecords(xlayout.vehicles.indexOf(v)) : null }));
+        let tri = 0;
+        const solidTris = [];
+        let cables = [0, 0];
+        for (const v of xlayout.vehicles) {
+          if (!own(v)) solidTris.push([tri, v.triangles]);
+          else if (v.beams > vis.beamRest0.length && cables[1] === 0) cables = [v.beamOffset + vis.beamRest0.length, v.beamOffset + v.beams];
+          tri += v.triangles;
+        }
+        labR.set({ solidTris, cables });
+        bodyFor.step = null;
+        bodyFor.layout = xlayout;
+      }
+      if (bodyFor.pos !== pos || bodyFor.sim !== xsim) { bodyR.setPositions(pos, labR.restBuffer(), RAYCAST ? xsim.miscBuffer() : null); bodyFor.pos = pos; bodyFor.sim = xsim; }
+      return true;
+    };
+    const bodyOn = () => bodyR && labR.opts.skin === 'body';
+    const LAB_REFLECT = qs.has('labReflect') ? Number(qs.get('labReflect')) || 0 : 0.16;
+    // The explicit solver's frame pacing (explicitFrame; ?minFps=N a frame-rate floor).
+    const pacer = new FramePacer(2000, Number(qs.get('minFps')) || 0);
+    // The live frame's lead (FramePacer.lead: simulated seconds past its last step,
+    // what the renderer and camera carry the state forward by; 0 in automation).
+    let xLead = 0;
+    let lab = null, labDt = 0, labView = { vp: new Float32Array(16), eye: [0, 0, 0] };
     let flexShadowBind = null, skinBind = null;
     // The world's buffers can be replaced when they grow: rebind when one is a new object.
     let bound = [], wheelBind = null, wheelShadowBind = null, groundBind = null, beamBind = null;
@@ -868,7 +1129,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     let depth = null, msaa = null;
     let beamView = qs.get('beams') === '1';
     document.getElementById('beamsBtn').onclick = (e) => { beamView = !beamView; e.target.blur(); };
-    document.getElementById('resetBtn').onclick = (e) => { resetScene(); e.target.blur(); };
+    document.getElementById('resetBtn').onclick = (e) => { if (lab) lab.restart(); else resetScene(); e.target.blur(); };
 
     // ---------------------------------------------------------------- camera / input
     let camEye = [0, 6, -14], camTarget = [0, 1, 0];
@@ -1072,7 +1333,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     }
     function resetScene() {
       resetGen++;
-      if (EXPLICIT) { buildExplicit(); xAcc = 0; xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; return; }
+      if (EXPLICIT) { buildExplicit(); pacer.reset(1); xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; if (lab) { lab.rebuilt(); lab.read(); } return; }
       if (crusher) { crusher.start = null; crusher.reading = false; crusher.heavy = false; }
       world.restoreState(initial);
       while (softs.length > initialSoftCount) softs.pop();
@@ -1194,14 +1455,75 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // The player's body, then the camera's target and source subjects (a
     // non-blocking read, one in flight): poses and velocities.
     let poseRead = null;
+    // Raycast wheels are drawn as static boxes of the World (render only: the
+    // explicit solver meets its own copies of the scene), posed from readDrive.
+    const wheelBodies = [];
+    // A rotation (x, y, z, w) whose +Z is `f` and +Y is `u` (orthonormalised).
+    function quatFromBasis(f, u) {
+      const z = norm3(f), x = norm3(cross3(u, z)), y = cross3(z, x);
+      const [m00, m01, m02, m10, m11, m12, m20, m21, m22] = [x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]];
+      const t = m00 + m11 + m22;
+      if (t > 0) { const s = Math.sqrt(t + 1) * 2; return [(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s]; }
+      if (m00 > m11 && m00 > m22) { const s = Math.sqrt(1 + m00 - m11 - m22) * 2; return [0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s]; }
+      if (m11 > m22) { const s = Math.sqrt(1 + m11 - m00 - m22) * 2; return [(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s]; }
+      const s = Math.sqrt(1 + m22 - m00 - m11) * 2; return [(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s];
+    }
+    // Wheels drawn at the last read (the automation's check).
+    let wheelsDrawn = 0;
+    function drawWheels(d) {
+      wheelsDrawn = d.vehicles.reduce((n, v) => n + (v?.wheels.length ?? 0), 0);
+      // The showcase body draws its own wheels from the drive state (skin.rs
+      // bind_raycast_wheels): no stand-in boxes.
+      // An imported body with wheel pieces on the raycast wheels (flexmesh) too.
+      if (bodyR && (carKind === 'showcase' || (importSrc && bodyVisual().rigid?.some((r) => r >= 2)))) return;
+      d.vehicles.forEach((v, i) => {
+        if (!v) return;
+        wheelBodies[i] ??= [];
+        v.wheels.forEach((w, k) => {
+          // A box R × R × width (the page draws colliders as boxes), its local +X
+          // along the axle, turned about it by the wheel's spin.
+          const fw = cross3(w.axle, w.up), c = Math.cos(w.spin), s = Math.sin(w.spin);
+          const z = [0, 1, 2].map((a) => fw[a] * c - w.up[a] * s), y = [0, 1, 2].map((a) => w.up[a] * c + fw[a] * s);
+          const q = quatFromBasis(z, y);
+          if (!wheelBodies[i][k]) {
+            const body = world.createBody({ position: w.centre, rotation: q });
+            // Render only (the prop material's friction, as the scene's static props).
+            world.createShape(body, { material: { friction: 0.6 } }, { box: { half: [w.width / 2, w.radius, w.radius] } });
+            wheelBodies[i][k] = body;
+          }
+          world.bodySetType(wheelBodies[i][k], 'static', w.centre, q, [0, 0, 0], [0, 0, 0]);
+        });
+      });
+    }
     function readPoses() {
       if (poseRead) return poseRead;
+      if (RAYCAST && anyDrivable()) {
+        const sim = xsim, step = simSteps(), xstep = sim.steps();
+        poseRead = sim.readDrive().then((d) => {
+          poseRead = null;
+          if (sim !== xsim) return;
+          drawWheels(d);
+          const me = d.vehicles[player];
+          if (!me) return;
+          frameTrace?.poses.push({ step: xstep, p: me.centre.slice(), speed: me.speed, at: performance.now() });
+          // The rates the camera carries the pose forward with (updateCamera): from
+          // the previous read, the body's own velocity (sliding too) and how its
+          // axes turn.
+          const prev = lastPlayer?.xstep < xstep && xstep - lastPlayer.xstep <= 400 && lastPlayer.fw ? lastPlayer : null;
+          const per = prev ? 2000 / (xstep - prev.xstep) : 0;
+          const rate = (a, b) => a.map((x, i) => (x - b[i]) * per);
+          lastPlayer = { p: me.centre, q: quatFromBasis(me.forward, me.up), v: me.forward.map((x) => x * me.speed), step, xstep, speed: me.speed,
+            fw: me.forward, up: me.up, vel: prev ? rate(me.centre, prev.p) : null, dfw: prev ? rate(me.forward, prev.fw) : null, dup: prev ? rate(me.up, prev.up) : null };
+          camTargetPose = camFromPose = lastPlayer;
+        }, (e) => { poseRead = null; throw e; });
+        return poseRead;
+      }
       if (EXPLICIT) {
-        const sim = xsim, step = simSteps();
+        const sim = xsim, step = simSteps(), xstep = sim.steps();
         poseRead = sim.readPoses().then((f) => {
           poseRead = null;
           if (sim !== xsim) return;
-          lastPlayer = { p: [f[0], f[1], f[2]], q: [0, 0, 0, 1], v: [f[3], f[4], f[5]], step };
+          lastPlayer = { p: [f[0], f[1], f[2]], q: [0, 0, 0, 1], v: [f[3], f[4], f[5]], step, xstep };
           camTargetPose = camFromPose = lastPlayer;
         }, (e) => { poseRead = null; throw e; });
         return poseRead;
@@ -1252,7 +1574,8 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     function updateHud() {
       if (EXPLICIT) {
         const d = damage?.[0];
-        xstatsEl.innerHTML = `explicit 2 kHz · ${xLastSteps} steps/frame${xlayout.wide ? ' · wide' : ''}<br>GPU ${xGpuMs == null ? '…' : (xGpuApprox ? '≈' : '') + xGpuMs.toFixed(2)} ms/frame`
+        const pace = !manual && pacer.speed() < 0.97 ? ` · <b>${Math.round(pacer.speed() * 100)} % pace</b> (GPU behind)` : '';
+        xstatsEl.innerHTML = `explicit 2 kHz · ${xLastSteps} steps/frame${xlayout.wide ? ' · wide' : ''}${pace}<br>GPU ${xGpuMs == null ? '…' : (xGpuApprox ? '≈' : '') + xGpuMs.toFixed(2)} ms/frame`
           + (d ? `<br>${d.broken} broken · ${d.yielded} bent / ${d.beams} beams` : '') + xnote;
       } else {
         xstatsEl.textContent = `soft AVBD · ${HZ} Hz × ${ITERS} it`;
@@ -1304,8 +1627,17 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     function updateCamera(dt, snap) {
       // Views on a subject (its pose read back each frame): level (yaw only)
       // except the driver's seat and the mount, which ride its full orientation.
-      // Poses are a few steps old by the time they arrive: carry them forward.
-      const lead = (P) => P && { ...P, p: P.p.map((x, i) => x + P.v[i] * Math.max(0, simSteps() - (P.step ?? simSteps())) / HZ) };
+      // Poses are a few steps old by the time they arrive: carry them forward to the
+      // step on display (the explicit solver's own 2 kHz steps, not the soft rate's).
+      const age = (P) => P.xstep != null && xsim ? Math.max(0, xsim.steps() - P.xstep) / 2000 + (manual ? 0 : xLead) : Math.max(0, simSteps() - (P.step ?? simSteps())) / HZ;
+      const lead = (P) => {
+        if (!P) return P;
+        const a = age(P), v = P.vel ?? P.v;
+        if (!(a > 0)) return P;
+        // A drive pose turns too: its axes carried by their rates.
+        const q = P.dfw ? quatFromBasis(P.fw.map((x, i) => x + P.dfw[i] * a), P.up.map((x, i) => x + P.dup[i] * a)) : P.q;
+        return { ...P, p: P.p.map((x, i) => x + v[i] * a), q };
+      };
       const T = lead(camTargetPose), F = lead(camFromPose);
       let at = camMode === 'orbit' && orbit.target ? orbit.target : lastPlayer ? [lastPlayer.p[0], lastPlayer.p[1] + 0.6, lastPlayer.p[2]] : camTarget;
       let desiredE;
@@ -1338,8 +1670,12 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         const cp = Math.cos(orbit.pitch);
         desiredE = [at[0] + orbit.dist * cp * Math.sin(orbit.yaw), at[1] + orbit.dist * Math.sin(orbit.pitch), at[2] + orbit.dist * cp * Math.cos(orbit.yaw)];
       }
+      // Exponential follow, the same per second at any frame rate: the eye keeps
+      // 0.2 % of its offset after a second, the target four times as fast.
+      // Automation (recordings: frame-stepped) keeps its own easing, unchanged.
       const k = snap || rigid ? 1 : 1 - Math.pow(0.002, dt);
-      camTarget = camTarget.map((x, i) => x + (at[i] - x) * Math.min(1, k * 4));
+      const kt = snap || rigid ? 1 : manual ? Math.min(1, k * 4) : 1 - Math.pow(0.002, 4 * dt);
+      camTarget = camTarget.map((x, i) => x + (at[i] - x) * kt);
       camEye = camEye.map((x, i) => x + (desiredE[i] - x) * k);
       if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
         depth?.destroy(); msaa?.destroy();
@@ -1347,10 +1683,11 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         msaa = device.createTexture({ size: [canvas.width, canvas.height], format, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
       }
       const vp = viewProj(camEye, camTarget, canvas.width / canvas.height);
+      labView = { vp, eye: camEye.slice() };
       frameF.set(vp, 0);
       frameF.set([...camEye, 0], 16);
       frameF.set([...LIGHT, 0], 20);
-      frameF.set([beamView ? 1 : 0, 0, 0, 0], 24);
+      frameF.set([beamView ? 1 : 0, LAB && labR.opts.studio ? 1 : 0, manual ? 0 : xLead, 0], 24);
       frameF.set(lightViewProj(camTarget), 28);
       frameF.set(mat4Inv(vp), 44);
       device.queue.writeBuffer(frameBuf, 0, frameF);
@@ -1367,12 +1704,22 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       // Particle effects (sparks, shards, chips, dust) are off by default so the
       // deformation reads clearly; ?fx=1 turns them on.
       if (flexMode) carR.compute(enc, FX ? fxDt : 0);
+      if (lab) lab.beforeDraw(enc, labDt, manual ? null : xLead);
+      if (bodyOn() && syncBody()) {
+        // The simulated time shown since the last frame (live or replayed;
+        // 0 when paused or scrubbed back: no debris, no wear).
+        const step = lab?.shownStep() ?? 0;
+        const dt = bodyFor.step === null ? 0 : (step - bodyFor.step) / 2000;
+        bodyFor.step = step;
+        bodyR.update(enc, { dt, floorY: labR.opts.floorY, boxes: xlayout.boxes });
+      }
       // Sun shadow map.
       const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
       refreshColliders();
       if (colIdxN) { sp.setPipeline(colShadow); sp.setBindGroup(0, colShadowBind); sp.setVertexBuffer(0, cubeVbo); sp.draw(36, colIdxN); }
       if (world.wheelCount()) { sp.setPipeline(wheelShadow); sp.setBindGroup(0, wheelShadowBind); sp.setVertexBuffer(0, cylVbo); sp.draw(cyl.length / 6, world.wheelCount()); }
-      if (xsim) { sp.setPipeline(xSkinShadow); sp.setBindGroup(0, xBindings().shadow); sp.draw(xlayout.triangles * 3); }
+      if (xsim && LAB) labR.drawShadow(sp);
+      else if (xsim) { sp.setPipeline(xSkinShadow); sp.setBindGroup(0, xBindings().shadow); sp.draw(xlayout.triangles * 3); }
       if (flexMode) {
         carR.drawShadow(sp);
         if (flexCount) {
@@ -1385,8 +1732,18 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         colorAttachments: [{ view: msaa.createView(), resolveTarget: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'discard' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
-      rp.setPipeline(skyPipe); rp.setBindGroup(0, skyBind); rp.draw(3);
-      rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
+      if (LAB && labR.opts.studio) {
+        // The showcase body reflected in the lab's floor (?labReflect=0 off,
+        // =0.2 its reflectance): the floor then leaves no depth behind.
+        const refl = xsim && bodyOn() && bodyFor.pos ? LAB_REFLECT : 0;
+        if (labR.opts.reflect !== refl > 0) labR.set({ reflect: refl > 0 });
+        labR.drawBackground(rp);
+        if (refl > 0) bodyR.drawReflection(rp, { viewProj: labView.vp, eye: labView.eye, light: LIGHT, strength: refl, floorY: labR.opts.floorY });
+      }
+      else {
+        rp.setPipeline(skyPipe); rp.setBindGroup(0, skyBind); rp.draw(3);
+        rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
+      }
       if (colIdxN) { rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, colIdxN); }
       if (flexMode) {
         carR.drawOpaque(rp);
@@ -1396,7 +1753,12 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         }
       } else if (triCount) { rp.setPipeline(skinPipe); rp.setBindGroup(0, skinBind); rp.draw(triCount * 3); }
       if (beamView && beamTotal) { rp.setPipeline(beamPipe); rp.setBindGroup(0, beamBind); rp.draw(2, beamTotal); }
-      if (xsim) {
+      // The lab's skeleton, nodes, solid skin and grab line. A textured body skinned
+      // to the nodes (the showcase car renderer) draws here too, from
+      // labR.positionsBuffer() (live and replayed positions alike).
+      if (xsim && LAB) labR.drawOpaque(rp);
+      if (xsim && bodyOn() && bodyFor.pos) bodyR.draw(rp, { viewProj: labView.vp, eye: labView.eye, light: LIGHT, height: canvas.height });
+      else if (xsim) {
         const xb = xBindings();
         rp.setPipeline(xSkinPipe); rp.setBindGroup(0, xb.skin); rp.draw(xlayout.triangles * 3);
         rp.setPipeline(xBeamPipe); rp.setBindGroup(0, xb.beam); rp.draw(4 * xlayout.beams);
@@ -1404,6 +1766,7 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
       if (world.wheelCount()) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.wheelCount()); }
       buggyR?.draw(rp);
       if (flexMode) { carR.drawGlass(rp); if (FX) carR.drawFx(rp); }
+      if (LAB) labR.drawTransparent(rp);
       rp.end();
     }
     // Steps run right before each one is taken: the tbone scene's ram launch.
@@ -1426,24 +1789,51 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // known state: ?stopAt=0 leaves every step to __step).
     const stopAt = qs.has('stopAt') ? Number(qs.get('stopAt')) : Infinity;
     let stepAcc = 0, simAcc = 0, wallAcc = 0, realTime = 1;
-    // Explicit solver frames: 2,000 steps per second of wall time (a slow frame
-    // catches up with up to twice its share, as the soft loop does), each frame's
-    // steps in one submit; its GPU time from timestamps a few times a second.
+    // Explicit solver frames: 2,000 steps per second of wall time, paced by Rust's
+    // FramePacer (frame_pacer.rs: a fixed-step accumulator, whole steps with the
+    // remainder carried, so a frame's simulated time is its wall time; real time at
+    // any frame rate down to 20 fps, past which the physics slows and the HUD says
+    // so; slow motion eased in and out), each frame's steps in one submit; its GPU
+    // time from timestamps a few times a second. ?minFps=N: a frame-rate floor
+    // instead (60: every frame of a 60 Hz display, the physics slower on a GPU
+    // that cannot keep real time there), the GPU time its budget.
     const XRATE = 2000, XSTEPS = Math.round(XRATE / 60);
-    let xAcc = 0, xFrameN = 0, xGpuMs = null, xGpuApprox = false, xTimesRead = null, xLastSteps = 0;
+    let xFrameN = 0, xGpuMs = null, xGpuApprox = false, xTimesRead = null, xLastSteps = 0, xStepsSince = 0, xCallsSince = 0;
+    // Automation's scripted driver input (window.__explicit.drive), else the keys.
+    let driveOverride = null;
     function explicitFrame(dt) {
-      xAcc += Math.max(0, dt) * XRATE;
-      const steps = Math.max(0, Math.min(Math.floor(xAcc), 2 * XSTEPS, xsim.maxFrameSteps()));
-      xAcc = Math.min(xAcc - steps, XSTEPS);
+      let steps;
       const t0 = performance.now();
-      xsim.frame(steps);
+      // Driving: the keys and gamepad go to the player's raycast wheels (Rust does the rest).
+      if (DRIVE && xsim.drivable(player)) {
+        const i = driveOverride ?? readInput();
+        // Self-driving scenes: the keys take over the player's car for 3 s after a touch.
+        if (i.forward || i.steer || i.handbrake) userUntil = performance.now() + 3000;
+        const user = !xsim.selfDriving() || performance.now() < userUntil || driveOverride;
+        if (user) xsim.setDriveInput(player, i.forward ?? 0, i.steer ?? 0, i.brake ?? 0, i.handbrake ?? 0);
+        if (xsim.selfDriving()) xsim.autopilot(Math.max(0, dt), user ? player : -1);
+      }
+      if (lab) {
+        // The lab's clock (slow motion, pause, stepping); the steps of a frame in
+        // chunks, each followed by a frame-state read (impact, recording, picking).
+        steps = lab.stepsFor(dt, xsim.maxFrameSteps());
+        for (const k of lab.chunks(steps)) if (k) { xsim.frame(k); xCallsSince++; lab.read(); }
+      } else {
+        steps = pacer.advance(dt, 1, xsim.maxFrameSteps());
+        xsim.frame(steps);
+        if (steps) xCallsSince++;
+      }
       xLastSteps = steps;
-      if (++xFrameN % 30 === 0 && !xTimesRead) {
-        const sim = xsim;
+      xStepsSince += steps;
+      if (++xFrameN % 15 === 0 && !xTimesRead && steps) {
+        // The budget's GPU cost: the timed solver frames' mean (a lab frame submits
+        // its steps in chunks) for their mean steps.
+        const sim = xsim, calls = xCallsSince, taken = xStepsSince;
+        xStepsSince = 0; xCallsSince = 0;
         // Without timestamp queries: submit-to-done time of this frame (an upper bound).
         xTimesRead = sim.timed()
-          ? sim.readFrameTimes().then((t) => { if (t.length && sim === xsim) xGpuMs = t.reduce((a, b) => a + b, 0) / t.length; })
-          : device.queue.onSubmittedWorkDone().then(() => { xGpuMs = performance.now() - t0; xGpuApprox = true; });
+          ? sim.readFrameTimes().then((t) => { if (t.length && sim === xsim) { xGpuMs = t.reduce((a, b) => a + b, 0) / t.length; pacer.reportGpu(xGpuMs, taken / calls); } })
+          : device.queue.onSubmittedWorkDone().then(() => { xGpuMs = performance.now() - t0; xGpuApprox = true; pacer.reportGpu(xGpuMs, steps); });
         xTimesRead.finally(() => { xTimesRead = null; }).catch(fail);
       }
       return steps;
@@ -1452,8 +1842,12 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // Explicit frames in flight on the GPU: at most two, as a game loop keeps it, so
     // the fps and real-time readouts count finished work, not submissions running ahead.
     let xInFlight = 0;
+    // Frame pacing trace (automation: window.__frameTrace(on) starts a log, returns it
+    // when turned off): per displayed frame its wall time, steps, camera and subject.
+    let frameTrace = null;
+    window.__frameTrace = (on = true) => { const t = frameTrace; frameTrace = on ? { frames: [], poses: [] } : null; return t; };
     function frame(now) {
-      if (EXPLICIT && !manual && xInFlight >= 2) { requestAnimationFrame(frame); return; }
+      if (EXPLICIT && !manual && xInFlight >= 2) { frameTrace?.frames.push({ now, skipped: 1 }); requestAnimationFrame(frame); return; }
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
       fpsAcc += dt; fpsN++;
@@ -1467,16 +1861,29 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         return;
       }
       if (EXPLICIT) {
+        labDt = dt;
         const steps = explicitFrame(dt);
         simAcc += steps / XRATE; wallAcc += dt;
         if (wallAcc > 0.5) { realTime = simAcc / wallAcc; simAcc = 0; wallAcc = 0; }
         readPoses().catch(fail);
-        updateCamera(dt, false);
+        // Paced (not paused, stepped or replayed): the frame shows the state its
+        // lead past the last step, and the camera eases by the wall time that
+        // motion stands for (a frame a cap held short moves camera and subject
+        // alike); otherwise as stepped, by the frame's wall time.
+        const paced = !lab || (!lab.st.paused && lab.st.replay < 0);
+        // (The lab's gather carries the nodes forward, the page's own explicit
+        // skin and beams do in xpos: traffic and the arena.)
+        xLead = paced ? pacer.lead() : 0;
+        // The orbit cameras' subject at the step on display, before the camera moves.
+        lab?.followFocus(0, xLead);
+        updateCamera(paced ? pacer.shownDt() : dt, false);
         const enc = device.createCommandEncoder();
         drawScene(enc);
         device.queue.submit([enc.finish()]);
         xInFlight++;
         device.queue.onSubmittedWorkDone().then(() => { xInFlight--; });
+        frameTrace?.frames.push({ now, dt, steps, step: xsim.steps(), slow: lab ? (lab.st.auto && lab.st.impactStep == null ? 1 : lab.st.slow) : 1,
+          eye: camEye.slice(), at: camTarget.slice(), focus: lab?.st.focus?.slice() ?? null, focusStep: lab?.st.lastState?.step ?? null, gpu: xGpuMs, scale: pacer.scale(), speed: pacer.speed(), msPerStep: pacer.msPerStep(), share: pacer.share(), lead: xLead });
         updateHud();
         updateStatus();
         requestAnimationFrame(frame);
@@ -1535,7 +1942,9 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
         for (let i = 0; i < n;) {
           const k = Math.min(XSTEPS, n - i);
           xsim.frame(k); xLastSteps = k; i += k;
+          const r = lab?.read();
           await device.queue.onSubmittedWorkDone();
+          if (r) await r;
         }
         const times = await xsim.readFrameTimes();
         if (times.length) xGpuMs = times.reduce((a, b) => a + b, 0) / times.length;
@@ -1638,11 +2047,63 @@ fn xpos(i: u32, v: u32) -> vec3f { return xnodes[i * 3u].xyz + bitcast<vec3f>(xm
     // the GPU time per frame (timestamps, or ≈ submit-to-done).
     // The import scene crashes an imported vehicle (?car=import, ?truck=) into its target.
     if (!EXPLICIT && scene === 'import' && carKind === 'import') window.__crashImported({ ...carDesc }, { label: importSrc.label });
+    if (LAB) {
+      lab = createCrashLab({
+        sim: () => xsim, layout: () => xlayout, renderer: labR, canvas, qs, preset: LAB_PRESET, xscene, body: !!bodyR,
+        scenes: XSCENES, sceneUrl: xsceneUrl, pill: XPILL[xscene]?.() ?? xscene.toUpperCase(), crash: XCRASH.has(xscene), drive: DRIVE,
+        setOrbit: (o) => {
+          if (o.chase) { camMode = 'chase'; window.__camSync?.(); return; }
+          if (o.follow) { if (camMode === 'orbit') { orbit.target = o.follow; orbit.yaw += o.spin; } return; }
+          camMode = 'orbit'; orbit = { ...orbit, yaw: o.yaw, pitch: o.pitch, dist: o.dist, target: orbit.target }; window.__camSync?.();
+        },
+        view: () => labView, inverse: mat4Inv, restart: () => resetScene(), fail, pacer,
+      });
+      lab.read();
+      // Automation: n steps in frames of `chunk` (each read: impact to that chunk),
+      // then a drawn frame; the lab's state.
+      const labState = () => {
+        const s = lab.st, step = s.replay >= 0 ? s.ring[s.replay].step : xsim.steps();
+        return { step, impactStep: s.impactStep, time: lab.timeText(step).text, reads: s.reads, recorded: s.ring.length, replay: s.replay,
+          bent: s.lastState?.bent ?? null, broken: s.lastState?.broken ?? null, grab: s.grab && { node: s.grab.global, target: s.grab.target },
+          opts: { ...labR.opts, grab: undefined }, slow: s.auto ? 'auto' : s.slow, paused: s.paused, counts: document.getElementById('labCounts').textContent,
+          readout: document.getElementById('labTime').innerText.replace(/\n/g, ' | '), pills: document.getElementById('labPills').innerText.replace(/\n/g, ' | ') };
+      };
+      const drawNow = async () => {
+        // Driving: the wheels' poses and the chase camera's subject first.
+        if (RAYCAST) await readPoses();
+        updateCamera(0.1, false);
+        const enc = device.createCommandEncoder();
+        drawScene(enc);
+        device.queue.submit([enc.finish()]);
+        await device.queue.onSubmittedWorkDone();
+      };
+      window.__lab = {
+        lab, state: labState, draw: drawNow, view: () => ({ vp: Array.from(labView.vp), eye: labView.eye.slice() }),
+        async advance(n, chunk = 17) {
+          manual = true;
+          const reads = [];
+          for (let i = 0; i < n;) { const k = Math.min(chunk, n - i); xsim.frame(k); i += k; const r = lab.read(); if (r) reads.push(r); await device.queue.onSubmittedWorkDone(); }
+          await Promise.all(reads);
+          await drawNow();
+          return labState();
+        },
+        async frames(n) { manual = false; for (let i = 0; i < n; i++) await new Promise((r) => requestAnimationFrame(r)); manual = true; await device.queue.onSubmittedWorkDone(); return labState(); },
+      };
+    }
     window.__solver = EXPLICIT ? 'explicit' : 'soft';
-    window.__explicit = EXPLICIT ? { sim: () => xsim, layout: () => xlayout, launch: () => xsim.launch(XSPEED), gpuMs: () => xGpuMs } : null;
+    window.__explicit = EXPLICIT ? { sim: () => xsim, layout: () => xlayout, launch: () => xsim.launch(XSPEED), gpuMs: () => xGpuMs,
+      // Driving automation: hold an input ({ forward, steer, brake, handbrake }; null: the keys
+      // again) and read the vehicles' drive state.
+      drive: (i) => { driveOverride = i; if (i && xsim.drivable(player)) xsim.setDriveInput(player, i.forward ?? 0, i.steer ?? 0, i.brake ?? 0, i.handbrake ?? 0); },
+      readDrive: () => (anyDrivable() ? xsim.readDrive() : Promise.resolve({ vehicles: [] })), wheelBodies: () => wheelsDrawn } : null;
     window.__ready = true;
     statusEl.textContent = `scene ready · ${world.bodyCount()} bodies · ${softs.length} soft bodies`;
-    requestAnimationFrame(frame);
+    // The first frame on screen ends the loading card (its stages: window.__loadTimes).
+    loading.stage('First frame');
+    requestAnimationFrame((t) => {
+      frame(t);
+      device.queue.onSubmittedWorkDone().then(() => { if (!window.__failed) window.__loadTimes = loading.done(); });
+    });
   </script>
 </body>
 </html>

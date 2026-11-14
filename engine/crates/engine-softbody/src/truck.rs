@@ -110,6 +110,13 @@ enum Section {
     Triggers,
     Animators,
     SlideNodes,
+    TyrePose,
+    SpawnContacts,
+    ContactBreaks,
+    JbeamPlastic,
+    TensionYield,
+    DampCutoff,
+    AeroTri,
     Skipped,
 }
 
@@ -301,12 +308,79 @@ pub struct TruckFile {
     pub minimass_skip_loaded: bool,
     pub advanced_deformation: bool,
     pub collision_range: f32,
+    /// The file sets `set_collision_range` (the BeamNG profile's band then yields
+    /// to it).
+    pub collision_range_set: bool,
     pub nodes: Vec<SoftNode>,
     /// Per node: loaded flag and optional load-weight override.
     pub loaded: Vec<(bool, Option<f32>)>,
     pub beams: Vec<SoftBeam>,
     pub triangles: Vec<SoftTriangle>,
     pub contacters: Vec<u32>,
+    /// `rubble_full_contact` (Rubble's extension, spec §10.2): every node with
+    /// collision is a contacter against other vehicles' triangles.
+    pub full_contact: bool,
+    /// `rubble_exact_lengths` (Rubble's extension): beam lengths through an exact
+    /// square root, not RoR's fast inverse square root (its error, up to 0.18 % of a
+    /// length, is comparable to metal's yield strain and far above glass's).
+    pub exact_lengths: bool,
+    /// `rubble_beamng_profile` (Rubble's extension, jbeam-semantics-spec.md §36):
+    /// the vehicle runs the BeamNG profile's switches
+    /// ([`crate::explicit_beams::ExplicitBeamsSettings::beamng`]) and two-body
+    /// vehicle contact, as JBeam content does.
+    pub beamng_profile: bool,
+    /// `rubble_drag_coef <dragCoef> [<liftCoef>]` (Rubble's extension,
+    /// jbeam-semantics-spec.md §36): the BeamNG profile's triangle aerodynamics
+    /// with these coefficients on every cab triangle (BeamNG's defaults 100 and
+    /// dragCoef otherwise; "around 10 for most exposed body panels").
+    pub drag_coef: Option<(f32, f32)>,
+    /// `rubble_rest_pose <y>` (Rubble's extension): the file's node positions are
+    /// the vehicle at rest on flat ground at height `y` (its beams' rest lengths
+    /// carry the unloaded geometry).
+    pub rest_ground: Option<f32>,
+    /// `rubble_tyre_pose` lines `wheel, node, x, y, z` (Rubble's extension): a
+    /// generated tyre node's spawn position (the tyre at rest, deflected; its
+    /// beams' rest lengths stay the undeflected tyre's). `wheel` is the file's
+    /// wheel index, `node` the tyre's node (0 .. 2 × rays).
+    pub tyre_pose: Vec<(u32, u32, [f32; 3])>,
+    /// `rubble_tyre_pose` lines `wheel, x1, y1, z1, x2, y2, z2`: the tyre's
+    /// axle nodes' rest positions (the unloaded design's), which its beams'
+    /// rest lengths are built round.
+    pub tyre_rest_axle: Vec<(u32, [f32; 3], [f32; 3])>,
+    /// `rubble_spawn_contacts` lines `a, b, c, node` (Rubble's extension): a
+    /// node and a collision triangle (by its nodes) that collide although the
+    /// node starts in its range: in a file that is its vehicle at rest, they
+    /// rest in contact (spec §10.1's spawn exclusions are the design's).
+    pub spawn_contacts: Vec<([u32; 3], u32)>,
+    /// `rubble_contact_breaks` lines `group, force_N, nodes…` (Rubble's extension,
+    /// jbeam-semantics-spec.md §32): break group `group` goes off when the contact
+    /// force on any of the nodes exceeds `force_N` in a step.
+    pub contact_breaks: Vec<(u32, f32, Vec<u32>)>,
+    /// `rubble_jbeam_plastic` lines `a, b, deformLimitStress_N, deformLimit,
+    /// deformLimitExpansion` (Rubble's extension): the beam between nodes a and
+    /// b yields by JBeam's rule (`jbeam-semantics-spec.md` §3) with those
+    /// limits: its hardened thresholds never pass the stress cap, its rest
+    /// length never shortens past (1 − deformLimit) or lengthens past
+    /// (1 + deformLimitExpansion) of its spawn rest length (a negative value:
+    /// no limit). It keeps the file's plastic coefficient.
+    /// An optional sixth field `breakAtExpansion` (nonzero; Rubble's, §36): the beam
+    /// tears the step its rest length reaches (1 + deformLimitExpansion)·L. A rope
+    /// (`r`) line is a tension-only JBeam beam (`JbeamRope`).
+    pub jbeam_plastic: Vec<(u32, u32, f32, f32, f32, bool)>,
+    /// `rubble_tension_yield` lines `a, b, Tt_N` (Rubble's extension,
+    /// jbeam-semantics-spec.md §18.4): the deformable beam between nodes a and
+    /// b yields in tension at Tt (its compression threshold stays the file's
+    /// deform threshold): a sheet buckles in compression but carries its
+    /// material's yield in tension.
+    pub tension_yield: Vec<(u32, u32, f32)>,
+    /// `rubble_damp_cutoff` lines `a, b, dampCutoffHz` (Rubble's extension,
+    /// jbeam-semantics-spec.md §36): the BeamNG profile's beam a–b damps only
+    /// its extension rate filtered at that cutoff (JBeam's `dampCutoffHz`, §2).
+    pub damp_cutoff: Vec<(u32, u32, f32)>,
+    /// `rubble_aero_tri` lines `a, b, c, dragCoef, liftCoef` (Rubble's extension,
+    /// §36): the BeamNG profile's triangle aerodynamics per cab triangle (nodes in
+    /// any order); with the section, an unlisted cab triangle has none.
+    pub aero_tri: Vec<([u32; 3], f32, f32)>,
     pub wheels: Vec<TruckWheel>,
     pub engine: Option<SoftEngine>,
     pub brake_force: Option<f32>,
@@ -587,6 +661,13 @@ impl Parser {
             "triggers" => Section::Triggers,
             "animators" => Section::Animators,
             "slidenodes" => Section::SlideNodes,
+            "rubble_tyre_pose" => Section::TyrePose,
+            "rubble_spawn_contacts" => Section::SpawnContacts,
+            "rubble_contact_breaks" => Section::ContactBreaks,
+            "rubble_jbeam_plastic" => Section::JbeamPlastic,
+            "rubble_tension_yield" => Section::TensionYield,
+            "rubble_damp_cutoff" => Section::DampCutoff,
+            "rubble_aero_tri" => Section::AeroTri,
             // Known sections this importer does not simulate (phase 3 / cosmetic).
             "engoption"
             | "engturbo"
@@ -741,6 +822,14 @@ impl Parser {
             }
             "set_default_minimass" => self.out.minimass = fd(t, 1, DEFAULT_MINIMASS),
             "enable_advanced_deformation" => self.out.advanced_deformation = true,
+            "rubble_full_contact" => self.out.full_contact = true,
+            "rubble_exact_lengths" => self.out.exact_lengths = true,
+            "rubble_beamng_profile" => self.out.beamng_profile = true,
+            "rubble_drag_coef" => {
+                let d = f(t, 1, 100.0);
+                self.out.drag_coef = Some((d, f(t, 2, d)));
+            }
+            "rubble_rest_pose" => self.out.rest_ground = Some(f(t, 1, 0.0)),
             "detacher_group" => {
                 self.detacher_group = if t.get(1) == Some(&"end") {
                     0
@@ -748,7 +837,10 @@ impl Parser {
                     f(t, 1, 0.0).abs() as u32
                 };
             }
-            "set_collision_range" => self.out.collision_range = fd(t, 1, DEFAULT_COLLISION_RANGE),
+            "set_collision_range" => {
+                self.out.collision_range = fd(t, 1, DEFAULT_COLLISION_RANGE);
+                self.out.collision_range_set = true;
+            }
             "submesh_groundmodel" => {
                 self.out.submesh_groundmodel = t.get(1).map(|g| g.to_string());
             }
@@ -844,6 +936,15 @@ impl Parser {
                 };
                 let mut beam = self.beam(a, b);
                 Self::beam_options(&mut beam, t);
+                // (Rubble's extension: a fifth field, its rest length over
+                // its spawn length.)
+                if let Some(p) = t
+                    .get(4)
+                    .and_then(|p| p.parse::<f32>().ok())
+                    .filter(|&p| p > 0.0)
+                {
+                    beam.precompression = p;
+                }
                 self.out.beams.push(beam);
             }
             Section::Shocks | Section::Shocks2 | Section::Shocks3 => self.parse_shock(t),
@@ -1009,9 +1110,16 @@ impl Parser {
                 let opts = t.get(3).copied().unwrap_or("");
                 let solid = opts.chars().any(|c| matches!(c, 'c' | 'p' | 'u'));
                 let buoyant = opts.chars().any(|c| matches!(c, 'D' | 'F' | 'S'));
+                // (Rubble's extension, spec §18: a fifth field is its break
+                // group, a sixth the edges it breaks with, bit k for nodes k
+                // to k+1, all three if absent.)
+                let group = t.get(4).and_then(|g| g.parse::<u32>().ok());
+                let sides = t.get(5).and_then(|m| m.parse::<u8>().ok()).unwrap_or(7) & 7;
                 let tri = SoftTriangle {
                     nodes: [a, b, c],
                     collision: solid || buoyant,
+                    break_group: group.unwrap_or(0),
+                    break_sides: if group.is_some() { sides } else { 0 },
                     ..Default::default()
                 };
                 // A line with a letter of each group is two collision triangles in
@@ -1020,6 +1128,92 @@ impl Parser {
                     self.out.triangles.push(tri.clone());
                 }
                 self.out.triangles.push(tri);
+            }
+            Section::SpawnContacts => {
+                let n: Vec<u32> = t.iter().filter_map(|x| x.parse::<u32>().ok()).collect();
+                if n.len() >= 4 {
+                    self.out.spawn_contacts.push(([n[0], n[1], n[2]], n[3]));
+                } else {
+                    self.warn("rubble_spawn_contacts needs a, b, c, node: ignored".into());
+                }
+            }
+            Section::ContactBreaks => {
+                let g = t.first().and_then(|x| x.parse::<u32>().ok());
+                let force = t.get(1).and_then(|x| x.parse::<f32>().ok());
+                let nodes: Option<Vec<u32>> = t[2.min(t.len())..]
+                    .iter()
+                    .map(|x| x.parse::<u32>().ok())
+                    .collect();
+                match (g, force, nodes) {
+                    (Some(g), Some(force), Some(nodes))
+                        if g > 0 && force > 0.0 && !nodes.is_empty() =>
+                    {
+                        self.out.contact_breaks.push((g, force, nodes))
+                    }
+                    _ => self.warn(
+                        "rubble_contact_breaks needs group (> 0), force_N (> 0), nodes…: ignored"
+                            .into(),
+                    ),
+                }
+            }
+            Section::JbeamPlastic => {
+                let n: Vec<f32> = t.iter().filter_map(|x| x.parse::<f32>().ok()).collect();
+                if n.len() >= 5 && n[0] >= 0.0 && n[1] >= 0.0 {
+                    let tear = n.get(5).is_some_and(|&x| x != 0.0);
+                    self.out
+                        .jbeam_plastic
+                        .push((n[0] as u32, n[1] as u32, n[2], n[3], n[4], tear));
+                } else {
+                    self.warn(
+                        "rubble_jbeam_plastic needs a, b, deformLimitStress, deformLimit, deformLimitExpansion: ignored"
+                            .into(),
+                    );
+                }
+            }
+            Section::DampCutoff => {
+                let n: Vec<f32> = t.iter().filter_map(|x| x.parse::<f32>().ok()).collect();
+                if n.len() >= 3 && n[0] >= 0.0 && n[1] >= 0.0 && n[2] > 0.0 {
+                    self.out.damp_cutoff.push((n[0] as u32, n[1] as u32, n[2]));
+                } else {
+                    self.warn("rubble_damp_cutoff needs a, b, dampCutoffHz (> 0): ignored".into());
+                }
+            }
+            Section::AeroTri => {
+                let n: Vec<f32> = t.iter().filter_map(|x| x.parse::<f32>().ok()).collect();
+                if n.len() >= 5 && n[..3].iter().all(|&x| x >= 0.0) {
+                    self.out
+                        .aero_tri
+                        .push(([n[0] as u32, n[1] as u32, n[2] as u32], n[3], n[4]));
+                } else {
+                    self.warn("rubble_aero_tri needs a, b, c, dragCoef, liftCoef: ignored".into());
+                }
+            }
+            Section::TensionYield => {
+                let n: Vec<f32> = t.iter().filter_map(|x| x.parse::<f32>().ok()).collect();
+                if n.len() >= 3 && n[0] >= 0.0 && n[1] >= 0.0 && n[2] > 0.0 {
+                    self.out
+                        .tension_yield
+                        .push((n[0] as u32, n[1] as u32, n[2]));
+                } else {
+                    self.warn("rubble_tension_yield needs a, b, Tt_N (> 0): ignored".into());
+                }
+            }
+            Section::TyrePose => {
+                if t.len() >= 7 {
+                    self.out.tyre_rest_axle.push((
+                        f(t, 0, 0.0) as u32,
+                        [f(t, 1, 0.0), f(t, 2, 0.0), f(t, 3, 0.0)],
+                        [f(t, 4, 0.0), f(t, 5, 0.0), f(t, 6, 0.0)],
+                    ));
+                } else if t.len() >= 5 {
+                    self.out.tyre_pose.push((
+                        f(t, 0, 0.0) as u32,
+                        f(t, 1, 0.0) as u32,
+                        [f(t, 2, 0.0), f(t, 3, 0.0), f(t, 4, 0.0)],
+                    ));
+                } else {
+                    self.warn("rubble_tyre_pose needs wheel, node, x, y, z: ignored".into());
+                }
             }
             Section::Contacters => {
                 for tok in t {

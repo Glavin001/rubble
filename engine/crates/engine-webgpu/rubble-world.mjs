@@ -6,12 +6,19 @@
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
-  hiresCarJbeam, explicitSedanTruck, sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
+  hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
+  showcaseLayout, brickRingLayout, sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
 // explicitSedanTruck(tyres): the explicit solver's procedural sedan as .truck text.
-export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck };
+// showcaseCar(params): an authored vehicle (engine_softbody::authoring): { truck, counts, visual }.
+// jbeamVisual(spec, meshes): an imported JBeam vehicle's flexbodies and props (engine_softbody::flexmesh).
+// decodeTexture(bytes, size): a PNG or DDS as one mipped RGBA8 layer (engine_softbody::flextex).
+// jbeamVisualSkinned(spec, meshes, glb, skin): the same for a vehicle whose
+// flexbodies are a glTF render model with weighted skins (flexskin, `.rskin`).
+// FramePacer(rate, gpuBudget): fixed steps per displayed frame (engine-world-wasm frame_pacer.rs).
+export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, FramePacer };
 let ready = null;
 
 /** The wasm's world-less functions (terrain settings, predictions, buffer layout), once loaded. */
@@ -71,6 +78,57 @@ export async function createCity(opts, page = {}) {
   const world = await WebWorld.createCity(city, page);
   world.flags = solverFlags();
   return { city, world };
+}
+
+/**
+ * The explicit vehicles' crash town (`rubble::explicit_scene::crash_town`, as the native
+ * benchmark builds it): `spec` `{ truck, count, houses, speed, runUp, drag }` (`truck`
+ * .truck text; absent, the procedural sedan with tyres). Returns the world and
+ * `{ houses, ground, centres }`.
+ */
+export async function createVehicleTown(spec) {
+  ready ??= init();
+  await ready;
+  const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) });
+  world.flags = solverFlags();
+  return { world, layout: vehicleTownLayout(spec.houses ?? 0, spec.count ?? 4) };
+}
+
+/**
+ * The one-World showcase (`rubble::showcase_scene`): `spec` `{ vehicles: [{ truck } |
+ * { jbeam: [[name, text]], pc }] (cycled over the preset's cars), preset: 'house' |
+ * 'crates' | 'twoway' | 'convoy', count, speed, runUp, drag }` (or `truck`: one .truck
+ * vehicle). Returns the world and its layout (`showcaseLayout`).
+ */
+export async function createShowcase(spec) {
+  ready ??= init();
+  await ready;
+  const { truck, vehicles, ...rest } = spec;
+  const layout = showcaseLayout(rest);
+  const world = await WebWorld.createShowcase(spec);
+  world.flags = solverFlags();
+  return { world, layout };
+}
+
+/**
+ * The brick ring drive (`rubble::brick_ring_drive`): the 110k brick ring with drivable
+ * soft-body cars on raycast wheels in one World on its own device (spec as
+ * `WebWorld.createBrickRingDrive`), and its layout (`brickRingLayout`).
+ */
+export async function createBrickRingDrive(spec) {
+  ready ??= init();
+  await ready;
+  const { vehicles, ...rest } = spec;
+  const layout = brickRingLayout(rest);
+  const world = await WebWorld.createBrickRingDrive(spec);
+  world.flags = solverFlags();
+  return { world, layout };
+}
+
+/** The wasm, once loaded (pages that call its free functions before a world). */
+export async function loadWasm() {
+  ready ??= init();
+  await ready;
 }
 
 /**

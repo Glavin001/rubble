@@ -15,7 +15,22 @@ fn main() {
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
     let pc = std::fs::read_to_string(dir.join(name).join(pc)).unwrap();
-    for (k, n) in engine_softbody::jbeam::feature_census(&files, Some(&pc)).unwrap() {
+    let census = engine_softbody::jbeam::feature_census(&files, Some(&pc)).unwrap();
+    for (k, n) in &census {
         println!("{n:6} {k}");
+    }
+    // What JBeam mode does not simulate (engine/docs/jbeam-semantics-spec.md §11,
+    // Part II): empty means every physics feature the configuration uses runs.
+    let unsupported = engine_softbody::jbeam::unsupported_features(&census);
+    if unsupported.is_empty() {
+        println!("JBeam mode simulates every physics feature this configuration uses");
+    } else {
+        println!("not simulated by JBeam mode:");
+        for (k, n) in unsupported {
+            println!("{n:6} {k}");
+        }
+    }
+    for (k, n, why) in engine_softbody::jbeam::out_of_scope_features(&census) {
+        println!("out of scope: {n:6} {k}: {why}");
     }
 }

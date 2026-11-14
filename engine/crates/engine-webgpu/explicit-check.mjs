@@ -171,6 +171,31 @@ const RUNS = [
     const ok = steps > 1000 && /GPU [≈0-9]/.test(hud) && kmh > 20;
     return { ok, msg: `${live.fps.toFixed(0)} fps, ${(live.realTime * 100).toFixed(0)}% real time, ${steps} steps, launched to ${kmh.toFixed(0)} km/h; HUD: ${hud}` };
   }],
+  // Reads hold the state their step says: reads issued between frames submitted in
+  // one task, none awaited, return different states (the copy is submitted before
+  // the read returns; it once ran after every frame of the task). The explicit
+  // solver's readPoses (read_ranges_on) and the World's readBodies.
+  ['reads', async (v) => {
+    await open(`solver=explicit&scene=wall&stopAt=0&${v.query}`, 'explicit');
+    await evaluate('window.__step(40)');
+    const xz = await evaluate(`(async () => {
+      const x = window.__explicit.sim(), rs = [];
+      for (let i = 0; i < 4; i++) { x.frame(8); rs.push(x.readPoses().then((f) => f[2])); }
+      return Promise.all(rs);
+    })()`);
+    // The World's body buffer, written between reads (World.step panics on wasm32
+    // at std::time::Instant::now, so the soft solver cannot step here: the writes
+    // a pose change makes stand in for steps).
+    const sz = await evaluate(`(async () => {
+      const w = window.__world, b = w.createBody({ position: [0, 50, 0] }), slot = w.bodySlot(b), rs = [];
+      for (let i = 0; i < 4; i++) { w.bodySetType(b, 'static', [0, 50, i], [0, 0, 0, 1], [0, 0, 0], [0, 0, 0]); rs.push(w.readBodies([slot]).then((f) => f[2])); }
+      return Promise.all(rs);
+    })()`);
+    const distinct = (z) => z.length >= 2 && z.every((x, i) => i === 0 || x !== z[i - 1]);
+    const ok = distinct(xz) && distinct(sz);
+    const f = (z) => z.map((x) => x.toFixed(4)).join(', ');
+    return { ok, msg: `explicit readPoses z: ${f(xz)}; World readBodies z: ${f(sz)}` };
+  }],
   // The button rebuilds the scene on the soft solver (same vehicle, same spawn), and back.
   ['toggle', async (v) => {
     await open(`solver=explicit&scene=wall&${v.query}`, 'explicit');

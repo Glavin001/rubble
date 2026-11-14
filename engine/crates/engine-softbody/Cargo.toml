@@ -11,3 +11,10 @@ engine-vehicle.workspace = true
 glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Collada (.dae) flexbody meshes of imported JBeam vehicles (flexmesh.rs).
+quick-xml = "0.41"
+# Imported vehicles' textures (flextex.rs: materials.json colour maps).
+png = "0.18"
+
+[dev-dependencies]
+bcdec_rs = "0.2.1"
