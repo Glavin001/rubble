@@ -1678,6 +1678,27 @@ impl ExplicitBeamsGpu {
         self.queue.write_buffer(&self.misc, (rec * 16) as u64, bytemuck::cast_slice(&flag));
     }
 
+    /// Vehicle contact's candidates in a grid in the small groups' triangle tests
+    /// (`explicit_beams.slang` vvGridBuild; lossless: the same candidates pass the box
+    /// test) on (the default) or off (every candidate against every listed triangle).
+    #[doc(hidden)]
+    pub fn set_vv_grid(&mut self, on: bool) {
+        let w = (self.layout.status.base / 4) as usize + 9;
+        let off: i32 = if on { 0 } else { 1 };
+        self.queue.write_buffer(&self.bufs[5], (w * 4) as u64, bytemuck::bytes_of(&off));
+    }
+
+    /// Measurement: candidates the small groups' triangle tests visited since the last
+    /// call (which clears the count).
+    #[doc(hidden)]
+    pub fn take_vv_visits(&mut self) -> u64 {
+        let w = (self.layout.status.base / 4) as usize + 8;
+        let acc: Vec<i32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
+        let n = acc.get(w).copied().unwrap_or(0) as u32 as u64;
+        self.queue.write_buffer(&self.bufs[5], (w * 4) as u64, bytemuck::bytes_of(&0i32));
+        n
+    }
+
     /// The coupling's window per piece (vehicle_coupling.slang pieceAccept; on by default,
     /// `RUBBLE_PIECE_WINDOWS=0` off): with piece labels a collider is a proxy only when it
     /// can reach some piece's box, not just the whole vehicle's. Off: one window.

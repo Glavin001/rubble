@@ -219,6 +219,12 @@ fn main() -> anyhow::Result<()> {
                 x.set_vehicle_contact_margin(v, m);
             }
         }
+        // EV_ABLATE=mask (measurement, time only): the explicit frame's ablation build.
+        if let Some(m) = std::env::var("EV_ABLATE").ok().and_then(|v| v.parse::<u32>().ok()) {
+            if let Some(x) = w.explicit_vehicles_mut() {
+                x.set_ablation(m);
+            }
+        }
         // EV_CULL=0 (measurement): the coupling's shape cull off.
         if std::env::var("EV_CULL").as_deref() == Ok("0") {
             if let Some(x) = w.explicit_vehicles_mut() {
@@ -264,6 +270,36 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             wall.push(t0.elapsed().as_secs_f64() * 1e3);
+            // EV_AB_AT=step, EV_AB_MASKS=m1,m2,…: at that World step, the explicit frame
+            // alone from one snapshot under each ablation mask (time only; 2147483648 the
+            // ablation build with nothing skipped), 20 frames of 34 steps each.
+            if std::env::var("EV_AB_AT").ok().and_then(|v| v.parse::<u64>().ok()) == Some(w.step_count()) {
+                let masks: Vec<u32> = std::env::var("EV_AB_MASKS").unwrap_or_default().split(',').filter_map(|m| m.parse().ok()).collect();
+                if let Some(x) = w.explicit_vehicles_mut() {
+                    x.wait();
+                    let snap = x.snapshot();
+                    let mut line = Vec::new();
+                    for &m in &masks {
+                        x.restore(&snap);
+                        x.set_ablation(m);
+                        x.frame(34);
+                        x.wait();
+                        x.restore(&snap);
+                        let t = std::time::Instant::now();
+                        for _ in 0..20 {
+                            x.frame(34);
+                            x.wait();
+                        }
+                        line.push(format!("{m}: {:.2}", t.elapsed().as_secs_f64() * 1e3 / 20.0));
+                    }
+                    x.set_ablation(0);
+                    x.restore(&snap);
+                    x.wait();
+                    let mut g = x.contact_group_sizes();
+                    g.sort_unstable();
+                    println!("  ablations at step {} (groups {:?}), ms a frame: {}", w.step_count(), g, line.join(", "));
+                }
+            }
             if std::env::var("EV_GROUPS").is_ok() && w.step_count() % 20 == 0 {
                 let sc = w.step_count();
                 if let Some(x) = w.explicit_vehicles_mut() {

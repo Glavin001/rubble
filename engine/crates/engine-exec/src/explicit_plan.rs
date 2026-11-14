@@ -286,7 +286,7 @@ pub const VV_MEMBER_REC: u32 = 5;
 /// The kernel's VV_RECS, VV_SLOTS and the counters' words (VV_CTL_WORDS).
 pub const VV_RECS: usize = 6;
 const VV_SLOTS: usize = 8;
-const VV_CTL_WORDS: u32 = 8;
+const VV_CTL_WORDS: u32 = 10;
 /// Frame bounds margin past the travel of a vehicle's fastest node (m): see
 /// [`FramePlanner::set_contact_margin`].
 pub const DEFAULT_CONTACT_MARGIN: f32 = 1.0;
@@ -1594,7 +1594,9 @@ impl ExplicitUpload {
         // (Four times: a small group's owners each have their own run, the
         // kernel's vvPassSmall.)
         let vv_run = beams.len() as u32;
-        beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * total_cp));
+        // (Then as many again: the small groups' candidates sorted by cell, the kernel's
+        // vvSortAt.)
+        beams.extend(std::iter::repeat_n([0.0f32; 4], 8 * total_cp));
         // Two-body contact (jbeam-semantics-spec.md §10.3): per node its force at
         // the contact pass's start.
         let two_body = nv > 1 && vehicles.iter().any(|v| v.two_body_contact);
@@ -1695,7 +1697,9 @@ impl ExplicitUpload {
         // (Hits: per group 8 × its points hits of two words: the kernel's vvHitAt,
         // and vvPassSmall's lists, twice the group's points for each of up to four
         // owners.)
-        let slot_list_base = (vv_hits as usize + 16 * total_cp) as u32;
+        // (Then the small groups' candidates' cell ranks, 4 words per contact point: the
+        // kernel's vvRankAt.)
+        let slot_list_base = (vv_hits as usize + 20 * total_cp) as u32;
         // Then per vehicle its self-collision hit list and pending beams (the
         // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
         let hit_base = slot_list_base as usize + slot_list_len as usize;

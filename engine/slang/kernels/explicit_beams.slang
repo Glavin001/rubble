@@ -5339,8 +5339,13 @@ static const uint VV_OUTSIDE = 4u;
 static const uint VV_OVERFLOW = 5u;
 static const uint VV_UNCONVERGED = 6u;
 static const uint VV_TOO_BIG = 7u;
-static const uint VV_CTL_WORDS = 8u;
+// Measurement: candidates the small groups' triangle tests visited (vvVisit), and the
+// host's switch of the candidates' grid (vvGridOn: nonzero off).
+static const uint VV_VISITS = 8u;
+static const uint VV_GRID_OFF = 9u;
+static const uint VV_CTL_WORDS = 10u;
 uint vvCtl(uint i) { return gP.vvAcc + gP.vehicles * 12u + i; }
+void vvVisit(uint n);
 
 // A value one lane decided, read by every lane as uniform (the WGSL
 // post-process turns its reads into workgroupUniformLoad).
@@ -7956,6 +7961,10 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
         sync();
     }
     uint pairs = on ? gsPairCountM[m].load() : 0u;
+#ifdef EB_ABLATE
+    // Measurement only: 1048576 the members' self-collision tests.
+    if ((gP.ablate & 1048576u) != 0u) {} else
+#endif
     if (early && pairs <= PAIR_PART)
     {
         for (uint i = pl, iStop = EB_END(i, pairs, P); i < iStop; i += P)
@@ -9078,6 +9087,7 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
     bool cand = false;
     bool hit = false;
     uint run = vvRunSmall(runOff, points, a);
+    vvVisit(sub < cands ? (cands - sub + subs - 1u) / subs : 0u);
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[run + e];
@@ -9141,6 +9151,197 @@ uint vvLevel(uint a, uint k, uint points)
         if (b == a) mine = l;
     }
     return mine;
+}
+
+
+// --- The small groups' candidates in a grid (lossless) ---
+// The (T) phase tested every listed triangle against every candidate of its owner (the
+// partners' contact points in the owner's box): in a crash both counts are hundreds a
+// step. With the grid, after the candidates are listed each owner's candidates are
+// counted into buckets of its own cells (gsCount, free in a group's frame: owner a's
+// buckets a·256 …; a counting sort, the sorted copy after the runs at vvSortAt), and a
+// triangle walks the cells of its box padded by the most any candidate's box test pads it
+// (vvInBox with the owner's fastest candidate), each bucket once: every candidate inside
+// the box it tests is in a covered cell, so the same candidates pass the box test and the
+// same hits are found (applied in the canonical order whatever order they were found in).
+// A box over more than GRID_MAX_CELLS cells tests every
+// candidate as before.
+uint vvTotalCp() { return gP.vvHits - (gP.vvBig + gP.vehicles); }
+uint vvSortAt(uint runOff) { return gP.vvRun + 4u * vvTotalCp() + 4u * runOff; }
+uint vvRankAt(uint runOff, uint points, uint a, uint e) { return gP.vvHits + 16u * vvTotalCp() + 4u * runOff + a * points + e; }
+uint vvGridBucket(uint a, int3 c) { return a * 256u + (gridBucket(c) & 255u); }
+// The grid's cell: the owner's self-collision cell, else half a metre (any size gives
+// the same candidates; it only sets how many are visited).
+float vvGridCell(uint va)
+{
+    float c = asfloat(gStatic[va * 4u + 3u].w);
+    return c > 0.0 ? c : 0.5;
+}
+void vvVisit(uint n)
+{
+    if (n > 0u) gAcc[vvCtl(VV_VISITS)].add(int(n));
+}
+
+// Every lane (uniform; after the candidates' barrier): the owners' candidates bucketed,
+// scanned and copied in bucket order. gsCount[GRID_BUCKETS + a]: owner a's fastest
+// candidate's speed (float bits).
+void vvGridBuild(uint k, uint off, uint runOff, uint points, uint lane)
+{
+    for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
+    if (lane < VV_PART) gsCount[GRID_BUCKETS + lane].store(0u);
+    sync();
+    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    {
+        uint va = vvMember(off, a);
+        float cell = vvGridCell(va);
+        uint cands = gsVvOff4[a].load() != 0u ? gsVvCand4[a].load() : 0u;
+        uint run = vvRunSmall(runOff, points, a);
+        for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+        {
+            float4 E = gBeams[run + e];
+            uint h = asuint(E.w);
+            uint b = vvGridBucket(a, int3(floor(E.xyz / cell)));
+            gNext[vvRankAt(runOff, points, a, e)] = b | (gsCount[b].add(1u) << 10);
+            float3 v = gNodes[h * 3u + 1u].xyz;
+            uint sp = asuint(ssqrt(sdot(v, v)));
+            if (sp > gsCount[GRID_BUCKETS + a].load()) gsCount[GRID_BUCKETS + a].max(sp);
+        }
+    }
+    sync();
+    // Offsets: per lane its buckets' sum, a scan over blocks of lanes, the blocks' totals.
+    uint per = GRID_BUCKETS / LANES;
+    uint block = LANES / GRID_BLOCKS;
+    uint sum = 0u;
+    for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++) sum += gsCount[lane * per + q].load();
+    gsPart[lane] = sum;
+    sync();
+    if (lane < GRID_BLOCKS)
+    {
+        uint run = 0u;
+        for (uint q = 0u, qStop = EB_END(q, block, 1u); q < qStop; q++)
+        {
+            uint x = gsPart[lane * block + q];
+            gsPart[lane * block + q] = run;
+            run += x;
+        }
+        gsBlk[lane] = run;
+    }
+    sync();
+    if (lane == 0u)
+    {
+        uint run = 0u;
+        for (uint q = 0u; q < GRID_BLOCKS; q++)
+        {
+            uint x = gsBlk[q];
+            gsBlk[q] = run;
+            run += x;
+        }
+        gsOff[GRID_BUCKETS] = run;
+    }
+    sync();
+    {
+        uint run = gsPart[lane] + gsBlk[lane / block];
+        for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++)
+        {
+            gsOff[lane * per + q] = run;
+            run += gsCount[lane * per + q].load();
+        }
+    }
+    sync();
+    uint sorted = vvSortAt(runOff);
+    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    {
+        uint va = vvMember(off, a);
+        float cell = vvGridCell(va);
+        uint cands = gsVvOff4[a].load() != 0u ? gsVvCand4[a].load() : 0u;
+        uint run = vvRunSmall(runOff, points, a);
+        for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+        {
+            uint br = gNext[vvRankAt(runOff, points, a, e)];
+            gBeams[sorted + gsOff[br & (GRID_BUCKETS - 1u)] + (br >> 10)] = gBeams[run + e];
+        }
+    }
+    sync();
+}
+
+// vvTriangleCandsSmall with the grid: the same candidates, from the cells the box covers.
+void vvTriangleCandsGrid(uint a, uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r)
+{
+    float cell = vvGridCell(va);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
+    // The most vvInBox pads this box (its anti-clip pad with the fastest candidate).
+    float vmax = asfloat(gsCount[GRID_BUCKETS + a].load());
+    float pad = nf(nf(t.travel + smul(vmax, STEP)) + CLIP_DEPTH);
+    float3 lo = ssub3(t.lo, float3(pad, pad, pad));
+    float3 hi = sadd3(t.hi, float3(pad, pad, pad));
+    if (any(t.lo > t.hi)) return; // a dead triangle's empty box: no candidate in it
+    float3 f0 = floor(lo / cell);
+    float3 fs = floor(hi / cell) - f0 + float3(1.0, 1.0, 1.0);
+    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS))
+                 || !(all(abs(f0) < 1.0e8));
+    if (every)
+    {
+        vvTriangleCandsSmall(a, va, gt, sub, subs, runOff, points, cands, r);
+        return;
+    }
+    bool cand = false;
+    bool hit = false;
+    int3 c0 = int3(f0);
+    int3 span = int3(fs);
+    uint yz = uint(span.y * span.z);
+    uint cells = uint(span.x) * yz;
+    uint sorted = vvSortAt(runOff);
+    uint seen = 0u;
+    for (uint i = sub, iStop = EB_END(i, cells, subs); i < iStop; i += subs)
+    {
+        uint b = vvGridBucket(a, c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
+        bool dup = false;
+        int3 cj = int3(0, 0, 0);
+        for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+        {
+            if (vvGridBucket(a, c0 + cj) == b)
+            {
+                dup = true;
+                break;
+            }
+            cj.z += 1;
+            if (cj.z == span.z)
+            {
+                cj.z = 0;
+                cj.y += 1;
+                if (cj.y == span.y)
+                {
+                    cj.y = 0;
+                    cj.x += 1;
+                }
+            }
+        }
+        if (dup) continue;
+        uint e0 = gsOff[b];
+        uint e1 = gsOff[b + 1u];
+        seen += e1 - e0;
+        for (uint e = e0, eGuard = 0u; e < e1; e++)
+        {
+            EB_PASS(eGuard);
+            float4 E = gBeams[sorted + e];
+            uint h = asuint(E.w);
+            uint vh = gStatic[gP.nodeInfoBase + h].w;
+            bool anti = vvAnti(t, vh);
+            if (!vvInBox(t, E.xyz, h, anti)) continue;
+            cand = true;
+            if (!vvFind(t, gt, h, E.xyz, vh, r, anti)) continue;
+            hit = true;
+            vvSplitCount(t, h, a);
+            uint n = gsVvHit4[a].add(1u);
+            if (n < 2u * points)
+            {
+                gNext[vvHitSmall(runOff, points, a, n)] = gt;
+                gNext[vvHitSmall(runOff, points, a, n) + 1u] = h;
+            }
+        }
+    }
+    vvVisit(seen);
+    vvMark(gt, cand, hit);
 }
 
 void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lane)
@@ -9300,6 +9501,11 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
         }
     }
     sync();
+    // The candidates' grid (lane 0's decision through gsUniformOpen, free here).
+    if (lane == 0u) gsUniformOpen = gAcc[vvCtl(VV_GRID_OFF)].load() == 0 ? 1u : 0u;
+    sync();
+    bool vvGrid = gsUniformOpen != 0u;
+    if (vvGrid) vvGridBuild(k, off, runOff, points, lane);
     // (T) every owner's listed triangles against its candidates.
     {
         uint total = 0u;
@@ -9324,8 +9530,12 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             uint va = vvMember(off, a);
             uint4 ra1 = gStatic[va * 4u + 1u];
             uint t = gNext[vvTestedAt(ra1.x + q)];
-            vvTriangleCandsSmall(a, va, ra1.x + t, p % subs, subs, runOff, points, gsVvCand4[a].load(),
-                                 asfloat(gStatic[va * 4u + 3u].z));
+            if (vvGrid)
+                vvTriangleCandsGrid(a, va, ra1.x + t, p % subs, subs, runOff, points, gsVvCand4[a].load(),
+                                    asfloat(gStatic[va * 4u + 3u].z));
+            else
+                vvTriangleCandsSmall(a, va, ra1.x + t, p % subs, subs, runOff, points, gsVvCand4[a].load(),
+                                     asfloat(gStatic[va * 4u + 3u].z));
         }
     }
     sync();
