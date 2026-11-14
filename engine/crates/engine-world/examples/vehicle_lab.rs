@@ -104,6 +104,10 @@ fn options(script: &Value) -> LabOptions {
     if let Some(s) = arg("--surface") {
         o.insert("surface".into(), json!(s == "1"));
     }
+    // `--own-travel 0|1`: anti-clip's padding by each contacter's own travel (on in the lab).
+    if let Some(s) = arg("--own-travel") {
+        o.insert("ownTravel".into(), json!(s == "1"));
+    }
     let mut m = o.get("mountain").cloned().unwrap_or_else(|| json!({}));
     for (flag, key) in [
         ("--seed", "seed"),

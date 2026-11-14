@@ -2566,6 +2566,29 @@ impl ExplicitBeamsGpu {
         }
     }
 
+    /// Vehicle `vehicle`'s anti-clip box padding by each contacter's own travel
+    /// (`ExplicitBeams::own_travel_reach`, its flags word's FLAG_OWN_TRAVEL) from the
+    /// next frame on. The upload takes it from the vehicle; this changes it in place.
+    pub fn set_own_travel_reach(&mut self, vehicle: usize, on: bool) {
+        if vehicle >= self.layout.vehicles() {
+            return;
+        }
+        let at = (vehicle * 4 + 3) * 4;
+        let words: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[1])).to_vec();
+        let f = if on {
+            words[at] | plan::FLAG_OWN_TRAVEL
+        } else {
+            words[at] & !plan::FLAG_OWN_TRAVEL
+        };
+        self.queue.write_buffer(&self.bufs[1], (at * 4) as u64, bytemuck::bytes_of(&f));
+        // The wide passes' copy of the static records (the first vehicles').
+        if let Some(w) = &self.wide {
+            if ((at + 1) * 4) as u64 <= w.table.size() {
+                self.queue.write_buffer(&w.table, (at * 4) as u64, bytemuck::bytes_of(&f));
+            }
+        }
+    }
+
     /// Set one node's velocity (vehicle index, node index within it).
     pub fn set_velocity(&self, vehicle: usize, node: u32, v: Vec3) {
         let offset = self.layout.velocity_offset(vehicle, node);

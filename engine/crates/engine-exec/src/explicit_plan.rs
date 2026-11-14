@@ -281,6 +281,8 @@ pub const DEFAULT_CONTACT_MARGIN: f32 = 1.0;
 pub const KEYS: usize = engine_softbody::explicit_triggers::KEYS;
 const NONE: u32 = u32::MAX;
 const NODE_SLOT_SHIFT: u32 = 8;
+/// Vehicle flags bit (the kernel's FLAG_OWN_TRAVEL): `ExplicitBeams::own_travel_reach`.
+pub const FLAG_OWN_TRAVEL: u32 = 1 << 20;
 /// Node info flag (the kernel's NODE_PAIR_TRACKED): a contacter or a collision triangle's
 /// node, whose motion the reused self-collision pair list tracks.
 const NODE_PAIR_TRACKED: u32 = 128;
@@ -981,7 +983,8 @@ impl ExplicitUpload {
                 | (any_shift as u32) << 16
                 | (v.surface_contact as u32) << 17
                 | (v.settings.centred_damping as u32) << 18
-                | ((v.settings.centred_damping && v.settings.centred_objective) as u32) << 19;
+                | ((v.settings.centred_damping && v.settings.centred_objective) as u32) << 19
+                | (v.own_travel_reach as u32) << 20;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,

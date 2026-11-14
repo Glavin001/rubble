@@ -118,7 +118,8 @@
       <h2>Options</h2>
       <div class="row"><label><input type="checkbox" id="surface" data-opt="build" /> surface contact</label><label><input type="checkbox" id="parked" data-opt="build" /> second car</label>
         <label><input type="checkbox" id="drag" data-opt="build" checked /> air drag</label><label><input type="checkbox" id="centred" data-opt="build" /> centred damping</label>
-        <label><input type="checkbox" id="sleep" data-opt="build" checked /> rigid sleep</label></div>
+        <label><input type="checkbox" id="sleep" data-opt="build" checked /> rigid sleep</label>
+        <label title="Anti-clip pads each self-collision box by the contacter's own travel, not the car's fastest node's (debris falling far away no longer widens every box). Applies as it runs."><input type="checkbox" id="ownTravel" data-opt="live" checked /> own-travel anti-clip boxes</label></div>
       <div class="row"><span class="muted">GPU timing</span><select id="timing" data-opt="build"><option value="off">off</option><option value="step">per step</option><option value="phases">rigid · vehicle</option></select>
         <span class="muted">coupling room</span><input type="number" id="shapes" data-opt="build" value="256" min="8" max="1024" step="8" />
         <label><input type="checkbox" id="clean" data-opt="live" /> clean layout</label></div>
@@ -244,6 +245,7 @@
         if (c.dataset.opt === 'build') { if (c.type === 'number') { clearTimeout(restartTimer); restartTimer = setTimeout(build, 400); } else build(); }
         else if (c.dataset.opt === 'restart') { clearTimeout(restartTimer); restartTimer = setTimeout(restart, c.type === 'range' || c.type === 'number' ? 120 : 0); }
         else if (c.id === 'cam') cam.init = false;
+        else if (c.id === 'ownTravel') cmd({ ownTravel: get('ownTravel') });
       };
       c.addEventListener(c.type === 'range' ? 'input' : 'change', on);
     }
@@ -325,7 +327,7 @@
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), parked: get('parked'), mountain: mountainSpec(), shapes: get('shapes'),
+          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), parked: get('parked'), mountain: mountainSpec(), shapes: get('shapes'),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),

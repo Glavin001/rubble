@@ -880,6 +880,9 @@ pub struct ExplicitBeams {
     pub parking_brake: f32,
     /// Self-collision contacts in the last step (a statistic; not simulated state).
     pub last_contacts: u32,
+    /// Self-collision (triangle, contacter) pairs inside the box test in the last step
+    /// (those tested for a hit; a statistic, not simulated state).
+    pub last_self_pairs: u32,
     pub settings: ExplicitBeamsSettings,
     /// Turbulence noise state (starts at 1).
     pub noise: i32,
@@ -954,6 +957,14 @@ pub struct ExplicitBeams {
     /// triangle, is caught from the side it came from (a swept test, whatever its
     /// speed), in self-collision and vehicle contact. Off: RoR's band test alone.
     pub anti_clip: bool,
+    /// Anti-clip's box padding by each contacter's own travel (a Rubble setting, not
+    /// in the specification; off by default): a contacter is tested against a triangle
+    /// when inside its box padded by r + (the triangle's fastest node's speed + the
+    /// contacter's own speed, at most the vehicle's fastest) · h + CLIP_DEPTH, instead
+    /// of the vehicle's fastest node's speed (§36). A node's anti-clip contact needs
+    /// only its own and the triangle's travel; the fastest node's padding also catches
+    /// what only some other fast node's speed reached. Without anti-clip it does nothing.
+    pub own_travel_reach: bool,
     /// Anti-clip's side memory (§36; `explicit_contact::clip_word`): per node the
     /// sides held this step and those recorded for the next. Sized when anti-clip
     /// first runs; rolled by the node pass.
@@ -1688,6 +1699,7 @@ impl ExplicitBeams {
             ground: 0.0,
             collision_range: DEFAULT_COLLISION_RANGE,
             last_contacts: 0,
+            last_self_pairs: 0,
             tyres: Vec::new(),
             brakes: Vec::new(),
             parking_brake: 0.0,
@@ -1721,6 +1733,7 @@ impl ExplicitBeams {
             rest_pose: None,
             two_body_contact: false,
             anti_clip: false,
+            own_travel_reach: false,
             clip_sides: Vec::new(),
             anti_only_tris: Vec::new(),
             fixed_contact: false,
@@ -4232,6 +4245,7 @@ impl ExplicitBeams {
         }
         let r = self.collision_range;
         let h = STEP;
+        self.last_self_pairs = 0;
         // Without the throttle (§36) a triangle never waits: its count stays ≤ 0.
         let cap = if self.settings.triangle_throttle { i32::MAX } else { 0 };
         // The two-body rule (spec §36, as vehicle contact's §10.3): the step's hits
@@ -4265,17 +4279,24 @@ impl ExplicitBeams {
             // Anti-clip (§36): the box also reaches what crossed it over the step
             // or is remembered up to CLIP_DEPTH behind it.
             let anti = self.anti_clip;
-            let reach = if anti {
-                let tv = [i0, i1, i2]
+            let tv = if anti {
+                [i0, i1, i2]
                     .iter()
                     .map(|&i| self.nodes[i as usize].vel.length())
-                    .fold(0.0f32, f32::max);
+                    .fold(0.0f32, f32::max)
+            } else {
+                0.0
+            };
+            let reach = if anti {
                 r + (tv + vmax) * STEP + crate::explicit_contact::CLIP_DEPTH
             } else {
                 r
             };
             let lo = p0.min(p1).min(p2) - Vec3::splat(reach);
             let hi = p0.max(p1).max(p2) + Vec3::splat(reach);
+            // Each contacter padded by its own travel (`own_travel_reach`): a box inside
+            // the one above (its speed at most vmax), whose cells the grid gathers.
+            let own = anti && self.own_travel_reach;
             let only = self.tri_anti_only(t);
             let mut hit = false;
             // The candidates to test, in candidate order: all of them, or those in
@@ -4315,6 +4336,17 @@ impl ExplicitBeams {
                 if p.cmplt(lo).any() || p.cmpgt(hi).any() {
                     continue;
                 }
+                if own {
+                    let vh = self.nodes[hn as usize].vel.length();
+                    let s = if vh < vmax { vh } else { vmax };
+                    let reach = r + (tv + s) * STEP + crate::explicit_contact::CLIP_DEPTH;
+                    let lo = p0.min(p1).min(p2) - Vec3::splat(reach);
+                    let hi = p0.max(p1).max(p2) + Vec3::splat(reach);
+                    if p.cmplt(lo).any() || p.cmpgt(hi).any() {
+                        continue;
+                    }
+                }
+                self.last_self_pairs += 1;
                 // (α, β, γ, depth into the contact, normal).
                 let found_hit = if anti {
                     self.clip_hit(t, hn, p, &frame, [i0, i1, i2], r, only)

@@ -153,6 +153,9 @@ static const uint FLAG_CENTRED = 262144u;
 // change of its extension rate itself, each rate along the beam's direction at its
 // own time, so a beam that only turns reads zero (centredKeep, centredBeamObjective).
 static const uint FLAG_CENTRED_OBJECTIVE = 524288u;
+// Anti-clip's box padding by each contacter's own travel (ExplicitBeams::own_travel_reach;
+// with FLAG_ANTI_CLIP): ownTravelOut.
+static const uint FLAG_OWN_TRAVEL = 1048576u;
 // The contact position steps' fixed point, units per metre (explicit_beams.rs
 // SHIFT_FIXED, 2^24).
 static const float SHIFT_FIXED = 16777216.0;
@@ -2984,6 +2987,29 @@ uint selfClip(TriGeo t, uint h, float3 p, float3 origin, float r, out float alph
     return 1u;
 }
 
+// Anti-clip with FLAG_OWN_TRAVEL (explicit_beams.rs own_travel_reach): contacter h at p
+// outside triangle t's box padded by r + (the triangle's fastest node's speed + h's own
+// speed, at most the vehicle's fastest) · h + CLIP_DEPTH, the CPU's arithmetic (inside
+// the fastest node's box, which the caller tested). False without the setting.
+bool ownTravelOut(TriGeo t, uint h, float3 p, float3 origin, float r, uint parity)
+{
+    if ((t.clip & 1u) == 0u) return false;
+    uint4 tn = t.tn;
+    if ((gStatic[tn.w * 4u + 3u].x & FLAG_OWN_TRAVEL) == 0u) return false;
+    float3 p0 = nf3(origin + gNodes[tn.x * 3u].xyz);
+    float3 p1 = nf3(origin + gNodes[tn.y * 3u].xyz);
+    float3 p2 = nf3(origin + gNodes[tn.z * 3u].xyz);
+    float tv = clipTriSpeed(tn);
+    float vm = clipVmax(tn.w, parity);
+    float3 V = gNodes[h * 3u + 1u].xyz;
+    float vh = ssqrt(sdot(V, V));
+    float sp = vh < vm ? vh : vm;
+    float reach = nf(nf(r + smul(nf(tv + sp), STEP)) + CLIP_DEPTH);
+    float3 lo = min(min(p0, p1), p2) - float3(reach, reach, reach);
+    float3 hi = max(max(p0, p1), p2) + float3(reach, reach, reach);
+    return any(p < lo) || any(p > hi);
+}
+
 // Contacter node h against triangle t: when h is within r of the face, the hit is
 // recorded (the throttle's hit flag, and the vehicle's hit list for selfApply).
 void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount,
@@ -3007,6 +3033,7 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
     }
     float3 p = nf3(origin + P.xyz);
     if (any(p < t.lo) || any(p > t.hi)) return;
+    if (ownTravelOut(t, h, p, origin, r, parity)) return;
 #ifdef EB_ABLATE
     // Measurement only: 16777216 no hit test past the box.
     if ((gP.ablate & 16777216u) != 0u) return;
@@ -3732,7 +3759,8 @@ uint pairReuseDecide(uint v, uint grid, uint parity, float3 origin)
 
 // Triangle gt (every one, waiting or not) against the contacters in the cells of its box
 // padded by `margin` more, the walk's list mode (triangleGridWalk) on that box: the
-// pairs inside it into the list at listAt.
+// pairs inside it into the list at listAt. With FLAG_OWN_TRAVEL each contacter must also
+// be inside the box ownTravelOut tests, padded by `margin` more.
 void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
                    uint parity, uint listAt, float margin)
 {
@@ -3740,10 +3768,16 @@ void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint c
     float3 p0 = nf3(origin + gNodes[tn.x * 3u].xyz);
     float3 p1 = nf3(origin + gNodes[tn.y * 3u].xyz);
     float3 p2 = nf3(origin + gNodes[tn.z * 3u].xyz);
-    bool anti = (gStatic[tn.w * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u;
+    uint flags = gStatic[tn.w * 4u + 3u].x;
+    bool anti = (flags & FLAG_ANTI_CLIP) != 0u;
+    bool own = anti && (flags & FLAG_OWN_TRAVEL) != 0u;
     float pad = (anti ? triReach(tn, r, parity) : r) + margin;
-    float3 lo = min(min(p0, p1), p2) - float3(pad, pad, pad);
-    float3 hi = max(max(p0, p1), p2) + float3(pad, pad, pad);
+    float3 mn = min(min(p0, p1), p2);
+    float3 mx = max(max(p0, p1), p2);
+    float3 lo = mn - float3(pad, pad, pad);
+    float3 hi = mx + float3(pad, pad, pad);
+    float tv = own ? clipTriSpeed(tn) : 0.0;
+    float vm = own ? clipVmax(tn.w, parity) : 0.0;
     float3 f0 = floor((lo - origin) / cell);
     float3 fs = floor((hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
     bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
@@ -3809,6 +3843,14 @@ void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint c
             }
             if (h == tn.x || h == tn.y || h == tn.z) continue;
             if (any(p < lo) || any(p > hi)) continue;
+            if (own)
+            {
+                float3 V = gNodes[h * 3u + 1u].xyz;
+                float vh = ssqrt(sdot(V, V));
+                float sp = vh < vm ? vh : vm;
+                float q = nf(nf(r + smul(nf(tv + sp), STEP)) + CLIP_DEPTH) + margin;
+                if (any(p < mn - float3(q, q, q)) || any(p > mx + float3(q, q, q))) continue;
+            }
             uint n = triPairAdd();
             if (n < TRI_PAIR_CAP)
             {
@@ -5327,6 +5369,7 @@ void selfSerialHits(uint v, float3 origin, float r, uint beamOff, uint groupOff,
             float4 P = gNodes[h * 3u];
             float3 p = nf3(origin + P.xyz);
             if (any(p < T.lo) || any(p > T.hi)) continue;
+            if (ownTravelOut(T, h, p, origin, r, parity)) continue;
             float alpha;
             float beta;
             float gamma;
@@ -5406,6 +5449,7 @@ void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint group
             float4 P = gNodes[h * 3u];
             float3 p = nf3(origin + P.xyz);
             if (any(p < T.lo) || any(p > T.hi)) continue;
+            if (ownTravelOut(T, h, p, origin, r, parity)) continue;
             float alpha;
             float beta;
             float gamma;

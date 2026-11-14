@@ -62,6 +62,11 @@ pub struct LabOptions {
     pub scene: Scene,
     /// The car's opt-in triangle-against-shape contact (`ExplicitBeams::surface_contact`).
     pub surface_contact: bool,
+    /// Anti-clip's self-collision box padded by each contacter's own travel, not the
+    /// car's fastest node's (`ExplicitBeams::own_travel_reach`; on in the lab: debris
+    /// falling off the mountain no longer pads every triangle's box). Live
+    /// (`{ ownTravel: bool }` command).
+    pub own_travel_reach: bool,
     /// A second copy of the car parked broadside ahead (the flat scene).
     pub parked: bool,
     /// The coupling's room per car; more in one window fails the step by name.
@@ -78,6 +83,7 @@ impl Default for LabOptions {
         Self {
             scene: Scene::Flat,
             surface_contact: false,
+            own_travel_reach: true,
             parked: false,
             capacity: CouplingCapacity {
                 bodies: 256,
@@ -107,7 +113,7 @@ fn vec3(v: &Value, k: &str) -> Option<Vec3> {
 }
 
 impl LabOptions {
-    /// `{ scene: 'flat' | 'mountain', surface, parked, shapes, planes, sleep, mountain:
+    /// `{ scene: 'flat' | 'mountain', surface, ownTravel, parked, shapes, planes, sleep, mountain:
     /// { seed, steepness, roughness, width, chunk, ahead, behind, launch, loose }, parts:
     /// { names, start, beams } }`, each defaulting to [`LabOptions::default`].
     pub fn from_json(v: &Value) -> Self {
@@ -156,6 +162,10 @@ impl LabOptions {
                 .get("surface")
                 .and_then(Value::as_bool)
                 .unwrap_or(d.surface_contact),
+            own_travel_reach: v
+                .get("ownTravel")
+                .and_then(Value::as_bool)
+                .unwrap_or(d.own_travel_reach),
             parked: v.get("parked").and_then(Value::as_bool).unwrap_or(d.parked),
             capacity: CouplingCapacity {
                 bodies: shapes,
@@ -1552,6 +1562,7 @@ impl Bench {
             "t": self.t,
             "scene": if self.opts.scene == Scene::Mountain { "mountain" } else { "flat" },
             "surfaceContact": self.opts.surface_contact,
+            "ownTravel": self.opts.own_travel_reach,
             "car": self.car.json(&self.model),
             "shots": self.shots.iter().map(Shot::json).collect::<Vec<_>>(),
             "plates": self.plates.iter().map(Plate::json).collect::<Vec<_>>(),
@@ -1765,6 +1776,7 @@ pub fn lab_car(template: &ExplicitBeams, opts: &LabOptions, start: Option<Start>
             .push(StaticShape::oriented_box(centre + up, half, rot));
     }
     car.surface_contact = opts.surface_contact;
+    car.own_travel_reach = opts.own_travel_reach;
     car
 }
 
@@ -2202,6 +2214,17 @@ impl Lab {
     }
 
     pub fn command(&mut self, world: &mut World, cmd: &Value) -> anyhow::Result<Value> {
+        // { ownTravel: bool }: the cars' anti-clip padding by each contacter's own travel
+        // (LabOptions::own_travel_reach), now and after a restart.
+        if let Some(on) = cmd.get("ownTravel").and_then(Value::as_bool) {
+            self.bench.opts.own_travel_reach = on;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                for v in 0..x.vehicle_count() {
+                    x.set_own_travel_reach(v, on);
+                }
+            }
+            return Ok(json!({ "ownTravel": on }));
+        }
         self.bench.command(
             &mut WorldRig {
                 world,
