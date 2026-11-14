@@ -27,7 +27,13 @@ impl Pieces {
     /// The pieces of `s` with its beams' broken flags `broken` (one per beam; a missing
     /// flag reads unbroken).
     pub fn of(s: &ExplicitBeams, broken: &[bool]) -> Self {
-        let n = s.nodes.len();
+        let masses: Vec<f32> = s.nodes.iter().map(|n| n.mass).collect();
+        Self::from_beams(&masses, s.beams.iter().enumerate().map(|(j, b)| (b.a, b.b, broken.get(j).copied().unwrap_or(false))))
+    }
+
+    /// The pieces of nodes of `masses` joined by `beams` (a, b, broken).
+    pub fn from_beams(masses: &[f32], beams: impl Iterator<Item = (u32, u32, bool)>) -> Self {
+        let n = masses.len();
         let mut parent: Vec<u32> = (0..n as u32).collect();
         fn find(p: &mut [u32], mut x: u32) -> u32 {
             while p[x as usize] != x {
@@ -36,11 +42,11 @@ impl Pieces {
             }
             x
         }
-        for (j, b) in s.beams.iter().enumerate() {
-            if broken.get(j).copied().unwrap_or(false) {
+        for (a, c, broken) in beams {
+            if broken {
                 continue;
             }
-            let (a, c) = (b.a as usize, b.b as usize);
+            let (a, c) = (a as usize, c as usize);
             if a >= n || c >= n {
                 continue;
             }
@@ -63,7 +69,7 @@ impl Pieces {
             }
             let k = id[r];
             piece[i] = k;
-            mass[k as usize] += s.nodes[i].mass;
+            mass[k as usize] += masses[i];
             nodes[k as usize] += 1;
         }
         let main = (0..mass.len()).fold(0usize, |b, k| if mass[k] > mass[b] { k } else { b }) as u32;
@@ -114,7 +120,9 @@ pub fn piece_labels(s: &ExplicitBeams, pieces: &Pieces, broken: &[bool]) -> Vec<
 ///   thresholds, nor a piece still joined to the main body by a live beam;
 /// - a piece at rest on the ground beside the car is retired too once its time is up: it
 ///   is debris all the same;
-/// - never the piece holding node 0 (the vehicle's frame origin follows node 0);
+/// - never a piece holding node 0 (the vehicle's frame origin follows node 0) or a
+///   raycast wheel's hub or reference node (the wheel and the drive follow them;
+///   [`DebrisTracker::for_vehicle`]);
 /// - a piece's time counts from the reading at which its nodes were first seen off the
 ///   main body (its last node to leave), at the host's beam readings (the lab: 10 a
 ///   second).
@@ -126,12 +134,9 @@ pub struct DebrisTtl {
 }
 
 impl DebrisTtl {
-    /// Whether a vehicle can retire debris: not with centred damping (its correction
-    /// reads every node) nor with slide nodes (they move nodes along their rails).
+    /// Whether a vehicle can retire debris: not with slide nodes (they move nodes along
+    /// their rails).
     pub fn check(s: &ExplicitBeams) -> Result<(), String> {
-        if s.settings.centred_damping {
-            return Err("debris time to live needs centred damping off (its correction reads every node)".into());
-        }
         if !s.slides.is_empty() {
             return Err("debris time to live needs a vehicle without slide nodes".into());
         }
@@ -166,6 +171,8 @@ pub struct DebrisTracker {
     pub mass: f32,
     /// Pieces retired since the last [`Self::take_events`].
     events: Vec<Retired>,
+    /// Per node: its piece is never retired (empty: node 0 only).
+    pub keep: Vec<bool>,
 }
 
 impl DebrisTracker {
@@ -173,9 +180,28 @@ impl DebrisTracker {
         Self { ttl, off_since: vec![None; nodes], retired: vec![false; nodes], ..Default::default() }
     }
 
-    /// One reading at time `t` of `s`'s pieces: true when [`Self::retired`] changed.
-    pub fn update(&mut self, s: &ExplicitBeams, pieces: &Pieces, t: f64) -> bool {
-        let n = s.nodes.len().min(pieces.piece.len());
+    /// For vehicle `s`: its raycast wheels' hub and reference nodes kept with node 0.
+    pub fn for_vehicle(ttl: Option<DebrisTtl>, s: &ExplicitBeams) -> Self {
+        let n = s.nodes.len();
+        let mut keep = vec![false; n];
+        if n > 0 {
+            keep[0] = true;
+        }
+        if let Some(d) = s.drive.as_ref() {
+            let c = &d.config;
+            for i in c.wheels.iter().flat_map(|w| [w.node1, w.node2]).chain(c.refs) {
+                if let Some(k) = keep.get_mut(i as usize) {
+                    *k = true;
+                }
+            }
+        }
+        Self { keep, ..Self::new(ttl, n) }
+    }
+
+    /// One reading at time `t` of the vehicle's pieces: true when [`Self::retired`]
+    /// changed.
+    pub fn update(&mut self, pieces: &Pieces, t: f64) -> bool {
+        let n = pieces.piece.len();
         self.off_since.resize(n, None);
         self.retired.resize(n, false);
         for i in 0..n {
@@ -192,7 +218,7 @@ impl DebrisTracker {
         for i in 0..n {
             let p = pieces.piece[i] as usize;
             since[p] = since[p].max(self.off_since[i].unwrap_or(f64::MAX));
-            origin[p] |= i == 0;
+            origin[p] |= i == 0 || self.keep.get(i).copied().unwrap_or(false);
             done[p] |= self.retired[i];
         }
         let mut changed = false;

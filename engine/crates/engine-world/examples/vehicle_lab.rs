@@ -107,6 +107,17 @@ fn options(script: &Value) -> LabOptions {
         o.insert("surface".into(), json!(s == "1"));
     }
     // `--own-travel 0|1`: anti-clip's padding by each contacter's own travel (on in the lab).
+    // `--debris 0|1`, `--debris-ttl S`, `--debris-kg M`, `--debris-nodes N`: the debris time
+    // to live (on in the lab: 5 s, 5 kg, 40 nodes).
+    if arg("--debris").is_some() || arg("--debris-ttl").is_some() {
+        let mut d = json!({ "on": arg("--debris").as_deref() != Some("0") });
+        for (flag, key) in [("--debris-ttl", "seconds"), ("--debris-kg", "maxKg"), ("--debris-nodes", "maxNodes")] {
+            if let Some(x) = arg(flag).and_then(|x| x.parse::<f64>().ok()) {
+                d[key] = json!(x);
+            }
+        }
+        o.insert("debris".into(), d);
+    }
     // `--pieces 0|1`: the GPU pair list's piece labels (on in the lab).
     if let Some(s) = arg("--pieces") {
         o.insert("pieceLabels".into(), json!(s == "1"));
@@ -543,8 +554,24 @@ fn reuse_census(s: &ExplicitBeams, pos: &[glam::Vec3], vel: &[glam::Vec3], broke
         r.len()
     };
     let steps = |sp: f32| if sp > 0.0 { 0.05 / (sp * STEP) } else { f32::INFINITY };
+    // The pieces off the main body: (nodes, kg), heaviest first.
+    let mut shed: Vec<(u32, f32)> = Vec::new();
+    {
+        let mut seen = vec![false; n];
+        for i in 0..n {
+            let r = find(&mut parent, i);
+            if r != main && !seen[r] {
+                seen[r] = true;
+                let k = (0..n).filter(|&j| find(&mut parent, j) == r).count() as u32;
+                shed.push((k, mass[r]));
+            }
+        }
+        shed.sort_by(|a, b| b.1.total_cmp(&a.1));
+    }
+    let shed: Vec<String> = shed.iter().map(|(k, m)| format!("{k}n {m:.2}kg")).collect();
     format!(
-        "tracked {ka} (main {k0}); detached nodes {} in {pieces} pieces ({} tracked, fastest {:.0} m/s, {} over 20 m/s), live triangles off the main body {live_tri_detached}; velocity spread all {all:.1} m/s ({:.0} steps a list), main only {m0:.1} m/s ({:.0} steps)",
+        "pieces off [{}]; tracked {ka} (main {k0}); detached nodes {} in {pieces} pieces ({} tracked, fastest {:.0} m/s, {} over 20 m/s), live triangles off the main body {live_tri_detached}; velocity spread all {all:.1} m/s ({:.0} steps a list), main only {m0:.1} m/s ({:.0} steps)",
+        shed.join(", "),
         (0..n).filter(|&i| !is_main[i]).count(),
         det.len(),
         det.iter().fold(0.0f32, |a, &b| a.max(b)),
@@ -580,6 +607,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     })?;
     lab.read_blocking(&world, true)?;
     lab.bench.set_script(&script)?;
+    println!("debris time to live {:?}; notes {:?}", lab.bench.debris.ttl, lab.bench.notes);
     let flag = |k: &str| arg(k).map(|x| x == "1");
     if let Some(x) = world.explicit_vehicles_mut() {
         if let Some(on) = flag("--surface-pairs") {
@@ -815,6 +843,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let vel: Vec<glam::Vec3> = (0..nodes.len() / 12).map(|i| glam::Vec3::new(f(nodes[12 * i + 4]), f(nodes[12 * i + 5]), f(nodes[12 * i + 6]))).collect();
                 println!("   census: {}", tri_census(template, &pos, &vel, &broken));
                 println!("   reuse census: {}", reuse_census(template, &pos, &vel, &broken));
+            }
+            if lab.bench.debris.ttl.is_some() || lab.bench.debris.pieces > 0 {
+                let d = &lab.bench.debris;
+                println!("   debris retired: {} pieces, {} nodes, {:.2} kg", d.pieces, d.nodes, d.mass);
             }
             let c = &lab.bench.car;
             let size = c.hi - c.lo;

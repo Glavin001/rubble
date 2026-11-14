@@ -28,6 +28,7 @@ use crate::{
 };
 use engine_schema::convex::{CollisionFilter, ConvexHull};
 use engine_softbody::explicit_beams::{ExplicitBeams, StaticShape, GRAVITY};
+use engine_softbody::explicit_debris::{DebrisTracker, DebrisTtl, Pieces};
 use engine_softbody::explicit_drive::DriveInput;
 use engine_webgpu::{CouplingCapacity, CouplingLayout};
 use glam::{DVec3, Quat, Vec3};
@@ -72,6 +73,11 @@ pub struct LabOptions {
     /// longer invalidates the main body's list. Lossless (the same results either way).
     /// Live (`{ pieceLabels: bool }`).
     pub piece_labels: bool,
+    /// Small debris retired after its time to live (`DebrisTtl`; None: never, the
+    /// solver's behaviour without the setting). On in the lab: 5 s, at most 10 kg and 40
+    /// nodes ([`LAB_DEBRIS_TTL`]: what the mountain sheds). Live
+    /// (`{ debris: { on, seconds, maxKg, maxNodes } }`; retired pieces stay retired).
+    pub debris_ttl: Option<DebrisTtl>,
     /// A second copy of the car parked broadside ahead (the flat scene).
     pub parked: bool,
     /// The coupling's room per car; more in one window fails the step by name.
@@ -90,6 +96,7 @@ impl Default for LabOptions {
             surface_contact: false,
             own_travel_reach: true,
             piece_labels: true,
+            debris_ttl: Some(LAB_DEBRIS_TTL),
             parked: false,
             capacity: CouplingCapacity {
                 bodies: 256,
@@ -100,6 +107,29 @@ impl Default for LabOptions {
             sleep: true,
             parts: Vec::new(),
         }
+    }
+}
+
+/// The lab's debris time to live (`LabOptions::debris_ttl`).
+/// Measured on the mountain (lab-mountain-perf.md §6): its fragments weigh 0.3 to 5.6 kg
+/// (2 to 12 nodes); the next pieces up are a 12 kg panel, the 19 kg wheels, 30 and 45 kg
+/// parts. 10 kg retires every fragment and nothing a player would miss.
+pub const LAB_DEBRIS_TTL: DebrisTtl = DebrisTtl { max_mass_kg: 10.0, max_nodes: 40, seconds: 5.0 };
+
+/// `{ on, seconds, maxKg, maxNodes }` (missing: the lab's default) as a time to live.
+pub fn debris_ttl_from(x: &Value) -> Option<DebrisTtl> {
+    let d = LAB_DEBRIS_TTL;
+    x.get("on").and_then(Value::as_bool).unwrap_or(true).then(|| DebrisTtl {
+        max_mass_kg: (num(x, "maxKg", f64::from(d.max_mass_kg)) as f32).max(0.0),
+        max_nodes: (num(x, "maxNodes", f64::from(d.max_nodes)) as u32).max(1),
+        seconds: (num(x, "seconds", f64::from(d.seconds)) as f32).max(0.0),
+    })
+}
+
+fn debris_json(t: Option<DebrisTtl>) -> Value {
+    match t {
+        Some(t) => json!({ "on": true, "seconds": t.seconds, "maxKg": t.max_mass_kg, "maxNodes": t.max_nodes }),
+        None => json!({ "on": false }),
     }
 }
 
@@ -176,6 +206,10 @@ impl LabOptions {
                 .get("pieceLabels")
                 .and_then(Value::as_bool)
                 .unwrap_or(d.piece_labels),
+            debris_ttl: match v.get("debris") {
+                Some(x) if !x.is_null() => debris_ttl_from(x),
+                _ => d.debris_ttl,
+            },
             parked: v.get("parked").and_then(Value::as_bool).unwrap_or(d.parked),
             capacity: CouplingCapacity {
                 bodies: shapes,
@@ -572,6 +606,11 @@ pub struct Bench {
     /// The car's nodes at the last reading (about `last_origin`): what a click picks.
     last: Vec<Vec3>,
     last_origin: DVec3,
+    /// The car's pieces at the last beam reading, and its debris time to live: which
+    /// nodes are retired, and a new set for the solver (the rig applies it).
+    pub pieces: Option<Pieces>,
+    pub debris: DebrisTracker,
+    pub retire_due: Option<Vec<bool>>,
 }
 
 const KIND_SHOT: u8 = 0;
@@ -579,6 +618,7 @@ const KIND_PLATE: u8 = 1;
 
 impl Bench {
     pub fn new(opts: LabOptions, car: &ExplicitBeams, dt: f32) -> Self {
+        let ttl = opts.debris_ttl.filter(|_| DebrisTtl::check(car).is_ok());
         let mountain = (opts.scene == Scene::Mountain).then(|| MountainRun {
             spec: opts.mountain,
             palette: opts.mountain.palette().into_iter().map(Arc::new).collect(),
@@ -612,7 +652,32 @@ impl Bench {
             ext: [Vec3::splat(-1.0), Vec3::splat(1.0)],
             last: Vec::new(),
             last_origin: DVec3::ZERO,
+            pieces: None,
+            debris: DebrisTracker::for_vehicle(ttl, car),
+            retire_due: None,
         }
+        .with_debris_check(car)
+    }
+
+    fn with_debris_check(mut self, car: &ExplicitBeams) -> Self {
+        if let (Some(_), Err(e)) = (self.opts.debris_ttl, DebrisTtl::check(car)) {
+            self.notes.push(format!("debris time to live off: {e}"));
+        }
+        self
+    }
+
+    /// The debris time to live from now on (retired pieces stay retired).
+    pub fn set_debris_ttl(&mut self, ttl: Option<DebrisTtl>) {
+        self.opts.debris_ttl = ttl;
+        self.debris.ttl = ttl;
+    }
+
+    /// The debris time to live failed in the solver (`reason`): off from now on.
+    pub fn debris_failed(&mut self, reason: &str) {
+        self.debris.ttl = None;
+        self.opts.debris_ttl = None;
+        self.notes.push(format!("debris time to live off: {reason}"));
+        self.car.events.push(monitor::Event { t: self.t, text: format!("debris time to live off: {reason}") });
     }
 
     /// The car's frame at the last reading: centre of mass (world), left, forward.
@@ -1374,6 +1439,26 @@ impl Bench {
     pub fn read_at(&mut self, car: &CarRead, frame: &ProxyFrame, taken: f64) {
         let before = self.car.speed;
         self.car.read(&self.model, car, frame, taken);
+        // The pieces the unbroken beams leave; small ones retired after their time.
+        if let Some(b) = car.beams {
+            let pieces = Pieces::from_beams(
+                &self.model.masses,
+                self.model.beams.iter().zip(b).map(|(e, x)| (e[0], e[1], x.0)),
+            );
+            if self.debris.update(&pieces, taken) {
+                self.retire_due = Some(self.debris.retired.clone());
+            }
+            for r in self.debris.take_events() {
+                self.car.events.push(monitor::Event {
+                    t: r.t,
+                    text: format!(
+                        "debris retired: {} nodes, {:.2} kg, {:.1} s off the main body",
+                        r.nodes, r.mass, r.off_for
+                    ),
+                });
+            }
+            self.pieces = Some(pieces);
+        }
         if self.arrival.is_none()
             && self.car.readings > 1
             && frame
@@ -1573,6 +1658,9 @@ impl Bench {
             "scene": if self.opts.scene == Scene::Mountain { "mountain" } else { "flat" },
             "surfaceContact": self.opts.surface_contact,
             "ownTravel": self.opts.own_travel_reach,
+            "pieceLabels": self.opts.piece_labels,
+            "debris": debris_json(self.debris.ttl),
+            "retired": { "pieces": self.debris.pieces, "nodes": self.debris.nodes, "mass": self.debris.mass },
             "car": self.car.json(&self.model),
             "shots": self.shots.iter().map(Shot::json).collect::<Vec<_>>(),
             "plates": self.plates.iter().map(Plate::json).collect::<Vec<_>>(),
@@ -1595,6 +1683,7 @@ impl Bench {
         let c = &self.car;
         let _ = writeln!(o, "t {:.2} s   car {:.0} kg at ({:.2}, {:.2}, {:.2})   {:.1} km/h   KE {:.0} J   peak {:.1} g", self.t, self.model.mass, c.centre.x, c.centre.y, c.centre.z, c.speed * 3.6, c.kinetic, c.g_peak);
         let _ = writeln!(o, "beams {} broken, {} yielded of {}   deformation {:.3} m (peak {:.3}), {} nodes > 10 cm   attached mass {:.1} %", c.beams_broken, c.beams_yielded, c.beams_total, c.deform, c.deform_peak, c.nodes_moved, 100.0 * c.attached);
+        let _ = writeln!(o, "debris retired: {} pieces, {} nodes, {:.2} kg (time to live {:?})", self.debris.pieces, self.debris.nodes, self.debris.mass, self.debris.ttl);
         let _ = writeln!(o, "penetration: deepest node in a rigid body {:.3} m (peak {:.3}), {} nodes inside; body points in the car's hull {} (deepest {:.3} m, peak {:.3})", c.node_depth, c.node_depth_peak, c.nodes_inside, c.body_points_inside, c.body_depth, c.body_depth_peak);
         let _ = writeln!(
             o,
@@ -2250,6 +2339,13 @@ impl Lab {
             }
             return Ok(json!({ "ownTravel": on }));
         }
+        // { debris: { on, seconds, maxKg, maxNodes } }: the debris time to live
+        // (LabOptions::debris_ttl), now and after a restart.
+        if let Some(d) = cmd.get("debris") {
+            let ttl = debris_ttl_from(d);
+            self.bench.set_debris_ttl(ttl);
+            return Ok(json!({ "debris": debris_json(ttl) }));
+        }
         // { pieceLabels: bool }: the pair list's piece labels (LabOptions::piece_labels).
         if let Some(on) = cmd.get("pieceLabels").and_then(Value::as_bool) {
             self.bench.opts.piece_labels = on;
@@ -2269,6 +2365,13 @@ impl Lab {
 
     /// Call before each `World::step`.
     pub fn before_step(&mut self, world: &mut World) -> anyhow::Result<()> {
+        if let Some(retired) = self.bench.retire_due.take() {
+            if let Some(x) = world.explicit_vehicles_mut() {
+                if let Err(e) = x.set_retired(0, &retired) {
+                    self.bench.debris_failed(&e);
+                }
+            }
+        }
         if let Some(labels) = self.labels_due.take() {
             if let Some(x) = world.explicit_vehicles_mut() {
                 let zeros = vec![0u8; self.car.nodes.len()];
@@ -2331,15 +2434,6 @@ impl Lab {
                 .collect()
         });
         let taken = taken.filter(|t| t.is_finite()).unwrap_or(self.bench.t);
-        if let (Some(b), true) = (beams.as_deref(), self.bench.opts.piece_labels) {
-            use engine_softbody::explicit_debris::{piece_labels, Pieces};
-            let broken: Vec<bool> = b.iter().map(|x| x.0).collect();
-            let pieces = Pieces::of(&self.car, &broken);
-            let labels = if pieces.mass.len() > 1 { piece_labels(&self.car, &pieces, &broken) } else { Vec::new() };
-            if labels != self.labels {
-                self.labels_due = Some(labels);
-            }
-        }
         self.bench.read_at(
             &CarRead {
                 pos: &pos,
@@ -2350,6 +2444,14 @@ impl Lab {
             &frame,
             taken,
         );
+        if let (Some(b), Some(pieces), true) = (beams.as_deref(), self.bench.pieces.as_ref(), self.bench.opts.piece_labels) {
+            use engine_softbody::explicit_debris::piece_labels;
+            let broken: Vec<bool> = b.iter().map(|x| x.0).collect();
+            let labels = if pieces.mass.len() > 1 { piece_labels(&self.car, pieces, &broken) } else { Vec::new() };
+            if labels != self.labels {
+                self.labels_due = Some(labels);
+            }
+        }
         Ok(())
     }
 

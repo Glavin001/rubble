@@ -342,3 +342,133 @@ vehicle_lab_reset` 3 passed. Chrome: the mountain, the parked car and the author
 **Not verified:** the `engine-metal` suites (not run); contact groups, the wide and big
 modules keep the walk every step (the reuse is the solo frame's only); B on a vehicle
 contact (`explicit_contact.rs`, out of scope).
+
+## 6. Torn-off pieces: their own groups in the pair list, and a time to live for debris (2026-11-14)
+
+The report: on the mountain (`surface=0&drag=0`) nodes torn off the car fall for ever
+(228 m/s at 29 s) and the late phase runs at 40 World steps/s.
+
+### Why the late phase was slow (native, `vehicle_lab --tri-census 1`, new reuse census)
+
+The reused pair list's bound took one spread for every tracked node. At 23 s 68 nodes
+are off the main body in 12 pieces (48 of them tracked, 45 live collision triangles
+among them), falling at up to 226 m/s: the tracked nodes' velocity spread is 166 m/s
+(the 5 cm list lasts under one step), against 17 m/s for the main body alone (6 steps).
+From 23 s the list was reused on **0 %** of grid steps (built every frame, then the
+backoff to the walk), 10,000–11,000 pairs a build. The pieces carry their own triangles,
+and 7 live triangles that no beam can kill join falling nodes to the car (box sides up to
+1.6 km). What the mountain sheds by 30 s: fragments of 0.3–5.6 kg (2–12 nodes), a 12 kg
+piece (20 nodes), three 19 kg pieces (the wheels, 5 nodes), 30 and 45 kg parts.
+
+### A. Piece labels (lossless; `bb985818`)
+
+The host labels each node by piece (`explicit_debris::Pieces`: a union-find over the
+unbroken beams of each beam reading; `piece_labels`: 0 the main body, 1..6 the pieces
+with most triangles of their own, 7 the rest); `ExplicitBeamsGpu::set_piece_labels`
+writes them (gNext, Params word 94). The kernel proves the list for the labels given:
+each group's own spread within the margin; a triangle whose nodes carry different
+labels, or the loose label, is *volatile* (never listed; every candidate tested each step
+as the walk tests it); a cross pair is safe while the contacter's displacement relative
+to the other group stays below its separation at the build, `max(gap to that group's node
+box − a bound on any triangle's padding, M)` (per axis, keys per group; the main body's
+contacters as one group). Any labels give the walk's results; good ones let a falling
+piece stop invalidating the list. Lab: on (`pieceLabels`, the page's "torn pieces apart
+in the pair list"), `vehicle_lab --pieces 0|1 --ab-switch pieces`.
+
+### B. Debris time to live (explicit setting, off by default; `55ca2f19` and the lab commit)
+
+`DebrisTtl { max_mass_kg, max_nodes, seconds }` with `DebrisTracker` (engine-softbody,
+any host): a piece off the main body (no live beam joins them) for `seconds`, at most the
+thresholds, is retired. Never the main body (the heaviest piece), never anything larger,
+never a piece holding node 0 or a raycast wheel's hub or reference node. **A piece at rest
+on the ground beside the car is retired too once its time is up: it is debris.** The time
+counts from the beam reading at which its last node was first seen off the main body.
+
+A retired node (`ExplicitBeams::retired`; `ExplicitBeamsGpu::set_retired`, a bit per node
+in gMisc, Params word 95, 0 until something is retired) is left at rest where it is: not
+integrated, no self-collision as contacter or triangle node, no surface contact, out of
+the pair list's bounds, the fastest node's speed, the centred-damping correction and the
+coupling's bounds (`cpl_bounds`). Its own beams are still evaluated (frozen: they cannot
+move it; a few hundred beam updates at most). Each check is an early return behind the
+param word. The renderer discards a retired node's skin (the tear flag); the event log
+says "debris retired: N nodes, M kg, T s off the main body"; the stats show retired
+pieces, nodes and mass beside the mass on the main body. Refused (an error, the lab turns
+it off and says so) while vehicle contact is active, and for a vehicle with slide nodes.
+Labelling cost: one union-find over the beams per beam reading (the lab: every 6
+windows; 3,583 beams).
+
+Lab default: on, 5 s, at most 10 kg and 40 nodes (every fragment the mountain sheds; not
+the 12 kg piece, the wheels or the larger parts). Page: "retire small debris after … s,
+at most … kg and … nodes" (live); `vehicle_lab --debris 0|1 --debris-ttl --debris-kg
+--debris-nodes`.
+
+### Results
+
+Native (`vehicle_lab --measure mountain-perf --secs 32 --car …/sedan_new --surface 0
+--drag 0 --steepness 55 --roughness 0.25 --launch 12 --own-travel 1`), ms per World step;
+GPU use before the runs 1–5 %, 0 %, 96 % (the last run overlapped another GPU user):
+
+| t (s) | before (`9c8270c0` tree, labels off) | A | A + B (lab defaults) | reuse before → A |
+|---|---|---|---|---|
+| 3 | 6.20 | 6.29 | 6.26 | 97 → 97 % |
+| 9 | 11.29 | 11.55 | 11.62 | 65 → 65 % |
+| 13 | 14.29 | 13.71 | 13.81 | 47 → 47 % |
+| 17 | 15.65 | 16.05 | 15.31 | 49 → 50 % |
+| 21 | 16.41 | 16.53 | 15.43 | 54 → 54 % |
+| 23 | 21.49 | 21.45 | 20.39 | 33 → 39 % |
+| 25 | 22.78 | 19.10 | 20.02 | 0 → 68 % |
+| 27 | 23.65 | 22.03 | 22.74 | 0 → 65 % |
+| 29 | 22.52 | 20.32 | 17.22 | 0 → 69 % |
+| 31 | 21.83 | 19.72 | 19.81 | 0 → 69 % |
+
+The trajectory is the same in all three to every printed figure. With B 8 pieces (34
+nodes, 17.9 kg) were retired by 32 s; the coupling's proxies between 10 and 22 s fell from
+27–131 to 19–59, and from 23 s the unretired large pieces keep them at 107–135.
+
+Bit-identity: A/B of the labels from one snapshot (20 frames of 34 steps each way, every
+state word) at 8, 14, 20, 24 and 29 s: all the same (24 s: 18.5 vs 22.4 ms a frame; 29 s:
+16.8 vs 19.3). `explicit_pair_reuse_gpu piece_labels_keep_the_list_bit_for_bit`: the sedan
+with its front torn off and flung at 60 m/s, labels against none against the walk, 20
+frames, every state word; builds in frames 8–20: 45 with labels, 136 without.
+`debris_retire_gpu`: a contacter, a falling triangle (with and without centred damping
+and JBeam beams) and a node resting on a box with surface contact, retired mid-run on the
+CPU and the GPU: positions and velocities bit for bit every step. `debris_ttl` (CPU): the
+rule's cases; with nothing retired the CPU's state is the same bit for bit.
+
+Headless Chrome (`vehicle-lab-record.mjs --probe --secs 45`, the same build each way; GPU
+use before 11 % and 87 %), GPU ms per World step / World steps per second:
+
+| page t (s) | labels and TTL off | defaults (both on) |
+|---|---|---|
+| 2.8 | 5.1 / 60 | 5.1 / 60 |
+| 8.8 | 10.7 / 60 | 10.6 / 60 |
+| 14.8 | 9.8 / 58 | 9.2 / 59 |
+| 19.8 | 11.1 / 60 | 10.2 / 59 |
+| 22.5 | 11.8 / 59 | 10.9 / 59 |
+| 23.9 | 14.8 / 42 | 12.6 / 59 |
+| 25.4 | 15.7 / 39 | 13.4 / 55 |
+| 26.8 | 16.1 / 40 | 14.7 / 41 |
+| 28.1 | 17.7 / 39 | 15.5 / 39 |
+| 30.1 | 20.9 / 40 | 17.5 / 40 |
+| 33.5 | 20.7 / 40 | 15.5 / 40 |
+| 37.3 | 21.1 / 39 | 16.6 / 40 |
+
+60 steps/s now holds to 25.4 s (was 23.2 s) and the late GPU time is 15.5–18 ms (was
+20–21), but **the goal is not met**: from 26 s the page runs 40 steps/s. The parked car
+4.5 ms; the authored sedan's 90 km/h crash 4.3 ms; the mountain with surface contact
+(the page's default for the generated car) retires debris too; no console or WGSL error
+in any run. Fleet (`fleet.sh apart "1 8 32"`, GPU idle): 8.96 / 9.74 / 11.38 ms medians
+(were 8.9 / 9.6 / 11.4).
+
+### What is left
+
+- **The coupling's window covers every unretired node.** `cpl_bounds` takes one box over
+  the car; the wheels (19 kg) and the 30 and 45 kg parts falling hundreds of metres below
+  keep 107–135 proxy bodies and 300–590 hull planes in the window from 23 s, more than the
+  pair list. Per-piece windows (the owner's "separate islands") are the next lever; not
+  done here.
+- In Chrome the page holds 40 steps/s late even at 15.5 ms of GPU a step (under
+  16.7 ms): the step rate is not explained by GPU time alone. Not investigated.
+- The Chrome runs are of the build before the last kernel change (`piecesClear` skipped
+  without labels or retirement: the fleet's lane-0 clears; it changes no result).
+- `engine-metal` suites not run (their cold compile; `engine-metal` builds).

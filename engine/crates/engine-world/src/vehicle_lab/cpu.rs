@@ -223,7 +223,8 @@ impl CpuLab {
         // reaches the car's box grown by the margin and the car's own travel.
         let o = self.sim.origin;
         let (mut lo, mut hi, mut fast) = (Vec3::MAX, Vec3::MIN, 0.0f32);
-        for n in &self.sim.nodes {
+        // Retired debris is not where the car is (the GPU's cpl_bounds skips it too).
+        for (_, n) in self.sim.nodes.iter().enumerate().filter(|(i, _)| !self.sim.is_retired(*i)) {
             lo = lo.min(o + n.pos);
             hi = hi.max(o + n.pos);
             fast = fast.max(n.vel.length());
@@ -302,6 +303,10 @@ impl CpuLab {
             }
         }
         self.read(&set, &which);
+        // The debris time to live's decision, for the next window (as the GPU lab's).
+        if let Some(r) = self.bench.retire_due.take() {
+            self.sim.retired = r;
+        }
         anyhow::ensure!(
             !self.bench.car.non_finite,
             "vehicle lab: non-finite node state at t = {:.3} s",

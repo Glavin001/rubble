@@ -4074,6 +4074,10 @@ impl ExplicitBeams {
             }
         }
         for i in 0..self.nodes.len() {
+            if self.is_retired(i) {
+                // Retired debris: left at rest (the node pass's).
+                continue;
+            }
             let mut c = Vec3::ZERO;
             let mut seen: Option<u32> = None;
             for &j in &self.incidence[i] {

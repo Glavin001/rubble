@@ -2545,6 +2545,8 @@ void centredBeam(uint gj, bool objective)
 // phase's), v += h·c/m, x += h·(h·c/m).
 void centredNode(uint gi, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
+    // Retired debris: left at rest (nodeRetire).
+    if (gP.retireBase != 0u && nodeRetired(gi)) return;
     uint4 info = gStatic[gP.nodeInfoBase + gi];
     float3 c = beamSum(float3(0.0, 0.0, 0.0), info, beamOff, groupOff, groupCount, parity, false);
     if ((info.x & NODE_IMMOVABLE) != 0u) return;
@@ -3908,9 +3910,10 @@ bool piecesAllow(uint v, float grow, float eps)
 
 // pairReuseDecide's clears with labels in use (lane 0): the step's keys; the build's
 // inputs unless this step builds (then its outputs).
-void piecesClear(uint mode)
+void piecesClear(uint v, uint mode)
 {
-    if (gP.pieceBase == 0u) return;
+    // Nothing written this frame without labels or retirement (pairReuseBegin cleared it).
+    if (gP.pieceBase == 0u || (!piecesOn(v) && gP.retireBase == 0u)) return;
     for (uint k = RU_D; k < RU_E; k++) gsCount[GRID_BUCKETS + k].store(0u);
     for (uint k = RU_K; k < RU_S; k++) gsCount[GRID_BUCKETS + k].store(0u);
     if (mode == 1u)
@@ -4091,7 +4094,7 @@ uint pairReuseDecide(uint v, uint grid, uint parity, float3 origin)
             gsCount[GRID_BUCKETS + RU_STREAK].store(0u);
     }
     for (uint k = 0u; k < 8u; k++) gsCount[GRID_BUCKETS + k].store(0u);
-    piecesClear(mode);
+    piecesClear(v, mode);
     if (mode == 2u) gsCount[GRID_BUCKETS + RU_STATS + 1u].add(1u);
     return mode;
 }

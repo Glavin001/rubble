@@ -23,11 +23,11 @@ fn node(p: Vec3, v: Vec3, flags: u32) -> Node {
     Node { pos: p, vel: v, force: Vec3::ZERO, mass: 1.0, friction: 1.0, flags }
 }
 
-/// The scene: an immovable triangle in y = 0 (nodes 0..2) with contacters 3 and 4 falling
+/// The scene (`centred`: with centred damping and the falling triangle's beams): an immovable triangle in y = 0 (nodes 0..2) with contacters 3 and 4 falling
 /// onto it; a triangle (5..7) falling at 2 m/s with contacter 8 rising into it; node 9
 /// falling onto a static box (surface contact on).
-fn scene() -> ExplicitBeams {
-    let mut s = ExplicitBeams::empty(EXACT);
+fn scene(centred: bool) -> ExplicitBeams {
+    let mut s = ExplicitBeams::empty(ExplicitBeamsSettings { centred_damping: centred, centred_objective: centred, ..EXACT });
     s.ground = -1.0e3;
     let fixed = NODE_IMMOVABLE | NODE_NO_GROUND;
     let free = NODE_NO_GROUND | NODE_CONTACTER;
@@ -43,6 +43,14 @@ fn scene() -> ExplicitBeams {
     s.nodes.push(node(Vec3::new(-4.0, 0.08, 0.0), Vec3::new(0.0, -0.5, 0.0), 0));
     s.triangles.push(Triangle { nodes: [0, 1, 2], wait: 0, idle: 0 });
     s.triangles.push(Triangle { nodes: [5, 6, 7], wait: 0, idle: 0 });
+    if centred {
+        // The falling triangle held by JBeam beams (centred damping's correction acts on
+        // JBeam elements), stretched a little so they ring.
+        for (a, b) in [(5u32, 6u32), (6, 7), (7, 5)] {
+            let l = (s.nodes[a as usize].pos - s.nodes[b as usize].pos).length();
+            s.beams.push(Beam::new(a, b, ExplicitKind::JbeamPlain, ExplicitType::Deformable, 2.0e4, 40.0, 0.97 * l, 1.0e9, 1.0e9, 0.0));
+        }
+    }
     s.boxes.push(StaticBox::centered(Vec3::new(-4.0, -0.5, 0.0), Vec3::new(1.0, 0.5, 1.0)));
     s.anti_clip = true;
     s.two_body_contact = true;
@@ -59,8 +67,8 @@ fn bits(v: &[Vec3]) -> Vec<[u32; 3]> {
 /// Steps of one-step frames, the retirement `retire` (nodes) applied before frame `at`
 /// on both; every frame positions and velocities bit for bit. Returns the CPU's final
 /// positions.
-fn run(retire: &[usize], at: u32, frames: u32) -> Option<Vec<Vec3>> {
-    let s = scene();
+fn run(retire: &[usize], at: u32, frames: u32, centred: bool) -> Option<Vec<Vec3>> {
+    let s = scene(centred);
     let (_, device, queue) = default_device().ok()?;
     let mut g = ExplicitBeamsGpu::new(&device, &queue, std::slice::from_ref(&s));
     let mut w = ExplicitBeamsWorld::new(vec![s.clone()]);
@@ -87,15 +95,20 @@ fn run(retire: &[usize], at: u32, frames: u32) -> Option<Vec<Vec3>> {
 #[test]
 fn retired_nodes_step_like_the_cpu_bit_for_bit() {
     // Nothing retired: the reference run (the contacts happen).
-    let Some(free) = run(&[], 0, 320) else {
+    let Some(free) = run(&[], 0, 320, false) else {
         eprintln!("no GPU: skipped");
         return;
     };
     // Contacter 4 retired at step 20 (before it reaches the triangle at y = 0), the
     // falling triangle 5..7 at step 20 (before contacter 8 meets it), node 9 at step 200
     // (resting on the box).
-    let a = run(&[4, 5, 6, 7], 20, 320).unwrap();
-    let b = run(&[9], 200, 320).unwrap();
+    let a = run(&[4, 5, 6, 7], 20, 320, false).unwrap();
+    let b = run(&[9], 200, 320, false).unwrap();
+    // With centred damping (its correction skips retired nodes): the beam-held triangle
+    // retired mid-fall, and nothing retired.
+    run(&[], 0, 320, true).unwrap();
+    let c = run(&[5, 6, 7], 20, 320, true).unwrap();
+    assert!(c[8].y > c[5].y + 0.05, "centred: node 8 passed the retired triangle: {} vs {}", c[8].y, c[5].y);
     eprintln!(
         "free: node 4 at y {:.4}, node 8 at y {:.4}, node 9 at y {:.4}; retired: node 4 at y {:.4}, node 8 at y {:.4}; node 9 at y {:.4}",
         free[4].y, free[8].y, free[9].y, a[4].y, a[8].y, b[9].y

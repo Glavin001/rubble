@@ -119,7 +119,10 @@
       <div class="row"><label><input type="checkbox" id="surface" data-opt="build" /> surface contact</label><label><input type="checkbox" id="parked" data-opt="build" /> second car</label>
         <label><input type="checkbox" id="drag" data-opt="build" checked /> air drag</label><label><input type="checkbox" id="centred" data-opt="build" /> centred damping</label>
         <label><input type="checkbox" id="sleep" data-opt="build" checked /> rigid sleep</label>
-        <label title="Anti-clip pads each self-collision box by the contacter's own travel, not the car's fastest node's (debris falling far away no longer widens every box). Applies as it runs."><input type="checkbox" id="ownTravel" data-opt="live" checked /> own-travel anti-clip boxes</label></div>
+        <label title="Anti-clip pads each self-collision box by the contacter's own travel, not the car's fastest node's (debris falling far away no longer widens every box). Applies as it runs."><input type="checkbox" id="ownTravel" data-opt="live" checked /> own-travel anti-clip boxes</label>
+        <label title="Self-collision's reused pair list told which nodes are off the main body, so a piece torn off no longer invalidates it (the same results either way). Applies as it runs."><input type="checkbox" id="pieceLabels" data-opt="live" checked /> torn pieces apart in the pair list</label></div>
+      <div class="row"><label title="A small piece off the car's main body (no unbroken beam joins them) for this long is retired: no longer simulated, not drawn, in no contact. A piece at rest beside the car goes too. Applies as it runs; retired pieces stay retired."><input type="checkbox" id="debris" data-opt="live" checked /> retire small debris after</label>
+        <input type="number" id="debrisTtl" data-opt="live" value="5" min="0" max="600" step="0.5" /> s, at most <input type="number" id="debrisKg" data-opt="live" value="10" min="0" max="1000" step="0.5" /> kg and <input type="number" id="debrisNodes" data-opt="live" value="40" min="1" max="10000" step="1" /> nodes</div>
       <div class="row"><span class="muted">GPU timing</span><select id="timing" data-opt="build"><option value="off">off</option><option value="step">per step</option><option value="phases">rigid · vehicle</option></select>
         <span class="muted">coupling room</span><input type="number" id="shapes" data-opt="build" value="256" min="8" max="1024" step="8" />
         <label><input type="checkbox" id="clean" data-opt="live" /> clean layout</label></div>
@@ -246,6 +249,8 @@
         else if (c.dataset.opt === 'restart') { clearTimeout(restartTimer); restartTimer = setTimeout(restart, c.type === 'range' || c.type === 'number' ? 120 : 0); }
         else if (c.id === 'cam') cam.init = false;
         else if (c.id === 'ownTravel') cmd({ ownTravel: get('ownTravel') });
+        else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
+        else if (c.id.startsWith('debris')) cmd({ debris: debrisSpec() });
       };
       c.addEventListener(c.type === 'range' ? 'input' : 'change', on);
     }
@@ -327,7 +332,7 @@
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), parked: get('parked'), mountain: mountainSpec(), shapes: get('shapes'),
+          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), debris: debrisSpec(), parked: get('parked'), mountain: mountainSpec(), shapes: get('shapes'),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),
@@ -398,7 +403,7 @@
     };
     function addCar(w, i) {
       const v = w.car.visuals[i % w.car.visuals.length].visual, cut = i === 0 && w.hidden.size > 0;
-      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i) });
+      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord() });
     }
 
     // ---------------------------------------------------------------- restart (in place)
@@ -469,6 +474,7 @@
     }
 
     // ---------------------------------------------------------------- commands
+    const debrisSpec = () => ({ on: get('debris'), seconds: get('debrisTtl') ?? 5, maxKg: get('debrisKg') ?? 10, maxNodes: get('debrisNodes') ?? 40 });
     const cmd = (c) => { if (!W) return null; try { return W.lab.command(W.world, c); } catch (e) { warn(errorText(e)); return null; } };
     const shotSpec = () => ({ shape: get('shape'), size: [get('bx'), get('by'), get('bz')], radius: get('radius'), length: get('length'), material: get('material'),
       ...(get('mass') ? { mass: get('mass') } : {}), speed: get('speed'), spinRate: get('spin'), count: Math.max(1, get('burst')), interval: 0.12, axis: get('cylAxis') });
@@ -778,6 +784,7 @@
         ['deformation · peak', `${nf(100 * c.deform)} · ${nf(100 * c.deformPeak)} cm`],
         ['nodes moved > 10 cm', `${nf(c.nodesMoved10cm)} of ${nf(c.nodes)}`],
         ['mass on the main body', `${nf(100 * c.attachedMass, 1)} %`, c.attachedMass < 0.995],
+        ['debris retired', s.retired.pieces ? `${nf(s.retired.pieces)} pieces · ${nf(s.retired.nodes)} nodes · ${nf(s.retired.mass, 2)} kg` : (s.debris.on ? 'none yet' : 'off')],
         ['energy ledger', 'CPU reference only'],
         ['World steps/s', RECORD ? `${Math.round(RATE)} (frame-locked)` : paused ? 'paused' : `${simRate.toFixed(0)} · ${Math.min(100, 100 * rt).toFixed(0)} % real time`, !RECORD && !paused && rt < 0.9],
         ...(RECORD ? [] : [['FPS · frame p50 / p95', `${fps.toFixed(0)} · ${pct(0.5).toFixed(1)} / ${pct(0.95).toFixed(1)} ms`]]),
@@ -805,7 +812,8 @@
       if (s.mountain) {
         const m = s.mountain;
         grid($('mstats'), [['time', `${nf(s.t, 1)} s`], ['fallen', `${nf(m.fallen)} m (${nf(m.along)} m along the slope)`], ['speed', `${nf(c.kmh, 1)} km/h`], ['peak', `${nf(c.gPeak, 1)} g`],
-          ['parts detached', nf(c.partsDetached)], ['mass on the main body', `${nf(100 * c.attachedMass, 1)} %`], ['energy dissipated', `${nf(c.mechanicalLostJ / 1000)} kJ`],
+          ['parts detached', nf(c.partsDetached)], ['mass on the main body', `${nf(100 * c.attachedMass, 1)} %`],
+          ['debris retired', `${nf(s.retired.pieces)} pieces · ${nf(s.retired.mass, 2)} kg`], ['energy dissipated', `${nf(c.mechanicalLostJ / 1000)} kJ`],
           ['chunks live · made · dropped', `${m.chunksLive} · ${m.chunksMade} · ${m.chunksDropped}`], ['rockslides', nf(m.rockslides)]]);
       }
       grid($('cstats'), [['stated speed', s.targetKmh == null ? '–' : `${nf(s.targetKmh, 1)} km/h`], ['speed at first contact', s.arrivalKmh == null ? '–' : `${nf(s.arrivalKmh, 1)} km/h`, s.arrivalKmh != null && Math.abs(s.arrivalKmh - s.targetKmh) > 1.5],

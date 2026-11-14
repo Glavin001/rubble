@@ -134,7 +134,7 @@ struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r
 // beams (nodeCount + 1 starts, then (node, spawn length bits) pairs).
 struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listAt: u32, trisAt: u32, beamOffset: u32, level: u32,
   restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32, deathAt: u32,
-  wheelAt: u32, frameAt: u32, tbAt: u32, brkAt: u32 };
+  wheelAt: u32, frameAt: u32, tbAt: u32, brkAt: u32, retireAt: u32 };
 // The frame's effects: simulated seconds since the last update (0: nothing
 // moves, spawns or accumulates), a seed, the floor and the static boxes
 // (centre, kind; half extents) the sparks and scrapes test.
@@ -212,6 +212,13 @@ fn origin() -> vec3f {
 }
 fn nodePos(i: u32) -> vec3f { let k = (params.nodeOffset + i) * 3u; return nodes[k].xyz + nodes[k + 1u].xyz * fxu.lead.x; }
 fn beamBroken(j: u32) -> bool { return beams[(params.beamOffset + j) * 2u + 1u].z != 0.0; }
+// Retired debris (the solver's nodeRetired bits in misc at retireAt; 0: none): its skin is
+// not drawn.
+fn retiredNode(i: u32) -> bool {
+  let g = params.nodeOffset + i;
+  let w = misc[params.retireAt + (g >> 7u)];
+  return ((w[(g >> 5u) & 3u] >> (g & 31u)) & 1u) != 0u;
+}
 fn beamRest(j: u32) -> f32 { return beams[(params.beamOffset + j) * 2u].x; }
 fn restN(i: u32) -> vec3f {
   let k = params.restNAt + 8u * i;
@@ -979,6 +986,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
       fxSpawn(pos, v * 0.8 + fxRndDir(seed, 6u) * 1.2 + vec3f(0.0, 0.8, 0.0), 4.0, 5u | (col << 8u));
     }
   }
+  if (params.retireAt != 0u && (retiredNode(bd.n0) || retiredNode(bd.n1) || retiredNode(bd.n2))) { tear = 1.0; }
   outv[k] = vec4f(pos, bitcast<f32>(pack2x16float(vec2f(tear, dmg))));
   outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(plastic, min(scrape, 60000.0)))));
 }
@@ -1935,7 +1943,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * vehicle's first node in the solver (`layout.vehicles[i].nodeOffset`), `vehicle`
      * its index (for its origin). Returns an id.
      */
-    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0, dataBase = 0, wheelRecords = null } = {}) {
+    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0, dataBase = 0, wheelRecords = null, retireAt = 0 } = {}) {
       const nodeCount = visual.nodeCount;
       const nt = visual.normalTris, start = visual.nodeTriStart, list = visual.nodeTriList;
       const units = visual.unitKind?.length ?? 0;
@@ -2203,7 +2211,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         const floorIndex = device.createBuffer({ label: 'showcase-floor-index', size: floorList.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(floorIndex, 0, floorList);
         const params = device.createBuffer({ label: 'showcase-params', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, frameAt, tbAt, brkAt]);
+        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, frameAt, tbAt, brkAt, retireAt]);
         return { n, binds, out, attrs, index, floorIndex, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const car = { nodeOffset, beamOffset };

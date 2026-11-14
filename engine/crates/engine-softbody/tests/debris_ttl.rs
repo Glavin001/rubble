@@ -89,7 +89,7 @@ fn a_small_piece_is_retired_after_its_time_and_nothing_else() {
     // Off: nothing is ever retired.
     let mut off = DebrisTracker::new(None, s.nodes.len());
     for k in 0..20 {
-        assert!(!off.update(&s, &pieces, k as f64 * 0.1));
+        assert!(!off.update(&pieces, k as f64 * 0.1));
     }
     assert!(off.retired.iter().all(|&r| !r));
     // On: the corner only, at its time to live from the first reading it was off.
@@ -97,7 +97,7 @@ fn a_small_piece_is_retired_after_its_time_and_nothing_else() {
     let mut retired_at = None;
     for k in 0..20 {
         let t = 1.0 + k as f64 * 0.1;
-        if on.update(&s, &pieces, t) {
+        if on.update(&pieces, t) {
             retired_at.get_or_insert(t);
         }
     }
@@ -124,7 +124,7 @@ fn a_small_piece_is_retired_after_its_time_and_nothing_else() {
     // Too many nodes for a lower limit: kept.
     let mut few = DebrisTracker::new(Some(DebrisTtl { max_nodes: 1, ..TTL }), s.nodes.len());
     for k in 0..20 {
-        few.update(&s, &pieces, k as f64 * 0.1);
+        few.update(&pieces, k as f64 * 0.1);
     }
     let lone = pieces.nodes.iter().filter(|&&c| c == 1).count();
     assert_eq!(few.nodes as usize, lone, "only single-node pieces under a 1-node limit");
@@ -141,7 +141,7 @@ fn the_piece_holding_node_0_and_a_joined_piece_are_never_retired() {
     assert_ne!(pieces.piece[0], pieces.main, "node 0's piece is off the main body");
     let mut on = DebrisTracker::new(Some(TTL), s.nodes.len());
     for k in 0..40 {
-        on.update(&s, &pieces, k as f64 * 0.1);
+        on.update(&pieces, k as f64 * 0.1);
     }
     let p = pieces.piece[0];
     assert!(

@@ -162,6 +162,13 @@ impl WebWorld {
             .map_or(JsValue::NULL, |g| gpu_buffer(g.beams_buffer()))
     }
 
+    /// The gMisc record of the explicit nodes' retired bits (renderers hide retired
+    /// debris; `ExplicitBeamsGpu::set_retired`), 0 without vehicles.
+    #[wasm_bindgen(js_name = explicitRetireRecord)]
+    pub fn explicit_retire_record(&self) -> u32 {
+        self.world.explicit_vehicles().map_or(0, |g| g.layout().retire_rec)
+    }
+
     /// Per vehicle `[first node, first beam]` in the node and beam buffers.
     #[wasm_bindgen(js_name = explicitSpans)]
     pub fn explicit_spans(&self) -> Vec<u32> {

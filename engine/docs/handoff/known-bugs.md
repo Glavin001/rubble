@@ -147,6 +147,9 @@ The 110k ring settles into sleep (110k → 30k awake, rigid 20–30 ms a step). 
 ### C4. Native timing shows `cpl_share` at 3.86 ms (Suspected mis-attribution)
 That pass does trivial work, so the timestamps are probably attributed to the wrong pass.
 
+### C5. The coupling window spans pieces torn off the car (Confirmed, 2026-11-14)
+`vehicle_coupling.slang` `cpl_bounds` takes one box over all of a vehicle's (unretired) nodes. On the lab's mountain the wheels and 30–45 kg parts that fall off keep 107–135 proxy bodies in the window from 23 s (lab-mountain-perf.md §6); the debris time to live only removes small pieces. Lossless fix: a window per piece (the pair list's piece labels already give them).
+
 ### P1. Metal and CUDA lack the 2 kHz speed-up and surface modules (Confirmed)
 `engine_exec::explicit_plan::MODULES`, the table Metal and CUDA compile, is missing the `*_seg` and `explicit_surface_*` modules that the WebGPU build ships. Those paths don't run on Metal or CUDA yet. Test `engine-webgpu explicit_plan_modules` compares the table against the shipped list less those WebGPU-only tables (`EXPLICIT_BEAMS_NOCPL`, `EXPLICIT_BEAMS_SURF_SPLIT`) and passes.
 
