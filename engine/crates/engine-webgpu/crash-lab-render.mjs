@@ -396,8 +396,9 @@ struct BgFrag { @location(0) c: vec4f, @builtin(frag_depth) depth: f32 };
  * @param {GPUBuffer} o.frameBuf the page's frame uniform (viewProj, eye, light, opts, lightVP, invViewProj)
  * @param {GPUTextureView} o.shadowView
  * @param {GPUSampler} o.shadowSampler
+ * @param {GPUTextureFormat} [o.depthFormat] the page's depth attachment ('depth24plus')
  */
-export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, shadowView, shadowSampler }) {
+export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, shadowView, shadowSampler, depthFormat = 'depth24plus' }) {
   let sim = null, layout = null, mod = null, pipes = null, bufs = null, groups = null, sides = 0;
   const labBuf = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const countsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -407,7 +408,7 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
     // ranges [first, count] drawn solid in the 'body' view (vehicles without a
     // body of their own, such as the FMVSS 214 barrier).
     cables: [0, 0], solidTris: [] };
-  const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
+  const depthStencil = { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less' };
 
   const build = (n) => {
     sides = n;
@@ -426,7 +427,7 @@ export function createCrashLabRenderer({ device, format, sampleCount, frameBuf, 
       ghost: rp('vsSkin', 'fsGhost', { blend: true, write: false }),
       bg: device.createRenderPipeline({
         layout: 'auto', vertex: { module: mod, entryPoint: 'vsBg' }, fragment: { module: mod, entryPoint: 'fsBg', targets: target(false) },
-        primitive: { cullMode: 'none' }, depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less-equal' }, multisample: { count: sampleCount },
+        primitive: { cullMode: 'none' }, depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less-equal' }, multisample: { count: sampleCount },
       }),
       shadow: device.createRenderPipeline({
         layout: 'auto', vertex: { module: mod, entryPoint: 'vsSkinShadow' }, primitive: { cullMode: 'none' },

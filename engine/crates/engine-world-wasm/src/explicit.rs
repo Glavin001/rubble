@@ -1074,27 +1074,9 @@ impl ExplicitSim {
             && gpu.enable_frame_timing(TIMED_FRAMES);
 
         // Render records.
-        let mut tris: Vec<[u32; 4]> = Vec::new();
-        let mut recs: Vec<[u32; 4]> = Vec::new();
-        for (vi, v) in vehicles.iter().enumerate() {
-            let off = gpu.node_offset(vi);
-            let p = |i: u32| v.sim.nodes[i as usize].pos;
-            for t in &v.sim.triangles {
-                let [a, b, c] = t.nodes;
-                tris.push([off + a, off + b, off + c, vi as u32]);
-                tris.push([
-                    p(a).distance(p(b)).to_bits(),
-                    p(b).distance(p(c)).to_bits(),
-                    p(c).distance(p(a)).to_bits(),
-                    0,
-                ]);
-            }
-            let tyre = |i: u32| v.sim.nodes[i as usize].flags & NODE_TYRE != 0;
-            for b in &v.sim.beams {
-                let t = (tyre(b.a) || tyre(b.b)) as u32;
-                recs.push([off + b.a, off + b.b, vi as u32 | t << 16, b.rest0.to_bits()]);
-            }
-        }
+        let offsets: Vec<u32> = (0..vehicles.len()).map(|vi| gpu.node_offset(vi)).collect();
+        let sims: Vec<&ExplicitBeams> = vehicles.iter().map(|v| &v.sim).collect();
+        let (tris, recs) = render_records(&sims, &offsets);
         use wgpu::util::DeviceExt;
         let init = |label: &str, words: &[[u32; 4]]| {
             let bytes: &[u8] = if words.is_empty() {
@@ -1137,6 +1119,50 @@ impl ExplicitSim {
             ai,
         })
     }
+}
+
+/// The render records of `sims` (vehicle `vi`'s first node at `offsets[vi]`): per
+/// collision triangle 2 `vec4<u32>`, (global nodes a, b, c, vehicle) then its spawn
+/// edge lengths ab, bc, ca as `f32` bits; per beam (global node a, b, vehicle | 1 << 16
+/// for a tyre beam, spawn rest length bits). [`ExplicitSim::tris_buffer`],
+/// [`ExplicitSim::beam_records_buffer`] and the World's `explicitLabRecords`.
+pub(crate) fn render_records(sims: &[&ExplicitBeams], offsets: &[u32]) -> (Vec<[u32; 4]>, Vec<[u32; 4]>) {
+    let mut tris: Vec<[u32; 4]> = Vec::new();
+    let mut recs: Vec<[u32; 4]> = Vec::new();
+    for (vi, (sim, &off)) in sims.iter().zip(offsets).enumerate() {
+        let p = |i: u32| sim.nodes[i as usize].pos;
+        for t in &sim.triangles {
+            let [a, b, c] = t.nodes;
+            tris.push([off + a, off + b, off + c, vi as u32]);
+            tris.push([
+                p(a).distance(p(b)).to_bits(),
+                p(b).distance(p(c)).to_bits(),
+                p(c).distance(p(a)).to_bits(),
+                0,
+            ]);
+        }
+        let tyre = |i: u32| sim.nodes[i as usize].flags & NODE_TYRE != 0;
+        for b in &sim.beams {
+            let t = (tyre(b.a) || tyre(b.b)) as u32;
+            recs.push([off + b.a, off + b.b, vi as u32 | t << 16, b.rest0.to_bits()]);
+        }
+    }
+    (tris, recs)
+}
+
+/// The crash lab's per-beam constants (stiffness, strength, compression yield as `f32`
+/// bits, part), as [`ExplicitSim::lab_beams_buffer`] holds them.
+pub(crate) fn lab_beam_words(vehicles: &[(&ExplicitBeams, Vec3)]) -> Vec<[u32; 4]> {
+    crash_lab::lab_beam_words(vehicles)
+}
+
+/// Per node (global order) its vehicle index | 1 << 16 for a tyre node.
+pub(crate) fn node_vehicle_words(sims: &[&ExplicitBeams]) -> Vec<u32> {
+    let mut out = Vec::new();
+    for (i, sim) in sims.iter().enumerate() {
+        out.extend(sim.nodes.iter().map(|n| i as u32 | u32::from(n.flags & NODE_TYRE != 0) << 16));
+    }
+    out
 }
 
 #[wasm_bindgen]

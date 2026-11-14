@@ -134,7 +134,7 @@ struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r
 // beams (nodeCount + 1 starts, then (node, spawn length bits) pairs).
 struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listAt: u32, trisAt: u32, beamOffset: u32, level: u32,
   restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32, deathAt: u32,
-  wheelAt: u32, frameAt: u32, tbAt: u32, brkAt: u32, retireAt: u32 };
+  wheelAt: u32, frameAt: u32, tbAt: u32, brkAt: u32, retireAt: u32, labelAt: u32 };
 // The frame's effects: simulated seconds since the last update (0: nothing
 // moves, spawns or accumulates), a seed, the floor and the static boxes
 // (centre, kind; half extents) the sparks and scrapes test.
@@ -212,6 +212,15 @@ fn origin() -> vec3f {
 }
 fn nodePos(i: u32) -> vec3f { let k = (params.nodeOffset + i) * 3u; return nodes[k].xyz + nodes[k + 1u].xyz * fxu.lead.x; }
 fn beamBroken(j: u32) -> bool { return beams[(params.beamOffset + j) * 2u + 1u].z != 0.0; }
+// The host's piece labels (engine_softbody::explicit_debris::piece_labels: 0 the main
+// body, 1–7 pieces off it; 4 bits a node in misc at labelAt, the solver's pair-list
+// record; 0: none, every node 0).
+fn pieceOf(i: u32) -> u32 {
+  if (params.labelAt == 0u) { return 0u; }
+  let g = params.nodeOffset + i;
+  let w = misc[params.labelAt + (g >> 5u)];
+  return (w[(g >> 3u) & 3u] >> ((g & 7u) * 4u)) & 15u;
+}
 // Retired debris (the solver's nodeRetired bits in misc at retireAt; 0: none): its skin is
 // not drawn.
 fn retiredNode(i: u32) -> bool {
@@ -842,6 +851,84 @@ fn weightedVertex(bd: Bind) -> Weighted {
   return Weighted(pos, n * (1.0 / max(length(n), 1e-20)), ids);
 }
 
+// The nodes that move a vertex: a weighted vertex's entries, a node-frame vertex's
+// blend nodes, a triangle-bound vertex's three (a wheel's: none).
+const NODES_NONE = 0u;
+const NODES_WEIGHTED = 1u;
+const NODES_BLENDED = 2u;
+const NODES_TRIANGLE = 3u;
+fn nodesKind(bd: Bind) -> u32 {
+  if ((bd.flags & (1u << 23u)) != 0u) { return NODES_NONE; }
+  if ((bd.flags & (1u << 25u)) != 0u) { return NODES_WEIGHTED; }
+  if ((bd.flags & (1u << 26u)) != 0u) { return NODES_BLENDED; }
+  return NODES_TRIANGLE;
+}
+fn blendNode(bd: Bind, k: u32) -> u32 {
+  let nw = array<u32, 4>(bd.n0, bd.n1, bd.n2, bd.vehicle);
+  return (nw[k / 2u] >> (16u * (k % 2u))) & 0xffffu;
+}
+// Whether any node that moves the vertex is retired debris (then its skin is not drawn).
+fn vertexRetired(bd: Bind) -> bool {
+  switch nodesKind(bd) {
+    case 1u: {
+      for (var e = 0u; e < bd.n0; e++) { if (retiredNode(wEntry(bd.vehicle, e).x)) { return true; } }
+      return false;
+    }
+    case 2u: {
+      for (var k = 0u; k < ${BLEND}u; k++) {
+        let id = blendNode(bd, k);
+        if (id == 0xffffu) { break; }
+        if (retiredNode(id)) { return true; }
+      }
+      return false;
+    }
+    case 3u: { return retiredNode(bd.n0) || retiredNode(bd.n1) || retiredNode(bd.n2); }
+    default: { return false; }
+  }
+}
+// A vertex's piece (pieceOf): every node that moves it in one piece, PIECE_SPLIT when
+// they are in different pieces (it would be drawn stretched between them), PIECE_ANY
+// for a wheel's (its own triangles only). A node-frame vertex follows its anchor (its
+// first blend node); its own cut handles a tear inside a piece.
+const PIECE_SPLIT = 0xffffffffu;
+const PIECE_ANY = 0xfffffffeu;
+fn joinPiece(a: u32, b: u32) -> u32 {
+  if (a == PIECE_ANY) { return b; }
+  if (b == PIECE_ANY) { return a; }
+  return select(PIECE_SPLIT, a, a == b);
+}
+fn vertexPiece(bd: Bind) -> u32 {
+  switch nodesKind(bd) {
+    case 1u: {
+      var p = PIECE_ANY;
+      for (var e = 0u; e < bd.n0; e++) { p = joinPiece(p, pieceOf(wEntry(bd.vehicle, e).x)); }
+      return p;
+    }
+    case 2u: { return pieceOf(blendNode(bd, 0u)); }
+    case 3u: { return joinPiece(joinPiece(pieceOf(bd.n0), pieceOf(bd.n1)), pieceOf(bd.n2)); }
+    default: { return PIECE_ANY; }
+  }
+}
+// The drawn triangle list (cutTris; with piece labels only): the level's triangles
+// (triSrc), every triangle whose vertices are not all in one piece collapsed to a
+// point. Skin joining the main body to a piece torn off it (no live beam between
+// them) is cut there, not drawn stretched to wherever the piece went.
+@group(0) @binding(10) var<storage, read> triSrc: array<u32>;
+@group(0) @binding(11) var<storage, read_write> triOut: array<u32>;
+@compute @workgroup_size(${WG})
+fn cutTris(@builtin(global_invocation_id) gid: vec3u) {
+  let t = gid.x;
+  if (t >= arrayLength(&triSrc) / 3u) { return; }
+  let a = triSrc[3u * t];
+  let b = triSrc[3u * t + 1u];
+  let c = triSrc[3u * t + 2u];
+  let p = joinPiece(joinPiece(vertexPiece(binds[a]), vertexPiece(binds[b])), vertexPiece(binds[c]));
+  let cut = p == PIECE_SPLIT;
+  triOut[3u * t] = a;
+  triOut[3u * t + 1u] = select(b, a, cut);
+  triOut[3u * t + 2u] = select(c, a, cut);
+}
+
 @compute @workgroup_size(${WG})
 fn skin(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
@@ -986,7 +1073,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
       fxSpawn(pos, v * 0.8 + fxRndDir(seed, 6u) * 1.2 + vec3f(0.0, 0.8, 0.0), 4.0, 5u | (col << 8u));
     }
   }
-  if (params.retireAt != 0u && (retiredNode(bd.n0) || retiredNode(bd.n1) || retiredNode(bd.n2))) { tear = 1.0; }
+  if (params.retireAt != 0u && vertexRetired(binds[i])) { tear = 1.0; }
   outv[k] = vec4f(pos, bitcast<f32>(pack2x16float(vec2f(tear, dmg))));
   outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(plastic, min(scrape, 60000.0)))));
 }
@@ -1853,6 +1940,17 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   });
   const makePosBind = (car) => posBuf && car.levels.map((lv) => bindFor(car, lv, posBuf, posMisc ?? posBuf, restBuf));
   const makeSkinBind = (car) => car.levels.map((lv) => bindFor(car, lv, nodesBuf, miscBuf, beamsBuf));
+  // cutTris (made on first use): per level its two lists' bind groups and triangle counts.
+  let cutPipe = null;
+  const makeCutBind = (car) => {
+    if (!car.levels.some((lv) => lv.cut) || !miscBuf) return null;
+    cutPipe ??= device.createComputePipeline({ label: 'showcase-cut-tris', layout: 'auto', compute: { module: skinModule, entryPoint: 'cutTris' } });
+    return car.levels.map((lv) => lv.cut.map(([src, out, tris]) => [device.createBindGroup({
+      label: 'showcase-cut-tris',
+      layout: cutPipe.getBindGroupLayout(0),
+      entries: [[1, miscBuf], [2, lv.binds], [4, lv.params], [10, src], [11, out]].map(([binding, buffer]) => ({ binding, resource: { buffer } })),
+    }), tris]));
+  };
   const upload = (label, data, usage = GPUBufferUsage.STORAGE) => {
     const b = device.createBuffer({ label, size: Math.max(16, Math.ceil(data.byteLength / 4) * 4), usage: usage | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(b, 0, data);
@@ -1936,14 +2034,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       nodesBuf = nodes;
       miscBuf = misc;
       beamsBuf = beams;
-      for (const car of cars.values()) car.skinBind = makeSkinBind(car);
+      for (const car of cars.values()) { car.skinBind = makeSkinBind(car); car.cutBind = makeCutBind(car); }
     },
     /**
      * Add a car: `visual` from the wasm (`showcaseCar(...).visual`), `nodeOffset` its
      * vehicle's first node in the solver (`layout.vehicles[i].nodeOffset`), `vehicle`
      * its index (for its origin). Returns an id.
      */
-    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0, dataBase = 0, wheelRecords = null, retireAt = 0 } = {}) {
+    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0, dataBase = 0, wheelRecords = null, retireAt = 0, labelAt = 0 } = {}) {
       const nodeCount = visual.nodeCount;
       const nt = visual.normalTris, start = visual.nodeTriStart, list = visual.nodeTriList;
       const units = visual.unitKind?.length ?? 0;
@@ -2206,13 +2304,16 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         }
         const attrs = device.createBuffer({ label: 'showcase-attrs', size: attr.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(attrs, 0, attr);
-        const index = device.createBuffer({ label: 'showcase-index', size: ordered.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+        // With piece labels the drawn lists are cutTris's output from these sources.
+        const cutUse = labelAt ? GPUBufferUsage.STORAGE : 0;
+        const index = device.createBuffer({ label: 'showcase-index', size: ordered.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST | cutUse });
         device.queue.writeBuffer(index, 0, ordered);
-        const floorIndex = device.createBuffer({ label: 'showcase-floor-index', size: floorList.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+        const floorIndex = device.createBuffer({ label: 'showcase-floor-index', size: floorList.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST | cutUse });
         device.queue.writeBuffer(floorIndex, 0, floorList);
+        const cut = labelAt ? [[upload('showcase-index-src', ordered), index, ordered.length / 3], [upload('showcase-floor-index-src', floorList), floorIndex, floorList.length / 3]] : null;
         const params = device.createBuffer({ label: 'showcase-params', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, frameAt, tbAt, brkAt, retireAt]);
-        return { n, binds, out, attrs, index, floorIndex, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
+        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, frameAt, tbAt, brkAt, retireAt, labelAt]);
+        return { n, binds, out, attrs, index, floorIndex, cut, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const car = { nodeOffset, beamOffset };
       const extra = (Array.isArray(lod) ? lod : [lod]).filter(Boolean).slice(0, 2);
@@ -2246,7 +2347,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         layout: pickLayout,
         entries: [car.lod, car.args, viewBuf].map((buffer, binding) => ({ binding, resource: { buffer } })),
       });
-      if (nodesBuf) car.skinBind = makeSkinBind(car);
+      if (nodesBuf) { car.skinBind = makeSkinBind(car); car.cutBind = makeCutBind(car); }
       car.posBind = makePosBind(car);
       const id = nextId++;
       cars.set(id, car);
@@ -2367,6 +2468,16 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           pass.setBindGroup(0, groups[k]);
           pass.dispatchWorkgroupsIndirect(car.args, k * 92);
         });
+        // Skin across pieces cut (the drawn lists from the piece labels).
+        if (!usePos && car.cutBind) {
+          pass.setPipeline(cutPipe);
+          for (const lists of car.cutBind) {
+            for (const [bind, tris] of lists) {
+              pass.setBindGroup(0, bind);
+              pass.dispatchWorkgroups(Math.ceil(tris / WG));
+            }
+          }
+        }
       }
       if (live && anyGroup) {
         pass.setPipeline(fxStepPipe);

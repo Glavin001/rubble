@@ -176,16 +176,8 @@ impl ExplicitSim {
     /// Per node (global order) its vehicle index | 1 << 16 for a tyre node, `u32`.
     #[wasm_bindgen(js_name = labNodeVehicles)]
     pub fn lab_node_vehicles(&self) -> js_sys::Uint32Array {
-        let mut out = Vec::new();
-        for (i, v) in self.vehicles.iter().enumerate() {
-            out.extend(
-                v.sim
-                    .nodes
-                    .iter()
-                    .map(|n| i as u32 | u32::from(n.flags & NODE_TYRE != 0) << 16),
-            );
-        }
-        js_sys::Uint32Array::from(out.as_slice())
+        let sims: Vec<&ExplicitBeams> = self.vehicles.iter().map(|v| &v.sim).collect();
+        js_sys::Uint32Array::from(super::node_vehicle_words(&sims).as_slice())
     }
 
     /// Part names, by the part index of [`Self::lab_beams_buffer`].

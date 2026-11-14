@@ -169,6 +169,42 @@ impl WebWorld {
         self.world.explicit_vehicles().map_or(0, |g| g.layout().retire_rec)
     }
 
+    /// The gMisc record of the explicit nodes' piece labels (4 bits a node: 0 the main
+    /// body, 1–7 pieces torn off it; `ExplicitBeamsGpu::set_piece_labels`, from the host's
+    /// beam readings): renderers cut skin that joins two pieces. 0 without vehicles.
+    #[wasm_bindgen(js_name = explicitPieceLabelRecord)]
+    pub fn explicit_piece_label_record(&self) -> u32 {
+        self.world.explicit_vehicles().map_or(0, |g| g.layout().label_rec)
+    }
+
+    /// The crash lab renderer's records for the World's explicit vehicles
+    /// (crash-lab-render.mjs: the vehicle lab's beams and nodes views): `{ tris, recs,
+    /// labBeams, nodeVehicles }` as `Uint32Array`s, the same words as `ExplicitSim`'s
+    /// `trisBuffer`, `beamRecordsBuffer`, `labBeamsBuffer` and `labNodeVehicles`, and the
+    /// counts `{ nodes, beams, triangles }`. Spawn values: call again after a rebuild.
+    #[wasm_bindgen(js_name = explicitLabRecords)]
+    pub fn explicit_lab_records(&self) -> Result<JsValue, JsValue> {
+        let Some(g) = self.world.explicit_vehicles() else {
+            return Ok(JsValue::NULL);
+        };
+        let sims: Vec<&ExplicitBeams> = self.world.explicit_vehicles_as_added().iter().collect();
+        let offsets: Vec<u32> = (0..sims.len()).map(|v| g.node_offset(v)).collect();
+        let (tris, recs) = crate::explicit::render_records(&sims, &offsets);
+        // The lab's cars face +z (their parts' front and rear by it).
+        let lab: Vec<(&ExplicitBeams, glam::Vec3)> = sims.iter().map(|s| (*s, glam::Vec3::Z)).collect();
+        let words = |w: &[[u32; 4]]| js_sys::Uint32Array::from(w.iter().flatten().copied().collect::<Vec<u32>>().as_slice());
+        let o = js_sys::Object::new();
+        let set = |k: &str, v: &JsValue| js_sys::Reflect::set(&o, &JsValue::from_str(k), v).map(|_| ());
+        set("tris", &words(&tris))?;
+        set("recs", &words(&recs))?;
+        set("labBeams", &words(&crate::explicit::lab_beam_words(&lab)))?;
+        set("nodeVehicles", &js_sys::Uint32Array::from(crate::explicit::node_vehicle_words(&sims).as_slice()))?;
+        set("nodes", &JsValue::from(sims.iter().map(|s| s.nodes.len()).sum::<usize>() as u32))?;
+        set("beams", &JsValue::from(recs.len() as u32))?;
+        set("triangles", &JsValue::from((tris.len() / 2) as u32))?;
+        Ok(o.into())
+    }
+
     /// Per vehicle `[first node, first beam]` in the node and beam buffers.
     #[wasm_bindgen(js_name = explicitSpans)]
     pub fn explicit_spans(&self) -> Vec<u32> {

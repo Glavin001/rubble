@@ -129,6 +129,11 @@
         <label><input type="checkbox" id="clean" data-opt="live" /> clean layout</label></div>
       <div class="row"><span class="muted">Measurements</span><select id="monitor" data-opt="live"><option value="auto">15 times a second; every step while a shot, plate or crash is live</option><option value="1">every step</option><option value="4">15 times a second</option><option value="0">off (no readback: no numbers, no click aim)</option></select></div>
       <div class="note">These five and the car rebuild the simulation in place (its kernels differ; no page reload). Wheels: raycast (the lab's cars drive on raycast wheels and draw their own). Everything else applies as it runs.</div>
+      <h2>Structure</h2>
+      <div class="row"><label><input type="checkbox" id="beams" data-opt="live" /> beams</label><label><input type="checkbox" id="nodes" data-opt="live" /> nodes</label>
+        <label><input type="checkbox" id="body" data-opt="live" checked /> body</label>
+        <span class="muted">beam colour</span><select id="beamColor" data-opt="live"><option value="damage">damage</option><option value="strain">strain</option><option value="part">part</option></select></div>
+      <div class="note">Drawing only, live: the solver's beams as tubes and its nodes as dots (the crash lab's views). Damage: intact blue-grey, bent yellow to red; strain: the beam's force over its break strength; broken beams are not drawn. Turn the body off to see inside.</div>
       <h2>Cutaway</h2>
       <div class="row" id="cutaway"></div>
     </div>
@@ -172,6 +177,7 @@
     // control: it is not an option of the lab.
     import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
+    import { createCrashLabRenderer } from './crash-lab-render.mjs';
     import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
@@ -253,6 +259,7 @@
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
         else if (c.id.startsWith('debris')) cmd({ debris: debrisSpec() });
+        else if (['beams', 'nodes', 'beamColor'].includes(c.id)) structureOpts();
       };
       c.addEventListener(c.type === 'range' ? 'input' : 'change', on);
     }
@@ -363,6 +370,7 @@
           plan: { nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize }, depthTex: null, msaaTex: null,
           pool: Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: nSize + oSize + cSize + bSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })) };
         w.pacer = new FramePacer(w.RATE, 0);
+        w.wire = structureView(device, world);
         for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i));
         // Cutaway (drawing only): material groups left out of the car's triangles.
         $('cutaway').textContent = '';
@@ -377,6 +385,7 @@
         W = w;
         W.spec = spec;
         configure();
+        structureOpts();
         gpuSeg.clear(); gpuTotal = [];
         window.__world = world; window.__lab = lab;
         await restart(true);
@@ -397,6 +406,30 @@
       errEl.append(b);
       console.warn('device lost: ' + message);
     }
+    // The beams and nodes views: the crash lab's renderer (crash-lab-render.mjs) on the
+    // World's explicit buffers and the wasm's render records (explicitLabRecords).
+    function structureView(device, world) {
+      const rec = world.explicitLabRecords();
+      if (!rec) return null;
+      const up = (words) => {
+        const b = device.createBuffer({ size: Math.max(16, words.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        if (words.byteLength) device.queue.writeBuffer(b, 0, words);
+        return b;
+      };
+      const frameBuf = device.createBuffer({ size: 240, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      // The studio backdrop's shadow map is not drawn here: a stand-in to bind.
+      const shadowTex = device.createTexture({ size: [1, 1], format: 'depth32float', usage: GPUTextureUsage.TEXTURE_BINDING });
+      const r = createCrashLabRenderer({ device, format, sampleCount: SAMPLES, frameBuf, shadowView: shadowTex.createView(), shadowSampler: device.createSampler({ compare: 'less' }), depthFormat: DEPTH });
+      const bufs = { recs: up(rec.recs), labBeams: up(rec.labBeams), tris: up(rec.tris) };
+      r.setSim({
+        labNodeVehicles: () => rec.nodeVehicles, beamRecordsBuffer: () => bufs.recs, labBeamsBuffer: () => bufs.labBeams, trisBuffer: () => bufs.tris,
+        nodesBuffer: () => world.explicitNodesBuffer(), miscBuffer: () => world.explicitMiscBuffer(), beamsBuffer: () => world.explicitBeamsBuffer(),
+      }, { nodes: rec.nodes, beams: rec.beams, triangles: rec.triangles });
+      return { r, frameBuf };
+    }
+    function structureOpts() {
+      W?.wire?.r.set({ skeleton: get('beams'), nodes: get('nodes'), colorMode: get('beamColor'), skin: 'off', stubs: false, tyres: true, studio: false });
+    }
     const without = (w, v) => {
       if (!w.hidden.size || !v?.material) return v;
       const idx = v.indices, keep = [];
@@ -405,7 +438,7 @@
     };
     function addCar(w, i) {
       const v = w.car.visuals[i % w.car.visuals.length].visual, cut = i === 0 && w.hidden.size > 0;
-      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord() });
+      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord(), labelAt: w.world.explicitPieceLabelRecord() });
     }
 
     // ---------------------------------------------------------------- restart (in place)
@@ -678,6 +711,13 @@
         road: [0, 0, 0], fogDist: M ? 70 : 220 });
       const enc = device.createCommandEncoder();
       cars.update(enc, { dt: simDt, floorY: M ? -1e5 : 0, lead });
+      const wire = (get('beams') || get('nodes')) ? w.wire : null;
+      if (wire) {
+        const f = new Float32Array(60);
+        f.set(vp, 0); f.set([...cam.eye, 1], 16); f.set([...env.sun, 0], 20); f.set(lastInv, 44);
+        device.queue.writeBuffer(wire.frameBuf, 0, f);
+        wire.r.gather(enc, lead);
+      }
       env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }));
       const tex = context.getCurrentTexture().createView();
       const pass = enc.beginRenderPass({
@@ -685,7 +725,8 @@
         depthStencilAttachment: { view: w.depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' },
       });
       env.draw(pass, world);
-      cars.draw(pass, { viewProj: vp, eye: cam.eye, light: env.sun, height: canvas.height });
+      if (get('body')) cars.draw(pass, { viewProj: vp, eye: cam.eye, light: env.sun, height: canvas.height });
+      wire?.r.drawOpaque(pass);
       env.drawGhosts(pass, world);
       pass.end();
       let finish = null;
