@@ -472,3 +472,122 @@ in any run. Fleet (`fleet.sh apart "1 8 32"`, GPU idle): 8.96 / 9.74 / 11.38 ms 
 - The Chrome runs are of the build before the last kernel change (`piecesClear` skipped
   without labels or retirement: the fleet's lane-0 clears; it changes no result).
 - `engine-metal` suites not run (their cold compile; `engine-metal` builds).
+
+## 7. The late phase split by cause, and three lossless fixes (2026-11-14)
+
+The page steps on vsync: it holds 60 World steps/s only while a step's GPU time stays
+under about 12.5–13.4 ms (the frame is the step, the readback and the render). At
+`d78284b6` the late phase ran 15.5–18 ms (40 steps/s from 26 s).
+
+### Where the late phase's time went
+
+Chrome (`vehicle-lab-record.mjs --probe --eval out/late/ab2.js`: knobs toggled or a WGSL
+function stubbed in the running page, 1 s each, interleaved with the baseline; GPU idle
+before; each line is one sample, so ±1 ms is noise):
+
+| t (s) | change | GPU ms per step |
+|---|---|---|
+| 29–34 | baseline | 16.6–17.5 |
+| 30 | coupling off (lossy, measurement) | 14.8 (−1.8) |
+| 32 | pair list off (the walk every step) | 18.5 (+1.5) |
+| 34 | volatile triangles' tests stubbed | 12.1 (−4.5) |
+| 36 | listed and volatile tests stubbed | 15.0 |
+| 38 | the walk stubbed | 17.5 |
+| 44 | volatile triangles' tests stubbed | 14.5 (−4.1) |
+
+Native at t = 35 s (`vehicle_lab --ab 35 --ab-ablate …`, the ablation kernel, 20 frames
+of 34 steps from one snapshot each way), ms a frame: everything 19.6; without the volatile
+tests 17.6; without any self-collision search (2^8: listing, walk and tests) 5.4; without
+the proxies' node contacts 15.4; without the coupling's per-step passes (integration,
+spheres, count) 13.9; without the beams 17.1. Census (`--tri-census`): from 28 s 34–36
+volatile triangles, 20 of them dead (a break beam broken) and 14 live, all 14 longer
+than 3 m (car-to-falling-node triangles no beam can kill, boxes up to 1.6 km: every
+candidate in their box); 110–135 proxy bodies and 300–590 hull planes in the window,
+most of them far from the car (between it and pieces hundreds of metres below).
+
+So, late: self-collision first (the volatile triangles about 4.5 ms in Chrome), then
+the coupling (the window spanning torn pieces: proxies tested by every node).
+
+### Fixes (each lossless, each its own commit)
+
+1. **Dead volatile triangles are not listed** (`6a63cd7b`; failing test `04bb6457`): a
+   triangle dead before this beam phase stays dead (tryContact's box empty), one with a
+   retired node meets nothing. The live ones are tested by `piecesTestTriangle`: their
+   records loaded once, then each candidate as the walk takes it, with up to 64 lanes a
+   triangle. Torn-sedan test: volatile triangles tested 19,040 → 8,160 over 680 grid
+   steps (12 live, 16 dead), bit for bit.
+2. **The plane test before tryContact, for the volatile triangles** (`d8dca883`): a
+   contact (held, crossed or not) needs triangleHit's signed distance `rn · (p − p0)`
+   within max(r, CLIP_DEPTH); `pairFar` computes it as triangleHit does (with a rounding
+   allowance) and skips tryContact, which has no effect before that point, for a
+   volatile triangle's candidate beyond it. Tried on the listed pairs too (`d8dca883`,
+   `c9aa511e`) and taken back out: no gain on the mountain, and the authored sedan's
+   90 km/h crash went from 4.5–4.8 to 5.5–5.8 ms in Chrome (its crumpled pairs pass the
+   test; it only added loads).
+3. **A coupling window per piece** (`a3c8077a`; failing test `a068d482`): with the piece
+   labels, `cpl_bounds` takes each piece's node box and `cpl_plan` keeps a collider only
+   when its swept sphere meets some piece's box grown by the vehicle's reach, the bound
+   the vehicle's own box relies on. A node meets only shapes near its own piece's box, so
+   the shapes left out met no node: the same contacts. Native mountain: proxy shapes
+   14–22 s 0–9 (were 27–131), 30–37 s 14–73 (were 103–119). Page: "a coupling window per
+   piece" (live), `LabOptions::piece_windows`, `RUBBLE_PIECE_WINDOWS=0`.
+
+Bit-identity (final kernel): `explicit_beams_bitwise` 12, `explicit_pair_reuse_gpu` 2 (the torn sedan,
+labels against none against the walk, every state word, every frame),
+`explicit_contact_gpu` 13, `debris_retire_gpu` 1, `showcase_car_gpu` 6 + 1 ignored;
+`vehicle_lab_piece_windows` (engine-world: the procedural sedan on the mountain with its
+front torn off 30 m ahead, one window against a window per piece, the car's node, beam
+and origin words after 150 World steps the same; a box per piece, 30 m apart). Native
+mountain with all three: the trajectory the same as before to every printed figure.
+I found no scene for the test in which the window per piece leaves out a proxy *and* that
+runs in a test's time (the lab's flat arena has its vehicle out of the broadphase; the
+mountain's bodies near a test car are few): the proxies left out are measured on the
+real mountain run, above.
+
+### Results: headless Chrome, 45 s, GPU ms per World step / World steps per second
+
+Same probe each time (`--probe --secs 45`, GPU use under 15 % before each run); the
+columns are the page's wall seconds, the cells "sim t: GPU / steps".
+
+| wall s | `d78284b6` (§6) | fixes 1–3, plane test on listed pairs too | fixes 1–3 (final) |
+|---|---|---|---|
+| 3 | 2.58: 5.05 / 60 | 2.78: 5.11 / 60 | 2.98: 5.07 / 60 |
+| 6 | 5.6: 7.98 / 60 | 5.8: 8.34 / 60 | 6: 8.14 / 60 |
+| 9 | 8.6: 10.55 / 60 | 8.8: 10.85 / 60 | 9: 11.42 / 60 |
+| 12 | 11.62: 9.41 / 60 | 11.8: 9.18 / 60 | 12: 9.17 / 60 |
+| 15 | 14.6: 9.24 / 59 | 14.8: 9.14 / 59 | 15: 9.06 / 60 |
+| 18 | 17.62: 8.85 / 60 | 17.8: 8.69 / 60 | 18: 8.68 / 60 |
+| 21 | 20.57: 10.31 / 59 | 20.73: 10.15 / 59 | 20.97: 10.31 / 57.1 |
+| 24 | 23.55: 12.6 / 59 | 23.68: 12.47 / 58 | 23.95: 12.56 / 59 |
+| 27 | 26.1: 13.98 / 51.2 | 26.68: 10.44 / 59 | 26.93: 10.54 / 60 |
+| 30 | 28.12: 15.45 / 39.3 | 29.63: 10.73 / 58 | 29.88: 10.92 / 59 |
+| 33 | 30.13: 17.53 / 40.3 | 32.65: 11.42 / 60 | 32.9: 11.49 / 60 |
+| 34 | 30.8: 18.2 / 40.3 | 33.62: 11.58 / 60 | 33.85: 11.7 / 60 |
+| 35 | 31.47: 18 / 39.3 | 34.6: 12.02 / 58 | 34.78: 12.42 / 57.1 |
+| 36 | 32.13: 17.36 / 40.3 | 35.47: 13.15 / 59 | 35.52: 13.53 / 52 |
+| 37 | 32.83: 15.71 / 40.3 | 36.22: 14.13 / 47.2 | 36.2: 14.59 / 42.3 |
+| 38 | 33.5: 15.54 / 40.3 | 36.97: 15.01 / 44.3 | 36.9: 15.17 / 41.3 |
+| 39 | 34.17: 15.81 / 40.3 | 37.77: 15.19 / 45.2 | 37.65: 14.7 / 42.3 |
+| 40 | 34.83: 16.01 / 40.3 | 38.65: 13.91 / 50.2 | 38.6: 13.69 / 51.2 |
+| 41 | 35.5: 16.22 / 39.4 | 39.65: 12.87 / 56.1 | 39.4: 13.38 / 51.2 |
+| 42 | 36.17: 16.34 / 40.3 | 40.63: 12.6 / 59 | 40.33: 13.35 / 51.1 |
+| 43 | 36.85: 16.45 / 40.3 | 41.63: 12.69 / 60 | 41.18: 13.08 / 58 |
+| 44 | 37.52: 16.56 / 39.3 | 42.63: 12.78 / 59 | 42.13: 12.92 / 48.2 |
+| 45 | 38.18: 16.56 / 40.3 | 43.6: 12.65 / 60 | 43.08: 12.99 / 59 |
+
+Final: 60 steps/s for the whole run (11.7 ms or less through t 34 s, was 40 steps/s
+from 26 s) except t ≈ 35–42 s: 13.4–15.2 ms, 41–52 steps/s (the car strikes the slope
+at about 100 km/h at 36 s, 45 km/h after), then 12.9–13.1 ms. **The ≤ 12.5 ms goal is
+not met from t ≈ 35 s.** In that window a
+stub of the volatile tests still takes 2.7 ms (13.5 → 10.8 ms at t 38–39): the 14 live
+car-to-falling-node triangles, whose boxes hold every candidate, test the candidates
+near their planes every step (as the walk did). Further reduction needs either a
+cheaper exact rejection inside anti-clip's crossing test, or a decision about triangles
+no beam can kill once they are stretched kilometres long (lossy: not done; their contacts
+are what the specification asks for).
+
+Other checks (Chrome, final build): the parked car 4.5 ms; the authored sedan's 90 km/h
+crash 4.5–5.6 ms over 45 s (was 4.3 ms over 20 s in §6); no console or WGSL error.
+Fleet (`fleet.sh`, GPU idle; the plane test on listed pairs still in): apart 1 / 8 / 32
+cars 9.03 / 9.77 / 11.40 ms medians (were 8.9 / 9.6 / 11.4), crash town 1 / 4 / 8 cars
+12.24 / 12.50 / 67.92 (were 12.1 / 12.3 / 67.6).
