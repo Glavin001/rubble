@@ -32,3 +32,24 @@ What it shows:
   other: 8 cars take 67 ms, 16 take 73 ms (p99 113). Contact groups step several cars in
   one workgroup.
 - 32 cars in the town run out of coupling shapes at step 70 (a capacity error, as designed).
+
+## After the reused pair list and own-travel boxes (`e356f58a`, 2026-11-14)
+
+Both are in `lab-mountain-perf.md` §5. This bench's cars run the reuse (on by default,
+lossless); own-travel boxes are the lab's setting and are off here.
+
+| Cars | Apart: median / p99 (ms), before → after | Crash town: median / p99 (ms), before → after |
+|---|---|---|
+| 1 | 11.7 / 12.9 → 8.9 / 10.0 | 14.9 / 15.6 → 12.1 / 13.7 |
+| 4 | 12.1 / 13.2 → not run | 15.1 / 45.5 → 12.3 / 47.1 |
+| 8 | 12.7 / 13.8 → 9.6 / 10.8 | 66.6 / 71.0 → 67.6 / 71.4 |
+| 32 | 13.9–14.2 / 15.4–16.3 → 11.4 / 12.5 | fails (coupling shapes), as before |
+
+(The GPU showed 92 % utilisation just before the "after" runs; they are no lower than a
+quiet run would be.) Separate cars gained 2.6–2.9 ms each. Cars in contact did not:
+contact groups keep the walk every step, and are the next work.
+
+Headless Chrome, one car in the lab (raycast wheels), GPU ms per World step, before → after:
+parked 6.9 → 4.5; mountain free fall 7.8 → 5.0, 8–16 s 11.5–12.6 → 9.6–10.1, 20 s
+13.8 → 11.1 (60 steps/s until 22 s, was 19 s), 26 s on 17–20 → 18–22 (40 steps/s, unchanged:
+the detached nodes in free fall invalidate the list most steps).
