@@ -321,7 +321,10 @@ fn sedans_head_on_and_t_bone_bitwise() {
     // At the World origin: vehicle contact runs in the owner's frame (vvRel) while the
     // frozen reference runs it in World coordinates; the two are the same arithmetic
     // only while every vehicle's origin is 0 (never re-based: within REBASE_RADIUS).
-    // (explicit_far_origin_gpu.rs covers contact away from the origin.)
+    // Off the origin: explicit_far_origin_gpu.rs
+    // `sedans_head_on_t_bone_and_chain_at_100_m_gpu_is_cpu_bitwise` (GPU = CPU bit for
+    // bit at 100 m) and engine-softbody main_parity_cases.rs (closer to the origin run
+    // than main; PR #105 audit S6/T1).
     let o = Vec3::ZERO;
     compare_steps("sedan head-on", &pair(&s, o, 0.85 * SPEED, 1.5, false), &[(2, STEPS), (300, 1), (40, STEPS)], true);
     compare_steps("sedan T-bone", &pair(&s, o, 0.85 * SPEED, 1.0, true), &[(2, STEPS), (300, 1), (40, STEPS)], true);
@@ -334,7 +337,7 @@ fn sedans_head_on_and_t_bone_bitwise() {
 /// audit, S6). Kept so the difference from main stays measurable: run it with
 /// `--ignored`; when it passes, vehicle contact away from the origin equals main again.
 #[test]
-#[ignore = "regression vs main: vehicle contact 100 m from the World origin is not bit-identical to the frozen main-era reference (owner-frame contact); expected to fail until that is decided"]
+#[ignore = "behaviour change kept (audit S6): owner-frame vehicle contact is not main's World-coordinate arithmetic off the origin; it is closer to the origin run than main (main_parity_cases.rs). Run with --ignored to measure the difference"]
 fn main_sedans_head_on_and_t_bone_at_100_m_bitwise() {
     let s = repo_sedan();
     let o = Vec3::new(100.0, 0.0, 100.0);
@@ -415,7 +418,10 @@ fn chain_and_four(text: &str, name: &str) {
     // At the World origin: vehicle contact runs in the owner's frame (vvRel) while the
     // frozen reference runs it in World coordinates; the two are the same arithmetic
     // only while every vehicle's origin is 0 (never re-based: within REBASE_RADIUS).
-    // (explicit_far_origin_gpu.rs covers contact away from the origin.)
+    // Off the origin: explicit_far_origin_gpu.rs
+    // `sedans_head_on_t_bone_and_chain_at_100_m_gpu_is_cpu_bitwise` (GPU = CPU bit for
+    // bit at 100 m) and engine-softbody main_parity_cases.rs (closer to the origin run
+    // than main; PR #105 audit S6/T1).
     let o = Vec3::ZERO;
     let len = g.along.1 - g.along.0;
     let chain = vec![

@@ -277,3 +277,92 @@ fn slide_nodes_and_raycast_wheels_at_4_km_are_the_origins_bit_for_bit() {
         b.kernel_status().unwrap();
     }
 }
+
+/// Audit T1 (PR #105): main ran `explicit_beams_bitwise.rs`'s sedan head-on, T-bone and
+/// chain crashes 100 m from the World origin against its frozen World-coordinate
+/// reference; vehicle contact now runs in the owner's frame (audit S6, kept: closer to
+/// the origin run than main, `engine-softbody/tests/main_parity_cases.rs`), so that
+/// reference no longer applies off the origin and the branch moved those cases to the
+/// origin. Off the origin they are covered here instead: the repository sedan (the
+/// bitwise suite's car) head on and T-bone, 100 m out, and a chain of three, on the GPU
+/// against the CPU reference with fixed-point contact sums, every node position bit for
+/// bit after every frame.
+fn repo_sedan(at: Vec3, yaw: f32, vel: Vec3) -> ExplicitBeams {
+    let text = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck"
+    ));
+    let settings = ExplicitBeamsSettings {
+        turbulence: false,
+        drag: false,
+        ..Default::default()
+    };
+    let mut s = if yaw == 0.0 {
+        ExplicitBeams::from_truck(text, at, vel, settings)
+    } else {
+        ExplicitBeams::from_truck_config_yaw(text, None, at, yaw, vel, settings)
+    }
+    .unwrap();
+    s.fixed_contact = true;
+    let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    for n in &mut s.nodes {
+        n.pos.y += 0.02 - low;
+    }
+    s.roll_tyres(vel);
+    s
+}
+
+fn gpu_is_cpu_bitwise(label: &str, fleet: Vec<ExplicitBeams>, frames: usize) {
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut g = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    let mut w = ExplicitBeamsWorld::new(fleet);
+    for f in 0..frames {
+        w.frame(17);
+        g.frame(17);
+        let pos = g.positions();
+        for (k, v) in w.vehicles.iter().enumerate() {
+            let cpu = v.positions();
+            let differ = pos[k].iter().zip(&cpu).filter(|(a, b)| a.to_array().map(f32::to_bits) != b.to_array().map(f32::to_bits)).count();
+            assert_eq!(differ, 0, "{label}: frame {f}, vehicle {k}: {differ} node positions differ GPU vs CPU");
+        }
+    }
+    g.wait();
+    g.contact_status().unwrap();
+    assert!(w.first_hit_step.is_some(), "{label}: the cars met");
+    eprintln!("{label}: {frames} frames, GPU = CPU bit for bit");
+}
+
+#[test]
+fn sedans_head_on_t_bone_and_chain_at_100_m_gpu_is_cpu_bitwise() {
+    for o in [Vec3::ZERO, Vec3::new(100.0, 0.0, 100.0)] {
+        let tag = if o == Vec3::ZERO { "origin" } else { "100 m" };
+        gpu_is_cpu_bitwise(
+            &format!("head-on at {tag}"),
+            vec![
+                repo_sedan(o + Vec3::new(-4.0, 0.0, 0.0), 0.0, Vec3::new(10.0, 0.0, 0.0)),
+                repo_sedan(o + Vec3::new(4.0, 0.0, 0.4), 0.0, Vec3::new(-10.0, 0.0, 0.0)),
+            ],
+            50,
+        );
+        gpu_is_cpu_bitwise(
+            &format!("T-bone at {tag}"),
+            vec![
+                repo_sedan(o + Vec3::new(-5.0, 0.0, 0.0), 0.0, Vec3::new(12.0, 0.0, 0.0)),
+                repo_sedan(o + Vec3::new(1.5, 0.0, 0.0), 90.0, Vec3::ZERO),
+            ],
+            50,
+        );
+        gpu_is_cpu_bitwise(
+            &format!("chain of three at {tag}"),
+            vec![
+                repo_sedan(o + Vec3::new(-6.0, 0.0, 0.0), 0.0, Vec3::new(12.0, 0.0, 0.0)),
+                repo_sedan(o + Vec3::new(0.0, 0.0, 0.0), 0.0, Vec3::ZERO),
+                repo_sedan(o + Vec3::new(5.5, 0.0, 0.0), 0.0, Vec3::ZERO),
+            ],
+            50,
+        );
+    }
+}
