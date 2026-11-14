@@ -91,7 +91,7 @@ for (const c of cars) {
   const PREFER = ['etkk/kr6.pc', 'ccf/f4_sport_M.pc', 'gavril_vertex/gavril_vertex.pc', 'fullsuv/mid-sport.pc', 'boathauler/gooseneck.pc', 'bh_yacht48/yacht48.pc'];
   const first = c.configs.find((k) => PREFER.includes(k.pc)) ?? c.configs[0];
   for (const k of PCS.length ? c.configs.filter((x) => PCS.includes(x.pc.split('/').pop())) : ALL ? c.configs : [first]) {
-    const q = `solver=explicit&mod=/__mods/${c.folder}&pc=${encodeURIComponent(k.pc)}${(k.wheels ?? 1) > 0 ? '&wheels=raycast' : ''}`;
+    const q = `solver=explicit&lab=1&jbeamMode=native&mod=/__mods/${c.folder}&pc=${encodeURIComponent(k.pc)}${(k.wheels ?? 1) > 0 ? '&wheels=raycast' : ''}`;
     const row = { car: c.label, pc: k.pc, mb: c.megabytes, nodes: k.nodes, beams: k.beams, rest: '', wall: '', url: `/softbody.html?${q}&preset=${(k.wheels ?? 1) > 0 ? 'wall56' : 'drop15'}` };
     try {
       await open(`${q}&xscene=${REST_SCENE}&cam=left`);

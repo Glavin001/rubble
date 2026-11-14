@@ -570,6 +570,29 @@ link opens either solver.
   buffers. Damage, the camera's pose, GPU times and the launch are `mapAsync`
   reads. The World keeps the ground and the wall (rendered as colliders) and is not
   stepped.
+* **Opt-in options** (each a control on the page and a query key; off by default, so
+  an older link opens what it always did):
+  * `?lab=1`, the **crash lab** box: the crash-test lab view (tube beams, node
+    spheres, slow motion, impact time, replay, node grabbing; `crash-lab.mjs`). On by
+    default only for links that need it: a lab `?preset=`, a converted `?mod=` and
+    `?car=showcase` (`?lab=0` turns it off). Not in the arena or the traffic derby.
+    Its slow motion is real time by default; `?slow=N` or `?slow=auto` (real time,
+    then `?autoSlow=` (20)× slower from the impact), or the lab's slow menu.
+  * `?pacer=1`, the **smooth pacing** box: steps paced by `FramePacer` (whole steps,
+    remainder carried, eased slow-down when the GPU falls behind, HUD says the pace)
+    and the nodes drawn carried forward to the displayed time. The lab always paces
+    this way.
+  * `?camEase=1`, the **rate-independent easing** box (every solver): the camera
+    target eases by the same amount per second at any frame rate (default on in the
+    lab).
+  * `?jbeamMode=native`, the JBeam menu (an imported JBeam folder): JBeam mode
+    (BeamNG's rules) instead of the `.truck` export (`truck`, the default; a converted
+    `?mod=` defaults to `native`).
+  * `?mods=1`, the **BeamNG mods…** button: lists the converted vehicles
+    (`__mods/index.json`, `community_cache`); not fetched otherwise.
+  * Scenes added since: `?xscene=yard` (drive yard on raycast wheels) and
+    `?xscene=traffic` (traffic derby), also in the scene menu; the soft yard and
+    traffic still map to `idle`.
 
 ```bash
 python3 -m http.server 8791 --directory engine   # the page and the acceptance vehicles

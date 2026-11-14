@@ -127,7 +127,7 @@ const ready = async () => {
 // --query a=b&c=d: appended to every page's query (bind=legacy, alt=0: a
 // visual A/B on identical physics).
 const EXTRA = opt('--query', '');
-const open = async (query) => { await send('Page.navigate', { url: `${base}/softbody.html?solver=explicit&${query}&${CARS[CAR]}${EXTRA ? '&' + EXTRA : ''}` }); await ready(); };
+const open = async (query) => { await send('Page.navigate', { url: `${base}/softbody.html?solver=explicit&lab=1&${query}&${CARS[CAR]}${EXTRA ? '&' + EXTRA : ''}` }); await ready(); };
 const lab = (expr) => evaluate(`(async () => { const L = window.__lab; return ${expr}; })()`);
 const HZ = 2000, FPS = 60;
 // The lab's readout follows its own slow-motion setting; keep it truthful.

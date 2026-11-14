@@ -127,7 +127,9 @@ export function createCrashLab(ctx) {
 
   // ---------------------------------------------------------------- state
   const P = (k, d) => (qs.has(k) && qs.get(k) !== '' ? qs.get(k) : d);
-  const slowParam = P('slow', preset || ctx.crash ? 'auto' : '1');
+  // ?slow=N: N times slower; ?slow=auto (or the slow list's "auto"): real time until
+  // the impact, then ?autoSlow= (20) times slower. Real time by default.
+  const slowParam = P('slow', '1');
   const st = {
     auto: slowParam === 'auto',
     slow: slowParam === 'auto' ? Number(P('autoSlow', 20)) : Math.max(1, Number(slowParam) || 1),

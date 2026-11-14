@@ -1350,8 +1350,10 @@ of mass. The wheels drawn away from the car were the wheel meshes placed at thei
 **Through the `.truck` export the same content does not rest.** The ETK on raycast
 wheels through `desc_to_truck` (RoR's rules): 11 broken, 99 bent and a node at
 9.8 m/s within 1 s (JBeam mode: 0, 0, 0.15 m/s). That is what tore the browser drive
-yard's parked ETKs and sent cars past their contact frame bounds; the page now runs
-JBeam content in JBeam mode by default (`?jbeamMode=truck` opts back).
+yard's parked ETKs and sent cars past their contact frame bounds; the page runs
+converted mods (`?mod=`) in JBeam mode by default. An imported JBeam folder keeps the
+`.truck` export by default, as before; `?jbeamMode=native` (the page's JBeam menu)
+runs it in JBeam mode, `?jbeamMode=truck` forces the export for a mod.
 
 **The full-size SUV and the boathauler trailer still do not rest (open, content past
 the step's limit).** On raycast wheels and on their hubs alike:

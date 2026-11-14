@@ -35,8 +35,12 @@
     <div class="row">
       <select id="sceneSel"></select>
       <select id="carSel" title="The vehicle every scene crashes"></select>
+      <button id="modsBtn" title="List the converted BeamNG vehicles (community_cache: engine-webgpu/__mods; ?mods=1)">BeamNG mods…</button>
       <select id="modSel" title="Converted BeamNG vehicles (community_cache: engine-webgpu/__mods)" hidden></select>
+      <select id="jbeamModeSel" title="How the imported JBeam vehicle runs on the explicit solver (?jbeamMode=truck|native)" hidden></select>
       <select id="xsceneSel" title="The explicit solver's scene" style="display:none"></select>
+      <label class="p" id="labLbl" style="display:none" title="The crash-test lab view: tube beams, node spheres, slow motion, impact time, node grabbing (?lab=1)"><input type="checkbox" id="labChk" /> crash lab</label>
+      <label class="p" id="pacerLbl" style="display:none" title="FramePacer pacing (whole steps, remainder carried, eased slow-down when the GPU falls behind) and nodes drawn carried forward to the displayed time (?pacer=1)"><input type="checkbox" id="pacerChk" /> smooth pacing</label>
       <label class="file">Load .truck <input id="truckFile" type="file" accept=".truck,.load,.car,.trailer,.boat,.airplane,.fixed,.train" hidden /></label>
       <label class="file" title="A BeamNG vehicle folder (.jbeam parts, optional .pc config)">Load JBeam folder <input id="jbeamDir" type="file" webkitdirectory multiple hidden /></label>
       <button id="beamsBtn">beams (V)</button>
@@ -46,7 +50,7 @@
       <select id="presetSel" title="Crash-test presets"></select>
     </div>
     <div class="row" id="paramRow"></div>
-    <div class="row"><label class="p">camera</label><select id="camSel"></select><select id="camTargetSel" title="what it looks at"></select><label class="p" id="camFromLbl">from</label><select id="camFromSel" title="what it rides on"></select></div>
+    <div class="row"><label class="p">camera</label><select id="camSel"></select><select id="camTargetSel" title="what it looks at"></select><label class="p" id="camFromLbl">from</label><select id="camFromSel" title="what it rides on"></select><label class="p" title="The camera target eases by the same amount per second at any frame rate (?camEase=1; the crash lab's default)"><input type="checkbox" id="camEaseChk" /> rate-independent easing</label></div>
     <div class="muted" style="margin-top:6px;display:none" id="xkeys">
       Explicit solver: no drivetrain. <kbd>L</kbd> launch at 100 km/h · <kbd>R</kbd> restart · <kbd>V</kbd> beams (green intact, yellow→red bent, magenta broken) · <kbd>C</kbd> camera · drag to orbit, wheel to zoom
     </div>
@@ -98,14 +102,37 @@
     addEventListener('error', (e) => fail(e.error || e.message));
 
     const qs = new URLSearchParams(location.search);
-    // What a scene or preset change keeps: the solver, the vehicle (built-in car,
-    // .truck, imported mod and configuration, wheels, JBeam mode) and the view and
-    // contact options.
-    const KEEP_KEYS = ['solver', 'car', 'style', 'res', 'truck', 'mod', 'pc', 'wheels', 'jbeamMode', 'tyres', 'drag', 'lab', 'drive', 'tex', 'skin', 'surfaceContact', 'fullContact', 'centredDamping'];
-    const keepVehicle = (s) => { for (const k of KEEP_KEYS) if (qs.has(k)) s.set(k, qs.get(k)); return s; };
-    window.__keepVehicle = keepVehicle;
-    // JBeam imports run in JBeam mode (BeamNG's rules) unless ?jbeamMode=truck.
-    const JBEAM_NATIVE = qs.get('jbeamMode') !== 'truck';
+    // What a scene change keeps: the solver and the vehicle (built-in car, .truck),
+    // as it always did, plus the opt-in options added since (imported mod and its
+    // configuration, wheels, JBeam mode, lab, pacing, camera easing ...; none of them
+    // in a URL from before them, so those URLs keep only what they kept).
+    const KEEP_KEYS = ['solver', 'car', 'style', 'res', 'truck', 'mod', 'pc', 'wheels', 'jbeamMode', 'lab', 'pacer', 'camEase', 'mods', 'drive', 'tex', 'surfaceContact', 'fullContact', 'centredDamping'];
+    // The crash lab's scene and preset changes (lab URLs only) also keep the bare
+    // body and drag switches and the skin mode.
+    const LAB_KEEP_KEYS = [...KEEP_KEYS, 'tyres', 'drag', 'skin'];
+    const keepVehicle = (s, keys = KEEP_KEYS) => { for (const k of keys) if (qs.has(k)) s.set(k, qs.get(k)); return s; };
+    window.__keepVehicle = (s) => keepVehicle(s, LAB_KEEP_KEYS);
+    // The page's opt-in switches (each also a control on the page): one place that
+    // reads them from the URL and writes them back when a control changes.
+    // ?lab=1 the crash lab, ?pacer=1 FramePacer pacing with extrapolated drawing
+    // (explicit solver), ?camEase=1 the frame-rate-independent camera easing,
+    // ?jbeamMode=native|truck an imported JBeam vehicle's mode, ?mods=1 the list of
+    // converted BeamNG vehicles (__mods/index.json).
+    const OPT = {
+      // (camEase absent: null, resolved once the lab is known: on in the lab, else off.)
+      lab: qs.get('lab'), pacer: qs.get('pacer') === '1', camEase: qs.has('camEase') ? qs.get('camEase') === '1' : null,
+      jbeamMode: qs.get('jbeamMode'), mods: qs.get('mods') === '1',
+    };
+    // A switch changed on the page: the URL says so (a reload or a shared link keeps it).
+    const setOpt = (k, v, reload = false) => {
+      const u = new URL(location.href);
+      if (v == null || v === false) u.searchParams.delete(k); else u.searchParams.set(k, v === true ? '1' : String(v));
+      if (reload) location.href = u.href; else history.replaceState(null, '', u.href);
+    };
+    // JBeam imports (a loaded JBeam folder) go through the .truck export (RoR's
+    // rules), as they always did; ?jbeamMode=native runs them in JBeam mode (BeamNG's
+    // rules). A converted mod (?mod=, new) defaults to JBeam mode.
+    const JBEAM_NATIVE = OPT.jbeamMode ? OPT.jbeamMode === 'native' : !!qs.get('mod');
     // Crash-lab presets (?preset=, crash-lab.mjs): the explicit solver's scene and
     // its fields (the query's own values win), labels and camera.
     // A ?xscene= other than the preset's own wins: the preset is dropped (it would
@@ -174,12 +201,25 @@
     const carSel = document.getElementById('carSel');
     for (const [id, t] of Object.entries(CARS)) carSel.add(new Option(t, id, false, id === carKind));
     carSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('car', carSel.value); if (carSel.value !== 'import') for (const k of ['truck', 'mod', 'pc', 'wheels']) u.searchParams.delete(k); location.href = u.href; };
+    // An imported JBeam vehicle on the explicit solver: through the .truck export
+    // (RoR's rules, the default) or in JBeam mode (BeamNG's rules): ?jbeamMode=.
+    if (EXPLICIT && importSrc?.kind === 'jbeam') {
+      const jm = document.getElementById('jbeamModeSel');
+      jm.add(new Option('JBeam: via .truck (RoR rules)', 'truck', false, !JBEAM_NATIVE));
+      jm.add(new Option('JBeam: native mode (BeamNG rules)', 'native', false, JBEAM_NATIVE));
+      jm.hidden = false;
+      jm.onchange = () => setOpt('jbeamMode', jm.value, true);
+    }
     // Converted community vehicles (community_cache writes __mods/index.json): every
     // car and configuration; picking one loads it in JBeam mode on raycast wheels in
-    // this scene (explicit solver).
+    // this scene (explicit solver). Fetched only when asked for (the "BeamNG mods"
+    // button, ?mods=1, or a ?mod= page): a site without converted vehicles answers
+    // 404, which the browser logs as a failed resource on every load otherwise.
     const modSel = document.getElementById('modSel');
-    fetch('/__mods/index.json').then((r) => (r.ok ? r.json() : [])).then((cars) => {
-      if (!cars.length) return;
+    const modsBtn = document.getElementById('modsBtn');
+    const listMods = () => fetch('/__mods/index.json').then((r) => (r.ok ? r.json() : [])).then((cars) => {
+      if (!cars.length) { modsBtn.textContent = 'no converted BeamNG vehicles here'; modsBtn.disabled = true; return; }
+      modsBtn.hidden = true;
       modSel.hidden = false;
       modSel.add(new Option('Converted BeamNG vehicles…', ''));
       for (const c of cars) {
@@ -191,7 +231,9 @@
         }
         modSel.appendChild(g);
       }
-    }).catch(() => {});
+    }).catch(() => { modsBtn.textContent = 'no converted BeamNG vehicles here'; modsBtn.disabled = true; });
+    modsBtn.onclick = (e) => { setOpt('mods', true); listMods(); e.target.blur(); };
+    if (OPT.mods || qs.get('mod')) listMods();
     modSel.onchange = () => {
       if (!modSel.value) return;
       const [mod, pc, wheels] = modSel.value.split('|');
@@ -210,7 +252,7 @@
       }
       location.href = u.href;
     };
-    // Query parameters a scene change keeps: the solver and the vehicle.
+    // Query parameters a scene change keeps: the solver and the vehicle (KEEP_KEYS).
     const keep = (u) => { keepVehicle(u.searchParams); return u; };
     sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = keep(u).href; };
     const solverBtn = document.getElementById('solverBtn');
@@ -218,11 +260,11 @@
     solverBtn.textContent = EXPLICIT ? 'solver: explicit 2 kHz ⇄ soft' : 'solver: soft AVBD ⇄ explicit 2 kHz';
     solverBtn.onclick = () => { const u = new URL(location.href); if (EXPLICIT) u.searchParams.delete('solver'); else u.searchParams.set('solver', 'explicit'); location.href = u.href; };
     // The explicit solver's scenes; each soft scene maps to the nearest.
-    // Speeds, angles and the rest are each scene's knobs (XPARAMS), not part of its name.
-    const XSCENES = { idle: 'Explicit: at rest (L launches)', coast: 'Explicit: coasting', wall: 'Explicit: into a rigid wall',
-      headon: 'Explicit: head-on, two cars', tbone: 'Explicit: T-bone into a car', pole: 'Explicit: into a 20 cm pole',
+    // (Main's scenes and labels first, in their order; the scenes added since after.)
+    const XSCENES = { idle: 'Explicit: at rest (L launches at 100 km/h)', coast: 'Explicit: coasting at 100 km/h', wall: 'Explicit: 100 km/h into a rigid wall', arena: 'Explicit: fleet arena (?n= vehicles, ?headOn= share)',
+      headon: 'Explicit: head-on, two cars (overlap)', tbone: 'Explicit: T-bone into a standing car', pole: 'Explicit: into a 20 cm pole',
       sidepole: 'Explicit: sideways into a 20 cm pole', limbo: 'Explicit: under a low bar', drop: 'Explicit: drop test',
-      arena: 'Explicit: fleet arena (many vehicles)', mdb214: 'Explicit: FMVSS 214 moving barrier', doorpull: 'Explicit: door pull',
+      mdb214: 'Explicit: FMVSS 214 moving barrier', doorpull: 'Explicit: door pull',
       yard: 'Explicit: drive yard (WASD, raycast wheels)', traffic: 'Explicit: traffic derby (self-driving, raycast wheels)' };
     // Explicit scenes' knobs (the solver's crash_scene and arena): [url key, label,
     // default, [min, max, step]]. km/h knobs go to the solver in m/s; angles in degrees.
@@ -243,7 +285,10 @@
       traffic: [['cars', 'cars', 20, [1, 64, 1]]],
     };
     const XCRASH = new Set(['wall', 'headon', 'tbone', 'pole', 'sidepole', 'limbo', 'drop', 'mdb214', 'doorpull']);
-    const XMAP = { yard: 'yard', crates: 'idle', traffic: 'traffic', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
+    // (The explicit drive yard and traffic derby are their own scenes, picked by
+    // ?xscene=yard / traffic or the explicit scene list; the soft yard and traffic
+    // map to the explicit scene at rest, as they always did.)
+    const XMAP = { yard: 'idle', crates: 'idle', traffic: 'idle', drop: 'idle', crusher: 'idle', ramp: 'coast', rollover: 'coast',
       wall: 'wall', pole: 'pole', sidepole: 'sidepole', tbone: 'tbone', headon: 'headon', limbo: 'limbo', sandwich: 'wall', import: 'wall', drop: 'drop' };
     const xscene = XSCENES[qs.get('xscene')] ? qs.get('xscene') : XMAP[scene];
     const ARENA = EXPLICIT && xscene === 'arena';
@@ -270,7 +315,7 @@
     // vehicle (and the lab's view options), drops any preset and the old scene's knobs.
     const xsceneUrl = (id) => {
       const u = new URL(location.href), s = new URLSearchParams();
-      keepVehicle(s);
+      keepVehicle(s, LAB_KEEP_KEYS);
       s.set('solver', 'explicit'); s.set('xscene', id);
       u.search = s.toString();
       return u.href;
@@ -284,15 +329,44 @@
       yard: () => 'DRIVE YARD · WASD · SPACE HANDBRAKE', traffic: () => `TRAFFIC DERBY · ${P('cars', 20)} CARS` };
     // The crash-test lab (crash-lab.mjs, crash-lab-render.mjs): the explicit solver's
     // view with tube beams, node spheres, a ghost body, time control, impact time and
-    // node grabbing; ?lab=0 keeps the plain view (the arena always does).
-    // (The traffic derby has more cars than the lab reads per frame: the plain view.)
-    const LAB = EXPLICIT && !ARENA && xscene !== 'traffic' && qs.get('lab') !== '0';
+    // node grabbing. Opt-in: ?lab=1 or the "crash lab" box (?lab=0 off). Off by
+    // default (the plain view, as before the lab), except on pages that only exist
+    // with it: a crash-lab ?preset=, a converted ?mod= and the showcase car (their
+    // bodies are drawn by the lab).
+    // (The arena and the traffic derby have more cars than the lab reads per frame:
+    // always the plain view.)
+    const LAB_OK = EXPLICIT && !ARENA && xscene !== 'traffic';
+    const LAB = LAB_OK && (OPT.lab != null ? OPT.lab === '1' : !!(LAB_PRESET || qs.get('mod') || carKind === 'showcase'));
+    OPT.camEase ??= LAB;
+    {
+      // The camera's easing (every solver), at run time.
+      const camEaseChk = document.getElementById('camEaseChk');
+      camEaseChk.checked = OPT.camEase;
+      camEaseChk.onchange = () => { OPT.camEase = camEaseChk.checked; setOpt('camEase', OPT.camEase ? '1' : '0'); camEaseChk.blur(); };
+    }
     if (EXPLICIT) {
       const xs = document.getElementById('xsceneSel');
       for (const [id, t] of Object.entries(XSCENES)) xs.add(new Option(t, id, false, id === xscene));
       xs.style.display = '';
-      xs.onchange = () => { location.href = xsceneUrl(xs.value); };
+      // Without the lab: this page with the new scene (its knobs and the rest kept), as
+      // always; the lab's scene list (and this one under it) open the scene with its
+      // default knobs.
+      xs.onchange = () => {
+        if (LAB) { location.href = xsceneUrl(xs.value); return; }
+        const u = new URL(location.href); u.searchParams.set('xscene', xs.value); location.href = u.href;
+      };
       if (LAB) xs.style.display = 'none';
+      // The explicit solver's opt-in switches.
+      const labChk = document.getElementById('labChk');
+      labChk.checked = LAB; labChk.disabled = !LAB_OK;
+      if (!LAB_OK) labChk.parentElement.title = 'The crash lab reads every vehicle each frame: not in the arena or the traffic derby.';
+      labChk.onchange = () => setOpt('lab', labChk.checked ? '1' : '0', true);
+      const pacerChk = document.getElementById('pacerChk');
+      pacerChk.checked = OPT.pacer || LAB; pacerChk.disabled = LAB;
+      if (LAB) pacerChk.parentElement.title = 'The crash lab always paces with FramePacer.';
+      // At run time (explicitFrame starts the newly chosen clock afresh).
+      pacerChk.onchange = () => { OPT.pacer = pacerChk.checked; setOpt('pacer', OPT.pacer); pacerChk.blur(); };
+      for (const id of ['labLbl', 'pacerLbl']) document.getElementById(id).style.display = '';
       document.getElementById('xkeys').style.display = '';
       for (const id of ['softKeys', 'presetSel']) document.getElementById(id).style.display = 'none';
       document.getElementById('infoTitle').innerHTML = '<b>Soft-body vehicles</b> <span class="muted">— explicit node–beam solver, Rigs of Rods parity</span>';
@@ -1098,7 +1172,10 @@ fn xpos(i: u32, v: u32) -> vec3f {
     const bodyOn = () => bodyR && labR.opts.skin === 'body';
     const LAB_REFLECT = qs.has('labReflect') ? Number(qs.get('labReflect')) || 0 : 0.16;
     // The explicit solver's frame pacing (explicitFrame; ?minFps=N a frame-rate floor).
+    // Used by the crash lab, and by the plain view with "smooth pacing" (?pacer=1);
+    // otherwise the plain view keeps its own accumulator (xAcc), as before.
     const pacer = new FramePacer(2000, Number(qs.get('minFps')) || 0);
+    const PACED = () => LAB || OPT.pacer;
     // The live frame's lead (FramePacer.lead: simulated seconds past its last step,
     // what the renderer and camera carry the state forward by; 0 in automation).
     let xLead = 0;
@@ -1333,7 +1410,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
     }
     function resetScene() {
       resetGen++;
-      if (EXPLICIT) { buildExplicit(); pacer.reset(1); xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; if (lab) { lab.rebuilt(); lab.read(); } return; }
+      if (EXPLICIT) { buildExplicit(); pacer.reset(1); xAcc = 0; xFrameN = 0; damage = null; damageStep = -1; xGpuMs = null; lastPlayer = null; if (lab) { lab.rebuilt(); lab.read(); } return; }
       if (crusher) { crusher.start = null; crusher.reading = false; crusher.heavy = false; }
       world.restoreState(initial);
       while (softs.length > initialSoftCount) softs.pop();
@@ -1574,7 +1651,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
     function updateHud() {
       if (EXPLICIT) {
         const d = damage?.[0];
-        const pace = !manual && pacer.speed() < 0.97 ? ` · <b>${Math.round(pacer.speed() * 100)} % pace</b> (GPU behind)` : '';
+        const pace = PACED() && !manual && pacer.speed() < 0.97 ? ` · <b>${Math.round(pacer.speed() * 100)} % pace</b> (GPU behind)` : '';
         xstatsEl.innerHTML = `explicit 2 kHz · ${xLastSteps} steps/frame${xlayout.wide ? ' · wide' : ''}${pace}<br>GPU ${xGpuMs == null ? '…' : (xGpuApprox ? '≈' : '') + xGpuMs.toFixed(2)} ms/frame`
           + (d ? `<br>${d.broken} broken · ${d.yielded} bent / ${d.beams} beams` : '') + xnote;
       } else {
@@ -1627,9 +1704,11 @@ fn xpos(i: u32, v: u32) -> vec3f {
     function updateCamera(dt, snap) {
       // Views on a subject (its pose read back each frame): level (yaw only)
       // except the driver's seat and the mount, which ride its full orientation.
-      // Poses are a few steps old by the time they arrive: carry them forward to the
-      // step on display (the explicit solver's own 2 kHz steps, not the soft rate's).
-      const age = (P) => P.xstep != null && xsim ? Math.max(0, xsim.steps() - P.xstep) / 2000 + (manual ? 0 : xLead) : Math.max(0, simSteps() - (P.step ?? simSteps())) / HZ;
+      // Poses are a few steps old by the time they arrive: carry them forward. Paced
+      // explicit frames (lab, ?pacer=1) and drive poses: to the step on display (the
+      // explicit solver's own 2 kHz steps plus the frame's lead); otherwise by the
+      // display rate's steps, as before.
+      const age = (P) => P.xstep != null && xsim && (PACED() || P.dfw) ? Math.max(0, xsim.steps() - P.xstep) / 2000 + (manual ? 0 : xLead) : Math.max(0, simSteps() - (P.step ?? simSteps())) / HZ;
       const lead = (P) => {
         if (!P) return P;
         const a = age(P), v = P.vel ?? P.v;
@@ -1670,11 +1749,13 @@ fn xpos(i: u32, v: u32) -> vec3f {
         const cp = Math.cos(orbit.pitch);
         desiredE = [at[0] + orbit.dist * cp * Math.sin(orbit.yaw), at[1] + orbit.dist * Math.sin(orbit.pitch), at[2] + orbit.dist * cp * Math.cos(orbit.yaw)];
       }
-      // Exponential follow, the same per second at any frame rate: the eye keeps
-      // 0.2 % of its offset after a second, the target four times as fast.
-      // Automation (recordings: frame-stepped) keeps its own easing, unchanged.
+      // The eye keeps 0.2 % of its offset after a second; the target eases at four
+      // times the eye's per-frame rate (capped at 1), as always. "Rate-independent
+      // easing" (?camEase=1; the lab's default): the target four times as fast per
+      // second instead, the same at any frame rate. Automation (recordings:
+      // frame-stepped) keeps the first.
       const k = snap || rigid ? 1 : 1 - Math.pow(0.002, dt);
-      const kt = snap || rigid ? 1 : manual ? Math.min(1, k * 4) : 1 - Math.pow(0.002, 4 * dt);
+      const kt = snap || rigid ? 1 : manual || !OPT.camEase ? Math.min(1, k * 4) : 1 - Math.pow(0.002, 4 * dt);
       camTarget = camTarget.map((x, i) => x + (at[i] - x) * kt);
       camEye = camEye.map((x, i) => x + (desiredE[i] - x) * k);
       if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
@@ -1789,8 +1870,10 @@ fn xpos(i: u32, v: u32) -> vec3f {
     // known state: ?stopAt=0 leaves every step to __step).
     const stopAt = qs.has('stopAt') ? Number(qs.get('stopAt')) : Infinity;
     let stepAcc = 0, simAcc = 0, wallAcc = 0, realTime = 1;
-    // Explicit solver frames: 2,000 steps per second of wall time, paced by Rust's
-    // FramePacer (frame_pacer.rs: a fixed-step accumulator, whole steps with the
+    // Explicit solver frames: 2,000 steps per second of wall time (a slow frame
+    // catches up with up to twice its share), each frame's steps in one submit.
+    // In the crash lab and with "smooth pacing" (?pacer=1): paced by Rust's
+    // FramePacer instead (frame_pacer.rs: a fixed-step accumulator, whole steps with the
     // remainder carried, so a frame's simulated time is its wall time; real time at
     // any frame rate down to 20 fps, past which the physics slows and the HUD says
     // so; slow motion eased in and out), each frame's steps in one submit; its GPU
@@ -1798,7 +1881,7 @@ fn xpos(i: u32, v: u32) -> vec3f {
     // instead (60: every frame of a 60 Hz display, the physics slower on a GPU
     // that cannot keep real time there), the GPU time its budget.
     const XRATE = 2000, XSTEPS = Math.round(XRATE / 60);
-    let xFrameN = 0, xGpuMs = null, xGpuApprox = false, xTimesRead = null, xLastSteps = 0, xStepsSince = 0, xCallsSince = 0;
+    let xAcc = 0, xWasPaced = false, xFrameN = 0, xGpuMs = null, xGpuApprox = false, xTimesRead = null, xLastSteps = 0, xStepsSince = 0, xCallsSince = 0;
     // Automation's scripted driver input (window.__explicit.drive), else the keys.
     let driveOverride = null;
     function explicitFrame(dt) {
@@ -1818,17 +1901,30 @@ fn xpos(i: u32, v: u32) -> vec3f {
         // chunks, each followed by a frame-state read (impact, recording, picking).
         steps = lab.stepsFor(dt, xsim.maxFrameSteps());
         for (const k of lab.chunks(steps)) if (k) { xsim.frame(k); xCallsSince++; lab.read(); }
-      } else {
+      } else if (OPT.pacer) {
+        // "Smooth pacing" (?pacer=1): FramePacer, started afresh when switched on.
+        if (!xWasPaced) { pacer.reset(1); xWasPaced = true; }
         steps = pacer.advance(dt, 1, xsim.maxFrameSteps());
+        xsim.frame(steps);
+        if (steps) xCallsSince++;
+      } else {
+        // The default: 2,000 steps per second of wall time, a slow frame catching up
+        // with up to twice its share (as the soft loop does).
+        if (xWasPaced) { xAcc = 0; xWasPaced = false; }
+        xAcc += Math.max(0, dt) * XRATE;
+        steps = Math.max(0, Math.min(Math.floor(xAcc), 2 * XSTEPS, xsim.maxFrameSteps()));
+        xAcc = Math.min(xAcc - steps, XSTEPS);
         xsim.frame(steps);
         if (steps) xCallsSince++;
       }
       xLastSteps = steps;
       xStepsSince += steps;
-      if (++xFrameN % 15 === 0 && !xTimesRead && steps) {
+      // GPU time sampled every 30 frames, every 15 when paced (FramePacer budgets
+      // from it; a paced frame with no steps has nothing to time).
+      if (PACED() ? ++xFrameN % 15 === 0 && !xTimesRead && steps : ++xFrameN % 30 === 0 && !xTimesRead) {
         // The budget's GPU cost: the timed solver frames' mean (a lab frame submits
         // its steps in chunks) for their mean steps.
-        const sim = xsim, calls = xCallsSince, taken = xStepsSince;
+        const sim = xsim, calls = Math.max(1, xCallsSince), taken = xStepsSince;
         xStepsSince = 0; xCallsSince = 0;
         // Without timestamp queries: submit-to-done time of this frame (an upper bound).
         xTimesRead = sim.timed()
@@ -1870,7 +1966,8 @@ fn xpos(i: u32, v: u32) -> vec3f {
         // lead past the last step, and the camera eases by the wall time that
         // motion stands for (a frame a cap held short moves camera and subject
         // alike); otherwise as stepped, by the frame's wall time.
-        const paced = !lab || (!lab.st.paused && lab.st.replay < 0);
+        // Unpaced (the default plain view): no lead, the frame's wall time.
+        const paced = PACED() && (!lab || (!lab.st.paused && lab.st.replay < 0));
         // (The lab's gather carries the nodes forward, the page's own explicit
         // skin and beams do in xpos: traffic and the arena.)
         xLead = paced ? pacer.lead() : 0;

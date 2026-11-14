@@ -144,7 +144,8 @@ cargo run --release -p engine-softbody --example community_cache -- \
 ```
 
 That writes the folder the pages load (`__mods/etkk_tex`, configuration `etkk/kc6.pc`),
-its `files.json`, and `__mods/index.json` (the `softbody.html` menu). Only data files
+its `files.json`, and `__mods/index.json` (the `softbody.html` menu, listed by its
+"BeamNG mods…" button or `?mods=1`). Only data files
 are copied (JBeam, `.pc`, Collada meshes, materials, downscaled textures); nothing in a
 mod runs. `git status` must never show anything under `__mods/`.
 

@@ -158,7 +158,7 @@ const ready = async (solver) => {
 };
 
 const open = async (query) => {
-  await send('Page.navigate', { url: `${base}/softbody.html?${query}&${CARS[CAR]}` });
+  await send('Page.navigate', { url: `${base}/softbody.html?${query}&lab=1&${CARS[CAR]}` });
   await ready('explicit');
   if (!(await evaluate('!!window.__lab'))) throw new Error('the lab is not on');
 };

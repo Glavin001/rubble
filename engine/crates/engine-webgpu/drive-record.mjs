@@ -107,7 +107,7 @@ const ready = async () => {
   }
   throw new Error('the page did not start');
 };
-const open = async (query) => { await send('Page.navigate', { url: `${base}/softbody.html?solver=explicit&${query}&${CARS[CAR]}` }); await ready(); };
+const open = async (query) => { await send('Page.navigate', { url: `${base}/softbody.html?solver=explicit&lab=1&${query}&${CARS[CAR]}` }); await ready(); };
 const lab = (expr) => evaluate(`(async () => { const L = window.__lab; return ${expr}; })()`);
 const HZ = 2000, FPS = 60;
 const setSlow = (k) => lab(`(L.lab.st.auto = false, L.lab.st.paused = false, L.lab.st.slow = ${k}, true)`);

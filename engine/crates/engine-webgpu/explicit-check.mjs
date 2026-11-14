@@ -3,7 +3,8 @@
 // in Chrome WebGPU: for each test vehicle, the idle scene (settles, then the launch
 // key sets it rolling), the 100 km/h wall (it reaches the wall and crumples), and the
 // solver button (rebuilds the scene on the soft solver and back), and a few seconds
-// of the page's own live loop (launch key, GPU time in the HUD). Fails on any page
+// of the page's own live loop (launch key, GPU time in the HUD; again with the
+// opt-in ?pacer=1 pacing). Fails on any page
 // or GPU error, and when a vehicle does not move or deform. Screenshots per run.
 //
 //   cargo run -p engine-webgpu --release --bin wgsl_export      # WGSL + vehicle wasm
@@ -159,9 +160,10 @@ const RUNS = [
     return { ok, msg: `reached ${reach.toFixed(1)} m (wall face at z ${gap.toFixed(1)}), ${d.yielded} bent, ${d.broken} broken of ${d.beams}, ${(Math.hypot(...b.player.v) * 3.6).toFixed(0)} km/h after${gpu != null ? `, GPU ${gpu.toFixed(2)} ms/frame` : ''}` };
   }],
   // Live (the page's own frame loop at wall-clock 2 kHz): the launch key, frames
-  // stepping, GPU time per frame in the HUD.
-  ['live', async (v) => {
-    await open(`solver=explicit&scene=yard&${v.query}`, 'explicit');
+  // stepping, GPU time per frame in the HUD. live_paced: the same with the opt-in
+  // FramePacer pacing (?pacer=1, the "smooth pacing" box).
+  ...[['live', ''], ['live_paced', '&pacer=1']].map(([name, opt]) => [name, async (v) => {
+    await open(`solver=explicit&scene=yard${opt}&${v.query}`, 'explicit');
     await evaluate(`dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyL' }))`);
     const live = await evaluate('window.__live(3000)');
     const steps = await evaluate('window.__explicit.sim().steps()');
@@ -170,7 +172,7 @@ const RUNS = [
     const kmh = Math.hypot(...r.player.v) * 3.6;
     const ok = steps > 1000 && /GPU [≈0-9]/.test(hud) && kmh > 20;
     return { ok, msg: `${live.fps.toFixed(0)} fps, ${(live.realTime * 100).toFixed(0)}% real time, ${steps} steps, launched to ${kmh.toFixed(0)} km/h; HUD: ${hud}` };
-  }],
+  }]),
   // Read order. The new reads (readFrameState, readDrive) submit their copy before
   // they return: issued between frames submitted in one task, none awaited, each holds
   // its own step's state. Every read that existed before (readPoses, readBodies, ...)
