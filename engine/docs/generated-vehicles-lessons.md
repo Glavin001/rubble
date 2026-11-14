@@ -268,8 +268,18 @@ Tables: [generated-vehicles.md](generated-vehicles.md), "Jello against the ETK, 
 - **(Measurement) Interior collisions changed the frontal crashes for the better.** With the hood landing on the engine the wall's residual crush fell from 299 / 215 to 239 / 169 mm (the ETK 228 / 192) and the pole's flipped triangles from 616 to 80.
 - **Process:** this shell (zsh) does not split `$cfg` into words: pass each value as its own variable.
 
+## 16. Hinges that snap instead of bending (2026-11-14, `integration/lab-skin`)
+
+Measurement: [measurements/hinge-breaks.md](measurements/hinge-breaks.md).
+
+- **(Measurement) A break group is as weak as its weakest beam.** One beam past its strength sets off the whole group, so a hinge of nine unyielding beams (deform FLT_MAX) snapped at the first beam's 17-29 mm of stretch while the door or lid was barely bent (2-6 % plastic strain). Hardware that should bend needs a finite deform below its strength (now 0.4 × strength, the census's door band) and a bounded bend.
+- **(Measurement) With a fixed spring per beam, the long beams of a mount reach their strength first,** and a beam to a crush member changes length when that zone folds whatever the panel does. Mount reach and crush members are rules (`HINGE_REACH`, `crush_member`).
+- **(Fact) The solver keeps a JBeam rest length at 0.1 m or more (`MIN_REST`):** a shorter beam cannot yield in compression and breaks on its strength. Hardware beams are 0.12 m or longer.
+- **(Measurement) A per-step observer finds the trigger:** `examples/hinge_breaks` (CPU reference, `CpuLab::step_observed`) names the beam past its strength, its force and stretch, and the panel's state at that step. One mountain run is one sample: compare seeds.
+
 ## Changelog
 
+- 2026-11-14: section 16, hinges that snap instead of bending.
 - 2026-11-13: section 14: the GPU kernels carry the centred damping's objective form; on by default for CPU and GPU.
 - 2026-11-13: section 15, jello against the ETK (modes in band, kerb not), collisions inside one car.
 
