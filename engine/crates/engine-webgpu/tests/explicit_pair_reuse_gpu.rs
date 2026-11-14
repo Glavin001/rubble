@@ -130,3 +130,90 @@ fn reused_pair_list_is_the_walk_bit_for_bit() {
         assert_reused("procedural sedan tumbling drop, anti-clip", st, false);
     }
 }
+
+/// A piece torn off and flying away (`ExplicitBeamsGpu::set_piece_labels`): the list with
+/// the host's piece labels against the same list with none and against the walk, each frame
+/// from one saved state, every state word the same; with the labels the piece no longer
+/// invalidates the main body's list (reused on most steps, against few without).
+#[test]
+fn piece_labels_keep_the_list_bit_for_bit() {
+    use engine_softbody::explicit_debris::{piece_labels, Pieces};
+    let o = Vec3::new(20.0, 0.0, -30.0);
+    // The procedural sedan in free fall 40 m up with anti-clip, every triangle tested every
+    // step (no throttle: the grid each step); its front 0.5 m torn off (every beam across
+    // the cut broken) and flung sideways and down at 60 m/s.
+    let settings = ExplicitBeamsSettings { triangle_throttle: false, ..Default::default() };
+    let mut d = ExplicitBeams::from_truck_config(&gen_sedan(), None, o, Vec3::ZERO, settings).expect("spawn");
+    let low = d.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    for n in &mut d.nodes {
+        n.pos.y += 40.0 - low;
+    }
+    d.anti_clip = true;
+    d.fixed_contact = true;
+    d.finish();
+    let front = d.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+    let cut: Vec<bool> = d.nodes.iter().map(|n| n.pos.z > front - 0.5).collect();
+    for b in &mut d.beams {
+        if cut[b.a as usize] != cut[b.b as usize] {
+            b.broken = true;
+        }
+    }
+    for (n, &c) in d.nodes.iter_mut().zip(&cut) {
+        if c {
+            n.vel = Vec3::new(50.0, -33.0, 0.0);
+        }
+    }
+    let broken: Vec<bool> = d.beams.iter().map(|b| b.broken).collect();
+    let pieces = Pieces::of(&d, &broken);
+    let labels = piece_labels(&d, &pieces, &broken);
+    assert!(labels.iter().any(|&l| l != 0), "the cut leaves no piece off the main body");
+    let Some((_, device, queue)) = default_device().ok() else { return };
+    let fleet = std::slice::from_ref(&d);
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, fleet);
+    gpu.set_wide(false);
+    let zeros = vec![0u8; d.nodes.len()];
+    let (mut with, mut without) = ([0u64; 4], [0u64; 4]);
+    // The first frames the piece is still beside the cut; from frame 8 it is metres away.
+    let (mut late_with, mut late_without) = ([0u64; 2], [0u64; 2]);
+    for f in 0..20 {
+        let snap = gpu.snapshot();
+        let mut run = |gpu: &mut ExplicitBeamsGpu, reuse: bool, l: &[u8]| {
+            gpu.restore(&snap);
+            gpu.set_pair_reuse(reuse);
+            gpu.set_piece_labels(0, l);
+            gpu.take_pair_reuse_stats();
+            gpu.frame(34);
+            gpu.wait();
+            let st = gpu.take_pair_reuse_stats();
+            gpu.set_piece_labels(0, &zeros);
+            gpu.set_pair_reuse(true);
+            (gpu.state_words(), st)
+        };
+        let (walk, _) = run(&mut gpu, false, &zeros);
+        let (none, s0) = run(&mut gpu, true, &zeros);
+        let (lab, s1) = run(&mut gpu, true, &labels);
+        if let Some(diff) = first_diff(&walk, &none) {
+            panic!("torn piece: frame {f}: the list without labels differs from the walk at {diff}");
+        }
+        if let Some(diff) = first_diff(&walk, &lab) {
+            panic!("torn piece: frame {f}: the list with piece labels differs from the walk at {diff}");
+        }
+        for k in 0..2 {
+            with[k] += s1[k];
+            without[k] += s0[k];
+            if f >= 8 {
+                late_with[k] += s1[k];
+                late_without[k] += s0[k];
+            }
+        }
+    }
+    eprintln!(
+        "torn piece: 20 frames of 34 steps bit for bit; with labels built {} reused {}, without built {} reused {}; frames 8..20: with built {} reused {}, without built {} reused {}",
+        with[0], with[1], without[0], without[1], late_with[0], late_with[1], late_without[0], late_without[1]
+    );
+    assert!(with[1] > with[0], "with labels the list was reused on {} steps for {} builds", with[1], with[0]);
+    // Once the piece is away, the labelled list is built a few times a frame (the cut
+    // body's own ringing; measured 45 builds in 12 frames, 136 without the labels).
+    assert!(late_with[0] <= 5 * 12, "frames 8..20 with labels: {} builds", late_with[0]);
+    assert!(late_without[0] > 2 * late_with[0], "frames 8..20 builds: with labels {}, without {}", late_with[0], late_without[0]);
+}
