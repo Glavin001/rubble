@@ -754,6 +754,26 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             ));
         }
     }
+    // The split group path (EB_VV_SPLIT; engine/docs/measurements/contact-groups-design.md):
+    // a contact group's substeps as dispatches, the members' steps (a workgroup per
+    // vehicle) and the groups' contact passes, at the frame module's four variants.
+    for (tag, lanes) in [("", L256), ("_wide", L512), ("_aero", L256), ("_aero_wide", L512)] {
+        for entry in ["member", "group"] {
+            // (The members' module without EB_VV_GROUPS: its frame step never reaches
+            // contactGroup, so it binds the workgroup variables of the steps alone:
+            // Metal allows 31 a kernel.)
+            let mut d = vec![W, lanes, SOLO, ("EB_VV_SPLIT", "1")];
+            if tag.contains("aero") {
+                d.push(AERO);
+            }
+            if entry == "member" {
+                d.push(("EB_SOLO_STEP", "1"));
+            } else {
+                d.push(GROUPS);
+            }
+            jobs.push((format!("explicit_beams_split_{entry}{tag}"), if entry == "member" { "explicit_beams_split_member" } else { "explicit_beams_split_group" }, d));
+        }
+    }
     for (name, entry, defines) in &jobs {
         let out = wgsl_dir.join(format!("{name}.wgsl"));
         compile_with_defines(&explicit_beams_source(slang_root), entry, SlangTarget::Wgsl, &out, &[], defines)?;

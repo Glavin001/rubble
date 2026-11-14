@@ -93,6 +93,11 @@ pub struct ExplicitBeamsGpu {
     piece_windows: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
+    /// The split group path ([`Self::set_group_split`]): on, its pipelines (created at
+    /// first use) and whether they zero workgroup memory (natively; browsers always do).
+    group_split: bool,
+    group_split_pipes: std::sync::OnceLock<GroupSplit>,
+    group_split_zero: bool,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
     /// `wait` saw, not yet handled.
     contact_errors: std::sync::Mutex<Vec<String>>,
@@ -333,6 +338,86 @@ impl Split {
     }
 }
 
+/// Whether contact groups run split across workgroups ([`ExplicitBeamsGpu::set_group_split`]):
+/// `RUBBLE_GROUP_SPLIT=1|0` (default on).
+pub fn group_split_default() -> bool {
+    std::env::var("RUBBLE_GROUP_SPLIT").as_deref() != Ok("0")
+}
+
+/// Byte offsets in the indirect arguments of the split group path's dispatches (the
+/// kernel's vvArgs): the groups, and the vehicles when there is a group.
+const SPLIT_GROUP_ARGS: u64 = 64;
+const SPLIT_MEMBER_ARGS: u64 = 80;
+/// The split group path's entry points (`explicit_beams_split.slang`).
+pub const SPLIT_MEMBER_ENTRY: &str = "explicit_beams_split_member";
+pub const SPLIT_GROUP_ENTRY: &str = "explicit_beams_split_group";
+/// The kernel's SPLIT_BEGIN: the parameter copy past the frame's end marks the groups'
+/// frame start.
+const SPLIT_BEGIN: u32 = u32::MAX;
+
+/// The split group path's pipelines and bind group (contact-groups-design.md): the
+/// members' step (a workgroup per vehicle) and the groups' pass, binding 0 one
+/// parameter copy (the step) by the dynamic offset.
+struct GroupSplit {
+    member: wgpu::ComputePipeline,
+    group: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+}
+
+impl GroupSplit {
+    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], aero: bool, lanes: u32, zero: bool) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("explicit-beams-group-split"),
+            entries: &split_entries(),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("explicit-beams-group-split"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let tag = match (aero, lanes) {
+            (false, 512) => "_wide",
+            (false, _) => "",
+            (true, 512) => "_aero_wide",
+            (true, _) => "_aero",
+        };
+        let pipe = |which: &str, entry: &str| {
+            let name = format!("explicit_beams_split_{which}{tag}");
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(&name),
+                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(&name)).into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(&name),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                // Natively, no zeroing of workgroup memory at each workgroup's start
+                // (naga's MSL zeroes it from one lane: about 0.16 ms a dispatch): every
+                // workgroup value these entries read was written in the same dispatch
+                // (contact-groups-design.md §4; checked bit for bit against the zeroing
+                // build, RUBBLE_GROUP_SPLIT_ZERO=1).
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    zero_initialize_workgroup_memory: zero,
+                    ..Default::default()
+                },
+                cache: None,
+            })
+        };
+        let member = pipe("member", SPLIT_MEMBER_ENTRY);
+        let group = pipe("group", SPLIT_GROUP_ENTRY);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams-group-split"),
+            layout: &layout,
+            entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 0 { params_window(&bufs[0]) } else { bufs[i].as_entire_binding() },
+            }),
+        });
+        Self { member, group, bind }
+    }
+}
+
 /// A status read: its staging buffer and its map state (0 copied, not yet mapped;
 /// 1 map requested; 2 mapped; 3 map failed).
 struct StatusRead {
@@ -392,6 +477,7 @@ fn module_wgsl(name: &str) -> &'static str {
             .chain(crate::EXPLICIT_BEAMS_NOCPL.iter())
             .chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter())
             .chain(crate::EXPLICIT_BEAMS_SURF_SPLIT.iter())
+            .chain(crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| *w)
             .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
@@ -844,6 +930,9 @@ impl ExplicitBeamsGpu {
             piece_windows: std::env::var("RUBBLE_PIECE_WINDOWS").as_deref() != Ok("0"),
             wide,
             contact,
+            group_split: group_split_default(),
+            group_split_pipes: std::sync::OnceLock::new(),
+            group_split_zero: std::env::var("RUBBLE_GROUP_SPLIT_ZERO").as_deref() == Ok("1"),
             contact_errors: Default::default(),
             contact_errors_seen: Default::default(),
             bufs,
@@ -2078,7 +2167,7 @@ impl ExplicitBeamsGpu {
         self.check_contact_status();
         self.write_wakes();
         let wide_allowed = self.alt_pipes().is_none();
-        let cmds = self.write_params(steps, wide_allowed);
+        let mut cmds = self.write_params(steps, wide_allowed);
         // Timestamps at the start of the frame's first pass and the end of its last.
         let slot = self.timing.as_mut().and_then(|t| {
             (t.used < t.capacity).then(|| {
@@ -2087,6 +2176,13 @@ impl ExplicitBeamsGpu {
             })
         });
         let alt = self.alt_pipes();
+        let split = self.group_split_on(steps);
+        if split {
+            // The solo frame as planned (every vehicle when no group formed, else none),
+            // then the split path's dispatches (below) in place of the groups' frames:
+            // with a group, every vehicle a step a dispatch.
+            cmds.retain(|c| !matches!(c, Cmd::Indirect { kernel: Kernel::Contact | Kernel::ContactBig, .. }));
+        }
         let set = self.timing.as_ref().map(|t| &t.set);
         let stamps = |begin: bool, end: bool| {
             ext.or(set.zip(slot))
@@ -2102,7 +2198,42 @@ impl ExplicitBeamsGpu {
             if i > 0 {
                 self.copy(enc, copies[i - 1]);
             }
+            let last = i + 1 == runs.len();
             if let Some((q, first, cap)) = per {
+                if split && last {
+                    // The split dispatches in one timed pass after the run's own.
+                    for cmd in *run {
+                        let k = first + labels.len() as u32;
+                        let timed = (labels.len() as u32) < cap;
+                        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("explicit_beams"),
+                            timestamp_writes: timed.then_some(wgpu::ComputePassTimestampWrites {
+                                query_set: q,
+                                beginning_of_pass_write_index: Some(2 * k),
+                                end_of_pass_write_index: Some(2 * k + 1),
+                            }),
+                        });
+                        self.dispatch(&mut pass, cmd, alt);
+                        if timed {
+                            labels.push(kernel_name(cmd));
+                        }
+                    }
+                    let k = first + labels.len() as u32;
+                    let timed = (labels.len() as u32) < cap;
+                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("explicit_beams"),
+                        timestamp_writes: timed.then_some(wgpu::ComputePassTimestampWrites {
+                            query_set: q,
+                            beginning_of_pass_write_index: Some(2 * k),
+                            end_of_pass_write_index: Some(2 * k + 1),
+                        }),
+                    });
+                    self.dispatch_group_split(&mut pass, steps);
+                    if timed {
+                        labels.push("explicit split groups");
+                    }
+                    continue;
+                }
                 for cmd in *run {
                     let k = first + labels.len() as u32;
                     let timed = (labels.len() as u32) < cap;
@@ -2132,14 +2263,27 @@ impl ExplicitBeamsGpu {
                     }
                     m.mark(enc, kernel_name(cmd));
                 }
+                if split && last {
+                    {
+                        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("explicit_beams"),
+                            timestamp_writes: None,
+                        });
+                        self.dispatch_group_split(&mut pass, steps);
+                    }
+                    m.mark(enc, "explicit split groups");
+                }
                 continue;
             }
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("explicit_beams"),
-                timestamp_writes: stamps(i == 0, i + 1 == runs.len()),
+                timestamp_writes: stamps(i == 0, last),
             });
             for cmd in *run {
                 self.dispatch(&mut pass, cmd, alt);
+            }
+            if split && last {
+                self.dispatch_group_split(&mut pass, steps);
             }
         }
         // The status every STATUS_EVERY frames (the counters and the loop-cap
@@ -2704,10 +2848,20 @@ impl ExplicitBeamsGpu {
     /// The frame's parameters and its commands: only the parameter copies the commands
     /// read are uploaded (a dispatch reads copy `param_copy`; the per-vehicle frame and
     /// contact kernels copy 0), so a frame on per-vehicle workgroups uploads one copy,
-    /// not one a step.
+    /// not one a step. The split group path reads every step's copy and copy steps + 1
+    /// (the groups' frame start, the kernel's SPLIT_BEGIN).
     fn write_params(&mut self, steps: u32, wide_allowed: bool) -> Vec<Cmd> {
-        let bytes = self.planner.write_params(steps);
+        let mut bytes = self.planner.write_params(steps);
         let cmds = self.planner.commands(steps, wide_allowed);
+        if self.group_split_on(steps) {
+            let mut w = self.planner.words;
+            w[11] = SPLIT_BEGIN;
+            bytes.resize((PARAM_STRIDE * u64::from(steps + 2)) as usize, 0);
+            let at = (PARAM_STRIDE * u64::from(steps + 1)) as usize;
+            bytes[at..at + 4 * w.len()].copy_from_slice(bytemuck::cast_slice(&w));
+            self.queue.write_buffer(&self.params, 0, &bytes);
+            return cmds;
+        }
         let used = cmds
             .iter()
             .map(|c| match *c {
@@ -2719,6 +2873,71 @@ impl ExplicitBeamsGpu {
         let n = ((u64::from(used) + 1) * PARAM_STRIDE).min(bytes.len() as u64) as usize;
         self.queue.write_buffer(&self.params, 0, &bytes[..n]);
         cmds
+    }
+
+    /// Contact groups run split across workgroups (contact-groups-design.md) on, or off
+    /// (each group in one workgroup, as before): the same results bit for bit. On by
+    /// default (`RUBBLE_GROUP_SPLIT=0` off). Not with vehicle sleep, the test kernel
+    /// variants or the diagnostic pipelines (those frames keep the groups' workgroup).
+    pub fn set_group_split(&mut self, on: bool) {
+        self.group_split = on;
+    }
+
+    /// Measurement: the split path's pipelines with workgroup memory zeroed at each
+    /// workgroup's start (the shader translator's default) or not (ours natively).
+    #[doc(hidden)]
+    pub fn set_group_split_zero(&mut self, zero: bool) {
+        if zero != self.group_split_zero {
+            self.group_split_zero = zero;
+            self.group_split_pipes = std::sync::OnceLock::new();
+        }
+    }
+
+    /// Measurement only (time): the ablation word alone, for the split path (its modules
+    /// read bit 512: the groups' contact passes skipped), keeping the shipped modules.
+    #[doc(hidden)]
+    pub fn set_split_ablation(&mut self, mask: u32) {
+        self.planner.set_ablation(mask);
+    }
+
+    /// This frame (after the parameters' plan) runs the split group path.
+    fn group_split_on(&self, steps: u32) -> bool {
+        self.group_split
+            && self.planner.contact_active()
+            && !self.planner.sleep_on()
+            && self.variant == KernelVariant::Current
+            && self.debug_big.is_none()
+            && self.debug_solo.is_none()
+            && self.debug_groups.is_none()
+            && steps > 0
+            && steps + 2 <= plan::PARAM_COPIES
+    }
+
+    fn group_split_pipes(&self) -> &GroupSplit {
+        self.group_split_pipes.get_or_init(|| {
+            let (aero, _, lanes) = self.module_kind;
+            GroupSplit::new(&self.device, &self.bufs, aero, lanes, self.group_split_zero)
+        })
+    }
+
+    /// The split group path's dispatches of a frame of `steps` steps: the groups' frame
+    /// start, then per step the members' steps and the groups' passes (the last with the
+    /// groups' frame end). Each from the indirect arguments the plan wrote (none without
+    /// a group).
+    fn dispatch_group_split(&self, pass: &mut wgpu::ComputePass, steps: u32) {
+        let g = self.group_split_pipes();
+        let args = &self.contact.args;
+        let at = |k: u32| [k * PARAM_STRIDE as u32];
+        pass.set_pipeline(&g.group);
+        pass.set_bind_group(0, &g.bind, &at(steps + 1));
+        pass.dispatch_workgroups_indirect(args, SPLIT_GROUP_ARGS);
+        for s in 0..steps {
+            pass.set_pipeline(&g.member);
+            pass.set_bind_group(0, &g.bind, &at(s));
+            pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
+            pass.set_pipeline(&g.group);
+            pass.dispatch_workgroups_indirect(args, SPLIT_GROUP_ARGS);
+        }
     }
 
     /// Submit `dispatches` dispatches of `steps` steps each in one compute pass (the
@@ -3084,6 +3303,10 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     out.push((plan::SLEEP_LIST.into(), plan::SLEEP_LIST, u(crate::EXPLICIT_BEAMS_SLEEP_LIST_WGSL)));
     for (n, w) in crate::EXPLICIT_BEAMS_SURF_SPLIT.iter() {
         let entry = plan::SURF_PASSES.iter().find(|(m, _)| m == n).map_or(plan::FRAME_ENTRY, |(_, e)| *e);
+        out.push((n.to_string(), entry, u(w)));
+    }
+    for (n, w) in crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter() {
+        let entry = if n.contains("member") { SPLIT_MEMBER_ENTRY } else { SPLIT_GROUP_ENTRY };
         out.push((n.to_string(), entry, u(w)));
     }
     out
