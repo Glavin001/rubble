@@ -211,6 +211,9 @@ pub const W_RETIRE_BASE: usize = 95;
 /// with collision triangles of their own, 7 every other node off the main body.
 pub const PIECE_GROUPS: usize = 8;
 pub const PIECE_LOOSE: u8 = 7;
+/// gMisc records per vehicle of the coupling's piece boxes (vehicle_coupling.slang
+/// PIECE_BOX_RECS): 8 boxes of 6 keys, then the labels-in-use word.
+pub const PIECE_BOX_RECS: usize = 13;
 /// Params word: the loop budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`).
 pub const W_LOOP_BUDGET: usize = 88;
 /// The loop budget's floor and ceiling (passes of one invocation in a frame).
@@ -764,6 +767,10 @@ pub struct ExplicitLayout {
     pub vv_tri_base: u32,
     /// gMisc record of the retired nodes' bits ([`W_RETIRE_BASE`] when in use).
     pub retire_rec: u32,
+    /// gMisc records of the nodes' piece labels (4 bits each) and per vehicle its
+    /// pieces' boxes ([`PIECE_BOX_RECS`]) for the coupling's window per piece.
+    pub label_rec: u32,
+    pub piece_box_rec: u32,
     /// The fleet runs the aero modules (`EB_AERO`).
     pub aero: bool,
     /// Some vehicle has surface contact: the frame modules with the surface pass
@@ -1907,6 +1914,13 @@ impl ExplicitUpload {
         // until a host retires a node.
         let retire_rec = misc.len() as u32;
         misc.extend(std::iter::repeat_n([0u32; 4], total_nodes.div_ceil(128).max(1)));
+        // A coupling window per piece (vehicle_coupling.slang pieceAccept; the host's
+        // `set_piece_labels`): per node its label, 4 bits, 32 a record; per vehicle
+        // PIECE_BOX_RECS records (its pieces' node boxes, then its labels-in-use word).
+        let label_rec = misc.len() as u32;
+        misc.extend(std::iter::repeat_n([0u32; 4], total_nodes.div_ceil(32).max(1)));
+        let piece_box_rec = misc.len() as u32;
+        misc.extend(std::iter::repeat_n([0u32; 4], PIECE_BOX_RECS * nv.max(1)));
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -2197,6 +2211,8 @@ impl ExplicitUpload {
             sleep: sleep_layout,
             vv_tri_base,
             retire_rec,
+            label_rec,
+            piece_box_rec,
             aero,
             surface: any_surface,
             big,

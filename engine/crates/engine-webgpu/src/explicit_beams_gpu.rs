@@ -82,6 +82,11 @@ pub struct ExplicitBeamsGpu {
     surface_culls_off: bool,
     /// The retired nodes' bits as last written ([`Self::set_retired`]; empty: none).
     retired_bits: Vec<u32>,
+    /// The nodes' piece labels packed for the coupling (4 bits each), the vehicles with
+    /// labels in use, and whether the coupling takes a window per piece.
+    label_words: Vec<u32>,
+    labelled: Vec<bool>,
+    piece_windows: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
@@ -816,6 +821,9 @@ impl ExplicitBeamsGpu {
             surface_pairs_off: std::env::var("RUBBLE_SURFACE_PAIRS").as_deref() == Ok("0"),
             surface_culls_off: std::env::var("RUBBLE_SURFACE_CULLS").as_deref() == Ok("0"),
             retired_bits: Vec::new(),
+            label_words: Vec::new(),
+            labelled: vec![false; vehicles_n],
+            piece_windows: std::env::var("RUBBLE_PIECE_WINDOWS").as_deref() != Ok("0"),
             wide,
             contact,
             contact_errors: Default::default(),
@@ -901,8 +909,10 @@ impl ExplicitBeamsGpu {
         }
         self.planner.restore(FramePlanner::new(new).state());
         self.layout = upload.layout.clone();
-        // Nothing retired (the misc records were rewritten).
+        // Nothing retired, no labels (the misc and next records were rewritten).
         self.retired_bits.clear();
+        self.label_words.clear();
+        self.labelled.iter_mut().for_each(|l| *l = false);
         self.planner.words[plan::W_RETIRE_BASE] = 0;
         self.sleep_inputs = vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect();
         self.sleep_grab = None;
@@ -1631,20 +1641,57 @@ impl ExplicitBeamsGpu {
     /// [`plan::PIECE_LOOSE`] any other node off the main body. A hint only: any labels give
     /// the same results bit for bit (the list's validity is proved on the GPU for the
     /// labels given); good labels let a piece torn off the vehicle move without
-    /// invalidating the main body's list. All zero (the default): one group, as before.
-    /// Applies from the next frame. No-op without the pair list.
+    /// invalidating the main body's list, and the coupling takes a window per piece
+    /// ([`Self::set_piece_windows`]). All zero (the default): one group, as before.
+    /// Applies from the next frame.
     pub fn set_piece_labels(&mut self, v: usize, labels: &[u8]) {
         let base = self.planner.words[plan::W_PIECE_BASE] as usize;
-        let Some(span) = self.layout.spans.get(v) else { return };
-        if base == 0 {
-            return;
-        }
+        let Some(span) = self.layout.spans.get(v).copied() else { return };
         let n = (span.nodes as usize).min(labels.len());
         let words: Vec<u32> = labels[..n].iter().map(|&l| u32::from(l)).collect();
         let active = u32::from(words.iter().any(|&l| l != 0));
-        self.queue.write_buffer(&self.bufs[8], ((base + span.node_off as usize) * 4) as u64, bytemuck::cast_slice(&words));
-        let at = base + self.layout.total[0] as usize + v;
-        self.queue.write_buffer(&self.bufs[8], (at * 4) as u64, bytemuck::bytes_of(&active));
+        // The pair list's (a vehicle fleet with it).
+        if base != 0 {
+            self.queue.write_buffer(&self.bufs[8], ((base + span.node_off as usize) * 4) as u64, bytemuck::cast_slice(&words));
+            let at = base + self.layout.total[0] as usize + v;
+            self.queue.write_buffer(&self.bufs[8], (at * 4) as u64, bytemuck::bytes_of(&active));
+        }
+        // The coupling's copy (vehicle_coupling.slang pieceLabelOf, pieceAccept).
+        let total = self.layout.total[0] as usize;
+        if self.label_words.is_empty() {
+            self.label_words = vec![0u32; total.div_ceil(32).max(1) * 4];
+        }
+        let first = span.node_off as usize;
+        for i in first..first + span.nodes as usize {
+            let l = labels.get(i - first).copied().unwrap_or(0).min(7) as u32;
+            let (w, sh) = (i / 8, (i % 8) * 4);
+            self.label_words[w] = (self.label_words[w] & !(0xF << sh)) | (l << sh);
+        }
+        if span.nodes > 0 {
+            let (r0, r1) = (first / 32, (first + span.nodes as usize - 1) / 32);
+            let rec = self.layout.label_rec as usize;
+            self.queue.write_buffer(&self.misc, ((rec + r0) * 16) as u64, bytemuck::cast_slice(&self.label_words[r0 * 4..(r1 + 1) * 4]));
+        }
+        self.labelled[v] = active != 0;
+        let flag = [active, 0, 0, 0];
+        let rec = self.layout.piece_box_rec as usize + v * plan::PIECE_BOX_RECS + 12;
+        self.queue.write_buffer(&self.misc, (rec * 16) as u64, bytemuck::cast_slice(&flag));
+    }
+
+    /// The coupling's window per piece (vehicle_coupling.slang pieceAccept; on by default,
+    /// `RUBBLE_PIECE_WINDOWS=0` off): with piece labels a collider is a proxy only when it
+    /// can reach some piece's box, not just the whole vehicle's. Off: one window.
+    pub fn set_piece_windows(&mut self, on: bool) {
+        self.piece_windows = on;
+    }
+
+    /// The coupling's piece label and box records (0, 0: one window per vehicle).
+    pub fn piece_window_records(&self) -> (u32, u32) {
+        if self.piece_windows && self.labelled.iter().any(|&l| l) {
+            (self.layout.label_rec, self.layout.piece_box_rec)
+        } else {
+            (0, 0)
+        }
     }
 
     /// Retire nodes of vehicle `v` (`retired`: one flag per node; `explicit_beams.slang`

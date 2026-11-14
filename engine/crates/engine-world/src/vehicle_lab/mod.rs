@@ -73,6 +73,9 @@ pub struct LabOptions {
     /// longer invalidates the main body's list. Lossless (the same results either way).
     /// Live (`{ pieceLabels: bool }`).
     pub piece_labels: bool,
+    /// With the piece labels, the coupling's window per piece
+    /// (`ExplicitBeamsGpu::set_piece_windows`; lossless). Live (`{ pieceWindows: bool }`).
+    pub piece_windows: bool,
     /// Small debris retired after its time to live (`DebrisTtl`; None: never, the
     /// solver's behaviour without the setting). On in the lab: 5 s, at most 10 kg and 40
     /// nodes ([`LAB_DEBRIS_TTL`]: what the mountain sheds). Live
@@ -96,6 +99,7 @@ impl Default for LabOptions {
             surface_contact: false,
             own_travel_reach: true,
             piece_labels: true,
+            piece_windows: true,
             debris_ttl: Some(LAB_DEBRIS_TTL),
             parked: false,
             capacity: CouplingCapacity {
@@ -206,6 +210,10 @@ impl LabOptions {
                 .get("pieceLabels")
                 .and_then(Value::as_bool)
                 .unwrap_or(d.piece_labels),
+            piece_windows: v
+                .get("pieceWindows")
+                .and_then(Value::as_bool)
+                .unwrap_or(d.piece_windows),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
                 _ => d.debris_ttl,
@@ -2145,6 +2153,9 @@ impl Lab {
         let layout = world
             .explicit_coupling_layout()
             .ok_or_else(|| anyhow::anyhow!("vehicle lab: no coupling layout"))?;
+        if let Some(x) = world.explicit_vehicles_mut() {
+            x.set_piece_windows(opts.piece_windows);
+        }
         let x = world.explicit_vehicles().expect("vehicles");
         let span = x.layout().spans[0];
         let plan = ReadPlan {
@@ -2345,6 +2356,14 @@ impl Lab {
             let ttl = debris_ttl_from(d);
             self.bench.set_debris_ttl(ttl);
             return Ok(json!({ "debris": debris_json(ttl) }));
+        }
+        // { pieceWindows: bool }: the coupling's window per piece (LabOptions::piece_windows).
+        if let Some(on) = cmd.get("pieceWindows").and_then(Value::as_bool) {
+            self.bench.opts.piece_windows = on;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.set_piece_windows(on);
+            }
+            return Ok(json!({ "pieceWindows": on }));
         }
         // { pieceLabels: bool }: the pair list's piece labels (LabOptions::piece_labels).
         if let Some(on) = cmd.get("pieceLabels").and_then(Value::as_bool) {

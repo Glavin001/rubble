@@ -569,8 +569,30 @@ fn reuse_census(s: &ExplicitBeams, pos: &[glam::Vec3], vel: &[glam::Vec3], broke
         shed.sort_by(|a, b| b.1.total_cmp(&a.1));
     }
     let shed: Vec<String> = shed.iter().map(|(k, m)| format!("{k}n {m:.2}kg")).collect();
+    // The pair list's volatile triangles under the lab's labels: live and dead.
+    let (vol_live, vol_dead, vol_big) = {
+        use engine_softbody::explicit_debris::{piece_labels, Pieces};
+        let pieces = Pieces::of(s, broken);
+        let labels = piece_labels(s, &pieces, broken);
+        let (mut l, mut d, mut big) = (0u32, 0u32, 0u32);
+        for (t, tri) in s.triangles.iter().enumerate() {
+            let a = labels[tri.nodes[0] as usize];
+            if !(a == 7 || tri.nodes.iter().any(|&v| labels[v as usize] != a)) {
+                continue;
+            }
+            let kills = s.tri_breaks.get(t).copied().unwrap_or([u32::MAX; 4]);
+            if kills.iter().any(|&b| b != u32::MAX && broken.get(b as usize).copied().unwrap_or(false)) {
+                d += 1;
+            } else {
+                l += 1;
+                let p = tri.nodes.map(|i| pos[i as usize]);
+                big += ((p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).max_element() > 3.0) as u32;
+            }
+        }
+        (l, d, big)
+    };
     format!(
-        "pieces off [{}]; tracked {ka} (main {k0}); detached nodes {} in {pieces} pieces ({} tracked, fastest {:.0} m/s, {} over 20 m/s), live triangles off the main body {live_tri_detached}; velocity spread all {all:.1} m/s ({:.0} steps a list), main only {m0:.1} m/s ({:.0} steps)",
+        "volatile triangles live {vol_live} ({vol_big} over 3 m) dead {vol_dead}; pieces off [{}]; tracked {ka} (main {k0}); detached nodes {} in {pieces} pieces ({} tracked, fastest {:.0} m/s, {} over 20 m/s), live triangles off the main body {live_tri_detached}; velocity spread all {all:.1} m/s ({:.0} steps a list), main only {m0:.1} m/s ({:.0} steps)",
         shed.join(", "),
         (0..n).filter(|&i| !is_main[i]).count(),
         det.len(),

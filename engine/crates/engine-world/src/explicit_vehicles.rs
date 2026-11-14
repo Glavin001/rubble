@@ -126,8 +126,12 @@ struct Params {
     loop_budget: u32,
     /// gMisc record of the explicit nodes' retired bits (0: none retired).
     retire_base: u32,
+    /// The coupling's window per piece: gMisc records of the nodes' labels and of the
+    /// pieces' boxes (0: one window per vehicle).
+    label_base: u32,
+    piece_box_base: u32,
     /// To the uniform's 16-byte size.
-    pad: [u32; 3],
+    pad: u32,
 }
 
 /// The coupling passes' pass budget: four times a bound on one invocation's passes
@@ -564,7 +568,9 @@ impl ExplicitVehicles {
             extra_base: self.extra_word as u32,
             loop_budget: 0,
             retire_base: self.gpu.retire_base(),
-            pad: [0; 3],
+            label_base: self.gpu.piece_window_records().0,
+            piece_box_base: self.gpu.piece_window_records().1,
+            pad: 0,
         };
         let p = Params { loop_budget: coupling_loop_budget(&p), ..p };
         sim.queue().write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
