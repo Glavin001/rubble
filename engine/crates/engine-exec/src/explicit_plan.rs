@@ -1699,7 +1699,9 @@ impl ExplicitUpload {
         // owners.)
         // (Then the small groups' candidates' cell ranks, 4 words per contact point: the
         // kernel's vvRankAt.)
-        let slot_list_base = (vv_hits as usize + 20 * total_cp) as u32;
+        // (Then the levels' hit buckets: per group 16 words a contact point, the kernel's
+        // vvOrderAt.)
+        let slot_list_base = (vv_hits as usize + 36 * total_cp) as u32;
         // Then per vehicle its self-collision hit list and pending beams (the
         // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
         let hit_base = slot_list_base as usize + slot_list_len as usize;

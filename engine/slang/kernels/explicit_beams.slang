@@ -9344,6 +9344,247 @@ void vvTriangleCandsGrid(uint a, uint va, uint gt, uint sub, uint subs, uint run
     vvMark(gt, cand, hit);
 }
 
+
+// --- The triangle tests as a pair list (lossless) ---
+// The triangles' tests ran on the lane that walked the triangle: a few triangles in the
+// crush hold most candidates, and the step waited for their lanes. With the pair list
+// (the members' own self-collision pair regions, triPairsAt: unused in a group's frame),
+// the walk only lists the (triangle, candidate) pairs its box test passes, and after a
+// barrier the lanes test the pairs, one each: the same tests, the same hits (applied in
+// the canonical order), the same marks. An owner whose list overflows TRI_PAIR_CAP tests
+// inline (vvTriangleCandsGrid) instead.
+static const uint VV_PAIR_RUN = 0x80000000u; // a candidate's index in its owner's run (else the sorted copy)
+void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r)
+{
+    float cell = vvGridCell(va);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
+    if (any(t.lo > t.hi)) return;
+    float vmax = asfloat(gsCount[GRID_BUCKETS + a].load());
+    float pad = nf(nf(t.travel + smul(vmax, STEP)) + CLIP_DEPTH);
+    float3 lo = ssub3(t.lo, float3(pad, pad, pad));
+    float3 hi = sadd3(t.hi, float3(pad, pad, pad));
+    float3 f0 = floor(lo / cell);
+    float3 fs = floor(hi / cell) - f0 + float3(1.0, 1.0, 1.0);
+    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS))
+                 || !(all(abs(f0) < 1.0e8));
+    uint at = triPairsAt(va);
+    bool cand = false;
+    if (every)
+    {
+        uint run = vvRunSmall(runOff, points, a);
+        vvVisit(sub < cands ? (cands - sub + subs - 1u) / subs : 0u);
+        for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
+        {
+            float4 E = gBeams[run + e];
+            uint h = asuint(E.w);
+            if (!vvInBox(t, E.xyz, h, vvAnti(t, gStatic[gP.nodeInfoBase + h].w))) continue;
+            cand = true;
+            uint n = gsPairCountM[a].add(1u);
+            if (n < TRI_PAIR_CAP)
+            {
+                gNext[at + 2u * n] = gt;
+                gNext[at + 2u * n + 1u] = e | VV_PAIR_RUN;
+            }
+        }
+        vvMark(gt, cand, false);
+        return;
+    }
+    int3 c0 = int3(f0);
+    int3 span = int3(fs);
+    uint yz = uint(span.y * span.z);
+    uint cells = uint(span.x) * yz;
+    uint sorted = vvSortAt(runOff);
+    uint seen = 0u;
+    for (uint i = sub, iStop = EB_END(i, cells, subs); i < iStop; i += subs)
+    {
+        uint b = vvGridBucket(a, c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
+        bool dup = false;
+        int3 cj = int3(0, 0, 0);
+        for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+        {
+            if (vvGridBucket(a, c0 + cj) == b)
+            {
+                dup = true;
+                break;
+            }
+            cj.z += 1;
+            if (cj.z == span.z)
+            {
+                cj.z = 0;
+                cj.y += 1;
+                if (cj.y == span.y)
+                {
+                    cj.y = 0;
+                    cj.x += 1;
+                }
+            }
+        }
+        if (dup) continue;
+        uint e0 = gsOff[b];
+        uint e1 = gsOff[b + 1u];
+        seen += e1 - e0;
+        for (uint e = e0, eGuard = 0u; e < e1; e++)
+        {
+            EB_PASS(eGuard);
+            float4 E = gBeams[sorted + e];
+            uint h = asuint(E.w);
+            if (!vvInBox(t, E.xyz, h, vvAnti(t, gStatic[gP.nodeInfoBase + h].w))) continue;
+            cand = true;
+            uint n = gsPairCountM[a].add(1u);
+            if (n < TRI_PAIR_CAP)
+            {
+                gNext[at + 2u * n] = gt;
+                gNext[at + 2u * n + 1u] = e;
+            }
+        }
+    }
+    vvVisit(seen);
+    vvMark(gt, cand, false);
+}
+
+// A listed pair's test (vvTriangleCandsSmall's after its box test).
+void vvPairTest(uint a, uint va, uint gt, uint idx, uint runOff, uint points, float r)
+{
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
+    float4 E = (idx & VV_PAIR_RUN) != 0u ? gBeams[vvRunSmall(runOff, points, a) + (idx & ~VV_PAIR_RUN)]
+                                          : gBeams[vvSortAt(runOff) + idx];
+    uint h = asuint(E.w);
+    uint vh = gStatic[gP.nodeInfoBase + h].w;
+    bool anti = vvAnti(t, vh);
+    if (!vvFind(t, gt, h, E.xyz, vh, r, anti)) return;
+    vvSplitCount(t, h, a);
+    uint n = gsVvHit4[a].add(1u);
+    if (n < 2u * points)
+    {
+        gNext[vvHitSmall(runOff, points, a, n)] = gt;
+        gNext[vvHitSmall(runOff, points, a, n) + 1u] = h;
+    }
+    vvMark(gt, false, true);
+}
+
+
+
+// --- A level's listed hits bucketed by contact point (lossless) ---
+// vvApplyOrdered found each hit's place in its point's chain by scanning every hit of
+// the owner, twice per hit (O(n²) a level). The hits of one contact point are now found
+// in their point's bucket (a counting sort of the hit indices by point, owner a's buckets
+// a·256 …, in gsCount/gsOff: free in the levels, the grid's last use was the tests): the
+// same chain, the same order, the same results.
+uint vvOrderAt(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 20u * vvTotalCp() + 16u * runOff + 2u * a * points + i; }
+uint vvHitBucket(uint a, uint h) { return a * 256u + ((h * 2654435761u) >> 24); }
+
+// Every lane (uniform): the hit lists of level l's owners bucketed by point.
+void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
+{
+    for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
+    sync();
+    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    {
+        uint n = gsVvHit4[a].load();
+        if (vvLevel(a, k, points) != l || n > 2u * points) continue;
+        for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
+        {
+            uint b = vvHitBucket(a, gNext[vvHitSmall(runOff, points, a, i) + 1u]);
+            gNext[vvOrderAt(runOff, points, a, i)] = b | (gsCount[b].add(1u) << 10);
+        }
+    }
+    sync();
+    uint per = GRID_BUCKETS / LANES;
+    uint block = LANES / GRID_BLOCKS;
+    uint sum = 0u;
+    for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++) sum += gsCount[lane * per + q].load();
+    gsPart[lane] = sum;
+    sync();
+    if (lane < GRID_BLOCKS)
+    {
+        uint run = 0u;
+        for (uint q = 0u, qStop = EB_END(q, block, 1u); q < qStop; q++)
+        {
+            uint x = gsPart[lane * block + q];
+            gsPart[lane * block + q] = run;
+            run += x;
+        }
+        gsBlk[lane] = run;
+    }
+    sync();
+    if (lane == 0u)
+    {
+        uint run = 0u;
+        for (uint q = 0u; q < GRID_BLOCKS; q++)
+        {
+            uint x = gsBlk[q];
+            gsBlk[q] = run;
+            run += x;
+        }
+        gsOff[GRID_BUCKETS] = run;
+    }
+    sync();
+    {
+        uint run = gsPart[lane] + gsBlk[lane / block];
+        for (uint q = 0u, qStop = EB_END(q, per, 1u); q < qStop; q++)
+        {
+            gsOff[lane * per + q] = run;
+            run += gsCount[lane * per + q].load();
+        }
+    }
+    sync();
+    // The sorted hit indices after the ranks (2·points words an owner, four owners).
+    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    {
+        uint n = gsVvHit4[a].load();
+        if (vvLevel(a, k, points) != l || n > 2u * points) continue;
+        for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
+        {
+            uint br = gNext[vvOrderAt(runOff, points, a, i)];
+            gNext[vvOrderAt(runOff, 0u, 0u, 0u) + 8u * points + gsOff[br & (GRID_BUCKETS - 1u)] + (br >> 10)] = i;
+        }
+    }
+    sync();
+}
+
+// vvApplyOrdered with each hit's point's hits from its bucket.
+void vvApplyOrderedBuckets(uint va, uint a, uint base, uint n, float r, uint parity, uint lane, uint runOff, uint points)
+{
+    float3 oa = vvRel(va, va);
+    uint sorted = vvOrderAt(runOff, 0u, 0u, 0u) + 8u * points;
+    for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
+    {
+        uint gt = gNext[base + 2u * i];
+        uint h = gNext[base + 2u * i + 1u];
+        uint b = vvHitBucket(a, h);
+        uint e0 = gsOff[b];
+        uint e1 = gsOff[b + 1u];
+        bool first = true;
+        for (uint e = e0, eGuard = 0u; e < e1; e++)
+        {
+            EB_PASS(eGuard);
+            uint j = gNext[sorted + e];
+            if (gNext[base + 2u * j + 1u] == h && gNext[base + 2u * j] < gt)
+            {
+                first = false;
+                break;
+            }
+        }
+        if (!first) continue;
+        uint vh = gStatic[gP.nodeInfoBase + h].w;
+        for (uint it = 0u, itStop = EB_END(it, n, 1u); it < itStop; it++)
+        {
+            VvTri t = vvTriangle(gt, oa, r);
+            vvTry(t, gt, h, nf3(vvRel(vh, va) + gNodes[h * 3u].xyz), vh, r, parity, a);
+            uint next = 0xFFFFFFFFu;
+            for (uint e = e0, eGuard = 0u; e < e1; e++)
+            {
+                EB_PASS(eGuard);
+                uint j = gNext[sorted + e];
+                uint gj = gNext[base + 2u * j];
+                if (gNext[base + 2u * j + 1u] == h && gj > gt && gj < next) next = gj;
+            }
+            if (next == 0xFFFFFFFFu) break;
+            gt = next;
+        }
+    }
+}
+
 void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 {
     uint parity = step & 1u;
@@ -9506,6 +9747,13 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
     sync();
     bool vvGrid = gsUniformOpen != 0u;
     if (vvGrid) vvGridBuild(k, off, runOff, points, lane);
+    // The tests as a pair list (with the grid and the members' pair regions).
+    bool vvList = vvGrid && gP.triPairs != 0u;
+    if (vvList)
+    {
+        if (lane < VV_PART) gsPairCountM[lane].store(0u);
+        sync();
+    }
     // (T) every owner's listed triangles against its candidates.
     {
         uint total = 0u;
@@ -9530,12 +9778,71 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
             uint va = vvMember(off, a);
             uint4 ra1 = gStatic[va * 4u + 1u];
             uint t = gNext[vvTestedAt(ra1.x + q)];
-            if (vvGrid)
+            if (vvList)
+                vvTriangleCandsList(a, va, ra1.x + t, p % subs, subs, runOff, points, gsVvCand4[a].load(),
+                                    asfloat(gStatic[va * 4u + 3u].z));
+            else if (vvGrid)
                 vvTriangleCandsGrid(a, va, ra1.x + t, p % subs, subs, runOff, points, gsVvCand4[a].load(),
                                     asfloat(gStatic[va * 4u + 3u].z));
             else
                 vvTriangleCandsSmall(a, va, ra1.x + t, p % subs, subs, runOff, points, gsVvCand4[a].load(),
                                      asfloat(gStatic[va * 4u + 3u].z));
+        }
+    }
+    if (vvList)
+    {
+        sync();
+        // The listed pairs, a lane each; an owner past the list's room tests inline.
+        uint total = 0u;
+        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        {
+            uint n = gsPairCountM[a].load();
+            total += n <= TRI_PAIR_CAP ? n : 0u;
+        }
+        for (uint p = lane, pStop = EB_END(p, total, LANES); p < pStop; p += LANES)
+        {
+            uint q = p;
+            uint a = 0u;
+            for (uint c = 0u, cGuard = 0u; c < k; c++)
+            {
+                EB_PASS(cGuard);
+                uint n = gsPairCountM[c].load();
+                n = n <= TRI_PAIR_CAP ? n : 0u;
+                if (q < n)
+                {
+                    a = c;
+                    break;
+                }
+                q -= n;
+            }
+            uint va = vvMember(off, a);
+            uint at = triPairsAt(va);
+            vvPairTest(a, va, gNext[at + 2u * q], gNext[at + 2u * q + 1u], runOff, points, asfloat(gStatic[va * 4u + 3u].z));
+        }
+        uint over = 0u;
+        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+            over += gsPairCountM[a].load() > TRI_PAIR_CAP ? gsVvList4[a].load() : 0u;
+        uint subs = clamp(LANES / max(over, 1u), 1u, 64u);
+        for (uint p = lane, pStop = EB_END(p, over * subs, LANES); p < pStop; p += LANES)
+        {
+            uint q = p / subs;
+            uint a = 0u;
+            for (uint c = 0u, cGuard = 0u; c < k; c++)
+            {
+                EB_PASS(cGuard);
+                uint n = gsPairCountM[c].load() > TRI_PAIR_CAP ? gsVvList4[c].load() : 0u;
+                if (q < n)
+                {
+                    a = c;
+                    break;
+                }
+                q -= n;
+            }
+            uint va = vvMember(off, a);
+            uint4 ra1 = gStatic[va * 4u + 1u];
+            uint t = gNext[vvTestedAt(ra1.x + q)];
+            vvTriangleCandsGrid(a, va, ra1.x + t, p % subs, subs, runOff, points, gsVvCand4[a].load(),
+                                asfloat(gStatic[va * 4u + 3u].z));
         }
     }
     sync();
@@ -9570,13 +9877,16 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                 if (gsVvFix[a] != 0u) gMisc[gP.vvTri + gt].x = 0u;
             }
         }
+        if (vvGrid) vvHitBuckets(k, l, off, runOff, points, lane);
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
         {
             if (vvLevel(a, k, points) != l) continue;
             uint va = vvMember(off, a);
             float range = asfloat(gStatic[va * 4u + 3u].z);
             uint hits = gsVvHit4[a].load();
-            if (hits <= 2u * points)
+            if (hits <= 2u * points && vvGrid)
+                vvApplyOrderedBuckets(va, a, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, runOff, points);
+            else if (hits <= 2u * points)
                 vvApplyOrdered(va, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, LANES, a);
             else
             {
