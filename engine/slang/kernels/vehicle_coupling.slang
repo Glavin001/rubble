@@ -105,6 +105,7 @@ static const uint ST_PLANES = 4u;
 static const uint ST_IMPULSES = 8u;
 static const uint ST_ROWS = 16u;
 static const uint ST_LOOP = 32u; // a loop held to its cap or past the pass budget
+static const uint ST_CANDS = 64u; // cpl_query's candidates (duplicates included) past their room
 // work: [0] chunk rows used, [1] status, [2..2+maxBodies) share counts (all cleared each
 // window), then per vehicle 8 words of bounds (ordered bits: lo xyz, hi xyz, speed, 0;
 // rewritten by cpl_bounds for every awake vehicle), then per vehicle 4 words written once
@@ -417,7 +418,7 @@ uint candAppend(uint v, uint c)
 {
     uint at = gWork[wCandCount(v)].add(1u);
     if (at < gP.candCap) gWork[wCands(v) + at].store(c);
-    else gWork[1].or(ST_SHAPES);
+    else gWork[1].or(ST_CANDS);
     return at;
 }
 

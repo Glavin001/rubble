@@ -65,13 +65,14 @@ pub const PROXY_SLACK: f32 = 0.5;
 const PROXY_OUT: u32 = 2;
 /// Impulse record keys (after the host's, the terrain's 0x300000 + collider).
 const KEY_BASE: u32 = 0x50_0000;
-const ST_NAMES: [&str; 6] = [
+const ST_NAMES: [&str; 7] = [
     "more colliders than the shapes room",
     "more bodies than the bodies room",
     "more hull planes than the planes room",
     "more impulse records than IMPULSE_CAP",
     "more chunk records than the threshold ingest's rows",
     "a coupling loop past its cap or pass budget (a corrupt count; the frame is invalid)",
+    "more broadphase candidates than their room (three times the shapes room: a collider can be listed by its resting cell and as moving or moved)",
 ];
 /// Windows between status reads.
 const STATUS_EVERY: u64 = 8;
@@ -936,6 +937,16 @@ impl World {
     /// Blocking read (tests, tools): per vehicle, its last window's proxy shapes as
     /// (collider, impulse N s, angular impulse about the shape's reference point and that
     /// point): the impulses the next step's rigid step applies.
+    /// Measurement (blocking): per vehicle the coupling's candidates of the last window
+    /// (cpl_query's list, duplicates included; its room is three times the shapes room).
+    pub fn explicit_candidate_counts(&self) -> Vec<u32> {
+        let Some(x) = self.explicit.as_ref() else {
+            return Vec::new();
+        };
+        let nv = x.sims.len() as u64;
+        engine_webgpu::explicit_coupling::read_words(self.sim.device(), self.sim.queue(), &x.work, 4 * x.extra_word, 4 * nv)
+    }
+
     pub fn explicit_window_impulses(&self) -> Vec<Vec<(u32, [f32; 3], [f32; 3], [f32; 3])>> {
         let Some(x) = self.explicit.as_ref() else {
             return Vec::new();

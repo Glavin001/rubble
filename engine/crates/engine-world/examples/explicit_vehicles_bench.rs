@@ -225,6 +225,12 @@ fn main() -> anyhow::Result<()> {
                 x.set_ablation(m);
             }
         }
+        // EV_VV_GRID=0 (measurement): vehicle contact's candidates' grid off.
+        if std::env::var("EV_VV_GRID").as_deref() == Ok("0") {
+            if let Some(x) = w.explicit_vehicles_mut() {
+                x.set_vv_grid(false);
+            }
+        }
         // EV_CULL=0 (measurement): the coupling's shape cull off.
         if std::env::var("EV_CULL").as_deref() == Ok("0") {
             if let Some(x) = w.explicit_vehicles_mut() {
@@ -300,7 +306,8 @@ fn main() -> anyhow::Result<()> {
                     println!("  ablations at step {} (groups {:?}), ms a frame: {}", w.step_count(), g, line.join(", "));
                 }
             }
-            if std::env::var("EV_GROUPS").is_ok() && w.step_count() % 20 == 0 {
+            let every: u64 = std::env::var("EV_GROUPS").ok().and_then(|v| v.parse().ok()).unwrap_or(20).max(1);
+            if std::env::var("EV_GROUPS").is_ok() && w.step_count() % every == 0 {
                 let sc = w.step_count();
                 if let Some(x) = w.explicit_vehicles_mut() {
                     let mut g = x.contact_group_sizes();
@@ -312,6 +319,19 @@ fn main() -> anyhow::Result<()> {
                     let mut shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
                     shapes.sort_unstable();
                     eprintln!("  proxy shapes per vehicle: {shapes:?}");
+                    if let Some(x) = w.explicit_vehicles() {
+                        let pos = x.positions();
+                        let ext: Vec<f32> = pos.iter().map(|p| {
+                            let (lo, hi) = p.iter().fold((glam::Vec3::MAX, glam::Vec3::MIN), |(a, b), q| (a.min(*q), b.max(*q)));
+                            (hi - lo).max_element()
+                        }).collect();
+                        let worst = ext.iter().cloned().fold(0.0f32, f32::max);
+                        eprintln!("  largest vehicle node box side {worst:.1} m");
+                    }
+                    {
+                        let c = w.explicit_candidate_counts();
+                        eprintln!("  most coupling candidates {}", c.iter().max().copied().unwrap_or(0));
+                    }
                 }
             }
             if span {
