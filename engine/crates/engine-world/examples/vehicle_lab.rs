@@ -57,9 +57,11 @@ fn car(name: &str) -> anyhow::Result<ExplicitBeams> {
             .iter()
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
+        // `--drag 0`: air drag off (the page's `drag=0`).
+        let drag = arg("--drag").as_deref() != Some("0");
         let settings = ExplicitBeamsSettings {
-            drag: true,
-            turbulence: true,
+            drag,
+            turbulence: drag,
             ..settings
         };
         return Ok(rubble::showcase_scene::jbeam_vehicle_on(
@@ -105,6 +107,10 @@ fn options(script: &Value) -> LabOptions {
         o.insert("surface".into(), json!(s == "1"));
     }
     // `--own-travel 0|1`: anti-clip's padding by each contacter's own travel (on in the lab).
+    // `--pieces 0|1`: the GPU pair list's piece labels (on in the lab).
+    if let Some(s) = arg("--pieces") {
+        o.insert("pieceLabels".into(), json!(s == "1"));
+    }
     if let Some(s) = arg("--own-travel") {
         o.insert("ownTravel".into(), json!(s == "1"));
     }
@@ -470,6 +476,84 @@ fn tri_census(s: &ExplicitBeams, pos: &[glam::Vec3], vel: &[glam::Vec3], broken:
     )
 }
 
+/// What the reused pair list's movement bound sees: the tracked nodes (contacters and live
+/// collision triangles' nodes) split into the main body (the heaviest piece the unbroken
+/// beams leave) and the rest; per group, the per-axis spread of their velocities (m/s) and
+/// the steps a 0.05 m list survives at that spread (M / (spread · h)); the detached ones'
+/// speeds and whether they carry live triangles.
+fn reuse_census(s: &ExplicitBeams, pos: &[glam::Vec3], vel: &[glam::Vec3], broken: &[bool]) -> String {
+    let n = s.nodes.len().min(pos.len());
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    for (j, b) in s.beams.iter().enumerate() {
+        if !broken.get(j).copied().unwrap_or(false) {
+            let (x, y) = (find(&mut parent, b.a as usize), find(&mut parent, b.b as usize));
+            if x != y {
+                parent[x] = y;
+            }
+        }
+    }
+    let mut mass = vec![0.0f32; n];
+    for i in 0..n {
+        let r = find(&mut parent, i);
+        mass[r] += s.nodes[i].mass;
+    }
+    let main = (0..n).fold(0, |b, i| if mass[i] > mass[b] { i } else { b });
+    let mut tracked = vec![false; n];
+    for &c in &s.candidates {
+        tracked[c as usize] = true;
+    }
+    let mut live_tri_detached = 0u32;
+    for (t, tri) in s.triangles.iter().enumerate() {
+        let kills = s.tri_breaks.get(t).copied().unwrap_or([u32::MAX; 4]);
+        let dead = kills.iter().any(|&b| b != u32::MAX && broken.get(b as usize).copied().unwrap_or(false));
+        for &v in &tri.nodes {
+            tracked[v as usize] = true;
+        }
+        if !dead && tri.nodes.iter().any(|&v| find(&mut parent, v as usize) != main) {
+            live_tri_detached += 1;
+        }
+    }
+    let spread = |sel: &dyn Fn(usize) -> bool| -> (f32, u32) {
+        let (mut lo, mut hi, mut k) = (glam::Vec3::MAX, glam::Vec3::MIN, 0u32);
+        for i in (0..n).filter(|&i| tracked[i] && sel(i)) {
+            lo = lo.min(vel[i]);
+            hi = hi.max(vel[i]);
+            k += 1;
+        }
+        (if k > 0 { (hi - lo).max_element() } else { 0.0 }, k)
+    };
+    let mut is_main = vec![false; n];
+    for i in 0..n {
+        is_main[i] = find(&mut parent, i) == main;
+    }
+    let (all, ka) = spread(&|_| true);
+    let (m0, k0) = spread(&|i| is_main[i]);
+    let det: Vec<f32> = (0..n).filter(|&i| tracked[i] && !is_main[i]).map(|i| vel[i].length()).collect();
+    let pieces = {
+        let mut r: Vec<usize> = (0..n).filter(|&i| !is_main[i]).map(|i| find(&mut parent, i)).collect();
+        r.sort();
+        r.dedup();
+        r.len()
+    };
+    let steps = |sp: f32| if sp > 0.0 { 0.05 / (sp * STEP) } else { f32::INFINITY };
+    format!(
+        "tracked {ka} (main {k0}); detached nodes {} in {pieces} pieces ({} tracked, fastest {:.0} m/s, {} over 20 m/s), live triangles off the main body {live_tri_detached}; velocity spread all {all:.1} m/s ({:.0} steps a list), main only {m0:.1} m/s ({:.0} steps)",
+        (0..n).filter(|&i| !is_main[i]).count(),
+        det.len(),
+        det.iter().fold(0.0f32, |a, &b| a.max(b)),
+        det.iter().filter(|&&v| v > 20.0).count(),
+        steps(all),
+        steps(m0)
+    )
+}
+
 /// The page's mountain (`vehicle-lab.html?mode=mountain&…`) for its cost: per second of
 /// simulated time, the wall time of a World step (each step waited on: its GPU time and
 /// the readback), with the car's speed, node box, coupling use and the surface pair
@@ -537,8 +621,14 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // whether every state word is the same. `--ab-switch reuse`: the reused pair list
     // (`set_pair_reuse`) on then off instead.
     let reuse_ab = arg("--ab-switch").as_deref() == Some("reuse");
-    let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool| {
-        if reuse_ab {
+    // `--ab-switch pieces`: the pair list's piece labels (the lab's) against none.
+    let pieces_ab = arg("--ab-switch").as_deref() == Some("pieces");
+    let n_nodes = template.nodes.len();
+    let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
+        if pieces_ab {
+            let zeros = vec![0u8; n_nodes];
+            x.set_piece_labels(0, if on && !labels.is_empty() { labels } else { &zeros });
+        } else if reuse_ab {
             x.set_pair_reuse(on);
         } else {
             x.set_surface_culls(on);
@@ -550,6 +640,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     for k in 0..windows {
         if ab.first().is_some_and(|&t| lab.bench.t >= t) {
             ab.remove(0);
+            let labels = lab.piece_labels().to_vec();
             let x = world.explicit_vehicles_mut().expect("vehicles");
             x.wait();
             let snap = x.snapshot();
@@ -583,7 +674,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             let second = std::env::args().any(|a| a == "--ab-same");
             for on in [true, second] {
                 x.restore(&snap);
-                switch(x, on);
+                switch(x, on, &labels);
                 x.wait();
                 let t = std::time::Instant::now();
                 for _ in 0..20 {
@@ -592,7 +683,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 }
                 let ms = t.elapsed().as_secs_f64() * 1e3 / 20.0;
                 // The switch's own header bit back, so the words compare the state alone.
-                switch(x, true);
+                switch(x, true, &labels);
                 x.wait();
                 out.push((ms, x.state_words(), x.coupling_words()));
             }
@@ -623,13 +714,13 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             println!(
                 "   A/B at t {:.1}: {} on {:.2} ms/frame, off {:.2} ms/frame; state bit for bit: {same}",
                 lab.bench.t,
-                if reuse_ab { "pair reuse" } else { "surface culls" },
+                if pieces_ab { "piece labels" } else if reuse_ab { "pair reuse" } else { "surface culls" },
                 out[0].0,
                 out[1].0
             );
             anyhow::ensure!(same, "the A/B switch changed the state");
             x.restore(&snap);
-            switch(x, true);
+            switch(x, true, &labels);
             x.wait();
         }
         if ablate != 0 && lab.bench.t >= ablate_at {
@@ -723,6 +814,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let broken: Vec<bool> = (0..beams.len() / 8).map(|j| f(beams[8 * j + 6]) != 0.0).collect();
                 let vel: Vec<glam::Vec3> = (0..nodes.len() / 12).map(|i| glam::Vec3::new(f(nodes[12 * i + 4]), f(nodes[12 * i + 5]), f(nodes[12 * i + 6]))).collect();
                 println!("   census: {}", tri_census(template, &pos, &vel, &broken));
+                println!("   reuse census: {}", reuse_census(template, &pos, &vel, &broken));
             }
             let c = &lab.bench.car;
             let size = c.hi - c.lo;

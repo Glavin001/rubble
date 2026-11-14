@@ -168,7 +168,7 @@ pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params (word 87 the parking brakes' base, word 88 the loop
 /// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 the pair
 /// list's build records, 92 its margin ([`W_PAIR_REUSE`]), 93 its backoff
-/// ([`W_PAIR_STREAK`]), 94..96 padding).
+/// ([`W_PAIR_STREAK`]), 94 its piece labels ([`W_PIECE_BASE`]), 95 padding).
 pub const PARAM_WORDS: usize = 96;
 /// Params word: the grid walk's pair list reused over steps (the kernel's pairReuse*,
 /// lossless): its margin M in metres as float bits, 0 off (the walk lists every step).
@@ -200,6 +200,13 @@ pub fn pair_reuse_default() -> u32 {
         .unwrap_or(PAIR_REUSE_MARGIN);
     m.to_bits()
 }
+/// Params word: the reused pair list's piece labels in gNext (the kernel's pieceBase; 0
+/// none): per node its label, then per vehicle its labels-in-use word.
+pub const W_PIECE_BASE: usize = 94;
+/// Piece labels (the kernel's PIECE_GROUPS, PIECE_LOOSE): 0 the main body, 1..6 pieces
+/// with collision triangles of their own, 7 every other node off the main body.
+pub const PIECE_GROUPS: usize = 8;
+pub const PIECE_LOOSE: u8 = 7;
 /// Params word: the loop budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`).
 pub const W_LOOP_BUDGET: usize = 88;
 /// The loop budget's floor and ceiling (passes of one invocation in a frame).
@@ -1923,6 +1930,17 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // The pair list's pieces (the kernel's pieces*; host hints and scratch): per node
+        // its piece label (0: the main body; written by `set_piece_labels`), per vehicle
+        // its labels-in-use word, per node PIECE_GROUPS separations (+inf), per triangle
+        // the volatile list.
+        let piece_base = if pair_build != 0 {
+            let at = next_len as u32;
+            next_len += total_nodes * (1 + PIECE_GROUPS) + nv + total_tris;
+            at
+        } else {
+            0
+        };
         // The loop budget's unit (explicit_loop_cap.slang): passes one invocation could
         // legitimately take in a step, bounded by the whole fleet's work on one lane
         // (a contact group's lane walks its members; the serial self-collision pass
@@ -1939,6 +1957,10 @@ impl ExplicitUpload {
             })
             .sum();
         let mut next_init = vec![0u32; next_len.max(1)];
+        if piece_base != 0 {
+            let at = piece_base as usize + total_nodes + nv;
+            next_init[at..at + total_nodes * PIECE_GROUPS].fill(f32::INFINITY.to_bits());
+        }
         if any_keys {
             for (vi, v) in vehicles.iter().enumerate() {
                 let parity = (v.steps as usize & 1) ^ 1;
@@ -2123,6 +2145,7 @@ impl ExplicitUpload {
             pair_build,
             pair_reuse_default(),
             pair_streak_default(),
+            piece_base,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [

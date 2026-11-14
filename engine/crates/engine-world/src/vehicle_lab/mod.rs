@@ -67,6 +67,11 @@ pub struct LabOptions {
     /// falling off the mountain no longer pads every triangle's box). Live
     /// (`{ ownTravel: bool }` command).
     pub own_travel_reach: bool,
+    /// The GPU's reused self-collision pair list told which nodes are off the main body
+    /// (`ExplicitBeamsGpu::set_piece_labels`, from each beam reading): a piece torn off no
+    /// longer invalidates the main body's list. Lossless (the same results either way).
+    /// Live (`{ pieceLabels: bool }`).
+    pub piece_labels: bool,
     /// A second copy of the car parked broadside ahead (the flat scene).
     pub parked: bool,
     /// The coupling's room per car; more in one window fails the step by name.
@@ -84,6 +89,7 @@ impl Default for LabOptions {
             scene: Scene::Flat,
             surface_contact: false,
             own_travel_reach: true,
+            piece_labels: true,
             parked: false,
             capacity: CouplingCapacity {
                 bodies: 256,
@@ -166,6 +172,10 @@ impl LabOptions {
                 .get("ownTravel")
                 .and_then(Value::as_bool)
                 .unwrap_or(d.own_travel_reach),
+            piece_labels: v
+                .get("pieceLabels")
+                .and_then(Value::as_bool)
+                .unwrap_or(d.piece_labels),
             parked: v.get("parked").and_then(Value::as_bool).unwrap_or(d.parked),
             capacity: CouplingCapacity {
                 bodies: shapes,
@@ -1910,6 +1920,11 @@ pub struct Lab {
     plan: ReadPlan,
     /// Restarts since the build.
     pub restarts: u32,
+    /// The car as added (its beams, triangles and contacters: the pieces' topology).
+    car: ExplicitBeams,
+    /// The piece labels last sent to the GPU, and new ones to send before the next step.
+    labels: Vec<u8>,
+    labels_due: Option<Vec<u8>>,
 }
 
 fn deg(v: &Value, k: &str, d: f64) -> f32 {
@@ -2061,6 +2076,9 @@ impl Lab {
             layout,
             plan,
             restarts: 0,
+            car: cars[0].clone(),
+            labels: Vec::new(),
+            labels_due: None,
         };
         lab.bench.begin(&mut WorldRig {
             world: &mut world,
@@ -2147,6 +2165,8 @@ impl Lab {
         let dt = self.bench.dt;
         self.bench = Bench::new(opts, &cars[0], dt);
         self.restarts += 1;
+        self.car = cars[0].clone();
+        self.labels_due = (!self.labels.is_empty()).then(Vec::new);
         let mut rig = WorldRig {
             world,
             bodies: &mut self.bodies,
@@ -2213,6 +2233,11 @@ impl Lab {
         self.plan
     }
 
+    /// The piece labels last sent to the GPU's pair list (empty: none, all zero).
+    pub fn piece_labels(&self) -> &[u8] {
+        &self.labels
+    }
+
     pub fn command(&mut self, world: &mut World, cmd: &Value) -> anyhow::Result<Value> {
         // { ownTravel: bool }: the cars' anti-clip padding by each contacter's own travel
         // (LabOptions::own_travel_reach), now and after a restart.
@@ -2225,6 +2250,14 @@ impl Lab {
             }
             return Ok(json!({ "ownTravel": on }));
         }
+        // { pieceLabels: bool }: the pair list's piece labels (LabOptions::piece_labels).
+        if let Some(on) = cmd.get("pieceLabels").and_then(Value::as_bool) {
+            self.bench.opts.piece_labels = on;
+            if !on {
+                self.labels_due = Some(Vec::new());
+            }
+            return Ok(json!({ "pieceLabels": on }));
+        }
         self.bench.command(
             &mut WorldRig {
                 world,
@@ -2236,6 +2269,13 @@ impl Lab {
 
     /// Call before each `World::step`.
     pub fn before_step(&mut self, world: &mut World) -> anyhow::Result<()> {
+        if let Some(labels) = self.labels_due.take() {
+            if let Some(x) = world.explicit_vehicles_mut() {
+                let zeros = vec![0u8; self.car.nodes.len()];
+                x.set_piece_labels(0, if labels.is_empty() { &zeros } else { &labels });
+            }
+            self.labels = labels;
+        }
         self.bench.before_step(&mut WorldRig {
             world,
             bodies: &mut self.bodies,
@@ -2291,6 +2331,15 @@ impl Lab {
                 .collect()
         });
         let taken = taken.filter(|t| t.is_finite()).unwrap_or(self.bench.t);
+        if let (Some(b), true) = (beams.as_deref(), self.bench.opts.piece_labels) {
+            use engine_softbody::explicit_debris::{piece_labels, Pieces};
+            let broken: Vec<bool> = b.iter().map(|x| x.0).collect();
+            let pieces = Pieces::of(&self.car, &broken);
+            let labels = if pieces.mass.len() > 1 { piece_labels(&self.car, &pieces, &broken) } else { Vec::new() };
+            if labels != self.labels {
+                self.labels_due = Some(labels);
+            }
+        }
         self.bench.read_at(
             &CarRead {
                 pos: &pos,

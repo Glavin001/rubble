@@ -1619,6 +1619,28 @@ impl ExplicitBeamsGpu {
         self.set_pair_reuse_margin(if on { f32::from_bits(m) } else { 0.0 });
     }
 
+    /// The reused pair list's piece labels for vehicle `v` (`explicit_beams.slang`
+    /// pieces*; one per node of the vehicle, [`engine_softbody::explicit_debris::piece_labels`]):
+    /// 0 the main body, 1..=6 a piece with collision triangles of its own,
+    /// [`plan::PIECE_LOOSE`] any other node off the main body. A hint only: any labels give
+    /// the same results bit for bit (the list's validity is proved on the GPU for the
+    /// labels given); good labels let a piece torn off the vehicle move without
+    /// invalidating the main body's list. All zero (the default): one group, as before.
+    /// Applies from the next frame. No-op without the pair list.
+    pub fn set_piece_labels(&mut self, v: usize, labels: &[u8]) {
+        let base = self.planner.words[plan::W_PIECE_BASE] as usize;
+        let Some(span) = self.layout.spans.get(v) else { return };
+        if base == 0 {
+            return;
+        }
+        let n = (span.nodes as usize).min(labels.len());
+        let words: Vec<u32> = labels[..n].iter().map(|&l| u32::from(l)).collect();
+        let active = u32::from(words.iter().any(|&l| l != 0));
+        self.queue.write_buffer(&self.bufs[8], ((base + span.node_off as usize) * 4) as u64, bytemuck::cast_slice(&words));
+        let at = base + self.layout.total[0] as usize + v;
+        self.queue.write_buffer(&self.bufs[8], (at * 4) as u64, bytemuck::bytes_of(&active));
+    }
+
     /// Measurement: the reused pair list's margin in metres (0: off).
     #[doc(hidden)]
     pub fn set_pair_reuse_margin(&mut self, metres: f32) {

@@ -274,7 +274,9 @@ struct Params
     uint pairBuild;
     uint pairReuse;
     uint pairStreak; // a list reused on fewer steps than this: the walk for REUSE_BACKOFF grid steps
-    uint pairPad1;
+    // The pair list's pieces (pieces*: gNext per node its piece label, then per vehicle
+    // its active word, per node its separations, per triangle the volatile list; 0 none).
+    uint pieceBase;
     uint pairPad2;
 };
 
@@ -358,7 +360,7 @@ static const uint GRID_MAX_CELLS = 64u;
 static const uint GRID_BLOCKS = 16u;
 // Past the buckets, the reused pair list's words (gsReuse; never cleared by the steps'
 // bucket clears; no workgroup variable of its own: Metal's threadgroup slots are full).
-static const uint REUSE_WORDS = 16u;
+static const uint REUSE_WORDS = 160u;
 groupshared Atomic<uint> gsCount[GRID_BUCKETS + REUSE_WORDS];
 groupshared uint gsOff[GRID_BUCKETS + 1u];
 groupshared uint gsPart[LANES];
@@ -3666,15 +3668,306 @@ void pairReuseBegin()
 {
     if (!pairReuseOn()) return;
     for (uint k = 0u; k < 16u; k++) gsCount[GRID_BUCKETS + k].store(0u);
+    if (gP.pieceBase != 0u)
+    {
+        for (uint k = 16u; k < REUSE_WORDS; k++) gsCount[GRID_BUCKETS + k].store(0u);
+    }
 }
 
 static const uint NODE_PAIR_TRACKED = 128u;
+
+void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
+                   uint parity, uint listAt, float margin);
+void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint beamOff, uint groupOff,
+                   uint groupCount, uint parity);
+void piecesClearBuild();
+
+// --- The reused pair list's pieces: parts torn off the vehicle (lossless) ---
+// With one bound for the whole vehicle (the spread R of every tracked node's displacement)
+// a detached piece in free fall invalidates the list every step: it moves metres a frame
+// relative to the car. The host labels each node with a piece (gNext at gP.pieceBase: 0
+// the main body, 1..PIECE_LOOSE - 1 a piece with collision triangles of its own,
+// PIECE_LOOSE the rest; a vehicle's word after the nodes nonzero: labels in use). Any
+// labelling is sound, the labels only decide how much is reused: the list is kept while
+// * main-main pairs: the main body's spread R0 + h · (2 G + dV) + eps <= M (as before);
+// * a piece's own pairs (its triangle, its contacter): its spread likewise;
+// * a triangle whose nodes carry different labels, or the PIECE_LOOSE label, is volatile:
+//   never listed, its candidates tested every step as the walk tests them;
+// * cross pairs (triangle of group a, contacter h of another group): at the build, h was
+//   s = max(gap(h, E_a) - Pb, M) from every box of a (E_a: the box of a's tracked nodes,
+//   Pb: a bound on any triangle's padding; M: unlisted), and h has since moved relative to every node of a
+//   by less than s less the boxes' growth: per axis d_h - s < lo_a - g and
+//   -d_h - s < -hi_a - g (lo_a, hi_a: a's displacements; contacters of a piece, a key per
+//   axis), or for the main body's contacters (one group) the largest relative
+//   displacement of the two groups below the least s.
+// gsCount past its buckets: RU_D group g's (1..PIECE_LOOSE - 1) displacement keys (as
+// words 0..5); RU_E group g's (0..PIECE_LOOSE) position keys (largest x, y, z, negated);
+// RU_K group a's (0..PIECE_LOOSE - 1) contacter keys (d - s, -d - s per axis); RU_S per
+// group a the least s of a main contacter (pairReuseKey of -s); RU_VALL the fastest
+// tracked node's speed; RU_VOL the volatile triangles listed. gNext after the labels and
+// the vehicles' words: per node PIECE_GROUPS separations (float bits; +inf none), then per
+// triangle the volatile list (a vehicle's at its triOff).
+static const uint PIECE_GROUPS = 8u;
+static const uint PIECE_LOOSE = 7u;
+static const uint RU_D = 16u;
+static const uint RU_E = RU_D + 6u * (PIECE_LOOSE - 1u);
+static const uint RU_K = RU_E + 6u * PIECE_GROUPS;
+static const uint RU_S = RU_K + 6u * PIECE_LOOSE;
+static const uint RU_VALL = RU_S + PIECE_GROUPS;
+static const uint RU_VOL = RU_VALL + 1u;
+static const uint PIECE_SUBS = 8u;
+
+uint pieceLabel(uint gi) { return min(gNext[gP.pieceBase + gi] & 0xFFu, PIECE_LOOSE); }
+bool piecesOn(uint v)
+{
+    return gP.pieceBase != 0u && gNext[gP.pieceBase + gP.totalNodes + v] != 0u;
+}
+uint pieceSigmaAt(uint gi, uint a) { return gP.pieceBase + gP.totalNodes + gP.vehicles + gi * PIECE_GROUPS + a; }
+uint pieceVolAt(uint t) { return gP.pieceBase + gP.totalNodes * (1u + PIECE_GROUPS) + gP.vehicles + t; }
+void pieceKeyMax(uint w, float f)
+{
+    uint k = pairReuseKey(f);
+    if (k > gsCount[GRID_BUCKETS + w].load()) gsCount[GRID_BUCKETS + w].max(k);
+}
+// A group's six keys (largest x, y, z, then of the negated) present.
+bool pieceKeysSet(uint w) { return gsCount[GRID_BUCKETS + w].load() != 0u; }
+float pieceKey(uint w) { return pairReuseVal(gsCount[GRID_BUCKETS + w].load()); }
+// Triangle t's nodes in different groups, or in the loose group: tested every step.
+bool pieceVolatile(uint t)
+{
+    uint4 tn = gStatic[gP.triBase + t];
+    uint a = pieceLabel(tn.x);
+    return a == PIECE_LOOSE || pieceLabel(tn.y) != a || pieceLabel(tn.z) != a;
+}
+
+// pairReuseTrack with labels in use (true: done): the lane's tracked nodes, each into its
+// group's keys; the main body's displacements into words 0..5 as before.
+bool piecesTrack(uint nodeOff, uint nodeCount, uint lane)
+{
+    if (gP.pieceBase == 0u || !pairReuseOn() || nodeCount == 0u) return false;
+    if (!piecesOn(gStatic[gP.nodeInfoBase + nodeOff].w)) return false;
+    if (lane >= nodeCount) return true;
+    bool valid = gsCount[GRID_BUCKETS + RU_VALID].load() != 0u;
+    float3 dHi = float3(-3.0e38, -3.0e38, -3.0e38);
+    float3 dLo = dHi;
+    float grow = -3.0e38;
+    float size = 0.0;
+    float vall = 0.0;
+    uint bad = 0u;
+    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    {
+        if ((gStatic[gP.nodeInfoBase + nodeOff + i].x & NODE_PAIR_TRACKED) == 0u) continue;
+        uint gi = nodeOff + i;
+        uint g = pieceLabel(gi);
+        float3 P = gNodes[gi * 3u].xyz;
+        float3 V = gNodes[gi * 3u + 1u].xyz;
+        float sp = ssqrt(sdot(V, V));
+        vall = max(vall, sp);
+        for (uint x = 0u; x < 3u; x++)
+        {
+            pieceKeyMax(RU_E + g * 6u + x, P[x]);
+            pieceKeyMax(RU_E + g * 6u + 3u + x, -P[x]);
+        }
+        if ((asuint(sp) & 0x7F800000u) == 0x7F800000u) bad = 1u;
+        if (!valid) continue;
+        float4 B = gBeams[gP.pairBuild + gi];
+        float3 d = P - B.xyz;
+        float gr = sp - B.w;
+        uint3 db = asuint(d) & 0x7F800000u;
+        uint3 pb = asuint(P) & 0x7F800000u;
+        if (any(db == 0x7F800000u) || any(pb == 0x7F800000u) || (asuint(gr) & 0x7F800000u) == 0x7F800000u) bad = 1u;
+        grow = max(grow, gr);
+        size = max(size, max(max(abs(P.x), abs(P.y)), abs(P.z)));
+        if (g == 0u)
+        {
+            dHi = max(dHi, d);
+            dLo = max(dLo, -d);
+            continue;
+        }
+        if (g < PIECE_LOOSE)
+        {
+            for (uint x = 0u; x < 3u; x++)
+            {
+                pieceKeyMax(RU_D + (g - 1u) * 6u + x, d[x]);
+                pieceKeyMax(RU_D + (g - 1u) * 6u + 3u + x, -d[x]);
+            }
+        }
+        // A piece's contacter against the other groups' triangles.
+        for (uint a = 0u; a < PIECE_LOOSE; a++)
+        {
+            if (a == g) continue;
+            float s = asfloat(gNext[pieceSigmaAt(gi, a)]);
+            if (!(s < 3.0e38)) continue;
+            for (uint x = 0u; x < 3u; x++)
+            {
+                pieceKeyMax(RU_K + a * 6u + x, d[x] - s);
+                pieceKeyMax(RU_K + a * 6u + 3u + x, -d[x] - s);
+            }
+        }
+    }
+    pieceKeyMax(RU_VALL, vall);
+    if (!valid) return true;
+    uint keys[8] = { pairReuseKey(dHi.x), pairReuseKey(dHi.y), pairReuseKey(dHi.z), pairReuseKey(dLo.x),
+                     pairReuseKey(dLo.y), pairReuseKey(dLo.z), pairReuseKey(grow), pairReuseKey(size) };
+    if (bad != 0u) keys[7] = 0xFFFFFFFFu;
+    for (uint k = 0u; k < 8u; k++)
+    {
+        if (keys[k] > gsCount[GRID_BUCKETS + k].load()) gsCount[GRID_BUCKETS + k].max(keys[k]);
+    }
+    return true;
+}
+
+// pairReuseDecide's test with labels in use (lane 0; true when off): the pieces' own
+// spreads and the cross pairs' separations hold. grow: the boxes' growth h · (2 G + dV).
+bool piecesAllow(uint v, float grow, float eps)
+{
+    if (!piecesOn(v)) return true;
+    float M = asfloat(gP.pairReuse);
+    bool ok = true;
+    // A group's displacement range (lo, hi) per axis: the main body's words 0..5.
+    for (uint a = 0u; a < PIECE_LOOSE; a++)
+    {
+        uint w = a == 0u ? 0u : RU_D + (a - 1u) * 6u;
+        bool hasD = pieceKeysSet(w);
+        float3 hi = hasD ? float3(pieceKey(w), pieceKey(w + 1u), pieceKey(w + 2u)) : float3(0.0, 0.0, 0.0);
+        float3 lo = hasD ? -float3(pieceKey(w + 3u), pieceKey(w + 4u), pieceKey(w + 5u)) : float3(0.0, 0.0, 0.0);
+        if (a > 0u && hasD)
+        {
+            float3 r = hi - lo;
+            ok = ok && max(max(r.x, r.y), r.z) + grow + eps <= M;
+        }
+        // Other groups' contacters against a's triangles.
+        if (pieceKeysSet(RU_K + a * 6u))
+        {
+            ok = ok && hasD;
+            for (uint x = 0u; x < 3u; x++)
+            {
+                ok = ok && pieceKey(RU_K + a * 6u + x) + grow + 2.0 * eps < lo[x];
+                ok = ok && pieceKey(RU_K + a * 6u + 3u + x) + grow + 2.0 * eps < -hi[x];
+            }
+        }
+        // The main body's contacters against a piece's triangles.
+        if (a > 0u && gsCount[GRID_BUCKETS + RU_S + a].load() != 0u)
+        {
+            float s = -pairReuseVal(gsCount[GRID_BUCKETS + RU_S + a].load());
+            bool has0 = pieceKeysSet(0u);
+            ok = ok && hasD && has0;
+            float3 hi0 = float3(pieceKey(0u), pieceKey(1u), pieceKey(2u));
+            float3 lo0 = -float3(pieceKey(3u), pieceKey(4u), pieceKey(5u));
+            float3 m = max(hi0 - lo, hi - lo0);
+            ok = ok && max(max(m.x, m.y), m.z) + grow + 2.0 * eps < s;
+        }
+    }
+    return ok;
+}
+
+// pairReuseDecide's clears with labels in use (lane 0): the step's keys; the build's
+// inputs unless this step builds (then its outputs).
+void piecesClear(uint mode)
+{
+    if (gP.pieceBase == 0u) return;
+    for (uint k = RU_D; k < RU_E; k++) gsCount[GRID_BUCKETS + k].store(0u);
+    for (uint k = RU_K; k < RU_S; k++) gsCount[GRID_BUCKETS + k].store(0u);
+    if (mode == 1u)
+    {
+        for (uint k = RU_S; k < RU_VALL; k++) gsCount[GRID_BUCKETS + k].store(0u);
+        gsCount[GRID_BUCKETS + RU_VOL].store(0u);
+    }
+    else
+        piecesClearBuild();
+}
+void piecesClearBuild()
+{
+    for (uint k = RU_E; k < RU_K; k++) gsCount[GRID_BUCKETS + k].store(0u);
+    gsCount[GRID_BUCKETS + RU_VALL].store(0u);
+}
+
+// The Chebyshev gap from p to the box of group a's keys (+inf: no such group).
+float pieceGap(float3 p, uint a)
+{
+    uint w = RU_E + a * 6u;
+    if (!pieceKeysSet(w)) return 3.4e38;
+    float3 hi = float3(pieceKey(w), pieceKey(w + 1u), pieceKey(w + 2u));
+    float3 lo = -float3(pieceKey(w + 3u), pieceKey(w + 4u), pieceKey(w + 5u));
+    float3 out = max(lo - p, p - hi);
+    return max(max(out.x, out.y), out.z);
+}
+
+// pairReuseBuild with labels in use (true: done): the volatile triangles listed instead of
+// their pairs; each contacter's separations from the other groups (a piece's per node, the
+// main body's least per group); then the build records as pairReuseBuild writes them.
+bool piecesBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff, uint nodeCount, float3 origin, float r,
+                 float cell, uint candOff, uint candCount, uint parity)
+{
+    if (!piecesOn(v)) return false;
+    float margin = asfloat(gP.pairReuse);
+    uint at = triPairsAt(v);
+    for (uint p = lane, pStop = EB_END(p, triCount * LIST_SUBS, LANES); p < pStop; p += LANES)
+    {
+        uint t = triOff + p / LIST_SUBS;
+        if (pieceVolatile(t))
+        {
+            if (p % LIST_SUBS == 0u) gNext[pieceVolAt(triOff + gsCount[GRID_BUCKETS + RU_VOL].add(1u))] = t;
+            continue;
+        }
+        pairReuseList(t, p % LIST_SUBS, origin, r, cell, candOff, candCount, parity, at, margin);
+    }
+    // A bound on every triangle's box padding (triReach; rounding allowance).
+    bool anti = (gStatic[v * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u;
+    float vall = gsCount[GRID_BUCKETS + RU_VALL].load() != 0u ? pieceKey(RU_VALL) : 3.4e38;
+    float pb = anti ? r + (vall + clipVmax(v, parity)) * STEP + CLIP_DEPTH : r;
+    pb = pb + 1.0e-4 + 1.0e-5 * pb;
+    for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+    {
+        uint h = gLists[candOff + c];
+        uint g = pieceLabel(h);
+        float3 p = gNodes[h * 3u].xyz;
+        for (uint a = 0u; a < PIECE_LOOSE; a++)
+        {
+            if (a == g) continue;
+            // Absent from the list, a pair was also at least M outside its box.
+            float s = pieceGap(p, a);
+            s = s < 3.0e38 ? max(s - pb, margin) : 3.4e38;
+            if (g == 0u)
+            {
+                if (s < 3.0e38) pieceKeyMax(RU_S + a, -s);
+            }
+            else
+                gNext[pieceSigmaAt(h, a)] = asuint(s);
+        }
+    }
+    for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop; i += LANES)
+    {
+        float3 P = gNodes[(nodeOff + i) * 3u].xyz;
+        float3 V = gNodes[(nodeOff + i) * 3u + 1u].xyz;
+        gBeams[gP.pairBuild + nodeOff + i] = float4(P, ssqrt(sdot(V, V)));
+    }
+    if (lane == 0u)
+        gsCount[GRID_BUCKETS + RU_VMAX].store(asuint(anti ? clipVmax(v, parity) : 0.0));
+    return true;
+}
+
+// pairReuseTests' volatile triangles (labels in use): every candidate of each, as the walk
+// tests it (pairReuseTest), PIECE_SUBS lanes a triangle.
+void piecesTests(uint v, uint lane, uint triOff, float3 origin, float r, float cell, uint candOff, uint candCount,
+                 uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    if (!piecesOn(v)) return;
+    uint vol = gsCount[GRID_BUCKETS + RU_VOL].load();
+    for (uint p = lane, pStop = EB_END(p, vol * PIECE_SUBS, LANES); p < pStop; p += LANES)
+    {
+        uint t = gNext[pieceVolAt(triOff + p / PIECE_SUBS)];
+        for (uint c = p % PIECE_SUBS, cStop = EB_END(c, candCount, PIECE_SUBS); c < cStop; c += PIECE_SUBS)
+            pairReuseTest(t, gLists[candOff + c], origin, r, cell, beamOff, groupOff, groupCount, parity);
+    }
+}
 
 // After the node phase (its last writes to positions and velocities: the lane's own
 // nodes, the centred correction's on the same lanes), before its barrier: the lane's
 // tracked nodes against their build records.
 void pairReuseTrack(uint nodeOff, uint nodeCount, uint lane)
 {
+    if (piecesTrack(nodeOff, nodeCount, lane)) return;
     if (!pairReuseOn() || gsCount[GRID_BUCKETS + RU_VALID].load() == 0u || lane >= nodeCount) return;
     float3 dHi = float3(-3.0e38, -3.0e38, -3.0e38);
     float3 dLo = dHi;
@@ -3738,7 +4031,7 @@ uint pairReuseDecide(uint v, uint grid, uint parity, float3 origin)
             float size = max(max(abs(origin.x), abs(origin.y)), abs(origin.z)) + pairReuseVal(gsCount[GRID_BUCKETS + 7].load());
             float eps = 1.0e-4 + 4.0e-6 * (size + 1.0);
             float need = max(max(rx, ry), rz) + STEP * (2.0 * grow + dv) + eps;
-            if (need <= asfloat(gP.pairReuse)) mode = 2u;
+            if (need <= asfloat(gP.pairReuse) && piecesAllow(v, STEP * (2.0 * grow + dv), eps)) mode = 2u;
         }
         if (mode == 2u)
             gsCount[GRID_BUCKETS + RU_STREAK].add(1u);
@@ -3753,6 +4046,7 @@ uint pairReuseDecide(uint v, uint grid, uint parity, float3 origin)
             gsCount[GRID_BUCKETS + RU_STREAK].store(0u);
     }
     for (uint k = 0u; k < 8u; k++) gsCount[GRID_BUCKETS + k].store(0u);
+    piecesClear(mode);
     if (mode == 2u) gsCount[GRID_BUCKETS + RU_STATS + 1u].add(1u);
     return mode;
 }
@@ -3866,6 +4160,7 @@ void pairReuseList(uint gt, uint sub, float3 origin, float r, float cell, uint c
 void pairReuseBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff, uint nodeCount, float3 origin,
                     float r, float cell, uint candOff, uint candCount, uint parity)
 {
+    if (piecesBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, r, cell, candOff, candCount, parity)) return;
     float margin = asfloat(gP.pairReuse);
     uint at = triPairsAt(v);
     for (uint p = lane, pStop = EB_END(p, triCount * LIST_SUBS, LANES); p < pStop; p += LANES)
@@ -3938,6 +4233,7 @@ void pairReuseTests(uint v, uint lane, uint mode, uint triOff, uint triCount, fl
         for (uint i = lane, iStop = EB_END(i, listed, LANES); i < iStop; i += LANES)
             pairReuseTest(gNext[at + 2u * i], gNext[at + 2u * i + 1u], origin, r, cell, beamOff, groupOff, groupCount,
                           parity);
+        piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
     }
     else
     {
@@ -3951,6 +4247,7 @@ void pairReuseTests(uint v, uint lane, uint mode, uint triOff, uint triCount, fl
     }
     if (lane == 0u && mode == 1u)
     {
+        if (gP.pieceBase != 0u) piecesClearBuild();
         gsCount[GRID_BUCKETS + RU_VALID].store(listed <= TRI_PAIR_CAP ? 1u : 0u);
         gsCount[GRID_BUCKETS + RU_COUNT].store(listed);
         gsCount[GRID_BUCKETS + RU_STATS].add(1u);
