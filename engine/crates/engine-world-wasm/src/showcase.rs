@@ -92,126 +92,6 @@ pub fn decode_texture(bytes: &[u8], size: u32) -> Result<Vec<u8>, JsValue> {
 /// The showcase car's third level of detail (`showcase_visual_lod`'s detail).
 const FAR_DETAIL: f32 = 0.2;
 
-/// The visual for a spawn on raycast wheels (`engine_softbody::explicit_drive`):
-/// without the tyre nodes and beams the `.truck` spawn builds, so every binding,
-/// beam index and per-node array matches that solver's vehicle. The wheels'
-/// pieces (tyre, rim, disc, caliper) ride the raycast wheels instead
-/// (`skin::bind_raycast_wheels`: the renderer places them from the drive
-/// state); beams after the tyres' move down.
-struct TyreCut {
-    /// The spawn's nodes without tyres, its first tyre beam and the tyre beams.
-    nodes: u32,
-    first: u32,
-    count: u32,
-    /// The raycast spawn's drive (its wheels, in the drive state's order).
-    config: engine_softbody::explicit_drive::DriveConfig,
-}
-
-impl TyreCut {
-    fn of(truck: &str) -> Result<Self, JsValue> {
-        use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
-        let z = glam::Vec3::ZERO;
-        let with = ExplicitBeams::from_truck(truck, z, z, ExplicitBeamsSettings::default())
-            .map_err(err)?;
-        let (without, _) = ExplicitBeams::from_truck_raycast(
-            truck,
-            None,
-            z,
-            0.0,
-            z,
-            ExplicitBeamsSettings::default(),
-        )
-        .map_err(err)?;
-        // Beam order: cinecam beams, tyre beams, then the file's.
-        let first = engine_softbody::truck::parse_truck(truck).cinecams.len() as u32 * 8;
-        let config = without
-            .drive
-            .as_ref()
-            .ok_or_else(|| err("raycast spawn without a drive"))?
-            .config
-            .clone();
-        Ok(Self {
-            nodes: without.nodes.len() as u32,
-            first,
-            count: (with.beams.len() - without.beams.len()) as u32,
-            config,
-        })
-    }
-
-    fn beam(&self, b: u32) -> Option<u32> {
-        if b < self.first {
-            Some(b)
-        } else if b < self.first + self.count {
-            None
-        } else {
-            Some(b - self.count)
-        }
-    }
-
-    fn apply(&self, v: &mut ShowcaseVisual) -> Result<(), JsValue> {
-        engine_softbody::authoring::skin::bind_raycast_wheels(v, &self.config).map_err(err)?;
-        let n = self.nodes;
-        let live = |t: &[u32; 3]| t.iter().all(|&i| i < n);
-        let ok_vertex: Vec<bool> = v.bind_nodes.iter().map(live).collect();
-        let idx: Vec<u32> = v
-            .indices
-            .chunks(3)
-            .filter(|t| t.iter().all(|&i| ok_vertex[i as usize]))
-            .flatten()
-            .copied()
-            .collect();
-        v.indices = idx;
-        for (b, ok) in v.bind_nodes.iter_mut().zip(&ok_vertex) {
-            if !ok {
-                *b = [0; 3];
-            }
-        }
-        v.normal_tris.retain(|t| live(t));
-        let mut lists = vec![Vec::new(); n as usize];
-        for (k, t) in v.normal_tris.iter().enumerate() {
-            for &i in t {
-                lists[i as usize].push(k as u32);
-            }
-        }
-        v.node_tri_start = std::iter::once(0)
-            .chain(lists.iter().scan(0u32, |a, l| {
-                *a += l.len() as u32;
-                Some(*a)
-            }))
-            .collect();
-        v.node_tri_list = lists.concat();
-        v.node_rest_normal.truncate(n as usize);
-        v.node_rest.truncate(n as usize);
-        v.node_material.truncate(n as usize);
-        v.node_beam_start.truncate(n as usize + 1);
-        let end = v.node_beam_start.last().copied().unwrap_or(0) as usize;
-        v.node_beam_list.truncate(end);
-        v.node_beam_list = v
-            .node_beam_list
-            .iter()
-            .filter_map(|&b| self.beam(b))
-            .collect();
-        let (a, c) = (self.first as usize, (self.first + self.count) as usize);
-        if c <= v.beam_rest0.len() {
-            v.beam_rest0.drain(a..c);
-        }
-        for u in &mut v.units {
-            u.beams = u.beams.iter().filter_map(|&b| self.beam(b)).collect();
-        }
-        // The shut-line fallbacks' death lists name solver beams: renumber
-        // them past the cut tyre beams (a tyre beam never kills a skin frame).
-        for d in &mut v.skin_death {
-            for b in d.iter_mut() {
-                if *b != u32::MAX {
-                    *b = self.beam(*b).unwrap_or(u32::MAX);
-                }
-            }
-        }
-        v.node_count = n;
-        Ok(())
-    }
-}
-
 #[wasm_bindgen(js_name = showcaseCar)]
 pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     let b = built(&params)?;
@@ -223,14 +103,11 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
             .and_then(|w| w.as_string())
             .as_deref()
             == Some("raycast");
-    let cut = if raycast {
-        Some(TyreCut::of(&b.truck)?)
-    } else {
-        None
-    };
+    // On raycast wheels: the visual without the tyre nodes and beams
+    // (`skin::raycast_visual`).
     let fix = |mut v: ShowcaseVisual| -> Result<ShowcaseVisual, JsValue> {
-        if let Some(c) = &cut {
-            c.apply(&mut v)?;
+        if raycast {
+            engine_softbody::authoring::skin::raycast_visual(&mut v, &b.truck).map_err(err)?;
         }
         Ok(v)
     };
