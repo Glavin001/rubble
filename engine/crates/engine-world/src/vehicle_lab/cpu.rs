@@ -213,6 +213,17 @@ impl CpuLab {
 
     /// One World window (1/60 s).
     pub fn step(&mut self) -> anyhow::Result<()> {
+        self.window(None)
+    }
+
+    /// One World window, calling `each` after every 2 kHz step of the car (a
+    /// measurement's view of the car between steps; `examples/hinge_breaks.rs`). The
+    /// steps are the window's own ([`ExplicitBeams::frame`]'s, one by one).
+    pub fn step_observed(&mut self, each: &mut dyn FnMut(&ExplicitBeams)) -> anyhow::Result<()> {
+        self.window(Some(each))
+    }
+
+    fn window(&mut self, each: Option<&mut dyn FnMut(&ExplicitBeams)>) -> anyhow::Result<()> {
         self.bench.before_step(&mut CpuRig {
             objs: &mut self.objs,
             next: &mut self.next,
@@ -270,7 +281,20 @@ impl CpuLab {
         );
         set.begin_window();
         self.sim.rigid = Some(Box::new(set));
-        self.sim.frame();
+        match each {
+            None => {
+                self.sim.frame();
+            }
+            Some(each) => {
+                // `frame`, step by step.
+                self.sim.check_wings();
+                self.sim.rebase_origin();
+                for _ in 0..self.sim.clock.next() {
+                    self.sim.step();
+                    each(&self.sim);
+                }
+            }
+        }
         let set = *self.sim.rigid.take().expect("the window's proxies");
         let mut proxied = vec![false; self.objs.len()];
         for (b, &i) in set.bodies.iter().zip(&which) {
