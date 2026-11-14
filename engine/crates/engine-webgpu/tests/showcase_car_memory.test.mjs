@@ -22,13 +22,15 @@ const { createShowcaseCarRenderer } = await import('../showcase-car-render.mjs')
 // Anything the renderer asks of a device: buffers keep their label; writeBuffer keeps a
 // weak reference to what it was given and a copy of its bytes.
 function fakeDevice() {
+  const buffers = [];
   const any = () => new Proxy(function () {}, { get: (_, k) => (k === 'then' ? undefined : any()), apply: () => any() });
   const writes = [];
   const queue = {
     writeBuffer(buffer, offset, data, dataOffset = 0, size) {
       const src = ArrayBuffer.isView(data) ? data : new Uint8Array(data);
       const bytes = new Uint8Array(src.buffer, src.byteOffset + dataOffset * (src.BYTES_PER_ELEMENT ?? 1), size !== undefined ? size * (src.BYTES_PER_ELEMENT ?? 1) : src.byteLength - dataOffset * (src.BYTES_PER_ELEMENT ?? 1));
-      writes.push({ label: buffer.label, offset, bytes: bytes.slice(), source: new WeakRef(ArrayBuffer.isView(data) ? data.buffer : data) });
+      buffer.image.set(bytes, offset);
+      writes.push({ label: buffer.label, offset, size: bytes.byteLength, source: new WeakRef(ArrayBuffer.isView(data) ? data.buffer : data) });
     },
     writeTexture() {},
     submit() {},
@@ -36,12 +38,14 @@ function fakeDevice() {
   const device = new Proxy({}, {
     get: (_, k) => {
       if (k === 'queue') return queue;
-      if (k === 'createBuffer') return (d) => ({ label: d.label, size: d.size, usage: d.usage, destroy() {} });
+      if (k === 'createBuffer') return (d) => { const b = { label: d.label, size: d.size, usage: d.usage, image: new Uint8Array(d.size), destroy() {} }; buffers.push(b); return b; };
       if (k === 'then') return undefined;
       return any();
     },
   });
-  return { device, writes };
+  // A buffer's contents once every write has landed (the first with that label).
+  const image = (label) => buffers.find((b) => b.label === label).image;
+  return { device, writes, image };
 }
 
 // A small weighted-skin visual in the wasm's format (showcase.rs visual_js): three nodes,
@@ -69,11 +73,11 @@ const sha = (b) => createHash('sha256').update(b).digest('hex').slice(0, 16);
 
 // Pinned from the renderer before the memory work (5b5a527f): what it uploads must not change.
 test('a skinned car\'s uploads are the same bytes (binds, rest pose, attributes, indices)', () => {
-  const { device, writes } = fakeDevice();
+  const { device, image } = fakeDevice();
   const r = createShowcaseCarRenderer(device, { format: 'bgra8unorm' });
   r.addCar(skinnedVisual());
   const got = Object.fromEntries(['showcase-binds', 'showcase-out', 'showcase-attrs', 'showcase-index', 'showcase-topology']
-    .map((l) => [l, sha(writes.find((w) => w.label === l).bytes)]));
+    .map((l) => [l, sha(image(l))]));
   assert.deepEqual(got, {
     'showcase-binds': '559f728b0c7b6e43',
     'showcase-out': 'ea471a5319892872',
@@ -93,9 +97,9 @@ test('a skin\'s weights as grid steps upload the same bytes as f32 weights', () 
   for (let k = 0; k < q.length; k++) q[k] = v.wtW[k] / grid[k % 3 === 0 ? 0 : 1];
   const compact = { ...v, wtNode: undefined, wtW: undefined, wtNode16: Uint16Array.from(v.wtNode), wtQ: q, wtGrid: grid };
   const bytes = (visual) => {
-    const { device, writes } = fakeDevice();
+    const { device, image } = fakeDevice();
     createShowcaseCarRenderer(device, { format: 'bgra8unorm' }).addCar(visual);
-    return sha(writes.find((w) => w.label === 'showcase-binds').bytes);
+    return sha(image('showcase-binds'));
   };
   assert.equal(bytes(compact), '559f728b0c7b6e43');
   assert.equal(bytes(v), '559f728b0c7b6e43');
@@ -109,4 +113,34 @@ test('addCar keeps no CPU copy of what it uploaded', async () => {
   const kept = writes.filter((w) => /^showcase-(binds|out|attrs|index|floor-index|topology)/.test(w.label) && w.source.deref()).map((w) => w.label);
   assert.deepEqual(kept, []);
   assert.ok(r.removeCar && id !== undefined);
+});
+
+// skinnedVisual's three vertices tiled `copies` times (every third vertex with nine
+// entries: three 4-entry slots), for a bind buffer of tens of MB.
+function tiled(copies) {
+  const v = skinnedVisual(), n = 3 * copies;
+  const rep = (a, per) => { const o = new a.constructor(a.length * copies); for (let c = 0; c < copies; c++) o.set(a, c * a.length); return o; };
+  const out = { ...v, vertexCount: n };
+  for (const k of ['positions', 'normals', 'uvs', 'colors', 'ao', 'material', 'bindNodes', 'bindCoords', 'bindNormal', 'bindRest', 'smooth', 'rigid', 'wtOff', 'wtNrm']) out[k] = rep(v[k]);
+  out.indices = new Uint32Array(n); for (let i = 0; i < n; i++) out.indices[i] = i;
+  const start = [0], node = [], w = [];
+  for (let i = 0; i < n; i++) {
+    const r = i % 3 === 0 ? 3 : 1;
+    for (let k = 0; k < r; k++) for (let e = 0; e < 3; e++) { const j = 3 * (i % 3) + e; node.push(v.wtNode[j]); w.push(v.wtW[3 * j], v.wtW[3 * j + 1], v.wtW[3 * j + 2]); }
+    start.push(node.length);
+  }
+  Object.assign(out, { wtStart: Uint32Array.from(start), wtNode: Uint32Array.from(node), wtW: Float32Array.from(w) });
+  return out;
+}
+
+// Pinned from the renderer that packed the whole bind buffer at once (cf30b0b9).
+test('a large skin\'s bindings upload in bounded pieces, the same bytes', () => {
+  const { device, writes, image } = fakeDevice();
+  createShowcaseCarRenderer(device, { format: 'bgra8unorm' }).addCar(tiled(100_000));
+  const binds = writes.filter((w) => w.label === 'showcase-binds');
+  const total = binds.reduce((s, w) => s + w.size, 0);
+  assert.equal(total, image('showcase-binds').byteLength);
+  assert.ok(total > 30 * 2 ** 20, `${total} bytes`);
+  assert.equal(sha(image('showcase-binds')), '084f4adc2b15eaac');
+  assert.ok(Math.max(...binds.map((w) => w.size)) <= 8 * 2 ** 20, 'each piece at most 8 MB');
 });
