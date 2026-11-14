@@ -809,6 +809,13 @@ impl ExplicitSim {
         Self::new(device, queue, spec)
     }
 
+    /// The vehicles `spec` spawns, as the CPU reference steps them (no device: tests
+    /// and tools reproduce a page's scene on `ExplicitBeamsWorld`).
+    #[doc(hidden)]
+    pub fn spawn_cpu(spec: &serde_json::Value) -> Result<Vec<ExplicitBeams>, String> {
+        Ok(Self::spawn(spec)?.vehicles.into_iter().map(|v| v.sim).collect())
+    }
+
     /// The GPU solver (tests and tools).
     #[doc(hidden)]
     pub fn gpu_solver(&self) -> &ExplicitBeamsGpu {
