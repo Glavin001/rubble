@@ -15,16 +15,15 @@
 use rubble::*;
 use wasm_bindgen::prelude::*;
 
-pub mod broadside;
+/// The range scenes (`rubble::play`), at the paths the pages' bindings use.
+pub use rubble::play::{broadside, range, timber_yard};
 /// Broadside (`broadside.html`) and the timber yard (`timber.html`): their scenes stepped
 /// in Rust, the page draws their poses.
 mod broadside_page;
 pub use broadside_page::*;
-/// What a range page plays (also drawn natively by engine-viewer's `world_viewer`).
-pub mod play;
-/// The shooting range under Broadside and the timber yard.
-pub mod range;
-pub mod timber_yard;
+/// What a range page plays (`rubble::play::stage`, also drawn natively by engine-viewer's
+/// `world_viewer`).
+pub use rubble::play::stage as play;
 
 /// The large-maps city (`city.html`): `rubble::city` placed over frames.
 mod city;
@@ -39,6 +38,7 @@ mod guidance;
 /// The fracture lab (`fracture/`): its scenes as destructibles, its shots.
 mod lab;
 mod motion;
+mod presets;
 mod read;
 mod scene;
 mod showcase;
@@ -117,7 +117,7 @@ pub fn last_panic() -> String {
 
 /// A high-performance WebGPU adapter's device with its full limits: what
 /// `engine_webgpu::default_device` opens natively.
-async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), JsValue> {
+pub(crate) async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgpu::Queue), JsValue> {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::BROWSER_WEBGPU;
     let instance = wgpu::Instance::new(desc);

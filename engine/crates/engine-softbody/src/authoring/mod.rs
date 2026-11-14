@@ -20,11 +20,13 @@ pub mod lint;
 pub mod hatchback;
 pub mod material;
 pub mod members;
+pub mod node_frames;
 pub mod parts;
 pub mod rig;
 pub mod sedan;
 pub mod skeleton;
 pub mod skin;
+pub mod skin_lint;
 pub mod vehicle;
 
 pub use body::{BodyProfile, Seg, Spacing, Well};

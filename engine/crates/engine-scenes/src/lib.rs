@@ -12,6 +12,7 @@ use glam::{Quat, Vec3};
 pub mod joints;
 pub use joints::*;
 pub mod legacy;
+pub mod web;
 
 #[derive(Clone, Debug)]
 pub struct SceneInfo {
@@ -66,36 +67,40 @@ fn add_sphere_vel(
     id
 }
 
-/// Paper Fig. 1 — brick ring smashed by a rolling sphere.
-pub fn brick_ring(b: &mut SceneBuilder<'_>, radius: f32, courses: u32, tier: u32, rows: u32) {
-    for c in 0..courses {
-        let depth = (rows.saturating_sub(c / tier)).max(1);
-        for j in 0..depth {
-            let r = radius + 0.25 + 0.52 * j as f32;
-            let n = ((2.0 * std::f32::consts::PI * (r - 0.25)) / 1.02).floor().max(1.0) as u32;
-            for i in 0..n {
-                let a = ((i as f32 + if c % 2 == 1 { 0.5 } else { 0.0 }) / n as f32)
-                    * 2.0
-                    * std::f32::consts::PI;
-                // demo (r cos a, r sin a, 0.75+0.5c) → (x, y=height, z)
-                add_brick(
-                    b,
-                    r * a.cos(),
-                    0.75 + 0.5 * c as f32,
-                    r * a.sin(),
-                    a + std::f32::consts::FRAC_PI_2,
-                );
+/// The generators' pieces as this crate's bodies: bricks of three-avbd's 0.25 kg (a
+/// piece's own mass is the web demo's), boxes and balls of their masses, a ball's spin
+/// from its speed along Z (`add_sphere_vel`).
+fn add_pieces(b: &mut SceneBuilder<'_>, pieces: &[web::Piece]) {
+    let v3 = |v: [f64; 3]| Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32);
+    for piece in pieces {
+        match *piece {
+            web::Piece::Brick { p, angle, .. } => {
+                add_brick(b, p[0] as f32, p[1] as f32, p[2] as f32, angle as f32);
+            }
+            web::Piece::Box { p, half, q, mass } => {
+                let id = b.add_box(v3(p), v3(half), mass as f32);
+                if q != [0.0, 0.0, 0.0, 1.0] {
+                    let mut body = b.world_mut().body(id);
+                    body.orientation = Quat::from_xyzw(q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32)
+                        .normalize()
+                        .to_array();
+                    b.world_mut().set_body(id, body);
+                }
+            }
+            web::Piece::Ball {
+                p, radius, density, v, ..
+            } => {
+                let r = radius as f32;
+                let mass = density as f32 * (4.0 / 3.0) * std::f32::consts::PI * r.powi(3);
+                add_sphere_vel(b, v3(p), r, mass, v3(v));
             }
         }
     }
-    let ball_r = courses as f32 / 5.0;
-    add_sphere_vel(
-        b,
-        Vec3::new(0.0, 0.5 + ball_r, -(radius + 0.52 * rows as f32 + ball_r + 2.0)),
-        ball_r,
-        10.0 * (4.0 / 3.0) * std::f32::consts::PI * ball_r.powi(3),
-        Vec3::new(0.0, 0.0, 30.0),
-    );
+}
+
+/// Paper Fig. 1 — brick ring smashed by a rolling sphere (`web::ring`).
+pub fn brick_ring(b: &mut SceneBuilder<'_>, radius: f32, courses: u32, tier: u32, rows: u32) {
+    add_pieces(b, &web::ring(radius as f64, courses, tier, rows));
 }
 
 /// Matches three-avbd `bench-cases` “Brick ring 9k” (`brickRing(s, 12, 20, 2, 10)`).
@@ -111,60 +116,18 @@ pub fn brick_ring_110k(b: &mut SceneBuilder<'_>) {
     brick_ring(b, 80.0, 40, 4, 10);
 }
 
-/// Triangular brick walls (paper Fig. 3, scaled).
+/// Triangular brick walls (paper Fig. 3, scaled; `web::gables`).
 pub fn brick_walls(b: &mut SceneBuilder<'_>, columns: u32, rows: u32, base: u32) {
-    let (pitch_x, pitch_z) = (base as f32 + 2.0, 5.0);
-    for cx in 0..columns {
-        for cz in 0..rows {
-            let x0 = (cx as f32 - (columns as f32 - 1.0) / 2.0) * pitch_x;
-            let z = (cz as f32 - (rows as f32 - 1.0) / 2.0) * pitch_z;
-            for k in 0..base {
-                let m = base - k;
-                for i in 0..m {
-                    let x = x0 + (i as f32 - (m as f32 - 1.0) / 2.0) * 1.01;
-                    add_brick(b, x, 0.75 + 0.5 * k as f32, z, 0.0);
-                }
-            }
-        }
-    }
-    let r = base as f32 / 7.0;
-    let mass = 50.0 * (4.0 / 3.0) * std::f32::consts::PI * r.powi(3);
-    for &cx in &[2u32, 5] {
-        let x = (cx as f32 - (columns as f32 - 1.0) / 2.0) * pitch_x;
-        let z0 = -((rows as f32 - 1.0) / 2.0) * pitch_z - r - 12.0;
-        add_sphere_vel(b, Vec3::new(x, 0.5 + r, z0), r, mass, Vec3::new(0.0, 0.0, 30.0));
-    }
+    add_pieces(b, &web::gables(columns, rows, base));
 }
 
 pub fn brick_walls_27k(b: &mut SceneBuilder<'_>) {
     brick_walls(b, 8, 16, 20);
 }
 
-/// Wall smash: running-bond wall + heavy ball.
+/// Wall smash: running-bond wall + heavy ball (`web::wall`; three-avbd's 0.25 kg bricks).
 pub fn wall_smash(b: &mut SceneBuilder<'_>, w: u32, h: u32) {
-    for z in 0..h {
-        let offset = if z % 2 == 0 { 0.0 } else { 0.5 };
-        for x in 0..w {
-            for y in 0..2 {
-                add_brick(
-                    b,
-                    (x as f32 - w as f32 / 2.0) + offset,
-                    0.75 + z as f32 * 0.5,
-                    y as f32 * 0.5,
-                    0.0,
-                );
-            }
-        }
-    }
-    let r: f32 = 2.0;
-    let mass = 20.0 * (4.0 / 3.0) * std::f32::consts::PI * r.powi(3);
-    add_sphere_vel(
-        b,
-        Vec3::new(0.0, 5.0, -25.0),
-        r,
-        mass,
-        Vec3::new(0.0, 4.0, 30.0),
-    );
+    add_pieces(b, &web::wall(w, h, 0.25, 1.0));
 }
 
 pub fn wall_smash_2k(b: &mut SceneBuilder<'_>) {
@@ -356,71 +319,10 @@ pub fn heavy_pendulum_default(b: &mut SceneBuilder<'_>) {
     heavy_pendulum(b, 50, 50_000.0);
 }
 
+/// three-avbd's box pile (`web::box_pile`): generated in its (z, x, y) order so sizes and
+/// orientations match, uploaded in Morton order (its spatialSort default).
 pub fn box_pile(b: &mut SceneBuilder<'_>, n: u32, h: u32) {
-    let mut seed = 12345u32;
-    let mut rand = || {
-        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-        (seed as f32) / (u32::MAX as f32)
-    };
-    // Generate in three-avbd (z,x,y) order so sizes/orients match, then upload in
-    // Morton order (their spatialSort default) for cache-friendly body adjacency.
-    let mut specs: Vec<(Vec3, Vec3, Quat)> = Vec::with_capacity((n * n * h) as usize);
-    for z in 0..h {
-        for x in 0..n {
-            for y in 0..n {
-                let half = Vec3::new(
-                    0.25 + rand() * 0.35,
-                    0.25 + rand() * 0.35,
-                    0.25 + rand() * 0.35,
-                );
-                let pos = Vec3::new(
-                    (x as f32 - n as f32 / 2.0) * 1.6,
-                    2.0 + z as f32 * 1.6,
-                    (y as f32 - n as f32 / 2.0) * 1.6,
-                );
-                let q = Quat::from_xyzw(
-                    rand() - 0.5,
-                    rand() - 0.5,
-                    rand() - 0.5,
-                    rand() - 0.5,
-                )
-                .normalize();
-                specs.push((pos, half, q));
-            }
-        }
-    }
-    let mut lo = Vec3::splat(f32::INFINITY);
-    let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for (pos, _, _) in &specs {
-        lo = lo.min(*pos);
-        hi = hi.max(*pos);
-    }
-    let spread = |mut x: u32| -> u32 {
-        x &= 0x3ff;
-        x = (x | (x << 16)) & 0x30000ff;
-        x = (x | (x << 8)) & 0x300f00f;
-        x = (x | (x << 4)) & 0x30c30c3;
-        x = (x | (x << 2)) & 0x9249249;
-        x
-    };
-    let mut order: Vec<usize> = (0..specs.len()).collect();
-    order.sort_by_key(|&i| {
-        let p = specs[i].0;
-        let q = |k: usize| -> u32 {
-            let t = ((p[k] - lo[k]) / (hi[k] - lo[k]).max(1e-9) * 1024.0).floor() as i32;
-            t.clamp(0, 1023) as u32
-        };
-        spread(q(0)) | (spread(q(1)) << 1) | (spread(q(2)) << 2)
-    });
-    for i in order {
-        let (pos, half, q) = specs[i];
-        // three-avbd: mass = sx·sy·sz·density with density=1 (full extents).
-        let mass = 8.0 * half.x * half.y * half.z;
-        let id = b.add_box(pos, half, mass);
-        let mut body = b.world_mut().body(id);
-        body.orientation = q.to_array();
-        b.world_mut().set_body(id, body);
-    }
+    add_pieces(b, &web::box_pile(n, h));
 }
 
 pub fn box_pile_4k(b: &mut SceneBuilder<'_>) {
@@ -431,47 +333,20 @@ pub fn box_pile_32k(b: &mut SceneBuilder<'_>) {
     box_pile(b, 40, 20);
 }
 
+/// three-avbd boxColumns (`web::box_columns`): unit boxes at y = 1 + layer, so the first
+/// course sits on the ground slab top (y 0.5).
 pub fn box_columns(b: &mut SceneBuilder<'_>, n: u32, h: u32) {
-    // three-avbd boxColumns (Z-up → Y-up): unit boxes at y = 1+layer so the first
-    // course sits on the ground slab top (y=0.5). Centre 0.5 penetrates 0.5 m.
-    for x in 0..n {
-        for z in 0..n {
-            for y in 0..h {
-                b.add_box(
-                    Vec3::new(
-                        (x as f32 - n as f32 / 2.0) * 1.5,
-                        1.0 + y as f32,
-                        (z as f32 - n as f32 / 2.0) * 1.5,
-                    ),
-                    Vec3::splat(0.5),
-                    1.0,
-                );
-            }
-        }
-    }
+    add_pieces(b, &web::box_columns(n, h));
 }
 
 pub fn box_columns_100k(b: &mut SceneBuilder<'_>) {
     box_columns(b, 100, 10);
 }
 
+/// three-avbd brickPyramid (`web::pyramid`): centres at 0.75 + level × 0.5 (no pre-sink;
+/// the collision margin seats them).
 pub fn pyramid(b: &mut SceneBuilder<'_>, levels: u32) {
-    // Match three-avbd brickPyramid: centres at 0.75 + level*0.5 (no pre-sink). Collision
-    // margin seats them; FINDINGS: pre-sink did not fix wall buckle and skewed first C0.
-    for level in 0..levels {
-        let n = levels - level;
-        for x in 0..n {
-            for z in 0..n {
-                add_brick(
-                    b,
-                    (x as f32 - (n as f32 - 1.0) / 2.0) * 1.05,
-                    0.75 + level as f32 * 0.5,
-                    (z as f32 - (n as f32 - 1.0) / 2.0) * 0.55,
-                    0.0,
-                );
-            }
-        }
-    }
+    add_pieces(b, &web::pyramid(levels));
 }
 
 pub fn stack(b: &mut SceneBuilder<'_>, n: u32) {

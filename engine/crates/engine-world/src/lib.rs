@@ -44,6 +44,10 @@ mod joints;
 /// The fracture lab as one API (scenes, bond models, settings, actions, stats).
 #[cfg(feature = "stress")]
 pub mod lab;
+/// Every demo as a preset of the one library: the registry, the shared balls, the range
+/// scenes (Broadside, the timber yard) and what a host draws for them.
+#[cfg(feature = "stress")]
+pub mod play;
 mod math;
 mod motion;
 mod queries;
@@ -798,6 +802,22 @@ impl World {
 
     pub fn sim(&self) -> &WgpuSim {
         &self.sim
+    }
+
+    /// Hand the uploads written so far to the GPU and, natively, wait for them: staging
+    /// memory is reclaimed only once its copies finish, so placing hundreds of thousands
+    /// of bodies without waiting piles up staging buffers until each new one crawls
+    /// through the driver. In the browser `writeBuffer` stages and frees on its own (and a
+    /// poll cannot wait there), so this only submits. The world is unchanged.
+    pub fn settle_uploads(&self) {
+        let index = self.sim.queue().submit(std::iter::empty());
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = self.sim.device().poll(wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: None,
+        });
+        #[cfg(target_arch = "wasm32")]
+        let _ = index;
     }
 
     /// Compile `groups`' kernels now instead of on the first step that runs them

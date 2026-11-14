@@ -21,36 +21,8 @@ use engine_schema::guidance::{ZoneDesc, ZoneShape};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-/// Building spans along the street (z from, z to), both sides: 310 m.
-pub const SPANS: [(f32, f32); 8] = [
-    (0.0, 30.0),
-    (40.0, 70.0),
-    (80.0, 110.0),
-    (120.0, 150.0),
-    (160.0, 190.0),
-    (200.0, 230.0),
-    (240.0, 270.0),
-    (280.0, 310.0),
-];
-/// Parked cars at the kerbs (x, z, yaw).
-pub const PARKED: [(f32, f32, f32); 10] = [
-    (-5.6, 22.0, 0.0),
-    (5.6, 48.0, std::f32::consts::PI),
-    (-5.6, 75.0, 0.0),
-    (5.6, 96.0, std::f32::consts::PI),
-    (-5.6, 128.0, 0.0),
-    (5.6, 165.0, std::f32::consts::PI),
-    (-5.6, 205.0, 0.0),
-    (5.6, 238.0, std::f32::consts::PI),
-    (-5.6, 262.0, 0.0),
-    (5.6, 296.0, std::f32::consts::PI),
-];
-/// The finish line (z): the end of the street.
-pub const FINISH: f32 = 315.0;
-/// Meteor radius (m), mass (kg) and how many the page keeps parked for launch.
-pub const METEOR_RADIUS: f32 = 0.8;
-pub const METEOR_MASS: f32 = 2500.0;
-pub const METEORS: u32 = 12;
+pub use engine_vehicle::streets::run::*;
+
 /// A meteor's blast on a facade: radius (m) and the fastest block (m/s).
 const BLAST_RADIUS: f32 = 2.0;
 const BLAST_SPEED: f32 = 8.5;
@@ -78,11 +50,6 @@ const TIME_POINTS: f32 = 20.0;
 /// toward the ring beside the car (tag 2).
 pub const BLOCK_TAGS: u32 = 1;
 pub const METEOR_TAGS: u32 = 2;
-
-/// The street.
-pub fn layout() -> gauntlet::Layout {
-    gauntlet::layout_of(&SPANS, &PARKED)
-}
 
 /// The zones: the Gauntlet's (around the car, behind it, the parked cars'
 /// roofs; tag 1), the ring around the car set a little wider (a block steered

@@ -77,9 +77,8 @@
     // rigid_plan); this page builds the scene through World, renders the world's
     // body and collider buffers in place, and keeps the camera, input, HUD,
     // benchmark protocol and checks.
-    import { createWorld, pollFrame, stepFrames, drain, macrotask, saveState, errorText } from './rubble-world.mjs';
-    import { parseDemoQuery, demoSolver, sceneCap, SLEEP_OFF_TIME } from './demo-config.mjs';
-    import { buildDemoScene, packDemoBodies } from './demo-scene.mjs';
+    import { createWorld, createScene, sceneFromQuery, pollFrame, stepFrames, drain, macrotask, saveState, errorText } from './rubble-world.mjs';
+    import { parseDemoQuery, demoSolver, SLEEP_OFF_TIME } from './demo-config.mjs';
     import { restoreSceneOrder } from './spatial-order.mjs';
     import { runRingRegression } from './ring-regression.mjs';
     import { runGablesRegression } from './gables-regression.mjs';
@@ -177,7 +176,7 @@
     const snap = cfg.snapshot ? await loadSnapshot(cfg.snapshot) : null;
     if (snap) {
       cfg.iterations = cfg.iterations ?? snap.meta.iterations;
-      cfg.cap = sceneCap(snap.counts.bodies, { maxJoints: Math.max(64, snap.counts.joints + 1) });
+      cfg.cap = snap.meta.cap;
       cfg.title = `${cfg.title}, ${cfg.iterations} iterations`;
     }
     const lead = cfg.lead;
@@ -255,18 +254,23 @@
     const killParam = new URLSearchParams(location.search).get('kill');
     const killBelow = killParam === 'off' ? null : Number(killParam ?? -50);
     if (killBelow !== null && !Number.isFinite(killBelow)) throw new Error(`kill=${killParam}: a height or off`);
-    const world = await createWorld({
-      gravity: [0, snap?.meta.params?.gravityY ?? -10, 0],
-      capacity: cfg.cap,
+    // The page's switches over the scene's world (contact storage, engine features, solver
+    // constants, GPU timing) and where the world ends: bodies thrown off the ground fall
+    // forever and never sleep, so a fully settled scene could never stop stepping. Below
+    // this they are destroyed (reported in each frame's leftWorld). ?kill=<y>, ?kill=off.
+    const settings = {
       contacts: Q.contacts,
       features: Q.features,
       solver,
       gpuTiming: liveTiming,
-      // Where the world ends: bodies thrown off the ground fall forever and never
-      // sleep, so a fully settled scene could never stop stepping. Below this they
-      // are destroyed (reported in each frame's leftWorld). ?kill=<y>, ?kill=off.
       ...(killBelow === null ? {} : { killBelow }),
-    });
+    };
+    // Built scenes are a SceneDef placed in Rust (rubble::play, the rigid family: its world
+    // from the scene table); snapshots are imported records on a world sized for them.
+    const sceneDef = snap ? null : await sceneFromQuery('rigid', location.search);
+    const world = snap
+      ? await createWorld({ gravity: [0, snap.meta.params?.gravityY ?? -10, 0], capacity: cfg.cap, ...settings })
+      : await createScene(sceneDef, settings);
     const device = world.device();
     diagLimits = world.deviceLimits?.() ?? '';
     console.info(`rubble device limits: ${diagLimits}`);
@@ -282,13 +286,15 @@
         camera: { eye: cameraEye, target: () => target, fovY: Math.PI / 5 },
       });
     } else {
-      sceneBodies = buildDemoScene(scene, cfg, { ccd: Q.ccd });
+      // Built in Rust (engine-scenes `web`, engine-world `play::rigid::place`): the ground
+      // slab, the scene's pieces, uploaded in Morton order with ?order=morton.
+      const placed = world.placeScene(sceneDef);
+      // Each scene body's starting position (scene order): the checks' reference.
+      sceneBodies = Array.from({ length: placed.initial.length / 3 }, (_, i) => ({ p: Array.from(placed.initial.subarray(3 * i, 3 * i + 3)) }));
       if (scene === 'pyramid')
         document.querySelector('h1').textContent = `Slang → WGSL · settled pyramid ${cfg.levels} levels (~${sceneBodies.length - 1}), 10 iterations`;
-      if (sceneBodies.length > cfg.cap.maxBodies) throw new Error(`${sceneBodies.length} bodies exceed capacity ${cfg.cap.maxBodies}`);
-      const packed = packDemoBodies(sceneBodies, { spatialOrder: Q.spatialOrder });
-      order = Q.spatialOrder ? packed : null;
-      handles = { bodies: Float64Array.from(world.createBodies(packed.records, { material: { friction: cfg.friction } })) };
+      order = Q.spatialOrder ? { gpuToScene: placed.gpuToScene } : null;
+      handles = { bodies: placed.bodies };
     }
     const bodyCount = world.bodyCount();
     const drawCount = world.colliderCount() - 1;

@@ -49,6 +49,14 @@ Context is in [soft-rigid-world.md](soft-rigid-world.md).
 - **Effect:** "an immovable proxy equals the static shape bit for bit" holds only for Rigs of Rods-profile cars. For the ETK at 50 km/h, momentum differs by about 5 %.
 - **Decision:** the user's.
 
+### G1. The lab's grab at its strongest setting blows the car up (Confirmed)
+- **Where:** `softbody.html` crash lab grab tool, strength slider up to 3.16 MN/m (`crash-lab.mjs`).
+- **Cause:** the grab spring is explicit; on a light skin node (the front bumper's 0.23 kg) h·√(k/m) = 1.86 before the node's beams, past the explicit step's stability. The car goes non-finite in the first frame (CPU, `showcase_skin_integrity grab_at_the_strongest_setting_keeps_the_car_finite`, ignored known failure).
+- **Fix options (the user's decision):** an explicit limit of the grab's stiffness per node mass that fails with a clear error, or an implicit grab spring (a solver change).
+
+### G2. Damper-only beams hold pulled-off nodes and draw as long low-strain beams (Confirmed)
+- 876 of the authored sedan's 7,258 beams are k = 0 body dashpots (the BX node damping pattern). They never break by stretch, so a node torn out of its panel stays tethered by them, and the lab's strain colour (k·|ℓ − L|) draws them blue-grey at any length. Physically they should go with their part's structure (an authoring change, the user's decision); the lab could colour k = 0 beams by geometric strain (render only). `engine/docs/measurements/skin-shards.md`.
+
 ### F7. Raycast wheels don't see rigid bodies (Confirmed)
 - **Cause:** `explicit_drive.rs` `ray_cast` sees the car's own ground plane, boxes and static shapes only.
 - **Effect:** cars can't drive up onto debris or rigid ramps; wheels pass through bricks (part of B1).

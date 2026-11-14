@@ -1,8 +1,9 @@
+#![cfg(feature = "stress")]
 //! The Broadside take natively: the captain walks the length of the choreography and
 //! reaches the main deck, every cue fires and breaks wood, nothing hits him, and the
 //! closing volley wrecks the ship around him.
 
-use engine_world_wasm::broadside::*;
+use rubble::play::broadside::*;
 use rubble::GpuContext;
 use std::time::Instant;
 
@@ -238,7 +239,7 @@ fn destruction() {
         b.step().unwrap();
         b.poll_blocking().unwrap();
         let c = glam::Vec3::from(b.captain_at);
-        for (id, _) in &b.balls {
+        for (id, _) in b.balls.live() {
             if let Ok(s) = b.world.read_body_state(*id) {
                 if glam::Vec3::from(s.linear_velocity).length() > 50.0 {
                     let d = glam::Vec3::from(s.transform.position) - c;

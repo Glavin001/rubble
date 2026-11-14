@@ -255,6 +255,13 @@ pub struct ShowcaseVisual {
     pub wt_w: Vec<[f32; 3]>,
     pub wt_off: Vec<[f32; 3]>,
     pub wt_nrm: Vec<[f32; 3]>,
+    /// The node-frame skin ([`super::node_frames`], the body's binding): the
+    /// per-node frames, and per vertex its [`super::node_frames::BLEND`]
+    /// nodes (`u32::MAX` past the last; all `u32::MAX` or absent: the
+    /// vertex keeps its triangle binding above) and weights.
+    pub frames: super::node_frames::NodeFrames,
+    pub bl_node: Vec<[u32; super::node_frames::BLEND]>,
+    pub bl_w: Vec<[f32; super::node_frames::BLEND]>,
 }
 
 /// `ShowcaseVisual::rigid` values.
@@ -354,6 +361,9 @@ pub fn bind_raycast_wheels(
         let f = a.cross(u);
         let d = Vec3::from_array(v.positions[i]) - centre;
         let n = Vec3::from_array(v.normals[i]);
+        if let Some(b) = v.bl_node.get_mut(i) {
+            *b = [u32::MAX; super::node_frames::BLEND];
+        }
         v.bind_nodes[i] = [k, k, k];
         v.bind_coords[i] = [d.dot(a), d.dot(u), d.dot(f)];
         v.bind_normal[i] = [n.dot(a), n.dot(u), n.dot(f)];
@@ -368,6 +378,101 @@ pub fn bind_raycast_wheels(
             *a = 0;
         }
     }
+    Ok(())
+}
+
+/// The visual for a spawn of `truck` on raycast wheels
+/// (`ExplicitBeams::from_truck_raycast`): without the tyre nodes and beams the
+/// `.truck` spawn builds, so every binding, beam index and per-node array
+/// matches that solver's vehicle. The wheels' pieces (tyre, rim, disc,
+/// caliper) ride the raycast wheels instead ([`bind_raycast_wheels`]: the
+/// renderer places them from the drive state); beams after the tyres' move
+/// down. The page's `showcaseCar({ wheels: 'raycast' })` is this.
+pub fn raycast_visual(v: &mut ShowcaseVisual, truck: &str) -> Result<(), String> {
+    let z = Vec3::ZERO;
+    let with = ExplicitBeams::from_truck(truck, z, z, ExplicitBeamsSettings::default())?;
+    let (without, _) = ExplicitBeams::from_truck_raycast(
+        truck,
+        None,
+        z,
+        0.0,
+        z,
+        ExplicitBeamsSettings::default(),
+    )?;
+    // Beam order: cinecam beams, tyre beams, then the file's.
+    let first = crate::truck::parse_truck(truck).cinecams.len() as u32 * 8;
+    let count = (with.beams.len() - without.beams.len()) as u32;
+    let config = without
+        .drive
+        .as_ref()
+        .ok_or("raycast spawn without a drive")?
+        .config
+        .clone();
+    let n = without.nodes.len() as u32;
+    let beam = |b: u32| {
+        if b < first {
+            Some(b)
+        } else if b < first + count {
+            None
+        } else {
+            Some(b - count)
+        }
+    };
+    bind_raycast_wheels(v, &config)?;
+    let live = |t: &[u32; 3]| t.iter().all(|&i| i < n);
+    let ok_vertex: Vec<bool> = v.bind_nodes.iter().map(live).collect();
+    let idx: Vec<u32> = v
+        .indices
+        .chunks(3)
+        .filter(|t| t.iter().all(|&i| ok_vertex[i as usize]))
+        .flatten()
+        .copied()
+        .collect();
+    v.indices = idx;
+    for (b, ok) in v.bind_nodes.iter_mut().zip(&ok_vertex) {
+        if !ok {
+            *b = [0; 3];
+        }
+    }
+    v.normal_tris.retain(|t| live(t));
+    let mut lists = vec![Vec::new(); n as usize];
+    for (k, t) in v.normal_tris.iter().enumerate() {
+        for &i in t {
+            lists[i as usize].push(k as u32);
+        }
+    }
+    v.node_tri_start = std::iter::once(0)
+        .chain(lists.iter().scan(0u32, |a, l| {
+            *a += l.len() as u32;
+            Some(*a)
+        }))
+        .collect();
+    v.node_tri_list = lists.concat();
+    v.node_rest_normal.truncate(n as usize);
+    v.node_rest.truncate(n as usize);
+    v.node_material.truncate(n as usize);
+    v.node_beam_start.truncate(n as usize + 1);
+    let end = v.node_beam_start.last().copied().unwrap_or(0) as usize;
+    v.node_beam_list.truncate(end);
+    v.node_beam_list = v.node_beam_list.iter().filter_map(|&b| beam(b)).collect();
+    let (a, c) = (first as usize, (first + count) as usize);
+    if c <= v.beam_rest0.len() {
+        v.beam_rest0.drain(a..c);
+    }
+    for u in &mut v.units {
+        u.beams = u.beams.iter().filter_map(|&b| beam(b)).collect();
+    }
+    // The shut-line fallbacks' death lists name solver beams: renumber them
+    // past the cut tyre beams (a tyre beam never kills a skin frame).
+    for d in &mut v.skin_death {
+        for b in d.iter_mut() {
+            if *b != u32::MAX {
+                *b = beam(*b).unwrap_or(u32::MAX);
+            }
+        }
+    }
+    v.frames.retain_nodes(n as usize, beam);
+    v.node_count = n;
     Ok(())
 }
 
@@ -1097,6 +1202,15 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
 /// The visual at a level of detail (1 full; 0.45 the distant LOD: the body
 /// sampled about 2× coarser, single-step edge rolls, fewer wheel segments).
 pub fn showcase_visual_lod(built: &Built, detail: f32) -> Result<ShowcaseVisual, String> {
+    let mut v = showcase_visual_triangles_lod(built, detail)?;
+    super::node_frames::bind(&mut v, built)?;
+    Ok(v)
+}
+
+/// **Measurement only**: [`showcase_visual_lod`] with every vertex on its
+/// binding triangle (the binding before the node-frame skin), for a visual
+/// A/B on identical physics (`showcaseCar({ bind: 'triangles' })`).
+pub fn showcase_visual_triangles_lod(built: &Built, detail: f32) -> Result<ShowcaseVisual, String> {
     super::parts::with_detail(detail, || build_visual(built))
 }
 
@@ -2476,7 +2590,22 @@ pub fn deform_beams(
     let mut nrm = Vec::with_capacity(v.positions.len());
     let weighted = v.wt_start.len() == v.positions.len() + 1;
     let mut wbuf: Vec<(u32, f32, f32, f32)> = Vec::new();
+    let framed = super::node_frames::eval(v, nodes, beams);
     for i in 0..v.positions.len() {
+        if let Some((p, n, _)) = framed[i] {
+            let gone = units.is_some_and(|st| {
+                let u = v.unit.get(i).copied().unwrap_or(u32::MAX);
+                u != u32::MAX && st[u as usize].broken && shatters(v.units[u as usize].kind, v.material[i])
+            });
+            if gone {
+                pos.push(Vec3::splat(f32::NAN));
+                nrm.push(Vec3::Y);
+            } else {
+                pos.push(p);
+                nrm.push(n);
+            }
+            continue;
+        }
         if weighted && v.wt_start[i + 1] > v.wt_start[i] {
             let gone = units.is_some_and(|st| {
                 let u = v.unit.get(i).copied().unwrap_or(u32::MAX);
@@ -2559,6 +2688,76 @@ pub fn deform_beams(
         nrm.push(nf);
     }
     (pos, nrm)
+}
+
+/// Per vertex its tear as the renderer computes it (`showcase-car-render.mjs`
+/// `skin()`): the fragment stage cuts a triangle where the tear,
+/// interpolated linearly across it, passes ½. A node-frame vertex: its
+/// tear from [`super::node_frames::eval`]. A
+/// triangle-bound vertex: the per-node field of every skin triangle's
+/// perimeter stretch, interpolated over its binding nodes (a rigid piece:
+/// their largest), 1 where its binding triangle has torn past
+/// [`TEAR_STRETCH`]. A weighted-skin vertex: 0. `pos` is [`deform_beams`]'s
+/// (a dropped vertex, NaN, is 1).
+pub fn vertex_tears(
+    v: &ShowcaseVisual,
+    nodes: &[Vec3],
+    beams: Option<&[BeamState]>,
+    pos: &[Vec3],
+) -> Vec<f32> {
+    let framed = super::node_frames::eval(v, nodes, beams);
+    let rest = |i: u32| Vec3::from_array(v.node_rest[i as usize]);
+    let per = |a: Vec3, b: Vec3, c: Vec3| a.distance(b) + b.distance(c) + c.distance(a);
+    let field: Vec<f32> = (0..nodes.len())
+        .map(|i| {
+            if i + 1 >= v.node_tri_start.len() {
+                return 0.0;
+            }
+            let mut st = 0.0f32;
+            for &ti in &v.node_tri_list[v.node_tri_start[i] as usize..v.node_tri_start[i + 1] as usize] {
+                let t = v.normal_tris[ti as usize];
+                let r = per(rest(t[0]), rest(t[1]), rest(t[2]));
+                if r > 0.0 {
+                    let q = t.map(|k| nodes[k as usize]);
+                    st = st.max(per(q[0], q[1], q[2]) / r);
+                }
+            }
+            let x = ((st - 1.35) / (1.8 - 1.35)).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        })
+        .collect();
+    let weighted = v.wt_start.len() == v.positions.len() + 1;
+    (0..v.positions.len())
+        .map(|i| {
+            if !pos[i].x.is_finite() {
+                return 1.0;
+            }
+            if let Some((_, _, t)) = framed[i] {
+                return t;
+            }
+            if weighted && v.wt_start[i + 1] > v.wt_start[i] {
+                return 0.0;
+            }
+            let rk = v.rigid.get(i).copied().unwrap_or(0);
+            if rk >= 2 {
+                return 0.0;
+            }
+            let ([a, b, c], [al, be, _], [r1, r2]) = match on_alt(v, i, nodes, beams) {
+                Some(k) => (v.alt_nodes[k], v.alt_coords[k], v.alt_rest[k]),
+                None => (v.bind_nodes[i], v.bind_coords[i], v.bind_rest[i]),
+            };
+            let (p0, p1, p2) = (nodes[a as usize], nodes[b as usize], nodes[c as usize]);
+            if (p1 - p0).length() > TEAR_STRETCH * r1 || (p2 - p0).length() > TEAR_STRETCH * r2 {
+                return 1.0;
+            }
+            let t = [field[a as usize], field[b as usize], field[c as usize]];
+            if rk == 1 {
+                t[0].max(t[1]).max(t[2])
+            } else {
+                ((1.0 - al - be) * t[0] + al * t[1] + be * t[2]).clamp(0.0, 1.0)
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

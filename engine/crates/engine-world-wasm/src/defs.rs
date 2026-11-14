@@ -136,8 +136,12 @@ pub fn capacity(f: &mut Fields, c: &mut WorldCapacity) -> Result<(), JsValue> {
 }
 
 pub fn world_def(v: JsValue) -> Result<WorldDef, JsValue> {
+    world_def_over(v, WorldDef::default())
+}
+
+/// [`world_def`]'s fields over `d` (a scene's own definition): the fields given replace it.
+pub fn world_def_over(v: JsValue, mut d: WorldDef) -> Result<WorldDef, JsValue> {
     let mut f = Fields::of("WorldDef", v)?;
-    let mut d = WorldDef::default();
     f.floats("gravity", &mut d.gravity)?;
     f.bool("enableSleep", &mut d.enable_sleep)?;
     f.u64("userData", &mut d.user_data)?;
