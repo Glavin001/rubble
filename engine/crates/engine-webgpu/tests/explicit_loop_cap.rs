@@ -611,4 +611,78 @@ fn the_pass_budget_ends_a_frame_and_reports_it() {
     let e = gpu.kernel_status().expect_err("a frame past its budget reports the stop");
     assert!(e.contains("cap"), "{e}");
     assert!(ms < 2000.0, "the stopped frame took {ms} ms");
+    // Audit S12: the stop is not silent. The host reads the status every STATUS_EVERY
+    // frames (as on main, where it then panicked): within that many frames the host's
+    // flag holds it (sticky) and the error list names it; pages get it thrown by
+    // ExplicitSim.frame.
+    let mut flagged = None;
+    for _ in 0..=engine_exec::explicit_plan::STATUS_EVERY {
+        gpu.frame(34);
+        gpu.wait();
+        flagged = gpu.frame_error();
+        if flagged.is_some() {
+            break;
+        }
+    }
+    let flagged = flagged.expect("the invalid frame is flagged for the host");
+    assert!(flagged.contains("cap"), "{flagged}");
+    assert!(gpu.frame_error().is_some(), "the flag stays until cleared");
+    assert!(gpu.take_contact_errors().iter().any(|e| e.contains("cap")), "the error list names it");
+}
+
+/// Audit S13: the per-frame pass budget never stops a legitimate frame, with 8x headroom:
+/// the heaviest explicit frames the repo's scenes make (the hires JBeam car on the BeamNG
+/// profile driving into a wall; five sedans nose to tail, the first at 85 km/h, a contact
+/// group of five; both at the pages' largest frame, 128 steps) run with an eighth of the
+/// host's budget and report nothing.
+#[test]
+fn the_pass_budget_never_stops_the_heaviest_legitimate_frames() {
+    use engine_exec::explicit_plan::loop_budget;
+    use engine_softbody::explicit_beams::{ExplicitBeams, StaticBox};
+    use engine_softbody::hires::{hires_car_jbeam, HiresParams};
+    use engine_softbody::jbeam::load_jbeam;
+    use engine_softbody::truck_export::TyreDefaults;
+    use glam::Vec3;
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    const STEPS: u32 = 128;
+    let sedan = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck"
+    ))
+    .unwrap();
+    let (hires, _) = hires_car_jbeam(&HiresParams::default());
+    let desc = load_jbeam(&[("hires.jbeam", hires.as_str())], None).unwrap();
+    let (mut car, _) = ExplicitBeams::from_desc_jbeam(
+        &desc,
+        TyreDefaults::for_vehicle(&desc),
+        Vec3::new(0.0, 0.6, 0.0),
+        Vec3::new(0.0, 0.0, 15.0),
+        Default::default(),
+    )
+    .unwrap();
+    car.boxes.push(StaticBox::centered(Vec3::new(0.0, 2.0, 4.5), Vec3::new(3.0, 2.0, 0.5)));
+    let chain: Vec<ExplicitBeams> = (0..5)
+        .map(|k| {
+            let v = if k == 0 { Vec3::new(23.6, 0.0, 0.0) } else { Vec3::ZERO };
+            ExplicitBeams::from_truck(&sedan, Vec3::new(-6.0 + 5.2 * k as f32, 0.3, 0.0), v, Default::default()).unwrap()
+        })
+        .collect();
+    for (label, fleet, frames) in [("hires JBeam into a wall", vec![car], 6), ("five sedans nose to tail", chain, 6)] {
+        let mut gpu = engine_webgpu::ExplicitBeamsGpu::new(&device, &queue, &fleet);
+        let budget = loop_budget(gpu.layout().loop_unit, STEPS);
+        // SAFETY: this test's own process state; the planner reads it at each frame.
+        unsafe { std::env::set_var("RUBBLE_LOOP_BUDGET", (budget / 8).to_string()) };
+        for f in 0..frames {
+            gpu.frame(STEPS);
+            gpu.wait();
+            let status = gpu.kernel_status();
+            assert!(status.is_ok(), "{label}: frame {f} stopped with an eighth of the budget ({}): {status:?}", budget / 8);
+        }
+        unsafe { std::env::remove_var("RUBBLE_LOOP_BUDGET") };
+        assert!(gpu.frame_error().is_none(), "{label}: {:?}", gpu.frame_error());
+        eprintln!("{label}: {frames} frames of {STEPS} steps within {} passes (host budget {budget})", budget / 8);
+    }
 }

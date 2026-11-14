@@ -86,6 +86,11 @@ pub struct ExplicitBeamsGpu {
     /// `wait` saw, not yet handled.
     contact_errors: std::sync::Mutex<Vec<String>>,
     contact_errors_seen: std::sync::Mutex<Vec<String>>,
+    /// The first error whose frame's results are invalid (a loop stopped at its cap or
+    /// the frame's pass budget, a pair-list overflow, an unconverged or oversized
+    /// group: everything but a vehicle leaving its frame bounds, which the margin
+    /// absorbs). Sticky until [`Self::clear_frame_error`] ([`Self::frame_error`]).
+    frame_error: std::sync::Mutex<Option<String>>,
     /// The bound buffers (bindings 0..8) and the module choice (aero, 512 lanes),
     /// for the test-only kernel variants ([`Self::set_kernel_variant`]).
     bufs: [wgpu::Buffer; 9],
@@ -784,6 +789,7 @@ impl ExplicitBeamsGpu {
             contact,
             contact_errors: Default::default(),
             contact_errors_seen: Default::default(),
+            frame_error: Default::default(),
             bufs,
             module_kind: (aero, big, lanes),
             variant: KernelVariant::Current,
@@ -2263,6 +2269,9 @@ impl ExplicitBeamsGpu {
             }
             self.planner.request_replan();
         }
+        if !e.contains("left its frame bounds") {
+            self.frame_error.lock().unwrap().get_or_insert_with(|| e.clone());
+        }
         let mut errors = self.contact_errors.lock().unwrap();
         if errors.last() != Some(&e) {
             errors.push(e);
@@ -2274,6 +2283,22 @@ impl ExplicitBeamsGpu {
     pub fn take_contact_errors(&mut self) -> Vec<String> {
         self.check_contact_status();
         std::mem::take(&mut *self.contact_errors.lock().unwrap())
+    }
+
+    /// The first error since the last [`Self::clear_frame_error`] whose frame's results
+    /// are invalid (a loop stopped at its cap or by the frame's pass budget, a pair-list
+    /// overflow, an unconverged or oversized contact group), or `None`. Main panicked on
+    /// these; the sim now keeps stepping and the host reads this flag (pages:
+    /// `ExplicitSim.frame` throws it, `frameError()`; the World: `explicitFrameError()`).
+    /// A vehicle leaving its frame bounds is not one (the margin widens; results hold).
+    pub fn frame_error(&mut self) -> Option<String> {
+        self.check_contact_status();
+        self.frame_error.lock().unwrap().clone()
+    }
+
+    /// Forget [`Self::frame_error`] (a host that handled it).
+    pub fn clear_frame_error(&mut self) {
+        *self.frame_error.lock().unwrap() = None;
     }
 
     /// The parameters for a frame of `steps` steps (the plan's copies, one per step).
@@ -2309,8 +2334,9 @@ impl ExplicitBeamsGpu {
         self.queue.submit([enc.finish()]);
     }
 
-    /// Block until submitted frames have run. Fails (panics) when one reported a
-    /// vehicle-contact error ([`Self::contact_status`]).
+    /// Block until submitted frames have run. An error a frame reported is kept for
+    /// [`Self::take_contact_errors`] and, when it invalidates the frame, for
+    /// [`Self::frame_error`] (main panicked here).
     pub fn wait(&self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         if let Some(e) = self.contact.ready_error() {

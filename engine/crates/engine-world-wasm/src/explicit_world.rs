@@ -131,6 +131,21 @@ impl WebWorld {
         self.world.explicit_vehicles_mut().map_or(Vec::new(), |g| g.take_contact_errors())
     }
 
+    /// The first explicit-solver error since `clearExplicitFrameError()` whose frame's
+    /// results are invalid (a loop stopped at its cap or the frame's pass budget, a
+    /// contact list overflow), or `undefined` (`ExplicitBeamsGpu::frame_error`).
+    #[wasm_bindgen(js_name = explicitFrameError)]
+    pub fn explicit_frame_error(&mut self) -> Option<String> {
+        self.world.explicit_vehicles_mut().and_then(|g| g.frame_error())
+    }
+
+    #[wasm_bindgen(js_name = clearExplicitFrameError)]
+    pub fn clear_explicit_frame_error(&mut self) {
+        if let Some(g) = self.world.explicit_vehicles_mut() {
+            g.clear_frame_error();
+        }
+    }
+
     /// Diagnostic: the explicit frame module's WGSL (per-vehicle workgroups).
     #[wasm_bindgen(js_name = debugExplicitFrameWgsl)]
     pub fn debug_explicit_frame_wgsl(&self) -> String {

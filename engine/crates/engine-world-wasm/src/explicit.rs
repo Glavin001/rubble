@@ -1157,7 +1157,14 @@ impl ExplicitSim {
     /// is a console warning and the sim keeps stepping; other errors are returned.
     pub fn frame(&mut self, steps: u32) -> Result<(), JsValue> {
         self.frame_steps(steps).map_err(err)?;
-        for e in self.gpu.take_contact_errors() {
+        let errors = self.gpu.take_contact_errors();
+        // A frame whose results are invalid (a loop stopped at its cap or the frame's
+        // pass budget, a contact list overflow): thrown, as main's trap stopped the sim;
+        // also kept for `frameError()` until `clearFrameError()`.
+        if let Some(e) = errors.iter().find(|e| !e.contains("left its frame bounds")) {
+            return Err(err(format!("explicit beams frame invalid: {e}")));
+        }
+        for e in errors {
             let note = format!("explicit beams vehicle contact (the sim continues): {e}");
             #[cfg(target_arch = "wasm32")]
             web_sys::console::warn_1(&note.into());
@@ -1165,6 +1172,21 @@ impl ExplicitSim {
             eprintln!("{note}");
         }
         Ok(())
+    }
+}
+
+#[wasm_bindgen]
+impl ExplicitSim {
+    /// The first error since `clearFrameError()` whose frame's results are invalid
+    /// (`ExplicitBeamsGpu::frame_error`), or `undefined`.
+    #[wasm_bindgen(js_name = frameError)]
+    pub fn frame_error(&mut self) -> Option<String> {
+        self.gpu.frame_error()
+    }
+
+    #[wasm_bindgen(js_name = clearFrameError)]
+    pub fn clear_frame_error(&mut self) {
+        self.gpu.clear_frame_error();
     }
 }
 
