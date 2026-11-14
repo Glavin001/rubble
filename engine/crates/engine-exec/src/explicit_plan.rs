@@ -191,6 +191,11 @@ pub const BEAM_ORDER_PAIR: u32 = 1;
 /// A JBeam plain, support, bounded or rope beam without an extension record: the hot
 /// path (jbeamHot), its records packed in the entry.
 pub const BEAM_ORDER_HOT: u32 = 2;
+/// An aero triangle's two records (kinds 18, 19) as one pair entry with its fields packed:
+/// (j, class | kind << 2 | third node (local) << 16, nodes x0 | x1 << 16, the first
+/// record's slots), (drag, lift, sin of the stall angle, the second record's slots).
+/// Both records unbroken: atriHot; otherwise as [`BEAM_ORDER_PAIR`].
+pub const BEAM_ORDER_ATRI: u32 = 3;
 /// The kind codes of a two-record element's second record (torsion, pressure triangle,
 /// aero triangle, LBEAM vertex).
 pub const BEAM_ORDER_SECONDS: [u32; 4] = [11, 17, 19, 20];
@@ -226,6 +231,121 @@ pub fn pair_reuse_default() -> u32 {
         .unwrap_or(PAIR_REUSE_MARGIN);
     m.to_bits()
 }
+/// The beam phase on its sorted records at start ([`W_BEAM_ORDER`]); `RUBBLE_BEAM_ORDER=0`
+/// (measurement) starts in file order.
+pub fn beam_order_default() -> bool {
+    std::env::var("RUBBLE_BEAM_ORDER").as_deref() != Ok("0")
+}
+
+/// The [`W_BEAM_ORDER`] region from the uploaded records: per vehicle its header, then
+/// per vehicle `beams` entry slots (2 records each) at its beam offset, its entries
+/// first. Hot: a JBeam plain (6), support (7), bounded (8) or rope (21) beam without an
+/// extension record whose fields fit the packing (16-bit local ends and incidence
+/// slots, a 16-bit group); a vehicle that does not fit keeps every beam on beamUpdate.
+fn beam_order_records(
+    spans: &[Span],
+    node_info: &[[u32; 4]],
+    beam_recs: &[[u32; 4]],
+    slots: &[[u32; 2]],
+    ext_index: &[u32],
+    ext_recs: &[[u32; 4]],
+) -> Vec<[u32; 4]> {
+    const TYPE_EXT_BIT: u32 = 4 << 8;
+    let nv = spans.len();
+    let total: usize = spans.iter().map(|s| s.beams as usize).sum();
+    let mut out = vec![[0u32; 4]; nv + 2 * total];
+    for (vi, s) in spans.iter().enumerate() {
+        let n = s.beams as usize;
+        if n == 0 {
+            continue;
+        }
+        let inc_start = node_info.get(s.node_off as usize).map_or(0, |i| i[1]);
+        let rec = |j: usize| beam_recs[3 * (s.beam_off as usize + j)];
+        let kind = |j: usize| rec(j)[2] & 0xFF;
+        let fits = s.nodes <= 1 << 16
+            && (0..n).all(|j| {
+                let g = slots[s.beam_off as usize + j];
+                (rec(j)[3] as i32).unsigned_abs() < 1 << 15
+                    && g.iter().all(|&p| p != u32::MAX && p >= inc_start && p - inc_start < 1 << 16)
+            });
+        let hot = |j: usize| fits && matches!(kind(j), 6 | 7 | 8 | 21) && rec(j)[2] & TYPE_EXT_BIT == 0;
+        // A first record whose next record is its second (torsion 10 → 11, pressure
+        // triangle 16 → 17, aero triangle 18 → 19, LBEAM 14 → 20).
+        let pairs = |j: usize| {
+            j + 1 < n && matches!((kind(j), kind(j + 1)), (10, 11) | (16, 17) | (18, 19) | (14, 20))
+        };
+        // An aero triangle (18 → 19) with its third node and both records' slots packed:
+        // its E1 (third node, drag, lift, sin of the stall angle).
+        let atri_e1 = |j: usize| -> Option<[u32; 4]> {
+            let x = *ext_index.get(s.beam_off as usize + j)?;
+            (x != 0).then(|| ext_recs[4 * (x as usize - 1) + 1])
+        };
+        let atri = |j: usize| {
+            fits && kind(j) == 18
+                && pairs(j)
+                && atri_e1(j).is_some_and(|e| e[0] >= s.node_off && e[0] - s.node_off < 1 << 16)
+        };
+        let mut entries: Vec<(u32, u32, usize)> = Vec::with_capacity(n);
+        let mut j = 0;
+        while j < n {
+            if pairs(j) {
+                entries.push((1, kind(j), j));
+                j += 2;
+                continue;
+            }
+            // (A second record without its first, which uploads never make: alone.)
+            entries.push((if hot(j) { 0 } else { 1 }, kind(j), j));
+            j += 1;
+        }
+        let hot_count = entries.iter().filter(|e| e.0 == 0).count();
+        // Hot block first, then the rest; by kind, then index (a stable sort).
+        entries.sort_by_key(|&(block, k, j)| (block, k, j));
+        out[vi] = [entries.len() as u32, hot_count as u32, inc_start, 0];
+        for (k, &(block, _, j)) in entries.iter().enumerate() {
+            let r0 = rec(j);
+            let at = nv + 2 * (s.beam_off as usize + k);
+            let class = if block == 0 {
+                BEAM_ORDER_HOT
+            } else if atri(j) {
+                BEAM_ORDER_ATRI
+            } else if pairs(j) {
+                BEAM_ORDER_PAIR
+            } else {
+                BEAM_ORDER_SINGLE
+            };
+            let mut y = class | (r0[2] & 0x1F) << 2;
+            if class == BEAM_ORDER_HOT {
+                let r1 = beam_recs[3 * (s.beam_off as usize + j) + 1];
+                let r2 = beam_recs[3 * (s.beam_off as usize + j) + 2];
+                let g = slots[s.beam_off as usize + j];
+                y |= ((r0[2] >> 8) & 3) << 8 | (r0[3] as i32 as i16 as u16 as u32) << 16;
+                out[at] = [
+                    j as u32,
+                    y,
+                    (r0[0] - s.node_off) | (r0[1] - s.node_off) << 16,
+                    (g[0] - inc_start) | (g[1] - inc_start) << 16,
+                ];
+                out[at + 1] = [r1[0], r1[1], r2[3], r2[1]];
+            } else if class == BEAM_ORDER_ATRI {
+                let e1 = atri_e1(j).expect("an aero triangle's E1");
+                let g = slots[s.beam_off as usize + j];
+                let g2 = slots[s.beam_off as usize + j + 1];
+                y |= (e1[0] - s.node_off) << 16;
+                out[at] = [
+                    j as u32,
+                    y,
+                    (r0[0] - s.node_off) | (r0[1] - s.node_off) << 16,
+                    (g[0] - inc_start) | (g[1] - inc_start) << 16,
+                ];
+                out[at + 1] = [e1[1], e1[2], e1[3], (g2[0] - inc_start) | (g2[1] - inc_start) << 16];
+            } else {
+                out[at] = [j as u32, y, 0, 0];
+            }
+        }
+    }
+    out
+}
+
 /// Params word: the reused pair list's piece labels in gNext (the kernel's pieceBase; 0
 /// none): per node its label, then per vehicle its labels-in-use word.
 pub const W_PIECE_BASE: usize = 94;
@@ -2028,6 +2148,9 @@ impl ExplicitUpload {
                 }
             }
         }
+        // The beam phase's records sorted by kind ([`W_BEAM_ORDER`]), from the beam records
+        // as uploaded (filters patched).
+        let beam_order = beam_order_records(&spans, &node_info, &beam_recs, &slots, &ext_index, &ext_recs);
         let table_recs = vehicle_recs.clone();
         let mut statics = vehicle_recs;
         statics.extend(node_info);
@@ -2092,6 +2215,13 @@ impl ExplicitUpload {
                 seg_mark += segs.len() as u32;
                 node_mark += v.nodes.len() as u32;
             }
+            base
+        } else {
+            0
+        };
+        let beam_order_base = if beam_order_default() && total_beams > 0 {
+            let base = statics.len() as u32;
+            statics.extend(beam_order);
             base
         } else {
             0
@@ -2204,6 +2334,9 @@ impl ExplicitUpload {
             pair_reuse_default(),
             pair_streak_default(),
             piece_base,
+            // The retired nodes (set by the host), then the beam phase's sorted records.
+            0,
+            beam_order_base,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -3170,6 +3303,7 @@ mod tests {
         let slot_base = up.layout.words[8] as usize;
         let nv = vs.len();
         let mut hot_total = 0;
+        let mut atri_total = 0;
         for (vi, v) in vs.iter().enumerate() {
             let span = up.layout.spans[vi];
             let head = up.statics[base + vi];
@@ -3210,6 +3344,23 @@ mod tests {
                         assert!(BEAM_ORDER_SECONDS.contains(&second), "vehicle {vi} entry {k}: a pair's second record");
                         seen[j + 1] += 1;
                     }
+                    BEAM_ORDER_ATRI => {
+                        let g = span.beam_off as usize + j;
+                        assert_eq!(kind, 18, "an aero triangle");
+                        assert_eq!(up.statics[beam_base + 3 * (g + 1)][2] & 0xFF, 19, "its second record");
+                        let x = up.lists[up.layout.words[64] as usize + g];
+                        let e1 = up.statics[up.layout.words[65] as usize + 4 * (x as usize - 1) + 1];
+                        assert_eq!(span.node_off + (a[1] >> 16), e1[0], "third node");
+                        assert_eq!(span.node_off + (a[2] & 0xFFFF), rec(0)[0], "x0");
+                        assert_eq!(span.node_off + (a[2] >> 16), rec(0)[1], "x1");
+                        assert_eq!([b[0], b[1], b[2]], [e1[1], e1[2], e1[3]], "drag, lift, stall");
+                        for (r, w) in [(g, a[3]), (g + 1, b[3])] {
+                            assert_eq!(inc_start + (w & 0xFFFF), up.lists[slot_base + 2 * r], "slot a of {r}");
+                            assert_eq!(inc_start + (w >> 16), up.lists[slot_base + 2 * r + 1], "slot b of {r}");
+                        }
+                        seen[j + 1] += 1;
+                        atri_total += 1;
+                    }
                     BEAM_ORDER_SINGLE => {}
                     other => panic!("vehicle {vi} entry {k}: class {other}"),
                 }
@@ -3217,6 +3368,7 @@ mod tests {
             assert!(seen.iter().all(|&s| s == 1), "vehicle {vi}: every beam exactly once");
         }
         assert!(hot_total > vs[1].beams.len() / 2, "most of the sedan's beams are hot ({hot_total})");
+        assert!(atri_total > 0, "the sedan's aero triangles are packed");
     }
 
     /// Every kernel a plan can name has a module, with its entry.

@@ -6,7 +6,7 @@
 //!
 //! Vehicles: the generated sedan (in memory, as the rigger exports it: JBeam plain,
 //! support and bounded beams, couplers, torsion bars, extension records, aero
-//! triangles) into a wall at 56 km/h (yields, breaks and group cascades), and beside a
+//! triangles) into a wall at 100 km/h (yields, breaks and group cascades), and beside a
 //! Rigs of Rods truck (plain kinds, the cold path) in one upload.
 
 use engine_softbody::authoring::gen2::{rig as lattice, vg_input};
@@ -29,7 +29,12 @@ fn first_diff(a: &[(&str, Vec<u32>)], b: &[(&str, Vec<u32>)]) -> Option<String> 
     None
 }
 
-fn sedan_desc() -> SoftVehicleDesc {
+fn sedan_desc() -> &'static SoftVehicleDesc {
+    static D: std::sync::OnceLock<SoftVehicleDesc> = std::sync::OnceLock::new();
+    D.get_or_init(build_desc)
+}
+
+fn build_desc() -> SoftVehicleDesc {
     let inp = rig::DesignInput::find("sedan", None, None).expect("the sedan's design");
     let r = lattice::rig_with(&inp);
     let files = vg_input::physics_files(&inp, &r);
@@ -55,8 +60,8 @@ fn sedan(at: Vec3, speed: f32, gap: f32) -> ExplicitBeams {
         ..Default::default()
     };
     let v = Vec3::Z * speed;
-    let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(&d, Vec3::ZERO, Vec3::ZERO, settings).expect("spawn");
-    let f = engine_softbody::pack::forward_axis(&d);
+    let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(d, Vec3::ZERO, Vec3::ZERO, settings).expect("spawn");
+    let f = engine_softbody::pack::forward_axis(d);
     let q = Quat::from_rotation_y(-f.x.atan2(f.z));
     let o = s.origin;
     s.origin = Vec3::ZERO;
@@ -137,8 +142,8 @@ fn compare(label: &str, fleet: &[ExplicitBeams], segments: &[(u32, u32)]) -> Opt
 
 #[test]
 fn generated_sedan_into_a_wall_sorted_order_is_file_order() {
-    let car = sedan(Vec3::ZERO, 15.6, 0.3);
-    let Some(broken) = compare("generated sedan wall", &[car], &[(2, 17), (120, 1), (40, 17)]) else {
+    let car = sedan(Vec3::ZERO, 27.8, 0.3);
+    let Some(broken) = compare("generated sedan wall", &[car], &[(2, 17), (200, 1), (60, 17)]) else {
         return;
     };
     assert!(broken > 0, "the crash breaks beams (so breaks were compared)");
@@ -148,4 +153,14 @@ fn generated_sedan_into_a_wall_sorted_order_is_file_order() {
 fn sedan_and_truck_in_one_upload_sorted_order_is_file_order() {
     let fleet = [sedan(Vec3::ZERO, 0.0, 0.0), truck(Vec3::new(10.0, 0.0, 0.0))];
     compare("sedan and truck at rest", &fleet, &[(30, 17)]);
+}
+
+#[test]
+fn fleet_of_32_sedans_apart_sorted_order_is_file_order() {
+    // 32 generated sedans side by side, 6 m apart, rolling at 10 m/s (the fleet
+    // benchmark's shape: no vehicle contact).
+    let fleet: Vec<ExplicitBeams> = (0..32)
+        .map(|i| sedan(Vec3::new(6.0 * (i % 8) as f32, 0.0, 12.0 * (i / 8) as f32), 10.0, 0.0))
+        .collect();
+    compare("32 sedans apart", &fleet, &[(20, 17)]);
 }

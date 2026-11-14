@@ -799,9 +799,13 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let reuse_ab = arg("--ab-switch").as_deref() == Some("reuse");
     // `--ab-switch pieces`: the pair list's piece labels (the lab's) against none.
     let pieces_ab = arg("--ab-switch").as_deref() == Some("pieces");
+    // `--ab-switch beams`: the beam phase on its records sorted by kind against file order.
+    let beams_ab = arg("--ab-switch").as_deref() == Some("beams");
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if pieces_ab {
+        if beams_ab {
+            x.set_beam_order(on);
+        } else if pieces_ab {
             let zeros = vec![0u8; n_nodes];
             x.set_piece_labels(0, if on && !labels.is_empty() { labels } else { &zeros });
         } else if reuse_ab {
@@ -891,7 +895,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             println!(
                 "   A/B at t {:.1}: {} on {:.2} ms/frame, off {:.2} ms/frame; state bit for bit: {same}",
                 lab.bench.t,
-                if pieces_ab { "piece labels" } else if reuse_ab { "pair reuse" } else { "surface culls" },
+                if beams_ab { "sorted beams" } else if pieces_ab { "piece labels" } else if reuse_ab { "pair reuse" } else { "surface culls" },
                 out[0].0,
                 out[1].0
             );

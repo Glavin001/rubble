@@ -280,6 +280,12 @@ struct Params
     // Debris retired by the host (DebrisTtl, engine_softbody::explicit_debris): gMisc per
     // node a bit (128 nodes a record; 0: none retired, nothing below runs).
     uint retireBase;
+    // The beam phase's records sorted by kind in gStatic (beamPhaseSorted; 0: the beams
+    // in file order, beamUpdate for each). explicit_plan::W_BEAM_ORDER.
+    uint beamOrder;
+    uint beamOrderPad0;
+    uint beamOrderPad1;
+    uint beamOrderPad2;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -2783,6 +2789,325 @@ void beamUpdate(uint gj, uint local, bool fast, uint groupOff, uint parity)
     float3 push = sscale(d, smul(f, inv));
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u]] = float4(push, 0.0);
     gBeams[gP.incBase + gLists[gP.slotBase + gj * 2u + 1u]] = float4(-push, 0.0);
+}
+
+// --- The beam phase on its records sorted by kind (gP.beamOrder, explicit_plan
+// W_BEAM_ORDER). The same updates as beamUpdate in file order; only the lane that runs
+// a beam, and when, change: a beam writes only its own records and incidence entries,
+// and group breaks are atomic minima. Per vehicle a header (entries, hot entries, its
+// first incidence position), then its entries: the hot JBeam beams (jbeamHot), then
+// every other beam by kind (beamUpdate), a two-record element as one entry whose
+// second record is updated first, on the same lane, as the two lanes in step did.
+static const uint BEAM_ORDER_SINGLE = 0u;
+static const uint BEAM_ORDER_PAIR = 1u;
+static const uint BEAM_ORDER_HOT = 2u;
+static const uint BEAM_ORDER_ATRI = 3u;
+
+// A hot beam's state and its ends (nothing in the beam phase writes them but the beam
+// itself, after it has read them): loaded ahead of the beam's arithmetic.
+struct HotIn
+{
+    float4 s0;
+    float4 s1;
+    float4 pa;
+    float4 pb;
+    float3 va;
+    float3 vb;
+};
+HotIn hotLoad(uint gj, uint4 a, uint nodeOff)
+{
+    HotIn h;
+    uint na = nodeOff + (a.z & 0xFFFFu);
+    uint nb = nodeOff + (a.z >> 16);
+    h.s1 = gBeams[gj * 2u + 1u];
+    h.s0 = gBeams[gj * 2u];
+    h.pa = gNodes[na * 3u];
+    h.pb = gNodes[nb * 3u];
+    h.va = gNodes[na * 3u + 1u].xyz;
+    h.vb = gNodes[nb * 3u + 1u].xyz;
+    return h;
+}
+// beamUpdate and jbeamUpdate for a JBeam plain, support, bounded or rope beam with no
+// extension record, its static fields from its sorted entry (a, b): every load it needs
+// is issued at once (the entry, then its state and its ends: hotLoad), no index waits
+// on another.
+// The rest of its records (limit k and c, short bound, plastic) only where the rule
+// reads them. The arithmetic is jbeamUpdate's, operation for operation.
+void jbeamHot(uint gj, uint4 a, uint4 b, HotIn h, uint incStart, uint groupOff, uint parity, bool centred, bool keep)
+{
+    uint local = a.x;
+    cfFire(gj, groupOff, parity);
+    uint slotA = gP.incBase + incStart + (a.w & 0xFFFFu);
+    uint slotB = gP.incBase + incStart + (a.w >> 16);
+    float4 s1 = h.s1;
+    float4 s0 = h.s0;
+    float4 pa = h.pa;
+    float4 pb = h.pb;
+    float3 va = h.va;
+    float3 vb = h.vb;
+    if (s1.z != 0.0)
+    {
+        // beamUpdate's broken beam (no extension record: extPending does nothing).
+        if (s1.w != 0.0) gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
+        gBeams[slotA] = float4(0.0, 0.0, 0.0, 0.0);
+        gBeams[slotB] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    uint kind = (a.y >> 2) & 31u;
+    uint type = (a.y >> 8) & 3u;
+    int group = int(a.y) >> 16;
+    bool broken = false;
+    float strength = s1.x;
+    float rest = s0.x;
+    float tc = s0.y;
+    float tt = s0.z;
+    float gate = s0.w;
+    float3 d = ssub3(pa.xyz, pb.xyz);
+    float q = sdot(d, d);
+    float2 li = sExactLength(q);
+    float inv = li.y;
+    float len = li.x;
+    float e = nf(len - rest);
+    float u = smul(sdot(ssub3(va, vb), d), inv);
+    float gain = 1.0;
+    if (b.z != 0u)
+    {
+        uint fi = b.z - 1u;
+        float4 flt = gBeams[fi];
+        float y = nf(smul(flt.z, u) - smul(flt.w, flt.y));
+        gBeams[fi] = float4(u, y, flt.z, flt.w);
+        u = y;
+        gain = flt.z;
+    }
+    float k = asfloat(b.x);
+    float c = asfloat(b.y);
+    float damp = smul(c, u);
+    float slope = c;
+    float last = 0.0;
+    float f = 0.0;
+    bool lengthBreak = false;
+    if (kind == KIND_JBOUNDED)
+    {
+        float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
+        float4 c2 = asfloat(gStatic[gP.beamBase + gj * 3u + 2u]);
+        float au = abs(u);
+        if (au > tc)
+        {
+            float m = nf(smul(c, tc) + smul(tt, nf(au - tc)));
+            damp = u < 0.0 ? -m : m;
+            slope = tt;
+        }
+        float lb = smul(c2.y, rest);
+        float sb = smul(c2.x, rest);
+        float o = 0.0;
+        if (e > lb) o = nf(e - lb);
+        else if (e < -sb) o = nf(-e - sb);
+        if (o > 0.0)
+        {
+            float sz = c2.z > 0.0 ? min(sdiv(o, c2.z), 1.0) : 1.0;
+            k = nf(k + smul(nf(c1.z - k), sz));
+            damp = nf(damp + smul(nf(smul(c1.w, u) - damp), sz));
+            slope = nf(slope + smul(nf(c1.w - slope), sz));
+        }
+    }
+    else if (kind == KIND_JSUPPORT && e > 0.0)
+    {
+        if (len > asfloat(b.w)) lengthBreak = true;
+        k = 0.0;
+        damp = 0.0;
+        slope = 0.0;
+    }
+    else if (kind == KIND_JROPE && e < 0.0)
+    {
+        k = 0.0;
+        damp = smul(smul(c, 0.1), u);
+        slope = smul(c, 0.1);
+    }
+    bool tear = false;
+    if (lengthBreak)
+    {
+        broken = true;
+        if (group > 0)
+        {
+            gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+            gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+        }
+    }
+    else
+    {
+        f = nf(smul(-k, e) - damp);
+        last = f;
+        float tau = abs(f);
+        if (tau > gate && type == TYPE_DEFORMABLE && k != 0.0)
+        {
+            float4 c1 = asfloat(gStatic[gP.beamBase + gj * 3u + 1u]);
+            float4 c2 = asfloat(gStatic[gP.beamBase + gj * 3u + 2u]);
+            if (f > tc && e < 0.0 && nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z))) < 0.0)
+            {
+                float delta = nf(e + smul(sdiv(tc, k), nf(1.0 - c2.z)));
+                float old = rest;
+                float floorLen = max(c2.x, MIN_REST);
+                float free = nf(rest + delta);
+                if (free < floorLen)
+                {
+                    rest = min(floorLen, old);
+                    f = nf(smul(-k, nf(len - rest)) - damp);
+                }
+                else
+                {
+                    rest = free;
+                    f = nf(f - sdiv(nf(f - tc), 2.0));
+                }
+                tau = abs(f);
+                if (rest < old)
+                {
+                    tc = min(sdiv(smul(tc, old), rest), max(c1.z, tc));
+                    gate = min(min(tc, tt), strength);
+                }
+            }
+            else if (f < -tt && e > 0.0 && nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z))) > 0.0)
+            {
+                float delta = nf(e - smul(sdiv(tt, k), nf(1.0 - c2.z)));
+                float old = rest;
+                float free = nf(rest + delta);
+                float ceilLen = abs(c2.y);
+                if (free > ceilLen)
+                {
+                    rest = max(ceilLen, old);
+                    f = nf(smul(-k, nf(len - rest)) - damp);
+                    tear = c2.y < 0.0;
+                }
+                else
+                {
+                    rest = free;
+                    f = nf(f - sdiv(nf(f + tt), 2.0));
+                }
+                tau = abs(f);
+                if (rest > old)
+                {
+                    tt = min(sdiv(smul(tt, rest), old), max(c1.z, tt));
+                    gate = min(min(tc, tt), strength);
+                    if (!keep) strength = nf(strength - smul(nf(rest - old), k));
+                }
+            }
+        }
+        if (tau > strength || tear)
+        {
+            broken = true;
+            f = 0.0;
+            if (group > 0)
+            {
+                gGroups[groupSlot(parity, groupOff, uint(group))].min(local);
+                gGroups[groupSlot(parity, groupOff, 0u)].min(local);
+            }
+        }
+    }
+    float4 n0 = float4(rest, tc, tt, gate);
+    if (any(n0 != s0)) gBeams[gj * 2u] = n0;
+    if (strength != s1.x || broken)
+        gBeams[gj * 2u + 1u] = float4(strength, last, broken ? 1.0 : 0.0, broken ? 1.0 : 0.0);
+    else if (s1.w != 0.0)
+        gBeams[gj * 2u + 1u] = float4(s1.xyz, 0.0);
+    float3 push = sscale(d, smul(f, inv));
+    gBeams[slotA] = float4(push, !broken && centred ? smul(slope, gain) : 0.0);
+    gBeams[slotB] = float4(-push, 0.0);
+}
+
+// jbeamExtUpdate's aero triangle (KIND_JATRI) for an unbroken pair, its third node,
+// factors and both records' slots from its sorted entry (a, b): the same arithmetic.
+void atriHot(uint4 a, uint4 b, uint nodeOff, uint incStart)
+{
+    uint n0 = nodeOff + (a.z & 0xFFFFu);
+    uint n1 = nodeOff + (a.z >> 16);
+    uint n2 = nodeOff + (a.y >> 16);
+    float3 x0 = gNodes[n0 * 3u].xyz;
+    float3 x1 = gNodes[n1 * 3u].xyz;
+    float3 x2 = gNodes[n2 * 3u].xyz;
+    float3 v0 = gNodes[n0 * 3u + 1u].xyz;
+    float3 v1 = gNodes[n1 * 3u + 1u].xyz;
+    float3 v2 = gNodes[n2 * 3u + 1u].xyz;
+    float4 e1 = float4(0.0, asfloat(b.x), asfloat(b.y), asfloat(b.z));
+    float3 vm = sscale(sadd3(sadd3(v0, v1), v2), 1.0 / 3.0);
+    float s2 = sdot(vm, vm);
+    float3 cr = scross(ssub3(x1, x0), ssub3(x2, x0));
+    float cl = ssqrt(sdot(cr, cr));
+    float3 f = float3(0.0, 0.0, 0.0);
+    if (s2 > 1e-12 && cl > 0.0)
+    {
+        float sp = ssqrt(s2);
+        float3 u = sscale(vm, sdiv(-1.0, sp));
+        float3 n = sscale(cr, sdiv(1.0, cl));
+        float c = sdot(n, u);
+        float sa = abs(c);
+        float ca = ssqrt(max(nf(1.0 - smul(c, c)), 0.0));
+        float q = smul(smul(0.5, cl), s2);
+        f = sscale(u, smul(smul(e1.y, q), sa));
+        float3 l = ssub3(n, sscale(u, c));
+        float ll = ssqrt(sdot(l, l));
+        if (ll > 0.0)
+        {
+            float cla = sa <= e1.w ? smul(sa, ca) : smul(e1.w, ca);
+            float m = smul(smul(e1.z, q), cla);
+            f = sadd3(f, sscale(l, sdiv(c < 0.0 ? -m : m, ll)));
+        }
+        f = sscale(f, 1.0 / 3.0);
+    }
+    uint base = gP.incBase + incStart;
+    gBeams[base + (a.w & 0xFFFFu)] = float4(f, 0.0);
+    gBeams[base + (a.w >> 16)] = float4(f, 0.0);
+    gBeams[base + (b.w & 0xFFFFu)] = float4(f, 0.0);
+    gBeams[base + (b.w >> 16)] = float4(0.0, 0.0, 0.0, 0.0);
+}
+
+// Vehicle v's beam phase on its sorted entries (`head`: its gStatic header at
+// gP.beamOrder + v): lanes stride over the entries.
+void beamPhaseSorted(uint v, uint lane, uint lanes, uint4 head, bool on, uint nodeOff, uint beamOff, bool fast,
+                     uint groupOff, uint parity, uint flagsV)
+{
+    uint entries = on ? head.x : 0u;
+    bool centred = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
+    bool keep = (flagsV & FLAG_KEEP_STRENGTH) != 0u;
+    uint at = gP.beamOrder + gP.vehicles + 2u * beamOff;
+    uint hot = min(head.y, entries);
+    uint k = lane;
+    for (uint kStop = EB_END(k, hot, lanes); k < kStop; k += lanes)
+    {
+        uint4 a = gStatic[at + 2u * k];
+        jbeamHot(beamOff + a.x, a, gStatic[at + 2u * k + 1u], hotLoad(beamOff + a.x, a, nodeOff), head.z, groupOff,
+                 parity, centred, keep);
+    }
+    for (uint kStop = EB_END(k, entries, lanes); k < kStop; k += lanes)
+    {
+        uint4 a = gStatic[at + 2u * k];
+        uint cls = a.y & 3u;
+        uint gj = beamOff + a.x;
+        if (cls == BEAM_ORDER_ATRI)
+        {
+            // Both records unbroken: their updates are the first's aero force alone
+            // (the second's writes nothing), after their contact-force groups.
+            if (gBeams[gj * 2u + 1u].z == 0.0 && gBeams[(gj + 1u) * 2u + 1u].z == 0.0)
+            {
+                cfFire(gj + 1u, groupOff, parity);
+                cfFire(gj, groupOff, parity);
+                atriHot(a, gStatic[at + 2u * k + 1u], nodeOff, head.z);
+                continue;
+            }
+        }
+        // A pair: the second record first (the first record writes its incidence
+        // entries and, a torsion bar, its state), then the first. An unbroken second
+        // record's update writes nothing (it returns on its kind) but its contact-force
+        // group. One call site of beamUpdate (the compilers inline it).
+        for (uint p = cls == BEAM_ORDER_PAIR || cls == BEAM_ORDER_ATRI ? 0u : 1u; p < 2u; p++)
+        {
+            uint up = 1u - p;
+            if (p == 0u && gBeams[(gj + 1u) * 2u + 1u].z == 0.0)
+            {
+                cfFire(gj + 1u, groupOff, parity);
+                continue;
+            }
+            beamUpdate(gj + up, a.x + up, fast, groupOff, parity);
+        }
+    }
 }
 
 // A triangle's throttle after a step: a waiting triangle counts down (and its idle
@@ -6169,6 +6494,8 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         cplGsClear();
         cplGsAdd(0u, v, 0u, 0u);
     }
+    // The beam phase's sorted entries' header (beamPhaseSorted).
+    uint4 beamHead = gP.beamOrder != 0u ? gStatic[gP.beamOrder + v] : uint4(0u, 0u, 0u, 0u);
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
 #ifdef EB_VV_SOLO
@@ -6328,7 +6655,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #else
         uint beamEnd = beamCount;
 #endif
-        for (uint j = lane, jStop = EB_END(j, beamEnd, LANES); j < jStop; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
+        if (gP.beamOrder != 0u)
+            beamPhaseSorted(v, lane, LANES, beamHead, beamEnd != 0u, nodeOff, beamOff, fast, groupOff, parity, flagsV);
+        else
+            for (uint j = lane, jStop = EB_END(j, beamEnd, LANES); j < jStop; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
         // Without the grid this step: list the candidate pairs now (lanes in
         // reverse, so those with one beam fewer start first).
         uint listedB = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
