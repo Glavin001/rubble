@@ -595,7 +595,7 @@ fn kernel_name(cmd: &Cmd) -> &'static str {
         Kernel::Wide(_) => "explicit wide",
         Kernel::Sleep => "explicit sleep list",
         Kernel::FrameSeg => "explicit frame segment",
-        Kernel::Surf(_) => "explicit surface pass",
+        Kernel::Surf(i) => plan::SURF_PASSES[i].0,
     }
 }
 

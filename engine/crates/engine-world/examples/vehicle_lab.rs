@@ -38,6 +38,38 @@ fn car(name: &str) -> anyhow::Result<ExplicitBeams> {
         fast_inv_sqrt: true,
         ..Default::default()
     };
+    // A local JBeam export (a directory with `files.json`, as the page's `__mods/…`): the
+    // page's generated sedan, with the page's settings (air drag on).
+    let dir = std::path::Path::new(name);
+    if dir.join("files.json").is_file() {
+        let list: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("files.json"))?)?;
+        let mut texts = Vec::new();
+        let mut pc = None;
+        for f in &list {
+            if f.ends_with(".jbeam") {
+                texts.push((f.clone(), std::fs::read_to_string(dir.join(f))?));
+            } else if f.ends_with(".pc") {
+                pc = Some(std::fs::read_to_string(dir.join(f))?);
+            }
+        }
+        let files: Vec<(&str, &str)> = texts
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let settings = ExplicitBeamsSettings {
+            drag: true,
+            turbulence: true,
+            ..settings
+        };
+        return Ok(rubble::showcase_scene::jbeam_vehicle_on(
+            &files,
+            pc.as_deref(),
+            settings,
+            engine_softbody::explicit_beams::JbeamWheels::Raycast,
+        )?
+        .0);
+    }
     let text = match name {
         "showcase" => {
             use engine_softbody::authoring::{build, style, BuildParams, Resolution};
@@ -79,6 +111,7 @@ fn options(script: &Value) -> LabOptions {
         ("--roughness", "roughness"),
         ("--loose", "loose"),
         ("--start", "start"),
+        ("--launch", "launch"),
     ] {
         if let Some(x) = arg(flag).and_then(|x| x.parse::<f64>().ok()) {
             m[key] = if key == "seed" || key == "loose" {
@@ -87,6 +120,9 @@ fn options(script: &Value) -> LabOptions {
                 json!(x)
             };
         }
+    }
+    if let Some(r) = arg("--rockslide") {
+        m["rockslide"] = json!(r == "1");
     }
     o.insert("mountain".into(), m);
     LabOptions::from_json(&v)
@@ -342,8 +378,160 @@ fn measure(template: &ExplicitBeams, what: &str, gpu: bool) -> anyhow::Result<()
                 println!("{:>7.1} {:>8} {:>8}", d[0].as_f64().unwrap(), d[1], d[2]);
             }
         }
-        other => anyhow::bail!("unknown --measure {other} (plates, spheres, mountain)"),
+        "mountain-perf" => mountain_perf(template, gpu)?,
+        other => {
+            anyhow::bail!("unknown --measure {other} (plates, spheres, mountain, mountain-perf)")
+        }
     }
+    Ok(())
+}
+
+/// The page's mountain (`vehicle-lab.html?mode=mountain&…`) for its cost: per second of
+/// simulated time, the wall time of a World step (each step waited on: its GPU time and
+/// the readback), with the car's speed, node box, coupling use and the surface pair
+/// counts. `--steepness 55 --roughness 0.25 --launch 12 --rockslide 1 --surface 1` is
+/// the owner's report. Measurement switches (one at a time): `--ablate MASK` from
+/// `--ablate-at T` (results meaningless), `--surface-pairs 0`, `--surface-culls 0`.
+fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(gpu, "mountain-perf runs in the GPU World (--mode gpu)");
+    let secs: f64 = arg("--secs").and_then(|x| x.parse().ok()).unwrap_or(40.0);
+    let scene = arg("--scene").unwrap_or_else(|| "mountain".into());
+    let script = json!({ "scene": scene, "surface": arg("--surface").as_deref() == Some("1"), "events": [] });
+    let opts = options(&script);
+    println!(
+        "options: {scene}, surface {} {:?}",
+        opts.surface_contact, opts.mountain
+    );
+    let timing = arg("--timing");
+    let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |d| {
+        d.gpu_timing = match timing.as_deref() {
+            Some("phases") => GpuTiming::Phases,
+            Some("step") => GpuTiming::Step,
+            _ => GpuTiming::Off,
+        }
+    })?;
+    lab.read_blocking(&world, true)?;
+    lab.bench.set_script(&script)?;
+    let flag = |k: &str| arg(k).map(|x| x == "1");
+    if let Some(x) = world.explicit_vehicles_mut() {
+        if let Some(on) = flag("--surface-pairs") {
+            x.set_surface_pairs(on);
+        }
+        if let Some(on) = flag("--surface-culls") {
+            x.set_surface_culls(on);
+        }
+    }
+    let ablate: u32 = arg("--ablate").and_then(|x| x.parse().ok()).unwrap_or(0);
+    let ablate_at: f64 = arg("--ablate-at")
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(0.0);
+    let windows = (secs * 60.0).round() as u64;
+    let (mut sum, mut worst, mut n) = (0.0f64, 0.0f64, 0u32);
+    // `--alternate pairs|cull|ablate=MASK`: that switch on odd windows only, each
+    // window's wall time kept by parity (the same run's states, side by side).
+    let alternate = arg("--alternate");
+    let mut alt = [(0.0f64, 0u32); 2];
+    let t_all = std::time::Instant::now();
+    println!(
+        "{:>6} {:>8} {:>8} {:>8} {:>7} {:>18} {:>12} {:>16}",
+        "t s", "ms/step", "worst", "km/h", "drop m", "box m", "proxies", "surf pairs·hits"
+    );
+    for k in 0..windows {
+        if ablate != 0 && lab.bench.t >= ablate_at {
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.set_ablation(ablate);
+            }
+        }
+        let odd = k % 2 == 1;
+        if let (Some(a), Some(x)) = (alternate.as_deref(), world.explicit_vehicles_mut()) {
+            match a {
+                "pairs" => x.set_surface_pairs(!odd),
+                "cull" => x.set_coupling_cull(!odd),
+                m if m.starts_with("ablate=") => {
+                    x.set_ablation(if odd { m[7..].parse()? } else { 0 })
+                }
+                other => anyhow::bail!("unknown --alternate {other}"),
+            }
+        }
+        lab.before_step(&mut world)?;
+        let t = std::time::Instant::now();
+        world.step()?;
+        world.poll_blocking()?;
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        alt[usize::from(odd)].0 += ms;
+        alt[usize::from(odd)].1 += 1;
+        lab.read_blocking(&world, k % 6 == 5)?;
+        anyhow::ensure!(
+            !lab.bench.car.non_finite,
+            "non-finite node state at t = {:.3} s",
+            lab.bench.t
+        );
+        sum += ms;
+        worst = worst.max(ms);
+        n += 1;
+        if (k + 1) % 60 == 0 {
+            if let Some(g) = world.last_step_gpu_time() {
+                let mut by: Vec<(&str, f64, u32)> = Vec::new();
+                for &(l, ms) in &g.segments {
+                    match by.iter_mut().find(|x| x.0 == l) {
+                        Some(x) => {
+                            x.1 += ms;
+                            x.2 += 1;
+                        }
+                        None => by.push((l, ms, 1)),
+                    }
+                }
+                by.sort_by(|a, b| b.1.total_cmp(&a.1));
+                println!(
+                    "   gpu: total {:.2} ms, span {:.2} ms, {} segments ({} unmeasured); {}",
+                    g.total_ms,
+                    g.span_ms,
+                    g.segments.len(),
+                    g.unmeasured.len(),
+                    by.iter()
+                        .take(12)
+                        .map(|(l, ms, n)| format!("{l} {ms:.2}×{n}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if alternate.is_some() {
+                println!(
+                    "   alternate: off {:.2} ms/step, on {:.2} ms/step",
+                    alt[0].0 / f64::from(alt[0].1.max(1)),
+                    alt[1].0 / f64::from(alt[1].1.max(1))
+                );
+                alt = [(0.0, 0); 2];
+            }
+            let c = &lab.bench.car;
+            let size = c.hi - c.lo;
+            let pairs = world
+                .explicit_vehicles()
+                .map(|x| x.surface_pair_stats())
+                .unwrap_or_default();
+            println!(
+                "{:>6.1} {:>8.2} {:>8.2} {:>8.1} {:>7.0} {:>18} {:>12} {:>16}",
+                lab.bench.t,
+                sum / f64::from(n),
+                worst,
+                c.speed * 3.6,
+                -c.centre.y,
+                format!("{:.2}×{:.2}×{:.2}", size.x, size.y, size.z),
+                format!("{:?}", c.proxies),
+                pairs
+                    .first()
+                    .map_or("-".into(), |p| format!("{}·{}", p.0, p.1)),
+            );
+            (sum, worst, n) = (0.0, 0.0, 0);
+        }
+    }
+    if let Some(x) = world.explicit_vehicles() {
+        x.kernel_status().map_err(anyhow::Error::msg)?;
+    }
+    println!(
+        "wall {:.1} s for {secs:.1} s simulated",
+        t_all.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
