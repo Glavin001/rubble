@@ -17,9 +17,9 @@ const chrome = process.env.CHROME ?? '/Applications/Google Chrome.app/Contents/M
 const server = http.createServer(async (req, res) => {
   const file = path.join(root, decodeURIComponent(new URL(req.url, 'http://x').pathname));
   if (!file.startsWith(root)) { res.writeHead(403).end(); return; }
-  try {
-    res.writeHead(200, {'content-type': types[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store'}).end(await readFile(file));
-  } catch { res.writeHead(404).end(); }
+  let body;
+  try { body = await readFile(file); } catch { res.writeHead(404).end(); return; }
+  res.writeHead(200, {'content-type': types[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store'}).end(body);
 });
 await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
 const page = `http://127.0.0.1:${server.address().port}/dispatch.html`;

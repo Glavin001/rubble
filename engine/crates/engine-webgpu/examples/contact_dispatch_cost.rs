@@ -20,10 +20,14 @@ struct Rig {
 }
 
 impl Rig {
-    /// GPU ms of one pass holding `n` dispatches of `groups` workgroups (best of 7).
-    fn time(&self, pipe: &wgpu::ComputePipeline, group: &wgpu::BindGroup, groups: u32, n: u32) -> f64 {
-        let mut best = f64::MAX;
-        for _ in 0..7 {
+    /// (GPU, wall) ms of one pass holding `n` dispatches of `groups` workgroups: the
+    /// medians of 9 (the wall time from submit to completion; differences of two such
+    /// cancel the submission's own latency).
+    fn time(&self, pipe: &wgpu::ComputePipeline, group: &wgpu::BindGroup, groups: u32, n: u32) -> (f64, f64) {
+        let mut gpu = Vec::new();
+        let mut wall = Vec::new();
+        for _ in 0..9 {
+            let t0 = std::time::Instant::now();
             let mut enc = self.device.create_command_encoder(&Default::default());
             {
                 let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -46,11 +50,16 @@ impl Rig {
             let slice = self.read.slice(..);
             slice.map_async(wgpu::MapMode::Read, |_| {});
             let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            wall.push(t0.elapsed().as_secs_f64() * 1e3);
             let t: Vec<u64> = bytemuck::cast_slice(&slice.get_mapped_range().unwrap().to_vec()).to_vec();
             self.read.unmap();
-            best = best.min((t[1] - t[0]) as f64 * f64::from(self.queue.get_timestamp_period()) * 1e-6);
+            gpu.push(t[1].wrapping_sub(t[0]) as f64 * f64::from(self.queue.get_timestamp_period()) * 1e-6);
         }
-        best
+        let med = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        (med(gpu), med(wall))
     }
 }
 
@@ -118,12 +127,12 @@ fn main() {
             let g = group(&disp, 0);
             for groups in [1u32, 40, 128] {
                 let one = rig.time(&disp, &g, groups, 1);
-                let many = rig.time(&disp, &g, groups, 340);
+                let many = rig.time(&disp, &g, groups, 341);
                 println!(
-                    "dispatch: {words:5} workgroup words, zeroing {zero:5}, {groups:3} workgroups: one {:.1} us; 340 dependent {:.3} ms = {:.2} us each",
-                    one * 1e3,
-                    many,
-                    many * 1e3 / 340.0
+                    "dispatch: {words:5} workgroup words, zeroing {zero:5}, {groups:3} workgroups: a dependent dispatch {:.2} us (pass timestamps) / {:.2} us (wall); one alone {:.1} us",
+                    (many.0 - one.0) * 1e3 / 340.0,
+                    (many.1 - one.1) * 1e3 / 340.0,
+                    one.0 * 1e3,
                 );
             }
             let sy = pipe("syncs");
@@ -132,10 +141,9 @@ fn main() {
                 let k = 4000;
                 let loaded = rig.time(&sy, &group(&sy, k), groups, 1);
                 println!(
-                    "sync:     {words:5} workgroup words, zeroing {zero:5}, {groups:3} workgroups: {:.3} us a sync (k=0 {:.1} us, k={k} {:.3} ms)",
-                    (loaded - base) * 1e3 / f64::from(k),
-                    base * 1e3,
-                    loaded
+                    "sync:     {words:5} workgroup words, zeroing {zero:5}, {groups:3} workgroups: {:.3} us a sync (pass timestamps) / {:.3} us (wall)",
+                    (loaded.0 - base.0) * 1e3 / f64::from(k),
+                    (loaded.1 - base.1) * 1e3 / f64::from(k),
                 );
             }
         }

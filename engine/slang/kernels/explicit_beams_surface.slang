@@ -1184,7 +1184,7 @@ uint surfaceOn() { return 0u; }
 uint surfaceOn() { return gP.surfSplit != 0u ? 1u : 0u; }
 #endif
 
-#if defined(EB_FRAME_SEG) || defined(EB_SURF_PIPE)
+#if defined(EB_FRAME_SEG) || defined(EB_SURF_PIPE) || defined(EB_SOLO_STEP)
 // A frame in segments with the surface pass as its own pipelines
 // (explicit_beams_surface_pipes.slang): per vehicle one gMisc record, the wide passes'
 // (unused while the frame runs per vehicle, and the wide passes have no surface contact).
