@@ -104,3 +104,86 @@ fn the_jbeam_loaders_collision_range_is_mains_outside_the_beamng_profile() {
             .unwrap();
     assert_eq!(native.collision_range, 0.03);
 }
+
+/// Audit S6 / T1: vehicle contact runs in the owner's frame (`ExplicitBeamsWorld::owner_frame`)
+/// instead of World coordinates, so far from the origin the result differs from main. The
+/// reference is the same crash at the World origin (every position within metres of 0,
+/// f32 resolves 2.4e-7 m there): two repo sedans head on at 10 m/s each, spawned at four
+/// offsets about 100 m and four about 360 m out, 25 frames of 33 steps. Per band, the mean
+/// over frames 20-25 (after the impact at step 625) of the largest node distance from the
+/// origin run, positions rebuilt in f64. Main (30ab0e1d, measured with
+/// `examples/far_origin_contact_error.rs`, which builds unchanged on main):
+/// 0.0704 m at ~100 m, 0.1157 m at ~360 m. The branch must stay at or below main's error.
+/// Branch when written: 0.0688 m and 0.0550 m.
+#[test]
+fn far_from_the_origin_vehicle_contact_is_no_further_from_the_origin_run_than_mains() {
+    use engine_softbody::explicit_contact::ExplicitBeamsWorld;
+    const SEDAN: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/explicit-beams-acceptance/vehicles/rubble_sedan_ror.truck"
+    ));
+    const MAIN_100: f64 = 0.0704;
+    const MAIN_360: f64 = 0.1157;
+    fn world(at: Vec3) -> ExplicitBeamsWorld {
+        let mut s = ExplicitBeamsSettings::default();
+        s.fast_inv_sqrt = true;
+        let a = ExplicitBeams::from_truck(SEDAN, at + Vec3::new(-4.0, 0.3, 0.0), Vec3::new(10.0, 0.0, 0.0), s).unwrap();
+        let b = ExplicitBeams::from_truck(SEDAN, at + Vec3::new(4.0, 0.3, 0.4), Vec3::new(-10.0, 0.0, 0.0), s).unwrap();
+        ExplicitBeamsWorld::new(vec![a, b])
+    }
+    fn positions(w: &ExplicitBeamsWorld, at: Vec3) -> Vec<[f64; 3]> {
+        let mut out = Vec::new();
+        for v in &w.vehicles {
+            for n in &v.nodes {
+                let mut p = [0.0f64; 3];
+                for k in 0..3 {
+                    p[k] = v.origin.to_array()[k] as f64 + n.pos.to_array()[k] as f64 - at.to_array()[k] as f64;
+                }
+                out.push(p);
+            }
+        }
+        out
+    }
+    let mut reference = world(Vec3::ZERO);
+    let refs: Vec<_> = (0..25)
+        .map(|_| {
+            reference.frame(33);
+            positions(&reference, Vec3::ZERO)
+        })
+        .collect();
+    let band = |offsets: [Vec3; 4]| {
+        let (mut sum, mut n) = (0.0f64, 0);
+        for at in offsets {
+            let mut w = world(at);
+            for (f, r) in refs.iter().enumerate() {
+                w.frame(33);
+                if f + 1 >= 20 {
+                    let e = positions(&w, at)
+                        .iter()
+                        .zip(r)
+                        .map(|(a, b)| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt())
+                        .fold(0.0f64, f64::max);
+                    sum += e;
+                    n += 1;
+                }
+            }
+            assert!(w.first_hit_step.is_some(), "the cars met at {at}");
+        }
+        sum / n as f64
+    };
+    let near = band([
+        Vec3::new(100.0, 0.0, 100.0),
+        Vec3::new(71.3, 0.0, 71.9),
+        Vec3::new(-64.0, 0.0, 75.5),
+        Vec3::new(98.7, 0.0, -29.3),
+    ]);
+    let far = band([
+        Vec3::new(300.0, 0.0, -200.0),
+        Vec3::new(255.1, 0.0, 255.3),
+        Vec3::new(-180.4, 0.0, 310.2),
+        Vec3::new(-350.9, 0.0, -88.6),
+    ]);
+    eprintln!("mean distance from the origin run: ~100 m {near:.4} m (main {MAIN_100}), ~360 m {far:.4} m (main {MAIN_360})");
+    assert!(near <= MAIN_100, "~100 m: {near} m from the origin run, main {MAIN_100} m");
+    assert!(far <= MAIN_360, "~360 m: {far} m from the origin run, main {MAIN_360} m");
+}
