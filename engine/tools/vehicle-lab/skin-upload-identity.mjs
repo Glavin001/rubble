@@ -51,22 +51,25 @@ const spec = { jbeam: files, pc: readFileSync(join(MOD, PC), 'utf8'), native: tr
 const r = wasm.jbeamVisualSkinned(spec, [], glb, skin);
 const visual = r.visual;
 
-// Anything the renderer asks of a device; every write hashed into its buffer's label.
+// Anything the renderer asks of a device; each buffer's contents once written (however
+// many writes it took), hashed by label.
 const any = () => new Proxy(function () {}, { get: (_, k) => (k === 'then' ? undefined : any()), apply: () => any() });
-const hashes = new Map();
+const buffers = [];
 const queue = {
-  writeBuffer(buffer, offset, data) {
-    const v = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
-    if (!hashes.has(buffer.label)) hashes.set(buffer.label, createHash('sha256'));
-    hashes.get(buffer.label).update(`@${offset}:`).update(v);
+  writeBuffer(buffer, offset, data, dataOffset = 0, size) {
+    const el = ArrayBuffer.isView(data) ? data.BYTES_PER_ELEMENT : 1;
+    const src = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
+    buffer.image.set(src.subarray(dataOffset * el, size !== undefined ? (dataOffset + size) * el : undefined), offset);
   },
   writeTexture() {}, submit() {},
 };
-const device = new Proxy({}, { get: (_, k) => (k === 'queue' ? queue : k === 'createBuffer' ? (d) => ({ label: d.label, size: d.size, destroy() {} }) : k === 'then' ? undefined : any()) });
+const device = new Proxy({}, { get: (_, k) => (k === 'queue' ? queue : k === 'createBuffer' ? (d) => { const b = { label: d.label, size: d.size, image: new Uint8Array(d.size), destroy() {} }; buffers.push(b); return b; } : k === 'then' ? undefined : any()) });
 const { createShowcaseCarRenderer } = await import(pathToFileURL(RENDERER).href);
 const cars = createShowcaseCarRenderer(device, { format: 'bgra8unorm', depthFormat: 'depth32float', sampleCount: 4 });
 // As the lab adds its first car: raycast wheels' records stand in (4 words a wheel).
 cars.addCar(visual, { nodeOffset: 0, beamOffset: 0, vehicle: 0, lod: visual.lod ?? null, wheelRecords: new Uint32Array(16), retireAt: 1, labelAt: 2 });
 const out = { vertices: visual.vertexCount, weights: visual.wtQ ? 'grid steps (wtQ)' : 'f32 (wtW)' };
-for (const [k, h] of [...hashes].sort()) out[k] = h.digest('hex').slice(0, 24);
+for (const b of buffers.filter((b) => b.label?.startsWith('showcase-') && !/frame|view|fx|contact|mirror/.test(b.label)).sort((x, y) => (x.label < y.label ? -1 : 1))) {
+  out[b.label] = `${b.size} bytes ${createHash('sha256').update(b.image).digest('hex').slice(0, 24)}`;
+}
 console.log(JSON.stringify(out, null, 1));

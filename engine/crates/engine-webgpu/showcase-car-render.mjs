@@ -1756,6 +1756,9 @@ fn shade(i: VOut, front: bool) -> vec4f {
  * `opts`: `{ format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none', zebra = 0 }`
  * (`zebra` 1–3 draws the paint as reflected stripes: the highlight check).
  */
+// The most 64-byte bind records addCar stages on the CPU at once (8 MB).
+const BIND_PIECE = 1 << 17;
+
 export function createShowcaseCarRenderer(device, opts = {}) {
   const { format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none', zebra = 0 } = opts;
   // ?crease= / ?splitDeg= (showcase-car.html): other crease constants, for comparison.
@@ -2149,7 +2152,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         // pack a vertex's entries hold the packed data's views, and a closure kept on
         // the level (`pw`) would keep its whole scope, so those views and the data
         // (hundreds of MB for a generated car's skin) would outlive the upload.
-        const binds = upload('showcase-binds', packBinds(v, n));
+        const binds = packBinds(v, n);
         // Deformed (position | torn, normal | damage, plastic | scrape) per
         // vertex: the compute pass writes it, the draw reads it as a vertex
         // buffer. Starts at the rest pose.
@@ -2177,11 +2180,28 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         const wslot = ws ? new Uint32Array(n) : null;
         let nslots = 0;
         if (ws) for (let i = 0; i < n; i++) { wslot[i] = n + na + nslots; nslots += Math.ceil((ws[i + 1] - ws[i]) / 4); }
-        const bindData = new ArrayBuffer((n + na + nslots) * 64);
-        const u = new Uint32Array(bindData);
-        const f = new Float32Array(bindData);
+        // Packed and uploaded in pieces of at most BIND_PIECE records (8 MB): the
+        // vertices' records, the weighted entries' slots (both in vertex order) and
+        // the fallbacks (few) each staged apart, so the CPU never holds the whole
+        // buffer (255 MB for a generated car) at once. The same bytes as one upload.
+        const total = n + na + nslots;
+        const buffer = device.createBuffer({ label: 'showcase-binds', size: Math.max(16, total * 64), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const stage = (records, base) => {
+          const data = new ArrayBuffer(records * 64);
+          return { data, u: new Uint32Array(data), f: new Float32Array(data), base, used: 0 };
+        };
+        const flush = (st) => {
+          if (st.used) device.queue.writeBuffer(buffer, st.base * 64, st.data, 0, st.used * 64);
+          st.u.fill(0); st.used = 0;
+        };
+        const rec = stage(Math.min(BIND_PIECE, Math.max(n, 1)), 0);
+        const slot = stage(Math.min(BIND_PIECE, Math.max(nslots, 1)), n + na);
+        const alt = stage(Math.max(na, 1), n);
         for (let i = 0; i < n; i++) {
-          const o = i * 16;
+          if (i - rec.base >= BIND_PIECE) { flush(rec); rec.base = i; }
+          rec.used = i - rec.base + 1;
+          const { u, f } = rec;
+          const o = (i - rec.base) * 16;
           u[o] = v.bindNodes[3 * i];
           u[o + 1] = v.bindNodes[3 * i + 1];
           u[o + 2] = v.bindNodes[3 * i + 2];
@@ -2217,13 +2237,16 @@ export function createShowcaseCarRenderer(device, opts = {}) {
             ord.sort((x, y) => Math.abs(wW(3 * y, 0)) - Math.abs(wW(3 * x, 0)));
             u[o] = k1 - k0;
             u[o + 3] = wslot[i];
+            const sc = Math.ceil((k1 - k0) / 4);
+            if (wslot[i] + sc - slot.base > BIND_PIECE) { flush(slot); slot.base = wslot[i]; }
+            slot.used = wslot[i] + sc - slot.base;
             f[o + 4] = v.wtOff[3 * i]; f[o + 5] = v.wtOff[3 * i + 1]; f[o + 6] = v.wtOff[3 * i + 2];
             f[o + 8] = v.wtNrm[3 * i]; f[o + 9] = v.wtNrm[3 * i + 1]; f[o + 10] = v.wtNrm[3 * i + 2];
             u[o + 15] = (u[o + 15] & ~3) | (1 << 25);
             ord.forEach((k, e) => {
-              const q = wslot[i] * 16 + 4 * e;
-              u[q] = wNode[k];
-              f[q + 1] = wW(3 * k, 0); f[q + 2] = wW(3 * k + 1, 1); f[q + 3] = wW(3 * k + 2, 2);
+              const q = (wslot[i] - slot.base) * 16 + 4 * e;
+              slot.u[q] = wNode[k];
+              slot.f[q + 1] = wW(3 * k, 0); slot.f[q + 2] = wW(3 * k + 1, 1); slot.f[q + 3] = wW(3 * k + 2, 2);
             });
           }
           const bl = framed && v.blNode && v.blNode[BLEND * i] !== 0xffffffff;
@@ -2243,17 +2266,19 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           }
           if (a && !bl) {
             // The fallback: its own-part frame, the same vertex otherwise.
-            const q = (n + a - 1) * 16, k = a - 1;
-            u.set(u.subarray(o, o + 16), q);
-            u[q] = v.altNodes[3 * k]; u[q + 1] = v.altNodes[3 * k + 1]; u[q + 2] = v.altNodes[3 * k + 2];
-            u[q + 3] = v.altTri[k];
-            f[q + 4] = v.altCoords[3 * k]; f[q + 5] = v.altCoords[3 * k + 1]; f[q + 6] = v.altCoords[3 * k + 2];
-            f[q + 7] = v.altRest[2 * k];
-            f[q + 8] = v.altNormal[3 * k]; f[q + 9] = v.altNormal[3 * k + 1]; f[q + 10] = v.altNormal[3 * k + 2];
-            f[q + 11] = v.altRest[2 * k + 1];
+            const q = (a - 1) * 16, k = a - 1, au = alt.u, af = alt.f;
+            alt.used = na;
+            au.set(u.subarray(o, o + 16), q);
+            au[q] = v.altNodes[3 * k]; au[q + 1] = v.altNodes[3 * k + 1]; au[q + 2] = v.altNodes[3 * k + 2];
+            au[q + 3] = v.altTri[k];
+            af[q + 4] = v.altCoords[3 * k]; af[q + 5] = v.altCoords[3 * k + 1]; af[q + 6] = v.altCoords[3 * k + 2];
+            af[q + 7] = v.altRest[2 * k];
+            af[q + 8] = v.altNormal[3 * k]; af[q + 9] = v.altNormal[3 * k + 1]; af[q + 10] = v.altNormal[3 * k + 2];
+            af[q + 11] = v.altRest[2 * k + 1];
           }
         }
-        return bindData;
+        flush(rec); flush(slot); flush(alt);
+        return buffer;
       };
       const levelRest = (v, lvIndex, n, binds, out) => {
         // Per vertex: colour, AO, material, rest position (the glass's crack
