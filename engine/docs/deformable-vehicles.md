@@ -144,6 +144,7 @@ Two wheel models:
 |---|---|---|
 | What it is | The rigid World's raycast vehicle model (suspension spring and damper, bump stop, anti-roll bars, tyre friction curves within a friction ellipse, brakes, steering with Ackermann), evaluated **as forces on the hub nodes inside each 0.5 ms step** | Real node–beam tyres: hub and tread rings joined by beams, plus a pressure group (air in the tyre) |
 | Deforms with crashes | Yes: forces go through the beams, a crushed suspension moves the hub, and the ray moves with it | Yes, fully |
+| End of travel | The rim stop (`DriveConfig::rim_stop`, on for generated cars): the hub never comes within its rim's radius (`hubRadius`) of the surface under it; the ground pushes the hub as it pushes a node, so the load goes into the hub's arms and mounts (known-bugs W1) | The rim's own nodes and beams |
 | Cost | Cheap | Many more nodes and beams |
 | Limits today | Rays see the ground and static shapes, **not World rigid bodies** (known-bugs F7). Drive is a direct-drive simplification (no engine, clutch, gearbox or differentials) | The converted ETK has no tyre content, so it rides on its rims |
 

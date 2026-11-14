@@ -500,6 +500,21 @@ void drvBars(DrvCtx c)
     }
 }
 
+// explicit_drive::rim_stop: the normal force (0: none) with which the hit surface (at
+// `t` along the ray, normal n, cosT = n·up) holds a hub of mass m, velocity vh and
+// force fHub (the node phase's) within the rim's radius `rim` of it, on top of the
+// suspension's `load`: spec §37's normal force (the approach stopped, no positive work).
+// Its own function behind its own test (the fast-math codegen of the old path untouched).
+float drvRimStop(float t, float restLen, float rim, float cosT, float m, float3 vh, float3 fHub, float3 n, float load)
+{
+    float d = smul(nf(t - restLen), cosT);
+    if (d >= rim) return 0.0;
+    float vn = sdot(vh, n);
+    float fn_ = nf(sdot(fHub, n) + load);
+    float r = nf(-fn_ - sdiv(smul(nf(vn + max(vn, 0.0)), m), STEP));
+    return r > 0.0 ? r : 0.0;
+}
+
 // Sections 3 and 4 for wheel k: tyre, spin, state records, hub forces.
 void drvTyre(DrvCtx c, uint k, uint step)
 {
@@ -559,13 +574,18 @@ void drvTyre(DrvCtx c, uint k, uint step)
     if (contact)
     {
         float3 n = hitK.xyz;
-        float fn_ = loadK;
-        b = nf(b + smul(smul(w4.w, fn_), r));
-        float3 t = drvNrm(ssub3(fwd, sscale(n, sdot(n, fwd))));
-        float3 sd = scross(n, t);
         uint g1 = c.nodeOff + w0.x;
         float3 fpre = drvForceNow(g1, c.beamOff, c.groupOff, c.groupCount, step);
         if (w0.x != w0.y) fpre = sadd3(fpre, drvForceNow(c.nodeOff + w0.y, c.beamOff, c.groupOff, c.groupCount, step));
+        float fn_ = loadK;
+        if ((c.c5y & 8u) != 0u && w6.z > 0.0)
+        {
+            float rs = drvRimStop(hitK.w, w2.z, w6.z, sdot(n, c.up), m, vh, fpre, n, fn_);
+            if (rs > 0.0) fn_ = nf(fn_ + rs);
+        }
+        b = nf(b + smul(smul(w4.w, fn_), r));
+        float3 t = drvNrm(ssub3(fwd, sscale(n, sdot(n, fwd))));
+        float3 sd = scross(n, t);
         float vt = sdot(vh, t);
         float vs = sdot(vh, sd);
         float ft = sdot(fpre, t);

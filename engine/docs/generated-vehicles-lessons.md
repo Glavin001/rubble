@@ -251,7 +251,21 @@ Record: [handoff/known-bugs.md](handoff/known-bugs.md) S3; spec §39.6; `example
 - **(Measurement) A hub cap leaves at a 25 km/h bump onto its wheel** (9 clips of 600 N a beam, the study's value). Not changed: open whether real clip retention holds at that load.
 - **Process:** write the test from the physical invariant first and commit it failing. Set energy bounds against the plain step on the same body: single precision alone moves an undamped body's energy by 0.3 % a second.
 
+## 15. Wheels in the floor: the raycast suspension had no solid end (2026-11-14, `fix/wheel-through-floor`)
+
+Record: [handoff/known-bugs.md](handoff/known-bugs.md) W1; `engine-world/examples/wheel_floor_probe`; `engine-softbody/tests/wheel_rim_stop.rs`, `engine-world/tests/wheel_rim_press.rs`.
+
+- **(Measurement) The raycast suspension lives between the hub and the ground, and its stop is generic.** `pack::raycast_core` gives every car a bump-stop length of 0.02 m against a rest length of 0.203 m: 0.183 m of hub travel below rest. The sedan's rim is 0.2 m and its tyre 0.33 m, so at the stop the hub is 5 cm inside the rim's radius. Pressed, the hubs sat at 0.145 m and the floor took the plate's load; dropped 5 m, a hub went 4.9 cm into its rim's radius.
+- **(Measurement) The hypothesis "the bump-stop spring keeps compressing" was right for the procedural sedan (0.054 m past its stop at 140 kN a wheel), not for the generated one,** whose floor reached the ground first. Measure per car before naming the cause.
+- **(Fact) The generated car draws its rims and tyres on the hub's own nodes,** not from the drive wheel (`flexmesh` rebinds groups named `wheel*`/`tire*`/`tyre*`; ours are `sedan_wheel_FL`). Wherever the hub goes the wheel is drawn. Principle 6 wants exactly that (real hubs and rims); it makes the hub's height the wheel's.
+- **(Decision, by the brief's rule) The rim stop:** the hub may not come within the rim's radius of the surface its ray hit; there the surface acts on the hub as the solver's ground acts on a node (§37, velocity-level, no stiffness to tune), and the force goes into the hub's beams. On by default for wheels that are parts of their own (`raycastWheelMass`), off for other content because the JBeam fixture's existing drive test would change. Ordinary driving of the generated sedan is bit-identical with it.
+- **(Measurement) What the stop cannot see:** contact position steps. Pressed flat, the crushed body's self-contact moves the wheel's outer axle node down without velocity, and the hub sinks through the stop at about 0.1 mm a step. The ground has the same property.
+- **(Measurement) The mounts are stronger than the press needed:** the front wheels carried up to 122 kN each before the crush reached them, with 2 mount beams yielded and none broken (legs and clamps yield at 155 kN, break at 300 kN; the hub's own beams never break). No real-hardware figure to compare against yet; not tuned.
+- **(Fact) A rim of three nodes cannot hold the ground by node contact:** its lowest node is 0.096 m under the hub. The stop works at the drive instead; a ring of rim nodes would be the authoring alternative (more nodes on the wheel).
+
 ## Changelog
+
+- 2026-11-14: section 15, the wheels in the floor: the raycast suspension's generic stop, the rim stop.
 
 - 2026-11-13: section 14: the GPU kernels carry the centred damping's objective form; on by default for CPU and GPU.
 

@@ -170,3 +170,63 @@ fn driving_into_a_parked_car_with_a_plain_car_beside_bitwise() {
     ];
     compare("into a car", fleet, 120, true);
 }
+
+/// The generated sedan (JBeam mode, its wheels parts of their own: the rim stop on)
+/// dropped 1.5 m under throttle: its hubs reach their rims' radius over the ground and
+/// the rim stop (`explicit_drive::rim_stop`, the kernel's `drvRimStop`) holds them,
+/// bit for bit with the CPU.
+#[test]
+fn landing_on_the_rims_bitwise() {
+    use engine_softbody::authoring::gen2::{rig as lattice, vg_input};
+    use engine_softbody::authoring::rig;
+    let inp = rig::DesignInput::find("sedan", None, None).expect("the sedan's design");
+    let r = lattice::rig_with(&inp);
+    let files = vg_input::physics_files(&inp, &r);
+    let texts: Vec<(String, String)> = files
+        .iter()
+        .map(|(p, b)| (p.clone(), String::from_utf8_lossy(b).into_owned()))
+        .collect();
+    let refs: Vec<(&str, &str)> = texts
+        .iter()
+        .filter(|(p, _)| p.ends_with(".jbeam"))
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let pc = texts
+        .iter()
+        .find(|(p, _)| p.ends_with(".pc"))
+        .map(|(_, b)| b.as_str());
+    let d = engine_softbody::jbeam::load_jbeam(&refs, pc).expect("the sedan's jbeam");
+    let make = || {
+        let (mut s, _) = ExplicitBeams::from_desc_jbeam_raycast(
+            &d,
+            Vec3::new(0.0, 1.5, 0.0),
+            Vec3::ZERO,
+            SETTINGS,
+        )
+        .unwrap();
+        s.fixed_contact = true;
+        s.finish();
+        s
+    };
+    // The CPU alone first: the stop must be reached in this run.
+    let mut s = make();
+    let dr = s.drive.as_ref().unwrap();
+    assert!(dr.config.rim_stop, "the generated sedan's rim stop is off");
+    let wheels = dr.config.wheels.clone();
+    let mut reached = 0;
+    for f in 0..90u32 {
+        s.set_drive_input(input(f));
+        s.frame();
+        for w in &wheels {
+            let hub = 0.5 * (s.nodes[w.node1 as usize].pos.y + s.nodes[w.node2 as usize].pos.y)
+                + s.origin.y
+                - s.ground;
+            if hub < w.rim_radius + 1e-3 {
+                reached += 1;
+            }
+        }
+    }
+    println!("landing: {reached} wheel-frames at the rim stop (CPU)");
+    assert!(reached > 0, "the drop never reached the rim stop");
+    compare("landing on the rims", vec![make()], 90, false);
+}

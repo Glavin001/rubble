@@ -11,7 +11,7 @@
 //! 2  (wheels, ref centre, ref back, ref left) u32         (0 wheels: no drive)
 //! 3  (max torque, top speed, steer rate, Ackermann)
 //! 4  (wheelbase, track, throttle rate, brake rate)
-//! 5  (handbrake rate, flags u32: 1 reverse brake, 2 traction control, 4 hub axles, max slope cos, surface)
+//! 5  (handbrake rate, flags u32: 1 reverse brake, 2 traction control, 4 hub axles, 8 rim stop, max slope cos, surface)
 //! 6  (traction-control α, cut, speed, anti-roll bars u32)  cut, speed: state
 //! 7  (speed-curve points u32, 0, 0, 0)
 //! 8..11   speed curve, two points per record
@@ -23,7 +23,7 @@
 //!    3  (damper, bump spring, bump damper, max steer)
 //!    4  (drive multiplier, brake, handbrake, rolling resistance)
 //!    5  (long scale, lat scale, peak slip ratio, peak slip angle °)
-//!    6  (tan peak angle, side, 0, 0)
+//!    6  (tan peak angle, side, rim radius, 0)
 //!    7..10   longitudinal curve; 11..14 lateral curve
 //!    15 state (spin, spin angle, steer angle, length)
 //!    16 state (load, slip ratio, slip angle °, contact 0/1)
@@ -102,8 +102,10 @@ pub fn records(d: Option<&Drive>, stride: u32) -> Vec<[u32; 4]> {
     r[2] = [c.wheels.len() as u32, c.refs[0], c.refs[1], c.refs[2]];
     r[3] = f4(c.max_torque, c.top_speed, c.steer_rate, c.ackermann);
     r[4] = f4(c.wheelbase, c.track, c.throttle_rate, c.brake_rate);
-    let flags =
-        c.reverse_brake as u32 | (c.traction_control as u32) << 1 | (c.hub_axles as u32) << 2;
+    let flags = c.reverse_brake as u32
+        | (c.traction_control as u32) << 1
+        | (c.hub_axles as u32) << 2
+        | (c.rim_stop as u32) << 3;
     r[5] = [
         c.handbrake_rate.to_bits(),
         flags,
@@ -133,7 +135,7 @@ pub fn records(d: Option<&Drive>, stride: u32) -> Vec<[u32; 4]> {
         r[at + 3] = f4(w.c, w.bump_k, w.bump_c, w.max_steer);
         r[at + 4] = f4(w.drive_mult, w.brake_max, w.handbrake_max, w.rolling);
         r[at + 5] = f4(w.long_scale, w.lat_scale, w.peak_kappa, w.peak_alpha);
-        r[at + 6] = f4(w.tan_peak_alpha, w.side, 0.0, 0.0);
+        r[at + 6] = f4(w.tan_peak_alpha, w.side, w.rim_radius, 0.0);
         r[at + 20] = f4(w.axle_rest[0], w.axle_rest[1], w.axle_rest[2], 0.0);
         curve(&mut r, at + 7, &w.long_curve);
         curve(&mut r, at + 11, &w.lat_curve);
