@@ -13,8 +13,9 @@
 //
 // Beam colours (colour modes):
 //   strain  the beam's elastic force estimate k·|length − rest| over its break
-//           strength, or its permanent length change over 5 % (capped short of a
-//           break): blue-grey at rest, yellow, orange, red near breaking;
+//           strength (a dashpot, k = 0: its length change over 5 %), or its
+//           permanent length change over 5 % (capped short of a break):
+//           blue-grey at rest, yellow, orange, red near breaking;
 //   damage  intact blue-grey, bent yellow to red (rest off its spawn length by
 //           0.1 % to 8 %), broken magenta;
 //   part    the beam's part (labParts: front, rear, roof, cabin, tyres, suspension).
@@ -177,7 +178,11 @@ fn tubeVertex(a: vec3f, b: vec3f, r: f32, k: u32, o: ptr<function, TubeOut>) {
   let k_ = bitcast<f32>(inf.x);
   let strength = bitcast<f32>(inf.y);
   let len = length(pb - pa);
-  let stress = k_ * abs(len - L) / max(strength, 1.0);
+  // A dashpot (k = 0: body damping only, it carries no elastic force and
+  // never breaks by stretch) by its geometric strain on the plastic term's 5 %
+  // scale, so a node pulled out of its panel on dashpots reads as stretched,
+  // not as a beam at rest (skin-shards.md, finding G2).
+  let stress = select(k_ * abs(len - L) / max(strength, 1.0), abs(len - L) / max(L, 1e-6) / 0.05, k_ <= 0.0);
   let plastic = abs(L - L0) / max(L0, 1e-6);
   var c = vec3f(0.0);
   if (lab.colorMode == 0u) {
