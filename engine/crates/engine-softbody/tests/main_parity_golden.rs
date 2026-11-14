@@ -46,9 +46,12 @@ const CHANGED: &[(&str, &str, f32)] = &[
     ("pair_head_on__far_fast", "owner-frame vehicle contact (S6), crash", 0.25),
     // JBeam mode is the BeamNG profile (audit S1), its contact band 0.025 m (S9: on this
     // path only; the JBeam loader's desc, its `.truck` export and the other soft solver
-    // keep main's 0.03 m, so `jbeam_as_truck__hires` is bit-identical again).
-    ("jbeam_native__latched_box", "BeamNG profile for JBeam mode (S1)", 0.05),
-    ("jbeam_native__hires", "BeamNG profile for JBeam mode (S1)", 0.5),
+    // keep main's 0.03 m, so `jbeam_as_truck__hires` is bit-identical again). The
+    // profile's exact lengths (S2) and yield sign guards (S5) run here too; the latched
+    // box also has a 500 Hz dampCutoffHz (S3) and a torsion bar (S4). Each of S3, S4,
+    // S5, S7, S8, S10 has its own not-worse-than-main test in `main_parity_profile.rs`.
+    ("jbeam_native__latched_box", "BeamNG profile for JBeam mode (S1; with S2, S3, S4, S5)", 0.05),
+    ("jbeam_native__hires", "BeamNG profile for JBeam mode (S1; with S2, S5)", 0.5),
 ];
 
 fn dir() -> PathBuf {
