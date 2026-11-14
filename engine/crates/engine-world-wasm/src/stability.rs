@@ -73,7 +73,8 @@ pub const GRAVITY: f64 = 9.81;
 /// The box check: a vehicle's bounding box diagonal past `BOX_FACTOR` × its first
 /// (spawn) diagonal + `BOX_MARGIN` metres (a car torn apart with debris thrown 50 m
 /// is inside it) while its kinetic energy is above `ENERGY_FLOOR` and `BOX_ENERGY_RISE`
-/// × the lowest it has been since the last launch.
+/// × the lowest it has been since the last launch + the work of its fall since
+/// that low (a car tumbling on down a mountain may leave a torn-off part far behind).
 pub const BOX_FACTOR: f32 = 10.0;
 pub const BOX_MARGIN: f32 = 50.0;
 pub const BOX_ENERGY_RISE: f64 = 1.5;
@@ -206,6 +207,8 @@ struct Track {
     lowest: f64,
     /// The lowest kinetic energy since the start or the last launch (J).
     kinetic_low: f64,
+    /// The centre of mass height at that low (m): the fall since it is a source.
+    low_height: f64,
     damage: Option<(u32, u32, u32)>,
 }
 
@@ -378,10 +381,14 @@ impl StabilityGuard {
                 v.first = Some(*s);
                 v.lowest = s.height;
                 v.kinetic_low = s.kinetic;
+                v.low_height = s.height;
             }
             v.last = Some(*s);
             v.lowest = v.lowest.min(s.height);
-            v.kinetic_low = v.kinetic_low.min(s.kinetic);
+            if s.kinetic < v.kinetic_low {
+                v.kinetic_low = s.kinetic;
+                v.low_height = s.height;
+            }
         }
         if self.fleet > self.vehicles.len() || self.unbounded {
             // Unread vehicles, or bodies and rigs the guard does not read, can hand
@@ -470,7 +477,10 @@ impl StabilityGuard {
         for (i, (s, v)) in samples.iter().zip(&self.vehicles).enumerate() {
             let rest = v.first.map_or(s.size, |f| f.size);
             let limit = BOX_FACTOR * rest + BOX_MARGIN;
-            if s.size > limit && s.kinetic > ENERGY_FLOOR && s.kinetic > BOX_ENERGY_RISE * v.kinetic_low {
+            // The fall since the low is a source of the rise (a car tumbling on down a
+            // mountain, a torn-off part left far behind it).
+            let fall = s.mass * GRAVITY * (v.low_height - s.height).max(0.0);
+            if s.size > limit && s.kinetic > ENERGY_FLOOR && s.kinetic > BOX_ENERGY_RISE * v.kinetic_low + fall {
                 return self.stop(
                     t,
                     format!(
