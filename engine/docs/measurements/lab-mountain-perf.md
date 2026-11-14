@@ -131,7 +131,18 @@ CPU twin (`--measure mountain`, 12 s): box narrow-phase queries 37.2 M → 0.29 
   bit for bit with the cull on and off (12,695 queries against 771,200; 1,816 hits), and
   every element the cull skips is checked to have no contact; across the 12 s CPU
   mountain run every separated pair's query was evaluated and none had a contact.
-- The GPU suites below (CPU == GPU bit for bit).
+- GPU suites (native wgpu on Metal, CPU == GPU bit for bit): `explicit_loop_cap` (12),
+  `explicit_surface_proxy_gpu` (12), `explicit_contact_gpu` (5), `explicit_beams_bitwise`
+  (4), `surface_pairs`, `vehicle_lab_reset` (3), `surface_contact_gpu` (3); CPU:
+  `explicit_surface`, `_cast`, `_friction`, `_cull`, `explicit_thin_box`.
+- **Not verified: `engine-metal` `vehicle_parity` and `explicit_surface_proxy_parity`.**
+  Their kernel's cold Metal compile (Slang to MSL, the frame with the surface pass in
+  it) ran past a 25 and a 20 minute kill timer (`MTLCompilerService` at 100 %, tests
+  waiting on it); the change invalidated the cached build. The added code is +0.4–1.0 %
+  of each module's inlined size (`scripts/wgsl-inline-size.py`: `explicit_surface_prep`
+  +944 lines of 90,248, `explicit_surface_find_tri` +374 of 65,058, `explicit_beams_wide`
+  +2,057 of 499,054, `explicit_beams_contact_wide` +4,114 of 1,036,117), so the compile
+  was presumably as long before; that was not measured.
 
 ### The gate
 
