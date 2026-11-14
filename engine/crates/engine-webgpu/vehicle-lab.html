@@ -33,6 +33,8 @@
     td:first-child, th:first-child { text-align: left; }
     #log { font-size: 12px; color: #c3cbd9; max-height: 9rem; overflow-y: auto; }
     #plot { width: 100%; height: 150px; background: rgba(0, 0, 0, 0.25); border-radius: 6px; }
+    #perf { left: 50%; transform: translateX(-50%); bottom: 10px; padding: 6px 12px; font: 12px ui-monospace, Menlo, monospace; white-space: nowrap; pointer-events: none; display: flex; gap: 14px; align-items: center; }
+    #perf b { font-weight: 700; } #perf .bad { color: #ff8e8e; } #perf canvas { width: 180px; height: 28px; }
     #slowTag { left: 50%; transform: translateX(-50%); top: 18px; display: none; font-weight: 800; letter-spacing: 0.12em; color: #ffd166; font-size: 15px; }
     #busy { left: 50%; top: 50%; transform: translate(-50%, -50%); display: none; font-size: 15px; font-weight: 650; padding: 16px 22px; z-index: 5; }
     #caption { left: 22px; bottom: 22px; padding: 10px 16px; display: none; max-width: 40rem; }
@@ -140,6 +142,7 @@
     <h2>Events</h2><div id="log"></div>
   </div>
   <div id="slowTag" class="panel"></div>
+  <div id="perf" class="panel"></div>
   <div id="busy" class="panel"></div>
   <div id="cross"></div>
   <svg id="tracer" style="position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;opacity:0"></svg>
@@ -689,6 +692,9 @@
 
     // ---------------------------------------------------------------- HUD
     const stepHist = [];
+    // Per frame, over the last 600 frames: World steps taken, and steps owed that the
+    // World was not ready for (its readbacks still out: the GPU is behind).
+    const takenHist = [], refusedHist = [];
     const pct = (q) => { const a = [...stepHist].sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(q * a.length))] : 0; };
     let fps = 0, frames = 0, fpsAt = performance.now(), simAt = performance.now(), simCount = 0, simRate = 0;
     const gpuSeg = new Map(); let gpuTotal = [];
@@ -726,6 +732,34 @@
         for (let k = 0; k < s.length; k += 2) { const x = 70 + (PW - 80) * s[k] / xm, y = PH - 30 - (PH - 50) * Math.max(0, s[k + 1]) / ym; if (k) pctx.lineTo(x, y); else pctx.moveTo(x, y); }
         pctx.stroke();
       });
+    }
+    // The always-visible performance bar: frame rate and frame time (the last 600
+    // frames: median, 95th percentile, worst), the World's step rate against real time,
+    // how many frames took 0, 1 or 2+ World steps (uneven counts are judder), steps the
+    // GPU was not ready for, and a trace of the frame times (16.7 ms and 33.3 ms marked).
+    function perfBar(rt) {
+      const el = $('perf');
+      if (RECORD) { el.style.display = 'none'; return; }
+      const n = Math.max(1, takenHist.length), worst = stepHist.length ? Math.max(...stepHist) : 0;
+      const c0 = takenHist.filter((k) => k === 0).length, c1 = takenHist.filter((k) => k === 1).length, c2 = n - c0 - c1;
+      const refused = refusedHist.reduce((a, b) => a + b, 0), owedAll = takenHist.reduce((a, b) => a + b, 0) + refused;
+      const g = gpuSplit();
+      const cls = (bad) => bad ? ' class="bad"' : '';
+      let cv = el.querySelector('canvas');
+      if (!cv) { el.innerHTML = '<span id="perfText"></span><canvas width="360" height="56"></canvas>'; cv = el.querySelector('canvas'); }
+      el.querySelector('#perfText').innerHTML =
+        `<b${cls(fps < 50)}>${fps.toFixed(0)} FPS</b> · frame <b>${pct(0.5).toFixed(1)}</b> / <b${cls(pct(0.95) > 25)}>${pct(0.95).toFixed(1)}</b> / <b${cls(worst > 50)}>${worst.toFixed(0)}</b> ms (p50 / p95 / worst)`
+        + ` · World <b${cls(!paused && rt < 0.9)}>${paused ? 'paused' : `${simRate.toFixed(0)}/s, ${Math.min(100, 100 * rt).toFixed(0)} % real time`}</b>`
+        + ` · steps a frame 0: ${(100 * c0 / n).toFixed(0)} %, 1: ${(100 * c1 / n).toFixed(0)} %, 2+: ${(100 * c2 / n).toFixed(0)} %`
+        + ` · <span${cls(refused > 0.02 * owedAll)}>GPU not ready ${owedAll ? (100 * refused / owedAll).toFixed(1) : '0.0'} %</span>`
+        + (W.timing !== 'off' && gpuTotal.length ? ` · GPU ${g.total.toFixed(2)} ms/step` : '');
+      const x = cv.getContext('2d'), w = cv.width, h = cv.height, top = 50;
+      x.clearRect(0, 0, w, h);
+      x.strokeStyle = 'rgba(255,255,255,0.25)'; x.lineWidth = 1;
+      for (const ms of [16.7, 33.3]) { const y = h - h * ms / top; x.beginPath(); x.moveTo(0, y); x.lineTo(w, y); x.stroke(); }
+      x.strokeStyle = '#7fd4ff'; x.beginPath();
+      stepHist.forEach((ms, i) => { const px = w * i / 600, py = h - h * Math.min(top, ms) / top; if (i) x.lineTo(px, py); else x.moveTo(px, py); });
+      x.stroke();
     }
     let lastStats = null;
     function hud() {
@@ -777,6 +811,7 @@
       $('parts').innerHTML = c.parts.length ? '<tr><th>part</th><th>yielded</th><th>broken</th><th>of</th><th></th></tr>' + c.parts.slice(0, 14).map((q) => `<tr><td>${esc(q.name)}</td><td>${q.yielded}</td><td>${q.broken}</td><td>${q.beams}</td><td>${q.detached ? 'detached' : ''}</td></tr>`).join('')
         : `<tr><td class="muted">${W.car.visuals[0].visual.unitNames?.length ? 'no part damaged' : 'this car names no parts'}</td></tr>`;
       $('log').innerHTML = s.events.slice(-30).reverse().map((e) => `<div>${e.t.toFixed(2)} s · ${esc(e.text)}</div>`).join('') || '<span class="muted">nothing yet</span>';
+      perfBar(rt);
       const tag = $('slowTag');
       tag.style.display = paused || slow() < 1 ? 'block' : 'none';
       tag.textContent = paused ? 'PAUSED' : `SLOW MOTION ×${slow() === 0.25 ? '¼' : '1⁄16'}`;
@@ -788,7 +823,7 @@
     window.__set = async (o) => { for (const [k, v] of Object.entries(o)) { if (k === 'mode') setMode(v); else put(k, v); } showOuts(); shapeUi(); syncUrl(); };
     window.__build = () => build();
     window.__gpu = () => ({ total: [...gpuTotal], split: gpuSplit(), segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
-    window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95) }, carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
+    window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95), worst: stepHist.length ? Math.max(...stepHist) : 0 }, stepsAFrame: [0, 1, 2].map((k) => takenHist.filter((t) => (k < 2 ? t === k : t >= 2)).length), refused: refusedHist.reduce((a, b) => a + b, 0), carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
 
     // ---------------------------------------------------------------- loops
     const before = () => { runPageEvents(W.lab.time()); applyDrive(); W.lab.beforeStep(W.world); };
@@ -840,8 +875,9 @@
           let owed = scale > 0 ? w.pacer.advance(dt, 1 / scale, 4) : 0;
           if (stepOnce) { owed = 1; stepOnce = false; }
           let taken = 0;
+          let refused = 0;
           for (let k = 0; k < owed; k++) {
-            if (!w.world.canStep()) break;
+            if (!w.world.canStep()) { refused = owed - k; break; }
             before();
             w.world.step();
             taken++;
@@ -850,6 +886,8 @@
           // owed later: a GPU that falls behind shows the run slower, it is never
           // sent more work to catch up (at most 2 steps in flight, WebWorld.canStep).
           stepHist.push(dt * 1000); if (stepHist.length > 600) stepHist.shift();
+          takenHist.push(taken); if (takenHist.length > 600) takenHist.shift();
+          refusedHist.push(refused); if (refusedHist.length > 600) refusedHist.shift();
           if (taken && restartAt != null) { againMs = performance.now() - restartAt; restartAt = null; }
           simSteps += taken; simCount += taken;
           if (now - simAt > 1000) { simRate = simCount * 1000 / (now - simAt); simCount = 0; simAt = now; }
