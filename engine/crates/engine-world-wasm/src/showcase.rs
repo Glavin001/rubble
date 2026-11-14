@@ -116,10 +116,15 @@ pub fn showcase_car(params: JsValue) -> Result<JsValue, JsValue> {
     // shut-line fallbacks.
     let p: serde_json::Value = serde_wasm_bindgen::from_value(params.clone()).unwrap_or_default();
     let legacy = p.get("bind").and_then(|s| s.as_str()) == Some("legacy");
+    // `bind: 'triangles'`: every vertex on its binding triangle (the binding
+    // before the node-frame skin).
+    let triangles = p.get("bind").and_then(|s| s.as_str()) == Some("triangles");
     let no_alt = p.get("alt").and_then(|s| s.as_bool()) == Some(false);
     let make = |detail: f32| {
         let v = if legacy {
             engine_softbody::authoring::skin::showcase_visual_legacy_lod(&b, detail)
+        } else if triangles {
+            engine_softbody::authoring::skin::showcase_visual_triangles_lod(&b, detail)
         } else {
             showcase_visual_lod(&b, detail)
         };
@@ -370,6 +375,34 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         set(&vis, "wtW", &f32s(v.wt_w.iter().flatten().copied()));
         set(&vis, "wtOff", &f32s(v.wt_off.iter().flatten().copied()));
         set(&vis, "wtNrm", &f32s(v.wt_nrm.iter().flatten().copied()));
+    }
+    // The node-frame skin (engine_softbody::authoring::node_frames): per node
+    // its neighbourhood (CSR frameStart, nodeCount + 1; frameNode, frameW),
+    // rest basis (frameBasis, 6 a node), part (framePart) and tear beams (CSR
+    // tearStart; tearNode, tearRest); per vertex its BLEND nodes (blNode,
+    // u32::MAX past the last; all u32::MAX: its triangle binding) and
+    // weights (blW). showcase-car-render.mjs nodeFrames() and blendVertex().
+    let f = &v.frames;
+    if !v.bl_node.is_empty() && f.start.len() == v.node_count as usize + 1 {
+        use engine_softbody::authoring::node_frames::BLEND;
+        set(&vis, "frameStart", &Uint32Array::from(f.start.as_slice()).into());
+        set(&vis, "frameNode", &Uint32Array::from(f.node.as_slice()).into());
+        set(&vis, "frameW", &f32s(f.w.iter().copied()));
+        set(&vis, "frameBasis", &f32s(f.basis.iter().flatten().copied()));
+        let part: Vec<u32> = f.part.iter().map(|&p| p as u32).collect();
+        set(&vis, "framePart", &Uint32Array::from(part.as_slice()).into());
+        set(&vis, "tearStart", &Uint32Array::from(f.tb_start.as_slice()).into());
+        set(&vis, "tearNode", &Uint32Array::from(f.tb_node.as_slice()).into());
+        set(&vis, "tearRest", &f32s(f.tb_rest.iter().copied()));
+        let bn: Vec<u32> = v.bl_node.iter().flatten().copied().collect();
+        set(&vis, "blNode", &Uint32Array::from(bn.as_slice()).into());
+        set(&vis, "blW", &f32s(v.bl_w.iter().flatten().copied()));
+        use engine_softbody::authoring::node_frames as nf;
+        set(
+            &vis,
+            "frameConsts",
+            &f32s([nf::TEAR_LO, nf::TEAR_HI, nf::CUT_SHARE_SCALE, nf::FOLD_LO, nf::FOLD_HI, BLEND as f32]),
+        );
     }
     set(&vis, "nodeCount", &JsValue::from(v.node_count));
     set(

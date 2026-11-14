@@ -38,6 +38,14 @@
 // weighted (1 − α − β, α, β); node normals are computed each frame from the skin
 // triangles (`normalTris`, per node `nodeTriStart`/`nodeTriList`, `nodeRestNormal`).
 //
+// Node-frame skin (the authored cars' body; engine_softbody::authoring::
+// node_frames, whose `eval` is the CPU reference): a pass after the node pass
+// gives each node a frame (P, M) from its own part's neighbourhood
+// (`nodeFrames`), and each such vertex blends its BLEND nodes' frames,
+// x = Σ w (P + M (x⁰ − p⁰)), its weights gated by the nodes' tears and by
+// staying with its anchor node, its tear the share gated away and its nodes'
+// disagreement (`blendVertex`). visual.frame*, tear*, blNode, blW.
+//
 // Damage follows the physics (engine/docs/beamng-realism-plan.md P5): each
 // damage unit (a glass pane, lamp or mirror: `visual.unit*`) is a set of the
 // solver's beams; a pass reads their broken flags and rest lengths from the
@@ -92,6 +100,17 @@ const LOD_PX = 3.0;
 // A node's skin splits into two planes (a fold through it) where its most
 // deviant triangle is more than 20° from its mean normal (skin.rs SPLIT_COS).
 const SPLIT_COS = Math.cos(20 * Math.PI / 180);
+// The node-frame skin (engine_softbody::authoring::node_frames, the CPU
+// reference; the wasm sends its values as visual.frameConsts and addCar checks
+// them): the tear ramp, the cut share scale, the fold ramp, BLEND.
+const TEAR_LO = 1.35;
+const TEAR_HI = 1.8;
+const CUT_SHARE_SCALE = 2.0;
+const FOLD_LO = 0.5;
+const FOLD_HI = 1.0;
+const BLEND = 8;
+// Per node state: 6 vec4, then the node frame's 4.
+const NS = 10;
 
 const SKIN_WGSL = /* wgsl */ `
 struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r1: f32, nt: f32, nb: f32, nn: f32, r2: f32, rx: f32, ry: f32, rz: f32, flags: u32 };
@@ -105,9 +124,13 @@ struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r
 // Shut-line fallbacks: a Bind's word 3 (\`vehicle\`, unused here) is 0 or
 // the index in binds of its own-part binding (after the count vertices),
 // whose word 3 is its frame's death record (4 beam ids at deathAt).
+// The node-frame skin (skin.rs node_frames; frameAt 0: none): at frameAt per
+// node its neighbourhood (nodeCount + 1 starts, then (node, ω bits) pairs),
+// then per node its rest basis (6 f32) and part; at tbAt per node its tear
+// beams (nodeCount + 1 starts, then (node, spawn length bits) pairs).
 struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listAt: u32, trisAt: u32, beamOffset: u32, level: u32,
   restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32, deathAt: u32,
-  wheelAt: u32 };
+  wheelAt: u32, frameAt: u32, tbAt: u32 };
 // The frame's effects: simulated seconds since the last update (0: nothing
 // moves, spawns or accumulates), a seed, the floor and the static boxes
 // (centre, kind; half extents) the sparks and scrapes test.
@@ -151,8 +174,15 @@ const ENVELOPE_MAX = ${ENVELOPE_MAX};
 const SPLIT_COS = ${SPLIT_COS};
 // Per node: (plane a now, tear), (last world position, valid), (plastic
 // strain, broken beams, scrape, 0), (plane b now, two planes), plane a at
-// rest (and two), plane b at rest.
-const NS = 6u;
+// rest (and two), plane b at rest; then the node frame (skin.rs
+// node_frames::node_frame): (P, valid), M's three columns.
+const NS = ${NS}u;
+// node_frames.rs: the tear ramp, the cut share scale, the fold ramp, BLEND.
+const TEAR_LO = ${TEAR_LO.toFixed(6)};
+const TEAR_HI = ${TEAR_HI.toFixed(6)};
+const CUT_SHARE_SCALE = ${CUT_SHARE_SCALE.toFixed(6)};
+const FOLD_LO = ${FOLD_LO.toFixed(6)};
+const FOLD_HI = ${FOLD_HI.toFixed(6)};
 const ANNEALED_CRACK = ${LAMINATED_CRACK_STRAIN};
 // A node within this of a surface (its collision range) is in contact.
 const CONTACT = 0.03;
@@ -343,8 +373,14 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
     return;
   }
   var stretch = 0.0;
+  let framed = params.frameAt != 0u;
   for (var k = topo[i]; k < topo[i + 1u]; k++) {
     let t = params.trisAt + 4u * topo[params.listAt + k];
+    // Node frames: its own part's skin triangles only (node_frames::node_tears).
+    if (framed) {
+      let pi = nodePart(i);
+      if (nodePart(topo[t]) != pi || nodePart(topo[t + 1u]) != pi || nodePart(topo[t + 2u]) != pi) { continue; }
+    }
     let a = nodePos(topo[t]);
     let b = nodePos(topo[t + 1u]);
     let c = nodePos(topo[t + 2u]);
@@ -352,13 +388,29 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
     let rest = bitcast<f32>(topo[t + 3u]);
     if (rest > 0.0) { stretch = max(stretch, (length(b - a) + length(c - b) + length(a - c)) / rest); }
   }
+  if (framed) {
+    // And its own part's stiff beams, and every node of its neighbourhood,
+    // by distance against spawn (node_frames::node_tears).
+    let q = nodePos(i);
+    let tb = params.tbAt;
+    for (var k = topo[tb + i]; k < topo[tb + i + 1u]; k++) {
+      let e = tb + params.nodeCount + 1u + 2u * k;
+      stretch = max(stretch, length(nodePos(topo[e]) - q) / bitcast<f32>(topo[e + 1u]));
+    }
+    let fa = params.frameAt;
+    for (var k = topo[fa + i]; k < topo[fa + i + 1u]; k++) {
+      let m = topo[fa + params.nodeCount + 1u + 2u * k];
+      let r = length(restP(m) - restP(i));
+      if (m != i && r > 1e-6) { stretch = max(stretch, length(nodePos(m) - q) / r); }
+    }
+  }
   // w: how torn the node's skin is (0 whole, 1 torn), smooth across nodes so a
   // tear cuts the panel along a smooth line rather than the mesh's grid.
   // The node's planes now and at rest (nodePlanes: one, or two either side
   // of a fold through it).
   let pn = nodePlanes(i, false);
   let pr = nodePlanes(i, true);
-  nodeN[NS * i] = vec4f(pn[0].xyz, smoothstep(1.35, 1.8, stretch));
+  nodeN[NS * i] = vec4f(pn[0].xyz, smoothstep(TEAR_LO, TEAR_HI, stretch));
   nodeN[NS * i + 3u] = pn[1];
   nodeN[NS * i + 4u] = pr[0];
   nodeN[NS * i + 5u] = pr[1];
@@ -413,6 +465,146 @@ fn nodeNormals(@builtin(global_invocation_id) gid: vec3u) {
   nodeN[NS * i + 2u] = vec4f(plastic, nb, scrape, 0.0);
 }
 
+
+// The node-frame skin (skin.rs node_frames, the CPU reference: eval).
+fn frameEntries() -> u32 { return params.frameAt + params.nodeCount + 1u; }
+fn nodePart(i: u32) -> u32 {
+  let e = topo[params.frameAt + params.nodeCount];
+  return topo[frameEntries() + 2u * e + 6u * params.nodeCount + i];
+}
+// Whether nodes i and j are still together (node_frames::pair_gate).
+fn pairGate(i: u32, j: u32) -> f32 {
+  if (i == j) { return 1.0; }
+  let r = length(restP(i) - restP(j));
+  if (r <= 1e-6) { return 1.0; }
+  return 1.0 - smoothstep(TEAR_LO, TEAR_HI, length(nodePos(i) - nodePos(j)) / r);
+}
+struct Gs { ok: bool, c: vec3f, c0: vec3f, f: mat3x3f };
+// node_frames::frame_at: the gated neighbourhood's Gram–Schmidt frame, at
+// the current (now) or rest positions.
+fn frameAt(j: u32, now: bool) -> Gs {
+  var o: Gs;
+  o.ok = false;
+  let fa = params.frameAt;
+  let ent = frameEntries();
+  var w = 0.0; var c = vec3f(0.0); var c0 = vec3f(0.0);
+  for (var k = topo[fa + j]; k < topo[fa + j + 1u]; k++) {
+    let m = topo[ent + 2u * k];
+    let g = bitcast<f32>(topo[ent + 2u * k + 1u]) * (1.0 - nodeN[NS * m].w) * pairGate(j, m);
+    w += g;
+    c += select(restP(m), nodePos(m), now) * g;
+    c0 += restP(m) * g;
+  }
+  if (w <= 1e-6) { return o; }
+  c = c / w; c0 = c0 / w;
+  let ba = ent + 2u * topo[fa + params.nodeCount] + 6u * j;
+  let t = vec3f(bitcast<f32>(topo[ba]), bitcast<f32>(topo[ba + 1u]), bitcast<f32>(topo[ba + 2u]));
+  let b = vec3f(bitcast<f32>(topo[ba + 3u]), bitcast<f32>(topo[ba + 4u]), bitcast<f32>(topo[ba + 5u]));
+  var u = vec3f(0.0); var v = vec3f(0.0);
+  for (var k = topo[fa + j]; k < topo[fa + j + 1u]; k++) {
+    let m = topo[ent + 2u * k];
+    let g = bitcast<f32>(topo[ent + 2u * k + 1u]) * (1.0 - nodeN[NS * m].w) * pairGate(j, m);
+    let d = select(restP(m), nodePos(m), now) - c;
+    let d0 = restP(m) - c0;
+    u += d * (g * dot(d0, t));
+    v += d * (g * dot(d0, b));
+  }
+  let x = cross(u, v);
+  let lu = length(u); let lv = length(v); let lx = length(x);
+  if (lu <= 1e-12 || lv <= 1e-12 || lx <= 1e-4 * lu * lv) { return o; }
+  let un = u / lu;
+  let wn = x / lx;
+  o.ok = true; o.c = c; o.c0 = c0; o.f = mat3x3f(un, cross(wn, un), wn);
+  return o;
+}
+// Per node its frame (node_frames::node_frame): (P, valid), M's columns.
+@compute @workgroup_size(${WG})
+fn nodeFrames(@builtin(global_invocation_id) gid: vec3u) {
+  let j = gid.x;
+  if (j >= params.nodeCount || params.frameAt == 0u) { return; }
+  var ok = topo[params.frameAt + j] < topo[params.frameAt + j + 1u];
+  var p = vec3f(0.0);
+  var m = mat3x3f(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0));
+  if (ok) {
+    let a = frameAt(j, true);
+    let r = frameAt(j, false);
+    ok = a.ok && r.ok;
+    if (ok) {
+      m = a.f * transpose(r.f);
+      p = a.c + m * (restP(j) - r.c0);
+    }
+  }
+  nodeN[NS * j + 6u] = vec4f(p, select(0.0, 1.0, ok));
+  nodeN[NS * j + 7u] = vec4f(m[0], 0.0);
+  nodeN[NS * j + 8u] = vec4f(m[1], 0.0);
+  nodeN[NS * j + 9u] = vec4f(m[2], 0.0);
+}
+// A vertex on node frames (bit 26; node_frames::eval): words 0–3 its BLEND
+// nodes as u16 pairs (0xffff past the last), words 4–7 their weights as
+// unorm16 pairs, (nt, nb, nn) its rest position, (rx, ry, rz) its rest
+// normal. Position (origin-relative), normal, tear, its first three nodes.
+struct Blend { pos: vec3f, nrm: vec3f, tear: f32, ids: vec3u };
+fn blendVertex(bd: Bind) -> Blend {
+  var o: Blend;
+  var nw = array<u32, 4>(bd.n0, bd.n1, bd.n2, bd.vehicle);
+  var ww = array<u32, 4>(bitcast<u32>(bd.a), bitcast<u32>(bd.b), bitcast<u32>(bd.h), bitcast<u32>(bd.r1));
+  var ids: array<u32, ${BLEND}>;
+  var ws: array<f32, ${BLEND}>;
+  var cnt = 0u;
+  for (var k = 0u; k < ${BLEND}u; k++) {
+    let id = (nw[k / 2u] >> (16u * (k % 2u))) & 0xffffu;
+    if (id == 0xffffu) { break; }
+    ids[k] = id;
+    ws[k] = unpack2x16unorm(ww[k / 2u])[k % 2u];
+    cnt = k + 1u;
+  }
+  o.ids = vec3u(ids[0], ids[min(1u, cnt - 1u)], ids[min(2u, cnt - 1u)]);
+  let x0 = vec3f(bd.nt, bd.nb, bd.nn);
+  let n0 = vec3f(bd.rx, bd.ry, bd.rz);
+  // The anchor: its heaviest untorn node with a frame.
+  var anchor = 0xffffffffu;
+  var best = 0.0;
+  for (var k = 0u; k < cnt; k++) {
+    let j = ids[k];
+    let s = ws[k] * (1.0 - nodeN[NS * j].w);
+    if (s > best && nodeN[NS * j + 6u].w > 0.5) { best = s; anchor = j; }
+  }
+  if (anchor == 0xffffffffu) { o.pos = nodePos(ids[0]); o.nrm = vec3f(0.0, 1.0, 0.0); o.tear = 1.0; return o; }
+  var p = vec3f(0.0); var n = vec3f(0.0); var sum = 0.0; var total = 0.0;
+  var pr: array<vec3f, ${BLEND}>; var pg: array<f32, ${BLEND}>; var pd: array<f32, ${BLEND}>;
+  for (var k = 0u; k < cnt; k++) {
+    let j = ids[k];
+    total += ws[k];
+    pg[k] = 0.0;
+    let fr = nodeN[NS * j + 6u];
+    if (fr.w < 0.5) { continue; }
+    let g = ws[k] * (1.0 - nodeN[NS * j].w) * pairGate(anchor, j);
+    if (g <= 0.0) { continue; }
+    let m = mat3x3f(nodeN[NS * j + 7u].xyz, nodeN[NS * j + 8u].xyz, nodeN[NS * j + 9u].xyz);
+    let off = x0 - restP(j);
+    let q = fr.xyz + m * off;
+    pr[k] = q; pg[k] = g; pd[k] = length(off);
+    p += g * q;
+    n += g * (m * n0);
+    sum += g;
+  }
+  if (sum <= 1e-6) { o.pos = nodePos(ids[0]); o.nrm = vec3f(0.0, 1.0, 0.0); o.tear = 1.0; return o; }
+  var tear = clamp(CUT_SHARE_SCALE * (1.0 - sum / total), 0.0, 1.0);
+  let x = p / sum;
+  var dd = 0.0; var reach = 0.0;
+  for (var k = 0u; k < cnt; k++) {
+    if (pg[k] <= 0.0) { continue; }
+    let d = pr[k] - x;
+    dd += pg[k] * dot(d, d);
+    reach += pg[k] * pd[k];
+  }
+  let ratio = sqrt(dd / sum) / max(reach / sum, 1e-3);
+  tear = max(tear, smoothstep(FOLD_LO, FOLD_HI, ratio));
+  o.pos = x;
+  o.nrm = n * (1.0 / max(length(n), 1e-20));
+  o.tear = clamp(tear, 0.0, 1.0);
+  return o;
+}
 
 // Pick the car's level: the finest whose median edge is at least LOD_PX
 // pixels at the car's distance (its first node) from the last frame's eye
@@ -517,12 +709,21 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   var bd = binds[i];
   if ((bd.flags & (1u << 23u)) != 0u) { wheelVertex(i, bd); return; }
   let weighted = (bd.flags & (1u << 25u)) != 0u;
+  let blended = (bd.flags & (1u << 26u)) != 0u;
   var pos: vec3f;
   var n: vec3f;
   var w: vec3f;
   var tear: f32;
   var nrm: vec3f;
-  if (weighted) {
+  if (blended) {
+    let r = blendVertex(bd);
+    pos = r.pos + origin();
+    nrm = r.nrm;
+    n = r.nrm;
+    w = vec3f(1.0 / 3.0);
+    tear = r.tear;
+    bd.n0 = r.ids.x; bd.n1 = r.ids.y; bd.n2 = r.ids.z;
+  } else if (weighted) {
     let r = weightedVertex(bd);
     pos = r.pos + origin();
     nrm = r.nrm;
@@ -1355,6 +1556,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   const pipeLayout = device.createPipelineLayout({ bindGroupLayouts: [skinLayout] });
   const skinPipe = device.createComputePipeline({ label: 'showcase-skin', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'skin' } });
   const normalPipe = device.createComputePipeline({ label: 'showcase-node-normals', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeNormals' } });
+  const framePipe = device.createComputePipeline({ label: 'showcase-node-frames', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeFrames' } });
   const fxStepPipe = device.createComputePipeline({ label: 'showcase-fx-step', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'fxStepAll' } });
   // Debris: one ring buffer for every car, and the effects uniform (dt,
   // seed, floor, static boxes).
@@ -1580,6 +1782,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           pick: device.createComputePipeline({ label: 'showcase-lod-pick-pos', layout: pickPipeLayout, compute: { module: m, entryPoint: 'pick' } }),
           skin: device.createComputePipeline({ label: 'showcase-skin-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'skin' } }),
           normal: device.createComputePipeline({ label: 'showcase-node-normals-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'nodeNormals' } }),
+          frames: device.createComputePipeline({ label: 'showcase-node-frames-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'nodeFrames' } }),
         };
       }
       for (const car of cars.values()) car.posBind = makePosBind(car);
@@ -1616,9 +1819,32 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       // Raycast wheels' misc records (ExplicitSim.wheelRecords), 4 per wheel.
       const wheelAt = deathAt + death.length;
       const wheelRecs = wheelRecords ?? new Uint32Array(0);
-      const topo = new Uint32Array(wheelAt + Math.max(wheelRecs.length, 1));
+      // The node-frame skin (SKIN_WGSL's Params: frameAt, tbAt; 0 none).
+      const framed = !!(visual.frameStart && visual.blNode);
+      if (framed) {
+        const want = [TEAR_LO, TEAR_HI, CUT_SHARE_SCALE, FOLD_LO, FOLD_HI, BLEND];
+        const got = Array.from(visual.frameConsts ?? []);
+        if (got.length !== want.length || got.some((x, k) => Math.abs(x - want[k]) > 1e-6)) throw new Error(`showcase addCar: node-frame constants ${got} differ from the renderer's ${want} (rebuild the wasm)`);
+      }
+      const frameAt = framed ? wheelAt + Math.max(wheelRecs.length, 1) : 0;
+      const frameE = framed ? visual.frameNode.length : 0;
+      const tbAt = framed ? frameAt + (nodeCount + 1) + 2 * frameE + 7 * nodeCount : 0;
+      const tbE = framed ? visual.tearNode.length : 0;
+      const topoLen = framed ? tbAt + (nodeCount + 1) + 2 * tbE : wheelAt + Math.max(wheelRecs.length, 1);
+      const topo = new Uint32Array(topoLen);
       topo.set(death, deathAt);
       topo.set(wheelRecs, wheelAt);
+      if (framed) {
+        const tfr = new Float32Array(topo.buffer);
+        topo.set(visual.frameStart, frameAt);
+        const ent = frameAt + nodeCount + 1;
+        for (let k = 0; k < frameE; k++) { topo[ent + 2 * k] = visual.frameNode[k]; tfr[ent + 2 * k + 1] = visual.frameW[k]; }
+        tfr.set(visual.frameBasis, ent + 2 * frameE);
+        topo.set(visual.framePart, ent + 2 * frameE + 6 * nodeCount);
+        topo.set(visual.tearStart, tbAt);
+        const te = tbAt + nodeCount + 1;
+        for (let k = 0; k < tbE; k++) { topo[te + 2 * k] = visual.tearNode[k]; tfr[te + 2 * k + 1] = visual.tearRest[k]; }
+      }
       const tf = new Float32Array(topo.buffer);
       topo.set(start, 0);
       topo.set(list, listAt);
@@ -1657,7 +1883,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           break;
         }
       }
-      const stateAt = nodeCount * 6;
+      const stateAt = nodeCount * NS;
       const level = (v, lvIndex) => {
         const n = v.vertexCount;
         // Shut-line fallbacks after the n bindings (word 3 links them).
@@ -1717,7 +1943,22 @@ export function createShowcaseCarRenderer(device, opts = {}) {
               f[q + 1] = v.wtW[3 * k]; f[q + 2] = v.wtW[3 * k + 1]; f[q + 3] = v.wtW[3 * k + 2];
             });
           }
-          if (a) {
+          const bl = framed && v.blNode && v.blNode[BLEND * i] !== 0xffffffff;
+          if (bl) {
+            // On node frames (bit 26; SKIN_WGSL blendVertex): BLEND nodes as
+            // u16 pairs (0xffff past the last), weights as unorm16 pairs, the
+            // rest position in words 8–10 (the rest normal stays in 12–14).
+            for (let k = 0; k < BLEND / 2; k++) {
+              const lo = v.blNode[BLEND * i + 2 * k], hi = v.blNode[BLEND * i + 2 * k + 1];
+              if (lo !== 0xffffffff && lo > 0xfffe || hi !== 0xffffffff && hi > 0xfffe) throw new Error('showcase addCar: node-frame node past 65,534');
+              u[o + k] = (lo === 0xffffffff ? 0xffff : lo) | ((hi === 0xffffffff ? 0xffff : hi) << 16);
+              const q = (x) => Math.round(Math.min(Math.max(x, 0), 1) * 65535);
+              u[o + 4 + k] = q(v.blW[BLEND * i + 2 * k]) | (q(v.blW[BLEND * i + 2 * k + 1]) << 16);
+            }
+            f[o + 8] = v.positions[3 * i]; f[o + 9] = v.positions[3 * i + 1]; f[o + 10] = v.positions[3 * i + 2];
+            u[o + 15] = (u[o + 15] & ~3) | (1 << 26);
+          }
+          if (a && !bl) {
             // The fallback: its own-part frame, the same vertex otherwise.
             const q = (n + a - 1) * 16, k = a - 1;
             u.set(u.subarray(o, o + 16), q);
@@ -1809,7 +2050,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         const floorIndex = device.createBuffer({ label: 'showcase-floor-index', size: floorList.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(floorIndex, 0, floorList);
         const params = device.createBuffer({ label: 'showcase-params', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, 0, 0]);
+        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, frameAt, tbAt]);
         return { n, binds, out, attrs, index, floorIndex, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const car = { nodeOffset, beamOffset };
@@ -1834,7 +2075,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       Object.assign(car, {
         nodeCount, vehicle, levels, units, stateAt, unitNames: visual.unitNames ?? [], skinBind: null, posBind: null,
         topo: upload('showcase-topology', topo),
-        // Per node 6 vec4, per unit 1, the level state 1 (zeros: nothing yet).
+        // Per node NS vec4, per unit 1, the level state 1 (zeros: nothing yet).
         nodeN: device.createBuffer({ label: 'showcase-node-state', size: (stateAt + units + 1) * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }),
         lod: upload('showcase-lod', lodData, GPUBufferUsage.UNIFORM),
         // Indirect args (23 words a level); level 0 drawn until the first pick.
@@ -1942,7 +2183,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       }
       device.queue.writeBuffer(fxuBuf, 0, fxu);
       if (live) fxLive = true;
-      const pipes = usePos ? posPipes : { normal: normalPipe, skin: skinPipe, pick: pickPipe };
+      const pipes = usePos ? posPipes : { normal: normalPipe, frames: framePipe, skin: skinPipe, pick: pickPipe };
       const pass = encoder.beginComputePass({ label: usePos ? 'showcase-skin-pos' : 'showcase-skin' });
       let anyGroup = null;
       for (const car of cars.values()) {
@@ -1951,6 +2192,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         pass.setBindGroup(0, groups[0]);
         pass.setPipeline(pipes.normal);
         pass.dispatchWorkgroups(Math.ceil((car.nodeCount + car.units) / WG));
+        // The node frames (after every node's tear, before the skin).
+        pass.setPipeline(pipes.frames);
+        pass.dispatchWorkgroups(Math.ceil(car.nodeCount / WG));
         pass.setPipeline(pipes.pick);
         pass.setBindGroup(1, car.pickBind);
         pass.dispatchWorkgroups(1);
@@ -2083,3 +2327,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     },
   };
 }
+
+// The compute shaders' source (the skin from the solver's buffers, and from
+// world positions), for offline validation.
+export const SHOWCASE_SKIN_WGSL = { skin: SKIN_WGSL, pos: SKIN_POS_WGSL };

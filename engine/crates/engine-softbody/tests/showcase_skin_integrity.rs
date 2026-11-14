@@ -133,7 +133,14 @@ fn components(s: &ExplicitBeams) -> Vec<u32> {
 
 /// The nodes that drive vertex `i` now.
 fn drivers(v: &ShowcaseVisual, i: usize, tears: &[f32]) -> Vec<u32> {
-    let _ = tears;
+    if let Some(ids) = v.bl_node.get(i).filter(|b| b[0] != u32::MAX) {
+        return ids
+            .iter()
+            .zip(&v.bl_w[i])
+            .filter(|(&j, &w)| j != u32::MAX && w > 0.0 && tears[j as usize] < 1.0)
+            .map(|(&j, _)| j)
+            .collect();
+    }
     if v.rigid[i] >= 2 {
         return Vec::new();
     }
@@ -196,7 +203,7 @@ fn measure(s: &ExplicitBeams) -> Report {
     let us = unit_states(v, &bs);
     let (pos, nrm) = deform_beams(v, &nodes, Some(&us), Some(&bs));
     let tear = vertex_tears(v, &nodes, Some(&bs), &pos);
-    let ntears = vec![0.0f32; nodes.len()];
+    let ntears = engine_softbody::authoring::node_frames::node_tears(v, &nodes);
     let comp = components(s);
     let rp = |i: u32| Vec3::from_array(v.positions[i as usize]);
     let n = v.positions.len();
@@ -247,7 +254,8 @@ fn measure(s: &ExplicitBeams) -> Report {
                 [(0, 1), (1, 2), (2, 0)].map(|(a, b)| rp(t[a]).distance(rp(t[b]))),
                 [(0, 1), (1, 2), (2, 0)].map(|(a, b)| p[a].distance(p[b])), tv);
             for &i in &ids {
-                eprintln!("    v{i} rigid {} part {} nodes {:?} moved {:?}", v.rigid[i], v.part[i], v.bind_nodes[i], pos[i] - rp(i as u32));
+                eprintln!("    v{i} rigid {} part {} nodes {:?} w {:?} node tears {:?} moved {:?}", v.rigid[i], v.part[i], v.bl_node[i], v.bl_w[i],
+                    v.bl_node[i].map(|j| if j == u32::MAX { -1.0 } else { ntears[j as usize] }), pos[i] - rp(i as u32));
             }
         }
         let mut c: Vec<u32> = ids.iter().flat_map(|&i| drivers(v, i, &ntears)).map(|j| comp[j as usize]).collect();
@@ -274,7 +282,7 @@ fn measure(s: &ExplicitBeams) -> Report {
             r.jumpy += 1;
             if std::env::var("DUMP").is_ok() {
                 let piece = v.pieces.iter().find(|pc| (pc.1 as usize..(pc.1 + pc.2) as usize).contains(&i)).map_or("?", |pc| pc.0.as_str());
-                eprintln!("  jumpy v{i} on {piece}: off {:.3} m vs mean edge {:.3}, {} neighbours, tear {:.2}, nodes {:?}", (d - mean).length(), e, cnt[i], tear[i], v.bind_nodes[i]);
+                eprintln!("  jumpy v{i} on {piece}: off {:.3} m vs mean edge {:.3}, {} neighbours, tear {:.2}, nodes {:?} w {:?}", (d - mean).length(), e, cnt[i], tear[i], v.bl_node[i], v.bl_w[i]);
             }
         }
     }

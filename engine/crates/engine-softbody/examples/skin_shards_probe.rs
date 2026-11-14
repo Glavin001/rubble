@@ -10,7 +10,7 @@
 //! scenes: wall, wall2 (two hits), side (a car into the rear door), all.
 //! `OBJ=dir`: writes the deformed skin (drawn triangles) as `.obj` files.
 use engine_softbody::authoring::skin::{
-    deform_beams, raycast_visual, showcase_visual_lod, unit_states,
+    deform_beams, raycast_visual, showcase_visual_lod, showcase_visual_triangles_lod, unit_states,
     vertex_tears, BeamState, ShowcaseVisual,
 };
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
@@ -328,8 +328,99 @@ fn skin_stats(
             head.push_str(&format!("v {} {} {}\n", q.x, q.y, q.z));
         }
         std::fs::write(path, head + &out).unwrap();
+        let stem = path.trim_end_matches(".obj");
+        for (k, dir) in [Vec3::new(0.8, 0.45, 1.0), Vec3::new(-1.0, 0.35, -0.2)].iter().enumerate() {
+            render_png(v, &pos, &vt, &format!("{stem}_view{k}.png"), *dir);
+        }
     }
     st
+}
+
+/// A CPU z-buffer render of the drawn skin (the renderer's cut: per pixel,
+/// the tear interpolated across the triangle, discarded past ½), lit flat
+/// from its face normal; back faces in dark red so flips show. `dir` points
+/// from the car toward the eye.
+fn render_png(v: &ShowcaseVisual, pos: &[Vec3], tear: &[f32], path: &str, dir: Vec3) {
+    let (w, h) = (1400usize, 900usize);
+    let fin: Vec<Vec3> = pos.iter().copied().filter(|p| p.is_finite()).collect();
+    // Frame the car: the median centre, the 2nd–98th percentile extent.
+    let pct = |f: fn(&Vec3) -> f32, q: f32| {
+        let mut a: Vec<f32> = fin.iter().map(f).collect();
+        a.sort_by(f32::total_cmp);
+        a[((a.len() - 1) as f32 * q) as usize]
+    };
+    let lo = Vec3::new(pct(|p| p.x, 0.01), pct(|p| p.y, 0.01), pct(|p| p.z, 0.01));
+    let hi = Vec3::new(pct(|p| p.x, 0.99), pct(|p| p.y, 0.99), pct(|p| p.z, 0.99));
+    let c = 0.5 * (lo + hi);
+    let rad = 0.5 * (hi - lo).length() * 1.25;
+    let fwd = -dir.normalize();
+    let right = fwd.cross(Vec3::Y).normalize();
+    let up = right.cross(fwd);
+    let scale = (h as f32 * 0.5) / rad;
+    let proj = |p: Vec3| {
+        let d = p - c;
+        (w as f32 * 0.5 + d.dot(right) * scale, h as f32 * 0.5 - d.dot(up) * scale, d.dot(fwd))
+    };
+    let mut z = vec![f32::MAX; w * h];
+    let mut img = vec![[38u8, 42, 52]; w * h];
+    let light = Vec3::new(0.4, 0.8, 0.45).normalize();
+    for t in v.indices.chunks_exact(3) {
+        let ids = [t[0] as usize, t[1] as usize, t[2] as usize];
+        let p = ids.map(|i| pos[i]);
+        if p.iter().any(|q| !q.is_finite()) {
+            continue;
+        }
+        let tv = ids.map(|i| tear[i]);
+        if tv.iter().all(|&x| x >= 0.5) {
+            continue;
+        }
+        let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
+        let vn: Vec3 = ids.iter().map(|&i| Vec3::from_array(v.normals[i])).sum();
+        let r0 = ids.map(|i| Vec3::from_array(v.positions[i]));
+        let outward = (r0[1] - r0[0]).cross(r0[2] - r0[0]).dot(vn) >= 0.0;
+        let nn = if outward { n } else { -n };
+        let facing = nn.dot(dir) >= 0.0;
+        let col = v.colors[ids[0]];
+        let lit = 0.25 + 0.75 * nn.dot(light).max(0.0);
+        let rgb = if facing {
+            [col[0], col[1], col[2]].map(|x| ((x.powf(1.0 / 2.2) * lit).min(1.0) * 255.0) as u8)
+        } else {
+            [(110.0 * lit) as u8, 10, 10]
+        };
+        let s = p.map(proj);
+        let (x0, x1) = (s.iter().map(|q| q.0).fold(f32::MAX, f32::min).max(0.0) as usize, s.iter().map(|q| q.0).fold(f32::MIN, f32::max).min(w as f32 - 1.0) as usize);
+        let (y0, y1) = (s.iter().map(|q| q.1).fold(f32::MAX, f32::min).max(0.0) as usize, s.iter().map(|q| q.1).fold(f32::MIN, f32::max).min(h as f32 - 1.0) as usize);
+        let area = (s[1].0 - s[0].0) * (s[2].1 - s[0].1) - (s[2].0 - s[0].0) * (s[1].1 - s[0].1);
+        if area.abs() < 1e-9 || x0 > x1 || y0 > y1 {
+            continue;
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let w0 = ((s[1].0 - px) * (s[2].1 - py) - (s[2].0 - px) * (s[1].1 - py)) / area;
+                let w1 = ((s[2].0 - px) * (s[0].1 - py) - (s[0].0 - px) * (s[2].1 - py)) / area;
+                let w2 = 1.0 - w0 - w1;
+                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                    continue;
+                }
+                if w0 * tv[0] + w1 * tv[1] + w2 * tv[2] >= 0.5 {
+                    continue;
+                }
+                let d = w0 * s[0].2 + w1 * s[1].2 + w2 * s[2].2;
+                let k = y * w + x;
+                if d < z[k] {
+                    z[k] = d;
+                    img[k] = rgb;
+                }
+            }
+        }
+    }
+    let f = std::fs::File::create(path).unwrap();
+    let mut e = png::Encoder::new(std::io::BufWriter::new(f), w as u32, h as u32);
+    e.set_color(png::ColorType::Rgb);
+    e.set_depth(png::BitDepth::Eight);
+    let mut wr = e.write_header().unwrap();
+    wr.write_image_data(&img.concat()).unwrap();
 }
 
 struct Car {
@@ -431,7 +522,12 @@ fn report(tag: &str, v: &ShowcaseVisual, b: &Built, s: &ExplicitBeams, car: &Car
 }
 
 fn visual(b: &Built) -> ShowcaseVisual {
-    let mut v = showcase_visual_lod(b, 1.0).unwrap();
+    // BIND=triangles: the binding before the node-frame skin (A/B).
+    let mut v = if std::env::var("BIND").is_ok_and(|x| x == "triangles") {
+        showcase_visual_triangles_lod(b, 1.0).unwrap()
+    } else {
+        showcase_visual_lod(b, 1.0).unwrap()
+    };
     raycast_visual(&mut v, &b.truck).unwrap();
     v
 }

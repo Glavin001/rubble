@@ -255,6 +255,13 @@ pub struct ShowcaseVisual {
     pub wt_w: Vec<[f32; 3]>,
     pub wt_off: Vec<[f32; 3]>,
     pub wt_nrm: Vec<[f32; 3]>,
+    /// The node-frame skin ([`super::node_frames`], the body's binding): the
+    /// per-node frames, and per vertex its [`super::node_frames::BLEND`]
+    /// nodes (`u32::MAX` past the last; all `u32::MAX` or absent: the
+    /// vertex keeps its triangle binding above) and weights.
+    pub frames: super::node_frames::NodeFrames,
+    pub bl_node: Vec<[u32; super::node_frames::BLEND]>,
+    pub bl_w: Vec<[f32; super::node_frames::BLEND]>,
 }
 
 /// `ShowcaseVisual::rigid` values.
@@ -354,6 +361,9 @@ pub fn bind_raycast_wheels(
         let f = a.cross(u);
         let d = Vec3::from_array(v.positions[i]) - centre;
         let n = Vec3::from_array(v.normals[i]);
+        if let Some(b) = v.bl_node.get_mut(i) {
+            *b = [u32::MAX; super::node_frames::BLEND];
+        }
         v.bind_nodes[i] = [k, k, k];
         v.bind_coords[i] = [d.dot(a), d.dot(u), d.dot(f)];
         v.bind_normal[i] = [n.dot(a), n.dot(u), n.dot(f)];
@@ -460,6 +470,19 @@ pub fn raycast_visual(v: &mut ShowcaseVisual, truck: &str) -> Result<(), String>
                 *b = beam(*b).unwrap_or(u32::MAX);
             }
         }
+    }
+    let f = &mut v.frames;
+    if f.start.len() > n as usize + 1 {
+        f.start.truncate(n as usize + 1);
+        let e = *f.start.last().unwrap() as usize;
+        f.node.truncate(e);
+        f.w.truncate(e);
+        f.basis.truncate(n as usize);
+        f.part.truncate(n as usize);
+        f.tb_start.truncate(n as usize + 1);
+        let e = *f.tb_start.last().unwrap() as usize;
+        f.tb_node.truncate(e);
+        f.tb_rest.truncate(e);
     }
     v.node_count = n;
     Ok(())
@@ -1191,6 +1214,15 @@ pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
 /// The visual at a level of detail (1 full; 0.45 the distant LOD: the body
 /// sampled about 2× coarser, single-step edge rolls, fewer wheel segments).
 pub fn showcase_visual_lod(built: &Built, detail: f32) -> Result<ShowcaseVisual, String> {
+    let mut v = showcase_visual_triangles_lod(built, detail)?;
+    super::node_frames::bind(&mut v, built)?;
+    Ok(v)
+}
+
+/// **Measurement only**: [`showcase_visual_lod`] with every vertex on its
+/// binding triangle (the binding before the node-frame skin), for a visual
+/// A/B on identical physics (`showcaseCar({ bind: 'triangles' })`).
+pub fn showcase_visual_triangles_lod(built: &Built, detail: f32) -> Result<ShowcaseVisual, String> {
     super::parts::with_detail(detail, || build_visual(built))
 }
 
@@ -2570,7 +2602,22 @@ pub fn deform_beams(
     let mut nrm = Vec::with_capacity(v.positions.len());
     let weighted = v.wt_start.len() == v.positions.len() + 1;
     let mut wbuf: Vec<(u32, f32, f32, f32)> = Vec::new();
+    let framed = super::node_frames::eval(v, nodes);
     for i in 0..v.positions.len() {
+        if let Some((p, n, _)) = framed[i] {
+            let gone = units.is_some_and(|st| {
+                let u = v.unit.get(i).copied().unwrap_or(u32::MAX);
+                u != u32::MAX && st[u as usize].broken && shatters(v.units[u as usize].kind, v.material[i])
+            });
+            if gone {
+                pos.push(Vec3::splat(f32::NAN));
+                nrm.push(Vec3::Y);
+            } else {
+                pos.push(p);
+                nrm.push(n);
+            }
+            continue;
+        }
         if weighted && v.wt_start[i + 1] > v.wt_start[i] {
             let gone = units.is_some_and(|st| {
                 let u = v.unit.get(i).copied().unwrap_or(u32::MAX);
@@ -2657,8 +2704,9 @@ pub fn deform_beams(
 
 /// Per vertex its tear as the renderer computes it (`showcase-car-render.mjs`
 /// `skin()`): the fragment stage cuts a triangle where the tear,
-/// interpolated linearly across it, passes ½. A triangle-bound vertex: the
-/// per-node field of every skin triangle's
+/// interpolated linearly across it, passes ½. A node-frame vertex: its
+/// tear from [`super::node_frames::eval`]. A
+/// triangle-bound vertex: the per-node field of every skin triangle's
 /// perimeter stretch, interpolated over its binding nodes (a rigid piece:
 /// their largest), 1 where its binding triangle has torn past
 /// [`TEAR_STRETCH`]. A weighted-skin vertex: 0. `pos` is [`deform_beams`]'s
@@ -2669,6 +2717,7 @@ pub fn vertex_tears(
     beams: Option<&[BeamState]>,
     pos: &[Vec3],
 ) -> Vec<f32> {
+    let framed = super::node_frames::eval(v, nodes);
     let rest = |i: u32| Vec3::from_array(v.node_rest[i as usize]);
     let per = |a: Vec3, b: Vec3, c: Vec3| a.distance(b) + b.distance(c) + c.distance(a);
     let field: Vec<f32> = (0..nodes.len())
@@ -2694,6 +2743,9 @@ pub fn vertex_tears(
         .map(|i| {
             if !pos[i].x.is_finite() {
                 return 1.0;
+            }
+            if let Some((_, _, t)) = framed[i] {
+                return t;
             }
             if weighted && v.wt_start[i + 1] > v.wt_start[i] {
                 return 0.0;

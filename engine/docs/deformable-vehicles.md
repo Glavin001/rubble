@@ -125,9 +125,10 @@ Each switch is a separate setting (jbeam-semantics-spec §36).
 
 ## 5. Layer 3: what you see
 
-The visual model is separate, detailed meshes (from `.dae` files in JBeam vehicles). Each mesh vertex is **bound to nearby nodes once, at load**, and **recomputed from the node positions every frame** on the GPU. Rubble has two bindings:
+The visual model is separate, detailed meshes (from `.dae` files in JBeam vehicles). Each mesh vertex is **bound to nearby nodes once, at load**, and **recomputed from the node positions every frame** on the GPU. Rubble has three bindings:
 1. **Three-node frames** (`engine-softbody/src/flexbody.rs`, the JBeam-style default). Each vertex takes its nearest allowed node as an origin, plus two more nodes chosen so the two directions are as close to perpendicular as possible. The vertex is stored in that little frame. A rigid motion moves it exactly, and a deformation carries it along.
-2. **Weighted skins** (`flexskin.rs`, a **Rubble extension**: a `.rskin` sidecar named by `"rubbleSkin"`). Each vertex stores explicit node weights from a smooth moving-least-squares fit over its own part's nodes. Rigid motion is reproduced exactly, and the surface stays smooth: no creases where a three-node frame would switch nodes. Normals are recomputed from the deformed field. This is how Rubble does better than per-vertex frames on dense panels.
+2. **Node-frame skins** (`authoring/node_frames.rs`, a **Rubble extension**, the authored showcase cars). Each node of a part gets a smooth frame (position and rotation) from its own part's neighbourhood, and each vertex blends the frames of its 8 nearest own-part nodes with weights continuous in its rest position. Neighbouring vertices therefore always move together (no shards or saw-tooth), a part carries only its own skin (a pulled-off door takes its whole skin), and the skin is cut where its nodes have torn apart or folded past what one sheet can follow. Rest pose and rigid motion are exact. Why and the measurements: [measurements/skin-shards.md](measurements/skin-shards.md).
+3. **Weighted skins** (`flexskin.rs`, a **Rubble extension**: a `.rskin` sidecar named by `"rubbleSkin"`). Each vertex stores explicit node weights from a smooth moving-least-squares fit over its own part's nodes. Rigid motion is reproduced exactly, and the surface stays smooth: no creases where a three-node frame would switch nodes. Normals are recomputed from the deformed field. This is how Rubble does better than per-vertex frames on dense panels.
 
 Like skeletal animation for a character, with three differences:
 - there are hundreds of "bones" (nodes) with no hierarchy;
@@ -239,4 +240,5 @@ Physical accuracy and mathematical soundness come first; how it looks comes last
 
 ## Changelog
 
+- 2026-11-13: node-frame skins for the authored cars (the triangle binding drew shards in crashes).
 - 2026-11-07: first version, written for the PR #105 handoff. Same day: node drag vs triangle aero, and the moving-body penetration bug (from `diag/ring-phase-through`).
