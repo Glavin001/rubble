@@ -3061,6 +3061,11 @@ bool ownTravelOut(TriGeo t, uint h, float3 p, float3 origin, float r, uint parit
 void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount,
                 uint parity)
 {
+#ifdef EB_ABLATE
+    // Measurement only (time): 2^27 nothing past the caller's geometry; 2^30 nothing
+    // past the exclusions.
+    if ((gP.ablate & 134217728u) != 0u) return;
+#endif
     if (gP.retireBase != 0u && contactRetired(t.tn, h)) return;
     uint4 tn = t.tn;
     if (h == tn.x || h == tn.y || h == tn.z) return;
@@ -3078,6 +3083,9 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
         if (k >= ex.y) break;
         if (gLists[ex.x + k] == h) return;
     }
+#ifdef EB_ABLATE
+    if ((gP.ablate & 1073741824u) != 0u) return;
+#endif
     float3 p = nf3(origin + P.xyz);
     if (any(p < t.lo) || any(p > t.hi)) return;
     if (ownTravelOut(t, h, p, origin, r, parity)) return;
@@ -4132,6 +4140,38 @@ void pairReuseTrack(uint nodeOff, uint nodeCount, uint lane)
     }
 }
 
+#ifdef EB_ABLATE
+// Measurement only (2^29, nothing skipped): why a grid step did not reuse the list, into
+// two records per vehicle after the pieces' statistics: (no list, main spread, main
+// spread with the growth, the pieces), (backoff walks, non-finite, reused, spread sum in
+// 0.1 mm). first: 1 no list, 2 non-finite; R the main spread with eps, need the whole.
+void reuseCause(uint v, uint mode, float R, float need, uint first)
+{
+    if ((gP.ablate & 536870912u) == 0u) return;
+    uint at = gP.pairBuild + gP.totalNodes + 2u * gP.vehicles + 2u * v;
+    uint4 a = asuint(gBeams[at]);
+    uint4 b = asuint(gBeams[at + 1u]);
+    float M = asfloat(gP.pairReuse);
+    if (first == 1u) a.x += 1u;
+    else if (first == 2u) b.y += 1u;
+    else if (mode == 2u) b.z += 1u;
+    else if (R > M) a.y += 1u;
+    else if (need > M) a.z += 1u;
+    else a.w += 1u;
+    if (first == 0u) b.w += uint(min(R, 100.0) * 1.0e4);
+    gBeams[at] = asfloat(a);
+    gBeams[at + 1u] = asfloat(b);
+}
+void reuseCauseWalk(uint v)
+{
+    if ((gP.ablate & 536870912u) == 0u) return;
+    uint at = gP.pairBuild + gP.totalNodes + 2u * gP.vehicles + 2u * v + 1u;
+    uint4 b = asuint(gBeams[at]);
+    b.x += 1u;
+    gBeams[at] = asfloat(b);
+}
+#endif
+
 // Lane 0, after the node phase's barrier, the grid decided (grid): this step's path, the
 // list's mode (0 the walk, 1 build, 2 reuse) for gsUniformLanes' bits 1..2.
 uint pairReuseDecide(uint v, uint grid, uint parity, float3 origin)
@@ -4145,6 +4185,9 @@ uint pairReuseDecide(uint v, uint grid, uint parity, float3 origin)
         // debris spreads the tracked nodes every step): the walk (mode 0, the same
         // results) for REUSE_BACKOFF grid steps, then a list again.
         uint left = (streak & ~REUSE_BACKOFF_FLAG) - 1u;
+#ifdef EB_ABLATE
+        reuseCauseWalk(v);
+#endif
         gsCount[GRID_BUCKETS + RU_STREAK].store(left > 0u ? (REUSE_BACKOFF_FLAG | left) : 0u);
     }
     else if (grid != 0u)
@@ -4164,7 +4207,14 @@ uint pairReuseDecide(uint v, uint grid, uint parity, float3 origin)
             float eps = 1.0e-4 + 4.0e-6 * (size + 1.0);
             float need = max(max(rx, ry), rz) + STEP * (2.0 * grow + dv) + eps;
             if (need <= asfloat(gP.pairReuse) && piecesAllow(v, STEP * (2.0 * grow + dv), eps)) mode = 2u;
+#ifdef EB_ABLATE
+            reuseCause(v, mode, max(max(rx, ry), rz) + eps, need, 0u);
+#endif
         }
+#ifdef EB_ABLATE
+        else
+            reuseCause(v, 1u, 0.0, 0.0, gsCount[GRID_BUCKETS + RU_VALID].load() != 0u ? 2u : 1u);
+#endif
         if (mode == 2u)
             gsCount[GRID_BUCKETS + RU_STREAK].add(1u);
         else if (gsCount[GRID_BUCKETS + RU_VALID].load() != 0u && streak < gP.pairStreak)
@@ -4349,6 +4399,10 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
             if (!covered) return;
         }
     }
+#ifdef EB_ABLATE
+    // Measurement only (time): 2^26 the listed pairs' contact tests (their box tests kept).
+    if ((gP.ablate & 67108864u) != 0u) return;
+#endif
     tryContact(triGeoLoad(gt), h, origin, r, beamOff, groupOff, groupCount, parity);
 }
 

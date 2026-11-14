@@ -1959,7 +1959,8 @@ impl ExplicitUpload {
         let pair_build = if tri_pairs != 0 {
             let at = beams.len() as u32;
             // (Then per vehicle the pieces' statistics: volatile triangles tested.)
-            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes + 2 * nv));
+            // (Then two per vehicle: the reuse census, EB_ABLATE builds' 2^29; measurement.)
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes + 4 * nv));
             at
         } else {
             0

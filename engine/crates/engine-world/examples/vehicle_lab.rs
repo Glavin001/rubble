@@ -603,6 +603,90 @@ fn reuse_census(s: &ExplicitBeams, pos: &[glam::Vec3], vel: &[glam::Vec3], broke
     )
 }
 
+/// What spreads the main body's (label 0) tracked nodes' displacements, the pair list's
+/// reuse bound: their velocity spread (the bound's rate), the same after removing the best
+/// rigid motion (translation and rotation: what rotation alone costs), the nodes far off
+/// the rigid motion, and the spread among nodes within 1 m of each other (what a local
+/// bound would see).
+fn reuse_cause(s: &ExplicitBeams, pos: &[glam::Vec3], vel: &[glam::Vec3], broken: &[bool]) -> String {
+    use engine_softbody::explicit_debris::{piece_labels, Pieces};
+    let n = s.nodes.len().min(pos.len());
+    let pieces = Pieces::of(s, broken);
+    let labels = piece_labels(s, &pieces, broken);
+    let mut tracked = vec![false; n];
+    for &c in &s.candidates {
+        tracked[c as usize] = true;
+    }
+    for tri in &s.triangles {
+        for &v in &tri.nodes {
+            tracked[v as usize] = true;
+        }
+    }
+    let m: Vec<usize> = (0..n).filter(|&i| tracked[i] && labels[i] == 0).collect();
+    if m.is_empty() {
+        return "no main nodes".into();
+    }
+    let k = m.len() as f32;
+    let c = m.iter().map(|&i| pos[i]).sum::<glam::Vec3>() / k;
+    let v0 = m.iter().map(|&i| vel[i]).sum::<glam::Vec3>() / k;
+    let mut inertia = glam::Mat3::ZERO;
+    let mut l = glam::Vec3::ZERO;
+    for &i in &m {
+        let r = pos[i] - c;
+        inertia += glam::Mat3::from_diagonal(glam::Vec3::splat(r.length_squared()))
+            - glam::Mat3::from_cols(r * r.x, r * r.y, r * r.z);
+        l += r.cross(vel[i] - v0);
+    }
+    let w = if inertia.determinant().abs() > 1e-6 { inertia.inverse() * l } else { glam::Vec3::ZERO };
+    let spread = |f: &dyn Fn(usize) -> glam::Vec3| {
+        let (mut lo, mut hi) = (glam::Vec3::MAX, glam::Vec3::MIN);
+        for &i in &m {
+            lo = lo.min(f(i));
+            hi = hi.max(f(i));
+        }
+        (hi - lo).max_element()
+    };
+    let all = spread(&|i| vel[i]);
+    let rot = spread(&|i| w.cross(pos[i] - c));
+    let res = |i: usize| vel[i] - v0 - w.cross(pos[i] - c);
+    let resid = spread(&res);
+    let mut far: Vec<f32> = m.iter().map(|&i| res(i).abs().max_element()).collect();
+    far.sort_by(|a, b| b.total_cmp(a));
+    let over = |x: f32| far.iter().filter(|&&f| f > x).count();
+    // Without the nodes more than 2 m/s off the rigid motion: the rest's spread.
+    let (mut lo, mut hi) = (glam::Vec3::MAX, glam::Vec3::MIN);
+    for &i in &m {
+        if res(i).abs().max_element() <= 2.0 {
+            lo = lo.min(vel[i]);
+            hi = hi.max(vel[i]);
+        }
+    }
+    let calm = (hi - lo).max_element();
+    let mut local = 0.0f32;
+    for (a, &i) in m.iter().enumerate() {
+        for &j in &m[a + 1..] {
+            if (pos[i] - pos[j]).abs().max_element() < 1.0 {
+                local = local.max((vel[i] - vel[j]).abs().max_element());
+            }
+        }
+    }
+    let steps = |sp: f32| if sp > 0.0 { 0.1 / (sp * STEP) } else { f32::INFINITY };
+    format!(
+        "main tracked {}: spread {all:.2} m/s ({:.0} steps at 0.1 m), rotation {:.2} rad/s gives {rot:.2}, off the rigid motion {resid:.2} (nodes over 0.5 / 2 / 10 m/s: {} / {} / {}; top {:.1} {:.1} {:.1}), spread without those over 2 m/s {calm:.2} ({:.0} steps), within 1 m {local:.2} ({:.0} steps)",
+        m.len(),
+        steps(all),
+        w.length(),
+        over(0.5),
+        over(2.0),
+        over(10.0),
+        far.first().copied().unwrap_or(0.0),
+        far.get(1).copied().unwrap_or(0.0),
+        far.get(2).copied().unwrap_or(0.0),
+        steps(calm),
+        steps(local)
+    )
+}
+
 /// The page's mountain (`vehicle-lab.html?mode=mountain&…`) for its cost: per second of
 /// simulated time, the wall time of a World step (each step waited on: its GPU time and
 /// the readback), with the car's speed, node box, coupling use and the surface pair
@@ -680,6 +764,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             x.set_piece_labels(0, if on && !labels.is_empty() { labels } else { &zeros });
         } else if reuse_ab {
             x.set_pair_reuse(on);
+
         } else {
             x.set_surface_culls(on);
         }
@@ -833,6 +918,14 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 );
             }
             if let Some(x) = world.explicit_vehicles_mut() {
+                let rc = x.take_reuse_cause();
+                if rc.iter().any(|&c| c > 0) {
+                    println!(
+                        "   reuse causes: no list {}, main spread {}, with growth {}, pieces {}, backoff walks {}, non-finite {}, reused {}, mean main spread {:.1} mm",
+                        rc[0], rc[1], rc[2], rc[3], rc[4], rc[5], rc[6],
+                        rc[7] as f64 / 10.0 / (rc[1] + rc[2] + rc[3] + rc[6]).max(1) as f64
+                    );
+                }
                 let st = x.take_pair_reuse_stats();
                 if st[0] > 0 {
                     println!(
@@ -865,6 +958,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let vel: Vec<glam::Vec3> = (0..nodes.len() / 12).map(|i| glam::Vec3::new(f(nodes[12 * i + 4]), f(nodes[12 * i + 5]), f(nodes[12 * i + 6]))).collect();
                 println!("   census: {}", tri_census(template, &pos, &vel, &broken));
                 println!("   reuse census: {}", reuse_census(template, &pos, &vel, &broken));
+                println!("   reuse cause: {}", reuse_cause(template, &pos, &vel, &broken));
             }
             if lab.bench.debris.ttl.is_some() || lab.bench.debris.pieces > 0 {
                 let d = &lab.bench.debris;

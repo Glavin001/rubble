@@ -1818,6 +1818,30 @@ impl ExplicitBeamsGpu {
         out
     }
 
+    /// Measurement (an `EB_ABLATE` build with mask bit 2^29): why grid steps did not reuse
+    /// the pair list, summed over vehicles since the last call (which clears them): (no
+    /// list, the main body's spread over the margin, its spread with the boxes' growth,
+    /// the pieces' bounds, backoff walks, non-finite, reused, the main spread summed in
+    /// 0.1 mm).
+    #[doc(hidden)]
+    pub fn take_reuse_cause(&mut self) -> [u64; 8] {
+        let at = self.planner.words[91] as usize;
+        if at == 0 {
+            return [0; 8];
+        }
+        let nv = self.layout.spans.len();
+        let rec = at + self.layout.total[0] as usize + 2 * nv;
+        let beams: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[4])).to_vec();
+        let mut out = [0u64; 8];
+        for v in 0..nv {
+            for k in 0..8 {
+                out[k] += u64::from(beams[(rec + 2 * v) * 4 + k]);
+            }
+        }
+        self.queue.write_buffer(&self.bufs[4], (rec * 16) as u64, &vec![0u8; nv * 32]);
+        out
+    }
+
     /// The coupling's per-node shape ranges (`explicit_beams_rigid.slang` `cplGsAdd`, the
     /// header's bit 64): each node's contacts start at the first proxy shape its count
     /// pass found it inside and stop after the last (on), or scan every shape (off; the
