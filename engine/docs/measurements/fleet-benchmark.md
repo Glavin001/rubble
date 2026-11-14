@@ -118,3 +118,59 @@ The status bit was shared by two capacities: the window's shapes and cpl_query's
 candidate list (duplicates included, three times the shapes room). The latter now reports
 its own message (`3f551fb5`), so the next failure will say which. Not reproduced since,
 so its cause and the real need are not established.
+
+### A contact group across workgroups (C2): what each car needs from the others
+
+What one 2 kHz substep of a small group does, in order, inside its one workgroup
+(`contactGroup` → `contactMembersStep`, `vvPassSmall`):
+
+1. Per member: the node phase (reads its beam slots of the last beam phase and its
+   contact accumulators, **including the vehicle-contact forces the previous substep's
+   pass added**), its frame box keys (`vvBoxKey`, gAcc), the throttles, the beam phase,
+   its self-collision (the walk, now a pair list) and `selfApply` (writes the
+   accumulators).
+2. Barrier (workgroup).
+3. The vehicle-contact pass over the group: reads **every member's box keys of this
+   substep**, every member's node positions and velocities **after this substep's node
+   phase**, and each contact point's force **after this substep's beams and
+   self-collision** (`vvPointForce`, `vvSnapshot`: beam sum plus accumulators); lists
+   and tests; applies the hits level by level, each hit reading its contact point's force
+   with the earlier hits added; adds to **both cars'** accumulators (the owner's
+   triangle nodes and the partner's points), two-body counts and the residual phases.
+4. Barrier; the next substep's node phase reads those accumulators.
+
+So a member's substep s + 1 depends on every partner's substep s (twice: after the
+member phase, and after the contact pass), and the contact pass depends on every
+member's substep s complete. Two designs:
+
+- **Same-substep (today's order), across workgroups:** each substep becomes two
+  dispatches, the members' steps (a workgroup per car, 256 lanes) and the groups' contact
+  passes (a workgroup per group), 68 dispatches a 34-step frame, every workgroup-memory
+  state that lives across substeps (the pair list's reuse state, the coupling's sphere
+  copies, the drive's and the throttle's per-frame words) moved to storage. The arithmetic
+  and its order are unchanged (the member step does not depend on its lane count:
+  per-element updates, fixed-point sums, hits applied in the specification's order), so it
+  can be identical, but it is the whole group path rebuilt. Its cost, from the
+  ablations: about 34 × (one car's substep, 0.27 ms, + the contact pass's share) plus
+  68 dispatch boundaries; and the lone cars' frames (one dispatch, 9 ms) would run before
+  or after it, not beside it (one queue). Estimated 25–35 ms for 8 cars: under today's
+  47–53 ms but not within 2× one car.
+- **Two-phase substep** (each car's contact detection on the last substep's partner
+  state, so cars need no barrier inside a substep): changes results (the partner's
+  positions, velocities and forces are a substep old). Not identical; not pursued.
+
+None is cheap; the first is the only identical one and I have not built it.
+
+**Members' self-collision as a pair list: tried, not identical, not shipped.** A grid
+member's tested triangles' geometry once a step (triGeoFill), its walk listing the pairs
+its box test passes (`triangleGridAtList`, a per-member counter) and its lanes testing
+them a pair each (tryContact on the stored geometry), as the lone car's frame does. Two
+generated sedans head-on, switch off against on from one state: frame 7 differed in 6
+contact accumulator words by one fixed-point unit (`acc[777]` 0x6c58 against 0x6c59),
+while the contact grid alone (the member lists disabled) was the same in all 40 frames.
+The cause is not established. A likely one: a tryContact that reads a node's force while
+other lanes add to it (the documented same-contacter race, resolved by `selfApply`'s
+ordered re-evaluation in the lone frame) sees a different set of adds when the tests are
+reordered across the member's lanes. Kept out; the kernel source is in the worktree's
+gitignored `engine/out/late/explicit_beams.member.slang` (8 cars 47.1 ms a frame same
+state, against about 53.5 without it).

@@ -81,3 +81,61 @@ fn the_candidates_grid_is_the_brute_test_bit_for_bit_with_fewer_visits() {
     assert!(brute > 0, "the cars met (candidates were tested)");
     assert!(grid * 4 < brute, "the grid visited {grid} candidates against {brute}");
 }
+
+/// The candidates' grid, pair list and bucketed hits with cars that have a self-collision
+/// grid of their own: two generated sedans head-on, every frame from one saved state with
+/// the switch off then on, every state word the same. (A member's own self-collision as a
+/// pair list, `triangleGridAtList`, failed this: one fixed-point unit in 6 contact
+/// accumulator words at frame 7; not shipped: fleet-benchmark.md.)
+#[test]
+fn the_grid_with_gridded_cars_is_bit_for_bit() {
+    use engine_softbody::authoring::{build, style, BuildParams, Resolution};
+    let text = build(&style("sedan").unwrap(), &BuildParams { resolution: Resolution::Low, ..Default::default() }).unwrap().truck;
+    let settings = ExplicitBeamsSettings { drag: false, turbulence: false, ..Default::default() };
+    let spawn = |at: Vec3, yaw: f32, vel: Vec3| {
+        let mut s = if yaw == 0.0 {
+            ExplicitBeams::from_truck_config(&text, None, at, vel, settings)
+        } else {
+            ExplicitBeams::from_truck_config_yaw(&text, None, at, yaw, vel, settings)
+        }
+        .expect("spawn");
+        let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+        for n in &mut s.nodes {
+            n.pos.y += 0.02 - low;
+        }
+        s.roll_tyres(vel);
+        s.finish();
+        s
+    };
+    // The generated sedan faces +z; the second turned 180°, 1 m past the first's front.
+    let a = spawn(Vec3::ZERO, 0.0, Vec3::new(0.0, 0.0, 12.0));
+    assert!(a.grid_cell > 0.0, "the generated sedan has a self-collision grid");
+    let front = a.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+    let probe = spawn(Vec3::ZERO, 180.0, Vec3::ZERO);
+    let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
+    let b = spawn(Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
+    let fleet = vec![a, b];
+    let Some((_, device, queue)) = default_device().ok() else { return };
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    gpu.set_vehicle_contact(true);
+    gpu.set_wide(false);
+    let mut grouped = 0u32;
+    for f in 0..40 {
+        let snap = gpu.snapshot();
+        gpu.set_vv_grid(false);
+        gpu.frame(17);
+        gpu.wait();
+        let off = gpu.state_words();
+        gpu.restore(&snap);
+        gpu.set_vv_grid(true);
+        gpu.frame(17);
+        gpu.wait();
+        let on = gpu.state_words();
+        if let Some(d) = first_diff(&off, &on) {
+            panic!("frame {f}: the grid differs from every candidate at {d}");
+        }
+        grouped += u32::from(gpu.contact_groups() > 0);
+    }
+    eprintln!("generated sedans head-on: 40 frames bit for bit, {grouped} with a contact group");
+    assert!(grouped > 10, "the cars met in a contact group ({grouped} frames)");
+}
