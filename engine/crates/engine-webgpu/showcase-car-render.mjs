@@ -102,15 +102,19 @@ const LOD_PX = 3.0;
 const SPLIT_COS = Math.cos(20 * Math.PI / 180);
 // The node-frame skin (engine_softbody::authoring::node_frames, the CPU
 // reference; the wasm sends its values as visual.frameConsts and addCar checks
-// them): the tear ramp, the cut share scale, the fold ramp, BLEND.
+// them): the tear ramp (the triangle-bound vertices' tear field), the cut
+// share scale, BLEND, MAX_NEIGHBOURS (the reach mask's bits).
 const TEAR_LO = 1.35;
 const TEAR_HI = 1.8;
 const CUT_SHARE_SCALE = 2.0;
-const FOLD_LO = 0.5;
-const FOLD_HI = 1.0;
 const BLEND = 8;
-// Per node state: 6 vec4, then the node frame's 4.
-const NS = 10;
+const MAX_NEIGHBOURS = 128;
+// nodeComponents' pass budget: a component of n nodes settles in at most n
+// passes (pointer jumping makes it far fewer); past this the labels stop.
+const COMPONENT_PASSES = 4096;
+// Per node state: 6 vec4, then the node frame's 4, its reach (2) and its
+// component (1).
+const NS = 13;
 
 const SKIN_WGSL = /* wgsl */ `
 struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r1: f32, nt: f32, nb: f32, nn: f32, r2: f32, rx: f32, ry: f32, rz: f32, flags: u32 };
@@ -130,7 +134,7 @@ struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r
 // beams (nodeCount + 1 starts, then (node, spawn length bits) pairs).
 struct Params { count: u32, nodeOffset: u32, nodeCount: u32, vehicle: u32, listAt: u32, trisAt: u32, beamOffset: u32, level: u32,
   restNAt: u32, nodeBeamAt: u32, rest0At: u32, unitAt: u32, unitCount: u32, nodeMatAt: u32, paint: u32, stateAt: u32, deathAt: u32,
-  wheelAt: u32, frameAt: u32, tbAt: u32 };
+  wheelAt: u32, frameAt: u32, tbAt: u32, brkAt: u32 };
 // The frame's effects: simulated seconds since the last update (0: nothing
 // moves, spawns or accumulates), a seed, the floor and the static boxes
 // (centre, kind; half extents) the sparks and scrapes test.
@@ -175,14 +179,13 @@ const SPLIT_COS = ${SPLIT_COS};
 // Per node: (plane a now, tear), (last world position, valid), (plastic
 // strain, broken beams, scrape, 0), (plane b now, two planes), plane a at
 // rest (and two), plane b at rest; then the node frame (skin.rs
-// node_frames::node_frame): (P, valid), M's three columns.
+// node_frames::node_frame): (P, valid), M's three columns; its reach (two
+// vec4: 16 bits a float); its component (x).
 const NS = ${NS}u;
-// node_frames.rs: the tear ramp, the cut share scale, the fold ramp, BLEND.
+// node_frames.rs: the tear ramp, the cut share scale.
 const TEAR_LO = ${TEAR_LO.toFixed(6)};
 const TEAR_HI = ${TEAR_HI.toFixed(6)};
 const CUT_SHARE_SCALE = ${CUT_SHARE_SCALE.toFixed(6)};
-const FOLD_LO = ${FOLD_LO.toFixed(6)};
-const FOLD_HI = ${FOLD_HI.toFixed(6)};
 const ANNEALED_CRACK = ${LAMINATED_CRACK_STRAIN};
 // A node within this of a surface (its collision range) is in contact.
 const CONTACT = 0.03;
@@ -472,25 +475,52 @@ fn nodePart(i: u32) -> u32 {
   let e = topo[params.frameAt + params.nodeCount];
   return topo[frameEntries() + 2u * e + 6u * params.nodeCount + i];
 }
-// Whether nodes i and j are still together (node_frames::pair_gate).
-fn pairGate(i: u32, j: u32) -> f32 {
-  if (i == j) { return 1.0; }
-  let r = length(restP(i) - restP(j));
-  if (r <= 1e-6) { return 1.0; }
-  return 1.0 - smoothstep(TEAR_LO, TEAR_HI, length(nodePos(i) - nodePos(j)) / r);
+// The break graph (node_frames::Binding::Breaks; brkAt: the offsets of its
+// stiff-beam adjacency, neighbourhood order and neighbourhood beams, then per
+// node its rest component and its rest reach, 4 words).
+fn brkAdj() -> u32 { return topo[params.brkAt]; }
+fn brkSorted() -> u32 { return topo[params.brkAt + 1u]; }
+fn brkNe() -> u32 { return topo[params.brkAt + 2u]; }
+fn comp0(i: u32) -> u32 { return topo[params.brkAt + 3u + i]; }
+fn restReach(i: u32, l: u32) -> bool { return ((topo[params.brkAt + 3u + params.nodeCount + 4u * i + l / 32u] >> (l % 32u)) & 1u) == 1u; }
+// The local index of node m in node k's neighbourhood (node_frames::local),
+// 0xffffffff none: a binary search over its neighbourhood in node order.
+fn nodeLocal(k: u32, m: u32) -> u32 {
+  let a = topo[params.frameAt + k];
+  var lo = 0u; var hi = topo[params.frameAt + k + 1u] - a;
+  let ent = frameEntries();
+  let srt = brkSorted();
+  for (var it = 0u; it < 8u && lo < hi; it++) {
+    let mid = (lo + hi) / 2u;
+    let l = topo[srt + a + mid];
+    let n = topo[ent + 2u * (a + l)];
+    if (n == m) { return l; }
+    if (n < m) { lo = mid + 1u; } else { hi = mid; }
+  }
+  return 0xffffffffu;
 }
+// Node k's reach now (nodeFrames: slots 10 and 11, 16 bits a float).
+fn reachNow(k: u32, l: u32) -> bool {
+  let s = nodeN[NS * k + 10u + l / 64u];
+  let h = u32(s[(l % 64u) / 16u]);
+  return ((h >> (l % 16u)) & 1u) == 1u;
+}
+fn compNow(i: u32) -> u32 { return u32(nodeN[NS * i + 12u].x); }
 struct Gs { ok: bool, c: vec3f, c0: vec3f, f: mat3x3f };
-// node_frames::frame_at: the gated neighbourhood's Gram–Schmidt frame, at
-// the current (now) or rest positions.
-fn frameAt(j: u32, now: bool) -> Gs {
+// node_frames::frame_at: the neighbourhood's Gram–Schmidt frame over the
+// members in reach (bit per local index), now or at rest.
+fn frameAt(j: u32, now: bool, mask: array<u32, 4>) -> Gs {
   var o: Gs;
   o.ok = false;
   let fa = params.frameAt;
   let ent = frameEntries();
+  let a = topo[fa + j];
   var w = 0.0; var c = vec3f(0.0); var c0 = vec3f(0.0);
-  for (var k = topo[fa + j]; k < topo[fa + j + 1u]; k++) {
+  for (var k = a; k < topo[fa + j + 1u]; k++) {
+    let l = k - a;
+    if (((mask[l / 32u] >> (l % 32u)) & 1u) == 0u) { continue; }
     let m = topo[ent + 2u * k];
-    let g = bitcast<f32>(topo[ent + 2u * k + 1u]) * (1.0 - nodeN[NS * m].w) * pairGate(j, m);
+    let g = bitcast<f32>(topo[ent + 2u * k + 1u]);
     w += g;
     c += select(restP(m), nodePos(m), now) * g;
     c0 += restP(m) * g;
@@ -501,9 +531,11 @@ fn frameAt(j: u32, now: bool) -> Gs {
   let t = vec3f(bitcast<f32>(topo[ba]), bitcast<f32>(topo[ba + 1u]), bitcast<f32>(topo[ba + 2u]));
   let b = vec3f(bitcast<f32>(topo[ba + 3u]), bitcast<f32>(topo[ba + 4u]), bitcast<f32>(topo[ba + 5u]));
   var u = vec3f(0.0); var v = vec3f(0.0);
-  for (var k = topo[fa + j]; k < topo[fa + j + 1u]; k++) {
+  for (var k = a; k < topo[fa + j + 1u]; k++) {
+    let l = k - a;
+    if (((mask[l / 32u] >> (l % 32u)) & 1u) == 0u) { continue; }
     let m = topo[ent + 2u * k];
-    let g = bitcast<f32>(topo[ent + 2u * k + 1u]) * (1.0 - nodeN[NS * m].w) * pairGate(j, m);
+    let g = bitcast<f32>(topo[ent + 2u * k + 1u]);
     let d = select(restP(m), nodePos(m), now) - c;
     let d0 = restP(m) - c0;
     u += d * (g * dot(d0, t));
@@ -517,17 +549,56 @@ fn frameAt(j: u32, now: bool) -> Gs {
   o.ok = true; o.c = c; o.c0 = c0; o.f = mat3x3f(un, cross(wn, un), wn);
   return o;
 }
-// Per node its frame (node_frames::node_frame): (P, valid), M's columns.
+// Per node (node_frames::eval_breaks): its reach, the members of its
+// neighbourhood still joined to it by live stiff beams among them (slots 10,
+// 11), and its frame over those and the members with no path at rest that
+// its part still joins (node_frames::node_frame): (P, valid), M's columns. The propagation is budgeted by the neighbourhood's size (a pass
+// adds at least one member or stops).
 @compute @workgroup_size(${WG})
 fn nodeFrames(@builtin(global_invocation_id) gid: vec3u) {
   let j = gid.x;
   if (j >= params.nodeCount || params.frameAt == 0u) { return; }
-  var ok = topo[params.frameAt + j] < topo[params.frameAt + j + 1u];
+  let fa = params.frameAt;
+  let cnt = topo[fa + j + 1u] - topo[fa + j];
+  var mask = array<u32, 4>(0u, 0u, 0u, 0u);
+  let me = nodeLocal(j, j);
+  if (me != 0xffffffffu) {
+    mask[me / 32u] = 1u << (me % 32u);
+    let ne = brkNe();
+    let e0 = topo[ne + j]; let e1 = topo[ne + j + 1u];
+    let pairs = ne + params.nodeCount + 1u;
+    for (var it = 0u; it < ${MAX_NEIGHBOURS}u; it++) {
+      var grew = false;
+      for (var e = e0; e < e1; e++) {
+        if (beamBroken(topo[pairs + 2u * e + 1u])) { continue; }
+        let pr = topo[pairs + 2u * e];
+        let x = pr & 0xffffu; let y = pr >> 16u;
+        let bx = (mask[x / 32u] >> (x % 32u)) & 1u;
+        let by = (mask[y / 32u] >> (y % 32u)) & 1u;
+        if (bx != by) {
+          mask[x / 32u] |= 1u << (x % 32u);
+          mask[y / 32u] |= 1u << (y % 32u);
+          grew = true;
+        }
+      }
+      if (!grew) { break; }
+    }
+  }
+  // The frame's members: those in reach, and those with no path at rest
+  // either while their part still joins them (nodeComponents ran first).
+  var gate = mask;
+  let ent = frameEntries();
+  for (var l = 0u; l < cnt; l++) {
+    if (((mask[l / 32u] >> (l % 32u)) & 1u) == 1u || restReach(j, l)) { continue; }
+    let q = topo[ent + 2u * (topo[fa + j] + l)];
+    if (compNow(j) == compNow(q) || comp0(j) != comp0(q)) { gate[l / 32u] |= 1u << (l % 32u); }
+  }
   var p = vec3f(0.0);
   var m = mat3x3f(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0));
+  var ok = cnt > 0u;
   if (ok) {
-    let a = frameAt(j, true);
-    let r = frameAt(j, false);
+    let a = frameAt(j, true, gate);
+    let r = frameAt(j, false, gate);
     ok = a.ok && r.ok;
     if (ok) {
       m = a.f * transpose(r.f);
@@ -538,71 +609,133 @@ fn nodeFrames(@builtin(global_invocation_id) gid: vec3u) {
   nodeN[NS * j + 7u] = vec4f(m[0], 0.0);
   nodeN[NS * j + 8u] = vec4f(m[1], 0.0);
   nodeN[NS * j + 9u] = vec4f(m[2], 0.0);
+  let h = array<f32, 8>(f32(mask[0] & 0xffffu), f32(mask[0] >> 16u), f32(mask[1] & 0xffffu), f32(mask[1] >> 16u),
+    f32(mask[2] & 0xffffu), f32(mask[2] >> 16u), f32(mask[3] & 0xffffu), f32(mask[3] >> 16u));
+  nodeN[NS * j + 10u] = vec4f(h[0], h[1], h[2], h[3]);
+  nodeN[NS * j + 11u] = vec4f(h[4], h[5], h[6], h[7]);
 }
-// A vertex on node frames (bit 26; node_frames::eval): words 0–3 its BLEND
-// nodes as u16 pairs (0xffff past the last), words 4–7 their weights as
+// Per node its component of its part's live stiff beams (node_frames::
+// components: the smallest node index in it; slot 12): one workgroup per car,
+// min-label propagation with pointer jumping until nothing changes, budgeted
+// (COMPONENT_PASSES; a component of n nodes settles in at most n passes).
+var<workgroup> wgAny: atomic<u32>;
+var<workgroup> wgFlag: u32;
+@compute @workgroup_size(256)
+fn nodeComponents(@builtin(local_invocation_index) li: u32) {
+  if (params.frameAt == 0u) { return; }
+  let n = params.nodeCount;
+  for (var j = li; j < n; j += 256u) { nodeN[NS * j + 12u] = vec4f(f32(j), 0.0, 0.0, 0.0); }
+  storageBarrier();
+  let adj = brkAdj();
+  let ent = adj + n + 1u;
+  for (var it = 0u; it < ${COMPONENT_PASSES}u; it++) {
+    if (li == 0u) { atomicStore(&wgAny, 0u); }
+    workgroupBarrier();
+    for (var j = li; j < n; j += 256u) {
+      let was = compNow(j);
+      var l = was;
+      for (var k = topo[adj + j]; k < topo[adj + j + 1u]; k++) {
+        if (beamBroken(topo[ent + 2u * k + 1u])) { continue; }
+        l = min(l, compNow(topo[ent + 2u * k]));
+      }
+      l = min(l, compNow(l));
+      if (l < was) { nodeN[NS * j + 12u].x = f32(l); atomicStore(&wgAny, 1u); }
+    }
+    storageBarrier();
+    workgroupBarrier();
+    if (li == 0u) { wgFlag = atomicLoad(&wgAny); }
+    if (workgroupUniformLoad(&wgFlag) == 0u) { break; }
+  }
+}
+// A vertex on node frames (bit 26; node_frames::eval_breaks): words 0–3 its
+// BLEND nodes as u16 pairs (0xffff past the last), words 4–7 their weights as
 // unorm16 pairs, (nt, nb, nn) its rest position, (rx, ry, rz) its rest
-// normal. Position (origin-relative), normal, tear, its first three nodes.
+// normal. Its nodes are grouped by live stiff beams (two stay together unless
+// they were joined at rest and no live path joins them now; with no local
+// evidence, while their part still joins them); it follows the group carrying
+// most of its weight, and is cut where a quarter of its weight is on the far
+// side of a break. Position (origin-relative), normal, tear, first three nodes.
 struct Blend { pos: vec3f, nrm: vec3f, tear: f32, ids: vec3u };
+fn ufFind(p: ptr<function, array<u32, ${BLEND}>>, x0: u32) -> u32 {
+  var x = x0;
+  for (var it = 0u; it < ${BLEND}u; it++) {
+    if ((*p)[x] == x) { break; }
+    x = (*p)[x];
+  }
+  return x;
+}
+fn joinedNow(k: u32, lk: u32, m: u32, lm: u32) -> bool {
+  return (lk != 0xffffffffu && reachNow(k, lk)) || (lm != 0xffffffffu && reachNow(m, lm));
+}
+fn joinedRest(k: u32, lk: u32, m: u32, lm: u32) -> bool {
+  return (lk != 0xffffffffu && restReach(k, lk)) || (lm != 0xffffffffu && restReach(m, lm));
+}
 fn blendVertex(bd: Bind) -> Blend {
   var o: Blend;
   var nw = array<u32, 4>(bd.n0, bd.n1, bd.n2, bd.vehicle);
   var ww = array<u32, 4>(bitcast<u32>(bd.a), bitcast<u32>(bd.b), bitcast<u32>(bd.h), bitcast<u32>(bd.r1));
   var ids: array<u32, ${BLEND}>;
   var ws: array<f32, ${BLEND}>;
+  var par: array<u32, ${BLEND}>;
   var cnt = 0u;
   for (var k = 0u; k < ${BLEND}u; k++) {
     let id = (nw[k / 2u] >> (16u * (k % 2u))) & 0xffffu;
     if (id == 0xffffu) { break; }
     ids[k] = id;
     ws[k] = unpack2x16unorm(ww[k / 2u])[k % 2u];
+    par[k] = k;
     cnt = k + 1u;
   }
   o.ids = vec3u(ids[0], ids[min(1u, cnt - 1u)], ids[min(2u, cnt - 1u)]);
   let x0 = vec3f(bd.nt, bd.nb, bd.nn);
   let n0 = vec3f(bd.rx, bd.ry, bd.rz);
-  // The anchor: its heaviest untorn node with a frame.
-  var anchor = 0xffffffffu;
-  var best = 0.0;
   for (var k = 0u; k < cnt; k++) {
-    let j = ids[k];
-    let s = ws[k] * (1.0 - nodeN[NS * j].w);
-    if (s > best && nodeN[NS * j + 6u].w > 0.5) { best = s; anchor = j; }
+    for (var m = k + 1u; m < cnt; m++) {
+      let a = ids[k]; let b = ids[m];
+      let la = nodeLocal(a, b); let lb = nodeLocal(b, a);
+      let together = joinedNow(a, la, b, lb)
+        || (!joinedRest(a, la, b, lb) && (compNow(a) == compNow(b) || comp0(a) != comp0(b)));
+      if (together) {
+        let ra = ufFind(&par, k); let rb = ufFind(&par, m);
+        if (ra != rb) { par[max(ra, rb)] = min(ra, rb); }
+      }
+    }
   }
-  if (anchor == 0xffffffffu) { o.pos = nodePos(ids[0]); o.nrm = vec3f(0.0, 1.0, 0.0); o.tear = 1.0; return o; }
-  var p = vec3f(0.0); var n = vec3f(0.0); var sum = 0.0; var total = 0.0;
-  var pr: array<vec3f, ${BLEND}>; var pg: array<f32, ${BLEND}>; var pd: array<f32, ${BLEND}>;
+  var gw: array<f32, ${BLEND}>;
+  var all = 0.0;
+  for (var k = 0u; k < cnt; k++) { gw[k] = 0.0; }
+  for (var k = 0u; k < cnt; k++) { let r = ufFind(&par, k); gw[r] += ws[k]; all += ws[k]; }
+  var side = ufFind(&par, 0u);
+  for (var k = 0u; k < cnt; k++) { if (gw[k] > gw[side] + 1e-6) { side = k; } }
+  // A node whose joined neighbourhood spans no frame still carries its
+  // weight, at its own position, turned as its side's framed nodes turn.
+  var turn = mat3x3f(vec3f(0.0), vec3f(0.0), vec3f(0.0)); var tw = 0.0;
   for (var k = 0u; k < cnt; k++) {
     let j = ids[k];
-    total += ws[k];
-    pg[k] = 0.0;
+    if (ufFind(&par, k) != side || nodeN[NS * j + 6u].w < 0.5) { continue; }
+    turn += mat3x3f(nodeN[NS * j + 7u].xyz, nodeN[NS * j + 8u].xyz, nodeN[NS * j + 9u].xyz) * ws[k];
+    tw += ws[k];
+  }
+  if (tw > 1e-6) { turn = turn * (1.0 / tw); } else { turn = mat3x3f(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0)); }
+  var p = vec3f(0.0); var n = vec3f(0.0); var sum = 0.0;
+  for (var k = 0u; k < cnt; k++) {
+    if (ufFind(&par, k) != side) { continue; }
+    let j = ids[k];
     let fr = nodeN[NS * j + 6u];
-    if (fr.w < 0.5) { continue; }
-    let g = ws[k] * (1.0 - nodeN[NS * j].w) * pairGate(anchor, j);
-    if (g <= 0.0) { continue; }
-    let m = mat3x3f(nodeN[NS * j + 7u].xyz, nodeN[NS * j + 8u].xyz, nodeN[NS * j + 9u].xyz);
-    let off = x0 - restP(j);
-    let q = fr.xyz + m * off;
-    pr[k] = q; pg[k] = g; pd[k] = length(off);
-    p += g * q;
-    n += g * (m * n0);
-    sum += g;
+    var pk = nodePos(j);
+    var m = turn;
+    if (fr.w > 0.5) {
+      pk = fr.xyz;
+      m = mat3x3f(nodeN[NS * j + 7u].xyz, nodeN[NS * j + 8u].xyz, nodeN[NS * j + 9u].xyz);
+    }
+    p += ws[k] * (pk + m * (x0 - restP(j)));
+    n += ws[k] * (m * n0);
+    sum += ws[k];
   }
   if (sum <= 1e-6) { o.pos = nodePos(ids[0]); o.nrm = vec3f(0.0, 1.0, 0.0); o.tear = 1.0; return o; }
-  var tear = clamp(CUT_SHARE_SCALE * (1.0 - sum / total), 0.0, 1.0);
-  let x = p / sum;
-  var dd = 0.0; var reach = 0.0;
-  for (var k = 0u; k < cnt; k++) {
-    if (pg[k] <= 0.0) { continue; }
-    let d = pr[k] - x;
-    dd += pg[k] * dot(d, d);
-    reach += pg[k] * pd[k];
-  }
-  let ratio = sqrt(dd / sum) / max(reach / sum, 1e-3);
-  tear = max(tear, smoothstep(FOLD_LO, FOLD_HI, ratio));
-  o.pos = x;
+  o.pos = p / sum;
   o.nrm = n * (1.0 / max(length(n), 1e-20));
-  o.tear = clamp(tear, 0.0, 1.0);
+  o.tear = clamp(CUT_SHARE_SCALE * (1.0 - gw[side] / max(all, 1e-6)), 0.0, 1.0);
   return o;
 }
 
@@ -1557,6 +1690,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   const skinPipe = device.createComputePipeline({ label: 'showcase-skin', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'skin' } });
   const normalPipe = device.createComputePipeline({ label: 'showcase-node-normals', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeNormals' } });
   const framePipe = device.createComputePipeline({ label: 'showcase-node-frames', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeFrames' } });
+  const compPipe = device.createComputePipeline({ label: 'showcase-node-components', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeComponents' } });
   const fxStepPipe = device.createComputePipeline({ label: 'showcase-fx-step', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'fxStepAll' } });
   // Debris: one ring buffer for every car, and the effects uniform (dt,
   // seed, floor, static boxes).
@@ -1783,6 +1917,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
           skin: device.createComputePipeline({ label: 'showcase-skin-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'skin' } }),
           normal: device.createComputePipeline({ label: 'showcase-node-normals-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'nodeNormals' } }),
           frames: device.createComputePipeline({ label: 'showcase-node-frames-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'nodeFrames' } }),
+          comps: device.createComputePipeline({ label: 'showcase-node-components-pos', layout: pipeLayout, compute: { module: m, entryPoint: 'nodeComponents' } }),
         };
       }
       for (const car of cars.values()) car.posBind = makePosBind(car);
@@ -1822,7 +1957,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       // The node-frame skin (SKIN_WGSL's Params: frameAt, tbAt; 0 none).
       const framed = !!(visual.frameStart && visual.blNode);
       if (framed) {
-        const want = [TEAR_LO, TEAR_HI, CUT_SHARE_SCALE, FOLD_LO, FOLD_HI, BLEND];
+        const want = [TEAR_LO, TEAR_HI, CUT_SHARE_SCALE, BLEND, MAX_NEIGHBOURS];
         const got = Array.from(visual.frameConsts ?? []);
         if (got.length !== want.length || got.some((x, k) => Math.abs(x - want[k]) > 1e-6)) throw new Error(`showcase addCar: node-frame constants ${got} differ from the renderer's ${want} (rebuild the wasm)`);
       }
@@ -1830,7 +1965,17 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const frameE = framed ? visual.frameNode.length : 0;
       const tbAt = framed ? frameAt + (nodeCount + 1) + 2 * frameE + 7 * nodeCount : 0;
       const tbE = framed ? visual.tearNode.length : 0;
-      const topoLen = framed ? tbAt + (nodeCount + 1) + 2 * tbE : wheelAt + Math.max(wheelRecs.length, 1);
+      // The break graph (SKIN_WGSL brkAt: three offsets, per node its rest
+      // component and rest reach (4 words), the stiff-beam adjacency (CSR then
+      // (node, beam) pairs), the neighbourhoods in node order, their beams (CSR
+      // then (pair, beam) pairs)).
+      const brkAt = framed ? tbAt + (nodeCount + 1) + 2 * tbE : 0;
+      const adjE = framed ? visual.adjNode.length : 0;
+      const neE = framed ? visual.nePair.length : 0;
+      const adjAt = brkAt + 3 + 5 * nodeCount;
+      const sortedAt = adjAt + (nodeCount + 1) + 2 * adjE;
+      const neAt = sortedAt + frameE;
+      const topoLen = framed ? neAt + (nodeCount + 1) + 2 * neE : wheelAt + Math.max(wheelRecs.length, 1);
       const topo = new Uint32Array(topoLen);
       topo.set(death, deathAt);
       topo.set(wheelRecs, wheelAt);
@@ -1844,6 +1989,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         topo.set(visual.tearStart, tbAt);
         const te = tbAt + nodeCount + 1;
         for (let k = 0; k < tbE; k++) { topo[te + 2 * k] = visual.tearNode[k]; tfr[te + 2 * k + 1] = visual.tearRest[k]; }
+        topo.set([adjAt, sortedAt, neAt], brkAt);
+        topo.set(visual.frameComp0, brkAt + 3);
+        topo.set(visual.frameRestReach, brkAt + 3 + nodeCount);
+        topo.set(visual.adjStart, adjAt);
+        for (let k = 0; k < adjE; k++) { topo[adjAt + nodeCount + 1 + 2 * k] = visual.adjNode[k]; topo[adjAt + nodeCount + 2 + 2 * k] = visual.adjBeam[k]; }
+        topo.set(visual.frameSorted, sortedAt);
+        topo.set(visual.neStart, neAt);
+        for (let k = 0; k < neE; k++) { topo[neAt + nodeCount + 1 + 2 * k] = visual.nePair[k]; topo[neAt + nodeCount + 2 + 2 * k] = visual.neBeam[k]; }
       }
       const tf = new Float32Array(topo.buffer);
       topo.set(start, 0);
@@ -2049,8 +2202,8 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         device.queue.writeBuffer(index, 0, ordered);
         const floorIndex = device.createBuffer({ label: 'showcase-floor-index', size: floorList.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
         device.queue.writeBuffer(floorIndex, 0, floorList);
-        const params = device.createBuffer({ label: 'showcase-params', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, frameAt, tbAt]);
+        const params = device.createBuffer({ label: 'showcase-params', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, frameAt, tbAt, brkAt]);
         return { n, binds, out, attrs, index, floorIndex, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const car = { nodeOffset, beamOffset };
@@ -2183,7 +2336,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       }
       device.queue.writeBuffer(fxuBuf, 0, fxu);
       if (live) fxLive = true;
-      const pipes = usePos ? posPipes : { normal: normalPipe, frames: framePipe, skin: skinPipe, pick: pickPipe };
+      const pipes = usePos ? posPipes : { normal: normalPipe, frames: framePipe, comps: compPipe, skin: skinPipe, pick: pickPipe };
       const pass = encoder.beginComputePass({ label: usePos ? 'showcase-skin-pos' : 'showcase-skin' });
       let anyGroup = null;
       for (const car of cars.values()) {
@@ -2192,7 +2345,10 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         pass.setBindGroup(0, groups[0]);
         pass.setPipeline(pipes.normal);
         pass.dispatchWorkgroups(Math.ceil((car.nodeCount + car.units) / WG));
-        // The node frames (after every node's tear, before the skin).
+        // The live-beam components (one workgroup labels the car's), then the
+        // node frames (after every node's tear, before the skin).
+        pass.setPipeline(pipes.comps);
+        pass.dispatchWorkgroups(1);
         pass.setPipeline(pipes.frames);
         pass.dispatchWorkgroups(Math.ceil(car.nodeCount / WG));
         pass.setPipeline(pipes.pick);

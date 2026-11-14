@@ -49,6 +49,24 @@ pub struct LintReport {
     /// B4 part separation: with one detachable part moved 1 m away, drawn
     /// triangles with an edge more than 1 cm longer than at rest (summed).
     pub bridges: usize,
+    /// B2 reproduction (informational): every node moved by a homogeneous
+    /// strain (10 % stretch, 5 % shear) or bent (the car round a 6 m radius
+    /// along its length): the largest distance of a vertex (rigid pieces and
+    /// wheels aside) from the same map of its rest position (m), and its p99.
+    pub affine_err: f32,
+    pub affine_p99: f32,
+    pub bend_err: f32,
+    pub bend_p99: f32,
+    /// A2 frame conditioning: the angle (degrees) between a frame's first two
+    /// directions at rest (BeamNG-style: VX − C and VY − C per vertex; node
+    /// frames: each driving node's atan(λ₂/λ₁), [`super::node_frames::rest_frame_angle`],
+    /// 45° even, 0° a line; triangle
+    /// binding: the binding triangle's angle at its first node): minimum and
+    /// 1st percentile; and for four-node frames the smallest |det| of the
+    /// three unit directions (1 orthogonal, 0 coplanar; 1 otherwise).
+    pub frame_angle_min: f32,
+    pub frame_angle_p1: f32,
+    pub frame_det_min: f32,
 }
 
 /// A4: a vertex this many of its part's node spacings from its nearest
@@ -284,6 +302,65 @@ pub fn lint(v: &ShowcaseVisual, built: &Built, probe_every: usize) -> LintReport
             r.bridges += long as usize;
         }
     }
+    // B2: a homogeneous strain and a bend of every node.
+    let strain = Mat3::from_cols(Vec3::new(1.1, 0.0, 0.05), Vec3::new(0.0, 0.92, 0.0), Vec3::new(0.05, 0.0, 1.06));
+    let bend = |p: Vec3| {
+        // Round a 6 m radius about an axis along x, 6 m above the car:
+        // length (z) becomes arc.
+        let rr = 6.0f32;
+        let th = p.z / rr;
+        Vec3::new(p.x, rr - (rr - p.y) * th.cos(), (rr - p.y) * th.sin())
+    };
+    for (k, map) in [&(|p: Vec3| strain * p) as &dyn Fn(Vec3) -> Vec3, &bend].into_iter().enumerate() {
+        let moved: Vec<Vec3> = rest.iter().map(|&p| map(p)).collect();
+        let pos = positions(v, &moved);
+        let mut e: Vec<f32> = (0..n)
+            .filter(|&i| !drv[i].is_empty() && v.rigid.get(i).copied().unwrap_or(0) == 0 && pos[i].is_finite())
+            .map(|i| pos[i].distance(map(Vec3::from_array(v.positions[i]))))
+            .collect();
+        e.sort_by(f32::total_cmp);
+        let (mx, p99) = (e.last().copied().unwrap_or(0.0), e.get(e.len().saturating_sub(1) * 99 / 100).copied().unwrap_or(0.0));
+        if k == 0 {
+            (r.affine_err, r.affine_p99) = (mx, p99);
+        } else {
+            (r.bend_err, r.bend_p99) = (mx, p99);
+        }
+    }
+    // A2.
+    let ang = |a: Vec3, b: Vec3| a.normalize_or_zero().dot(b.normalize_or_zero()).clamp(-1.0, 1.0).acos().to_degrees();
+    let mut angles: Vec<f32> = Vec::new();
+    r.frame_det_min = 1.0;
+    let beamng = v.frames.mode == super::node_frames::Binding::Beamng;
+    let mut nodes_seen: HashSet<u32> = HashSet::new();
+    for i in 0..n {
+        if let Some(b) = v.bl_node.get(i).filter(|b| b[0] != u32::MAX) {
+            if beamng {
+                let c = rest[b[0] as usize];
+                let (x, y) = (rest[b[1] as usize] - c, rest[b[2] as usize] - c);
+                angles.push(ang(x, y));
+                if b[3] != u32::MAX {
+                    let z = rest[b[3] as usize] - c;
+                    let d = x.normalize_or_zero().dot(y.normalize_or_zero().cross(z.normalize_or_zero())).abs();
+                    r.frame_det_min = r.frame_det_min.min(d);
+                }
+            } else {
+                for &j in b.iter().filter(|&&j| j != u32::MAX) {
+                    if nodes_seen.insert(j) {
+                        if let Some(a) = super::node_frames::rest_frame_angle(&v.frames, j as usize, &rest) {
+                            angles.push(a);
+                        }
+                    }
+                }
+            }
+        } else if v.rigid.get(i).copied().unwrap_or(0) < 2 {
+            let t = v.bind_nodes[i];
+            let c = rest[t[0] as usize];
+            angles.push(ang(rest[t[1] as usize] - c, rest[t[2] as usize] - c));
+        }
+    }
+    angles.sort_by(f32::total_cmp);
+    r.frame_angle_min = angles.first().copied().unwrap_or(90.0);
+    r.frame_angle_p1 = angles.get(angles.len() / 100).copied().unwrap_or(90.0);
     r
 }
 

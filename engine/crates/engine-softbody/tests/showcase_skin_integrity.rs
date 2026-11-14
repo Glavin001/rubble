@@ -45,6 +45,7 @@ use engine_softbody::authoring::skin::{
     deform_beams, raycast_visual, showcase_visual_lod, unit_states, vertex_tears, BeamState,
     ShowcaseVisual,
 };
+use engine_softbody::authoring::node_frames::eval_full;
 use engine_softbody::authoring::{build, style, BuildParams, Built, Resolution};
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings, Grab, StaticBox, STEP};
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
@@ -143,14 +144,15 @@ fn components(s: &ExplicitBeams) -> Vec<u32> {
     (0..s.nodes.len() as u32).map(|i| find(&mut p, i)).collect()
 }
 
-/// The nodes that drive vertex `i` now.
-fn drivers(v: &ShowcaseVisual, i: usize, tears: &[f32]) -> Vec<u32> {
+/// The nodes that carry vertex `i`: its bound nodes, or (`used`, from
+/// [`eval_full`]) those that drive it now.
+fn drivers(v: &ShowcaseVisual, i: usize, used: Option<u8>) -> Vec<u32> {
     if let Some(ids) = v.bl_node.get(i).filter(|b| b[0] != u32::MAX) {
         return ids
             .iter()
-            .zip(&v.bl_w[i])
-            .filter(|(&j, &w)| j != u32::MAX && w > 0.0 && tears[j as usize] < 1.0)
-            .map(|(&j, _)| j)
+            .enumerate()
+            .filter(|&(k, &j)| j != u32::MAX && used.map_or(true, |u| (u >> k) & 1 == 1))
+            .map(|(_, &j)| j)
             .collect();
     }
     if v.rigid[i] >= 2 {
@@ -249,7 +251,8 @@ fn measure(s: &ExplicitBeams) -> Report {
     let us = unit_states(v, &bs);
     let (pos, nrm) = deform_beams(v, &nodes, Some(&us), Some(&bs));
     let tear = vertex_tears(v, &nodes, Some(&bs), &pos);
-    let ntears = engine_softbody::authoring::node_frames::node_tears(v, &nodes);
+    let skinned = eval_full(v, &nodes, Some(&bs));
+    let used = |i: usize| skinned[i].map(|x| x.used);
     let comp = components(s);
     let rp = |i: u32| Vec3::from_array(v.positions[i as usize]);
     let n = v.positions.len();
@@ -299,12 +302,36 @@ fn measure(s: &ExplicitBeams) -> Report {
             eprintln!("  shard on {piece}: rest {:?} now {:?} tears {:?}",
                 [(0, 1), (1, 2), (2, 0)].map(|(a, b)| rp(t[a]).distance(rp(t[b]))),
                 [(0, 1), (1, 2), (2, 0)].map(|(a, b)| p[a].distance(p[b])), tv);
+            if std::env::var("DUMP").as_deref() == Ok("3") {
+                use engine_softbody::authoring::node_frames as nf;
+                let f = &v.frames;
+                let br = |b: u32| bs.get(b as usize).is_some_and(|x| x.broken);
+                let comp = nf::components(f, nodes.len(), &br);
+                let ns: Vec<u32> = v.bl_node[ids[0]].iter().copied().filter(|&j| j != u32::MAX).collect();
+                for &k in &ns {
+                    let rk = nf::reach(f, k as usize, &br);
+                    let r0 = nf::reach(f, k as usize, &|_| false);
+                    let row: Vec<String> = ns.iter().map(|&m| match nf::local(f, k as usize, m) {
+                        None => format!("{m}:-"),
+                        Some(x) => format!("{m}:{}{}", (r0 >> x) & 1, (rk >> x) & 1),
+                    }).collect();
+                    eprintln!("      node {k} comp {} moved {:.2}: {}", comp[k as usize], (nodes[k as usize] - Vec3::from_array(v.node_rest[k as usize])).length(), row.join(" "));
+                }
+            }
+            if std::env::var("DUMP").as_deref() == Ok("2") {
+                let ns: Vec<u32> = v.bl_node[ids[0]].iter().copied().filter(|&j| j != u32::MAX).collect();
+                for b in s.beams.iter().filter(|b| ns.contains(&b.a) && ns.contains(&b.b)) {
+                    let (a, c) = (b.a as usize, b.b as usize);
+                    let r0 = Vec3::from_array(v.node_rest[a]).distance(Vec3::from_array(v.node_rest[c]));
+                    eprintln!("      beam {a}-{c} k {:.0} broken {} stretch {:.2}", b.k, b.broken, nodes[a].distance(nodes[c]) / r0);
+                }
+            }
             for &i in &ids {
-                eprintln!("    v{i} rigid {} part {} nodes {:?} w {:?} node tears {:?} moved {:?}", v.rigid[i], v.part[i], v.bl_node[i], v.bl_w[i],
-                    v.bl_node[i].map(|j| if j == u32::MAX { -1.0 } else { ntears[j as usize] }), pos[i] - rp(i as u32));
+                eprintln!("    v{i} rigid {} part {} nodes {:?} w {:?} used {:?} moved {:?}", v.rigid[i], v.part[i], v.bl_node[i], v.bl_w[i],
+                    used(i), pos[i] - rp(i as u32));
             }
         }
-        let mut c: Vec<u32> = ids.iter().flat_map(|&i| drivers(v, i, &ntears)).map(|j| comp[j as usize]).collect();
+        let mut c: Vec<u32> = ids.iter().flat_map(|&i| drivers(v, i, used(i))).map(|j| comp[j as usize]).collect();
         c.sort_unstable();
         c.dedup();
         r.spans += (c.len() > 1) as usize;
@@ -341,11 +368,10 @@ fn measure(s: &ExplicitBeams) -> Report {
         .filter(|b| b.broken)
         .map(|b| (b.a.min(b.b), b.a.max(b.b)))
         .collect();
-    let zero = vec![0.0f32; nodes.len()];
     // A vertex is at a break when a broken beam joins two of the nodes that
     // carry it.
     let at_break = |i: usize| {
-        let d = drivers(v, i, &zero);
+        let d = drivers(v, i, None);
         d.iter().any(|&a| d.iter().any(|&b| a < b && broken.contains(&(a, b))))
     };
     let shattered = |i: usize| {

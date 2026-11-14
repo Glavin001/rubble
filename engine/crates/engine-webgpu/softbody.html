@@ -36,6 +36,11 @@
       <select id="sceneSel"></select>
       <select id="carSel" title="The vehicle every scene crashes"></select>
       <select id="modSel" title="Converted BeamNG vehicles (community_cache: engine-webgpu/__mods)" hidden></select>
+      <select id="bindSel" title="The showcase car's skin binding (a visual A/B on the same physics; ?bind= sets it at load)" hidden>
+        <option value="">skin: node frames, cut at breaks</option>
+        <option value="triangles">skin: triangle binding (before)</option>
+        <option value="legacy">skin: legacy binding</option>
+      </select>
       <select id="xsceneSel" title="The explicit solver's scene" style="display:none"></select>
       <label class="file">Load .truck <input id="truckFile" type="file" accept=".truck,.load,.car,.trailer,.boat,.airplane,.fixed,.train" hidden /></label>
       <label class="file" title="A BeamNG vehicle folder (.jbeam parts, optional .pc config)">Load JBeam folder <input id="jbeamDir" type="file" webkitdirectory multiple hidden /></label>
@@ -451,10 +456,13 @@
     // procedural sedan is the same `.truck` text as on the soft solver), or the authored
     // showcase sedan (?style=, ?res=; ?bind=, ?alt=0 measurement switches).
     let showcaseCache = null;
-    const showcaseBuilt = () => showcaseCache ??= showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: qs.get('res') ?? 'medium',
+    // The skin binding (the bindSel control; ?bind= its value at load).
+    let skinBindMode = qs.get('bind') ?? '';
+    const showcaseOf = (bind) => showcaseCar({ style: qs.get('style') ?? 'sedan', resolution: qs.get('res') ?? 'medium',
       ...(RAYCAST ? { wheels: 'raycast' } : {}),
       // Measurement switches (a visual A/B on identical physics).
-      ...(qs.get('bind') ? { bind: qs.get('bind') } : {}), ...(qs.get('alt') === '0' ? { alt: false } : {}) });
+      ...(bind ? { bind } : {}), ...(qs.get('alt') === '0' ? { alt: false } : {}) });
+    const showcaseBuilt = () => showcaseCache ??= showcaseOf(skinBindMode);
     const hiresJbeam = carKind === 'hires' ? [['hires.jbeam', hiresCarJbeam()]] : null;
     const vehicleSource = () => RAYCAST ? { ...baseSource(), wheels: 'raycast' } : baseSource();
     const baseSource = () => carKind === 'hires' ? { jbeam: hiresJbeam }
@@ -1096,6 +1104,20 @@ fn xpos(i: u32, v: u32) -> vec3f {
       return true;
     };
     const bodyOn = () => bodyR && labR.opts.skin === 'body';
+    // The skin binding control: rebuild only the showcase car's visual (the
+    // physics, its truck, stays) and put it on the vehicles again next frame.
+    {
+      const sel = document.getElementById('bindSel');
+      sel.value = skinBindMode;
+      sel.hidden = !(carKind === 'showcase' && bodyR);
+      sel.onchange = () => {
+        skinBindMode = sel.value;
+        if (!showcaseCache) return;
+        const c = showcaseOf(skinBindMode);
+        Object.assign(showcaseCache, { visual: c.visual, visualLod: c.visualLod, visualFar: c.visualFar });
+        bodyFor.layout = null;
+      };
+    }
     const LAB_REFLECT = qs.has('labReflect') ? Number(qs.get('labReflect')) || 0 : 0.16;
     // The explicit solver's frame pacing (explicitFrame; ?minFps=N a frame-rate floor).
     const pacer = new FramePacer(2000, Number(qs.get('minFps')) || 0);

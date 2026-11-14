@@ -471,19 +471,7 @@ pub fn raycast_visual(v: &mut ShowcaseVisual, truck: &str) -> Result<(), String>
             }
         }
     }
-    let f = &mut v.frames;
-    if f.start.len() > n as usize + 1 {
-        f.start.truncate(n as usize + 1);
-        let e = *f.start.last().unwrap() as usize;
-        f.node.truncate(e);
-        f.w.truncate(e);
-        f.basis.truncate(n as usize);
-        f.part.truncate(n as usize);
-        f.tb_start.truncate(n as usize + 1);
-        let e = *f.tb_start.last().unwrap() as usize;
-        f.tb_node.truncate(e);
-        f.tb_rest.truncate(e);
-    }
+    v.frames.retain_nodes(n as usize, beam);
     v.node_count = n;
     Ok(())
 }
@@ -2602,7 +2590,7 @@ pub fn deform_beams(
     let mut nrm = Vec::with_capacity(v.positions.len());
     let weighted = v.wt_start.len() == v.positions.len() + 1;
     let mut wbuf: Vec<(u32, f32, f32, f32)> = Vec::new();
-    let framed = super::node_frames::eval(v, nodes);
+    let framed = super::node_frames::eval(v, nodes, beams);
     for i in 0..v.positions.len() {
         if let Some((p, n, _)) = framed[i] {
             let gone = units.is_some_and(|st| {
@@ -2717,7 +2705,7 @@ pub fn vertex_tears(
     beams: Option<&[BeamState]>,
     pos: &[Vec3],
 ) -> Vec<f32> {
-    let framed = super::node_frames::eval(v, nodes);
+    let framed = super::node_frames::eval(v, nodes, beams);
     let rest = |i: u32| Vec3::from_array(v.node_rest[i as usize]);
     let per = |a: Vec3, b: Vec3, c: Vec3| a.distance(b) + b.distance(c) + c.distance(a);
     let field: Vec<f32> = (0..nodes.len())

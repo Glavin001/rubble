@@ -383,7 +383,12 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
     // u32::MAX past the last; all u32::MAX: its triangle binding) and
     // weights (blW). showcase-car-render.mjs nodeFrames() and blendVertex().
     let f = &v.frames;
-    if !v.bl_node.is_empty() && f.start.len() == v.node_count as usize + 1 {
+    // (The renderer draws node frames cut at breaks only: the measurement
+    // modes are CPU-only and never exported.)
+    if !v.bl_node.is_empty()
+        && f.start.len() == v.node_count as usize + 1
+        && f.mode == engine_softbody::authoring::node_frames::Binding::Breaks
+    {
         use engine_softbody::authoring::node_frames::BLEND;
         set(&vis, "frameStart", &Uint32Array::from(f.start.as_slice()).into());
         set(&vis, "frameNode", &Uint32Array::from(f.node.as_slice()).into());
@@ -398,10 +403,28 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
         set(&vis, "blNode", &Uint32Array::from(bn.as_slice()).into());
         set(&vis, "blW", &f32s(v.bl_w.iter().flatten().copied()));
         use engine_softbody::authoring::node_frames as nf;
+        // The break graph (node_frames::Binding::Breaks, the renderer's only
+        // mode): per node its part's stiff beams (CSR adjStart; adjNode,
+        // adjBeam: vehicle-local solver beams), its neighbourhood's local
+        // indices in node order (frameSorted, over frameNode's ranges), the
+        // stiff beams among its neighbourhood (CSR neStart; nePair: local a |
+        // b << 16, neBeam), its rest reach (frameRestReach, 4 words) and rest
+        // component (frameComp0).
+        set(&vis, "adjStart", &Uint32Array::from(f.adj_start.as_slice()).into());
+        set(&vis, "adjNode", &Uint32Array::from(f.adj_node.as_slice()).into());
+        set(&vis, "adjBeam", &Uint32Array::from(f.adj_beam.as_slice()).into());
+        let sorted: Vec<u32> = f.sorted.iter().map(|&x| x as u32).collect();
+        set(&vis, "frameSorted", &Uint32Array::from(sorted.as_slice()).into());
+        set(&vis, "neStart", &Uint32Array::from(f.ne_start.as_slice()).into());
+        set(&vis, "nePair", &Uint32Array::from(f.ne_pair.as_slice()).into());
+        set(&vis, "neBeam", &Uint32Array::from(f.ne_beam.as_slice()).into());
+        let (rr, c0) = nf::rest_tables(f);
+        set(&vis, "frameRestReach", &Uint32Array::from(rr.as_slice()).into());
+        set(&vis, "frameComp0", &Uint32Array::from(c0.as_slice()).into());
         set(
             &vis,
             "frameConsts",
-            &f32s([nf::TEAR_LO, nf::TEAR_HI, nf::CUT_SHARE_SCALE, nf::FOLD_LO, nf::FOLD_HI, BLEND as f32]),
+            &f32s([nf::TEAR_LO, nf::TEAR_HI, nf::CUT_SHARE_SCALE, BLEND as f32, nf::MAX_NEIGHBOURS as f32]),
         );
     }
     set(&vis, "nodeCount", &JsValue::from(v.node_count));
