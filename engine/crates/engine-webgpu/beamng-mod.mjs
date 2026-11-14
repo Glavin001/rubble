@@ -52,7 +52,25 @@ export async function loadMod(base, { pc = null } = {}) {
     bin(glbName),
     bin(skinName),
   ]);
-  return { kind: 'jbeam', files, pc: pcText, pcName, meshes, materials, base, list, label: base.split('/').pop(), glb, skin };
+  return { kind: 'jbeam', files, pc: pcText, pcName, meshes, materials, base, list, label: base.split('/').pop(), glb, skin, glbName, skinName,
+    modelBytes: (glb?.length ?? 0) + (skin?.length ?? 0) };
+}
+
+/**
+ * Drop a glTF-skinned vehicle's model bytes (`mod.glb`, `mod.skin`: a generated car's
+ * are ~140 MB) once its visuals are built; `modModels` fetches them again (the HTTP
+ * cache's copy, normally) before another is built. A phone's tab cannot keep them.
+ */
+export function releaseModels(mod) {
+  if (mod.skinName) mod.glb = mod.skin = null;
+}
+
+/** The model bytes `releaseModels` dropped, fetched again (nothing when they are held). */
+export async function modModels(mod) {
+  if (!mod.skinName || mod.skin) return mod;
+  const [glb, skin] = await Promise.all([mod.glbName ? fetchFile(`${mod.base}/${mod.glbName}`) : null, fetchFile(`${mod.base}/${mod.skinName}`)]);
+  mod.glb = glb; mod.skin = skin;
+  return mod;
 }
 
 /**
@@ -62,6 +80,7 @@ export async function loadMod(base, { pc = null } = {}) {
  * `visual.lod` set to its distant levels (`[]` when it has none).
  */
 export function modVisual(mod, { native = true, raycast = false, paint = null } = {}) {
+  if (mod.skinName && !mod.skin) throw new Error(`modVisual: ${mod.label}'s model files were released (releaseModels); await modModels(mod) first`);
   const spec = { jbeam: mod.files, pc: mod.pc, native, ...(raycast ? { wheels: 'raycast' } : {}), ...(paint ? { paint } : {}), materials: mod.materials ?? [] };
   const r = mod.skin ? jbeamVisualSkinned(spec, mod.meshes, mod.glb, mod.skin) : jbeamVisual(spec, mod.meshes);
   r.visual.lod = r.visualLod ? [r.visualLod, r.visualFar] : [];

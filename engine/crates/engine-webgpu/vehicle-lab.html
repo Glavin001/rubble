@@ -236,7 +236,7 @@
     import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
-    import { loadMod, modVisual, modTextures } from './beamng-mod.mjs';
+    import { loadMod, modVisual, modModels, releaseModels, modTextures } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
     import { createStabilityStop } from './stability-stop.mjs';
@@ -361,8 +361,10 @@
         progress(`downloading the ${m.name}…`);
         const mod = await loadMod(m.base, { pc: m.pc });
         progress(`binding the ${m.name}'s body to its nodes…`); await new Promise((r) => setTimeout(r));
-        const make = (paint) => modVisual(mod, { native: true, raycast: true, paint });
-        entry = { kind, name: m.name, visuals: [make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: (mod.glb?.length || 0) + (mod.skin?.length || 0) };
+        // The model files (a generated car's glb and rskin, ~140 MB) are dropped once a
+        // visual is built and fetched again (the HTTP cache) for another paint.
+        const make = async (paint) => { await modModels(mod); try { return modVisual(mod, { native: true, raycast: true, paint }); } finally { releaseModels(mod); } };
+        entry = { kind, name: m.name, visuals: [await make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: mod.modelBytes };
       }
       entry.loadMs = performance.now() - t;
       carCache.set(kind, entry);
@@ -395,7 +397,7 @@
         const car = await carOf(get('car'));
         const n = get('parked') ? 2 : 1;
         // The second car's paint: built when first asked for (kept, like the first).
-        if (n > 1 && car.visuals.length < 2) { progress(`building the second ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(car.make(PAINTS[1])); }
+        if (n > 1 && car.visuals.length < 2) { progress(`building the second ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[1])); }
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {

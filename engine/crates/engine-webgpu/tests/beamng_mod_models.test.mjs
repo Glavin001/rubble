@@ -32,7 +32,7 @@ globalThis.fetch = async (url) => {
 test('a skinned vehicle\'s model files can be released after its visual is built, and fetched again', async () => {
   const mod = await loadMod('./m');
   assert.equal(mod.modelBytes, 8);
-  assert.deepEqual(modVisual(mod).visual, { kind: 'skinned', glb: 5, skin: 3 });
+  assert.deepEqual(modVisual(mod).visual, { kind: 'skinned', glb: 5, skin: 3, lod: [] });
   releaseModels(mod);
   assert.equal(mod.glb, null);
   assert.equal(mod.skin, null);
@@ -41,7 +41,7 @@ test('a skinned vehicle\'s model files can be released after its visual is built
   await modModels(mod);
   assert.deepEqual([...mod.glb], [1, 2, 3, 4, 5]);
   assert.deepEqual([...mod.skin], [9, 8, 7]);
-  assert.deepEqual(modVisual(mod).visual, { kind: 'skinned', glb: 5, skin: 3 });
+  assert.deepEqual(modVisual(mod).visual, { kind: 'skinned', glb: 5, skin: 3, lod: [] });
   assert.equal(fetches['car/car.rskin'], 2);
   // Held, nothing is fetched again.
   await modModels(mod);
