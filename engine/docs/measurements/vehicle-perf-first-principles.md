@@ -1,0 +1,632 @@
+# Deformable vehicles: the physical floor, where the time goes, and what to build (2026-11-14)
+
+This is a read-only audit. No kernel or host code was changed, and no GPU run was made.
+It is grounded in the kernel (`slang/kernels/explicit_beams.slang` with
+`explicit_beams_rigid.slang`, `_drive`, `_surface`, `_sleep`), the layout
+(`crates/engine-exec/src/explicit_plan.rs`), the host (`crates/engine-webgpu/src/explicit_beams_gpu.rs`,
+`crates/engine-world/src/explicit_vehicles.rs`) and the CPU reference
+(`crates/engine-softbody/src/explicit_beams.rs`). Measured costs come from
+`lab-mountain-perf.md`, `fleet-benchmark.md`, `explicit-2khz.md`,
+`explicit-vehicles-in-world.md` and `handoff/known-bugs.md`. The only new measurement is a
+CPU microbenchmark (§1.4, source in Appendix A).
+
+Each claim is marked as one of:
+- **[code]**: read in the code at `c01d4715`;
+- **[doc]**: measured in the repo's docs;
+- **[assumed]**: a hardware figure that was not measured here;
+- **[inferred]**: a conclusion drawn from the above.
+
+The machine is an M3 Max: 40 GPU cores, 12 performance CPU cores, 400 GB/s unified memory.
+
+## 0. Corrections to the brief
+
+- **The lab's sedan runs 512 lanes a car, not 256** [code]. `explicit_plan::frame_lanes` gives
+  512 to fleets of up to 32 vehicles, and to any fleet holding a vehicle with more than
+  `WIDE_BEAMS` = 2,048 beams. Larger fleets of small cars get 256. The doc comment there
+  records the measurement behind this choice, in µs of GPU time per step at 256 / 512 / 1,024
+  lanes [doc]: Viper 23.0 / 20.3 / 24.6, E36 39.4 / 31.0 / 38.8, Mustang 44.6 / 40.4 / 46.0.
+  Doubling or quadrupling the lanes barely changes a step's time. That alone says the step is
+  bound by latency, not by throughput (§2).
+- **With surface contact on, a frame is not one dispatch** [code, doc]. Under
+  `EB_FRAME_SEG` each step runs as one segment, with the surface pass as nine pipelines
+  between segments: 34 × 10 dispatches a frame (`lab-mountain-perf.md` §1a). Without surface
+  contact, all 34 steps run in one dispatch.
+- **A rebuild is no longer triggered whole-car by any one node** [code]. The reuse rule keeps
+  one spread per piece label (`lab-mountain-perf.md` §6A). A piece's own violation still
+  rebuilds the whole list, though. The "about 5 ms" is the walk's total per frame on the
+  steps that cannot reuse the list (Chrome stub, §8), not the cost of one rebuild.
+- **The CPU figure (45 s of mountain in 34 s wall) is not in the repo's docs.** It is used
+  here as given. The docs' CPU figure is 12 s simulated in 12.0 s of wall time, with surface
+  contact (§2 there).
+- **Steps a frame: 34** (`gP.steps`; 34 × 60 = 2,040 Hz in the lab).
+
+## 1. The physical floor
+
+### 1.1 The car and its work per substep [code + doc]
+
+The car is the generated sedan as the lab runs it: 548 nodes, 3,581 beams, 528 collision
+triangles, raycast wheels. The self-collision pair list holds 5,000 pairs in free fall and
+5,800–10,500 late on the mountain (margin 0.1 m, `lab-mountain-perf.md` §8).
+
+| Work item | Count a substep | Bytes the kernel touches per item, as laid out today [code] |
+|---|---|---|
+| Beam evaluation (`beamUpdate`) | 3,581 | 184 B. Reads `s1`, `bn`, `c1`, `c2`, `s0` (5 × 16), the two ends' position and velocity (4 × 16) and two slot indices (8). Writes two incidence entries (2 × 16). |
+| Node integration (`nodeUpdate`, `beamSum` gather) | 548 | 305 B. Reads P, V, F (48) and ≈13.1 incidence entries (13.1 × 16 = 209); `info` stays in registers for the frame. Writes P, V, F (48). |
+| Listed pair test (`pairReuseTest` → `tryContact`) | 5,000–10,500 | ≈290 B. Liveness (16), the box (32), the node (16), `triGeoLoad`'s 9 records plus `tn` (160), the group word, the node's `.w` and exclusions (48). |
+| Grid counting sort | 548 candidates, 1,024 buckets | small (workgroup atomics) |
+
+Summed: the beams 0.66 MB, the nodes 0.17 MB and the pairs 1.45–3.0 MB give **2.3–3.8 MB a
+substep, or 77–130 MB a 1/60 s frame**. That is traffic through the caches, not DRAM. The
+car's whole working set (nodes 26 KB, beam state and statics ≈290 KB, incidence 115 KB,
+triangle geometry 93 KB, pair list ≤84 KB) is **about 0.6 MB**. It stays in cache across
+substeps.
+
+**Arithmetic** [inferred, from the code's operations]. A beam is about 60–80 flops in
+strict form: a sqrt, a divide and the yield and break branches. A pair test is about
+100–150 flops; a node about 100. Altogether that is roughly **30–60 MFLOP a frame**.
+
+### 1.2 Hardware figures used [assumed]
+
+- GPU: 40 cores. FP32 ≈ 14 TFLOPS for the whole GPU, so ≈0.36 TFLOPS a core. DRAM 400 GB/s.
+- One core's load bandwidth from its caches: ≈64 B a clock at ≈1.4 GHz, so ≈90 GB/s. Not
+  measured; this is the figure the "one workgroup" bounds below depend on most.
+- A dependent load that hits L2 costs ≈0.2–0.35 µs, and one that goes to DRAM ≈0.5–0.7 µs.
+- One `sync()` costs ≈1–3 µs with its phase's minimum work. This is backed by measurements:
+  the page car's frame without coupling took 0.72 ms for 33 steps of about 6–8 syncs
+  (`explicit-2khz.md`), and the Viper took 20 µs a step.
+- A dependent dispatch costs 5.3 µs natively (wgpu on Metal, a trivial kernel:
+  `examples/dispatch_cost.rs`, 340 dispatches in 1.8 ms) [doc]. A dispatch whose kernel uses
+  large workgroup arrays costs ≈0.16 ms natively, because naga's MSL writer zeroes them from
+  one thread [doc]. Chrome's dispatch cost has not been measured.
+- CPU: one P-core of the M3 Max; Appendix A measures it.
+
+### 1.3 The GPU floor
+
+**One car** (per 1/60 s frame of 34 substeps):
+
+| Bound | Basis | Floor |
+|---|---|---|
+| Whole-GPU bandwidth (work spread over 40 cores) | 77–130 MB at 400 GB/s, and the working set is cache-resident | 0.02–0.3 ms |
+| Whole-GPU arithmetic | 30–60 MFLOP at 14 TFLOPS | 2–4 µs |
+| One core (one workgroup), as laid out | 77–130 MB at ≈90 GB/s | **0.85–1.45 ms** |
+| One core, compact records (§3.4: pair 24 B, beam 56 B, node ≈100 B) | ≈0.6 MB a substep, ≈20 MB a frame | ≈0.23 ms |
+| One core, arithmetic | 30–60 MFLOP at 0.36 TFLOPS | 0.08–0.17 ms |
+| Dependency chain | 34 substeps × at least 3–4 dependent phases (node → beam → contact test and apply, plus the coupling) × 1.5–3 µs | **0.15–0.4 ms** |
+
+**The floor for one car is about 0.3–0.5 ms a frame on this GPU.** It is set by latency
+(the 34 serial substeps), not by work. The car's work is about 1 % of what the GPU could do
+in that time.
+
+**N cars apart.** The latency floor (≈0.3–0.5 ms) applies until the GPU fills. After that,
+each car costs its own throughput: ≈20 MB a frame with compact records, at aggregate cache
+bandwidth (≈1–2 TB/s assumed) or at worst DRAM. That is **≈10–50 µs a car**. So:
+- 32 cars: ≈0.5–1.6 ms;
+- 100 cars: ≈1–5 ms;
+- 1,000 cars: ≈10–50 ms, which is memory-bound.
+
+**Cars in contact.** Contact adds a vehicle–vehicle pair test set comparable to
+self-collision, per touching pair. Spread over cores, a touching pair costs about one car's
+latency floor × 1.5, so **≈0.5–0.8 ms**. Thirty-two cars in contact cost **≈1–2 ms**.
+
+### 1.4 The CPU floor (one core) [measured here]
+
+Appendix A is a C model of one substep with this car's counts: 548 nodes, 3,581 springs with
+damping and a break check, 7,000 point–triangle plane tests and the integration. It is built
+`clang -O2 -ffp-contract=off` (no FMA contraction, as the bitwise contract needs) and runs
+20,000 substeps on one M3 Max P-core, with other agents' builds running.
+
+| Part | Per substep | Per item |
+|---|---|---|
+| Beams | 6.2–6.3 µs | 1.74–1.77 ns |
+| 7,000 pair tests | 26.9–27.0 µs | 3.84–3.86 ns |
+| Nodes | 0.9 µs | |
+| **Total** | **34.0–34.2 µs, so 1.16 ms a frame** | |
+
+The real beam has kinds, plasticity, break groups and strict helpers, and real contacts
+carry friction laws: allow 2–3× on the beams and contacts. That puts **a well-written
+single-core CPU car at ≈1.5–2.5 ms a frame**.
+
+The reference today runs ≈12.6 ms a frame: 34 s for 2,700 frames, which is 378 µs a
+substep. That is 5–8× the CPU floor. It was written for clarity and for the bitwise
+contract, not for speed. One example: `step()` allocates `Vec`s per substep for centred
+damping [code].
+
+### 1.5 Today against the floor
+
+| Case | Measured [doc] | Floor | Ratio |
+|---|---|---|---|
+| One car parked (Chrome GPU ms per World step) | 4.5–4.8 | 0.3–0.5 | 10–15× |
+| Free fall | 5.0 (Chrome), 6.3 (native) | 0.3–0.5 | 10–20× |
+| Late mountain crash | 12.8–14.2 (Chrome) | 0.3–0.5 (plus more pairs: ≤0.7) | 20–45× |
+| 32 cars apart | 11.75 (native, 1/8/32 = 9.34/10.12/11.75) | 0.5–1.6 | 7–20× |
+| Cars in contact, 8 / 16 / 32 | 53.6 / 58.8 / 103.3 | ≈1 / 1–1.5 / 1–2 | 50–100× |
+| CPU reference, one car | 12.6 ms a frame | 1.5–2.5 | 5–8× |
+
+**By phase** (native, one snapshot at t = 35 s, the car before re-export, 20 frames each way
+with ablations, ms a frame; `lab-mountain-perf.md` §7) [doc]:
+
+| Phase | Measured | One-core floor as laid out (§1.3) | Ratio |
+|---|---|---|---|
+| Whole frame | 19.6 | ≈1 | ≈20× |
+| Self-collision search (listing, walk, tests) | ≈14.2 (19.6 − 5.4) | pairs 0.3–1.0 | 15–45× |
+| Coupling per-step passes | ≈5.7 (19.6 − 13.9) | well under 0.1 (548 nodes × a few shapes × 34) | >50× |
+| Beams | ≈2.5 (19.6 − 17.1) | 0.25 | ≈10× |
+| Everything except self-collision | 5.4 | 0.3–0.5 | 10–18× |
+
+The ablation shares overlap: a step waits on its slowest phase, so the shares do not add.
+
+**Contact group, 8 cars** (same state, ms a frame, `fleet-benchmark.md`) [doc]: 68.4 before
+the grid fixes, 52.0 after. In the 52.0: members' self-collision ≈16, vehicle–vehicle
+triangle tests ≈10, the levels' application ≈12 (chains serial per contact point), the rest
+14.
+
+## 2. Where the gap goes, by cause
+
+### 2.1 Barriers per substep [code]
+
+`sync()` is two barriers: `DeviceMemoryBarrierWithGroupSync` then
+`GroupMemoryBarrierWithGroupSync`. These are the solo frame's syncs per substep, by
+condition:
+
+| Site | syncs | When |
+|---|---|---|
+| `coupleStep`: reactBy, integrate, spheres, count | 4 | coupled car (the lab); 3 on the first step |
+| `driveStep` | 1 | driven car |
+| `centredPhase` | 2 | centred damping |
+| After the node phase and clears | 1 | always |
+| Aero / commands | 1 | `EB_AERO` modules |
+| After the beam phase | 1 | always |
+| Grid scan and scatter | 5 | grid steps that build (not on reuse) |
+| `pairReuseTests` | 1 | grid with reuse |
+| `selfApply` | ≥2 (1 a round, up to 32 rounds, then the serial tail; 3 more with `selfSplit`) | steps with a hit |
+| `surfaceStep` | up to 5 | surface contact |
+| End of step | 1 | always |
+
+The coupled lab car with drive and no hit, reusing its list, runs about **9 syncs (18
+barriers) a substep**. A rebuild with hits runs about 16, and surface contact adds up to 5,
+for 21. Over 34 substeps that is **≈300–700 syncs a frame**. At 1.5–3 µs each, the barriers
+with their minimum phase latency cost **≈0.5–2 ms a frame**: about the whole floor, spent on
+synchronisation alone.
+
+### 2.2 Work per lane between barriers: serial dependent loads [code + inferred]
+
+At 512 lanes:
+- **Beams:** 3,581 / 512 = 7 beams a lane. Each is a chain of about four dependent loads
+  (`s1` → `bn` → the four node records → the slot indices), and nothing overlaps them across
+  iterations. That is ≈7 × 4 × 0.3 µs ≈ **8 µs a substep**.
+- **Pair tests:** 5,000–10,500 pairs give 10–20 a lane. Each is about five dependent levels:
+  liveness, box, node, then `tryContact`'s loads, then `triGeoLoad`'s 9 records. That is
+  ≈10–20 × 1.5 µs ≈ **15–30 µs a substep**, or 0.5–1 ms a frame.
+- **Walk (rebuild):** `pairReuseList` gives a triangle 2 lanes. Each lane walks up to 64 cells
+  and their bucket runs serially, so the step waits for the triangle with the most
+  candidates.
+- **Coupling count (`cplCountBy`):** each lane loops over every proxy shape for its node:
+  O(nodes × shapes) every substep. There were 100+ shapes on the mountain before per-piece
+  windows, and still 14–73 at 30–37 s.
+- **Group application (`selfApply`, vv levels):** the hits' chains run in rounds, one
+  barrier a round. Past 32 rounds one lane finishes them, and in groups the chains run
+  serially per contact point.
+- **Lane-0 serial work:** `grabApply`, `brakeApply`, `resolvePending`, the 16-block scan
+  total and the reuse decision all run on one lane.
+
+With one 512-lane workgroup on a core, there are 16 SIMD groups to hide memory latency. A
+core can hold several times that, so every dependent load is paid almost in full. **This is
+the main cause [inferred]: per substep, the step is a chain of ≈9–21 phases, each as long as
+its slowest lane's dependent-load chain.** The lane measurements fit this: 256 → 512 →
+1,024 lanes gives −10 %, then +20 %.
+
+### 2.3 Idle lanes and idle GPU [code + inferred]
+
+- **One car uses 1 of 40 cores.** For 5–14 ms a World step, 39 cores idle while the frame
+  runs.
+- **The frame does not overlap the rigid step.** `encode_frame` runs cpl_plan → share → frame
+  → loads after the rigid step on one queue, and wgpu barriers storage writes between
+  passes. A car's frame is added to the World step's critical path [code].
+- **Within the car, work is short and uneven.** Phases with fewer items than lanes leave
+  lanes idle: a few dozen bodies (`cplIntegrate`), 16-lane scan blocks, lane-0 sections.
+  The early-out `triangleFinish` and the throttle make work per lane uneven.
+- **A contact group of k cars runs on one workgroup** [code: `contactGroup`;
+  doc: `fleet-benchmark.md`]. Each member gets lanes / k. Eight cars in groups of 2 put 2×
+  each member's work on one core, and the frame waits on the slowest group. That is why 8
+  cars cost 5× what 4 cars do.
+
+### 2.4 Data layout [code]
+
+- **Nodes:** AoS of 3 × float4: (P, mass), (V, friction), (F, self group). That is
+  48 B, vector-friendly; good for the GPU.
+- **Beams:** 3 static uint4 (48 B: ends, kind/type, group, k, c, limits), 2 state float4
+  (32 B) and 2 slot indices. `c2` is loaded before the kind branch, though only LIMITED and
+  SUPPORT use it (the compiler may sink the load; not verified). Beam kinds are mixed in file
+  order, so a SIMD group runs several kinds' branches.
+- **Forces:** gathered, not scattered. Each beam writes its two ends' forces into the CSR
+  incidence entries (16 B each), and the node sums them in a fixed order. This is already
+  the best design for bitwise determinism, with no atomics. Its cost is 2 × 16 B written
+  and read per beam, against ≈2 × 12 B at minimum.
+- **Pair records:** 2 words (triangle, node) in `gNext`. Each test reloads the triangle's 9
+  geometry records: **≈290 B a pair, of which ≈180 B is the same triangle's geometry**,
+  reloaded once per candidate.
+- **Indirections:** `gLists[slotBase + 2j]` for the incidence slots; `gStatic[nodeInfoBase]`;
+  per-pair `gMisc` liveness and `gStatic` exclusions.
+
+### 2.5 Host work, readbacks and what gates the next step [code + doc]
+
+- **Per World step** (`explicit_vehicles.rs`): `write_params` (one uniform write), two buffer
+  clears, cpl_plan (2–3 dispatches of nv workgroups), a copy into indirect args, cpl_share
+  (indirect), the frame, cpl_loads and sleep. The status is read without waiting every 16
+  frames (`STATUS_EVERY`). **Nothing in the frame waits on the host.**
+- **The lab, CPU side:** a union-find over the beams for piece labels every 6 windows (this
+  needs the beams' broken state read back), plus retired-bit uploads.
+- **What gates the next step on the page:** `canStep` allows at most 2 readbacks in flight,
+  and the World's ring holds 3. When the GPU is the limit, a step is refused and is not owed
+  again (§8–9 there). At 120 Hz this starved steps until the draw-skipping fix. **The host is
+  not a cost; GPU latency is** [doc].
+- **Native split frames:** 340 dispatches with surface contact, ≈55 ms a World step of naga
+  workgroup zeroing [doc]. Native-only, and bit-identical with `RUBBLE_SURFACE_SPLIT=0`.
+
+### 2.6 Rebuilt every step that could be kept [code]
+
+- **The grid's bucket counts:** cleared, and every candidate counted, every substep, even when
+  the list is reused (reuse == 2 skips only the scan and the scatter). That is 548 workgroup
+  atomics and 1,024 clears a substep; cheap but useless on reuse steps.
+- **The whole pair list on any violation.** A list whose margin one piece exceeds is rebuilt
+  for every triangle. The standard alternative rebuilds only the rows of the elements that
+  moved (§3.1).
+- **Every listed pair re-tested every substep,** including pairs whose gap at the last test
+  is many times the most the two could approach since. Parked, the list is reused on 97 % of
+  steps, but all 5,000 pairs are still tested 34 times a frame.
+- **The coupling's node-against-shape count, every substep from scratch.** Every node is
+  tested against every shape's sphere.
+- **`triGeoFill` for every tested triangle, every substep.** This is needed: geometry changes.
+
+### 2.7 Work done for parts at rest [code + doc]
+
+- **Whole-car sleep exists** (`explicit_beams_sleep.slang`, an engine-wide setting). A
+  sleeping car is not stepped. Whether the lab turns it on was not checked; the parked
+  figures above are of an awake car.
+- **Inside an awake car, everything is evaluated every substep:** all beams (needed: loaded
+  structure at rest still carries forces), all pair tests (not needed, §2.6), all coupling
+  counts (not needed).
+- **Torn pieces at rest** are retired by the debris time to live. That is lossy by design,
+  and the owner chose it: off by default, on in the lab.
+
+## 3. Best known technique for each cost
+
+For each, the technique (with its standard source), the design here, the expected cost
+after, and whether the result stays the same.
+
+### 3.1 Self-collision: Verlet lists done per element
+
+**Sources:**
+- Verlet lists with a skin, rebuilt on displacement (Verlet 1967; Allen & Tildesley,
+  *Computer Simulation of Liquids*, §5.3);
+- per-particle "half-skin" displacement tracking (the same text; LAMMPS and HOOMD's
+  neighbour-list `check yes`);
+- spatial hashing with a counting sort (Teschner et al. 2003, *Optimized Spatial Hashing for
+  Collision Detection of Deformable Objects*; Green 2010, *Particle Simulation using CUDA*,
+  NVIDIA);
+- conservative advancement / time-of-impact bounds (Mirtich 1996; Redon et al. 2002).
+
+**(a) A safe-until bound per pair.** At a pair's test, store its gap g past the contact band
+(the plane distance less max(r, CLIP_DEPTH), as `pairFar` already computes). Skip the pair
+until the accumulated relative-motion bound since then (the same per-axis spread and h·v
+terms the list's rule uses, per piece) exceeds g. This is the list's own proof applied per
+pair instead of per list.
+- Expected: most of the 5,000–10,500 tests a substep drop when parked or cruising. Late, a
+  fraction drops (only the crush zone keeps testing). The pair tests (0.5–1 ms a frame plus
+  the waits) fall to ≈0.1–0.3 ms.
+- **Identical (bitwise):** a skipped pair provably meets the band in neither path. It needs a
+  rounding allowance like `fqSeparated`'s, and a CPU twin.
+- Size: medium. A gap word a pair, a check in `pairReuseTest`, the CPU twin and tests.
+
+**(b) An incremental (row-wise) rebuild.** When the bound fails for some elements, rebuild only
+the rows of the triangles and candidates whose own displacement exceeded the half-margin,
+not the whole list. The grid is already counted every step.
+- Expected: the late rebuild total (≈5 ms in Chrome) scales with the moved fraction:
+  ≈1–2 ms in a crash, ≈0 at cruise.
+- Identical: the list stays a superset with the same box test, and selfApply orders the hits.
+- Size: medium-large (the list's rows need stable slots; compaction is part of the build).
+
+**(c) A balanced build.** Replace the per-triangle walk (2 lanes a triangle, ≤64 cells) with
+node-centric queries: each candidate reads its one cell's triangle entries, after a counting
+sort of (cell, triangle) entries. Or allocate per-triangle work by a prefix sum of its cell
+counts (Green 2010).
+- Expected: the rebuild costs its total work over 512 lanes, not its worst triangle. ≈2–4×
+  on rebuild steps.
+- Identical (same pairs).
+
+**(d) Triangle-major list order with the geometry loaded once.** Sort the list by triangle (the
+counting sort already exists). Each lane takes a fixed chunk of consecutive pairs and
+reloads the geometry only when the triangle changes. Bytes a pair fall from ≈290 to ≈24.
+- Expected: pair traffic ÷10. On one core: −0.5 to −1 ms a frame late.
+- Identical: tests are pure, and selfApply applies the hits in the specification's order.
+
+### 3.2 The coupling: a Verlet list and fewer barriers
+
+The coupled car pays 4 syncs a substep plus O(nodes × shapes) in `cplCountBy` [code].
+
+- **A per-frame (node, shape) list.** Build it once a frame from the shapes' swept spheres
+  and the nodes' frame travel bound (the same proof as 3.1, with the proxies' velocities
+  bounded over the frame). The per-substep count tests only listed pairs.
+- **Fold `cplReactBy` and `cplSpheres` into neighbouring phases.** reactBy can go into the end
+  of the previous step's last phase, and the spheres into the integrate phase with lanes
+  split. That gives 4 → 2 syncs.
+- Expected: 1.8–5.7 ms → ≈0.3–0.8 ms a frame.
+- Identical (superset list; the same order of sums: fixed-point `gAcc`).
+- Size: medium.
+
+### 3.3 Barriers and phase structure
+
+**Sources:**
+- Harris, *Optimizing Parallel Reduction in CUDA*, and subgroup scans (Merrill & Garland
+  2016, single-pass scan);
+- software pipelining of loads (Volkov 2010, *Better performance at lower occupancy*).
+
+**What to do:**
+- Merge the clears into the node phase's barrier.
+- Run `driveStep` beside the coupling's integrate.
+- Scan the grid with subgroup operations: WebGPU `subgroups` has shipped in Chrome since
+  M128 and wgpu has it. That takes the scan's 5 syncs to 2.
+- Skip the bucket counting on reuse steps.
+- Issue the next item's loads before the current item's arithmetic in the beam and pair
+  loops (unroll by 2), so two dependent chains are in flight a lane.
+
+Expected: 9–16 → 5–8 syncs a substep (−0.3 to −1 ms a frame), and −30–50 % on the beam and
+pair phases' latency. Identical. Each change is small. **Measure first:** the barrier cost
+with the existing `EB_ABLATE` bits 64 (one barrier instead of two) and 128 (none),
+time-only. No doc reports this yet.
+
+### 3.4 Data layout
+
+**Sources:** Bell & Garland 2008 (sparse matrix–vector on GPUs: CSR, ELL, sorting rows by
+length); Cuthill–McKee reordering for locality.
+
+**What to do:**
+- Sort beams by kind (and by type) within a car, so a SIMD group runs one branch.
+- Renumber nodes by reverse Cuthill–McKee, so a group's endpoints share cache lines.
+- Pack the beam statics into 32 B: local u16 ends plus a vehicle base, k, c, and limits only
+  for the kinds that use them, in a side table.
+- Store incidence forces as 12 B entries.
+
+**Identical:** beamSum's order is the CSR's per-node order, which the beam evaluation order
+does not change. Break groups use `min(local)`, which is order-free.
+
+**Not identical, and needs the owner:** a renumbering changes nothing in the arithmetic. But a
+beam's file index appears in the spec (§17 masters, `min(local)`), so the permutation must be
+held beside the beams and mapped back. That is bookkeeping, not physics.
+
+Expected: beams −30–50 % (≈1 ms a frame in the late phase). Size: medium (the layout, the CPU
+twin's indexing, the readbacks).
+
+### 3.5 Cars in contact: one car a workgroup, and contact across workgroups
+
+**Source:** the standard multi-body GPU pattern. Per-body local solves run in their own
+blocks, and interactions are exchanged through global memory at a kernel boundary (one
+kernel launch a phase, as in PhysX GPU and Bullet's GPU pipeline). Global barriers inside a
+kernel are not allowed in WebGPU: there is no forward-progress guarantee across workgroups.
+
+**Design: C2's same-substep design** (`fleet-benchmark.md` "A contact group across
+workgroups"). Each substep is two dispatches:
+- (i) every member's step, one workgroup a car;
+- (ii) the vehicle-contact pass, one thread a candidate pair across all groups, with
+  fixed-point sums.
+
+That is 68 dispatches a frame, whatever the number of cars. State that lives across substeps
+moves to storage: the reuse state, the coupling's sphere copies, the per-frame drive words.
+
+Expected:
+- 34 × (2 × 5.3 µs dispatch + the member step + the pass);
+- with today's member step (≈0.27 ms) that is 25–35 ms for 8 cars, the doc's estimate;
+- **after 3.1–3.3 bring a member's substep to ≈20–40 µs, ≈1.5–3 ms for any number of
+  touching cars** until the GPU fills.
+
+**Identical** (the doc's analysis: per-element updates, fixed-point sums, hits in the
+specification's order).
+
+**What it forces:** the group kernels must use small workgroup arrays, or native pays ≈0.16 ms
+of naga zeroing a dispatch [doc]. That would be 11 ms a frame at 68 dispatches. The fix is
+either `create_shader_module_trusted` after a read-before-write audit, or the state in
+storage. Also needed: Chrome's dispatch cost measured with the real bind group. Size: large
+(the whole group path).
+
+**Lossy alternative (owner's decision):** a two-phase substep, where each car tests
+contact against its partner's state one substep old. It needs no barrier inside a substep,
+so groups dissolve into solo frames. Not identical.
+
+### 3.6 Fleets of cars apart
+
+- One workgroup a car is the persistent-block pattern. It avoids 34 × k dispatches and keeps
+  per-substep data local.
+- It scales across cores until residency fills: ≈40 cores × 2–4 resident 512-lane groups,
+  so 80–160 cars at one car's latency (1 → 32 cars: 9.3 → 11.8 ms [doc]).
+- Past that, throughput binds, and **256 lanes for large fleets** (the current rule) is right.
+- The existing **wide passes** (a dispatch per phase per step across all vehicles,
+  `WIDE_PASSES`) are the phase-dispatch alternative. They run no coupling, aero, raycast
+  wheels or surface contact, and were slower for one sedan (0.63 vs 0.44 ms [doc]).
+
+Expected after 3.1–3.4: per car ≈20–50 µs of throughput, so ≈2–5 ms for 100 cars. Measure:
+the fleet bench at 64/128/256 generated sedans (only 32 has been measured).
+
+### 3.7 CPU threads per car (BeamNG's public description)
+
+BeamNG publicly describes its physics as running at 2,000 Hz with vehicles spread over CPU
+cores. That is public material only; no source was read.
+
+On this machine (§1.4) a well-written car costs ≈1.5–2.5 ms a frame on a P-core, so 12
+P-cores carry ≈12 cars at ≈2 ms. For a single car that is worse than the GPU's floor
+(0.3–0.5 ms) but better than today's GPU (4.5–14 ms).
+
+**What it forces:**
+- The rigid world's contacts and proxies live on the GPU. A CPU car can exchange with them
+  once a frame, not every substep. That changes the coupling's time resolution: **lossy, the
+  owner's decision**.
+- It also needs a CPU reference 5–8× faster than today's (SoA, no per-step allocations,
+  SIMD), which is worth doing anyway for validation speed. It stays bitwise if the SIMD keeps
+  the scalar order per lane.
+
+## 4. Is one workgroup a car the right architecture?
+
+**One car: yes in principle; the cost is the work inside it, not the shape.** A workgroup
+barrier (≈1–3 µs) is cheaper than a dependent dispatch (5.3 µs native; more in Chrome,
+unmeasured). One car's 3,581 beams would fill only ≈3 % of the GPU in a phase-dispatch
+design, which therefore cannot beat one workgroup's latency. The floor is ≈0.3–0.5 ms, and
+today's 4.5–14 ms comes from:
+- 9–21 phases a substep;
+- each phase as long as a lane's chain of 7–20 dependent loads;
+- O(nodes × shapes) coupling;
+- whole-list rebuilds.
+
+More lanes do not help (measured). Fewer phases, shorter chains and less work do.
+
+**(b) Fewer or more lanes sized to the car.** No real effect (−10 % at 512, worse at 1,024).
+Keep 512 for small fleets and 256 for large ones.
+
+**Hundreds of cars apart: yes.** Throughput-bound past ≈100 cars, with no dispatch overhead
+and data local to each car. (a) one dispatch a phase across many workgroups would add 100–200
+dispatches a frame, and wins only if per-car latency stays where it is. Keep (a) as the wide
+passes for vehicles too big for one workgroup.
+
+**Cars in contact: no.** Putting a group on one workgroup puts k cars' work on one core, and
+the frame waits on the biggest group: 8 cars cost 53 ms against ≈1 ms of floor. Contact
+belongs across workgroups (3.5), with each car keeping its own workgroup for its local
+phases.
+
+**(c) Few cars on CPU threads, crowds on GPU.** Not as the base: it makes the rigid coupling
+frame-rate (lossy) and duplicates the hot path's tuning on two targets. It is a fallback for
+cars that touch no dynamic rigid body, if the owner wants it.
+
+**If starting today, I would build:**
+- **Solo cars:** one workgroup a car for the whole frame (as now), designed for ≤4–5 syncs a
+  substep. Every contact search runs as a per-element Verlet list with safe-until bounds and
+  row-wise rebuilds, and the coupling's (node, shape) pairs are listed once a frame.
+- **Cars in contact:** the same per-car kernel run a substep at a time, alternating with a
+  global contact dispatch: two dispatches a substep, ≈68 a frame. The host picks per frame
+  which cars run solo (all 34 substeps in one dispatch) and which run in the contact
+  schedule, as it picks groups now.
+- **Records compact and sorted:** beams by kind and locality, triangle-major pair lists.
+- **One CPU twin, kept bitwise and made fast** (SoA, SIMD in scalar order), so validation runs
+  at 5–10× real time.
+
+This is today's architecture for solo cars and fleets, and C2's design for groups, with the
+inner loops rebuilt. It is not a rewrite.
+
+## 5. Ranked recommendations
+
+Ranked by expected gain × how often it is paid. "Identical" means bitwise, the same as
+today's contract.
+
+| # | Change | Expected gain | Identical? | Risk | Depends on | Measure before committing |
+|---|---|---|---|---|---|---|
+| 1 | **Self-collision per pair:** safe-until bound (3.1a) + triangle-major list with the geometry loaded once (3.1d) | Every car every frame. Parked 4.5 → ≈3 ms. Late crash −2 to −4 ms (12.8–14.2 → ≈9–11) | Yes | Low–medium (rounding allowance; CPU twin) | none | On the CPU twin: per substep, the share of listed pairs whose gap exceeds the bound (`--tri-census` style). GPU: the 2^26 / 2^27 ablations' share at parked, 9 s and 35 s |
+| 2 | **Incremental, balanced rebuild** (3.1b, c) | Late ≈5 ms → ≈1–2 ms (−3 to −4) | Yes | Medium (stable row slots) | 1 (shared bounds) | Rebuild census: the elements past the half-margin at each rebuild; the walk's per-lane spread |
+| 3 | **Coupling list + barrier folding** (3.2) | 1.8–5.7 → ≈0.3–0.8 ms in coupled scenes (the World, mountain, town) | Yes | Medium | none | Ablation 32768 (count) and 8192/16384 shares at t 10, 20, 35 s; shapes a node meets |
+| 4 | **Contact groups across workgroups** (3.5, C2) | 8/16/32 touching cars 53/59/103 → ≈25–35 now, ≈2–4 ms after 1–3 | Yes | High (whole group path; workgroup zeroing natively; Chrome dispatch cost) | 1–3 for the big gain | A Chrome dependent-dispatch microbench with the frame's bind group; the member step's cost after 1–3 |
+| 5 | **Fewer syncs, pipelined loads, subgroup scan** (3.3) | −0.3 to −1 ms a frame, every car | Yes | Low | none | `EB_ABLATE` 64/128 barrier cost (time-only), parked and late |
+| 6 | **Compact, sorted beam records** (3.4) | Beams −30–50 % (≈−1 ms late; more for 6k-beam cars) | Yes (with the index map) | Medium (touches every reader of beam records) | none | The beam ablation (32) share on the re-exported car; SIMD divergence by kind census |
+| 7 | **A fast CPU twin** (SoA, no per-step allocation, SIMD in scalar order) | Validation 5–8× faster; CPU-hosted cars possible | Yes | Low–medium | none | A profile of the CPU twin on the mountain |
+| 8 | **Large-fleet bench** (64–256 generated sedans, 256 vs 512 lanes) | Decides whether the phase dispatch matters for fleets | n/a | none | 1–6 | The bench itself |
+
+**Owner decisions (not lossless, not recommended without a decision):**
+- vehicle contact one substep behind (dissolves groups);
+- CPU cars with frame-rate rigid coupling;
+- sleep for torn pieces at rest without the debris TTL's retirement;
+- fast-math or FMA in the kernels (breaks CPU==GPU).
+
+Expected total for one car after 1, 2, 3, 5 and 6: **parked ≈1.5–2.5 ms, late crash ≈4–6 ms.**
+That is still ≈5–10× the floor. Closing the rest needs the phase count at 3–5 a substep and
+compact records end to end, which this plan works toward but does not fully reach. The
+latency floor (≈0.3–0.5 ms) is not reachable while the frame holds 9+ syncs a substep.
+
+## 6. What is verified and what is inferred
+
+**Verified in code:**
+- the lane policy (512 / 256);
+- the barrier sites and counts per substep;
+- `sync()` = two barriers;
+- the node, beam and pair load sets and record sizes;
+- the CSR gather (no atomics for beams);
+- `cplCountBy`'s O(nodes × shapes) loop;
+- bucket counting on reuse steps;
+- the per-triangle walk at 2 lanes;
+- `triGeoLoad`'s 9 records a pair;
+- that the frame is encoded after the rigid step with no host wait inside;
+- status reads every 16 frames;
+- contact groups on one workgroup;
+- the wide passes' existence and limits;
+- the CPU reference's per-substep allocations under centred damping.
+
+**Measured here:** the CPU microbenchmark (§1.4).
+
+**From the docs:** every GPU millisecond quoted, the ablation shares, dispatch and zeroing
+costs, and the lanes measurements.
+
+**Inferred or assumed:**
+- per-core GPU load bandwidth (≈90 GB/s);
+- load latencies (0.2–0.7 µs);
+- the per-sync cost (1.5–3 µs, fitted to the page car and the Viper);
+- every floor number;
+- every expected gain;
+- that dependent loads, rather than barriers alone, dominate a phase;
+- residency (2–4 workgroups of 512 lanes a core);
+- the share of pairs a safe-until bound would skip.
+
+**Not verified:**
+- the CPU figure of 34 s for 45 s (not in the docs);
+- Chrome's dispatch cost;
+- whether the compiler sinks `c2`'s load;
+- the lab renderer's per-frame readback volume (the skin path was not read);
+- BeamNG's threading details beyond its public statements.
+
+## Appendix A: the CPU microbenchmark
+
+`clang -O2 -ffp-contract=off beambench.c && ./beambench` (M3 Max, one P-core, a busy
+machine). Output, two runs: 34.0 and 34.2 µs a substep; beams 1.74–1.77 ns each, pair tests
+3.84–3.86 ns each, nodes 0.86–0.88 µs; 1.16 ms per 34-substep frame. A model of the work's
+shape (scalar, scatter-add, plane test only), not of the full beam laws.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+#define N 548
+#define B 3581
+#define T 528
+#define P 7000
+static float px[N],py[N],pz[N],vx[N],vy[N],vz[N],fx[N],fy[N],fz[N],im[N];
+static int ba[B],bb[B]; static float rest[B],kk[B],cc[B],str[B]; static unsigned char brk[B];
+static int ta[T],tb[T],tc[T]; static int pt[P],pn[P]; static int hits;
+static double now(){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec*1e-9;}
+int main(){
+  srand(1);
+  for(int i=0;i<N;i++){px[i]=(i%10)*0.3f;py[i]=((i/10)%6)*0.3f;pz[i]=(i/60)*0.3f;vx[i]=vy[i]=vz[i]=0;im[i]=1.0f/2.5f;}
+  for(int j=0;j<B;j++){int a=rand()%N,b=(a+1+rand()%40)%N;ba[j]=a;bb[j]=b;
+    float dx=px[a]-px[b],dy=py[a]-py[b],dz=pz[a]-pz[b];rest[j]=sqrtf(dx*dx+dy*dy+dz*dz)*1.001f;kk[j]=2e6f;cc[j]=200;str[j]=1e9f;brk[j]=0;}
+  for(int t=0;t<T;t++){ta[t]=rand()%N;tb[t]=rand()%N;tc[t]=rand()%N;}
+  for(int p=0;p<P;p++){pt[p]=rand()%T;pn[p]=rand()%N;}
+  const float h=1.0f/2000; int steps=20000;
+  double t0=now(), tb_=0, tn=0, tp=0;
+  for(int s=0;s<steps;s++){
+    double a0=now();
+    for(int i=0;i<N;i++){fx[i]=0;fy[i]=-9.81f/im[i];fz[i]=0;}
+    for(int j=0;j<B;j++){ if(brk[j])continue; int a=ba[j],b=bb[j];
+      float dx=px[a]-px[b],dy=py[a]-py[b],dz=pz[a]-pz[b];
+      float q=dx*dx+dy*dy+dz*dz; float inv=1.0f/sqrtf(q); float len=q*inv;
+      float e=len-rest[j]; float u=((vx[a]-vx[b])*dx+(vy[a]-vy[b])*dy+(vz[a]-vz[b])*dz)*inv;
+      float f=-kk[j]*e-cc[j]*u; if(fabsf(f)>str[j]){brk[j]=1;f=0;}
+      float s_=f*inv; fx[a]+=dx*s_;fy[a]+=dy*s_;fz[a]+=dz*s_; fx[b]-=dx*s_;fy[b]-=dy*s_;fz[b]-=dz*s_; }
+    double a1=now();
+    for(int p=0;p<P;p++){int t=pt[p],n=pn[p]; int A=ta[t],Bq=tb[t],C=tc[t];
+      float e1x=px[Bq]-px[A],e1y=py[Bq]-py[A],e1z=pz[Bq]-pz[A],e2x=px[C]-px[A],e2y=py[C]-py[A],e2z=pz[C]-pz[A];
+      float nx=e1y*e2z-e1z*e2y,ny=e1z*e2x-e1x*e2z,nz=e1x*e2y-e1y*e2x; float nl=sqrtf(nx*nx+ny*ny+nz*nz)+1e-20f;
+      float d=((px[n]-px[A])*nx+(py[n]-py[A])*ny+(pz[n]-pz[A])*nz)/nl; if(fabsf(d)<0.025f) hits++; }
+    double a2=now();
+    for(int i=0;i<N;i++){ vx[i]+=fx[i]*im[i]*h; vy[i]+=fy[i]*im[i]*h; vz[i]+=fz[i]*im[i]*h;
+      px[i]+=vx[i]*h; py[i]+=vy[i]*h; pz[i]+=vz[i]*h; if(py[i]<-1){py[i]=-1;vy[i]=0;} }
+    double a3=now(); tb_+=a1-a0; tp+=a2-a1; tn+=a3-a2;
+  }
+  double t1=now();
+  printf("per substep: total %.2f us  beams %.2f us (%.2f ns/beam)  pairs %.2f us (%.2f ns/pair)  nodes %.2f us; hits %d\n",
+    (t1-t0)/steps*1e6, tb_/steps*1e6, tb_/steps*1e9/B, tp/steps*1e6, tp/steps*1e9/P, tn/steps*1e6, hits);
+  printf("per 1/60 s frame (34 substeps): %.2f ms\n",(t1-t0)/steps*34*1e3);
+}
+```
