@@ -104,9 +104,19 @@ fn positions(v: &ShowcaseVisual, nodes: &[Vec3]) -> Vec<Vec3> {
 /// B3 probes every this-many-th node (0: none).
 pub fn lint(v: &ShowcaseVisual, built: &Built, probe_every: usize) -> LintReport {
     let sk = &built.skeleton;
+    let parts: Vec<u16> = sk.nodes.iter().map(|n| n.part).collect();
+    let beams: Vec<(u32, u32)> = sk.beams.iter().map(|b| (b.a, b.b)).collect();
+    lint_parts(v, &parts, &sk.parts, &beams, probe_every)
+}
+
+/// [`lint`] for any visual: per node its part (`u16::MAX` none: an imported
+/// vehicle's nodes, whose flexbodies bind to node groups; then A1 checks each
+/// piece against the nodes it binds, and A7, A4's spacing, B1 and B4, which
+/// need parts, measure nothing), the part names and the beams (node pairs).
+pub fn lint_parts(v: &ShowcaseVisual, parts: &[u16], part_names: &[String], beam_pairs: &[(u32, u32)], probe_every: usize) -> LintReport {
     let nn = v.node_rest.len();
     let rest: Vec<Vec3> = v.node_rest.iter().map(|q| Vec3::from_array(*q)).collect();
-    let part = |j: u32| sk.nodes.get(j as usize).map_or(u16::MAX, |n| n.part);
+    let part = |j: u32| parts.get(j as usize).copied().unwrap_or(u16::MAX);
     let n = v.positions.len();
     let mut r = LintReport {
         vertices: n,
@@ -142,12 +152,12 @@ pub fn lint(v: &ShowcaseVisual, built: &Built, probe_every: usize) -> LintReport
     }
     // A7 and part spacing.
     let mut by_part: HashMap<u16, Vec<u32>> = HashMap::new();
-    for j in 0..nn.min(sk.nodes.len()) {
+    for j in 0..nn.min(parts.len()) {
         by_part.entry(part(j as u32)).or_default().push(j as u32);
     }
     let mut spacing: HashMap<u16, f32> = HashMap::new();
     for (p, ids) in &by_part {
-        let name = sk.parts.get(*p as usize).cloned().unwrap_or_else(|| format!("{p}"));
+        let name = part_names.get(*p as usize).cloned().unwrap_or_else(|| format!("{p}"));
         let mut nearest: Vec<f32> = ids
             .iter()
             .map(|&a| {
@@ -160,6 +170,9 @@ pub fn lint(v: &ShowcaseVisual, built: &Built, probe_every: usize) -> LintReport
             .collect();
         nearest.sort_by(f32::total_cmp);
         spacing.insert(*p, nearest.get(nearest.len() / 2).copied().unwrap_or(0.0));
+        if *p == u16::MAX {
+            continue;
+        }
         if ids.len() < 3 {
             r.bad_groups.push(format!("{name}: {} nodes", ids.len()));
             continue;
@@ -208,8 +221,8 @@ pub fn lint(v: &ShowcaseVisual, built: &Built, probe_every: usize) -> LintReport
     }
     // A6.
     let mut beams: HashSet<(u32, u32)> = HashSet::new();
-    for b in &sk.beams {
-        beams.insert((b.a.min(b.b), b.a.max(b.b)));
+    for &(a, b) in beam_pairs {
+        beams.insert((a.min(b), a.max(b)));
     }
     let mut seen: HashSet<(u32, u32)> = HashSet::new();
     for t in v.indices.chunks_exact(3) {
@@ -233,8 +246,9 @@ pub fn lint(v: &ShowcaseVisual, built: &Built, probe_every: usize) -> LintReport
     let mut gains: Vec<(usize, f32)> = Vec::new();
     let delta = 0.01f32;
     let probed: Vec<usize> = if probe_every == 0 { Vec::new() } else { (0..nn).step_by(probe_every).collect() };
+    let has_parts = parts.iter().any(|&p| p != u16::MAX);
     for j in probed {
-        if part(j as u32) == u16::MAX {
+        if has_parts && part(j as u32) == u16::MAX {
             continue;
         }
         for axis in [Vec3::X, Vec3::Y, Vec3::Z] {

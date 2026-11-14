@@ -2996,11 +2996,13 @@ opening's edge, the doors' belt edges included, is black rubber.
 * **Node-frame skin (the binding the renderer uses).** Since 2026-11-13 every
   body vertex (wheels aside) is skinned by `authoring/node_frames.rs`: per
   node a smooth frame from its own part's neighbourhood, per vertex a
-  continuous blend of its 8 nearest own-part nodes' frames, cut where its
-  nodes tore apart or disagree (folded or crushed past one sheet). The
-  triangle binding below still computes `bind_nodes`, units and the
-  structure-group node sets; `showcaseCar({ bind: 'triangles' })`
-  (`?bind=triangles`) draws it for an A/B. Measurements and the BeamNG
+  continuous blend of its 8 nearest own-part nodes' frames. Since 2026-11-14
+  it is cut only where beams broke (a vertex follows the side of its nodes,
+  grouped by live stiff beams, carrying most of its weight); folds, crushes
+  and stretch are drawn as they are. The triangle binding below still
+  computes `bind_nodes`, units and the structure-group node sets;
+  `showcaseCar({ bind: 'triangles' })` draws it for an A/B (the page's skin
+  select, `?bind=` at load). Measurements and the BeamNG
   documentation notes: [measurements/skin-shards.md](measurements/skin-shards.md).
 
 * **Voted pieces.** A piece binds to the physics part most of it lies on (a vote

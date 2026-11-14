@@ -132,28 +132,9 @@ points pass.) Every test scene: 0 shards, 0 drawn triangles across a break,
 0 saw-tooth vertices, flipped share under the skeleton's own folded share +
 0.5 %.
 
-**What it costs to look at:** in the heaviest crush (90 km/h three times)
-the skin smooths a crumple into rounded bulges (the node frames are smooth
-over about 0.4 m), and opens holes where the structure folded or crushed past
-what one sheet can follow (drawn triangles 304,106 → 292,362 of 345,815). It
-never draws a shard there. Finer crumples need a finer lattice (or helper
-nodes) in the car, not a sharper binding.
-
-**Over-cutting, measured:** the 60 km/h striker's front-left fender is cut
-almost whole (45 of 4,857 triangles drawn at 0.33 s; the triangle binding drew
-all of it, as shards): 42 % of its vertices' support sits on nodes whose
-skin triangles, stiff beams or ring neighbours stretched past 35 %, and the
-rest disagree. Whether a coarse lattice's node distances stretching 35 %
-really means the sheet tore there (rather than crumpled between nodes) is
-open; the tear ramp (`TEAR_LO`/`TEAR_HI`) and the cut share are the knobs,
-and they need a reference (crash photos of real fenders at this energy)
-before changing.
-
-**Struck doors over-cut, measured:** in the 60 km/h side hit the struck
-car's front-left outer door skin is half cut at 0.33 s (2,054 of 4,205
-triangles drawn; the triangle binding drew 2,883 of them, as confetti): the
-side video shows a hole into the cabin where a pushed-in, dented door should
-be. Same knobs and the same open question as the fender above.
+**Superseded (2026-11-14):** the cuts this version made (stretch past 35 %,
+a quarter of a vertex's support gated, nodes disagreeing at a fold) drew
+dented panels as holes: see "v2: cut only where beams broke" below.
 
 ## Video (CPU, side by side: triangle binding left, node frames right)
 
@@ -234,12 +215,179 @@ sedan (`feat/sedan-body`), B2 affine and bend reproduction, the A2 frame
 angle and determinant measures (they apply to per-vertex three-node frames;
 the node-frame skin's equivalent is B3).
 
+## v2: cut only where beams broke (2026-11-14)
+
+**What still looked wrong.** The node-frame skin above had no shards, but it
+cut triangles for stretch, fold and disagreement, none of which is a tear: in
+the 70 km/h wall most of the bonnet front and bumper area was missing, the
+struck door in the side hit was half gone, the grabbed fender vanished.
+Sheet metal dents; BeamNG deforms the mesh continuously and removes polygons
+only where a beam breaks. Measured with the new integrity assertions (below):
+side 60, struck, 0.25 s: **7,930 triangles cut with no broken beam under
+them** (door_f_l 6,060 of 13,592 drawn; body 128,722 of 140,026).
+
+**The rule now** (`node_frames::Binding::Breaks`, the default; CPU
+`eval_breaks`, GPU `nodeComponents`, `nodeFrames`, `blendVertex`):
+- A node's frame is steered by the members of its neighbourhood still joined
+  to it by **live stiff beams** (k > 0: a dashpot holds no material) within
+  the neighbourhood; a member with no such path even at rest stays while its
+  part's live stiff beams still join them at all (per-part components).
+- A vertex groups its 8 nodes the same way (two stay together unless they
+  were joined at rest and no live path joins them now), follows the group
+  carrying most of its weight, and is cut (tear = 2 × the far group's weight
+  share, cut at ½) only where its support straddles a break. A node left
+  without a frame by breaks keeps its weight at its own position, turned as
+  its group's framed nodes turn.
+- Nothing else cuts. Folds, crushes and stretch are drawn as they are.
+- Rest and rigid motion stay exact (test `at_rest_and_under_rigid_motion`).
+
+**New assertions** (`tests/showcase_skin_integrity.rs`): a triangle is cut
+only where a broken beam joins two of the nodes carrying one of its vertices,
+or its glass shattered; no new boundary edge (hole) beside a cut no break
+explains. Every crash and grab scene: **0** of either.
+
+### Four bindings on the same trajectories (`examples/skin_compare.rs`)
+
+Shards (drawn edge > 3× rest and +5 cm), longest, edge stretch p99 / max,
+flipped (share of drawn; the skeleton's own folded share), saw-tooth, triangles
+uncut, cut with no broken beam. "frames+cuts" is the previous node-frame
+version (`Binding::Stretch`); "BeamNG-style" is `bind_beamng` (below).
+
+| Scene | Binding | Shards | Longest | Stretch | Flipped | Saw | Uncut | Cut w/o break |
+|---|---|---|---|---|---|---|---|---|
+| Wall 70, 1.5 s (154 broken) | triangles | 6,337 | 0.62 m | 18.3 / 2,879 | 4.49 % (1.22) | 3,151 | 90.9 % | 16,817 |
+| | frames+cuts | 0 | 0 | 1.21 / 2 | 0.20 % | 0 | 97.9 % | 2,558 |
+| | **frames, breaks** | **0** | 0 | 1.22 / 2 | 0.25 % | 0 | **98.9 %** | **0** |
+| | BeamNG-style | 3,933 | 0.85 m | 4.98 / 1,073 | 5.66 % | 1,274 | 96.0 % | 0 |
+| Wall 90 ×3, end (501) | triangles | 12,444 | 0.65 m | 29.8 / 3,328 | 8.05 % (2.16) | 4,981 | 85.0 % | 20,229 |
+| | frames+cuts | 0 | 0 | 1.28 / 4 | 0.29 % | 0 | 82.5 % | 17,912 |
+| | **frames, breaks** | **20** | 0.59 m | 1.48 / 5 | 0.43 % | 0 | **97.5 %** | **0** |
+| | BeamNG-style | 9,164 | 2.31 m | 8.72 / 683 | 10.6 % | 2,338 | 80.1 % | 0 |
+| Side 60 struck, 2 s (114) | triangles | 4,521 | 0.75 m | 11.1 / 2,881 | 2.38 % (0.68) | 1,270 | 94.9 % | 7,994 |
+| | frames+cuts | 0 | 0 | 1.11 / 2 | 0.07 % | 0 | 91.4 % | 7,172 |
+| | **frames, breaks** | **21** | 0.16 m | 1.26 / 4 | 0.11 % | 0 | **98.6 %** | **0** |
+| | BeamNG-style | 3,227 | 1.37 m | 4.13 / 532 | 3.28 % | 1,024 | 96.2 % | 0 |
+| Side 60 striker, 2 s (116) | frames+cuts | 0 | 0 | 1.12 / 2 | 0.04 % (1.89) | 0 | 92.0 % | 5,029 |
+| | **frames, breaks** | **14** | 0.25 m | 1.32 / 5 | 0.12 % | 0 | **99.5 %** | **0** |
+| Grab door 10 m, held (84) | triangles | 466 | 0.23 m | 1.70 / 388 | 0.47 % | 135 | 94.7 % | 15,605 |
+| | frames+cuts | 0 | 0 | 1.04 / 1 | 0.00 % | 0 | 98.3 % | 192 |
+| | **frames, breaks** | 0 | 0 | 1.08 / 2 | 0.00 % | 0 | **100 %** | 0 |
+| Grab bumper_f 2 m, held (8) | frames+cuts | 0 | 0 | 1.00 / 1 | 0 | 0 | 93.9 % | 0 |
+| | **frames, breaks** | 0 | 0 | 1.16 / 2 | 0.00 % | 0 | **100 %** | 0 |
+| Grab boot lid 2 m, held (31) | triangles | 946 | 0.77 m | 2.20 / 1,860 | 0.66 % (0.41) | 223 | 85.5 % | 13,221 |
+| | frames+cuts | 0 | 0 | 1.03 / 1 | 0.00 % | 0 | 87.8 % | 5,891 |
+| | **frames, breaks** | **354** | 0.27 m | 1.81 / 24 | 0.20 % | 8 | **97.0 %** | **0** |
+| | BeamNG-style | 2,110 | 0.80 m | 4.35 / 327 | 2.64 % | 812 | 92.2 % | 0 |
+
+Full output (every checkpoint, every binding, per part):
+`skin_compare` (`LINT=1 PARTS=1`), 4 minutes on the CPU.
+
+**Choice, on these numbers: node frames, cut only at breaks.** BeamNG-style
+per-vertex frames (implemented from the public documentation as faithfully
+as we can: own part only, centre = the vertex's nearest part node, VX/VY/VZ
+among its stiff-beam neighbours chosen nearest a right angle, every vertex of
+a centre sharing its frame, three nodes + normal where flat) make 3,000–9,000
+shards a crash: neighbouring vertices on different centres' frames, and the
+affine coordinates extrapolate (A3 Σ|w| up to 28.9 on 147,340 vertices). On
+this lattice (spacing 10–20 cm under 1–3 cm visual triangles) a per-vertex
+frame choice is discontinuous between neighbours by construction; the blend
+is not. Kept as `Binding::Beamng` (CPU, measurement only).
+
+**What is still wrong (honest coarse-lattice state, no break under it).**
+Shards remain where the lattice folded or crushed with every beam intact:
+- body (underbody and rear floor) in the 90 km/h walls: 10–20 shards up to
+  0.6 m; the underbody's visual triangles are 13–28 cm, across nodes whose
+  predictions differ by 0.2 m in the crush;
+- the struck rear door (side 60): 20–21 shards up to 0.2 m;
+- the body round the boot (lamp bar, plate surround, rear bumper pieces) when
+  the boot lid is pulled 2 m and drags the rear panel: 354–434 shards up to
+  0.27 m, saw-tooth 8–26.
+Each is a fold of a coarse lattice blended linearly (two node groups rotated
+by a large angle against each other; a vertex between them takes a weighted
+mix of their predictions). Flipped triangles stay under the skeleton's own
+folded share in every scene. The integrity tests that see these shards fail
+(`wall_at_90_kmh_three_times`, `car_into_the_rear_door_at_60_kmh`,
+`random_impacts`, `grab_rear_and_roof`) and are kept as they are.
+**Authoring finding:** the underbody, the rear door and the rear body panel
+round the boot need a denser lattice (or helper nodes for the skin) so that
+one node spacing is not bent through a large angle; tried and rejected: a
+blend of node positions plus one blended turn (no lever arms) made it worse
+(wall 70: 0 → 162 shards).
+
+**Coverage per part** (frames, breaks; parts not listed draw 100 %): every
+cut has a broken beam under it.
+
+| Scene | Part: uncut / rest triangles |
+|---|---|
+| Wall 70 | body 98.7 %, bonnet 95.6 %, boot lid 98.8 %, fender_r 99.8 % |
+| Wall 90 ×3 | body 96.8 %, bonnet 95.6 %, rear doors 89.7 %, boot lid 98.8 % |
+| Side 60 struck | door_f_l 89.6 % (was 44.6 %), door_r_l 90.7 % (was 0 %), body 98.5 %, boot lid 98.9 % |
+| Side 60 striker | body 99.9 %, bonnet 95.6 % (fender_l was cut almost whole before; now 100 %) |
+| Grab door 10 m | 100 % (the door comes off whole along its broken hinges) |
+| Grab boot lid 2 m | boot lid 77.5 %, body 96.0 % |
+
+The same 1,532 bonnet and ~250 boot-lid triangles are cut in every crash
+(beams inside them break each time; which, not investigated).
+
+### Binding lint, completed
+
+B2 (informational): every node moved by a homogeneous strain (10 % stretch,
+5 % shear) or bent round a 6 m radius; a vertex's distance from the same map
+of its rest position. A2: frame conditioning (per-vertex frames: angle between
+VX − C and VY − C, and |det| of the three unit directions; node frames:
+atan(λ₂/λ₁) of a driving node's neighbourhood, 45° even, 0° a line; triangle
+binding: the binding triangle's angle).
+
+| Measure | Triangles | Frames, breaks | BeamNG-style | ETK (our loader) | Generated sedan |
+|---|---|---|---|---|---|
+| A1 group purity | 53,089 | **0** | 0 | 0 (no parts: per piece) | n/a (no parts) |
+| A3 Σ\|w\| max; over 1.001 | 12.6; 51,167 | **1.000; 0** | 28.9; 147,340 | 5.85; 37,596 (48.8 %) | 9.08; 383,376 (78 %)* |
+| B3 gain max (p99) | 5.66 (1.31) | **1.10 (1.00)** | 7.77 (3.01) | 5.11 (1.72) | 2.96 (0.86) |
+| A6 incoherent edges | 63 | **0** | 1,608 | 42 | 0 |
+| B1 leaks; rigid error | 201,030; 10 mm | **0; 1.2 µm** | 0; 2.7 µm | n/a | whole car 0.14 mm |
+| B4 bridges | 6,042 | **0** | 0 | n/a | n/a |
+| A4 reach max; past 3 | 6.5; 3,928 | 7.5; 9,919 | 8.6; 11,115 | 9.2; 9,257 | n/a |
+| B2 affine max | 4.1 cm | 6.8 cm | 0.0 (exact) | 7.3 cm (p99 3.3) | 6.4 cm (p99 4.0) |
+| B2 bend max | 5.5 cm | 9.5 cm | 5.3 cm | 4.0 cm (p99 2.5) | 9.3 cm (p99 2.6) |
+| A2 angle min (p1) | 12° (19°) | 1° (6°) | 12° (22°); det 0.074 | 30° (43°) | n/a |
+
+*The generated sedan's weighted skin (`flexskin`: per node (A, ∂A/∂T, ∂A/∂B))
+has negative A by design, so A3's convex-blend rule does not apply to it as
+written; B3 2.96 is past the 1.5 bound. Measured from `origin/feat/sedan-body`
+(1fb87819) in a scratch worktree (`rig_vehicle("sedan")`, the skin as
+`vehicle_film.rs` builds it; 490,997 vertices on 548 nodes), read only.
+**Calibration:** BeamNG's own ETK (default config, 77,034 vertices; kc6:
+the same) fails A3 on half its vertices, B3 at 5.1 and A6 at 42: our hard
+bounds are much stricter than BeamNG content as our loader binds it, so a
+binding that passes them is well inside what BeamNG ships. Node frames give
+up affine reproduction (6.8 cm under a 10 % strain: offsets are turned, not
+sheared) for continuity; the per-vertex affine frame reproduces it exactly
+and is the one that shards.
+
+### GPU check (not run here)
+
+The renderer mirrors `eval_breaks`; both skin modules validate with naga
+(`node showcase-wgsl-dump.mjs out/wgsl && cargo run -p engine-webgpu --release
+--example wgsl_validate -- out/wgsl/*.wgsl`; naga 24 needs `LOD_PX` as a float,
+which the dump writes). Not run on a GPU or in Chrome (Tint's uniformity
+rules are stricter: `nodeComponents` loops on `workgroupUniformLoad`). Check:
+1. `softbody.html?solver=explicit&car=showcase` (drive yard), Chrome.
+2. Drive into the wall at 70 km/h: the bonnet and bumper dent and stay
+   drawn; holes only where the beam overlay (V) shows broken beams.
+3. Drive into a parked car's rear door: the door dents, no hole into the
+   cabin unless beams there broke.
+4. Grab (crash lab) a door, the fender and the front bumper and pull 0.5, 2
+   and 10 m, then release: the panel stretches and comes off whole along its
+   broken beams; no confetti, no long blades.
+5. The "skin" select (next to the car select) switches node frames /
+   triangle binding / legacy on the same physics, for an A/B.
+6. Console free of WebGPU validation errors (the params buffer is 96 bytes,
+   NS = 13 vec4 per node).
+
 ## Open
 
-- The GPU renderer (`showcase-car-render.mjs`: `nodeFrames`, `blendVertex`)
-  mirrors `node_frames::eval`; its WGSL validates with naga, but it has not
-  been run on a GPU. Check `softbody.html?solver=explicit&car=showcase`
-  (drive yard), crash into the wall and the parked cars, grab panels; and
-  `?bind=triangles` for the A/B (URL-only measurement switch, as `?bind=legacy`).
-- The binding lint's remaining items (above).
-- The generated sedan (`feat/sedan-body`) is not measured.
+- The GPU page: the steps under "GPU check" above.
+- Shards at folds with no break (underbody, struck rear door, rear body round
+  the boot): a denser lattice or skin helper nodes there (authoring).
+- Physics findings G1 (grab blow-up at the strongest setting) and G2 (dashpot
+  tethers) above: unchanged.

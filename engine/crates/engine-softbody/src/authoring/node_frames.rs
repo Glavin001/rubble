@@ -42,15 +42,23 @@
 //! x = Σ wₖ (Pₖ + Mₖ (x⁰ − p⁰ₖ)),   n = normalize(Σ wₖ Mₖ n⁰)
 //! ```
 //!
-//! each weight gated by its node's tear (1 − tₖ) and by whether the node is
-//! still with the vertex's anchor (its untorn heaviest node: [`pair_gate`],
-//! their distance against rest), then renormalised. The vertex's tear (the
-//! renderer cuts at ½) is the larger of [`CUT_SHARE_SCALE`] × the share of
-//! its weight so gated away, and the nodes' disagreement on where the vertex
-//! is (RMS of their predictions about the blend, over its reach at rest)
-//! through [`FOLD_LO`]–[`FOLD_HI`]: so a vertex at a tear line, or where the
-//! structure crushed or folded within its reach past what one smooth sheet
-//! can follow, is cut, and no drawn triangle spans either.
+//! **Cuts only where beams broke** ([`Binding::Breaks`], the default,
+//! 2026-11-14): a node's frame (level 1) takes only the members of its
+//! neighbourhood still joined to it by live stiff beams (k > 0) within the
+//! neighbourhood (a member with no such path even at rest: while its part's
+//! live stiff beams still join them); a vertex groups its nodes the same way,
+//! blends only the group carrying most of its weight, and its tear (the
+//! renderer cuts at ½) is [`CUT_SHARE_SCALE`] × the other groups' weight
+//! share: a vertex is cut only where its support straddles a break, and no
+//! drawn triangle spans one. Folds, crushes and stretch are drawn as they
+//! are. ([`Binding::Stretch`] keeps the earlier stretch / fold cuts, and
+//! [`Binding::Beamng`] BeamNG-style per-vertex frames, both CPU-only for
+//! measurement: engine/docs/measurements/skin-shards.md, "v2".)
+//!
+//! The earlier rule (`Stretch`): each weight gated by its node's tear (1 − tₖ)
+//! and by whether the node is still with the vertex's anchor ([`pair_gate`]),
+//! the vertex cut by the share gated away or by its nodes' disagreement
+//! through [`FOLD_LO`]–[`FOLD_HI`].
 //!
 //! At rest every term is x⁰ and nothing is gated, so the rest pose is exact;
 //! under a rigid motion every frame moves rigidly, so the skin does. A rigid
@@ -64,8 +72,8 @@
 //! and its distances to its neighbourhood, through [`TEAR_LO`]–[`TEAR_HI`].
 //! Stretch only: bending and crushing never pull two points of a sheet apart.
 //!
-//! `showcase-car-render.mjs` evaluates the same on the GPU (`nodeFrames`,
-//! `blendVertex`); [`eval`] is the CPU reference.
+//! `showcase-car-render.mjs` evaluates `Breaks` on the GPU (`nodeComponents`,
+//! `nodeFrames`, `blendVertex`); [`eval`] is the CPU reference.
 
 use super::skin::{BeamState, ShowcaseVisual};
 use super::vehicle::Built;
