@@ -16,13 +16,31 @@ import { jbeamVisual, jbeamVisualSkinned, decodeTexture } from './rubble-world.m
 /** Why a converted vehicle can be missing: they live only in a developer's checkout. */
 export const LOCAL_MODS = 'Converted community vehicles are local only (engine-webgpu/__mods, never committed or deployed); CONTRIBUTING.md "Local BeamNG vehicles" says how to make one with community_cache.';
 
+/**
+ * One file's bytes: an HTTP error throws, and a body shorter than its Content-Length
+ * (a connection cut mid-file, seen over a proxy as "rskin: truncated") is fetched once
+ * more, then throws naming the file and both sizes. (A compressed response's
+ * Content-Length is the encoded size, so the check applies only to identity bodies.)
+ */
+export async function fetchFile(url) {
+  for (let attempt = 1; ; attempt++) {
+    const r = await fetch(url, attempt > 1 ? { cache: 'no-store' } : undefined);
+    if (!r.ok) throw new Error(`${url}: ${r.status} ${r.statusText}`);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const encoded = (r.headers.get('Content-Encoding') ?? 'identity') !== 'identity';
+    const want = encoded ? NaN : Number(r.headers.get('Content-Length'));
+    if (!(want > bytes.length)) return bytes;
+    if (attempt >= 2) throw new Error(`${url}: truncated, ${bytes.length} of ${want} bytes (after a retry)`);
+  }
+}
+
 export async function loadMod(base, { pc = null } = {}) {
   base = base.replace(/\/$/, '');
   const r = await fetch(`${base}/files.json`);
   if (!r.ok) throw new Error(`${base}/files.json: ${r.status} ${r.statusText}. ${LOCAL_MODS}`);
   const list = await r.json();
-  const text = async (f) => [f, await (await fetch(`${base}/${f}`)).text()];
-  const bin = async (f) => (f ? new Uint8Array(await (await fetch(`${base}/${f}`)).arrayBuffer()) : null);
+  const text = async (f) => [f, new TextDecoder().decode(await fetchFile(`${base}/${f}`))];
+  const bin = async (f) => (f ? await fetchFile(`${base}/${f}`) : null);
   const pcName = pc ?? list.find((f) => f.endsWith('.pc'));
   const skinName = list.find((f) => f.endsWith('.rskin'));
   const glbName = skinName && list.find((f) => f.endsWith('.glb') && f.includes('/'));
