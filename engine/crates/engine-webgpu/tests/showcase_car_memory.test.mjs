@@ -83,6 +83,24 @@ test('a skinned car\'s uploads are the same bytes (binds, rest pose, attributes,
   });
 });
 
+// The weights as the sidecar stores them (showcase.rs visual_js when every one is on
+// its grid): u16 nodes, i16 steps of wtGrid's (A, dA) steps. Half the bytes of
+// wtNode + wtW, and the same uploads.
+test('a skin\'s weights as grid steps upload the same bytes as f32 weights', () => {
+  const v = skinnedVisual();
+  const grid = new Float32Array([2 ** -13, 2 ** -9]);
+  const q = new Int16Array(v.wtW.length);
+  for (let k = 0; k < q.length; k++) q[k] = v.wtW[k] / grid[k % 3 === 0 ? 0 : 1];
+  const compact = { ...v, wtNode: undefined, wtW: undefined, wtNode16: Uint16Array.from(v.wtNode), wtQ: q, wtGrid: grid };
+  const bytes = (visual) => {
+    const { device, writes } = fakeDevice();
+    createShowcaseCarRenderer(device, { format: 'bgra8unorm' }).addCar(visual);
+    return sha(writes.find((w) => w.label === 'showcase-binds').bytes);
+  };
+  assert.equal(bytes(compact), '559f728b0c7b6e43');
+  assert.equal(bytes(v), '559f728b0c7b6e43');
+});
+
 test('addCar keeps no CPU copy of what it uploaded', async () => {
   const { device, writes } = fakeDevice();
   const r = createShowcaseCarRenderer(device, { format: 'bgra8unorm' });
