@@ -35,14 +35,20 @@ fn showcase_tbone_118_into_61_stays_bounded() {
         "angle": env("TB_ANG", 90.0),
     });
     let mut cars = ExplicitSim::spawn_cpu(&spec).unwrap();
-    // (TB_RULE=two_body: two-body, dissipative vehicle contact on both cars, a measurement.)
-    if std::env::var("TB_RULE").is_ok_and(|r| r == "two_body") {
+    // (TB_RULE: `ror`, `two_body` (without the dissipative normal force) or
+    // `dissipative` (with it) on both cars, a measurement; the file's rule otherwise.)
+    if let Ok(r) = std::env::var("TB_RULE") {
         for c in &mut cars {
-            c.two_body_contact = true;
-            c.dissipative_contact = true;
+            c.two_body_contact = r != "ror";
+            c.dissipative_contact = r == "dissipative";
         }
     }
-    eprintln!("lightest node {:.3} kg; two-body {}", cars[0].nodes.iter().map(|n| n.mass).fold(f32::MAX, f32::min), cars[0].two_body_contact);
+    eprintln!(
+        "lightest node {:.3} kg; two-body {}, dissipative {}",
+        cars[0].nodes.iter().map(|n| n.mass).fold(f32::MAX, f32::min),
+        cars[0].two_body_contact,
+        cars[0].dissipative_contact
+    );
     let mut w = ExplicitBeamsWorld::new(cars);
     let kinetic = |w: &ExplicitBeamsWorld| -> Vec<f64> {
         w.vehicles
@@ -128,6 +134,8 @@ fn showcase_tbone_118_into_61_stays_bounded() {
         low = low.min(total);
         rise = rise.max(total - low);
     }
+    let broken: Vec<usize> = w.vehicles.iter().map(|v| v.beams.iter().filter(|b| b.broken).count()).collect();
+    eprintln!("broken beams {broken:?}");
     eprintln!("largest rise of the cars' kinetic energy over its low so far {:.1} kJ; fastest node at a frame's end {fastest:.0} m/s", rise / 1e3);
     assert!(rise <= 0.01 * start, "the cars' kinetic energy rose {:.1} kJ above its low ({:.0} kJ at the start)", rise / 1e3, start / 1e3);
     assert!(fastest <= 150.0, "a node ended a frame at {fastest:.0} m/s");

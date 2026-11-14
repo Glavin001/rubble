@@ -200,6 +200,12 @@ pub struct Skeleton {
     pub full_contact: bool,
     /// Exact beam lengths (spec §33): `rubble_exact_lengths`.
     pub exact_lengths: bool,
+    /// Two-body vehicle and self contact on Rigs of Rods' profile (spec
+    /// §10.3): `rubble_two_body_contact`. A car with
+    /// light skin nodes beside heavy frame nodes needs it: RoR's rule puts a
+    /// heavy contacter's whole force on a struck triangle's nodes whatever
+    /// they weigh.
+    pub two_body_contact: bool,
     /// The BeamNG profile (spec §36): `rubble_beamng_profile` (exact
     /// lengths, no idle-triangle throttle, two-body vehicle and self
     /// contact).
@@ -1257,6 +1263,9 @@ impl Skeleton {
         let _ = writeln!(s, "enable_advanced_deformation\n");
         if self.exact_lengths {
             let _ = writeln!(s, "rubble_exact_lengths\n");
+        }
+        if self.two_body_contact && !self.beamng_profile {
+            let _ = writeln!(s, "rubble_two_body_contact\n");
         }
         if self.beamng_profile {
             let _ = writeln!(s, "rubble_beamng_profile\n");

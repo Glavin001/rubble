@@ -329,6 +329,14 @@ pub struct TruckFile {
     /// ([`crate::explicit_beams::ExplicitBeamsSettings::beamng`]) and two-body
     /// vehicle contact, as JBeam content does.
     pub beamng_profile: bool,
+    /// `rubble_two_body_contact` (Rubble's extension, jbeam-semantics-spec.md
+    /// §10.3): vehicle and self contact by the two-body rule (each hit cancels the
+    /// pair's relative force and approach with their reduced mass, a node of
+    /// several hits split between them), on Rigs of Rods' profile otherwise. For a
+    /// vehicle whose nodes' masses differ widely: RoR's rule cancels a contacter's
+    /// whole force and puts it on the triangle's nodes by their weights, whatever
+    /// they weigh.
+    pub two_body_contact: bool,
     /// `rubble_drag_coef <dragCoef> [<liftCoef>]` (Rubble's extension,
     /// jbeam-semantics-spec.md §36): the BeamNG profile's triangle aerodynamics
     /// with these coefficients on every cab triangle (BeamNG's defaults 100 and
@@ -825,6 +833,7 @@ impl Parser {
             "rubble_full_contact" => self.out.full_contact = true,
             "rubble_exact_lengths" => self.out.exact_lengths = true,
             "rubble_beamng_profile" => self.out.beamng_profile = true,
+            "rubble_two_body_contact" => self.out.two_body_contact = true,
             "rubble_drag_coef" => {
                 let d = f(t, 1, 100.0);
                 self.out.drag_coef = Some((d, f(t, 2, d)));

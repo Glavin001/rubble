@@ -4268,6 +4268,13 @@ pub fn build(def: &VehicleDef, params: &BuildParams) -> Result<Built, String> {
         }
     }
     shut_line_breaks(&mut sk, &shell, &hardware);
+    // Two tiers: 50–150 g skin nodes beside frame nodes of kilograms, so its
+    // contact is by the two-body rule (one tier has it by its profile).
+    // RoR's rule put a frame node's whole force (tens of kN in a crash) on
+    // the skin triangle it met: a 55 g node left one step 270 m/s faster
+    // (`explicit_scenes_cpu`, the 118 into 61 km/h T-bone).
+    // `TWO_BODY_CONTACT=0` leaves the line out (a measurement switch).
+    sk.two_body_contact = !one && std::env::var("TWO_BODY_CONTACT").map_or(true, |v| v != "0");
     sk.skin = shell.tris.clone();
     // Reference nodes: floor centre, a metre back, and left.
     let floor: Vec<u32> = shell

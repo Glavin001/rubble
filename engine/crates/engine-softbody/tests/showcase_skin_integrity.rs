@@ -37,6 +37,9 @@
 //!   mesh continuously and removes polygons only where a beam breaks). The
 //!   bound: cut triangles without a broken beam under them = 0; reported per
 //!   part as drawn / rest triangles.
+//! - **No specks**: no piece of the drawn mesh is under [`SPECK_SHARE`] of the
+//!   piece it belonged to at rest (a scrap of a few dozen triangles hanging
+//!   in the air where a panel was torn round a node).
 //! - **No holes without a tear**: a part's drawn mesh has no boundary edge
 //!   it did not have at rest, except beside a cut that a broken beam
 //!   explains.
@@ -57,6 +60,8 @@ const SHARD_MIN: f32 = 0.05;
 const JUMP_EDGES: f32 = 3.0;
 const FLIP_SLACK: f32 = 0.005;
 const EXACT: f32 = 1e-4;
+/// A drawn piece under this share of its rest piece's triangles is a speck.
+const SPECK_SHARE: f32 = 0.02;
 
 struct Car {
     b: Built,
@@ -184,6 +189,11 @@ struct Report {
     flipped: usize,
     lattice_flip: f32,
     nan_nodes: usize,
+    /// Specks: pieces of the drawn mesh (triangles joined by shared vertices) of
+    /// under [`SPECK_SHARE`] of the piece they were part of at rest, and how many
+    /// triangles they hold. A scrap left hanging in the air where a panel tore.
+    specks: usize,
+    speck_tris: usize,
     /// Cut triangles (any vertex torn past ½ or dropped).
     cut: usize,
     /// Of them with no broken beam on the nodes carrying them (and no
@@ -201,9 +211,9 @@ impl Report {
     fn check(&self, tag: &str) {
         let Report { parts, .. } = self;
         eprintln!(
-            "{tag}: drawn {} shards {} longest {:.2} spans {} jumpy {} flipped {} lattice_flip {:.4} nan {} cut {} cut_unexplained {} boundary_unexplained {}",
+            "{tag}: drawn {} shards {} longest {:.2} spans {} jumpy {} flipped {} lattice_flip {:.4} nan {} cut {} cut_unexplained {} boundary_unexplained {} specks {} ({} triangles)",
             self.drawn, self.shards, self.longest, self.spans, self.jumpy, self.flipped, self.lattice_flip,
-            self.nan_nodes, self.cut, self.cut_unexplained, self.boundary_unexplained
+            self.nan_nodes, self.cut, self.cut_unexplained, self.boundary_unexplained, self.specks, self.speck_tris
         );
         for (name, [all, drawn, bad, b0, b1]) in parts {
             if drawn < all {
@@ -226,6 +236,7 @@ impl Report {
         );
         assert_eq!(self.shards, 0, "{tag}: {} shards (longest {:.2} m)", self.shards, self.longest);
         assert_eq!(self.spans, 0, "{tag}: {} drawn triangles span a break", self.spans);
+        assert_eq!(self.specks, 0, "{tag}: {} specks ({} triangles) cut off from their panel", self.specks, self.speck_tris);
         assert_eq!(self.jumpy, 0, "{tag}: {} saw-tooth vertices", self.jumpy);
         let share = self.flipped as f32 / self.drawn.max(1) as f32;
         assert!(
@@ -443,6 +454,66 @@ fn measure(s: &ExplicitBeams) -> Report {
         }
     }
     r.lattice_flip = flip as f32 / all.max(1) as f32;
+    // Specks: the drawn mesh's pieces against the rest mesh's (vertices welded
+    // by rest position, 0.1 mm: a hard edge duplicates them).
+    {
+        let mut weld: std::collections::HashMap<[i32; 3], u32> = Default::default();
+        let class: Vec<u32> = (0..n)
+            .map(|i| {
+                let q = rp(i as u32);
+                let key = [(q.x * 1e4).round() as i32, (q.y * 1e4).round() as i32, (q.z * 1e4).round() as i32];
+                let next = weld.len() as u32;
+                *weld.entry(key).or_insert(next)
+            })
+            .collect();
+        fn find(p: &mut [u32], mut i: u32) -> u32 {
+            while p[i as usize] != i {
+                p[i as usize] = p[p[i as usize] as usize];
+                i = p[i as usize];
+            }
+            i
+        }
+        let pieces = |keep: &dyn Fn(&[u32]) -> bool| -> (Vec<u32>, std::collections::HashMap<u32, usize>) {
+            let mut par: Vec<u32> = (0..weld.len() as u32).collect();
+            for t in v.indices.chunks_exact(3).filter(|t| keep(t)) {
+                let a = find(&mut par, class[t[0] as usize]);
+                for &i in &t[1..] {
+                    let b = find(&mut par, class[i as usize]);
+                    par[b as usize] = a;
+                }
+            }
+            let mut count: std::collections::HashMap<u32, usize> = Default::default();
+            for t in v.indices.chunks_exact(3).filter(|t| keep(t)) {
+                *count.entry(find(&mut par, class[t[0] as usize])).or_default() += 1;
+            }
+            let roots = (0..weld.len() as u32).map(|i| find(&mut par, i)).collect();
+            (roots, count)
+        };
+        let (rest_root, rest_count) = pieces(&|_| true);
+        let is_drawn = |t: &[u32]| t.iter().all(|&i| pos[i as usize].x.is_finite()) && t.iter().any(|&i| tear[i as usize] < 0.5);
+        let (now_root, now_count) = pieces(&is_drawn);
+        let mut seen: std::collections::HashSet<u32> = Default::default();
+        for t in v.indices.chunks_exact(3).filter(|t| is_drawn(t)) {
+            let c = class[t[0] as usize];
+            let root = now_root[c as usize];
+            if !seen.insert(root) {
+                continue;
+            }
+            let (now, was) = (now_count[&root], rest_count[&rest_root[c as usize]]);
+            if (now as f32) < SPECK_SHARE * was as f32 {
+                r.specks += 1;
+                r.speck_tris += now;
+                if std::env::var("DUMP_SPECKS").is_ok() {
+                    let i = t[0] as usize;
+                    let piece = v.pieces.iter().find(|pc| (pc.1 as usize..(pc.1 + pc.2) as usize).contains(&i)).map_or("?", |pc| pc.0.as_str());
+                    let ns: Vec<u32> = v.bl_node.get(i).map(|x| x.iter().copied().filter(|&j| j != u32::MAX).collect()).unwrap_or_default();
+                    let live: Vec<usize> = ns.iter().map(|&j| s.incidence[j as usize].iter().filter(|&&b| !s.beams[b as usize].broken && s.beams[b as usize].k > 0.0).count()).collect();
+                    eprintln!("  speck on {piece}: {now} of {was} triangles, moved {:.2} m; its nodes {ns:?}, their live stiff beams {live:?}, masses {:?}",
+                        (pos[i] - rp(i as u32)).length(), ns.iter().map(|&j| s.nodes[j as usize].mass).collect::<Vec<_>>());
+                }
+            }
+        }
+    }
     r
 }
 
@@ -553,6 +624,45 @@ fn car_into_the_rear_door_at_60_kmh() {
             measure(&w.vehicles[1]).check(&format!("side 60 striker f {f}"));
         }
     }
+}
+
+/// The T-bone reported from the page on 2026-11-14 (`xscene=tbone&speed=118&
+/// carSpeed=61`): a car at 118 km/h square into the middle of the side of one
+/// crossing at 61 km/h. On RoR's contact rule the frame nodes' forces flung the
+/// 50–80 g skin nodes they met (one left a step 270 m/s faster), which broke
+/// their beams and scattered single nodes carrying specks of skin.
+#[test]
+fn t_bone_118_into_61_kmh() {
+    let b = &car().b;
+    let struck = spawn(Vec3::ZERO, 0.0, Vec3::new(0.0, 0.0, 61.0 / 3.6));
+    let p0 = struck.positions();
+    let hw = p0.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+    let len = b.def.profile.length;
+    let striker = spawn(Vec3::new(hw + 0.5 * len + 0.3, 0.0, 0.0), -90.0, Vec3::new(-118.0 / 3.6, 0.0, 0.0));
+    let mut w = ExplicitBeamsWorld::new(vec![struck, striker]);
+    let mut failed: Vec<String> = Vec::new();
+    for f in 0..120u32 {
+        w.frame_60();
+        if f == 15 || f == 71 || f == 119 {
+            for (v, name) in ["struck", "striker"].iter().enumerate() {
+                let s = &w.vehicles[v];
+                let fastest = s.nodes.iter().map(|n| n.vel.length()).fold(0.0f32, f32::max);
+                eprintln!(
+                    "t-bone 118/61 {name} f {f}: {} broken beams, fastest node {fastest:.0} m/s",
+                    s.beams.iter().filter(|b| b.broken).count()
+                );
+            }
+            // Every reading is reported before the first failure stops the test.
+            for (v, name) in ["struck", "striker"].iter().enumerate() {
+                let r = measure(&w.vehicles[v]);
+                let tag = format!("t-bone 118/61 {name} f {f}");
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.check(&tag))).is_err() {
+                    failed.push(tag);
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "failed: {failed:?}");
 }
 
 /// Random impacts (seeded): 50–110 km/h into a wall, the car turned up to

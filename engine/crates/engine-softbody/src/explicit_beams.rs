@@ -2220,6 +2220,12 @@ impl ExplicitBeams {
             s.dissipative_contact = true;
             s.exact_friction = true;
         }
+        // `rubble_two_body_contact` (Rubble's extension, spec §10.3): the two-body
+        // rule in vehicle and self contact, the profile otherwise unchanged (RoR's
+        // normal force and ground contact).
+        if file.two_body_contact {
+            s.two_body_contact = true;
+        }
         // `rubble_contact_breaks` (Rubble's extension, spec §32).
         if !file.contact_breaks.is_empty() {
             s.set_contact_breaks(&file.contact_breaks)?;
