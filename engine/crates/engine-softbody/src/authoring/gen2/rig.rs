@@ -857,6 +857,8 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
                 },
                 part,
                 group: None,
+                sub: None,
+                inner: false,
             });
         }
     }
@@ -925,6 +927,8 @@ fn skin_hull(r: &mut Rig, inp: &dyn RigInput) {
                             },
                             part: r.car.nodes[hi].part,
                             group: None,
+                sub: None,
+                inner: false,
                         });
                     }
                 }
@@ -1201,6 +1205,8 @@ fn bridge_seams(
                 },
                 part: owner,
                 group: (mode == "main" || mode == "nearest").then_some(group),
+                sub: None,
+                inner: false,
             });
             true
         };
@@ -2230,6 +2236,10 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // ------------------------------------------------------------------
     // Closures.
     // ------------------------------------------------------------------
+    // Rigidifiers under the hood, the lid and the fenders on the defined
+    // body (`RIG_NO_RIGIDIFIER=1`: none).
+    let rigid_panels =
+        defined.is_some() && std::env::var("RIG_NO_RIGIDIFIER").map_or(true, |v| v != "1");
     let mut door_nodes: HashMap<Part, Vec<usize>> = HashMap::new();
     for (front, lo, hi, pts) in [(true, df_lo, df_hi, &df), (false, dr_lo, dr_hi, &dr)] {
         for s in [1.0f32, -1.0] {
@@ -2504,12 +2514,26 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             r.car.tri(bf, f0, belt_row[1], part);
             r.car.tri(belt_row[1], f0, f1, part);
             r.car.tri(belt_row[1], f1, br, part);
-            let all: Vec<usize> = below
+            let mut all: Vec<usize> = below
                 .iter()
                 .copied()
                 .chain(frame.iter().copied())
                 .chain(frame_in.iter().copied())
                 .collect();
+            if rigid_panels {
+                // The door's rigidifier: inboard of its middle (the armrest's
+                // place on the trim panel), beamed to every node of the door,
+                // the window frame's corners included. The frame then stands
+                // on a base as deep as the rigidifier, not on the belt's
+                // 10 cm (it swung in and out at 15 Hz), and the lower corners
+                // no longer twist about the hinge-latch line.
+                let z = cols[1];
+                let bottom = low_at(pts, z, 0.04).unwrap_or(lo.y) + 0.03;
+                let ym = 0.5 * (bottom + belt(z) - 0.02);
+                let at = mirror(inward(side(z, ym), RIGIDIFIER_DEPTH), s);
+                let own = all.clone();
+                all.push(rigidifier(&mut r, &format!("{dn}_r0"), at, part, &own));
+            }
             door_nodes.insert(part, all);
         }
     }
@@ -2561,6 +2585,16 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         let mut all: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
         all.extend(&inner);
         graph(&mut r, &all, 0.85, part, Role::Sheet, &|_| false);
+        if rigid_panels {
+            // Two rigidifiers on the centre line, a third of the hood's
+            // length from each end.
+            let (z0, z1) = (rows_z[0], *rows_z.last().unwrap());
+            for (k, t) in [1.0f32 / 3.0, 2.0 / 3.0].iter().enumerate() {
+                let at = inward(top(z0 + t * (z1 - z0), 0.0), RIGIDIFIER_DEPTH);
+                let own = all.clone();
+                all.push(rigidifier(&mut r, &format!("hd_r{k}"), at, part, &own));
+            }
+        }
         all
     };
 
@@ -2628,6 +2662,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         let mut all: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
         all.extend(&inner);
         graph(&mut r, &all, 0.85, part, Role::Sheet, &|_| false);
+        if rigid_panels {
+            let at = inward(top(0.5 * (deck[0] + deck[deck.len() - 1]), 0.0), RIGIDIFIER_DEPTH);
+            let own = all.clone();
+            all.push(rigidifier(&mut r, "tk_r0", at, part, &own));
+        }
         all
     };
 
@@ -2670,8 +2709,17 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         }
         r.car
             .panel(&grid, part, &[Role::Sheet; 3], Role::Sheet, true);
-        let all: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
+        let mut all: Vec<usize> = grid.iter().flatten().flatten().copied().collect();
         graph(&mut r, &all, reach_panel, part, Role::Sheet, &|_| false);
+        if rigid_panels {
+            // Inboard of the shoulder at the fender's middle (over the
+            // wheelhouse, where its inner flange runs to the apron).
+            let z = cols[cols.len() / 2];
+            let y = 0.5 * (inp.shoulder_y(z) + top(z, inner_x_at(&fen, z, 0.04).unwrap_or(0.6)).y);
+            let at = mirror(inward(side(z, y), RIGIDIFIER_DEPTH), s);
+            let own = all.clone();
+            all.push(rigidifier(&mut r, &format!("fe{fx}_r0"), at, part, &own));
+        }
         fender_ids.insert(part, all);
     }
 
@@ -3018,6 +3066,27 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     // BeamNG hinge group is 8-12 beams: they hold the leaf in every
     // direction, where four near-parallel ones left it to swing on its latch).
     let hinge_n = if census { 3 } else { 2 };
+    // On the defined body a latch and its striker carry their hardware's
+    // mass ([`hardware_mass`]; `RIG_LIGHT_LATCH=1`: the part's share, as
+    // before).
+    let latch_mass =
+        defined.is_some() && std::env::var("RIG_LIGHT_LATCH").map_or(true, |v| v != "1");
+    // On the defined body a mount's body nodes are picked to span all three
+    // directions ([`spread_pick`]; `RIG_NO_SPREAD=1`: the nearest, as before).
+    let spread = defined.is_some() && std::env::var("RIG_NO_SPREAD").map_or(true, |v| v != "1");
+    let shell_nodes = |r: &Rig| -> Vec<usize> {
+        (0..r.car.nodes.len())
+            .filter(|&i| {
+                let n = &r.car.nodes[i];
+                n.part == Part::Body
+                    && r.member[i].is_some()
+                    && !n.no_group
+                    && !n.contact
+                    && !n.name.starts_with("hub")
+                    && !n.name.starts_with("rim")
+            })
+            .collect()
+    };
     let pillar = |i: usize, r: &Rig| {
         matches!(
             r.member[i],
@@ -3040,7 +3109,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
                 let mut dv: Vec<(f32, usize)> =
                     own.iter().map(|&i| (r.g(i).distance(mk), i)).collect();
                 dv.sort_by(|a, b| a.0.total_cmp(&b.0));
-                let bv = r.nearest(body, mk, hinge_n, |i| pillar(i, &r));
+                let bv = if spread {
+                    spread_pick(&r, mk, &shell_nodes(&r), hinge_n)
+                } else {
+                    r.nearest(body, mk, hinge_n, |i| pillar(i, &r))
+                };
                 for &(_, d) in dv.iter().take(hinge_n) {
                     for &b in &bv {
                         r.car.hardware(
@@ -3086,7 +3159,27 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             for &(_, d) in dv.iter().take(6) {
                 r.car.beam(latch, d, Role::DoorFrame, part);
             }
-            for b in r.nearest(body, mk, 5, |i| pillar(i, &r)) {
+            // The latch is bolted through the door's rear wall into its inner
+            // panel: it holds the door's rear edge across the car too. Its
+            // nearest nodes all lie in the rear edge's plane; the door's
+            // rigidifier, inboard, gives it the third direction (without it
+            // the rear edge swung in and out on the latch at 17 Hz).
+            if spread {
+                if let Some(&rg) = own.iter().find(|&&i| r.car.nodes[i].name.ends_with("_r0")) {
+                    if !r.car.has_beam(latch, rg) {
+                        r.car.beam(latch, rg, Role::DoorFrame, part);
+                    }
+                }
+            }
+            let strike_to = if spread {
+                spread_pick(&r, mk, &shell_nodes(&r), 5)
+            } else {
+                r.nearest(body, mk, 5, |i| pillar(i, &r))
+            };
+            if latch_mass {
+                hardware_mass(&mut r, latch, strike, DOOR_LATCH_KG, &strike_to);
+            }
+            for b in strike_to {
                 r.car.beam(strike, b, Role::Web, body);
             }
             // The window frame seats inward on the roof rail's and pillars'
@@ -3142,12 +3235,16 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         let mut dv: Vec<(f32, usize)> =
             hood_ids.iter().map(|&i| (r.g(i).distance(mk), i)).collect();
         dv.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let bv = r.nearest(body, mk, hinge_n, |i| {
-            matches!(
-                r.member[i],
-                Some(Role::Apron) | Some(Role::Firewall) | Some(Role::PillarA)
-            )
-        });
+        let bv = if spread {
+            spread_pick(&r, mk, &shell_nodes(&r), hinge_n)
+        } else {
+            r.nearest(body, mk, hinge_n, |i| {
+                matches!(
+                    r.member[i],
+                    Some(Role::Apron) | Some(Role::Firewall) | Some(Role::PillarA)
+                )
+            })
+        };
         for &(_, d) in dv.iter().take(hinge_n) {
             for &b in &bv {
                 r.car.hardware(
@@ -3191,7 +3288,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             r.car.beam(l, d, Role::DoorFrame, part);
         }
         let _ = to;
-        for b in r.nearest(Part::Body, at, 5, |i| r.member[i].is_some() && !r.skin[i]) {
+        let ties = r.nearest(Part::Body, at, 5, |i| r.member[i].is_some() && !r.skin[i]);
+        if latch_mass {
+            let kg = if part == Part::Hood { HOOD_LATCH_KG } else { TRUNK_LATCH_KG };
+            hardware_mass(r, l, t, kg, &ties);
+        }
+        for b in ties {
             r.car.beam(t, b, Role::Web, Part::Body);
         }
     };
@@ -3239,7 +3341,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             .map(|&i| (r.g(i).distance(mk), i))
             .collect();
         dv.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let bv = r.nearest(body, mk, hinge_n, |i| r.member[i].is_some());
+        let bv = if spread {
+            spread_pick(&r, mk, &shell_nodes(&r), hinge_n)
+        } else {
+            r.nearest(body, mk, hinge_n, |i| r.member[i].is_some())
+        };
         for &(_, d) in dv.iter().take(hinge_n) {
             for &b in &bv {
                 r.car.hardware(
@@ -3440,6 +3546,66 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     }
 
     // ------------------------------------------------------------------
+    // Fender bolt rows: a real fender's top flange is bolted down the apron
+    // rail every 15-25 cm and its rear edge to the hinge pillar (two or
+    // three bolts), so it moves with the apron and the pillar rather than
+    // with its own skin. Each top-flange node (the fender's nodes on the
+    // hood's shut line) is bolted to the nearest apron or cowl node; each
+    // rear-edge node to the nearest hinge-pillar node. One M6 8.8 bolt each
+    // ([`FENDER_ROW_BOLT`]).
+    // (Before the seals: a seal never takes a pair a bolt holds. With the
+    // seals first the fender's rear lower leg had a SUPPORT beam to the sill
+    // where its bolt belonged, and swung on it at 8.6 Hz.)
+    // ------------------------------------------------------------------
+    if std::env::var("GEN3_NO_FENDER_ROWS").is_err() {
+        for (s, part) in [(1.0f32, Part::FenderL), (-1.0, Part::FenderR)] {
+            let x = lr(s);
+            let own: Vec<usize> = (0..r.car.nodes.len())
+                .filter(|&i| r.car.nodes[i].part == part && !r.car.nodes[i].contact)
+                .collect();
+            let hood_n: Vec<usize> = (0..r.car.nodes.len())
+                .filter(|&i| r.car.nodes[i].part == Part::Hood && !r.car.nodes[i].no_group)
+                .collect();
+            let z_rear = own.iter().map(|&i| r.g(i).z).fold(f32::MAX, f32::min);
+            let mut k = 0;
+            for &f in &own {
+                let g = r.g(f);
+                let on_hood_line = hood_n.iter().any(|&h| r.g(h).distance(g) < 0.12);
+                let rear_edge = g.z < z_rear + 0.06;
+                let to: Vec<usize> = if on_hood_line {
+                    r.nearest(body, g, 1, |i| {
+                        matches!(r.member[i], Some(Role::Apron) | Some(Role::Firewall))
+                    })
+                } else if rear_edge && defined.is_some() {
+                    // The defined shell's hinge pillar stands on the sill's
+                    // first station: its base nodes are the sill's.
+                    r.nearest(body, g, 2, |i| {
+                        matches!(r.member[i], Some(Role::PillarA) | Some(Role::Sill))
+                    })
+                } else if rear_edge {
+                    r.nearest(body, g, 1, |i| r.member[i] == Some(Role::PillarA))
+                } else {
+                    continue;
+                };
+                for b in to {
+                    if r.g(b).distance(g) > 0.30 || r.car.has_beam(f, b) {
+                        continue;
+                    }
+                    k += 1;
+                    r.car.hardware(
+                        f,
+                        b,
+                        Role::Bolt,
+                        part,
+                        &format!("fender_{x}_row{k}"),
+                        fender_row_bolt,
+                    );
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Seals and stops (census): as a BeamNG car's 7-11 % of SUPPORT beams.
     // Every closure and bolted panel node bears on its [`SEAL_K`] nearest
     // body members within [`SEAL_REACH`] (compression only: the door's seal
@@ -3534,6 +3700,12 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
             (tk_lo.z + 0.06, tk_hi.z - 0.06),
             ph.edge_spacing,
             census,
+            // (The body keeps its edge nodes: they are the corners of its
+            // collision skin along every aperture. `RIG_SHELL_STOPS=1` puts
+            // the stops on the shell's own nodes instead: 126 fewer collision
+            // triangles, the skin's coverage p99 0.25 m against 0.16.)
+            defined.is_some() && std::env::var("RIG_SHELL_STOPS").is_ok_and(|v| v == "1"),
+            defined.is_some(),
         );
     }
 
@@ -3552,57 +3724,6 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     }
 
     // ------------------------------------------------------------------
-    // Fender bolt rows: a real fender's top flange is bolted down the apron
-    // rail every 15-25 cm and its rear edge to the hinge pillar (two or
-    // three bolts), so it moves with the apron and the pillar rather than
-    // with its own skin. Each top-flange node (the fender's nodes on the
-    // hood's shut line) is bolted to the nearest apron or cowl node; each
-    // rear-edge node to the nearest hinge-pillar node. One M6 8.8 bolt each
-    // ([`FENDER_ROW_BOLT`]).
-    // ------------------------------------------------------------------
-    if std::env::var("GEN3_NO_FENDER_ROWS").is_err() {
-        for (s, part) in [(1.0f32, Part::FenderL), (-1.0, Part::FenderR)] {
-            let x = lr(s);
-            let own: Vec<usize> = (0..r.car.nodes.len())
-                .filter(|&i| r.car.nodes[i].part == part && !r.car.nodes[i].contact)
-                .collect();
-            let hood_n: Vec<usize> = (0..r.car.nodes.len())
-                .filter(|&i| r.car.nodes[i].part == Part::Hood && !r.car.nodes[i].no_group)
-                .collect();
-            let z_rear = own.iter().map(|&i| r.g(i).z).fold(f32::MAX, f32::min);
-            let mut k = 0;
-            for &f in &own {
-                let g = r.g(f);
-                let on_hood_line = hood_n.iter().any(|&h| r.g(h).distance(g) < 0.12);
-                let rear_edge = g.z < z_rear + 0.06;
-                let to: Vec<usize> = if on_hood_line {
-                    r.nearest(body, g, 1, |i| {
-                        matches!(r.member[i], Some(Role::Apron) | Some(Role::Firewall))
-                    })
-                } else if rear_edge {
-                    r.nearest(body, g, 1, |i| r.member[i] == Some(Role::PillarA))
-                } else {
-                    continue;
-                };
-                for b in to {
-                    if r.g(b).distance(g) > 0.30 || r.car.has_beam(f, b) {
-                        continue;
-                    }
-                    k += 1;
-                    r.car.hardware(
-                        f,
-                        b,
-                        Role::Bolt,
-                        part,
-                        &format!("fender_{x}_row{k}"),
-                        fender_row_bolt,
-                    );
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
     // The collision skin from the render skin (an input that opts in,
     // `RigInput::hull_triangles`): every part's triangles are the render
     // surface's restricted Delaunay triangulation over the part's nodes at
@@ -3615,6 +3736,15 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
     if inp.hull_triangles() {
         skin_hull(&mut r, inp);
         r.car.tri_aero = Some((hull_drag_coef(&r, inp, ph.drag_cd), 0.0));
+    }
+    // ------------------------------------------------------------------
+    // Collision faces inside the car (the defined body): the parts of one
+    // car meet each other as its outside meets the world.
+    // ------------------------------------------------------------------
+    let inner_skins =
+        defined.is_some() && std::env::var("RIG_NO_INNER_SKINS").map_or(true, |v| v != "1");
+    if inner_skins {
+        interior_skins(&mut r);
     }
     // ------------------------------------------------------------------
     // Pole lanes: light contact-only nodes on the side-facing skin edges.
@@ -3691,7 +3821,11 @@ pub fn rig_with(inp: &dyn RigInput) -> Rig {
         // (The hub nodes stay out: they are corners of the wheels' collision
         // cones only, and inside the arch beside the rails.)
         let block = nd.part == Part::Engine && nd.sub.as_deref().map_or(true, |s| s == "engine");
-        nd.self_collision = (on_tri[i] || block || nd.name.starts_with("rim"))
+        // Every node of the defined shell is a contacter (as a BeamNG
+        // shell's: the study's §10.3), so a door driven into its opening
+        // meets the sill's and the pillars' nodes, not only the outer skin's.
+        let shell = inner_skins && nd.name.starts_with("sh_");
+        nd.self_collision = (on_tri[i] || block || shell || nd.name.starts_with("rim"))
             && !nd.contact
             && !nd.name.starts_with("hub")
             && std::env::var("GEN3_NOSELF").is_err()
@@ -4437,6 +4571,330 @@ fn push_links(r: &mut Rig, census: bool) {
 pub const PUSH_MIN: f32 = 0.04;
 pub const PUSH_REACH: f32 = 0.30;
 
+/// A latch's mass on its closure (kg): the latch or striker, its
+/// reinforcement in the panel's wall and what is bolted beside it (a door's
+/// handle carrier and lock; a lid's lock barrel). A door latch alone weighs
+/// about 0.9 kg.
+pub const DOOR_LATCH_KG: f32 = 2.5;
+pub const HOOD_LATCH_KG: f32 = 1.0;
+pub const TRUNK_LATCH_KG: f32 = 1.5;
+/// The body's side of a latch (kg): the striker or lock and the reinforcement
+/// it bolts through, mass that belongs to the member it stands on and is
+/// taken from that member's nodes.
+pub const STRIKE_KG: f32 = 2.5;
+
+/// Gives a latch node and its striker node their hardware's mass. The
+/// solver holds a coupled pair with a spring sized by the pair's reduced mass
+/// (`explicit_beams::coupler_rates`: k = 0.16 mu / h^2), so two 0.5 kg tag
+/// nodes are a 2e5 N/m latch: more than half of each door's first mode's
+/// strain energy sat in it (18 Hz), a third of the lid's. The striker's mass
+/// is the member's own at that place: it comes out of the nodes the striker
+/// is tied to, equally, so the body's mass and its distribution stay.
+fn hardware_mass(r: &mut Rig, latch: usize, strike: usize, latch_kg: f32, ties: &[usize]) {
+    r.car.nodes[latch].fixed_mass = latch_kg;
+    let givers: Vec<usize> = ties
+        .iter()
+        .copied()
+        .filter(|&j| r.car.nodes[j].fixed_mass > 2.0 * STRIKE_KG / ties.len() as f32)
+        .collect();
+    if givers.is_empty() {
+        return;
+    }
+    let each = STRIKE_KG / givers.len() as f32;
+    for j in givers {
+        r.car.nodes[j].fixed_mass -= each;
+    }
+    r.car.nodes[strike].fixed_mass = STRIKE_KG;
+}
+
+/// How far a mount's beams may reach for a body node that gives them a
+/// direction they lack ([`spread_pick`]).
+pub const MOUNT_SPREAD_REACH: f32 = 0.75;
+/// A rigidifier's depth behind its panel's skin (the study's rule 20:
+/// 0.2-0.4 m), and how far its beams reach.
+pub const RIGIDIFIER_DEPTH: f32 = 0.22;
+pub const RIGIDIFIER_REACH: f32 = 0.95;
+
+/// `n` body nodes for a mount at `at`: the nearest of `cands`, then each time
+/// the candidate (within [`MOUNT_SPREAD_REACH`]) that most raises the
+/// weakest direction of the beams so far, so the mount's beams span all
+/// three axes. A hinge leaf bolted to a pillar holds in every direction;
+/// the nearest nodes alone can all lie in the pillar's plane (the front
+/// doors slid fore and aft on theirs at 12.6 Hz).
+fn spread_pick(r: &Rig, at: Vec3, cands: &[usize], n: usize) -> Vec<usize> {
+    let mut v: Vec<(f32, usize)> = cands
+        .iter()
+        .map(|&i| (r.g(i).distance(at), i))
+        .filter(|x| x.0 > 0.02)
+        .collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<usize> = v.iter().take(1).map(|x| x.1).collect();
+    let second = |d: Vec3| glam::Mat3::from_cols(d * d.x, d * d.y, d * d.z);
+    while out.len() < n {
+        let m = out.iter().fold(glam::Mat3::ZERO, |m, &j| {
+            m + second((r.g(j) - at).normalize_or_zero())
+        });
+        let best = v
+            .iter()
+            .filter(|x| x.0 < MOUNT_SPREAD_REACH && !out.contains(&x.1))
+            .map(|&(d, j)| {
+                let mm = m + second((r.g(j) - at).normalize_or_zero());
+                // Two beams leave one axis empty whatever they are: judge
+                // them by their second-weakest direction.
+                let lam = if out.len() == 1 {
+                    let d0 = (r.g(out[0]) - at).normalize_or_zero();
+                    1.0 - d0.dot((r.g(j) - at).normalize_or_zero()).abs()
+                } else {
+                    weakest_axis(mm).0
+                };
+                (lam - 0.15 * d, j)
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        match best {
+            Some((_, j)) => out.push(j),
+            None => break,
+        }
+    }
+    out
+}
+
+/// A panel's rigidifier ([`RIGIDIFIER_DEPTH`] under its skin at `at`, a point
+/// of its inner frame): beamed to the panel's nodes within
+/// [`RIGIDIFIER_REACH`], so the panel bends as a section of that depth and
+/// not as its skin alone (bending stiffness goes as k d²; the study's §5.1
+/// and rule 20). Not a collision node.
+fn rigidifier(r: &mut Rig, name: &str, at: Vec3, part: Part, own: &[usize]) -> usize {
+    let i = r.node(name, at, part, Some(Role::DoorFrame), false);
+    for &j in own {
+        let d = r.g(j).distance(at);
+        if d > 0.03 && d < RIGIDIFIER_REACH && !r.car.has_beam(i, j) {
+            r.car.beam(i, j, Role::DoorFrame, part);
+        }
+    }
+    i
+}
+
+/// The parts whose own solid is a collision skin: the convex hull of their
+/// nodes ([`interior_skins`]).
+pub const HULL_PARTS: [&str; 8] = [
+    "seat_FL",
+    "seat_FR",
+    "seat_rear",
+    "dash",
+    "console",
+    "engine",
+    "fuel_tank",
+    "radiator",
+];
+
+/// The convex hull of `p` as polygons (indices into `p`, in order around
+/// each face): every plane through three points with all the others on one
+/// side, its coplanar points taken together. A flat set is one polygon.
+fn hull_faces(p: &[Vec3]) -> Vec<Vec<usize>> {
+    let eps = 2e-3;
+    let mut seen: std::collections::BTreeSet<Vec<usize>> = Default::default();
+    let mut out = Vec::new();
+    for a in 0..p.len() {
+        for b in a + 1..p.len() {
+            for c in b + 1..p.len() {
+                let n = (p[b] - p[a]).cross(p[c] - p[a]);
+                if n.length() < 1e-5 {
+                    continue;
+                }
+                let n = n.normalize();
+                let d: Vec<f32> = p.iter().map(|q| n.dot(*q - p[a])).collect();
+                if !(d.iter().all(|&x| x <= eps) || d.iter().all(|&x| x >= -eps)) {
+                    continue;
+                }
+                let mut on: Vec<usize> = (0..p.len()).filter(|&i| d[i].abs() <= eps).collect();
+                if !seen.insert(on.clone()) {
+                    continue;
+                }
+                let cen = on.iter().map(|&i| p[i]).sum::<Vec3>() / on.len() as f32;
+                let u = (p[on[0]] - cen).normalize_or_zero();
+                let v = n.cross(u);
+                on.sort_by(|&i, &j| {
+                    let f = |k: usize| (p[k] - cen).dot(v).atan2((p[k] - cen).dot(u));
+                    f(i).total_cmp(&f(j))
+                });
+                out.push(on);
+            }
+        }
+    }
+    out
+}
+
+/// The collision faces inside the defined car. Each is a triangle on its
+/// part's own nodes, marked [`Tri::inner`] (no air on it); its nodes become
+/// contacters with the rest of the skin's.
+///
+/// - **The cabin's structure** (the shell): each sill's outer face (bottom
+///   to top), the floor pan, the tunnel's walls, and the firewall from the
+///   cowl to the toe board.
+/// - **Each door's box:** its inner panel, its bottom, its belt and its two
+///   end walls, so a door is a solid on both faces.
+/// - **Interior and engine-bay parts** ([`HULL_PARTS`]): the convex hull of
+///   the part's nodes, the solid they are the corners of.
+///
+/// Before this only the outer skin had triangles: a door T-boned at 50 km/h
+/// went through the sill's top edge and the A-pillar, and nothing in the
+/// cabin could stop it or be pushed by it.
+fn interior_skins(r: &mut Rig) {
+    let ix: HashMap<String, usize> = r
+        .car
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.name.clone(), i))
+        .collect();
+    let mut have: std::collections::BTreeSet<[usize; 3]> = r
+        .car
+        .tris
+        .iter()
+        .map(|t| {
+            let mut k = t.n;
+            k.sort_unstable();
+            k
+        })
+        .collect();
+    let mut add: Vec<Tri> = Vec::new();
+    let pos: Vec<Vec3> = (0..r.car.nodes.len()).map(|i| r.g(i)).collect();
+    let mut poly = |ids: &[usize], part: Part, sub: Option<&str>| {
+        for k in 1..ids.len().saturating_sub(1) {
+            let n = [ids[0], ids[k], ids[k + 1]];
+            let area = (pos[n[1]] - pos[n[0]]).cross(pos[n[2]] - pos[n[0]]).length();
+            let mut key = n;
+            key.sort_unstable();
+            if area < 1e-5 || !have.insert(key) {
+                continue;
+            }
+            add.push(Tri {
+                n,
+                part,
+                group: None,
+                sub: sub.map(str::to_string),
+                inner: true,
+            });
+        }
+    };
+    let named = |names: &[String]| -> Option<Vec<usize>> {
+        names.iter().map(|n| ix.get(n).copied()).collect()
+    };
+    // The shell.
+    for s in ["l", "r"] {
+        for row in 1..=4 {
+            let (a, b) = (row, row + 1);
+            for q in [
+                // the sill's outer face
+                [format!("sh_c1_{a}o{s}"), format!("sh_c1_{b}o{s}"), format!("sh_c2_{b}{s}"), format!("sh_c2_{a}{s}")],
+                // the floor pan
+                [format!("sh_c1_{a}o{s}"), format!("sh_c1_{b}o{s}"), format!("sh_c1_{b}t{s}"), format!("sh_c1_{a}t{s}")],
+                // the tunnel's wall
+                [format!("sh_c1_{a}t{s}"), format!("sh_c1_{b}t{s}"), format!("sh_c3_{b}"), format!("sh_c3_{a}")],
+            ] {
+                if let Some(ids) = named(&q) {
+                    poly(&ids, Part::Body, None);
+                }
+            }
+        }
+    }
+    let across = ["ol", "il", "ir", "or"];
+    let floor1 = ["ol", "tl", "tr", "or"];
+    for k in 0..3 {
+        for q in [
+            [format!("sh_b2_{}", across[k]), format!("sh_b2_{}", across[k + 1]), format!("sh_b1_{}", across[k + 1]), format!("sh_b1_{}", across[k])],
+            [format!("sh_b1_{}", across[k]), format!("sh_b1_{}", across[k + 1]), format!("sh_c1_1{}", floor1[k + 1]), format!("sh_c1_1{}", floor1[k])],
+        ] {
+            if let Some(ids) = named(&q) {
+                poly(&ids, Part::Body, None);
+            }
+        }
+    }
+    // The doors.
+    for part in [Part::DoorFL, Part::DoorFR, Part::DoorRL, Part::DoorRR] {
+        let dn = part.name().trim_start_matches("gen2_").to_string();
+        let o = |row: usize, k: usize| format!("{dn}_o{row}{k}");
+        let i = |row: usize, k: usize| format!("{dn}_i{row}{k}");
+        for k in 0..2 {
+            for q in [
+                [i(0, k), i(0, k + 1), i(1, k + 1), i(1, k)],
+                [o(0, k), o(0, k + 1), i(0, k + 1), i(0, k)],
+                [o(2, k), o(2, k + 1), i(1, k + 1), i(1, k)],
+            ] {
+                if let Some(ids) = named(&q) {
+                    poly(&ids, part, None);
+                }
+            }
+        }
+        for k in [0, 2] {
+            if let Some(ids) = named(&[o(0, k), i(0, k), i(1, k), o(2, k)]) {
+                poly(&ids, part, None);
+            }
+        }
+    }
+    // The parts that are solids of their own.
+    for sub in HULL_PARTS {
+        let ids: Vec<usize> = (0..r.car.nodes.len())
+            .filter(|&i| r.car.nodes[i].sub.as_deref() == Some(sub))
+            .collect();
+        if ids.len() < 3 {
+            continue;
+        }
+        let pts: Vec<Vec3> = ids.iter().map(|&i| pos[i]).collect();
+        for face in hull_faces(&pts) {
+            let f: Vec<usize> = face.iter().map(|&k| ids[k]).collect();
+            poly(&f, Part::Engine, Some(sub));
+        }
+    }
+    r.car.tris.extend(add);
+}
+
+/// The least share of an edge node's ties' directions along their weakest
+/// axis (the smallest eigenvalue of the unit directions' second moment over
+/// their number; a third is isotropic) for the node to be made.
+pub const EDGE_SPREAD: f32 = 0.05;
+
+/// The spread the ties of a body edge node at `g` could reach: its four
+/// nearest structural nodes, then up to three more within 0.65 m, each the
+/// one most along the weakest axis so far (as `edge_nodes` ties them).
+fn edge_tie_spread(r: &Rig, g: Vec3, edge: &[usize]) -> f32 {
+    let cands: Vec<usize> = r
+        .nearest(Part::Body, g, 24, |j| {
+            !edge.contains(&j)
+                && !r.car.nodes[j].no_group
+                && !r.car.nodes[j].name.starts_with("hub")
+                && !r.car.nodes[j].name.starts_with("rim")
+        })
+        .into_iter()
+        .filter(|&j| r.g(j).distance(g) < 0.65 && r.g(j).distance(g) > 0.03)
+        .collect();
+    let mut tied: Vec<usize> = cands.iter().copied().take(4).collect();
+    let moment = |tied: &[usize]| {
+        tied.iter().fold(glam::Mat3::ZERO, |m, &j| {
+            let d = (r.g(j) - g).normalize_or_zero();
+            m + glam::Mat3::from_cols(d * d.x, d * d.y, d * d.z)
+        })
+    };
+    for _ in 0..3 {
+        let (lam, axis) = weakest_axis(moment(&tied));
+        if lam > 0.12 * tied.len() as f32 {
+            break;
+        }
+        let best = cands.iter().copied().filter(|j| !tied.contains(j)).max_by(|&a, &b| {
+            let f = |j: usize| (r.g(j) - g).normalize_or_zero().dot(axis).abs();
+            f(a).total_cmp(&f(b))
+        });
+        match best {
+            Some(j) => tied.push(j),
+            None => break,
+        }
+    }
+    if tied.is_empty() {
+        return 0.0;
+    }
+    weakest_axis(moment(&tied)).0 / tied.len() as f32
+}
+
 fn edge_nodes(
     r: &mut Rig,
     inp: &dyn RigInput,
@@ -4444,6 +4902,8 @@ fn edge_nodes(
     trunk_z: (f32, f32),
     edge_spacing: f32,
     census: bool,
+    shell_stops: bool,
+    budget_body: bool,
 ) -> Vec<usize> {
     let model = inp.model();
     // Skinned and rigid pieces of the parts (glass excluded: it sits in its
@@ -4583,6 +5043,32 @@ fn edge_nodes(
                 if census && part != Part::Body {
                     pair[side] = r
                         .nearest(part, g, 1, |j| r.skin[j] && !r.car.nodes[j].no_group)
+                        .first()
+                        .copied()
+                        .filter(|&j| r.g(j).distance(g) < 0.35);
+                    continue;
+                }
+                // A shell on its members' nodes takes the stop on the nearest
+                // of them (the aperture's flange is part of that member), as
+                // a BeamNG shell does: no light edge nodes hung on soft ties
+                // (they rang at 6-20 Hz and never settled).
+                // The same for an edge node its part could not hold in three
+                // directions ([`EDGE_SPREAD`]): on a pillar every node in
+                // reach lies in the pillar's plane, and a node tied in one
+                // plane swings across it (two A-pillar edge nodes moved
+                // 1.2 mm at rest and never stopped).
+                let flat = budget_body
+                    && part == Part::Body
+                    && edge_tie_spread(r, g, &made.iter().map(|m| m.0).collect::<Vec<_>>())
+                        < EDGE_SPREAD;
+                if (shell_stops || flat) && part == Part::Body {
+                    pair[side] = r
+                        .nearest(part, g, 1, |j| {
+                            r.member[j].is_some()
+                                && !r.car.nodes[j].no_group
+                                && !r.car.nodes[j].name.starts_with("hub")
+                                && !r.car.nodes[j].name.starts_with("rim")
+                        })
                         .first()
                         .copied()
                         .filter(|&j| r.g(j).distance(g) < 0.35);

@@ -348,7 +348,7 @@ pub fn jbeam_files(
         let mut own: Vec<&super::build::Tri> = car
             .tris
             .iter()
-            .filter(|t| t.part == part && sub.is_none())
+            .filter(|t| t.part == part && t.sub.as_deref() == sub && !t.inner)
             .collect();
         own.sort_by_key(|t| t.group.is_some());
         for t in own {
@@ -369,6 +369,20 @@ pub fn jbeam_files(
             }
             _ => trows,
         };
+        // Inner faces (the cabin's structure, a door's inner panel, a
+        // part's own solid) collide and carry no air.
+        let mut trows = trows;
+        let inner: Vec<&super::build::Tri> = car
+            .tris
+            .iter()
+            .filter(|t| t.part == part && t.sub.as_deref() == sub && t.inner)
+            .collect();
+        if !inner.is_empty() {
+            trows.push(json!({"dragCoef": 0, "liftCoef": 0, "breakGroup": ""}));
+            for t in inner {
+                trows.push(json!([n(t.n[0]), n(t.n[1]), n(t.n[2])]));
+            }
+        }
         if !trows.is_empty() {
             sec.push(format!(
                 "    \"triangles\": {}",

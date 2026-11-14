@@ -251,9 +251,27 @@ Record: [handoff/known-bugs.md](handoff/known-bugs.md) S3; spec §39.6; `example
 - **(Measurement) A hub cap leaves at a 25 km/h bump onto its wheel** (9 clips of 600 N a beam, the study's value). Not changed: open whether real clip retention holds at that load.
 - **Process:** write the test from the physical invariant first and commit it failing. Set energy bounds against the plain step on the same body: single precision alone moves an undamped body's energy by 0.3 % a second.
 
+## 15. Jello and collisions inside one car (2026-11-13, `feat/sedan-body`)
+
+Tables: [generated-vehicles.md](generated-vehicles.md), "Jello against the ETK, and parts that collide inside one car".
+
+- **(Measurement) Ask each mode which springs hold it.** `sedan_stiffness` with `MODE_BEAMS=1` prints a mode's strain energy by spring, `MODE_NODES=1` its shape. The doors' softness was one spring: the latch's coupler (55 % of the energy), not the door's lattice.
+- **(Fact) A coupler is as stiff as its nodes are heavy.** `coupler_rates`: k = 0.16·μ/h², ω·h 0.4 on the reduced mass. A latch on two light tag nodes is a soft spring. Give the latch and striker nodes their hardware's mass, the striker's from the member it stands on.
+- **(Measurement) "Nearest n" breaks symmetry by rounding.** A hub cap's nine clips took one of two equally near frame nodes per corner; two corners shared one and the cap was a pendulum (2–22 Hz, a different value per wheel, never at rest). A mount's beams are chosen by a rule that is the same on every wheel, or all of them are taken.
+- **(Measurement) The order hardware is built in is a rule.** Seals made before bolts took the bolts' pairs (`has_beam`): a fender leg hung on a push-only beam.
+- **(Measurement) A node whose ties lie in one plane swings across it, whatever their stiffness.** Check the spread before making the node, not after (`EDGE_SPREAD`).
+- **(Measurement) A tie sized by a sheet rule on a light node is stripped by the stability pass.** Size it by the node's budget.
+- **(Measurement) Removing the body's edge nodes removes its collision skin's corners** (126 triangles; coverage p99 0.16 → 0.25 m). A stiffness fix has to be checked against the lint, not only the modes.
+- **(Measurement) The kerb gap to the ETK is input and mounting, not panel stiffness.** Panels ripple a third as much about their own fit as about the body's; the body's worst nodes are the strut towers, loaded through a rigid strut link where the ETK has its spring.
+- **(Measurement) A scene has to drive the door into its opening to show a door passing through the cabin.** A pole to the ground and a ram over the sill both push the sill and pillar through the door's stops, and the seat moves with the floor. A second car into the door at 50 km/h showed it: the sill's top edge and the A-pillar through the door's triangles.
+- **(Fact) Self-collision is node against triangle, and a pair inside 2 cm at spawn never collides.** Give every solid faces on its own nodes (hulls for seats, panel, engine, tank; boxes for doors; faces for the sills, floor, tunnel and firewall) and make its nodes contacters. Edges still cross between nodes, and neighbouring panels' edge nodes at a 5 mm shut line are excluded for good: both are the solver's, not authoring's.
+- **(Measurement) Interior collisions changed the frontal crashes for the better.** With the hood landing on the engine the wall's residual crush fell from 299 / 215 to 239 / 169 mm (the ETK 228 / 192) and the pole's flipped triangles from 616 to 80.
+- **Process:** this shell (zsh) does not split `$cfg` into words: pass each value as its own variable.
+
 ## Changelog
 
 - 2026-11-13: section 14: the GPU kernels carry the centred damping's objective form; on by default for CPU and GPU.
+- 2026-11-13: section 15, jello against the ETK (modes in band, kerb not), collisions inside one car.
 
 - 2026-11-13: section 14, energy bombs: the gapped stops, the centred damping on spinning parts, the lint's rules and the tests.
 

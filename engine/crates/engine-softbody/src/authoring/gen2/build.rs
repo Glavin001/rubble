@@ -463,6 +463,12 @@ pub struct Tri {
     /// JBeam `breakGroup`: the triangle dies with that group (a collision
     /// skin triangle bridging a seam dies with its part's fastening).
     pub group: Option<String>,
+    /// The mechanical or interior part it belongs to (its JBeam file), as
+    /// [`Node::sub`].
+    pub sub: Option<String>,
+    /// Inside the car (an interior or structural face, a part's own
+    /// solid): it collides and has no air on it (`dragCoef` 0).
+    pub inner: bool,
 }
 
 /// A point mass the structure carries.
@@ -700,13 +706,13 @@ impl Car {
             self.tris.push(Tri {
                 n: [a, b, c],
                 part,
-                group: None,
+                group: None, sub: None, inner: false,
             });
         } else {
             self.tris.push(Tri {
                 n: [a, c, b],
                 part,
-                group: None,
+                group: None, sub: None, inner: false,
             });
         }
     }
@@ -1154,10 +1160,21 @@ impl Car {
                         .unwrap_or_else(|| budget * (m[b.a] / ends(b.a)).min(m[b.b] / ends(b.b)));
                 }
                 let sp = b.role.spec(b.part);
-                mult * if sp.k_fixed > 0.0 {
-                    sp.k_fixed
+                let k = mult
+                    * if sp.k_fixed > 0.0 {
+                        sp.k_fixed
+                    } else {
+                        sp.kl / l.max(SPRING_LENGTH)
+                    };
+                // On a car built to a node budget, a shut line's edge node
+                // is tied within its own: the sheet's rule on a 0.5 kg node
+                // is six times its budget, and the stability pass then
+                // stripped those ties until the node rang at 6-20 Hz and
+                // never settled.
+                if self.node_budget > 0.0 && matches!(b.role, Role::EdgeTie) {
+                    k.min(budget * (m[b.a] / ends(b.a)).min(m[b.b] / ends(b.b)))
                 } else {
-                    sp.kl / l.max(SPRING_LENGTH)
+                    k
                 }
             })
             .collect();

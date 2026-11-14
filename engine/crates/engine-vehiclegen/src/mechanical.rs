@@ -387,10 +387,14 @@ pub fn sedan_parts(g: &Gear, st: &Structure) -> Vec<MechPart> {
         disc.transform(None, at(xc, 0.0, 0.0));
         cap.mesh = disc;
         cap.internal.push(Internal { pairs: cap.complete(), v: vals(0.0, 20.0, 300.0, INF), deform_group: None });
-        // (nine clips: each corner to the outer axle node, the frame node at
-        // its own angle and one beside it; six to the first two alone are all
-        // radial and leave the cap free to turn in the rim)
-        cap.mounts.push(Mount { group: format!("hub_cap_{c}"), from: cap.names(), to: wh.names()[1..].to_vec(), beams: 9, kind: BeamKind::Normal, v: vals(0.0, 20.0, 300.0, 600.0), precomp: 1.0 });
+        // (twelve clip beams: each corner to the outer axle node and to all
+        // three frame nodes. Six, to the axle node and the frame node at the
+        // corner's own angle, are all radial and leave the cap free to turn
+        // in the rim. Nine took one of each corner's two equally near
+        // neighbours, whichever rounding chose: two corners went to the same
+        // frame node and the cap rocked about the third at 2-22 Hz, a
+        // pendulum on its own clips that never came to rest.)
+        cap.mounts.push(Mount { group: format!("hub_cap_{c}"), from: cap.names(), to: wh.names()[1..].to_vec(), beams: 12, kind: BeamKind::Normal, v: vals(0.0, 20.0, 300.0, 600.0), precomp: 1.0 });
         out.extend([hub, arm, strut]);
         if !upper.links.is_empty() {
             out.push(upper);
