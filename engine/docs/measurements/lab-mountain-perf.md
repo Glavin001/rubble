@@ -687,3 +687,12 @@ Tried and dropped: carrying a refused step to the next frame (60 Hz fell to 39 s
 from the start); skipping the draw of every refused frame (60 Hz fell to 40 late). The
 timer is an emulation: a real 120 Hz window is not measured here. `ioreg`'s first sample
 of "Device Utilization %" is stale (92, then 0, 0): take three.
+
+Also tried and dropped (the owner: physics first, drawing may fall to 60 or 30): a second
+level that draws every other step frame (30 drawn) once steps are refused at 60 drawn. It
+made the physics slower, at both display rates: from 33 s the measured GPU time of a step
+rose to 17.5–20 ms (12–14 ms without it) and the page fell to 30 steps/s (60 Hz) and
+34–40 (120 Hz), against 53–60 without. Fewer draws do not free time for the steps here;
+the likely reason is the one `frame_pacer.rs` already notes (the GPU lowers its clocks
+under a lighter load), not established. Past ~13 ms a step the remaining lever is the
+step's own cost.
