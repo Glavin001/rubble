@@ -591,3 +591,9 @@ crash 4.5–5.6 ms over 45 s (was 4.3 ms over 20 s in §6); no console or WGSL e
 Fleet (`fleet.sh`, GPU idle; the plane test on listed pairs still in): apart 1 / 8 / 32
 cars 9.03 / 9.77 / 11.40 ms medians (were 8.9 / 9.6 / 11.4), crash town 1 / 4 / 8 cars
 12.24 / 12.50 / 67.92 (were 12.1 / 12.3 / 67.6).
+
+**After the car's re-export (11:58, the generator's hinge change; 2026-11-14, final build
+at `3f551fb5`):** the same Chrome probe holds 60 steps/s to t ≈ 30 s (≤ 11.7 ms), then
+12.1–21.1 ms and 30–54 steps/s from 30.4 s to the end (39 s). The trajectory is the new
+car's (it breaks differently); the late phase has not been split again for it. Parked car
+4.5 ms.
