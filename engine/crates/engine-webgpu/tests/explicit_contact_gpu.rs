@@ -646,7 +646,23 @@ fn anti_clip_steps_like_the_cpu() {
     }
 }
 
+/// [`anti_clip_steps_like_the_cpu`] with every vehicle's box padded by each contacter's
+/// own travel (`ExplicitBeams::own_travel_reach`), and in the self-colliding vehicle a
+/// fast node that is neither a contacter nor a triangle's (it pads every box without
+/// the setting): CPU and GPU the same, side memories word for word, positions bit for bit.
+#[test]
+fn anti_clip_with_own_travel_steps_like_the_cpu() {
+    for dissipative in [false, true] {
+        anti_clip_scene_with(0, dissipative, true);
+        anti_clip_scene_with(3, dissipative, true);
+    }
+}
+
 fn anti_clip_scene(extra: usize, dissipative: bool) {
+    anti_clip_scene_with(extra, dissipative, false);
+}
+
+fn anti_clip_scene_with(extra: usize, dissipative: bool, own_travel: bool) {
     let mut fl = floor(Vec3::new(3.0, 3.0, 3.0));
     fl.anti_clip = true;
     fl.two_body_contact = true;
@@ -692,6 +708,17 @@ fn anti_clip_scene(extra: usize, dissipative: bool) {
         wait: 0,
         idle: 0,
     });
+    if own_travel {
+        // Far below, falling at 200 m/s: in no triangle and no contacter.
+        own.nodes.push(Node {
+            pos: Vec3::new(30.0, -50.0, 30.0),
+            vel: Vec3::new(0.0, -200.0, 0.0),
+            force: Vec3::ZERO,
+            mass: 1.0,
+            friction: 1.0,
+            flags: NODE_NO_GROUND,
+        });
+    }
     own.anti_only_tris = vec![false, true];
     own.anti_clip = true;
     own.two_body_contact = true;
@@ -700,6 +727,7 @@ fn anti_clip_scene(extra: usize, dissipative: bool) {
     // GPU's values.
     for v in [&mut fl, &mut pts, &mut own] {
         v.fixed_contact = true;
+        v.own_travel_reach = own_travel;
     }
     fl.dissipative_contact = dissipative;
     own.dissipative_contact = dissipative;
