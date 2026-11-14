@@ -1635,6 +1635,14 @@ impl ExplicitBeamsGpu {
         self.set_pair_reuse_margin(if on { f32::from_bits(m) } else { 0.0 });
     }
 
+    /// The beam phase on its records sorted by kind ([`plan::W_BEAM_ORDER`]; on, the
+    /// default) or the beams in file order (off: beamUpdate for each, as before). The
+    /// same results bit for bit (`tests/explicit_beam_order_gpu.rs`). Applies from the
+    /// next frame.
+    pub fn set_beam_order(&mut self, on: bool) {
+        self.planner.words[plan::W_BEAM_ORDER] = if on { self.layout.words[plan::W_BEAM_ORDER] } else { 0 };
+    }
+
     /// The reused pair list's piece labels for vehicle `v` (`explicit_beams.slang`
     /// pieces*; one per node of the vehicle, [`engine_softbody::explicit_debris::piece_labels`]):
     /// 0 the main body, 1..=6 a piece with collision triangles of its own,

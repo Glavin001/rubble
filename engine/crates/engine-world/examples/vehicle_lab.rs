@@ -409,6 +409,7 @@ fn measure(template: &ExplicitBeams, what: &str, gpu: bool) -> anyhow::Result<()
             }
         }
         "mountain-perf" => mountain_perf(template, gpu)?,
+        "beam-census" => beam_census(template),
         other => {
             anyhow::bail!("unknown --measure {other} (plates, spheres, mountain, mountain-perf)")
         }
@@ -693,6 +694,47 @@ fn reuse_cause(s: &ExplicitBeams, pos: &[glam::Vec3], vel: &[glam::Vec3], broken
 /// counts. `--steepness 55 --roughness 0.25 --launch 12 --rockslide 1 --surface 1` is
 /// the owner's report. Measurement switches (one at a time): `--ablate MASK` from
 /// `--ablate-at T` (results meaningless), `--surface-pairs 0`, `--surface-culls 0`.
+/// The beam phase's shape on the GPU (`--measure beam-census`, CPU only): beams by kind
+/// code, extension records and damping filters, and per 32-beam SIMD group (lane j takes
+/// beam j, j + LANES, …) the distinct code paths it runs; the nodes' incidence counts
+/// (a node lane's loads in its beam sum).
+fn beam_census(template: &ExplicitBeams) {
+    let path = |j: usize| {
+        let b = &template.beams[j];
+        let ext = template.ext_of.get(j).is_some_and(|&x| x != 0);
+        (b.kind.code(), ext, b.shock != 0 && b.kind.is_jbeam())
+    };
+    let mut kinds = std::collections::BTreeMap::<(u32, bool, bool), usize>::new();
+    for j in 0..template.beams.len() {
+        *kinds.entry(path(j)).or_default() += 1;
+    }
+    println!("beams {} by (kind code, extension, filter): {kinds:?}", template.beams.len());
+    let groups = template.beams.len().div_ceil(32);
+    let (mut paths, mut mixed) = (0usize, 0usize);
+    for g in 0..groups {
+        let mut s: Vec<_> = (g * 32..((g + 1) * 32).min(template.beams.len())).map(path).collect();
+        s.sort();
+        s.dedup();
+        paths += s.len();
+        mixed += usize::from(s.len() > 1);
+    }
+    println!(
+        "SIMD groups of 32 beams: {groups}, {:.2} distinct paths each on average, {mixed} mixed",
+        paths as f64 / groups as f64
+    );
+    let mut inc: Vec<usize> = template.incidence.iter().map(Vec::len).collect();
+    let total: usize = inc.iter().sum();
+    inc.sort_unstable();
+    println!(
+        "nodes {}: incidence entries {total}, mean {:.1}, median {}, p90 {}, max {}",
+        inc.len(),
+        total as f64 / inc.len() as f64,
+        inc[inc.len() / 2],
+        inc[inc.len() * 9 / 10],
+        inc[inc.len() - 1]
+    );
+}
+
 fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     anyhow::ensure!(gpu, "mountain-perf runs in the GPU World (--mode gpu)");
     let secs: f64 = arg("--secs").and_then(|x| x.parse().ok()).unwrap_or(40.0);
