@@ -185,8 +185,10 @@ pub fn pair_streak_default() -> u32 {
 }
 /// The reused pair list's margin (m): each triangle's box padded by this much more when
 /// the list is built; it is reused while no node has moved, relative to the others, by
-/// more than this less the boxes' growth (measured: lab-mountain-perf.md §5).
-pub const PAIR_REUSE_MARGIN: f32 = 0.05;
+/// more than this less the boxes' growth (measured: lab-mountain-perf.md §5; 0.1 since §8:
+/// the re-exported sedan's late mountain reuses its list on 63-86 % of grid steps, against
+/// 45-73 % at 0.05).
+pub const PAIR_REUSE_MARGIN: f32 = 0.1;
 
 /// The pair list's margin word at start: [`PAIR_REUSE_MARGIN`], `RUBBLE_PAIR_MARGIN=m`
 /// (measurement) another, `RUBBLE_PAIR_REUSE=0` off.

@@ -597,3 +597,64 @@ at `3f551fb5`):** the same Chrome probe holds 60 steps/s to t ≈ 30 s (≤ 11.7
 12.1–21.1 ms and 30–54 steps/s from 30.4 s to the end (39 s). The trajectory is the new
 car's (it breaks differently); the late phase has not been split again for it. Parked car
 4.5 ms.
+
+## 8. The re-exported car's late phase split by cause; the reuse margin 0.05 → 0.1 (2026-11-14)
+
+The car is `sedan_new` as regenerated with hinges that bend. Every comparison below toggles one
+switch on this car, starting from the same state.
+
+**Split by cause** (headless Chrome, WGSL stubs from `out/late/ab2.js`, t 31–42 s, GPU ms
+per World step):
+
+| Variant | ms |
+|---|---|
+| base | 11.6–15.7 |
+| self-collision walk stubbed | 10.15 (so the walk costs about 5 ms) |
+| pair-list reuse off | 16.4 |
+| volatile triangles' tests stubbed | no gain |
+| rigid coupling off | 11.7 (against 11.95) |
+
+The largest cause is still the self-collision walk. That is the grid steps that rebuild the
+pair list, plus the steps whose list cannot be reused. The volatile tests from §7 no longer
+matter for this car.
+
+**The lossless fix: a larger reuse margin.** `PAIR_REUSE_MARGIN` sets how far a node may
+travel before the list is rebuilt. It is exact at any value: the list holds every pair
+within the box test padded by the margin, and every listed pair is tested every step. A
+larger margin lists more pairs but rebuilds less often. Native, `vehicle_lab --measure
+mountain-perf`, same seed, GPU ms per World step at t 24–42 s:
+
+| Margin | Pairs listed (late) | Reused grid steps | ms at t 29–41 |
+|---|---|---|---|
+| 0.05 | 4,650–7,900 | 45–73 % | 15.1–19.5 |
+| **0.1 (now)** | 5,800–10,500 | 63–86 % | 14.4–17.0 |
+| 0.2 | 8,900–17,400 | | 15.8–18.1 |
+
+At 0.1, each step is 0.3–1.7 ms faster than at 0.05. At 0.2, the extra pair tests cost more
+than the rebuilds they save. Every GPU suite, including `explicit_beams_bitwise` and
+`explicit_pair_reuse_gpu`, passes at 0.1.
+
+**Headless Chrome, 45 s, final build** (GPU utilisation 0 % before the run, load 5.1):
+
+| t (s) | GPU ms / World steps per second |
+|---|---|
+| 1–4 | 5.2–5.4 / 60 |
+| 5–31 | 7.8–10.9 / 59–60 |
+| 32–34 | 11.0–12.2 / 59–60 |
+| 35–37 | 12.8–13.4 / 49–56 |
+| 38–45 | 13.5–14.2 / 43–55 |
+
+The run holds 60 steps/s with 12.5 ms or less through t ≈ 34 s. **From t ≈ 35 s (the strike
+on the slope) it costs 12.8–14.2 ms, so the 12.5 ms budget is still not met there.** In the
+same window, the build before the fix was at 13.4–21.1 ms. The parked car costs 4.8 ms.
+What remains is the walk on the steps that cannot reuse their list (about 5 ms). Taking that
+further needs a cheaper exact rebuild, for example an incremental one. This was not built.
+
+**The 120 Hz frame loop (observation only, not measured, page not edited).** The page's
+`pacer.advance(dt, 1/scale, 4)` owes about 0.5 steps per frame at 120 Hz. A step runs only
+while `canStep()` holds, which allows at most 2 readbacks in flight. A step refused on one
+frame is not owed again later. So on a 120 Hz display, any frame that owes a step while the
+GPU is still busy with the previous 2 loses that step. A 60 Hz display owes 1 step per frame
+and loses the same way less often relative to its rate. That would match the "GPU not ready
+54.7 %, steps a frame 0: 69 %" reading. It needs a measurement, a fixed-rate A/B at 60 and
+120 Hz, before the loop is changed.

@@ -174,3 +174,20 @@ ordered re-evaluation in the lone frame) sees a different set of adds when the t
 reordered across the member's lanes. Kept out; the kernel source is in the worktree's
 gitignored `engine/out/late/explicit_beams.member.slang` (8 cars 47.1 ms a frame same
 state, against about 53.5 without it).
+
+**Final check (2026-11-14, reuse margin 0.1, same car).** GPU utilisation was 0 % before
+each set.
+- `fleet.sh` apart, 1 / 8 / 32 cars: 9.34 / 10.12 / 11.75 ms.
+- Town, grid on against off (`EV_VV_GRID=0`):
+
+| Cars | Grid on | Grid off |
+|---|---|---|
+| 1 | 12.23 | 12.22 |
+| 4 | 29.96 | 29.96 |
+| 8 | 53.57 | 71.33 |
+| 16 | 58.75 | 74.96 |
+| 32 | 103.26 | 138.54 |
+
+Bonds broken match in every pair of runs: 9 / 68 / 169 / 224 / 293. All 32-car runs
+completed.
+
