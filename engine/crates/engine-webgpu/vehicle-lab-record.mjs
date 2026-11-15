@@ -14,6 +14,14 @@
 //     times the in-place restart (a slider change to running again) and an in-place
 //     rebuild, and checks the page did not reload.
 //
+//   node vehicle-lab-record.mjs --qa [--secs 45] [--stills 4,15,30] [--beams-at 30] name:query …
+//     QA of a page (local or deployed): time to ready, the adapter (fails on a software
+//     one), a line a second, PNG stills at those simulated times (the beams view once),
+//     then the perf report, the lab's table and stats (penetration) as files; console
+//     errors and a failure banner fail the run.
+//   --base URL: a deployed page instead of the local server (--auth URL first, e.g. a
+//   Vercel share link, which sets the session cookie); --profile DIR keeps Chrome's
+//   profile (its GPU caches) between runs; CHROME_FLAGS adds Chrome flags.
 // Needs Chrome and ffmpeg (record), the World wasm (CONTRIBUTING.md). Run it as the
 // machine's one GPU job: engine/scripts/with-gpu-lock.py --limit 900 -- node …
 // A hard time limit (--limit, minutes) bounds every run.
@@ -29,9 +37,9 @@ const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const OUT = opt('--out', join(homedir(), 'Development', 'rubble-artifacts', 'vehicle-lab'));
 const [W, H] = opt('--size', '1280x720').split('x').map(Number);
-const PROBE = args.includes('--probe'), RESTARTS = args.includes('--restarts');
+const PROBE = args.includes('--probe'), RESTARTS = args.includes('--restarts'), QA = args.includes('--qa');
 const EXTRA = opt('--query', '');
-const FLAGS = ['--probe', '--restarts', '--segments'];
+const FLAGS = ['--probe', '--restarts', '--segments', '--qa'];
 const runs = args.filter((a, i) => !a.startsWith('--') && (!args[i - 1]?.startsWith('--') || FLAGS.includes(args[i - 1])));
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
@@ -49,17 +57,21 @@ const server = createServer((req, res) => {
   if (req.method === 'HEAD') { res.end(); return; }
   res.end(readFileSync(realpathSync(path)));
 });
-await new Promise((r) => server.listen(0, '127.0.0.1', r));
-const base = `http://127.0.0.1:${server.address().port}`;
+const BASE = opt('--base', null);
+if (!BASE) await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const base = BASE ? BASE.replace(/\/$/, '') : `http://127.0.0.1:${server.address().port}`;
 
-const profile = mkdtempSync(join(tmpdir(), 'vehicle-lab-chrome-'));
+const keepProfile = opt('--profile', null);
+if (keepProfile) mkdirSync(keepProfile, { recursive: true });
+const profile = keepProfile || mkdtempSync(join(tmpdir(), 'vehicle-lab-chrome-'));
 const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
   '--enable-unsafe-webgpu', `--window-size=${W},${H}`, '--no-first-run', '--no-default-browser-check',
-  '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank',
-], { stdio: 'ignore' });
-const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
+  '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
+  ...(process.env.CHROME_FLAGS || '').split(' ').filter(Boolean), 'about:blank',
+], { stdio: process.env.CHROME_LOG ? ['ignore', 'inherit', 'inherit'] : 'ignore' });
+const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} if (!keepProfile) try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
 process.on('exit', cleanup);
 
 let targets = [];
@@ -89,6 +101,11 @@ const evaluate = async (expression) => {
 await send('Runtime.enable');
 await send('Page.enable');
 await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
+if (opt('--auth', null)) {
+  // A share link (Vercel Authentication): its redirect sets the session cookie.
+  await send('Page.navigate', { url: opt('--auth') });
+  await new Promise((r) => setTimeout(r, 4000));
+}
 
 const open = async (query) => {
   await send('Page.navigate', { url: `${base}/vehicle-lab.html?${query}${EXTRA ? '&' + EXTRA : ''}` });
@@ -137,6 +154,79 @@ if (RESTARTS) {
     failOnErrors(name);
   }
   process.exit(0);
+}
+
+if (QA) {
+  const grabPng = async (file) => {
+    const s = await send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(file, Buffer.from(s.result.data, 'base64'));
+    console.log(`  still ${file}`);
+  };
+  const waitSim = async (t, limitS) => {
+    const t0 = Date.now();
+    for (;;) {
+      const now = await evaluate('window.__state().t').catch(() => 0);
+      if (now >= t) return now;
+      if (Date.now() - t0 > limitS * 1000) return now;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  };
+  let failedRuns = 0;
+  // The adapter first (fails fast on a software one): on the site's root page.
+  await send('Page.navigate', { url: `${base}/` });
+  await new Promise((r) => setTimeout(r, 3000));
+  const adapter0 = await evaluate(`(async () => { if (!navigator.gpu) return null; const a = await navigator.gpu.requestAdapter(); const i = a?.info || {}; return a && { vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description, fallback: !!a.isFallbackAdapter }; })()`).catch((e) => ({ error: e.message }));
+  console.log(`WebGPU adapter: ${JSON.stringify(adapter0)}`);
+  if (!adapter0 || adapter0.error || adapter0.fallback || /swiftshader|llvmpipe|lavapipe/i.test(`${adapter0.vendor} ${adapter0.description} ${adapter0.device} ${adapter0.architecture}`)) {
+    console.log('FAILED: no hardware WebGPU adapter'); process.exit(3);
+  }
+  for (const run of runs) {
+    const { name, query } = parse(run);
+    pageErrors.length = 0;
+    const tLoad = Date.now();
+    let ready;
+    try { ready = await open(query); } catch (e) { console.log(`${name}: FAILED to start after ${((Date.now() - tLoad) / 1000).toFixed(1)} s: ${e.message}`); failedRuns++; continue; }
+    const adapter = await evaluate(`(async () => { const a = await navigator.gpu.requestAdapter(); const i = a?.info || {}; return { vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description, fallback: !!a?.isFallbackAdapter }; })()`);
+    console.log(`${name}: ready in ${ready.toFixed(1)} s; adapter ${JSON.stringify(adapter)}`);
+    if (!adapter || adapter.fallback || /swiftshader|llvmpipe|lavapipe/i.test(`${adapter.vendor} ${adapter.description} ${adapter.device} ${adapter.architecture}`)) {
+      console.log(`${name}: FAILED: software or no WebGPU adapter`); process.exit(3);
+    }
+    const secs = Number(opt('--secs', '45'));
+    const stills = (opt('--stills', '') || '').split(',').filter(Boolean).map(Number).sort((a, b) => a - b);
+    const beamsAt = opt('--beams-at', null) == null ? null : Number(opt('--beams-at'));
+    const shots = [...stills.map((t) => ({ t, beams: false })), ...(beamsAt != null ? [{ t: beamsAt, beams: true }] : [])].sort((a, b) => a.t - b.t);
+    const wall0 = Date.now();
+    let lastLog = 0;
+    for (const shot of shots) {
+      const at = await waitSim(shot.t, secs * 4);
+      if (shot.beams) { await evaluate(`(async () => { await window.__set({ beams: true }); document.getElementById('beams').checked = true; document.getElementById('beams').dispatchEvent(new Event('change')); })()`); await new Promise((r) => setTimeout(r, 600)); }
+      await grabPng(join(OUT, 'stills', `${name}-t${String(shot.t).padStart(2, '0')}${shot.beams ? '-beams' : ''}.png`));
+      if (shot.beams) await evaluate(`(async () => { document.getElementById('beams').checked = false; document.getElementById('beams').dispatchEvent(new Event('change')); })()`);
+      console.log(`    (sim ${Number(at).toFixed(1)} s)`);
+    }
+    // The rest of the run, a line a second.
+    while ((Date.now() - wall0) / 1000 < secs) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const s = Math.round((Date.now() - wall0) / 1000);
+      if (s - lastLog >= 5) {
+        lastLog = s;
+        try { console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, frameMs, refused, gpu }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), frameP50: +frameMs.p50.toFixed(1), refused, gpu: gpu && gpu.total.length ? { total: +gpu.split.total.toFixed(2), rigid: +gpu.split.rigid.toFixed(2), vehicle: +gpu.split.vehicle.toFixed(2) } : null }))(window.__state()))`)}`); } catch (e) { console.log(`  ${s}s (no reading: ${String(e.message).slice(0, 80)})`); }
+      }
+    }
+    await grabPng(join(OUT, 'stills', `${name}-end.png`));
+    const state = await evaluate('window.__state()');
+    const stats = await evaluate('window.__stats()');
+    const pen = stats?.car?.penetration;
+    writeFileSync(join(OUT, `${name}.perf.txt`), await evaluate('window.__perfReport()'));
+    writeFileSync(join(OUT, `${name}.table.txt`), await evaluate('window.__table()'));
+    writeFileSync(join(OUT, `${name}.stats.json`), JSON.stringify({ name, query, readySeconds: ready, adapter, state, stats }, null, 1));
+    const banner = await evaluate('document.getElementById("err")?.textContent || ""');
+    const failed = await evaluate('window.__failed || ""');
+    console.log(`${name}: sim ${state.t.toFixed(1)} s in ${((Date.now() - wall0) / 1000).toFixed(0)} s (sim rate ${state.simRate.toFixed(1)} steps/s, fps ${state.fps.toFixed(0)}); nodes inside rigid bodies ${pen?.nodesInside}; banner "${banner}"; failed "${failed}"; console errors ${pageErrors.length}`);
+    for (const e of pageErrors.slice(0, 10)) console.log(`  console error: ${String(e).slice(0, 300)}`);
+    if (pageErrors.length || failed || (pen && pen.nodesInside > 0)) failedRuns++;
+  }
+  process.exit(failedRuns ? 1 : 0);
 }
 
 if (PROBE) {
