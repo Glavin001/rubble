@@ -342,6 +342,55 @@ fn main() -> anyhow::Result<()> {
                     println!("  ablations at step {} (groups {:?}), ms a frame: {}", w.step_count(), g, line.join(", "));
                 }
             }
+            // EV_SPLIT_AT=s1,s2,…: at those World steps, the explicit frame from one snapshot
+            // with the contact groups in one workgroup each, then split across workgroups
+            // (contact-groups-design.md): every state word compared, and 20 frames of each
+            // timed. Prints the first difference, if any.
+            let split_at: Vec<u64> = std::env::var("EV_SPLIT_AT").unwrap_or_default().split(',').filter_map(|m| m.parse().ok()).collect();
+            if split_at.contains(&w.step_count()) {
+                if let Some(x) = w.explicit_vehicles_mut() {
+                    x.wait();
+                    let snap = x.snapshot();
+                    let run = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool| {
+                        x.restore(&snap);
+                        x.set_group_split(on);
+                        x.frame(34);
+                        x.wait();
+                        let words = x.state_words();
+                        x.restore(&snap);
+                        let t = std::time::Instant::now();
+                        for _ in 0..20 {
+                            x.frame(34);
+                            x.wait();
+                        }
+                        (words, t.elapsed().as_secs_f64() * 1e3 / 20.0)
+                    };
+                    let (old, t_old) = run(x, false);
+                    let (new, t_new) = run(x, true);
+                    // The split frame without the groups' contact passes (time only).
+                    x.set_split_ablation(512);
+                    let (_, t_novv) = run(x, true);
+                    x.set_split_ablation(0);
+                    let mut diff = String::from("bit for bit");
+                    for ((name, a), (_, b)) in old.iter().zip(&new) {
+                        if a.len() != b.len() {
+                            diff = format!("{name}: lengths {} and {}", a.len(), b.len());
+                            break;
+                        }
+                        if let Some(i) = a.iter().zip(b).position(|(p, q)| p != q) {
+                            let n = a.iter().zip(b).filter(|(p, q)| p != q).count();
+                            diff = format!("DIFFERS {name}[{i}] ({:#x} vs {:#x}), {n} words", a[i], b[i]);
+                            break;
+                        }
+                    }
+                    x.restore(&snap);
+                    x.set_group_split(engine_webgpu::group_split_default());
+                    x.wait();
+                    let mut g = x.contact_group_sizes();
+                    g.sort_unstable();
+                    println!("  split check at step {} (groups {:?}): {diff}; ms a frame alone: groups' workgroup {t_old:.2}, split {t_new:.2}, split without the contact passes {t_novv:.2}", w.step_count(), g);
+                }
+            }
             let every: u64 = std::env::var("EV_GROUPS").ok().and_then(|v| v.parse().ok()).unwrap_or(20).max(1);
             if std::env::var("EV_GROUPS").is_ok() && w.step_count() % every == 0 {
                 let sc = w.step_count();

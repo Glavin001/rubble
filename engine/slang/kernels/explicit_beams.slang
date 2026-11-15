@@ -6051,6 +6051,27 @@ void contactGroup(uint g, uint lane);
 
 // Raycast wheels (engine_softbody::explicit_drive).
 #include "explicit_beams_drive.slang"
+#ifdef EB_SOLO_STEP
+// The solo frame a step a dispatch (explicitBeamsFrameStep): what it keeps in workgroup
+// memory from one step to the next, in the vehicle's records between dispatches: the hit
+// flag (its segment record, free while contact runs: no wide passes) and the pair
+// list's state (gsCount past the buckets, REUSE_WORDS words, at the vehicle's wide-pass
+// grid counts in gAcc: free, a solo vehicle's grid is in workgroup memory).
+uint soloStepAt(uint v) { return gP.gridCountBase + v * GRID_BUCKETS; }
+void soloStepSave(uint v, uint lane)
+{
+    if (lane == 0u) gMisc[gP.wideMisc + 1u + v].x = gsHit;
+    for (uint k = lane; k < REUSE_WORDS; k += LANES) gAcc[soloStepAt(v) + k].store(int(gsCount[GRID_BUCKETS + k].load()));
+}
+void soloStepLoad(uint v, uint lane)
+{
+    for (uint k = lane; k < REUSE_WORDS; k += LANES) gsCount[GRID_BUCKETS + k].store(uint(gAcc[soloStepAt(v) + k].load()));
+}
+#endif
+#ifdef EB_SELF_SPLIT
+// Self-collision's listed pairs across workgroups (selfcol-design.md).
+#include "explicit_beams_selfsplit.slang"
+#endif
 // Surface contact (jbeam-semantics-spec.md §38).
 #include "explicit_beams_surface.slang"
 // Vehicle sleep (engine_softbody::explicit_sleep).
@@ -6058,9 +6079,16 @@ void contactGroup(uint g, uint lane);
 // The surface pass as its own pipelines (EB_SURF_PIPE modules only).
 #include "explicit_beams_surface_pipes.slang"
 
+#ifdef EB_SOLO_STEP
+// The split group path's solo vehicles (explicit_beams_split.slang): step gP.pad2 of the
+// frame alone, a function of the members' entry (the frame's start in step 0, its end in
+// the last; the state the frame keeps across steps in workgroup memory saved between).
+void explicitBeamsFrameStep(uint3 gid, uint3 lid)
+#else
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+#endif
 {
     uint v = gid.x;
     uint lane = lid.x;
@@ -6115,7 +6143,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint4 aero1 = gStatic[gP.aeroBase + v * 3u + 1u];
     uint4 aero2 = gStatic[gP.aeroBase + v * 3u + 2u];
     // The wing break check, once per frame on the positions before the rebase.
-#ifdef EB_FRAME_SEG
+#if defined(EB_FRAME_SEG) || defined(EB_SOLO_STEP)
     if (gP.pad2 == 0u)
 #endif
     {
@@ -6127,8 +6155,8 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     // Origin rebase: every lane reads node 0 before any lane moves it.
     float3 first = gNodes[nodeOff * 3u].xyz;
     sync();
-#ifdef EB_FRAME_SEG
-    // A frame in segments (EB_FRAME_SEG): the rebase in the first only.
+#if defined(EB_FRAME_SEG) || defined(EB_SOLO_STEP)
+    // A frame in segments (EB_FRAME_SEG, EB_SOLO_STEP): the rebase in the first only.
     if (gP.pad2 == 0u && length(first) > REBASE_RADIUS)
 #else
     if (length(first) > REBASE_RADIUS)
@@ -6152,7 +6180,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint stepBase = misc.w;
     if (lane == 0u)
     {
-#ifdef EB_FRAME_SEG
+#if defined(EB_FRAME_SEG) || defined(EB_SOLO_STEP)
         // A later segment: the hit flag the last one and the surface pipelines left.
         gsHit = gP.pad2 == 0u ? 1u : gMisc[segRec(v)].x;
 #else
@@ -6162,15 +6190,30 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsTestedCount[1].store(0u);
         // Self-collision hits or pending beams possible (selfApply's barriers).
         gsUniformLanes = triCount > 0u ? 1u : 0u;
+#ifdef EB_SOLO_STEP
+        if (gP.pad2 == 0u) pairReuseBegin();
+#else
         pairReuseBegin();
+#endif
         coupleBegin();
         driveBegin();
         // The coupling's spheres in workgroup memory (cplGsRange).
         cplGsClear();
         cplGsAdd(0u, v, 0u, 0u);
+#ifdef EB_SOLO_STEP
+        // A step a dispatch: the coupling list's frame maxima (in storage) cleared at the
+        // frame's start only, as the whole frame clears them (cplListFirst: step 0).
+        if (gP.pad2 == 0u) cplListBegin(v);
+#else
         cplListBegin(v);
+#endif
+        // The fold's uniform mark lives in workgroup memory: set at every dispatch.
         cplFoldMark(v);
     }
+#ifdef EB_SOLO_STEP
+    // A later step: the pair list's state as the last step left it (soloStepSave).
+    if (gP.pad2 > 0u) soloStepLoad(v, lane);
+#endif
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
 #ifdef EB_VV_SOLO
@@ -6190,6 +6233,29 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint driveOn = gsUniformDrive;
     uint surfOn = surfaceOn();
 
+#ifdef EB_SELF_SPLIT
+    // Step k - 1's rest (k = gP.pad2), after its tests' dispatches: its hits applied,
+    // its surface pass, its slide nodes and its closing barrier, as the frame runs them.
+    if (gP.pad2 > 0u)
+    {
+        uint parityR = (stepBase + gP.pad2 - 1u) & 1u;
+        if (lane == 0u) selfSplitHits(v);
+        if (selfOn != 0u)
+        {
+            sync();
+            selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parityR);
+        }
+        surfaceStep(v, lane, surfOn, parityR);
+#ifdef EB_AERO
+        if ((flagsV & FLAG_SLIDES) != 0u)
+        {
+            uint count = min(aero2.y, gP.slideTotal - min(aero2.x, gP.slideTotal));
+            for (uint k = lane, kStop = EB_END(k, count, LANES); k < kStop; k += LANES) slideNode(aero2.x + k, SLIDE_FRAME, groupOff, parityR);
+        }
+#endif
+        sync();
+    }
+#endif
 #ifdef EB_FRAME_SEG
     // Segment k (gP.pad2) of a frame whose surface pass runs as its own pipelines
     // between segments: step k-1's rest after its surface pass (the slide nodes and the
@@ -6207,6 +6273,8 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         sync();
     }
+    for (uint s = gP.pad2, sStop = EB_END_UNIFORM(s, min(gP.pad2 + 1u, gP.steps), 1u, 1u); s < sStop; s++)
+#elif defined(EB_SOLO_STEP)
     for (uint s = gP.pad2, sStop = EB_END_UNIFORM(s, min(gP.pad2 + 1u, gP.steps), 1u, 1u); s < sStop; s++)
 #else
     for (uint s = 0u, sStop = EB_END_UNIFORM(s, gP.steps, 1u, EB_MAX_STEPS); s < sStop; s++)
@@ -6259,6 +6327,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
         if (lane == 0u)
         {
+#ifdef EB_SELF_SPLIT
+            selfSplitClear(v);
+#endif
             gsPairCount.store(0u);
             gAcc[hitAcc(v)].store(0);
             gAcc[hitAcc(v) + 1u].store(0);
@@ -6434,8 +6505,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         {
             // The pair list kept over steps: built this step, or reused.
             if (reuse == 1u)
+#ifdef EB_SELF_SPLIT
+                selfSplitBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount,
+                               parity);
+#else
                 pairReuseBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount,
                                parity);
+#endif
         }
         else if (candCount > 0u && cell > 0.0 && gridOn != 0u)
         {
@@ -6474,8 +6550,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         if ((gP.ablate & 256u) == 0u)
 #endif
         if (gridOn != 0u && reuse != 0u)
+#ifdef EB_SELF_SPLIT
+            selfSplitTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
+                           groupCount, parity);
+#else
             pairReuseTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
                            groupCount, parity);
+#endif
         else if (gridOn != 0u && gP.triPairs != 0u)
         {
             // The walk's listed pairs, a pair a lane (triPairsAt); past the list's
@@ -6500,6 +6581,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 }
             }
         }
+#ifdef EB_SELF_SPLIT
+        // The pairs dispatch next; this step's rest opens the next step dispatch.
+        sync();
+        continue;
+#endif
         if (selfOn != 0u)
         {
             sync();
@@ -6528,6 +6614,20 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         sync();
         if (lane == 0u) gMisc[segRec(v)].x = gsHit;
         if (sleepOn) sleepMark(v, sleepMove);
+        return ebLoopCapFlush();
+    }
+#endif
+#ifdef EB_SOLO_STEP
+#ifdef EB_SELF_SPLIT
+    // Every step's dispatch (the last step's rest and the frame's end in its own).
+    if (gP.pad2 < gP.steps)
+#else
+    if (gP.pad2 + 1u < gP.steps)
+#endif
+    {
+        // Not the last step (its closing barrier passed): the hit flag and the pair
+        // list's state for the next.
+        soloStepSave(v, lane);
         return ebLoopCapFlush();
     }
 #endif
@@ -7163,6 +7263,14 @@ void vvArgs(uint nv, uint groups, bool big)
     gArgs[6] = 1u;
     // The plan's groups (vehicle sleep's awake list rewrites the arguments every frame).
     gArgs[3] = groups;
+    // The split group path (explicit_beams_split.slang): the groups' passes (words
+    // 16..18) and, with a group, the members' steps over every vehicle (20..22).
+    gArgs[16] = groups;
+    gArgs[17] = 1u;
+    gArgs[18] = 1u;
+    gArgs[20] = groups == 0u ? 0u : nv;
+    gArgs[21] = 1u;
+    gArgs[22] = 1u;
 }
 
 void vvEmitPair(uint a, uint b)
@@ -7513,7 +7621,11 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     if (lane == 0u)
     {
         gsTestedCount[parity].store(0u);
+#ifndef EB_SOLO_STEP
+        // (The split path's members' module: the groups' pass clears them, in its own
+        // dispatch; Metal binds at most 31 workgroup variables a kernel.)
         if (first) vvClearCounters();
+#endif
     }
     sync();
     {
@@ -7787,12 +7899,21 @@ void trianglePairsM(uint m, uint t, uint gt, uint sub, uint subs, float3 origin,
     }
 }
 
+// `only` (contact-groups-design.md, the split group path): the one member this workgroup
+// steps (its partition's lanes are its own; the other partitions idle), or >= k for
+// every member (the group's own frame).
+void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only);
 void contactMembersStep(uint off, uint k, uint lane, uint s)
+{
+    contactMembersStepAt(off, k, lane, s, VV_PART);
+}
+
+void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
 {
     uint P = vvPartLanes(k);
     uint m = lane / P;
     uint pl = lane % P;
-    bool on = m < k;
+    bool on = m < k && (only >= k || m == only);
     uint v = vvMember(off, on ? m : 0u);
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
@@ -7836,8 +7957,11 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
     uint listBase = gP.testedListBase + triOff;
     if (lane == 0u)
     {
+#ifndef EB_SOLO_STEP
+        // (The split path's members' module: the groups' pass clears them.)
         vvClearCounters();
         vvClearSmall();
+#endif
         gsUniformHits = 0u;
         gsUniformOpen = 0u;
     }
@@ -7904,7 +8028,7 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
             uint4 q1 = gStatic[vj * 4u + 1u];
             uint4 q2 = gStatic[vj * 4u + 2u];
             float cj = asfloat(gStatic[vj * 4u + 3u].w);
-            uint lj = gsTestedM[2u * j + (((gMisc[vj].w + s) & 1u))].load();
+            uint lj = (only >= k || j == only) ? gsTestedM[2u * j + (((gMisc[vj].w + s) & 1u))].load() : 0u;
             if (cj > 0.0 && q2.y > 0u && lj * q2.y > BRUTE_PAIRS_PER_LANE * P) any = any | 1u;
             // Self-collision hits or pending beams possible (selfApply's barriers).
             if (q1.y > 0u) any = any | 2u;
@@ -10114,3 +10238,9 @@ void contactGroup(uint g, uint lane)
     if (sleepOn) sleepGroupEnd(off, k, lane, sleepMask, gP.steps);
     for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
 }
+
+// The split group path (contact-groups-design.md): a contact group's substeps across
+// workgroups, a member's step in its own.
+#ifdef EB_VV_SPLIT
+#include "explicit_beams_split.slang"
+#endif
