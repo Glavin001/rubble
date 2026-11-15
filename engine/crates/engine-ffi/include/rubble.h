@@ -1586,7 +1586,9 @@ enum RbResult rbWorld_Prewarm(struct RbWorld *world, uint32_t groups, uint32_t *
 enum RbResult rbWorld_PrewarmAsync(struct RbWorld *world, uint32_t groups);
 
 // Progress of the world's background prewarms: kernels compiled so far and in
-// all (`done == total` when finished; both 0 when none was started).
+// all (`done == total` when finished; both 0 when none was started). A kernel the
+// platform's shader compiler could not build counts as done and makes this return
+// `RB_ERROR` (the progress is still written), so a loading loop always ends.
 enum RbResult rbWorld_GetPrewarmProgress(struct RbWorld *world,
                                          uint32_t *out_done,
                                          uint32_t *out_total);

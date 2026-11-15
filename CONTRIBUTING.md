@@ -126,6 +126,12 @@ soft-body sedan and say so (`softbody.html`, the car menu), or, where no stand-i
 sense (`showcase-car.html?mod=`, an ETK snapshot in `crash-orbit.html`), show an
 on-page message.
 
+Rubble's own generated sedan is different: `build-web.sh` makes it in every build (its
+step "Generated sedan" runs the generator and rigger, `vehicle_gen_rig`, cached by their
+sources) and writes it to the site's `__mods/sedan_new`, so the deployed site and its
+previews have it. Its output is never committed. If your `engine/web-dist/__mods` is a
+symlink to your own mods folder, the build keeps that link and uses it instead.
+
 To make one locally, point `community_cache` at an unpacked BeamNG `vehicles` folder
 (the vehicle's folder and `common/` side by side, for example unzipped from your own
 copy of the game's `content/vehicles/<vehicle>.zip` and `common.zip`):

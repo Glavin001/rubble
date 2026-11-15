@@ -27,7 +27,10 @@ use engine_exec::explicit_plan::{
     self as plan, Cmd, ExplicitLayout, ExplicitUpload, FramePlanner, Kernel, PlannerState, BIND_TABLE,
     PARAM_STRIDE, VV_RECS,
 };
-pub use engine_exec::explicit_plan::{CouplingCapacity, CouplingLayout, GpuBeam};
+pub use engine_exec::explicit_plan::{
+    CouplingCapacity, CouplingLayout, GpuBeam, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING,
+    COUPLING_LIST_SKIN_NODES_ONLY,
+};
 use engine_softbody::explicit_beams::ExplicitBeams;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -69,6 +72,10 @@ pub struct ExplicitBeamsGpu {
     debug_coupling_bits: u32,
     /// The coupling's per-node shape ranges off ([`Self::set_coupling_node_ranges`]).
     coupling_ranges_off: bool,
+    /// The coupling's candidate list off ([`Self::set_coupling_candidate_list`]).
+    coupling_list_off: bool,
+    /// The coupling's folded step off ([`Self::set_coupling_fold`]).
+    coupling_fold_off: bool,
     /// Diagnostic: the large contact groups' pipeline from an edited module
     /// ([`Self::debug_set_contact_big_wgsl`]).
     debug_big: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
@@ -80,8 +87,36 @@ pub struct ExplicitBeamsGpu {
     vehicle_margins: Vec<f32>,
     surface_pairs_off: bool,
     surface_culls_off: bool,
+    /// The retired nodes' bits as last written ([`Self::set_retired`]; empty: none).
+    retired_bits: Vec<u32>,
+    /// The nodes' piece labels packed for the coupling (4 bits each), the vehicles with
+    /// labels in use, and whether the coupling takes a window per piece.
+    label_words: Vec<u32>,
+    labelled: Vec<bool>,
+    piece_windows: bool,
     /// Vehicle–vehicle contact ([`Self::set_vehicle_contact`]).
     contact: Contact,
+    /// The split group path ([`Self::set_group_split`]): on, its pipelines (created at
+    /// first use) and whether they zero workgroup memory (natively; browsers always do).
+    group_split: bool,
+    group_split_tests: bool,
+    group_split_pipes: std::sync::OnceLock<GroupSplit>,
+    group_split_zero: bool,
+    /// Self-collision's listed pairs across workgroups ([`Self::set_self_split`]): on,
+    /// its pipelines (created at first use), and this frame's steps when it runs it (0
+    /// not).
+    self_split: bool,
+    self_split_pipes: std::sync::OnceLock<SelfSplit>,
+    self_split_frame: std::cell::Cell<u32>,
+    /// The last frame ran self-collision split with vehicle contact (on the split group
+    /// path's dispatches: [`ExplicitBeamsGpu::dispatch_group_split`]).
+    self_split_vv: std::cell::Cell<bool>,
+    /// Measurement only (time; results meaningless): self split dispatches not encoded
+    /// (bit 0 the walks, bit 1 the pairs; [`ExplicitBeamsGpu::set_self_split_skip`]).
+    self_split_skip: u32,
+    /// Measurement: under per-dispatch timing, each dispatch of a self split or split
+    /// group frame its own timed pass (off: the frame's split dispatches one segment).
+    split_dispatch_timing: bool,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
     /// `wait` saw, not yet handled.
     contact_errors: std::sync::Mutex<Vec<String>>,
@@ -173,8 +208,10 @@ struct ContactPipes {
     groups: wgpu::ComputePipeline,
     /// The solo vehicles' frame (`EB_VV_SOLO`).
     solo: wgpu::ComputePipeline,
-    /// The groups of more than four members ([`Kernel::ContactBig`]).
-    big: wgpu::ComputePipeline,
+    /// The groups of more than four members ([`Kernel::ContactBig`]); `None` for a
+    /// fleet of at most [`plan::VV_PART`] vehicles, which cannot form one (the
+    /// plan then never gives that dispatch a workgroup): its module is not compiled.
+    big: Option<wgpu::ComputePipeline>,
 }
 
 /// The vehicle-contact passes' bind group layout entries: the frame's bindings,
@@ -254,6 +291,7 @@ pub fn surface_split_default() -> bool {
 /// coupled frame hundreds of times slower (the crash town's car against a crate:
 /// 755 ms a 1/60 s frame with them, 0.87 ms without; `engine/docs/explicit-vehicles-in-world.md`).
 /// `RUBBLE_COUPLING_RANGES=0|1` overrides it natively.
+
 pub fn coupling_node_ranges_off_default() -> bool {
     match std::env::var("RUBBLE_COUPLING_RANGES").as_deref() {
         Ok("0") => true,
@@ -308,6 +346,327 @@ impl Split {
     }
 }
 
+/// Whether contact groups run split across workgroups ([`ExplicitBeamsGpu::set_group_split`]):
+/// `RUBBLE_GROUP_SPLIT=1|0` (default off until its suites and fleet runs are clean:
+/// contact-groups-design.md §6).
+pub fn group_split_default() -> bool {
+    std::env::var("RUBBLE_GROUP_SPLIT").as_deref() == Ok("1")
+}
+
+/// Byte offsets in the indirect arguments of the split group path's dispatches (the
+/// kernel's vvArgs): the groups, and the vehicles when there is a group.
+const SPLIT_GROUP_ARGS: u64 = 64;
+const SPLIT_MEMBER_ARGS: u64 = 80;
+const SPLIT_TESTS_ARGS: u64 = 96;
+/// Self-collision split with vehicle contact: every vehicle's step in every frame
+/// (the kernel's vvArgs words 28..30).
+const SPLIT_ALL_ARGS: u64 = 112;
+/// The kernel's step-word phases (`explicit_beams_split.slang`): the triangle tests in
+/// their own dispatches, the levels (and the tests' pairs) after them.
+const SPLIT_TESTS: u32 = 0x2000_0000;
+const SPLIT_LEVELS: u32 = 0x4000_0000;
+/// The split group path's entry points (`explicit_beams_split.slang`).
+pub const SPLIT_MEMBER_ENTRY: &str = "explicit_beams_split_member";
+pub const SPLIT_GROUP_ENTRY: &str = "explicit_beams_split_group";
+pub const SPLIT_TESTS_ENTRY: &str = "explicit_beams_split_tests";
+
+/// Whether the split path runs the small groups' triangle tests across workgroups
+/// ([`ExplicitBeamsGpu::set_group_split_tests`]): `RUBBLE_GROUP_SPLIT_TESTS=1|0` (default on).
+pub fn group_split_tests_default() -> bool {
+    std::env::var("RUBBLE_GROUP_SPLIT_TESTS").as_deref() != Ok("0")
+}
+/// The kernel's SPLIT_BEGIN: the parameter copy past the frame's end marks the groups'
+/// frame start.
+const SPLIT_BEGIN: u32 = u32::MAX;
+
+/// The split group path's module `which` (member, group, tests) for a fleet's variant.
+/// The self-collision split's modules a frame needs (selfcol-design.md), at the frame's
+/// variant: without vehicle contact the step, walk and pairs; with it the vehicles' step,
+/// the walk and pairs that skip members, and the split group path's group and tests.
+fn self_split_modules(aero: bool, lanes: u32, vv: bool) -> Vec<(String, &'static str, bool)> {
+    let tag = match (aero, lanes) {
+        (false, 512) => "_wide",
+        (false, _) => "",
+        (true, 512) => "_aero_wide",
+        (true, _) => "_aero",
+    };
+    // (name, entry, binds the arguments buffer at binding 10)
+    if vv {
+        vec![
+            (format!("explicit_beams_selfsplit_member_vv{tag}"), SPLIT_MEMBER_ENTRY, true),
+            (format!("explicit_beams_selfsplit_walk_vv{tag}"), "explicit_beams_self_walk", false),
+            (format!("explicit_beams_selfsplit_pairs_vv{tag}"), "explicit_beams_self_pairs", false),
+            (split_module("group", aero, lanes).to_string(), SPLIT_GROUP_ENTRY, false),
+            (split_module("tests", aero, lanes).to_string(), SPLIT_TESTS_ENTRY, false),
+        ]
+    } else {
+        vec![
+            (format!("explicit_beams_selfsplit_step{tag}"), "explicit_beams_self_step", true),
+            (format!("explicit_beams_selfsplit_walk{tag}"), "explicit_beams_self_walk", false),
+            (format!("explicit_beams_selfsplit_pairs{tag}"), "explicit_beams_self_pairs", false),
+        ]
+    }
+}
+
+/// The self split's step layout: the split group path's entries and the indirect
+/// arguments at binding 10 (storage).
+fn self_split_step_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    let mut e = split_entries();
+    e.push(wgpu::BindGroupLayoutEntry {
+        binding: 10,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    });
+    e
+}
+
+fn split_module(which: &str, aero: bool, lanes: u32) -> &'static str {
+    let tag = match (aero, lanes) {
+        (false, 512) => "_wide",
+        (false, _) => "",
+        (true, 512) => "_aero_wide",
+        (true, _) => "_aero",
+    };
+    let name = format!("explicit_beams_split_{which}{tag}");
+    crate::EXPLICIT_BEAMS_SPLIT_GROUPS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(n, _)| *n)
+        .unwrap_or_else(|| panic!("explicit beams: no split module {name}"))
+}
+
+/// The split group path's pipelines and bind group (contact-groups-design.md): the
+/// members' step (a workgroup per vehicle) and the groups' pass, binding 0 one
+/// parameter copy (the step) by the dynamic offset.
+struct GroupSplit {
+    /// The members' step: created at first use (self-collision split with contact runs
+    /// its own vehicles' module and never needs it; a browser compiles it for minutes).
+    member: std::sync::OnceLock<wgpu::ComputePipeline>,
+    device: wgpu::Device,
+    pipeline_layout: wgpu::PipelineLayout,
+    kind: (bool, u32, bool),
+    group: wgpu::ComputePipeline,
+    tests: wgpu::ComputePipeline,
+    bind: wgpu::BindGroup,
+}
+
+impl GroupSplit {
+    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], aero: bool, lanes: u32, zero: bool) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("explicit-beams-group-split"),
+            entries: &split_entries(),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("explicit-beams-group-split"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let kind = (aero, lanes, zero);
+        let group = split_pipe(device, &pipeline_layout, kind, "group", SPLIT_GROUP_ENTRY);
+        let tests = split_pipe(device, &pipeline_layout, kind, "tests", SPLIT_TESTS_ENTRY);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explicit-beams-group-split"),
+            layout: &layout,
+            entries: &std::array::from_fn::<_, 9, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 0 { params_window(&bufs[0]) } else { bufs[i].as_entire_binding() },
+            }),
+        });
+        Self { member: std::sync::OnceLock::new(), device: device.clone(), pipeline_layout, kind, group, tests, bind }
+    }
+
+    fn member(&self) -> &wgpu::ComputePipeline {
+        self.member
+            .get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, "member", SPLIT_MEMBER_ENTRY))
+    }
+}
+
+/// One of the split group path's pipelines (module `which` at the frame's variant).
+fn split_pipe(
+    device: &wgpu::Device,
+    pipeline_layout: &wgpu::PipelineLayout,
+    (aero, lanes, zero): (bool, u32, bool),
+    which: &str,
+    entry: &str,
+) -> wgpu::ComputePipeline {
+    let name = split_module(which, aero, lanes);
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(name),
+        source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(name),
+        layout: Some(pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        // Natively, no zeroing of workgroup memory at each workgroup's start
+        // (naga's MSL zeroes it from one lane: about 0.16 ms a dispatch): every
+        // workgroup value these entries read was written in the same dispatch
+        // (contact-groups-design.md §4; checked bit for bit against the zeroing
+        // build, RUBBLE_GROUP_SPLIT_ZERO=1).
+        compilation_options: wgpu::PipelineCompilationOptions {
+            zero_initialize_workgroup_memory: zero,
+            ..Default::default()
+        },
+        cache: None,
+    })
+}
+
+/// Self-collision's split pipelines (`EB_SELF_SPLIT`; selfcol-design.md): the solo
+/// frame's step cut at its tests and the pairs dispatch, bound as the split group path's.
+struct SelfSplit {
+    /// Without vehicle contact: [the step, the walk, the pairs], compiled on first use.
+    solo: std::sync::OnceLock<[wgpu::ComputePipeline; 3]>,
+    /// The step's bind group (the arguments buffer at binding 10, storage) and the pairs'
+    /// (without it: the pairs dispatch takes its size from it).
+    step_bind: wgpu::BindGroup,
+    pairs_bind: wgpu::BindGroup,
+    /// The pairs' then the walk's indirect arguments, three slots of three words each.
+    args: wgpu::Buffer,
+    /// Measurement only: the step module's `EB_ABLATE` build, compiled on first use
+    /// ([`ExplicitBeamsGpu::set_ablation`] with the split on).
+    ablate: std::sync::OnceLock<[wgpu::ComputePipeline; 3]>,
+    /// With vehicle contact: the vehicles' dispatch (the split group path's members'),
+    /// the walk and the pairs that skip a group's members, compiled on first use.
+    vv: std::sync::OnceLock<[wgpu::ComputePipeline; 3]>,
+    device: wgpu::Device,
+    step_layout: wgpu::PipelineLayout,
+    pairs_layout: wgpu::PipelineLayout,
+    tag: &'static str,
+    zero: bool,
+}
+
+impl SelfSplit {
+    fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], aero: bool, lanes: u32, zero: bool) -> Self {
+        let pairs_entries = split_entries();
+        let step_entries = self_split_step_entries();
+        let layouts = [&step_entries, &pairs_entries].map(|entries| {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("explicit-beams-self-split"),
+                entries,
+            });
+            let pipeline = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("explicit-beams-self-split"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            (layout, pipeline)
+        });
+        let tag = match (aero, lanes) {
+            (false, 512) => "_wide",
+            (false, _) => "",
+            (true, 512) => "_aero_wide",
+            (true, _) => "_aero",
+        };
+        let args = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-self-split-args"),
+            size: SELF_ARGS_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            mapped_at_creation: false,
+        });
+        let bind = |layout: &wgpu::BindGroupLayout, with_args: bool| {
+            let mut entries: Vec<wgpu::BindGroupEntry> = (0..9)
+                .map(|i| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: if i == 0 { params_window(&bufs[0]) } else { bufs[i].as_entire_binding() },
+                })
+                .collect();
+            if with_args {
+                entries.push(wgpu::BindGroupEntry { binding: 10, resource: args.as_entire_binding() });
+            }
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("explicit-beams-self-split"),
+                layout,
+                entries: &entries,
+            })
+        };
+        let step_bind = bind(&layouts[0].0, true);
+        let pairs_bind = bind(&layouts[1].0, false);
+        let [(_, step_layout), (_, pairs_layout)] = layouts;
+        Self {
+            solo: std::sync::OnceLock::new(),
+            step_bind,
+            pairs_bind,
+            args,
+            ablate: std::sync::OnceLock::new(),
+            vv: std::sync::OnceLock::new(),
+            device: device.clone(),
+            step_layout,
+            pairs_layout,
+            tag,
+            zero,
+        }
+    }
+
+    fn pipeline(&self, name: &str, entry: &str, layout: &wgpu::PipelineLayout) -> wgpu::ComputePipeline {
+        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(name),
+            source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
+        });
+        self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(name),
+            layout: Some(layout),
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                zero_initialize_workgroup_memory: self.zero,
+                ..Default::default()
+            },
+            cache: None,
+        })
+    }
+
+    /// Without vehicle contact: [the step, the walk, the pairs].
+    fn solo_pipes(&self) -> &[wgpu::ComputePipeline; 3] {
+        self.solo.get_or_init(|| {
+            let t = self.tag;
+            [
+                self.pipeline(&format!("explicit_beams_selfsplit_step{t}"), "explicit_beams_self_step", &self.step_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_walk{t}"), "explicit_beams_self_walk", &self.pairs_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_pairs{t}"), "explicit_beams_self_pairs", &self.pairs_layout),
+            ]
+        })
+    }
+
+    /// With vehicle contact: [the vehicles' step, the walk, the pairs].
+    fn vv_pipes(&self) -> &[wgpu::ComputePipeline; 3] {
+        self.vv.get_or_init(|| {
+            let t = self.tag;
+            [
+                self.pipeline(&format!("explicit_beams_selfsplit_member_vv{t}"), SPLIT_MEMBER_ENTRY, &self.step_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_walk_vv{t}"), "explicit_beams_self_walk", &self.pairs_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_pairs_vv{t}"), "explicit_beams_self_pairs", &self.pairs_layout),
+            ]
+        })
+    }
+
+    /// The step module's ablation build (measurement only; `_wide` and 256-lane builds).
+    /// The modules' ablation builds [step, walk, pairs] (measurement only; `_wide` and
+    /// 256-lane builds).
+    fn ablate_pipes(&self) -> &[wgpu::ComputePipeline; 3] {
+        self.ablate.get_or_init(|| {
+            let t = self.tag;
+            [
+                self.pipeline(&format!("explicit_beams_selfsplit_step_ablate{t}"), "explicit_beams_self_step", &self.step_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_walk_ablate{t}"), "explicit_beams_self_walk", &self.pairs_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_pairs_ablate{t}"), "explicit_beams_self_pairs", &self.pairs_layout),
+            ]
+        })
+    }
+}
+
+/// Whether solo frames run self-collision's listed pairs across workgroups
+/// ([`ExplicitBeamsGpu::set_self_split`]): off unless `RUBBLE_SELF_SPLIT=1` (work in
+/// progress: not yet verified bit for bit on a GPU).
+pub fn self_split_default() -> bool {
+    std::env::var("RUBBLE_SELF_SPLIT").as_deref() == Ok("1")
+}
+
 /// A status read: its staging buffer and its map state (0 copied, not yet mapped;
 /// 1 map requested; 2 mapped; 3 map failed).
 struct StatusRead {
@@ -344,8 +703,36 @@ fn params_window(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
     })
 }
 
+/// Measurement only: the explicit modules' WGSL read from another build's generated
+/// directory (`NAME.wgsl`, e.g. a copy of an older build's `OUT_DIR/wgsl`) instead of
+/// this build's, for the pipelines created after the call (`None`: this build's). With
+/// it, one process runs an older kernel against the current one from one snapshot
+/// (`vehicle_lab --ab-switch kernel`): bit for bit and time. Process-wide.
+#[doc(hidden)]
+pub fn set_explicit_module_override(dir: Option<std::path::PathBuf>) {
+    *MODULE_OVERRIDE.lock().unwrap() = dir;
+}
+
+static MODULE_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+fn module_override(name: &str) -> Option<&'static str> {
+    type Cache = std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, &'static str>>;
+    static READ: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let dir = MODULE_OVERRIDE.lock().unwrap().clone()?;
+    let path = dir.join(format!("{name}.wgsl"));
+    let mut cache = READ.get_or_init(Default::default).lock().unwrap();
+    let text = cache.entry(path.clone()).or_insert_with(|| {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        Box::leak(text.into_boxed_str())
+    });
+    Some(*text)
+}
+
 /// The WGSL of a plan module ([`engine_exec::explicit_plan::MODULES`]).
 fn module_wgsl(name: &str) -> &'static str {
+    if let Some(text) = module_override(name) {
+        return text;
+    }
     match name {
         "explicit_beams" => EXPLICIT_BEAMS_WGSL,
         "explicit_beams_wide" => EXPLICIT_BEAMS_WIDE_WGSL,
@@ -364,12 +751,46 @@ fn module_wgsl(name: &str) -> &'static str {
             .iter()
             .chain(EXPLICIT_BEAMS_WIDE_PASSES.iter())
             .chain(crate::EXPLICIT_BEAMS_NOSURF.iter())
+            .chain(crate::EXPLICIT_BEAMS_NOCPL.iter())
             .chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter())
             .chain(crate::EXPLICIT_BEAMS_SURF_SPLIT.iter())
+            .chain(crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
+            .chain(crate::EXPLICIT_BEAMS_SELF_SPLIT.iter())
+            .chain(SELF_SPLIT_ABLATE.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| *w)
-            .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
+            .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name} (a measurement module needs the `test-kernels` feature)")),
     }
+}
+
+/// The self split's ablation modules (measurement; built with the `test-kernels` feature).
+#[cfg(feature = "test-kernels")]
+const SELF_SPLIT_ABLATE: &[(&str, &str)] = &crate::EXPLICIT_BEAMS_SELF_SPLIT_ABLATE;
+#[cfg(not(feature = "test-kernels"))]
+const SELF_SPLIT_ABLATE: &[(&str, &str)] = &[];
+
+/// A frame kernel's module for an upload: [`Kernel::module_for`], and with surface
+/// contact but without the World's coupling (`coupled` false) its `_nocpl` twin
+/// ([`crate::EXPLICIT_BEAMS_NOCPL`]): the surface pass without the proxy paths no such
+/// upload can reach. The same results; a much smaller kernel for a browser to compile.
+fn frame_module(kernel: Kernel, aero: bool, lanes: u32, surface: bool, coupled: bool) -> &'static str {
+    let name = kernel.module_for(aero, lanes, surface);
+    if surface && !coupled {
+        if let Some((twin, _)) = crate::EXPLICIT_BEAMS_NOCPL
+            .iter()
+            .find(|(n, _)| n.strip_suffix("_nocpl") == Some(name))
+        {
+            return twin;
+        }
+    }
+    name
+}
+
+/// Whether an upload's surface contact runs split from the frame
+/// ([`surface_split_default`]): only with the World's coupling. Without it the frame
+/// with the pass in it (the `_nocpl` module) is small enough, and one pipeline.
+fn surface_split_for(coupled: bool) -> bool {
+    coupled && surface_split_default()
 }
 
 /// The vehicle a "left its frame bounds" error names.
@@ -391,6 +812,7 @@ impl Contact {
         (status_at, cap_at): (u64, u64),
         args_init: &[u8],
         build_pipes: bool,
+        big_groups: bool,
     ) -> Self {
         let args_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("explicit-beams-vv-args"),
@@ -455,7 +877,7 @@ impl Contact {
             sleep: make(plan::SLEEP_LIST, module_wgsl(plan::SLEEP_LIST), &plan_layout),
             groups: make(plan::FRAME_ENTRY, contact_wgsl, &contact_layout),
             solo: make(plan::FRAME_ENTRY, solo_wgsl, &contact_layout),
-            big: make(plan::CONTACT_ENTRY, big_wgsl, &contact_layout),
+            big: big_groups.then(|| make(plan::CONTACT_ENTRY, big_wgsl, &contact_layout)),
         });
         Self {
             pipes,
@@ -567,7 +989,7 @@ fn kernel_name(cmd: &Cmd) -> &'static str {
         Kernel::Wide(_) => "explicit wide",
         Kernel::Sleep => "explicit sleep list",
         Kernel::FrameSeg => "explicit frame segment",
-        Kernel::Surf(_) => "explicit surface pass",
+        Kernel::Surf(i) => plan::SURF_PASSES[i].0,
     }
 }
 
@@ -600,7 +1022,8 @@ impl ExplicitBeamsGpu {
         // More than one vehicle: the contact kernels run while contact is on; the
         // plain frame only once it is turned off (created at first use).
         let deferred = vehicles.len() > 1;
-        let mut specs = if surface && surface_split_default() {
+        let coupled = coupling.is_some();
+        let mut specs = if surface && surface_split_for(coupled) {
             // Surface contact split from the frame: its segments' module and the
             // surface pass's pipelines (Split::new's descriptors).
             let seg = Kernel::FrameSeg.module(aero, lanes);
@@ -618,8 +1041,8 @@ impl ExplicitBeamsGpu {
         } else {
             vec![crate::ComputeSpec {
                 label: "explicit_beams_frame",
-                module: Kernel::Frame.module_for(aero, lanes, surface),
-                wgsl: u(module_wgsl(Kernel::Frame.module_for(aero, lanes, surface))),
+                module: frame_module(Kernel::Frame, aero, lanes, surface, coupled),
+                wgsl: u(module_wgsl(frame_module(Kernel::Frame, aero, lanes, surface, coupled))),
                 entry: plan::FRAME_ENTRY,
                 layout: None,
                 deferred,
@@ -644,14 +1067,56 @@ impl ExplicitBeamsGpu {
                 layout: Some(contact_entries(true)),
                 deferred: false,
             }));
-            for kernel in [Kernel::Contact, Kernel::Solo, Kernel::ContactBig] {
+            // (The larger groups' module only for a fleet that can form one.)
+            let big = (vehicles.len() > plan::VV_PART).then_some(Kernel::ContactBig);
+            for kernel in [Kernel::Contact, Kernel::Solo].into_iter().chain(big) {
                 specs.push(crate::ComputeSpec {
                     label: kernel.entry(),
-                    module: kernel.module_for(aero, lanes, surface),
-                    wgsl: u(module_wgsl(kernel.module_for(aero, lanes, surface))),
+                    module: frame_module(kernel, aero, lanes, surface, coupled),
+                    wgsl: u(module_wgsl(frame_module(kernel, aero, lanes, surface, coupled))),
                     entry: kernel.entry(),
                     layout: Some(contact_entries(false)),
                     deferred: false,
+                });
+            }
+        }
+        if vehicles.len() > 1 && group_split_default() {
+            // The split group path's three pipelines (GroupSplit::new's descriptors),
+            // after the first frame's: they run only once a contact group forms.
+            for (which, entry) in [("member", SPLIT_MEMBER_ENTRY), ("group", SPLIT_GROUP_ENTRY), ("tests", SPLIT_TESTS_ENTRY)] {
+                let module = split_module(which, aero, lanes);
+                specs.push(crate::ComputeSpec {
+                    label: entry,
+                    module,
+                    wgsl: u(module_wgsl(module)),
+                    entry,
+                    layout: Some(split_entries()),
+                    deferred: true,
+                });
+            }
+        }
+        // Self-collision split's pipelines (selfcol-design.md), deferred: a host that
+        // compiles them ahead gates the split on them (crate::pipeline_ready), so the
+        // first frames run the tests in the workgroup until they are compiled. Not with
+        // surface contact (the split runs only without it).
+        if !surface {
+            for (name, entry, args) in self_split_modules(aero, lanes, vehicles.len() > 1) {
+                if specs.iter().any(|s| s.module == name) {
+                    continue;
+                }
+                let module: &'static str = crate::EXPLICIT_BEAMS_SELF_SPLIT
+                    .iter()
+                    .chain(crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
+                    .find(|(n, _)| *n == name)
+                    .map(|(n, _)| *n)
+                    .unwrap_or_else(|| panic!("explicit beams: no module {name}"));
+                specs.push(crate::ComputeSpec {
+                    label: entry,
+                    module,
+                    wgsl: u(module_wgsl(module)),
+                    entry,
+                    layout: Some(if args { self_split_step_entries() } else { split_entries() }),
+                    deferred: true,
                 });
             }
         }
@@ -686,7 +1151,8 @@ impl ExplicitBeamsGpu {
         let (aero, big, lanes) = (layout.aero, layout.big, layout.lanes);
         // Large vehicles get twice the lanes (more loads in flight per step), a
         // small fleet 512 (frame_lanes).
-        let frame_module = Kernel::Frame.module_for(aero, lanes, layout.surface);
+        let coupled = coupling.is_some();
+        let frame_module = frame_module(Kernel::Frame, aero, lanes, layout.surface, coupled);
         let storage = wgpu::BufferUsages::STORAGE;
         let state = storage | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
         let init = |label: &str, b: u32, usage| {
@@ -727,14 +1193,15 @@ impl ExplicitBeamsGpu {
             device,
             &buffers,
             (
-                module_wgsl(Kernel::Contact.module_for(aero, lanes, layout.surface)),
-                module_wgsl(Kernel::Solo.module_for(aero, lanes, layout.surface)),
-                module_wgsl(Kernel::ContactBig.module_for(aero, lanes, layout.surface)),
+                module_wgsl(self::frame_module(Kernel::Contact, aero, lanes, layout.surface, coupled)),
+                module_wgsl(self::frame_module(Kernel::Solo, aero, lanes, layout.surface, coupled)),
+                module_wgsl(self::frame_module(Kernel::ContactBig, aero, lanes, layout.surface, coupled)),
             ),
             &acc,
             (layout.status.base, layout.status.cap),
             &upload.bytes(plan::BIND_ARGS),
             vehicles.len() > 1,
+            vehicles.len() > plan::VV_PART,
         );
         let bufs = [
             params.clone(),
@@ -748,7 +1215,7 @@ impl ExplicitBeamsGpu {
             next.clone(),
         ];
         let mut planner = FramePlanner::new(&layout);
-        planner.set_surface_split(surface_split_default());
+        planner.set_surface_split(surface_split_for(coupled));
         if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
             planner.set_sleep_listing(false);
         }
@@ -774,14 +1241,30 @@ impl ExplicitBeamsGpu {
             coupling_cache_off: false,
             debug_coupling_bits: 0,
             coupling_ranges_off: coupling_node_ranges_off_default(),
+            coupling_list_off: std::env::var("RUBBLE_COUPLING_LIST").as_deref() == Ok("0"),
+            coupling_fold_off: std::env::var("RUBBLE_COUPLING_FOLD").as_deref() == Ok("0"),
             debug_big: None,
             debug_solo: None,
             debug_groups: None,
             vehicle_margins: vec![0.0; vehicles_n],
             surface_pairs_off: std::env::var("RUBBLE_SURFACE_PAIRS").as_deref() == Ok("0"),
             surface_culls_off: std::env::var("RUBBLE_SURFACE_CULLS").as_deref() == Ok("0"),
+            retired_bits: Vec::new(),
+            label_words: Vec::new(),
+            labelled: vec![false; vehicles_n],
+            piece_windows: std::env::var("RUBBLE_PIECE_WINDOWS").as_deref() != Ok("0"),
             wide,
             contact,
+            group_split: group_split_default(),
+            group_split_tests: group_split_tests_default(),
+            group_split_pipes: std::sync::OnceLock::new(),
+            group_split_zero: std::env::var("RUBBLE_GROUP_SPLIT_ZERO").as_deref() == Ok("1"),
+            self_split: self_split_default(),
+            self_split_pipes: std::sync::OnceLock::new(),
+            self_split_frame: std::cell::Cell::new(0),
+            self_split_vv: std::cell::Cell::new(false),
+            self_split_skip: 0,
+            split_dispatch_timing: std::env::var("RUBBLE_SPLIT_DISPATCH_TIMING").as_deref() == Ok("1"),
             contact_errors: Default::default(),
             contact_errors_seen: Default::default(),
             bufs,
@@ -805,6 +1288,89 @@ impl ExplicitBeamsGpu {
             }
         }
         gpu
+    }
+
+    /// Put the fleet back to `vehicles`' state in place: every state buffer rewritten as a
+    /// new upload of them would hold it, the contact plan as at the first frame. No buffer,
+    /// pipeline or bind group is made (a restart costs a few buffer writes). `vehicles`
+    /// must be the fleet this was built for (the same vehicles in the same order, the
+    /// same statics count, coupling room and sleep setting): only their state may differ
+    /// (node positions and velocities, beam state, the origin, the ground's height, the
+    /// static shapes' places, the drive state). A fleet of another layout is an error and
+    /// changes nothing. Host settings made since the build (coupling on, vehicle contact,
+    /// margins, variants) stay.
+    pub fn reset_state(
+        &mut self,
+        vehicles: &[ExplicitBeams],
+        coupling: Option<CouplingCapacity>,
+        sleep: Option<engine_softbody::explicit_sleep::VehicleSleep>,
+    ) -> Result<(), String> {
+        let upload = ExplicitUpload::with_sleep(vehicles, coupling, sleep);
+        let new = &upload.layout;
+        let old = &self.layout;
+        let key = |l: &ExplicitLayout| -> Vec<[u32; 8]> { l.spans.iter().map(|s| [s.node_off, s.nodes, s.beam_off, s.beams, s.slide_off, s.slides, s.seg_off, s.tris]).collect() };
+        let same = key(new) == key(old)
+            && new.rest0.len() == old.rest0.len()
+            && new.total == old.total
+            && (new.aero, new.big, new.lanes, new.surface, new.wide_ok) == (old.aero, old.big, old.lanes, old.surface, old.wide_ok);
+        if !same {
+            return Err("explicit beams: reset_state needs the fleet this was built for (another layout)".into());
+        }
+        // (binding, buffer index): statics, nodes, beams, acc, groups, misc, next. The
+        // lists (topology) are not state.
+        let writes = [
+            (plan::BIND_STATIC, 1usize),
+            (plan::BIND_NODES, 3),
+            (plan::BIND_BEAMS, 4),
+            (plan::BIND_ACC, 5),
+            (plan::BIND_GROUPS, 6),
+            (plan::BIND_MISC, 7),
+            (plan::BIND_NEXT, 8),
+        ];
+        let data: Vec<Vec<u8>> = writes.iter().map(|(b, _)| upload.bytes(*b)).collect();
+        let args = upload.bytes(plan::BIND_ARGS);
+        if writes.iter().zip(&data).any(|((_, i), d)| d.len() as u64 != self.bufs[*i].size()) || args.len() as u64 != self.contact.args.size() {
+            return Err("explicit beams: reset_state needs the fleet this was built for (another buffer size)".into());
+        }
+        for ((_, i), d) in writes.iter().zip(&data) {
+            self.queue.write_buffer(&self.bufs[*i], 0, d);
+        }
+        self.queue.write_buffer(&self.contact.args, 0, &args);
+        if let Some(w) = &self.wide {
+            self.queue.write_buffer(&w.table, 0, bytemuck::cast_slice(upload.table_records()));
+        }
+        // The parameter words the new state changes (the ground, the statics' ranges),
+        // over the planner's (which hold the host's settings in other words).
+        for k in 0..new.words.len() {
+            if new.words[k] != old.words[k] {
+                self.planner.words[k] = new.words[k];
+            }
+        }
+        self.planner.restore(FramePlanner::new(new).state());
+        self.layout = upload.layout.clone();
+        // Nothing retired, no labels (the misc and next records were rewritten).
+        self.retired_bits.clear();
+        self.label_words.clear();
+        self.labelled.iter_mut().for_each(|l| *l = false);
+        self.planner.words[plan::W_RETIRE_BASE] = 0;
+        self.sleep_inputs = vehicles.iter().map(|v| v.drive.as_ref().map(|d| d.input)).collect();
+        self.sleep_grab = None;
+        self.sleep_wake.lock().unwrap().clear();
+        self.contact_errors.lock().unwrap().clear();
+        self.contact_errors_seen.lock().unwrap().clear();
+        // The host settings that live in the rewritten misc records: the coupling's
+        // header and the vehicles' contact margins.
+        if self.layout.coupling.is_some() {
+            self.write_coupling_header();
+        }
+        for v in 0..self.vehicle_margins.len() {
+            let m = self.vehicle_margins[v];
+            if m != 0.0 {
+                self.set_vehicle_contact_margin(v, m);
+            }
+        }
+        self.planner.request_replan();
+        Ok(())
     }
 
     /// The split frame's pipelines (see `split`).
@@ -872,7 +1438,7 @@ impl ExplicitBeamsGpu {
             "groups" => Kernel::Contact,
             _ => Kernel::ContactBig,
         };
-        crate::uniformize_workgroup_lanes(module_wgsl(k.module_for(aero, lanes, self.layout.surface)))
+        crate::uniformize_workgroup_lanes(module_wgsl(frame_module(k, aero, lanes, self.layout.surface, self.layout.coupling.is_some())))
     }
 
     /// Diagnostic: run `src` as a contact module ("solo", "groups" or "big") from now on.
@@ -1023,9 +1589,17 @@ impl ExplicitBeamsGpu {
         );
         list.sort_unstable();
         list.dedup();
-        for v in list {
+        // One write a run of consecutive vehicles (their records are consecutive): a fleet
+        // with every car under throttle costs one write, not one a car.
+        let mut i = 0;
+        while i < list.len() {
+            let mut j = i + 1;
+            while j < list.len() && list[j] == list[j - 1] + 1 {
+                j += 1;
+            }
             self.queue
-                .write_buffer(&self.misc, s.record_offset(v), bytemuck::cast_slice(&[0u32; 4]));
+                .write_buffer(&self.misc, s.record_offset(list[i]), &vec![0u8; 16 * (j - i)]);
+            i = j;
         }
     }
 
@@ -1225,8 +1799,7 @@ impl ExplicitBeamsGpu {
         {
             return Vec::new();
         }
-        self.write_params(steps);
-        let cmds = self.planner.commands(steps, true);
+        let cmds = self.write_params(steps, true);
         let count = 2 * cmds.len() as u32;
         let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("explicit-beams-wide-profile"),
@@ -1290,8 +1863,7 @@ impl ExplicitBeamsGpu {
             return Vec::new();
         }
         self.check_contact_status();
-        self.write_params(steps);
-        let cmds = self.planner.commands(steps, false);
+        let cmds = self.write_params(steps, false);
         let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("explicit-beams-profile"),
             ty: wgpu::QueryType::Timestamp,
@@ -1497,6 +2069,232 @@ impl ExplicitBeamsGpu {
         self.write_coupling_header();
     }
 
+    /// The self-collision grid walk's pair list built once and reused over steps while
+    /// it provably holds every pair the walk would test (`explicit_beams.slang`
+    /// pairReuse*; lossless: the same hits, bit for bit) on, or listed every step (off).
+    /// On by default ([`plan::PAIR_REUSE_MARGIN`]; `RUBBLE_PAIR_REUSE=0` starts it
+    /// off). No-op for a fleet without the pair list.
+    pub fn set_pair_reuse(&mut self, on: bool) {
+        let m = plan::pair_reuse_default();
+        let m = if m == 0 { plan::PAIR_REUSE_MARGIN.to_bits() } else { m };
+        self.set_pair_reuse_margin(if on { f32::from_bits(m) } else { 0.0 });
+    }
+
+    /// The beam phase on its records sorted by kind ([`plan::W_BEAM_ORDER`]; on, the
+    /// default) or the beams in file order (off: beamUpdate for each, as before). The
+    /// same results bit for bit (`tests/explicit_beam_order_gpu.rs`). Applies from the
+    /// next frame.
+    pub fn set_beam_order(&mut self, on: bool) {
+        self.planner.words[plan::W_BEAM_ORDER] = if on { self.layout.words[plan::W_BEAM_ORDER] } else { 0 };
+    }
+
+    /// The reused pair list's piece labels for vehicle `v` (`explicit_beams.slang`
+    /// pieces*; one per node of the vehicle, [`engine_softbody::explicit_debris::piece_labels`]):
+    /// 0 the main body, 1..=6 a piece with collision triangles of its own,
+    /// [`plan::PIECE_LOOSE`] any other node off the main body. A hint only: any labels give
+    /// the same results bit for bit (the list's validity is proved on the GPU for the
+    /// labels given); good labels let a piece torn off the vehicle move without
+    /// invalidating the main body's list, and the coupling takes a window per piece
+    /// ([`Self::set_piece_windows`]). All zero (the default): one group, as before.
+    /// Applies from the next frame.
+    pub fn set_piece_labels(&mut self, v: usize, labels: &[u8]) {
+        let base = self.planner.words[plan::W_PIECE_BASE] as usize;
+        let Some(span) = self.layout.spans.get(v).copied() else { return };
+        let n = (span.nodes as usize).min(labels.len());
+        let words: Vec<u32> = labels[..n].iter().map(|&l| u32::from(l)).collect();
+        let active = u32::from(words.iter().any(|&l| l != 0));
+        // The pair list's (a vehicle fleet with it).
+        if base != 0 {
+            self.queue.write_buffer(&self.bufs[8], ((base + span.node_off as usize) * 4) as u64, bytemuck::cast_slice(&words));
+            let at = base + self.layout.total[0] as usize + v;
+            self.queue.write_buffer(&self.bufs[8], (at * 4) as u64, bytemuck::bytes_of(&active));
+        }
+        // The coupling's copy (vehicle_coupling.slang pieceLabelOf, pieceAccept).
+        let total = self.layout.total[0] as usize;
+        if self.label_words.is_empty() {
+            self.label_words = vec![0u32; total.div_ceil(32).max(1) * 4];
+        }
+        let first = span.node_off as usize;
+        for i in first..first + span.nodes as usize {
+            let l = labels.get(i - first).copied().unwrap_or(0).min(7) as u32;
+            let (w, sh) = (i / 8, (i % 8) * 4);
+            self.label_words[w] = (self.label_words[w] & !(0xF << sh)) | (l << sh);
+        }
+        if span.nodes > 0 {
+            let (r0, r1) = (first / 32, (first + span.nodes as usize - 1) / 32);
+            let rec = self.layout.label_rec as usize;
+            self.queue.write_buffer(&self.misc, ((rec + r0) * 16) as u64, bytemuck::cast_slice(&self.label_words[r0 * 4..(r1 + 1) * 4]));
+        }
+        self.labelled[v] = active != 0;
+        let flag = [active, 0, 0, 0];
+        let rec = self.layout.piece_box_rec as usize + v * plan::PIECE_BOX_RECS + 12;
+        self.queue.write_buffer(&self.misc, (rec * 16) as u64, bytemuck::cast_slice(&flag));
+    }
+
+    /// Vehicle contact's candidates in a grid in the small groups' triangle tests
+    /// (`explicit_beams.slang` vvGridBuild; lossless: the same candidates pass the box
+    /// test) on (the default) or off (every candidate against every listed triangle).
+    #[doc(hidden)]
+    pub fn set_vv_grid(&mut self, on: bool) {
+        let w = (self.layout.status.base / 4) as usize + 9;
+        let off: i32 = if on { 0 } else { 1 };
+        self.queue.write_buffer(&self.bufs[5], (w * 4) as u64, bytemuck::bytes_of(&off));
+    }
+
+    /// Measurement: candidates the small groups' triangle tests visited since the last
+    /// call (which clears the count).
+    #[doc(hidden)]
+    pub fn take_vv_visits(&mut self) -> u64 {
+        let w = (self.layout.status.base / 4) as usize + 8;
+        let acc: Vec<i32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
+        let n = acc.get(w).copied().unwrap_or(0) as u32 as u64;
+        self.queue.write_buffer(&self.bufs[5], (w * 4) as u64, bytemuck::bytes_of(&0i32));
+        n
+    }
+
+    /// The coupling's window per piece (vehicle_coupling.slang pieceAccept; on by default,
+    /// `RUBBLE_PIECE_WINDOWS=0` off): with piece labels a collider is a proxy only when it
+    /// can reach some piece's box, not just the whole vehicle's. Off: one window.
+    pub fn set_piece_windows(&mut self, on: bool) {
+        self.piece_windows = on;
+    }
+
+    /// The coupling's piece label and box records (0, 0: one window per vehicle).
+    pub fn piece_window_records(&self) -> (u32, u32) {
+        if self.piece_windows && self.labelled.iter().any(|&l| l) {
+            (self.layout.label_rec, self.layout.piece_box_rec)
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Retire nodes of vehicle `v` (`retired`: one flag per node; `explicit_beams.slang`
+    /// nodeRetired, the CPU reference's [`engine_softbody::explicit_beams::ExplicitBeams::retired`]):
+    /// from the next frame a retired node is no longer simulated (left at rest where it
+    /// is, no contact of any kind, out of the coupling's bounds and the self-collision
+    /// list's). The host decides ([`engine_softbody::explicit_debris::DebrisTracker`]);
+    /// a flag cleared brings a node back as it was left. Fails while vehicle contact is
+    /// active (its contact groups do not read the flags). Nothing retired yet: every
+    /// result as before (the kernel's retirement code is off until a node is retired).
+    pub fn set_retired(&mut self, v: usize, retired: &[bool]) -> Result<(), String> {
+        let Some(span) = self.layout.spans.get(v).copied() else {
+            return Err(format!("set_retired: no vehicle {v}"));
+        };
+        if self.contact_active() && retired.iter().any(|&r| r) {
+            return Err("retired debris needs vehicle contact off (its contact groups do not skip retired nodes)".into());
+        }
+        let total = self.layout.total[0] as usize;
+        if self.retired_bits.is_empty() {
+            self.retired_bits = vec![0u32; total.div_ceil(128).max(1) * 4];
+        }
+        let n = (span.nodes as usize).min(retired.len());
+        let (first, last) = (span.node_off as usize, span.node_off as usize + span.nodes as usize);
+        for i in first..last {
+            let on = i - first < n && retired[i - first];
+            let (w, b) = (i / 32, i % 32);
+            if on {
+                self.retired_bits[w] |= 1 << b;
+            } else {
+                self.retired_bits[w] &= !(1 << b);
+            }
+        }
+        if span.nodes > 0 {
+            let (r0, r1) = (first / 128, (last - 1) / 128);
+            let rec = self.layout.retire_rec as usize;
+            self.queue.write_buffer(
+                &self.misc,
+                ((rec + r0) * 16) as u64,
+                bytemuck::cast_slice(&self.retired_bits[r0 * 4..(r1 + 1) * 4]),
+            );
+        }
+        if self.retired_bits.iter().any(|&w| w != 0) {
+            self.planner.words[plan::W_RETIRE_BASE] = self.layout.retire_rec;
+        }
+        Ok(())
+    }
+
+    /// The retired nodes' gMisc record for the coupling's passes (0: none retired).
+    pub fn retire_base(&self) -> u32 {
+        self.planner.words[plan::W_RETIRE_BASE]
+    }
+
+    /// Measurement: the reused pair list's margin in metres (0: off).
+    #[doc(hidden)]
+    pub fn set_pair_reuse_margin(&mut self, metres: f32) {
+        self.planner.words[plan::W_PAIR_REUSE] = if metres > 0.0 { metres.to_bits() } else { 0 };
+    }
+
+    /// Measurement: the reused pair list's backoff ([`plan::W_PAIR_STREAK`]): a list
+    /// reused on fewer steps than `steps` sends the next grid steps to the walk.
+    #[doc(hidden)]
+    pub fn set_pair_reuse_streak(&mut self, steps: u32) {
+        self.planner.words[plan::W_PAIR_STREAK] = steps;
+    }
+
+    /// Measurement: the reused pair list's statistics summed over the vehicles since the
+    /// last call (which clears them): (lists built, steps that reused one, pairs listed
+    /// at the builds, the most listed at one build). Zeros without the pair list.
+    #[doc(hidden)]
+    pub fn take_pair_reuse_stats(&mut self) -> [u64; 4] {
+        let at = self.planner.words[91] as usize;
+        if at == 0 {
+            return [0; 4];
+        }
+        let nv = self.layout.spans.len();
+        let rec = at + self.layout.total[0] as usize;
+        let beams: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[4])).to_vec();
+        let mut out = [0u64; 4];
+        for v in 0..nv {
+            let s = &beams[(rec + v) * 4..(rec + v) * 4 + 4];
+            out[0] += u64::from(s[0]);
+            out[1] += u64::from(s[1]);
+            out[2] += u64::from(s[2]);
+            out[3] = out[3].max(u64::from(s[3]));
+        }
+        self.queue.write_buffer(&self.bufs[4], (rec * 16) as u64, &vec![0u8; nv * 16]);
+        out
+    }
+
+    /// Measurement: the reused pair list's volatile triangles tested (summed over steps
+    /// and vehicles) since the last call (which clears them). 0 without the pair list.
+    #[doc(hidden)]
+    pub fn take_piece_stats(&mut self) -> u64 {
+        let at = self.planner.words[91] as usize;
+        if at == 0 {
+            return 0;
+        }
+        let nv = self.layout.spans.len();
+        let rec = at + self.layout.total[0] as usize + nv;
+        let beams: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[4])).to_vec();
+        let out = (0..nv).map(|v| u64::from(beams[(rec + v) * 4])).sum();
+        self.queue.write_buffer(&self.bufs[4], (rec * 16) as u64, &vec![0u8; nv * 16]);
+        out
+    }
+
+    /// Measurement (an `EB_ABLATE` build with mask bit 2^29): why grid steps did not reuse
+    /// the pair list, summed over vehicles since the last call (which clears them): (no
+    /// list, the main body's spread over the margin, its spread with the boxes' growth,
+    /// the pieces' bounds, backoff walks, non-finite, reused, the main spread summed in
+    /// 0.1 mm).
+    #[doc(hidden)]
+    pub fn take_reuse_cause(&mut self) -> [u64; 8] {
+        let at = self.planner.words[91] as usize;
+        if at == 0 {
+            return [0; 8];
+        }
+        let nv = self.layout.spans.len();
+        let rec = at + self.layout.total[0] as usize + 2 * nv;
+        let beams: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[4])).to_vec();
+        let mut out = [0u64; 8];
+        for v in 0..nv {
+            for k in 0..8 {
+                out[k] += u64::from(beams[(rec + 2 * v) * 4 + k]);
+            }
+        }
+        self.queue.write_buffer(&self.bufs[4], (rec * 16) as u64, &vec![0u8; nv * 32]);
+        out
+    }
+
     /// The coupling's per-node shape ranges (`explicit_beams_rigid.slang` `cplGsAdd`, the
     /// header's bit 64): each node's contacts start at the first proxy shape its count
     /// pass found it inside and stop after the last (on), or scan every shape (off; the
@@ -1506,6 +2304,56 @@ impl ExplicitBeamsGpu {
     pub fn set_coupling_node_ranges(&mut self, on: bool) {
         self.coupling_ranges_off = !on;
         self.write_coupling_header();
+    }
+
+    /// The coupling's candidate list (`explicit_beams_rigid.slang` `cplList*`, lossless:
+    /// the same contacts, counts and sums, bit for bit) on (the default), or every node
+    /// testing every proxy shape every step (off; `RUBBLE_COUPLING_LIST=0` starts it off).
+    /// Each node lists the shapes within its skin at a frame's first step and keeps the
+    /// list while its own travel and the shapes' travel since stay within the skin
+    /// ([`engine_softbody::explicit_rigid::candidate_list`]); otherwise it rebuilds it.
+    pub fn set_coupling_candidate_list(&mut self, on: bool) {
+        self.coupling_list_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// The coupling's folded step (`explicit_beams_rigid.slang` `cplStepFolded`, lossless:
+    /// the bodies' integration, the spheres and the count in two phases, 2 barriers a step
+    /// instead of 4) on (the default; it needs the candidate list), or the four phases (off;
+    /// `RUBBLE_COUPLING_FOLD=0` starts it off).
+    pub fn set_coupling_fold(&mut self, on: bool) {
+        self.coupling_fold_off = !on;
+        self.write_coupling_header();
+    }
+
+    /// Tests: per vehicle, the nodes whose candidate list (as the last step left it) holds
+    /// at least one shape, and the nodes that keep no list (more than 16 shapes in reach).
+    /// Empty without the coupling.
+    #[doc(hidden)]
+    pub fn coupling_list_stats(&self) -> Vec<(u32, u32)> {
+        let Some(c) = self.layout.coupling else {
+            return Vec::new();
+        };
+        let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
+        let words = engine_exec::explicit_plan::CouplingLayout::LIST_NODE_WORDS as usize;
+        let base = c.list_base as usize
+            + (engine_exec::explicit_plan::CouplingLayout::LIST_SHAPE_WORDS * c.cap.shapes * c.vehicles) as usize;
+        self.layout
+            .spans
+            .iter()
+            .map(|sp| {
+                let (mut listed, mut over) = (0, 0);
+                for i in 0..sp.nodes as usize {
+                    let at = base + (sp.node_off as usize + i) * words + 4;
+                    match next.get(at).copied() {
+                        Some(w) if w & 0xFFFF == 0xFFFE => over += 1,
+                        Some(w) if w & 0xFFFF != 0xFFFF => listed += 1,
+                        _ => {}
+                    }
+                }
+                (listed, over)
+            })
+            .collect()
     }
 
     /// Tests and measurement: the coupling's workgroup copies and ranges (on by default;
@@ -1549,6 +2397,8 @@ impl ExplicitBeamsGpu {
                 0
             }
             | if self.coupling_on && self.coupling_ranges_off { 64 } else { 0 }
+            | if self.coupling_on && self.coupling_list_off { COUPLING_LIST_OFF } else { 0 }
+            | if self.coupling_on && self.coupling_fold_off { COUPLING_FOLD_OFF } else { 0 }
             | if self.coupling_on { self.debug_coupling_bits } else { 0 };
         self.queue.write_buffer(
             &self.misc,
@@ -1656,7 +2506,8 @@ impl ExplicitBeamsGpu {
         let mut labels = Vec::new();
         self.check_contact_status();
         self.write_wakes();
-        self.write_params(steps);
+        let wide_allowed = self.alt_pipes().is_none();
+        let mut cmds = self.write_params(steps, wide_allowed);
         // Timestamps at the start of the frame's first pass and the end of its last.
         let slot = self.timing.as_mut().and_then(|t| {
             (t.used < t.capacity).then(|| {
@@ -1665,7 +2516,19 @@ impl ExplicitBeamsGpu {
             })
         });
         let alt = self.alt_pipes();
-        let cmds = self.planner.commands(steps, alt.is_none());
+        let vv = self.self_split_vv.get();
+        let split = vv || self.group_split_on(steps);
+        if split {
+            // The solo frame as planned (every vehicle when no group formed, else none),
+            // then the split path's dispatches (below) in place of the groups' frames:
+            // with a group, every vehicle a step a dispatch. With self-collision split,
+            // every vehicle a step a dispatch in every frame (no solo frame).
+            cmds.retain(|c| match c {
+                Cmd::Indirect { kernel: Kernel::Contact | Kernel::ContactBig, .. } => false,
+                Cmd::Indirect { kernel: Kernel::Solo, .. } => !vv,
+                _ => true,
+            });
+        }
         let set = self.timing.as_ref().map(|t| &t.set);
         let stamps = |begin: bool, end: bool| {
             ext.or(set.zip(slot))
@@ -1681,8 +2544,10 @@ impl ExplicitBeamsGpu {
             if i > 0 {
                 self.copy(enc, copies[i - 1]);
             }
+            let last = i + 1 == runs.len();
             if let Some((q, first, cap)) = per {
-                for cmd in *run {
+                // Each dispatch its own timed pass (past `cap`, untimed), labelled.
+                let mut timed_pass = |enc: &mut wgpu::CommandEncoder, label: &'static str, f: &mut dyn FnMut(&mut wgpu::ComputePass)| {
                     let k = first + labels.len() as u32;
                     let timed = (labels.len() as u32) < cap;
                     let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1693,9 +2558,38 @@ impl ExplicitBeamsGpu {
                             end_of_pass_write_index: Some(2 * k + 1),
                         }),
                     });
-                    self.dispatch(&mut pass, cmd, alt);
+                    f(&mut pass);
                     if timed {
-                        labels.push(kernel_name(cmd));
+                        labels.push(label);
+                    }
+                };
+                // (Split frames: each of their dispatches timed on its own only with
+                // RUBBLE_SPLIT_DISPATCH_TIMING=1: a hundred-odd passes a frame cost more
+                // than the dispatches they time, and empty indirect passes time nothing.)
+                let each = self.split_dispatch_timing;
+                for cmd in *run {
+                    let frame = matches!(cmd, Cmd::Dispatch { kernel: Kernel::Frame, .. } | Cmd::Indirect { kernel: Kernel::Frame, .. });
+                    if frame && self.self_split_frame.get() > 0 {
+                        if each {
+                            // Self-collision split: its step, walk and pairs dispatches.
+                            for d in self_split_schedule(self.planner.vehicles(), self.self_split_frame.get()) {
+                                timed_pass(enc, d.label(), &mut |pass| self.dispatch_self_one(pass, d));
+                            }
+                        } else {
+                            timed_pass(enc, "explicit self split frame", &mut |pass| self.dispatch(pass, cmd, alt));
+                        }
+                        continue;
+                    }
+                    timed_pass(enc, kernel_name(cmd), &mut |pass| self.dispatch(pass, cmd, alt));
+                }
+                if split && last {
+                    if each {
+                        for op in self.group_split_ops(steps) {
+                            timed_pass(enc, op.label(), &mut |pass| self.run_group_op(pass, op));
+                        }
+                    } else {
+                        let label = if self.self_split_vv.get() { "explicit self split groups" } else { "explicit split groups" };
+                        timed_pass(enc, label, &mut |pass| self.dispatch_group_split(pass, steps));
                     }
                 }
                 continue;
@@ -1711,14 +2605,27 @@ impl ExplicitBeamsGpu {
                     }
                     m.mark(enc, kernel_name(cmd));
                 }
+                if split && last {
+                    {
+                        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("explicit_beams"),
+                            timestamp_writes: None,
+                        });
+                        self.dispatch_group_split(&mut pass, steps);
+                    }
+                    m.mark(enc, "explicit split groups");
+                }
                 continue;
             }
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("explicit_beams"),
-                timestamp_writes: stamps(i == 0, i + 1 == runs.len()),
+                timestamp_writes: stamps(i == 0, last),
             });
             for cmd in *run {
                 self.dispatch(&mut pass, cmd, alt);
+            }
+            if split && last {
+                self.dispatch_group_split(&mut pass, steps);
             }
         }
         // The status every STATUS_EVERY frames (the counters and the loop-cap
@@ -1739,6 +2646,10 @@ impl ExplicitBeamsGpu {
             Cmd::Indirect { kernel, .. } => (kernel, None),
             Cmd::Copy { .. } => unreachable!("copies end the pass"),
         };
+        if kernel == Kernel::Frame && self.self_split_frame.get() > 0 {
+            self.dispatch_self_split(pass, self.self_split_frame.get());
+            return;
+        }
         match kernel {
             Kernel::Frame => {
                 let (p, g) = alt.map_or_else(
@@ -1779,7 +2690,10 @@ impl ExplicitBeamsGpu {
                     pass.set_bind_group(0, g, &[]);
                 } else {
                     let p = c.pipes.as_ref().expect("explicit beams: contact passes for one vehicle");
-                    pass.set_pipeline(&p.big);
+                    // At most VV_PART vehicles: no group this dispatch steps can
+                    // exist (its indirect count is always 0), and it has no pipeline.
+                    let Some(big) = &p.big else { return };
+                    pass.set_pipeline(big);
                     pass.set_bind_group(0, &c.contact_group, &[]);
                 }
             }
@@ -1880,7 +2794,7 @@ impl ExplicitBeamsGpu {
         }
         let read = |name: &str| {
             let path = format!("{}/{name}.wgsl", crate::EXPLICIT_BEAMS_WGSL_DIR);
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e} (the test kernels are built with engine-webgpu's `test-kernels` feature)"))
         };
         let (aero, big, lanes) = self.module_kind;
         let (prefix, suffix) = match variant {
@@ -2125,52 +3039,17 @@ impl ExplicitBeamsGpu {
     /// the lanes (grid runs, tested lists, candidate lists) is left out.
     #[doc(hidden)]
     pub fn state_words(&self) -> Vec<(&'static str, Vec<u32>)> {
-        let w = &self.planner.words;
         let words = |b: &wgpu::Buffer| -> Vec<u32> { bytemuck::cast_slice(&self.read(b)).to_vec() };
-        let nodes = words(&self.bufs[3]);
-        let beams = words(&self.bufs[4]);
-        let acc = words(&self.bufs[5]);
-        let groups = words(&self.bufs[6]);
-        let mut misc = words(&self.bufs[7]);
-        let next = words(&self.bufs[8]);
-        let nv = self.layout.spans.len();
-        let (grid_base, aero_state) = (w[9] as usize, w[27] as usize);
-        // The aero, slide state and slide-force slots (the contributions after them
-        // are scratch).
-        let slide_end = (w[35] + w[38]) as usize;
-        let (vv_veh, vv_groups) = (w[43] as usize, w[46] as usize);
-        for v in 0..nv {
-            misc[(vv_veh + v * VV_RECS + 4) * 4 + 2] = 0;
-        }
-        // The wide passes' per-frame rebase shifts (scratch).
-        let wide_misc = w[16] as usize;
-        misc[wide_misc * 4..(wide_misc + 1 + nv) * 4].fill(0);
-        let mut beam_words = beams[..grid_base * 4].to_vec();
-        // A beam's "broke in the last beam phase" mark (.w of its second record) is
-        // read only within that step (the next beam phase clears it first).
-        for j in 0..self.layout.total[1] as usize {
-            beam_words[(2 * j + 1) * 4 + 3] = 0;
-        }
-        beam_words.extend_from_slice(&beams[aero_state * 4..slide_end * 4]);
-        vec![
-            ("nodes", nodes),
-            ("beams", beam_words),
-            ("acc", acc[..3 * self.layout.total[0] as usize].to_vec()),
-            // Anti-clip's side memory (order free; jbeam-semantics-spec.md §36).
-            ("clip", {
-                let at = w[78] as usize;
-                if at == 0 {
-                    Vec::new()
-                } else {
-                    acc[at..at + 4 * self.layout.total[0] as usize].to_vec()
-                }
-            }),
-            ("groups", groups),
-            ("misc", misc[..vv_groups * 4].to_vec()),
-            // The trigger inputs: from keyBase to the contact lists (vvMembers −
-            // vehicles).
-            ("keys", next[w[31] as usize..w[47] as usize - nv].to_vec()),
-        ]
+        plan::state_words(
+            &self.layout,
+            &self.planner.words,
+            words(&self.bufs[3]),
+            &words(&self.bufs[4]),
+            &words(&self.bufs[5]),
+            words(&self.bufs[6]),
+            words(&self.bufs[7]),
+            &words(&self.bufs[8]),
+        )
     }
 
     /// Tests only: the words of [`Self::state_words`]' `misc` holding the vehicle-contact
@@ -2277,9 +3156,389 @@ impl ExplicitBeamsGpu {
     }
 
     /// The parameters for a frame of `steps` steps (the plan's copies, one per step).
-    fn write_params(&mut self, steps: u32) {
-        let bytes = self.planner.write_params(steps);
-        self.queue.write_buffer(&self.params, 0, &bytes);
+    /// The frame's parameters and its commands: only the parameter copies the commands
+    /// read are uploaded (a dispatch reads copy `param_copy`; the per-vehicle frame and
+    /// contact kernels copy 0), so a frame on per-vehicle workgroups uploads one copy,
+    /// not one a step. The split group path reads every step's copy and copy steps + 1
+    /// (the groups' frame start, the kernel's SPLIT_BEGIN).
+    fn write_params(&mut self, steps: u32, wide_allowed: bool) -> Vec<Cmd> {
+        let mut bytes = self.planner.write_params(steps);
+        let cmds = self.planner.commands(steps, wide_allowed);
+        let selfs = self.self_split_on(steps, &cmds);
+        self.self_split_frame.set(if selfs { steps } else { 0 });
+        let vv = !selfs && self.self_split_vv_on(steps, &cmds);
+        self.self_split_vv.set(vv);
+        if selfs {
+            // A step dispatch reads copy s (s = 0 ..= steps), the pairs dispatch too.
+            self.queue.write_buffer(&self.params, 0, &bytes);
+            return cmds;
+        }
+        if vv || self.group_split_on(steps) {
+            // Copy steps + 1: the groups' frame start (the kernel's SPLIT_BEGIN); with the
+            // tests split, copy steps + 2 + s step s's second phase (SPLIT_LEVELS) and copy
+            // 2 steps + 2 + s its first group dispatch and walk (SPLIT_TESTS). The
+            // vehicles' steps read copy s (the step alone).
+            let extra = if self.group_split_tests { 2 * steps + 1 } else { 1 };
+            bytes.resize((PARAM_STRIDE * u64::from(steps + 1 + extra)) as usize, 0);
+            let mut put = |k: u32, word: u32| {
+                let mut w = self.planner.words;
+                w[11] = word;
+                let at = (PARAM_STRIDE * u64::from(k)) as usize;
+                bytes[at..at + 4 * w.len()].copy_from_slice(bytemuck::cast_slice(&w));
+            };
+            put(steps + 1, SPLIT_BEGIN);
+            if self.group_split_tests {
+                for s in 0..steps {
+                    put(steps + 2 + s, s | SPLIT_LEVELS);
+                    put(2 * steps + 2 + s, s | SPLIT_TESTS);
+                }
+            }
+            self.queue.write_buffer(&self.params, 0, &bytes);
+            return cmds;
+        }
+        let used = cmds
+            .iter()
+            .map(|c| match *c {
+                Cmd::Dispatch { param_copy, .. } => param_copy,
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        let n = ((u64::from(used) + 1) * PARAM_STRIDE).min(bytes.len() as u64) as usize;
+        self.queue.write_buffer(&self.params, 0, &bytes[..n]);
+        cmds
+    }
+
+    /// Contact groups run split across workgroups (contact-groups-design.md) on, or off
+    /// (each group in one workgroup, as before): the same results bit for bit. Off by
+    /// default (`RUBBLE_GROUP_SPLIT=1` on). Not with vehicle sleep, the test kernel
+    /// variants or the diagnostic pipelines (those frames keep the groups' workgroup).
+    pub fn set_group_split(&mut self, on: bool) {
+        self.group_split = on;
+    }
+
+    /// Self-collision's listed pairs across workgroups (selfcol-design.md) on, or tested
+    /// in each vehicle's workgroup (off, as before): the same results bit for bit. Off by
+    /// default (`RUBBLE_SELF_SPLIT=1` on). For frames on the per-vehicle frame kernel
+    /// alone: no vehicle contact, sleep, surface contact, wide passes, test variants or
+    /// diagnostic pipelines (those frames keep the tests in the workgroup).
+    pub fn set_self_split(&mut self, on: bool) {
+        self.self_split = on;
+    }
+
+    /// Whether the last frame ran self-collision split ([`Self::set_self_split`]), with
+    /// or without vehicle contact.
+    pub fn self_split_used(&self) -> bool {
+        self.self_split_frame.get() > 0 || self.self_split_vv.get()
+    }
+
+    /// Whether this frame (its commands) runs self-collision split with vehicle contact:
+    /// on the split group path's dispatches, every vehicle's step in every substep's
+    /// vehicles' dispatch (a solo vehicle's cut at its tests, a contact group's member's
+    /// whole), then the walk and pairs dispatches over the solo vehicles, then the
+    /// groups' contact passes (none without a group). The same conditions as that path
+    /// (no sleep, the shipped kernels, the parameter copies, the fleet bound), and no
+    /// surface contact (the self split's modules are built without it).
+    fn self_split_vv_on(&self, steps: u32, cmds: &[Cmd]) -> bool {
+        self.self_split
+            && self.planner.contact_active()
+            && !self.planner.sleep_on()
+            && !self.planner.has_surface()
+            && self.variant == KernelVariant::Current
+            && self.debug_big.is_none()
+            && self.debug_solo.is_none()
+            && self.debug_groups.is_none()
+            && steps > 0
+            && 3 * steps + 2 <= plan::PARAM_COPIES
+            && self.layout.spans.len() * 16 <= 65_535
+            && self.self_split_ready(true)
+            && cmds.iter().all(|c| match c {
+                Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => {
+                    matches!(kernel, Kernel::Vv(_) | Kernel::Solo | Kernel::Contact | Kernel::ContactBig)
+                }
+                Cmd::Copy { .. } => true,
+            })
+    }
+
+    /// Whether this frame (its commands) runs self-collision split.
+    fn self_split_on(&self, steps: u32, cmds: &[Cmd]) -> bool {
+        self.self_split
+            && !self.planner.contact_active()
+            && !self.planner.sleep_on()
+            && !self.planner.has_surface()
+            // (Ablate: measurement only, the step module's ablation build.)
+            && matches!(self.variant, KernelVariant::Current | KernelVariant::Ablate)
+            && self.debug_big.is_none()
+            && self.debug_solo.is_none()
+            && self.debug_groups.is_none()
+            && steps > 0
+            && steps < plan::PARAM_COPIES
+            && self.self_split_ready(false)
+            && cmds.iter().any(|c| matches!(c, Cmd::Dispatch { kernel: Kernel::Frame, .. } | Cmd::Indirect { kernel: Kernel::Frame, .. }))
+            && cmds.iter().all(|c| match c {
+                Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => *kernel == Kernel::Frame,
+                Cmd::Copy { .. } => true,
+            })
+    }
+
+    /// Whether the self split's modules (with vehicle contact or not) are compiled
+    /// (a browser host's async compiles, [`crate::pipeline_ready`]; natively always):
+    /// until then frames keep the tests in the workgroup, the same results.
+    fn self_split_ready(&self, vv: bool) -> bool {
+        let (aero, _, lanes) = self.module_kind;
+        self_split_modules(aero, lanes, vv).iter().all(|(m, _, _)| crate::pipeline_ready(m))
+    }
+
+    fn self_split_pipes(&self) -> &SelfSplit {
+        self.self_split_pipes.get_or_init(|| {
+            let (aero, _, lanes) = self.module_kind;
+            let zero = std::env::var("RUBBLE_SELF_SPLIT_ZERO").as_deref() == Ok("1");
+            SelfSplit::new(&self.device, &self.bufs, aero, lanes, zero)
+        })
+    }
+
+    /// A solo frame of `steps` steps with self-collision split: per step its step
+    /// dispatch (a workgroup a vehicle), its walk dispatch (indirect: the vehicles that
+    /// build their pair list) and its pairs dispatch (indirect: the listed pairs of the
+    /// vehicles that reuse it), then the last
+    /// step's rest and the frame's end (step dispatch `steps`).
+    fn dispatch_self_split(&self, pass: &mut wgpu::ComputePass, steps: u32) {
+        for d in self_split_schedule(self.planner.vehicles(), steps) {
+            match d {
+                SelfDispatch::Walk { .. } if self.self_split_skip & 1 != 0 => continue,
+                SelfDispatch::Pairs { .. } if self.self_split_skip & 2 != 0 => continue,
+                _ => self.dispatch_self_one(pass, d),
+            }
+        }
+    }
+
+    /// Measurement only (time; the results are then meaningless): leave the self
+    /// split's walk dispatches (bit 0) and/or pairs dispatches (bit 1) out of its frames.
+    #[doc(hidden)]
+    pub fn set_self_split_skip(&mut self, mask: u32) {
+        self.self_split_skip = mask;
+    }
+
+    fn dispatch_self_one(&self, pass: &mut wgpu::ComputePass, d: SelfDispatch) {
+        let p = self.self_split_pipes();
+        let at = |k: u32| [k * PARAM_STRIDE as u32];
+        match d {
+            SelfDispatch::Step { copy, groups } => {
+                pass.set_pipeline(if self.variant == KernelVariant::Ablate { &p.ablate_pipes()[0] } else { &p.solo_pipes()[0] });
+                pass.set_bind_group(0, &p.step_bind, &at(copy));
+                pass.dispatch_workgroups(groups, 1, 1);
+            }
+            SelfDispatch::Walk { copy, offset } | SelfDispatch::Pairs { copy, offset } => {
+                let walk = matches!(d, SelfDispatch::Walk { .. });
+                pass.set_pipeline(match (self.variant == KernelVariant::Ablate, walk) {
+                    (true, true) => &p.ablate_pipes()[1],
+                    (true, false) => &p.ablate_pipes()[2],
+                    (false, true) => &p.solo_pipes()[1],
+                    (false, false) => &p.solo_pipes()[2],
+                });
+                pass.set_bind_group(0, &p.pairs_bind, &at(copy));
+                pass.dispatch_workgroups_indirect(&p.args, offset);
+            }
+        }
+    }
+
+    /// Measurement: one frame of `steps` steps with self-collision split (when this frame
+    /// runs it: [`Self::set_self_split`]), each of its dispatches in its own timed pass
+    /// (the passes add their own cost): per kind (step, walk, pairs) the GPU ms summed
+    /// over the frame and the dispatches, then ("span", first begin to last end, 1).
+    /// `None` when the frame does not run split or the device has no timestamps. Waits.
+    #[doc(hidden)]
+    pub fn profile_self_split_frame(&mut self, steps: u32) -> Option<Vec<(&'static str, f64, u32)>> {
+        if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) || self.layout.spans.is_empty() || steps == 0 {
+            return None;
+        }
+        self.check_contact_status();
+        self.write_wakes();
+        let cmds = self.write_params(steps, self.alt_pipes().is_none());
+        if self.self_split_frame.get() == 0 {
+            return None;
+        }
+        let sched = self_split_schedule(self.planner.vehicles(), steps);
+        let count = 2 * sched.len() as u32;
+        let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("explicit-beams-self-split-profile"),
+            ty: wgpu::QueryType::Timestamp,
+            count,
+        });
+        let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-self-split-profile"),
+            size: u64::from(count) * 8,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for cmd in &cmds {
+            if let Cmd::Copy { .. } = cmd {
+                self.copy(&mut enc, cmd);
+                continue;
+            }
+            for (i, &d) in sched.iter().enumerate() {
+                let k = 2 * i as u32;
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("explicit_beams_self_split_profile"),
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: &set,
+                        beginning_of_pass_write_index: Some(k),
+                        end_of_pass_write_index: Some(k + 1),
+                    }),
+                });
+                self.dispatch_self_one(&mut pass, d);
+            }
+        }
+        enc.resolve_query_set(&set, 0..count, &resolve, 0);
+        if self.planner.status_due() {
+            self.contact.read_status(&self.device, &mut enc);
+        }
+        self.queue.submit([enc.finish()]);
+        let period = f64::from(self.queue.get_timestamp_period()) * 1e-6;
+        let raw = self.read(&resolve);
+        let ticks: &[u64] = bytemuck::cast_slice(&raw);
+        let mut out = vec![("step", 0.0, 0u32), ("walk", 0.0, 0), ("pairs", 0.0, 0)];
+        for (i, d) in sched.iter().enumerate() {
+            let k = match d {
+                SelfDispatch::Step { .. } => 0,
+                SelfDispatch::Walk { .. } => 1,
+                SelfDispatch::Pairs { .. } => 2,
+            };
+            out[k].1 += ticks[2 * i + 1].saturating_sub(ticks[2 * i]) as f64 * period;
+            out[k].2 += 1;
+        }
+        let span = ticks[2 * sched.len() - 1].saturating_sub(ticks[0]) as f64 * period;
+        out.push(("span", span, 1));
+        Some(out)
+    }
+
+    /// The split path's small groups' triangle tests in dispatches of their own, across
+    /// workgroups (on, the default; `RUBBLE_GROUP_SPLIT_TESTS=0` off: each group's pass
+    /// whole in its workgroup). The same results bit for bit.
+    pub fn set_group_split_tests(&mut self, on: bool) {
+        self.group_split_tests = on;
+    }
+
+    /// Measurement: the split path's pipelines with workgroup memory zeroed at each
+    /// workgroup's start (the shader translator's default) or not (ours natively).
+    #[doc(hidden)]
+    pub fn set_group_split_zero(&mut self, zero: bool) {
+        if zero != self.group_split_zero {
+            self.group_split_zero = zero;
+            self.group_split_pipes = std::sync::OnceLock::new();
+        }
+    }
+
+    /// Measurement only (time): the ablation word alone, for the split path (its modules
+    /// read bit 512: the groups' contact passes skipped), keeping the shipped modules.
+    #[doc(hidden)]
+    pub fn set_split_ablation(&mut self, mask: u32) {
+        self.planner.set_ablation(mask);
+    }
+
+    /// This frame (after the parameters' plan) runs the split group path.
+    fn group_split_on(&self, steps: u32) -> bool {
+        self.group_split
+            && self.planner.contact_active()
+            && !self.planner.sleep_on()
+            && self.variant == KernelVariant::Current
+            && self.debug_big.is_none()
+            && self.debug_solo.is_none()
+            && self.debug_groups.is_none()
+            && steps > 0
+            && 3 * steps + 2 <= plan::PARAM_COPIES
+            // The tests' dispatch is 16 workgroups a group (at most one group per two
+            // vehicles), the vehicles' one a workgroup each: within WebGPU's 65,535 a
+            // dimension. A larger fleet keeps the groups' workgroup (the same results).
+            && self.layout.spans.len() * 16 <= 65_535
+    }
+
+    fn group_split_pipes(&self) -> &GroupSplit {
+        self.group_split_pipes.get_or_init(|| {
+            let (aero, _, lanes) = self.module_kind;
+            GroupSplit::new(&self.device, &self.bufs, aero, lanes, self.group_split_zero)
+        })
+    }
+
+    /// The split group path's dispatches of a frame of `steps` steps: the groups' frame
+    /// start, then per step the members' steps and the groups' passes (the last with the
+    /// groups' frame end). Each from the indirect arguments the plan wrote (none without
+    /// a group).
+    fn dispatch_group_split(&self, pass: &mut wgpu::ComputePass, steps: u32) {
+        for op in self.group_split_ops(steps) {
+            match op {
+                GroupOp::SelfWalk { .. } if self.self_split_skip & 1 != 0 => continue,
+                GroupOp::SelfPairs { .. } if self.self_split_skip & 2 != 0 => continue,
+                _ => self.run_group_op(pass, op),
+            }
+        }
+    }
+
+    /// The split group path's dispatches of a frame of `steps` steps, in order (with
+    /// self-collision split, [`Self::self_split_vv_on`], every vehicle's step, the walk
+    /// and the pairs in each substep).
+    fn group_split_ops(&self, steps: u32) -> Vec<GroupOp> {
+        let mut out = vec![GroupOp::Group { copy: steps + 1, tests: false, args: SPLIT_GROUP_ARGS }];
+        // With self-collision split: every vehicle's step (copy s, s = 0 ..= steps: the
+        // last the solo vehicles' last rest and frame end), each step's walk and pairs
+        // over the solo vehicles (explicit_beams_selfsplit.slang), then the groups.
+        let vv = self.self_split_vv.get();
+        for s in 0..steps + u32::from(vv) {
+            if vv {
+                out.push(GroupOp::SelfMember(s));
+                if s == steps {
+                    break;
+                }
+                let slot = u64::from(if s == 0 { 2 } else { s & 1 });
+                out.push(GroupOp::SelfWalk { copy: s, offset: 12 * (3 + slot) });
+                out.push(GroupOp::SelfPairs { copy: s, offset: 12 * slot });
+            } else {
+                out.push(GroupOp::Member(s));
+            }
+            if self.group_split_tests {
+                // The front, the tests across workgroups (the walk, then the listed
+                // pairs), then the levels.
+                out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS });
+                out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS });
+                out.push(GroupOp::Group { copy: steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS });
+                out.push(GroupOp::Group { copy: steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS });
+            } else {
+                out.push(GroupOp::Group { copy: s, tests: false, args: SPLIT_GROUP_ARGS });
+            }
+        }
+        out
+    }
+
+    /// One of [`Self::group_split_ops`]: its pipeline, bind group and indirect dispatch.
+    fn run_group_op(&self, pass: &mut wgpu::ComputePass, op: GroupOp) {
+        let g = self.group_split_pipes();
+        let args = &self.contact.args;
+        let at = |k: u32| [k * PARAM_STRIDE as u32];
+        match op {
+            GroupOp::Group { copy, tests, args: off } => {
+                pass.set_pipeline(if tests { &g.tests } else { &g.group });
+                pass.set_bind_group(0, &g.bind, &at(copy));
+                pass.dispatch_workgroups_indirect(args, off);
+            }
+            GroupOp::Member(s) => {
+                pass.set_pipeline(g.member());
+                pass.set_bind_group(0, &g.bind, &at(s));
+                pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
+            }
+            GroupOp::SelfMember(s) => {
+                let p = self.self_split_pipes();
+                pass.set_pipeline(&p.vv_pipes()[0]);
+                pass.set_bind_group(0, &p.step_bind, &at(s));
+                pass.dispatch_workgroups_indirect(args, SPLIT_ALL_ARGS);
+            }
+            GroupOp::SelfWalk { copy, offset } | GroupOp::SelfPairs { copy, offset } => {
+                let p = self.self_split_pipes();
+                pass.set_pipeline(&p.vv_pipes()[if matches!(op, GroupOp::SelfWalk { .. }) { 1 } else { 2 }]);
+                pass.set_bind_group(0, &p.pairs_bind, &at(copy));
+                pass.dispatch_workgroups_indirect(&p.args, offset);
+            }
+        }
     }
 
     /// Submit `dispatches` dispatches of `steps` steps each in one compute pass (the
@@ -2401,6 +3660,29 @@ impl ExplicitBeamsGpu {
             let rec = u64::from(self.layout.brake_base + 2 * (off + k) + 1);
             self.queue
                 .write_buffer(&self.bufs[1], rec * 16 + 8, bytemuck::bytes_of(&u.to_bits()));
+        }
+    }
+
+    /// Vehicle `vehicle`'s anti-clip box padding by each contacter's own travel
+    /// (`ExplicitBeams::own_travel_reach`, its flags word's FLAG_OWN_TRAVEL) from the
+    /// next frame on. The upload takes it from the vehicle; this changes it in place.
+    pub fn set_own_travel_reach(&mut self, vehicle: usize, on: bool) {
+        if vehicle >= self.layout.vehicles() {
+            return;
+        }
+        let at = (vehicle * 4 + 3) * 4;
+        let words: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[1])).to_vec();
+        let f = if on {
+            words[at] | plan::FLAG_OWN_TRAVEL
+        } else {
+            words[at] & !plan::FLAG_OWN_TRAVEL
+        };
+        self.queue.write_buffer(&self.bufs[1], (at * 4) as u64, bytemuck::bytes_of(&f));
+        // The wide passes' copy of the static records (the first vehicles').
+        if let Some(w) = &self.wide {
+            if ((at + 1) * 4) as u64 <= w.table.size() {
+                self.queue.write_buffer(&w.table, (at * 4) as u64, bytemuck::bytes_of(&f));
+            }
         }
     }
 
@@ -2615,7 +3897,7 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     for (e, w) in EXPLICIT_BEAMS_VV_PASSES.iter().chain(EXPLICIT_BEAMS_WIDE_PASSES.iter()) {
         out.push((e.to_string(), e, u(w)));
     }
-    for (n, w) in crate::EXPLICIT_BEAMS_NOSURF.iter().chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter()) {
+    for (n, w) in crate::EXPLICIT_BEAMS_NOSURF.iter().chain(crate::EXPLICIT_BEAMS_NOCPL.iter()).chain(crate::EXPLICIT_BEAMS_CONTACT_BIG.iter()) {
         let entry = if n.contains("contact_big") { plan::CONTACT_ENTRY } else { plan::FRAME_ENTRY };
         out.push((n.to_string(), entry, u(w)));
     }
@@ -2623,6 +3905,113 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
     for (n, w) in crate::EXPLICIT_BEAMS_SURF_SPLIT.iter() {
         let entry = plan::SURF_PASSES.iter().find(|(m, _)| m == n).map_or(plan::FRAME_ENTRY, |(_, e)| *e);
         out.push((n.to_string(), entry, u(w)));
+    }
+    for (n, w) in crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter() {
+        let entry = if n.contains("member") {
+            SPLIT_MEMBER_ENTRY
+        } else if n.contains("tests") {
+            SPLIT_TESTS_ENTRY
+        } else {
+            SPLIT_GROUP_ENTRY
+        };
+        out.push((n.to_string(), entry, u(w)));
+    }
+    for (n, w) in crate::EXPLICIT_BEAMS_SELF_SPLIT.iter() {
+        out.push((n.to_string(), self_split_entry(n), u(w)));
+    }
+    out
+}
+
+/// A self-collision split module's entry point (`explicit_beams_selfsplit_{step,walk,pairs}*`).
+fn self_split_entry(name: &str) -> &'static str {
+    if name.contains("_member") {
+        SPLIT_MEMBER_ENTRY
+    } else if name.contains("_walk") {
+        "explicit_beams_self_walk"
+    } else if name.contains("_pairs") {
+        "explicit_beams_self_pairs"
+    } else {
+        "explicit_beams_self_step"
+    }
+}
+
+/// What a self-collision split frame dispatches ([`ExplicitBeamsGpu::set_self_split`]), in
+/// order: per step its step dispatch (`nv` workgroups, binding the indirect arguments as
+/// storage), its walk and its pairs dispatch (indirect from the arguments, which they do
+/// not bind), then the last step's rest and the frame's end.
+/// A dispatch of the split group path ([`ExplicitBeamsGpu::group_split_ops`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupOp {
+    /// A groups' dispatch (`tests`: the tests across workgroups) of parameter copy `copy`,
+    /// its size at byte `args` of the plan's arguments.
+    Group { copy: u32, tests: bool, args: u64 },
+    /// The vehicles' step s (a group's members; with no group, none).
+    Member(u32),
+    /// Self-collision split: every vehicle's step s.
+    SelfMember(u32),
+    /// Self-collision split: step `copy`'s walk and pairs over the solo vehicles.
+    SelfWalk { copy: u32, offset: u64 },
+    SelfPairs { copy: u32, offset: u64 },
+}
+
+impl GroupOp {
+    fn label(self) -> &'static str {
+        match self {
+            GroupOp::Group { tests: false, .. } => "explicit split group",
+            GroupOp::Group { tests: true, .. } => "explicit split tests",
+            GroupOp::Member(_) => "explicit split member",
+            GroupOp::SelfMember(_) => "explicit self step",
+            GroupOp::SelfWalk { .. } => "explicit self walk",
+            GroupOp::SelfPairs { .. } => "explicit self pairs",
+        }
+    }
+}
+
+impl SelfDispatch {
+    fn label(self) -> &'static str {
+        match self {
+            SelfDispatch::Step { .. } => "explicit self step",
+            SelfDispatch::Walk { .. } => "explicit self walk",
+            SelfDispatch::Pairs { .. } => "explicit self pairs",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelfDispatch {
+    /// The step dispatch of parameter copy `copy` over `groups` workgroups.
+    Step { copy: u32, groups: u32 },
+    /// The walk dispatch of copy `copy`, its size at byte `offset` of the arguments.
+    Walk { copy: u32, offset: u64 },
+    /// The pairs dispatch of copy `copy`, its size at byte `offset` of the arguments.
+    Pairs { copy: u32, offset: u64 },
+}
+
+/// Bytes of the self-collision split's indirect arguments (two kinds, three slots of
+/// three words: explicit_beams_selfsplit.slang selfArgsAt, selfWalkArgsAt).
+const SELF_ARGS_BYTES: u64 = 128;
+
+impl SelfDispatch {
+    /// Whether the dispatch binds the arguments buffer as storage (the step dispatch
+    /// alone: a buffer cannot be storage and indirect in one dispatch).
+    fn binds_args(self) -> bool {
+        matches!(self, SelfDispatch::Step { .. })
+    }
+}
+
+/// A self-collision split frame's dispatches for `nv` vehicles and `steps` steps.
+fn self_split_schedule(nv: u32, steps: u32) -> Vec<SelfDispatch> {
+    let mut out = Vec::new();
+    for s in 0..=steps {
+        out.push(SelfDispatch::Step { copy: s, groups: nv });
+        if s == steps {
+            break;
+        }
+        // Step 0's slot 2, then odd and even steps' (selfArgsAt); the walk's after the
+        // pairs' three.
+        let slot = u64::from(if s == 0 { 2 } else { s & 1 });
+        out.push(SelfDispatch::Walk { copy: s, offset: 12 * (3 + slot) });
+        out.push(SelfDispatch::Pairs { copy: s, offset: 12 * slot });
     }
     out
 }
@@ -2678,4 +4067,67 @@ pub fn render_scene_json(
         tyres.join(","),
         boxes.join(",")
     )
+}
+
+#[cfg(test)]
+mod self_split_tests {
+    use super::*;
+
+    /// The split frame's dispatches for 1, 4 and 64 vehicles, 1 to 34 steps (and the
+    /// most a parameter buffer holds): a step dispatch for each parameter copy 0 ..= steps
+    /// over every vehicle; between them the walk and pairs dispatches of that step, each
+    /// sized from three words inside the arguments buffer, a slot its own for each of the
+    /// two dispatches of consecutive steps; no indirect dispatch binds the arguments (wgpu
+    /// rejects a buffer used as storage and indirect in one dispatch).
+    #[test]
+    fn self_split_schedule_is_bounded_and_never_binds_its_arguments_indirectly() {
+        for nv in [1u32, 4, 64] {
+            for steps in [1u32, 2, 3, 34, plan::PARAM_COPIES - 1] {
+                let d = self_split_schedule(nv, steps);
+                assert_eq!(d.len() as u32, 3 * steps + 1, "nv {nv}, steps {steps}");
+                let mut last: Option<(u64, u64)> = None;
+                for (k, x) in d.iter().enumerate() {
+                    match *x {
+                        SelfDispatch::Step { copy, groups } => {
+                            assert_eq!(copy as usize, k / 3);
+                            assert_eq!(groups, nv);
+                            assert!(copy <= steps && copy < plan::PARAM_COPIES);
+                            assert!(x.binds_args());
+                        }
+                        SelfDispatch::Walk { copy, offset } | SelfDispatch::Pairs { copy, offset } => {
+                            assert!(!x.binds_args(), "an indirect dispatch binds its arguments");
+                            assert!(copy < steps);
+                            assert_eq!(offset % 4, 0);
+                            assert!(offset + 12 <= SELF_ARGS_BYTES, "arguments past the buffer at {offset}");
+                        }
+                    }
+                }
+                // The two kinds never share a slot, and consecutive steps never share one
+                // (a step dispatch clears the next step's while the last is still read).
+                for s in 0..steps as usize {
+                    let (SelfDispatch::Walk { offset: w, .. }, SelfDispatch::Pairs { offset: p, .. }) =
+                        (d[3 * s + 1], d[3 * s + 2])
+                    else {
+                        panic!("step {s}: not a walk then a pairs dispatch");
+                    };
+                    assert_ne!(w, p);
+                    if let Some((lw, lp)) = last {
+                        assert!(lw != w && lp != p, "steps {} and {s} share a slot", s - 1);
+                    }
+                    last = Some((w, p));
+                }
+                assert!(matches!(d.last(), Some(SelfDispatch::Step { copy, .. }) if *copy == steps));
+            }
+        }
+    }
+
+    /// The twelve split modules are shipped with their entry points.
+    #[test]
+    fn self_split_modules_are_shipped() {
+        let shipped = explicit_beams_shipped_wgsl();
+        for (n, _) in crate::EXPLICIT_BEAMS_SELF_SPLIT.iter() {
+            let (_, e, w) = shipped.iter().find(|(s, _, _)| s == n).unwrap_or_else(|| panic!("{n} not shipped"));
+            assert!(w.contains(&format!("fn {e}(")), "{n}: no entry {e}");
+        }
+    }
 }

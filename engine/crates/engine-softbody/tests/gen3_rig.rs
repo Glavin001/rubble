@@ -16,18 +16,53 @@
 //! `CARGO_TARGET_TMPDIR/gen3`. Run in release:
 //! `cargo test --release -p engine-softbody --test gen3_rig -- --nocapture`.
 use engine_softbody::authoring::gen2::{self, gen3};
-use engine_softbody::explicit_beams::{ExplicitBeams, JbeamWheels};
+use engine_softbody::explicit_beams::ExplicitBeams;
 use engine_softbody::vehicle_compare::{rigid_fit, settings, Car, CarSpec};
 use glam::Vec3;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// The mod folder (`<tmp>/gen3`, vehicle `gen2`).
+/// The car under test: gen3 (the Rust render model, vehicle `gen2`), or a
+/// vehicle-gen design when `GEN3_RIG_DESIGN=<design>` is set (the Rust
+/// generator's, in memory; a Python design's `.glb` and `rig.json` from
+/// `GEN3_RIG_DIR` or its default build folders: `VgInput::find`,
+/// `engine/docs/generated-vehicles.md`).
+struct Target {
+    vehicle: String,
+    glb: String,
+    skin: String,
+}
+
+fn target() -> Target {
+    match std::env::var("GEN3_RIG_DESIGN") {
+        Ok(d) => Target {
+            glb: gen2::vg_input::glb_file(&d),
+            skin: gen2::vg_input::skin_file(&d),
+            vehicle: d,
+        },
+        Err(_) => Target {
+            vehicle: "gen2".into(),
+            glb: gen3::GLB_FILE.into(),
+            skin: gen3::SKIN_FILE.into(),
+        },
+    }
+}
+
+/// The mod folder (`<tmp>/gen3`, or `<tmp>/vg_<design>`).
 fn mod_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("gen3");
-        for (p, bytes) in gen2::files() {
+        let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+        let (dir, files) = match std::env::var("GEN3_RIG_DESIGN") {
+            Ok(d) => {
+                let dir = std::env::var("GEN3_RIG_DIR").ok().map(PathBuf::from);
+                let inp = gen2::vg_input::VgInput::find(&d, None, dir.as_deref()).unwrap();
+                let b = gen2::vg_input::build(inp).unwrap();
+                (tmp.join(format!("vg_{d}")), gen2::vg_input::files(&b))
+            }
+            Err(_) => (tmp.join("gen3"), gen2::files()),
+        };
+        for (p, bytes) in files {
             let path = dir.join(&p);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, bytes).unwrap();
@@ -45,33 +80,30 @@ struct Loaded {
 /// The car on raycast wheels (surface contact on) and its skinned visual.
 fn load() -> Loaded {
     let dir = mod_dir();
-    let files = engine_softbody::jbeam::read_vehicle_dir(dir, "gen2").unwrap();
-    let pc = std::fs::read_to_string(dir.join("gen2/gen2.pc")).ok();
+    let t = target();
+    let v = t.vehicle.as_str();
+    let files = engine_softbody::jbeam::read_vehicle_dir(dir, v).unwrap();
+    let pc = std::fs::read_to_string(dir.join(v).join(format!("{v}.pc"))).ok();
     let refs: Vec<(&str, &str)> = files
         .iter()
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
     let desc = engine_softbody::jbeam::load_jbeam(&refs, pc.as_deref()).unwrap();
-    let (mut sim, _) = ExplicitBeams::from_desc_jbeam_with(
-        &desc,
-        JbeamWheels::Raycast,
-        Vec3::ZERO,
-        Vec3::ZERO,
-        settings(),
-    )
-    .unwrap();
+    // (On its raycast wheels: `from_desc_jbeam_with(.., Raycast, ..)` alone
+    // spawns the car without them, resting on whatever nodes are lowest.)
+    let (mut sim, _) =
+        ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
     sim.surface_contact = true;
     let flex = engine_softbody::jbeam::assembled_rows(&refs, pc.as_deref(), "flexbodies").unwrap();
     let g =
-        engine_softbody::glb::read(&std::fs::read(dir.join("gen2").join(gen3::GLB_FILE)).unwrap())
-            .unwrap();
+        engine_softbody::glb::read(&std::fs::read(dir.join(v).join(&t.glb)).unwrap()).unwrap();
     let meshes: Vec<_> = g
         .meshes
         .iter()
         .map(|m| engine_softbody::flexskin::glb_mesh(&g, m))
         .collect();
     let skin = engine_softbody::flexskin::Skin::decode(
-        &std::fs::read(dir.join("gen2").join(gen3::SKIN_FILE)).unwrap(),
+        &std::fs::read(dir.join(v).join(&t.skin)).unwrap(),
     )
     .unwrap();
     let (vis, rep) = engine_softbody::flexmesh::jbeam_visual_skinned(
@@ -95,13 +127,10 @@ fn load() -> Loaded {
     Loaded { desc, sim, vis }
 }
 
-/// As the harness places a car: its lowest node 2 cm above the ground.
+/// As the harness places a car: its lowest point (a node, or a raycast
+/// wheel's tyre) 2 cm above the ground.
 fn lift(sim: &mut ExplicitBeams) {
-    let low = sim
-        .nodes
-        .iter()
-        .map(|n| sim.origin.y + n.pos.y)
-        .fold(f32::MAX, f32::min);
+    let low = engine_softbody::vehicle_compare::lowest_point(sim);
     for n in &mut sim.nodes {
         n.pos.y += 0.02 - low;
     }
@@ -118,9 +147,24 @@ fn park(s: &mut ExplicitBeams, seconds: f32) {
 }
 
 /// Max vertex error (mm) and normal error (degrees) of the skin against the
-/// design carried by each vertex's own nodes' rigid motion (weighted by its
-/// A > 0; the position error beyond the most any of those nodes is off that
-/// motion: the warp the skin adds), and against the design itself.
+/// design carried by each vertex's own nodes' rigid motion (fitted to its
+/// nodes weighted by its A > 0; the position error beyond the most any node
+/// it is bound to is off that motion: the warp the skin adds), and against
+/// the design itself.
+///
+/// "Its own nodes" for the allowance are every node the vertex is bound to:
+/// every entry, whatever the sign of its A, and the frame's gradient entries.
+/// The skin is linear in all of them (x = Σ Aⱼqⱼ + offset in the frame
+/// (Σ ∂Aⱼ/∂T qⱼ, Σ ∂Aⱼ/∂B qⱼ)), so a node with A < 0 or a gradient weight
+/// moves the vertex as much as one with A > 0. Until 2026-11-15 the
+/// allowance counted only the fit's nodes (A > 0, and only those with
+/// round(40·A) ≥ 1), so a structure's real flex that the skin carries through
+/// its other entries was charged to the skin: the console over the tunnel
+/// (A −1.08 on the floor nodes beside it, 1.1–2.3 mm off the tunnel's fit
+/// parked) read 1.06 mm, and seat_FL's frame (gradient weights on flr3L,
+/// A −0.35, and on flr2L, A 0.003) 1.00 mm. The bar is unchanged; the
+/// MLS weights' extrapolation (Σ|A| up to 4.3 on this car) is the binding
+/// lint's to bound (`skin_lint` A3 / B3), not this test's.
 fn fidelity(
     v: &engine_softbody::authoring::skin::ShowcaseVisual,
     now: &[Vec3],
@@ -135,8 +179,9 @@ fn fidelity(
         a_abs = a_abs.max(n[i].angle_between(n0).to_degrees());
         let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
         // The nodes' rigid motion weighted as the skin weights them (each
-        // node counted in proportion to its A > 0), and how far those nodes
-        // themselves are off it: the skin's own warp is what exceeds theirs.
+        // node counted in proportion to its A > 0), and how far the nodes the
+        // vertex is bound to are off it: the skin's own warp is what exceeds
+        // theirs.
         let ids: Vec<u32> = (a..b)
             .filter(|&k| v.wt_w[k][0] > 0.0)
             .flat_map(|k| {
@@ -149,9 +194,9 @@ fn fidelity(
             continue;
         }
         let f = rigid_fit(&rest, now, &ids);
-        let own = distinct
-            .iter()
-            .map(|&j| f.to_rest(now[j as usize]).distance(rest[j as usize]))
+        let own = (a..b)
+            .map(|k| v.wt_node[k] as usize)
+            .map(|j| f.to_rest(now[j]).distance(rest[j]))
             .fold(0.0f32, f32::max);
         let e = (f.to_rest(p[i]).distance(x0) - own).max(0.0);
         if e > e_local && std::env::var("GEN3_WORST").is_ok() {
@@ -211,7 +256,10 @@ fn rest_drift_every_part_within_5_mm() {
         .iter()
         .map(|n| Vec3::from(n.position))
         .collect();
-    let susp = |name: &str| name.starts_with("hub") || name.starts_with("rim");
+    // The running gear's nodes (hubs, wheels: `hub…`, `rim…`, a defined
+    // wheel part's `whe…`) carry the car and deflect under it.
+    let susp =
+        |name: &str| name.starts_with("hub") || name.starts_with("rim") || name.starts_with("whe");
     let fit_ids: Vec<u32> = (0..nd as u32)
         .filter(|&i| !susp(&l.desc.nodes[i as usize].name))
         .collect();
@@ -221,15 +269,30 @@ fn rest_drift_every_part_within_5_mm() {
     let fit = rigid_fit(&design, &now, &fit_ids);
     let broken = l.sim.beams.iter().filter(|b| b.broken).count();
     let bent = l.sim.beams.iter().filter(|b| b.bent()).count();
+    // `GEN3_DRIFT_NODES=eng_,tra_`: each such node's drift (mm, the solver's
+    // frame: x left, y up, z forward).
+    if let Ok(list) = std::env::var("GEN3_DRIFT_NODES") {
+        for (i, n) in l.desc.nodes.iter().enumerate() {
+            if list.split(',').any(|p| n.name.starts_with(p)) {
+                let d = (fit.to_rest(now[i]) - design[i]) * 1e3;
+                println!("  {:<14} {:+7.1} {:+7.1} {:+7.1} mm", n.name, d.x, d.y, d.z);
+            }
+        }
+    }
     let mut worst = Vec::new();
     for p in &l.desc.parts {
-        let mx = p
+        let (mx, at) = p
             .nodes
             .iter()
             .filter(|&&i| (i as usize) < nd && !susp(&l.desc.nodes[i as usize].name))
-            .map(|&i| (fit.to_rest(now[i as usize]) - design[i as usize]).length())
-            .fold(0.0f32, f32::max);
-        println!("{:<16} {:.1} mm", p.name, mx * 1e3);
+            .map(|&i| ((fit.to_rest(now[i as usize]) - design[i as usize]).length(), i))
+            .fold((0.0f32, 0u32), |a, b| if b.0 > a.0 { b } else { a });
+        println!(
+            "{:<16} {:.1} mm (worst node {})",
+            p.name,
+            mx * 1e3,
+            l.desc.nodes.get(at as usize).map_or("-", |n| n.name.as_str())
+        );
         worst.push((p.name.clone(), mx));
     }
     println!("broken {broken}, bent {bent}");
@@ -249,8 +312,11 @@ fn rest_drift_every_part_within_5_mm() {
 }
 
 fn spec() -> CarSpec {
+    let t = target();
+    let name = if t.vehicle == "gen2" { "gen3" } else { t.vehicle.as_str() };
     serde_json::from_value(serde_json::json!({
-        "name": "gen3", "mod": mod_dir().to_string_lossy(), "vehicle": "gen2", "pc": "gen2.pc"
+        "name": name, "mod": mod_dir().to_string_lossy(), "vehicle": t.vehicle,
+        "pc": format!("{}.pc", t.vehicle)
     }))
     .unwrap()
 }
@@ -311,4 +377,31 @@ fn mesh_quality_after_wall56_and_side_pole() {
 #[ignore = "open: seams past 5 cm in the wall (vehicle-gen3.md)"]
 fn seams_stay_shut_after_wall56_and_side_pole() {
     crashes(true);
+}
+
+/// The sidecar read in place (`flexskin::SkinBytes`, what the web loader binds
+/// from) binds the same visual, bit for bit, as the sidecar decoded.
+#[test]
+fn the_sidecar_read_in_place_binds_the_same_visual() {
+    use engine_softbody::flexskin::{Skin, SkinBytes, SkinRef};
+    let dir = mod_dir();
+    let t = target();
+    let v = t.vehicle.as_str();
+    let files = engine_softbody::jbeam::read_vehicle_dir(dir, v).unwrap();
+    let pc = std::fs::read_to_string(dir.join(v).join(format!("{v}.pc"))).ok();
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let desc = engine_softbody::jbeam::load_jbeam(&refs, pc.as_deref()).unwrap();
+    let (sim, _) = ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+    let flex = engine_softbody::jbeam::assembled_rows(&refs, pc.as_deref(), "flexbodies").unwrap();
+    let g = engine_softbody::glb::read(&std::fs::read(dir.join(v).join(&t.glb)).unwrap()).unwrap();
+    let meshes: Vec<_> = g.meshes.iter().map(|m| engine_softbody::flexskin::glb_mesh(&g, m)).collect();
+    let bytes = std::fs::read(dir.join(v).join(&t.skin)).unwrap();
+    let (decoded, in_place) = (Skin::decode(&bytes).unwrap(), SkinBytes::parse(&bytes).unwrap());
+    let visual = |s: SkinRef| {
+        let (vis, rep) = engine_softbody::flexmesh::jbeam_visual_skin(&flex, &[], &desc, &sim, &meshes, &Default::default(), [0.5, 0.05, 0.04], Some(s)).unwrap();
+        format!("{vis:?} {rep:?}")
+    };
+    let (a, b) = (visual(SkinRef::Decoded(&decoded)), visual(SkinRef::Bytes(&in_place)));
+    assert!(a.len() > 1_000_000, "a weighted visual ({} bytes of Debug)", a.len());
+    assert!(a == b, "the visuals differ");
 }

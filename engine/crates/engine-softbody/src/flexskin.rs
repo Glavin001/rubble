@@ -262,6 +262,272 @@ impl Skin {
     }
 }
 
+/// A `.rskin` read where it lies: the node names decoded, each mesh's vertices
+/// and entries left in the sidecar's bytes and read as they are visited
+/// ([`MeshBytes::verts`]), the same values [`Skin::decode`] gives without its
+/// decoded copy (16 bytes an entry and a list a vertex: 320 MB for a generated
+/// car's 14 million entries, held in a wasm heap that never shrinks). Checked
+/// as `decode` checks, with its messages.
+#[derive(Clone, Debug)]
+pub struct SkinBytes<'a> {
+    pub nodes: Vec<String>,
+    pub meshes: Vec<MeshBytes<'a>>,
+}
+
+/// One mesh of a [`SkinBytes`]: its vertex records and entries, in place.
+#[derive(Clone, Debug)]
+pub struct MeshBytes<'a> {
+    pub name: String,
+    ver: u32,
+    nv: usize,
+    ne: usize,
+    /// Version 2: per vertex its entry count (u8), offset and normal (6 f32).
+    /// Version 1: per vertex its first entry (u32), offset and normal, then the end.
+    verts: &'a [u8],
+    /// Version 2: node u16, A, ∂A/∂T, ∂A/∂B as i16 steps. Version 1: u32, 3 f32.
+    entries: &'a [u8],
+}
+
+impl<'a> SkinBytes<'a> {
+    /// `b` checked as [`Skin::decode`] reads it (the same errors, in its order).
+    pub fn parse(b: &'a [u8]) -> Result<SkinBytes<'a>, String> {
+        let mut at = 0usize;
+        let take = |at: &mut usize, n: usize| -> Result<&'a [u8], String> {
+            let s = b.get(*at..*at + n).ok_or("rskin: truncated")?;
+            *at += n;
+            Ok(s)
+        };
+        let u32_ = |at: &mut usize| -> Result<u32, String> {
+            Ok(u32::from_le_bytes(take(at, 4)?.try_into().unwrap()))
+        };
+        let str_ = |at: &mut usize| -> Result<String, String> {
+            let n = u16::from_le_bytes(take(at, 2)?.try_into().unwrap()) as usize;
+            String::from_utf8(take(at, n)?.to_vec()).map_err(|e| e.to_string())
+        };
+        if take(&mut at, 4)? != MAGIC {
+            return Err("rskin: not a Rubble skin".into());
+        }
+        let ver = u32_(&mut at)?;
+        if ver != 1 && ver != 2 {
+            return Err(format!("rskin: version {ver}"));
+        }
+        let nn = u32_(&mut at)? as usize;
+        let mut nodes = Vec::with_capacity(nn);
+        for _ in 0..nn {
+            nodes.push(str_(&mut at)?);
+        }
+        let nm = u32_(&mut at)? as usize;
+        let mut meshes = Vec::with_capacity(nm);
+        for _ in 0..nm {
+            let name = str_(&mut at)?;
+            let nv = u32_(&mut at)? as usize;
+            let ne = u32_(&mut at)? as usize;
+            if ver == 2 {
+                // decode reads each record in turn (a truncated one fails there).
+                let v0 = at;
+                let mut sum = 0usize;
+                for _ in 0..nv {
+                    sum += take(&mut at, 1)?[0] as usize;
+                    take(&mut at, 24)?;
+                }
+                let verts = &b[v0..at];
+                if sum != ne {
+                    return Err(format!("rskin: {name}: entry counts do not sum to {ne}"));
+                }
+                let e0 = at;
+                for _ in 0..ne {
+                    let e = take(&mut at, 2)?;
+                    let n = u16::from_le_bytes(e.try_into().unwrap()) as usize;
+                    if n >= nn {
+                        return Err(format!("rskin: {name}: node {n} of {nn}"));
+                    }
+                    take(&mut at, 6)?;
+                }
+                meshes.push(MeshBytes {
+                    name,
+                    ver,
+                    nv,
+                    ne,
+                    verts,
+                    entries: &b[e0..at],
+                });
+                continue;
+            }
+            let v0 = at;
+            let mut starts = Vec::with_capacity(nv + 1);
+            for _ in 0..nv {
+                starts.push(u32_(&mut at)? as usize);
+                take(&mut at, 24)?;
+            }
+            starts.push(u32_(&mut at)? as usize);
+            let verts = &b[v0..at];
+            if starts[nv] != ne {
+                return Err(format!(
+                    "rskin: {name}: {} entries listed, {ne} stated",
+                    starts[nv]
+                ));
+            }
+            // decode reads starts[k]..starts[k + 1] entries a vertex.
+            let read: usize = starts.windows(2).map(|w| w[1].saturating_sub(w[0])).sum();
+            let e0 = at;
+            for _ in 0..read {
+                let n = u32_(&mut at)? as usize;
+                if n >= nn {
+                    return Err(format!("rskin: {name}: node {n} of {nn}"));
+                }
+                take(&mut at, 12)?;
+            }
+            meshes.push(MeshBytes {
+                name,
+                ver,
+                nv,
+                ne: read,
+                verts,
+                entries: &b[e0..at],
+            });
+        }
+        Ok(SkinBytes { nodes, meshes })
+    }
+
+    pub fn mesh(&self, name: &str) -> Option<&MeshBytes<'a>> {
+        self.meshes.iter().find(|m| m.name == name)
+    }
+}
+
+impl<'a> MeshBytes<'a> {
+    /// Its vertex count.
+    pub fn len(&self) -> usize {
+        self.nv
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nv == 0
+    }
+
+    /// Its entry count (every vertex's).
+    pub fn entries(&self) -> usize {
+        self.ne
+    }
+
+    /// Its vertices in order, each read from the bytes as [`Skin::decode`] reads it.
+    pub fn verts(&self) -> impl Iterator<Item = Vert> + '_ {
+        let rec = if self.ver == 2 { 25 } else { 28 };
+        let f32_at = |s: &[u8], k: usize| f32::from_le_bytes(s[k..k + 4].try_into().unwrap());
+        let mut e = 0usize;
+        (0..self.nv).map(move |k| {
+            let r = &self.verts[k * rec..k * rec + rec];
+            let (count, f0) = if self.ver == 2 {
+                (r[0] as usize, 1)
+            } else {
+                let s = |k: usize| {
+                    u32::from_le_bytes(self.verts[k * rec..k * rec + 4].try_into().unwrap())
+                        as usize
+                };
+                let next = if k + 1 < self.nv {
+                    s(k + 1)
+                } else {
+                    u32::from_le_bytes(
+                        self.verts[self.nv * rec..self.nv * rec + 4]
+                            .try_into()
+                            .unwrap(),
+                    ) as usize
+                };
+                (next.saturating_sub(s(k)), 4)
+            };
+            let f = [0, 1, 2, 3, 4, 5].map(|q| f32_at(r, f0 + 4 * q));
+            let mut w = Vec::with_capacity(count);
+            for _ in 0..count {
+                if self.ver == 2 {
+                    let x = &self.entries[8 * e..8 * e + 8];
+                    let i = |q: usize| i16::from_le_bytes(x[q..q + 2].try_into().unwrap()) as f64;
+                    let n = u16::from_le_bytes(x[0..2].try_into().unwrap()) as u32;
+                    w.push((
+                        n,
+                        (i(2) * Q_A) as f32,
+                        (i(4) * Q_D) as f32,
+                        (i(6) * Q_D) as f32,
+                    ));
+                } else {
+                    let x = &self.entries[16 * e..16 * e + 16];
+                    let n = u32::from_le_bytes(x[0..4].try_into().unwrap());
+                    w.push((n, f32_at(x, 4), f32_at(x, 8), f32_at(x, 12)));
+                }
+                e += 1;
+            }
+            Vert {
+                w,
+                off: [f[0], f[1], f[2]],
+                nrm: [f[3], f[4], f[5]],
+            }
+        })
+    }
+}
+
+/// A skin as the loader binds it: decoded ([`Skin`], an export's own) or read in
+/// place ([`SkinBytes`], a sidecar's bytes).
+#[derive(Clone, Copy, Debug)]
+pub enum SkinRef<'a> {
+    Decoded(&'a Skin),
+    Bytes(&'a SkinBytes<'a>),
+}
+
+/// One mesh of a [`SkinRef`].
+#[derive(Clone, Copy, Debug)]
+pub enum MeshRef<'a> {
+    Decoded(&'a MeshSkin),
+    Bytes(&'a MeshBytes<'a>),
+}
+
+impl<'a> SkinRef<'a> {
+    pub fn nodes(&self) -> &'a [String] {
+        match *self {
+            SkinRef::Decoded(s) => &s.nodes,
+            SkinRef::Bytes(s) => &s.nodes,
+        }
+    }
+
+    pub fn mesh(&self, name: &str) -> Option<MeshRef<'a>> {
+        match *self {
+            SkinRef::Decoded(s) => s.mesh(name).map(MeshRef::Decoded),
+            SkinRef::Bytes(s) => s.mesh(name).map(MeshRef::Bytes),
+        }
+    }
+
+    /// Every mesh's entries.
+    pub fn entries(&self) -> usize {
+        match *self {
+            SkinRef::Decoded(s) => s
+                .meshes
+                .iter()
+                .flat_map(|m| &m.verts)
+                .map(|v| v.w.len())
+                .sum(),
+            SkinRef::Bytes(s) => s.meshes.iter().map(|m| m.ne).sum(),
+        }
+    }
+}
+
+impl<'a> MeshRef<'a> {
+    pub fn len(&self) -> usize {
+        match *self {
+            MeshRef::Decoded(m) => m.verts.len(),
+            MeshRef::Bytes(m) => m.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Its vertices in order (a decoded mesh's cloned).
+    pub fn verts(&self) -> Box<dyn Iterator<Item = Vert> + 'a> {
+        match *self {
+            MeshRef::Decoded(m) => Box::new(m.verts.iter().cloned()),
+            MeshRef::Bytes(m) => Box::new(m.verts()),
+        }
+    }
+}
+
 /// The skinned position and normal of one vertex from node positions `q`
 /// (its entries' nodes already mapped to indices into `q`).
 pub fn eval(w: &[(u32, f32, f32, f32)], off: [f32; 3], nrm: [f32; 3], q: &[Vec3]) -> (Vec3, Vec3) {
@@ -368,6 +634,25 @@ fn min_eig(a: DMat3) -> f64 {
 /// metre, range ±64 /m): the sidecar stores each as an i16 count of steps.
 pub const Q_A: f64 = 1.0 / 8192.0;
 pub const Q_D: f64 = 1.0 / 512.0;
+
+/// An entry (node, [A, ∂A/∂T, ∂A/∂B]) as the sidecar stores it: the node as u16
+/// and each weight as i16 steps of [`Q_A`], [`Q_D`], when that is exact (the steps
+/// read back as the same f32 bits, as [`Skin::decode`] reads them); None otherwise.
+pub fn steps(node: u32, w: [f32; 3]) -> Option<(u16, [i16; 3])> {
+    let node = u16::try_from(node).ok()?;
+    let mut q = [0i16; 3];
+    for (k, (f, s)) in w.into_iter().zip([Q_A, Q_D, Q_D]).enumerate() {
+        let x = f as f64 / s;
+        if !(x.fract() == 0.0 && x >= i16::MIN as f64 && x <= i16::MAX as f64) {
+            return None;
+        }
+        q[k] = x as i16;
+        if ((q[k] as f64 * s) as f32).to_bits() != f.to_bits() {
+            return None;
+        }
+    }
+    Some((node, q))
+}
 
 /// `x` rounded to multiples of `q` summing exactly to `total` (largest
 /// remainder), as f32 (exact: a step count below 2¹⁵ times a power of two);
@@ -687,5 +972,145 @@ mod tests {
             }],
         };
         assert_eq!(Skin::decode(&s.encode()).unwrap(), s);
+    }
+
+    /// Two meshes on the lattice's nodes.
+    fn two_meshes() -> Skin {
+        let (ids, p) = lattice();
+        let (v, n) = verts();
+        let (sk, _) = bind(&ids, &p, &v, &n).unwrap();
+        Skin {
+            nodes: ids.iter().map(|i| format!("n{i}")).collect(),
+            meshes: vec![
+                MeshSkin {
+                    name: "panel".into(),
+                    verts: sk[..120].to_vec(),
+                },
+                MeshSkin {
+                    name: "door".into(),
+                    verts: sk[120..].to_vec(),
+                },
+            ],
+        }
+    }
+
+    /// The version 1 sidecar (f32 entries, per vertex its first entry), as the
+    /// first exports wrote it.
+    fn v1_bytes(s: &Skin) -> Vec<u8> {
+        let mut o = Vec::new();
+        o.extend_from_slice(MAGIC);
+        o.extend_from_slice(&1u32.to_le_bytes());
+        let st = |o: &mut Vec<u8>, t: &str| {
+            o.extend_from_slice(&(t.len() as u16).to_le_bytes());
+            o.extend_from_slice(t.as_bytes());
+        };
+        o.extend_from_slice(&(s.nodes.len() as u32).to_le_bytes());
+        for n in &s.nodes {
+            st(&mut o, n);
+        }
+        o.extend_from_slice(&(s.meshes.len() as u32).to_le_bytes());
+        for m in &s.meshes {
+            st(&mut o, &m.name);
+            let ne: usize = m.verts.iter().map(|v| v.w.len()).sum();
+            o.extend_from_slice(&(m.verts.len() as u32).to_le_bytes());
+            o.extend_from_slice(&(ne as u32).to_le_bytes());
+            let mut at = 0u32;
+            for v in &m.verts {
+                o.extend_from_slice(&at.to_le_bytes());
+                for f in v.off.iter().chain(&v.nrm) {
+                    o.extend_from_slice(&f.to_le_bytes());
+                }
+                at += v.w.len() as u32;
+            }
+            o.extend_from_slice(&at.to_le_bytes());
+            for v in &m.verts {
+                for &(n, a, b, c) in &v.w {
+                    o.extend_from_slice(&n.to_le_bytes());
+                    for f in [a, b, c] {
+                        o.extend_from_slice(&f.to_le_bytes());
+                    }
+                }
+            }
+        }
+        o
+    }
+
+    /// An entry as the sidecar's steps: exact (back to the same f32 bits) or none.
+    #[test]
+    fn steps_are_exact_or_none() {
+        let s = two_meshes();
+        let d = Skin::decode(&s.encode()).unwrap();
+        for v in d.meshes.iter().flat_map(|m| &m.verts) {
+            for &(n, a, b, c) in &v.w {
+                let (n16, q) = steps(n, [a, b, c]).expect("a decoded entry is on its grids");
+                assert_eq!(n16 as u32, n);
+                let back = [
+                    (q[0] as f64 * Q_A) as f32,
+                    (q[1] as f64 * Q_D) as f32,
+                    (q[2] as f64 * Q_D) as f32,
+                ];
+                assert_eq!(back.map(f32::to_bits), [a, b, c].map(f32::to_bits));
+            }
+        }
+        assert!(steps(3, [0.1, 0.0, 0.0]).is_none(), "off the A grid");
+        assert!(
+            steps(3, [0.0, 0.001, 0.0]).is_none(),
+            "off the gradient grid"
+        );
+        assert!(steps(3, [4.0, 0.0, 0.0]).is_none(), "past the i16 range");
+        assert!(steps(65_536, [0.5, 0.0, 0.0]).is_none(), "a node past u16");
+        assert!(steps(3, [f32::NAN, 0.0, 0.0]).is_none());
+        assert_eq!(
+            steps(65_535, [-4.0, -64.0, 0.0]),
+            Some((65_535, [-32_768, -32_768, 0]))
+        );
+        // -0.0 is not 0 steps' bits.
+        assert!(steps(1, [-0.0, 0.0, 0.0]).is_none());
+    }
+
+    /// Read in place, a sidecar gives the same bits as decoded, in both versions,
+    /// and fails where decode fails with decode's message.
+    #[test]
+    fn read_in_place_is_decode() {
+        let s = two_meshes();
+        for b in [s.encode(), v1_bytes(&s)] {
+            let d = Skin::decode(&b).unwrap();
+            let r = SkinBytes::parse(&b).unwrap();
+            assert_eq!(r.nodes, d.nodes);
+            assert_eq!(r.meshes.len(), d.meshes.len());
+            for (m, dm) in r.meshes.iter().zip(&d.meshes) {
+                assert_eq!(m.name, dm.name);
+                assert_eq!(m.len(), dm.verts.len());
+                assert_eq!(
+                    m.entries(),
+                    dm.verts.iter().map(|v| v.w.len()).sum::<usize>()
+                );
+                let got: Vec<Vert> = m.verts().collect();
+                assert_eq!(format!("{got:?}"), format!("{:?}", dm.verts));
+            }
+            for cut in (0..b.len()).step_by(7) {
+                assert_eq!(
+                    SkinBytes::parse(&b[..cut]).err(),
+                    Skin::decode(&b[..cut]).err(),
+                    "cut at {cut}"
+                );
+            }
+        }
+        // A node index past the names: the same error.
+        let mut bad = v1_bytes(&s);
+        let n = bad.len();
+        bad[n - 16..n - 12].copy_from_slice(&999u32.to_le_bytes());
+        assert_eq!(SkinBytes::parse(&bad).err(), Skin::decode(&bad).err());
+        assert!(SkinBytes::parse(&bad).is_err());
+        // Either reading, through SkinRef, the same meshes.
+        let b = s.encode();
+        let (d, r) = (Skin::decode(&b).unwrap(), SkinBytes::parse(&b).unwrap());
+        for name in ["panel", "door"] {
+            let a: Vec<Vert> = SkinRef::Decoded(&d).mesh(name).unwrap().verts().collect();
+            let c: Vec<Vert> = SkinRef::Bytes(&r).mesh(name).unwrap().verts().collect();
+            assert_eq!(format!("{a:?}"), format!("{c:?}"));
+        }
+        assert!(SkinRef::Bytes(&r).mesh("hood").is_none());
+        assert_eq!(SkinRef::Bytes(&r).nodes(), &d.nodes[..]);
     }
 }

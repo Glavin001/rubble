@@ -425,7 +425,7 @@ export function lightViewProj(sun, focus, half) {
 // `hullTris`: triangles drawn per collider instance (a scene of boxes only: 12);
 // `firstCollider`: colliders before it are not drawn (a ground slab the sky's ground
 // stands for); `brick`: light dynamic colliders (below 700 kg/m³) are shaded as brick.
-export function createSceneRenderer(device, { format, depthFormat = 'depth32float', sampleCount = 1, hullTris = HULL_TRIS, firstCollider = 0, brick = false }) {
+export function createSceneRenderer(device, { format, depthFormat = 'depth32float', sampleCount = 1, hullTris = HULL_TRIS, firstCollider = 0, brick = false, sphereCols = 64 }) {
   const mod = (label, code) => device.createShaderModule({ label, code });
   const colMod = mod('one-world colliders', brick
     ? COLLIDERS.replace('let density = bitcast<f32>(i.kind.x);', 'let raw = bitcast<f32>(i.kind.x);\n  let density = select(raw, 1900.0, raw > 0.0 && raw < 700.0);')
@@ -490,7 +490,6 @@ export function createSceneRenderer(device, { format, depthFormat = 'depth32floa
     return group;
   };
   let lightVP = null;
-  let sphereCols = 64;
   const api = {
     sun: (() => { const s = [0.55, 0.72, 0.42]; const l = Math.hypot(...s); return s.map((x) => x / l); })(),
     lightVP: () => lightVP,

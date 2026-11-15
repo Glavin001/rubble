@@ -3,7 +3,9 @@
     Blender -b --python build.py -- <design> [--out DIR] [--no-render] [--samples N]
 
 Designs live in designs/<name>.py. Output defaults to
-engine/scenes/vehicles/<name>/.
+engine/scenes/vehicles/<name>/. Beside the .glb it writes <name>.rig.json, the
+data the physics rigger reads (vehgen/rigexport.py,
+engine/docs/generated-vehicles.md).
 """
 import sys
 import os
@@ -34,7 +36,7 @@ _v = opt('--views', 'front34,side,rear34,top')
 views = _v.split(';') if 'at:' in _v else _v.split(',')
 os.makedirs(out_dir, exist_ok=True)
 
-from vehgen import assemble, blender, render, uvpack  # noqa: E402
+from vehgen import assemble, blender, render, rigexport, uvpack  # noqa: E402
 from vehgen.mesh import Mesh  # noqa: E402
 
 D = importlib.import_module(design)
@@ -46,6 +48,8 @@ for k, m in extras.items():
 parts.update(new)
 if hasattr(D, 'post'):
     D.post(parts)
+rig = rigexport.export(D, cb, markers, os.path.join(out_dir, design + '.rig.json'))
+print('wrote', rig)
 S = uvpack.pack(parts)
 uvpack.normalise_other(parts)
 print('built %d parts in %.1fs; paint atlas %.2f m square' % (len(parts), time.time() - t0, S))

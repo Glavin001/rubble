@@ -519,9 +519,12 @@ struct ArenaSpot {
 ///   `carSpeed`) across its lane, turned `angle` (default 90) from its heading, hit
 ///   `at` metres along it from its centre.
 /// * `pole`: into a 20 cm square pole `offset` metres across, turned by `angle`.
-/// * `sidepole`: sliding sideways at `speed` into a 20 cm pole `at` metres along its
+/// * `sidepole`: carried sideways at `speed` into a 20 cm pole `at` metres along its
 ///   side from its centre; `angle` (default 90) the travel's angle from its forward
-///   axis (75: the oblique pole test).
+///   axis (75: the oblique pole test). The car rides a carrier, as in the real test
+///   (its tyres on low-friction pads on a sled, FMVSS 214 S10): its tyres' grip on
+///   the ground is `crash_rigs::CARRIER_MU` for the whole scene, so it reaches the pole at
+///   `speed` instead of being stopped by its own tyres' lateral grip.
 /// * `limbo`: under a bar 30 cm deep whose underside is `bar` metres up (default 1).
 /// * `drop`: dropped flat from `height` metres (default 8), moving forward at `speed`
 ///   (default 0).
@@ -538,6 +541,9 @@ struct ArenaSpot {
 ///   0.5) with a `pullStiffness` N/m (default 100,000) grab spring; its far side's
 ///   sill held still unless `holdBody` is false.
 /// Returns the spawns and every box once (for rendering); None for another scene.
+///
+/// A vehicle launched off its forward axis (`vel` set: the side pole) rides a carrier:
+/// `engine_softbody::crash_rigs::on_carrier`.
 fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32, axles: (f32, f32)) -> Option<(Vec<ArenaSpot>, Vec<(Vec3, Vec3)>)> {
     use std::f32::consts::PI;
     let deg = |k: &str, d: f64| (num(spec, k, d) as f32).to_radians();
@@ -769,10 +775,11 @@ impl WebWorld {
     /// [`Self::explicit_sim`], its GPU kernels compiled first without blocking
     /// (`createComputePipelineAsync`, see `crate::warm_pipelines`): a promise of
     /// the `ExplicitSim`. Load with this; the synchronous call is then a cache hit
-    /// (a restart may use it). `progress(stage)` (optional) hears each stage:
-    /// `"spawn"`, then `"compile N"` with the number of kernels compiling, then
-    /// `"compiled <module> <ms>"` as each one finishes (ms since the compiles began;
-    /// a kernel the first frame does not need compiles after the promise resolves).
+    /// (a restart may use it). `progress(line)` (optional) hears each stage
+    /// (`crate::Hear`: `spawn`, `kernels <json>`, then `compiled`/`failed` per
+    /// kernel; a kernel the first frame does not need compiles after the promise
+    /// resolves). Rejects, without creating anything more, if the browser loses the
+    /// device while the kernels compile.
     #[wasm_bindgen(js_name = explicitSimAsync)]
     pub fn explicit_sim_async(
         &self,
@@ -782,28 +789,12 @@ impl WebWorld {
         let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
         let (device, queue) = (self.world.device().clone(), self.world.queue().clone());
         Ok(wasm_bindgen_futures::future_to_promise(async move {
-            let progress = std::rc::Rc::new(progress);
-            let say = {
-                let progress = progress.clone();
-                move |stage: String| {
-                    if let Some(f) = progress.as_ref() {
-                        let _ = f.call1(&JsValue::NULL, &stage.into());
-                    }
-                }
-            };
-            let say = std::rc::Rc::new(say);
+            let say = crate::hear_fn(progress);
             say("spawn".into());
             let spawn = ExplicitSim::spawn(&spec).map_err(err)?;
             let sims: Vec<ExplicitBeams> = spawn.vehicles.iter().map(|v| v.sim.clone()).collect();
             let specs = ExplicitBeamsGpu::compute_specs(&sims, None);
-            say(format!("compile {}", specs.iter().filter(|s| !s.deferred).count()));
-            let heard = say.clone();
-            crate::warm_pipelines(
-                &device,
-                &specs,
-                std::rc::Rc::new(move |module: &str, ms: f64| heard(format!("compiled {module} {ms:.0}"))),
-            )
-            .await;
+            crate::warm_pipelines(&device, &specs, say).await.map_err(err)?;
             ExplicitSim::assemble(&device, &queue, &spec, spawn)
                 .map(JsValue::from)
                 .map_err(err)
@@ -816,6 +807,13 @@ impl ExplicitSim {
     #[doc(hidden)]
     pub fn new_native(device: &wgpu::Device, queue: &wgpu::Queue, spec: &serde_json::Value) -> Result<Self, String> {
         Self::new(device, queue, spec)
+    }
+
+    /// The vehicles `spec` spawns, as the CPU reference steps them (no device: tests
+    /// and tools reproduce a page's scene on `ExplicitBeamsWorld`).
+    #[doc(hidden)]
+    pub fn spawn_cpu(spec: &serde_json::Value) -> Result<Vec<ExplicitBeams>, String> {
+        Ok(Self::spawn(spec)?.vehicles.into_iter().map(|v| v.sim).collect())
     }
 
     /// The GPU solver (tests and tools).
@@ -992,6 +990,9 @@ impl ExplicitSim {
                 pull = Some(door_pull(&mut sim, spec, forward, lateral));
             }
             set_moving(&mut sim, spots.get(vi).and_then(|s| s.vel).unwrap_or(forward * speed));
+            if spots.get(vi).is_some_and(|s| s.vel.is_some() && !s.mdb) {
+                engine_softbody::crash_rigs::on_carrier(&mut sim);
+            }
             if let Some(s) = spots.get(vi) {
                 for &(c, h) in &s.boxes {
                     sim.boxes.push(StaticBox::centered(c, h));
@@ -1073,27 +1074,9 @@ impl ExplicitSim {
             && gpu.enable_frame_timing(TIMED_FRAMES);
 
         // Render records.
-        let mut tris: Vec<[u32; 4]> = Vec::new();
-        let mut recs: Vec<[u32; 4]> = Vec::new();
-        for (vi, v) in vehicles.iter().enumerate() {
-            let off = gpu.node_offset(vi);
-            let p = |i: u32| v.sim.nodes[i as usize].pos;
-            for t in &v.sim.triangles {
-                let [a, b, c] = t.nodes;
-                tris.push([off + a, off + b, off + c, vi as u32]);
-                tris.push([
-                    p(a).distance(p(b)).to_bits(),
-                    p(b).distance(p(c)).to_bits(),
-                    p(c).distance(p(a)).to_bits(),
-                    0,
-                ]);
-            }
-            let tyre = |i: u32| v.sim.nodes[i as usize].flags & NODE_TYRE != 0;
-            for b in &v.sim.beams {
-                let t = (tyre(b.a) || tyre(b.b)) as u32;
-                recs.push([off + b.a, off + b.b, vi as u32 | t << 16, b.rest0.to_bits()]);
-            }
-        }
+        let offsets: Vec<u32> = (0..vehicles.len()).map(|vi| gpu.node_offset(vi)).collect();
+        let sims: Vec<&ExplicitBeams> = vehicles.iter().map(|v| &v.sim).collect();
+        let (tris, recs) = render_records(&sims, &offsets);
         use wgpu::util::DeviceExt;
         let init = |label: &str, words: &[[u32; 4]]| {
             let bytes: &[u8] = if words.is_empty() {
@@ -1138,6 +1121,50 @@ impl ExplicitSim {
     }
 }
 
+/// The render records of `sims` (vehicle `vi`'s first node at `offsets[vi]`): per
+/// collision triangle 2 `vec4<u32>`, (global nodes a, b, c, vehicle) then its spawn
+/// edge lengths ab, bc, ca as `f32` bits; per beam (global node a, b, vehicle | 1 << 16
+/// for a tyre beam, spawn rest length bits). [`ExplicitSim::tris_buffer`],
+/// [`ExplicitSim::beam_records_buffer`] and the World's `explicitLabRecords`.
+pub(crate) fn render_records(sims: &[&ExplicitBeams], offsets: &[u32]) -> (Vec<[u32; 4]>, Vec<[u32; 4]>) {
+    let mut tris: Vec<[u32; 4]> = Vec::new();
+    let mut recs: Vec<[u32; 4]> = Vec::new();
+    for (vi, (sim, &off)) in sims.iter().zip(offsets).enumerate() {
+        let p = |i: u32| sim.nodes[i as usize].pos;
+        for t in &sim.triangles {
+            let [a, b, c] = t.nodes;
+            tris.push([off + a, off + b, off + c, vi as u32]);
+            tris.push([
+                p(a).distance(p(b)).to_bits(),
+                p(b).distance(p(c)).to_bits(),
+                p(c).distance(p(a)).to_bits(),
+                0,
+            ]);
+        }
+        let tyre = |i: u32| sim.nodes[i as usize].flags & NODE_TYRE != 0;
+        for b in &sim.beams {
+            let t = (tyre(b.a) || tyre(b.b)) as u32;
+            recs.push([off + b.a, off + b.b, vi as u32 | t << 16, b.rest0.to_bits()]);
+        }
+    }
+    (tris, recs)
+}
+
+/// The crash lab's per-beam constants (stiffness, strength, compression yield as `f32`
+/// bits, part), as [`ExplicitSim::lab_beams_buffer`] holds them.
+pub(crate) fn lab_beam_words(vehicles: &[(&ExplicitBeams, Vec3)]) -> Vec<[u32; 4]> {
+    crash_lab::lab_beam_words(vehicles)
+}
+
+/// Per node (global order) its vehicle index | 1 << 16 for a tyre node.
+pub(crate) fn node_vehicle_words(sims: &[&ExplicitBeams]) -> Vec<u32> {
+    let mut out = Vec::new();
+    for (i, sim) in sims.iter().enumerate() {
+        out.extend(sim.nodes.iter().map(|n| i as u32 | u32::from(n.flags & NODE_TYRE != 0) << 16));
+    }
+    out
+}
+
 #[wasm_bindgen]
 impl ExplicitSim {
     /// Steps per second (2,000: 0.5 ms steps).
@@ -1156,6 +1183,9 @@ impl ExplicitSim {
     /// contact error (a vehicle past its frame bounds: the margin widens by itself)
     /// is a console warning and the sim keeps stepping; other errors are returned.
     pub fn frame(&mut self, steps: u32) -> Result<(), JsValue> {
+        if crate::device_lost() {
+            return Err(err(format!("the browser lost the GPU device: {}", crate::gpu_error())));
+        }
         self.frame_steps(steps).map_err(err)?;
         for e in self.gpu.take_contact_errors() {
             let note = format!("explicit beams vehicle contact (the sim continues): {e}");
@@ -1207,6 +1237,15 @@ impl ExplicitSim {
 
 #[wasm_bindgen]
 impl ExplicitSim {
+
+    /// The stability check of this sim's vehicles (`stability.rs`: read-only; the
+    /// page stops stepping when it reports).
+    pub fn health(&self) -> crate::stability::VehicleHealth {
+        let health = crate::stability::VehicleHealth::new(&self.device, &self.queue, &self.gpu);
+        // A pulling rig puts in energy the guard cannot bound: no rebound check.
+        health.set_unbounded(self.pull.is_some());
+        health
+    }
 
     /// Steps run since spawn.
     pub fn steps(&self) -> f64 {

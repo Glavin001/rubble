@@ -320,6 +320,27 @@ pub struct ExplicitBeamsWorld {
     /// at least (`VV_PLAN_STEPS`).
     pub plan_margin: f32,
     pub plan_steps: u32,
+    /// The last contact pass's dissipative two-body hits with their final forces,
+    /// for the next step's work guard on the final velocities
+    /// ([`Self::guard_final`], spec §37.1).
+    staged_hits: Vec<StagedHit>,
+    /// §37.1's work guard on the final velocities ([`Self::guard_final`]). Off by
+    /// default until the GPU kernels carry it (the CPU reference and the kernels
+    /// agree bit for bit); `FINAL_GUARD=1` (or this field) turns it on.
+    pub final_guard: bool,
+}
+
+/// A dissipative two-body hit as the contact pass staged it: node `h` of
+/// vehicle `b` takes `f`, the nodes `tri` of vehicle `a` take −f·`w`.
+#[derive(Clone, Copy, Debug)]
+struct StagedHit {
+    a: usize,
+    b: usize,
+    h: u32,
+    tri: [u32; 3],
+    w: [f32; 3],
+    n: Vec3,
+    f: Vec3,
 }
 
 impl ExplicitBeamsWorld {
@@ -350,6 +371,8 @@ impl ExplicitBeamsWorld {
             skip: Vec::new(),
             plan_margin: 1.0,
             plan_steps: 34,
+            staged_hits: Vec::new(),
+            final_guard: std::env::var("FINAL_GUARD").is_ok_and(|v| v == "1"),
         }
     }
 
@@ -476,8 +499,13 @@ impl ExplicitBeamsWorld {
             v.sleep.moving = v.grab.is_some();
         }
         for _ in 0..steps {
+            let v0 = self.staged_velocities();
             for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
-                v.step();
+                v.step_nodes();
+            }
+            self.guard_final(&v0, None);
+            for v in self.vehicles.iter_mut().filter(|v| !v.sleep.asleep) {
+                v.step_rest();
             }
             self.steps += 1;
             if self.contact && nv > 1 {
@@ -509,9 +537,14 @@ impl ExplicitBeamsWorld {
 
     /// One step: every vehicle's own step in vehicle order, then the contact pass.
     pub fn step(&mut self) {
+        let v0 = self.staged_velocities();
         let Some(mut ledger) = self.ledger.take() else {
             for v in &mut self.vehicles {
-                v.step();
+                v.step_nodes();
+            }
+            self.guard_final(&v0, None);
+            for v in &mut self.vehicles {
+                v.step_rest();
             }
             self.steps += 1;
             if self.contact && self.vehicles.len() > 1 {
@@ -519,15 +552,24 @@ impl ExplicitBeamsWorld {
             }
             return;
         };
+        let mut before: Vec<Vec<(Vec3, Vec3, Vec3)>> = self
+            .vehicles
+            .iter()
+            .map(|v| {
+                v.nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (v.origin + n.pos, n.vel, v.force_now(i)))
+                    .collect()
+            })
+            .collect();
+        for v in &mut self.vehicles {
+            v.step_nodes();
+        }
+        self.guard_final(&v0, Some((&mut ledger, &mut before)));
         for (k, v) in self.vehicles.iter_mut().enumerate() {
-            let before: Vec<(Vec3, Vec3, Vec3)> = v
-                .nodes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (v.origin + n.pos, n.vel, v.force_now(i)))
-                .collect();
-            v.step();
-            ledger.account(k, v, &before);
+            v.step_rest();
+            ledger.account(k, v, &before[k]);
         }
         self.steps += 1;
         ledger.vc_reset(&self.vehicles);
@@ -568,6 +610,7 @@ impl ExplicitBeamsWorld {
 
     /// The bounding boxes (spec §4.1) and the vehicle-contact pass (§3.1 3).
     pub fn contact_pass(&mut self) {
+        self.staged_hits.clear();
         let nv = self.vehicles.len();
         if self.vehicles.iter().any(|v| v.two_body_contact) {
             self.pass_force.resize(nv, Vec::new());
@@ -1030,6 +1073,17 @@ impl ExplicitBeamsWorld {
                 f = f + g;
             }
             self.apply_vehicle_hit(a, x, f);
+            if f != Vec3::ZERO {
+                self.staged_hits.push(StagedHit {
+                    a,
+                    b: x.b,
+                    h: x.h,
+                    tri: x.tri,
+                    w: x.w,
+                    n: x.n,
+                    f,
+                });
+            }
         }
     }
 
@@ -1065,6 +1119,107 @@ impl ExplicitBeamsWorld {
         if let Some(l) = self.vehicles[b].contact_force.as_mut() {
             l.add(h as usize, f);
         }
+    }
+
+    /// Every vehicle's velocities before this step's node updates, when the last
+    /// contact pass staged hits ([`Self::guard_final`]); empty otherwise.
+    fn staged_velocities(&self) -> Vec<Vec<Vec3>> {
+        if self.staged_hits.is_empty() {
+            return Vec::new();
+        }
+        self.vehicles
+            .iter()
+            .map(|v| v.nodes.iter().map(|n| n.vel).collect())
+            .collect()
+    }
+
+    /// §37.1's work guard on the final velocities: after every vehicle's node
+    /// update and centred damping correction (`ExplicitBeams::step_nodes`), each
+    /// hit the last contact pass staged ([`StagedHit`], in its order) is checked
+    /// at the pair's realised mean velocity over the step, (v₀ + v′)/2, with the
+    /// forces its nodes actually took (the fixed-point sums' rounding of its
+    /// shares, `ExplicitBeams::applied_contact`). Where its work is positive its
+    /// force is scaled by s ∈ [0, 1) to zero work, s solving
+    /// s·q·(u + s·h·q·Σ w²/m) = 0 with u the pair's mean relative velocity less
+    /// the hit's own share: its nodes' velocities lose (1 − s)·h·q·w/m and their
+    /// positions h times that (the node update's x += h·v), equal and opposite
+    /// (momentum kept).
+    ///
+    /// The guard at the contact pass (`guard_vehicle_pass`) predicts the end
+    /// velocity as v + h·F/m; the centred damping's correction after the node
+    /// update moves it by h·c/m, and the shared nodes of several hits, the
+    /// residual pass and the sums' rounding move it too. Measured: a stuck striker
+    /// node on the struck door in the showcase's 80 km/h T-bone did +0.5–1 mJ a
+    /// step for 0.1 s with the earlier guard alone (`tests/vehicle_contact_work.rs`).
+    ///
+    /// With the ledger, the scaled part of each force leaves its vehicle-contact
+    /// terms and the forces the step started with (`before`), so the ledger
+    /// still closes.
+    fn guard_final(
+        &mut self,
+        v0: &[Vec<Vec3>],
+        mut ledger: Option<(&mut EnergyLedger, &mut Vec<Vec<(Vec3, Vec3, Vec3)>>)>,
+    ) {
+        if self.staged_hits.is_empty() || !self.final_guard {
+            return;
+        }
+        let hits = std::mem::take(&mut self.staged_hits);
+        let h = STEP;
+        for x in &hits {
+            let (va, vb) = (&self.vehicles[x.a], &self.vehicles[x.b]);
+            let im = |v: &ExplicitBeams, i: u32| {
+                let n = &v.nodes[i as usize];
+                if n.has(NODE_IMMOVABLE) || v.is_retired(i as usize) {
+                    0.0
+                } else {
+                    1.0 / n.mass
+                }
+            };
+            // The shares each node took: +f on the contacter, −f·w on the triangle.
+            let qb = vb.applied_contact(x.f);
+            let qa = [0, 1, 2].map(|k| va.applied_contact(-(x.f * x.w[k])));
+            let mut work = qb.dot(v0[x.b][x.h as usize] + vb.nodes[x.h as usize].vel);
+            let mut lose = qb.dot(qb) * im(vb, x.h);
+            for k in 0..3 {
+                let i = x.tri[k] as usize;
+                work += qa[k].dot(v0[x.a][i] + va.nodes[i].vel);
+                lose += qa[k].dot(qa[k]) * im(va, x.tri[k]);
+            }
+            // `work` is 2·W/h at the full force. At s of it the nodes keep s of the
+            // hit's velocity change: 2·W(s)/h = s·(work − (1 − s)·h·lose).
+            if work <= 0.0 || lose <= 0.0 {
+                continue;
+            }
+            // Zero work at r = 1 − s = work/(h·lose) (all of it past 1). Taken as r
+            // itself, not 1 − s: a stuck contact needs r ~ 10⁻⁴, which 1 − s
+            // in single precision leaves with a relative error of 10⁻³.
+            let r = (work / (h * lose)).min(1.0);
+            let dvb = qb * (-r * h * im(vb, x.h));
+            self.vehicles[x.b].nudge(x.h as usize, dvb);
+            for k in 0..3 {
+                let i = x.tri[k] as usize;
+                let dva = qa[k] * (-r * h * im(&self.vehicles[x.a], x.tri[k]));
+                self.vehicles[x.a].nudge(i, dva);
+            }
+            if let Some((l, before)) = ledger.as_mut() {
+                let fnorm = x.n * x.f.dot(x.n);
+                let ft = x.f - fnorm;
+                for (v, i, wk) in [
+                    (x.b, x.h, -1.0f32),
+                    (x.a, x.tri[0], x.w[0]),
+                    (x.a, x.tri[1], x.w[1]),
+                    (x.a, x.tri[2], x.w[2]),
+                ] {
+                    let i = i as usize;
+                    l.vc[v][0][i] += fnorm * (wk * r);
+                    l.vc[v][1][i] += ft * (wk * r);
+                    before[v][i].2 += x.f * (wk * r);
+                }
+            }
+        }
+        // (The buffer back, empty, for the next contact pass.)
+        self.staged_hits = hits;
+        self.staged_hits.clear();
     }
 
     /// §37.1's work guard over owner `a`'s staged hits (`on`; forces `first`,
@@ -1289,6 +1444,14 @@ impl EnergyLedger {
             + self.w_ground_vertical
             + self.w_ground_horizontal
             - self.discretisation
+    }
+
+    /// Vehicle `v`'s node `i`: the vehicle-contact force on it this step
+    /// (normal and friction; read after [`ExplicitBeamsWorld::step`]).
+    pub fn vehicle_contact(&self, v: usize, i: usize) -> Vec3 {
+        self.vc
+            .get(v)
+            .map_or(Vec3::ZERO, |c| c[0].get(i).copied().unwrap_or_default() + c[1].get(i).copied().unwrap_or_default())
     }
 
     fn account(&mut self, k: usize, v: &ExplicitBeams, before: &[(Vec3, Vec3, Vec3)]) {

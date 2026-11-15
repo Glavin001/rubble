@@ -193,7 +193,18 @@ pub struct RoleSpec {
     pub support: bool,
     /// Carries deformLimitExpansion 1.2 (BeamNG: on 37–49 % of body beams).
     pub limit_expansion: bool,
+    /// Yield as a share of the beam's strength: beamDeform = share × beamStrength
+    /// (0: by [`Self::eps`]). Hardware whose strength is set per mount (hinges).
+    pub yield_share: f32,
 }
+
+/// A hinge beam yields at this share of its strength (beamDeform = 0.4 ×
+/// beamStrength: doors and hood 16 kN, boot 10 kN, in the census's door band of
+/// 10–77 kN), and carries deformLimitExpansion 1.2 like the body's limited
+/// beams (a bounded bend, then elastic about it until its strength): a hinge
+/// bends before it breaks (`tests/sedan_hinges.rs`; the measurement,
+/// `engine/docs/measurements/hinge-breaks.md`).
+pub const HINGE_YIELD_SHARE: f32 = 0.4;
 
 /// Census k·L bands of a part's sheet (N): body 0.8–1.1e6, doors 0.4–1.0e6,
 /// bonnet 2.2–4.7e5, boot 2.2–5e5, fenders 1.5–4.3e5, bumper covers 0.4–1.3e5.
@@ -277,11 +288,30 @@ pub const CLIP_COMPRESSION: f32 = 0.05;
 /// Damping ratio of every spring beam (census ζ 0.03–0.05).
 pub const ZETA: f32 = 0.04;
 
+/// A defined spring beam's damping (N·s/m): its definition's `c`, raised to
+/// the census ratio [`ZETA`] on its final spring `k` and the reduced mass
+/// `mu` of its nodes. A part defined with one damping for every beam (the
+/// seats' 38 N·s/m) on springs set by the node budget was at ζ 0.006–0.03:
+/// the empty front seat rocked at 12 Hz with a modal ζ of 0.008 and still
+/// moved 0.07 mm five seconds after spawn (`tests/sedan_jello.rs`). Stops
+/// and rubber mounts (`normal` false) keep their defined value.
+pub fn defined_damping(c: f32, normal: bool, k: f32, mu: f32) -> f32 {
+    if normal && k > 0.0 {
+        c.max(2.0 * ZETA * (k * mu).sqrt())
+    } else {
+        c
+    }
+}
+
 /// The explicit step's real bound with margin: the highest spring mode at
 /// ω_max·h ≤ 1.85 (symplectic Euler diverges past 2).
 pub const OMEGA_H: f32 = 1.85;
 /// The bound under centred damping (§39: stable below 2 at any ζ), with margin.
 pub const OMEGA_H_CENTRED: f32 = 1.92;
+/// Per-node stiffness budget Σk/m (s⁻²) for defined beams with no spring of
+/// their own (the measured cars sit at 7–10e6: `beamng-structure-study.md`
+/// §7.1).
+pub const NODE_BUDGET: f32 = 8.5e6;
 
 impl Role {
     /// Lane ties and shut-line edge ties: the springs the stability bound
@@ -302,6 +332,7 @@ impl Role {
             kg_per_m,
             support: false,
             limit_expansion: lim,
+            yield_share: 0.0,
         };
         let fixed = |k: f32, eps: f32, strength: f32| RoleSpec {
             k_fixed: k,
@@ -334,7 +365,11 @@ impl Role {
             // Elastic: a light lane node follows the panel (its own beams yield).
             Role::Tie | Role::Backing => s(sheet_kl(part), f32::INFINITY, 0.0, false),
             // Hardware (census: hinges 30–98 kN a beam, k 0.5–3e6).
-            Role::Hinge => fixed(1.5e6, inf, 40e3),
+            Role::Hinge => RoleSpec {
+                yield_share: HINGE_YIELD_SHARE,
+                limit_expansion: true,
+                ..fixed(1.5e6, inf, 40e3)
+            },
             Role::Bolt => fixed(0.8e6, inf, 9e3),
             Role::Clip => fixed(0.8e6, inf, 9e3),
             Role::EdgeTie => s(sheet_kl(part), e, 0.0, false),
@@ -377,6 +412,10 @@ pub struct Node {
     /// edge nodes does not lighten them; the edge ties give way to the
     /// step's bound instead).
     pub edge: bool,
+    /// The definition part it belongs to (a mechanical or interior part of
+    /// `engine_vehiclegen::mechanical`, a pane's centre node): its own JBeam
+    /// part and node group. None: its [`Part`]'s.
+    pub sub: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -392,12 +431,75 @@ pub struct Beam {
     pub break_group: Option<String>,
     /// JBeam deformLimit (compression: L ≥ (1 − d)·L₀), 0 for none.
     pub deform_limit: f32,
+    /// The definition part whose JBeam part lists it (see [`Node::sub`]).
+    pub sub: Option<String>,
+}
+
+/// How a defined beam acts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FixedKind {
+    Normal,
+    /// Pushes only (a stop, a rest).
+    Support,
+    /// A rubber mount: its spring within `travel` (a share of its length
+    /// either way), then the limit spring and damping.
+    Bounded {
+        travel: f32,
+        limit_k: f32,
+        limit_c: f32,
+    },
+}
+
+/// A beam whose values come from its part's definition
+/// (`engine_vehiclegen::{structure, mechanical}`, [`super::shell`]), not from
+/// its role's census band: spring (None: from the node budget), damping and
+/// yield force as defined. [`Car::assign_springs`] keeps them; only the
+/// step's bound may lower the spring, and [`Car::k_rule`] records what it
+/// was asked for.
+#[derive(Clone, Debug)]
+pub struct Fixed {
+    pub k: Option<f32>,
+    pub c: f32,
+    pub deform: f32,
+    pub kind: FixedKind,
+    /// JBeam deformLimitExpansion (0: none).
+    pub limit_expansion: f32,
+    /// (deform group, trigger ratio).
+    pub deform_group: Option<(String, f32)>,
+}
+
+/// A torsion bar over four nodes (twist about 2–3).
+#[derive(Clone, Debug)]
+pub struct Torsion {
+    pub n: [usize; 4],
+    pub k: f32,
+    pub c: f32,
+    pub deform: f32,
+}
+
+/// The nodes a render mesh binds to, when its part's definition names them.
+#[derive(Clone, Debug, Default)]
+pub struct Bind {
+    pub nodes: Vec<usize>,
+    /// The definition part whose JBeam part carries the flexbody row.
+    pub owner: Option<String>,
+    /// One frame for the piece.
+    pub rigid: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Tri {
     pub n: [usize; 3],
     pub part: Part,
+    /// JBeam `breakGroup`: the triangle dies with that group (a collision
+    /// skin triangle bridging a seam dies with its part's fastening).
+    pub group: Option<String>,
+    /// The mechanical or interior part it belongs to (its JBeam file), as
+    /// [`Node::sub`].
+    pub sub: Option<String>,
+    /// Inside the car (an interior or structural face, a part's own
+    /// solid): it collides and has no air on it (`dragCoef` 0).
+    pub inner: bool,
 }
 
 /// A point mass the structure carries.
@@ -447,9 +549,50 @@ pub struct Car {
     /// the damping, so the bound is the springs' highest mode at
     /// [`OMEGA_H_CENTRED`], damping not counted.
     pub centred_damping: bool,
+    /// The collision triangles' aerodynamics (JBeam `dragCoef`, `liftCoef`),
+    /// written as a modifier row before them; None: the JBeam defaults.
+    pub tri_aero: Option<(f32, f32)>,
     /// Per [`Role::Stop`] beam: the closure (m) after which it engages
     /// (absent: [`super::export::STOP_LEFT`] of its length left).
     pub stop_close: HashMap<usize, f32>,
+    /// Gapped stops ([`Role::Stop`]) as push-only springs inside the step's
+    /// bound: each takes [`super::export::STOP_SPRING`] where its nodes can
+    /// carry it engaged and less where they cannot (the power iteration
+    /// counts every stop as engaged and softens the stops first), and is
+    /// written as a SUPPORT beam whose rest length is the length at which it
+    /// engages, so its force starts from zero there and it lets go when the
+    /// parts have separated. False (the earlier cars): a BOUNDED beam with no
+    /// base spring, whose limit spring acts on the beam's whole extension
+    /// the moment a bound is crossed (jbeam-semantics-spec.md section 5): about
+    /// 1 MN at the short bound and, a hundred lengths away, 1e8 N on a part
+    /// that had left the car.
+    pub stops_in_bound: bool,
+    /// Damping ratio of the bumpers' beams (None: [`ZETA`] as every part;
+    /// the census's bumper covers run at 0.07-0.33).
+    pub bumper_zeta: Option<f32>,
+    /// Per beam: JBeam `beamPrecompression` (a preloaded seal or bump stop).
+    pub precomp: HashMap<usize, f32>,
+    /// Per beam: values from its part's definition ([`Fixed`]).
+    pub fixed: HashMap<usize, Fixed>,
+    /// Per beam: the spring it was given before the step's bound (the row
+    /// cap and the power iteration) lowered any ([`Car::assign_springs`]).
+    pub k_rule: Vec<f32>,
+    /// The power iteration's bound on ω·h (None: [`OMEGA_H`], or
+    /// [`OMEGA_H_CENTRED`] under centred damping).
+    pub omega_limit: Option<f32>,
+    /// Per node stiffness budget Σk/m (s⁻²) for the defined beams whose
+    /// spring is left to it (0: [`NODE_BUDGET`]).
+    pub node_budget: f32,
+    /// The crash character's yield-strain multiples for the panels and the
+    /// bumper covers (`engine_vehiclegen::physics::CrashFeel`; None: 1).
+    pub panel_yield: Option<(f32, f32)>,
+    /// The raycast wheel's mass (kg) when the wheel part's own nodes carry
+    /// the rest of the defined wheel (exported as `raycastWheelMass`; None:
+    /// the solver's 20 kg).
+    pub raycast_wheel_kg: Option<f32>,
+    pub torsion: Vec<Torsion>,
+    /// Render mesh name: the nodes it binds to ([`Bind`]).
+    pub bind: BTreeMap<String, Bind>,
     by_name: HashMap<String, usize>,
     pair: HashMap<(usize, usize), usize>,
 }
@@ -469,6 +612,7 @@ impl Car {
             no_group: false,
             fixed_mass: 0.0,
             edge: false,
+            sub: None,
         });
         let i = self.nodes.len() - 1;
         self.by_name.insert(name.to_string(), i);
@@ -511,6 +655,7 @@ impl Car {
             strength: sp.strength,
             break_group: None,
             deform_limit: 0.0,
+            sub: None,
         });
         let j = self.beams.len() - 1;
         self.pair.insert(key, j);
@@ -589,9 +734,17 @@ impl Car {
             cen - axis
         };
         if n.dot(out) >= 0.0 {
-            self.tris.push(Tri { n: [a, b, c], part });
+            self.tris.push(Tri {
+                n: [a, b, c],
+                part,
+                group: None, sub: None, inner: false,
+            });
         } else {
-            self.tris.push(Tri { n: [a, c, b], part });
+            self.tris.push(Tri {
+                n: [a, c, b],
+                part,
+                group: None, sub: None, inner: false,
+            });
         }
     }
 
@@ -1002,25 +1155,76 @@ impl Car {
             .collect();
         let mu = |b: &Beam| m[b.a] * m[b.b] / (m[b.a] + m[b.b]);
         let mult = stiff_mult();
-        let mut ks: Vec<f32> = self
-            .beams
-            .iter()
-            .zip(&len)
-            .map(|(b, &l)| {
-                let sp = b.role.spec(b.part);
-                mult * if sp.k_fixed > 0.0 {
-                    sp.k_fixed
-                } else {
-                    sp.kl / l.max(SPRING_LENGTH)
-                }
-            })
-            .collect();
-        let damp = |k: f32, b: &Beam| 2.0 * ZETA * (k * mu(b)).sqrt();
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (j, b) in self.beams.iter().enumerate() {
             adj[b.a].push(j);
             adj[b.b].push(j);
         }
+        // A defined beam with no spring of its own takes its nodes' budget:
+        // Σk/m shared by the bilateral beams at its lighter-loaded end.
+        let budget = if self.node_budget > 0.0 {
+            self.node_budget
+        } else {
+            NODE_BUDGET
+        };
+        let fixed = &self.fixed;
+        let ends = |i: usize| {
+            adj[i]
+                .iter()
+                .filter(|j| {
+                    fixed.get(j).map_or(true, |f| {
+                        !matches!(f.kind, FixedKind::Support | FixedKind::Bounded { .. })
+                    })
+                })
+                .count()
+                .max(1) as f32
+        };
+        let mut ks: Vec<f32> = self
+            .beams
+            .iter()
+            .zip(&len)
+            .enumerate()
+            .map(|(j, (b, &l))| {
+                if let Some(f) = fixed.get(&j) {
+                    return f
+                        .k
+                        .unwrap_or_else(|| budget * (m[b.a] / ends(b.a)).min(m[b.b] / ends(b.b)));
+                }
+                let sp = b.role.spec(b.part);
+                let k = mult
+                    * if sp.k_fixed > 0.0 {
+                        sp.k_fixed
+                    } else {
+                        sp.kl / l.max(SPRING_LENGTH)
+                    };
+                // On a car built to a node budget, a shut line's edge node
+                // is tied within its own: the sheet's rule on a 0.5 kg node
+                // is six times its budget, and the stability pass then
+                // stripped those ties until the node rang at 6-20 Hz and
+                // never settled.
+                if self.node_budget > 0.0 && matches!(b.role, Role::EdgeTie) {
+                    k.min(budget * (m[b.a] / ends(b.a)).min(m[b.b] / ends(b.b)))
+                } else {
+                    k
+                }
+            })
+            .collect();
+        let k_rule = ks.clone();
+        let bz = self.bumper_zeta;
+        let zeta_of = move |b: &Beam| match (b.part, bz) {
+            (Part::BumperF | Part::BumperR, Some(z)) => z,
+            _ => ZETA,
+        };
+        // A defined spring's damping is at least the census ratio
+        // ([`ZETA`]): a defined value is a floor, not a ceiling (see
+        // [`defined_damping`]). Stops and rubber mounts keep theirs.
+        let fixed_c: Vec<Option<(f32, bool)>> = (0..self.beams.len())
+            .map(|j| fixed.get(&j).map(|f| (f.c, f.kind == FixedKind::Normal)))
+            .collect();
+        let damp = |j: usize, k: f32, b: &Beam| match fixed_c[j] {
+            Some((c, normal)) => defined_damping(c, normal, k, mu(b)),
+            None => 2.0 * zeta_of(b) * (k * mu(b)).sqrt(),
+        };
         // The cap: rows past row_cap × sedan1's bound scale their beams back
         // (the lane nodes' ties, mostly).
         let cap = row_cap() * ROW_BOUND;
@@ -1032,7 +1236,7 @@ impl Car {
                     .map(|&j| {
                         let b = &self.beams[j];
                         let o = if b.a == i { b.b } else { b.a };
-                        let q = H * H * ks[j] + 2.0 * H * damp(ks[j], b);
+                        let q = H * H * ks[j] + 2.0 * H * damp(j, ks[j], b);
                         q * (1.0 / m[i] + 1.0 / (m[i] * m[o]).sqrt())
                     })
                     .sum();
@@ -1051,7 +1255,7 @@ impl Car {
                             .map(|&j| {
                                 let b = &self.beams[j];
                                 let o = if b.a == i { b.b } else { b.a };
-                                let q = H * H * ks[j] + 2.0 * H * damp(ks[j], b);
+                                let q = H * H * ks[j] + 2.0 * H * damp(j, ks[j], b);
                                 q * (1.0 / m[i] + 1.0 / (m[i] * m[o]).sqrt())
                             })
                             .sum()
@@ -1078,6 +1282,15 @@ impl Car {
             }
             if !over {
                 break;
+            }
+        }
+        // Gapped stops count engaged, at their own spring.
+        if self.stops_in_bound {
+            let k_stop = env_f("GEN3_STOP_SPRING", super::export::STOP_SPRING);
+            for (j, b) in self.beams.iter().enumerate() {
+                if b.role == Role::Stop && !fixed.contains_key(&j) {
+                    ks[j] = k_stop;
+                }
             }
         }
         // The real bound: the highest mode of M⁻¹K (power iteration), the
@@ -1133,7 +1346,7 @@ impl Car {
                         + if centred {
                             0.0
                         } else {
-                            2.0 * damp(ks[j], b) / H
+                            2.0 * damp(j, ks[j], b) / H
                         };
                     let f = d * (keff * d.dot(x[b.a] - x[b.b]));
                     y[b.a] += f;
@@ -1153,7 +1366,9 @@ impl Car {
                 x = y.into_iter().map(|v| v / ny.max(1e-30)).collect();
             }
             omega_h = lam.sqrt() * H;
-            let limit = if centred { OMEGA_H_CENTRED } else { OMEGA_H };
+            let limit = self
+                .omega_limit
+                .unwrap_or(if centred { OMEGA_H_CENTRED } else { OMEGA_H });
             if std::env::var("GEN3_MODE").is_ok()
                 && (round < 3 || round % 50 == 0 || omega_h <= OMEGA_H)
             {
@@ -1185,7 +1400,7 @@ impl Car {
                         + if centred {
                             0.0
                         } else {
-                            2.0 * damp(ks[j], b) / H
+                            2.0 * damp(j, ks[j], b) / H
                         };
                     keff * dirs[j].dot(x[b.a] - x[b.b]).powi(2)
                 })
@@ -1193,23 +1408,47 @@ impl Car {
             let emax = e.iter().copied().fold(0.0, f32::max);
             // Where the mode's carriers include a shut line's edge ties or
             // stops, only those give (the panel keeps its census springs).
-            let edge_first = (0..e.len()).any(|j| {
-                e[j] >= 0.25 * emax && matches!(self.beams[j].role, Role::EdgeTie | Role::EdgeStop)
-            });
+            // (A gapped stop gives before anything else does: it is not part
+            // of the structure at rest.)
+            let stops = self.stops_in_bound;
+            let gives =
+                |r: Role| matches!(r, Role::EdgeTie | Role::EdgeStop) || (stops && r == Role::Stop);
+            let edge_first =
+                (0..e.len()).any(|j| e[j] >= 0.25 * emax && gives(self.beams[j].role));
             for j in 0..e.len() {
-                let edge = matches!(self.beams[j].role, Role::EdgeTie | Role::EdgeStop);
+                let edge = gives(self.beams[j].role);
                 if e[j] >= 0.25 * emax && (edge || !edge_first) {
                     ks[j] *= 0.97;
                 }
             }
         }
         self.omega_h = omega_h;
+        self.k_rule = k_rule;
         for (j, b) in self.beams.iter_mut().enumerate() {
             let sp = b.role.spec(b.part);
             b.k = ks[j];
-            b.c = 2.0 * ZETA * (ks[j] * (m[b.a] * m[b.b] / (m[b.a] + m[b.b]))).sqrt();
-            b.deform = if sp.eps.is_finite() {
-                sp.eps * ks[j] * len[j].max(SPRING_LENGTH)
+            if let Some(f) = self.fixed.get(&j) {
+                let mu = m[b.a] * m[b.b] / (m[b.a] + m[b.b]);
+                b.c = defined_damping(f.c, f.kind == FixedKind::Normal, ks[j], mu);
+                b.deform = f.deform;
+                continue;
+            }
+            let z = match (b.part, bz) {
+                (Part::BumperF | Part::BumperR, Some(z)) => z,
+                _ => ZETA,
+            };
+            b.c = 2.0 * z * (ks[j] * (m[b.a] * m[b.b] / (m[b.a] + m[b.b]))).sqrt();
+            // (the crash character's panel multiple: a statement about the
+            // panels' sheet, applied to every beam of the part alike)
+            let feel = match b.part {
+                Part::Body | Part::Engine => 1.0,
+                Part::BumperF | Part::BumperR => self.panel_yield.map_or(1.0, |p| p.1),
+                _ => self.panel_yield.map_or(1.0, |p| p.0),
+            };
+            b.deform = if sp.yield_share > 0.0 {
+                sp.yield_share * b.strength
+            } else if sp.eps.is_finite() {
+                feel * sp.eps * ks[j] * len[j].max(SPRING_LENGTH)
             } else {
                 f32::INFINITY
             };

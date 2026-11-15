@@ -6,9 +6,28 @@ use wgpu::util::DeviceExt;
 fn main() {
     std::env::set_var("RUBBLE_GPU_TIMING", "1");
     let (_, device, queue) = engine_webgpu::default_device().unwrap();
-    let src = "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
+    // DISPATCH_WG=<words>: the kernel also uses a workgroup array of that many words
+    // (zero-initialised by the shader translator at each workgroup's start).
+    let wg: u32 = std::env::var("DISPATCH_WG")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(0);
+    let src = if wg == 0 {
+        "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
 @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) g: vec3<u32>) {
-  if (g.x < arrayLength(&b)) { b[g.x] = b[g.x] + 1u; } }";
+  if (g.x < arrayLength(&b)) { b[g.x] = b[g.x] + 1u; } }"
+            .to_string()
+    } else {
+        format!(
+            "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
+var<workgroup> w: array<u32, {wg}>;
+@compute @workgroup_size(256) fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_index) l: u32) {{
+  w[l] = w[l] + 1u;
+  workgroupBarrier();
+  if (g.x < arrayLength(&b)) {{ b[g.x] = b[g.x] + w[(l + 1u) % 256u]; }} }}"
+        )
+    };
+    println!("workgroup array: {wg} words");
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
         source: wgpu::ShaderSource::Wgsl(src.into()),
@@ -52,6 +71,25 @@ fn main() {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        {
+            let mut wall = f64::MAX;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                let mut enc = device.create_command_encoder(&Default::default());
+                {
+                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                    pass.set_pipeline(&pipe);
+                    pass.set_bind_group(0, &group, &[]);
+                    for _ in 0..340 {
+                        pass.dispatch_workgroups(elems.div_ceil(256), 1, 1);
+                    }
+                }
+                queue.submit([enc.finish()]);
+                let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                wall = wall.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("{elems:6} threads: wall {wall:.3} ms for 340 dependent dispatches");
+        }
         for n in [1u32, 51, 1000] {
             let mut best = f64::MAX;
             for _ in 0..5 {

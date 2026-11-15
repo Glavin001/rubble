@@ -177,6 +177,7 @@ const QUIET: ExplicitBeamsSettings = ExplicitBeamsSettings {
     fast_inv_sqrt: true,
     triangle_throttle: true,
     centred_damping: false,
+    centred_objective: false,
 };
 
 /// A 0.3 m × 0.5 m plate (node lines at z = ±0.25, braced), its two collision

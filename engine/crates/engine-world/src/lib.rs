@@ -35,6 +35,8 @@ mod explicit_vehicles;
 pub mod explicit_scene;
 pub mod showcase_scene;
 pub mod brick_ring_drive;
+#[cfg(feature = "stress")]
+pub mod vehicle_lab;
 mod guidance;
 mod handles;
 mod host_state;
@@ -2199,6 +2201,12 @@ impl World {
     /// browser's main thread) step only when this holds, and poll otherwise.
     pub fn can_step_without_waiting(&self) -> bool {
         self.readback.has_free()
+    }
+
+    /// Steps whose readback is still in flight (a host's back-pressure: it may hold
+    /// the queue shorter than the readback slots allow).
+    pub fn readbacks_in_flight(&self) -> usize {
+        self.readback.in_flight()
     }
 
     /// Advance one fixed step (queued commands first). Never waits on a

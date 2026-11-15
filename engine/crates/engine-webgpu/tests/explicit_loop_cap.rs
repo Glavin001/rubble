@@ -310,6 +310,12 @@ fn every_explicit_slang_loop_is_capped() {
     assert_eq!(engine_webgpu::EXPLICIT_LOOP_CAP, EXPLICIT_LOOP_CAP, "the WGSL post-process's cap");
 }
 
+/// Whether a module carries the Slang caps (explicit_loop_cap.slang): its cap functions
+/// (the counted loops' ends raise the flag without a call of ebLoopCapHit).
+fn slang_caps(wgsl: &str) -> bool {
+    ["fn ebLoopCapHit_0(", "fn ebEnd_0(", "fn ebEndMost_0("].iter().any(|f| wgsl.contains(f))
+}
+
 #[test]
 fn every_shipped_explicit_loop_is_capped_and_valid() {
     let modules = explicit_beams_shipped_wgsl();
@@ -319,12 +325,12 @@ fn every_shipped_explicit_loop_is_capped_and_valid() {
         // module with a loop that is not constant (a few wide passes have none).
         let (loops, _, _, literal) = census(wgsl);
         assert!(
-            loops == literal || wgsl.contains("fn ebLoopCapHit_0("),
+            loops == literal || slang_caps(wgsl),
             "{name}: no Slang loop caps"
         );
         assert!(!wgsl.contains("loopGuard") && !wgsl.contains("ebLoopHit ="), "{name}: post-processed");
         // The flag reaches gAcc where the entry point ends (ebLoopCapFlush).
-        if wgsl.contains("fn ebLoopCapHit_0(") {
+        if slang_caps(wgsl) {
             assert!(wgsl.contains("ebLoopCapFlush_0();"), "{name}: the entry point never flushes the flag");
         }
         let module = naga::front::wgsl::parse_str(wgsl)
@@ -349,7 +355,7 @@ fn every_shipped_explicit_loop_is_capped_and_valid() {
             continue;
         }
         let wgsl = std::fs::read_to_string(&path).unwrap();
-        if wgsl.contains("fn ebLoopCapHit_0(") {
+        if slang_caps(&wgsl) {
             assert!(!wgsl.contains("loopGuard"), "{name}: capped twice");
             slang += 1;
             continue;

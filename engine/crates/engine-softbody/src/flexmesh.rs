@@ -644,6 +644,11 @@ pub struct FlexReport {
     /// Meshes a row names that no Collada file has, and vertices with no frame.
     pub missing: Vec<String>,
     pub unbound: usize,
+    /// The desc's raycast wheels that a weighted skin (`.rskin`) draws: a
+    /// skinned vertex follows one of the wheel's axle nodes. A vehicle whose
+    /// wheels are parts with their own nodes and meshes (the generated cars)
+    /// draws its wheels this way; the page then adds no stand-in wheels.
+    pub wheels_skinned: usize,
 }
 
 /// The visual of a loaded JBeam vehicle: `flex` and `props` its assembled
@@ -684,6 +689,23 @@ pub fn jbeam_visual_skinned(
     materials: &HashMap<String, MatInfo>,
     paint: [f32; 3],
     skin: Option<&crate::flexskin::Skin>,
+) -> Result<(ShowcaseVisual, FlexReport), String> {
+    jbeam_visual_skin(flex, props, desc, sim, meshes, materials, paint, skin.map(crate::flexskin::SkinRef::Decoded))
+}
+
+/// [`jbeam_visual_skinned`] on a skin decoded or read in place
+/// ([`crate::flexskin::SkinRef`]: a sidecar's bytes, [`crate::flexskin::SkinBytes`]):
+/// the same visual either way.
+#[allow(clippy::too_many_arguments)]
+pub fn jbeam_visual_skin(
+    flex: &[(String, Map<String, Value>)],
+    props: &[(String, Map<String, Value>)],
+    desc: &SoftVehicleDesc,
+    sim: &crate::explicit_beams::ExplicitBeams,
+    meshes: &[DaeMesh],
+    materials: &HashMap<String, MatInfo>,
+    paint: [f32; 3],
+    skin: Option<crate::flexskin::SkinRef>,
 ) -> Result<(ShowcaseVisual, FlexReport), String> {
     // A mesh material's class and colour: its name's class, made glass when
     // the material is translucent and emissive when it glows; its diffuse
@@ -780,7 +802,14 @@ pub fn jbeam_visual_skinned(
         ..Default::default()
     };
     let mut rep = FlexReport::default();
+    let mut skinned_nodes: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut wt_cnt: Vec<u32> = Vec::new();
+    // The entries' lists at their size up front: grown by doubling, a generated car's
+    // (14 million entries, 16 bytes each) would hold its old and new blocks at once.
+    if let Some(sk) = skin {
+        out.wt_node.reserve_exact(sk.entries());
+        out.wt_w.reserve_exact(sk.entries());
+    }
     let mut add = |name: &str,
                    m: &DaeMesh,
                    xf: Mat4,
@@ -1025,17 +1054,22 @@ pub fn jbeam_visual_skinned(
             let first = out.positions.len();
             if let Some(ms) = skinned {
                 let sk = skin.unwrap();
-                if ms.verts.len() != m.pos.len() {
-                    return Err(format!("{mesh}: {} skinned vertices for {}", ms.verts.len(), m.pos.len()));
+                if ms.len() != m.pos.len() {
+                    return Err(format!("{mesh}: {} skinned vertices for {}", ms.len(), m.pos.len()));
                 }
                 // The skin's node names to solver nodes.
                 let map: Vec<u32> = sk
-                    .nodes
+                    .nodes()
                     .iter()
                     .map(|n| by_name.get(n.as_str()).and_then(|&i| sim_of[i as usize]).ok_or_else(|| format!("{mesh}: skin node {n} is not the vehicle's")))
                     .collect::<Result<_, _>>()?;
                 let first = out.positions.len() as u32;
-                for (k, sv) in ms.verts.iter().enumerate() {
+                for sv in ms.verts() {
+                    for e in &sv.w {
+                        skinned_nodes.insert(map[e.0 as usize]);
+                    }
+                }
+                for (k, sv) in ms.verts().enumerate() {
                     let p = to_r(xf.transform_point3(m.pos[k]));
                     let n = to_r(xf.transform_vector3(m.nrm[k])).normalize_or(Vec3::Y);
                     let mut top = sv.w.clone();
@@ -1258,6 +1292,15 @@ pub fn jbeam_visual_skinned(
     if !out.wheel.is_empty() {
         out.wheel.resize(out.positions.len(), u32::MAX);
     }
+    rep.wheels_skinned = desc
+        .wheels
+        .iter()
+        .filter(|w| {
+            [w.node1, w.node2]
+                .iter()
+                .any(|&i| sim_of.get(i as usize).copied().flatten().is_some_and(|k| skinned_nodes.contains(&k)))
+        })
+        .count();
     Ok((out, rep))
 }
 

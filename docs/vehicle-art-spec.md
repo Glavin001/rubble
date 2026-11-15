@@ -97,7 +97,11 @@ Place empties (glTF nodes without a mesh) at the real mounting points. We use th
 | Each wheel (rim, tyre, disc) | at most 15,000 |
 | Interior | at most 80,000 |
 | Lamps, glass, trim, under-bonnet | at most 60,000 |
-| **Total** | **at most 500,000** |
+| Body structure (the body-in-white's members: rails, sills, floor, firewall, towers) | at most 40,000 |
+| Mechanical parts (subframes, suspension, engine, driveline, exhaust, tank, radiator) | at most 60,000 |
+| **Total** | **at most 600,000** |
+
+The structure and mechanical groups were added on 2026-11-12, and the total raised from 500,000 to 600,000 with them: the physics is built one-to-one on visible members (`engine/docs/beamng-structure-study.md` §10), so the body-in-white and the mechanical parts are modelled as closed solids instead of placeholder boxes. Budgets are raised, never met by decimating.
 
 ## Materials and textures
 
@@ -145,6 +149,8 @@ No. We generate the structure. The inner panels, firewall and wheel wells above 
 ### Should parts be thick solids?
 
 No. Use a single-sided outer skin plus a hem at the edges, and an inner panel on closures. Solid thick shells double the vertex count without helping.
+
+Our own generator goes further: it builds every panel and pane as a closed solid (outer skin, edge walls, inner face) and tags each vertex, so a part looks whole on its own while the physics follows the outer skin only. See [engine-vehiclegen, "Solid parts"](../engine/crates/engine-vehiclegen/README.md#solid-parts). A delivered model does not have to.
 
 ### Can I go denser than 15 mm?
 

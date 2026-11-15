@@ -557,3 +557,237 @@ pub fn surface_shape(bp: Vec3, bq: Quat, s: &mut ProxyShape) -> SurfaceShape {
         }
     }
 }
+
+/// The coupling's per-frame candidate list (a Verlet list with a checked skin; the GPU's
+/// `explicit_beams_rigid.slang` `cplList*`, the same arithmetic). The GPU tests a node
+/// against a proxy shape only while the node may be inside the shape's cull sphere
+/// (centre `p`, grown radius `r`, [`candidate_list::cull_sphere`]): a node outside it is
+/// rejected by the face test, with no force and no count. The list is the work-saving
+/// form of that test, lossless:
+///
+/// * **Build** (a node's first step of a frame, or a step its list fails the check): the
+///   node scans every shape, as the exhaustive path does, and lists the shapes within
+///   `r + m` of it (`m` its skin, [`candidate_list::margin`]), in shape order. It keeps
+///   its position `x0` and its limit `m − E` (`E` below, at the build).
+/// * **Check** (every later step of the frame): the list holds while
+///   `|x − x0| + E < limit`, with `E` the frame's running maximum, over every shape of the
+///   vehicle, of the shape's centre's distance from its centre at the frame's first step.
+///   Then an unlisted shape k (`|x0 − p_k(b)| ≥ r_k(b) + m` at the build step b) stays at
+///   `|x − p_k| ≥ r_k(b) + m − |x − x0| − |p_k − p_k(b)| > r_k(b)` (the triangle
+///   inequality; `|p_k − p_k(b)| ≤ E(s) + E(b)`), so the node is outside its true cull
+///   radius (`r` is grown at least 1 cm and 0.1 % past it, well past the rounding of
+///   these sums): the face test would reject it. Listed shapes are tested as before, in
+///   shape order, so every force, count and sum is the same, bit for bit.
+/// * A node whose list would pass [`candidate_list::CAP`] shapes keeps no list
+///   (overflow): it scans every shape every step, as before.
+///
+/// Nothing about the motion is assumed: a node that accelerates, a body thrown at the
+/// car, a thin shape or a shape that comes within reach mid-frame only make the check
+/// fail sooner (the node rebuilds its own list), never a contact missed. The skin only
+/// sets how often a node rebuilds.
+pub mod candidate_list {
+    use glam::Vec3;
+
+    /// Shapes a node's list holds at most (the GPU's 16 half-words a node).
+    pub const CAP: usize = 16;
+    /// The skin's floor and ceiling (m).
+    pub const MIN_MARGIN: f32 = 0.02;
+    pub const MAX_MARGIN: f32 = 4.0;
+
+    /// A shape's cull sphere as the GPU's `cplSpheresBy` writes it: its centre `p` and its
+    /// radius grown past the true bounding radius `radius` (`pr.z`) and the face test's
+    /// rounding: `radius · 1.001 + 0.01 + 1e-4 · max(|p|∞, radius)`. Returns the radius
+    /// squared (3e38 when not finite: every node tests the shape).
+    pub fn cull_sphere(p: Vec3, radius: f32) -> f32 {
+        let big = p.x.abs().max(p.y.abs()).max(p.z.abs().max(radius.abs()));
+        let r = radius * 1.001 + 0.01 + 1.0e-4 * big;
+        let finite = p.abs().cmplt(Vec3::splat(1.0e30)).all() && r.abs() < 1.0e18;
+        if finite {
+            r * r
+        } else {
+            3.0e38
+        }
+    }
+
+    /// The skin of a node with speed `speed` (m/s), the shapes' fastest point speed
+    /// `shape_speed`, `left` steps to the frame's end: the distance both may close over
+    /// the rest of the frame, a quarter more, within [`MIN_MARGIN`, `MAX_MARGIN`]. Only
+    /// the rebuild rate depends on it.
+    pub fn margin(speed: f32, shape_speed: f32, left: u32) -> f32 {
+        let m = 1.25 * crate::explicit_beams::STEP * left as f32 * (speed + shape_speed) + MIN_MARGIN;
+        // NaN (a non-finite speed) takes the ceiling.
+        if m < MAX_MARGIN {
+            m.max(MIN_MARGIN)
+        } else {
+            MAX_MARGIN
+        }
+    }
+
+    /// One node's list.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct NodeList {
+        pub x0: Vec3,
+        pub limit: f32,
+        /// The listed shapes in shape order; `None` past [`CAP`] (every shape).
+        pub shapes: Option<Vec<u16>>,
+    }
+
+    /// Build a node's list at `x` against the shapes' spheres (`(centre, radius squared)`
+    /// in shape order), skin `m`, the frame's running maximum shape travel `e`.
+    pub fn build(x: Vec3, spheres: &[(Vec3, f32)], m: f32, e: f32) -> NodeList {
+        let mut shapes = Some(Vec::new());
+        for (k, &(p, r2)) in spheres.iter().enumerate() {
+            let d = x - p;
+            let l = r2.sqrt() + m;
+            // NaN lists the shape.
+            if !(d.dot(d) >= l * l) {
+                match &mut shapes {
+                    Some(s) if s.len() < CAP => s.push(k as u16),
+                    _ => shapes = None,
+                }
+            }
+        }
+        NodeList { x0: x, limit: m - e, shapes }
+    }
+
+    /// Whether `list` still holds every shape the node at `x` may be inside, the frame's
+    /// running maximum shape travel now `e` (never on a frame's first step: the caller
+    /// builds there).
+    pub fn holds(list: &NodeList, x: Vec3, e: f32) -> bool {
+        (x - list.x0).length() + e < list.limit
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A small deterministic generator (no dependency).
+        struct Lcg(u64);
+        impl Lcg {
+            fn f(&mut self) -> f32 {
+                self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((self.0 >> 40) as f32) / ((1u64 << 24) as f32)
+            }
+            fn v(&mut self, s: f32) -> Vec3 {
+                Vec3::new(self.f() - 0.5, self.f() - 0.5, self.f() - 0.5) * (2.0 * s)
+            }
+        }
+
+        /// The lossless claim, against the exhaustive test: at every step a node inside a
+        /// shape's true bounding sphere (where the face test can pass) has that shape in
+        /// its list (or keeps no list). Adversarial frames: nodes that jump speed mid-frame
+        /// (impacts, up to 300 m/s), bodies thrown through the car (up to 200 m/s), thin
+        /// shapes (radius 1 cm), shapes that start far out of reach and enter mid-frame,
+        /// shapes far from the origin (rounding), skins forced to the floor and the
+        /// ceiling. Returns (rebuilds, checks held).
+        fn run(seed: u64, skin: Option<f32>) -> (u32, u32) {
+            let mut g = Lcg(seed);
+            let steps = 34u32;
+            let h = crate::explicit_beams::STEP;
+            let (mut rebuilds, mut held) = (0, 0);
+            for _frame in 0..40 {
+                let far = if g.f() < 0.3 { 2000.0 } else { 0.0 };
+                let centre = Vec3::new(far, 0.5 * far, -far);
+                let ns = 1 + (g.f() * 40.0) as usize;
+                let mut shapes: Vec<(Vec3, Vec3, f32)> = (0..ns)
+                    .map(|_| {
+                        let radius = if g.f() < 0.3 { 0.01 } else { 0.05 + 3.0 * g.f() };
+                        let speed = if g.f() < 0.2 { 200.0 } else { 5.0 * g.f() };
+                        // Some start well out of reach, moving at the nodes.
+                        let at = if g.f() < 0.3 { g.v(15.0) } else { g.v(3.0) };
+                        (centre + at, -at.normalize_or_zero() * speed + g.v(1.0), radius)
+                    })
+                    .collect();
+                let nn = 30;
+                let mut nodes: Vec<(Vec3, Vec3)> =
+                    (0..nn)
+                        .map(|_| {
+                            let x = centre + g.v(2.0);
+                            let s = if g.f() < 0.5 { 30.0 } else { 1.0 };
+                            (x, g.v(s))
+                        })
+                        .collect();
+                let mut p0 = Vec::new();
+                let mut e = 0.0f32;
+                let mut lists: Vec<Option<NodeList>> = vec![None; nn];
+                for s in 0..steps {
+                    let spheres: Vec<(Vec3, f32)> = shapes.iter().map(|&(p, _, r)| (p, cull_sphere(p, r))).collect();
+                    if s == 0 {
+                        p0 = shapes.iter().map(|s| s.0).collect();
+                    }
+                    let mut vs = 0.0f32;
+                    for (k, sh) in shapes.iter().enumerate() {
+                        e = e.max((sh.0 - p0[k]).length());
+                        vs = vs.max(sh.1.length());
+                    }
+                    for (i, &(x, v)) in nodes.iter().enumerate() {
+                        let ok = s > 0 && lists[i].as_ref().is_some_and(|l| holds(l, x, e));
+                        if ok {
+                            held += 1;
+                        } else {
+                            rebuilds += 1;
+                            let m = skin.unwrap_or_else(|| margin(v.length(), vs, steps - s));
+                            lists[i] = Some(build(x, &spheres, m, e));
+                        }
+                        let l = lists[i].as_ref().unwrap();
+                        for (k, &(p, _, radius)) in shapes.iter().enumerate() {
+                            let d = x - p;
+                            // Where the face test can pass (the true bounding sphere).
+                            if d.dot(d) < radius * radius {
+                                if let Some(ls) = &l.shapes {
+                                    assert!(ls.contains(&(k as u16)), "seed {seed} step {s}: node {i} inside shape {k}, not listed");
+                                }
+                            }
+                        }
+                    }
+                    // Motion: impacts change the nodes' speed mid-frame, bodies keep theirs.
+                    for n in &mut nodes {
+                        if g.f() < 0.05 {
+                            n.1 = g.v(300.0);
+                        }
+                        n.0 += n.1 * h;
+                    }
+                    for sh in &mut shapes {
+                        if g.f() < 0.02 {
+                            sh.1 = g.v(200.0);
+                        }
+                        sh.0 += sh.1 * h;
+                    }
+                }
+            }
+            (rebuilds, held)
+        }
+
+        #[test]
+        fn a_listed_node_meets_no_unlisted_shape() {
+            let (mut r, mut h) = (0, 0);
+            for seed in 0..60 {
+                let (a, b) = run(seed, None);
+                r += a;
+                h += b;
+            }
+            // The lists are used (most checks hold), and they are rebuilt.
+            assert!(h > r && r > 0, "rebuilds {r}, held {h}");
+        }
+
+        #[test]
+        fn the_skin_at_its_floor_and_ceiling_misses_nothing() {
+            for seed in 0..20 {
+                run(seed, Some(MIN_MARGIN));
+                run(seed, Some(0.0));
+                run(seed, Some(MAX_MARGIN));
+            }
+        }
+
+        #[test]
+        fn non_finite_positions_list_every_shape() {
+            let spheres = [(Vec3::ZERO, 1.0), (Vec3::splat(f32::NAN), 3.0e38), (Vec3::splat(10.0), 1.0)];
+            let l = build(Vec3::splat(f32::NAN), &spheres, 0.1, 0.0);
+            assert_eq!(l.shapes, Some(vec![0, 1, 2]));
+            assert!(!holds(&l, Vec3::ZERO, 0.0));
+            let l = build(Vec3::ZERO, &spheres, 0.1, 0.0);
+            assert_eq!(l.shapes, Some(vec![0, 1]));
+            assert!(!holds(&l, Vec3::ZERO, f32::NAN));
+        }
+    }
+}

@@ -1368,3 +1368,144 @@ fn authoring_census() {
         report_mass(&x);
     }
 }
+
+/// The raw model of each `RUBBLE_CENSUS_CARS` car as one JSON file, for
+/// `engine/tools/beamng-structure-study/analyze.py`
+/// (`engine/docs/beamng-structure-study.md`). Written to `RUBBLE_STRUCTURE_OUT`
+/// (a directory outside the repository: the files hold the cars' node tables
+/// and meshes, which are never committed). Skipped when either variable is
+/// absent.
+///
+/// Positions are in the JBeam frame (+X left, +Y rear, +Z up), metres. Per car:
+/// the assembled parts and their slot types, every assembled row of the
+/// physics and visual sections with the part that defines it, each node's
+/// final position and mass as the loader builds it, the node groups, and each
+/// flexbody's mesh (vertices and triangles, its row's transform applied).
+#[test]
+#[ignore]
+fn structure_dump() {
+    use engine_softbody::jbeam::{assembled_parts, assembled_rows, load_jbeam, read_vehicle_dir};
+    let (Ok(list), Ok(out)) = (
+        std::env::var("RUBBLE_CENSUS_CARS"),
+        std::env::var("RUBBLE_STRUCTURE_OUT"),
+    ) else {
+        eprintln!("skip: RUBBLE_CENSUS_CARS and RUBBLE_STRUCTURE_OUT not both set");
+        return;
+    };
+    let out = std::path::PathBuf::from(out);
+    std::fs::create_dir_all(&out).unwrap();
+    const SECTIONS: [&str; 16] = [
+        "nodes",
+        "beams",
+        "triangles",
+        "flexbodies",
+        "props",
+        "torsionbars",
+        "slots",
+        "slots2",
+        "pressureWheels",
+        "hubWheels",
+        "hydros",
+        "rails",
+        "slidenodes",
+        "powertrain",
+        "glowMap",
+        "quads",
+    ];
+    for item in list.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let Some((label, rest)) = item.split_once('=') else {
+            continue;
+        };
+        let f: Vec<&str> = rest.split(',').collect();
+        let (dir, name, pc) = (
+            std::path::Path::new(f.first().copied().unwrap_or("")),
+            f.get(1).copied().unwrap_or(""),
+            f.get(2).copied().filter(|p| !p.is_empty()),
+        );
+        if !dir.join(name).is_dir() {
+            eprintln!("skip {label}: {} absent", dir.join(name).display());
+            continue;
+        }
+        let run = || -> Result<Value, String> {
+            let texts = read_vehicle_dir(dir, name)?;
+            let files: Vec<(&str, &str)> = texts
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect();
+            let pc_file = pc;
+            let pc = match pc {
+                Some(p) => Some(
+                    std::fs::read_to_string(dir.join(name).join(p)).map_err(|e| e.to_string())?,
+                ),
+                None => None,
+            };
+            let pc = pc.as_deref();
+            let desc = load_jbeam(&files, pc)?;
+            let mut root = Map::new();
+            root.insert("label".into(), label.into());
+            root.insert(
+                "parts".into(),
+                assembled_parts(&files, pc)?
+                    .into_iter()
+                    .map(|(n, s)| serde_json::json!([n, s]))
+                    .collect(),
+            );
+            let mut rows = Map::new();
+            for s in SECTIONS {
+                let v: Vec<Value> = assembled_rows(&files, pc, s)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(p, f)| serde_json::json!({ "part": p, "row": f }))
+                    .collect();
+                rows.insert(s.into(), v.into());
+            }
+            root.insert("rows".into(), rows.into());
+            root.insert(
+                "nodes".into(),
+                desc.nodes
+                    .iter()
+                    .map(|n| {
+                        let p = n.position;
+                        serde_json::json!({
+                            "id": n.name, "pos": [p[0], -p[2], p[1]], "mass": n.mass,
+                            "collision": n.collision, "selfCollision": n.self_collision,
+                        })
+                    })
+                    .collect(),
+            );
+            root.insert(
+                "groups".into(),
+                desc.node_group_nodes
+                    .iter()
+                    .map(|(g, v)| serde_json::json!([g, v]))
+                    .collect(),
+            );
+            // The flexbody meshes, as `load_jbeam_car` reads them.
+            let car = load_jbeam_car(label, dir, name, pc_file)?;
+            let to_j = |p: Vec3| [p.x, -p.z, p.y];
+            root.insert(
+                "flex".into(),
+                car.flex
+                    .iter()
+                    .map(|fx| {
+                        serde_json::json!({
+                            "part": car.parts[fx.part].0, "mesh": fx.mesh, "groups": fx.groups,
+                            "pool": fx.pool,
+                            "pos": fx.pos.iter().map(|&p| to_j(p)).collect::<Vec<_>>(),
+                            "tris": fx.tris,
+                        })
+                    })
+                    .collect(),
+            );
+            Ok(root.into())
+        };
+        match run() {
+            Ok(v) => {
+                let p = out.join(format!("{label}.json"));
+                std::fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
+                eprintln!("wrote {}", p.display());
+            }
+            Err(e) => eprintln!("skip {label}: {e}"),
+        }
+    }
+}

@@ -22,3 +22,6 @@ engine-slang-build.workspace = true
 engine-exec.workspace = true
 engine-terrain.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

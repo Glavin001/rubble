@@ -219,6 +219,18 @@ fn main() -> anyhow::Result<()> {
                 x.set_vehicle_contact_margin(v, m);
             }
         }
+        // EV_ABLATE=mask (measurement, time only): the explicit frame's ablation build.
+        if let Some(m) = std::env::var("EV_ABLATE").ok().and_then(|v| v.parse::<u32>().ok()) {
+            if let Some(x) = w.explicit_vehicles_mut() {
+                x.set_ablation(m);
+            }
+        }
+        // EV_VV_GRID=0 (measurement): vehicle contact's candidates' grid off.
+        if std::env::var("EV_VV_GRID").as_deref() == Ok("0") {
+            if let Some(x) = w.explicit_vehicles_mut() {
+                x.set_vv_grid(false);
+            }
+        }
         // EV_CULL=0 (measurement): the coupling's shape cull off.
         if std::env::var("EV_CULL").as_deref() == Ok("0") {
             if let Some(x) = w.explicit_vehicles_mut() {
@@ -264,7 +276,123 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             wall.push(t0.elapsed().as_secs_f64() * 1e3);
-            if std::env::var("EV_GROUPS").is_ok() && w.step_count() % 20 == 0 {
+            // EV_AB_AT=step, EV_AB_MASKS=m1,m2,…: at that World step, the explicit frame
+            // alone from one snapshot under each ablation mask (time only; 2147483648 the
+            // ablation build with nothing skipped), 20 frames of 34 steps each.
+            if std::env::var("EV_AB_AT").ok().and_then(|v| v.parse::<u64>().ok()) == Some(w.step_count()) {
+                let masks: Vec<u32> = std::env::var("EV_AB_MASKS").unwrap_or_default().split(',').filter_map(|m| m.parse().ok()).collect();
+                let at_step = w.step_count();
+                if let Some(x) = w.explicit_vehicles_mut() {
+                    x.wait();
+                    let snap = x.snapshot();
+                    let mut line = Vec::new();
+                    for &m in &masks {
+                        x.restore(&snap);
+                        x.set_ablation(m);
+                        x.frame(34);
+                        x.wait();
+                        x.restore(&snap);
+                        let t = std::time::Instant::now();
+                        for _ in 0..20 {
+                            x.frame(34);
+                            x.wait();
+                        }
+                        line.push(format!("{m}: {:.2}", t.elapsed().as_secs_f64() * 1e3 / 20.0));
+                    }
+                    x.set_ablation(0);
+                    // EV_AB_COUPLING=1: the coupling's paths from the same snapshot, three
+                    // rounds interleaved, 20 frames each: every node against every shape in
+                    // four phases (old), the candidate list (list), the list and the
+                    // folded step (list+fold, the default). Median ms a frame.
+                    if std::env::var("EV_AB_COUPLING").as_deref() == Ok("1") {
+                        let ways = [("old", false, false), ("list", true, false), ("list+fold", true, true)];
+                        let mut ms = vec![Vec::new(); ways.len()];
+                        for _ in 0..3 {
+                            for (i, &(_, list, fold)) in ways.iter().enumerate() {
+                                x.restore(&snap);
+                                x.set_coupling_candidate_list(list);
+                                x.set_coupling_fold(fold);
+                                x.frame(34);
+                                x.wait();
+                                x.restore(&snap);
+                                let t = std::time::Instant::now();
+                                for _ in 0..20 {
+                                    x.frame(34);
+                                    x.wait();
+                                }
+                                ms[i].push(t.elapsed().as_secs_f64() * 1e3 / 20.0);
+                            }
+                        }
+                        x.set_coupling_candidate_list(true);
+                        x.set_coupling_fold(true);
+                        let line: Vec<String> = ways
+                            .iter()
+                            .zip(&mut ms)
+                            .map(|((name, _, _), m)| {
+                                m.sort_by(f64::total_cmp);
+                                format!("{name} {:.2} ({:.2}..{:.2})", m[1], m[0], m[2])
+                            })
+                            .collect();
+                        println!("  coupling at step {at_step}, ms a frame (median, range of 3): {}", line.join(", "));
+                    }
+                    x.restore(&snap);
+                    x.wait();
+                    let mut g = x.contact_group_sizes();
+                    g.sort_unstable();
+                    println!("  ablations at step {} (groups {:?}), ms a frame: {}", w.step_count(), g, line.join(", "));
+                }
+            }
+            // EV_SPLIT_AT=s1,s2,…: at those World steps, the explicit frame from one snapshot
+            // with the contact groups in one workgroup each, then split across workgroups
+            // (contact-groups-design.md): every state word compared, and 20 frames of each
+            // timed. Prints the first difference, if any.
+            let split_at: Vec<u64> = std::env::var("EV_SPLIT_AT").unwrap_or_default().split(',').filter_map(|m| m.parse().ok()).collect();
+            if split_at.contains(&w.step_count()) {
+                if let Some(x) = w.explicit_vehicles_mut() {
+                    x.wait();
+                    let snap = x.snapshot();
+                    let run = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool| {
+                        x.restore(&snap);
+                        x.set_group_split(on);
+                        x.frame(34);
+                        x.wait();
+                        let words = x.state_words();
+                        x.restore(&snap);
+                        let t = std::time::Instant::now();
+                        for _ in 0..20 {
+                            x.frame(34);
+                            x.wait();
+                        }
+                        (words, t.elapsed().as_secs_f64() * 1e3 / 20.0)
+                    };
+                    let (old, t_old) = run(x, false);
+                    let (new, t_new) = run(x, true);
+                    // The split frame without the groups' contact passes (time only).
+                    x.set_split_ablation(512);
+                    let (_, t_novv) = run(x, true);
+                    x.set_split_ablation(0);
+                    let mut diff = String::from("bit for bit");
+                    for ((name, a), (_, b)) in old.iter().zip(&new) {
+                        if a.len() != b.len() {
+                            diff = format!("{name}: lengths {} and {}", a.len(), b.len());
+                            break;
+                        }
+                        if let Some(i) = a.iter().zip(b).position(|(p, q)| p != q) {
+                            let n = a.iter().zip(b).filter(|(p, q)| p != q).count();
+                            diff = format!("DIFFERS {name}[{i}] ({:#x} vs {:#x}), {n} words", a[i], b[i]);
+                            break;
+                        }
+                    }
+                    x.restore(&snap);
+                    x.set_group_split(engine_webgpu::group_split_default());
+                    x.wait();
+                    let mut g = x.contact_group_sizes();
+                    g.sort_unstable();
+                    println!("  split check at step {} (groups {:?}): {diff}; ms a frame alone: groups' workgroup {t_old:.2}, split {t_new:.2}, split without the contact passes {t_novv:.2}", w.step_count(), g);
+                }
+            }
+            let every: u64 = std::env::var("EV_GROUPS").ok().and_then(|v| v.parse().ok()).unwrap_or(20).max(1);
+            if std::env::var("EV_GROUPS").is_ok() && w.step_count() % every == 0 {
                 let sc = w.step_count();
                 if let Some(x) = w.explicit_vehicles_mut() {
                     let mut g = x.contact_group_sizes();
@@ -276,6 +404,19 @@ fn main() -> anyhow::Result<()> {
                     let mut shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
                     shapes.sort_unstable();
                     eprintln!("  proxy shapes per vehicle: {shapes:?}");
+                    if let Some(x) = w.explicit_vehicles() {
+                        let pos = x.positions();
+                        let ext: Vec<f32> = pos.iter().map(|p| {
+                            let (lo, hi) = p.iter().fold((glam::Vec3::MAX, glam::Vec3::MIN), |(a, b), q| (a.min(*q), b.max(*q)));
+                            (hi - lo).max_element()
+                        }).collect();
+                        let worst = ext.iter().cloned().fold(0.0f32, f32::max);
+                        eprintln!("  largest vehicle node box side {worst:.1} m");
+                    }
+                    {
+                        let c = w.explicit_candidate_counts();
+                        eprintln!("  most coupling candidates {}", c.iter().max().copied().unwrap_or(0));
+                    }
                 }
             }
             if span {

@@ -510,7 +510,14 @@ pub fn steering_wheel(center: DVec3, r: f64, tilt_deg: f64, mat: Mat, column: f6
 /// Half-drum liner over a wheel: roof (cylinder) + inner wall. Angles in
 /// degrees.
 pub fn wheel_well(center: DVec3, r: f64, x_in: f64, x_out: f64, side: f64, a_front: f64, a_rear: f64) -> Mesh {
-    let prof = [(r, x_out), (r, x_in), (r * 0.55, x_in)];
+    wheel_well_with(center, r, x_in, x_out, side, a_front, a_rear, 0.55)
+}
+
+/// [`wheel_well`] with the inner wall's opening `hole` × r (the arms, the
+/// strut and the shafts pass through it).
+#[allow(clippy::too_many_arguments)]
+pub fn wheel_well_with(center: DVec3, r: f64, x_in: f64, x_out: f64, side: f64, a_front: f64, a_rear: f64, hole: f64) -> Mesh {
+    let prof = [(r, x_out), (r, x_in), (r * hole, x_in)];
     let mut m = lathe(&prof, 40, Mat::TrimBlack, (-a_rear).to_radians(), a_front.to_radians());
     // lathe: axis x, angle 0 -> +y, +90 -> +z. Profile above runs outward ->
     // inward; faces should look at the wheel (inwards).

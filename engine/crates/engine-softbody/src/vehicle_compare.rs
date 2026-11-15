@@ -81,6 +81,9 @@ pub fn surface_contact() -> bool {
 pub fn settings() -> ExplicitBeamsSettings {
     ExplicitBeamsSettings {
         turbulence: false,
+        // `RUBBLE_CENTRED_OBJECTIVE=0`: the centred damping's end-direction form
+        // (before spec §39.6), to measure what the objective form (the default) moved.
+        centred_objective: !std::env::var("RUBBLE_CENTRED_OBJECTIVE").is_ok_and(|v| v == "0"),
         ..Default::default()
     }
 }
@@ -164,8 +167,23 @@ fn skin_nodes(s: &ExplicitBeams) -> Vec<u32> {
     v
 }
 
+/// The car's lowest point (world y): its lowest node, or the bottom of a
+/// raycast wheel's tyre when that is lower. A raycast wheel has no nodes, so
+/// a car whose lowest node is its exhaust or a rim would be placed with its
+/// tyres that far into the ground and thrown up by its bump stops.
+pub fn lowest_point(s: &ExplicitBeams) -> f32 {
+    let node = |i: u32| s.origin.y + s.nodes[i as usize].pos.y;
+    let mut low = (0..s.nodes.len() as u32).map(node).fold(f32::MAX, f32::min);
+    if let Some(d) = &s.drive {
+        for w in &d.config.wheels {
+            low = low.min(0.5 * (node(w.node1) + node(w.node2)) - w.radius);
+        }
+    }
+    low
+}
+
 /// Turn about +Y by `angle` and place: skin box centred on x = z = 0, the
-/// lowest node `lift` above the ground.
+/// lowest point ([`lowest_point`]) `lift` above the ground.
 fn place(s: &mut ExplicitBeams, angle: f32, lift: f32) {
     flatten_origin(s);
     let q = Quat::from_rotation_y(angle);
@@ -175,7 +193,7 @@ fn place(s: &mut ExplicitBeams, angle: f32, lift: f32) {
     }
     let skin = skin_nodes(s);
     let (lo, hi) = bounds(s, &skin);
-    let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let low = lowest_point(s);
     let mid = 0.5 * (lo + hi);
     for n in &mut s.nodes {
         n.pos.x -= mid.x;
@@ -1878,6 +1896,84 @@ pub fn scene_rest(car: &Car, truck_export: bool, seconds: f32) -> Value {
 /// crush, springback, the wall force, energy, ripple, intrusion, damage and
 /// the render mesh after.
 pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
+    scene_front(car, kmh, seconds_after, Front::Wall)
+}
+
+/// Where the car yielded, for "does it crumple like paper": per part the
+/// share of its beams that yielded and their plastic strain (|rest − rest₀| /
+/// rest₀; p50 and p99 of the yielded ones), and the beams that yielded with
+/// both ends behind `far_z` at rest (away from a frontal hit: a solid car
+/// yields where it is struck and stays in shape elsewhere).
+fn plastic_report(car: &Car, s: &ExplicitBeams, rest: &[Vec3], far_z: f32) -> Value {
+    let n = s.nodes.len();
+    let mut part_of = vec![usize::MAX; n];
+    for (k, (_, ids)) in car.parts.iter().enumerate() {
+        for &i in ids {
+            if (i as usize) < n {
+                part_of[i as usize] = k;
+            }
+        }
+    }
+    let mut per: Vec<(usize, Vec<f32>)> = vec![(0, Vec::new()); car.parts.len()];
+    let (mut far, mut far_yielded, mut all, mut yielded) = (0usize, 0usize, 0usize, 0usize);
+    let mut strains: Vec<f32> = Vec::new();
+    for b in &s.beams {
+        let (a, c) = (b.a as usize, b.b as usize);
+        if a >= n || c >= n || is_tyre(s, a) || is_tyre(s, c) || b.rest0 <= 0.0 || !b.tc.is_finite() {
+            continue;
+        }
+        let e = ((b.rest - b.rest0) / b.rest0).abs();
+        let y = e > 1e-4 && !b.broken;
+        all += 1;
+        yielded += usize::from(y);
+        if y {
+            strains.push(e);
+        }
+        if rest[a].z < far_z && rest[c].z < far_z {
+            far += 1;
+            far_yielded += usize::from(y);
+        }
+        if part_of[a] == part_of[c] && part_of[a] != usize::MAX {
+            per[part_of[a]].0 += 1;
+            if y {
+                per[part_of[a]].1.push(e);
+            }
+        }
+    }
+    let mut parts: Vec<Value> = car
+        .parts
+        .iter()
+        .zip(per.iter_mut())
+        .filter(|(_, p)| p.0 >= 8 && !p.1.is_empty())
+        .map(|((name, _), p)| {
+            json!([name, p.0, p.1.len(), r3(p.1.len() as f32 / p.0 as f32), r3(pct(&mut p.1, 0.5)), r3(pct(&mut p.1, 0.99))])
+        })
+        .collect();
+    parts.sort_by(|a, b| b[3].as_f64().unwrap_or(0.0).total_cmp(&a[3].as_f64().unwrap_or(0.0)));
+    json!({
+        "beams": all, "yielded": yielded, "yielded_share": r3(yielded as f32 / all.max(1) as f32),
+        "strain_p50": r3(pct(&mut strains, 0.5)), "strain_p99": r3(pct(&mut strains, 0.99)),
+        "far_beams": far, "far_yielded": far_yielded, "far_yielded_share": r3(far_yielded as f32 / far.max(1) as f32),
+        "parts": parts,
+    })
+}
+
+/// What a frontal scene drives into.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Front {
+    /// a rigid wall across the whole width
+    Wall,
+    /// a rigid barrier over this share of the car's width, on the driver's
+    /// side (+x)
+    Offset(f32),
+    /// a rigid 254 mm pole on the centre line
+    Pole,
+}
+
+/// A frontal crash into `barrier` ([`scene_wall`]'s measurements; the
+/// residual crush zones run across the whole width, so an offset's and a
+/// pole's profile shows in them).
+pub fn scene_front(car: &Car, kmh: f32, seconds_after: f32, barrier: Front) -> Value {
     let t0 = Instant::now();
     let v0 = kmh / 3.6;
     let f = car.frame;
@@ -1891,10 +1987,25 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
         .fold(f32::MIN, f32::max);
     let gap = 0.05;
     let wall_z = front + gap;
-    s.boxes.push(StaticBox::centered(
-        Vec3::new(0.0, 2.0, wall_z + 0.5),
-        Vec3::new(0.5 * f.width() + 1.0, 2.0, 0.5),
-    ));
+    match barrier {
+        Front::Wall => s.boxes.push(StaticBox::centered(
+            Vec3::new(0.0, 2.0, wall_z + 0.5),
+            Vec3::new(0.5 * f.width() + 1.0, 2.0, 0.5),
+        )),
+        Front::Offset(share) => {
+            // its inner edge `share` of the width in from the +x side
+            let edge = f.hi.x - share * f.width();
+            s.boxes.push(StaticBox::centered(
+                Vec3::new(edge + 1.5, 2.0, wall_z + 0.5),
+                Vec3::new(1.5, 2.0, 0.5),
+            ));
+        }
+        Front::Pole => s.shapes.push(StaticShape::cylinder(
+            Vec3::new(0.5 * (f.lo.x + f.hi.x), 2.0, wall_z + 0.127),
+            0.127,
+            2.0,
+        )),
+    }
     // The rear cabin (NCAP's rear-seat accelerometers stand in the middle of
     // the cabin's rear): non-tyre nodes over the rear half of the wheelbase.
     let cabin: Vec<u32> = (0..s.nodes.len() as u32)
@@ -2106,7 +2217,8 @@ pub fn scene_wall(car: &Car, kmh: f32, seconds_after: f32) -> Value {
     let wall_s = t0.elapsed().as_secs_f32();
     let sim_s = k as f32 * STEP;
     json!({
-        "kmh": kmh, "mass_kg": r1(total),
+        "kmh": kmh, "mass_kg": r1(total), "barrier": format!("{barrier:?}"),
+        "plastic": plastic_report(car, s, &rest, f.hi.z - 1.2),
         "dynamic_crush_mm": mm(d_dyn), "t_m_ms": r1(tm * 1e3), "peak_g": r1(peak_g), "mean_g_to_tm": r1(v0 / tm / 9.81),
         "rebound_ms": r3(rebound), "restitution": r3(rebound / v0),
         "residual_crush_zones_mm": c.iter().map(|x| mm(*x)).collect::<Vec<_>>(), "residual_crush_max_mm": mm(c_max), "residual_crush_avg_mm": mm(c_avg),
@@ -2146,6 +2258,8 @@ pub fn scene_pole_at(car: &Car, kmh: f32, seconds: f32, dz: f32) -> Value {
     let mut s = car.template.clone();
     let rest = positions(&s);
     set_moving(&mut s, dir * kmh / 3.6);
+    // On a carrier, as the real test (its tyres' grip must not slow it).
+    crate::crash_rigs::on_carrier(&mut s);
     let r = 0.127;
     let head = occupant_points(&f)
         .iter()

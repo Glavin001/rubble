@@ -118,6 +118,15 @@ pub struct ExplicitBeamsSettings {
     /// correction after the node update. Lifts the damped explicit step's limit
     /// from ω·h ≤ 2(√(1+ζ²) − ζ) to 2 and past it; JBeam elements only.
     pub centred_damping: bool,
+    /// The centred damping's correction from each beam's change of extension
+    /// rate, each rate along the beam's own direction at its time
+    /// (jbeam-semantics-spec.md §39.6): Δu = (v′_a − v′_b)·d̂′ − (v_a − v_b)·d̂.
+    /// On by default (it acts only with [`Self::centred_damping`]; the CPU
+    /// reference and the GPU kernels, `FLAG_CENTRED_OBJECTIVE`). Off: the
+    /// change of the relative velocity along the end direction alone, which
+    /// reads a beam that only turns as shortening at ω²·L·h and adds energy to
+    /// anything that spins (known-bugs S3); kept for comparison.
+    pub centred_objective: bool,
 }
 
 impl Default for ExplicitBeamsSettings {
@@ -128,6 +137,7 @@ impl Default for ExplicitBeamsSettings {
             turbulence: true,
             triangle_throttle: true,
             centred_damping: false,
+            centred_objective: true,
         }
     }
 }
@@ -870,6 +880,9 @@ pub struct ExplicitBeams {
     pub parking_brake: f32,
     /// Self-collision contacts in the last step (a statistic; not simulated state).
     pub last_contacts: u32,
+    /// Self-collision (triangle, contacter) pairs inside the box test in the last step
+    /// (those tested for a hit; a statistic, not simulated state).
+    pub last_self_pairs: u32,
     pub settings: ExplicitBeamsSettings,
     /// Turbulence noise state (starts at 1).
     pub noise: i32,
@@ -944,6 +957,21 @@ pub struct ExplicitBeams {
     /// triangle, is caught from the side it came from (a swept test, whatever its
     /// speed), in self-collision and vehicle contact. Off: RoR's band test alone.
     pub anti_clip: bool,
+    /// Anti-clip's box padding by each contacter's own travel (a Rubble setting, not
+    /// in the specification; off by default): a contacter is tested against a triangle
+    /// when inside its box padded by r + (the triangle's fastest node's speed + the
+    /// contacter's own speed, at most the vehicle's fastest) · h + CLIP_DEPTH, instead
+    /// of the vehicle's fastest node's speed (§36). A node's anti-clip contact needs
+    /// only its own and the triangle's travel; the fastest node's padding also catches
+    /// what only some other fast node's speed reached. Without anti-clip it does nothing.
+    pub own_travel_reach: bool,
+    /// Retired debris (`crate::explicit_debris::DebrisTtl`; the GPU's
+    /// `ExplicitBeamsGpu::set_retired`): per node whether it is retired (empty: none). A
+    /// retired node is no longer simulated: the node pass leaves it at rest where it is,
+    /// and it takes part in no contact (self-collision as contacter or triangle node,
+    /// surface contact as point, segment or triangle node). Its own beams are still
+    /// evaluated (they cannot move it). The host sets it; nothing here changes it.
+    pub retired: Vec<bool>,
     /// Anti-clip's side memory (§36; `explicit_contact::clip_word`): per node the
     /// sides held this step and those recorded for the next. Sized when anti-clip
     /// first runs; rolled by the node pass.
@@ -974,6 +1002,13 @@ pub struct ExplicitBeams {
     pub surface_contact: bool,
     /// The surface pass's hits in the last step (a statistic; not simulated state).
     pub surface_last: u32,
+    /// The surface pass's narrow-phase queries in the last step (triangles and segments
+    /// against a shape, casts aside): a work counter, not simulated state.
+    pub surface_queries: u32,
+    /// The surface pass's separation cull ([`engine_schema::feature_query::separated`];
+    /// lossless, on by default): off, every element whose box meets a shape's runs the
+    /// narrow phase (tests and measurement).
+    pub surface_separation: bool,
     /// The surface pass's segments (beam-edge contact, [`crate::explicit_surface::surface_segments`]),
     /// found at its first step.
     pub surface_segs: Option<Vec<u32>>,
@@ -1671,6 +1706,7 @@ impl ExplicitBeams {
             ground: 0.0,
             collision_range: DEFAULT_COLLISION_RANGE,
             last_contacts: 0,
+            last_self_pairs: 0,
             tyres: Vec::new(),
             brakes: Vec::new(),
             parking_brake: 0.0,
@@ -1704,12 +1740,16 @@ impl ExplicitBeams {
             rest_pose: None,
             two_body_contact: false,
             anti_clip: false,
+            own_travel_reach: false,
+            retired: Vec::new(),
             clip_sides: Vec::new(),
             anti_only_tris: Vec::new(),
             fixed_contact: false,
             dissipative_contact: false,
             surface_contact: false,
             surface_last: 0,
+            surface_queries: 0,
+            surface_separation: true,
             surface_segs: None,
             surface_force: glam::DVec3::ZERO,
             contact_shift: Vec::new(),
@@ -2200,6 +2240,21 @@ impl ExplicitBeams {
             s.fixed_contact = true;
             s.dissipative_contact = true;
             s.exact_friction = true;
+        }
+        // `rubble_damper_tear` (Rubble's extension): a damper-only beam tears when it
+        // is stretched past the ratio (its `long_bound`, as a support's break factor).
+        if let Some(r) = file.damper_tear.filter(|r| *r > 0.0) {
+            for b in &mut s.beams {
+                if b.kind == ExplicitKind::Plain && b.k == 0.0 && b.c > 0.0 {
+                    b.long_bound = r;
+                }
+            }
+        }
+        // `rubble_two_body_contact` (Rubble's extension, spec §10.3): the two-body
+        // rule in vehicle and self contact, the profile otherwise unchanged (RoR's
+        // normal force and ground contact).
+        if file.two_body_contact {
+            s.two_body_contact = true;
         }
         // `rubble_contact_breaks` (Rubble's extension, spec §32).
         if !file.contact_breaks.is_empty() {
@@ -3453,16 +3508,35 @@ impl ExplicitBeams {
     /// One fixed step: nodes, wings, fuselage drag, commands, beams,
     /// self-collision.
     pub fn step(&mut self) {
+        self.step_nodes();
+        self.step_rest();
+    }
+
+    /// [`Self::step`]'s first part: the drive, the node update and the centred
+    /// damping's correction (every velocity change of the step). A world
+    /// ([`crate::explicit_contact::ExplicitBeamsWorld`]) runs it on every vehicle,
+    /// then its contact work guard on the final velocities (spec §37.1), then
+    /// [`Self::step_rest`].
+    pub fn step_nodes(&mut self) {
         if self.drive.is_some() {
             crate::explicit_drive::drive_pass(self);
         }
         if self.settings.centred_damping {
             let v0: Vec<Vec3> = self.nodes.iter().map(|n| n.vel).collect();
+            // The objective form reads each beam's direction before the update too.
+            let x0: Option<Vec<Vec3>> = self
+                .settings
+                .centred_objective
+                .then(|| self.nodes.iter().map(|n| n.pos).collect());
             self.node_pass();
-            self.centred_correction(&v0);
+            self.centred_correction(&v0, x0.as_deref());
         } else {
             self.node_pass();
         }
+    }
+
+    /// [`Self::step`]'s second part: everything after [`Self::step_nodes`].
+    pub fn step_rest(&mut self) {
         if let Some(speed) = self.sleep.track {
             // Vehicle sleep: the velocities this node pass (and its centred correction)
             // left (the GPU's point).
@@ -3522,8 +3596,13 @@ impl ExplicitBeams {
 
     fn node_pass(&mut self) {
         let exact = self.exact_friction;
-        // Anti-clip's side memory (§36): last step's contacts are held now.
-        for c in &mut self.clip_sides {
+        // Anti-clip's side memory (§36): last step's contacts are held now (a retired
+        // node's stays as it was: the GPU's node phase skips it).
+        let any_retired = self.retired.iter().any(|&r| r);
+        for (i, c) in self.clip_sides.iter_mut().enumerate() {
+            if any_retired && self.retired.get(i).copied().unwrap_or(false) {
+                continue;
+            }
             crate::explicit_contact::clip_roll(c);
         }
         // Fixed-point contact (§36): last step's contact sums, then its slide forces.
@@ -3568,6 +3647,11 @@ impl ExplicitBeams {
         // (Sized by the pressure wheels' builder: every tread node has a slot.)
         let mut tread = std::mem::take(&mut self.tread);
         for i in 0..self.nodes.len() {
+            if any_retired && self.retired.get(i).copied().unwrap_or(false) {
+                // Retired debris: at rest where it is, nothing else.
+                self.nodes[i].vel = Vec3::ZERO;
+                continue;
+            }
             let mut n = self.nodes[i];
             if let Some(l) = cf.as_mut() {
                 l.roll(i);
@@ -3935,7 +4019,16 @@ impl ExplicitBeams {
     /// damping it applied reads the mean of the step's start and end velocities.
     /// Each node sums its incidence entries in order (the kernel's slots), then
     /// v += h·c/m and x += h·(h·c/m).
-    fn centred_correction(&mut self, v0: &[Vec3]) {
+    ///
+    /// `x0` (the positions before the node update;
+    /// [`ExplicitBeamsSettings::centred_objective`], spec §39.6): a plain beam's Δu
+    /// is then the change of its extension rate itself, each rate along the beam's
+    /// direction at its own time, (v′_a − v′_b)·d̂′ − (v_a − v_b)·d̂. Without it Δu is
+    /// (Δv_a − Δv_b)·d̂′, which is the same while the beam keeps its direction and
+    /// reads −ω²·L·h for a beam that only turns at ω (its relative velocity turns
+    /// with it): an outward push on every damped beam of a spinning body, which
+    /// then gains energy (known-bugs S3).
+    fn centred_correction(&mut self, v0: &[Vec3], x0: Option<&[Vec3]>) {
         let h = STEP;
         let nb = self.beams.len();
         self.damp_slopes.resize(nb, 0.0);
@@ -3954,10 +4047,21 @@ impl ExplicitBeams {
                     let n = self.beams[j + 1];
                     let ids = [a, e, n.a as usize, n.b as usize];
                     let g = dihedral_jacobian(ids.map(|i| self.nodes[i].pos));
-                    let dr = g[0].dot(dv[ids[0]])
-                        + g[1].dot(dv[ids[1]])
-                        + g[2].dot(dv[ids[2]])
-                        + g[3].dot(dv[ids[3]]);
+                    let dr = match x0 {
+                        // The dihedral rate's change, each rate with its own gradient.
+                        Some(x0) => {
+                            let g0 = dihedral_jacobian(ids.map(|i| x0[i]));
+                            (0..4)
+                                .map(|q| g[q].dot(self.nodes[ids[q]].vel) - g0[q].dot(v0[ids[q]]))
+                                .sum::<f32>()
+                        }
+                        None => {
+                            g[0].dot(dv[ids[0]])
+                                + g[1].dot(dv[ids[1]])
+                                + g[2].dot(dv[ids[2]])
+                                + g[3].dot(dv[ids[3]])
+                        }
+                    };
                     let t = -0.5 * slope * dr;
                     slot[j] = [g[0] * t, g[1] * t];
                     slot[j + 1] = [g[2] * t, g[3] * t];
@@ -3969,13 +4073,25 @@ impl ExplicitBeams {
                 _ => {
                     let d = self.nodes[a].pos - self.nodes[e].pos;
                     let inv = exact_length(d.dot(d)).1;
-                    let du = (dv[a] - dv[e]).dot(d) * inv;
+                    let du = match x0 {
+                        Some(x0) => {
+                            let d0 = x0[a] - x0[e];
+                            let inv0 = exact_length(d0.dot(d0)).1;
+                            (self.nodes[a].vel - self.nodes[e].vel).dot(d) * inv
+                                - (v0[a] - v0[e]).dot(d0) * inv0
+                        }
+                        None => (dv[a] - dv[e]).dot(d) * inv,
+                    };
                     let push = d * ((-0.5 * slope * du) * inv);
                     slot[j] = [push, -push];
                 }
             }
         }
         for i in 0..self.nodes.len() {
+            if self.is_retired(i) {
+                // Retired debris: left at rest (the node pass's).
+                continue;
+            }
             let mut c = Vec3::ZERO;
             let mut seen: Option<u32> = None;
             for &j in &self.incidence[i] {
@@ -4165,6 +4281,7 @@ impl ExplicitBeams {
         }
         let r = self.collision_range;
         let h = STEP;
+        self.last_self_pairs = 0;
         // Without the throttle (§36) a triangle never waits: its count stays ≤ 0.
         let cap = if self.settings.triangle_throttle { i32::MAX } else { 0 };
         // The two-body rule (spec §36, as vehicle contact's §10.3): the step's hits
@@ -4185,7 +4302,8 @@ impl ExplicitBeams {
                 tri.idle = 0;
             }
             let [i0, i1, i2] = tri.nodes;
-            if (!self.tri_dead.is_empty() && self.tri_dead[t]) || (self.tri_anti_only(t) && !self.anti_clip) {
+            let retired = !self.retired.is_empty() && [i0, i1, i2].iter().any(|&i| self.is_retired(i as usize));
+            if retired || (!self.tri_dead.is_empty() && self.tri_dead[t]) || (self.tri_anti_only(t) && !self.anti_clip) {
                 // A broken triangle (spec §18), or an anti-clip-only one with
                 // anti-clip off: no candidates.
                 self.triangles[t].wait = (self.triangles[t].wait + 1).min(cap);
@@ -4198,17 +4316,24 @@ impl ExplicitBeams {
             // Anti-clip (§36): the box also reaches what crossed it over the step
             // or is remembered up to CLIP_DEPTH behind it.
             let anti = self.anti_clip;
-            let reach = if anti {
-                let tv = [i0, i1, i2]
+            let tv = if anti {
+                [i0, i1, i2]
                     .iter()
                     .map(|&i| self.nodes[i as usize].vel.length())
-                    .fold(0.0f32, f32::max);
+                    .fold(0.0f32, f32::max)
+            } else {
+                0.0
+            };
+            let reach = if anti {
                 r + (tv + vmax) * STEP + crate::explicit_contact::CLIP_DEPTH
             } else {
                 r
             };
             let lo = p0.min(p1).min(p2) - Vec3::splat(reach);
             let hi = p0.max(p1).max(p2) + Vec3::splat(reach);
+            // Each contacter padded by its own travel (`own_travel_reach`): a box inside
+            // the one above (its speed at most vmax), whose cells the grid gathers.
+            let own = anti && self.own_travel_reach;
             let only = self.tri_anti_only(t);
             let mut hit = false;
             // The candidates to test, in candidate order: all of them, or those in
@@ -4238,6 +4363,9 @@ impl ExplicitBeams {
                 if hn == i0 || hn == i1 || hn == i2 {
                     continue;
                 }
+                if !self.retired.is_empty() && self.is_retired(hn as usize) {
+                    continue;
+                }
                 if tri_group != 0 && self.self_groups[hn as usize] == tri_group {
                     continue;
                 }
@@ -4248,6 +4376,17 @@ impl ExplicitBeams {
                 if p.cmplt(lo).any() || p.cmpgt(hi).any() {
                     continue;
                 }
+                if own {
+                    let vh = self.nodes[hn as usize].vel.length();
+                    let s = if vh < vmax { vh } else { vmax };
+                    let reach = r + (tv + s) * STEP + crate::explicit_contact::CLIP_DEPTH;
+                    let lo = p0.min(p1).min(p2) - Vec3::splat(reach);
+                    let hi = p0.max(p1).max(p2) + Vec3::splat(reach);
+                    if p.cmplt(lo).any() || p.cmpgt(hi).any() {
+                        continue;
+                    }
+                }
+                self.last_self_pairs += 1;
                 // (α, β, γ, depth into the contact, normal).
                 let found_hit = if anti {
                     self.clip_hit(t, hn, p, &frame, [i0, i1, i2], r, only)
@@ -4311,6 +4450,11 @@ impl ExplicitBeams {
         }
     }
 
+    /// Whether node `i` is retired ([`Self::retired`]).
+    pub fn is_retired(&self, i: usize) -> bool {
+        self.retired.get(i).copied().unwrap_or(false)
+    }
+
     /// The fastest node's speed (m/s).
     pub fn max_speed(&self) -> f32 {
         self.nodes.iter().map(|n| n.vel.length()).fold(0.0, f32::max)
@@ -4361,6 +4505,29 @@ impl ExplicitBeams {
     }
 
     /// Node `i`'s fixed-point contact sum in newtons (zero when none).
+    /// A velocity change `dv` of node `i` after its node update (the world's
+    /// contact work guard, spec §37.1): the velocity and, as the node update
+    /// moves a node by h·v, its position by h·dv. Immovable and retired nodes
+    /// stay as they are.
+    pub fn nudge(&mut self, i: usize, dv: Vec3) {
+        if self.nodes[i].has(NODE_IMMOVABLE) || self.is_retired(i) {
+            return;
+        }
+        let n = &mut self.nodes[i];
+        n.vel += dv;
+        n.pos += dv * STEP;
+    }
+
+    /// The force a staged contact share `f` on a node actually reaches it with:
+    /// the fixed-point sums' rounding of it ([`to_fixed`]) with
+    /// [`Self::fixed_contact`], `f` itself without.
+    pub fn applied_contact(&self, f: Vec3) -> Vec3 {
+        if !self.fixed_contact {
+            return f;
+        }
+        Vec3::new(to_fixed(f.x) as f32, to_fixed(f.y) as f32, to_fixed(f.z) as f32) * (1.0 / CONTACT_FIXED)
+    }
+
     pub fn contact_sum(&self, i: usize) -> Vec3 {
         match self.contact_acc.get(i) {
             Some(a) => Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32) * (1.0 / CONTACT_FIXED),
@@ -5214,6 +5381,7 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
     let mut k = beam.k;
     let mut c = beam.c;
     let mut support_broke = false;
+    let mut torn = false;
     match beam.kind {
         ExplicitKind::LimitedSpring => {
             let long = beam.long_bound * beam.rest;
@@ -5251,6 +5419,16 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
                 c *= 0.1;
             }
         }
+        // A damper-only beam with a tear ratio (`rubble_damper_tear`): stretched past
+        // it, the material it damped has parted (the kernel's damperTorn).
+        ExplicitKind::Plain if beam.k == 0.0 && beam.long_bound > 0.0 => {
+            if e > beam.rest * beam.long_bound {
+                // Torn: no force this step (nothing joins its ends any more).
+                beam.broken = true;
+                support_broke = true;
+                torn = true;
+            }
+        }
         // Shock2 beams take `shock2_force`; here they act as plain ones. Triggers
         // have k = c = 0.
         // JBeam-mode kinds take `jbeam_force` (never here).
@@ -5274,7 +5452,7 @@ pub fn beam_force(beam: &mut Beam, na: &Node, nb: &Node, fast: bool) -> BeamOut 
         | ExplicitKind::JbeamAeroTri2
         | ExplicitKind::JbeamLbeam2 => {}
     }
-    let mut f = -k * e - c * u;
+    let mut f = if torn { 0.0 } else { -k * e - c * u };
     beam.force = f;
     let mut tau = f.abs();
     let mut check_break = false;

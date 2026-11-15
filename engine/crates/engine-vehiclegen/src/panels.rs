@@ -31,7 +31,7 @@ fn nrm(x: DVec3) -> DVec3 {
 }
 
 /// Python's float floor division `a // b` (CPython `float_floor_div`).
-fn py_floordiv(vx: f64, wx: f64) -> f64 {
+pub(crate) fn py_floordiv(vx: f64, wx: f64) -> f64 {
     let m = vx % wx; // C fmod
     let mut div = (vx - m) / wx;
     if m != 0.0 && ((wx < 0.0) != (m < 0.0)) {
@@ -556,6 +556,14 @@ pub fn panel(
 /// the skin; edges shared with another pane are pulled back 3 mm. Python
 /// defaults: depth 0.012, grow 0.006.
 pub fn glass_from(block_meshes: &[(Mesh, i32)], depth: f64, grow: f64, shared: Option<&FxHashSet<Key>>) -> Mesh {
+    glass_from_with(block_meshes, depth, grow, shared, false)
+}
+
+/// [`glass_from`]; `fair` (the solid build): the pane's corners are rounded
+/// as its opening's are (so it sits in the rebate there too) and it is sunk
+/// along smoothed normals, no deeper behind a bend than the bend allows (a
+/// lens wrapping a corner keeps its shape instead of creasing).
+pub fn glass_from_with(block_meshes: &[(Mesh, i32)], depth: f64, grow: f64, shared: Option<&FxHashSet<Key>>, fair: bool) -> Mesh {
     let mut m = Mesh::new();
     for (g, _) in block_meshes {
         m.add(g);
@@ -569,10 +577,32 @@ pub fn glass_from(block_meshes: &[(Mesh, i32)], depth: f64, grow: f64, shared: O
             }
         }
     }
-    inset_boundary(&mut m, &d, Some(&[0.5, 0.2]), None);
-    let n = m.vertex_normals();
-    for (p, nn) in m.v.iter_mut().zip(&n) {
-        *p -= *nn * depth;
+    if fair {
+        // the opening's own border: inset as the panel's is, corners rounded
+        // as the panel's are, then grown under the flange
+        let loops = boundary_loops(&m);
+        let back = vec![HEM_OUT * 0.6; m.v.len()];
+        let (loops, _) = inset_boundary(&mut m, &back, None, Some(loops));
+        round_corners(&mut m, &loops, 35.0);
+        let d: Vec<f64> = d.iter().map(|x| x - HEM_OUT * 0.6).collect();
+        inset_boundary(&mut m, &d, Some(&[0.5, 0.2]), Some(loops));
+        let n = smooth_normals(&m, 8);
+        let nb = neighbours(&m);
+        for i in 0..m.v.len() {
+            let mut k = 0.0f64;
+            for &j in &nb[i] {
+                let e = m.v[j as usize] - m.v[i];
+                k = k.max((n[j as usize] - n[i]).dot(e) / e.length_squared().max(1e-18));
+            }
+            let cap = if k > 1e-9 { 0.5 / k } else { f64::INFINITY };
+            m.v[i] -= n[i] * depth.min(cap);
+        }
+    } else {
+        inset_boundary(&mut m, &d, Some(&[0.5, 0.2]), None);
+        let n = m.vertex_normals();
+        for (p, nn) in m.v.iter_mut().zip(&n) {
+            *p -= *nn * depth;
+        }
     }
     m.set_mat(Mat::Glass);
     m.set_islands(-1);
