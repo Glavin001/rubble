@@ -337,9 +337,10 @@ impl Split {
 }
 
 /// Whether contact groups run split across workgroups ([`ExplicitBeamsGpu::set_group_split`]):
-/// `RUBBLE_GROUP_SPLIT=1|0` (default on).
+/// `RUBBLE_GROUP_SPLIT=1|0` (default off until its suites and fleet runs are clean:
+/// contact-groups-design.md).
 pub fn group_split_default() -> bool {
-    std::env::var("RUBBLE_GROUP_SPLIT").as_deref() != Ok("0")
+    std::env::var("RUBBLE_GROUP_SPLIT").as_deref() == Ok("1")
 }
 
 /// Byte offsets in the indirect arguments of the split group path's dispatches (the

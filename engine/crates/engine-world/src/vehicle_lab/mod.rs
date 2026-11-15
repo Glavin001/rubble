@@ -76,6 +76,11 @@ pub struct LabOptions {
     /// With the piece labels, the coupling's window per piece
     /// (`ExplicitBeamsGpu::set_piece_windows`; lossless). Live (`{ pieceWindows: bool }`).
     pub piece_windows: bool,
+    /// Self-collision's listed pairs tested across the GPU's workgroups, a dispatch a
+    /// step (`ExplicitBeamsGpu::set_self_split`; the same results bit for bit). Only
+    /// frames without vehicle contact, sleep or surface contact take it. Live
+    /// (`{ selfSplit: bool }`).
+    pub self_split: bool,
     /// Small debris retired after its time to live (`DebrisTtl`; None: never, the
     /// solver's behaviour without the setting). On in the lab: 5 s, at most 10 kg and 40
     /// nodes ([`LAB_DEBRIS_TTL`]: what the mountain sheds). Live
@@ -100,6 +105,7 @@ impl Default for LabOptions {
             own_travel_reach: true,
             piece_labels: true,
             piece_windows: true,
+            self_split: false,
             debris_ttl: Some(LAB_DEBRIS_TTL),
             parked: false,
             capacity: CouplingCapacity {
@@ -214,6 +220,10 @@ impl LabOptions {
                 .get("pieceWindows")
                 .and_then(Value::as_bool)
                 .unwrap_or(d.piece_windows),
+            self_split: v
+                .get("selfSplit")
+                .and_then(Value::as_bool)
+                .unwrap_or(d.self_split),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
                 _ => d.debris_ttl,
@@ -2155,6 +2165,7 @@ impl Lab {
             .ok_or_else(|| anyhow::anyhow!("vehicle lab: no coupling layout"))?;
         if let Some(x) = world.explicit_vehicles_mut() {
             x.set_piece_windows(opts.piece_windows);
+            x.set_self_split(opts.self_split);
         }
         let x = world.explicit_vehicles().expect("vehicles");
         let span = x.layout().spans[0];
@@ -2356,6 +2367,14 @@ impl Lab {
             let ttl = debris_ttl_from(d);
             self.bench.set_debris_ttl(ttl);
             return Ok(json!({ "debris": debris_json(ttl) }));
+        }
+        // { selfSplit: bool }: self-collision's pairs across workgroups (LabOptions::self_split).
+        if let Some(on) = cmd.get("selfSplit").and_then(Value::as_bool) {
+            self.bench.opts.self_split = on;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.set_self_split(on);
+            }
+            return Ok(json!({ "selfSplit": on }));
         }
         // { pieceWindows: bool }: the coupling's window per piece (LabOptions::piece_windows).
         if let Some(on) = cmd.get("pieceWindows").and_then(Value::as_bool) {
