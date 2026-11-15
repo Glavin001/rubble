@@ -187,12 +187,16 @@ impl CudaExplicitBeams {
             // of this build's (another build's device code of the same module, same
             // bindings): explicit_ab's `env.RUBBLE_CUDA_EXPLICIT_DIR=...` variant runs an
             // older kernel against this one from one state.
+            // (A module the directory lacks: this build's, named on stderr.)
             let other = std::env::var("RUBBLE_CUDA_EXPLICIT_DIR")
                 .ok()
                 .filter(|d| !d.is_empty())
-                .map(|d| std::fs::read(std::path::Path::new(&d).join(format!("{name}.fatbin"))))
-                .transpose()
-                .map_err(|e| anyhow::anyhow!("RUBBLE_CUDA_EXPLICIT_DIR: {name}.fatbin: {e}"))?;
+                .and_then(|d| {
+                    let path = std::path::Path::new(&d).join(format!("{name}.fatbin"));
+                    let read = std::fs::read(&path).ok();
+                    eprintln!("RUBBLE_CUDA_EXPLICIT_DIR: {name}: {}", if read.is_some() { "from the directory" } else { "this build's (not in the directory)" });
+                    read
+                });
             let image: &[u8] = other.as_deref().unwrap_or(t.image);
             let module = unsafe { result::module::load_data(image.as_ptr() as *const c_void) }
                 .map_err(|e| anyhow::anyhow!("CUDA: load module {name}: {e:?}"))?;

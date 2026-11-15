@@ -128,9 +128,35 @@ select of the arguments), or a branch-free helper.
 | 1. cplHdr: always the workgroup copy (no branch, ~630 copies) | 235,407 | 34.9 | |
 | 2. ebEnd / ebEndMost: selects, not ifs (~220 copies) | 226,851 | 33.5 | 15.1 |
 | 3. the four accelerations of selfTwoBodyCore, resDrive, guardOf from one call site (opaqueCount loop); the node pass's ground and box contacts from one contactForce | 214,711 | | |
-| 4. the brute and every-candidate tests from one site; the frame's listing walk without tests | 201,261 | 27.6 / 26.5 | 12.9 |
-| 5. the step's listed pairs (reused, walk's, early) from one tryContact site; the testing walk from one site | 187,232 | 28.3 / 26.4 | |
+| 4. the brute and every-candidate tests from one site; the frame's listing walk without tests (**reverted**) | 201,261 | 27.6 / 26.5 | 12.9 |
+| 5. the step's listed pairs (reused, walk's, early) from one tryContact site; the testing walk from one site (**reverted**) | 187,232 | 28.3 / 26.4 | |
 | 6. one beamUpdate site for sorted and file order; selfSerial's hits and residual modes as one pass | 169,029 | 24.7 / 23.8 | 12.0 (frame 5.9, step 5.6) |
+| **kept: 1, 2, 3, 6 without 4 and 5** | **196,508** | **27.5 / 26.3** (base 38.1 / 38.0 in the same session) | **14.0** (frame 6.8, step 6.6) |
+
+Steps 4 and 5 are reverted: on NVIDIA (CUDA route, T4, `explicit_ab` with the base
+build's fatbin loaded through `RUBBLE_CUDA_EXPLICIT_DIR`, generated sedan, tumble and
+crash, 60 frames) the frame with them took 6.63 ms a frame against 5.50 (+20 %), bit for
+bit; without them 5.53–5.55 against 5.59–5.60. (Bisected with fatbins per variant: steps
+1–2 5.73, step 3 5.42–5.50, step 6's beam merge removed still 6.59.) Metal ran them
+faster, so they were a register-allocation loss on NVIDIA's compiler, not more work. An
+intermediate form of step 4 also made group_split's two-sedan head-on run past 420 s on
+Metal (bit for bit); the form committed and then reverted ran it in 133 s.
+
+### NVIDIA T4 (Vulkan, driver 620.70.06), cold, the page's four modules
+
+`gpu_run.sh --allow-cold-compile --no-warm --no-shader-cache --cpus 8 -- -p engine-webgpu
+--bin gpu_adapter -- --compile --jobs 8` (the four kept modules and the base build's
+four side by side, a core each):
+
+| Module | Base | Kept |
+|---|---|---|
+| `explicit_beams_wide_nosurf` (frame) | 186.2 s | 68.4 s |
+| `explicit_beams_selfsplit_step_wide` | 182.8 s | 71.6 s |
+| `explicit_beams_selfsplit_walk_wide` | 1.5 s | 1.5 s |
+| `explicit_beams_selfsplit_pairs_wide` | 1.5 s | 1.5 s |
+| sum (one after another) / longest (side by side) | 372 s / 186 s | 143 s / 72 s |
+
+The 60 s bar is not met: 2.6x less, still 143 s one after another.
 
 `opaqueCount(n)` is n plus `noFuseBits()` (0 at run time from a uniform), so no compiler
 can see the trip count and unroll the merged call sites back into copies.
@@ -141,8 +167,9 @@ change what a driver contracts into an FMA. (The coupling's two `contactForce` c
 one with `f * share`, are left alone for that reason.)
 
 Runtime, mountain (vehicle_lab --measure mountain-perf --self-split 1 --ab-switch kernel
---ab-kernel-dir <base WGSL>, native Metal, ms a frame, this kernel / base, one snapshot
-each way): see the commit messages and the table in the final report.
+--ab-kernel-dir <base WGSL>, native Metal, ms a frame, one snapshot each way), kept
+kernel against base: t 9 5.48 / 5.58, t 20 5.45 / 5.55, t 36 5.64 / 5.86, t 44 5.71 /
+5.89, every state word bit for bit.
 
 ### Not done / open
 
