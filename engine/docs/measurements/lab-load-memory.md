@@ -111,25 +111,83 @@ give the same bytes for all 13 buffers (`showcase-binds` 267,358,144 bytes,
 Natively, `gen3_rig::the_sidecar_read_in_place_binds_the_same_visual` checks the
 in-place skin binds the same visual (its `Debug`, every float) as the decoded one.
 
+## Second pass (2026-11-15): the phone's "GPU device was lost"
+
+The iPhone then lost its WebGPU device while loading (the banner's "The GPU device
+was lost (no reason given)", 0 steps taken). The four lossless items below were
+done on `perf/gen-car-phone-memory`; same method, same car, served from a local
+build (`build-web.sh`'s wgsl_export, world wasm and assembly; `__mods` linked to
+the artifacts' folder). MiB, desktop Chrome on an M-series Mac:
+
+| | mountain gen, before | after | shoot gen surface, before | after | authored sedan, before | after |
+|---|---:|---:|---:|---:|---:|---:|
+| **Renderer footprint, peak** | **1170** | **919** | **1235** | **969** | 407 | 435 |
+| Renderer footprint, settled | 1136 | 719 | 1134 | 728 | 400 | 397 |
+| JS heap, peak at a step's end | 310 | 241 | 310 | 239 | 90 | 89 |
+| JS heap, settled | 177 | 5 | 178 | 6 | 68 | 69 |
+| wasm memory | 529 | 419 | 529 | 419 | 150 | 149 |
+| GPU buffers, peak | 377 | 260 | 370 | 259 | 144 | 143 |
+| `showcase-binds` | 255 | 136 | 255 | 136 | 23 | 23 |
+
+(The authored sedan's peak moves between runs by about 30 MiB; its settled numbers
+are unchanged.)
+
+1. **The bind buffer at 8 B an entry** (1332af91). When the wasm sends the weights
+   as grid steps (`wtQ`) on the grids the shader decodes (2⁻¹³, 2⁻⁹), a weighted
+   vertex's entries are packed end to end: node u16 and A i16 in one word, ∂A/∂T
+   and ∂A/∂B i16 in the next (flags bit 27). The shader decodes a step count s by
+   lowering f32(s)'s exponent (integer arithmetic): the same f32 bits, and no float
+   operation a compiler could fold into the sums. Other weights keep the f32 layout.
+   267,358,144 → 142,986,368 bytes.
+2. **The visual not kept after its upload** (8926eac3). The renderer's per-level
+   Params closure kept `addCar`'s whole scope, the visual among it, while the car
+   was drawn; it is built outside that scope now. The lab drops a mod car's visuals
+   once uploaded and builds them again for an in-place rebuild, the cutaway or a
+   second paint (the same files and wasm: the same bytes).
+3. **The model files streamed into the wasm heap** (80e47910): `HeldBytes`, written
+   chunk by chunk as they download (`loadMod(…, { held: true })`), read there by
+   `jbeamVisualSkinnedHeld`, freed by `releaseModels`.
+4. **The weights as steps in Rust** (80e47910): `ShowcaseVisual::wt` is a
+   `flexskin::WtEntries`, u16 + 3 × i16 while every entry is exact, else u32 + f32;
+   `w(k)` gives back the pushed f32 bits, so the CPU users read the same values.
+   Native wasm-heap peak (`skinned_visual_memory`): 476 → 369 MB.
+
+Also: the device-lost banner names the load step last shown (or "while running, N
+steps taken") and the last memory reading (JS heap where given, wasm heap, the car's
+estimated footprint, device memory), and a loss while the lab is still being built on
+the device is reported too. The fit check's estimate is the measured one (tab
+450 MB + 3.7 × model bytes; bind buffer 1.16 × rskin), and on iOS (`isIOS()`: the
+UA, or a Mac UA with touch) a car estimated past 1 GB of tab is warned about with a
+"Load it anyway" button. That 1 GB is a judgement from one report (0.42 GB ran,
+1.2 GB did not), not a known WebKit limit; the generated sedan now estimates 0.97 GB
+and is not warned about.
+
+Proofs (all on the generated sedan, 490,997 vertices, 13,945,318 entries):
+
+* GPU: `engine/tools/vehicle-lab/skin-gpu-identity.mjs` skins the same deformed
+  node positions with the old renderer and the new one (headless Chrome, Metal):
+  `showcase-out` (15,711,904 bytes, every vertex moved off its rest) is
+  byte-identical.
+* CPU mirror: `skin-upload-identity.mjs` hashes the entries as `wEntry` decodes
+  them from `showcase-binds`: the same old and new. With the new renderer, every
+  buffer's hash is the same from the old wasm, the new wasm, and the new wasm
+  reading `HeldBytes` (`--held`).
+* Tests: `tests/showcase_car_memory.test.mjs` (the step layout decodes to the f32
+  layout's entries, in bounded pieces; another grid keeps the f32 bytes; addCar
+  keeps nothing of the visual), `beamng_mod_models` (held files, retry,
+  truncation), `beamng_mod_footprint` (iOS), `flexskin::wt_entries_give_back_what_was_pushed`,
+  `gen3_rig` (the in-place sidecar binds the same visual).
+
+What is left of the load peak: the visual as JS arrays while it is uploaded (about
+170 MB, transient now) and the bind staging. Packing the bind buffer in Rust and
+uploading it from the wasm heap would remove the first; not done (a change of where
+the renderer's packing lives).
+
 ## Not done, for decision or later
-
-Lossless, not done (each needs a design choice or touches drawing code):
-
-* The bind buffer at 8 B an entry (u16 node, 3 i16 steps; the shader scales by
-  powers of two, exact): `showcase-binds` 255 → about 140 MB on the GPU. A change to
-  the skin shader's data layout.
-* The visual's weights held as steps in Rust (`ShowcaseVisual`): the wasm
-  high-water 515 → about 405 MB. Its CPU users (`vehicle_compare`, `skin::deform`,
-  lint) read f32 today.
-* The rskin streamed into the wasm heap as it downloads (no JS copy, no second
-  copy): about 124 MB off the JS peak during the bind.
-* Not keeping the visual in JS after its upload (173 MB): in-place rebuilds and the
-  cutaway would rebuild it (about 1 s) or keep it in wasm.
 
 Lossy (would need the user's decision; not measured beyond this): f16 weights
 would halve the steps again but A spans ±4, where f16's step is 2⁻⁹ (16× the
-sidecar's grid); quantised detail offsets likewise. Not proposed further: the
-lossless items above are larger.
+sidecar's grid); quantised detail offsets likewise.
 
 ## Phone estimate (unverified)
 
