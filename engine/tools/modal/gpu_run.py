@@ -209,11 +209,22 @@ def _run(cmd: list[str], cwd: str, env: dict, deadline: float, every: int) -> tu
             return 124, time.time() - t0
 
 
-@app.function(
+FUNCTION = dict(
     gpu="T4", image=image, cpu=CPUS, memory=MEM_GIB * 1024, timeout=600, retries=0,
     single_use_containers=True, volumes={CACHE_MOUNT: cache_volume},
 )
+
+
+@app.function(**FUNCTION)
 def run(archive: bytes, spec: dict) -> dict:
+    return _run_impl(archive, spec)
+
+
+# (Modal preempted two of tonight's long cold runs: the call restarts from the beginning,
+# billed again. Non-preemptible containers are not offered for GPU functions.)
+
+
+def _run_impl(archive: bytes, spec: dict) -> dict:
     started = time.time()
     # Leave time to save the shader cache and print the summary before Modal's kill.
     deadline = started + spec["cap"] - 45

@@ -177,11 +177,15 @@ def main() -> None:
     # The kernel version: every generated explicit-beams WGSL module (the slow ones for
     # the driver); gpu_run.py keys "seen on this driver" markers on it.
     import hashlib
-    h = hashlib.sha256()
+    # By module name (an engine-world build has engine-webgpu's WGSL in two build
+    # directories, the same files): every selection of one source tree hashes alike.
+    modules = {}
     for key in sorted(files):
         if "/out/wgsl/" in key and Path(key).name.startswith("explicit_"):
-            h.update(Path(key).name.encode())
-            h.update(files[key].read_bytes())
+            modules[Path(key).name] = hashlib.sha256(files[key].read_bytes()).hexdigest()
+    h = hashlib.sha256()
+    for name, digest in sorted(modules.items()):
+        h.update(f"{name} {digest}\n".encode())
     manifest = {"run_args": run_args, "cargo": cargo_args, "exes": [], "data_bytes": total,
                 "kernel_hash": "" if cuda else h.hexdigest()[:16], "route": "cuda" if cuda else "vulkan"}
     buf = io.BytesIO()
@@ -203,6 +207,8 @@ def main() -> None:
             tar.addfile(info, io.BytesIO(blob))
     (out / "archive.tar.gz").write_bytes(buf.getvalue())
     names = ", ".join(f"{e['name']} ({e['kind']})" for e in runs)
+    if manifest["kernel_hash"]:
+        print(f"kernel version {manifest['kernel_hash']}", file=sys.stderr)
     print(f"packed {names}; {len(files) + len(staged)} data files ({total / 1e6:.1f} MB, {generated / 1e6:.1f} MB of it generated WGSL); "
           f"archive {len(buf.getvalue()) / 1e6:.1f} MB", file=sys.stderr)
 
