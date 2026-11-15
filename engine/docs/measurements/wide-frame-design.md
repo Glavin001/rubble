@@ -183,3 +183,80 @@ per indirect dispatch; nvcc / CUDA compile times; hundreds of cars with the real
 - (f) Risks: occupancy of small arrays across workgroups is exactly what §1.1 measured (the
   wide form loses); the 2-in-flight readback gate is unchanged; inherently serial passes
   (vehicle-contact levels) stay bounded per group as in contact-groups-design.md.
+
+## 5. Runtime-switch candidates: the measurements to take when the GPU is back
+
+Each is adopted only if the frame's runtime is equal within noise **and** every state
+word is bit-identical to the compiled variant's, native and Chrome. Protocol: the
+`vehicle_lab --ab` harness (20 frames of 34 steps from one snapshot each way, state words
+compared), at parked t 2.5 and mountain t 9/20/36/44, page-default mountain (generated
+sedan, surface off and on), plus `explicit_vehicles_bench` "frame alone" at 1 and 32 cars;
+Chrome: the page with `timing=phases`, the frame's segment, the same sim times.
+
+**(a) Lanes as a WGSL `override` constant** (removes the `_wide` twin of every module:
+≈half the module *files*; Metal still compiles each specialisation, Tint/naga translate
+once). The kernel uses `LANES` in workgroup array sizes (`gsPart[LANES]`, …) and in
+`numthreads`; WGSL allows `override` in `@workgroup_size` and in workgroup array sizes
+(`array<T, OVERRIDE>`), but Slang's WGSL output emits `static const`. Steps: emit
+`EB_LANES` as an override (post-process or Slang `[SpecializationConstant]`), pass it
+in `PipelineCompilationOptions::constants`; check naga (native) and Tint (Chrome) accept
+override-sized workgroup arrays; A/B the 256 and 512 pipelines against today's modules.
+Expected runtime: identical (the same code after specialisation). Risk: naga's support
+for override-sized arrays.
+
+**(b) The surface twins** (`_nosurf`, `_nocpl`: ≈32 modules). Today a fleet without
+surface contact runs a module compiled without the surface pass (`EB_NO_SURFACE`), which
+exists for browser compile time and Metal's 31-threadgroup-variable limit, not runtime.
+Candidate: one module with the pass behind its runtime flag (`surfaceOn()` is already a
+uniform). Measure: the full module running a surface-off car against `_nosurf` on the
+same car (register pressure / occupancy: the risk). If equal, drop `_nosurf`; `_nocpl`
+likewise against the full module with coupling off. Note the 31-variable limit forced
+some twins (contact modules with every path); those stay unless the limit allows.
+
+(c) aero as data (≈half of the remaining families): the same protocol with a non-aero car
+on the aero module.
+
+## 6. Fewer phases and shorter chains inside the workgroup (next runtime work)
+
+The step dispatch of the self split (one generated sedan, coupling on, drive, anti-clip,
+no surface) runs these barriers (`sync()`, two barriers each) per substep, from
+`explicit_beams.slang` (line numbers at `8fffff88`):
+
+| Where | syncs | When |
+|---|---|---|
+| coupling, folded (`cplStepFolded`) | 2 | coupled car |
+| drive (`driveStep`) | 1 | driven car |
+| step k − 1's rest: hits (`selfSplitHits`, `selfApply` rounds) | ≥ 2 | a step with self-collision hits |
+| slides | 1 | slide nodes |
+| after the node phase and clears (6672) | 1 | always |
+| aero / commands (6713) | 1 | `EB_AERO` modules |
+| after the beam phase (6762) | 1 | always |
+| grid scan and scatter (6782–6824) | 5 | grid steps that build (2–6 a frame now) |
+| the cut before the pairs dispatch (6921) | 1 | self split |
+
+≈8–9 syncs a reusing substep, ≈13 a building one. §1.1 measured two phases with a barrier
+each at ≈18 µs a substep for this car; the step runs ≈135 µs a substep, so the barriers
+alone (≈0.4–0.5 µs a sync with the frame's lanes waiting on the slowest) are a few µs of
+that, and the rest is each phase's longest lane chain. Plan, measured first, each change
+lossless and bitwise against today's frame:
+
+1. **Measure the barrier share** with the existing ablation masks on the self split's step
+   module: 64 (one barrier instead of two per sync) and 128 (no barriers; time only), at
+   t 9/20/36/44. That bounds what removing syncs can give.
+2. **Measure each phase's chain** with the masks already in the kernel: 32 (beams), 2 and
+   4 (nodes: none / one a lane), 8 and 16 (aero commands, wings), 57344 (coupling), 1 (grid
+   scan), 256 (self-collision listing in the step). The phase whose removal saves most is
+   first.
+3. Candidates, ranked by expected gain (to confirm by 1–2):
+   - **The node phase's chain** (ground, static boxes, the coupling's contacts per node):
+     the coupling's candidate list keeps it to listed shapes; next, load the node's
+     records once (`myInfo` already) and keep the boxes' test to the node's cell.
+   - **The beam phase** in kind-sorted records (`beam-records.md`, `--ab-switch beams`):
+     lanes of one SIMD group run one code path; measured separately on that branch.
+   - **The grid scan** with subgroup prefix sums (WebGPU `subgroups`, native wgpu
+     `SUBGROUP`): 5 syncs to 2 on building steps (2–6 a frame).
+   - **Merging independent phases' barriers** (drive and the node clears; aero commands and
+     the beam phase where the commands' rest lengths are read only by the beams): each
+     merge needs the read/write sets of both sides disjoint; proved per merge from the code.
+4. **The CPU reference stays the oracle**: every change bitwise on the GPU against the
+   frame before it (the `--ab` harness and the suites), and the CPU twin unchanged.
