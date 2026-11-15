@@ -15,12 +15,12 @@
 #![cfg(feature = "gpu")]
 
 use stress_gpu::gpu::Gpu;
-use stress_ref::capability::Profile;
+use stress_ref::capability::{ImpactResponse, Profile, PulseModel, StrikeModel};
 use stress_ref::impact_local::{self, Impact, Target};
 use stress_ref::load_path::{Dof, LOWER};
 use stress_ref::scene::{Methods, Scene};
 use stress_rubble::scenes::{cantilever_plate, shot_at, shot_wall};
-use stress_rubble::threshold::ThresholdWorld;
+use stress_rubble::threshold::{FractureOptions, ThresholdWorld};
 
 fn world(gpu: &Gpu, scene: Scene, profile: Profile, radius: f64, mass: f64) -> ThresholdWorld {
     let mut scene = scene.with_derived();
@@ -287,6 +287,72 @@ fn equal_momentum_only_the_fast_light_shot_holes_the_wall() {
     println!("fast: {:?}; slow: {:?}", fast.record, slow.record);
     assert!(fast.record.outcome & 8 != 0, "the fast light shot perforates");
     assert!(slow.record.outcome & 8 == 0, "the slow heavy one does not");
+}
+
+/// The load path with the analytic strike and `response`: a shot of `mass` at `speed` into
+/// the anchored wall; (bonds broken a second after the strike, the strike's outcome, the
+/// structural strike's (peak force, duration, frequency)).
+fn structural(gpu: &Gpu, response: Option<ImpactResponse>, mass: f64, speed: f64) -> (u32, &'static str, [f32; 3]) {
+    let mut scene = shot_wall(2, true).with_derived();
+    scene.sim.methods = Methods::established();
+    Profile::LoadPath.apply_scene(&mut scene);
+    let options = FractureOptions { contact: Some(false), strike_prediction: Some(true), strike: Some(StrikeModel::Analytic { fracture_work: true }), impact_response: response, ..FractureOptions::default() };
+    let mut w = ThresholdWorld::with_options(gpu, &scene, R, mass, Profile::LoadPath, options).expect("fracture world");
+    let hz = 1.0 / scene.sim.frame_dt;
+    assert!(w.launch(gpu, &shot_at(R, mass, [0.05, -(1.5 * speed / hz + 0.2), 0.55], [0.0, speed, 0.0])));
+    let wall = w.tables.chunk_body[0] as usize;
+    let mut seen = None;
+    for _ in 0..(3.0 * hz) as usize {
+        w.step_frame(gpu).expect("frame");
+        let c = w.fracture.counters(gpu);
+        if seen.is_none() && c.bounces + c.craters + c.spalls + c.perforations > 0 {
+            seen = Some((outcome(&w.fracture.strike_records(gpu)[wall]), w.fracture.impact_responses(gpu)[wall]));
+        }
+    }
+    let c = w.fracture.counters(gpu);
+    assert_eq!(c.error, 0, "no error bits");
+    let (o, r) = seen.expect("a strike");
+    (c.broken, o, r)
+}
+
+/// A strike's structural response: a heavy slow shot that does not hole the wall breaks
+/// nothing without it and breaks the wall with it; a light shot at the same speed leaves the
+/// wall standing either way; the structure's frequency is the cantilever's.
+#[test]
+fn a_heavy_slow_shot_breaks_the_wall_through_its_structure() {
+    let gpu = Gpu::new().expect("GPU");
+    let light = steel_mass(R);
+    let dynamic = Some(ImpactResponse::default());
+    let fixed = Some(ImpactResponse { pulse: PulseModel::Static, scale_pct: 100 });
+    let off = structural(&gpu, None, light * 37.5, 8.0);
+    let on = structural(&gpu, dynamic, light * 37.5, 8.0);
+    let peak = structural(&gpu, fixed, light * 37.5, 8.0);
+    let small = structural(&gpu, dynamic, light, 8.0);
+    let small_off = structural(&gpu, None, light, 8.0);
+    let fast = structural(&gpu, dynamic, light, 300.0);
+    let fast_off = structural(&gpu, None, light, 300.0);
+    let tenth = structural(&gpu, Some(ImpactResponse { pulse: PulseModel::Dynamic, scale_pct: 1 }), light * 37.5, 8.0);
+    println!("heavy slow: off {off:?}, dynamic {on:?}, static {peak:?}, 1% {tenth:?}\nlight slow: off {small_off:?}, dynamic {small:?}\nlight fast: off {fast_off:?}, dynamic {fast:?}");
+    assert_ne!(off.1, "perforate");
+    assert!(on.0 > off.0 + 10, "the wall breaks through its structure: {} bonds, {} without", on.0, off.0);
+    assert!(peak.0 > off.0, "and under the static peak");
+    assert_eq!(small.0, small_off.0, "a light shot at the same speed leaves the structure standing");
+    assert_eq!(tenth.0, off.0, "the scale is a factor on the structural load");
+    assert_eq!(fast.1, "perforate");
+    // The wall as a cantilever from its fixed row (1.0 m of it free, 0.2 m thick): Rayleigh's
+    // quotient of a point load's shape is at or above the first mode.
+    let m = scene_concrete();
+    let first = 3.516 * (m.0 / m.1).sqrt() * (0.2 / 12f64.sqrt()) / (1.0 * 1.0);
+    let omega = on.2[2] as f64;
+    assert!(omega > 0.8 * first && omega < 4.0 * first, "the structure's frequency {omega} rad/s; the cantilever's first mode {first}");
+}
+
+/// The wall's concrete: (Young's modulus as the solve has it, density).
+fn scene_concrete() -> (f64, f64) {
+    let mut scene = shot_wall(2, true).with_derived();
+    Profile::LoadPath.apply_scene(&mut scene);
+    let m = scene.material("concrete");
+    (m.youngs_modulus * scene.sim.stiffness_scale, m.density)
 }
 
 /// Thicker walls at 120 m/s: perforated, then spalled, then cratered (never a worse

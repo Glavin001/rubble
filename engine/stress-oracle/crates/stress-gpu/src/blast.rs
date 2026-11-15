@@ -107,6 +107,7 @@ const FRAME_ROWS: usize = 10;
 const MOTION_WORDS: usize = 7;
 const FRACTURE_BINDINGS: [Binding; 11] = [U, W, W, R, R, R, R, W, W, W, W];
 const VIRIAL_BINDINGS: [Binding; 9] = [U, R, R, R, R, R, R, R, W];
+const VIEW_BINDINGS: [Binding; 6] = [U, R, R, R, R, W];
 
 /// The topology kernels and their indirect sizes (`blast_topology.slang` `A_*`, words).
 const TOPOLOGY: [(&str, u64); 12] = [
@@ -971,6 +972,13 @@ pub struct BlastFrame {
     loaded: Vec<u32>,
     loads: Kernel,
     breaks: Kernel,
+    /// The stress view (`blast_view.slang`): on, each frame leaves every node's largest
+    /// bond stress over its fatal limit in `view` (f32 bits, a word per node). Off by
+    /// default; the frame's damage and breaks are the same with it or without.
+    pub stress_view: bool,
+    pub view: wgpu::Buffer,
+    view_kernels: [Kernel; 2],
+    view_bind: wgpu::BindGroup,
     bind: Option<wgpu::BindGroup>,
     gravity: Vec3,
     w_alive: u32,
@@ -1012,7 +1020,17 @@ impl BlastFrame {
         let loads = gpu.compute(&shaders::BLAST_FRACTURE, "blast_loads", &FRACTURE_BINDINGS);
         let breaks = gpu.compute(&shaders::BLAST_FRACTURE, "blast_breaks", &FRACTURE_BINDINGS);
         let solver = GpuBlastSolver::new(gpu, graph, materials);
+        let view = gpu.storage("blast stress view", &vec![0u32; solver.graph.node_count().max(1)]);
+        let view_kernels = [gpu.compute(&shaders::BLAST_VIEW, "blast_view_clear", &VIEW_BINDINGS), gpu.compute(&shaders::BLAST_VIEW, "blast_view", &VIEW_BINDINGS)];
+        let view_bind = {
+            let b = &solver.buffers;
+            gpu.bind(&view_kernels[0].group, &[&b.params, &b.bonds, &b.out, &b.geometry, &b.materials, &view])
+        };
         BlastFrame {
+            stress_view: false,
+            view,
+            view_kernels,
+            view_bind,
             solver,
             node_frame,
             sync,
@@ -1112,6 +1130,11 @@ impl BlastFrame {
             self.virial.dispatch(&mut pass, bind, n.max(1));
         }
         self.solver.record_stress(encoder);
+        if self.stress_view {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            self.view_kernels[0].dispatch(&mut pass, &self.view_bind, n.max(1));
+            self.view_kernels[1].dispatch(&mut pass, &self.view_bind, m.max(1));
+        }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             self.breaks.dispatch(&mut pass, bind, m.max(1));

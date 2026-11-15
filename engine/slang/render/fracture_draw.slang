@@ -6,7 +6,8 @@
 struct BodyPose { float4 p; float4 q; float4 invI; float4 v; float4 w; float4 ip; float4 iq; };
 // Column-major view-projection; mode.x = instance stride, mode.y = colour mode
 // (0 materials, 1 sleep state: awake orange, asleep blue, static grey, 2 bodies: one
-// colour per body, hues a golden-ratio step apart), mode.z = joints
+// colour per body, hues a golden-ratio step apart, 3 stress: a pose stream's chunks by
+// their load over strength), mode.z = joints
 // per copy (0: the scene runs without joints), mode.w = 1 when the records are a pose
 // stream carrying each record's body slot + 1 in p.w (the lab's stress models).
 struct View { float4 c0; float4 c1; float4 c2; float4 c3; uint4 mode; };
@@ -39,6 +40,16 @@ float3 slotColor(uint slot)
     uint k = uint(h);
     return k == 0u ? float3(v, t, p) : k == 1u ? float3(q, v, p) : k == 2u ? float3(p, v, t)
          : k == 3u ? float3(p, q, v) : k == 4u ? float3(t, p, v) : float3(v, p, q);
+}
+
+// A load over strength as a colour: blue unloaded, through cyan, green and yellow to
+// orange-red at 1 (the bond is at its strength) and above.
+float3 stressColor(float u)
+{
+    float t = saturate(u) * 4.0;
+    float3 c0 = float3(0.10, 0.32, 0.86), c1 = float3(0.10, 0.74, 0.86), c2 = float3(0.30, 0.82, 0.36);
+    float3 c3 = float3(0.96, 0.84, 0.16), c4 = float3(0.93, 0.36, 0.10);
+    return t < 1.0 ? lerp(c0, c1, t) : t < 2.0 ? lerp(c1, c2, t - 1.0) : t < 3.0 ? lerp(c2, c3, t - 2.0) : lerp(c3, c4, t - 3.0);
 }
 
 [shader("vertex")]
@@ -94,6 +105,12 @@ VsOut vs(uint vid : SV_VertexID, uint copy : SV_InstanceID)
         // colour as pieces break off it. Else the record is the body itself.
         uint body_slot = gView.mode.w != 0u ? asuint(body.p.w) : index;
         r.color = body_slot != 0u ? slotColor(body_slot - 1u) : r.color;
+    }
+    else if (gView.mode.y == 3u && index != 0u && gView.mode.w != 0u)
+    {
+        // The stress view (pose streams): v.x is 1 + the chunk's largest bond load over
+        // strength (0: none solved, drawn grey).
+        r.color = body.v.x > 0.0 ? stressColor(body.v.x - 1.0) : float3(0.42, 0.44, 0.47);
     }
     r.world = world;
     return r;
