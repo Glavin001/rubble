@@ -18,22 +18,27 @@
 // step's listed pairs for the pairs dispatch (0: none; written every step). The pairs
 // dispatch's indirect arguments in their own buffer (bound by the step dispatch alone: a
 // buffer cannot be storage and indirect in one dispatch), three slots of (x = the most
-// chunks of LANES pairs any vehicle listed, y = the vehicles, z = 1): step 0's (slot 2),
+// chunks of SELF_PAIRS_WG pairs any vehicle listed, y = the vehicles, z = 1): step 0's (slot 2),
 // then odd and even steps'. Step dispatch s clears step s + 1's slot (read last by pairs
 // dispatch s - 1), the frame's last clears step 0's.
 static const uint SELF_LISTED = REUSE_WORDS;
+// The pairs and walk dispatches' workgroups: 64 threads (no barrier in either), so a
+// list's threads spread over every core of the GPU (512-thread workgroups put ~10k
+// pairs on ~20 cores, each core's threads a long dependent chain).
+#define SELF_PAIRS_WG 64
+#define SELF_WALK_WG 64
 [[vk::binding(10, 0)]] RWStructuredBuffer<Atomic<int>> gSelfArgs;
 uint selfListedAt(uint v) { return soloStepAt(v) + SELF_LISTED; }
 uint selfArgsAt(uint s) { return 3u * (s == 0u ? 2u : (s & 1u)); }
 // The walk (a building step's list, from the walk dispatch): per vehicle the pairs it
 // listed (a storage atomic, in place of gsPairCount) and whether it walks this step; its
-// indirect arguments' slots after the pairs' (x = the most chunks of LANES (triangle,
+// indirect arguments' slots after the pairs' (x = the most chunks of SELF_WALK_WG (triangle,
 // share) threads, y = the vehicles, z = 1). A triangle's cells are spread over WALK_SUBS
 // threads (its cells sub, sub + WALK_SUBS, ...: the list's order differs from the
 // workgroup's walk, its pairs do not; nothing depends on the list's order).
 static const uint SELF_WALK = REUSE_WORDS + 1u;
 static const uint WALK_SUBS = 8u;
-static const uint WALK_X = 32u;
+static const uint WALK_X = 256u;
 uint selfWalkAt(uint v) { return soloStepAt(v) + SELF_WALK; }
 uint selfWalkArgsAt(uint s) { return 9u + selfArgsAt(s); }
 
@@ -59,8 +64,8 @@ void selfSplitTests(uint v, uint lane, uint mode, uint triOff, uint triCount, fl
         {
             gAcc[selfListedAt(v)].store(int(listed));
             uint at = selfArgsAt(gP.pad2);
-            // (listed <= TRI_PAIR_CAP: at most TRI_PAIR_CAP / LANES workgroups a vehicle.)
-            gSelfArgs[at].max(int(min((listed + LANES - 1u) / LANES, (TRI_PAIR_CAP + LANES - 1u) / LANES)));
+            // (listed <= TRI_PAIR_CAP: at most TRI_PAIR_CAP / SELF_PAIRS_WG workgroups a vehicle.)
+            gSelfArgs[at].max(int(min((listed + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG, (TRI_PAIR_CAP + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG)));
             gSelfArgs[at + 1u].store(int(gP.vehicles));
             gSelfArgs[at + 2u].store(1);
         }
@@ -105,8 +110,8 @@ void selfSplitBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
         gAcc[selfWalkAt(v)].store(0);
         gAcc[selfWalkAt(v) + 1u].store(1);
         uint at = selfWalkArgsAt(gP.pad2);
-        // (At most WALK_X workgroups: past them each thread takes every WALK_X · LANES-th.)
-        gSelfArgs[at].max(int(min((triCount * WALK_SUBS + LANES - 1u) / LANES, WALK_X)));
+        // (At most WALK_X workgroups: past them each thread takes every WALK_X · SELF_WALK_WG-th.)
+        gSelfArgs[at].max(int(min((triCount * WALK_SUBS + SELF_WALK_WG - 1u) / SELF_WALK_WG, WALK_X)));
         gSelfArgs[at + 1u].store(int(gP.vehicles));
         gSelfArgs[at + 2u].store(1);
     }
@@ -314,16 +319,16 @@ void explicit_beams_self_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 }
 
 // The pairs dispatch of step gP.pad2: workgroup (x, v) tests vehicle v's listed pairs
-// x · LANES .. (x + 1) · LANES - 1, a pair a thread. No barrier.
+// x · SELF_PAIRS_WG .. (x + 1) · SELF_PAIRS_WG - 1, a pair a thread. No barrier.
 [shader("compute")]
-[numthreads(EB_LANES, 1, 1)]
+[numthreads(SELF_PAIRS_WG, 1, 1)]
 void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.y;
     uint lane = lid.x;
     uint s = gP.pad2;
     uint listed = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfListedAt(v)].load()) : 0u;
-    uint i = gid.x * LANES + lane;
+    uint i = gid.x * SELF_PAIRS_WG + lane;
     if (i < listed)
     {
         uint4 r0 = gStatic[v * 4u];
@@ -341,11 +346,11 @@ void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
 }
 
 // The walk dispatch of step gP.pad2: workgroup (x, v) takes vehicle v's (triangle, share)
-// threads x · LANES .. (x + 1) · LANES - 1 when v builds its list this step (every
+// threads x · SELF_WALK_WG .. (x + 1) · SELF_WALK_WG - 1 when v builds its list this step (every
 // triangle, waiting or not, as pairReuseBuild lists them; with labels, not the volatile
 // ones). No barrier.
 [shader("compute")]
-[numthreads(EB_LANES, 1, 1)]
+[numthreads(SELF_WALK_WG, 1, 1)]
 void explicit_beams_self_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.y;
@@ -363,8 +368,8 @@ void explicit_beams_self_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         uint parity = (misc.w + gP.pad2) & 1u;
         // The dispatch has WALK_X workgroups whenever some vehicle needs more (the args'
         // clamp): then this stride covers every share.
-        for (uint p = gid.x * LANES + lid.x, pStop = EB_END(p, r1.y * WALK_SUBS, WALK_X * LANES); p < pStop;
-             p += WALK_X * LANES)
+        for (uint p = gid.x * SELF_WALK_WG + lid.x, pStop = EB_END(p, r1.y * WALK_SUBS, WALK_X * SELF_WALK_WG); p < pStop;
+             p += WALK_X * SELF_WALK_WG)
         {
             uint t = r1.x + p / WALK_SUBS;
             if (!(piecesOn(v) && pieceVolatile(t)))

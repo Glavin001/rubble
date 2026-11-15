@@ -796,11 +796,11 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
                 d.push(AERO);
             }
             jobs.push((format!("explicit_beams_selfsplit_{entry}{tag}"), fun, d.clone()));
-            // Measurement only: the step module's ablation build (EB_ABLATE), at the
-            // non-aero variants.
-            if entry == "step" && !tag.contains("aero") {
+            // Measurement only: the modules' ablation builds (EB_ABLATE), at the non-aero
+            // variants.
+            if !tag.contains("aero") {
                 d.push(("EB_ABLATE", "1"));
-                jobs.push((format!("explicit_beams_selfsplit_step_ablate{tag}"), fun, d));
+                jobs.push((format!("explicit_beams_selfsplit_{entry}_ablate{tag}"), fun, d));
             }
         }
         // With vehicle contact (EB_VV_SOLO): the vehicles' dispatch is the split group

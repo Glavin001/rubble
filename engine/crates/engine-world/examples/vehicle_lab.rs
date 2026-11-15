@@ -896,6 +896,35 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         .join(", ")
                 );
             }
+            // `--ab-skip`: the same 20 frames with self-collision split, its walk and/or
+            // pairs dispatches left out (time only: 0 all, 1 no walks, 2 no pairs, 3 neither).
+            if std::env::args().any(|a| a == "--ab-skip") {
+                let mut line = Vec::new();
+                for (k, m) in [0u32, 1, 2, 3, 0].into_iter().enumerate() {
+                    x.restore(&snap);
+                    x.set_self_split(true);
+                    x.set_self_split_skip(m);
+                    x.wait();
+                    x.take_pair_reuse_stats();
+                    let t = std::time::Instant::now();
+                    for _ in 0..20 {
+                        x.frame(34);
+                        x.wait();
+                    }
+                    line.push(format!("{m}: {:.2}", t.elapsed().as_secs_f64() * 1e3 / 20.0));
+                    let st = x.take_pair_reuse_stats();
+                    if k == 0 {
+                        line.push(format!(
+                            "(builds {:.1}/frame, reused steps {:.1}/frame, pairs a build {:.0})",
+                            st[0] as f64 / 20.0,
+                            st[1] as f64 / 20.0,
+                            st[2] as f64 / st[0].max(1) as f64
+                        ));
+                    }
+                }
+                x.set_self_split_skip(0);
+                println!("   self split skips at t {:.1} (ms/frame): {}", lab.bench.t, line.join(", "));
+            }
             let mut out = Vec::new();
             // `--ab-same`: both runs with the culls on (the harness's own repeatability).
             let second = std::env::args().any(|a| a == "--ab-same");

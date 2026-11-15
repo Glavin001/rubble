@@ -111,6 +111,9 @@ pub struct ExplicitBeamsGpu {
     /// The last frame ran self-collision split with vehicle contact (on the split group
     /// path's dispatches: [`ExplicitBeamsGpu::dispatch_group_split`]).
     self_split_vv: std::cell::Cell<bool>,
+    /// Measurement only (time; results meaningless): self split dispatches not encoded
+    /// (bit 0 the walks, bit 1 the pairs; [`ExplicitBeamsGpu::set_self_split_skip`]).
+    self_split_skip: u32,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
     /// `wait` saw, not yet handled.
     contact_errors: std::sync::Mutex<Vec<String>>,
@@ -462,14 +465,13 @@ struct SelfSplit {
     args: wgpu::Buffer,
     /// Measurement only: the step module's `EB_ABLATE` build, compiled on first use
     /// ([`ExplicitBeamsGpu::set_ablation`] with the split on).
-    ablate: std::sync::OnceLock<wgpu::ComputePipeline>,
+    ablate: std::sync::OnceLock<[wgpu::ComputePipeline; 3]>,
     /// With vehicle contact: the vehicles' dispatch (the split group path's members'),
     /// the walk and the pairs that skip a group's members, compiled on first use.
     vv: std::sync::OnceLock<[wgpu::ComputePipeline; 3]>,
     device: wgpu::Device,
     step_layout: wgpu::PipelineLayout,
     pairs_layout: wgpu::PipelineLayout,
-    ablate_name: String,
     tag: &'static str,
     zero: bool,
 }
@@ -567,7 +569,6 @@ impl SelfSplit {
             device: device.clone(),
             step_layout,
             pairs_layout,
-            ablate_name: format!("explicit_beams_selfsplit_step_ablate{tag}"),
             tag,
             zero,
         }
@@ -604,8 +605,17 @@ impl SelfSplit {
     }
 
     /// The step module's ablation build (measurement only; `_wide` and 256-lane builds).
-    fn step_ablate(&self) -> &wgpu::ComputePipeline {
-        self.ablate.get_or_init(|| self.pipeline(&self.ablate_name, "explicit_beams_self_step", &self.step_layout))
+    /// The modules' ablation builds [step, walk, pairs] (measurement only; `_wide` and
+    /// 256-lane builds).
+    fn ablate_pipes(&self) -> &[wgpu::ComputePipeline; 3] {
+        self.ablate.get_or_init(|| {
+            let t = self.tag;
+            [
+                self.pipeline(&format!("explicit_beams_selfsplit_step_ablate{t}"), "explicit_beams_self_step", &self.step_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_walk_ablate{t}"), "explicit_beams_self_walk", &self.pairs_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_pairs_ablate{t}"), "explicit_beams_self_pairs", &self.pairs_layout),
+            ]
+        })
     }
 }
 
@@ -1153,6 +1163,7 @@ impl ExplicitBeamsGpu {
             self_split_pipes: std::sync::OnceLock::new(),
             self_split_frame: std::cell::Cell::new(0),
             self_split_vv: std::cell::Cell::new(false),
+            self_split_skip: 0,
             contact_errors: Default::default(),
             contact_errors_seen: Default::default(),
             bufs,
@@ -3169,8 +3180,19 @@ impl ExplicitBeamsGpu {
     /// step's rest and the frame's end (step dispatch `steps`).
     fn dispatch_self_split(&self, pass: &mut wgpu::ComputePass, steps: u32) {
         for d in self_split_schedule(self.planner.vehicles(), steps) {
-            self.dispatch_self_one(pass, d);
+            match d {
+                SelfDispatch::Walk { .. } if self.self_split_skip & 1 != 0 => continue,
+                SelfDispatch::Pairs { .. } if self.self_split_skip & 2 != 0 => continue,
+                _ => self.dispatch_self_one(pass, d),
+            }
         }
+    }
+
+    /// Measurement only (time; the results are then meaningless): leave the self
+    /// split's walk dispatches (bit 0) and/or pairs dispatches (bit 1) out of its frames.
+    #[doc(hidden)]
+    pub fn set_self_split_skip(&mut self, mask: u32) {
+        self.self_split_skip = mask;
     }
 
     fn dispatch_self_one(&self, pass: &mut wgpu::ComputePass, d: SelfDispatch) {
@@ -3178,12 +3200,18 @@ impl ExplicitBeamsGpu {
         let at = |k: u32| [k * PARAM_STRIDE as u32];
         match d {
             SelfDispatch::Step { copy, groups } => {
-                pass.set_pipeline(if self.variant == KernelVariant::Ablate { p.step_ablate() } else { &p.step });
+                pass.set_pipeline(if self.variant == KernelVariant::Ablate { &p.ablate_pipes()[0] } else { &p.step });
                 pass.set_bind_group(0, &p.step_bind, &at(copy));
                 pass.dispatch_workgroups(groups, 1, 1);
             }
             SelfDispatch::Walk { copy, offset } | SelfDispatch::Pairs { copy, offset } => {
-                pass.set_pipeline(if matches!(d, SelfDispatch::Walk { .. }) { &p.walk } else { &p.pairs });
+                let walk = matches!(d, SelfDispatch::Walk { .. });
+                pass.set_pipeline(match (self.variant == KernelVariant::Ablate, walk) {
+                    (true, true) => &p.ablate_pipes()[1],
+                    (true, false) => &p.ablate_pipes()[2],
+                    (false, true) => &p.walk,
+                    (false, false) => &p.pairs,
+                });
                 pass.set_bind_group(0, &p.pairs_bind, &at(copy));
                 pass.dispatch_workgroups_indirect(&p.args, offset);
             }
@@ -3315,7 +3343,11 @@ impl ExplicitBeamsGpu {
     /// a group).
     fn dispatch_group_split(&self, pass: &mut wgpu::ComputePass, steps: u32) {
         for op in self.group_split_ops(steps) {
-            self.run_group_op(pass, op);
+            match op {
+                GroupOp::SelfWalk { .. } if self.self_split_skip & 1 != 0 => continue,
+                GroupOp::SelfPairs { .. } if self.self_split_skip & 2 != 0 => continue,
+                _ => self.run_group_op(pass, op),
+            }
         }
     }
 
