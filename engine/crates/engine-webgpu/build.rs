@@ -584,7 +584,8 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             SlangTarget::Wgsl,
             &out,
             &[],
-            &[("ENGINE_WGSL", "1")],
+            // (The aux pass: a workgroup a vehicle of 512 lanes.)
+            if pass == "aux" { &[("ENGINE_WGSL", "1"), ("EB_LANES", "512")][..] } else { &[("ENGINE_WGSL", "1")][..] },
         )?;
         explicit_post(&out)?;
     }

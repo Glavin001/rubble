@@ -912,6 +912,34 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     line.join(", ")
                 );
             }
+            // `--ab-wide-profile`: 10 frames on the fleet-wide passes, each dispatch in its
+            // own timed pass (`profile_wide_frame`): GPU ms a frame per pass kind (time
+            // only; needs `--timing step`).
+            if std::env::args().any(|a| a == "--ab-wide-profile") {
+                x.restore(&snap);
+                let was = x.is_wide();
+                x.set_wide(true);
+                for _ in 0..3 {
+                    x.frame(34);
+                }
+                x.wait();
+                let mut sums: Vec<(&str, f64)> = Vec::new();
+                for _ in 0..10 {
+                    for (k, (name, ms)) in x.profile_wide_frame(34).into_iter().enumerate() {
+                        if sums.len() <= k {
+                            sums.push((name, 0.0));
+                        }
+                        sums[k].1 += ms / 10.0;
+                    }
+                }
+                x.set_wide(was);
+                println!(
+                    "   wide profile at t {:.1} (GPU ms a frame, each dispatch timed apart): {}; sum {:.2}",
+                    lab.bench.t,
+                    sums.iter().filter(|x| x.1 > 0.0).map(|(n, ms)| format!("{} {ms:.2}", n.trim_start_matches("explicit_beams_wide_"))).collect::<Vec<_>>().join(", "),
+                    sums.iter().map(|x| x.1).sum::<f64>()
+                );
+            }
             // `--ab-profile`: the same 20 frames with self-collision split, each of its
             // dispatches in its own timed pass (`profile_self_split_frame`): GPU ms a frame
             // per dispatch kind and the span, beside the frames' wall time (time only).

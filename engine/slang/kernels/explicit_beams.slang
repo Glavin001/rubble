@@ -7474,9 +7474,9 @@ void explicit_beams_wide_close(uint3 id : SV_DispatchThreadID)
 // workgroup a vehicle before the step's wide_nodes, coupleStep then driveStep as the
 // frame runs them (their phases are a few lanes' short chains: cheap inside a workgroup);
 // after the last step (the parameter copy `steps`) the coupling's end. No sphere or
-// node-range copies in workgroup memory (they would not reach wide_nodes): the buffers'.
+// wide_nodes reads the spheres and lists from the buffers (workgroup copies do not reach it).
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(EB_LANES, 1, 1)]
 void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.x;
@@ -7486,7 +7486,9 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
     {
         coupleBegin();
         driveBegin();
+        // (The spheres' workgroup copies serve this dispatch's own phases, as the frame's.)
         cplGsClear();
+        cplGsAdd(0u, v, 0u, 0u);
         if (s == 0u) cplListBegin(v);
         cplFoldMark(v);
     }

@@ -715,7 +715,11 @@ pub const MODULES: &[Module] = &[
     pass(WIDE_PASSES[7]),
     pass(WIDE_PASSES[8]),
     pass(WIDE_PASSES[9]),
-    pass(WIDE_PASSES[10]),
+    Module {
+        name: WIDE_PASSES[10],
+        entry: WIDE_PASSES[10],
+        defines: &[W, L512],
+    },
     Module {
         name: SLEEP_LIST,
         entry: SLEEP_LIST,

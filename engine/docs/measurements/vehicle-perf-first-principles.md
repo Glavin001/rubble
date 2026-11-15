@@ -760,3 +760,97 @@ Eight cars: the default path steps a group of eight on one workgroup (the big-gr
 the existing split paths halve it and leave the pass of a group past four members in one
 workgroup (`contact-groups-design.md` §5.3). Reaching 3 ms needs that pass across
 workgroups for any group size, then every per-car phase above. Not started here.
+
+## 8. The architecture from the GPU's measured cost model: one schedule for the whole fleet (2026-11-15)
+
+§7 treated the frame as given. This section derives the structure from what the GPU
+charges, measured (`examples/gpu_cost_model.rs`, native Metal, M3 Max; logs
+`out/perf/cost_model*.log`): synthetic kernels on a 1 MB table (a car's working set),
+dependent dispatches in one pass, and barrier phases in one workgroup.
+
+### 8.1 The cost model
+
+| What | Cost |
+|---|---|
+| A dependent dispatch of a small kernel, 64 to 4,096 threads | 2.2–2.7 µs |
+| The same, 32,768 threads (eight cars' beams) | 4.4–5.0 µs |
+| Each buffer load a thread makes in sequence, in such a dispatch | +0.2 µs (streamed), +0.4 µs through an index, +0.27 µs chained; the dispatch waits for its longest thread |
+| A barrier phase in a workgroup, nothing to do | 0.12–0.3 µs |
+| A barrier phase, 4 to 64 lanes active, one item of L loads | 0.3 + 0.11·L µs |
+| A barrier phase, every lane active (512 lanes × 8 items × 4 loads) | 10.3 µs: one core's throughput, ≈0.6 ns a load |
+| 8 or 32 workgroups in one dispatch | the same per phase: cores in parallel |
+| A dispatch of the 470 KB frame kernel that returns at once (§7.2) | ≈10 µs |
+| Native only: a dispatch of a kernel with workgroup arrays, zeroed by naga | ≈70 µs (measured below) |
+
+So: **threads are cheap and loads are dear.** A thread pays about 0.2 µs for every load it
+makes in a row, dependent or not; a workgroup of 512 lanes is one core, and a full phase
+there is bound by that core's throughput. Work with many items (beams, nodes, pairs)
+belongs one item a thread across the GPU; work with a few items and several dependent
+phases (hits, wheels, proxy bodies) belongs in a small workgroup, where a phase costs
+0.3 µs plus its chain. Kernels must be small (a dispatch of the big frame kernel costs
+four times a small one's) and carry no workgroup arrays natively.
+
+### 8.2 What the repo's wide passes already do
+
+The wide passes (`explicit_beams_wide_*`: a thread an element over every vehicle, four
+dispatches a step, the same per-element functions as the frame) were measured 6–7× slower
+than a workgroup a car (`wide-frame-design.md` §1.2). **That was naga's zeroing of their
+workgroup arrays, per dispatch, not their structure.** `examples/wide_vs_workgroup.rs`,
+the repo's sedan (367 nodes, 2,170 beams, self-collision on), ms a 34-step frame:
+
+| Cars | Workgroup a car | Wide, zeroed (as shipped natively) | Wide, not zeroed (`RUBBLE_WIDE_ZERO=0`) |
+|---|---|---|---|
+| 1 | 1.17–1.21 | 7.34 | **1.08** |
+| 8 | 1.24–1.27 | 7.34 | 1.32 |
+| 32 | 1.47 | 7.89 | 1.93 |
+| 128 | 4.55 | — | 4.26 |
+
+Per pass at one car (each dispatch timed apart): nodes 0.42, beams 0.29, triangles 0.17,
+hits 0.22 ms a frame. Browsers never paid the zeroing (Tint zeroes across the lanes).
+
+### 8.3 The lab's car on the wide passes (built, bit for bit)
+
+The wide passes could not run raycast wheels or the rigid coupling. Now they do: an **aux
+pass** a step (`explicit_beams_wide_aux`, a workgroup a vehicle: `coupleStep` then
+`driveStep` exactly as the frame calls them; after the last step the coupling's end), the
+coupling's header loaded in `wide_nodes` (its proxy contacts read spheres and lists from
+the buffers), the coupling's rebase in `wide_begin`. `ExplicitBeamsGpu::set_wide`,
+`RUBBLE_WIDE=1`; off by default.
+
+Mountain, the lab's generated sedan (`vehicle_lab --ab-switch wide`, 20 frames of 34 steps
+each way from one snapshot, self split off, `RUBBLE_WIDE_ZERO=0`): **every state word the
+same as the workgroup frame** at t 0.5, 2.5, 4, 6, 8 and 20 s; 5.1–5.4 ms a frame wide
+against 5.8–6.1 in free fall, 6.4–6.7 against 8.3–9.0 from the first impact on.
+
+Per pass (`--ab-wide-profile`, GPU ms a frame, timed apart), against what §8.1 charges
+for the same work done as it should be:
+
+| Pass | Free fall, t 2.5 | Wreck at rest, t 20 | By the cost model | What gets it there |
+|---|---|---|---|---|
+| Self-collision triangles (grid walk and tests, every step) | 2.18 | 2.81 | ≈0.3 (a thread a listed pair: 2.5 + 0.2 × 15 µs) | the reused pair list's walk and pairs kernels (the self split's, already across the GPU) in this schedule |
+| Aux (coupling, wheels) | 1.52 | 1.58 | ≈0.3–0.4 | its own small kernels: the frame's functions inline a 10 µs dispatch and five phases |
+| Hits applied | 0.20 | 1.85 | ≈0.2–0.4 (five phases of ≤64 active lanes) | not yet split by cause |
+| Nodes | 0.72 | 0.90 | ≈0.3 (2.5 + 0.2 × 25 µs) | records streamed for the node thread |
+| Beams | 0.52 | 0.52 | ≈0.15 (2.5 + 0.2 × 10 µs) | the sorted hot records (the frame's `jbeamHot`), not file-order `beamUpdate` |
+| Centred damping (on in this run) | 0.50 | 0.50 | | |
+| **Frame** | 5.2 | 6.7 | **≈1.2–1.6** | |
+
+The design, then: **every car in the same few dispatches a substep** (nodes; beams with
+the pair tests and the wheels' rays; hits and the coupling's bodies in small workgroups),
+small kernels, no workgroup arrays, hit lists and pair lists in storage. Its cost is
+dispatches × (2.5 µs + 0.2 µs × the longest thread's loads), flat in the number of cars
+until a dispatch passes about ten thousand threads (§8.1: 2.5 → 5 µs at 32k), so eight cars
+cost about what one does. Cars in contact need no contact groups in this structure: their
+pairs are more threads in the pairs dispatch, and the specification's owner order is extra
+short hit rounds. That part is not built.
+
+### 8.4 Order of work
+
+1. The reused pair list in the wide schedule (−1.5 to −2 ms).
+2. The aux pass as its own small kernels (−1 ms); hits by cause (−1 to −1.5 ms in a crash).
+3. Hot beam records and streamed node records in the wide passes (−0.6 ms).
+4. Native: the wide pipelines without zeroing by default, after each kernel's workgroup
+   reads are audited (today `RUBBLE_WIDE_ZERO=0`).
+5. Vehicle contact in the wide schedule (pairs across the GPU, ordered hit rounds), in
+   place of contact groups: the 8-car target.
+6. Chrome at each step.
