@@ -319,10 +319,10 @@
     }
     for (const [k, v] of Object.entries(MODES)) {
       const b = document.createElement('button'); b.textContent = v; b.dataset.mode = k;
-      b.onclick = () => { put('script', ''); script = null; const rebuild = setMode(k); put('cam', k === 'mountain' ? 'tumble' : k === 'drive' ? 'chase' : 'orbit'); syncUrl(); if (rebuild && W) build(); else restart(); };
+      b.onclick = () => { put('script', ''); script = null; const rebuild = setMode(k); put('cam', k === 'mountain' ? 'orbit' : k === 'drive' ? 'chase' : 'orbit'); syncUrl(); if (rebuild && W) build(); else restart(); };
       $('modes').append(b);
     }
-    if (!qs.has('cam')) put('cam', mode === 'mountain' ? 'tumble' : mode === 'drive' ? 'chase' : 'orbit');
+    if (!qs.has('cam')) put('cam', mode === 'mountain' ? 'orbit' : mode === 'drive' ? 'chase' : 'orbit');
     setMode(mode); showOuts(); shapeUi();
     let restartTimer = null;
     for (const c of controls) {
