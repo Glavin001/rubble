@@ -64,6 +64,14 @@ case "$gpu" in T4|L4|L40S) ;; *) echo "gpu_run: --gpu must be T4, L4 or L40S" >&
 case "$cap" in ''|*[!0-9]*) echo "gpu_run: --timeout takes seconds" >&2; exit 2 ;; esac
 if [ "$cap" -lt 30 ] || [ "$cap" -gt 1800 ]; then echo "gpu_run: --timeout must be 30..1800 s" >&2; exit 2; fi
 
+# The adapter probe every run starts with (engine-webgpu's gpu_adapter bin): a branch
+# cut before it was added must merge or cherry-pick it first.
+if ! grep -q '^name = "gpu_adapter"' "$repo/engine/crates/engine-webgpu/Cargo.toml" \
+   || [ ! -f "$repo/engine/crates/engine-webgpu/src/bin/gpu_adapter.rs" ]; then
+  echo "gpu_run: this branch lacks engine-webgpu's gpu_adapter bin (src/bin/gpu_adapter.rs and its [[bin]] entry in engine/crates/engine-webgpu/Cargo.toml); merge or cherry-pick it from tools/modal-gpu-runner" >&2
+  exit 2
+fi
+
 # One directory per invocation: nothing shared between concurrent runs.
 id="$(date +%Y%m%d-%H%M%S)-$$-$RANDOM"
 run="$repo/engine/target/gpu-run/$id"

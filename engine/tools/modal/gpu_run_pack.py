@@ -34,11 +34,18 @@ ENGINE = REPO / "engine"
 DATA = [
     "engine/docs/explicit-beams-acceptance/vehicles",
     "engine/crates/engine-webgpu/vehicle-lab-scripts",
+    # engine-world's destruction tests (crush, strike_prediction, lab_api, stress_block).
+    "engine/crates/engine-webgpu/fracture/packs",
+    "engine/stress-oracle/packs",
 ]
 # Shipped when that target is selected: explicit_loop_cap checks the kernel sources'
 # loop caps, so it reads them.
 TARGET_DATA = {
     "explicit_loop_cap": ["engine/slang/kernels"],
+    # The one fracture asset small enough to ship (4.7 MB); the others (veneer-house,
+    # galleon-stern, timber-yard: 52-170 MB) are not shipped, see README.
+    **{t: ["engine/crates/engine-webgpu/fracture/assets/masonry-arch.glb"]
+       for t in ("equivalence", "threshold", "destruction", "quickstart")},
 }
 # Directories under a build script's OUT_DIR the binaries read at run time
 # (engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR).

@@ -193,6 +193,9 @@ def run(archive: bytes, spec: dict) -> dict:
     exes = manifest["exes"]
     for e in exes:
         os.chmod(f"/work/{e['file']}", 0o755)
+        # The working directory (a test's crate dir, as cargo test uses) exists even
+        # when no data file of that crate is shipped.
+        Path(e["cwd"]).mkdir(parents=True, exist_ok=True)
     probe = next((e for e in exes if e["role"] == "probe"), None)
     if probe:
         code, _ = _run([f"/work/{probe['file']}"], "/work", base, deadline, 0)
@@ -253,8 +256,8 @@ def main(archive: str, spec: str):
         out = call.get(timeout=cap + int(s["queue"]))
     except TimeoutError:
         call.cancel()
-        print(f"[gpu_run] no result within {cap} s + {s['queue']} s of queueing: cancelled "
-              f"(no {gpu} capacity? try --gpu T4 or a larger --queue)", flush=True)
+        print(f"[gpu_run] no result within {cap} s + {s['queue']} s: cancelled (queued for "
+              f"lack of {gpu} capacity, or preempted and restarted past the cap)", flush=True)
         Path(spec).with_name("exit_code").write_text("125")
         raise SystemExit(125)
     secs = out["secs"]

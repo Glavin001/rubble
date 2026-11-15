@@ -25,6 +25,8 @@ per kernel version.
    (prints the adapter; the run stops if there is none or it is a software
    rasteriser), then the selection, its output streamed. The Modal CLI runs in Docker
    with only that run directory and `gpu_run.py` mounted, the login volume read-only.
+   Tests run in their crate's directory (created in the container), as with
+   `cargo test`.
 4. Exit with the run's exit code (124: the time cap killed it; 125: no GPU within the
    queue limit) and delete the run directory (`--keep` keeps it). Ctrl-C stops the
    Modal call too.
@@ -37,6 +39,21 @@ lock); the GPU runs still overlap.
 **Hard time cap:** each run's container is killed after `--timeout` seconds, default
 **600 (10 min)**, at most 1800. Inside, the running process is stopped 45 s before
 the cap so the summary and the shader cache still get written.
+
+## On another branch
+
+The runner needs engine-webgpu's `gpu_adapter` bin
+(`engine/crates/engine-webgpu/src/bin/gpu_adapter.rs` and its `[[bin]]` entry in
+`engine/crates/engine-webgpu/Cargo.toml`); `gpu_run.sh` stops at once with that message
+when a branch lacks it. Merge or cherry-pick `tools/modal-gpu-runner` (the runner, the
+bin, the README).
+
+Quick check that a branch builds and starts on Modal (no kernels compiled, ~1 min once
+built):
+
+```bash
+engine/tools/modal/gpu_run.sh --timeout 120 -- -p engine-world --test explicit_vehicles -- --list
+```
 
 ## Options
 
@@ -207,9 +224,21 @@ edited explicit kernels costs $0.10-0.40 per attempt, mostly an idle GPU.
 - The browser, Chrome WebGPU, the web demos; Node tests (`*.test.mjs`).
 - Shell wrappers (`fleet.sh`, `with-gpu-lock.py`): pass the cargo command they run
   (see above). `perl -e 'alarm ...'` is not needed: `--timeout` is the kill timer.
+- engine-world tests whose data is not shipped (too large, or outside the repo):
+  `town_columns_probe`, `town_solver_probe`, `glass_tower_felling_probe` (need
+  `RUBBLE_TOWN_PACK`, a town pack outside the repo; they return early without it), and
+  `lab_api` / `stress_block`'s `fracturedTower` parts (`engine-webgpu/generated/`,
+  not in the repo; they skip). Shipped for engine-world: `fracture/packs`,
+  `stress-oracle/packs`, the `.truck` cars, and `masonry-arch.glb` (4.7 MB) for
+  `equivalence`, `threshold`, `destruction` and the `quickstart` example. Not shipped
+  (52-170 MB `.glb`): `veneer-house` (`destruction`'s house cases fail), `galleon-stern`
+  (`broadside`, `broadside_take`, the broadside play preset) and `timber-yard`
+  (`timber_yard`, `timber_take`, the timber-yard preset): those cannot run here.
 - Files outside the repo other than `@sedan`: put them in the repo (a gitignored
   `out/` works) and pass `--data`. `RUBBLE_INSPIRATION` (Rigs of Rods content) is not
   shipped, so tests that need it skip as they do without it locally.
+- Preemption: Modal may preempt a GPU container; the call is then restarted from the
+  start (with a fresh time cap, billed again). Seen once in a 30-minute run.
 - Stack traces of a hung process: gVisor does not allow ptrace (no gdb); `--monitor`
   tells a compile (GPU 0 %, a core busy) from GPU work.
 - `engine-cuda` (the CUDA host) has its own runner, `run_cuda_tests.sh` (below).
