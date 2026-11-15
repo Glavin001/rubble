@@ -284,7 +284,9 @@ struct Params
     // in file order, beamUpdate for each). explicit_plan::W_BEAM_ORDER.
     uint beamOrder;
     uint beamOrderPad0;
-    uint beamOrderPad1;
+    // Lossless schedule switches (explicit_plan::W_PERF_FLAGS; the same results bit for
+    // bit either way): 1 selfApply's node forces once a hit and role (hitFbFill).
+    uint perfFlags;
     uint beamOrderPad2;
 };
 
@@ -374,6 +376,18 @@ groupshared uint gsOff[GRID_BUCKETS + 1u];
 groupshared uint gsPart[LANES];
 groupshared uint gsBlk[GRID_BLOCKS];
 
+#ifdef EB_ABLATE
+// Measurement only (time): a second mask, in the free parameter word after beamOrder
+// (ExplicitBeamsGpu::set_ablation2), of the solo frame's smaller phases: 1 the raycast
+// wheels' step, 2 the triangles' finish and tested list, 4 the grid's bucket clears and
+// counts, 8 the pair list's tracking, 32 the triangles' step geometry (triGeoFill), 64
+// selfApply, 256 the group slots' clears, 512 the coupling's step, 1024 the whole step
+// (the frame's start, end and dispatches alone), 2048 lane 0's grab, brake and pending
+// breaks.
+#define EB_A2(b) ((gP.beamOrderPad0 & (b)) != 0u)
+#else
+#define EB_A2(b) false
+#endif
 // Storage writes visible to the whole workgroup.
 void sync()
 {
@@ -1532,6 +1546,12 @@ static const uint PEND_CAP = 64u;
 uint hitList(uint v) { return gStatic[gP.vvStatic + v].z; }
 uint hitAcc(uint v) { return gStatic[gP.vvStatic + v].w; }
 uint pendList(uint v) { return hitList(v) + HIT_CAP * HIT_WORDS; }
+// selfApply's node forces (perfFlags bit 1): per listed hit and role (0 the contacter, 1..3
+// the triangle's n0, n1, n2) the node's beam force (beamSum), 3 words, after the pending
+// beams; filled once a step (hitFbFill) for the round and the residual pass's phases,
+// which each summed it again. 0: no record (the sum from the incidence entries).
+static const uint PERF_HIT_FB = 1u;
+uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 
 // The break exception (spec §2, step 4: an end on a collision triangle with fewer
 // than 3 live plain beams saves the beam) reads the beams' state in spawn order: a
@@ -3223,11 +3243,19 @@ float ownInvMass(uint x)
 }
 
 // Node x's acceleration from its force at the pass's start (0 immovable).
-float3 selfAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
+// Node x's beam force for a hit's pass: its record (fb, hitFbFill's: the same sum's
+// bits) or, fb 0, the sum from its incidence entries.
+float3 hitBeamSum(uint x, uint fb, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    if (fb != 0u) return asfloat(uint3(gNext[fb], gNext[fb + 1u], gNext[fb + 2u]));
+    return beamSum(gNodes[x * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + x], beamOff, groupOff, groupCount, parity,
+                   false);
+}
+
+float3 selfAcc(uint x, uint fb, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return float3(0.0, 0.0, 0.0);
-    float3 f = beamSum(gNodes[x * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + x], beamOff, groupOff, groupCount, parity,
-                       false);
+    float3 f = hitBeamSum(x, fb, beamOff, groupOff, groupCount, parity);
     return sdiv3(f, gNodes[x * 3u].w);
 }
 
@@ -3238,7 +3266,7 @@ float selfTerm(float w, float im) { return w > 0.0 ? smul(smul(w, w), im) : 0.0;
 // the geometry the finding lane stored. Strict, in the CPU's order.
 float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn,
                        float pen, float3 vv, float friction, uint beamOff, uint groupOff, uint groupCount,
-                       uint parity, bool shifts)
+                       uint parity, bool shifts, uint fb)
 {
     float imt = nf(nf(selfTerm(alpha, selfInvMass(t1)) + selfTerm(beta, selfInvMass(t2)))
                    + selfTerm(gamma, selfInvMass(t0)));
@@ -3250,7 +3278,9 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
     float3 ah = float3(0.0, 0.0, 0.0);
     for (uint k = 0u, kStop = EB_END(k, opaqueCount(4u), 1u); k < kStop; k++)
     {
-        float3 acc = selfAcc(k == 0u ? t1 : (k == 1u ? t2 : (k == 2u ? t0 : h)), beamOff, groupOff, groupCount, parity);
+        float3 acc = selfAcc(k == 0u ? t1 : (k == 1u ? t2 : (k == 2u ? t0 : h)),
+                             fb == 0u ? 0u : fb + (k == 0u ? 6u : (k == 1u ? 9u : (k == 2u ? 3u : 0u))), beamOff, groupOff,
+                             groupCount, parity);
         if (k == 0u) a3 = sscale(acc, alpha);
         else if (k == 1u) a3 = sadd3(a3, sscale(acc, beta));
         else if (k == 2u) a3 = sadd3(a3, sscale(acc, gamma));
@@ -3280,14 +3310,14 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
     return f;
 }
 
-float3 selfTwoBodyForce(uint at, uint h, uint beamOff, uint groupOff, uint groupCount, uint parity)
+float3 selfTwoBodyForce(uint at, uint h, uint beamOff, uint groupOff, uint groupCount, uint parity, uint fb)
 {
     float alpha = asfloat(gNext[at + 1u]);
     float beta = asfloat(gNext[at + 2u]);
     return selfTwoBodyCore(h, gNext[at + 8u], gNext[at + 9u], gNext[at + 10u], alpha, beta,
                            nf(nf(1.0 - alpha) - beta), asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u])),
                            asfloat(gNext[at + 15u]), asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u])),
-                           asfloat(gNext[at + 20u]), beamOff, groupOff, groupCount, parity, true);
+                           asfloat(gNext[at + 20u]), beamOff, groupOff, groupCount, parity, true, fb);
 }
 
 // Self-collision's anti-clip test (§36; explicit_beams.rs clip_hit, the order-free
@@ -5826,7 +5856,8 @@ uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r,
         if (selfTwoBody(v))
         {
             // Two-body (spec §36): no hit reads another's force.
-            float3 f2 = selfTwoBodyForce(at, h, beamOff, groupOff, groupCount, parity);
+            float3 f2 = selfTwoBodyForce(at, h, beamOff, groupOff, groupCount, parity,
+                                         (gP.perfFlags & PERF_HIT_FB) != 0u ? hitFbAt(v, i) : 0u);
             gNext[at + 3u] = asuint(f2.x);
             gNext[at + 4u] = asuint(f2.y);
             gNext[at + 5u] = asuint(f2.z);
@@ -5888,11 +5919,10 @@ bool selfResidual(uint v)
 
 // Node x's acceleration from its force now (0 immovable): beams and A, with B when
 // `withB` (the integer sum A + B, then to newtons, as the CPU's one sum).
-float3 resAccNow(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity, bool withB)
+float3 resAccNow(uint x, uint fb, uint beamOff, uint groupOff, uint groupCount, uint parity, bool withB)
 {
     if ((gStatic[gP.nodeInfoBase + x].x & NODE_IMMOVABLE) != 0u) return float3(0.0, 0.0, 0.0);
-    float3 f = beamSum(gNodes[x * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + x], beamOff, groupOff, groupCount, parity,
-                       false);
+    float3 f = hitBeamSum(x, fb, beamOff, groupOff, groupCount, parity);
     int3 a = int3(gAcc[x * 3u].load(), gAcc[x * 3u + 1u].load(), gAcc[x * 3u + 2u].load());
     if (withB)
     {
@@ -5902,16 +5932,16 @@ float3 resAccNow(uint x, uint beamOff, uint groupOff, uint groupCount, uint pari
     float3 c = float3(float(a.x), float(a.y), float(a.z)) * (1.0 / FIXED);
     return sdiv3(sadd3(f, c), gNodes[x * 3u].w);
 }
-float3 resAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
+float3 resAcc(uint x, uint fb, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    return resAccNow(x, beamOff, groupOff, groupCount, parity, false);
+    return resAccNow(x, fb, beamOff, groupOff, groupCount, parity, false);
 }
 
 // The hit's pair (contacter h, triangle t0..t2 at weights, normal nn, relative
 // velocity vv): its relative normal acceleration `a` now, `x` = vn + max(vn, 0),
 // and whether it approaches (vn < 0) and still does over the step.
 bool resDrive(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float3 vv,
-              uint beamOff, uint groupOff, uint groupCount, uint parity, out float a, out float x)
+              uint beamOff, uint groupOff, uint groupCount, uint parity, uint fb, out float a, out float x)
 {
     // at = α·a(t1) + β·a(t2) + γ·a(t0), then a(h): from one call site (opaqueCount),
     // the same strict sums in the same order.
@@ -5919,7 +5949,9 @@ bool resDrive(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float 
     float3 ah = float3(0.0, 0.0, 0.0);
     for (uint k = 0u, kStop = EB_END(k, opaqueCount(4u), 1u); k < kStop; k++)
     {
-        float3 acc = resAcc(k == 0u ? t1 : (k == 1u ? t2 : (k == 2u ? t0 : h)), beamOff, groupOff, groupCount, parity);
+        float3 acc = resAcc(k == 0u ? t1 : (k == 1u ? t2 : (k == 2u ? t0 : h)),
+                            fb == 0u ? 0u : fb + (k == 0u ? 6u : (k == 1u ? 9u : (k == 2u ? 3u : 0u))), beamOff, groupOff,
+                            groupCount, parity);
         if (k == 0u) at = sscale(acc, alpha);
         else if (k == 1u) at = sadd3(at, sscale(acc, beta));
         else if (k == 2u) at = sadd3(at, sscale(acc, gamma));
@@ -5944,11 +5976,11 @@ float resForceR(uint h, uint t0, uint t1, uint t2, float alpha, float beta, floa
 
 // The hit's residual r (0: none) from A.
 float resOf(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float3 vv,
-            uint beamOff, uint groupOff, uint groupCount, uint parity)
+            uint beamOff, uint groupOff, uint groupCount, uint parity, uint fb)
 {
     float a;
     float x;
-    if (!resDrive(h, t0, t1, t2, alpha, beta, gamma, nn, vv, beamOff, groupOff, groupCount, parity, a, x)) return 0.0;
+    if (!resDrive(h, t0, t1, t2, alpha, beta, gamma, nn, vv, beamOff, groupOff, groupCount, parity, fb, a, x)) return 0.0;
     return resForceR(h, t0, t1, t2, alpha, beta, gamma, a, x);
 }
 
@@ -5970,7 +6002,7 @@ void resStage(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float 
 // The work guard of a hit's force t (first pass with residual): −(1 − s)·t where
 // its work at the pair's realised mean velocity (A + B) would be positive; 0 else.
 bool guardOf(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 vv, float3 t,
-             uint beamOff, uint groupOff, uint groupCount, uint parity, out float3 g)
+             uint beamOff, uint groupOff, uint groupCount, uint parity, uint fb, out float3 g)
 {
     g = float3(0.0, 0.0, 0.0);
     if (all(t == float3(0.0, 0.0, 0.0))) return false;
@@ -5980,7 +6012,9 @@ bool guardOf(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float g
     float3 aw = float3(0.0, 0.0, 0.0);
     for (uint k = 0u, kStop = EB_END(k, opaqueCount(4u), 1u); k < kStop; k++)
     {
-        float3 acc = resAccNow(k == 0u ? h : (k == 1u ? t1 : (k == 2u ? t2 : t0)), beamOff, groupOff, groupCount, parity, true);
+        float3 acc = resAccNow(k == 0u ? h : (k == 1u ? t1 : (k == 2u ? t2 : t0)),
+                               fb == 0u ? 0u : fb + (k == 0u ? 0u : (k == 1u ? 6u : (k == 2u ? 9u : 3u))), beamOff, groupOff,
+                               groupCount, parity, true);
         if (k == 0u) ah = acc;
         else if (k == 1u) aw = sscale(acc, alpha);
         else if (k == 2u) aw = sadd3(aw, sscale(acc, beta));
@@ -6018,12 +6052,12 @@ void resFinal(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float 
 
 // The total of a hit (first pass f1, residual r along nn) with its guard.
 float3 resTotal(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float3 vv,
-                float3 f1, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
+                float3 f1, float r, uint beamOff, uint groupOff, uint groupCount, uint parity, uint fb)
 {
     float3 f = f1;
     if (r > 0.0) f = sadd3(f, sscale(nn, r));
     float3 g;
-    if (guardOf(h, t0, t1, t2, alpha, beta, gamma, vv, f, beamOff, groupOff, groupCount, parity, g)) f = sadd3(f, g);
+    if (guardOf(h, t0, t1, t2, alpha, beta, gamma, vv, f, beamOff, groupOff, groupCount, parity, fb, g)) f = sadd3(f, g);
     return f;
 }
 
@@ -6072,6 +6106,7 @@ void selfResidualPhase(uint v, uint sub, uint lanes, uint phase, uint beamOff, u
             resMerge(h, t0, t1, t2);
             continue;
         }
+        uint fb = (gP.perfFlags & PERF_HIT_FB) != 0u ? hitFbAt(v, i) : 0u;
         float alpha = asfloat(gNext[at + 1u]);
         float beta = asfloat(gNext[at + 2u]);
         float gamma = nf(nf(1.0 - alpha) - beta);
@@ -6079,15 +6114,39 @@ void selfResidualPhase(uint v, uint sub, uint lanes, uint phase, uint beamOff, u
         float3 vv = asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u]));
         if (phase == 0u)
         {
-            float r = resOf(h, t0, t1, t2, alpha, beta, gamma, nn, vv, beamOff, groupOff, groupCount, parity);
+            float r = resOf(h, t0, t1, t2, alpha, beta, gamma, nn, vv, beamOff, groupOff, groupCount, parity, fb);
             gNext[at + 21u] = asuint(r);
             if (r > 0.0) resStage(h, t0, t1, t2, alpha, beta, gamma, sscale(nn, r));
             continue;
         }
         float3 f1 = asfloat(uint3(gNext[at + 3u], gNext[at + 4u], gNext[at + 5u]));
         float3 total = resTotal(h, t0, t1, t2, alpha, beta, gamma, nn, vv, f1, asfloat(gNext[at + 21u]), beamOff,
-                                groupOff, groupCount, parity);
+                                groupOff, groupCount, parity, fb);
         resFinal(h, t0, t1, t2, alpha, beta, gamma, f1, total);
+    }
+}
+
+// selfApply's node forces (perfFlags bit 1), before its rounds: each listed hit's four
+// nodes' beam forces (beamSum: the incidence entries and group state of this step,
+// which nothing in selfApply writes), one (hit, role) a lane, for the two-body rule's
+// round and the residual pass's two phases to read instead of summing them again.
+void hitFbFill(uint v, uint sub, uint lanes, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint count = uint(gAcc[hitAcc(v)].load());
+    if (count > HIT_CAP || !selfTwoBody(v)) return;
+    uint base = hitList(v);
+    uint nodeOff = gStatic[v * 4u].x;
+    for (uint q = sub, qStop = EB_END(q, count * 4u, lanes); q < qStop; q += lanes)
+    {
+        uint at = base + (q >> 2) * HIT_WORDS;
+        uint role = q & 3u;
+        uint x = role == 0u ? nodeOff + (gNext[at] & 0xFFFFu) : gNext[at + 7u + role];
+        float3 f = beamSum(gNodes[x * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + x], beamOff, groupOff, groupCount, parity,
+                           false);
+        uint fb = hitFbAt(v, q >> 2) + role * 3u;
+        gNext[fb] = asuint(f.x);
+        gNext[fb + 1u] = asuint(f.y);
+        gNext[fb + 2u] = asuint(f.z);
     }
 }
 
@@ -6106,6 +6165,11 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
     // caller's barrier; none: nothing to apply, no further barrier.
     uint any = gsUniformHits;
     if (any == 0u) return;
+    if ((gP.perfFlags & PERF_HIT_FB) != 0u)
+    {
+        if (on) hitFbFill(v, sub, lanes, beamOff, groupOff, groupCount, parity);
+        sync();
+    }
     // A lane with hits still open after round k sets gsUniformOpen to k: the round
     // numbers only grow within a step, so reading "at least k" after the barrier
     // is the same for every lane even if a fast lane has moved on to round k + 1.
@@ -6234,7 +6298,7 @@ void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint group
             float rr = 0.0;
             if (mode != 0u)
             {
-                rr = resOf(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, beamOff, groupOff, groupCount, parity);
+                rr = resOf(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, beamOff, groupOff, groupCount, parity, 0u);
                 if (mode == 1u)
                 {
                     if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));
@@ -6245,7 +6309,7 @@ void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint group
             // (Mode 0 with its position step, mode 2 without: one call site.)
             if (two)
                 f = selfTwoBodyCore(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, pen, rv, V.w, beamOff, groupOff,
-                                    groupCount, parity, mode == 0u);
+                                    groupCount, parity, mode == 0u, 0u);
             else
             {
                 float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff,
@@ -6256,7 +6320,7 @@ void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint group
             if (mode == 2u)
             {
                 float3 total = resTotal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, f, rr, beamOff, groupOff,
-                                        groupCount, parity);
+                                        groupCount, parity, 0u);
                 resFinal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, f, total);
                 continue;
             }
@@ -6525,7 +6589,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     {
         uint parityR = (stepBase + gP.pad2 - 1u) & 1u;
         if (lane == 0u) selfSplitHits(v);
+#ifdef EB_ABLATE
+        if (selfOn != 0u && !EB_A2(64u))
+#else
         if (selfOn != 0u)
+#endif
         {
             sync();
             selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parityR);
@@ -6565,7 +6633,18 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     for (uint s = 0u, sStop = EB_END_UNIFORM(s, gP.steps, 1u, EB_MAX_STEPS); s < sStop; s++)
 #endif
     {
+#ifdef EB_ABLATE
+        if (EB_A2(1024u))
+        {
+            sync();
+            continue;
+        }
+        if (!EB_A2(512u))
+#endif
         coupleStep(v, lane, s, coupleOn);
+#ifdef EB_ABLATE
+        if (!EB_A2(1u))
+#endif
         driveStep(v, lane, s, driveOn);
         uint step = stepBase + s;
         uint parity = step & 1u;
@@ -6598,10 +6677,20 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         if (gP.centredDv != 0u) centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
         if (sleepOn) sleepMove = sleepTrack(nodeOff, nodeCount, lane, sleepMove);
+#ifdef EB_ABLATE
+        if (!EB_A2(8u))
+#endif
         pairReuseTrack(nodeOff, nodeCount, lane);
 
+#ifdef EB_ABLATE
+        if (!EB_A2(256u))
+#endif
         for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
+#ifdef EB_ABLATE
+        if (candCount > 0u && !EB_A2(2u))
+#else
         if (candCount > 0u)
+#endif
         {
             for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES)
             {
@@ -6609,6 +6698,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 if (triCount <= TRI_LIST && w <= 0) gsTested[gsTestedCount[parity].add(1u)] = t;
             }
         }
+#ifdef EB_ABLATE
+        if (!EB_A2(4u))
+#endif
         for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
         if (lane == 0u)
         {
@@ -6623,8 +6715,14 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             gsUniformOpen = 0u;
         }
         sync();
+#ifdef EB_ABLATE
+        if (!EB_A2(2048u))
+#endif
         if (lane == 0u) grabApply(nodeOff, nodeCount, origin);
 #ifdef EB_AERO
+#ifdef EB_ABLATE
+        if (!EB_A2(2048u))
+#endif
         if (lane == 0u) brakeApply(aero2.z, aero2.w);
 #endif
         if (lane == 0u)
@@ -6637,7 +6735,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             // With the grid, its pair list built, reused or not used (pairReuseDecide).
             gsUniformLanes = grid | (pairReuseDecide(v, grid, parity, origin) << 1);
         }
+#ifdef EB_ABLATE
+        if (cell > 0.0 && !EB_A2(4u))
+#else
         if (cell > 0.0)
+#endif
         {
             for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
             {
@@ -6703,7 +6805,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 trianglePairs(t, triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, parity);
             }
         }
+#ifdef EB_ABLATE
+        else if (candCount > 0u && gP.triGeo != 0u && !EB_A2(32u))
+#else
         else if (candCount > 0u && gP.triGeo != 0u)
+#endif
         {
             // The grid this step: each tested triangle's geometry once, for its walk
             // (triGeoFill; lanes in reverse).
@@ -6716,6 +6822,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         // reused, no grid to build.
         uint reuse = gridOn >> 1;
         // This step's deferred breaks, in spawn order (before selfApply's barrier).
+#ifdef EB_ABLATE
+        if (!EB_A2(2048u))
+#endif
         if (lane == 0u) resolvePending(v, parity);
 #ifdef EB_ABLATE
         if (gridOn != 0u && reuse != 2u && (gP.ablate & 1u) == 0u)
@@ -6872,7 +6981,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         sync();
         continue;
 #endif
+#ifdef EB_ABLATE
+        if (selfOn != 0u && !EB_A2(64u))
+#else
         if (selfOn != 0u)
+#endif
         {
             sync();
             selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parity);

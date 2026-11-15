@@ -2088,6 +2088,17 @@ impl ExplicitBeamsGpu {
         self.planner.words[plan::W_BEAM_ORDER] = if on { self.layout.words[plan::W_BEAM_ORDER] } else { 0 };
     }
 
+    /// The kernels' lossless schedule switches ([`plan::W_PERF_FLAGS`], `plan::PERF_*`
+    /// bits; `RUBBLE_PERF_FLAGS` sets the start value): each the same results bit for
+    /// bit on or off. Applies from the next frame.
+    pub fn set_perf_flags(&mut self, flags: u32) {
+        self.planner.set_perf_flags(flags);
+    }
+
+    pub fn perf_flags(&self) -> u32 {
+        self.planner.perf_flags()
+    }
+
     /// The reused pair list's piece labels for vehicle `v` (`explicit_beams.slang`
     /// pieces*; one per node of the vehicle, [`engine_softbody::explicit_debris::piece_labels`]):
     /// 0 the main body, 1..=6 a piece with collision triangles of its own,
@@ -2916,6 +2927,14 @@ impl ExplicitBeamsGpu {
     pub fn set_ablation(&mut self, mask: u32) {
         self.planner.set_ablation(mask);
         self.set_kernel_variant(if mask == 0 { KernelVariant::Current } else { KernelVariant::Ablate });
+    }
+
+    /// Measurement only (time; results are then meaningless): the ablation build's second
+    /// mask (`EB_A2`, explicit_beams.slang: the solo frame's smaller phases), read only by
+    /// the ablation kernels ([`Self::set_ablation`] with a nonzero mask selects them).
+    #[doc(hidden)]
+    pub fn set_ablation2(&mut self, mask: u32) {
+        self.planner.set_ablation2(mask);
     }
 
     /// Tests only: whether an `EB_DET_HITS` frame had more self-collision hits in a

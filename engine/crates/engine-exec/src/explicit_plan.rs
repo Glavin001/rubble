@@ -195,6 +195,17 @@ pub const PARAM_WORDS: usize = 100;
 /// only its own records and incidence entries, and a node sums its entries in its own
 /// order.
 pub const W_BEAM_ORDER: usize = 96;
+/// Params word: lossless schedule switches of the kernels (`gP.perfFlags`), each the same
+/// results bit for bit on or off; `PERF_*`.
+pub const W_PERF_FLAGS: usize = 98;
+/// [`W_PERF_FLAGS`]: selfApply's node beam forces summed once per listed hit and role
+/// (the kernel's `hitFbFill`) instead of in the two-body round and again in each of the
+/// residual pass's two phases.
+pub const PERF_HIT_FB: u32 = 1;
+/// The switches a host starts with: `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement).
+pub fn perf_flags_default() -> u32 {
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+}
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;
 /// A two-record element (its first record j, its second j + 1, which carries forces the
@@ -534,7 +545,9 @@ pub const FLAG_OWN_TRAVEL: u32 = 1 << 20;
 const NODE_PAIR_TRACKED: u32 = 128;
 /// Per vehicle the kernel's self-collision hit list (HIT_CAP records of HIT_WORDS
 /// words) and pending-beam list (PEND_CAP) in gNext.
-const SELF_HIT_WORDS: usize = 256 * 24 + 64;
+/// (Then HIT_CAP records of 12 words: each listed hit's four nodes' beam forces, the
+/// kernel's hitFbAt, [`PERF_HIT_FB`].)
+const SELF_HIT_WORDS: usize = 256 * 24 + 64 + 256 * 12;
 /// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
 pub const WIDE_MAX_VEHICLES: usize = 256;
 /// Bytes of the wide passes' vehicle table (the kernel's VehicleTable).
@@ -2434,7 +2447,8 @@ impl ExplicitUpload {
             0,
             beam_order_base,
         ];
-        let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
+        let mut words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
+        words[W_PERF_FLAGS] = perf_flags_default();
         let total = [
             total_nodes as u32,
             total_beams as u32,
@@ -2754,6 +2768,22 @@ impl FramePlanner {
     /// Measurement only: the phases `EB_ABLATE` builds skip.
     pub fn set_ablation(&mut self, mask: u32) {
         self.words[W_ABLATE] = mask;
+    }
+
+    /// Measurement only: the second mask of `EB_ABLATE` builds (the solo frame's smaller
+    /// phases, `EB_A2` in explicit_beams.slang), in the free word after [`W_BEAM_ORDER`].
+    /// The lossless schedule switches ([`W_PERF_FLAGS`]: `PERF_*` bits; the same results
+    /// bit for bit either way).
+    pub fn set_perf_flags(&mut self, flags: u32) {
+        self.words[W_PERF_FLAGS] = flags;
+    }
+
+    pub fn perf_flags(&self) -> u32 {
+        self.words[W_PERF_FLAGS]
+    }
+
+    pub fn set_ablation2(&mut self, mask: u32) {
+        self.words[W_BEAM_ORDER + 1] = mask;
     }
 
     /// The parameters for a frame of `steps` steps, from byte 0 of binding 0: copy k
