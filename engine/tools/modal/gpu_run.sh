@@ -13,6 +13,12 @@
 #
 # Options:
 #   --gpu T4|L4|L40S     GPU (default T4; L40S only for a reason, ~3x the price)
+#   --cpus N             CPU cores for the container (default 8: the driver compiles
+#                        pipelines on the CPU, one core each, several at once)
+#   --allow-cold-compile run even when this kernel version is new on the host's
+#                        driver (minutes of compiling; without it the run stops
+#                        at once with the estimate, exit 3)
+#   --no-warm            skip the parallel pipeline warm-up before the selection
 #   --timeout SECS       hard cap on the container (default 600, max 1800)
 #   --queue SECS         how long to wait for a free GPU before giving up (default
 #                        300; queueing is not billed)
@@ -36,13 +42,16 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 
-gpu=T4 cap=600 queue=300 monitor=30 shader_cache=1 repeat=1 timing=0 build_only=0 keep=0
+gpu=T4 cpus=8 allow_cold=0 warm=1 cap=600 queue=300 monitor=30 shader_cache=1 repeat=1 timing=0 build_only=0 keep=0
 sedan="$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new"
 envs=() variants=() data=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu) gpu="$2"; shift 2 ;;
     --timeout) cap="$2"; shift 2 ;;
+    --cpus) cpus="$2"; shift 2 ;;
+    --allow-cold-compile) allow_cold=1; shift ;;
+    --no-warm) warm=0; shift ;;
     --queue) queue="$2"; shift 2 ;;
     --env) envs+=("$2"); shift 2 ;;
     --variant) variants+=("$2"); shift 2 ;;
@@ -55,7 +64,7 @@ while [ $# -gt 0 ]; do
     --build-only) build_only=1; shift ;;
     --keep) keep=1; shift ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
     *) echo "gpu_run: unknown option $1 (the cargo selection goes after --)" >&2; exit 2 ;;
   esac
 done
@@ -110,13 +119,24 @@ fi
 wt_key="$(printf '%s' "$repo" | shasum -a 256 | cut -c1-12)"
 t0=$(date +%s)
 echo "gpu_run: building in Docker (target volume rubble-gpurun-target-$wt_key)" >&2
-docker run --rm --platform linux/amd64 \
+# ENGINE_* variables reach the build (engine-cuda: ENGINE_CUDA_EXPLICIT_MODULES,
+# ENGINE_CUDA_SASS, ...). The CUDA route embeds SASS for the GPU it runs on only.
+case " $* " in *" engine-cuda "*|*" -p engine-cuda"*)
+  if [ -z "${ENGINE_CUDA_SASS:-}" ]; then
+    if [ "$gpu" = T4 ]; then export ENGINE_CUDA_SASS=75; else export ENGINE_CUDA_SASS=89; fi
+  fi ;;
+esac
+build_env=()
+while IFS='=' read -r k _; do
+  case "$k" in ENGINE_*) build_env+=(-e "$k") ;; esac
+done < <(env)
+docker run --rm --platform linux/amd64 ${build_env[@]+"${build_env[@]}"} \
   -v "$repo:/repo" \
   -v "$run:/out" \
   -v rubble-cuda-cargo:/cache/cargo \
   -v "rubble-gpurun-target-$wt_key:/cache/target" \
   -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target \
-  -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-6}" \
+  -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-6}" -e RUBBLE_BUILD_JOBS="${RUBBLE_BUILD_JOBS:-4}" \
   "$image" python3 /repo/engine/tools/modal/gpu_run_pack.py /out ${data[@]+"${data[@]}"} -- "${args[@]}"
 t1=$(date +%s)
 echo "gpu_run: build + pack $((t1 - t0)) s, archive $(du -h "$run/archive.tar.gz" | cut -f1)" >&2
@@ -128,10 +148,10 @@ if [ "$build_only" = 1 ]; then
 fi
 
 # The run's spec (JSON) for gpu_run.py.
-python3 - "$run/spec.json" "$gpu" "$cap" "$repeat" "$timing" "$monitor" "$queue" "$shader_cache" "$id" \
+python3 - "$run/spec.json" "$gpu" "$cap" "$repeat" "$timing" "$monitor" "$queue" "$shader_cache" "$id" "$cpus" "$allow_cold" "$warm" \
   "${#envs[@]}" ${envs[@]+"${envs[@]}"} ${variants[@]+"${variants[@]}"} <<'PY'
 import json, sys
-out, gpu, cap, repeat, timing, monitor, queue, shader_cache, run_id, n, *rest = sys.argv[1:]
+out, gpu, cap, repeat, timing, monitor, queue, shader_cache, run_id, cpus, allow_cold, warm, n, *rest = sys.argv[1:]
 n = int(n)
 def kv(spec):
     # K=V,K2=V2; a comma part without `=` belongs to the value before it (EV_AB_MASKS=1,2).
@@ -158,7 +178,8 @@ for v in rest[n:]:
         raise SystemExit(f"gpu_run: --variant {v!r} is not NAME:K=V,...")
     variants.append({"name": name, "env": kv(spec)})
 json.dump({"gpu": gpu, "cap": int(cap), "repeat": int(repeat), "timing": timing == "1", "monitor": int(monitor), "queue": int(queue),
-           "shader_cache": shader_cache == "1", "id": run_id,
+           "shader_cache": shader_cache == "1", "id": run_id, "cpus": int(cpus),
+           "allow_cold": allow_cold == "1", "warm": warm == "1",
            "env": env, "variants": variants}, open(out, "w"))
 PY
 

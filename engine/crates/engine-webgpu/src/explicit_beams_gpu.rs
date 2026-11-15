@@ -27,7 +27,10 @@ use engine_exec::explicit_plan::{
     self as plan, Cmd, ExplicitLayout, ExplicitUpload, FramePlanner, Kernel, PlannerState, BIND_TABLE,
     PARAM_STRIDE, VV_RECS,
 };
-pub use engine_exec::explicit_plan::{CouplingCapacity, CouplingLayout, GpuBeam};
+pub use engine_exec::explicit_plan::{
+    CouplingCapacity, CouplingLayout, GpuBeam, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING,
+    COUPLING_LIST_SKIN_NODES_ONLY,
+};
 use engine_softbody::explicit_beams::ExplicitBeams;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -267,17 +270,6 @@ pub fn surface_split_default() -> bool {
 /// coupled frame hundreds of times slower (the crash town's car against a crate:
 /// 755 ms a 1/60 s frame with them, 0.87 ms without; `engine/docs/explicit-vehicles-in-world.md`).
 /// `RUBBLE_COUPLING_RANGES=0|1` overrides it natively.
-/// The coupling's candidate list (`explicit_beams_rigid.slang` `cplList*`;
-/// [`engine_softbody::explicit_rigid::candidate_list`]): the header's bit 128 turns it off
-/// (every node tests every proxy shape each step, as before it). Bits 256 and 512 are tests'
-/// skins (256: without the shapes' speed, so a body entering mid-frame is caught by the
-/// check alone; 512: the ceiling, so nodes keep their lists through hard accelerations).
-pub const COUPLING_LIST_OFF: u32 = 128;
-pub const COUPLING_LIST_SKIN_NODES_ONLY: u32 = 256;
-pub const COUPLING_LIST_SKIN_CEILING: u32 = 512;
-/// The coupling's folded step (`explicit_beams_rigid.slang` `cplStepFolded`: 2 barriers a
-/// step, not 4) off: the header's bit 1024.
-pub const COUPLING_FOLD_OFF: u32 = 1024;
 
 pub fn coupling_node_ranges_off_default() -> bool {
     match std::env::var("RUBBLE_COUPLING_RANGES").as_deref() {
@@ -2549,52 +2541,17 @@ impl ExplicitBeamsGpu {
     /// the lanes (grid runs, tested lists, candidate lists) is left out.
     #[doc(hidden)]
     pub fn state_words(&self) -> Vec<(&'static str, Vec<u32>)> {
-        let w = &self.planner.words;
         let words = |b: &wgpu::Buffer| -> Vec<u32> { bytemuck::cast_slice(&self.read(b)).to_vec() };
-        let nodes = words(&self.bufs[3]);
-        let beams = words(&self.bufs[4]);
-        let acc = words(&self.bufs[5]);
-        let groups = words(&self.bufs[6]);
-        let mut misc = words(&self.bufs[7]);
-        let next = words(&self.bufs[8]);
-        let nv = self.layout.spans.len();
-        let (grid_base, aero_state) = (w[9] as usize, w[27] as usize);
-        // The aero, slide state and slide-force slots (the contributions after them
-        // are scratch).
-        let slide_end = (w[35] + w[38]) as usize;
-        let (vv_veh, vv_groups) = (w[43] as usize, w[46] as usize);
-        for v in 0..nv {
-            misc[(vv_veh + v * VV_RECS + 4) * 4 + 2] = 0;
-        }
-        // The wide passes' per-frame rebase shifts (scratch).
-        let wide_misc = w[16] as usize;
-        misc[wide_misc * 4..(wide_misc + 1 + nv) * 4].fill(0);
-        let mut beam_words = beams[..grid_base * 4].to_vec();
-        // A beam's "broke in the last beam phase" mark (.w of its second record) is
-        // read only within that step (the next beam phase clears it first).
-        for j in 0..self.layout.total[1] as usize {
-            beam_words[(2 * j + 1) * 4 + 3] = 0;
-        }
-        beam_words.extend_from_slice(&beams[aero_state * 4..slide_end * 4]);
-        vec![
-            ("nodes", nodes),
-            ("beams", beam_words),
-            ("acc", acc[..3 * self.layout.total[0] as usize].to_vec()),
-            // Anti-clip's side memory (order free; jbeam-semantics-spec.md §36).
-            ("clip", {
-                let at = w[78] as usize;
-                if at == 0 {
-                    Vec::new()
-                } else {
-                    acc[at..at + 4 * self.layout.total[0] as usize].to_vec()
-                }
-            }),
-            ("groups", groups),
-            ("misc", misc[..vv_groups * 4].to_vec()),
-            // The trigger inputs: from keyBase to the contact lists (vvMembers −
-            // vehicles).
-            ("keys", next[w[31] as usize..w[47] as usize - nv].to_vec()),
-        ]
+        plan::state_words(
+            &self.layout,
+            &self.planner.words,
+            words(&self.bufs[3]),
+            &words(&self.bufs[4]),
+            &words(&self.bufs[5]),
+            words(&self.bufs[6]),
+            words(&self.bufs[7]),
+            &words(&self.bufs[8]),
+        )
     }
 
     /// Tests only: the words of [`Self::state_words`]' `misc` holding the vehicle-contact

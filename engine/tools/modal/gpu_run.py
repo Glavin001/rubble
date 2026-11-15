@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import tarfile
 import time
@@ -40,18 +41,30 @@ image = modal.Image.from_registry("debian:bookworm-slim", add_python="3.12").run
 # reference kernel 2.5 s); from the cache it is 0.1 s. Entries are keyed by the
 # driver on the SPIR-V's hash, so a kernel that changed misses and is compiled, and
 # sharing the cache between worktrees cannot give one another's binary.
-# Each run copies the newest snapshot in, and if it compiled anything writes a new
-# snapshot directory of its own (nothing is written in place; the oldest beyond
-# KEEP_SNAPSHOTS are removed). Reset: modal volume delete rubble-gpu-run-shader-cache
+# Snapshots are kept per kernel version (the hash of the generated explicit-beams WGSL)
+# and driver: a run copies its version's newest snapshot in (else the newest of any
+# version, as a seed), and if it compiled anything writes a new snapshot directory of
+# its own (nothing is written in place). WARMED marks a snapshot a completed warm-up
+# saved: the cold-compile guard passes for that version. Two runs of one version that
+# both compile: the last to finish wins. Reset: modal volume delete rubble-gpu-run-shader-cache
 cache_volume = modal.Volume.from_name("rubble-gpu-run-shader-cache", create_if_missing=True)
 CACHE_MOUNT, CACHE_LOCAL = "/nvcache", "/tmp/nvc"
-KEEP_SNAPSHOTS = 4
+EXE_NAME = "rubble-gpu"
 MAX_SNAPSHOT_BYTES = 4 << 30
 
 GPU_PRICE = {"T4": 0.000164, "L4": 0.000222, "L40S": 0.000542}
 CPUS, MEM_GIB = 4, 8
 CPU_PRICE, MEM_PRICE = 0.0000131, 0.00000222
 MAX_TIMEOUT = 1800
+
+COLD_GUARD = (
+    "STOPPED: this kernel version has not been compiled on {driver} yet. Its warm-up "
+    "compiles the explicit-beams pipelines in parallel (the slowest current module "
+    "alone takes ~510 s on a T4 host), then the tests compile anything else they use "
+    "on first use: expect 9-15 minutes at about $0.02/min with {cpus} cores. Rerun with "
+    "--allow-cold-compile (and --timeout 1200 or more) to pay it; later runs of this "
+    "kernel version on this driver are warm. Nothing else was run (exit 3)."
+)
 
 DIRECTIONAL = (
     "TIMING IS DIRECTIONAL ONLY: an NVIDIA {gpu} through Vulkan in a gVisor sandbox is "
@@ -84,42 +97,61 @@ def _tree_bytes(root: str) -> int:
     return sum(f.stat().st_size for f in Path(root).rglob("*") if f.is_file())
 
 
-def _cache_in(key: str) -> Path | None:
-    """The newest complete snapshot for this GPU and driver, copied to CACHE_LOCAL."""
+def _snaps(d: Path) -> list[Path]:
+    return sorted(p for p in d.glob("*") if (p / "DONE").is_file()) if d.is_dir() else []
+
+
+def _cache_in(key: str, kernel: str) -> bool:
+    """Copy this kernel version's newest snapshot (else the newest of any version, as a
+    seed: the rigid kernels and unchanged modules hit) to CACHE_LOCAL. True when it is
+    this version's and a completed warm-up saved it (WARMED)."""
     Path(CACHE_LOCAL).mkdir(parents=True, exist_ok=True)
-    root = Path(CACHE_MOUNT) / key
-    snaps = sorted(p for p in root.glob("*") if (p / "DONE").is_file()) if root.is_dir() else []
-    if not snaps:
+    root = Path(CACHE_MOUNT) / key / "v"
+    own = _snaps(root / (kernel or "none"))
+    pick = own[-1:] or sorted(
+        (p for d in (root.glob("*") if root.is_dir() else []) for p in _snaps(d)),
+        key=lambda p: p.name,
+    )[-1:]
+    if not pick:
         _say(f"shader cache: empty for {key} (cold compiles)")
-        return None
+        return False
+    snap = pick[0]
     try:
-        subprocess.run(["cp", "-a", f"{snaps[-1]}/GLCache", CACHE_LOCAL], check=True)
-        _say(f"shader cache: {snaps[-1].name}, {_tree_bytes(CACHE_LOCAL) / 1e6:.1f} MB")
-        return snaps[-1]
+        subprocess.run(["cp", "-a", f"{snap}/GLCache", CACHE_LOCAL], check=True)
     except (subprocess.CalledProcessError, OSError) as e:
-        _say(f"shader cache: could not read {snaps[-1].name} ({e}); cold compiles")
-        return None
+        _say(f"shader cache: could not read {snap.name} ({e}); cold compiles")
+        return False
+    warmed = bool(own) and (snap / "WARMED").is_file()
+    _say(f"shader cache: {'this kernel version' if own else 'seed from ' + snap.parent.name}, "
+         f"{snap.name}, {_tree_bytes(CACHE_LOCAL) / 1e6:.1f} MB")
+    return warmed
 
 
-def _cache_out(key: str, since: float, run_id: str) -> None:
-    """A new snapshot when this run compiled anything; drop the oldest."""
+def _cache_out(key: str, kernel: str, since: float, run_id: str, warmed: bool, was_warmed: bool) -> None:
+    """A new snapshot for this kernel version when this run compiled anything or first
+    completed its warm-up; the 2 newest per version and the 16 newest versions kept."""
     new = [f for f in Path(CACHE_LOCAL).rglob("*") if f.is_file() and f.stat().st_mtime > since]
-    if not new:
+    if not new and not (warmed and not was_warmed):
         return
     size = _tree_bytes(CACHE_LOCAL)
     if size > MAX_SNAPSHOT_BYTES:
         _say(f"shader cache: {size / 1e9:.1f} GB, over the cap; not saved")
         return
-    root = Path(CACHE_MOUNT) / key
-    dest = root / f"{time.strftime('%Y%m%d-%H%M%S')}-{run_id}"
+    root = Path(CACHE_MOUNT) / key / "v"
+    dest = root / (kernel or "none") / f"{time.strftime('%Y%m%d-%H%M%S')}-{run_id}"
     dest.mkdir(parents=True)
     subprocess.run(["cp", "-a", f"{CACHE_LOCAL}/GLCache", str(dest)], check=True)
+    if warmed or was_warmed:
+        (dest / "WARMED").write_text("")
     (dest / "DONE").write_text("")
-    snaps = sorted(p for p in root.glob("*") if (p / "DONE").is_file())
-    for old in snaps[:-KEEP_SNAPSHOTS]:
+    for old in _snaps(dest.parent)[:-2]:
+        subprocess.run(["rm", "-rf", str(old)])
+    versions = sorted((d for d in root.glob("*") if _snaps(d)), key=lambda d: _snaps(d)[-1].name)
+    for old in versions[:-16]:
         subprocess.run(["rm", "-rf", str(old)])
     cache_volume.commit()
-    _say(f"shader cache: saved {len(new)} new files ({size / 1e6:.1f} MB) as {dest.name}")
+    _say(f"shader cache: saved {len(new)} new files ({size / 1e6:.1f} MB) for kernel version "
+         f"{kernel or 'none'}{' (warm)' if warmed or was_warmed else ''}")
 
 
 NOT_RUN = -1
@@ -170,7 +202,7 @@ def _run(cmd: list[str], cwd: str, env: dict, deadline: float, every: int) -> tu
             p.kill()
             p.wait()
             reader.join(timeout=5)
-            _say(f"time cap reached: killed {Path(cmd[0]).name}"
+            _say(f"time cap reached: killed {Path(cmd[0]).parent.name}"
                  + (f" while running test {running[0]}" if running[0] else ""))
             _say("its last output (tests run with --nocapture, so nothing was held back):")
             print("".join(tail), end="", flush=True)
@@ -200,10 +232,11 @@ def run(archive: bytes, spec: dict) -> dict:
     driver = (smi.stdout.split(",")[1].strip() if smi.stdout.count(",") >= 2 else "unknown")
     cache_key = f"{spec['gpu']}-{driver}"
     cache_on = spec.get("shader_cache", True)
+    was_warmed = False
     cache_since = time.time()
     cache_env = {}
     if cache_on:
-        _cache_in(cache_key)
+        was_warmed = _cache_in(cache_key, manifest.get("kernel_hash", ""))
         cache_since = time.time()
         cache_env = {"__GL_SHADER_DISK_CACHE_PATH": CACHE_LOCAL,
                      "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP": "1"}
@@ -221,15 +254,45 @@ def run(archive: bytes, spec: dict) -> dict:
     exes = manifest["exes"]
     for e in exes:
         os.chmod(f"/work/{e['file']}", 0o755)
+        # One executable name for every process: NVIDIA's shader disk cache keeps a file
+        # per executable basename (measured: same basename in another directory hits,
+        # another basename misses), so the warm-up's pipelines reach the tests only if
+        # they share it.
+        d = Path("/work/exe") / Path(e["file"]).name
+        d.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f"/work/{e['file']}", d / EXE_NAME)
+        e["exec"] = str(d / EXE_NAME)
         # The working directory (a test's crate dir, as cargo test uses) exists even
         # when no data file of that crate is shipped.
         Path(e["cwd"]).mkdir(parents=True, exist_ok=True)
     probe = next((e for e in exes if e["role"] == "probe"), None)
     if probe:
-        code, _ = _run([f"/work/{probe['file']}"], "/work", base, deadline, 0)
+        code, _ = _run([probe["exec"]], "/work", base, deadline, 0)
         if code != 0:
             _say(f"no hardware adapter (gpu_adapter exit {code}); nothing run")
             return {"code": code or 1, "secs": time.time() - started}
+    if manifest.get("route") == "cuda":
+        # Device code (SASS for the T4 / Ada, PTX otherwise) is in the binaries: no
+        # compile here, no shader cache, no warm-up.
+        base["ENGINE_CUDA_DEVICE"] = "1"
+        cache_on = False
+        spec = {**spec, "allow_cold": True, "warm": False}
+        _say("CUDA route: device code built locally; nothing compiles on this host")
+    # Has this kernel version been compiled on this driver (by a warm-up) before?
+    kernel = manifest.get("kernel_hash", "")
+    mark_seen = False
+    seen = cache_on and bool(kernel) and was_warmed
+    if kernel:
+        _say(f"kernel version {kernel}: {'warmed on this driver before' if seen else 'NEW on this driver (cold)'}")
+    if not seen and not spec.get("allow_cold"):
+        _say(COLD_GUARD.format(driver=cache_key, cpus=spec.get("cpus", CPUS)))
+        return {"code": 3, "secs": time.time() - started}
+    if probe and spec.get("warm", True):
+        _say("warm-up: the selection's pipelines, every core at once")
+        code, secs = _run([probe["exec"], "--warm"], "/work", base, deadline, 0)
+        _say(f"warm-up: exit {code}, {secs:.1f} s")
+        # Marked seen once the cache holding the warm-up is saved (end of the run).
+        mark_seen = code == 0 and cache_on and bool(kernel) and not seen
     runs = [e for e in exes if e["role"] == "run"]
     variants = spec["variants"] or [{"name": "", "env": {}}]
     timing = spec["timing"] or len(variants) > 1
@@ -252,7 +315,7 @@ def run(archive: bytes, spec: dict) -> dict:
                     label += f" #{rep + 1}"
                 envs = " ".join(f"{k}={val}" for k, val in {**spec["env"], **v["env"]}.items())
                 _say(f"=== {label}: {' '.join(args)}" + (f"  (env {envs})" if envs else ""))
-                code, secs = _run([f"/work/{e['file']}", *args], e["cwd"], env, deadline, spec["monitor"])
+                code, secs = _run([e["exec"], *args], e["cwd"], env, deadline, spec["monitor"])
                 if code == NOT_RUN:
                     _say(f"=== {label}: NOT RUN (time cap)")
                 else:
@@ -261,7 +324,7 @@ def run(archive: bytes, spec: dict) -> dict:
                 worst = worst or (124 if code == NOT_RUN else code)
     if cache_on:
         try:
-            _cache_out(cache_key, cache_since, spec["id"])
+            _cache_out(cache_key, kernel, cache_since, spec["id"], mark_seen, was_warmed)
         except Exception as e:  # noqa: BLE001 - the cache never fails a run
             _say(f"shader cache: not saved ({e})")
     _say("summary:")
@@ -287,7 +350,7 @@ def main(archive: str, spec: str):
     t0 = time.time()
     # Spawned, so the wait has a bound of its own: a GPU type without capacity leaves
     # the call queued (Modal's timeout counts only once a container runs).
-    call = run.with_options(gpu=gpu, timeout=cap).spawn(data, s)
+    call = run.with_options(gpu=gpu, timeout=cap, cpu=int(s.get("cpus", CPUS))).spawn(data, s)
     try:
         out = call.get(timeout=cap + int(s["queue"]))
     except TimeoutError:
@@ -297,10 +360,11 @@ def main(archive: str, spec: str):
         Path(spec).with_name("exit_code").write_text("125")
         raise SystemExit(125)
     secs = out["secs"]
-    rate = GPU_PRICE[gpu] + CPUS * CPU_PRICE + MEM_GIB * MEM_PRICE
+    cpus = int(s.get("cpus", CPUS))
+    rate = GPU_PRICE[gpu] + cpus * CPU_PRICE + MEM_GIB * MEM_PRICE
     print(
         f"[gpu_run] container {secs:.1f} s (call {time.time() - t0:.1f} s); "
-        f"cost about ${secs * rate:.4f} at ${rate * 60:.4f}/min ({gpu} + {CPUS} cores + {MEM_GIB} GiB)",
+        f"cost about ${secs * rate:.4f} at ${rate * 60:.4f}/min ({gpu} + {cpus} cores + {MEM_GIB} GiB)",
         flush=True,
     )
     Path(spec).with_name("exit_code").write_text(str(out["code"]))

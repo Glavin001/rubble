@@ -94,7 +94,10 @@ def main() -> None:
     is_test = any(a in ("--test", "--tests", "--lib", "--bench", "--benches", "--doc") for a in cargo_args)
     cmd = (["test", "--no-run"] if is_test else ["build"]) + cargo_args
 
-    probe = cargo_json(["build", "-p", "engine-webgpu", "--bin", "gpu_adapter"])
+    # The CUDA route (engine-cuda: device code built here by nvcc, nothing compiled on
+    # the GPU host) needs no Vulkan adapter probe.
+    cuda = "engine-cuda" in cargo_args
+    probe = [] if cuda else cargo_json(["build", "-p", "engine-webgpu", "--bin", "gpu_adapter"])
     msgs = probe + cargo_json(cmd)
     exes: list[dict] = []
     out_dirs: list[Path] = []
@@ -171,7 +174,16 @@ def main() -> None:
         )
 
     out.mkdir(parents=True, exist_ok=True)
-    manifest = {"run_args": run_args, "cargo": cargo_args, "exes": [], "data_bytes": total}
+    # The kernel version: every generated explicit-beams WGSL module (the slow ones for
+    # the driver); gpu_run.py keys "seen on this driver" markers on it.
+    import hashlib
+    h = hashlib.sha256()
+    for key in sorted(files):
+        if "/out/wgsl/" in key and Path(key).name.startswith("explicit_"):
+            h.update(Path(key).name.encode())
+            h.update(files[key].read_bytes())
+    manifest = {"run_args": run_args, "cargo": cargo_args, "exes": [], "data_bytes": total,
+                "kernel_hash": "" if cuda else h.hexdigest()[:16], "route": "cuda" if cuda else "vulkan"}
     buf = io.BytesIO()
     with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0, compresslevel=6) as gz:
         with tarfile.open(fileobj=gz, mode="w") as tar:
