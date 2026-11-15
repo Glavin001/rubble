@@ -2376,6 +2376,15 @@ impl Lab {
             }
             return Ok(json!({ "selfSplit": on }));
         }
+        // Measurement only (time; the run's results are then wrong): { selfSplitSkip: n }
+        // leaves the self split's walk (1) and/or pairs (2) dispatches out of its frames
+        // (ExplicitBeamsGpu::set_self_split_skip); 0 restores them.
+        if let Some(n) = cmd.get("selfSplitSkip").and_then(Value::as_u64) {
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.set_self_split_skip(n as u32);
+            }
+            return Ok(json!({ "selfSplitSkip": n }));
+        }
         // { pieceWindows: bool }: the coupling's window per piece (LabOptions::piece_windows).
         if let Some(on) = cmd.get("pieceWindows").and_then(Value::as_bool) {
             self.bench.opts.piece_windows = on;

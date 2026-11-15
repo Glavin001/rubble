@@ -37,8 +37,11 @@ uint selfArgsAt(uint s) { return 3u * (s == 0u ? 2u : (s & 1u)); }
 // threads (its cells sub, sub + WALK_SUBS, ...: the list's order differs from the
 // workgroup's walk, its pairs do not; nothing depends on the list's order).
 static const uint SELF_WALK = REUSE_WORDS + 1u;
-static const uint WALK_SUBS = 8u;
-static const uint WALK_X = 256u;
+static const uint WALK_SUBS = 32u;
+static const uint WALK_X = 1024u;
+// selfListedAt on a building step: the pairs dispatch tests the walk's list (its count
+// from the walk, at most TRI_PAIR_CAP; the walk tests the pairs past the room itself).
+static const uint SELF_FROM_WALK = 0xFFFFFFFFu;
 uint selfWalkAt(uint v) { return soloStepAt(v) + SELF_WALK; }
 uint selfWalkArgsAt(uint s) { return 9u + selfArgsAt(s); }
 
@@ -114,6 +117,13 @@ void selfSplitBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
         gSelfArgs[at].max(int(min((triCount * WALK_SUBS + SELF_WALK_WG - 1u) / SELF_WALK_WG, WALK_X)));
         gSelfArgs[at + 1u].store(int(gP.vehicles));
         gSelfArgs[at + 2u].store(1);
+        // The walk's list is tested by the pairs dispatch after it (its count unknown
+        // here: the list's room, threads past the count return at once).
+        gAcc[selfListedAt(v)].store(int(SELF_FROM_WALK));
+        uint pa = selfArgsAt(gP.pad2);
+        gSelfArgs[pa].max(int((TRI_PAIR_CAP + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG));
+        gSelfArgs[pa + 1u].store(int(gP.vehicles));
+        gSelfArgs[pa + 2u].store(1);
     }
     bool anti = (gStatic[v * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u;
     if (piecesOn(v))
@@ -161,9 +171,10 @@ void selfSplitBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
 }
 
 // pairReuseList for the walk dispatch: share `sub` of WALK_SUBS of triangle gt's cells,
-// the grid's offsets from storage (offBase), the count a storage atomic; each pair listed
-// is then tested as the pairs dispatch tests a listed pair (pairReuseTest), so the list
-// past its room is still tested (the workgroup walked with its tests there instead).
+// the grid's offsets from storage (offBase), the count a storage atomic; the pairs
+// dispatch after it tests the listed pairs (pairReuseTest, a thread a pair), and a pair
+// past the list's room is tested here, so every pair is tested once (the workgroup walked
+// with its tests there instead).
 void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
                   uint parity, uint listAt, float margin, uint offBase, uint beamOff, uint groupOff, uint groupCount)
 {
@@ -257,10 +268,12 @@ void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell,
             uint n = uint(gAcc[selfWalkAt(v)].add(1));
             if (n < TRI_PAIR_CAP)
             {
+                // Listed: the pairs dispatch after this one tests it.
                 gNext[listAt + 2u * n] = gt;
                 gNext[listAt + 2u * n + 1u] = h;
             }
-            pairReuseTest(gt, h, origin, r, cell, beamOff, groupOff, groupCount, parity);
+            else
+                pairReuseTest(gt, h, origin, r, cell, beamOff, groupOff, groupCount, parity);
         }
     }
 }
@@ -328,6 +341,8 @@ void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
     uint lane = lid.x;
     uint s = gP.pad2;
     uint listed = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfListedAt(v)].load()) : 0u;
+    // A building step: the walk's list (its pairs past the room the walk tested).
+    if (listed == SELF_FROM_WALK) listed = min(uint(gAcc[selfWalkAt(v)].load()), TRI_PAIR_CAP);
     uint i = gid.x * SELF_PAIRS_WG + lane;
     if (i < listed)
     {
