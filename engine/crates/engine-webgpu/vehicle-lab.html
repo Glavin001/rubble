@@ -286,7 +286,12 @@
     if (MODES[qs.get('mode')]) mode = qs.get('mode');
     if (!qs.has('car') || $('car').selectedOptions[0]?.disabled) put('car', have.gen ? 'gen' : 'sedan');
     let surfaceChosen = qs.has('surface');
-    if (!surfaceChosen) put('surface', get('car') === 'gen');
+    // Surface contact (the skin's triangles against rigid shapes) by default for the
+    // generated car, except on the mountain: there node contact keeps the steps in real
+    // time (with it on the mountain ran at half real time, measured 2026-11-15), and the
+    // self-collision passes across the GPU run only on frames without it. A control.
+    const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain';
+    if (!surfaceChosen) put('surface', surfaceDefault());
     function syncUrl() {
       const q = new URLSearchParams();
       q.set('mode', mode);
@@ -308,10 +313,13 @@
       for (const k of Object.keys(MODES)) document.body.classList.toggle(k, k === m);
       mode = m;
       for (const b of $('modes').children) b.classList.toggle('on', b.dataset.mode === m);
+      // Returns whether the simulation must be rebuilt (surface contact is a build option).
+      if (!surfaceChosen && $('surface').checked !== surfaceDefault()) { put('surface', surfaceDefault()); return true; }
+      return false;
     }
     for (const [k, v] of Object.entries(MODES)) {
       const b = document.createElement('button'); b.textContent = v; b.dataset.mode = k;
-      b.onclick = () => { put('script', ''); script = null; setMode(k); put('cam', k === 'mountain' ? 'tumble' : k === 'drive' ? 'chase' : 'orbit'); syncUrl(); restart(); };
+      b.onclick = () => { put('script', ''); script = null; const rebuild = setMode(k); put('cam', k === 'mountain' ? 'tumble' : k === 'drive' ? 'chase' : 'orbit'); syncUrl(); if (rebuild && W) build(); else restart(); };
       $('modes').append(b);
     }
     if (!qs.has('cam')) put('cam', mode === 'mountain' ? 'tumble' : mode === 'drive' ? 'chase' : 'orbit');
@@ -321,7 +329,7 @@
       const on = async () => {
         showOuts(); shapeUi(); syncUrl();
         if (c.id === 'surface') surfaceChosen = true;
-        if (c.id === 'car' && !surfaceChosen) { put('surface', get('car') === 'gen'); syncUrl(); }
+        if (c.id === 'car' && !surfaceChosen) { put('surface', surfaceDefault()); syncUrl(); }
         if (c.id === 'script') { await loadScript(); restart(); return; }
         if (c.dataset.opt === 'build') { if (c.type === 'number') { clearTimeout(restartTimer); restartTimer = setTimeout(build, 400); } else build(); }
         else if (c.dataset.opt === 'restart') { clearTimeout(restartTimer); restartTimer = setTimeout(restart, c.type === 'range' || c.type === 'number' ? 120 : 0); }
