@@ -809,9 +809,14 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let selfsplit_ab = arg("--ab-switch").as_deref() == Some("selfsplit");
     // `--ab-switch beams`: the beam phase on its records sorted by kind against file order.
     let beams_ab = arg("--ab-switch").as_deref() == Some("beams");
+    // `--ab-switch fullmodule`: the frame's module without its surface twin (the full one,
+    // wide-frame-design.md §5b) against the upload's own (off).
+    let fullmodule_ab = arg("--ab-switch").as_deref() == Some("fullmodule");
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if beams_ab {
+        if fullmodule_ab {
+            x.set_frame_module_full(on);
+        } else if beams_ab {
             x.set_beam_order(on);
         } else if selfsplit_ab {
             x.set_self_split(on);
@@ -970,7 +975,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             println!(
                 "   A/B at t {:.1}: {} on {:.2} ms/frame, off {:.2} ms/frame; state bit for bit: {same}",
                 lab.bench.t,
-                if beams_ab {
+                if fullmodule_ab {
+                    "full module"
+                } else if beams_ab {
                     "sorted beams"
                 } else if selfsplit_ab {
                     "self split"

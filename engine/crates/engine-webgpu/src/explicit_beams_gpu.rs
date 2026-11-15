@@ -2052,6 +2052,22 @@ impl ExplicitBeamsGpu {
         self.set_pair_reuse_margin(if on { f32::from_bits(m) } else { 0.0 });
     }
 
+    /// Measurement only (wide-frame-design.md §5b): the frame kernel's module chosen as for
+    /// an upload with surface contact (the full module, its surface pass behind its runtime
+    /// flag) instead of the `_nosurf` / `_nocpl` twin; `false` restores the upload's own.
+    /// Results must be bit for bit; the A/B is the module's runtime. Applies from the next
+    /// frame (the frame pipeline is recreated).
+    #[doc(hidden)]
+    pub fn set_frame_module_full(&mut self, full: bool) {
+        let (aero, _, lanes) = self.module_kind;
+        let coupled = self.layout.coupling.is_some();
+        let m = frame_module(Kernel::Frame, aero, lanes, full || self.layout.surface, coupled || full);
+        if m != self.frame_module {
+            self.frame_module = m;
+            self.frame = std::sync::OnceLock::new();
+        }
+    }
+
     /// The beam phase on its records sorted by kind ([`plan::W_BEAM_ORDER`]; on, the
     /// default) or the beams in file order (off: beamUpdate for each, as before). The
     /// same results bit for bit (`tests/explicit_beam_order_gpu.rs`). Applies from the
