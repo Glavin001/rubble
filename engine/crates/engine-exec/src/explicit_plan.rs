@@ -414,8 +414,9 @@ pub const VV_PART: usize = 4;
 pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
 /// groups (16), the awake vehicles' frame (32, vehicle sleep), the larger groups (48),
-/// the split group path's groups (64) and members (80).
-pub const ARGS_BYTES: u64 = 96;
+/// the split group path's groups (64), members (80) and tests (96), and every vehicle's
+/// step in every frame for self-collision split with vehicle contact (112).
+pub const ARGS_BYTES: u64 = 128;
 /// The vehicle sleep awake list's pass ([`Kernel::Sleep`]).
 pub const SLEEP_LIST: &str = "explicit_beams_sleep_list";
 /// The surface contact's pair path (`explicit_beams_surface.slang` `SURF_PAIR_CAP`,

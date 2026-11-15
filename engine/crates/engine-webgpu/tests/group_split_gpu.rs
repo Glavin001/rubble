@@ -1,9 +1,11 @@
 //! Contact groups split across workgroups (`ExplicitBeamsGpu::set_group_split`,
 //! `explicit_beams_split.slang`, engine/docs/measurements/contact-groups-design.md): each
-//! substep the members' steps in a workgroup per vehicle, then the groups' contact passes,
-//! instead of a group's whole frame in one workgroup. A change of how, not what: every
-//! frame from one saved state with the group's workgroup, then split (workgroup memory
-//! not zeroed natively), then split with it zeroed, every state word the same.
+//! substep the members' steps in a workgroup per vehicle, then the groups' contact passes
+//! (their triangle tests across workgroups), instead of a group's whole frame in one
+//! workgroup. A change of how, not what: every frame from one saved state with the group's
+//! workgroup, then split (workgroup memory not zeroed natively), split with each group's
+//! pass whole in its workgroup, and split with workgroup memory zeroed: every state word
+//! the same.
 
 use engine_softbody::authoring::{build, style, BuildParams, Resolution};
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
@@ -58,18 +60,20 @@ fn split_matches(fleet: Vec<ExplicitBeams>, frames: u32, steps: u32) -> (u32, u3
         gpu.wait();
         let old = gpu.state_words();
         let sizes = gpu.contact_group_sizes();
-        for zero in [false, true] {
+        for (zero, tests) in [(false, true), (false, false), (true, true)] {
             gpu.restore(&snap);
             gpu.set_group_split(true);
             gpu.set_group_split_zero(zero);
+            gpu.set_group_split_tests(tests);
             gpu.frame(steps);
             gpu.wait();
             let new = gpu.state_words();
             if let Some(d) = first_diff(&old, &new) {
-                panic!("frame {f} (groups {sizes:?}): split (zeroing {zero}) differs from the groups' workgroup at {d}");
+                panic!("frame {f} (groups {sizes:?}): split (zeroing {zero}, tests across workgroups {tests}) differs from the groups' workgroup at {d}");
             }
         }
         gpu.set_group_split_zero(false);
+        gpu.set_group_split_tests(true);
         grouped += u32::from(!sizes.is_empty());
         largest = largest.max(sizes.iter().copied().max().unwrap_or(0));
     }

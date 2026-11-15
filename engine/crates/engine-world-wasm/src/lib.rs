@@ -342,6 +342,9 @@ pub(crate) async fn warm_pipelines(
         if device.as_webgpu().is_none() {
             return Ok(());
         }
+        // Paths that only save time wait for their deferred kernels' compiles
+        // (engine_webgpu::pipeline_ready): marked below as each one finishes.
+        engine_webgpu::set_pipeline_gate(true);
         let names = kernel_names(specs);
         hear(format!(
             "kernels {}",
@@ -388,6 +391,7 @@ pub(crate) async fn warm_pipelines(
                 Err(e) => Some(e),
             };
             let Some(e) = failed else {
+                engine_webgpu::mark_pipeline_compiled(s.module);
                 hear(format!("compiled {name} {:.0}", now() - at));
                 continue;
             };
@@ -444,7 +448,10 @@ pub(crate) async fn warm_pipelines(
                     let at = js_sys::Date::now();
                     match start_pipeline(&device, &s) {
                         Ok(Some(p)) => match wasm_bindgen_futures::JsFuture::from(p).await {
-                            Ok(_) => hear(format!("compiled {name} {:.0}", js_sys::Date::now() - at)),
+                            Ok(_) => {
+                                engine_webgpu::mark_pipeline_compiled(s.module);
+                                hear(format!("compiled {name} {:.0}", js_sys::Date::now() - at))
+                            }
                             Err(e) => hear(format!("failed {name} {:.0} {}", js_sys::Date::now() - at, text(&e))),
                         },
                         Ok(None) => {}
