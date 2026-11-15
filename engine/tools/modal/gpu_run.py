@@ -122,17 +122,41 @@ def _cache_out(key: str, since: float, run_id: str) -> None:
     _say(f"shader cache: saved {len(new)} new files ({size / 1e6:.1f} MB) as {dest.name}")
 
 
+NOT_RUN = -1
+
+
 def _run(cmd: list[str], cwd: str, env: dict, deadline: float, every: int) -> tuple[int, float]:
-    """Run to completion or the deadline; every `every` s a line of GPU use and CPU use."""
+    """Run to completion or the deadline, streaming its output; every `every` s a line
+    of GPU use and CPU use. At the cap: the test that was running and its last output.
+    NOT_RUN when the deadline passed before it could start."""
+    import collections
+    import threading
+
     t0 = time.time()
     if deadline - t0 <= 0:
-        return 124, 0.0
-    p = subprocess.Popen(cmd, cwd=cwd, env=env)
+        return NOT_RUN, 0.0
+    p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+    tail: collections.deque[str] = collections.deque(maxlen=60)
+    running = [""]
+
+    def pump() -> None:
+        for line in p.stdout:  # type: ignore[union-attr]
+            print(line, end="", flush=True)
+            tail.append(line)
+            # libtest: "test NAME ... " starts a test (its result ends the line).
+            if line.startswith("test ") and " ... " in line:
+                rest = line.split(" ... ", 1)[1].strip()
+                running[0] = "" if rest.startswith(("ok", "FAILED", "ignored")) else line[5:].split(" ... ")[0]
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
     last_t, last_cpu = t0, 0.0
     next_note = t0 + every if every else float("inf")
     while True:
         try:
             code = p.wait(timeout=1)
+            reader.join(timeout=5)
             return code, time.time() - t0
         except subprocess.TimeoutExpired:
             pass
@@ -143,9 +167,13 @@ def _run(cmd: list[str], cwd: str, env: dict, deadline: float, every: int) -> tu
                  f"{100 * (cpu - last_cpu) / (now - last_t):.0f}%")
             last_t, last_cpu, next_note = now, cpu, now + every
         if now >= deadline:
-            _say(f"time cap reached: killed {Path(cmd[0]).name}")
             p.kill()
             p.wait()
+            reader.join(timeout=5)
+            _say(f"time cap reached: killed {Path(cmd[0]).name}"
+                 + (f" while running test {running[0]}" if running[0] else ""))
+            _say("its last output (tests run with --nocapture, so nothing was held back):")
+            print("".join(tail), end="", flush=True)
             return 124, time.time() - t0
 
 
@@ -213,17 +241,24 @@ def run(archive: bytes, spec: dict) -> dict:
             env = {**base, **v["env"]}
             for e in runs:
                 args = list(manifest["run_args"])
-                if e["kind"] == "test" and "--test-threads" not in " ".join(args):
-                    args.append("--test-threads=1")  # one GPU: tests in turn
+                if e["kind"] == "test" and "--list" not in args:
+                    if "--test-threads" not in " ".join(args):
+                        args.append("--test-threads=1")  # one GPU: tests in turn
+                    # Output as it happens: a test the cap kills keeps what it printed.
+                    if "--nocapture" not in args and "--show-output" not in args:
+                        args.append("--nocapture")
                 label = f"{e['name']}" + (f" [{v['name']}]" if v["name"] else "")
                 if spec["repeat"] > 1:
                     label += f" #{rep + 1}"
                 envs = " ".join(f"{k}={val}" for k, val in {**spec["env"], **v["env"]}.items())
                 _say(f"=== {label}: {' '.join(args)}" + (f"  (env {envs})" if envs else ""))
                 code, secs = _run([f"/work/{e['file']}", *args], e["cwd"], env, deadline, spec["monitor"])
-                _say(f"=== {label}: exit {code}, {secs:.2f} s wall")
+                if code == NOT_RUN:
+                    _say(f"=== {label}: NOT RUN (time cap)")
+                else:
+                    _say(f"=== {label}: exit {code}, {secs:.2f} s wall")
                 results.append((label, code, secs))
-                worst = worst or code
+                worst = worst or (124 if code == NOT_RUN else code)
     if cache_on:
         try:
             _cache_out(cache_key, cache_since, spec["id"])
@@ -231,7 +266,8 @@ def run(archive: bytes, spec: dict) -> dict:
             _say(f"shader cache: not saved ({e})")
     _say("summary:")
     for label, code, secs in results:
-        _say(f"  {'ok  ' if code == 0 else 'FAIL'} {secs:8.2f} s  {label}")
+        status = {NOT_RUN: "NOT RUN", 0: "ok", 124: "KILLED"}.get(code, "FAIL")
+        _say(f"  {status:7} {secs:8.2f} s  {label}")
     if timing:
         _say(DIRECTIONAL.format(gpu=spec["gpu"]))
     return {"code": worst, "secs": time.time() - started}

@@ -41,7 +41,9 @@ DATA = [
 # Shipped when that target is selected: explicit_loop_cap checks the kernel sources'
 # loop caps, so it reads them.
 TARGET_DATA = {
-    "explicit_loop_cap": ["engine/slang/kernels"],
+    # explicit_loop_cap's census reads the kernel sources and what they include
+    # (../physics/strict.slang): the Slang text, about 2 MB.
+    "explicit_loop_cap": ["engine/slang/kernels", "engine/slang/physics"],
     # The one fracture asset small enough to ship (4.7 MB); the others (veneer-house,
     # galleon-stern, timber-yard: 52-170 MB) are not shipped, see README.
     **{t: ["engine/crates/engine-webgpu/fracture/assets/masonry-arch.glb"]

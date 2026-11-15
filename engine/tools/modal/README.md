@@ -78,7 +78,10 @@ The selection is what you would give `cargo test` / `cargo build` from `engine/`
 `--features ...`. Always release. Arguments after the inner `--` go to every
 executable (libtest's filter and flags for tests; the example's own arguments). Tests
 run in their crate's directory, as `cargo test` does, one test thread unless you pass
-`--test-threads`; examples and bins run in `engine/`. The container sets
+`--test-threads`, and with `--nocapture` (unless you pass `--show-output`), so output
+streams as it happens; examples and bins run in `engine/`. When the time cap kills a
+binary, the runner names the test that was running and reprints its last 60 lines;
+the summary marks it KILLED and any binary after it NOT RUN (exit 124). The container sets
 `RUBBLE_GPU_LOCK=0` (one job per container), `WGPU_BACKEND=vulkan` and
 `SEDAN=/scenarios/sedan_new`.
 
@@ -160,7 +163,10 @@ engine/tools/modal/gpu_run.sh --timeout 1800 -- -p engine-world --test explicit_
 Cold, these suites need more than the 30-minute cap; run one test binary (or one
 filter) at a time until the cache is warm for your kernels. Tests that only use small
 kernels are quick, e.g. `--test explicit_loop_cap -- a_runaway` (5.6 s in the
-container).
+container). Source-census tests read the Slang sources they check, which are shipped
+for them (`explicit_loop_cap`: `engine/slang/kernels` and `engine/slang/physics`); a
+new test that reads other sources needs its entry in `TARGET_DATA` in
+`gpu_run_pack.py`.
 
 ### 3. Timing A/B (directional only)
 
