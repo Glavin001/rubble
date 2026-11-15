@@ -663,6 +663,12 @@ pub mod cuda_layout {
             cmd.arg(format!("-gencode=arch=compute_{sm},code=sm_{sm}"));
         }
         cmd.arg(format!("-gencode=arch={ptx_arch},code={ptx_arch}"));
+        let cache = FatbinCache::open(nvcc, &cmd, cu)?;
+        if let Some(c) = &cache {
+            if c.fetch(dest)? {
+                return Ok(());
+            }
+        }
         let output = cmd
             .arg("-o")
             .arg(dest)
@@ -676,7 +682,92 @@ pub mod cuda_layout {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        if let Some(c) = &cache {
+            c.store(dest)?;
+        }
         Ok(())
+    }
+
+    /// `ENGINE_CUDA_FATBIN_CACHE=<dir>` (CI): fatbins kept by the content of what made
+    /// them: the CUDA source's bytes, nvcc's `--version` and every argument. An entry
+    /// holds the fatbin with that source and those words beside it, and a hit compares
+    /// both byte for byte before using it, so a hash collision can only miss. A hit
+    /// touches the entry (CI drops the ones a build did not touch). Unset: no cache. Not a
+    /// build input (the outputs are the same with or without it), so no rerun on a change.
+    struct FatbinCache {
+        stem: std::path::PathBuf,
+        source: Vec<u8>,
+        words: String,
+    }
+
+    impl FatbinCache {
+        fn open(nvcc: &Path, cmd: &std::process::Command, cu: &Path) -> Result<Option<Self>> {
+            let Some(dir) = std::env::var_os("ENGINE_CUDA_FATBIN_CACHE").filter(|d| !d.is_empty()) else {
+                return Ok(None);
+            };
+            static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let version = VERSION.get_or_init(|| {
+                std::process::Command::new(nvcc)
+                    .arg("--version")
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                    .unwrap_or_default()
+            });
+            if version.is_empty() {
+                return Ok(None);
+            }
+            let mut words = format!("{}\n{version}\n", nvcc.display());
+            for a in cmd.get_args() {
+                words.push_str(&a.to_string_lossy());
+                words.push('\n');
+            }
+            let source = std::fs::read(cu)?;
+            // Two 64-bit SipHashes with different prefixes: the name only; a hit is
+            // checked against the stored source and words.
+            let hash = |salt: u8| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                salt.hash(&mut h);
+                words.hash(&mut h);
+                source.hash(&mut h);
+                h.finish()
+            };
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir)?;
+            let stem = dir.join(format!("{:016x}{:016x}", hash(1), hash(2)));
+            Ok(Some(Self { stem, source, words }))
+        }
+
+        fn path(&self, ext: &str) -> std::path::PathBuf {
+            self.stem.with_extension(ext)
+        }
+
+        /// Copy a matching entry to `dest`; false when there is none.
+        fn fetch(&self, dest: &Path) -> Result<bool> {
+            let same = |ext: &str, want: &[u8]| std::fs::read(self.path(ext)).is_ok_and(|b| b == want);
+            if !same("cu", &self.source) || !same("args", self.words.as_bytes()) || !self.path("fatbin").exists() {
+                return Ok(false);
+            }
+            std::fs::copy(self.path("fatbin"), dest)?;
+            let now = std::time::SystemTime::now();
+            for ext in ["cu", "args", "fatbin"] {
+                std::fs::File::options().append(true).open(self.path(ext))?.set_modified(now)?;
+            }
+            Ok(true)
+        }
+
+        /// Keep `dest` (written by nvcc) as this source's entry; the fatbin last, through
+        /// a rename, so a reader never sees a partial one.
+        fn store(&self, dest: &Path) -> Result<()> {
+            std::fs::write(self.path("cu"), &self.source)?;
+            std::fs::write(self.path("args"), &self.words)?;
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp = self.path(&format!("part{}-{n}", std::process::id()));
+            std::fs::copy(dest, &tmp)?;
+            std::fs::rename(&tmp, self.path("fatbin"))?;
+            Ok(())
+        }
     }
 
     #[cfg(test)]

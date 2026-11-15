@@ -90,6 +90,23 @@ one CUDA fault does not fail the rest):
 `.github/workflows/engine-cuda.yml` builds on the free runner and calls Modal on
 pushes to main, PRs labelled `cuda`, and manual runs (repo secrets
 `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`), skipping inputs that already passed.
+nvcc is nearly all of that build (ptxas on the explicit frame modules: minutes
+each), so CI embeds device code only for what its tests run, and every
+module's CUDA source is still generated and checked:
+
+- explicit modules: `ENGINE_CUDA_EXPLICIT_MODULES` from
+  `crates/engine-cuda/ci_explicit_modules.txt`, the modules the GPU tests'
+  fleets load (`CudaExplicitBeams::modules_for`).
+  `tests/explicit_parity.rs` fails on the CPU when the list is stale and
+  prints the command that rewrites it;
+- SASS for the run's GPU only (`ENGINE_CUDA_SASS=75` on the T4; `75,89` for a
+  manual run on another GPU), plus the compute_75 PTX;
+- `ENGINE_CUDA_FATBIN_CACHE`: fatbins kept across runs by the content of their
+  CUDA source, nvcc version and flags (checked byte for byte on a hit), so the
+  rigid and terrain kernels a kernel edit leaves unchanged are not recompiled.
+
+`engine/tools/cuda/measure_nvcc.py` measures nvcc per module (wall, peak RSS,
+cicc and ptxas per target) on sources a build generated.
 
 ## Inspiration (gitignored `inspiration/pinned/`)
 
