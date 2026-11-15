@@ -1793,6 +1793,11 @@ fn shade(i: VOut, front: bool) -> vec4f {
  */
 // The most 64-byte bind records addCar stages on the CPU at once (8 MB).
 const BIND_PIECE = 1 << 17;
+// A level's Params words (SKIN_WGSL), with the car's current node and beam offsets
+// (words 1 and 6: setNodeOffset moves them).
+function paramsWords(car, words) {
+  return () => { const w = Uint32Array.from(words); w[1] = car.nodeOffset; w[6] = car.beamOffset; return w; };
+}
 
 export function createShowcaseCarRenderer(device, opts = {}) {
   const { format, depthFormat = 'depth24plus', sampleCount = 1, cullMode = 'none', zebra = 0 } = opts;
@@ -2414,7 +2419,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         device.queue.writeBuffer(floorIndex, 0, floorList);
         const cut = labelAt ? [[upload('showcase-index-src', ordered), index, ordered.length / 3], [upload('showcase-floor-index-src', floorList), floorIndex, floorList.length / 3]] : null;
         const params = device.createBuffer({ label: 'showcase-params', size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const pw = () => new Uint32Array([n, car.nodeOffset, nodeCount, vehicle, listAt, trisAt, car.beamOffset, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, frameAt, tbAt, brkAt, retireAt, labelAt]);
+        // Made outside this scope (paramsWords): a closure here would keep addCar's
+        // scope, the visual among it, for as long as the car is drawn.
+        const pw = paramsWords(car, [n, 0, nodeCount, vehicle, listAt, trisAt, 0, lvIndex, restNAt, nodeBeamAt, rest0At, unitAt, units, nodeMatAt, paint, stateAt, deathAt, wheelAt, frameAt, tbAt, brkAt, retireAt, labelAt]);
         return { n, binds, out, attrs, index, floorIndex, cut, params, pw, opaqueCount: no, glassCount: tri.length - no, lowCount: nl, midCount: nm };
       };
       const car = { nodeOffset, beamOffset };

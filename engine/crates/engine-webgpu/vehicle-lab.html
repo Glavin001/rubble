@@ -239,10 +239,10 @@
     //            or another World definition), with progress shown; parsed cars are kept.
     // Only ?record=1 (the frame-locked recorder's harness, vehicle-lab-record.mjs) has no
     // control: it is not an option of the lab.
-    import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
+    import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer, wasmMemoryBytes } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
-    import { loadMod, modVisual, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
+    import { loadMod, modVisual, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck, isIOS } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
     import { createStabilityStop } from './stability-stop.mjs';
@@ -254,7 +254,23 @@
     const fail = (e) => { errEl.textContent = errorText(e); window.__failed = String(e?.message ?? e); console.error(e); };
     const warn = (e) => { errEl.textContent = String(e?.message ?? e); setTimeout(() => { if (!window.__failed) errEl.textContent = ''; }, 5000); };
     if (!navigator.gpu) { fail('WebGPU is not available in this browser'); throw new Error('no WebGPU'); }
-    const progress = (text) => { busyEl.textContent = text; busyEl.style.display = text ? 'block' : 'none'; statusEl.textContent = text || statusEl.textContent; };
+    const progress = (text) => { busyEl.textContent = text; busyEl.style.display = text ? 'block' : 'none'; statusEl.textContent = text || statusEl.textContent; if (text) { phase = text; noteMemory(); } };
+    // For a report from a device that cannot be inspected (a phone that lost its GPU
+    // device): the load step last shown, the steps taken since the build, and the
+    // tab's last memory reading (the JS heap where the browser gives it, the world
+    // wasm's heap, the car's estimated footprint).
+    let phase = 'starting', stepsTaken = 0, lastMemory = null, carFootprint = null;
+    function noteMemory() {
+      lastMemory = { heap: performance.memory?.usedJSHeapSize ?? null, wasm: wasmMemoryBytes(), at: phase };
+    }
+    function memoryText() {
+      const mb = (b) => `${Math.round(b / 2 ** 20)} MB`;
+      const m = lastMemory, parts = [];
+      if (m) parts.push(`last reading (${m.at}): ${m.heap != null ? `JS heap ${mb(m.heap)}, ` : ''}wasm heap ${mb(m.wasm)}`);
+      if (carFootprint) parts.push(`the car's estimated footprint: ${mb(carFootprint.tab)} of tab memory, ${mb(carFootprint.gpu)} of GPU memory`);
+      parts.push(navigator.deviceMemory ? `device memory ${navigator.deviceMemory} GB` : 'device memory not reported');
+      return parts.join('; ');
+    }
 
     // ---------------------------------------------------------------- options: controls ↔ URL
     const MODES = { shoot: 'Shoot', compactor: 'Compactor', mountain: 'Mountain', drive: 'Drive', crash: 'Crash test' };
@@ -391,17 +407,22 @@
         if (!waived.has(kind)) {
           progress(`checking that the ${m.name} fits this device…`);
           const adapter = await navigator.gpu.requestAdapter().catch(() => null);
-          const check = footprintCheck(modFootprint(await modModelSizes(m.base)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
+          carFootprint = modFootprint(await modModelSizes(m.base));
+          const check = footprintCheck(carFootprint, { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name, ios: isIOS() });
           if (!check.fits) throw Object.assign(new Error(check.message), { footprint: kind });
         }
         progress(`downloading the ${m.name}…`);
-        const mod = await loadMod(m.base, { pc: m.pc });
+        const mod = await loadMod(m.base, { pc: m.pc, held: true });
         progress(`binding the ${m.name}'s body to its nodes…`); await new Promise((r) => setTimeout(r));
         // The model files (a generated car's glb and rskin, ~140 MB) are dropped once a
         // visual is built and fetched again (the HTTP cache) for another paint.
         const make = async (paint) => { await modModels(mod); try { return modVisual(mod, { native: true, raycast: true, paint }); } finally { releaseModels(mod); } };
         entry = { kind, name: m.name, visuals: [await make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: mod.modelBytes };
       }
+      // What the page reads of the car's visual besides uploading it (kept when the
+      // visual itself is released: releaseVisuals).
+      const v0 = entry.visuals[0].visual;
+      entry.meta = { unitNames: v0.unitNames, unitStart: v0.unitStart, unitBeams: v0.unitBeams, materials: v0.materials, textures: v0.textures, dataTextures: v0.dataTextures };
       entry.loadMs = performance.now() - t;
       carCache.set(key, entry);
       return entry;
@@ -451,8 +472,8 @@
         const car = await carOf(get('car'));
         const n = get('parked') ? 2 : 1;
         // The second car's paint: built when first asked for (kept, like the first).
-        if (n > 1 && car.visuals.length < 2) { progress(`building the second ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[1])); }
-        const vis0 = car.visuals[0].visual;
+        await visualsOf(car, n);
+        const vis0 = car.meta;
         const timing = get('timing');
         const spec = {
           vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), debris: debrisSpec(), parked: get('parked'), mountain: mountainSpec(), shapes: get('shapes'),
@@ -466,7 +487,9 @@
         loading.stage('Building the renderers');
         try { old?.cars.destroy(); old?.lab.free(); old?.world.free(); } catch (e) { console.warn(e); }
         const device = world.device();
-        device.lost.then((i) => { if (W?.device === device) lost(i.message); });
+        // Lost while the lab is still being built on it, or once it runs.
+        loadingDevice = device;
+        device.lost.then((i) => { if (W?.device === device || loadingDevice === device) lost(i.message); });
         device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
         // The ground slab (the World's first collider) is left to the renderer's ground.
         const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, firstCollider: 1, sphereCols: 2048 });
@@ -486,11 +509,19 @@
         w.pacer = new FramePacer(w.RATE, 0);
         w.wire = structureView(device, world);
         for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i));
+        releaseVisuals(car);
         // Cutaway (drawing only): material groups left out of the car's triangles.
         $('cutaway').textContent = '';
         for (const [id, name] of (vis0.materials || []).entries()) {
           const l = document.createElement('label'); const c = document.createElement('input'); c.type = 'checkbox'; c.checked = true;
-          c.onchange = () => { if (c.checked) w.hidden.delete(id); else w.hidden.add(id); w.cars.removeCar(w.carIds[0]); w.carIds[0] = addCar(w, 0); };
+          c.onchange = async () => {
+            if (c.checked) w.hidden.delete(id); else w.hidden.add(id);
+            try {
+              await visualsOf(w.car, 1);
+              if (W !== w) return;
+              w.cars.removeCar(w.carIds[0]); w.carIds[0] = addCar(w, 0);
+            } catch (e) { fail(e); } finally { progress(''); releaseVisuals(w.car); }
+          };
           l.append(c, ` ${name}`); $('cutaway').append(l);
         }
         if (!vis0.materials?.length) $('cutaway').textContent = 'this car has no material groups';
@@ -498,6 +529,7 @@
         if (qs.has('material')) put('material', qs.get('material'));
         W = w;
         W.spec = spec;
+        stepsTaken = 0;
         configure();
         structureOpts();
         gpuSeg.clear(); gpuTotal = [];
@@ -509,6 +541,8 @@
         progress('');
         window.__loadTimes = loading.done();
         window.__ready = true;
+        loadingDevice = null;
+        phase = 'running'; noteMemory();
       } catch (e) {
         progress(''); if (loading.active()) loading.fail({ detail: e.footprint ? e.message : errorText(e) });
         if (e.footprint) {
@@ -520,11 +554,27 @@
         } else fail(e);
       } finally { building = false; if (buildAgain) { buildAgain = false; build(); } }
     }
+    // A generated car's visuals (hundreds of MB of typed arrays: positions, bindings,
+    // weights) are not kept once uploaded: the GPU has them. An in-place rebuild, the
+    // cutaway or a second paint builds them again (visualsOf: the model files from the
+    // HTTP cache, the same wasm build, so the same bytes). The authored sedan's are
+    // small and kept.
+    function releaseVisuals(car) { if (car.mod) car.visuals = []; }
+    async function visualsOf(car, n) {
+      for (let i = car.visuals.length; i < n; i++) {
+        progress(i ? `building the second ${car.name}'s body…` : `binding the ${car.name}'s body to its nodes…`);
+        await new Promise((r) => setTimeout(r));
+        car.visuals.push(await car.make(PAINTS[i]));
+      }
+      return car.visuals;
+    }
     // The GPU device was lost (a driver reset, the GPU process restarted, memory): the
     // simulation is gone with it. Say so, and offer the rebuild (the parsed car is kept).
+    let loadingDevice = null;
     function lost(message) {
-      W = null; window.__lost = message;
-      errEl.textContent = `The GPU device was lost (${message || 'no reason given'}). `;
+      const when = W && phase === 'running' ? `while running, ${stepsTaken} steps taken` : `while loading, at "${phase}"`;
+      W = null; loadingDevice = null; window.__lost = message;
+      errEl.textContent = `The GPU device was lost (${message || 'no reason given'}) ${when}. Memory: ${memoryText()}. `;
       const b = document.createElement('button'); b.textContent = 'Rebuild'; b.onclick = () => { errEl.textContent = ''; window.__failed = null; build(); };
       errEl.append(b);
       console.warn('device lost: ' + message);
@@ -929,12 +979,14 @@
     function perfTick(now, dtMs, taken, refused, owed, drew, stepMs, pollMs, drawMs) {
       if (!perfSec) perfSec = perfNew(now);
       const r = perfSec;
+      stepsTaken += taken;
       r.frames++; r.taken += taken; r.refused += refused; r.idle += owed === 0 ? 1 : 0; r.drawn += drew ? 1 : 0; r.undrawn += drew ? 0 : 1;
       r.dts.push(dtMs); r.dtMax = Math.max(r.dtMax, dtMs);
       r.stepMs += stepMs; r.stepMax = Math.max(r.stepMax, stepMs); r.pollMs += pollMs; r.pollMax = Math.max(r.pollMax, pollMs); r.drawMs += drawMs; r.drawMax = Math.max(r.drawMax, drawMs);
       if (document.hidden) r.hidden++;
       if (now - r.at >= 1000) {
         const d = [...r.dts].sort((x, y) => x - y), n = r.frames, f1 = (x) => +x.toFixed(2);
+        noteMemory();
         perfLog.push({ page: +(r.at / 1000).toFixed(1), sim: +(W?.lab.time() ?? 0).toFixed(2), fps: n, steps: r.taken, refused: r.refused, drawn: r.drawn, undrawn: r.undrawn, idle: r.idle,
           dt: [f1(d[n >> 1] ?? 0), f1(d[Math.floor(0.95 * (n - 1))] ?? 0), f1(r.dtMax)], cpuStep: [f1(r.stepMs / n), f1(r.stepMax)], cpuPoll: [f1(r.pollMs / n), f1(r.pollMax)], cpuDraw: [f1(r.drawMs / Math.max(1, r.drawn)), f1(r.drawMax)],
           gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, gpuDraw: drawGpu.before.length ? [f1(median(drawGpu.before)), f1(median(drawGpu.picture))] : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
@@ -1060,7 +1112,7 @@
       grid($('cstats'), [['stated speed', s.targetKmh == null ? '–' : `${nf(s.targetKmh, 1)} km/h`], ['speed at first contact', s.arrivalKmh == null ? '–' : `${nf(s.arrivalKmh, 1)} km/h`, s.arrivalKmh != null && Math.abs(s.arrivalKmh - s.targetKmh) > 1.5],
         ['peak', `${nf(c.gPeak, 1)} g`], ['deformation', `${nf(100 * c.deform)} cm`], ['beams yielded · broken', `${nf(c.beams.yielded)} · ${nf(c.beams.broken)}`]]);
       $('parts').innerHTML = c.parts.length ? '<tr><th>part</th><th>yielded</th><th>broken</th><th>of</th><th></th></tr>' + c.parts.slice(0, 14).map((q) => `<tr><td>${esc(q.name)}</td><td>${q.yielded}</td><td>${q.broken}</td><td>${q.beams}</td><td>${q.detached ? 'detached' : ''}</td></tr>`).join('')
-        : `<tr><td class="muted">${W.car.visuals[0].visual.unitNames?.length ? 'no part damaged' : 'this car names no parts'}</td></tr>`;
+        : `<tr><td class="muted">${W.car.meta.unitNames?.length ? 'no part damaged' : 'this car names no parts'}</td></tr>`;
       $('log').innerHTML = s.events.slice(-30).reverse().map((e) => `<div>${e.t.toFixed(2)} s · ${esc(e.text)}</div>`).join('') || '<span class="muted">nothing yet</span>';
       perfBar(rt);
       const tag = $('slowTag');

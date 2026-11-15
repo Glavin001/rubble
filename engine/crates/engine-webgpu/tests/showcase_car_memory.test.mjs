@@ -157,6 +157,21 @@ test('addCar keeps no CPU copy of what it uploaded', async () => {
   assert.ok(r.removeCar && id !== undefined);
 });
 
+// Nor of the visual itself: the page may drop it once uploaded (a generated car's is
+// hundreds of MB) and build it again when it needs it.
+test('addCar keeps nothing of the visual it was given', async () => {
+  const { device } = fakeDevice();
+  const r = createShowcaseCarRenderer(device, { format: 'bgra8unorm' });
+  let v = skinnedVisual();
+  const refs = Object.entries(v).filter(([, x]) => ArrayBuffer.isView(x)).map(([k, x]) => [k, new WeakRef(x)]);
+  const whole = new WeakRef(v);
+  r.addCar(v);
+  v = null;
+  for (let k = 0; k < 3; k++) { await new Promise((res) => setTimeout(res)); gc(); }
+  assert.equal(whole.deref(), undefined);
+  assert.deepEqual(refs.filter(([, w]) => w.deref()).map(([k]) => k), []);
+});
+
 // skinnedVisual's three vertices tiled `copies` times (every third vertex with nine
 // entries: three 4-entry slots), for a bind buffer of tens of MB.
 function tiled(copies) {

@@ -8,7 +8,7 @@
 //
 //   python3 engine/scripts/with-gpu-lock.py --limit 300 -- env RUBBLE_GPU_LOCK=0 \
 //     node engine/tools/vehicle-lab/lab-memory.mjs [--base http://127.0.0.1:8863] \
-//       [--query 'mode=mountain&car=gen'] [--settle 8] [--json out.json] [--deviceMemory GB]
+//       [--query 'mode=mountain&car=gen'] [--settle 8] [--json out.json] [--deviceMemory GB] [--then 'js']
 //
 // --deviceMemory: the page sees this navigator.deviceMemory (the lab's footprint guard).
 //
@@ -150,6 +150,9 @@ const labels = Object.entries(probe.byLabel).filter(([, v]) => v > 1 << 20).sort
 console.log('GPU allocations held at the end, over 1 MB:');
 for (const [k, v] of labels) console.log(`  ${k.padEnd(48)} ${MB(v).padStart(8)} MB`);
 if (owners) { console.log('the page\'s own breakdown (window.__mem):'); for (const [k, v] of Object.entries(owners)) console.log(`  ${k.padEnd(48)} ${typeof v === 'number' ? MB(v).padStart(8) + ' MB' : JSON.stringify(v)}`); }
+// --then: an expression evaluated (awaited) after the settled reading, its value printed
+// (e.g. a rebuild in place, the cutaway, a second paint: that they still work).
+if (opt('--then')) console.log('then: ' + JSON.stringify(await evaluate(opt('--then')).catch((e) => 'threw: ' + e.message)));
 if (errors.length) console.log('page exceptions:\n' + errors.slice(0, 5).join('\n'));
 if (opt('--json')) writeFileSync(opt('--json'), JSON.stringify({ url, ready, loadS, phases: probe.phases, atReady, settled, peak, peakAtReady, peakBuf: probe.peakBuf, peakTex: probe.peakTex, byLabel: probe.byLabel, owners }, null, 1));
 process.exit(ready ? 0 : 1);
