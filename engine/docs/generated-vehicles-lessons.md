@@ -281,6 +281,7 @@ Tables: [generated-vehicles.md](generated-vehicles.md), "Jello against the ETK, 
     - Settle went from 0.3 / 0.7 / 0.7 / 0.7 / 0.3 / 1.0 to 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.9 s.
     - Rest stays 0.04 mm. The towers fell from 0.56 to 0.27 mm and the kerb's internal KE from 2.87 J to 1.94 J.
     - Door, hood and trunk pass, and every settle but the bumpers'. Body (0.12) and fender (0.14) are just over. The bumpers (peaks on the front cover's `bf_o00`, 1.06 mm at 0.7 s, and the rear cover at 0.5 s) are the one gap left that the mounting does not close.
+    - With the same settings `rig_export`, `sedan_energy`, `sedan_hinges` and `sedan_parts_collide` all pass. The crash scenes were not run.
   - *Follow-up (solver, not authoring):* the raycast spring is the whole suspension's rate (1.6 Hz), so a car with its own coilover has two in series, the ETK too.
   - Harness: `KERB_NODES` now also lists the body's own nodes. The rest run prints the raycast loads and each tower's static strut load (front 3.6–3.8 kN, rear 3.3–3.6 kN).
 - **Process:** this shell (zsh) does not split `$cfg` into words: pass each value as its own variable.
