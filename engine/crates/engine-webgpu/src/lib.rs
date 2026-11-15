@@ -183,10 +183,11 @@ pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, &str); 24] = [
     ("explicit_beams_selfsplit_walk_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_aero_wide.wgsl"))),
     ("explicit_beams_selfsplit_pairs_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_aero_wide.wgsl"))),
 ];
-/// Measurement only (native): the self split's modules with `EB_ABLATE`, at the
+/// Measurement only (native; the `test-kernels` feature): the self split's modules with `EB_ABLATE`, at the
 /// non-aero variants (`ExplicitBeamsGpu::set_ablation` with the split on). Not shipped
 /// to browsers.
 #[doc(hidden)]
+#[cfg(feature = "test-kernels")]
 pub const EXPLICIT_BEAMS_SELF_SPLIT_ABLATE: [(&str, &str); 6] = [
     ("explicit_beams_selfsplit_step_ablate", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_ablate.wgsl"))),
     ("explicit_beams_selfsplit_walk_ablate", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_ablate.wgsl"))),

@@ -136,7 +136,7 @@ kernel that carries a disabled feature's code can lose occupancy to registers):
 
 | Change | Modules removed | Runtime risk | Status |
 |---|---|---|---|
-| Test-only modules (ablation, det, baseline, reference) built only for the test build (a `test-kernels` feature the crate's own dev-dependency turns on), not for release/web/CI's non-test jobs | 84 of 474 from every non-test build | none (not shipped) | proposal; cheapest and certain |
+| Test-only modules (ablation, det, baseline, reference) built only for the test build (a `test-kernels` feature the crate's own dev-dependency turns on), not for release/web/CI's non-test jobs | 84 of 474 from every non-test build | none (not shipped) | **done** (with the explicit modules compiled in parallel, which they were not): release lib build script 113.8 → 41.9 s, test build 46.1 s, 72.9 → 51.6 MB of WGSL, world wasm 63.0 → 61.9 MB |
 | Lanes 256/512 as a WGSL `override` constant: one module, two pipelines | ≈half the shipped modules' *translation* (not their pipeline compiles) | none expected (the same code after specialisation) | to measure: Metal compiles each specialisation; Tint/naga translate once |
 | `_nocpl` (frame without the coupling's proxy paths: a smaller kernel for browsers) | ≈20 | compile only: it exists for browser compile time | keep while it shortens the page's first load |
 | aero as data (no wings: empty ranges) | ≈half | **must measure**: aero code in a non-aero car's kernel | to measure |
@@ -148,9 +148,13 @@ kernel that carries a disabled feature's code can lose occupancy to registers):
    coupling's folded step is done (2 barriers, not 4); next the grid count / scan / scatter
    (5 syncs on builds), self-collision's apply rounds, and the beam phase's records sorted by
    kind (`beam-records.md`, measured separately). Bitwise against today's frame per change.
-2. **Anti-clip hit test** (≈2.1 ms): finish the compute-vs-atomic split (clipRecord's
-   per-node atomic mins), then lossless scheduling only (previous-frame geometry once per
-   triangle per substep, triangle-major order), with a bitwise A/B.
+2. **Anti-clip hit test** (≈2.1–2.3 ms). Split measured (ablation builds of the pairs
+   module, t 36/44, log `profile_clip_0627.log`): without the hit test past the box 5.1 ms
+   (from 7.4); without the crossing test (the previous step's frame) unchanged; without
+   `clipRecord`'s atomics unchanged (≤0.2 ms). So it is the first `triangleHit` and its
+   loads on ≈4.5k pairs a substep: compute and latency, not contention. Lossless options
+   are scheduling only (the triangle's geometry once per triangle per substep,
+   triangle-major order), with a bitwise A/B.
 3. **Surface contact with the self split**: the page's other mode (surface on) runs the
    frame in segments without the split; cutting the self-collision passes around the
    surface pass gives it the same saving.

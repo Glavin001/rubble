@@ -728,12 +728,18 @@ fn module_wgsl(name: &str) -> &'static str {
             .chain(crate::EXPLICIT_BEAMS_SURF_SPLIT.iter())
             .chain(crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
             .chain(crate::EXPLICIT_BEAMS_SELF_SPLIT.iter())
-            .chain(crate::EXPLICIT_BEAMS_SELF_SPLIT_ABLATE.iter())
+            .chain(SELF_SPLIT_ABLATE.iter())
             .find(|(n, _)| *n == name)
             .map(|(_, w)| *w)
-            .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name}")),
+            .unwrap_or_else(|| panic!("explicit beams: no WGSL module {name} (a measurement module needs the `test-kernels` feature)")),
     }
 }
+
+/// The self split's ablation modules (measurement; built with the `test-kernels` feature).
+#[cfg(feature = "test-kernels")]
+const SELF_SPLIT_ABLATE: &[(&str, &str)] = &crate::EXPLICIT_BEAMS_SELF_SPLIT_ABLATE;
+#[cfg(not(feature = "test-kernels"))]
+const SELF_SPLIT_ABLATE: &[(&str, &str)] = &[];
 
 /// A frame kernel's module for an upload: [`Kernel::module_for`], and with surface
 /// contact but without the World's coupling (`coupled` false) its `_nocpl` twin
@@ -2760,7 +2766,7 @@ impl ExplicitBeamsGpu {
         }
         let read = |name: &str| {
             let path = format!("{}/{name}.wgsl", crate::EXPLICIT_BEAMS_WGSL_DIR);
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e} (the test kernels are built with engine-webgpu's `test-kernels` feature)"))
         };
         let (aero, big, lanes) = self.module_kind;
         let (prefix, suffix) = match variant {

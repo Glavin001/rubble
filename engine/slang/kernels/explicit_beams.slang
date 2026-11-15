@@ -3430,6 +3430,11 @@ void tryContact(TriGeo t, uint h, float3 origin, float r, uint beamOff, uint gro
         uint word;
         uint c = selfClip(t, h, p, origin, r, alpha, beta, gamma, pen, nn, word);
         if (c == 0u) return;
+#if defined(EB_ABLATE) && defined(EB_SELF_PAIRS_ABLATE)
+        // Measurement only (the self split's pairs and walk ablation builds alone, where
+        // no coupling code runs): 65536 the contact's record (clipRecord's atomics).
+        if ((gP.ablate & 65536u) == 0u)
+#endif
         clipRecord(h, word);
         if (c == 2u) return;
     }
