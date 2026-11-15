@@ -406,6 +406,40 @@ rules are stricter: `nodeComponents` loops on `workgroupUniformLoad`). Check:
 6. Console free of WebGPU validation errors (the params buffer is 96 bytes,
    NS = 13 vec4 per node).
 
+## Speck after the door_r_r 10 m grab: a margin island in the part split (2026-11-15)
+
+`grab_doors` failed with "grab door_r_r 10 m held: 1 specks (18 triangles)".
+Evidence (`DUMP_SPECKS=2`, the test's `speck_detail`):
+- The cut round it is right. The grabbed node 832 (door_r_r's rear corner)
+  moved 9.98 m with **all 10** of its stiff beams broken (9 inside the door, 1
+  to body node 571): torn out of the door. The 21 door_r_r triangles welded
+  to the speck carry 27–28 % of their weight on 832, so they are cut by the v2
+  rule (tear 0.55–0.57), each explained by a broken beam.
+- The speck is not a torn piece. Its 8 carrier nodes are body nodes, all in
+  one live component with the whole body, no beam among them broken (only
+  the cross-part beams 832–571 and 866–912). It moved 1.82 m, as the whole car
+  was dragged.
+- It is a binding error. The 18 triangles (a 3.5 cm patch on the door's
+  rounded rear edge) are 4–6 cm from door node 832 and 15–17 cm from the
+  nearest body node, and every triangle round them is door_r_r. The split of
+  the authored body shell (`build_visual`: a vertex leaves the voted part only
+  when that part's skin is 8 cm farther than the nearest part's) left an
+  island on the body that was held only by the 8 cm margin. When the door tore
+  round 832, the island was drawn on its own.
+
+**Fix** (`skin.rs`, `margin_islands_to_far_side`): a near-side region of the
+split (vertices welded by position) in which no vertex has the voted part
+nearest is given to the far side. The margin then only extends the voted
+part's own region at a shut line. The skin's evaluation (`eval_breaks`,
+`vertex_tears`) and its GPU mirror are unchanged: the visual is built in Rust,
+and the wasm calls it. The car draws 343,407 triangles instead of 345,815
+(fewer clip lines round the islands).
+
+`showcase_skin_integrity`, before → after: `grab_doors` passes (door_r_r 10 m
+held: specks 1 (18) → 0, cut 3,432 → 3,392, cut without a break 0 → 0).
+Every other checkpoint keeps or lowers its shards, cuts and flips (wall 70
+flipped 736 → 590). The other failing tests fail on the same shards as before.
+
 ## Open
 
 - The GPU page: the steps under "GPU check" above.

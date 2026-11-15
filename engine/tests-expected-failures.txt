@@ -21,5 +21,4 @@ showcase_skin_integrity::wall_at_90_kmh_three_times
 showcase_skin_integrity::car_into_the_rear_door_at_60_kmh
 showcase_skin_integrity::t_bone_118_into_61_kmh
 showcase_skin_integrity::random_impacts
-showcase_skin_integrity::grab_doors
 showcase_skin_integrity::grab_rear_and_roof
