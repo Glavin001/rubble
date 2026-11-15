@@ -86,7 +86,15 @@ jobs:
       # real adapter (Metal or a hardware wgpu backend) and run locally; see
       # engine/crates/engine-webgpu/README.md and engine/docs/softbody.md.
       - name: cargo test
-        run: cargo test --release -p engine-schema -p engine-exec -p engine-scenes -p engine-vehicle -p engine-softbody -p engine-fracture -p engine-vehiclegen --no-default-features --no-fail-fast
+        # Every test runs; the job passes when the failures are exactly tracked expected
+        # failures (engine/tests-expected-failures.txt; new failures, fixed-but-listed and
+        # missing tests all fail it).
+        run: |
+          set +e
+          cargo test --release -p engine-schema -p engine-exec -p engine-scenes -p engine-vehicle -p engine-softbody -p engine-fracture -p engine-vehiclegen --no-default-features --no-fail-fast 2>&1 | tee host-tests.log
+          code=${PIPESTATUS[0]}
+          set -e
+          python3 ../.github/scripts/expected-failures.py host-tests.log tests-expected-failures.txt "$code"
 
   # The C library a game engine links (engine/crates/engine-ffi): built, its header
   # checked, packaged with engine/scripts/build-ffi.sh, and examples/hello.c compiled

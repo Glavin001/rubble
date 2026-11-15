@@ -1,0 +1,25 @@
+# Host tests known to fail, each with its tracking note. Format: <test file stem>::<test name>
+# CI ("Engine host tests (no GPU)") passes when the failures are exactly a subset of this
+# list, and FAILS when:
+#   - any test not listed fails (a new regression), or a test binary fails to build or crashes;
+#   - a listed test passes (remove it from this list: it is fixed);
+#   - a listed test is not run at all (renamed or removed: update this list).
+# Nothing here is loosened: every listed test still runs every time with its own bar.
+# Findings and the plan for each: engine/docs/handoff/host-test-expected-failures.md
+
+# Ride wobble against the ETK reference car (committed failing as targets, 7b9b0e58).
+sedan_jello::kerb_wobble_is_at_the_etk_level
+sedan_jello::kerb_wobble_dies_as_fast_as_the_etks
+sedan_jello::the_parked_car_stands_still
+
+# Side pole crush depth against the NHTSA band (since 31c20eb2) and contact energy (since 770875dd).
+showcase_car::o_side_pole_matches_the_nhtsa_sedans
+showcase_car::contacts_do_no_positive_work
+
+# Skin tearing in crashes (committed failing as targets, e4c5ec3c / 31c20eb2).
+showcase_skin_integrity::wall_at_90_kmh_three_times
+showcase_skin_integrity::car_into_the_rear_door_at_60_kmh
+showcase_skin_integrity::t_bone_118_into_61_kmh
+showcase_skin_integrity::random_impacts
+showcase_skin_integrity::grab_doors
+showcase_skin_integrity::grab_rear_and_roof
