@@ -758,7 +758,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     // a contact group's substeps as dispatches, the members' steps (a workgroup per
     // vehicle) and the groups' contact passes, at the frame module's four variants.
     for (tag, lanes) in [("", L256), ("_wide", L512), ("_aero", L256), ("_aero_wide", L512)] {
-        for entry in ["member", "group"] {
+        for entry in ["member", "group", "tests"] {
             // (The members' module without EB_VV_GROUPS: its frame step never reaches
             // contactGroup, so it binds the workgroup variables of the steps alone:
             // Metal allows 31 a kernel.)
@@ -766,12 +766,18 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             if tag.contains("aero") {
                 d.push(AERO);
             }
-            if entry == "member" {
-                d.push(("EB_SOLO_STEP", "1"));
-            } else {
-                d.push(GROUPS);
+            match entry {
+                "member" => d.push(("EB_SOLO_STEP", "1")),
+                "group" => d.push(GROUPS),
+                // The tests across workgroups: their counters in global memory.
+                _ => d.push(("EB_VV_GLOBAL", "1")),
             }
-            jobs.push((format!("explicit_beams_split_{entry}{tag}"), if entry == "member" { "explicit_beams_split_member" } else { "explicit_beams_split_group" }, d));
+            let e = match entry {
+                "member" => "explicit_beams_split_member",
+                "group" => "explicit_beams_split_group",
+                _ => "explicit_beams_split_tests",
+            };
+            jobs.push((format!("explicit_beams_split_{entry}{tag}"), e, d));
         }
     }
     // Self-collision's listed pairs across workgroups (EB_SELF_SPLIT;
