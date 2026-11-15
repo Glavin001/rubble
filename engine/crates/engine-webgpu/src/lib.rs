@@ -24,7 +24,7 @@ pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]
-pub use compute_spec::ComputeSpec;
+pub use compute_spec::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate, ComputeSpec};
 #[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
     explicit_beams_shipped_wgsl, group_split_default, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,

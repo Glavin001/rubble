@@ -114,6 +114,9 @@ pub struct ExplicitBeamsGpu {
     /// Measurement only (time; results meaningless): self split dispatches not encoded
     /// (bit 0 the walks, bit 1 the pairs; [`ExplicitBeamsGpu::set_self_split_skip`]).
     self_split_skip: u32,
+    /// Measurement: under per-dispatch timing, each dispatch of a self split or split
+    /// group frame its own timed pass (off: the frame's split dispatches one segment).
+    split_dispatch_timing: bool,
     /// Contact errors for the host ([`Self::take_contact_errors`]), and those a
     /// `wait` saw, not yet handled.
     contact_errors: std::sync::Mutex<Vec<String>>,
@@ -377,6 +380,51 @@ pub fn group_split_tests_default() -> bool {
 const SPLIT_BEGIN: u32 = u32::MAX;
 
 /// The split group path's module `which` (member, group, tests) for a fleet's variant.
+/// The self-collision split's modules a frame needs (selfcol-design.md), at the frame's
+/// variant: without vehicle contact the step, walk and pairs; with it the vehicles' step,
+/// the walk and pairs that skip members, and the split group path's group and tests.
+fn self_split_modules(aero: bool, lanes: u32, vv: bool) -> Vec<(String, &'static str, bool)> {
+    let tag = match (aero, lanes) {
+        (false, 512) => "_wide",
+        (false, _) => "",
+        (true, 512) => "_aero_wide",
+        (true, _) => "_aero",
+    };
+    // (name, entry, binds the arguments buffer at binding 10)
+    if vv {
+        vec![
+            (format!("explicit_beams_selfsplit_member_vv{tag}"), SPLIT_MEMBER_ENTRY, true),
+            (format!("explicit_beams_selfsplit_walk_vv{tag}"), "explicit_beams_self_walk", false),
+            (format!("explicit_beams_selfsplit_pairs_vv{tag}"), "explicit_beams_self_pairs", false),
+            (split_module("group", aero, lanes).to_string(), SPLIT_GROUP_ENTRY, false),
+            (split_module("tests", aero, lanes).to_string(), SPLIT_TESTS_ENTRY, false),
+        ]
+    } else {
+        vec![
+            (format!("explicit_beams_selfsplit_step{tag}"), "explicit_beams_self_step", true),
+            (format!("explicit_beams_selfsplit_walk{tag}"), "explicit_beams_self_walk", false),
+            (format!("explicit_beams_selfsplit_pairs{tag}"), "explicit_beams_self_pairs", false),
+        ]
+    }
+}
+
+/// The self split's step layout: the split group path's entries and the indirect
+/// arguments at binding 10 (storage).
+fn self_split_step_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    let mut e = split_entries();
+    e.push(wgpu::BindGroupLayoutEntry {
+        binding: 10,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    });
+    e
+}
+
 fn split_module(which: &str, aero: bool, lanes: u32) -> &'static str {
     let tag = match (aero, lanes) {
         (false, 512) => "_wide",
@@ -396,7 +444,12 @@ fn split_module(which: &str, aero: bool, lanes: u32) -> &'static str {
 /// members' step (a workgroup per vehicle) and the groups' pass, binding 0 one
 /// parameter copy (the step) by the dynamic offset.
 struct GroupSplit {
-    member: wgpu::ComputePipeline,
+    /// The members' step: created at first use (self-collision split with contact runs
+    /// its own vehicles' module and never needs it; a browser compiles it for minutes).
+    member: std::sync::OnceLock<wgpu::ComputePipeline>,
+    device: wgpu::Device,
+    pipeline_layout: wgpu::PipelineLayout,
+    kind: (bool, u32, bool),
     group: wgpu::ComputePipeline,
     tests: wgpu::ComputePipeline,
     bind: wgpu::BindGroup,
@@ -413,32 +466,9 @@ impl GroupSplit {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipe = |which: &str, entry: &str| {
-            let name = split_module(which, aero, lanes);
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(name),
-                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
-            });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(name),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some(entry),
-                // Natively, no zeroing of workgroup memory at each workgroup's start
-                // (naga's MSL zeroes it from one lane: about 0.16 ms a dispatch): every
-                // workgroup value these entries read was written in the same dispatch
-                // (contact-groups-design.md §4; checked bit for bit against the zeroing
-                // build, RUBBLE_GROUP_SPLIT_ZERO=1).
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    zero_initialize_workgroup_memory: zero,
-                    ..Default::default()
-                },
-                cache: None,
-            })
-        };
-        let member = pipe("member", SPLIT_MEMBER_ENTRY);
-        let group = pipe("group", SPLIT_GROUP_ENTRY);
-        let tests = pipe("tests", SPLIT_TESTS_ENTRY);
+        let kind = (aero, lanes, zero);
+        let group = split_pipe(device, &pipeline_layout, kind, "group", SPLIT_GROUP_ENTRY);
+        let tests = split_pipe(device, &pipeline_layout, kind, "tests", SPLIT_TESTS_ENTRY);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("explicit-beams-group-split"),
             layout: &layout,
@@ -447,16 +477,51 @@ impl GroupSplit {
                 resource: if i == 0 { params_window(&bufs[0]) } else { bufs[i].as_entire_binding() },
             }),
         });
-        Self { member, group, tests, bind }
+        Self { member: std::sync::OnceLock::new(), device: device.clone(), pipeline_layout, kind, group, tests, bind }
     }
+
+    fn member(&self) -> &wgpu::ComputePipeline {
+        self.member
+            .get_or_init(|| split_pipe(&self.device, &self.pipeline_layout, self.kind, "member", SPLIT_MEMBER_ENTRY))
+    }
+}
+
+/// One of the split group path's pipelines (module `which` at the frame's variant).
+fn split_pipe(
+    device: &wgpu::Device,
+    pipeline_layout: &wgpu::PipelineLayout,
+    (aero, lanes, zero): (bool, u32, bool),
+    which: &str,
+    entry: &str,
+) -> wgpu::ComputePipeline {
+    let name = split_module(which, aero, lanes);
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(name),
+        source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(name),
+        layout: Some(pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        // Natively, no zeroing of workgroup memory at each workgroup's start
+        // (naga's MSL zeroes it from one lane: about 0.16 ms a dispatch): every
+        // workgroup value these entries read was written in the same dispatch
+        // (contact-groups-design.md §4; checked bit for bit against the zeroing
+        // build, RUBBLE_GROUP_SPLIT_ZERO=1).
+        compilation_options: wgpu::PipelineCompilationOptions {
+            zero_initialize_workgroup_memory: zero,
+            ..Default::default()
+        },
+        cache: None,
+    })
 }
 
 /// Self-collision's split pipelines (`EB_SELF_SPLIT`; selfcol-design.md): the solo
 /// frame's step cut at its tests and the pairs dispatch, bound as the split group path's.
 struct SelfSplit {
-    step: wgpu::ComputePipeline,
-    walk: wgpu::ComputePipeline,
-    pairs: wgpu::ComputePipeline,
+    /// Without vehicle contact: [the step, the walk, the pairs], compiled on first use.
+    solo: std::sync::OnceLock<[wgpu::ComputePipeline; 3]>,
     /// The step's bind group (the arguments buffer at binding 10, storage) and the pairs'
     /// (without it: the pairs dispatch takes its size from it).
     step_bind: wgpu::BindGroup,
@@ -479,17 +544,7 @@ struct SelfSplit {
 impl SelfSplit {
     fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], aero: bool, lanes: u32, zero: bool) -> Self {
         let pairs_entries = split_entries();
-        let mut step_entries = split_entries();
-        step_entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 10,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        });
+        let step_entries = self_split_step_entries();
         let layouts = [&step_entries, &pairs_entries].map(|entries| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("explicit-beams-self-split"),
@@ -508,30 +563,6 @@ impl SelfSplit {
             (true, 512) => "_aero_wide",
             (true, _) => "_aero",
         };
-        let pipe = |which: &str, entry: &str, layout: &wgpu::PipelineLayout| {
-            let name = format!("explicit_beams_selfsplit_{which}{tag}");
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(&name),
-                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(&name)).into()),
-            });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(&name),
-                layout: Some(layout),
-                module: &module,
-                entry_point: Some(entry),
-                // Natively no zeroing of workgroup memory (as the split group path's:
-                // every workgroup value these entries read is written earlier in the
-                // same dispatch; RUBBLE_SELF_SPLIT_ZERO=1 zeroes, for the check).
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    zero_initialize_workgroup_memory: zero,
-                    ..Default::default()
-                },
-                cache: None,
-            })
-        };
-        let step = pipe("step", "explicit_beams_self_step", &layouts[0].1);
-        let pairs = pipe("pairs", "explicit_beams_self_pairs", &layouts[1].1);
-        let walk = pipe("walk", "explicit_beams_self_walk", &layouts[1].1);
         let args = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-self-split-args"),
             size: SELF_ARGS_BYTES,
@@ -558,9 +589,7 @@ impl SelfSplit {
         let pairs_bind = bind(&layouts[1].0, false);
         let [(_, step_layout), (_, pairs_layout)] = layouts;
         Self {
-            step,
-            walk,
-            pairs,
+            solo: std::sync::OnceLock::new(),
             step_bind,
             pairs_bind,
             args,
@@ -589,6 +618,18 @@ impl SelfSplit {
                 ..Default::default()
             },
             cache: None,
+        })
+    }
+
+    /// Without vehicle contact: [the step, the walk, the pairs].
+    fn solo_pipes(&self) -> &[wgpu::ComputePipeline; 3] {
+        self.solo.get_or_init(|| {
+            let t = self.tag;
+            [
+                self.pipeline(&format!("explicit_beams_selfsplit_step{t}"), "explicit_beams_self_step", &self.step_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_walk{t}"), "explicit_beams_self_walk", &self.pairs_layout),
+                self.pipeline(&format!("explicit_beams_selfsplit_pairs{t}"), "explicit_beams_self_pairs", &self.pairs_layout),
+            ]
         })
     }
 
@@ -1020,6 +1061,31 @@ impl ExplicitBeamsGpu {
                 });
             }
         }
+        // Self-collision split's pipelines (selfcol-design.md), deferred: a host that
+        // compiles them ahead gates the split on them (crate::pipeline_ready), so the
+        // first frames run the tests in the workgroup until they are compiled. Not with
+        // surface contact (the split runs only without it).
+        if !surface {
+            for (name, entry, args) in self_split_modules(aero, lanes, vehicles.len() > 1) {
+                if specs.iter().any(|s| s.module == name) {
+                    continue;
+                }
+                let module: &'static str = crate::EXPLICIT_BEAMS_SELF_SPLIT
+                    .iter()
+                    .chain(crate::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
+                    .find(|(n, _)| *n == name)
+                    .map(|(n, _)| *n)
+                    .unwrap_or_else(|| panic!("explicit beams: no module {name}"));
+                specs.push(crate::ComputeSpec {
+                    label: entry,
+                    module,
+                    wgsl: u(module_wgsl(module)),
+                    entry,
+                    layout: Some(if args { self_split_step_entries() } else { split_entries() }),
+                    deferred: true,
+                });
+            }
+        }
         specs.sort_by(|a, b| b.wgsl.len().cmp(&a.wgsl.len()));
         specs
     }
@@ -1164,6 +1230,7 @@ impl ExplicitBeamsGpu {
             self_split_frame: std::cell::Cell::new(0),
             self_split_vv: std::cell::Cell::new(false),
             self_split_skip: 0,
+            split_dispatch_timing: std::env::var("RUBBLE_SPLIT_DISPATCH_TIMING").as_deref() == Ok("1"),
             contact_errors: Default::default(),
             contact_errors_seen: Default::default(),
             bufs,
@@ -2462,20 +2529,33 @@ impl ExplicitBeamsGpu {
                         labels.push(label);
                     }
                 };
+                // (Split frames: each of their dispatches timed on its own only with
+                // RUBBLE_SPLIT_DISPATCH_TIMING=1: a hundred-odd passes a frame cost more
+                // than the dispatches they time, and empty indirect passes time nothing.)
+                let each = self.split_dispatch_timing;
                 for cmd in *run {
                     let frame = matches!(cmd, Cmd::Dispatch { kernel: Kernel::Frame, .. } | Cmd::Indirect { kernel: Kernel::Frame, .. });
                     if frame && self.self_split_frame.get() > 0 {
-                        // Self-collision split: its step, walk and pairs dispatches.
-                        for d in self_split_schedule(self.planner.vehicles(), self.self_split_frame.get()) {
-                            timed_pass(enc, d.label(), &mut |pass| self.dispatch_self_one(pass, d));
+                        if each {
+                            // Self-collision split: its step, walk and pairs dispatches.
+                            for d in self_split_schedule(self.planner.vehicles(), self.self_split_frame.get()) {
+                                timed_pass(enc, d.label(), &mut |pass| self.dispatch_self_one(pass, d));
+                            }
+                        } else {
+                            timed_pass(enc, "explicit self split frame", &mut |pass| self.dispatch(pass, cmd, alt));
                         }
                         continue;
                     }
                     timed_pass(enc, kernel_name(cmd), &mut |pass| self.dispatch(pass, cmd, alt));
                 }
                 if split && last {
-                    for op in self.group_split_ops(steps) {
-                        timed_pass(enc, op.label(), &mut |pass| self.run_group_op(pass, op));
+                    if each {
+                        for op in self.group_split_ops(steps) {
+                            timed_pass(enc, op.label(), &mut |pass| self.run_group_op(pass, op));
+                        }
+                    } else {
+                        let label = if self.self_split_vv.get() { "explicit self split groups" } else { "explicit split groups" };
+                        timed_pass(enc, label, &mut |pass| self.dispatch_group_split(pass, steps));
                     }
                 }
                 continue;
@@ -3137,6 +3217,7 @@ impl ExplicitBeamsGpu {
             && steps > 0
             && 3 * steps + 2 <= plan::PARAM_COPIES
             && self.layout.spans.len() * 16 <= 65_535
+            && self.self_split_ready(true)
             && cmds.iter().all(|c| match c {
                 Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => {
                     matches!(kernel, Kernel::Vv(_) | Kernel::Solo | Kernel::Contact | Kernel::ContactBig)
@@ -3158,11 +3239,20 @@ impl ExplicitBeamsGpu {
             && self.debug_groups.is_none()
             && steps > 0
             && steps < plan::PARAM_COPIES
+            && self.self_split_ready(false)
             && cmds.iter().any(|c| matches!(c, Cmd::Dispatch { kernel: Kernel::Frame, .. } | Cmd::Indirect { kernel: Kernel::Frame, .. }))
             && cmds.iter().all(|c| match c {
                 Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => *kernel == Kernel::Frame,
                 Cmd::Copy { .. } => true,
             })
+    }
+
+    /// Whether the self split's modules (with vehicle contact or not) are compiled
+    /// (a browser host's async compiles, [`crate::pipeline_ready`]; natively always):
+    /// until then frames keep the tests in the workgroup, the same results.
+    fn self_split_ready(&self, vv: bool) -> bool {
+        let (aero, _, lanes) = self.module_kind;
+        self_split_modules(aero, lanes, vv).iter().all(|(m, _, _)| crate::pipeline_ready(m))
     }
 
     fn self_split_pipes(&self) -> &SelfSplit {
@@ -3200,7 +3290,7 @@ impl ExplicitBeamsGpu {
         let at = |k: u32| [k * PARAM_STRIDE as u32];
         match d {
             SelfDispatch::Step { copy, groups } => {
-                pass.set_pipeline(if self.variant == KernelVariant::Ablate { &p.ablate_pipes()[0] } else { &p.step });
+                pass.set_pipeline(if self.variant == KernelVariant::Ablate { &p.ablate_pipes()[0] } else { &p.solo_pipes()[0] });
                 pass.set_bind_group(0, &p.step_bind, &at(copy));
                 pass.dispatch_workgroups(groups, 1, 1);
             }
@@ -3209,8 +3299,8 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(match (self.variant == KernelVariant::Ablate, walk) {
                     (true, true) => &p.ablate_pipes()[1],
                     (true, false) => &p.ablate_pipes()[2],
-                    (false, true) => &p.walk,
-                    (false, false) => &p.pairs,
+                    (false, true) => &p.solo_pipes()[1],
+                    (false, false) => &p.solo_pipes()[2],
                 });
                 pass.set_bind_group(0, &p.pairs_bind, &at(copy));
                 pass.dispatch_workgroups_indirect(&p.args, offset);
@@ -3398,7 +3488,7 @@ impl ExplicitBeamsGpu {
                 pass.dispatch_workgroups_indirect(args, off);
             }
             GroupOp::Member(s) => {
-                pass.set_pipeline(&g.member);
+                pass.set_pipeline(g.member());
                 pass.set_bind_group(0, &g.bind, &at(s));
                 pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
             }
