@@ -229,3 +229,95 @@ fn fleet_split_is_bit_for_bit() {
         .collect();
     check("fleet of four", compare("fleet of four", &fleet, 20, 34, &mut |_, _| {}), 20);
 }
+
+/// The generated sedan (low resolution) at `at` turned `yaw` degrees, moving at `vel`,
+/// its lowest node 2 cm off the ground (as group_split_gpu.rs spawns it).
+fn sedan_yaw(text: &str, at: Vec3, yaw: f32, vel: Vec3) -> ExplicitBeams {
+    let settings = ExplicitBeamsSettings { drag: false, turbulence: false, ..Default::default() };
+    let mut s = if yaw == 0.0 {
+        ExplicitBeams::from_truck_config(text, None, at, vel, settings)
+    } else {
+        ExplicitBeams::from_truck_config_yaw(text, None, at, yaw, vel, settings)
+    }
+    .expect("spawn");
+    let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    for n in &mut s.nodes {
+        n.pos.y += 0.02 - low;
+    }
+    s.roll_tyres(vel);
+    s.finish();
+    s
+}
+
+/// `frames` frames of `steps` steps with vehicle contact, each from one saved state: the
+/// old path (self-collision in each vehicle's workgroup, a contact group's frame in its
+/// workgroup), then self-collision split (every vehicle a step a dispatch, the groups'
+/// passes split), with the groups' triangle tests across workgroups and not: every state
+/// word the same. Returns (frames the split ran, frames with a contact group, largest).
+fn contact_matches(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32) -> Option<(u32, u32, u32)> {
+    let (_, device, queue) = default_device().ok()?;
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    gpu.set_vehicle_contact(true);
+    gpu.set_wide(false);
+    let (mut split, mut grouped, mut largest) = (0u32, 0u32, 0u32);
+    for f in 0..frames {
+        let snap = gpu.snapshot();
+        gpu.set_self_split(false);
+        gpu.set_group_split(false);
+        gpu.frame(steps);
+        gpu.wait();
+        assert!(!gpu.self_split_used(), "{label}: the split ran with it off");
+        let old = gpu.state_words();
+        let sizes = gpu.contact_group_sizes();
+        for tests in [true, false] {
+            gpu.restore(&snap);
+            gpu.set_self_split(true);
+            gpu.set_group_split_tests(tests);
+            gpu.frame(steps);
+            gpu.wait();
+            split += u32::from(tests && gpu.self_split_used());
+            let new = gpu.state_words();
+            if let Some(d) = first_diff(&old, &new) {
+                panic!("{label}: frame {f} (groups {sizes:?}): self split (group tests across workgroups {tests}) differs from the old path at {d}");
+            }
+        }
+        gpu.set_group_split_tests(true);
+        grouped += u32::from(!sizes.is_empty());
+        largest = largest.max(sizes.iter().copied().max().unwrap_or(0));
+    }
+    eprintln!("{label}: {frames} frames bit for bit, the split on {split}, {grouped} with a contact group (largest {largest})");
+    Some((split, grouped, largest))
+}
+
+#[test]
+fn two_sedans_head_on_self_split_is_bit_for_bit() {
+    let text = gen_sedan();
+    let a = sedan_yaw(&text, Vec3::ZERO, 0.0, Vec3::new(0.0, 0.0, 12.0));
+    let front = a.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+    let probe = sedan_yaw(&text, Vec3::ZERO, 180.0, Vec3::ZERO);
+    let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
+    let b = sedan_yaw(&text, Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
+    let Some((split, grouped, _)) = contact_matches("two sedans head-on", vec![a, b], 40, 17) else { return };
+    assert_eq!(split, 40, "the split ran on {split} of 40 frames");
+    assert!(grouped > 10, "the cars met in a contact group ({grouped} frames)");
+}
+
+/// Six sedans nose to tail, the last pushed into the others: groups past four members
+/// and small ones, solo cars stepping beside them.
+#[test]
+fn a_column_of_six_self_split_is_bit_for_bit() {
+    let text = gen_sedan();
+    let probe = sedan_yaw(&text, Vec3::ZERO, 0.0, Vec3::ZERO);
+    let (lo, hi) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(l, h), n| (l.min(n.pos.z), h.max(n.pos.z)));
+    let pitch = hi - lo + 0.3;
+    let fleet: Vec<ExplicitBeams> = (0..6)
+        .map(|i| {
+            let vel = if i == 0 { Vec3::new(0.0, 0.0, 15.0) } else { Vec3::ZERO };
+            sedan_yaw(&text, Vec3::new(0.0, 0.0, i as f32 * pitch), 0.0, vel)
+        })
+        .collect();
+    let Some((split, grouped, largest)) = contact_matches("a column of six", fleet, 30, 17) else { return };
+    assert_eq!(split, 30, "the split ran on {split} of 30 frames");
+    assert!(grouped > 10, "the cars met in a contact group ({grouped} frames)");
+    assert!(largest > 4, "a group past four members formed (largest {largest})");
+}
