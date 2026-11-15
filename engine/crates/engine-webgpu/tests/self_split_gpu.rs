@@ -111,6 +111,17 @@ fn check(label: &str, r: Option<(u32, u64, u64)>, frames: u32) {
     assert!(built > 0 && reused > 0, "{label}: lists built {built}, reused {reused}: the listed pairs were not tested");
 }
 
+/// The first check of a new kernel version: two frames of a few steps, one car.
+#[test]
+fn tiny_split_is_bit_for_bit() {
+    let o = Vec3::new(20.0, 0.0, -30.0);
+    let s = spawn(o, Vec3::new(0.0, 0.0, 20.0), 0.02, true);
+    let r = compare("tiny", std::slice::from_ref(&s), 2, 4, &mut |_, _| {});
+    if let Some((split, _, _)) = r {
+        assert_eq!(split, 2, "tiny: the split ran on {split} of 2 frames");
+    }
+}
+
 #[test]
 fn wall_crash_split_is_bit_for_bit() {
     let o = Vec3::new(20.0, 0.0, -30.0);
