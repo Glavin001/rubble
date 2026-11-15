@@ -8,7 +8,8 @@
 //     [--wasm engine/crates/engine-webgpu/generated/world-wasm] [--renderer path/showcase-car-render.mjs]
 //
 // --wasm: a folder with engine_world_wasm.js and engine_world_wasm_bg.wasm (a build).
-// Prints one JSON object: { label: sha256 of every write to it, in order }.
+// Prints one JSON object: { label: sha256 of every write to it, in order }, and the
+// weighted skin's entries as the skin shader decodes them (hashed).
 import { register } from 'node:module';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -69,7 +70,34 @@ const cars = createShowcaseCarRenderer(device, { format: 'bgra8unorm', depthForm
 // As the lab adds its first car: raycast wheels' records stand in (4 words a wheel).
 cars.addCar(visual, { nodeOffset: 0, beamOffset: 0, vehicle: 0, lod: visual.lod ?? null, wheelRecords: new Uint32Array(16), retireAt: 1, labelAt: 2 });
 const out = { vertices: visual.vertexCount, weights: visual.wtQ ? 'grid steps (wtQ)' : 'f32 (wtW)' };
+// The weighted entries as SKIN_WGSL's wEntry decodes them from showcase-binds (either
+// layout: f32 4-entry slots, or with flags bit 27 the 8-byte grid steps), hashed: a
+// layout change that leaves what the shader reads the same keeps this hash.
+{
+  const img = buffers.find((b) => b.label === 'showcase-binds').image;
+  const u = new Uint32Array(img.buffer, img.byteOffset, img.byteLength / 4);
+  const f32 = new Float32Array(1), b32 = new Uint32Array(f32.buffer);
+  const stepBits = (s16, k) => { const s = (s16 << 16) >> 16; if (s === 0) return 0; f32[0] = s; return (b32[0] - (k << 23)) >>> 0; };
+  const h = createHash('sha256'), row = new Uint32Array(5);
+  let count = 0;
+  for (let i = 0; i < visual.vertexCount; i++) {
+    const flags = u[16 * i + 15];
+    if (!(flags & (1 << 25))) continue;
+    for (let e = 0, at = u[16 * i + 3]; e < u[16 * i]; e++, count++) {
+      if (flags & (1 << 27)) {
+        const x = u[2 * (at + e)], y = u[2 * (at + e) + 1];
+        row.set([i, x & 0xffff, stepBits(x >>> 16, 13), stepBits(y & 0xffff, 9), stepBits(y >>> 16, 9)]);
+      } else {
+        const w = 16 * (at + (e >> 2)) + 4 * (e & 3);
+        row.set([i, u[w], u[w + 1], u[w + 2], u[w + 3]]);
+      }
+      h.update(row);
+    }
+  }
+  out['weighted entries as decoded'] = `${count} ${h.digest('hex').slice(0, 24)}`;
+}
 for (const b of buffers.filter((b) => b.label?.startsWith('showcase-') && !/frame|view|fx|contact|mirror/.test(b.label)).sort((x, y) => (x.label < y.label ? -1 : 1))) {
   out[b.label] = `${b.size} bytes ${createHash('sha256').update(b.image).digest('hex').slice(0, 24)}`;
 }
 console.log(JSON.stringify(out, null, 1));
+process.exit(0);

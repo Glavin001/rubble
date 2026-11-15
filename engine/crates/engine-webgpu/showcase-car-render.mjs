@@ -115,6 +115,10 @@ const COMPONENT_PASSES = 4096;
 // Per node state: 6 vec4, then the node frame's 4, its reach (2) and its
 // component (1).
 const NS = 13;
+// The rskin's weight grids (engine_softbody::flexskin::Q_A, Q_D: A in steps of 2⁻¹³,
+// its gradients in steps of 2⁻⁹): the bind buffer's 8-byte entries hold i16 counts of them.
+const STEP_EXP_A = 13;
+const STEP_EXP_D = 9;
 
 const SKIN_WGSL = /* wgsl */ `
 struct Bind { n0: u32, n1: u32, n2: u32, vehicle: u32, a: f32, b: f32, h: f32, r1: f32, nt: f32, nb: f32, nn: f32, r2: f32, rx: f32, ry: f32, rz: f32, flags: u32 };
@@ -814,15 +818,46 @@ fn wheelVertex(i: u32, bd: Bind) {
 
 // Weighted skins (engine_softbody::flexskin, a Rubble extension; the CPU twin
 // is flexskin::eval). A weighted vertex's Bind (flags bit 25): n0 its entry
-// count, vehicle its first entry slot in binds (4 entries a 64-byte slot,
-// each (node, A, dA/dT, dA/dB)), (a, b, h) its detail offset, (nt, nb, nn) its
-// rest normal's coefficients in the frame (U, V, W):
+// count, vehicle where its entries start, (a, b, h) its detail offset, (nt, nb,
+// nn) its rest normal's coefficients in the frame (U, V, W). The entries, each
+// (node, A, dA/dT, dA/dB), in one of two layouts: f32, 4 entries a 64-byte slot
+// (vehicle: the first slot's index in binds); or, with flags bit 27, the
+// sidecar's grid steps, 8 bytes an entry packed end to end (vehicle: the first
+// entry's index in 8-byte units): the node (u16) and A (i16 steps of
+// 2^-STEP_EXP_A) in one word, dA/dT and dA/dB (i16 steps of 2^-STEP_EXP_D) in
+// the next. A step count s decodes to s · 2^-k by lowering f32(s)'s exponent
+// (integer arithmetic: exactly the f32 the f32 layout holds, and no float
+// operation for a compiler to fold into the sums that use it).
+// The frame (U, V, W):
 // P = sum A q, U = sum a q, V = sum b q, W = (U x V)/|U x V|;
 // x = P + off.x U/|U| + off.y (W x U/|U|) + off.z W;
 // n = normalize(nt (V x W) + nb (W x U) + nn (U x V)).
 struct Weighted { pos: vec3f, nrm: vec3f, ids: vec3u };
-fn wEntry(slot: u32, e: u32) -> vec4u {
-  let b = binds[slot + e / 4u];
+const STEP_EXP_A = ${STEP_EXP_A}u;
+const STEP_EXP_D = ${STEP_EXP_D}u;
+fn stepBits(s16: u32, k: u32) -> u32 {
+  let s = bitcast<i32>(s16 << 16u) >> 16u;
+  if (s == 0) { return 0u; }
+  return bitcast<u32>(f32(s)) - (k << 23u);
+}
+fn wEntry(bd: Bind, e: u32) -> vec4u {
+  if ((bd.flags & (1u << 27u)) != 0u) {
+    let g = bd.vehicle + e;
+    let b = binds[g / 8u];
+    var x: u32; var y: u32;
+    switch (g % 8u) {
+      case 0u: { x = b.n0; y = b.n1; }
+      case 1u: { x = b.n2; y = b.vehicle; }
+      case 2u: { x = bitcast<u32>(b.a); y = bitcast<u32>(b.b); }
+      case 3u: { x = bitcast<u32>(b.h); y = bitcast<u32>(b.r1); }
+      case 4u: { x = bitcast<u32>(b.nt); y = bitcast<u32>(b.nb); }
+      case 5u: { x = bitcast<u32>(b.nn); y = bitcast<u32>(b.r2); }
+      case 6u: { x = bitcast<u32>(b.rx); y = bitcast<u32>(b.ry); }
+      default: { x = bitcast<u32>(b.rz); y = b.flags; }
+    }
+    return vec4u(x & 0xffffu, stepBits(x >> 16u, STEP_EXP_A), stepBits(y & 0xffffu, STEP_EXP_D), stepBits(y >> 16u, STEP_EXP_D));
+  }
+  let b = binds[bd.vehicle + e / 4u];
   let k = e % 4u;
   if (k == 0u) { return vec4u(b.n0, b.n1, b.n2, b.vehicle); }
   if (k == 1u) { return vec4u(bitcast<u32>(b.a), bitcast<u32>(b.b), bitcast<u32>(b.h), bitcast<u32>(b.r1)); }
@@ -833,7 +868,7 @@ fn weightedVertex(bd: Bind) -> Weighted {
   var p = vec3f(0.0); var u = vec3f(0.0); var v = vec3f(0.0);
   var ids = vec3u(0u);
   for (var e = 0u; e < bd.n0; e++) {
-    let w = wEntry(bd.vehicle, e);
+    let w = wEntry(bd, e);
     let q = nodePos(w.x);
     p += q * bitcast<f32>(w.y);
     u += q * bitcast<f32>(w.z);
@@ -871,7 +906,7 @@ fn blendNode(bd: Bind, k: u32) -> u32 {
 fn vertexRetired(bd: Bind) -> bool {
   switch nodesKind(bd) {
     case 1u: {
-      for (var e = 0u; e < bd.n0; e++) { if (retiredNode(wEntry(bd.vehicle, e).x)) { return true; } }
+      for (var e = 0u; e < bd.n0; e++) { if (retiredNode(wEntry(bd, e).x)) { return true; } }
       return false;
     }
     case 2u: {
@@ -901,7 +936,7 @@ fn vertexPiece(bd: Bind) -> u32 {
   switch nodesKind(bd) {
     case 1u: {
       var p = PIECE_ANY;
-      for (var e = 0u; e < bd.n0; e++) { p = joinPiece(p, pieceOf(wEntry(bd.vehicle, e).x)); }
+      for (var e = 0u; e < bd.n0; e++) { p = joinPiece(p, pieceOf(wEntry(bd, e).x)); }
       return p;
     }
     case 2u: { return pieceOf(blendNode(bd, 0u)); }
@@ -2168,8 +2203,11 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const packBinds = (v, n) => {
         // Shut-line fallbacks after the n bindings (word 3 links them).
         const na = v.alt && v.alt.length === n ? v.altTri.length : 0;
-        // Weighted skins (flexskin): 4 entries a 64-byte slot after the
-        // fallbacks; per vertex its entries' first slot.
+        // Weighted skins (flexskin), after the fallbacks: per vertex where its entries
+        // start (wslot). The entries as the sidecar's grid steps, 8 bytes each end to end,
+        // when the wasm sent them so (wtQ: flexskin::steps found every one exact) on the
+        // grids SKIN_WGSL decodes; otherwise f32, 4 entries a 64-byte slot. The shader
+        // reads the same f32 values from either.
         const ws = v.wtStart && v.wtStart.length === n + 1 ? v.wtStart : null;
         // Each entry's node and (A, dA/dT, dA/dB): f32 (wtNode, wtW), or the sidecar's
         // grid steps when the wasm found them exact (wtNode16, wtQ: i16 steps of
@@ -2177,13 +2215,18 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         const wq = v.wtQ, ga = v.wtGrid?.[0], gd = v.wtGrid?.[1];
         const wNode = wq ? v.wtNode16 : v.wtNode;
         const wW = wq ? (k, c) => wq[k] * (c === 0 ? ga : gd) : (k) => v.wtW[k];
+        const steps = !!(ws && wq && ga === 2 ** -STEP_EXP_A && gd === 2 ** -STEP_EXP_D);
         const wslot = ws ? new Uint32Array(n) : null;
+        // Records (64 bytes) the entries take: f32 slots, or the packed entries rounded up.
         let nslots = 0;
-        if (ws) for (let i = 0; i < n; i++) { wslot[i] = n + na + nslots; nslots += Math.ceil((ws[i + 1] - ws[i]) / 4); }
+        if (ws && steps) {
+          for (let i = 0; i < n; i++) wslot[i] = 8 * (n + na) + ws[i] - ws[0];
+          nslots = Math.ceil((ws[n] - ws[0]) / 8);
+        } else if (ws) for (let i = 0; i < n; i++) { wslot[i] = n + na + nslots; nslots += Math.ceil((ws[i + 1] - ws[i]) / 4); }
         // Packed and uploaded in pieces of at most BIND_PIECE records (8 MB): the
-        // vertices' records, the weighted entries' slots (both in vertex order) and
+        // vertices' records, the weighted entries (both in vertex order) and
         // the fallbacks (few) each staged apart, so the CPU never holds the whole
-        // buffer (255 MB for a generated car) at once. The same bytes as one upload.
+        // buffer (hundreds of MB for a generated car) at once. The same bytes as one upload.
         const total = n + na + nslots;
         const buffer = device.createBuffer({ label: 'showcase-binds', size: Math.max(16, total * 64), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         const stage = (records, base) => {
@@ -2237,17 +2280,35 @@ export function createShowcaseCarRenderer(device, opts = {}) {
             ord.sort((x, y) => Math.abs(wW(3 * y, 0)) - Math.abs(wW(3 * x, 0)));
             u[o] = k1 - k0;
             u[o + 3] = wslot[i];
-            const sc = Math.ceil((k1 - k0) / 4);
-            if (wslot[i] + sc - slot.base > BIND_PIECE) { flush(slot); slot.base = wslot[i]; }
-            slot.used = wslot[i] + sc - slot.base;
             f[o + 4] = v.wtOff[3 * i]; f[o + 5] = v.wtOff[3 * i + 1]; f[o + 6] = v.wtOff[3 * i + 2];
             f[o + 8] = v.wtNrm[3 * i]; f[o + 9] = v.wtNrm[3 * i + 1]; f[o + 10] = v.wtNrm[3 * i + 2];
-            u[o + 15] = (u[o + 15] & ~3) | (1 << 25);
-            ord.forEach((k, e) => {
-              const q = (wslot[i] - slot.base) * 16 + 4 * e;
-              slot.u[q] = wNode[k];
-              slot.f[q + 1] = wW(3 * k, 0); slot.f[q + 2] = wW(3 * k + 1, 1); slot.f[q + 3] = wW(3 * k + 2, 2);
-            });
+            u[o + 15] = (u[o + 15] & ~3) | (1 << 25) | (steps ? 1 << 27 : 0);
+            if (steps) {
+              // Records [first, last] the entries touch, staged a piece at a time
+              // (a record shared with the vertex before stays in the stage).
+              const first = Math.floor(wslot[i] / 8), last = Math.floor((wslot[i] + k1 - k0 - 1) / 8);
+              if (last + 1 - slot.base > BIND_PIECE) {
+                const keep = slot.used && first === slot.base + slot.used - 1;
+                const carry = keep ? slot.u.slice(16 * (first - slot.base), 16 * (first - slot.base) + 16) : null;
+                flush(slot); slot.base = first;
+                if (carry) slot.u.set(carry, 0);
+              }
+              slot.used = last + 1 - slot.base;
+              ord.forEach((k, e) => {
+                const q = 2 * (wslot[i] + e - 8 * slot.base);
+                slot.u[q] = wNode[k] | (wq[3 * k] & 0xffff) << 16;
+                slot.u[q + 1] = (wq[3 * k + 1] & 0xffff) | (wq[3 * k + 2] & 0xffff) << 16;
+              });
+            } else {
+              const sc = Math.ceil((k1 - k0) / 4);
+              if (wslot[i] + sc - slot.base > BIND_PIECE) { flush(slot); slot.base = wslot[i]; }
+              slot.used = wslot[i] + sc - slot.base;
+              ord.forEach((k, e) => {
+                const q = (wslot[i] - slot.base) * 16 + 4 * e;
+                slot.u[q] = wNode[k];
+                slot.f[q + 1] = wW(3 * k, 0); slot.f[q + 2] = wW(3 * k + 1, 1); slot.f[q + 3] = wW(3 * k + 2, 2);
+              });
+            }
           }
           const bl = framed && v.blNode && v.blNode[BLEND * i] !== 0xffffffff;
           if (bl) {

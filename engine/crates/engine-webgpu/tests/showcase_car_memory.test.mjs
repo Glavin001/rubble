@@ -88,21 +88,63 @@ test('a skinned car\'s uploads are the same bytes (binds, rest pose, attributes,
 });
 
 // The weights as the sidecar stores them (showcase.rs visual_js when every one is on
-// its grid): u16 nodes, i16 steps of wtGrid's (A, dA) steps. Half the bytes of
-// wtNode + wtW, and the same uploads.
-test('a skin\'s weights as grid steps upload the same bytes as f32 weights', () => {
-  const v = skinnedVisual();
+// its grid): u16 nodes, i16 steps of wtGrid's (A, dA) steps.
+const asSteps = (v) => {
   const grid = new Float32Array([2 ** -13, 2 ** -9]);
   const q = new Int16Array(v.wtW.length);
   for (let k = 0; k < q.length; k++) q[k] = v.wtW[k] / grid[k % 3 === 0 ? 0 : 1];
-  const compact = { ...v, wtNode: undefined, wtW: undefined, wtNode16: Uint16Array.from(v.wtNode), wtQ: q, wtGrid: grid };
-  const bytes = (visual) => {
-    const { device, image } = fakeDevice();
-    createShowcaseCarRenderer(device, { format: 'bgra8unorm' }).addCar(visual);
-    return sha(image('showcase-binds'));
-  };
-  assert.equal(bytes(compact), '559f728b0c7b6e43');
-  assert.equal(bytes(v), '559f728b0c7b6e43');
+  return { ...v, wtNode: undefined, wtW: undefined, wtNode16: Uint16Array.from(v.wtNode), wtQ: q, wtGrid: grid };
+};
+const bindsOf = (visual) => {
+  const { device, image } = fakeDevice();
+  createShowcaseCarRenderer(device, { format: 'bgra8unorm' }).addCar(visual);
+  return image('showcase-binds');
+};
+
+// Every weighted vertex's entries as SKIN_WGSL's wEntry reads them from a bind buffer
+// (its CPU mirror, both layouts): per vertex (node, A, dA/dT, dA/dB as f32 bits) in
+// the order the shader sums them. The step layout's decode is the shader's integer
+// one: f32(s)'s bits with the exponent lowered by k.
+function entries(bytes, n) {
+  const u = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  const f32 = new Float32Array(1), b32 = new Uint32Array(f32.buffer);
+  const stepBits = (s16, k) => { const s = (s16 << 16) >> 16; if (s === 0) return 0; f32[0] = s; return (b32[0] - (k << 23)) >>> 0; };
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const flags = u[16 * i + 15];
+    if (!(flags & (1 << 25))) continue;
+    const count = u[16 * i], at = u[16 * i + 3];
+    for (let e = 0; e < count; e++) {
+      if (flags & (1 << 27)) {
+        const x = u[2 * (at + e)], y = u[2 * (at + e) + 1];
+        out.push([i, x & 0xffff, stepBits(x >>> 16, 13), stepBits(y & 0xffff, 9), stepBits(y >>> 16, 9)]);
+      } else {
+        const w = 16 * (at + (e >> 2)) + 4 * (e & 3);
+        out.push([i, u[w], u[w + 1], u[w + 2], u[w + 3]]);
+      }
+    }
+  }
+  return out;
+}
+
+// The step layout: 8 bytes an entry instead of 16 (and no 4-entry slots' padding), and
+// every entry the shader reads is the same f32 bits as the f32 layout's.
+test('a skin\'s weights as grid steps upload 8-byte entries that decode to the same f32 bits', () => {
+  const v = skinnedVisual();
+  const f = bindsOf(v), q = bindsOf(asSteps(v));
+  assert.equal(sha(f), '559f728b0c7b6e43');
+  assert.equal(sha(q), '2b78ff9751a374b8');
+  assert.ok(q.byteLength < f.byteLength, `${q.byteLength} < ${f.byteLength}`);
+  assert.deepEqual(entries(q, 3), entries(f, 3));
+  assert.equal(entries(f, 3).length, 9);
+});
+
+// A grid other than the one SKIN_WGSL decodes: the f32 layout (never rounded).
+test('weights on another grid keep the f32 layout', () => {
+  const v = asSteps(skinnedVisual());
+  v.wtGrid = new Float32Array([2 ** -12, 2 ** -9]);
+  for (let k = 0; k < v.wtQ.length; k += 3) v.wtQ[k] = v.wtQ[k] >> 1;
+  assert.equal(sha(bindsOf(v)), '559f728b0c7b6e43');
 });
 
 test('addCar keeps no CPU copy of what it uploaded', async () => {
@@ -143,4 +185,19 @@ test('a large skin\'s bindings upload in bounded pieces, the same bytes', () => 
   assert.ok(total > 30 * 2 ** 20, `${total} bytes`);
   assert.equal(sha(image('showcase-binds')), '084f4adc2b15eaac');
   assert.ok(Math.max(...binds.map((w) => w.size)) <= 8 * 2 ** 20, 'each piece at most 8 MB');
+});
+
+// The step layout staged in pieces (entries packed end to end cross the pieces'
+// edges, a record shared by two vertices among them): the same entries as the f32
+// layout's, and each piece at most 8 MB.
+test('a large skin\'s step-layout bindings upload in bounded pieces, the same entries', () => {
+  const v = tiled(200_000), n = v.vertexCount;
+  const { device, writes, image } = fakeDevice();
+  createShowcaseCarRenderer(device, { format: 'bgra8unorm' }).addCar(asSteps(v));
+  const binds = writes.filter((w) => w.label === 'showcase-binds');
+  assert.ok(binds.length > 3, `${binds.length} pieces`);
+  assert.ok(Math.max(...binds.map((w) => w.size)) <= 8 * 2 ** 20, 'each piece at most 8 MB');
+  const q = entries(image('showcase-binds'), n), f = entries(bindsOf(v), n);
+  assert.equal(q.length, f.length);
+  for (let k = 0; k < f.length; k++) if (q[k].some((x, c) => x !== f[k][c])) assert.fail(`entry ${k}: ${q[k]} vs ${f[k]}`);
 });
