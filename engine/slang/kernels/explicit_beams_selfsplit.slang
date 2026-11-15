@@ -260,6 +260,19 @@ void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell,
     }
 }
 
+// Whether vehicle v takes the split's walk and pairs dispatches this frame: every
+// vehicle, except with vehicle contact (EB_VV_SOLO) a contact group's member, whose step
+// runs its tests in its own dispatch (and whose grid counts fill the words these
+// dispatches read: soloStepAt).
+bool selfSplitVehicle(uint v)
+{
+#ifdef EB_VV_SOLO
+    return gMisc[vvRec(v, VV_FLAGS)].y == 0u;
+#else
+    return true;
+#endif
+}
+
 // The step dispatch's start (lane 0, before the step's clears): no pairs for the pairs
 // dispatch unless selfSplitTests lists them.
 void selfSplitClear(uint v)
@@ -309,7 +322,7 @@ void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
     uint v = gid.y;
     uint lane = lid.x;
     uint s = gP.pad2;
-    uint listed = v < gP.vehicles ? uint(gAcc[selfListedAt(v)].load()) : 0u;
+    uint listed = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfListedAt(v)].load()) : 0u;
     uint i = gid.x * LANES + lane;
     if (i < listed)
     {
@@ -336,7 +349,7 @@ void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
 void explicit_beams_self_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.y;
-    uint walk = v < gP.vehicles ? uint(gAcc[selfWalkAt(v) + 1u].load()) : 0u;
+    uint walk = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfWalkAt(v) + 1u].load()) : 0u;
     uint4 r1 = gStatic[min(v, gP.vehicles - 1u) * 4u + 1u];
     if (walk != 0u)
     {

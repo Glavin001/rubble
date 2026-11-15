@@ -795,8 +795,26 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             if tag.contains("aero") {
                 d.push(AERO);
             }
-            jobs.push((format!("explicit_beams_selfsplit_{entry}{tag}"), fun, d));
+            jobs.push((format!("explicit_beams_selfsplit_{entry}{tag}"), fun, d.clone()));
+            // Measurement only: the step module's ablation build (EB_ABLATE), at the
+            // non-aero variants.
+            if entry == "step" && !tag.contains("aero") {
+                d.push(("EB_ABLATE", "1"));
+                jobs.push((format!("explicit_beams_selfsplit_step_ablate{tag}"), fun, d));
+            }
         }
+        // With vehicle contact (EB_VV_SOLO): the vehicles' dispatch is the split group
+        // path's members' (explicit_beams_split_member: a solo vehicle's step cut at its
+        // tests, a member's step whole), and the walk and pairs skip the members.
+        let mut base = vec![W, lanes, SOLO, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), ("EB_NO_SURFACE", "1")];
+        if tag.contains("aero") {
+            base.push(AERO);
+        }
+        let mut member = base.clone();
+        member.push(("EB_VV_SPLIT", "1"));
+        jobs.push((format!("explicit_beams_selfsplit_member_vv{tag}"), "explicit_beams_split_member", member));
+        jobs.push((format!("explicit_beams_selfsplit_walk_vv{tag}"), "explicit_beams_self_walk", base.clone()));
+        jobs.push((format!("explicit_beams_selfsplit_pairs_vv{tag}"), "explicit_beams_self_pairs", base));
     }
     for (name, entry, defines) in &jobs {
         let out = wgsl_dir.join(format!("{name}.wgsl"));

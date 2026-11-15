@@ -302,7 +302,9 @@ fn begin_timed<'e>(enc: &'e mut wgpu::CommandEncoder, queries: Option<&StepQueri
 
 impl StepQueries {
     fn new(device: &wgpu::Device) -> Self {
-        let segments = 128;
+        // (Room for a frame's dispatches each timed on its own: self-collision split
+        // runs three a substep, with contact groups up to seven: 34 × 7 + the step's.)
+        let segments = 512;
         Self {
             set: device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("step timestamps"),

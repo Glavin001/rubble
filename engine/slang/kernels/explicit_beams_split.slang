@@ -91,6 +91,9 @@ void splitDriveStep(uint v, uint lane, uint s, uint on)
 // frame; any other vehicle returns at once.
 void splitMember(uint v, uint lane, uint s)
 {
+    // (With self-collision split the vehicles' dispatch runs once more after the last
+    // step, s = steps: the solo vehicles' last rest and frame end; a member has none.)
+    if (s >= gP.steps) return;
     uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
     uint4 G = fl.y != 0u ? gMisc[gP.vvGroups + fl.z] : uint4(0u, 0u, 0u, 0u);
     uint k = splitUniform(lane, G.y);
@@ -430,6 +433,12 @@ void explicit_beams_split_tests(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+#ifdef EB_SELF_SPLIT
+    // Self-collision split (explicit_beams_selfsplit.slang): the solo vehicles' steps cut
+    // at their tests, the walk and pairs dispatches after this one; the next pairs
+    // dispatch's slot cleared as the self split's step dispatch does.
+    selfSplitArgsClear(gid.x, lid.x);
+#endif
     // A solo vehicle's step of its frame (it returns at once for a group's member), then
     // a member's (returns at once for a solo vehicle).
     explicitBeamsFrameStep(gid, lid);

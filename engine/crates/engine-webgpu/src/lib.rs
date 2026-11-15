@@ -152,9 +152,11 @@ pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 12] = [
 /// Self-collision's listed pairs across workgroups (`EB_SELF_SPLIT`,
 /// engine/docs/measurements/selfcol-design.md): per frame-module variant the solo frame's
 /// step cut at its tests (`explicit_beams_self_step`), the walk dispatch
-/// (`explicit_beams_self_walk`) and the pairs dispatch (`explicit_beams_self_pairs`).
-/// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, &str); 12] = [
+/// (`explicit_beams_self_walk`) and the pairs dispatch (`explicit_beams_self_pairs`);
+/// with vehicle contact (`_vv`) the vehicles' dispatch of the split group path
+/// (`explicit_beams_split_member`, a solo vehicle's step cut at its tests) and the walk
+/// and pairs that skip a contact group's members. WebGPU only (native wgpu and browsers).
+pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, &str); 24] = [
     ("explicit_beams_selfsplit_step", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step.wgsl"))),
     ("explicit_beams_selfsplit_walk", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk.wgsl"))),
     ("explicit_beams_selfsplit_pairs", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs.wgsl"))),
@@ -167,6 +169,27 @@ pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, &str); 12] = [
     ("explicit_beams_selfsplit_step_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_aero_wide.wgsl"))),
     ("explicit_beams_selfsplit_walk_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_aero_wide.wgsl"))),
     ("explicit_beams_selfsplit_pairs_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_aero_wide.wgsl"))),
+
+    ("explicit_beams_selfsplit_member_vv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv.wgsl"))),
+    ("explicit_beams_selfsplit_walk_vv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_vv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv.wgsl"))),
+    ("explicit_beams_selfsplit_member_vv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv_wide.wgsl"))),
+    ("explicit_beams_selfsplit_walk_vv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_wide.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_vv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_wide.wgsl"))),
+    ("explicit_beams_selfsplit_member_vv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv_aero.wgsl"))),
+    ("explicit_beams_selfsplit_walk_vv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_aero.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_vv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_aero.wgsl"))),
+    ("explicit_beams_selfsplit_member_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv_aero_wide.wgsl"))),
+    ("explicit_beams_selfsplit_walk_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_aero_wide.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_aero_wide.wgsl"))),
+];
+/// Measurement only (native): the self split's step module with `EB_ABLATE`, at the
+/// non-aero variants (`ExplicitBeamsGpu::set_ablation` with the split on). Not shipped
+/// to browsers.
+#[doc(hidden)]
+pub const EXPLICIT_BEAMS_SELF_SPLIT_ABLATE: [(&str, &str); 2] = [
+    ("explicit_beams_selfsplit_step_ablate", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_ablate.wgsl"))),
+    ("explicit_beams_selfsplit_step_ablate_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_ablate_wide.wgsl"))),
 ];
 /// The build's WGSL directory (native tests read the frozen baseline kernel,
 /// `explicit_baseline_*.wgsl`, from it at run time).

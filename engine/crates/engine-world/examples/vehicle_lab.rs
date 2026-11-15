@@ -864,6 +864,38 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     line.join(", ")
                 );
             }
+            // `--ab-profile`: the same 20 frames with self-collision split, each of its
+            // dispatches in its own timed pass (`profile_self_split_frame`): GPU ms a frame
+            // per dispatch kind and the span, beside the frames' wall time (time only).
+            if std::env::args().any(|a| a == "--ab-profile") {
+                x.restore(&snap);
+                x.set_self_split(true);
+                x.wait();
+                let mut sums: Vec<(&str, f64, u32)> = Vec::new();
+                let t = std::time::Instant::now();
+                let mut frames = 0u32;
+                for _ in 0..20 {
+                    let Some(p) = x.profile_self_split_frame(34) else { break };
+                    frames += 1;
+                    for (k, (name, ms, n)) in p.into_iter().enumerate() {
+                        if sums.len() <= k {
+                            sums.push((name, 0.0, 0));
+                        }
+                        sums[k].1 += ms;
+                        sums[k].2 += n;
+                    }
+                }
+                let wall = t.elapsed().as_secs_f64() * 1e3 / f64::from(frames.max(1));
+                let f = f64::from(frames.max(1));
+                println!(
+                    "   self split profile at t {:.1} ({frames} frames, ms/frame, dispatches/frame): {}; wall {wall:.2}",
+                    lab.bench.t,
+                    sums.iter()
+                        .map(|(n, ms, c)| format!("{n} {:.3} ×{:.0}", ms / f, f64::from(*c) / f))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             let mut out = Vec::new();
             // `--ab-same`: both runs with the culls on (the harness's own repeatability).
             let second = std::env::args().any(|a| a == "--ab-same");

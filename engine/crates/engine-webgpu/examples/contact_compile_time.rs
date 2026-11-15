@@ -6,15 +6,20 @@
 fn main() {
     let (_, device, _queue) = engine_webgpu::default_device().unwrap();
     let all = engine_webgpu::explicit_beams_shipped_wgsl();
-    for name in [
+    // Module names from the arguments (default: the contact modules); each compiled with
+    // zeroing on, off, and off again (a second compile in the process: the driver's cache).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let default = [
         "explicit_beams_contact_wide_nosurf",
         "explicit_beams_solo_wide_nosurf",
         "explicit_beams_split_member_wide",
         "explicit_beams_split_group_wide",
         "explicit_beams_split_tests_wide",
-    ] {
+    ];
+    let names: Vec<&str> = if args.is_empty() { default.to_vec() } else { args.iter().map(String::as_str).collect() };
+    for name in names {
         let (_, entry, wgsl) = all.iter().find(|(n, _, _)| n == name).expect("module");
-        for zero in [true, false] {
+        for zero in [true, false, false] {
             let t = std::time::Instant::now();
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(name),

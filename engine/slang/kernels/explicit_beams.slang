@@ -7606,6 +7606,12 @@ void vvArgs(uint nv, uint groups, bool big)
     gArgs[24] = groups * 16u;
     gArgs[25] = 1u;
     gArgs[26] = 1u;
+    // Self-collision split in a world with vehicle contact (explicit_beams_split.slang,
+    // EB_SELF_SPLIT): the members' steps over every vehicle in every frame, a group or
+    // not (words 28..30).
+    gArgs[28] = nv;
+    gArgs[29] = 1u;
+    gArgs[30] = 1u;
 }
 
 void vvEmitPair(uint a, uint b)
