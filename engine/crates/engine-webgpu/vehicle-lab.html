@@ -141,6 +141,7 @@
         <label title="Self-collision's contact tests run one GPU thread per candidate pair across the whole GPU, a pass every 2 kHz step, instead of inside the car's one thread group (the same results bit for bit). Used on frames without car-to-car contact, sleep or surface contact. Applies as it runs."><input type="checkbox" id="selfSplit" data-opt="live" /> self-collision across the GPU</label></div>
       <div class="row"><label title="A small piece off the car's main body (no unbroken beam joins them) for this long is retired: no longer simulated, not drawn, in no contact. A piece at rest beside the car goes too. Applies as it runs; retired pieces stay retired."><input type="checkbox" id="debris" data-opt="live" checked /> retire small debris after</label>
         <input type="number" id="debrisTtl" data-opt="live" value="5" min="0" max="600" step="0.5" /> s, at most <input type="number" id="debrisKg" data-opt="live" value="10" min="0" max="1000" step="0.5" /> kg and <input type="number" id="debrisNodes" data-opt="live" value="40" min="1" max="10000" step="1" /> nodes</div>
+      <div class="row"><span class="muted" title="How many of the display's pixels the picture is drawn at. Automatic keeps the physics in real time first: it lowers the picture's resolution while steps are being refused because the GPU is busy, and raises it again when they are not. Applies as it runs.">Render scale</span><select id="renderScale" data-opt="live"><option value="auto">automatic (physics first)</option><option value="1">100 %</option><option value="0.75">75 %</option><option value="0.5">50 %</option></select></div>
       <div class="row"><button id="perfCopy" title="Copies a text report to the clipboard: this device and display, the page's options, and a row a second for the last three minutes (display frames, steps taken and refused, frames drawn, the page's CPU time in stepping and drawing, GPU time a step when GPU timing is on). Run for a while first, then press it and paste it where the run is being looked at.">Copy perf report</button></div>
       <div class="row"><span class="muted">GPU timing</span><select id="timing" data-opt="build"><option value="off">off</option><option value="step">per step</option><option value="phases">rigid · vehicle</option></select>
         <span class="muted">coupling room</span><input type="number" id="shapes" data-opt="build" value="256" min="8" max="1024" step="8" />
@@ -319,6 +320,7 @@
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
         else if (c.id === 'selfSplit') cmd({ selfSplit: get('selfSplit') });
+        else if (c.id === 'renderScale') { autoScale = 1; autoQuiet = 0; configure(); }
         else if (c.id.startsWith('debris')) cmd({ debris: debrisSpec() });
         else if (['beams', 'nodes', 'beamColor'].includes(c.id)) structureOpts();
       };
@@ -390,11 +392,27 @@
     const context = canvas.getContext('webgpu');
     const format = navigator.gpu.getPreferredCanvasFormat();
     const DEPTH = 'depth32float', SAMPLES = 4;
+    // Render scale: a fixed share of the display's pixels, or automatic (0.5 to 1 in
+    // steps of 1/8). Automatic: a second in which more than two steps were refused (the
+    // GPU behind) lowers it a step; five seconds in a row with none raises it a step.
+    let autoScale = 1, autoQuiet = 0;
+    const renderScale = () => { const v = $('renderScale')?.value ?? 'auto'; return v === 'auto' ? autoScale : Number(v); };
+    function renderAuto(refused) {
+      if (($('renderScale')?.value ?? 'auto') !== 'auto') return;
+      const was = autoScale;
+      if (refused > 2) { autoScale = Math.max(0.5, autoScale - 0.125); autoQuiet = 0; }
+      else if (refused === 0) { if (++autoQuiet >= 5) { autoScale = Math.min(1, autoScale + 0.125); autoQuiet = 0; } }
+      else autoQuiet = 0;
+      if (autoScale !== was) configure();
+    }
     let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0;
     const scene = () => (mode === 'mountain' ? 'mountain' : 'flat');
     const mountainSpec = () => ({ seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide'), start: get('start') });
     const configure = () => {
-      const dpr = Math.min(devicePixelRatio || 1, 2);
+      // The drawing's resolution: the display's pixels times the render scale (the
+      // renderScale control; "auto" lowers it while the World's steps are being refused,
+      // physics first, and raises it again when they are not: renderAuto below).
+      const dpr = Math.min(devicePixelRatio || 1, 2) * renderScale();
       canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
       canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
       if (W) context.configure({ device: W.device, format, alphaMode: 'opaque' });
@@ -850,6 +868,8 @@
         perfLog.push({ page: +(r.at / 1000).toFixed(1), sim: +(W?.lab.time() ?? 0).toFixed(2), fps: n, steps: r.taken, refused: r.refused, drawn: r.drawn, undrawn: r.undrawn, idle: r.idle,
           dt: [f1(d[n >> 1] ?? 0), f1(d[Math.floor(0.95 * (n - 1))] ?? 0), f1(r.dtMax)], cpuStep: [f1(r.stepMs / n), f1(r.stepMax)], cpuPoll: [f1(r.pollMs / n), f1(r.pollMax)], cpuDraw: [f1(r.drawMs / Math.max(1, r.drawn)), f1(r.drawMax)],
           gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
+        perfLog[perfLog.length - 1].scale = +renderScale().toFixed(3);
+        renderAuto(r.refused);
         if (perfLog.length > 180) perfLog.shift();
         perfSec = perfNew(now);
       }
@@ -1014,9 +1034,9 @@
         worldRate: W ? Math.round(W.RATE) : null, gpuTiming: W?.timing ?? null,
         state: window.__state?.(), gpu: W && W.timing !== 'off' ? window.__gpu() : 'GPU timing is off: set "GPU timing" to "rigid · vehicle" (rebuilds) for GPU ms a step',
         load: window.__loadTimes ?? null, failed: window.__failed ?? null,
-        columns: 'page s, sim s, display frames, steps taken, steps refused (GPU not ready), frames drawn, frames not drawn, frames with nothing owed, frame interval ms [p50, p95, max], CPU ms in step calls [mean a frame, max], in readback poll [mean, max], in draw [mean a drawn frame, max], GPU ms a step (median) or null, bodies, readback windows skipped (total), frames while hidden',
+        columns: 'page s, sim s, display frames, steps taken, steps refused (GPU not ready), frames drawn, frames not drawn, frames with nothing owed, frame interval ms [p50, p95, max], CPU ms in step calls [mean a frame, max], in readback poll [mean, max], in draw [mean a drawn frame, max], GPU ms a step (median) or null, bodies, readback windows skipped (total), frames while hidden, render scale',
       };
-      const rows = perfLog.map((r) => [r.page, r.sim, r.fps, r.steps, r.refused, r.drawn, r.undrawn, r.idle, r.dt.join('/'), r.cpuStep.join('/'), r.cpuPoll.join('/'), r.cpuDraw.join('/'), r.gpu ?? '-', r.bodies, r.readsSkipped, r.hidden].join('\t'));
+      const rows = perfLog.map((r) => [r.page, r.sim, r.fps, r.steps, r.refused, r.drawn, r.undrawn, r.idle, r.dt.join('/'), r.cpuStep.join('/'), r.cpuPoll.join('/'), r.cpuDraw.join('/'), r.gpu ?? '-', r.bodies, r.readsSkipped, r.hidden, r.scale].join('\t'));
       return JSON.stringify(head, null, 1) + '\n\nper second (last ' + rows.length + ' s):\n' + rows.join('\n') + '\n';
     }
     window.__perfReport = perfReport;
