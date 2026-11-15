@@ -510,11 +510,143 @@ fn measure(s: &ExplicitBeams) -> Report {
                     let live: Vec<usize> = ns.iter().map(|&j| s.incidence[j as usize].iter().filter(|&&b| !s.beams[b as usize].broken && s.beams[b as usize].k > 0.0).count()).collect();
                     eprintln!("  speck on {piece}: {now} of {was} triangles, moved {:.2} m; its nodes {ns:?}, their live stiff beams {live:?}, masses {:?}",
                         (pos[i] - rp(i as u32)).length(), ns.iter().map(|&j| s.nodes[j as usize].mass).collect::<Vec<_>>());
+                    if std::env::var("DUMP_SPECKS").as_deref() == Ok("2") {
+                        speck_detail(s, v, &nodes, &bs, &pos, &tear, &skinned, &|t: &[u32]| now_root[class[t[0] as usize] as usize] == root && is_drawn(t), &comp, &class);
+                    }
                 }
             }
         }
     }
     r
+}
+
+/// `DUMP_SPECKS=2`: a speck's carrier nodes, their components and beams, and
+/// how the vertices round it were grouped.
+#[allow(clippy::too_many_arguments)]
+fn speck_detail(
+    s: &ExplicitBeams,
+    v: &ShowcaseVisual,
+    nodes: &[Vec3],
+    bs: &[BeamState],
+    pos: &[Vec3],
+    tear: &[f32],
+    skinned: &[Option<engine_softbody::authoring::node_frames::Skinned>],
+    in_speck: &dyn Fn(&[u32]) -> bool,
+    comp: &[u32],
+    class: &[u32],
+) {
+    use engine_softbody::authoring::node_frames as nf;
+    let f = &v.frames;
+    let br = |b: u32| bs.get(b as usize).is_some_and(|x| x.broken);
+    let pc = nf::components(f, nodes.len(), &br);
+    let pc0 = nf::components(f, nodes.len(), &|_| false);
+    let reaches: Vec<u128> = (0..nodes.len()).map(|j| nf::reach(f, j, &br)).collect();
+    let rest_reaches: Vec<u128> = (0..nodes.len()).map(|j| nf::reach(f, j, &|_| false)).collect();
+    let joined = |k: usize, m: usize| {
+        let bit = |r: &[u128], a: usize, x: Option<usize>| x.is_some_and(|x| (r[a] >> x) & 1 == 1);
+        let (lk, lm) = (nf::local(f, k, m as u32), nf::local(f, m, k as u32));
+        (bit(&reaches, k, lk) || bit(&reaches, m, lm), bit(&rest_reaches, k, lk) || bit(&rest_reaches, m, lm))
+    };
+    let mut sv: Vec<usize> = v.indices.chunks_exact(3).filter(|t| in_speck(t)).flatten().map(|&i| i as usize).collect();
+    sv.sort_unstable();
+    sv.dedup();
+    let svs: std::collections::HashSet<usize> = sv.iter().copied().collect();
+    let scl: std::collections::HashSet<u32> = sv.iter().map(|&i| class[i]).collect();
+    // Vertices of triangles touching the speck (welded by rest position) that are cut.
+    let pname = |i: usize| v.pieces.iter().find(|pc| (pc.1 as usize..(pc.1 + pc.2) as usize).contains(&i)).map_or("?".to_string(), |pc| pc.0.clone());
+    let mut tp: std::collections::BTreeMap<(String, u16, bool), usize> = Default::default();
+    for t in v.indices.chunks_exact(3).filter(|t| !in_speck(t) && t.iter().any(|&i| scl.contains(&class[i as usize]))) {
+        let drawn = t.iter().all(|&i| pos[i as usize].x.is_finite()) && t.iter().any(|&i| tear[i as usize] < 0.5);
+        *tp.entry((pname(t[0] as usize), v.part[t[0] as usize], drawn)).or_default() += 1;
+    }
+    eprintln!("    welded neighbour triangles (piece, part, drawn): {tp:?}");
+    let mut rim: Vec<usize> = v
+        .indices
+        .chunks_exact(3)
+        .filter(|t| !in_speck(t) && t.iter().any(|&i| scl.contains(&class[i as usize])))
+        .flatten()
+        .map(|&i| i as usize)
+        .filter(|i| !svs.contains(i))
+        .collect();
+    rim.sort_unstable();
+    rim.dedup();
+    let mut carriers: Vec<u32> = sv.iter().flat_map(|&i| v.bl_node[i].iter().copied().filter(|&j| j != u32::MAX)).collect();
+    carriers.sort_unstable();
+    carriers.dedup();
+    let part = v.part[sv[0]];
+    let part_nodes: Vec<usize> = (0..nodes.len()).filter(|&j| f.part.get(j) == Some(&part)).collect();
+    let mut pcs: std::collections::BTreeMap<u32, usize> = Default::default();
+    for &j in &part_nodes {
+        *pcs.entry(pc[j]).or_default() += 1;
+    }
+    eprintln!("    part {part}: {} nodes; part-stiff components now {:?}", part_nodes.len(), pcs);
+    eprintln!("    speck: {} vertices, {} rim (cut) vertices, carriers {carriers:?}", sv.len(), rim.len());
+    let mut rimn: Vec<u32> = rim.iter().flat_map(|&i| v.bl_node[i].iter().copied().filter(|&j| j != u32::MAX)).collect();
+    rimn.sort_unstable();
+    rimn.dedup();
+    eprintln!("    part names: {:?}", car().b.skeleton.parts.iter().enumerate().collect::<Vec<_>>());
+    for &j in carriers.iter().chain(rimn.iter()) {
+        let inc = &s.incidence[j as usize];
+        let stiff: Vec<&u32> = inc.iter().filter(|&&b| s.beams[b as usize].k > 0.0).collect();
+        let brk: Vec<String> = stiff
+            .iter()
+            .filter(|&&&b| s.beams[b as usize].broken)
+            .map(|&&b| {
+                let bb = &s.beams[b as usize];
+                format!("{}-{}(p{}-p{} k {:.0})", bb.a, bb.b, f.part[bb.a as usize], f.part[bb.b as usize], bb.k)
+            })
+            .collect();
+        eprintln!(
+            "      node {j} part {} all-comp {} part-comp {} (rest {}) moved {:.2} stiff {} broken {} {brk:?}",
+            f.part[j as usize],
+            comp[j as usize],
+            pc[j as usize],
+            pc0[j as usize],
+            (nodes[j as usize] - Vec3::from_array(v.node_rest[j as usize])).length(),
+            stiff.len(),
+            brk.len()
+        );
+    }
+    let show = |label: &str, i: usize| {
+        let ids: Vec<u32> = v.bl_node[i].iter().copied().filter(|&j| j != u32::MAX).collect();
+        let sk = skinned[i].as_ref();
+        let pairs: Vec<String> = (0..ids.len())
+            .flat_map(|k| (k + 1..ids.len()).map(move |m| (k, m)))
+            .filter_map(|(k, m)| {
+                let (a, b) = (ids[k] as usize, ids[m] as usize);
+                let (now, was) = joined(a, b);
+                (was && !now).then(|| format!("{a}|{b}{}", if pc[a] == pc[b] { "(same part-comp)" } else { "" }))
+            })
+            .collect();
+        eprintln!(
+            "      {label} v{i} part {} tear {:.2} used {:08b} nodes {ids:?} w {:?} split pairs {pairs:?} moved {:.2}",
+            v.part[i], tear[i],
+            sk.map_or(0, |x| x.used),
+            &v.bl_w[i][..ids.len()],
+            (pos[i] - Vec3::from_array(v.positions[i])).length()
+        );
+    };
+    let near = |x: Vec3, p: u16| {
+        (0..v.node_rest.len())
+            .filter(|&j| f.part.get(j) == Some(&p))
+            .map(|j| (Vec3::from_array(v.node_rest[j]).distance(x), j))
+            .fold((f32::MAX, 0), |a, b| if b.0 < a.0 { b } else { a })
+    };
+    let mut ext = (Vec3::MAX, Vec3::MIN);
+    for &i in &sv {
+        let x = Vec3::from_array(v.positions[i]);
+        ext = (ext.0.min(x), ext.1.max(x));
+        let (db, jb) = near(x, 0);
+        let (dd, jd) = near(x, 4);
+        eprintln!("      speck v{i} at {:.3?} n {:.2?} nearest body {jb} {db:.3}, nearest door_r_r {jd} {dd:.3}", x, v.normals[i]);
+    }
+    eprintln!("    speck extent {:.3?} .. {:.3?}", ext.0, ext.1);
+    for &i in sv.iter().take(2) {
+        show("speck", i);
+    }
+    for &i in rim.iter().take(24) {
+        show("rim", i);
+    }
 }
 
 // ---- Rest and rigid motion ---------------------------------------------------

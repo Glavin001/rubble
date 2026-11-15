@@ -331,7 +331,9 @@ fn the_coupling_shape_cull_is_bit_exact() {
             x.wait();
             // (The header's cull bit itself is the one word the runs set apart.)
             x.set_coupling_cull(true);
-            x.state_words()
+            let mut words = x.state_words();
+            words.extend(x.coupling_words());
+            words
         };
         let off = run(false);
         let on = run(true);
@@ -392,7 +394,9 @@ fn the_coupling_workgroup_copies_are_bit_exact() {
             x.wait();
             // (The header's cache bit itself is the one word the runs set apart.)
             x.set_coupling_workgroup_cache(true);
-            x.state_words()
+            let mut words = x.state_words();
+            words.extend(x.coupling_words());
+            words
         };
         let off = run(false);
         let on = run(true);
@@ -450,7 +454,9 @@ fn the_coupling_node_ranges_are_bit_exact() {
             x.wait();
             // (The header's bit itself is the one word the runs set apart.)
             x.set_coupling_node_ranges(true);
-            x.state_words()
+            let mut words = x.state_words();
+            words.extend(x.coupling_words());
+            words
         };
         let off = run(false);
         let on = run(true);
@@ -763,4 +769,78 @@ fn the_coupling_candidate_list_meets_fast_and_thin_bodies() {
         }
     }
     assert!(used >= 3, "the lists were in use");
+}
+
+/// Contact groups split across workgroups (`ExplicitBeamsGpu::set_group_split`,
+/// contact-groups-design.md) with the coupling on: the same frames with each group in
+/// its workgroup, then split (its triangle tests across workgroups or whole in the
+/// group's workgroup), are equal bit for bit in every state word, proxy record and sum,
+/// the coupling's candidate list (its maxima and its per-node lists) included. Four cars
+/// into one house at 120 Hz, compared once they are among its chunks in contact groups.
+#[test]
+fn the_group_split_with_the_coupling_is_bit_exact() {
+    let template = sedan(0.0, 0.0, Vec3::ZERO, 0);
+    let mut town = rubble::explicit_scene::crash_town_at(
+        GpuContext::Default,
+        &template,
+        1,
+        4,
+        15.0,
+        8.0,
+        30,
+        &rubble::explicit_scene::town_coupling(),
+        Some(1.0 / 120.0),
+        None,
+    )
+    .unwrap();
+    let w = &mut town.world;
+    let mut grouped = 0;
+    for step in 0..150 {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+        if step < 60 || step % 15 != 0 {
+            continue;
+        }
+        let shapes: Vec<usize> = w.explicit_window_impulses().iter().map(|v| v.len()).collect();
+        let x = w.explicit_vehicles_mut().unwrap();
+        let snap = x.snapshot();
+        let mut run = |split: bool, tests: bool| {
+            x.restore(&snap);
+            x.set_group_split(split);
+            x.set_group_split_tests(tests);
+            let mut groups = Vec::new();
+            for _ in 0..3 {
+                x.frame(17);
+                x.wait();
+                groups.extend(x.contact_group_sizes());
+            }
+            x.set_group_split(false);
+            x.set_group_split_tests(true);
+            let mut words = x.state_words();
+            words.extend(x.coupling_words());
+            // The candidate list's state (each node's list as the last step left it).
+            let stats = x.coupling_list_stats();
+            words.push(("candidate lists (listed, over)", stats.iter().flat_map(|&(a, b)| [a, b]).collect()));
+            (words, groups)
+        };
+        let (base, groups) = run(false, true);
+        for tests in [true, false] {
+            let (split, _) = run(true, tests);
+            for ((name, a), (_, b)) in base.iter().zip(&split) {
+                let diff: Vec<usize> = a.iter().zip(b).enumerate().filter(|(_, (p, q))| p != q).map(|(i, _)| i).collect();
+                assert!(
+                    diff.is_empty(),
+                    "step {step} (groups {groups:?}): split (tests across workgroups {tests}): {name}: {} words differ, first at {:?}",
+                    diff.len(),
+                    &diff[..diff.len().min(8)]
+                );
+            }
+        }
+        x.restore(&snap);
+        println!("step {step}: proxy shapes per vehicle {shapes:?}, groups {groups:?}");
+        if !groups.is_empty() && shapes.iter().any(|&n| n >= 10) {
+            grouped += 1;
+        }
+    }
+    assert!(grouped >= 2, "the comparison ran with the cars in contact groups among the house's chunks");
 }

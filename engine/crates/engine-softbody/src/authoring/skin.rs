@@ -1195,6 +1195,62 @@ fn point_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
 }
 
 /// Build the visual skin of a built vehicle.
+/// The split of a voted piece (`g`: its part's skin distance over the nearest
+/// part's, less the 8 cm margin; negative stays with the voted part) keeps the
+/// margin only where it extends the voted part's own region. A region on the
+/// near side (vertices welded by position, joined by triangles) in which no
+/// vertex has the voted part nearest is held only by the margin, wholly
+/// inside another part's skin: it is given to the far side, so it rides the
+/// part it lies on. Left on the voted part it was a scrap of that part's skin
+/// enclosed by another's: when the enclosing part tore round it, the scrap was
+/// drawn alone (grab door_r_r 10 m: 18 body triangles 4–6 cm from the door's
+/// torn-out corner node, 15 cm from the nearest body node).
+fn margin_islands_to_far_side(m: &Mesh, g: &mut [f32]) {
+    // -1: the voted part is nearest (or no other part's skin is near).
+    let anchored = |x: f32| x == -1.0;
+    let n = m.pos.len();
+    let mut weld: HashMap<[i32; 3], u32> = HashMap::new();
+    let class: Vec<u32> = m
+        .pos
+        .iter()
+        .map(|q| {
+            let k = [(q.x * 1e4).round() as i32, (q.y * 1e4).round() as i32, (q.z * 1e4).round() as i32];
+            let next = weld.len() as u32;
+            *weld.entry(k).or_insert(next)
+        })
+        .collect();
+    let mut par: Vec<u32> = (0..weld.len() as u32).collect();
+    fn find(p: &mut [u32], mut i: u32) -> u32 {
+        while p[i as usize] != i {
+            p[i as usize] = p[p[i as usize] as usize];
+            i = p[i as usize];
+        }
+        i
+    }
+    for t in m.idx.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            if g[a as usize] < 0.0 && g[b as usize] < 0.0 {
+                let (x, y) = (find(&mut par, class[a as usize]), find(&mut par, class[b as usize]));
+                if x != y {
+                    par[x as usize] = y;
+                }
+            }
+        }
+    }
+    let mut held = vec![false; weld.len()];
+    for k in 0..n {
+        if g[k] < 0.0 && anchored(g[k]) {
+            let r = find(&mut par, class[k]);
+            held[r as usize] = true;
+        }
+    }
+    for k in 0..n {
+        if g[k] < 0.0 && !held[find(&mut par, class[k]) as usize] {
+            g[k] = (-g[k]).max(1e-6);
+        }
+    }
+}
+
 pub fn showcase_visual(built: &Built) -> Result<ShowcaseVisual, String> {
     showcase_visual_lod(built, 1.0)
 }
@@ -1477,7 +1533,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
             pieces.push(piece);
             continue;
         };
-        let g: Vec<f32> = (0..piece.mesh.len())
+        let mut g: Vec<f32> = (0..piece.mesh.len())
             .map(|k| {
                 let (p, n) = (piece.mesh.pos[k], piece.mesh.nrm[k]);
                 match (pb.bind(pt, p, n), pb.nearest(p, n)) {
@@ -1486,6 +1542,7 @@ fn build_visual(built: &Built) -> Result<ShowcaseVisual, String> {
                 }
             })
             .collect();
+        margin_islands_to_far_side(&piece.mesh, &mut g);
         if g.iter().all(|&v| v < 0.0) {
             pieces.push(Piece {
                 bind: Bind::Part(pt),

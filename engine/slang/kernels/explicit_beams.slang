@@ -7601,6 +7601,17 @@ void vvArgs(uint nv, uint groups, bool big)
     gArgs[20] = groups == 0u ? 0u : nv;
     gArgs[21] = 1u;
     gArgs[22] = 1u;
+    // Its triangle tests across workgroups (explicit_beams_split.slang SPLIT_TEST_WGS a
+    // group; words 24..26).
+    gArgs[24] = groups * 16u;
+    gArgs[25] = 1u;
+    gArgs[26] = 1u;
+    // Self-collision split in a world with vehicle contact (explicit_beams_split.slang,
+    // EB_SELF_SPLIT): the members' steps over every vehicle in every frame, a group or
+    // not (words 28..30).
+    gArgs[28] = nv;
+    gArgs[29] = 1u;
+    gArgs[30] = 1u;
 }
 
 void vvEmitPair(uint a, uint b)
@@ -9582,6 +9593,24 @@ void vvClearSmall()
     }
 }
 
+// The tests' counters, the owners' fastest candidates and the grid's offsets: in
+// workgroup memory in a group's own pass; in the split path's test dispatches
+// (EB_VV_GLOBAL: many workgroups per group) in the group's scratch, which its pass's
+// front fills (explicit_beams_split.slang, splitVvAt / splitVvOffAt).
+#ifdef EB_VV_GLOBAL
+static uint gVvC; // gAcc: per owner its pairs (0..3), hits (4..7), fastest (8..11)
+static uint gVvO; // gNext: the grid's offsets
+uint vvHitAdd(uint a) { return uint(gAcc[gVvC + 4u + a].add(1)); }
+uint vvPairAdd(uint a) { return uint(gAcc[gVvC + a].add(1)); }
+float vvSpeedAt(uint a) { return asfloat(uint(gAcc[gVvC + 8u + a].load())); }
+uint vvOffAt(uint b) { return gNext[gVvO + b]; }
+#else
+uint vvHitAdd(uint a) { return gsVvHit4[a].add(1u); }
+uint vvPairAdd(uint a) { return gsPairCountM[a].add(1u); }
+float vvSpeedAt(uint a) { return asfloat(gsCount[GRID_BUCKETS + a].load()); }
+uint vvOffAt(uint b) { return gsOff[b]; }
+#endif
+
 // Owner a's candidate run and hit list (each owner its own, within the group's
 // regions, which hold four times the group's points).
 uint vvRunSmall(uint runOff, uint points, uint a) { return gP.vvRun + 4u * runOff + a * points; }
@@ -9609,7 +9638,7 @@ void vvTriangleCandsSmall(uint a, uint va, uint gt, uint sub, uint subs, uint ru
         if (!vvFind(t, gt, h, E.xyz, vh, r, anti)) continue;
         hit = true;
         vvSplitCount(t, h, a);
-        uint i = gsVvHit4[a].add(1u);
+        uint i = vvHitAdd(a);
         if (i < 2u * points)
         {
             gNext[vvHitSmall(runOff, points, a, i)] = gt;
@@ -9780,7 +9809,7 @@ void vvTriangleCandsGrid(uint a, uint va, uint gt, uint sub, uint subs, uint run
     float cell = vvGridCell(va);
     VvTri t = vvTriangle(gt, vvRel(va, va), r);
     // The most vvInBox pads this box (its anti-clip pad with the fastest candidate).
-    float vmax = asfloat(gsCount[GRID_BUCKETS + a].load());
+    float vmax = vvSpeedAt(a);
     float pad = nf(nf(t.travel + smul(vmax, STEP)) + CLIP_DEPTH);
     float3 lo = ssub3(t.lo, float3(pad, pad, pad));
     float3 hi = sadd3(t.hi, float3(pad, pad, pad));
@@ -9827,8 +9856,8 @@ void vvTriangleCandsGrid(uint a, uint va, uint gt, uint sub, uint subs, uint run
             }
         }
         if (dup) continue;
-        uint e0 = gsOff[b];
-        uint e1 = gsOff[b + 1u];
+        uint e0 = vvOffAt(b);
+        uint e1 = vvOffAt(b + 1u);
         seen += e1 - e0;
         for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
@@ -9842,7 +9871,7 @@ void vvTriangleCandsGrid(uint a, uint va, uint gt, uint sub, uint subs, uint run
             if (!vvFind(t, gt, h, E.xyz, vh, r, anti)) continue;
             hit = true;
             vvSplitCount(t, h, a);
-            uint n = gsVvHit4[a].add(1u);
+            uint n = vvHitAdd(a);
             if (n < 2u * points)
             {
                 gNext[vvHitSmall(runOff, points, a, n)] = gt;
@@ -9869,7 +9898,7 @@ void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint run
     float cell = vvGridCell(va);
     VvTri t = vvTriangle(gt, vvRel(va, va), r);
     if (any(t.lo > t.hi)) return;
-    float vmax = asfloat(gsCount[GRID_BUCKETS + a].load());
+    float vmax = vvSpeedAt(a);
     float pad = nf(nf(t.travel + smul(vmax, STEP)) + CLIP_DEPTH);
     float3 lo = ssub3(t.lo, float3(pad, pad, pad));
     float3 hi = sadd3(t.hi, float3(pad, pad, pad));
@@ -9889,7 +9918,7 @@ void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint run
             uint h = asuint(E.w);
             if (!vvInBox(t, E.xyz, h, vvAnti(t, gStatic[gP.nodeInfoBase + h].w))) continue;
             cand = true;
-            uint n = gsPairCountM[a].add(1u);
+            uint n = vvPairAdd(a);
             if (n < TRI_PAIR_CAP)
             {
                 gNext[at + 2u * n] = gt;
@@ -9930,8 +9959,8 @@ void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint run
             }
         }
         if (dup) continue;
-        uint e0 = gsOff[b];
-        uint e1 = gsOff[b + 1u];
+        uint e0 = vvOffAt(b);
+        uint e1 = vvOffAt(b + 1u);
         seen += e1 - e0;
         for (uint e = e0, eGuard = 0u; e < e1; e++)
         {
@@ -9940,7 +9969,7 @@ void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint run
             uint h = asuint(E.w);
             if (!vvInBox(t, E.xyz, h, vvAnti(t, gStatic[gP.nodeInfoBase + h].w))) continue;
             cand = true;
-            uint n = gsPairCountM[a].add(1u);
+            uint n = vvPairAdd(a);
             if (n < TRI_PAIR_CAP)
             {
                 gNext[at + 2u * n] = gt;
@@ -9963,7 +9992,7 @@ void vvPairTest(uint a, uint va, uint gt, uint idx, uint runOff, uint points, fl
     bool anti = vvAnti(t, vh);
     if (!vvFind(t, gt, h, E.xyz, vh, r, anti)) return;
     vvSplitCount(t, h, a);
-    uint n = gsVvHit4[a].add(1u);
+    uint n = vvHitAdd(a);
     if (n < 2u * points)
     {
         gNext[vvHitSmall(runOff, points, a, n)] = gt;
@@ -10095,9 +10124,25 @@ void vvApplyOrderedBuckets(uint va, uint a, uint base, uint n, float r, uint par
     }
 }
 
+// vvPassSmall in three parts (the split group path, contact-groups-design.md, runs the
+// tests across workgroups between the first and the last): the scans, candidates and
+// their grid (returns 0 when nothing is offered, else bit 0, with bit 1 the grid); the
+// triangle tests; the hits' levels.
+uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, uint lane);
+void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid);
+void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid);
 void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 {
     uint parity = step & 1u;
+    uint front = vvPassSmallFront(k, off, runOff, points, parity, lane);
+    if (front == 0u) return;
+    bool vvGrid = (front & 2u) != 0u;
+    vvPassSmallTests(k, off, runOff, points, parity, lane, vvGrid);
+    vvPassSmallLevels(k, off, runOff, points, parity, lane, vvGrid);
+}
+
+uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, uint lane)
+{
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     // (S) the partner scans: lane per ordered pair (a, b).
     for (uint p = lane, pStop = EB_END(p, k * k, LANES); p < pStop; p += LANES)
@@ -10142,7 +10187,7 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
         gsUniformOpen = offered;
     }
     sync();
-    if (gsUniformOpen == 0u) return;
+    if (gsUniformOpen == 0u) return 0u;
     // The two-body pass reads every member's node force at its start (nothing the
     // scans wrote).
     if (gP.vvSplit != 0u)
@@ -10257,6 +10302,11 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
     sync();
     bool vvGrid = gsUniformOpen != 0u;
     if (vvGrid) vvGridBuild(k, off, runOff, points, lane);
+    return vvGrid ? 3u : 1u;
+}
+
+void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid)
+{
     // The tests as a pair list (with the grid and the members' pair regions).
     bool vvList = vvGrid && gP.triPairs != 0u;
     if (vvList)
@@ -10355,6 +10405,10 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
                                 asfloat(gStatic[va * 4u + 3u].z));
         }
     }
+}
+
+void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid)
+{
     sync();
     // The hits, level by level (at most k levels); with the first, every listed
     // triangle's throttle update (its marks are final) and a later owner's reset.

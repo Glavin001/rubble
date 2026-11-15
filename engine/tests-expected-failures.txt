@@ -10,7 +10,6 @@
 # Ride wobble against the ETK reference car (committed failing as targets, 7b9b0e58).
 sedan_jello::kerb_wobble_is_at_the_etk_level
 sedan_jello::kerb_wobble_dies_as_fast_as_the_etks
-sedan_jello::the_parked_car_stands_still
 
 # Side pole crush depth against the NHTSA band (since 31c20eb2) and contact energy (since 770875dd).
 showcase_car::o_side_pole_matches_the_nhtsa_sedans
@@ -21,5 +20,4 @@ showcase_skin_integrity::wall_at_90_kmh_three_times
 showcase_skin_integrity::car_into_the_rear_door_at_60_kmh
 showcase_skin_integrity::t_bone_118_into_61_kmh
 showcase_skin_integrity::random_impacts
-showcase_skin_integrity::grab_doors
 showcase_skin_integrity::grab_rear_and_roof

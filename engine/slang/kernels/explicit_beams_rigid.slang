@@ -117,6 +117,52 @@ float4 cplQmul(float4 a, float4 b)
     return float4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz));
 }
 
+// --- One code shape per arithmetic (bit-identical paths on every device) ---
+// The unfolded step (cplReactBy, cplIntegrateBody, cplIntegrateBodySplit), the folded
+// step (cplBodyStepped, cplStepFolded's phase C) and a contact group's members compute
+// the same window sums, torque terms and integration. Written out once per path, a
+// device's compiler may contract each copy differently (a fused multiply-add in one, a
+// rounded product in the other: NVIDIA's Vulkan compiler, not Metal's), and paths the
+// tests compare bit for bit then differ in the last bit. Every path calls these.
+
+// Shape record `at`'s window sums (its impulse, largest force and moment) with the
+// step's reaction F, M added.
+void cplWindowAdd(uint at, float3 F, float3 M)
+{
+    float4 imp = asfloat(gMisc[at + 4u]);
+    float4 mom = asfloat(gMisc[at + 5u]);
+    gMisc[at + 4u] = asuint(float4(imp.xyz + F * STEP, max(imp.w, length(F))));
+    gMisc[at + 5u] = asuint(float4(mom.xyz + M * STEP, 0.0));
+}
+
+// A shape's torque term about its body's centre c (reference point ref).
+float3 cplTorqueTerm(float3 ref, float3 c, float3 F, float3 M)
+{
+    return M + cross(ref - c, F);
+}
+
+// A body's symplectic Euler step over its summed force and torque: c0 its centre (.w
+// 1/M), q its rotation, c2 its velocity, w (in: c3's angular velocity) its angular
+// velocity, c4 its inverse inertia.
+void cplIntegrateStep(inout float4 c0, inout float4 q, inout float4 c2, inout float3 w, float4 c4, float3 force, float3 torque)
+{
+    float3 vel = c2.xyz;
+    if (c0.w != 0.0)
+    {
+        vel += force * (c0.w * STEP);
+        float3 lt = cplRot(float4(-q.xyz, q.w), torque);
+        w += cplRot(q, c4.xyz * lt) * STEP;
+    }
+    float3 pos = c0.xyz + vel * STEP;
+    if (any(w != float3(0.0, 0.0, 0.0)))
+    {
+        float4 dq = cplQmul(float4(w, 0.0), q);
+        q = normalize(q + 0.5 * STEP * dq);
+    }
+    c0 = float4(pos, c0.w);
+    c2 = float4(vel, c2.w);
+}
+
 // A proxy shape's rotation in the vehicle frame: its body's, then its own.
 float4 cplShapeRot(float4 q, float4 lq)
 {
@@ -524,12 +570,9 @@ void cplReactBy(uint v, uint lane, uint lanes)
         float3 F = float3(float(gAcc[s].load()), float(gAcc[s + 1u].load()), float(gAcc[s + 2u].load())) * (1.0 / FIXED);
         float3 M = float3(float(gAcc[s + 3u].load()), float(gAcc[s + 4u].load()), float(gAcc[s + 5u].load())) * (1.0 / FIXED);
         for (uint w = 0u; w < 6u; w++) gAcc[s + w].store(0);
-        float4 imp = asfloat(gMisc[at + 4u]);
-        float4 mom = asfloat(gMisc[at + 5u]);
         float3 ref = asfloat(gMisc[at + 6u].xyz);
-        gMisc[at + 4u] = asuint(float4(imp.xyz + F * STEP, max(imp.w, length(F))));
-        gMisc[at + 5u] = asuint(float4(mom.xyz + M * STEP, 0.0));
-        float3 t = M + cross(ref - c, F);
+        cplWindowAdd(at, F, M);
+        float3 t = cplTorqueTerm(ref, c, F, M);
         uint g = CPL_GS_SPH + CPL_REACT_WORDS * (gr.x + k);
         gsCpl[g] = asuint(F.x);
         gsCpl[g + 1u] = asuint(F.y);
@@ -575,31 +618,16 @@ void cplIntegrateBody(uint v, uint j)
         float3 F = float3(float(gAcc[s].load()), float(gAcc[s + 1u].load()), float(gAcc[s + 2u].load())) * (1.0 / FIXED);
         float3 M = float3(float(gAcc[s + 3u].load()), float(gAcc[s + 4u].load()), float(gAcc[s + 5u].load())) * (1.0 / FIXED);
         for (uint w = 0u; w < 6u; w++) gAcc[s + w].store(0);
-        float4 imp = asfloat(gMisc[at + 4u]);
-        float4 mom = asfloat(gMisc[at + 5u]);
         float3 ref = asfloat(gMisc[at + 6u].xyz);
-        gMisc[at + 4u] = asuint(float4(imp.xyz + F * STEP, max(imp.w, length(F))));
-        gMisc[at + 5u] = asuint(float4(mom.xyz + M * STEP, 0.0));
+        cplWindowAdd(at, F, M);
         force += F;
-        torque += M + cross(ref - c0.xyz, F);
+        torque += cplTorqueTerm(ref, c0.xyz, F, M);
     }
-    float3 vel = c2.xyz;
     float3 w = c3.xyz;
-    if (c0.w != 0.0)
-    {
-        vel += force * (c0.w * STEP);
-        float3 lt = cplRot(float4(-q.xyz, q.w), torque);
-        w += cplRot(q, c4.xyz * lt) * STEP;
-    }
-    float3 pos = c0.xyz + vel * STEP;
-    if (any(w != float3(0.0, 0.0, 0.0)))
-    {
-        float4 dq = cplQmul(float4(w, 0.0), q);
-        q = normalize(q + 0.5 * STEP * dq);
-    }
-    gMisc[b] = asuint(float4(pos, c0.w));
+    cplIntegrateStep(c0, q, c2, w, c4, force, torque);
+    gMisc[b] = asuint(c0);
     gMisc[b + 1u] = asuint(q);
-    gMisc[b + 2u] = asuint(float4(vel, c2.w));
+    gMisc[b + 2u] = asuint(c2);
     gMisc[b + 3u] = uint4(asuint(w), gMisc[b + 3u].w);
     gAcc[acc + j].store(0);
 }
@@ -633,23 +661,11 @@ void cplIntegrateBodySplit(uint v, uint j)
         force += asfloat(uint3(gsCpl[g], gsCpl[g + 1u], gsCpl[g + 2u]));
         torque += asfloat(uint3(gsCpl[g + 3u], gsCpl[g + 4u], gsCpl[g + 5u]));
     }
-    float3 vel = c2.xyz;
     float3 w = c3.xyz;
-    if (c0.w != 0.0)
-    {
-        vel += force * (c0.w * STEP);
-        float3 lt = cplRot(float4(-q.xyz, q.w), torque);
-        w += cplRot(q, c4.xyz * lt) * STEP;
-    }
-    float3 pos = c0.xyz + vel * STEP;
-    if (any(w != float3(0.0, 0.0, 0.0)))
-    {
-        float4 dq = cplQmul(float4(w, 0.0), q);
-        q = normalize(q + 0.5 * STEP * dq);
-    }
-    gMisc[b] = asuint(float4(pos, c0.w));
+    cplIntegrateStep(c0, q, c2, w, c4, force, torque);
+    gMisc[b] = asuint(c0);
     gMisc[b + 1u] = asuint(q);
-    gMisc[b + 2u] = asuint(float4(vel, c2.w));
+    gMisc[b + 2u] = asuint(c2);
     gMisc[b + 3u] = uint4(asuint(w), gMisc[b + 3u].w);
     gAcc[acc + j].store(0);
 }
@@ -1082,27 +1098,13 @@ void cplBodyStepped(uint v, uint j, uint shapes, out float4 c0, out float4 q, ou
             float3 F = float3(float(gAcc[s].load()), float(gAcc[s + 1u].load()), float(gAcc[s + 2u].load())) * (1.0 / FIXED);
             float3 M = float3(float(gAcc[s + 3u].load()), float(gAcc[s + 4u].load()), float(gAcc[s + 5u].load())) * (1.0 / FIXED);
             float3 ref = asfloat(gMisc[at + 6u].xyz);
-            float3 t = M + cross(ref - c0.xyz, F);
+            float3 t = cplTorqueTerm(ref, c0.xyz, F, M);
             force += F;
             torque += t;
         }
     }
-    float3 vel = c2.xyz;
     w = c3.xyz;
-    if (c0.w != 0.0)
-    {
-        vel += force * (c0.w * STEP);
-        float3 lt = cplRot(float4(-q.xyz, q.w), torque);
-        w += cplRot(q, c4.xyz * lt) * STEP;
-    }
-    float3 pos = c0.xyz + vel * STEP;
-    if (any(w != float3(0.0, 0.0, 0.0)))
-    {
-        float4 dq = cplQmul(float4(w, 0.0), q);
-        q = normalize(q + 0.5 * STEP * dq);
-    }
-    c0 = float4(pos, c0.w);
-    c2 = float4(vel, c2.w);
+    cplIntegrateStep(c0, q, c2, w, c4, force, torque);
 }
 
 // Phase B for shape k: its sphere and step frame (cplSpheresBy's arithmetic) from its
@@ -1182,10 +1184,7 @@ void cplStepFolded(uint v, uint lane, uint lanes, uint s)
             float3 F = float3(float(gAcc[sm].load()), float(gAcc[sm + 1u].load()), float(gAcc[sm + 2u].load())) * (1.0 / FIXED);
             float3 M = float3(float(gAcc[sm + 3u].load()), float(gAcc[sm + 4u].load()), float(gAcc[sm + 5u].load())) * (1.0 / FIXED);
             for (uint u = 0u; u < 6u; u++) gAcc[sm + u].store(0);
-            float4 imp = asfloat(gMisc[at + 4u]);
-            float4 mom = asfloat(gMisc[at + 5u]);
-            gMisc[at + 4u] = asuint(float4(imp.xyz + F * STEP, max(imp.w, length(F))));
-            gMisc[at + 5u] = asuint(float4(mom.xyz + M * STEP, 0.0));
+            cplWindowAdd(at, F, M);
         }
         if (k < gr.y)
         {

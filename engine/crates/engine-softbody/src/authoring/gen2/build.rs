@@ -288,6 +288,21 @@ pub const CLIP_COMPRESSION: f32 = 0.05;
 /// Damping ratio of every spring beam (census ζ 0.03–0.05).
 pub const ZETA: f32 = 0.04;
 
+/// A defined spring beam's damping (N·s/m): its definition's `c`, raised to
+/// the census ratio [`ZETA`] on its final spring `k` and the reduced mass
+/// `mu` of its nodes. A part defined with one damping for every beam (the
+/// seats' 38 N·s/m) on springs set by the node budget was at ζ 0.006–0.03:
+/// the empty front seat rocked at 12 Hz with a modal ζ of 0.008 and still
+/// moved 0.07 mm five seconds after spawn (`tests/sedan_jello.rs`). Stops
+/// and rubber mounts (`normal` false) keep their defined value.
+pub fn defined_damping(c: f32, normal: bool, k: f32, mu: f32) -> f32 {
+    if normal && k > 0.0 {
+        c.max(2.0 * ZETA * (k * mu).sqrt())
+    } else {
+        c
+    }
+}
+
 /// The explicit step's real bound with margin: the highest spring mode at
 /// ω_max·h ≤ 1.85 (symplectic Euler diverges past 2).
 pub const OMEGA_H: f32 = 1.85;
@@ -1200,11 +1215,14 @@ impl Car {
             (Part::BumperF | Part::BumperR, Some(z)) => z,
             _ => ZETA,
         };
-        let fixed_c: Vec<Option<f32>> = (0..self.beams.len())
-            .map(|j| fixed.get(&j).map(|f| f.c))
+        // A defined spring's damping is at least the census ratio
+        // ([`ZETA`]): a defined value is a floor, not a ceiling (see
+        // [`defined_damping`]). Stops and rubber mounts keep theirs.
+        let fixed_c: Vec<Option<(f32, bool)>> = (0..self.beams.len())
+            .map(|j| fixed.get(&j).map(|f| (f.c, f.kind == FixedKind::Normal)))
             .collect();
         let damp = |j: usize, k: f32, b: &Beam| match fixed_c[j] {
-            Some(c) => c,
+            Some((c, normal)) => defined_damping(c, normal, k, mu(b)),
             None => 2.0 * zeta_of(b) * (k * mu(b)).sqrt(),
         };
         // The cap: rows past row_cap × sedan1's bound scale their beams back
@@ -1410,7 +1428,8 @@ impl Car {
             let sp = b.role.spec(b.part);
             b.k = ks[j];
             if let Some(f) = self.fixed.get(&j) {
-                b.c = f.c;
+                let mu = m[b.a] * m[b.b] / (m[b.a] + m[b.b]);
+                b.c = defined_damping(f.c, f.kind == FixedKind::Normal, ks[j], mu);
                 b.deform = f.deform;
                 continue;
             }

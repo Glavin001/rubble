@@ -159,8 +159,17 @@ as `EB_SOLO_STEP` does). Built (`slang/kernels/explicit_beams_selfsplit.slang`, 
 branch alone has it): the coupling's candidate list (`cplListBegin`, lab-skin) clears its
 frame maxima at each dispatch's start, and `EB_SOLO_STEP` makes every step a dispatch,
 so its skin check would see only the current step's shape travel. Fixed here for
-`EB_SOLO_STEP` (cleared at the frame's start only, as the whole frame does); the split
-group path's members (`splitMember`) were not checked.
+`EB_SOLO_STEP` (cleared at the frame's start only, as the whole frame does). The split
+group path's members (`splitMember`, checked 2026-11-15 after merging the latest
+`perf/contact-groups`): their coupling step (`splitCoupleStep`) predated the list, so a
+member stepped without it (`cplCountBy`, no `cplListShapes`) and nothing cleared its
+maxima at the group's frame start (`splitGroupBegin`). The results were the same (the
+list is lossless), but the list's state differed from `contactGroup`'s. Fixed: the member
+runs `coupleStepMembers`' calls (the list's maxima and count pass) and `splitGroupBegin`
+clears the maxima; test `explicit_vehicles::the_group_split_with_the_coupling_is_bit_exact`.
+The fold's mark (`cplFoldMark`, workgroup memory) runs at every dispatch of the solo step,
+which is right: workgroup memory does not survive a dispatch; groups never fold (neither
+`contactGroup` nor `splitMember` marks it).
 
 Test plan (each bitwise against the in-workgroup path, every state word, every frame):
 spin at 20 rad/s free and into a wall; a piece torn off mid-list; retired nodes; a

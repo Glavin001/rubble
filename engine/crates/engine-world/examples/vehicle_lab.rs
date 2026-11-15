@@ -864,6 +864,67 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     line.join(", ")
                 );
             }
+            // `--ab-profile`: the same 20 frames with self-collision split, each of its
+            // dispatches in its own timed pass (`profile_self_split_frame`): GPU ms a frame
+            // per dispatch kind and the span, beside the frames' wall time (time only).
+            if std::env::args().any(|a| a == "--ab-profile") {
+                x.restore(&snap);
+                x.set_self_split(true);
+                x.wait();
+                let mut sums: Vec<(&str, f64, u32)> = Vec::new();
+                let t = std::time::Instant::now();
+                let mut frames = 0u32;
+                for _ in 0..20 {
+                    let Some(p) = x.profile_self_split_frame(34) else { break };
+                    frames += 1;
+                    for (k, (name, ms, n)) in p.into_iter().enumerate() {
+                        if sums.len() <= k {
+                            sums.push((name, 0.0, 0));
+                        }
+                        sums[k].1 += ms;
+                        sums[k].2 += n;
+                    }
+                }
+                let wall = t.elapsed().as_secs_f64() * 1e3 / f64::from(frames.max(1));
+                let f = f64::from(frames.max(1));
+                println!(
+                    "   self split profile at t {:.1} ({frames} frames, ms/frame, dispatches/frame): {}; wall {wall:.2}",
+                    lab.bench.t,
+                    sums.iter()
+                        .map(|(n, ms, c)| format!("{n} {:.3} ×{:.0}", ms / f, f64::from(*c) / f))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            // `--ab-skip`: the same 20 frames with self-collision split, its walk and/or
+            // pairs dispatches left out (time only: 0 all, 1 no walks, 2 no pairs, 3 neither).
+            if std::env::args().any(|a| a == "--ab-skip") {
+                let mut line = Vec::new();
+                for (k, m) in [0u32, 1, 2, 3, 0].into_iter().enumerate() {
+                    x.restore(&snap);
+                    x.set_self_split(true);
+                    x.set_self_split_skip(m);
+                    x.wait();
+                    x.take_pair_reuse_stats();
+                    let t = std::time::Instant::now();
+                    for _ in 0..20 {
+                        x.frame(34);
+                        x.wait();
+                    }
+                    line.push(format!("{m}: {:.2}", t.elapsed().as_secs_f64() * 1e3 / 20.0));
+                    let st = x.take_pair_reuse_stats();
+                    if k == 0 {
+                        line.push(format!(
+                            "(builds {:.1}/frame, reused steps {:.1}/frame, pairs a build {:.0})",
+                            st[0] as f64 / 20.0,
+                            st[1] as f64 / 20.0,
+                            st[2] as f64 / st[0].max(1) as f64
+                        ));
+                    }
+                }
+                x.set_self_split_skip(0);
+                println!("   self split skips at t {:.1} (ms/frame): {}", lab.bench.t, line.join(", "));
+            }
             let mut out = Vec::new();
             // `--ab-same`: both runs with the culls on (the harness's own repeatability).
             let second = std::env::args().any(|a| a == "--ab-same");

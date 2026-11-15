@@ -37,12 +37,8 @@ fn gpu() -> bool {
 
 #[test]
 fn cuda_explicit_sources_emitted() {
-    // A build that compiled only some modules (ENGINE_CUDA_EXPLICIT_MODULES, development)
-    // checks the modules it has.
-    if option_env!("ENGINE_CUDA_EXPLICIT_MODULES").is_some_and(|v| !v.trim().is_empty()) {
-        eprintln!("ENGINE_CUDA_EXPLICIT_MODULES set at build: checking only the modules built");
-        return;
-    }
+    // Every module's source, also in a build that embeds device code for only some
+    // (ENGINE_CUDA_EXPLICIT_MODULES).
     for m in MODULES {
         let k = CUDA_EXPLICIT_KERNELS
             .iter()
@@ -110,6 +106,109 @@ fn jbeam_car(v: Vec3) -> ExplicitBeams {
     s
 }
 
+fn sedan_crash() -> ExplicitBeams {
+    let mut cpu = sedan(Vec3::new(0.0, 0.0, 56.0 / 3.6));
+    let front = cpu.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+    cpu.boxes.push(StaticBox::centered(
+        Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
+        Vec3::new(3.0, 2.0, 1.0),
+    ));
+    cpu
+}
+
+fn jbeam_crash() -> ExplicitBeams {
+    let mut cpu = jbeam_car(Vec3::new(0.0, 0.0, 56.0 / 3.6));
+    let front = cpu.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+    cpu.boxes.push(StaticBox::centered(Vec3::new(0.0, 1.0, front + 0.3 + 1.0), Vec3::new(4.0, 3.0, 1.0)));
+    cpu
+}
+
+/// Two sedans, the rear one at 15 m/s half a metre behind the other.
+fn two_sedans() -> Vec<ExplicitBeams> {
+    let text = sedan_text();
+    let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
+    let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
+    let (zmin, zmax) = probe
+        .nodes
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.z), b.max(n.pos.z)));
+    let v = Vec3::new(0.0, 0.0, 15.0);
+    let mut rear = ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - low, 0.0), v, settings()).unwrap();
+    rear.roll_tyres(v);
+    let front = ExplicitBeams::from_truck(
+        &text,
+        Vec3::new(0.0, 0.01 - low, zmax - zmin + 0.5),
+        Vec3::ZERO,
+        settings(),
+    )
+    .unwrap();
+    vec![front, rear]
+}
+
+/// Every fleet this file's GPU tests upload.
+fn gpu_test_fleets() -> Vec<Vec<ExplicitBeams>> {
+    vec![
+        vec![sedan(Vec3::ZERO)],
+        vec![sedan_crash()],
+        vec![jbeam_car(Vec3::ZERO)],
+        vec![jbeam_crash()],
+        two_sedans(),
+    ]
+}
+
+/// The explicit modules CI embeds device code for (`ENGINE_CUDA_EXPLICIT_MODULES` in
+/// .github/workflows/engine-cuda.yml, read from `ci_explicit_modules.txt`) are exactly
+/// those this file's GPU tests load, derived from their fleets the way
+/// `CudaExplicitBeams::new` picks them. Fails on the CPU, before any GPU run, when a test
+/// needs a module CI would leave out (or the list names one no test loads).
+#[test]
+fn ci_explicit_modules_are_those_the_gpu_tests_load() {
+    let need: std::collections::BTreeSet<&str> = gpu_test_fleets()
+        .iter()
+        .flat_map(|f| CudaExplicitBeams::modules_for(f, None))
+        .collect();
+    let rewrite = "ENGINE_CUDA_WRITE_CI_MODULES=1 cargo test -p engine-cuda --release --test explicit_parity ci_explicit";
+    if std::env::var("ENGINE_CUDA_WRITE_CI_MODULES").as_deref() == Ok("1") {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/ci_explicit_modules.txt");
+        let mut text = String::from(
+            "# Explicit modules CI compiles to device code: those tests/explicit_parity.rs's GPU\n\
+             # tests load. Generated; rewrite with\n",
+        );
+        text.push_str(&format!("# {rewrite}\n"));
+        for n in &need {
+            text.push_str(n);
+            text.push('\n');
+        }
+        std::fs::write(path, text).unwrap();
+        eprintln!("wrote {path}");
+        return;
+    }
+    let listed: std::collections::BTreeSet<&str> = include_str!("../ci_explicit_modules.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    let missing: Vec<_> = need.difference(&listed).collect();
+    let unused: Vec<_> = listed.difference(&need).collect();
+    assert!(
+        missing.is_empty() && unused.is_empty(),
+        "ci_explicit_modules.txt is stale: the GPU tests need {missing:?} it leaves out, and it lists \
+         {unused:?} they do not load. Rewrite it with `{rewrite}`"
+    );
+    for name in &listed {
+        assert!(MODULES.iter().any(|m| m.name == *name), "ci_explicit_modules.txt: {name} is not a plan module");
+    }
+    // This build embeds them (a build filtered to other modules fails here, not on the GPU).
+    if CudaExplicitBeams::has_ptx() {
+        let absent: Vec<_> = need
+            .iter()
+            .filter(|n| CUDA_EXPLICIT_KERNELS.iter().any(|k| k.name == **n && k.image.is_empty()))
+            .collect();
+        assert!(absent.is_empty(), "this build has no device code for {absent:?}, which the GPU tests load");
+    }
+    eprintln!("{} explicit modules for the GPU tests: {}", need.len(), need.iter().copied().collect::<Vec<_>>().join(","));
+}
+
 fn rms_max(a: &[Vec3], b: &[Vec3]) -> (f32, f32) {
     let mut sum = 0.0f64;
     let mut max = 0.0f32;
@@ -149,12 +248,7 @@ fn cuda_sedan_at_rest_and_crash_match_cpu() {
         eprintln!("CUDA (wide {wide}) at rest 1 s: rms {:.3} mm max {:.3} mm", rms * 1e3, max * 1e3);
         assert!(rms < 3e-3 && max < 1e-2, "rms {rms} max {max}");
 
-        let mut cpu = sedan(Vec3::new(0.0, 0.0, 56.0 / 3.6));
-        let front = cpu.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
-        cpu.boxes.push(StaticBox::centered(
-            Vec3::new(0.0, 1.0, front + 0.05 + 1.0),
-            Vec3::new(3.0, 2.0, 1.0),
-        ));
+        let mut cpu = sedan_crash();
         let mut g = run_both(&mut cpu, 36, wide);
         let (c_broken, c_bent) = cpu.damage();
         let beams = &g.beams().unwrap()[0];
@@ -177,10 +271,7 @@ fn cuda_jbeam_pressure_car_matches_cpu() {
     eprintln!("CUDA JBeam car at rest 2 s: max {:.3} mm, broken {gb}", max * 1e3);
     assert_eq!((cpu.damage().0, gb), (0, 0));
     assert!(max < 5e-3, "{max}");
-    let v = Vec3::new(0.0, 0.0, 56.0 / 3.6);
-    let mut cpu = jbeam_car(v);
-    let front = cpu.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
-    cpu.boxes.push(StaticBox::centered(Vec3::new(0.0, 1.0, front + 0.3 + 1.0), Vec3::new(4.0, 3.0, 1.0)));
+    let mut cpu = jbeam_crash();
     let mut g = run_both(&mut cpu, 60, false);
     let gb = g.beams().unwrap()[0].iter().filter(|b| b.broken).count();
     let cb = cpu.damage().0;
@@ -193,24 +284,7 @@ fn cuda_two_sedans_rear_end_match_cpu() {
     if !gpu() {
         return;
     }
-    let text = sedan_text();
-    let probe = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings()).unwrap();
-    let low = probe.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
-    let (zmin, zmax) = probe
-        .nodes
-        .iter()
-        .fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.z), b.max(n.pos.z)));
-    let v = Vec3::new(0.0, 0.0, 15.0);
-    let mut rear = ExplicitBeams::from_truck(&text, Vec3::new(0.0, 0.01 - low, 0.0), v, settings()).unwrap();
-    rear.roll_tyres(v);
-    let front = ExplicitBeams::from_truck(
-        &text,
-        Vec3::new(0.0, 0.01 - low, zmax - zmin + 0.5),
-        Vec3::ZERO,
-        settings(),
-    )
-    .unwrap();
-    let fleet = vec![front, rear];
+    let fleet = two_sedans();
     let mut g = CudaExplicitBeams::new(&fleet).unwrap();
     assert!(g.contact_active());
     let mut w = ExplicitBeamsWorld::new(fleet);
