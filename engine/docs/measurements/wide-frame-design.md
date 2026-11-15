@@ -236,8 +236,8 @@ no surface) runs these barriers (`sync()`, two barriers each) per substep, from
 
 ≈8–9 syncs a reusing substep, ≈13 a building one. §1.1 measured two phases with a barrier
 each at ≈18 µs a substep for this car; the step runs ≈135 µs a substep, so the barriers
-alone (≈0.4–0.5 µs a sync with the frame's lanes waiting on the slowest) are a few µs of
-that, and the rest is each phase's longest lane chain. Plan, measured first, each change
+alone (0.19–0.25 µs a sync measured on an empty kernel, contact-groups-design.md §2; more
+when lanes wait on the slowest) are a few µs of that, and the rest is each phase's longest lane chain. Plan, measured first, each change
 lossless and bitwise against today's frame:
 
 1. **Measure the barrier share** with the existing ablation masks on the self split's step
