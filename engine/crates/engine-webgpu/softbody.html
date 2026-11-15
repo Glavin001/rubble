@@ -190,9 +190,9 @@
     const buggy = carKind === 'buggy' && !EXPLICIT;
     const carSel = document.getElementById('carSel');
     for (const [id, t] of Object.entries(CARS)) carSel.add(new Option(t, id, false, id === carKind));
-    // Rubble's generated sedan (the vehicle lab's default car; a local export served at
-    // __mods/sedan_new): listed when it is there, loaded as that folder on the explicit
-    // solver with raycast wheels.
+    // Rubble's generated sedan (the vehicle lab's default car, at __mods/sedan_new:
+    // build-web.sh makes it by running the generator): listed when it is there, loaded
+    // as that folder on the explicit solver with raycast wheels.
     const GEN = { mod: '/__mods/sedan_new', pc: 'sedan/sedan.pc' };
     fetch(`${GEN.mod}/files.json`, { method: 'HEAD' }).then((r) => {
       if (!r.ok) return;
