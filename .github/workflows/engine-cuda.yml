@@ -50,6 +50,10 @@ env:
   SLANGC: /opt/slang/bin/slangc
   NVCC: /usr/local/cuda-12.8/bin/nvcc
   ENGINE_CUDA_REQUIRE_PTX: "1"
+  # SASS only for the GPU the run uses: the T4 (sm_75) of every push/PR run; a manual
+  # run on another GPU (L40S: sm_89) adds it. Any other GPU JIT-compiles the PTX.
+  ENGINE_CUDA_SASS: ${{ (inputs.gpu || 'T4') == 'T4' && '75' || '75,89' }}
+  ENGINE_CUDA_FATBIN_CACHE: ${{ github.workspace }}/.engine-cuda-fatbins
   # nvcc on the explicit vehicle kernels needs several GB each: one per core ran the
   # 16 GB runner out of memory (the runner was lost mid-build). Two at a time.
   RUBBLE_BUILD_JOBS: "2"
@@ -85,13 +89,46 @@ jobs:
         if: steps.green.outputs.cache-hit != 'true'
         with:
           workspaces: engine
+      # Device code only for the explicit modules the GPU tests load (derived from their
+      # fleets; tests/explicit_parity.rs fails if the list is stale). Every module's CUDA
+      # source is still generated and checked. Set for the job: the package step's
+      # cargo must see the same value, or the build script reruns.
+      - name: Explicit modules the tests load
+        if: steps.green.outputs.cache-hit != 'true'
+        run: echo "ENGINE_CUDA_EXPLICIT_MODULES=$(grep -v '^#' engine/crates/engine-cuda/ci_explicit_modules.txt | paste -sd, -)" >> "$GITHUB_ENV"
+      # Fatbins by content (ENGINE_CUDA_FATBIN_CACHE, engine-slang-build): a kernel whose
+      # CUDA source, nvcc and flags are unchanged is not recompiled. A kernel edit
+      # changes every explicit frame module, rarely the rigid and terrain kernels.
+      - name: Restore fatbin cache
+        if: steps.green.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .engine-cuda-fatbins
+          key: engine-cuda-fatbins-${{ github.run_id }}
+          restore-keys: engine-cuda-fatbins-
       - name: CPU tests (sources, device code embedded; GPU tests skip)
         if: steps.green.outputs.cache-hit != 'true'
         working-directory: engine
         run: |
           # Memory every 60 s, so a lost runner leaves evidence in the log.
           (while sleep 60; do echo "mem: $(free -m | awk 'NR==2{print $3"/"$2" MB used"}')"; done) &
+          echo "runner: $(nproc) cores, $(free -m | awk 'NR==2{print $2}') MB"
+          mkdir -p "$ENGINE_CUDA_FATBIN_CACHE" && touch "$RUNNER_TEMP/fatbins-start"
+          echo "fatbin cache: $(find "$ENGINE_CUDA_FATBIN_CACHE" -name '*.fatbin' | wc -l) entries restored"
           cargo test -p engine-cuda --release
+          echo "fatbin cache: $(find "$ENGINE_CUDA_FATBIN_CACHE" -name '*.fatbin' -newer "$RUNNER_TEMP/fatbins-start" | wc -l) entries used or added"
+      - name: Save fatbin cache
+        if: always() && steps.green.outputs.cache-hit != 'true'
+        run: |
+          # Only the entries this build used or added.
+          if [ -f "$RUNNER_TEMP/fatbins-start" ]; then
+            find "$ENGINE_CUDA_FATBIN_CACHE" -type f ! -newer "$RUNNER_TEMP/fatbins-start" -delete
+          fi
+      - if: always() && steps.green.outputs.cache-hit != 'true' && hashFiles('.engine-cuda-fatbins/*.fatbin') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .engine-cuda-fatbins
+          key: engine-cuda-fatbins-${{ github.run_id }}
       - name: Package test binaries
         if: steps.green.outputs.cache-hit != 'true'
         run: |

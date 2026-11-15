@@ -186,10 +186,12 @@ fn explicit_kernels(
     std::fs::create_dir_all(&dir)?;
     let source = root.join("kernels/explicit_beams.slang");
     let slots = vk_binding_slots(std::slice::from_ref(&source))?;
-    // `ENGINE_CUDA_EXPLICIT_MODULES=a,b*,...` (development): compile only the modules
-    // named (a trailing `*` is a prefix). nvcc takes minutes per explicit module, and a
-    // scenario needs a handful; the others are listed with no device code, and
-    // `CudaExplicitBeams` names any it needs that were left out.
+    // `ENGINE_CUDA_EXPLICIT_MODULES=a,b*,...`: device code only for the modules named (a
+    // trailing `*` is a prefix). nvcc takes minutes per explicit module, and a scenario
+    // needs a handful; CI builds the ones its tests load (ci_explicit_modules.txt). Every
+    // module's CUDA source is still generated and checked (hazards, loop caps); the
+    // others are listed with no device code, and `CudaExplicitBeams` names any it needs
+    // that were left out.
     let only: Option<Vec<String>> = env::var("ENGINE_CUDA_EXPLICIT_MODULES")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -203,9 +205,7 @@ fn explicit_kernels(
         })
     };
     let compiled = engine_slang_build::par_map(MODULES, |m| -> Compiled {
-        if !wanted(m.name) {
-            return Ok((CudaKernel { threads: [0, 0, 0], fields: Vec::new() }, 0, false, false));
-        }
+        // Every module is generated and checked; only the device code is filtered.
         let cu = dir.join(format!("{}.cu", m.name));
         let kernel = compile_kernel_with_defines(slangc, root, &source, m.entry, &cu, m.defines)?;
         let text = std::fs::read_to_string(&cu)?;
@@ -227,6 +227,7 @@ fn explicit_kernels(
             "{}: the CUDA source has no loop caps (explicit_loop_cap.slang)",
             m.name
         );
+        let nvcc = nvcc.filter(|_| wanted(m.name));
         if let Some(nvcc) = nvcc {
             let threads = kernel.threads.iter().product();
             engine_slang_build::cuda_layout::fatbin_threads(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass, threads)?;

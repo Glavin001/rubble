@@ -99,6 +99,31 @@ impl CudaExplicitBeams {
         Self::has_ptx() && crate::CudaSim::available()
     }
 
+    /// The kernels [`Self::new`] loads for a fleet of this layout.
+    fn kernels_for_layout(layout: &ExplicitLayout) -> Vec<Kernel> {
+        let mut wanted = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact, Kernel::ContactBig];
+        wanted.extend((0..plan::VV_PASSES.len()).map(Kernel::Vv));
+        if layout.wide_ok {
+            wanted.extend((0..plan::WIDE_PASSES.len()).map(Kernel::Wide));
+        }
+        wanted
+    }
+
+    /// The plan modules (`explicit_plan::MODULES` names) [`Self::new`] loads for a
+    /// fleet of this layout: the device code a build must embed to run it.
+    pub fn modules_for_layout(layout: &ExplicitLayout) -> Vec<&'static str> {
+        Self::kernels_for_layout(layout)
+            .iter()
+            .map(|k| k.module_for(layout.aero, layout.lanes, layout.surface))
+            .collect()
+    }
+
+    /// [`Self::modules_for_layout`] of `vehicles` (host only, no device): e.g. the
+    /// modules a test's fleets need (`ci_explicit_modules.txt`).
+    pub fn modules_for(vehicles: &[ExplicitBeams], cap: Option<CouplingCapacity>) -> Vec<&'static str> {
+        Self::modules_for_layout(&ExplicitUpload::new(vehicles, cap).layout)
+    }
+
     /// Upload `vehicles` (their current state) on device 0.
     pub fn new(vehicles: &[ExplicitBeams]) -> anyhow::Result<Self> {
         Self::with_coupling(vehicles, None)
@@ -133,16 +158,11 @@ impl CudaExplicitBeams {
             sizes.push(bytes.len() as u64);
         }
 
-        let mut wanted = vec![Kernel::Frame, Kernel::Solo, Kernel::Contact, Kernel::ContactBig];
-        wanted.extend((0..plan::VV_PASSES.len()).map(Kernel::Vv));
-        if layout.wide_ok {
-            wanted.extend((0..plan::WIDE_PASSES.len()).map(Kernel::Wide));
-        }
+        let wanted = Self::kernels_for_layout(&layout);
         // Every module this fleet needs that the build left out (ENGINE_CUDA_EXPLICIT_MODULES),
         // named at once.
-        let missing: Vec<&str> = wanted
-            .iter()
-            .map(|k| k.module_for(layout.aero, layout.lanes, layout.surface))
+        let missing: Vec<&str> = Self::modules_for_layout(&layout)
+            .into_iter()
             .filter(|name| CUDA_EXPLICIT_KERNELS.iter().any(|t| t.name == *name && t.image.is_empty()))
             .collect();
         anyhow::ensure!(
