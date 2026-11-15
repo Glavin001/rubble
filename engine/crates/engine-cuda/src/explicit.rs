@@ -183,7 +183,22 @@ impl CudaExplicitBeams {
                 "explicit module {name} has no device code in this build: add it to \
                  ENGINE_CUDA_EXPLICIT_MODULES (or unset that variable to build every module)"
             );
-            let module = unsafe { result::module::load_data(t.image.as_ptr() as *const c_void) }
+            // Measurement only: `RUBBLE_CUDA_EXPLICIT_DIR=dir` loads `dir/NAME.fatbin` in place
+            // of this build's (another build's device code of the same module, same
+            // bindings): explicit_ab's `env.RUBBLE_CUDA_EXPLICIT_DIR=...` variant runs an
+            // older kernel against this one from one state.
+            // (A module the directory lacks: this build's, named on stderr.)
+            let other = std::env::var("RUBBLE_CUDA_EXPLICIT_DIR")
+                .ok()
+                .filter(|d| !d.is_empty())
+                .and_then(|d| {
+                    let path = std::path::Path::new(&d).join(format!("{name}.fatbin"));
+                    let read = std::fs::read(&path).ok();
+                    eprintln!("RUBBLE_CUDA_EXPLICIT_DIR: {name}: {}", if read.is_some() { "from the directory" } else { "this build's (not in the directory)" });
+                    read
+                });
+            let image: &[u8] = other.as_deref().unwrap_or(t.image);
+            let module = unsafe { result::module::load_data(image.as_ptr() as *const c_void) }
                 .map_err(|e| anyhow::anyhow!("CUDA: load module {name}: {e:?}"))?;
             let function = unsafe { result::module::get_function(module, CString::new(t.entry)?) }
                 .map_err(|e| anyhow::anyhow!("CUDA: function {name}: {e:?}"))?;

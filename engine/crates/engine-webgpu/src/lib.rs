@@ -27,7 +27,7 @@ mod soft_skin;
 pub use compute_spec::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate, ComputeSpec};
 #[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
-    explicit_beams_shipped_wgsl, group_split_default, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
+    explicit_beams_shipped_wgsl, group_split_default, set_explicit_module_override, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
     GpuBeam, GpuSnapshot, KernelVariant, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
 #[cfg(feature = "gpu")]

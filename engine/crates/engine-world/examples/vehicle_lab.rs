@@ -739,7 +739,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     anyhow::ensure!(gpu, "mountain-perf runs in the GPU World (--mode gpu)");
     let secs: f64 = arg("--secs").and_then(|x| x.parse().ok()).unwrap_or(40.0);
     let scene = arg("--scene").unwrap_or_else(|| "mountain".into());
-    let script = json!({ "scene": scene, "surface": arg("--surface").as_deref() == Some("1"), "events": [] });
+    // `--self-split 1`: the page's default (self-collision across the GPU).
+    let script = json!({ "scene": scene, "surface": arg("--surface").as_deref() == Some("1"),
+        "selfSplit": arg("--self-split").as_deref() == Some("1"), "events": [] });
     let opts = options(&script);
     println!(
         "options: {scene}, surface {} {:?}",
@@ -809,6 +811,17 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let selfsplit_ab = arg("--ab-switch").as_deref() == Some("selfsplit");
     // `--ab-switch beams`: the beam phase on its records sorted by kind against file order.
     let beams_ab = arg("--ab-switch").as_deref() == Some("beams");
+    // `--ab-switch kernel --ab-kernel-dir DIR`: this build's explicit kernel (A) against
+    // the modules' WGSL in DIR (B: e.g. a copy of an older build's OUT_DIR/wgsl;
+    // `engine_webgpu::set_explicit_module_override`). B is a second lab of the same
+    // options whose host creates its pipelines from DIR, given A's state at each --ab
+    // time (the snapshot's bytes, the car's retired nodes and piece labels): every state
+    // word compared bit for bit, and each one's ms a frame (B's pipelines compiled
+    // before its timed frames).
+    let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
+    let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
+    anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
+    let mut other = None;
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
         if beams_ab {
@@ -926,9 +939,46 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 println!("   self split skips at t {:.1} (ms/frame): {}", lab.bench.t, line.join(", "));
             }
             let mut out = Vec::new();
+            if kernel_ab {
+                let timed = |y: &mut engine_webgpu::ExplicitBeamsGpu, snap: &engine_webgpu::GpuSnapshot| {
+                    // Two untimed frames first (a lazily created pipeline compiles there).
+                    for timed in [false, true] {
+                        y.restore(snap);
+                        y.wait();
+                        let t = std::time::Instant::now();
+                        for _ in 0..if timed { 20 } else { 2 } {
+                            y.frame(34);
+                            y.wait();
+                        }
+                        if timed {
+                            return t.elapsed().as_secs_f64() * 1e3 / 20.0;
+                        }
+                    }
+                    unreachable!()
+                };
+                let ms = timed(x, &snap);
+                out.push((ms, x.state_words(), x.coupling_words()));
+                let bytes = x.snapshot_to_bytes(&snap);
+                let retired = lab.bench.debris.retired.clone();
+                engine_webgpu::set_explicit_module_override(kernel_dir.clone());
+                if other.is_none() {
+                    other = Some(Lab::build(GpuContext::Default, template, options(&script), |_| {})?);
+                }
+                let (wb, _) = other.as_mut().expect("lab B");
+                let y = wb.explicit_vehicles_mut().expect("vehicles B");
+                if retired.iter().any(|&r| r) {
+                    y.set_retired(0, &retired).map_err(anyhow::Error::msg)?;
+                }
+                let zeros = vec![0u8; n_nodes];
+                y.set_piece_labels(0, if labels.is_empty() { &zeros } else { &labels });
+                let snap_b = y.snapshot_from_bytes(&bytes);
+                let ms = timed(y, &snap_b);
+                out.push((ms, y.state_words(), y.coupling_words()));
+                engine_webgpu::set_explicit_module_override(None);
+            }
             // `--ab-same`: both runs with the culls on (the harness's own repeatability).
             let second = std::env::args().any(|a| a == "--ab-same");
-            for on in [true, second] {
+            for on in if kernel_ab { vec![] } else { vec![true, second] } {
                 x.restore(&snap);
                 switch(x, on, &labels);
                 x.wait();
@@ -970,7 +1020,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             println!(
                 "   A/B at t {:.1}: {} on {:.2} ms/frame, off {:.2} ms/frame; state bit for bit: {same}",
                 lab.bench.t,
-                if beams_ab {
+                if kernel_ab {
+                    "this kernel (on) / --ab-kernel-dir's (off)"
+                } else if beams_ab {
                     "sorted beams"
                 } else if selfsplit_ab {
                     "self split"
