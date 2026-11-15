@@ -321,6 +321,18 @@ pub fn pack_soft(
     }
 }
 
+/// The soft solver's stage-1 raycast vehicle for `desc` (its rigid core's wheels,
+/// suspension, brakes, steering and drive), from the desc's node masses: the model
+/// the explicit solver's raycast wheels reuse ([`crate::explicit_drive`]). `None`
+/// without wheels.
+pub fn raycast_core(desc: &SoftVehicleDesc, opts: &SpawnOptions) -> Option<CorePlan> {
+    if desc.wheels.is_empty() {
+        return None;
+    }
+    let mut masses: Vec<f32> = desc.nodes.iter().map(|nd| nd.mass.max(1.0e-3)).collect();
+    Some(core_plan(desc, &mut masses, opts))
+}
+
 fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) -> CorePlan {
     let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
     let frame = frame_nodes(desc);

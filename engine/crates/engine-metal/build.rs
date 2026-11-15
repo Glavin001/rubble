@@ -171,6 +171,78 @@ fn main() -> Result<()> {
     println!("cargo:rustc-env=ENGINE_MSL_DIR={}", msl_dir.display());
     rigid_kernels(&slang_root, &out_dir)?;
     terrain_kernels(&slang_root, &out_dir)?;
+    explicit_kernels(&slang_root, &out_dir)?;
+    Ok(())
+}
+
+/// The explicit-beams solver's modules (`engine_exec::explicit_plan::MODULES`:
+/// name, entry, defines), Slang → MSL from `explicit_beams.slang` with each
+/// global's Metal buffer mapped to the plan's binding (its `[[vk::binding]]`),
+/// so `MetalExplicitBeams` replays the WebGPU host's commands on the same
+/// buffers. Emits `explicit_kernels.rs`.
+fn explicit_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<()> {
+    use engine_exec::explicit_plan::MODULES;
+    use engine_slang_build::msl_layout::{compile_kernel_with_defines, msl_buffers, vk_binding_slots};
+    use std::fmt::Write;
+    let slangc = find_slangc()?;
+    let dir = out_dir.join("explicit_msl");
+    std::fs::create_dir_all(&dir)?;
+    let source = root.join("kernels/explicit_beams.slang");
+    let slots = vk_binding_slots(std::slice::from_ref(&source))?;
+    let compiled = engine_slang_build::par_map(MODULES, |m| {
+        let dest = dir.join(format!("{}.metal", m.name));
+        let r = compile_kernel_with_defines(&slangc, root, &source, m.entry, &dest, m.defines);
+        (dest, r)
+    });
+    let mut table = String::from(
+        "/// Explicit-beams modules: (plan module, entry, MSL, threads, [(metal buffer, plan binding)])\n\
+         pub static EXPLICIT_KERNELS: &[ExplicitKernel] = &[\n",
+    );
+    for (m, (dest, r)) in MODULES.iter().zip(compiled) {
+        let (msl, threads) = r?;
+        // The kernel caps its loops in its source (explicit_loop_cap.slang): every
+        // module with a loop carries them on this target too.
+        anyhow::ensure!(
+            msl.contains("ebLoopCapHit") || !(msl.contains("for(") || msl.contains("for (") || msl.contains("while")),
+            "{}: the MSL has no loop caps (explicit_loop_cap.slang)",
+            m.name
+        );
+        let mut binds = String::new();
+        for (global, index) in msl_buffers(&msl, m.entry, "[[kernel]]")? {
+            let slot = slots
+                .get(&global)
+                .ok_or_else(|| anyhow::anyhow!("{}: global {global} has no vk::binding", m.name))?;
+            write!(binds, "({index}, {slot}), ")?;
+        }
+        writeln!(
+            table,
+            "    ExplicitKernel {{ name: {:?}, entry: {:?}, msl: include_str!({:?}), threads: {threads:?}, binds: &[{binds}] }},",
+            m.name,
+            m.entry,
+            dest.display().to_string()
+        )?;
+    }
+    table.push_str("];\n");
+    // Tests only: the loop caps on a runaway (tests/explicit_loop_cap.rs).
+    let test_source = root.join("kernels/explicit_loop_cap_test.slang");
+    let test_slots = vk_binding_slots(std::slice::from_ref(&test_source))?;
+    let entry = "explicit_loop_cap_test";
+    let dest = dir.join(format!("{entry}.metal"));
+    let (msl, threads) = compile_kernel_with_defines(&slangc, root, &test_source, entry, &dest, &[])?;
+    let mut binds = String::new();
+    for (global, index) in msl_buffers(&msl, entry, "[[kernel]]")? {
+        let slot = test_slots
+            .get(&global)
+            .ok_or_else(|| anyhow::anyhow!("{entry}: global {global} has no vk::binding"))?;
+        write!(binds, "({index}, {slot}), ")?;
+    }
+    writeln!(
+        table,
+        "/// Tests only: `explicit_loop_cap_test.slang` (bindings 0 gAcc, 1 gOut).\n\
+         pub static LOOP_CAP_TEST: ExplicitKernel = ExplicitKernel {{ name: {entry:?}, entry: {entry:?}, msl: include_str!({:?}), threads: {threads:?}, binds: &[{binds}] }};",
+        dest.display().to_string()
+    )?;
+    std::fs::write(out_dir.join("explicit_kernels.rs"), table)?;
     Ok(())
 }
 

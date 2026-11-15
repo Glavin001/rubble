@@ -187,6 +187,7 @@ fn compare_steps(
     let mut det = 0;
     let mut retried = 0;
     let mut groups = 0;
+    let mut members = 0;
     let mut same_as_ref = 0;
     let mut ref_retries = 0;
     let frames: u32 = segments.iter().map(|s| s.0).sum();
@@ -218,6 +219,7 @@ fn compare_steps(
         let b = run(&mut gpu, &snap, KernelVariant::Current, steps);
         let grouped = gpu.contact_groups();
         groups = groups.max(grouped);
+        members = members.max(gpu.contact_group_sizes().into_iter().max().unwrap_or(0));
         if let Some(d) = first_diff(&b, &run(&mut gpu, &snap, KernelVariant::Current, steps)) {
             panic!("{label}: frame {f}: the current kernel is not deterministic: {d}");
         }
@@ -278,7 +280,7 @@ fn compare_steps(
          frozen reference ({ref_retries} retries); ordered hits = \
          the baseline's one-lane order in {det} ({retried} retries); {break_races} frames with a \
          break-exception race (not compared), {contact_races} with a contact race in the plain \
-         baseline; contact groups seen {groups}"
+         baseline; contact groups seen {groups}, the largest of {members} members"
     );
     assert_eq!(det + break_races, frames);
     assert_eq!(same_as_ref, frames);
@@ -316,7 +318,11 @@ fn sedan_alone_and_into_a_wall_bitwise() {
 #[test]
 fn sedans_head_on_and_t_bone_bitwise() {
     let s = repo_sedan();
-    let o = Vec3::new(100.0, 0.0, 100.0);
+    // At the World origin: vehicle contact runs in the owner's frame (vvRel) while the
+    // frozen reference runs it in World coordinates; the two are the same arithmetic
+    // only while every vehicle's origin is 0 (never re-based: within REBASE_RADIUS).
+    // (explicit_far_origin_gpu.rs covers contact away from the origin.)
+    let o = Vec3::ZERO;
     compare_steps("sedan head-on", &pair(&s, o, 0.85 * SPEED, 1.5, false), &[(2, STEPS), (300, 1), (40, STEPS)], true);
     compare_steps("sedan T-bone", &pair(&s, o, 0.85 * SPEED, 1.0, true), &[(2, STEPS), (300, 1), (40, STEPS)], true);
 }
@@ -391,7 +397,11 @@ fn mixed_fleet_bitwise() {
 /// head-on pairs side by side): contact groups of three and four, the owners' levels.
 fn chain_and_four(text: &str, name: &str) {
     let g = geo(text);
-    let o = Vec3::new(100.0, 0.0, 100.0);
+    // At the World origin: vehicle contact runs in the owner's frame (vvRel) while the
+    // frozen reference runs it in World coordinates; the two are the same arithmetic
+    // only while every vehicle's origin is 0 (never re-based: within REBASE_RADIUS).
+    // (explicit_far_origin_gpu.rs covers contact away from the origin.)
+    let o = Vec3::ZERO;
     let len = g.along.1 - g.along.0;
     let chain = vec![
         spawn(text, o, 0.0, g.forward * (0.85 * SPEED)),
@@ -403,6 +413,21 @@ fn chain_and_four(text: &str, name: &str) {
     let mut four = pair(text, o, 0.85 * SPEED, 1.5, false);
     four.extend(pair(text, o + g.lateral * (width + 0.6), 0.7 * SPEED, 1.5, false));
     compare_steps(&format!("{name} two pairs side by side"), &four, &[(2, STEPS), (200, 1), (30, STEPS)], true);
+}
+
+/// Five cars nose to tail, the first driving into the four standing: a contact group
+/// of more than four members (the larger groups' module, Kernel::ContactBig).
+#[test]
+fn a_group_of_five_bitwise() {
+    let text = repo_sedan();
+    let g = geo(&text);
+    let o = Vec3::ZERO;
+    let len = g.along.1 - g.along.0;
+    let mut chain = vec![spawn(&text, o, 0.0, g.forward * (0.85 * SPEED))];
+    for k in 1..5 {
+        chain.push(spawn(&text, o + g.forward * (k as f32 * (len + 0.5) + 1.0), 0.0, Vec3::ZERO));
+    }
+    compare_steps("sedan chain of five", &chain, &[(2, STEPS), (120, 1), (30, STEPS)], true);
 }
 
 #[test]

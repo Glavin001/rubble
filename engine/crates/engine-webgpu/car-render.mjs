@@ -9,6 +9,7 @@
 // strain changes; off unless the caller passes a dt.
 
 import { createSoftSkinner } from './soft-skin.mjs';
+import { FX_STRUCT_WGSL, FX_COMPUTE_WGSL, FX_DRAW_WGSL, FX_BLEND, fxBufferSize } from './fx-particles.mjs';
 
 const FX_N = 16384;
 
@@ -95,8 +96,7 @@ const COMPUTE_WGSL = /* wgsl */`
 struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
   linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
 struct Counts { verts: u32, tris: u32, seed: u32, dt: f32 };
-struct Particle { pos: vec3f, life: f32, vel: vec3f, kind: u32 };
-struct Particles { head: atomic<u32>, pad0: u32, pad1: u32, pad2: u32, p: array<Particle, ${FX_N}> };
+${FX_STRUCT_WGSL(FX_N)}
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
 @group(0) @binding(2) var<storage, read> tris: array<vec4u>;
 @group(0) @binding(3) var<storage, read> faces: array<vec4f>;
@@ -104,24 +104,12 @@ struct Particles { head: atomic<u32>, pad0: u32, pad1: u32, pad2: u32, p: array<
 @group(0) @binding(5) var<storage, read_write> prevStrain: array<f32>;
 @group(0) @binding(6) var<storage, read> vmeta: array<vec4u>;
 @group(0) @binding(7) var<uniform> counts: Counts;
-@group(0) @binding(8) var<storage, read_write> fx: Particles;
-
-fn rnd(a: u32, b: u32) -> f32 {
-  var x = a * 747796405u + b * 2891336453u + counts.seed * 1664525u;
-  x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
-  return f32((x >> 22u) ^ x) / 4294967295.0;
-}
-fn rndDir(a: u32, b: u32) -> vec3f {
-  let z = rnd(a, b) * 2.0 - 1.0;
-  let ph = rnd(a, b + 7u) * 6.28318;
-  let r = sqrt(max(1.0 - z * z, 0.0));
-  return vec3f(r * cos(ph), z, r * sin(ph));
-}
-// kind: 0 spark, 1 glass, 2 paint chip, 3 dust; car index << 8.
-fn spawn(pos: vec3f, vel: vec3f, life: f32, kind: u32) {
-  let i = atomicAdd(&fx.head, 1u) % ${FX_N}u;
-  fx.p[i] = Particle(pos, life, vel, kind);
-}
+@group(0) @binding(8) var<storage, read_write> fx: FxParticles;
+${FX_COMPUTE_WGSL(FX_N, 'counts.seed')}
+fn rnd(a: u32, b: u32) -> f32 { return fxRnd(a, b); }
+fn rndDir(a: u32, b: u32) -> vec3f { return fxRndDir(a, b); }
+// kind: 0 spark, 1 glass, 2 paint chip, 3 dust; car index << 8 (fx-particles.mjs).
+fn spawn(pos: vec3f, vel: vec3f, life: f32, kind: u32) { fxSpawn(pos, vel, life, kind); }
 
 // Effects from what changed since the last frame (engine faces: w = strain, −1
 // torn): a tear sheds a chip, a pane that lets go sheds a shard, a sudden
@@ -154,22 +142,7 @@ fn spawn(pos: vec3f, vel: vec3f, life: f32, kind: u32) {
 
 // Particles: gravity, drag, a bouncing ground at y = 0.
 @compute @workgroup_size(64) fn particles(@builtin(global_invocation_id) id: vec3u) {
-  let i = id.x;
-  if (i >= ${FX_N}u) { return; }
-  var q = fx.p[i];
-  if (q.life <= 0.0 || counts.dt <= 0.0) { return; }
-  let dt = counts.dt;
-  let kind = q.kind & 255u;
-  let drag = select(select(0.4, 3.0, kind == 3u), 1.2, kind == 0u);
-  q.vel = q.vel * exp(-drag * dt) + vec3f(0.0, select(-9.81, 0.4, kind == 3u), 0.0) * dt;
-  q.pos += q.vel * dt;
-  if (q.pos.y < 0.01) {
-    q.pos.y = 0.01;
-    q.vel = vec3f(q.vel.x * 0.55, abs(q.vel.y) * select(0.25, 0.4, kind == 1u), q.vel.z * 0.55);
-    if (kind == 0u) { q.life -= 0.1; }
-  }
-  q.life -= dt;
-  fx.p[i] = q;
+  fxStep(id.x, counts.dt, 0.0);
 }
 `;
 
@@ -208,56 +181,14 @@ fn carVertex(vi: u32, vp: mat4x4f) -> Out {
 }
 @vertex fn vsCar(@builtin(vertex_index) vi: u32) -> Out { return carVertex(vi, frame.viewProj); }
 
-struct Particle { pos: vec3f, life: f32, vel: vec3f, kind: u32 };
-struct Particles { head: u32, pad0: u32, pad1: u32, pad2: u32, p: array<Particle, ${FX_N}> };
-@group(0) @binding(7) var<storage, read> fx: Particles;
-struct FxOut { @builtin(position) clip: vec4f, @location(0) c: vec4f, @location(1) uv: vec2f };
+${FX_STRUCT_WGSL(FX_N)}
+@group(0) @binding(7) var<storage, read> fx: FxParticlesRead;
+${FX_DRAW_WGSL}
+fn fxChip(kind: u32, h: f32) -> vec3f { return tonemap(toLinear(paintColor(kind >> 8u)) * (0.4 + 0.6 * h)); }
 @vertex fn vsFx(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> FxOut {
-  let q = fx.p[inst];
-  let kind = q.kind & 255u;
-  var o: FxOut;
-  let corner = array<vec2f, 6>(vec2f(-1, -1), vec2f(1, -1), vec2f(1, 1), vec2f(-1, -1), vec2f(1, 1), vec2f(-1, 1))[vi];
-  o.uv = corner;
-  let toEye = normalize(frame.eye.xyz - q.pos);
-  var right = normalize(cross(toEye, vec3f(0.0, 1.0, 0.0)));
-  var up = cross(right, toEye);
-  var p = q.pos;
-  let h = f32(inst * 2654435761u % 1000u) / 1000.0;
-  if (kind == 0u) {
-    // Spark: a streak along its velocity.
-    let v = q.vel;
-    let len = clamp(length(v) * 0.02, 0.02, 0.25);
-    let d = normalize(v + vec3f(1e-4));
-    let side = normalize(cross(d, toEye));
-    p = q.pos - d * len * (corner.y * 0.5 + 0.5) + side * corner.x * 0.006;
-    let fade = clamp(q.life * 3.0, 0.0, 1.0);
-    o.c = vec4f(vec3f(1.0, 0.7, 0.3) * 1.8 * fade, 0.0);
-  } else if (kind == 1u) {
-    let s = 0.012 + 0.015 * h;
-    p = q.pos + (right * corner.x + up * corner.y) * s;
-    o.c = vec4f(vec3f(0.75, 0.85, 0.95) * 0.8, 0.85);
-  } else if (kind == 2u) {
-    let s = 0.025 + 0.04 * h;
-    let ang = h * 6.28 + q.life * 4.0;
-    let r2 = right * cos(ang) + up * sin(ang);
-    let u2 = cross(r2, toEye);
-    p = q.pos + (r2 * corner.x + u2 * corner.y * 0.6) * s;
-    let car = q.kind >> 8u;
-    o.c = vec4f(tonemap(toLinear(paintColor(car)) * (0.4 + 0.6 * h)), 1.0);
-  } else {
-    let s = 0.1 + (1.0 - q.life) * 0.3;
-    p = q.pos + (right * corner.x + up * corner.y) * s;
-    let a = 0.1 * clamp(q.life, 0.0, 1.0);
-    o.c = vec4f(vec3f(0.45, 0.43, 0.4) * a, a);
-  }
-  o.clip = select(frame.viewProj * vec4f(p, 1.0), HIDE, q.life <= 0.0);
-  return o;
+  return fxVertex(vi, inst, frame.eye.xyz, frame.viewProj);
 }
-@fragment fn fsFx(i: FxOut) -> @location(0) vec4f {
-  let r = length(i.uv);
-  if (i.c.a > 0.0 && i.c.a < 0.5 && r > 1.0) { discard; } // round dust
-  return i.c;
-}
+@fragment fn fsFx(i: FxOut) -> @location(0) vec4f { return fxFragment(i); }
 @vertex fn vsCarShadow(@builtin(vertex_index) vi: u32) -> Out { return carVertex(vi, frame.lightVP); }
 
 fn paintColor(car: u32) -> vec3f {
@@ -376,13 +307,11 @@ export function createCarRenderer(device, { format, sampleCount, bodies, frameBu
   });
   const fxPipe = device.createRenderPipeline({
     layout: 'auto', vertex: { module: rendMod, entryPoint: 'vsFx' },
-    fragment: { module: rendMod, entryPoint: 'fsFx', targets: [{ format, blend: {
-      color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-      alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' } } }] },
+    fragment: { module: rendMod, entryPoint: 'fsFx', targets: [{ format, blend: FX_BLEND }] },
     primitive: { cullMode: 'none' }, depthStencil: { ...depthStencil, depthWriteEnabled: false }, multisample: { count: sampleCount },
   });
   // Particles persist across rebuilds (sparks keep flying when a car spawns).
-  const fxBuf = device.createBuffer({ size: 16 + FX_N * 32, usage: GPUBufferUsage.STORAGE });
+  const fxBuf = device.createBuffer({ size: fxBufferSize(FX_N), usage: GPUBufferUsage.STORAGE });
   const shadow = device.createRenderPipeline({
     layout: 'auto', vertex: { module: rendMod, entryPoint: 'vsCarShadow' },
     primitive: { cullMode: 'none' }, depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2.5 },

@@ -13,12 +13,19 @@
 
 use crate::{err, gpu_buffer, WebWorld};
 use engine_softbody::explicit_beams::{
-    ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape, NODE_IMMOVABLE, NODE_TYRE,
+    ExplicitBeams, ExplicitBeamsSettings, StaticBox, StaticShape, NODE_IMMOVABLE, NODE_TYRE, STEP,
 };
 use engine_softbody::SoftVehicleDesc;
 use engine_webgpu::ExplicitBeamsGpu;
 use glam::{Quat, Vec3};
 use wasm_bindgen::prelude::*;
+
+// The crash-test lab: the node grab, per-beam strain constants, frame-state reads.
+#[path = "explicit_lab.rs"]
+mod crash_lab;
+// Driving: raycast wheels' input and poses.
+#[path = "explicit_drive.rs"]
+mod drive;
 
 /// Steps per second.
 const RATE: f64 = 2000.0;
@@ -59,9 +66,83 @@ pub struct ExplicitSim {
     /// per beam (ends, vehicle | tyre << 16, spawn rest bits).
     tris: wgpu::Buffer,
     beam_recs: wgpu::Buffer,
+    /// The crash lab's per-beam constants (`crash_lab::lab_beam_words`).
+    lab_beams: wgpu::Buffer,
     tri_count: u32,
     steps: u64,
     timed: bool,
+    /// The `doorpull` scene's rig: its grab target moves out each frame.
+    pull: Option<Pull>,
+    /// Driving: the vehicles' poses from the last `readDrive`, and the self-driving
+    /// cars' state (`traffic`).
+    drive_poses: drive::Poses,
+    ai: Vec<drive::AiCar>,
+}
+
+/// What [`ExplicitSim::spawn`] spawns: the vehicles, the static boxes and shapes,
+/// the door-pull rig, and the scene's name.
+struct Spawn {
+    vehicles: Vec<Spawned>,
+    boxes: Vec<(Vec3, Vec3)>,
+    shapes: Vec<StaticShape>,
+    pull: Option<Pull>,
+    scene: String,
+}
+
+/// A door pull ([`engine_softbody::crash_rigs::add_door_pull`]): vehicle 0's rig
+/// node pulled from `start` along `dir` at `speed` m/s by a grab spring `k`.
+#[derive(Clone, Copy, Debug)]
+struct Pull {
+    rig: u32,
+    start: Vec3,
+    dir: Vec3,
+    speed: f32,
+    k: f32,
+    c: f32,
+}
+
+/// The `doorpull` rig on a spawned vehicle (its frame: `forward`, `left` the side
+/// pulled): the skin nodes nearest the front door's latch edge, at 60 % of the
+/// body's height and 0.2 m ahead of its wheelbase's middle (**Choice**: a door
+/// handle's place on a passenger car), joined to one rig node 0.3 m outside.
+fn door_pull(sim: &mut ExplicitBeams, spec: &serde_json::Value, forward: Vec3, left: Vec3) -> Pull {
+    let (lo, hi) = skin_bounds(sim);
+    let centre = 0.5 * (lo + hi);
+    // Axles along `forward` about the centre (the vehicle is turned to its yaw).
+    let (mut f, mut r) = ((0.0f32, 0u32), (0.0f32, 0u32));
+    for n in sim.nodes.iter().filter(|n| n.flags & NODE_TYRE != 0) {
+        let z = (n.pos - centre).dot(forward);
+        if z > 0.0 { f = (f.0 + z, f.1 + 1) } else { r = (r.0 + z, r.1 + 1) }
+    }
+    let mid = if f.1 > 0 && r.1 > 0 { 0.5 * (f.0 / f.1 as f32 + r.0 / r.1 as f32) } else { 0.0 };
+    let reach = sim.nodes.iter().map(|n| n.pos.dot(left)).fold(f32::MIN, f32::max);
+    let at = centre + forward * (mid + 0.2) + left * (reach - centre.dot(left));
+    let at = Vec3::new(at.x, lo.y + 0.6 * (hi.y - lo.y), at.z);
+    // The body held as a door test holds it (**Choice**): the far side's nodes in the
+    // lowest 40 % of its height (its sill and floor) do not move, so the pull loads
+    // the door's hinges and latch instead of dragging the car on its tyres.
+    let far = sim.nodes.iter().map(|n| n.pos.dot(left)).fold(f32::MAX, f32::min);
+    if spec.get("holdBody").and_then(|h| h.as_bool()).unwrap_or(true) {
+        for n in &mut sim.nodes {
+            if n.flags & NODE_TYRE == 0 && n.pos.dot(left) < far + 0.25 && n.pos.y < lo.y + 0.4 * (hi.y - lo.y) {
+                n.flags |= NODE_IMMOVABLE;
+            }
+        }
+    }
+    let count = num(spec, "doorNodes", 6.0).max(1.0) as usize;
+    let door = engine_softbody::crash_rigs::door_nodes(sim, left, at, count);
+    let start = at + left * 0.3;
+    let rig = engine_softbody::crash_rigs::add_door_pull(sim, &door, start);
+    let k = num(spec, "pullStiffness", 100_000.0) as f32;
+    let m = sim.nodes[rig as usize].mass;
+    Pull {
+        rig,
+        start,
+        dir: left,
+        speed: num(spec, "pullSpeed", 0.5) as f32,
+        k,
+        c: (2.0 * (k * m).sqrt()).min(0.5 * m / STEP),
+    }
 }
 
 /// The spawn's vehicle: `.truck` text, JBeam files (and `.pc`), or a desc.
@@ -69,8 +150,19 @@ fn build(
     v: &serde_json::Value,
     settings: ExplicitBeamsSettings,
 ) -> Result<(ExplicitBeams, SoftVehicleDesc, Vec<String>), String> {
+    // `wheels: 'raycast'`: drivable, on raycast wheels (engine_softbody::explicit_drive)
+    // in place of its tyres.
+    let raycast = v.get("wheels").and_then(|w| w.as_str()) == Some("raycast");
+    if raycast {
+        return build_raycast(v, settings);
+    }
     if let Some(text) = v.get("truck").and_then(|t| t.as_str()) {
-        let sim = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings)?;
+        let mut sim = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, settings)?;
+        // `fullContact`: JBeam's contact semantics for this `.truck` vehicle (every
+        // node a contacter, spawn self-collision exclusions; spec §10.1–10.2).
+        if v.get("fullContact").and_then(|f| f.as_bool()).unwrap_or(false) {
+            sim.opt_in_full_contact();
+        }
         return Ok((sim, engine_softbody::truck::load_truck(text), Vec::new()));
     }
     if let Some(files) = v.get("jbeam").and_then(|t| t.as_array()) {
@@ -87,6 +179,18 @@ fn build(
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
         let pc = v.get("pc").and_then(|t| t.as_str());
+        if v.get("native").and_then(|n| n.as_bool()).unwrap_or(false) {
+            // JBeam mode (jbeam-semantics-spec.md): BeamNG's rules, pressure wheels.
+            let desc = engine_softbody::jbeam::load_jbeam(&refs, pc)?;
+            let (sim, warnings) = ExplicitBeams::from_desc_jbeam_with(
+                &desc,
+                engine_softbody::explicit_beams::JbeamWheels::Pressure,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                settings,
+            )?;
+            return Ok((sim, desc, warnings));
+        }
         let (sim, text, warnings) =
             ExplicitBeams::from_jbeam(&refs, pc, Vec3::ZERO, Vec3::ZERO, settings)?;
         return Ok((sim, engine_softbody::truck::load_truck(&text), warnings));
@@ -94,8 +198,107 @@ fn build(
     if let Some(d) = v.get("desc") {
         let desc: SoftVehicleDesc =
             serde_json::from_value(d.clone()).map_err(|e| format!("desc: {e}"))?;
+        // `native`: a desc loaded from JBeam, run in JBeam mode (pressure wheels).
+        if v.get("native").and_then(|n| n.as_bool()).unwrap_or(false) {
+            let (sim, warnings) = ExplicitBeams::from_desc_jbeam_with(
+                &desc,
+                engine_softbody::explicit_beams::JbeamWheels::Pressure,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                settings,
+            )?;
+            return Ok((sim, desc, warnings));
+        }
         let sim = ExplicitBeams::new(&desc, Vec3::ZERO, Vec3::ZERO, settings);
         return Ok((sim, desc, Vec::new()));
+    }
+    Err("a vehicle needs `truck`, `jbeam` or `desc`".into())
+}
+
+/// The drive scenes' static shapes beside their boxes: the yard's five 15 cm
+/// poles across z = 34 and its ramp at x = −18 (6 × 8 m, rising toward +Z at 14°).
+fn drive_shapes(scene: &str) -> Vec<StaticShape> {
+    match scene {
+        "yard" => {
+            let mut v: Vec<StaticShape> = (0..5)
+                .map(|i| StaticShape::cylinder(Vec3::new(-14.0 + 3.5 * i as f32, 1.5, 34.0), 0.15, 1.5))
+                .collect();
+            v.push(StaticShape::oriented_box(
+                Vec3::new(-18.0, 0.5, 10.0),
+                Vec3::new(3.0, 0.3, 4.0),
+                Quat::from_rotation_x(-0.25),
+            ));
+            v
+        }
+        "traffic" => {
+            let mut v: Vec<StaticShape> = (0..10)
+                .map(|i| {
+                    let a = i as f32 * 2.39996;
+                    let r = 18.0 + (i % 4) as f32 * 11.0;
+                    StaticShape::oriented_box(
+                        Vec3::new(a.cos() * r, 0.5, a.sin() * r),
+                        Vec3::new(1.5, 0.5, 0.5),
+                        Quat::from_rotation_y(a),
+                    )
+                })
+                .collect();
+            v.extend((0..8).map(|i| {
+                let a = i as f32 * 0.785 + 0.4;
+                StaticShape::cylinder(Vec3::new(a.cos() * 32.0, 1.5, a.sin() * 32.0), 0.15, 1.5)
+            }));
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// [`build`] on raycast wheels: `.truck` text, JBeam files (`native`: JBeam mode,
+/// else through the `.truck` export) or a JBeam-mode desc.
+fn build_raycast(
+    v: &serde_json::Value,
+    settings: ExplicitBeamsSettings,
+) -> Result<(ExplicitBeams, SoftVehicleDesc, Vec<String>), String> {
+    let native = v.get("native").and_then(|n| n.as_bool()).unwrap_or(false);
+    let truck = |text: &str| -> Result<(ExplicitBeams, SoftVehicleDesc, Vec<String>), String> {
+        let (mut sim, notes) =
+            ExplicitBeams::from_truck_raycast(text, None, Vec3::ZERO, 0.0, Vec3::ZERO, settings)?;
+        if v.get("fullContact").and_then(|f| f.as_bool()).unwrap_or(false) {
+            sim.opt_in_full_contact();
+        }
+        Ok((sim, engine_softbody::truck::load_truck(text), notes))
+    };
+    if let Some(text) = v.get("truck").and_then(|t| t.as_str()) {
+        return truck(text);
+    }
+    if let Some(files) = v.get("jbeam").and_then(|t| t.as_array()) {
+        let files: Vec<(String, String)> = files
+            .iter()
+            .map(|f| {
+                (
+                    f.get(0).and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    f.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let pc = v.get("pc").and_then(|t| t.as_str());
+        let desc = engine_softbody::jbeam::load_jbeam(&refs, pc)?;
+        if native {
+            let (sim, w) = ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, Vec3::ZERO, settings)?;
+            return Ok((sim, desc, w));
+        }
+        let (text, mut w) = engine_softbody::truck_export::desc_to_truck(
+            &desc,
+            engine_softbody::truck_export::TyreDefaults::for_vehicle(&desc),
+        );
+        let (sim, d, mut notes) = truck(&text)?;
+        w.append(&mut notes);
+        return Ok((sim, d, w));
+    }
+    if let Some(d) = v.get("desc") {
+        let desc: SoftVehicleDesc = serde_json::from_value(d.clone()).map_err(|e| format!("desc: {e}"))?;
+        let (sim, w) = ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, Vec3::ZERO, settings)?;
+        return Ok((sim, desc, w));
     }
     Err("a vehicle needs `truck`, `jbeam` or `desc`".into())
 }
@@ -140,6 +343,23 @@ fn skin_bounds(sim: &ExplicitBeams) -> (Vec3, Vec3) {
     if b.0.x > b.1.x { bounds(sim) } else { b }
 }
 
+/// The front and rear axles' positions along +Z relative to the body's middle
+/// (`lo`, `hi`: its skin box), facing +Z: the mean of the tyre nodes ahead of and
+/// behind the middle; ±30 % of the length without tyres.
+fn axles(sim: &ExplicitBeams, lo: Vec3, hi: Vec3) -> (f32, f32) {
+    let mid = 0.5 * (lo.z + hi.z);
+    let (mut f, mut r) = ((0.0f32, 0u32), (0.0f32, 0u32));
+    for n in sim.nodes.iter().filter(|n| n.flags & NODE_TYRE != 0) {
+        let z = n.pos.z - mid;
+        if z > 0.0 { f = (f.0 + z, f.1 + 1) } else { r = (r.0 + z, r.1 + 1) }
+    }
+    let len = hi.z - lo.z;
+    if f.1 == 0 || r.1 == 0 {
+        return (0.3 * len, -0.3 * len);
+    }
+    (f.0 / f.1 as f32, r.0 / r.1 as f32)
+}
+
 /// Node box (min, max).
 fn bounds(sim: &ExplicitBeams) -> (Vec3, Vec3) {
     sim.nodes.iter().fold((Vec3::MAX, Vec3::MIN), |(a, b), n| {
@@ -158,6 +378,12 @@ fn set_moving(sim: &mut ExplicitBeams, velocity: Vec3) {
     }
     if velocity != Vec3::ZERO {
         sim.roll_tyres(velocity);
+    }
+    // Raycast wheels roll at the forward speed (their frame's forward).
+    if let Some(d) = sim.drive.as_mut() {
+        let [c, b, _] = d.config.refs;
+        let f = (sim.nodes[c as usize].pos - sim.nodes[b as usize].pos).normalize_or_zero();
+        d.roll(velocity.dot(f));
     }
 }
 
@@ -256,6 +482,7 @@ fn ring(spec: &serde_json::Value, n: usize, width: f32, length: f32) -> Vec<Aren
                 boxes: Vec::new(),
                 vel: None,
                 lift: 0.0,
+                mdb: false,
             });
         }
         r += length + 3.0;
@@ -274,12 +501,15 @@ struct ArenaSpot {
     vel: Option<Vec3>,
     /// Height of the lowest node above 2 cm (a drop test).
     lift: f32,
+    /// The FMVSS 214 moving deformable barrier spawns here instead of the vehicle
+    /// (`engine_softbody::crash_rigs`).
+    mdb: bool,
 }
 
 /// The crash-test scenes, built from one vehicle (`width` across, `length` along at
 /// yaw 0, facing +Z). Speeds in m/s, angles in degrees; each moving vehicle starts
-/// 1 + 0.5 × its speed metres from what it hits, so the hit lands after about half a
-/// second:
+/// 1 + 0.5 × its speed metres from what it hits (`runUp` metres when given), so the
+/// hit lands after about half a second:
 /// * `wall`: into a rigid wall at `speed`; `overlap` (0 to 1, default 1) of the
 ///   width meets it (the rest passes beside it), the vehicle turned by `angle`.
 /// * `headon`: two copies nose to nose at `speed` and `speed2` (default `speed`);
@@ -290,18 +520,32 @@ struct ArenaSpot {
 ///   `at` metres along it from its centre.
 /// * `pole`: into a 20 cm square pole `offset` metres across, turned by `angle`.
 /// * `sidepole`: sliding sideways at `speed` into a 20 cm pole `at` metres along its
-///   side from its centre.
+///   side from its centre; `angle` (default 90) the travel's angle from its forward
+///   axis (75: the oblique pole test).
 /// * `limbo`: under a bar 30 cm deep whose underside is `bar` metres up (default 1).
 /// * `drop`: dropped flat from `height` metres (default 8), moving forward at `speed`
 ///   (default 0).
+/// * `mdb214`: FMVSS 214 (49 CFR 571.214 S7, S8.10–S8.11): the 1,367.6 kg moving
+///   deformable barrier (`engine_softbody::crash_rigs`) into the vehicle's left
+///   (driver's) side at `speed` (default 33.5 mph), crabbed `crab` degrees
+///   (default 27: its wheels turned toward the vehicle's rear, so it moves rearward
+///   along the struck side), its face square to the side and the face's forward edge
+///   on the impact reference line: 940 mm ahead of the wheelbase's centre (508 mm
+///   behind the front axle past a 2,896 mm wheelbase). The vehicle stands.
+/// * `doorpull`: the vehicle at rest, its left front door's latch edge pulled
+///   outward through `doorNodes` (default 6) of its skin nodes by one rig
+///   ([`engine_softbody::crash_rigs::add_door_pull`]) at `pullSpeed` m/s (default
+///   0.5) with a `pullStiffness` N/m (default 100,000) grab spring; its far side's
+///   sill held still unless `holdBody` is false.
 /// Returns the spawns and every box once (for rendering); None for another scene.
-fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32) -> Option<(Vec<ArenaSpot>, Vec<(Vec3, Vec3)>)> {
+fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32, axles: (f32, f32)) -> Option<(Vec<ArenaSpot>, Vec<(Vec3, Vec3)>)> {
     use std::f32::consts::PI;
     let deg = |k: &str, d: f64| (num(spec, k, d) as f32).to_radians();
     let v = num(spec, "speed", 27.78) as f32;
     let run_up = |v: f32| 1.0 + 0.5 * v;
-    let gap = run_up(v);
-    let spot = |at: Vec3, yaw: f32, speed: f32, boxes: Vec<(Vec3, Vec3)>, vel: Option<Vec3>| ArenaSpot { at, yaw, speed, boxes, vel, lift: 0.0 };
+    // `runUp`: the gap (m) between the vehicle and what it hits, default 1 + v/2 s.
+    let gap = num(spec, "runUp", f64::from(run_up(v))) as f32;
+    let spot = |at: Vec3, yaw: f32, speed: f32, boxes: Vec<(Vec3, Vec3)>, vel: Option<Vec3>| ArenaSpot { at, yaw, speed, boxes, vel, lift: 0.0, mdb: false };
     let pole = |x: f32, z: f32| (Vec3::new(x, 2.0, z), Vec3::new(0.1, 2.0, 0.1));
     let overlap = (num(spec, "overlap", 1.0) as f32).clamp(0.05, 1.0);
     Some(match scene {
@@ -315,6 +559,48 @@ fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32) -
             let (half_x, cx) = if overlap >= 1.0 { (0.5 * width + 1.0, 0.0) } else { (0.5 * overlap * width, 0.5 * width * (1.0 - overlap)) };
             let b = (Vec3::new(hit_x + cx, 2.0, hit_z + 0.5), Vec3::new(half_x, 2.0, 0.5));
             (vec![spot(Vec3::ZERO, a, v, vec![b], None)], vec![b])
+        }
+        "yard" => {
+            // The drive yard (the soft solver's `yard`, softbody.html): the player car at
+            // rest facing +Z, two cars parked side-on at x = 14 (z = 20 and 30), a
+            // wall 3 m high across z = 60 and a row of poles and a ramp
+            // (`drive_shapes`). Every copy drives on the spawn's wheels.
+            let wall = (Vec3::new(0.0, 1.5, 60.0), Vec3::new(8.0, 1.5, 0.3));
+            let parked = |z: f32, yaw: f32| {
+                let fwd = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+                spot(Vec3::new(14.0, 0.0, z) + fwd * (0.5 * length), yaw, 0.0, vec![wall], None)
+            };
+            (
+                vec![
+                    spot(Vec3::new(0.0, 0.0, 0.5 * length), 0.0, 0.0, vec![wall], None),
+                    parked(20.0, 0.5 * PI),
+                    parked(30.0, -0.5 * PI),
+                ],
+                vec![wall],
+            )
+        }
+        "traffic" => {
+            // The traffic derby (the soft solver's `traffic`): `cars` copies (default 20,
+            // at most 64) on a grid in a walled 140 m arena with concrete blocks and
+            // poles (`drive_shapes`), each turned its own way; they drive themselves
+            // (ExplicitSim::autopilot).
+            let n = (num(spec, "cars", 20.0) as usize).clamp(1, 64);
+            let cols = (n as f32).sqrt().ceil() as usize;
+            let a = 70.0;
+            let walls: Vec<(Vec3, Vec3)> = [(0.0, a, a, 0.5), (0.0, -a, a, 0.5), (a, 0.0, 0.5, a), (-a, 0.0, 0.5, a)]
+                .iter()
+                .map(|&(x, z, hx, hz)| (Vec3::new(x, 1.0, z), Vec3::new(hx, 1.0, hz)))
+                .collect();
+            let spots = (0..n)
+                .map(|i| {
+                    let c = (cols as f32 - 1.0) / 2.0;
+                    let at = Vec3::new(((i % cols) as f32 - c) * 9.0, 0.0, ((i / cols) as f32 - c) * 11.0);
+                    let yaw = (i as f32 * 1.7) % std::f32::consts::TAU;
+                    let fwd = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+                    spot(at + fwd * (0.5 * length), yaw, 0.0, walls.clone(), None)
+                })
+                .collect();
+            (spots, walls)
         }
         "headon" => {
             let v2 = num(spec, "speed2", f64::from(v)) as f32;
@@ -352,15 +638,41 @@ fn crash_scene(scene: &str, spec: &serde_json::Value, width: f32, length: f32) -
             (vec![spot(Vec3::ZERO, a, v, vec![b], None)], vec![b])
         }
         "sidepole" => {
-            let b = pole(num(spec, "at", 0.0) as f32, 0.5 * width + gap + 0.1);
-            // Forward +X, its centre at the origin, moving along +Z (sideways).
-            (vec![spot(Vec3::new(0.5 * length, 0.0, 0.0), 0.5 * PI, v, vec![b], Some(Vec3::new(0.0, 0.0, v)))], vec![b])
+            let at = num(spec, "at", 0.0) as f32;
+            // Forward +X, its centre at the origin, moving along +Z (sideways), or
+            // with `angle` (degrees from its forward axis, default 90) obliquely, as an
+            // oblique pole test at 75°: the pole on the path of the side's point `at`.
+            let angle = num(spec, "angle", 90.0) as f32;
+            let (b, vel) = if angle == 90.0 {
+                (pole(at, 0.5 * width + gap + 0.1), Vec3::new(0.0, 0.0, v))
+            } else {
+                let d = Vec3::new(angle.to_radians().cos(), 0.0, angle.to_radians().sin());
+                let p = Vec3::new(at, 0.0, 0.5 * width) + d * (gap + 0.1);
+                (pole(p.x, p.z), d * v)
+            };
+            (vec![spot(Vec3::new(0.5 * length, 0.0, 0.0), 0.5 * PI, v, vec![b], Some(vel))], vec![b])
         }
         "limbo" => {
             let bar = num(spec, "bar", 1.0) as f32;
             let b = (Vec3::new(0.0, bar + 0.15, gap + 0.15), Vec3::new(0.5 * width + 1.0, 0.15, 0.15));
             (vec![spot(Vec3::ZERO, 0.0, v, vec![b], None)], vec![b])
         }
+        "mdb214" => {
+            let v = num(spec, "speed", f64::from(engine_softbody::crash_rigs::MDB_SPEED)) as f32;
+            let crab = deg("crab", f64::from(engine_softbody::crash_rigs::MDB_CRAB_DEG));
+            let (front_axle, rear_axle) = axles;
+            let wb = front_axle - rear_axle;
+            let irl = if wb <= 2.896 { 0.5 * (front_axle + rear_axle) + 0.94 } else { front_axle - 0.508 };
+            let half_face = 0.5 * engine_softbody::crash_rigs::MDB_FACE[0];
+            // Facing −X (yaw −90°), its face's middle at the struck side when it hits.
+            let contact = Vec3::new(0.5 * width, 0.0, irl - half_face);
+            let dir = Vec3::new(-crab.cos(), 0.0, -crab.sin());
+            let gap = num(spec, "runUp", f64::from(run_up(v))) as f32;
+            let mut barrier = spot(contact - dir * gap, -0.5 * PI, v, Vec::new(), Some(dir * v));
+            barrier.mdb = true;
+            (vec![spot(Vec3::new(0.0, 0.0, 0.5 * length), 0.0, 0.0, Vec::new(), None), barrier], Vec::new())
+        }
+        "doorpull" => (vec![spot(Vec3::new(0.0, 0.0, 0.5 * length), 0.0, 0.0, Vec::new(), None)], Vec::new()),
         "drop" => {
             let mut s = spot(Vec3::ZERO, 0.0, num(spec, "speed", 0.0) as f32, Vec::new(), None);
             s.lift = num(spec, "height", 8.0) as f32;
@@ -428,6 +740,7 @@ fn arena(spec: &serde_json::Value, width: f32, length: f32) -> (Vec<ArenaSpot>, 
                 boxes,
                 vel: None,
                 lift: 0.0,
+                mdb: false,
             }
         })
         .collect();
@@ -437,38 +750,110 @@ fn arena(spec: &serde_json::Value, width: f32, length: f32) -> (Vec<ArenaSpot>, 
 #[wasm_bindgen]
 impl WebWorld {
     /// Explicit-beams vehicles on this world's device. `spec`: `{ vehicles: [{
-    /// truck | jbeam: [[name, text], …] (+ pc) | desc, at: [x, z], yaw, front }], scene:
+    /// truck (+ fullContact: true for JBeam contact semantics) | jbeam: [[name, text], …] (+ pc, + native: true for JBeam mode with pressure
+    /// wheels) | desc, at: [x, z], yaw, front }], scene:
     /// 'idle' | 'coast' | 'wall' | 'arena', speed (m/s, coast and wall), wallGap (m,
     /// default 1 + 0.5·speed); arena (see `arena`): count, cols, speedMin, speedMax,
     /// hitMin, hitMax, headOn, layout ('rows' | 'ring', see `ring`), ringRadius;
     /// shapes (static colliders for every vehicle, see `shapes`); the
-    /// first vehicle copied to every spawn, drag, turbulence, fastInvSqrt (default true), timing
+    /// first vehicle copied to every spawn, drag, turbulence, fastInvSqrt (default true),
+    /// centredDamping (the BeamNG profile's centred damping, spec §39; default the
+    /// profile's), timing
     /// (default true: GPU timestamps when the device has them) }`.
     #[wasm_bindgen(js_name = explicitSim)]
     pub fn explicit_sim(&self, spec: JsValue) -> Result<ExplicitSim, JsValue> {
         let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
         ExplicitSim::new(self.world.device(), self.world.queue(), &spec).map_err(err)
     }
+
+    /// [`Self::explicit_sim`], its GPU kernels compiled first without blocking
+    /// (`createComputePipelineAsync`, see `crate::warm_pipelines`): a promise of
+    /// the `ExplicitSim`. Load with this; the synchronous call is then a cache hit
+    /// (a restart may use it). `progress(stage)` (optional) hears each stage:
+    /// `"spawn"`, then `"compile N"` with the number of kernels compiling, then
+    /// `"compiled <module> <ms>"` as each one finishes (ms since the compiles began;
+    /// a kernel the first frame does not need compiles after the promise resolves).
+    #[wasm_bindgen(js_name = explicitSimAsync)]
+    pub fn explicit_sim_async(
+        &self,
+        spec: JsValue,
+        progress: Option<js_sys::Function>,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
+        let (device, queue) = (self.world.device().clone(), self.world.queue().clone());
+        Ok(wasm_bindgen_futures::future_to_promise(async move {
+            let progress = std::rc::Rc::new(progress);
+            let say = {
+                let progress = progress.clone();
+                move |stage: String| {
+                    if let Some(f) = progress.as_ref() {
+                        let _ = f.call1(&JsValue::NULL, &stage.into());
+                    }
+                }
+            };
+            let say = std::rc::Rc::new(say);
+            say("spawn".into());
+            let spawn = ExplicitSim::spawn(&spec).map_err(err)?;
+            let sims: Vec<ExplicitBeams> = spawn.vehicles.iter().map(|v| v.sim.clone()).collect();
+            let specs = ExplicitBeamsGpu::compute_specs(&sims, None);
+            say(format!("compile {}", specs.iter().filter(|s| !s.deferred).count()));
+            let heard = say.clone();
+            crate::warm_pipelines(
+                &device,
+                &specs,
+                std::rc::Rc::new(move |module: &str, ms: f64| heard(format!("compiled {module} {ms:.0}"))),
+            )
+            .await;
+            ExplicitSim::assemble(&device, &queue, &spec, spawn)
+                .map(JsValue::from)
+                .map_err(err)
+        }))
+    }
 }
 
 impl ExplicitSim {
+    /// [`WebWorld::explicit_sim`] on a native device (tests and tools).
+    #[doc(hidden)]
+    pub fn new_native(device: &wgpu::Device, queue: &wgpu::Queue, spec: &serde_json::Value) -> Result<Self, String> {
+        Self::new(device, queue, spec)
+    }
+
+    /// The GPU solver (tests and tools).
+    #[doc(hidden)]
+    pub fn gpu_solver(&self) -> &ExplicitBeamsGpu {
+        &self.gpu
+    }
+
+    /// Vehicle `i`'s spawn state (its CPU copy at spawn).
+    #[doc(hidden)]
+    pub fn spawned(&self, i: usize) -> &ExplicitBeams {
+        &self.vehicles[i].sim
+    }
+
     fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         spec: &serde_json::Value,
     ) -> Result<Self, String> {
+        let spawn = Self::spawn(spec)?;
+        Self::assemble(device, queue, spec, spawn)
+    }
+
+    /// The vehicles `spec` spawns and the scene around them (CPU only).
+    fn spawn(spec: &serde_json::Value) -> Result<Spawn, String> {
         let flag = |k: &str| spec.get(k).and_then(|x| x.as_bool()).unwrap_or(true);
         let settings = ExplicitBeamsSettings {
             fast_inv_sqrt: flag("fastInvSqrt"),
             drag: flag("drag"),
             turbulence: flag("turbulence") && flag("drag"),
+            ..Default::default()
         };
         let scene = spec.get("scene").and_then(|s| s.as_str()).unwrap_or("idle");
-        const SCENES: [&str; 10] = ["idle", "coast", "wall", "arena", "headon", "tbone", "pole", "sidepole", "limbo", "drop"];
+        const SCENES: [&str; 14] = ["idle", "coast", "wall", "arena", "headon", "tbone", "pole", "sidepole", "limbo", "drop", "mdb214", "doorpull", "yard", "traffic"];
         if !SCENES.contains(&scene) {
             return Err(format!("unknown explicit scene {scene}: {}", SCENES.join(", ")));
         }
-        let speed = if scene == "idle" {
+        let speed = if scene == "idle" || scene == "doorpull" || scene == "yard" || scene == "traffic" {
             0.0
         } else {
             num(spec, "speed", 27.78) as f32
@@ -482,17 +867,19 @@ impl ExplicitSim {
         }
         let mut vehicles = Vec::new();
         let mut boxes = Vec::new();
-        let shapes = shapes(spec)?;
+        let mut shapes = shapes(spec)?;
+        shapes.extend(drive_shapes(scene));
         // `arena`: the first vehicle, built once, copied to every spawn.
         let mut spots = Vec::new();
-        let template = if scene == "arena" || crash_scene(scene, spec, 1.0, 1.0).is_some() {
+        let mut pull: Option<Pull> = None;
+        let template = if scene == "arena" || crash_scene(scene, spec, 1.0, 1.0, (1.0, -1.0)).is_some() {
             let (mut sim, desc, warnings) = build(&list[0], settings)?;
             let f = engine_softbody::pack::forward_axis(&desc);
             turn(&mut sim, -f.x.atan2(f.z));
             // The body's extent: its collision-triangle nodes (a file's helper nodes,
             // such as camera nodes, can sit outside it), else every node.
             let (lo, hi) = skin_bounds(&sim);
-            let (s, all) = crash_scene(scene, spec, hi.x - lo.x, hi.z - lo.z)
+            let (s, all) = crash_scene(scene, spec, hi.x - lo.x, hi.z - lo.z, axles(&sim, lo, hi))
                 .unwrap_or_else(|| arena(spec, hi.x - lo.x, hi.z - lo.z));
             turn(&mut sim, f.x.atan2(f.z));
             spots = s;
@@ -508,9 +895,21 @@ impl ExplicitSim {
         let list = if template.is_some() { &arena_list } else { list };
         for (vi, v) in list.iter().enumerate() {
             let (mut sim, desc, warnings) = match &template {
+                _ if spots.get(vi).is_some_and(|s| s.mdb) => build(
+                    &serde_json::json!({ "jbeam": [["mdb214.jbeam", engine_softbody::crash_rigs::mdb214_jbeam()]], "native": true }),
+                    settings,
+                )?,
                 Some(t) => t.clone(),
                 None => build(v, settings)?,
             };
+            // `centredDamping`: the BeamNG profile's centred damping on or off
+            // (jbeam-semantics-spec.md §39; its default otherwise). A Rigs of Rods
+            // profile vehicle is never changed.
+            if let Some(c) = spec.get("centredDamping").and_then(|c| c.as_bool()) {
+                if sim.beamng_profile {
+                    sim.settings.centred_damping = c;
+                }
+            }
             let speed = spots.get(vi).map_or(speed, |s| s.speed);
             if sim.nodes.is_empty() {
                 return Err("the vehicle has no nodes".into());
@@ -549,7 +948,24 @@ impl ExplicitSim {
             let along = at3.dot(forward) - if front { f1 } else { 0.5 * (f0 + f1) };
             let across = at3.dot(lateral) - 0.5 * (l0 + l1);
             let lift = spots.get(vi).map_or(0.0, |s| s.lift);
-            let shift = forward * along + lateral * across + Vec3::Y * (0.02 - lowest + lift);
+            // Raycast wheels: the lowest wheel's bottom 2 cm up (the suspension
+            // fully extended; it settles by its sag), or the body's lowest node at
+            // the usual clearance, whichever is higher.
+            let wheel_low = sim.drive.as_ref().map(|d| {
+                d.config
+                    .wheels
+                    .iter()
+                    .map(|w| {
+                        let y = 0.5 * (sim.nodes[w.node1 as usize].pos.y + sim.nodes[w.node2 as usize].pos.y);
+                        y - w.radius
+                    })
+                    .fold(f32::MAX, f32::min)
+            });
+            let rise = match wheel_low {
+                Some(wl) => (sim.spawn_clearance() - lowest).max(0.02 - wl),
+                None => sim.spawn_clearance() - lowest,
+            };
+            let shift = forward * along + lateral * across + Vec3::Y * (rise + lift);
             for n in &mut sim.nodes {
                 n.pos += shift;
             }
@@ -572,6 +988,9 @@ impl ExplicitSim {
                 .copied()
                 .max_by_key(|&i| (sim.incidence[i as usize].len(), std::cmp::Reverse(i)))
                 .unwrap_or(0);
+            if scene == "doorpull" && vi == 0 {
+                pull = Some(door_pull(&mut sim, spec, forward, lateral));
+            }
             set_moving(&mut sim, spots.get(vi).and_then(|s| s.vel).unwrap_or(forward * speed));
             if let Some(s) = spots.get(vi) {
                 for &(c, h) in &s.boxes {
@@ -611,6 +1030,11 @@ impl ExplicitSim {
                 boxes.push((c, half));
             }
             sim.shapes.extend_from_slice(&shapes);
+            // `surfaceContact`: the collision triangles meet the boxes and shapes by
+            // their surface too (jbeam-semantics-spec.md §38; off by default).
+            if spec.get("surfaceContact").and_then(|x| x.as_bool()).unwrap_or(false) {
+                sim.surface_contact = true;
+            }
             vehicles.push(Spawned {
                 name: desc.name.clone(),
                 sim,
@@ -619,6 +1043,30 @@ impl ExplicitSim {
                 warnings,
             });
         }
+        Ok(Spawn {
+            vehicles,
+            boxes,
+            shapes,
+            pull,
+            scene: scene.to_string(),
+        })
+    }
+
+    /// The solver on `device` for what [`Self::spawn`] spawned.
+    fn assemble(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        spec: &serde_json::Value,
+        spawn: Spawn,
+    ) -> Result<Self, String> {
+        let Spawn {
+            vehicles,
+            boxes,
+            shapes,
+            pull,
+            scene,
+        } = spawn;
+        let scene = scene.as_str();
         let sims: Vec<ExplicitBeams> = vehicles.iter().map(|v| v.sim.clone()).collect();
         let mut gpu = ExplicitBeamsGpu::new(device, queue, &sims);
         let timed = spec.get("timing").and_then(|x| x.as_bool()).unwrap_or(true)
@@ -659,8 +1107,17 @@ impl ExplicitSim {
                 usage: wgpu::BufferUsages::STORAGE,
             })
         };
+        // `traffic`: every car drives itself (`ai`: 'derby' (default: two in three
+        // wander, one chases), 'cruise' (wander, brake for cars ahead) or 'off').
+        let ai = if scene == "traffic" {
+            drive::ai_cars(vehicles.len(), spec.get("ai").and_then(|a| a.as_str()).unwrap_or("derby"))
+        } else {
+            Vec::new()
+        };
         let tris_buf = init("explicit-render-tris", &tris);
         let recs_buf = init("explicit-render-beams", &recs);
+        let lab: Vec<(&ExplicitBeams, Vec3)> = vehicles.iter().map(|v| (&v.sim, v.forward)).collect();
+        let lab_beams = init("explicit-lab-beams", &crash_lab::lab_beam_words(&lab));
         Ok(Self {
             gpu,
             device: device.clone(),
@@ -671,8 +1128,12 @@ impl ExplicitSim {
             shapes,
             tris: tris_buf,
             beam_recs: recs_buf,
+            lab_beams,
             steps: 0,
             timed,
+            pull,
+            drive_poses: Default::default(),
+            ai,
         })
     }
 }
@@ -691,12 +1152,50 @@ impl ExplicitSim {
         MAX_FRAME_STEPS
     }
 
-    /// Submit one frame of `steps` fixed steps for every vehicle (never waits).
+    /// Submit one frame of `steps` fixed steps for every vehicle (never waits). A
+    /// contact error (a vehicle past its frame bounds: the margin widens by itself)
+    /// is a console warning and the sim keeps stepping; other errors are returned.
     pub fn frame(&mut self, steps: u32) -> Result<(), JsValue> {
+        self.frame_steps(steps).map_err(err)?;
+        for e in self.gpu.take_contact_errors() {
+            let note = format!("explicit beams vehicle contact (the sim continues): {e}");
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::warn_1(&note.into());
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("{note}");
+        }
+        Ok(())
+    }
+}
+
+impl ExplicitSim {
+    /// [`Self::frame`] for native hosts and tests (errors as text, a contact
+    /// error too: the sim keeps stepping).
+    #[doc(hidden)]
+    pub fn frame_native(&mut self, steps: u32) -> Result<(), String> {
+        self.frame_steps(steps)?;
+        // A contact error (a vehicle past its frame bounds: the margin widens by
+        // itself) never stops the sim: the caller gets it and keeps stepping.
+        let errors = self.gpu.take_contact_errors();
+        if !errors.is_empty() {
+            return Err(format!("vehicle contact (the sim continues): {}", errors.join("; ")));
+        }
+        Ok(())
+    }
+
+    /// One frame's steps; contact errors are left for the caller.
+    fn frame_steps(&mut self, steps: u32) -> Result<(), String> {
         if steps > MAX_FRAME_STEPS {
-            return Err(err(format!(
+            return Err(format!(
                 "at most {MAX_FRAME_STEPS} steps per frame, got {steps}"
-            )));
+            ));
+        }
+        if let Some(p) = self.pull {
+            // The rig's target where it is at this frame's end (vehicle frame: the
+            // vehicle's origin stays where it spawned).
+            let t = (self.steps + u64::from(steps)) as f32 * STEP;
+            let target = self.vehicles[0].sim.origin + p.start + p.dir * (p.speed * t);
+            self.gpu.set_grab(Some((0, engine_softbody::explicit_beams::Grab { node: p.rig, target, k: p.k, c: p.c })));
         }
         if steps > 0 {
             self.gpu.frame(steps);
@@ -704,6 +1203,10 @@ impl ExplicitSim {
         }
         Ok(())
     }
+}
+
+#[wasm_bindgen]
+impl ExplicitSim {
 
     /// Steps run since spawn.
     pub fn steps(&self) -> f64 {
@@ -769,6 +1272,8 @@ impl ExplicitSim {
                     "mass": v.sim.nodes.iter().map(|n| f64::from(n.mass)).sum::<f64>(),
                     "nodeOffset": self.gpu.node_offset(i), "beamOffset": self.gpu.beam_offset(i),
                     "forward": v.forward.to_array(), "warnings": v.warnings,
+                    // The solver profile it runs (spec §36): "beamng" or "ror".
+                    "profile": if v.sim.beamng_profile { "beamng" } else { "ror" },
                 })
             })
             .collect();

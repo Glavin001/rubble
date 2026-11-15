@@ -180,6 +180,58 @@ pub struct JbeamBeam {
     pub deform_limit_expansion: f32,
     /// `dampCutoffHz` (Hz; 0 = none): damping only below this frequency.
     pub damp_cutoff_hz: f32,
+    // --- Part II of the spec (§16–§24); the defaults mean "unused". ---
+    /// The second and third break groups of a `breakGroup` table (0 none; §17).
+    pub extra_break_groups: [u32; 2],
+    /// `disableTriangleBreaking` (§18).
+    pub disable_triangle_breaking: bool,
+    /// Deform groups (index + 1 into [`SoftVehicleDesc::deform_groups`], 0 none;
+    /// §19) and `deformationTriggerRatio` (`f32::INFINITY`: breaking only).
+    pub deform_groups: [u32; 2],
+    #[serde(with = "inf_f32")]
+    pub deformation_trigger_ratio: f32,
+    /// ANISOTROPIC (§20): `springExpansion`, `dampExpansion` (None: the
+    /// compression values), `transitionZone` (fraction of the spawn length).
+    pub anisotropic: bool,
+    pub spring_expansion: Option<f32>,
+    pub damp_expansion: Option<f32>,
+    pub transition_zone: f32,
+    /// `beamLongExtent` (m; SUPPORT and ANISOTROPIC break length, §23).
+    pub long_extent: Option<f32>,
+    /// PRESSURED (§21): gauge pressure (Pa), `surface` (m²), `volumeCoef`, gauge
+    /// `pressureLimit` and `maxPressure` (Pa; ∞ none).
+    pub pressured: bool,
+    pub pressure: f32,
+    pub surface: f32,
+    pub volume_coef: f32,
+    #[serde(with = "inf_f32")]
+    pub pressure_limit: f32,
+    #[serde(with = "inf_f32")]
+    pub max_pressure: f32,
+    /// BOUNDED rebound damping (§22): `beamDampRebound`, `beamDampReboundFast`,
+    /// `beamDampVelocitySplitRebound`, `beamLimitDampRebound` (None: unset).
+    pub damp_rebound: Option<f32>,
+    pub damp_rebound_fast: Option<f32>,
+    pub damp_velocity_split_rebound: Option<f32>,
+    pub limit_damp_rebound: Option<f32>,
+    /// `beamPrecompressionTime` (s; 0 none, §23).
+    pub precompression_time: f32,
+}
+
+impl JbeamBeam {
+    /// Whether the beam uses any Part II feature that needs an extension record
+    /// (spec §16; triangle breaking and `beamLongExtent` need none).
+    pub fn needs_ext(&self) -> bool {
+        self.extra_break_groups != [0, 0]
+            || self.deform_groups != [0, 0]
+            || self.anisotropic
+            || self.pressured
+            || self.damp_rebound.is_some()
+            || self.damp_rebound_fast.is_some()
+            || self.damp_velocity_split_rebound.is_some()
+            || self.limit_damp_rebound.is_some()
+            || self.precompression_time > 0.0
+    }
 }
 
 impl Default for JbeamBeam {
@@ -197,6 +249,26 @@ impl Default for JbeamBeam {
             deform_limit: f32::INFINITY,
             deform_limit_expansion: f32::INFINITY,
             damp_cutoff_hz: 0.0,
+            extra_break_groups: [0, 0],
+            disable_triangle_breaking: false,
+            deform_groups: [0, 0],
+            deformation_trigger_ratio: f32::INFINITY,
+            anisotropic: false,
+            spring_expansion: None,
+            damp_expansion: None,
+            transition_zone: 0.0,
+            long_extent: None,
+            pressured: false,
+            pressure: 0.0,
+            surface: 1.0,
+            volume_coef: 1.0,
+            pressure_limit: f32::INFINITY,
+            max_pressure: f32::INFINITY,
+            damp_rebound: None,
+            damp_rebound_fast: None,
+            damp_velocity_split_rebound: None,
+            limit_damp_rebound: None,
+            precompression_time: 0.0,
         }
     }
 }
@@ -299,6 +371,8 @@ pub struct SoftSlideNode {
     pub strength: f32,
     #[serde(with = "inf_f32")]
     pub cap_strength: f32,
+    /// `fixToRail`: moved onto its rail at spawn (default true).
+    pub fix_to_rail: bool,
 }
 
 impl Default for SoftSlideNode {
@@ -312,6 +386,7 @@ impl Default for SoftSlideNode {
             damp: 0.0,
             strength: f32::INFINITY,
             cap_strength: f32::INFINITY,
+            fix_to_rail: true,
         }
     }
 }
@@ -333,6 +408,15 @@ pub struct SoftTriangle {
     /// colliding once that group breaks, as it does once a beam along an edge
     /// breaks.
     pub break_group: u32,
+    /// Which of its edges (bit k: nodes k to k+1) stop it colliding once
+    /// their beam breaks (spec §18). JBeam triangles: all three (7); a
+    /// `.truck` cab line: none, or with Rubble's extension (a fifth field, its
+    /// break group, and a sixth, this mask, 7 if absent) the ones given.
+    pub break_sides: u8,
+    /// JBeam aerodynamics (`engine/docs/jbeam-semantics-spec.md` §31): `dragCoef`,
+    /// `liftCoef`, `stallAngle` (rad), `skinDragCoef` (BeamNG defaults 100,
+    /// `dragCoef`, 0.58, 0).
+    pub aero: [f32; 4],
 }
 
 impl Default for SoftTriangle {
@@ -342,6 +426,8 @@ impl Default for SoftTriangle {
             collision: true,
             bias: 0.0,
             break_group: 0,
+            break_sides: 0,
+            aero: [100.0, 100.0, 0.58, 0.0],
         }
     }
 }
@@ -529,6 +615,71 @@ pub struct SoftVehicleDesc {
     /// `couplerNodes` within their `couplingStartRadius`). Only the explicit
     /// solver's JBeam mode simulates them.
     pub couplers: Vec<SoftCoupler>,
+    /// JBeam deform group names (`JbeamBeam::deform_groups` g is
+    /// `deform_groups[g - 1]`; spec §19).
+    pub deform_groups: Vec<String>,
+    /// JBeam pressure wheels' parameters, one per `wheels` entry they made
+    /// (`wheel` its index; spec §25). Only the explicit solver's JBeam mode reads
+    /// them, and only when asked for pressure wheels.
+    pub pressure_wheels: Vec<JbeamPressureWheel>,
+    /// JBeam break group names: [`SoftBeam::break_group`] g (and
+    /// `JbeamBeam::extra_break_groups`, [`SoftTriangle::break_group`]) is
+    /// `break_groups[g - 1]`.
+    pub break_groups: Vec<String>,
+    /// JBeam node groups (each node `group`, all of them) and their nodes in node
+    /// order: what flexbodies bind to.
+    pub node_group_nodes: Vec<(String, Vec<u32>)>,
+}
+
+impl SoftVehicleDesc {
+    /// Node name (JBeam id) → node index. The explicit solver's JBeam mode keeps
+    /// the desc's node order and its beam order (desc beams first, anything it adds
+    /// after them: `ExplicitBeams::from_desc_jbeam_with`).
+    pub fn node_index(&self) -> std::collections::HashMap<String, u32> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.name.clone(), i as u32))
+            .collect()
+    }
+
+    /// Beam `i`'s deform group names and break group names (JBeam beams; empty for
+    /// others). Deform groups: at most two per beam, break groups three.
+    pub fn beam_group_names(&self, i: usize) -> (Vec<&str>, Vec<&str>) {
+        let b = &self.beams[i];
+        let deform = b
+            .jbeam
+            .map(|j| j.deform_groups.to_vec())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&g| g != 0)
+            .filter_map(|g| self.deform_groups.get(g as usize - 1).map(String::as_str))
+            .collect();
+        let mut gs = vec![b.break_group];
+        if let Some(j) = b.jbeam {
+            gs.extend(j.extra_break_groups);
+        }
+        let breaks = gs
+            .into_iter()
+            .filter(|&g| g != 0)
+            .filter_map(|g| self.break_groups.get(g as usize - 1).map(String::as_str))
+            .collect();
+        (deform, breaks)
+    }
+}
+
+/// A JBeam `pressureWheels` row as the file gives it (spec §25): its nodes and its
+/// numeric and boolean fields by their JBeam names (after modifiers).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JbeamPressureWheel {
+    pub wheel: u32,
+    pub name: String,
+    pub node1: u32,
+    pub node2: u32,
+    pub arm: Option<u32>,
+    pub values: std::collections::BTreeMap<String, f32>,
+    pub flags: std::collections::BTreeMap<String, bool>,
 }
 
 /// Two nodes held together (BeamNG: "considered one" while coupled) until the
@@ -545,6 +696,9 @@ pub struct SoftCoupler {
     /// (`breakGroupType` 1).
     pub break_group: u32,
     pub break_group_passive: bool,
+    /// Further break groups (0 = none; a node coupler whose nodes name several,
+    /// `jbeam-semantics-spec.md` §7.1), with `break_group_passive`'s type.
+    pub extra_break_groups: [u32; 2],
 }
 
 impl Default for SoftCoupler {
@@ -555,6 +709,7 @@ impl Default for SoftCoupler {
             strength: f32::INFINITY,
             break_group: 0,
             break_group_passive: false,
+            extra_break_groups: [0, 0],
         }
     }
 }

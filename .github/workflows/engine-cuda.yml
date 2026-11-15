@@ -50,6 +50,9 @@ env:
   SLANGC: /opt/slang/bin/slangc
   NVCC: /usr/local/cuda-12.8/bin/nvcc
   ENGINE_CUDA_REQUIRE_PTX: "1"
+  # nvcc on the explicit vehicle kernels needs several GB each: one per core ran the
+  # 16 GB runner out of memory (the runner was lost mid-build). Two at a time.
+  RUBBLE_BUILD_JOBS: "2"
 
 jobs:
   cuda:
@@ -85,7 +88,10 @@ jobs:
       - name: CPU tests (sources, device code embedded; GPU tests skip)
         if: steps.green.outputs.cache-hit != 'true'
         working-directory: engine
-        run: cargo test -p engine-cuda --release
+        run: |
+          # Memory every 60 s, so a lost runner leaves evidence in the log.
+          (while sleep 60; do echo "mem: $(free -m | awk 'NR==2{print $3"/"$2" MB used"}')"; done) &
+          cargo test -p engine-cuda --release
       - name: Package test binaries
         if: steps.green.outputs.cache-hit != 'true'
         run: |

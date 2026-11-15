@@ -199,6 +199,12 @@ impl EngineIngest {
         self.chunk_count
     }
 
+    /// The per-substep row counts (`ingest_rows` writes slot k's; a host writing its own
+    /// records into a slot writes that slot's count).
+    pub fn row_counts_buffer(&self) -> &wgpu::Buffer {
+        &self.row_counts
+    }
+
     /// The rows and bodies it was made for (`new`).
     pub fn capacity(&self) -> (u32, u32) {
         (self.max_rows, self.max_bodies)
@@ -281,44 +287,61 @@ impl EngineIngest {
         pass.dispatch_workgroups(groups(self.max_rows as usize, 64), 1, 1);
     }
 
+    /// [`Self::merge`] of substep 0 and the first `rows` rows of substep 1 (a host's own
+    /// records there, at most `rows`): the dispatches cover only those records.
+    pub fn merge_with_rows(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, rows: u32) {
+        assert!(self.max_substeps >= 2, "ingest: no second substep slot");
+        self.merge_records(gpu, encoder, e, 2 * self.max_rows + 2 * rows.min(self.max_rows), 2 + rows, None);
+    }
+
     /// The frame's manifolds, from the records of `substeps` substeps (the rest of the
     /// slots cleared).
     pub fn merge(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32) {
-        self.merge_with(gpu, encoder, e, substeps, None);
+        let records = if substeps == 0 { 0 } else { 2 * self.max_rows * substeps };
+        self.merge_records(gpu, encoder, e, records, substeps, None);
     }
 
-    /// [`Self::merge`] behind the quiet gate (`coupling.slang` `ingest_gate`): `sizes` is the
-    /// fracture's indirect sizes with the gate's slots from `slot`, `args` their copy the
-    /// dispatches read. On a quiet frame the merge dispatches no group: what it would write
-    /// is already there.
-    pub fn merge_gated(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32, sizes: &wgpu::Buffer, args: &wgpu::Buffer, slot: u32) {
-        self.merge_with(gpu, encoder, e, substeps, Some((sizes, args, slot)));
+    /// [`Self::merge`] (or, with `rows`, [`Self::merge_with_rows`]) behind the quiet gate
+    /// (`coupling.slang` `ingest_gate`): `sizes` is the fracture's indirect sizes with the
+    /// gate's slots from `slot`, `args` their copy the dispatches read. On a quiet frame the
+    /// merge dispatches no group: what it would write is already there.
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_gated(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32, rows: Option<u32>, sizes: &wgpu::Buffer, args: &wgpu::Buffer, slot: u32) {
+        let gate = Some((sizes, args, slot));
+        match rows {
+            Some(rows) => {
+                assert!(self.max_substeps >= 2, "ingest: no second substep slot");
+                self.merge_records(gpu, encoder, e, 2 * self.max_rows + 2 * rows.min(self.max_rows), 2 + rows, gate);
+            }
+            None => {
+                let records = if substeps == 0 { 0 } else { 2 * self.max_rows * substeps };
+                self.merge_records(gpu, encoder, e, records, substeps, gate);
+            }
+        }
     }
 
-    fn merge_with(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32, gate: Option<(&wgpu::Buffer, &wgpu::Buffer, u32)>) {
+    fn merge_records(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, record_count: u32, key: u32, gate: Option<(&wgpu::Buffer, &wgpu::Buffer, u32)>) {
+        let substeps = key;
         // Only the substeps run are merged, and in each only its rows (`record_live`): the
         // rest of the records is never read, so nothing is cleared.
-        let mut params = IngestParams {
+        let params = IngestParams {
             row_offset: 0,
             max_rows: self.max_rows,
             substep: 0,
             chunk_count: self.chunk_count,
-            record_count: 2 * self.max_rows * substeps.max(1),
+            record_count,
             max_bodies: self.max_bodies,
             h: 0.0,
             gate: gate.map_or(0, |g| g.2),
         };
-        if substeps == 0 {
-            params.record_count = 0;
-        }
-        let records = (2 * self.max_rows * substeps.max(1)) as usize;
+        let records = (record_count as usize).max(1);
         let n = self.chunk_count as usize;
         let kernels = [&self.clear, &self.count, &self.scan, &self.scan_top, &self.scan_add, &self.scatter, &self.merge, &self.any, &self.gate];
         let sizes = [groups(2 * n, 64), groups(records, 64), groups(n, 1024), 1, groups(n, 64), groups(records, 64), groups(n, 64)];
         // The gate's slots of each pass (`coupling.slang` `GATE_IG_*`).
         let slots = [2u64, 3, 4, 5, 6, 3, 6];
         let labels = ["ingest clear", "ingest count", "ingest scan", "ingest scan blocks", "ingest scan add", "ingest scatter", "ingest merge"];
-        let binds = self.binds(gpu, &kernels, [1, 0, gate.map_or(0, |g| 1 + g.2), 0, substeps], e, gate.map_or(&self.no_gate, |g| g.0), || params);
+        let binds = self.binds(gpu, &kernels, [1, gate.map_or(0, |g| 1 + g.2), record_count, 0, substeps], e, gate.map_or(&self.no_gate, |g| g.0), || params);
         if let Some((sizes, args, _)) = gate {
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ingest gate"), timestamp_writes: None });

@@ -15,6 +15,7 @@ wasm-opt = false
 engine-world = { path = "../engine-world" }
 engine-schema.workspace = true
 engine-softbody.workspace = true
+engine-exec.workspace = true
 engine-terrain.workspace = true
 engine-webgpu = { workspace = true, features = ["gpu"] }
 engine-fracture.workspace = true

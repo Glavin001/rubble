@@ -75,6 +75,24 @@ const evaluate = async (expression) => {
 };
 await send('Runtime.enable');
 await send('Page.enable');
+// GPU_CALLS=1: count the page's WebGPU calls (window.__gpuCalls: queue submits and
+// writeBuffer, compute passes, dispatches, buffer copies, mapAsync), for an A/B of the
+// work a step issues (with CHECK=1 and an EXPR that steps and reads the counts).
+if (process.env.GPU_CALLS === '1') {
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    if (!self.GPUDevice) return;
+    const c = window.__gpuCalls = { submit: 0, commandBuffers: 0, writeBuffer: 0, computePass: 0, renderPass: 0, dispatch: 0, dispatchIndirect: 0, copyB2B: 0, mapAsync: 0 };
+    const wrap = (proto, name, f) => { const o = proto[name]; proto[name] = function (...a) { f(a); return o.apply(this, a); }; };
+    wrap(GPUQueue.prototype, 'submit', (a) => { c.submit++; c.commandBuffers += a[0]?.length ?? 0; });
+    wrap(GPUQueue.prototype, 'writeBuffer', () => c.writeBuffer++);
+    wrap(GPUCommandEncoder.prototype, 'beginComputePass', () => c.computePass++);
+    wrap(GPUCommandEncoder.prototype, 'beginRenderPass', () => c.renderPass++);
+    wrap(GPUCommandEncoder.prototype, 'copyBufferToBuffer', () => c.copyB2B++);
+    wrap(GPUComputePassEncoder.prototype, 'dispatchWorkgroups', () => c.dispatch++);
+    wrap(GPUComputePassEncoder.prototype, 'dispatchWorkgroupsIndirect', () => c.dispatchIndirect++);
+    wrap(GPUBuffer.prototype, 'mapAsync', () => c.mapAsync++);
+  })();` });
+}
 
 const results = [];
 for (const page of pages) {

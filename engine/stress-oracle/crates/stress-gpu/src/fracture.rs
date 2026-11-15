@@ -1798,16 +1798,20 @@ impl GpuFracture {
     /// word the merge, the loads and the threshold's breaks write as it already is: those
     /// passes then dispatch no group, and every other pass runs as in any frame. Decided on
     /// the GPU, nothing read back. `STRESS_QUIET_GATE=0`: without the gate (an A/B).
-    pub fn encode_frame_merged(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, ingest: &EngineIngest, engine: &EngineBuffers, substeps: u32) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_frame_merged(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, ingest: &EngineIngest, engine: &EngineBuffers, substeps: u32, rows: Option<u32>) {
         if std::env::var("STRESS_QUIET_GATE").is_ok_and(|v| v == "0") {
-            ingest.merge(gpu, encoder, engine, substeps);
+            match rows {
+                Some(rows) => ingest.merge_with_rows(gpu, encoder, engine, rows),
+                None => ingest.merge(gpu, encoder, engine, substeps),
+            }
             self.frame(gpu, encoder, step, None);
         } else {
-            self.frame(gpu, encoder, step, Some((ingest, engine, substeps)));
+            self.frame(gpu, encoder, step, Some((ingest, engine, substeps, rows)));
         }
     }
 
-    fn frame(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, merge: Option<(&EngineIngest, &EngineBuffers, u32)>) {
+    fn frame(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, merge: Option<(&EngineIngest, &EngineBuffers, u32, Option<u32>)>) {
         use std::sync::atomic::Ordering;
         // The pool's halves swap every frame, and the step and log stamp move on: on the GPU
         // (`fr_frame_begin`), the host writing them only off the expected sequence.
@@ -1828,8 +1832,8 @@ impl GpuFracture {
                 self.direct(&mut pass, "fr_quiet", 1);
             }
         }
-        if let Some((ingest, engine, substeps)) = merge {
-            ingest.merge_gated(gpu, encoder, engine, substeps, &self.sizes, &self.args, ARG_Q_CHUNKS as u32);
+        if let Some((ingest, engine, substeps, rows)) = merge {
+            ingest.merge_gated(gpu, encoder, engine, substeps, rows, &self.sizes, &self.args, ARG_Q_CHUNKS as u32);
         }
         // The chunks and bonds in use (a shared fracture's tables are sized for its room).
         let (n, e, b) = (self.params.chunk_used as usize, self.params.bond_used as usize, self.layout.b as usize);
