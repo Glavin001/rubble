@@ -782,6 +782,15 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         if let Some(n) = arg("--pair-streak").and_then(|n| n.parse::<u32>().ok()) {
             x.set_pair_reuse_streak(n);
         }
+        // `--wide 1`: the fleet-wide passes (`set_wide`); `--wide-list 1`: with the reused
+        // pair list (`set_wide_list`).
+        if let Some(on) = flag("--wide") {
+            let got = x.set_wide(on);
+            println!("wide passes: {got}");
+        }
+        if let Some(on) = flag("--wide-list") {
+            x.set_wide_list(on);
+        }
         x.take_pair_reuse_stats();
     }
     let ablate: u32 = arg("--ablate").and_then(|x| x.parse().ok()).unwrap_or(0);
@@ -1053,12 +1062,20 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 x.restore(&snap);
                 switch(x, on, &labels);
                 x.wait();
-                let t = std::time::Instant::now();
+                // (AB_GAP_MS=n: the GPU idle n ms before each frame, as a display's frame
+                // loop leaves it; the frames' own time alone is summed.)
+                let gap: u64 = std::env::var("AB_GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let mut sum = 0.0;
                 for _ in 0..20 {
+                    if gap > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(gap));
+                    }
+                    let t = std::time::Instant::now();
                     x.frame(34);
                     x.wait();
+                    sum += t.elapsed().as_secs_f64();
                 }
-                let ms = t.elapsed().as_secs_f64() * 1e3 / 20.0;
+                let ms = sum * 1e3 / 20.0;
                 // The switch's own header bit back, so the words compare the state alone.
                 switch(x, true, &labels);
                 x.wait();
@@ -1263,6 +1280,20 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     }
     if let Some(x) = world.explicit_vehicles() {
         x.kernel_status().map_err(anyhow::Error::msg)?;
+    }
+    // `--end-frames`: after the run, 20 frames of the vehicles' solver alone from the final
+    // state (wall ms a frame), then the wide passes' profile when the frame is wide.
+    if std::env::args().any(|a| a == "--end-frames") {
+        let x = world.explicit_vehicles_mut().expect("vehicles");
+        x.wait();
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            x.frame(34);
+            x.wait();
+        }
+        println!("end frames: {:.2} ms a frame (wall), wide {}", t.elapsed().as_secs_f64() * 1e3 / 20.0, x.is_wide());
+        let p = x.profile_wide_frame(34);
+        println!("end wide profile: {}", p.iter().filter(|x| x.1 > 0.0).map(|(n, ms)| format!("{} {ms:.2}", n.trim_start_matches("explicit_beams_wide_"))).collect::<Vec<_>>().join(", "));
     }
     if !gpu_steps.is_empty() {
         // The run's GPU time a World step: median, p95 and the worst step (and when).

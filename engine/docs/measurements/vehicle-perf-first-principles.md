@@ -854,3 +854,45 @@ short hit rounds. That part is not built.
 5. Vehicle contact in the wide schedule (pairs across the GPU, ordered hit rounds), in
    place of contact groups: the 8-car target.
 6. Chrome at each step.
+
+### 8.5 Step 1 of §8.4 built: the reused pair list in the wide schedule
+
+`ExplicitBeamsGpu::set_wide_list` (`RUBBLE_WIDE_LIST=1`, `vehicle_lab --wide 1 --wide-list 1`;
+off by default): after a step's `wide_beams`, a small list kernel a vehicle
+(`explicit_beams_wide_list`: the list's tracking, the triangles' throttles, the grid's
+counts and scan, the reuse decision, a build's records, the volatile triangles' tests; its
+state loaded and saved in storage), then the self split's walk and pairs dispatches, then
+`wide_hits` (which records a walk's list in the saved state). `wide_tris` is not dispatched.
+
+Bit for bit against the wide passes' own walk (`--ab-switch widelist`, every state word,
+20 frames each way) at t 0.5, 2.5, 4, 6, 8, 20 s; 4.40 / 6.00 / 6.20 / 6.09 / 6.30 ms a
+frame against 5.20 / 6.74 / 6.74 / 6.66 / 7.21.
+
+A first version reused the self split's step kernel for the list (two thinned dispatches
+of the 470 KB kernel a step): bit for bit, 0.35 ms faster. The small kernel: 0.5–0.9 ms
+faster. Kernel size is a cost of its own (§8.1).
+
+**Whole run, one car, native** (40 s, vehicles' GPU ms a step from t 0.5 s, the same
+trajectory to every printed figure):
+
+| Path | median / p95 / worst |
+|---|---|
+| A workgroup a car, self split on (the default, §7.1) | 5.82 / 6.02 / 6.55 |
+| Wide passes with the list (`RUBBLE_WIDE_ZERO=0`) | **5.73 / 5.93 / 6.10** |
+
+Per pass at rest (t 40, timed apart): the list, walk and pairs with the beams 2.29 (beams
+0.52 of it), hits 1.90, aux 1.60, nodes 0.91, centred damping 0.52 (on in the native
+example's settings, off on the page). The list kernel's dispatch is ≈26 µs, the walk and
+pairs ≈12 µs: the list kernel is the next thing to cut (its lane-0 decision and the
+triangles' geometry belong in threads of their own).
+
+Frames back to back hide a GPU effect that every path pays in a display's frame loop: with
+the GPU idle 10 ms before each frame (`AB_GAP_MS=10`), the same frames take 15–20 % longer
+(wide 6.28 → 7.40, self split 6.27 → 7.24, one workgroup 8.58 → 9.86 ms).
+
+**Where this leaves the targets.** Not met: one car is 5.7–6.1 ms on either path. What
+changed is the structure: the wide schedule now runs the lab's car exactly, its cost is a
+sum of passes that are each measured against a model, and it is flat in the number of cars
+apart (§8.2). The remaining passes (list, hits, aux, node and beam records) are each 3–8×
+over what §8.1 charges for their work; cars in contact still run the old contact groups
+(a frame with vehicle contact is not wide yet).
