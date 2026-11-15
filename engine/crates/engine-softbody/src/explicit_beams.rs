@@ -3508,6 +3508,16 @@ impl ExplicitBeams {
     /// One fixed step: nodes, wings, fuselage drag, commands, beams,
     /// self-collision.
     pub fn step(&mut self) {
+        self.step_nodes();
+        self.step_rest();
+    }
+
+    /// [`Self::step`]'s first part: the drive, the node update and the centred
+    /// damping's correction (every velocity change of the step). A world
+    /// ([`crate::explicit_contact::ExplicitBeamsWorld`]) runs it on every vehicle,
+    /// then its contact work guard on the final velocities (spec §37.1), then
+    /// [`Self::step_rest`].
+    pub fn step_nodes(&mut self) {
         if self.drive.is_some() {
             crate::explicit_drive::drive_pass(self);
         }
@@ -3523,6 +3533,10 @@ impl ExplicitBeams {
         } else {
             self.node_pass();
         }
+    }
+
+    /// [`Self::step`]'s second part: everything after [`Self::step_nodes`].
+    pub fn step_rest(&mut self) {
         if let Some(speed) = self.sleep.track {
             // Vehicle sleep: the velocities this node pass (and its centred correction)
             // left (the GPU's point).
@@ -4491,6 +4505,29 @@ impl ExplicitBeams {
     }
 
     /// Node `i`'s fixed-point contact sum in newtons (zero when none).
+    /// A velocity change `dv` of node `i` after its node update (the world's
+    /// contact work guard, spec §37.1): the velocity and, as the node update
+    /// moves a node by h·v, its position by h·dv. Immovable and retired nodes
+    /// stay as they are.
+    pub fn nudge(&mut self, i: usize, dv: Vec3) {
+        if self.nodes[i].has(NODE_IMMOVABLE) || self.is_retired(i) {
+            return;
+        }
+        let n = &mut self.nodes[i];
+        n.vel += dv;
+        n.pos += dv * STEP;
+    }
+
+    /// The force a staged contact share `f` on a node actually reaches it with:
+    /// the fixed-point sums' rounding of it ([`to_fixed`]) with
+    /// [`Self::fixed_contact`], `f` itself without.
+    pub fn applied_contact(&self, f: Vec3) -> Vec3 {
+        if !self.fixed_contact {
+            return f;
+        }
+        Vec3::new(to_fixed(f.x) as f32, to_fixed(f.y) as f32, to_fixed(f.z) as f32) * (1.0 / CONTACT_FIXED)
+    }
+
     pub fn contact_sum(&self, i: usize) -> Vec3 {
         match self.contact_acc.get(i) {
             Some(a) => Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32) * (1.0 / CONTACT_FIXED),
