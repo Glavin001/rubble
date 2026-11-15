@@ -803,6 +803,15 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
                 jobs.push((format!("explicit_beams_selfsplit_{entry}_ablate{tag}"), fun, d));
             }
         }
+        // The wide passes' reused pair list (explicit_beams_wide_list: the list's part of
+        // a step alone, a small kernel); wide fleets have no aero.
+        if !tag.contains("aero") {
+            jobs.push((
+                format!("explicit_beams_selfsplit_list{tag}"),
+                "explicit_beams_wide_list",
+                vec![W, lanes, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), ("EB_NO_SURFACE", "1")],
+            ));
+        }
         // With vehicle contact (EB_VV_SOLO): the vehicles' dispatch is the split group
         // path's members' (explicit_beams_split_member: a solo vehicle's step cut at its
         // tests, a member's step whole), and the walk and pairs skip the members.

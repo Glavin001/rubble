@@ -832,13 +832,21 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let perf_ab: Option<u32> = arg("--ab-switch").and_then(|s| s.strip_prefix("perf=").and_then(|m| m.parse().ok()));
     // `--ab-switch wide`: the fleet-wide passes (`set_wide`) against a workgroup a vehicle.
     let wide_ab = arg("--ab-switch").as_deref() == Some("wide");
+    // `--ab-switch widelist`: the wide passes with the reused pair list against their own
+    // grid walk every step.
+    let widelist_ab = arg("--ab-switch").as_deref() == Some("widelist");
+    let wide_ab = wide_ab || widelist_ab;
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
     let mut other = None;
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if wide_ab {
+        if widelist_ab {
+            // (Against the wide passes' own walk: both wide.)
+            x.set_wide(true);
+            x.set_wide_list(on);
+        } else if wide_ab {
             x.set_wide(on);
         } else if let Some(mask) = perf_ab {
             let f = x.perf_flags();

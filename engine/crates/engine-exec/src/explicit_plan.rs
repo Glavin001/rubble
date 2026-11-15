@@ -206,6 +206,12 @@ pub const PERF_HIT_FB: u32 = 1;
 /// phase and their tyres beside the coupling's first phase (the kernel's
 /// `driveAheadPart`), in place of three phases of their own each step. Solo frames.
 pub const PERF_DRIVE_AHEAD: u32 = 2;
+/// [`W_PERF_FLAGS`], per parameter copy, for a wide frame with the reused pair list
+/// (`ExplicitBeamsGpu::set_wide_list`): the self split's step kernel as the list's part of
+/// a step, as the hits' part, and the wide passes leaving the triangles to it.
+pub const PERF_WIDE_SELF_A: u32 = 4;
+pub const PERF_WIDE_SELF_B: u32 = 8;
+pub const PERF_WIDE_LIST: u32 = 16;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7); `RUBBLE_PERF_FLAGS=<mask>` overrides
 /// (a measurement; 0: every switch off).
@@ -609,11 +615,11 @@ pub const VV_PASSES: [&str; 3] = [
 const WIDE_BEGIN: usize = 0;
 const WIDE_REBASE: usize = 1;
 const WIDE_NODES: usize = 2;
-const WIDE_BEAMS_PASS: usize = 3;
-const WIDE_TRIS: usize = 4;
-const WIDE_END: usize = 5;
+pub const WIDE_BEAMS_PASS: usize = 3;
+pub const WIDE_TRIS: usize = 4;
+pub const WIDE_END: usize = 5;
 const WIDE_CLOSE: usize = 6;
-const WIDE_HITS: usize = 7;
+pub const WIDE_HITS: usize = 7;
 // Centred damping (jbeam-semantics-spec.md §39): after a step's nodes, when a
 // vehicle has it.
 const WIDE_CENTRED_BEAMS: usize = 8;
