@@ -7175,6 +7175,12 @@ void explicit_beams_wide_begin(uint3 id : SV_DispatchThreadID)
     float3 first = gNodes[x.nodeOff * 3u].xyz;
     float3 shift = length(first) > REBASE_RADIUS ? first : float3(0.0, 0.0, 0.0);
     gMisc[gP.wideMisc + 1u + v] = uint4(asuint(shift), 0u);
+    // The coupling's proxies with the vehicle (cplRebase, as the frame's rebase: every
+    // lane's share on this thread).
+    if (length(first) > REBASE_RADIUS)
+    {
+        for (uint l = 0u; l < LANES; l++) cplRebase(v, l, first);
+    }
     gAcc[gP.testedBase + v * 2u].store(0);
     gAcc[gP.testedBase + v * 2u + 1u].store(0);
 }
@@ -7200,8 +7206,16 @@ void explicit_beams_wide_rebase(uint3 id : SV_DispatchThreadID)
 // Nodes, then group slots, grid counts (and overflow and this step's tested counts).
 [shader("compute")]
 [numthreads(256, 1, 1)]
-void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID)
+void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
 {
+    // The coupling's header for the nodes' proxy contacts (cplContacts reads it from
+    // workgroup memory; no sphere or node-range copies there: every read from the buffers).
+    if (lid.x == 0u)
+    {
+        coupleBegin();
+        cplGsClear();
+    }
+    sync();
     uint i = id.x;
     if (i < gP.totalNodes)
     {
@@ -7454,6 +7468,41 @@ void explicit_beams_wide_close(uint3 id : SV_DispatchThreadID)
     if (v >= gP.vehicles) return;
     uint4 m = gMisc[v];
     gMisc[v] = uint4(m.xyz, m.w + wideStep());
+}
+
+// The rigid coupling's and the raycast wheels' part of a step in the wide passes: a
+// workgroup a vehicle before the step's wide_nodes, coupleStep then driveStep as the
+// frame runs them (their phases are a few lanes' short chains: cheap inside a workgroup);
+// after the last step (the parameter copy `steps`) the coupling's end. No sphere or
+// node-range copies in workgroup memory (they would not reach wide_nodes): the buffers'.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint v = gid.x;
+    uint lane = lid.x;
+    uint s = wideStep();
+    if (lane == 0u)
+    {
+        coupleBegin();
+        driveBegin();
+        cplGsClear();
+        if (s == 0u) cplListBegin(v);
+        cplFoldMark(v);
+    }
+    sync();
+    uint coupleOn = gsUniformCouple;
+    uint driveOn = gsUniformDrive;
+    if (s < gP.steps)
+    {
+        coupleStep(v, lane, s, coupleOn);
+        driveStep(v, lane, s, driveOn);
+    }
+    else
+    {
+        coupleEnd(v, lane, coupleOn);
+    }
+    ebLoopCapFlush();
 }
 
 // --- Vehicle–vehicle contact (engine/docs/explicit-beams-vehicle-contact-spec.md,

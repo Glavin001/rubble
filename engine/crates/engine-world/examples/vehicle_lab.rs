@@ -748,6 +748,11 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         "options: {scene}, surface {} {:?}",
         opts.surface_contact, opts.mountain
     );
+    println!(
+        "features: wings {}, fusedrag {}, centering {}, shocks2 {}, triggers {}, commands {}, slides {}, brakes {}, drive {}, static shapes {}",
+        template.wings.len(), template.fusedrag.is_some(), template.centering.len(), template.shocks2.len(), template.triggers.len(),
+        template.commands.len(), template.slides.len(), template.brakes.len(), template.drive.is_some(), template.shapes.len()
+    );
     let timing = arg("--timing");
     let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |d| {
         d.gpu_timing = match timing.as_deref() {
@@ -825,13 +830,17 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // (`ExplicitBeamsGpu::set_perf_flags`, `explicit_plan::PERF_*`): the run's flags with
     // MASK's bits on against off.
     let perf_ab: Option<u32> = arg("--ab-switch").and_then(|s| s.strip_prefix("perf=").and_then(|m| m.parse().ok()));
+    // `--ab-switch wide`: the fleet-wide passes (`set_wide`) against a workgroup a vehicle.
+    let wide_ab = arg("--ab-switch").as_deref() == Some("wide");
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
     let mut other = None;
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if let Some(mask) = perf_ab {
+        if wide_ab {
+            x.set_wide(on);
+        } else if let Some(mask) = perf_ab {
             let f = x.perf_flags();
             x.set_perf_flags(if on { f | mask } else { f & !mask });
         } else if beams_ab {
@@ -1048,6 +1057,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 lab.bench.t,
                 if kernel_ab {
                     "this kernel (on) / --ab-kernel-dir's (off)"
+                } else if wide_ab {
+                    "wide passes"
                 } else if perf_ab.is_some() {
                     "perf flags"
                 } else if beams_ab {
@@ -1068,7 +1079,13 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 out[0].0,
                 out[1].0
             );
-            anyhow::ensure!(same, "the A/B switch changed the state");
+            // (Wide against the workgroup frame: the two keep different scratch in the
+            // accumulators and misc records; the nodes, beams and groups are the state.)
+            let physics = out[0].1.iter().zip(&out[1].1).filter(|((n, _), _)| ["nodes", "beams", "groups"].contains(n)).all(|((_, a), (_, b))| a == b);
+            if wide_ab {
+                println!("   wide: nodes, beams and groups bit for bit: {physics}");
+            }
+            anyhow::ensure!(same || (wide_ab && physics), "the A/B switch changed the state");
             x.restore(&snap);
             switch(x, true, &labels);
             x.wait();

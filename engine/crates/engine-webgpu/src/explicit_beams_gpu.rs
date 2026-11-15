@@ -3860,7 +3860,13 @@ impl Wide {
                     layout: Some(&pipeline_layout),
                     module: &module,
                     entry_point: Some(entry),
-                    compilation_options: Default::default(),
+                    // RUBBLE_WIDE_ZERO=0 (a measurement until the passes' workgroup reads
+                    // are audited): naga's MSL writer zeroes workgroup memory from one
+                    // thread, per dispatch.
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        zero_initialize_workgroup_memory: std::env::var("RUBBLE_WIDE_ZERO").as_deref() != Ok("0"),
+                        ..Default::default()
+                    },
                     cache: None,
                 })
             })

@@ -587,7 +587,7 @@ pub struct Module {
 /// The frame entry point (frame, solo and contact modules).
 pub const FRAME_ENTRY: &str = "explicit_beams_frame";
 /// The wide passes, in dispatch-kind order ([`Kernel::Wide`]).
-pub const WIDE_PASSES: [&str; 10] = [
+pub const WIDE_PASSES: [&str; 11] = [
     "explicit_beams_wide_begin",
     "explicit_beams_wide_rebase",
     "explicit_beams_wide_nodes",
@@ -598,6 +598,7 @@ pub const WIDE_PASSES: [&str; 10] = [
     "explicit_beams_wide_hits",
     "explicit_beams_wide_centred_beams",
     "explicit_beams_wide_centred_nodes",
+    "explicit_beams_wide_aux",
 ];
 /// The vehicle-contact plan passes ([`Kernel::Vv`]): bounds, pairs, group.
 pub const VV_PASSES: [&str; 3] = [
@@ -617,6 +618,9 @@ const WIDE_HITS: usize = 7;
 // vehicle has it.
 const WIDE_CENTRED_BEAMS: usize = 8;
 const WIDE_CENTRED_NODES: usize = 9;
+/// The coupling's and the raycast wheels' part of a step (a workgroup a vehicle), and the
+/// coupling's end after the last step.
+const WIDE_AUX: usize = 10;
 /// The Params word of the centred damping's Δv region (nonzero: some vehicle has it).
 const W_CENTRED_DV: usize = 84;
 
@@ -711,6 +715,7 @@ pub const MODULES: &[Module] = &[
     pass(WIDE_PASSES[7]),
     pass(WIDE_PASSES[8]),
     pass(WIDE_PASSES[9]),
+    pass(WIDE_PASSES[10]),
     Module {
         name: SLEEP_LIST,
         entry: SLEEP_LIST,
@@ -2465,7 +2470,12 @@ impl ExplicitUpload {
         // The wide passes do not run wings, the fuselage drag, commands or shocks2.
         // Raycast wheels run in the vehicle workgroups only.
         // (Surface contact runs in the frame modules: not in the wide passes.)
-        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none() && !any_surface;
+        // (RUBBLE_WIDE_FORCE=1, a measurement of time only: the wide passes for a fleet
+        // with raycast wheels, whose wheels then do nothing.)
+        let force = std::env::var("RUBBLE_WIDE_FORCE").as_deref() == Ok("1");
+        let _ = force;
+        // (Raycast wheels and the rigid coupling run in the wide passes' aux pass.)
+        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && !any_surface;
         // Every vehicle must have run the same steps for the wide passes (one
         // step parity for the group slots).
         let same_steps = vehicles.windows(2).all(|w| w[0].steps == w[1].steps);
@@ -2617,6 +2627,8 @@ pub struct FramePlanner {
     contact: ContactPlan,
     /// Wide passes possible ([`ExplicitLayout::wide_ok`]) and on.
     wide_ok: bool,
+    /// The fleet has raycast wheels or the rigid coupling's room: the wide passes' aux pass.
+    wide_aux: bool,
     wide_on: bool,
     /// Frames submitted (every STATUS_EVERY-th reads the status).
     frames: u64,
@@ -2645,7 +2657,8 @@ impl FramePlanner {
                 ..Default::default()
             },
             wide_ok: layout.wide_ok,
-            wide_on: layout.wide_default,
+            wide_aux: layout.drive.is_some() || layout.coupling.is_some(),
+            wide_on: layout.wide_default || (layout.wide_ok && std::env::var("RUBBLE_WIDE").as_deref() == Ok("1")),
             frames: 0,
             sleep_rec: layout.sleep.map_or(0, |s| s.header),
             sleep_listing: true,
@@ -2958,6 +2971,9 @@ impl FramePlanner {
         let centred = self.words[W_CENTRED_DV] != 0;
         let mut plan = vec![(0, WIDE_BEGIN, groups(nv)), (0, WIDE_REBASE, groups(nodes))];
         for k in 0..steps {
+            if self.wide_aux {
+                plan.push((k, WIDE_AUX, nv));
+            }
             plan.push((k, WIDE_NODES, groups(nodes + slots + buckets)));
             if centred {
                 plan.push((k, WIDE_CENTRED_BEAMS, groups(beams)));
@@ -2967,6 +2983,9 @@ impl FramePlanner {
             plan.push((k, WIDE_TRIS, groups(tris * WIDE_SUBS)));
             // One workgroup per vehicle: deferred breaks and self-collision hits.
             plan.push((k, WIDE_HITS, nv));
+        }
+        if self.wide_aux {
+            plan.push((steps, WIDE_AUX, nv));
         }
         plan.push((steps, WIDE_END, groups(tris + beams)));
         plan.push((steps, WIDE_CLOSE, groups(nv)));

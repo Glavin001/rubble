@@ -21,7 +21,23 @@ fn main() {
         let fleet: Vec<ExplicitBeams> = (0..n)
             .map(|i| {
                 let at = Vec3::new((i % 16) as f32 * 6.0, 0.0, (i / 16) as f32 * 12.0);
-                let mut s = ExplicitBeams::from_truck(&text, at, Vec3::new(0.0, 0.0, 15.0), ExplicitBeamsSettings::default()).unwrap();
+                // WIDE_CAR=<jbeam dir with files.json>: that car (JBeam mode, pressure wheels)
+                // in place of the repo sedan.
+                let mut s = match std::env::var("WIDE_CAR") {
+                    Ok(dir) => {
+                        let dir = std::path::Path::new(&dir);
+                        let list = std::fs::read_to_string(dir.join("files.json")).unwrap();
+                        let names: Vec<&str> = list.split('"').filter(|s| s.ends_with(".jbeam")).collect();
+                        let files: Vec<(String, String)> = names.iter().map(|f| (f.to_string(), std::fs::read_to_string(dir.join(f)).unwrap())).collect();
+                        let refs: Vec<(&str, &str)> = files.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
+                        let pc = std::fs::read_to_string(dir.join("sedan/sedan.pc")).ok();
+                        let desc = engine_softbody::jbeam::load_jbeam(&refs, pc.as_deref()).unwrap();
+                        let settings = ExplicitBeamsSettings { fast_inv_sqrt: true, ..Default::default() };
+                        let wheels = if std::env::var("WIDE_RAYCAST").is_ok() { engine_softbody::explicit_beams::JbeamWheels::Raycast } else { engine_softbody::explicit_beams::JbeamWheels::Pressure };
+                        ExplicitBeams::from_desc_jbeam_with(&desc, wheels, at, Vec3::new(0.0, 0.0, 15.0), settings).unwrap().0
+                    }
+                    Err(_) => ExplicitBeams::from_truck(&text, at, Vec3::new(0.0, 0.0, 15.0), ExplicitBeamsSettings::default()).unwrap(),
+                };
                 let low = s.nodes.iter().map(|n| n.pos.y).fold(f32::MAX, f32::min);
                 for p in &mut s.nodes {
                     p.pos.y += 0.02 - low;
