@@ -54,9 +54,12 @@ env:
   # run on another GPU (L40S: sm_89) adds it. Any other GPU JIT-compiles the PTX.
   ENGINE_CUDA_SASS: ${{ (inputs.gpu || 'T4') == 'T4' && '75' || '75,89' }}
   ENGINE_CUDA_FATBIN_CACHE: ${{ github.workspace }}/.engine-cuda-fatbins
-  # nvcc on the explicit vehicle kernels needs several GB each: one per core ran the
-  # 16 GB runner out of memory (the runner was lost mid-build). Two at a time.
-  RUBBLE_BUILD_JOBS: "2"
+  # One nvcc per core (4). Peak RSS measured per module (engine/tools/cuda/measure_nvcc.py):
+  # the explicit frame modules CI builds (ci_explicit_modules.txt) 1.8-4.3 GB, 9.8 GB
+  # for all four at once; the rigid and terrain kernels under 1 GB. The largest
+  # modules CI does not build (contact, aero) need 8.4 GB each: building every module
+  # at 4 jobs would not fit the 16 GB runner, as happened before at one per core.
+  RUBBLE_BUILD_JOBS: "4"
 
 jobs:
   cuda:
