@@ -1,0 +1,12 @@
+{
+  "title": "Compactor: the side plates in at 0.25 m/s to a 0.7 m gap",
+  "mode": "compactor",
+  "scene": "flat",
+  "duration": 8,
+  "events": [
+    { "t": 0.3, "cam": "orbit" },
+    { "t": 0.5, "plates": { "axis": "sides", "speed": 0.25, "gap": 0.7 } },
+    { "t": 2.0, "slow": 0.25 },
+    { "t": 3.0, "slow": 1 }
+  ]
+}

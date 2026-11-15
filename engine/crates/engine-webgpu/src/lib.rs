@@ -24,11 +24,11 @@ pub mod metal_interop;
 #[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]
-pub use compute_spec::ComputeSpec;
+pub use compute_spec::{mark_pipeline_compiled, pipeline_ready, set_pipeline_gate, ComputeSpec};
 #[cfg(feature = "gpu")]
 pub use explicit_beams_gpu::{
-    explicit_beams_shipped_wgsl, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu, GpuBeam,
-    GpuSnapshot, KernelVariant,
+    explicit_beams_shipped_wgsl, group_split_default, set_explicit_module_override, render_scene_json, CouplingCapacity, CouplingLayout, ExplicitBeamsGpu,
+    GpuBeam, GpuSnapshot, KernelVariant, COUPLING_FOLD_OFF, COUPLING_LIST_OFF, COUPLING_LIST_SKIN_CEILING, COUPLING_LIST_SKIN_NODES_ONLY,
 };
 #[cfg(feature = "gpu")]
 pub use features::{
@@ -70,6 +70,27 @@ pub const EXPLICIT_BEAMS_CONTACT_BIG: [(&str, &str); 4] = [
     ("explicit_beams_contact_big_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero.wgsl"))),
     ("explicit_beams_contact_big_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_big_aero_wide.wgsl"))),
 ];
+/// The twelve frame and contact modules (not the large groups' four, which a fleet of
+/// more than four without coupling falls back to as shipped) with surface contact but
+/// without the World's coupling (`EB_NO_COUPLING`, name `<module>_nocpl`): the surface pass without its
+/// proxy paths (the per-element proxy loops, the casts, the pair path), which no
+/// upload without coupling room can reach. The host runs them for such an upload
+/// with surface contact (`explicit_beams_gpu::frame_module`); what executes is the
+/// same code, and a browser compiles a kernel a third the size.
+pub const EXPLICIT_BEAMS_NOCPL: [(&str, &str); 12] = [
+    ("explicit_beams_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_nocpl.wgsl"))),
+    ("explicit_beams_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_wide_nocpl.wgsl"))),
+    ("explicit_beams_aero_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_nocpl.wgsl"))),
+    ("explicit_beams_aero_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_aero_wide_nocpl.wgsl"))),
+    ("explicit_beams_solo_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_nocpl.wgsl"))),
+    ("explicit_beams_solo_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_wide_nocpl.wgsl"))),
+    ("explicit_beams_solo_aero_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_nocpl.wgsl"))),
+    ("explicit_beams_solo_aero_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_solo_aero_wide_nocpl.wgsl"))),
+    ("explicit_beams_contact_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_nocpl.wgsl"))),
+    ("explicit_beams_contact_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_wide_nocpl.wgsl"))),
+    ("explicit_beams_contact_aero_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_nocpl.wgsl"))),
+    ("explicit_beams_contact_aero_wide_nocpl", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_contact_aero_wide_nocpl.wgsl"))),
+];
 /// The sixteen frame and contact modules without surface contact (`EB_NO_SURFACE`,
 /// name `<module>_nosurf`; `engine_exec::explicit_plan::Kernel::module_for`): the host
 /// runs them when no vehicle of the upload has surface contact.
@@ -108,6 +129,72 @@ pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
     ("explicit_surface_apply_seg", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_seg.wgsl"))),
     ("explicit_surface_apply_point", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_point.wgsl"))),
     ("explicit_surface_apply_pair", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_surface_apply_pair.wgsl"))),
+];
+/// The split group path (`EB_VV_SPLIT`, engine/docs/measurements/contact-groups-design.md):
+/// per frame-module variant (plain, wide, aero, aero wide) the members' step
+/// (`explicit_beams_split_member`), the groups' pass (`explicit_beams_split_group`) and
+/// its triangle tests across workgroups (`explicit_beams_split_tests`).
+/// WebGPU only (native wgpu and browsers).
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 12] = [
+    ("explicit_beams_split_member", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member.wgsl"))),
+    ("explicit_beams_split_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group.wgsl"))),
+    ("explicit_beams_split_tests", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests.wgsl"))),
+    ("explicit_beams_split_member_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member_wide.wgsl"))),
+    ("explicit_beams_split_group_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group_wide.wgsl"))),
+    ("explicit_beams_split_tests_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests_wide.wgsl"))),
+    ("explicit_beams_split_member_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member_aero.wgsl"))),
+    ("explicit_beams_split_group_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group_aero.wgsl"))),
+    ("explicit_beams_split_tests_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests_aero.wgsl"))),
+    ("explicit_beams_split_member_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member_aero_wide.wgsl"))),
+    ("explicit_beams_split_group_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group_aero_wide.wgsl"))),
+    ("explicit_beams_split_tests_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests_aero_wide.wgsl"))),
+];
+/// Self-collision's listed pairs across workgroups (`EB_SELF_SPLIT`,
+/// engine/docs/measurements/selfcol-design.md): per frame-module variant the solo frame's
+/// step cut at its tests (`explicit_beams_self_step`), the walk dispatch
+/// (`explicit_beams_self_walk`) and the pairs dispatch (`explicit_beams_self_pairs`);
+/// with vehicle contact (`_vv`) the vehicles' dispatch of the split group path
+/// (`explicit_beams_split_member`, a solo vehicle's step cut at its tests) and the walk
+/// and pairs that skip a contact group's members. WebGPU only (native wgpu and browsers).
+pub const EXPLICIT_BEAMS_SELF_SPLIT: [(&str, &str); 24] = [
+    ("explicit_beams_selfsplit_step", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step.wgsl"))),
+    ("explicit_beams_selfsplit_walk", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk.wgsl"))),
+    ("explicit_beams_selfsplit_pairs", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs.wgsl"))),
+    ("explicit_beams_selfsplit_step_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_wide.wgsl"))),
+    ("explicit_beams_selfsplit_walk_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_wide.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_wide.wgsl"))),
+    ("explicit_beams_selfsplit_step_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_aero.wgsl"))),
+    ("explicit_beams_selfsplit_walk_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_aero.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_aero.wgsl"))),
+    ("explicit_beams_selfsplit_step_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_aero_wide.wgsl"))),
+    ("explicit_beams_selfsplit_walk_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_aero_wide.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_aero_wide.wgsl"))),
+
+    ("explicit_beams_selfsplit_member_vv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv.wgsl"))),
+    ("explicit_beams_selfsplit_walk_vv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_vv", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv.wgsl"))),
+    ("explicit_beams_selfsplit_member_vv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv_wide.wgsl"))),
+    ("explicit_beams_selfsplit_walk_vv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_wide.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_vv_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_wide.wgsl"))),
+    ("explicit_beams_selfsplit_member_vv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv_aero.wgsl"))),
+    ("explicit_beams_selfsplit_walk_vv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_aero.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_vv_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_aero.wgsl"))),
+    ("explicit_beams_selfsplit_member_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_member_vv_aero_wide.wgsl"))),
+    ("explicit_beams_selfsplit_walk_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_vv_aero_wide.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_vv_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_vv_aero_wide.wgsl"))),
+];
+/// Measurement only (native; the `test-kernels` feature): the self split's modules with `EB_ABLATE`, at the
+/// non-aero variants (`ExplicitBeamsGpu::set_ablation` with the split on). Not shipped
+/// to browsers.
+#[doc(hidden)]
+#[cfg(feature = "test-kernels")]
+pub const EXPLICIT_BEAMS_SELF_SPLIT_ABLATE: [(&str, &str); 6] = [
+    ("explicit_beams_selfsplit_step_ablate", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_ablate.wgsl"))),
+    ("explicit_beams_selfsplit_walk_ablate", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_ablate.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_ablate", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_ablate.wgsl"))),
+    ("explicit_beams_selfsplit_step_ablate_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_step_ablate_wide.wgsl"))),
+    ("explicit_beams_selfsplit_walk_ablate_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_walk_ablate_wide.wgsl"))),
+    ("explicit_beams_selfsplit_pairs_ablate_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_selfsplit_pairs_ablate_wide.wgsl"))),
 ];
 /// The build's WGSL directory (native tests read the frozen baseline kernel,
 /// `explicit_baseline_*.wgsl`, from it at run time).

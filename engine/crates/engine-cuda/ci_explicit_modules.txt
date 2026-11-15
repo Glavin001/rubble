@@ -1,0 +1,20 @@
+# Explicit modules CI compiles to device code: those tests/explicit_parity.rs's GPU
+# tests load. Generated; rewrite with
+# ENGINE_CUDA_WRITE_CI_MODULES=1 cargo test -p engine-cuda --release --test explicit_parity ci_explicit
+explicit_beams_contact_big_wide_nosurf
+explicit_beams_contact_wide_nosurf
+explicit_beams_solo_wide_nosurf
+explicit_beams_vv_bounds
+explicit_beams_vv_group
+explicit_beams_vv_pairs
+explicit_beams_wide_beams
+explicit_beams_wide_begin
+explicit_beams_wide_centred_beams
+explicit_beams_wide_centred_nodes
+explicit_beams_wide_close
+explicit_beams_wide_end
+explicit_beams_wide_hits
+explicit_beams_wide_nodes
+explicit_beams_wide_nosurf
+explicit_beams_wide_rebase
+explicit_beams_wide_tris

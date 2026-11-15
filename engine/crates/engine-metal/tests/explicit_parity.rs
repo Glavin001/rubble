@@ -376,6 +376,7 @@ fn metal_coupled_sedan_into_a_rigid_box_matches_cpu() {
         turbulence: false,
         triangle_throttle: true,
         centred_damping: false,
+        centred_objective: false,
     };
     let mut sim = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings).unwrap();
     let bounds = |s: &ExplicitBeams| {

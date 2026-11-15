@@ -7,7 +7,8 @@
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
   hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
-  showcaseLayout, brickRingLayout, sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
+  showcaseLayout, brickRingLayout, createVehicleLab as createVehicleLabWasm, vehicleLabMaterials,
+  sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
 } from './generated/world-wasm/engine_world_wasm.js';
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
@@ -97,10 +98,10 @@ export async function cityMaxHouses(opts = {}) {
  * .truck text; absent, the procedural sedan with tyres). Returns the world and
  * `{ houses, ground, centres }`.
  */
-export async function createVehicleTown(spec) {
+export async function createVehicleTown(spec, progress) {
   ready ??= init();
   await ready;
-  const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) });
+  const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) }, progress);
   world.flags = solverFlags();
   return { world, layout: vehicleTownLayout(spec.houses ?? 0, spec.count ?? 4) };
 }
@@ -109,14 +110,16 @@ export async function createVehicleTown(spec) {
  * The one-World showcase (`rubble::showcase_scene`): `spec` `{ vehicles: [{ truck } |
  * { jbeam: [[name, text]], pc }] (cycled over the preset's cars), preset: 'house' |
  * 'crates' | 'twoway' | 'convoy', count, speed, runUp, drag }` (or `truck`: one .truck
- * vehicle). Returns the world and its layout (`showcaseLayout`).
+ * vehicle). Returns the world and its layout (`showcaseLayout`). `progress` (optional,
+ * here and in the other create functions): a loading card's `loading.progress`
+ * (load-progress.mjs), which hears the load's stages and each GPU kernel's compile.
  */
-export async function createShowcase(spec) {
+export async function createShowcase(spec, progress) {
   ready ??= init();
   await ready;
   const { truck, vehicles, ...rest } = spec;
   const layout = showcaseLayout(rest);
-  const world = await WebWorld.createShowcase(spec);
+  const world = await WebWorld.createShowcase(spec, progress);
   world.flags = solverFlags();
   return { world, layout };
 }
@@ -126,14 +129,27 @@ export async function createShowcase(spec) {
  * soft-body cars on raycast wheels in one World on its own device (spec as
  * `WebWorld.createBrickRingDrive`), and its layout (`brickRingLayout`).
  */
-export async function createBrickRingDrive(spec) {
+export async function createBrickRingDrive(spec, progress) {
   ready ??= init();
   await ready;
   const { vehicles, ...rest } = spec;
   const layout = brickRingLayout(rest);
-  const world = await WebWorld.createBrickRingDrive(spec);
+  const world = await WebWorld.createBrickRingDrive(spec, progress);
   world.flags = solverFlags();
   return { world, layout };
+}
+
+/**
+ * The vehicle test lab (`rubble::vehicle_lab`, vehicle-lab.html): one soft-body car on a
+ * flat arena or the infinite mountain in one World on its own device, and the lab's
+ * state beside it (spec as the wasm's `createVehicleLab`).
+ */
+export async function createVehicleLab(spec, progress) {
+  ready ??= init();
+  await ready;
+  const [world, lab] = await createVehicleLabWasm(spec, progress);
+  world.flags = solverFlags();
+  return { world, lab, materials: vehicleLabMaterials() };
 }
 
 /** The wasm, once loaded (pages that call its free functions before a world). */

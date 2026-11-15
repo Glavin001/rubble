@@ -39,6 +39,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_SASS");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_LOAD_CACHE");
     println!("cargo:rerun-if-env-changed=ENGINE_CUDA_REQUIRE_PTX");
+    println!("cargo:rerun-if-env-changed=ENGINE_CUDA_EXPLICIT_MODULES");
 
     let slangc = find_slangc()?;
     let nvcc = match find_nvcc() {
@@ -185,7 +186,26 @@ fn explicit_kernels(
     std::fs::create_dir_all(&dir)?;
     let source = root.join("kernels/explicit_beams.slang");
     let slots = vk_binding_slots(std::slice::from_ref(&source))?;
+    // `ENGINE_CUDA_EXPLICIT_MODULES=a,b*,...`: device code only for the modules named (a
+    // trailing `*` is a prefix). nvcc takes minutes per explicit module, and a scenario
+    // needs a handful; CI builds the ones its tests load (ci_explicit_modules.txt). Every
+    // module's CUDA source is still generated and checked (hazards, loop caps); the
+    // others are listed with no device code, and `CudaExplicitBeams` names any it needs
+    // that were left out.
+    let only: Option<Vec<String>> = env::var("ENGINE_CUDA_EXPLICIT_MODULES")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
+    let wanted = |name: &str| {
+        only.as_ref().is_none_or(|list| {
+            list.iter().any(|p| match p.strip_suffix('*') {
+                Some(prefix) => name.starts_with(prefix),
+                None => name == p,
+            })
+        })
+    };
     let compiled = engine_slang_build::par_map(MODULES, |m| -> Compiled {
+        // Every module is generated and checked; only the device code is filtered.
         let cu = dir.join(format!("{}.cu", m.name));
         let kernel = compile_kernel_with_defines(slangc, root, &source, m.entry, &cu, m.defines)?;
         let text = std::fs::read_to_string(&cu)?;
@@ -203,12 +223,14 @@ fn explicit_kernels(
         // (The kernel's code: past Slang's CUDA prelude, which has loops of its own.)
         let code = text.split_once("SLANG_globalParams;").map_or(text.as_str(), |x| x.1);
         anyhow::ensure!(
-            code.contains("ebLoopCapHit") || only_constant_loops(code),
+            code.contains("ebLoopCapHit") || code.contains("ebLoopHit") || only_constant_loops(code),
             "{}: the CUDA source has no loop caps (explicit_loop_cap.slang)",
             m.name
         );
+        let nvcc = nvcc.filter(|_| wanted(m.name));
         if let Some(nvcc) = nvcc {
-            fatbin(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass)?;
+            let threads = kernel.threads.iter().product();
+            engine_slang_build::cuda_layout::fatbin_threads(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass, threads)?;
         }
         Ok((kernel, text.len() as u64, nvcc.is_some(), false))
     });

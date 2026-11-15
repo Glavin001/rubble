@@ -9,6 +9,7 @@
 //! community content (CPU, GPU, the page's `?mod=`). Guide:
 //! `engine/docs/vehicle-gen2.md`.
 
+pub mod body2;
 pub mod build;
 pub mod export;
 pub mod gen3;
@@ -17,7 +18,9 @@ pub mod model;
 pub mod rig;
 pub mod sedan;
 pub mod shape;
+pub mod shell;
 pub mod surface;
+pub mod vg_input;
 
 pub use build::{Car, Part, Role};
 

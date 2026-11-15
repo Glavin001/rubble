@@ -65,13 +65,14 @@ pub const PROXY_SLACK: f32 = 0.5;
 const PROXY_OUT: u32 = 2;
 /// Impulse record keys (after the host's, the terrain's 0x300000 + collider).
 const KEY_BASE: u32 = 0x50_0000;
-const ST_NAMES: [&str; 6] = [
+const ST_NAMES: [&str; 7] = [
     "more colliders than the shapes room",
     "more bodies than the bodies room",
     "more hull planes than the planes room",
     "more impulse records than IMPULSE_CAP",
     "more chunk records than the threshold ingest's rows",
     "a coupling loop past its cap or pass budget (a corrupt count; the frame is invalid)",
+    "more broadphase candidates than their room (three times the shapes room: a collider can be listed by its resting cell and as moving or moved)",
 ];
 /// Windows between status reads.
 const STATUS_EVERY: u64 = 8;
@@ -124,6 +125,14 @@ struct Params {
     /// Passes one invocation of the plan passes may take (explicit_loop_cap.slang; see
     /// [`coupling_loop_budget`]).
     loop_budget: u32,
+    /// gMisc record of the explicit nodes' retired bits (0: none retired).
+    retire_base: u32,
+    /// The coupling's window per piece: gMisc records of the nodes' labels and of the
+    /// pieces' boxes (0: one window per vehicle).
+    label_base: u32,
+    piece_box_base: u32,
+    /// To the uniform's 16-byte size.
+    pad: u32,
 }
 
 /// The coupling passes' pass budget: four times a bound on one invocation's passes
@@ -559,6 +568,10 @@ impl ExplicitVehicles {
             cand_cap: self.cand_cap(),
             extra_base: self.extra_word as u32,
             loop_budget: 0,
+            retire_base: self.gpu.retire_base(),
+            label_base: self.gpu.piece_window_records().0,
+            piece_box_base: self.gpu.piece_window_records().1,
+            pad: 0,
         };
         let p = Params { loop_budget: coupling_loop_budget(&p), ..p };
         sim.queue().write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
@@ -858,6 +871,35 @@ impl World {
         Ok(())
     }
 
+    /// Put the explicit vehicles back to `vehicles`' state in place (a restart: the same
+    /// fleet placed anew, at new speeds, undamaged), without making a device, buffer or
+    /// pipeline: `ExplicitBeamsGpu::reset_state`, and the coupling's clock, pending
+    /// impulses and proxies as after [`World::add_explicit_vehicles`]. The vehicles
+    /// step again with the next step. `vehicles` must be the fleet that was added (only
+    /// its state may differ); another is an error and changes nothing.
+    pub fn reset_explicit_vehicles(&mut self, vehicles: &[ExplicitBeams]) -> anyhow::Result<()> {
+        let queue = self.sim.queue().clone();
+        let x = self.explicit.as_mut().ok_or_else(|| anyhow::anyhow!("no explicit vehicles"))?;
+        anyhow::ensure!(vehicles.len() == x.sims.len(), "reset_explicit_vehicles: {} vehicles, {} were added", vehicles.len(), x.sims.len());
+        x.gpu.reset_state(vehicles, Some(x.def.capacity), x.def.sleep).map_err(anyhow::Error::msg)?;
+        x.sims = vehicles.to_vec();
+        x.carry = 0.0;
+        x.emit_pending = false;
+        x.emit_wakes = false;
+        x.read_pending = false;
+        *x.status.lock().unwrap() = None;
+        x.any_awake = true;
+        for m in &mut x.sleep_mask {
+            *m = 0;
+        }
+        queue.write_buffer(&x.work, 4 * x.sleep_mask_word, bytemuck::cast_slice(&x.sleep_mask));
+        for v in 0..vehicles.len() as u32 {
+            // Its proxy in the broadphase is rebuilt at the next window.
+            queue.write_buffer(&x.work, x.work_proxy(v) + 28, bytemuck::bytes_of(&0u32));
+        }
+        Ok(())
+    }
+
     /// The explicit vehicles' GPU state (nodes, beams, the coupling's records), once added.
     pub fn explicit_vehicles(&self) -> Option<&ExplicitBeamsGpu> {
         self.explicit.as_ref().map(|x| &x.gpu)
@@ -895,6 +937,16 @@ impl World {
     /// Blocking read (tests, tools): per vehicle, its last window's proxy shapes as
     /// (collider, impulse N s, angular impulse about the shape's reference point and that
     /// point): the impulses the next step's rigid step applies.
+    /// Measurement (blocking): per vehicle the coupling's candidates of the last window
+    /// (cpl_query's list, duplicates included; its room is three times the shapes room).
+    pub fn explicit_candidate_counts(&self) -> Vec<u32> {
+        let Some(x) = self.explicit.as_ref() else {
+            return Vec::new();
+        };
+        let nv = x.sims.len() as u64;
+        engine_webgpu::explicit_coupling::read_words(self.sim.device(), self.sim.queue(), &x.work, 4 * x.extra_word, 4 * nv)
+    }
+
     pub fn explicit_window_impulses(&self) -> Vec<Vec<(u32, [f32; 3], [f32; 3], [f32; 3])>> {
         let Some(x) = self.explicit.as_ref() else {
             return Vec::new();

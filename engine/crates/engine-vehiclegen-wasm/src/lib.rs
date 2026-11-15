@@ -39,6 +39,12 @@ impl VehicleBuild {
             None => Float32Array::new_with_length(0),
         }
     }
+    /// Surface tag per vertex of a solid part: 0 outer skin, 1 edge wall,
+    /// 2 inner face (all 0 for parts that are not skin + walls + inner face).
+    pub fn surfaces(&self, i: usize) -> js_sys::Uint8Array {
+        let s: Vec<u8> = self.parts[i].surf.iter().map(|s| *s as u8).collect();
+        js_sys::Uint8Array::from(&s[..])
+    }
     pub fn indices(&self, i: usize) -> Uint32Array {
         Uint32Array::from(&self.parts[i].indices[..])
     }

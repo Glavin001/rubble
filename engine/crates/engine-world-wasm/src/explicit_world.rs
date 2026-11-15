@@ -38,7 +38,7 @@ impl WebWorld {
     /// prefractured cuboid houses (threshold destructibles), one from each side of each,
     /// past a crate each.
     #[wasm_bindgen(js_name = createVehicleTown)]
-    pub async fn create_vehicle_town(spec: JsValue) -> Result<WebWorld, JsValue> {
+    pub async fn create_vehicle_town(spec: JsValue, progress: Option<js_sys::Function>) -> Result<WebWorld, JsValue> {
         let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
         let truck = spec
             .get("truck")
@@ -59,7 +59,7 @@ impl WebWorld {
         let count = num(&spec, "count", 4.0) as usize;
         let fleet = vec![template.clone(); count.max(1)];
         let specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(town_coupling().capacity));
-        crate::warm_pipelines(&device, &specs, std::rc::Rc::new(|_: &str, _: f64| {})).await;
+        crate::warm_pipelines(&device, &specs, crate::hear_fn(progress)).await.map_err(err)?;
         let town = res(crash_town(
             GpuContext::Shared { info, device, queue },
             &template,
@@ -105,10 +105,20 @@ impl WebWorld {
         self.world.explicit_vehicles_mut().is_some_and(|g| g.set_wide(on))
     }
 
+    /// Measurement: the reused self-collision pair list's margin (m; 0 off) and backoff
+    /// (a list reused on fewer steps than `streak` sends the next grid steps to the walk).
+    #[wasm_bindgen(js_name = setExplicitPairReuse)]
+    pub fn set_explicit_pair_reuse(&mut self, margin: f32, streak: u32) -> bool {
+        let Some(g) = self.world.explicit_vehicles_mut() else { return false };
+        g.set_pair_reuse_margin(margin);
+        g.set_pair_reuse_streak(streak);
+        true
+    }
+
     /// Measurement knobs of the explicit frame (ablations in a browser): `coupling` (the
     /// rigid coupling in the frame; off, the vehicles no longer feel the bodies),
-    /// `couplingCull`, `couplingCache`, `couplingRanges`, `surfacePairs`, `surfaceCulls` (lossless paths on
-    /// or off). Returns false for an unknown knob.
+    /// `couplingCull`, `couplingCache`, `couplingRanges`, `surfacePairs`, `surfaceCulls`, `pairReuse`
+    /// (lossless paths on or off). Returns false for an unknown knob.
     #[wasm_bindgen(js_name = setExplicitKnob)]
     pub fn set_explicit_knob(&mut self, name: &str, on: bool) -> bool {
         let Some(g) = self.world.explicit_vehicles_mut() else { return false };
@@ -119,6 +129,7 @@ impl WebWorld {
             "surfacePairs" => g.set_surface_pairs(on),
             "surfaceCulls" => g.set_surface_culls(on),
             "couplingRanges" => g.set_coupling_node_ranges(on),
+            "pairReuse" => g.set_pair_reuse(on),
             _ => return false,
         }
         true

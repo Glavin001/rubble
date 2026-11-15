@@ -8,6 +8,8 @@ description = "Soft-body (node–beam) vehicles: Rigs of Rods .truck / JBeam imp
 [dependencies]
 engine-schema.workspace = true
 engine-vehicle.workspace = true
+# The vehicle generator's designs: rigged in memory (authoring::gen2::vg_input).
+engine-vehiclegen.workspace = true
 glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true

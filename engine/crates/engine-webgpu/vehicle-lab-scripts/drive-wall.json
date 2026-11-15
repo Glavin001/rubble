@@ -1,0 +1,13 @@
+{
+  "title": "Drive: full throttle into a rigid wall 30 m ahead",
+  "mode": "drive",
+  "scene": "flat",
+  "duration": 8,
+  "events": [
+    { "t": 0.1, "obstacle": { "kind": "wall", "ahead": 30 } },
+    { "t": 0.3, "cam": "chase" },
+    { "t": 0.3, "drive": { "forward": 1 } },
+    { "t": 6.5, "drive": { "forward": 0, "brake": 1 } },
+    { "t": 6.5, "cam": "orbit" }
+  ]
+}

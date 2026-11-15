@@ -20,7 +20,7 @@
 // included), no pipelines: seconds, not the driver's compile.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +29,9 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const DIR = process.env.EXPLICIT_WGSL_DIR || join(ROOT, 'generated', 'explicit-wgsl');
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
+// EXPLICIT_WGSL_DUMP=<file>: Chrome's log with the MSL Dawn generates for each
+// pipeline (dump_shaders), for timing Apple's compiler on it offline.
+const DUMP = process.env.EXPLICIT_WGSL_DUMP;
 const PAGE = `<!doctype html><meta charset="utf-8"><title>explicit wgsl</title><script type="module">
 window.__run = async (nonce, only, exact, moduleOnly) => {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
@@ -117,8 +120,9 @@ const chrome = spawn(CHROME, [
   '--enable-unsafe-webgpu', '--no-first-run',
   // Dawn renames every symbol before Metal sees it, so a renamed entry point alone
   // would still hit the driver's shader cache: keep the names (EXPLICIT_WGSL_COLD).
-  ...(process.env.EXPLICIT_WGSL_COLD === '1' ? ['--enable-dawn-features=disable_symbol_renaming'] : []), '--no-default-browser-check', 'about:blank',
-], { stdio: 'ignore' });
+  ...(DUMP ? ['--enable-dawn-features=disable_symbol_renaming,dump_shaders', '--enable-logging=stderr', '--v=0']
+    : process.env.EXPLICIT_WGSL_COLD === '1' ? ['--enable-dawn-features=disable_symbol_renaming'] : []), '--no-default-browser-check', 'about:blank',
+], { stdio: DUMP ? ['ignore', 'ignore', openSync(DUMP, 'w')] : 'ignore' });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} server.close(); };
 process.on('exit', cleanup);
 // A kill timer's signal (perl -e 'alarm N; exec ...' sends SIGALRM) or a TERM: close

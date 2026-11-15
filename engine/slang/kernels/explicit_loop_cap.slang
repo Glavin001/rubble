@@ -57,28 +57,25 @@ void ebLoopCapFlush()
 // budget is far above any legitimate count, so a budgeted loop computes what an
 // uncapped one does.
 static uint ebSpent = 0u;
+// (Branch-free, selects in place of the ifs: the same ends and counts. Every capped loop
+// inlines it (~220 copies in a frame module), and its branches cost the GPU drivers'
+// compilers ~20% of the frame's compile; engine/docs/measurements/kernel-compile-time.md.)
 uint ebEnd(uint start, uint bound, uint step, uint line, bool budgeted)
 {
     uint end = min(bound, max(start + min(step, 0xFFFFFFFFu / EB_LOOP_CAP) * EB_LOOP_CAP, start));
     end = min(end, 0xFFFFFFFFu - max(step, 1u) + 1u);
 #ifdef EB_LOOP_BUDGET
-    uint budget = EB_LOOP_BUDGET;
-    if (budgeted && budget != 0u && end > start)
-    {
-        uint s = max(step, 1u);
-        uint passes = (end - start - 1u) / s + 1u;
-        uint left = budget - min(ebSpent, budget);
-        if (passes > left)
-        {
-            end = start + left * s;
-            ebSpent = budget;
-        }
-        else
-            ebSpent += passes;
-    }
+    uint budget = select(budgeted, EB_LOOP_BUDGET, 0u);
+    uint s = max(step, 1u);
+    // Passes this loop grants (none when it is empty), then the budget's rest: past
+    // it, the loop ends at the budget and the count is spent; else the count grows.
+    uint passes = select(end > start, (end - start - 1u) / s + 1u, 0u);
+    uint left = budget - min(ebSpent, budget);
+    bool over = select(budget != 0u, passes > left, false);
+    end = select(over, start + left * s, end);
+    ebSpent = select(budget == 0u, ebSpent, select(over, budget, ebSpent + passes));
 #endif
-    if (end < bound)
-        ebLoopCapHit(line);
+    ebLoopHit = max(ebLoopHit, select(end < bound, EB_LOOP_CAP_TAG | line, 0u));
     return end;
 }
 // One pass of a counted loop from the budget (false: none left).
@@ -105,9 +102,8 @@ uint ebEndMost(uint start, uint bound, uint step, uint line, uint most)
     uint passes = max(min(EB_LOOP_CAP, most), 1u);
     uint end = min(bound, max(start + min(s, 0xFFFFFFFFu / passes) * passes, start));
     end = min(end, 0xFFFFFFFFu - s + 1u);
-    if (step == 0u) end = min(end, start);
-    if (end < bound)
-        ebLoopCapHit(line);
+    end = select(step == 0u, min(end, start), end);
+    ebLoopHit = max(ebLoopHit, select(end < bound, EB_LOOP_CAP_TAG | line, 0u));
     return end;
 }
 #define EB_END_UNIFORM(start, bound, step, most) ebEndMost(start, bound, step, __LINE__, most)

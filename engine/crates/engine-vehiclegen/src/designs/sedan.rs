@@ -13,7 +13,8 @@ use std::rc::Rc;
 use glam::{DVec2, DVec3};
 use serde::{Deserialize, Serialize};
 
-use crate::assemble::Design;
+use crate::assemble::{Design, RigSpec};
+use crate::physics::Physics;
 use crate::carbody::{CapPt, CarBody, Side};
 use crate::curves::{bump, interp, linspace, sign, smoothstep, Pchip};
 use crate::export::Marker;
@@ -22,6 +23,8 @@ use crate::layout::{Curve, FaceFn};
 use crate::mesh::{box_, closed_lathe, grid, orient_outward, rbox, rot_x, rrect, sweep, Grid2, Mat, Mesh, SweepOpts};
 use crate::panels::{boundary_loops, inner_panel};
 use crate::parts::{self as p, RimStyle, WheelSpec};
+use crate::mechanical::{self, MechPart};
+use crate::structure::{self, Structure};
 use crate::tube::{Handle, Key, Tube};
 use crate::uvpack::Parts;
 
@@ -64,6 +67,9 @@ pub struct SedanParams {
     pub paint: [f64; 3],
     pub metallic: f64,
     pub roughness: f64,
+    /// The crash physics block (masses, zone yields, hardware; census
+    /// defaults): `engine/docs/generated-vehicles.md`.
+    pub physics: Physics,
 }
 
 impl Default for SedanParams {
@@ -84,6 +90,7 @@ impl Default for SedanParams {
             paint: [0.22, 0.006, 0.012],
             metallic: 0.5,
             roughness: 0.24,
+            physics: Physics::default(),
         }
     }
 }
@@ -552,9 +559,91 @@ impl Design for Sedan {
     fn parts(&self, cb: &CarBody) -> (Parts, Parts, Vec<Marker>) {
         self.make_parts(cb)
     }
+    fn rig_spec(&self) -> Option<RigSpec> {
+        let (a, b) = (self.clone(), self.clone());
+        let [(zf, yf), (zr, yr)] = self.arch_centres();
+        Some(RigSpec {
+            wheelbase: self.p.wheelbase,
+            track: self.p.track,
+            axle_f: self.zf_ax,
+            axle_r: self.zr_ax,
+            tyre_d: self.p.tyre_d,
+            tyre_w: self.p.tyre_w,
+            rim_d: self.p.rim_in * 0.0254,
+            wheel_y: self.wheel_y,
+            z_front: self.f.z(R_FRONT),
+            z_rear: self.f.z(R_REAR),
+            doors: ["FL", "FR", "RL", "RR"].iter().map(|s| s.to_string()).collect(),
+            rear_closure: "trunk_lid".into(),
+            arches: vec![(zf, yf, self.arch_r), (zr, yr, self.arch_r)],
+            front_z: Rc::new(move |x, y| a.front_z(x, y)),
+            rear_z: Rc::new(move |x, y| b.rear_z(x, y)),
+            physics: self.p.physics.clone(),
+            surfaces: Vec::new(),
+            structure: None,
+            mechanical: Rc::new(Vec::new()),
+        })
+    }
+
+    fn mechanical(&self, st: &Structure) -> Vec<MechPart> {
+        mechanical::sedan_parts(&self.gear(), st)
+    }
+
+    fn structure(&self) -> Option<Structure> {
+        Some(self.unibody())
+    }
 }
 
 impl Sedan {
+    /// The lines the body-in-white is placed from ([`structure::unibody`]).
+    pub fn structure_lines(&self) -> structure::Lines {
+        let z = |n: &str| ZLINES.iter().find(|l| l.0 == n).unwrap().1;
+        structure::Lines {
+            f: self.f.clone(),
+            axle_f: R_WHEELBASE / 2.0,
+            axle_r: -R_WHEELBASE / 2.0,
+            z_door_front: z("DF"),
+            z_screen_base: z("WB"),
+            z_screen_top: z("WT"),
+            z_b: z("BP"),
+            z_door_rear: z("AR1"),
+            // (the back light's top and base on the centre line: `build_layout`)
+            z_rear_top: -1.00,
+            z_rear_base: -1.70,
+            well_x: 0.56,
+            well_r: 0.375 + self.arch_r - R_ARCH_R,
+            wheel_y: self.f.y(R_TYRE_D / 2.0),
+        }
+    }
+
+    /// The running gear's dimensions for [`mechanical::sedan_parts`].
+    pub fn gear(&self) -> mechanical::Gear {
+        let (a, b) = (self.clone(), self.clone());
+        mechanical::Gear {
+            f: self.f.clone(),
+            half_track: self.p.track / 2.0,
+            wheel_y: self.wheel_y,
+            zf: self.zf_ax,
+            zr: self.zr_ax,
+            tyre_d: self.p.tyre_d,
+            tyre_w: self.p.tyre_w,
+            rim_d: self.p.rim_in * 0.0254,
+            rim_w: self.p.rim_w_in * 0.0254,
+            axle_f: R_WHEELBASE / 2.0,
+            axle_r: -R_WHEELBASE / 2.0,
+            z_nose: Rc::new(move |x, y| a.front_z(x, y)),
+            z_tail: Rc::new(move |x, y| b.rear_z(x, y)),
+        }
+    }
+
+    /// The body-in-white: members (solids) and shell nodes.
+    pub fn unibody(&self) -> Structure {
+        let tube = self.tube();
+        let (a, b) = (self.clone(), self.clone());
+        let (fz, rz) = (move |x: f64, y: f64| a.front_z(x, y), move |x: f64, y: f64| b.rear_z(x, y));
+        structure::unibody(&self.structure_lines(), &structure::Skin { tube: &tube, front_z: &fz, rear_z: &rz })
+    }
+
     fn build_nose(&self, cb: &mut CarBody) {
         let i0 = cb.zi("F");
         let j = cb.jn;
@@ -663,6 +752,12 @@ impl Sedan {
         let mut out = Parts::default();
         let mut extras = Parts::default();
         let mut mk: Vec<Marker> = Vec::new();
+        // solid build: liners, door cards, the headliner and the lamp
+        // reflectors are closed too, not sheets. Still sheets: the grille's
+        // back plates (closing them takes the lamps-glass-trim group over
+        // the art spec's 60,000 triangles)
+        let solid = cb.extra.contains_key("solid");
+        let thick = |m: Mesh, th: f64| if solid { crate::solid::slab(&m, th) } else { m };
         let mut marker = |name: String, pos: DVec3, xa: DVec3| mk.push(Marker { name, pos, xaxis: xa });
         let sides = [("L", 1.0f64), ("R", -1.0f64)];
 
@@ -689,8 +784,14 @@ impl Sedan {
                         isb[i as usize] = true;
                     }
                 }
-                let mut h = inner_panel(&sk, &isb, 0.032, -1_000_000, 1, Mat::LampEmissive);
-                h.flip();
+                // (solid: a 3 mm moulding)
+                let mut h = if solid {
+                    crate::solid::reflector(&sk, 0.032, 0.003, Mat::LampEmissive)
+                } else {
+                    let mut h = inner_panel(&sk, &isb, 0.032, -1_000_000, 1, Mat::LampEmissive);
+                    h.flip();
+                    h
+                };
                 if kind == "headlight" {
                     let c0 = sk.v.iter().copied().sum::<DVec3>() / sk.v.len() as f64;
                     let vn = sk.vertex_normals();
@@ -777,13 +878,24 @@ impl Sedan {
             .map(|&(z, v)| DVec2::new(f.z(z), v))
             .collect();
         bx.add(&p::molding(tube, &ws, 0.0015, (0.008, 0.004), true, 6));
+        // solid build: the B-pillar, behind the doors' shut line (the doors
+        // meet over it; an open door shows it, not the cabin)
+        if solid {
+            for side in [1.0, -1.0] {
+                bx.add(&b_pillar(tube, f.z(-0.22), side));
+            }
+        }
         extras.insert("body_shell", bx);
 
         // interior
         let hf = f.y(0.215);
         let dhf = hf - 0.215;
         for (s, sg) in sides {
-            out.insert(&format!("seat_F{s}"), p::bucket_seat(sg * f.x(0.38), f.z(-0.40), hf + 0.02, Mat::InteriorFabric, true));
+            // (solid build: the seats, the bench, the dash and the console
+            // are parts on the structure: `mechanical`)
+            if !solid {
+                out.insert(&format!("seat_F{s}"), p::bucket_seat(sg * f.x(0.38), f.z(-0.40), hf + 0.02, Mat::InteriorFabric, true));
+            }
             marker(format!("seat_H_point_F{s}"), f.p(sg * 0.38, 0.215 + 0.20, -0.53) + DVec3::new(0.0, dhf - (f.y(0.415) - 0.415), 0.0), DVec3::X);
         }
         let mut rs = Mesh::new();
@@ -791,14 +903,21 @@ impl Sedan {
         let mut back = rbox(DVec3::ZERO, DVec3::new(f.x(0.52), 0.29, 0.06), 0.05, 3, Mat::InteriorFabric);
         back.transform(Some(rot_x((-22.0f64).to_radians())), DVec3::new(0.0, hf + 0.56, f.z(-1.38)));
         rs.add(&back);
-        out.insert("seat_rear", rs);
+        if !solid {
+            out.insert("seat_rear", rs);
+        }
         let mut dash = Mesh::new();
         dash.add(&rbox(DVec3::new(0.0, f.y(0.78), f.z(0.48)), DVec3::new(f.x(0.76), 0.12, 0.16), 0.06, 3, Mat::InteriorPlastic));
         dash.add(&rbox(DVec3::new(f.x(0.38), f.y(0.92), f.z(0.42)), DVec3::new(0.18, 0.03, 0.08), 0.025, 2, Mat::InteriorPlastic));
         dash.add(&rbox(DVec3::new(0.0, f.y(0.86), f.z(0.33)), DVec3::new(0.13, 0.08, 0.02), 0.01, 2, Mat::TrimBlack));
-        out.insert("dash", dash);
-        out.insert("steering_wheel", p::steering_wheel(DVec3::new(f.x(0.38), f.y(0.84), f.z(0.17)), 0.185, 24.0, Mat::InteriorPlastic, 0.13));
-        out.insert("console", rbox(DVec3::new(0.0, f.y(0.42), f.z(-0.15)), DVec3::new(0.11, 0.12, 0.45), 0.03, 2, Mat::InteriorPlastic));
+        if !solid {
+            out.insert("dash", dash);
+        }
+        // (solid build: the column reaches the instrument panel on its beam)
+        out.insert("steering_wheel", p::steering_wheel(DVec3::new(f.x(0.38), f.y(0.84), f.z(0.17)), 0.185, 24.0, Mat::InteriorPlastic, if solid { 0.19 } else { 0.13 }));
+if !solid {
+                    out.insert("console", rbox(DVec3::new(0.0, f.y(0.42), f.z(-0.15)), DVec3::new(0.11, 0.12, 0.45), 0.03, 2, Mat::InteriorPlastic));
+        }
         for s in ["FL", "FR", "RL", "RR"] {
             let sk = cb.skins[&format!("door_{s}")].clone();
             let mut isb = vec![false; sk.v.len()];
@@ -807,7 +926,14 @@ impl Sedan {
                     isb[i as usize] = true;
                 }
             }
-            out.insert(&format!("door_trim_{s}"), inner_panel(&sk, &isb, 0.085, -1_000_000, 2, Mat::InteriorPlastic));
+            // solid: a moulded card 18 mm thick, its back 17 mm off the
+            // door's inner panel, with an armrest, a pull cup and a pocket
+            let trim = if solid {
+                crate::solid::door_card(&sk, 0.085, 0.018, Mat::InteriorPlastic)
+            } else {
+                inner_panel(&sk, &isb, 0.085, -1_000_000, 2, Mat::InteriorPlastic)
+            };
+            out.insert(&format!("door_trim_{s}"), trim);
         }
         let zz: Vec<f64> = linspace(-0.05, -0.95, 46).into_iter().map(|z| f.z(z)).collect();
         let vv = linspace(7.35, vm - 7.35, 60);
@@ -820,7 +946,7 @@ impl Sedan {
         if my > 0.0 {
             hl.flip();
         }
-        out.insert("headliner", hl);
+        out.insert("headliner", thick(hl, 0.008));
 
         // bay: transverse four with gearbox, radiator, firewall
         let mut eb = Mesh::new();
@@ -828,12 +954,29 @@ impl Sedan {
         eb.add(&rbox(f.p(0.05, 0.71, 1.55), DVec3::new(0.28, 0.04, 0.10), 0.02, 2, Mat::TrimBlack));
         eb.add(&rbox(f.p(-0.36, 0.42, 1.52), DVec3::new(0.12, 0.13, 0.12), 0.04, 2, Mat::MetalBare));
         eb.add(&rbox(f.p(0.05, 0.62, 1.74), DVec3::new(0.30, 0.07, 0.04), 0.02, 2, Mat::TrimBlack));
-        out.insert("engine_block", eb);
+        if !solid {
+            out.insert("engine_block", eb);
+        }
         let mut rad = Mesh::new();
         rad.add(&box_(f.p(0.0, 0.56, 2.12), DVec3::new(f.x(0.36), 0.16, 0.024), Mat::TrimBlack, None));
         rad.add(&box_(f.p(0.0, 0.735, 2.12), DVec3::new(f.x(0.37), 0.014, 0.030), Mat::MetalBare, None));
-        out.insert("radiator", rad);
-        out.insert("firewall", box_(f.p(0.0, 0.60, 0.94), DVec3::new(f.x(0.60), 0.28, 0.003), Mat::TrimBlack, None));
+        if solid {
+            // the body-in-white: every member a closed solid, and the
+            // mechanical and interior parts on it (they replace the sheet
+            // build's boxes: firewall, engine, radiator, trays, seats, dash)
+            let st = self.unibody();
+            for (name, m) in st.parts() {
+                out.insert(&name, m);
+            }
+            for part in self.mechanical(&st) {
+                if !part.mesh.v.is_empty() {
+                    out.insert(&part.name, part.mesh);
+                }
+            }
+        } else {
+            out.insert("radiator", rad);
+            out.insert("firewall", box_(f.p(0.0, 0.60, 0.94), DVec3::new(f.x(0.60), 0.28, 0.003), Mat::TrimBlack, None));
+        }
         // boxes along the car span their mapped ends (a shorter overhang
         // shortens the tray under it)
         let zspan = |zc: f64, hz: f64| ((f.z(zc - hz) + f.z(zc + hz)) / 2.0, (f.z(zc + hz) - f.z(zc - hz)) / 2.0);
@@ -844,7 +987,9 @@ impl Sedan {
         ub.add(&box_(DVec3::new(0.0, f.y(0.330), zc), DVec3::new(f.x(0.50), 0.004, hz), Mat::TrimBlack, None));
         let (zc, hz) = zspan(-1.90, 0.22);
         ub.add(&rbox(DVec3::new(f.x(-0.09), f.y(0.30), zc), DVec3::new(0.21, 0.05, hz), 0.02, 2, Mat::MetalBare));
-        out.insert("underbody", ub);
+        if !solid {
+            out.insert("underbody", ub);
+        }
         let mut ex = Mesh::new();
         let pts: Vec<DVec3> = [(0.10, 0.36, 1.30), (0.12, 0.25, 1.12), (0.10, 0.168, 0.95), (0.10, 0.166, -0.70), (0.16, 0.175, -1.20), (0.30, 0.20, -1.60), (0.42, 0.25, -2.10), (0.48, 0.26, -2.42)]
             .iter()
@@ -854,13 +999,16 @@ impl Sedan {
         ex.add(&rbox(f.p(0.12, 0.168, -0.20), DVec3::new(0.09, 0.016, 0.25), 0.012, 2, Mat::MetalBare));
         let (zc, hz) = zspan(-1.92, 0.13);
         ex.add(&rbox(DVec3::new(f.x(0.36), f.y(0.230), zc), DVec3::new(0.20, 0.06, hz), 0.04, 2, Mat::MetalBare));
-        out.insert("exhaust", ex);
+        if !solid {
+            out.insert("exhaust", ex);
+        }
         let dr = self.arch_r - R_ARCH_R;
         for (tag, zc) in [("F", self.zf_ax), ("R", self.zr_ax)] {
             for (s, sg) in sides {
                 out.insert(
                     &format!("wheel_well_{tag}{s}"),
-                    p::wheel_well(DVec3::new(0.0, f.y(R_TYRE_D / 2.0), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0),
+                    // (solid build: the inner wall's opening lets the arms through)
+                    thick(p::wheel_well_with(DVec3::new(0.0, f.y(R_TYRE_D / 2.0), zc), 0.375 + dr, f.x(0.56), f.x(0.86), sg, 92.0, 92.0, if solid { 0.74 } else { 0.55 }), 0.004),
                 );
             }
         }
@@ -899,6 +1047,120 @@ impl Sedan {
 }
 
 /// numpy.arange(a, b, step) for floats.
+/// The B-pillar: a closed box section down the body side at z0, from the
+/// sill to the roof rail, behind the doors. Its outer face sits 72 mm in
+/// from the skin (the doors' inner panels are 50 mm deep), reaches out to
+/// the sill's inner face at the foot and stops under the roof rail; each
+/// jamb face has a seal land, a step in 16 mm down; the inner face is
+/// 132 mm in. 72 mm wide: the slot between the door cards.
+fn b_pillar(tube: &Tube, z0: f64, side: f64) -> Mesh {
+    // (v: 1 the sill, 2 the doors' bottom edge, 7 the roof rail)
+    let (v0, v1) = (1.60, 6.95);
+    let at = |v: f64, dz: f64, depth: f64| {
+        // (in from the skin level with the ground, not along the normal:
+        // a section this deep would fold behind the shoulder's bend)
+        let p = tube.eval(z0 + dz, if side > 0.0 { v } else { tube.vm - v });
+        p - DVec3::X * (side * depth)
+    };
+    // stations every 22 mm up the side
+    let fine: Vec<f64> = linspace(v0, v1, 280);
+    let mut len = vec![0.0];
+    for k in 1..fine.len() {
+        let d = (at(fine[k], 0.0, 0.0) - at(fine[k - 1], 0.0, 0.0)).length();
+        len.push(len[k - 1] + d);
+    }
+    let total = len[len.len() - 1];
+    let ns = (total / 0.022).round() as usize;
+    let vs: Vec<f64> = (0..=ns).map(|i| interp(total * i as f64 / ns as f64, &len, &fine)).collect();
+    // the section: (along the car, below the skin), outer face first
+    let (hw, land, face, step, back) = (0.036, 0.029, 0.072, 0.088, 0.132);
+    let ring = |v: f64| -> Vec<DVec3> {
+        // the outer face meets the sill's inner face
+        let up = smoothstep(1.95, v0, v);
+        let o = face + (0.031 - face) * up;
+        let s = step + (0.047 - step) * up;
+        [
+            (-hw, o),
+            (-0.012, o),
+            (0.012, o),
+            (hw, o),
+            (hw, s),
+            (land, s + 0.002),
+            (land, 0.5 * (s + back)),
+            (land, back),
+            (0.010, back),
+            (-0.010, back),
+            (-land, back),
+            (-land, 0.5 * (s + back)),
+            (-land, s + 0.002),
+            (-hw, s),
+        ]
+        .iter()
+        .map(|&(dz, d)| at(v, dz, d))
+        .collect()
+    };
+    // (the head stops at the doors' top edge, under the roof rail and short
+    // of the headliner)
+    let rings: Vec<Vec<DVec3>> = vs.iter().map(|&v| ring(v)).collect();
+    let nr = rings[0].len();
+    // its own UV island (metres: round the section, up the pillar), the end
+    // caps beside it
+    let mut round = vec![0.0; nr + 1];
+    for j in 0..nr {
+        round[j + 1] = round[j] + (rings[2][(j + 1) % nr] - rings[2][j]).length();
+    }
+    let island = if side > 0.0 { 5_000 } else { 5_010 };
+    let mut m = Mesh::new();
+    for r in &rings {
+        m.v.extend_from_slice(r);
+    }
+    let id = |i: usize, j: usize| (i * nr + j % nr) as u32;
+    for i in 0..rings.len() - 1 {
+        let (v0, v1) = (0.022 * i as f64, 0.022 * (i + 1) as f64);
+        for j in 0..nr {
+            m.q.push([id(i, j), id(i, j + 1), id(i + 1, j + 1), id(i + 1, j)]);
+            m.quv.push([DVec2::new(round[j], v0), DVec2::new(round[j + 1], v0), DVec2::new(round[j + 1], v1), DVec2::new(round[j], v1)]);
+            m.qm.push(Mat::Paint);
+            m.qi.push(island);
+        }
+    }
+    // end caps: the section cut into well shaped cells (the wide part as
+    // three, the stem as two with a triangle each side of its foot)
+    let section: [DVec2; 14] = {
+        let (o, s) = (face, step);
+        [(-hw, o), (-0.012, o), (0.012, o), (hw, o), (hw, s), (land, s + 0.002), (land, 0.5 * (s + back)), (land, back), (0.010, back), (-0.010, back), (-land, back), (-land, 0.5 * (s + back)), (-land, s + 0.002), (-hw, s)].map(|(a, b)| DVec2::new(a, b))
+    };
+    for (e, i) in [0, rings.len() - 1].into_iter().enumerate() {
+        let uv = |j: usize| section[j] + DVec2::new(0.0, 0.1 * e as f64);
+        for f in [[0, 1, 12, 13], [1, 2, 5, 12], [2, 3, 4, 5], [12, 5, 6, 11], [11, 6, 8, 9]] {
+            let (mut q, mut u) = (f.map(|j| id(i, j)), f.map(uv));
+            if i == 0 {
+                q.reverse();
+                u.reverse();
+            }
+            m.q.push(q);
+            m.qm.push(Mat::Paint);
+            m.quv.push(u);
+            m.qi.push(island + 1);
+        }
+        for f in [[6, 7, 8], [11, 9, 10]] {
+            let (mut q, mut u) = (f.map(|j| id(i, j)), f.map(uv));
+            if i == 0 {
+                q.reverse();
+                u.reverse();
+            }
+            m.t.push(q);
+            m.tm.push(Mat::Paint);
+            m.tuv.push(u);
+            m.ti.push(island + 1);
+        }
+    }
+    let mut m = orient_outward(m);
+    // not skin: the rigger and the collision skin leave it alone
+    m.surf = Some(vec![crate::mesh::Surf::Edge; m.v.len()]);
+    m
+}
+
 fn arange(a: f64, b: f64, step: f64) -> Vec<f64> {
     let n = ((b - a) / step).ceil().max(0.0) as usize;
     (0..n).map(|i| a + i as f64 * step).collect()

@@ -1210,6 +1210,71 @@ pub fn near(x: &[Vec3; 3], r: f32, lo: Vec3, hi: Vec3) -> bool {
     tlo.cmple(hi).all() && thi.cmpge(lo).all()
 }
 
+/// The separation cull's allowance for rounding beyond the band (m), besides
+/// [`SEPARATION_REL`] of the largest coordinate.
+pub const SEPARATION_ABS: f32 = 1e-3;
+/// The separation cull's allowance relative to the largest coordinate it reads.
+pub const SEPARATION_REL: f32 = 1e-4;
+
+/// The surface pass's separation cull (lossless; the GPU's `fqSeparated`): whether the
+/// element (its points `x`: a triangle's three, a segment's two) lies wholly outside one
+/// of the shape's outward face planes by more than `r` plus the rounding allowance
+/// ([`SEPARATION_ABS`] and [`SEPARATION_REL`] of the largest coordinate read). Every
+/// point of the element is then farther than `r` from every point of the shape (the
+/// plane separates them), so the narrow phase, whose computed gaps are within 1e-5 of
+/// the largest coordinate and 1e-4 m of the true ones, finds no contact:
+/// [`triangle_contact`] and [`segment_contact`] return none. A box's six planes, a
+/// hull's, a cylinder's two ends; for a sphere, a capsule and a cylinder's side the gap
+/// from the element's box to their core ([`apart`]); a triangle shape is never
+/// separated here. The shape's bounding box ([`near`]) is a far weaker test for a turned
+/// shape: a slab on a slope holds the whole car in its box.
+pub fn separated(x: &[Vec3], s: &SurfaceShape, r: f32) -> bool {
+    let big = x.iter().fold(0.0f32, |m, p| {
+        m.max(p.x.abs()).max(p.y.abs()).max(p.z.abs())
+    });
+    let outside = |n: Vec3, d: f32| {
+        let thr = r + SEPARATION_ABS + SEPARATION_REL * big.max(d.abs());
+        x.iter().all(|&p| dot3(n, p) - d > thr)
+    };
+    match s {
+        SurfaceShape::Box { c, axes, half } => (0..3).any(|i| {
+            let ca = dot3(axes[i], *c);
+            outside(-axes[i], half[i] - ca) || outside(axes[i], ca + half[i])
+        }),
+        SurfaceShape::Hull { planes, .. } => planes.iter().any(|&(n, d)| outside(n, d)),
+        SurfaceShape::Cylinder {
+            c,
+            radius,
+            half_height,
+        } => {
+            outside(Vec3::NEG_Y, *half_height - c.y)
+                || outside(Vec3::Y, c.y + *half_height)
+                || apart(x, *c, *c, Vec3::new(1.0, 0.0, 1.0), *radius, r, big)
+        }
+        SurfaceShape::Sphere { c, radius } => apart(x, *c, *c, Vec3::ONE, *radius, r, big),
+        SurfaceShape::Capsule { a, b, radius } => {
+            apart(x, a.min(*b), a.max(*b), Vec3::ONE, *radius, r, big)
+        }
+        SurfaceShape::Triangle { .. } => false,
+    }
+}
+
+/// [`separated`] for a round shape: the gap between the element's box and the box
+/// `lo..hi` holding the shape's core (a sphere's or cylinder's centre, a capsule's
+/// segment), over the axes `mask` keeps (a cylinder's horizontal ones), farther than the
+/// shape's `radius`, `r` and the allowance. Every point of the element is in its box and
+/// every point of the core in `lo..hi`, so their distance is at least that gap.
+fn apart(x: &[Vec3], lo: Vec3, hi: Vec3, mask: Vec3, radius: f32, r: f32, big: f32) -> bool {
+    let (elo, ehi) = x.iter().fold(
+        (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+        |(a, b), &p| (a.min(p), b.max(p)),
+    );
+    let gap = (elo - hi).max(lo - ehi).max(Vec3::ZERO) * mask;
+    let far = big.max(lo.abs().max_element()).max(hi.abs().max_element());
+    let thr = radius + r + SEPARATION_ABS + SEPARATION_REL * far;
+    dot3(gap, gap) > thr * thr
+}
+
 /// A world box holding the shape, 1 cm wide of it (the surface pass's cull).
 pub fn bounds(s: &SurfaceShape) -> (Vec3, Vec3) {
     let fold = |pts: &[Vec3]| {

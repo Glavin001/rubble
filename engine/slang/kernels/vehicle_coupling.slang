@@ -88,6 +88,9 @@ struct Params
     uint candCap;        // candidates per vehicle
     uint extraBase;      // gWork word of the broadphase region (candidate counts, proxies, candidates)
     uint loopBudget;     // passes one invocation may take (explicit_loop_cap.slang; 0 none)
+    uint retireBase;     // gMisc record of the explicit nodes' retired bits (explicit_beams.slang nodeRetired; 0 none)
+    uint labelBase;      // gMisc record of the nodes' piece labels, 4 bits each (0: one window per vehicle)
+    uint pieceBoxBase;   // gMisc: per vehicle PIECE_BOX_RECS records, its pieces' node boxes, then its labels-in-use word
 };
 
 static const uint BODY_RECS = 5u;
@@ -102,6 +105,7 @@ static const uint ST_PLANES = 4u;
 static const uint ST_IMPULSES = 8u;
 static const uint ST_ROWS = 16u;
 static const uint ST_LOOP = 32u; // a loop held to its cap or past the pass budget
+static const uint ST_CANDS = 64u; // cpl_query's candidates (duplicates included) past their room
 // work: [0] chunk rows used, [1] status, [2..2+maxBodies) share counts (all cleared each
 // window), then per vehicle 8 words of bounds (ordered bits: lo xyz, hi xyz, speed, 0;
 // rewritten by cpl_bounds for every awake vehicle), then per vehicle 4 words written once
@@ -179,7 +183,11 @@ uint brec(uint v, uint j) { return vrec(v) + 1u + j * BODY_RECS; }
 uint srec(uint v, uint k) { return vrec(v) + 1u + gP.B * BODY_RECS + k * SHAPE_RECS; }
 uint prec(uint v, uint i) { return vrec(v) + 1u + gP.B * BODY_RECS + gP.S * SHAPE_RECS + i; }
 
-groupshared Atomic<uint> gsBox[7];
+// The vehicle's node box and fastest speed (0..6), then with piece labels each piece's
+// node box (7 + 6 g: min x, y, z keys, max x, y, z keys; one variable: Metal's slots).
+static const uint PIECES = 8u;
+static const uint PIECE_BOX_RECS = 13u;
+groupshared Atomic<uint> gsBox[7u + 6u * PIECES];
 groupshared Atomic<uint> gsCount;
 static const uint LIST_CAP = 1024u;
 groupshared uint gsList[LIST_CAP];
@@ -206,6 +214,72 @@ bool bodyMoving(uint body)
 }
 
 void sweptBox(uint v, out float3 lo, out float3 hi, bool fresh);
+bool cplAccept(uint c, float3 lo, float3 hi);
+
+// --- A window per piece (lossless) ---
+// With piece labels (the host's, engine_softbody::explicit_debris; written by
+// ExplicitBeamsGpu::set_piece_labels: 4 bits a node at labelBase) cpl_bounds also takes
+// each piece's node box, and cpl_plan keeps a collider only if its swept sphere meets some
+// piece's box grown by the vehicle's reach (its fastest node's travel over the window and
+// the margin), not just the whole vehicle's: a piece fallen far from the car no longer
+// puts every body between them in the window. A node meets only shapes near its own
+// piece's box under the same bound the vehicle's box relies on, so the shapes left out
+// meet no node: the same contacts, with fewer proxies to test.
+uint pieceLabelOf(uint gi)
+{
+    uint4 w = gMisc[gP.labelBase + (gi >> 5u)];
+    uint k = (gi >> 3u) & 3u;
+    uint x = k == 0u ? w.x : (k == 1u ? w.y : (k == 2u ? w.z : w.w));
+    return (x >> ((gi & 7u) * 4u)) & 7u;
+}
+void pieceBoxAdd(uint gi, float3 x)
+{
+    uint b = 7u + 6u * pieceLabelOf(gi);
+    gsBox[b].min(ordered(x.x));
+    gsBox[b + 1u].min(ordered(x.y));
+    gsBox[b + 2u].min(ordered(x.z));
+    gsBox[b + 3u].max(ordered(x.x));
+    gsBox[b + 4u].max(ordered(x.y));
+    gsBox[b + 5u].max(ordered(x.z));
+}
+// Whether collider c's swept sphere meets some piece's box grown by `reach` (true when the
+// vehicle's labels are not in use).
+bool pieceAccept(uint v, uint c, float reach)
+{
+    if (gP.labelBase == 0u) return true;
+    uint at = gP.pieceBoxBase + v * PIECE_BOX_RECS;
+    if (gMisc[at + 12u].x == 0u) return true;
+    for (uint g = 0u; g < PIECES; g++)
+    {
+        uint w = 6u * g;
+        uint k[6];
+        for (uint j = 0u; j < 6u; j++)
+        {
+            uint4 r = gMisc[at + (w + j) / 4u];
+            uint m = (w + j) % 4u;
+            k[j] = m == 0u ? r.x : (m == 1u ? r.y : (m == 2u ? r.z : r.w));
+        }
+        if (k[0] == 0xFFFFFFFFu) continue;
+        float3 lo = float3(unordered(k[0]), unordered(k[1]), unordered(k[2])) - reach;
+        float3 hi = float3(unordered(k[3]), unordered(k[4]), unordered(k[5])) + reach;
+        if (cplAccept(c, lo, hi)) return true;
+    }
+    return false;
+}
+// The vehicle's reach (sweptBox's growth).
+float sweptReach(uint v)
+{
+    return asfloat(gWork[wBounds(v) + 6u].load()) * gP.window + gP.margin;
+}
+
+// explicit_beams.slang nodeRetired: node gi's retired bit.
+bool cplRetired(uint gi)
+{
+    uint4 w = gMisc[gP.retireBase + (gi >> 7u)];
+    uint k = (gi >> 5u) & 3u;
+    uint x = k == 0u ? w.x : (k == 1u ? w.y : (k == 2u ? w.z : w.w));
+    return ((x >> (gi & 31u)) & 1u) != 0u;
+}
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -215,6 +289,7 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint lane = lid.x;
     if (lane < 3u) gsBox[lane].store(0xFFFFFFFFu);
     else if (lane < 7u) gsBox[lane].store(0u);
+    else if (lane < 7u + 6u * PIECES) gsBox[lane].store(((lane - 7u) % 6u) < 3u ? 0xFFFFFFFFu : 0u);
     if (lane == 0u)
     {
         gsUniformCpl = vehicleAt(v);
@@ -232,6 +307,8 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float3 origin = asfloat(gMisc[v].xyz);
     for (uint i = lane, iStop = EB_END(i, nodes, 256u); i < iStop; i += 256u)
     {
+        // Retired debris is not where the vehicle is (it meets nothing).
+        if (gP.retireBase != 0u && cplRetired(vt.x + i)) continue;
         float3 x = origin + gNodes[(vt.x + i) * 3u].xyz;
         float3 u = gNodes[(vt.x + i) * 3u + 1u].xyz;
         gsBox[0].min(ordered(x.x));
@@ -241,9 +318,17 @@ void cpl_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         gsBox[4].max(ordered(x.y));
         gsBox[5].max(ordered(x.z));
         gsBox[6].max(asuint(length(u)));
+        if (gP.labelBase != 0u) pieceBoxAdd(vt.x + i, x);
     }
     GroupMemoryBarrierWithGroupSync();
     if (lane < 7u && !keep) gWork[wBounds(v) + lane].store(gsBox[lane].load());
+    // Each piece's box (a window per piece in cpl_plan; pieceAccept): 12 records.
+    if (gP.labelBase != 0u && lane < 12u && !keep)
+    {
+        uint b = 7u + 4u * lane;
+        gMisc[gP.pieceBoxBase + v * PIECE_BOX_RECS + lane] =
+            uint4(gsBox[b].load(), gsBox[b + 1u].load(), gsBox[b + 2u].load(), gsBox[b + 3u].load());
+    }
     // The broadphase proxy: kept while the swept box stays inside it.
     if (lane == 0u && !keep && vt.y > 0u && gP.extraBase != 0u)
     {
@@ -333,7 +418,7 @@ uint candAppend(uint v, uint c)
 {
     uint at = gWork[wCandCount(v)].add(1u);
     if (at < gP.candCap) gWork[wCands(v) + at].store(c);
-    else gWork[1].or(ST_SHAPES);
+    else gWork[1].or(ST_CANDS);
     return at;
 }
 
@@ -655,9 +740,11 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     sweptBox(v, lo, hi, false);
     if (gP.mode == 0u)
     {
+        float pr = sweptReach(v);
         for (uint c = lane, cStop = EB_END(c, gP.colliders, 256u); c < cStop; c += 256u)
         {
             if (!cplAccept(c, lo, hi)) continue;
+            if (!pieceAccept(v, c, pr)) continue;
             if (gP.sleepBase != 0u && bodyMoving(gColliders[4u * c].x)) gsWake.store(1u);
             uint at = gsCount.add(1u);
             if (at < LIST_CAP) gsList[at] = c;
@@ -677,6 +764,7 @@ void cpl_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 if (gWork[wCands(v) + j].load() == c) { dup = true; break; }
             }
             if (dup) continue;
+            if (!pieceAccept(v, c, sweptReach(v))) continue;
             if (gP.sleepBase != 0u && bodyMoving(gColliders[4u * c].x)) gsWake.store(1u);
             uint at = gsCount.add(1u);
             if (at < LIST_CAP) gsList[at] = c;

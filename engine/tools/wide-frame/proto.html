@@ -1,0 +1,154 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Wide frame prototype</title>
+<script type="module">
+// The browser half of crates/engine-webgpu/examples/wide_proto.rs (the same WGSL): a 2 kHz
+// substep as a beam pass and a node pass over every car (two dependent dispatches), 34
+// substeps a frame, against the same work in one workgroup a car (barriers), on the car's
+// real topology (topology.bin, written by the example with WIDE_PROTO_DUMP). Wall time to
+// onSubmittedWorkDone, median of 30 frames after 10; and pipeline compile times.
+const BEAMS = `
+struct P { beams: u32, nodes: u32, dt: f32, pad: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> beam: array<vec4<u32>>;     // a, b, k bits, rest bits
+@group(0) @binding(2) var<storage, read> pos: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> vel: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> force: array<vec4<f32>>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let j = id.x;
+  if (j >= p.beams) { return; }
+  let b = beam[j];
+  let d = pos[b.y].xyz - pos[b.x].xyz;
+  let l = length(d);
+  let n = select(vec3<f32>(0.0), d / l, l > 0.0);
+  let k = bitcast<f32>(b.z);
+  let rest = bitcast<f32>(b.w);
+  let rv = dot(vel[b.y].xyz - vel[b.x].xyz, n);
+  force[j] = vec4<f32>(n * (k * (l - rest) + 0.02 * k * 0.001 * rv), 0.0);
+}
+`;
+const NODES = `
+struct P { beams: u32, nodes: u32, dt: f32, pad: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> inc_off: array<u32>;   // nodes + 1
+@group(0) @binding(2) var<storage, read> inc: array<u32>;       // beam index | sign bit 31
+@group(0) @binding(3) var<storage, read_write> pos: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> vel: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> force: array<vec4<f32>>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= p.nodes) { return; }
+  var f = vec3<f32>(0.0, -9.81, 0.0) * vel[i].w;
+  let e1 = min(inc_off[i + 1u], inc_off[i] + 64u);
+  for (var e = inc_off[i]; e < e1; e++) {
+    let w = inc[e];
+    let fb = force[w & 0x7fffffffu].xyz;
+    f += select(fb, -fb, (w & 0x80000000u) != 0u);
+  }
+  let m = max(vel[i].w, 1e-3);
+  var v = vel[i].xyz + f / m * p.dt;
+  var x = pos[i].xyz + v * p.dt;
+  if (x.y < 0.0) { x.y = 0.0; v.y = 0.0; }
+  vel[i] = vec4<f32>(v, vel[i].w);
+  pos[i] = vec4<f32>(x, pos[i].w);
+}
+`;
+const WG = `
+struct P { beams: u32, nodes: u32, dt: f32, pad: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> beam: array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read> inc_off: array<u32>;
+@group(0) @binding(3) var<storage, read> inc: array<u32>;
+@group(0) @binding(4) var<storage, read_write> pos: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> vel: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> force: array<vec4<f32>>;
+// One workgroup a car (beams p.beams / cars each: nb = p.pad), 34 substeps in one dispatch,
+// a barrier after each phase: the in-workgroup frame's structure on the same work.
+@compute @workgroup_size(LANES)
+fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
+  let car = g.x;
+  let nb = p.pad & 0xffffu;
+  let nn = p.pad >> 16u;
+  for (var s = 0u; s < 34u; s++) {
+    for (var jj = l.x; jj < nb; jj += LANES) {
+      let j = car * nb + jj;
+      let b = beam[j];
+      let d = pos[b.y].xyz - pos[b.x].xyz;
+      let len = length(d);
+      let n = select(vec3<f32>(0.0), d / len, len > 0.0);
+      let k = bitcast<f32>(b.z);
+      let rest = bitcast<f32>(b.w);
+      let rv = dot(vel[b.y].xyz - vel[b.x].xyz, n);
+      force[j] = vec4<f32>(n * (k * (len - rest) + 0.02 * k * 0.001 * rv), 0.0);
+    }
+    storageBarrier(); workgroupBarrier();
+    for (var ii = l.x; ii < nn; ii += LANES) {
+      let i = car * nn + ii;
+      var f = vec3<f32>(0.0, -9.81, 0.0) * vel[i].w;
+      let e1 = min(inc_off[i + 1u], inc_off[i] + 64u);
+      for (var e = inc_off[i]; e < e1; e++) {
+        let w = inc[e];
+        let fb = force[w & 0x7fffffffu].xyz;
+        f += select(fb, -fb, (w & 0x80000000u) != 0u);
+      }
+      let m = max(vel[i].w, 1e-3);
+      var v = vel[i].xyz + f / m * p.dt;
+      var x = pos[i].xyz + v * p.dt;
+      if (x.y < 0.0) { x.y = 0.0; v.y = 0.0; }
+      vel[i] = vec4<f32>(v, vel[i].w);
+      pos[i] = vec4<f32>(x, pos[i].w);
+    }
+    storageBarrier(); workgroupBarrier();
+  }
+}
+`;
+const out = [];
+const med = (a) => { a.sort((x, y) => x - y); return a[a.length >> 1]; };
+try {
+  const words = new Uint32Array(await (await fetch('topology.bin')).arrayBuffer());
+  const nn = words[0], nb = words[1];
+  const beamW = words.subarray(2, 2 + 4 * nb), nodeW = words.subarray(2 + 4 * nb, 2 + 4 * nb + 4 * nn);
+  const off0 = words.subarray(2 + 4 * nb + 4 * nn, 2 + 4 * nb + 4 * nn + nn + 1);
+  const inc0 = words.subarray(2 + 4 * nb + 5 * nn + 1);
+  const adapter = await navigator.gpu.requestAdapter({powerPreference: 'high-performance'});
+  const device = await adapter.requestDevice({requiredLimits: {maxComputeInvocationsPerWorkgroup: 512, maxComputeWorkgroupSizeX: 512,
+    maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize}});
+  out.push(`car: ${nn} nodes, ${nb} beams`);
+  const compile = async (src) => { const t = performance.now(); const p = await device.createComputePipelineAsync({layout: 'auto', compute: {module: device.createShaderModule({code: src}), entryPoint: 'main'}}); return [p, performance.now() - t]; };
+  const [bp, bms] = await compile(BEAMS), [np, nms] = await compile(NODES);
+  out.push(`compile: beam pass ${bms.toFixed(0)} ms, node pass ${nms.toFixed(0)} ms`);
+  const counts = (new URLSearchParams(location.search).get('counts') ?? '1,8,32,128').split(',').map(Number);
+  for (const n of counts) {
+    const tb = n * nb, tn = n * nn;
+    const beam = new Uint32Array(4 * tb), pos = new Float32Array(4 * tn), vel = new Float32Array(4 * tn), off = new Uint32Array(tn + 1), inc = new Uint32Array(n * inc0.length);
+    const nf = new Float32Array(nodeW.buffer, nodeW.byteOffset, nodeW.length);
+    for (let c = 0; c < n; c++) {
+      for (let j = 0; j < nb; j++) { beam[4 * (c * nb + j)] = beamW[4 * j] + c * nn; beam[4 * (c * nb + j) + 1] = beamW[4 * j + 1] + c * nn; beam[4 * (c * nb + j) + 2] = beamW[4 * j + 2]; beam[4 * (c * nb + j) + 3] = beamW[4 * j + 3]; }
+      for (let i = 0; i < nn; i++) { pos[4 * (c * nn + i)] = nf[4 * i] + 8 * c; pos[4 * (c * nn + i) + 1] = nf[4 * i + 1]; pos[4 * (c * nn + i) + 2] = nf[4 * i + 2]; vel[4 * (c * nn + i) + 3] = nf[4 * i + 3]; off[c * nn + i + 1] = c * inc0.length + off0[i + 1]; }
+      for (let e = 0; e < inc0.length; e++) inc[c * inc0.length + e] = ((inc0[e] & 0x7fffffff) + c * nb) | (inc0[e] & 0x80000000);
+    }
+    const buf = (d, usage = GPUBufferUsage.STORAGE) => { const b = device.createBuffer({size: Math.max(16, d.byteLength), usage: usage | GPUBufferUsage.COPY_DST}); device.queue.writeBuffer(b, 0, d); return b; };
+    const beamB = buf(beam), posB = buf(pos), velB = buf(vel), offB = buf(off), incB = buf(inc);
+    const forceB = device.createBuffer({size: 16 * tb, usage: GPUBufferUsage.STORAGE});
+    const pu = buf(new Uint32Array([tb, tn, new Uint32Array(new Float32Array([0.0005]).buffer)[0], 0]), GPUBufferUsage.UNIFORM);
+    const pw = buf(new Uint32Array([tb, tn, new Uint32Array(new Float32Array([0.0005]).buffer)[0], nb | (nn << 16)]), GPUBufferUsage.UNIFORM);
+    const bg = (p, bs) => device.createBindGroup({layout: p.getBindGroupLayout(0), entries: bs.map((b, i) => ({binding: i, resource: {buffer: b}}))});
+    const gb = bg(bp, [pu, beamB, posB, velB, forceB]), gn = bg(np, [pu, offB, incB, posB, velB, forceB]);
+    const frame = async (subs) => { const enc = device.createCommandEncoder(); const pass = enc.beginComputePass();
+      for (let s = 0; s < subs; s++) { pass.setPipeline(bp); pass.setBindGroup(0, gb); pass.dispatchWorkgroups(Math.ceil(tb / 64)); pass.setPipeline(np); pass.setBindGroup(0, gn); pass.dispatchWorkgroups(Math.ceil(tn / 64)); }
+      pass.end(); device.queue.submit([enc.finish()]); await device.queue.onSubmittedWorkDone(); };
+    const time = async (f) => { for (let i = 0; i < 10; i++) await f(); const ms = []; for (let i = 0; i < 30; i++) { const t = performance.now(); await f(); ms.push(performance.now() - t); } return med(ms); };
+    const w34 = await time(() => frame(34)), w1 = await time(() => frame(1));
+    out.push(`${n} cars (${tn} nodes, ${tb} beams): WIDE ${w34.toFixed(3)} ms a frame; 1 substep ${w1.toFixed(3)} ms; per substep ${((w34 - w1) / 33 * 1000).toFixed(1)} us`);
+    for (const lanes of [256, 512]) {
+      const [wp, wms] = await compile(WG.replaceAll('LANES', lanes + 'u'));
+      const gw = bg(wp, [pw, beamB, offB, incB, posB, velB, forceB]);
+      const run = async () => { const enc = device.createCommandEncoder(); const pass = enc.beginComputePass(); pass.setPipeline(wp); pass.setBindGroup(0, gw); pass.dispatchWorkgroups(n); pass.end(); device.queue.submit([enc.finish()]); await device.queue.onSubmittedWorkDone(); };
+      out.push(`${n} cars: WORKGROUP (${lanes} lanes a car) ${(await time(run)).toFixed(3)} ms a frame (compile ${wms.toFixed(0)} ms)`);
+    }
+  }
+  window.__result = {lines: out};
+} catch (e) { window.__result = {lines: out, error: String(e?.stack ?? e)}; }
+</script>

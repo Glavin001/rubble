@@ -1,0 +1,698 @@
+# The vehicle lab's mountain: where a World step's time goes
+
+The report: `vehicle-lab.html?mode=mountain&car=gen&…&rockslide=1&steepness=55&roughness=0.25&launch=12&surface=1`
+in Chrome, generated sedan, surface contact on: 13 World steps/s (21 % of real time),
+"GPU not ready" 78 %, about 75 ms of GPU per World step, 6 shapes in the coupling window.
+
+Everything below is native (wgpu on Metal, M3 Max, `examples/vehicle_lab.rs --measure
+mountain-perf`), wall time of a World step that is waited on. The generated sedan is the
+live export (`sedan_new`: 548 nodes, 4,253 beams, 528 collision triangles). Scenario:
+seed 1, 55°, roughness 0.25, launch 12 m/s, rockslide on, surface contact on. GPU
+utilisation before each run is given; the owner's page was open for most runs (70–99 %),
+so absolute numbers are high, but every comparison is between runs of the same
+trajectory (the speeds match to 0.1 km/h at every second) or, where marked, on the same
+state.
+
+```bash
+cargo build --release -j 4 -p engine-world --example vehicle_lab
+python3 engine/scripts/with-gpu-lock.py --limit 600 -- env RUBBLE_GPU_LOCK=0 RUBBLE_SURFACE_SPLIT=0 \
+  engine/target/release/examples/vehicle_lab --mode gpu --measure mountain-perf --secs 30 \
+  --car ~/Development/rubble-artifacts/sedan-live/mods/sedan_new --surface 1 \
+  --steepness 55 --roughness 0.25 --launch 12 --rockslide 1 [--ab 4,8,12] [--alternate culls]
+```
+
+## 1. Where the time goes
+
+| Configuration | ms per World step | GPU use before |
+|---|---|---|
+| Free fall (t 2–3 s), surface on, native default (split frames) | 67–69 | 82–99 % |
+| Free fall, surface on, `RUBBLE_SURFACE_SPLIT=0` | 12.6–12.9 | 94 % |
+| Free fall, surface off | 11.6–12.4 | 82 % |
+| Flat arena, parked, no proxies: split / unsplit / surface off | 80 / 12.6 / 10.2 | 99 % |
+| Old car (`sedan_new_prev`, 363 triangles) vs new, surface on, free fall | 66–68 vs 68–71 | 92–99 % |
+| Authored showcase sedan, surface on, free fall | 63–70 | 97 % |
+| Mountain in contact (t 4–13 s), unsplit, surface on | 19–49 | 69 % |
+| Same, surface pass ablated on alternate windows | 11–16 | 25 % |
+| Same, only the narrow phase ablated (box cull kept) | 11–16 | 97 % |
+| Same, the pair path off on alternate windows | no faster (−5 to +10 %) | 89 % |
+
+Two separate costs:
+
+**(a) Native split frames: 55 ms per World step of workgroup-memory zeroing.** With the
+World's coupling and surface contact, a frame runs as segments with the surface pass as
+nine small pipelines between them (`3e0aa017`, made so Chrome compiles the surface pass
+in seconds): 34 × 10 dispatches of one workgroup per World step. Each costs about
+0.16 ms whatever it does: the surface pair kernels that return at once cost the same,
+duplicating them adds 0.16 ms each, giving them zero workgroups removes it. naga's MSL
+writer zero-initialises every workgroup variable a kernel uses from one thread
+(`if (local_invocation_index == 0u) { … }`, naga 30 `back/msl/writer.rs`
+`write_workgroup_variables_initialization`); the surface pipelines use `gsCpl`
+(2,080 words). `examples/dispatch_cost.rs`: 340 dependent dispatches of a trivial kernel
+take 1.8 ms; with a used 2,080-word workgroup array 54 ms; with 8,192 words 211 ms.
+`examples/explicit_dispatch_cost.rs`: 340 dispatches of the shipped
+`explicit_surface_find_pair` with no vehicle (it returns at once) take 54 ms of wall.
+Chrome's Tint spreads the zeroing over the workgroup's lanes, so this is a native cost
+only: the page's own numbers with split frames (`vehicle-lab.md`, Shoot idle 3.7–4.0 ms
+of GPU per step) show it does not pay it. It does make native timings of the lab
+meaningless unless `RUBBLE_SURFACE_SPLIT=0` (bit for bit the same results: the split
+commit's suites hold both paths to the CPU twin).
+
+**(b) The surface pass's narrow phase on the mountain: 5–35 ms per World step.** The
+mountain is slabs 3 m thick turned 55° plus rocks. A turned slab's bounding box is about
+14 × 20 × 36 m, so it holds the whole car: every triangle, beam edge and node passes the
+box cull against it. The pair path (`surfPairList`) listed 3,400–3,800 (element, shape)
+pairs a step for 0–90 hits, past its 2,048 room, so the step fell back to the
+per-element loops: each lane takes elements and runs the full closest-feature query
+(`fqContact`, `fqSegContact`) against every shape whose box it meets. Ablating only
+those queries (the box cull kept) removes the whole surface cost. Self-collision is not
+the cost (the old export with 363 triangles costs the same; surface off removes it).
+
+The rest of a step (11–16 ms here, 33–38 ms after 24 s when 40+ shapes and rockslide
+boulders are in the window, 150–175 ms in one run where flung nodes made the car's box
+hundreds of metres tall and the window held 100 shapes and 700 hull planes) is the
+explicit frame and the coupling; it was not part of this fix.
+
+## 2. The fix: a separation cull (lossless)
+
+`engine_schema::feature_query::separated` and its Slang twin `fqSeparated`
+(`slang/physics/feature_query.slang`): an element (a triangle's three points, a beam
+edge's two) is skipped when it lies wholly outside one of the shape's outward face planes
+by more than the band `r` plus a rounding allowance (1 mm and 1e-4 of the largest
+coordinate read): a box's six planes, a hull's planes, a cylinder's ends; for a sphere, a
+capsule and a cylinder's side, the gap from the element's box to the shape's core. Such
+a plane holds every point of the element farther than `r` from every point of the shape,
+so the narrow phase, whose computed gaps are within 1e-5 of the largest coordinate and
+1e-4 m of the true ones (the same bound the existing edge culls `fqFar` rely on), finds
+nothing. Nodes (point contact) are not culled.
+
+Where: the CPU twin's triangle and segment loops (`explicit_surface.rs`, switch
+`ExplicitBeams::surface_separation`, counter `surface_queries`); on the GPU every
+triangle and segment narrow-phase site of `explicit_beams_surface.slang` (static slots,
+proxies, the casts' gathering, the pair path's contact) and, the part that matters on
+the GPU, the pair path's listing: a separated pair is not listed. The listing then fits
+its room and each listed pair gets its own lane. The GPU culls are under the existing
+`fqCullsOn()` switch (`ExplicitBeamsGpu::set_surface_culls`).
+
+### Before → after (same trajectory, unsplit, native)
+
+| t (s) | shapes | pairs listed before → after | ms per World step before → after |
+|---|---|---|---|
+| 4 | 4 | 3,833 → 553 | 19.5 → 14.5 |
+| 5 | 9 | 2,735 → 379 | 25.9 → 17.3 |
+| 8 | 30 | 3,413 → 668 | 29.8 → 20.9 |
+| 9 | 36 | 3,825 → 591 | 42.9 → 21.7 |
+| 10 | 33 | 1,865 → 251 | 49.3 → 22.1 |
+| 13 | 26 | 3,778 → 541 | 46.3 → 21.6 |
+| 19 | 36 | 3,694 → 533 | 47.2 → 23.9 |
+| 22 | 33 | 3,705 → 540 | 39.9 → 25.4 |
+| 25 | 36 | 1,278 → 171 | 51.9 → 36.2 |
+| 29 | 23 | 2,136 → 296 | 49.9 → 36.8 |
+
+GPU use before the runs: 69 % (before), 0 % (after). Free fall is unchanged (12.6 →
+12.2 ms). The cull at the narrow-phase sites alone (without the listing) gained only
+3–6 %: on the GPU a step waits for its slowest lane, and the few elements that do meet a
+shape still ran their queries serially; listing fewer pairs puts them back on the pair
+path, one pair a lane.
+
+CPU twin (`--measure mountain`, 12 s): box narrow-phase queries 37.2 M → 0.29 M, wall
+20.8 s → 12.0 s, the run's summary identical.
+
+### Proof it is lossless
+
+- **Same state, GPU, bit for bit:** `--ab T…` snapshots the car's solver, runs 20 frames
+  of 34 steps with the culls on and again with them off (the coupling's proxies as the
+  World last wrote them), and compares every state word (`state_words`: nodes, beams,
+  accumulators, groups, misc, trigger keys; `coupling_words`: proxy records and sums).
+  Identical at t = 4, 6, 8, 10, 12, 16, 20, 24, 28, 29.5 s (on 17–39 ms a frame, off
+  19–70 ms).
+- **Whole run:** before and after give the same speed, drop and coupling counts at every
+  second of 30 s.
+- **CPU:** `tests/explicit_surface_cull.rs`: a sedan pushed onto a 55° slab steps 400 steps
+  bit for bit with the cull on and off (12,695 queries against 771,200; 1,816 hits), and
+  every element the cull skips is checked to have no contact; across the 12 s CPU
+  mountain run every separated pair's query was evaluated and none had a contact.
+- GPU suites (native wgpu on Metal, CPU == GPU bit for bit): `explicit_loop_cap` (12),
+  `explicit_surface_proxy_gpu` (12), `explicit_contact_gpu` (5), `explicit_beams_bitwise`
+  (4), `surface_pairs`, `vehicle_lab_reset` (3), `surface_contact_gpu` (3); CPU:
+  `explicit_surface`, `_cast`, `_friction`, `_cull`, `explicit_thin_box`.
+- **Not verified: `engine-metal` `vehicle_parity` and `explicit_surface_proxy_parity`.**
+  Their kernel's cold Metal compile (Slang to MSL, the frame with the surface pass in
+  it) ran past a 25 and a 20 minute kill timer (`MTLCompilerService` at 100 %, tests
+  waiting on it); the change invalidated the cached build. The added code is +0.4–1.0 %
+  of each module's inlined size (`scripts/wgsl-inline-size.py`: `explicit_surface_prep`
+  +944 lines of 90,248, `explicit_surface_find_tri` +374 of 65,058, `explicit_beams_wide`
+  +2,057 of 499,054, `explicit_beams_contact_wide` +4,114 of 1,036,117), so the compile
+  was presumably as long before; that was not measured.
+
+### The gate
+
+`tests/explicit_surface_cull.rs` `a_slab_on_a_slope_queries_only_the_elements_along_its_face`
+(committed failing first): a sedan resting on a slab turned 55°; narrow-phase queries must
+not exceed the elements within `r` + 0.1 m of the slab's face. Before: 1,928 queries (every
+element) for 43; after: 5.
+
+## 3. Not done, and the owner's decisions
+
+1. **Chrome was not measured** (no browser in this task). The page's surface kernels are
+   the same Slang, so the pair-path overflow and its fix apply there; the 75 ms itself and
+   how much of it this removes need a page measurement.
+2. **Native split frames** (§1a): native hosts split by default (`RUBBLE_SURFACE_SPLIT`
+   unset). Turning the split off natively by default would take 55 ms off every native
+   World step with surface contact (bit for bit the same results), but native tests would
+   then no longer run the browser's split path unless they ask for it. Alternatively
+   native shader modules could skip workgroup zeroing (`create_shader_module_trusted`),
+   which needs every kernel checked for reads before writes. Neither was adopted.
+3. **The coupling's cost with many shapes** (33–38 ms a step with 40 shapes; 150+ ms when
+   flung nodes spread the window over 100 shapes and 700 hull planes) is the next cost on
+   the mountain; rockslide boulders accumulate around a car that has stopped.
+4. **The lab's arena fixtures** ride along as the car's static shapes on the mountain (far
+   overhead, for one layout per template), so the per-element surface loops always run
+   against them (cheap: the box cull rejects them).
+
+## 4. Surface contact off: the self-collision pair list (2026-11-14)
+
+The report: `vehicle-lab.html?mode=mountain&car=gen&steepness=55&roughness=0.25&launch=12&surface=0&drag=0`
+"Mountain (hard)": smooth at first, then slow. Headless Chrome (`vehicle-lab-record.mjs
+--probe`, 60 Hz, GPU idle before each run), GPU time of a World step: 7.6 ms in free fall,
+11–12.6 ms on the slope (t 5–16 s), 13–14 ms to 19 s, then 26–28 ms (30 World steps/s) from
+t ≈ 21 s on. Air drag on gives the same.
+
+**Where it goes (Chrome, the frame's WGSL with one function stubbed at t = 24 s,
+`--eval` + `debugSetExplicitFrameWgsl`):** all of it is `explicit frame (solo)`; without
+`triangleGridWalk` (the self-collision search) the step is 7.1 ms instead of 28.2 ms, with
+120 proxy shapes in the window. Stubbing `selfApply` and `driveStep` as well changes nothing
+(6.8, 7.2 ms). The coupling switched off (`setExplicitKnob('coupling')`) takes 28 to 20–25 ms.
+
+**Why (native GPU World, `--tri-census 1`: the walk's load each second).** With anti-clip
+every triangle's box is padded by r + (its own fastest node + the car's fastest node) × h
++ `CLIP_DEPTH`. Detached nodes left behind fall off the mountain's recycled chunks and
+fall for ever: the car's fastest node gains 9.8 m/s every second (111 m/s at 17 s, 6 nodes;
+228 m/s at 29 s, 14 nodes). The padded boxes then hold more (triangle, candidate) pairs:
+5,200 at the start, 7,800 at 17 s, 9,500 at 23 s, 11,200 at 29 s; with each candidate's own
+travel in place of the fastest node's they would hold 5,200–6,700 throughout. Past the
+pair list's room (`TRI_PAIR_CAP`, 8,192) the frame walks again with its tests in the
+walk's lanes (uneven), and the step waits for the slowest. The collision triangles
+themselves stay small (longest box side 1–2.3 m, none past the grid's 64 cells).
+
+**Fix applied (lossless): `TRI_PAIR_CAP` 8,192 → 32,768** (196 KB more of `gNext` a
+vehicle). The listed pairs' tests and results are the walk's (the same hits, applied in
+the specification's order), so only the path changes.
+
+| t (s) | native ms per World step, before → after | Chrome GPU ms, before → after |
+|---|---|---|
+| 17 | 15.0 → 15.1 | 13.0 → 12.6 |
+| 21 | 17.5 (worst 28.3) → 15.9 | 14.3–17 → 17.2 |
+| 23 | 26.2 → 16.8 | 26.4 → 17.0 |
+| 25 | 28.5 → 17.4 | 28.4 → 18.2 |
+| 29 | 33.1 → 20.0 | 23.0–28.0 → 18.4 |
+
+The native trajectories are the same to every figure printed (speed, drop, box, proxies,
+pair counts each second). `engine-webgpu explicit_beams_bitwise`: 12 passed.
+
+**Not real time yet:** 17–20 ms a step from 20 s on (40 World steps/s in Chrome). The
+rest is the same cause, the fastest node's padding, which the room does not remove:
+more pairs to test and more cells for every triangle's walk. Two changes would, both
+the owner's decision (neither is lossless):
+1. *Each candidate tested against the box padded by its own travel* (the triangle's cells
+   by the triangle's travel, a fast candidate entered in the cells its travel covers). It
+   changes the specification's box (§36): a contact the rule only found because some
+   other node was fast is no longer found. Pairs stay at 5,200–6,700.
+2. *The lab retires debris that has left the mountain* (a node of a detached part more
+   than some distance below the lowest live chunk), as a kill plane does. Lab scene only.
+
+For 120 Hz (8.3 ms) the frame's base cost is the limit: 7.6 ms in free fall, 11–12.6 ms
+in contact, for one car at 34 steps a World step.
+
+Tools: `vehicle-lab-record.mjs --probe --segments` (the GPU split by pass every 5 s),
+`--eval file.js` (a script in the page, its `window.__abLog` printed at the end);
+`examples/vehicle_lab --tri-census N` (CPU and `mountain-perf`).
+
+## 5. The pair list reused over steps, and anti-clip padded by each node's own travel (2026-11-14)
+
+Two changes to the self-collision search of the explicit frame, each its own commit.
+
+**A. The grid walk's pair list built once and reused (lossless, on by default).** A
+building step lists every triangle's (triangle, contacter) pairs against its box padded
+by a margin M = 0.05 m more; later steps test that list again while no tracked node (the
+contacters and the collision triangles' nodes, the only nodes a box test reads) has moved,
+relative to the others, by more than M less the boxes' growth: the spread of the nodes'
+displacements since the build, per axis, plus h · (2 · the largest growth of a node's
+speed + the growth of the fastest node's speed) plus a rounding allowance must stay
+within M. Else the step builds again (and so does each frame's first step). A listed pair
+is tested as the walk tests it (a waiting triangle skipped, the walk's cells, buckets and
+box on the step's own geometry), then `tryContact`, so the hits are the walk's, applied in
+the specification's order. A list never reused before it is invalidated sends the next 8
+grid steps to the walk (it never happened on the mountain natively). Knobs:
+`set_pair_reuse` (wasm `setExplicitKnob('pairReuse')`, `RUBBLE_PAIR_REUSE=0`),
+`set_pair_reuse_margin`, `set_pair_reuse_streak`, `take_pair_reuse_stats`;
+`vehicle_lab --pair-reuse 0|1 --pair-margin M --pair-streak N --ab-switch reuse`.
+Metal had no threadgroup slot left for another workgroup variable: the state lives past
+`gsCount`'s buckets, the step's path in `gsUniformLanes`' bits 1..2.
+
+**B. Anti-clip padded by each contacter's own travel (an explicit setting, on in the lab
+only).** `ExplicitBeams::own_travel_reach` (default off): a contacter is tested against
+the triangle's box padded by r + (the triangle's fastest node + the contacter's own speed,
+at most the vehicle's fastest) · h + `CLIP_DEPTH` instead of the vehicle's fastest node's.
+The grid still gathers the cells of the fastest node's box, so a fast contacter is still
+found. CPU and GPU use the same arithmetic. Lab: `LabOptions::own_travel_reach` (on), the
+page's "own-travel anti-clip boxes" checkbox (live), `vehicle_lab --own-travel 0|1`. It is
+not lossless in principle (a contact only the fastest node's padding reached is no longer
+found); on the mountain the trajectory was the same to every printed figure.
+
+### Results
+
+Native (`vehicle_lab --measure mountain-perf`, the command of §4 with `--surface 0`), ms
+per World step:
+
+| t (s) | before (`--pair-reuse 0 --own-travel 0`) | A (M 0.05) | A + B (the defaults) |
+|---|---|---|---|
+| 3 (free fall) | 9.57 | 6.30 | 6.41 |
+| 9 | 13.25 | 9.59 | 9.63 |
+| 13 | 13.83 | 11.66 | 11.91 |
+| 17 | 15.33 | 12.56 | 12.64 |
+| 21 | 16.24 | 12.16 | 11.86 |
+| 25 | 17.83 | 15.04 | 14.49 |
+| 29 | 20.37 | 16.47 | 15.49 |
+
+Native parked (`--scene flat`): 5.9 ms, the list reused on 97 % of grid steps.
+
+The list (native, A): reused on 97 % of grid steps in free fall (4,987 pairs a build), 91 %
+at 9 s, 66 % at 17 s, 57–62 % from 25 s (10,751–12,645 pairs a build). The late builds are
+caused by detached nodes falling off the mountain (the tracked nodes' spread). With B the
+pairs a build fall to 5,283 at 9 s, 6,753 at 17 s and 6,415–7,041 from 25 s, but the time
+hardly changes: the late cost is no longer the pair tests.
+
+The margin (native, A): M 0.025 m loses late (reuse 19–20 % from 25 s, 17.2 / 19.9 ms at
+25 / 29 s); 0.05 and 0.1 m are equal over the run (0.1: 6.62, 9.98, 11.47, 12.45, 12.26,
+14.59, 15.92 ms; more pairs a build, 16,124 at 29 s). 0.05 m kept: shorter lists.
+
+Headless Chrome (`vehicle-lab-record.mjs --probe`, GPU ms per World step, the page's
+mountain with `surface=0&drag=0`; "before" is A's build with `pairReuse` off and
+`ownTravel=0`):
+
+| sim t (s) | before | A + B (defaults) |
+|---|---|---|
+| 2.8 | 7.9 | 5.0 |
+| 5.8 | 10.5 | 7.8 |
+| 8.8 | 12.1 | 10.7 |
+| 11.8 | 12.7 | 10.1 |
+| 14.8 | 12.6 | 9.7 |
+| 17.6–17.8 | 13.6 | 10.2 |
+| 19.8–20.8 | 15.4 | 11.3 |
+| 23–24 | 17.3 | 14.3 |
+| 25–26 | 18.4 | 17.6 |
+| 27–30 | 18.3–18.6 | 18.8 |
+| 31–36 | 20.3–20.9 | 21.1–22.1 |
+
+Parked (`mode=shoot&car=gen&surface=0&drag=0`): 7.0 ms → 4.4–4.9 ms (one earlier run
+read 6.2 ms from 30 s on; not reproduced in two later runs, likely another GPU user then).
+
+**Not a gain late in Chrome.** From t ≈ 25 s the list is no faster than the walk in Chrome,
+and an in-page A/B toggling `pairReuse` every 2 s (one run) read it 1.5–2.5 ms slower from
+26 s on; with the backoff, a later sweep of thresholds 1–4 against the walk read them all
+within ±0.5–1 ms of the walk from 25 s on (and 2–3.5 ms faster before). Natively the list
+still saves 3.6 ms a frame at 29 s. Why a build costs more in Chrome than the walk it
+replaces is not established. Threshold 2 lost 0.5–0.6 ms natively late, so 1 is kept.
+
+### Bit-identity of A
+
+* `engine-webgpu --test explicit_beams_bitwise`: 12 passed (the reuse is on by default:
+  the current kernel against the frozen reference, every frame).
+* `--test explicit_pair_reuse_gpu` (new): reuse on against off from the same state every
+  frame, every state word: the procedural sedan into a wall (31 builds, 48 reused steps),
+  with anti-clip (pairs a build 1,635), and dropped tumbling at 4 rad/s (46 builds, 17
+  reused): all bit for bit.
+* The mountain (native, `--ab 2,8,14,20,26,29 --ab-switch reuse --own-travel 0`): 20 frames
+  of 34 steps each way from one snapshot at each time, every state word the same at every
+  time; on 5.78 / 9.08 / 12.03 / 11.21 / 14.90 / 15.85 ms a frame, off 9.04 / 12.76 /
+  14.10 / 15.50 / 19.18 / 19.50.
+* The native mountain runs with the list on and off: the same speed, drop, box and proxies
+  every second for 30 s.
+
+### Other tests
+
+`--test showcase_car_gpu` 6 passed (1 ignored, as before), `--test explicit_contact_gpu`
+13 passed (with the new `anti_clip_with_own_travel_steps_like_the_cpu`: side memories word
+for word, positions bit for bit), `engine-softbody --test own_travel_reach` passed (a node at
+300 m/s in no triangle and no contacter: 577 → 3,437 pairs tested with the fastest node's
+padding, 577 → 577 with own travel), `engine-world --features stress --test
+vehicle_lab_reset` 3 passed. Chrome: the mountain, the parked car and the authored sedan's
+90 km/h crash (312 beams broken) with no console or WGSL validation error.
+
+**Not verified:** the `engine-metal` suites (not run); contact groups, the wide and big
+modules keep the walk every step (the reuse is the solo frame's only); B on a vehicle
+contact (`explicit_contact.rs`, out of scope).
+
+## 6. Torn-off pieces: their own groups in the pair list, and a time to live for debris (2026-11-14)
+
+The report: on the mountain (`surface=0&drag=0`) nodes torn off the car fall for ever
+(228 m/s at 29 s) and the late phase runs at 40 World steps/s.
+
+### Why the late phase was slow (native, `vehicle_lab --tri-census 1`, new reuse census)
+
+The reused pair list's bound took one spread for every tracked node. At 23 s 68 nodes
+are off the main body in 12 pieces (48 of them tracked, 45 live collision triangles
+among them), falling at up to 226 m/s: the tracked nodes' velocity spread is 166 m/s
+(the 5 cm list lasts under one step), against 17 m/s for the main body alone (6 steps).
+From 23 s the list was reused on **0 %** of grid steps (built every frame, then the
+backoff to the walk), 10,000–11,000 pairs a build. The pieces carry their own triangles,
+and 7 live triangles that no beam can kill join falling nodes to the car (box sides up to
+1.6 km). What the mountain sheds by 30 s: fragments of 0.3–5.6 kg (2–12 nodes), a 12 kg
+piece (20 nodes), three 19 kg pieces (the wheels, 5 nodes), 30 and 45 kg parts.
+
+### A. Piece labels (lossless; `bb985818`)
+
+The host labels each node by piece (`explicit_debris::Pieces`: a union-find over the
+unbroken beams of each beam reading; `piece_labels`: 0 the main body, 1..6 the pieces
+with most triangles of their own, 7 the rest); `ExplicitBeamsGpu::set_piece_labels`
+writes them (gNext, Params word 94). The kernel proves the list for the labels given:
+each group's own spread within the margin; a triangle whose nodes carry different
+labels, or the loose label, is *volatile* (never listed; every candidate tested each step
+as the walk tests it); a cross pair is safe while the contacter's displacement relative
+to the other group stays below its separation at the build, `max(gap to that group's node
+box − a bound on any triangle's padding, M)` (per axis, keys per group; the main body's
+contacters as one group). Any labels give the walk's results; good ones let a falling
+piece stop invalidating the list. Lab: on (`pieceLabels`, the page's "torn pieces apart
+in the pair list"), `vehicle_lab --pieces 0|1 --ab-switch pieces`.
+
+### B. Debris time to live (explicit setting, off by default; `55ca2f19` and the lab commit)
+
+`DebrisTtl { max_mass_kg, max_nodes, seconds }` with `DebrisTracker` (engine-softbody,
+any host): a piece off the main body (no live beam joins them) for `seconds`, at most the
+thresholds, is retired. Never the main body (the heaviest piece), never anything larger,
+never a piece holding node 0 or a raycast wheel's hub or reference node. **A piece at rest
+on the ground beside the car is retired too once its time is up: it is debris.** The time
+counts from the beam reading at which its last node was first seen off the main body.
+
+A retired node (`ExplicitBeams::retired`; `ExplicitBeamsGpu::set_retired`, a bit per node
+in gMisc, Params word 95, 0 until something is retired) is left at rest where it is: not
+integrated, no self-collision as contacter or triangle node, no surface contact, out of
+the pair list's bounds, the fastest node's speed, the centred-damping correction and the
+coupling's bounds (`cpl_bounds`). Its own beams are still evaluated (frozen: they cannot
+move it; a few hundred beam updates at most). Each check is an early return behind the
+param word. The renderer discards a retired node's skin (the tear flag); the event log
+says "debris retired: N nodes, M kg, T s off the main body"; the stats show retired
+pieces, nodes and mass beside the mass on the main body. Refused (an error, the lab turns
+it off and says so) while vehicle contact is active, and for a vehicle with slide nodes.
+Labelling cost: one union-find over the beams per beam reading (the lab: every 6
+windows; 3,583 beams).
+
+Lab default: on, 5 s, at most 10 kg and 40 nodes (every fragment the mountain sheds; not
+the 12 kg piece, the wheels or the larger parts). Page: "retire small debris after … s,
+at most … kg and … nodes" (live); `vehicle_lab --debris 0|1 --debris-ttl --debris-kg
+--debris-nodes`.
+
+### Results
+
+Native (`vehicle_lab --measure mountain-perf --secs 32 --car …/sedan_new --surface 0
+--drag 0 --steepness 55 --roughness 0.25 --launch 12 --own-travel 1`), ms per World step;
+GPU use before the runs 1–5 %, 0 %, 96 % (the last run overlapped another GPU user):
+
+| t (s) | before (`9c8270c0` tree, labels off) | A | A + B (lab defaults) | reuse before → A |
+|---|---|---|---|---|
+| 3 | 6.20 | 6.29 | 6.26 | 97 → 97 % |
+| 9 | 11.29 | 11.55 | 11.62 | 65 → 65 % |
+| 13 | 14.29 | 13.71 | 13.81 | 47 → 47 % |
+| 17 | 15.65 | 16.05 | 15.31 | 49 → 50 % |
+| 21 | 16.41 | 16.53 | 15.43 | 54 → 54 % |
+| 23 | 21.49 | 21.45 | 20.39 | 33 → 39 % |
+| 25 | 22.78 | 19.10 | 20.02 | 0 → 68 % |
+| 27 | 23.65 | 22.03 | 22.74 | 0 → 65 % |
+| 29 | 22.52 | 20.32 | 17.22 | 0 → 69 % |
+| 31 | 21.83 | 19.72 | 19.81 | 0 → 69 % |
+
+The trajectory is the same in all three to every printed figure. With B 8 pieces (34
+nodes, 17.9 kg) were retired by 32 s; the coupling's proxies between 10 and 22 s fell from
+27–131 to 19–59, and from 23 s the unretired large pieces keep them at 107–135.
+
+Bit-identity: A/B of the labels from one snapshot (20 frames of 34 steps each way, every
+state word) at 8, 14, 20, 24 and 29 s: all the same (24 s: 18.5 vs 22.4 ms a frame; 29 s:
+16.8 vs 19.3). `explicit_pair_reuse_gpu piece_labels_keep_the_list_bit_for_bit`: the sedan
+with its front torn off and flung at 60 m/s, labels against none against the walk, 20
+frames, every state word; builds in frames 8–20: 45 with labels, 136 without.
+`debris_retire_gpu`: a contacter, a falling triangle (with and without centred damping
+and JBeam beams) and a node resting on a box with surface contact, retired mid-run on the
+CPU and the GPU: positions and velocities bit for bit every step. `debris_ttl` (CPU): the
+rule's cases; with nothing retired the CPU's state is the same bit for bit.
+
+Headless Chrome (`vehicle-lab-record.mjs --probe --secs 45`, the same build each way; GPU
+use before 11 % and 87 %), GPU ms per World step / World steps per second:
+
+| page t (s) | labels and TTL off | defaults (both on) |
+|---|---|---|
+| 2.8 | 5.1 / 60 | 5.1 / 60 |
+| 8.8 | 10.7 / 60 | 10.6 / 60 |
+| 14.8 | 9.8 / 58 | 9.2 / 59 |
+| 19.8 | 11.1 / 60 | 10.2 / 59 |
+| 22.5 | 11.8 / 59 | 10.9 / 59 |
+| 23.9 | 14.8 / 42 | 12.6 / 59 |
+| 25.4 | 15.7 / 39 | 13.4 / 55 |
+| 26.8 | 16.1 / 40 | 14.7 / 41 |
+| 28.1 | 17.7 / 39 | 15.5 / 39 |
+| 30.1 | 20.9 / 40 | 17.5 / 40 |
+| 33.5 | 20.7 / 40 | 15.5 / 40 |
+| 37.3 | 21.1 / 39 | 16.6 / 40 |
+
+60 steps/s now holds to 25.4 s (was 23.2 s) and the late GPU time is 15.5–18 ms (was
+20–21), but **the goal is not met**: from 26 s the page runs 40 steps/s. The parked car
+4.5 ms; the authored sedan's 90 km/h crash 4.3 ms; the mountain with surface contact
+(the page's default for the generated car) retires debris too; no console or WGSL error
+in any run. Fleet (`fleet.sh apart "1 8 32"`, GPU idle): 8.96 / 9.74 / 11.38 ms medians
+(were 8.9 / 9.6 / 11.4).
+
+### What is left
+
+- **The coupling's window covers every unretired node.** `cpl_bounds` takes one box over
+  the car; the wheels (19 kg) and the 30 and 45 kg parts falling hundreds of metres below
+  keep 107–135 proxy bodies and 300–590 hull planes in the window from 23 s, more than the
+  pair list. Per-piece windows (the owner's "separate islands") are the next lever; not
+  done here.
+- In Chrome the page holds 40 steps/s late even at 15.5 ms of GPU a step (under
+  16.7 ms): the step rate is not explained by GPU time alone. Not investigated.
+- The Chrome runs are of the build before the last kernel change (`piecesClear` skipped
+  without labels or retirement: the fleet's lane-0 clears; it changes no result).
+- `engine-metal` suites not run (their cold compile; `engine-metal` builds).
+
+## 7. The late phase split by cause, and three lossless fixes (2026-11-14)
+
+The page steps on vsync: it holds 60 World steps/s only while a step's GPU time stays
+under about 12.5–13.4 ms (the frame is the step, the readback and the render). At
+`d78284b6` the late phase ran 15.5–18 ms (40 steps/s from 26 s).
+
+### Where the late phase's time went
+
+Chrome (`vehicle-lab-record.mjs --probe --eval out/late/ab2.js`: knobs toggled or a WGSL
+function stubbed in the running page, 1 s each, interleaved with the baseline; GPU idle
+before; each line is one sample, so ±1 ms is noise):
+
+| t (s) | change | GPU ms per step |
+|---|---|---|
+| 29–34 | baseline | 16.6–17.5 |
+| 30 | coupling off (lossy, measurement) | 14.8 (−1.8) |
+| 32 | pair list off (the walk every step) | 18.5 (+1.5) |
+| 34 | volatile triangles' tests stubbed | 12.1 (−4.5) |
+| 36 | listed and volatile tests stubbed | 15.0 |
+| 38 | the walk stubbed | 17.5 |
+| 44 | volatile triangles' tests stubbed | 14.5 (−4.1) |
+
+Native at t = 35 s (`vehicle_lab --ab 35 --ab-ablate …`, the ablation kernel, 20 frames
+of 34 steps from one snapshot each way), ms a frame: everything 19.6; without the volatile
+tests 17.6; without any self-collision search (2^8: listing, walk and tests) 5.4; without
+the proxies' node contacts 15.4; without the coupling's per-step passes (integration,
+spheres, count) 13.9; without the beams 17.1. Census (`--tri-census`): from 28 s 34–36
+volatile triangles, 20 of them dead (a break beam broken) and 14 live, all 14 longer
+than 3 m (car-to-falling-node triangles no beam can kill, boxes up to 1.6 km: every
+candidate in their box); 110–135 proxy bodies and 300–590 hull planes in the window,
+most of them far from the car (between it and pieces hundreds of metres below).
+
+So, late: self-collision first (the volatile triangles about 4.5 ms in Chrome), then
+the coupling (the window spanning torn pieces: proxies tested by every node).
+
+### Fixes (each lossless, each its own commit)
+
+1. **Dead volatile triangles are not listed** (`6a63cd7b`; failing test `04bb6457`): a
+   triangle dead before this beam phase stays dead (tryContact's box empty), one with a
+   retired node meets nothing. The live ones are tested by `piecesTestTriangle`: their
+   records loaded once, then each candidate as the walk takes it, with up to 64 lanes a
+   triangle. Torn-sedan test: volatile triangles tested 19,040 → 8,160 over 680 grid
+   steps (12 live, 16 dead), bit for bit.
+2. **The plane test before tryContact, for the volatile triangles** (`d8dca883`): a
+   contact (held, crossed or not) needs triangleHit's signed distance `rn · (p − p0)`
+   within max(r, CLIP_DEPTH); `pairFar` computes it as triangleHit does (with a rounding
+   allowance) and skips tryContact, which has no effect before that point, for a
+   volatile triangle's candidate beyond it. Tried on the listed pairs too (`d8dca883`,
+   `c9aa511e`) and taken back out: no gain on the mountain, and the authored sedan's
+   90 km/h crash went from 4.5–4.8 to 5.5–5.8 ms in Chrome (its crumpled pairs pass the
+   test; it only added loads).
+3. **A coupling window per piece** (`a3c8077a`; failing test `a068d482`): with the piece
+   labels, `cpl_bounds` takes each piece's node box and `cpl_plan` keeps a collider only
+   when its swept sphere meets some piece's box grown by the vehicle's reach, the bound
+   the vehicle's own box relies on. A node meets only shapes near its own piece's box, so
+   the shapes left out met no node: the same contacts. Native mountain: proxy shapes
+   14–22 s 0–9 (were 27–131), 30–37 s 14–73 (were 103–119). Page: "a coupling window per
+   piece" (live), `LabOptions::piece_windows`, `RUBBLE_PIECE_WINDOWS=0`.
+
+Bit-identity (final kernel): `explicit_beams_bitwise` 12, `explicit_pair_reuse_gpu` 2 (the torn sedan,
+labels against none against the walk, every state word, every frame),
+`explicit_contact_gpu` 13, `debris_retire_gpu` 1, `showcase_car_gpu` 6 + 1 ignored;
+`vehicle_lab_piece_windows` (engine-world: the procedural sedan on the mountain with its
+front torn off 30 m ahead, one window against a window per piece, the car's node, beam
+and origin words after 150 World steps the same; a box per piece, 30 m apart). Native
+mountain with all three: the trajectory the same as before to every printed figure.
+I found no scene for the test in which the window per piece leaves out a proxy *and* that
+runs in a test's time (the lab's flat arena has its vehicle out of the broadphase; the
+mountain's bodies near a test car are few): the proxies left out are measured on the
+real mountain run, above.
+
+### Results: headless Chrome, 45 s, GPU ms per World step / World steps per second
+
+Same probe each time (`--probe --secs 45`, GPU use under 15 % before each run); the
+columns are the page's wall seconds, the cells "sim t: GPU / steps".
+
+| wall s | `d78284b6` (§6) | fixes 1–3, plane test on listed pairs too | fixes 1–3 (final) |
+|---|---|---|---|
+| 3 | 2.58: 5.05 / 60 | 2.78: 5.11 / 60 | 2.98: 5.07 / 60 |
+| 6 | 5.6: 7.98 / 60 | 5.8: 8.34 / 60 | 6: 8.14 / 60 |
+| 9 | 8.6: 10.55 / 60 | 8.8: 10.85 / 60 | 9: 11.42 / 60 |
+| 12 | 11.62: 9.41 / 60 | 11.8: 9.18 / 60 | 12: 9.17 / 60 |
+| 15 | 14.6: 9.24 / 59 | 14.8: 9.14 / 59 | 15: 9.06 / 60 |
+| 18 | 17.62: 8.85 / 60 | 17.8: 8.69 / 60 | 18: 8.68 / 60 |
+| 21 | 20.57: 10.31 / 59 | 20.73: 10.15 / 59 | 20.97: 10.31 / 57.1 |
+| 24 | 23.55: 12.6 / 59 | 23.68: 12.47 / 58 | 23.95: 12.56 / 59 |
+| 27 | 26.1: 13.98 / 51.2 | 26.68: 10.44 / 59 | 26.93: 10.54 / 60 |
+| 30 | 28.12: 15.45 / 39.3 | 29.63: 10.73 / 58 | 29.88: 10.92 / 59 |
+| 33 | 30.13: 17.53 / 40.3 | 32.65: 11.42 / 60 | 32.9: 11.49 / 60 |
+| 34 | 30.8: 18.2 / 40.3 | 33.62: 11.58 / 60 | 33.85: 11.7 / 60 |
+| 35 | 31.47: 18 / 39.3 | 34.6: 12.02 / 58 | 34.78: 12.42 / 57.1 |
+| 36 | 32.13: 17.36 / 40.3 | 35.47: 13.15 / 59 | 35.52: 13.53 / 52 |
+| 37 | 32.83: 15.71 / 40.3 | 36.22: 14.13 / 47.2 | 36.2: 14.59 / 42.3 |
+| 38 | 33.5: 15.54 / 40.3 | 36.97: 15.01 / 44.3 | 36.9: 15.17 / 41.3 |
+| 39 | 34.17: 15.81 / 40.3 | 37.77: 15.19 / 45.2 | 37.65: 14.7 / 42.3 |
+| 40 | 34.83: 16.01 / 40.3 | 38.65: 13.91 / 50.2 | 38.6: 13.69 / 51.2 |
+| 41 | 35.5: 16.22 / 39.4 | 39.65: 12.87 / 56.1 | 39.4: 13.38 / 51.2 |
+| 42 | 36.17: 16.34 / 40.3 | 40.63: 12.6 / 59 | 40.33: 13.35 / 51.1 |
+| 43 | 36.85: 16.45 / 40.3 | 41.63: 12.69 / 60 | 41.18: 13.08 / 58 |
+| 44 | 37.52: 16.56 / 39.3 | 42.63: 12.78 / 59 | 42.13: 12.92 / 48.2 |
+| 45 | 38.18: 16.56 / 40.3 | 43.6: 12.65 / 60 | 43.08: 12.99 / 59 |
+
+Final: 60 steps/s for the whole run (11.7 ms or less through t 34 s, was 40 steps/s
+from 26 s) except t ≈ 35–42 s: 13.4–15.2 ms, 41–52 steps/s (the car strikes the slope
+at about 100 km/h at 36 s, 45 km/h after), then 12.9–13.1 ms. **The ≤ 12.5 ms goal is
+not met from t ≈ 35 s.** In that window a
+stub of the volatile tests still takes 2.7 ms (13.5 → 10.8 ms at t 38–39): the 14 live
+car-to-falling-node triangles, whose boxes hold every candidate, test the candidates
+near their planes every step (as the walk did). Further reduction needs either a
+cheaper exact rejection inside anti-clip's crossing test, or a decision about triangles
+no beam can kill once they are stretched kilometres long (lossy: not done; their contacts
+are what the specification asks for).
+
+Other checks (Chrome, final build): the parked car 4.5 ms; the authored sedan's 90 km/h
+crash 4.5–5.6 ms over 45 s (was 4.3 ms over 20 s in §6); no console or WGSL error.
+Fleet (`fleet.sh`, GPU idle; the plane test on listed pairs still in): apart 1 / 8 / 32
+cars 9.03 / 9.77 / 11.40 ms medians (were 8.9 / 9.6 / 11.4), crash town 1 / 4 / 8 cars
+12.24 / 12.50 / 67.92 (were 12.1 / 12.3 / 67.6).
+
+**After the car's re-export (11:58, the generator's hinge change; 2026-11-14, final build
+at `3f551fb5`):** the same Chrome probe holds 60 steps/s to t ≈ 30 s (≤ 11.7 ms), then
+12.1–21.1 ms and 30–54 steps/s from 30.4 s to the end (39 s). The trajectory is the new
+car's (it breaks differently); the late phase has not been split again for it. Parked car
+4.5 ms.
+
+## 8. The re-exported car's late phase split by cause; the reuse margin 0.05 → 0.1 (2026-11-14)
+
+The car is `sedan_new` as regenerated with hinges that bend. Every comparison below toggles one
+switch on this car, starting from the same state.
+
+**Split by cause** (headless Chrome, WGSL stubs from `out/late/ab2.js`, t 31–42 s, GPU ms
+per World step):
+
+| Variant | ms |
+|---|---|
+| base | 11.6–15.7 |
+| self-collision walk stubbed | 10.15 (so the walk costs about 5 ms) |
+| pair-list reuse off | 16.4 |
+| volatile triangles' tests stubbed | no gain |
+| rigid coupling off | 11.7 (against 11.95) |
+
+The largest cause is still the self-collision walk. That is the grid steps that rebuild the
+pair list, plus the steps whose list cannot be reused. The volatile tests from §7 no longer
+matter for this car.
+
+**The lossless fix: a larger reuse margin.** `PAIR_REUSE_MARGIN` sets how far a node may
+travel before the list is rebuilt. It is exact at any value: the list holds every pair
+within the box test padded by the margin, and every listed pair is tested every step. A
+larger margin lists more pairs but rebuilds less often. Native, `vehicle_lab --measure
+mountain-perf`, same seed, GPU ms per World step at t 24–42 s:
+
+| Margin | Pairs listed (late) | Reused grid steps | ms at t 29–41 |
+|---|---|---|---|
+| 0.05 | 4,650–7,900 | 45–73 % | 15.1–19.5 |
+| **0.1 (now)** | 5,800–10,500 | 63–86 % | 14.4–17.0 |
+| 0.2 | 8,900–17,400 | | 15.8–18.1 |
+
+At 0.1, each step is 0.3–1.7 ms faster than at 0.05. At 0.2, the extra pair tests cost more
+than the rebuilds they save. Every GPU suite, including `explicit_beams_bitwise` and
+`explicit_pair_reuse_gpu`, passes at 0.1.
+
+**Headless Chrome, 45 s, final build** (GPU utilisation 0 % before the run, load 5.1):
+
+| t (s) | GPU ms / World steps per second |
+|---|---|
+| 1–4 | 5.2–5.4 / 60 |
+| 5–31 | 7.8–10.9 / 59–60 |
+| 32–34 | 11.0–12.2 / 59–60 |
+| 35–37 | 12.8–13.4 / 49–56 |
+| 38–45 | 13.5–14.2 / 43–55 |
+
+The run holds 60 steps/s with 12.5 ms or less through t ≈ 34 s. **From t ≈ 35 s (the strike
+on the slope) it costs 12.8–14.2 ms, so the 12.5 ms budget is still not met there.** In the
+same window, the build before the fix was at 13.4–21.1 ms. The parked car costs 4.8 ms.
+What remains is the walk on the steps that cannot reuse their list (about 5 ms). Taking that
+further needs a cheaper exact rebuild, for example an incremental one. This was not built.
+
+**The 120 Hz frame loop (observation only, not measured, page not edited).** The page's
+`pacer.advance(dt, 1/scale, 4)` owes about 0.5 steps per frame at 120 Hz. A step runs only
+while `canStep()` holds, which allows at most 2 readbacks in flight. A step refused on one
+frame is not owed again later. So on a 120 Hz display, any frame that owes a step while the
+GPU is still busy with the previous 2 loses that step. A 60 Hz display owes 1 step per frame
+and loses the same way less often relative to its rate. That would match the "GPU not ready
+54.7 %, steps a frame 0: 69 %" reading. It needs a measurement, a fixed-rate A/B at 60 and
+120 Hz, before the loop is changed.
+
+## 9. A 120 Hz display: in-between frames starved the steps (2026-11-14)
+
+The owner's visible window (120 Hz, generated sedan, mountain) showed 27 World steps/s at
+22 s with "steps a frame 0: 69 %, GPU not ready 54.7 %" where the 60 Hz headless probe
+holds 58–60. Canvas size is not it (headless 4000×2300 = 1280×720). Reproduced headless
+by driving the page's frame loop from a 120 Hz timer (`tools/explicit-2khz/raf120.js`,
+`vehicle-lab-record.mjs --probe --eval`): 60 steps/s to ~15 s, then **16 steps/s** once a
+step costs more than ~10.4 ms. A 120 Hz display draws two frames a step; two draws and a
+step no longer fit in 16.7 ms, the draws are submitted regardless and the steps are the
+ones refused (`canStep`).
+
+Fix (the page's loop only, no physics): while the GPU is the limit (a step refused in the
+last 3 s) the frames that owe no step are not drawn; the frames that owe one are drawn as
+on a 60 Hz display. Headless, GPU idle, World steps/s (GPU ms):
+
+| page t (s) | 60 Hz | 120 Hz before | 120 Hz after |
+|---|---|---|---|
+| 8 | 60 (9.2) | 60 (9.2) | 60 (9.2) |
+| 16 | 60 (10.5) | 57 (10.5) | 60 (10.5) |
+| 20 | 60 (10.0) | 17 (10.4) | 60 (9.9) |
+| 28 | 60 (10.4) | 16 (10.4) | 59 (9.5) |
+| 36 | 60 (12.0) | – | 59 (13.2) |
+| 40 | 55 (13.3) | – | 53 (14.2) |
+
+Tried and dropped: carrying a refused step to the next frame (60 Hz fell to 39 steps/s
+from the start); skipping the draw of every refused frame (60 Hz fell to 40 late). The
+timer is an emulation: a real 120 Hz window is not measured here. `ioreg`'s first sample
+of "Device Utilization %" is stale (92, then 0, 0): take three.
+
+Also tried and dropped (the owner: physics first, drawing may fall to 60 or 30): a second
+level that draws every other step frame (30 drawn) once steps are refused at 60 drawn. It
+made the physics slower, at both display rates: from 33 s the measured GPU time of a step
+rose to 17.5–20 ms (12–14 ms without it) and the page fell to 30 steps/s (60 Hz) and
+34–40 (120 Hz), against 53–60 without. Fewer draws do not free time for the steps here;
+the likely reason is the one `frame_pacer.rs` already notes (the GPU lowers its clocks
+under a lighter load), not established. Past ~13 ms a step the remaining lever is the
+step's own cost.

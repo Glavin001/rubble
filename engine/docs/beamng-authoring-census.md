@@ -1,5 +1,11 @@
 # BeamNG authoring census (2026-11-06, measured)
 
+**See also:** [beamng-structure-study.md](beamng-structure-study.md) (2026-11-12) goes
+below the part level: where the shell's nodes sit, bracing, crush grading,
+mechanical parts, the wheel's load path, glass, BeamNG's own guidance with
+sources, and the specification for the generated sedan. One correction from
+it: BeamNG cars do carry a few damping-only beams (15–32 per car, about 1 %).
+
 **Decision: measurement only.** No engine or authoring code changed. This page
 measures how five real BeamNG cars are authored, puts sedan1 beside them, and
 ends with the rules the generator should adopt. It does not adopt them.

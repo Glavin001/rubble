@@ -435,7 +435,14 @@ fn main() -> Result<()> {
 
 /// Every slangc compile of this crate into `out_dir` (`spirv/`, `spirv_entries.txt`,
 /// `wgsl/`).
+/// Whether this build compiles the test-only explicit modules (the frozen baseline and
+/// reference, the deterministic-hits and ablation builds): the `test-kernels` feature.
+fn test_kernels() -> bool {
+    env::var_os("CARGO_FEATURE_TEST_KERNELS").is_some()
+}
+
 fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
+    let test_kernels = test_kernels();
     let out = out_dir.join("spirv");
     std::fs::create_dir_all(&out)?;
     let mut warnings = Vec::new();
@@ -646,22 +653,14 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         d.push(("EB_VV_BIG_ONLY", "1"));
         vv.push((name.replace("contact", "contact_big"), "explicit_beams_contact", d));
     }
-    for (name, entry, defines) in &vv {
+    // (The explicit modules compile in parallel, as the baseline's: each a slangc of its own.)
+    for r in par_map(&vv, |(name, entry, defines)| -> Result<()> {
         let out = wgsl_dir.join(format!("{name}.wgsl"));
-        let entry = if entry.is_empty() {
-            name.as_str()
-        } else {
-            entry
-        };
-        compile_with_defines(
-            &explicit_beams_source(slang_root),
-            entry,
-            SlangTarget::Wgsl,
-            &out,
-            &[],
-            defines,
-        )?;
-        explicit_post(&out)?;
+        let entry = if entry.is_empty() { name.as_str() } else { entry };
+        compile_with_defines(&explicit_beams_source(slang_root), entry, SlangTarget::Wgsl, &out, &[], defines)?;
+        explicit_post(&out)
+    }) {
+        r?;
     }
     // The sixteen frame and contact modules again without surface contact
     // (EB_NO_SURFACE, the `_nosurf` names; engine_exec::explicit_plan::Kernel::module_for):
@@ -696,19 +695,31 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         ("explicit_beams_contact_big_aero", C, &[W, L256, AERO, SOLO, GROUPS, BIG]),
         ("explicit_beams_contact_big_aero_wide", C, &[W, L512, AERO, SOLO, GROUPS, BIG]),
     ];
-    for (name, entry, defines) in frames {
+    for r in par_map(&frames, |&(name, entry, defines)| -> Result<()> {
         let out = wgsl_dir.join(format!("{name}_nosurf.wgsl"));
         let mut d = defines.to_vec();
         d.push(("EB_NO_SURFACE", "1"));
-        compile_with_defines(
-            &explicit_beams_source(slang_root),
-            entry,
-            SlangTarget::Wgsl,
-            &out,
-            &[],
-            &d,
-        )?;
-        explicit_post(&out)?;
+        compile_with_defines(&explicit_beams_source(slang_root), entry, SlangTarget::Wgsl, &out, &[], &d)?;
+        explicit_post(&out)
+    }) {
+        r?;
+    }
+    // Twelve of the sixteen with surface contact but without the World's coupling
+    // (EB_NO_COUPLING, the `_nocpl` names; explicit_beams_gpu::frame_module): the surface
+    // pass without its proxy paths, for an upload that has no coupling room.
+    for r in par_map(&frames, |&(name, entry, defines)| -> Result<()> {
+        // (Not the large groups' modules: a fleet of more than four vehicles without
+        // coupling runs the shipped ones.)
+        if name.contains("contact_big") {
+            return Ok(());
+        }
+        let out = wgsl_dir.join(format!("{name}_nocpl.wgsl"));
+        let mut d = defines.to_vec();
+        d.push(("EB_NO_COUPLING", "1"));
+        compile_with_defines(&explicit_beams_source(slang_root), entry, SlangTarget::Wgsl, &out, &[], &d)?;
+        explicit_post(&out)
+    }) {
+        r?;
     }
     // A fleet with surface contact on the frame modules (no contact groups): the frame
     // in segments, a step each (EB_FRAME_SEG, `<module>_seg`), with the surface pass
@@ -739,16 +750,87 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             ));
         }
     }
-    for (name, entry, defines) in &jobs {
+    // The split group path (EB_VV_SPLIT; engine/docs/measurements/contact-groups-design.md):
+    // a contact group's substeps as dispatches, the members' steps (a workgroup per
+    // vehicle) and the groups' contact passes, at the frame module's four variants.
+    for (tag, lanes) in [("", L256), ("_wide", L512), ("_aero", L256), ("_aero_wide", L512)] {
+        for entry in ["member", "group", "tests"] {
+            // (The members' module without EB_VV_GROUPS: its frame step never reaches
+            // contactGroup, so it binds the workgroup variables of the steps alone:
+            // Metal allows 31 a kernel.)
+            let mut d = vec![W, lanes, SOLO, ("EB_VV_SPLIT", "1")];
+            if tag.contains("aero") {
+                d.push(AERO);
+            }
+            match entry {
+                "member" => d.push(("EB_SOLO_STEP", "1")),
+                "group" => d.push(GROUPS),
+                // The tests across workgroups: their counters in global memory.
+                _ => d.push(("EB_VV_GLOBAL", "1")),
+            }
+            let e = match entry {
+                "member" => "explicit_beams_split_member",
+                "group" => "explicit_beams_split_group",
+                _ => "explicit_beams_split_tests",
+            };
+            jobs.push((format!("explicit_beams_split_{entry}{tag}"), e, d));
+        }
+    }
+    // Self-collision's listed pairs across workgroups (EB_SELF_SPLIT;
+    // engine/docs/measurements/selfcol-design.md): a solo frame a step a dispatch, cut at
+    // its tests, and the pairs dispatch, at the frame module's four variants.
+    for (tag, lanes) in [("", L256), ("_wide", L512), ("_aero", L256), ("_aero_wide", L512)] {
+        for (entry, fun) in [
+            ("step", "explicit_beams_self_step"),
+            ("walk", "explicit_beams_self_walk"),
+            ("pairs", "explicit_beams_self_pairs"),
+        ] {
+            // (Without surface contact: these frames run only without it, and the module
+            // compiles as the frame's `_nosurf` twin does.)
+            let mut d = vec![W, lanes, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), ("EB_NO_SURFACE", "1")];
+            if tag.contains("aero") {
+                d.push(AERO);
+            }
+            jobs.push((format!("explicit_beams_selfsplit_{entry}{tag}"), fun, d.clone()));
+            // Measurement only: the modules' ablation builds (EB_ABLATE), at the non-aero
+            // variants.
+            if test_kernels && !tag.contains("aero") {
+                d.push(("EB_ABLATE", "1"));
+                if entry != "step" {
+                    d.push(("EB_SELF_PAIRS_ABLATE", "1"));
+                }
+                jobs.push((format!("explicit_beams_selfsplit_{entry}_ablate{tag}"), fun, d));
+            }
+        }
+        // With vehicle contact (EB_VV_SOLO): the vehicles' dispatch is the split group
+        // path's members' (explicit_beams_split_member: a solo vehicle's step cut at its
+        // tests, a member's step whole), and the walk and pairs skip the members.
+        let mut base = vec![W, lanes, SOLO, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), ("EB_NO_SURFACE", "1")];
+        if tag.contains("aero") {
+            base.push(AERO);
+        }
+        let mut member = base.clone();
+        member.push(("EB_VV_SPLIT", "1"));
+        jobs.push((format!("explicit_beams_selfsplit_member_vv{tag}"), "explicit_beams_split_member", member));
+        jobs.push((format!("explicit_beams_selfsplit_walk_vv{tag}"), "explicit_beams_self_walk", base.clone()));
+        jobs.push((format!("explicit_beams_selfsplit_pairs_vv{tag}"), "explicit_beams_self_pairs", base));
+    }
+    for r in par_map(&jobs, |(name, entry, defines)| -> Result<()> {
         let out = wgsl_dir.join(format!("{name}.wgsl"));
         compile_with_defines(&explicit_beams_source(slang_root), entry, SlangTarget::Wgsl, &out, &[], defines)?;
-        explicit_post(&out)?;
+        explicit_post(&out)
+    }) {
+        r?;
     }
     // The frozen baseline of the explicit-beams kernel (a test oracle,
     // `explicit_beams_baseline.slang`): every frame-entry variant and the plan passes
     // as `wgsl/explicit_baseline_*.wgsl`, plus the race-probe variants (`EB_RACE_PROBE`).
     // Read from OUT_DIR at run time by the bit-identity tests only (not embedded).
-    explicit_baseline(slang_root, &wgsl_dir)?;
+    // Test builds only (the `test-kernels` feature: the crate's own dev-dependency turns it
+    // on for its tests and examples): not shipped, not in a web or release build.
+    if test_kernels {
+        explicit_baseline(slang_root, &wgsl_dir)?;
+    }
     // Tests only (tests/explicit_loop_cap.rs): the explicit kernels' Slang loop caps
     // (explicit_loop_cap.slang) on a runaway, read at run time.
     compile_with_defines(
@@ -804,6 +886,8 @@ fn cache_key(manifest: &Path, slang_root: &Path) -> Result<String> {
     for f in ["build.rs", "src/wgsl_loop_cap.rs", "../engine-slang-build/src/lib.rs"] {
         std::fs::read(manifest.join(f))?.hash(&mut h);
     }
+    // The test kernels in or out (a test build's entry holds more modules).
+    test_kernels().hash(&mut h);
     Ok(format!("engine-webgpu-{:016x}", h.finish()))
 }
 
@@ -893,7 +977,8 @@ fn explicit_post(out: &Path) -> Result<()> {
     let name = out.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let uncapped = name.starts_with("explicit_ref_")
         && std::env::var("RUBBLE_EB_REF_UNCAPPED").is_ok_and(|v| v == "1");
-    let text = if uncapped || text.contains("ebLoopCapHit") {
+    // (The Slang caps: their flag, ebLoopHit, set by the loops' ends or ebLoopCapHit.)
+    let text = if uncapped || text.contains("ebLoopCapHit") || text.contains("ebLoopHit") {
         text
     } else {
         cap_explicit_loops(&text).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?

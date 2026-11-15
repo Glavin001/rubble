@@ -76,11 +76,21 @@ pub struct CouplingLayout {
     pub vehicles: u32,
     pub misc_base: u32,
     pub acc_base: u32,
+    /// The candidate list (`explicit_beams_rigid.slang` `cplList*`): gAcc words of its
+    /// per-vehicle maxima ([`Self::LIST_ACC_WORDS`] a vehicle, right after the sums), and
+    /// in gNext right after the shapes' spheres, per vehicle and shape its frame-start
+    /// centre ([`Self::LIST_SHAPE_WORDS`]), then per node its list
+    /// ([`Self::LIST_NODE_WORDS`], by global node index).
+    pub list_acc: u32,
+    pub list_base: u32,
 }
 
 impl CouplingLayout {
     pub const BODY_RECS: u32 = 5;
     pub const SHAPE_RECS: u32 = 7;
+    pub const LIST_ACC_WORDS: u32 = 2;
+    pub const LIST_SHAPE_WORDS: u32 = 4;
+    pub const LIST_NODE_WORDS: u32 = 12;
 
     fn new(cap: CouplingCapacity, vehicles: u32, misc_base: u32, acc_base: u32) -> Self {
         assert!(
@@ -92,6 +102,8 @@ impl CouplingLayout {
             vehicles,
             misc_base,
             acc_base,
+            list_acc: 0,
+            list_base: 0,
         }
     }
     /// Records per vehicle.
@@ -166,8 +178,199 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
 /// Words of the kernel's Params (word 87 the parking brakes' base, word 88 the loop
-/// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 padding).
-pub const PARAM_WORDS: usize = 92;
+/// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 the pair
+/// list's build records, 92 its margin ([`W_PAIR_REUSE`]), 93 its backoff
+/// ([`W_PAIR_STREAK`]), 94 its piece labels ([`W_PIECE_BASE`]), 95 the retired nodes
+/// ([`W_RETIRE_BASE`]), 96 the beam phase's sorted records ([`W_BEAM_ORDER`]), 97–99
+/// padding).
+pub const PARAM_WORDS: usize = 100;
+/// Params word: the beam phase's records sorted by kind in gStatic (the kernel's
+/// beamOrder; 0: the beams in file order, beamUpdate for each). Per vehicle a header
+/// (entries, hot entries, its first incidence position, 0), then from record
+/// `vehicles + 2 × (its beam offset + k)` entry k as 2 records: (local beam j, class |
+/// kind << 2 | type << 8 | group (i16) << 16, ends a | b << 16 local, incidence slots a |
+/// b << 16 from its first incidence position), (k, c, damping filter record + 1, long
+/// bound) for a hot entry ([`BEAM_ORDER_HOT`]), zeros otherwise. The order changes
+/// which lane evaluates a beam and when, never what a beam computes: each beam writes
+/// only its own records and incidence entries, and a node sums its entries in its own
+/// order.
+pub const W_BEAM_ORDER: usize = 96;
+/// A beam-order entry's class: one beam by beamUpdate.
+pub const BEAM_ORDER_SINGLE: u32 = 0;
+/// A two-record element (its first record j, its second j + 1, which carries forces the
+/// first writes): the second's update, then the first's, on one lane.
+pub const BEAM_ORDER_PAIR: u32 = 1;
+/// A JBeam plain, support, bounded or rope beam without an extension record: the hot
+/// path (jbeamHot), its records packed in the entry.
+pub const BEAM_ORDER_HOT: u32 = 2;
+/// An aero triangle's two records (kinds 18, 19) as one pair entry with its fields packed:
+/// (j, class | kind << 2 | third node (local) << 16, nodes x0 | x1 << 16, the first
+/// record's slots), (drag, lift, sin of the stall angle, the second record's slots).
+/// Both records unbroken: atriHot; otherwise as [`BEAM_ORDER_PAIR`].
+pub const BEAM_ORDER_ATRI: u32 = 3;
+/// The kind codes of a two-record element's second record (torsion, pressure triangle,
+/// aero triangle, LBEAM vertex).
+pub const BEAM_ORDER_SECONDS: [u32; 4] = [11, 17, 19, 20];
+/// Params word: the grid walk's pair list reused over steps (the kernel's pairReuse*,
+/// lossless): its margin M in metres as float bits, 0 off (the walk lists every step).
+pub const W_PAIR_REUSE: usize = 92;
+/// Params word: a pair list reused on fewer steps than this before it is invalidated
+/// sends the next grid steps back to the walk for a while (the same results; a list
+/// rebuilt nearly every step costs more than the walk). 0: never.
+pub const W_PAIR_STREAK: usize = 93;
+/// [`W_PAIR_STREAK`]'s default (`RUBBLE_PAIR_STREAK=n` another).
+pub const PAIR_REUSE_STREAK: u32 = 1;
+pub fn pair_streak_default() -> u32 {
+    std::env::var("RUBBLE_PAIR_STREAK").ok().and_then(|x| x.parse().ok()).unwrap_or(PAIR_REUSE_STREAK)
+}
+/// The reused pair list's margin (m): each triangle's box padded by this much more when
+/// the list is built; it is reused while no node has moved, relative to the others, by
+/// more than this less the boxes' growth (measured: lab-mountain-perf.md §5; 0.1 since §8:
+/// the re-exported sedan's late mountain reuses its list on 63-86 % of grid steps, against
+/// 45-73 % at 0.05).
+pub const PAIR_REUSE_MARGIN: f32 = 0.1;
+
+/// The pair list's margin word at start: [`PAIR_REUSE_MARGIN`], `RUBBLE_PAIR_MARGIN=m`
+/// (measurement) another, `RUBBLE_PAIR_REUSE=0` off.
+pub fn pair_reuse_default() -> u32 {
+    if std::env::var("RUBBLE_PAIR_REUSE").as_deref() == Ok("0") {
+        return 0;
+    }
+    let m = std::env::var("RUBBLE_PAIR_MARGIN")
+        .ok()
+        .and_then(|x| x.parse::<f32>().ok())
+        .filter(|m| *m > 0.0)
+        .unwrap_or(PAIR_REUSE_MARGIN);
+    m.to_bits()
+}
+/// The beam phase on its sorted records at start ([`W_BEAM_ORDER`]); `RUBBLE_BEAM_ORDER=0`
+/// (measurement) starts in file order.
+pub fn beam_order_default() -> bool {
+    std::env::var("RUBBLE_BEAM_ORDER").as_deref() != Ok("0")
+}
+
+/// The [`W_BEAM_ORDER`] region from the uploaded records: per vehicle its header, then
+/// per vehicle `beams` entry slots (2 records each) at its beam offset, its entries
+/// first. Hot: a JBeam plain (6), support (7), bounded (8) or rope (21) beam without an
+/// extension record whose fields fit the packing (16-bit local ends and incidence
+/// slots, a 16-bit group); a vehicle that does not fit keeps every beam on beamUpdate.
+fn beam_order_records(
+    spans: &[Span],
+    node_info: &[[u32; 4]],
+    beam_recs: &[[u32; 4]],
+    slots: &[[u32; 2]],
+    ext_index: &[u32],
+    ext_recs: &[[u32; 4]],
+) -> Vec<[u32; 4]> {
+    const TYPE_EXT_BIT: u32 = 4 << 8;
+    let nv = spans.len();
+    let total: usize = spans.iter().map(|s| s.beams as usize).sum();
+    let mut out = vec![[0u32; 4]; nv + 2 * total];
+    for (vi, s) in spans.iter().enumerate() {
+        let n = s.beams as usize;
+        if n == 0 {
+            continue;
+        }
+        let inc_start = node_info.get(s.node_off as usize).map_or(0, |i| i[1]);
+        let rec = |j: usize| beam_recs[3 * (s.beam_off as usize + j)];
+        let kind = |j: usize| rec(j)[2] & 0xFF;
+        let fits = s.nodes <= 1 << 16
+            && (0..n).all(|j| {
+                let g = slots[s.beam_off as usize + j];
+                (rec(j)[3] as i32).unsigned_abs() < 1 << 15
+                    && g.iter().all(|&p| p != u32::MAX && p >= inc_start && p - inc_start < 1 << 16)
+            });
+        let hot = |j: usize| fits && matches!(kind(j), 6 | 7 | 8 | 21) && rec(j)[2] & TYPE_EXT_BIT == 0;
+        // A first record whose next record is its second (torsion 10 → 11, pressure
+        // triangle 16 → 17, aero triangle 18 → 19, LBEAM 14 → 20).
+        let pairs = |j: usize| {
+            j + 1 < n && matches!((kind(j), kind(j + 1)), (10, 11) | (16, 17) | (18, 19) | (14, 20))
+        };
+        // An aero triangle (18 → 19) with its third node and both records' slots packed:
+        // its E1 (third node, drag, lift, sin of the stall angle).
+        let atri_e1 = |j: usize| -> Option<[u32; 4]> {
+            let x = *ext_index.get(s.beam_off as usize + j)?;
+            (x != 0).then(|| ext_recs[4 * (x as usize - 1) + 1])
+        };
+        let atri = |j: usize| {
+            fits && kind(j) == 18
+                && pairs(j)
+                && atri_e1(j).is_some_and(|e| e[0] >= s.node_off && e[0] - s.node_off < 1 << 16)
+        };
+        let mut entries: Vec<(u32, u32, usize)> = Vec::with_capacity(n);
+        let mut j = 0;
+        while j < n {
+            if pairs(j) {
+                entries.push((1, kind(j), j));
+                j += 2;
+                continue;
+            }
+            // (A second record without its first, which uploads never make: alone.)
+            entries.push((if hot(j) { 0 } else { 1 }, kind(j), j));
+            j += 1;
+        }
+        let hot_count = entries.iter().filter(|e| e.0 == 0).count();
+        // Hot block first, then the rest; by kind, then index (a stable sort).
+        entries.sort_by_key(|&(block, k, j)| (block, k, j));
+        out[vi] = [entries.len() as u32, hot_count as u32, inc_start, 0];
+        for (k, &(block, _, j)) in entries.iter().enumerate() {
+            let r0 = rec(j);
+            let at = nv + 2 * (s.beam_off as usize + k);
+            let class = if block == 0 {
+                BEAM_ORDER_HOT
+            } else if atri(j) {
+                BEAM_ORDER_ATRI
+            } else if pairs(j) {
+                BEAM_ORDER_PAIR
+            } else {
+                BEAM_ORDER_SINGLE
+            };
+            let mut y = class | (r0[2] & 0x1F) << 2;
+            if class == BEAM_ORDER_HOT {
+                let r1 = beam_recs[3 * (s.beam_off as usize + j) + 1];
+                let r2 = beam_recs[3 * (s.beam_off as usize + j) + 2];
+                let g = slots[s.beam_off as usize + j];
+                y |= ((r0[2] >> 8) & 3) << 8 | (r0[3] as i32 as i16 as u16 as u32) << 16;
+                out[at] = [
+                    j as u32,
+                    y,
+                    (r0[0] - s.node_off) | (r0[1] - s.node_off) << 16,
+                    (g[0] - inc_start) | (g[1] - inc_start) << 16,
+                ];
+                out[at + 1] = [r1[0], r1[1], r2[3], r2[1]];
+            } else if class == BEAM_ORDER_ATRI {
+                let e1 = atri_e1(j).expect("an aero triangle's E1");
+                let g = slots[s.beam_off as usize + j];
+                let g2 = slots[s.beam_off as usize + j + 1];
+                y |= (e1[0] - s.node_off) << 16;
+                out[at] = [
+                    j as u32,
+                    y,
+                    (r0[0] - s.node_off) | (r0[1] - s.node_off) << 16,
+                    (g[0] - inc_start) | (g[1] - inc_start) << 16,
+                ];
+                out[at + 1] = [e1[1], e1[2], e1[3], (g2[0] - inc_start) | (g2[1] - inc_start) << 16];
+            } else {
+                out[at] = [j as u32, y, 0, 0];
+            }
+        }
+    }
+    out
+}
+
+/// Params word: the reused pair list's piece labels in gNext (the kernel's pieceBase; 0
+/// none): per node its label, then per vehicle its labels-in-use word.
+pub const W_PIECE_BASE: usize = 94;
+/// Params word: the retired nodes' bits in gMisc (the kernel's retireBase; 0: none
+/// retired, the retirement code does not run).
+pub const W_RETIRE_BASE: usize = 95;
+/// Piece labels (the kernel's PIECE_GROUPS, PIECE_LOOSE): 0 the main body, 1..6 pieces
+/// with collision triangles of their own, 7 every other node off the main body.
+pub const PIECE_GROUPS: usize = 8;
+pub const PIECE_LOOSE: u8 = 7;
+/// gMisc records per vehicle of the coupling's piece boxes (vehicle_coupling.slang
+/// PIECE_BOX_RECS): 8 boxes of 6 keys, then the labels-in-use word.
+pub const PIECE_BOX_RECS: usize = 13;
 /// Params word: the loop budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`).
 pub const W_LOOP_BUDGET: usize = 88;
 /// The loop budget's floor and ceiling (passes of one invocation in a frame).
@@ -194,7 +397,7 @@ pub fn loop_budget_override() -> Option<u32> {
 }
 /// The grid walk's pairs a vehicle lists per step before it walks again with its tests
 /// (the kernel's `TRI_PAIR_CAP`; 2 gNext words a pair).
-pub const TRI_PAIR_CAP: usize = 8192;
+pub const TRI_PAIR_CAP: usize = 32768;
 /// gBeams records per self-collision triangle of its per-step geometry (the kernel's
 /// `TRI_GEO_RECS`, `triGeoFill`).
 pub const TRI_GEO_RECS: usize = 9;
@@ -203,11 +406,17 @@ pub const CPL_SPHERE_WORDS: u32 = 16;
 /// Params word: vehicle sleep's header record in gMisc (0: off; the kernel's
 /// `sleepRec`; after centred damping's word 84). The next word is the awake-list flag.
 pub const W_SLEEP: usize = 85;
+/// Members of a contact group stepped side by side (the kernel's `VV_PART`): larger
+/// groups run in their own dispatch ([`Kernel::ContactBig`]), so a fleet of at most
+/// this many vehicles never needs that module.
+pub const VV_PART: usize = 4;
 /// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
 pub const VV_SPLIT_SLOTS: usize = 5;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
-/// groups (16), the awake vehicles' frame (32, vehicle sleep).
-pub const ARGS_BYTES: u64 = 64;
+/// groups (16), the awake vehicles' frame (32, vehicle sleep), the larger groups (48),
+/// the split group path's groups (64), members (80) and tests (96), and every vehicle's
+/// step in every frame for self-collision split with vehicle contact (112).
+pub const ARGS_BYTES: u64 = 128;
 /// The vehicle sleep awake list's pass ([`Kernel::Sleep`]).
 pub const SLEEP_LIST: &str = "explicit_beams_sleep_list";
 /// The surface contact's pair path (`explicit_beams_surface.slang` `SURF_PAIR_CAP`,
@@ -235,8 +444,81 @@ const W_VV_VEH: usize = 43;
 pub const VV_MEMBER_REC: u32 = 5;
 /// The kernel's VV_RECS, VV_SLOTS and the counters' words (VV_CTL_WORDS).
 pub const VV_RECS: usize = 6;
+
+/// The coupling's candidate list (`explicit_beams_rigid.slang` `cplList*`;
+/// `engine_softbody::explicit_rigid::candidate_list`): the header's bit 128 turns it off
+/// (every node tests every proxy shape each step, as before it). Bits 256 and 512 are tests'
+/// skins (256: without the shapes' speed, so a body entering mid-frame is caught by the
+/// check alone; 512: the ceiling, so nodes keep their lists through hard accelerations).
+pub const COUPLING_LIST_OFF: u32 = 128;
+pub const COUPLING_LIST_SKIN_NODES_ONLY: u32 = 256;
+pub const COUPLING_LIST_SKIN_CEILING: u32 = 512;
+/// The coupling's folded step (`explicit_beams_rigid.slang` `cplStepFolded`: 2 barriers a
+/// step, not 4) off: the header's bit 1024.
+pub const COUPLING_FOLD_OFF: u32 = 1024;
+/// The coupling header's other measurement bits (the WebGPU host's switches): 2 the
+/// shape cull off, 4 the cache off, 8 fast proxies' casts off, 16 surface pairs off,
+/// 32 surface culls off, 64 per-node shape ranges off.
+pub const COUPLING_HEADER_BITS: [(&str, u32); 6] =
+    [("cull_off", 2), ("cache_off", 4), ("casts_off", 8), ("surface_pairs_off", 16), ("surface_culls_off", 32), ("ranges_off", 64)];
+
+/// The solver's state as words, for bit-for-bit comparisons of two runs from one state
+/// (every host: WebGPU `ExplicitBeamsGpu::state_words`, CUDA
+/// `CudaExplicitBeams::state_words`): `bufs` are the downloaded bindings
+/// (`BIND_NODES`, `BIND_BEAMS`, `BIND_ACC`, `BIND_GROUPS`, `BIND_MISC`, `BIND_NEXT`) and
+/// `w` the planner's parameter words. Scratch whose content follows the lanes or the
+/// frame (rebase shifts, a beam's broke-this-phase mark, the contact plan's per-frame
+/// slot) is left out.
+pub fn state_words(
+    layout: &ExplicitLayout,
+    w: &[u32],
+    nodes: Vec<u32>,
+    beams: &[u32],
+    acc: &[u32],
+    groups: Vec<u32>,
+    mut misc: Vec<u32>,
+    next: &[u32],
+) -> Vec<(&'static str, Vec<u32>)> {
+    let nv = layout.spans.len();
+    let (grid_base, aero_state) = (w[9] as usize, w[27] as usize);
+    // The aero, slide state and slide-force slots (the contributions after them are
+    // scratch).
+    let slide_end = (w[35] + w[38]) as usize;
+    let (vv_veh, vv_groups) = (w[43] as usize, w[46] as usize);
+    for v in 0..nv {
+        misc[(vv_veh + v * VV_RECS + 4) * 4 + 2] = 0;
+    }
+    // The wide passes' per-frame rebase shifts (scratch).
+    let wide_misc = w[16] as usize;
+    misc[wide_misc * 4..(wide_misc + 1 + nv) * 4].fill(0);
+    let mut beam_words = beams[..grid_base * 4].to_vec();
+    // A beam's "broke in the last beam phase" mark (.w of its second record) is read
+    // only within that step (the next beam phase clears it first).
+    for j in 0..layout.total[1] as usize {
+        beam_words[(2 * j + 1) * 4 + 3] = 0;
+    }
+    beam_words.extend_from_slice(&beams[aero_state * 4..slide_end * 4]);
+    vec![
+        ("nodes", nodes),
+        ("beams", beam_words),
+        ("acc", acc[..3 * layout.total[0] as usize].to_vec()),
+        // Anti-clip's side memory (order free; jbeam-semantics-spec.md §36).
+        ("clip", {
+            let at = w[78] as usize;
+            if at == 0 {
+                Vec::new()
+            } else {
+                acc[at..at + 4 * layout.total[0] as usize].to_vec()
+            }
+        }),
+        ("groups", groups),
+        ("misc", misc[..vv_groups * 4].to_vec()),
+        // The trigger inputs: from keyBase to the contact lists (vvMembers − vehicles).
+        ("keys", next[w[31] as usize..w[47] as usize - nv].to_vec()),
+    ]
+}
 const VV_SLOTS: usize = 8;
-const VV_CTL_WORDS: u32 = 8;
+const VV_CTL_WORDS: u32 = 10;
 /// Frame bounds margin past the travel of a vehicle's fastest node (m): see
 /// [`FramePlanner::set_contact_margin`].
 pub const DEFAULT_CONTACT_MARGIN: f32 = 1.0;
@@ -245,6 +527,11 @@ pub const DEFAULT_CONTACT_MARGIN: f32 = 1.0;
 pub const KEYS: usize = engine_softbody::explicit_triggers::KEYS;
 const NONE: u32 = u32::MAX;
 const NODE_SLOT_SHIFT: u32 = 8;
+/// Vehicle flags bit (the kernel's FLAG_OWN_TRAVEL): `ExplicitBeams::own_travel_reach`.
+pub const FLAG_OWN_TRAVEL: u32 = 1 << 20;
+/// Node info flag (the kernel's NODE_PAIR_TRACKED): a contacter or a collision triangle's
+/// node, whose motion the reused self-collision pair list tracks.
+const NODE_PAIR_TRACKED: u32 = 128;
 /// Per vehicle the kernel's self-collision hit list (HIT_CAP records of HIT_WORDS
 /// words) and pending-beam list (PEND_CAP) in gNext.
 const SELF_HIT_WORDS: usize = 256 * 24 + 64;
@@ -710,6 +997,12 @@ pub struct ExplicitLayout {
     pub sleep: Option<SleepLayout>,
     /// gMisc record of the first triangle's contact throttle.
     pub vv_tri_base: u32,
+    /// gMisc record of the retired nodes' bits ([`W_RETIRE_BASE`] when in use).
+    pub retire_rec: u32,
+    /// gMisc records of the nodes' piece labels (4 bits each) and per vehicle its
+    /// pieces' boxes ([`PIECE_BOX_RECS`]) for the coupling's window per piece.
+    pub label_rec: u32,
+    pub piece_box_rec: u32,
     /// The fleet runs the aero modules (`EB_AERO`).
     pub aero: bool,
     /// Some vehicle has surface contact: the frame modules with the surface pass
@@ -879,10 +1172,21 @@ impl ExplicitUpload {
                 }
             }
             slot_ranges.push((slot_first, slot_count - slot_first));
+            // The nodes a self-collision box test reads (contacters, collision triangles'
+            // nodes): the reused pair list tracks their motion (NODE_PAIR_TRACKED).
+            let mut tracked = vec![false; v.nodes.len()];
+            for &c in &v.candidates {
+                tracked[c as usize] = true;
+            }
+            for t in &v.triangles {
+                for n in t.nodes {
+                    tracked[n as usize] = true;
+                }
+            }
             // Incidence lists, then the candidates.
             for (i, inc) in v.incidence.iter().enumerate() {
                 let n = &v.nodes[i];
-                let flags = n.flags | slot_of[i] << NODE_SLOT_SHIFT;
+                let flags = n.flags | slot_of[i] << NODE_SLOT_SHIFT | if tracked[i] { NODE_PAIR_TRACKED } else { 0 };
                 node_info.push([flags, lists.len() as u32, inc.len() as u32, vi as u32]);
                 for &j in inc {
                     let b = &v.beams[j as usize];
@@ -930,7 +1234,9 @@ impl ExplicitUpload {
                 | (v.dissipative_contact as u32) << 15
                 | (any_shift as u32) << 16
                 | (v.surface_contact as u32) << 17
-                | (v.settings.centred_damping as u32) << 18;
+                | (v.settings.centred_damping as u32) << 18
+                | ((v.settings.centred_damping && v.settings.centred_objective) as u32) << 19
+                | (v.own_travel_reach as u32) << 20;
             vehicle_recs.push([
                 node_off,
                 v.nodes.len() as u32,
@@ -1520,7 +1826,9 @@ impl ExplicitUpload {
         // (Four times: a small group's owners each have their own run, the
         // kernel's vvPassSmall.)
         let vv_run = beams.len() as u32;
-        beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * total_cp));
+        // (Then as many again: the small groups' candidates sorted by cell, the kernel's
+        // vvSortAt.)
+        beams.extend(std::iter::repeat_n([0.0f32; 4], 8 * total_cp));
         // Two-body contact (jbeam-semantics-spec.md §10.3): per node its force at
         // the contact pass's start.
         let two_body = nv > 1 && vehicles.iter().any(|v| v.two_body_contact);
@@ -1541,10 +1849,16 @@ impl ExplicitUpload {
         };
         // The tread contact (jbeam-semantics-spec.md §34): per node (z, the depth
         // the step before, 0, 0) for every vehicle when any has tread nodes.
-        // Centred damping (§39): per node its step-start velocity, then its Δv.
+        // Centred damping (§39): per node its node phase's Δv; with the objective form
+        // (§39.6, some vehicle's `centred_objective`) then per node its position, then
+        // its velocity, before the node phase.
         let centred_dv = if any_centred {
             let at = beams.len() as u32;
-            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
+            let objective = vehicles
+                .iter()
+                .any(|v| v.settings.centred_damping && v.settings.centred_objective);
+            let per_node = if objective { 3 } else { 1 };
+            beams.extend(std::iter::repeat_n([0.0f32; 4], per_node * total_nodes));
             at
         } else {
             0
@@ -1615,7 +1929,11 @@ impl ExplicitUpload {
         // (Hits: per group 8 × its points hits of two words: the kernel's vvHitAt,
         // and vvPassSmall's lists, twice the group's points for each of up to four
         // owners.)
-        let slot_list_base = (vv_hits as usize + 16 * total_cp) as u32;
+        // (Then the small groups' candidates' cell ranks, 4 words per contact point: the
+        // kernel's vvRankAt.)
+        // (Then the levels' hit buckets: per group 16 words a contact point, the kernel's
+        // vvOrderAt.)
+        let slot_list_base = (vv_hits as usize + 36 * total_cp) as u32;
         // Then per vehicle its self-collision hit list and pending beams (the
         // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
         let hit_base = slot_list_base as usize + slot_list_len as usize;
@@ -1626,15 +1944,24 @@ impl ExplicitUpload {
         // `loopCapWord`; the frozen WGSL test modules' post-process writes gAcc's
         // last word, the same word).
         let coupling = coupling.map(|cap| {
-            let layout =
+            let mut layout =
                 CouplingLayout::new(cap, nv as u32, misc.len() as u32, acc_init.len() as u32);
             misc.extend(std::iter::repeat_n([0u32; 4], layout.misc_words() as usize));
             acc_init.extend(std::iter::repeat_n(0, layout.acc_words() as usize));
+            // The candidate list's per-vehicle maxima (right after the sums: the kernel
+            // finds them from the sums' base).
+            layout.list_acc = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, (CouplingLayout::LIST_ACC_WORDS * nv as u32) as usize));
             // The shape cull's spheres and the shapes' step frames (`explicit_beams_rigid.slang`
             // `cplSpheres`, `cplFrameStore`): per vehicle and shape CPL_SPHERE_WORDS words of
             // gNext, rewritten every step.
             let cull_base = next_len as u32;
             next_len += (CPL_SPHERE_WORDS * cap.shapes * nv as u32) as usize;
+            // Then the candidate list's shape centres and node lists (rebuilt from each
+            // frame's first step: no initial state).
+            layout.list_base = next_len as u32;
+            next_len += (CouplingLayout::LIST_SHAPE_WORDS * cap.shapes * nv as u32) as usize
+                + CouplingLayout::LIST_NODE_WORDS as usize * total_nodes;
             misc[couple_rec] = [
                 0,
                 layout.misc_base,
@@ -1829,6 +2156,18 @@ impl ExplicitUpload {
             }
             misc[s.header as usize + 1][1] = s.anchor;
         }
+        // Retired debris (the kernel's nodeRetired; the host's `set_retired`): per node a
+        // bit, 128 a record, after every other gMisc record. Off ([`W_RETIRE_BASE`] 0)
+        // until a host retires a node.
+        let retire_rec = misc.len() as u32;
+        misc.extend(std::iter::repeat_n([0u32; 4], total_nodes.div_ceil(128).max(1)));
+        // A coupling window per piece (vehicle_coupling.slang pieceAccept; the host's
+        // `set_piece_labels`): per node its label, 4 bits, 32 a record; per vehicle
+        // PIECE_BOX_RECS records (its pieces' node boxes, then its labels-in-use word).
+        let label_rec = misc.len() as u32;
+        misc.extend(std::iter::repeat_n([0u32; 4], total_nodes.div_ceil(32).max(1)));
+        let piece_box_rec = misc.len() as u32;
+        misc.extend(std::iter::repeat_n([0u32; 4], PIECE_BOX_RECS * nv.max(1)));
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -1854,6 +2193,28 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // The pair list reused over steps (the kernel's pairBuild; scratch): per node its
+        // position and speed at the list's build, then per vehicle its statistics.
+        let pair_build = if tri_pairs != 0 {
+            let at = beams.len() as u32;
+            // (Then per vehicle the pieces' statistics: volatile triangles tested.)
+            // (Then two per vehicle: the reuse census, EB_ABLATE builds' 2^29; measurement.)
+            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes + 4 * nv));
+            at
+        } else {
+            0
+        };
+        // The pair list's pieces (the kernel's pieces*; host hints and scratch): per node
+        // its piece label (0: the main body; written by `set_piece_labels`), per vehicle
+        // its labels-in-use word, per node PIECE_GROUPS separations (+inf), per triangle
+        // the volatile list.
+        let piece_base = if pair_build != 0 {
+            let at = next_len as u32;
+            next_len += total_nodes * (1 + PIECE_GROUPS) + nv + total_tris;
+            at
+        } else {
+            0
+        };
         // The loop budget's unit (explicit_loop_cap.slang): passes one invocation could
         // legitimately take in a step, bounded by the whole fleet's work on one lane
         // (a contact group's lane walks its members; the serial self-collision pass
@@ -1870,6 +2231,10 @@ impl ExplicitUpload {
             })
             .sum();
         let mut next_init = vec![0u32; next_len.max(1)];
+        if piece_base != 0 {
+            let at = piece_base as usize + total_nodes + nv;
+            next_init[at..at + total_nodes * PIECE_GROUPS].fill(f32::INFINITY.to_bits());
+        }
         if any_keys {
             for (vi, v) in vehicles.iter().enumerate() {
                 let parity = (v.steps as usize & 1) ^ 1;
@@ -1879,6 +2244,9 @@ impl ExplicitUpload {
                 }
             }
         }
+        // The beam phase's records sorted by kind ([`W_BEAM_ORDER`]), from the beam records
+        // as uploaded (filters patched).
+        let beam_order = beam_order_records(&spans, &node_info, &beam_recs, &slots, &ext_index, &ext_recs);
         let table_recs = vehicle_recs.clone();
         let mut statics = vehicle_recs;
         statics.extend(node_info);
@@ -1943,6 +2311,13 @@ impl ExplicitUpload {
                 seg_mark += segs.len() as u32;
                 node_mark += v.nodes.len() as u32;
             }
+            base
+        } else {
+            0
+        };
+        let beam_order_base = if beam_order_default() && total_beams > 0 {
+            let base = statics.len() as u32;
+            statics.extend(beam_order);
             base
         } else {
             0
@@ -2051,7 +2426,13 @@ impl ExplicitUpload {
             0,
             tri_geo,
             tri_pairs,
+            pair_build,
+            pair_reuse_default(),
+            pair_streak_default(),
+            piece_base,
+            // The retired nodes (set by the host), then the beam phase's sorted records.
             0,
+            beam_order_base,
         ];
         let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         let total = [
@@ -2090,6 +2471,9 @@ impl ExplicitUpload {
             drive,
             sleep: sleep_layout,
             vv_tri_base,
+            retire_rec,
+            label_rec,
+            piece_box_rec,
             aero,
             surface: any_surface,
             big,
@@ -2249,6 +2633,11 @@ impl FramePlanner {
             surface_split: false,
             loop_unit: layout.loop_unit,
         }
+    }
+
+    /// Some vehicle has surface contact ([`ExplicitLayout::surface`]).
+    pub fn has_surface(&self) -> bool {
+        self.surface
     }
 
     /// A host with the split modules ([`Kernel::FrameSeg`], [`Kernel::Surf`]): frames of
@@ -2944,6 +3333,7 @@ mod tests {
             fast_inv_sqrt: true,
             triangle_throttle: true,
             centred_damping: false,
+            centred_objective: false,
         };
         let mut vs = Vec::new();
         for k in 0..2 {
@@ -2967,6 +3357,119 @@ mod tests {
                 r1[2]
             );
         }
+    }
+
+    /// The generated sedan (in memory, as the rigger exports it) on raycast wheels: JBeam
+    /// beams of every kind the beam phase splits (plain, support, bounded, couplers,
+    /// torsion pairs, extension records, aero triangles).
+    pub(crate) fn generated_sedan() -> engine_softbody::explicit_beams::ExplicitBeams {
+        use engine_softbody::authoring::gen2::{rig as lattice, vg_input};
+        use engine_softbody::authoring::rig;
+        use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
+        let inp = rig::DesignInput::find("sedan", None, None).expect("the sedan's design");
+        let r = lattice::rig_with(&inp);
+        let files = vg_input::physics_files(&inp, &r);
+        let texts: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, b)| (p.clone(), String::from_utf8_lossy(b).into_owned()))
+            .collect();
+        let refs: Vec<(&str, &str)> = texts
+            .iter()
+            .filter(|(p, _)| p.ends_with(".jbeam"))
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let pc = texts.iter().find(|(p, _)| p.ends_with(".pc")).map(|(_, b)| b.as_str());
+        let d = engine_softbody::jbeam::load_jbeam(&refs, pc).expect("the sedan's jbeam");
+        ExplicitBeams::from_desc_jbeam_raycast(&d, Vec3::ZERO, Vec3::ZERO, ExplicitBeamsSettings::default())
+            .expect("spawn")
+            .0
+    }
+
+    /// The beam phase's records sorted by kind ([`W_BEAM_ORDER`]): per vehicle a header
+    /// (entries, hot entries, its first incidence position), then its entries: the hot
+    /// JBeam beams first, then every other beam (a two-record element as one pair
+    /// entry), each block by kind. Every beam is evaluated exactly once, and a hot
+    /// entry's packed fields are the beam's own records, bit for bit.
+    #[test]
+    fn beam_order_sorts_by_kind_and_covers_every_beam() {
+        use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
+        let text = "order\nglobals\n40, 0, tracks/semi\nnodes\n0, 0.0, 0.0, 0.0\n1, 0.3, 0.0, 0.0\n2, 0.0, 0.3, 0.0\nbeams\n0, 1\n1, 2\n2, 0\nend\n";
+        let truck = ExplicitBeams::from_truck(text, Vec3::ZERO, Vec3::ZERO, ExplicitBeamsSettings::default()).unwrap();
+        let sedan = generated_sedan();
+        let vs = vec![truck, sedan];
+        let up = ExplicitUpload::new(&vs, None);
+        let base = up.layout.words[W_BEAM_ORDER] as usize;
+        assert_ne!(base, 0, "the sorted beam records are uploaded");
+        let beam_base = up.layout.words[3] as usize;
+        let slot_base = up.layout.words[8] as usize;
+        let nv = vs.len();
+        let mut hot_total = 0;
+        let mut atri_total = 0;
+        for (vi, v) in vs.iter().enumerate() {
+            let span = up.layout.spans[vi];
+            let head = up.statics[base + vi];
+            let (entries, hot, inc_start) = (head[0] as usize, head[1] as usize, head[2]);
+            assert!(hot <= entries && entries <= v.beams.len(), "vehicle {vi}: {head:?}");
+            assert_eq!(inc_start, up.statics[up.layout.words[2] as usize + span.node_off as usize][1]);
+            let mut seen = vec![0u32; v.beams.len()];
+            let mut last = (0u32, 0u32);
+            for k in 0..entries {
+                let a = up.statics[base + nv + 2 * (span.beam_off as usize + k)];
+                let b = up.statics[base + nv + 2 * (span.beam_off as usize + k) + 1];
+                let j = a[0] as usize;
+                let class = a[1] & 3;
+                let kind = (a[1] >> 2) & 31;
+                let rec = |r: usize| up.statics[beam_base + 3 * (span.beam_off as usize + j) + r];
+                assert_eq!(kind, rec(0)[2] & 0xFF, "vehicle {vi} entry {k}: its kind");
+                // Hot entries first, then the rest; by kind within each block.
+                let block = u32::from(class != BEAM_ORDER_HOT);
+                assert_eq!(block, u32::from(k >= hot), "vehicle {vi} entry {k}: hot block first");
+                assert!((block, kind) >= last, "vehicle {vi} entry {k}: sorted by kind");
+                last = (block, kind);
+                seen[j] += 1;
+                match class {
+                    BEAM_ORDER_HOT => {
+                        assert_eq!(rec(0)[2] & (4 << 8), 0, "a hot beam has no extension record");
+                        assert_eq!((a[1] >> 8) & 3, (rec(0)[2] >> 8) & 3, "type");
+                        assert_eq!(((a[1] as i32) >> 16) as u32, rec(0)[3], "group");
+                        assert_eq!(span.node_off + (a[2] & 0xFFFF), rec(0)[0], "end a");
+                        assert_eq!(span.node_off + (a[2] >> 16), rec(0)[1], "end b");
+                        let g = span.beam_off as usize + j;
+                        assert_eq!(inc_start + (a[3] & 0xFFFF), up.lists[slot_base + 2 * g], "slot a");
+                        assert_eq!(inc_start + (a[3] >> 16), up.lists[slot_base + 2 * g + 1], "slot b");
+                        assert_eq!([b[0], b[1], b[2], b[3]], [rec(1)[0], rec(1)[1], rec(2)[3], rec(2)[1]], "k, c, filter, long bound");
+                        hot_total += 1;
+                    }
+                    BEAM_ORDER_PAIR => {
+                        let second = up.statics[beam_base + 3 * (span.beam_off as usize + j + 1)][2] & 0xFF;
+                        assert!(BEAM_ORDER_SECONDS.contains(&second), "vehicle {vi} entry {k}: a pair's second record");
+                        seen[j + 1] += 1;
+                    }
+                    BEAM_ORDER_ATRI => {
+                        let g = span.beam_off as usize + j;
+                        assert_eq!(kind, 18, "an aero triangle");
+                        assert_eq!(up.statics[beam_base + 3 * (g + 1)][2] & 0xFF, 19, "its second record");
+                        let x = up.lists[up.layout.words[64] as usize + g];
+                        let e1 = up.statics[up.layout.words[65] as usize + 4 * (x as usize - 1) + 1];
+                        assert_eq!(span.node_off + (a[1] >> 16), e1[0], "third node");
+                        assert_eq!(span.node_off + (a[2] & 0xFFFF), rec(0)[0], "x0");
+                        assert_eq!(span.node_off + (a[2] >> 16), rec(0)[1], "x1");
+                        assert_eq!([b[0], b[1], b[2]], [e1[1], e1[2], e1[3]], "drag, lift, stall");
+                        for (r, w) in [(g, a[3]), (g + 1, b[3])] {
+                            assert_eq!(inc_start + (w & 0xFFFF), up.lists[slot_base + 2 * r], "slot a of {r}");
+                            assert_eq!(inc_start + (w >> 16), up.lists[slot_base + 2 * r + 1], "slot b of {r}");
+                        }
+                        seen[j + 1] += 1;
+                        atri_total += 1;
+                    }
+                    BEAM_ORDER_SINGLE => {}
+                    other => panic!("vehicle {vi} entry {k}: class {other}"),
+                }
+            }
+            assert!(seen.iter().all(|&s| s == 1), "vehicle {vi}: every beam exactly once");
+        }
+        assert!(hot_total > vs[1].beams.len() / 2, "most of the sedan's beams are hot ({hot_total})");
+        assert!(atri_total > 0, "the sedan's aero triangles are packed");
     }
 
     /// Every kernel a plan can name has a module, with its entry.

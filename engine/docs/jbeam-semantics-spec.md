@@ -3081,6 +3081,88 @@ cars' masses, so "off" here is not §39's "current"):
   off only `fixed_contact_quantisation_does_no_work` (0.0102 J), which passes on.
   None is caused by this change; they are follow-ups.
 
+### 39.6 The correction must not see a beam turn (2026-11-13)
+
+`ExplicitBeamsSettings::centred_objective` (known-bugs S3). **On by default since
+2026-11-13, on the CPU reference and in the GPU kernels together** (see "The
+kernels" below); off selects the earlier end-direction form, unchanged bit for bit.
+
+**What was wrong.** The rule above takes Δu = (Δv_a − Δv_b)·d̂′, the change of the
+ends' relative velocity w = v_a − v_b along the beam's direction at the end of the
+step. The extension rate is u = w·d̂, and its change over a step is
+
+    u′ − u = w′·d̂′ − w·d̂ = (w′ − w)·d̂′ + w·(d̂′ − d̂).
+
+The rule keeps the first term and drops the second. While a beam keeps its
+direction the second is zero and the rule is exact. For a beam of length L that
+only turns at ω (a rigid rotation: u = u′ = 0), w is perpendicular to d̂ with
+|w| = ω·L and turns with the beam by θ = ω·h a step, so
+
+    (w′ − w)·d̂′ = −w·d̂′ = −ω·L·sin θ ≈ −ω²·L·h
+
+(the centripetal change of the relative velocity), and the rule pushes the ends
+apart with ½·s·ω²·L·h every step. The form is not frame-objective: it gives a
+different damping force to the same deformation seen from a turning frame. The
+push stretches the body and the stretch feeds the spin's energy.
+
+**Measured** (`examples/spin_probe`, `tests/centred_damping_objective.rs`; a free
+triangle, no contact). Three nodes of 0.1 kg 9.5 cm apart (a hub cap), k 68,000 N/m,
+c 20 N·s/m (its beams at ω·h 0.71, h·c·2/m 0.2):
+
+| Rim speed (m/s) / turn a step (rad) | End-direction form | Objective form | Centred damping off |
+|---|---|---|---|
+| 5 / 0.046 | 3.75 J → 1,800 J at 0.75 s; not finite at 1.5 s | falls | falls |
+| 20 / 0.18 | 5.6e12 J at 0.25 s | falls | falls |
+| 50 / 0.46 | 6.8e15 J at 0.25 s | falls | falls |
+
+A door-sized triangle (1.2 kg, 0.6 m, c 80) gains 7 % in 1.5 s at 10 m/s and 140 %
+at 30 m/s. With c = 0 nothing is added. In the crash lab this is a hub cap that
+has left its wheel (25 m/s to 3,700 m/s in 1.4 s), then the car.
+
+**The objective form.** Δu is the change of the extension rate itself, each rate
+along the beam's direction at its own time:
+
+    Δu = (v′_a − v′_b)·d̂′ − (v_a − v_b)·d̂,
+
+d̂ from the positions before the node update (the CPU reference keeps them; the
+kernels keep each node's position and velocity before its update). A
+torsion bar takes the change of its dihedral rate the same way, g′·v′ − g·v with
+each gradient at its own positions. A coupler's correction is on the relative
+velocity itself and is unchanged. The push is still −½·s·Δu along d̂′, equal and
+opposite, so momentum stays exact.
+
+* **A beam that does not turn:** identical to the old form (same Δu). A two-node
+  oscillator rings down with the analytic period and decrement (1 %, 3 %) in both
+  forms, and the peaks agree to 1e-3.
+* **The property of §39:** a mode at ω·h = 1.95, ζ = 0.07 (past the plain step's
+  1.865) still rings down; the plain step diverges.
+* **Angular momentum:** constant once the beams have stopped ringing; while they
+  ring, the push acts along the end direction on the start's lever, a torque of
+  second order in h (1.2e-3 of the momentum over one ring-down).
+* **Energy:** a free spinning or tumbling body never gains (the tests' bodies, 5 to
+  50 m/s at the rim).
+
+**The kernels** (`explicit_beams.slang`; WGSL, Metal and CUDA are built from it). A
+vehicle with centred damping and the objective form carries `FLAG_CENTRED_OBJECTIVE`
+(vehicle flag bit 19, beside `FLAG_CENTRED`). Before each node's update `centredKeep`
+writes its position and velocity after the Δv region (`gP.centredDv`: one record a
+node, three when some vehicle of the upload has the form), and `centredBeam` hands a
+flagged vehicle's records to `centredBeamObjective`, which computes the Δu above (a
+torsion bar through `centredGrad` at both sets of positions). The per-vehicle frame
+(solo and plain), the contact groups' step and the wide passes share these
+functions. The end-direction form's code is untouched, so a vehicle without the flag
+steps as before.
+
+* **Test** (`engine-webgpu/tests/explicit_centred_damping_gpu.rs`,
+  `objective_form_steps_bit_for_bit_and_a_spinning_part_gains_no_energy`; Metal:
+  `engine-metal/tests/explicit_centred_damping.rs`): the hub cap at 20 m/s keeps its
+  60.000 J on the GPU on both paths (2.9e12 J in 0.25 s before the port), and the hub
+  cap, a tumbling tetrahedron, the latched box thrown spinning (torsion bar, coupler)
+  and the rolling pressure-wheel car step bit for bit with the CPU reference, frame
+  and wide.
+* **Cost:** two more writes a node and, per damped beam, two more node reads and one
+  more inverse square root, each step. Not timed.
+
 ## 40. Fuel-tank mass (2026-11-06)
 
 What BeamNG documents: [N] "`fuel`: These nodes contain the mass of the fuel inside

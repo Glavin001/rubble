@@ -70,7 +70,7 @@ impl WebWorld {
     /// rows, density }, sleep (default true), shapes (coupling room per car), gpuTiming ('off' | 'step' |
     /// 'phases'), drag (default true) }`. No vehicles: the ring alone.
     #[wasm_bindgen(js_name = createBrickRingDrive)]
-    pub async fn create_brick_ring_drive(spec: JsValue) -> Result<WebWorld, JsValue> {
+    pub async fn create_brick_ring_drive(spec: JsValue, progress: Option<js_sys::Function>) -> Result<WebWorld, JsValue> {
         let spec: serde_json::Value = serde_wasm_bindgen::from_value(spec).map_err(err)?;
         let drag = spec.get("drag").and_then(|x| x.as_bool()).unwrap_or(true);
         let settings = ExplicitBeamsSettings {
@@ -146,7 +146,7 @@ impl WebWorld {
                 .collect();
             let specs =
                 engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(coupling.capacity));
-            crate::warm_pipelines(&device, &specs, std::rc::Rc::new(|_: &str, _: f64| {})).await;
+            crate::warm_pipelines(&device, &specs, crate::hear_fn(progress)).await.map_err(err)?;
         }
         let s = res(brick_ring_drive(
             GpuContext::Shared {

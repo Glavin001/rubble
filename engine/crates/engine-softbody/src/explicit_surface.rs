@@ -39,8 +39,8 @@ use crate::explicit_beams::{
 use engine_schema::feature_query as fq;
 pub use engine_schema::feature_query::{
     closest_on_triangle, closest_seg_seg, cross3, dot3, near, overlap_axis, point_contact,
-    seg_near, seg_overlap_axis, segment_contact, triangle_contact, SurfaceHit, SurfaceShape,
-    PIERCE, TIE,
+    seg_near, seg_overlap_axis, segment_contact, separated, triangle_contact, SurfaceHit,
+    SurfaceShape, PIERCE, TIE,
 };
 use glam::Vec3;
 
@@ -280,6 +280,8 @@ impl ExplicitBeams {
             casts.fast.iter_mut().for_each(|c| *c = None);
         }
         let any_fast = casts.fast.iter().any(Option::is_some);
+        let cull = self.surface_separation;
+        let mut queries = 0u32;
         if self.surface_segs.is_none() {
             self.surface_segs = Some(surface_segments(self));
         }
@@ -294,14 +296,20 @@ impl ExplicitBeams {
             found.clear();
             let nodes = &self.nodes;
             let vel = |i: u32| nodes[i as usize].vel;
+            // Retired debris is no element (the GPU's surfTriRetired, surfSegRetired).
+            let gone = |i: u32| self.is_retired(i as usize);
             for t in 0..self.triangles.len() {
                 if (!self.tri_dead.is_empty() && self.tri_dead[t]) || self.tri_anti_only(t) {
                     continue;
                 }
                 let [i0, i1, i2] = self.triangles[t].nodes;
+                if gone(i0) || gone(i1) || gone(i2) {
+                    continue;
+                }
                 let x = [i0, i1, i2].map(|i| self.origin + self.nodes[i as usize].pos);
                 for (k, (s, lo, hi)) in shapes.iter().enumerate() {
-                    let hit = if near(&x, r, *lo, *hi) {
+                    let hit = if near(&x, r, *lo, *hi) && !(cull && separated(&x, s, r)) {
+                        queries += u32::from(!gather);
                         triangle_contact(&x, s, r)
                     } else {
                         None
@@ -326,13 +334,14 @@ impl ExplicitBeams {
             let nt = self.triangles.len() as u32;
             for (k, &j) in segs.iter().enumerate() {
                 let b = &self.beams[j as usize];
-                if b.broken {
+                if b.broken || gone(b.a) || gone(b.b) {
                     continue;
                 }
                 let (a, bb) = (b.a, b.b);
                 let x = [a, bb].map(|i| self.origin + self.nodes[i as usize].pos);
                 for (slot, (s, lo, hi)) in shapes.iter().enumerate() {
-                    let pair = if seg_near(&x, r, *lo, *hi) {
+                    let pair = if seg_near(&x, r, *lo, *hi) && !(cull && separated(&x, s, r)) {
+                        queries += u32::from(!gather);
                         segment_contact(&x, s, r)
                     } else {
                         None
@@ -359,7 +368,7 @@ impl ExplicitBeams {
             // the band of it (a node strictly inside is node contact's), after the segments.
             let ns = nt + segs.len() as u32;
             for i in 0..self.nodes.len() {
-                if self.nodes[i].has(NODE_NO_GROUND) {
+                if self.nodes[i].has(NODE_NO_GROUND) || gone(i as u32) {
                     continue;
                 }
                 let x = self.origin + self.nodes[i].pos;
@@ -390,6 +399,7 @@ impl ExplicitBeams {
         }
         self.surface_segs = Some(segs);
         self.surface_last = found.len() as u32;
+        self.surface_queries = queries;
         self.surface_force = glam::DVec3::ZERO;
         if found.is_empty() {
             return;
