@@ -305,6 +305,23 @@ stream. The split frame's timings at 8/16/32 cars, apart and town, split against
 and 64/128 were therefore not measured. The 2-car town (no group) ran: the explicit
 frame alone 10.7–16.2 ms either way, the same within noise.
 
+### 6.3a The pinned GPU and the split path
+
+The coordinator suspected a runaway kernel in the split path. Two of my runs on the
+pinned GPU were killed at the 600 s limit (`explicit_contact_gpu`'s
+`a_group_over_the_limit_runs_alone_and_is_reported`, about 21:06–21:16, split on; the
+8-car town, about 20:46–20:56, split on). The utilisation sampled inside the lock just
+before the 8-car run already read 100 / 100 / 100, and that test with the split off
+stalled the same way at 21:57. Checked since, off the Mac's GPU:
+- every split dispatch count comes from the plan's `vvArgs` (groups ≤ vehicles,
+  vehicles, groups × 16, now bounded by the fleet size), from a zeroed buffer;
+- every loop bound in the split path is a constant or a count written earlier in the
+  same substep in global memory; no workgroup value is read before it is written;
+- on Modal (T4), the over-limit test with the split on ran 3 × 1,750 s at **GPU 0 %**,
+  one core compiling the cold kernels (the old path passed it in 1,038 s, nearly all
+  compile); no dispatch was reached, so the test itself is not yet run there.
+Not established: whether a split frame ever ran away on the Mac.
+
 ### 6.4 The default
 
 `RUBBLE_GROUP_SPLIT` defaults to **off** until the suites and the fleet runs are clean
