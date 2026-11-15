@@ -324,9 +324,10 @@ impl Split {
 }
 
 /// Whether contact groups run split across workgroups ([`ExplicitBeamsGpu::set_group_split`]):
-/// `RUBBLE_GROUP_SPLIT=1|0` (default on).
+/// `RUBBLE_GROUP_SPLIT=1|0` (default off until its suites and fleet runs are clean:
+/// contact-groups-design.md §6).
 pub fn group_split_default() -> bool {
-    std::env::var("RUBBLE_GROUP_SPLIT").as_deref() != Ok("0")
+    std::env::var("RUBBLE_GROUP_SPLIT").as_deref() == Ok("1")
 }
 
 /// Byte offsets in the indirect arguments of the split group path's dispatches (the
@@ -352,6 +353,22 @@ pub fn group_split_tests_default() -> bool {
 /// frame start.
 const SPLIT_BEGIN: u32 = u32::MAX;
 
+/// The split group path's module `which` (member, group, tests) for a fleet's variant.
+fn split_module(which: &str, aero: bool, lanes: u32) -> &'static str {
+    let tag = match (aero, lanes) {
+        (false, 512) => "_wide",
+        (false, _) => "",
+        (true, 512) => "_aero_wide",
+        (true, _) => "_aero",
+    };
+    let name = format!("explicit_beams_split_{which}{tag}");
+    crate::EXPLICIT_BEAMS_SPLIT_GROUPS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(n, _)| *n)
+        .unwrap_or_else(|| panic!("explicit beams: no split module {name}"))
+}
+
 /// The split group path's pipelines and bind group (contact-groups-design.md): the
 /// members' step (a workgroup per vehicle) and the groups' pass, binding 0 one
 /// parameter copy (the step) by the dynamic offset.
@@ -373,20 +390,14 @@ impl GroupSplit {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let tag = match (aero, lanes) {
-            (false, 512) => "_wide",
-            (false, _) => "",
-            (true, 512) => "_aero_wide",
-            (true, _) => "_aero",
-        };
         let pipe = |which: &str, entry: &str| {
-            let name = format!("explicit_beams_split_{which}{tag}");
+            let name = split_module(which, aero, lanes);
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(&name),
-                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(&name)).into()),
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl(crate::uniformize_workgroup_lanes(module_wgsl(name)).into()),
             });
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(&name),
+                label: Some(name),
                 layout: Some(&pipeline_layout),
                 module: &module,
                 entry_point: Some(entry),
@@ -791,6 +802,21 @@ impl ExplicitBeamsGpu {
                     entry: kernel.entry(),
                     layout: Some(contact_entries(false)),
                     deferred: false,
+                });
+            }
+        }
+        if vehicles.len() > 1 && group_split_default() {
+            // The split group path's three pipelines (GroupSplit::new's descriptors),
+            // after the first frame's: they run only once a contact group forms.
+            for (which, entry) in [("member", SPLIT_MEMBER_ENTRY), ("group", SPLIT_GROUP_ENTRY), ("tests", SPLIT_TESTS_ENTRY)] {
+                let module = split_module(which, aero, lanes);
+                specs.push(crate::ComputeSpec {
+                    label: entry,
+                    module,
+                    wgsl: u(module_wgsl(module)),
+                    entry,
+                    layout: Some(split_entries()),
+                    deferred: true,
                 });
             }
         }
@@ -2812,8 +2838,8 @@ impl ExplicitBeamsGpu {
     }
 
     /// Contact groups run split across workgroups (contact-groups-design.md) on, or off
-    /// (each group in one workgroup, as before): the same results bit for bit. On by
-    /// default (`RUBBLE_GROUP_SPLIT=0` off). Not with vehicle sleep, the test kernel
+    /// (each group in one workgroup, as before): the same results bit for bit. Off by
+    /// default (`RUBBLE_GROUP_SPLIT=1` on). Not with vehicle sleep, the test kernel
     /// variants or the diagnostic pipelines (those frames keep the groups' workgroup).
     pub fn set_group_split(&mut self, on: bool) {
         self.group_split = on;
@@ -2854,6 +2880,10 @@ impl ExplicitBeamsGpu {
             && self.debug_groups.is_none()
             && steps > 0
             && 3 * steps + 2 <= plan::PARAM_COPIES
+            // The tests' dispatch is 16 workgroups a group (at most one group per two
+            // vehicles), the vehicles' one a workgroup each: within WebGPU's 65,535 a
+            // dimension. A larger fleet keeps the groups' workgroup (the same results).
+            && self.layout.spans.len() * 16 <= 65_535
     }
 
     fn group_split_pipes(&self) -> &GroupSplit {

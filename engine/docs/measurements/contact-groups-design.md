@@ -273,4 +273,56 @@ workgroup a group; the members' steps and the tests are what spreads.
 
 ## 6. Results
 
-(Pending: the split path's town numbers, the bitwise checks in the crash town at 2 / 8 / 32 cars, the GPU suites. Bit for bit so far: `group_split_gpu`, two sedans head-on 40 frames and a column of six (groups of up to six, the larger groups' pass) 30 frames, against the group's workgroup, with the tests split or not and workgroup memory zeroed or not.)
+### 6.1 Exactness (verified)
+
+- `group_split_gpu` (native, M3 Max): two generated sedans head on (40 frames of 17
+  steps, a group in all 40) and a column of six (30 frames, groups of up to six: the
+  larger groups' pass): every state word the same as the group's workgroup, for split
+  with the tests across workgroups, split with each group's pass whole, and split with
+  workgroup memory zeroed.
+- The crash town, `EV_SPLIT_AT=60,120,150`: at 2 cars bit for bit (no group forms).
+  The 8- and 32-car checks did not complete (§6.3).
+- `explicit_beams_bitwise`: 12 passed with the split path on (then the default).
+- `explicit_plan_modules`: passes with the split modules in the WebGPU-only table.
+
+### 6.2 Compile cost (measured)
+
+Native pipeline creation (`examples/contact_compile_time.rs`, Metal, wall s, zeroing
+on / off): the old contact module (nosurf) 26.7 / 26.6; the split members' module
+54.3 / 44.3 (the solo frame and the member step in one kernel, with surface contact);
+the groups' module 8.8 / 8.6; the tests' module 0.4 / 0.0. The split pipelines are
+created at the first frame with a group (natively) and are in `compute_specs` as
+deferred (a browser compiles them after the first frame's). On NVIDIA's Vulkan driver
+(Modal) each large module takes minutes cold (engine/tools/modal/README.md).
+
+### 6.3 Fleet timings: not established
+
+The Mac's GPU was shared with jobs outside the GPU lock for the whole session
+(utilisation 82–100 % sampled before every locked run, the same count varying 1.8×
+between runs), and from about 20:46 it stayed at 100 % with locked jobs starved (the
+old path stalled the same way as the split one), until the coordinator paused every
+stream. The split frame's timings at 8/16/32 cars, apart and town, split against old,
+and 64/128 were therefore not measured. The 2-car town (no group) ran: the explicit
+frame alone 10.7–16.2 ms either way, the same within noise.
+
+### 6.4 The default
+
+`RUBBLE_GROUP_SPLIT` defaults to **off** until the suites and the fleet runs are clean
+on an idle GPU; `set_group_split(true)` / `RUBBLE_GROUP_SPLIT=1` turns it on. The split
+path also stands down for a fleet past 4,095 vehicles (its tests' dispatch, 16
+workgroups a group, must stay within WebGPU's 65,535 a dimension).
+
+## 7. Findings on the way
+
+- **Native workgroup zeroing costs 0.7–1.8 ms a dispatch** for the vehicle kernels'
+  workgroup arrays (§2). The existing one-dispatch frame pays it once a frame (about 4 %
+  of one car's frame). Lossless to remove after the same audit (the split pipelines do).
+- **The old contact module with surface contact does not build on native Metal** (more
+  than 31 threadgroup variables; `examples/contact_compile_time.rs` fails on
+  `explicit_beams_contact_wide`). Native hosts run the `_nosurf` twin when no vehicle
+  has surface contact; a native fleet with surface contact and vehicle contact would
+  fail at pipeline creation. Not reproduced in a scene; reported, not fixed.
+- **The members' self-collision walks every step in a group** (no reused pair list):
+  17–46 ms of the frames in §1, the second cause. The member pair list was not used
+  by this design (the member's step is today's, bit for bit), so its one-unit mismatch
+  was not investigated here.

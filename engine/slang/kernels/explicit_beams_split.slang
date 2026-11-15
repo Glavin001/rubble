@@ -213,7 +213,10 @@ void splitVvImport(uint off)
         gsVvReset4[a] = uint(gAcc[c + 24u + a].load());
         gsVvFix[a] = uint(gAcc[c + 28u + a].load());
     }
-    for (uint q = 0u; q < VV_PART * VV_PART; q++) gsVvPair[q] = uint(gAcc[c + 32u + q].load());
+    for (uint a = 0u; a < VV_PART; a++)
+    {
+        for (uint b = 0u; b < VV_PART; b++) gsVvPair[a * VV_PART + b] = uint(gAcc[c + 32u + a * VV_PART + b].load());
+    }
 }
 
 // Group g's contact pass of step s; after the last step, the group's frame end. Phase A
