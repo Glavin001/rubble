@@ -15,7 +15,7 @@ The lab changes no solver or kernel behaviour. It places bodies, reads state and
 
 Build the World wasm (CONTRIBUTING.md), serve `engine/crates/engine-webgpu` (or the built site) and open `vehicle-lab.html`.
 
-**Cars.** The generated sedan when a local export is at `__mods/sedan_new` (default), the BeamNG community ETK when it is at `__mods/etkk_tex` (local only, never committed), and the repo's authored sedan always. A car that is not there is greyed out in the menu.
+**Cars.** The generated sedan at `__mods/sedan_new` (default; `build-web.sh` makes it in every build by running the generator, so the deployed site has it), the BeamNG community ETK when it is at `__mods/etkk_tex` (a community mod: local only, never committed or deployed), and the repo's authored sedan always. A car that is not there is greyed out in the menu with the reason ("not generated: run engine/scripts/build-web.sh", "community mod: local only").
 
 **Modes.**
 

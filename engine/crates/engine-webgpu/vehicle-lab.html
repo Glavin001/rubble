@@ -262,13 +262,18 @@
     for (const s of SCRIPTS) $('script').add(new Option(s, s));
     const CAMS = { orbit: 'Orbit (drag)', chase: 'Chase', tumble: 'Tumble', side: 'Side', top: 'Top' };
     for (const [k, v] of Object.entries(CAMS)) $('cam').add(new Option(v, k));
-    // The cars: the generated sedan (a local export in __mods/sedan_new) when it is there,
-    // the BeamNG community ETK (local only), the repo's authored sedan always.
-    const MODS = { gen: { base: './__mods/sedan_new', pc: 'sedan/sedan.pc', name: 'Generated sedan' }, etk: { base: './__mods/etkk_tex', pc: 'etkk/kc6.pc', name: 'ETK K-series' } };
+    // The cars: the generated sedan (__mods/sedan_new, which build-web.sh makes by running
+    // the generator: missing only where the page is served without that build), the
+    // BeamNG community ETK (a community mod, never shipped: local only), the repo's
+    // authored sedan always.
+    const MODS = {
+      gen: { base: './__mods/sedan_new', pc: 'sedan/sedan.pc', name: 'Generated sedan', missing: 'not generated: run engine/scripts/build-web.sh' },
+      etk: { base: './__mods/etkk_tex', pc: 'etkk/kc6.pc', name: 'ETK K-series', missing: 'community mod: local only' },
+    };
     const have = {};
     await Promise.all(Object.entries(MODS).map(async ([k, m]) => { try { have[k] = (await fetch(`${m.base}/files.json`, { method: 'HEAD' })).ok; } catch { have[k] = false; } }));
     $('car').add(new Option('Soft-body sedan (authored)', 'sedan'));
-    for (const [k, m] of Object.entries(MODS)) { const o = new Option(have[k] ? m.name : `${m.name} (not in this build)`, k); o.disabled = !have[k]; $('car').add(o); }
+    for (const [k, m] of Object.entries(MODS)) { const o = new Option(have[k] ? m.name : `${m.name} (${m.missing})`, k); o.disabled = !have[k]; $('car').add(o); }
     const controls = [...document.querySelectorAll('[data-opt]')];
     const get = (id) => { const c = $(id); return c.type === 'checkbox' ? c.checked : c.type === 'number' || c.type === 'range' ? (c.value === '' ? null : Number(c.value)) : c.value; };
     const put = (id, v) => { const c = $(id); if (!c || v == null) return; if (c.type === 'checkbox') c.checked = v === true || v === '1' || v === 'true'; else c.value = v; };
