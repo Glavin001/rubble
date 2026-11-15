@@ -276,7 +276,11 @@ Tables: [generated-vehicles.md](generated-vehicles.md), "Jello against the ETK, 
     1. Define each strut as a coilover: a spring (the ETK's class, 25–40 kN/m), a damper, precompression to carry the corner at design height, and BOUNDED bump and rebound limits. The travel-limit beam keeps spring 0, as its source has it.
     2. Rear: put it on the existing link.
     3. Front: a MacPherson needs a sliding joint beams can carry. Either guide the knuckle's top by an upper link, as the ETK's front does with its upper arms, or have the JBeam import support rails and slide nodes (`jbeam.rs` skips them today).
-  - *Hypothesis, not measured:* with both ends sprung the front-input categories (body, fender, bumper) fall the way the rear ones did.
+  - *Guided front, measured* (`RIG_FRONT_GUIDE=1 RIG_COILOVER=37000,4200,3050,3050`). Both axles get coilovers. At the front the two clamps are replaced by two pin-jointed links from the knuckle's top (`hubf*_up`) to the body, near square to the strut's axis. They are hand-picked for this measurement: `sh_a2_u*` forward (0.64 m) and `sh_c3_1` inboard and back (0.85 m). The knuckle keeps one path, and nothing bends or breaks.
+    - Ripple went from 0.20 / 0.29 / 0.37 / 0.35 / 0.27 / 0.53 to 0.12 / 0.15 / 0.20 / 0.18 / 0.14 / 0.36. The bars (1.25 × the ETK) are 0.11 / 0.19 / 0.29 / 0.26 / 0.11 / 0.23.
+    - Settle went from 0.3 / 0.7 / 0.7 / 0.7 / 0.3 / 1.0 to 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.9 s.
+    - Rest stays 0.04 mm. The towers fell from 0.56 to 0.27 mm and the kerb's internal KE from 2.87 J to 1.94 J.
+    - Door, hood and trunk pass, and every settle but the bumpers'. Body (0.12) and fender (0.14) are just over. The bumpers (peaks on the front cover's `bf_o00`, 1.06 mm at 0.7 s, and the rear cover at 0.5 s) are the one gap left that the mounting does not close.
   - *Follow-up (solver, not authoring):* the raycast spring is the whole suspension's rate (1.6 Hz), so a car with its own coilover has two in series, the ETK too.
   - Harness: `KERB_NODES` now also lists the body's own nodes. The rest run prints the raycast loads and each tower's static strut load (front 3.6–3.8 kN, rear 3.3–3.6 kN).
 - **Process:** this shell (zsh) does not split `$cfg` into words: pass each value as its own variable.
@@ -292,7 +296,7 @@ Measurement: [measurements/hinge-breaks.md](measurements/hinge-breaks.md).
 
 ## Changelog
 
-- 2026-11-15: section 15, the kerb gap measured: no spring between hub and body; a rear coilover tried, the front needs a sliding joint.
+- 2026-11-15: section 15, the kerb gap measured: no spring between hub and body; coilovers with a guided front bring all but the bumpers (and body and fender, just over) to the ETK's level.
 - 2026-11-14: section 16, hinges that snap instead of bending.
 - 2026-11-13: section 14: the GPU kernels carry the centred damping's objective form; on by default for CPU and GPU.
 - 2026-11-13: section 15, jello against the ETK (modes in band, kerb not), collisions inside one car.

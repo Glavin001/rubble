@@ -485,7 +485,8 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
         // carry the corner's sprung load (N; 0 keeps that axle's strut).
         // At the rear (two arms and a toe link: one free path) that is the
         // car's spring; at the front the clamps still hold the knuckle
-        // (a MacPherson needs a sliding joint: lessons §15).
+        // unless `RIG_FRONT_GUIDE=1` (a MacPherson needs a sliding joint:
+        // lessons §15).
         let coil: Option<Vec<f32>> = std::env::var("RIG_COILOVER")
             .ok()
             .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect());
@@ -498,7 +499,25 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
             .iter()
             .filter(|l| is_coil(l))
             .count();
+        // `RIG_FRONT_GUIDE=1` (with a front coilover): the clamps give way
+        // to two pin-jointed links from the knuckle's top to the body, near
+        // square to the strut's axis (a measurement of a guided front).
+        let guide = std::env::var("RIG_FRONT_GUIDE").is_ok()
+            && coil.as_ref().is_some_and(|c| c.len() == 4 && c[2] > 0.0)
+            && (p.name.ends_with("_FL") || p.name.ends_with("_FR"))
+            && p.name.starts_with("strut_");
+        if guide {
+            let s = if p.name.ends_with("_FL") { "l" } else { "r" };
+            let up = id(&ids, &format!("hubf{s}_up"));
+            for n in [format!("sh_a2_u{s}"), "sh_c3_1".to_string()] {
+                let v = engine_vehiclegen::mechanical::vals(1.2e7, 2000.0, 155e3, 300e3);
+                put(r, up, id(&ids, &n), Role::Susp, &p.name, fixed_of(&v, FixedKind::Normal), 300e3, Some(&format!("strut_guide_f{s}")));
+            }
+        }
         for l in &p.links {
+            if guide && l.name.contains("clamp") {
+                continue;
+            }
             let (a, b) = (id(&ids, &l.a), id(&ids, &l.b));
             let mut f = fixed_of(&l.v, FixedKind::Normal);
             let strut = is_coil(l);
