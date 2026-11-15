@@ -147,9 +147,24 @@ fn park(s: &mut ExplicitBeams, seconds: f32) {
 }
 
 /// Max vertex error (mm) and normal error (degrees) of the skin against the
-/// design carried by each vertex's own nodes' rigid motion (weighted by its
-/// A > 0; the position error beyond the most any of those nodes is off that
-/// motion: the warp the skin adds), and against the design itself.
+/// design carried by each vertex's own nodes' rigid motion (fitted to its
+/// nodes weighted by its A > 0; the position error beyond the most any node
+/// it is bound to is off that motion: the warp the skin adds), and against
+/// the design itself.
+///
+/// "Its own nodes" for the allowance are every node the vertex is bound to:
+/// every entry, whatever the sign of its A, and the frame's gradient entries.
+/// The skin is linear in all of them (x = Σ Aⱼqⱼ + offset in the frame
+/// (Σ ∂Aⱼ/∂T qⱼ, Σ ∂Aⱼ/∂B qⱼ)), so a node with A < 0 or a gradient weight
+/// moves the vertex as much as one with A > 0. Until 2026-11-15 the
+/// allowance counted only the fit's nodes (A > 0, and only those with
+/// round(40·A) ≥ 1), so a structure's real flex that the skin carries through
+/// its other entries was charged to the skin: the console over the tunnel
+/// (A −1.08 on the floor nodes beside it, 1.1–2.3 mm off the tunnel's fit
+/// parked) read 1.06 mm, and seat_FL's frame (gradient weights on flr3L,
+/// A −0.35, and on flr2L, A 0.003) 1.00 mm. The bar is unchanged; the
+/// MLS weights' extrapolation (Σ|A| up to 4.3 on this car) is the binding
+/// lint's to bound (`skin_lint` A3 / B3), not this test's.
 fn fidelity(
     v: &engine_softbody::authoring::skin::ShowcaseVisual,
     now: &[Vec3],
@@ -164,8 +179,9 @@ fn fidelity(
         a_abs = a_abs.max(n[i].angle_between(n0).to_degrees());
         let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
         // The nodes' rigid motion weighted as the skin weights them (each
-        // node counted in proportion to its A > 0), and how far those nodes
-        // themselves are off it: the skin's own warp is what exceeds theirs.
+        // node counted in proportion to its A > 0), and how far the nodes the
+        // vertex is bound to are off it: the skin's own warp is what exceeds
+        // theirs.
         let ids: Vec<u32> = (a..b)
             .filter(|&k| v.wt_w[k][0] > 0.0)
             .flat_map(|k| {
@@ -178,9 +194,9 @@ fn fidelity(
             continue;
         }
         let f = rigid_fit(&rest, now, &ids);
-        let own = distinct
-            .iter()
-            .map(|&j| f.to_rest(now[j as usize]).distance(rest[j as usize]))
+        let own = (a..b)
+            .map(|k| v.wt_node[k] as usize)
+            .map(|j| f.to_rest(now[j]).distance(rest[j]))
             .fold(0.0f32, f32::max);
         let e = (f.to_rest(p[i]).distance(x0) - own).max(0.0);
         if e > e_local && std::env::var("GEN3_WORST").is_ok() {
