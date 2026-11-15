@@ -977,7 +977,8 @@ fn explicit_post(out: &Path) -> Result<()> {
     let name = out.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let uncapped = name.starts_with("explicit_ref_")
         && std::env::var("RUBBLE_EB_REF_UNCAPPED").is_ok_and(|v| v == "1");
-    let text = if uncapped || text.contains("ebLoopCapHit") {
+    // (The Slang caps: their flag, ebLoopHit, set by the loops' ends or ebLoopCapHit.)
+    let text = if uncapped || text.contains("ebLoopCapHit") || text.contains("ebLoopHit") {
         text
     } else {
         cap_explicit_loops(&text).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?

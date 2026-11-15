@@ -65,14 +65,14 @@ groupshared uint gsCpl[CPL_GS_NODE + CPL_GS_NODES];
 
 
 uint coupleRec() { return grabRec() + 2u; }
-// Header word i (CPL_GS_HDR order); from the buffer when the workgroup copies are
-// off (the header's .x bit 2, tests).
+// Header word i (CPL_GS_HDR order): always the workgroup copy coupleBegin made from
+// the buffer at the dispatch's start (the header is constant through a frame, so the
+// copy is the buffer's value). The header's .x bit 2 (the workgroup copies off, tests)
+// no longer reads the buffer here: a branch at each of the ~600 inlined uses made the
+// drivers' compile ~15% longer (engine/docs/measurements/kernel-compile-time.md).
 uint cplHdr(uint i)
 {
-    if ((gsCpl[0] & 4u) == 0u) return gsCpl[CPL_GS_HDR + i];
-    uint4 h = gMisc[coupleRec()];
-    uint4 h1 = gMisc[coupleRec() + 1u];
-    return i == 0u ? h.y : (i == 1u ? h.z : (i == 2u ? h.w : (i == 3u ? h1.x : h1.y)));
+    return gsCpl[CPL_GS_HDR + i];
 }
 // The host allows at most CPL_MAX_SHAPES shapes and no more bodies per vehicle
 // (explicit_plan CouplingLayout::new), so these bounds never change a valid header;

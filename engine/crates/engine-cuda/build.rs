@@ -223,7 +223,7 @@ fn explicit_kernels(
         // (The kernel's code: past Slang's CUDA prelude, which has loops of its own.)
         let code = text.split_once("SLANG_globalParams;").map_or(text.as_str(), |x| x.1);
         anyhow::ensure!(
-            code.contains("ebLoopCapHit") || only_constant_loops(code),
+            code.contains("ebLoopCapHit") || code.contains("ebLoopHit") || only_constant_loops(code),
             "{}: the CUDA source has no loop caps (explicit_loop_cap.slang)",
             m.name
         );

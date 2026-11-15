@@ -203,7 +203,7 @@ fn explicit_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result
         // The kernel caps its loops in its source (explicit_loop_cap.slang): every
         // module with a loop carries them on this target too.
         anyhow::ensure!(
-            msl.contains("ebLoopCapHit") || !(msl.contains("for(") || msl.contains("for (") || msl.contains("while")),
+            msl.contains("ebLoopCapHit") || msl.contains("ebLoopHit") || !(msl.contains("for(") || msl.contains("for (") || msl.contains("while")),
             "{}: the MSL has no loop caps (explicit_loop_cap.slang)",
             m.name
         );

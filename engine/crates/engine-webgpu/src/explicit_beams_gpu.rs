@@ -703,8 +703,36 @@ fn params_window(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
     })
 }
 
+/// Measurement only: the explicit modules' WGSL read from another build's generated
+/// directory (`NAME.wgsl`, e.g. a copy of an older build's `OUT_DIR/wgsl`) instead of
+/// this build's, for the pipelines created after the call (`None`: this build's). With
+/// it, one process runs an older kernel against the current one from one snapshot
+/// (`vehicle_lab --ab-switch kernel`): bit for bit and time. Process-wide.
+#[doc(hidden)]
+pub fn set_explicit_module_override(dir: Option<std::path::PathBuf>) {
+    *MODULE_OVERRIDE.lock().unwrap() = dir;
+}
+
+static MODULE_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+fn module_override(name: &str) -> Option<&'static str> {
+    type Cache = std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, &'static str>>;
+    static READ: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let dir = MODULE_OVERRIDE.lock().unwrap().clone()?;
+    let path = dir.join(format!("{name}.wgsl"));
+    let mut cache = READ.get_or_init(Default::default).lock().unwrap();
+    let text = cache.entry(path.clone()).or_insert_with(|| {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        Box::leak(text.into_boxed_str())
+    });
+    Some(*text)
+}
+
 /// The WGSL of a plan module ([`engine_exec::explicit_plan::MODULES`]).
 fn module_wgsl(name: &str) -> &'static str {
+    if let Some(text) = module_override(name) {
+        return text;
+    }
     match name {
         "explicit_beams" => EXPLICIT_BEAMS_WGSL,
         "explicit_beams_wide" => EXPLICIT_BEAMS_WIDE_WGSL,
