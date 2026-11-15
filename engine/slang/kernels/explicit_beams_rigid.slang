@@ -1032,6 +1032,16 @@ float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, flo
 // frame, with the list and the workgroup copies on, every sphere in workgroup memory
 // (cplSplit) and no more bodies than lanes (one a lane: its registers across the
 // barrier); otherwise the four phases. Off with the coupling header's bit 1024.
+// The frame's fold decision for the barriers' control flow: lane 0 at the frame's start
+// (cplFoldMark, after cplGsAdd) sets this bit of gsUniformCouple, which every lane reads
+// with workgroupUniformLoad (a decision read from storage is not uniform for Chrome's
+// WGSL: its barriers would be rejected).
+static const uint CPL_FOLD_FRAME = 0x100000u;
+bool cplFoldOn(uint v, uint lanes);
+void cplFoldMark(uint v)
+{
+    if (gsUniformCouple != 0u && cplFoldOn(v, LANES)) gsUniformCouple = gsUniformCouple | CPL_FOLD_FRAME;
+}
 bool cplFoldOn(uint v, uint lanes)
 {
     if ((gsCpl[0] & 1024u) != 0u || !cplListOn()) return false;
@@ -1192,8 +1202,8 @@ void cplStepFolded(uint v, uint lane, uint lanes, uint s)
 void coupleStep(uint v, uint lane, uint s, uint on)
 {
     if (on == 0u) return;
-    // Folded (2 barriers; cplStepFolded): the solo frame's usual case.
-    if (cplFoldOn(v, LANES))
+    // Folded (2 barriers; cplStepFolded): the solo frame's usual case (uniform: on).
+    if ((on & CPL_FOLD_FRAME) != 0u)
     {
 #ifdef EB_ABLATE
         if ((gP.ablate & 57344u) == 0u)

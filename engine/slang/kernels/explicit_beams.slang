@@ -6169,6 +6169,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         cplGsClear();
         cplGsAdd(0u, v, 0u, 0u);
         cplListBegin(v);
+        cplFoldMark(v);
     }
     // Static records the lane reads every step, kept in registers: its first node's.
     uint4 myInfo = gStatic[gP.nodeInfoBase + nodeOff + min(lane, max(nodeCount, 1u) - 1u)];
