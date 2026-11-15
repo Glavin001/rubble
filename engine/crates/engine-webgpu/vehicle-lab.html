@@ -157,7 +157,7 @@
       <div class="row" id="cutaway"></div>
     </div>
     <div class="grid" id="stats"></div>
-    <div id="about" class="muted"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · drag to orbit, wheel to zoom · <kbd>T</kbd> slow motion · <kbd>P</kbd> pause · <kbd>.</kbd> step · <kbd>C</kbd> camera · <kbd>R</kbd> restart</div>
+    <div id="about" class="muted"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · drag to orbit, wheel to zoom (any camera) · <kbd>T</kbd> slow motion · <kbd>P</kbd> pause · <kbd>.</kbd> step · <kbd>C</kbd> camera · <kbd>R</kbd> restart</div>
     <div id="status" class="muted">starting…</div>
     <div id="err"></div>
   </div>
@@ -748,15 +748,29 @@
       if (get('cam') !== 'orbit') { const d = sub3(cam.eye, cam.at); orbit.dist = Math.hypot(...d); orbit.yaw = Math.atan2(d[0], d[2]); orbit.pitch = Math.asin(d[1] / orbit.dist); put('cam', 'orbit'); syncUrl(); }
       orbit.yaw -= dx * 0.005; orbit.pitch = Math.max(-0.2, Math.min(1.5, orbit.pitch + dy * 0.005)); orbit.auto = 0;
     });
-    canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.dist = Math.max(2.5, Math.min(120, orbit.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    // The wheel zooms every camera: the orbit's distance, or the fixed cameras' offset
+    // from the car (camZoom times their own).
+    let camZoom = 1;
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const k = Math.exp(e.deltaY * 0.001);
+      if (get('cam') === 'orbit') orbit.dist = Math.max(2.5, Math.min(120, orbit.dist * k));
+      else camZoom = Math.max(0.2, Math.min(8, camZoom * k));
+    }, { passive: false });
     let lastInv = new Float32Array(16);
     function updateCamera(lead, wallDt) {
       // The reading is of an earlier step: carried forward by its age in simulated time
       // (and the frame's lead), so the camera moves with the car drawn, not behind it.
       const age = Math.max(0, Math.min(0.25, (W.lab.time() - (pose.t ?? W.lab.time())))) + lead;
       const c = add3(pose.c, mul3(pose.v, age));
-      // The target follows the car: tightly, so a tumbling car stays framed.
-      cam.target = cam.init ? mix3(cam.target, c, 1 - Math.exp(-wallDt / 0.12)) : c;
+      // The target follows the car with no lag at any speed: it is moved by the car's own
+      // movement since the last frame first, and only what is left (a new reading's
+      // correction) is eased in. Easing the position itself left the camera v x 0.12 s
+      // behind (5 m at 150 km/h) and swung the view whenever the speed changed.
+      let moved = cam.init && cam.last ? sub3(c, cam.last) : [0, 0, 0];
+      if (Math.hypot(...moved) > 8) { cam.init = false; moved = [0, 0, 0]; }
+      cam.last = c;
+      cam.target = cam.init ? mix3(add3(cam.target, moved), c, 1 - Math.exp(-wallDt / 0.12)) : c;
       const t = cam.target;
       let eye, at = t;
       const vh = [pose.v[0], 0, pose.v[2]];
@@ -764,11 +778,11 @@
       chaseHead = norm3(mix3(chaseHead, want, 1 - Math.exp(-wallDt / 0.25)));
       const camMode = get('cam');
       switch (camMode) {
-        case 'chase': eye = add3(t, add3(mul3(chaseHead, -7.5), [0, 2.2, 0])); at = add3(t, mul3(chaseHead, 4)); break;
+        case 'chase': eye = add3(t, mul3(add3(mul3(chaseHead, -7.5), [0, 2.2, 0]), camZoom)); at = add3(t, mul3(chaseHead, 4)); break;
         // Down the mountain: beside and above the car, looking down the fall line.
-        case 'tumble': eye = add3(t, [9, 5.5, -11]); at = add3(t, [0, -0.5, 2]); break;
-        case 'side': eye = add3(t, [9, 1.6, 0]); break;
-        case 'top': eye = add3(t, [0.01, 14, -0.01]); break;
+        case 'tumble': eye = add3(t, mul3([9, 5.5, -11], camZoom)); at = add3(t, [0, -0.5, 2]); break;
+        case 'side': eye = add3(t, mul3([9, 1.6, 0], camZoom)); break;
+        case 'top': eye = add3(t, mul3([0.01, 14, -0.01], camZoom)); break;
         default: {
           orbit.yaw += orbit.auto * wallDt;
           const cp = Math.cos(orbit.pitch);
@@ -777,8 +791,11 @@
       }
       if (scene() !== 'mountain') eye[1] = Math.max(eye[1], 0.3);
       if (!cam.init) { cam.eye = eye; cam.at = at; cam.init = true; return; }
-      const tau = camMode === 'orbit' ? 0.05 : 0.35;
-      cam.eye = mix3(cam.eye, eye, 1 - Math.exp(-wallDt / tau)); cam.at = mix3(cam.at, at, 1 - Math.exp(-wallDt / 0.1));
+      // Orbit: the eye and the point looked at are one rigid pair on the target (the
+      // drag sets the angle directly), so the view's direction never changes by itself.
+      // The other cameras ease their own offsets, on top of the car's movement.
+      if (camMode === 'orbit') { cam.eye = eye; cam.at = at; return; }
+      cam.eye = mix3(add3(cam.eye, moved), eye, 1 - Math.exp(-wallDt / 0.35)); cam.at = mix3(add3(cam.at, moved), at, 1 - Math.exp(-wallDt / 0.1));
     }
 
     // ---------------------------------------------------------------- the script's page events
