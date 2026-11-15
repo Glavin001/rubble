@@ -141,6 +141,7 @@
         <label title="Self-collision's contact tests run one GPU thread per candidate pair across the whole GPU, a pass every 2 kHz step, instead of inside the car's one thread group (the same results bit for bit). Used on frames without car-to-car contact, sleep or surface contact. Applies as it runs."><input type="checkbox" id="selfSplit" data-opt="live" /> self-collision across the GPU</label></div>
       <div class="row"><label title="A small piece off the car's main body (no unbroken beam joins them) for this long is retired: no longer simulated, not drawn, in no contact. A piece at rest beside the car goes too. Applies as it runs; retired pieces stay retired."><input type="checkbox" id="debris" data-opt="live" checked /> retire small debris after</label>
         <input type="number" id="debrisTtl" data-opt="live" value="5" min="0" max="600" step="0.5" /> s, at most <input type="number" id="debrisKg" data-opt="live" value="10" min="0" max="1000" step="0.5" /> kg and <input type="number" id="debrisNodes" data-opt="live" value="40" min="1" max="10000" step="1" /> nodes</div>
+      <div class="row"><button id="perfCopy" title="Copies a text report to the clipboard: this device and display, the page's options, and a row a second for the last three minutes (display frames, steps taken and refused, frames drawn, the page's CPU time in stepping and drawing, GPU time a step when GPU timing is on). Run for a while first, then press it and paste it where the run is being looked at.">Copy perf report</button></div>
       <div class="row"><span class="muted">GPU timing</span><select id="timing" data-opt="build"><option value="off">off</option><option value="step">per step</option><option value="phases">rigid · vehicle</option></select>
         <span class="muted">coupling room</span><input type="number" id="shapes" data-opt="build" value="256" min="8" max="1024" step="8" />
         <label><input type="checkbox" id="clean" data-opt="live" /> clean layout</label></div>
@@ -830,6 +831,29 @@
     // Per frame, over the last 600 frames: World steps taken, and steps owed that the
     // World was not ready for (its readbacks still out: the GPU is behind).
     const takenHist = [], refusedHist = [];
+    // The perf report (the "Copy perf report" button): one row a second of the frame loop,
+    // for the last 180 s. Per second: display frames, steps taken and refused, frames
+    // drawn and not drawn, frames with nothing owed, the frame interval, and the page's
+    // CPU time in the step calls, the readback poll and the draw call (ms, mean a frame
+    // and worst), the GPU time a step when GPU timing is on, the readback slots.
+    const perfLog = []; let perfSec = null;
+    const perfNew = (now) => ({ at: now, frames: 0, taken: 0, refused: 0, drawn: 0, undrawn: 0, idle: 0, dtMax: 0, dts: [], stepMs: 0, stepMax: 0, pollMs: 0, pollMax: 0, drawMs: 0, drawMax: 0, hidden: 0 });
+    function perfTick(now, dtMs, taken, refused, owed, drew, stepMs, pollMs, drawMs) {
+      if (!perfSec) perfSec = perfNew(now);
+      const r = perfSec;
+      r.frames++; r.taken += taken; r.refused += refused; r.idle += owed === 0 ? 1 : 0; r.drawn += drew ? 1 : 0; r.undrawn += drew ? 0 : 1;
+      r.dts.push(dtMs); r.dtMax = Math.max(r.dtMax, dtMs);
+      r.stepMs += stepMs; r.stepMax = Math.max(r.stepMax, stepMs); r.pollMs += pollMs; r.pollMax = Math.max(r.pollMax, pollMs); r.drawMs += drawMs; r.drawMax = Math.max(r.drawMax, drawMs);
+      if (document.hidden) r.hidden++;
+      if (now - r.at >= 1000) {
+        const d = [...r.dts].sort((x, y) => x - y), n = r.frames, f1 = (x) => +x.toFixed(2);
+        perfLog.push({ page: +(r.at / 1000).toFixed(1), sim: +(W?.lab.time() ?? 0).toFixed(2), fps: n, steps: r.taken, refused: r.refused, drawn: r.drawn, undrawn: r.undrawn, idle: r.idle,
+          dt: [f1(d[n >> 1] ?? 0), f1(d[Math.floor(0.95 * (n - 1))] ?? 0), f1(r.dtMax)], cpuStep: [f1(r.stepMs / n), f1(r.stepMax)], cpuPoll: [f1(r.pollMs / n), f1(r.pollMax)], cpuDraw: [f1(r.drawMs / Math.max(1, r.drawn)), f1(r.drawMax)],
+          gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
+        if (perfLog.length > 180) perfLog.shift();
+        perfSec = perfNew(now);
+      }
+    }
     const pct = (q) => { const a = [...stepHist].sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(q * a.length))] : 0; };
     let fps = 0, frames = 0, fpsAt = performance.now(), simAt = performance.now(), simCount = 0, simRate = 0;
     const gpuSeg = new Map(); let gpuTotal = [];
@@ -977,6 +1001,33 @@
       }
       return out;
     };
+    // Everything a slow run needs to be explained, as text: the device and display, the
+    // page's options (its URL), the run's state, and the per-second log above.
+    async function perfReport() {
+      let adapter = null;
+      try { const a = await navigator.gpu.requestAdapter(); adapter = a && { ...(a.info ? { vendor: a.info.vendor, architecture: a.info.architecture, device: a.info.device, description: a.info.description } : {}), fallback: !!a.isFallbackAdapter }; } catch {}
+      const c = $('c'), hz = perfLog.length ? Math.max(...perfLog.slice(-20).map((r) => r.fps)) : null;
+      const head = {
+        report: 'rubble vehicle lab perf', when: new Date().toISOString(), url: location.href, userAgent: navigator.userAgent, adapter,
+        display: { canvas: [c.width, c.height], css: [c.clientWidth, c.clientHeight], dpr: devicePixelRatio, screen: [screen.width, screen.height], framesASecondSeen: hz, visibility: document.visibilityState, focused: document.hasFocus() },
+        cores: navigator.hardwareConcurrency, deviceMemory: navigator.deviceMemory ?? null,
+        worldRate: W ? Math.round(W.RATE) : null, gpuTiming: W?.timing ?? null,
+        state: window.__state?.(), gpu: W && W.timing !== 'off' ? window.__gpu() : 'GPU timing is off: set "GPU timing" to "rigid · vehicle" (rebuilds) for GPU ms a step',
+        load: window.__loadTimes ?? null, failed: window.__failed ?? null,
+        columns: 'page s, sim s, display frames, steps taken, steps refused (GPU not ready), frames drawn, frames not drawn, frames with nothing owed, frame interval ms [p50, p95, max], CPU ms in step calls [mean a frame, max], in readback poll [mean, max], in draw [mean a drawn frame, max], GPU ms a step (median) or null, bodies, readback windows skipped (total), frames while hidden',
+      };
+      const rows = perfLog.map((r) => [r.page, r.sim, r.fps, r.steps, r.refused, r.drawn, r.undrawn, r.idle, r.dt.join('/'), r.cpuStep.join('/'), r.cpuPoll.join('/'), r.cpuDraw.join('/'), r.gpu ?? '-', r.bodies, r.readsSkipped, r.hidden].join('\t'));
+      return JSON.stringify(head, null, 1) + '\n\nper second (last ' + rows.length + ' s):\n' + rows.join('\n') + '\n';
+    }
+    window.__perfReport = perfReport;
+    $('perfCopy').onclick = async () => {
+      const b = $('perfCopy'), text = await perfReport();
+      let ok = false;
+      try { await navigator.clipboard.writeText(text); ok = true; } catch {}
+      if (!ok) { const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); try { ok = document.execCommand('copy'); } catch {} t.remove(); }
+      b.textContent = ok ? 'Copied' : 'Copy failed: see console'; if (!ok) console.log(text);
+      setTimeout(() => { b.textContent = 'Copy perf report'; }, 1500);
+    };
     window.__gpu = () => ({ total: [...gpuTotal], split: gpuSplit(), segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
     window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95), worst: stepHist.length ? Math.max(...stepHist) : 0 }, stepsAFrame: [0, 1, 2].map((k) => takenHist.filter((t) => (k < 2 ? t === k : t >= 2)).length), refused: refusedHist.reduce((a, b) => a + b, 0), carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
 
@@ -1031,12 +1082,14 @@
           if (stepOnce) { owed = 1; stepOnce = false; }
           let taken = 0;
           let refused = 0;
+          const t0 = performance.now();
           for (let k = 0; k < owed; k++) {
             if (!w.world.canStep()) { refused = owed - k; break; }
             before();
             w.world.step();
             taken++;
           }
+          const t1 = performance.now();
           // A step the World was not ready for (its last readback still out) is not
           // owed later: a GPU that falls behind shows the run slower, it is never
           // sent more work to catch up (at most 2 steps in flight, WebWorld.canStep).
@@ -1046,14 +1099,18 @@
           if (taken && restartAt != null) { againMs = performance.now() - restartAt; restartAt = null; }
           simSteps += taken; simCount += taken;
           if (now - simAt > 1000) { simRate = simCount * 1000 / (now - simAt); simCount = 0; simAt = now; }
+          const t2 = performance.now();
           pollFrame(w.world, onFrame);
+          const t3 = performance.now();
           // A display faster than the World (120 Hz: a step every other frame) draws
           // frames between steps. While the GPU is the limit (a step refused in the
           // last 3 s) those in-between frames are not drawn: they would take the time
           // the next step needs (measured: 16 steps/s instead of 60). The frames that
           // owe a step are drawn as on a 60 Hz display.
           if (refused > 0) refusedAt = now;
-          if (!(owed === 0 && scale > 0 && now - refusedAt < 3000)) draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0);
+          const drew = !(owed === 0 && scale > 0 && now - refusedAt < 3000);
+          if (drew) draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0);
+          perfTick(now, dt * 1000, taken, refused, owed, drew, t1 - t0, t3 - t2, drew ? performance.now() - t3 : 0);
           if (now - hudAt > 250) { hud(); hudAt = now; if (lastStats?.scriptDone) window.__done = true; }
         } catch (e) { fail(e); }
       }
