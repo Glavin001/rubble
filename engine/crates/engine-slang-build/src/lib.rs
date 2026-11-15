@@ -626,8 +626,28 @@ pub mod cuda_layout {
         ptx_arch: &str,
         sass: &[&str],
     ) -> Result<()> {
+        fatbin_threads(nvcc, cu, dest, ptx_arch, sass, 0)
+    }
+
+    /// [`fatbin`] for a kernel launched with `threads` threads a block: registers per
+    /// thread capped so a block fits one SM's 64K registers (`-maxrregcount`; Slang's
+    /// CUDA has no `__launch_bounds__`, so ptxas may otherwise use more and the launch
+    /// fails with CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES). The same code: spills, not
+    /// different arithmetic. `threads` 0: no cap.
+    pub fn fatbin_threads(
+        nvcc: &Path,
+        cu: &Path,
+        dest: &Path,
+        ptx_arch: &str,
+        sass: &[&str],
+        threads: u32,
+    ) -> Result<()> {
         let mut cmd = std::process::Command::new(nvcc);
         cmd.args(["-fatbin", "-std=c++17", "-lineinfo"]);
+        if threads > 256 {
+            let regs = (65536 / threads).min(255) / 8 * 8;
+            cmd.arg(format!("-maxrregcount={regs}"));
+        }
         // 20044: Slang's `extern "C" __constant__ SLANG_globalParams` becomes a
         // module definition in whole-program mode, as the host expects.
         cmd.args(["-diag-suppress", "20044"]);

@@ -299,6 +299,79 @@ const W_VV_VEH: usize = 43;
 pub const VV_MEMBER_REC: u32 = 5;
 /// The kernel's VV_RECS, VV_SLOTS and the counters' words (VV_CTL_WORDS).
 pub const VV_RECS: usize = 6;
+
+/// The coupling's candidate list (`explicit_beams_rigid.slang` `cplList*`;
+/// `engine_softbody::explicit_rigid::candidate_list`): the header's bit 128 turns it off
+/// (every node tests every proxy shape each step, as before it). Bits 256 and 512 are tests'
+/// skins (256: without the shapes' speed, so a body entering mid-frame is caught by the
+/// check alone; 512: the ceiling, so nodes keep their lists through hard accelerations).
+pub const COUPLING_LIST_OFF: u32 = 128;
+pub const COUPLING_LIST_SKIN_NODES_ONLY: u32 = 256;
+pub const COUPLING_LIST_SKIN_CEILING: u32 = 512;
+/// The coupling's folded step (`explicit_beams_rigid.slang` `cplStepFolded`: 2 barriers a
+/// step, not 4) off: the header's bit 1024.
+pub const COUPLING_FOLD_OFF: u32 = 1024;
+/// The coupling header's other measurement bits (the WebGPU host's switches): 2 the
+/// shape cull off, 4 the cache off, 8 fast proxies' casts off, 16 surface pairs off,
+/// 32 surface culls off, 64 per-node shape ranges off.
+pub const COUPLING_HEADER_BITS: [(&str, u32); 6] =
+    [("cull_off", 2), ("cache_off", 4), ("casts_off", 8), ("surface_pairs_off", 16), ("surface_culls_off", 32), ("ranges_off", 64)];
+
+/// The solver's state as words, for bit-for-bit comparisons of two runs from one state
+/// (every host: WebGPU `ExplicitBeamsGpu::state_words`, CUDA
+/// `CudaExplicitBeams::state_words`): `bufs` are the downloaded bindings
+/// (`BIND_NODES`, `BIND_BEAMS`, `BIND_ACC`, `BIND_GROUPS`, `BIND_MISC`, `BIND_NEXT`) and
+/// `w` the planner's parameter words. Scratch whose content follows the lanes or the
+/// frame (rebase shifts, a beam's broke-this-phase mark, the contact plan's per-frame
+/// slot) is left out.
+pub fn state_words(
+    layout: &ExplicitLayout,
+    w: &[u32],
+    nodes: Vec<u32>,
+    beams: &[u32],
+    acc: &[u32],
+    groups: Vec<u32>,
+    mut misc: Vec<u32>,
+    next: &[u32],
+) -> Vec<(&'static str, Vec<u32>)> {
+    let nv = layout.spans.len();
+    let (grid_base, aero_state) = (w[9] as usize, w[27] as usize);
+    // The aero, slide state and slide-force slots (the contributions after them are
+    // scratch).
+    let slide_end = (w[35] + w[38]) as usize;
+    let (vv_veh, vv_groups) = (w[43] as usize, w[46] as usize);
+    for v in 0..nv {
+        misc[(vv_veh + v * VV_RECS + 4) * 4 + 2] = 0;
+    }
+    // The wide passes' per-frame rebase shifts (scratch).
+    let wide_misc = w[16] as usize;
+    misc[wide_misc * 4..(wide_misc + 1 + nv) * 4].fill(0);
+    let mut beam_words = beams[..grid_base * 4].to_vec();
+    // A beam's "broke in the last beam phase" mark (.w of its second record) is read
+    // only within that step (the next beam phase clears it first).
+    for j in 0..layout.total[1] as usize {
+        beam_words[(2 * j + 1) * 4 + 3] = 0;
+    }
+    beam_words.extend_from_slice(&beams[aero_state * 4..slide_end * 4]);
+    vec![
+        ("nodes", nodes),
+        ("beams", beam_words),
+        ("acc", acc[..3 * layout.total[0] as usize].to_vec()),
+        // Anti-clip's side memory (order free; jbeam-semantics-spec.md §36).
+        ("clip", {
+            let at = w[78] as usize;
+            if at == 0 {
+                Vec::new()
+            } else {
+                acc[at..at + 4 * layout.total[0] as usize].to_vec()
+            }
+        }),
+        ("groups", groups),
+        ("misc", misc[..vv_groups * 4].to_vec()),
+        // The trigger inputs: from keyBase to the contact lists (vvMembers − vehicles).
+        ("keys", next[w[31] as usize..w[47] as usize - nv].to_vec()),
+    ]
+}
 const VV_SLOTS: usize = 8;
 const VV_CTL_WORDS: u32 = 10;
 /// Frame bounds margin past the travel of a vehicle's fastest node (m): see

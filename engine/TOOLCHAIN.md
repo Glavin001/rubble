@@ -33,6 +33,9 @@ export SLANGC=/opt/slang/bin/slangc NVCC=/usr/local/cuda-12.8/bin/nvcc
 
 ## CUDA tests on Modal
 
+(The wgpu tests and examples run on Modal GPUs through Vulkan with
+`engine/tools/modal/gpu_run.sh`; see `engine/tools/modal/README.md`.)
+
 When nvcc is present at build time, `engine-cuda` embeds a fatbin per kernel:
 SASS for `ENGINE_CUDA_SASS` (default `75,89`: T4, and the Ada L4 / L40S / RTX
 4090) so those GPUs never JIT, plus PTX for `ENGINE_CUDA_ARCH` (default
