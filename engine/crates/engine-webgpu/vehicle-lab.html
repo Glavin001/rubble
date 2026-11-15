@@ -80,6 +80,7 @@
       <div class="row" id="modes"></div>
       <div class="row">
         <label class="muted" for="car">Car</label><select id="car" data-opt="build"></select>
+        <label class="muted" for="res" title="The authored sedan's model detail: how many nodes and beams its body has (low is the fastest; high the finest crumpling). The generated sedan has one version. Rebuilds the simulation in place.">Detail</label><select id="res" data-opt="build"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>
         <label class="muted" for="cam">Camera</label><select id="cam" data-opt="live"></select>
       </div>
       <div class="row">
@@ -297,6 +298,8 @@
       startKmh: (v) => `${v} km/h`, kmh: (v) => `${v} km/h`, overlap: (v) => `${(100 * v).toFixed(0)} %`, offset: (v) => `${v.toFixed(2)} m`, angle: (v) => `${v}°` };
     const showOuts = () => { for (const [k, f] of Object.entries(outs)) $(`${k}Out`).textContent = f(get(k)); };
     const shapeUi = () => {
+      // The model detail is the authored sedan's; the generated sedan and the mods have one version.
+      $('res').disabled = get('car') !== 'sedan';
       const s = get('shape'); $('dimBox').style.display = s === 'box' ? '' : 'none'; $('dimR').style.display = s === 'box' ? 'none' : ''; $('dimL').style.display = $('cylAxis').style.display = s === 'cylinder' ? '' : 'none';
       const k = get('crashKind'); $('rowOverlap').style.display = k === 'offset' ? '' : 'none'; $('rowOffset').style.display = k === 'pole' || k === 'sidepole' ? '' : 'none'; $('rowAngle').style.display = k === 'wall' || k === 'offset' ? '' : 'none';
       document.body.classList.toggle('clean', get('clean') || RECORD);
@@ -361,14 +364,16 @@
     const carCache = new Map();
     const waived = new Set();
     async function carOf(kind) {
-      if (carCache.has(kind)) return carCache.get(kind);
+      // The authored sedan has three model details (its node and beam counts): each is its own car.
+      const key = kind === 'sedan' ? `sedan:${get('res')}` : kind;
+      if (carCache.has(key)) return carCache.get(key);
       const t = performance.now();
       let entry;
       if (kind === 'sedan') {
         progress('building the sedan\'s body…'); await new Promise((r) => setTimeout(r));
-        const make = (paint) => { const c = showcaseCar({ style: 'sedan', resolution: 'low', paint, wheels: 'raycast' }); c.visual.lod = [c.visualLod, c.visualFar]; return c; };
+        const make = (paint) => { const c = showcaseCar({ style: 'sedan', resolution: get('res'), paint, wheels: 'raycast' }); c.visual.lod = [c.visualLod, c.visualFar]; return c; };
         const first = make(PAINTS[0]);
-        entry = { kind, name: 'soft-body sedan', visuals: [first], make, vehicle: { truck: first.truck }, mod: null };
+        entry = { kind, name: `soft-body sedan (${get('res')} detail)`, visuals: [first], make, vehicle: { truck: first.truck }, mod: null };
       } else {
         const m = MODS[kind];
         // Before downloading it: whether it fits this device (its estimated footprint
@@ -390,7 +395,7 @@
         entry = { kind, name: m.name, visuals: [await make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: mod.modelBytes };
       }
       entry.loadMs = performance.now() - t;
-      carCache.set(kind, entry);
+      carCache.set(key, entry);
       return entry;
     }
 
