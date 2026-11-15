@@ -1480,6 +1480,43 @@ fn main() {
             );
         }
 
+        // The strut tops' static load: each beam from a hub node to a
+        // suspension tower (the generated sedan's `sh_a6_*`/`sh_e2_*`), its
+        // spring force (N, + compression) and the vertical force it puts on
+        // the tower, per tower.
+        {
+            let mut per: BTreeMap<String, (usize, f64, f64)> = BTreeMap::new();
+            for b in &sp.beams {
+                let (na, nb) = (car.node_name(b.a as usize), car.node_name(b.b as usize));
+                let (tw, hb, ti, hi) = if na.starts_with("sh_a6_") || na.starts_with("sh_e2_") {
+                    (na, nb, b.a, b.b)
+                } else {
+                    (nb, na, b.b, b.a)
+                };
+                if !(tw.starts_with("sh_a6_") || tw.starts_with("sh_e2_")) || !hb.starts_with("hub") || b.broken {
+                    continue;
+                }
+                let d = sp.nodes[ti as usize].pos - sp.nodes[hi as usize].pos;
+                let l = d.length();
+                let comp = -(b.k * (l - b.rest)) as f64;
+                let e = per.entry(tw.to_string()).or_default();
+                e.0 += 1;
+                e.1 += comp;
+                e.2 += comp * (d.y / l) as f64;
+            }
+            if let Some(d) = &sp.drive {
+                println!(
+                    "\nraycast loads at rest (N) and lengths (m): {}",
+                    d.wheels.iter().map(|w| format!("{:.0} / {:.3}", w.load, w.length)).collect::<Vec<_>>().join("; ")
+                );
+            }
+            if !per.is_empty() {
+                println!(
+                    "\nstrut tops at rest (beams, Σ spring compression N, vertical on the tower N): {}",
+                    per.iter().map(|(t, (n, c, v))| format!("{t} {n} {c:.0} {v:.0}")).collect::<Vec<_>>().join("; ")
+                );
+            }
+        }
         // Where the rest wobble lives: each node's amplitude (√2·σ about the body's fit, 4–5 s).
         {
             let mut snap = sp.clone();
@@ -1558,6 +1595,7 @@ fn main() {
                 let mut late: Vec<usize> = sets.nontyre.iter().map(|&i| i as usize).collect();
                 late.sort_by(|&a, &b| r.node_late[b].total_cmp(&r.node_late[a]));
                 println!("\nkerb, nodes still moving late (all parts): {}", late.iter().take(n).map(|&i| format!("{} {} {:.2} kg {:.2} mm", car.node_name(i), part_of(i).trim_start_matches("sedan_"), s.nodes[i].mass, r.node_late[i] * 1e3)).collect::<Vec<_>>().join("; "));
+                println!("\nkerb, body nodes by peak ripple about the body: {}", idx.iter().filter(|&&i| cat[i] == 0).take(n).map(|&i| format!("{} {} {:.2} kg {:.2} mm at {:.1} s", car.node_name(i), part_of(i).trim_start_matches("sedan_"), s.nodes[i].mass, r.node_peak[i].0 * 1e3, r.node_peak[i].1 as f64 * 0.1)).collect::<Vec<_>>().join("; "));
                 println!("\nkerb, nodes by peak ripple about the body: {}", idx.iter().take(n).map(|&i| format!("{} {} {:.2} kg {:.2} mm at {:.1} s", car.node_name(i), part_of(i).trim_start_matches("sedan_"), s.nodes[i].mass, r.node_peak[i].0 * 1e3, r.node_peak[i].1 as f64 * 0.1)).collect::<Vec<_>>().join("; "));
             }
             // Beams the bump bent (rest length changed by more than 0.1 mm) or broke, by member pair.

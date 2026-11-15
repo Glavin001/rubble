@@ -479,17 +479,51 @@ pub fn build(r: &mut Rig, inp: &dyn RigInput, d: &Defs) -> Built {
                 }
             }
         }
+        // A measurement, never a result: `RIG_COILOVER=k,c,front_N,rear_N`
+        // makes a corner's strut beam (`strut_<corner>`, not its clamps) a
+        // coilover of spring k (N/m) and damper c (N·s/m), precompressed to
+        // carry the corner's sprung load (N; 0 keeps that axle's strut).
+        // At the rear (two arms and a toe link: one free path) that is the
+        // car's spring; at the front the clamps still hold the knuckle
+        // (a MacPherson needs a sliding joint: lessons §15).
+        let coil: Option<Vec<f32>> = std::env::var("RIG_COILOVER")
+            .ok()
+            .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect());
+        // (the strut's own beam, not its clamps)
+        let is_coil = |l: &engine_vehiclegen::mechanical::Link| {
+            l.name.starts_with("strut_") && !l.name.contains("clamp")
+        };
+        let n_strut = p
+            .links
+            .iter()
+            .filter(|l| is_coil(l))
+            .count();
         for l in &p.links {
-            put(
-                r,
-                id(&ids, &l.a),
-                id(&ids, &l.b),
-                Role::Susp,
-                &p.name,
-                fixed_of(&l.v, FixedKind::Normal),
-                l.v.strength as f32,
-                l.group.as_deref(),
-            );
+            let (a, b) = (id(&ids, &l.a), id(&ids, &l.b));
+            let mut f = fixed_of(&l.v, FixedKind::Normal);
+            let strut = is_coil(l);
+            let is_front = p.name.ends_with("_FL") || p.name.ends_with("_FR");
+            // (a corner whose load is 0 keeps its strut)
+            let coil = coil
+                .as_ref()
+                .filter(|c| strut && c.len() == 4 && (if is_front { c[2] } else { c[3] }) > 0.0);
+            if let Some(c) = coil {
+                let n = n_strut as f32;
+                f.k = Some(c[0] / n);
+                f.c = c[1] / n;
+            }
+            let j = put(r, a, b, Role::Susp, &p.name, f, l.v.strength as f32, l.group.as_deref());
+            if let (Some(c), Some(j)) = (coil, j) {
+                let w = if is_front { c[2] } else { c[3] };
+                let d = r.car.p(a) - r.car.p(b);
+                let len = d.length();
+                // (JBeam frame: z up) compression per beam for its share.
+                let fb = w / (n_strut as f32 * (d.z / len).abs().max(0.2));
+                r.car.precomp.insert(j, 1.0 + fb / (c[0] / n_strut as f32) / len);
+                if std::env::var("RIG_LOG").is_ok() {
+                    eprintln!("coilover {}: {} beam(s), {:.0} N each, precomp {:.3}", p.name, n_strut, fb, 1.0 + fb / (c[0] / n_strut as f32) / len);
+                }
+            }
         }
     }
     // ---- preload: the soft-mounted parts carry their weight at the design
