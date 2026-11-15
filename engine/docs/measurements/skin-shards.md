@@ -294,6 +294,8 @@ frame choice is discontinuous between neighbours by construction; the blend
 is not. Kept as `Binding::Beamng` (CPU, measurement only).
 
 **What is still wrong (honest coarse-lattice state, no break under it).**
+(Corrected 2026-11-15: these are not folds over intact beams; see "The
+remaining shards are not folds over intact beams" below.)
 Shards remain where the lattice folded or crushed with every beam intact:
 - body (underbody and rear floor) in the 90 km/h walls: 10–20 shards up to
   0.6 m; the underbody's visual triangles are 13–28 cm, across nodes whose
@@ -440,10 +442,75 @@ held: specks 1 (18) → 0, cut 3,432 → 3,392, cut without a break 0 → 0).
 Every other checkpoint keeps or lowers its shards, cuts and flips (wall 70
 flipped 736 → 590). The other failing tests fail on the same shards as before.
 
+## The remaining shards are not folds over intact beams (2026-11-15)
+
+Time-boxed look (CPU, `showcase_skin_integrity`, branch `fix/skin-shards` off
+`integration/lab-skin` 24e9822a) at the five failing tests, to decide between
+a denser lattice and skin helper nodes. Per shard triangle (`DUMP=2/3`): its
+vertices' 8 drivers, every solver beam among them (k, broken, stretch over
+spawn, rest/rest0, strength), the drivers' live-beam components and each
+vertex's `used` mask. Baseline counts at the first failing checkpoint: wall 90
+×3 hit 1 at 1.5 s 4; side 60 struck f 15 14 (plus 1 speck of 114 triangles,
+also failing); t-bone struck 115/106/79, striker 184/171/173; random 0 11;
+grab bootlid 2 m held 288.
+
+**Finding: the stated cause ("a fold of a coarse lattice with every beam
+intact") does not hold.** All drivers are in one live component (so the skin
+neither cuts nor counts a span), but 1–10 beams among them are broken in most
+shards, and the shards fall into three different mechanisms:
+
+| Class | Where (shards) | What the numbers show |
+|---|---|---|
+| **C: stretch the beams allow** | wall 90 underbody (4/4); random 0 underbody 8 + arch liner 3; side 60 rear door card and inner (14/14); t-bone struck doors, underbody, valance_r, bumper_r, arch liner (~315) | The nodes themselves moved apart along **intact soft beams** (k 21–42 kN/m) stretched 1.5–2.7× over spawn with rest/rest0 = 1.00: neither yielded nor broke. Wall 90: beam 408–266 (k 24 kN/m, strength 12 kN) at 2.26×; the stiff 1.1 MN/m beams among the same drivers (891–408, 891–410, 892–408, 639–893) broke. Their break extension strength/k is 0.2–0.6 m (median 0.5 m underbody, 0.62 m rear door) on 15–30 cm beams. Census of the spawned car: of the body's 4,068 stiff beams, 943 neither yield nor break before 40 % strain and 618 not before 100 % (bonnet 40/145, doors 22–33). A skin between two nodes 2.26× apart is drawn at least that stretched: 3× edges follow. |
+| **A: group switch (binding)** | grab bootlid 2 m: plate 30, plate_surround 31, bumper_r 26; t-bone striker: bonnet 325, bonnet_inner 36, lip_f 72 | Neighbouring vertices put a shared driver in different groups. Example (grab, `plate`): node 363 (beams 0–363 and 1–363 broken, pulled away) carries 9–10 % of v97406, v97407 and v97426; v97426 leaves it out (used 247), the other two keep it (255). The only difference in their sets is a node of weight 0.0001 (364 vs 1) that bridges 363 into the main group: the `eval_breaks` union-find joins through third nodes, so a pair the rule says is apart ("joined at rest, no live path now") ends in one group through a near-zero-weight member or a "loose" pair (no rest path, same component). Triangle edges 11–23× rest. |
+| **B: transitive rejoin, consistent** | grab bootlid 2 m: lightbar 150, deck+ 42 | Same groups on all three vertices, but the group mixes nodes the local evidence separates: 363 (moved 1.43 m) and 362 (1.26 m) with 364 (0.60 m) and 762/770/763 (0.48 m); 363–364 joined at rest, not now (`10`), and 363–762 "loose" (`00`, one component) rejoins them. The vertex is a linear mix of predictions 0.8 m apart, its weight on 364 changing 0.09 → 0.17 across a 2 cm edge. Same mechanism as A. |
+
+**Would helper nodes or a denser lattice remove them?** No, on these numbers.
+Class C is node motion the physics allows (soft beams elastic past 100 %
+strain); any binding draws the stretch, and adding nodes or beams there
+changes the crash physics `showcase_car` pins. Classes A and B are in the
+vertex grouping of `eval_breaks`; denser nodes would only move where the
+bridging happens.
+
+**Tried (measurement only; nothing committed; prototypes in the worktree's
+`engine/out/skin-shards-prototypes.diff`):**
+
+| Variant | Grab bootlid 2 m held | T-bone striker f 15/71/119 | T-bone struck | Wall 90 h1 1.5 s | Side 60 | Random 0 | Wall 70, grab_doors, grab_front |
+|---|---|---|---|---|---|---|---|
+| Baseline | 288 shards | 184 / 171 / 173 | 115 / 106 / 79 | 4 | 14 + 1 speck | 11 | pass |
+| **SEP**: union refused if it would merge a pair joined at rest and not now (live joins first, then loose) | **30**, but 26 cut with no broken beam on two drivers, 7 saw-tooth | **37 / 34 / 39** | unchanged | 4 | unchanged | 11 (longest 0.54) | pass |
+| SEP blend, tear from the old grouping | 196, 152 saw-tooth | 660 / 608 / 662 | unchanged | | | | |
+| Anchor only (a node joins the side if joined to the nearest node) | 89, 26 unexplained cuts | 297 / 293 / 303 | unchanged | | | | |
+| Cut where a broken beam joins two drivers and two drivers pulled apart past 1.35–1.8× | specks 2 at 0.5 m | 1 shard, 11 specks, +35,000 vertices cut | 54 / 49 / 19, +14,600 cut | 0, but hit 2 0.33 s: 2 shards, 4 specks | 0 shards, 8 specks | 3 | grab_doors fails (1 speck) |
+
+SEP is the right direction for A and B (the rule as written: two nodes stay
+together *unless* joined at rest and not now; the union-find breaks that
+through third nodes), but as measured it cuts 26 grab triangles whose break is
+on the neighbourhood path, not on a beam between two of the vertex's drivers
+(the test's explanation), and it would need the same change in the renderer's
+`blendVertex` (`engine-webgpu/showcase-car-render.mjs`), outside this task.
+
+**Next steps.**
+1. Classes A and B (grab_rear_and_roof; the t-bone striker): make the
+   vertex grouping respect separation (SEP), mirror it in `blendVertex`, and
+   settle the 26 path-only cuts. Either the test's explanation takes a broken
+   beam on the rest path between two drivers within their neighbourhood (a
+   change to the bar: user decision), or the grouping takes separation only
+   from a broken beam between two drivers.
+2. Class C (wall_at_90_kmh_three_times, car_into_the_rear_door_at_60_kmh,
+   random_impacts, the t-bone struck car): physics/authoring, not the skin.
+   The soft skin-tier beams are elastic to 0.2–0.6 m: sheet steel parts at
+   20–40 % elongation. An elongation-at-break (or yield) for these beams
+   changes the crash physics and needs the user's decision and the
+   `showcase_car` suite; then re-measure.
+3. Side 60 also fails on a speck (114 triangles at f 15), with or without
+   SEP; not investigated.
+
 ## Open
 
 - The GPU page: the steps under "GPU check" above.
-- Shards at folds with no break (underbody, struck rear door, rear body round
-  the boot): a denser lattice or skin helper nodes there (authoring).
+- Shards with no cut (underbody, struck rear door, rear body round the boot):
+  not folds. Grouping bridges separated nodes (A, B) and soft beams elastic
+  past 100 % strain (C); see "The remaining shards are not folds" above.
 - Physics findings G1 (grab blow-up at the strongest setting) and G2 (dashpot
   tethers) above: unchanged.
