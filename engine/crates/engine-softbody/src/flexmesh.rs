@@ -805,10 +805,9 @@ pub fn jbeam_visual_skin(
     let mut skinned_nodes: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut wt_cnt: Vec<u32> = Vec::new();
     // The entries' lists at their size up front: grown by doubling, a generated car's
-    // (14 million entries, 16 bytes each) would hold its old and new blocks at once.
+    // (14 million entries, 8 bytes each as grid steps) would hold its old and new blocks at once.
     if let Some(sk) = skin {
-        out.wt_node.reserve_exact(sk.entries());
-        out.wt_w.reserve_exact(sk.entries());
+        out.wt.reserve_exact(sk.entries());
     }
     let mut add = |name: &str,
                    m: &DaeMesh,
@@ -1085,8 +1084,7 @@ pub fn jbeam_visual_skin(
                     out.wt_off.push(sv.off);
                     out.wt_nrm.push(sv.nrm);
                     for &(nd, a, da, db) in &sv.w {
-                        out.wt_node.push(map[nd as usize]);
-                        out.wt_w.push([a, da, db]);
+                        out.wt.push(map[nd as usize], [a, da, db]);
                     }
                     out.positions.push(p.to_array());
                     out.normals.push(n.to_array());
@@ -1180,7 +1178,7 @@ pub fn jbeam_visual_skin(
     }
     rep.triangles = out.indices.len() / 3;
     out.unit.resize(out.positions.len(), u32::MAX);
-    if !out.wt_node.is_empty() {
+    if !out.wt.is_empty() {
         let nv = out.positions.len();
         wt_cnt.resize(nv, 0);
         out.wt_off.resize(nv, [0.0; 3]);

@@ -183,9 +183,9 @@ fn fidelity(
         // vertex is bound to are off it: the skin's own warp is what exceeds
         // theirs.
         let ids: Vec<u32> = (a..b)
-            .filter(|&k| v.wt_w[k][0] > 0.0)
+            .filter(|&k| v.wt.w(k)[0] > 0.0)
             .flat_map(|k| {
-                std::iter::repeat(v.wt_node[k]).take((v.wt_w[k][0] * 40.0).round() as usize)
+                std::iter::repeat(v.wt.node(k)).take((v.wt.w(k)[0] * 40.0).round() as usize)
             })
             .collect();
         let mut distinct = ids.clone();
@@ -195,7 +195,7 @@ fn fidelity(
         }
         let f = rigid_fit(&rest, now, &ids);
         let own = (a..b)
-            .map(|k| v.wt_node[k] as usize)
+            .map(|k| v.wt.node(k) as usize)
             .map(|j| f.to_rest(now[j]).distance(rest[j]))
             .fold(0.0f32, f32::max);
         let e = (f.to_rest(p[i]).distance(x0) - own).max(0.0);

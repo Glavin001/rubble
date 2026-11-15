@@ -247,12 +247,12 @@ pub struct ShowcaseVisual {
     pub tyre_axles: Vec<[u32; 2]>,
     /// Weighted skins ([`crate::flexskin`], a Rubble extension): per vertex
     /// (CSR, `positions.len() + 1` starts, or empty) its entries: solver
-    /// node (`wt_node`) and (A, ∂A/∂T, ∂A/∂B) (`wt_w`); per vertex its detail
+    /// node and (A, ∂A/∂T, ∂A/∂B) (`wt`: as the sidecar's grid steps while every
+    /// entry is one, [`crate::flexskin::WtEntries`]); per vertex its detail
     /// offset and normal coefficients. A vertex with entries is skinned by
     /// [`crate::flexskin::eval`] (the renderer's `weightedVertex()`), never torn.
     pub wt_start: Vec<u32>,
-    pub wt_node: Vec<u32>,
-    pub wt_w: Vec<[f32; 3]>,
+    pub wt: crate::flexskin::WtEntries,
     pub wt_off: Vec<[f32; 3]>,
     pub wt_nrm: Vec<[f32; 3]>,
     /// The node-frame skin ([`super::node_frames`], the body's binding): the
@@ -2675,7 +2675,10 @@ pub fn deform_beams(
             }
             let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
             wbuf.clear();
-            wbuf.extend((a..b).map(|k| (v.wt_node[k], v.wt_w[k][0], v.wt_w[k][1], v.wt_w[k][2])));
+            wbuf.extend((a..b).map(|k| {
+                let w = v.wt.w(k);
+                (v.wt.node(k), w[0], w[1], w[2])
+            }));
             let (p, n) = crate::flexskin::eval(&wbuf, v.wt_off[i], v.wt_nrm[i], nodes);
             pos.push(p);
             nrm.push(n);

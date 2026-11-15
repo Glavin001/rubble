@@ -654,6 +654,95 @@ pub fn steps(node: u32, w: [f32; 3]) -> Option<(u16, [i16; 3])> {
     Some((node, q))
 }
 
+/// A weighted skin's entries (solver node, [A, ∂A/∂T, ∂A/∂B]), held as the
+/// sidecar's grid steps ([`steps`]: u16 node, i16 steps; 8 bytes an entry) while
+/// every entry is exactly that, else as u32 and f32 (16 bytes). Either way
+/// [`WtEntries::w`] gives the same f32 bits that were pushed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WtEntries {
+    Steps { node: Vec<u16>, q: Vec<[i16; 3]> },
+    F32 { node: Vec<u32>, w: Vec<[f32; 3]> },
+}
+
+impl Default for WtEntries {
+    fn default() -> Self {
+        WtEntries::Steps {
+            node: Vec::new(),
+            q: Vec::new(),
+        }
+    }
+}
+
+impl WtEntries {
+    /// Room for `n` more entries (as steps: an entry that is not one converts
+    /// the list then).
+    pub fn reserve_exact(&mut self, n: usize) {
+        match self {
+            WtEntries::Steps { node, q } => {
+                node.reserve_exact(n);
+                q.reserve_exact(n);
+            }
+            WtEntries::F32 { node, w } => {
+                node.reserve_exact(n);
+                w.reserve_exact(n);
+            }
+        }
+    }
+    pub fn push(&mut self, nd: u32, w: [f32; 3]) {
+        if let WtEntries::Steps { node, q } = self {
+            if let Some((a, s)) = steps(nd, w) {
+                node.push(a);
+                q.push(s);
+                return;
+            }
+            let n = node.len();
+            let nodes: Vec<u32> = node.iter().map(|&a| a as u32).collect();
+            let ws: Vec<[f32; 3]> = (0..n).map(|k| from_steps(q[k])).collect();
+            *self = WtEntries::F32 { node: nodes, w: ws };
+        }
+        if let WtEntries::F32 { node, w: ws } = self {
+            node.push(nd);
+            ws.push(w);
+        }
+    }
+    pub fn len(&self) -> usize {
+        match self {
+            WtEntries::Steps { node, .. } => node.len(),
+            WtEntries::F32 { node, .. } => node.len(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Entry `k`'s solver node.
+    pub fn node(&self, k: usize) -> u32 {
+        match self {
+            WtEntries::Steps { node, .. } => node[k] as u32,
+            WtEntries::F32 { node, .. } => node[k],
+        }
+    }
+    /// Entry `k`'s [A, ∂A/∂T, ∂A/∂B].
+    pub fn w(&self, k: usize) -> [f32; 3] {
+        match self {
+            WtEntries::Steps { q, .. } => from_steps(q[k]),
+            WtEntries::F32 { w, .. } => w[k],
+        }
+    }
+    /// The nodes of entries `range`.
+    pub fn nodes(&self, range: std::ops::Range<usize>) -> Vec<u32> {
+        range.map(|k| self.node(k)).collect()
+    }
+}
+
+/// [`steps`]' weights back as f32 (the same bits it was given).
+pub fn from_steps(q: [i16; 3]) -> [f32; 3] {
+    [
+        (q[0] as f64 * Q_A) as f32,
+        (q[1] as f64 * Q_D) as f32,
+        (q[2] as f64 * Q_D) as f32,
+    ]
+}
+
 /// `x` rounded to multiples of `q` summing exactly to `total` (largest
 /// remainder), as f32 (exact: a step count below 2¹⁵ times a power of two);
 /// None if a count leaves the i16 range.
@@ -1036,6 +1125,30 @@ mod tests {
     }
 
     /// An entry as the sidecar's steps: exact (back to the same f32 bits) or none.
+    #[test]
+    fn wt_entries_give_back_what_was_pushed() {
+        let mut e = WtEntries::default();
+        e.reserve_exact(3);
+        e.push(3, [0.5, -0.25, 2.0f32.powi(-9)]);
+        e.push(70000 - 69990, [1.0, 0.0, -1.0]);
+        assert!(matches!(e, WtEntries::Steps { .. }));
+        let off = [0.1f32, 0.0, 0.0];
+        e.push(7, off);
+        assert!(matches!(e, WtEntries::F32 { .. }));
+        e.push(1 << 20, [0.5, 0.0, 0.0]);
+        let want = [
+            (3, [0.5, -0.25, 2.0f32.powi(-9)]),
+            (10, [1.0, 0.0, -1.0]),
+            (7, off),
+            (1 << 20, [0.5, 0.0, 0.0]),
+        ];
+        assert_eq!(e.len(), 4);
+        for (k, (n, w)) in want.into_iter().enumerate() {
+            assert_eq!(e.node(k), n);
+            assert_eq!(e.w(k).map(f32::to_bits), w.map(f32::to_bits));
+        }
+    }
+
     #[test]
     fn steps_are_exact_or_none() {
         let s = two_meshes();

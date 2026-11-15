@@ -986,7 +986,7 @@ pub fn lint(d: &SoftVehicleDesc, vis: Option<&ShowcaseVisual>, ex: &Expect) -> V
         let weights = |i: usize| -> Vec<u32> {
             if v.wt_start.len() == v.positions.len() + 1 {
                 let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
-                v.wt_node[a..b].to_vec()
+                v.wt.nodes(a..b)
             } else {
                 v.bind_nodes.get(i).map_or(vec![], |b| b.to_vec())
             }

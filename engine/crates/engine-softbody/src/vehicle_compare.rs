@@ -1078,8 +1078,8 @@ fn seam_diagnosis(
         }
         let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
         (a..b)
-            .max_by(|&x, &y| v.wt_w[x][0].total_cmp(&v.wt_w[y][0]))
-            .map(|k| v.wt_node[k])
+            .max_by(|&x, &y| v.wt.w(x)[0].total_cmp(&v.wt.w(y)[0]))
+            .map(|k| v.wt.node(k))
     };
     let mut piece = vec![0usize; v.positions.len()];
     for (k, (_, first, count)) in v.pieces.iter().enumerate() {
@@ -3059,7 +3059,7 @@ pub fn rest_seam_pairs(
 fn vertex_nodes(v: &ShowcaseVisual, i: usize) -> Vec<u32> {
     if v.wt_start.len() == v.positions.len() + 1 {
         (v.wt_start[i] as usize..v.wt_start[i + 1] as usize)
-            .map(|k| v.wt_node[k])
+            .map(|k| v.wt.node(k))
             .collect()
     } else {
         v.bind_nodes[i].to_vec()
@@ -3072,8 +3072,8 @@ fn vertex_top(v: &ShowcaseVisual, i: usize) -> u32 {
     if v.wt_start.len() == v.positions.len() + 1 {
         let (a, b) = (v.wt_start[i] as usize, v.wt_start[i + 1] as usize);
         (a..b)
-            .max_by(|&x, &y| v.wt_w[x][0].total_cmp(&v.wt_w[y][0]))
-            .map_or(v.bind_nodes[i][0], |k| v.wt_node[k])
+            .max_by(|&x, &y| v.wt.w(x)[0].total_cmp(&v.wt.w(y)[0]))
+            .map_or(v.bind_nodes[i][0], |k| v.wt.node(k))
     } else {
         v.bind_nodes[i][0]
     }

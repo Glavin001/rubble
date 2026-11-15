@@ -450,33 +450,28 @@ fn visual_js(v: &ShowcaseVisual) -> Object {
 /// bytes; a generated car's are 110 MB instead of 220), else as `wtNode` (u32) and
 /// `wtW` (f32). Copied out in chunks (no temporary of the whole in the wasm heap).
 fn wt_entries_js(vis: &Object, v: &ShowcaseVisual) {
-    use engine_softbody::flexskin::{steps, Q_A, Q_D};
-    let exact = v.wt_node.iter().zip(&v.wt_w).all(|(&n, &w)| steps(n, w).is_some());
-    if !exact {
-        set(vis, "wtNode", &Uint32Array::from(v.wt_node.as_slice()).into());
-        set(vis, "wtW", &flat(&v.wt_w));
-        return;
-    }
-    let n = v.wt_node.len();
-    let nodes = js_sys::Uint16Array::new_with_length(n as u32);
-    let q = js_sys::Int16Array::new_with_length(3 * n as u32);
-    const CHUNK: usize = 1 << 16;
-    let (mut bn, mut bq) = (Vec::with_capacity(CHUNK), Vec::with_capacity(3 * CHUNK));
-    for (c, (ns, ws)) in v.wt_node.chunks(CHUNK).zip(v.wt_w.chunks(CHUNK)).enumerate() {
-        bn.clear();
-        bq.clear();
-        for (&nd, &w) in ns.iter().zip(ws) {
-            let (a, s) = steps(nd, w).expect("checked above");
-            bn.push(a);
-            bq.extend(s);
+    use engine_softbody::flexskin::{WtEntries, Q_A, Q_D};
+    match &v.wt {
+        WtEntries::F32 { node, w } => {
+            set(vis, "wtNode", &Uint32Array::from(node.as_slice()).into());
+            set(vis, "wtW", &flat(w));
         }
-        let at = (c * CHUNK) as u32;
-        nodes.subarray(at, at + ns.len() as u32).copy_from(&bn);
-        q.subarray(3 * at, 3 * (at + ns.len() as u32)).copy_from(&bq);
+        WtEntries::Steps { node, q } => {
+            set(vis, "wtNode16", &js_sys::Uint16Array::from(node.as_slice()).into());
+            // Copied out in chunks (no temporary of the whole in the wasm heap).
+            let out = js_sys::Int16Array::new_with_length(3 * q.len() as u32);
+            const CHUNK: usize = 1 << 16;
+            let mut buf: Vec<i16> = Vec::with_capacity(3 * CHUNK);
+            for (c, part) in q.chunks(CHUNK).enumerate() {
+                buf.clear();
+                buf.extend(part.iter().flatten());
+                let at = 3 * (c * CHUNK) as u32;
+                out.subarray(at, at + buf.len() as u32).copy_from(&buf);
+            }
+            set(vis, "wtQ", &out.into());
+            set(vis, "wtGrid", &f32v(&[Q_A as f32, Q_D as f32]));
+        }
     }
-    set(vis, "wtNode16", &nodes.into());
-    set(vis, "wtQ", &q.into());
-    set(vis, "wtGrid", &f32v(&[Q_A as f32, Q_D as f32]));
 }
 
 /// The visual layer of an imported BeamNG JBeam vehicle (engine_softbody
@@ -505,6 +500,37 @@ pub fn jbeam_visual(spec: JsValue, meshes: Array) -> Result<JsValue, JsValue> {
 #[wasm_bindgen(js_name = jbeamVisualSkinned)]
 pub fn jbeam_visual_skinned(spec: JsValue, meshes: Array, glb: &[u8], skin: &[u8]) -> Result<JsValue, JsValue> {
     jbeam_visual_with(spec, meshes, Some(glb), Some(skin))
+}
+
+/// A model file's bytes held in the wasm heap, written as they download
+/// (`push` per chunk of the response body): the page never holds the whole file
+/// (a generated car's `.rskin` is 124 MB) as well as the copy the wasm reads.
+#[wasm_bindgen]
+pub struct HeldBytes(Vec<u8>);
+
+#[wasm_bindgen]
+impl HeldBytes {
+    /// Empty, with room for `capacity` bytes (the file's Content-Length, or 0).
+    #[wasm_bindgen(constructor)]
+    pub fn new(capacity: u32) -> HeldBytes {
+        HeldBytes(Vec::with_capacity(capacity as usize))
+    }
+    /// The next chunk of the file.
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.0.extend_from_slice(chunk);
+    }
+    /// Bytes held.
+    #[wasm_bindgen(getter)]
+    pub fn length(&self) -> u32 {
+        self.0.len() as u32
+    }
+}
+
+/// [`jbeam_visual_skinned`] with the model files held in the wasm heap
+/// ([`HeldBytes`]): the same reads of the same bytes, without their copy in.
+#[wasm_bindgen(js_name = jbeamVisualSkinnedHeld)]
+pub fn jbeam_visual_skinned_held(spec: JsValue, meshes: Array, glb: &HeldBytes, skin: &HeldBytes) -> Result<JsValue, JsValue> {
+    jbeam_visual_with(spec, meshes, Some(&glb.0), Some(&skin.0))
 }
 
 fn jbeam_visual_with(spec: JsValue, meshes: Array, glb: Option<&[u8]>, skin: Option<&[u8]>) -> Result<JsValue, JsValue> {

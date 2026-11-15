@@ -6,7 +6,7 @@
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
-  hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
+  hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, jbeamVisualSkinnedHeld, HeldBytes, decodeTexture, vehicleTownLayout, FramePacer,
   showcaseLayout, brickRingLayout, createVehicleLab as createVehicleLabWasm, vehicleLabMaterials,
   sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
 } from './generated/world-wasm/engine_world_wasm.js';
@@ -18,20 +18,24 @@ import init, {
 // decodeTexture(bytes, size): a PNG or DDS as one mipped RGBA8 layer (engine_softbody::flextex).
 // jbeamVisualSkinned(spec, meshes, glb, skin): the same for a vehicle whose
 // flexbodies are a glTF render model with weighted skins (flexskin, `.rskin`).
+// jbeamVisualSkinnedHeld(spec, meshes, glb, skin): the same from model files held in the
+// wasm heap (HeldBytes: written chunk by chunk as they download).
 // FramePacer(rate, gpuBudget): fixed steps per displayed frame (engine-world-wasm frame_pacer.rs).
-export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, FramePacer };
-let ready = null;
+export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, jbeamVisualSkinnedHeld, HeldBytes, decodeTexture, FramePacer };
+let ready = null, wasmExports = null;
+/** The world wasm's linear memory in bytes (it never shrinks: its high-water), 0 before it loads. */
+export const wasmMemoryBytes = () => wasmExports?.memory?.buffer.byteLength ?? 0;
 
 /** The wasm's world-less functions (terrain settings, predictions, buffer layout), once loaded. */
 export async function worldWasm() {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   return { terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout };
 }
 
 /** A World on its own WebGPU device (`WorldDef` fields, camelCase). Render on `world.device()`. */
 export async function createWorld(def = {}) {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   const world = await WebWorld.create(def);
   world.flags = solverFlags();
@@ -45,7 +49,7 @@ export async function createWorld(def = {}) {
  * own; place it with `world.placeScene(def)`.
  */
 export async function createScene(def, settings = undefined) {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   const world = await WebWorld.createScene(def, settings);
   world.flags = solverFlags();
@@ -54,14 +58,14 @@ export async function createScene(def, settings = undefined) {
 
 /** The scene a family's page builds from its URL query (`rubble::play::SceneDef::from_query`). */
 export async function sceneFromQuery(family, query) {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   return wasmSceneFromQuery(family, query);
 }
 
 /** Preset `name`'s scene (`rubble::play::Preset::scene_def`). */
 export async function presetScene(name) {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   return wasmPresetScene(name);
 }
@@ -73,7 +77,7 @@ export async function presetScene(name) {
  * `world.cityPlace(city, n)` over frames; `world.cityRebuild(city, page)` starts over.
  */
 export async function createCity(opts, page = {}) {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   const city = new WebCity(opts);
   const world = await WebWorld.createCity(city, page);
@@ -88,7 +92,7 @@ export async function createCity(opts, page = {}) {
  * `{ houses, ground, centres }`.
  */
 export async function createVehicleTown(spec, progress) {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   const world = await WebWorld.createVehicleTown({ ...spec, truck: spec.truck ?? explicitSedanTruck(true) }, progress);
   world.flags = solverFlags();
@@ -104,7 +108,7 @@ export async function createVehicleTown(spec, progress) {
  * (load-progress.mjs), which hears the load's stages and each GPU kernel's compile.
  */
 export async function createShowcase(spec, progress) {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   const { truck, vehicles, ...rest } = spec;
   const layout = showcaseLayout(rest);
@@ -119,7 +123,7 @@ export async function createShowcase(spec, progress) {
  * `WebWorld.createBrickRingDrive`), and its layout (`brickRingLayout`).
  */
 export async function createBrickRingDrive(spec, progress) {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   const { vehicles, ...rest } = spec;
   const layout = brickRingLayout(rest);
@@ -134,7 +138,7 @@ export async function createBrickRingDrive(spec, progress) {
  * state beside it (spec as the wasm's `createVehicleLab`).
  */
 export async function createVehicleLab(spec, progress) {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
   const [world, lab] = await createVehicleLabWasm(spec, progress);
   world.flags = solverFlags();
@@ -143,7 +147,7 @@ export async function createVehicleLab(spec, progress) {
 
 /** The wasm, once loaded (pages that call its free functions before a world). */
 export async function loadWasm() {
-  ready ??= init();
+  ready ??= init().then((e) => (wasmExports = e));
   await ready;
 }
 

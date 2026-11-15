@@ -5,7 +5,7 @@
 //
 //   node engine/tools/vehicle-lab/skin-upload-identity.mjs \
 //     [--mod ~/Development/rubble-artifacts/sedan-live/mods/sedan_new] [--pc sedan/sedan.pc] \
-//     [--wasm engine/crates/engine-webgpu/generated/world-wasm] [--renderer path/showcase-car-render.mjs]
+//     [--wasm engine/crates/engine-webgpu/generated/world-wasm] [--renderer path/showcase-car-render.mjs] [--held]
 //
 // --wasm: a folder with engine_world_wasm.js and engine_world_wasm_bg.wasm (a build).
 // Prints one JSON object: { label: sha256 of every write to it, in order }, and the
@@ -49,7 +49,10 @@ const materials = list.filter((f) => f.endsWith('.materials.json')).map(text);
 const glb = new Uint8Array(readFileSync(join(MOD, list.find((f) => f.endsWith('.glb') && f.includes('/')))));
 const skin = new Uint8Array(readFileSync(join(MOD, list.find((f) => f.endsWith('.rskin')))));
 const spec = { jbeam: files, pc: readFileSync(join(MOD, PC), 'utf8'), native: true, wheels: 'raycast', paint: [0.6, 0.04, 0.03], materials };
-const r = wasm.jbeamVisualSkinned(spec, [], glb, skin);
+// --held: the model files streamed into the wasm heap 64 KB at a time (HeldBytes, as
+// the vehicle lab loads them) and read there (jbeamVisualSkinnedHeld).
+const hold = (bytes) => { const h = new wasm.HeldBytes(bytes.length); for (let k = 0; k < bytes.length; k += 65536) h.push(bytes.subarray(k, k + 65536)); return h; };
+const r = args.includes('--held') ? wasm.jbeamVisualSkinnedHeld(spec, [], hold(glb), hold(skin)) : wasm.jbeamVisualSkinned(spec, [], glb, skin);
 const visual = r.visual;
 
 // Anything the renderer asks of a device; each buffer's contents once written (however

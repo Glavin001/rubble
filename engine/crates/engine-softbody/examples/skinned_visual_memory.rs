@@ -85,17 +85,20 @@ fn main() -> Result<(), String> {
     stage(if decoded { "rskin decoded" } else { "rskin read in place" });
     let (vis, rep) = engine_softbody::flexmesh::jbeam_visual_skin(&flex, &props, &desc, &sim, &all, &Default::default(), [0.6, 0.04, 0.03], Some(sref))?;
     stage("visual built");
-    // visual_js before: each flattened field collected into a Vec, then copied out
-    // (now copied from the flat slice).
-    let flat: Vec<f32> = vis.wt_w.iter().flatten().copied().collect();
-    stage("(the old visual_js's largest temporary, wtW flattened)");
-    drop(flat);
+    println!(
+        "    weights held as {}",
+        if matches!(vis.wt, engine_softbody::flexskin::WtEntries::Steps { .. }) {
+            "grid steps (8 B an entry)"
+        } else {
+            "f32 (16 B an entry)"
+        }
+    );
     println!(
         "{} vertices, {} triangles, {} skin entries ({:.1} a vertex)",
         rep.vertices,
         rep.triangles,
-        vis.wt_node.len(),
-        vis.wt_node.len() as f64 / vis.positions.len().max(1) as f64
+        vis.wt.len(),
+        vis.wt.len() as f64 / vis.positions.len().max(1) as f64
     );
     drop((vis, bytes, skin, all, g));
     drop((glb_bytes, skin_bytes));

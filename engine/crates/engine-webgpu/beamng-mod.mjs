@@ -4,7 +4,7 @@
 // visual, its textures). Shared by the pages that load one (softbody.html ?mod=,
 // one-world.html). Community content is data: only its .jbeam, .pc, .dae,
 // .materials.json, .glb/.rskin and image files are read, and nothing in it runs.
-import { jbeamVisual, jbeamVisualSkinned, decodeTexture } from './rubble-world.mjs';
+import { jbeamVisual, jbeamVisualSkinned, jbeamVisualSkinnedHeld, HeldBytes, decodeTexture } from './rubble-world.mjs';
 
 /**
  * The vehicle folder at `base` (a URL): `{ kind: 'jbeam', files: [[name, text]] (its
@@ -34,13 +34,45 @@ export async function fetchFile(url) {
   }
 }
 
-export async function loadMod(base, { pc = null } = {}) {
+/**
+ * One file's bytes streamed into the wasm heap as they arrive (a `HeldBytes`: the page
+ * never holds the file itself), with fetchFile's checks: an HTTP error throws, a body
+ * shorter than its Content-Length is fetched once more, then throws.
+ */
+export async function fetchHeld(url) {
+  for (let attempt = 1; ; attempt++) {
+    const r = await fetch(url, attempt > 1 ? { cache: 'no-store' } : undefined);
+    if (!r.ok) throw new Error(`${url}: ${r.status} ${r.statusText}`);
+    const encoded = (r.headers.get('Content-Encoding') ?? 'identity') !== 'identity';
+    const want = encoded ? NaN : Number(r.headers.get('Content-Length'));
+    const held = new HeldBytes(want > 0 ? want : 0);
+    try {
+      const reader = r.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        held.push(value);
+      }
+    } catch (e) { held.free(); throw e; }
+    if (!(want > held.length)) return held;
+    const got = held.length;
+    held.free();
+    if (attempt >= 2) throw new Error(`${url}: truncated, ${got} of ${want} bytes (after a retry)`);
+  }
+}
+
+// `held`: the glTF model files (.glb, .rskin) streamed into the wasm heap (fetchHeld)
+// rather than kept as bytes in JavaScript; modVisual reads them there, releaseModels
+// frees them.
+export async function loadMod(base, { pc = null, held = false } = {}) {
   base = base.replace(/\/$/, '');
   const r = await fetch(`${base}/files.json`);
   if (!r.ok) throw new Error(`${base}/files.json: ${r.status} ${r.statusText}. ${LOCAL_MODS}`);
   const list = await r.json();
   const text = async (f) => [f, new TextDecoder().decode(await fetchFile(`${base}/${f}`))];
   const bin = async (f) => (f ? await fetchFile(`${base}/${f}`) : null);
+  const kept = [];
+  const model = async (f) => { const b = f ? await (held ? fetchHeld : fetchFile)(`${base}/${f}`) : null; if (held && b) kept.push(b); return b; };
   const pcName = pc ?? list.find((f) => f.endsWith('.pc'));
   const skinName = list.find((f) => f.endsWith('.rskin'));
   const glbName = skinName && list.find((f) => f.endsWith('.glb') && f.includes('/'));
@@ -49,22 +81,35 @@ export async function loadMod(base, { pc = null } = {}) {
     pcName && list.includes(pcName) ? text(pcName).then((t) => t[1]) : undefined,
     Promise.all(list.filter((f) => f.endsWith('.dae')).map(async (f) => [f, await bin(f)])),
     Promise.all(list.filter((f) => f.endsWith('.materials.json')).map(text)),
-    bin(glbName),
-    bin(skinName),
-  ]);
-  return { kind: 'jbeam', files, pc: pcText, pcName, meshes, materials, base, list, label: base.split('/').pop(), glb, skin, glbName, skinName,
+    model(glbName),
+    model(skinName),
+  ]).catch((e) => { for (const b of kept) b.free(); throw e; });
+  return { kind: 'jbeam', files, pc: pcText, pcName, meshes, materials, base, list, label: base.split('/').pop(), glb, skin, glbName, skinName, held,
     modelBytes: (glb?.length ?? 0) + (skin?.length ?? 0) };
 }
 
 // A glTF-skinned vehicle's cost as the vehicle lab measured it
 // (engine/docs/measurements/lab-load-memory.md: the generated sedan, 16 MB glb and
-// 124 MB rskin; the authored sedan for the base): the tab's peak physical footprint
-// (JS and wasm heaps, the browser's own), the GPU memory the lab holds, and the skin's
-// bind buffer (64 bytes a vertex and a slot of 4 entries: about twice the rskin).
-const FOOTPRINT = { tabBase: 450e6, tabPerModelByte: 6.0, gpuBase: 170e6, gpuPerSkinByte: 2.15, bindPerSkinByte: 2.16 };
+// 124 MB rskin, a 922 MiB tab peak; the authored sedan for the base): the tab's peak
+// physical footprint (JS and wasm heaps, the browser's own), the GPU memory the lab
+// holds, and the skin's bind buffer (64 bytes a vertex and 8 an entry as the rskin's
+// grid steps: 1.16 × the rskin).
+const FOOTPRINT = { tabBase: 450e6, tabPerModelByte: 3.7, gpuBase: 170e6, gpuPerSkinByte: 1.16, bindPerSkinByte: 1.16 };
 // The share of a device's memory a tab can count on (a judgement: browsers kill a
 // tab well before it has the device's whole memory).
 const TAB_SHARE = 0.5;
+// iOS and iPadOS (every browser there is WebKit) report no navigator.deviceMemory, and
+// WebKit closes a tab's web process near a limit it does not expose (jetsam's, set by
+// the device's memory). A judgement, from one report: an iPhone ran the authored sedan
+// (0.42 GB tab peak measured in desktop Chrome) and lost the generated one (1.2 GB).
+// A car estimated over this is warned about there, with the choice to load it anyway.
+const IOS_TAB = 1.0e9;
+
+/** Whether this browser is on iOS or iPadOS (an iPad asks for desktop pages as a Mac with touch). */
+export function isIOS(nav = globalThis.navigator) {
+  if (!nav) return false;
+  return /iPhone|iPad|iPod/.test(nav.userAgent ?? '') || (/Macintosh/.test(nav.userAgent ?? '') && (nav.maxTouchPoints ?? 0) > 1);
+}
 
 /**
  * What loading a glTF-skinned vehicle will cost, estimated from its model files' sizes
@@ -78,10 +123,11 @@ export function modFootprint({ glb = 0, skin = 0 }) {
 /**
  * Whether a footprint (`modFootprint`) fits this device: `deviceMemory` (GB,
  * navigator.deviceMemory where the browser gives it; Safari does not), `limits` (the
- * WebGPU adapter's, or null). `{ fits, message }`: the message names the vehicle and
- * the numbers. Without a deviceMemory the memory is not judged (nothing to judge by).
+ * WebGPU adapter's, or null), `ios` (isIOS(): no deviceMemory there, judged against
+ * IOS_TAB instead). `{ fits, message }`: the message names the vehicle and the numbers.
+ * Elsewhere without a deviceMemory the memory is not judged (nothing to judge by).
  */
-export function footprintCheck(fp, { deviceMemory, limits, name }) {
+export function footprintCheck(fp, { deviceMemory, limits, name, ios = false }) {
   const mb = (b) => `${Math.round(b / 2 ** 20)} MB`;
   const need = `the ${name} needs about ${mb(fp.tab)} of this tab's memory and ${mb(fp.gpu)} of GPU memory to load`;
   if (limits) {
@@ -93,6 +139,9 @@ export function footprintCheck(fp, { deviceMemory, limits, name }) {
   }
   if (deviceMemory && fp.tab + fp.gpu > TAB_SHARE * deviceMemory * 2 ** 30) {
     return { fits: false, message: `${need}; this device reports ${deviceMemory} GB of memory, and a tab can count on about ${Math.round(100 * TAB_SHARE)} % of it. Loading it would likely crash the tab.` };
+  }
+  if (!deviceMemory && ios && fp.tab > IOS_TAB) {
+    return { fits: false, message: `${need}; iOS does not report this device's memory, and an iPhone has closed the tab loading a car that needs about 1.2 GB (it ran one of 0.42 GB). Loading it may crash the tab.` };
   }
   return { fits: true, message: '' };
 }
@@ -116,13 +165,16 @@ export async function modModelSizes(base) {
  * cache's copy, normally) before another is built. A phone's tab cannot keep them.
  */
 export function releaseModels(mod) {
-  if (mod.skinName) mod.glb = mod.skin = null;
+  if (!mod.skinName) return;
+  if (mod.held) { mod.glb?.free(); mod.skin?.free(); }
+  mod.glb = mod.skin = null;
 }
 
 /** The model bytes `releaseModels` dropped, fetched again (nothing when they are held). */
 export async function modModels(mod) {
   if (!mod.skinName || mod.skin) return mod;
-  const [glb, skin] = await Promise.all([mod.glbName ? fetchFile(`${mod.base}/${mod.glbName}`) : null, fetchFile(`${mod.base}/${mod.skinName}`)]);
+  const get = mod.held ? fetchHeld : fetchFile;
+  const [glb, skin] = await Promise.all([mod.glbName ? get(`${mod.base}/${mod.glbName}`) : null, get(`${mod.base}/${mod.skinName}`)]);
   mod.glb = glb; mod.skin = skin;
   return mod;
 }
@@ -136,7 +188,7 @@ export async function modModels(mod) {
 export function modVisual(mod, { native = true, raycast = false, paint = null } = {}) {
   if (mod.skinName && !mod.skin) throw new Error(`modVisual: ${mod.label}'s model files were released (releaseModels); await modModels(mod) first`);
   const spec = { jbeam: mod.files, pc: mod.pc, native, ...(raycast ? { wheels: 'raycast' } : {}), ...(paint ? { paint } : {}), materials: mod.materials ?? [] };
-  const r = mod.skin ? jbeamVisualSkinned(spec, mod.meshes, mod.glb, mod.skin) : jbeamVisual(spec, mod.meshes);
+  const r = mod.skin ? (mod.held ? jbeamVisualSkinnedHeld : jbeamVisualSkinned)(spec, mod.meshes, mod.glb, mod.skin) : jbeamVisual(spec, mod.meshes);
   r.visual.lod = r.visualLod ? [r.visualLod, r.visualFar] : [];
   return r;
 }
