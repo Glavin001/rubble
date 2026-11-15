@@ -1902,7 +1902,9 @@ pub unsafe extern "C" fn rbWorld_PrewarmAsync(world: *mut RbWorld, groups: u32) 
 }
 
 /// Progress of the world's background prewarms: kernels compiled so far and in
-/// all (`done == total` when finished; both 0 when none was started).
+/// all (`done == total` when finished; both 0 when none was started). A kernel the
+/// platform's shader compiler could not build counts as done and makes this return
+/// `RB_ERROR` (the progress is still written), so a loading loop always ends.
 #[no_mangle]
 pub unsafe extern "C" fn rbWorld_GetPrewarmProgress(
     world: *mut RbWorld,
@@ -1917,7 +1919,12 @@ pub unsafe extern "C" fn rbWorld_GetPrewarmProgress(
             .map(Prewarm::progress)
             .fold((0, 0), |(d, t), (a, b)| (d + a, t + b));
         write(out_done, done as u32)?;
-        write(out_total, total as u32)
+        write(out_total, total as u32)?;
+        // A kernel the platform compiler could not build (after a retry) is an error
+        // the host sees here, with done == total, never a progress that stops short.
+        let failed: usize = w.prewarms.iter().map(Prewarm::failed).sum();
+        anyhow::ensure!(failed == 0, "prewarm: {failed} of {total} kernels failed to compile (the platform's shader compiler; see stderr)");
+        Ok(())
     })
 }
 

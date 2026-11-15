@@ -110,10 +110,36 @@ impl LazyKernel {
 /// being compiled waits for that one).
 pub struct Prewarm {
     done: Arc<std::sync::atomic::AtomicUsize>,
+    failed: Arc<std::sync::atomic::AtomicUsize>,
     total: usize,
 }
 
+/// One background kernel build: a build that fails (a driver's compiler can fail
+/// transiently: seen on CI's Metal, "Compilation failed") is tried once more, and a
+/// build that still fails is counted in `failed`. Either way it counts in `done`, so a
+/// prewarm always finishes: a failure is reported, never a progress that stops short
+/// (a host waiting for `done == total` waited forever). The kernel is built again,
+/// and its error raised, by the first step that needs it.
+#[cfg(not(target_arch = "wasm32"))]
+fn prewarm_one(
+    build: impl Fn(),
+    done: &std::sync::atomic::AtomicUsize,
+    failed: &std::sync::atomic::AtomicUsize,
+) {
+    use std::sync::atomic::Ordering;
+    let try_once = || std::panic::catch_unwind(std::panic::AssertUnwindSafe(&build)).is_ok();
+    if !(try_once() || try_once()) {
+        failed.fetch_add(1, Ordering::Release);
+    }
+    done.fetch_add(1, Ordering::Release);
+}
+
 impl Prewarm {
+    /// Kernels this prewarm could not build (after a retry); they count as done.
+    pub fn failed(&self) -> usize {
+        self.failed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Kernels compiled so far, and how many this prewarm compiles in all.
     pub fn progress(&self) -> (usize, usize) {
         (self.done.load(std::sync::atomic::Ordering::Acquire), self.total)
@@ -3898,6 +3924,7 @@ impl WgpuSim {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let todo = Arc::new(self.unbuilt(groups));
         let done = Arc::new(AtomicUsize::new(0));
+        let failed = Arc::new(AtomicUsize::new(0));
         let total = todo.len();
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3910,11 +3937,11 @@ impl WgpuSim {
             for _ in 0..threads {
                 let (todo, done, next) = (todo.clone(), done.clone(), next.clone());
                 let device = self.device.clone();
+                let failed = failed.clone();
                 std::thread::spawn(move || loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some((name, kernel)) = todo.get(i) else { break };
-                    kernel.build(&device, name);
-                    done.fetch_add(1, Ordering::Release);
+                    prewarm_one(|| { kernel.build(&device, name); }, &done, &failed);
                 });
             }
         }
@@ -3923,7 +3950,7 @@ impl WgpuSim {
             kernel.build(&self.device, name);
             done.fetch_add(1, Ordering::Release);
         }
-        Prewarm { done, total }
+        Prewarm { done, failed, total }
     }
 
     /// The kernels of `groups` not built yet, slowest first (the largest WGSL), so
@@ -4865,4 +4892,26 @@ pub struct SoftEvents {
     /// Records overwritten in the event ring before this poll (bodies were
     /// resynchronised from a readback).
     pub lost: u32,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod prewarm_tests {
+    use super::prewarm_one;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_build_that_panics_counts_as_done_and_failed() {
+        let (done, failed, tries) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
+        prewarm_one(|| { tries.fetch_add(1, Ordering::SeqCst); panic!("Compilation failed"); }, &done, &failed);
+        assert_eq!(done.load(Ordering::SeqCst), 1, "a failed build still finishes");
+        assert_eq!(failed.load(Ordering::SeqCst), 1, "and is reported");
+        assert_eq!(tries.load(Ordering::SeqCst), 2, "after one retry");
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried() {
+        let (done, failed, tries) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
+        prewarm_one(|| { if tries.fetch_add(1, Ordering::SeqCst) == 0 { panic!("transient"); } }, &done, &failed);
+        assert_eq!((done.load(Ordering::SeqCst), failed.load(Ordering::SeqCst)), (1, 0));
+    }
 }
