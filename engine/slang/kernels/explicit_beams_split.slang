@@ -44,7 +44,8 @@ void splitCplTable(uint off, uint k)
 }
 
 // coupleStepMembers for member `rank` alone (uniform `on`, k the group's members): the
-// same per-vehicle calls on the same lanes of its partition.
+// same per-vehicle calls on the same lanes of its partition (the candidate list's
+// shapes' maxima and its count pass included, as contactGroup runs them).
 void splitCoupleStep(uint v, uint rank, uint k, uint lane, uint s, uint on)
 {
     if (on == 0u) return;
@@ -59,17 +60,22 @@ void splitCoupleStep(uint v, uint rank, uint k, uint lane, uint s, uint on)
             if (act) cplIntegrateBy(v, lane, P);
         }
         sync();
-        if (act) cplSpheresBy(v, lane, P);
+        if (act)
+        {
+            cplSpheresBy(v, lane, P);
+            cplListShapes(v, lane, P, s);
+        }
         sync();
-        if (act) cplCountBy(v, lane, P);
+        if (act) cplCountStep(v, lane, P, s);
         sync();
         return;
     }
     if (s > 0u) cplIntegrate(v, lane);
     sync();
     cplSpheres(v, lane);
+    cplListShapes(v, lane, LANES, s);
     sync();
-    cplCount(v, lane);
+    cplCountStep(v, lane, LANES, s);
     sync();
 }
 
@@ -149,6 +155,10 @@ void splitGroupBegin(uint g, uint lane)
             gNext[vvPrefixAt(off, m)] = run;
             run += vvCpCount(vvMember(off, m));
         }
+        // The coupling list's frame maxima cleared (contactGroup's frame start;
+        // cplListBegin reads the header from workgroup memory: coupleBegin first).
+        coupleBegin();
+        for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) cplListBegin(vvMember(off, m));
     }
     sync();
     for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberBegin(vvMember(off, m), lane);
