@@ -630,3 +630,133 @@ int main(){
   printf("per 1/60 s frame (34 substeps): %.2f ms\n",(t1-t0)/steps*34*1e3);
 }
 ```
+
+## 7. First pass against this audit: measured phases, one change adopted, where the targets stand (2026-11-15)
+
+Branch `claude/rubble-vehicle-gpu-perf-2d0f9c`. M3 Max, native wgpu on Metal and headless
+Chrome (page visible to the compositor, 60 Hz). Benchmark: the vehicle lab's mountain at the
+page's defaults (seed 1, 50°, roughness 0.6, launch 14 m/s, no rockslide, surface contact
+off, self-collision across the GPU on), the generated sedan (548 nodes, 4,251 beams, 528
+collision triangles), 40 s. With these defaults the car is at rest, crumpled, from t ≈ 10 s,
+so three quarters of the run is a wreck lying still.
+
+New in the lab: a **"cars" control** (1–8; `LabOptions::cars`, `vehicle_lab --cars N`): the
+cars leave the lip together, side by side and stacked, closing on the first. It rebuilds
+the lab in place (the fleet is fixed when the World is built). The run's GPU time a step
+as median / p95 / worst: `vehicle_lab --measure mountain-perf --timing step` natively, the
+page's `__gpuRun()` (printed by `vehicle-lab-record.mjs --probe`).
+
+### 7.1 Where the targets stand
+
+Vehicle GPU ms per World step (the explicit frame and the coupling's passes), steps from
+t = 0.5 s, whole run:
+
+| Case | Before: median / p95 / worst | After: median / p95 / worst | Target (worst) |
+|---|---|---|---|
+| 1 car, native | 6.71 / 6.94 / 7.37 | 5.82 / 6.02 / 6.55 | 1.0 |
+| 1 car, Chrome | 6.81–6.87 / 7.23–8.76 / 7.77–12.29 (two runs) | 5.97–6.02 / 6.44–7.88 / 6.92 (15.2 in one run, one step) | 1.0 |
+| 8 cars, native, default paths | 312 / 534 / 553 | unchanged | 3 |
+| 8 cars, native, `RUBBLE_GROUP_SPLIT=1` and self split (14 s) | 168 / 257 / 270 | unchanged | 3 |
+
+**Neither target is met.** One car is 6–7× over its target; eight cars in a pile are
+50–180× over theirs. 60 steps/s held for one car in Chrome (10–20 steps refused in the
+first second of each run). Eight cars were not run in Chrome, and 120 steps/s was not
+tested.
+
+### 7.2 One car's frame by phase (native, measured)
+
+`vehicle_lab --ab T --ab-ablate …`: 20 frames of 34 steps from one snapshot under each
+mask, wall ms a frame, self split on. Skipping a phase removes its chain and what it
+feeds, so shares overlap; rows marked ≤ include downstream work.
+
+| Phase | Free fall, t 2.5 s | Wreck at rest, t 20 s | Measured how |
+|---|---|---|---|
+| Whole frame | 4.5 | 7.1 → **6.2** | |
+| Self-collision hits applied (`selfApply`) | ≈0 | 2.1 → **1.1** | second mask 64 |
+| Listed pairs' tests and walks (their dispatches) | 0.4 | ≈0.45 | `set_self_split_skip` 3, less `selfApply` |
+| Raycast wheels | 0.56 | 0.58 | second mask 1 |
+| Nodes | 0.5 | 0.6 | mask 2 |
+| Beams | 0.5 | 0.4 | mask 32 |
+| Coupling (step passes and node contacts) | 0.4 | 0.5 | mask 122880 |
+| 35 step dispatches that return at once | 0.33–0.38 | same | second mask 4096 |
+| … with the frame's start in each (records, rebase check, 3 barriers) | 0.45–0.53 | same | second mask 8192 |
+| Everything else in a step (the reuse decision and tracking, bucket counts, triangle throttles, volatile triangles, barriers) | ≈1.1 | ≈1.2 | remainder |
+
+The in-workgroup frame (self split off) is 6.2 ms in free fall and 8.7–9.1 ms from the
+first impact on; a frame whose step loop is empty costs 0.47 ms there (one dispatch).
+
+Two corrections to §1–§2 from these numbers:
+- **No phase is under 0.3 ms a frame, and none is over 1.1 ms after the change below.**
+  There is no single cause left to remove for one car; the frame is about a dozen
+  dependent phases a step of 10–30 µs each.
+- **A phase's cost is its longest lane's chain, and a core is the unit.** The repo's own
+  prototype (`wide-frame-design.md` §1.1: beams and nodes only, simple springs, 804 nodes,
+  6,427 beams) measured 18 µs a substep for two phases in one workgroup and 15–17 µs as
+  two dispatches across the GPU: **about 9 µs a dependent phase either way, 0.3 ms a
+  frame**. §1.2 assumed 1.5–3 µs. A step with self-collision needs at least four phases
+  in sequence (nodes, beams, the pair tests, the hits applied), so the floor of a crash
+  frame is about 4 × 0.3 = **1.2 ms** before the hit rounds, the coupling and the wheels,
+  and free flight about 0.6 ms. **The 1.0 ms worst-frame target is below that for crash
+  frames on this GPU** with any schedule built from these phases. The realistic target
+  for one car is 1.2–1.5 ms; today is 6.2–6.5.
+
+### 7.3 Adopted: `selfApply`'s node forces summed once a hit (perf flag 1, on by default)
+
+The two-body rule's round and the residual pass's two phases each summed the beam forces
+of a hit's four nodes again, in series on the hit's lane (12 `beamSum`s a hit). Now a
+phase before the rounds computes each (hit, role)'s sum on its own lane into the hit list's
+region (`hitFbFill`, 12 words a hit after the pending beams), and the three readers load
+it. Nothing in `selfApply` writes what `beamSum` reads (the incidence entries and the
+step's group slots), so the stored bits are the bits each reader computed.
+`explicit_plan::PERF_HIT_FB`, `ExplicitBeamsGpu::set_perf_flags`, `RUBBLE_PERF_FLAGS=0`
+off, the page's "hit forces summed once" (live), `vehicle_lab --ab-switch perf=1`.
+
+Bit for bit (every state word, 20 frames of 34 steps each way from one snapshot):
+- mountain, one car, self split on: t 2.5, 4, 6, 8, 20 s; with flag 2 as well, self split
+  on and off: t 0.5, 2.5, 4, 6, 8, 20 s;
+- two cars in contact: t 1, 2, 3, 5 s; eight cars in contact: t 1, 2, 3 s (flags 1 and 2);
+- against the CPU reference and the frozen kernel with the flags on
+  (`tools/explicit-2khz/perf-verify.sh 3`): `explicit_loop_cap` 5, `explicit_beams_bitwise`
+  12, `explicit_contact_gpu` 13, `explicit_pair_reuse_gpu` 2, `explicit_drive_gpu` 3,
+  `showcase_car_gpu` 6 (1 ignored, as before), `vv_grid_gpu` 2, `explicit_jbeam_gpu` 6;
+  engine-world `explicit_vehicles` 11, `vehicle_lab_reset` 3, `vehicle_lab_piece_windows` 1,
+  `explicit_drive_world` 1. The same suites and `explicit_plan_modules` pass with every
+  flag off (`perf-verify.sh 0`: the old path after the kernel edits).
+- **Not run:** the `engine-metal` parity suites (Metal and CUDA hosts take the flag from
+  the shared plan, so they run the new path by default), and the Chrome module check
+  `softbody-check.mjs` (the lab page itself loaded and ran with both flags on, no console
+  or WGSL error).
+
+Time, same snapshots, ms a frame, off → on: free fall 4.40 → 4.41; t 4 s 6.69 → 5.90; 6 s
+7.08 → 6.15; 8 s 6.96 → 6.00; 20 s 7.17 → 6.20 (−12 to −14 %). Chrome, whole run: median
+6.81 → 5.97–6.02, p95 7.23 → 6.44 in the clean run.
+
+### 7.4 Tried, bit for bit, not faster: the wheels beside other phases (perf flag 2, off)
+
+The wheels' rays and bars for step s + 1 beside step s's beam phase and after it, their
+tyres beside the coupling's first phase (`driveAheadPart`; three barriers a step fewer).
+Every state word the same at all six times, split and in-workgroup. Time: −2 % to +7 %
+natively, 6.02 against 5.97 ms median in Chrome. A wheel's tyre chain is longer than the
+coupling phase it shares, and its rays lengthen the beam phase on their lanes, so the
+frame waits as long as before: removing barriers does not pay when the guest's chain is
+the longer one. Kept behind its switch (the page's "wheels beside other phases").
+
+Also measured: one barrier instead of two per `sync()` (mask 64) changes the state on
+Metal, so its timing (−1.3 ms at rest) is not a result; both barriers are needed.
+
+### 7.5 Remaining gap per phase, and what would close it
+
+| Phase | Now (rest) | Floor (0.3 ms a dependent phase) | Why it is above |
+|---|---|---|---|
+| Hits applied | 1.1 | 0.3–0.6 | five phases in sequence (fill, round, residual, guard, merge); each is a real dependency of the specification's residual pass |
+| Pair tests | 0.45 | 0.3 | at its floor within 2× |
+| Nodes, beams | 0.6, 0.4 | 0.3 each | 548 nodes on 512 lanes put two nodes on 36 lanes; 8 beams a lane |
+| Coupling | 0.5 | 0.3 | two phases (folded) |
+| Wheels | 0.58 | 0 beside another phase | the tyre chain; see §7.4 |
+| Dispatches and frame start | 0.5 | 0.07 (34 × 2 µs) | 10 µs a step dispatch of the 470 KB kernel, not the 2 µs of a trivial one |
+| Rest of a step | 1.2 | ≈0.1 | not split further |
+
+Eight cars: the default path steps a group of eight on one workgroup (the big-group pass);
+the existing split paths halve it and leave the pass of a group past four members in one
+workgroup (`contact-groups-design.md` §5.3). Reaching 3 ms needs that pass across
+workgroups for any group size, then every per-car phase above. Not started here.

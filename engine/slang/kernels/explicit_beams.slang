@@ -1551,6 +1551,9 @@ uint pendList(uint v) { return hitList(v) + HIT_CAP * HIT_WORDS; }
 // beams; filled once a step (hitFbFill) for the round and the residual pass's phases,
 // which each summed it again. 0: no record (the sum from the incidence entries).
 static const uint PERF_HIT_FB = 1u;
+// perfFlags bit 2: the raycast wheels' rays and bars beside the step before's beam phase,
+// their tyres beside the coupling's first phase (driveAheadPart): no phase of their own.
+static const uint PERF_DRIVE_AHEAD = 2u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 
 // The break exception (spec §2, step 4: an end on a collision triangle with fewer
@@ -6439,6 +6442,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.x;
     uint lane = lid.x;
+#ifdef EB_ABLATE
+    // Measurement only (time): 4096 the dispatch alone.
+    if (EB_A2(4096u)) return ebLoopCapFlush();
+#endif
     // Vehicle sleep, awake-indexed: the workgroup's awake vehicle (or contact group).
     bool sleepListed = gP.sleepRec != 0u && gP.sleepPad0 != 0u;
     if (sleepListed) v = sleepPick(gid.x, lane);
@@ -6577,10 +6584,22 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
 
     sync();
+#ifdef EB_ABLATE
+    // Measurement only (time): 8192 the dispatch and the frame's start alone.
+    if (EB_A2(8192u)) return ebLoopCapFlush();
+#endif
     uint selfOn = gsUniformLanes;
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
     uint surfOn = surfaceOn();
+    // The wheels' parts beside other phases (driveAheadPart; uniform).
+    bool driveAhead = (gP.perfFlags & PERF_DRIVE_AHEAD) != 0u && driveOn != 0u;
+    // The lane's drive context for the next step's parts (driveAheadCtx), kept from its
+    // rays to its tyres within one invocation.
+    DrvCtx drvC = (DrvCtx)0;
+    bool drvHas = false;
+    bool drvApart = false;
+    bool drvCarried = false;
 
 #ifdef EB_SELF_SPLIT
     // Step k - 1's rest (k = gP.pad2), after its tests' dispatches: its hits applied,
@@ -6641,11 +6660,29 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
         if (!EB_A2(512u))
 #endif
-        coupleStep(v, lane, s, coupleOn);
+        {
+            if (driveAhead)
+            {
+                // The frame's first step: its rays and bars here (later steps': beside
+                // the step before's beam phase).
+                if (!drvCarried) driveAheadCtx(v, LANES - 1u - lane, drvC, drvHas, drvApart);
+                if (s == 0u)
+                {
+                    driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 0u, stepBase + s);
+                    sync();
+                    driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 1u, stepBase + s);
+                    sync();
+                }
+                driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 2u, stepBase + s);
+                if (lane == 0u) gsHit = 1u;
+                if (coupleOn == 0u) sync();
+            }
+            coupleStep(v, lane, s, coupleOn);
+        }
 #ifdef EB_ABLATE
         if (!EB_A2(1u))
 #endif
-        driveStep(v, lane, s, driveOn);
+        if (!driveAhead) driveStep(v, lane, s, driveOn);
         uint step = stepBase + s;
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
@@ -6790,6 +6827,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         // (Sorted records or, gP.beamOrder 0, file order: one call site of beamUpdate.)
         beamPhaseSorted(v, lane, LANES, beamHead, beamEnd != 0u, nodeOff, beamOff, fast, groupOff, parity, flagsV, beamEnd);
+        // The next step's rays (driveAheadPart), on the lanes with the fewest beams.
+        if (driveAhead && s + 1u < gP.steps)
+        {
+            driveAheadCtx(v, LANES - 1u - lane, drvC, drvHas, drvApart);
+            drvCarried = true;
+            driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 0u, stepBase + s + 1u);
+        }
         // Without the grid this step: list the candidate pairs now (lanes in
         // reverse, so those with one beam fewer start first).
         uint listedB = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
@@ -6818,6 +6862,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
         sync();
         uint gridOn = gsUniformLanes;
+        // The next step's bars, after its rays' barrier (the step's closing barrier
+        // follows before its tyres).
+        if (driveAhead && s + 1u < gP.steps) driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 1u, stepBase + s + 1u);
         // The grid's pair list this step (pairReuseDecide; nonzero only with the grid): 2
         // reused, no grid to build.
         uint reuse = gridOn >> 1;

@@ -2446,6 +2446,15 @@ impl Lab {
             }
             return Ok(json!({ "selfSplitSkip": n }));
         }
+        // { perfFlags: n }: the kernels' lossless schedule switches
+        // (ExplicitBeamsGpu::set_perf_flags, explicit_plan::PERF_*: the same results bit
+        // for bit either way), from the next step.
+        if let Some(n) = cmd.get("perfFlags").and_then(Value::as_u64) {
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.set_perf_flags(n as u32);
+            }
+            return Ok(json!({ "perfFlags": n }));
+        }
         // { pieceWindows: bool }: the coupling's window per piece (LabOptions::piece_windows).
         if let Some(on) = cmd.get("pieceWindows").and_then(Value::as_bool) {
             self.bench.opts.piece_windows = on;

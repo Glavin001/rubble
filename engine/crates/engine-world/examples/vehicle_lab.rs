@@ -866,12 +866,19 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             // mask (time only; 2147483648 is the ablation kernel with nothing skipped).
             if let Some(masks) = arg("--ab-ablate") {
                 let mut line = Vec::new();
-                // (`M:M2`: with the second mask M2, `set_ablation2`.)
-                for (m, m2) in masks.split(',').filter_map(|m| {
+                let mut first_words = None;
+                // (`M:M2[:SKIP]`: with the second mask M2, `set_ablation2`, and the self
+                // split's walk (1) and pairs (2) dispatches left out, `set_self_split_skip`.)
+                for (m, m2, skip) in masks.split(',').filter_map(|m| {
                     let mut p = m.split(':');
-                    Some((p.next()?.parse::<u32>().ok()?, p.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0)))
+                    Some((
+                        p.next()?.parse::<u32>().ok()?,
+                        p.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0),
+                        p.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0),
+                    ))
                 }) {
                     x.restore(&snap);
+                    x.set_self_split_skip(skip);
                     x.set_ablation2(m2);
                     x.set_ablation(m);
                     x.wait();
@@ -880,11 +887,14 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         x.frame(34);
                         x.wait();
                     }
-                    line.push(format!(
-                        "{m}:{m2}: {:.2}",
-                        t.elapsed().as_secs_f64() * 1e3 / 20.0
-                    ));
+                    let ms = t.elapsed().as_secs_f64() * 1e3 / 20.0;
+                    // (Whether the frames ended in the first mask's state: a mask that
+                    // skips nothing the results depend on.)
+                    let words = x.state_words();
+                    let same = *first_words.get_or_insert_with(|| words.clone()) == words;
+                    line.push(format!("{m}:{m2}:{skip}: {ms:.2}{}", if same { " =" } else { "" }));
                 }
+                x.set_self_split_skip(0);
                 x.set_ablation2(0);
                 x.set_ablation(0);
                 println!(

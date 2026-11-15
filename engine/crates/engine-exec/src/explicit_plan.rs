@@ -202,9 +202,15 @@ pub const W_PERF_FLAGS: usize = 98;
 /// (the kernel's `hitFbFill`) instead of in the two-body round and again in each of the
 /// residual pass's two phases.
 pub const PERF_HIT_FB: u32 = 1;
-/// The switches a host starts with: `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement).
+/// [`W_PERF_FLAGS`]: the raycast wheels' rays and bars beside the step before's beam
+/// phase and their tyres beside the coupling's first phase (the kernel's
+/// `driveAheadPart`), in place of three phases of their own each step. Solo frames.
+pub const PERF_DRIVE_AHEAD: u32 = 2;
+/// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
+/// in Chrome: vehicle-perf-first-principles.md §7); `RUBBLE_PERF_FLAGS=<mask>` overrides
+/// (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB)
 }
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;
