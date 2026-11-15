@@ -82,7 +82,13 @@ fn compile_timing(device: &wgpu::Device, spec: &str) {
         "unchecked" => checks = wgpu::ShaderRuntimeChecks::unchecked(),
         m => panic!("unknown check mode {m}"),
     }
-    let path = format!("{}/{name}.wgsl", engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR);
+    // A NAME with a `/` is a WGSL file's path (e.g. another build's module shipped with
+    // gpu_run.sh --data: before and after in one run).
+    let path = if name.contains('/') {
+        name.to_string()
+    } else {
+        format!("{}/{name}.wgsl", engine_webgpu::EXPLICIT_BEAMS_WGSL_DIR)
+    };
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let entries: Vec<String> = src
         .split("@compute")

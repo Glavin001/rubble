@@ -82,3 +82,70 @@ On macOS the Metal compiler service (`MTLCompilerService`) goes on compiling a p
 - `one-world.html`, `explicit-world.html`, `brick-ring-drive.html` and `vehicle-lab.html` were not loaded in a browser after their loading card and stop were wired in; they build, and the card and the stop panel are tested on their own (`load-progress-check.mjs`).
 - Compile times on other GPUs and browsers. The inlined-size measure is about Metal; other drivers may not inline everything.
 - `explicit_plan_modules` fails on `feat/sedan-body` before these changes (the shared module table lacks the surface split's modules) and still does; the `_nocpl` modules are WGSL only and are not in that table either.
+
+## 2026-11-15: NVIDIA's driver, nvcc and Metal (the vehicle lab's mountain page)
+
+Goal (owner): a cold compile of every pipeline the vehicle lab's mountain page needs
+(generated sedan, page defaults: the frame module `explicit_beams_wide_nosurf` and the
+deferred self-split modules `explicit_beams_selfsplit_{step,walk,pairs}_wide`) in under
+60 s on NVIDIA (T4, Vulkan), proportionally less on Metal and nvcc. Lossless only: every
+change bit for bit, runtime no worse.
+
+### Where the time goes
+
+GPU drivers inline every call, so a module costs what its entry point is after full
+inlining. `tools/explicit-compile/inline_size.py MODULE.wgsl` counts it (non-blank WGSL
+lines, each function's own lines times the call paths that reach it):
+
+| Module | WGSL lines | after inlining |
+|---|---|---|
+| frozen reference `explicit_ref_solo` (T4: 2.5–3.3 s) | 2,966 | 26,764 |
+| `explicit_beams_wide_nosurf` (T4: 171 s) | 15,766 | 262,497 |
+| `explicit_beams_solo` (with surface, T4: 504–518 s) | 23,997 | 736,404 |
+| `explicit_beams_contact_wide_nosurf` (T4: 1,024 s) | 22,793 | 561,783 |
+
+Tested and ruled out:
+
+- **Unrolling.** The substep loop's count is a run-time value (`gP.steps`); Slang keeps
+  every loop a loop (136 in the frame's WGSL, 146 `for(;;)` in its CUDA). Forcing
+  `#pragma unroll 1` on all 146 CUDA loops: PTX −1.3 % lines, nvcc 44.9 → 42.4–43.4 s.
+- **wgpu's runtime checks** (bounds, loop bounding, division): no change on the T4
+  (tools/modal/README.md).
+
+Proxy (nvcc, sm_75 alone, Docker on the M3 Max; `tools/cuda/measure_nvcc.py`): marking
+every function of 20+ lines `__noinline__` (`tools/explicit-compile/cu_noinline.py`)
+takes the frame from 44.9 to 9.9 s, so the copies are the cost. One function at a time
+(noinline, frame, s): cplHdr 38.2, tryContact 34.6, beamUpdate 38.8, selfTwoBodyCore 37.5,
+ebEnd 36.1, triangleGeo 40.5. WGSL has no noinline, so the fix is fewer call sites in the
+source: the same calls in the same order from one site (a loop over the cases, or a
+select of the arguments), or a branch-free helper.
+
+### Changes (each bit for bit; mountain A/B against the previous build's WGSL)
+
+| Step | Frame lines after inlining | nvcc frame / step (s) | Metal cold, page's 4 modules (s) |
+|---|---|---|---|
+| baseline | 262,497 | 44.9 / 45 (alone); 60.3 / 60.8 (4 at once) | 19.4 (frame 9.3, step 9.5) |
+| 1. cplHdr: always the workgroup copy (no branch, ~630 copies) | 235,407 | 34.9 | |
+| 2. ebEnd / ebEndMost: selects, not ifs (~220 copies) | 226,851 | 33.5 | 15.1 |
+| 3. the four accelerations of selfTwoBodyCore, resDrive, guardOf from one call site (opaqueCount loop); the node pass's ground and box contacts from one contactForce | 214,711 | | |
+| 4. the brute and every-candidate tests from one site; the frame's listing walk without tests | 201,261 | 27.6 / 26.5 | 12.9 |
+| 5. the step's listed pairs (reused, walk's, early) from one tryContact site; the testing walk from one site | 187,232 | 28.3 / 26.4 | |
+| 6. one beamUpdate site for sorted and file order; selfSerial's hits and residual modes as one pass | 169,029 | 24.7 / 23.8 | 12.0 (frame 5.9, step 5.6) |
+
+`opaqueCount(n)` is n plus `noFuseBits()` (0 at run time from a uniform), so no compiler
+can see the trip count and unroll the merged call sites back into copies.
+
+Strict arithmetic: every merged call passes values that are the results of strict
+operations (`nf`, a bitcast XOR) or loads, never a plain product, so a merge cannot
+change what a driver contracts into an FMA. (The coupling's two `contactForce` calls,
+one with `f * share`, are left alone for that reason.)
+
+Runtime, mountain (vehicle_lab --measure mountain-perf --self-split 1 --ab-switch kernel
+--ab-kernel-dir <base WGSL>, native Metal, ms a frame, this kernel / base, one snapshot
+each way): see the commit messages and the table in the final report.
+
+### Not done / open
+
+- Chrome runtime A/B (no harness runs two kernels from one snapshot in the page).
+- The page could start on the self-split modules alone (no frame module), halving its
+  cold compile; that changes the page's start, an owner decision.

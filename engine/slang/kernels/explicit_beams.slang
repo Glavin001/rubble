@@ -432,6 +432,12 @@ Surface contactSurfaceV(uint v, uint w)
 // Strict float arithmetic (slang/physics/strict.slang); its zero comes from a uniform.
 uint noFuseBits() { return gP.vehicles >> 31; }
 #include "../physics/strict.slang"
+// n, from a uniform the compilers cannot see through (noFuseBits is 0 at run time): a
+// loop `for (k < EB_END(k, opaqueCount(n), 1u))` over a call's n uses (the same calls in
+// the same order) stays a loop, its body one inlined copy, where the n calls written
+// out are n copies after the drivers inline everything
+// (engine/docs/measurements/kernel-compile-time.md).
+uint opaqueCount(uint n) { return n + noFuseBits(); }
 
 float sFastInvSqrt(float x)
 {
@@ -680,6 +686,46 @@ float3 frictionLimit(float3 c, float3 f, float3 v, float m, float3 n, float p)
     float3 dv = sscale(t, sdiv(STEP, m));
     if (sdot(dv, vt) < 0.0 && sdot(dv, dv) > sdot(vt, vt)) return sadd3(c, ssub3(sscale(-vt, sdiv(m, STEP)), t));
     return c;
+}
+
+// The node pass's ground and box contacts of a node at x (world), in order: the ground
+// (depth ground − x.y > 0; with the friction limit when the node has it), then each box
+// it is inside, f with each one's force added. One call site of contactForce for all of
+// them (a loop over the ground, then the boxes: the same forces in the same order), where
+// the drivers would inline a copy per call (engine/docs/measurements/kernel-compile-time.md).
+float3 groundBoxContacts(float3 f, float3 vel, float mass, float3 x, uint4 info, uint vehicle, float ground,
+                         uint boxOff, uint boxCount, float friction)
+{
+    for (uint b = 0u, bStop = EB_END(b, boxCount + 1u, 1u); b < bStop; b++)
+    {
+        float3 n = float3(0.0, 1.0, 0.0);
+        float depth = ground - x.y;
+        bool on = ground > x.y;
+        if (b > 0u)
+        {
+            float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b - 1u) * 2u].xyz);
+            float3 hi = asfloat(gStatic[gP.boxBase + (boxOff + b - 1u) * 2u + 1u].xyz);
+            on = x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z;
+            if (on)
+            {
+                n = float3(0.0, 0.0, -1.0);
+                float d = x.z - lo.z;
+                if (hi.z - x.z < d) { d = hi.z - x.z; n = float3(0.0, 0.0, 1.0); }
+                if (x.x - lo.x < d) { d = x.x - lo.x; n = float3(-1.0, 0.0, 0.0); }
+                if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
+                if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
+                if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
+            }
+            depth = 0.0;
+        }
+        if (on)
+        {
+            float3 c = contactForce(f, vel, mass, n, surfaceV(b == 0u ? groundSurface() : boxSurface(), vehicle), depth, friction);
+            if (b == 0u && (info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
+            f += c;
+        }
+    }
+    return f;
 }
 
 // The tread contact (NODE_TREAD, jbeam-semantics-spec.md §34; CPU
@@ -1142,28 +1188,7 @@ void nodeUpdate(uint gi, uint4 info, uint vehicle, uint local, uint step, float3
     if ((flags & NODE_NO_GROUND) == 0u)
     {
         float3 x = origin + pos;
-        if (ground > x.y)
-        {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
-            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
-            f += c;
-        }
-        for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
-        {
-            float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u].xyz);
-            float3 hi = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u + 1u].xyz);
-            if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)
-            {
-                float3 n = float3(0.0, 0.0, -1.0);
-                float d = x.z - lo.z;
-                if (hi.z - x.z < d) { d = hi.z - x.z; n = float3(0.0, 0.0, 1.0); }
-                if (x.x - lo.x < d) { d = x.x - lo.x; n = float3(-1.0, 0.0, 0.0); }
-                if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
-                if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
-                if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
-                f += contactForce(f, vel, mass, n, surfaceV(boxSurface(), vehicle), 0.0, V.w);
-            }
-        }
+        f = groundBoxContacts(f, vel, mass, x, info, vehicle, ground, boxOff, boxCount, V.w);
     }
     if ((flags & NODE_IMMOVABLE) == 0u)
     {
@@ -1242,28 +1267,7 @@ uint nodeUpdateSolo(uint gi, uint4 info, uint vehicle, uint local, uint step, fl
     if ((flags & NODE_NO_GROUND) == 0u)
     {
         float3 x = origin + pos;
-        if (ground > x.y)
-        {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
-            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
-            f += c;
-        }
-        for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
-        {
-            float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u].xyz);
-            float3 hi = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u + 1u].xyz);
-            if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)
-            {
-                float3 n = float3(0.0, 0.0, -1.0);
-                float d = x.z - lo.z;
-                if (hi.z - x.z < d) { d = hi.z - x.z; n = float3(0.0, 0.0, 1.0); }
-                if (x.x - lo.x < d) { d = x.x - lo.x; n = float3(-1.0, 0.0, 0.0); }
-                if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
-                if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
-                if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
-                f += contactForce(f, vel, mass, n, surfaceV(boxSurface(), vehicle), 0.0, V.w);
-            }
-        }
+        f = groundBoxContacts(f, vel, mass, x, info, vehicle, ground, boxOff, boxCount, V.w);
     }
     if ((flags & NODE_IMMOVABLE) == 0u)
     {
@@ -3060,10 +3064,14 @@ void atriHot(uint4 a, uint4 b, uint nodeOff, uint incStart)
 }
 
 // Vehicle v's beam phase on its sorted entries (`head`: its gStatic header at
-// gP.beamOrder + v): lanes stride over the entries.
+// gP.beamOrder + v): lanes stride over the entries. Without the sorted records
+// (gP.beamOrder 0), its `count` beams in file order, a beam a lane, as single entries:
+// one call site of beamUpdate for both (kernel-compile-time.md).
 void beamPhaseSorted(uint v, uint lane, uint lanes, uint4 head, bool on, uint nodeOff, uint beamOff, bool fast,
-                     uint groupOff, uint parity, uint flagsV)
+                     uint groupOff, uint parity, uint flagsV, uint count)
 {
+    bool sorted = gP.beamOrder != 0u;
+    if (!sorted) head = uint4(count, 0u, 0u, 0u);
     uint entries = on ? head.x : 0u;
     bool centred = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
     bool keep = (flagsV & FLAG_KEEP_STRENGTH) != 0u;
@@ -3078,7 +3086,7 @@ void beamPhaseSorted(uint v, uint lane, uint lanes, uint4 head, bool on, uint no
     }
     for (uint kStop = EB_END(k, entries, lanes); k < kStop; k += lanes)
     {
-        uint4 a = gStatic[at + 2u * k];
+        uint4 a = sorted ? gStatic[at + 2u * k] : uint4(k, BEAM_ORDER_SINGLE, 0u, 0u);
         uint cls = a.y & 3u;
         uint gj = beamOff + a.x;
         if (cls == BEAM_ORDER_ATRI)
@@ -3236,10 +3244,19 @@ float3 selfTwoBodyCore(uint h, uint t0, uint t1, uint t2, float alpha, float bet
                    + selfTerm(gamma, selfInvMass(t0)));
     float inv = nf(selfInvMass(h) + imt);
     float m = inv > 0.0 ? sdiv(1.0, inv) : 0.0;
-    float3 a3 = sadd3(sadd3(sscale(selfAcc(t1, beamOff, groupOff, groupCount, parity), alpha),
-                            sscale(selfAcc(t2, beamOff, groupOff, groupCount, parity), beta)),
-                      sscale(selfAcc(t0, beamOff, groupOff, groupCount, parity), gamma));
-    float3 fh = sscale(ssub3(selfAcc(h, beamOff, groupOff, groupCount, parity), a3), m);
+    // a3 = α·a(t1) + β·a(t2) + γ·a(t0), then a(h): the four accelerations from one call
+    // site (opaqueCount), the same strict sums in the same order.
+    float3 a3 = float3(0.0, 0.0, 0.0);
+    float3 ah = float3(0.0, 0.0, 0.0);
+    for (uint k = 0u, kStop = EB_END(k, opaqueCount(4u), 1u); k < kStop; k++)
+    {
+        float3 acc = selfAcc(k == 0u ? t1 : (k == 1u ? t2 : (k == 2u ? t0 : h)), beamOff, groupOff, groupCount, parity);
+        if (k == 0u) a3 = sscale(acc, alpha);
+        else if (k == 1u) a3 = sadd3(a3, sscale(acc, beta));
+        else if (k == 2u) a3 = sadd3(a3, sscale(acc, gamma));
+        else ah = acc;
+    }
+    float3 fh = sscale(ssub3(ah, a3), m);
     uint hv = gStatic[gP.nodeInfoBase + h].w;
     Surface surf = contactSurfaceV(hv, hv);
     float budget;
@@ -3740,7 +3757,13 @@ void triangleGrid(uint gt, uint sub, float3 origin, float r, float cell, uint ca
                   uint beamOff, uint groupOff, uint groupCount, uint parity, uint listAt)
 {
     triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, false, 0u,
-                     listAt);
+                     listAt, false);
+}
+// The walk that only lists its pairs at listAt (nonzero): no tests, so this copy of the
+// walk carries no tryContact (kernel-compile-time.md).
+void triangleGridList(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount, uint listAt)
+{
+    triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, 0u, 0u, 0u, 0u, false, 0u, listAt, true);
 }
 
 // --- The grid walk's pairs, then their tests (lossless) ---
@@ -3766,12 +3789,16 @@ static const uint LIST_SUBS = 2u;
 // outer loop walks the candidates (one each); else the covered cells, each bucket's
 // run once. The same tests in the same order as two separate loops.
 void triangleGridWalk(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
-                      uint beamOff, uint groupOff, uint groupCount, uint parity, bool at, uint offBase, uint listAt)
+                      uint beamOff, uint groupOff, uint groupCount, uint parity, bool at, uint offBase, uint listAt,
+                      bool listOnly)
 {
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
+    // listOnly: the caller's listAt is nonzero (a constant at its call site, so that
+    // inlined copy has no tests).
+    bool listing = listOnly || listAt != 0u;
     // The frame's walk: the step's geometry from the beam phase (triGeoFill).
-    TriGeo t = listAt != 0u ? triGeoBox(gt) : (!at && gP.triGeo != 0u ? triGeoLoad(gt) : triangleGeo(gt, origin, r, parity));
-    uint subs = listAt != 0u ? LIST_SUBS : GRID_SUBS;
+    TriGeo t = listing ? triGeoBox(gt) : (!at && gP.triGeo != 0u ? triGeoLoad(gt) : triangleGeo(gt, origin, r, parity));
+    uint subs = listing ? LIST_SUBS : GRID_SUBS;
 #ifdef EB_ABLATE
     // Measurement only: 4194304 the walk stops after the triangle's geometry.
     if ((gP.ablate & 4194304u) != 0u) return;
@@ -3848,7 +3875,7 @@ void triangleGridWalk(uint gt, uint sub, float3 origin, float r, float cell, uin
                 if (any(p < t.lo) || any(p > t.hi)) continue;
                 h = asuint(E.w);
             }
-            if (listAt != 0u)
+            if (listing)
             {
                 // Listed for the test pass: a bucket's entry as the testing walk passes
                 // it to tryContact (its box test above); every candidate (too many
@@ -3882,26 +3909,40 @@ void triangleGridWalk(uint gt, uint sub, float3 origin, float r, float cell, uin
 // wave read before any adds), which moved the E36 drive ensemble against RoR from
 // 115-150 mm to 310-520 mm (fail; 3 runs each): reverted for accuracy.
 static const uint BRUTE_PAIRS_PER_LANE = 16u;
+void triangleGridCands(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
+                       uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity, bool filter);
 void triangleGridBrute(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
                        uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
+    triangleGridCands(gt, sub, subs, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, true);
+}
+// triangleGridBrute, or (filter false) triangleTest's every candidate: lane `sub` of
+// `subs` of triangle gt tests candidates sub, sub + subs, ... (one call site of
+// tryContact for both; kernel-compile-time.md).
+void triangleGridCands(uint gt, uint sub, uint subs, float3 origin, float r, float cell, uint candOff,
+                       uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity, bool filter)
+{
     if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
     TriGeo t = triangleGeo(gt, origin, r, parity);
-    float3 f0 = floor((t.lo - origin) / cell);
-    float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
     // Too many cells: every candidate (no filter), else those the grid walk visits;
     // one call site of tryContact for both (the compilers inline every call).
-    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
+    bool every = true;
     int3 c0 = int3(0, 0, 0);
     int3 span = int3(1, 1, 1);
     uint yz = 1u;
     uint cells = 0u;
-    if (!every)
+    if (filter)
     {
-        c0 = int3(f0);
-        span = int3(fs);
-        yz = uint(span.y * span.z);
-        cells = uint(span.x) * yz;
+        float3 f0 = floor((t.lo - origin) / cell);
+        float3 fs = floor((t.hi - origin) / cell) - f0 + float3(1.0, 1.0, 1.0);
+        every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS));
+        if (!every)
+        {
+            c0 = int3(f0);
+            span = int3(fs);
+            yz = uint(span.y * span.z);
+            cells = uint(span.x) * yz;
+        }
     }
     for (uint k = sub, kStop = EB_END(k, candCount, subs); k < kStop; k += subs)
     {
@@ -4694,10 +4735,17 @@ void pairReuseBuild(uint v, uint lane, uint triOff, uint triCount, uint nodeOff,
 // walk's cells and buckets of the triangle's box (or every candidate past
 // GRID_MAX_CELLS) and its box test; then tryContact (whose own box test, on the live
 // triangle's geometry, comes first).
+bool pairReuseKeep(uint gt, uint h, float3 origin, float cell);
 void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint beamOff, uint groupOff,
                    uint groupCount, uint parity)
 {
-    if (asint(gMisc[gP.vehicles + gt].x) > 0) return;
+    if (!pairReuseKeep(gt, h, origin, cell)) return;
+    tryContact(triGeoLoad(gt), h, origin, r, beamOff, groupOff, groupCount, parity);
+}
+// pairReuseTest's filters: whether it tests (gt, h).
+bool pairReuseKeep(uint gt, uint h, float3 origin, float cell)
+{
+    if (asint(gMisc[gP.vehicles + gt].x) > 0) return false;
     // The box from triGeoFill's records before its liveness (a dead triangle's empty box
     // fails tryContact's test, as in the walk).
     uint at = gP.triGeo + gt * TRI_GEO_RECS;
@@ -4712,7 +4760,7 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
     {
         float3 e = gNodes[h * 3u].xyz;
         float3 p = origin + e;
-        if (any(p < lo) || any(p > hi)) return;
+        if (any(p < lo) || any(p > hi)) return false;
         int3 c0 = int3(f0);
         int3 span = int3(fs);
         int3 c = int3(floor(e / cell));
@@ -4726,42 +4774,34 @@ void pairReuseTest(uint gt, uint h, float3 origin, float r, float cell, uint bea
             for (uint i = 0u, iStop = EB_END(i, cells, 1u); i < iStop; i++)
                 covered = covered
                     || gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z)))) == b;
-            if (!covered) return;
+            if (!covered) return false;
         }
     }
 #ifdef EB_ABLATE
     // Measurement only (time): 2^26 the listed pairs' contact tests (their box tests kept).
-    if ((gP.ablate & 67108864u) != 0u) return;
+    if ((gP.ablate & 67108864u) != 0u) return false;
 #endif
-    tryContact(triGeoLoad(gt), h, origin, r, beamOff, groupOff, groupCount, parity);
+    return true;
 }
 
 
 // The step's tests of the list (uniform; after the build or in its place): a pair a
 // lane; a build past the list's room walks with its tests instead.
-void pairReuseTests(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
+// The listed count (past TRI_PAIR_CAP the caller walks with the tests instead); the
+// list's tests (pairReuseTest, a pair a lane) and the walk are the frame's, at its one call
+// site of each (kernel-compile-time.md), then pairReuseStats.
+uint pairReuseTests(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
                     uint candOff, uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     sync();
     uint listed = mode == 2u ? gsCount[GRID_BUCKETS + RU_COUNT].load() : gsPairCount.load();
     if (listed <= TRI_PAIR_CAP)
-    {
-        uint at = triPairsAt(v);
-        for (uint i = lane, iStop = EB_END(i, listed, LANES); i < iStop; i += LANES)
-            pairReuseTest(gNext[at + 2u * i], gNext[at + 2u * i + 1u], origin, r, cell, beamOff, groupOff, groupCount,
-                          parity);
         piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
-    }
-    else
-    {
-        uint tested = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        for (uint p = lane, pStop = EB_END(p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
-        {
-            uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
-            triangleGrid(triOff + t, p % GRID_SUBS, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
-                         parity, 0u);
-        }
-    }
+    return listed;
+}
+// After the step's tests of the list: a build's statistics (lane 0).
+void pairReuseStats(uint lane, uint mode, uint listed)
+{
     if (lane == 0u && mode == 1u)
     {
         if (gP.pieceBase != 0u) piecesClearBuild();
@@ -5599,28 +5639,7 @@ void nodeUpdateFuse(uint gi, uint4 info, uint vehicle, float3 origin, float grou
     if ((flags & NODE_NO_GROUND) == 0u)
     {
         float3 x = origin + pos;
-        if (ground > x.y)
-        {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
-            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
-            f += c;
-        }
-        for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
-        {
-            float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u].xyz);
-            float3 hi = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u + 1u].xyz);
-            if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)
-            {
-                float3 n = float3(0.0, 0.0, -1.0);
-                float d = x.z - lo.z;
-                if (hi.z - x.z < d) { d = hi.z - x.z; n = float3(0.0, 0.0, 1.0); }
-                if (x.x - lo.x < d) { d = x.x - lo.x; n = float3(-1.0, 0.0, 0.0); }
-                if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
-                if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
-                if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
-                f += contactForce(f, vel, mass, n, surfaceV(boxSurface(), vehicle), 0.0, V.w);
-            }
-        }
+        f = groundBoxContacts(f, vel, mass, x, info, vehicle, ground, boxOff, boxCount, V.w);
     }
     if ((flags & NODE_IMMOVABLE) == 0u)
     {
@@ -5658,28 +5677,7 @@ uint nodeUpdateFuseSolo(uint gi, uint4 info, uint vehicle, float3 origin, float 
     if ((flags & NODE_NO_GROUND) == 0u)
     {
         float3 x = origin + pos;
-        if (ground > x.y)
-        {
-            float3 c = contactForce(f, vel, mass, float3(0.0, 1.0, 0.0), surfaceV(groundSurface(), vehicle), ground - x.y, V.w);
-            if ((info.x & NODE_FRICTION_LIMIT) != 0u) c = frictionLimit(c, f, vel, mass, float3(0.0, 1.0, 0.0), ground - x.y);
-            f += c;
-        }
-        for (uint b = 0u, bStop = EB_END(b, boxCount, 1u); b < bStop; b++)
-        {
-            float3 lo = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u].xyz);
-            float3 hi = asfloat(gStatic[gP.boxBase + (boxOff + b) * 2u + 1u].xyz);
-            if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)
-            {
-                float3 n = float3(0.0, 0.0, -1.0);
-                float d = x.z - lo.z;
-                if (hi.z - x.z < d) { d = hi.z - x.z; n = float3(0.0, 0.0, 1.0); }
-                if (x.x - lo.x < d) { d = x.x - lo.x; n = float3(-1.0, 0.0, 0.0); }
-                if (hi.x - x.x < d) { d = hi.x - x.x; n = float3(1.0, 0.0, 0.0); }
-                if (x.y - lo.y < d) { d = x.y - lo.y; n = float3(0.0, -1.0, 0.0); }
-                if (hi.y - x.y < d) { d = hi.y - x.y; n = float3(0.0, 1.0, 0.0); }
-                f += contactForce(f, vel, mass, n, surfaceV(boxSurface(), vehicle), 0.0, V.w);
-            }
-        }
+        f = groundBoxContacts(f, vel, mass, x, info, vehicle, ground, boxOff, boxCount, V.w);
     }
     if ((flags & NODE_IMMOVABLE) == 0u)
     {
@@ -5938,10 +5936,19 @@ float3 resAcc(uint x, uint beamOff, uint groupOff, uint groupCount, uint parity)
 bool resDrive(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float gamma, float3 nn, float3 vv,
               uint beamOff, uint groupOff, uint groupCount, uint parity, out float a, out float x)
 {
-    float3 at = sadd3(sadd3(sscale(resAcc(t1, beamOff, groupOff, groupCount, parity), alpha),
-                            sscale(resAcc(t2, beamOff, groupOff, groupCount, parity), beta)),
-                      sscale(resAcc(t0, beamOff, groupOff, groupCount, parity), gamma));
-    a = sdot(ssub3(resAcc(h, beamOff, groupOff, groupCount, parity), at), nn);
+    // at = α·a(t1) + β·a(t2) + γ·a(t0), then a(h): from one call site (opaqueCount),
+    // the same strict sums in the same order.
+    float3 at = float3(0.0, 0.0, 0.0);
+    float3 ah = float3(0.0, 0.0, 0.0);
+    for (uint k = 0u, kStop = EB_END(k, opaqueCount(4u), 1u); k < kStop; k++)
+    {
+        float3 acc = resAcc(k == 0u ? t1 : (k == 1u ? t2 : (k == 2u ? t0 : h)), beamOff, groupOff, groupCount, parity);
+        if (k == 0u) at = sscale(acc, alpha);
+        else if (k == 1u) at = sadd3(at, sscale(acc, beta));
+        else if (k == 2u) at = sadd3(at, sscale(acc, gamma));
+        else ah = acc;
+    }
+    a = sdot(ssub3(ah, at), nn);
     float vn = sdot(vv, nn);
     x = nf(vn + max(vn, 0.0));
     return vn < 0.0 && nf(smul(a, STEP) + x) < 0.0;
@@ -5990,10 +5997,19 @@ bool guardOf(uint h, uint t0, uint t1, uint t2, float alpha, float beta, float g
 {
     g = float3(0.0, 0.0, 0.0);
     if (all(t == float3(0.0, 0.0, 0.0))) return false;
-    float3 a = ssub3(resAccNow(h, beamOff, groupOff, groupCount, parity, true),
-                     sadd3(sadd3(sscale(resAccNow(t1, beamOff, groupOff, groupCount, parity, true), alpha),
-                                 sscale(resAccNow(t2, beamOff, groupOff, groupCount, parity, true), beta)),
-                           sscale(resAccNow(t0, beamOff, groupOff, groupCount, parity, true), gamma)));
+    // a = a(h) − (α·a(t1) + β·a(t2) + γ·a(t0)): the four from one call site
+    // (opaqueCount), h first as written, the same strict sums in the same order.
+    float3 ah = float3(0.0, 0.0, 0.0);
+    float3 aw = float3(0.0, 0.0, 0.0);
+    for (uint k = 0u, kStop = EB_END(k, opaqueCount(4u), 1u); k < kStop; k++)
+    {
+        float3 acc = resAccNow(k == 0u ? h : (k == 1u ? t1 : (k == 2u ? t2 : t0)), beamOff, groupOff, groupCount, parity, true);
+        if (k == 0u) ah = acc;
+        else if (k == 1u) aw = sscale(acc, alpha);
+        else if (k == 2u) aw = sadd3(aw, sscale(acc, beta));
+        else aw = sadd3(aw, sscale(acc, gamma));
+    }
+    float3 a = ssub3(ah, aw);
     float inv = nf(ownInvMass(h)
                    + nf(nf(selfTerm(alpha, ownInvMass(t1)) + selfTerm(beta, ownInvMass(t2))) + selfTerm(gamma, ownInvMass(t0))));
     float3 rest = ssub3(a, sscale(t, inv));
@@ -6163,102 +6179,28 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
 // self-collision of this step exactly as the specification orders it (tested
 // triangles in file order, every candidate in node order, each hit added at once).
 // Slow, and only for a step with more than HIT_CAP hits.
-void selfSerialHits(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity);
 void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity,
                         uint mode);
 void selfSerialMerge(uint v);
 
 void selfSerial(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
-    selfSerialHits(v, origin, r, beamOff, groupOff, groupCount, parity);
-    if (gP.selfSplit == 0u || !selfResidual(v)) return;
-    // Modes 1 then 2, from one call site: the browser's and the driver's compilers
-    // inline every call, so each site is a copy of the whole pass.
-    for (uint mode = 1u; mode <= 2u; mode++)
+    // The hits (mode 0), then (§37.1) the residual's modes 1 and 2, from one call site:
+    // the compilers inline every call, so each site is a copy of the whole pass
+    // (opaqueCount: the loop stays one; kernel-compile-time.md).
+    for (uint mode = 0u, modeStop = EB_END(mode, opaqueCount(3u), 1u); mode < modeStop; mode++)
+    {
+        if (mode == 1u && (gP.selfSplit == 0u || !selfResidual(v))) return;
         selfSerialResidual(v, origin, r, beamOff, groupOff, groupCount, parity, mode);
+    }
     selfSerialMerge(v);
 }
 
-// selfSerial's hits, each applied as found.
-void selfSerialHits(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity)
-{
-    uint4 r1 = gStatic[v * 4u + 1u];
-    uint4 r2 = gStatic[v * 4u + 2u];
-    for (uint t = 0u, tStop = EB_END(t, r1.y, 1u); t < tStop; t++)
-    {
-        uint gt = r1.x + t;
-        if (asint(gMisc[gP.vehicles + gt].x) > 0) continue;
-        TriGeo T = triangleGeo(gt, origin, r, parity);
-        uint4 tn = T.tn;
-        for (uint k = 0u, kStop = EB_END(k, r2.y, 1u); k < kStop; k++)
-        {
-            uint h = gLists[r2.x + k];
-            if (h == tn.x || h == tn.y || h == tn.z) continue;
-            float4 P = gNodes[h * 3u];
-            float3 p = nf3(origin + P.xyz);
-            if (any(p < T.lo) || any(p > T.hi)) continue;
-            if (ownTravelOut(T, h, p, origin, r, parity)) continue;
-            float alpha;
-            float beta;
-            float gamma;
-            float delta;
-            float3 nn;
-            float pen;
-            if ((T.clip & 1u) != 0u)
-            {
-                // Anti-clip: the test alone (tryContact recorded the sides).
-                uint word;
-                if (selfClip(T, h, p, origin, r, alpha, beta, gamma, pen, nn, word) != 1u) continue;
-            }
-            else
-            {
-                if (!triangleHit(T, p, r, alpha, beta, gamma, delta)) continue;
-                nn = T.n;
-                if (delta < 0.0)
-                {
-                    nn = -T.n;
-                    delta = -delta;
-                }
-                pen = nf(r - delta);
-            }
-            gMisc[T.mi].w = 1u;
-            float4 V = gNodes[h * 3u + 1u];
-            float4 P0 = gNodes[tn.x * 3u];
-            float4 P1 = gNodes[tn.y * 3u];
-            float4 P2 = gNodes[tn.z * 3u];
-            float3 f;
-            if (selfTwoBody(v))
-            {
-                float3 vv = ssub3(V.xyz, sadd3(sadd3(sscale(gNodes[tn.y * 3u + 1u].xyz, alpha),
-                                                     sscale(gNodes[tn.z * 3u + 1u].xyz, beta)),
-                                               sscale(gNodes[tn.x * 3u + 1u].xyz, gamma)));
-                f = selfTwoBodyCore(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, pen, vv, V.w, beamOff,
-                                    groupOff, groupCount, parity, true);
-            }
-            else
-            {
-                float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff,
-                                    groupCount, parity, false);
-                f = hitContact(V, P, P0, P1, P2, gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz,
-                               gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, pen, nn, fb, accForce(h), v);
-            }
-            accAdd(h, f);
-            accAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
-            accAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
-            accAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
-            if (selfResidual(v)) continue; // (§37.1: logged as its total)
-            cfAdd(h, f);
-            cfAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
-            cfAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
-            cfAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
-        }
-    }
-}
-
-// selfSerial's residual pass and guard (§37.1): its hits found again (the tests
-// have no side effects here). Mode 1: the residual forces into B. Mode 2: each hit's
-// first-pass force again (without its position step), its residual (from A) and
-// guard (A + B), the total into D.
+// selfSerial's pass over the vehicle's tested triangles in file order, every candidate
+// in node order. Mode 0: each hit applied as found (its position step too). §37.1's
+// residual pass and guard, its hits found again (the tests have no side effects here):
+// mode 1, the residual forces into B; mode 2, each hit's first-pass force again (without
+// its position step), its residual (from A) and guard (A + B), the total into D.
 void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint groupOff, uint groupCount, uint parity,
                         uint mode)
 {
@@ -6301,21 +6243,55 @@ void selfSerialResidual(uint v, float3 origin, float r, uint beamOff, uint group
                 }
                 pen = nf(r - delta);
             }
+            if (mode == 0u) gMisc[T.mi].w = 1u;
             float4 V = gNodes[h * 3u + 1u];
-            float3 rv = ssub3(V.xyz, sadd3(sadd3(sscale(gNodes[tn.y * 3u + 1u].xyz, alpha),
-                                                 sscale(gNodes[tn.z * 3u + 1u].xyz, beta)),
-                                           sscale(gNodes[tn.x * 3u + 1u].xyz, gamma)));
-            float rr = resOf(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, beamOff, groupOff, groupCount, parity);
-            if (mode == 1u)
+            float4 P0 = gNodes[tn.x * 3u];
+            float4 P1 = gNodes[tn.y * 3u];
+            float4 P2 = gNodes[tn.z * 3u];
+            bool two = mode != 0u || selfTwoBody(v);
+            float3 rv = float3(0.0, 0.0, 0.0);
+            if (two)
+                rv = ssub3(V.xyz, sadd3(sadd3(sscale(gNodes[tn.y * 3u + 1u].xyz, alpha),
+                                              sscale(gNodes[tn.z * 3u + 1u].xyz, beta)),
+                                        sscale(gNodes[tn.x * 3u + 1u].xyz, gamma)));
+            float rr = 0.0;
+            if (mode != 0u)
             {
-                if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));
+                rr = resOf(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, beamOff, groupOff, groupCount, parity);
+                if (mode == 1u)
+                {
+                    if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));
+                    continue;
+                }
+            }
+            float3 f;
+            // (Mode 0 with its position step, mode 2 without: one call site.)
+            if (two)
+                f = selfTwoBodyCore(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, pen, rv, V.w, beamOff, groupOff,
+                                    groupCount, parity, mode == 0u);
+            else
+            {
+                float3 fb = beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], beamOff, groupOff,
+                                    groupCount, parity, false);
+                f = hitContact(V, P, P0, P1, P2, gNodes[tn.x * 3u + 1u].xyz, gNodes[tn.y * 3u + 1u].xyz,
+                               gNodes[tn.z * 3u + 1u].xyz, alpha, beta, gamma, pen, nn, fb, accForce(h), v);
+            }
+            if (mode == 2u)
+            {
+                float3 total = resTotal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, f, rr, beamOff, groupOff,
+                                        groupCount, parity);
+                resFinal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, f, total);
                 continue;
             }
-            float3 f1 = selfTwoBodyCore(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, pen, rv, V.w, beamOff, groupOff,
-                                        groupCount, parity, false);
-            float3 total = resTotal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, nn, rv, f1, rr, beamOff, groupOff,
-                                    groupCount, parity);
-            resFinal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, f1, total);
+            accAdd(h, f);
+            accAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
+            accAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
+            accAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
+            if (selfResidual(v)) continue; // (§37.1: logged as its total)
+            cfAdd(h, f);
+            cfAdd(tn.y, hitShare(f, 2u, alpha, beta, gamma));
+            cfAdd(tn.z, hitShare(f, 3u, alpha, beta, gamma));
+            cfAdd(tn.x, hitShare(f, 4u, alpha, beta, gamma));
         }
     }
 }
@@ -6733,10 +6709,8 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #else
         uint beamEnd = beamCount;
 #endif
-        if (gP.beamOrder != 0u)
-            beamPhaseSorted(v, lane, LANES, beamHead, beamEnd != 0u, nodeOff, beamOff, fast, groupOff, parity, flagsV);
-        else
-            for (uint j = lane, jStop = EB_END(j, beamEnd, LANES); j < jStop; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
+        // (Sorted records or, gP.beamOrder 0, file order: one call site of beamUpdate.)
+        beamPhaseSorted(v, lane, LANES, beamHead, beamEnd != 0u, nodeOff, beamOff, fast, groupOff, parity, flagsV, beamEnd);
         // Without the grid this step: list the candidate pairs now (lanes in
         // reverse, so those with one beam fewer start first).
         uint listedB = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
@@ -6827,15 +6801,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_ABLATE
         if ((gP.ablate & 256u) != 0u) {} else
 #endif
-        if (early && pairs <= PAIR_LIST)
-        {
-            for (uint i = lane, iStop = EB_END(i, pairs, LANES); i < iStop; i += LANES)
-            {
-                uint e = gsPairs[i];
-                tryContact(triangleGeo(triOff + (e >> 16), origin, range, parity), gLists[candOff + (e & 0xFFFFu)], origin,
-                           range, beamOff, groupOff, groupCount, parity);
-            }
-        }
+        // (The early list's tests run with the walk's listed pairs below: one call site
+        // of tryContact for both; kernel-compile-time.md.)
+        if (early && pairs <= PAIR_LIST) {}
         else if (gridOn != 0u && reuse != 0u)
         {
             // The pair list kept over steps: built this step, or reused.
@@ -6850,62 +6818,104 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
         else if (candCount > 0u && cell > 0.0 && gridOn != 0u)
         {
-            uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-            uint subs = gP.triPairs != 0u ? LIST_SUBS : GRID_SUBS;
-            for (uint p = lane, pStop = EB_END(p, listed * subs, LANES); p < pStop; p += LANES)
+            // With the walk's pair list (gP.triPairs) the walk lists here and the pairs
+            // are tested below; without it, the walk with its tests runs below (one call
+            // site of the testing walk; kernel-compile-time.md).
+            if (gP.triPairs != 0u)
             {
-                uint t = triCount <= TRI_LIST ? gsTested[p / subs] : p / subs;
-                triangleGrid(triOff + t, p % subs, origin, range, cell, candOff, candCount, beamOff,
-                             groupOff, groupCount, parity, gP.triPairs != 0u ? triPairsAt(v) : 0u);
-            }
-        }
-        else if (candCount > 0u && cell > 0.0)
-        {
-            uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-            uint lanes = clamp(LANES / max(listed, 1u), 1u, candCount);
-            uint stride = (LANES / lanes) * lanes;
-            for (uint p = lane, pStop = EB_END(p, listed * lanes, stride); p < pStop && lane < stride; p += stride)
-            {
-                uint t = triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
-                triangleGridBrute(triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, beamOff,
-                                  groupOff, groupCount, parity);
+                uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
+                for (uint p = lane, pStop = EB_END(p, listed * LIST_SUBS, LANES); p < pStop; p += LANES)
+                {
+                    uint t = triCount <= TRI_LIST ? gsTested[p / LIST_SUBS] : p / LIST_SUBS;
+                    triangleGridList(triOff + t, p % LIST_SUBS, origin, range, cell, candOff, candCount, triPairsAt(v));
+                }
             }
         }
         else if (candCount > 0u)
         {
-            // Up to LANES lanes per step: `lanes` per triangle, one per candidate when
-            // they fit.
-            uint lanes = clamp(LANES / max(triCount, 1u), 1u, candCount);
+            // With a grid cell, the candidates the grid walk would visit (triangleGridBrute,
+            // the tested triangles); without one, every candidate of every triangle. Up to
+            // LANES lanes per step: `lanes` per triangle, one per candidate when they fit.
+            // One call site of tryContact for both (kernel-compile-time.md).
+            bool filter = cell > 0.0;
+            uint listed = filter && triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
+            uint lanes = clamp(LANES / max(listed, 1u), 1u, candCount);
             uint stride = (LANES / lanes) * lanes;
-            for (uint p = lane, pStop = EB_END(p, triCount * lanes, stride); p < pStop && lane < stride; p += stride)
-                triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff,
-                             groupOff, groupCount, parity);
+            for (uint p = lane, pStop = EB_END(p, listed * lanes, stride); p < pStop && lane < stride; p += stride)
+            {
+                uint t = filter && triCount <= TRI_LIST ? gsTested[p / lanes] : p / lanes;
+                triangleGridCands(triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, beamOff,
+                                  groupOff, groupCount, parity, filter);
+            }
         }
 #ifdef EB_ABLATE
         if ((gP.ablate & 256u) == 0u)
 #endif
-        if (gridOn != 0u && reuse != 0u)
-#ifdef EB_SELF_SPLIT
-            selfSplitTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
-                           groupCount, parity);
-#else
-            pairReuseTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
-                           groupCount, parity);
-#endif
-        else if (gridOn != 0u && gP.triPairs != 0u)
         {
-            // The walk's listed pairs, a pair a lane (triPairsAt); past the list's
-            // room, the walk again with its tests.
-            sync();
-            uint listedPairs = gsPairCount.load();
-            if (listedPairs <= TRI_PAIR_CAP)
+            // The step's listed pairs, a pair a lane, from one call site of tryContact
+            // (kernel-compile-time.md): the reused list's (pairReuseTests: its volatile
+            // triangles, then pairReuseTest's filters), the walk's (triPairsAt, with the
+            // grid) or the early list's (gsPairs, without it). Past the walk's list's room
+            // (or without one), the walk with its tests, also from one call site.
+            uint kind = 0u; // 1 the reused list, 2 the walk's, 3 the early list
+            uint listedPairs = 0u;
+            bool walk = false;
+            if (gridOn != 0u && reuse != 0u)
+            {
+#ifdef EB_SELF_SPLIT
+                // (Its listed pairs are the pairs dispatch's.)
+                walk = selfSplitTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff,
+                                      groupOff, groupCount, parity);
+#else
+                listedPairs = pairReuseTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount,
+                                             beamOff, groupOff, groupCount, parity);
+                kind = 1u;
+#endif
+            }
+            else if (gridOn != 0u)
+            {
+                listedPairs = TRI_PAIR_CAP + 1u;
+                if (gP.triPairs != 0u)
+                {
+                    sync();
+                    listedPairs = gsPairCount.load();
+                }
+                kind = 2u;
+            }
+            else if (early && pairs <= PAIR_LIST)
+            {
+                listedPairs = pairs;
+                kind = 3u;
+            }
+            if (kind != 0u && listedPairs > TRI_PAIR_CAP)
+            {
+                walk = true;
+                kind = 0u;
+            }
+            if (kind != 0u)
             {
                 uint at = triPairsAt(v);
                 for (uint i = lane, iStop = EB_END(i, listedPairs, LANES); i < iStop; i += LANES)
-                    tryContact(triGeoLoad(gNext[at + 2u * i]), gNext[at + 2u * i + 1u], origin, range, beamOff,
-                               groupOff, groupCount, parity);
+                {
+                    TriGeo g;
+                    uint h;
+                    if (kind == 3u)
+                    {
+                        uint e = gsPairs[i];
+                        g = triangleGeo(triOff + (e >> 16), origin, range, parity);
+                        h = gLists[candOff + (e & 0xFFFFu)];
+                    }
+                    else
+                    {
+                        uint gt = gNext[at + 2u * i];
+                        h = gNext[at + 2u * i + 1u];
+                        if (kind == 1u && !pairReuseKeep(gt, h, origin, cell)) continue;
+                        g = triGeoLoad(gt);
+                    }
+                    tryContact(g, h, origin, range, beamOff, groupOff, groupCount, parity);
+                }
             }
-            else
+            if (walk)
             {
                 uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
                 for (uint p = lane, pStop = EB_END(p, listed * GRID_SUBS, LANES); p < pStop; p += LANES)
@@ -6915,6 +6925,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                                  groupOff, groupCount, parity, 0u);
                 }
             }
+#ifndef EB_SELF_SPLIT
+            if (gridOn != 0u && reuse != 0u) pairReuseStats(lane, reuse, listedPairs);
+#endif
         }
 #ifdef EB_SELF_SPLIT
         // The pairs dispatch next; this step's rest opens the next step dispatch.
@@ -8186,7 +8199,7 @@ uint vvPartLanes(uint k)
 void triangleGridAt(uint gt, uint sub, float3 origin, float r, float cell, uint candOff, uint candCount,
                     uint beamOff, uint groupOff, uint groupCount, uint parity, uint offBase)
 {
-    triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, true, offBase, 0u);
+    triangleGridWalk(gt, sub, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity, true, offBase, 0u, false);
 }
 
 // trianglePairs into member m's slice of the pair list.

@@ -46,44 +46,29 @@ uint selfWalkAt(uint v) { return soloStepAt(v) + SELF_WALK; }
 uint selfWalkArgsAt(uint s) { return 9u + selfArgsAt(s); }
 
 // pairReuseTests in the step dispatch (uniform): the listed pairs left to the pairs
-// dispatch, everything else as pairReuseTests runs it.
-void selfSplitTests(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
+// dispatch, everything else as pairReuseTests runs it. True: past the list's room, the
+// caller walks with the tests (its one call site of the walk; kernel-compile-time.md).
+bool selfSplitTests(uint v, uint lane, uint mode, uint triOff, uint triCount, float3 origin, float r, float cell,
                     uint candOff, uint candCount, uint beamOff, uint groupOff, uint groupCount, uint parity)
 {
     sync();
-    if (mode == 1u)
+    // A building step (mode 1): the walk dispatch lists and tests the pairs
+    // (selfSplitBuild); the volatile triangles here as pairReuseTests tests them. Its
+    // count, the list's validity and statistics after the walk (selfSplitWalkEnd).
+    uint listed = mode == 1u ? 0u : gsCount[GRID_BUCKETS + RU_COUNT].load();
+    if (listed > TRI_PAIR_CAP) return true;
+    if (mode != 1u && lane == 0u)
     {
-        // A building step: the walk dispatch lists and tests the pairs (selfSplitBuild);
-        // the volatile triangles here as pairReuseTests tests them. Its count, the list's
-        // validity and statistics after the walk (selfSplitWalkEnd).
-        piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
-        if (lane == 0u && gP.pieceBase != 0u) piecesClearBuild();
-        return;
+        gAcc[selfListedAt(v)].store(int(listed));
+        uint at = selfArgsAt(gP.pad2);
+        // (listed <= TRI_PAIR_CAP: at most TRI_PAIR_CAP / SELF_PAIRS_WG workgroups a vehicle.)
+        gSelfArgs[at].max(int(min((listed + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG, (TRI_PAIR_CAP + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG)));
+        gSelfArgs[at + 1u].store(int(gP.vehicles));
+        gSelfArgs[at + 2u].store(1);
     }
-    uint listed = gsCount[GRID_BUCKETS + RU_COUNT].load();
-    if (listed <= TRI_PAIR_CAP)
-    {
-        if (lane == 0u)
-        {
-            gAcc[selfListedAt(v)].store(int(listed));
-            uint at = selfArgsAt(gP.pad2);
-            // (listed <= TRI_PAIR_CAP: at most TRI_PAIR_CAP / SELF_PAIRS_WG workgroups a vehicle.)
-            gSelfArgs[at].max(int(min((listed + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG, (TRI_PAIR_CAP + SELF_PAIRS_WG - 1u) / SELF_PAIRS_WG)));
-            gSelfArgs[at + 1u].store(int(gP.vehicles));
-            gSelfArgs[at + 2u].store(1);
-        }
-        piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
-    }
-    else
-    {
-        uint tested = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        for (uint p = lane, pStop = EB_END(p, tested * GRID_SUBS, LANES); p < pStop; p += LANES)
-        {
-            uint t = triCount <= TRI_LIST ? gsTested[p / GRID_SUBS] : p / GRID_SUBS;
-            triangleGrid(triOff + t, p % GRID_SUBS, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
-                         parity, 0u);
-        }
-    }
+    piecesTests(v, lane, triOff, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount, parity);
+    if (mode == 1u && lane == 0u && gP.pieceBase != 0u) piecesClearBuild();
+    return false;
 }
 
 // The next step dispatch's start (lane 0, the pair list's state loaded): a walk's list
