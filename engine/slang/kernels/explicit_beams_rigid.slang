@@ -1040,7 +1040,10 @@ static const uint CPL_FOLD_FRAME = 0x100000u;
 bool cplFoldOn(uint v, uint lanes);
 void cplFoldMark(uint v)
 {
-    if (gsUniformCouple != 0u && cplFoldOn(v, LANES)) gsUniformCouple = gsUniformCouple | CPL_FOLD_FRAME;
+    // Written, never read here: every read of gsUniformCouple becomes a
+    // workgroupUniformLoad (a barrier), which lane 0 alone must not execute. gsCpl[0] is
+    // the same word (coupleBegin).
+    if (gsCpl[0] != 0u && cplFoldOn(v, LANES)) gsUniformCouple = gsCpl[0] | CPL_FOLD_FRAME;
 }
 bool cplFoldOn(uint v, uint lanes)
 {
