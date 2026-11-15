@@ -762,9 +762,14 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // phases; `--ab-switch fold`: the folded step against the four phases, the list on.
     let coupling_ab = arg("--ab-switch").as_deref() == Some("coupling");
     let fold_ab = arg("--ab-switch").as_deref() == Some("fold");
+    // `--ab-switch selfsplit`: self-collision's listed pairs across workgroups
+    // (`set_self_split`, selfcol-design.md) against the tests in the car's workgroup.
+    let selfsplit_ab = arg("--ab-switch").as_deref() == Some("selfsplit");
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if coupling_ab {
+        if selfsplit_ab {
+            x.set_self_split(on);
+        } else if coupling_ab {
             x.set_coupling_candidate_list(on);
         } else if fold_ab {
             x.set_coupling_fold(on);
@@ -858,7 +863,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             println!(
                 "   A/B at t {:.1}: {} on {:.2} ms/frame, off {:.2} ms/frame; state bit for bit: {same}",
                 lab.bench.t,
-                if coupling_ab {
+                if selfsplit_ab {
+                    "self split"
+                } else if coupling_ab {
                     "coupling list"
                 } else if fold_ab {
                     "coupling fold"

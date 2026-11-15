@@ -129,9 +129,38 @@ frame kernel is unchanged for everything else, and the old path stays selectable
 | self walk s (indirect) | over every vehicle's tested triangles; none when every vehicle reuses its list | a building vehicle's triangles each list their pairs (`pairReuseList`; the grid's offsets in storage) |
 | self pairs s (indirect) | one thread a listed pair over every vehicle | `pairReuseTest` → `tryContact` (and the volatile triangles' tests) |
 
-Phase 1 (this branch first): the pairs dispatch, with the build still in the step
-dispatch. Phase 2: the walk dispatch. The frame's end runs after the last pairs dispatch
-(the last step's rest, the frame end, as `EB_SOLO_STEP` does).
+The frame's end runs after the last pairs dispatch (the last step's rest, the frame end,
+as `EB_SOLO_STEP` does). Built (`slang/kernels/explicit_beams_selfsplit.slang`, host
+`ExplicitBeamsGpu::set_self_split`, `RUBBLE_SELF_SPLIT=0` off):
+
+- **Step dispatch** (`explicit_beams_self_step`): `explicitBeamsFrameStep` with
+  `EB_SELF_SPLIT`. At its start (step k > 0) step k − 1's rest: its hit flag rebuilt
+  from the saved `gsHit` and the hit list's count (every hit counts there), `selfApply`,
+  the surface step (off in these frames), the slides, the closing barrier; and a walk's
+  list recorded as `pairReuseTests` records a build's (valid, count, statistics). Then
+  step k as the frame runs it up to its tests: a reusing step leaves its listed count for
+  the pairs dispatch and tests its volatile triangles in the workgroup (and, past the
+  list's room, walks with its tests as before); a building step writes the node build
+  records, the volatile list and separations (`piecesBuild` without its triangles' lists)
+  and the grid's offsets to storage for the walk dispatch.
+- **Walk dispatch** (`explicit_beams_self_walk`): every building vehicle's (triangle,
+  share) threads, 8 shares a triangle, list their pairs (`pairReuseList`'s arithmetic, the
+  count a storage atomic) and test each as the pairs dispatch would (`pairReuseTest`), so a
+  list past its room is still tested.
+- **Pairs dispatch** (`explicit_beams_self_pairs`): a thread a listed pair of every
+  reusing vehicle.
+- Indirect arguments in a buffer of their own (a buffer cannot be storage and indirect in
+  one dispatch), maxima over the vehicles, clamped in the kernel (pairs ≤ TRI_PAIR_CAP /
+  LANES workgroups, walk ≤ 32 with a strided loop past it), cleared a step ahead.
+- Used for frames on the per-vehicle frame kernel alone (no vehicle contact, sleep,
+  surface contact, wide passes, test variants or diagnostic pipelines).
+
+**A bug found in the merge of `perf/contact-groups` with this branch's base** (neither
+branch alone has it): the coupling's candidate list (`cplListBegin`, lab-skin) clears its
+frame maxima at each dispatch's start, and `EB_SOLO_STEP` makes every step a dispatch,
+so its skin check would see only the current step's shape travel. Fixed here for
+`EB_SOLO_STEP` (cleared at the frame's start only, as the whole frame does); the split
+group path's members (`splitMember`) were not checked.
 
 Test plan (each bitwise against the in-workgroup path, every state word, every frame):
 spin at 20 rad/s free and into a wall; a piece torn off mid-list; retired nodes; a

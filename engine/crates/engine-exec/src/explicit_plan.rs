@@ -2405,6 +2405,11 @@ impl FramePlanner {
         }
     }
 
+    /// Some vehicle has surface contact ([`ExplicitLayout::surface`]).
+    pub fn has_surface(&self) -> bool {
+        self.surface
+    }
+
     /// A host with the split modules ([`Kernel::FrameSeg`], [`Kernel::Surf`]): frames of
     /// a fleet with surface contact on the frame modules (no contact groups, not wide)
     /// run in segments, a step each, with the surface pass's pipelines between them.
