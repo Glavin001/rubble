@@ -136,6 +136,7 @@
       </div>
       <h2>Options</h2>
       <div class="row"><label><input type="checkbox" id="surface" data-opt="build" /> surface contact</label><label><input type="checkbox" id="parked" data-opt="build" /> second car</label>
+        <label title="Copies of the car in the run. On the mountain they leave the lip together, side by side and stacked, closing on the first car, so they crash into each other on the way down; on the flat arena the others stand in a row to one side. The numbers shown are the first car's. Rebuilds the lab in place (no reload).">cars <input type="number" id="cars" data-opt="build" value="1" min="1" max="8" step="1" /></label>
         <label><input type="checkbox" id="drag" data-opt="build" checked /> air drag</label><label><input type="checkbox" id="centred" data-opt="build" /> centred damping</label>
         <label><input type="checkbox" id="sleep" data-opt="build" checked /> rigid sleep</label>
         <label title="Anti-clip pads each self-collision box by the contacter's own travel, not the car's fastest node's (debris falling far away no longer widens every box). Applies as it runs."><input type="checkbox" id="ownTravel" data-opt="live" checked /> own-travel anti-clip boxes</label>
@@ -368,7 +369,7 @@
     statusEl.textContent = 'loading…';
     const tLoad = performance.now();
     await loadWasm();
-    const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42]];
+    const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42], [0.7, 0.45, 0.02], [0.03, 0.3, 0.1], [0.55, 0.55, 0.57], [0.25, 0.03, 0.35], [0.02, 0.35, 0.4], [0.05, 0.05, 0.06]];
     const carCache = new Map();
     const waived = new Set();
     async function carOf(kind) {
@@ -449,13 +450,13 @@
       loading.stage('Building the car');
       try {
         const car = await carOf(get('car'));
-        const n = get('parked') ? 2 : 1;
+        const nCars = Math.min(8, Math.max(1, Math.round(get('cars') || 1))), n = nCars + (get('parked') ? 1 : 0);
         // The second car's paint: built when first asked for (kept, like the first).
-        if (n > 1 && car.visuals.length < 2) { progress(`building the second ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[1])); }
+        while (car.visuals.length < Math.min(n, PAINTS.length)) { progress(`building another ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[car.visuals.length])); }
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), debris: debrisSpec(), parked: get('parked'), mountain: mountainSpec(), shapes: get('shapes'),
+          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), debris: debrisSpec(), parked: get('parked'), cars: nCars, mountain: mountainSpec(), shapes: get('shapes'),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),
@@ -500,7 +501,7 @@
         W.spec = spec;
         configure();
         structureOpts();
-        gpuSeg.clear(); gpuTotal = [];
+        gpuSeg.clear(); gpuTotal = []; gpuRun = [];
         window.__world = world; window.__lab = lab;
         await restart(true);
         lastBuildMs = performance.now() - t0;
@@ -947,6 +948,7 @@
     const pct = (q) => { const a = [...stepHist].sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(q * a.length))] : 0; };
     let fps = 0, frames = 0, fpsAt = performance.now(), simAt = performance.now(), simCount = 0, simRate = 0;
     const gpuSeg = new Map(); let gpuTotal = [];
+    let gpuRun = [];
     const median = (a) => a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : 0;
     function gpuSplit() {
       let veh = 0, rigid = 0;
@@ -960,6 +962,9 @@
         const per = new Map();
         for (const [n, ms] of t.segments) per.set(n, (per.get(n) || 0) + ms);
         for (const [n, ms] of per) { const a = gpuSeg.get(n) || []; a.push(ms); if (a.length > 120) a.shift(); gpuSeg.set(n, a); }
+        // The whole run, a row a step: (lab time, the step's GPU ms, the vehicles' part).
+        let veh = 0; for (const [n, ms] of per) if (n.startsWith('cpl_') || n.startsWith('explicit')) veh += ms;
+        if (gpuRun.length < 60000) gpuRun.push([W?.lab.time() ?? 0, t.totalMs, veh]);
       }
     };
     const nf = (x, d = 0) => Number(x).toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
@@ -1117,6 +1122,14 @@
       if (!ok) { const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); try { ok = document.execCommand('copy'); } catch {} t.remove(); }
       b.textContent = ok ? 'Copied' : 'Copy failed: see console'; if (!ok) console.log(text);
       setTimeout(() => { b.textContent = 'Copy perf report'; }, 1500);
+    };
+    // The run's GPU time a World step since the last build or restart (GPU timing on):
+    // median, p95 and worst of the whole step and of the vehicles' part (needs "rigid ·
+    // vehicle" timing), for steps at lab time `from` (s) or later, and the steps refused.
+    window.__gpuRun = (from = 0) => {
+      const rows = gpuRun.filter((r) => r[0] >= from);
+      const stat = (k) => { const a = rows.map((r) => r[k]).sort((x, y) => x - y); if (!a.length) return null; const q = (p) => a[Math.round((a.length - 1) * p)]; const w = rows.reduce((m, r) => (r[k] > m[k] ? r : m), rows[0]); return { median: q(0.5), p95: q(0.95), p99: q(0.99), worst: w[k], worstAt: w[0] }; };
+      return { steps: rows.length, total: stat(1), vehicle: stat(2), refused: perfLog.reduce((a, r) => a + r.refused, 0), taken: perfLog.reduce((a, r) => a + r.steps, 0) };
     };
     window.__gpu = () => ({ total: [...gpuTotal], split: gpuSplit(), segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
     window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95), worst: stepHist.length ? Math.max(...stepHist) : 0 }, stepsAFrame: [0, 1, 2].map((k) => takenHist.filter((t) => (k < 2 ? t === k : t >= 2)).length), refused: refusedHist.reduce((a, b) => a + b, 0), carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });

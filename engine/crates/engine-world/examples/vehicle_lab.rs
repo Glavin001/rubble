@@ -741,7 +741,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let scene = arg("--scene").unwrap_or_else(|| "mountain".into());
     // `--self-split 1`: the page's default (self-collision across the GPU).
     let script = json!({ "scene": scene, "surface": arg("--surface").as_deref() == Some("1"),
-        "selfSplit": arg("--self-split").as_deref() == Some("1"), "events": [] });
+        "selfSplit": arg("--self-split").as_deref() == Some("1"),
+        "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [] });
     let opts = options(&script);
     println!(
         "options: {scene}, surface {} {:?}",
@@ -788,6 +789,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // window's wall time kept by parity (the same run's states, side by side).
     let alternate = arg("--alternate");
     let mut alt = [(0.0f64, 0u32); 2];
+    // (t, the step's GPU span, the vehicles' segments, the explicit frame's), ms.
+    let mut gpu_steps: Vec<(f64, f64, f64, f64)> = Vec::new();
     let t_all = std::time::Instant::now();
     println!(
         "{:>6} {:>8} {:>8} {:>8} {:>7} {:>18} {:>12} {:>16}",
@@ -818,13 +821,20 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // time (the snapshot's bytes, the car's retired nodes and piece labels): every state
     // word compared bit for bit, and each one's ms a frame (B's pipelines compiled
     // before its timed frames).
+    // `--ab-switch perf=MASK`: the kernels' lossless schedule switches
+    // (`ExplicitBeamsGpu::set_perf_flags`, `explicit_plan::PERF_*`): the run's flags with
+    // MASK's bits on against off.
+    let perf_ab: Option<u32> = arg("--ab-switch").and_then(|s| s.strip_prefix("perf=").and_then(|m| m.parse().ok()));
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
     let mut other = None;
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if beams_ab {
+        if let Some(mask) = perf_ab {
+            let f = x.perf_flags();
+            x.set_perf_flags(if on { f | mask } else { f & !mask });
+        } else if beams_ab {
             x.set_beam_order(on);
         } else if selfsplit_ab {
             x.set_self_split(on);
@@ -856,8 +866,13 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             // mask (time only; 2147483648 is the ablation kernel with nothing skipped).
             if let Some(masks) = arg("--ab-ablate") {
                 let mut line = Vec::new();
-                for m in masks.split(',').filter_map(|m| m.parse::<u32>().ok()) {
+                // (`M:M2`: with the second mask M2, `set_ablation2`.)
+                for (m, m2) in masks.split(',').filter_map(|m| {
+                    let mut p = m.split(':');
+                    Some((p.next()?.parse::<u32>().ok()?, p.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0)))
+                }) {
                     x.restore(&snap);
+                    x.set_ablation2(m2);
                     x.set_ablation(m);
                     x.wait();
                     let t = std::time::Instant::now();
@@ -866,10 +881,11 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         x.wait();
                     }
                     line.push(format!(
-                        "{m}: {:.2}",
+                        "{m}:{m2}: {:.2}",
                         t.elapsed().as_secs_f64() * 1e3 / 20.0
                     ));
                 }
+                x.set_ablation2(0);
                 x.set_ablation(0);
                 println!(
                     "   ablations at t {:.1} (ms/frame): {}",
@@ -1022,6 +1038,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 lab.bench.t,
                 if kernel_ab {
                     "this kernel (on) / --ab-kernel-dir's (off)"
+                } else if perf_ab.is_some() {
+                    "perf flags"
                 } else if beams_ab {
                     "sorted beams"
                 } else if selfsplit_ab {
@@ -1069,6 +1087,13 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         let ms = t.elapsed().as_secs_f64() * 1e3;
         alt[usize::from(odd)].0 += ms;
         alt[usize::from(odd)].1 += 1;
+        // With `--timing step|phases`: this step's GPU time, the vehicles' part of it (the
+        // explicit frame's dispatches and the coupling's passes) and the frame alone.
+        if let Some(g) = world.last_step_gpu_time() {
+            let veh: f64 = g.segments.iter().filter(|(l, _)| l.starts_with("explicit") || l.starts_with("cpl_")).map(|x| x.1).sum();
+            let frame: f64 = g.segments.iter().filter(|(l, _)| l.starts_with("explicit")).map(|x| x.1).sum();
+            gpu_steps.push((lab.bench.t, g.span_ms, veh, frame));
+        }
         lab.read_blocking(&world, k % 6 == 5)?;
         anyhow::ensure!(
             !lab.bench.car.non_finite,
@@ -1175,6 +1200,31 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     }
     if let Some(x) = world.explicit_vehicles() {
         x.kernel_status().map_err(anyhow::Error::msg)?;
+    }
+    if !gpu_steps.is_empty() {
+        // The run's GPU time a World step: median, p95 and the worst step (and when).
+        let stat = |name: &str, f: &dyn Fn(&(f64, f64, f64, f64)) -> f64, from: f64| {
+            let mut v: Vec<(f64, f64)> = gpu_steps.iter().filter(|x| x.0 >= from).map(|x| (f(x), x.0)).collect();
+            if v.is_empty() {
+                return;
+            }
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let q = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize].0;
+            let w = v[v.len() - 1];
+            println!("gpu ms a step, {name} (t >= {from:.1} s, {} steps): median {:.3}, p95 {:.3}, p99 {:.3}, worst {:.3} at t {:.2}", v.len(), q(0.5), q(0.95), q(0.99), w.0, w.1);
+        };
+        for from in [0.0, 0.5] {
+            stat("whole step (span)", &|x| x.1, from);
+            stat("vehicles (frame + coupling passes)", &|x| x.2, from);
+            stat("explicit frame", &|x| x.3, from);
+        }
+        if let Some(path) = arg("--gpu-csv") {
+            let mut out = String::from("t,span_ms,vehicles_ms,frame_ms\n");
+            for x in &gpu_steps {
+                out.push_str(&format!("{:.4},{:.4},{:.4},{:.4}\n", x.0, x.1, x.2, x.3));
+            }
+            std::fs::write(path, out)?;
+        }
     }
     println!(
         "wall {:.1} s for {secs:.1} s simulated",

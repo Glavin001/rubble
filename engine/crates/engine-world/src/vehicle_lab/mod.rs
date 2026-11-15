@@ -88,6 +88,11 @@ pub struct LabOptions {
     pub debris_ttl: Option<DebrisTtl>,
     /// A second copy of the car parked broadside ahead (the flat scene).
     pub parked: bool,
+    /// Copies of the car in the run, 1 to [`MAX_CARS`] (the multi-car benchmark): on the
+    /// mountain they leave the lip together, side by side and stacked, closing on the
+    /// first car, so they crash into each other on the way down; on the flat arena the
+    /// others stand in a row to one side. The lab's numbers are the first car's.
+    pub cars: u32,
     /// The coupling's room per car; more in one window fails the step by name.
     pub capacity: CouplingCapacity,
     pub mountain: MountainSpec,
@@ -108,6 +113,7 @@ impl Default for LabOptions {
             self_split: false,
             debris_ttl: Some(LAB_DEBRIS_TTL),
             parked: false,
+            cars: 1,
             capacity: CouplingCapacity {
                 bodies: 256,
                 shapes: 256,
@@ -124,6 +130,9 @@ impl Default for LabOptions {
 /// Measured on the mountain (lab-mountain-perf.md §6): its fragments weigh 0.3 to 5.6 kg
 /// (2 to 12 nodes); the next pieces up are a 12 kg panel, the 19 kg wheels, 30 and 45 kg
 /// parts. 10 kg retires every fragment and nothing a player would miss.
+/// The most cars of [`LabOptions::cars`].
+pub const MAX_CARS: u32 = 8;
+
 pub const LAB_DEBRIS_TTL: DebrisTtl = DebrisTtl { max_mass_kg: 10.0, max_nodes: 40, seconds: 5.0 };
 
 /// `{ on, seconds, maxKg, maxNodes }` (missing: the lab's default) as a time to live.
@@ -229,6 +238,7 @@ impl LabOptions {
                 _ => d.debris_ttl,
             },
             parked: v.get("parked").and_then(Value::as_bool).unwrap_or(d.parked),
+            cars: (num(v, "cars", f64::from(d.cars)) as u32).clamp(1, MAX_CARS),
             capacity: CouplingCapacity {
                 bodies: shapes,
                 shapes,
@@ -2110,6 +2120,57 @@ impl Lab {
     ) -> Vec<ExplicitBeams> {
         let car = lab_car(template, opts, start);
         let mut cars = vec![car];
+        // The other cars of the multi-car benchmark (`LabOptions::cars`).
+        let mountain = opts.scene == Scene::Mountain;
+        let first = start.unwrap_or(Start {
+            speed: if mountain { opts.mountain.launch } else { 0.0 },
+            ..Start::default()
+        });
+        for k in 1..opts.cars.clamp(1, MAX_CARS) as usize {
+            // (to the left m, up m, closing speed to the right m/s) from the first car.
+            const FORMATION: [[f32; 3]; 7] = [
+                [2.3, 0.0, 2.0],
+                [-2.3, 0.0, -2.0],
+                [0.0, 1.9, 0.0],
+                [2.3, 1.9, 2.0],
+                [-2.3, 1.9, -2.0],
+                [1.15, 3.8, 1.0],
+                [-1.15, 3.8, -1.0],
+            ];
+            let mut c = if mountain {
+                let [x, y, close] = FORMATION[k - 1];
+                let base = lab_car(template, opts, None);
+                let z0 = {
+                    let (lo, hi) = base.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.z), b.max(n.pos.z)));
+                    0.5 * (lo + hi)
+                };
+                lab_car(
+                    template,
+                    opts,
+                    Some(Start {
+                        speed: opts.mountain.launch,
+                        lateral: -close,
+                        at: [x, z0],
+                        lift: 0.3 + y,
+                        ..Start::default()
+                    }),
+                )
+            } else {
+                // Standing in a row to the first car's right, clear of the arena's lanes.
+                lab_car(
+                    template,
+                    opts,
+                    Some(Start {
+                        at: [first.at[0] - 12.0 - 3.0 * k as f32, first.at[1] - 12.0],
+                        ..Start::default()
+                    }),
+                )
+            };
+            c.origin = cars[0].origin;
+            c.ground = cars[0].ground;
+            c.shapes = cars[0].shapes.clone();
+            cars.push(c);
+        }
         if opts.parked {
             // Broadside across the arena, 16 m ahead of the origin (far overhead on the
             // mountain: the fleet is the same in every scene).

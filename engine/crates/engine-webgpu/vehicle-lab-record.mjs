@@ -153,6 +153,7 @@ if (PROBE) {
     }
     await grabTo(join(OUT, 'stills', `probe-${name}.jpg`), 85);
     if (opt('--eval', null)) console.log(await evaluate('(window.__abLog || []).join("\\n")'));
+    console.log(`  gpu run (t >= 0.5 s): ${await evaluate('JSON.stringify(window.__gpuRun(0.5), (k, v) => typeof v === "number" ? +v.toFixed(3) : v)')}`);
     console.log(await evaluate('window.__table()'));
     failOnErrors(name);
   }

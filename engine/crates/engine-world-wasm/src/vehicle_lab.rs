@@ -26,7 +26,8 @@ pub struct WebVehicleLab {
 /// { truck } | { jbeam: [[name, text]], pc } (on raycast wheels), drag (default true),
 /// centredDamping (the solver's centred damping correction; default its own),
 /// gpuTiming ('off' | 'step' | 'phases'), scene ('flat' | 'mountain'), surface (the car's
-/// opt-in surface contact), parked (a second car broadside ahead), shapes and planes (the
+/// opt-in surface contact), parked (a second car broadside ahead), cars (1 to 8 copies of the car: the multi-car
+/// benchmark), shapes and planes (the
 /// coupling's room per car), sleep, mountain: { seed, steepness, roughness, … }, parts:
 /// { names, start, beams } }` (`rubble::vehicle_lab::LabOptions::from_json`).
 #[wasm_bindgen(js_name = createVehicleLab)]
@@ -84,7 +85,7 @@ pub async fn create_vehicle_lab(spec: JsValue, progress: Option<js_sys::Function
     {
         // The vehicles' kernels compiled without blocking first (as `createVehicleTown`).
         let car = lab_car(&template, &opts, None);
-        let fleet = vec![car; if opts.parked { 2 } else { 1 }];
+        let fleet = vec![car; opts.cars as usize + usize::from(opts.parked)];
         let specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(opts.capacity));
         crate::warm_pipelines(&device, &specs, crate::hear_fn(progress)).await.map_err(err)?;
     }
