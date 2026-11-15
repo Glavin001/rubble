@@ -6,7 +6,8 @@
 //! (`engine_webgpu::EXPLICIT_BEAMS_NOCPL`, twins a browser compiles faster) and
 //! surface contact split from the frame (`engine_webgpu::EXPLICIT_BEAMS_SURF_SPLIT`:
 //! the `*_seg` frames and the `explicit_surface_*` pipelines) and the split group path
-//! (`engine_webgpu::EXPLICIT_BEAMS_SPLIT_GROUPS`), which Metal and CUDA do not run
+//! (`engine_webgpu::EXPLICIT_BEAMS_SPLIT_GROUPS`) and self-collision across workgroups
+//! (`engine_webgpu::EXPLICIT_BEAMS_SELF_SPLIT`), which Metal and CUDA do not run
 //! (known-bugs P1).
 use engine_exec::explicit_plan::MODULES;
 
@@ -16,6 +17,7 @@ fn plan_modules_are_the_shipped_wgsl() {
         .iter()
         .chain(engine_webgpu::EXPLICIT_BEAMS_SURF_SPLIT.iter())
         .chain(engine_webgpu::EXPLICIT_BEAMS_SPLIT_GROUPS.iter())
+        .chain(engine_webgpu::EXPLICIT_BEAMS_SELF_SPLIT.iter())
         .map(|(n, _)| *n)
         .collect();
     let mut shipped: Vec<(String, &str)> = engine_webgpu::explicit_beams_shipped_wgsl()

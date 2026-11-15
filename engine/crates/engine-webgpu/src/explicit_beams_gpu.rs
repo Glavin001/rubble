@@ -496,7 +496,7 @@ impl SelfSplit {
         let walk = pipe("walk", "explicit_beams_self_walk", &layouts[1].1);
         let args = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-self-split-args"),
-            size: 128,
+            size: SELF_ARGS_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             mapped_at_creation: false,
         });
@@ -3057,21 +3057,20 @@ impl ExplicitBeamsGpu {
     /// step's rest and the frame's end (step dispatch `steps`).
     fn dispatch_self_split(&self, pass: &mut wgpu::ComputePass, steps: u32) {
         let p = self.self_split_pipes();
-        let nv = self.planner.vehicles();
         let at = |k: u32| [k * PARAM_STRIDE as u32];
-        for s in 0..=steps {
-            pass.set_pipeline(&p.step);
-            pass.set_bind_group(0, &p.step_bind, &at(s));
-            pass.dispatch_workgroups(nv, 1, 1);
-            if s == steps {
-                break;
+        for d in self_split_schedule(self.planner.vehicles(), steps) {
+            match d {
+                SelfDispatch::Step { copy, groups } => {
+                    pass.set_pipeline(&p.step);
+                    pass.set_bind_group(0, &p.step_bind, &at(copy));
+                    pass.dispatch_workgroups(groups, 1, 1);
+                }
+                SelfDispatch::Walk { copy, offset } | SelfDispatch::Pairs { copy, offset } => {
+                    pass.set_pipeline(if matches!(d, SelfDispatch::Walk { .. }) { &p.walk } else { &p.pairs });
+                    pass.set_bind_group(0, &p.pairs_bind, &at(copy));
+                    pass.dispatch_workgroups_indirect(&p.args, offset);
+                }
             }
-            let slot = if s == 0 { 2 } else { s & 1 };
-            pass.set_pipeline(&p.walk);
-            pass.set_bind_group(0, &p.pairs_bind, &at(s));
-            pass.dispatch_workgroups_indirect(&p.args, 12 * u64::from(3 + slot));
-            pass.set_pipeline(&p.pairs);
-            pass.dispatch_workgroups_indirect(&p.args, 12 * u64::from(slot));
         }
     }
 
@@ -3501,6 +3500,63 @@ pub fn explicit_beams_shipped_wgsl() -> Vec<(String, &'static str, String)> {
         let entry = if n.contains("member") { SPLIT_MEMBER_ENTRY } else { SPLIT_GROUP_ENTRY };
         out.push((n.to_string(), entry, u(w)));
     }
+    for (n, w) in crate::EXPLICIT_BEAMS_SELF_SPLIT.iter() {
+        out.push((n.to_string(), self_split_entry(n), u(w)));
+    }
+    out
+}
+
+/// A self-collision split module's entry point (`explicit_beams_selfsplit_{step,walk,pairs}*`).
+fn self_split_entry(name: &str) -> &'static str {
+    if name.contains("_walk") {
+        "explicit_beams_self_walk"
+    } else if name.contains("_pairs") {
+        "explicit_beams_self_pairs"
+    } else {
+        "explicit_beams_self_step"
+    }
+}
+
+/// What a self-collision split frame dispatches ([`ExplicitBeamsGpu::set_self_split`]), in
+/// order: per step its step dispatch (`nv` workgroups, binding the indirect arguments as
+/// storage), its walk and its pairs dispatch (indirect from the arguments, which they do
+/// not bind), then the last step's rest and the frame's end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelfDispatch {
+    /// The step dispatch of parameter copy `copy` over `groups` workgroups.
+    Step { copy: u32, groups: u32 },
+    /// The walk dispatch of copy `copy`, its size at byte `offset` of the arguments.
+    Walk { copy: u32, offset: u64 },
+    /// The pairs dispatch of copy `copy`, its size at byte `offset` of the arguments.
+    Pairs { copy: u32, offset: u64 },
+}
+
+/// Bytes of the self-collision split's indirect arguments (two kinds, three slots of
+/// three words: explicit_beams_selfsplit.slang selfArgsAt, selfWalkArgsAt).
+const SELF_ARGS_BYTES: u64 = 128;
+
+impl SelfDispatch {
+    /// Whether the dispatch binds the arguments buffer as storage (the step dispatch
+    /// alone: a buffer cannot be storage and indirect in one dispatch).
+    fn binds_args(self) -> bool {
+        matches!(self, SelfDispatch::Step { .. })
+    }
+}
+
+/// A self-collision split frame's dispatches for `nv` vehicles and `steps` steps.
+fn self_split_schedule(nv: u32, steps: u32) -> Vec<SelfDispatch> {
+    let mut out = Vec::new();
+    for s in 0..=steps {
+        out.push(SelfDispatch::Step { copy: s, groups: nv });
+        if s == steps {
+            break;
+        }
+        // Step 0's slot 2, then odd and even steps' (selfArgsAt); the walk's after the
+        // pairs' three.
+        let slot = u64::from(if s == 0 { 2 } else { s & 1 });
+        out.push(SelfDispatch::Walk { copy: s, offset: 12 * (3 + slot) });
+        out.push(SelfDispatch::Pairs { copy: s, offset: 12 * slot });
+    }
     out
 }
 
@@ -3555,4 +3611,67 @@ pub fn render_scene_json(
         tyres.join(","),
         boxes.join(",")
     )
+}
+
+#[cfg(test)]
+mod self_split_tests {
+    use super::*;
+
+    /// The split frame's dispatches for 1, 4 and 64 vehicles, 1 to 34 steps (and the
+    /// most a parameter buffer holds): a step dispatch for each parameter copy 0 ..= steps
+    /// over every vehicle; between them the walk and pairs dispatches of that step, each
+    /// sized from three words inside the arguments buffer, a slot its own for each of the
+    /// two dispatches of consecutive steps; no indirect dispatch binds the arguments (wgpu
+    /// rejects a buffer used as storage and indirect in one dispatch).
+    #[test]
+    fn self_split_schedule_is_bounded_and_never_binds_its_arguments_indirectly() {
+        for nv in [1u32, 4, 64] {
+            for steps in [1u32, 2, 3, 34, plan::PARAM_COPIES - 1] {
+                let d = self_split_schedule(nv, steps);
+                assert_eq!(d.len() as u32, 3 * steps + 1, "nv {nv}, steps {steps}");
+                let mut last: Option<(u64, u64)> = None;
+                for (k, x) in d.iter().enumerate() {
+                    match *x {
+                        SelfDispatch::Step { copy, groups } => {
+                            assert_eq!(copy as usize, k / 3);
+                            assert_eq!(groups, nv);
+                            assert!(copy <= steps && copy < plan::PARAM_COPIES);
+                            assert!(x.binds_args());
+                        }
+                        SelfDispatch::Walk { copy, offset } | SelfDispatch::Pairs { copy, offset } => {
+                            assert!(!x.binds_args(), "an indirect dispatch binds its arguments");
+                            assert!(copy < steps);
+                            assert_eq!(offset % 4, 0);
+                            assert!(offset + 12 <= SELF_ARGS_BYTES, "arguments past the buffer at {offset}");
+                        }
+                    }
+                }
+                // The two kinds never share a slot, and consecutive steps never share one
+                // (a step dispatch clears the next step's while the last is still read).
+                for s in 0..steps as usize {
+                    let (SelfDispatch::Walk { offset: w, .. }, SelfDispatch::Pairs { offset: p, .. }) =
+                        (d[3 * s + 1], d[3 * s + 2])
+                    else {
+                        panic!("step {s}: not a walk then a pairs dispatch");
+                    };
+                    assert_ne!(w, p);
+                    if let Some((lw, lp)) = last {
+                        assert!(lw != w && lp != p, "steps {} and {s} share a slot", s - 1);
+                    }
+                    last = Some((w, p));
+                }
+                assert!(matches!(d.last(), Some(SelfDispatch::Step { copy, .. }) if *copy == steps));
+            }
+        }
+    }
+
+    /// The twelve split modules are shipped with their entry points.
+    #[test]
+    fn self_split_modules_are_shipped() {
+        let shipped = explicit_beams_shipped_wgsl();
+        for (n, _) in crate::EXPLICIT_BEAMS_SELF_SPLIT.iter() {
+            let (_, e, w) = shipped.iter().find(|(s, _, _)| s == n).unwrap_or_else(|| panic!("{n} not shipped"));
+            assert!(w.contains(&format!("fn {e}(")), "{n}: no entry {e}");
+        }
+    }
 }
