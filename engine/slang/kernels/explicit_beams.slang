@@ -1596,6 +1596,19 @@ static const uint PERF_VV_BIG_GRID = 128u;
 // before the groups' pass (explicit_beams_split.slang memberRest; the host adds it).
 static const uint PERF_MEMBER_LIST = 256u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
+// perfFlags bit 1024 (explicit_plan::PERF_HIT_ROLES, with PERF_HIT_FB): a two-body
+// dissipative vehicle's hits applied a (hit, role) a lane. A hit's first-pass adds, its
+// residual's and its total's shares, its four nodes' accelerations and the merge are
+// each four independent node updates (fixed-point atomics, order-free); selfApply ran
+// them in series on the hit's lane (about 130 atomics a hit over its phases). Here each
+// phase that touches a node runs on the (hit, role)'s own lane and each phase that
+// combines the four runs on the hit's lane, the values between them in the hit's
+// record after the beam forces (hitRoleAt: per role the acceleration xyz and an
+// inverse mass, then the total xyz; HIT_ROLE_WORDS words a hit): the same sums of the
+// same bits in the same order, more barriers and shorter chains (selfResidualRoles).
+static const uint PERF_HIT_ROLES = 1024u;
+static const uint HIT_ROLE_WORDS = 20u;
+uint hitRoleAt(uint v, uint i) { return hitFbAt(v, HIT_CAP) + i * HIT_ROLE_WORDS; }
 
 // The break exception (spec §2, step 4: an end on a collision triangle with fewer
 // than 3 live plain beams saves the beam) reads the beams' state in spawn order: a
@@ -5859,6 +5872,7 @@ void hitForce(uint v, uint at, uint key, int3 sum, uint round, float3 origin, fl
 }
 
 bool selfResidual(uint v);
+bool hitRolesOn(uint v);
 
 // The computed hit at record `at` adds its shares to the accumulators.
 void selfAddOne(uint at, uint key, uint nodeOff)
@@ -5906,7 +5920,8 @@ uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r,
             gNext[at + 4u] = asuint(f2.y);
             gNext[at + 5u] = asuint(f2.z);
             gNext[at + 6u] = round != 0u ? round : SELF_ROUNDS + 1u;
-            selfAddOne(at, key, nodeOff);
+            // (PERF_HIT_ROLES: its shares a role a lane, after this round's barrier.)
+            if (!hitRolesOn(v)) selfAddOne(at, key, nodeOff);
             continue;
         }
         int3 sum = int3(0, 0, 0);
@@ -6170,6 +6185,186 @@ void selfResidualPhase(uint v, uint sub, uint lanes, uint phase, uint beamOff, u
     }
 }
 
+// --- PERF_HIT_ROLES: the first pass's adds and §37.1's pass a (hit, role) a lane ---
+// Vehicle v's hits take it: the switch (with the beam forces' records) and the residual
+// pass (two-body, dissipative).
+bool hitRolesOn(uint v)
+{
+    return (gP.perfFlags & (PERF_HIT_ROLES | PERF_HIT_FB)) == (PERF_HIT_ROLES | PERF_HIT_FB) && selfResidual(v);
+}
+
+// A node phase of the pass over vehicle v's listed hits, item q = 4 · hit + role (role 0
+// the contacter, 1..3 the triangle's n0, n1, n2: hitFbFill's) on lane `sub` of `lanes`:
+// 0  the first pass's share into the accumulator A (selfAddOne's add for this node);
+// 1  the node's acceleration from A and the inverse mass of its hit count (resAcc,
+//    selfInvMass) into the hit's role record;
+// 3  the residual's share into B (resStage's add for this node; r from phase 2);
+// 4  the node's acceleration from A + B and its own inverse mass (resAccNow, ownInvMass)
+//    into the role record;
+// 6  the total's share less the first pass's into A and B cleared, the total's
+//    magnitude into the contact-force log (the total from phase 5). resFinal adds that
+//    difference to D and resMergeNode then moves the node's D into A and clears B and
+//    D: nothing reads A or B after phase 4, so the difference goes into A at once (the
+//    same integers added, in any order) and D stays zero.
+// Each add is the integer selfAddOne, resStage or resFinal adds for that node and the
+// sums are order-free; each acceleration is read after every lane's adds of the phase
+// before (the caller's barriers), as the hit's lane read it.
+void hitRolePhase(uint v, uint sub, uint lanes, uint phase, uint beamOff, uint groupOff, uint groupCount,
+                  uint parity)
+{
+    uint count = uint(gAcc[hitAcc(v)].load());
+    if (count > HIT_CAP || !hitRolesOn(v)) return;
+    uint base = hitList(v);
+    uint nodeOff = gStatic[v * 4u].x;
+    for (uint q = sub, qStop = EB_END(q, count * 4u, lanes); q < qStop; q += lanes)
+    {
+        uint i = q >> 2;
+        uint role = q & 3u;
+        uint at = base + i * HIT_WORDS;
+        uint x = role == 0u ? nodeOff + (gNext[at] & 0xFFFFu) : gNext[at + 7u + role];
+        uint rec = hitRoleAt(v, i) + role * 4u;
+        if (phase == 1u || phase == 4u)
+        {
+            float3 acc = resAccNow(x, hitFbAt(v, i) + role * 3u, beamOff, groupOff, groupCount, parity, phase == 4u);
+            float im = phase == 1u ? selfInvMass(x) : ownInvMass(x);
+            gNext[rec] = asuint(acc.x);
+            gNext[rec + 1u] = asuint(acc.y);
+            gNext[rec + 2u] = asuint(acc.z);
+            gNext[rec + 3u] = asuint(im);
+            continue;
+        }
+        // hitShare's role of this node: the contacter 1, n1 2, n2 3, n0 4.
+        uint share = role == 0u ? 1u : (role == 1u ? 4u : role);
+        float alpha = asfloat(gNext[at + 1u]);
+        float beta = asfloat(gNext[at + 2u]);
+        float gamma = nf(nf(1.0 - alpha) - beta);
+        float3 f1 = asfloat(uint3(gNext[at + 3u], gNext[at + 4u], gNext[at + 5u]));
+        if (phase == 0u)
+        {
+            accAdd(x, hitShare(f1, share, alpha, beta, gamma));
+            continue;
+        }
+        if (phase == 3u)
+        {
+            float r = asfloat(gNext[at + 21u]);
+            if (r > 0.0)
+            {
+                float3 nn = asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u]));
+                float3 s = hitShare(sscale(nn, r), share, alpha, beta, gamma);
+                uint b = resAt(x);
+                gAcc[b + 1u].add(toFixed(s.x));
+                gAcc[b + 2u].add(toFixed(s.y));
+                gAcc[b + 3u].add(toFixed(s.z));
+            }
+            continue;
+        }
+        uint tot = hitRoleAt(v, i) + 16u;
+        float3 total = asfloat(uint3(gNext[tot], gNext[tot + 1u], gNext[tot + 2u]));
+        float3 st = hitShare(total, share, alpha, beta, gamma);
+        int3 d = toFixed3(st) - toFixed3(hitShare(f1, share, alpha, beta, gamma));
+        uint b = resAt(x);
+        gAcc[b + 1u].store(0);
+        gAcc[b + 2u].store(0);
+        gAcc[b + 3u].store(0);
+        if (d.x != 0) gAcc[x * 3u].add(d.x);
+        if (d.y != 0) gAcc[x * 3u + 1u].add(d.y);
+        if (d.z != 0) gAcc[x * 3u + 2u].add(d.z);
+        cfAdd(x, st);
+    }
+}
+
+// A hit phase of the same pass, hit i on lane `sub` of `lanes`, from its four role
+// records (the accelerations and inverse masses the phase before left):
+// 2  the residual r into record word 21 (resOf: resDrive's and resForceR's arithmetic);
+// 5  the total, first pass with residual and guard, into the hit's role record
+//    (resTotal: guardOf's arithmetic).
+void hitCombinePhase(uint v, uint sub, uint lanes, uint phase)
+{
+    uint count = uint(gAcc[hitAcc(v)].load());
+    if (count > HIT_CAP || !hitRolesOn(v)) return;
+    uint base = hitList(v);
+    for (uint i = sub, iStop = EB_END(i, count, lanes); i < iStop; i += lanes)
+    {
+        uint at = base + i * HIT_WORDS;
+        uint rec = hitRoleAt(v, i);
+        float alpha = asfloat(gNext[at + 1u]);
+        float beta = asfloat(gNext[at + 2u]);
+        float gamma = nf(nf(1.0 - alpha) - beta);
+        float3 nn = asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u]));
+        float3 vv = asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u]));
+        // The roles' records: the contacter, n0, n1, n2.
+        float3 ah = asfloat(uint3(gNext[rec], gNext[rec + 1u], gNext[rec + 2u]));
+        float imh = asfloat(gNext[rec + 3u]);
+        float3 a0 = asfloat(uint3(gNext[rec + 4u], gNext[rec + 5u], gNext[rec + 6u]));
+        float im0 = asfloat(gNext[rec + 7u]);
+        float3 a1 = asfloat(uint3(gNext[rec + 8u], gNext[rec + 9u], gNext[rec + 10u]));
+        float im1 = asfloat(gNext[rec + 11u]);
+        float3 a2 = asfloat(uint3(gNext[rec + 12u], gNext[rec + 13u], gNext[rec + 14u]));
+        float im2 = asfloat(gNext[rec + 15u]);
+        // α·a(n1) + β·a(n2) + γ·a(n0), in that order (resDrive, guardOf).
+        float3 aw = sscale(a1, alpha);
+        aw = sadd3(aw, sscale(a2, beta));
+        aw = sadd3(aw, sscale(a0, gamma));
+        float imt = nf(nf(selfTerm(alpha, im1) + selfTerm(beta, im2)) + selfTerm(gamma, im0));
+        if (phase == 2u)
+        {
+            float a = sdot(ssub3(ah, aw), nn);
+            float vn = sdot(vv, nn);
+            float x = nf(vn + max(vn, 0.0));
+            float r = 0.0;
+            if (vn < 0.0 && nf(smul(a, STEP) + x) < 0.0)
+            {
+                float inv = nf(imh + imt);
+                if (inv > 0.0)
+                {
+                    float m = sdiv(1.0, inv);
+                    float rr = nf(-smul(a, m) - sdiv(smul(x, m), STEP));
+                    r = rr > 0.0 ? rr : 0.0;
+                }
+            }
+            gNext[at + 21u] = asuint(r);
+            continue;
+        }
+        float3 f = asfloat(uint3(gNext[at + 3u], gNext[at + 4u], gNext[at + 5u]));
+        float r = asfloat(gNext[at + 21u]);
+        if (r > 0.0) f = sadd3(f, sscale(nn, r));
+        if (!all(f == float3(0.0, 0.0, 0.0)))
+        {
+            float3 a = ssub3(ah, aw);
+            float inv = nf(imh + imt);
+            float3 rest = ssub3(a, sscale(f, inv));
+            float aa = sdot(f, sadd3(sadd3(vv, vv), sscale(rest, STEP)));
+            float bb = smul(smul(STEP, sdot(f, f)), inv);
+            if (nf(aa + bb) > 0.0 && bb > 0.0)
+            {
+                float k = aa < 0.0 ? min(sdiv(-aa, bb), 1.0) : 0.0;
+                f = sadd3(f, sscale(f, -nf(1.0 - k)));
+            }
+        }
+        gNext[rec + 16u] = asuint(f.x);
+        gNext[rec + 17u] = asuint(f.y);
+        gNext[rec + 18u] = asuint(f.z);
+    }
+}
+
+// selfApply's end with PERF_HIT_ROLES, after its rounds' last barrier (every listed hit
+// of a vehicle that takes it has its first-pass force and none of its adds; any other
+// vehicle's hits are complete and nothing here touches them): the phases above in order,
+// a barrier after each. One call site each (the compilers inline every call).
+void selfResidualRoles(uint v, bool on, uint sub, uint lanes, uint beamOff, uint groupOff, uint groupCount,
+                       uint parity)
+{
+    for (uint phase = 0u; phase < 7u; phase++)
+    {
+        if (on)
+        {
+            if (phase == 2u || phase == 5u) hitCombinePhase(v, sub, lanes, phase);
+            else hitRolePhase(v, sub, lanes, phase, beamOff, groupOff, groupCount, parity);
+        }
+        sync();
+    }
+}
+
 // selfApply's node forces (perfFlags bit 1), before its rounds: each listed hit's four
 // nodes' beam forces (beamSum: the incidence entries and group state of this step,
 // which nothing in selfApply writes), one (hit, role) a lane, for the two-body rule's
@@ -6249,6 +6444,12 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
     // then the merge, each after every lane's previous phase.
     if (gP.selfSplit != 0u)
     {
+        // (PERF_HIT_ROLES: a (hit, role) a lane, with the first pass's adds.)
+        if ((gP.perfFlags & (PERF_HIT_ROLES | PERF_HIT_FB)) == (PERF_HIT_ROLES | PERF_HIT_FB))
+        {
+            selfResidualRoles(v, on, sub, lanes, beamOff, groupOff, groupCount, parity);
+            return;
+        }
         for (uint phase = 0u; phase < 3u; phase++)
         {
             sync();
@@ -7324,6 +7525,46 @@ void explicit_beams_wide_centred_nodes(uint3 id : SV_DispatchThreadID)
     ebLoopCapFlush();
 }
 
+// perfFlags bit 2048 (explicit_plan::PERF_WIDE_GEO, with PERF_WIDE_LIST): the tested
+// triangles' step geometry (triGeoFill) on threads of the beams' dispatch, a triangle a
+// thread across the GPU, in place of the list kernel's lanes (one workgroup: 528
+// triangles' records on one core, the kernel's longest phase). What triGeoFill reads
+// (the nodes' positions and velocities, the fastest node's speed, the triangles' flags)
+// is the node phase's and nothing writes it until the triangles' tests are over, so
+// the records are the list kernel's bit for bit; they are filled for the triangles the
+// list kernel would fill: those its throttle update will leave tested this step
+// (triangleFinishPeek: triangleFinish's result from the words the step before left,
+// which nothing writes between its hits and this step's list kernel), every triangle
+// of a vehicle past TRI_LIST. (A step on the list kernel's few-pairs path reads no
+// record: these are then written and not read.)
+static const uint PERF_WIDE_GEO = 2048u;
+int triangleFinishPeek(uint gt)
+{
+    uint4 th = gMisc[gP.vehicles + gt];
+    int wait = asint(th.x);
+    int idle = asint(th.y);
+    if (wait > 0) return wait - 1;
+    if (idle > 0) wait = min(idle, 12);
+    return th.w != 0u ? -20000 : min(wait + 1, throttleCap(gt));
+}
+void wideGeoThread(uint gt)
+{
+    if (gt >= gP.totalTris || gP.triGeo == 0u) return;
+    uint v = gStatic[gP.triBase + gt].w;
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    if (r2.y == 0u) return;
+    // (The list kernel's origin, parity and range: the same words.)
+    uint4 misc = gMisc[v];
+    uint s = gP.pad2;
+    if (r1.y <= TRI_LIST)
+    {
+        int w = s > 0u ? triangleFinishPeek(gt) : asint(gMisc[gP.vehicles + gt].x);
+        if (w > 0) return;
+    }
+    triGeoFill(gt, asfloat(misc.xyz), asfloat(gStatic[v * 4u + 3u].z), (misc.w + s) & 1u);
+}
+
 // Beams, then grid filling (candidates), then triangles' throttle and tested list.
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -7339,8 +7580,13 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
         beamUpdate(i, i - x.beamOff, (x.flags & FLAG_FAST_INV_SQRT) != 0u, x.groupOff, vehicleStep(v) & 1u);
         return ebLoopCapFlush();
     }
-    // (PERF_WIDE_LIST: the grid and the triangles' throttles are the list kernel's.)
-    if ((gP.perfFlags & PERF_WIDE_LIST) != 0u) return ebLoopCapFlush();
+    // (PERF_WIDE_LIST: the grid and the triangles' throttles are the list kernel's; with
+    // PERF_WIDE_GEO the tested triangles' geometry here, a thread a triangle.)
+    if ((gP.perfFlags & PERF_WIDE_LIST) != 0u)
+    {
+        if ((gP.perfFlags & PERF_WIDE_GEO) != 0u) wideGeoThread(i - gP.totalBeams);
+        return ebLoopCapFlush();
+    }
     i -= gP.totalBeams;
     if (i < gP.totalCands)
     {
@@ -7702,7 +7948,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
             trianglePairs(t, triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, parity);
         }
     }
-    else if (candCount > 0u && gP.triGeo != 0u)
+    else if (candCount > 0u && gP.triGeo != 0u && (gP.perfFlags & PERF_WIDE_GEO) == 0u)
     {
         for (uint q = LANES - 1u - lane, qStop = EB_END(q, listedB, LANES); q < qStop; q += LANES)
             triGeoFill(triOff + (triCount <= TRI_LIST ? gsTested[q] : q), origin, range, parity);
