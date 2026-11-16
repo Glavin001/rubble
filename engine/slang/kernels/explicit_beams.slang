@@ -8099,7 +8099,7 @@ void vvArgs(uint nv, uint groups, bool big)
     gArgs[22] = 1u;
     // Its triangle tests across workgroups (explicit_beams_split.slang SPLIT_TEST_WGS a
     // group; words 24..26).
-    gArgs[24] = groups * 16u;
+    gArgs[24] = groups * 64u;
     gArgs[25] = 1u;
     gArgs[26] = 1u;
     // Self-collision split in a world with vehicle contact (explicit_beams_split.slang,

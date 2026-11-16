@@ -3404,7 +3404,7 @@ impl ExplicitBeamsGpu {
             && self.debug_groups.is_none()
             && steps > 0
             && 3 * steps + 2 <= plan::PARAM_COPIES
-            && self.layout.spans.len() * 16 <= 65_535
+            && self.layout.spans.len() * 64 <= 65_535
             && self.self_split_ready(true)
             && cmds.iter().all(|c| match c {
                 Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => {
@@ -3700,10 +3700,10 @@ impl ExplicitBeamsGpu {
             && self.debug_groups.is_none()
             && steps > 0
             && 3 * steps + 2 <= plan::PARAM_COPIES
-            // The tests' dispatch is 16 workgroups a group (at most one group per two
+            // The tests' dispatch is 64 workgroups a group (at most one group per two
             // vehicles), the vehicles' one a workgroup each: within WebGPU's 65,535 a
             // dimension. A larger fleet keeps the groups' workgroup (the same results).
-            && self.layout.spans.len() * 16 <= 65_535
+            && self.layout.spans.len() * 64 <= 65_535
             // (A browser host's async compiles: the groups' workgroup until its modules
             // are compiled, the same results.)
             && {

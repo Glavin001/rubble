@@ -177,7 +177,7 @@ static const uint SPLIT_TESTS = 0x20000000u;
 static const uint SPLIT_LEVELS = 0x40000000u;
 static const uint SPLIT_STEP = 0x0FFFFFFFu;
 // Workgroups per group of the tests' dispatches (the host's SPLIT_TEST_WGS).
-static const uint SPLIT_TEST_WGS = 16u;
+static const uint SPLIT_TEST_WGS = 64u;
 
 // Group g's scratch for the tests across workgroups: its first member's wide-pass grid
 // counts (gAcc, GRID_BUCKETS words) and grid offsets (gNext, GRID_BUCKETS + 1): that

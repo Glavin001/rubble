@@ -1223,3 +1223,11 @@ snapshot, 34 dispatches of each a frame):
 
 Next from this table: the walk (a triangle's thread scans up to 3,500 candidates in a
 pile, 4,160 listed triangles on 8,192 threads, so one part each), then the front.
+
+4. **The tests on 64 workgroups a group** (`SPLIT_TEST_WGS`, was 16: 16 of the GPU's
+   cores at most, and one part a triangle in a pile). Bit for bit at the same five times.
+   Eight cars, ms a frame at t 2 / 3.7 / 5 / 8 / 12 s: 16.8 / 33.7 / 22.1 / 33.1 / 30.3
+   (15.7 / 35.3 / 24.8 / 49.4 / 54.7 before); the first 12 s' worst frame 53 ms (300 at
+   the start of this section). The pile's frame by kind now (30.0 ms untimed): tests'
+   walk 11.3 ms (34 %), front 8.9 (27 %), the cars' steps 7.7 (23 %), levels 2.6 (8 %),
+   listed pairs 2.1 (6 %).
