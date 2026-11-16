@@ -1971,7 +1971,8 @@ impl ExplicitBeamsGpu {
             .map(|g| {
                 let rec = &misc[(groups + g) * 4..(groups + g) * 4 + 4];
                 let (off, k, points) = (rec[0] as usize, rec[1] as usize, rec[3]);
-                if k == 0 || k > plan::VV_PART {
+                let any = self.fleet_flags() & plan::PERF_FLEET_ANY != 0;
+                if k == 0 || (k > plan::VV_PART && !(any && fleet.is_some())) {
                     return (k as u32, points, Vec::new());
                 }
                 if let Some(at) = fleet {
@@ -3919,7 +3920,8 @@ impl ExplicitBeamsGpu {
             flags &= !plan::PERF_FLEET_STATE;
         }
         if !front {
-            flags &= !plan::PERF_FLEET_FRONT;
+            // (Groups of any size on the fleet-wide passes: only with the front there.)
+            flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY);
         }
         flags
     }
@@ -4029,8 +4031,11 @@ impl ExplicitBeamsGpu {
                 // then the groups' levels. The step's three copies are the phases.
                 let (c0, ct, cl) = (s, 2 * steps + 2 + s, steps + 2 + s);
                 // (A group past VV_PART members: its whole pass in its own workgroup,
-                // no workgroups without one.)
-                out.push(GroupOp::Group { copy: ct, tests: false, args: FLEET_LARGER_ARGS, part: 5 });
+                // no workgroups without one; with PERF_FLEET_ANY it is on the fleet-wide
+                // passes as every other.)
+                if self.fleet_flags() & plan::PERF_FLEET_ANY == 0 {
+                    out.push(GroupOp::Group { copy: ct, tests: false, args: FLEET_LARGER_ARGS, part: 5 });
+                }
                 out.push(GroupOp::Fleet { copy: c0, kernel: 0, args: FLEET_SCAN_ARGS, from: 0, part: 0 });
                 out.push(GroupOp::Fleet { copy: c0, kernel: 1, args: FLEET_FIRST_ARGS, from: 0, part: 1 });
                 out.push(GroupOp::Fleet { copy: ct, kernel: 0, args: FLEET_ELEMENT_ARGS, from: 1, part: 2 });

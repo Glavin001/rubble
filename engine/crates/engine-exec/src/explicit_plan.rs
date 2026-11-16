@@ -185,7 +185,27 @@ pub const PARAM_COPIES: u32 = 129;
 /// second ablation mask, 98 [`W_PERF_FLAGS`], 99–101 vehicle contact's own scratch
 /// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`]), 102–104 vehicle contact's
 /// state by owner vehicle ([`W_VV_FLEET`], [`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`])).
-pub const PARAM_WORDS: usize = 105;
+pub const PARAM_WORDS: usize = 106;
+/// Params word: the partners' room (the kernel's `vvRoom`): vehicle contact's candidate
+/// run, hit list and ranks hold this many times the fleet's contact points and a node's
+/// two-body point counts this many owners ([`vv_room`]). Past it the contact status
+/// reports it (the kernel's FL_ERR_RUN, FL_ERR_SLOTS); it cannot be passed by a fleet of
+/// at most `VV_ROOM_MAX + 1` vehicles.
+pub const W_VV_ROOM: usize = 105;
+/// The most partners the regions are sized for, whatever the fleet's size.
+pub const VV_ROOM_MAX: usize = 32;
+/// The partners' room of a fleet of `nv` vehicles: every other vehicle, at least
+/// [`VV_PART`] (the contact groups' own slots) and at most [`VV_ROOM_MAX`].
+pub const fn vv_room(nv: usize) -> usize {
+    let others = if nv > 0 { nv - 1 } else { 0 };
+    if others < VV_PART {
+        VV_PART
+    } else if others > VV_ROOM_MAX {
+        VV_ROOM_MAX
+    } else {
+        others
+    }
+}
 /// Params word: vehicle contact's state by owner vehicle in gAcc (the kernel's `vvFleet`,
 /// explicit_beams_fleet.slang; contact-groups-design.md §8): per vehicle
 /// [`FLEET_OWN_WORDS`] counters of the pass (offered, listed, candidates, pairs, hits,
@@ -307,6 +327,12 @@ pub const PERF_FLEET_STATE: u32 = 4096;
 /// dispatch over every owner, in place of a workgroup a group for the front and 64 a
 /// group for the tests.
 pub const PERF_FLEET_FRONT: u32 = 8192;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_STATE`] and [`PERF_FLEET_FRONT`]: a contact group of
+/// any size (to the kernel's `VV_MAX_GROUP`) on the fleet-wide front and tests, its
+/// levels for any number of owners (the kernel's PERF_FLEET_ANY, `fleetLevelsAny`:
+/// contact-groups-design.md §8 stage 3), in place of the larger groups' pass on one
+/// core past [`VV_PART`] members.
+pub const PERF_FLEET_ANY: u32 = 16384;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
@@ -1046,7 +1072,7 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
         0 => {}
         2 => {
             return Err(format!(
-                "the owners' candidates passed the fleet-wide run's room ({VV_PART} times the                  fleet's contact points: too many vehicles in contact with one another at                  once; that step's contact pass was cut short)"
+                "the owners' candidates passed the fleet-wide run's room ({VV_ROOM_MAX} times the                  fleet's contact points: too many vehicles in contact with one another at                  once; that step's contact pass was cut short)"
             ))
         }
         3 => {
@@ -1057,7 +1083,7 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
         }
         4 => {
             return Err(format!(
-                "a vehicle had more than {VV_PART} partners with two-body contact at once                  (the two-body point counts hold {VV_PART} owners a node)"
+                "a vehicle had more than {VV_ROOM_MAX} partners with two-body contact at once                  (the two-body point counts hold {VV_ROOM_MAX} owners a node)"
             ))
         }
         _ => return Err("the overlapping-pair list overflowed".into()),
@@ -1986,7 +2012,7 @@ impl ExplicitUpload {
         let vv_run = beams.len() as u32;
         // (Then as many again: the small groups' candidates sorted by cell, the kernel's
         // vvSortAt.)
-        beams.extend(std::iter::repeat_n([0.0f32; 4], 2 * VV_PART * total_cp));
+        beams.extend(std::iter::repeat_n([0.0f32; 4], 2 * vv_room(nv) * total_cp));
         // Two-body contact (jbeam-semantics-spec.md §10.3): per node its force at
         // the contact pass's start.
         let two_body = nv > 1 && vehicles.iter().any(|v| v.two_body_contact);
@@ -2092,7 +2118,7 @@ impl ExplicitUpload {
         // kernel's vvRankAt.)
         // (Then the levels' hit buckets: per group 16 words a contact point, the kernel's
         // vvOrderAt.)
-        let slot_list_base = (vv_hits as usize + 9 * VV_PART * total_cp) as u32;
+        let slot_list_base = (vv_hits as usize + 9 * vv_room(nv) * total_cp) as u32;
         // Then per vehicle its self-collision hit list and pending beams (the
         // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
         let hit_base = slot_list_base as usize + slot_list_len as usize;
@@ -2177,7 +2203,7 @@ impl ExplicitUpload {
         // per node its triangle-hit count, then VV_SPLIT_SLOTS − 1 point-hit slots.
         let vv_split = if two_body {
             let at = acc_init.len() as u32;
-            acc_init.extend(std::iter::repeat_n(0, VV_SPLIT_SLOTS * total_nodes));
+            acc_init.extend(std::iter::repeat_n(0, (1 + vv_room(nv)) * total_nodes));
             at
         } else {
             0
@@ -2662,6 +2688,7 @@ impl ExplicitUpload {
         words[W_VV_FLEET] = vv_fleet;
         words[W_VV_FLEET_NEXT] = vv_fleet_next;
         words[W_VV_FLEET_BOX] = vv_fleet_box;
+        words[W_VV_ROOM] = vv_room(nv) as u32;
         let total = [
             total_nodes as u32,
             total_beams as u32,

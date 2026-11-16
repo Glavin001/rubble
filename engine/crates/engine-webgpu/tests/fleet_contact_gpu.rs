@@ -53,12 +53,19 @@ fn generated() -> String {
 /// on, every state word the same. Returns the frames with a contact group, the largest
 /// group and the most hits an owner listed in a frame's last pass with the switches on.
 fn fleet_matches(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool) -> Option<[u32; 3]> {
+    fleet_matches_with(label, fleet, frames, steps, mask, self_split, 0)
+}
+
+/// [`fleet_matches`] with the second measurement word `word2` (bit 31: the levels for any
+/// number of owners for the small groups too, with `PERF_FLEET_ANY`).
+fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool, word2: u32) -> Option<[u32; 3]> {
     let (_, device, queue) = default_device().ok()?;
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
     gpu.set_vehicle_contact(true);
     gpu.set_wide(false);
     gpu.set_group_split(true);
     gpu.set_self_split(self_split);
+    gpu.set_ablation2(word2);
     let flags = gpu.perf_flags();
     let (mut grouped, mut largest, mut hits) = (0u32, 0u32, 0u32);
     for f in 0..frames {
@@ -117,5 +124,30 @@ fn owners_state_by_vehicle_is_bit_for_bit() {
             .collect();
         let Some([grouped, largest, hits]) = fleet_matches("a column of six", fleet, 30, 17, mask, self_split) else { return };
         assert!(grouped > 10 && largest > 4 && hits > 0, "a group past four members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
+    }
+}
+
+/// Contact groups of any size on the fleet-wide passes (`explicit_plan::PERF_FLEET_ANY`,
+/// the kernel's fleetLevelsAny; contact-groups-design.md §8 stage 3): a column of ten, a
+/// group past eight members, against the larger groups' pass in the group's workgroup
+/// (the switch off); and the same levels taken for small groups (the second measurement
+/// word's bit 31) against the small groups' own.
+#[test]
+fn groups_of_any_size_are_bit_for_bit() {
+    use engine_exec::explicit_plan::PERF_FLEET_ANY;
+    let text = generated();
+    let probe = sedan(&text, Vec3::ZERO, 0.0, Vec3::ZERO);
+    let (lo, hi) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(l, h), n| (l.min(n.pos.z), h.max(n.pos.z)));
+    let pitch = hi - lo + 0.3;
+    let column = |n: usize, speed: f32| -> Vec<ExplicitBeams> {
+        (0..n)
+            .map(|i| sedan(&text, Vec3::new(0.0, 0.0, i as f32 * pitch), 0.0, if i == 0 { Vec3::new(0.0, 0.0, speed) } else { Vec3::ZERO }))
+            .collect()
+    };
+    for self_split in [true, false] {
+        let Some([grouped, largest, hits]) = fleet_matches("a column of ten", column(10, 15.0), 40, 17, PERF_FLEET_ANY, self_split) else { return };
+        assert!(grouped > 10 && largest > 8 && hits > 0, "a group past eight members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
+        let Some([grouped, largest, hits]) = fleet_matches_with("a column of six, the levels for any size", column(6, 15.0), 30, 17, PERF_FLEET_ANY, self_split, 0x8000_0000) else { return };
+        assert!(grouped > 10 && largest > 4 && hits > 0, "a group formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
     }
 }

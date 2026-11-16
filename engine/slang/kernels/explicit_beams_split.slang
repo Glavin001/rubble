@@ -256,7 +256,11 @@ void splitGroupStep(uint g, uint lane, uint word)
 #ifdef EB_VV_FLEET
     // The owners' state by vehicle (PERF_FLEET_STATE, explicit_beams_fleet.slang; the
     // host sets it only with the tests split, the candidates' grid and the pair list).
-    if (small && (tests || levels) && (gP.perfFlags & PERF_FLEET_STATE) != 0u && (gP.ablate & 512u) == 0u)
+    // (PERF_FLEET_ANY, which the host sets only with the front fleet-wide: a group of any
+    // size, its levels fleetLevelsAny past VV_PART owners; the second measurement word's
+    // bit 0x80000000, tests only (set_ablation2), takes those levels for the small groups too.)
+    bool anySize = (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_ANY)) == (PERF_FLEET_FRONT | PERF_FLEET_ANY);
+    if ((small || anySize) && (tests || levels) && (gP.perfFlags & PERF_FLEET_STATE) != 0u && (gP.ablate & 512u) == 0u)
     {
         if (!levels)
         {
@@ -272,8 +276,11 @@ void splitGroupStep(uint g, uint lane, uint word)
             fleetGroupFront(g, k, off, runOff, parity, lane);
             return;
         }
-        fleetGroupLevels(k, off, runOff, points, parity, lane,
-                         (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((stepBase + s + 1u) | 0x80000000u) : 0u);
+        uint tag = (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((stepBase + s + 1u) | 0x80000000u) : 0u;
+        if (small && !(anySize && (gP.beamOrderPad0 & 0x80000000u) != 0u))
+            fleetGroupLevels(k, off, runOff, points, parity, lane, tag);
+        else
+            fleetLevelsAny(k, off, parity, lane, tag);
         splitGroupEnd(off, k, lane, s);
         return;
     }
