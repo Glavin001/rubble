@@ -40,12 +40,20 @@ use std::collections::BTreeMap;
 
 /// Step rates a part could run at (Hz), fastest first.
 const RATES: [f64; 4] = [2000.0, 1000.0, 500.0, 250.0];
-const CLASS_NAMES: [&str; 5] = ["under margin at 2 kHz", "2 kHz", "1 kHz", "500 Hz", "250 Hz or less"];
+const CLASS_NAMES: [&str; 5] = [
+    "under margin at 2 kHz",
+    "2 kHz",
+    "1 kHz",
+    "500 Hz",
+    "250 Hz or less",
+];
 const SAFETY: [f64; 3] = [1.0, 2.0, 4.0];
 
 fn arg(k: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
-    a.iter().position(|x| x == k).and_then(|i| a.get(i + 1).cloned())
+    a.iter()
+        .position(|x| x == k)
+        .and_then(|i| a.get(i + 1).cloned())
 }
 
 /// The largest stable ω·h of one damped mode (module docs).
@@ -160,9 +168,22 @@ fn kind_label(sim: &ExplicitBeams, j: usize, desc_kind: Option<BeamKind>) -> Str
 
 fn generated(res: Resolution) -> Car {
     let def = style("sedan").expect("sedan style");
-    let built = build(&def, &BuildParams { resolution: res, ..BuildParams::default() }).expect("build");
-    let settings = ExplicitBeamsSettings { drag: false, turbulence: false, ..Default::default() };
-    let sim = ExplicitBeams::from_truck_config(&built.truck, None, Vec3::ZERO, Vec3::ZERO, settings).expect("spawn");
+    let built = build(
+        &def,
+        &BuildParams {
+            resolution: res,
+            ..BuildParams::default()
+        },
+    )
+    .expect("build");
+    let settings = ExplicitBeamsSettings {
+        drag: false,
+        turbulence: false,
+        ..Default::default()
+    };
+    let sim =
+        ExplicitBeams::from_truck_config(&built.truck, None, Vec3::ZERO, Vec3::ZERO, settings)
+            .expect("spawn");
     let n = sim.nodes.len();
     // A node's part: the smallest named group (member, block or corner) holding it.
     let mut part = vec![String::new(); n];
@@ -180,15 +201,31 @@ fn generated(res: Resolution) -> Car {
     }
     for (i, p) in part.iter_mut().enumerate() {
         if p.is_empty() {
-            *p = if sim.nodes[i].has(NODE_TYRE) { "tyres".into() } else { "(no group)".into() };
+            *p = if sim.nodes[i].has(NODE_TYRE) {
+                "tyres".into()
+            } else {
+                "(no group)".into()
+            };
         }
     }
-    let beam_kind = (0..sim.beams.len()).map(|j| kind_label(&sim, j, None)).collect();
+    let beam_kind = (0..sim.beams.len())
+        .map(|j| kind_label(&sim, j, None))
+        .collect();
     Car {
         title: format!("repo generated sedan, {res:?} resolution (`.truck`, soft tyres)"),
         node_name: (0..n).map(|i| format!("n{i}")).collect(),
         node_part: part,
-        beam_group: sim.beams.iter().map(|b| if b.group == 0 { String::new() } else { format!("g{}", b.group.abs()) }).collect(),
+        beam_group: sim
+            .beams
+            .iter()
+            .map(|b| {
+                if b.group == 0 {
+                    String::new()
+                } else {
+                    format!("g{}", b.group.abs())
+                }
+            })
+            .collect(),
         beam_kind,
         beam_k2: vec![0.0; sim.beams.len()],
         sim,
@@ -198,27 +235,47 @@ fn generated(res: Resolution) -> Car {
 /// A group name without its trailing index or side, so the table stays short.
 fn part_family(name: &str) -> String {
     let t = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_' || c == '.');
-    if t.is_empty() { name.to_string() } else { t.to_string() }
+    if t.is_empty() {
+        name.to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 fn jbeam_car(dir: &std::path::Path) -> Car {
     let list: Vec<String> =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("files.json")).expect("files.json")).expect("files.json");
+        serde_json::from_str(&std::fs::read_to_string(dir.join("files.json")).expect("files.json"))
+            .expect("files.json");
     let mut texts = Vec::new();
     let mut pc = None;
     for f in &list {
         if f.ends_with(".jbeam") {
-            texts.push((f.clone(), std::fs::read_to_string(dir.join(f)).expect("jbeam")));
+            texts.push((
+                f.clone(),
+                std::fs::read_to_string(dir.join(f)).expect("jbeam"),
+            ));
         } else if f.ends_with(".pc") {
             pc = Some(std::fs::read_to_string(dir.join(f)).expect("pc"));
         }
     }
-    let files: Vec<(&str, &str)> = texts.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let files: Vec<(&str, &str)> = texts
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let desc = engine_softbody::jbeam::load_jbeam(&files, pc.as_deref()).expect("load");
-    let settings = ExplicitBeamsSettings { fast_inv_sqrt: true, ..Default::default() };
+    let settings = ExplicitBeamsSettings {
+        fast_inv_sqrt: true,
+        ..Default::default()
+    };
     let wheels = arg("--wheels").unwrap_or_else(|| "raycast".into());
     let (sim, _) = match wheels.as_str() {
-        "pressure" => ExplicitBeams::from_desc_jbeam_with(&desc, JbeamWheels::Pressure, Vec3::ZERO, Vec3::ZERO, settings),
+        "pressure" => ExplicitBeams::from_desc_jbeam_with(
+            &desc,
+            JbeamWheels::Pressure,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            settings,
+        ),
         _ => ExplicitBeams::from_desc_jbeam_raycast(&desc, Vec3::ZERO, Vec3::ZERO, settings),
     }
     .expect("spawn");
@@ -236,26 +293,52 @@ fn jbeam_car(dir: &std::path::Path) -> Car {
     }
     for (i, p) in part.iter_mut().enumerate() {
         if p.is_empty() {
-            *p = if i >= desc.nodes.len() { "wheels (spawned)".into() } else { "(no part)".into() };
+            *p = if i >= desc.nodes.len() {
+                "wheels (spawned)".into()
+            } else {
+                "(no part)".into()
+            };
         }
     }
-    let beam_kind = (0..sim.beams.len()).map(|j| kind_label(&sim, j, desc.beams.get(j).map(|b| b.kind))).collect();
+    let beam_kind = (0..sim.beams.len())
+        .map(|j| kind_label(&sim, j, desc.beams.get(j).map(|b| b.kind)))
+        .collect();
     let beam_group = sim
         .beams
         .iter()
         .map(|b| {
             let g = b.group.unsigned_abs() as usize;
-            if g == 0 { String::new() } else { desc.break_groups.get(g - 1).cloned().unwrap_or_else(|| format!("g{g}")) }
+            if g == 0 {
+                String::new()
+            } else {
+                desc.break_groups
+                    .get(g - 1)
+                    .cloned()
+                    .unwrap_or_else(|| format!("g{g}"))
+            }
         })
         .collect();
     Car {
         title: format!("{} (JBeam mode, {wheels} wheels)", dir.display()),
-        node_name: (0..n).map(|i| desc.nodes.get(i).map(|x| x.name.clone()).unwrap_or_else(|| format!("n{i}"))).collect(),
+        node_name: (0..n)
+            .map(|i| {
+                desc.nodes
+                    .get(i)
+                    .map(|x| x.name.clone())
+                    .unwrap_or_else(|| format!("n{i}"))
+            })
+            .collect(),
         node_part: part,
         beam_kind,
         beam_group,
         beam_k2: (0..sim.beams.len())
-            .map(|j| desc.beams.get(j).and_then(|b| b.jbeam).and_then(|j| j.spring_expansion).unwrap_or(0.0) as f64)
+            .map(|j| {
+                desc.beams
+                    .get(j)
+                    .and_then(|b| b.jbeam)
+                    .and_then(|j| j.spring_expansion)
+                    .unwrap_or(0.0) as f64
+            })
             .collect(),
         sim,
     }
@@ -315,7 +398,9 @@ fn springs(car: &Car, worst: bool) -> (Vec<Spring>, BTreeMap<String, usize>) {
             }
         }
         if b.a == b.b || (k == 0.0 && c == 0.0) {
-            *skipped.entry(format!("{:?} with no rate", b.kind)).or_insert(0) += 1;
+            *skipped
+                .entry(format!("{:?} with no rate", b.kind))
+                .or_insert(0) += 1;
             continue;
         }
         out.push(Spring {
@@ -332,7 +417,11 @@ fn springs(car: &Car, worst: bool) -> (Vec<Spring>, BTreeMap<String, usize>) {
 }
 
 fn mass(s: &ExplicitBeams, i: usize) -> f64 {
-    if s.nodes[i].has(NODE_IMMOVABLE) { f64::INFINITY } else { s.nodes[i].mass as f64 }
+    if s.nodes[i].has(NODE_IMMOVABLE) {
+        f64::INFINITY
+    } else {
+        s.nodes[i].mass as f64
+    }
 }
 
 /// The largest ω (rad/s) of the vehicle at rest with the nodes of `free` moving and the
@@ -342,10 +431,16 @@ fn omega_max(s: &ExplicitBeams, sp: &[Spring], free: &[bool], iters: usize) -> (
     let n = s.nodes.len();
     let dirs: Vec<DVec3> = sp
         .iter()
-        .map(|b| (s.nodes[b.a].pos - s.nodes[b.b].pos).as_dvec3().normalize_or_zero())
+        .map(|b| {
+            (s.nodes[b.a].pos - s.nodes[b.b].pos)
+                .as_dvec3()
+                .normalize_or_zero()
+        })
         .collect();
     let m: Vec<f64> = (0..n).map(|i| mass(s, i)).collect();
-    let live: Vec<bool> = (0..n).map(|i| free[i] && m[i].is_finite() && m[i] > 0.0).collect();
+    let live: Vec<bool> = (0..n)
+        .map(|i| free[i] && m[i].is_finite() && m[i] > 0.0)
+        .collect();
     if !live.iter().any(|&x| x) {
         return (0.0, vec![0.0; n]);
     }
@@ -357,7 +452,11 @@ fn omega_max(s: &ExplicitBeams, sp: &[Spring], free: &[bool], iters: usize) -> (
                 seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 (seed >> 8) as f64 / (1u32 << 24) as f64 - 0.5
             };
-            if live[i] { DVec3::new(r(), r(), r()) } else { DVec3::ZERO }
+            if live[i] {
+                DVec3::new(r(), r(), r())
+            } else {
+                DVec3::ZERO
+            }
         })
         .collect();
     let mut lambda = 0.0;
@@ -365,7 +464,11 @@ fn omega_max(s: &ExplicitBeams, sp: &[Spring], free: &[bool], iters: usize) -> (
         let mut y = vec![DVec3::ZERO; n];
         for (b, d) in sp.iter().zip(&dirs) {
             let rel = x[b.a] - x[b.b];
-            let f = if b.isotropic { rel * b.k } else { *d * (b.k * d.dot(rel)) };
+            let f = if b.isotropic {
+                rel * b.k
+            } else {
+                *d * (b.k * d.dot(rel))
+            };
             y[b.a] += f;
             y[b.b] -= f;
         }
@@ -386,17 +489,36 @@ fn omega_max(s: &ExplicitBeams, sp: &[Spring], free: &[bool], iters: usize) -> (
             x[i] = y[i] * inv;
         }
     }
-    let total: f64 = (0..n).filter(|&i| live[i]).map(|i| m[i] * x[i].length_squared()).sum();
-    let share = (0..n).map(|i| if live[i] { m[i] * x[i].length_squared() / total } else { 0.0 }).collect();
+    let total: f64 = (0..n)
+        .filter(|&i| live[i])
+        .map(|i| m[i] * x[i].length_squared())
+        .sum();
+    let share = (0..n)
+        .map(|i| {
+            if live[i] {
+                m[i] * x[i].length_squared() / total
+            } else {
+                0.0
+            }
+        })
+        .collect();
     (lambda.max(0.0).sqrt(), share)
 }
 
 fn pct(n: usize, of: usize) -> String {
-    if of == 0 { "–".into() } else { format!("{:.1} %", 100.0 * n as f64 / of as f64) }
+    if of == 0 {
+        "–".into()
+    } else {
+        format!("{:.1} %", 100.0 * n as f64 / of as f64)
+    }
 }
 
 fn pctf(x: f64, of: f64) -> String {
-    if of <= 0.0 { "–".into() } else { format!("{:.1} %", 100.0 * x / of) }
+    if of <= 0.0 {
+        "–".into()
+    } else {
+        format!("{:.1} %", 100.0 * x / of)
+    }
 }
 
 fn share_row(label: &str, classes: &[usize]) -> String {
@@ -448,22 +570,46 @@ fn report(car: &Car) {
          centred damping {}; step {STEP} s; bounded beams {}.",
         s.beams.len(),
         sp.len(),
-        if s.settings.centred_damping { "on (BeamNG profile)" } else { "off (Rigs of Rods profile)" },
-        if worst { "at their limit rates (`--worst`)" } else { "at their rates inside their bounds" },
+        if s.settings.centred_damping {
+            "on (BeamNG profile)"
+        } else {
+            "off (Rigs of Rods profile)"
+        },
+        if worst {
+            "at their limit rates (`--worst`)"
+        } else {
+            "at their rates inside their bounds"
+        },
     );
     if !skipped.is_empty() {
         let list: Vec<String> = skipped.iter().map(|(k, v)| format!("{v} {k}")).collect();
-        println!("\nRecords left out (not a linear spring between two nodes): {}.", list.join(", "));
+        println!(
+            "\nRecords left out (not a linear spring between two nodes): {}.",
+            list.join(", ")
+        );
     }
 
     // Per beam and per node limits.
     let red = |b: &Spring| {
         let (ma, mb) = (mass(s, b.a), mass(s, b.b));
-        if !ma.is_finite() { mb } else if !mb.is_finite() { ma } else { ma * mb / (ma + mb) }
+        if !ma.is_finite() {
+            mb
+        } else if !mb.is_finite() {
+            ma
+        } else {
+            ma * mb / (ma + mb)
+        }
     };
-    let beam_h0: Vec<f64> = sp.iter().map(|b| h_limit(b.k, b.c, red(b), false, b.centred)).collect();
-    let beam_h: Vec<f64> = sp.iter().map(|b| h_limit(b.k, b.c, red(b), true, b.centred)).collect();
-    let (mut nk, mut nc, mut ncentred, mut deg) = (vec![0.0; n], vec![0.0; n], vec![true; n], vec![0usize; n]);
+    let beam_h0: Vec<f64> = sp
+        .iter()
+        .map(|b| h_limit(b.k, b.c, red(b), false, b.centred))
+        .collect();
+    let beam_h: Vec<f64> = sp
+        .iter()
+        .map(|b| h_limit(b.k, b.c, red(b), true, b.centred))
+        .collect();
+    let (mut nk, mut nc, mut ncentred, mut deg) =
+        (vec![0.0; n], vec![0.0; n], vec![true; n], vec![0usize; n]);
     for b in &sp {
         for i in [b.a, b.b] {
             nk[i] += b.k;
@@ -472,9 +618,15 @@ fn report(car: &Car) {
             deg[i] += 1;
         }
     }
-    let node_h0: Vec<f64> = (0..n).map(|i| h_limit(nk[i], nc[i], mass(s, i), false, ncentred[i])).collect();
-    let node_h: Vec<f64> = (0..n).map(|i| h_limit(nk[i], nc[i], mass(s, i), true, ncentred[i])).collect();
-    let node_hg: Vec<f64> = (0..n).map(|i| h_limit(2.0 * nk[i], 2.0 * nc[i], mass(s, i), true, ncentred[i])).collect();
+    let node_h0: Vec<f64> = (0..n)
+        .map(|i| h_limit(nk[i], nc[i], mass(s, i), false, ncentred[i]))
+        .collect();
+    let node_h: Vec<f64> = (0..n)
+        .map(|i| h_limit(nk[i], nc[i], mass(s, i), true, ncentred[i]))
+        .collect();
+    let node_hg: Vec<f64> = (0..n)
+        .map(|i| h_limit(2.0 * nk[i], 2.0 * nc[i], mass(s, i), true, ncentred[i]))
+        .collect();
     let h = STEP as f64;
     let min = |v: &[f64]| v.iter().cloned().fold(f64::INFINITY, f64::min);
     let (w, mode) = omega_max(s, &sp, &vec![true; n], 4000);
@@ -500,9 +652,21 @@ fn report(car: &Car) {
     let names: Vec<String> = top
         .iter()
         .take(6)
-        .map(|&i| format!("{} ({}, {:.2} kg, {:.0} %)", car.node_name[i], car.node_part[i], mass(s, i), 100.0 * mode[i]))
+        .map(|&i| {
+            format!(
+                "{} ({}, {:.2} kg, {:.0} %)",
+                car.node_name[i],
+                car.node_part[i],
+                mass(s, i),
+                100.0 * mode[i]
+            )
+        })
         .collect();
-    println!("\nThe stiffest mode (ω = {w:.0} rad/s, ω·h = {:.2}) lives on: {}.", w * h, names.join("; "));
+    println!(
+        "\nThe stiffest mode (ω = {w:.0} rad/s, ω·h = {:.2}) lives on: {}.",
+        w * h,
+        names.join("; ")
+    );
 
     // Rate classes.
     println!("\n### Share by the slowest rate the limit allows\n");
@@ -512,7 +676,10 @@ fn report(car: &Car) {
         println!("| what | count | {} |", CLASS_NAMES.join(" | "));
         println!("|---|---|---|---|---|---|---|");
         let cl = |v: &[f64]| v.iter().map(|&x| class(x, sf)).collect::<Vec<_>>();
-        println!("{}", share_row("beams, each alone, undamped", &cl(&beam_h0)));
+        println!(
+            "{}",
+            share_row("beams, each alone, undamped", &cl(&beam_h0))
+        );
         println!("{}", share_row("beams, each alone, damped", &cl(&beam_h)));
         println!("{}", share_row("nodes, Σk, undamped", &cl(&node_h0)));
         let nd = cl(&node_h);
@@ -520,7 +687,13 @@ fn report(car: &Car) {
         println!("{}", share_row("nodes, Gershgorin, damped", &cl(&node_hg)));
         // A beam steps with its faster end.
         let by_end: Vec<usize> = sp.iter().map(|b| nd[b.a].min(nd[b.b])).collect();
-        println!("{}", share_row("beams, at the rate of their faster end node (damped)", &by_end));
+        println!(
+            "{}",
+            share_row(
+                "beams, at the rate of their faster end node (damped)",
+                &by_end
+            )
+        );
         let mut m = [0.0; 5];
         for i in 0..n {
             if mass(s, i).is_finite() {
@@ -528,7 +701,10 @@ fn report(car: &Car) {
             }
         }
         let cells: Vec<String> = m.iter().map(|&x| pctf(x, total_mass)).collect();
-        println!("| mass, by its node's class (damped) | {total_mass:.0} kg | {} |", cells.join(" | "));
+        println!(
+            "| mass, by its node's class (damped) | {total_mass:.0} kg | {} |",
+            cells.join(" | ")
+        );
         println!();
     }
 
@@ -541,7 +717,8 @@ fn report(car: &Car) {
         let nd: Vec<usize> = node_h.iter().map(|&x| class(x, sf)).collect();
         let cost = |c: usize| 1.0 / (1u32 << c.saturating_sub(1)) as f64;
         let nodes: f64 = nd.iter().map(|&c| cost(c)).sum::<f64>() / n as f64;
-        let beams: f64 = sp.iter().map(|b| cost(nd[b.a].min(nd[b.b]))).sum::<f64>() / sp.len() as f64;
+        let beams: f64 =
+            sp.iter().map(|b| cost(nd[b.a].min(nd[b.b]))).sum::<f64>() / sp.len() as f64;
         println!("| {sf} | {nodes:.2} | {beams:.2} |");
     }
 
@@ -560,23 +737,42 @@ fn report(car: &Car) {
     let mut rows: Vec<(&str, Vec<usize>)> = parts.into_iter().collect();
     rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
     for (name, ids) in &rows {
-        let kg: f64 = ids.iter().map(|&i| mass(s, i)).filter(|m| m.is_finite()).sum();
+        let kg: f64 = ids
+            .iter()
+            .map(|&i| mass(s, i))
+            .filter(|m| m.is_finite())
+            .sum();
         let mut cells = Vec::new();
         for nd in [&nd1, &nd2, &nd4] {
-            let c = |lo: usize, hi: usize| ids.iter().filter(|&&i| nd[i] >= lo && nd[i] <= hi).count();
+            let c =
+                |lo: usize, hi: usize| ids.iter().filter(|&&i| nd[i] >= lo && nd[i] <= hi).count();
             for (lo, hi) in [(0, 1), (2, 2), (3, 3), (4, 4)] {
                 cells.push(pct(c(lo, hi), ids.len()));
             }
         }
-        let soft = ids.iter().map(|&i| node_h[i]).filter(|x| x.is_finite()).fold(0.0, f64::max);
+        let soft = ids
+            .iter()
+            .map(|&i| node_h[i])
+            .filter(|x| x.is_finite())
+            .fold(0.0, f64::max);
         // The part as a detached piece: its own nodes and the beams between them.
         let mut own = vec![false; n];
         for &i in ids {
             own[i] = true;
         }
-        let inner: Vec<Spring> = sp.iter().filter(|b| own[b.a] && own[b.b]).cloned().collect();
+        let inner: Vec<Spring> = sp
+            .iter()
+            .filter(|b| own[b.a] && own[b.b])
+            .cloned()
+            .collect();
         let (wp, _) = omega_max(s, &inner, &own, 3000);
-        let rate = |sf: f64| if wp > 0.0 { CLASS_NAMES[class(2.0 / wp, sf)] } else { "–" };
+        let rate = |sf: f64| {
+            if wp > 0.0 {
+                CLASS_NAMES[class(2.0 / wp, sf)]
+            } else {
+                "–"
+            }
+        };
         println!(
             "| {name} | {} | {kg:.1} | {} | {:.2} ms | {wp:.0} | {} | {} |",
             ids.len(),
@@ -594,7 +790,10 @@ fn report(car: &Car) {
     println!("|---|---|---|---|---|---|---|---|---|---|");
     let mut kinds: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (q, b) in sp.iter().enumerate() {
-        kinds.entry(car.beam_kind[b.record].as_str()).or_default().push(q);
+        kinds
+            .entry(car.beam_kind[b.record].as_str())
+            .or_default()
+            .push(q);
     }
     let stiff_k: f64 = (0..n).filter(|&i| nd2[i] <= 1).map(|i| nk[i]).sum();
     for (name, ids) in &kinds {
@@ -604,7 +803,10 @@ fn report(car: &Car) {
         for &q in ids {
             c[class(beam_h[q], 2.0)] += 1;
         }
-        let touch = ids.iter().filter(|&&q| nd2[sp[q].a] <= 1 || nd2[sp[q].b] <= 1).count();
+        let touch = ids
+            .iter()
+            .filter(|&&q| nd2[sp[q].a] <= 1 || nd2[sp[q].b] <= 1)
+            .count();
         let on: f64 = ids
             .iter()
             .map(|&q| {
@@ -629,8 +831,15 @@ fn report(car: &Car) {
     println!("\n### What the 2 kHz nodes look like (safety factor 2)\n");
     println!("| class | nodes | mass min / median / max (kg) | Σk min / median / max (N/m) | beams per node, median | ζ median |");
     println!("|---|---|---|---|---|---|");
-    for (label, lo, hi) in [("need 2 kHz", 0usize, 1usize), ("1 kHz", 2, 2), ("500 Hz", 3, 3), ("≤ 250 Hz", 4, 4)] {
-        let ids: Vec<usize> = (0..n).filter(|&i| nd2[i] >= lo && nd2[i] <= hi && mass(s, i).is_finite()).collect();
+    for (label, lo, hi) in [
+        ("need 2 kHz", 0usize, 1usize),
+        ("1 kHz", 2, 2),
+        ("500 Hz", 3, 3),
+        ("≤ 250 Hz", 4, 4),
+    ] {
+        let ids: Vec<usize> = (0..n)
+            .filter(|&i| nd2[i] >= lo && nd2[i] <= hi && mass(s, i).is_finite())
+            .collect();
         if ids.is_empty() {
             println!("| {label} | 0 | – | – | – | – |");
             continue;
@@ -642,10 +851,27 @@ fn report(car: &Car) {
         let m = med(ids.iter().map(|&i| mass(s, i)).collect());
         let k = med(ids.iter().map(|&i| nk[i]).collect());
         let d = med(ids.iter().map(|&i| deg[i] as f64).collect());
-        let z = med(ids.iter().map(|&i| if nk[i] > 0.0 { nc[i] / (2.0 * (nk[i] * mass(s, i)).sqrt()) } else { 0.0 }).collect());
+        let z = med(ids
+            .iter()
+            .map(|&i| {
+                if nk[i] > 0.0 {
+                    nc[i] / (2.0 * (nk[i] * mass(s, i)).sqrt())
+                } else {
+                    0.0
+                }
+            })
+            .collect());
         println!(
             "| {label} | {} | {:.2} / {:.2} / {:.2} | {:.2e} / {:.2e} / {:.2e} | {:.0} | {:.3} |",
-            ids.len(), m.0, m.1, m.2, k.0, k.1, k.2, d.1, z.1
+            ids.len(),
+            m.0,
+            m.1,
+            m.2,
+            k.0,
+            k.1,
+            k.2,
+            d.1,
+            z.1
         );
     }
 
@@ -653,18 +879,33 @@ fn report(car: &Car) {
     let by_end2: Vec<usize> = sp.iter().map(|b| nd2[b.a].min(nd2[b.b])).collect();
     let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (q, b) in sp.iter().enumerate() {
-        groups.entry(car.beam_group[b.record].as_str()).or_default().push(q);
+        groups
+            .entry(car.beam_group[b.record].as_str())
+            .or_default()
+            .push(q);
     }
     if groups.len() > 1 {
-        println!("\n### By break group (beams at the rate of their faster end node, safety factor 2)\n");
-        let grouped: usize = groups.iter().filter(|(k, _)| !k.is_empty()).map(|(_, v)| v.len()).sum();
+        println!(
+            "\n### By break group (beams at the rate of their faster end node, safety factor 2)\n"
+        );
+        let grouped: usize = groups
+            .iter()
+            .filter(|(k, _)| !k.is_empty())
+            .map(|(_, v)| v.len())
+            .sum();
         let stiff_grouped: usize = groups
             .iter()
             .filter(|(k, _)| !k.is_empty())
             .map(|(_, v)| v.iter().filter(|&&q| by_end2[q] <= 1).count())
             .sum();
-        let all_stiff = groups.iter().filter(|(k, v)| !k.is_empty() && v.iter().all(|&q| by_end2[q] <= 1)).count();
-        let none_stiff = groups.iter().filter(|(k, v)| !k.is_empty() && v.iter().all(|&q| by_end2[q] > 1)).count();
+        let all_stiff = groups
+            .iter()
+            .filter(|(k, v)| !k.is_empty() && v.iter().all(|&q| by_end2[q] <= 1))
+            .count();
+        let none_stiff = groups
+            .iter()
+            .filter(|(k, v)| !k.is_empty() && v.iter().all(|&q| by_end2[q] > 1))
+            .count();
         println!(
             "{} break groups hold {grouped} beams; {} of those beams need 2 kHz. {all_stiff} groups are wholly at 2 kHz, {none_stiff} wholly slower, {} mixed.\n",
             groups.len() - groups.contains_key("") as usize,
@@ -676,7 +917,11 @@ fn report(car: &Car) {
         let mut rows: Vec<(&str, &Vec<usize>)> = groups.iter().map(|(k, v)| (*k, v)).collect();
         rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
         for (name, ids) in rows.iter().take(10) {
-            let c = |lo: usize, hi: usize| ids.iter().filter(|&&q| by_end2[q] >= lo && by_end2[q] <= hi).count();
+            let c = |lo: usize, hi: usize| {
+                ids.iter()
+                    .filter(|&&q| by_end2[q] >= lo && by_end2[q] <= hi)
+                    .count()
+            };
             println!(
                 "| {} | {} | {} | {} | {} | {} |",
                 if name.is_empty() { "(none)" } else { name },
@@ -723,11 +968,17 @@ fn report(car: &Car) {
         }
         let cs = components(n, &sp, &stiff);
         let cf = components(n, &sp, &soft);
-        let bx = if ns > 0 { bbox(&stiff) / car_box } else { Vec3::ZERO };
+        let bx = if ns > 0 {
+            bbox(&stiff) / car_box
+        } else {
+            Vec3::ZERO
+        };
         println!(
             "| {sf} | {ns} ({}) | {:.2}, {:.2}, {:.2} | {} ({}) | {} | {} | {} ({}) | {} ({}) |",
             pct(ns, n),
-            bx.x, bx.y, bx.z,
+            bx.x,
+            bx.y,
+            bx.z,
             cs.len(),
             cs.first().copied().unwrap_or(0),
             n - ns,
@@ -749,10 +1000,25 @@ fn report(car: &Car) {
         slice[q][0] += 1;
         slice[q][1] += (nd2[i] <= 1) as usize;
     }
-    println!("\nAlong the car's length in ten slices (safety factor 2), nodes needing 2 kHz / nodes:\n");
-    println!("| slice | {} |", (1..=10).map(|i| i.to_string()).collect::<Vec<_>>().join(" | "));
+    println!(
+        "\nAlong the car's length in ten slices (safety factor 2), nodes needing 2 kHz / nodes:\n"
+    );
+    println!(
+        "| slice | {} |",
+        (1..=10)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
     println!("|---|{}", "---|".repeat(10));
-    println!("| share | {} |", slice.iter().map(|c| format!("{} of {}", c[1], c[0])).collect::<Vec<_>>().join(" | "));
+    println!(
+        "| share | {} |",
+        slice
+            .iter()
+            .map(|c| format!("{} of {}", c[1], c[0]))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
 
     // The largest slow set by the assembled stiffness: remove the nodes carrying the
     // stiffest mode (held: they step at 2 kHz) until what is left is slow enough.
@@ -765,10 +1031,19 @@ fn report(car: &Car) {
     {
         let own = 2.0 / (w * h);
         let targets: Vec<(f64, String)> = vec![
-            (2000.0 / own, format!("1 kHz at the car's own margin today ({own:.2})")),
+            (
+                2000.0 / own,
+                format!("1 kHz at the car's own margin today ({own:.2})"),
+            ),
             (1000.0, "1 kHz at safety 2, or 500 Hz at safety 1".into()),
-            (1000.0 / own, format!("500 Hz at the car's own margin ({own:.2})")),
-            (500.0, "1 kHz at safety 4, 500 Hz at safety 2, or 250 Hz at safety 1".into()),
+            (
+                1000.0 / own,
+                format!("500 Hz at the car's own margin ({own:.2})"),
+            ),
+            (
+                500.0,
+                "1 kHz at safety 4, 500 Hz at safety 2, or 250 Hz at safety 1".into(),
+            ),
         ];
         let mut set: Vec<bool> = (0..n).map(|i| mass(s, i).is_finite()).collect();
         for (limit, label) in targets {
@@ -815,7 +1090,11 @@ fn report(car: &Car) {
                 continue;
             }
             let (w, _) = omega_max(s, &sp, &set, 4000);
-            println!("| {sf} | {} and slower | {count} | {w:.0} | {:.2} |", CLASS_NAMES[c + 1], w / rate);
+            println!(
+                "| {sf} | {} and slower | {count} | {w:.0} | {:.2} |",
+                CLASS_NAMES[c + 1],
+                w / rate
+            );
         }
     }
 }
@@ -825,7 +1104,9 @@ fn main() {
     if let Some(dir) = arg("--car") {
         report(&jbeam_car(std::path::Path::new(&dir)));
     } else {
-        let res = arg("--generated").and_then(|r| Resolution::parse(&r)).unwrap_or(Resolution::Low);
+        let res = arg("--generated")
+            .and_then(|r| Resolution::parse(&r))
+            .unwrap_or(Resolution::Low);
         report(&generated(res));
     }
 }
