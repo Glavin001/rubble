@@ -1147,7 +1147,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             if wide_ab {
                 println!("   wide: nodes, beams and groups bit for bit: {physics}");
             }
-            anyhow::ensure!(same || (wide_ab && physics), "the A/B switch changed the state");
+            // (AB_TIME_ONLY=1: a measurement switch that changes the results on purpose.)
+            anyhow::ensure!(same || (wide_ab && physics) || std::env::var("AB_TIME_ONLY").is_ok(), "the A/B switch changed the state");
             x.restore(&snap);
             switch(x, true, &labels);
             x.wait();

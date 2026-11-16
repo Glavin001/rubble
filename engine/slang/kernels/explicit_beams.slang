@@ -7657,15 +7657,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         uint grid = cell > 0.0 && candCount > 0u && listed * candCount > BRUTE_PAIRS_PER_LANE * LANES ? 1u : 0u;
         gsUniformLanes = grid | (pairReuseDecide(v, grid, parity, origin) << 1);
     }
-    if (cell > 0.0)
-    {
-        for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
-        {
-            float3 p = gNodes[gLists[candOff + c] * 3u].xyz;
-            uint b = gridBucket(int3(floor(p / cell)));
-            gNext[candOff + c] = b | (gsCount[b].add(1u) << 10);
-        }
-    }
+    // (The grid's bucket counts: only a step that scans the grid reads them, below.)
     uint listedB = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
     bool early = candCount > 0u && !(cell > 0.0 && listedB * candCount > BRUTE_PAIRS_PER_LANE * LANES);
     if (early)
@@ -7689,6 +7681,18 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     uint reuse = gridOn >> 1;
     if (gridOn != 0u && reuse != 2u)
     {
+        // The candidates counted into their buckets here, not on every step: a step that
+        // reuses its list (reuse 2) or has no grid never reads the counts or the ranks.
+        if (cell > 0.0)
+        {
+            for (uint c = lane, cStop = EB_END(c, candCount, LANES); c < cStop; c += LANES)
+            {
+                float3 p = gNodes[gLists[candOff + c] * 3u].xyz;
+                uint b = gridBucket(int3(floor(p / cell)));
+                gNext[candOff + c] = b | (gsCount[b].add(1u) << 10);
+            }
+        }
+        sync();
         uint per = GRID_BUCKETS / LANES;
         uint block = LANES / GRID_BLOCKS;
         uint sum = 0u;

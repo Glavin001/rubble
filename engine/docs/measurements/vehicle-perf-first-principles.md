@@ -1026,3 +1026,14 @@ the aux dispatch (3.97 / 4.25 / 5.60 / 5.95 / 5.85 / 6.11 against 4.24 / 4.49 / 
 
 Per pass at rest now (timed apart): the list kernel with the walk and pairs 2.6, hits with
 the tyres 2.4, nodes 0.9, beams 0.5.
+
+### 8.10 The list kernel split by part; bucket counts only on building steps
+
+Time-only switches in the list kernel (since removed), free fall / at rest, ms a frame:
+the coupling's and wheels' work fused there costs ≈0.5 (it was ≈1.5 as a dispatch of its
+own); the grid's bucket counting ≈0.3, on every step, though only a step that scans the
+grid (a build, or a walk without the list) reads the counts and ranks. The counting now
+runs inside that branch (one more barrier on those steps). Bit for bit against the self
+split frame at t 0.5, 2.5, 4, 6, 8, 10, 20, 30 s. Its gain is inside the run-to-run spread
+of this harness (the same build's frames at rest read 5.6 and 6.1 ms in two runs an hour
+apart), so no number is claimed for it.
