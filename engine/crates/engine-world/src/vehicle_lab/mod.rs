@@ -151,7 +151,7 @@ impl Default for LabOptions {
 /// (2 to 12 nodes); the next pieces up are a 12 kg panel, the 19 kg wheels, 30 and 45 kg
 /// parts. 10 kg retires every fragment and nothing a player would miss.
 /// The most cars of [`LabOptions::cars`].
-pub const MAX_CARS: u32 = 8;
+pub const MAX_CARS: u32 = 32;
 
 pub const LAB_DEBRIS_TTL: DebrisTtl = DebrisTtl { max_mass_kg: 10.0, max_nodes: 40, seconds: 5.0 };
 
@@ -2162,7 +2162,17 @@ impl Lab {
                 [-1.15, 3.8, -1.0],
             ];
             let mut c = if mountain {
-                let [x, y, close] = FORMATION[k - 1];
+                // Past the eighth car: further columns to either side, two high, closing
+                // faster the further out they start (the first eight as they were).
+                let [x, y, close] = if k <= FORMATION.len() {
+                    FORMATION[k - 1]
+                } else {
+                    let e = k - 1 - FORMATION.len();
+                    let column = e / 2;
+                    let side = if column % 2 == 0 { 1.0 } else { -1.0 };
+                    let out = (2 + column / 2) as f32;
+                    [side * 2.3 * out, 1.9 * (e % 2) as f32, side * out]
+                };
                 let base = lab_car(template, opts, None);
                 let z0 = {
                     let (lo, hi) = base.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.z), b.max(n.pos.z)));

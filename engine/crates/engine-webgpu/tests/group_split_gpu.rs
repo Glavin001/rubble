@@ -142,7 +142,12 @@ fn whole_workgroup_members_first_difference() {
     gpu.set_wide(false);
     for f in 0..12 {
         let snap = gpu.snapshot();
-        for steps in [1u32, 2, 4, 17] {
+        let lengths: Vec<u32> = if f < 6 { vec![17] } else { (1..=17).collect() };
+        let mut seen = false;
+        for steps in lengths {
+            if seen {
+                break;
+            }
             gpu.restore(&snap);
             gpu.set_group_split(false);
             gpu.set_split_ablation(0);
@@ -152,7 +157,7 @@ fn whole_workgroup_members_first_difference() {
             let sizes = gpu.contact_group_sizes();
             gpu.restore(&snap);
             gpu.set_group_split(true);
-            gpu.set_split_ablation(4096);
+            gpu.set_split_ablation(8192);
             gpu.frame(steps);
             gpu.wait();
             let new = gpu.state_words();
@@ -169,8 +174,16 @@ fn whole_workgroup_members_first_difference() {
             for ((name, x), (_, y)) in old.iter().zip(&new) {
                 let n = x.iter().zip(y).filter(|(p, q)| p != q).count();
                 if n > 0 {
-                    let at: Vec<usize> = x.iter().zip(y).enumerate().filter(|(_, (p, q))| p != q).map(|(i, _)| i).take(6).collect();
-                    eprintln!("    {name}: {n} of {} at {at:?}", x.len());
+                    seen = true;
+                    let at: Vec<String> = x
+                        .iter()
+                        .zip(y)
+                        .enumerate()
+                        .filter(|(_, (p, q))| p != q)
+                        .map(|(i, (p, q))| format!("[{i}] {p:#x}/{q:#x}"))
+                        .take(26)
+                        .collect();
+                    eprintln!("    {name}: {n} of {}: {}", x.len(), at.join(" "));
                 }
             }
         }

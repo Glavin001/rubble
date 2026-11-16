@@ -1341,3 +1341,29 @@ Worst and p95 per car count, whole 40 s run, vehicle GPU ms a World step (t ≥ 
 
 (These pages ran the World at its default 60 steps a second. The brief's 120 steps a
 second was not run: at 31–41 ms a step eight cars hold neither.)
+
+### 8.17 Thirty-two cars: the group is the cost (2026-11-16)
+
+The lab's "cars" control goes to 32 (the first eight as before; further cars in columns
+to either side, two high, closing on the first). All 32 are one contact group from the
+start (their boxes overlap side by side), a group past `VV_PART` members takes the
+larger groups' pass in the group's own workgroup, and that pass is the frame:
+
+| t s | frame, ms | the groups' pass (one core) | the 32 cars' own steps |
+|---|---|---|---|
+| 1.0 (falling, no hit) | 189 | 181 (95 %) | 7.7 |
+| 2.5 | 125 | 117 (93 %) | 7.4 |
+| 4.0 (crashing) | 452 | 494 timed (96 %) | 15.5 |
+
+(`--cars 32 --ab 1,2.5,4 --ab-switch groupsplit --ab-profile`; split against the groups'
+own workgroup bit for bit at the three times, 185 / 134 / 472 against 332 / 288 / 652 ms.)
+The cars' own steps hold at one core a car: 7–15 ms for 32, as `wide-frame-design.md`
+§1.1's prototype has it. Contact as a per-group pass does not: its cost follows the
+group's size, hits or no hits. This is the measurement behind the plan's first step,
+vehicle contact as fleet-wide lists with no group as a unit of execution.
+
+Also here: the split modules' measurement word 8192 steps a small group's members with
+the larger groups' member step (`contactMemberStep`), for the ignored diagnostic test
+`whole_workgroup_members_first_difference`. Finding so far: for two sedans the pass
+finds the same vehicle-vehicle hits but their forces do not reach the accumulators
+(zero for the hit triangle's nodes and the point); cause not yet found.

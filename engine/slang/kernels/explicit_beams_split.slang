@@ -116,7 +116,9 @@ void splitMember(uint v, uint lane, uint s)
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     splitCoupleStep(v, rank, k, lane, s, coupleOn);
     splitDriveStep(v, lane, s, driveOn);
-    if (k <= VV_SIDE)
+    // (Diagnostic, the measurement word's 8192: the larger groups' member step for a
+    // small group too. Not the same results yet: group_split_gpu's ignored test.)
+    if (k <= VV_SIDE && (gP.ablate & 8192u) == 0u)
     {
         // The member on every lane of its workgroup (gVvWhole); with the measurement
         // word's 4096, on its partition's lanes alone, first (lanes 0 .. P - 1 here),
