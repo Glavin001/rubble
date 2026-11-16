@@ -1268,3 +1268,12 @@ last), `explicit_beams_selfsplit_member_vv_wide` 35 s (535 k inlined lines: thre
 copies of a car's step), `explicit_beams_contact_wide_nosurf` 29–37 s. Until the
 member module is compiled a page runs touching cars in the groups' own workgroup: the
 user's two-car page held 60 steps a second apart and 21–26 touching.
+
+**Eight cars, the whole 40 s run after this section** (native, vehicle GPU ms a World
+step, t ≥ 0.5 s, `--timing step`; 2,383 steps): median 31.5, p95 39.2, p99 40.4, worst
+41.7 at t 3.70 s. At the start of the section (§8.11's rerun): 222.6 / 399.7 / — /
+417.4. The frame grows slowly through the rest (29 ms at t 12 s, 41 at t 40 s). The
+targets (3 ms worst, 120 steps a second) are not met: a step is ten times the target.
+Per kind in the pile (t 12 s, µs a substep; a substep's budget at the target is 88 µs
+for everything): tests' walk 330, the cars' steps 227, front 203, levels 79, listed
+pairs 62. One car's frame (§8.9, untouched in this section) is 164 µs a substep.
