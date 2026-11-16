@@ -124,6 +124,9 @@ fn hullWord(base: u32, w: u32) -> u32 { let r = hulls[base + w / 4u]; return r[w
 fn solidWorld(ci: u32, vi: u32, o: ptr<function, Out>) -> bool {
   let col = cols[ci];
   if (col.shape != 2u && col.shape != 3u) { return false; }
+  // A collider of density 1 (no material's) is a boundary nobody should see, such as
+  // the vehicle lab's lid over its canyon (mountain.rs LID_TAG): not drawn, no shadow.
+  if (col.density > 0.5 && col.density < 1.5) { return false; }
   let tri = vi / 3u;
   let corner = vi % 3u;
   var lp = vec3f(0.0);
