@@ -950,19 +950,50 @@ scattered access, not a load. That is why packing a hit's own words (§8.6) gain
 a hit's cost is its ≈90 atomics and its four nodes' scattered records, about 30 µs a step
 of `selfApply`'s 35.
 
-**The wide schedule in Chrome** (the page's new "fleet-wide passes" and "with the reused
-pair list" switches, live; headless, the 1-car mountain, 42 s, vehicles' GPU ms a step
-from t 0.5 s, two rounds interleaved):
+**The wide schedule in Chrome: 12 % faster, once measured fairly.** A first probe read it
+1.5 ms slower (7.40–7.65 against 5.92 ms median). That was the probe, not the schedule:
+with `timing=phases` the page times every dispatch in a pass of its own, about 240 passes
+a wide frame against one for the default's split frame. With the frame as one timed
+segment (`timing=step`), headless, the 1-car mountain, 42 s, vehicles' GPU ms a step from
+t 0.5 s, three rounds interleaved:
 
 | Path | median / p95 / worst |
 |---|---|
-| A workgroup a car, self split on (default) | 5.92 / 6.35 / 6.80 (the first round after a new build: 7.97 / 9.62 / 12.34) |
-| Wide passes with the list | 7.40 / 7.85 / 8.49 and 7.65 / 8.12 / 8.79 |
+| A workgroup a car, self split on | 5.93 / 6.36 / 6.83, 5.91 / 6.35 / 6.80, 5.93 / 6.37 / 7.06 |
+| Wide passes with the list | **5.18 / 5.62 / 6.23**, 5.19 / 5.67 / 6.39, 5.19 / 5.63 / 6.43 |
 
-**In Chrome the wide schedule is 1.5 ms slower**, where natively it is 0.1–0.45 ms
-faster. It runs about 240 dispatches a frame against the default's 103; the difference is
-about 11 µs a dispatch more in Chrome than natively (Dawn's validation of each dispatch
-and of each indirect one, Tint's zeroing of the list and aux kernels' workgroup arrays on
-every dispatch: not split here). So by the brief's rule the wide schedule stays off, and
-its design needs a Chrome dispatch-cost measurement with these kernels before more passes
-move to it: fewer, fatter dispatches there, or kernels without workgroup arrays.
+60 steps/s held in every run (14–17 steps refused in the first second).
+
+### 8.8 The wide schedule is the lab's default
+
+`LabOptions::wide` and `wide_list` (on; the page's "fleet-wide passes" and "with the
+reused pair list", live; `vehicle_lab --wide 0`). Frames with car-to-car contact, sleep or
+surface contact keep a workgroup a car, so more than one car in the lab is not wide yet.
+The engine's own default is unchanged (`ExplicitBeamsGpu::set_wide`, off except for
+vehicles past 2,048 beams).
+
+Native wide pipelines are now created without workgroup zeroing (`RUBBLE_WIDE_ZERO=1`
+zeroes). The audit, from each wide module's WGSL: begin, rebase, beams, end, close and the
+centred passes use no workgroup variable; `wide_nodes` and `wide_aux` read the coupling's
+header and table after lane 0 wrote them before a barrier (`coupleBegin`, `cplGsClear`)
+and sphere copies only where the table lists them; `wide_hits` its two hit flags after
+lane 0 set them; `wide_tris` only writes its two; the list kernel is the self split's
+family, already unzeroed and written the same way.
+
+Proofs: every state word the same as the self split frame, 20 frames of 34 steps each way
+from one snapshot, at t 0.5, 2.5, 4, 6, 8, 10, 20 and 30 s (`--ab-switch wide`); the GPU
+suites with the lab on the wide schedule: `explicit_loop_cap` 5, `explicit_beams_bitwise`
+12, `explicit_beams_gpu` 5, `explicit_contact_gpu` 13, `explicit_plan_modules` 1,
+engine-world `explicit_vehicles` 11, `vehicle_lab_reset` 3, `vehicle_lab_piece_windows` 1,
+`vehicle_lab_pose_time` 2, `explicit_drive_world` 1.
+
+**One car, whole run, vehicles' GPU ms a step (median / p95 / worst):**
+
+| | Start of this work | Now |
+|---|---|---|
+| Native | 6.71 / 6.94 / 7.37 | 5.77 / 5.96 / 6.14 |
+| Chrome | 6.81–6.87 / 7.23–8.76 / 7.77–12.29 | 5.19 / 5.63 / 6.43 |
+
+Natively the wide schedule and the self split frame are within 2 % of each other frame for
+frame (wall, back to back: 4.33–6.35 against 4.39–6.20 ms); the whole run's worst step is
+6.14 against 6.55. The gain is Chrome's.

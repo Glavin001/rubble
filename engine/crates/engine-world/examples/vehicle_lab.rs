@@ -742,6 +742,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // `--self-split 1`: the page's default (self-collision across the GPU).
     let script = json!({ "scene": scene, "surface": arg("--surface").as_deref() == Some("1"),
         "selfSplit": arg("--self-split").as_deref() == Some("1"),
+        // (The lab's default is the wide passes; `--wide 0` a workgroup a car.)
+        "wide": arg("--wide").as_deref() != Some("0"), "wideList": arg("--wide-list").as_deref() != Some("0"),
         "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [] });
     let opts = options(&script);
     println!(

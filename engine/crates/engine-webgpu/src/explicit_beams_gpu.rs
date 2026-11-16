@@ -3950,11 +3950,16 @@ impl Wide {
                     layout: Some(&pipeline_layout),
                     module: &module,
                     entry_point: Some(entry),
-                    // RUBBLE_WIDE_ZERO=0 (a measurement until the passes' workgroup reads
-                    // are audited): naga's MSL writer zeroes workgroup memory from one
-                    // thread, per dispatch.
+                    // No zeroing of workgroup memory natively (naga's MSL writer zeroes it
+                    // from one thread on every dispatch: 70 us each, 7 ms a frame). Every
+                    // workgroup value a wide pass reads it wrote earlier in the same
+                    // dispatch: the coupling's header and table (coupleBegin, cplGsClear on
+                    // lane 0 before a barrier: wide_nodes, wide_aux), the hit flags (lane 0
+                    // before a barrier: wide_hits), the drive's word (driveBegin); wide_tris
+                    // only writes its two. vehicle-perf-first-principles.md §8.8.
+                    // RUBBLE_WIDE_ZERO=1 zeroes (a check: the same results).
                     compilation_options: wgpu::PipelineCompilationOptions {
-                        zero_initialize_workgroup_memory: std::env::var("RUBBLE_WIDE_ZERO").as_deref() != Ok("0"),
+                        zero_initialize_workgroup_memory: std::env::var("RUBBLE_WIDE_ZERO").as_deref() == Ok("1"),
                         ..Default::default()
                     },
                     cache: None,

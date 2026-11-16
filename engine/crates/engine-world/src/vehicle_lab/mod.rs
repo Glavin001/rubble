@@ -81,6 +81,13 @@ pub struct LabOptions {
     /// frames without vehicle contact, sleep or surface contact take it. Live
     /// (`{ selfSplit: bool }`).
     pub self_split: bool,
+    /// The vehicles' frame as the fleet-wide passes (`ExplicitBeamsGpu::set_wide`: a thread
+    /// an element over every car) with the reused pair list (`set_wide_list`); the same
+    /// results bit for bit, faster natively and in Chrome
+    /// (vehicle-perf-first-principles.md §8). Frames with car-to-car contact, sleep or
+    /// surface contact keep a workgroup a car. Live (`{ wide, wideList }`).
+    pub wide: bool,
+    pub wide_list: bool,
     /// Small debris retired after its time to live (`DebrisTtl`; None: never, the
     /// solver's behaviour without the setting). On in the lab: 5 s, at most 10 kg and 40
     /// nodes ([`LAB_DEBRIS_TTL`]: what the mountain sheds). Live
@@ -111,6 +118,8 @@ impl Default for LabOptions {
             piece_labels: true,
             piece_windows: true,
             self_split: false,
+            wide: true,
+            wide_list: true,
             debris_ttl: Some(LAB_DEBRIS_TTL),
             parked: false,
             cars: 1,
@@ -233,6 +242,8 @@ impl LabOptions {
                 .get("selfSplit")
                 .and_then(Value::as_bool)
                 .unwrap_or(d.self_split),
+            wide: v.get("wide").and_then(Value::as_bool).unwrap_or(d.wide),
+            wide_list: v.get("wideList").and_then(Value::as_bool).unwrap_or(d.wide_list),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
                 _ => d.debris_ttl,
@@ -2227,6 +2238,8 @@ impl Lab {
         if let Some(x) = world.explicit_vehicles_mut() {
             x.set_piece_windows(opts.piece_windows);
             x.set_self_split(opts.self_split);
+            x.set_wide_list(opts.wide_list);
+            x.set_wide(opts.wide);
         }
         let x = world.explicit_vehicles().expect("vehicles");
         let span = x.layout().spans[0];
@@ -2455,10 +2468,14 @@ impl Lab {
             let mut got = false;
             if let Some(x) = world.explicit_vehicles_mut() {
                 if let Some(on) = cmd.get("wideList").and_then(Value::as_bool) {
+                    self.bench.opts.wide_list = on;
                     x.set_wide_list(on);
                 }
                 got = match cmd.get("wide").and_then(Value::as_bool) {
-                    Some(on) => x.set_wide(on),
+                    Some(on) => {
+                        self.bench.opts.wide = on;
+                        x.set_wide(on)
+                    }
                     None => x.is_wide(),
                 };
             }
