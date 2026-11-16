@@ -1100,7 +1100,7 @@ impl ExplicitBeamsGpu {
                 });
             }
         }
-        if vehicles.len() > 1 && group_split_default() {
+        if vehicles.len() > 1 {
             // The split group path's three pipelines (GroupSplit::new's descriptors),
             // after the first frame's: they run only once a contact group forms.
             for (which, entry) in [("member", SPLIT_MEMBER_ENTRY), ("group", SPLIT_GROUP_ENTRY), ("tests", SPLIT_TESTS_ENTRY)] {
@@ -3581,6 +3581,12 @@ impl ExplicitBeamsGpu {
             // vehicles), the vehicles' one a workgroup each: within WebGPU's 65,535 a
             // dimension. A larger fleet keeps the groups' workgroup (the same results).
             && self.layout.spans.len() * 16 <= 65_535
+            // (A browser host's async compiles: the groups' workgroup until its modules
+            // are compiled, the same results.)
+            && {
+                let (aero, _, lanes) = self.module_kind;
+                ["member", "group", "tests"].iter().all(|w| crate::pipeline_ready(split_module(w, aero, lanes)))
+            }
     }
 
     fn group_split_pipes(&self) -> &GroupSplit {

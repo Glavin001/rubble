@@ -743,7 +743,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let script = json!({ "scene": scene, "surface": arg("--surface").as_deref() == Some("1"),
         "selfSplit": arg("--self-split").as_deref() == Some("1"),
         // (The lab's default is the wide passes; `--wide 0` a workgroup a car.)
-        "wide": arg("--wide").as_deref() != Some("0"), "wideList": arg("--wide-list").as_deref() != Some("0"), "wideFused": arg("--wide-fused").as_deref() != Some("0"),
+        "wide": arg("--wide").as_deref() != Some("0"), "wideList": arg("--wide-list").as_deref() != Some("0"), "wideFused": arg("--wide-fused").as_deref() != Some("0"), "groupSplit": arg("--group-split").as_deref() != Some("0"),
         "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [] });
     let opts = options(&script);
     println!(
@@ -850,13 +850,19 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // against an aux dispatch a step (both wide with the list).
     let fused_ab = arg("--ab-switch").as_deref() == Some("fused");
     let wide_ab = wide_ab || widelist_ab || fused_ab;
+    // `--ab-switch groupsplit`: contact groups across workgroups with self-collision
+    // split (`set_group_split`, `set_self_split`) against each group on one workgroup.
+    let groupsplit_ab = arg("--ab-switch").as_deref() == Some("groupsplit");
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
     let mut other = None;
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if fused_ab {
+        if groupsplit_ab {
+            x.set_group_split(on);
+            x.set_self_split(on);
+        } else if fused_ab {
             x.set_wide(true);
             x.set_wide_list(true);
             x.set_wide_fused(on);
@@ -1119,6 +1125,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 lab.bench.t,
                 if kernel_ab {
                     "this kernel (on) / --ab-kernel-dir's (off)"
+                } else if groupsplit_ab {
+                    "group split"
                 } else if wide_ab {
                     "wide passes"
                 } else if perf_ab.is_some() {

@@ -1037,3 +1037,43 @@ runs inside that branch (one more barrier on those steps). Bit for bit against t
 split frame at t 0.5, 2.5, 4, 6, 8, 10, 20, 30 s. Its gain is inside the run-to-run spread
 of this harness (the same build's frames at rest read 5.6 and 6.1 ms in two runs an hour
 apart), so no number is claimed for it.
+
+### 8.11 Verification closed, and cars in contact across workgroups as the lab's default
+
+**Suites on the final kernels** (default switches, the lab on the wide schedule):
+engine-webgpu `explicit_loop_cap` 5, `explicit_beams_bitwise` 12, `explicit_contact_gpu`
+13, `explicit_pair_reuse_gpu` 2, `explicit_drive_gpu` 3, `showcase_car_gpu` 6 (1 ignored),
+`explicit_plan_modules` 1, `explicit_beams_gpu` 5, `explicit_rigid_gpu` 6, `vv_grid_gpu` 2,
+`debris_retire_gpu` 1, `explicit_beam_order_gpu` 3, `group_split_gpu` 2, `self_split_gpu`
+8, `self_split_gate` 1; engine-world `explicit_vehicles` 11, `vehicle_lab_reset` 3,
+`vehicle_lab_piece_windows` 1, `explicit_drive_world` 1; engine-metal `vehicle_parity` 4,
+`explicit_parity` 7, `explicit_drive_parity` 1. All pass.
+
+**Cars in contact.** The existing split group path (`set_group_split`: a member's step a
+workgroup, the contact tests across the GPU) with self-collision split is now the lab's
+default (`LabOptions::group_split`, the page's "touching cars across the GPU", live;
+`vehicle_lab --group-split 0`), gated in browsers on its modules being compiled
+(prewarmed, deferred, for any fleet of more than one car). The engine's default is
+unchanged (`RUBBLE_GROUP_SPLIT`).
+
+Bit for bit against a workgroup a group (`--ab-switch groupsplit`, every state word, 20
+frames each way): two cars at t 1, 2, 3 s (24.4 / 25.6 against 26.4 / 28.3 ms a frame);
+eight cars at t 1, 3, 6 s (**23.8 / 18.7 / 70.8 against 44.7 / 48.7 / 106.4**).
+
+**Eight cars, whole 40 s run, native, vehicles' GPU ms a step:**
+
+| | median / p95 / worst |
+|---|---|
+| Start (a workgroup a group) | 312 / 534 / 553 |
+| Now (split) | 264 / 474 / 490 |
+
+The gain is in flight and the crash (2–3×); the run is dominated by what follows: from
+t ≈ 10 s the eight cars lie in one pile, one contact group of eight, whose contact pass
+past four members is still one workgroup (owner after owner, `contact-groups-design.md`
+§5.3), and its cost climbs from 224 ms at 20 s to 480 ms at 40 s with the cars at rest
+(not investigated: more held contacts as the wrecks settle is the likely cause).
+
+**Eight cars in Chrome** (headless, 25 s of wall time, `timing=step`): the page loads in
+64–74 s, runs 7–12 steps/s (the simulation reached t ≈ 4 s), 42 ms median and 103 ms worst
+a step, about 1,000 steps refused. 120 steps/s is not held; criterion 2 fails there by
+the same cause.

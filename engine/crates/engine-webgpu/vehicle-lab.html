@@ -143,6 +143,7 @@
         <label title="Self-collision's reused pair list told which nodes are off the main body, so a piece torn off no longer invalidates it (the same results either way). Applies as it runs."><input type="checkbox" id="pieceLabels" data-opt="live" checked /> torn pieces apart in the pair list</label>
         <label title="With the torn pieces labelled, the rigid bodies in the car's window are those near some piece, not everything between the car and a piece far away (the same contacts). Applies as it runs."><input type="checkbox" id="pieceWindows" data-opt="live" checked /> a coupling window per piece</label>
         <label title="Self-collision's contact tests run one GPU thread per candidate pair across the whole GPU, a pass every 2 kHz step, instead of inside the car's one thread group (the same results bit for bit). Used on frames without car-to-car contact, sleep or surface contact. Applies as it runs."><input type="checkbox" id="selfSplit" data-opt="live" checked /> self-collision across the GPU</label>
+        <label title="Cars touching each other are stepped each in its own GPU thread group, with their contact tests across the whole GPU, instead of every touching group on one thread group (the same results bit for bit). Applies as it runs."><input type="checkbox" id="groupSplit" data-opt="live" checked /> touching cars across the GPU</label>
         <label title="Self-collision's hit forces: each hit's four node beam forces are summed once on idle GPU threads instead of three times in a row (the same results bit for bit). Applies as it runs."><input type="checkbox" id="hitCache" data-opt="live" checked /> hit forces summed once</label>
         <label title="The car's physics as fleet-wide passes: one GPU thread per node, beam and candidate pair across every car, a few passes every 2 kHz step, instead of one thread group per car (the same results bit for bit). Used on frames without car-to-car contact, sleep or surface contact. Applies as it runs."><input type="checkbox" id="wide" data-opt="live" checked /> fleet-wide passes</label>
         <label title="With the fleet-wide passes: self-collision from the reused pair list instead of a grid walk every step (the same results bit for bit). Applies as it runs."><input type="checkbox" id="wideList" data-opt="live" checked /> with the reused pair list</label>
@@ -346,6 +347,7 @@
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
         else if (c.id === 'selfSplit') cmd({ selfSplit: get('selfSplit') });
+        else if (c.id === 'groupSplit') cmd({ groupSplit: get('groupSplit') });
         else if (c.id === 'hitCache' || c.id === 'driveAhead') cmd({ perfFlags: perfFlags() });
         else if (c.id === 'wide' || c.id === 'wideList' || c.id === 'wideFused') cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
         else if (c.id === 'renderScale') { autoScale = 1; autoQuiet = 0; configure(); }
@@ -465,7 +467,7 @@
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), parked: get('parked'), cars: nCars, mountain: mountainSpec(), shapes: get('shapes'),
+          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), parked: get('parked'), cars: nCars, mountain: mountainSpec(), shapes: get('shapes'),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),

@@ -92,6 +92,11 @@ pub struct LabOptions {
     /// kernels' lanes, no dispatch of their own (`set_wide_fused`; the same results).
     /// Live (`{ wideFused }`).
     pub wide_fused: bool,
+    /// Cars in contact stepped across workgroups (`ExplicitBeamsGpu::set_group_split`: a
+    /// member's step a workgroup, the contact tests across the GPU) instead of each
+    /// contact group on one workgroup; the same results bit for bit. Live
+    /// (`{ groupSplit }`).
+    pub group_split: bool,
     /// Small debris retired after its time to live (`DebrisTtl`; None: never, the
     /// solver's behaviour without the setting). On in the lab: 5 s, at most 10 kg and 40
     /// nodes ([`LAB_DEBRIS_TTL`]: what the mountain sheds). Live
@@ -125,6 +130,7 @@ impl Default for LabOptions {
             wide: true,
             wide_list: true,
             wide_fused: true,
+            group_split: true,
             debris_ttl: Some(LAB_DEBRIS_TTL),
             parked: false,
             cars: 1,
@@ -250,6 +256,7 @@ impl LabOptions {
             wide: v.get("wide").and_then(Value::as_bool).unwrap_or(d.wide),
             wide_list: v.get("wideList").and_then(Value::as_bool).unwrap_or(d.wide_list),
             wide_fused: v.get("wideFused").and_then(Value::as_bool).unwrap_or(d.wide_fused),
+            group_split: v.get("groupSplit").and_then(Value::as_bool).unwrap_or(d.group_split),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
                 _ => d.debris_ttl,
@@ -2246,6 +2253,7 @@ impl Lab {
             x.set_self_split(opts.self_split);
             x.set_wide_list(opts.wide_list);
             x.set_wide_fused(opts.wide_fused);
+            x.set_group_split(opts.group_split);
             x.set_wide(opts.wide);
         }
         let x = world.explicit_vehicles().expect("vehicles");
@@ -2448,6 +2456,14 @@ impl Lab {
             let ttl = debris_ttl_from(d);
             self.bench.set_debris_ttl(ttl);
             return Ok(json!({ "debris": debris_json(ttl) }));
+        }
+        // { groupSplit: bool }: contact groups across workgroups (LabOptions::group_split).
+        if let Some(on) = cmd.get("groupSplit").and_then(Value::as_bool) {
+            self.bench.opts.group_split = on;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.set_group_split(on);
+            }
+            return Ok(json!({ "groupSplit": on }));
         }
         // { selfSplit: bool }: self-collision's pairs across workgroups (LabOptions::self_split).
         if let Some(on) = cmd.get("selfSplit").and_then(Value::as_bool) {
