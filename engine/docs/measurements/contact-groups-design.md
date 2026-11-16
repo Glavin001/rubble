@@ -518,9 +518,9 @@ walk (3.2 ms a frame of eight cars at rest), and a group past `VV_PART` is uncha
 
 ### 8.8 The candidates kept across substeps (2026-11-16)
 
-Perf flag 32768 (`PERF_FLEET_KEEP`, with 8192; a checkbox on the lab page), kernel
-functions `fk*` in `explicit_beams_fleet.slang`; measurements and the default in
-`vehicle-perf-first-principles.md` §8.26. Steps 2 to 5 of §8.4 find, every substep, the
+Perf flag 32768 (`PERF_FLEET_KEEP`, with 8192; off by default; a checkbox on the lab
+page), kernel functions `fk*` in `explicit_beams_fleet.slang`; proofs, measurements and
+the default in `vehicle-perf-first-principles.md` §8.28. Steps 2 to 5 of §8.4 find, every substep, the
 (triangle, contact point) pairs whose box test passes, for 0 to 20 hits, and almost
 nothing has moved since the substep before. With the flag the pairs are a Verlet list
 with a conservative skin:
@@ -610,4 +610,9 @@ Limits. The build is fleet-wide: one pair of cars past its bound builds every ow
 list again. A vehicle's bound is two numbers (calm, wild), so one calm node moving 5 cm
 ends the list (and is wild from the next build on). An owner's list holds 32,767 pairs:
 past it (four cars in their first collision came to 30,170) the pass and the next 136
-take the front's own path.
+take the front's own path. Thirty-two cars are one group past `VV_PART`, which the
+fleet-wide front does not take, so the list does nothing for them (§8.7, stage 3).
+
+Open: in Chrome the lab page's eight-car mountain does not end in the same state with the
+flag as without it (natively every check is bit for bit), so the flag is off by default
+until the cause is found (`vehicle-perf-first-principles.md` §8.28).
