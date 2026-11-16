@@ -1770,6 +1770,36 @@ impl ExplicitBeamsGpu {
         (0..n).map(|g| misc[(at + g) * 4 + 1]).collect()
     }
 
+    /// Measurement (blocking reads): per contact group of the last frame on the split
+    /// group path, its members, its points and, per member in vehicle order, the last
+    /// pass's (listed pairs, hits, listed triangles, candidates) from the group's
+    /// scratch (explicit_beams_split.slang splitVvExport).
+    #[doc(hidden)]
+    pub fn contact_group_counts(&self) -> Vec<(u32, u32, Vec<[u32; 4]>)> {
+        if !self.contact_active() {
+            return Vec::new();
+        }
+        let n = bytemuck::cast_slice::<u8, u32>(&self.read(&self.contact.args))[3] as usize;
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
+        let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
+        let w = &self.planner.words;
+        let (nv, grid, groups, members) = (w[1] as usize, w[17] as usize, w[46] as usize, w[47] as usize);
+        (0..n)
+            .map(|g| {
+                let rec = &misc[(groups + g) * 4..(groups + g) * 4 + 4];
+                let (off, k, points) = (rec[0] as usize, rec[1] as usize, rec[3]);
+                if k == 0 || k > plan::VV_PART {
+                    return (k as u32, points, Vec::new());
+                }
+                let v0 = next[members + nv + off] as usize;
+                let c = grid + v0 * 1024;
+                let per = (0..k).map(|a| [acc[c + a], acc[c + plan::VV_PART + a], acc[c + 3 * plan::VV_PART + a], acc[c + 4 * plan::VV_PART + a]]).collect();
+                (k as u32, points, per)
+            })
+            .collect()
+    }
+
     /// Per vehicle with the contact-force log (jbeam-semantics-spec.md §32;
     /// blocking read): per node its last complete step's contact force and the
     /// largest since [`Self::clear_contact_force_peaks`] (N), and per break group

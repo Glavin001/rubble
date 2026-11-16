@@ -1156,3 +1156,70 @@ groups of any size.
 
 Eight cars at t 12 s, a workgroup a group: 355 ms a frame at the start of this section's
 work, 239 now.
+
+### 8.15 A frame by dispatch kind, closing to 100 %; groups of five to eight on the split path (2026-11-16)
+
+**The measurement.** `vehicle_lab --ab T --ab-profile` (`ExplicitBeamsGpu::profile_dispatches`,
+any frame path): from the snapshot at T, 10 frames untimed (wall), then the same 10 with
+every dispatch in its own timed pass, summed by kind. The table closes: the kinds' sum
+plus the time between passes is the timed span (within 1 % on eight cars), and the span
+against the untimed frame is what the timing costs (2–9 %). A pass whose indirect
+dispatch is empty has no work to stamp on Metal (its stamps land on its neighbours'
+work): a pass whose interval holds another's is counted as empty, time 0. Below a
+dispatch (the phases between a kernel's barriers) there is no clock; those stay
+ablations, which do not add up. `contact_group_counts` prints, per group, each member's
+listed pairs, hits, listed triangles and candidates of the last pass.
+
+**Groups of five to eight members on the split path's pass** (`VV_PART` 8: every layout
+sized by it; `VV_SIDE` 4: the members a workgroup steps side by side, and the
+one-workgroup path's small pass). A group of five to eight was the larger groups' pass,
+owner after owner on one core; it now takes the small groups' pass with its tests
+across workgroups, its members each on a whole workgroup. Bit for bit against the
+one-workgroup path (`--ab-switch groupsplit`, eight cars, every state word but the
+contact plan's records) at t 2, 3.7, 5, 8, 12, 16 s. The plan's records are outside the
+verdict: a vehicle's "big" flag is whichever vehicle overflowed a broadphase bucket
+first, and differs between two runs of one path (`--ab-same`); the pairs are the same.
+
+What the first table showed (eight cars; one group of eight from t ≈ 2 s, while the cars
+still fall): at t 3.7 s the levels' dispatch was 87 % of a 164 ms frame with 17 hits in
+the whole group; in the pile the tests' walk was 55 % of 92 ms. Three changes from it,
+each bit for bit at the same times:
+
+1. **The walk's parts by the group's threads.** A triangle's cells or candidates were
+   split in `LANES / triangles` parts (one workgroup's lanes: 1 part in a pile) although
+   the walk runs on 16 workgroups; now `16 · LANES / triangles`. Tests' walk 51 → 31 ms.
+2. **The levels once, and only those in use.** Every lane recomputed every owner's level
+   (`vvLevel`, k³) for every owner of every level, and the loop ran k levels of bucket
+   builds and residual phases whatever the hits. Lane 0 now computes the levels once
+   (four bits an owner in `gsUniformLanes`: Metal has no workgroup variable to spare),
+   and the loop stops at the highest in use (level 1 always: the throttle updates).
+3. **The two-body counts cleared where hits wrote them.** After a pass with any hit,
+   `vvSplitClear` zeroed nine words of every node of every member (39,456 scattered
+   atomic stores for eight sedans, on one core: the 3.6 ms a substep at t 3.7 s). The
+   counts are only written by a found hit (`vvSplitCount`), so the levels now zero the
+   listed hits' triangle nodes and points (every node's only when a list overflowed).
+
+Eight cars, ms a frame (untimed wall of the same snapshots; old: the one-workgroup path
+at the start of this section):
+
+| t s | old | split, VV_PART 8 | + walk parts | + levels, clear |
+|---|---|---|---|---|
+| 2.0 (falling, one group of 8) | 52.7 | 37.6 | 35.4 | 15.7 |
+| 3.7 (first collisions) | 96.6 | 153.4 | 150.2 | 35.3 |
+| 5.0 | 76.5 | 61.4 | 55.6 | 24.8 |
+| 8.0 | 198.7 | 101.8 | 79.2 | 49.4 |
+| 12.0 (pile) | 237.0 | 86.5 | 74.1 | 54.7 |
+
+The pile's frame by dispatch kind now (t 12 s, 48.3 ms untimed on the profiled
+snapshot, 34 dispatches of each a frame):
+
+| kind | ms a frame | µs each | share |
+|---|---|---|---|
+| tests' walk (16 workgroups a group) | 31.0 | 912 | 59 % |
+| front (candidates, grids; the group's workgroup) | 8.9 | 261 | 17 % |
+| every car's step (a workgroup each) | 7.7 | 226 | 15 % |
+| levels (hits applied; the group's workgroup) | 2.6 | 77 | 5 % |
+| tests' listed pairs | 1.9 | 56 | 4 % |
+
+Next from this table: the walk (a triangle's thread scans up to 3,500 candidates in a
+pile, 4,160 listed triangles on 8,192 threads, so one part each), then the front.

@@ -985,6 +985,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         }
                     }
                 }
+                for (k, points, per) in x.contact_group_counts() {
+                    println!("   group of {k}, {points} points; per member [listed pairs, hits, listed triangles, candidates] (hit list room {}): {per:?}", 2 * points);
+                }
                 if got == 0 {
                     println!("   profile at t {:.1}: no timestamps, or too many dispatches", lab.bench.t);
                 } else {

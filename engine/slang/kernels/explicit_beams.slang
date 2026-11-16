@@ -10234,6 +10234,37 @@ uint vvLevel(uint a, uint k, uint points)
 }
 
 
+// Every owner's level once a pass (lane 0; vvLevel's rule: the hit counts and the
+// partner bits are final when the levels start), four bits an owner in gsUniformLanes
+// (no workgroup variable to spare on Metal); each lane keeps the word (gVvLv).
+static uint gVvLv;
+uint vvLv(uint a) { return (gVvLv >> (4u * a)) & 15u; }
+void vvLevelsSet(uint k, uint lane)
+{
+    if (lane != 0u) return;
+    uint lv[VV_PART];
+    uint packed = 0u;
+    for (uint b = 0u, bStop = EB_END(b, k, 1u); b < bStop; b++)
+    {
+        uint l = 0u;
+        if (gsVvHit4[b].load() != 0u)
+        {
+            l = 1u;
+            for (uint c = 0u, cStop = EB_END(c, b, 1u); c < cStop; c++)
+            {
+                if (lv[c] == 0u) continue;
+                bool meet = (gsVvPair[b * VV_PART + c] & 1u) != 0u;
+                for (uint d = 0u, dStop = EB_END(d, k, 1u); d < dStop; d++)
+                    meet = meet || ((gsVvPair[b * VV_PART + d] & 1u) != 0u && (gsVvPair[c * VV_PART + d] & 1u) != 0u);
+                if (meet) l = max(l, lv[c] + 1u);
+            }
+        }
+        lv[b] = l;
+        packed |= l << (4u * b);
+    }
+    gsUniformLanes = packed;
+}
+
 // --- The small groups' candidates in a grid (lossless) ---
 // The (T) phase tested every listed triangle against every candidate of its owner (the
 // partners' contact points in the owner's box): in a crash both counts are hundreds a
@@ -10729,7 +10760,7 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
     for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
     {
         uint n = gsVvHit4[a].load();
-        if (vvLevel(a, k, points) != l || n > 2u * points) continue;
+        if (vvLv(a) != l || n > 2u * points) continue;
         for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
         {
             uint b = vvHitBucket(a, gNext[vvHitSmall(runOff, points, a, i) + 1u]);
@@ -10780,7 +10811,7 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
     for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
     {
         uint n = gsVvHit4[a].load();
-        if (vvLevel(a, k, points) != l || n > 2u * points) continue;
+        if (vvLv(a) != l || n > 2u * points) continue;
         for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
         {
             uint br = gNext[vvOrderAt(runOff, points, a, i)];
@@ -11119,9 +11150,17 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
 void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid)
 {
     sync();
+    // The owners' levels, once (vvLevelsSet), and the highest: the levels past it
+    // hold no owner (level 1 runs whatever the hits: the throttle updates).
+    vvLevelsSet(k, lane);
+    sync();
+    gVvLv = gsUniformLanes;
+    sync();
+    uint top = 1u;
+    for (uint a = 0u; a < VV_PART; a++) top = max(top, vvLv(a));
     // The hits, level by level (at most k levels); with the first, every listed
     // triangle's throttle update (its marks are final) and a later owner's reset.
-    for (uint l = 1u, lGuard = 0u; l <= k; l++)
+    for (uint l = 1u, lGuard = 0u; l <= top; l++)
     {
         EB_PASS_UNIFORM(lGuard, EB_MAX_MEMBERS + 1u);
 #ifdef EB_ABLATE
@@ -11153,7 +11192,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         if (vvGrid) vvHitBuckets(k, l, off, runOff, points, lane);
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
         {
-            if (vvLevel(a, k, points) != l) continue;
+            if (vvLv(a) != l) continue;
             uint va = vvMember(off, a);
             float range = asfloat(gStatic[va * 4u + 3u].z);
             uint hits = gsVvHit4[a].load();
@@ -11182,7 +11221,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
             {
                 for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
                 {
-                    if (vvLevel(a, k, points) != l) continue;
+                    if (vvLv(a) != l) continue;
                     uint hits = gsVvHit4[a].load();
                     if (hits > 2u * points) continue;
                     uint va = vvMember(off, a);
@@ -11193,10 +11232,33 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
             }
         }
     }
-    // The two-body counts of every owner's turn, once all levels are applied.
+    // The two-body counts of every owner's turn, once all levels are applied: the
+    // counts a hit wrote (vvSplitCount: its triangle's nodes, its point in its owner's
+    // slot), from the hit lists; every node's when an owner's list overflowed.
     uint anyHits = 0u;
-    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) anyHits += gsVvHit4[a].load();
-    if (anyHits > 0u) vvSplitClear(off, k, k, lane);
+    bool listedAll = true;
+    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+    {
+        uint n = gsVvHit4[a].load();
+        anyHits += n;
+        if (n > 2u * points) listedAll = false;
+    }
+    if (anyHits > 0u && !listedAll) vvSplitClear(off, k, k, lane);
+    else if (anyHits > 0u && gP.vvSplit != 0u)
+    {
+        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        {
+            uint base = vvHitSmall(runOff, points, a, 0u);
+            for (uint i = lane, iStop = EB_END(i, gsVvHit4[a].load(), LANES); i < iStop; i += LANES)
+            {
+                uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
+                gAcc[vvSplitTri(tn.x)].store(0);
+                gAcc[vvSplitTri(tn.y)].store(0);
+                gAcc[vvSplitTri(tn.z)].store(0);
+                gAcc[vvSplitPoint(a, gNext[base + 2u * i + 1u])].store(0);
+            }
+        }
+    }
 }
 
 [shader("compute")]
