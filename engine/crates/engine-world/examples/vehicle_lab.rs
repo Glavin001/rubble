@@ -1359,6 +1359,33 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 println!("   reuse census: {}", reuse_census(template, &pos, &vel, &broken));
                 println!("   reuse cause: {}", reuse_cause(template, &pos, &vel, &broken));
             }
+            // Every car's box diagonal (m), when there is more than one: a car that has
+            // blown up shows here (the page's stability check is the wasm host's).
+            if let Some(x) = world.explicit_vehicles() {
+                let all = x.positions();
+                if all.len() > 1 {
+                    let d: Vec<String> = all
+                        .iter()
+                        .map(|p| {
+                            let (lo, hi) = p.iter().fold((glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)), |(a, b), q| (a.min(*q), b.max(*q)));
+                            format!("{:.1}", (hi - lo).length())
+                        })
+                        .collect();
+                    println!("   boxes m: {}", d.join(" "));
+                    // (median node speed / fastest node, km/h: a body that has blown up
+                    // has nodes far faster than its own motion.)
+                    let v: Vec<String> = x
+                        .velocities()
+                        .iter()
+                        .map(|vs| {
+                            let mut sp: Vec<f32> = vs.iter().map(|q| q.length() * 3.6).collect();
+                            sp.sort_by(f32::total_cmp);
+                            format!("{:.0}/{:.0}", sp[sp.len() / 2], sp[sp.len() - 1])
+                        })
+                        .collect();
+                    println!("   speeds km/h: {}", v.join(" "));
+                }
+            }
             if lab.bench.debris.ttl.is_some() || lab.bench.debris.pieces > 0 {
                 let d = &lab.bench.debris;
                 println!("   debris retired: {} pieces, {} nodes, {:.2} kg", d.pieces, d.nodes, d.mass);
