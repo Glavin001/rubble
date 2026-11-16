@@ -337,7 +337,9 @@ void splitTests(uint g, uint part, uint lane, uint word)
     {
         uint total = 0u;
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += uint(gAcc[gVvC + 3u * VV_PART + a].load());
-        uint subs = clamp(LANES / max(total, 1u), 1u, 64u);
+        // (Parts of a triangle's cells or candidates: as many as the group's threads
+        // here hold, the same pairs listed whatever the count.)
+        uint subs = clamp(stride / max(total, 1u), 1u, 64u);
         for (uint p = at0, pStop = EB_END(p, total * subs, stride); p < pStop; p += stride)
         {
             uint q = p / subs;
@@ -395,7 +397,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
     uint over = 0u;
     for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
         over += uint(gAcc[gVvC + a].load()) > TRI_PAIR_CAP ? uint(gAcc[gVvC + 3u * VV_PART + a].load()) : 0u;
-    uint subs = clamp(LANES / max(over, 1u), 1u, 64u);
+    uint subs = clamp(stride / max(over, 1u), 1u, 64u);
     for (uint p = at0, pStop = EB_END(p, over * subs, stride); p < pStop; p += stride)
     {
         uint q = p / subs;
