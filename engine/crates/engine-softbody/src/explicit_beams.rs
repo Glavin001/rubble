@@ -3767,7 +3767,14 @@ impl ExplicitBeams {
                     }
                 }
                 if let Some(r) = rigid.as_mut() {
-                    let c = r.node_contact_with(x, &n, fast_side);
+                    let c = r.node_contact_with(
+                        x,
+                        &n,
+                        fast_side,
+                        &ContactSurface::BOX
+                            .exact_if(exact)
+                            .dissipative_if(dissipative),
+                    );
                     if let Some(l) = cf.as_mut() {
                         l.add(i, c);
                     }
