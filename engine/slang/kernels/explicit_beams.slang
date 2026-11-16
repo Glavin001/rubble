@@ -1570,6 +1570,11 @@ static const uint PERF_WIDE_FUSED = 32u;
 // candidate loop reads two streamed records a candidate in place of the node's record,
 // its vehicle's flags and its velocity: the same box test on the same values.
 static const uint PERF_VV_STREAM = 64u;
+// perfFlags bit 128 (explicit_plan::PERF_VV_BIG_GRID): the larger groups' contact pass
+// sorts each owner's candidates into a grid (every bucket, the whole workgroup: one owner
+// at a time) and a triangle visits the cells of its padded box, as the small groups'
+// pass does (vvGridBuild, vvTriangleCandsGrid), in place of every candidate.
+static const uint PERF_VV_BIG_GRID = 128u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 
 // The break exception (spec §2, step 4: an end on a collision triangle with fewer
@@ -9698,6 +9703,9 @@ uint vvHitAt(uint runOff, uint i) { return gP.vvHits + 2u * (2u * runOff + i); }
 
 // vvInBox with the candidate's travel over the step given (PERF_VV_STREAM: the value
 // vvInBox computes from its velocity, kept where the candidate was gathered).
+void vvBigGridBuild(uint va, uint runOff, uint cands, uint lane);
+void vvTriangleCandsBigGrid(uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r,
+                            uint parity, uint q);
 bool vvInBoxTravel(VvTri t, float3 x, float travelH, bool anti)
 {
     if (!anti) return !(any(x < t.lo) || any(x > t.hi));
@@ -9713,7 +9721,8 @@ void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint po
     VvTri t = vvTriangle(gt, vvRel(va, va), r);
     bool cand = false;
     bool hit = false;
-    bool stream = (gP.perfFlags & PERF_VV_STREAM) != 0u;
+    // (With the grid the sort records hold the sorted candidates: no stream.)
+    bool stream = (gP.perfFlags & (PERF_VV_STREAM | PERF_VV_BIG_GRID)) == PERF_VV_STREAM;
     uint info = vvSortAt(runOff);
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
     {
@@ -10026,7 +10035,7 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
                     if (any(x < clo - e3) || any(x > chi + e3)) continue;
                     uint ci = gsVvCands[q].add(1u);
                     gBeams[gP.vvRun + runOff + ci] = float4(nf3(orel + gNodes[h * 3u].xyz), asfloat(h));
-                    if ((gP.perfFlags & PERF_VV_STREAM) != 0u)
+                    if ((gP.perfFlags & (PERF_VV_STREAM | PERF_VV_BIG_GRID)) == PERF_VV_STREAM)
                     {
                         // The candidate's part of vvInBox's pad, its vehicle's anti-clip and
                         // its vehicle (vvTriangleCands; the group's slice of the small
@@ -10047,10 +10056,15 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
 #ifdef EB_ABLATE
         if ((gP.ablate & 2048u) != 0u) listed = 0u;
 #endif
+        bool bigGrid = (gP.perfFlags & PERF_VV_BIG_GRID) != 0u;
+        if (bigGrid) vvBigGridBuild(va, runOff, cands, lane);
         for (uint p = lane, pStop = EB_END(p, listed * subs, LANES); p < pStop; p += LANES)
         {
             uint t = gNext[vvTestedAt(ra1.x + p / subs)];
-            vvTriangleCands(va, ra1.x + t, p % subs, subs, runOff, points, cands, range, parity, q);
+            if (bigGrid)
+                vvTriangleCandsBigGrid(va, ra1.x + t, p % subs, subs, runOff, points, cands, range, parity, q);
+            else
+                vvTriangleCands(va, ra1.x + t, p % subs, subs, runOff, points, cands, range, parity, q);
         }
         sync();
         prevTri = ra1.x;
@@ -10405,6 +10419,174 @@ void vvTriangleCandsGrid(uint a, uint va, uint gt, uint sub, uint subs, uint run
     vvMark(gt, cand, hit);
 }
 
+
+// --- The larger groups' pass with the grid (PERF_VV_BIG_GRID) ---
+// vvPass's owner va (the whole workgroup, one owner at a time): its `cands` candidates
+// (the run at gP.vvRun + runOff) counted into every bucket of gsCount (free in a group's
+// frame, as vvGridBuild uses it), scanned and copied in bucket order to the group's sort
+// records; gsCount[GRID_BUCKETS]: the fastest candidate's speed. Every lane (uniform).
+// The larger groups' grid cell: 0.75 m (any size gives the same candidates; a contact
+// triangle's padded box, a metre or two across, must stay within GRID_MAX_CELLS cells or
+// it visits every candidate, which the self-collision cell's size does not allow).
+float vvBigCell(uint va) { return max(vvGridCell(va), 0.75); }
+void vvBigGridBuild(uint va, uint runOff, uint cands, uint lane)
+{
+    for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
+    if (lane == 0u) gsCount[GRID_BUCKETS].store(0u);
+    sync();
+    float cell = vvBigCell(va);
+    uint rank = vvRankAt(runOff, 0u, 0u, 0u);
+    for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+    {
+        float4 E = gBeams[gP.vvRun + runOff + e];
+        uint h = asuint(E.w);
+        uint b = gridBucket(int3(floor(E.xyz / cell)));
+        gNext[rank + e] = b | (gsCount[b].add(1u) << 10);
+        float3 v = gNodes[h * 3u + 1u].xyz;
+        uint sp = asuint(ssqrt(sdot(v, v)));
+        if (sp > gsCount[GRID_BUCKETS].load()) gsCount[GRID_BUCKETS].max(sp);
+    }
+    sync();
+    uint per = GRID_BUCKETS / LANES;
+    uint block = LANES / GRID_BLOCKS;
+    uint sum = 0u;
+    for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++) sum += gsCount[lane * per + k].load();
+    gsPart[lane] = sum;
+    sync();
+    if (lane < GRID_BLOCKS)
+    {
+        uint run = 0u;
+        for (uint k = 0u, kStop = EB_END(k, block, 1u); k < kStop; k++)
+        {
+            uint x = gsPart[lane * block + k];
+            gsPart[lane * block + k] = run;
+            run += x;
+        }
+        gsBlk[lane] = run;
+    }
+    sync();
+    if (lane == 0u)
+    {
+        uint run = 0u;
+        for (uint k = 0u; k < GRID_BLOCKS; k++)
+        {
+            uint x = gsBlk[k];
+            gsBlk[k] = run;
+            run += x;
+        }
+        gsOff[GRID_BUCKETS] = run;
+    }
+    sync();
+    {
+        uint run = gsPart[lane] + gsBlk[lane / block];
+        for (uint k = 0u, kStop = EB_END(k, per, 1u); k < kStop; k++)
+        {
+            gsOff[lane * per + k] = run;
+            run += gsCount[lane * per + k].load();
+        }
+    }
+    sync();
+    uint sorted = vvSortAt(runOff);
+    for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+    {
+        uint br = gNext[rank + e];
+        gBeams[sorted + gsOff[br & (GRID_BUCKETS - 1u)] + (br >> 10)] = gBeams[gP.vvRun + runOff + e];
+    }
+    sync();
+}
+
+// vvTriangleCands from the grid: the candidates of the cells the triangle's box covers,
+// the box padded by the most vvInBox pads it (the owner's fastest candidate), each bucket
+// once: every candidate that passes the box test is in a covered cell, so the same
+// candidates pass it and the same hits are found (vvApplyHits applies them in the
+// canonical order whatever order they were found in). A box over more than GRID_MAX_CELLS
+// cells: every candidate, as vvTriangleCands.
+void vvTriangleCandsBigGrid(uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r,
+                            uint parity, uint q)
+{
+    float cell = vvBigCell(va);
+    VvTri t = vvTriangle(gt, vvRel(va, va), r);
+    float vmax = asfloat(gsCount[GRID_BUCKETS].load());
+    float pad = nf(nf(t.travel + smul(vmax, STEP)) + CLIP_DEPTH);
+    float3 lo = ssub3(t.lo, float3(pad, pad, pad));
+    float3 hi = sadd3(t.hi, float3(pad, pad, pad));
+    if (any(t.lo > t.hi))
+    {
+        // (A dead triangle's empty box: no candidate in it; its mark as vvTriangleCands
+        // leaves it.)
+        vvMark(gt, false, false);
+        return;
+    }
+    float3 f0 = floor(lo / cell);
+    float3 fs = floor(hi / cell) - f0 + float3(1.0, 1.0, 1.0);
+    bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS))
+                 || !(all(abs(f0) < 1.0e8));
+    if (every)
+    {
+        // (The run itself, unsorted: the sort records hold the sorted copy.)
+        vvTriangleCands(va, gt, sub, subs, runOff, points, cands, r, parity, q);
+        return;
+    }
+    bool cand = false;
+    bool hit = false;
+    int3 c0 = int3(f0);
+    int3 span = int3(fs);
+    uint yz = uint(span.y * span.z);
+    uint cells = uint(span.x) * yz;
+    uint sorted = vvSortAt(runOff);
+    for (uint i = sub, iStop = EB_END(i, cells, subs); i < iStop; i += subs)
+    {
+        uint b = gridBucket(c0 + int3(int(i / yz), int((i / uint(span.z)) % uint(span.y)), int(i % uint(span.z))));
+        bool dup = false;
+        int3 cj = int3(0, 0, 0);
+        for (uint j = 0u, jStop = EB_END(j, i, 1u); j < jStop; j++)
+        {
+            if (gridBucket(c0 + cj) == b)
+            {
+                dup = true;
+                break;
+            }
+            cj.z += 1;
+            if (cj.z == span.z)
+            {
+                cj.z = 0;
+                cj.y += 1;
+                if (cj.y == span.y)
+                {
+                    cj.y = 0;
+                    cj.x += 1;
+                }
+            }
+        }
+        if (dup) continue;
+        uint e0 = gsOff[b];
+        uint e1 = gsOff[b + 1u];
+        for (uint e = e0, eGuard = 0u; e < e1; e++)
+        {
+            EB_PASS(eGuard);
+            float4 E = gBeams[sorted + e];
+            uint h = asuint(E.w);
+            uint vh = gStatic[gP.nodeInfoBase + h].w;
+            bool anti = vvAnti(t, vh);
+            if (!vvInBox(t, E.xyz, h, anti)) continue;
+            cand = true;
+            if (!vvFind(t, gt, h, E.xyz, vh, r, anti)) continue;
+            hit = true;
+            vvSplitCount(t, h, 0u);
+            uint n = gsVvHits[q].add(1u);
+            if (n < 2u * points)
+            {
+                gNext[vvHitAt(runOff, n)] = gt;
+                gNext[vvHitAt(runOff, n) + 1u] = h;
+            }
+            else
+            {
+                vvTry(t, gt, h, E.xyz, vh, r, parity, 0u);
+            }
+        }
+    }
+    vvMark(gt, cand, hit);
+}
 
 // --- The triangle tests as a pair list (lossless) ---
 // The triangles' tests ran on the lane that walked the triangle: a few triangles in the

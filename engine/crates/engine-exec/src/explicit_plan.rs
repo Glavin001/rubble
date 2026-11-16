@@ -218,11 +218,15 @@ pub const PERF_WIDE_FUSED: u32 = 32;
 /// travel, vehicle and anti-clip beside it (the kernel's PERF_VV_STREAM), so its triangle
 /// tests read streamed records, not three scattered ones a candidate.
 pub const PERF_VV_STREAM: u32 = 64;
+/// [`W_PERF_FLAGS`]: the larger contact groups' pass with each owner's candidates in a
+/// grid (the kernel's PERF_VV_BIG_GRID), in place of every listed triangle against every
+/// candidate.
+pub const PERF_VV_BIG_GRID: u32 = 128;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7) and [`PERF_VV_STREAM`] (§8.13); `RUBBLE_PERF_FLAGS=<mask>` overrides
 /// (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM)
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID)
 }
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;

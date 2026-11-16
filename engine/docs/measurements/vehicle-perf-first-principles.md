@@ -1127,3 +1127,32 @@ It is not the fix: the loop still visits every listed triangle against every can
 have them, would cut the visits about sevenfold (`fleet-benchmark.md`: 11.1 M → 1.5 M), and
 the tests across workgroups would spread what is left; neither is built for groups past
 four.
+
+### 8.14 The larger groups' contact pass with a grid (on by default), and what is left in it
+
+`PERF_VV_BIG_GRID` (perf flag 128, on by default; the page's "contact candidates in a
+grid", live): in `vvPass` each owner's candidates are counted into the workgroup's 1,024
+buckets, scanned and copied in bucket order (`vvBigGridBuild`: the small groups'
+`vvGridBuild` for one owner), and a triangle visits the cells of its box padded by the
+most `vvInBox` pads it (`vvTriangleCandsBigGrid`), each bucket once; a box over more than
+64 cells visits every candidate as before. The cell is 0.75 m (any size gives the same
+candidates; the self-collision cell left most contact triangles over the 64 cells).
+
+Bit for bit (eight cars, `--ab-switch perf=128` against the streamed loop, every state
+word) at t 2, 4, 6, 9, 12 s. Time, ms a frame, grid against streamed: 52.6 / 104.1 /
+245.2 / 238.9 against 48.1 / 108.5 / 289.1 / 300.0: 9 % slower in flight (the build's
+barriers an owner, few candidates), 15–20 % faster in the pile, where the worst frames are.
+Suites with it on (`perf-verify.sh 193`): `explicit_loop_cap`, `explicit_contact_gpu` 13,
+`group_split_gpu` 2, `vv_grid_gpu` 2, `explicit_beams_bitwise` 12, `explicit_vehicles` 11.
+
+Inside the pass with the grid (t 12 s, ablation masks of the same snapshot): the frame 249,
+without the pass 39.6, without the triangles' loop (2048) 59, without the candidates'
+gather (4096) 70. **The triangles' loop is still ≈190 ms a frame** (0.7 ms an owner a
+substep): in the pile the candidates that remain are really inside the triangles' boxes,
+and each takes the anti-clip test (`vvFind`: the held sides, the neighbours' vote) on one
+core. That is work to spread, not to cull: the pairs listed and tested a thread each
+across the GPU, as the small groups' split path does (`contact-groups-design.md` §5), for
+groups of any size.
+
+Eight cars at t 12 s, a workgroup a group: 355 ms a frame at the start of this section's
+work, 239 now.
