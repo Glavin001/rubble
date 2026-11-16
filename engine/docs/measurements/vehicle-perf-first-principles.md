@@ -896,3 +896,45 @@ sum of passes that are each measured against a model, and it is flat in the numb
 apart (§8.2). The remaining passes (list, hits, aux, node and beam records) are each 3–8×
 over what §8.1 charges for their work; cars in contact still run the old contact groups
 (a frame with vehicle contact is not wide yet).
+
+### 8.6 Hard stop (2026-11-15): three attempts in a row under 5 %
+
+The brief's stop rule was reached. Since the hit forces' cache (§7.3, −12 %), three
+attempts each gained under 5 % of one car's frame against the best default:
+
+| Attempt | Bit for bit | Gain against the default path |
+|---|---|---|
+| Wheels beside other phases (§7.4) | yes | −2 to +7 % (none) |
+| The wide schedule with the aux pass and the reused pair list (§8.3, §8.5) | yes | 5.82 → 5.73 ms median, 6.55 → 6.10 worst (1.5 % / 7 % of the worst step) |
+| Hits packed into vector records (each hit's list words and node records in 9 `float4` loads a phase in place of ≈40 loads; tried, reverted) | yes, t 2.5, 4, 6, 8, 20 s | 6.21 against 6.20 ms: none |
+
+The last one says the load-count model of §8.1 does not explain `selfApply`: removing
+about 80 loads a hit changed nothing. What it does not model is atomics: a hit makes
+about 80–100 atomic adds, stores and exchanges on storage (the fixed-point accumulators,
+the residual's B and D words, the shifts, the contact-force log). Their cost was not
+measured; `gpu_cost_model` has no atomic case. That is the first measurement to make
+before touching hits again.
+
+**Best result per criterion**
+
+| Criterion | Best | Target |
+|---|---|---|
+| 1 car, worst step, native | 6.10 ms (wide schedule, opt-in), 6.55 ms (default) | 1.0 |
+| 1 car, worst step, Chrome | 6.92 ms (default; the wide schedule is not measured in Chrome) | 1.0 |
+| 8 cars crashing, worst step, native | 270 ms (existing splits on, 14 s), 553 ms (default) | 3 |
+| 8 cars, 120 steps/s, zero refused | not run | |
+| Every phase within 2× its floor | no phase is (§7.5, §8.3) | |
+| Bit-for-bit proofs | every change: mountain at 5–6 times, 2- and 8-car contact for the flags, the GPU suites; tiny and wall crash by the suites only | |
+
+**Remaining gap per phase** (one car at rest, the wide schedule, ms a frame, against §8.1's
+charge): list, walk and pairs 1.8 / 0.3; hits 1.9 / 0.2–0.4; aux (coupling, wheels) 1.6 /
+0.3–0.4; nodes 0.9 / 0.3; beams 0.5 / 0.15.
+
+**Why.** Three causes, in order of size. (1) Cars in contact still run as contact groups
+on one workgroup; the wide schedule has no vehicle contact yet, so the 8-car case has not
+moved. (2) Each remaining pass is the frame's per-element functions called from a wide
+thread, with their original record layouts and, for hits, their atomics; the two rewrites
+tried at that level (the list as a small kernel: 0.5–0.9 ms; hits packed: nothing) show the
+gain is real where the model applies and absent where it does not. (3) 1.0 ms itself is
+under the measured cost of four dependent dispatches a substep (§7.2); 1.2–1.6 ms is what
+the model supports for this car.
