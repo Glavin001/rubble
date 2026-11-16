@@ -60,7 +60,7 @@ fn fleet_matches(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32
 /// (`ExplicitBeamsGpu::take_fleet_keep_stats`: builds, passes that reused the kept pairs,
 /// pairs kept over the builds, passes on the front's own path, the most pairs an owner
 /// kept).
-fn fleet_matches_kept(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool) -> Option<([u32; 3], [u64; 9])> {
+fn fleet_matches_kept(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool) -> Option<([u32; 3], [u64; 10])> {
     let (_, device, queue) = default_device().ok()?;
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
     gpu.set_vehicle_contact(true);
@@ -69,7 +69,7 @@ fn fleet_matches_kept(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps
     gpu.set_self_split(self_split);
     let flags = gpu.perf_flags();
     let (mut grouped, mut largest, mut hits) = (0u32, 0u32, 0u32);
-    let mut kept = [0u64; 9];
+    let mut kept = [0u64; 10];
     for f in 0..frames {
         gpu.wait();
         let snap = gpu.snapshot();
@@ -86,7 +86,7 @@ fn fleet_matches_kept(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps
         gpu.wait();
         let on = gpu.state_words();
         let k = gpu.take_fleet_keep_stats();
-        for i in 0..9 {
+        for i in 0..10 {
             kept[i] = if matches!(i, 4 | 7 | 8) { kept[i].max(k[i]) } else { kept[i] + k[i] };
         }
         if let Some(d) = first_diff(&off, &on) {
@@ -145,7 +145,7 @@ fn owners_state_by_vehicle_is_bit_for_bit() {
         let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
         let b = sedan(&text, Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
         let Some(([grouped, _, hits], kept)) = fleet_matches_kept("two sedans head-on, candidates kept", vec![a, b], 60, 17, PERF_FLEET_KEEP, self_split) else { return };
-        eprintln!("   kept candidates: {kept:?} (builds, passes reused, pairs kept, passes on the front's own path, most an owner, builds for motion, for cover, largest bound and fastest node as float bits)");
+        eprintln!("   kept candidates: {kept:?} (builds, passes reused, pairs kept, passes on the front's own path, most an owner, builds for a calm node, for cover, largest bound and fastest travel as float bits, builds for two vehicles' motion)");
         assert!(grouped > 10 && hits > 0, "the cars met and hit ({grouped} frames grouped, {hits} hits)");
         assert!(kept[0] > 0 && kept[1] > kept[0], "the kept list was built and reused more often than built: {kept:?}");
         let (lo, hi) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(l, h), n| (l.min(n.pos.z), h.max(n.pos.z)));

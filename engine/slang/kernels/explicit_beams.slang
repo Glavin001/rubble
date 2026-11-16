@@ -5864,13 +5864,17 @@ uint flBoxAt(uint v) { return gP.vvFleetBox + 4u * v; }
 // --- Vehicle contact's kept candidates (PERF_FLEET_KEEP): addresses, after the fleet
 // state's own (explicit_plan::fleet_acc_words, fleet_next_words; the passes are
 // explicit_beams_fleet.slang's fk*) ---
-// gAcc: per vehicle FK_ACC words (the farthest any of its tracked nodes has moved since
-// the build, relative to its first node; its fastest tracked node's speed, both float
-// bits and zero between passes; its kept pairs), then FK_ACC_CTL words.
-static const uint FK_ACC = 3u;
-static const uint FK_DEV = 0u;
-static const uint FK_VMAX = 1u;
-static const uint FK_PAIRS = 2u;
+// gAcc: per vehicle FK_ACC words (for its calm and its wild tracked nodes, the farthest
+// one has moved since the build relative to the vehicle's reference motion and the
+// fastest one's travel over a step, float bits, zero between passes; its kept pairs; the
+// box of its wild candidates at the build, vvKey's keys; its tracked nodes' motions
+// summed, fixed point, zero between passes), then FK_ACC_CTL words.
+static const uint FK_ACC = 14u;
+static const uint FK_SUM = 11u;
+static const uint FK_DEV = 0u; // calm; + 2: wild
+static const uint FK_TRAV = 1u; // calm; + 2: wild
+static const uint FK_PAIRS = 4u;
+static const uint FK_WILD_BOX = 5u;
 static const uint FK_ACC_CTL = 4u;
 uint fkAcc(uint v, uint w) { return flCtl(FL_CTL) + v * FK_ACC + w; }
 uint fkAccCtl(uint i) { return fkAcc(gP.vehicles, 0u) + i; }
@@ -5885,8 +5889,12 @@ uint fkCover(uint v, uint i) { return fkListed(gP.totalTris) + v * (FK_COVER + 1
 uint fkRun(uint v) { return fkCover(gP.vehicles, 0u) + v; }
 uint fkPrefix(uint v) { return fkRun(gP.vehicles + 1u) + v; }
 uint fkOrigin(uint v) { return fkPrefix(gP.vehicles + 1u) + 3u * v; }
-uint fkCtl(uint i) { return fkOrigin(gP.vehicles) + i; }
-// gBeams after the owners' boxes: per node its position (its vehicle's frame) at the build.
+// (Per vehicle six words, float bits: its reference motion of this pass, 0..2, and its
+// tracked nodes' mean motion of the pass before, 3..5.)
+uint fkMean(uint v, uint i) { return fkOrigin(gP.vehicles) + 6u * v + i; }
+uint fkCtl(uint i) { return fkMean(gP.vehicles, 0u) + i; }
+// gBeams after the owners' boxes: per node its position (its vehicle's frame) at the build
+// and its class there (.w: 0 calm, 1 wild).
 uint fkRef(uint n) { return gP.vvFleetBox + 4u * gP.vehicles + n; }
 
 // A value one lane decided, read by every lane as uniform (the WGSL

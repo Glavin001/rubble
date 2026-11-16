@@ -1321,10 +1321,11 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let fk = x.take_fleet_keep_stats();
                 if fk[0] + fk[1] > 0 {
                     println!(
-                        "     kept candidates ({}): {} builds ({} for motion, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, fastest node {:.1} m/s",
+                        "     kept candidates ({}): {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, fastest node {:.1} m/s",
                         if on { "on" } else { "off" },
                         fk[0],
                         fk[5],
+                        fk[9],
                         fk[6],
                         fk[1],
                         100.0 * fk[1] as f64 / (fk[0] + fk[1] + fk[3]).max(1) as f64,
@@ -1332,11 +1333,17 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         fk[2] as f64 / fk[0].max(1) as f64,
                         fk[4],
                         f32::from_bits(fk[7] as u32),
-                        f32::from_bits(fk[8] as u32)
+                        f32::from_bits(fk[8] as u32) / 0.0005
                     );
                 }
                 if env_u("AB_COUNTS", 0) != 0 {
                     println!("     counts ({}): {:?}", if on { "on" } else { "off" }, x.contact_group_counts());
+                }
+                // (FK_MOTION=1: the kept candidates' reference motions after the frames.)
+                if on && env_u("FK_MOTION", 0) != 0 {
+                    for (v, m) in x.fleet_keep_motion().iter().enumerate() {
+                        println!("     kept motion, car {v}: reference {:?}, mean {:?}, origin change {:?}", &m[0..3], &m[3..6], &m[6..9]);
+                    }
                 }
                 // The switch's own header bit back, so the words compare the state alone.
                 switch(x, true, &labels);
@@ -1523,9 +1530,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let fk = x.take_fleet_keep_stats();
                 if fk[0] + fk[1] > 0 {
                     println!(
-                        "   vehicle contact's kept candidates: {} builds ({} for motion, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, fastest node {:.1} m/s",
+                        "   vehicle contact's kept candidates: {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, fastest node {:.1} m/s",
                         fk[0],
                         fk[5],
+                        fk[9],
                         fk[6],
                         fk[1],
                         100.0 * fk[1] as f64 / (fk[0] + fk[1] + fk[3]).max(1) as f64,
@@ -1533,7 +1541,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         fk[2] as f64 / fk[0].max(1) as f64,
                         fk[4],
                         f32::from_bits(fk[7] as u32),
-                        f32::from_bits(fk[8] as u32)
+                        f32::from_bits(fk[8] as u32) / 0.0005
                     );
                 }
             }

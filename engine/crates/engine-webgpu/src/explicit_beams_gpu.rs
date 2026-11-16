@@ -2520,23 +2520,56 @@ impl ExplicitBeamsGpu {
     /// kernel's fkCtl) since the last call (which clears them): (builds, contact passes
     /// that reused the kept pairs, pairs kept summed over the builds, passes with partners
     /// on the front's own path, the most pairs one owner kept at a build, builds because
-    /// the nodes had moved past the margin, builds because a pair was not covered or no
-    /// list was kept, the largest motion bound of a vehicle at a build for motion and the
-    /// fastest tracked node, both float bits). Zeros without the fleet state.
+    /// a calm node had moved past its allowance, builds because a pair was not covered or
+    /// no list was kept, the largest motion bound of a vehicle at a build for motion and
+    /// the fastest tracked node's travel over a step, both float bits, builds because two
+    /// vehicles had moved past theirs; the other builds are a wild node's). Zeros without
+    /// the fleet state.
     #[doc(hidden)]
-    pub fn take_fleet_keep_stats(&mut self) -> [u64; 9] {
+    pub fn take_fleet_keep_stats(&mut self) -> [u64; 10] {
         let w = &self.planner.words;
         let at = w[plan::W_VV_FLEET_NEXT] as usize;
         if at == 0 {
-            return [0; 9];
+            return [0; 10];
         }
         let nv = self.layout.spans.len();
         let end = at + plan::fleet_next_words(nv, w[49] as usize, self.layout.total[2] as usize);
         let ctl = end - plan::FLEET_CTL_WORDS;
         let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
-        let out = std::array::from_fn(|k| u64::from(next[ctl + 5 + k]));
+        // (Word 14 is the passes' clock, not a count of this window.)
+        let out = std::array::from_fn(|k| u64::from(next[ctl + if k == 9 { 15 } else { 5 + k }]));
         self.queue.write_buffer(&self.bufs[8], ((ctl + 5) * 4) as u64, &[0u8; 36]);
+        self.queue.write_buffer(&self.bufs[8], ((ctl + 15) * 4) as u64, &[0u8; 4]);
         out
+    }
+
+    /// Measurement: per vehicle, the kept candidates' reference motion of the next pass
+    /// and its tracked nodes' mean motion of the last (the kernel's fkMean; metres since
+    /// the list's build), then its origin's change since the build.
+    #[doc(hidden)]
+    pub fn fleet_keep_motion(&self) -> Vec<[f32; 9]> {
+        let w = &self.planner.words;
+        let at = w[plan::W_VV_FLEET_NEXT] as usize;
+        if at == 0 {
+            return Vec::new();
+        }
+        let nv = self.layout.spans.len();
+        let end = at + plan::fleet_next_words(nv, w[49] as usize, self.layout.total[2] as usize);
+        let mean = end - plan::FLEET_CTL_WORDS - 6 * nv;
+        let origin = mean - 3 * nv;
+        let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        (0..nv)
+            .map(|v| {
+                std::array::from_fn(|k| {
+                    if k < 6 {
+                        f32::from_bits(next[mean + 6 * v + k])
+                    } else {
+                        f32::from_bits(misc[v * 4 + k - 6]) - f32::from_bits(next[origin + 3 * v + k - 6])
+                    }
+                })
+            })
+            .collect()
     }
 
     /// Measurement: the reused pair list's statistics summed over the vehicles since the
