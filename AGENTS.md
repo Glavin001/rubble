@@ -54,6 +54,16 @@
   3. **Before a commit that changes results or a default.** The suites that hold
      GPU == CPU reference and the paths against each other
      (`tools/explicit-2khz/perf-verify.sh default ...`), `engine-metal` parity.
+     A switch that will be on by default also passes Chrome's bit-for-bit A/B on the lab
+     page (minutes; from `engine/`, after the web build):
+     `tools/vehicle-lab/run.sh --probe --locked --ab MASK --abUntil 40 "m8:mode=mountain&cars=8&terrain=ledges&timing=step"`
+     (frame-locked, so the page's run does not depend on the GPU's speed; every simulated
+     second the vehicles run 20 frames from the page's state with the switch on and off,
+     `WebWorld.explicitAb`, every state word compared; the first differing state is saved
+     to `out/chrome-ab/` as a fixture for `fast-check.sh perf=MASK FILE`). Two runs of
+     the page with the switch on and off, compared second by second:
+     `--ab 0 --abSaveAll TAG` each, then `vehicle_lab ... --from-fixture A
+     --compare-fixture B`. A Chrome state that differs goes into `out/fixtures/` (rung 1).
   4. **Before a merge or a number in a doc.** The whole 40 s runs (native and the Chrome
      probe) and every suite.
   When a higher rung finds something a lower one missed, add a fixture or a test at the

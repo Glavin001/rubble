@@ -613,6 +613,17 @@ past it (four cars in their first collision came to 30,170) the pass and the nex
 take the front's own path. Thirty-two cars are one group past `VV_PART`, which the
 fleet-wide front does not take, so the list does nothing for them (§8.7, stage 3).
 
-Open: in Chrome the lab page's eight-car mountain does not end in the same state with the
-flag as without it (natively every check is bit for bit), so the flag is off by default
-until the cause is found (`vehicle-perf-first-principles.md` §8.28).
+One contact point, one position. The walk tests a point at the position its gather
+stored, `nf3(vvRel(vb, va) + x)`; the kept pairs compute the same expression again in
+`fkPairTry`. Both are the same source, but they are two inlined copies, and a compiler
+that may reassociate (Metal's, natively through naga and in Chrome through Tint) turned
+`(o_vb − o_va) + x` into another order in one of them: the two positions differed in the
+last bit, and a pair at the edge of a test hit on one path and not on the other. This
+was found in Chrome (the lab page frame-locked, flag on and off, apart between t 20 and
+21 s) and it is not Chrome's: the Chrome state replayed natively differs at the same step
+(frame 31, step 27). Native fixtures never met it: it needs the origins far apart (the
+mountain at t 20 s) and a point at a test's edge. `vvRel` is now unfusable (`nf3`), so
+every copy rounds `o_vb − o_va` alone and then adds; the two Chrome states are rung-1
+fixtures. (Any expression a kept test repeats from the walk must be unfusable or the
+same stored value: the same rule as Metal's fast math elsewhere in the kernels.)
+`vehicle-perf-first-principles.md` §8.28 has the evidence and the checks.
