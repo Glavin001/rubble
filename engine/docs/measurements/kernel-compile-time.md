@@ -213,6 +213,10 @@ The runner is a virtual machine ("Apple M1 (Virtual)", `VirtualMac2,1`, 3 cores,
 |---|---|---|
 | Inlined lines | 78,391 | 21,836 |
 | Pipeline, M3 Max, cold (`gpu_adapter --compile <wgsl>`) | 7.09 s | 2.00 s |
+| Pipeline, GitHub macOS runner (same command, four runners, three builds each, alternating) | fails, 12 of 12 (the GPU timeout, 10.7 to 15.1 s after the start) | 2.46 to 4.10 s, 12 of 12 (first build on a runner 3.59 to 4.10 s) |
+| `hello` on a fresh GitHub macOS runner, eight runs each | first run failed both attempts on 4 of 4 runners | 64 of 64 runs pass with no failed attempt (8 runners, two workflow runs; first run 14 to 22 s, later 8 to 12 s) |
+
+The runner numbers are from a temporary workflow on the fix's branch (runs 43854810639 and 43911463486, removed before the pull request): it ran `hello` eight times on each of four fresh runners, then built the old kernel's WGSL (main at 977ff3ac) and the new one's with `gpu_adapter --compile`. So the new pipeline has about 2.5 times the room under the roughly 10.5 s limit, where the old one was at or over it.
 
 ### Results against the old kernel
 
