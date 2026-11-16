@@ -896,9 +896,64 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let mut ab: Vec<f64> = arg("--ab")
         .map(|x| x.split(',').filter_map(|t| t.parse().ok()).collect())
         .unwrap_or_default();
+    // `--save-fixtures DIR`: at each `--ab` time the state as a file
+    // (DIR/cars<N>_t<T>.fx: the snapshot's bytes with every car's piece labels and
+    // retired nodes). `--from-fixture FILE`: that state restored in this process and the
+    // `--ab` block run on it at once, with no step before it (the same fleet options):
+    // a change checked on a saved moment in seconds, not after driving up to it.
+    let save_dir = arg("--save-fixtures").map(std::path::PathBuf::from);
+    let from_fixture = arg("--from-fixture");
+    if let Some(file) = &from_fixture {
+        let bytes = std::fs::read(file)?;
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let t = f64::from_bits(u64::from_le_bytes(bytes[0..8].try_into()?));
+        let nv = u32_at(8);
+        let mut at = 12;
+        let x = world.explicit_vehicles_mut().expect("vehicles");
+        anyhow::ensure!(nv <= x.vehicle_count(), "{file}: a fixture of {nv} cars, this run has {}", x.vehicle_count());
+        for v in 0..nv {
+            let n = u32_at(at);
+            let labels = &bytes[at + 4..at + 4 + n];
+            at += 4 + n;
+            let m = u32_at(at);
+            let retired: Vec<bool> = bytes[at + 4..at + 4 + m].iter().map(|b| *b != 0).collect();
+            at += 4 + m;
+            // (As the lab does: with vehicle contact on the engine takes no retired
+            // nodes, and the lab's run went on without them.)
+            if retired.iter().any(|&r| r) {
+                let _ = x.set_retired(v, &retired);
+            }
+            if !labels.is_empty() {
+                x.set_piece_labels(v, labels);
+            }
+        }
+        let snap = x.snapshot_from_bytes(&bytes[at..]);
+        x.restore(&snap);
+        x.wait();
+        lab.bench.t = t;
+        ab = vec![t];
+    }
     for k in 0..windows {
         if ab.first().is_some_and(|&t| lab.bench.t >= t) {
             ab.remove(0);
+            if let Some(dir) = &save_dir {
+                std::fs::create_dir_all(dir)?;
+                let host = lab.fleet_host_state();
+                let x = world.explicit_vehicles().expect("vehicles");
+                let snap = x.snapshot();
+                let mut out = lab.bench.t.to_bits().to_le_bytes().to_vec();
+                out.extend((host.len() as u32).to_le_bytes());
+                for (labels, retired) in &host {
+                    out.extend((labels.len() as u32).to_le_bytes());
+                    out.extend(labels);
+                    out.extend((retired.len() as u32).to_le_bytes());
+                    out.extend(retired.iter().map(|r| u8::from(*r)));
+                }
+                out.extend(x.snapshot_to_bytes(&snap));
+                let file = dir.join(format!("cars{}_t{:.1}.fx", host.len(), lab.bench.t));
+                std::fs::write(&file, &out)?;
+                println!("   fixture {} ({:.1} MB)", file.display(), out.len() as f64 / 1e6);
+            }
             let labels = lab.piece_labels().to_vec();
             let x = world.explicit_vehicles_mut().expect("vehicles");
             x.wait();
@@ -1165,11 +1220,19 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 x.restore(&snap);
                 switch(x, on, &labels);
                 x.wait();
+                // (One untimed frame first: a pipeline this path creates on first use
+                // compiles there, not in the timing. Then the state again.)
+                x.frame(34);
+                x.wait();
+                x.restore(&snap);
+                x.wait();
                 // (AB_GAP_MS=n: the GPU idle n ms before each frame, as a display's frame
                 // loop leaves it; the frames' own time alone is summed.)
                 let gap: u64 = std::env::var("AB_GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                // (`--ab-frames N`: the frames each way, 20 unless given.)
+                let frames: u32 = arg("--ab-frames").and_then(|v| v.parse().ok()).unwrap_or(20).max(1);
                 let mut sum = 0.0;
-                for _ in 0..20 {
+                for _ in 0..frames {
                     if gap > 0 {
                         std::thread::sleep(std::time::Duration::from_millis(gap));
                     }
@@ -1178,7 +1241,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     x.wait();
                     sum += t.elapsed().as_secs_f64();
                 }
-                let ms = sum * 1e3 / 20.0;
+                let ms = sum * 1e3 / f64::from(frames);
                 // The switch's own header bit back, so the words compare the state alone.
                 switch(x, true, &labels);
                 x.wait();
@@ -1270,6 +1333,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             x.restore(&snap);
             switch(x, true, &labels);
             x.wait();
+            if from_fixture.is_some() {
+                // (A replayed fixture: its check is the whole run.)
+                std::process::exit(0);
+            }
         }
         if ablate != 0 && lab.bench.t >= ablate_at {
             if let Some(x) = world.explicit_vehicles_mut() {

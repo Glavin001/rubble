@@ -165,6 +165,14 @@ pub fn compile_stage(
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // One compile's output kept by what it depends on (`compile_key`): an edit to one
+    // kernel file recompiles the modules that include it, not every module.
+    let cached = compile_key(&slangc, source, entry, stage, target.flag(), include_dirs, defines)
+        .and_then(|key| compile_cache_dir().map(|dir| dir.join(key)));
+    if let Some(hit) = cached.as_deref().filter(|p| p.is_file()) {
+        std::fs::copy(hit, out)?;
+        return Ok(());
+    }
     let mut cmd = Command::new(&slangc);
     cmd.arg("-target")
         .arg(target.flag())
@@ -193,7 +201,137 @@ pub fn compile_stage(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    if let Some(entry) = &cached {
+        // (Written beside its name and renamed: another build may store the same key.)
+        if let Some(dir) = entry.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = entry.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::copy(out, &tmp).is_ok() {
+            let _ = std::fs::rename(&tmp, entry);
+        }
+    }
     Ok(())
+}
+
+/// Where single compiles are kept: `RUBBLE_SLANG_OBJ_CACHE` (a directory; `0` or empty:
+/// no cache), else `slang-obj-cache` in the cargo target directory this build script
+/// runs for. None outside a build script.
+fn compile_cache_dir() -> Option<PathBuf> {
+    match std::env::var_os("RUBBLE_SLANG_OBJ_CACHE") {
+        Some(v) if v.is_empty() || v == "0" => None,
+        Some(v) => Some(PathBuf::from(v)),
+        // OUT_DIR is <target>/<profile>/build/<package>-<hash>/out (with a target triple,
+        // one level deeper: the cache is then that triple's).
+        None => {
+            let out = PathBuf::from(std::env::var_os("OUT_DIR")?);
+            Some(out.ancestors().nth(4)?.join("slang-obj-cache"))
+        }
+    }
+}
+
+/// A key of everything one compile's output depends on: slangc itself (path, size,
+/// modification time), its arguments, and the bytes of the source and of every file it
+/// reaches by `#include "..."`. None (no cache for this compile) when a file in that
+/// closure uses `import` or `__include`, whose modules slangc finds by its own search:
+/// such a compile runs every time, as before.
+fn compile_key(
+    slangc: &Path,
+    source: &Path,
+    entry: &str,
+    stage: &str,
+    target: &str,
+    include_dirs: &[&Path],
+    defines: &[(&str, &str)],
+) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    // The files reached, twice: first every `#include` (and every macro name any of
+    // them defines), then only those not inside an `#ifdef NAME` whose NAME neither a
+    // `-D` nor any of those files defines (such a block is never compiled: the split
+    // group path's file, say, in a module built without it). Anything less plain than
+    // `#ifdef NAME` keeps its includes.
+    let all = include_closure(source, include_dirs, None)?;
+    let mut known: std::collections::HashSet<String> = defines.iter().map(|(n, _)| n.to_string()).collect();
+    for text in &all {
+        for line in text.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("#define") {
+                if let Some(name) = rest.split(|c: char| !(c.is_alphanumeric() || c == '_')).find(|t| !t.is_empty()) {
+                    known.insert(name.to_string());
+                }
+            }
+        }
+    }
+    let texts = include_closure(source, include_dirs, Some(&known))?;
+    // Two independent 64-bit hashes (std's SipHash with two seeds' worth of prefix).
+    let hash = |seed: u8| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        seed.hash(&mut h);
+        slangc.hash(&mut h);
+        if let Ok(m) = std::fs::metadata(slangc) {
+            m.len().hash(&mut h);
+            m.modified().ok().hash(&mut h);
+        }
+        (entry, stage, target).hash(&mut h);
+        for d in include_dirs {
+            d.hash(&mut h);
+        }
+        defines.hash(&mut h);
+        source.file_name().hash(&mut h);
+        for t in &texts {
+            t.hash(&mut h);
+        }
+        h.finish()
+    };
+    Some(format!("{:016x}{:016x}", hash(1), hash(2)))
+}
+
+/// The texts of `source` and of every file it reaches by `#include "..."` (None: a
+/// file missing, or one that uses `import` / `__include`). With `known`, an include
+/// inside an `#ifdef NAME` block whose NAME is not in `known` is not followed.
+fn include_closure(source: &Path, include_dirs: &[&Path], known: Option<&std::collections::HashSet<String>>) -> Option<Vec<String>> {
+    let mut files = vec![source.canonicalize().ok()?];
+    let mut texts = Vec::new();
+    let mut at = 0;
+    while at < files.len() {
+        let file = files[at].clone();
+        at += 1;
+        let text = std::fs::read_to_string(&file).ok()?;
+        // Per open conditional: whether its block may be compiled.
+        let mut open: Vec<bool> = Vec::new();
+        for line in text.lines() {
+            let line = line.trim_start();
+            if line.starts_with("import ") || line.starts_with("__include") || line.starts_with("__import") {
+                return None;
+            }
+            if let Some(rest) = line.strip_prefix("#ifdef") {
+                let name = rest.split_whitespace().next().unwrap_or("");
+                open.push(known.is_none_or(|k| k.contains(name)));
+            } else if line.starts_with("#if") {
+                open.push(true);
+            } else if line.starts_with("#else") || line.starts_with("#elif") {
+                if let Some(last) = open.last_mut() {
+                    *last = true;
+                }
+            } else if line.starts_with("#endif") {
+                open.pop();
+            }
+            let Some(rest) = line.strip_prefix("#include") else { continue };
+            if open.iter().any(|live| !live) {
+                continue;
+            }
+            let name = rest.trim().strip_prefix('"')?.split('"').next()?;
+            // Relative to the including file, then to the include directories.
+            let found = std::iter::once(file.parent()?.join(name))
+                .chain(include_dirs.iter().map(|d| d.join(name)))
+                .find(|p| p.is_file())?;
+            let found = found.canonicalize().ok()?;
+            if !files.contains(&found) {
+                files.push(found);
+            }
+        }
+        texts.push(text);
+    }
+    Some(texts)
 }
 
 /// Compile every `(source_rel, entry)` pair into `out_dir/<entry>.<ext>`.
