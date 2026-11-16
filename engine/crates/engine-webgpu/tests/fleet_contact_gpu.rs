@@ -125,14 +125,16 @@ fn owners_state_by_vehicle_is_bit_for_bit() {
         let Some([grouped, largest, hits]) = fleet_matches("a column of six", fleet, 30, 17, mask, self_split) else { return };
         assert!(grouped > 10 && largest > 4 && hits > 0, "a group past four members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
     }
+    groups_of_any_size_are_bit_for_bit();
 }
 
 /// Contact groups of any size on the fleet-wide passes (`explicit_plan::PERF_FLEET_ANY`,
 /// the kernel's fleetLevelsAny; contact-groups-design.md §8 stage 3): a column of ten, a
 /// group past eight members, against the larger groups' pass in the group's workgroup
 /// (the switch off); and the same levels taken for small groups (the second measurement
-/// word's bit 31) against the small groups' own.
-#[test]
+/// word's bit 31) against the small groups' own. (Run from the one test above, after it:
+/// two such tests side by side in one process diverge, vehicle-perf-first-principles.md
+/// §8.25's open finding.)
 fn groups_of_any_size_are_bit_for_bit() {
     use engine_exec::explicit_plan::PERF_FLEET_ANY;
     let text = generated();
@@ -150,4 +152,13 @@ fn groups_of_any_size_are_bit_for_bit() {
         let Some([grouped, largest, hits]) = fleet_matches_with("a column of six, the levels for any size", column(6, 15.0), 30, 17, PERF_FLEET_ANY, self_split, 0x8000_0000) else { return };
         assert!(grouped > 10 && largest > 4 && hits > 0, "a group formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
     }
+    // The listed triangles' throttle updates as threads over the fleet
+    // (`explicit_plan::PERF_FLEET_POST`, the kernel's fleetPost): with the levels for any
+    // size (a column of ten, against neither) and alone (a column of six, the small groups'
+    // own levels).
+    use engine_exec::explicit_plan::PERF_FLEET_POST;
+    let Some([grouped, largest, hits]) = fleet_matches("a column of ten, throttles fleet-wide", column(10, 15.0), 40, 17, PERF_FLEET_ANY | PERF_FLEET_POST, true) else { return };
+    assert!(grouped > 10 && largest > 8 && hits > 0, "a group past eight members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
+    let Some([grouped, largest, hits]) = fleet_matches("a column of six, throttles fleet-wide", column(6, 15.0), 30, 17, PERF_FLEET_POST, true) else { return };
+    assert!(grouped > 10 && largest > 4 && hits > 0, "a group formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
 }

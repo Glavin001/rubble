@@ -333,6 +333,10 @@ pub const PERF_FLEET_FRONT: u32 = 8192;
 /// contact-groups-design.md §8 stage 3), in place of the larger groups' pass on one
 /// core past [`VV_PART`] members.
 pub const PERF_FLEET_ANY: u32 = 16384;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_FRONT`]: the listed triangles' throttle updates after
+/// a contact pass's tests a thread each across the fleet (the kernel's PERF_FLEET_POST,
+/// `fleetPost`), in place of the group's workgroup with its first level.
+pub const PERF_FLEET_POST: u32 = 65536;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),

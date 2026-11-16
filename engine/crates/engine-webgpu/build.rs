@@ -755,7 +755,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     // a contact group's substeps as dispatches, the members' steps (a workgroup per
     // vehicle) and the groups' contact passes, at the frame module's four variants.
     for (tag, lanes) in [("", L256), ("_wide", L512), ("_aero", L256), ("_aero_wide", L512)] {
-        for entry in ["member", "group", "tests", "fleetfront", "fleetplan"] {
+        for entry in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost"] {
             // (The members' module without EB_VV_GROUPS: its frame step never reaches
             // contactGroup, so it binds the workgroup variables of the steps alone:
             // Metal allows 31 a kernel.)
@@ -770,6 +770,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
                 // thread kernels, and the one that writes the next dispatches' counts.
                 "fleetfront" => d.push(("EB_FLEET_FRONT", "1")),
                 "fleetplan" => d.push(("EB_FLEET_PLAN", "1")),
+                "fleetpost" => d.push(("EB_FLEET_POST", "1")),
                 // The tests across workgroups: their counters in global memory.
                 _ => d.push(("EB_VV_GLOBAL", "1")),
             }
@@ -783,6 +784,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
                 "group" => "explicit_beams_split_group",
                 "fleetfront" => "explicit_beams_fleet_front",
                 "fleetplan" => "explicit_beams_fleet_plan",
+                "fleetpost" => "explicit_beams_fleet_post",
                 _ => "explicit_beams_split_tests",
             };
             jobs.push((format!("explicit_beams_split_{entry}{tag}"), e, d));

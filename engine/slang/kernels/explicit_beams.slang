@@ -1616,6 +1616,10 @@ static const uint PERF_FLEET_FRONT = 8192u;
 // group of any size on the fleet-wide front and tests, its levels for any number of
 // owners (fleetLevelsAny), in place of the larger groups' pass (vvPass) past VV_PART.
 static const uint PERF_FLEET_ANY = 16384u;
+// perfFlags bit 65536 (explicit_plan::PERF_FLEET_POST), with the front fleet-wide: the
+// listed triangles' throttle updates a thread each in a dispatch of their own
+// (fleetPost), in place of the group's workgroup with its first level.
+static const uint PERF_FLEET_POST = 65536u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 // perfFlags bit 1024 (explicit_plan::PERF_HIT_ROLES, with PERF_HIT_FB): a two-body
 // dissipative vehicle's hits applied a (hit, role) a lane. A hit's first-pass adds, its
@@ -9746,6 +9750,13 @@ uint vvSplitPoint(uint slot, uint n) { return gP.vvSplit + (1u + slot) * gP.tota
 uint vvHitRoom(uint a, uint points) { return 2u * points; }
 uint vvSplitSlots(uint k) { return k; }
 #endif
+// The listed triangles' throttle updates already made by threads over the fleet
+// (explicit_beams_fleet.slang, PERF_FLEET_POST): the levels leave them out.
+#ifdef EB_VV_FLEET
+bool vvPostDone() { return gFl != 0u && (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_POST)) == (PERF_FLEET_FRONT | PERF_FLEET_POST); }
+#else
+bool vvPostDone() { return false; }
+#endif
 // A two-body hit found by a walk: its nodes' hit counts of this owner's turn.
 void vvSplitCount(VvTri t, uint h, uint slot)
 {
@@ -11856,7 +11867,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         // Measurement only: 524288 the levels (the hits' application).
         if ((gP.ablate & 524288u) != 0u) break;
 #endif
-        if (l == 1u && (gP.ablate & 131072u) == 0u)
+        if (l == 1u && (gP.ablate & 131072u) == 0u && !vvPostDone())
         {
             uint total = 0u;
             for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();

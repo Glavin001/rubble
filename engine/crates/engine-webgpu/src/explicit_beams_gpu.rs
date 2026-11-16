@@ -490,7 +490,7 @@ struct GroupSplit {
     /// plans, run from the first, write the second (`bind_second`: a dispatch never binds
     /// the buffer it runs from; a spare at the other binding); the groups' module zeroes
     /// both (`bind_args`).
-    fleet: std::sync::OnceLock<[wgpu::ComputePipeline; 2]>,
+    fleet: std::sync::OnceLock<[wgpu::ComputePipeline; 3]>,
     args_layout: wgpu::PipelineLayout,
     bind_args: wgpu::BindGroup,
     bind_first: wgpu::BindGroup,
@@ -516,6 +516,7 @@ const FLEET_FIRST_ARGS: u64 = 144;
 const FLEET_LARGER_ARGS: u64 = 176;
 const FLEET_FRONT_ENTRY: &str = "explicit_beams_fleet_front";
 const FLEET_PLAN_ENTRY: &str = "explicit_beams_fleet_plan";
+const FLEET_POST_ENTRY: &str = "explicit_beams_fleet_post";
 
 impl GroupSplit {
     fn new(device: &wgpu::Device, bufs: &[wgpu::Buffer; 9], aero: bool, lanes: u32, zero: bool) -> Self {
@@ -598,11 +599,12 @@ impl GroupSplit {
     }
 
     /// [the fleet-wide front's thread kernels, its plan kernel].
-    fn fleet(&self) -> &[wgpu::ComputePipeline; 2] {
+    fn fleet(&self) -> &[wgpu::ComputePipeline; 3] {
         self.fleet.get_or_init(|| {
             [
                 split_pipe(&self.device, &self.pipeline_layout, self.kind, "fleetfront", FLEET_FRONT_ENTRY),
                 split_pipe(&self.device, &self.args_layout, self.kind, "fleetplan", FLEET_PLAN_ENTRY),
+                split_pipe(&self.device, &self.pipeline_layout, self.kind, "fleetpost", FLEET_POST_ENTRY),
             ]
         })
     }
@@ -1224,6 +1226,7 @@ impl ExplicitBeamsGpu {
                 ("tests", SPLIT_TESTS_ENTRY),
                 ("fleetfront", FLEET_FRONT_ENTRY),
                 ("fleetplan", FLEET_PLAN_ENTRY),
+                ("fleetpost", FLEET_POST_ENTRY),
             ] {
                 let module = split_module(which, aero, lanes);
                 // (The groups' and the fleet plan's modules bind the fleet's arguments.)
@@ -1309,6 +1312,7 @@ impl ExplicitBeamsGpu {
             "explicit_beams_split_tests",
             "explicit_beams_split_fleetfront",
             "explicit_beams_split_fleetplan",
+            "explicit_beams_split_fleetpost",
         ];
         if !specs.iter().any(|s| s.module.starts_with(ahead[0])) {
             return;
@@ -3913,7 +3917,7 @@ impl ExplicitBeamsGpu {
         // are compiled; a browser host's async compiles.)
         let front = ok && self.planner.perf_flags() & plan::PERF_FLEET_STATE != 0 && {
             let (aero, _, lanes) = self.module_kind;
-            ["fleetfront", "fleetplan"].iter().all(|w| crate::pipeline_ready(split_module(w, aero, lanes)))
+            ["fleetfront", "fleetplan", "fleetpost"].iter().all(|w| crate::pipeline_ready(split_module(w, aero, lanes)))
         };
         let mut flags = self.planner.perf_flags();
         if !ok {
@@ -3921,7 +3925,7 @@ impl ExplicitBeamsGpu {
         }
         if !front {
             // (Groups of any size on the fleet-wide passes: only with the front there.)
-            flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY);
+            flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY | plan::PERF_FLEET_POST);
         }
         flags
     }
@@ -4045,6 +4049,10 @@ impl ExplicitBeamsGpu {
                 out.push(GroupOp::Fleet { copy: ct, kernel: 2, args: FLEET_WALK_ARGS, from: 2, part: 6 });
                 out.push(GroupOp::Fleet { copy: cl, kernel: 1, args: FLEET_ONE_ARGS, from: 1, part: 7 });
                 out.push(GroupOp::Fleet { copy: cl, kernel: 2, args: FLEET_PAIRS_ARGS, from: 2, part: 8 });
+                // (The listed triangles' throttle updates, a thread each: the walk's size.)
+                if self.fleet_flags() & plan::PERF_FLEET_POST != 0 {
+                    out.push(GroupOp::Fleet { copy: cl, kernel: 3, args: FLEET_WALK_ARGS, from: 2, part: 9 });
+                }
                 out.push(GroupOp::Group { copy: cl, tests: false, args: SPLIT_GROUP_ARGS, part: 4 });
             } else if self.group_split_tests {
                 // The front, the tests across workgroups (the walk, then the listed
@@ -4077,6 +4085,7 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(match kernel {
                     0 => &g.fleet()[0],
                     1 => &g.fleet()[1],
+                    3 => &g.fleet()[2],
                     _ => &g.tests,
                 });
                 let bind = match (kernel, from) {
@@ -4572,7 +4581,8 @@ impl GroupOp {
             GroupOp::Fleet { part: 5, .. } => "explicit fleet listed prefix",
             GroupOp::Fleet { part: 6, .. } => "explicit fleet walk",
             GroupOp::Fleet { part: 7, .. } => "explicit fleet pairs' prefix",
-            GroupOp::Fleet { .. } => "explicit fleet pairs",
+            GroupOp::Fleet { part: 8, .. } => "explicit fleet pairs",
+            GroupOp::Fleet { .. } => "explicit fleet throttles",
             GroupOp::Member(_) => "explicit split member",
             GroupOp::SelfMember(_) => "explicit self step",
             GroupOp::SelfWalk { .. } => "explicit self walk",

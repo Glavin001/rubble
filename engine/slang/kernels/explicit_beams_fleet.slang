@@ -546,32 +546,10 @@ void fleetTests(uint g, uint part, uint lane, uint word)
 // level is one past every earlier owner with hits whose touched vehicles meet its own.
 
 uint flHits(uint v) { return uint(gAcc[flOwn(v) + FL_HITS].load()); }
+// An owner's hits past which a small group keeps its own levels (the hits' order by
+// buckets; by scan it is the list's length squared).
+static const uint FL_SCAN_MOST = 128u;
 uint flLevelAt(uint v) { return flVehAt(5u, v); }
-
-// Owner v's level from the others' as they stand (0 without hits): one past the highest
-// level of an earlier owner that is its partner, or a partner of one of its partners.
-uint flLevelOf(uint v)
-{
-    if (flHits(v) == 0u) return 0u;
-    uint l = 1u;
-    uint e1 = gNext[flAdjFirst(v + 1u)];
-    for (uint e = gNext[flAdjFirst(v)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
-    {
-        uint d = gNext[flAdjAt(e)];
-        if ((gNext[flBitsAt(d)] & 5u) != 1u) continue;
-        uint u = flPartner(d);
-        if (u < v) l = max(l, gNext[flLevelAt(u)] != 0u ? gNext[flLevelAt(u)] + 1u : 0u);
-        uint f1 = gNext[flAdjFirst(u + 1u)];
-        for (uint f = gNext[flAdjFirst(u)], fStop = EB_END(f, f1, 1u); f < fStop; f++)
-        {
-            uint d2 = gNext[flAdjAt(f)];
-            if ((gNext[flBitsAt(d2)] & 5u) != 1u) continue;
-            uint w = flPartner(d2);
-            if (w < v) l = max(l, gNext[flLevelAt(w)] != 0u ? gNext[flLevelAt(w)] + 1u : 0u);
-        }
-    }
-    return l;
-}
 
 // The levels of a group of k owners (any k up to VV_MAX_GROUP) after the tests'
 // dispatches, then the pass's end for its owners. Every lane of the group's workgroup.
@@ -592,20 +570,50 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
         gFl = 2u;
         gFlOff = off;
         gVvTag = 0u;
+        // The owners with hits, listed (gsOff, free in this dispatch; H of them, usually a
+        // few of the group's): what follows visits those alone. Every lane walking every
+        // owner for each phase was the pass's cost in a large group (32 owners: a
+        // millisecond a substep with no hit at all).
+        if (lane == 0u) gsCount[0].store(0u);
+        sync();
+        for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
+        {
+            if (flHits(vvMember(off, m)) != 0u) gsOff[gsCount[0].add(1u)] = m;
+        }
+        sync();
+        uint H = splitUniform(lane, lane == 0u ? gsCount[0].load() : 0u);
+        // The longest of their hit lists: a lane past it has no hit in any phase and
+        // walks no owner (every lane, when a list overflowed: that owner walks again).
+        uint most = 0u;
+        if (lane == 0u)
+        {
+            for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++)
+            {
+                uint n = flHits(vvMember(off, gsOff[j]));
+                most = n > vvHitRoom(gsOff[j], 0u) ? 0xFFFFFFFFu : max(most, n);
+            }
+        }
+        most = splitUniform(lane, most);
+        uint Hl = lane < most ? H : 0u;
         // The two-body pass's forces at the pass's start, for the listed hits' nodes
         // (vvPassSmallLevels' snapshot); every member's nodes when a list overflowed.
-        if (gP.vvSplit != 0u)
+        // (Measurement only, time: the parameter word's bits as vvPassSmallLevels': 65536
+        // the snapshot, 32768 the hits' application, 16384 the residual phases; 262144 the
+        // levels' rounds. The results are then meaningless.)
+        if (gP.vvSplit != 0u && (gP.ablate & 65536u) == 0u)
         {
             bool every = false;
-            for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+            for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++)
             {
+                uint a = gsOff[j];
                 if (flHits(vvMember(off, a)) > vvHitRoom(a, 0u)) every = true;
             }
             if (every) vvSnapshot(off, k, parity, lane);
             else
             {
-                for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+                for (uint j = 0u, jStop = EB_END(j, Hl, 1u); j < jStop; j++)
                 {
+                    uint a = gsOff[j];
                     uint base = vvHitSmall(0u, 0u, a, 0u);
                     uint n = flHits(vvMember(off, a));
                     for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
@@ -622,24 +630,57 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
             sync();
             if (!every) gVvTag = tag;
         }
-        // The owners' levels: from 1 for an owner with hits, raised until none changes
-        // (a lane an owner; a round's reads may be this round's or the last's: either is
-        // at most the level, and a round without a change has every owner's rule met).
+        // The owners' levels. Owner b's is one past the highest of an earlier owner c with
+        // hits whose touched vehicles (itself and its partners) meet b's partners
+        // (vvLevelsSet's rule: c is b's partner, or they share one). A group has at most
+        // 64 members, so an owner's partners are two words of bits by member (gsPart, free
+        // here: its partners, then those with itself), and a round is a lane an owner with
+        // hits over the others with hits: raised from 1 until none changes (a round's
+        // reads may be this round's or the last's; either is at most the level, and a
+        // round without a change has every owner's rule met).
         for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
         {
             uint v = vvMember(off, m);
             gNext[flLevelAt(v)] = flHits(v) != 0u ? 1u : 0u;
         }
+        for (uint j = lane, jStop = EB_END(j, H, LANES); j < jStop; j += LANES)
+        {
+            uint m = gsOff[j];
+            uint v = vvMember(off, m);
+            uint2 p = uint2(0u, 0u);
+            uint e1 = gNext[flAdjFirst(v + 1u)];
+            for (uint e = gNext[flAdjFirst(v)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
+            {
+                uint d = gNext[flAdjAt(e)];
+                if ((gNext[flBitsAt(d)] & 5u) != 1u) continue;
+                uint r = gMisc[vvRec(flPartner(d), VV_MEMBER)].x;
+                if (r < 32u) p.x |= 1u << r;
+                else if (r < 64u) p.y |= 1u << (r - 32u);
+            }
+            gsPart[4u * j] = p.x;
+            gsPart[4u * j + 1u] = p.y;
+            gsPart[4u * j + 2u] = p.x | (m < 32u ? 1u << m : 0u);
+            gsPart[4u * j + 3u] = p.y | (m >= 32u ? 1u << (m - 32u) : 0u);
+        }
         sync();
         for (uint round = 0u; round < EB_MAX_MEMBERS + 2u; round++)
         {
+            if (H == 0u || (gP.ablate & 262144u) != 0u) break;
             if (lane == 0u) gsUniformLanes = 0u;
             sync();
             bool changed = false;
-            for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
+            for (uint j = lane, jStop = EB_END(j, H, LANES); j < jStop; j += LANES)
             {
+                uint m = gsOff[j];
                 uint v = vvMember(off, m);
-                uint l = flLevelOf(v);
+                uint l = 1u;
+                for (uint c = 0u, cStop = EB_END(c, H, 1u); c < cStop; c++)
+                {
+                    uint mc = gsOff[c];
+                    if (mc >= m) continue;
+                    if ((gsPart[4u * j] & gsPart[4u * c + 2u]) == 0u && (gsPart[4u * j + 1u] & gsPart[4u * c + 3u]) == 0u) continue;
+                    l = max(l, gNext[flLevelAt(vvMember(off, mc))] + 1u);
+                }
                 if (l != gNext[flLevelAt(v)])
                 {
                     gNext[flLevelAt(v)] = l;
@@ -663,7 +704,7 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
         for (uint l = 1u, lGuard = 0u; l <= top; l++)
         {
             EB_PASS_UNIFORM(lGuard, EB_MAX_MEMBERS + 1u);
-            if (l == 1u)
+            if (l == 1u && !flPostOn())
             {
                 for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
                 {
@@ -680,10 +721,11 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
                     }
                 }
             }
-            for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+            for (uint j = 0u, jStop = EB_END(j, Hl, 1u); j < jStop; j++)
             {
+                uint a = gsOff[j];
                 uint va = vvMember(off, a);
-                if (gNext[flLevelAt(va)] != l) continue;
+                if (gNext[flLevelAt(va)] != l || (gP.ablate & 32768u) != 0u) continue;
                 float range = asfloat(gStatic[va * 4u + 3u].z);
                 uint hits = flHits(va);
                 if (hits <= vvHitRoom(a, 0u))
@@ -703,12 +745,13 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
                 }
             }
             sync();
-            if (gP.vvSplit != 0u)
+            if (gP.vvSplit != 0u && (gP.ablate & 16384u) == 0u)
             {
                 for (uint ph = 0u; ph < 3u; ph++)
                 {
-                    for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+                    for (uint j = 0u, jStop = EB_END(j, Hl, 1u); j < jStop; j++)
                     {
+                        uint a = gsOff[j];
                         uint va = vvMember(off, a);
                         if (gNext[flLevelAt(va)] != l) continue;
                         uint hits = flHits(va);
@@ -724,8 +767,9 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
         {
             uint anyHits = 0u;
             bool listedAll = true;
-            for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+            for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++)
             {
+                uint a = gsOff[j];
                 uint n = flHits(vvMember(off, a));
                 anyHits += n;
                 if (n > vvHitRoom(a, 0u)) listedAll = false;
@@ -733,8 +777,9 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
             if (anyHits > 0u && !listedAll) vvSplitClear(off, k, vvRoom(), lane);
             else if (anyHits > 0u)
             {
-                for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+                for (uint j = 0u, jStop = EB_END(j, Hl, 1u); j < jStop; j++)
                 {
+                    uint a = gsOff[j];
                     uint base = vvHitSmall(0u, 0u, a, 0u);
                     uint n = flHits(vvMember(off, a));
                     for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
@@ -755,6 +800,38 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
     for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES) flOwnerEnd(vvMember(off, m));
     flArgsZero(lane);
 }
+
+// --- Stage 3b: the levels' work that needs no order, as threads over the fleet
+// (PERF_FLEET_POST) ---
+// Every listed triangle's throttle update (vvThrottleEnd: its marks are final once the
+// tests are done) and a later owner's reset ran in the group's workgroup with its first
+// level: 528 triangles a car on one core every substep, hits or not (32 cars: 31 to 68 ms
+// a frame in the levels with few hits). They read and write the triangle's own record and
+// marks and nothing a hit touches, so here they are a thread a listed triangle, in a
+// dispatch after the listed pairs' tests and before the groups' levels, which then leave
+// them out (flPostOn). Sized by the walk's dispatch (at least a thread a listed triangle).
+bool flPostOn() { return (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_POST)) == (PERF_FLEET_FRONT | PERF_FLEET_POST); }
+
+#ifdef EB_FLEET_POST
+void fleetPost(uint tid)
+{
+    uint nv = gP.vehicles;
+    if (tid >= gNext[flPrefixAt(1u, nv)]) return;
+    uint va = flFind(1u, tid);
+    uint triOff = gStatic[va * 4u + 1u].x;
+    uint gt = triOff + gNext[vvTestedAt(triOff + tid - gNext[flPrefixAt(1u, va)])];
+    vvThrottleEnd(gt);
+    if (gAcc[flOwn(va) + FL_FIX].load() != 0) gMisc[gP.vvTri + gt].x = 0u;
+}
+
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_fleet_post(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    fleetPost(gid.x * LANES + lid.x);
+    ebLoopCapFlush();
+}
+#endif
 
 // --- Stage 2: the front as fleet-wide dispatches (contact-groups-design.md §8.4) ---
 // Each a dispatch over every pair, vehicle or element, its phase the step word's (three a
