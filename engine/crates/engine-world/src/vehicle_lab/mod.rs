@@ -88,6 +88,10 @@ pub struct LabOptions {
     /// surface contact keep a workgroup a car. Live (`{ wide, wideList }`).
     pub wide: bool,
     pub wide_list: bool,
+    /// With both: the coupling's and the wheels' part of a step on the list and hits
+    /// kernels' lanes, no dispatch of their own (`set_wide_fused`; the same results).
+    /// Live (`{ wideFused }`).
+    pub wide_fused: bool,
     /// Small debris retired after its time to live (`DebrisTtl`; None: never, the
     /// solver's behaviour without the setting). On in the lab: 5 s, at most 10 kg and 40
     /// nodes ([`LAB_DEBRIS_TTL`]: what the mountain sheds). Live
@@ -120,6 +124,7 @@ impl Default for LabOptions {
             self_split: false,
             wide: true,
             wide_list: true,
+            wide_fused: true,
             debris_ttl: Some(LAB_DEBRIS_TTL),
             parked: false,
             cars: 1,
@@ -244,6 +249,7 @@ impl LabOptions {
                 .unwrap_or(d.self_split),
             wide: v.get("wide").and_then(Value::as_bool).unwrap_or(d.wide),
             wide_list: v.get("wideList").and_then(Value::as_bool).unwrap_or(d.wide_list),
+            wide_fused: v.get("wideFused").and_then(Value::as_bool).unwrap_or(d.wide_fused),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
                 _ => d.debris_ttl,
@@ -2239,6 +2245,7 @@ impl Lab {
             x.set_piece_windows(opts.piece_windows);
             x.set_self_split(opts.self_split);
             x.set_wide_list(opts.wide_list);
+            x.set_wide_fused(opts.wide_fused);
             x.set_wide(opts.wide);
         }
         let x = world.explicit_vehicles().expect("vehicles");
@@ -2464,12 +2471,18 @@ impl Lab {
         // a step) and, with them, the reused pair list (set_wide_list); the same results
         // bit for bit. Frames with car-to-car contact, sleep or surface contact keep a
         // workgroup a car. Returns whether the wide passes can run this fleet.
-        if cmd.get("wide").is_some() || cmd.get("wideList").is_some() {
+        if cmd.get("wide").is_some() || cmd.get("wideList").is_some() || cmd.get("wideFused").is_some() {
             let mut got = false;
             if let Some(x) = world.explicit_vehicles_mut() {
                 if let Some(on) = cmd.get("wideList").and_then(Value::as_bool) {
                     self.bench.opts.wide_list = on;
                     x.set_wide_list(on);
+                }
+                // (wideFused: the coupling's and wheels' work on the list and hits
+                // kernels' lanes, no dispatch of their own; set_wide_fused.)
+                if let Some(on) = cmd.get("wideFused").and_then(Value::as_bool) {
+                    self.bench.opts.wide_fused = on;
+                    x.set_wide_fused(on);
                 }
                 got = match cmd.get("wide").and_then(Value::as_bool) {
                     Some(on) => {

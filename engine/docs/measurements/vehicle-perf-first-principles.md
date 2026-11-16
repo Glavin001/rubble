@@ -997,3 +997,32 @@ engine-world `explicit_vehicles` 11, `vehicle_lab_reset` 3, `vehicle_lab_piece_w
 Natively the wide schedule and the self split frame are within 2 % of each other frame for
 frame (wall, back to back: 4.33–6.35 against 4.39–6.20 ms); the whole run's worst step is
 6.14 against 6.55. The gain is Chrome's.
+
+### 8.9 The aux pass's work on the list and hits kernels' lanes (lab default)
+
+The aux dispatch a step existed for order only: step s + 1's coupling phases and its
+wheels' rays and bars read what step s's node phase left, and its tyres what step s's hits
+left. With `set_wide_fused` (`LabOptions::wide_fused`, the page's "coupling and wheels in
+those passes", live; `vehicle_lab --wide-fused 0`) they run on the list kernel's lanes
+beside step s's list phases (the coupling's two folded phases on the shapes' and nodes'
+lanes, the rays and bars on the top lanes) and at the end of step s's `wide_hits` (the
+tyres). The aux dispatch remains for step 0 and the coupling's end.
+
+Bit for bit against the aux dispatch (`--ab-switch fused`) at t 0.5, 2.5, 4, 6, 8, 20 s,
+and the whole wide default against the self split frame at t 0.5, 2.5, 4, 6, 8, 10, 20,
+30 s (4.15–6.09 against 4.40–6.18 ms a frame). Natively 0.25–0.47 ms a frame faster than
+the aux dispatch (3.97 / 4.25 / 5.60 / 5.95 / 5.85 / 6.11 against 4.24 / 4.49 / 6.07 /
+6.28 / 6.16 / 6.36); Chrome 5.08–5.10 / 5.50 / 6.05–6.23 against 5.23 / 5.71 / 6.83
+(median / p95 / worst). Suites green with it on (`explicit_loop_cap`,
+`explicit_beams_bitwise`, `explicit_plan_modules`, `explicit_vehicles`, `vehicle_lab_reset`,
+`vehicle_lab_piece_windows`, `explicit_drive_world`).
+
+**One car, whole run, vehicles' GPU ms a step (median / p95 / worst):**
+
+| | Start of this work | Now |
+|---|---|---|
+| Native | 6.71 / 6.94 / 7.37 | 5.57 / 5.76 / 6.00 |
+| Chrome | 6.81–6.87 / 7.23–8.76 / 7.77–12.29 | 5.08 / 5.49 / 6.05–6.23 |
+
+Per pass at rest now (timed apart): the list kernel with the walk and pairs 2.6, hits with
+the tyres 2.4, nodes 0.9, beams 0.5.

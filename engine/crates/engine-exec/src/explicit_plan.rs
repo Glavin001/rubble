@@ -210,6 +210,10 @@ pub const PERF_DRIVE_AHEAD: u32 = 2;
 /// reused pair list (`ExplicitBeamsGpu::set_wide_list`): the wide passes leave the
 /// triangles' throttles and the grid to the list kernel.
 pub const PERF_WIDE_LIST: u32 = 16;
+/// [`W_PERF_FLAGS`], with [`PERF_WIDE_LIST`] (the kernel's PERF_WIDE_FUSED): the aux pass's
+/// work for steps 1.. on the list and hits kernels' lanes; the host leaves those aux
+/// dispatches out.
+pub const PERF_WIDE_FUSED: u32 = 32;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7); `RUBBLE_PERF_FLAGS=<mask>` overrides
 /// (a measurement; 0: every switch off).
@@ -624,7 +628,7 @@ const WIDE_CENTRED_BEAMS: usize = 8;
 const WIDE_CENTRED_NODES: usize = 9;
 /// The coupling's and the raycast wheels' part of a step (a workgroup a vehicle), and the
 /// coupling's end after the last step.
-const WIDE_AUX: usize = 10;
+pub const WIDE_AUX: usize = 10;
 /// The Params word of the centred damping's Δv region (nonzero: some vehicle has it).
 const W_CENTRED_DV: usize = 84;
 

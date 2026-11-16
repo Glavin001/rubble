@@ -1558,6 +1558,12 @@ static const uint PERF_DRIVE_AHEAD = 2u;
 // reused pair list (explicit_plan::PERF_WIDE_LIST): the wide passes leave the triangles'
 // throttles, the grid and its counts' words to explicit_beams_wide_list.
 static const uint PERF_WIDE_LIST = 16u;
+// perfFlags bit 32, with it (explicit_plan::PERF_WIDE_FUSED): no aux dispatch for steps
+// 1..: step s + 1's coupling phases and its wheels' rays and bars run on the list kernel's
+// lanes beside step s's list phases, its tyres at the end of step s's wide_hits (all of
+// them read what step s's node phase and hits left, as the aux dispatch before step
+// s + 1's nodes did).
+static const uint PERF_WIDE_FUSED = 32u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 
 // The break exception (spec §2, step 4: an end on a collision triangle with fewer
@@ -7436,6 +7442,7 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     uint parity = vehicleStep(v) & 1u;
     if (lane == 0u)
     {
+        driveBegin();
         resolvePending(v, parity);
         gsUniformHits = uint(gAcc[hitAcc(v)].load()) > 0u ? 1u : 0u;
         gsUniformOpen = 0u;
@@ -7458,8 +7465,20 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     }
     sync();
     uint on = gsUniformHits;
+    uint driveOn = gsUniformDrive;
     if (on != 0u)
         selfApply(v, true, lane, 256u, lane, vehicleOrigin(v), x.range, x.beamOff, x.groupOff, x.groupCount, parity);
+    // The next step's tyres (PERF_WIDE_FUSED), after this step's hits: their hubs'
+    // accumulators are final (its rays and bars ran beside this step's list phases).
+    if ((gP.perfFlags & PERF_WIDE_FUSED) != 0u && wideStep() + 1u < gP.steps && driveOn != 0u)
+    {
+        if (on != 0u) sync();
+        DrvCtx drvC;
+        bool drvHas;
+        bool drvApart;
+        driveAheadCtx(v, 255u - lane, drvC, drvHas, drvApart);
+        driveAheadPart(drvC, drvHas, drvApart, 255u - lane, 2u, vehicleStep(v) + 1u);
+    }
     ebLoopCapFlush();
 }
 
@@ -7575,6 +7594,12 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         gsTestedCount[1].store(0u);
         gsUniformLanes = 0u;
         if (s == 0u) pairReuseBegin();
+        // (The next step's coupling and wheels here: PERF_WIDE_FUSED.)
+        coupleBegin();
+        driveBegin();
+        cplGsClear();
+        cplGsAdd(0u, v, 0u, 0u);
+        cplFoldMark(v);
     }
     if (s > 0u) soloStepLoad(v, lane);
     sync();
@@ -7582,6 +7607,28 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     {
         pairReuseEnd(v, lane);
         return ebLoopCapFlush();
+    }
+    // Step s + 1's coupling and wheels beside this step's list phases (uniform).
+    bool ahead = (gP.perfFlags & PERF_WIDE_FUSED) != 0u && s + 1u < gP.steps;
+    uint coupleOn = gsUniformCouple;
+    uint driveOn = gsUniformDrive;
+    bool aheadFold = ahead && (coupleOn & CPL_FOLD_FRAME) != 0u;
+    // (A coupling that cannot fold: its four phases here, before the list's.)
+    if (ahead && !aheadFold) coupleStep(v, lane, s + 1u, coupleOn);
+    bool aheadDrive = ahead && driveOn != 0u;
+    bool cBody = false;
+    float4 cC0 = float4(0.0, 0.0, 0.0, 0.0);
+    float4 cQ = float4(0.0, 0.0, 0.0, 1.0);
+    float4 cC2 = float4(0.0, 0.0, 0.0, 0.0);
+    float3 cW = float3(0.0, 0.0, 0.0);
+    DrvCtx drvC = (DrvCtx)0;
+    bool drvHas = false;
+    bool drvApart = false;
+    if (aheadFold) cplFoldB(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+    if (aheadDrive)
+    {
+        driveAheadCtx(v, LANES - 1u - lane, drvC, drvHas, drvApart);
+        driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 0u, misc.w + s + 1u);
     }
     pairReuseTrack(nodeOff, nodeCount, lane);
     if (candCount > 0u)
@@ -7601,6 +7648,8 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         gsUniformOpen = 0u;
     }
     sync();
+    if (aheadFold) cplFoldC(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+    if (aheadDrive) driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 1u, misc.w + s + 1u);
     if (lane == 0u)
     {
         gsTestedCount[parity ^ 1u].store(0u);

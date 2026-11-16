@@ -111,6 +111,9 @@ pub struct ExplicitBeamsGpu {
     /// The wide passes with the reused pair list ([`Self::set_wide_list`]), and the steps
     /// of the frame being encoded when it runs so (0: not).
     wide_list: bool,
+    /// With the list: the aux pass's work on the list and hits kernels' lanes
+    /// ([`Self::set_wide_fused`]).
+    wide_fused: bool,
     wide_list_frame: std::cell::Cell<u32>,
     /// The last frame ran self-collision split with vehicle contact (on the split group
     /// path's dispatches: [`ExplicitBeamsGpu::dispatch_group_split`]).
@@ -1293,6 +1296,7 @@ impl ExplicitBeamsGpu {
             self_split_pipes: std::sync::OnceLock::new(),
             self_split_frame: std::cell::Cell::new(0),
             wide_list: std::env::var("RUBBLE_WIDE_LIST").as_deref() == Ok("1"),
+            wide_fused: std::env::var("RUBBLE_WIDE_FUSED").as_deref() == Ok("1"),
             wide_list_frame: std::cell::Cell::new(0),
             self_split_vv: std::cell::Cell::new(false),
             self_split_skip: 0,
@@ -2702,6 +2706,13 @@ impl ExplicitBeamsGpu {
                 if kind == plan::WIDE_TRIS {
                     return;
                 }
+                // (PERF_WIDE_FUSED: steps 1..'s coupling and wheels ran on the step
+                // before's list and hits kernels.)
+                if let Cmd::Dispatch { param_copy, .. } = *cmd {
+                    if kind == plan::WIDE_AUX && self.wide_fused && param_copy >= 1 && param_copy < wl {
+                        return;
+                    }
+                }
                 if kind == plan::WIDE_END {
                     self.dispatch_self_one(pass, SelfDispatch::List { copy: wl, groups: self.planner.vehicles() });
                 }
@@ -3260,7 +3271,8 @@ impl ExplicitBeamsGpu {
             let at = 4 * plan::W_PERF_FLAGS;
             let flags = self.planner.words[plan::W_PERF_FLAGS];
             for k in 0..=steps as usize {
-                bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(flags | plan::PERF_WIDE_LIST).to_le_bytes());
+                let fused = if self.wide_fused { plan::PERF_WIDE_FUSED } else { 0 };
+                bytes[stride * k + at..stride * k + at + 4].copy_from_slice(&(flags | plan::PERF_WIDE_LIST | fused).to_le_bytes());
             }
             self.queue.write_buffer(&self.params, 0, &bytes);
             return cmds;
@@ -3319,6 +3331,14 @@ impl ExplicitBeamsGpu {
     /// list, walk and pairs kernels in the wide schedule, the same results bit for bit.
     pub fn set_wide_list(&mut self, on: bool) {
         self.wide_list = on;
+    }
+
+    /// With the wide passes' pair list: step s + 1's coupling phases and wheels' rays and
+    /// bars beside step s's list phases, its tyres after step s's hits, in place of an
+    /// aux dispatch a step (on) or that dispatch (off, the default; `RUBBLE_WIDE_FUSED=1`
+    /// on). The same results bit for bit.
+    pub fn set_wide_fused(&mut self, on: bool) {
+        self.wide_fused = on;
     }
 
     /// Self-collision's listed pairs across workgroups (selfcol-design.md) on, or tested

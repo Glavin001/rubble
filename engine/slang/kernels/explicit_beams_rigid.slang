@@ -1144,25 +1144,30 @@ void cplShapeFolded(uint v, uint k, uint shapes, bool stepped)
 
 // The folded step of vehicle v (every lane, uniform: cplFoldOn): phases B and C, the
 // barrier between and after.
-void cplStepFolded(uint v, uint lane, uint lanes, uint s)
+// cplStepFolded's two phases as calls (the caller's barrier between and after): B, whose
+// body lane keeps its integrated record in registers for C.
+void cplFoldB(uint v, uint lane, uint lanes, uint s, out bool body, out float4 c0, out float4 q, out float4 c2,
+              out float3 w)
 {
     uint4 hdr = cplVeh(v);
     bool stepped = s > 0u;
-    // B
     for (uint k = lane, kStop = EB_END(k, hdr.y, lanes); k < kStop; k += lanes) cplShapeFolded(v, k, hdr.y, stepped);
     cplListShapes(v, lane, lanes, s);
-    bool body = stepped && lane < hdr.x;
-    float4 c0 = float4(0.0, 0.0, 0.0, 0.0);
-    float4 q = float4(0.0, 0.0, 0.0, 1.0);
-    float4 c2 = float4(0.0, 0.0, 0.0, 0.0);
-    float3 w = float3(0.0, 0.0, 0.0);
+    body = stepped && lane < hdr.x;
+    c0 = float4(0.0, 0.0, 0.0, 0.0);
+    q = float4(0.0, 0.0, 0.0, 1.0);
+    c2 = float4(0.0, 0.0, 0.0, 0.0);
+    w = float3(0.0, 0.0, 0.0);
     if (body)
     {
         cplBodyStepped(v, lane, hdr.y, c0, q, c2, w);
         gAcc[cplAcc(v) + lane].store(0);
     }
-    sync();
-    // C
+}
+void cplFoldC(uint v, uint lane, uint lanes, uint s, bool body, float4 c0, float4 q, float4 c2, float3 w)
+{
+    uint4 hdr = cplVeh(v);
+    bool stepped = s > 0u;
     if (body)
     {
         uint b = cplBody(v, lane);
@@ -1197,6 +1202,17 @@ void cplStepFolded(uint v, uint lane, uint lanes, uint s)
         }
     }
     cplCountListedGr(v, lane, lanes, s, uint2(0u, 0u));
+}
+void cplStepFolded(uint v, uint lane, uint lanes, uint s)
+{
+    bool body;
+    float4 c0;
+    float4 q;
+    float4 c2;
+    float3 w;
+    cplFoldB(v, lane, lanes, s, body, c0, q, c2, w);
+    sync();
+    cplFoldC(v, lane, lanes, s, body, c0, q, c2, w);
     sync();
 }
 
