@@ -177,6 +177,9 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 /// step word) plus the frame's end, at the uniform offset alignment.
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
+/// More copies past those for the levels across the GPU ([`PERF_FLEET_LEVELS`]): four a
+/// level slot and three more, after a frame's steps' copies.
+pub const PARAM_LEVEL_COPIES: u32 = 4 * FLEET_LEVEL_MAX as u32 + 3;
 /// Words of the kernel's Params (word 87 the parking brakes' base, word 88 the loop
 /// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 the pair
 /// list's build records, 92 its margin ([`W_PAIR_REUSE`]), 93 its backoff
@@ -348,6 +351,12 @@ pub const PERF_FLEET_POST: u32 = 65536;
 pub const PERF_FLEET_LEVELS: u32 = 524288;
 /// The kernel's LV_MAX: level slots at most (the levels' dispatches a step: four a slot).
 pub const FLEET_LEVEL_MAX: usize = 16;
+/// The level slots of a frame travel in the levels' parameter copies' perf flags, at this
+/// shift (the kernel's LV_SLOTS_SHIFT; 0: the levels are found and reported, not spread).
+pub const FLEET_LEVEL_SLOTS_SHIFT: u32 = 24;
+/// The kernel's LV_CACHE: a step's hits on the levels across the GPU whose staged geometry
+/// the residual phases keep (past it they take it again: the same values).
+pub const FLEET_LEVEL_CACHE: usize = 4096;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
@@ -2461,7 +2470,9 @@ impl ExplicitUpload {
         };
         let vv_fleet_box = if nv > 1 {
             let at = beams.len() as u32;
-            beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * nv));
+            // (Then the levels across the GPU's staged hits: FLEET_LEVEL_CACHE hits, four
+            // records each; explicit_beams_fleet_levels.slang flLvCache.)
+            beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * nv + 4 * FLEET_LEVEL_CACHE));
             at
         } else {
             0
@@ -2816,9 +2827,9 @@ impl ExplicitUpload {
     }
 }
 
-/// Bytes of the parameter buffer ([`PARAM_COPIES`] copies).
+/// Bytes of the parameter buffer ([`PARAM_COPIES`] copies, then [`PARAM_LEVEL_COPIES`]).
 pub const fn params_bytes() -> u64 {
-    PARAM_STRIDE * PARAM_COPIES as u64
+    PARAM_STRIDE * (PARAM_COPIES + PARAM_LEVEL_COPIES) as u64
 }
 
 // --- Per-frame planning.

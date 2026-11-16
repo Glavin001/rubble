@@ -43,6 +43,15 @@ bool flLevelsOn()
     uint m = PERF_FLEET_STATE | PERF_FLEET_FRONT | PERF_FLEET_ANY | PERF_FLEET_POST | PERF_FLEET_LEVELS;
     return (gP.perfFlags & m) == m;
 }
+// The frame's level slots (the host's, in the copies' perf flags past the switches:
+// explicit_plan::FLEET_LEVEL_SLOTS_SHIFT). 0: the levels' dispatches are not in this
+// frame; the groups find and report their levels (fleetLevelsDefer) and keep them.
+static const uint LV_SLOTS_SHIFT = 24u;
+uint lvSlots() { return (gP.perfFlags >> LV_SLOTS_SHIFT) & 31u; }
+// gAcc's fleet counters 0 and 1 (flCtl): the frame's highest level of a group and its most
+// owners with hits past its levels (some level holds two or more: the levels' dispatches
+// then run owners side by side), maxima the host reads back and zeroes each frame.
+static const uint LV_REPORT = 0u;
 // gNext after the fleet's counters (explicit_plan::fleet_next_words): per vehicle its mark
 // (LV_MARK | the step: its group's levels are the fleet's this step; 0 not), the marked
 // owners with hits in slot order, the hits' prefix in that order (one more), then per slot
@@ -161,7 +170,15 @@ bool fleetLevelsDefer(uint k, uint off, uint lane, uint s, bool allowed)
                 sync();
                 if (go == 0u) break;
             }
-            ok = 1u;
+            // The report: this group's highest level and its owners past it.
+            if (lane == 0u)
+            {
+                uint top = 0u;
+                for (uint j = 0u, jStop = EB_END(j, H, 1u); j < jStop; j++) top = max(top, gNext[flLevelAt(vvMember(off, gsOff[j]))]);
+                gAcc[flCtl(LV_REPORT)].max(int(top));
+                gAcc[flCtl(LV_REPORT + 1u)].max(int(H - min(top, H)));
+            }
+            ok = lvSlots() != 0u ? 1u : 0u;
         }
     }
     for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES)
@@ -457,7 +474,75 @@ void fleetLevelsWide(uint tid, uint word)
     if (phase == LV_APPLY)
         vvApplyOrdered(va, base, n, range, parity, i, n, 0u);
     else if (gP.vvSplit != 0u)
-        vvResidualPhase(va, base, n, range, parity, i, n, 0u, phase - 1u);
+        lvResidual(va, base, i, range, parity, phase - 1u, g);
+}
+
+// gBeams after the owners' boxes (explicit_plan's FLEET_LEVEL_CACHE): four records a hit of
+// the step, at its place g in slot order: (alpha, beta, gamma, staged), (nn), (v), (f1).
+static const uint LV_CACHE = 4096u;
+uint flLvCache(uint g) { return gP.vvFleetBox + 4u * gP.vehicles + 4u * g; }
+
+// vvResidualPhase for hit i of owner va (place g) alone. Its staged geometry and first-pass
+// force (vvStagedHit) read only what no phase of the pass writes (positions, velocities,
+// the snapshot, the two-body counts, the clip state), so phase 0 keeps them and phases 1
+// and 2 load them: the same values (past LV_CACHE hits a step, each phase takes them).
+void lvResidual(uint va, uint base, uint i, float r, uint parity, uint phase, uint g)
+{
+    if (gP.selfSplit == 0u || gP.vvSplit == 0u) return;
+    uint gt = gNext[base + 2u * i];
+    uint h = gNext[base + 2u * i + 1u];
+    uint vh = gStatic[gP.nodeInfoBase + h].w;
+    uint4 tn = gStatic[gP.triBase + gt];
+    bool kept = gNext[flLvHit(0u)] <= LV_CACHE;
+    float alpha;
+    float beta;
+    float gamma;
+    float3 nn;
+    float3 v;
+    float3 f1;
+    if (phase == 0u || !kept)
+    {
+        VvTri t = vvTriangle(gt, asfloat(gMisc[va].xyz), r);
+        bool staged = vvStagedHit(t, gt, h, nf3(asfloat(gMisc[vh].xyz) + gNodes[h * 3u].xyz), vh, r, parity, 0u, alpha, beta,
+                                  gamma, nn, v, f1);
+        if (kept)
+        {
+            uint at = flLvCache(g);
+            gBeams[at] = float4(alpha, beta, gamma, staged ? 1.0 : 0.0);
+            gBeams[at + 1u] = float4(nn, 0.0);
+            gBeams[at + 2u] = float4(v, 0.0);
+            gBeams[at + 3u] = float4(f1, 0.0);
+        }
+        if (!staged) return;
+    }
+    else
+    {
+        uint at = flLvCache(g);
+        float4 a = gBeams[at];
+        if (a.w == 0.0) return;
+        alpha = a.x;
+        beta = a.y;
+        gamma = a.z;
+        nn = gBeams[at + 1u].xyz;
+        v = gBeams[at + 2u].xyz;
+        f1 = gBeams[at + 3u].xyz;
+    }
+    if (phase == 2u)
+    {
+        resMerge(h, tn.x, tn.y, tn.z);
+        return;
+    }
+    float rr = vvResOf(va, vh, h, tn, alpha, beta, gamma, nn, v, parity, 0u);
+    if (phase == 0u)
+    {
+        if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, alpha, beta, gamma, sscale(nn, rr));
+        return;
+    }
+    float3 total = f1;
+    if (rr > 0.0) total = sadd3(total, sscale(nn, rr));
+    float3 gg;
+    if (vvGuardOf(va, vh, h, tn, alpha, beta, gamma, v, total, parity, gg)) total = sadd3(total, gg);
+    resFinal(h, tn.x, tn.y, tn.z, alpha, beta, gamma, f1, total);
 }
 
 [shader("compute")]
