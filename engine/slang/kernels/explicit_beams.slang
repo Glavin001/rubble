@@ -8747,13 +8747,18 @@ void contactMembersStep(uint off, uint k, uint lane, uint s)
     contactMembersStepAt(off, k, lane, s, VV_PART);
 }
 
+// (gVvWhole, the split path's members, a workgroup each: member `only` on every lane of
+// the workgroup, its workgroup arrays in slot 0, in place of its partition's lanes. The
+// same step: the lanes only share its items out.)
+static bool gVvWhole = false;
 void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
 {
-    uint P = vvPartLanes(k);
-    uint m = lane / P;
+    uint P = gVvWhole ? LANES : vvPartLanes(k);
+    uint mm = gVvWhole ? only : lane / P;
+    uint m = gVvWhole ? 0u : mm;
     uint pl = lane % P;
-    bool on = m < k && (only >= k || m == only);
-    uint v = vvMember(off, on ? m : 0u);
+    bool on = mm < k && (only >= k || mm == only);
+    uint v = vvMember(off, on ? mm : 0u);
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
@@ -8867,7 +8872,7 @@ void contactMembersStepAt(uint off, uint k, uint lane, uint s, uint only)
             uint4 q1 = gStatic[vj * 4u + 1u];
             uint4 q2 = gStatic[vj * 4u + 2u];
             float cj = asfloat(gStatic[vj * 4u + 3u].w);
-            uint lj = (only >= k || j == only) ? gsTestedM[2u * j + (((gMisc[vj].w + s) & 1u))].load() : 0u;
+            uint lj = (only >= k || j == only) ? gsTestedM[2u * (gVvWhole ? 0u : j) + (((gMisc[vj].w + s) & 1u))].load() : 0u;
             if (cj > 0.0 && q2.y > 0u && lj * q2.y > BRUTE_PAIRS_PER_LANE * P) any = any | 1u;
             // Self-collision hits or pending beams possible (selfApply's barriers).
             if (q1.y > 0u) any = any | 2u;

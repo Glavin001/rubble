@@ -1240,3 +1240,31 @@ pile, 4,160 listed triangles on 8,192 threads, so one part each), then the front
    overflowed). Bit for bit at the same five times; the front 8.9 → 6.9 ms a frame in
    the pile, 5.7 → 3.5 falling; frames at t 2 / 3.7 / 5 / 8 / 12 s: 14.6 / 33.0 / 20.6 /
    31.6 / 28.2 ms.
+
+6. **A small group's member on every lane of its own workgroup.** On the split path a
+   member of a group of two to four stepped on its partition's lanes alone (256, 128,
+   128 of the workgroup's 512: the step written for members sharing one workgroup), so
+   two to four touching cars were the slowest case left: four cars 53 ms a frame
+   against eight cars' 28, two cars 25 ms while grouped against 6.8 apart. The same
+   step now takes every lane (`gVvWhole`: its items shared over 512 lanes, its
+   workgroup arrays in slot 0; the split modules' measurement word 4096 gives the
+   partition back). Bit for bit against the groups' own workgroup (`group_split_gpu`,
+   `self_split_gpu`; `--ab-switch groupsplit`, two and four cars, t 2, 4, 6, 9 s).
+   Four cars 53 → 27 ms a frame (the cars' steps 1,390 → 593 µs a substep); two cars
+   grouped 24.8 → 17.4 ms. A group's member's step is still 2.6 times a larger group's
+   member's (226 µs: `contactMemberStep`, with the reused pair list). The two are not
+   interchangeable as written: `contactMemberStep` for a group of two differs from the
+   small groups' step from the first frame with a hit (ignored test
+   `whole_workgroup_members_first_difference` was written against that attempt; cause
+   not found).
+
+**Chrome (2026-11-16).** Two breaks from this section's changes, found on the page and
+fixed: the frame kernel's workgroup storage went 96 bytes past the browser's 32,768
+(arrays sized by `VV_PART` that only serve `VV_SIDE` members), and the levels' loop
+bound was not uniform to Tint. `explicit-wgsl-check.mjs` (modules only: 5 s) now runs
+after every kernel change. Cold compiles on Metal: `explicit_beams_split_member_wide`
+209 s (1.44 M inlined lines; used only with self-collision split off: now compiled
+last), `explicit_beams_selfsplit_member_vv_wide` 35 s (535 k inlined lines: three
+copies of a car's step), `explicit_beams_contact_wide_nosurf` 29–37 s. Until the
+member module is compiled a page runs touching cars in the groups' own workgroup: the
+user's two-car page held 60 steps a second apart and 21–26 touching.

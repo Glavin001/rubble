@@ -118,9 +118,12 @@ void splitMember(uint v, uint lane, uint s)
     splitDriveStep(v, lane, s, driveOn);
     if (k <= VV_SIDE)
     {
-        // The member's partition first: its lanes are lanes 0 .. P - 1 here.
+        // The member on every lane of its workgroup (gVvWhole); with the measurement
+        // word's 4096, on its partition's lanes alone, first (lanes 0 .. P - 1 here),
+        // as before: the same results.
+        gVvWhole = (gP.ablate & 4096u) == 0u;
         uint P = vvPartLanes(k);
-        contactMembersStepAt(off, k, (lane + rank * P) % LANES, s, rank);
+        contactMembersStepAt(off, k, gVvWhole ? lane : (lane + rank * P) % LANES, s, rank);
     }
     else
     {

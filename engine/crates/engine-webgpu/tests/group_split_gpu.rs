@@ -123,3 +123,61 @@ fn a_column_of_six_split_is_bit_for_bit() {
     assert!(grouped > 10, "the cars met in a contact group ({grouped} frames)");
     assert!(largest > 4, "a group past four members formed (largest {largest})");
 }
+
+/// Diagnostic (ignored): the split path with every member on a whole workgroup (the
+/// split modules' measurement bit 4096) against the groups' own workgroup, frames of
+/// 1, 2, 4, 17 steps from one state: the first frame length and word that differ.
+#[test]
+#[ignore]
+fn whole_workgroup_members_first_difference() {
+    let text = generated();
+    let a = sedan(&text, Vec3::ZERO, 0.0, Vec3::new(0.0, 0.0, 12.0));
+    let front = a.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+    let probe = sedan(&text, Vec3::ZERO, 180.0, Vec3::ZERO);
+    let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
+    let b = sedan(&text, Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
+    let Some((_, device, queue)) = default_device().ok() else { return };
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &[a, b]);
+    gpu.set_vehicle_contact(true);
+    gpu.set_wide(false);
+    for f in 0..12 {
+        let snap = gpu.snapshot();
+        for steps in [1u32, 2, 4, 17] {
+            gpu.restore(&snap);
+            gpu.set_group_split(false);
+            gpu.set_split_ablation(0);
+            gpu.frame(steps);
+            gpu.wait();
+            let old = gpu.state_words();
+            let sizes = gpu.contact_group_sizes();
+            gpu.restore(&snap);
+            gpu.set_group_split(true);
+            gpu.set_split_ablation(4096);
+            gpu.frame(steps);
+            gpu.wait();
+            let new = gpu.state_words();
+            let counts_new = gpu.contact_group_counts();
+            gpu.restore(&snap);
+            gpu.set_split_ablation(0);
+            gpu.frame(steps);
+            gpu.wait();
+            let counts_old = gpu.contact_group_counts();
+            eprintln!("frame {f}, {steps} steps, groups {sizes:?}: {:?}", first_diff(&old, &new));
+            if counts_new != counts_old {
+                eprintln!("    counts [pairs, hits, listed, candidates]: partition {counts_old:?}, whole {counts_new:?}");
+            }
+            for ((name, x), (_, y)) in old.iter().zip(&new) {
+                let n = x.iter().zip(y).filter(|(p, q)| p != q).count();
+                if n > 0 {
+                    let at: Vec<usize> = x.iter().zip(y).enumerate().filter(|(_, (p, q))| p != q).map(|(i, _)| i).take(6).collect();
+                    eprintln!("    {name}: {n} of {} at {at:?}", x.len());
+                }
+            }
+        }
+        gpu.restore(&snap);
+        gpu.set_group_split(false);
+        gpu.set_split_ablation(0);
+        gpu.frame(17);
+        gpu.wait();
+    }
+}
