@@ -79,14 +79,15 @@ pub struct LabOptions {
     pub piece_windows: bool,
     /// Self-collision's listed pairs tested across the GPU's workgroups, a dispatch a
     /// step (`ExplicitBeamsGpu::set_self_split`; the same results bit for bit). Only
-    /// frames without vehicle contact, sleep or surface contact take it. Live
+    /// frames without surface contact take it. Live
     /// (`{ selfSplit: bool }`).
     pub self_split: bool,
     /// The vehicles' frame as the fleet-wide passes (`ExplicitBeamsGpu::set_wide`: a thread
     /// an element over every car) with the reused pair list (`set_wide_list`); the same
     /// results bit for bit, faster natively and in Chrome
-    /// (vehicle-perf-first-principles.md §8). Frames with car-to-car contact, sleep or
-    /// surface contact keep a workgroup a car. Live (`{ wide, wideList }`).
+    /// (vehicle-perf-first-principles.md §8). Frames with car-to-car contact or surface
+    /// contact, and a fleet of several cars with vehicle sleep, keep a workgroup (or a
+    /// step's dispatches) a car. Live (`{ wide, wideList }`).
     pub wide: bool,
     pub wide_list: bool,
     /// With both: the coupling's and the wheels' part of a step on the list and hits
@@ -120,6 +121,8 @@ pub struct LabOptions {
     /// resumes from its state at sleep. Not lossless against a run that never sleeps
     /// (the motion under the thresholds is not simulated while asleep). Live
     /// (`{ vehicleSleep: { on, speed, reachMm, dwell } }`: m/s, mm, 0.5 ms steps).
+    /// Off here (hosts and tests ask for it; the harness: `--vehicle-sleep 1`); the
+    /// lab's page has it on.
     pub vehicle_sleep: bool,
     /// Its thresholds (the engine's defaults), kept while it is off.
     pub vehicle_sleep_cfg: VehicleSleep,
@@ -2600,7 +2603,8 @@ impl Lab {
         // { wide: bool, wideList: bool }: the vehicles' frame as the fleet-wide passes
         // (ExplicitBeamsGpu::set_wide: a thread an element over every car, a few dispatches
         // a step) and, with them, the reused pair list (set_wide_list); the same results
-        // bit for bit. Frames with car-to-car contact, sleep or surface contact keep a
+        // bit for bit. Frames with car-to-car contact or surface contact (and several
+        // cars with vehicle sleep) keep a
         // workgroup a car. Returns whether the wide passes can run this fleet.
         if cmd.get("wide").is_some() || cmd.get("wideList").is_some() || cmd.get("wideFused").is_some() {
             let mut got = false;

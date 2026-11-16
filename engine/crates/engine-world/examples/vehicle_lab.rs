@@ -1879,6 +1879,53 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             std::fs::write(path, out)?;
         }
     }
+    // `--save-final FILE`: every car's node positions at the run's end (f32 x, y, z a
+    // node, the cars in order). `--compare-final FILE`: against another run's: per car
+    // the largest node displacement between the two (mm), and the fleet's energy. Two
+    // runs of the World are not bit for bit the same (a crash is chaotic and native
+    // runs differ in timing): compare a setting's difference with two same-setting runs'.
+    if let Some(x) = world.explicit_vehicles() {
+        let pos = x.positions();
+        if let Some(file) = arg("--compare-final") {
+            let raw = std::fs::read(&file)?;
+            let other: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+            let mut at = 0;
+            let mut out = Vec::new();
+            for p in &pos {
+                let mut worst = 0.0f32;
+                for q in p {
+                    if at + 3 <= other.len() {
+                        worst = worst.max((*q - glam::Vec3::new(other[at], other[at + 1], other[at + 2])).length());
+                    }
+                    at += 3;
+                }
+                out.push(format!("{:.1}", worst * 1e3));
+            }
+            println!("final positions against {file}: largest node difference a car, mm: {}", out.join(" "));
+        }
+        if let Some(file) = arg("--save-final") {
+            let bytes: Vec<u8> = pos.iter().flatten().flat_map(|q| q.to_array()).flat_map(f32::to_le_bytes).collect();
+            std::fs::write(&file, bytes)?;
+        }
+        let vel = x.velocities();
+        let (mut ke, mut pe) = (0.0f64, 0.0f64);
+        for (p, v) in pos.iter().zip(&vel) {
+            for ((q, w), n) in p.iter().zip(v).zip(&template.nodes) {
+                let m = f64::from(n.mass);
+                ke += 0.5 * m * f64::from(w.length_squared());
+                pe += m * 9.81 * f64::from(q.y);
+            }
+        }
+        println!("final energy kJ: kinetic {:.3}, potential {:.3}, total {:.3}", ke * 1e-3, pe * 1e-3, (ke + pe) * 1e-3);
+        if world.explicit_vehicle_sleep().is_some() {
+            println!(
+                "final vehicle sleep: asleep {}; first slept at s {}; wakes {:?}",
+                sleep_log.iter().map(|s| if s.2 { "1" } else { "0" }).collect::<Vec<_>>().join(""),
+                sleep_log.iter().map(|s| s.0.map_or("-".to_string(), |t| format!("{t:.2}"))).collect::<Vec<_>>().join(" "),
+                sleep_log.iter().map(|s| s.1).collect::<Vec<_>>()
+            );
+        }
+    }
     println!(
         "wall {:.1} s for {secs:.1} s simulated",
         t_all.elapsed().as_secs_f64()
