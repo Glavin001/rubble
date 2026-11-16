@@ -1096,7 +1096,23 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 x.wait();
                 out.push((ms, x.state_words(), x.coupling_words()));
             }
-            let same = out[0].1 == out[1].1 && out[0].2 == out[1].2;
+            // The vehicle-contact plan's records are planning state, as in
+            // tests/explicit_vehicles.rs: a vehicle's "big" flag is whichever vehicle
+            // overflowed a broadphase bucket first (the same pairs either way; it differs
+            // between two runs of one path, --ab-same). Reported below, outside the verdict.
+            let plan = x.vv_record_words();
+            let masked = |w: &[(&'static str, Vec<u32>)]| -> Vec<Vec<u32>> {
+                w.iter()
+                    .map(|(name, v)| {
+                        let mut v = v.clone();
+                        if *name == "misc" {
+                            v[plan.clone()].fill(0);
+                        }
+                        v
+                    })
+                    .collect()
+            };
+            let same = masked(&out[0].1) == masked(&out[1].1) && out[0].2 == out[1].2;
             for ((name, a), (_, b)) in out[0]
                 .1
                 .iter()
@@ -1118,6 +1134,12 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         a.len(),
                         at.join(", ")
                     );
+                    if *name == "misc" {
+                        // Which planning record a differing word is (6 records of 4 words a vehicle).
+                        let r = x.vv_record_words();
+                        let inside = a.iter().zip(b).enumerate().filter(|(i, (p, q))| p != q && r.contains(i)).count();
+                        println!("       (vehicle-contact planning records, words {}..{}, 24 a vehicle: {inside} of the {diff}; outside the verdict)", r.start, r.end);
+                    }
                 }
             }
             println!(

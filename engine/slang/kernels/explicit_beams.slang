@@ -7869,7 +7869,12 @@ static const float VV_APPROACH_SQ = 16.0;
 // a larger group's vehicles run alone that frame and the host fails.
 static const uint VV_MAX_GROUP = 64u;
 // Groups of at most VV_PART members step side by side (contactMembersStep).
-static const uint VV_PART = 4u;
+static const uint VV_PART = 8u;
+// Members a group steps side by side on one workgroup, and the one-workgroup path's
+// small-group pass: at most VV_SIDE. The split group path's pass (its tests across
+// workgroups, its levels) takes groups up to VV_PART, whose members past VV_SIDE each
+// step on every lane of their own workgroup (contactMemberStep).
+static const uint VV_SIDE = 4u;
 static const int VV_MAX_WAIT = 12;
 
 [[vk::binding(10, 0)]] RWStructuredBuffer<uint> gArgs;
@@ -8341,7 +8346,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         bool big = false;
         for (uint g = 0u, gStop = EB_END(g, groups, 1u); g < gStop; g++)
         {
-            if (gMisc[gP.vvGroups + g].y > VV_PART) big = true;
+            if (gMisc[gP.vvGroups + g].y > VV_SIDE) big = true;
         }
         vvArgs(nv, groups, big);
     }
@@ -10136,9 +10141,9 @@ void vvClearSmall()
 #ifdef EB_VV_GLOBAL
 static uint gVvC; // gAcc: per owner its pairs (0..3), hits (4..7), fastest (8..11)
 static uint gVvO; // gNext: the grid's offsets
-uint vvHitAdd(uint a) { return uint(gAcc[gVvC + 4u + a].add(1)); }
+uint vvHitAdd(uint a) { return uint(gAcc[gVvC + VV_PART + a].add(1)); }
 uint vvPairAdd(uint a) { return uint(gAcc[gVvC + a].add(1)); }
-float vvSpeedAt(uint a) { return asfloat(uint(gAcc[gVvC + 8u + a].load())); }
+float vvSpeedAt(uint a) { return asfloat(uint(gAcc[gVvC + 2u * VV_PART + a].load())); }
 uint vvOffAt(uint b) { return gNext[gVvO + b]; }
 #else
 uint vvHitAdd(uint a) { return gsVvHit4[a].add(1u); }
@@ -10149,8 +10154,8 @@ uint vvOffAt(uint b) { return gsOff[b]; }
 
 // Owner a's candidate run and hit list (each owner its own, within the group's
 // regions, which hold four times the group's points).
-uint vvRunSmall(uint runOff, uint points, uint a) { return gP.vvRun + 4u * runOff + a * points; }
-uint vvHitSmall(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 2u * (8u * runOff + 2u * a * points + i); }
+uint vvRunSmall(uint runOff, uint points, uint a) { return gP.vvRun + VV_PART * runOff + a * points; }
+uint vvHitSmall(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 2u * (2u * VV_PART * runOff + 2u * a * points + i); }
 
 // vvTriangleCands into owner a's own list (capacity: twice the group's points, as
 // vvPass's); on overflow the list keeps its first entries and the owner re-walks at
@@ -10242,9 +10247,9 @@ uint vvLevel(uint a, uint k, uint points)
 // A box over more than GRID_MAX_CELLS cells tests every
 // candidate as before.
 uint vvTotalCp() { return gP.vvHits - (gP.vvBig + gP.vehicles); }
-uint vvSortAt(uint runOff) { return gP.vvRun + 4u * vvTotalCp() + 4u * runOff; }
-uint vvRankAt(uint runOff, uint points, uint a, uint e) { return gP.vvHits + 16u * vvTotalCp() + 4u * runOff + a * points + e; }
-uint vvGridBucket(uint a, int3 c) { return a * 256u + (gridBucket(c) & 255u); }
+uint vvSortAt(uint runOff) { return gP.vvRun + VV_PART * vvTotalCp() + VV_PART * runOff; }
+uint vvRankAt(uint runOff, uint points, uint a, uint e) { return gP.vvHits + 4u * VV_PART * vvTotalCp() + VV_PART * runOff + a * points + e; }
+uint vvGridBucket(uint a, int3 c) { return a * (GRID_BUCKETS / VV_PART) + (gridBucket(c) & (GRID_BUCKETS / VV_PART - 1u)); }
 // The grid's cell: the owner's self-collision cell, else half a metre (any size gives
 // the same candidates; it only sets how many are visited).
 float vvGridCell(uint va)
@@ -10713,8 +10718,8 @@ void vvPairTest(uint a, uint va, uint gt, uint idx, uint runOff, uint points, fl
 // in their point's bucket (a counting sort of the hit indices by point, owner a's buckets
 // a·256 …, in gsCount/gsOff: free in the levels, the grid's last use was the tests): the
 // same chain, the same order, the same results.
-uint vvOrderAt(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 20u * vvTotalCp() + 16u * runOff + 2u * a * points + i; }
-uint vvHitBucket(uint a, uint h) { return a * 256u + ((h * 2654435761u) >> 24); }
+uint vvOrderAt(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 5u * VV_PART * vvTotalCp() + 4u * VV_PART * runOff + 2u * a * points + i; }
+uint vvHitBucket(uint a, uint h) { return a * (GRID_BUCKETS / VV_PART) + (((h * 2654435761u) >> 22) & (GRID_BUCKETS / VV_PART - 1u)); }
 
 // Every lane (uniform): the hit lists of level l's owners bucketed by point.
 void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
@@ -10779,7 +10784,7 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
         for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
         {
             uint br = gNext[vvOrderAt(runOff, points, a, i)];
-            gNext[vvOrderAt(runOff, 0u, 0u, 0u) + 8u * points + gsOff[br & (GRID_BUCKETS - 1u)] + (br >> 10)] = i;
+            gNext[vvOrderAt(runOff, 0u, 0u, 0u) + 2u * VV_PART * points + gsOff[br & (GRID_BUCKETS - 1u)] + (br >> 10)] = i;
         }
     }
     sync();
@@ -10789,7 +10794,7 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
 void vvApplyOrderedBuckets(uint va, uint a, uint base, uint n, float r, uint parity, uint lane, uint runOff, uint points)
 {
     float3 oa = vvRel(va, va);
-    uint sorted = vvOrderAt(runOff, 0u, 0u, 0u) + 8u * points;
+    uint sorted = vvOrderAt(runOff, 0u, 0u, 0u) + 2u * VV_PART * points;
     for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
     {
         uint gt = gNext[base + 2u * i];
@@ -11227,10 +11232,10 @@ void contactGroup(uint g, uint lane)
     // returns at once for the other's groups (k uniform), and holds only its own path.
     // Without either define, every group.
 #ifdef EB_VV_SMALL_ONLY
-    if (k > VV_PART) return;
+    if (k > VV_SIDE) return;
 #endif
 #ifdef EB_VV_BIG_ONLY
-    if (k <= VV_PART) return;
+    if (k <= VV_SIDE) return;
 #endif
     // Vehicle sleep: a group with an awake member wakes the others; a group asleep is
     // not stepped.
@@ -11284,7 +11289,7 @@ void contactGroup(uint g, uint lane)
         coupleStepMembers(off, k, lane, s, coupleOn);
         driveStepMembers(off, k, lane, s, driveOn);
 #ifndef EB_VV_BIG_ONLY
-        if (k <= VV_PART)
+        if (k <= VV_SIDE)
         {
             contactMembersStep(off, k, lane, s);
         }
@@ -11308,7 +11313,7 @@ void contactGroup(uint g, uint lane)
         if ((gP.ablate & 512u) != 0u) {} else
 #endif
 #ifndef EB_VV_BIG_ONLY
-        if (k <= VV_PART)
+        if (k <= VV_SIDE)
         {
             vvPassSmall(k, off, runOff, points, stepBase + s, lane);
         }

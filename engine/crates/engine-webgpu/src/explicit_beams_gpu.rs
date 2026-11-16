@@ -1088,7 +1088,7 @@ impl ExplicitBeamsGpu {
                 deferred: false,
             }));
             // (The larger groups' module only for a fleet that can form one.)
-            let big = (vehicles.len() > plan::VV_PART).then_some(Kernel::ContactBig);
+            let big = (vehicles.len() > plan::VV_SIDE).then_some(Kernel::ContactBig);
             for kernel in [Kernel::Contact, Kernel::Solo].into_iter().chain(big) {
                 specs.push(crate::ComputeSpec {
                     label: kernel.entry(),
@@ -1234,7 +1234,7 @@ impl ExplicitBeamsGpu {
             (layout.status.base, layout.status.cap),
             &upload.bytes(plan::BIND_ARGS),
             vehicles.len() > 1,
-            vehicles.len() > plan::VV_PART,
+            vehicles.len() > plan::VV_SIDE,
         );
         let bufs = [
             params.clone(),

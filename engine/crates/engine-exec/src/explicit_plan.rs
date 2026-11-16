@@ -442,9 +442,12 @@ pub const W_SLEEP: usize = 85;
 /// Members of a contact group stepped side by side (the kernel's `VV_PART`): larger
 /// groups run in their own dispatch ([`Kernel::ContactBig`]), so a fleet of at most
 /// this many vehicles never needs that module.
-pub const VV_PART: usize = 4;
+pub const VV_PART: usize = 8;
+/// Members a group steps side by side on one workgroup (the kernel's `VV_SIDE`): a larger
+/// group runs in the larger groups' dispatch ([`Kernel::ContactBig`]).
+pub const VV_SIDE: usize = 4;
 /// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
-pub const VV_SPLIT_SLOTS: usize = 5;
+pub const VV_SPLIT_SLOTS: usize = 9;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
 /// groups (16), the awake vehicles' frame (32, vehicle sleep), the larger groups (48),
 /// the split group path's groups (64), members (80) and tests (96), and every vehicle's
@@ -1872,7 +1875,7 @@ impl ExplicitUpload {
         let vv_run = beams.len() as u32;
         // (Then as many again: the small groups' candidates sorted by cell, the kernel's
         // vvSortAt.)
-        beams.extend(std::iter::repeat_n([0.0f32; 4], 8 * total_cp));
+        beams.extend(std::iter::repeat_n([0.0f32; 4], 2 * VV_PART * total_cp));
         // Two-body contact (jbeam-semantics-spec.md §10.3): per node its force at
         // the contact pass's start.
         let two_body = nv > 1 && vehicles.iter().any(|v| v.two_body_contact);
@@ -1977,7 +1980,7 @@ impl ExplicitUpload {
         // kernel's vvRankAt.)
         // (Then the levels' hit buckets: per group 16 words a contact point, the kernel's
         // vvOrderAt.)
-        let slot_list_base = (vv_hits as usize + 36 * total_cp) as u32;
+        let slot_list_base = (vv_hits as usize + 9 * VV_PART * total_cp) as u32;
         // Then per vehicle its self-collision hit list and pending beams (the
         // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
         let hit_base = slot_list_base as usize + slot_list_len as usize;
