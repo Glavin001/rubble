@@ -684,6 +684,18 @@ default for large worlds and off in the crash lab. Code: `engine_softbody::expli
 on), `ExplicitBeamsGpu::with_sleep` and `ExplicitBeamsWorld::sleep` (off unless set: the crash
 lab's hosts and the CPU fleet step every vehicle as before).
 
+Decision (user, 2026-11-16): sleep is acceptable, not lossless. A woken vehicle continues
+bit for bit from its state at sleep; against a run that never sleeps, what is lost is
+the motion under the thresholds while asleep. That is accepted provided the thresholds
+are configurable at runtime and what each setting loses is measured (§10.7 and
+`measurements/vehicle-perf-first-principles.md` §8.26). The setting is live:
+`World::set_explicit_vehicle_sleep(Some(thresholds) | None)` (on with these thresholds,
+or off; no rebuild; thresholds that are not finite and non-negative are an error),
+`ExplicitBeamsGpu::set_sleep` and `set_sleep_config` under it. Vehicles added with
+`ExplicitVehiclesDef::sleep = None` have no room for it and stay without (bit for bit as
+before). The vehicle lab builds with the room and has the control on its page ("vehicle
+sleep" and its three thresholds, applied as it runs).
+
 **The rule** (every frame's end, for each awake vehicle; one arithmetic on CPU and GPU):
 a vehicle is *moving* if at some step of the frame some node's velocity had a component
 above `speed`; otherwise *displaced* if it has no anchor (its node positions when its still

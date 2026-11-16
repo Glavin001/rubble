@@ -558,6 +558,9 @@ bool flVehicleOn(uint v)
 {
     uint4 fl = gMisc[vvRec(v, VV_FLAGS)];
     if (fl.y == 0u) return false;
+    // (Vehicle sleep: a sleeping group's members are no one's partners; its levels do
+    // not run. explicit_beams_split.slang splitAwake.)
+    if (sleepAsleep(v)) return false;
     uint k = gMisc[gP.vvGroups + fl.z].y;
     return k != 0u && k <= VV_PART;
 }

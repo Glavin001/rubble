@@ -2840,6 +2840,8 @@ pub struct FramePlanner {
     /// Measurement only ([`Self::set_sleep_listing`]): false dispatches every vehicle,
     /// a sleeping one's workgroup returning at once.
     sleep_listing: bool,
+    /// [`Self::set_wide_sleep`].
+    wide_sleep: bool,
     /// Some vehicle has surface contact ([`ExplicitLayout::surface`]).
     surface: bool,
     /// The host runs the surface pass as its own pipelines ([`Self::set_surface_split`]).
@@ -2865,6 +2867,7 @@ impl FramePlanner {
             frames: 0,
             sleep_rec: layout.sleep.map_or(0, |s| s.header),
             sleep_listing: true,
+            wide_sleep: false,
             surface: layout.surface,
             surface_split: false,
             loop_unit: layout.loop_unit,
@@ -2972,10 +2975,19 @@ impl FramePlanner {
         self.contact.replan.store(true, Ordering::Relaxed);
     }
 
-    /// Wide passes on (and possible), and contact not active, and no vehicle sleep (it
-    /// runs in the vehicle workgroups only).
+    /// Wide passes on (and possible), and contact not active, and no vehicle sleep,
+    /// except for a lone vehicle on a host whose wide kernels hold sleep's rule
+    /// ([`Self::set_wide_sleep`]): the wide passes step every vehicle in step, and a
+    /// sleeping vehicle's step count stands, so a fleet with sleep keeps a workgroup (or
+    /// a step's dispatches) a vehicle.
     pub fn is_wide(&self) -> bool {
-        self.wide_ok && self.wide_on && !self.contact_active() && !self.sleep_on()
+        self.wide_ok && self.wide_on && !self.contact_active() && (!self.sleep_on() || (self.wide_sleep && self.nv == 1))
+    }
+
+    /// A host whose wide passes run vehicle sleep for a lone vehicle (the kernel's
+    /// sleepMarkNode, sleepSettleOne; off: wide frames only without sleep).
+    pub fn set_wide_sleep(&mut self, on: bool) {
+        self.wide_sleep = on;
     }
 
     /// Run frames as the wide passes or one workgroup per vehicle; returns

@@ -7,7 +7,8 @@
 #       after a change of the buffers' layout)  saves the fixtures: CARS cars (default
 #       1 2 4 8) driven to the moments below, into out/fixtures/cars<N>_t<T>.fx
 #   tools/explicit-2khz/fast-check.sh SWITCH [FIXTURE ...]
-#       SWITCH: a `vehicle_lab --ab-switch` value (perf=<mask>, groupsplit, wide, ...).
+#       SWITCH: a `vehicle_lab --ab-switch` value (perf=<mask>, groupsplit, wide, sleep,
+#       sleeplist, ...; vehicle sleep's own checks: sleep-check.sh).
 #       FIXTURE: files or name parts (default: every fixture). One line a fixture:
 #       its name, ms a frame with the switch on and off, and the verdict.
 #   FRAMES=n (default 4) frames each way; PROFILE=fast|release (default fast: no
@@ -43,6 +44,8 @@ if [ "$1" = "--make" ]; then
     case "$n" in
       1) at="2.5,6,20"; secs=20.3 ;;
       32) at="1,2.5,4"; secs=4.3 ;;
+      # (Eight cars: also the pile at rest, where vehicle sleep acts.)
+      8) at="2,3.7,8,16,20,30"; secs=30.3 ;;
       *) at="2,3.7,8,16"; secs=16.3 ;;
     esac
     lab "$n" --ab "$at" --ab-switch "perf=0" --ab-frames 1 --save-fixtures "$fixtures" --secs "$secs" 2>&1 | grep -E "fixture|^Error"
@@ -75,7 +78,7 @@ for f in $list; do
     echo "FAIL $name: ${line:-no verdict}"
     echo "$out" | grep -E "differ|records|^Error|panicked" | head -6 | sed 's/^/       /'
   fi
-  [ -n "$EXTRA" ] && echo "$out" | grep -E "profile at|explicit |split ablation|untimed|group of" | sed 's/^/     /'
+  [ -n "$EXTRA" ] && echo "$out" | grep -E "profile at|explicit |split ablation|untimed|group of|sleep \\(" | sed 's/^/     /'
 done
 echo "fast check: $(( $(date +%s) - start )) s"
 exit $bad

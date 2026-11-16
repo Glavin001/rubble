@@ -118,6 +118,17 @@ fn options(script: &Value) -> LabOptions {
         }
         o.insert("debris".into(), d);
     }
+    // `--vehicle-sleep 0|1`, `--sleep-speed V` (m/s), `--sleep-reach-mm R`, `--sleep-dwell N`
+    // (steps): vehicle sleep and its thresholds (the lab's `vehicleSleep`).
+    if arg("--vehicle-sleep").is_some() || arg("--sleep-speed").is_some() || arg("--sleep-reach-mm").is_some() || arg("--sleep-dwell").is_some() {
+        let mut d = json!({ "on": arg("--vehicle-sleep").as_deref() != Some("0") });
+        for (flag, key) in [("--sleep-speed", "speed"), ("--sleep-reach-mm", "reachMm"), ("--sleep-dwell", "dwell")] {
+            if let Some(x) = arg(flag).and_then(|x| x.parse::<f64>().ok()) {
+                d[key] = json!(x);
+            }
+        }
+        o.insert("vehicleSleep".into(), d);
+    }
     // `--pieces 0|1`: the GPU pair list's piece labels (on in the lab).
     if let Some(s) = arg("--pieces") {
         o.insert("pieceLabels".into(), json!(s == "1"));
@@ -807,6 +818,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let mut alt = [(0.0f64, 0u32); 2];
     // (t, the step's GPU span, the vehicles' segments, the explicit frame's), ms.
     let mut gpu_steps: Vec<(f64, f64, f64, f64)> = Vec::new();
+    // Vehicle sleep, per car: (the time it first slept, its wakes, asleep now).
+    let mut sleep_log: Vec<(Option<f64>, u32, bool)> = Vec::new();
     let t_all = std::time::Instant::now();
     println!(
         "{:>6} {:>8} {:>8} {:>8} {:>7} {:>18} {:>12} {:>16}",
@@ -853,6 +866,17 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // `--ab-switch groupsplit`: contact groups across workgroups with self-collision
     // split (`set_group_split`, `set_self_split`) against each group on one workgroup.
     let groupsplit_ab = arg("--ab-switch").as_deref() == Some("groupsplit");
+    // `--ab-switch sleep`: vehicle sleep on (every vehicle awake at the snapshot, its still
+    // count 0) against off: with nobody asleep the physics state must be the same bit for
+    // bit (the sleep records, anchors and flags are sleep's own, outside the state words).
+    // `--ab-switch sleeplist`: with sleep on (`--vehicle-sleep 1`), the awake-indexed
+    // dispatch against every vehicle dispatched (a sleeping one's workgroup returning at
+    // once): every state word and every sleep word. With sleep on, `--ab-switch
+    // groupsplit` compares the sleep words too (the split paths against a workgroup a
+    // group, the reference for sleep's rule).
+    let sleep_ab = arg("--ab-switch").as_deref() == Some("sleep");
+    let sleeplist_ab = arg("--ab-switch").as_deref() == Some("sleeplist");
+    let sleep_cfg = options(&script).vehicle_sleep_cfg;
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
@@ -862,6 +886,11 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         if groupsplit_ab {
             x.set_group_split(on);
             x.set_self_split(on);
+        } else if sleep_ab {
+            x.set_sleep_config(sleep_cfg);
+            x.set_sleep(on);
+        } else if sleeplist_ab {
+            x.set_sleep_listing(on);
         } else if fused_ab {
             x.set_wide(true);
             x.set_wide_list(true);
@@ -929,6 +958,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         }
         let snap = x.snapshot_from_bytes(&bytes[at..]);
         x.restore(&snap);
+        // (The fixture's records hold the thresholds it was saved with: this run's.)
+        x.set_sleep_config(options(&script).vehicle_sleep_cfg);
         x.wait();
         lab.bench.t = t;
         ab = vec![t];
@@ -1087,6 +1118,163 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     if !row.is_empty() {
                         println!("     {m}: by pass, GPU ms a frame, timed apart: {}", row.join(", "));
                     }
+                }
+            }
+            // `--sleep-loss "off;V,R,N;V,R,N;…"` (speed m/s, reach mm, dwell steps), with
+            // `--loss-frames F` (default 600 frames of 34 steps: 10.2 s): from this
+            // snapshot the vehicles' solver alone, F frames under each setting (the
+            // coupling's proxies as the World last wrote them: a pile at rest on static
+            // ground). Per setting: when each car first sleeps and how often it wakes, the
+            // frame's wall time early and late, the fleet's kinetic + potential energy at
+            // the end, and each car's largest node displacement from the first setting's
+            // end state (mm). The first setting is the reference (give `off` first).
+            // `--rest-probe F`: from this snapshot with sleep off, F frames of 34 steps of
+            // the solver alone: what the sleep rule would see of each car. Per car its
+            // fastest node along an axis at a frame's end (the worst frame; the rule's
+            // speed bound looks at every step, so this is a lower bound), how many of its
+            // nodes were ever past 0.25 m/s at a frame's end, the node that travelled
+            // farthest along an axis over a dwell (30 frames, from each dwell's start)
+            // and how many nodes travelled past 0.1 mm in one.
+            if let Some(frames) = arg("--rest-probe").and_then(|v| v.parse::<u32>().ok()) {
+                x.restore(&snap);
+                let was = x.sleep_on();
+                x.set_sleep(false);
+                x.wait();
+                let nv = x.vehicle_count();
+                let mut anchor = x.positions();
+                let mut fast = vec![(0.0f32, 0usize); nv];
+                let mut ever = vec![std::collections::HashSet::<usize>::new(); nv];
+                let mut far = vec![(0.0f32, 0usize); nv];
+                let mut moved = vec![std::collections::HashSet::<usize>::new(); nv];
+                for f in 0..frames {
+                    x.frame(34);
+                    x.wait();
+                    let (pos, vel) = (x.positions(), x.velocities());
+                    for v in 0..nv {
+                        for (i, w) in vel[v].iter().enumerate() {
+                            let u = w.abs().max_element();
+                            if u > fast[v].0 || u.is_nan() {
+                                fast[v] = (u, i);
+                            }
+                            if !(u <= 0.25) {
+                                ever[v].insert(i);
+                            }
+                        }
+                        for (i, (p, a)) in pos[v].iter().zip(&anchor[v]).enumerate() {
+                            let d = (*p - *a).abs().max_element();
+                            if d > far[v].0 {
+                                far[v] = (d, i);
+                            }
+                            if !(d <= 1.0e-4) {
+                                moved[v].insert(i);
+                            }
+                        }
+                    }
+                    if f % 30 == 29 {
+                        anchor = pos;
+                    }
+                }
+                println!("   rest probe at t {:.1}, {frames} frames ({} nodes a car):", lab.bench.t, n_nodes);
+                for v in 0..nv {
+                    println!(
+                        "     car {v}: fastest node at a frame's end {:.3} m/s (node {}), {} nodes ever past 0.25 m/s; farthest in a dwell {:.3} mm (node {}), {} nodes past 0.1 mm",
+                        fast[v].0,
+                        fast[v].1,
+                        ever[v].len(),
+                        far[v].0 * 1e3,
+                        far[v].1,
+                        moved[v].len()
+                    );
+                }
+                x.restore(&snap);
+                if was {
+                    x.set_sleep(true);
+                }
+                x.wait();
+            }
+            if let Some(spec) = arg("--sleep-loss") {
+                let frames: u32 = arg("--loss-frames").and_then(|v| v.parse().ok()).unwrap_or(600);
+                let was = (x.sleep_on(), sleep_cfg);
+                let mut reference: Option<Vec<Vec<glam::Vec3>>> = None;
+                println!("   sleep loss at t {:.1}, {frames} frames of 34 steps ({:.1} s) each:", lab.bench.t, f64::from(frames) * 34.0 * 0.0005);
+                for setting in spec.split(';') {
+                    let cfg = (setting != "off").then(|| {
+                        let p: Vec<f64> = setting.split(',').filter_map(|v| v.parse().ok()).collect();
+                        assert!(p.len() == 3, "--sleep-loss: `off` or `speed,reachMm,dwell`, got {setting}");
+                        engine_softbody::explicit_sleep::VehicleSleep { speed: p[0] as f32, reach: (p[1] * 1e-3) as f32, dwell: p[2] as u32 }
+                    });
+                    x.restore(&snap);
+                    x.set_sleep(false);
+                    if let Some(c) = cfg {
+                        anyhow::ensure!(x.set_sleep_config(c), "--sleep-loss: the fleet has no room for vehicle sleep");
+                        x.set_sleep(true);
+                    }
+                    x.wait();
+                    let nv = x.vehicle_count();
+                    let (mut first, mut wakes, mut asleep) = (vec![None::<u32>; nv], vec![0u32; nv], vec![false; nv]);
+                    let mut ms = Vec::with_capacity(frames as usize);
+                    for f in 0..frames {
+                        let t = std::time::Instant::now();
+                        x.frame(34);
+                        x.wait();
+                        ms.push(t.elapsed().as_secs_f64() * 1e3);
+                        if cfg.is_some() {
+                            for (v, (_, a)) in x.sleep_states().into_iter().enumerate() {
+                                if a && !asleep[v] {
+                                    first[v].get_or_insert(f + 1);
+                                }
+                                if !a && asleep[v] {
+                                    wakes[v] += 1;
+                                }
+                                asleep[v] = a;
+                            }
+                        }
+                    }
+                    let med = |v: &[f64]| {
+                        let mut v = v.to_vec();
+                        v.sort_by(f64::total_cmp);
+                        v[v.len() / 2]
+                    };
+                    let n = ms.len();
+                    let (early, late) = (med(&ms[..n.min(30)]), med(&ms[n - n.min(60)..]));
+                    let pos = x.positions();
+                    let vel = x.velocities();
+                    let mut energy = 0.0f64;
+                    for (p, v) in pos.iter().zip(&vel) {
+                        for ((q, w), node) in p.iter().zip(v).zip(&template.nodes) {
+                            let m = f64::from(node.mass);
+                            energy += 0.5 * m * f64::from(w.length_squared()) + m * 9.81 * f64::from(q.y);
+                        }
+                    }
+                    let diff: Vec<String> = match &reference {
+                        Some(r) => pos
+                            .iter()
+                            .zip(r)
+                            .map(|(a, b)| format!("{:.3}", a.iter().zip(b).map(|(p, q)| (*p - *q).length()).fold(0.0f32, f32::max) * 1e3))
+                            .collect(),
+                        None => vec!["reference".into()],
+                    };
+                    let secs = |f: u32| f64::from(f) * 34.0 * 0.0005;
+                    println!(
+                        "     {setting:>16}: first asleep after s {}; wakes {:?}; asleep at the end {} of {nv}; ms a frame first 30 / last 60 {early:.2} / {late:.2}; energy {:.3} kJ; largest node difference a car, mm: {}; path split {}",
+                        first.iter().map(|f| f.map_or("-".to_string(), |f| format!("{:.2}", secs(f)))).collect::<Vec<_>>().join(" "),
+                        wakes,
+                        asleep.iter().filter(|a| **a).count(),
+                        energy * 1e-3,
+                        diff.join(" "),
+                        x.self_split_used(),
+                    );
+                    reference.get_or_insert(pos);
+                }
+                x.restore(&snap);
+                x.set_sleep(false);
+                x.set_sleep_config(was.1);
+                if was.0 {
+                    x.set_sleep(true);
+                }
+                x.wait();
+                if from_fixture.is_some() {
+                    std::process::exit(0);
                 }
             }
             // `--ab-profile`: the frame as it runs now, by dispatch kind (time only): 10
@@ -1294,6 +1482,11 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 x.frame(34);
                 x.wait();
                 x.restore(&snap);
+                if sleeplist_ab {
+                    // (The listing's switch asks for a new contact plan, which the
+                    // restored snapshot's planner state forgot.)
+                    switch(x, on, &labels);
+                }
                 x.wait();
                 // (AB_GAP_MS=n: the GPU idle n ms before each frame, as a display's frame
                 // loop leaves it; the frames' own time alone is summed.)
@@ -1319,10 +1512,18 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 if env_u("AB_COUNTS", 0) != 0 {
                     println!("     counts ({}): {:?}", if on { "on" } else { "off" }, x.contact_group_counts());
                 }
+                // (Vehicle sleep's own words, before the switch is put back: the records,
+                // the anchors. Not for the sleep switch itself, which they are.)
+                let sleep_words = if sleep_ab { Vec::new() } else { x.sleep_words() };
+                if std::env::var("AB_SLEEP_STATES").is_ok() {
+                    println!("     sleep ({}): {:?}, split path used {}", if on { "on" } else { "off" }, x.sleep_states(), x.self_split_used());
+                }
                 // The switch's own header bit back, so the words compare the state alone.
                 switch(x, true, &labels);
                 x.wait();
-                out.push((ms, x.state_words(), x.coupling_words()));
+                let mut extra = x.coupling_words();
+                extra.extend(sleep_words);
+                out.push((ms, x.state_words(), extra));
             }
             // The vehicle-contact plan's records are planning state, as in
             // tests/explicit_vehicles.rs: a vehicle's "big" flag is whichever vehicle
@@ -1377,6 +1578,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     "this kernel (on) / --ab-kernel-dir's (off)"
                 } else if groupsplit_ab {
                     "group split"
+                } else if sleep_ab {
+                    "vehicle sleep"
+                } else if sleeplist_ab {
+                    "sleep listing"
                 } else if wide_ab {
                     "wide passes"
                 } else if perf_ab.is_some() {
@@ -1401,7 +1606,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             );
             // (Wide against the workgroup frame: the two keep different scratch in the
             // accumulators and misc records; the nodes, beams and groups are the state.)
-            let physics = out[0].1.iter().zip(&out[1].1).filter(|((n, _), _)| ["nodes", "beams", "groups"].contains(n)).all(|((_, a), (_, b))| a == b);
+            // (And vehicle sleep's own words, when it is on: the records and anchors.)
+            let physics = out[0].1.iter().zip(&out[1].1).filter(|((n, _), _)| ["nodes", "beams", "groups"].contains(n)).all(|((_, a), (_, b))| a == b)
+                && out[0].2.iter().zip(&out[1].2).filter(|((n, _), _)| n.starts_with("sleep")).all(|((_, a), (_, b))| a == b);
             if wide_ab {
                 println!("   wide: nodes, beams and groups bit for bit: {physics}");
             }
@@ -1435,8 +1642,21 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         lab.before_step(&mut world)?;
         let t = std::time::Instant::now();
         world.step()?;
-        world.poll_blocking()?;
+        let frames = world.poll_blocking()?;
         let ms = t.elapsed().as_secs_f64() * 1e3;
+        // Vehicle sleep: each car's first sleep, its wakes, and who sleeps now.
+        for e in frames.iter().flat_map(|f| f.explicit_sleep.iter()) {
+            let v = e.vehicle as usize;
+            if sleep_log.len() <= v {
+                sleep_log.resize(v + 1, (None, 0, false));
+            }
+            if e.asleep {
+                sleep_log[v].0.get_or_insert(lab.bench.t);
+            } else {
+                sleep_log[v].1 += 1;
+            }
+            sleep_log[v].2 = e.asleep;
+        }
         alt[usize::from(odd)].0 += ms;
         alt[usize::from(odd)].1 += 1;
         // With `--timing step|phases`: this step's GPU time, the vehicles' part of it (the
@@ -1579,8 +1799,16 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         total += ke + pe;
                         per.push(format!("{:.0}+{:.0}", ke * 1e-3, pe * 1e-3));
                     }
-                    println!("   energy kJ (kinetic+potential a car): {}; total {:.0}", per.join(" "), total * 1e-3);
+                    println!("   energy kJ (kinetic+potential a car): {}; total {:.3}", per.join(" "), total * 1e-3);
                 }
+            }
+            if world.explicit_vehicle_sleep().is_some() {
+                println!(
+                    "   vehicle sleep: asleep {}; first slept at s {}; wakes {:?}",
+                    sleep_log.iter().map(|s| if s.2 { "1" } else { "0" }).collect::<Vec<_>>().join(""),
+                    sleep_log.iter().map(|s| s.0.map_or("-".to_string(), |t| format!("{t:.2}"))).collect::<Vec<_>>().join(" "),
+                    sleep_log.iter().map(|s| s.1).collect::<Vec<_>>()
+                );
             }
             if lab.bench.debris.ttl.is_some() || lab.bench.debris.pieces > 0 {
                 let d = &lab.bench.debris;

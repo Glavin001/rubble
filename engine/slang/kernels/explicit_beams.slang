@@ -6752,7 +6752,14 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
     // Vehicle sleep, awake-indexed: the workgroup's awake vehicle (or contact group).
     bool sleepListed = gP.sleepRec != 0u && gP.sleepPad0 != 0u;
+#ifdef EB_SOLO_STEP
+    // (A step a dispatch: the entry picked the workgroup's vehicle, sleepPick, and gave
+    // it as gid.x; past the awake vehicles, the one workgroup a dispatch keeps when none
+    // is awake: nothing to step.)
+    if (sleepListed && v >= gP.vehicles) return ebLoopCapFlush();
+#else
     if (sleepListed) v = sleepPick(gid.x, lane);
+#endif
 #ifdef EB_VV_SOLO
 #ifdef EB_VV_GROUPS
     // Workgroups past the vehicles step the contact groups (one dispatch: groups
@@ -7376,8 +7383,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
     {
         // Not the last step (its closing barrier passed): the hit flag and the pair
-        // list's state for the next.
+        // list's state for the next, and this step's motion for the frame end's sleep
+        // rule.
         soloStepSave(v, lane);
+        if (sleepOn) sleepMark(v, sleepMove);
         return ebLoopCapFlush();
     }
 #endif
@@ -7475,6 +7484,12 @@ void explicit_beams_wide_begin(uint3 id : SV_DispatchThreadID)
 {
     uint v = id.x;
     if (v >= gP.vehicles) return ebLoopCapFlush();
+    // (Vehicle sleep: a sleeping vehicle is not stepped; no rebase.)
+    if (sleepAsleep(v))
+    {
+        gMisc[gP.wideMisc + 1u + v] = uint4(0u, 0u, 0u, 0u);
+        return ebLoopCapFlush();
+    }
     Vehicle x = vehicleAt(v);
     float3 first = gNodes[x.nodeOff * 3u].xyz;
     float3 shift = length(first) > REBASE_RADIUS ? first : float3(0.0, 0.0, 0.0);
@@ -7526,6 +7541,7 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_Gr
     {
         uint4 info = gStatic[gP.nodeInfoBase + i];
         uint v = info.w;
+        if (sleepAsleep(v)) return ebLoopCapFlush();
         Vehicle x = vehicleAt(v);
         float3 origin = vehicleOrigin(v);
         bool centred = gP.centredDv != 0u && (x.flags & FLAG_CENTRED) != 0u;
@@ -7534,9 +7550,14 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_Gr
         nodeUpdate(i, info, v, i - x.nodeOff, vehicleStep(v), origin, x.flags, x.ground, x.boxOff, x.boxCount,
                    x.beamOff, x.groupOff, x.groupCount, true);
         if (centred) centredDelta(i, v0);
+        // Vehicle sleep: this step's motion (with centred damping, after its correction:
+        // wide_centred_nodes), as the frame's sleepTrack after its node phase.
+        if (gP.sleepRec != 0u && !centred) sleepMarkNode(v, i);
         return ebLoopCapFlush();
     }
     i -= gP.totalNodes;
+    // (Vehicle sleep, a lone vehicle: asleep, nothing of its step runs.)
+    if (sleepAsleep(0u)) return ebLoopCapFlush();
     if (i < gP.groupTotal)
     {
         // Every vehicle has the same step parity.
@@ -7570,6 +7591,7 @@ void explicit_beams_wide_centred_beams(uint3 id : SV_DispatchThreadID)
     uint j = id.x;
     if (j >= gP.totalBeams) return;
     uint v = gStatic[gP.beamBase + j * 3u].z >> 16;
+    if (sleepAsleep(v)) return;
     uint flagsV = vehicleAt(v).flags;
     if ((flagsV & FLAG_CENTRED) != 0u) centredBeam(j, (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u);
 }
@@ -7581,9 +7603,14 @@ void explicit_beams_wide_centred_nodes(uint3 id : SV_DispatchThreadID)
     uint i = id.x;
     if (i >= gP.totalNodes) return ebLoopCapFlush();
     uint v = gStatic[gP.nodeInfoBase + i].w;
+    if (sleepAsleep(v)) return ebLoopCapFlush();
     Vehicle x = vehicleAt(v);
     if ((x.flags & FLAG_CENTRED) != 0u)
+    {
         centredNode(i, x.beamOff, x.groupOff, x.groupCount, (vehicleStep(v) + 1u) & 1u);
+        // (Vehicle sleep: the node's motion after the correction.)
+        if (gP.sleepRec != 0u) sleepMarkNode(v, i);
+    }
     ebLoopCapFlush();
 }
 
@@ -7613,6 +7640,7 @@ void wideGeoThread(uint gt)
 {
     if (gt >= gP.totalTris || gP.triGeo == 0u) return;
     uint v = gStatic[gP.triBase + gt].w;
+    if (sleepAsleep(v)) return;
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
     if (r2.y == 0u) return;
@@ -7638,6 +7666,7 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
     if (i < gP.totalBeams)
     {
         uint v = gStatic[gP.beamBase + i * 3u].z >> 16;
+        if (sleepAsleep(v)) return ebLoopCapFlush();
         Vehicle x = vehicleAt(v);
         beamUpdate(i, i - x.beamOff, (x.flags & FLAG_FAST_INV_SQRT) != 0u, x.groupOff, vehicleStep(v) & 1u);
         return ebLoopCapFlush();
@@ -7656,7 +7685,7 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
         uint h = gLists[pos];
         uint v = gStatic[gP.nodeInfoBase + h].w;
         float cell = asfloat(gVt.rec[v * 4u + 3u].w);
-        if (cell > 0.0)
+        if (cell > 0.0 && !sleepAsleep(v))
         {
             float3 p = gNodes[h * 3u].xyz;
             uint b = gridBucket(int3(floor(p / cell)));
@@ -7678,7 +7707,7 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
         // beams).
         uint v = gStatic[gP.triBase + i].w;
         Vehicle x = vehicleAt(v);
-        if (x.candCount == 0u) return ebLoopCapFlush();
+        if (x.candCount == 0u || sleepAsleep(v)) return ebLoopCapFlush();
         int w = wideStep() > 0u ? triangleFinish(i) : asint(gMisc[gP.vehicles + i].x);
         if (w <= 0)
         {
@@ -7696,6 +7725,7 @@ void grabApplyWide()
     uint4 g = gMisc[grabRec()];
     if (g.x == 0u || g.y >= gP.totalNodes) return;
     uint v = gStatic[gP.nodeInfoBase + g.y].w;
+    if (sleepAsleep(v)) return;
     Vehicle x = vehicleAt(v);
     grabApply(x.nodeOff, x.nodeCount, vehicleOrigin(v));
 }
@@ -7754,7 +7784,7 @@ void explicit_beams_wide_tris(uint3 id : SV_DispatchThreadID)
     if (gt >= gP.totalTris) return ebLoopCapFlush();
     uint v = gStatic[gP.triBase + gt].w;
     Vehicle x = vehicleAt(v);
-    if (x.candCount == 0u) return ebLoopCapFlush();
+    if (x.candCount == 0u || sleepAsleep(v)) return ebLoopCapFlush();
     uint step = vehicleStep(v);
     uint k = gt - x.triOff;
     if (k >= uint(gAcc[gP.testedBase + v * 2u + (step & 1u)].load())) return ebLoopCapFlush();
@@ -7777,6 +7807,11 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 {
     uint v = gid.x;
     uint lane = lid.x;
+    // Vehicle sleep: a sleeping vehicle is not stepped.
+    if (gP.sleepRec != 0u)
+    {
+        if (sleepSkip(v, lane)) return ebLoopCapFlush();
+    }
     Vehicle x = vehicleAt(v);
     uint parity = vehicleStep(v) & 1u;
     if (lane == 0u)
@@ -7831,7 +7866,7 @@ void explicit_beams_wide_end(uint3 id : SV_DispatchThreadID)
     if (i < gP.totalTris)
     {
         uint v = gStatic[gP.triBase + i].w;
-        if (gStatic[v * 4u + 2u].y > 0u) triangleFinish(i);
+        if (gStatic[v * 4u + 2u].y > 0u && !sleepAsleep(v)) triangleFinish(i);
         return;
     }
     i -= gP.totalTris;
@@ -7839,7 +7874,7 @@ void explicit_beams_wide_end(uint3 id : SV_DispatchThreadID)
     {
         uint v = gStatic[gP.beamBase + i * 3u].z >> 16;
         Vehicle x = vehicleAt(v);
-        if (x.groupCount > 0u) groupDrops(i, x.beamOff, x.groupOff, (vehicleStep(v) - 1u) & 1u, true);
+        if (x.groupCount > 0u && !sleepAsleep(v)) groupDrops(i, x.beamOff, x.groupOff, (vehicleStep(v) - 1u) & 1u, true);
     }
 }
 
@@ -7848,9 +7883,17 @@ void explicit_beams_wide_end(uint3 id : SV_DispatchThreadID)
 void explicit_beams_wide_close(uint3 id : SV_DispatchThreadID)
 {
     uint v = id.x;
-    if (v >= gP.vehicles) return;
+    if (v >= gP.vehicles) return ebLoopCapFlush();
+    // Vehicle sleep: a sleeping vehicle's step count stands; an awake one's frame-end rule
+    // (the frame's sleepSettle, on this thread).
+    if (gP.sleepRec != 0u)
+    {
+        if (sleepAsleep(v)) return ebLoopCapFlush();
+        sleepSettleOne(v, gP.steps);
+    }
     uint4 m = gMisc[v];
     gMisc[v] = uint4(m.xyz, m.w + wideStep());
+    ebLoopCapFlush();
 }
 
 // The rigid coupling's and the raycast wheels' part of a step in the wide passes: a
@@ -7865,6 +7908,11 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
     uint v = gid.x;
     uint lane = lid.x;
     uint s = wideStep();
+    // Vehicle sleep: a sleeping vehicle is not stepped.
+    if (gP.sleepRec != 0u)
+    {
+        if (sleepSkip(v, lane)) return ebLoopCapFlush();
+    }
     if (lane == 0u)
     {
         coupleBegin();
@@ -7908,6 +7956,11 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     uint v = gid.x;
     uint lane = lid.x;
     uint s = gP.pad2;
+    // Vehicle sleep: a sleeping vehicle is not stepped.
+    if (gP.sleepRec != 0u)
+    {
+        if (sleepSkip(v, lane)) return ebLoopCapFlush();
+    }
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
@@ -8451,6 +8504,10 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     gArgs[44] = larger ? groups : 0u;
     gArgs[45] = 1u;
     gArgs[46] = 1u;
+    // The plan's values of words 32 and 44, kept for vehicle sleep's awake list, which
+    // rewrites those arguments every frame (explicit_beams_sleep.slang).
+    gArgs[7] = gArgs[32];
+    gArgs[11] = gArgs[44];
 }
 
 void vvEmitPair(uint a, uint b)
