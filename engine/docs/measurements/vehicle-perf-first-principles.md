@@ -1292,3 +1292,52 @@ modules compiled before the first frame they run across the GPU from the first s
 The second run's later frames are slower (39–46 ms against 33–37): the fallback's
 modules were compiling behind it, and the two runs were not controlled against each
 other. 120 steps a second is not held: 11–14 steps a second, every other step refused.
+
+### 8.16 Per phase: before, floor, after (2026-11-16)
+
+Native M3 Max, ms a frame of 34 substeps. "Before": the start of this work (§7.1, the
+8-car column §8.11/§8.12's first table). "Floor": §8.1's cost model for the phase as a
+dependent dispatch across the GPU, 34 × (2.5–5 µs a dispatch + its longest thread's
+chain at ≈0.2 µs a scattered access); a phase that needs k dependent sub-phases is k
+times that. "Within 2×" is against the floor's upper figure.
+
+**One car** (wreck at rest, the wide schedule; §8.9's per-pass profile; no change in §8.15):
+
+| phase | before | floor | after | within 2× | why not |
+|---|---|---|---|---|---|
+| self-collision: list, walk, pairs (3 dispatches) | ≈2.9 (in the workgroup) | 0.3–0.5 | 2.6 | no | the list kernel is 65 µs a dispatch: the reuse decision, tracking and throttles are barrier phases of one workgroup, not threads over elements |
+| hits applied, with the tyres | 2.1 | 0.3–0.6 (five dependent sub-phases of the residual pass) | 2.4 with the tyres' 0.6 | no | ≈90 atomics a hit on one thread (0.25 µs each, §8.7): 22 µs a hit's chain |
+| nodes | 0.6 | 0.1–0.2 | 0.9 with the coupling's fold | no | a node's record is ≈12 scattered loads; the streamed record of §3.4 is not built |
+| beams | 0.4–0.5 | 0.1–0.2 | 0.5 | no (2.5×) | a beam's record and two nodes' loads |
+| dispatches, frame start and end | 0.5 | 0.1 | ≈0.4 (≈10 dispatches a substep) | no | count of dispatches, 2.5–5 µs each |
+| **frame, worst of the 40 s run** | 7.37 | 1.2–1.5 (§7.2) | **6.00** | no | |
+
+**Eight cars in a pile** (t 12 s, one contact group of eight; §8.15's profile, a kind's
+34 dispatches):
+
+| phase | before | floor | after | within 2× | why not |
+|---|---|---|---|---|---|
+| contact tests: triangles' walk | ≈190 (in `vvPass`, one core) | 0.2–0.4 (a thread a listed triangle's cell) | 11.2 | no | 4,160 triangles share 32,768 threads in whole parts; a part still scans up to ≈450 candidates (every candidate of a box over 64 cells) |
+| every car's step | ≈40 (one after another) | as one car's frame, 1.2–1.5 (the wide schedule over the fleet) | 7.7 | no | members step a workgroup each, not on the fleet-wide passes |
+| contact front (scans, candidates, grids) | in the pass | 0.2–0.4 | 6.9 | no | one workgroup a group: 4,224 triangles' box tests and 4,384 points' gather on one core |
+| levels (hits applied) | in the pass | 0.2–0.4 a level in use | 2.6 | no | one workgroup a group; ≈8 barrier phases a level |
+| contact tests: listed pairs | in the pass | 0.2 | 2.1 | no | 56 µs a dispatch of 64 workgroups a group, most of them idle |
+| **frame, worst of the 40 s run** | 553 | 2–3 | **41.7** | no | |
+
+No phase is within twice its floor. None of the "why not" entries is a physical limit:
+each names work that still runs on one core or as barrier phases of one workgroup. The
+exception already recorded is the one-car crash frame's floor itself (§7.2: 1.2–1.5 ms,
+above the 1.0 ms target on this GPU). What the gap is made of, in order of size: for
+eight cars the walk's parts (a finer split, or the candidates culled by the 0.75 m grid
+the larger groups' pass has), the members' steps on the wide passes, the front's scans
+on the tests' dispatch; for one car the list kernel and the hits' atomics.
+
+Worst and p95 per car count, whole 40 s run, vehicle GPU ms a World step (t ≥ 0.5 s):
+
+| cars | native median / p95 / worst | Chrome median / p95 / worst | steps a second (Chrome), refused |
+|---|---|---|---|
+| 1 | 5.57 / 5.76 / 6.00 (§8.9) | 5.08 / 5.49 / 6.05–6.23 (§8.9) | the World's 60 held, 14–17 refused in the first second (§8.7) |
+| 8 | 31.5 / 39.2 / 41.7 | 41.0 / 46.1 / 51.1 | 11–14 of the World's 60, 8,100 of 10,400 refused |
+
+(These pages ran the World at its default 60 steps a second. The brief's 120 steps a
+second was not run: at 31–41 ms a step eight cars hold neither.)
