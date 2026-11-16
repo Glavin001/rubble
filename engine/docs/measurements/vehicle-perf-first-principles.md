@@ -1810,3 +1810,27 @@ this work's flags, and with flag 256 alone and no fleet kernel in use) the tests
 diverge from frames 0 to 5, each on its own device. One at a time
 (`--test-threads=1`) all pass. Zeroing the split pipelines' workgroup memory does not
 change it. Cause not found; the new test is in a file of its own (`fleet_contact_gpu`).
+
+### 8.26 Whole runs with the fleet-wide front and the one-car switches merged (2026-11-16)
+
+After §8.23 (one car's two switches) and §8.25 (vehicle contact's state by owner
+vehicle, its front and tests as fleet-wide dispatches) were merged and checked here
+(all 18 fixtures bit for bit for each set of switches; 13 suites; 116 modules validate
+in Chrome). Vehicle GPU ms a World step, whole 40 s run, t ≥ 0.5 s:
+
+| | median | p95 | worst | before these merges (§8.24) |
+|---|---|---|---|---|
+| 8 cars, native | 17.5 | 18.2 | 24.2 | 26.7 / 28.1 / 32.0 |
+| 8 cars, Chrome (page visible, 50 s simulated) | 16.8 | 20.5 | 26.9 | 23.5 / 25.8 / 32.4 |
+| 1 car, native | 4.77 | 5.03 | 5.30 | 5.03 / 5.33 / 5.66 (the same scene, switches off) |
+
+From the start of this work: eight cars 312 / 534 / 553 native (understated by §8.18's
+bug), one car 6.71 / 6.94 / 7.37. The targets (3 ms and 1 ms worst) are not met: eight
+cars are 8 times the target, one car 5 times. Chrome takes about 17 World steps a second
+with eight cars (7,740 of 10,770 steps refused).
+
+Where the eight-car frame is now (§8.25's profile at t 9 s, 16.3 ms): the cars' own
+steps 5.8, the levels 3.3, the front 2.6, members' self-collision hits 1.7, the walk
+1.8, listed pairs 0.8, self pairs and walk 1.4. Thirty-two cars are unchanged
+(139–270 ms): a group past eight members still takes the larger groups' pass on one
+core, which the next stage removes.
