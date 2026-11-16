@@ -49,6 +49,13 @@ runs:
       run: |
         bash engine/scripts/build-ffi.sh
         bash .github/scripts/slang-cache-digest.sh
+    - name: What macOS logged about Metal's compiler
+      # wgpu's error for a pipeline Metal could not build is only "Compilation
+      # failed"; the reason (a compiler crash, a memory kill, the virtual GPU's
+      # timeout) is in the system log.
+      if: failure() && runner.os == 'macOS'
+      shell: bash
+      run: bash engine/scripts/metal-compiler-log.sh 5
     - name: Upload the package
       uses: actions/upload-artifact@v4
       with:
