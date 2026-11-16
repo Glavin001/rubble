@@ -181,9 +181,23 @@ pub const PARAM_COPIES: u32 = 129;
 /// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 the pair
 /// list's build records, 92 its margin ([`W_PAIR_REUSE`]), 93 its backoff
 /// ([`W_PAIR_STREAK`]), 94 its piece labels ([`W_PIECE_BASE`]), 95 the retired nodes
-/// ([`W_RETIRE_BASE`]), 96 the beam phase's sorted records ([`W_BEAM_ORDER`]), 97–99
-/// padding).
-pub const PARAM_WORDS: usize = 100;
+/// ([`W_RETIRE_BASE`]), 96 the beam phase's sorted records ([`W_BEAM_ORDER`]), 97 the
+/// second ablation mask, 98 [`W_PERF_FLAGS`], 99–101 vehicle contact's own scratch
+/// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`])).
+pub const PARAM_WORDS: usize = 102;
+/// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
+/// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
+/// dispatches at its first member's. 0 for a fleet of one vehicle (no group forms).
+pub const W_VV_SCRATCH: usize = 99;
+/// Params word: the same in gNext (the kernel's `vvScratchOff`, `splitVvOffAt`): per
+/// vehicle `GRID_BUCKETS + 1` words, a group's candidate grid's offsets.
+pub const W_VV_SCRATCH_OFF: usize = 100;
+/// Params word: vehicle contact's listed (triangle, candidate) pairs in gNext (the
+/// kernel's `vvTriPairs`, `vvTriPairsAt`): per vehicle 2 × [`TRI_PAIR_CAP`] words. 0:
+/// none (one vehicle, or no self-collision pair list: the pass tests in its walk).
+/// Apart from the vehicles' own self-collision pair lists (word 90), which a contact
+/// group's member may keep from one substep to the next.
+pub const W_VV_TRI_PAIRS: usize = 101;
 /// Params word: the beam phase's records sorted by kind in gStatic (the kernel's
 /// beamOrder; 0: the beams in file order, beamUpdate for each). Per vehicle a header
 /// (entries, hot entries, its first incidence position, 0), then from record
@@ -2215,6 +2229,15 @@ impl ExplicitUpload {
         misc.extend(std::iter::repeat_n([0u32; 4], total_nodes.div_ceil(32).max(1)));
         let piece_box_rec = misc.len() as u32;
         misc.extend(std::iter::repeat_n([0u32; 4], PIECE_BOX_RECS * nv.max(1)));
+        // Vehicle contact's own scratch ([`W_VV_SCRATCH`]; before the loop-cap flag, which
+        // stays gAcc's last word).
+        let vv_scratch = if nv > 1 {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, nv * WIDE_GRID_BUCKETS));
+            at
+        } else {
+            0
+        };
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -2258,6 +2281,22 @@ impl ExplicitUpload {
         let piece_base = if pair_build != 0 {
             let at = next_len as u32;
             next_len += total_nodes * (1 + PIECE_GROUPS) + nv + total_tris;
+            at
+        } else {
+            0
+        };
+        // Vehicle contact's own scratch in gNext ([`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`];
+        // scratch, after every other region).
+        let vv_scratch_off = if nv > 1 {
+            let at = next_len as u32;
+            next_len += nv * (WIDE_GRID_BUCKETS + 1);
+            at
+        } else {
+            0
+        };
+        let vv_tri_pairs = if nv > 1 && tri_pairs != 0 {
+            let at = next_len as u32;
+            next_len += nv * 2 * TRI_PAIR_CAP;
             at
         } else {
             0
@@ -2483,6 +2522,9 @@ impl ExplicitUpload {
         ];
         let mut words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         words[W_PERF_FLAGS] = perf_flags_default();
+        words[W_VV_SCRATCH] = vv_scratch;
+        words[W_VV_SCRATCH_OFF] = vv_scratch_off;
+        words[W_VV_TRI_PAIRS] = vv_tri_pairs;
         let total = [
             total_nodes as u32,
             total_beams as u32,

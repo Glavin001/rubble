@@ -287,7 +287,17 @@ struct Params
     // Lossless schedule switches (explicit_plan::W_PERF_FLAGS; the same results bit for
     // bit either way): 1 selfApply's node forces once a hit and role (hitFbFill).
     uint perfFlags;
-    uint beamOrderPad2;
+    // Vehicle contact's own scratch on the split group path (explicit_plan's
+    // W_VV_SCRATCH, W_VV_SCRATCH_OFF, W_VV_TRI_PAIRS; fleets of two vehicles or more, else
+    // 0): per vehicle GRID_BUCKETS words of gAcc and GRID_BUCKETS + 1 of gNext (a group's
+    // counters and grid offsets between its pass's dispatches, at its first member's:
+    // splitVvAt, splitVvOffAt), and per vehicle 2 · TRI_PAIR_CAP words of gNext, the
+    // pass's listed (triangle, candidate) pairs of that owner (vvTriPairsAt; 0: no list).
+    // Apart from the members' own self-collision regions (triPairsAt, gridCountBase,
+    // gridOffBase), which a member's step may keep from one substep to the next.
+    uint vvScratch;
+    uint vvScratchOff;
+    uint vvTriPairs;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -10647,11 +10657,13 @@ void vvTriangleCandsBigGrid(uint va, uint gt, uint sub, uint subs, uint runOff, 
 // --- The triangle tests as a pair list (lossless) ---
 // The triangles' tests ran on the lane that walked the triangle: a few triangles in the
 // crush hold most candidates, and the step waited for their lanes. With the pair list
-// (the members' own self-collision pair regions, triPairsAt: unused in a group's frame),
+// (a region of its own per owner, vvTriPairsAt: the member's self-collision pair region,
+// triPairsAt, stays the member's),
 // the walk only lists the (triangle, candidate) pairs its box test passes, and after a
 // barrier the lanes test the pairs, one each: the same tests, the same hits (applied in
 // the canonical order), the same marks. An owner whose list overflows TRI_PAIR_CAP tests
 // inline (vvTriangleCandsGrid) instead.
+uint vvTriPairsAt(uint v) { return gP.vvTriPairs + v * 2u * TRI_PAIR_CAP; }
 static const uint VV_PAIR_RUN = 0x80000000u; // a candidate's index in its owner's run (else the sorted copy)
 void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r)
 {
@@ -10666,7 +10678,7 @@ void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint run
     float3 fs = floor(hi / cell) - f0 + float3(1.0, 1.0, 1.0);
     bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS))
                  || !(all(abs(f0) < 1.0e8));
-    uint at = triPairsAt(va);
+    uint at = vvTriPairsAt(va);
     bool cand = false;
     if (every)
     {
@@ -11063,7 +11075,7 @@ uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, u
 void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid)
 {
     // The tests as a pair list (with the grid and the members' pair regions).
-    bool vvList = vvGrid && gP.triPairs != 0u;
+    bool vvList = vvGrid && gP.vvTriPairs != 0u;
     if (vvList)
     {
         if (lane < VV_PART) gsPairCountM[lane].store(0u);
@@ -11131,7 +11143,7 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
                 q -= n;
             }
             uint va = vvMember(off, a);
-            uint at = triPairsAt(va);
+            uint at = vvTriPairsAt(va);
             vvPairTest(a, va, gNext[at + 2u * q], gNext[at + 2u * q + 1u], runOff, points, asfloat(gStatic[va * 4u + 3u].z));
         }
         uint over = 0u;

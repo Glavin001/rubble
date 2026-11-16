@@ -174,14 +174,15 @@ static const uint SPLIT_STEP = 0x0FFFFFFFu;
 // Workgroups per group of the tests' dispatches (the host's SPLIT_TEST_WGS).
 static const uint SPLIT_TEST_WGS = 64u;
 
-// Group g's scratch for the tests across workgroups: its first member's wide-pass grid
-// counts (gAcc, GRID_BUCKETS words) and grid offsets (gNext, GRID_BUCKETS + 1): that
-// member's own self-collision grid, dead from its step's end to the next step's start.
+// Group g's scratch for the tests across workgroups: GRID_BUCKETS words of gAcc and
+// GRID_BUCKETS + 1 of gNext at its first member's place in vehicle contact's own scratch
+// (gP.vvScratch, gP.vvScratchOff: not the member's self-collision grid words, which hold
+// a solo step's saved pair-list state, soloStepAt).
 // Words of the counts: per owner its pairs (0..3), hits (4..7), fastest candidate (8..11),
 // listed triangles (12..15), candidates (16..19), offered (20..23), reset (24..27), fix
 // (28..31); the partner bits (32..47); the front's flags (48: bit 0 open, bit 1 the grid).
-uint splitVvAt(uint off) { return gP.gridCountBase + vvMember(off, 0u) * GRID_BUCKETS; }
-uint splitVvOffAt(uint off) { return gP.gridOffBase + vvMember(off, 0u) * (GRID_BUCKETS + 1u); }
+uint splitVvAt(uint off) { return gP.vvScratch + vvMember(off, 0u) * GRID_BUCKETS; }
+uint splitVvOffAt(uint off) { return gP.vvScratchOff + vvMember(off, 0u) * (GRID_BUCKETS + 1u); }
 
 // The front's results out to the scratch (every lane; after the front's barriers).
 void splitVvExport(uint off, uint front, uint lane)
@@ -325,7 +326,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
     uint front = uint(gAcc[gVvC + 8u * VV_PART + VV_PART * VV_PART].load());
     if (front == 0u) return;
     bool vvGrid = (front & 2u) != 0u;
-    bool vvList = vvGrid && gP.triPairs != 0u;
+    bool vvList = vvGrid && gP.vvTriPairs != 0u;
     uint at0 = part * LANES + lane;
     uint stride = SPLIT_TEST_WGS * LANES;
     if ((word & SPLIT_LEVELS) == 0u)
@@ -386,7 +387,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
             q -= n;
         }
         uint va = vvMember(off, a);
-        uint at = triPairsAt(va);
+        uint at = vvTriPairsAt(va);
         vvPairTest(a, va, gNext[at + 2u * q], gNext[at + 2u * q + 1u], runOff, points, asfloat(gStatic[va * 4u + 3u].z));
     }
     uint over = 0u;

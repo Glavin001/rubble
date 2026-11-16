@@ -1819,7 +1819,7 @@ impl ExplicitBeamsGpu {
         let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
         let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
         let w = &self.planner.words;
-        let (nv, grid, groups, members) = (w[1] as usize, w[17] as usize, w[46] as usize, w[47] as usize);
+        let (nv, grid, groups, members) = (w[1] as usize, w[plan::W_VV_SCRATCH] as usize, w[46] as usize, w[47] as usize);
         (0..n)
             .map(|g| {
                 let rec = &misc[(groups + g) * 4..(groups + g) * 4 + 4];
