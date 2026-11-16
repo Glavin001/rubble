@@ -1,0 +1,42 @@
+name: Cache cleanup
+
+# The repository's Actions caches share one 10 GB limit; past it GitHub evicts the least
+# recently used, which on a quiet day is main's. Two kinds of cache are never read
+# again and are deleted here instead:
+#   - a closed pull request's (they are scoped to refs/pull/N/merge);
+#   - on main, every cache whose key was superseded: the same key up to its last
+#     segment (a hash of the inputs, or a run id), and a newer one exists.
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cache-cleanup-${{ github.event.pull_request.number || 'main' }}
+
+jobs:
+  cleanup:
+    name: Delete caches nothing reads
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          sparse-checkout: .github/scripts
+      - name: Delete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [[ "${{ github.event_name }}" == pull_request ]]; then
+            python3 .github/scripts/cache-cleanup.py --ref "refs/pull/${{ github.event.pull_request.number }}/merge" --all
+          else
+            python3 .github/scripts/cache-cleanup.py --ref refs/heads/main --superseded
+          fi
