@@ -1154,6 +1154,17 @@ impl ExplicitBeamsGpu {
             });
         }
         specs.sort_by(|a, b| b.wgsl.len().cmp(&a.wgsl.len()));
+        // The split group path's member module is the largest by far (209 s cold in
+        // Chrome on Metal) and runs only with self-collision split off: where the self
+        // split's modules are compiled too (its own members' step takes its place), it
+        // goes last, behind every module the default path waits for.
+        if !surface {
+            let member = split_module("member", aero, lanes);
+            if let Some(i) = specs.iter().position(|s| s.module == member) {
+                let spec = specs.remove(i);
+                specs.push(spec);
+            }
+        }
         specs
     }
 
