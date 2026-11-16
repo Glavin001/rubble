@@ -33,6 +33,8 @@ void flError(int code) { gAcc[vvCtl(VV_OVERFLOW)].max(code); }
 // side's partner bits, each vehicle's offered count, the resets.
 void flScanPair(uint p, uint parity)
 {
+    // (A later copy of a pair the plan's list holds twice: vvAdjBuild.)
+    if ((gNext[flBitsAt(2u * p)] & 4u) != 0u) return;
     float3 m3 = float3(VV_BOX_MARGIN, VV_BOX_MARGIN, VV_BOX_MARGIN);
     uint va = gNext[gP.vvPairs + 2u * p];
     uint vb = gNext[gP.vvPairs + 2u * p + 1u];
@@ -385,7 +387,8 @@ void flImport(uint off, uint k)
         {
             uint d = gNext[flAdjAt(e)];
             uint m = gMisc[vvRec(flPartner(d), VV_MEMBER)].x;
-            if (m < VV_PART) gsVvPair[a * VV_PART + m] = gNext[flBitsAt(d)];
+            uint bits = gNext[flBitsAt(d)];
+            if (m < VV_PART && (bits & 4u) == 0u) gsVvPair[a * VV_PART + m] = bits;
         }
     }
 }

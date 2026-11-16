@@ -313,6 +313,8 @@ impl MountainSpec {
         // The lid: a slab across the canyon on top of its walls (LID_UP m above the
         // chunk's line), so that nothing thrown up in a crash leaves the canyon. A part
         // over a wall had no ground and fell without end (past 1,000 km/h within a run).
+        if std::env::var("LAB_NO_LID").is_err()
+        {
         shapes.push(MountainShape {
             geom: RockGeom::Box {
                 half: Vec3::new(0.5 * w + 3.0, 0.5, 0.5 * l + 0.5),
@@ -322,6 +324,7 @@ impl MountainSpec {
             tag: LID_TAG,
             loose: false,
         });
+        }
         // Rocks on the slabs.
         let mut r = Rng::new(self.seed, k, 2);
         let total: f32 = segs.iter().map(|s| s.4).sum();

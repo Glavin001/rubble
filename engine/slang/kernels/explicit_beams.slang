@@ -5814,7 +5814,8 @@ uint flGridCount(uint v) { return gP.vvFleet + gP.vehicles * (FL_OWN + 1u) + v *
 uint flCtl(uint i) { return gP.vvFleet + gP.vehicles * (FL_OWN + 1u + 1024u) + i; }
 // gNext at vvFleetNext: the plan's adjacency (per vehicle its first entry, one more for
 // the end; then the entries: d = 2 · pair + side, the vehicle that side of the pair, its
-// partner the other, d ^ 1), then per d the step's bits (1 partners, 2 a fast approach)
+// partner the other, d ^ 1), then per d the step's bits (1 partners, 2 a fast approach;
+// 4, from the plan: a later copy of a pair the list holds twice, never a partner)
 // and the owner's two-body slot at the partner's points (its rank among that vehicle's
 // two-body partners of the step); then four words a vehicle plus one (0: its part of the
 // fleet-wide run, the prefix of the owners' offered counts; 1..3 the prefixes of the
@@ -8292,6 +8293,25 @@ void vvAdjBuild(uint lane, uint nv, uint pairs)
         gNext[flAdjAt(gNext[flAdjFirst(y)] + uint(gAcc[flAdjCount(y)].add(1)))] = 2u * p + 1u;
     }
     sync();
+    // The pair list may hold a pair twice (a vehicle twice in one bucket of the vehicle
+    // grid, two of its cells there: vvFindPairs then meets it twice in a cell). The
+    // grouping does not mind; the owners' partners must be each once, or a partner's
+    // contact points would be candidates twice and its hits applied twice. A later copy
+    // of a pair is marked in its bits words (4: flScanPair leaves it, never a partner).
+    for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
+    {
+        uint x = gNext[gP.vvPairs + 2u * p];
+        uint y = gNext[gP.vvPairs + 2u * p + 1u];
+        uint dup = 0u;
+        uint e1 = gNext[flAdjFirst(x + 1u)];
+        for (uint e = gNext[flAdjFirst(x)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
+        {
+            uint d = gNext[flAdjAt(e)];
+            if ((d >> 1u) < p && flPartner(d) == y) dup = 4u;
+        }
+        gNext[flBitsAt(2u * p)] = dup;
+        gNext[flBitsAt(2u * p + 1u)] = dup;
+    }
 }
 uint vvSum(uint g, uint k) { return gP.vvLabel + gP.vehicles + g * 3u + k; }
 
@@ -9497,7 +9517,8 @@ void vvSplitClear(uint off, uint k, uint slots, uint lane)
             gAcc[vvSplitTri(r0.x + i)].store(0);
             for (uint sl = 0u; sl < VV_PART; sl++)
             {
-                if (sl < slots) gAcc[vvSplitPoint(sl, r0.x + i)].store(0);
+                // (The slot's own word, whatever the owners' addressing.)
+                if (sl < slots) gAcc[gP.vvSplit + (1u + sl) * gP.totalNodes + r0.x + i].store(0);
             }
         }
     }
