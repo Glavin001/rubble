@@ -412,6 +412,11 @@ fn self_split_modules(aero: bool, lanes: u32, vv: bool) -> Vec<(String, &'static
     }
 }
 
+/// The wide passes' list module for a fleet at `lanes` (wide fleets have no aero).
+fn wide_list_module(lanes: u32) -> &'static str {
+    if lanes == 512 { "explicit_beams_selfsplit_list_wide" } else { "explicit_beams_selfsplit_list" }
+}
+
 /// The self split's step layout: the split group path's entries and the indirect
 /// arguments at binding 10 (storage).
 fn self_split_step_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
@@ -1131,6 +1136,19 @@ impl ExplicitBeamsGpu {
                     deferred: true,
                 });
             }
+        }
+        // The wide passes' reused pair list (explicit_beams_wide_list), deferred as the
+        // self split's: wide frames walk their own grid until it is compiled.
+        if !surface && !aero && layout.wide_ok {
+            let name = wide_list_module(lanes);
+            specs.push(crate::ComputeSpec {
+                label: "explicit_beams_wide_list",
+                module: name,
+                wgsl: u(module_wgsl(name)),
+                entry: "explicit_beams_wide_list",
+                layout: Some(self_split_step_entries()),
+                deferred: true,
+            });
         }
         specs.sort_by(|a, b| b.wgsl.len().cmp(&a.wgsl.len()));
         specs
@@ -3234,7 +3252,8 @@ impl ExplicitBeamsGpu {
             && steps > 0
             && !self.planner.has_surface()
             && self.variant == KernelVariant::Current
-            && self.self_split_ready(false);
+            && self.self_split_ready(false)
+            && crate::pipeline_ready(wide_list_module(self.module_kind.2));
         self.wide_list_frame.set(if wl { steps } else { 0 });
         if wl {
             let stride = PARAM_STRIDE as usize;

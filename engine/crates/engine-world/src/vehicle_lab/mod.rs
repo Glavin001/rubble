@@ -2446,6 +2446,24 @@ impl Lab {
             }
             return Ok(json!({ "selfSplitSkip": n }));
         }
+        // { wide: bool, wideList: bool }: the vehicles' frame as the fleet-wide passes
+        // (ExplicitBeamsGpu::set_wide: a thread an element over every car, a few dispatches
+        // a step) and, with them, the reused pair list (set_wide_list); the same results
+        // bit for bit. Frames with car-to-car contact, sleep or surface contact keep a
+        // workgroup a car. Returns whether the wide passes can run this fleet.
+        if cmd.get("wide").is_some() || cmd.get("wideList").is_some() {
+            let mut got = false;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                if let Some(on) = cmd.get("wideList").and_then(Value::as_bool) {
+                    x.set_wide_list(on);
+                }
+                got = match cmd.get("wide").and_then(Value::as_bool) {
+                    Some(on) => x.set_wide(on),
+                    None => x.is_wide(),
+                };
+            }
+            return Ok(json!({ "wide": got }));
+        }
         // { perfFlags: n }: the kernels' lossless schedule switches
         // (ExplicitBeamsGpu::set_perf_flags, explicit_plan::PERF_*: the same results bit
         // for bit either way), from the next step.

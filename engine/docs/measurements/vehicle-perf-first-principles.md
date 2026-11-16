@@ -938,3 +938,31 @@ tried at that level (the list as a small kernel: 0.5–0.9 ms; hits packed: noth
 gain is real where the model applies and absent where it does not. (3) 1.0 ms itself is
 under the measured cost of four dependent dispatches a substep (§7.2); 1.2–1.6 ms is what
 the model supports for this car.
+
+### 8.7 After the stop: atomics measured, the wide schedule in Chrome (2026-11-15)
+
+**Atomics** (`examples/gpu_atomic_cost.rs`, one 512-lane workgroup, µs a phase per
+operation a lane, 4–64 lanes active): a plain load at a scattered address 0.17–0.26, an
+`atomicLoad` 0.21–0.24, an `atomicAdd` 0.25–0.28 (the same when every lane hits the same
+eight words), a plain store 0.10. So an atomic costs about what a scattered load does, and
+loads of one record's neighbouring words cost almost nothing: the unit of §8.1 is a
+scattered access, not a load. That is why packing a hit's own words (§8.6) gained nothing:
+a hit's cost is its ≈90 atomics and its four nodes' scattered records, about 30 µs a step
+of `selfApply`'s 35.
+
+**The wide schedule in Chrome** (the page's new "fleet-wide passes" and "with the reused
+pair list" switches, live; headless, the 1-car mountain, 42 s, vehicles' GPU ms a step
+from t 0.5 s, two rounds interleaved):
+
+| Path | median / p95 / worst |
+|---|---|
+| A workgroup a car, self split on (default) | 5.92 / 6.35 / 6.80 (the first round after a new build: 7.97 / 9.62 / 12.34) |
+| Wide passes with the list | 7.40 / 7.85 / 8.49 and 7.65 / 8.12 / 8.79 |
+
+**In Chrome the wide schedule is 1.5 ms slower**, where natively it is 0.1–0.45 ms
+faster. It runs about 240 dispatches a frame against the default's 103; the difference is
+about 11 µs a dispatch more in Chrome than natively (Dawn's validation of each dispatch
+and of each indirect one, Tint's zeroing of the list and aux kernels' workgroup arrays on
+every dispatch: not split here). So by the brief's rule the wide schedule stays off, and
+its design needs a Chrome dispatch-cost measurement with these kernels before more passes
+move to it: fewer, fatter dispatches there, or kernels without workgroup arrays.
