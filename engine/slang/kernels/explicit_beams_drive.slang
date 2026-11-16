@@ -984,6 +984,176 @@ void driveTyresPost(uint v, uint w, uint step)
     for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++) drvTyrePost(v, vr, k, step);
 }
 
+// --- perfFlags bit 2097152 (explicit_plan::PERF_TYRE_EARLY, with PERF_TYRE_AHEAD): a
+// wheel's second part loaded before the step's hits ---
+// drvTyrePost reads, besides its hubs' accumulators (accForce), only what nothing in the
+// hits kernel after its first barrier writes: its first part's records (the list
+// dispatch's), the wheel's record, the hub nodes' masses and beam sums (the beam phase's
+// incidence entries and group state; resolvePending ran before that barrier, and selfApply
+// writes neither). With the wheels apart (wheel w on lane 255 - w, its own records), the
+// lane loads all of that while the other lanes apply the hits (drvTyreLoad), and after
+// them reads the accumulators and runs the rest (drvTyreFinish): drvTyrePost's arithmetic
+// on the same bits in the same order (drvForceNow's `beam sum + accForce`, as written
+// there). Not apart: drvTyrePost as before.
+struct DrvPostIn
+{
+    bool ok;
+    uint p;
+    uint wr;
+    uint4 w0;
+    uint nodeOff;
+    float4 p0;
+    float4 p1;
+    float4 p2;
+    float4 p3;
+    float4 p4;
+    float4 p5;
+    float4 p6;
+    float4 p7;
+    float3 b1;
+    float3 b2;
+    float m1;
+    float m2;
+};
+DrvPostIn drvTyreLoad(uint v, uint w, uint step)
+{
+    DrvPostIn d = (DrvPostIn)0;
+    d.ok = false;
+    if (w >= DRV_MAX_WHEELS) return d;
+    uint vr = driveBase(v);
+    uint nw = min(gMisc[vr + 2u].x, DRV_MAX_WHEELS);
+    if (w >= nw) return d;
+    d.p = drvPreAt(vr, w);
+    d.p7 = DF(d.p + 7u);
+    if (d.p7.w == 0.0) return d;
+    d.ok = true;
+    d.wr = vr + DRV_VEH + w * DRV_WHEEL;
+    d.p6 = DF(d.p + 6u);
+    d.w0 = gMisc[d.wr];
+    d.nodeOff = gStatic[v * 4u].x;
+    if (d.p7.y == 0.0) return d;
+    d.p0 = DF(d.p);
+    d.p1 = DF(d.p + 1u);
+    d.p2 = DF(d.p + 2u);
+    d.p3 = DF(d.p + 3u);
+    d.p4 = DF(d.p + 4u);
+    d.p5 = DF(d.p + 5u);
+    uint beamOff = gStatic[v * 4u].z;
+    uint4 r2 = gStatic[v * 4u + 2u];
+    uint g1 = d.nodeOff + d.w0.x;
+    d.b1 = beamSum(gNodes[g1 * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + g1], beamOff, r2.z, r2.w, (step + 1u) & 1u, false);
+    d.m1 = gNodes[g1 * 3u].w;
+    if (d.w0.x != d.w0.y)
+    {
+        uint g2 = d.nodeOff + d.w0.y;
+        d.b2 = beamSum(gNodes[g2 * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + g2], beamOff, r2.z, r2.w, (step + 1u) & 1u,
+                       false);
+        d.m2 = gNodes[g2 * 3u].w;
+    }
+    return d;
+}
+float3 drvForceFrom(float3 f, uint gi)
+{
+    return f + accForce(gi);
+}
+void drvTyreFinish(DrvPostIn d)
+{
+    float h = STEP;
+    uint p = d.p;
+    uint wr = d.wr;
+    float4 p6 = d.p6;
+    float4 p7 = d.p7;
+    bool contact = p7.y != 0.0;
+    float wNew;
+    float fnOut = 0.0;
+    float m = 0.0;
+    float3 force = float3(0.0, 0.0, 0.0);
+    uint4 w0 = d.w0;
+    uint nodeOff = d.nodeOff;
+    if (contact)
+    {
+        float3 t = d.p0.xyz;
+        float vt = d.p0.w;
+        float3 sd = d.p1.xyz;
+        float vs = d.p1.w;
+        float3 n = d.p2.xyz;
+        float fn_ = d.p2.w;
+        m = d.p3.x;
+        float j = d.p3.y;
+        float r = d.p3.z;
+        float wd = d.p3.w;
+        float b = d.p4.x;
+        float al = d.p4.y;
+        float at = d.p4.z;
+        float nx = d.p4.w;
+        float ny = d.p5.x;
+        float nn = d.p5.y;
+        float ws = d.p5.z;
+        uint g1 = nodeOff + w0.x;
+        float3 fpre = drvForceFrom(d.b1, g1);
+        if (w0.x != w0.y) fpre = sadd3(fpre, drvForceFrom(d.b2, nodeOff + w0.y));
+        float ft = sdot(fpre, t);
+        float fs = sdot(fpre, sd);
+        float ftRaw = -nf(fs + sdiv(smul(m, vs), h));
+        float flRaw = drvSpin(m, vt, ft, j, r, wd, b, DRV_FLT_MAX).y;
+        float alEff = al;
+        float fT = ftRaw;
+        if (at <= 1e-9)
+        {
+            fT = 0.0;
+        }
+        else
+        {
+            float e = 2.0;
+            if (al > 1e-9)
+            {
+                float ql = sdiv(flRaw, al);
+                float qt = sdiv(ftRaw, at);
+                e = nf(smul(ql, ql) + smul(qt, qt));
+            }
+            if (e > 1.0)
+            {
+                float sc = sdiv(1.0, ssqrt(e));
+                float tProp = smul(abs(ftRaw), sc);
+                float lProp = smul(abs(flRaw), sc);
+                float tCap = drvLerp(tProp, nn > 1e-6 ? sdiv(smul(at, ny), nn) : tProp, ws);
+                alEff = drvLerp(lProp, nn > 1e-6 ? sdiv(smul(al, nx), nn) : lProp, ws);
+                fT = drvClamp(ftRaw, -tCap, tCap);
+            }
+            else
+            {
+                float qt = sdiv(ftRaw, at);
+                alEff = smul(al, ssqrt(max(nf(1.0 - smul(qt, qt)), 0.0)));
+            }
+        }
+        float2 sol = drvSpin(m, vt, ft, j, r, wd, b, alEff);
+        wNew = sol.x;
+        force = sadd3(sadd3(sscale(t, sol.y), sscale(sd, fT)), sscale(n, fn_));
+        fnOut = fn_;
+    }
+    else
+    {
+        wNew = p7.z;
+    }
+    float spin = nf(p6.x + smul(wNew, h));
+    if (spin > asfloat(0x40490fdbu)) spin = nf(spin - asfloat(0x40c90fdbu));
+    else if (spin <= -asfloat(0x40490fdbu)) spin = nf(spin + asfloat(0x40c90fdbu));
+    DSet(wr + 15u, float4(wNew, spin, p6.y, p6.z));
+    DSet(wr + 16u, float4(fnOut, p6.w, p7.x, contact ? 1.0 : 0.0));
+    for (uint i = 0u; i < DRV_PRE; i++) gMisc[p + i] = uint4(0u, 0u, 0u, 0u);
+    if (contact)
+    {
+        uint g1 = nodeOff + w0.x;
+        if (w0.x == w0.y) accAdd(g1, force);
+        else
+        {
+            uint g2 = nodeOff + w0.y;
+            accAdd(g1, sscale(force, sdiv(d.m1, m)));
+            accAdd(g2, sscale(force, sdiv(d.m2, m)));
+        }
+    }
+}
+
 // The drive's part of step s of vehicle v (uniform `on`): its wheels, then a barrier.
 void driveStep(uint v, uint lane, uint s, uint on)
 {

@@ -1630,6 +1630,9 @@ static const uint PERF_HIT_ROLES = 1024u;
 // seven phases on those copies, written back once. The same arithmetic in the same
 // order on the same bits; only where the values wait between phases changes.
 static const uint PERF_HITS_LOCAL = 1048576u;
+// perfFlags bit 2097152 (explicit_plan::PERF_TYRE_EARLY, with PERF_TYRE_AHEAD): the
+// wheels' second part loaded before the hits (explicit_beams_drive.slang drvTyreLoad).
+static const uint PERF_TYRE_EARLY = 2097152u;
 static const uint HIT_ROLE_WORDS = 20u;
 uint hitRoleAt(uint v, uint i) { return hitFbAt(v, HIT_CAP) + i * HIT_ROLE_WORDS; }
 
@@ -7795,7 +7798,11 @@ void explicit_beams_wide_tris(uint3 id : SV_DispatchThreadID)
 // hitCombinePhase. The scratch records those phases leave in gNext (the beam forces, the
 // hit's force, round, residual, its role records and total) are written as they leave
 // them. Workgroup arrays: the list kernels' (gsTested, gsPairs, gsCount), which the hits
-// kernel does not otherwise use.
+// kernel does not otherwise use. Its barriers are workgroup barriers only (sync() adds a
+// device-memory barrier, which waits for the phase's outstanding device writes): no lane
+// here reads a device word another lane wrote here (the phases exchange values through
+// the workgroup copies), and the caller's sync() after it orders its device writes for
+// the tyres.
 static const uint HITS_LOCAL_CAP = 48u;
 // gsTested: per item LQ words at q * LQ (node, slot | immovable << 31, mass, beam force
 // xyz, inverse mass of its hit count), then per hit LH words at LH_BASE + i * LH (alpha,
@@ -7837,6 +7844,15 @@ float localOwnInvMass(uint q)
 {
     if ((gsTested[q * LQ + 1u] >> 31) != 0u) return 0.0;
     return sdiv(1.0, asfloat(gsTested[q * LQ + 2u]));
+}
+
+// The round's position step d for item q's node (gsPairs is free until phase 1).
+void localShift(uint q, float3 d)
+{
+    gsPairs[q * 4u] = asuint(d.x);
+    gsPairs[q * 4u + 1u] = asuint(d.y);
+    gsPairs[q * 4u + 2u] = asuint(d.z);
+    gsPairs[q * 4u + 3u] = 1u;
 }
 
 void localAdd(uint at, int3 d)
@@ -7900,6 +7916,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
         gsTested[q * LQ + 4u] = asuint(fb.y);
         gsTested[q * LQ + 5u] = asuint(fb.z);
         gsTested[q * LQ + 6u] = asuint(imSelf);
+        gsPairs[q * 4u + 3u] = 0u;
         if (lead)
         {
             h = x;
@@ -7925,7 +7942,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
             gsTested[hb + 7u] = asuint(vv.z);
         }
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     // Slots: the first item naming the node; its copy of A and B starts as the device's.
     uint slot = q;
     if (item)
@@ -7949,7 +7966,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
             gsCount[LB_BASE + q * 3u + 2u].store(asuint(b0.z));
         }
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     float gamma = nf(nf(1.0 - alpha) - beta);
     // The round (selfRound's two-body branch, selfTwoBodyCore with shifts): the hit's
     // four items are q, q + 1 (n0 = t0), q + 2 (n1 = t1), q + 3 (n2 = t2).
@@ -7976,11 +7993,13 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
                 float delta = shiftDepth(pen, budget, sdot(fh, nn));
                 if (delta > 0.0)
                 {
+                    // The position steps for the items' own lanes to add (shiftAdd's
+                    // integer adds: any order).
                     float qd = smul(delta, m);
-                    shiftAdd(h, sscale(nn, smul(qd, localOwnInvMass(q))));
-                    if (alpha > 0.0) shiftAdd(t1, sscale(nn, -smul(alpha, smul(qd, localOwnInvMass(q + 2u)))));
-                    if (beta > 0.0) shiftAdd(t2, sscale(nn, -smul(beta, smul(qd, localOwnInvMass(q + 3u)))));
-                    if (gamma > 0.0) shiftAdd(t0, sscale(nn, -smul(gamma, smul(qd, localOwnInvMass(q + 1u)))));
+                    localShift(q, sscale(nn, smul(qd, localOwnInvMass(q))));
+                    if (alpha > 0.0) localShift(q + 2u, sscale(nn, -smul(alpha, smul(qd, localOwnInvMass(q + 2u)))));
+                    if (beta > 0.0) localShift(q + 3u, sscale(nn, -smul(beta, smul(qd, localOwnInvMass(q + 3u)))));
+                    if (gamma > 0.0) localShift(q + 1u, sscale(nn, -smul(gamma, smul(qd, localOwnInvMass(q + 1u)))));
                 }
             }
             f1 = f;
@@ -7994,7 +8013,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
         gsTested[hb + 9u] = asuint(f1.y);
         gsTested[hb + 10u] = asuint(f1.z);
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     // hitRolePhase's and hitCombinePhase's phases 0..6 on the copies.
     uint share = role == 0u ? 1u : (role == 1u ? 4u : role);
     uint hb = LH_BASE + i * LH;
@@ -8009,8 +8028,10 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
         ig = nf(nf(1.0 - ia) - ib);
         if1 = asfloat(uint3(gsTested[hb + 8u], gsTested[hb + 9u], gsTested[hb + 10u]));
         localAdd(slot * 3u, toFixed3(hitShare(if1, share, ia, ib, ig)));
+        if (gsPairs[q * 4u + 3u] != 0u)
+            shiftAdd(x, asfloat(uint3(gsPairs[q * 4u], gsPairs[q * 4u + 1u], gsPairs[q * 4u + 2u])));
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     if (item)
     {
         float3 acc = localAccNow(q, slot, false);
@@ -8019,7 +8040,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
         gsPairs[q * 4u + 2u] = asuint(acc.z);
         gsPairs[q * 4u + 3u] = gsTested[q * LQ + 6u];
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     if (lead)
     {
         // The roles' records: the contacter, n0, n1, n2.
@@ -8052,7 +8073,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
         gNext[at + 21u] = asuint(r);
         gsTested[hb + 11u] = asuint(r);
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     if (item)
     {
         float r = asfloat(gsTested[hb + 11u]);
@@ -8063,7 +8084,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
             localAdd(LB_BASE + slot * 3u, int3(toFixed(s.x), toFixed(s.y), toFixed(s.z)));
         }
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     uint rec = hitRoleAt(v, i) + role * 4u;
     if (item)
     {
@@ -8078,7 +8099,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
         gNext[rec + 2u] = asuint(acc.z);
         gNext[rec + 3u] = asuint(im);
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     if (lead)
     {
         float3 ah = asfloat(uint3(gsPairs[q * 4u], gsPairs[q * 4u + 1u], gsPairs[q * 4u + 2u]));
@@ -8117,7 +8138,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
         gsPairs[LT_BASE + i * 3u + 1u] = asuint(f.y);
         gsPairs[LT_BASE + i * 3u + 2u] = asuint(f.z);
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     if (item)
     {
         float3 total = asfloat(uint3(gsPairs[LT_BASE + i * 3u], gsPairs[LT_BASE + i * 3u + 1u], gsPairs[LT_BASE + i * 3u + 2u]));
@@ -8126,7 +8147,7 @@ void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCo
         localAdd(slot * 3u, d);
         cfAdd(x, st);
     }
-    sync();
+    GroupMemoryBarrierWithGroupSync();
     // Write back: each slot's A as the device's plus its adds; B cleared (phase 6's
     // stores).
     if (item && slot == q)
@@ -8183,6 +8204,12 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     sync();
     uint on = gsUniformHits;
     uint driveOn = gsUniformDrive;
+    // PERF_TYRE_EARLY: the next step's tyres' second part loaded before the hits.
+    bool tyreEarly = (gP.perfFlags & (PERF_TYRE_EARLY | PERF_TYRE_AHEAD | PERF_AHEAD_APART | PERF_WIDE_FUSED))
+                         == (PERF_TYRE_EARLY | PERF_TYRE_AHEAD | PERF_AHEAD_APART | PERF_WIDE_FUSED)
+                     && wideStep() + 1u < gP.steps && driveOn != 0u;
+    DrvPostIn tyreIn = (DrvPostIn)0;
+    if (tyreEarly) tyreIn = drvTyreLoad(v, 255u - lane, vehicleStep(v) + 1u);
     if (on == 2u)
         selfApplyLocal(v, lane, x.beamOff, x.groupOff, x.groupCount, parity);
     else if (on != 0u)
@@ -8194,6 +8221,12 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         if (on != 0u) sync();
         // (PERF_TYRE_AHEAD: their first part ran on the list dispatch's coupling and
         // wheels workgroup; the rest here.)
+        if (tyreEarly)
+        {
+            if (tyreIn.ok) drvTyreFinish(tyreIn);
+            else driveTyresPost(v, 255u - lane, vehicleStep(v) + 1u);
+            return ebLoopCapFlush();
+        }
         if ((gP.perfFlags & (PERF_TYRE_AHEAD | PERF_AHEAD_APART)) == (PERF_TYRE_AHEAD | PERF_AHEAD_APART))
         {
             driveTyresPost(v, 255u - lane, vehicleStep(v) + 1u);

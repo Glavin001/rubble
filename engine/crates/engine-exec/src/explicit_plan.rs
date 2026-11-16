@@ -324,6 +324,12 @@ pub const PERF_TYRE_AHEAD: u32 = 262144;
 /// node values and accumulators loaded once, the round and the residual pass's phases on
 /// those copies, the accumulators written back once. vehicle-perf-first-principles.md §8.33.
 pub const PERF_HITS_LOCAL: u32 = 1048576;
+/// [`W_PERF_FLAGS`], with [`PERF_TYRE_AHEAD`]: a wheel's second part (the tyre after its
+/// hubs' forces) on the hits kernel loads its records, its hub nodes' masses and beam sums
+/// before the step's hits, while the other lanes apply them, and reads only the hubs'
+/// accumulators after (the kernel's PERF_TYRE_EARLY, `drvTyreLoad`, `drvTyreFinish`).
+/// vehicle-perf-first-principles.md §8.33.
+pub const PERF_TYRE_EARLY: u32 = 2097152;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
