@@ -290,6 +290,10 @@ void splitGroupStep(uint g, uint lane, uint word)
             }
             longest = splitUniform(lane, longest);
         }
+        // (PERF_FLEET_LEVELS: the levels of a group whose hit lists fit across the GPU,
+        // explicit_beams_fleet.slang fleetLevelsDefer; the pass's end then in the levels'
+        // end dispatch.)
+        if (flLevelsOn() && fleetLevelsDefer(k, off, lane, s, !(small && (!anySize || longest > FL_SCAN_MOST)))) return;
         if (small && (!anySize || longest > FL_SCAN_MOST))
             fleetGroupLevels(k, off, runOff, points, parity, lane, tag);
         else
@@ -575,6 +579,15 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_group(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+#ifdef EB_VV_FLEET
+    // (The levels across the GPU's end dispatch: explicit_beams_fleet.slang.)
+    if ((gP.pad2 & 0xF0000000u) == SPLIT_LV)
+    {
+        fleetLevelsEnd(gid.x, lid.x, gP.pad2);
+        ebLoopCapFlush();
+        return;
+    }
+#endif
     if (gP.pad2 == SPLIT_BEGIN)
         splitGroupBegin(gid.x, lid.x);
     else

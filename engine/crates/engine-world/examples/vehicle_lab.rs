@@ -1133,6 +1133,26 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 for (k, points, per) in x.contact_group_counts() {
                     println!("   group of {k}, {points} points; per member [listed pairs, hits, listed triangles, candidates] (hit list room {}): {per:?}", 2 * points);
                 }
+                // (AB_LEVELS=n: n frames again from the snapshot, each one's last pass's
+                // owners with hits by level: the levels in use and their hits.)
+                let levels_frames: u32 = std::env::var("AB_LEVELS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                if levels_frames > 0 {
+                    x.restore(&snap);
+                    let mut lines = Vec::new();
+                    for _ in 0..levels_frames {
+                        x.frame(34);
+                        x.wait();
+                        let lv = x.contact_levels();
+                        let top = lv.iter().map(|p| p.1).max().unwrap_or(0) as usize;
+                        let mut by = vec![(0u32, 0u32); top];
+                        for (h, l) in lv {
+                            by[l as usize - 1].0 += 1;
+                            by[l as usize - 1].1 += h;
+                        }
+                        lines.push(format!("{top}:{}", by.iter().map(|(o, h)| format!("{o}o/{h}h")).collect::<Vec<_>>().join(",")));
+                    }
+                    println!("   levels at t {:.1} (each frame's last pass: top: owners/hits by level): {}", lab.bench.t, lines.join("  "));
+                }
                 if got == 0 {
                     println!("   profile at t {:.1}: no timestamps, or too many dispatches", lab.bench.t);
                 } else {

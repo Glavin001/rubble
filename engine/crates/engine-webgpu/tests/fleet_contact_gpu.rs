@@ -51,14 +51,15 @@ fn generated() -> String {
 /// explicit_beams_fleet.slang; contact-groups-design.md §8): each frame from one saved
 /// state on the split path with the switches of `mask` off (a contact group's slots) then
 /// on, every state word the same. Returns the frames with a contact group, the largest
-/// group and the most hits an owner listed in a frame's last pass with the switches on.
-fn fleet_matches(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool) -> Option<[u32; 3]> {
+/// group, the most hits an owner listed in a frame's last pass with the switches on, and
+/// the highest level of a frame's last pass (with the levels for any number of owners).
+fn fleet_matches(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool) -> Option<[u32; 4]> {
     fleet_matches_with(label, fleet, frames, steps, mask, self_split, 0)
 }
 
 /// [`fleet_matches`] with the second measurement word `word2` (bit 31: the levels for any
 /// number of owners for the small groups too, with `PERF_FLEET_ANY`).
-fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool, word2: u32) -> Option<[u32; 3]> {
+fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool, word2: u32) -> Option<[u32; 4]> {
     let (_, device, queue) = default_device().ok()?;
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
     gpu.set_vehicle_contact(true);
@@ -67,7 +68,7 @@ fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps
     gpu.set_self_split(self_split);
     gpu.set_ablation2(word2);
     let flags = gpu.perf_flags();
-    let (mut grouped, mut largest, mut hits) = (0u32, 0u32, 0u32);
+    let (mut grouped, mut largest, mut hits, mut top) = (0u32, 0u32, 0u32, 0u32);
     for f in 0..frames {
         gpu.wait();
         let snap = gpu.snapshot();
@@ -91,14 +92,15 @@ fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps
             panic!("{label}: frame {f}: {e}");
         }
         hits = hits.max(gpu.contact_group_counts().iter().flat_map(|g| g.2.iter().map(|m| m[1])).max().unwrap_or(0));
+        top = top.max(gpu.contact_levels().iter().map(|p| p.1).max().unwrap_or(0));
         grouped += u32::from(!sizes.is_empty());
         largest = largest.max(sizes.iter().copied().max().unwrap_or(0));
     }
     gpu.set_perf_flags(flags);
     eprintln!(
-        "{label} (self split {self_split}, perf flags {mask}): {frames} frames bit for bit, {grouped} with a contact group (largest {largest}), most hits an owner {hits}"
+        "{label} (self split {self_split}, perf flags {mask}): {frames} frames bit for bit, {grouped} with a contact group (largest {largest}), most hits an owner {hits}, highest level {top}"
     );
-    Some([grouped, largest, hits])
+    Some([grouped, largest, hits, top])
 }
 
 #[test]
@@ -113,7 +115,7 @@ fn owners_state_by_vehicle_is_bit_for_bit() {
         let probe = sedan(&text, Vec3::ZERO, 180.0, Vec3::ZERO);
         let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
         let b = sedan(&text, Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
-        let Some([grouped, _, hits]) = fleet_matches("two sedans head-on", vec![a, b], 40, 17, mask, self_split) else { return };
+        let Some([grouped, _, hits, _]) = fleet_matches("two sedans head-on", vec![a, b], 40, 17, mask, self_split) else { return };
         assert!(grouped > 10 && hits > 0, "the cars met and hit ({grouped} frames grouped, {hits} hits)");
         // A column of six, the first pushed into the others: groups of two to six, owners
         // without a partner beside owners with hits.
@@ -122,7 +124,7 @@ fn owners_state_by_vehicle_is_bit_for_bit() {
         let fleet: Vec<ExplicitBeams> = (0..6)
             .map(|i| sedan(&text, Vec3::new(0.0, 0.0, i as f32 * pitch), 0.0, if i == 0 { Vec3::new(0.0, 0.0, 15.0) } else { Vec3::ZERO }))
             .collect();
-        let Some([grouped, largest, hits]) = fleet_matches("a column of six", fleet, 30, 17, mask, self_split) else { return };
+        let Some([grouped, largest, hits, _]) = fleet_matches("a column of six", fleet, 30, 17, mask, self_split) else { return };
         assert!(grouped > 10 && largest > 4 && hits > 0, "a group past four members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
     }
     groups_of_any_size_are_bit_for_bit();
@@ -147,9 +149,9 @@ fn groups_of_any_size_are_bit_for_bit() {
             .collect()
     };
     for self_split in [true, false] {
-        let Some([grouped, largest, hits]) = fleet_matches("a column of ten", column(10, 15.0), 40, 17, PERF_FLEET_ANY, self_split) else { return };
+        let Some([grouped, largest, hits, _]) = fleet_matches("a column of ten", column(10, 15.0), 40, 17, PERF_FLEET_ANY, self_split) else { return };
         assert!(grouped > 10 && largest > 8 && hits > 0, "a group past eight members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
-        let Some([grouped, largest, hits]) = fleet_matches_with("a column of six, the levels for any size", column(6, 15.0), 30, 17, PERF_FLEET_ANY, self_split, 0x8000_0000) else { return };
+        let Some([grouped, largest, hits, _]) = fleet_matches_with("a column of six, the levels for any size", column(6, 15.0), 30, 17, PERF_FLEET_ANY, self_split, 0x8000_0000) else { return };
         assert!(grouped > 10 && largest > 4 && hits > 0, "a group formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
     }
     // The listed triangles' throttle updates as threads over the fleet
@@ -157,8 +159,42 @@ fn groups_of_any_size_are_bit_for_bit() {
     // size (a column of ten, against neither) and alone (a column of six, the small groups'
     // own levels).
     use engine_exec::explicit_plan::PERF_FLEET_POST;
-    let Some([grouped, largest, hits]) = fleet_matches("a column of ten, throttles fleet-wide", column(10, 15.0), 40, 17, PERF_FLEET_ANY | PERF_FLEET_POST, true) else { return };
+    let Some([grouped, largest, hits, _]) = fleet_matches("a column of ten, throttles fleet-wide", column(10, 15.0), 40, 17, PERF_FLEET_ANY | PERF_FLEET_POST, true) else { return };
     assert!(grouped > 10 && largest > 8 && hits > 0, "a group past eight members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
-    let Some([grouped, largest, hits]) = fleet_matches("a column of six, throttles fleet-wide", column(6, 15.0), 30, 17, PERF_FLEET_POST, true) else { return };
+    let Some([grouped, largest, hits, _]) = fleet_matches("a column of six, throttles fleet-wide", column(6, 15.0), 30, 17, PERF_FLEET_POST, true) else { return };
     assert!(grouped > 10 && largest > 4 && hits > 0, "a group formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
+    levels_across_the_gpu_are_bit_for_bit(&column);
+}
+
+/// The levels across the GPU (`explicit_plan::PERF_FLEET_LEVELS`,
+/// explicit_beams_fleet_levels.slang; contact-groups-design.md §8.7, stage 3c) against the
+/// group's workgroup (the switch off): a column of ten pushed from behind (a chain of
+/// owners, many levels) and two columns of six side by side (two groups in the same
+/// dispatches), with every level slot, and with two and one (the levels past them in the
+/// end dispatch's workgroup), with and without self split.
+fn levels_across_the_gpu_are_bit_for_bit(column: &dyn Fn(usize, f32) -> Vec<ExplicitBeams>) {
+    use engine_exec::explicit_plan::PERF_FLEET_LEVELS;
+    let mut deepest = 0;
+    for slots in ["16", "2", "1"] {
+        std::env::set_var("RUBBLE_FLEET_LEVEL_SLOTS", slots);
+        for self_split in [true, false] {
+            let label = format!("a column of ten, levels across the GPU, {slots} slots");
+            let Some([grouped, largest, hits, top]) = fleet_matches(&label, column(10, 15.0), 40, 17, PERF_FLEET_LEVELS, self_split) else { return };
+            assert!(grouped > 10 && largest > 8 && hits > 0, "a group past eight members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
+            deepest = deepest.max(top);
+        }
+        // Two columns of six, ten metres apart: two groups, their levels in one dispatch.
+        let mut two = column(6, 15.0);
+        for mut v in column(6, 12.0) {
+            for n in &mut v.nodes {
+                n.pos.x += 10.0;
+            }
+            two.push(v);
+        }
+        let label = format!("two columns of six, levels across the GPU, {slots} slots");
+        let Some([grouped, largest, hits, _]) = fleet_matches(&label, two, 30, 17, PERF_FLEET_LEVELS, true) else { return };
+        assert!(grouped > 10 && largest > 4 && hits > 0, "groups formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
+    }
+    std::env::remove_var("RUBBLE_FLEET_LEVEL_SLOTS");
+    assert!(deepest >= 3, "the column's levels reached {deepest}: too few to pass a slot");
 }

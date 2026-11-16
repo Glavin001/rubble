@@ -1118,6 +1118,13 @@ void fleetPlan(uint lane, uint word)
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_fleet_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    // (The levels across the GPU's plan: stage 3c below.)
+    if ((gP.pad2 & 0xF0000000u) == SPLIT_LV)
+    {
+        fleetLevelsPlan(lid.x, gP.pad2);
+        ebLoopCapFlush();
+        return;
+    }
     fleetPlan(lid.x, gP.pad2);
     ebLoopCapFlush();
 }
@@ -1159,3 +1166,6 @@ void fleetWideTests(uint g, uint lane, uint word)
     }
 }
 #endif
+
+// Stage 3c: the levels across the GPU (PERF_FLEET_LEVELS).
+#include "explicit_beams_fleet_levels.slang"

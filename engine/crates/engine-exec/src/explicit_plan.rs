@@ -236,8 +236,10 @@ pub const fn fleet_next_words(nv: usize, pair_cap: usize, tris: usize) -> usize 
     // adjacency firsts, entries, bits, slots; then five prefixes over the vehicles (+ 1
     // each: run base, listed, pairs, hits, and the contact points', static); then per
     // vehicle: step base, last counts (4), level; the fleet's listed triangles; the
-    // fleet's counters.
-    (nv + 1) + 6 * pair_cap + 5 * (nv + 1) + 6 * nv + tris + FLEET_CTL_WORDS
+    // fleet's counters; then the levels across the GPU's (explicit_beams_fleet_levels.slang
+    // flLvAt): per vehicle its mark, the owners in slot order, their hits' prefix (+ 1),
+    // per slot its first owner and first hit (FLEET_LEVEL_MAX + 3 each).
+    (nv + 1) + 6 * pair_cap + 5 * (nv + 1) + 6 * nv + tris + FLEET_CTL_WORDS + 3 * nv + 1 + 2 * (FLEET_LEVEL_MAX + 3)
 }
 /// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
 /// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
@@ -337,6 +339,15 @@ pub const PERF_FLEET_ANY: u32 = 16384;
 /// a contact pass's tests a thread each across the fleet (the kernel's PERF_FLEET_POST,
 /// `fleetPost`), in place of the group's workgroup with its first level.
 pub const PERF_FLEET_POST: u32 = 65536;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_ANY`] and [`PERF_FLEET_POST`]: a contact group's
+/// levels across the GPU (the kernel's PERF_FLEET_LEVELS, explicit_beams_fleet_levels.slang;
+/// contact-groups-design.md §8.7, stage 3c): the snapshot, then a dispatch a level and phase
+/// (the hits' application, the three residual phases), a thread a hit of every group, in
+/// place of the group's one workgroup; levels past the host's slots in the group's
+/// workgroup after them.
+pub const PERF_FLEET_LEVELS: u32 = 524288;
+/// The kernel's LV_MAX: level slots at most (the levels' dispatches a step: four a slot).
+pub const FLEET_LEVEL_MAX: usize = 16;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
