@@ -57,3 +57,30 @@ jobs:
             fi
           done
           echo "FAILED $fails of 8 runs, $attempts failed attempts"
+      - name: Time the old and the new char_move pipeline on this runner
+        if: always()
+        run: |
+          cd engine
+          TOOLS="${RUBBLE_TOOLS:-$HOME/.cache/rubble-tools}"
+          . scripts/slangc.sh
+          SLANGC="${SLANGC:-$(command -v slangc)}"
+          cargo build -p engine-webgpu --release --bin gpu_adapter
+          git fetch --depth 1 origin 977ff3ac5e48f1fcb199aaac03dd445f7f59651b
+          mkdir -p /tmp/k/old /tmp/k/new
+          cp -R slang /tmp/k/old/slang
+          git show FETCH_HEAD:engine/slang/kernels/character_step.slang > /tmp/k/old/slang/kernels/character_step.slang
+          cp -R slang /tmp/k/new/slang
+          for v in old new; do
+            (cd /tmp/k/$v/slang/kernels && "$SLANGC" -target wgsl -stage compute -entry char_move -o /tmp/k/$v/char_move.wgsl -DENGINE_WGSL=1 character_step.slang) 2>&1 | grep -i error || true
+            ls -l /tmp/k/$v/char_move.wgsl
+          done
+          python3 scripts/wgsl-inline-size.py /tmp/k/old/char_move.wgsl /tmp/k/new/char_move.wgsl --top 0
+          for i in 1 2 3; do
+            for v in new old; do
+              cp /tmp/k/$v/char_move.wgsl /tmp/k/$v/char_move_$i.wgsl
+              echo "// $i" >> /tmp/k/$v/char_move_$i.wgsl
+              echo "== $v $i"
+              ./target/release/gpu_adapter --compile /tmp/k/$v/char_move_$i.wgsl 2>&1 | grep -E "pipeline char_move|error|panicked|Compilation" || true
+            done
+          done
+          bash scripts/metal-compiler-log.sh 3 | grep -E "MTLCompiler\)|Timeout|Paravirt" || true
