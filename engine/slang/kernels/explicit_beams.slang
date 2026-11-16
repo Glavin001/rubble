@@ -8191,8 +8191,8 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     gArgs[29] = 1u;
     gArgs[30] = 1u;
     // The contact pass's front as fleet-wide dispatches (explicit_beams_fleet.slang), none
-    // without a group: a thread a pair (words 32..34, in workgroups of 256 at least),
-    // one workgroup (36..38), a thread a triangle or contact point (40..42).
+    // without a group: a thread a pair (words 32..34, in workgroups of 256 at least) and
+    // one workgroup (36..38: the first plan, which sizes the rest).
     uint any = groups == 0u ? 0u : 1u;
     gArgs[32] = any * ((gNext[flAdjFirst(nv)] / 2u + 255u) / 256u);
     gArgs[33] = 1u;
@@ -8200,9 +8200,6 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     gArgs[36] = any;
     gArgs[37] = 1u;
     gArgs[38] = 1u;
-    gArgs[40] = any * ((max(gP.totalTris, vvTotalCp()) + 255u) / 256u);
-    gArgs[41] = 1u;
-    gArgs[42] = 1u;
     // … and every group again when one is past VV_PART members (`larger`: its pass is
     // the larger groups', in the groups' own dispatch; words 44..46), else none.
     gArgs[44] = larger ? groups : 0u;

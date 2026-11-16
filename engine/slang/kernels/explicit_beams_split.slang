@@ -471,7 +471,7 @@ void explicit_beams_split_tests(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
     // The tests over every owner (a thread an element, not a group's workgroups).
     if ((gP.perfFlags & PERF_FLEET_FRONT) != 0u)
     {
-        fleetWideTests(gid.x * LANES + lid.x, gP.pad2);
+        fleetWideTests(gid.x, lid.x, gP.pad2);
         ebLoopCapFlush();
         return;
     }
