@@ -174,14 +174,15 @@ static const uint SPLIT_STEP = 0x0FFFFFFFu;
 // Workgroups per group of the tests' dispatches (the host's SPLIT_TEST_WGS).
 static const uint SPLIT_TEST_WGS = 64u;
 
-// Group g's scratch for the tests across workgroups: its first member's wide-pass grid
-// counts (gAcc, GRID_BUCKETS words) and grid offsets (gNext, GRID_BUCKETS + 1): that
-// member's own self-collision grid, dead from its step's end to the next step's start.
+// Group g's scratch for the tests across workgroups: GRID_BUCKETS words of gAcc and
+// GRID_BUCKETS + 1 of gNext at its first member's place in vehicle contact's own scratch
+// (gP.vvScratch, gP.vvScratchOff: not the member's self-collision grid words, which hold
+// a solo step's saved pair-list state, soloStepAt).
 // Words of the counts: per owner its pairs (0..3), hits (4..7), fastest candidate (8..11),
 // listed triangles (12..15), candidates (16..19), offered (20..23), reset (24..27), fix
 // (28..31); the partner bits (32..47); the front's flags (48: bit 0 open, bit 1 the grid).
-uint splitVvAt(uint off) { return gP.gridCountBase + vvMember(off, 0u) * GRID_BUCKETS; }
-uint splitVvOffAt(uint off) { return gP.gridOffBase + vvMember(off, 0u) * (GRID_BUCKETS + 1u); }
+uint splitVvAt(uint off) { return gP.vvScratch + vvMember(off, 0u) * GRID_BUCKETS; }
+uint splitVvOffAt(uint off) { return gP.vvScratchOff + vvMember(off, 0u) * (GRID_BUCKETS + 1u); }
 
 // The front's results out to the scratch (every lane; after the front's barriers).
 void splitVvExport(uint off, uint front, uint lane)
@@ -325,7 +326,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
     uint front = uint(gAcc[gVvC + 8u * VV_PART + VV_PART * VV_PART].load());
     if (front == 0u) return;
     bool vvGrid = (front & 2u) != 0u;
-    bool vvList = vvGrid && gP.triPairs != 0u;
+    bool vvList = vvGrid && gP.vvTriPairs != 0u;
     uint at0 = part * LANES + lane;
     uint stride = SPLIT_TEST_WGS * LANES;
     if ((word & SPLIT_LEVELS) == 0u)
@@ -386,7 +387,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
             q -= n;
         }
         uint va = vvMember(off, a);
-        uint at = triPairsAt(va);
+        uint at = vvTriPairsAt(va);
         vvPairTest(a, va, gNext[at + 2u * q], gNext[at + 2u * q + 1u], runOff, points, asfloat(gStatic[va * 4u + 3u].z));
     }
     uint over = 0u;
@@ -425,12 +426,62 @@ void explicit_beams_split_tests(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
 }
 #endif
 
+#ifdef EB_SELF_SPLIT
+// A member's step s after its tests' dispatches (PERF_MEMBER_LIST with self-collision
+// split: contactMemberStep ends at its tests): the walk's list recorded in the pair
+// list's state (selfSplitWalkEnd), the step's self-collision hits applied (every hit,
+// of the step's dispatch, the walk's and the pairs', counts in the hit list's count), the
+// slide nodes, as contactMemberStep runs them after its tests; then the list's state for
+// the next step, or its statistics at the frame's end. Before the groups' pass of the
+// step, which reads what the hits leave. A solo vehicle returns at once.
+void memberRest(uint v, uint lane, uint s)
+{
+    uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
+    bool keep = (gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn() && s < gP.steps;
+    uint member = splitUniform(lane, keep ? fl.y : 0u);
+    if (member == 0u) return;
+    uint4 r0 = gStatic[v * 4u];
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    uint4 r3 = gStatic[v * 4u + 3u];
+    uint4 misc = gMisc[v];
+    float3 origin = asfloat(misc.xyz);
+    uint parity = (misc.w + s) & 1u;
+    soloStepLoad(v, lane);
+    sync();
+    if (lane == 0u)
+    {
+        selfSplitWalkEnd(v);
+        gsUniformHits = gAcc[hitAcc(v)].load() != 0 ? 1u : 0u;
+        gsUniformOpen = 0u;
+        gsUniformLanes = r1.y > 0u ? 1u : 0u;
+    }
+    sync();
+    uint selfOn = gsUniformLanes;
+    if (selfOn != 0u) selfApply(v, true, lane, LANES, lane, origin, asfloat(r3.z), r0.z, r2.z, r2.w, parity);
+#ifdef EB_AERO
+    uint4 aero2 = gStatic[gP.aeroBase + v * 3u + 2u];
+    if (lane == LANES - 1u && (r3.x & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, SLIDE_FRAME, r2.z, parity);
+#endif
+    sync();
+    memberListSave(v, lane, s);
+}
+#endif
+
 #ifdef EB_SOLO_STEP
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
 #ifdef EB_SELF_SPLIT
+    // The members' rest of step s (the step word's SPLIT_LEVELS: after the step's walk
+    // and pairs dispatches, before the groups' pass).
+    if ((gP.pad2 & SPLIT_LEVELS) != 0u)
+    {
+        memberRest(gid.x, lid.x, gP.pad2 & SPLIT_STEP);
+        ebLoopCapFlush();
+        return;
+    }
     // Self-collision split (explicit_beams_selfsplit.slang): the solo vehicles' steps cut
     // at their tests, the walk and pairs dispatches after this one; the next pairs
     // dispatch's slot cleared as the self split's step dispatch does.

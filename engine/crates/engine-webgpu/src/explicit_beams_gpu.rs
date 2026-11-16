@@ -1819,7 +1819,7 @@ impl ExplicitBeamsGpu {
         let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
         let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
         let w = &self.planner.words;
-        let (nv, grid, groups, members) = (w[1] as usize, w[17] as usize, w[46] as usize, w[47] as usize);
+        let (nv, grid, groups, members) = (w[1] as usize, w[plan::W_VV_SCRATCH] as usize, w[46] as usize, w[47] as usize);
         (0..n)
             .map(|g| {
                 let rec = &misc[(groups + g) * 4..(groups + g) * 4 + 4];
@@ -3352,7 +3352,9 @@ impl ExplicitBeamsGpu {
             // tests split, copy steps + 2 + s step s's second phase (SPLIT_LEVELS) and copy
             // 2 steps + 2 + s its first group dispatch and walk (SPLIT_TESTS). The
             // vehicles' steps read copy s (the step alone).
-            let extra = if self.group_split_tests { 2 * steps + 1 } else { 1 };
+            // (The members' rest dispatches read the SPLIT_LEVELS copies too.)
+            let rest = self.member_rest_on(vv);
+            let extra = if self.group_split_tests { 2 * steps + 1 } else if rest { steps + 1 } else { 1 };
             bytes.resize((PARAM_STRIDE * u64::from(steps + 1 + extra)) as usize, 0);
             let mut put = |k: u32, word: u32| {
                 let mut w = self.planner.words;
@@ -3361,9 +3363,11 @@ impl ExplicitBeamsGpu {
                 bytes[at..at + 4 * w.len()].copy_from_slice(bytemuck::cast_slice(&w));
             };
             put(steps + 1, SPLIT_BEGIN);
-            if self.group_split_tests {
-                for s in 0..steps {
+            for s in 0..steps {
+                if self.group_split_tests || rest {
                     put(steps + 2 + s, s | SPLIT_LEVELS);
+                }
+                if self.group_split_tests {
                     put(2 * steps + 2 + s, s | SPLIT_TESTS);
                 }
             }
@@ -3768,6 +3772,14 @@ impl ExplicitBeamsGpu {
         }
     }
 
+    /// Whether a frame with self-collision split and vehicle contact (`vv`) runs the
+    /// members' rest dispatches: with [`plan::PERF_MEMBER_LIST`] a member's step ends at
+    /// its self-collision tests (the kernel's contactMemberStep), its hits applied in a
+    /// dispatch of their own after the step's walk and pairs (memberRest).
+    fn member_rest_on(&self, vv: bool) -> bool {
+        vv && self.planner.perf_flags() & plan::PERF_MEMBER_LIST != 0
+    }
+
     /// The split group path's dispatches of a frame of `steps` steps, in order (with
     /// self-collision split, [`Self::self_split_vv_on`], every vehicle's step, the walk
     /// and the pairs in each substep).
@@ -3786,6 +3798,9 @@ impl ExplicitBeamsGpu {
                 let slot = u64::from(if s == 0 { 2 } else { s & 1 });
                 out.push(GroupOp::SelfWalk { copy: s, offset: 12 * (3 + slot) });
                 out.push(GroupOp::SelfPairs { copy: s, offset: 12 * slot });
+                if self.member_rest_on(vv) {
+                    out.push(GroupOp::SelfRest { copy: steps + 2 + s });
+                }
             } else {
                 out.push(GroupOp::Member(s));
             }
@@ -3830,6 +3845,14 @@ impl ExplicitBeamsGpu {
                 pass.set_pipeline(&p.vv_pipes()[if matches!(op, GroupOp::SelfWalk { .. }) { 1 } else { 2 }]);
                 pass.set_bind_group(0, &p.pairs_bind, &at(copy));
                 pass.dispatch_workgroups_indirect(&p.args, offset);
+            }
+            GroupOp::SelfRest { copy } => {
+                // The vehicles' module again, a workgroup a vehicle when the plan formed
+                // a group (none otherwise): a solo vehicle's returns at once.
+                let p = self.self_split_pipes();
+                pass.set_pipeline(&p.vv_pipes()[0]);
+                pass.set_bind_group(0, &p.step_bind, &at(copy));
+                pass.dispatch_workgroups_indirect(args, SPLIT_MEMBER_ARGS);
             }
         }
     }
@@ -4259,6 +4282,11 @@ enum GroupOp {
     /// Self-collision split: step `copy`'s walk and pairs over the solo vehicles.
     SelfWalk { copy: u32, offset: u64 },
     SelfPairs { copy: u32, offset: u64 },
+    /// Self-collision split with the members' kept pair lists
+    /// ([`plan::PERF_MEMBER_LIST`]): the members' rest of a step (their self-collision
+    /// hits applied) after its walk and pairs, before the groups' pass; parameter copy
+    /// `copy` (the step with the kernel's SPLIT_LEVELS). No workgroups without a group.
+    SelfRest { copy: u32 },
 }
 
 impl GroupOp {
@@ -4274,6 +4302,7 @@ impl GroupOp {
             GroupOp::SelfMember(_) => "explicit self step",
             GroupOp::SelfWalk { .. } => "explicit self walk",
             GroupOp::SelfPairs { .. } => "explicit self pairs",
+            GroupOp::SelfRest { .. } => "explicit self members' hits",
         }
     }
 }

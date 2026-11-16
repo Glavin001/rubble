@@ -200,6 +200,16 @@ as before):
 workgroup, `set_group_split_tests(false)`). The old path stays selectable
 (`set_group_split(false)`, `RUBBLE_GROUP_SPLIT=0`).
 
+With self-collision split and the members' kept pair lists (`PERF_MEMBER_LIST`,
+vehicle-perf-first-principles.md §8.19) a substep is: the vehicles' step (a member's cut
+at its self-collision tests, as a solo vehicle's), the self-collision walk and pairs
+dispatches over every vehicle, **the members' hits** (`memberRest`: a workgroup a
+vehicle when there is a group, a solo vehicle's returning at once), then the groups'
+four dispatches. The pass's scratch between its dispatches (per owner counters, the
+grid's offsets) and its listed pairs are in vehicle contact's own regions (`vvScratch`,
+`vvScratchOff`, `vvTriPairs`), not the members' self-collision words: those hold a
+member's pair list and its state from one substep to the next.
+
 ### 5.2 Why the results are the same, bit for bit
 
 The new path runs the same functions on the same values in an order the old path's
