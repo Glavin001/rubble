@@ -327,17 +327,17 @@ pub const PERF_FLEET_FRONT: u32 = 8192;
 /// explicit_beams_fleet.slang fk*; contact-groups-design.md §8.8): built with a margin
 /// over every pair of vehicles the plan pairs, tested each substep by the exact tests on
 /// that substep's partners, listed triangles and boxes, and built again when the
-/// vehicles' tracked nodes may have moved past the margin; in place of the gather, the
+/// vehicles' nodes may have moved past the list's allowances; in place of the gather, the
 /// grids, the sorted copy and the walk every substep.
 pub const PERF_FLEET_KEEP: u32 = 32768;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
 /// [`PERF_HIT_ROLES`] and [`PERF_WIDE_GEO`] (§8.22), [`PERF_FLEET_STATE`] and
-/// [`PERF_FLEET_FRONT`] (§8.25); `RUBBLE_PERF_FLAGS=<mask>` overrides
-/// (a measurement; 0: every switch off).
+/// [`PERF_FLEET_FRONT`] (§8.25), [`PERF_FLEET_KEEP`] (§8.26); `RUBBLE_PERF_FLAGS=<mask>`
+/// overrides (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST | PERF_VV_BEAM_SUM | PERF_HIT_ROLES | PERF_WIDE_GEO | PERF_FLEET_STATE | PERF_FLEET_FRONT)
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST | PERF_VV_BEAM_SUM | PERF_HIT_ROLES | PERF_WIDE_GEO | PERF_FLEET_STATE | PERF_FLEET_FRONT | PERF_FLEET_KEEP)
 }
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;

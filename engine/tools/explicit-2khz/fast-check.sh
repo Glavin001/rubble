@@ -24,7 +24,7 @@ car="${CAR:-$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new}"
 cd "$engine" || exit 1
 [ "$profile" = release ] && flag="--release" || flag="--profile $profile"
 # shellcheck disable=SC2086
-bin="$engine/target/$profile/examples/vehicle_lab"
+bin="${LAB_BIN:-$engine/target/$profile/examples/vehicle_lab}"
 # The machine's one GPU job at a time: the whole check under one hold of the lock (a hold
 # a fixture would wait behind another job's minutes each time), the build before it.
 if [ -z "$FAST_CHECK_LOCKED" ]; then

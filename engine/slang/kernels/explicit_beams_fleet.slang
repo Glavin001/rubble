@@ -37,28 +37,36 @@ void flError(int code) { gAcc[vvCtl(VV_OVERFLOW)].max(code); }
 //   the build   every (triangle, contact point) of two vehicles the plan pairs whose
 //               point is in the triangle's box grown by its range, CLIP_DEPTH, the
 //               triangle's and the point's allowances (FK_CALM, or FK_WILD for a node
-//               that is fast relative to its vehicle: fkRefNow) and FK_BETWEEN, whatever
-//               the throttle, the partners' bits or the owner's box say this substep
-//               (fkPoint, fkWalk: a grid as the front's, padded); each tracked node's
-//               position and class and each vehicle's origin recorded (fkRef, fkOrigin)
+//               that is fast relative to its vehicle or hot: fkRefNow) and the allowance
+//               between vehicles (fkBetween: the build's choice, from how fast partners
+//               move relative to each other), whatever the throttle, the partners' bits
+//               or the owner's box say this substep (fkPoint, fkWalk: a grid as the
+//               front's, padded); every node's position and class and each vehicle's
+//               origin recorded (fkRef, fkOrigin); a point within FK_FAR of a kept
+//               pair's box marks its vehicle near the owner (fkNear)
 //   each pass   the kept pairs tested (fkPairTry): the triangle listed by its throttle
 //               step this pass, the vehicles partners this pass, the point in the owner's
 //               box (flPoint's test), in the triangle's box (vvInBox), then vvFind: the
 //               tests the walk and the listed pairs' test run today, on today's values
-//   the bound   per vehicle and class the farthest a tracked node (a triangle's, a
-//               contact point) has moved since the build relative to the vehicle's first
-//               node, and the fastest one's travel over a step (anti-clip's pads grow
-//               with it) (fkTrack); held to the class's allowance (fkVehicleCheck), and
-//               per pair of partners of the pass the first nodes' relative motion, with
-//               the origins' (a rebase cancels) and room for rounding, to FK_BETWEEN
-//               (fkPairCheck); past either, the list is built again (fkDecide)
+//   the bound   per vehicle and class the farthest a node has moved since the build
+//               relative to the vehicle's reference motion (fkReference: its nodes' mean
+//               motion, predicted), and the fastest one's travel over a step (anti-clip's
+//               pads grow with it) (fkTrack); held to the class's allowance
+//               (fkVehicleCheck), and per pair of partners of the pass the reference
+//               motions' difference, with the origins' (a rebase cancels) and room for
+//               rounding, to the allowance between vehicles, FK_FAR more for two
+//               vehicles not near each other (fkPairCheck); past either, the list is
+//               built again (fkDecide)
 // A pair today's walk would list has its point within the triangle's box grown by the
 // range and at most CLIP_DEPTH plus both nodes' travel. Since the build the point has
-// moved relative to the triangle's nodes by at most its own motion in its vehicle, the
-// triangle's nodes' in theirs, and the two first nodes' relative motion; with the travel
-// that is within the two allowances and FK_BETWEEN, so the point was in the build's box:
-// the kept list holds the pair. The pairs tested are therefore today's, the hits and the
-// marks the same.
+// moved relative to the triangle's nodes by at most its own motion relative to its
+// vehicle's reference, the triangle's nodes' relative to theirs, and the two references'
+// relative motion; with the travel that is within the two allowances and the one between
+// vehicles, so the point was in the build's box: the kept list holds the pair. (Two
+// vehicles not near each other: every point was outside the box grown by FK_FAR too.)
+// The pairs tested are therefore today's, the hits and the marks the same. The classes,
+// the heat, the reference motion and the allowance between vehicles are choices that
+// cannot make a list unsound: the build's boxes and the bound use the same ones.
 // What is not kept: a pass with a node too fast for a build's allowances, or a bound not
 // finite, takes today's path; a build past an owner's room (FK_CAP pairs: its tests in the
 // padded walk that pass) or the run's is followed by FK_BACKOFF passes on today's path;

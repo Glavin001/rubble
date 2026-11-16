@@ -528,8 +528,11 @@ with a conservative skin:
 - **The build** lists every (triangle, contact point) of two vehicles the plan pairs
   whose point is inside the triangle's box grown by its range, `CLIP_DEPTH`, an allowance
   for the triangle's nodes, one for the point, and one for the two vehicles' relative
-  motion (`FK_BETWEEN`, 5 cm), whatever the throttle, the step's partner bits or the
-  owner's box say in that substep. A node's allowance is its class's: calm (`FK_CALM`,
+  motion, whatever the throttle, the step's partner bits or the owner's box say in that
+  substep. The last is the build's choice (`fkBetween`): 16 passes of the fastest
+  relative motion of two partners over the pass before, between 5 and 30 cm, so a list
+  built while cars slide past each other is larger and lasts as long as one built at
+  rest. A node's allowance is its class's: calm (`FK_CALM`,
   5 cm) or wild (`FK_WILD`, 35 cm). A node is wild when it is faster than 1 m/s relative
   to its vehicle, too fast for the calm allowance at all, or hot (it used more than half
   the calm allowance under an earlier list: wild for the next 4,096 passes); a spinning
@@ -559,16 +562,16 @@ with a conservative skin:
   holds each partner vehicle's calm motion plus travel to `FK_CALM` and its largest
   motion plus largest travel to `FK_WILD`, and each pair of partners' relative motion
   (the two reference motions' difference, with the origins' terms as the tests round
-  them and 2 mm plus 2·10⁻⁶ of the coordinates for rounding) to `FK_BETWEEN`, or to
-  `FK_BETWEEN` + `FK_FAR` when neither is near the other. Past any of them, a pair the
+  them and 2 mm plus 2·10⁻⁶ of the coordinates for rounding) to the build's allowance,
+  or to that plus `FK_FAR` when neither is near the other. Past any of them, a pair the
   build did not cover, or a missing signature: the list is built again in that pass.
 
 Why the same hits: a pair today's walk lists has its point within the triangle's box
 grown by the range and at most `CLIP_DEPTH` plus the two nodes' travel. Since the build
 the point has moved relative to the triangle's nodes by at most its own motion relative
 to its vehicle's reference, the triangle's nodes' relative to theirs, and the two
-references' relative motion; with the travel that is within the two allowances and
-`FK_BETWEEN`, so at the build the point was inside the build's box: the kept list has the
+references' relative motion; with the travel that is within the two allowances and the
+one between vehicles, so at the build the point was inside the build's box: the kept list has the
 pair. For two vehicles not near each other, every point was outside the box grown by
 `FK_FAR` as well, so the same holds with that much more relative motion and no pair. The other conditions (listed, partners, owner's box, `vvInBox`) are evaluated
 exactly, so the pairs that reach `vvFind` are today's set, each once; the hit list's
@@ -596,6 +599,15 @@ dispatch (the tests' module, the step word alone, sized by the first plan), and 
 sorted copy, both later plans, the walk and the listed pairs' dispatch are empty; a build
 runs every dispatch, its tests in the listed pairs'.
 
+The rounding allowance, counted: the tests compare a point's and a triangle's
+coordinates after about three operations each, each within half a unit in the last
+place (6·10⁻⁸ of the coordinate); the build's test, a node's motion and the vehicles'
+relative motion add about as many. Together under 1.2·10⁻⁶ of the largest coordinate
+involved (the origins' difference plus a node's position), against 2·10⁻⁶ of it and
+2 mm.
+
 Limits. The build is fleet-wide: one pair of cars past its bound builds every owner's
 list again. A vehicle's bound is two numbers (calm, wild), so one calm node moving 5 cm
-ends the list (and is wild from the next build on).
+ends the list (and is wild from the next build on). An owner's list holds 32,767 pairs:
+past it (four cars in their first collision came to 30,170) the pass and the next 136
+take the front's own path.
