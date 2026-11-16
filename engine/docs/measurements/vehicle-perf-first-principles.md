@@ -1700,3 +1700,36 @@ Chrome (its two new checkboxes are untested), the CUDA host, more than eight car
 checkboxes, which clears the flags without a checkbox (256 `PERF_MEMBER_LIST`, 512
 `PERF_VV_BEAM_SUM`): the page runs without them. Flags 1024 and 2048 have checkboxes.
 
+
+### 8.24 The lid, the page's switches, and the whole runs after them (2026-11-16)
+
+**The canyon's lid.** A slab across the canyon on its walls' tops (a collider of
+density 1, which the scene renderer does not draw). Parts thrown over a wall had no
+ground and fell without end; one such node set its car's contact reach and pair-list
+rebuilds. With the lid no node passes 25 km/h late in the run.
+
+**The page's switches.** The page sends its perf flags as its checkboxes' sum, so a
+switch without a checkbox was off on the page: the members' pair lists (256, §8.19) and
+the contact hits' beam sums (512, §8.21) never ran in Chrome until they got theirs
+here. Every Chrome figure for more than one car before this section is without them.
+
+**Whole 40 s run, vehicle GPU ms a World step (t ≥ 0.5 s):**
+
+| | median | p95 | worst |
+|---|---|---|---|
+| 8 cars, native, before the lid (§8.21) | 37.5 | 44.4 | 52.7 |
+| 8 cars, native, with the lid | 26.7 | 28.1 | 32.0 |
+| 8 cars, Chrome, with the lid, the two switches off on the page | 35.2 | 39.6 | 47.1 |
+| 8 cars, Chrome, every switch on (51 s simulated, no stop) | 23.5 | 25.8 | 32.4 |
+| 1 car, native, §8.23's two switches on / off (its agent's runs) | 4.80 / 5.05 | 5.05 / 5.44 | 5.35 / 5.64 |
+
+Chrome still takes about 15 World steps a second with eight cars (8,069 of 10,950
+steps refused). Debris retirement is refused by the engine while vehicle contact is on
+(`set_retired`: "its contact groups do not skip retired nodes"), so with several cars
+only the piece labels take effect; the lid is what keeps debris from running away.
+
+**The fast loop** (AGENTS.md, "Checking a kernel change"): `fast-check.sh` on 18 saved
+states (1, 2, 4, 8, 32 cars) in place of driving up to each moment; a cache for each
+kernel compile; a `fast` build profile. A rebuild after a kernel edit 91 s → 5 s (a
+small file) or 25 s (`explicit_beams.slang`); a bit-for-bit check of four eight-car
+moments 4–6 minutes → 5 s.
