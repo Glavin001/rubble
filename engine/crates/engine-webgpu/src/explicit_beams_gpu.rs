@@ -1168,6 +1168,30 @@ impl ExplicitBeamsGpu {
         specs
     }
 
+    /// [`Self::compute_specs`] for a host that runs self-collision split
+    /// ([`Self::set_self_split`]) from its first frame: where the fleet's touching cars
+    /// then take the self split's contact path (more than one vehicle, no surface
+    /// contact: its member, walk, pairs, group and tests modules are in `specs`), those
+    /// are compiled before the first frame and the groups' own workgroup's kernels
+    /// (contact, larger groups, solo: that path's fallback, taken only with the split
+    /// off) after it. The same modules, another order: a cold start is no longer, and
+    /// touching cars run across the GPU from the first frame instead of after the
+    /// deferred compiles (two minutes on Metal in Chrome).
+    pub fn prefer_self_split(specs: &mut [crate::ComputeSpec]) {
+        let ahead = ["explicit_beams_selfsplit_member_vv", "explicit_beams_selfsplit_walk_vv", "explicit_beams_selfsplit_pairs_vv", "explicit_beams_split_group", "explicit_beams_split_tests"];
+        if !specs.iter().any(|s| s.module.starts_with(ahead[0])) {
+            return;
+        }
+        let fallback = [Kernel::Contact.entry(), Kernel::Solo.entry(), Kernel::ContactBig.entry()];
+        for s in specs.iter_mut() {
+            if ahead.iter().any(|m| s.module.starts_with(m)) {
+                s.deferred = false;
+            } else if fallback.contains(&s.label) && !s.deferred {
+                s.deferred = true;
+            }
+        }
+    }
+
     /// [`Self::new`] with room for rigid-body proxies per vehicle (the World coupling,
     /// `slang/kernels/explicit_beams_rigid.slang`, [`CouplingLayout`]); off until the
     /// host writes the coupling header's `on` word.

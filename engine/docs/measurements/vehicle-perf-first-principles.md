@@ -1277,3 +1277,18 @@ targets (3 ms worst, 120 steps a second) are not met: a step is ten times the ta
 Per kind in the pile (t 12 s, µs a substep; a substep's budget at the target is 88 µs
 for everything): tests' walk 330, the cars' steps 227, front 203, levels 79, listed
 pairs 62. One car's frame (§8.9, untouched in this section) is 164 µs a substep.
+
+**Chrome, eight cars, 200 s of page time (40 s simulated), page visible** (probe,
+`timing=step`, vehicle GPU ms a step, t ≥ 0.5 s):
+
+| build | ready | median | p95 | worst | steps refused |
+|---|---|---|---|---|---|
+| this section's kernels, the fallback's modules compiled first | 74 s (cold) | 34.9 | 73.1 | 175.7 at t 5.9 s | 8,130 |
+| the self split's contact modules first (`prefer_self_split`, the lab) | 16 s (the driver's cache warm) | 41.0 | 46.1 | 51.1 | 8,100 |
+
+With the fallback first, touching cars ran in the groups' own workgroup (49–95 ms a
+step) for the first 45–55 s after the page was ready. With the self split's contact
+modules compiled before the first frame they run across the GPU from the first step.
+The second run's later frames are slower (39–46 ms against 33–37): the fallback's
+modules were compiling behind it, and the two runs were not controlled against each
+other. 120 steps a second is not held: 11–14 steps a second, every other step refused.

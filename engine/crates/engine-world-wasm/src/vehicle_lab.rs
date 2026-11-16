@@ -86,7 +86,10 @@ pub async fn create_vehicle_lab(spec: JsValue, progress: Option<js_sys::Function
         // The vehicles' kernels compiled without blocking first (as `createVehicleTown`).
         let car = lab_car(&template, &opts, None);
         let fleet = vec![car; opts.cars as usize + usize::from(opts.parked)];
-        let specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(opts.capacity));
+        let mut specs = engine_webgpu::ExplicitBeamsGpu::compute_specs(&fleet, Some(opts.capacity));
+        if opts.self_split {
+            engine_webgpu::ExplicitBeamsGpu::prefer_self_split(&mut specs);
+        }
         crate::warm_pipelines(&device, &specs, crate::hear_fn(progress)).await.map_err(err)?;
     }
     let (world, lab) = res(Lab::build(
