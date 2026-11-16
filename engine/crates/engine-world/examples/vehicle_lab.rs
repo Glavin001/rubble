@@ -2234,6 +2234,18 @@ fn main() -> anyhow::Result<()> {
         template.triangles.len(),
         template.nodes.iter().map(|n| n.mass).sum::<f32>()
     );
+    // `--node-masses I,J,…`: those nodes' masses and the car's mass distribution (kg), then
+    // exit (no GPU).
+    if let Some(list) = arg("--node-masses") {
+        let mut m: Vec<f32> = template.nodes.iter().map(|n| n.mass).collect();
+        for i in list.split(',').filter_map(|i| i.parse::<usize>().ok()) {
+            println!("node {i}: {:.3} kg", template.nodes[i].mass);
+        }
+        m.sort_by(f32::total_cmp);
+        let n = m.len();
+        println!("node masses kg: min {:.3}, p10 {:.3}, median {:.3}, p90 {:.3}, max {:.3}, mean {:.3}", m[0], m[n / 10], m[n / 2], m[n * 9 / 10], m[n - 1], m.iter().sum::<f32>() / n as f32);
+        return Ok(());
+    }
     if let Some(what) = arg("--measure") {
         return measure(&template, &what, gpu);
     }
