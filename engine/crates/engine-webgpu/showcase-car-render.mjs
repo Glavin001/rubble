@@ -2294,7 +2294,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         // Packed and uploaded in pieces of at most BIND_PIECE records (8 MB): the
         // vertices' records, the weighted entries' slots (both in vertex order) and
         // the fallbacks (few) each staged apart, so the CPU never holds the whole
-        // buffer (255 MB for a generated car) at once. The same bytes as one upload.
+        // buffer (157 MB for a generated car) at once. The same bytes as one upload.
         const total = n + na + nslots;
         const buffer = device.createBuffer({ label: 'showcase-binds', size: Math.max(16, total * 64), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         const stage = (records, base) => {
