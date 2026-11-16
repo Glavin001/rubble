@@ -426,12 +426,62 @@ void explicit_beams_split_tests(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThre
 }
 #endif
 
+#ifdef EB_SELF_SPLIT
+// A member's step s after its tests' dispatches (PERF_MEMBER_LIST with self-collision
+// split: contactMemberStep ends at its tests): the walk's list recorded in the pair
+// list's state (selfSplitWalkEnd), the step's self-collision hits applied (every hit,
+// of the step's dispatch, the walk's and the pairs', counts in the hit list's count), the
+// slide nodes, as contactMemberStep runs them after its tests; then the list's state for
+// the next step, or its statistics at the frame's end. Before the groups' pass of the
+// step, which reads what the hits leave. A solo vehicle returns at once.
+void memberRest(uint v, uint lane, uint s)
+{
+    uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
+    bool keep = (gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn() && s < gP.steps;
+    uint member = splitUniform(lane, keep ? fl.y : 0u);
+    if (member == 0u) return;
+    uint4 r0 = gStatic[v * 4u];
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    uint4 r3 = gStatic[v * 4u + 3u];
+    uint4 misc = gMisc[v];
+    float3 origin = asfloat(misc.xyz);
+    uint parity = (misc.w + s) & 1u;
+    soloStepLoad(v, lane);
+    sync();
+    if (lane == 0u)
+    {
+        selfSplitWalkEnd(v);
+        gsUniformHits = gAcc[hitAcc(v)].load() != 0 ? 1u : 0u;
+        gsUniformOpen = 0u;
+        gsUniformLanes = r1.y > 0u ? 1u : 0u;
+    }
+    sync();
+    uint selfOn = gsUniformLanes;
+    if (selfOn != 0u) selfApply(v, true, lane, LANES, lane, origin, asfloat(r3.z), r0.z, r2.z, r2.w, parity);
+#ifdef EB_AERO
+    uint4 aero2 = gStatic[gP.aeroBase + v * 3u + 2u];
+    if (lane == LANES - 1u && (r3.x & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, SLIDE_FRAME, r2.z, parity);
+#endif
+    sync();
+    memberListSave(v, lane, s);
+}
+#endif
+
 #ifdef EB_SOLO_STEP
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
 #ifdef EB_SELF_SPLIT
+    // The members' rest of step s (the step word's SPLIT_LEVELS: after the step's walk
+    // and pairs dispatches, before the groups' pass).
+    if ((gP.pad2 & SPLIT_LEVELS) != 0u)
+    {
+        memberRest(gid.x, lid.x, gP.pad2 & SPLIT_STEP);
+        ebLoopCapFlush();
+        return;
+    }
     // Self-collision split (explicit_beams_selfsplit.slang): the solo vehicles' steps cut
     // at their tests, the walk and pairs dispatches after this one; the next pairs
     // dispatch's slot cleared as the self split's step dispatch does.

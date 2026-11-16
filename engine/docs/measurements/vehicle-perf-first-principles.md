@@ -1420,3 +1420,57 @@ list) comes before, not after, the contact front: it needs the vehicle contact's
 pairs and the group's scratch out of the regions the solo step's pair list and saved
 state use (`triPairsAt`, `gridCountBase`), which is stage 1 of
 `contact-groups-design.md` §8.
+
+### 8.19 A group's members on the solo step's pair list (2026-11-16)
+
+§8.18's first item, built in three steps, each bit for bit (`group_split_gpu`,
+`self_split_gpu`; `--ab-switch groupsplit` at 2, 4 and 8 cars, t 2, 4, 6, 9 s; the
+GPU == CPU suites; Chrome's validation of every module).
+
+1. **Vehicle contact's scratch in regions of its own.** The pass's listed (triangle,
+   candidate) pairs were in each owner's self-collision pair region (`triPairsAt`) and a
+   group's counters and grid offsets between its dispatches in its first member's
+   self-collision grid words (`gridCountBase`, `gridOffBase`): the places a solo step
+   keeps its reused pair list and its state between dispatches. Now `vvTriPairs`
+   (gNext, 2 · `TRI_PAIR_CAP` words a vehicle), `vvScratch` (gAcc, `GRID_BUCKETS` a
+   vehicle) and `vvScratchOff` (gNext, `GRID_BUCKETS` + 1 a vehicle); Params words
+   101, 99, 100 (`PARAM_WORDS` 102), fleets of two vehicles or more. 1 MB of gNext more a
+   vehicle. No change in time.
+2. **The member keeps its pair list over the frame's steps** (`PERF_MEMBER_LIST`, perf
+   flag 256, on by default; `--ab-switch perf=256`). `contactMemberStep` runs the solo
+   step's list (`pairReuseTrack`, `pairReuseDecide`, build or reuse), its state saved to
+   the member's solo-step record after each step's dispatch and loaded before the next
+   (`memberListLoad`, `memberListSave`). Everything else of the member's step is as it
+   was (the pending throttle reset, the box keys, the node phase's `hits`, the coupling
+   and drive before it, the frame's end in `contactMemberEnd`). With the list's tests in
+   the member's own workgroup (the split path without self-collision split, and this
+   step's first form) a member's step in the pile went 600 → 467 µs a substep for eight
+   cars and 543 → 358 for four: the dispatch waits for its slowest workgroup, and with a
+   list built on 9–16 % of a member's steps some member of eight builds in three steps
+   of four.
+3. **With self-collision split, the member's walk and pairs in the fleet's dispatches.**
+   The member's step ends at its tests as a solo vehicle's does (`selfSplitBuild`,
+   `selfSplitTests`; `selfSplitVehicle` takes members), the walk and pairs dispatches
+   test its pairs across the GPU, and its hits are applied in a dispatch of their own
+   before the groups' pass (`memberRest`, the vehicles' module with the step word's
+   `SPLIT_LEVELS`; the host's `GroupOp::SelfRest`, no workgroups without a group). A
+   solo vehicle's hits wait for its next step's dispatch; a member's cannot: the
+   groups' pass of the step runs after them in the groups' own workgroup, and that
+   order is kept. One dispatch more a substep.
+
+Native M3 Max, the pile at t 9 s, a frame of 34 substeps (`--ab-profile`):
+
+| | before | after |
+|---|---|---|
+| 8 cars: the vehicles' step, µs a substep | 599.8 | 164.6, and the members' hits 56.5, self pairs 25.5, self walk 37.2 (22 of 34 steps) |
+| 8 cars: the vehicles' own work, ms a frame | 20.4 | 9.2 |
+| 8 cars: frame, ms (untimed) | 45.1 | 33.8 |
+| 4 cars: the vehicles' step, µs a substep | 542.7 | 173.6, and the members' hits 57.8, self pairs 17.2, self walk 33.6 (10 of 34) |
+| 4 cars: frame, ms | 24.8 | 15.3 |
+| 2 cars grouped (t 2 s): frame, ms | 15.5 | 6.9 |
+
+The first 9.3 s of the run, the explicit frame's GPU ms a World step (t ≥ 0.5 s; median /
+p95 / worst): 2 cars 6.37 / 17.2 / 18.6 → 6.31 / 8.1 / 9.7; 4 cars 22.3 / 25.2 / 31.0 →
+12.5 / 16.8 / 22.3; 8 cars 32.1 / 46.4 / 57.4 → 22.2 / 34.8 / 50.0. Eight cars' frame
+by kind is now the contact tests' walk 14.2 ms (38 %), the front 7.0, the vehicles' step
+5.6, the levels 4.2, the tests' pairs 2.2, the members' hits 1.9.

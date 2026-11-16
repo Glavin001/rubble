@@ -1590,6 +1590,10 @@ static const uint PERF_VV_BIG_GRID = 128u;
 // vehicle does (pairReuse*: built at a step, tested again while it provably holds every
 // pair the walk would test), its state saved between the steps' dispatches
 // (memberListSave), in place of the grid's sort and walk every step (contactMemberStep).
+// With self-collision split (EB_SELF_SPLIT) the list's walk and its pairs' tests run in
+// the walk and pairs dispatches across the GPU, beside the solo vehicles', and the
+// member's step ends at its tests: its hits are applied in a dispatch of their own
+// before the groups' pass (explicit_beams_split.slang memberRest; the host adds it).
 static const uint PERF_MEMBER_LIST = 256u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 
@@ -8458,14 +8462,17 @@ void memberListLoad(uint v, uint lane, uint s)
     else
         soloStepLoad(v, lane);
 }
+// The state for the member's next dispatch.
+void memberListKeep(uint v, uint lane)
+{
+    for (uint k = lane; k < REUSE_WORDS; k += LANES) gAcc[soloStepAt(v) + k].store(int(gsCount[GRID_BUCKETS + k].load()));
+}
 // After the step's closing barrier: the state for the next step's dispatch, or at the
 // frame's last step the list's statistics (pairReuseEnd).
 void memberListSave(uint v, uint lane, uint s)
 {
     if (s + 1u < gP.steps)
-    {
-        for (uint k = lane; k < REUSE_WORDS; k += LANES) gAcc[soloStepAt(v) + k].store(int(gsCount[GRID_BUCKETS + k].load()));
-    }
+        memberListKeep(v, lane);
     else
         pairReuseEnd(v, lane);
 }
@@ -8573,6 +8580,10 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     if (lane == 0u)
     {
         if (keep) gsPairCount.store(0u);
+#ifdef EB_SELF_SPLIT
+        // (No pairs for the pairs dispatch, no walk, unless this step lists them.)
+        if (keep) selfSplitClear(v);
+#endif
         gAcc[hitAcc(v)].store(0);
         gAcc[hitAcc(v) + 1u].store(0);
         clipVmaxClear(v, parity);
@@ -8702,8 +8713,19 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     }
 #ifdef EB_SOLO_STEP
     if (gridOn != 0u && reuse != 0u)
+    {
+#ifdef EB_SELF_SPLIT
+        // The solo step's cut: the build's walk and the listed pairs' tests in the walk
+        // and pairs dispatches after this one.
+        if (reuse == 1u)
+            selfSplitBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount, parity);
+        selfSplitTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
+                       groupCount, parity);
+#else
         memberListTests(v, lane, reuse, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount,
                         beamOff, groupOff, groupCount, parity);
+#endif
+    }
     else
 #endif
     if (candCount > 0u && cell > 0.0 && gridOn != 0u)
@@ -8736,6 +8758,16 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
             triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff, groupOff,
                          groupCount, parity);
     }
+#ifdef EB_SELF_SPLIT
+    if (keep)
+    {
+        // The step's rest (its hits applied, the slide nodes) after the walk and pairs
+        // dispatches: memberRest.
+        sync();
+        memberListKeep(v, lane);
+        return;
+    }
+#endif
     if ((flagsU & 2u) != 0u)
     {
         sync();
