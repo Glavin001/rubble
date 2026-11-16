@@ -1923,7 +1923,13 @@ pub unsafe extern "C" fn rbWorld_GetPrewarmProgress(
         // A kernel the platform compiler could not build (after a retry) is an error
         // the host sees here, with done == total, never a progress that stops short.
         let failed: usize = w.prewarms.iter().map(Prewarm::failed).sum();
-        anyhow::ensure!(failed == 0, "prewarm: {failed} of {total} kernels failed to compile (the platform's shader compiler; see stderr)");
+        if failed != 0 {
+            let errors: Vec<String> = w.prewarms.iter().flat_map(Prewarm::errors).collect();
+            anyhow::bail!(
+                "prewarm: {failed} of {total} kernels failed to compile (the platform's shader compiler):\n{}",
+                errors.join("\n")
+            );
+        }
         Ok(())
     })
 }
