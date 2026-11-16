@@ -240,15 +240,17 @@ fn fleet_matches(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32
 
 #[test]
 fn owners_state_by_vehicle_is_bit_for_bit() {
-    use engine_exec::explicit_plan::PERF_FLEET_STATE;
+    use engine_exec::explicit_plan::{PERF_FLEET_FRONT, PERF_FLEET_STATE};
     let text = generated();
-    for self_split in [false, true] {
+    // The state by vehicle under the groups' dispatches (stage 1), then with the front and
+    // the tests as fleet-wide dispatches too (stage 2), each against the groups' slots.
+    for (mask, self_split) in [(PERF_FLEET_STATE, false), (PERF_FLEET_STATE, true), (PERF_FLEET_STATE | PERF_FLEET_FRONT, false), (PERF_FLEET_STATE | PERF_FLEET_FRONT, true)] {
         let a = sedan(&text, Vec3::ZERO, 0.0, Vec3::new(0.0, 0.0, 12.0));
         let front = a.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
         let probe = sedan(&text, Vec3::ZERO, 180.0, Vec3::ZERO);
         let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
         let b = sedan(&text, Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
-        let Some([grouped, _, hits]) = fleet_matches("two sedans head-on", vec![a, b], 40, 17, PERF_FLEET_STATE, self_split) else { return };
+        let Some([grouped, _, hits]) = fleet_matches("two sedans head-on", vec![a, b], 40, 17, mask, self_split) else { return };
         assert!(grouped > 10 && hits > 0, "the cars met and hit ({grouped} frames grouped, {hits} hits)");
         // A column of six, the first pushed into the others: groups of two to six, owners
         // without a partner beside owners with hits.
@@ -257,7 +259,7 @@ fn owners_state_by_vehicle_is_bit_for_bit() {
         let fleet: Vec<ExplicitBeams> = (0..6)
             .map(|i| sedan(&text, Vec3::new(0.0, 0.0, i as f32 * pitch), 0.0, if i == 0 { Vec3::new(0.0, 0.0, 15.0) } else { Vec3::ZERO }))
             .collect();
-        let Some([grouped, largest, hits]) = fleet_matches("a column of six", fleet, 30, 17, PERF_FLEET_STATE, self_split) else { return };
+        let Some([grouped, largest, hits]) = fleet_matches("a column of six", fleet, 30, 17, mask, self_split) else { return };
         assert!(grouped > 10 && largest > 4 && hits > 0, "a group past four members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
     }
 }

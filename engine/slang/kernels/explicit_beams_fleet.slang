@@ -171,8 +171,8 @@ void flPoint(uint vb, uint i)
         if (any(x < B0.xyz - e3) || any(x > B1.xyz + e3)) continue;
         uint own = flOwn(va);
         uint base = flRun(va);
-        // (An owner past the run's room has no part: FL_ERR_RUN.)
-        if (base == 0xFFFFFFFFu) continue;
+        // (Past the run's room no owner is offered anything: FL_ERR_RUN, fleetPlan.)
+        if (gAcc[own + FL_OFFERED].load() == 0) continue;
         uint ci = uint(gAcc[own + FL_CANDS].add(1));
         float4 E = float4(nf3(vvRel(vb, va) + gNodes[h * 3u].xyz), asfloat(h));
         gBeams[gP.vvRun + base + ci] = E;
@@ -426,6 +426,16 @@ void fleetGroupLevels(uint k, uint off, uint runOff, uint points, uint parity, u
     }
     sync();
     for (uint m = lane, mStop = EB_END(m, k, LANES); m < mStop; m += LANES) flOwnerEnd(vvMember(off, m));
+#ifdef EB_VV_GROUPS
+    // The fleet-wide dispatches' counts back to zero (PERF_FLEET_FRONT: fleetPlan wrote
+    // them for this pass; without a group nothing does, and they must run no thread).
+    if (lane == 0u && (gP.perfFlags & PERF_FLEET_FRONT) != 0u)
+    {
+        gArgs[0] = 0u;
+        gArgs[4] = 0u;
+        gArgs[8] = 0u;
+    }
+#endif
 }
 
 #ifdef EB_VV_GLOBAL
@@ -509,6 +519,276 @@ void fleetTests(uint g, uint part, uint lane, uint word)
             q -= n;
         }
         flWalkInline(vvMember(off, a), q, p % subs, subs);
+    }
+}
+#endif
+
+// --- Stage 2: the front as fleet-wide dispatches (contact-groups-design.md §8.4) ---
+// Each a dispatch over every pair, vehicle or element, its phase the step word's (three a
+// module: the step alone, SPLIT_TESTS, SPLIT_LEVELS):
+//   explicit_beams_fleet_front  the pairs' step scans (a thread a pair);
+//                               SPLIT_TESTS: every triangle's throttle step and every
+//                               contact point's gather (a thread each);
+//                               SPLIT_LEVELS: the candidates' sorted copy (a thread a
+//                               place of the fleet-wide run)
+//   explicit_beams_fleet_plan   one workgroup: the owners' parts of the run (the prefix
+//                               of their offered counts) and their records of the step;
+//                               SPLIT_TESTS: a workgroup a vehicle, its grid's offsets
+//                               (the first also the listed triangles' prefix);
+//                               SPLIT_LEVELS: one workgroup, the listed pairs' prefix
+//   explicit_beams_split_tests  the walk (a thread a part of a listed triangle) and the
+//                               listed pairs (a thread a pair), over every owner
+// The plan module binds the fleet's indirect arguments (gArgs: three words each for the
+// sorted copy at 0, the walk at 4, the pairs at 8) and writes the counts the next
+// dispatches run with; the group's levels zero them after the pass (no group: no
+// workgroup anywhere).
+
+// A vehicle whose contact is the fleet-wide passes' this frame: a member of a group the
+// small groups' levels take (a larger group's pass, vvPass, is its own).
+bool flVehicleOn(uint v)
+{
+    uint4 fl = gMisc[vvRec(v, VV_FLAGS)];
+    if (fl.y == 0u) return false;
+    uint k = gMisc[gP.vvGroups + fl.z].y;
+    return k != 0u && k <= VV_PART;
+}
+// The step's parity for vehicle v's boxes: its group's first member's step count (as the
+// group's pass has it), kept at the groups' frame start.
+uint flParity(uint v, uint s) { return (gNext[flVehAt(0u, v)] + s) & 1u; }
+
+// The last vehicle whose prefix (row r) is at most x: the owner of place x of a
+// fleet-wide list (the vehicles without a part have the next one's start).
+uint flFind(uint r, uint x)
+{
+    uint lo = 0u;
+    uint hi = gP.vehicles;
+    for (uint it = 0u; it < 32u; it++)
+    {
+        if (hi - lo <= 1u) break;
+        uint mid = (lo + hi) >> 1u;
+        if (gNext[flPrefixAt(r, mid)] <= x) lo = mid;
+        else hi = mid;
+    }
+    return lo;
+}
+
+// Row r of the prefixes from the owners' counter `word` (a listed pairs' count past the
+// list's room counts 0: that owner tests inline), every lane of one workgroup, uniform;
+// four barriers. Returns nothing: the total is the row's last word.
+uint flCount(uint v, uint word)
+{
+    uint n = uint(gAcc[flOwn(v) + word].load());
+    return word == FL_PAIRS && n > TRI_PAIR_CAP ? 0u : n;
+}
+void flPrefix(uint r, uint word, uint lane)
+{
+    uint nv = gP.vehicles;
+    uint chunk = (nv + LANES - 1u) / LANES;
+    uint v0 = min(lane * chunk, nv);
+    uint v1 = min(v0 + chunk, nv);
+    uint block = LANES / GRID_BLOCKS;
+    sync();
+    uint sum = 0u;
+    for (uint v = v0, vStop = EB_END(v, v1, 1u); v < vStop; v++) sum += flCount(v, word);
+    gsPart[lane] = sum;
+    sync();
+    if (lane < GRID_BLOCKS)
+    {
+        uint run = 0u;
+        for (uint q = 0u, qStop = EB_END(q, block, 1u); q < qStop; q++)
+        {
+            uint x = gsPart[lane * block + q];
+            gsPart[lane * block + q] = run;
+            run += x;
+        }
+        gsBlk[lane] = run;
+    }
+    sync();
+    if (lane == 0u)
+    {
+        uint run = 0u;
+        for (uint q = 0u; q < GRID_BLOCKS; q++)
+        {
+            uint x = gsBlk[q];
+            gsBlk[q] = run;
+            run += x;
+        }
+        gNext[flPrefixAt(r, nv)] = run;
+    }
+    sync();
+    {
+        uint run = gsPart[lane] + gsBlk[lane / block];
+        for (uint v = v0, vStop = EB_END(v, v1, 1u); v < vStop; v++)
+        {
+            gNext[flPrefixAt(r, v)] = run;
+            run += flCount(v, word);
+        }
+    }
+    sync();
+}
+
+#ifdef EB_FLEET_FRONT
+// Thread `tid` of the fleet-wide front's thread dispatches.
+void fleetFront(uint tid, uint word)
+{
+    uint s = word & SPLIT_STEP;
+    if ((word & (SPLIT_TESTS | SPLIT_LEVELS)) == 0u)
+    {
+        // (S) the plan's pairs. A pair outside the fleet-wide passes (no group, or a
+        // larger group's): no partners here, whatever an earlier frame left.
+        uint pairs = gNext[flAdjFirst(gP.vehicles)] / 2u;
+        if (tid >= pairs) return;
+        uint va = gNext[gP.vvPairs + 2u * tid];
+        if (!flVehicleOn(va))
+        {
+            if ((gNext[flBitsAt(2u * tid)] & 4u) == 0u)
+            {
+                gNext[flBitsAt(2u * tid)] = 0u;
+                gNext[flBitsAt(2u * tid + 1u)] = 0u;
+            }
+            return;
+        }
+        flScanPair(tid, flParity(va, s));
+        return;
+    }
+    if ((word & SPLIT_TESTS) != 0u)
+    {
+        // (P) triangle tid's throttle step; contact point tid's gather.
+        if (tid < gP.totalTris)
+        {
+            uint va = gStatic[gP.triBase + tid].w;
+            if (flVehicleOn(va)) flTriangle(va, tid, flParity(va, s));
+        }
+        if (tid < gNext[flPrefixAt(4u, gP.vehicles)])
+        {
+            uint vb = flFind(4u, tid);
+            if (flVehicleOn(vb)) flPoint(vb, tid - gNext[flPrefixAt(4u, vb)]);
+        }
+        return;
+    }
+    // The sorted copy: place tid of the fleet-wide run.
+    if (tid >= gNext[flPrefixAt(0u, gP.vehicles)]) return;
+    uint va = flFind(0u, tid);
+    uint e = tid - flRun(va);
+    if (e < flCands(va)) flSortCand(va, e);
+}
+
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_fleet_front(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    fleetFront(gid.x * LANES + lid.x, gP.pad2);
+    ebLoopCapFlush();
+}
+#endif
+
+#ifdef EB_FLEET_PLAN
+// The fleet's indirect arguments (gArgs in the plan module's binding): x, 1, 1.
+void flArgs(uint at, uint threads)
+{
+    gArgs[at] = (threads + LANES - 1u) / LANES;
+    gArgs[at + 1u] = 1u;
+    gArgs[at + 2u] = 1u;
+}
+static const uint FL_ARGS_SORT = 0u;
+static const uint FL_ARGS_WALK = 4u;
+static const uint FL_ARGS_PAIRS = 8u;
+// Threads the walk aims at (the split groups' tests ran SPLIT_TEST_WGS workgroups a group).
+static const uint FL_WALK_THREADS = 64u * LANES;
+
+void fleetPlan(uint g, uint lane, uint word)
+{
+    uint s = word & SPLIT_STEP;
+    uint nv = gP.vehicles;
+    if ((word & (SPLIT_TESTS | SPLIT_LEVELS)) == 0u)
+    {
+        // After the scans (one workgroup): the owners' parts of the fleet-wide run, the
+        // prefix of their offered counts; past the run's room no owner is offered
+        // anything this step (FL_ERR_RUN: the pass is cut short, loudly).
+        flPrefix(0u, FL_OFFERED, lane);
+        uint total = splitUniform(lane, gNext[flPrefixAt(0u, nv)]);
+        if (total > VV_PART * vvTotalCp())
+        {
+            for (uint v = lane, vStop = EB_END(v, nv, LANES); v < vStop; v += LANES) gAcc[flOwn(v) + FL_OFFERED].store(0);
+            if (lane == 0u) flError(FL_ERR_RUN);
+            flPrefix(0u, FL_OFFERED, lane);
+        }
+        for (uint v = lane, vStop = EB_END(v, nv, LANES); v < vStop; v += LANES)
+        {
+            if (flVehicleOn(v)) flOwnerPlan(v, flParity(v, s));
+        }
+        if (lane == 0u) flArgs(FL_ARGS_SORT, min(gNext[flPrefixAt(0u, nv)], VV_PART * vvTotalCp()));
+        return;
+    }
+    if ((word & SPLIT_TESTS) != 0u)
+    {
+        // After the gather (a workgroup a vehicle): owner g's grid's offsets; the first
+        // workgroup also the listed triangles' prefix and the walk's threads.
+        uint offered = splitUniform(lane, g < nv ? uint(gAcc[flOwn(g) + FL_OFFERED].load()) : 0u);
+        if (offered != 0u) flOffsets(g, lane);
+        uint first = splitUniform(lane, g == 0u ? 1u : 0u);
+        if (first != 0u)
+        {
+            flPrefix(1u, FL_LISTED, lane);
+            if (lane == 0u)
+            {
+                uint listed = gNext[flPrefixAt(1u, nv)];
+                uint subs = clamp(FL_WALK_THREADS / max(listed, 1u), 1u, 64u);
+                gNext[flCtlNext(0u)] = subs;
+                flArgs(FL_ARGS_WALK, listed * subs);
+            }
+        }
+        return;
+    }
+    // After the walk (one workgroup): the listed pairs' prefix and the pairs' threads (an
+    // owner past its list's room tests its listed triangles inline there, a thread each).
+    flPrefix(2u, FL_PAIRS, lane);
+    if (lane == 0u)
+    {
+        uint over = 0u;
+        for (uint v = 0u, vStop = EB_END(v, nv, 1u); v < vStop; v++)
+        {
+            if (uint(gAcc[flOwn(v) + FL_PAIRS].load()) > TRI_PAIR_CAP) over = 1u;
+        }
+        gNext[flCtlNext(1u)] = over;
+        flArgs(FL_ARGS_PAIRS, max(gNext[flPrefixAt(2u, nv)], over != 0u ? gNext[flPrefixAt(1u, nv)] : 0u));
+    }
+}
+
+[shader("compute")]
+[numthreads(EB_LANES, 1, 1)]
+void explicit_beams_fleet_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    fleetPlan(gid.x, lid.x, gP.pad2);
+    ebLoopCapFlush();
+}
+#endif
+
+#ifdef EB_VV_GLOBAL
+// The tests over every owner (PERF_FLEET_FRONT): thread tid of the walk (a part of a
+// listed triangle) or of the listed pairs (SPLIT_LEVELS).
+void fleetWideTests(uint tid, uint word)
+{
+    uint nv = gP.vehicles;
+    uint listed = gNext[flPrefixAt(1u, nv)];
+    if ((word & SPLIT_LEVELS) == 0u)
+    {
+        uint subs = gNext[flCtlNext(0u)];
+        if (subs == 0u || tid >= listed * subs) return;
+        uint q = tid / subs;
+        uint va = flFind(1u, q);
+        flWalk(va, q - gNext[flPrefixAt(1u, va)], tid % subs, subs);
+        return;
+    }
+    if (tid < gNext[flPrefixAt(2u, nv)])
+    {
+        uint va = flFind(2u, tid);
+        flPairTest(va, tid - gNext[flPrefixAt(2u, va)]);
+    }
+    if (gNext[flCtlNext(1u)] != 0u && tid < listed)
+    {
+        uint va = flFind(1u, tid);
+        if (uint(gAcc[flOwn(va) + FL_PAIRS].load()) > TRI_PAIR_CAP) flWalkInline(va, tid - gNext[flPrefixAt(1u, va)], 0u, 1u);
     }
 }
 #endif

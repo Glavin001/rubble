@@ -1604,6 +1604,10 @@ static const uint PERF_MEMBER_LIST = 256u;
 // 1): on the split group path with its tests across workgroups, vehicle contact's state
 // by owner vehicle (explicit_beams_fleet.slang) in place of a contact group's slots.
 static const uint PERF_FLEET_STATE = 1024u;
+// perfFlags bit 2048 (explicit_plan::PERF_FLEET_FRONT; §8 stage 2), with it: the pass's
+// front and tests as fleet-wide dispatches (explicit_beams_fleet.slang fleetFront,
+// fleetPlan, fleetWideTests).
+static const uint PERF_FLEET_FRONT = 2048u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 
 // The break exception (spec §2, step 4: an end on a collision triangle with fewer
@@ -5817,9 +5821,10 @@ uint flCtl(uint i) { return gP.vvFleet + gP.vehicles * (FL_OWN + 1u + 1024u) + i
 // partner the other, d ^ 1), then per d the step's bits (1 partners, 2 a fast approach;
 // 4, from the plan: a later copy of a pair the list holds twice, never a partner)
 // and the owner's two-body slot at the partner's points (its rank among that vehicle's
-// two-body partners of the step); then four words a vehicle plus one (0: its part of the
+// two-body partners of the step); then five words a vehicle plus one (0: its part of the
 // fleet-wide run, the prefix of the owners' offered counts; 1..3 the prefixes of the
-// listed triangles, the listed pairs and the hits); then six words a vehicle (0: its
+// listed triangles, the listed pairs and the hits; 4 the prefix of the vehicles' contact
+// points, static, from the host); then six words a vehicle (0: its
 // group's step count at the frame's start; 1..4: its last pass's pairs, hits, listed
 // triangles and candidates, a measurement; 5: its level); the fleet's listed triangles;
 // FL_CTL counters.
@@ -5828,7 +5833,7 @@ uint flAdjAt(uint e) { return gP.vvFleetNext + gP.vehicles + 1u + e; }
 uint flBitsAt(uint d) { return flAdjAt(0u) + 2u * gP.vvPairCap + d; }
 uint flSlotAt(uint d) { return flAdjAt(0u) + 4u * gP.vvPairCap + d; }
 uint flPrefixAt(uint r, uint v) { return flAdjAt(0u) + 6u * gP.vvPairCap + r * (gP.vehicles + 1u) + v; }
-uint flVehAt(uint r, uint v) { return flPrefixAt(4u, 0u) + r * gP.vehicles + v; }
+uint flVehAt(uint r, uint v) { return flPrefixAt(5u, 0u) + r * gP.vehicles + v; }
 uint flListAt(uint i) { return flVehAt(6u, 0u) + i; }
 uint flCtlNext(uint i) { return flListAt(gP.totalTris) + i; }
 // A pair's side d: its vehicle and the other.
@@ -8153,7 +8158,7 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 // (words 0..2), else the frame with the groups over vehicles + groups (words 4..6);
 // and every group again for the larger groups' module (words 12..14) when one has
 // more than VV_PART members (`big`), else none.
-void vvArgs(uint nv, uint groups, bool big)
+void vvArgs(uint nv, uint groups, bool big, bool larger)
 {
     gArgs[12] = big ? groups : 0u;
     gArgs[13] = 1u;
@@ -8185,6 +8190,24 @@ void vvArgs(uint nv, uint groups, bool big)
     gArgs[28] = nv;
     gArgs[29] = 1u;
     gArgs[30] = 1u;
+    // The contact pass's front as fleet-wide dispatches (explicit_beams_fleet.slang), none
+    // without a group: a thread a pair (words 32..34, in workgroups of 256 at least),
+    // one workgroup (36..38), a thread a triangle or contact point (40..42).
+    uint any = groups == 0u ? 0u : 1u;
+    gArgs[32] = any * ((gNext[flAdjFirst(nv)] / 2u + 255u) / 256u);
+    gArgs[33] = 1u;
+    gArgs[34] = 1u;
+    gArgs[36] = any;
+    gArgs[37] = 1u;
+    gArgs[38] = 1u;
+    gArgs[40] = any * ((max(gP.totalTris, vvTotalCp()) + 255u) / 256u);
+    gArgs[41] = 1u;
+    gArgs[42] = 1u;
+    // … and every group again when one is past VV_PART members (`larger`: its pass is
+    // the larger groups', in the groups' own dispatch; words 44..46), else none.
+    gArgs[44] = larger ? groups : 0u;
+    gArgs[45] = 1u;
+    gArgs[46] = 1u;
 }
 
 void vvEmitPair(uint a, uint b)
@@ -8341,7 +8364,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         }
         if (lane == 0u)
         {
-            vvArgs(nv, 0u, false);
+            vvArgs(nv, 0u, false, false);
             gAcc[vvCtl(VV_BIGS)].store(0);
         }
         return ebLoopCapFlush();
@@ -8479,11 +8502,13 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         // A group past VV_PART members (within VV_MAX_GROUP: a larger one's
         // vehicles run alone, its member count 0).
         bool big = false;
+        bool larger = false;
         for (uint g = 0u, gStop = EB_END(g, groups, 1u); g < gStop; g++)
         {
             if (gMisc[gP.vvGroups + g].y > VV_SIDE) big = true;
+            if (gMisc[gP.vvGroups + g].y > VV_PART) larger = true;
         }
-        vvArgs(nv, groups, big);
+        vvArgs(nv, groups, big, larger);
     }
     // Clear for the next frame.
     for (uint b = lane, bGuard = 0u; b <= gP.vvGridMask; b += 256u)

@@ -145,6 +145,13 @@ void splitGroupBegin(uint g, uint lane)
         gMisc[vvRec(v, VV_MEMBER)].x = rank;
     }
     sync();
+    // (The owners' state by vehicle: each member's group's step count, the parity of
+    // the group's pass for its boxes: explicit_beams_fleet.slang flParity.)
+    if (gP.vvFleetNext != 0u)
+    {
+        uint base = gMisc[vvMember(off, 0u)].w;
+        for (uint i = lane, iStop = EB_END(i, k, LANES); i < iStop; i += LANES) gNext[flVehAt(0u, vvMember(off, i))] = base;
+    }
     if (lane == 0u)
     {
         uint run = 0u;
@@ -253,6 +260,9 @@ void splitGroupStep(uint g, uint lane, uint word)
     {
         if (!levels)
         {
+            // (With the front as fleet-wide dispatches this one runs only for a larger
+            // group's pass: nothing here.)
+            if ((gP.perfFlags & PERF_FLEET_FRONT) != 0u) return;
             if (lane == 0u)
             {
                 gsUniformHits = 0u;
@@ -457,6 +467,15 @@ void splitTests(uint g, uint part, uint lane, uint word)
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_tests(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+#ifdef EB_VV_FLEET
+    // The tests over every owner (a thread an element, not a group's workgroups).
+    if ((gP.perfFlags & PERF_FLEET_FRONT) != 0u)
+    {
+        fleetWideTests(gid.x * LANES + lid.x, gP.pad2);
+        ebLoopCapFlush();
+        return;
+    }
+#endif
     splitTests(gid.x / SPLIT_TEST_WGS, gid.x % SPLIT_TEST_WGS, lid.x, gP.pad2);
     ebLoopCapFlush();
 }

@@ -213,10 +213,11 @@ pub const fn fleet_acc_words(nv: usize) -> usize {
     nv * (FLEET_OWN_WORDS + 1 + WIDE_GRID_BUCKETS) + FLEET_CTL_WORDS
 }
 pub const fn fleet_next_words(nv: usize, pair_cap: usize, tris: usize) -> usize {
-    // adjacency firsts, entries, bits, slots; then per vehicle: run base (+ 1), step
-    // base, last counts (4), level, listed base (+ 1), pair base (+ 1), hit base (+ 1);
-    // the fleet's listed triangles; the fleet's counters.
-    (nv + 1) + 6 * pair_cap + 4 * (nv + 1) + 6 * nv + tris + FLEET_CTL_WORDS
+    // adjacency firsts, entries, bits, slots; then five prefixes over the vehicles (+ 1
+    // each: run base, listed, pairs, hits, and the contact points', static); then per
+    // vehicle: step base, last counts (4), level; the fleet's listed triangles; the
+    // fleet's counters.
+    (nv + 1) + 6 * pair_cap + 5 * (nv + 1) + 6 * nv + tris + FLEET_CTL_WORDS
 }
 /// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
 /// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
@@ -288,6 +289,13 @@ pub const PERF_VV_BEAM_SUM: u32 = 512;
 /// fleet-wide regions, its candidates' grid its own, two-body point counts by the owner's
 /// rank among the point's vehicle's partners; in place of a contact group's slots.
 pub const PERF_FLEET_STATE: u32 = 1024;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_STATE`]: the contact pass's front as fleet-wide
+/// dispatches (the kernel's PERF_FLEET_FRONT; contact-groups-design.md §8 stage 2): the
+/// pairs' step scans, every triangle's throttle step and every contact point's gather,
+/// each owner's grid, the candidates' sorted copy, the walk and the listed pairs, each a
+/// dispatch over every owner, in place of a workgroup a group for the front and 64 a
+/// group for the tests.
+pub const PERF_FLEET_FRONT: u32 = 2048;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14) and [`PERF_MEMBER_LIST`] (§8.19); `RUBBLE_PERF_FLAGS=<mask>` overrides
@@ -2415,6 +2423,17 @@ impl ExplicitUpload {
             })
             .sum();
         let mut next_init = vec![0u32; next_len.max(1)];
+        // The contact points' prefix over the vehicles (the fleet state's fifth prefix:
+        // the kernel's flPrefixAt(4, v); static).
+        if vv_fleet_next != 0 {
+            let at = vv_fleet_next as usize + (nv + 1) + 6 * vv_pair_cap as usize + 4 * (nv + 1);
+            let mut run = 0u32;
+            for (k, v) in vehicles.iter().enumerate() {
+                next_init[at + k] = run;
+                run += v.contact_points.len() as u32;
+            }
+            next_init[at + nv] = run;
+        }
         if piece_base != 0 {
             let at = piece_base as usize + total_nodes + nv;
             next_init[at..at + total_nodes * PIECE_GROUPS].fill(f32::INFINITY.to_bits());
