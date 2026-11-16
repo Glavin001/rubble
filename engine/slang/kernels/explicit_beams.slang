@@ -10928,13 +10928,8 @@ uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, u
     }
     sync();
     if (gsUniformOpen == 0u) return 0u;
-    // The two-body pass reads every member's node force at its start (nothing the
-    // scans wrote).
-    if (gP.vvSplit != 0u)
-    {
-        vvSnapshot(off, k, parity, lane);
-        sync();
-    }
+    // (The two-body pass's node forces at its start: taken by the levels, for the
+    // listed hits' nodes, before any hit is applied: vvPassSmallLevels.)
     // (P) every owner's throttle step and candidates.
     {
         uint triTotal = 0u;
@@ -11150,6 +11145,38 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
 void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid)
 {
     sync();
+    // The two-body pass reads its hits' nodes' forces as at the pass's start (the
+    // triangle's nodes and the point: vvStagedHit, vvTry). Nothing since the start
+    // wrote a force (the scans, the lists and the tests do not), so they are taken
+    // here, before the first hit is applied, for the listed hits' nodes alone (the
+    // same value from every lane that takes a node); every member's nodes when an
+    // owner's list overflowed.
+    if (gP.vvSplit != 0u)
+    {
+        bool every = false;
+        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+        {
+            if (gsVvHit4[a].load() > 2u * points) every = true;
+        }
+        if (every) vvSnapshot(off, k, parity, lane);
+        else
+        {
+            for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
+            {
+                uint base = vvHitSmall(runOff, points, a, 0u);
+                for (uint i = lane, iStop = EB_END(i, gsVvHit4[a].load(), LANES); i < iStop; i += LANES)
+                {
+                    uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
+                    uint h = gNext[base + 2u * i + 1u];
+                    gBeams[gP.vvSnap + tn.x] = float4(vvPointForce(tn.x, tn.w, parity), 0.0);
+                    gBeams[gP.vvSnap + tn.y] = float4(vvPointForce(tn.y, tn.w, parity), 0.0);
+                    gBeams[gP.vvSnap + tn.z] = float4(vvPointForce(tn.z, tn.w, parity), 0.0);
+                    gBeams[gP.vvSnap + h] = float4(vvPointForce(h, gStatic[gP.nodeInfoBase + h].w, parity), 0.0);
+                }
+            }
+        }
+        sync();
+    }
     // The owners' levels, once (vvLevelsSet), and the highest: the levels past it
     // hold no owner (level 1 runs whatever the hits: the throttle updates).
     vvLevelsSet(k, lane);

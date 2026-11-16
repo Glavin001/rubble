@@ -1231,3 +1231,12 @@ pile, 4,160 listed triangles on 8,192 threads, so one part each), then the front
    the start of this section). The pile's frame by kind now (30.0 ms untimed): tests'
    walk 11.3 ms (34 %), front 8.9 (27 %), the cars' steps 7.7 (23 %), levels 2.6 (8 %),
    listed pairs 2.1 (6 %).
+
+5. **The two-body pass's force snapshot for the listed hits' nodes.** The front took
+   every member's every node's force (`vvSnapshot`: a beam sum a node, 4,384 nodes on
+   one core, every substep) for a pass that reads it at its hits' nodes alone. Nothing
+   between the pass's start and its first applied hit writes a force, so the levels take
+   it for the listed hits' triangle nodes and points (every node's when a list
+   overflowed). Bit for bit at the same five times; the front 8.9 → 6.9 ms a frame in
+   the pile, 5.7 → 3.5 falling; frames at t 2 / 3.7 / 5 / 8 / 12 s: 14.6 / 33.0 / 20.6 /
+   31.6 / 28.2 ms.
