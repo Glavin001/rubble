@@ -1579,6 +1579,9 @@ static const uint PERF_WIDE_LIST = 16u;
 // them read what step s's node phase and hits left, as the aux dispatch before step
 // s + 1's nodes did).
 static const uint PERF_WIDE_FUSED = 32u;
+// explicit_plan::PERF_AHEAD_APART and PERF_TYRE_AHEAD (wideAheadApart, driveTyresPost).
+static const uint PERF_AHEAD_APART = 131072u;
+static const uint PERF_TYRE_AHEAD = 262144u;
 // perfFlags bit 64 (explicit_plan::PERF_VV_STREAM): the larger groups' contact pass keeps,
 // beside each gathered candidate, its travel over the step, its vehicle and whether that
 // vehicle has anti-clip (written where the candidate is gathered), so a triangle's
@@ -7812,6 +7815,13 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     if ((gP.perfFlags & PERF_WIDE_FUSED) != 0u && wideStep() + 1u < gP.steps && driveOn != 0u)
     {
         if (on != 0u) sync();
+        // (PERF_TYRE_AHEAD: their first part ran on the list dispatch's coupling and
+        // wheels workgroup; the rest here.)
+        if ((gP.perfFlags & (PERF_TYRE_AHEAD | PERF_AHEAD_APART)) == (PERF_TYRE_AHEAD | PERF_AHEAD_APART))
+        {
+            driveTyresPost(v, 255u - lane, vehicleStep(v) + 1u);
+            return ebLoopCapFlush();
+        }
         DrvCtx drvC;
         bool drvHas;
         bool drvApart;
@@ -7911,7 +7921,9 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
 // read, so they ran beside them already; on a core of their own the list's longest
 // phases no longer carry them. (Its own function behind an early return: the list's
 // code is unchanged.)
-static const uint PERF_AHEAD_APART = 131072u;
+// perfFlags bit 262144 (explicit_plan::PERF_TYRE_AHEAD, with PERF_AHEAD_APART): the
+// tyres split at their hubs' forces (explicit_beams_drive.slang drvTyrePre,
+// drvTyrePost): the first part here, the second in the hits kernel after selfApply.
 void wideAheadApart(uint v, uint lane)
 {
     uint s = gP.pad2;
@@ -7948,6 +7960,11 @@ void wideAheadApart(uint v, uint lane)
     sync();
     if (aheadFold) cplFoldC(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
     if (aheadDrive) driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 1u, misc.w + s + 1u);
+    // PERF_TYRE_AHEAD: the tyres' part before their hubs' forces (after the bars), and
+    // the end; the hits kernel runs the rest (driveTyresPost).
+    if ((gP.perfFlags & PERF_TYRE_AHEAD) == 0u) return;
+    sync();
+    if (aheadDrive) driveTyresPre(drvC, drvHas, drvApart, LANES - 1u - lane);
 }
 
 [shader("compute")]
