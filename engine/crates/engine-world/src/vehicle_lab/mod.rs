@@ -198,7 +198,9 @@ impl LabOptions {
         // (More than one car: the mountain keeps ground under all of them, several
         // times one car's chunks, so the shapes' room defaults to its most.)
         let many = num(v, "cars", f64::from(d.cars)) > 1.0;
-        let shapes = (num(v, "shapes", if many { 1024.0 } else { f64::from(d.capacity.shapes) }) as u32).clamp(8, 1024);
+        let shapes = (num(v, "shapes", f64::from(d.capacity.shapes)) as u32).clamp(8, 1024);
+        // (At least the most with several cars, whatever a page asks for one car's run.)
+        let shapes = if many { 1024 } else { shapes };
         let mut parts = Vec::new();
         if let Some(p) = v.get("parts") {
             let list = |k: &str| -> Vec<u64> {
@@ -1343,28 +1345,21 @@ impl Bench {
         } else {
             0
         };
-        // With more cars, ground under every one of them: the chunks from the hindmost
-        // car's to the foremost's (each car within the rebase radius of its origin, so
-        // that many chunks further either way). One car: as before.
-        let (mut lo, mut hi) = (at, at);
+        // With more cars, ground under every one of them: each car's own window of
+        // chunks (a car is within the rebase radius of its origin, so that many chunks
+        // further either way), not the whole span between the hindmost and the
+        // foremost, which grows without end as one car runs on. One car: as before.
+        let (behind, ahead) = (i64::from(m.spec.behind), i64::from(m.spec.ahead));
+        let mut windows = vec![((at - behind).max(-1), at + ahead)];
         if self.car.readings > 0 && self.fleet.len() > 1 {
             let reach = (100.0 / f64::from(m.spec.chunk)).ceil() as i64;
             for o in &self.fleet[1..] {
                 let k = m.spec.chunk_of(*o);
-                lo = lo.min(k - reach);
-                hi = hi.max(k + reach);
+                windows.push(((k - reach - behind).max(-1), k + reach + ahead));
             }
         }
-        let (first, last) = (
-            (lo - i64::from(m.spec.behind)).max(-1),
-            hi + i64::from(m.spec.ahead),
-        );
-        let gone: Vec<i64> = m
-            .live
-            .keys()
-            .copied()
-            .filter(|k| *k < first || *k > last)
-            .collect();
+        let keep = |k: i64| windows.iter().any(|(a, b)| k >= *a && k <= *b);
+        let gone: Vec<i64> = m.live.keys().copied().filter(|k| !keep(*k)).collect();
         for k in gone {
             for key in m.live.remove(&k).unwrap_or_default() {
                 rig.remove(key);
@@ -1372,7 +1367,9 @@ impl Bench {
             m.dropped += 1;
         }
         // The nearest missing chunk first; one a step once the run is going.
-        let mut order: Vec<i64> = (first..=last).filter(|k| !m.live.contains_key(k)).collect();
+        let mut order: Vec<i64> = windows.iter().flat_map(|(a, b)| *a..=*b).filter(|k| !m.live.contains_key(k)).collect();
+        order.sort_unstable();
+        order.dedup();
         order.sort_by_key(|k| (k - at).abs());
         for k in order {
             let chunk = m.spec.chunk(k);

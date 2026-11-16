@@ -1474,3 +1474,39 @@ p95 / worst): 2 cars 6.37 / 17.2 / 18.6 → 6.31 / 8.1 / 9.7; 4 cars 22.3 / 25.2
 12.5 / 16.8 / 22.3; 8 cars 32.1 / 46.4 / 57.4 → 22.2 / 34.8 / 50.0. Eight cars' frame
 by kind is now the contact tests' walk 14.2 ms (38 %), the front 7.0, the vehicles' step
 5.6, the levels 4.2, the tests' pairs 2.2, the members' hits 1.9.
+
+### 8.20 The eight-car benchmark's scene, and where it stands (2026-11-16)
+
+Three things about the scene, not the solver, found on the way to a whole run:
+
+- **The page's stability check stopped the run in Chrome at t ≈ 9.2 s** (twice): a car
+  slowed by a crash to 47 kJ, 104 m across with parts left behind, left at 568 kJ after
+  being struck by another. Its own fall does not explain the rise and the box rule
+  counted nothing else. Natively the fleet's kinetic + potential energy only falls
+  (1,388 → −18,417 kJ over 13 s) and so does each car's own (`vehicle_lab`'s energy
+  line). The box rule now also needs the read vehicles' mechanical energy together to
+  have risen past launches and external work (`stability.rs`; two tests).
+- **The mountain's ground followed the first car alone.** The other cars' chunks were
+  dropped as it ran on, and whole cars fell without end (median node speeds of
+  350 km/h, fastest past 1,000). Each car now keeps its own window of chunks (from
+  every vehicle's origin record, read with the first car's nodes), and the shapes'
+  room is 1,024 with more than one car.
+- **Still open:** a few debris nodes a car leave over the canyon's walls and fall
+  without end (the lab's debris time to live reads the first car only). A wide apron
+  under each chunk was tried and removed: it became a contact candidate for every car
+  (median 56, worst 88 ms) and did not catch them all.
+
+Whole 40 s run with §8.19's members' pair list and the ground under every car, vehicle
+GPU ms a World step (t ≥ 0.5 s):
+
+| | median | p95 | worst | |
+|---|---|---|---|---|
+| 8 cars, native | 37.6 | 60.3 | 62.9 | 55.6 / 65.2 / 70.3 in §8.18 |
+| 8 cars, Chrome (page visible, 50 s simulated) | 40.4 | 49.6 | 53.3 | no stop; 11–15 steps a second, 8,219 of 10,500 steps refused |
+| 1 car, native | 5.55 | 5.74 | 5.94 | unchanged |
+
+The frame grows through the run although the cars are at rest from about t 16 s
+(26 ms at t 4 s, 32 at 12, 40 at 20, 62 at 40): at t 20–30 s the cars' steps are
+530–540 µs a substep again and the levels 365 (the members' pair list on or off:
+57 against 58–63 ms a frame). Not yet explained; the debris in free fall and resting
+cars that never sleep are the two candidates.
