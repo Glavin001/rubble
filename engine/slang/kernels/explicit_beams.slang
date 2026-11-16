@@ -8655,10 +8655,12 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
 // the accumulators of the contact pass), so every member's step is the same, bit
 // for bit, while the barriers are shared: k members cost about one member's step.
 // (VV_PART: with VV_MAX_GROUP, above.)
-groupshared Atomic<uint> gsTestedM[2u * VV_PART];
+// (The members' step's own: at most VV_SIDE members side by side. A browser's workgroup
+// storage is 32,768 bytes a module: sized by VV_PART these passed it.)
+groupshared Atomic<uint> gsTestedM[2u * VV_SIDE];
 groupshared Atomic<uint> gsPairCountM[VV_PART];
-groupshared uint gsBlkM[GRID_BLOCKS * VV_PART];
-static const uint PAIR_PART = PAIR_LIST / VV_PART;
+groupshared uint gsBlkM[GRID_BLOCKS * VV_SIDE];
+static const uint PAIR_PART = PAIR_LIST / VV_SIDE;
 
 // Lanes per member for k members: LANES >> ceil(log2 k).
 uint vvPartLanes(uint k)
@@ -11181,10 +11183,13 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
     // hold no owner (level 1 runs whatever the hits: the throttle updates).
     vvLevelsSet(k, lane);
     sync();
-    gVvLv = gsUniformLanes;
+    // (The loop's bound from the uniform load itself: a browser's uniformity analysis
+    // does not follow it through the lane's own copy.)
+    uint packed = gsUniformLanes;
+    gVvLv = packed;
     sync();
     uint top = 1u;
-    for (uint a = 0u; a < VV_PART; a++) top = max(top, vvLv(a));
+    for (uint a = 0u; a < VV_PART; a++) top = max(top, (packed >> (4u * a)) & 15u);
     // The hits, level by level (at most k levels); with the first, every listed
     // triangle's throttle update (its marks are final) and a later owner's reset.
     for (uint l = 1u, lGuard = 0u; l <= top; l++)
