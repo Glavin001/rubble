@@ -539,7 +539,10 @@ pub const VV_SPLIT_SLOTS: usize = 9;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
 /// groups (16), the awake vehicles' frame (32, vehicle sleep), the larger groups (48),
 /// the split group path's groups (64), members (80) and tests (96), and every vehicle's
-/// step in every frame for self-collision split with vehicle contact (112).
+/// step in every frame for self-collision split with vehicle contact (112). (Then the
+/// fleet-wide contact front's 128, 144 and 176; self-collision split's awake vehicles
+/// without vehicle contact at 160, written by vehicle sleep's awake list, which rewrites
+/// the plan's arguments every frame from the plan's values kept at words 3, 7 and 11.)
 pub const ARGS_BYTES: u64 = 192;
 /// The vehicle sleep awake list's pass ([`Kernel::Sleep`]).
 pub const SLEEP_LIST: &str = "explicit_beams_sleep_list";
@@ -2919,8 +2922,9 @@ impl FramePlanner {
     /// Frames dispatch the awake vehicles only (vehicle sleep on, more than one vehicle:
     /// the awake list's pass, [`Kernel::Sleep`], writes the indirect arguments).
     pub fn sleep_listed(&self) -> bool {
-        // Split frames dispatch every vehicle (a sleeping one returns at once): each
-        // segment binds its own parameter copy, which the indirect dispatch has not.
+        // The surface pass's split frames dispatch every vehicle (a sleeping one returns
+        // at once): each segment binds its own parameter copy, which the indirect
+        // dispatch has not.
         self.sleep_on() && self.nv > 1 && self.sleep_listing && !self.split_frames(true)
     }
 

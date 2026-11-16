@@ -275,8 +275,10 @@ workgroup a group; the members' steps and the tests are what spreads.
 - Groups past four members keep the owner-after-owner pass (`vvPass`) in one workgroup:
   their members' steps spread, their pass does not. A pile-up of more than four cars in
   one component pays it (§6).
-- Vehicle sleep, the test kernel variants and the diagnostic pipelines keep the group's
-  workgroup (the host's `group_split_on`).
+- The test kernel variants and the diagnostic pipelines keep the group's workgroup (the
+  host's `group_split_on`). Vehicle sleep no longer does (2026-11-16): the split path
+  runs sleep's rule as the group's workgroup does, bit for bit
+  (`explicit-vehicles-in-world.md` §10.7).
 - WebGPU only (native wgpu and browsers). Metal and CUDA run the old group path
   (known-bugs P1's table).
 
