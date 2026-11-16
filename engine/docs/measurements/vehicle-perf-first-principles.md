@@ -1077,3 +1077,29 @@ past four members is still one workgroup (owner after owner, `contact-groups-des
 64–74 s, runs 7–12 steps/s (the simulation reached t ≈ 4 s), 42 ms median and 103 ms worst
 a step, about 1,000 steps refused. 120 steps/s is not held; criterion 2 fails there by
 the same cause.
+
+### 8.12 The eight-car pile: what its frame is (measured), and one thing that does not fix it
+
+Ablations in the pile (`vehicle_lab --cars 8 --ab 12,30 --ab-ablate …`, a workgroup a
+group, 20 frames from one snapshot, ms a frame):
+
+| t (s) | Frame | Without the vehicle-contact pass (512) | Without the members' self-collision tests, the levels or the tests of the small-group pass |
+|---|---|---|---|
+| 12 | 305–308 | **39.5** | 305–307 (those masks belong to the small-group pass) |
+| 30 | 470–472 | **38.7** | 470 |
+
+So **87–92 % of the pile's frame is the contact pass of a group past four members**
+(`vvPass`: owner after owner, each owner's listed triangles against every partner's
+contact points in its box, on one workgroup), about 1 ms an owner a substep at 12 s and
+1.6 ms at 30 s. At 12 s the state after 20 frames is the same word for word with the pass
+left out: the cars lie within each other's frame boxes without touching, and the pass
+finds nothing. Everything else for eight cars on one workgroup is 39 ms.
+
+Tried: `VV_PART` 4 → 8, so a group of eight takes the small-group pass (candidates in a
+grid, a pair list, levels). Its buffers are laid out for four owners in five places
+(`vvRunSmall`, `vvHitSmall`, `vvSortAt`, `vvRankAt`, `vvOrderAt`, and the plan's sizes); the
+loop caps stopped the first run at once. With those generalised it runs on one workgroup
+but slower in flight (128 against 45 ms a step: each of eight members steps on 64 lanes),
+and with the split group path on it ends in non-finite state at t 4.5 s (that path's
+scratch also assumes four owners). Reverted. The fix is the one §8.3 names: the contact
+tests of any group as threads across the GPU from a grid, not a larger side-by-side group.
