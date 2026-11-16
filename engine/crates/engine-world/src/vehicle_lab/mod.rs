@@ -195,7 +195,12 @@ impl LabOptions {
         let d = Self::default();
         let m = v.get("mountain").cloned().unwrap_or(Value::Null);
         let dm = d.mountain;
+        // (More than one car: the mountain keeps ground under all of them, several
+        // times one car's chunks, so the shapes' room defaults to its most.)
+        let many = num(v, "cars", f64::from(d.cars)) > 1.0;
         let shapes = (num(v, "shapes", f64::from(d.capacity.shapes)) as u32).clamp(8, 1024);
+        // (At least the most with several cars, whatever a page asks for one car's run.)
+        let shapes = if many { 1024 } else { shapes };
         let mut parts = Vec::new();
         if let Some(p) = v.get("parts") {
             let list = |k: &str| -> Vec<u64> {
@@ -643,6 +648,10 @@ pub struct Bench {
     pub plates: Vec<Plate>,
     obstacles: Vec<u32>,
     mountain: Option<MountainRun>,
+    /// Every vehicle's origin at the last read (the first car's included; a vehicle's
+    /// nodes stay within the kernel's rebase radius, 100 m, of its origin): the
+    /// mountain keeps ground under each of them.
+    pub fleet: Vec<DVec3>,
     script: Vec<(f64, Value)>,
     script_at: usize,
     pub script_end: Option<f64>,
@@ -694,6 +703,7 @@ impl Bench {
             plates: Vec::new(),
             obstacles: Vec::new(),
             mountain,
+            fleet: Vec::new(),
             script: Vec::new(),
             script_at: 0,
             script_end: None,
@@ -1335,16 +1345,21 @@ impl Bench {
         } else {
             0
         };
-        let (first, last) = (
-            (at - i64::from(m.spec.behind)).max(-1),
-            at + i64::from(m.spec.ahead),
-        );
-        let gone: Vec<i64> = m
-            .live
-            .keys()
-            .copied()
-            .filter(|k| *k < first || *k > last)
-            .collect();
+        // With more cars, ground under every one of them: each car's own window of
+        // chunks (a car is within the rebase radius of its origin, so that many chunks
+        // further either way), not the whole span between the hindmost and the
+        // foremost, which grows without end as one car runs on. One car: as before.
+        let (behind, ahead) = (i64::from(m.spec.behind), i64::from(m.spec.ahead));
+        let mut windows = vec![((at - behind).max(-1), at + ahead)];
+        if self.car.readings > 0 && self.fleet.len() > 1 {
+            let reach = (100.0 / f64::from(m.spec.chunk)).ceil() as i64;
+            for o in &self.fleet[1..] {
+                let k = m.spec.chunk_of(*o);
+                windows.push(((k - reach - behind).max(-1), k + reach + ahead));
+            }
+        }
+        let keep = |k: i64| windows.iter().any(|(a, b)| k >= *a && k <= *b);
+        let gone: Vec<i64> = m.live.keys().copied().filter(|k| !keep(*k)).collect();
         for k in gone {
             for key in m.live.remove(&k).unwrap_or_default() {
                 rig.remove(key);
@@ -1352,7 +1367,9 @@ impl Bench {
             m.dropped += 1;
         }
         // The nearest missing chunk first; one a step once the run is going.
-        let mut order: Vec<i64> = (first..=last).filter(|k| !m.live.contains_key(k)).collect();
+        let mut order: Vec<i64> = windows.iter().flat_map(|(a, b)| *a..=*b).filter(|k| !m.live.contains_key(k)).collect();
+        order.sort_unstable();
+        order.dedup();
         order.sort_by_key(|k| (k - at).abs());
         for k in order {
             let chunk = m.spec.chunk(k);
@@ -2050,6 +2067,15 @@ pub struct ReadPlan {
     pub beams: (u64, u64),
 }
 
+/// One of the other cars' debris state ([`Lab`]'s `fleet`).
+#[derive(Default)]
+struct FleetCar {
+    debris: DebrisTracker,
+    labels: Vec<u8>,
+    retire_due: Option<Vec<bool>>,
+    labels_due: Option<Vec<u8>>,
+}
+
 /// The lab in a GPU World.
 pub struct Lab {
     pub bench: Bench,
@@ -2066,6 +2092,11 @@ pub struct Lab {
     /// The piece labels last sent to the GPU, and new ones to send before the next step.
     labels: Vec<u8>,
     labels_due: Option<Vec<u8>>,
+    /// The other cars of the multi-car run (cars 1 ..: copies of the first): each its
+    /// pieces' debris time to live and piece labels, as the first car's, from the same
+    /// beam reading. Without them a torn-off part of another car was never retired,
+    /// and its travel set that car's contact reach and pair-list rebuilds for good.
+    fleet: Vec<FleetCar>,
 }
 
 fn deg(v: &Value, k: &str, d: f64) -> f32 {
@@ -2268,14 +2299,24 @@ impl Lab {
         }
         let x = world.explicit_vehicles().expect("vehicles");
         let span = x.layout().spans[0];
+        // The first car's copies whose beams follow its own, one after another.
+        let fleet_cars = (1..(opts.cars.clamp(1, MAX_CARS) as usize).min(x.vehicle_count()))
+            .take_while(|&k| {
+                let s = x.layout().spans[k];
+                s.beams == span.beams && s.beam_off == span.beam_off + k as u32 * span.beams
+            })
+            .count();
         let plan = ReadPlan {
             nodes: (u64::from(span.node_off) * 48, u64::from(span.nodes) * 48),
-            origin: (0, 16),
+            // (Every vehicle's origin record: the mountain's ground follows them all.)
+            origin: (0, 16 * x.vehicle_count() as u64),
             coupling: (
                 u64::from(layout.vehicle(0)) * 16,
                 u64::from(layout.recs()) * 16,
             ),
-            beams: (u64::from(span.beam_off) * 32, u64::from(span.beams) * 32),
+            // (The first car's beams, then its copies': the copies are laid out after it,
+            // each as long.)
+            beams: (u64::from(span.beam_off) * 32, u64::from(span.beams) * 32 * (1 + fleet_cars as u64)),
         };
         let dt = world.solver().dt;
         let mut lab = Lab {
@@ -2289,7 +2330,9 @@ impl Lab {
             car: cars[0].clone(),
             labels: Vec::new(),
             labels_due: None,
+            fleet: Vec::new(),
         };
+        lab.fleet_reset(fleet_cars);
         lab.bench.begin(&mut WorldRig {
             world: &mut world,
             bodies: &mut lab.bodies,
@@ -2377,6 +2420,12 @@ impl Lab {
         self.restarts += 1;
         self.car = cars[0].clone();
         self.labels_due = (!self.labels.is_empty()).then(Vec::new);
+        let fleet_cars = self.fleet.len();
+        let stale: Vec<bool> = self.fleet.iter().map(|c| !c.labels.is_empty()).collect();
+        self.fleet_reset(fleet_cars);
+        for (c, stale) in self.fleet.iter_mut().zip(stale) {
+            c.labels_due = stale.then(Vec::new);
+        }
         let mut rig = WorldRig {
             world,
             bodies: &mut self.bodies,
@@ -2446,6 +2495,15 @@ impl Lab {
     /// The piece labels last sent to the GPU's pair list (empty: none, all zero).
     pub fn piece_labels(&self) -> &[u8] {
         &self.labels
+    }
+
+    /// Every car's host-set state the GPU's snapshot does not hold, the first car's
+    /// first: its piece labels (empty: none) and its retired nodes. With the snapshot's
+    /// bytes, what a saved state needs to be replayed in another process.
+    pub fn fleet_host_state(&self) -> Vec<(Vec<u8>, Vec<bool>)> {
+        std::iter::once((self.labels.clone(), self.bench.debris.retired.clone()))
+            .chain(self.fleet.iter().map(|c| (c.labels.clone(), c.debris.retired.clone())))
+            .collect()
     }
 
     pub fn command(&mut self, world: &mut World, cmd: &Value) -> anyhow::Result<Value> {
@@ -2554,6 +2612,14 @@ impl Lab {
         )
     }
 
+    /// The other cars' debris state, fresh (a build or a restart).
+    fn fleet_reset(&mut self, cars: usize) {
+        let ttl = self.bench.debris.ttl;
+        self.fleet = (0..cars)
+            .map(|_| FleetCar { debris: DebrisTracker::for_vehicle(ttl, &self.car), ..Default::default() })
+            .collect();
+    }
+
     /// Call before each `World::step`.
     pub fn before_step(&mut self, world: &mut World) -> anyhow::Result<()> {
         if let Some(retired) = self.bench.retire_due.take() {
@@ -2569,6 +2635,24 @@ impl Lab {
                 x.set_piece_labels(0, if labels.is_empty() { &zeros } else { &labels });
             }
             self.labels = labels;
+        }
+        for (k, c) in self.fleet.iter_mut().enumerate() {
+            let v = k + 1;
+            if let Some(retired) = c.retire_due.take() {
+                if let Some(x) = world.explicit_vehicles_mut() {
+                    if let Err(e) = x.set_retired(v, &retired) {
+                        c.debris.ttl = None;
+                        self.bench.notes.push(format!("car {v}: debris time to live off: {e}"));
+                    }
+                }
+            }
+            if let Some(labels) = c.labels_due.take() {
+                if let Some(x) = world.explicit_vehicles_mut() {
+                    let zeros = vec![0u8; self.car.nodes.len()];
+                    x.set_piece_labels(v, if labels.is_empty() { &zeros } else { &labels });
+                }
+                c.labels = labels;
+            }
         }
         self.bench.before_step(&mut WorldRig {
             world,
@@ -2613,18 +2697,48 @@ impl Lab {
             })
             .collect();
         anyhow::ensure!(origin.len() >= 3, "vehicle lab: no origin record");
+        self.bench.fleet = origin
+            .chunks_exact(4)
+            .map(|w| DVec3::new(f64::from(f(w[0])), f64::from(f(w[1])), f64::from(f(w[2]))))
+            .collect();
         let o = DVec3::new(
             f64::from(f(origin[0])),
             f64::from(f(origin[1])),
             f64::from(f(origin[2])),
         );
         let frame = monitor::decode_coupling(&self.layout, coupling).map_err(anyhow::Error::msg)?;
+        // (The reading holds the first car's beams, then its copies'.)
+        let own = 8 * self.bench.model.beams.len();
+        let rest: Option<&[u32]> = beams.filter(|b| own > 0 && b.len() > own).map(|b| &b[own..]);
         let beams: Option<Vec<(bool, f32)>> = beams.map(|b| {
-            (0..b.len() / 8)
+            (0..b.len().min(own.max(if rest.is_some() { own } else { b.len() })) / 8)
                 .map(|j| (f(b[8 * j + 6]) != 0.0, f(b[8 * j])))
                 .collect()
         });
         let taken = taken.filter(|t| t.is_finite()).unwrap_or(self.bench.t);
+        if let Some(rest) = rest {
+            use engine_softbody::explicit_debris::piece_labels;
+            let ttl = self.bench.debris.ttl;
+            let label = self.bench.opts.piece_labels;
+            for (c, b) in self.fleet.iter_mut().zip(rest.chunks_exact(own)) {
+                let broken: Vec<bool> = (0..own / 8).map(|j| f(b[8 * j + 6]) != 0.0).collect();
+                let pieces = Pieces::from_beams(
+                    &self.bench.model.masses,
+                    self.bench.model.beams.iter().zip(&broken).map(|(e, x)| (e[0], e[1], *x)),
+                );
+                c.debris.ttl = ttl;
+                if c.debris.update(&pieces, taken) {
+                    c.retire_due = Some(c.debris.retired.clone());
+                }
+                c.debris.take_events();
+                if label {
+                    let labels = if pieces.mass.len() > 1 { piece_labels(&self.car, &pieces, &broken) } else { Vec::new() };
+                    if labels != c.labels {
+                        c.labels_due = Some(labels);
+                    }
+                }
+            }
+        }
         self.bench.read_at(
             &CarRead {
                 pos: &pos,

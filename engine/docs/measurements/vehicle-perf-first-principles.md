@@ -1420,3 +1420,417 @@ list) comes before, not after, the contact front: it needs the vehicle contact's
 pairs and the group's scratch out of the regions the solo step's pair list and saved
 state use (`triPairsAt`, `gridCountBase`), which is stage 1 of
 `contact-groups-design.md` §8.
+
+### 8.19 A group's members on the solo step's pair list (2026-11-16)
+
+§8.18's first item, built in three steps, each bit for bit (`group_split_gpu`,
+`self_split_gpu`; `--ab-switch groupsplit` at 2, 4 and 8 cars, t 2, 4, 6, 9 s; the
+GPU == CPU suites; Chrome's validation of every module).
+
+1. **Vehicle contact's scratch in regions of its own.** The pass's listed (triangle,
+   candidate) pairs were in each owner's self-collision pair region (`triPairsAt`) and a
+   group's counters and grid offsets between its dispatches in its first member's
+   self-collision grid words (`gridCountBase`, `gridOffBase`): the places a solo step
+   keeps its reused pair list and its state between dispatches. Now `vvTriPairs`
+   (gNext, 2 · `TRI_PAIR_CAP` words a vehicle), `vvScratch` (gAcc, `GRID_BUCKETS` a
+   vehicle) and `vvScratchOff` (gNext, `GRID_BUCKETS` + 1 a vehicle); Params words
+   101, 99, 100 (`PARAM_WORDS` 102), fleets of two vehicles or more. 1 MB of gNext more a
+   vehicle. No change in time.
+2. **The member keeps its pair list over the frame's steps** (`PERF_MEMBER_LIST`, perf
+   flag 256, on by default; `--ab-switch perf=256`). `contactMemberStep` runs the solo
+   step's list (`pairReuseTrack`, `pairReuseDecide`, build or reuse), its state saved to
+   the member's solo-step record after each step's dispatch and loaded before the next
+   (`memberListLoad`, `memberListSave`). Everything else of the member's step is as it
+   was (the pending throttle reset, the box keys, the node phase's `hits`, the coupling
+   and drive before it, the frame's end in `contactMemberEnd`). With the list's tests in
+   the member's own workgroup (the split path without self-collision split, and this
+   step's first form) a member's step in the pile went 600 → 467 µs a substep for eight
+   cars and 543 → 358 for four: the dispatch waits for its slowest workgroup, and with a
+   list built on 9–16 % of a member's steps some member of eight builds in three steps
+   of four.
+3. **With self-collision split, the member's walk and pairs in the fleet's dispatches.**
+   The member's step ends at its tests as a solo vehicle's does (`selfSplitBuild`,
+   `selfSplitTests`; `selfSplitVehicle` takes members), the walk and pairs dispatches
+   test its pairs across the GPU, and its hits are applied in a dispatch of their own
+   before the groups' pass (`memberRest`, the vehicles' module with the step word's
+   `SPLIT_LEVELS`; the host's `GroupOp::SelfRest`, no workgroups without a group). A
+   solo vehicle's hits wait for its next step's dispatch; a member's cannot: the
+   groups' pass of the step runs after them in the groups' own workgroup, and that
+   order is kept. One dispatch more a substep.
+
+Native M3 Max, the pile at t 9 s, a frame of 34 substeps (`--ab-profile`):
+
+| | before | after |
+|---|---|---|
+| 8 cars: the vehicles' step, µs a substep | 599.8 | 164.6, and the members' hits 56.5, self pairs 25.5, self walk 37.2 (22 of 34 steps) |
+| 8 cars: the vehicles' own work, ms a frame | 20.4 | 9.2 |
+| 8 cars: frame, ms (untimed) | 45.1 | 33.8 |
+| 4 cars: the vehicles' step, µs a substep | 542.7 | 173.6, and the members' hits 57.8, self pairs 17.2, self walk 33.6 (10 of 34) |
+| 4 cars: frame, ms | 24.8 | 15.3 |
+| 2 cars grouped (t 2 s): frame, ms | 15.5 | 6.9 |
+
+The first 9.3 s of the run, the explicit frame's GPU ms a World step (t ≥ 0.5 s; median /
+p95 / worst): 2 cars 6.37 / 17.2 / 18.6 → 6.31 / 8.1 / 9.7; 4 cars 22.3 / 25.2 / 31.0 →
+12.5 / 16.8 / 22.3; 8 cars 32.1 / 46.4 / 57.4 → 22.2 / 34.8 / 50.0. Eight cars' frame
+by kind is now the contact tests' walk 14.2 ms (38 %), the front 7.0, the vehicles' step
+5.6, the levels 4.2, the tests' pairs 2.2, the members' hits 1.9.
+
+### 8.20 The eight-car benchmark's scene, and where it stands (2026-11-16)
+
+Three things about the scene, not the solver, found on the way to a whole run:
+
+- **The page's stability check stopped the run in Chrome at t ≈ 9.2 s** (twice): a car
+  slowed by a crash to 47 kJ, 104 m across with parts left behind, left at 568 kJ after
+  being struck by another. Its own fall does not explain the rise and the box rule
+  counted nothing else. Natively the fleet's kinetic + potential energy only falls
+  (1,388 → −18,417 kJ over 13 s) and so does each car's own (`vehicle_lab`'s energy
+  line). The box rule now also needs the read vehicles' mechanical energy together to
+  have risen past launches and external work (`stability.rs`; two tests).
+- **The mountain's ground followed the first car alone.** The other cars' chunks were
+  dropped as it ran on, and whole cars fell without end (median node speeds of
+  350 km/h, fastest past 1,000). Each car now keeps its own window of chunks (from
+  every vehicle's origin record, read with the first car's nodes), and the shapes'
+  room is 1,024 with more than one car.
+- **Still open:** a few debris nodes a car leave over the canyon's walls and fall
+  without end (the lab's debris time to live reads the first car only). A wide apron
+  under each chunk was tried and removed: it became a contact candidate for every car
+  (median 56, worst 88 ms) and did not catch them all.
+
+Whole 40 s run with §8.19's members' pair list and the ground under every car, vehicle
+GPU ms a World step (t ≥ 0.5 s):
+
+| | median | p95 | worst | |
+|---|---|---|---|---|
+| 8 cars, native | 37.6 | 60.3 | 62.9 | 55.6 / 65.2 / 70.3 in §8.18 |
+| 8 cars, Chrome (page visible, 50 s simulated) | 40.4 | 49.6 | 53.3 | no stop; 11–15 steps a second, 8,219 of 10,500 steps refused |
+| 1 car, native | 5.55 | 5.74 | 5.94 | unchanged |
+
+The frame grows through the run although the cars are at rest from about t 16 s
+(26 ms at t 4 s, 32 at 12, 40 at 20, 62 at 40): at t 20–30 s the cars' steps are
+530–540 µs a substep again and the levels 365 (the members' pair list on or off:
+57 against 58–63 ms a frame). Not yet explained; the debris in free fall and resting
+cars that never sleep are the two candidates.
+
+### 8.21 Every car's debris; the levels' cost by part; a hit's nodes' beam sums kept (2026-11-16)
+
+**Every car's debris.** The lab's piece labels and debris time to live were the first
+car's alone, so another car's torn-off part was never retired and never apart in its
+pair list. Each copy now has both, from one beam reading. Eight cars' whole run:
+median 37.5, p95 44.4, worst 52.7 ms a step (37.6 / 60.3 / 62.9 before); the pair
+lists reused on 93–94 % of car-steps late in the run (86–91 %). A few larger parts
+past the time to live's limits (10 kg, 40 nodes) still fall off the canyon's sides.
+
+**The resting pile's frame by kind** (t 30 s, 42.8 ms): tests' walk 12.8, levels 11.2,
+front 7.7, the cars' steps 6.2, listed pairs 2.2, members' hits 2.0. Vehicle contact is
+34 of the 43 ms; the cars' own steps are 183 µs a substep for all eight.
+
+**Inside the levels** (`vehicle_lab --ab-split-ablate`, the split modules' measurement
+word: time only, the same 20 frames from one snapshot with a part skipped):
+
+| skipped | t 3.7 s (17 hits a pass) | t 30 s (10 hits) |
+|---|---|---|
+| nothing | 40.3 ms a frame | 42.7 |
+| the whole pass | 9.9 | 10.8 |
+| residual phases (16384) | 26.8 (−13.4) | 37.8 (−5.0) |
+| the snapshot (65536) | 33.6 (−6.7) | 41.9 (−0.9) |
+| buckets and application (32768) | 35.4 (−4.9) | 40.3 (−2.5) |
+| level 1's throttle updates (131072) | 37.1 (−3.2) | 41.6 (−1.2) |
+| all four | 20.9 (−19.3) | 33.7 (−9.0) |
+
+Ten to seventeen hits cost 9–19 ms a frame because the levels run in the group's one
+workgroup: every lane's work on one core, a hit after another. A hit takes its
+triangle, its clip test and its four nodes' forces again in each of four passes over
+the list.
+
+**A hit's nodes' beam sums kept for the pass** (perf flag 512, on by default;
+`--ab-switch perf=512`). A node's force is its beams' sum plus its accumulators, and
+the sum does not change within a pass, but each use took the node's whole beam list
+again. The levels now keep it beside the snapshot when they take it (the snapshot's
+unused word tags the pass) and later uses load it. Bit for bit at t 2, 3.7, 5, 8, 12,
+30 s; ms a frame 35.1 against 39.5 at t 3.7 s and 41.6 against 43.4 at t 30 s, within
+noise elsewhere. Small: the rest of a hit's chain (the triangle, the clip test, the
+staging) is still taken four times, on one core. The remedy is §8 of
+`contact-groups-design.md` stage 3 (a thread a hit across the GPU), not more caching.
+
+### 8.22 The tiny and wall-crash proofs, run on their own (2026-11-16)
+
+The brief's bit-for-bit list names a tiny scene and a wall crash beside the mountain
+and the 2- and 8-car contact A/Bs. Until now they were covered only inside whole
+suites. Run separately at commit `0e698895` (release build, under the GPU lock, a clean
+worktree), each twice: with the host's default perf flags and with
+`RUBBLE_PERF_FLAGS=0` (every switch of this work off):
+
+| scene | test | default flags | every switch off |
+|---|---|---|---|
+| wall crash | `engine-webgpu explicit_beams_bitwise sedan_alone_and_into_a_wall_bitwise` | pass | pass |
+| tiny | `engine-webgpu self_split_gpu tiny_split_is_bit_for_bit` | pass | pass |
+
+Both runs of the wall crash print the same lines: the idle sedan 40 frames
+deterministic and equal to the frozen reference, the wall crash 263 frames
+deterministic and equal to the frozen reference, its hits in the baseline's one-lane
+order in 229. Both runs of the tiny scene: 2 frames of 4 steps bit for bit. So on these
+scenes the paths with the switches on and off both equal the frozen reference, hence
+each other. Limits: one run each; the tiny test is two frames of four steps; the commit
+predates the fast-check tooling (no kernel change after it on this branch).
+
+### 8.23 One car's substep: the passes dissected on GPU timestamps; two small switches; three ideas that do not pay (2026-11-16)
+
+**The tool.** `vehicle_lab --ab-perf-masks M1,M2,…` replays 20 frames from one snapshot
+with the perf flags XOR each mask, three times round, and prints per mask the wall
+median and fastest tenth and (on the wide schedule) the GPU ms a frame of every pass
+from timestamps, each dispatch a timed pass (`profile_wide_frame`, now with the list
+kernel, the walk and the pairs apart). Wall time moves 5–40 % with other load on the
+machine; the per-pass timestamps repeat to 0.01 ms. Time-only switches in a kernel
+(skip a part, or run an idempotent part twice) give a part's cost; they were removed
+after use.
+
+**What one car's frame is made of** (wreck at rest, t 20 s, 13–16 hits a step, native M3
+Max, ms a frame of 34 substeps, each dispatch timed apart: the passes sum to about 7 where
+the untimed frame is 5.9–6.1):
+
+| pass | ms | of which |
+|---|---|---|
+| hits (`wide_hits`) | 2.48 | the hits applied (`selfApply`) 1.68: beam forces' fill 0.23, the round (two-body force, shifts, first adds) 0.55–0.63, the residual pass 0.79, barriers and the rest 0.06; the next step's tyres 0.50; the dispatch with nothing to apply 0.29 |
+| list kernel | 2.08 | the coupling's and wheels' fused work ≈0.5 (wall); tracking, twice for the price of 0.09 (wall); the triangles' geometry 0.11; the rest (state load and save, throttles, decision, an empty dispatch) not split further |
+| nodes | 0.88 | |
+| beams | 0.55 | |
+| pairs | 0.52 | 0.19 is the indirect dispatch with no pair to test |
+| centred damping (on in the native lab, off on the page) | 0.50 | |
+
+Three findings that correct §8.1–§8.16:
+- **Barriers are free here.** Eight more `sync()` (sixteen barriers) a step in the hits
+  kernel or in the list kernel change the frame by less than 0.05 ms. A phase costs its
+  longest lane's work, not its barrier.
+- **The list kernel has no expensive part.** Its triangles' geometry is 0.11 ms, its
+  tracking under 0.1, the volatile triangles' tests nothing measurable. A first reading
+  (skip the geometry: −1.4 ms) was the downstream effect of stale geometry (no hits to
+  apply), not the fill. The 65 µs a dispatch of §8.16 is mostly work it was given (the
+  fused coupling and wheels) and the dispatch itself.
+- **The hits' cost is the round and the residual pass at 13–16 hits, not atomics alone.**
+  The merge (36 atomics a hit) is 0.1 ms; the round is 0.55.
+
+**Kept, bit for bit, on by default**
+
+*Hits a (hit, role) a lane* (perf flag 1024, `PERF_HIT_ROLES`, with flag 1;
+`selfResidualRoles`, `hitRolePhase`, `hitCombinePhase`). The first pass's adds, each
+node's acceleration (from A, then A + B), the residual's and the total's shares run on
+the (hit, role)'s own lane; the two steps that combine a hit's four nodes (the residual
+r, the total with its guard) on the hit's lane, from four role records kept after the
+beam forces (20 words a hit). The total's difference goes straight into the
+accumulator: nothing reads A or B after the guard's accelerations, so the D words and
+the merge phase are not needed (the same integers added). Seven short phases in place
+of three long ones and the adds in the round. The hits pass 2.47–2.48 → 2.26 ms a frame
+(−0.21, timed apart; −8 % of the pass, −3.5 % of the frame); wall at rest 5.49 → 5.38 and
+6.14 → 6.00 (median of 60 frames), nothing in free fall (no hits).
+
+*The tested triangles' geometry beside the beams* (perf flag 2048, `PERF_WIDE_GEO`;
+`wideGeoThread`, `triangleFinishPeek`). A thread a triangle on the beams' dispatch
+(which already had the threads: they returned at once) in place of the list kernel's
+lanes; the same triangles (those the throttle update will leave tested, read ahead
+without writing). The list pass 2.05–2.08 → 1.93–1.97 (−0.11), beams unchanged
+(0.546 → 0.543). Wall: inside the noise.
+
+Both together: wall median 6.02 → 5.79 (t 6 s) and 6.21 → 5.81 (t 20 s) in one run of the
+mask harness; `fast-check.sh perf=3072 cars1`, 20 frames: 5.83 → 5.58 (t 6 s),
+5.65 → 5.57 (t 20 s), 4.31 = 4.31 (free fall).
+
+Proofs: `fast-check.sh perf=1024` and `perf=2048`, 20 frames each way, every state word
+the same on all eleven fixtures (one car at t 2.5, 6, 20 s; two cars at 2, 3.7, 8, 16 s;
+eight cars at 2, 3.7, 8, 16 s); the suites, Chrome's validation and the whole runs are
+below.
+
+**Tried, not kept**
+
+- *Strict arithmetic's opaque zero from a thread-local set at entry* (in place of the
+  uniform `gP.vehicles >> 31` at every strict operation; the suspicion was a uniform
+  load per operation). Not faster (5.61 against 5.69, 5.77 against 5.79 ms a frame) and
+  **not bit for bit**: at t 20 s 103 node words and 114 beam words differ after 20
+  frames (the first, node word 5304: 0x4135f235 against 0x4135f244). The compilers see
+  further through a local than through the uniform. Removed.
+- *The list kernel's parts moved off its workgroup*: only the geometry was worth trying
+  (above); the rest is under 0.1 ms each.
+- *Fewer barriers by fusing phases*: nothing to gain (barriers are free).
+
+**Per pass: before, floor, after** (one car at rest, ms a frame, timed apart; floor as
+§8.16)
+
+| pass | before | floor | after |
+|---|---|---|---|
+| hits applied, with the tyres | 2.48 | 0.3–0.6 | 2.26 |
+| list kernel | 2.08 | 0.3–0.5 with walk and pairs | 1.97 |
+| pairs | 0.52 | | 0.52 |
+| nodes | 0.88 | 0.1–0.2 | 0.88 |
+| beams | 0.55 | 0.1–0.2 | 0.55 |
+| centred damping | 0.50 | | 0.50 |
+
+**Stop.** Three attempts in a row gained under 5 % of one car's frame (−3.5 %, −1.9 %, 0 %).
+What the dissection says about the next step: no single pass has a cause left that a
+schedule change removes. The hits' round and residual pass cost 0.1–0.2 µs for every
+access in the longest lane's chain whether the access is an atomic, a scattered load or
+a neighbouring word (the role split cut atomics in series from about 130 to 30 a hit and
+gained a fifth of what a model that charges only atomics predicts). The remaining
+levers are each 0.1–0.3 ms: the round's four accelerations and its position shifts on
+the roles' lanes; the tyres (0.5) and the fused coupling (0.5), which earlier attempts
+did not move (§7.4); an in-box pair's chain in the pairs dispatch (the triangle's nodes
+loaded again by `ownTravelOut` and the hit's record, which the geometry records could
+carry). None reaches the 1.2–1.5 ms of §7.2 alone or together.
+
+**Whole run and verification** (both switches off, `RUBBLE_PERF_FLAGS=961`, against the
+new default, the same build; one car, 40.2 s, vehicles' GPU ms a step from t 0.5 s,
+two rounds interleaved; the scene is this branch's lab, with the mountain's lid, so
+the figures are not §8.9's):
+
+| | median / p95 / worst |
+|---|---|
+| off | 5.05 / 5.45 / 9.13 (the worst is the step at t 0.50 s), 5.06 / 5.44 / 5.64 |
+| on | **4.80 / 5.05 / 5.35**, 4.78 / 5.02 / 5.31 |
+
+The rest fixture alone, 60 frames a way: 5.53 → 5.25 ms a frame (median), hits pass
+2.34 → 2.15, list pass 2.11 → 1.99, every other pass within 0.003.
+
+With the switches on by default: `perf-verify.sh default` passes `explicit_loop_cap` 5,
+`explicit_beams_bitwise` 12, `explicit_contact_gpu` 13, `explicit_pair_reuse_gpu` 2,
+`explicit_beam_order_gpu` 3, `explicit_drive_gpu` 3, `explicit_rigid_gpu` 6,
+`showcase_car_gpu` 6 (1 ignored, as before), `self_split_gpu` 8, engine-world
+`explicit_vehicles` 11, `explicit_drive_world` 1, engine-metal `vehicle_parity` 4,
+`explicit_parity` 7; Chrome compiles all 108 modules. **Not run:** the lab page in
+Chrome (its two new checkboxes are untested), the CUDA host, more than eight cars.
+
+**Follow-up found, not fixed here.** The lab page sends its perf flags as the sum of its
+checkboxes, which clears the flags without a checkbox (256 `PERF_MEMBER_LIST`, 512
+`PERF_VV_BEAM_SUM`): the page runs without them. Flags 1024 and 2048 have checkboxes.
+
+
+### 8.24 The lid, the page's switches, and the whole runs after them (2026-11-16)
+
+**The canyon's lid.** A slab across the canyon on its walls' tops (a collider of
+density 1, which the scene renderer does not draw). Parts thrown over a wall had no
+ground and fell without end; one such node set its car's contact reach and pair-list
+rebuilds. With the lid no node passes 25 km/h late in the run.
+
+**The page's switches.** The page sends its perf flags as its checkboxes' sum, so a
+switch without a checkbox was off on the page: the members' pair lists (256, §8.19) and
+the contact hits' beam sums (512, §8.21) never ran in Chrome until they got theirs
+here. Every Chrome figure for more than one car before this section is without them.
+
+**Whole 40 s run, vehicle GPU ms a World step (t ≥ 0.5 s):**
+
+| | median | p95 | worst |
+|---|---|---|---|
+| 8 cars, native, before the lid (§8.21) | 37.5 | 44.4 | 52.7 |
+| 8 cars, native, with the lid | 26.7 | 28.1 | 32.0 |
+| 8 cars, Chrome, with the lid, the two switches off on the page | 35.2 | 39.6 | 47.1 |
+| 8 cars, Chrome, every switch on (51 s simulated, no stop) | 23.5 | 25.8 | 32.4 |
+| 1 car, native, §8.23's two switches on / off (its agent's runs) | 4.80 / 5.05 | 5.05 / 5.44 | 5.35 / 5.64 |
+
+Chrome still takes about 15 World steps a second with eight cars (8,069 of 10,950
+steps refused). Debris retirement is refused by the engine while vehicle contact is on
+(`set_retired`: "its contact groups do not skip retired nodes"), so with several cars
+only the piece labels take effect; the lid is what keeps debris from running away.
+
+**The fast loop** (AGENTS.md, "Checking a kernel change"): `fast-check.sh` on 18 saved
+states (1, 2, 4, 8, 32 cars) in place of driving up to each moment; a cache for each
+kernel compile; a `fast` build profile. A rebuild after a kernel edit 91 s → 5 s (a
+small file) or 25 s (`explicit_beams.slang`); a bit-for-bit check of four eight-car
+moments 4–6 minutes → 5 s.
+
+### 8.25 Vehicle contact's state by vehicle; its front and tests as dispatches over the fleet (2026-11-16)
+
+`contact-groups-design.md` §8, stages 1 and 2 (what is built: its §8.6; stage 3, the
+levels, is not: its §8.7). Perf flags 4096 (`PERF_FLEET_STATE`) and 8192
+(`PERF_FLEET_FRONT`, with 4096), both on by default, each a checkbox on the lab page.
+Kernel `explicit_beams_fleet.slang`; modules `explicit_beams_split_fleetfront` and
+`explicit_beams_split_fleetplan` (four variants each; 116 explicit modules).
+
+**Proofs** (native M3 Max; the GPU shared with another session throughout):
+
+- `fast-check.sh perf=12288` (both against neither): 18 fixtures (1, 2, 4, 8, 32 cars)
+  and the four pre-lid four-car fixtures at 20 frames, every state word the same.
+- `vehicle_lab … --ab 2,3.7,6,9 --ab-switch perf=…`, 2, 4 and 8 cars: `perf=8192` (both
+  against stage 1 alone), `perf=4096` (both against neither) and `perf=4096` with
+  `RUBBLE_PERF_FLAGS=8129` (stage 1 alone against neither): 36 lines, every one "state
+  bit for bit: true". `--ab-switch groupsplit` at eight cars: true at the four times.
+  32 cars, `--ab 1,2.5,4`: true (one group of 32: the larger groups' pass either way;
+  two words of the plan's records differ at t 1, outside the verdict as before).
+- `fleet_contact_gpu` (new: two sedans head on, a column of six; each switch setting,
+  with and without self split), `group_split_gpu` (3), `self_split_gpu` (8): pass.
+- `perf-verify.sh default …`: `explicit_loop_cap` 5, `explicit_beams_bitwise` 12,
+  `explicit_contact_gpu` 13, `explicit_pair_reuse_gpu` 2, `vv_grid_gpu` 2,
+  `explicit_vehicles` 11, Metal `vehicle_parity` 4: PASS.
+- Chrome: "all 116 modules compile in Chrome".
+
+**Eight cars, t 9 s, ms a frame of 34 substeps by dispatch kind** (`--ab-profile`; the
+scene with the lid, §8.24):
+
+| kind | before (both off) | after |
+|---|---|---|
+| front (one workgroup a group) | 6.81 | scans 0.29, owners' parts 0.61, triangles and points 0.89, grids 0.46, sorted copy 0.32: 2.57 |
+| tests' walk | 4.09 | 1.49, and its prefix 0.27 |
+| tests' listed pairs | 1.80 | 0.52, and its prefix 0.30 |
+| levels (a workgroup a group) | 2.81 | 3.29 |
+| the cars' steps, their self-collision walk, pairs and hits | 8.86 | 8.89 |
+| **frame, untimed** | **23.8** | **16.3** |
+
+A/B from one snapshot, on / off, ms a frame (`perf=4096`: both against neither):
+
+| cars | t 2 | t 3.7 | t 6 | t 9 |
+|---|---|---|---|---|
+| 2 | 7.41 / 7.83 | 11.48 / 11.97 | 10.88 / 11.56 | 10.03 / 11.06 |
+| 4 | 8.21 / 8.34 | 17.08 / 18.10 | 17.32 / 18.71 | 12.81 / 14.92 |
+| 8 | 12.71 / 14.87 | 19.97 / 23.98 | 15.51 / 22.72 | 16.28 / 23.66 |
+
+Stage 1 alone is within noise of the groups' slots (eight cars at t 9: 22.0 against
+23.6); the gain is stage 2's. The first 9.3 s of the eight-car run, the explicit
+frame's GPU ms a World step (t ≥ 0.5 s): median 21.7, p95 25.1, worst 31.6 with both
+off; 14.8 / 20.7 / 23.8 in the `perf=8192` A/B run (both on from t 2 s). Not measured:
+a whole 40 s run, and Chrome's frame times (the page was not opened; only the modules'
+compile was checked).
+
+**Thirty-two cars are unchanged**: one group past `VV_PART`, so `vvPass` in one
+workgroup, 150 of 166 ms at t 2.5 s (187 / 187, 234 / 234, 271 / 271 ms a frame on /
+off at t 2.5, 1 and 4 s). That is stage 3.
+
+**What cost what on the way.**
+- A group whose members have not met ran every fleet dispatch for nothing (four cars
+  falling: 9.5 against 8.5 ms a frame). The first plan now sizes everything after it
+  and writes zeros when no owner is offered a partner: 8.5 against 8.6.
+- The walk's parts: 64 workgroups' worth of threads, as a group had, left the walk at
+  8.2 ms a frame for eight cars at rest (the t 16 s fixture); 128 gives 3.0, and that
+  frame 29.4 → 18.8 ms (256: the same within noise).
+- The plan's pair list can hold a pair twice (`contact-groups-design.md` §8.6): hits
+  applied twice at four cars. Found by the long harness run, not by the suites. The
+  fast rung that catches it: `FIXTURES=$PWD/out/fixtures_nolid LAB_NO_LID=1
+  fast-check.sh --make 4`, then the same with `FRAMES=20` and `perf=12288` (the scene
+  before the lid, where the duplicate arises 18 frames after t 3.7 s; `LAB_NO_LID` is
+  the lab's switch for it).
+
+**Open, not caused by this work.** `group_split_gpu`'s three tests pass in one process;
+with a fourth test beside them that also toggles a perf flag frame by frame (tried with
+this work's flags, and with flag 256 alone and no fleet kernel in use) the tests
+diverge from frames 0 to 5, each on its own device. One at a time
+(`--test-threads=1`) all pass. Zeroing the split pipelines' workgroup memory does not
+change it. Cause not found; the new test is in a file of its own (`fleet_contact_gpu`).
+
+### 8.26 Whole runs with the fleet-wide front and the one-car switches merged (2026-11-16)
+
+After §8.23 (one car's two switches) and §8.25 (vehicle contact's state by owner
+vehicle, its front and tests as fleet-wide dispatches) were merged and checked here
+(all 18 fixtures bit for bit for each set of switches; 13 suites; 116 modules validate
+in Chrome). Vehicle GPU ms a World step, whole 40 s run, t ≥ 0.5 s:
+
+| | median | p95 | worst | before these merges (§8.24) |
+|---|---|---|---|---|
+| 8 cars, native | 17.5 | 18.2 | 24.2 | 26.7 / 28.1 / 32.0 |
+| 8 cars, Chrome (page visible, 50 s simulated) | 16.8 | 20.5 | 26.9 | 23.5 / 25.8 / 32.4 |
+| 1 car, native | 4.77 | 5.03 | 5.30 | 5.03 / 5.33 / 5.66 (the same scene, switches off) |
+
+From the start of this work: eight cars 312 / 534 / 553 native (understated by §8.18's
+bug), one car 6.71 / 6.94 / 7.37. The targets (3 ms and 1 ms worst) are not met: eight
+cars are 8 times the target, one car 5 times. Chrome takes about 17 World steps a second
+with eight cars (7,740 of 10,770 steps refused).
+
+Where the eight-car frame is now (§8.25's profile at t 9 s, 16.3 ms): the cars' own
+steps 5.8, the levels 3.3, the front 2.6, members' self-collision hits 1.7, the walk
+1.8, listed pairs 0.8, self pairs and walk 1.4. Thirty-two cars are unchanged
+(139–270 ms): a group past eight members still takes the larger groups' pass on one
+core, which the next stage removes.

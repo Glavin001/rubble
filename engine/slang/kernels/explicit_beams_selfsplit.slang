@@ -279,13 +279,15 @@ void selfWalkList(uint v, uint gt, uint sub, float3 origin, float r, float cell,
 }
 
 // Whether vehicle v takes the split's walk and pairs dispatches this frame: every
-// vehicle, except with vehicle contact (EB_VV_SOLO) a contact group's member, whose step
-// runs its tests in its own dispatch (and whose grid counts fill the words these
-// dispatches read: soloStepAt).
+// vehicle, except with vehicle contact (EB_VV_SOLO) a contact group's member whose step
+// runs its tests in its own dispatch (PERF_MEMBER_LIST off: its solo-step words, which
+// these dispatches read, are then whatever its last solo frame left). With
+// PERF_MEMBER_LIST a member's step is cut at its tests as a solo vehicle's
+// (contactMemberStep), so a member takes them too.
 bool selfSplitVehicle(uint v)
 {
 #ifdef EB_VV_SOLO
-    return gMisc[vvRec(v, VV_FLAGS)].y == 0u;
+    return ((gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn()) || gMisc[vvRec(v, VV_FLAGS)].y == 0u;
 #else
     return true;
 #endif

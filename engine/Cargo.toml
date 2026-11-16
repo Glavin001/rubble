@@ -67,3 +67,14 @@ engine-webgpu = { path = "crates/engine-webgpu" }
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# The fast loop's profile (`cargo build --profile fast`, `tools/explicit-2khz/fast-check.sh`):
+# release code generation without link-time optimisation, in parallel units and
+# incrementally, so that a rebuild after an edit links in seconds. The same optimisation
+# level, so the CPU reference's arithmetic is the release build's; what ships and what
+# the final checks run is `release`.
+[profile.fast]
+inherits = "release"
+lto = "off"
+codegen-units = 16
+incremental = true

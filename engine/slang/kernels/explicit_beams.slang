@@ -287,7 +287,22 @@ struct Params
     // Lossless schedule switches (explicit_plan::W_PERF_FLAGS; the same results bit for
     // bit either way): 1 selfApply's node forces once a hit and role (hitFbFill).
     uint perfFlags;
-    uint beamOrderPad2;
+    // Vehicle contact's own scratch on the split group path (explicit_plan's
+    // W_VV_SCRATCH, W_VV_SCRATCH_OFF, W_VV_TRI_PAIRS; fleets of two vehicles or more, else
+    // 0): per vehicle GRID_BUCKETS words of gAcc and GRID_BUCKETS + 1 of gNext (a group's
+    // counters and grid offsets between its pass's dispatches, at its first member's:
+    // splitVvAt, splitVvOffAt), and per vehicle 2 · TRI_PAIR_CAP words of gNext, the
+    // pass's listed (triangle, candidate) pairs of that owner (vvTriPairsAt; 0: no list).
+    // Apart from the members' own self-collision regions (triPairsAt, gridCountBase,
+    // gridOffBase), which a member's step may keep from one substep to the next.
+    uint vvScratch;
+    uint vvScratchOff;
+    uint vvTriPairs;
+    // Vehicle contact's state by owner vehicle (explicit_plan's W_VV_FLEET,
+    // W_VV_FLEET_NEXT, W_VV_FLEET_BOX; the fl* address functions; 0: one vehicle).
+    uint vvFleet;
+    uint vvFleetNext;
+    uint vvFleetBox;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -1575,7 +1590,38 @@ static const uint PERF_VV_STREAM = 64u;
 // at a time) and a triangle visits the cells of its padded box, as the small groups'
 // pass does (vvGridBuild, vvTriangleCandsGrid), in place of every candidate.
 static const uint PERF_VV_BIG_GRID = 128u;
+// perfFlags bit 256 (explicit_plan::PERF_MEMBER_LIST): on the split group path a contact
+// group's member keeps its self-collision pair list over the frame's steps as a solo
+// vehicle does (pairReuse*: built at a step, tested again while it provably holds every
+// pair the walk would test), its state saved between the steps' dispatches
+// (memberListSave), in place of the grid's sort and walk every step (contactMemberStep).
+// With self-collision split (EB_SELF_SPLIT) the list's walk and its pairs' tests run in
+// the walk and pairs dispatches across the GPU, beside the solo vehicles', and the
+// member's step ends at its tests: its hits are applied in a dispatch of their own
+// before the groups' pass (explicit_beams_split.slang memberRest; the host adds it).
+static const uint PERF_MEMBER_LIST = 256u;
+// perfFlags bit 4096 (explicit_plan::PERF_FLEET_STATE; contact-groups-design.md §8 stage
+// 1): on the split group path with its tests across workgroups, vehicle contact's state
+// by owner vehicle (explicit_beams_fleet.slang) in place of a contact group's slots.
+static const uint PERF_FLEET_STATE = 4096u;
+// perfFlags bit 8192 (explicit_plan::PERF_FLEET_FRONT; §8 stage 2), with it: the pass's
+// front and tests as fleet-wide dispatches (explicit_beams_fleet.slang fleetFront,
+// fleetPlan, fleetWideTests).
+static const uint PERF_FLEET_FRONT = 8192u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
+// perfFlags bit 1024 (explicit_plan::PERF_HIT_ROLES, with PERF_HIT_FB): a two-body
+// dissipative vehicle's hits applied a (hit, role) a lane. A hit's first-pass adds, its
+// residual's and its total's shares, its four nodes' accelerations and the merge are
+// each four independent node updates (fixed-point atomics, order-free); selfApply ran
+// them in series on the hit's lane (about 130 atomics a hit over its phases). Here each
+// phase that touches a node runs on the (hit, role)'s own lane and each phase that
+// combines the four runs on the hit's lane, the values between them in the hit's
+// record after the beam forces (hitRoleAt: per role the acceleration xyz and an
+// inverse mass, then the total xyz; HIT_ROLE_WORDS words a hit): the same sums of the
+// same bits in the same order, more barriers and shorter chains (selfResidualRoles).
+static const uint PERF_HIT_ROLES = 1024u;
+static const uint HIT_ROLE_WORDS = 20u;
+uint hitRoleAt(uint v, uint i) { return hitFbAt(v, HIT_CAP) + i * HIT_ROLE_WORDS; }
 
 // The break exception (spec §2, step 4: an end on a collision triangle with fewer
 // than 3 live plain beams saves the beam) reads the beams' state in spawn order: a
@@ -5760,6 +5806,55 @@ static const uint VV_CTL_WORDS = 10u;
 uint vvCtl(uint i) { return gP.vvAcc + gP.vehicles * 12u + i; }
 void vvVisit(uint n);
 
+// --- Vehicle contact's state by owner vehicle: addresses (contact-groups-design.md §8;
+// the passes are explicit_beams_fleet.slang's) ---
+// gAcc at vvFleet: per vehicle FL_OWN counters of the pass (zero between passes), per
+// vehicle its count of the plan's overlapping pairs, per vehicle GRID_BUCKETS counts of
+// its candidates' grid (zero between passes), FL_CTL counters of the fleet.
+static const uint FL_OWN = 8u;
+static const uint FL_OFFERED = 0u; // its partners' contact points this step
+static const uint FL_LISTED = 1u; // its listed triangles (vvTestedAt)
+static const uint FL_CANDS = 2u; // its candidates (its part of the run)
+static const uint FL_PAIRS = 3u; // its listed (triangle, candidate) pairs (vvTriPairsAt)
+static const uint FL_HITS = 4u; // its hits (its part of the hit list)
+static const uint FL_RESET = 5u; // a partner approaches fast: its throttles reset
+static const uint FL_FIX = 6u; // … and that partner is a later vehicle (vvPassSmall's gsVvFix)
+static const uint FL_FAST = 7u; // its fastest candidate's speed (float bits)
+static const uint FL_CTL = 16u;
+// The overflow word's values past the pair list's 1 (explicit_plan::contact_error).
+static const int FL_ERR_RUN = 2;
+static const int FL_ERR_HITS = 3;
+static const int FL_ERR_SLOTS = 4;
+uint flOwn(uint v) { return gP.vvFleet + v * FL_OWN; }
+uint flAdjCount(uint v) { return gP.vvFleet + gP.vehicles * FL_OWN + v; }
+uint flGridCount(uint v) { return gP.vvFleet + gP.vehicles * (FL_OWN + 1u) + v * 1024u; }
+uint flCtl(uint i) { return gP.vvFleet + gP.vehicles * (FL_OWN + 1u + 1024u) + i; }
+// gNext at vvFleetNext: the plan's adjacency (per vehicle its first entry, one more for
+// the end; then the entries: d = 2 · pair + side, the vehicle that side of the pair, its
+// partner the other, d ^ 1), then per d the step's bits (1 partners, 2 a fast approach;
+// 4, from the plan: a later copy of a pair the list holds twice, never a partner)
+// and the owner's two-body slot at the partner's points (its rank among that vehicle's
+// two-body partners of the step); then five words a vehicle plus one (0: its part of the
+// fleet-wide run, the prefix of the owners' offered counts; 1..3 the prefixes of the
+// listed triangles, the listed pairs and the hits; 4 the prefix of the vehicles' contact
+// points, static, from the host); then six words a vehicle (0: its
+// group's step count at the frame's start; 1..4: its last pass's pairs, hits, listed
+// triangles and candidates, a measurement; 5: its level); the fleet's listed triangles;
+// FL_CTL counters.
+uint flAdjFirst(uint v) { return gP.vvFleetNext + v; }
+uint flAdjAt(uint e) { return gP.vvFleetNext + gP.vehicles + 1u + e; }
+uint flBitsAt(uint d) { return flAdjAt(0u) + 2u * gP.vvPairCap + d; }
+uint flSlotAt(uint d) { return flAdjAt(0u) + 4u * gP.vvPairCap + d; }
+uint flPrefixAt(uint r, uint v) { return flAdjAt(0u) + 6u * gP.vvPairCap + r * (gP.vehicles + 1u) + v; }
+uint flVehAt(uint r, uint v) { return flPrefixAt(5u, 0u) + r * gP.vehicles + v; }
+uint flListAt(uint i) { return flVehAt(6u, 0u) + i; }
+uint flCtlNext(uint i) { return flListAt(gP.totalTris) + i; }
+// A pair's side d: its vehicle and the other.
+uint flOwner(uint d) { return gNext[gP.vvPairs + d]; }
+uint flPartner(uint d) { return gNext[gP.vvPairs + (d ^ 1u)]; }
+// gBeams at vvFleetBox: per owner vehicle 4 records of the step.
+uint flBoxAt(uint v) { return gP.vvFleetBox + 4u * v; }
+
 // A value one lane decided, read by every lane as uniform (the WGSL
 // post-process turns its reads into workgroupUniformLoad).
 groupshared uint gsUniformLanes;
@@ -5839,6 +5934,7 @@ void hitForce(uint v, uint at, uint key, int3 sum, uint round, float3 origin, fl
 }
 
 bool selfResidual(uint v);
+bool hitRolesOn(uint v);
 
 // The computed hit at record `at` adds its shares to the accumulators.
 void selfAddOne(uint at, uint key, uint nodeOff)
@@ -5886,7 +5982,8 @@ uint selfRound(uint v, uint sub, uint lanes, uint round, float3 origin, float r,
             gNext[at + 4u] = asuint(f2.y);
             gNext[at + 5u] = asuint(f2.z);
             gNext[at + 6u] = round != 0u ? round : SELF_ROUNDS + 1u;
-            selfAddOne(at, key, nodeOff);
+            // (PERF_HIT_ROLES: its shares a role a lane, after this round's barrier.)
+            if (!hitRolesOn(v)) selfAddOne(at, key, nodeOff);
             continue;
         }
         int3 sum = int3(0, 0, 0);
@@ -6150,6 +6247,186 @@ void selfResidualPhase(uint v, uint sub, uint lanes, uint phase, uint beamOff, u
     }
 }
 
+// --- PERF_HIT_ROLES: the first pass's adds and §37.1's pass a (hit, role) a lane ---
+// Vehicle v's hits take it: the switch (with the beam forces' records) and the residual
+// pass (two-body, dissipative).
+bool hitRolesOn(uint v)
+{
+    return (gP.perfFlags & (PERF_HIT_ROLES | PERF_HIT_FB)) == (PERF_HIT_ROLES | PERF_HIT_FB) && selfResidual(v);
+}
+
+// A node phase of the pass over vehicle v's listed hits, item q = 4 · hit + role (role 0
+// the contacter, 1..3 the triangle's n0, n1, n2: hitFbFill's) on lane `sub` of `lanes`:
+// 0  the first pass's share into the accumulator A (selfAddOne's add for this node);
+// 1  the node's acceleration from A and the inverse mass of its hit count (resAcc,
+//    selfInvMass) into the hit's role record;
+// 3  the residual's share into B (resStage's add for this node; r from phase 2);
+// 4  the node's acceleration from A + B and its own inverse mass (resAccNow, ownInvMass)
+//    into the role record;
+// 6  the total's share less the first pass's into A and B cleared, the total's
+//    magnitude into the contact-force log (the total from phase 5). resFinal adds that
+//    difference to D and resMergeNode then moves the node's D into A and clears B and
+//    D: nothing reads A or B after phase 4, so the difference goes into A at once (the
+//    same integers added, in any order) and D stays zero.
+// Each add is the integer selfAddOne, resStage or resFinal adds for that node and the
+// sums are order-free; each acceleration is read after every lane's adds of the phase
+// before (the caller's barriers), as the hit's lane read it.
+void hitRolePhase(uint v, uint sub, uint lanes, uint phase, uint beamOff, uint groupOff, uint groupCount,
+                  uint parity)
+{
+    uint count = uint(gAcc[hitAcc(v)].load());
+    if (count > HIT_CAP || !hitRolesOn(v)) return;
+    uint base = hitList(v);
+    uint nodeOff = gStatic[v * 4u].x;
+    for (uint q = sub, qStop = EB_END(q, count * 4u, lanes); q < qStop; q += lanes)
+    {
+        uint i = q >> 2;
+        uint role = q & 3u;
+        uint at = base + i * HIT_WORDS;
+        uint x = role == 0u ? nodeOff + (gNext[at] & 0xFFFFu) : gNext[at + 7u + role];
+        uint rec = hitRoleAt(v, i) + role * 4u;
+        if (phase == 1u || phase == 4u)
+        {
+            float3 acc = resAccNow(x, hitFbAt(v, i) + role * 3u, beamOff, groupOff, groupCount, parity, phase == 4u);
+            float im = phase == 1u ? selfInvMass(x) : ownInvMass(x);
+            gNext[rec] = asuint(acc.x);
+            gNext[rec + 1u] = asuint(acc.y);
+            gNext[rec + 2u] = asuint(acc.z);
+            gNext[rec + 3u] = asuint(im);
+            continue;
+        }
+        // hitShare's role of this node: the contacter 1, n1 2, n2 3, n0 4.
+        uint share = role == 0u ? 1u : (role == 1u ? 4u : role);
+        float alpha = asfloat(gNext[at + 1u]);
+        float beta = asfloat(gNext[at + 2u]);
+        float gamma = nf(nf(1.0 - alpha) - beta);
+        float3 f1 = asfloat(uint3(gNext[at + 3u], gNext[at + 4u], gNext[at + 5u]));
+        if (phase == 0u)
+        {
+            accAdd(x, hitShare(f1, share, alpha, beta, gamma));
+            continue;
+        }
+        if (phase == 3u)
+        {
+            float r = asfloat(gNext[at + 21u]);
+            if (r > 0.0)
+            {
+                float3 nn = asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u]));
+                float3 s = hitShare(sscale(nn, r), share, alpha, beta, gamma);
+                uint b = resAt(x);
+                gAcc[b + 1u].add(toFixed(s.x));
+                gAcc[b + 2u].add(toFixed(s.y));
+                gAcc[b + 3u].add(toFixed(s.z));
+            }
+            continue;
+        }
+        uint tot = hitRoleAt(v, i) + 16u;
+        float3 total = asfloat(uint3(gNext[tot], gNext[tot + 1u], gNext[tot + 2u]));
+        float3 st = hitShare(total, share, alpha, beta, gamma);
+        int3 d = toFixed3(st) - toFixed3(hitShare(f1, share, alpha, beta, gamma));
+        uint b = resAt(x);
+        gAcc[b + 1u].store(0);
+        gAcc[b + 2u].store(0);
+        gAcc[b + 3u].store(0);
+        if (d.x != 0) gAcc[x * 3u].add(d.x);
+        if (d.y != 0) gAcc[x * 3u + 1u].add(d.y);
+        if (d.z != 0) gAcc[x * 3u + 2u].add(d.z);
+        cfAdd(x, st);
+    }
+}
+
+// A hit phase of the same pass, hit i on lane `sub` of `lanes`, from its four role
+// records (the accelerations and inverse masses the phase before left):
+// 2  the residual r into record word 21 (resOf: resDrive's and resForceR's arithmetic);
+// 5  the total, first pass with residual and guard, into the hit's role record
+//    (resTotal: guardOf's arithmetic).
+void hitCombinePhase(uint v, uint sub, uint lanes, uint phase)
+{
+    uint count = uint(gAcc[hitAcc(v)].load());
+    if (count > HIT_CAP || !hitRolesOn(v)) return;
+    uint base = hitList(v);
+    for (uint i = sub, iStop = EB_END(i, count, lanes); i < iStop; i += lanes)
+    {
+        uint at = base + i * HIT_WORDS;
+        uint rec = hitRoleAt(v, i);
+        float alpha = asfloat(gNext[at + 1u]);
+        float beta = asfloat(gNext[at + 2u]);
+        float gamma = nf(nf(1.0 - alpha) - beta);
+        float3 nn = asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u]));
+        float3 vv = asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u]));
+        // The roles' records: the contacter, n0, n1, n2.
+        float3 ah = asfloat(uint3(gNext[rec], gNext[rec + 1u], gNext[rec + 2u]));
+        float imh = asfloat(gNext[rec + 3u]);
+        float3 a0 = asfloat(uint3(gNext[rec + 4u], gNext[rec + 5u], gNext[rec + 6u]));
+        float im0 = asfloat(gNext[rec + 7u]);
+        float3 a1 = asfloat(uint3(gNext[rec + 8u], gNext[rec + 9u], gNext[rec + 10u]));
+        float im1 = asfloat(gNext[rec + 11u]);
+        float3 a2 = asfloat(uint3(gNext[rec + 12u], gNext[rec + 13u], gNext[rec + 14u]));
+        float im2 = asfloat(gNext[rec + 15u]);
+        // α·a(n1) + β·a(n2) + γ·a(n0), in that order (resDrive, guardOf).
+        float3 aw = sscale(a1, alpha);
+        aw = sadd3(aw, sscale(a2, beta));
+        aw = sadd3(aw, sscale(a0, gamma));
+        float imt = nf(nf(selfTerm(alpha, im1) + selfTerm(beta, im2)) + selfTerm(gamma, im0));
+        if (phase == 2u)
+        {
+            float a = sdot(ssub3(ah, aw), nn);
+            float vn = sdot(vv, nn);
+            float x = nf(vn + max(vn, 0.0));
+            float r = 0.0;
+            if (vn < 0.0 && nf(smul(a, STEP) + x) < 0.0)
+            {
+                float inv = nf(imh + imt);
+                if (inv > 0.0)
+                {
+                    float m = sdiv(1.0, inv);
+                    float rr = nf(-smul(a, m) - sdiv(smul(x, m), STEP));
+                    r = rr > 0.0 ? rr : 0.0;
+                }
+            }
+            gNext[at + 21u] = asuint(r);
+            continue;
+        }
+        float3 f = asfloat(uint3(gNext[at + 3u], gNext[at + 4u], gNext[at + 5u]));
+        float r = asfloat(gNext[at + 21u]);
+        if (r > 0.0) f = sadd3(f, sscale(nn, r));
+        if (!all(f == float3(0.0, 0.0, 0.0)))
+        {
+            float3 a = ssub3(ah, aw);
+            float inv = nf(imh + imt);
+            float3 rest = ssub3(a, sscale(f, inv));
+            float aa = sdot(f, sadd3(sadd3(vv, vv), sscale(rest, STEP)));
+            float bb = smul(smul(STEP, sdot(f, f)), inv);
+            if (nf(aa + bb) > 0.0 && bb > 0.0)
+            {
+                float k = aa < 0.0 ? min(sdiv(-aa, bb), 1.0) : 0.0;
+                f = sadd3(f, sscale(f, -nf(1.0 - k)));
+            }
+        }
+        gNext[rec + 16u] = asuint(f.x);
+        gNext[rec + 17u] = asuint(f.y);
+        gNext[rec + 18u] = asuint(f.z);
+    }
+}
+
+// selfApply's end with PERF_HIT_ROLES, after its rounds' last barrier (every listed hit
+// of a vehicle that takes it has its first-pass force and none of its adds; any other
+// vehicle's hits are complete and nothing here touches them): the phases above in order,
+// a barrier after each. One call site each (the compilers inline every call).
+void selfResidualRoles(uint v, bool on, uint sub, uint lanes, uint beamOff, uint groupOff, uint groupCount,
+                       uint parity)
+{
+    for (uint phase = 0u; phase < 7u; phase++)
+    {
+        if (on)
+        {
+            if (phase == 2u || phase == 5u) hitCombinePhase(v, sub, lanes, phase);
+            else hitRolePhase(v, sub, lanes, phase, beamOff, groupOff, groupCount, parity);
+        }
+        sync();
+    }
+}
+
 // selfApply's node forces (perfFlags bit 1), before its rounds: each listed hit's four
 // nodes' beam forces (beamSum: the incidence entries and group state of this step,
 // which nothing in selfApply writes), one (hit, role) a lane, for the two-body rule's
@@ -6229,6 +6506,12 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
     // then the merge, each after every lane's previous phase.
     if (gP.selfSplit != 0u)
     {
+        // (PERF_HIT_ROLES: a (hit, role) a lane, with the first pass's adds.)
+        if ((gP.perfFlags & (PERF_HIT_ROLES | PERF_HIT_FB)) == (PERF_HIT_ROLES | PERF_HIT_FB))
+        {
+            selfResidualRoles(v, on, sub, lanes, beamOff, groupOff, groupCount, parity);
+            return;
+        }
         for (uint phase = 0u; phase < 3u; phase++)
         {
             sync();
@@ -7304,6 +7587,46 @@ void explicit_beams_wide_centred_nodes(uint3 id : SV_DispatchThreadID)
     ebLoopCapFlush();
 }
 
+// perfFlags bit 2048 (explicit_plan::PERF_WIDE_GEO, with PERF_WIDE_LIST): the tested
+// triangles' step geometry (triGeoFill) on threads of the beams' dispatch, a triangle a
+// thread across the GPU, in place of the list kernel's lanes (one workgroup: 528
+// triangles' records on one core, the kernel's longest phase). What triGeoFill reads
+// (the nodes' positions and velocities, the fastest node's speed, the triangles' flags)
+// is the node phase's and nothing writes it until the triangles' tests are over, so
+// the records are the list kernel's bit for bit; they are filled for the triangles the
+// list kernel would fill: those its throttle update will leave tested this step
+// (triangleFinishPeek: triangleFinish's result from the words the step before left,
+// which nothing writes between its hits and this step's list kernel), every triangle
+// of a vehicle past TRI_LIST. (A step on the list kernel's few-pairs path reads no
+// record: these are then written and not read.)
+static const uint PERF_WIDE_GEO = 2048u;
+int triangleFinishPeek(uint gt)
+{
+    uint4 th = gMisc[gP.vehicles + gt];
+    int wait = asint(th.x);
+    int idle = asint(th.y);
+    if (wait > 0) return wait - 1;
+    if (idle > 0) wait = min(idle, 12);
+    return th.w != 0u ? -20000 : min(wait + 1, throttleCap(gt));
+}
+void wideGeoThread(uint gt)
+{
+    if (gt >= gP.totalTris || gP.triGeo == 0u) return;
+    uint v = gStatic[gP.triBase + gt].w;
+    uint4 r1 = gStatic[v * 4u + 1u];
+    uint4 r2 = gStatic[v * 4u + 2u];
+    if (r2.y == 0u) return;
+    // (The list kernel's origin, parity and range: the same words.)
+    uint4 misc = gMisc[v];
+    uint s = gP.pad2;
+    if (r1.y <= TRI_LIST)
+    {
+        int w = s > 0u ? triangleFinishPeek(gt) : asint(gMisc[gP.vehicles + gt].x);
+        if (w > 0) return;
+    }
+    triGeoFill(gt, asfloat(misc.xyz), asfloat(gStatic[v * 4u + 3u].z), (misc.w + s) & 1u);
+}
+
 // Beams, then grid filling (candidates), then triangles' throttle and tested list.
 [shader("compute")]
 [numthreads(256, 1, 1)]
@@ -7319,8 +7642,13 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
         beamUpdate(i, i - x.beamOff, (x.flags & FLAG_FAST_INV_SQRT) != 0u, x.groupOff, vehicleStep(v) & 1u);
         return ebLoopCapFlush();
     }
-    // (PERF_WIDE_LIST: the grid and the triangles' throttles are the list kernel's.)
-    if ((gP.perfFlags & PERF_WIDE_LIST) != 0u) return ebLoopCapFlush();
+    // (PERF_WIDE_LIST: the grid and the triangles' throttles are the list kernel's; with
+    // PERF_WIDE_GEO the tested triangles' geometry here, a thread a triangle.)
+    if ((gP.perfFlags & PERF_WIDE_LIST) != 0u)
+    {
+        if ((gP.perfFlags & PERF_WIDE_GEO) != 0u) wideGeoThread(i - gP.totalBeams);
+        return ebLoopCapFlush();
+    }
     i -= gP.totalBeams;
     if (i < gP.totalCands)
     {
@@ -7682,7 +8010,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
             trianglePairs(t, triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, parity);
         }
     }
-    else if (candCount > 0u && gP.triGeo != 0u)
+    else if (candCount > 0u && gP.triGeo != 0u && (gP.perfFlags & PERF_WIDE_GEO) == 0u)
     {
         for (uint q = LANES - 1u - lane, qStop = EB_END(q, listedB, LANES); q < qStop; q += LANES)
             triGeoFill(triOff + (triCount <= TRI_LIST ? gsTested[q] : q), origin, range, parity);
@@ -8076,7 +8404,7 @@ void explicit_beams_vv_bounds(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 // (words 0..2), else the frame with the groups over vehicles + groups (words 4..6);
 // and every group again for the larger groups' module (words 12..14) when one has
 // more than VV_PART members (`big`), else none.
-void vvArgs(uint nv, uint groups, bool big)
+void vvArgs(uint nv, uint groups, bool big, bool larger)
 {
     gArgs[12] = big ? groups : 0u;
     gArgs[13] = 1u;
@@ -8108,6 +8436,21 @@ void vvArgs(uint nv, uint groups, bool big)
     gArgs[28] = nv;
     gArgs[29] = 1u;
     gArgs[30] = 1u;
+    // The contact pass's front as fleet-wide dispatches (explicit_beams_fleet.slang), none
+    // without a group: a thread a pair (words 32..34, in workgroups of 256 at least) and
+    // one workgroup (36..38: the first plan, which sizes the rest).
+    uint any = groups == 0u ? 0u : 1u;
+    gArgs[32] = any * ((gNext[flAdjFirst(nv)] / 2u + 255u) / 256u);
+    gArgs[33] = 1u;
+    gArgs[34] = 1u;
+    gArgs[36] = any;
+    gArgs[37] = 1u;
+    gArgs[38] = 1u;
+    // … and every group again when one is past VV_PART members (`larger`: its pass is
+    // the larger groups', in the groups' own dispatch; words 44..46), else none.
+    gArgs[44] = larger ? groups : 0u;
+    gArgs[45] = 1u;
+    gArgs[46] = 1u;
 }
 
 void vvEmitPair(uint a, uint b)
@@ -8180,6 +8523,62 @@ void vvFindPairs(uint v)
 }
 
 uint vvLabel(uint v) { return uint(gAcc[gP.vvLabel + v].load()); }
+
+// The plan's overlapping pairs by vehicle (contact-groups-design.md §8.2: partners from
+// the broadphase's pair list): per vehicle its entries, one a pair it is in (d = 2 · pair
+// + its side), in gNext at the fleet state's adjacency. Every lane of the grouping
+// kernel; three barriers. The entries' order within a vehicle follows an atomic counter:
+// nothing read from them depends on it (boxes' unions, counts, a slot's number).
+void vvAdjBuild(uint lane, uint nv, uint pairs)
+{
+    for (uint v = lane, vStop = EB_END(v, nv, 256u); v < vStop; v += 256u) gAcc[flAdjCount(v)].store(0);
+    sync();
+    for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
+    {
+        gAcc[flAdjCount(gNext[gP.vvPairs + 2u * p])].add(1);
+        gAcc[flAdjCount(gNext[gP.vvPairs + 2u * p + 1u])].add(1);
+    }
+    sync();
+    if (lane == 0u)
+    {
+        uint run = 0u;
+        for (uint v = 0u, vStop = EB_END(v, nv, 1u); v < vStop; v++)
+        {
+            gNext[flAdjFirst(v)] = run;
+            run += uint(gAcc[flAdjCount(v)].load());
+            gAcc[flAdjCount(v)].store(0);
+        }
+        gNext[flAdjFirst(nv)] = run;
+    }
+    sync();
+    for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
+    {
+        uint x = gNext[gP.vvPairs + 2u * p];
+        uint y = gNext[gP.vvPairs + 2u * p + 1u];
+        gNext[flAdjAt(gNext[flAdjFirst(x)] + uint(gAcc[flAdjCount(x)].add(1)))] = 2u * p;
+        gNext[flAdjAt(gNext[flAdjFirst(y)] + uint(gAcc[flAdjCount(y)].add(1)))] = 2u * p + 1u;
+    }
+    sync();
+    // The pair list may hold a pair twice (a vehicle twice in one bucket of the vehicle
+    // grid, two of its cells there: vvFindPairs then meets it twice in a cell). The
+    // grouping does not mind; the owners' partners must be each once, or a partner's
+    // contact points would be candidates twice and its hits applied twice. A later copy
+    // of a pair is marked in its bits words (4: flScanPair leaves it, never a partner).
+    for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
+    {
+        uint x = gNext[gP.vvPairs + 2u * p];
+        uint y = gNext[gP.vvPairs + 2u * p + 1u];
+        uint dup = 0u;
+        uint e1 = gNext[flAdjFirst(x + 1u)];
+        for (uint e = gNext[flAdjFirst(x)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
+        {
+            uint d = gNext[flAdjAt(e)];
+            if ((d >> 1u) < p && flPartner(d) == y) dup = 4u;
+        }
+        gNext[flBitsAt(2u * p)] = dup;
+        gNext[flBitsAt(2u * p + 1u)] = dup;
+    }
+}
 uint vvSum(uint g, uint k) { return gP.vvLabel + gP.vehicles + g * 3u + k; }
 
 [shader("compute")]
@@ -8208,7 +8607,7 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         }
         if (lane == 0u)
         {
-            vvArgs(nv, 0u, false);
+            vvArgs(nv, 0u, false, false);
             gAcc[vvCtl(VV_BIGS)].store(0);
         }
         return ebLoopCapFlush();
@@ -8219,6 +8618,8 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         gMisc[vvRec(v, VV_FLAGS)].y = 0u;
     }
     sync();
+    // The pairs by vehicle (the owners' state by vehicle reads its partners from them).
+    if (gP.vvFleet != 0u) vvAdjBuild(lane, nv, pairs);
     for (uint p = lane, pStop = EB_END(p, pairs, 256u); p < pStop; p += 256u)
     {
         gMisc[vvRec(gNext[gP.vvPairs + 2u * p], VV_FLAGS)].y = 1u;
@@ -8344,11 +8745,13 @@ void explicit_beams_vv_group(uint3 lid : SV_GroupThreadID)
         // A group past VV_PART members (within VV_MAX_GROUP: a larger one's
         // vehicles run alone, its member count 0).
         bool big = false;
+        bool larger = false;
         for (uint g = 0u, gStop = EB_END(g, groups, 1u); g < gStop; g++)
         {
             if (gMisc[gP.vvGroups + g].y > VV_SIDE) big = true;
+            if (gMisc[gP.vvGroups + g].y > VV_PART) larger = true;
         }
-        vvArgs(nv, groups, big);
+        vvArgs(nv, groups, big, larger);
     }
     // Clear for the next frame.
     for (uint b = lane, bGuard = 0u; b <= gP.vvGridMask; b += 256u)
@@ -8422,6 +8825,52 @@ void memberBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity,
         vvReportOutside(v);
 }
 
+// A member's pair list over the frame's steps (PERF_MEMBER_LIST; the split group path's
+// members, a workgroup each and a dispatch a step): the solo step's reused pair list
+// (pairReuse*), its state (gsCount past the buckets) in the member's solo-step record
+// between the steps' dispatches (soloStepAt: the member's own grid count words, which
+// vehicle contact's scratch no longer uses), its pairs in the member's own pair region
+// (triPairsAt) and its build records (gBeams at pairBuild): nothing else in a group's
+// frame writes them. The tests are the walk's, bit for bit, by the list's own argument
+// (above pairReuseBegin): it reads only the member's node state of the step and its
+// triangles' throttles of the step (a pending reset zeroes them before the tests, in
+// gMisc, where the listed pairs' tests read them).
+#ifdef EB_SOLO_STEP
+void memberListLoad(uint v, uint lane, uint s)
+{
+    if (s == 0u)
+    {
+        if (lane == 0u) pairReuseBegin();
+    }
+    else
+        soloStepLoad(v, lane);
+}
+// The state for the member's next dispatch.
+void memberListKeep(uint v, uint lane)
+{
+    for (uint k = lane; k < REUSE_WORDS; k += LANES) gAcc[soloStepAt(v) + k].store(int(gsCount[GRID_BUCKETS + k].load()));
+}
+// After the step's closing barrier: the state for the next step's dispatch, or at the
+// frame's last step the list's statistics (pairReuseEnd).
+void memberListSave(uint v, uint lane, uint s)
+{
+    if (s + 1u < gP.steps)
+        memberListKeep(v, lane);
+    else
+        pairReuseEnd(v, lane);
+}
+// A grid step with the list (uniform; mode 1 build, 2 reuse): the solo step's build and
+// tests in the member's workgroup.
+void memberListTests(uint v, uint lane, uint mode, uint triOff, uint triCount, uint nodeOff, uint nodeCount,
+                     float3 origin, float r, float cell, uint candOff, uint candCount, uint beamOff, uint groupOff,
+                     uint groupCount, uint parity)
+{
+    if (mode == 1u) pairReuseBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, r, cell, candOff, candCount, parity);
+    pairReuseTests(v, lane, mode, triOff, triCount, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
+                   parity);
+}
+#endif
+
 void contactMemberStep(uint v, uint lane, uint s, bool first)
 {
     uint4 r0 = gStatic[v * 4u];
@@ -8455,6 +8904,14 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     uint step = misc.w + s;
     uint parity = step & 1u;
     bool pending = gMisc[vvRec(v, VV_FLAGS)].w != 0u;
+#ifdef EB_SOLO_STEP
+    // The pair list kept over the frame's steps (PERF_MEMBER_LIST): none at the frame's
+    // first step, else its state as the member's last step left it.
+    bool keep = (gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn();
+    if (keep) memberListLoad(v, lane, s);
+#else
+    bool keep = false;
+#endif
     if (lane == 0u)
     {
         gsTestedCount[parity].store(0u);
@@ -8485,6 +8942,9 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
         if ((flagsV & FLAG_CENTRED) != 0u) memberBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
+#ifdef EB_SOLO_STEP
+    if (keep) pairReuseTrack(nodeOff, nodeCount, lane);
+#endif
     for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)
     {
@@ -8502,6 +8962,11 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
     if (lane == 0u)
     {
+        if (keep) gsPairCount.store(0u);
+#ifdef EB_SELF_SPLIT
+        // (No pairs for the pairs dispatch, no walk, unless this step lists them.)
+        if (keep) selfSplitClear(v);
+#endif
         gAcc[hitAcc(v)].store(0);
         gAcc[hitAcc(v) + 1u].store(0);
         clipVmaxClear(v, parity);
@@ -8518,9 +8983,15 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     {
         // Bit 0: the grid this step; bit 1: self-collision hits or pending beams
         // possible (selfApply's barriers).
+        // Bits 2..3 (PERF_MEMBER_LIST): the grid's pair list this step (pairReuseDecide:
+        // 0 the walk, 1 build, 2 reuse).
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        gsUniformLanes = (cell > 0.0 && candCount > 0u && listed * candCount > BRUTE_PAIRS_PER_LANE * LANES ? 1u : 0u)
-            | (triCount > 0u ? 2u : 0u);
+        uint grid = cell > 0.0 && candCount > 0u && listed * candCount > BRUTE_PAIRS_PER_LANE * LANES ? 1u : 0u;
+        uint mode = 0u;
+#ifdef EB_SOLO_STEP
+        if (keep) mode = pairReuseDecide(v, grid, parity, origin);
+#endif
+        gsUniformLanes = grid | (triCount > 0u ? 2u : 0u) | (mode << 2);
     }
     if (cell > 0.0)
     {
@@ -8566,8 +9037,13 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     sync();
     uint flagsU = gsUniformLanes;
     uint gridOn = flagsU & 1u;
+#ifdef EB_SOLO_STEP
+    uint reuse = flagsU >> 2;
+#else
+    const uint reuse = 0u;
+#endif
     if (lane == 0u) resolvePending(v, parity);
-    if (gridOn != 0u)
+    if (gridOn != 0u && reuse != 2u)
     {
         uint per = GRID_BUCKETS / LANES;
         uint block = LANES / GRID_BLOCKS;
@@ -8618,6 +9094,23 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         }
         sync();
     }
+#ifdef EB_SOLO_STEP
+    if (gridOn != 0u && reuse != 0u)
+    {
+#ifdef EB_SELF_SPLIT
+        // The solo step's cut: the build's walk and the listed pairs' tests in the walk
+        // and pairs dispatches after this one.
+        if (reuse == 1u)
+            selfSplitBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount, parity);
+        selfSplitTests(v, lane, reuse, triOff, triCount, origin, range, cell, candOff, candCount, beamOff, groupOff,
+                       groupCount, parity);
+#else
+        memberListTests(v, lane, reuse, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount,
+                        beamOff, groupOff, groupCount, parity);
+#endif
+    }
+    else
+#endif
     if (candCount > 0u && cell > 0.0 && gridOn != 0u)
     {
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
@@ -8648,6 +9141,16 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
             triangleTest(triOff + p / lanes, p % lanes, lanes, origin, range, candOff, candCount, beamOff, groupOff,
                          groupCount, parity);
     }
+#ifdef EB_SELF_SPLIT
+    if (keep)
+    {
+        // The step's rest (its hits applied, the slide nodes) after the walk and pairs
+        // dispatches: memberRest.
+        sync();
+        memberListKeep(v, lane);
+        return;
+    }
+#endif
     if ((flagsU & 2u) != 0u)
     {
         sync();
@@ -8657,6 +9160,9 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, SLIDE_FRAME, groupOff, parity);
 #endif
     sync();
+#ifdef EB_SOLO_STEP
+    if (keep) memberListSave(v, lane, s);
+#endif
 }
 
 // --- A small group's members stepped side by side (k <= VV_PART members) ---
@@ -9185,7 +9691,53 @@ bool vvTwoBody(uint va, uint vh)
     return gP.vvSplit != 0u && ((gStatic[va * 4u + 3u].x | gStatic[vh * 4u + 3u].x) & FLAG_TWO_BODY) != 0u;
 }
 uint vvSplitTri(uint n) { return gP.vvSplit + n; }
+#ifdef EB_VV_FLEET
+// The owners' state by vehicle (explicit_beams_fleet.slang): gFl 1 one owner, gFlV, on
+// this thread (the tests across workgroups); 2 a group's owners in its own workgroup,
+// owner a its member a (the levels); 0 a group's slots, as before. Set by the caller
+// around the leaf functions, whose address helpers follow it.
+static uint gFl = 0u;
+static uint gFlV = 0u;
+static uint gFlOff = 0u;
+uint flVehOf(uint a) { return gFl == 2u ? gNext[gP.vvMembers + gP.vehicles + gFlOff + a] : gFlV; }
+uint flRun(uint v) { return gNext[flPrefixAt(0u, v)]; }
+// Owner va's two-body slot at a point of vehicle vh: its rank among vh's two-body
+// partners of the step (flOwnerPlan), found among va's pairs; the last one kept.
+static uint gFlSlotVa = 0xFFFFFFFFu;
+static uint gFlSlotVh = 0xFFFFFFFFu;
+static uint gFlSlotVal = 0u;
+uint flSlot(uint va, uint vh)
+{
+    if (gFlSlotVa == va && gFlSlotVh == vh) return gFlSlotVal;
+    uint slot = 0u;
+    uint e1 = gNext[flAdjFirst(va + 1u)];
+    for (uint e = gNext[flAdjFirst(va)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
+    {
+        uint d = gNext[flAdjAt(e)];
+        if (flPartner(d) == vh)
+        {
+            slot = min(gNext[flSlotAt(d)], VV_PART - 1u);
+            break;
+        }
+    }
+    gFlSlotVa = va;
+    gFlSlotVh = vh;
+    gFlSlotVal = slot;
+    return slot;
+}
+uint vvSplitPoint(uint slot, uint n)
+{
+    if (gFl != 0u) slot = flSlot(flVehOf(slot), gStatic[gP.nodeInfoBase + n].w);
+    return gP.vvSplit + (1u + slot) * gP.totalNodes + n;
+}
+// An owner's hit list's room and the point slots a full clear zeroes.
+uint vvHitRoom(uint a, uint points) { return gFl != 0u ? 2u * uint(gAcc[flOwn(flVehOf(a)) + FL_OFFERED].load()) : 2u * points; }
+uint vvSplitSlots(uint k) { return gFl != 0u ? VV_PART : k; }
+#else
 uint vvSplitPoint(uint slot, uint n) { return gP.vvSplit + (1u + slot) * gP.totalNodes + n; }
+uint vvHitRoom(uint a, uint points) { return 2u * points; }
+uint vvSplitSlots(uint k) { return k; }
+#endif
 // A two-body hit found by a walk: its nodes' hit counts of this owner's turn.
 void vvSplitCount(VvTri t, uint h, uint slot)
 {
@@ -9233,18 +9785,35 @@ void vvSplitClear(uint off, uint k, uint slots, uint lane)
             gAcc[vvSplitTri(r0.x + i)].store(0);
             for (uint sl = 0u; sl < VV_PART; sl++)
             {
-                if (sl < slots) gAcc[vvSplitPoint(sl, r0.x + i)].store(0);
+                // (The slot's own word, whatever the owners' addressing.)
+                if (sl < slots) gAcc[gP.vvSplit + (1u + sl) * gP.totalNodes + r0.x + i].store(0);
             }
         }
     }
+}
+// --- A hit's nodes' beam sums kept for the pass (PERF_VV_BEAM_SUM, lossless) ---
+// A node's force is its beams' sum plus its accumulators. The beams' sum does not change
+// within a contact pass (no beam and no position does), yet the pass took it again for
+// each of a hit's four nodes at every use: the snapshot, the hit, and several times in
+// each residual phase (a node's whole beam list each time: 13 ms a frame for 17 hits
+// at eight cars' first collisions). With the flag the levels keep it beside the
+// snapshot when they take it (gBeams at vvSnap + totalNodes + node; the snapshot's .w
+// the pass's tag, so a node the pass did not take is summed as before), and every later
+// use loads it: the same value.
+static const uint PERF_VV_BEAM_SUM = 512u;
+static uint gVvTag = 0u; // this pass's tag (0: no kept sums)
+float3 vvBeamSumOf(uint h, uint vh, uint parity)
+{
+    if (gVvTag != 0u && asuint(gBeams[gP.vvSnap + h].w) == gVvTag) return gBeams[gP.vvSnap + gP.totalNodes + h].xyz;
+    uint4 rb0 = gStatic[vh * 4u];
+    uint4 rb2 = gStatic[vh * 4u + 2u];
+    return beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], rb0.z, rb2.z, rb2.w, parity, false);
 }
 // The contact point's force now (beams, accumulator, slide).
 float3 vvPointForce(uint h, uint vh, uint parity)
 {
     uint4 info = gStatic[gP.nodeInfoBase + h];
-    uint4 rb0 = gStatic[vh * 4u];
-    uint4 rb2 = gStatic[vh * 4u + 2u];
-    float3 fh = sadd3(beamSum(gNodes[h * 3u + 2u].xyz, info, rb0.z, rb2.z, rb2.w, parity, false), accForce(h));
+    float3 fh = sadd3(vvBeamSumOf(h, vh, parity), accForce(h));
 #ifdef EB_AERO
     uint slot1 = info.x >> NODE_SLOT_SHIFT;
     if (slot1 != 0u) fh = sadd3(fh, gBeams[gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u)].xyz);
@@ -9494,9 +10063,7 @@ float3 vvResAcc(uint x, uint vx, uint parity, bool withB)
 {
     if (vvImmovable(x)) return float3(0.0, 0.0, 0.0);
     uint4 info = gStatic[gP.nodeInfoBase + x];
-    uint4 rb0 = gStatic[vx * 4u];
-    uint4 rb2 = gStatic[vx * 4u + 2u];
-    float3 f = beamSum(gNodes[x * 3u + 2u].xyz, info, rb0.z, rb2.z, rb2.w, parity, false);
+    float3 f = vvBeamSumOf(x, vx, parity);
     int3 a = int3(gAcc[x * 3u].load(), gAcc[x * 3u + 1u].load(), gAcc[x * 3u + 2u].load());
     if (withB)
     {
@@ -10161,10 +10728,18 @@ void vvClearSmall()
 #ifdef EB_VV_GLOBAL
 static uint gVvC; // gAcc: per owner its pairs (0..3), hits (4..7), fastest (8..11)
 static uint gVvO; // gNext: the grid's offsets
+#ifdef EB_VV_FLEET
+// (With the owners' state by vehicle, gFl: the owner's record and its own grid's offsets.)
+uint vvHitAdd(uint a) { return uint(gAcc[gFl != 0u ? flOwn(flVehOf(a)) + FL_HITS : gVvC + VV_PART + a].add(1)); }
+uint vvPairAdd(uint a) { return uint(gAcc[gFl != 0u ? flOwn(flVehOf(a)) + FL_PAIRS : gVvC + a].add(1)); }
+float vvSpeedAt(uint a) { return asfloat(uint(gAcc[gFl != 0u ? flOwn(flVehOf(a)) + FL_FAST : gVvC + 2u * VV_PART + a].load())); }
+uint vvOffAt(uint b) { return gNext[(gFl != 0u ? gP.vvScratchOff + gFlV * (GRID_BUCKETS + 1u) : gVvO) + b]; }
+#else
 uint vvHitAdd(uint a) { return uint(gAcc[gVvC + VV_PART + a].add(1)); }
 uint vvPairAdd(uint a) { return uint(gAcc[gVvC + a].add(1)); }
 float vvSpeedAt(uint a) { return asfloat(uint(gAcc[gVvC + 2u * VV_PART + a].load())); }
 uint vvOffAt(uint b) { return gNext[gVvO + b]; }
+#endif
 #else
 uint vvHitAdd(uint a) { return gsVvHit4[a].add(1u); }
 uint vvPairAdd(uint a) { return gsPairCountM[a].add(1u); }
@@ -10174,8 +10749,18 @@ uint vvOffAt(uint b) { return gsOff[b]; }
 
 // Owner a's candidate run and hit list (each owner its own, within the group's
 // regions, which hold four times the group's points).
+#ifdef EB_VV_FLEET
+// (With the owners' state by vehicle, gFl: the owner's part of the fleet-wide run and hit
+// list, at its prefix of the owners' offered counts.)
+uint vvRunSmall(uint runOff, uint points, uint a) { return gFl != 0u ? gP.vvRun + flRun(flVehOf(a)) : gP.vvRun + VV_PART * runOff + a * points; }
+uint vvHitSmall(uint runOff, uint points, uint a, uint i)
+{
+    return gFl != 0u ? gP.vvHits + 2u * (2u * flRun(flVehOf(a)) + i) : gP.vvHits + 2u * (2u * VV_PART * runOff + 2u * a * points + i);
+}
+#else
 uint vvRunSmall(uint runOff, uint points, uint a) { return gP.vvRun + VV_PART * runOff + a * points; }
 uint vvHitSmall(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 2u * (2u * VV_PART * runOff + 2u * a * points + i); }
+#endif
 
 // vvTriangleCands into owner a's own list (capacity: twice the group's points, as
 // vvPass's); on overflow the list keeps its first entries and the owner re-walks at
@@ -10298,9 +10883,15 @@ void vvLevelsSet(uint k, uint lane)
 // A box over more than GRID_MAX_CELLS cells tests every
 // candidate as before.
 uint vvTotalCp() { return gP.vvHits - (gP.vvBig + gP.vehicles); }
+#ifdef EB_VV_FLEET
+// (gFl: the one owner's sorted copy at its part's place, every bucket of its own grid.)
+uint vvSortAt(uint runOff) { return gP.vvRun + VV_PART * vvTotalCp() + (gFl != 0u ? flRun(gFlV) : VV_PART * runOff); }
+uint vvGridBucket(uint a, int3 c) { return gFl != 0u ? gridBucket(c) : a * (GRID_BUCKETS / VV_PART) + (gridBucket(c) & (GRID_BUCKETS / VV_PART - 1u)); }
+#else
 uint vvSortAt(uint runOff) { return gP.vvRun + VV_PART * vvTotalCp() + VV_PART * runOff; }
-uint vvRankAt(uint runOff, uint points, uint a, uint e) { return gP.vvHits + 4u * VV_PART * vvTotalCp() + VV_PART * runOff + a * points + e; }
 uint vvGridBucket(uint a, int3 c) { return a * (GRID_BUCKETS / VV_PART) + (gridBucket(c) & (GRID_BUCKETS / VV_PART - 1u)); }
+#endif
+uint vvRankAt(uint runOff, uint points, uint a, uint e) { return gP.vvHits + 4u * VV_PART * vvTotalCp() + VV_PART * runOff + a * points + e; }
 // The grid's cell: the owner's self-collision cell, else half a metre (any size gives
 // the same candidates; it only sets how many are visited).
 float vvGridCell(uint va)
@@ -10647,11 +11238,13 @@ void vvTriangleCandsBigGrid(uint va, uint gt, uint sub, uint subs, uint runOff, 
 // --- The triangle tests as a pair list (lossless) ---
 // The triangles' tests ran on the lane that walked the triangle: a few triangles in the
 // crush hold most candidates, and the step waited for their lanes. With the pair list
-// (the members' own self-collision pair regions, triPairsAt: unused in a group's frame),
+// (a region of its own per owner, vvTriPairsAt: the member's self-collision pair region,
+// triPairsAt, stays the member's),
 // the walk only lists the (triangle, candidate) pairs its box test passes, and after a
 // barrier the lanes test the pairs, one each: the same tests, the same hits (applied in
 // the canonical order), the same marks. An owner whose list overflows TRI_PAIR_CAP tests
 // inline (vvTriangleCandsGrid) instead.
+uint vvTriPairsAt(uint v) { return gP.vvTriPairs + v * 2u * TRI_PAIR_CAP; }
 static const uint VV_PAIR_RUN = 0x80000000u; // a candidate's index in its owner's run (else the sorted copy)
 void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r)
 {
@@ -10666,7 +11259,7 @@ void vvTriangleCandsList(uint a, uint va, uint gt, uint sub, uint subs, uint run
     float3 fs = floor(hi / cell) - f0 + float3(1.0, 1.0, 1.0);
     bool every = !(all(fs <= float(GRID_MAX_CELLS)) && fs.x * fs.y * fs.z <= float(GRID_MAX_CELLS))
                  || !(all(abs(f0) < 1.0e8));
-    uint at = triPairsAt(va);
+    uint at = vvTriPairsAt(va);
     bool cand = false;
     if (every)
     {
@@ -10780,7 +11373,7 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
     for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
     {
         uint n = gsVvHit4[a].load();
-        if (vvLv(a) != l || n > 2u * points) continue;
+        if (vvLv(a) != l || n > vvHitRoom(a, points)) continue;
         for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
         {
             uint b = vvHitBucket(a, gNext[vvHitSmall(runOff, points, a, i) + 1u]);
@@ -10831,7 +11424,7 @@ void vvHitBuckets(uint k, uint l, uint off, uint runOff, uint points, uint lane)
     for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
     {
         uint n = gsVvHit4[a].load();
-        if (vvLv(a) != l || n > 2u * points) continue;
+        if (vvLv(a) != l || n > vvHitRoom(a, points)) continue;
         for (uint i = lane, iStop = EB_END(i, n, LANES); i < iStop; i += LANES)
         {
             uint br = gNext[vvOrderAt(runOff, points, a, i)];
@@ -10898,7 +11491,9 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
     if (front == 0u) return;
     bool vvGrid = (front & 2u) != 0u;
     vvPassSmallTests(k, off, runOff, points, parity, lane, vvGrid);
+    gVvTag = (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((step + 1u) | 0x80000000u) : 0u;
     vvPassSmallLevels(k, off, runOff, points, parity, lane, vvGrid);
+    gVvTag = 0u;
 }
 
 uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, uint lane)
@@ -11063,7 +11658,7 @@ uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, u
 void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid)
 {
     // The tests as a pair list (with the grid and the members' pair regions).
-    bool vvList = vvGrid && gP.triPairs != 0u;
+    bool vvList = vvGrid && gP.vvTriPairs != 0u;
     if (vvList)
     {
         if (lane < VV_PART) gsPairCountM[lane].store(0u);
@@ -11131,7 +11726,7 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
                 q -= n;
             }
             uint va = vvMember(off, a);
-            uint at = triPairsAt(va);
+            uint at = vvTriPairsAt(va);
             vvPairTest(a, va, gNext[at + 2u * q], gNext[at + 2u * q + 1u], runOff, points, asfloat(gStatic[va * 4u + 3u].z));
         }
         uint over = 0u;
@@ -11162,8 +11757,35 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
     }
 }
 
+// Node n's force at the pass's start into the snapshot; with a tag, its beams' sum kept
+// beside it (vvBeamSumOf) and the snapshot tagged. (Several lanes may take one node: the
+// same values.)
+void vvSnapNode(uint n, uint vn, uint parity, uint tag)
+{
+    if (tag == 0u)
+    {
+        gBeams[gP.vvSnap + n] = float4(vvPointForce(n, vn, parity), 0.0);
+        return;
+    }
+    uint4 info = gStatic[gP.nodeInfoBase + n];
+    uint4 rb0 = gStatic[vn * 4u];
+    uint4 rb2 = gStatic[vn * 4u + 2u];
+    float3 bs = beamSum(gNodes[n * 3u + 2u].xyz, info, rb0.z, rb2.z, rb2.w, parity, false);
+    float3 fh = sadd3(bs, accForce(n));
+#ifdef EB_AERO
+    uint slot1 = info.x >> NODE_SLOT_SHIFT;
+    if (slot1 != 0u) fh = sadd3(fh, gBeams[gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u)].xyz);
+#endif
+    gBeams[gP.vvSnap + gP.totalNodes + n] = float4(bs, 0.0);
+    gBeams[gP.vvSnap + n] = float4(fh, asfloat(tag));
+}
+
 void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid)
 {
+    // (The kept beam sums' tag for this pass: set by the caller, used from the snapshot
+    // on; off while the snapshot is taken, which sums afresh.)
+    uint tag = gVvTag;
+    gVvTag = 0u;
     sync();
     // The two-body pass reads its hits' nodes' forces as at the pass's start (the
     // triangle's nodes and the point: vvStagedHit, vvTry). Nothing since the start
@@ -11171,12 +11793,15 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
     // here, before the first hit is applied, for the listed hits' nodes alone (the
     // same value from every lane that takes a node); every member's nodes when an
     // owner's list overflowed.
-    if (gP.vvSplit != 0u)
+    // (Measurement only, time: the parameter word's 65536 skips this snapshot, 131072
+    // level 1's throttle updates, 16384 the residual phases, 32768 the hits' buckets and
+    // application. The results are then meaningless.)
+    if (gP.vvSplit != 0u && (gP.ablate & 65536u) == 0u)
     {
         bool every = false;
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
         {
-            if (gsVvHit4[a].load() > 2u * points) every = true;
+            if (gsVvHit4[a].load() > vvHitRoom(a, points)) every = true;
         }
         if (every) vvSnapshot(off, k, parity, lane);
         else
@@ -11188,14 +11813,15 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                 {
                     uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
                     uint h = gNext[base + 2u * i + 1u];
-                    gBeams[gP.vvSnap + tn.x] = float4(vvPointForce(tn.x, tn.w, parity), 0.0);
-                    gBeams[gP.vvSnap + tn.y] = float4(vvPointForce(tn.y, tn.w, parity), 0.0);
-                    gBeams[gP.vvSnap + tn.z] = float4(vvPointForce(tn.z, tn.w, parity), 0.0);
-                    gBeams[gP.vvSnap + h] = float4(vvPointForce(h, gStatic[gP.nodeInfoBase + h].w, parity), 0.0);
+                    vvSnapNode(tn.x, tn.w, parity, tag);
+                    vvSnapNode(tn.y, tn.w, parity, tag);
+                    vvSnapNode(tn.z, tn.w, parity, tag);
+                    vvSnapNode(h, gStatic[gP.nodeInfoBase + h].w, parity, tag);
                 }
             }
         }
         sync();
+        if (!every) gVvTag = tag;
     }
     // The owners' levels, once (vvLevelsSet), and the highest: the levels past it
     // hold no owner (level 1 runs whatever the hits: the throttle updates).
@@ -11217,7 +11843,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         // Measurement only: 524288 the levels (the hits' application).
         if ((gP.ablate & 524288u) != 0u) break;
 #endif
-        if (l == 1u)
+        if (l == 1u && (gP.ablate & 131072u) == 0u)
         {
             uint total = 0u;
             for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();
@@ -11239,16 +11865,16 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                 if (gsVvFix[a] != 0u) gMisc[gP.vvTri + gt].x = 0u;
             }
         }
-        if (vvGrid) vvHitBuckets(k, l, off, runOff, points, lane);
+        if (vvGrid && (gP.ablate & 32768u) == 0u) vvHitBuckets(k, l, off, runOff, points, lane);
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
         {
-            if (vvLv(a) != l) continue;
+            if (vvLv(a) != l || (gP.ablate & 32768u) != 0u) continue;
             uint va = vvMember(off, a);
             float range = asfloat(gStatic[va * 4u + 3u].z);
             uint hits = gsVvHit4[a].load();
-            if (hits <= 2u * points && vvGrid)
+            if (hits <= vvHitRoom(a, points) && vvGrid)
                 vvApplyOrderedBuckets(va, a, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, runOff, points);
-            else if (hits <= 2u * points)
+            else if (hits <= vvHitRoom(a, points))
                 vvApplyOrdered(va, vvHitSmall(runOff, points, a, 0u), hits, range, parity, lane, LANES, a);
             else
             {
@@ -11265,7 +11891,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         }
         sync();
         // §37.1: this level's owners' residual pass and work guard (listed hits).
-        if (gP.vvSplit != 0u)
+        if (gP.vvSplit != 0u && (gP.ablate & 16384u) == 0u)
         {
             for (uint ph = 0u; ph < 3u; ph++)
             {
@@ -11273,7 +11899,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                 {
                     if (vvLv(a) != l) continue;
                     uint hits = gsVvHit4[a].load();
-                    if (hits > 2u * points) continue;
+                    if (hits > vvHitRoom(a, points)) continue;
                     uint va = vvMember(off, a);
                     vvResidualPhase(va, vvHitSmall(runOff, points, a, 0u), hits, asfloat(gStatic[va * 4u + 3u].z),
                                     parity, lane, LANES, a, ph);
@@ -11291,9 +11917,9 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
     {
         uint n = gsVvHit4[a].load();
         anyHits += n;
-        if (n > 2u * points) listedAll = false;
+        if (n > vvHitRoom(a, points)) listedAll = false;
     }
-    if (anyHits > 0u && !listedAll) vvSplitClear(off, k, k, lane);
+    if (anyHits > 0u && !listedAll) vvSplitClear(off, k, vvSplitSlots(k), lane);
     else if (anyHits > 0u && gP.vvSplit != 0u)
     {
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
@@ -11448,4 +12074,7 @@ void contactGroup(uint g, uint lane)
 // workgroups, a member's step in its own.
 #ifdef EB_VV_SPLIT
 #include "explicit_beams_split.slang"
+#ifdef EB_VV_FLEET
+#include "explicit_beams_fleet.slang"
+#endif
 #endif

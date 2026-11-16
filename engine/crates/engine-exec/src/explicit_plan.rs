@@ -181,9 +181,57 @@ pub const PARAM_COPIES: u32 = 129;
 /// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 the pair
 /// list's build records, 92 its margin ([`W_PAIR_REUSE`]), 93 its backoff
 /// ([`W_PAIR_STREAK`]), 94 its piece labels ([`W_PIECE_BASE`]), 95 the retired nodes
-/// ([`W_RETIRE_BASE`]), 96 the beam phase's sorted records ([`W_BEAM_ORDER`]), 97–99
-/// padding).
-pub const PARAM_WORDS: usize = 100;
+/// ([`W_RETIRE_BASE`]), 96 the beam phase's sorted records ([`W_BEAM_ORDER`]), 97 the
+/// second ablation mask, 98 [`W_PERF_FLAGS`], 99–101 vehicle contact's own scratch
+/// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`]), 102–104 vehicle contact's
+/// state by owner vehicle ([`W_VV_FLEET`], [`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`])).
+pub const PARAM_WORDS: usize = 105;
+/// Params word: vehicle contact's state by owner vehicle in gAcc (the kernel's `vvFleet`,
+/// explicit_beams_fleet.slang; contact-groups-design.md §8): per vehicle
+/// [`FLEET_OWN_WORDS`] counters of the pass (offered, listed, candidates, pairs, hits,
+/// reset, fix, fastest candidate), then per vehicle its count of overlapping pairs (the
+/// plan's adjacency), then per vehicle `GRID_BUCKETS` counts of its candidates' grid, then
+/// [`FLEET_CTL_WORDS`] counters of the fleet. 0 for a fleet of one vehicle.
+pub const W_VV_FLEET: usize = 102;
+/// Params word: the same in gNext (the kernel's `vvFleetNext`): the plan's adjacency (per
+/// vehicle its first entry, then the entries: a pair and which of its two vehicles), per
+/// pair and direction the step's partner bits and the owner's two-body slot, per vehicle
+/// its part of the fleet-wide candidate run and hit list, its group's step count, its last
+/// pass's counts (a measurement), and the fleet-wide lists' prefixes.
+pub const W_VV_FLEET_NEXT: usize = 103;
+/// Params word: per owner vehicle four gBeams records of the step (the kernel's
+/// `vvFleetBox`): its box grown by its range (lo, hi with its anti-clip reach), its
+/// partners' boxes' union (lo, hi with their fastest node's speed).
+pub const W_VV_FLEET_BOX: usize = 104;
+/// The kernel's FL_OWN and FL_CTL (explicit_beams_fleet.slang).
+pub const FLEET_OWN_WORDS: usize = 8;
+pub const FLEET_CTL_WORDS: usize = 16;
+/// Words of [`W_VV_FLEET`] for `nv` vehicles, and of [`W_VV_FLEET_NEXT`] for `nv`
+/// vehicles, `pair_cap` overlapping pairs and `tris` collision triangles (the kernel's
+/// fl* address functions).
+pub const fn fleet_acc_words(nv: usize) -> usize {
+    nv * (FLEET_OWN_WORDS + 1 + WIDE_GRID_BUCKETS) + FLEET_CTL_WORDS
+}
+pub const fn fleet_next_words(nv: usize, pair_cap: usize, tris: usize) -> usize {
+    // adjacency firsts, entries, bits, slots; then five prefixes over the vehicles (+ 1
+    // each: run base, listed, pairs, hits, and the contact points', static); then per
+    // vehicle: step base, last counts (4), level; the fleet's listed triangles; the
+    // fleet's counters.
+    (nv + 1) + 6 * pair_cap + 5 * (nv + 1) + 6 * nv + tris + FLEET_CTL_WORDS
+}
+/// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
+/// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
+/// dispatches at its first member's. 0 for a fleet of one vehicle (no group forms).
+pub const W_VV_SCRATCH: usize = 99;
+/// Params word: the same in gNext (the kernel's `vvScratchOff`, `splitVvOffAt`): per
+/// vehicle `GRID_BUCKETS + 1` words, a group's candidate grid's offsets.
+pub const W_VV_SCRATCH_OFF: usize = 100;
+/// Params word: vehicle contact's listed (triangle, candidate) pairs in gNext (the
+/// kernel's `vvTriPairs`, `vvTriPairsAt`): per vehicle 2 × [`TRI_PAIR_CAP`] words. 0:
+/// none (one vehicle, or no self-collision pair list: the pass tests in its walk).
+/// Apart from the vehicles' own self-collision pair lists (word 90), which a contact
+/// group's member may keep from one substep to the next.
+pub const W_VV_TRI_PAIRS: usize = 101;
 /// Params word: the beam phase's records sorted by kind in gStatic (the kernel's
 /// beamOrder; 0: the beams in file order, beamUpdate for each). Per vehicle a header
 /// (entries, hot entries, its first incidence position, 0), then from record
@@ -222,11 +270,51 @@ pub const PERF_VV_STREAM: u32 = 64;
 /// grid (the kernel's PERF_VV_BIG_GRID), in place of every listed triangle against every
 /// candidate.
 pub const PERF_VV_BIG_GRID: u32 = 128;
+/// [`W_PERF_FLAGS`]: on the split group path a contact group's member keeps its
+/// self-collision pair list over the frame's steps, as a solo vehicle does (the kernel's
+/// PERF_MEMBER_LIST, `memberListLoad` / `memberListSave`), in place of its grid's sort and
+/// walk every step. With self-collision split the member's walk and pairs run in the
+/// fleet's walk and pairs dispatches and its hits in a dispatch of their own before the
+/// groups' pass (the kernel's `memberRest`; a WebGPU host adds that dispatch while the
+/// flag is on). vehicle-perf-first-principles.md §8.19.
+pub const PERF_MEMBER_LIST: u32 = 256;
+/// Perf flag: the small groups' contact pass keeps each hit node's beam sum for the pass
+/// beside the force snapshot (the kernel's PERF_VV_BEAM_SUM, `vvBeamSumOf`), in place of
+/// summing the node's beams again at every use. vehicle-perf-first-principles.md §8.21.
+pub const PERF_VV_BEAM_SUM: u32 = 512;
+/// Perf flag, with [`PERF_HIT_FB`]: a two-body dissipative vehicle's self-collision hits
+/// applied a (hit, role) a lane (the kernel's PERF_HIT_ROLES, `selfResidualRoles`): the
+/// first pass's adds, the residual's and the total's shares, the four nodes'
+/// accelerations and the merge each on the node's own lane, in place of in series on
+/// the hit's lane. vehicle-perf-first-principles.md §8.22.
+pub const PERF_HIT_ROLES: u32 = 1024;
+/// Perf flag, on a wide frame with the reused pair list: the tested triangles' step
+/// geometry on threads of the beams' dispatch, a triangle a thread, in place of the list
+/// kernel's lanes (the kernel's PERF_WIDE_GEO, `wideGeoThread`).
+/// vehicle-perf-first-principles.md §8.22.
+pub const PERF_WIDE_GEO: u32 = 2048;
+/// [`W_PERF_FLAGS`]: on the split group path with its tests across workgroups, vehicle
+/// contact's state by owner vehicle (the kernel's PERF_FLEET_STATE, explicit_beams_fleet.slang;
+/// contact-groups-design.md §8 stage 1): counters a record a vehicle, partners from the
+/// plan's pair list, each owner's candidates, sorted copy, ranks and hits at its prefix of
+/// fleet-wide regions, its candidates' grid its own, two-body point counts by the owner's
+/// rank among the point's vehicle's partners; in place of a contact group's slots.
+pub const PERF_FLEET_STATE: u32 = 4096;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_STATE`]: the contact pass's front as fleet-wide
+/// dispatches (the kernel's PERF_FLEET_FRONT; contact-groups-design.md §8 stage 2): the
+/// pairs' step scans, every triangle's throttle step and every contact point's gather,
+/// each owner's grid, the candidates' sorted copy, the walk and the listed pairs, each a
+/// dispatch over every owner, in place of a workgroup a group for the front and 64 a
+/// group for the tests.
+pub const PERF_FLEET_FRONT: u32 = 8192;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
-/// in Chrome: vehicle-perf-first-principles.md §7) and [`PERF_VV_STREAM`] (§8.13); `RUBBLE_PERF_FLAGS=<mask>` overrides
+/// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
+/// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
+/// [`PERF_HIT_ROLES`] and [`PERF_WIDE_GEO`] (§8.22), [`PERF_FLEET_STATE`] and
+/// [`PERF_FLEET_FRONT`] (§8.25); `RUBBLE_PERF_FLAGS=<mask>` overrides
 /// (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID)
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST | PERF_VV_BEAM_SUM | PERF_HIT_ROLES | PERF_WIDE_GEO | PERF_FLEET_STATE | PERF_FLEET_FRONT)
 }
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;
@@ -452,7 +540,7 @@ pub const VV_SPLIT_SLOTS: usize = 9;
 /// groups (16), the awake vehicles' frame (32, vehicle sleep), the larger groups (48),
 /// the split group path's groups (64), members (80) and tests (96), and every vehicle's
 /// step in every frame for self-collision split with vehicle contact (112).
-pub const ARGS_BYTES: u64 = 128;
+pub const ARGS_BYTES: u64 = 192;
 /// The vehicle sleep awake list's pass ([`Kernel::Sleep`]).
 pub const SLEEP_LIST: &str = "explicit_beams_sleep_list";
 /// The surface contact's pair path (`explicit_beams_surface.slang` `SURF_PAIR_CAP`,
@@ -571,8 +659,9 @@ const NODE_PAIR_TRACKED: u32 = 128;
 /// Per vehicle the kernel's self-collision hit list (HIT_CAP records of HIT_WORDS
 /// words) and pending-beam list (PEND_CAP) in gNext.
 /// (Then HIT_CAP records of 12 words: each listed hit's four nodes' beam forces, the
-/// kernel's hitFbAt, [`PERF_HIT_FB`].)
-const SELF_HIT_WORDS: usize = 256 * 24 + 64 + 256 * 12;
+/// kernel's hitFbAt, [`PERF_HIT_FB`]; then HIT_CAP records of 20 words: each listed
+/// hit's four role records and its total, the kernel's hitRoleAt, [`PERF_HIT_ROLES`].)
+const SELF_HIT_WORDS: usize = 256 * 24 + 64 + 256 * 12 + 256 * 20;
 /// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
 pub const WIDE_MAX_VEHICLES: usize = 256;
 /// Bytes of the wide passes' vehicle table (the kernel's VehicleTable).
@@ -951,8 +1040,27 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
             w[0] - 1
         ));
     }
-    if w[1] != 0 {
-        return Err("the overlapping-pair list overflowed".into());
+    // (The overflow word: 1 the pair list; from 2 on the limits of the owners' state by
+    // vehicle, the kernel's FL_ERR_*, the largest raised.)
+    match w[1] {
+        0 => {}
+        2 => {
+            return Err(format!(
+                "the owners' candidates passed the fleet-wide run's room ({VV_PART} times the                  fleet's contact points: too many vehicles in contact with one another at                  once; that step's contact pass was cut short)"
+            ))
+        }
+        3 => {
+            return Err(
+                "an owner's hits passed its part of the fleet-wide hit list (twice its                  partners' contact points; the hits past it were not applied)"
+                    .into(),
+            )
+        }
+        4 => {
+            return Err(format!(
+                "a vehicle had more than {VV_PART} partners with two-body contact at once                  (the two-body point counts hold {VV_PART} owners a node)"
+            ))
+        }
+        _ => return Err("the overlapping-pair list overflowed".into()),
     }
     if w[2] != 0 {
         return Err("the contact grouping did not converge".into());
@@ -1006,6 +1114,9 @@ pub struct ExplicitUpload {
 /// Where everything lives, and the fleet's module choice.
 #[derive(Clone, Debug)]
 pub struct ExplicitLayout {
+    /// gAcc word of the first vehicle's self-collision hit counters (two words a
+    /// vehicle: the step's hits, its pending beams; the kernel's hitAcc).
+    pub hit_acc: u32,
     /// The contact-force log in gAcc (word index; 0: no vehicle has it): per
     /// node (sum, last, peak), then per group slot its contact-break state.
     pub contact_force: u32,
@@ -1881,7 +1992,8 @@ impl ExplicitUpload {
         let two_body = nv > 1 && vehicles.iter().any(|v| v.two_body_contact);
         let vv_snap = if two_body {
             let at = beams.len() as u32;
-            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
+            // (Then per node its beams' sum of the pass: PERF_VV_BEAM_SUM.)
+            beams.extend(std::iter::repeat_n([0.0f32; 4], 2 * total_nodes));
             at
         } else {
             0
@@ -2215,6 +2327,24 @@ impl ExplicitUpload {
         misc.extend(std::iter::repeat_n([0u32; 4], total_nodes.div_ceil(32).max(1)));
         let piece_box_rec = misc.len() as u32;
         misc.extend(std::iter::repeat_n([0u32; 4], PIECE_BOX_RECS * nv.max(1)));
+        // Vehicle contact's own scratch ([`W_VV_SCRATCH`]; before the loop-cap flag, which
+        // stays gAcc's last word).
+        let vv_scratch = if nv > 1 {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, nv * WIDE_GRID_BUCKETS));
+            at
+        } else {
+            0
+        };
+        // Vehicle contact's state by owner vehicle ([`W_VV_FLEET`]; scratch, zero between
+        // passes).
+        let vv_fleet = if nv > 1 {
+            let at = acc_init.len() as u32;
+            acc_init.extend(std::iter::repeat_n(0, fleet_acc_words(nv)));
+            at
+        } else {
+            0
+        };
         let cap_at = acc_init.len();
         acc_init.push(0);
         for (k, rec) in vv_static.iter_mut().enumerate() {
@@ -2262,6 +2392,38 @@ impl ExplicitUpload {
         } else {
             0
         };
+        // Vehicle contact's own scratch in gNext ([`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`];
+        // scratch, after every other region).
+        let vv_scratch_off = if nv > 1 {
+            let at = next_len as u32;
+            next_len += nv * (WIDE_GRID_BUCKETS + 1);
+            at
+        } else {
+            0
+        };
+        let vv_tri_pairs = if nv > 1 && tri_pairs != 0 {
+            let at = next_len as u32;
+            next_len += nv * 2 * TRI_PAIR_CAP;
+            at
+        } else {
+            0
+        };
+        // Vehicle contact's state by owner vehicle ([`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`];
+        // scratch, after every other region).
+        let vv_fleet_next = if nv > 1 {
+            let at = next_len as u32;
+            next_len += fleet_next_words(nv, vv_pair_cap as usize, total_tris);
+            at
+        } else {
+            0
+        };
+        let vv_fleet_box = if nv > 1 {
+            let at = beams.len() as u32;
+            beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * nv));
+            at
+        } else {
+            0
+        };
         // The loop budget's unit (explicit_loop_cap.slang): passes one invocation could
         // legitimately take in a step, bounded by the whole fleet's work on one lane
         // (a contact group's lane walks its members; the serial self-collision pass
@@ -2278,6 +2440,17 @@ impl ExplicitUpload {
             })
             .sum();
         let mut next_init = vec![0u32; next_len.max(1)];
+        // The contact points' prefix over the vehicles (the fleet state's fifth prefix:
+        // the kernel's flPrefixAt(4, v); static).
+        if vv_fleet_next != 0 {
+            let at = vv_fleet_next as usize + (nv + 1) + 6 * vv_pair_cap as usize + 4 * (nv + 1);
+            let mut run = 0u32;
+            for (k, v) in vehicles.iter().enumerate() {
+                next_init[at + k] = run;
+                run += v.contact_points.len() as u32;
+            }
+            next_init[at + nv] = run;
+        }
         if piece_base != 0 {
             let at = piece_base as usize + total_nodes + nv;
             next_init[at..at + total_nodes * PIECE_GROUPS].fill(f32::INFINITY.to_bits());
@@ -2483,6 +2656,12 @@ impl ExplicitUpload {
         ];
         let mut words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
         words[W_PERF_FLAGS] = perf_flags_default();
+        words[W_VV_SCRATCH] = vv_scratch;
+        words[W_VV_SCRATCH_OFF] = vv_scratch_off;
+        words[W_VV_TRI_PAIRS] = vv_tri_pairs;
+        words[W_VV_FLEET] = vv_fleet;
+        words[W_VV_FLEET_NEXT] = vv_fleet_next;
+        words[W_VV_FLEET_BOX] = vv_fleet_box;
         let total = [
             total_nodes as u32,
             total_beams as u32,
@@ -2507,6 +2686,7 @@ impl ExplicitUpload {
         let mut table = table_recs[..n].to_vec();
         table.resize(WIDE_MAX_VEHICLES * 5, [0; 4]);
         let layout = ExplicitLayout {
+            hit_acc: hit_acc as u32,
             spans,
             rest0,
             words,

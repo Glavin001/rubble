@@ -200,6 +200,16 @@ as before):
 workgroup, `set_group_split_tests(false)`). The old path stays selectable
 (`set_group_split(false)`, `RUBBLE_GROUP_SPLIT=0`).
 
+With self-collision split and the members' kept pair lists (`PERF_MEMBER_LIST`,
+vehicle-perf-first-principles.md §8.19) a substep is: the vehicles' step (a member's cut
+at its self-collision tests, as a solo vehicle's), the self-collision walk and pairs
+dispatches over every vehicle, **the members' hits** (`memberRest`: a workgroup a
+vehicle when there is a group, a solo vehicle's returning at once), then the groups'
+four dispatches. The pass's scratch between its dispatches (per owner counters, the
+grid's offsets) and its listed pairs are in vehicle contact's own regions (`vvScratch`,
+`vvScratchOff`, `vvTriPairs`), not the members' self-collision words: those hold a
+member's pair list and its state from one substep to the next.
+
 ### 5.2 Why the results are the same, bit for bit
 
 The new path runs the same functions on the same values in an order the old path's
@@ -414,3 +424,94 @@ measured for the fleet.
 2. Steps 1–4 as fleet-wide dispatches; the front's workgroup goes.
 3. Step 7 fleet-wide; the group's workgroup, `VV_PART` as a group limit and the larger
    groups' pass go from the default path.
+
+### 8.6 What is built (2026-11-16): stages 1 and 2
+
+Kernel `engine/slang/kernels/explicit_beams_fleet.slang`; addresses `fl*` in
+`explicit_beams.slang`; perf flags 4096 (`PERF_FLEET_STATE`) and 8192
+(`PERF_FLEET_FRONT`), both on by default; measurements in
+`vehicle-perf-first-principles.md` §8.25. Stage 3 (the levels) is not built: §8.7.
+
+**Stage 1, the state by vehicle (flag 4096), under the groups' own dispatches.**
+
+| state | where |
+|---|---|
+| counters (offered, listed, candidates, pairs, hits, reset, fix, fastest candidate) | gAcc `flOwn(v)`, 8 words a vehicle, zero between passes (`flOwnerEnd`) |
+| the plan's pairs by vehicle | gNext `flAdjFirst`, `flAdjAt`: built by the grouping kernel (`vvAdjBuild`), an entry a pair and side |
+| partners this step | gNext `flBitsAt(d)`, a word a pair's side, written by the pair's scan (`flScanPair`) |
+| candidate run, sorted copy, ranks, hit list | the regions as before (`vvRun`, `vvHits`), an owner's part at `flRun(v)`, its prefix of the offered counts |
+| candidate grid | the owner's own 1,024 counts (gAcc `flGridCount`) and offsets (`vvScratchOff`), 128 buckets an owner before |
+| two-body point counts | slot = the owner's rank among the point's vehicle's two-body partners of the step (`flSlotAt`, set by `flOwnerPlan`) |
+| per owner, a step | gBeams `flBoxAt`: its box grown by its range and reach, its partners' boxes' union |
+
+The leaf functions are the small pass's own (`vvTriangleCandsList`, `vvPairTest`,
+`vvTry`, `vvPassSmallLevels`, …); the address helpers (`vvRunSmall`, `vvHitSmall`,
+`vvSortAt`, `vvGridBucket`, `vvOffAt`, `vvHitAdd`, `vvPairAdd`, `vvSpeedAt`,
+`vvSplitPoint`) follow a thread-local mode (`gFl`) in the modules built with
+`EB_VV_FLEET` (the groups', the tests', the fleet's). The levels still run in the
+group's workgroup: lane 0 imports the owners' records into the workgroup arrays
+(`flImport`), and their hit buckets stay the workgroup's (stage 3's to replace).
+
+Limits, each raised through the contact status' overflow word
+(`explicit_plan::contact_error`), never a silent drop: the owners' offered counts
+together past `VV_PART` times the fleet's contact points (the pass of that step is cut
+short); an owner's hits past twice its offered count; a vehicle with more than
+`VV_PART` two-body partners at once.
+
+**A finding on the way: the plan's pair list can hold a pair twice.** A vehicle sits
+in a vehicle-grid bucket once for each of its cells that hash there, and
+`vvFindPairs` then meets it twice in one cell. The grouping does not mind. Partners
+read from the list do: the partner's contact points became candidates twice and its
+hits were applied twice (four cars, 18 frames after first contact; found by the
+harness, not by the suites). `vvAdjBuild` marks a pair's later copies (bit 4 of its
+bits words), and the scans leave them.
+
+**Stage 2, the front and the tests as dispatches over the fleet (flag 8192).** A
+substep's contact pass, where a group's front (one workgroup) and its tests (64
+workgroups, twice) were:
+
+| dispatch | module, step word | threads | sized by |
+|---|---|---|---|
+| the pairs' scans | `fleet_front`, step | a pair | the contact plan (`vvArgs` 32) |
+| the owners' parts: prefix of the offered counts, each owner's records, the sizes of what follows | `fleet_plan`, step | one workgroup | the contact plan (36) |
+| every triangle's throttle step, every contact point's gather with its grid count | `fleet_front`, `SPLIT_TESTS` | a triangle or point | the first plan |
+| each owner's grid offsets | `split_tests`, step | a workgroup a vehicle | the first plan |
+| the candidates' sorted copy | `fleet_front`, `SPLIT_LEVELS` | a place of the run | the first plan |
+| the listed triangles' prefix, the walk's size | `fleet_plan`, `SPLIT_TESTS` | one workgroup | the first plan |
+| the walk | `split_tests`, `SPLIT_TESTS` | a part of a listed triangle (128 workgroups' worth aimed at) | the second plan |
+| the listed pairs' prefix, the pairs' size | `fleet_plan`, `SPLIT_LEVELS` | one workgroup | the first plan |
+| the listed pairs | `split_tests`, `SPLIT_LEVELS` | a pair | the third plan |
+| the levels | `split_group`, `SPLIT_LEVELS` | a workgroup a group | the contact plan |
+
+Sizes travel in two small argument buffers of the fleet's own (`gArgs` at binding 10,
+`gArgs2` at 11): a dispatch may not bind the buffer it runs from, so the first plan
+(run from the contact plan's arguments) writes the first buffer and the later plans
+(run from the first) write the second. With no owner offered a partner the first plan
+writes zeros: a group whose members have not met costs the scans and one workgroup a
+substep. The groups' levels zero both buffers after the pass, so with no group every
+one of these is an empty dispatch. Threads find their owner by a binary search of a
+prefix over the vehicles (`flFind`); the contact points' prefix is static.
+
+A group past `VV_PART` members still takes the larger groups' pass (`vvPass`) in its
+own workgroup (a dispatch that has workgroups only when such a group exists), and its
+pairs are no one's partners in the fleet-wide passes (`flVehicleOn`).
+
+### 8.7 Stage 3, not built: what it needs
+
+The levels in the group's workgroup are now the largest part of contact after the
+walk (3.2 ms a frame of eight cars at rest), and a group past `VV_PART` is unchanged
+(32 cars: 139–270 ms a frame). What stage 3 has to add, from building the first two:
+
+- the owners' levels by relaxation over the pairs (one workgroup, a round a barrier)
+  and the hits' prefix (`flPrefixAt(3, v)` is reserved);
+- a dispatch a level and phase (application, three residual phases) that knows its
+  level: the step's three parameter copies are used up as phases, so levels need
+  copies of their own (past `PARAM_COPIES`, a level and phase each) or a module a
+  phase; with L level slots that is 4 L dispatches a substep, empty past the highest
+  level in use, and one workgroup that loops the levels past L (lossless, slow, rare);
+- the hits' chains without the workgroup's buckets (a scan of the owner's hits for a
+  short list, a counting sort in global memory for a long one);
+- the snapshot, the throttle updates and the two-body clears as threads over hits and
+  listed triangles (independent of the levels: these could go first);
+- then `flVehicleOn` for every group, the two-body slot limit as the only bound on
+  partners, and `vvPass` out of the default path.

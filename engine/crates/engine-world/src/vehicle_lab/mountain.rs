@@ -99,6 +99,10 @@ pub struct MountainChunk {
 /// Spike hulls in the palette.
 pub const PALETTE: usize = 12;
 const SLAB: f32 = 3.0;
+/// The canyon's lid: its height above the chunk's line (the walls' tops, m), and its
+/// shapes' tag (a density no rock has: a page draws nothing for it).
+pub const LID_UP: f32 = 13.5;
+pub const LID_TAG: f32 = 1.0;
 
 fn mix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -305,6 +309,21 @@ impl MountainSpec {
                 tag: 2400.0,
                 loose: false,
             });
+        }
+        // The lid: a slab across the canyon on top of its walls (LID_UP m above the
+        // chunk's line), so that nothing thrown up in a crash leaves the canyon. A part
+        // over a wall had no ground and fell without end (past 1,000 km/h within a run).
+        if std::env::var("LAB_NO_LID").is_err()
+        {
+        shapes.push(MountainShape {
+            geom: RockGeom::Box {
+                half: Vec3::new(0.5 * w + 3.0, 0.5, 0.5 * l + 0.5),
+            },
+            pos: mid + rot * Vec3::new(0.0, LID_UP, 0.0),
+            rot,
+            tag: LID_TAG,
+            loose: false,
+        });
         }
         // Rocks on the slabs.
         let mut r = Rng::new(self.seed, k, 2);

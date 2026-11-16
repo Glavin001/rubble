@@ -896,9 +896,64 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let mut ab: Vec<f64> = arg("--ab")
         .map(|x| x.split(',').filter_map(|t| t.parse().ok()).collect())
         .unwrap_or_default();
+    // `--save-fixtures DIR`: at each `--ab` time the state as a file
+    // (DIR/cars<N>_t<T>.fx: the snapshot's bytes with every car's piece labels and
+    // retired nodes). `--from-fixture FILE`: that state restored in this process and the
+    // `--ab` block run on it at once, with no step before it (the same fleet options):
+    // a change checked on a saved moment in seconds, not after driving up to it.
+    let save_dir = arg("--save-fixtures").map(std::path::PathBuf::from);
+    let from_fixture = arg("--from-fixture");
+    if let Some(file) = &from_fixture {
+        let bytes = std::fs::read(file)?;
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let t = f64::from_bits(u64::from_le_bytes(bytes[0..8].try_into()?));
+        let nv = u32_at(8);
+        let mut at = 12;
+        let x = world.explicit_vehicles_mut().expect("vehicles");
+        anyhow::ensure!(nv <= x.vehicle_count(), "{file}: a fixture of {nv} cars, this run has {}", x.vehicle_count());
+        for v in 0..nv {
+            let n = u32_at(at);
+            let labels = &bytes[at + 4..at + 4 + n];
+            at += 4 + n;
+            let m = u32_at(at);
+            let retired: Vec<bool> = bytes[at + 4..at + 4 + m].iter().map(|b| *b != 0).collect();
+            at += 4 + m;
+            // (As the lab does: with vehicle contact on the engine takes no retired
+            // nodes, and the lab's run went on without them.)
+            if retired.iter().any(|&r| r) {
+                let _ = x.set_retired(v, &retired);
+            }
+            if !labels.is_empty() {
+                x.set_piece_labels(v, labels);
+            }
+        }
+        let snap = x.snapshot_from_bytes(&bytes[at..]);
+        x.restore(&snap);
+        x.wait();
+        lab.bench.t = t;
+        ab = vec![t];
+    }
     for k in 0..windows {
         if ab.first().is_some_and(|&t| lab.bench.t >= t) {
             ab.remove(0);
+            if let Some(dir) = &save_dir {
+                std::fs::create_dir_all(dir)?;
+                let host = lab.fleet_host_state();
+                let x = world.explicit_vehicles().expect("vehicles");
+                let snap = x.snapshot();
+                let mut out = lab.bench.t.to_bits().to_le_bytes().to_vec();
+                out.extend((host.len() as u32).to_le_bytes());
+                for (labels, retired) in &host {
+                    out.extend((labels.len() as u32).to_le_bytes());
+                    out.extend(labels);
+                    out.extend((retired.len() as u32).to_le_bytes());
+                    out.extend(retired.iter().map(|r| u8::from(*r)));
+                }
+                out.extend(x.snapshot_to_bytes(&snap));
+                let file = dir.join(format!("cars{}_t{:.1}.fx", host.len(), lab.bench.t));
+                std::fs::write(&file, &out)?;
+                println!("   fixture {} ({:.1} MB)", file.display(), out.len() as f64 / 1e6);
+            }
             let labels = lab.piece_labels().to_vec();
             let x = world.explicit_vehicles_mut().expect("vehicles");
             x.wait();
@@ -943,6 +998,96 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     lab.bench.t,
                     line.join(", ")
                 );
+            }
+            // `--ab-split-ablate M1,M2,…`: the same 20 frames with the split path's
+            // measurement word M (time only; the shipped modules, `set_split_ablation`):
+            // 0 nothing, 512 no contact pass, and the levels' 16384 residual phases,
+            // 32768 buckets and application, 65536 snapshot, 131072 throttle updates.
+            if let Some(masks) = arg("--ab-split-ablate") {
+                let mut line = Vec::new();
+                for m in masks.split(',').filter_map(|m| m.parse::<u32>().ok()) {
+                    x.restore(&snap);
+                    x.set_split_ablation(m);
+                    x.wait();
+                    let t = std::time::Instant::now();
+                    for _ in 0..20 {
+                        x.frame(34);
+                        x.wait();
+                    }
+                    line.push(format!("{m}: {:.2}", t.elapsed().as_secs_f64() * 1e3 / 20.0));
+                }
+                x.set_split_ablation(0);
+                x.restore(&snap);
+                println!("   split ablation at t {:.1} (ms a frame): {}", lab.bench.t, line.join(", "));
+            }
+            // `--ab-perf-masks M1,M2,…`: the same 20 frames with the run's perf flags XOR
+            // each mask, three times round the list: per mask the median and the fastest
+            // tenth of its 60 frames' wall ms (a frame's wall time rises with any other
+            // load on the machine: the low figures are the comparable ones); "=": the
+            // frames ended in the first mask's state, bit for bit. A lossless switch's
+            // cost or gain, and a kernel's time-only measurement bits when a build has any.
+            if let Some(masks) = arg("--ab-perf-masks") {
+                let f = x.perf_flags();
+                let masks: Vec<u32> = masks.split(',').filter_map(|m| m.parse().ok()).collect();
+                let mut ms = vec![Vec::new(); masks.len()];
+                // (On the fleet-wide passes: each mask's GPU ms a frame by pass, every
+                // dispatch a timed pass of its own, 8 frames a round.)
+                let mut passes: Vec<Vec<(&str, f64)>> = vec![Vec::new(); masks.len()];
+                let mut same = vec![true; masks.len()];
+                let mut first_words = None;
+                for _ in 0..3 {
+                    for (k, m) in masks.iter().enumerate() {
+                        x.restore(&snap);
+                        x.set_perf_flags(f ^ m);
+                        x.wait();
+                        for _ in 0..3 {
+                            x.frame(34);
+                            x.wait();
+                        }
+                        for _ in 0..20 {
+                            let t = std::time::Instant::now();
+                            x.frame(34);
+                            x.wait();
+                            ms[k].push(t.elapsed().as_secs_f64() * 1e3);
+                        }
+                        let words = x.state_words();
+                        same[k] &= *first_words.get_or_insert_with(|| words.clone()) == words;
+                        for _ in 0..8 {
+                            for (i, (name, t)) in x.profile_wide_frame(34).into_iter().enumerate() {
+                                if passes[k].len() <= i {
+                                    passes[k].push((name, 0.0));
+                                }
+                                passes[k][i].1 += t / 24.0;
+                            }
+                        }
+                    }
+                }
+                println!("   self-collision hits of the last step, per vehicle: {:?}", x.self_hit_counts());
+                x.set_perf_flags(f);
+                x.restore(&snap);
+                println!(
+                    "   perf masks at t {:.1} (flags {f} xor mask: median / fastest tenth, ms a frame of 60): {}",
+                    lab.bench.t,
+                    masks
+                        .iter()
+                        .enumerate()
+                        .map(|(k, m)| {
+                            ms[k].sort_by(f64::total_cmp);
+                            format!("{m}: {:.2} / {:.2}{}", ms[k][ms[k].len() / 2], ms[k][ms[k].len() / 10], if same[k] { " =" } else { "" })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                for (k, m) in masks.iter().enumerate() {
+                    let row: Vec<String> = passes[k]
+                        .iter()
+                        .filter(|p| p.1 >= 0.005 && p.0 != "walk")
+                        .map(|(n, t)| format!("{} {t:.3}", n.trim_start_matches("explicit_beams_wide_")))
+                        .collect();
+                    if !row.is_empty() {
+                        println!("     {m}: by pass, GPU ms a frame, timed apart: {}", row.join(", "));
+                    }
+                }
             }
             // `--ab-profile`: the frame as it runs now, by dispatch kind (time only): 10
             // frames untimed (wall), then the same 10 from the same snapshot with every
@@ -1144,20 +1289,36 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 x.restore(&snap);
                 switch(x, on, &labels);
                 x.wait();
+                // (One untimed frame first: a pipeline this path creates on first use
+                // compiles there, not in the timing. Then the state again.)
+                x.frame(34);
+                x.wait();
+                x.restore(&snap);
+                x.wait();
                 // (AB_GAP_MS=n: the GPU idle n ms before each frame, as a display's frame
                 // loop leaves it; the frames' own time alone is summed.)
                 let gap: u64 = std::env::var("AB_GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                // (`--ab-frames N`: the frames each way, 20 unless given.)
+                let frames: u32 = arg("--ab-frames").and_then(|v| v.parse().ok()).unwrap_or(20).max(1);
                 let mut sum = 0.0;
-                for _ in 0..20 {
+                // (AB_STEPS=s: frames of s steps in place of 34, to find the first step two
+                // paths differ at; AB_COUNTS=1: each path's contact groups' counts after
+                // its frames.)
+                let env_u = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+                let ab_steps = env_u("AB_STEPS", 34);
+                for _ in 0..frames {
                     if gap > 0 {
                         std::thread::sleep(std::time::Duration::from_millis(gap));
                     }
                     let t = std::time::Instant::now();
-                    x.frame(34);
+                    x.frame(ab_steps);
                     x.wait();
                     sum += t.elapsed().as_secs_f64();
                 }
-                let ms = sum * 1e3 / 20.0;
+                let ms = sum * 1e3 / f64::from(frames);
+                if env_u("AB_COUNTS", 0) != 0 {
+                    println!("     counts ({}): {:?}", if on { "on" } else { "off" }, x.contact_group_counts());
+                }
                 // The switch's own header bit back, so the words compare the state alone.
                 switch(x, true, &labels);
                 x.wait();
@@ -1249,6 +1410,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             x.restore(&snap);
             switch(x, true, &labels);
             x.wait();
+            if from_fixture.is_some() {
+                // (A replayed fixture: its check is the whole run.)
+                std::process::exit(0);
+            }
         }
         if ablate != 0 && lab.bench.t >= ablate_at {
             if let Some(x) = world.explicit_vehicles_mut() {
@@ -1384,6 +1549,37 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         })
                         .collect();
                     println!("   speeds km/h: {}", v.join(" "));
+                    // (Where each car's fastest node is, and how many of its nodes are
+                    // past 200 km/h: debris in free fall has left the ground.)
+                    let w: Vec<String> = all
+                        .iter()
+                        .zip(x.velocities().iter())
+                        .map(|(p, vs)| {
+                            let (i, top) = vs.iter().enumerate().fold((0, 0.0f32), |(bi, b), (i, q)| if q.length() > b { (i, q.length()) } else { (bi, b) });
+                            let fast = vs.iter().filter(|q| q.length() * 3.6 > 200.0).count();
+                            let med = p[p.len() / 2];
+                            format!("{fast}@x{:.0},y{:.0},z{:.0}(car x{:.0},y{:.0},z{:.0};{:.0})", p[i].x, p[i].y, p[i].z, med.x, med.y, med.z, top * 3.6)
+                        })
+                        .collect();
+                    println!("   fast nodes: {}", w.join(" "));
+                    // The fleet's energy ledger (kJ): kinetic, potential (m g y) and their
+                    // sum, per car and in all. Contact and yielding only take energy out:
+                    // the total may not rise, and a car's own sum rises only by what
+                    // another car hands it.
+                    let vel = x.velocities();
+                    // (Every car is the template: its nodes' masses.)
+                    let (mut total, mut per) = (0.0f64, Vec::new());
+                    for (p, v) in all.iter().zip(&vel) {
+                        let (mut ke, mut pe) = (0.0f64, 0.0f64);
+                        for ((q, w), n) in p.iter().zip(v).zip(&template.nodes) {
+                            let m = f64::from(n.mass);
+                            ke += 0.5 * m * f64::from(w.length_squared());
+                            pe += m * 9.81 * f64::from(q.y);
+                        }
+                        total += ke + pe;
+                        per.push(format!("{:.0}+{:.0}", ke * 1e-3, pe * 1e-3));
+                    }
+                    println!("   energy kJ (kinetic+potential a car): {}; total {:.0}", per.join(" "), total * 1e-3);
                 }
             }
             if lab.bench.debris.ttl.is_some() || lab.bench.debris.pieces > 0 {
