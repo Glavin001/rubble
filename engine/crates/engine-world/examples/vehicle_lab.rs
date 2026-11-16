@@ -1384,6 +1384,24 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         })
                         .collect();
                     println!("   speeds km/h: {}", v.join(" "));
+                    // The fleet's energy ledger (kJ): kinetic, potential (m g y) and their
+                    // sum, per car and in all. Contact and yielding only take energy out:
+                    // the total may not rise, and a car's own sum rises only by what
+                    // another car hands it.
+                    let vel = x.velocities();
+                    // (Every car is the template: its nodes' masses.)
+                    let (mut total, mut per) = (0.0f64, Vec::new());
+                    for (p, v) in all.iter().zip(&vel) {
+                        let (mut ke, mut pe) = (0.0f64, 0.0f64);
+                        for ((q, w), n) in p.iter().zip(v).zip(&template.nodes) {
+                            let m = f64::from(n.mass);
+                            ke += 0.5 * m * f64::from(w.length_squared());
+                            pe += m * 9.81 * f64::from(q.y);
+                        }
+                        total += ke + pe;
+                        per.push(format!("{:.0}+{:.0}", ke * 1e-3, pe * 1e-3));
+                    }
+                    println!("   energy kJ (kinetic+potential a car): {}; total {:.0}", per.join(" "), total * 1e-3);
                 }
             }
             if lab.bench.debris.ttl.is_some() || lab.bench.debris.pieces > 0 {

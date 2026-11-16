@@ -209,6 +209,12 @@ struct Track {
     kinetic_low: f64,
     /// The centre of mass height at that low (m): the fall since it is a source.
     low_height: f64,
+    /// At that low: the read vehicles' mechanical energy together (kinetic + m g h, J)
+    /// and the inputs counted so far (launches, external work, J). What one
+    /// read vehicle hands another in a collision is in neither's fall and is no
+    /// energy from nowhere: the fleet's sum does not rise by it.
+    fleet_low: f64,
+    sources_low: f64,
     damage: Option<(u32, u32, u32)>,
 }
 
@@ -376,18 +382,26 @@ impl StabilityGuard {
             }
         }
         self.last_t = Some(t);
+        let fleet_energy: f64 = samples.iter().map(|s| s.kinetic + s.mass * GRAVITY * s.height).sum();
+        // (Launches and external work: the box check never counted traction, whose
+        // allowance over a second at speed is larger than a blow-up's rise.)
+        let sources_now = self.launched + self.external;
         for (s, v) in samples.iter().zip(&mut self.vehicles) {
             if v.first.is_none() {
                 v.first = Some(*s);
                 v.lowest = s.height;
                 v.kinetic_low = s.kinetic;
                 v.low_height = s.height;
+                v.fleet_low = fleet_energy;
+                v.sources_low = sources_now;
             }
             v.last = Some(*s);
             v.lowest = v.lowest.min(s.height);
             if s.kinetic < v.kinetic_low {
                 v.kinetic_low = s.kinetic;
                 v.low_height = s.height;
+                v.fleet_low = fleet_energy;
+                v.sources_low = sources_now;
             }
         }
         if self.fleet > self.vehicles.len() || self.unbounded {
@@ -480,7 +494,13 @@ impl StabilityGuard {
             // The fall since the low is a source of the rise (a car tumbling on down a
             // mountain, a torn-off part left far behind it).
             let fall = s.mass * GRAVITY * (v.low_height - s.height).max(0.0);
-            if s.size > limit && s.kinetic > ENERGY_FLOOR && s.kinetic > BOX_ENERGY_RISE * v.kinetic_low + fall {
+            // A read vehicle struck by another gains kinetic energy its own fall does
+            // not explain, and the other lost it: the read vehicles' mechanical energy
+            // together has not risen. Only a rise of that sum past the inputs since
+            // the low (and the floor) is energy from nowhere. (One vehicle: its own
+            // rise less its fall, as before.)
+            let fleet_rise = fleet_energy - v.fleet_low - (sources_now - v.sources_low);
+            if s.size > limit && s.kinetic > ENERGY_FLOOR && s.kinetic > BOX_ENERGY_RISE * v.kinetic_low + fall && fleet_rise > ENERGY_FLOOR {
                 return self.stop(
                     t,
                     format!(
@@ -676,6 +696,29 @@ mod tests {
         assert_eq!(g.observe(0.0, &[car(0.0, 0.68, 5.39, 3.0e3)]), None);
         // 5 m lower (71 kJ of fall), 104 m across, 2,000 kJ.
         let trip = g.observe(1.0, &[car(0.0, -4.32, 104.0, 2.0e6)]).cloned();
+        assert!(trip.is_some_and(|t| t.reason.contains("104 m across")), "no trip");
+    }
+
+    /// The report of 2026-11-16 (vehicle lab, mountain, eight generated sedans): a car
+    /// slowed by a crash (47 kJ), 104 m across with parts left behind, is struck by a
+    /// faster one and leaves at 568 kJ. Its own fall does not explain the rise; the
+    /// other car lost that energy. Not a trip.
+    #[test]
+    fn a_car_struck_by_another_does_not_trip() {
+        let mut g = StabilityGuard::new(2);
+        assert_eq!(g.observe(0.0, &[car(8.0, -100.0, 5.39, 0.0), car(40.0, -100.0, 5.39, 0.0)]), None);
+        // A second later, at the same height: the struck car at 28 m/s and 104 m
+        // across, the striking car slowed to 20 m/s.
+        assert_eq!(g.observe(1.0, &[car(28.0, -100.0, 104.4, 0.0), car(20.0, -100.0, 5.39, 0.0)]), None);
+    }
+
+    /// The same two cars, but the second keeps its speed: the first car's rise is
+    /// energy from nowhere, and still trips.
+    #[test]
+    fn a_blow_up_beside_another_car_still_trips() {
+        let mut g = StabilityGuard::new(2);
+        assert_eq!(g.observe(0.0, &[car(8.0, -100.0, 5.39, 0.0), car(40.0, -100.0, 5.39, 0.0)]), None);
+        let trip = g.observe(1.0, &[car(28.0, -100.0, 104.4, 0.0), car(40.0, -100.0, 5.39, 0.0)]).cloned();
         assert!(trip.is_some_and(|t| t.reason.contains("104 m across")), "no trip");
     }
 
