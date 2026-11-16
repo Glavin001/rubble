@@ -28,6 +28,12 @@ env:
   # "Cache compiled Slang kernels" steps below.
   RUBBLE_SLANG_CACHE: ${{ github.workspace }}/.slang-cache
 
+# Only runs on main save the Rust dependency caches (save-if below): a pull request
+# restores main's (and, after a Cargo.lock change, the nearest one), and saves none of
+# its own. Each pull request used to save about 2 GB of them, in a repository whose
+# limit is 10 GB, so main's caches were the ones evicted. cache-cleanup.yml deletes what
+# a closed pull request and superseded keys leave behind.
+#
 # Every job is meant to end within 10 minutes; each has a timeout so a hang fails it
 # instead of holding a runner for 6 hours. What a job cannot avoid is one slangc compile
 # of the kernels when engine/slang (or the build script) changed: see RUBBLE_SLANG_CACHE.
@@ -48,13 +54,61 @@ jobs:
           case "$base" in 0000000000000000000000000000000000000000) base= ;; esac
           bash .github/scripts/check-large-files.sh "$base" HEAD
 
+  # One slangc compile of the kernels for the three web builds and the Linux C library. When the kernels
+  # changed, each of them (and each C library job) ran its own: the same 5-8 minutes of
+  # all four cores, four times over; "build stress" took 10.4 minutes and the C library
+  # up to 10 (runs 43848733117, 43851324851). Here it runs once (about 6 minutes) and they take it from the
+  # cache; when the kernels did not change this job only looks the cache up.
+  slang:
+    name: Slang kernels (compiled once for the Linux jobs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: Compiled already?
+        id: have
+        uses: actions/cache/restore@v4
+        with:
+          path: .slang-cache
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+          lookup-only: true
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.have.outputs.cache-hit != 'true'
+      - name: Cache slangc
+        if: steps.have.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rubble-tools
+          key: rubble-slangc-${{ runner.os }}-${{ hashFiles('engine/scripts/slangc.sh') }}
+      # engine-webgpu's build script is what compiles them; `check` of the library runs
+      # it without compiling the crates. No test kernels: the entry the wasm, host and
+      # C library builds use (cache_key in build.rs).
+      - name: Compile the Slang kernels
+        if: steps.have.outputs.cache-hit != 'true'
+        working-directory: engine
+        run: |
+          TOOLS="$HOME/.cache/rubble-tools"
+          . scripts/slangc.sh
+          cargo check -p engine-webgpu --no-default-features --lib
+          bash ../.github/scripts/slang-cache-digest.sh
+      - name: Save the compiled kernels
+        if: steps.have.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .slang-cache
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+
   # The demo site is built in three parallel jobs, one per part of build-web.sh
   # (RUBBLE_WEB_PARTS), and assembled by the `web` job below. One job took 21-28 minutes:
   # slangc ran three times in it (the host build, the world wasm and the stress wasm each
   # build engine-webgpu: 4.4-6.7 minutes of slangc each time).
-  # Each part builds engine-webgpu once; with the Slang cache warm, none runs slangc.
+  # Each part builds engine-webgpu once and none runs slangc: the `slang` job above
+  # left the compiled kernels in the cache.
   web-build:
     name: Web demos, build ${{ matrix.part }}
+    needs: slang
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -76,6 +130,7 @@ jobs:
             engine
             engine/stress-oracle
           key: ${{ matrix.part }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # wasm-pack cargo-installs the wasm-bindgen CLI pinned by the wasm crates (~1 min).
       # Per part: each downloads only the tools it uses.
       - name: Cache slangc, wasm-pack, Binaryen and wasm-bindgen
@@ -119,6 +174,7 @@ jobs:
         with:
           workspaces: engine
           key: site
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -179,7 +235,7 @@ jobs:
         with:
           workspaces: engine
           shared-key: engine-host
-          save-if: ${{ matrix.id == 'rest' }}
+          save-if: ${{ matrix.id == 'rest' && github.ref == 'refs/heads/main' }}
       # Schema, scene builders (host build, no Metal), step graph, vehicle, soft-body
       # (importers, beam model, CPU reference) and fracture host logic. GPU tests need a
       # real adapter (Metal or a hardware wgpu backend) and run locally; see
@@ -242,6 +298,21 @@ jobs:
   # and linked against the package. macOS runs it on the runner's Metal device and
   # Linux on lavapipe (Mesa's CPU Vulkan); Windows runners have no Vulkan driver, so
   # there it is linked only. Each package is uploaded as `rubble-<os>`.
+  # Linux takes the kernels the `slang` job compiled; macOS and Windows compile their
+  # own (slangc on that system), so with the kernels changed those two take 10-12.5
+  # minutes: 5-8 of slangc and the 5.7 and 7.6 minutes they take otherwise.
+  c-abi-linux:
+    name: C library (linux)
+    needs: slang
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/c-library
+        with:
+          name: linux
+          run_example: 1
+
   c-abi:
     name: C library (${{ matrix.name }})
     strategy:
@@ -251,52 +322,15 @@ jobs:
           - name: macos
             os: macos-15
             run_example: 1
-          - name: linux
-            os: ubuntu-latest
-            run_example: 1
           - name: windows
             os: windows-latest
             run_example: 0
     runs-on: ${{ matrix.os }}
+    # A build is 6-13 min; a hang must fail the job, not hold a runner for 6 hours.
     timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/lfs-pull
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/c-library
         with:
-          workspaces: engine
-          key: c-abi
-      - name: Cache slangc
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/rubble-tools
-          key: rubble-slangc-${{ runner.os }}-${{ hashFiles('engine/scripts/slangc.sh') }}
-      # slangc is 4-7.5 of this job's 6.5-14 minutes when the kernels have to be compiled.
-      # The key covers every input of cache_key in engine/crates/engine-webgpu/build.rs.
-      - name: Cache compiled Slang kernels (SPIR-V, WGSL)
-        uses: actions/cache@v4
-        with:
-          path: .slang-cache
-          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
-      - name: Mesa lavapipe (Vulkan on the CPU)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
-      - name: MSVC developer shell
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-      - name: Build, package and run the C example
-        # A build is 5-13 min; a hang must fail the job, not hold a runner for 6 hours.
-        timeout-minutes: 25
-        env:
-          RUN_EXAMPLE: ${{ matrix.run_example }}
-        run: bash engine/scripts/build-ffi.sh
-      - name: Upload the package
-        uses: actions/upload-artifact@v4
-        with:
-          name: rubble-${{ matrix.name }}
-          path: engine/ffi-dist
-          retention-days: 30
+          name: ${{ matrix.name }}
+          run_example: ${{ matrix.run_example }}
