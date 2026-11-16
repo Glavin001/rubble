@@ -318,6 +318,12 @@ pub const PERF_AHEAD_APART: u32 = 131072;
 /// before them on the coupling's and wheels' workgroup of the list dispatch, the rest after
 /// the step's hits as before. vehicle-perf-first-principles.md §8.31.
 pub const PERF_TYRE_AHEAD: u32 = 262144;
+/// [`W_PERF_FLAGS`], with [`PERF_HIT_ROLES`] and [`PERF_HIT_FB`]: in the wide hits kernel a
+/// two-body dissipative vehicle's step with 1..48 self-collision hits applied from
+/// workgroup memory (the kernel's PERF_HITS_LOCAL, `selfApplyLocal`): each (hit, role)'s
+/// node values and accumulators loaded once, the round and the residual pass's phases on
+/// those copies, the accumulators written back once. vehicle-perf-first-principles.md §8.33.
+pub const PERF_HITS_LOCAL: u32 = 1048576;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
