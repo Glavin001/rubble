@@ -8550,6 +8550,19 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     }
 #endif
     for (uint j = lane, jStop = EB_END(j, beamCount, LANES); j < jStop; j += LANES) beamUpdate(beamOff + j, j, fast, groupOff, parity);
+    // The grid this step (lane 0's decision above, from the same counts): each tested
+    // triangle's geometry of this step for its walk, which loads it (triangleGridWalk,
+    // triGeoLoad). Without this fill the walk read whatever the last solo or wide frame
+    // left there: stale triangles for every member of a larger group.
+    if (gP.triGeo != 0u && cell > 0.0 && candCount > 0u)
+    {
+        uint listedG = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
+        if (listedG * candCount > BRUTE_PAIRS_PER_LANE * LANES)
+        {
+            for (uint q = LANES - 1u - lane, qStop = EB_END(q, listedG, LANES); q < qStop; q += LANES)
+                triGeoFill(triOff + (triCount <= TRI_LIST ? gsTested[q] : q), origin, range, parity);
+        }
+    }
     sync();
     uint flagsU = gsUniformLanes;
     uint gridOn = flagsU & 1u;

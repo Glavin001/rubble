@@ -1367,3 +1367,56 @@ the larger groups' member step (`contactMemberStep`), for the ignored diagnostic
 `whole_workgroup_members_first_difference`. Finding so far: for two sedans the pass
 finds the same vehicle-vehicle hits but their forces do not reach the accumulators
 (zero for the hit triangle's nodes and the point); cause not yet found.
+
+### 8.18 Correction: a larger group's members tested stale triangles (fixed), and what it does to §8.15–§8.17's numbers (2026-11-16)
+
+**The bug (older than this work).** `contactMemberStep` (a member of a group past four
+cars, and since §8.15 a member of a group of five to eight on the split path) walks
+its self-collision grid with `triangleGridWalk`, which loads each triangle's geometry of
+the step from `gBeams[gP.triGeo …]` (`triGeoLoad`) whenever that cache exists. Only the
+solo step and the wide passes fill the cache (`triGeoFill`); no member step did. A
+member's grid walk therefore tested its triangles as the last solo or wide frame left
+them. The small groups' step (`contactMembersStepAt`) computes them live. Found by
+stepping two sedans' members with `contactMemberStep` (the split modules' diagnostic
+word 8192, since removed): identical while they approached, then the pass found the same
+vehicle hits but the members' own self-collision hits were missing.
+
+**The fix.** `contactMemberStep` fills the cache for its tested triangles in its beam
+phase when its grid is on (the solo step's loop). With it the two member steps agree bit
+for bit (the diagnostic over 12 frames; `group_split_gpu`, `self_split_gpu`), and
+GPU == CPU holds (`explicit_beams_bitwise` 12, `explicit_contact_gpu` 13,
+`explicit_vehicles` 11, Metal `vehicle_parity` 4). **Results change for any group past
+four cars** in a build with the cache: that is the bug's removal, not a regression.
+
+**One member step.** The split path now steps every member with `contactMemberStep`,
+whatever the group's size (the partitioned step is no longer in the split modules:
+`explicit_beams_selfsplit_member_vv_wide` 535 k → 408 k inlined lines,
+`explicit_beams_split_member_wide` 1.44 M → 1.31 M). Bit for bit against the groups' own
+workgroup at 2, 4 and 8 cars, t 2, 4, 6, 9 s.
+
+**What the earlier numbers were.** Stale triangles mostly do not overlap their car's
+nodes, so a member's self-collision found little and cost little. With the triangles of
+the step a member's step in the eight-car pile is 611 µs a substep, not the 227 µs of
+§8.15–§8.16; the small groups' step was never slower than the larger groups', it was
+doing the work. Corrected:
+
+| eight cars, whole 40 s run, native, vehicle GPU ms a step | median | p95 | worst |
+|---|---|---|---|
+| §8.15's figure (with the bug) | 31.5 | 39.2 | 41.7 |
+| now (fixed) | 55.6 | 65.2 | 70.3 |
+
+The start-of-work figures (312 / 534 / 553) and every "old path" column of §8.11–§8.17
+for more than four cars were also measured with the bug, so they understate the old
+path's cost too (the one-workgroup path at t 9 s: 200 ms then, 332 ms fixed). The frame
+by kind at t 9 s, fixed (45.9 ms): the cars' steps 20.8 (42 %), tests' walk 14.5, front
+7.3, levels 4.4, listed pairs 2.2. Four cars: 25–30 ms a frame, the cars' steps 18.4
+(70 %). Two cars grouped: 17 ms, apart 7.4.
+
+**What this changes in the order of work.** In a group the cars' own steps are again
+the largest part: a member's step is 540–610 µs a substep against 164–218 µs for the same
+car solo, because a member walks its self-collision every substep and the solo step
+reuses its pair list on 92 % of them. So members on the solo step (with its reused pair
+list) comes before, not after, the contact front: it needs the vehicle contact's listed
+pairs and the group's scratch out of the regions the solo step's pair list and saved
+state use (`triPairsAt`, `gridCountBase`), which is stage 1 of
+`contact-groups-design.md` §8.

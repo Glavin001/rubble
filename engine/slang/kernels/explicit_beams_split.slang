@@ -116,21 +116,11 @@ void splitMember(uint v, uint lane, uint s)
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     splitCoupleStep(v, rank, k, lane, s, coupleOn);
     splitDriveStep(v, lane, s, driveOn);
-    // (Diagnostic, the measurement word's 8192: the larger groups' member step for a
-    // small group too. Not the same results yet: group_split_gpu's ignored test.)
-    if (k <= VV_SIDE && (gP.ablate & 8192u) == 0u)
-    {
-        // The member on every lane of its workgroup (gVvWhole); with the measurement
-        // word's 4096, on its partition's lanes alone, first (lanes 0 .. P - 1 here),
-        // as before: the same results.
-        gVvWhole = (gP.ablate & 4096u) == 0u;
-        uint P = vvPartLanes(k);
-        contactMembersStepAt(off, k, gVvWhole ? lane : (lane + rank * P) % LANES, s, rank);
-    }
-    else
-    {
-        contactMemberStep(v, lane, s, rank == 0u);
-    }
+    // Every member on the whole of its workgroup with the one member step
+    // (contactMemberStep), whatever the group's size: the same results as a small
+    // group's partitioned step in the groups' own workgroup (contactMembersStepAt, which
+    // this module no longer holds), bit for bit (group_split_gpu, self_split_gpu).
+    contactMemberStep(v, lane, s, rank == 0u);
     if (surfOn != 0u)
     {
         surfaceStep(v, lane, surfOn, (stepBase + s) & 1u);
