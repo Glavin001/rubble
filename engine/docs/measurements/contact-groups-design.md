@@ -428,11 +428,11 @@ measured for the fleet.
 ### 8.6 What is built (2026-11-16): stages 1 and 2
 
 Kernel `engine/slang/kernels/explicit_beams_fleet.slang`; addresses `fl*` in
-`explicit_beams.slang`; perf flags 1024 (`PERF_FLEET_STATE`) and 2048
+`explicit_beams.slang`; perf flags 4096 (`PERF_FLEET_STATE`) and 8192
 (`PERF_FLEET_FRONT`), both on by default; measurements in
-`vehicle-perf-first-principles.md` §8.22. Stage 3 (the levels) is not built: §8.7.
+`vehicle-perf-first-principles.md` §8.23. Stage 3 (the levels) is not built: §8.7.
 
-**Stage 1, the state by vehicle (flag 1024), under the groups' own dispatches.**
+**Stage 1, the state by vehicle (flag 4096), under the groups' own dispatches.**
 
 | state | where |
 |---|---|
@@ -466,7 +466,7 @@ hits were applied twice (four cars, 18 frames after first contact; found by the
 harness, not by the suites). `vvAdjBuild` marks a pair's later copies (bit 4 of its
 bits words), and the scans leave them.
 
-**Stage 2, the front and the tests as dispatches over the fleet (flag 2048).** A
+**Stage 2, the front and the tests as dispatches over the fleet (flag 8192).** A
 substep's contact pass, where a group's front (one workgroup) and its tests (64
 workgroups, twice) were:
 
