@@ -28,6 +28,12 @@ env:
   # "Cache compiled Slang kernels" steps below.
   RUBBLE_SLANG_CACHE: ${{ github.workspace }}/.slang-cache
 
+# Only runs on main save the Rust dependency caches (save-if below): a pull request
+# restores main's (and, after a Cargo.lock change, the nearest one), and saves none of
+# its own. Each pull request used to save about 2 GB of them, in a repository whose
+# limit is 10 GB, so main's caches were the ones evicted. cache-cleanup.yml deletes what
+# a closed pull request and superseded keys leave behind.
+#
 # Every job is meant to end within 10 minutes; each has a timeout so a hang fails it
 # instead of holding a runner for 6 hours. What a job cannot avoid is one slangc compile
 # of the kernels when engine/slang (or the build script) changed: see RUBBLE_SLANG_CACHE.
@@ -76,6 +82,7 @@ jobs:
             engine
             engine/stress-oracle
           key: ${{ matrix.part }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # wasm-pack cargo-installs the wasm-bindgen CLI pinned by the wasm crates (~1 min).
       # Per part: each downloads only the tools it uses.
       - name: Cache slangc, wasm-pack, Binaryen and wasm-bindgen
@@ -119,6 +126,7 @@ jobs:
         with:
           workspaces: engine
           key: site
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -179,7 +187,7 @@ jobs:
         with:
           workspaces: engine
           shared-key: engine-host
-          save-if: ${{ matrix.id == 'rest' }}
+          save-if: ${{ matrix.id == 'rest' && github.ref == 'refs/heads/main' }}
       # Schema, scene builders (host build, no Metal), step graph, vehicle, soft-body
       # (importers, beam model, CPU reference) and fracture host logic. GPU tests need a
       # real adapter (Metal or a hardware wgpu backend) and run locally; see
@@ -270,6 +278,7 @@ jobs:
         with:
           workspaces: engine
           key: c-abi
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Cache slangc
         uses: actions/cache@v4
         with:
