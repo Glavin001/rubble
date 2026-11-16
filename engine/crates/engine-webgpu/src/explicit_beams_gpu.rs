@@ -115,6 +115,10 @@ pub struct ExplicitBeamsGpu {
     /// ([`Self::set_wide_fused`]).
     wide_fused: bool,
     wide_list_frame: std::cell::Cell<u32>,
+    /// Measurement ([`Self::profile_wide_frame`]): which of a wide beams command's
+    /// dispatches `dispatch` issues (0 all; 1 its own; 2 the list kernel, 3 the walk,
+    /// 4 the pairs).
+    wide_part: std::cell::Cell<u32>,
     /// The last frame ran self-collision split with vehicle contact (on the split group
     /// path's dispatches: [`ExplicitBeamsGpu::dispatch_group_split`]).
     self_split_vv: std::cell::Cell<bool>,
@@ -1333,6 +1337,7 @@ impl ExplicitBeamsGpu {
             wide_list: std::env::var("RUBBLE_WIDE_LIST").as_deref() == Ok("1"),
             wide_fused: std::env::var("RUBBLE_WIDE_FUSED").as_deref() == Ok("1"),
             wide_list_frame: std::cell::Cell::new(0),
+            wide_part: std::cell::Cell::new(0),
             self_split_vv: std::cell::Cell::new(false),
             self_split_skip: 0,
             split_dispatch_timing: std::env::var("RUBBLE_SPLIT_DISPATCH_TIMING").as_deref() == Ok("1"),
@@ -1805,6 +1810,14 @@ impl ExplicitBeamsGpu {
         (0..n).map(|g| misc[(at + g) * 4 + 1]).collect()
     }
 
+    /// Measurement (a blocking read): per vehicle the self-collision hits of the last
+    /// step run (the kernel's hit counter, cleared by a step's node phase).
+    #[doc(hidden)]
+    pub fn self_hit_counts(&self) -> Vec<u32> {
+        let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
+        (0..self.layout.spans.len()).map(|k| acc[self.layout.hit_acc as usize + 2 * k]).collect()
+    }
+
     /// Measurement (blocking reads): per contact group of the last frame on the split
     /// group path, its members, its points and, per member in vehicle order, the last
     /// pass's (listed pairs, hits, listed triangles, candidates) from the group's
@@ -1901,7 +1914,9 @@ impl ExplicitBeamsGpu {
             return Vec::new();
         }
         let cmds = self.write_params(steps, true);
-        let count = 2 * cmds.len() as u32;
+        // (With the reused pair list a step's beams command also dispatches the list
+        // kernel, the walk and the pairs: each in a timed pass of its own.)
+        let count = 2 * (cmds.len() as u32 + 3 * steps);
         let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("explicit-beams-wide-profile"),
             ty: wgpu::QueryType::Timestamp,
@@ -1917,19 +1932,27 @@ impl ExplicitBeamsGpu {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         let mut kinds = Vec::new();
+        let tails = self.wide_list_frame.get() > 0;
         for cmd in &cmds {
             if let Cmd::Dispatch { kernel: Kernel::Wide(kind), .. } = cmd {
-                let k = 2 * kinds.len() as u32;
-                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("explicit_beams_wide_profile"),
-                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
-                        query_set: &set,
-                        beginning_of_pass_write_index: Some(k),
-                        end_of_pass_write_index: Some(k + 1),
-                    }),
-                });
-                self.dispatch(&mut pass, cmd, None);
-                kinds.push(*kind);
+                // Part 1: the command's own dispatch; 2..4: the list kernel, the walk,
+                // the pairs after a step's beams.
+                let parts = if tails && *kind == plan::WIDE_BEAMS_PASS { 4 } else { 1 };
+                for part in 1..=parts {
+                    let k = 2 * kinds.len() as u32;
+                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("explicit_beams_wide_profile"),
+                        timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                            query_set: &set,
+                            beginning_of_pass_write_index: Some(k),
+                            end_of_pass_write_index: Some(k + 1),
+                        }),
+                    });
+                    self.wide_part.set(if tails { part } else { 0 });
+                    self.dispatch(&mut pass, cmd, None);
+                    self.wide_part.set(0);
+                    kinds.push(if part == 1 { *kind } else { EXPLICIT_BEAMS_WIDE_PASSES.len() + part as usize - 2 });
+                }
             } else {
                 self.copy(&mut enc, cmd);
             }
@@ -1943,9 +1966,15 @@ impl ExplicitBeamsGpu {
         let mut out: Vec<(&'static str, f64)> = EXPLICIT_BEAMS_WIDE_PASSES
             .iter()
             .map(|(n, _)| (*n, 0.0))
+            .chain([("list", 0.0), ("walk", 0.0), ("pairs", 0.0)])
             .collect();
         for (i, &kind) in kinds.iter().enumerate() {
-            out[kind].1 += ticks[2 * i + 1].saturating_sub(ticks[2 * i]) as f64 * period;
+            // (An empty indirect dispatch has no work to stamp on Metal: its stamps are
+            // stale or its neighbours'; an interval past 100 ms is one of those.)
+            let ms = ticks[2 * i + 1].saturating_sub(ticks[2 * i]) as f64 * period;
+            if ms < 100.0 {
+                out[kind].1 += ms;
+            }
         }
         out
     }
@@ -2766,6 +2795,22 @@ impl ExplicitBeamsGpu {
         // after a step's beams the list kernel's part, the walk, the pairs and the hits'
         // part; before the frame's end the list's end.
         let wl = self.wide_list_frame.get();
+        // (profile_wide_frame: one of a beams command's list, walk and pairs dispatches.)
+        let part = self.wide_part.get();
+        if wl > 0 && part >= 2 {
+            if let Cmd::Dispatch { kernel: Kernel::Wide(kind), param_copy: k, .. } = *cmd {
+                if kind == plan::WIDE_BEAMS_PASS {
+                    let nv = self.planner.vehicles();
+                    let slot = u64::from(if k == 0 { 2 } else { k & 1 });
+                    self.dispatch_self_one(pass, match part {
+                        2 => SelfDispatch::List { copy: k, groups: nv },
+                        3 => SelfDispatch::Walk { copy: k, offset: 12 * (3 + slot) },
+                        _ => SelfDispatch::Pairs { copy: k, offset: 12 * slot },
+                    });
+                }
+            }
+            return;
+        }
         if wl > 0 {
             if let Cmd::Dispatch { kernel: Kernel::Wide(kind), .. } = *cmd {
                 if kind == plan::WIDE_TRIS {
@@ -2867,7 +2912,7 @@ impl ExplicitBeamsGpu {
             (_, Some(x)) => pass.dispatch_workgroups(x, 1, 1),
             _ => unreachable!(),
         }
-        if wl > 0 {
+        if wl > 0 && part == 0 {
             if let Cmd::Dispatch { kernel: Kernel::Wide(kind), param_copy: k, .. } = *cmd {
                 if kind == plan::WIDE_BEAMS_PASS {
                     let nv = self.planner.vehicles();

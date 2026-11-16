@@ -248,6 +248,17 @@ pub const PERF_MEMBER_LIST: u32 = 256;
 /// beside the force snapshot (the kernel's PERF_VV_BEAM_SUM, `vvBeamSumOf`), in place of
 /// summing the node's beams again at every use. vehicle-perf-first-principles.md §8.21.
 pub const PERF_VV_BEAM_SUM: u32 = 512;
+/// Perf flag, with [`PERF_HIT_FB`]: a two-body dissipative vehicle's self-collision hits
+/// applied a (hit, role) a lane (the kernel's PERF_HIT_ROLES, `selfResidualRoles`): the
+/// first pass's adds, the residual's and the total's shares, the four nodes'
+/// accelerations and the merge each on the node's own lane, in place of in series on
+/// the hit's lane. vehicle-perf-first-principles.md §8.22.
+pub const PERF_HIT_ROLES: u32 = 1024;
+/// Perf flag, on a wide frame with the reused pair list: the tested triangles' step
+/// geometry on threads of the beams' dispatch, a triangle a thread, in place of the list
+/// kernel's lanes (the kernel's PERF_WIDE_GEO, `wideGeoThread`).
+/// vehicle-perf-first-principles.md §8.22.
+pub const PERF_WIDE_GEO: u32 = 2048;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14) and [`PERF_MEMBER_LIST`] (§8.19); `RUBBLE_PERF_FLAGS=<mask>` overrides
@@ -598,8 +609,9 @@ const NODE_PAIR_TRACKED: u32 = 128;
 /// Per vehicle the kernel's self-collision hit list (HIT_CAP records of HIT_WORDS
 /// words) and pending-beam list (PEND_CAP) in gNext.
 /// (Then HIT_CAP records of 12 words: each listed hit's four nodes' beam forces, the
-/// kernel's hitFbAt, [`PERF_HIT_FB`].)
-const SELF_HIT_WORDS: usize = 256 * 24 + 64 + 256 * 12;
+/// kernel's hitFbAt, [`PERF_HIT_FB`]; then HIT_CAP records of 20 words: each listed
+/// hit's four role records and its total, the kernel's hitRoleAt, [`PERF_HIT_ROLES`].)
+const SELF_HIT_WORDS: usize = 256 * 24 + 64 + 256 * 12 + 256 * 20;
 /// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
 pub const WIDE_MAX_VEHICLES: usize = 256;
 /// Bytes of the wide passes' vehicle table (the kernel's VehicleTable).
@@ -1033,6 +1045,9 @@ pub struct ExplicitUpload {
 /// Where everything lives, and the fleet's module choice.
 #[derive(Clone, Debug)]
 pub struct ExplicitLayout {
+    /// gAcc word of the first vehicle's self-collision hit counters (two words a
+    /// vehicle: the step's hits, its pending beams; the kernel's hitAcc).
+    pub hit_acc: u32,
     /// The contact-force log in gAcc (word index; 0: no vehicle has it): per
     /// node (sum, last, peak), then per group slot its contact-break state.
     pub contact_force: u32,
@@ -2563,6 +2578,7 @@ impl ExplicitUpload {
         let mut table = table_recs[..n].to_vec();
         table.resize(WIDE_MAX_VEHICLES * 5, [0; 4]);
         let layout = ExplicitLayout {
+            hit_acc: hit_acc as u32,
             spans,
             rest0,
             words,

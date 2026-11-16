@@ -965,6 +965,75 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 x.restore(&snap);
                 println!("   split ablation at t {:.1} (ms a frame): {}", lab.bench.t, line.join(", "));
             }
+            // `--ab-perf-masks M1,M2,…`: the same 20 frames with the run's perf flags XOR
+            // each mask, three times round the list: per mask the median and the fastest
+            // tenth of its 60 frames' wall ms (a frame's wall time rises with any other
+            // load on the machine: the low figures are the comparable ones); "=": the
+            // frames ended in the first mask's state, bit for bit. A lossless switch's
+            // cost or gain, and a kernel's time-only measurement bits when a build has any.
+            if let Some(masks) = arg("--ab-perf-masks") {
+                let f = x.perf_flags();
+                let masks: Vec<u32> = masks.split(',').filter_map(|m| m.parse().ok()).collect();
+                let mut ms = vec![Vec::new(); masks.len()];
+                // (On the fleet-wide passes: each mask's GPU ms a frame by pass, every
+                // dispatch a timed pass of its own, 8 frames a round.)
+                let mut passes: Vec<Vec<(&str, f64)>> = vec![Vec::new(); masks.len()];
+                let mut same = vec![true; masks.len()];
+                let mut first_words = None;
+                for _ in 0..3 {
+                    for (k, m) in masks.iter().enumerate() {
+                        x.restore(&snap);
+                        x.set_perf_flags(f ^ m);
+                        x.wait();
+                        for _ in 0..3 {
+                            x.frame(34);
+                            x.wait();
+                        }
+                        for _ in 0..20 {
+                            let t = std::time::Instant::now();
+                            x.frame(34);
+                            x.wait();
+                            ms[k].push(t.elapsed().as_secs_f64() * 1e3);
+                        }
+                        let words = x.state_words();
+                        same[k] &= *first_words.get_or_insert_with(|| words.clone()) == words;
+                        for _ in 0..8 {
+                            for (i, (name, t)) in x.profile_wide_frame(34).into_iter().enumerate() {
+                                if passes[k].len() <= i {
+                                    passes[k].push((name, 0.0));
+                                }
+                                passes[k][i].1 += t / 24.0;
+                            }
+                        }
+                    }
+                }
+                println!("   self-collision hits of the last step, per vehicle: {:?}", x.self_hit_counts());
+                x.set_perf_flags(f);
+                x.restore(&snap);
+                println!(
+                    "   perf masks at t {:.1} (flags {f} xor mask: median / fastest tenth, ms a frame of 60): {}",
+                    lab.bench.t,
+                    masks
+                        .iter()
+                        .enumerate()
+                        .map(|(k, m)| {
+                            ms[k].sort_by(f64::total_cmp);
+                            format!("{m}: {:.2} / {:.2}{}", ms[k][ms[k].len() / 2], ms[k][ms[k].len() / 10], if same[k] { " =" } else { "" })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                for (k, m) in masks.iter().enumerate() {
+                    let row: Vec<String> = passes[k]
+                        .iter()
+                        .filter(|p| p.1 >= 0.005 && p.0 != "walk")
+                        .map(|(n, t)| format!("{} {t:.3}", n.trim_start_matches("explicit_beams_wide_")))
+                        .collect();
+                    if !row.is_empty() {
+                        println!("     {m}: by pass, GPU ms a frame, timed apart: {}", row.join(", "));
+                    }
+                }
+            }
             // `--ab-profile`: the frame as it runs now, by dispatch kind (time only): 10
             // frames untimed (wall), then the same 10 from the same snapshot with every
             // dispatch in its own timed pass (`profile_dispatches`). The table closes: the

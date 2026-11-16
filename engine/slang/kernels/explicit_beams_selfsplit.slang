@@ -345,6 +345,7 @@ void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
     uint listed = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfListedAt(v)].load()) : 0u;
     // A building step: the walk's list (its pairs past the room the walk tested).
     if (listed == SELF_FROM_WALK) listed = min(uint(gAcc[selfWalkAt(v)].load()), TRI_PAIR_CAP);
+    if ((gP.perfFlags & 16777216u) != 0u) listed = 0u; // MEASURE
     uint i = gid.x * SELF_PAIRS_WG + lane;
     if (i < listed)
     {
