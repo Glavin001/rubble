@@ -454,9 +454,7 @@ Surface contactSurfaceV(uint v, uint w)
 // --- numerical primitives (compatible profile) ---
 
 // Strict float arithmetic (slang/physics/strict.slang); its zero comes from a uniform.
-static uint gsNoFuseLocal;
-void noFuseInit() { gsNoFuseLocal = gP.vehicles >> 31; }
-uint noFuseBits() { return gsNoFuseLocal; }
+uint noFuseBits() { return gP.vehicles >> 31; }
 #include "../physics/strict.slang"
 // n, from a uniform the compilers cannot see through (noFuseBits is 0 at run time): a
 // loop `for (k < EB_END(k, opaqueCount(n), 1u))` over a call's n uses (the same calls in
@@ -6358,7 +6356,7 @@ void selfResidualRoles(uint v, bool on, uint sub, uint lanes, uint beamOff, uint
 {
     for (uint phase = 0u; phase < 7u; phase++)
     {
-        if (on && !((gP.perfFlags & 2097152u) != 0u && phase >= 4u)) // MEASURE
+        if (on)
         {
             if (phase == 2u || phase == 5u) hitCombinePhase(v, sub, lanes, phase);
             else hitRolePhase(v, sub, lanes, phase, beamOff, groupOff, groupCount, parity);
@@ -6408,7 +6406,7 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
     if (any == 0u) return;
     if ((gP.perfFlags & PERF_HIT_FB) != 0u)
     {
-        if (on && (gP.perfFlags & 8388608u) == 0u) hitFbFill(v, sub, lanes, beamOff, groupOff, groupCount, parity); // MEASURE
+        if (on) hitFbFill(v, sub, lanes, beamOff, groupOff, groupCount, parity);
         sync();
     }
     // A lane with hits still open after round k sets gsUniformOpen to k: the round
@@ -6425,7 +6423,6 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
     {
         bool last = it > SELF_ROUNDS;
         bool act = last ? (on && sub == 0u && !done) : on;
-        if ((gP.perfFlags & 4194304u) != 0u) act = false; // MEASURE
         uint open = act ? selfRound(v, last ? 0u : sub, last ? 1u : lanes, last ? 0u : it, origin, r, beamOff,
                                     groupOff, groupCount, parity)
                         : 0u;
@@ -6445,7 +6442,6 @@ void selfApply(uint v, bool on, uint sub, uint lanes, uint lane, float3 origin, 
         selfSerial(v, origin, r, beamOff, groupOff, groupCount, parity);
     // §37's residual pass (a listed vehicle's; selfSerial ran its own): the forces,
     // then the merge, each after every lane's previous phase.
-    if ((gP.perfFlags & 1048576u) != 0u) return; // MEASURE
     if (gP.selfSplit != 0u)
     {
         // (PERF_HIT_ROLES: a (hit, role) a lane, with the first pass's adds.)
@@ -7455,7 +7451,6 @@ void explicit_beams_wide_rebase(uint3 id : SV_DispatchThreadID)
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
 {
-    noFuseInit();
     // The coupling's header for the nodes' proxy contacts (cplContacts reads it from
     // workgroup memory; no sphere or node-range copies there: every read from the buffers).
     if (lid.x == 0u)
@@ -7510,7 +7505,6 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_Gr
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_centred_beams(uint3 id : SV_DispatchThreadID)
 {
-    noFuseInit();
     uint j = id.x;
     if (j >= gP.totalBeams) return;
     uint v = gStatic[gP.beamBase + j * 3u].z >> 16;
@@ -7522,7 +7516,6 @@ void explicit_beams_wide_centred_beams(uint3 id : SV_DispatchThreadID)
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_centred_nodes(uint3 id : SV_DispatchThreadID)
 {
-    noFuseInit();
     uint i = id.x;
     if (i >= gP.totalNodes) return ebLoopCapFlush();
     uint v = gStatic[gP.nodeInfoBase + i].w;
@@ -7577,7 +7570,6 @@ void wideGeoThread(uint gt)
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
 {
-    noFuseInit();
     uint i = id.x;
     // The node grab, after this step's wide_nodes (one thread).
     if (i == 0u) grabApplyWide();
@@ -7721,7 +7713,6 @@ void explicit_beams_wide_tris(uint3 id : SV_DispatchThreadID)
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    noFuseInit();
     uint v = gid.x;
     uint lane = lid.x;
     Vehicle x = vehicleAt(v);
@@ -7750,12 +7741,8 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         }
     }
     sync();
-    if ((gP.perfFlags & 2147483648u) != 0u) return ebLoopCapFlush(); // MEASURE
-    if ((gP.perfFlags & 33554432u) != 0u) { for (uint xs = 0u; xs < 8u; xs++) sync(); } // MEASURE
     uint on = gsUniformHits;
     uint driveOn = gsUniformDrive;
-    if ((gP.perfFlags & 268435456u) != 0u) on = 0u; // MEASURE
-    if ((gP.perfFlags & 536870912u) != 0u) driveOn = 0u; // MEASURE
     if (on != 0u)
         selfApply(v, true, lane, 256u, lane, vehicleOrigin(v), x.range, x.beamOff, x.groupOff, x.groupCount, parity);
     // The next step's tyres (PERF_WIDE_FUSED), after this step's hits: their hubs'
@@ -7813,7 +7800,6 @@ void explicit_beams_wide_close(uint3 id : SV_DispatchThreadID)
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    noFuseInit();
     uint v = gid.x;
     uint lane = lid.x;
     uint s = wideStep();
@@ -7856,7 +7842,6 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    noFuseInit();
     selfSplitArgsClear(gid.x, lid.x);
     uint v = gid.x;
     uint lane = lid.x;
@@ -7900,9 +7885,8 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         pairReuseEnd(v, lane);
         return ebLoopCapFlush();
     }
-    if ((gP.perfFlags & 134217728u) != 0u) return ebLoopCapFlush(); // MEASURE
     // Step s + 1's coupling and wheels beside this step's list phases (uniform).
-    bool ahead = (gP.perfFlags & PERF_WIDE_FUSED) != 0u && s + 1u < gP.steps && (gP.perfFlags & 1073741824u) == 0u; // MEASURE
+    bool ahead = (gP.perfFlags & PERF_WIDE_FUSED) != 0u && s + 1u < gP.steps;
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
     bool aheadFold = ahead && (coupleOn & CPL_FOLD_FRAME) != 0u;
@@ -7923,7 +7907,6 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         driveAheadCtx(v, LANES - 1u - lane, drvC, drvHas, drvApart);
         driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 0u, misc.w + s + 1u);
     }
-    if ((gP.perfFlags & 67108864u) != 0u) pairReuseTrack(nodeOff, nodeCount, lane); // MEASURE
     pairReuseTrack(nodeOff, nodeCount, lane);
     if (candCount > 0u)
     {
@@ -7965,7 +7948,7 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
             trianglePairs(t, triOff + t, p % lanes, lanes, origin, range, cell, candOff, candCount, parity);
         }
     }
-    else if (candCount > 0u && gP.triGeo != 0u && (gP.perfFlags & PERF_WIDE_GEO) == 0u && (gP.perfFlags & 16777216u) == 0u) // MEASURE
+    else if (candCount > 0u && gP.triGeo != 0u && (gP.perfFlags & PERF_WIDE_GEO) == 0u)
     {
         for (uint q = LANES - 1u - lane, qStop = EB_END(q, listedB, LANES); q < qStop; q += LANES)
             triGeoFill(triOff + (triCount <= TRI_LIST ? gsTested[q] : q), origin, range, parity);

@@ -339,14 +339,12 @@ void explicit_beams_self_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 [numthreads(SELF_PAIRS_WG, 1, 1)]
 void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    noFuseInit();
     uint v = gid.y;
     uint lane = lid.x;
     uint s = gP.pad2;
     uint listed = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfListedAt(v)].load()) : 0u;
     // A building step: the walk's list (its pairs past the room the walk tested).
     if (listed == SELF_FROM_WALK) listed = min(uint(gAcc[selfWalkAt(v)].load()), TRI_PAIR_CAP);
-    if ((gP.perfFlags & 16777216u) != 0u) listed = 0u; // MEASURE
     uint i = gid.x * SELF_PAIRS_WG + lane;
     if (i < listed)
     {
@@ -372,7 +370,6 @@ void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
 [numthreads(SELF_WALK_WG, 1, 1)]
 void explicit_beams_self_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    noFuseInit();
     uint v = gid.y;
     uint walk = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfWalkAt(v) + 1u].load()) : 0u;
     uint4 r1 = gStatic[min(v, gP.vehicles - 1u) * 4u + 1u];
