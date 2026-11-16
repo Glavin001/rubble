@@ -200,6 +200,41 @@ impl WebVehicleLab {
         self.lab.bench.pose().to_vec()
     }
 
+    /// Vehicles in the World (the lab's cars and the parked car).
+    #[wasm_bindgen(js_name = vehicleCount)]
+    pub fn vehicle_count(&self) -> u32 {
+        self.lab.vehicle_count() as u32
+    }
+
+    /// The camera's readback of car `k` (`Lab::follow_plan`): node buffer byte offset and
+    /// bytes, misc buffer byte offset of its 16-byte origin record; empty: no such car.
+    #[wasm_bindgen(js_name = followPlan)]
+    pub fn follow_plan(&self, k: u32) -> Vec<f64> {
+        self.lab.follow_plan(k as usize).map_or(Vec::new(), |p| p.iter().map(|&x| x as f64).collect())
+    }
+
+    /// Car `k`'s nodes and origin record copied at the lab's time `taken`
+    /// (`Lab::ingest_follow`): what the camera follows.
+    #[wasm_bindgen(js_name = ingestFollow)]
+    pub fn ingest_follow(&mut self, k: u32, nodes: &[u32], origin: &[u32], taken: f64) -> Result<(), JsValue> {
+        res(self.lab.ingest_follow(k as usize, nodes, origin, taken))
+    }
+
+    /// The followed car (`Lab::follow_pose`): centre, velocity, heading, speed, the
+    /// state's time, readings, the car.
+    #[wasm_bindgen(js_name = followPose)]
+    pub fn follow_pose(&self) -> Vec<f64> {
+        self.lab.follow_pose().to_vec()
+    }
+
+    /// How far the camera may stand from the target toward the eye with no rock, wall or
+    /// ground between (`Bench::clear_view`).
+    #[wasm_bindgen(js_name = clearView)]
+    pub fn clear_view(&self, tx: f64, ty: f64, tz: f64, ex: f64, ey: f64, ez: f64) -> f64 {
+        use glam::DVec3;
+        self.lab.bench.clear_view(DVec3::new(tx, ty, tz), DVec3::new(ex, ey, ez))
+    }
+
     /// Whether per-step readings matter now (`Bench::busy`): a projectile in its first
     /// seconds, a plate, a crash before its first contact, a script.
     pub fn busy(&self) -> bool {

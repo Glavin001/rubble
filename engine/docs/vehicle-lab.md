@@ -27,7 +27,13 @@ Build the World wasm (CONTRIBUTING.md), serve `engine/crates/engine-webgpu` (or 
 | Mountain | The car leaves a cliff and falls down an endless rocky slope. Terrain (rolling gully, the default, or ledges and cliffs), seed, steepness, roughness, launch speed, loose rocks, a start depth. The launcher works here too: click the scene (or `F`) to shoot, for example to knock a stuck car loose. |
 | Drive | `W A S D`, `Space` handbrake. Obstacles appear ahead of the car: wall, pole, kerb, ramp, a stack of 25 kg bricks. A start speed. A second, parked car is an option. |
 
-**Common controls.** Slow motion ×1, ×¼, ×1⁄16; pause and single step; restart (`R`); camera (orbit by dragging, chase, tumble, side, top); cutaway (hide the car's material groups; drawing only).
+**Common controls.** Slow motion ×1, ×¼, ×1⁄16; pause and single step; restart (`R`); camera (overhead chase, orbit by dragging, chase, tumble, side, top); with more than one car, the car the camera follows (`V` cycles; the readouts stay the first car's); cutaway (hide the car's material groups; drawing only).
+
+**The camera.**
+
+- **It follows its own reading.** Every drawn frame copies the followed car's nodes and origin record back (tens of kB, its own three buffers), and the lab (`Lab::ingest_follow`) makes its centre of mass, velocity and heading; the camera carries that forward by the reading's age. It used to follow the measurements' reading, which is taken 15 times a second and skipped while the GPU is busy: the camera stopped (its forward carry was capped at 0.25 s) and then jumped to catch up. The reading's age is in `__state().camAge` and in the recorder's `--probe` lines.
+- **Nothing drawn hides the car.** Each frame the lab casts the view ray from the car to the eye (`Bench::clear_view`) against the mountain's rock (floor, banks, walls, humps, boulders: the live chunks' shapes, kept as they are made) and the arena's ground, and the eye comes in 0.6 m in front of what it meets. It comes in at once and goes back out eased over 0.5 s.
+- **Overhead chase** (the mountain's default): in the fall line's frame, 9 m over the slope and 10 m up it, looking a little down the slope; the frame is fixed, so a tumbling car does not swing the view. On the flat arena: 9 m up and 7 m behind the car's travel.
 
 **Every option is a control, and the URL mirrors the controls** (a control's id is its query key), so a run can be shared. A control is one of three kinds:
 
