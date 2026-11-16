@@ -7,6 +7,10 @@ on:
     branches: [claude/admiring-dhawan-d1aea5]
 jobs:
   probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2, 3, 4]
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -27,21 +31,29 @@ jobs:
         env:
           RUN_EXAMPLE: 0
         run: bash engine/scripts/build-ffi.sh
-      - name: Run hello 10 times
+      - name: Machine
+        run: |
+          sysctl -n machdep.cpu.brand_string hw.model hw.ncpu hw.memsize kern.osversion kern.hv_vmm_present
+          sw_vers
+          system_profiler SPDisplaysDataType SPHardwareDataType | grep -v -i "serial\|uuid\|udid"
+          vm_stat | sed -n 1,8p
+      - name: Run hello 8 times
         run: |
           HELLO=engine/ffi-dist/rubble-macos-aarch64/examples/hello
-          fails=0
-          for i in $(seq 1 10); do
+          fails=0; attempts=0
+          for i in $(seq 1 8); do
             echo "::group::run $i"
             start=$(date +%s)
             if /usr/bin/time -l "$HELLO" > run.out 2> run.err; then r=ok; else r=FAIL; fails=$((fails+1)); fi
             cat run.out; cat run.err
             echo "::endgroup::"
-            echo "RUN $i: $r in $(( $(date +%s) - start )) s"
-            if [[ $r == FAIL ]]; then
+            a=$(grep -c "^prewarm: kernel" run.err || true)
+            attempts=$((attempts+a))
+            echo "RUN $i: $r in $(( $(date +%s) - start )) s, failed attempts $a"
+            if [[ $a != 0 ]]; then
               echo "::group::metal log after run $i"
-              bash engine/scripts/metal-compiler-log.sh 2
+              bash engine/scripts/metal-compiler-log.sh 1
               echo "::endgroup::"
             fi
           done
-          echo "FAILED $fails of 10"
+          echo "FAILED $fails of 8 runs, $attempts failed attempts"
