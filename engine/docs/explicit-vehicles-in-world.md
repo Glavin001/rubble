@@ -1109,7 +1109,10 @@ vehicle, as before. A lone vehicle with sleep now stays on the wide passes
 (`FramePlanner::set_wide_sleep`, on in the WebGPU host, `RUBBLE_WIDE_SLEEP=0` off; off in
 the Metal and CUDA hosts, which are unchanged). Natively the wide passes are 9 % faster
 than self-collision split for the lab's car with sleep on (5.47 against 5.99 ms a
-frame).
+frame). Asleep, the wide passes' threads are still launched and return at once (a frame
+is not awake-indexed for a lone vehicle): over 180 frames of which 120 asleep, 2.23 ms a
+frame against 1.76 on self-collision split. In a World with nothing else awake neither
+is paid: the step is skipped.
 
 **A live setting.** `World::set_explicit_vehicle_sleep`, `ExplicitBeamsGpu::set_sleep` and
 `set_sleep_config` (the header record's three words). A change of thresholds leaves the
@@ -1143,6 +1146,8 @@ of two paths from one snapshot):
   frames ran split (`split_path_used`). A second test: a lone car through sleep, 10 frames
   asleep and a host wake on its workgroup, self-collision split and the wide passes with
   and without the pair list.
+- `tools/explicit-2khz/sleep-check.sh` runs the first two of these in one hold of the
+  GPU lock (24 checks, all "state bit for bit: true").
 - *Suites*, all pass: `explicit_loop_cap` 5, `fleet_contact_gpu` 1, `group_split_gpu` 3,
   `self_split_gpu` 8, `explicit_contact_gpu` 13, `explicit_beams_bitwise` 12,
   `explicit_sleep_gpu` 3, `sleep_fast_gpu` 2, `explicit_plan_modules` 1; engine-world
