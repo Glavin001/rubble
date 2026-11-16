@@ -1886,8 +1886,8 @@ the kept pairs' tests), owners' parts 0.70 → 0.98. Untimed frame 20.9 → 14.8
 steps): on 14.05 / 16.73 / 26.6 (median / p95 / worst), off 18.68 / 19.53 / 25.7. Both
 runs end in the same state (the energies a car and their total, −16,284 kJ, the same).
 
-**Chrome: not the same run.** The lab page, eight cars, mountain, `timing=step`,
-headless, 170 s of page time (43 s simulated), two pairs in opposite orders: vehicle GPU
+**Chrome: not the same run.** The lab page (its mountain before PR #117's gully terrain;
+the fixtures too), eight cars, `timing=step`, headless, 170 s of page time (43 s simulated), two pairs in opposite orders: vehicle GPU
 ms a step 21.09 / 27.66 / 38.4 and 20.92 / 27.18 / 36.7 with the flag, 24.47 / 26.73 /
 31.4 and 24.39 / 26.73 / 30.5 without (median / p95 / worst; the flag is slower from
 t 10 to 16 s, 27.4 against 25.4). But the runs do not end in the same place: the first
