@@ -30,6 +30,7 @@ use engine_schema::convex::{CollisionFilter, ConvexHull};
 use engine_softbody::explicit_beams::{ExplicitBeams, StaticShape, GRAVITY};
 use engine_softbody::explicit_debris::{DebrisTracker, DebrisTtl, Pieces};
 use engine_softbody::explicit_drive::DriveInput;
+use engine_softbody::explicit_sleep::VehicleSleep;
 use engine_webgpu::{CouplingCapacity, CouplingLayout};
 use glam::{DVec3, Quat, Vec3};
 use monitor::{CarModel, CarRead, CarStats, ProxyFrame};
@@ -78,14 +79,15 @@ pub struct LabOptions {
     pub piece_windows: bool,
     /// Self-collision's listed pairs tested across the GPU's workgroups, a dispatch a
     /// step (`ExplicitBeamsGpu::set_self_split`; the same results bit for bit). Only
-    /// frames without vehicle contact, sleep or surface contact take it. Live
+    /// frames without surface contact take it. Live
     /// (`{ selfSplit: bool }`).
     pub self_split: bool,
     /// The vehicles' frame as the fleet-wide passes (`ExplicitBeamsGpu::set_wide`: a thread
     /// an element over every car) with the reused pair list (`set_wide_list`); the same
     /// results bit for bit, faster natively and in Chrome
-    /// (vehicle-perf-first-principles.md §8). Frames with car-to-car contact, sleep or
-    /// surface contact keep a workgroup a car. Live (`{ wide, wideList }`).
+    /// (vehicle-perf-first-principles.md §8). Frames with car-to-car contact or surface
+    /// contact, and a fleet of several cars with vehicle sleep, keep a workgroup (or a
+    /// step's dispatches) a car. Live (`{ wide, wideList }`).
     pub wide: bool,
     pub wide_list: bool,
     /// With both: the coupling's and the wheels' part of a step on the list and hits
@@ -114,6 +116,16 @@ pub struct LabOptions {
     pub mountain: MountainSpec,
     /// Rigid bodies sleep after 0.5 s still.
     pub sleep: bool,
+    /// Vehicle sleep (`engine_softbody::explicit_sleep`; explicit-vehicles-in-world.md
+    /// §10): a car still for the dwell is not stepped until something wakes it, and
+    /// resumes from its state at sleep. Not lossless against a run that never sleeps
+    /// (the motion under the thresholds is not simulated while asleep). Live
+    /// (`{ vehicleSleep: { on, speed, reachMm, dwell } }`: m/s, mm, 0.5 ms steps).
+    /// Off here (hosts and tests ask for it; the harness: `--vehicle-sleep 1`); the
+    /// lab's page has it on.
+    pub vehicle_sleep: bool,
+    /// Its thresholds (the engine's defaults), kept while it is off.
+    pub vehicle_sleep_cfg: VehicleSleep,
     /// The car's named parts (beam lists) for the per-part numbers.
     pub parts: Vec<(String, Vec<u32>)>,
 }
@@ -141,9 +153,30 @@ impl Default for LabOptions {
             },
             mountain: MountainSpec::default(),
             sleep: true,
+            vehicle_sleep: false,
+            vehicle_sleep_cfg: VehicleSleep::default(),
             parts: Vec::new(),
         }
     }
+}
+
+/// `{ on, speed, reachMm, dwell }` (missing: `d`'s) as the vehicle sleep setting: on or
+/// off, and the thresholds (speed m/s, reach mm, dwell in 0.5 ms steps).
+pub fn vehicle_sleep_from(x: &Value, d: (bool, VehicleSleep)) -> (bool, VehicleSleep) {
+    let on = match x {
+        Value::Bool(b) => *b,
+        _ => x.get("on").and_then(Value::as_bool).unwrap_or(d.0),
+    };
+    let cfg = VehicleSleep {
+        speed: (num(x, "speed", f64::from(d.1.speed)) as f32).max(0.0),
+        reach: (num(x, "reachMm", f64::from(d.1.reach) * 1e3) as f32 * 1e-3).max(0.0),
+        dwell: num(x, "dwell", f64::from(d.1.dwell)).clamp(1.0, 1.0e9) as u32,
+    };
+    (on, cfg)
+}
+
+fn vehicle_sleep_json(on: bool, c: VehicleSleep) -> Value {
+    json!({ "on": on, "speed": c.speed, "reachMm": f64::from(c.reach) * 1e3, "dwell": c.dwell })
 }
 
 /// The lab's debris time to live (`LabOptions::debris_ttl`).
@@ -291,6 +324,8 @@ impl LabOptions {
             }
             .clamped(),
             sleep: v.get("sleep").and_then(Value::as_bool).unwrap_or(d.sleep),
+            vehicle_sleep: vehicle_sleep_from(v.get("vehicleSleep").unwrap_or(&Value::Null), (d.vehicle_sleep, d.vehicle_sleep_cfg)).0,
+            vehicle_sleep_cfg: vehicle_sleep_from(v.get("vehicleSleep").unwrap_or(&Value::Null), (d.vehicle_sleep, d.vehicle_sleep_cfg)).1,
             parts,
         }
     }
@@ -1729,6 +1764,7 @@ impl Bench {
             "ownTravel": self.opts.own_travel_reach,
             "pieceLabels": self.opts.piece_labels,
             "debris": debris_json(self.debris.ttl),
+            "vehicleSleep": vehicle_sleep_json(self.opts.vehicle_sleep, self.opts.vehicle_sleep_cfg),
             "retired": { "pieces": self.debris.pieces, "nodes": self.debris.nodes, "mass": self.debris.mass },
             "car": self.car.json(&self.model),
             "shots": self.shots.iter().map(Shot::json).collect::<Vec<_>>(),
@@ -2282,10 +2318,15 @@ impl Lab {
             &ExplicitVehiclesDef {
                 capacity: opts.capacity,
                 mask: !FIXTURE_CATEGORY,
-                sleep: None,
+                // (Room for vehicle sleep always: the setting is live. Off, every vehicle
+                // steps every step, bit for bit as without the room.)
+                sleep: Some(opts.vehicle_sleep_cfg),
                 ..ExplicitVehiclesDef::default()
             },
         )?;
+        if !opts.vehicle_sleep {
+            world.set_explicit_vehicle_sleep(None)?;
+        }
         let layout = world
             .explicit_coupling_layout()
             .ok_or_else(|| anyhow::anyhow!("vehicle lab: no coupling layout"))?;
@@ -2525,6 +2566,15 @@ impl Lab {
             self.bench.set_debris_ttl(ttl);
             return Ok(json!({ "debris": debris_json(ttl) }));
         }
+        // { vehicleSleep: { on, speed, reachMm, dwell } }: vehicle sleep and its thresholds
+        // (LabOptions::vehicle_sleep), from the next step and after a restart.
+        if let Some(x) = cmd.get("vehicleSleep") {
+            let (on, cfg) = vehicle_sleep_from(x, (self.bench.opts.vehicle_sleep, self.bench.opts.vehicle_sleep_cfg));
+            world.set_explicit_vehicle_sleep(on.then_some(cfg))?;
+            self.bench.opts.vehicle_sleep = on;
+            self.bench.opts.vehicle_sleep_cfg = cfg;
+            return Ok(json!({ "vehicleSleep": vehicle_sleep_json(on, cfg) }));
+        }
         // { groupSplit: bool }: contact groups across workgroups (LabOptions::group_split).
         if let Some(on) = cmd.get("groupSplit").and_then(Value::as_bool) {
             self.bench.opts.group_split = on;
@@ -2553,7 +2603,8 @@ impl Lab {
         // { wide: bool, wideList: bool }: the vehicles' frame as the fleet-wide passes
         // (ExplicitBeamsGpu::set_wide: a thread an element over every car, a few dispatches
         // a step) and, with them, the reused pair list (set_wide_list); the same results
-        // bit for bit. Frames with car-to-car contact, sleep or surface contact keep a
+        // bit for bit. Frames with car-to-car contact or surface contact (and several
+        // cars with vehicle sleep) keep a
         // workgroup a car. Returns whether the wide passes can run this fleet.
         if cmd.get("wide").is_some() || cmd.get("wideList").is_some() || cmd.get("wideFused").is_some() {
             let mut got = false;

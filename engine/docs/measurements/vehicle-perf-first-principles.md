@@ -1834,3 +1834,136 @@ steps 5.8, the levels 3.3, the front 2.6, members' self-collision hits 1.7, the 
 1.8, listed pairs 0.8, self pairs and walk 1.4. Thirty-two cars are unchanged
 (139–270 ms): a group past eight members still takes the larger groups' pass on one
 core, which the next stage removes.
+
+### 8.27 Vehicle sleep on the fast paths: what it costs, what it saves, what it loses (2026-11-16)
+
+What was built and its proofs: `explicit-vehicles-in-world.md` §10.7. In short: with
+vehicle sleep on, contact groups across workgroups, self-collision split, the fleet-wide
+contact front and (for a lone car) the wide passes now run, bit for bit as the workgroup
+paths with sleep on; a sleeping car or group is not dispatched; the thresholds are a
+live setting (the lab page's "vehicle sleep" row; `vehicle_lab --vehicle-sleep 1
+--sleep-speed V --sleep-reach-mm R --sleep-dwell N`). Owner's decision: sleep is
+acceptable, not lossless against a run that never sleeps; this section is the
+measurement of what each setting loses. Native, M3 Max, the GPU shared with two other
+sessions throughout (times are for ranking, not a quiet machine's).
+
+**Before this work, sleep on cost ten times the frame.** With sleep on the split paths
+stood down and touching cars ran one workgroup a group: 187 and 199 ms a frame of 34
+steps for the eight-car pile at t 20 and 30 s against 18.4 and 19.0 on the split paths
+(both with sleep on, from one snapshot); eight cars parked on the flat arena 73.7 against
+7.2.
+
+**Awake, sleep on against off** (nobody asleep; the same physics state bit for bit), ms a
+frame of 34 steps from one snapshot:
+
+| cars, moment | sleep on | sleep off |
+|---|---|---|
+| 1, t 2.5 / 6 / 20 s (the wide passes; 40 frames) | 5.26 / 5.79 / 5.62 | 4.68 / 5.56 / 5.39 |
+| 8, t 2 / 3.7 / 8 / 16 / 20 / 30 s | 13.46 / 17.67 / 16.50 / 19.23 / 18.57 / 19.00 | 13.28 / 17.37 / 16.25 / 19.03 / 18.35 / 18.84 |
+| 32, t 1 / 2.5 / 4 s | 213.2 / 139.3 / 270.0 | 212.9 / 138.5 / 269.5 |
+
+Whole 40 s eight-car run, vehicle GPU ms a World step (t ≥ 0.5 s): median 18.13, p95
+18.87, worst 25.15 with sleep on; 17.91 / 18.64 / 24.74 with it off (+1.2 % at the
+median). One car pays 4 to 12 % on the wide passes (what would trim it:
+`explicit-vehicles-in-world.md` §10.7).
+
+**The eight-car pile on the mountain is not at rest by sleep's rule.** The rule: no node
+faster than `speed` along an axis at any step, and no node farther than `reach` from its
+anchor, for `dwell` steps; the members of a contact group sleep together. What it sees
+of the pile (`vehicle_lab --rest-probe 120`, the solver alone from the saved states,
+sleep off; per car the fastest node at a frame's end, and the farthest any node
+travelled within a dwell of 0.5 s):
+
+| state | fastest node, m/s (by car) | nodes ever past 0.25 m/s | farthest travel in 0.5 s, mm | nodes past 0.1 mm |
+|---|---|---|---|---|
+| 8 cars, t 20 s | 44.4, 2.9, 2.4, 3.4, 13.6, 2.3, 1.5, 29.7 | 536, 66, 59, 265, 269, 156, 40, 536 | 7321, 297, 5.8, 64.8, 40.9, 52.7, 24.4, 4500 | 532 to 541 of 548 |
+| 8 cars, t 30 s | 2.7, 2.0, 1.5, 21.5, 15.9, 2.7, 1.5, 3.6 | 77, 55, 98, 539, 279, 123, 31, 173 | 95.5, 315, 6.7, 4714, 32.8, 18.9, 9.5, 191 | 530 to 539 of 548 |
+| 1 car, t 20 s | 3.6 | 94 | 12.1 | 530 of 548 |
+| 8 cars parked on the flat arena, t 5 s | 0.006 to 0.048 | 0 | 0.113 to 0.128 | 2 of 548 |
+
+On the mountain every car has dozens of nodes moving faster than the default bound and
+nearly all of its nodes travel more than 0.1 mm in half a second: loose parts of the
+wrecks keep moving at metres a second, whole cars creep on the slope, and cars still
+slide or tumble long after "rest" (two cars moved 4.5 and 7.3 m in half a second at
+t 20 s, another 4.7 m at t 30 s, in the probe's frames). In the never-sleep World run,
+from t 25 s seven cars' median node speed is 0 km/h while their fastest nodes are at up
+to 41 km/h (most seconds 1 to 10) to t 40 s; the eighth creeps at 3 to 4 km/h and slides
+at up to 28 km/h between t 29 and 32 s. The pile is one contact group of eight, so one
+moving member keeps all eight awake. Whether that residual motion is
+right physics (no static friction in the node contact, parts flailing on broken beams)
+is a separate question, not looked into here.
+
+**The loss table, the lab's eight-car mountain run** (whole 40 s World runs, one a
+setting; these runs repeat exactly here: the default-threshold run, in which no car
+sleeps, has the never-sleep run's energy at every second and its final positions).
+Thresholds as speed m/s, reach mm, dwell steps:
+
+| setting | each car first asleep, s | wakes | largest node displacement from the never-sleep run at t 40 s, mm (by car) | kinetic + potential at t 40 s, kJ | World step at rest (t 37 to 40 s), wall ms |
+|---|---|---|---|---|---|
+| sleep off | n/a | n/a | reference | −16,283.974 | 20.1 |
+| tighter: 0.05, 0.02, 4000 and 0.125, 0.05, 2000 | never (not run in the World: a tighter bound holds whenever a looser one does and a longer dwell is reached later, so they cannot sleep where the default never does; in the frozen-proxy sweep below neither slept) | 0 | 0 | as off | as off, plus the awake cost |
+| default: 0.25, 0.1, 1000 | never | 0 | 0.0 for every car | −16,283.974 | 20.3 to 20.4 |
+| looser: 1, 1, 1000 | never | 0 | 0.0 for every car | −16,283.974 | 20.3 |
+| far looser: 15, 400, 1000 | all eight at 24.37 (one group) | 0 | 355.3, 138.4, 27.4, 21,435.3, 66.6, 30.8, 76.6, 544.0 | −16,052.398 | 0.03 |
+
+So on the mountain nothing between the default and a hundredfold looser setting sleeps
+the pile, and the setting that does (a car may have nodes at 15 m/s and travel 40 cm in
+half a second and still count as still) freezes a pile that was going to move: in the
+never-sleep run one car slides 21 m further after t 24 s and the fleet gives up another
+232 kJ of potential energy. A sweep of the solver alone from the t 16 s state to t 40 s
+(`--sleep-loss`, seven settings from the two tighter ones to 10 m/s, 100 mm, 1000 steps
+and 5 m/s, 2 mm, 100 steps) had no car asleep under any of them, each ending in the
+never-sleep state to 0.000 mm (that sweep keeps the World's proxies as they were at t 16 s, so a car that
+leaves them falls: it shows only that those settings do not sleep the pile).
+
+**The loss table where there is rest: eight cars parked on the flat arena** (the solver
+alone from the saved state at t 5 s, 900 frames = 15.3 s under each setting,
+`--sleep-loss`; car 0 stands alone, cars 1 to 7 are one contact group):
+
+| setting | first asleep after, s (car 0; cars 1 to 7) | wakes | asleep at the end | largest node displacement from the never-sleep run, mm (by car) | kinetic + potential, kJ | frame, first 30 / last 60, ms |
+|---|---|---|---|---|---|---|
+| sleep off | n/a | n/a | 0 of 8 | reference | 58.276 | 7.10 / 7.10 |
+| tighter: 0.05, 0.02, 4000 | 5.58; never | 0 | 1 of 8 | 0.006; 0 | 58.276 | 7.31 / 6.89 |
+| tighter: 0.125, 0.05, 2000 | 2.70; never | 0 | 1 of 8 | 0.033; 0 | 58.276 | 7.32 / 6.88 |
+| default: 0.25, 0.1, 1000 | 1.02; 2.38 | 0 | 8 of 8 | 0.034, 0.019, 0.027 ×5, 0.046 | 58.276 | 7.31 / 1.24 |
+| looser: 0.5, 0.5, 500 | 0.27; 0.27 | 0 | 8 of 8 | 0.116, 0.104, 0.121 ×5, 0.105 | 58.276 | 7.24 / 1.26 |
+| looser: 1, 2, 250 | 0.15; 0.15 | 0 | 8 of 8 | 0.080, 0.075, 0.061 ×5, 0.059 | 58.275 | 1.29 / 1.24 |
+
+One car alone gives car 0's column (asleep after 1.02 s at the default, 0.034 mm). The
+default loses under 0.05 mm against never sleeping and no energy to the joule; the
+tighter settings do not sleep the row of seven in 15 s (some member always moves past
+the reach within the dwell); the looser ones sleep the cars while they are still settling and lose 0.06 to
+0.12 mm. (The 1.24 ms is the harness's frame with every dispatch empty; in the World a
+fleet asleep is not stepped at all: below.)
+
+**At rest in the World, sleep on (default thresholds) against off**, wall ms a World step:
+
+| scene | awake | asleep | sleep off |
+|---|---|---|---|
+| flat arena, 1 car (asleep at 6.05 s) | 4.3 to 4.9 | 0.03 | not run |
+| flat arena, 8 cars (asleep at 6.05 and 6.32 s) | 7.8 to 8.0 | 0.03 | 7.5 |
+| flat arena, 32 cars (asleep at 6.05 and 6.83 s) | 51.1 | 0.03 | 50.5 |
+| mountain, 8 cars | 18.6 to 20.4 | never asleep | 18.4 to 20.2 |
+
+**The coupling plan** (`cpl_plan`), GPU ms a World step: 0.03 to 0.05 for 1, 8 and 32
+cars on the flat arena; 0.13 to 0.33 for eight cars on the mountain beside a 15 to 18 ms
+frame; 0.09 to 0.10 ms beside a 191 to 302 ms frame (0.05 %) for 32 cars on the mountain. Not material, and not changed
+(`explicit-vehicles-in-world.md` §10.7 for what an exact skip of sleeping vehicles there
+would need).
+
+**The lab's default.** The page has vehicle sleep on at the engine's thresholds (0.25
+m/s, 0.1 mm, 1000 steps): parked on level ground the cars sleep 6 to 7 s after they are
+set down (a second or two after they stop settling) and the World stops stepping; on
+the mountain nothing sleeps
+and the run costs 1 % more (one car on the wide passes 4 to 12 %). `LabOptions` keeps it
+off for hosts and tests, which ask for it. Left for the owner: whether the mountain pile
+should sleep at all. No threshold short of freezing visibly moving wreckage does it; the
+other route is the residual motion itself (the flailing parts and the creep), which is a
+physics question with its own evidence to gather.
+
+**Commands.** `tools/explicit-2khz/sleep-check.sh` (the first rung); the tables:
+`vehicle_lab --mode gpu --measure mountain-perf --cars 8 --car … --rockslide 0
+--self-split 1 --timing step` with `--vehicle-sleep 0|1 [--sleep-speed … --sleep-reach-mm
+… --sleep-dwell …] --secs 40 [--save-final F | --compare-final F]` for the World runs,
+`--scene flat` for the arena, and `--from-fixture F --rest-probe 120 --sleep-loss
+"off;0.25,0.1,1000;…" --loss-frames N` for the solver alone from a saved state.
