@@ -575,7 +575,7 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
     )?;
     explicit_post(&beams)?;
     // The wide passes: one module per entry point.
-    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits", "centred_beams", "centred_nodes"] {
+    for pass in ["begin", "rebase", "nodes", "beams", "tris", "end", "close", "hits", "centred_beams", "centred_nodes", "aux"] {
         let entry = format!("explicit_beams_wide_{pass}");
         let out = wgsl_dir.join(format!("{entry}.wgsl"));
         compile_with_defines(
@@ -584,7 +584,8 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
             SlangTarget::Wgsl,
             &out,
             &[],
-            &[("ENGINE_WGSL", "1")],
+            // (The aux pass: a workgroup a vehicle of 512 lanes.)
+            if pass == "aux" { &[("ENGINE_WGSL", "1"), ("EB_LANES", "512")][..] } else { &[("ENGINE_WGSL", "1")][..] },
         )?;
         explicit_post(&out)?;
     }
@@ -801,6 +802,15 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
                 }
                 jobs.push((format!("explicit_beams_selfsplit_{entry}_ablate{tag}"), fun, d));
             }
+        }
+        // The wide passes' reused pair list (explicit_beams_wide_list: the list's part of
+        // a step alone, a small kernel); wide fleets have no aero.
+        if !tag.contains("aero") {
+            jobs.push((
+                format!("explicit_beams_selfsplit_list{tag}"),
+                "explicit_beams_wide_list",
+                vec![W, lanes, ("EB_SOLO_STEP", "1"), ("EB_SELF_SPLIT", "1"), ("EB_NO_SURFACE", "1")],
+            ));
         }
         // With vehicle contact (EB_VV_SOLO): the vehicles' dispatch is the split group
         // path's members' (explicit_beams_split_member: a solo vehicle's step cut at its

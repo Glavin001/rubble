@@ -116,16 +116,11 @@ void splitMember(uint v, uint lane, uint s)
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     splitCoupleStep(v, rank, k, lane, s, coupleOn);
     splitDriveStep(v, lane, s, driveOn);
-    if (k <= VV_PART)
-    {
-        // The member's partition first: its lanes are lanes 0 .. P - 1 here.
-        uint P = vvPartLanes(k);
-        contactMembersStepAt(off, k, (lane + rank * P) % LANES, s, rank);
-    }
-    else
-    {
-        contactMemberStep(v, lane, s, rank == 0u);
-    }
+    // Every member on the whole of its workgroup with the one member step
+    // (contactMemberStep), whatever the group's size: the same results as a small
+    // group's partitioned step in the groups' own workgroup (contactMembersStepAt, which
+    // this module no longer holds), bit for bit (group_split_gpu, self_split_gpu).
+    contactMemberStep(v, lane, s, rank == 0u);
     if (surfOn != 0u)
     {
         surfaceStep(v, lane, surfOn, (stepBase + s) & 1u);
@@ -177,7 +172,7 @@ static const uint SPLIT_TESTS = 0x20000000u;
 static const uint SPLIT_LEVELS = 0x40000000u;
 static const uint SPLIT_STEP = 0x0FFFFFFFu;
 // Workgroups per group of the tests' dispatches (the host's SPLIT_TEST_WGS).
-static const uint SPLIT_TEST_WGS = 16u;
+static const uint SPLIT_TEST_WGS = 64u;
 
 // Group g's scratch for the tests across workgroups: its first member's wide-pass grid
 // counts (gAcc, GRID_BUCKETS words) and grid offsets (gNext, GRID_BUCKETS + 1): that
@@ -196,16 +191,16 @@ void splitVvExport(uint off, uint front, uint lane)
     {
         uint a = lane;
         gAcc[c + a].store(0);
-        gAcc[c + 4u + a].store(0);
-        gAcc[c + 8u + a].store(int(gsCount[GRID_BUCKETS + a].load()));
-        gAcc[c + 12u + a].store(int(gsVvList4[a].load()));
-        gAcc[c + 16u + a].store(int(gsVvCand4[a].load()));
-        gAcc[c + 20u + a].store(int(gsVvOff4[a].load()));
-        gAcc[c + 24u + a].store(int(gsVvReset4[a]));
-        gAcc[c + 28u + a].store(int(gsVvFix[a]));
+        gAcc[c + 1u * VV_PART + a].store(0);
+        gAcc[c + 2u * VV_PART + a].store(int(gsCount[GRID_BUCKETS + a].load()));
+        gAcc[c + 3u * VV_PART + a].store(int(gsVvList4[a].load()));
+        gAcc[c + 4u * VV_PART + a].store(int(gsVvCand4[a].load()));
+        gAcc[c + 5u * VV_PART + a].store(int(gsVvOff4[a].load()));
+        gAcc[c + 6u * VV_PART + a].store(int(gsVvReset4[a]));
+        gAcc[c + 7u * VV_PART + a].store(int(gsVvFix[a]));
     }
-    if (lane < VV_PART * VV_PART) gAcc[c + 32u + lane].store(int(gsVvPair[lane]));
-    if (lane == 0u) gAcc[c + 48u].store(int(front));
+    if (lane < VV_PART * VV_PART) gAcc[c + 8u * VV_PART + lane].store(int(gsVvPair[lane]));
+    if (lane == 0u) gAcc[c + 8u * VV_PART + VV_PART * VV_PART].store(int(front));
     if ((front & 2u) != 0u)
     {
         uint o = splitVvOffAt(off);
@@ -219,16 +214,16 @@ void splitVvImport(uint off)
     uint c = splitVvAt(off);
     for (uint a = 0u; a < VV_PART; a++)
     {
-        gsVvHit4[a].store(uint(gAcc[c + 4u + a].load()));
-        gsVvList4[a].store(uint(gAcc[c + 12u + a].load()));
-        gsVvCand4[a].store(uint(gAcc[c + 16u + a].load()));
-        gsVvOff4[a].store(uint(gAcc[c + 20u + a].load()));
-        gsVvReset4[a] = uint(gAcc[c + 24u + a].load());
-        gsVvFix[a] = uint(gAcc[c + 28u + a].load());
+        gsVvHit4[a].store(uint(gAcc[c + 1u * VV_PART + a].load()));
+        gsVvList4[a].store(uint(gAcc[c + 3u * VV_PART + a].load()));
+        gsVvCand4[a].store(uint(gAcc[c + 4u * VV_PART + a].load()));
+        gsVvOff4[a].store(uint(gAcc[c + 5u * VV_PART + a].load()));
+        gsVvReset4[a] = uint(gAcc[c + 6u * VV_PART + a].load());
+        gsVvFix[a] = uint(gAcc[c + 7u * VV_PART + a].load());
     }
     for (uint a = 0u; a < VV_PART; a++)
     {
-        for (uint b = 0u; b < VV_PART; b++) gsVvPair[a * VV_PART + b] = uint(gAcc[c + 32u + a * VV_PART + b].load());
+        for (uint b = 0u; b < VV_PART; b++) gsVvPair[a * VV_PART + b] = uint(gAcc[c + 8u * VV_PART + a * VV_PART + b].load());
     }
 }
 
@@ -265,7 +260,7 @@ void splitGroupStep(uint g, uint lane, uint word)
         // the pass here too (the split modules have no EB_ABLATE build).
         if ((gP.ablate & 512u) != 0u)
         {
-            if (lane == 0u && small) gAcc[splitVvAt(off) + 48u].store(0);
+            if (lane == 0u && small) gAcc[splitVvAt(off) + 8u * VV_PART + VV_PART * VV_PART].store(0);
         }
         else if (small && tests)
         {
@@ -282,7 +277,7 @@ void splitGroupStep(uint g, uint lane, uint word)
     else if (small)
     {
         // The levels after the tests' dispatches.
-        uint front = splitUniform(lane, uint(gAcc[splitVvAt(off) + 48u].load()));
+        uint front = splitUniform(lane, uint(gAcc[splitVvAt(off) + 8u * VV_PART + VV_PART * VV_PART].load()));
         if (front != 0u)
         {
             if (lane == 0u)
@@ -327,7 +322,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
     uint points = G.w;
     gVvC = splitVvAt(off);
     gVvO = splitVvOffAt(off);
-    uint front = uint(gAcc[gVvC + 48u].load());
+    uint front = uint(gAcc[gVvC + 8u * VV_PART + VV_PART * VV_PART].load());
     if (front == 0u) return;
     bool vvGrid = (front & 2u) != 0u;
     bool vvList = vvGrid && gP.triPairs != 0u;
@@ -336,8 +331,10 @@ void splitTests(uint g, uint part, uint lane, uint word)
     if ((word & SPLIT_LEVELS) == 0u)
     {
         uint total = 0u;
-        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += uint(gAcc[gVvC + 12u + a].load());
-        uint subs = clamp(LANES / max(total, 1u), 1u, 64u);
+        for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += uint(gAcc[gVvC + 3u * VV_PART + a].load());
+        // (Parts of a triangle's cells or candidates: as many as the group's threads
+        // here hold, the same pairs listed whatever the count.)
+        uint subs = clamp(stride / max(total, 1u), 1u, 64u);
         for (uint p = at0, pStop = EB_END(p, total * subs, stride); p < pStop; p += stride)
         {
             uint q = p / subs;
@@ -345,7 +342,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
             for (uint c = 0u, cGuard = 0u; c + 1u < k; c++)
             {
                 EB_PASS(cGuard);
-                uint n = uint(gAcc[gVvC + 12u + a].load());
+                uint n = uint(gAcc[gVvC + 3u * VV_PART + a].load());
                 if (q < n) break;
                 q -= n;
                 a++;
@@ -353,7 +350,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
             uint va = vvMember(off, a);
             uint4 ra1 = gStatic[va * 4u + 1u];
             uint t = gNext[vvTestedAt(ra1.x + q)];
-            uint cands = uint(gAcc[gVvC + 16u + a].load());
+            uint cands = uint(gAcc[gVvC + 4u * VV_PART + a].load());
             float r = asfloat(gStatic[va * 4u + 3u].z);
             if (vvList)
                 vvTriangleCandsList(a, va, ra1.x + t, p % subs, subs, runOff, points, cands, r);
@@ -394,8 +391,8 @@ void splitTests(uint g, uint part, uint lane, uint word)
     }
     uint over = 0u;
     for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
-        over += uint(gAcc[gVvC + a].load()) > TRI_PAIR_CAP ? uint(gAcc[gVvC + 12u + a].load()) : 0u;
-    uint subs = clamp(LANES / max(over, 1u), 1u, 64u);
+        over += uint(gAcc[gVvC + a].load()) > TRI_PAIR_CAP ? uint(gAcc[gVvC + 3u * VV_PART + a].load()) : 0u;
+    uint subs = clamp(stride / max(over, 1u), 1u, 64u);
     for (uint p = at0, pStop = EB_END(p, over * subs, stride); p < pStop; p += stride)
     {
         uint q = p / subs;
@@ -403,7 +400,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
         for (uint c = 0u, cGuard = 0u; c < k; c++)
         {
             EB_PASS(cGuard);
-            uint n = uint(gAcc[gVvC + c].load()) > TRI_PAIR_CAP ? uint(gAcc[gVvC + 12u + c].load()) : 0u;
+            uint n = uint(gAcc[gVvC + c].load()) > TRI_PAIR_CAP ? uint(gAcc[gVvC + 3u * VV_PART + c].load()) : 0u;
             if (q < n)
             {
                 a = c;
@@ -414,7 +411,7 @@ void splitTests(uint g, uint part, uint lane, uint word)
         uint va = vvMember(off, a);
         uint4 ra1 = gStatic[va * 4u + 1u];
         uint t = gNext[vvTestedAt(ra1.x + q)];
-        vvTriangleCandsGrid(a, va, ra1.x + t, p % subs, subs, runOff, points, uint(gAcc[gVvC + 16u + a].load()),
+        vvTriangleCandsGrid(a, va, ra1.x + t, p % subs, subs, runOff, points, uint(gAcc[gVvC + 4u * VV_PART + a].load()),
                             asfloat(gStatic[va * 4u + 3u].z));
     }
 }

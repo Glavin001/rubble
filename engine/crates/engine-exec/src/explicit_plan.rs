@@ -195,6 +195,39 @@ pub const PARAM_WORDS: usize = 100;
 /// only its own records and incidence entries, and a node sums its entries in its own
 /// order.
 pub const W_BEAM_ORDER: usize = 96;
+/// Params word: lossless schedule switches of the kernels (`gP.perfFlags`), each the same
+/// results bit for bit on or off; `PERF_*`.
+pub const W_PERF_FLAGS: usize = 98;
+/// [`W_PERF_FLAGS`]: selfApply's node beam forces summed once per listed hit and role
+/// (the kernel's `hitFbFill`) instead of in the two-body round and again in each of the
+/// residual pass's two phases.
+pub const PERF_HIT_FB: u32 = 1;
+/// [`W_PERF_FLAGS`]: the raycast wheels' rays and bars beside the step before's beam
+/// phase and their tyres beside the coupling's first phase (the kernel's
+/// `driveAheadPart`), in place of three phases of their own each step. Solo frames.
+pub const PERF_DRIVE_AHEAD: u32 = 2;
+/// [`W_PERF_FLAGS`], set by the host on a wide frame's parameter copies when it runs the
+/// reused pair list (`ExplicitBeamsGpu::set_wide_list`): the wide passes leave the
+/// triangles' throttles and the grid to the list kernel.
+pub const PERF_WIDE_LIST: u32 = 16;
+/// [`W_PERF_FLAGS`], with [`PERF_WIDE_LIST`] (the kernel's PERF_WIDE_FUSED): the aux pass's
+/// work for steps 1.. on the list and hits kernels' lanes; the host leaves those aux
+/// dispatches out.
+pub const PERF_WIDE_FUSED: u32 = 32;
+/// [`W_PERF_FLAGS`]: the larger contact groups' pass keeps each gathered candidate's
+/// travel, vehicle and anti-clip beside it (the kernel's PERF_VV_STREAM), so its triangle
+/// tests read streamed records, not three scattered ones a candidate.
+pub const PERF_VV_STREAM: u32 = 64;
+/// [`W_PERF_FLAGS`]: the larger contact groups' pass with each owner's candidates in a
+/// grid (the kernel's PERF_VV_BIG_GRID), in place of every listed triangle against every
+/// candidate.
+pub const PERF_VV_BIG_GRID: u32 = 128;
+/// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
+/// in Chrome: vehicle-perf-first-principles.md §7) and [`PERF_VV_STREAM`] (§8.13); `RUBBLE_PERF_FLAGS=<mask>` overrides
+/// (a measurement; 0: every switch off).
+pub fn perf_flags_default() -> u32 {
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID)
+}
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;
 /// A two-record element (its first record j, its second j + 1, which carries forces the
@@ -409,9 +442,12 @@ pub const W_SLEEP: usize = 85;
 /// Members of a contact group stepped side by side (the kernel's `VV_PART`): larger
 /// groups run in their own dispatch ([`Kernel::ContactBig`]), so a fleet of at most
 /// this many vehicles never needs that module.
-pub const VV_PART: usize = 4;
+pub const VV_PART: usize = 8;
+/// Members a group steps side by side on one workgroup (the kernel's `VV_SIDE`): a larger
+/// group runs in the larger groups' dispatch ([`Kernel::ContactBig`]).
+pub const VV_SIDE: usize = 4;
 /// Two-body mass splitting's words per node (the kernel's 1 + VV_PART).
-pub const VV_SPLIT_SLOTS: usize = 5;
+pub const VV_SPLIT_SLOTS: usize = 9;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
 /// groups (16), the awake vehicles' frame (32, vehicle sleep), the larger groups (48),
 /// the split group path's groups (64), members (80) and tests (96), and every vehicle's
@@ -534,7 +570,9 @@ pub const FLAG_OWN_TRAVEL: u32 = 1 << 20;
 const NODE_PAIR_TRACKED: u32 = 128;
 /// Per vehicle the kernel's self-collision hit list (HIT_CAP records of HIT_WORDS
 /// words) and pending-beam list (PEND_CAP) in gNext.
-const SELF_HIT_WORDS: usize = 256 * 24 + 64;
+/// (Then HIT_CAP records of 12 words: each listed hit's four nodes' beam forces, the
+/// kernel's hitFbAt, [`PERF_HIT_FB`].)
+const SELF_HIT_WORDS: usize = 256 * 24 + 64 + 256 * 12;
 /// The kernel's WIDE_MAX_VEHICLES: more vehicles run one workgroup each.
 pub const WIDE_MAX_VEHICLES: usize = 256;
 /// Bytes of the wide passes' vehicle table (the kernel's VehicleTable).
@@ -568,7 +606,7 @@ pub struct Module {
 /// The frame entry point (frame, solo and contact modules).
 pub const FRAME_ENTRY: &str = "explicit_beams_frame";
 /// The wide passes, in dispatch-kind order ([`Kernel::Wide`]).
-pub const WIDE_PASSES: [&str; 10] = [
+pub const WIDE_PASSES: [&str; 11] = [
     "explicit_beams_wide_begin",
     "explicit_beams_wide_rebase",
     "explicit_beams_wide_nodes",
@@ -579,6 +617,7 @@ pub const WIDE_PASSES: [&str; 10] = [
     "explicit_beams_wide_hits",
     "explicit_beams_wide_centred_beams",
     "explicit_beams_wide_centred_nodes",
+    "explicit_beams_wide_aux",
 ];
 /// The vehicle-contact plan passes ([`Kernel::Vv`]): bounds, pairs, group.
 pub const VV_PASSES: [&str; 3] = [
@@ -589,15 +628,18 @@ pub const VV_PASSES: [&str; 3] = [
 const WIDE_BEGIN: usize = 0;
 const WIDE_REBASE: usize = 1;
 const WIDE_NODES: usize = 2;
-const WIDE_BEAMS_PASS: usize = 3;
-const WIDE_TRIS: usize = 4;
-const WIDE_END: usize = 5;
+pub const WIDE_BEAMS_PASS: usize = 3;
+pub const WIDE_TRIS: usize = 4;
+pub const WIDE_END: usize = 5;
 const WIDE_CLOSE: usize = 6;
-const WIDE_HITS: usize = 7;
+pub const WIDE_HITS: usize = 7;
 // Centred damping (jbeam-semantics-spec.md §39): after a step's nodes, when a
 // vehicle has it.
 const WIDE_CENTRED_BEAMS: usize = 8;
 const WIDE_CENTRED_NODES: usize = 9;
+/// The coupling's and the raycast wheels' part of a step (a workgroup a vehicle), and the
+/// coupling's end after the last step.
+pub const WIDE_AUX: usize = 10;
 /// The Params word of the centred damping's Δv region (nonzero: some vehicle has it).
 const W_CENTRED_DV: usize = 84;
 
@@ -692,6 +734,11 @@ pub const MODULES: &[Module] = &[
     pass(WIDE_PASSES[7]),
     pass(WIDE_PASSES[8]),
     pass(WIDE_PASSES[9]),
+    Module {
+        name: WIDE_PASSES[10],
+        entry: WIDE_PASSES[10],
+        defines: &[W, L512],
+    },
     Module {
         name: SLEEP_LIST,
         entry: SLEEP_LIST,
@@ -1828,7 +1875,7 @@ impl ExplicitUpload {
         let vv_run = beams.len() as u32;
         // (Then as many again: the small groups' candidates sorted by cell, the kernel's
         // vvSortAt.)
-        beams.extend(std::iter::repeat_n([0.0f32; 4], 8 * total_cp));
+        beams.extend(std::iter::repeat_n([0.0f32; 4], 2 * VV_PART * total_cp));
         // Two-body contact (jbeam-semantics-spec.md §10.3): per node its force at
         // the contact pass's start.
         let two_body = nv > 1 && vehicles.iter().any(|v| v.two_body_contact);
@@ -1933,7 +1980,7 @@ impl ExplicitUpload {
         // kernel's vvRankAt.)
         // (Then the levels' hit buckets: per group 16 words a contact point, the kernel's
         // vvOrderAt.)
-        let slot_list_base = (vv_hits as usize + 36 * total_cp) as u32;
+        let slot_list_base = (vv_hits as usize + 9 * VV_PART * total_cp) as u32;
         // Then per vehicle its self-collision hit list and pending beams (the
         // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
         let hit_base = slot_list_base as usize + slot_list_len as usize;
@@ -2434,7 +2481,8 @@ impl ExplicitUpload {
             0,
             beam_order_base,
         ];
-        let words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
+        let mut words: [u32; PARAM_WORDS] = std::array::from_fn(|i| words.get(i).copied().unwrap_or(0));
+        words[W_PERF_FLAGS] = perf_flags_default();
         let total = [
             total_nodes as u32,
             total_beams as u32,
@@ -2445,7 +2493,12 @@ impl ExplicitUpload {
         // The wide passes do not run wings, the fuselage drag, commands or shocks2.
         // Raycast wheels run in the vehicle workgroups only.
         // (Surface contact runs in the frame modules: not in the wide passes.)
-        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && drive.is_none() && !any_surface;
+        // (RUBBLE_WIDE_FORCE=1, a measurement of time only: the wide passes for a fleet
+        // with raycast wheels, whose wheels then do nothing.)
+        let force = std::env::var("RUBBLE_WIDE_FORCE").as_deref() == Ok("1");
+        let _ = force;
+        // (Raycast wheels and the rigid coupling run in the wide passes' aux pass.)
+        let wide_ok = nv <= WIDE_MAX_VEHICLES && !aero && !any_surface;
         // Every vehicle must have run the same steps for the wide passes (one
         // step parity for the group slots).
         let same_steps = vehicles.windows(2).all(|w| w[0].steps == w[1].steps);
@@ -2597,6 +2650,8 @@ pub struct FramePlanner {
     contact: ContactPlan,
     /// Wide passes possible ([`ExplicitLayout::wide_ok`]) and on.
     wide_ok: bool,
+    /// The fleet has raycast wheels or the rigid coupling's room: the wide passes' aux pass.
+    wide_aux: bool,
     wide_on: bool,
     /// Frames submitted (every STATUS_EVERY-th reads the status).
     frames: u64,
@@ -2625,7 +2680,8 @@ impl FramePlanner {
                 ..Default::default()
             },
             wide_ok: layout.wide_ok,
-            wide_on: layout.wide_default,
+            wide_aux: layout.drive.is_some() || layout.coupling.is_some(),
+            wide_on: layout.wide_default || (layout.wide_ok && std::env::var("RUBBLE_WIDE").as_deref() == Ok("1")),
             frames: 0,
             sleep_rec: layout.sleep.map_or(0, |s| s.header),
             sleep_listing: true,
@@ -2754,6 +2810,22 @@ impl FramePlanner {
     /// Measurement only: the phases `EB_ABLATE` builds skip.
     pub fn set_ablation(&mut self, mask: u32) {
         self.words[W_ABLATE] = mask;
+    }
+
+    /// Measurement only: the second mask of `EB_ABLATE` builds (the solo frame's smaller
+    /// phases, `EB_A2` in explicit_beams.slang), in the free word after [`W_BEAM_ORDER`].
+    /// The lossless schedule switches ([`W_PERF_FLAGS`]: `PERF_*` bits; the same results
+    /// bit for bit either way).
+    pub fn set_perf_flags(&mut self, flags: u32) {
+        self.words[W_PERF_FLAGS] = flags;
+    }
+
+    pub fn perf_flags(&self) -> u32 {
+        self.words[W_PERF_FLAGS]
+    }
+
+    pub fn set_ablation2(&mut self, mask: u32) {
+        self.words[W_BEAM_ORDER + 1] = mask;
     }
 
     /// The parameters for a frame of `steps` steps, from byte 0 of binding 0: copy k
@@ -2922,6 +2994,9 @@ impl FramePlanner {
         let centred = self.words[W_CENTRED_DV] != 0;
         let mut plan = vec![(0, WIDE_BEGIN, groups(nv)), (0, WIDE_REBASE, groups(nodes))];
         for k in 0..steps {
+            if self.wide_aux {
+                plan.push((k, WIDE_AUX, nv));
+            }
             plan.push((k, WIDE_NODES, groups(nodes + slots + buckets)));
             if centred {
                 plan.push((k, WIDE_CENTRED_BEAMS, groups(beams)));
@@ -2931,6 +3006,9 @@ impl FramePlanner {
             plan.push((k, WIDE_TRIS, groups(tris * WIDE_SUBS)));
             // One workgroup per vehicle: deferred breaks and self-collision hits.
             plan.push((k, WIDE_HITS, nv));
+        }
+        if self.wide_aux {
+            plan.push((steps, WIDE_AUX, nv));
         }
         plan.push((steps, WIDE_END, groups(tris + beams)));
         plan.push((steps, WIDE_CLOSE, groups(nv)));

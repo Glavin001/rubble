@@ -81,6 +81,22 @@ pub struct LabOptions {
     /// frames without vehicle contact, sleep or surface contact take it. Live
     /// (`{ selfSplit: bool }`).
     pub self_split: bool,
+    /// The vehicles' frame as the fleet-wide passes (`ExplicitBeamsGpu::set_wide`: a thread
+    /// an element over every car) with the reused pair list (`set_wide_list`); the same
+    /// results bit for bit, faster natively and in Chrome
+    /// (vehicle-perf-first-principles.md §8). Frames with car-to-car contact, sleep or
+    /// surface contact keep a workgroup a car. Live (`{ wide, wideList }`).
+    pub wide: bool,
+    pub wide_list: bool,
+    /// With both: the coupling's and the wheels' part of a step on the list and hits
+    /// kernels' lanes, no dispatch of their own (`set_wide_fused`; the same results).
+    /// Live (`{ wideFused }`).
+    pub wide_fused: bool,
+    /// Cars in contact stepped across workgroups (`ExplicitBeamsGpu::set_group_split`: a
+    /// member's step a workgroup, the contact tests across the GPU) instead of each
+    /// contact group on one workgroup; the same results bit for bit. Live
+    /// (`{ groupSplit }`).
+    pub group_split: bool,
     /// Small debris retired after its time to live (`DebrisTtl`; None: never, the
     /// solver's behaviour without the setting). On in the lab: 5 s, at most 10 kg and 40
     /// nodes ([`LAB_DEBRIS_TTL`]: what the mountain sheds). Live
@@ -88,6 +104,11 @@ pub struct LabOptions {
     pub debris_ttl: Option<DebrisTtl>,
     /// A second copy of the car parked broadside ahead (the flat scene).
     pub parked: bool,
+    /// Copies of the car in the run, 1 to [`MAX_CARS`] (the multi-car benchmark): on the
+    /// mountain they leave the lip together, side by side and stacked, closing on the
+    /// first car, so they crash into each other on the way down; on the flat arena the
+    /// others stand in a row to one side. The lab's numbers are the first car's.
+    pub cars: u32,
     /// The coupling's room per car; more in one window fails the step by name.
     pub capacity: CouplingCapacity,
     pub mountain: MountainSpec,
@@ -106,8 +127,13 @@ impl Default for LabOptions {
             piece_labels: true,
             piece_windows: true,
             self_split: false,
+            wide: true,
+            wide_list: true,
+            wide_fused: true,
+            group_split: true,
             debris_ttl: Some(LAB_DEBRIS_TTL),
             parked: false,
+            cars: 1,
             capacity: CouplingCapacity {
                 bodies: 256,
                 shapes: 256,
@@ -124,6 +150,9 @@ impl Default for LabOptions {
 /// Measured on the mountain (lab-mountain-perf.md §6): its fragments weigh 0.3 to 5.6 kg
 /// (2 to 12 nodes); the next pieces up are a 12 kg panel, the 19 kg wheels, 30 and 45 kg
 /// parts. 10 kg retires every fragment and nothing a player would miss.
+/// The most cars of [`LabOptions::cars`].
+pub const MAX_CARS: u32 = 32;
+
 pub const LAB_DEBRIS_TTL: DebrisTtl = DebrisTtl { max_mass_kg: 10.0, max_nodes: 40, seconds: 5.0 };
 
 /// `{ on, seconds, maxKg, maxNodes }` (missing: the lab's default) as a time to live.
@@ -224,11 +253,16 @@ impl LabOptions {
                 .get("selfSplit")
                 .and_then(Value::as_bool)
                 .unwrap_or(d.self_split),
+            wide: v.get("wide").and_then(Value::as_bool).unwrap_or(d.wide),
+            wide_list: v.get("wideList").and_then(Value::as_bool).unwrap_or(d.wide_list),
+            wide_fused: v.get("wideFused").and_then(Value::as_bool).unwrap_or(d.wide_fused),
+            group_split: v.get("groupSplit").and_then(Value::as_bool).unwrap_or(d.group_split),
             debris_ttl: match v.get("debris") {
                 Some(x) if !x.is_null() => debris_ttl_from(x),
                 _ => d.debris_ttl,
             },
             parked: v.get("parked").and_then(Value::as_bool).unwrap_or(d.parked),
+            cars: (num(v, "cars", f64::from(d.cars)) as u32).clamp(1, MAX_CARS),
             capacity: CouplingCapacity {
                 bodies: shapes,
                 shapes,
@@ -2110,6 +2144,67 @@ impl Lab {
     ) -> Vec<ExplicitBeams> {
         let car = lab_car(template, opts, start);
         let mut cars = vec![car];
+        // The other cars of the multi-car benchmark (`LabOptions::cars`).
+        let mountain = opts.scene == Scene::Mountain;
+        let first = start.unwrap_or(Start {
+            speed: if mountain { opts.mountain.launch } else { 0.0 },
+            ..Start::default()
+        });
+        for k in 1..opts.cars.clamp(1, MAX_CARS) as usize {
+            // (to the left m, up m, closing speed to the right m/s) from the first car.
+            const FORMATION: [[f32; 3]; 7] = [
+                [2.3, 0.0, 2.0],
+                [-2.3, 0.0, -2.0],
+                [0.0, 1.9, 0.0],
+                [2.3, 1.9, 2.0],
+                [-2.3, 1.9, -2.0],
+                [1.15, 3.8, 1.0],
+                [-1.15, 3.8, -1.0],
+            ];
+            let mut c = if mountain {
+                // Past the eighth car: further columns to either side, two high, closing
+                // faster the further out they start (the first eight as they were).
+                let [x, y, close] = if k <= FORMATION.len() {
+                    FORMATION[k - 1]
+                } else {
+                    let e = k - 1 - FORMATION.len();
+                    let column = e / 2;
+                    let side = if column % 2 == 0 { 1.0 } else { -1.0 };
+                    let out = (2 + column / 2) as f32;
+                    [side * 2.3 * out, 1.9 * (e % 2) as f32, side * out]
+                };
+                let base = lab_car(template, opts, None);
+                let z0 = {
+                    let (lo, hi) = base.nodes.iter().fold((f32::MAX, f32::MIN), |(a, b), n| (a.min(n.pos.z), b.max(n.pos.z)));
+                    0.5 * (lo + hi)
+                };
+                lab_car(
+                    template,
+                    opts,
+                    Some(Start {
+                        speed: opts.mountain.launch,
+                        lateral: -close,
+                        at: [x, z0],
+                        lift: 0.3 + y,
+                        ..Start::default()
+                    }),
+                )
+            } else {
+                // Standing in a row to the first car's right, clear of the arena's lanes.
+                lab_car(
+                    template,
+                    opts,
+                    Some(Start {
+                        at: [first.at[0] - 12.0 - 3.0 * k as f32, first.at[1] - 12.0],
+                        ..Start::default()
+                    }),
+                )
+            };
+            c.origin = cars[0].origin;
+            c.ground = cars[0].ground;
+            c.shapes = cars[0].shapes.clone();
+            cars.push(c);
+        }
         if opts.parked {
             // Broadside across the arena, 16 m ahead of the origin (far overhead on the
             // mountain: the fleet is the same in every scene).
@@ -2166,6 +2261,10 @@ impl Lab {
         if let Some(x) = world.explicit_vehicles_mut() {
             x.set_piece_windows(opts.piece_windows);
             x.set_self_split(opts.self_split);
+            x.set_wide_list(opts.wide_list);
+            x.set_wide_fused(opts.wide_fused);
+            x.set_group_split(opts.group_split);
+            x.set_wide(opts.wide);
         }
         let x = world.explicit_vehicles().expect("vehicles");
         let span = x.layout().spans[0];
@@ -2368,6 +2467,14 @@ impl Lab {
             self.bench.set_debris_ttl(ttl);
             return Ok(json!({ "debris": debris_json(ttl) }));
         }
+        // { groupSplit: bool }: contact groups across workgroups (LabOptions::group_split).
+        if let Some(on) = cmd.get("groupSplit").and_then(Value::as_bool) {
+            self.bench.opts.group_split = on;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.set_group_split(on);
+            }
+            return Ok(json!({ "groupSplit": on }));
+        }
         // { selfSplit: bool }: self-collision's pairs across workgroups (LabOptions::self_split).
         if let Some(on) = cmd.get("selfSplit").and_then(Value::as_bool) {
             self.bench.opts.self_split = on;
@@ -2384,6 +2491,43 @@ impl Lab {
                 x.set_self_split_skip(n as u32);
             }
             return Ok(json!({ "selfSplitSkip": n }));
+        }
+        // { wide: bool, wideList: bool }: the vehicles' frame as the fleet-wide passes
+        // (ExplicitBeamsGpu::set_wide: a thread an element over every car, a few dispatches
+        // a step) and, with them, the reused pair list (set_wide_list); the same results
+        // bit for bit. Frames with car-to-car contact, sleep or surface contact keep a
+        // workgroup a car. Returns whether the wide passes can run this fleet.
+        if cmd.get("wide").is_some() || cmd.get("wideList").is_some() || cmd.get("wideFused").is_some() {
+            let mut got = false;
+            if let Some(x) = world.explicit_vehicles_mut() {
+                if let Some(on) = cmd.get("wideList").and_then(Value::as_bool) {
+                    self.bench.opts.wide_list = on;
+                    x.set_wide_list(on);
+                }
+                // (wideFused: the coupling's and wheels' work on the list and hits
+                // kernels' lanes, no dispatch of their own; set_wide_fused.)
+                if let Some(on) = cmd.get("wideFused").and_then(Value::as_bool) {
+                    self.bench.opts.wide_fused = on;
+                    x.set_wide_fused(on);
+                }
+                got = match cmd.get("wide").and_then(Value::as_bool) {
+                    Some(on) => {
+                        self.bench.opts.wide = on;
+                        x.set_wide(on)
+                    }
+                    None => x.is_wide(),
+                };
+            }
+            return Ok(json!({ "wide": got }));
+        }
+        // { perfFlags: n }: the kernels' lossless schedule switches
+        // (ExplicitBeamsGpu::set_perf_flags, explicit_plan::PERF_*: the same results bit
+        // for bit either way), from the next step.
+        if let Some(n) = cmd.get("perfFlags").and_then(Value::as_u64) {
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.set_perf_flags(n as u32);
+            }
+            return Ok(json!({ "perfFlags": n }));
         }
         // { pieceWindows: bool }: the coupling's window per piece (LabOptions::piece_windows).
         if let Some(on) = cmd.get("pieceWindows").and_then(Value::as_bool) {

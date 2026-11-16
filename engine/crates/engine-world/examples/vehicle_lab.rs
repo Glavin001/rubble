@@ -741,11 +741,19 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     let scene = arg("--scene").unwrap_or_else(|| "mountain".into());
     // `--self-split 1`: the page's default (self-collision across the GPU).
     let script = json!({ "scene": scene, "surface": arg("--surface").as_deref() == Some("1"),
-        "selfSplit": arg("--self-split").as_deref() == Some("1"), "events": [] });
+        "selfSplit": arg("--self-split").as_deref() == Some("1"),
+        // (The lab's default is the wide passes; `--wide 0` a workgroup a car.)
+        "wide": arg("--wide").as_deref() != Some("0"), "wideList": arg("--wide-list").as_deref() != Some("0"), "wideFused": arg("--wide-fused").as_deref() != Some("0"), "groupSplit": arg("--group-split").as_deref() != Some("0"),
+        "cars": arg("--cars").and_then(|x| x.parse::<u32>().ok()).unwrap_or(1), "events": [] });
     let opts = options(&script);
     println!(
         "options: {scene}, surface {} {:?}",
         opts.surface_contact, opts.mountain
+    );
+    println!(
+        "features: wings {}, fusedrag {}, centering {}, shocks2 {}, triggers {}, commands {}, slides {}, brakes {}, drive {}, static shapes {}",
+        template.wings.len(), template.fusedrag.is_some(), template.centering.len(), template.shocks2.len(), template.triggers.len(),
+        template.commands.len(), template.slides.len(), template.brakes.len(), template.drive.is_some(), template.shapes.len()
     );
     let timing = arg("--timing");
     let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |d| {
@@ -776,6 +784,15 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         if let Some(n) = arg("--pair-streak").and_then(|n| n.parse::<u32>().ok()) {
             x.set_pair_reuse_streak(n);
         }
+        // `--wide 1`: the fleet-wide passes (`set_wide`); `--wide-list 1`: with the reused
+        // pair list (`set_wide_list`).
+        if let Some(on) = flag("--wide") {
+            let got = x.set_wide(on);
+            println!("wide passes: {got}");
+        }
+        if let Some(on) = flag("--wide-list") {
+            x.set_wide_list(on);
+        }
         x.take_pair_reuse_stats();
     }
     let ablate: u32 = arg("--ablate").and_then(|x| x.parse().ok()).unwrap_or(0);
@@ -788,6 +805,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // window's wall time kept by parity (the same run's states, side by side).
     let alternate = arg("--alternate");
     let mut alt = [(0.0f64, 0u32); 2];
+    // (t, the step's GPU span, the vehicles' segments, the explicit frame's), ms.
+    let mut gpu_steps: Vec<(f64, f64, f64, f64)> = Vec::new();
     let t_all = std::time::Instant::now();
     println!(
         "{:>6} {:>8} {:>8} {:>8} {:>7} {:>18} {:>12} {:>16}",
@@ -818,13 +837,45 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // time (the snapshot's bytes, the car's retired nodes and piece labels): every state
     // word compared bit for bit, and each one's ms a frame (B's pipelines compiled
     // before its timed frames).
+    // `--ab-switch perf=MASK`: the kernels' lossless schedule switches
+    // (`ExplicitBeamsGpu::set_perf_flags`, `explicit_plan::PERF_*`): the run's flags with
+    // MASK's bits on against off.
+    let perf_ab: Option<u32> = arg("--ab-switch").and_then(|s| s.strip_prefix("perf=").and_then(|m| m.parse().ok()));
+    // `--ab-switch wide`: the fleet-wide passes (`set_wide`) against a workgroup a vehicle.
+    let wide_ab = arg("--ab-switch").as_deref() == Some("wide");
+    // `--ab-switch widelist`: the wide passes with the reused pair list against their own
+    // grid walk every step.
+    let widelist_ab = arg("--ab-switch").as_deref() == Some("widelist");
+    // `--ab-switch fused`: the wide passes' aux work on the list and hits kernels' lanes
+    // against an aux dispatch a step (both wide with the list).
+    let fused_ab = arg("--ab-switch").as_deref() == Some("fused");
+    let wide_ab = wide_ab || widelist_ab || fused_ab;
+    // `--ab-switch groupsplit`: contact groups across workgroups with self-collision
+    // split (`set_group_split`, `set_self_split`) against each group on one workgroup.
+    let groupsplit_ab = arg("--ab-switch").as_deref() == Some("groupsplit");
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
     let kernel_dir = arg("--ab-kernel-dir").map(std::path::PathBuf::from);
     anyhow::ensure!(!kernel_ab || kernel_dir.is_some(), "--ab-switch kernel needs --ab-kernel-dir DIR");
     let mut other = None;
     let n_nodes = template.nodes.len();
     let switch = |x: &mut engine_webgpu::ExplicitBeamsGpu, on: bool, labels: &[u8]| {
-        if beams_ab {
+        if groupsplit_ab {
+            x.set_group_split(on);
+            x.set_self_split(on);
+        } else if fused_ab {
+            x.set_wide(true);
+            x.set_wide_list(true);
+            x.set_wide_fused(on);
+        } else if widelist_ab {
+            // (Against the wide passes' own walk: both wide.)
+            x.set_wide(true);
+            x.set_wide_list(on);
+        } else if wide_ab {
+            x.set_wide(on);
+        } else if let Some(mask) = perf_ab {
+            let f = x.perf_flags();
+            x.set_perf_flags(if on { f | mask } else { f & !mask });
+        } else if beams_ab {
             x.set_beam_order(on);
         } else if selfsplit_ab {
             x.set_self_split(on);
@@ -856,8 +907,20 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             // mask (time only; 2147483648 is the ablation kernel with nothing skipped).
             if let Some(masks) = arg("--ab-ablate") {
                 let mut line = Vec::new();
-                for m in masks.split(',').filter_map(|m| m.parse::<u32>().ok()) {
+                let mut first_words = None;
+                // (`M:M2[:SKIP]`: with the second mask M2, `set_ablation2`, and the self
+                // split's walk (1) and pairs (2) dispatches left out, `set_self_split_skip`.)
+                for (m, m2, skip) in masks.split(',').filter_map(|m| {
+                    let mut p = m.split(':');
+                    Some((
+                        p.next()?.parse::<u32>().ok()?,
+                        p.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0),
+                        p.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0),
+                    ))
+                }) {
                     x.restore(&snap);
+                    x.set_self_split_skip(skip);
+                    x.set_ablation2(m2);
                     x.set_ablation(m);
                     x.wait();
                     let t = std::time::Instant::now();
@@ -865,16 +928,115 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         x.frame(34);
                         x.wait();
                     }
-                    line.push(format!(
-                        "{m}: {:.2}",
-                        t.elapsed().as_secs_f64() * 1e3 / 20.0
-                    ));
+                    let ms = t.elapsed().as_secs_f64() * 1e3 / 20.0;
+                    // (Whether the frames ended in the first mask's state: a mask that
+                    // skips nothing the results depend on.)
+                    let words = x.state_words();
+                    let same = *first_words.get_or_insert_with(|| words.clone()) == words;
+                    line.push(format!("{m}:{m2}:{skip}: {ms:.2}{}", if same { " =" } else { "" }));
                 }
+                x.set_self_split_skip(0);
+                x.set_ablation2(0);
                 x.set_ablation(0);
                 println!(
                     "   ablations at t {:.1} (ms/frame): {}",
                     lab.bench.t,
                     line.join(", ")
+                );
+            }
+            // `--ab-profile`: the frame as it runs now, by dispatch kind (time only): 10
+            // frames untimed (wall), then the same 10 from the same snapshot with every
+            // dispatch in its own timed pass (`profile_dispatches`). The table closes: the
+            // kinds' sum + the time between passes = the timed span; the span against the
+            // untimed frame is what the timing itself costs.
+            if std::env::args().any(|a| a == "--ab-profile") {
+                const N: u32 = 10;
+                let mut plain = 0.0;
+                x.restore(&snap);
+                for i in 0..3 + N {
+                    let t = std::time::Instant::now();
+                    x.frame(34);
+                    x.wait();
+                    if i >= 3 {
+                        plain += t.elapsed().as_secs_f64() * 1e3 / f64::from(N);
+                    }
+                }
+                x.restore(&snap);
+                for _ in 0..3 {
+                    x.frame(34);
+                    x.wait();
+                }
+                let mut rows: Vec<(&'static str, f64, u32)> = Vec::new();
+                let (mut span, mut wall, mut got) = (0.0, 0.0, 0u32);
+                for _ in 0..N {
+                    let t = std::time::Instant::now();
+                    let Some((r, sp)) = x.profile_dispatches(34) else { break };
+                    x.wait();
+                    wall += t.elapsed().as_secs_f64() * 1e3;
+                    span += sp;
+                    got += 1;
+                    for (label, ms, n) in r {
+                        match rows.iter_mut().find(|q| q.0 == label) {
+                            Some(q) => {
+                                q.1 += ms;
+                                q.2 += n;
+                            }
+                            None => rows.push((label, ms, n)),
+                        }
+                    }
+                }
+                for (k, points, per) in x.contact_group_counts() {
+                    println!("   group of {k}, {points} points; per member [listed pairs, hits, listed triangles, candidates] (hit list room {}): {per:?}", 2 * points);
+                }
+                if got == 0 {
+                    println!("   profile at t {:.1}: no timestamps, or too many dispatches", lab.bench.t);
+                } else {
+                    let f = f64::from(got);
+                    let (span, wall) = (span / f, wall / f);
+                    let sum: f64 = rows.iter().map(|r| r.1).sum::<f64>() / f;
+                    let count: u32 = rows.iter().map(|r| r.2).sum::<u32>() / got;
+                    println!("   profile at t {:.1}: GPU ms a frame by dispatch kind ({got} frames, each dispatch a timed pass)", lab.bench.t);
+                    println!("     {:<30} {:>9} {:>7} {:>10} {:>7}", "kind", "ms/frame", "count", "us each", "share");
+                    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    for (label, ms, n) in &rows {
+                        let (ms, n) = (ms / f, f64::from(*n) / f);
+                        println!("     {label:<30} {ms:>9.3} {n:>7.0} {:>10.1} {:>6.1}%", ms / n * 1e3, 100.0 * ms / span);
+                    }
+                    println!("     {:<30} {:>9.3} {:>7} {:>10} {:>6.1}%", "between passes", span - sum, "", "", 100.0 * (span - sum) / span);
+                    println!("     {:<30} {span:>9.3} {count:>7} {:>10} {:>6.1}%", "= timed span", "", 100.0);
+                    println!(
+                        "     untimed frame (wall) {plain:.3} ms; timed frame (wall) {wall:.3} ms: the timing adds {:+.3} ms ({:+.1} %)",
+                        span - plain,
+                        100.0 * (span - plain) / plain
+                    );
+                }
+            }
+            // `--ab-wide-profile`: 10 frames on the fleet-wide passes, each dispatch in its
+            // own timed pass (`profile_wide_frame`): GPU ms a frame per pass kind (time
+            // only; needs `--timing step`).
+            if std::env::args().any(|a| a == "--ab-wide-profile") {
+                x.restore(&snap);
+                let was = x.is_wide();
+                x.set_wide(true);
+                for _ in 0..3 {
+                    x.frame(34);
+                }
+                x.wait();
+                let mut sums: Vec<(&str, f64)> = Vec::new();
+                for _ in 0..10 {
+                    for (k, (name, ms)) in x.profile_wide_frame(34).into_iter().enumerate() {
+                        if sums.len() <= k {
+                            sums.push((name, 0.0));
+                        }
+                        sums[k].1 += ms / 10.0;
+                    }
+                }
+                x.set_wide(was);
+                println!(
+                    "   wide profile at t {:.1} (GPU ms a frame, each dispatch timed apart): {}; sum {:.2}",
+                    lab.bench.t,
+                    sums.iter().filter(|x| x.1 > 0.0).map(|(n, ms)| format!("{} {ms:.2}", n.trim_start_matches("explicit_beams_wide_"))).collect::<Vec<_>>().join(", "),
+                    sums.iter().map(|x| x.1).sum::<f64>()
                 );
             }
             // `--ab-profile`: the same 20 frames with self-collision split, each of its
@@ -982,18 +1144,42 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 x.restore(&snap);
                 switch(x, on, &labels);
                 x.wait();
-                let t = std::time::Instant::now();
+                // (AB_GAP_MS=n: the GPU idle n ms before each frame, as a display's frame
+                // loop leaves it; the frames' own time alone is summed.)
+                let gap: u64 = std::env::var("AB_GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let mut sum = 0.0;
                 for _ in 0..20 {
+                    if gap > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(gap));
+                    }
+                    let t = std::time::Instant::now();
                     x.frame(34);
                     x.wait();
+                    sum += t.elapsed().as_secs_f64();
                 }
-                let ms = t.elapsed().as_secs_f64() * 1e3 / 20.0;
+                let ms = sum * 1e3 / 20.0;
                 // The switch's own header bit back, so the words compare the state alone.
                 switch(x, true, &labels);
                 x.wait();
                 out.push((ms, x.state_words(), x.coupling_words()));
             }
-            let same = out[0].1 == out[1].1 && out[0].2 == out[1].2;
+            // The vehicle-contact plan's records are planning state, as in
+            // tests/explicit_vehicles.rs: a vehicle's "big" flag is whichever vehicle
+            // overflowed a broadphase bucket first (the same pairs either way; it differs
+            // between two runs of one path, --ab-same). Reported below, outside the verdict.
+            let plan = x.vv_record_words();
+            let masked = |w: &[(&'static str, Vec<u32>)]| -> Vec<Vec<u32>> {
+                w.iter()
+                    .map(|(name, v)| {
+                        let mut v = v.clone();
+                        if *name == "misc" {
+                            v[plan.clone()].fill(0);
+                        }
+                        v
+                    })
+                    .collect()
+            };
+            let same = masked(&out[0].1) == masked(&out[1].1) && out[0].2 == out[1].2;
             for ((name, a), (_, b)) in out[0]
                 .1
                 .iter()
@@ -1015,6 +1201,12 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         a.len(),
                         at.join(", ")
                     );
+                    if *name == "misc" {
+                        // Which planning record a differing word is (6 records of 4 words a vehicle).
+                        let r = x.vv_record_words();
+                        let inside = a.iter().zip(b).enumerate().filter(|(i, (p, q))| p != q && r.contains(i)).count();
+                        println!("       (vehicle-contact planning records, words {}..{}, 24 a vehicle: {inside} of the {diff}; outside the verdict)", r.start, r.end);
+                    }
                 }
             }
             println!(
@@ -1022,6 +1214,12 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 lab.bench.t,
                 if kernel_ab {
                     "this kernel (on) / --ab-kernel-dir's (off)"
+                } else if groupsplit_ab {
+                    "group split"
+                } else if wide_ab {
+                    "wide passes"
+                } else if perf_ab.is_some() {
+                    "perf flags"
                 } else if beams_ab {
                     "sorted beams"
                 } else if selfsplit_ab {
@@ -1040,7 +1238,14 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 out[0].0,
                 out[1].0
             );
-            anyhow::ensure!(same, "the A/B switch changed the state");
+            // (Wide against the workgroup frame: the two keep different scratch in the
+            // accumulators and misc records; the nodes, beams and groups are the state.)
+            let physics = out[0].1.iter().zip(&out[1].1).filter(|((n, _), _)| ["nodes", "beams", "groups"].contains(n)).all(|((_, a), (_, b))| a == b);
+            if wide_ab {
+                println!("   wide: nodes, beams and groups bit for bit: {physics}");
+            }
+            // (AB_TIME_ONLY=1: a measurement switch that changes the results on purpose.)
+            anyhow::ensure!(same || (wide_ab && physics) || std::env::var("AB_TIME_ONLY").is_ok(), "the A/B switch changed the state");
             x.restore(&snap);
             switch(x, true, &labels);
             x.wait();
@@ -1069,6 +1274,13 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         let ms = t.elapsed().as_secs_f64() * 1e3;
         alt[usize::from(odd)].0 += ms;
         alt[usize::from(odd)].1 += 1;
+        // With `--timing step|phases`: this step's GPU time, the vehicles' part of it (the
+        // explicit frame's dispatches and the coupling's passes) and the frame alone.
+        if let Some(g) = world.last_step_gpu_time() {
+            let veh: f64 = g.segments.iter().filter(|(l, _)| l.starts_with("explicit") || l.starts_with("cpl_")).map(|x| x.1).sum();
+            let frame: f64 = g.segments.iter().filter(|(l, _)| l.starts_with("explicit")).map(|x| x.1).sum();
+            gpu_steps.push((lab.bench.t, g.span_ms, veh, frame));
+        }
         lab.read_blocking(&world, k % 6 == 5)?;
         anyhow::ensure!(
             !lab.bench.car.non_finite,
@@ -1147,6 +1359,33 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 println!("   reuse census: {}", reuse_census(template, &pos, &vel, &broken));
                 println!("   reuse cause: {}", reuse_cause(template, &pos, &vel, &broken));
             }
+            // Every car's box diagonal (m), when there is more than one: a car that has
+            // blown up shows here (the page's stability check is the wasm host's).
+            if let Some(x) = world.explicit_vehicles() {
+                let all = x.positions();
+                if all.len() > 1 {
+                    let d: Vec<String> = all
+                        .iter()
+                        .map(|p| {
+                            let (lo, hi) = p.iter().fold((glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)), |(a, b), q| (a.min(*q), b.max(*q)));
+                            format!("{:.1}", (hi - lo).length())
+                        })
+                        .collect();
+                    println!("   boxes m: {}", d.join(" "));
+                    // (median node speed / fastest node, km/h: a body that has blown up
+                    // has nodes far faster than its own motion.)
+                    let v: Vec<String> = x
+                        .velocities()
+                        .iter()
+                        .map(|vs| {
+                            let mut sp: Vec<f32> = vs.iter().map(|q| q.length() * 3.6).collect();
+                            sp.sort_by(f32::total_cmp);
+                            format!("{:.0}/{:.0}", sp[sp.len() / 2], sp[sp.len() - 1])
+                        })
+                        .collect();
+                    println!("   speeds km/h: {}", v.join(" "));
+                }
+            }
             if lab.bench.debris.ttl.is_some() || lab.bench.debris.pieces > 0 {
                 let d = &lab.bench.debris;
                 println!("   debris retired: {} pieces, {} nodes, {:.2} kg", d.pieces, d.nodes, d.mass);
@@ -1175,6 +1414,45 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     }
     if let Some(x) = world.explicit_vehicles() {
         x.kernel_status().map_err(anyhow::Error::msg)?;
+    }
+    // `--end-frames`: after the run, 20 frames of the vehicles' solver alone from the final
+    // state (wall ms a frame), then the wide passes' profile when the frame is wide.
+    if std::env::args().any(|a| a == "--end-frames") {
+        let x = world.explicit_vehicles_mut().expect("vehicles");
+        x.wait();
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            x.frame(34);
+            x.wait();
+        }
+        println!("end frames: {:.2} ms a frame (wall), wide {}", t.elapsed().as_secs_f64() * 1e3 / 20.0, x.is_wide());
+        let p = x.profile_wide_frame(34);
+        println!("end wide profile: {}", p.iter().filter(|x| x.1 > 0.0).map(|(n, ms)| format!("{} {ms:.2}", n.trim_start_matches("explicit_beams_wide_"))).collect::<Vec<_>>().join(", "));
+    }
+    if !gpu_steps.is_empty() {
+        // The run's GPU time a World step: median, p95 and the worst step (and when).
+        let stat = |name: &str, f: &dyn Fn(&(f64, f64, f64, f64)) -> f64, from: f64| {
+            let mut v: Vec<(f64, f64)> = gpu_steps.iter().filter(|x| x.0 >= from).map(|x| (f(x), x.0)).collect();
+            if v.is_empty() {
+                return;
+            }
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let q = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize].0;
+            let w = v[v.len() - 1];
+            println!("gpu ms a step, {name} (t >= {from:.1} s, {} steps): median {:.3}, p95 {:.3}, p99 {:.3}, worst {:.3} at t {:.2}", v.len(), q(0.5), q(0.95), q(0.99), w.0, w.1);
+        };
+        for from in [0.0, 0.5] {
+            stat("whole step (span)", &|x| x.1, from);
+            stat("vehicles (frame + coupling passes)", &|x| x.2, from);
+            stat("explicit frame", &|x| x.3, from);
+        }
+        if let Some(path) = arg("--gpu-csv") {
+            let mut out = String::from("t,span_ms,vehicles_ms,frame_ms\n");
+            for x in &gpu_steps {
+                out.push_str(&format!("{:.4},{:.4},{:.4},{:.4}\n", x.0, x.1, x.2, x.3));
+            }
+            std::fs::write(path, out)?;
+        }
     }
     println!(
         "wall {:.1} s for {secs:.1} s simulated",

@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """Checks a `cargo test --no-fail-fast` log against engine/tests-expected-failures.txt.
 
-Usage: expected-failures.py LOG LIST CARGO_EXIT_CODE
+Usage: expected-failures.py [--partial] LOG LIST CARGO_EXIT_CODE
 
 Passes (exit 0) when every failing test is listed and the run otherwise completed:
 no build error, no crashed test binary. Fails (exit 1) when a test not on the list
 fails, when a listed test passes (it is fixed: take it off the list), or when a
 listed test did not run at all (renamed or removed: update the list).
+
+--partial: LOG is one shard of the run (CI splits the host tests over parallel jobs,
+.github/scripts/host-tests.sh). A listed test that is not in it is not a problem
+there; the job that joins the shards' logs runs the full check.
 """
 import re
 import sys
 
-log_path, list_path, code = sys.argv[1], sys.argv[2], int(sys.argv[3])
+args = sys.argv[1:]
+partial = "--partial" in args
+args = [a for a in args if a != "--partial"]
+log_path, list_path, code = args[0], args[1], int(args[2])
 log = open(log_path, encoding="utf-8", errors="replace").read()
 log = re.sub(r"\x1b\[[0-9;]*m", "", log)
 
@@ -47,7 +54,7 @@ if code != 0 and not failed:
 
 unexpected = sorted(failed - expected)
 fixed = sorted(expected & passed)
-missing = sorted(expected - failed - passed)
+missing = [] if partial else sorted(expected - failed - passed)
 if unexpected:
     problems.append("failing tests not on the expected list (new failures):\n  " + "\n  ".join(unexpected))
 if fixed:
@@ -59,4 +66,7 @@ print(f"tests passed {len(passed)}, failed {len(failed)} ({len(failed & expected
 if problems:
     print("FAIL:\n" + "\n".join("- " + p for p in problems))
     sys.exit(1)
-print("OK: every failure is a listed, tracked expected failure (engine/tests-expected-failures.txt)")
+if partial:
+    print("OK (this shard): every failure is a listed, tracked expected failure (engine/tests-expected-failures.txt)")
+else:
+    print("OK: every failure is a listed, tracked expected failure (engine/tests-expected-failures.txt)")

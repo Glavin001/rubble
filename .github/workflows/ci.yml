@@ -10,14 +10,33 @@ permissions:
   contents: read
   checks: write
 
+# A new push to a pull request cancels that pull request's runs still in progress: their
+# results would be for a commit nobody is looking at any more. Every other run (a push
+# to main, a manual run) is in a group of its own (its run id), so it is never cancelled
+# and never waits: each commit on main keeps its own complete result.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTUP_TOOLCHAIN: stable
+  # engine-webgpu's build script compiles every Slang kernel with slangc (4.4-7.6 min on
+  # a runner) each time the crate is built. With this set it keeps the SPIR-V and WGSL
+  # in that folder under a hash of everything they depend on (cache_key in its build.rs)
+  # and copies them back on a match: the same bytes. The folder is cached by the
+  # "Cache compiled Slang kernels" steps below.
+  RUBBLE_SLANG_CACHE: ${{ github.workspace }}/.slang-cache
+
+# Every job is meant to end within 10 minutes; each has a timeout so a hang fails it
+# instead of holding a runner for 6 hours. What a job cannot avoid is one slangc compile
+# of the kernels when engine/slang (or the build script) changed: see RUBBLE_SLANG_CACHE.
 
 jobs:
   large-files:
     name: Large files
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,34 +48,92 @@ jobs:
           case "$base" in 0000000000000000000000000000000000000000) base= ;; esac
           bash .github/scripts/check-large-files.sh "$base" HEAD
 
-  web:
-    name: Web demos (build + JS tests)
+  # The demo site is built in three parallel jobs, one per part of build-web.sh
+  # (RUBBLE_WEB_PARTS), and assembled by the `web` job below. One job took 21-28 minutes:
+  # slangc ran three times in it (the host build, the world wasm and the stress wasm each
+  # build engine-webgpu: 4.4-6.7 minutes of slangc each time).
+  # Each part builds engine-webgpu once; with the Slang cache warm, none runs slangc.
+  web-build:
+    name: Web demos, build ${{ matrix.part }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # kernels: WGSL kernels, vehicle presets, vehicle wasm. world: vehicle-designer
+        # and world wasm. stress: fracture and stress-solver wasm.
+        part: [kernels, world, stress]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/lfs-pull
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      # Both workspaces: the stress-solver wasm (engine/stress-oracle) is the longest compile.
+      # Both workspaces: the stress-solver wasm is built in engine/stress-oracle.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             engine
             engine/stress-oracle
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
+          key: ${{ matrix.part }}
       # wasm-pack cargo-installs the wasm-bindgen CLI pinned by the wasm crates (~1 min).
+      # Per part: each downloads only the tools it uses.
       - name: Cache slangc, wasm-pack, Binaryen and wasm-bindgen
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/rubble-tools
             ~/.cache/.wasm-pack
-          key: rubble-tools-${{ runner.os }}-${{ hashFiles('engine/scripts/build-web.sh', 'engine/scripts/slangc.sh', 'engine/crates/*-wasm/Cargo.toml', 'engine/stress-oracle/crates/stress-web/Cargo.toml') }}
-      # The same build as the Vercel preview: slangc → WGSL, wasm modules, scene snapshots.
+          key: rubble-tools-${{ runner.os }}-${{ matrix.part }}-${{ hashFiles('engine/scripts/build-web.sh', 'engine/scripts/slangc.sh', 'engine/crates/*-wasm/Cargo.toml', 'engine/stress-oracle/crates/stress-web/Cargo.toml') }}
+      # The key covers every input of cache_key in engine/crates/engine-webgpu/build.rs.
+      - name: Cache compiled Slang kernels (SPIR-V, WGSL)
+        uses: actions/cache@v4
+        with:
+          path: .slang-cache
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
+      - name: Build the ${{ matrix.part }} part
+        env:
+          RUBBLE_WEB_PARTS: ${{ matrix.part }}
+        run: bash engine/scripts/build-web.sh
+      - name: Upload the part
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-generated-${{ matrix.part }}
+          path: engine/crates/engine-webgpu/generated
+          if-no-files-found: error
+          retention-days: 1
+
+  web:
+    name: Web demos (build + JS tests)
+    needs: web-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/lfs-pull
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # Its own cache (the host builds of scene_export and the sedan's generator only).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          key: site
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The three parts write separate folders of engine-webgpu/generated/.
+      - name: Download the parts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: web-generated-*
+          path: engine/crates/engine-webgpu/generated
+          merge-multiple: true
+      # With the parts above, the same site as the Vercel preview's one build-web.sh run:
+      # scene snapshots, the generated sedan, scene packs, then the site is assembled.
       - name: Build the demo site
+        env:
+          RUBBLE_WEB_PARTS: site
         run: bash engine/scripts/build-web.sh
       - name: JS tests (WebGPU host, vehicle and fracture modules)
         run: node --test engine/crates/engine-webgpu/tests/*.test.mjs engine/crates/engine-webgpu/fracture/*.test.mjs
@@ -67,9 +144,27 @@ jobs:
           path: engine/web-dist
           retention-days: 7
 
-  engine-host:
-    name: Engine host tests (no GPU)
+  # The host tests run in parallel jobs (.github/scripts/host-tests.sh): one job took
+  # 23-35 minutes, about 20 of them building 130 test binaries and examples (release,
+  # thin LTO) and 13 running engine-softbody's tests. engine-softbody is split into
+  # shards that together hold every one of its targets (host-test-shards.py reads them
+  # from cargo metadata); the other crates are one job. The same tests, the same
+  # profile, the same checks; `engine-host` below joins the logs.
+  engine-host-shard:
+    name: Engine host tests, ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "schema, exec, scenes, vehicle, fracture, vehiclegen", id: rest, args: rest }
+          - { name: softbody 1/6, id: softbody-1, args: softbody 1 6 }
+          - { name: softbody 2/6, id: softbody-2, args: softbody 2 6 }
+          - { name: softbody 3/6, id: softbody-3, args: softbody 3 6 }
+          - { name: softbody 4/6, id: softbody-4, args: softbody 4 6 }
+          - { name: softbody 5/6, id: softbody-5, args: softbody 5 6 }
+          - { name: softbody 6/6, id: softbody-6, args: softbody 6 6 }
     defaults:
       run:
         working-directory: engine
@@ -78,23 +173,69 @@ jobs:
       # engine-fracture's tests read the fracture GLBs.
       - uses: ./.github/actions/lfs-pull
       - uses: dtolnay/rust-toolchain@stable
+      # One cache of the dependencies for all of these jobs, saved by the job that
+      # builds every crate's (engine-softbody's are among them).
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
+          shared-key: engine-host
+          save-if: ${{ matrix.id == 'rest' }}
       # Schema, scene builders (host build, no Metal), step graph, vehicle, soft-body
       # (importers, beam model, CPU reference) and fracture host logic. GPU tests need a
       # real adapter (Metal or a hardware wgpu backend) and run locally; see
       # engine/crates/engine-webgpu/README.md and engine/docs/softbody.md.
       - name: cargo test
-        # Every test runs; the job passes when the failures are exactly tracked expected
-        # failures (engine/tests-expected-failures.txt; new failures, fixed-but-listed and
-        # missing tests all fail it).
+        # Every test of this job's share runs; it passes when its failures are tracked
+        # expected failures (engine/tests-expected-failures.txt).
+        run: bash ../.github/scripts/host-tests.sh ${{ matrix.args }}
+      - name: Upload the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-tests-${{ matrix.id }}
+          path: |
+            engine/host-tests.log
+            engine/host-tests.code
+          if-no-files-found: error
+          retention-days: 7
+
+  engine-host:
+    name: Engine host tests (no GPU)
+    needs: engine-host-shard
+    # Also after a failed share, to show the whole result; not after a cancelled run.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: Download the logs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: host-tests-*
+          path: host-logs
+      - name: Check every job's tests against the expected failures
+        # Every test ran in one of the jobs above; this passes when the failures are
+        # exactly the tracked expected failures (engine/tests-expected-failures.txt; new
+        # failures, fixed-but-listed and missing tests all fail it).
         run: |
-          set +e
-          cargo test --release -p engine-schema -p engine-exec -p engine-scenes -p engine-vehicle -p engine-softbody -p engine-fracture -p engine-vehiclegen --no-default-features --no-fail-fast 2>&1 | tee host-tests.log
-          code=${PIPESTATUS[0]}
-          set -e
-          python3 ../.github/scripts/expected-failures.py host-tests.log tests-expected-failures.txt "$code"
+          if [[ "${{ needs.engine-host-shard.result }}" != success ]]; then
+            echo "::error::A host test job failed or did not finish (${{ needs.engine-host-shard.result }}): see the 'Engine host tests, ...' jobs."
+          fi
+          ls host-logs
+          if [[ "$(ls -d host-logs/host-tests-* | wc -l)" -ne 7 ]]; then
+            echo "::error::Expected the logs of 7 host test jobs."
+            exit 1
+          fi
+          code=0
+          for f in host-logs/host-tests-*/host-tests.code; do
+            c="$(cat "$f")"
+            if (( c > code )); then code=$c; fi
+          done
+          cat host-logs/host-tests-*/host-tests.log > host-tests.log
+          python3 .github/scripts/expected-failures.py host-tests.log engine/tests-expected-failures.txt "$code"
+          [[ "${{ needs.engine-host-shard.result }}" == success ]]
 
   # The C library a game engine links (engine/crates/engine-ffi): built, its header
   # checked, packaged with engine/scripts/build-ffi.sh, and examples/hello.c compiled
@@ -117,6 +258,7 @@ jobs:
             os: windows-latest
             run_example: 0
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -133,6 +275,13 @@ jobs:
         with:
           path: ~/.cache/rubble-tools
           key: rubble-slangc-${{ runner.os }}-${{ hashFiles('engine/scripts/slangc.sh') }}
+      # slangc is 4-7.5 of this job's 6.5-14 minutes when the kernels have to be compiled.
+      # The key covers every input of cache_key in engine/crates/engine-webgpu/build.rs.
+      - name: Cache compiled Slang kernels (SPIR-V, WGSL)
+        uses: actions/cache@v4
+        with:
+          path: .slang-cache
+          key: rubble-slang-${{ runner.os }}-${{ hashFiles('engine/slang/**', 'engine/crates/engine-webgpu/build.rs', 'engine/crates/engine-webgpu/src/wgsl_loop_cap.rs', 'engine/crates/engine-slang-build/src/lib.rs', 'engine/scripts/slangc.sh') }}
       - name: Mesa lavapipe (Vulkan on the CPU)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
@@ -140,8 +289,8 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
       - name: Build, package and run the C example
-        # A build is ~10 min; a hang must fail the job, not hold a runner for 6 hours.
-        timeout-minutes: 40
+        # A build is 5-13 min; a hang must fail the job, not hold a runner for 6 hours.
+        timeout-minutes: 25
         env:
           RUN_EXAMPLE: ${{ matrix.run_example }}
         run: bash engine/scripts/build-ffi.sh

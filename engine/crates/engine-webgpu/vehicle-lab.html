@@ -136,12 +136,21 @@
       </div>
       <h2>Options</h2>
       <div class="row"><label><input type="checkbox" id="surface" data-opt="build" /> surface contact</label><label><input type="checkbox" id="parked" data-opt="build" /> second car</label>
+        <label title="Copies of the car in the run. On the mountain they leave the lip together, side by side and stacked, closing on the first car, so they crash into each other on the way down; on the flat arena the others stand in a row to one side. The numbers shown are the first car's. Rebuilds the lab in place (no reload).">cars <input type="number" id="cars" data-opt="build" value="1" min="1" max="32" step="1" /></label>
         <label><input type="checkbox" id="drag" data-opt="build" checked /> air drag</label><label><input type="checkbox" id="centred" data-opt="build" /> centred damping</label>
         <label><input type="checkbox" id="sleep" data-opt="build" checked /> rigid sleep</label>
         <label title="Anti-clip pads each self-collision box by the contacter's own travel, not the car's fastest node's (debris falling far away no longer widens every box). Applies as it runs."><input type="checkbox" id="ownTravel" data-opt="live" checked /> own-travel anti-clip boxes</label>
         <label title="Self-collision's reused pair list told which nodes are off the main body, so a piece torn off no longer invalidates it (the same results either way). Applies as it runs."><input type="checkbox" id="pieceLabels" data-opt="live" checked /> torn pieces apart in the pair list</label>
         <label title="With the torn pieces labelled, the rigid bodies in the car's window are those near some piece, not everything between the car and a piece far away (the same contacts). Applies as it runs."><input type="checkbox" id="pieceWindows" data-opt="live" checked /> a coupling window per piece</label>
-        <label title="Self-collision's contact tests run one GPU thread per candidate pair across the whole GPU, a pass every 2 kHz step, instead of inside the car's one thread group (the same results bit for bit). Used on frames without car-to-car contact, sleep or surface contact. Applies as it runs."><input type="checkbox" id="selfSplit" data-opt="live" checked /> self-collision across the GPU</label></div>
+        <label title="Self-collision's contact tests run one GPU thread per candidate pair across the whole GPU, a pass every 2 kHz step, instead of inside the car's one thread group (the same results bit for bit). Used on frames without car-to-car contact, sleep or surface contact. Applies as it runs."><input type="checkbox" id="selfSplit" data-opt="live" checked /> self-collision across the GPU</label>
+        <label title="Cars touching each other are stepped each in its own GPU thread group, with their contact tests across the whole GPU, instead of every touching group on one thread group (the same results bit for bit). Applies as it runs."><input type="checkbox" id="groupSplit" data-opt="live" checked /> touching cars across the GPU</label>
+        <label title="Self-collision's hit forces: each hit's four node beam forces are summed once on idle GPU threads instead of three times in a row (the same results bit for bit). Applies as it runs."><input type="checkbox" id="hitCache" data-opt="live" checked /> hit forces summed once</label>
+        <label title="The car's physics as fleet-wide passes: one GPU thread per node, beam and candidate pair across every car, a few passes every 2 kHz step, instead of one thread group per car (the same results bit for bit). Used on frames without car-to-car contact, sleep or surface contact. Applies as it runs."><input type="checkbox" id="wide" data-opt="live" checked /> fleet-wide passes</label>
+        <label title="With the fleet-wide passes: self-collision from the reused pair list instead of a grid walk every step (the same results bit for bit). Applies as it runs."><input type="checkbox" id="wideList" data-opt="live" checked /> with the reused pair list</label>
+        <label title="With both: the rigid coupling's and the raycast wheels' part of each step runs on spare GPU threads of the pair list's and the hits' passes instead of a pass of its own (the same results bit for bit). Applies as it runs."><input type="checkbox" id="wideFused" data-opt="live" checked /> coupling and wheels in those passes</label>
+        <label title="Car-to-car contact in groups of more than four cars: each candidate point's travel and car are kept beside it when it is gathered, so the triangle tests read them in a stream (the same results bit for bit). Applies as it runs."><input type="checkbox" id="vvStream" data-opt="live" checked /> contact candidates streamed</label>
+        <label title="Car-to-car contact in groups of more than four cars: each car's candidate points are sorted into a grid and a triangle tests only the points in the cells its box covers, instead of every point (the same results bit for bit). Applies as it runs."><input type="checkbox" id="vvBigGrid" data-opt="live" checked /> contact candidates in a grid</label>
+        <label title="The raycast wheels' rays and anti-roll bars run beside the step before's beam phase and their tyres beside the rigid coupling's first phase, instead of three phases of their own (the same results bit for bit; measured no faster so far). Applies as it runs."><input type="checkbox" id="driveAhead" data-opt="live" /> wheels beside other phases</label></div>
       <div class="row"><label title="A small piece off the car's main body (no unbroken beam joins them) for this long is retired: no longer simulated, not drawn, in no contact. A piece at rest beside the car goes too. Applies as it runs; retired pieces stay retired."><input type="checkbox" id="debris" data-opt="live" checked /> retire small debris after</label>
         <input type="number" id="debrisTtl" data-opt="live" value="5" min="0" max="600" step="0.5" /> s, at most <input type="number" id="debrisKg" data-opt="live" value="10" min="0" max="1000" step="0.5" /> kg and <input type="number" id="debrisNodes" data-opt="live" value="40" min="1" max="10000" step="1" /> nodes</div>
       <div class="row"><span class="muted" title="How many of the display's pixels the picture is drawn at. Automatic keeps the physics in real time first: it lowers the picture's resolution while steps are being refused because the GPU is busy, then draws every other step (30 pictures a second, each of the current state), and brings both back when steps are no longer refused. Applies as it runs.">Render scale</span><select id="renderScale" data-opt="live"><option value="auto">automatic (physics first)</option><option value="1">100 %</option><option value="0.75">75 %</option><option value="0.5">50 %</option></select></div>
@@ -290,6 +299,8 @@
     // generated car, except on the mountain: there node contact keeps the steps in real
     // time (with it on the mountain ran at half real time, measured 2026-11-15), and the
     // self-collision passes across the GPU run only on frames without it. A control.
+    // The kernels' lossless schedule switches (explicit_plan::PERF_*).
+    const perfFlags = () => (get('hitCache') ? 1 : 0) | (get('driveAhead') ? 2 : 0) | (get('vvStream') ? 64 : 0) | (get('vvBigGrid') ? 128 : 0);
     const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain';
     if (!surfaceChosen) put('surface', surfaceDefault());
     function syncUrl() {
@@ -338,6 +349,9 @@
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
         else if (c.id === 'selfSplit') cmd({ selfSplit: get('selfSplit') });
+        else if (c.id === 'groupSplit') cmd({ groupSplit: get('groupSplit') });
+        else if (c.id === 'hitCache' || c.id === 'driveAhead' || c.id === 'vvStream' || c.id === 'vvBigGrid') cmd({ perfFlags: perfFlags() });
+        else if (c.id === 'wide' || c.id === 'wideList' || c.id === 'wideFused') cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
         else if (c.id === 'renderScale') { autoScale = 1; autoQuiet = 0; configure(); }
         else if (c.id.startsWith('debris')) cmd({ debris: debrisSpec() });
         else if (['beams', 'nodes', 'beamColor'].includes(c.id)) structureOpts();
@@ -368,7 +382,7 @@
     statusEl.textContent = 'loading…';
     const tLoad = performance.now();
     await loadWasm();
-    const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42]];
+    const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42], [0.7, 0.45, 0.02], [0.03, 0.3, 0.1], [0.55, 0.55, 0.57], [0.25, 0.03, 0.35], [0.02, 0.35, 0.4], [0.05, 0.05, 0.06]];
     const carCache = new Map();
     const waived = new Set();
     async function carOf(kind) {
@@ -449,13 +463,13 @@
       loading.stage('Building the car');
       try {
         const car = await carOf(get('car'));
-        const n = get('parked') ? 2 : 1;
+        const nCars = Math.min(8, Math.max(1, Math.round(get('cars') || 1))), n = nCars + (get('parked') ? 1 : 0);
         // The second car's paint: built when first asked for (kept, like the first).
-        if (n > 1 && car.visuals.length < 2) { progress(`building the second ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[1])); }
+        while (car.visuals.length < Math.min(n, PAINTS.length)) { progress(`building another ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[car.visuals.length])); }
         const vis0 = car.visuals[0].visual;
         const timing = get('timing');
         const spec = {
-          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), debris: debrisSpec(), parked: get('parked'), mountain: mountainSpec(), shapes: get('shapes'),
+          vehicle: car.vehicle, drag: get('drag'), centredDamping: get('centred'), sleep: get('sleep'), scene: scene(), surface: get('surface'), ownTravel: get('ownTravel'), pieceLabels: get('pieceLabels'), pieceWindows: get('pieceWindows'), selfSplit: get('selfSplit'), groupSplit: get('groupSplit'), wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused'), debris: debrisSpec(), parked: get('parked'), cars: nCars, mountain: mountainSpec(), shapes: get('shapes'),
           // The car's named parts: the renderer's damage units (beam lists), when it has them.
           ...(vis0.unitNames?.length ? { parts: { names: [...vis0.unitNames], start: [...vis0.unitStart], beams: [...vis0.unitBeams] } } : {}),
           ...(timing !== 'off' ? { gpuTiming: timing } : {}),
@@ -497,10 +511,12 @@
         if (!$('material').options.length) for (const [name, density] of materials) $('material').add(new Option(`${name} (${density} kg/m³)`, name));
         if (qs.has('material')) put('material', qs.get('material'));
         W = w;
+        cmd({ perfFlags: perfFlags() });
+        cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
         W.spec = spec;
         configure();
         structureOpts();
-        gpuSeg.clear(); gpuTotal = [];
+        gpuSeg.clear(); gpuTotal = []; gpuRun = [];
         window.__world = world; window.__lab = lab;
         await restart(true);
         lastBuildMs = performance.now() - t0;
@@ -947,6 +963,7 @@
     const pct = (q) => { const a = [...stepHist].sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(q * a.length))] : 0; };
     let fps = 0, frames = 0, fpsAt = performance.now(), simAt = performance.now(), simCount = 0, simRate = 0;
     const gpuSeg = new Map(); let gpuTotal = [];
+    let gpuRun = [];
     const median = (a) => a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : 0;
     function gpuSplit() {
       let veh = 0, rigid = 0;
@@ -960,6 +977,9 @@
         const per = new Map();
         for (const [n, ms] of t.segments) per.set(n, (per.get(n) || 0) + ms);
         for (const [n, ms] of per) { const a = gpuSeg.get(n) || []; a.push(ms); if (a.length > 120) a.shift(); gpuSeg.set(n, a); }
+        // The whole run, a row a step: (lab time, the step's GPU ms, the vehicles' part).
+        let veh = 0; for (const [n, ms] of per) if (n.startsWith('cpl_') || n.startsWith('explicit')) veh += ms;
+        if (gpuRun.length < 60000) gpuRun.push([W?.lab.time() ?? 0, t.totalMs, veh]);
       }
     };
     const nf = (x, d = 0) => Number(x).toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
@@ -1117,6 +1137,14 @@
       if (!ok) { const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); try { ok = document.execCommand('copy'); } catch {} t.remove(); }
       b.textContent = ok ? 'Copied' : 'Copy failed: see console'; if (!ok) console.log(text);
       setTimeout(() => { b.textContent = 'Copy perf report'; }, 1500);
+    };
+    // The run's GPU time a World step since the last build or restart (GPU timing on):
+    // median, p95 and worst of the whole step and of the vehicles' part (needs "rigid ·
+    // vehicle" timing), for steps at lab time `from` (s) or later, and the steps refused.
+    window.__gpuRun = (from = 0) => {
+      const rows = gpuRun.filter((r) => r[0] >= from);
+      const stat = (k) => { const a = rows.map((r) => r[k]).sort((x, y) => x - y); if (!a.length) return null; const q = (p) => a[Math.round((a.length - 1) * p)]; const w = rows.reduce((m, r) => (r[k] > m[k] ? r : m), rows[0]); return { median: q(0.5), p95: q(0.95), p99: q(0.99), worst: w[k], worstAt: w[0] }; };
+      return { steps: rows.length, total: stat(1), vehicle: stat(2), refused: perfLog.reduce((a, r) => a + r.refused, 0), taken: perfLog.reduce((a, r) => a + r.steps, 0) };
     };
     window.__gpu = () => ({ total: [...gpuTotal], split: gpuSplit(), segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
     window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95), worst: stepHist.length ? Math.max(...stepHist) : 0 }, stepsAFrame: [0, 1, 2].map((k) => takenHist.filter((t) => (k < 2 ? t === k : t >= 2)).length), refused: refusedHist.reduce((a, b) => a + b, 0), carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });

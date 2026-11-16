@@ -7,6 +7,7 @@ explicit_beams_solo_wide_nosurf
 explicit_beams_vv_bounds
 explicit_beams_vv_group
 explicit_beams_vv_pairs
+explicit_beams_wide_aux
 explicit_beams_wide_beams
 explicit_beams_wide_begin
 explicit_beams_wide_centred_beams

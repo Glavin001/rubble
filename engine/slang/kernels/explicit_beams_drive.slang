@@ -701,6 +701,40 @@ void driveWheelsSplit(uint v, uint w, bool live, uint step)
     if (has && w == 0u) drvEnd(c);
 }
 
+// The wheels ahead (perfFlags bit 2, the solo frame): one part of driveWheelsSplit for
+// wheel lane `w` (0: the lane of the bars and the end), no barrier here. The rays and the
+// bars read the nodes' positions and velocities (final from a step's node phase to the
+// next), static shapes and the drive's records, so step s + 1's run beside step s's beam
+// phase and after it; the tyres (which read their hubs' forces: the last beam phase's
+// sums and the accumulators after selfApply) stay at the step's start, beside the
+// coupling's first phase, which reads and writes none of it. The same calls on the same
+// values as driveWheelsSplit.
+// (The context once for a step's three parts where they run in one invocation: drvCtx
+// reads the records drvEnd wrote and the nodes, neither of which changes between a
+// step's rays and its tyres.)
+void driveAheadCtx(uint v, uint w, out DrvCtx c, out bool has, out bool apart)
+{
+    has = w < DRV_MAX_WHEELS && drvCtx(v, c);
+    apart = has && drvWheelsApart(c);
+}
+void driveAheadPart(DrvCtx c, bool has, bool apart, uint w, uint part, uint step)
+{
+    uint k0 = apart ? w : 0u;
+    uint k1 = !has ? 0u : (apart ? min(w + 1u, c.nw) : (w == 0u ? c.nw : 0u));
+    if (part == 1u)
+    {
+        if (has && w == 0u) drvBars(c);
+        return;
+    }
+    // (One call site for the rays and one for the tyres, as driveWheelsSplit.)
+    for (uint k = k0, kStop = EB_END(k, k1, 1u); k < kStop; k++)
+    {
+        if (part == 0u) drvRays(c, k);
+        else drvTyre(c, k, step);
+    }
+    if (part == 2u && has && w == 0u) drvEnd(c);
+}
+
 // The drive's part of step s of vehicle v (uniform `on`): its wheels, then a barrier.
 void driveStep(uint v, uint lane, uint s, uint on)
 {
