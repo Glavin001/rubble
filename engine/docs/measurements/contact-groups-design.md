@@ -430,7 +430,7 @@ measured for the fleet.
 Kernel `engine/slang/kernels/explicit_beams_fleet.slang`; addresses `fl*` in
 `explicit_beams.slang`; perf flags 4096 (`PERF_FLEET_STATE`) and 8192
 (`PERF_FLEET_FRONT`), both on by default; measurements in
-`vehicle-perf-first-principles.md` §8.23. Stage 3 (the levels) is not built: §8.7.
+`vehicle-perf-first-principles.md` §8.25. Stage 3 (the levels) is not built: §8.7.
 
 **Stage 1, the state by vehicle (flag 4096), under the groups' own dispatches.**
 
