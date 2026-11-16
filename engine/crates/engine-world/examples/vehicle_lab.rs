@@ -14,7 +14,7 @@
 //!   explicit solver's procedural sedan).
 //! - `--surface 0|1`: the car's opt-in surface contact (default: the script's, else off).
 //! - `--secs S`: the run's length (default: the script's duration).
-//! - `--seed N`, `--steepness D`, `--roughness R`: the mountain's.
+//! - `--seed N`, `--steepness D`, `--roughness R`, `--terrain ledges|rolling`: the mountain's.
 //! - `--json <file>`: the stats as JSON.
 //! - `--every N`: a progress line every N windows.
 
@@ -155,6 +155,10 @@ fn options(script: &Value) -> LabOptions {
     }
     if let Some(r) = arg("--rockslide") {
         m["rockslide"] = json!(r == "1");
+    }
+    // `--terrain ledges|rolling` (the default without it: ledges, the measurements' scene).
+    if let Some(t) = arg("--terrain") {
+        m["terrain"] = json!(t);
     }
     o.insert("mountain".into(), m);
     LabOptions::from_json(&v)

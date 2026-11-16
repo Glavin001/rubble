@@ -24,10 +24,16 @@ Build the World wasm (CONTRIBUTING.md), serve `engine/crates/engine-webgpu` (or 
 | Shoot | The launcher is the camera. Click the scene (or `F`, or Fire, through the reticle): the lab picks what the view ray meets (the car's collision skin as last read, else the ground) and launches from the camera at the elevation that carries the shot, falling under gravity, through that point. A ring marks the aimed point; a speed that cannot reach it is said so. Shape: cuboid with its three sizes, sphere, cylinder (end on or side on). Material: steel 7850, aluminium 2700, concrete 2400, wood 600, rubber 1100 kg/m³, or a mass in kg. Speed 1–100 m/s, spin, bursts of up to 32. Projectiles are World rigid bodies. |
 | Compactor | Kinematic plates close on the car: top down, the two sides, or front and rear. Speed 0.02–0.5 m/s, a stop gap, pause, reverse, remove. Force against travel is plotted per plate, with the work done. |
 | Crash test | Offset wall (overlap slider, default 40 %), full wall, pole (offset slider), side pole on a sled. Speed, overlap, offset and wall angle are sliders; each change restarts the test in place. |
-| Mountain | The car leaves a cliff and falls down an endless rocky slope. Seed, steepness, roughness, launch speed, loose rocks, a start depth. |
+| Mountain | The car leaves a cliff and falls down an endless rocky slope. Terrain (rolling gully, the default, or ledges and cliffs), seed, steepness, roughness, launch speed, loose rocks, a start depth. The launcher works here too: click the scene (or `F`) to shoot, for example to knock a stuck car loose. |
 | Drive | `W A S D`, `Space` handbrake. Obstacles appear ahead of the car: wall, pole, kerb, ramp, a stack of 25 kg bricks. A start speed. A second, parked car is an option. |
 
-**Common controls.** Slow motion ×1, ×¼, ×1⁄16; pause and single step; restart (`R`); camera (orbit by dragging, chase, tumble, side, top); cutaway (hide the car's material groups; drawing only).
+**Common controls.** Slow motion ×1, ×¼, ×1⁄16; pause and single step; restart (`R`); camera (overhead chase, orbit by dragging, chase, tumble, side, top); with more than one car, the car the camera follows (`V` cycles; the readouts stay the first car's); cutaway (hide the car's material groups; drawing only).
+
+**The camera.**
+
+- **It follows its own reading.** Every drawn frame copies the followed car's nodes and origin record back (tens of kB, its own three buffers), and the lab (`Lab::ingest_follow`) makes its centre of mass, velocity and heading; the camera carries that forward by the reading's age. It used to follow the measurements' reading, which is taken 15 times a second and skipped while the GPU is busy: the camera stopped (its forward carry was capped at 0.25 s) and then jumped to catch up. The reading's age is in `__state().camAge` and in the recorder's `--probe` lines.
+- **Nothing drawn hides the car.** Each frame the lab casts the view ray from the car to the eye (`Bench::clear_view`) against the mountain's rock (floor, banks, walls, humps, boulders: the live chunks' shapes, kept as they are made) and the arena's ground, and the eye comes in 0.6 m in front of what it meets. It comes in at once and goes back out eased over 0.5 s.
+- **Overhead chase** (the mountain's default): in the fall line's frame, 9 m over the slope and 10 m up it, looking a little down the slope; the frame is fixed, so a tumbling car does not swing the view. On the flat arena: 9 m up and 7 m behind the car's travel.
 
 **Every option is a control, and the URL mirrors the controls** (a control's id is its query key), so a run can be shared. A control is one of three kinds:
 
@@ -104,12 +110,25 @@ So that every lab car of one template has one layout, the arena's ramp and kerb 
 
 ## The mountain
 
-`mountain.rs` makes the slope in chunks along the fall line. A chunk is a pure function of (seed, index), 24 m long:
+`mountain.rs` makes the slope in chunks along the fall line. A chunk is a pure function of (seed, index), 24 m long. There are two terrains (`mountain.terrain`, the page's "terrain" control):
+
+**Rolling** (the page's default, added 2026-11-16 because cars stopped on the ledges' shelves): a gully down a mountainside with no shelf or cliff, so the cars keep falling and bouncing.
+
+- **Ground:** the fall line swells along its normal by three seeded waves (71, 29 and 13 m), a function of the arc alone, so chunks join exactly; 4 m slabs follow it. The local slope stays within 4–14° of the mean (roughness) and never under 38° (over the rock's 37° kinetic friction angle), faded in over the first 30 m so every run leaves the lip the same way. A test holds both over 200 chunks, 8 seeds, 3 roughnesses and 3 steepnesses.
+- **Cross-section:** a flat bed half the width, and two banks rising 18° into the canyon walls (so nothing falls between bank and wall).
+- **Rocks, all rounded:** humps (spheres of 5–12 m buried to 0.2–1.1 m: faces at most 25° off the ground, a ramp that throws the car up and aside, never a step), part-buried boulders (0.35–1.1 m), and crags on the banks only (they turn a car back into the gully).
+- A car can still come to rest (in the crease behind a boulder, say): the rockslide, or a shot from the launcher, sets it going again.
+
+**Ledges** (the first mountain; `MountainSpec::default()` keeps it so the offline tools, the fixtures and the measurements below keep their scene; on the page `?terrain=ledges`):
 
 - **Ground:** 3 m thick slabs along a piecewise-linear profile. A chunk is a slope with a knee, a shelf with a near-vertical drop, or a gentler run with a 65–75° cliff face; every profile ends on the fall line, so chunks join.
 - **Canyon walls** keep the car on the mountain.
 - **Rocks** stand on the slabs: spikes (convex hulls from a palette of 12, so the hull arena stays bounded), boulders (spheres) and blocks (boxes). Roughness sets how many, and how often ledges and cliffs come.
 - **Loose rocks** (dynamic bodies) are optional and off by default: contact with moving bodies has no penetration push-back (B1).
+
+Both terrains:
+
+- **Shooting on the mountain.** The launcher panel shows in Mountain mode, and a click (or `F`) fires as in Shoot. The pick meets the car's skin, else the mountain's drawn rock (its boxes and spheres, `MountainSpec::ray`), else the air beside the car. The canyon's lid is not drawn, so a shot from a camera above it starts where the view ray leaves it. A shot is removed 30 s after it is fired (`MOUNTAIN_SHOT_TTL`): one that missed rolls on down without end. The page's stability stop keeps only its non-finite check in Mountain mode, since shots put energy into the cars.
 
 Chunks are made 8 ahead of the car's chunk (192 m, beyond the fog) and removed 2 behind, at most one new chunk per step.
 

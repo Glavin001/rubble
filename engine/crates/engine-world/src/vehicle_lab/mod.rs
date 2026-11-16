@@ -34,7 +34,7 @@ use engine_softbody::explicit_sleep::VehicleSleep;
 use engine_webgpu::{CouplingCapacity, CouplingLayout};
 use glam::{DVec3, Quat, Vec3};
 use monitor::{CarModel, CarRead, CarStats, ProxyFrame};
-use mountain::{MountainSpec, RockGeom};
+use mountain::{MountainSpec, RockGeom, Terrain};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -46,6 +46,9 @@ pub const GROUND: f32 = 0.0;
 const FIXTURE_CATEGORY: u16 = 0x8000;
 /// Projectiles alive at once; the oldest is removed for a new one.
 pub const MAX_SHOTS: usize = 48;
+/// On the mountain a shot that missed rolls on down without end: it is removed after
+/// this long (s).
+pub const MOUNTAIN_SHOT_TTL: f64 = 30.0;
 /// Shots waiting in a burst.
 pub const MAX_QUEUE: usize = 64;
 /// Obstacle bodies alive at once (a brick stack is one body per brick).
@@ -308,6 +311,11 @@ impl LabOptions {
             },
             mountain: MountainSpec {
                 seed: m.get("seed").and_then(Value::as_u64).unwrap_or(dm.seed),
+                terrain: m
+                    .get("terrain")
+                    .and_then(Value::as_str)
+                    .and_then(Terrain::from_name)
+                    .unwrap_or(dm.terrain),
                 steepness: num(&m, "steepness", f64::from(dm.steepness)) as f32,
                 roughness: num(&m, "roughness", f64::from(dm.roughness)) as f32,
                 width: num(&m, "width", f64::from(dm.width)) as f32,
@@ -660,6 +668,8 @@ struct MountainRun {
     spec: MountainSpec,
     palette: Vec<Arc<Vec<Vec3>>>,
     live: BTreeMap<i64, Vec<u32>>,
+    /// The live chunks' shapes (what a pick or the camera's view ray meets).
+    shapes: BTreeMap<i64, mountain::MountainChunk>,
     start: Option<DVec3>,
     made: u64,
     dropped: u64,
@@ -719,6 +729,7 @@ impl Bench {
             spec: opts.mountain,
             palette: opts.mountain.palette().into_iter().map(Arc::new).collect(),
             live: BTreeMap::new(),
+            shapes: BTreeMap::new(),
             start: None,
             made: 0,
             dropped: 0,
@@ -1230,6 +1241,12 @@ impl Bench {
                     .ok_or_else(|| anyhow::anyhow!("vehicle lab: pick needs a direction"))?
                     .normalize();
                 let (target, on) = self.pick(o, d);
+                // On the mountain a camera above the canyon's lid (not drawn) launches from
+                // where the view ray leaves it, so the shot is not stopped by it.
+                let o = match self.mountain_ray(o, d).1 {
+                    Some(t) if f64::from(t) + 0.3 < (target - o).length() => o + (d * (t + 0.3)).as_dvec3(),
+                    _ => o,
+                };
                 let speed = num(f, "speed", 20.0) as f32;
                 let (dir, reachable) = ballistic(target - o, speed);
                 aimed["origin"] = json!([o.x, o.y, o.z]);
@@ -1399,6 +1416,7 @@ impl Bench {
             for key in m.live.remove(&k).unwrap_or_default() {
                 rig.remove(key);
             }
+            m.shapes.remove(&k);
             m.dropped += 1;
         }
         // The nearest missing chunk first; one a step once the run is going.
@@ -1425,6 +1443,7 @@ impl Bench {
                 keys.push(rig.spawn(&def)?);
             }
             m.live.insert(k, keys);
+            m.shapes.insert(k, chunk);
             m.made += 1;
             if !all {
                 break;
@@ -1524,6 +1543,16 @@ impl Bench {
                     }
                 }
                 _ => {}
+            }
+        }
+        if self.mountain.is_some() {
+            for s in &mut self.shots {
+                if self.t - s.fired > MOUNTAIN_SHOT_TTL {
+                    if let Some(k) = s.key.take() {
+                        rig.remove(k);
+                        self.kinds.remove(&k);
+                    }
+                }
             }
         }
         self.stream_mountain(rig, false)?;
@@ -1688,8 +1717,8 @@ impl Bench {
     }
 
     /// What a ray from `o` along `d` (world) meets first: the car's collision skin as last
-    /// read ("car"), else the flat arena's ground ("ground"), else the point of the ray
-    /// nearest the car's centre ("air").
+    /// read ("car"), else the flat arena's ground ("ground") or the mountain's rock
+    /// ("mountain"), else the point of the ray nearest the car's centre ("air").
     pub fn pick(&self, o: DVec3, d: Vec3) -> (DVec3, &'static str) {
         let ro = (o - self.last_origin).as_vec3();
         let mut best = f32::INFINITY;
@@ -1720,8 +1749,53 @@ impl Bench {
                 return (o + d.as_dvec3() * t, "ground");
             }
         }
+        if let Some(t) = self.mountain_ray(o, d).0.filter(|t| *t < 500.0) {
+            return (o + (d * t).as_dvec3(), "mountain");
+        }
         let along = ((self.car.centre - o).as_vec3().dot(d)).max(2.0);
         (o + (d * along).as_dvec3(), "air")
+    }
+
+    /// On the mountain: where a ray first meets the live chunks' drawn rock, and where it
+    /// leaves the last lid it crosses (`Mountain::ray`).
+    fn mountain_ray(&self, o: DVec3, d: Vec3) -> (Option<f32>, Option<f32>) {
+        let Some(m) = &self.mountain else {
+            return (None, None);
+        };
+        let (mut hit, mut lid) = (None::<f32>, None::<f32>);
+        for c in m.shapes.values() {
+            let (h, l) = m.spec.ray(c, o, d);
+            hit = match (hit, h) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            lid = match (lid, l) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        (hit, lid)
+    }
+
+    /// How far a camera may stand from `target` toward `eye` (world) with nothing drawn
+    /// between them: the mountain's rock (walls, floor, humps, boulders) or the flat
+    /// arena's ground, less a margin; the full distance when nothing is in the way.
+    pub fn clear_view(&self, target: DVec3, eye: DVec3) -> f64 {
+        const MARGIN: f64 = 0.6;
+        let span = eye - target;
+        let len = span.length();
+        if !(len > 1e-6) {
+            return len;
+        }
+        let d = (span / len).as_vec3();
+        let mut free = len;
+        if let Some(t) = self.mountain_ray(target, d).0 {
+            free = free.min(f64::from(t) - MARGIN);
+        }
+        if self.opts.scene == Scene::Flat && d.y < -1e-6 {
+            free = free.min((f64::from(GROUND) + 0.3 - target.y) / f64::from(d.y));
+        }
+        free.clamp(0.5f64.min(len), len)
     }
 
     /// Whether something the per-step readings matter for is going on: a projectile in
@@ -1751,7 +1825,7 @@ impl Bench {
             let s = m.start.unwrap_or(self.car.centre);
             let d = self.car.centre - s;
             json!({
-                "seed": m.spec.seed, "steepness": m.spec.steepness, "roughness": m.spec.roughness,
+                "seed": m.spec.seed, "terrain": m.spec.terrain.name(), "steepness": m.spec.steepness, "roughness": m.spec.roughness,
                 "fallen": -d.y, "along": (d.y * d.y + d.z * d.z).sqrt(), "chunk": m.spec.chunk_of(self.car.centre),
                 "chunksLive": m.live.len(), "chunksMade": m.made, "chunksDropped": m.dropped, "rockslides": m.rockslides,
                 "bodies": m.live.values().map(Vec::len).sum::<usize>(),
@@ -2103,6 +2177,21 @@ pub struct ReadPlan {
     pub beams: (u64, u64),
 }
 
+/// A car's place for the camera, from its own small readback every frame
+/// ([`Lab::ingest_follow`]), apart from the lab's measurements (which are taken less
+/// often and skipped while the GPU is busy: a camera on them stopped, then jumped).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FollowPose {
+    pub car: usize,
+    pub centre: DVec3,
+    pub velocity: Vec3,
+    /// Horizontal, unit (the car's rear-to-front nodes).
+    pub heading: Vec3,
+    /// The lab's time the state was copied at (s).
+    pub t: f64,
+    pub readings: u64,
+}
+
 /// One of the other cars' debris state ([`Lab`]'s `fleet`).
 #[derive(Default)]
 struct FleetCar {
@@ -2133,6 +2222,10 @@ pub struct Lab {
     /// beam reading. Without them a torn-off part of another car was never retired,
     /// and its travel set that car's contact reach and pair-list rebuilds for good.
     fleet: Vec<FleetCar>,
+    /// Every vehicle's nodes in the World's node buffer (byte offset, bytes), for the
+    /// camera's readback of the car it follows.
+    spans: Vec<(u64, u64)>,
+    follow: FollowPose,
 }
 
 fn deg(v: &Value, k: &str, d: f64) -> f32 {
@@ -2359,6 +2452,13 @@ impl Lab {
             // each as long.)
             beams: (u64::from(span.beam_off) * 32, u64::from(span.beams) * 32 * (1 + fleet_cars as u64)),
         };
+        let spans = x
+            .layout()
+            .spans
+            .iter()
+            .take(x.vehicle_count())
+            .map(|s| (u64::from(s.node_off) * 48, u64::from(s.nodes) * 48))
+            .collect();
         let dt = world.solver().dt;
         let mut lab = Lab {
             bench: Bench::new(opts, &cars[0], dt),
@@ -2372,6 +2472,8 @@ impl Lab {
             labels: Vec::new(),
             labels_due: None,
             fleet: Vec::new(),
+            spans,
+            follow: FollowPose::default(),
         };
         lab.fleet_reset(fleet_cars);
         lab.bench.begin(&mut WorldRig {
@@ -2393,6 +2495,8 @@ impl Lab {
     /// surface contact and the second car stay as built.
     pub fn restart(&mut self, world: &mut World, v: &Value) -> anyhow::Result<()> {
         let mut opts = self.bench.opts.clone();
+        // (The camera's reading is of the run before.)
+        self.follow = FollowPose { car: self.follow.car, ..FollowPose::default() };
         match v.get("scene").and_then(Value::as_str) {
             Some("mountain") => opts.scene = Scene::Mountain,
             Some("flat") => opts.scene = Scene::Flat,
@@ -2531,6 +2635,84 @@ impl Lab {
 
     pub fn read_plan(&self) -> ReadPlan {
         self.plan
+    }
+
+    /// Vehicles in the World (the lab's cars and the parked car).
+    pub fn vehicle_count(&self) -> usize {
+        self.spans.len()
+    }
+
+    /// The camera's readback of car `k`: its nodes (byte offset and bytes in the node
+    /// buffer) and its origin record (byte offset in the misc buffer, 16 bytes).
+    pub fn follow_plan(&self, k: usize) -> Option<[u64; 3]> {
+        self.spans.get(k).map(|&(off, len)| [off, len, 16 * k as u64])
+    }
+
+    /// Car `k`'s nodes and origin record as copied at the lab's time `taken`: its centre
+    /// of mass, velocity and heading for the camera. Retired debris is left out.
+    pub fn ingest_follow(&mut self, k: usize, nodes: &[u32], origin: &[u32], taken: f64) -> anyhow::Result<()> {
+        anyhow::ensure!(k < self.spans.len() && origin.len() >= 3, "vehicle lab: no car {k} to follow");
+        let f = |w: u32| f64::from(f32::from_bits(w));
+        let masses = &self.bench.model.masses;
+        let retired: &[bool] = if k == 0 {
+            &self.bench.debris.retired
+        } else {
+            self.fleet.get(k - 1).map_or(&[], |c| &c.debris.retired)
+        };
+        let (mut c, mut v, mut m) = (DVec3::ZERO, DVec3::ZERO, 0.0f64);
+        let n = nodes.len() / 12;
+        for i in (0..n).filter(|&i| !retired.get(i).copied().unwrap_or(false)) {
+            let w = if masses.len() == n { f64::from(masses[i]) } else { 1.0 };
+            let q = &nodes[12 * i..];
+            let p = DVec3::new(f(q[0]), f(q[1]), f(q[2]));
+            let u = DVec3::new(f(q[4]), f(q[5]), f(q[6]));
+            if !(p.is_finite() && u.is_finite()) {
+                continue;
+            }
+            c += p * w;
+            v += u * w;
+            m += w;
+        }
+        anyhow::ensure!(m > 0.0, "vehicle lab: car {k} has no nodes to follow");
+        let readings = if self.follow.car == k { self.follow.readings + 1 } else { 1 };
+        let mut heading = if self.follow.car == k { self.follow.heading } else { Vec3::Z };
+        let [a, b] = self.bench.model.head;
+        if a < n && b < n {
+            let d = Vec3::new(f(nodes[12 * b]) as f32 - f(nodes[12 * a]) as f32, 0.0, f(nodes[12 * b + 2]) as f32 - f(nodes[12 * a + 2]) as f32);
+            if d.length() > 1e-3 {
+                heading = d.normalize();
+            }
+        }
+        self.follow = FollowPose {
+            car: k,
+            centre: DVec3::new(f(origin[0]), f(origin[1]), f(origin[2])) + c / m,
+            velocity: (v / m).as_vec3(),
+            heading,
+            t: taken,
+            readings,
+        };
+        Ok(())
+    }
+
+    /// The followed car now, as [`Bench::pose`]: centre, velocity, heading, speed, the
+    /// state's time, readings (0: none yet), and the car.
+    pub fn follow_pose(&self) -> [f64; 13] {
+        let p = &self.follow;
+        [
+            p.centre.x,
+            p.centre.y,
+            p.centre.z,
+            p.velocity.x.into(),
+            p.velocity.y.into(),
+            p.velocity.z.into(),
+            p.heading.x.into(),
+            p.heading.y.into(),
+            p.heading.z.into(),
+            p.velocity.length().into(),
+            p.t,
+            p.readings as f64,
+            p.car as f64,
+        ]
     }
 
     /// The piece labels last sent to the GPU's pair list (empty: none, all zero).

@@ -176,3 +176,59 @@ kernel against base: t 9 5.48 / 5.58, t 20 5.45 / 5.55, t 36 5.64 / 5.86, t 44 5
 - Chrome runtime A/B (no harness runs two kernels from one snapshot in the page).
 - The page could start on the self-split modules alone (no frame module), halving its
   cold compile; that changes the page's start, an owner decision.
+
+## 2026-11-16: `char_move` on GitHub's macOS runners (the C library job's "Compilation failed")
+
+The job "C library (macos)" failed about half its runs in `examples/hello`, which prewarms the character kernels:
+
+```
+In Device::create_compute_pipeline, label = 'char_move'
+  Internal error: new_compute_pipeline_state: NSError { code: 2, localizedDescription: "Compilation failed", domain: "CompilerError", ... }
+```
+
+That `NSError` is all Metal returns (its `userInfo` holds only the same description). The reason is in the macOS unified log of the process (`engine/scripts/metal-compiler-log.sh`, which the CI job now runs when it fails):
+
+```
+10:25:46.500 MTLCompilerService (MTLCompiler) Compilation SUCCESS (TYPE=MTLBuildLibraryFromSourceToArchive - source): Time 983 ms
+10:25:46.624 MTLCompilerService (MTLCompiler) Compilation SUCCESS (TYPE=MTLBuildFunctions - pipeline): Time 114 ms
+10:25:57.595 hello (Metal) Execution of the command buffer was aborted due to an error during execution. Caused GPU Timeout Error (00000002:kIOGPUCommandBufferCallbackErrorTimeout)
+10:25:57.597 hello (AppleParavirtGPUMetalIOGPUFamily) Failed to get compute pipeline state info
+```
+
+The runner is a virtual machine ("Apple M1 (Virtual)", `VirtualMac2,1`, 3 cores, 7 GB) with Apple's paravirtual GPU. The guest's compiler service finishes in about a second; the pipeline is then built outside the guest, and the guest's wait for it ends in a GPU timeout 10.5 to 11.0 s later (two attempts: 10.97 s and 10.49 s). It is not memory (81 % free, no memory kill), not concurrency (no other kernel was compiling), and no compiler crashed.
+
+`char_move` was the one kernel whose build took about that long there:
+
+- Four fresh runners, eight runs of `hello` each: the first run failed both attempts on all four; runs 2 to 8 passed on all four (15 to 22 s a run). One earlier runner passed ten of ten.
+- Eleven earlier CI jobs: the first attempt failed in nine, the engine's one retry in five of those.
+- A real GPU (M3 Max): five of five pass.
+
+### The fix: one call site for the casts (inlined size 78,391 → 21,836 lines)
+
+`wgsl-inline-size.py`: `char_move` was 78,391 lines once inlined. `castCandidates` (the capsule cast against the gathered candidates, 8,138 lines inlined) was written out six times (verify, step up, across, down, stick to floor, ground probe: 48.8k), and the cast straight down at a winner with its surface normal three more times (about 24k).
+
+`char_move` now runs the six casts from one loop (`CAST_VERIFY` … `CAST_GROUND`) that picks each cast's arguments by index, and the cast down at the winner from one call (`castDownSurface`, lane 0, shared through `gsShare[1]`; the step-down's was computed by every lane before, with the same value). Same casts, same arguments, same order, same tolerances.
+
+| `char_move` | Before | After |
+|---|---|---|
+| Inlined lines | 78,391 | 21,836 |
+| Pipeline, M3 Max, cold (`gpu_adapter --compile <wgsl>`) | 7.09 s | 2.00 s |
+| Pipeline, GitHub macOS runner (same command, four runners, three builds each, alternating) | fails, 12 of 12 (the GPU timeout, 10.7 to 15.1 s after the start) | 2.46 to 4.10 s, 12 of 12 (first build on a runner 3.59 to 4.10 s) |
+| `hello` on a fresh GitHub macOS runner, eight runs each | first run failed both attempts on 4 of 4 runners | 64 of 64 runs pass with no failed attempt (8 runners, two workflow runs; first run 14 to 22 s, later 8 to 12 s) |
+
+The runner numbers are from a temporary workflow on the fix's branch (runs 43854810639 and 43911463486, removed before the pull request): it ran `hello` eight times on each of four fresh runners, then built the old kernel's WGSL (main at 977ff3ac) and the new one's with `gpu_adapter --compile`. So the new pipeline has about 2.5 times the room under the roughly 10.5 s limit, where the old one was at or over it.
+
+### Results against the old kernel
+
+Compared on every `CharacterState` the `character` and `heightfield` tests of engine-webgpu decode (1,424 states, raw bits, native Metal; the tests are deterministic run to run):
+
+- **Bit for bit in eight of the eleven character tests** (flat walk, stairs, elevator, moving platform and jump, debris, crush, CCD rocket, compaction) after two things the old straight-line code got from the compiler's algebra and the loop has to say itself: a vertical cast's length is `|disp.y|` (`castCandidates`'s `vertical`; the compiler knew the direction was the constant up axis, the loop's `length()` is the rounded root of a square), and the stepped move is summed as displacements (`Dh * across + up − down`, where `P3 − P` adds and removes `P`).
+- **Not bit for bit on the two slope tests and the dynamic plank.** The first difference is the ground probe's hit distance against the tilted box, 0.8 µm apart with identical inputs (position and velocity equal in bits in that step): the shape cast's iteration, compiled in a different context, converging within its own tolerance. From there the 30° slope's character comes to rest 1.3 mm from where it did (3.1 mm apart at most on the way), the plank's 5 µm; the 55° slide's positions stay equal. Keeping the three casts down as three call sites did not change this (measured), so it is not that merge.
+- All of `character`, `heightfield`, `queries`, `kinematic` (engine-webgpu) and `motion`, `prewarm` (engine-world) pass. engine-metal builds.
+
+No tolerance, iteration count or contact was changed; the remaining difference is the platform compiler's floating-point code for the same source.
+
+### Not done / open
+
+- `query_batch` (63,092 inlined lines) and `projectile_step` (46,267) carry the same casts several times over. No CI job compiles them on the virtual GPU today; a host that prewarms them there would be near the same limit.
+- Chrome was not measured.

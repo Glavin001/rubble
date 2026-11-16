@@ -44,8 +44,8 @@
     #caption span { color: #c3cbd9; font-size: 13.5px; }
     #cross { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; display: none; border: 2px solid rgba(255, 209, 102, 0.95); border-radius: 50%; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
     #cross::after { content: ''; position: absolute; left: 9px; top: 9px; width: 4px; height: 4px; background: rgba(255, 209, 102, 0.95); border-radius: 50%; }
-    body.shoot canvas#c { cursor: crosshair; }
-    body.shoot #cross { display: block; }
+    body.shoot canvas#c, body.mountain canvas#c { cursor: crosshair; }
+    body.shoot #cross, body.mountain #cross { display: block; }
     body.clean #controls, body.clean #about, body.clean #status, body.clean #cross { display: none; }
     body.clean #caption { display: block; }
     body.clean #hud { width: 21rem; }
@@ -82,6 +82,7 @@
         <label class="muted" for="car">Car</label><select id="car" data-opt="build"></select>
         <label class="muted" for="res" title="The authored sedan's model detail: how many nodes and beams its body has (low is the fastest; high the finest crumpling). The generated sedan has one version. Rebuilds the simulation in place.">Detail</label><select id="res" data-opt="build"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>
         <label class="muted" for="cam">Camera</label><select id="cam" data-opt="live"></select>
+        <span id="followRow"><label class="muted" for="follow" title="Which car the camera follows (V cycles). The readouts are the first car's. Applies as it runs.">follows</label><select id="follow" data-opt="live"><option value="0">car 1</option></select></span>
       </div>
       <div class="row">
         <span class="muted">Time</span>
@@ -89,19 +90,6 @@
         <button id="pause">Pause</button><button id="step">Step</button><button id="restart">Restart <kbd>R</kbd></button>
       </div>
       <div class="row"><label class="muted" for="script">Scenario</label><select id="script" data-opt="restart"></select></div>
-      <div class="mode shoot">
-        <h2>Launcher</h2>
-        <div class="row"><select id="shape" data-opt="live"><option value="box">cuboid</option><option value="sphere" selected>sphere</option><option value="cylinder">cylinder</option></select>
-          <span id="dimBox"><input type="number" id="bx" data-opt="live" value="0.3" step="0.05" min="0.02" max="4" />×<input type="number" id="by" data-opt="live" value="0.2" step="0.05" min="0.02" max="4" />×<input type="number" id="bz" data-opt="live" value="0.4" step="0.05" min="0.02" max="4" /> m</span>
-          <span id="dimR">r <input type="number" id="radius" data-opt="live" value="0.1" step="0.01" min="0.02" max="1.5" /> m</span>
-          <span id="dimL">length <input type="number" id="length" data-opt="live" value="0.5" step="0.05" min="0.02" max="4" /> m</span></div>
-        <div class="row"><select id="material" data-opt="live"></select><span class="muted">or mass</span><input type="number" id="mass" data-opt="live" placeholder="kg" min="0.01" step="1" /></div>
-        <div class="row"><span class="muted">speed</span><input type="range" id="speed" data-opt="live" min="1" max="100" value="20" /><b id="speedOut"></b></div>
-        <div class="row"><span class="muted">spin</span><input type="number" id="spin" data-opt="live" value="0" step="5" min="0" max="600" /> rad/s <span class="muted">burst</span><input type="number" id="burst" data-opt="live" value="1" min="1" max="32" />
-          <select id="cylAxis" data-opt="live"><option value="flight">end on</option><option value="cross">side on</option></select></div>
-        <div class="row"><button id="fire">Fire <kbd>F</kbd></button><button id="clearShots">Clear shots</button><span class="muted">or click the scene: the shot goes to what is under the pointer</span></div>
-        <div class="note" id="aimOut"></div>
-      </div>
       <div class="mode compactor">
         <h2>Compactor</h2>
         <div class="row"><select id="axis" data-opt="live"><option value="top">top plate, down</option><option value="sides">side plates</option><option value="ends">front and rear plates</option></select>
@@ -112,12 +100,26 @@
       </div>
       <div class="mode mountain">
         <h2>Infinite mountain</h2>
+        <div class="row"><label class="muted" for="terrain">terrain</label><select id="terrain" data-opt="restart" title="Rolling: a smooth gully down the mountainside, rounded humps and boulders and no shelf, so the cars keep falling and bouncing. Ledges: the first mountain, with shelves, drops and cliffs (the scene of the lab's measurements). Restarts in place."><option value="rolling">rolling gully</option><option value="ledges">ledges and cliffs</option></select></div>
         <div class="row"><span class="muted">seed</span><input type="number" id="seed" data-opt="restart" value="1" min="0" step="1" /><label><input type="checkbox" id="rockslide" data-opt="restart" /> rockslide when at rest</label></div>
         <div class="row"><span class="muted">steepness</span><input type="range" id="steepness" data-opt="restart" min="35" max="55" step="1" value="50" /><b id="steepnessOut"></b></div>
         <div class="row"><span class="muted">roughness</span><input type="range" id="roughness" data-opt="restart" min="0" max="1" step="0.05" value="0.6" /><b id="roughnessOut"></b></div>
         <div class="row"><span class="muted">launch</span><input type="range" id="launch" data-opt="restart" min="0" max="40" step="1" value="14" /><b id="launchOut"></b>
           <span class="muted">loose rocks per chunk</span><input type="number" id="loose" data-opt="restart" value="0" min="0" max="16" /></div>
         <div class="row"><span class="muted">start</span><input type="number" id="start" data-opt="restart" value="0" min="0" max="100000" step="1000" style="width:5.5rem" /> m down the fall line <span class="note">(far from the origin: a precision check)</span></div>
+      </div>
+      <div class="mode shoot mountain">
+        <h2>Launcher</h2>
+        <div class="row"><select id="shape" data-opt="live"><option value="box">cuboid</option><option value="sphere" selected>sphere</option><option value="cylinder">cylinder</option></select>
+          <span id="dimBox"><input type="number" id="bx" data-opt="live" value="0.3" step="0.05" min="0.02" max="4" />×<input type="number" id="by" data-opt="live" value="0.2" step="0.05" min="0.02" max="4" />×<input type="number" id="bz" data-opt="live" value="0.4" step="0.05" min="0.02" max="4" /> m</span>
+          <span id="dimR">r <input type="number" id="radius" data-opt="live" value="0.1" step="0.01" min="0.02" max="1.5" /> m</span>
+          <span id="dimL">length <input type="number" id="length" data-opt="live" value="0.5" step="0.05" min="0.02" max="4" /> m</span></div>
+        <div class="row"><select id="material" data-opt="live"></select><span class="muted">or mass</span><input type="number" id="mass" data-opt="live" placeholder="kg" min="0.01" step="1" /></div>
+        <div class="row"><span class="muted">speed</span><input type="range" id="speed" data-opt="live" min="1" max="100" value="20" /><b id="speedOut"></b></div>
+        <div class="row"><span class="muted">spin</span><input type="number" id="spin" data-opt="live" value="0" step="5" min="0" max="600" /> rad/s <span class="muted">burst</span><input type="number" id="burst" data-opt="live" value="1" min="1" max="32" />
+          <select id="cylAxis" data-opt="live"><option value="flight">end on</option><option value="cross">side on</option></select></div>
+        <div class="row"><button id="fire">Fire <kbd>F</kbd></button><button id="clearShots">Clear shots</button><span class="muted">or click the scene: the shot goes to what is under the pointer (on the mountain too: knock a stuck car loose)</span></div>
+        <div class="note" id="aimOut"></div>
       </div>
       <div class="mode drive">
         <h2>Obstacles, ahead of the car</h2>
@@ -177,7 +179,7 @@
       <div class="row" id="cutaway"></div>
     </div>
     <div class="grid" id="stats"></div>
-    <div id="about" class="muted"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · drag to orbit, wheel to zoom (any camera) · <kbd>T</kbd> slow motion · <kbd>P</kbd> pause · <kbd>.</kbd> step · <kbd>C</kbd> camera · <kbd>R</kbd> restart</div>
+    <div id="about" class="muted"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · drag to orbit, wheel to zoom (any camera) · <kbd>T</kbd> slow motion · <kbd>P</kbd> pause · <kbd>.</kbd> step · <kbd>C</kbd> camera · <kbd>V</kbd> next car to follow · <kbd>R</kbd> restart</div>
     <div id="status" class="muted">starting…</div>
     <div id="err"></div>
   </div>
@@ -278,7 +280,7 @@
     const SCRIPTS = ['shoot-box', 'shoot-sphere', 'shoot-cylinder', 'compactor-top', 'compactor-sides', 'compactor-ends', 'mountain', 'drive-wall', 'drive-bricks'];
     $('script').add(new Option('none (free play)', ''));
     for (const s of SCRIPTS) $('script').add(new Option(s, s));
-    const CAMS = { orbit: 'Orbit (drag)', chase: 'Chase', tumble: 'Tumble', side: 'Side', top: 'Top' };
+    const CAMS = { overhead: 'Overhead chase', orbit: 'Orbit (drag)', chase: 'Chase', tumble: 'Tumble', side: 'Side', top: 'Top' };
     for (const [k, v] of Object.entries(CAMS)) $('cam').add(new Option(v, k));
     // The cars: the generated sedan (__mods/sedan_new, which build-web.sh makes by running
     // the generator: missing only where the page is served without that build), the
@@ -297,6 +299,8 @@
     const put = (id, v) => { const c = $(id); if (!c || v == null) return; if (c.type === 'checkbox') c.checked = v === true || v === '1' || v === 'true'; else c.value = v; };
     const defaults = Object.fromEntries(controls.map((c) => [c.id, get(c.id)]));
     let mode = 'shoot';
+    // The followed car from the URL, kept until the build lists the cars.
+    let followWant = qs.get('follow');
     // The URL first; then what the URL leaves open: the car (the generated sedan when it
     // is there) and surface contact (on for generated cars).
     for (const c of controls) if (qs.has(c.id)) put(c.id, qs.get(c.id));
@@ -338,10 +342,10 @@
     }
     for (const [k, v] of Object.entries(MODES)) {
       const b = document.createElement('button'); b.textContent = v; b.dataset.mode = k;
-      b.onclick = () => { put('script', ''); script = null; const rebuild = setMode(k); put('cam', k === 'mountain' ? 'orbit' : k === 'drive' ? 'chase' : 'orbit'); syncUrl(); if (rebuild && W) build(); else restart(); };
+      b.onclick = () => { put('script', ''); script = null; const rebuild = setMode(k); put('cam', k === 'mountain' ? 'overhead' : k === 'drive' ? 'chase' : 'orbit'); syncUrl(); if (rebuild && W) build(); else restart(); };
       $('modes').append(b);
     }
-    if (!qs.has('cam')) put('cam', mode === 'mountain' ? 'orbit' : mode === 'drive' ? 'chase' : 'orbit');
+    if (!qs.has('cam')) put('cam', mode === 'mountain' ? 'overhead' : mode === 'drive' ? 'chase' : 'orbit');
     setMode(mode); showOuts(); shapeUi();
     let restartTimer = null;
     for (const c of controls) {
@@ -352,7 +356,7 @@
         if (c.id === 'script') { await loadScript(); restart(); return; }
         if (c.dataset.opt === 'build') { if (c.type === 'number') { clearTimeout(restartTimer); restartTimer = setTimeout(build, 400); } else build(); }
         else if (c.dataset.opt === 'restart') { clearTimeout(restartTimer); restartTimer = setTimeout(restart, c.type === 'range' || c.type === 'number' ? 120 : 0); }
-        else if (c.id === 'cam') cam.init = false;
+        else if (c.id === 'cam' || c.id === 'follow') cam.init = false;
         else if (c.id === 'ownTravel') cmd({ ownTravel: get('ownTravel') });
         else if (c.id === 'pieceLabels') cmd({ pieceLabels: get('pieceLabels') });
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
@@ -452,7 +456,7 @@
     }
     let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0;
     const scene = () => (mode === 'mountain' ? 'mountain' : 'flat');
-    const mountainSpec = () => ({ seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide'), start: get('start') });
+    const mountainSpec = () => ({ terrain: get('terrain'), seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide'), start: get('start') });
     const configure = () => {
       // The drawing's resolution: the display's pixels times the render scale (the
       // renderScale control; "auto" lowers it while the World's steps are being refused,
@@ -505,7 +509,19 @@
         const [nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize] = lab.readPlan();
         const w = { world, lab, device, env, cars, car, n, spans, hidden: new Set(), carIds: [], timing, RATE: 1 / world.solver().dt, pacer: null,
           plan: { nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize }, depthTex: null, msaaTex: null,
-          pool: Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: nSize + oSize + cSize + bSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })) };
+          pool: Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: nSize + oSize + cSize + bSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })),
+          // The camera's own readback of the car it follows, every drawn frame (its nodes
+          // and origin record: tens of kB), apart from the measurements, which are taken
+          // less often and skipped while the GPU is busy (a camera on them stopped, then
+          // jumped to catch up).
+          camPool: Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: nSize + 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false })) };
+        // The cars the camera can follow.
+        const nv = lab.vehicleCount(), was = followWant ?? get('follow');
+        followWant = null;
+        $('follow').textContent = '';
+        for (let k = 0; k < nv; k++) $('follow').add(new Option(k === 0 ? 'car 1 (readouts)' : get('parked') && k === nv - 1 ? `car ${k + 1} (parked)` : `car ${k + 1}`, String(k)));
+        put('follow', Number(was) >= 0 && Number(was) < nv ? String(Number(was)) : '0');
+        $('followRow').style.display = nv > 1 ? '' : 'none';
         w.pacer = new FramePacer(w.RATE, 0);
         w.wire = structureView(device, world);
         for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i));
@@ -594,11 +610,12 @@
     // The stop on an unstable simulation (stability-stop.mjs; Rust judges, read-only):
     // a new one per restart, since a restart moves the car. Modes where rigid bodies
     // put energy into the car that the check does not read (shots, the compactor's
-    // plates, a crash sled, the rockslide's boulders) keep only its non-finite check.
+    // plates, a crash sled, the mountain's shots and rockslide boulders) keep only its
+    // non-finite check.
     function watch() {
       document.getElementById('stopped')?.remove();
       W.stop = createStabilityStop(W.world.explicitHealth() ?? null, { params: { mode, script: script?.name ?? null, spec: { ...W.spec, vehicle: undefined, parts: undefined } } });
-      W.stop.unbounded(mode === 'shoot' || mode === 'compactor' || mode === 'crash' || (mode === 'mountain' && get('rockslide')));
+      W.stop.unbounded(mode === 'shoot' || mode === 'compactor' || mode === 'crash' || mode === 'mountain');
     }
     async function restart(first = false) {
       if (!W) return;
@@ -617,9 +634,10 @@
       if (RECORD) orbit.auto = 0.35;
       $('ppause').textContent = 'Pause';
       for (const p of W.pool) p.stale = p.busy;
+      for (const p of W.camPool) p.stale = p.busy;
       restartMs = performance.now() - t0; restartAt = t0; if (!first) restarts++;
       const name = W.car.name;
-      $('subtitle').textContent = `${name}${get('surface') ? ', surface contact on' : ''} · ${scene() === 'mountain' ? `mountain seed ${get('seed')}, ${get('steepness')}°, roughness ${get('roughness')}` : 'flat arena'}`;
+      $('subtitle').textContent = `${name}${get('surface') ? ', surface contact on' : ''} · ${scene() === 'mountain' ? `${get('terrain') === 'ledges' ? 'ledged ' : ''}mountain seed ${get('seed')}, ${get('steepness')}°, roughness ${get('roughness')}` : 'flat arena'}`;
       $('capTitle').textContent = script?.title || `Vehicle Lab · ${MODES[mode]}${mode === 'crash' ? `: ${$('crashKind').selectedOptions[0].text}, ${get('kmh')} km/h` : ''}`;
       $('capSub').textContent = `${name}, 2 kHz node–beam, in one GPU World${get('surface') ? ' · surface contact on' : ''}`;
       // The first reading, before any step: the aim, the plates and the camera need the car.
@@ -715,7 +733,8 @@
       if (e.code === 'KeyT') setSlow(slow() === 1 ? 0.25 : slow() === 0.25 ? 0.0625 : 1);
       if (e.code === 'KeyP') $('pause').click();
       if (e.code === 'Period') $('step').click();
-      if (e.code === 'KeyF' && mode === 'shoot') $('fire').click();
+      if (e.code === 'KeyF' && (mode === 'shoot' || mode === 'mountain')) $('fire').click();
+      if (e.code === 'KeyV' && $('follow').options.length > 1) { put('follow', String((Number(get('follow')) + 1) % $('follow').options.length)); cam.init = false; syncUrl(); }
       if (e.code === 'KeyC') { const ks = Object.keys(CAMS); put('cam', ks[(ks.indexOf(get('cam')) + 1) % ks.length]); cam.init = false; syncUrl(); }
     });
     addEventListener('keyup', (e) => keys.delete(e.code));
@@ -767,8 +786,31 @@
     // the frame's lead along its velocity.
     let pose = { c: [0, 0.6, 0], v: [0, 0, 0], h: [0, 0, 1], speed: 0 };
     function readPose() {
-      const p = W.lab.pose();
-      if (p[11] > 0 && p.every(Number.isFinite)) pose = { c: [p[0], p[1], p[2]], v: [p[3], p[4], p[5]], h: [p[6], p[7], p[8]], speed: p[9], t: p[10] };
+      // The followed car from the camera's own readback (Lab::follow_pose); before its
+      // first reading, the first car from the measurements.
+      let p = W.lab.followPose();
+      if (!(p[11] > 0 && Number(p[12]) === Number(get('follow')))) p = Number(get('follow')) === 0 ? W.lab.pose() : null;
+      if (p && p[11] > 0 && p.slice(0, 12).every(Number.isFinite)) pose = { c: [p[0], p[1], p[2]], v: [p[3], p[4], p[5]], h: [p[6], p[7], p[8]], speed: p[9], t: p[10] };
+    }
+    // The camera's readback of the followed car (w.camPool), encoded with a frame.
+    function camReadback(w, enc) {
+      const k = Number(get('follow'));
+      const plan = w.lab.followPlan(k);
+      const slot = w.camPool.find((p) => !p.busy);
+      if (!slot || plan.length < 3 || plan[1] + 16 > slot.buf.size) return null;
+      slot.busy = true; slot.stale = false;
+      enc.copyBufferToBuffer(w.world.explicitNodesBuffer(), plan[0], slot.buf, 0, plan[1]);
+      enc.copyBufferToBuffer(w.world.explicitMiscBuffer(), plan[2], slot.buf, plan[1], 16);
+      const taken = w.lab.time(), len = plan[1];
+      return async () => {
+        try { await slot.buf.mapAsync(GPUMapMode.READ); } catch { slot.busy = false; return; }
+        try {
+          if (W === w && !slot.stale && Number(get('follow')) === k) {
+            const a = slot.buf.getMappedRange();
+            w.lab.ingestFollow(k, new Uint32Array(a, 0, len / 4), new Uint32Array(a, len, 4), taken);
+          }
+        } catch (e) { console.warn(e); } finally { slot.buf.unmap(); slot.busy = false; }
+      };
     }
     const cam = { eye: [6, 3, -7], at: [0, 0.6, 0], init: false, target: [0, 0.6, 0] };
     const orbit = { yaw: 0.9, pitch: 0.3, dist: 8.5, auto: RECORD ? 0.35 : 0 };
@@ -777,8 +819,8 @@
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('pointerdown', (e) => { canvas.focus(); drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: 0, button: e.button }; try { canvas.setPointerCapture(e.pointerId); } catch {} });
     canvas.addEventListener('pointerup', (e) => {
-      // A click without a drag in Shoot: fire along the ray through the pixel.
-      if (drag && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 8 && drag.button === 0 && mode === 'shoot') {
+      // A click without a drag in Shoot or on the mountain: fire along the ray through the pixel.
+      if (drag && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 8 && drag.button === 0 && (mode === 'shoot' || mode === 'mountain')) {
         const r = canvas.getBoundingClientRect();
         const nx = ((e.clientX - r.left) / r.width) * 2 - 1, ny = 1 - ((e.clientY - r.top) / r.height) * 2;
         const inv = lastInv;
@@ -807,10 +849,18 @@
       else camZoom = Math.max(0.2, Math.min(8, camZoom * k));
     }, { passive: false });
     let lastInv = new Float32Array(16);
+    // How far the eye may stand from the car (m): Bench::clear_view, eased out.
+    let camFree = Infinity;
+    // The camera's reading age (simulated s) each drawn frame: __state().camAge.
+    const camAges = [];
     function updateCamera(lead, wallDt) {
       // The reading is of an earlier step: carried forward by its age in simulated time
       // (and the frame's lead), so the camera moves with the car drawn, not behind it.
-      const age = Math.max(0, Math.min(0.25, (W.lab.time() - (pose.t ?? W.lab.time())))) + lead;
+      // (With the camera's own readback every frame the reading is a frame or two old;
+      // the bound only matters if readings stop, as when the GPU is lost.)
+      const rawAge = W.lab.time() - (pose.t ?? W.lab.time());
+      camAges.push(rawAge); if (camAges.length > 600) camAges.shift();
+      const age = Math.max(0, Math.min(0.5, rawAge)) + lead;
       const c = add3(pose.c, mul3(pose.v, age));
       // The target follows the car with no lag at any speed: it is moved by the car's own
       // movement since the last frame first, and only what is left (a new reading's
@@ -828,6 +878,17 @@
       const camMode = get('cam');
       switch (camMode) {
         case 'chase': eye = add3(t, mul3(add3(mul3(chaseHead, -7.5), [0, 2.2, 0]), camZoom)); at = add3(t, mul3(chaseHead, 4)); break;
+        // Above the car, looking down at it. On the mountain the frame is the fall line's
+        // (fixed: a tumbling car does not swing it): 9 m over the slope, 10 m up it,
+        // looking a little down the slope; on the flat arena behind the car's travel.
+        case 'overhead': {
+          if (scene() === 'mountain') {
+            const th = get('steepness') * Math.PI / 180;
+            const n = [0, Math.cos(th), Math.sin(th)], up = [0, Math.sin(th), -Math.cos(th)];
+            eye = add3(t, mul3(add3(mul3(n, 9), mul3(up, 10)), camZoom)); at = add3(t, mul3(up, -3));
+          } else { eye = add3(t, mul3(add3(mul3(chaseHead, -7), [0, 9, 0]), camZoom)); at = add3(t, mul3(chaseHead, 2)); }
+          break;
+        }
         // Down the mountain: beside and above the car, looking down the fall line.
         case 'tumble': eye = add3(t, mul3([9, 5.5, -11], camZoom)); at = add3(t, [0, -0.5, 2]); break;
         case 'side': eye = add3(t, mul3([9, 1.6, 0], camZoom)); break;
@@ -839,12 +900,20 @@
         }
       }
       if (scene() !== 'mountain') eye[1] = Math.max(eye[1], 0.3);
-      if (!cam.init) { cam.eye = eye; cam.at = at; cam.init = true; return; }
+      if (!cam.init) { cam.eye = eye; cam.at = at; cam.init = true; camFree = Infinity; }
       // Orbit: the eye and the point looked at are one rigid pair on the target (the
       // drag sets the angle directly), so the view's direction never changes by itself.
       // The other cameras ease their own offsets, on top of the car's movement.
-      if (camMode === 'orbit') { cam.eye = eye; cam.at = at; return; }
-      cam.eye = mix3(add3(cam.eye, moved), eye, 1 - Math.exp(-wallDt / 0.35)); cam.at = mix3(add3(cam.at, moved), at, 1 - Math.exp(-wallDt / 0.1));
+      else if (camMode === 'orbit') { cam.eye = eye; cam.at = at; }
+      else { cam.eye = mix3(add3(cam.eye, moved), eye, 1 - Math.exp(-wallDt / 0.35)); cam.at = mix3(add3(cam.at, moved), at, 1 - Math.exp(-wallDt / 0.1)); }
+      // Nothing drawn between the camera and the car: the lab (Rust) casts the view ray
+      // from the car to the eye against the mountain's rock and the arena's ground, and
+      // the eye comes in in front of what it meets. It comes in at once (the car is
+      // never hidden) and goes back out eased, so a rock passing by does not jerk it.
+      const off = sub3(cam.eye, t), dist = Math.hypot(...off);
+      const free = W.lab.clearView(t[0], t[1], t[2], cam.eye[0], cam.eye[1], cam.eye[2]);
+      camFree = free < camFree ? free : camFree + (free - camFree) * (1 - Math.exp(-wallDt / 0.5));
+      if (dist > 1e-6 && camFree < dist) cam.eye = add3(t, mul3(off, camFree / dist));
     }
 
     // ---------------------------------------------------------------- the script's page events
@@ -913,6 +982,7 @@
         finish = readback(w, enc, wantBeams);
         if (finish && wantBeams) lastBeamRead = now;
       }
+      const camFinish = camReadback(w, enc);
       if (dq) { enc.resolveQuerySet(dq.set, 0, 3, dq.resolve, 0); enc.copyBufferToBuffer(dq.resolve, 0, dq.read, 0, 24); }
       device.queue.submit([enc.finish()]);
       if (dq) {
@@ -924,7 +994,9 @@
           if (before >= 0 && picture >= 0 && before < 1000 && picture < 1000) { drawGpu.before.push(before); drawGpu.picture.push(picture); if (drawGpu.before.length > 120) { drawGpu.before.shift(); drawGpu.picture.shift(); } }
         }).catch(() => { dq.busy = false; });
       }
-      return finish ? finish() : Promise.resolve();
+      // (The recorder waits for both; the live page lets the camera's land when it does.)
+      const cf = camFinish ? camFinish() : null;
+      return Promise.all([finish ? finish() : null, RECORD ? cf : null]);
     }
     // The draw timer's queries and buffers, one set a device; null without timestamp
     // queries or while the last reading is still out (that frame is not timed).
@@ -1075,7 +1147,7 @@
       ]);
       $('shots').innerHTML = s.shots.length ? '<tr><th>shot</th><th>kg</th><th>impact m/s</th><th>p given N·s</th><th>of own</th><th>peak kN</th><th>result</th></tr>'
         + s.shots.slice(-8).reverse().map((h) => `<tr><td>${h.id} ${esc(h.what.replace(/ m$/, ''))}</td><td>${nf(h.mass, 1)}</td><td>${h.impactSpeed == null ? '–' : nf(h.impactSpeed, 1)}</td><td>${nf(h.momentum)}</td><td>${nf(100 * h.momentumAlong / Math.max(1e-6, h.momentumOwn))} %</td><td>${nf(h.peakForce / 1000, 1)}</td><td>${h.outcome}</td></tr>`).join('') : '<tr><td class="muted">none fired</td></tr>';
-      $('shotsBox').style.display = mode === 'shoot' || s.shots.length ? '' : 'none';
+      $('shotsBox').style.display = mode === 'shoot' || mode === 'mountain' || s.shots.length ? '' : 'none';
       if (mode === 'compactor' || s.plates.length) {
         $('plates').innerHTML = s.plates.length ? '<tr><th>plate</th><th>travel m</th><th>force kN</th><th>peak kN</th><th>work kJ</th><th>node in plate</th></tr>'
           + s.plates.map((q, i) => `<tr><td style="color:${COLORS[i % 2]}">${q.name} (${q.state})</td><td>${nf(q.travel, 3)} / ${nf(q.stroke, 2)}</td><td>${nf(q.force / 1000, 1)}</td><td>${nf(q.forcePeak / 1000, 1)}</td><td>${nf(q.work / 1000, 2)}</td><td>${nf(1000 * q.nodeDepth)} mm</td></tr>`).join('') : '<tr><td class="muted">no plates: Start</td></tr>';
@@ -1158,7 +1230,7 @@
       return { steps: rows.length, total: stat(1), vehicle: stat(2), refused: perfLog.reduce((a, r) => a + r.refused, 0), taken: perfLog.reduce((a, r) => a + r.steps, 0) };
     };
     window.__gpu = () => ({ total: [...gpuTotal], split: gpuSplit(), segments: Object.fromEntries([...gpuSeg].map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length])) });
-    window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95), worst: stepHist.length ? Math.max(...stepHist) : 0 }, stepsAFrame: [0, 1, 2].map((k) => takenHist.filter((t) => (k < 2 ? t === k : t >= 2)).length), refused: refusedHist.reduce((a, b) => a + b, 0), carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
+    window.__state = () => ({ t: W?.lab.time(), simRate, fps, bodies: W?.world.bodyCount(), readsTaken, readsSkipped, camAge: camAges.length ? { p50: [...camAges].sort((a, b) => a - b)[camAges.length >> 1], max: Math.max(...camAges) } : null, mode, car: get('car'), surface: get('surface'), restartMs, againMs, restarts, firstLoadMs, lastBuildMs, frameMs: { p50: pct(0.5), p95: pct(0.95), worst: stepHist.length ? Math.max(...stepHist) : 0 }, stepsAFrame: [0, 1, 2].map((k) => takenHist.filter((t) => (k < 2 ? t === k : t >= 2)).length), refused: refusedHist.reduce((a, b) => a + b, 0), carLoadMs: W?.car.loadMs, carBytes: W?.car.bytes, gpu: W && W.timing !== 'off' ? window.__gpu() : null });
 
     // ---------------------------------------------------------------- loops
     const before = () => { runPageEvents(W.lab.time()); applyDrive(); W.lab.beforeStep(W.world); };
