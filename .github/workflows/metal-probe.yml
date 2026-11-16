@@ -1,0 +1,47 @@
+# TEMPORARY (investigation of the macOS 'char_move' "Compilation failed"): builds the
+# C library once and runs examples/hello many times, printing what macOS logged about
+# Metal's compiler after each failure. Removed before this branch is merged.
+name: Metal probe
+on:
+  push:
+    branches: [claude/admiring-dhawan-d1aea5]
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/lfs-pull
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          key: c-abi
+          save-if: false
+      - name: Cache slangc
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rubble-tools
+          key: rubble-slangc-${{ runner.os }}-${{ hashFiles('engine/scripts/slangc.sh') }}
+      - name: Build
+        env:
+          RUN_EXAMPLE: 0
+        run: bash engine/scripts/build-ffi.sh
+      - name: Run hello 10 times
+        run: |
+          HELLO=engine/ffi-dist/rubble-macos-aarch64/examples/hello
+          fails=0
+          for i in $(seq 1 10); do
+            echo "::group::run $i"
+            start=$(date +%s)
+            if /usr/bin/time -l "$HELLO" > run.out 2> run.err; then r=ok; else r=FAIL; fails=$((fails+1)); fi
+            cat run.out; cat run.err
+            echo "::endgroup::"
+            echo "RUN $i: $r in $(( $(date +%s) - start )) s"
+            if [[ $r == FAIL ]]; then
+              echo "::group::metal log after run $i"
+              bash engine/scripts/metal-compiler-log.sh 2
+              echo "::endgroup::"
+            fi
+          done
+          echo "FAILED $fails of 10"
