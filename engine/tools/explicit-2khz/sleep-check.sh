@@ -10,7 +10,7 @@
 #    (fast-check.sh --make): the physics state bit for bit (`--ab-switch sleep`; the
 #    sleep records, anchors and flags are sleep's own).
 # 2. Cars asleep. The mountain's cars never meet sleep's rule (vehicle-perf-first-
-#    principles.md §8.26), so these run on the flat arena: eight cars and one car parked,
+#    principles.md §8.27), so these run on the flat arena: eight cars and one car parked,
 #    saved at t 5 s (out/fixtures_flat, made here when missing), sleep on at the default
 #    thresholds. The lone car sleeps 1.0 s after the fixture, the row of seven (one
 #    contact group) 2.4 s after it, so 180 frames hold both and the frames after:

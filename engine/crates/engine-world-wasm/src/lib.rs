@@ -154,6 +154,12 @@ pub(crate) async fn web_device() -> Result<(wgpu::AdapterInfo, wgpu::Device, wgp
 /// Set by the device-lost callback; cleared when a new device is opened.
 static DEVICE_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set by the first step taken after a load's kernels were compiled: the page is
+/// running (its renderers built, its first frame owed). The deferred kernels' compiles
+/// start only then: started before, Chrome builds the page's render pipelines behind
+/// them (measured: "Building the renderers" 50 s behind a 50 s fallback kernel).
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// What a load reports to its page (`load-progress.mjs` `loading.progress`), one
 /// line per event:
 /// - `spawn`: the vehicles are being built;
@@ -340,12 +346,14 @@ pub(crate) async fn warm_pipelines(
     #[cfg(target_arch = "wasm32")]
     {
         use js_sys::{Promise, Reflect};
+        use wasm_bindgen::JsCast;
         if device.as_webgpu().is_none() {
             return Ok(());
         }
         // Paths that only save time wait for their deferred kernels' compiles
         // (engine_webgpu::pipeline_ready): marked below as each one finishes.
         engine_webgpu::set_pipeline_gate(true);
+        RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
         let names = kernel_names(specs);
         hear(format!(
             "kernels {}",
@@ -441,6 +449,23 @@ pub(crate) async fn warm_pipelines(
             let device = device.clone();
             let hear = hear.clone();
             wasm_bindgen_futures::spawn_local(async move {
+                // Not before the page runs (see RUNNING); a host that never steps
+                // through `step` starts them after two minutes.
+                let started = js_sys::Date::now();
+                while !RUNNING.load(std::sync::atomic::Ordering::Relaxed) && js_sys::Date::now() - started < 120_000.0 {
+                    let wait = Promise::new(&mut |done, _| {
+                        let timer = Reflect::get(&js_sys::global(), &"setTimeout".into()).ok();
+                        if let Some(f) = timer.and_then(|t| t.dyn_into::<js_sys::Function>().ok()) {
+                            let _ = f.call2(&JsValue::NULL, &done, &JsValue::from_f64(100.0));
+                        } else {
+                            let _ = done.call0(&JsValue::NULL);
+                        }
+                    });
+                    let _ = wasm_bindgen_futures::JsFuture::from(wait).await;
+                    if DEVICE_LOST.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                }
                 for (s, name) in later {
                     if DEVICE_LOST.load(std::sync::atomic::Ordering::Relaxed) {
                         return;
@@ -582,6 +607,7 @@ impl WebWorld {
             return Ok(false);
         }
         res(self.world.step())?;
+        RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(true)
     }
 
