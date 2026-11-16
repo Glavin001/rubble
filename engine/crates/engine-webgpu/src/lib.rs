@@ -133,9 +133,19 @@ pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
 /// The split group path (`EB_VV_SPLIT`, engine/docs/measurements/contact-groups-design.md):
 /// per frame-module variant (plain, wide, aero, aero wide) the members' step
 /// (`explicit_beams_split_member`), the groups' pass (`explicit_beams_split_group`) and
-/// its triangle tests across workgroups (`explicit_beams_split_tests`).
+/// its triangle tests across workgroups (`explicit_beams_split_tests`); and the pass's
+/// front as fleet-wide dispatches (`explicit_beams_fleet_front`, `explicit_beams_fleet_plan`:
+/// explicit_beams_fleet.slang, contact-groups-design.md §8).
 /// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 12] = [
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 20] = [
+    ("explicit_beams_split_fleetfront", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront.wgsl"))),
+    ("explicit_beams_split_fleetplan", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan.wgsl"))),
+    ("explicit_beams_split_fleetfront_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_wide.wgsl"))),
+    ("explicit_beams_split_fleetplan_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan_wide.wgsl"))),
+    ("explicit_beams_split_fleetfront_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_aero.wgsl"))),
+    ("explicit_beams_split_fleetplan_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan_aero.wgsl"))),
+    ("explicit_beams_split_fleetfront_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_aero_wide.wgsl"))),
+    ("explicit_beams_split_fleetplan_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan_aero_wide.wgsl"))),
     ("explicit_beams_split_member", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_member.wgsl"))),
     ("explicit_beams_split_group", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_group.wgsl"))),
     ("explicit_beams_split_tests", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_tests.wgsl"))),

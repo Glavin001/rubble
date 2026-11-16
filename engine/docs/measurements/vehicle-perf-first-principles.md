@@ -1733,3 +1733,80 @@ states (1, 2, 4, 8, 32 cars) in place of driving up to each moment; a cache for 
 kernel compile; a `fast` build profile. A rebuild after a kernel edit 91 s → 5 s (a
 small file) or 25 s (`explicit_beams.slang`); a bit-for-bit check of four eight-car
 moments 4–6 minutes → 5 s.
+
+### 8.25 Vehicle contact's state by vehicle; its front and tests as dispatches over the fleet (2026-11-16)
+
+`contact-groups-design.md` §8, stages 1 and 2 (what is built: its §8.6; stage 3, the
+levels, is not: its §8.7). Perf flags 4096 (`PERF_FLEET_STATE`) and 8192
+(`PERF_FLEET_FRONT`, with 4096), both on by default, each a checkbox on the lab page.
+Kernel `explicit_beams_fleet.slang`; modules `explicit_beams_split_fleetfront` and
+`explicit_beams_split_fleetplan` (four variants each; 116 explicit modules).
+
+**Proofs** (native M3 Max; the GPU shared with another session throughout):
+
+- `fast-check.sh perf=12288` (both against neither): 18 fixtures (1, 2, 4, 8, 32 cars)
+  and the four pre-lid four-car fixtures at 20 frames, every state word the same.
+- `vehicle_lab … --ab 2,3.7,6,9 --ab-switch perf=…`, 2, 4 and 8 cars: `perf=8192` (both
+  against stage 1 alone), `perf=4096` (both against neither) and `perf=4096` with
+  `RUBBLE_PERF_FLAGS=8129` (stage 1 alone against neither): 36 lines, every one "state
+  bit for bit: true". `--ab-switch groupsplit` at eight cars: true at the four times.
+  32 cars, `--ab 1,2.5,4`: true (one group of 32: the larger groups' pass either way;
+  two words of the plan's records differ at t 1, outside the verdict as before).
+- `fleet_contact_gpu` (new: two sedans head on, a column of six; each switch setting,
+  with and without self split), `group_split_gpu` (3), `self_split_gpu` (8): pass.
+- `perf-verify.sh default …`: `explicit_loop_cap` 5, `explicit_beams_bitwise` 12,
+  `explicit_contact_gpu` 13, `explicit_pair_reuse_gpu` 2, `vv_grid_gpu` 2,
+  `explicit_vehicles` 11, Metal `vehicle_parity` 4: PASS.
+- Chrome: "all 116 modules compile in Chrome".
+
+**Eight cars, t 9 s, ms a frame of 34 substeps by dispatch kind** (`--ab-profile`; the
+scene with the lid, §8.24):
+
+| kind | before (both off) | after |
+|---|---|---|
+| front (one workgroup a group) | 6.81 | scans 0.29, owners' parts 0.61, triangles and points 0.89, grids 0.46, sorted copy 0.32: 2.57 |
+| tests' walk | 4.09 | 1.49, and its prefix 0.27 |
+| tests' listed pairs | 1.80 | 0.52, and its prefix 0.30 |
+| levels (a workgroup a group) | 2.81 | 3.29 |
+| the cars' steps, their self-collision walk, pairs and hits | 8.86 | 8.89 |
+| **frame, untimed** | **23.8** | **16.3** |
+
+A/B from one snapshot, on / off, ms a frame (`perf=4096`: both against neither):
+
+| cars | t 2 | t 3.7 | t 6 | t 9 |
+|---|---|---|---|---|
+| 2 | 7.41 / 7.83 | 11.48 / 11.97 | 10.88 / 11.56 | 10.03 / 11.06 |
+| 4 | 8.21 / 8.34 | 17.08 / 18.10 | 17.32 / 18.71 | 12.81 / 14.92 |
+| 8 | 12.71 / 14.87 | 19.97 / 23.98 | 15.51 / 22.72 | 16.28 / 23.66 |
+
+Stage 1 alone is within noise of the groups' slots (eight cars at t 9: 22.0 against
+23.6); the gain is stage 2's. The first 9.3 s of the eight-car run, the explicit
+frame's GPU ms a World step (t ≥ 0.5 s): median 21.7, p95 25.1, worst 31.6 with both
+off; 14.8 / 20.7 / 23.8 in the `perf=8192` A/B run (both on from t 2 s). Not measured:
+a whole 40 s run, and Chrome's frame times (the page was not opened; only the modules'
+compile was checked).
+
+**Thirty-two cars are unchanged**: one group past `VV_PART`, so `vvPass` in one
+workgroup, 150 of 166 ms at t 2.5 s (187 / 187, 234 / 234, 271 / 271 ms a frame on /
+off at t 2.5, 1 and 4 s). That is stage 3.
+
+**What cost what on the way.**
+- A group whose members have not met ran every fleet dispatch for nothing (four cars
+  falling: 9.5 against 8.5 ms a frame). The first plan now sizes everything after it
+  and writes zeros when no owner is offered a partner: 8.5 against 8.6.
+- The walk's parts: 64 workgroups' worth of threads, as a group had, left the walk at
+  8.2 ms a frame for eight cars at rest (the t 16 s fixture); 128 gives 3.0, and that
+  frame 29.4 → 18.8 ms (256: the same within noise).
+- The plan's pair list can hold a pair twice (`contact-groups-design.md` §8.6): hits
+  applied twice at four cars. Found by the long harness run, not by the suites. The
+  fast rung that catches it: `FIXTURES=$PWD/out/fixtures_nolid LAB_NO_LID=1
+  fast-check.sh --make 4`, then the same with `FRAMES=20` and `perf=12288` (the scene
+  before the lid, where the duplicate arises 18 frames after t 3.7 s; `LAB_NO_LID` is
+  the lab's switch for it).
+
+**Open, not caused by this work.** `group_split_gpu`'s three tests pass in one process;
+with a fourth test beside them that also toggles a perf flag frame by frame (tried with
+this work's flags, and with flag 256 alone and no fleet kernel in use) the tests
+diverge from frames 0 to 5, each on its own device. One at a time
+(`--test-threads=1`) all pass. Zeroing the split pipelines' workgroup memory does not
+change it. Cause not found; the new test is in a file of its own (`fleet_contact_gpu`).
