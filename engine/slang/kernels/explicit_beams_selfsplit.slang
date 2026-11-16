@@ -339,6 +339,7 @@ void explicit_beams_self_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 [numthreads(SELF_PAIRS_WG, 1, 1)]
 void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    noFuseInit();
     uint v = gid.y;
     uint lane = lid.x;
     uint s = gP.pad2;
@@ -371,6 +372,7 @@ void explicit_beams_self_pairs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
 [numthreads(SELF_WALK_WG, 1, 1)]
 void explicit_beams_self_walk(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    noFuseInit();
     uint v = gid.y;
     uint walk = v < gP.vehicles && selfSplitVehicle(v) ? uint(gAcc[selfWalkAt(v) + 1u].load()) : 0u;
     uint4 r1 = gStatic[min(v, gP.vehicles - 1u) * 4u + 1u];

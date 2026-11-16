@@ -454,7 +454,9 @@ Surface contactSurfaceV(uint v, uint w)
 // --- numerical primitives (compatible profile) ---
 
 // Strict float arithmetic (slang/physics/strict.slang); its zero comes from a uniform.
-uint noFuseBits() { return gP.vehicles >> 31; }
+static uint gsNoFuseLocal;
+void noFuseInit() { gsNoFuseLocal = gP.vehicles >> 31; }
+uint noFuseBits() { return gsNoFuseLocal; }
 #include "../physics/strict.slang"
 // n, from a uniform the compilers cannot see through (noFuseBits is 0 at run time): a
 // loop `for (k < EB_END(k, opaqueCount(n), 1u))` over a call's n uses (the same calls in
@@ -7453,6 +7455,7 @@ void explicit_beams_wide_rebase(uint3 id : SV_DispatchThreadID)
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
 {
+    noFuseInit();
     // The coupling's header for the nodes' proxy contacts (cplContacts reads it from
     // workgroup memory; no sphere or node-range copies there: every read from the buffers).
     if (lid.x == 0u)
@@ -7507,6 +7510,7 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_Gr
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_centred_beams(uint3 id : SV_DispatchThreadID)
 {
+    noFuseInit();
     uint j = id.x;
     if (j >= gP.totalBeams) return;
     uint v = gStatic[gP.beamBase + j * 3u].z >> 16;
@@ -7518,6 +7522,7 @@ void explicit_beams_wide_centred_beams(uint3 id : SV_DispatchThreadID)
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_centred_nodes(uint3 id : SV_DispatchThreadID)
 {
+    noFuseInit();
     uint i = id.x;
     if (i >= gP.totalNodes) return ebLoopCapFlush();
     uint v = gStatic[gP.nodeInfoBase + i].w;
@@ -7572,6 +7577,7 @@ void wideGeoThread(uint gt)
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
 {
+    noFuseInit();
     uint i = id.x;
     // The node grab, after this step's wide_nodes (one thread).
     if (i == 0u) grabApplyWide();
@@ -7715,6 +7721,7 @@ void explicit_beams_wide_tris(uint3 id : SV_DispatchThreadID)
 [numthreads(256, 1, 1)]
 void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    noFuseInit();
     uint v = gid.x;
     uint lane = lid.x;
     Vehicle x = vehicleAt(v);
@@ -7806,6 +7813,7 @@ void explicit_beams_wide_close(uint3 id : SV_DispatchThreadID)
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    noFuseInit();
     uint v = gid.x;
     uint lane = lid.x;
     uint s = wideStep();
@@ -7848,6 +7856,7 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    noFuseInit();
     selfSplitArgsClear(gid.x, lid.x);
     uint v = gid.x;
     uint lane = lid.x;
