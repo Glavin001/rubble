@@ -1196,6 +1196,288 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 }
                 x.wait();
             }
+            // `--rest-parts F` (`--rest-every K`, default 30 frames; `--rest-parking P`: every
+            // car's parking brake input set to P first): from this snapshot with sleep off,
+            // F frames of 34 steps of the solver alone, and per car, every K frames, where
+            // its motion is. Its nodes split into pieces over its unbroken beams (the main
+            // body: the heaviest piece). The body's motion as a rigid body (its centre of
+            // mass's velocity, its angular velocity from its angular momentum and inertia)
+            // and, past that, each node's own velocity relative to the rigid motion, for
+            // the wheels (tyre, tread, friction-limited and hub nodes) and the rest of the
+            // body apart; the loose pieces' speeds. Kinetic energy split the same way, and
+            // the potential energy: the fleet's total must not rise (nothing outside the
+            // vehicles moves; the ground is static). Speeds as sleep's rule sees them: a
+            // node's fastest axis, max over every frame of the window.
+            if let Some(frames) = arg("--rest-parts").and_then(|v| v.parse::<u32>().ok()) {
+                use engine_softbody::explicit_beams::{NODE_FRICTION_LIMIT, NODE_TREAD, NODE_TYRE};
+                x.restore(&snap);
+                let was = x.sleep_on();
+                x.set_sleep(false);
+                let nv = x.vehicle_count();
+                if let Some(p) = arg("--rest-parking").and_then(|v| v.parse::<f32>().ok()) {
+                    for v in 0..nv {
+                        x.set_parking_brake(v, p);
+                    }
+                    println!("   parking brake {p} on every car ({} brakes a car)", template.brakes.len());
+                }
+                // `--rest-vv 0`: vehicle contact off for the probe (an ablation: which
+                // motion the cars' contact with each other keeps up).
+                if arg("--rest-vv").as_deref() == Some("0") {
+                    x.set_vehicle_contact(false);
+                    println!("   vehicle contact off for the probe");
+                }
+                // `--rest-coupling 0`: the rigid coupling off (no rock, no ground: the cars
+                // fall free), an ablation of the static contact.
+                if arg("--rest-coupling").as_deref() == Some("0") {
+                    x.set_coupling_on(false);
+                    println!("   rigid coupling off for the probe (free fall)");
+                }
+                x.wait();
+                let every: u32 = arg("--rest-every").and_then(|v| v.parse().ok()).unwrap_or(30).max(1);
+                let nn = template.nodes.len();
+                let mass: Vec<f64> = template.nodes.iter().map(|n| f64::from(n.mass)).collect();
+                let mut wheel = vec![false; nn];
+                for (i, n) in template.nodes.iter().enumerate() {
+                    wheel[i] = n.flags & (NODE_TYRE | NODE_TREAD | NODE_FRICTION_LIMIT) != 0;
+                }
+                for b in &template.brakes {
+                    for i in b.first..b.first + b.count {
+                        wheel[i as usize] = true;
+                    }
+                    for i in b.axle {
+                        wheel[i as usize] = true;
+                    }
+                }
+                for t in &template.tyres {
+                    for i in t.first..t.first + t.count {
+                        wheel[i as usize] = true;
+                    }
+                }
+                let degree0: Vec<u32> = {
+                    let mut d = vec![0u32; nn];
+                    for b in &template.beams {
+                        d[b.a as usize] += 1;
+                        d[b.b as usize] += 1;
+                    }
+                    d
+                };
+                let mut fr: Vec<f32> = template.nodes.iter().map(|n| n.friction).collect();
+                fr.sort_by(f32::total_cmp);
+                println!(
+                    "   rest parts at t {:.1}: {frames} frames, a line every {every} ({:.2} s); {} wheel nodes of {nn}; node friction min {:.2} median {:.2} max {:.2}; body node / wheel node / loose: fastest axis m/s",
+                    lab.bench.t,
+                    f64::from(every) * 34.0 * 0.0005,
+                    wheel.iter().filter(|w| **w).count(),
+                    fr[0],
+                    fr[nn / 2],
+                    fr[nn - 1]
+                );
+                // Per car, per window: |v_com| max, |ω| max, body rel max (node), wheel rel
+                // max, loose max, body/wheel/loose node counts past 0.25 m/s.
+                #[derive(Clone, Default)]
+                struct Win {
+                    vc: f64,
+                    w: f64,
+                    body: (f64, usize),
+                    wheel: f64,
+                    loose: f64,
+                    fast: [std::collections::HashSet<usize>; 3],
+                }
+                let mut win = vec![Win::default(); nv];
+                let mut com0: Vec<glam::DVec3> = Vec::new();
+                // (Per car: its nodes at the window's start, its KE + PE at the last line.)
+                let mut wpos: Vec<Vec<glam::Vec3>> = x.positions();
+                let mut e_car: Vec<Option<f64>> = vec![None; nv];
+                let adjacent: Vec<std::collections::HashSet<u32>> = {
+                    let mut a = vec![std::collections::HashSet::new(); nn];
+                    for b in &template.beams {
+                        a[b.a as usize].insert(b.b);
+                        a[b.b as usize].insert(b.a);
+                    }
+                    a
+                };
+                let reach_self = 2.0 * template.collision_range;
+                let mut e_prev: Option<f64> = None;
+                for f in 0..frames {
+                    x.frame(34);
+                    x.wait();
+                    let sample = (f + 1) % every == 0;
+                    let (pos, vel) = (x.positions(), x.velocities());
+                    let beams = x.beams();
+                    let mut e_total = 0.0f64;
+                    let mut lines = Vec::new();
+                    for v in 0..nv {
+                        // Pieces over the unbroken beams (union-find).
+                        let mut parent: Vec<usize> = (0..nn).collect();
+                        fn find(p: &mut [usize], mut i: usize) -> usize {
+                            while p[i] != i {
+                                p[i] = p[p[i]];
+                                i = p[i];
+                            }
+                            i
+                        }
+                        let mut degree = vec![0u32; nn];
+                        for (b, g) in template.beams.iter().zip(&beams[v]) {
+                            if !g.broken {
+                                let (ra, rb) = (find(&mut parent, b.a as usize), find(&mut parent, b.b as usize));
+                                parent[ra] = rb;
+                                degree[b.a as usize] += 1;
+                                degree[b.b as usize] += 1;
+                            }
+                        }
+                        let root: Vec<usize> = (0..nn).map(|i| find(&mut parent, i)).collect();
+                        let mut pm = std::collections::HashMap::<usize, (f64, usize)>::new();
+                        for i in 0..nn {
+                            let e = pm.entry(root[i]).or_default();
+                            e.0 += mass[i];
+                            e.1 += 1;
+                        }
+                        let main = pm.iter().max_by(|a, b| a.1 .0.total_cmp(&b.1 .0)).map(|(k, _)| *k).unwrap();
+                        let p = |i: usize| pos[v][i].as_dvec3();
+                        let u = |i: usize| vel[v][i].as_dvec3();
+                        let (mut m, mut c, mut vc) = (0.0f64, glam::DVec3::ZERO, glam::DVec3::ZERO);
+                        for i in (0..nn).filter(|&i| root[i] == main) {
+                            m += mass[i];
+                            c += mass[i] * p(i);
+                            vc += mass[i] * u(i);
+                        }
+                        c /= m;
+                        vc /= m;
+                        let (mut l, mut inertia) = (glam::DVec3::ZERO, glam::DMat3::ZERO);
+                        for i in (0..nn).filter(|&i| root[i] == main) {
+                            let r = p(i) - c;
+                            l += mass[i] * r.cross(u(i) - vc);
+                            inertia += glam::DMat3::from_diagonal(glam::DVec3::splat(r.dot(r))) * mass[i]
+                                - glam::DMat3::from_cols(r * r.x, r * r.y, r * r.z) * mass[i];
+                        }
+                        let w = if inertia.determinant().abs() > 1e-12 { inertia.inverse() * l } else { glam::DVec3::ZERO };
+                        let (mut ke_def, mut ke_loose, mut pe, mut ke_wheel) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+                        let wv = &mut win[v];
+                        wv.vc = wv.vc.max(vc.length());
+                        wv.w = wv.w.max(w.length());
+                        for i in 0..nn {
+                            pe += mass[i] * 9.81 * p(i).y;
+                            let ax = |q: glam::DVec3| q.abs().max_element();
+                            if root[i] == main {
+                                let rel = u(i) - vc - w.cross(p(i) - c);
+                                let ke = 0.5 * mass[i] * rel.length_squared();
+                                if wheel[i] {
+                                    ke_wheel += ke;
+                                    wv.wheel = wv.wheel.max(ax(rel));
+                                    if ax(u(i)) > 0.25 {
+                                        wv.fast[1].insert(i);
+                                    }
+                                } else {
+                                    ke_def += ke;
+                                    if ax(rel) > wv.body.0 {
+                                        wv.body = (ax(rel), i);
+                                    }
+                                    if ax(u(i)) > 0.25 {
+                                        wv.fast[0].insert(i);
+                                    }
+                                }
+                            } else {
+                                ke_loose += 0.5 * mass[i] * u(i).length_squared();
+                                wv.loose = wv.loose.max(ax(u(i)));
+                                if ax(u(i)) > 0.25 {
+                                    wv.fast[2].insert(i);
+                                }
+                            }
+                        }
+                        let ke_t = 0.5 * m * vc.length_squared();
+                        let ke_r = 0.5 * w.dot(l);
+                        e_total += ke_t + ke_r + ke_def + ke_wheel + ke_loose + pe;
+                        if com0.len() < nv {
+                            com0.push(c);
+                        }
+                        if sample {
+                            let loose_n: usize = pm.iter().filter(|(k, _)| **k != main).map(|(_, e)| e.1).sum();
+                            let loose_m: f64 = pm.iter().filter(|(k, _)| **k != main).map(|(_, e)| e.0).sum();
+                            let bn = wv.body.1;
+                            lines.push(format!(
+                                "     car {v}: com {:.3} m/s (moved {:.0} mm), ω {:.3} rad/s; rel body {:.3} (node {bn}, beams {}/{}, {}), wheels {:.3}; loose {} pieces {} nodes {:.1} kg {:.3}; nodes past 0.25 body/wheel/loose {}/{}/{}; KE J trans {:.1} rot {:.1} body {:.2} wheels {:.2} loose {:.2}",
+                                wv.vc,
+                                (c - com0[v]).length() * 1e3,
+                                wv.w,
+                                wv.body.0,
+                                degree[bn],
+                                degree0[bn],
+                                if wheel[bn] { "wheel" } else { "body" },
+                                wv.wheel,
+                                pm.len() - 1,
+                                loose_n,
+                                loose_m,
+                                wv.loose,
+                                wv.fast[0].len(),
+                                wv.fast[1].len(),
+                                wv.fast[2].len(),
+                                ke_t,
+                                ke_r,
+                                ke_def,
+                                ke_wheel,
+                                ke_loose
+                            ));
+                            // The body's fast nodes now (relative speed past 0.25 m/s) by
+                            // what is near them: another car's node within 0.15 m, a node
+                            // of its own not beamed to it within twice the collision range
+                            // (a self-contact), or neither (the ground, rocks or the beams
+                            // alone). And the node that travelled farthest in the window.
+                            let (mut near_car, mut near_self, mut alone) = (0u32, 0u32, 0u32);
+                            for i in (0..nn).filter(|&i| root[i] == main && !wheel[i]) {
+                                let rel = u(i) - vc - w.cross(p(i) - c);
+                                if rel.abs().max_element() <= 0.25 {
+                                    continue;
+                                }
+                                let q = pos[v][i];
+                                let other = (0..nv).filter(|&o| o != v).any(|o| pos[o].iter().any(|r| r.distance_squared(q) < 0.0225));
+                                let own = (0..nn).any(|j| j != i && !adjacent[i].contains(&(j as u32)) && pos[v][j].distance(q) < reach_self);
+                                if other {
+                                    near_car += 1;
+                                } else if own {
+                                    near_self += 1;
+                                } else {
+                                    alone += 1;
+                                }
+                            }
+                            let (far, fi) = (0..nn).map(|i| ((pos[v][i] - wpos[v][i]).abs().max_element(), i)).fold((0.0f32, 0), |a, b| if b.0 > a.0 { b } else { a });
+                            let e = ke_t + ke_r + ke_def + ke_wheel + ke_loose + pe;
+                            lines.push(format!(
+                                "       fast body nodes near another car / a self-contact / neither: {near_car} / {near_self} / {alone}; farthest travel {:.1} mm (node {fi}, beams {}/{}, {}); car KE+PE {:+.2} J since the last line",
+                                far * 1e3,
+                                degree[fi],
+                                degree0[fi],
+                                if root[fi] == main { "body" } else { "loose" },
+                                e_car[v].map_or(0.0, |x| e - x)
+                            ));
+                            e_car[v] = Some(e);
+                            com0[v] = c;
+                            *wv = Win::default();
+                        }
+                    }
+                    if sample {
+                        println!(
+                            "   +{:.2} s: fleet KE+PE {:.3} kJ ({:+.2} J since the last line); contact groups {:?}",
+                            f64::from(f + 1) * 34.0 * 0.0005,
+                            e_total * 1e-3,
+                            e_prev.map_or(0.0, |e| e_total - e),
+                            x.contact_group_sizes()
+                        );
+                        for l in lines {
+                            println!("{l}");
+                        }
+                        e_prev = Some(e_total);
+                        wpos = pos;
+                    }
+                }
+                x.restore(&snap);
+                if was {
+                    x.set_sleep(true);
+                }
+                x.wait();
+                if from_fixture.is_some() && arg("--sleep-loss").is_none() {
+                    std::process::exit(0);
+                }
+            }
             if let Some(spec) = arg("--sleep-loss") {
                 let frames: u32 = arg("--loss-frames").and_then(|v| v.parse().ok()).unwrap_or(600);
                 let was = (x.sleep_on(), sleep_cfg);
