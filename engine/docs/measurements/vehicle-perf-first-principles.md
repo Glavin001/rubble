@@ -1551,3 +1551,24 @@ unused word tags the pass) and later uses load it. Bit for bit at t 2, 3.7, 5, 8
 noise elsewhere. Small: the rest of a hit's chain (the triangle, the clip test, the
 staging) is still taken four times, on one core. The remedy is §8 of
 `contact-groups-design.md` stage 3 (a thread a hit across the GPU), not more caching.
+
+### 8.22 The tiny and wall-crash proofs, run on their own (2026-11-16)
+
+The brief's bit-for-bit list names a tiny scene and a wall crash beside the mountain
+and the 2- and 8-car contact A/Bs. Until now they were covered only inside whole
+suites. Run separately at commit `0e698895` (release build, under the GPU lock, a clean
+worktree), each twice: with the host's default perf flags and with
+`RUBBLE_PERF_FLAGS=0` (every switch of this work off):
+
+| scene | test | default flags | every switch off |
+|---|---|---|---|
+| wall crash | `engine-webgpu explicit_beams_bitwise sedan_alone_and_into_a_wall_bitwise` | pass | pass |
+| tiny | `engine-webgpu self_split_gpu tiny_split_is_bit_for_bit` | pass | pass |
+
+Both runs of the wall crash print the same lines: the idle sedan 40 frames
+deterministic and equal to the frozen reference, the wall crash 263 frames
+deterministic and equal to the frozen reference, its hits in the baseline's one-lane
+order in 229. Both runs of the tiny scene: 2 frames of 4 steps bit for bit. So on these
+scenes the paths with the switches on and off both equal the frozen reference, hence
+each other. Limits: one run each; the tiny test is two frames of four steps; the commit
+predates the fast-check tooling (no kernel change after it on this branch).
