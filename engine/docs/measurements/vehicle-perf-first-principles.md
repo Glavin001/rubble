@@ -1510,3 +1510,44 @@ The frame grows through the run although the cars are at rest from about t 16 s
 530–540 µs a substep again and the levels 365 (the members' pair list on or off:
 57 against 58–63 ms a frame). Not yet explained; the debris in free fall and resting
 cars that never sleep are the two candidates.
+
+### 8.21 Every car's debris; the levels' cost by part; a hit's nodes' beam sums kept (2026-11-16)
+
+**Every car's debris.** The lab's piece labels and debris time to live were the first
+car's alone, so another car's torn-off part was never retired and never apart in its
+pair list. Each copy now has both, from one beam reading. Eight cars' whole run:
+median 37.5, p95 44.4, worst 52.7 ms a step (37.6 / 60.3 / 62.9 before); the pair
+lists reused on 93–94 % of car-steps late in the run (86–91 %). A few larger parts
+past the time to live's limits (10 kg, 40 nodes) still fall off the canyon's sides.
+
+**The resting pile's frame by kind** (t 30 s, 42.8 ms): tests' walk 12.8, levels 11.2,
+front 7.7, the cars' steps 6.2, listed pairs 2.2, members' hits 2.0. Vehicle contact is
+34 of the 43 ms; the cars' own steps are 183 µs a substep for all eight.
+
+**Inside the levels** (`vehicle_lab --ab-split-ablate`, the split modules' measurement
+word: time only, the same 20 frames from one snapshot with a part skipped):
+
+| skipped | t 3.7 s (17 hits a pass) | t 30 s (10 hits) |
+|---|---|---|
+| nothing | 40.3 ms a frame | 42.7 |
+| the whole pass | 9.9 | 10.8 |
+| residual phases (16384) | 26.8 (−13.4) | 37.8 (−5.0) |
+| the snapshot (65536) | 33.6 (−6.7) | 41.9 (−0.9) |
+| buckets and application (32768) | 35.4 (−4.9) | 40.3 (−2.5) |
+| level 1's throttle updates (131072) | 37.1 (−3.2) | 41.6 (−1.2) |
+| all four | 20.9 (−19.3) | 33.7 (−9.0) |
+
+Ten to seventeen hits cost 9–19 ms a frame because the levels run in the group's one
+workgroup: every lane's work on one core, a hit after another. A hit takes its
+triangle, its clip test and its four nodes' forces again in each of four passes over
+the list.
+
+**A hit's nodes' beam sums kept for the pass** (perf flag 512, on by default;
+`--ab-switch perf=512`). A node's force is its beams' sum plus its accumulators, and
+the sum does not change within a pass, but each use took the node's whole beam list
+again. The levels now keep it beside the snapshot when they take it (the snapshot's
+unused word tags the pass) and later uses load it. Bit for bit at t 2, 3.7, 5, 8, 12,
+30 s; ms a frame 35.1 against 39.5 at t 3.7 s and 41.6 against 43.4 at t 30 s, within
+noise elsewhere. Small: the rest of a hit's chain (the triangle, the clip test, the
+staging) is still taken four times, on one core. The remedy is §8 of
+`contact-groups-design.md` stage 3 (a thread a hit across the GPU), not more caching.

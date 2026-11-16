@@ -244,12 +244,16 @@ pub const PERF_VV_BIG_GRID: u32 = 128;
 /// groups' pass (the kernel's `memberRest`; a WebGPU host adds that dispatch while the
 /// flag is on). vehicle-perf-first-principles.md §8.19.
 pub const PERF_MEMBER_LIST: u32 = 256;
+/// Perf flag: the small groups' contact pass keeps each hit node's beam sum for the pass
+/// beside the force snapshot (the kernel's PERF_VV_BEAM_SUM, `vvBeamSumOf`), in place of
+/// summing the node's beams again at every use. vehicle-perf-first-principles.md §8.21.
+pub const PERF_VV_BEAM_SUM: u32 = 512;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14) and [`PERF_MEMBER_LIST`] (§8.19); `RUBBLE_PERF_FLAGS=<mask>` overrides
 /// (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST)
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST | PERF_VV_BEAM_SUM)
 }
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;
@@ -1904,7 +1908,8 @@ impl ExplicitUpload {
         let two_body = nv > 1 && vehicles.iter().any(|v| v.two_body_contact);
         let vv_snap = if two_body {
             let at = beams.len() as u32;
-            beams.extend(std::iter::repeat_n([0.0f32; 4], total_nodes));
+            // (Then per node its beams' sum of the pass: PERF_VV_BEAM_SUM.)
+            beams.extend(std::iter::repeat_n([0.0f32; 4], 2 * total_nodes));
             at
         } else {
             0

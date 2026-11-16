@@ -944,6 +944,27 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     line.join(", ")
                 );
             }
+            // `--ab-split-ablate M1,M2,…`: the same 20 frames with the split path's
+            // measurement word M (time only; the shipped modules, `set_split_ablation`):
+            // 0 nothing, 512 no contact pass, and the levels' 16384 residual phases,
+            // 32768 buckets and application, 65536 snapshot, 131072 throttle updates.
+            if let Some(masks) = arg("--ab-split-ablate") {
+                let mut line = Vec::new();
+                for m in masks.split(',').filter_map(|m| m.parse::<u32>().ok()) {
+                    x.restore(&snap);
+                    x.set_split_ablation(m);
+                    x.wait();
+                    let t = std::time::Instant::now();
+                    for _ in 0..20 {
+                        x.frame(34);
+                        x.wait();
+                    }
+                    line.push(format!("{m}: {:.2}", t.elapsed().as_secs_f64() * 1e3 / 20.0));
+                }
+                x.set_split_ablation(0);
+                x.restore(&snap);
+                println!("   split ablation at t {:.1} (ms a frame): {}", lab.bench.t, line.join(", "));
+            }
             // `--ab-profile`: the frame as it runs now, by dispatch kind (time only): 10
             // frames untimed (wall), then the same 10 from the same snapshot with every
             // dispatch in its own timed pass (`profile_dispatches`). The table closes: the

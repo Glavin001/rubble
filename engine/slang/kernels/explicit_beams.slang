@@ -9361,13 +9361,29 @@ void vvSplitClear(uint off, uint k, uint slots, uint lane)
         }
     }
 }
+// --- A hit's nodes' beam sums kept for the pass (PERF_VV_BEAM_SUM, lossless) ---
+// A node's force is its beams' sum plus its accumulators. The beams' sum does not change
+// within a contact pass (no beam and no position does), yet the pass took it again for
+// each of a hit's four nodes at every use: the snapshot, the hit, and several times in
+// each residual phase (a node's whole beam list each time: 13 ms a frame for 17 hits
+// at eight cars' first collisions). With the flag the levels keep it beside the
+// snapshot when they take it (gBeams at vvSnap + totalNodes + node; the snapshot's .w
+// the pass's tag, so a node the pass did not take is summed as before), and every later
+// use loads it: the same value.
+static const uint PERF_VV_BEAM_SUM = 512u;
+static uint gVvTag = 0u; // this pass's tag (0: no kept sums)
+float3 vvBeamSumOf(uint h, uint vh, uint parity)
+{
+    if (gVvTag != 0u && asuint(gBeams[gP.vvSnap + h].w) == gVvTag) return gBeams[gP.vvSnap + gP.totalNodes + h].xyz;
+    uint4 rb0 = gStatic[vh * 4u];
+    uint4 rb2 = gStatic[vh * 4u + 2u];
+    return beamSum(gNodes[h * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + h], rb0.z, rb2.z, rb2.w, parity, false);
+}
 // The contact point's force now (beams, accumulator, slide).
 float3 vvPointForce(uint h, uint vh, uint parity)
 {
     uint4 info = gStatic[gP.nodeInfoBase + h];
-    uint4 rb0 = gStatic[vh * 4u];
-    uint4 rb2 = gStatic[vh * 4u + 2u];
-    float3 fh = sadd3(beamSum(gNodes[h * 3u + 2u].xyz, info, rb0.z, rb2.z, rb2.w, parity, false), accForce(h));
+    float3 fh = sadd3(vvBeamSumOf(h, vh, parity), accForce(h));
 #ifdef EB_AERO
     uint slot1 = info.x >> NODE_SLOT_SHIFT;
     if (slot1 != 0u) fh = sadd3(fh, gBeams[gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u)].xyz);
@@ -9617,9 +9633,7 @@ float3 vvResAcc(uint x, uint vx, uint parity, bool withB)
 {
     if (vvImmovable(x)) return float3(0.0, 0.0, 0.0);
     uint4 info = gStatic[gP.nodeInfoBase + x];
-    uint4 rb0 = gStatic[vx * 4u];
-    uint4 rb2 = gStatic[vx * 4u + 2u];
-    float3 f = beamSum(gNodes[x * 3u + 2u].xyz, info, rb0.z, rb2.z, rb2.w, parity, false);
+    float3 f = vvBeamSumOf(x, vx, parity);
     int3 a = int3(gAcc[x * 3u].load(), gAcc[x * 3u + 1u].load(), gAcc[x * 3u + 2u].load());
     if (withB)
     {
@@ -11023,7 +11037,9 @@ void vvPassSmall(uint k, uint off, uint runOff, uint points, uint step, uint lan
     if (front == 0u) return;
     bool vvGrid = (front & 2u) != 0u;
     vvPassSmallTests(k, off, runOff, points, parity, lane, vvGrid);
+    gVvTag = (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((step + 1u) | 0x80000000u) : 0u;
     vvPassSmallLevels(k, off, runOff, points, parity, lane, vvGrid);
+    gVvTag = 0u;
 }
 
 uint vvPassSmallFront(uint k, uint off, uint runOff, uint points, uint parity, uint lane)
@@ -11287,8 +11303,35 @@ void vvPassSmallTests(uint k, uint off, uint runOff, uint points, uint parity, u
     }
 }
 
+// Node n's force at the pass's start into the snapshot; with a tag, its beams' sum kept
+// beside it (vvBeamSumOf) and the snapshot tagged. (Several lanes may take one node: the
+// same values.)
+void vvSnapNode(uint n, uint vn, uint parity, uint tag)
+{
+    if (tag == 0u)
+    {
+        gBeams[gP.vvSnap + n] = float4(vvPointForce(n, vn, parity), 0.0);
+        return;
+    }
+    uint4 info = gStatic[gP.nodeInfoBase + n];
+    uint4 rb0 = gStatic[vn * 4u];
+    uint4 rb2 = gStatic[vn * 4u + 2u];
+    float3 bs = beamSum(gNodes[n * 3u + 2u].xyz, info, rb0.z, rb2.z, rb2.w, parity, false);
+    float3 fh = sadd3(bs, accForce(n));
+#ifdef EB_AERO
+    uint slot1 = info.x >> NODE_SLOT_SHIFT;
+    if (slot1 != 0u) fh = sadd3(fh, gBeams[gP.slideAcc + min(slot1 - 1u, max(gP.slotTotal, 1u) - 1u)].xyz);
+#endif
+    gBeams[gP.vvSnap + gP.totalNodes + n] = float4(bs, 0.0);
+    gBeams[gP.vvSnap + n] = float4(fh, asfloat(tag));
+}
+
 void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, uint lane, bool vvGrid)
 {
+    // (The kept beam sums' tag for this pass: set by the caller, used from the snapshot
+    // on; off while the snapshot is taken, which sums afresh.)
+    uint tag = gVvTag;
+    gVvTag = 0u;
     sync();
     // The two-body pass reads its hits' nodes' forces as at the pass's start (the
     // triangle's nodes and the point: vvStagedHit, vvTry). Nothing since the start
@@ -11296,7 +11339,10 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
     // here, before the first hit is applied, for the listed hits' nodes alone (the
     // same value from every lane that takes a node); every member's nodes when an
     // owner's list overflowed.
-    if (gP.vvSplit != 0u)
+    // (Measurement only, time: the parameter word's 65536 skips this snapshot, 131072
+    // level 1's throttle updates, 16384 the residual phases, 32768 the hits' buckets and
+    // application. The results are then meaningless.)
+    if (gP.vvSplit != 0u && (gP.ablate & 65536u) == 0u)
     {
         bool every = false;
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
@@ -11313,14 +11359,15 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                 {
                     uint4 tn = gStatic[gP.triBase + gNext[base + 2u * i]];
                     uint h = gNext[base + 2u * i + 1u];
-                    gBeams[gP.vvSnap + tn.x] = float4(vvPointForce(tn.x, tn.w, parity), 0.0);
-                    gBeams[gP.vvSnap + tn.y] = float4(vvPointForce(tn.y, tn.w, parity), 0.0);
-                    gBeams[gP.vvSnap + tn.z] = float4(vvPointForce(tn.z, tn.w, parity), 0.0);
-                    gBeams[gP.vvSnap + h] = float4(vvPointForce(h, gStatic[gP.nodeInfoBase + h].w, parity), 0.0);
+                    vvSnapNode(tn.x, tn.w, parity, tag);
+                    vvSnapNode(tn.y, tn.w, parity, tag);
+                    vvSnapNode(tn.z, tn.w, parity, tag);
+                    vvSnapNode(h, gStatic[gP.nodeInfoBase + h].w, parity, tag);
                 }
             }
         }
         sync();
+        if (!every) gVvTag = tag;
     }
     // The owners' levels, once (vvLevelsSet), and the highest: the levels past it
     // hold no owner (level 1 runs whatever the hits: the throttle updates).
@@ -11342,7 +11389,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         // Measurement only: 524288 the levels (the hits' application).
         if ((gP.ablate & 524288u) != 0u) break;
 #endif
-        if (l == 1u)
+        if (l == 1u && (gP.ablate & 131072u) == 0u)
         {
             uint total = 0u;
             for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();
@@ -11364,10 +11411,10 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
                 if (gsVvFix[a] != 0u) gMisc[gP.vvTri + gt].x = 0u;
             }
         }
-        if (vvGrid) vvHitBuckets(k, l, off, runOff, points, lane);
+        if (vvGrid && (gP.ablate & 32768u) == 0u) vvHitBuckets(k, l, off, runOff, points, lane);
         for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++)
         {
-            if (vvLv(a) != l) continue;
+            if (vvLv(a) != l || (gP.ablate & 32768u) != 0u) continue;
             uint va = vvMember(off, a);
             float range = asfloat(gStatic[va * 4u + 3u].z);
             uint hits = gsVvHit4[a].load();
@@ -11390,7 +11437,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         }
         sync();
         // §37.1: this level's owners' residual pass and work guard (listed hits).
-        if (gP.vvSplit != 0u)
+        if (gP.vvSplit != 0u && (gP.ablate & 16384u) == 0u)
         {
             for (uint ph = 0u; ph < 3u; ph++)
             {

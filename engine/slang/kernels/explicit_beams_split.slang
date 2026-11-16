@@ -290,7 +290,9 @@ void splitGroupStep(uint g, uint lane, uint word)
                 gsUniformOpen = 0u;
             }
             sync();
+            gVvTag = (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((stepBase + s + 1u) | 0x80000000u) : 0u;
             vvPassSmallLevels(k, off, runOff, points, parity, lane, (front & 2u) != 0u);
+            gVvTag = 0u;
         }
     }
     if (s + 1u != gP.steps) return;
