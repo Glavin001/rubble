@@ -3471,6 +3471,99 @@ impl ExplicitBeamsGpu {
         }
     }
 
+    /// Measurement: one frame of `steps` steps as it would run now (whichever path: the
+    /// fleet-wide passes, self split, the split group path, one workgroup a vehicle),
+    /// every dispatch in its own timed pass: per label the GPU ms summed over the frame
+    /// and its dispatches, in first-seen order, then the span (the first pass's begin to
+    /// the last's end; with the labels' sum, the time between passes). The passes add
+    /// their own cost: compare the span with an untimed frame's wall time. (A wide frame
+    /// with the list kernel: its list, walk and pairs dispatches inside the beams pass.)
+    /// `None` without timestamp queries or with more dispatches than a query set holds.
+    /// Waits.
+    #[doc(hidden)]
+    pub fn profile_dispatches(&mut self, steps: u32) -> Option<(Vec<(&'static str, f64, u32)>, f64)> {
+        if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) || self.layout.spans.is_empty() || steps == 0 {
+            return None;
+        }
+        const CAP: u32 = 2048;
+        let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("explicit-beams-dispatch-profile"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2 * CAP,
+        });
+        let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-dispatch-profile"),
+            size: u64::from(2 * CAP) * 8,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let each = std::mem::replace(&mut self.split_dispatch_timing, true);
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let (read, labels) = self.encode(&mut enc, steps, None, Some((&set, 0, CAP)));
+        self.split_dispatch_timing = each;
+        let n = labels.len() as u32;
+        if n > 0 {
+            enc.resolve_query_set(&set, 0..2 * n, &resolve, 0);
+        }
+        self.queue.submit([enc.finish()]);
+        self.frame_submitted(read);
+        if n == 0 || n == CAP {
+            self.wait();
+            return None;
+        }
+        let period = f64::from(self.queue.get_timestamp_period()) * 1e-6;
+        let raw = self.read(&resolve);
+        let ticks: &[u64] = bytemuck::cast_slice(&raw);
+        // A pass whose indirect dispatch was empty has no work to stamp (Metal: its
+        // stamps land on its neighbours' work, or are stale). The passes run one after
+        // another, so a real pass's interval never holds another's: a pass outside the
+        // frame (from the first begin, at most a minute) or whose interval holds a
+        // shorter pass's is counted as an empty dispatch, time 0. (An empty pass with a
+        // short interval inside a real one is not caught: the table's "between passes"
+        // row goes negative by it.)
+        let t0 = ticks[0];
+        let limit = (60_000.0 / period) as u64;
+        let at = |i: usize| (ticks[2 * i], ticks[2 * i + 1]);
+        let inside = |i: usize| {
+            let (b, e) = at(i);
+            b >= t0 && e >= b && e - t0 < limit
+        };
+        let mut order: Vec<usize> = (0..labels.len()).filter(|&i| inside(i) && at(i).1 > at(i).0).collect();
+        order.sort_by_key(|&i| at(i).0);
+        let mut keep: Vec<bool> = (0..labels.len()).map(inside).collect();
+        for (k, &i) in order.iter().enumerate() {
+            let (b, e) = at(i);
+            // (Sorted by begin: a pass held by i begins at or after b and before e.)
+            for &j in order[k + 1..].iter().take_while(|&&j| at(j).0 < e) {
+                if at(j).1 <= e && at(j).1 - at(j).0 < e - b {
+                    keep[i] = false;
+                    break;
+                }
+            }
+        }
+        let mut out: Vec<(&'static str, f64, u32)> = Vec::new();
+        let (mut end, mut empty) = (t0, 0u32);
+        for (i, label) in labels.iter().enumerate() {
+            if !keep[i] {
+                empty += 1;
+                continue;
+            }
+            end = end.max(ticks[2 * i + 1]);
+            let ms = (ticks[2 * i + 1] - ticks[2 * i]) as f64 * period;
+            match out.iter_mut().find(|r| r.0 == *label) {
+                Some(r) => {
+                    r.1 += ms;
+                    r.2 += 1;
+                }
+                None => out.push((label, ms, 1)),
+            }
+        }
+        if empty > 0 {
+            out.push(("(empty dispatches, untimed)", 0.0, empty));
+        }
+        Some((out, (end - t0) as f64 * period))
+    }
+
     /// Measurement: one frame of `steps` steps with self-collision split (when this frame
     /// runs it: [`Self::set_self_split`]), each of its dispatches in its own timed pass
     /// (the passes add their own cost): per kind (step, walk, pairs) the GPU ms summed
@@ -3614,7 +3707,7 @@ impl ExplicitBeamsGpu {
     /// self-collision split, [`Self::self_split_vv_on`], every vehicle's step, the walk
     /// and the pairs in each substep).
     fn group_split_ops(&self, steps: u32) -> Vec<GroupOp> {
-        let mut out = vec![GroupOp::Group { copy: steps + 1, tests: false, args: SPLIT_GROUP_ARGS }];
+        let mut out = vec![GroupOp::Group { copy: steps + 1, tests: false, args: SPLIT_GROUP_ARGS, part: 0 }];
         // With self-collision split: every vehicle's step (copy s, s = 0 ..= steps: the
         // last the solo vehicles' last rest and frame end), each step's walk and pairs
         // over the solo vehicles (explicit_beams_selfsplit.slang), then the groups.
@@ -3634,12 +3727,12 @@ impl ExplicitBeamsGpu {
             if self.group_split_tests {
                 // The front, the tests across workgroups (the walk, then the listed
                 // pairs), then the levels.
-                out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS });
-                out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS });
-                out.push(GroupOp::Group { copy: steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS });
-                out.push(GroupOp::Group { copy: steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS });
+                out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS, part: 1 });
+                out.push(GroupOp::Group { copy: 2 * steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS, part: 2 });
+                out.push(GroupOp::Group { copy: steps + 2 + s, tests: true, args: SPLIT_TESTS_ARGS, part: 3 });
+                out.push(GroupOp::Group { copy: steps + 2 + s, tests: false, args: SPLIT_GROUP_ARGS, part: 4 });
             } else {
-                out.push(GroupOp::Group { copy: s, tests: false, args: SPLIT_GROUP_ARGS });
+                out.push(GroupOp::Group { copy: s, tests: false, args: SPLIT_GROUP_ARGS, part: 5 });
             }
         }
         out
@@ -3651,7 +3744,7 @@ impl ExplicitBeamsGpu {
         let args = &self.contact.args;
         let at = |k: u32| [k * PARAM_STRIDE as u32];
         match op {
-            GroupOp::Group { copy, tests, args: off } => {
+            GroupOp::Group { copy, tests, args: off, .. } => {
                 pass.set_pipeline(if tests { &g.tests } else { &g.group });
                 pass.set_bind_group(0, &g.bind, &at(copy));
                 pass.dispatch_workgroups_indirect(args, off);
@@ -4090,7 +4183,10 @@ fn self_split_entry(name: &str) -> &'static str {
 enum GroupOp {
     /// A groups' dispatch (`tests`: the tests across workgroups) of parameter copy `copy`,
     /// its size at byte `args` of the plan's arguments.
-    Group { copy: u32, tests: bool, args: u64 },
+    /// `part` names it in timings: 0 the frame's start, 1 a step's front (candidates,
+    /// grids, lists), 2 the tests' walk, 3 the listed pairs' tests, 4 the levels (the
+    /// hits applied; the last with the frame's end), 5 a whole pass in the group's workgroup.
+    Group { copy: u32, tests: bool, args: u64, part: u8 },
     /// The vehicles' step s (a group's members; with no group, none).
     Member(u32),
     /// Self-collision split: every vehicle's step s.
@@ -4103,8 +4199,12 @@ enum GroupOp {
 impl GroupOp {
     fn label(self) -> &'static str {
         match self {
-            GroupOp::Group { tests: false, .. } => "explicit split group",
-            GroupOp::Group { tests: true, .. } => "explicit split tests",
+            GroupOp::Group { part: 0, .. } => "explicit split begin",
+            GroupOp::Group { part: 1, .. } => "explicit split front",
+            GroupOp::Group { part: 2, .. } => "explicit split tests walk",
+            GroupOp::Group { part: 3, .. } => "explicit split tests pairs",
+            GroupOp::Group { part: 4, .. } => "explicit split levels",
+            GroupOp::Group { .. } => "explicit split pass",
             GroupOp::Member(_) => "explicit split member",
             GroupOp::SelfMember(_) => "explicit self step",
             GroupOp::SelfWalk { .. } => "explicit self walk",

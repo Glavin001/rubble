@@ -944,6 +944,70 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     line.join(", ")
                 );
             }
+            // `--ab-profile`: the frame as it runs now, by dispatch kind (time only): 10
+            // frames untimed (wall), then the same 10 from the same snapshot with every
+            // dispatch in its own timed pass (`profile_dispatches`). The table closes: the
+            // kinds' sum + the time between passes = the timed span; the span against the
+            // untimed frame is what the timing itself costs.
+            if std::env::args().any(|a| a == "--ab-profile") {
+                const N: u32 = 10;
+                let mut plain = 0.0;
+                x.restore(&snap);
+                for i in 0..3 + N {
+                    let t = std::time::Instant::now();
+                    x.frame(34);
+                    x.wait();
+                    if i >= 3 {
+                        plain += t.elapsed().as_secs_f64() * 1e3 / f64::from(N);
+                    }
+                }
+                x.restore(&snap);
+                for _ in 0..3 {
+                    x.frame(34);
+                    x.wait();
+                }
+                let mut rows: Vec<(&'static str, f64, u32)> = Vec::new();
+                let (mut span, mut wall, mut got) = (0.0, 0.0, 0u32);
+                for _ in 0..N {
+                    let t = std::time::Instant::now();
+                    let Some((r, sp)) = x.profile_dispatches(34) else { break };
+                    x.wait();
+                    wall += t.elapsed().as_secs_f64() * 1e3;
+                    span += sp;
+                    got += 1;
+                    for (label, ms, n) in r {
+                        match rows.iter_mut().find(|q| q.0 == label) {
+                            Some(q) => {
+                                q.1 += ms;
+                                q.2 += n;
+                            }
+                            None => rows.push((label, ms, n)),
+                        }
+                    }
+                }
+                if got == 0 {
+                    println!("   profile at t {:.1}: no timestamps, or too many dispatches", lab.bench.t);
+                } else {
+                    let f = f64::from(got);
+                    let (span, wall) = (span / f, wall / f);
+                    let sum: f64 = rows.iter().map(|r| r.1).sum::<f64>() / f;
+                    let count: u32 = rows.iter().map(|r| r.2).sum::<u32>() / got;
+                    println!("   profile at t {:.1}: GPU ms a frame by dispatch kind ({got} frames, each dispatch a timed pass)", lab.bench.t);
+                    println!("     {:<30} {:>9} {:>7} {:>10} {:>7}", "kind", "ms/frame", "count", "us each", "share");
+                    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    for (label, ms, n) in &rows {
+                        let (ms, n) = (ms / f, f64::from(*n) / f);
+                        println!("     {label:<30} {ms:>9.3} {n:>7.0} {:>10.1} {:>6.1}%", ms / n * 1e3, 100.0 * ms / span);
+                    }
+                    println!("     {:<30} {:>9.3} {:>7} {:>10} {:>6.1}%", "between passes", span - sum, "", "", 100.0 * (span - sum) / span);
+                    println!("     {:<30} {span:>9.3} {count:>7} {:>10} {:>6.1}%", "= timed span", "", 100.0);
+                    println!(
+                        "     untimed frame (wall) {plain:.3} ms; timed frame (wall) {wall:.3} ms: the timing adds {:+.3} ms ({:+.1} %)",
+                        span - plain,
+                        100.0 * (span - plain) / plain
+                    );
+                }
+            }
             // `--ab-wide-profile`: 10 frames on the fleet-wide passes, each dispatch in its
             // own timed pass (`profile_wide_frame`): GPU ms a frame per pass kind (time
             // only; needs `--timing step`).
