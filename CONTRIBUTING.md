@@ -381,17 +381,23 @@ requests:
 
 | Job | What runs |
 |-----|-----------|
+| Slang kernels | Compiles the Slang kernels once (`cargo check` of `engine-webgpu` runs its build script) into the cache the Linux jobs below read; only a cache lookup when the kernels did not change |
 | Web demos, build kernels / world / stress | Three parallel jobs, one per part of [engine/scripts/build-web.sh](engine/scripts/build-web.sh) (`RUBBLE_WEB_PARTS`): the WGSL kernels and vehicle wasm; the vehicle-designer and world wasm; the fracture and stress-solver wasm |
 | Web demos (build + JS tests) | Takes the three parts, builds the `site` part (scene snapshots, the generated sedan, scene packs: the same site as the Vercel build), then the JS tests of the WebGPU host, vehicle and fracture modules; uploads the site |
 | Engine host tests, … (7 jobs) | [.github/scripts/host-tests.sh](.github/scripts/host-tests.sh): `cargo test` without a GPU. One job for `engine-schema`, `engine-exec`, `engine-scenes` (host build), `engine-vehicle`, `engine-fracture` and `engine-vehiclegen`; six shards of `engine-softbody` ([host-test-shards.py](.github/scripts/host-test-shards.py) reads its targets from `cargo metadata`, so a new test is in a shard without being listed) |
 | Engine host tests (no GPU) | Joins the seven jobs' logs and checks them against [engine/tests-expected-failures.txt](engine/tests-expected-failures.txt) ([expected-failures.py](.github/scripts/expected-failures.py)): the one check to require |
-| C library (macos / linux / windows) | [engine/scripts/build-ffi.sh](engine/scripts/build-ffi.sh): builds and packages `engine-ffi`, checks the header, links `examples/hello.c` and runs it (Metal on macOS, lavapipe on Linux; linked only on Windows); uploads `rubble-<os>` |
+| C library (macos / linux / windows) | [.github/actions/c-library](.github/actions/c-library/action.yml) runs [engine/scripts/build-ffi.sh](engine/scripts/build-ffi.sh): builds and packages `engine-ffi`, checks the header, links `examples/hello.c` and runs it (Metal on macOS, lavapipe on Linux; linked only on Windows); uploads `rubble-<os>` |
 | Large files | [.github/scripts/check-large-files.sh](.github/scripts/check-large-files.sh): no raw file over 5 MB, every `*.glb` an LFS pointer |
 
 A new push to a pull request cancels that pull request's run still in progress; runs on
-`main` and manual runs are never cancelled. Every job has a timeout and is meant to end
-within 10 minutes. The compiled Slang kernels are cached (`RUBBLE_SLANG_CACHE`), so only
-a change under `engine/slang` (or to the kernels' build script) pays for a `slangc` pass.
+`main` and manual runs are never cancelled. Every job has a timeout. Measured on GitHub's
+runners (2026-11-16): with nothing under `engine/slang` changed every job ends within 8
+minutes and the whole run in about 9; after a kernel change `slangc` runs once on Linux
+(about 6 minutes, then the web builds and the Linux C library) and once each in the macOS
+and Windows C library jobs, which then take 10-12.5 minutes, and the run about 14.
+Only `main` saves the Rust dependency caches (pull requests restore them), and
+[cache-cleanup.yml](.github/workflows/cache-cleanup.yml) deletes a closed pull request's
+caches and superseded ones: the repository's caches share a 10 GB limit.
 [engine-cuda.yml](.github/workflows/engine-cuda.yml) builds `engine-cuda` and runs its
 GPU tests on Modal when the kernels or that crate change.
 
