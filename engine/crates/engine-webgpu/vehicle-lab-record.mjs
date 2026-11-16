@@ -147,7 +147,8 @@ if (PROBE) {
     if (opt('--eval', null)) console.log(await evaluate(readFileSync(opt('--eval'), 'utf8')));
     for (let s = 1; s <= Number(opt('--secs', '10')); s++) {
       await new Promise((r) => setTimeout(r, 1000));
-      try { console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, bodies, readsSkipped, gpu, frameMs }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), frameP50: +frameMs.p50.toFixed(1), frameP95: +frameMs.p95.toFixed(1), bodies, readsSkipped,
+      try { console.log(`  ${s}s ${await evaluate(`JSON.stringify((({ t, simRate, fps, bodies, readsSkipped, camAge, gpu, frameMs }) => ({ t: +t.toFixed(2), simRate: +simRate.toFixed(1), fps: +fps.toFixed(0), frameP50: +frameMs.p50.toFixed(1), frameP95: +frameMs.p95.toFixed(1), bodies, readsSkipped,
+        camAge: camAge && { p50: +camAge.p50.toFixed(3), max: +camAge.max.toFixed(3) },
         gpu: gpu && gpu.total.length ? { total: +gpu.split.total.toFixed(2), rigid: +gpu.split.rigid.toFixed(2), vehicle: +gpu.split.vehicle.toFixed(2) } : null }))(window.__state()))`)}`); } catch (e) { console.log(`  ${s}s (no reading: ${String(e.message).slice(0, 80)})`); }
       if (args.includes('--segments') && s % 5 === 0) console.log(`     segments ${await evaluate(`JSON.stringify(Object.fromEntries(Object.entries(window.__gpu().segments).map(([k, v]) => [k, +v.toFixed(2)]).filter(([, v]) => v >= 0.05)))`)}`);
     }
