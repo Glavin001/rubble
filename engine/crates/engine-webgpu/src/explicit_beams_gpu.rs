@@ -100,6 +100,9 @@ pub struct ExplicitBeamsGpu {
     /// first use) and whether they zero workgroup memory (natively; browsers always do).
     group_split: bool,
     group_split_tests: bool,
+    /// Vehicle contact's candidates in a grid ([`Self::set_vv_grid`]; the owners' state by
+    /// vehicle needs it).
+    vv_grid: bool,
     group_split_pipes: std::sync::OnceLock<GroupSplit>,
     group_split_zero: bool,
     /// Self-collision's listed pairs across workgroups ([`Self::set_self_split`]): on,
@@ -1325,6 +1328,7 @@ impl ExplicitBeamsGpu {
             contact,
             group_split: group_split_default(),
             group_split_tests: group_split_tests_default(),
+            vv_grid: true,
             group_split_pipes: std::sync::OnceLock::new(),
             group_split_zero: std::env::var("RUBBLE_GROUP_SPLIT_ZERO").as_deref() == Ok("1"),
             self_split: self_split_default(),
@@ -1820,12 +1824,27 @@ impl ExplicitBeamsGpu {
         let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
         let w = &self.planner.words;
         let (nv, grid, groups, members) = (w[1] as usize, w[plan::W_VV_SCRATCH] as usize, w[46] as usize, w[47] as usize);
+        // With the owners' state by vehicle: each member's last pass's counts (the
+        // kernel's flOwnerEnd, flVehAt 1..4).
+        let fleet = (self.fleet_flags() & plan::PERF_FLEET_STATE != 0).then(|| {
+            let pair_cap = w[49] as usize;
+            w[plan::W_VV_FLEET_NEXT] as usize + (nv + 1) + 6 * pair_cap + 4 * (nv + 1)
+        });
         (0..n)
             .map(|g| {
                 let rec = &misc[(groups + g) * 4..(groups + g) * 4 + 4];
                 let (off, k, points) = (rec[0] as usize, rec[1] as usize, rec[3]);
                 if k == 0 || k > plan::VV_PART {
                     return (k as u32, points, Vec::new());
+                }
+                if let Some(at) = fleet {
+                    let per = (0..k)
+                        .map(|a| {
+                            let v = next[members + nv + off + a] as usize;
+                            std::array::from_fn(|r| next[at + (1 + r) * nv + v])
+                        })
+                        .collect();
+                    return (k as u32, points, per);
                 }
                 let v0 = next[members + nv + off] as usize;
                 let c = grid + v0 * 1024;
@@ -2248,6 +2267,7 @@ impl ExplicitBeamsGpu {
     /// test) on (the default) or off (every candidate against every listed triangle).
     #[doc(hidden)]
     pub fn set_vv_grid(&mut self, on: bool) {
+        self.vv_grid = on;
         let w = (self.layout.status.base / 4) as usize + 9;
         let off: i32 = if on { 0 } else { 1 };
         self.queue.write_buffer(&self.bufs[5], (w * 4) as u64, bytemuck::bytes_of(&off));
@@ -3356,8 +3376,12 @@ impl ExplicitBeamsGpu {
             let rest = self.member_rest_on(vv);
             let extra = if self.group_split_tests { 2 * steps + 1 } else if rest { steps + 1 } else { 1 };
             bytes.resize((PARAM_STRIDE * u64::from(steps + 1 + extra)) as usize, 0);
+            // The owners' state by vehicle only where its dispatches and regions are (the
+            // groups' dispatches' copies carry the flags that hold this frame).
+            let flags = self.fleet_flags();
             let mut put = |k: u32, word: u32| {
                 let mut w = self.planner.words;
+                w[plan::W_PERF_FLAGS] = flags;
                 w[11] = word;
                 let at = (PARAM_STRIDE * u64::from(k)) as usize;
                 bytes[at..at + 4 * w.len()].copy_from_slice(bytemuck::cast_slice(&w));
@@ -3702,6 +3726,24 @@ impl ExplicitBeamsGpu {
         let span = ticks[2 * sched.len() - 1].saturating_sub(ticks[0]) as f64 * period;
         out.push(("span", span, 1));
         Some(out)
+    }
+
+    /// The perf flags of a frame on the split group path: vehicle contact's state by owner
+    /// vehicle ([`plan::PERF_FLEET_STATE`], contact-groups-design.md §8) only with the
+    /// tests in their own dispatches, the candidates' grid, the pair list and the state's
+    /// regions (a fleet of two or more); otherwise the groups' slots, the same results.
+    fn fleet_flags(&self) -> u32 {
+        let w = &self.planner.words;
+        let ok = self.group_split_tests
+            && self.vv_grid
+            && w[plan::W_VV_TRI_PAIRS] != 0
+            && w[plan::W_VV_FLEET] != 0
+            && w[plan::W_VV_FLEET_NEXT] != 0;
+        if ok {
+            self.planner.perf_flags()
+        } else {
+            self.planner.perf_flags() & !plan::PERF_FLEET_STATE
+        }
     }
 
     /// The split path's small groups' triangle tests in dispatches of their own, across

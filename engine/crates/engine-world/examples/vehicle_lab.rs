@@ -1169,16 +1169,24 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 // loop leaves it; the frames' own time alone is summed.)
                 let gap: u64 = std::env::var("AB_GAP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
                 let mut sum = 0.0;
-                for _ in 0..20 {
+                // (AB_FRAMES=n, AB_STEPS=s: n frames of s steps in place of 20 of 34, to
+                // find the first frame or step two paths differ at; AB_COUNTS=1: each
+                // path's contact groups' counts after its frames.)
+                let env_u = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+                let (ab_frames, ab_steps) = (env_u("AB_FRAMES", 20), env_u("AB_STEPS", 34));
+                for _ in 0..ab_frames {
                     if gap > 0 {
                         std::thread::sleep(std::time::Duration::from_millis(gap));
                     }
                     let t = std::time::Instant::now();
-                    x.frame(34);
+                    x.frame(ab_steps);
                     x.wait();
                     sum += t.elapsed().as_secs_f64();
                 }
-                let ms = sum * 1e3 / 20.0;
+                let ms = sum * 1e3 / f64::from(ab_frames.max(1));
+                if env_u("AB_COUNTS", 0) != 0 {
+                    println!("     counts ({}): {:?}", if on { "on" } else { "off" }, x.contact_group_counts());
+                }
                 // The switch's own header bit back, so the words compare the state alone.
                 switch(x, true, &labels);
                 x.wait();

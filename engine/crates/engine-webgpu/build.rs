@@ -769,6 +769,11 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
                 // The tests across workgroups: their counters in global memory.
                 _ => d.push(("EB_VV_GLOBAL", "1")),
             }
+            // The owners' state by vehicle (explicit_beams_fleet.slang), in the groups'
+            // and the tests' modules.
+            if entry != "member" {
+                d.push(("EB_VV_FLEET", "1"));
+            }
             let e = match entry {
                 "member" => "explicit_beams_split_member",
                 "group" => "explicit_beams_split_group",

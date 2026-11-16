@@ -190,3 +190,74 @@ fn members_keep_their_pair_list_bit_for_bit() {
         assert!(built > 0 && reused > 0, "the members kept a pair list (built {built}, reused {reused})");
     }
 }
+
+/// Vehicle contact's state by owner vehicle (`explicit_plan::PERF_FLEET_STATE`,
+/// explicit_beams_fleet.slang; contact-groups-design.md §8): each frame from one saved
+/// state on the split path with the switches of `mask` off (a contact group's slots) then
+/// on, every state word the same. Returns the frames with a contact group, the largest
+/// group and the most hits an owner listed in a frame's last pass with the switches on.
+fn fleet_matches(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool) -> Option<[u32; 3]> {
+    let (_, device, queue) = default_device().ok()?;
+    let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
+    gpu.set_vehicle_contact(true);
+    gpu.set_wide(false);
+    gpu.set_group_split(true);
+    gpu.set_self_split(self_split);
+    let flags = gpu.perf_flags();
+    let (mut grouped, mut largest, mut hits) = (0u32, 0u32, 0u32);
+    for f in 0..frames {
+        gpu.wait();
+        let snap = gpu.snapshot();
+        gpu.set_perf_flags(flags & !mask);
+        gpu.frame(steps);
+        gpu.wait();
+        let off = gpu.state_words();
+        let sizes = gpu.contact_group_sizes();
+        gpu.restore(&snap);
+        gpu.set_perf_flags(flags | mask);
+        gpu.frame(steps);
+        gpu.wait();
+        let on = gpu.state_words();
+        if let Some(d) = first_diff(&off, &on) {
+            panic!(
+                "{label} (self split {self_split}): frame {f} (groups {sizes:?}): perf flags {mask} on differ from off at {d}; counts {:?}",
+                gpu.contact_group_counts()
+            );
+        }
+        if let Some(e) = gpu.take_contact_errors().into_iter().next() {
+            panic!("{label}: frame {f}: {e}");
+        }
+        hits = hits.max(gpu.contact_group_counts().iter().flat_map(|g| g.2.iter().map(|m| m[1])).max().unwrap_or(0));
+        grouped += u32::from(!sizes.is_empty());
+        largest = largest.max(sizes.iter().copied().max().unwrap_or(0));
+    }
+    gpu.set_perf_flags(flags);
+    eprintln!(
+        "{label} (self split {self_split}, perf flags {mask}): {frames} frames bit for bit, {grouped} with a contact group (largest {largest}), most hits an owner {hits}"
+    );
+    Some([grouped, largest, hits])
+}
+
+#[test]
+fn owners_state_by_vehicle_is_bit_for_bit() {
+    use engine_exec::explicit_plan::PERF_FLEET_STATE;
+    let text = generated();
+    for self_split in [false, true] {
+        let a = sedan(&text, Vec3::ZERO, 0.0, Vec3::new(0.0, 0.0, 12.0));
+        let front = a.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+        let probe = sedan(&text, Vec3::ZERO, 180.0, Vec3::ZERO);
+        let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
+        let b = sedan(&text, Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
+        let Some([grouped, _, hits]) = fleet_matches("two sedans head-on", vec![a, b], 40, 17, PERF_FLEET_STATE, self_split) else { return };
+        assert!(grouped > 10 && hits > 0, "the cars met and hit ({grouped} frames grouped, {hits} hits)");
+        // A column of six, the first pushed into the others: groups of two to six, owners
+        // without a partner beside owners with hits.
+        let (lo, hi) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(l, h), n| (l.min(n.pos.z), h.max(n.pos.z)));
+        let pitch = hi - lo + 0.3;
+        let fleet: Vec<ExplicitBeams> = (0..6)
+            .map(|i| sedan(&text, Vec3::new(0.0, 0.0, i as f32 * pitch), 0.0, if i == 0 { Vec3::new(0.0, 0.0, 15.0) } else { Vec3::ZERO }))
+            .collect();
+        let Some([grouped, largest, hits]) = fleet_matches("a column of six", fleet, 30, 17, PERF_FLEET_STATE, self_split) else { return };
+        assert!(grouped > 10 && largest > 4 && hits > 0, "a group past four members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
+    }
+}
