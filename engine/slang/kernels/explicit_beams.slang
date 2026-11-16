@@ -9705,7 +9705,11 @@ void vvFrame(inout VvTri t, float3 p1, float3 p2)
 // (exactly 0 for v = a, and for every vehicle while the origins are 0). The contact's
 // geometry (triangles, contact points, votes, anti-clip) is in the owner's frame, its
 // selection (frame bounds, boxes, prefilters) in the World's.
-float3 vvRel(uint v, uint a) { return asfloat(gMisc[v].xyz) - asfloat(gMisc[a].xyz); }
+// (nf3: a compiler allowed to reassociate, as Metal's is, would otherwise turn
+// `vvRel(v, a) + x` into another order in one inlined copy and not in another, and one
+// contact point would have two positions: the gather's and the kept pairs' tests of
+// vehicle contact differed in the last bit; contact-groups-design.md §8.8.)
+float3 vvRel(uint v, uint a) { return nf3(asfloat(gMisc[v].xyz) - asfloat(gMisc[a].xyz)); }
 
 VvTri vvTriangle(uint gt, float3 origin, float r)
 {

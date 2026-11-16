@@ -716,6 +716,12 @@
     const setSlow = (s) => { put('slow', s); syncUrl(); };
     $('pause').onclick = () => { paused = !paused; $('pause').classList.toggle('on', paused); };
     $('step').onclick = () => { paused = true; $('pause').classList.add('on'); stepOnce = true; };
+    // (The recorder's Chrome A/B, vehicle-lab-record.mjs --ab: the World held while it runs;
+    // `at`: held by the loop itself before the first step at or past World time `at`, so
+    // that two runs are held at the same step.)
+    let holdAt = null;
+    window.__hold = (on, at = null) => { holdAt = at; paused = on; $('pause').classList.toggle('on', on); };
+    window.__held = () => paused;
 
     // ---------------------------------------------------------------- input
     const keys = new Set();
@@ -1281,6 +1287,7 @@
           let refused = 0;
           const t0 = performance.now();
           for (let k = 0; k < owed; k++) {
+            if (holdAt !== null && w.lab.time() >= holdAt - 1e-9) { window.__hold(true); break; }
             if (!w.world.canStep()) { refused = owed - k; break; }
             before();
             w.world.step();

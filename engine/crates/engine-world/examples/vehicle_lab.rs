@@ -935,26 +935,56 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         x.restore(&snap);
         x.wait();
         lab.bench.t = t;
+        // (AB_PRE=k: k frames of 34 steps with the run's own flags first, the A/B from the
+        // state after them: a fixture's first differing frame found, then checked alone.)
+        let pre: u32 = std::env::var("AB_PRE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        for _ in 0..pre {
+            x.frame(34);
+        }
+        x.wait();
+        lab.bench.t = t + f64::from(pre) / 60.0;
+        let t = lab.bench.t;
         ab = vec![t];
+        // `--compare-fixture B`: this fixture's state words against B's (two runs' states at
+        // one time, e.g. the page's flag-on and flag-off runs saved by vehicle-lab-record.mjs
+        // --abSaveAll), the verdict's masking; host state (labels, retired nodes) compared
+        // as bytes. Exits.
+        if let Some(other) = arg("--compare-fixture") {
+            let words = |x: &mut engine_webgpu::ExplicitBeamsGpu| {
+                let s = x.stage_state();
+                let (tx, rx) = std::sync::mpsc::channel();
+                s.buffer().slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    let _ = tx.send(r);
+                });
+                x.wait();
+                rx.recv().expect("map").expect("map ok");
+                s.ab_words()
+            };
+            let a = words(x);
+            let b_bytes = std::fs::read(&other)?;
+            let snap_b = x.snapshot_from_bytes(&b_bytes[at..]);
+            x.restore(&snap_b);
+            x.wait();
+            let b = words(x);
+            let tb = f64::from_bits(u64::from_le_bytes(b_bytes[0..8].try_into()?));
+            println!("compare {file} (t {t:.3}) with {other} (t {tb:.3}); host state the same: {}", bytes[8..at] == b_bytes[8..at]);
+            let d = engine_webgpu::state_differences(&a, &b, 64);
+            for l in &d {
+                println!("   {l}");
+            }
+            println!("   state bit for bit: {}", d.is_empty());
+            std::process::exit(i32::from(!d.is_empty()));
+        }
     }
     for k in 0..windows {
         if ab.first().is_some_and(|&t| lab.bench.t >= t) {
             ab.remove(0);
             if let Some(dir) = &save_dir {
                 std::fs::create_dir_all(dir)?;
-                let host = lab.fleet_host_state();
                 let x = world.explicit_vehicles().expect("vehicles");
                 let snap = x.snapshot();
-                let mut out = lab.bench.t.to_bits().to_le_bytes().to_vec();
-                out.extend((host.len() as u32).to_le_bytes());
-                for (labels, retired) in &host {
-                    out.extend((labels.len() as u32).to_le_bytes());
-                    out.extend(labels);
-                    out.extend((retired.len() as u32).to_le_bytes());
-                    out.extend(retired.iter().map(|r| u8::from(*r)));
-                }
-                out.extend(x.snapshot_to_bytes(&snap));
-                let file = dir.join(format!("cars{}_t{:.1}.fx", host.len(), lab.bench.t));
+                let out = lab.fixture_bytes(&x.snapshot_to_bytes(&snap));
+                let file = dir.join(format!("cars{}_t{:.1}.fx", lab.fleet_host_state().len(), lab.bench.t));
                 std::fs::write(&file, &out)?;
                 println!("   fixture {} ({:.1} MB)", file.display(), out.len() as f64 / 1e6);
             }
