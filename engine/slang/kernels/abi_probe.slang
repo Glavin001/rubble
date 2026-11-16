@@ -31,3 +31,4 @@ void abi_roundtrip(uint3 tid : SV_DispatchThreadID)
     p.counter = p.counter + 1;
     gProbes[i] = p;
 }
+// CI measurement 2: this line only changes the Slang cache key; reverted in the next commit.
