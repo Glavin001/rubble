@@ -236,11 +236,16 @@ pub const PERF_VV_STREAM: u32 = 64;
 /// grid (the kernel's PERF_VV_BIG_GRID), in place of every listed triangle against every
 /// candidate.
 pub const PERF_VV_BIG_GRID: u32 = 128;
+/// [`W_PERF_FLAGS`]: on the split group path a contact group's member keeps its
+/// self-collision pair list over the frame's steps, as a solo vehicle does (the kernel's
+/// PERF_MEMBER_LIST, `memberListLoad` / `memberListSave`), in place of its grid's sort and
+/// walk every step.
+pub const PERF_MEMBER_LIST: u32 = 256;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7) and [`PERF_VV_STREAM`] (§8.13); `RUBBLE_PERF_FLAGS=<mask>` overrides
 /// (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID)
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST)
 }
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;

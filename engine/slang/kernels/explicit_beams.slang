@@ -1585,6 +1585,12 @@ static const uint PERF_VV_STREAM = 64u;
 // at a time) and a triangle visits the cells of its padded box, as the small groups'
 // pass does (vvGridBuild, vvTriangleCandsGrid), in place of every candidate.
 static const uint PERF_VV_BIG_GRID = 128u;
+// perfFlags bit 256 (explicit_plan::PERF_MEMBER_LIST): on the split group path a contact
+// group's member keeps its self-collision pair list over the frame's steps as a solo
+// vehicle does (pairReuse*: built at a step, tested again while it provably holds every
+// pair the walk would test), its state saved between the steps' dispatches
+// (memberListSave), in place of the grid's sort and walk every step (contactMemberStep).
+static const uint PERF_MEMBER_LIST = 256u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 
 // The break exception (spec §2, step 4: an end on a collision triangle with fewer
@@ -8432,6 +8438,49 @@ void memberBox(uint v, uint nodeOff, uint nodeCount, float3 origin, uint parity,
         vvReportOutside(v);
 }
 
+// A member's pair list over the frame's steps (PERF_MEMBER_LIST; the split group path's
+// members, a workgroup each and a dispatch a step): the solo step's reused pair list
+// (pairReuse*), its state (gsCount past the buckets) in the member's solo-step record
+// between the steps' dispatches (soloStepAt: the member's own grid count words, which
+// vehicle contact's scratch no longer uses), its pairs in the member's own pair region
+// (triPairsAt) and its build records (gBeams at pairBuild): nothing else in a group's
+// frame writes them. The tests are the walk's, bit for bit, by the list's own argument
+// (above pairReuseBegin): it reads only the member's node state of the step and its
+// triangles' throttles of the step (a pending reset zeroes them before the tests, in
+// gMisc, where the listed pairs' tests read them).
+#ifdef EB_SOLO_STEP
+void memberListLoad(uint v, uint lane, uint s)
+{
+    if (s == 0u)
+    {
+        if (lane == 0u) pairReuseBegin();
+    }
+    else
+        soloStepLoad(v, lane);
+}
+// After the step's closing barrier: the state for the next step's dispatch, or at the
+// frame's last step the list's statistics (pairReuseEnd).
+void memberListSave(uint v, uint lane, uint s)
+{
+    if (s + 1u < gP.steps)
+    {
+        for (uint k = lane; k < REUSE_WORDS; k += LANES) gAcc[soloStepAt(v) + k].store(int(gsCount[GRID_BUCKETS + k].load()));
+    }
+    else
+        pairReuseEnd(v, lane);
+}
+// A grid step with the list (uniform; mode 1 build, 2 reuse): the solo step's build and
+// tests in the member's workgroup.
+void memberListTests(uint v, uint lane, uint mode, uint triOff, uint triCount, uint nodeOff, uint nodeCount,
+                     float3 origin, float r, float cell, uint candOff, uint candCount, uint beamOff, uint groupOff,
+                     uint groupCount, uint parity)
+{
+    if (mode == 1u) pairReuseBuild(v, lane, triOff, triCount, nodeOff, nodeCount, origin, r, cell, candOff, candCount, parity);
+    pairReuseTests(v, lane, mode, triOff, triCount, origin, r, cell, candOff, candCount, beamOff, groupOff, groupCount,
+                   parity);
+}
+#endif
+
 void contactMemberStep(uint v, uint lane, uint s, bool first)
 {
     uint4 r0 = gStatic[v * 4u];
@@ -8465,6 +8514,14 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     uint step = misc.w + s;
     uint parity = step & 1u;
     bool pending = gMisc[vvRec(v, VV_FLAGS)].w != 0u;
+#ifdef EB_SOLO_STEP
+    // The pair list kept over the frame's steps (PERF_MEMBER_LIST): none at the frame's
+    // first step, else its state as the member's last step left it.
+    bool keep = (gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn();
+    if (keep) memberListLoad(v, lane, s);
+#else
+    bool keep = false;
+#endif
     if (lane == 0u)
     {
         gsTestedCount[parity].store(0u);
@@ -8495,6 +8552,9 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
         if ((flagsV & FLAG_CENTRED) != 0u) memberBox(v, nodeOff, nodeCount, origin, parity, lane, LANES);
     }
+#ifdef EB_SOLO_STEP
+    if (keep) pairReuseTrack(nodeOff, nodeCount, lane);
+#endif
     for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
     if (candCount > 0u)
     {
@@ -8512,6 +8572,7 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     for (uint b = lane; b < GRID_BUCKETS; b += LANES) gsCount[b].store(0u);
     if (lane == 0u)
     {
+        if (keep) gsPairCount.store(0u);
         gAcc[hitAcc(v)].store(0);
         gAcc[hitAcc(v) + 1u].store(0);
         clipVmaxClear(v, parity);
@@ -8528,9 +8589,15 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     {
         // Bit 0: the grid this step; bit 1: self-collision hits or pending beams
         // possible (selfApply's barriers).
+        // Bits 2..3 (PERF_MEMBER_LIST): the grid's pair list this step (pairReuseDecide:
+        // 0 the walk, 1 build, 2 reuse).
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
-        gsUniformLanes = (cell > 0.0 && candCount > 0u && listed * candCount > BRUTE_PAIRS_PER_LANE * LANES ? 1u : 0u)
-            | (triCount > 0u ? 2u : 0u);
+        uint grid = cell > 0.0 && candCount > 0u && listed * candCount > BRUTE_PAIRS_PER_LANE * LANES ? 1u : 0u;
+        uint mode = 0u;
+#ifdef EB_SOLO_STEP
+        if (keep) mode = pairReuseDecide(v, grid, parity, origin);
+#endif
+        gsUniformLanes = grid | (triCount > 0u ? 2u : 0u) | (mode << 2);
     }
     if (cell > 0.0)
     {
@@ -8576,8 +8643,13 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     sync();
     uint flagsU = gsUniformLanes;
     uint gridOn = flagsU & 1u;
+#ifdef EB_SOLO_STEP
+    uint reuse = flagsU >> 2;
+#else
+    const uint reuse = 0u;
+#endif
     if (lane == 0u) resolvePending(v, parity);
-    if (gridOn != 0u)
+    if (gridOn != 0u && reuse != 2u)
     {
         uint per = GRID_BUCKETS / LANES;
         uint block = LANES / GRID_BLOCKS;
@@ -8628,6 +8700,12 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
         }
         sync();
     }
+#ifdef EB_SOLO_STEP
+    if (gridOn != 0u && reuse != 0u)
+        memberListTests(v, lane, reuse, triOff, triCount, nodeOff, nodeCount, origin, range, cell, candOff, candCount,
+                        beamOff, groupOff, groupCount, parity);
+    else
+#endif
     if (candCount > 0u && cell > 0.0 && gridOn != 0u)
     {
         uint listed = triCount <= TRI_LIST ? gsTestedCount[parity].load() : triCount;
@@ -8667,6 +8745,9 @@ void contactMemberStep(uint v, uint lane, uint s, bool first)
     if (lane == LANES - 1u && (flagsV & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, SLIDE_FRAME, groupOff, parity);
 #endif
     sync();
+#ifdef EB_SOLO_STEP
+    if (keep) memberListSave(v, lane, s);
+#endif
 }
 
 // --- A small group's members stepped side by side (k <= VV_PART members) ---
