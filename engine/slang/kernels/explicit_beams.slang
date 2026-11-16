@@ -7901,15 +7901,6 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
 }
 
 #ifdef EB_SELF_SPLIT
-// The reused pair list's part of a step in the wide passes (PERF_WIDE_LIST), a workgroup a
-// vehicle after the step's wide_beams: what explicit_beams_self_step runs of a step
-// between its beams and its pairs dispatch, and nothing else (a small kernel: a dispatch
-// of the frame kernel costs four times this one's). The list's tracking, the triangles'
-// throttles and tested list, the grid's counts, the decision, the grid's scan and the
-// build's records on a building step, the volatile triangles' tests; the list's state
-// loaded at its start and saved at its end (soloStepLoad, soloStepSave). The walk and
-// pairs dispatches follow, then wide_hits (the deferred breaks, the walk's end, the
-// hits). The parameter copy `steps`: the list's end (pairReuseEnd).
 // perfFlags bit 131072 (explicit_plan::PERF_AHEAD_APART, with PERF_WIDE_FUSED): step
 // s + 1's coupling and wheels (what the list kernel runs beside its own phases: the
 // coupling's step or its fold, the wheels' rays and bars) on a workgroup of their own,
@@ -7967,6 +7958,15 @@ void wideAheadApart(uint v, uint lane)
     if (aheadDrive) driveTyresPre(drvC, drvHas, drvApart, LANES - 1u - lane);
 }
 
+// The reused pair list's part of a step in the wide passes (PERF_WIDE_LIST), a workgroup a
+// vehicle after the step's wide_beams: what explicit_beams_self_step runs of a step
+// between its beams and its pairs dispatch, and nothing else (a small kernel: a dispatch
+// of the frame kernel costs four times this one's). The list's tracking, the triangles'
+// throttles and tested list, the grid's counts, the decision, the grid's scan and the
+// build's records on a building step, the volatile triangles' tests; the list's state
+// loaded at its start and saved at its end (soloStepLoad, soloStepSave). The walk and
+// pairs dispatches follow, then wide_hits (the deferred breaks, the walk's end, the
+// hits). The parameter copy `steps`: the list's end (pairReuseEnd).
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
