@@ -32,6 +32,35 @@
     behind `STRESS_CORRECTION_LIMIT=1`, off by default.
   - Do not enable it in a profile or in production code.
 
+- Checking a kernel change: climb a ladder, cheapest rung first, and do not go up a
+  rung until the one below passes. Never wait minutes for an answer a rung of seconds
+  gives. The bar does not move: what must be bit for bit is checked bit for bit.
+  1. **Seconds, after every edit.** `engine/tools/explicit-2khz/fast-check.sh SWITCH
+     [FIXTURE ...]` replays saved moments of the lab's multi-car run (1, 2, 4, 8 and 32
+     cars; falling, first collisions, pile, rest) both ways from one state, compares
+     every state word and times both: about a second a fixture, 5 s for one car count.
+     It builds with `--profile fast` (no link-time optimisation, incremental; the same
+     optimisation level) and the kernel compiles are cached one by one, so a rebuild is
+     5 s after an edit to a small kernel file and 25 s after one to
+     `explicit_beams.slang` (it was 91 s). `fast-check.sh --make` saves the fixtures
+     (3 minutes, once, and again after a change of the buffers' layout). A new switch
+     needs its `--ab-switch` value; a new kernel without a switch is checked against
+     the committed kernels (`--ab-switch kernel --ab-kernel-dir`).
+  2. **A minute.** The same with `FRAMES=20`, `EXTRA="--ab-profile"` for the frame by
+     dispatch kind, `explicit_loop_cap`, and Chrome's validation of every module
+     (`EXPLICIT_WGSL_MODULES_ONLY=1 node --experimental-websocket
+     explicit-wgsl-check.mjs`, 5 s: Chrome rejects barriers naga accepts and has a
+     workgroup storage limit Metal does not).
+  3. **Before a commit that changes results or a default.** The suites that hold
+     GPU == CPU reference and the paths against each other
+     (`tools/explicit-2khz/perf-verify.sh default ...`), `engine-metal` parity.
+  4. **Before a merge or a number in a doc.** The whole 40 s runs (native and the Chrome
+     probe) and every suite.
+  When a higher rung finds something a lower one missed, add a fixture or a test at the
+  lowest rung that would have caught it, so that it is never found by a long run again.
+  Timing: the fixtures' times are for ranking a change; a number for the doc comes from
+  rung 4 on a GPU nothing else is using (`with-gpu-lock.py` queues GPU jobs, it does not
+  keep the user's own page off the GPU).
 - Generated vehicles: read `engine/docs/generated-vehicles-lessons.md` first (lessons,
   measurements, decisions; add to it rather than redoing research).
 - Deformable vehicles: `engine/docs/deformable-vehicles.md` explains the model (keep it

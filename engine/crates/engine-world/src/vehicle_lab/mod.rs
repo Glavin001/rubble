@@ -2497,6 +2497,15 @@ impl Lab {
         &self.labels
     }
 
+    /// Every car's host-set state the GPU's snapshot does not hold, the first car's
+    /// first: its piece labels (empty: none) and its retired nodes. With the snapshot's
+    /// bytes, what a saved state needs to be replayed in another process.
+    pub fn fleet_host_state(&self) -> Vec<(Vec<u8>, Vec<bool>)> {
+        std::iter::once((self.labels.clone(), self.bench.debris.retired.clone()))
+            .chain(self.fleet.iter().map(|c| (c.labels.clone(), c.debris.retired.clone())))
+            .collect()
+    }
+
     pub fn command(&mut self, world: &mut World, cmd: &Value) -> anyhow::Result<Value> {
         // { ownTravel: bool }: the cars' anti-clip padding by each contacter's own travel
         // (LabOptions::own_travel_reach), now and after a restart.
