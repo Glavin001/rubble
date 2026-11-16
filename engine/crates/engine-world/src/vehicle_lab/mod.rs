@@ -195,7 +195,10 @@ impl LabOptions {
         let d = Self::default();
         let m = v.get("mountain").cloned().unwrap_or(Value::Null);
         let dm = d.mountain;
-        let shapes = (num(v, "shapes", f64::from(d.capacity.shapes)) as u32).clamp(8, 1024);
+        // (More than one car: the mountain keeps ground under all of them, several
+        // times one car's chunks, so the shapes' room defaults to its most.)
+        let many = num(v, "cars", f64::from(d.cars)) > 1.0;
+        let shapes = (num(v, "shapes", if many { 1024.0 } else { f64::from(d.capacity.shapes) }) as u32).clamp(8, 1024);
         let mut parts = Vec::new();
         if let Some(p) = v.get("parts") {
             let list = |k: &str| -> Vec<u64> {
@@ -643,6 +646,10 @@ pub struct Bench {
     pub plates: Vec<Plate>,
     obstacles: Vec<u32>,
     mountain: Option<MountainRun>,
+    /// Every vehicle's origin at the last read (the first car's included; a vehicle's
+    /// nodes stay within the kernel's rebase radius, 100 m, of its origin): the
+    /// mountain keeps ground under each of them.
+    pub fleet: Vec<DVec3>,
     script: Vec<(f64, Value)>,
     script_at: usize,
     pub script_end: Option<f64>,
@@ -694,6 +701,7 @@ impl Bench {
             plates: Vec::new(),
             obstacles: Vec::new(),
             mountain,
+            fleet: Vec::new(),
             script: Vec::new(),
             script_at: 0,
             script_end: None,
@@ -1335,9 +1343,21 @@ impl Bench {
         } else {
             0
         };
+        // With more cars, ground under every one of them: the chunks from the hindmost
+        // car's to the foremost's (each car within the rebase radius of its origin, so
+        // that many chunks further either way). One car: as before.
+        let (mut lo, mut hi) = (at, at);
+        if self.car.readings > 0 && self.fleet.len() > 1 {
+            let reach = (100.0 / f64::from(m.spec.chunk)).ceil() as i64;
+            for o in &self.fleet[1..] {
+                let k = m.spec.chunk_of(*o);
+                lo = lo.min(k - reach);
+                hi = hi.max(k + reach);
+            }
+        }
         let (first, last) = (
-            (at - i64::from(m.spec.behind)).max(-1),
-            at + i64::from(m.spec.ahead),
+            (lo - i64::from(m.spec.behind)).max(-1),
+            hi + i64::from(m.spec.ahead),
         );
         let gone: Vec<i64> = m
             .live
@@ -2270,7 +2290,8 @@ impl Lab {
         let span = x.layout().spans[0];
         let plan = ReadPlan {
             nodes: (u64::from(span.node_off) * 48, u64::from(span.nodes) * 48),
-            origin: (0, 16),
+            // (Every vehicle's origin record: the mountain's ground follows them all.)
+            origin: (0, 16 * x.vehicle_count() as u64),
             coupling: (
                 u64::from(layout.vehicle(0)) * 16,
                 u64::from(layout.recs()) * 16,
@@ -2613,6 +2634,10 @@ impl Lab {
             })
             .collect();
         anyhow::ensure!(origin.len() >= 3, "vehicle lab: no origin record");
+        self.bench.fleet = origin
+            .chunks_exact(4)
+            .map(|w| DVec3::new(f64::from(f(w[0])), f64::from(f(w[1])), f64::from(f(w[2]))))
+            .collect();
         let o = DVec3::new(
             f64::from(f(origin[0])),
             f64::from(f(origin[1])),

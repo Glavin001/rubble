@@ -1384,6 +1384,19 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         })
                         .collect();
                     println!("   speeds km/h: {}", v.join(" "));
+                    // (Where each car's fastest node is, and how many of its nodes are
+                    // past 200 km/h: debris in free fall has left the ground.)
+                    let w: Vec<String> = all
+                        .iter()
+                        .zip(x.velocities().iter())
+                        .map(|(p, vs)| {
+                            let (i, top) = vs.iter().enumerate().fold((0, 0.0f32), |(bi, b), (i, q)| if q.length() > b { (i, q.length()) } else { (bi, b) });
+                            let fast = vs.iter().filter(|q| q.length() * 3.6 > 200.0).count();
+                            let med = p[p.len() / 2];
+                            format!("{fast}@x{:.0},y{:.0},z{:.0}(car x{:.0},y{:.0},z{:.0};{:.0})", p[i].x, p[i].y, p[i].z, med.x, med.y, med.z, top * 3.6)
+                        })
+                        .collect();
+                    println!("   fast nodes: {}", w.join(" "));
                     // The fleet's energy ledger (kJ): kinetic, potential (m g y) and their
                     // sum, per car and in all. Contact and yielding only take energy out:
                     // the total may not rise, and a car's own sum rises only by what
