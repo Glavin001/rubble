@@ -885,6 +885,10 @@ void fkPoint(uint vb, uint i)
         if (ci >= gNext[fkRun(va + 1u)] - base) continue;
         float4 E = float4(nf3(vvRel(vb, va) + ref.xyz), asfloat(h));
         gBeams[gP.vvRun + base + ci] = E;
+        // (The owner's fastest candidate, as flPoint keeps it: a build past an owner's room
+        // walks its tests in the walk's own boxes, fkWalk.)
+        float3 w3 = gNodes[h * 3u + 1u].xyz;
+        gAcc[flOwn(va) + FL_FAST].max(int(asuint(ssqrt(sdot(w3, w3)))));
         uint b = gridBucket(int3(floor(E.xyz * FK_PER_CELL)));
         gNext[gP.vvHits + 4u * VV_PART * vvTotalCp() + base + ci] = b | (uint(gAcc[flGridCount(va) + b].add(1)) << 10);
         if (fkWild(ref))
@@ -1091,6 +1095,7 @@ uint fkDecide(uint lane)
             gNext[vvTriPairsAt(v)] = FK_MAGIC;
             gNext[vvTriPairsAt(v) + 1u] = epoch + 1u;
         }
+        if (lane == 0u) gAcc[fkAccCtl(2u)].store(0);
         if (tooMany) gsUniformOpen = 1u;
         // The fastest relative motion of two partners over the last pass (their reference
         // motions at a build are that pass's mean motions): the list's allowance for it.
@@ -1241,6 +1246,22 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
     bool wildNear = gAcc[fkAcc(va, FK_WILD_BOX)].load() != VV_INT_MAX
                     && !(any(whi < tlo - float3(farW, farW, farW)) || any(wlo > thi + float3(farW, farW, farW)));
     float pad = (wildNear ? padW : padC) + FK_FAR;
+    if (test)
+    {
+        // A build past an owner's room (FK_OVER): this pass's tests. Their cells are those
+        // of the walk's own box (vvTriangleCandsList's: the triangle's box grown by its
+        // range, its travel, the fastest candidate's travel and CLIP_DEPTH; room for the
+        // two boxes' rounding), not the build's padded one: every pair today's walk lists
+        // has its point there, and fkPairTry decides each exactly. (The padded box made
+        // this pass several times a pass's cost: the worst step of a run.)
+        float vmax = asfloat(uint(gAcc[flOwn(va) + FL_FAST].load()));
+        float travel = gP.clipMem != 0u ? smul(clipTriSpeed(tn), STEP) : 0.0;
+        float3 m3 = max(abs(tlo), abs(thi));
+        pad = asfloat(gStatic[va * 4u + 3u].z) + nf(nf(travel + smul(vmax, STEP)) + CLIP_DEPTH) + 0.002
+              + 4.0e-6 * max(m3.x, max(m3.y, m3.z));
+    }
+    // (A build whose list is void, an owner past its room: no more listing.)
+    else if (gAcc[fkAccCtl(2u)].load() != 0) return;
     uint nearDone = 0xFFFFFFFFu;
     float3 lo = tlo - float3(pad, pad, pad);
     float3 hi = thi + float3(pad, pad, pad);
@@ -1270,6 +1291,11 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
             {
                 gNext[at + 2u * (n + 1u)] = gt;
                 gNext[at + 2u * (n + 1u) + 1u] = asuint(E.w);
+            }
+            else
+            {
+                gAcc[fkAccCtl(2u)].store(1);
+                return;
             }
         }
         return;
@@ -1306,6 +1332,11 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
             {
                 gNext[at + 2u * (n + 1u)] = gt;
                 gNext[at + 2u * (n + 1u) + 1u] = asuint(E.w);
+            }
+            else
+            {
+                gAcc[fkAccCtl(2u)].store(1);
+                return;
             }
         }
     }

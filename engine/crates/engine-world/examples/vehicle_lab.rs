@@ -142,6 +142,11 @@ fn options(script: &Value) -> LabOptions {
             };
         }
     }
+    // `--terrain ledges|rolling`: the mountain's ground (the offline default is ledges, the
+    // page's rolling).
+    if let Some(t) = arg("--terrain") {
+        m["terrain"] = json!(t);
+    }
     if let Some(r) = arg("--rockslide") {
         m["rockslide"] = json!(r == "1");
     }
@@ -1347,7 +1352,15 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     let t = std::time::Instant::now();
                     x.frame(ab_steps);
                     x.wait();
-                    sum += t.elapsed().as_secs_f64();
+                    let dt = t.elapsed().as_secs_f64();
+                    sum += dt;
+                    // (AB_EACH=1: each frame's wall ms and, with the kept candidates, its
+                    // builds, reused passes and passes on the front's own path; the
+                    // summary's counts are then of the last frame alone.)
+                    if env_u("AB_EACH", 0) != 0 {
+                        let fk = x.take_fleet_keep_stats();
+                        println!("     frame ({}): {:.2} ms, builds {} (calm {}, between {}, cover {}), reused {}, own path {}", if on { "on" } else { "off" }, dt * 1e3, fk[0], fk[5], fk[9], fk[6], fk[1], fk[3]);
+                    }
                 }
                 let ms = sum * 1e3 / f64::from(frames);
                 // Vehicle contact's kept candidates (PERF_FLEET_KEEP), when this run used
