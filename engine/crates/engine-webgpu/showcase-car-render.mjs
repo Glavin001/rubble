@@ -1156,6 +1156,8 @@ struct VOut {
   @location(9) wear: vec2f,
   // Texture set + 1 (0 none): an imported vehicle's maps.
   @location(10) @interpolate(flat) tex: u32,
+  // 1 on the paint of a car whose panels are closed solids (visual.closedPanels).
+  @location(11) @interpolate(flat) closed: u32,
 };
 
 @vertex
@@ -1169,8 +1171,10 @@ fn vs(@location(0) p3: vec3f, @location(8) tw: u32, @location(1) n3: vec3f, @loc
   o.world = pt.xyz;
   o.normal = nrm.xyz;
   o.color = color;
-  // The attribute's low byte is the material, its high half the texture.
+  // The attribute's low byte is the material, bit 8 a closed solid's paint, its
+  // high half the texture.
   o.mat = mat & 0xffu;
+  o.closed = (mat >> 8u) & 1u;
   o.tex = mat >> 16u;
   o.torn = pt.w;
   o.ao = ao;
@@ -1443,6 +1447,8 @@ fn zebraCoord(n: vec3f, w: vec3f) -> f32 {
   if (ZEBRA < 2.5) { return atan2(r.y, r.z) * 9.0 / 3.14159265; }
   return asin(clamp(r.y, -1.0, 1.0)) * 18.0 / 3.14159265;
 }
+// The tear field (0 whole, cut at 0.5) from which a closed solid's inside is drawn.
+const CLOSED_TEAR: f32 = 0.05;
 fn shade(i: VOut, front: bool) -> vec4f {
   // Texture-coordinate footprint (taken in uniform control flow): printed
   // text fades to its average ink when too small to read.
@@ -1490,6 +1496,13 @@ fn shade(i: VOut, front: bool) -> vec4f {
   // a sliver folded over in a crush (a rolled edge, a crease): paint, so a
   // buckled seam reads as a sharp fold rather than a dark sawtooth.
   if (!front && i.mat == 0u && dot(n, v) < 0.0) {
+    // A closed solid's panel (skin, edge walls, inner face) has no inside to see
+    // while it is whole: every ray meets a front face first. A back face in view
+    // there is the solid turned through itself by a crush (its inner face pushed
+    // out past its skin, a few millimetres apart at rest), which drew as dark
+    // patches and dots in the paint. Not drawn: the skin behind it shows. Round a
+    // tear the cavity is open and its inside is drawn.
+    if (i.closed != 0u && i.torn < CLOSED_TEAR) { discard; }
     let d = vec3f(0.055, 0.056, 0.06) * (0.4 + 0.6 * clamp(i.ao, 0.0, 1.0));
     return vec4f(tonemap(d * (irradiance(-n) + vec3f(0.2))), 1.0);
   }
@@ -2042,10 +2055,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     /**
      * Add a car: `visual` from the wasm (`showcaseCar(...).visual`), `nodeOffset` its
      * vehicle's first node in the solver (`layout.vehicles[i].nodeOffset`), `vehicle`
-     * its index (for its origin). Returns an id.
+     * its index (for its origin). Returns an id. `visual.closedPanels`: its painted
+     * panels are closed solids (skin, edge walls, inner face), so the back of a paint
+     * face is drawn only round a tear (beamng-mod.mjs sets it from the model).
      */
     addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0, dataBase = 0, wheelRecords = null, retireAt = 0, labelAt = 0 } = {}) {
       const nodeCount = visual.nodeCount;
+      // Every level of detail is the same car: closed solids or sheets.
+      const closedPanels = !!visual.closedPanels;
       const nt = visual.normalTris, start = visual.nodeTriStart, list = visual.nodeTriList;
       const units = visual.unitKind?.length ?? 0;
       const nbs = visual.nodeBeamStart, nbl = visual.nodeBeamList, r0 = visual.beamRest0;
@@ -2297,9 +2314,10 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         for (let i = 0; i < n; i++) {
           af.set(v.colors.subarray(3 * i, 3 * i + 3), 10 * i);
           af[10 * i + 3] = v.ao ? v.ao[i] : 1;
-          // Material (low byte), texture set + 1 (high half; 0 none).
+          // Material (low byte), a closed solid's paint (bit 8), texture set + 1
+          // (high half; 0 none).
           const t = v.tex ? v.tex[i] : 0;
-          au[10 * i + 4] = v.material[i] | (t ? (t + setBase) << 16 : 0);
+          au[10 * i + 4] = v.material[i] | (closedPanels && v.material[i] === 0 ? 1 << 8 : 0) | (t ? (t + setBase) << 16 : 0);
           af.set(v.positions.subarray(3 * i, 3 * i + 3), 10 * i + 5);
           if (v.uvs) af.set(v.uvs.subarray(2 * i, 2 * i + 2), 10 * i + 8);
         }

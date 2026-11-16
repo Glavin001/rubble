@@ -138,7 +138,23 @@ export function modVisual(mod, { native = true, raycast = false, paint = null } 
   const spec = { jbeam: mod.files, pc: mod.pc, native, ...(raycast ? { wheels: 'raycast' } : {}), ...(paint ? { paint } : {}), materials: mod.materials ?? [] };
   const r = mod.skin ? jbeamVisualSkinned(spec, mod.meshes, mod.glb, mod.skin) : jbeamVisual(spec, mod.meshes);
   r.visual.lod = r.visualLod ? [r.visualLod, r.visualFar] : [];
+  r.visual.closedPanels = closedSolids(mod.glb);
   return r;
+}
+
+/**
+ * Whether a glTF model's parts are closed solids: the vehicle generator tags every
+ * vertex of a solid part outer skin, edge wall or inner face (the `_SURFACE` attribute,
+ * engine-vehiclegen export.rs), and writes no tag for sheet parts. The renderer then
+ * knows a paint face's back is inside a sealed panel (showcase-car-render.mjs).
+ */
+export function closedSolids(glb) {
+  if (!glb || glb.byteLength < 20) return false;
+  const view = new DataView(glb.buffer, glb.byteOffset, glb.byteLength);
+  // Header (magic, version, length), then the JSON chunk (length, type 'JSON').
+  if (view.getUint32(0, true) !== 0x46546c67 || view.getUint32(16, true) !== 0x4e4f534a) return false;
+  const json = JSON.parse(new TextDecoder().decode(glb.subarray(20, 20 + view.getUint32(12, true))));
+  return (json.meshes ?? []).some((m) => (m.primitives ?? []).some((p) => p.attributes && '_SURFACE' in p.attributes));
 }
 
 /**
