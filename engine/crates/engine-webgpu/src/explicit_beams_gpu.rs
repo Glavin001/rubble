@@ -2521,10 +2521,10 @@ impl ExplicitBeamsGpu {
     /// that reused the kept pairs, pairs kept summed over the builds, passes with partners
     /// on the front's own path, the most pairs one owner kept at a build, builds because
     /// a calm node had moved past its allowance, builds because a pair was not covered or
-    /// no list was kept, the largest motion bound of a vehicle at a build for motion and
-    /// the fastest tracked node's travel over a step, both float bits, builds because two
-    /// vehicles had moved past theirs; the other builds are a wild node's). Zeros without
-    /// the fleet state.
+    /// no list was kept, the largest bound at a build that ended a list for motion (a
+    /// node's, or two vehicles') and the current list's allowance for two vehicles'
+    /// relative motion, both float bits, builds because two vehicles had moved past it;
+    /// the other builds are a wild node's). Zeros without the fleet state.
     #[doc(hidden)]
     pub fn take_fleet_keep_stats(&mut self) -> [u64; 10] {
         let w = &self.planner.words;
@@ -2538,7 +2538,7 @@ impl ExplicitBeamsGpu {
         let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
         // (Word 14 is the passes' clock, not a count of this window.)
         let out = std::array::from_fn(|k| u64::from(next[ctl + if k == 9 { 15 } else { 5 + k }]));
-        self.queue.write_buffer(&self.bufs[8], ((ctl + 5) * 4) as u64, &[0u8; 36]);
+        self.queue.write_buffer(&self.bufs[8], ((ctl + 5) * 4) as u64, &[0u8; 32]);
         self.queue.write_buffer(&self.bufs[8], ((ctl + 15) * 4) as u64, &[0u8; 4]);
         out
     }

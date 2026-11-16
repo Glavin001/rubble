@@ -5879,7 +5879,8 @@ static const uint FK_ACC_CTL = 4u;
 uint fkAcc(uint v, uint w) { return flCtl(FL_CTL) + v * FK_ACC + w; }
 uint fkAccCtl(uint i) { return fkAcc(gP.vehicles, 0u) + i; }
 // gNext: per triangle whether its throttle step listed it this pass; per vehicle its
-// partners the build covered (a count, then FK_COVER vehicles); the prefixes over the
+// partners the build covered (a count, then FK_COVER vehicles, the top bit: one of that
+// partner's points was near one of this vehicle's triangles at the build); the prefixes over the
 // vehicles of the build's candidate runs and of the kept pairs (one more each for the
 // total); per vehicle its origin at the build (float bits); FK_CTL words.
 static const uint FK_COVER = 8u;
@@ -8482,10 +8483,10 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     // without a group: a thread a pair (words 32..34, in workgroups of 256 at least) and
     // one workgroup (36..38: the first plan, which sizes the rest).
     uint any = groups == 0u ? 0u : 1u;
-    // (With the kept candidates, PERF_FLEET_KEEP, also a thread a triangle or contact
-    // point: the nodes' motion since the list's build, fkTrack.)
+    // (With the kept candidates, PERF_FLEET_KEEP, also a thread a node: its motion since
+    // the list's build, fkTrack.)
     uint scanThreads = gNext[flAdjFirst(nv)] / 2u;
-    if ((gP.perfFlags & PERF_FLEET_KEEP) != 0u) scanThreads = max(scanThreads, max(gP.totalTris, gNext[flPrefixAt(4u, nv)]));
+    if ((gP.perfFlags & PERF_FLEET_KEEP) != 0u) scanThreads = max(scanThreads, gP.totalNodes);
     gArgs[32] = any * ((scanThreads + 255u) / 256u);
     gArgs[33] = 1u;
     gArgs[34] = 1u;

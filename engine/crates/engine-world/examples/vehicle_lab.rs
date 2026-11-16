@@ -1321,7 +1321,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let fk = x.take_fleet_keep_stats();
                 if fk[0] + fk[1] > 0 {
                     println!(
-                        "     kept candidates ({}): {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, fastest node {:.1} m/s",
+                        "     kept candidates ({}): {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, allowance between vehicles {:.3} m",
                         if on { "on" } else { "off" },
                         fk[0],
                         fk[5],
@@ -1333,7 +1333,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         fk[2] as f64 / fk[0].max(1) as f64,
                         fk[4],
                         f32::from_bits(fk[7] as u32),
-                        f32::from_bits(fk[8] as u32) / 0.0005
+                        f32::from_bits(fk[8] as u32)
                     );
                 }
                 if env_u("AB_COUNTS", 0) != 0 {
@@ -1530,7 +1530,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let fk = x.take_fleet_keep_stats();
                 if fk[0] + fk[1] > 0 {
                     println!(
-                        "   vehicle contact's kept candidates: {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, fastest node {:.1} m/s",
+                        "   vehicle contact's kept candidates: {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, allowance between vehicles {:.3} m",
                         fk[0],
                         fk[5],
                         fk[9],
@@ -1541,7 +1541,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         fk[2] as f64 / fk[0].max(1) as f64,
                         fk[4],
                         f32::from_bits(fk[7] as u32),
-                        f32::from_bits(fk[8] as u32) / 0.0005
+                        f32::from_bits(fk[8] as u32)
                     );
                 }
             }

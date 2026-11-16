@@ -538,27 +538,30 @@ with a conservative skin:
   the largest padding), a grid an owner (0.6 m cells; a candidate is taken from its own
   cell, so once), the sorted copy, and a walk over every triangle. The pairs are
   (triangle, node) in the owner's pair region (`vvTriPairsAt`, after a two-word
-  signature). Each tracked node's position and class and each vehicle's origin are
-  recorded.
+  signature). Every node's position and class and each vehicle's origin are recorded.
+  The walk's box is `FK_FAR` (30 cm) larger than a kept pair's: a point in between is
+  not kept, but marks its vehicle near the owner. Two vehicles neither of which is near
+  the other have no pair within `FK_FAR` of being kept.
 - **Every pass** tests the kept pairs with what the front and the walk would have applied
   to them, on that pass's values (`fkPairTry`): the triangle was listed by its throttle
   step this pass (`flTriangle`, unchanged, sets a word a triangle); the two vehicles are
   partners this pass (the scans' bits); the point is in the owner's box (`flPoint`'s
   test); it is in the triangle's box (`vvInBox`, which sets the had-candidates mark);
   then `vvFind`, the two-body counts, the hit listed, the hit mark, as `vvPairTest`.
-- **The bound.** A thread a triangle and contact point (in the scans' dispatch) takes, per
-  vehicle and class, the farthest a tracked node has moved since the build relative to
-  the vehicle's reference motion, and the fastest one's travel over a step (anti-clip's
-  pads grow with speed). A node's motion is its position less its recorded one plus the
-  origin's change (a rebase cancels). The reference motion is the vehicle's tracked
-  nodes' mean motion of the pass before plus that pass's change of it: any vector is
-  sound, a good one keeps the bounds small whatever a single node does. The first plan
+- **The bound.** A thread a node (in the scans' dispatch; every node, which holds every
+  triangle's node and contact point) takes, per vehicle and class, the farthest a node
+  has moved since the build relative to the vehicle's reference motion, and the fastest
+  one's travel over a step (anti-clip's pads grow with speed). A node's motion is its
+  position less its recorded one plus the origin's change (a rebase cancels). The
+  reference motion is the mean motion of one node in eight of the vehicle in the pass
+  before plus that pass's change of it: any vector is sound, a good one keeps the bounds
+  small whatever a single node does. The first plan
   holds each partner vehicle's calm motion plus travel to `FK_CALM` and its largest
   motion plus largest travel to `FK_WILD`, and each pair of partners' relative motion
   (the two reference motions' difference, with the origins' terms as the tests round
-  them and 2 mm plus 2·10⁻⁶ of the coordinates for rounding) to `FK_BETWEEN`. Past any of
-  them, a pair the build did not cover, or a missing signature: the list is built again
-  in that pass.
+  them and 2 mm plus 2·10⁻⁶ of the coordinates for rounding) to `FK_BETWEEN`, or to
+  `FK_BETWEEN` + `FK_FAR` when neither is near the other. Past any of them, a pair the
+  build did not cover, or a missing signature: the list is built again in that pass.
 
 Why the same hits: a pair today's walk lists has its point within the triangle's box
 grown by the range and at most `CLIP_DEPTH` plus the two nodes' travel. Since the build
@@ -566,7 +569,8 @@ the point has moved relative to the triangle's nodes by at most its own motion r
 to its vehicle's reference, the triangle's nodes' relative to theirs, and the two
 references' relative motion; with the travel that is within the two allowances and
 `FK_BETWEEN`, so at the build the point was inside the build's box: the kept list has the
-pair. The other conditions (listed, partners, owner's box, `vvInBox`) are evaluated
+pair. For two vehicles not near each other, every point was outside the box grown by
+`FK_FAR` as well, so the same holds with that much more relative motion and no pair. The other conditions (listed, partners, owner's box, `vvInBox`) are evaluated
 exactly, so the pairs that reach `vvFind` are today's set, each once; the hit list's
 order does not matter (the levels apply hits in the canonical order). The classes, the
 heat and the reference motion are choices that cannot make a list unsound: they only

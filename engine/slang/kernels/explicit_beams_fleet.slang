@@ -66,8 +66,12 @@ void flError(int code) { gAcc[vvCtl(VV_OVERFLOW)].max(code); }
 // region (the flag off for a frame) ends the kept one.
 static const float FK_CALM = 0.05; // a calm node's motion and travel since the build, at most
 static const float FK_WILD = 0.35; // a wild node's (a spinning wheel's, a flying piece's)
-static const float FK_BETWEEN = 0.05; // two vehicles' first nodes' relative motion, with the rounding
-static const float FK_WILD_SPEED = 1.0; // a node this fast relative to its vehicle's first node is wild
+static const float FK_BETWEEN = 0.05; // two vehicles' relative motion, with the rounding, at least;
+static const float FK_BETWEEN_MOST = 0.3; // at most; a build's own: FK_BETWEEN_PASSES passes of its
+static const float FK_BETWEEN_PASSES = 16.0; // fastest pair of partners' relative motion (fkBetween)
+static const float FK_WILD_SPEED = 1.0; // a node this fast relative to its vehicle is wild
+static const float FK_FAR = 0.3; // two vehicles with no pair this much past a kept pair's box: this much more
+static const uint FK_NEAR = 0x80000000u; // a covered partner's entry: not far
 static const float FK_PER_CELL = 1.0 / 0.6; // the build's grid: cells of 0.6 m (a multiply: the
 // gather's cell of a candidate and the walk's are the same bits)
 static const uint FK_MAX_CELLS = 216u; // a box over more cells walks every candidate
@@ -93,7 +97,7 @@ static const uint FK_MOST = 9u;
 static const uint FK_BY_CALM = 10u; // builds because a calm node passed its allowance,
 static const uint FK_BY_COVER = 11u; // … a pair the build did not cover (or no list),
 static const uint FK_DEV_MOST = 12u; // the largest motion bound a vehicle had at a build for motion (float bits)
-static const uint FK_VMAX_MOST = 13u; // the fastest tracked node's travel seen (float bits)
+static const uint FK_BTW = 13u; // the list's allowance for two vehicles' relative motion (float bits)
 static const uint FK_PASS = 14u; // the passes so far (a clock for the hot nodes)
 static const uint FK_BY_BETWEEN = 15u; // … two vehicles' relative motion (the rest: a wild node's)
 // A node that has used more than half a calm node's allowance since a build is hot: wild
@@ -106,6 +110,9 @@ static const uint FK_ROW_PAIRS = 17u;
 static const uint FK_W_RUN = 100u;
 static const uint FK_W_PAIRS = 101u;
 
+// The kept list's allowance for two vehicles' relative motion: the build's choice, the
+// same for its boxes and for the bound that holds the list to them.
+float fkBetween() { return min(max(asfloat(gNext[fkCtl(FK_BTW)]), FK_BETWEEN), FK_BETWEEN_MOST); }
 bool fkOn() { return (gP.perfFlags & PERF_FLEET_KEEP) != 0u && gP.vvTriPairs != 0u; }
 uint fkMode() { return fkOn() ? gNext[fkCtl(FK_MODE)] : FK_OFF; }
 // Owner v's room in the build's candidate run: its covered partners' contact points.
@@ -115,7 +122,7 @@ uint fkOffered(uint v)
     uint sum = 0u;
     for (uint j = 0u; j < FK_COVER; j++)
     {
-        if (j < n) sum += vvCpCount(gNext[fkCover(v, 1u + j)]);
+        if (j < n) sum += vvCpCount(gNext[fkCover(v, 1u + j)] & ~FK_NEAR);
     }
     return sum;
 }
@@ -777,6 +784,12 @@ float3 fkOriginShift(uint v)
     return asfloat(gMisc[v].xyz) - asfloat(uint3(gNext[fkOrigin(v)], gNext[fkOrigin(v) + 1u], gNext[fkOrigin(v) + 2u]));
 }
 float3 fkReference(uint v) { return asfloat(uint3(gNext[fkMean(v, 0u)], gNext[fkMean(v, 1u)], gNext[fkMean(v, 2u)])); }
+// The nodes of vehicle v whose motion the mean takes (fkTrackNode: one in eight).
+uint fkSampled(uint v)
+{
+    uint4 r0 = gStatic[v * 4u];
+    return ((r0.x + r0.y + 7u) >> 3u) - ((r0.x + 7u) >> 3u);
+}
 // Node n of vehicle v now, as a build records it: its position and its class, wild when
 // it is fast relative to the vehicle (its reference motion at a build is its mean motion
 // over the last pass: a spinning wheel, a piece flying off), too fast for a calm node's
@@ -794,10 +807,11 @@ float4 fkRefNow(uint n, uint v)
 bool fkWild(float4 ref) { return (asuint(ref.w) & 1u) != 0u; }
 
 #ifdef EB_FLEET_FRONT
-// Node n of vehicle v: how far it has moved since the build relative to the vehicle's
-// reference motion, and its travel over a step, into the vehicle's bounds of the node's
-// class at the build; its motion into the vehicle's sum (fixed point, a metre at most:
-// the mean is a reference, not a result).
+// Node n of vehicle v (every node: a contact point or a triangle's node is one): how far
+// it has moved since the build relative to the vehicle's reference motion, and its travel
+// over a step, into the vehicle's bounds of the node's class at the build; its motion
+// into the vehicle's sum (fixed point, a metre at most: the mean is a reference, not a
+// result).
 void fkTrackNode(uint n, uint v)
 {
     float4 ref = gBeams[fkRef(n)];
@@ -807,12 +821,19 @@ void fkTrackNode(uint n, uint v)
     uint c = fkWild(ref) ? 2u : 0u;
     float dev = sqrt(dot(d, d));
     float trav = sqrt(dot(w, w)) * STEP;
-    gAcc[fkAcc(v, FK_DEV + c)].max(int(fkBits(dev)));
-    gAcc[fkAcc(v, FK_TRAV + c)].max(int(fkBits(trav)));
-    int3 q = int3(clamp(m, float3(-1.0, -1.0, -1.0), float3(1.0, 1.0, 1.0)) * 4096.0);
-    gAcc[fkAcc(v, FK_SUM)].add(q.x);
-    gAcc[fkAcc(v, FK_SUM + 1u)].add(q.y);
-    gAcc[fkAcc(v, FK_SUM + 2u)].add(q.z);
+    // (A bound only grows within a pass: no atomic for a value under it.)
+    int db = int(fkBits(dev));
+    int tb = int(fkBits(trav));
+    if (db > gAcc[fkAcc(v, FK_DEV + c)].load()) gAcc[fkAcc(v, FK_DEV + c)].max(db);
+    if (tb > gAcc[fkAcc(v, FK_TRAV + c)].load()) gAcc[fkAcc(v, FK_TRAV + c)].max(tb);
+    // (The mean of one node in eight: any reference is sound, fkSampled counts them.)
+    if ((n & 7u) == 0u)
+    {
+        int3 q = int3(clamp(m, float3(-1.0, -1.0, -1.0), float3(1.0, 1.0, 1.0)) * 4096.0);
+        gAcc[fkAcc(v, FK_SUM)].add(q.x);
+        gAcc[fkAcc(v, FK_SUM + 1u)].add(q.y);
+        gAcc[fkAcc(v, FK_SUM + 2u)].add(q.z);
+    }
     // (Hot from now on; every thread that tracks the node writes the same record.)
     if (fkBits(dev + trav) > asuint(0.5 * FK_CALM))
     {
@@ -821,54 +842,34 @@ void fkTrackNode(uint n, uint v)
         if ((bits >> 1u) != heat) gBeams[fkRef(n)] = float4(ref.xyz, asfloat((heat << 1u) | (bits & 1u)));
     }
 }
-// Thread tid of the scans' dispatch: triangle tid's nodes, contact point tid.
+// Thread tid of the scans' dispatch: node tid.
 void fkTrack(uint tid)
 {
-    if (tid < gP.totalTris)
-    {
-        uint4 tn = gStatic[gP.triBase + tid];
-        if (flVehicleOn(tn.w))
-        {
-            fkTrackNode(tn.x, tn.w);
-            fkTrackNode(tn.y, tn.w);
-            fkTrackNode(tn.z, tn.w);
-        }
-    }
-    if (tid < gNext[flPrefixAt(4u, gP.vehicles)])
-    {
-        uint vb = flFind(4u, tid);
-        if (flVehicleOn(vb)) fkTrackNode(gLists[gStatic[gP.vvStatic + vb].x + (tid - gNext[flPrefixAt(4u, vb)])], vb);
-    }
+    if (tid >= gP.totalNodes) return;
+    uint v = gStatic[gP.nodeInfoBase + tid].w;
+    if (flVehicleOn(v)) fkTrackNode(tid, v);
 }
 
-// The build's records of triangle gt: its nodes' positions and classes.
-void fkTriRefs(uint gt)
-{
-    uint4 tn = gStatic[gP.triBase + gt];
-    gBeams[fkRef(tn.x)] = fkRefNow(tn.x, tn.w);
-    gBeams[fkRef(tn.y)] = fkRefNow(tn.y, tn.w);
-    gBeams[fkRef(tn.z)] = fkRefNow(tn.z, tn.w);
-}
-// The build's gather of contact point i of vehicle vb: its position and class recorded;
-// into the run of every owner the build covers it for (its vehicle's plan partners) whose
-// box, grown by its range (flOwnerPlan's), by the most the build's triangle boxes are
-// grown by and by room for rounding, holds it (every triangle of the owner is inside the
-// owner's box); a wild point also into the box of the owner's wild candidates.
+// The build's gather of contact point i of vehicle vb, into the run of every owner the
+// build covers it for (its vehicle's plan partners) whose box, grown by its range
+// (flOwnerPlan's), by the most the build's triangle boxes are grown by, FK_FAR and room
+// for rounding, holds it (every triangle of the owner is inside the owner's box); a wild
+// point also into the box of the owner's wild candidates. (Its class as the node's own
+// thread of this dispatch records it: the same function of the same values.)
 void fkPoint(uint vb, uint i)
 {
     uint h = gLists[gStatic[gP.vvStatic + vb].x + i];
     float4 ref = fkRefNow(h, vb);
-    gBeams[fkRef(h)] = ref;
     float3 x = nf3(asfloat(gMisc[vb].xyz) + ref.xyz);
     uint n = min(gNext[fkCover(vb, 0u)], FK_COVER);
     for (uint j = 0u; j < FK_COVER; j++)
     {
         if (j >= n) break;
-        uint va = gNext[fkCover(vb, 1u + j)];
+        uint va = gNext[fkCover(vb, 1u + j)] & ~FK_NEAR;
         float4 B0 = gBeams[flBoxAt(va)];
         float4 B1 = gBeams[flBoxAt(va) + 1u];
         float3 m3 = max(max(abs(B0.xyz), abs(B1.xyz)), abs(x));
-        float ex = CLIP_DEPTH + 2.0 * FK_WILD + FK_BETWEEN + 0.002 + 4.0e-6 * max(m3.x, max(m3.y, m3.z));
+        float ex = CLIP_DEPTH + 2.0 * FK_WILD + FK_BETWEEN_MOST + FK_FAR + 0.002 + 4.0e-6 * max(m3.x, max(m3.y, m3.z));
         float3 e3 = float3(ex, ex, ex);
         if (any(x < B0.xyz - e3) || any(x > B1.xyz + e3)) continue;
         uint base = gNext[fkRun(va)];
@@ -904,6 +905,18 @@ void fkSortCand(uint tid)
 #endif
 
 #ifdef EB_FLEET_PLAN
+// Vehicle va's entry of partner vb in the build's cover, 1 added (0: not covered).
+uint fkCovered(uint va, uint vb)
+{
+    uint found = 0u;
+    uint n = min(gNext[fkCover(va, 0u)], FK_COVER);
+    for (uint j = 0u; j < FK_COVER; j++)
+    {
+        uint e = gNext[fkCover(va, 1u + j)];
+        if (j < n && (e & ~FK_NEAR) == vb) found = (e & FK_NEAR) | 1u;
+    }
+    return found;
+}
 // A vehicle's bounds of the pass: 0 its tracked nodes are within their classes'
 // allowances (a calm node's motion and travel within FK_CALM, any node's within FK_WILD),
 // 1 a wild one is not, 2 a calm one is not (a build), 5 a node is too fast for a build's
@@ -932,13 +945,12 @@ uint fkPairCheck(uint p)
     uint vb = gNext[gP.vvPairs + 2u * p + 1u];
     uint code = max(fkVehicleCheck(va), fkVehicleCheck(vb));
     if (code == 5u) return 5u;
-    bool covered = false;
-    uint n = min(gNext[fkCover(va, 0u)], FK_COVER);
-    for (uint j = 0u; j < FK_COVER; j++)
-    {
-        if (j < n && gNext[fkCover(va, 1u + j)] == vb) covered = true;
-    }
-    if (!covered) return 4u;
+    // Covered by the build, each way; near when a point of either was within FK_FAR of a
+    // kept pair's box of the other's triangles at the build (fkWalk).
+    uint ab = fkCovered(va, vb);
+    uint ba = fkCovered(vb, va);
+    if (ab == 0u || ba == 0u) return 4u;
+    float limit = ((ab | ba) & FK_NEAR) != 0u ? fkBetween() : fkBetween() + FK_FAR;
     // The two vehicles' relative motion since the build, in the owner's frame as the tests
     // have it (a point of vb at vvRel(vb, va) + its position): their reference motions'
     // difference, with the origins' terms as the tests and the nodes' motions round them,
@@ -961,13 +973,13 @@ uint fkPairCheck(uint p)
     if (bb >= 0x7F800000u) return 5u;
     // (Measurement: the largest of the pass.)
     gAcc[fkAccCtl(3u)].max(int(bb));
-    return bb > asuint(FK_BETWEEN) ? 3u : code;
+    return bb > asuint(limit) ? 3u : code;
 }
 
 // The first plan's decision of the pass (every lane; uniform): the mode, with a build's
-// records (each vehicle's covered partners, origin, first node, signature, its part of
-// the build's run). Returns the mode.
-uint fkDecide(uint lane)
+// records (each vehicle's covered partners, origin, signature, its part of the build's
+// run). Returns the mode. In two parts: the pairs' and vehicles' checks, before a barrier
+void fkCheck(uint lane)
 {
     uint nv = gP.vehicles;
     uint epoch = gNext[fkCtl(FK_EPOCH)];
@@ -980,10 +992,15 @@ uint fkDecide(uint lane)
         if (gNext[vvTriPairsAt(v)] != FK_MAGIC || gNext[vvTriPairsAt(v) + 1u] != epoch) code = max(code, 4u);
         // (Measurement: the vehicles' largest bounds of the pass.)
         gAcc[fkAccCtl(1u)].max(max(gAcc[fkAcc(v, FK_DEV)].load(), gAcc[fkAcc(v, FK_DEV + 2u)].load()));
-        gAcc[fkAccCtl(2u)].max(max(gAcc[fkAcc(v, FK_TRAV)].load(), gAcc[fkAcc(v, FK_TRAV + 2u)].load()));
     }
     if (code != 0u) gAcc[fkAccCtl(0u)].max(int(code));
-    sync();
+}
+// … and after a barrier.
+uint fkDecide(uint lane)
+{
+    uint nv = gP.vehicles;
+    uint epoch = gNext[fkCtl(FK_EPOCH)];
+    uint pairs = gNext[flAdjFirst(nv)] / 2u;
     uint mode = FK_OFF;
     if (lane == 0u)
     {
@@ -1003,20 +1020,20 @@ uint fkDecide(uint lane)
             if (mode == FK_BUILD && c == 2u) gNext[fkCtl(FK_BY_CALM)] += 1u;
             if (mode == FK_BUILD && c == 3u) gNext[fkCtl(FK_BY_BETWEEN)] += 1u;
             if (mode == FK_BUILD && (c == 4u || c == 0u)) gNext[fkCtl(FK_BY_COVER)] += 1u;
-            gNext[fkCtl(FK_VMAX_MOST)] = max(gNext[fkCtl(FK_VMAX_MOST)], uint(gAcc[fkAccCtl(2u)].load()));
         }
         gAcc[fkAccCtl(1u)].store(0);
-        gAcc[fkAccCtl(2u)].store(0);
         gAcc[fkAccCtl(3u)].store(0);
         gNext[fkCtl(FK_PASS)] += 1u;
     }
-    mode = splitUniform(lane, mode);
+    if (lane == 0u) gsUniformLanes = mode;
+    sync();
+    mode = gsUniformLanes;
     // Each vehicle's reference motion of the next pass: its tracked nodes' mean motion of
     // this one plus its change over this pass; from a build, whose records are this pass's
     // positions, that change alone. The pass's bounds and sums back to zero.
     for (uint v = lane, vStop = EB_END(v, nv, LANES); v < vStop; v += LANES)
     {
-        float visits = float(max(3u * gStatic[v * 4u + 1u].y + vvCpCount(v), 1u)) * 4096.0;
+        float visits = float(max(fkSampled(v), 1u)) * 4096.0;
         float3 mean = float3(float(gAcc[fkAcc(v, FK_SUM)].load()), float(gAcc[fkAcc(v, FK_SUM + 1u)].load()), float(gAcc[fkAcc(v, FK_SUM + 2u)].load())) / visits;
         float3 delta = mean - asfloat(uint3(gNext[fkMean(v, 3u)], gNext[fkMean(v, 4u)], gNext[fkMean(v, 5u)]));
         float3 next = mode == FK_BUILD ? delta : mean + delta;
@@ -1067,6 +1084,16 @@ uint fkDecide(uint lane)
             gNext[vvTriPairsAt(v) + 1u] = epoch + 1u;
         }
         if (tooMany) gsUniformOpen = 1u;
+        // The fastest relative motion of two partners over the last pass (their reference
+        // motions at a build are that pass's mean motions): the list's allowance for it.
+        uint relMost = 0u;
+        for (uint p = lane, pStop = EB_END(p, pairs, LANES); p < pStop; p += LANES)
+        {
+            if ((gNext[flBitsAt(2u * p)] & 5u) != 1u) continue;
+            float3 rv = fkReference(gNext[gP.vvPairs + 2u * p + 1u]) - fkReference(gNext[gP.vvPairs + 2u * p]);
+            relMost = max(relMost, fkBits(sqrt(dot(rv, rv))));
+        }
+        if (relMost != 0u) gAcc[fkAccCtl(3u)].max(int(relMost));
         sync();
         flPrefix(FK_ROW_RUN, FK_W_RUN, lane);
         uint total = splitUniform(lane, gsUniformOpen != 0u ? 0xFFFFFFFFu : gNext[fkRun(nv)]);
@@ -1078,6 +1105,8 @@ uint fkDecide(uint lane)
             gNext[fkCtl(FK_VALID)] = 0u;
             gNext[fkCtl(FK_EPOCH)] = epoch + 1u;
             if (mode == FK_OFF) gNext[fkCtl(FK_WAIT)] = FK_BACKOFF;
+            gNext[fkCtl(FK_BTW)] = asuint(min(FK_BETWEEN_PASSES * asfloat(uint(gAcc[fkAccCtl(3u)].load())) + FK_BETWEEN, FK_BETWEEN_MOST));
+            gAcc[fkAccCtl(3u)].store(0);
         }
     }
     if (lane == 0u)
@@ -1155,6 +1184,20 @@ void fkTest(uint tid)
     fkPairTry(va, gNext[at], gNext[at + 1u]);
 }
 
+// A point of vehicle vb is within FK_FAR of a kept pair's box of owner va's triangle: va's
+// entry of vb marked (the same word from every thread). `done`: the partner this thread
+// marked last; returns it.
+uint fkNear(uint va, uint vb, uint done)
+{
+    if (vb == done) return done;
+    uint n = min(gNext[fkCover(va, 0u)], FK_COVER);
+    for (uint j = 0u; j < FK_COVER; j++)
+    {
+        if (j < n && gNext[fkCover(va, 1u + j)] == vb) gNext[fkCover(va, 1u + j)] = vb | FK_NEAR;
+    }
+    return vb;
+}
+
 // The build's walk: part `sub` of `subs` of triangle gt (any triangle of an owner with
 // candidates, whatever its throttle or its state: the tests decide) against its owner's
 // candidates of the build, by the grid's cells its padded box covers
@@ -1176,17 +1219,21 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
     float3 p1 = nf3(oa + gNodes[tn.y * 3u].xyz);
     float3 p2 = nf3(oa + gNodes[tn.z * 3u].xyz);
     bool wildTri = fkWild(gBeams[fkRef(tn.x)]) || fkWild(gBeams[fkRef(tn.y)]) || fkWild(gBeams[fkRef(tn.z)]);
-    float base = asfloat(gStatic[va * 4u + 3u].z) + CLIP_DEPTH + (wildTri ? FK_WILD : FK_CALM) + FK_BETWEEN;
+    float base = asfloat(gStatic[va * 4u + 3u].z) + CLIP_DEPTH + (wildTri ? FK_WILD : FK_CALM) + fkBetween();
     float3 tlo = min(min(p0, p1), p2);
     float3 thi = max(max(p0, p1), p2);
     float padW = base + FK_WILD;
     float padC = base + FK_CALM;
     float3 wlo = float3(vvUnkey(gAcc[fkAcc(va, FK_WILD_BOX)].load()), vvUnkey(gAcc[fkAcc(va, FK_WILD_BOX + 1u)].load()), vvUnkey(gAcc[fkAcc(va, FK_WILD_BOX + 2u)].load()));
     float3 whi = float3(vvUnkey(gAcc[fkAcc(va, FK_WILD_BOX + 3u)].load()), vvUnkey(gAcc[fkAcc(va, FK_WILD_BOX + 4u)].load()), vvUnkey(gAcc[fkAcc(va, FK_WILD_BOX + 5u)].load()));
-    // (No wild candidate: the box's keys are as the build's start left them.)
+    // (No wild candidate: the box's keys are as the build's start left them.) The cells
+    // are the kept pair's box's grown by FK_FAR: a candidate there and not kept makes its
+    // vehicle near (fkNear).
+    float farW = padW + FK_FAR;
     bool wildNear = gAcc[fkAcc(va, FK_WILD_BOX)].load() != VV_INT_MAX
-                    && !(any(whi < tlo - float3(padW, padW, padW)) || any(wlo > thi + float3(padW, padW, padW)));
-    float pad = wildNear ? padW : padC;
+                    && !(any(whi < tlo - float3(farW, farW, farW)) || any(wlo > thi + float3(farW, farW, farW)));
+    float pad = (wildNear ? padW : padC) + FK_FAR;
+    uint nearDone = 0xFFFFFFFFu;
     float3 lo = tlo - float3(pad, pad, pad);
     float3 hi = thi + float3(pad, pad, pad);
     float3 f0 = floor(lo * FK_PER_CELL);
@@ -1201,6 +1248,9 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
         {
             float4 E = gBeams[run + e];
             float ph = fkWild(gBeams[fkRef(asuint(E.w))]) ? padW : padC;
+            float pf = ph + FK_FAR;
+            if (any(E.xyz < tlo - float3(pf, pf, pf)) || any(E.xyz > thi + float3(pf, pf, pf))) continue;
+            if (!test) nearDone = fkNear(va, gStatic[gP.nodeInfoBase + asuint(E.w)].w, nearDone);
             if (any(E.xyz < tlo - float3(ph, ph, ph)) || any(E.xyz > thi + float3(ph, ph, ph))) continue;
             if (test)
             {
@@ -1234,6 +1284,9 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
             float4 E = gBeams[sorted + e];
             if (any(int3(floor(E.xyz * FK_PER_CELL)) != cc)) continue;
             float ph = fkWild(gBeams[fkRef(asuint(E.w))]) ? padW : padC;
+            float pf = ph + FK_FAR;
+            if (any(E.xyz < tlo - float3(pf, pf, pf)) || any(E.xyz > thi + float3(pf, pf, pf))) continue;
+            if (!test) nearDone = fkNear(va, gStatic[gP.nodeInfoBase + asuint(E.w)].w, nearDone);
             if (any(E.xyz < tlo - float3(ph, ph, ph)) || any(E.xyz > thi + float3(ph, ph, ph))) continue;
             if (test)
             {
@@ -1287,8 +1340,9 @@ void fleetFront(uint tid, uint word)
         {
             uint va = gStatic[gP.triBase + tid].w;
             if (flVehicleOn(va)) flTriangle(va, tid, flParity(va, s));
-            if (mode == FK_BUILD) fkTriRefs(tid);
         }
+        // (A build's record of node tid.)
+        if (mode == FK_BUILD && tid < gP.totalNodes) gBeams[fkRef(tid)] = fkRefNow(tid, gStatic[gP.nodeInfoBase + tid].w);
         if (tid < gNext[flPrefixAt(4u, gP.vehicles)] && mode != FK_REUSE)
         {
             uint vb = flFind(4u, tid);
@@ -1361,6 +1415,9 @@ void fleetPlan(uint lane, uint word)
             if (gAcc[flOwn(v) + FL_RESET].load() != 0 || gAcc[flOwn(v) + FL_FIX].load() != 0) resets = true;
         }
         if (resets) gsUniformOpen = 1u;
+        // (The kept candidates' checks of the pass, beside the owners' records: fkDecide
+        // reads their result after this barrier.)
+        if (fkOn()) fkCheck(lane);
         sync();
         uint anyReset = gsUniformOpen;
         // The kept candidates' mode of the pass (PERF_FLEET_KEEP). A pass that reuses
@@ -1383,7 +1440,7 @@ void fleetPlan(uint lane, uint word)
                 on = 0u;
             }
             if (mode == FK_BUILD) sort = flWorkgroups(gNext[fkRun(nv)]);
-            gArgs[FL_ARGS_ELEMENTS] = any * flWorkgroups(max(gP.totalTris, gNext[flPrefixAt(4u, nv)]));
+            gArgs[FL_ARGS_ELEMENTS] = any * flWorkgroups(max(max(gP.totalTris, gNext[flPrefixAt(4u, nv)]), mode == FK_BUILD ? gP.totalNodes : 0u));
             gArgs[FL_ARGS_ELEMENTS + 1u] = 1u;
             gArgs[FL_ARGS_ELEMENTS + 2u] = 1u;
             gArgs[FL_ARGS_GRIDS] = grids;

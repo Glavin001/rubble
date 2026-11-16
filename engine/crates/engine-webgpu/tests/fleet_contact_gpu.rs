@@ -145,7 +145,7 @@ fn owners_state_by_vehicle_is_bit_for_bit() {
         let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
         let b = sedan(&text, Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
         let Some(([grouped, _, hits], kept)) = fleet_matches_kept("two sedans head-on, candidates kept", vec![a, b], 60, 17, PERF_FLEET_KEEP, self_split) else { return };
-        eprintln!("   kept candidates: {kept:?} (builds, passes reused, pairs kept, passes on the front's own path, most an owner, builds for a calm node, for cover, largest bound and fastest travel as float bits, builds for two vehicles' motion)");
+        eprintln!("   kept candidates: {kept:?} (builds, passes reused, pairs kept, passes on the front's own path, most an owner, builds for a calm node, for cover, largest bound and the allowance between vehicles as float bits, builds for two vehicles' motion)");
         assert!(grouped > 10 && hits > 0, "the cars met and hit ({grouped} frames grouped, {hits} hits)");
         assert!(kept[0] > 0 && kept[1] > kept[0], "the kept list was built and reused more often than built: {kept:?}");
         let (lo, hi) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(l, h), n| (l.min(n.pos.z), h.max(n.pos.z)));
