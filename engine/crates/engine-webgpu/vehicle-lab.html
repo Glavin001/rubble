@@ -158,6 +158,7 @@
         <label title="Car-to-car contact: each hit point's summed beam force is kept for the step's contact pass instead of being summed again at every use (the same results bit for bit). Applies as it runs."><input type="checkbox" id="vvBeamSum" data-opt="live" checked /> contact hits' beam sums kept</label>
         <label title="Car-to-car contact: each car's contact state (its partners, candidates, hits and counters) is kept per car instead of per group of touching cars (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetState" data-opt="live" checked /> contact state per car</label>
         <label title="Car-to-car contact, with the state per car: finding the candidates and testing them runs across the whole fleet at once instead of once per group of touching cars (the same results bit for bit). Applies as it runs."><input type="checkbox" id="fleetFront" data-opt="live" checked /> contact tests across the fleet</label>
+        <label title="Each car's next-step coupling and wheels (rays, anti-roll bars) on a GPU core of their own, beside its self-collision list's work instead of on the same core (the same results bit for bit). Applies as it runs."><input type="checkbox" id="aheadApart" data-opt="live" /> wheels apart from the list</label>
         <label title="The raycast wheels' rays and anti-roll bars run beside the step before's beam phase and their tyres beside the rigid coupling's first phase, instead of three phases of their own (the same results bit for bit; measured no faster so far). Applies as it runs."><input type="checkbox" id="driveAhead" data-opt="live" /> wheels beside other phases</label></div>
       <div class="row"><label title="A small piece off the car's main body (no unbroken beam joins them) for this long is retired: no longer simulated, not drawn, in no contact. A piece at rest beside the car goes too. Applies as it runs; retired pieces stay retired."><input type="checkbox" id="debris" data-opt="live" checked /> retire small debris after</label>
         <input type="number" id="debrisTtl" data-opt="live" value="5" min="0" max="600" step="0.5" /> s, at most <input type="number" id="debrisKg" data-opt="live" value="10" min="0" max="1000" step="0.5" /> kg and <input type="number" id="debrisNodes" data-opt="live" value="40" min="1" max="10000" step="1" /> nodes</div>
@@ -310,7 +311,7 @@
     // time (with it on the mountain ran at half real time, measured 2026-11-15), and the
     // self-collision passes across the GPU run only on frames without it. A control.
     // The kernels' lossless schedule switches (explicit_plan::PERF_*).
-    const perfFlags = () => (get('hitCache') ? 1 : 0) | (get('driveAhead') ? 2 : 0) | (get('vvStream') ? 64 : 0) | (get('vvBigGrid') ? 128 : 0) | (get('memberList') ? 256 : 0) | (get('vvBeamSum') ? 512 : 0) | (get('hitRoles') ? 1024 : 0) | (get('wideGeo') ? 2048 : 0) | (get('fleetState') ? 4096 : 0) | (get('fleetFront') ? 8192 : 0);
+    const perfFlags = () => (get('hitCache') ? 1 : 0) | (get('driveAhead') ? 2 : 0) | (get('vvStream') ? 64 : 0) | (get('vvBigGrid') ? 128 : 0) | (get('memberList') ? 256 : 0) | (get('vvBeamSum') ? 512 : 0) | (get('hitRoles') ? 1024 : 0) | (get('wideGeo') ? 2048 : 0) | (get('fleetState') ? 4096 : 0) | (get('fleetFront') ? 8192 : 0) | (get('aheadApart') ? 131072 : 0);
     const surfaceDefault = () => get('car') === 'gen' && mode !== 'mountain';
     if (!surfaceChosen) put('surface', surfaceDefault());
     function syncUrl() {
@@ -360,7 +361,7 @@
         else if (c.id === 'pieceWindows') cmd({ pieceWindows: get('pieceWindows') });
         else if (c.id === 'selfSplit') cmd({ selfSplit: get('selfSplit') });
         else if (c.id === 'groupSplit') cmd({ groupSplit: get('groupSplit') });
-        else if (c.id === 'hitCache' || c.id === 'driveAhead' || c.id === 'vvStream' || c.id === 'vvBigGrid' || c.id === 'memberList' || c.id === 'vvBeamSum' || c.id === 'hitRoles' || c.id === 'wideGeo' || c.id === 'fleetState' || c.id === 'fleetFront') cmd({ perfFlags: perfFlags() });
+        else if (c.id === 'hitCache' || c.id === 'driveAhead' || c.id === 'vvStream' || c.id === 'vvBigGrid' || c.id === 'memberList' || c.id === 'vvBeamSum' || c.id === 'hitRoles' || c.id === 'wideGeo' || c.id === 'fleetState' || c.id === 'fleetFront' || c.id === 'aheadApart') cmd({ perfFlags: perfFlags() });
         else if (c.id === 'wide' || c.id === 'wideList' || c.id === 'wideFused') cmd({ wide: get('wide'), wideList: get('wideList'), wideFused: get('wideFused') });
         else if (c.id === 'renderScale') { autoScale = 1; autoQuiet = 0; configure(); }
         else if (c.id.startsWith('debris')) cmd({ debris: debrisSpec() });

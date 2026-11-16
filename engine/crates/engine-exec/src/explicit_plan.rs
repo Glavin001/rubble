@@ -307,6 +307,12 @@ pub const PERF_FLEET_STATE: u32 = 4096;
 /// dispatch over every owner, in place of a workgroup a group for the front and 64 a
 /// group for the tests.
 pub const PERF_FLEET_FRONT: u32 = 8192;
+/// [`W_PERF_FLAGS`], on a wide frame with the reused pair list and [`PERF_WIDE_FUSED`]:
+/// step s + 1's coupling and wheels (rays, bars) on a workgroup of their own in the list
+/// kernel's dispatch (the kernel's PERF_AHEAD_APART, `wideAheadApart`: workgroup
+/// vehicles + v, the host dispatches twice the vehicles), in place of on the list
+/// workgroup's lanes beside its phases. vehicle-perf-first-principles.md §8.31.
+pub const PERF_AHEAD_APART: u32 = 131072;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),

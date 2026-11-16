@@ -7900,10 +7900,65 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
 // loaded at its start and saved at its end (soloStepLoad, soloStepSave). The walk and
 // pairs dispatches follow, then wide_hits (the deferred breaks, the walk's end, the
 // hits). The parameter copy `steps`: the list's end (pairReuseEnd).
+// perfFlags bit 131072 (explicit_plan::PERF_AHEAD_APART, with PERF_WIDE_FUSED): step
+// s + 1's coupling and wheels (what the list kernel runs beside its own phases: the
+// coupling's step or its fold, the wheels' rays and bars) on a workgroup of their own,
+// vehicle v's at workgroup vehicles + v of the list's dispatch, in place of on the list
+// workgroup's lanes. The same calls on the same lanes with the same barriers between
+// them: what they read (the nodes after this step's node phase, the coupling's records
+// and sums, the wheels' records, the static shapes) and write (the coupling's bodies,
+// spheres and counts, the wheels' scratch records) the list's phases neither write nor
+// read, so they ran beside them already; on a core of their own the list's longest
+// phases no longer carry them. (Its own function behind an early return: the list's
+// code is unchanged.)
+static const uint PERF_AHEAD_APART = 131072u;
+void wideAheadApart(uint v, uint lane)
+{
+    uint s = gP.pad2;
+    uint4 misc = gMisc[v];
+    if (lane == 0u)
+    {
+        coupleBegin();
+        driveBegin();
+        cplGsClear();
+        cplGsAdd(0u, v, 0u, 0u);
+        cplFoldMark(v);
+    }
+    sync();
+    if (s + 1u >= gP.steps || (gP.perfFlags & PERF_WIDE_FUSED) == 0u) return;
+    uint coupleOn = gsUniformCouple;
+    uint driveOn = gsUniformDrive;
+    bool aheadFold = (coupleOn & CPL_FOLD_FRAME) != 0u;
+    if (!aheadFold) coupleStep(v, lane, s + 1u, coupleOn);
+    bool aheadDrive = driveOn != 0u;
+    bool cBody = false;
+    float4 cC0 = float4(0.0, 0.0, 0.0, 0.0);
+    float4 cQ = float4(0.0, 0.0, 0.0, 1.0);
+    float4 cC2 = float4(0.0, 0.0, 0.0, 0.0);
+    float3 cW = float3(0.0, 0.0, 0.0);
+    DrvCtx drvC = (DrvCtx)0;
+    bool drvHas = false;
+    bool drvApart = false;
+    if (aheadFold) cplFoldB(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+    if (aheadDrive)
+    {
+        driveAheadCtx(v, LANES - 1u - lane, drvC, drvHas, drvApart);
+        driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 0u, misc.w + s + 1u);
+    }
+    sync();
+    if (aheadFold) cplFoldC(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+    if (aheadDrive) driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 1u, misc.w + s + 1u);
+}
+
 [shader("compute")]
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    if ((gP.perfFlags & PERF_AHEAD_APART) != 0u && gid.x >= gP.vehicles)
+    {
+        wideAheadApart(gid.x - gP.vehicles, lid.x);
+        return ebLoopCapFlush();
+    }
     selfSplitArgsClear(gid.x, lid.x);
     uint v = gid.x;
     uint lane = lid.x;
@@ -7948,7 +8003,8 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         return ebLoopCapFlush();
     }
     // Step s + 1's coupling and wheels beside this step's list phases (uniform).
-    bool ahead = (gP.perfFlags & PERF_WIDE_FUSED) != 0u && s + 1u < gP.steps;
+    // (PERF_AHEAD_APART: on a workgroup of their own, wideAheadApart.)
+    bool ahead = (gP.perfFlags & (PERF_WIDE_FUSED | PERF_AHEAD_APART)) == PERF_WIDE_FUSED && s + 1u < gP.steps;
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
     bool aheadFold = ahead && (coupleOn & CPL_FOLD_FRAME) != 0u;

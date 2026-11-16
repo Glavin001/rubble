@@ -128,6 +128,12 @@ pub struct ExplicitBeamsGpu {
     /// Measurement only (time; results meaningless): self split dispatches not encoded
     /// (bit 0 the walks, bit 1 the pairs; [`ExplicitBeamsGpu::set_self_split_skip`]).
     self_split_skip: u32,
+    /// Measurement only (time): `RUBBLE_EXTRA_DISPATCH=n` adds n dependent dispatches of a
+    /// trivial one-workgroup kernel after every fleet-wide dispatch (and after each list,
+    /// walk and pairs dispatch), `RUBBLE_EXTRA_DISPATCH_INDIRECT=1` as indirect dispatches
+    /// of zero workgroups: the in-context cost of a dispatch boundary
+    /// (vehicle-perf-first-principles.md §8.31).
+    extra_dispatch: Option<ExtraDispatch>,
     /// Measurement: under per-dispatch timing, each dispatch of a self split or split
     /// group frame its own timed pass (off: the frame's split dispatches one segment).
     split_dispatch_timing: bool,
@@ -642,6 +648,73 @@ fn split_pipe(
         },
         cache: None,
     })
+}
+
+/// Measurement only ([`ExplicitBeamsGpu::extra_dispatch`]): a trivial dependent kernel
+/// (one workgroup adds one to a word of its own buffer) dispatched `n` times.
+struct ExtraDispatch {
+    pipe: wgpu::ComputePipeline,
+    group: wgpu::BindGroup,
+    args: wgpu::Buffer,
+    n: u32,
+    indirect: bool,
+}
+
+impl ExtraDispatch {
+    fn from_env(device: &wgpu::Device) -> Option<Self> {
+        let n: u32 = std::env::var("RUBBLE_EXTRA_DISPATCH").ok()?.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("explicit-beams-extra-dispatch"),
+            source: wgpu::ShaderSource::Wgsl(
+                "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
+@compute @workgroup_size(64) fn main(@builtin(local_invocation_index) l: u32) { b[l] = b[l] + 1u; }"
+                    .into(),
+            ),
+        });
+        let pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("explicit-beams-extra-dispatch"),
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-extra-dispatch"),
+            size: 256,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        // Zero workgroups (a new buffer is zeroed): an empty indirect dispatch.
+        let args = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-extra-dispatch-args"),
+            size: 16,
+            usage: wgpu::BufferUsages::INDIRECT,
+            mapped_at_creation: false,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipe.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+        });
+        let indirect = std::env::var("RUBBLE_EXTRA_DISPATCH_INDIRECT").as_deref() == Ok("1");
+        Some(Self { pipe, group, args, n, indirect })
+    }
+
+    fn encode(&self, pass: &mut wgpu::ComputePass) {
+        pass.set_pipeline(&self.pipe);
+        pass.set_bind_group(0, &self.group, &[]);
+        for _ in 0..self.n {
+            if self.indirect {
+                pass.dispatch_workgroups_indirect(&self.args, 0);
+            } else {
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+        }
+    }
 }
 
 /// Self-collision's split pipelines (`EB_SELF_SPLIT`; selfcol-design.md): the solo
@@ -1468,6 +1541,7 @@ impl ExplicitBeamsGpu {
             wide_part: std::cell::Cell::new(0),
             self_split_vv: std::cell::Cell::new(false),
             self_split_skip: 0,
+            extra_dispatch: ExtraDispatch::from_env(device),
             split_dispatch_timing: std::env::var("RUBBLE_SPLIT_DISPATCH_TIMING").as_deref() == Ok("1"),
             contact_errors: Default::default(),
             contact_errors_seen: Default::default(),
@@ -2947,7 +3021,7 @@ impl ExplicitBeamsGpu {
                     let nv = self.planner.vehicles();
                     let slot = u64::from(if k == 0 { 2 } else { k & 1 });
                     self.dispatch_self_one(pass, match part {
-                        2 => SelfDispatch::List { copy: k, groups: nv },
+                        2 => SelfDispatch::List { copy: k, groups: self.list_groups(nv) },
                         3 => SelfDispatch::Walk { copy: k, offset: 12 * (3 + slot) },
                         _ => SelfDispatch::Pairs { copy: k, offset: 12 * slot },
                     });
@@ -3056,16 +3130,30 @@ impl ExplicitBeamsGpu {
             (_, Some(x)) => pass.dispatch_workgroups(x, 1, 1),
             _ => unreachable!(),
         }
+        if let (Some(e), Kernel::Wide(_)) = (&self.extra_dispatch, kernel) {
+            e.encode(pass);
+        }
         if wl > 0 && part == 0 {
             if let Cmd::Dispatch { kernel: Kernel::Wide(kind), param_copy: k, .. } = *cmd {
                 if kind == plan::WIDE_BEAMS_PASS {
                     let nv = self.planner.vehicles();
                     let slot = u64::from(if k == 0 { 2 } else { k & 1 });
-                    self.dispatch_self_one(pass, SelfDispatch::List { copy: k, groups: nv });
+                    self.dispatch_self_one(pass, SelfDispatch::List { copy: k, groups: self.list_groups(nv) });
                     self.dispatch_self_one(pass, SelfDispatch::Walk { copy: k, offset: 12 * (3 + slot) });
                     self.dispatch_self_one(pass, SelfDispatch::Pairs { copy: k, offset: 12 * slot });
                 }
             }
+        }
+    }
+
+    /// The list kernel's workgroups for a step of `nv` vehicles: with
+    /// [`plan::PERF_AHEAD_APART`] (and the fused coupling and wheels) a second workgroup a
+    /// vehicle for step s + 1's coupling and wheels (the kernel's `wideAheadApart`).
+    fn list_groups(&self, nv: u32) -> u32 {
+        if self.wide_fused && self.planner.perf_flags() & plan::PERF_AHEAD_APART != 0 {
+            2 * nv
+        } else {
+            nv
         }
     }
 
@@ -3730,6 +3818,9 @@ impl ExplicitBeamsGpu {
                 pass.set_bind_group(0, &p.pairs_bind, &at(copy));
                 pass.dispatch_workgroups_indirect(&p.args, offset);
             }
+        }
+        if let (Some(e), SelfDispatch::List { .. } | SelfDispatch::Walk { .. } | SelfDispatch::Pairs { .. }) = (&self.extra_dispatch, d) {
+            e.encode(pass);
         }
     }
 
