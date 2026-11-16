@@ -60,8 +60,10 @@ export async function loadMod(base, { pc = null } = {}) {
 // (engine/docs/measurements/lab-load-memory.md: the generated sedan, 16 MB glb and
 // 124 MB rskin; the authored sedan for the base): the tab's peak physical footprint
 // (JS and wasm heaps, the browser's own), the GPU memory the lab holds, and the skin's
-// bind buffer (64 bytes a vertex and a slot of 4 entries: about twice the rskin).
-const FOOTPRINT = { tabBase: 450e6, tabPerModelByte: 6.0, gpuBase: 170e6, gpuPerSkinByte: 2.15, bindPerSkinByte: 2.16 };
+// bind buffer (64 bytes a vertex and a slot of 8 entries, the sidecar's own grid steps:
+// 157 MB for the sedan's 124 MB rskin; it was 267 MB at 4 f32 entries a slot, and the
+// GPU's figure is the measured one less that difference).
+const FOOTPRINT = { tabBase: 450e6, tabPerModelByte: 6.0, gpuBase: 170e6, gpuPerSkinByte: 1.26, bindPerSkinByte: 1.28 };
 // The share of a device's memory a tab can count on (a judgement: browsers kill a
 // tab well before it has the device's whole memory).
 const TAB_SHARE = 0.5;
