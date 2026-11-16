@@ -515,3 +515,67 @@ walk (3.2 ms a frame of eight cars at rest), and a group past `VV_PART` is uncha
   listed triangles (independent of the levels: these could go first);
 - then `flVehicleOn` for every group, the two-body slot limit as the only bound on
   partners, and `vvPass` out of the default path.
+
+### 8.8 The candidates kept across substeps (2026-11-16)
+
+Perf flag 32768 (`PERF_FLEET_KEEP`, with 8192; a checkbox on the lab page), kernel
+functions `fk*` in `explicit_beams_fleet.slang`; measurements and the default in
+`vehicle-perf-first-principles.md` §8.26. Steps 2 to 5 of §8.4 find, every substep, the
+(triangle, contact point) pairs whose box test passes; in a pile that is over 10,000
+pairs from 4,000 walked triangles for 0 to 20 hits, and almost nothing has moved since
+the substep before. With the flag the pairs are a Verlet list with a conservative skin:
+
+- **The build** lists every (triangle, contact point) of two vehicles the plan pairs
+  whose point is inside the triangle's box grown by its range, `CLIP_DEPTH` and a margin
+  (`FK_MARGIN`, 0.1 m), whatever the throttle, the step's partner bits or the owner's box
+  say in that substep. It is the front's own machinery with the padding: the gather (every
+  plan partner's points inside the owner's box grown by the same amount), the owners'
+  grids, the sorted copy, and a walk over every triangle. The pairs are (triangle, node)
+  in the owner's pair region (`vvTriPairsAt`, after a two-word signature). Each tracked
+  node's position and each vehicle's origin are recorded.
+- **Every pass** tests the kept pairs with what the front and the walk would have applied
+  to them, on that pass's values (`fkPairTry`): the triangle was listed by its throttle
+  step this pass (`flTriangle`, unchanged, sets a word a triangle); the two vehicles are
+  partners this pass (the scans' bits); the point is in the owner's box (`flPoint`'s
+  test); it is in the triangle's box (`vvInBox`, which sets the had-candidates mark);
+  then `vvFind`, the two-body counts, the hit listed, the hit mark, as `vvPairTest`.
+- **The bound.** A thread a triangle and contact point (in the scans' dispatch) takes, per
+  vehicle, the farthest any tracked node has moved since the build relative to the
+  vehicle's first node, and the fastest tracked node's speed. For each pair of vehicles
+  that are partners this pass, the first plan adds the two bounds, the first nodes'
+  relative motion (in the owner's frame as the tests compute it: local positions plus the
+  origins' difference, so a rebase cancels), both fastest nodes' travel over a step
+  (anti-clip's pads, which grow with speed) and room for rounding (2 mm and 10⁻⁵ of the
+  coordinates). Over the margin for any pair, or a pair the build did not cover, or a
+  missing signature: the list is built again in that pass.
+
+Why the same hits: a pair today's walk lists has its point within the triangle's box
+grown by the range and at most `CLIP_DEPTH` plus the two nodes' travel. At the build the
+point was nearer to that box than this distance plus the pair's relative motion since,
+which the bound holds under the margin: the kept list has the pair. The other conditions
+(listed, partners, owner's box, `vvInBox`) are evaluated exactly, so the pairs that reach
+`vvFind` are today's set, each once; the hit list's order does not matter (the levels
+apply hits in the canonical order).
+
+What forces a build or is handled exactly:
+
+| | |
+|---|---|
+| partners of the step, the approach test, `reset` / `fix` | the scans and the first plan run unchanged every pass; a kept pair is tested only for partners of the pass; a pair of vehicles the build did not cover (the plan's list changed, a group formed) forces a build |
+| the triangle throttle, its pending flag | `flTriangle` runs unchanged every pass on every triangle; the kept list holds pairs of throttled triangles and tests them only in a pass that lists the triangle |
+| broken or retired triangles and nodes | not used by the build (geometry alone); `vvTriangle`, `vvInBox` and `vvFind` decide in the pass |
+| anti-clip's pads | the bound includes both vehicles' fastest tracked nodes' travel over a step; too fast for the margin at all: the pass takes the front's own path |
+| the marks | had-candidates from `vvInBox` passing for a listed triangle, hit from `vvFind`: the conditions the walk and `vvPairTest` set them on |
+| two-body counts | `vvSplitCount` at the same hits |
+| the frame boundary | the list, the records and the bound's inputs are in the buffers (snapshots hold them); the plan's new pair list is compared with the build's covered partners by vehicle |
+| another path writing the pair region (the flag off for a frame) | the signature in each owner's first two words is gone: a build |
+| a build past an owner's room (32,767 pairs) or the run's | that pass tests in the padded walk; the front's own path for the next 136 passes |
+| NaN or infinite positions and speeds | the bounds are compared as bit patterns, anything not finite is over the margin: the front's own path |
+
+The dispatches do not change: a pass that reuses the list runs its tests in the grids'
+dispatch (the tests' module, the step word alone, sized by the first plan), and the
+sorted copy, both later plans, the walk and the listed pairs' dispatch are empty; a build
+runs every dispatch, its tests in the listed pairs'.
+
+Limits. The bound is one number a vehicle, so a wheel spinning or a piece flying off
+rebuilds the list of every owner in the fleet; the build is fleet-wide.

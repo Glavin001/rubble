@@ -1316,6 +1316,25 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     sum += t.elapsed().as_secs_f64();
                 }
                 let ms = sum * 1e3 / f64::from(frames);
+                // Vehicle contact's kept candidates (PERF_FLEET_KEEP), when this run used
+                // them (counted from the snapshot's own counts: a fixture's are zero).
+                let fk = x.take_fleet_keep_stats();
+                if fk[0] + fk[1] > 0 {
+                    println!(
+                        "     kept candidates ({}): {} builds ({} for motion, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, fastest node {:.1} m/s",
+                        if on { "on" } else { "off" },
+                        fk[0],
+                        fk[5],
+                        fk[6],
+                        fk[1],
+                        100.0 * fk[1] as f64 / (fk[0] + fk[1] + fk[3]).max(1) as f64,
+                        fk[3],
+                        fk[2] as f64 / fk[0].max(1) as f64,
+                        fk[4],
+                        f32::from_bits(fk[7] as u32),
+                        f32::from_bits(fk[8] as u32)
+                    );
+                }
                 if env_u("AB_COUNTS", 0) != 0 {
                     println!("     counts ({}): {:?}", if on { "on" } else { "off" }, x.contact_group_counts());
                 }
@@ -1499,6 +1518,22 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         100.0 * st[1] as f64 / (st[0] + st[1]) as f64,
                         st[2] as f64 / st[0] as f64,
                         st[3]
+                    );
+                }
+                let fk = x.take_fleet_keep_stats();
+                if fk[0] + fk[1] > 0 {
+                    println!(
+                        "   vehicle contact's kept candidates: {} builds ({} for motion, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, fastest node {:.1} m/s",
+                        fk[0],
+                        fk[5],
+                        fk[6],
+                        fk[1],
+                        100.0 * fk[1] as f64 / (fk[0] + fk[1] + fk[3]).max(1) as f64,
+                        fk[3],
+                        fk[2] as f64 / fk[0].max(1) as f64,
+                        fk[4],
+                        f32::from_bits(fk[7] as u32),
+                        f32::from_bits(fk[8] as u32)
                     );
                 }
             }

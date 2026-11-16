@@ -2516,6 +2516,29 @@ impl ExplicitBeamsGpu {
         self.planner.words[plan::W_PAIR_STREAK] = steps;
     }
 
+    /// Measurement: vehicle contact's kept candidates ([`plan::PERF_FLEET_KEEP`], the
+    /// kernel's fkCtl) since the last call (which clears them): (builds, contact passes
+    /// that reused the kept pairs, pairs kept summed over the builds, passes with partners
+    /// on the front's own path, the most pairs one owner kept at a build, builds because
+    /// the nodes had moved past the margin, builds because a pair was not covered or no
+    /// list was kept, the largest motion bound of a vehicle at a build for motion and the
+    /// fastest tracked node, both float bits). Zeros without the fleet state.
+    #[doc(hidden)]
+    pub fn take_fleet_keep_stats(&mut self) -> [u64; 9] {
+        let w = &self.planner.words;
+        let at = w[plan::W_VV_FLEET_NEXT] as usize;
+        if at == 0 {
+            return [0; 9];
+        }
+        let nv = self.layout.spans.len();
+        let end = at + plan::fleet_next_words(nv, w[49] as usize, self.layout.total[2] as usize);
+        let ctl = end - plan::FLEET_CTL_WORDS;
+        let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
+        let out = std::array::from_fn(|k| u64::from(next[ctl + 5 + k]));
+        self.queue.write_buffer(&self.bufs[8], ((ctl + 5) * 4) as u64, &[0u8; 36]);
+        out
+    }
+
     /// Measurement: the reused pair list's statistics summed over the vehicles since the
     /// last call (which clears them): (lists built, steps that reused one, pairs listed
     /// at the builds, the most listed at one build). Zeros without the pair list.
@@ -3919,7 +3942,8 @@ impl ExplicitBeamsGpu {
             flags &= !plan::PERF_FLEET_STATE;
         }
         if !front {
-            flags &= !plan::PERF_FLEET_FRONT;
+            // (The kept candidates are the fleet-wide front's.)
+            flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_KEEP);
         }
         flags
     }

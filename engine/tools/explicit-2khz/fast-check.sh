@@ -45,6 +45,9 @@ if [ "$1" = "--make" ]; then
       32) at="1,2.5,4"; secs=4.3 ;;
       *) at="2,3.7,8,16"; secs=16.3 ;;
     esac
+    # (AT="3,3.4,4.2,5" SECS=5.3: moments of one's own, e.g. the first collisions' fast
+    # relative motion, into FIXTURES=<another directory>.)
+    at="${AT:-$at}"; secs="${SECS:-$secs}"
     lab "$n" --ab "$at" --ab-switch "perf=0" --ab-frames 1 --save-fixtures "$fixtures" --secs "$secs" 2>&1 | grep -E "fixture|^Error"
   done
   exit 0
@@ -75,6 +78,7 @@ for f in $list; do
     echo "FAIL $name: ${line:-no verdict}"
     echo "$out" | grep -E "differ|records|^Error|panicked" | head -6 | sed 's/^/       /'
   fi
+  echo "$out" | grep -E "kept candidates \(on\)" | sed 's/^ */     /'
   [ -n "$EXTRA" ] && echo "$out" | grep -E "profile at|explicit |split ablation|untimed|group of" | sed 's/^/     /'
 done
 echo "fast check: $(( $(date +%s) - start )) s"

@@ -210,14 +210,27 @@ pub const FLEET_CTL_WORDS: usize = 16;
 /// vehicles, `pair_cap` overlapping pairs and `tris` collision triangles (the kernel's
 /// fl* address functions).
 pub const fn fleet_acc_words(nv: usize) -> usize {
-    nv * (FLEET_OWN_WORDS + 1 + WIDE_GRID_BUCKETS) + FLEET_CTL_WORDS
+    // (Then the kept candidates', [`PERF_FLEET_KEEP`], the kernel's fkAcc: per vehicle its
+    // tracked nodes' motion bound, fastest speed and kept pairs; four counters.)
+    nv * (FLEET_OWN_WORDS + 1 + WIDE_GRID_BUCKETS) + FLEET_CTL_WORDS + nv * 3 + 4
 }
 pub const fn fleet_next_words(nv: usize, pair_cap: usize, tris: usize) -> usize {
     // adjacency firsts, entries, bits, slots; then five prefixes over the vehicles (+ 1
     // each: run base, listed, pairs, hits, and the contact points', static); then per
     // vehicle: step base, last counts (4), level; the fleet's listed triangles; the
     // fleet's counters.
-    (nv + 1) + 6 * pair_cap + 5 * (nv + 1) + 6 * nv + tris + FLEET_CTL_WORDS
+    // (Then the kept candidates', [`PERF_FLEET_KEEP`], the kernel's fkListed .. fkCtl: per
+    // triangle whether the pass listed it; per vehicle its covered partners (a count and
+    // [`FLEET_KEEP_COVER`]); two prefixes over the vehicles (+ 1 each); per vehicle its
+    // origin at the build; [`FLEET_CTL_WORDS`] counters.)
+    (nv + 1) + 6 * pair_cap + 5 * (nv + 1) + 6 * nv + tris + FLEET_CTL_WORDS + fleet_keep_words(nv, tris)
+}
+/// The kernel's FK_COVER: the partners of a vehicle a build of the kept candidates covers.
+pub const FLEET_KEEP_COVER: usize = 8;
+/// Words of [`W_VV_FLEET_NEXT`] the kept candidates take ([`PERF_FLEET_KEEP`]), at its end;
+/// their counters ([`FLEET_CTL_WORDS`]) last.
+pub const fn fleet_keep_words(nv: usize, tris: usize) -> usize {
+    tris + nv * (FLEET_KEEP_COVER + 1) + 2 * (nv + 1) + 3 * nv + FLEET_CTL_WORDS
 }
 /// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
 /// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
@@ -307,6 +320,14 @@ pub const PERF_FLEET_STATE: u32 = 4096;
 /// dispatch over every owner, in place of a workgroup a group for the front and 64 a
 /// group for the tests.
 pub const PERF_FLEET_FRONT: u32 = 8192;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_FRONT`]: vehicle contact's listed (triangle, contact
+/// point) pairs kept from one substep to the next (the kernel's PERF_FLEET_KEEP,
+/// explicit_beams_fleet.slang fk*; contact-groups-design.md §8.8): built with a margin
+/// over every pair of vehicles the plan pairs, tested each substep by the exact tests on
+/// that substep's partners, listed triangles and boxes, and built again when the
+/// vehicles' tracked nodes may have moved past the margin; in place of the gather, the
+/// grids, the sorted copy and the walk every substep.
+pub const PERF_FLEET_KEEP: u32 = 32768;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
@@ -2419,7 +2440,8 @@ impl ExplicitUpload {
         };
         let vv_fleet_box = if nv > 1 {
             let at = beams.len() as u32;
-            beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * nv));
+            // (Then per node its position at the kept candidates' build: the kernel's fkRef.)
+            beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * nv + total_nodes));
             at
         } else {
             0
