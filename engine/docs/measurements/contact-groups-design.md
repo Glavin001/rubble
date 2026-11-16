@@ -343,3 +343,74 @@ workgroups a group, must stay within WebGPU's 65,535 a dimension).
   17–46 ms of the frames in §1, the second cause. The member pair list was not used
   by this design (the member's step is today's, bit for bit), so its one-unit mismatch
   was not investigated here.
+
+## 8. Contact without groups: fleet-wide lists (design, 2026-11-16)
+
+Why: §5's pass is per group. A group past eight members takes the larger groups' pass on
+one core, and 32 cars side by side are one group: 93–96 % of a 125–452 ms frame with or
+without a hit (`vehicle-perf-first-principles.md` §8.17). A group is only a connected
+component of overlapping boxes; nothing in the contact rule needs it. What the rule
+needs is per owner: its partners this step, its candidates, its listed triangles, its
+hits, and the owners' order.
+
+### 8.1 What stays exactly as it is
+
+The leaf rules, unchanged and reused: the step scans' box and approach tests, a
+triangle's throttle step and near-box test, the candidate's box test, `vvInBox`,
+`vvFind`, `vvClip`, `vvPairTest`, `vvTry`, the hits' canonical order (an owner's hits by
+contact point, a point's hits by triangle), `vvThrottleEnd`, the two-body counts, the
+snapshot and the residual phases. So the same hits, applied in the same order.
+
+### 8.2 Keyed by vehicle, not by a group's slot
+
+Today an owner's state is addressed by (group offset, the owner's index a in the group):
+counters in workgroup arrays of `VV_PART`, runs and hit lists at `runOff + a · points`,
+grids in an eighth of the workgroup's buckets, partner bits in a `VV_PART²` table. In
+this design every one of those is the owner vehicle's own:
+
+| state | today | here |
+|---|---|---|
+| counters (offered, listed, candidates, pairs, hits, reset, fix, fastest candidate) | workgroup arrays, exported to the group's scratch | a record a vehicle in `gAcc` |
+| partners this step | `gsVvPair[a · VV_PART + m]` | the broadphase's pair list (`vv_pairs`), a bit a pair |
+| candidate run, its sorted copy, ranks | `vvRunSmall`, `vvSortAt`, `vvRankAt` at the group's run offset | one fleet-wide run, each owner's part at its prefix of the offered counts |
+| candidate grid | `GRID_BUCKETS / VV_PART` workgroup buckets | the owner's own grid region (`gridCountBase`, `gridOffBase`: 1,024 buckets, dead between its steps) |
+| listed triangles, listed pairs | already the vehicle's (`vvTestedAt`, `triPairsAt`) | the same |
+| hit list, its order | `vvHitSmall`, `vvOrderAt` at the group's offset | one fleet-wide list, an owner's part at its prefix |
+| two-body point counts | slot a of `VV_PART` a node | the owner's rank among the point's vehicle's partners |
+
+Explicit limits (a clear error flag when passed, never a silent drop): the fleet-wide
+candidate run and hit list hold `VV_PART` times the fleet's contact points, and a
+vehicle has at most `VV_PART` partners with two-body contact at once.
+
+### 8.3 The owners' order without a group
+
+Owner v's level is 1 + the highest level of an owner u < v with hits whose touched
+vehicles ({u} and its partners) meet v's; 0 without hits (`vvLevelsSet`'s rule, which
+never used the group beyond listing the owners). Over the fleet it is a relaxation on
+the pair list: a lane a vehicle in one workgroup, a round a barrier, until no level
+changes (the rounds are bounded by the longest chain of touching owners).
+
+### 8.4 The schedule of a substep
+
+Each a dispatch over every vehicle, pair or element (empty when its count is 0, and
+then about 2 µs):
+
+1. the pairs' step scans: partners, offered counts, resets;
+2. every offered owner's triangles: throttle step, near-box test, listed;
+3. every pair's contact points into the owner's part of the run;
+4. each owner's grid: counts with 3, offsets (a workgroup an owner), sorted copy;
+5. the walk (today's `splitTests`, over every owner);
+6. the listed pairs' tests (the same);
+7. the levels: the plan of 8.3, then per level in use the hits applied (a thread a hit;
+   a point's chain found by scan for a short list, by buckets for a long one), then
+   the residual phases where two-body contact is on.
+
+Cars' own steps are not part of this: a workgroup a car or the fleet-wide passes, as
+measured for the fleet.
+
+### 8.5 Stages, each bit for bit against the path before it
+
+1. Per-owner state keyed by vehicle (8.2) under the existing per-group dispatches.
+2. Steps 1–4 as fleet-wide dispatches; the front's workgroup goes.
+3. Step 7 fleet-wide; the group's workgroup, `VV_PART` as a group limit and the larger
+   groups' pass go from the default path.
