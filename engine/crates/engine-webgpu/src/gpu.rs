@@ -111,6 +111,7 @@ impl LazyKernel {
 pub struct Prewarm {
     done: Arc<std::sync::atomic::AtomicUsize>,
     failed: Arc<std::sync::atomic::AtomicUsize>,
+    errors: Arc<std::sync::Mutex<Vec<String>>>,
     total: usize,
 }
 
@@ -120,24 +121,77 @@ pub struct Prewarm {
 /// prewarm always finishes: a failure is reported, never a progress that stops short
 /// (a host waiting for `done == total` waited forever). The kernel is built again,
 /// and its error raised, by the first step that needs it.
+///
+/// Every failed attempt is written to stderr and kept in `errors` with all the
+/// platform said (wgpu's error text, which on Metal is the whole `NSError`), the
+/// kernel's WGSL size, how long the attempt ran and how many other kernels this
+/// prewarm was compiling at that moment: a compiler that gives up says little else.
 #[cfg(not(target_arch = "wasm32"))]
 fn prewarm_one(
+    name: &str,
+    wgsl_bytes: usize,
     build: impl Fn(),
-    done: &std::sync::atomic::AtomicUsize,
-    failed: &std::sync::atomic::AtomicUsize,
+    counts: &PrewarmCounts,
 ) {
     use std::sync::atomic::Ordering;
-    let try_once = || std::panic::catch_unwind(std::panic::AssertUnwindSafe(&build)).is_ok();
-    if !(try_once() || try_once()) {
-        failed.fetch_add(1, Ordering::Release);
+    const ATTEMPTS: u32 = 2;
+    let mut built = false;
+    for attempt in 1..=ATTEMPTS {
+        let others = counts.compiling.fetch_add(1, Ordering::AcqRel);
+        let start = std::time::Instant::now();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&build));
+        counts.compiling.fetch_sub(1, Ordering::AcqRel);
+        match result {
+            Ok(()) => {
+                built = true;
+                break;
+            }
+            Err(payload) => {
+                let text = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("(a panic without a message)");
+                let message = format!(
+                    "prewarm: kernel '{name}' ({wgsl_bytes} bytes of WGSL) failed to compile \
+                     after {:.1} s, attempt {attempt} of {ATTEMPTS}, with {others} other \
+                     kernel(s) compiling: {}",
+                    start.elapsed().as_secs_f64(),
+                    text.trim()
+                );
+                eprintln!("{message}");
+                counts.errors.lock().unwrap_or_else(|e| e.into_inner()).push(message);
+            }
+        }
     }
-    done.fetch_add(1, Ordering::Release);
+    if !built {
+        counts.failed.fetch_add(1, Ordering::Release);
+    }
+    counts.done.fetch_add(1, Ordering::Release);
+}
+
+/// What a prewarm's threads share: its progress and what failed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct PrewarmCounts {
+    done: Arc<std::sync::atomic::AtomicUsize>,
+    failed: Arc<std::sync::atomic::AtomicUsize>,
+    errors: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Kernels being compiled right now.
+    compiling: std::sync::atomic::AtomicUsize,
 }
 
 impl Prewarm {
     /// Kernels this prewarm could not build (after a retry); they count as done.
     pub fn failed(&self) -> usize {
         self.failed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Every failed build attempt so far, in order (a kernel that built on its retry
+    /// is here once and not in [`Self::failed`]): the kernel, the platform's whole
+    /// error text and the conditions of the attempt.
+    pub fn errors(&self) -> Vec<String> {
+        self.errors.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Kernels compiled so far, and how many this prewarm compiles in all.
@@ -3925,6 +3979,7 @@ impl WgpuSim {
         let todo = Arc::new(self.unbuilt(groups));
         let done = Arc::new(AtomicUsize::new(0));
         let failed = Arc::new(AtomicUsize::new(0));
+        let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
         let total = todo.len();
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3934,14 +3989,19 @@ impl WgpuSim {
                 .map_or(2, |n| (n.get() / 2).clamp(1, 4))
                 .min(total);
             let next = Arc::new(AtomicUsize::new(0));
+            let counts = Arc::new(PrewarmCounts {
+                done: done.clone(),
+                failed: failed.clone(),
+                errors: errors.clone(),
+                compiling: AtomicUsize::new(0),
+            });
             for _ in 0..threads {
-                let (todo, done, next) = (todo.clone(), done.clone(), next.clone());
+                let (todo, next, counts) = (todo.clone(), next.clone(), counts.clone());
                 let device = self.device.clone();
-                let failed = failed.clone();
                 std::thread::spawn(move || loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some((name, kernel)) = todo.get(i) else { break };
-                    prewarm_one(|| { kernel.build(&device, name); }, &done, &failed);
+                    prewarm_one(name, kernel.wgsl.len(), || { kernel.build(&device, name); }, &counts);
                 });
             }
         }
@@ -3950,7 +4010,7 @@ impl WgpuSim {
             kernel.build(&self.device, name);
             done.fetch_add(1, Ordering::Release);
         }
-        Prewarm { done, failed, total }
+        Prewarm { done, failed, errors, total }
     }
 
     /// The kernels of `groups` not built yet, slowest first (the largest WGSL), so
@@ -4896,22 +4956,27 @@ pub struct SoftEvents {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod prewarm_tests {
-    use super::prewarm_one;
+    use super::{prewarm_one, PrewarmCounts};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn a_build_that_panics_counts_as_done_and_failed() {
-        let (done, failed, tries) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
-        prewarm_one(|| { tries.fetch_add(1, Ordering::SeqCst); panic!("Compilation failed"); }, &done, &failed);
-        assert_eq!(done.load(Ordering::SeqCst), 1, "a failed build still finishes");
-        assert_eq!(failed.load(Ordering::SeqCst), 1, "and is reported");
+        let (counts, tries) = (PrewarmCounts::default(), AtomicUsize::new(0));
+        prewarm_one("k", 7, || { tries.fetch_add(1, Ordering::SeqCst); panic!("Compilation failed"); }, &counts);
+        assert_eq!(counts.done.load(Ordering::SeqCst), 1, "a failed build still finishes");
+        assert_eq!(counts.failed.load(Ordering::SeqCst), 1, "and is reported");
         assert_eq!(tries.load(Ordering::SeqCst), 2, "after one retry");
+        let errors = counts.errors.lock().unwrap();
+        assert_eq!(errors.len(), 2, "each attempt's error is kept");
+        assert!(errors[0].contains("kernel 'k' (7 bytes of WGSL)") && errors[0].contains("attempt 1 of 2"));
+        assert!(errors[1].ends_with("Compilation failed"), "with the platform's text: {}", errors[1]);
     }
 
     #[test]
     fn a_transient_failure_is_retried() {
-        let (done, failed, tries) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
-        prewarm_one(|| { if tries.fetch_add(1, Ordering::SeqCst) == 0 { panic!("transient"); } }, &done, &failed);
-        assert_eq!((done.load(Ordering::SeqCst), failed.load(Ordering::SeqCst)), (1, 0));
+        let (counts, tries) = (PrewarmCounts::default(), AtomicUsize::new(0));
+        prewarm_one("k", 7, || { if tries.fetch_add(1, Ordering::SeqCst) == 0 { panic!("transient {}", 1); } }, &counts);
+        assert_eq!((counts.done.load(Ordering::SeqCst), counts.failed.load(Ordering::SeqCst)), (1, 0));
+        assert_eq!(counts.errors.lock().unwrap().len(), 1, "the failed attempt is still reported");
     }
 }

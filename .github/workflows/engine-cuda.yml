@@ -92,6 +92,8 @@ jobs:
         if: steps.green.outputs.cache-hit != 'true'
         with:
           workspaces: engine
+          # Pull requests restore main's cache and save none (see ci.yml).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Device code only for the explicit modules the GPU tests load (derived from their
       # fleets; tests/explicit_parity.rs fails if the list is stale). Every module's CUDA
       # source is still generated and checked. Set for the job: the package step's
