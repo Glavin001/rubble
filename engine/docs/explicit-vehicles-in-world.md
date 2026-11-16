@@ -737,8 +737,9 @@ lightly damped pressure wheels rock for about 50 s.
 `explicit_beams_sleep_list` (one workgroup, every frame, after the contact plan) writes the
 awake vehicles in vehicle order and the frame's indirect arguments (the frame over the
 awake ones; with vehicle contact the solo and group dispatches, the groups past the awake
-count). A lone vehicle's workgroup returns at once; a contact group of sleepers returns
-at once. With every vehicle asleep (the host reads the asleep bits back) and nothing
+count; on the split paths the vehicles' step dispatches over the awake ones and, with no
+vehicle awake, no group, test or contact-front dispatch at all: §10.7). A lone vehicle's
+workgroup returns at once; a contact group of sleepers returns at once. With every vehicle asleep (the host reads the asleep bits back) and nothing
 written to one, the vehicles stop requesting World steps, so an all-asleep World skips its
 step. In the World, `cpl_bounds` keeps a sleeping vehicle's bounds (its nodes have not
 moved) instead of reading its nodes, and `cpl_share`, `cpl_loads` and `cpl_emit` are
@@ -747,7 +748,8 @@ still runs a workgroup per vehicle and tests every collider (§8.4's O(vehicles 
 colliders), the World-broadphase work, §10.1), and the awake list is O(vehicles) threads
 of one workgroup.
 
-Lossless for awake vehicles: a vehicle's frame is the same whatever workgroup runs it, and
+Lossless for awake vehicles (and not lossless against a run that never sleeps: the
+2026-11-16 decision above): a vehicle's frame is the same whatever workgroup runs it, and
 the coupling passes do nothing for a vehicle without proxies. Checked: the awake vehicles
 of a fleet with sleep on, through the awake list (with and without vehicle contact), bit
 for bit with a fleet without sleep, the sleeping one frozen; the World's coupling tests

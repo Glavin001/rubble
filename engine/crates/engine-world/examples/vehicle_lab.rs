@@ -1256,13 +1256,14 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     };
                     let secs = |f: u32| f64::from(f) * 34.0 * 0.0005;
                     println!(
-                        "     {setting:>16}: first asleep after s {}; wakes {:?}; asleep at the end {} of {nv}; ms a frame first 30 / last 60 {early:.2} / {late:.2}; energy {:.3} kJ; largest node difference a car, mm: {}; path split {}",
+                        "     {setting:>16}: first asleep after s {}; wakes {:?}; asleep at the end {} of {nv}; ms a frame first 30 / last 60 {early:.2} / {late:.2}; energy {:.3} kJ; largest node difference a car, mm: {}; contact groups {:?}; path split {}",
                         first.iter().map(|f| f.map_or("-".to_string(), |f| format!("{:.2}", secs(f)))).collect::<Vec<_>>().join(" "),
                         wakes,
                         asleep.iter().filter(|a| **a).count(),
                         energy * 1e-3,
                         diff.join(" "),
-                        x.self_split_used(),
+                        x.contact_group_sizes(),
+                        x.split_path_used(),
                     );
                     reference.get_or_insert(pos);
                 }

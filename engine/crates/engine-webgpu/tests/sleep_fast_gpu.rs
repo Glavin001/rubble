@@ -11,6 +11,9 @@
 //!   beside an awake car and a car asleep on its own; a car driven into the group wakes
 //!   it; the woken cars start from their state at sleep, word for word; the frames that
 //!   wake them and step them run the fast path.
+//! * a lone vehicle: the fleet-wide passes (with and without the reused pair list) and
+//!   self-collision split against the vehicle's workgroup, through falling asleep, frames
+//!   asleep and a wake by the host.
 //! In a file of its own: a process of its own (see `fleet_contact_gpu`'s note).
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
@@ -253,4 +256,108 @@ fn a_sleeping_group_is_frozen_and_wakes_on_the_fast_path() {
     eprintln!(
         "asleep after {slept_at} frames; {frozen} frames frozen beside the awake car; woken at frame {woke_at} with {gap:.2} m to go; 60 frames of the crash ({hits} hits an owner at most): every frame on the fast paths (listed and not) equal to the reference path, word for word"
     );
+}
+
+/// A lone vehicle's frame: its workgroup (the reference), self-collision split, the
+/// fleet-wide passes, and those with the reused pair list.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Lone {
+    Workgroup,
+    SelfSplit,
+    Wide,
+    WideList,
+}
+
+fn set_lone(gpu: &mut ExplicitBeamsGpu, p: Lone) {
+    gpu.set_self_split(p == Lone::SelfSplit);
+    gpu.set_wide_list(p == Lone::WideList);
+    gpu.set_wide_fused(p == Lone::WideList);
+    let wide = gpu.set_wide(matches!(p, Lone::Wide | Lone::WideList));
+    assert_eq!(wide, matches!(p, Lone::Wide | Lone::WideList), "{p:?}: the wide passes with sleep, a lone vehicle");
+}
+
+/// One frame from the state the vehicle is in on every path. The wide passes keep other
+/// scratch in the accumulators and misc records than a workgroup: the nodes, beams,
+/// groups and sleep's own words are compared there; every word for self-collision split.
+/// The vehicle is left as the wide passes with the pair list left it.
+fn lone_frame_every_path(gpu: &mut ExplicitBeamsGpu, steps: u32, label: &str) -> Vec<(&'static str, Vec<u32>)> {
+    gpu.wait();
+    let snap = gpu.snapshot();
+    let physics = |w: &[(&'static str, Vec<u32>)]| -> Vec<(&'static str, Vec<u32>)> {
+        w.iter().filter(|r| ["nodes", "beams", "groups", "sleep records", "sleep anchors"].contains(&r.0)).cloned().collect()
+    };
+    let mut reference = Vec::new();
+    let mut last = Vec::new();
+    for p in [Lone::Workgroup, Lone::SelfSplit, Lone::Wide, Lone::WideList] {
+        gpu.restore(&snap);
+        set_lone(gpu, p);
+        gpu.frame(steps);
+        gpu.wait();
+        let w = words(gpu);
+        match p {
+            Lone::Workgroup => reference = w.clone(),
+            Lone::SelfSplit => {
+                assert!(gpu.split_path_used(), "{label}: self-collision split with sleep");
+                if let Some(d) = first_diff(&reference, &w) {
+                    panic!("{label}: self-collision split differs from the vehicle's workgroup at {d}");
+                }
+            }
+            _ => {
+                if let Some(d) = first_diff(&physics(&reference), &physics(&w)) {
+                    panic!("{label}: {p:?} differs from the vehicle's workgroup at {d}");
+                }
+            }
+        }
+        last = w;
+    }
+    last
+}
+
+#[test]
+fn a_lone_vehicle_sleeps_and_wakes_on_every_path() {
+    let Ok((_, device, queue)) = default_device() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let text = repo_sedan();
+    let fleet = vec![sedan(&text, Vec3::ZERO, Vec3::ZERO)];
+    let cfg = VehicleSleep { speed: 1.0, reach: 0.02, dwell: 150 };
+    let mut gpu = ExplicitBeamsGpu::with_sleep(&device, &queue, &fleet, None, Some(cfg));
+    const STEPS: u32 = 17;
+    let own = |w: &[(&'static str, Vec<u32>)]| -> Vec<u32> {
+        ["nodes", "beams", "sleep records", "sleep anchors"].iter().flat_map(|n| w.iter().find(|r| r.0 == *n).unwrap().1.clone()).collect()
+    };
+    let mut frame = 0u32;
+    let mut last = Vec::new();
+    while frame < 400 {
+        last = lone_frame_every_path(&mut gpu, STEPS, &format!("settling, frame {frame}"));
+        frame += 1;
+        if gpu.sleep_states()[0].1 {
+            break;
+        }
+    }
+    assert!(gpu.sleep_states()[0].1, "the parked car never slept in {frame} frames; fastest node {:?} m/s", fastest(&gpu));
+    let slept_at = frame;
+    let at_sleep = own(&last);
+    // Asleep: nothing changes, on any path.
+    for f in 0..10 {
+        let w = lone_frame_every_path(&mut gpu, STEPS, &format!("asleep, frame {}", frame + f));
+        assert_eq!(own(&w), at_sleep, "frame {}: the sleeping car changed", frame + f);
+    }
+    // The host sets it moving (a write wakes it; written with the next frame, which a
+    // restored snapshot would not hold: one frame on the wide passes alone).
+    for i in 0..fleet[0].nodes.len() as u32 {
+        gpu.set_velocity(0, i, Vec3::new(0.0, 0.0, 3.0));
+    }
+    set_lone(&mut gpu, Lone::WideList);
+    gpu.frame(STEPS);
+    gpu.wait();
+    assert!(!gpu.sleep_states()[0].1, "the host's write did not wake the car");
+    let z0 = gpu.positions()[0][0].z;
+    for f in 0..30 {
+        lone_frame_every_path(&mut gpu, STEPS, &format!("woken, frame {}", frame + 11 + f));
+    }
+    let z1 = gpu.positions()[0][0].z;
+    assert!(z1 > z0 + 0.3, "the woken car moved ({z0} to {z1} m)");
+    eprintln!("a lone car: asleep after {slept_at} frames; 10 frames asleep unchanged; woken by a host write, 30 frames: self-collision split equal to its workgroup in every word, the wide passes (with and without the pair list) in every node, beam, group and sleep word");
 }
