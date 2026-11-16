@@ -341,10 +341,11 @@ pub const PERF_FLEET_POST: u32 = 65536;
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
 /// [`PERF_HIT_ROLES`] and [`PERF_WIDE_GEO`] (§8.22), [`PERF_FLEET_STATE`] and
-/// [`PERF_FLEET_FRONT`] (§8.25); `RUBBLE_PERF_FLAGS=<mask>` overrides
+/// [`PERF_FLEET_FRONT`] (§8.25), [`PERF_FLEET_ANY`] and [`PERF_FLEET_POST`] (§8.29);
+/// `RUBBLE_PERF_FLAGS=<mask>` overrides
 /// (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST | PERF_VV_BEAM_SUM | PERF_HIT_ROLES | PERF_WIDE_GEO | PERF_FLEET_STATE | PERF_FLEET_FRONT)
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST | PERF_VV_BEAM_SUM | PERF_HIT_ROLES | PERF_WIDE_GEO | PERF_FLEET_STATE | PERF_FLEET_FRONT | PERF_FLEET_ANY | PERF_FLEET_POST)
 }
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;

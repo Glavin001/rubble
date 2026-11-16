@@ -430,7 +430,7 @@ measured for the fleet.
 Kernel `engine/slang/kernels/explicit_beams_fleet.slang`; addresses `fl*` in
 `explicit_beams.slang`; perf flags 4096 (`PERF_FLEET_STATE`) and 8192
 (`PERF_FLEET_FRONT`), both on by default; measurements in
-`vehicle-perf-first-principles.md` §8.25. Stage 3 (the levels) is not built: §8.7.
+`vehicle-perf-first-principles.md` §8.25. Stage 3: §8.7.
 
 **Stage 1, the state by vehicle (flag 4096), under the groups' own dispatches.**
 
@@ -496,22 +496,37 @@ A group past `VV_PART` members still takes the larger groups' pass (`vvPass`) in
 own workgroup (a dispatch that has workgroups only when such a group exists), and its
 pairs are no one's partners in the fleet-wide passes (`flVehicleOn`).
 
-### 8.7 Stage 3, not built: what it needs
+### 8.7 Stage 3 (2026-11-16): any size built; the levels across the GPU not
 
-The levels in the group's workgroup are now the largest part of contact after the
-walk (3.2 ms a frame of eight cars at rest), and a group past `VV_PART` is unchanged
-(32 cars: 139–270 ms a frame). What stage 3 has to add, from building the first two:
+Measurements and proofs: `vehicle-perf-first-principles.md` §8.29. Built, both perf flags
+on by default:
 
-- the owners' levels by relaxation over the pairs (one workgroup, a round a barrier)
-  and the hits' prefix (`flPrefixAt(3, v)` is reserved);
+- **Groups of any size on the fleet-wide passes** (16384, `PERF_FLEET_ANY`): the front
+  and tests of 8.6 for every group (`flVehicleOn` for all), and the levels in
+  `fleetLevelsAny` in the group's workgroup for any number of owners. The owners' levels
+  by relaxation (8.3) over the owners with hits only, an owner's partners as two words
+  of bits by member (a group has at most 64); the hits' chains by scan (no workgroup
+  buckets); every visit limited to the owners with hits and the lanes their lists
+  reach. A small group whose owner lists more than 128 hits keeps the small groups'
+  levels (its hits ordered by buckets). The larger groups' pass (`vvPass`) is no longer
+  on the default path. 32 cars: 132–249 → 31–50 ms a frame.
+- **The throttle updates as threads over the fleet** (65536, `PERF_FLEET_POST`): every
+  listed triangle's throttle update and a later owner's reset, a dispatch of a thread
+  each after the listed pairs' tests (they read and write the triangle's own record and
+  marks, nothing a hit touches), out of the first level.
+
+Not built (stage 3c): the levels themselves across the GPU. They are two-thirds of the
+32-car frame (21–35 ms of 31–50), all in the one group's workgroup. What it needs:
+
+- a prefix of the hits by level over the fleet (`flPrefixAt(3, v)` is reserved) and
+  the levels' rounds as one workgroup of the plan;
 - a dispatch a level and phase (application, three residual phases) that knows its
   level: the step's three parameter copies are used up as phases, so levels need
   copies of their own (past `PARAM_COPIES`, a level and phase each) or a module a
-  phase; with L level slots that is 4 L dispatches a substep, empty past the highest
-  level in use, and one workgroup that loops the levels past L (lossless, slow, rare);
-- the hits' chains without the workgroup's buckets (a scan of the owner's hits for a
-  short list, a counting sort in global memory for a long one);
-- the snapshot, the throttle updates and the two-body clears as threads over hits and
-  listed triangles (independent of the levels: these could go first);
-- then `flVehicleOn` for every group, the two-body slot limit as the only bound on
-  partners, and `vvPass` out of the default path.
+  phase reading its level from an argument word the plan writes; with L level slots
+  that is 4 L dispatches a substep, empty past the highest level in use, and one
+  workgroup that loops the levels past L (lossless, slow, rare);
+- within a level nothing is ordered (its owners touch disjoint vehicles); between
+  levels, and along one contact point's chain of hits, the order stays;
+- the snapshot and the two-body clears as threads over hits (they are independent of
+  the levels: before the first and after the last).
