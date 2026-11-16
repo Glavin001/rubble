@@ -1564,6 +1564,12 @@ static const uint PERF_WIDE_LIST = 16u;
 // them read what step s's node phase and hits left, as the aux dispatch before step
 // s + 1's nodes did).
 static const uint PERF_WIDE_FUSED = 32u;
+// perfFlags bit 64 (explicit_plan::PERF_VV_STREAM): the larger groups' contact pass keeps,
+// beside each gathered candidate, its travel over the step, its vehicle and whether that
+// vehicle has anti-clip (written where the candidate is gathered), so a triangle's
+// candidate loop reads two streamed records a candidate in place of the node's record,
+// its vehicle's flags and its velocity: the same box test on the same values.
+static const uint PERF_VV_STREAM = 64u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 
 // The break exception (spec §2, step 4: an end on a collision triangle with fewer
@@ -9690,19 +9696,45 @@ void vvMark(uint gt, bool cand, bool hit)
 // Hit list entry `i` of the group's list of this owner (q its counter parity).
 uint vvHitAt(uint runOff, uint i) { return gP.vvHits + 2u * (2u * runOff + i); }
 
+// vvInBox with the candidate's travel over the step given (PERF_VV_STREAM: the value
+// vvInBox computes from its velocity, kept where the candidate was gathered).
+bool vvInBoxTravel(VvTri t, float3 x, float travelH, bool anti)
+{
+    if (!anti) return !(any(x < t.lo) || any(x > t.hi));
+    float pad = nf(nf(t.travel + travelH) + CLIP_DEPTH);
+    float3 p3 = float3(pad, pad, pad);
+    return all(x >= ssub3(t.lo, p3)) && all(x <= sadd3(t.hi, p3));
+}
+uint vvSortAt(uint runOff);
+
 void vvTriangleCands(uint va, uint gt, uint sub, uint subs, uint runOff, uint points, uint cands, float r, uint parity,
                      uint q)
 {
     VvTri t = vvTriangle(gt, vvRel(va, va), r);
     bool cand = false;
     bool hit = false;
+    bool stream = (gP.perfFlags & PERF_VV_STREAM) != 0u;
+    uint info = vvSortAt(runOff);
     for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
     {
         float4 E = gBeams[gP.vvRun + runOff + e];
         uint h = asuint(E.w);
-        uint vh = gStatic[gP.nodeInfoBase + h].w;
-        bool anti = vvAnti(t, vh);
-        if (!vvInBox(t, E.xyz, h, anti)) continue;
+        uint vh;
+        bool anti;
+        if (stream)
+        {
+            // (travel, the vehicle's anti-clip, the vehicle: the gather's.)
+            float4 S = gBeams[info + e];
+            vh = asuint(S.z);
+            anti = (t.clip & 1u) != 0u || S.y != 0.0;
+            if (!vvInBoxTravel(t, E.xyz, S.x, anti)) continue;
+        }
+        else
+        {
+            vh = gStatic[gP.nodeInfoBase + h].w;
+            anti = vvAnti(t, vh);
+            if (!vvInBox(t, E.xyz, h, anti)) continue;
+        }
         cand = true;
         if (!vvFind(t, gt, h, E.xyz, vh, r, anti)) continue;
         hit = true;
@@ -9992,7 +10024,17 @@ void vvPass(uint k, uint off, uint runOff, uint points, uint step, uint lane)
                     }
                     float3 e3 = float3(ex, ex, ex);
                     if (any(x < clo - e3) || any(x > chi + e3)) continue;
-                    gBeams[gP.vvRun + runOff + gsVvCands[q].add(1u)] = float4(nf3(orel + gNodes[h * 3u].xyz), asfloat(h));
+                    uint ci = gsVvCands[q].add(1u);
+                    gBeams[gP.vvRun + runOff + ci] = float4(nf3(orel + gNodes[h * 3u].xyz), asfloat(h));
+                    if ((gP.perfFlags & PERF_VV_STREAM) != 0u)
+                    {
+                        // The candidate's part of vvInBox's pad, its vehicle's anti-clip and
+                        // its vehicle (vvTriangleCands; the group's slice of the small
+                        // groups' sort records, which a larger group does not use).
+                        float3 vs = gNodes[h * 3u + 1u].xyz;
+                        gBeams[vvSortAt(runOff) + ci] = float4(smul(ssqrt(sdot(vs, vs)), STEP),
+                                                              (gStatic[v * 4u + 3u].x & FLAG_ANTI_CLIP) != 0u ? 1.0 : 0.0, asfloat(v), 0.0);
+                    }
                 }
             }
         }

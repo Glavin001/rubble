@@ -1103,3 +1103,27 @@ but slower in flight (128 against 45 ms a step: each of eight members steps on 6
 and with the split group path on it ends in non-finite state at t 4.5 s (that path's
 scratch also assumes four owners). Reverted. The fix is the one §8.3 names: the contact
 tests of any group as threads across the GPU from a grid, not a larger side-by-side group.
+
+### 8.13 The larger groups' contact pass: candidates streamed (on by default)
+
+In `vvPass` a triangle's candidate loop loaded, for every candidate before its box test,
+the node's record (for its vehicle), that vehicle's flags and the node's velocity: three
+scattered loads, about two million times an owner a substep in the pile. With
+`PERF_VV_STREAM` (perf flag 64, on by default; the page's "contact candidates streamed",
+live) the gather writes the candidate's travel over the step, its vehicle and that
+vehicle's anti-clip into a record beside it (the group's slice of the small groups' sort
+records, unused by a larger group), and the loop reads the two streams: the same
+arithmetic of `vvInBox` on the same values (`vvInBoxTravel`).
+
+Bit for bit (eight cars, `--ab-switch perf=64`, every state word, 20 frames each way) at
+t 2, 4, 6, 9, 12 s; 47.9 / 79.5 / 107.5 / 283.3 / 296.9 ms a frame against 48.1 / 88.4 /
+116.3 / 322.3 / 355.0 (−10 to −16 % once the cars are in one group). Suites with it on:
+`explicit_loop_cap`, `explicit_contact_gpu` 13, `group_split_gpu` 2 (its column of six is a
+larger group), `vv_grid_gpu`, `explicit_beams_bitwise` 12, `explicit_vehicles` 11, engine-metal
+`explicit_parity` 7.
+
+It is not the fix: the loop still visits every listed triangle against every candidate
+(≈2 M visits an owner a substep, one core). The candidates in a grid, as the small groups
+have them, would cut the visits about sevenfold (`fleet-benchmark.md`: 11.1 M → 1.5 M), and
+the tests across workgroups would spread what is left; neither is built for groups past
+four.
