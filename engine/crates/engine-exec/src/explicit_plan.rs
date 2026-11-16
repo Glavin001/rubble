@@ -206,11 +206,9 @@ pub const PERF_HIT_FB: u32 = 1;
 /// phase and their tyres beside the coupling's first phase (the kernel's
 /// `driveAheadPart`), in place of three phases of their own each step. Solo frames.
 pub const PERF_DRIVE_AHEAD: u32 = 2;
-/// [`W_PERF_FLAGS`], per parameter copy, for a wide frame with the reused pair list
-/// (`ExplicitBeamsGpu::set_wide_list`): the self split's step kernel as the list's part of
-/// a step, as the hits' part, and the wide passes leaving the triangles to it.
-pub const PERF_WIDE_SELF_A: u32 = 4;
-pub const PERF_WIDE_SELF_B: u32 = 8;
+/// [`W_PERF_FLAGS`], set by the host on a wide frame's parameter copies when it runs the
+/// reused pair list (`ExplicitBeamsGpu::set_wide_list`): the wide passes leave the
+/// triangles' throttles and the grid to the list kernel.
 pub const PERF_WIDE_LIST: u32 = 16;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7); `RUBBLE_PERF_FLAGS=<mask>` overrides

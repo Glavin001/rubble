@@ -1554,14 +1554,9 @@ static const uint PERF_HIT_FB = 1u;
 // perfFlags bit 2: the raycast wheels' rays and bars beside the step before's beam phase,
 // their tyres beside the coupling's first phase (driveAheadPart): no phase of their own.
 static const uint PERF_DRIVE_AHEAD = 2u;
-// The wide passes with the reused pair list (set per parameter copy by the host for such
-// frames; explicit_plan::PERF_WIDE_*): 4 the self split's step kernel as the list's part
-// of a step alone (after wide_beams: the tracking, the triangles' throttles, the grid,
-// the decision and the build; no nodes, beams, coupling, wheels or hits), 8 as the hits'
-// part alone (after the pairs dispatch: step pad2 - 1's hits applied), 16 the wide
-// passes leave the triangles, the grid and its counts' words to that kernel.
-static const uint PERF_WIDE_SELF_A = 4u;
-static const uint PERF_WIDE_SELF_B = 8u;
+// perfFlags bit 16, set by the host on a wide frame's parameter copies when it runs the
+// reused pair list (explicit_plan::PERF_WIDE_LIST): the wide passes leave the triangles'
+// throttles, the grid and its counts' words to explicit_beams_wide_list.
 static const uint PERF_WIDE_LIST = 16u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 
@@ -6451,13 +6446,6 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint v = gid.x;
     uint lane = lid.x;
-    // The wide schedule's slices of this kernel (PERF_WIDE_SELF_A, _B; uniform).
-    bool thinA = false;
-    bool thinB = false;
-#ifdef EB_SELF_SPLIT
-    thinA = (gP.perfFlags & PERF_WIDE_SELF_A) != 0u;
-    thinB = (gP.perfFlags & PERF_WIDE_SELF_B) != 0u;
-#endif
 #ifdef EB_ABLATE
     // Measurement only (time): 4096 the dispatch alone.
     if (EB_A2(4096u)) return ebLoopCapFlush();
@@ -6573,7 +6561,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_SOLO_STEP
         // A step a dispatch: the coupling list's frame maxima (in storage) cleared at the
         // frame's start only, as the whole frame clears them (cplListFirst: step 0).
-        if (gP.pad2 == 0u && !thinA && !thinB) cplListBegin(v);
+        if (gP.pad2 == 0u) cplListBegin(v);
 #else
         cplListBegin(v);
 #endif
@@ -6609,7 +6597,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint driveOn = gsUniformDrive;
     uint surfOn = surfaceOn();
     // The wheels' parts beside other phases (driveAheadPart; uniform).
-    bool driveAhead = (gP.perfFlags & PERF_DRIVE_AHEAD) != 0u && driveOn != 0u && !thinA;
+    bool driveAhead = (gP.perfFlags & PERF_DRIVE_AHEAD) != 0u && driveOn != 0u;
     // The lane's drive context for the next step's parts (driveAheadCtx), kept from its
     // rays to its tyres within one invocation.
     DrvCtx drvC = (DrvCtx)0;
@@ -6620,7 +6608,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_SELF_SPLIT
     // Step k - 1's rest (k = gP.pad2), after its tests' dispatches: its hits applied,
     // its surface pass, its slide nodes and its closing barrier, as the frame runs them.
-    if (gP.pad2 > 0u && !thinA)
+    if (gP.pad2 > 0u)
     {
         uint parityR = (stepBase + gP.pad2 - 1u) & 1u;
         if (lane == 0u) selfSplitHits(v);
@@ -6642,12 +6630,6 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
 #endif
         sync();
-        if (thinB)
-        {
-            // The hits' part alone: the hit flag and the list's state for the next.
-            soloStepSave(v, lane);
-            return ebLoopCapFlush();
-        }
     }
 #endif
 #ifdef EB_FRAME_SEG
@@ -6682,7 +6664,6 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
         if (!EB_A2(512u))
 #endif
-        if (!thinA)
         {
             if (driveAhead)
             {
@@ -6705,7 +6686,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_ABLATE
         if (!EB_A2(1u))
 #endif
-        if (!driveAhead && !thinA) driveStep(v, lane, s, driveOn);
+        if (!driveAhead) driveStep(v, lane, s, driveOn);
         uint step = stepBase + s;
         uint parity = step & 1u;
         bool hits = gsHit != 0u;
@@ -6721,9 +6702,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         }
 #else
 #ifdef EB_ABLATE
-        uint nodeEnd = (gP.ablate & 2u) != 0u || thinA ? 0u : ((gP.ablate & 4u) != 0u ? min(nodeCount, LANES) : nodeCount);
+        uint nodeEnd = (gP.ablate & 2u) != 0u ? 0u : ((gP.ablate & 4u) != 0u ? min(nodeCount, LANES) : nodeCount);
 #else
-        uint nodeEnd = thinA ? 0u : nodeCount;
+        uint nodeEnd = nodeCount;
 #endif
         bool centredV = gP.centredDv != 0u && (flagsV & FLAG_CENTRED) != 0u;
         for (uint i = lane, iStop = EB_END(i, nodeEnd, LANES); i < iStop; i += LANES)
@@ -6735,7 +6716,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             if (centredV) centredDelta(nodeOff + i, v0);
         }
 #endif
-        if (gP.centredDv != 0u && !thinA) centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
+        if (gP.centredDv != 0u) centredPhase(flagsV, nodeOff, nodeCount, beamOff, beamCount, groupOff, groupCount, step, lane, LANES);
         if (sleepOn) sleepMove = sleepTrack(nodeOff, nodeCount, lane, sleepMove);
 #ifdef EB_ABLATE
         if (!EB_A2(8u))
@@ -6745,7 +6726,6 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_ABLATE
         if (!EB_A2(256u))
 #endif
-        if (!thinA)
         for (uint g = lane, gStop = EB_END(g, groupCount, LANES); g < gStop; g += LANES) gGroups[groupSlot(parity, groupOff, g)].store(NO_GROUP);
 #ifdef EB_ABLATE
         if (candCount > 0u && !EB_A2(2u))
@@ -6769,12 +6749,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             selfSplitClear(v);
 #endif
             gsPairCount.store(0u);
-            if (!thinA)
-            {
-                gAcc[hitAcc(v)].store(0);
-                gAcc[hitAcc(v) + 1u].store(0);
-                clipVmaxClear(v, parity);
-            }
+            gAcc[hitAcc(v)].store(0);
+            gAcc[hitAcc(v) + 1u].store(0);
+            clipVmaxClear(v, parity);
             gsUniformHits = 0u;
             gsUniformOpen = 0u;
         }
@@ -6782,7 +6759,7 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef EB_ABLATE
         if (!EB_A2(2048u))
 #endif
-        if (lane == 0u && !thinA) grabApply(nodeOff, nodeCount, origin);
+        if (lane == 0u) grabApply(nodeOff, nodeCount, origin);
 #ifdef EB_AERO
 #ifdef EB_ABLATE
         if (!EB_A2(2048u))
@@ -6848,9 +6825,9 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
 #endif
 #ifdef EB_ABLATE
-        uint beamEnd = (gP.ablate & 32u) != 0u || thinA ? 0u : beamCount;
+        uint beamEnd = (gP.ablate & 32u) != 0u ? 0u : beamCount;
 #else
-        uint beamEnd = thinA ? 0u : beamCount;
+        uint beamEnd = beamCount;
 #endif
         // (Sorted records or, gP.beamOrder 0, file order: one call site of beamUpdate.)
         beamPhaseSorted(v, lane, LANES, beamHead, beamEnd != 0u, nodeOff, beamOff, fast, groupOff, parity, flagsV, beamEnd);
@@ -7104,11 +7081,8 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         return ebLoopCapFlush();
     }
 #endif
-    if (!thinA) coupleEnd(v, lane, coupleOn);
+    coupleEnd(v, lane, coupleOn);
     pairReuseEnd(v, lane);
-    // (The wide schedule's list part: its end, the triangles' finish, the group drops
-    // and the step count are wide_end's and wide_close's.)
-    if (thinA) return ebLoopCapFlush();
     if (gP.steps > 0u && candCount > 0u)
     {
         for (uint t = lane, tStop = EB_END(t, triCount, LANES); t < tStop; t += LANES) triangleFinish(triOff + t);
@@ -7200,7 +7174,7 @@ float3 vehicleOrigin(uint v) { return asfloat(gVt.rec[WIDE_MAX_VEHICLES * 4u + v
 void explicit_beams_wide_begin(uint3 id : SV_DispatchThreadID)
 {
     uint v = id.x;
-    if (v >= gP.vehicles) return;
+    if (v >= gP.vehicles) return ebLoopCapFlush();
     Vehicle x = vehicleAt(v);
     float3 first = gNodes[x.nodeOff * 3u].xyz;
     float3 shift = length(first) > REBASE_RADIUS ? first : float3(0.0, 0.0, 0.0);
@@ -7213,6 +7187,7 @@ void explicit_beams_wide_begin(uint3 id : SV_DispatchThreadID)
     }
     gAcc[gP.testedBase + v * 2u].store(0);
     gAcc[gP.testedBase + v * 2u + 1u].store(0);
+    ebLoopCapFlush();
 }
 
 [shader("compute")]
