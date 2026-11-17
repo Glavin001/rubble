@@ -11,7 +11,10 @@
 // same order; nothing lives in workgroup memory from one dispatch to the next (every
 // value contactGroup kept there across substeps is recomputed: the coupling's header and
 // sphere table from the buffers, the contact pass's counters cleared at its start).
-// Without vehicle sleep (the host keeps the group's frame when sleep is on).
+// Vehicle sleep (explicit_beams_sleep.slang) as contactGroup has it: the groups' frame
+// start wakes a group with an awake member (sleepGroupSkip), a sleeping group's and
+// member's dispatches return at once (splitAwake), each member's step marks its motion,
+// the groups' frame end settles the members together (sleepGroupEnd).
 
 static const uint SPLIT_BEGIN = 0xFFFFFFFFu;
 
@@ -25,6 +28,16 @@ uint splitUniform(uint lane, uint x)
     uint u = gsUniformLanes;
     sync();
     return u;
+}
+
+// Group record G's members, 0 for a group asleep: after the groups' frame start (or the
+// awake list's kernel) every member of a group is awake or every member asleep, so its
+// first listed member says which (the unsorted list: a sleeping group's start never
+// sorted it).
+uint splitAwake(uint4 G)
+{
+    if (G.y == 0u || gP.sleepRec == 0u) return G.y;
+    return sleepAsleep(gNext[gP.vvMembers + G.x]) ? 0u : G.y;
 }
 
 // The coupling's sphere and node-range table as contactGroup writes it for its k members
@@ -96,7 +109,8 @@ void splitMember(uint v, uint lane, uint s)
     if (s >= gP.steps) return;
     uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
     uint4 G = fl.y != 0u ? gMisc[gP.vvGroups + fl.z] : uint4(0u, 0u, 0u, 0u);
-    uint k = splitUniform(lane, G.y);
+    // (A sleeping member is not stepped: its group sleeps.)
+    uint k = splitUniform(lane, v < gP.vehicles && sleepAsleep(v) ? 0u : G.y);
     if (k == 0u) return;
     uint off = G.x;
     uint rank = gMisc[vvRec(v, VV_MEMBER)].x;
@@ -126,6 +140,14 @@ void splitMember(uint v, uint lane, uint s)
         surfaceStep(v, lane, surfOn, (stepBase + s) & 1u);
         sync();
     }
+    // Vehicle sleep: this step's motion (the velocities its node phase left; nothing
+    // later in the step writes one), as contactGroup's sleepTrackMembers after its
+    // members' steps.
+    if (gP.sleepRec != 0u)
+    {
+        uint4 r0 = gStatic[v * 4u];
+        sleepMark(v, sleepTrack(r0.x, r0.y, lane, false));
+    }
 }
 
 // Group g's frame start (contactGroup's before its steps): the members in vehicle order,
@@ -136,6 +158,12 @@ void splitGroupBegin(uint g, uint lane)
     uint off = G.x;
     uint k = splitUniform(lane, G.y);
     if (k == 0u) return;
+    // Vehicle sleep: a group with an awake member wakes the others; a group asleep is not
+    // stepped (contactGroup's).
+    if (gP.sleepRec != 0u)
+    {
+        if (sleepGroupSkip(off, k, lane)) return;
+    }
     for (uint i = lane, iStop = EB_END(i, k, LANES); i < iStop; i += LANES)
     {
         uint v = gNext[gP.vvMembers + off + i];
@@ -248,7 +276,7 @@ void splitGroupStep(uint g, uint lane, uint word)
     uint off = G.x;
     uint runOff = G.z;
     uint points = G.w;
-    uint k = splitUniform(lane, G.y);
+    uint k = splitUniform(lane, splitAwake(G));
     if (k == 0u) return;
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     uint parity = (stepBase + s) & 1u;
@@ -369,6 +397,9 @@ void splitGroupEnd(uint off, uint k, uint lane, uint s)
     uint coupleOn = gsUniformCouple;
     sync();
     coupleEndMembers(off, k, lane, coupleOn);
+    // Vehicle sleep: each member's rule on the motion its steps marked; the members fall
+    // asleep together (contactGroup's, its marks already in the flags).
+    if (gP.sleepRec != 0u) sleepGroupEnd(off, k, lane, uint2(0u, 0u), gP.steps);
     for (uint m = 0u, mStop = EB_END_UNIFORM(m, k, 1u, EB_MAX_MEMBERS); m < mStop; m++) contactMemberEnd(vvMember(off, m), lane);
 }
 
@@ -381,7 +412,7 @@ void splitGroupEnd(uint off, uint k, uint lane, uint s)
 void splitTests(uint g, uint part, uint lane, uint word)
 {
     uint4 G = gMisc[gP.vvGroups + g];
-    uint k = G.y;
+    uint k = splitAwake(G);
     if (k == 0u || k > VV_PART) return;
     uint off = G.x;
     uint runOff = G.z;
@@ -519,7 +550,8 @@ void memberRest(uint v, uint lane, uint s)
 {
     uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
     bool keep = (gP.perfFlags & PERF_MEMBER_LIST) != 0u && pairReuseOn() && s < gP.steps;
-    uint member = splitUniform(lane, keep ? fl.y : 0u);
+    // (A sleeping member has no step to finish.)
+    uint member = splitUniform(lane, keep && !(v < gP.vehicles && sleepAsleep(v)) ? fl.y : 0u);
     if (member == 0u) return;
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
@@ -554,25 +586,30 @@ void memberRest(uint v, uint lane, uint s)
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    // Vehicle sleep's awake-indexed dispatch: the workgroup's awake vehicle (gP.vehicles
+    // or more past them: nothing to step).
+    uint3 vid = gid;
+    if (sleepListedOn()) vid.x = sleepPick(gid.x, lid.x);
 #ifdef EB_SELF_SPLIT
     // The members' rest of step s (the step word's SPLIT_LEVELS: after the step's walk
     // and pairs dispatches, before the groups' pass).
     if ((gP.pad2 & SPLIT_LEVELS) != 0u)
     {
-        memberRest(gid.x, lid.x, gP.pad2 & SPLIT_STEP);
+        memberRest(vid.x, lid.x, gP.pad2 & SPLIT_STEP);
         ebLoopCapFlush();
         return;
     }
     // Self-collision split (explicit_beams_selfsplit.slang): the solo vehicles' steps cut
     // at their tests, the walk and pairs dispatches after this one; the next pairs
-    // dispatch's slot cleared as the self split's step dispatch does.
+    // dispatch's slot cleared as the self split's step dispatch does (the dispatch's
+    // first workgroup, whatever its vehicle).
     selfSplitArgsClear(gid.x, lid.x);
 #endif
     // A solo vehicle's step of its frame (it returns at once for a group's member), then
     // a member's (returns at once for a solo vehicle).
-    explicitBeamsFrameStep(gid, lid);
+    explicitBeamsFrameStep(vid, lid);
     sync();
-    splitMember(gid.x, lid.x, gP.pad2);
+    splitMember(vid.x, lid.x, gP.pad2);
     ebLoopCapFlush();
 }
 #endif

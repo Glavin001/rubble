@@ -373,15 +373,18 @@ impl ProxySet {
     /// shape it is strictly inside, in shape order; each one's reaction is summed into its
     /// shape.
     pub fn node_contact(&mut self, x: Vec3, n: &Node) -> Vec3 {
-        self.node_contact_with(x, n, false)
+        self.node_contact_with(x, n, false, &ContactSurface::BOX)
     }
 
     /// [`Self::node_contact`]; with `fast_side` (the surface contact's casts, §38.4) a
     /// node inside a fast body's shape is pushed out along the body's motion relative to
     /// it, the side it entered by, instead of through the nearest face (a node a fast ball
     /// carried past its centre would otherwise leave by the far side and push the ball
-    /// on). Slow bodies are unchanged.
-    pub fn node_contact_with(&mut self, x: Vec3, n: &Node, fast_side: bool) -> Vec3 {
+    /// on). Slow bodies are unchanged. `stat`: the vehicle's static shape rule, used
+    /// against an infinite-mass (static or kinematic) body: the node pass's own boxes'
+    /// and shapes' surface (`ContactSurface::BOX`, exact and dissipative on the BeamNG
+    /// profile: jbeam-semantics-spec.md §37.1).
+    pub fn node_contact_with(&mut self, x: Vec3, n: &Node, fast_side: bool, stat: &ContactSurface) -> Vec3 {
         let mut total = Vec3::ZERO;
         let h = STEP;
         for k in 0..self.shapes.len() {
@@ -400,10 +403,11 @@ impl ProxySet {
             let b = &self.bodies[s.body as usize];
             let f = n.force + total;
             let fc = if b.is_static() {
-                // Bit for bit the static shape rule (the body still moves: kinematic).
+                // Bit for bit the node pass's static shape rule (the body still moves:
+                // kinematic), on the vehicle's surface.
                 let vb = b.vel + b.ang_vel.cross(x - b.pos);
                 let v = if vb == Vec3::ZERO { n.vel } else { n.vel - vb };
-                contact_force(f, v, n.mass, normal, h, &ContactSurface::BOX, 0.0, n.friction)
+                contact_force(f, v, n.mass, normal, h, stat, 0.0, n.friction)
             } else {
                 let r = x - b.pos;
                 let rn = r.cross(normal);

@@ -673,7 +673,10 @@ pub const VV_SPLIT_SLOTS: usize = 9;
 /// Bytes of the indirect arguments buffer: the solo vehicles (byte 0), the contact
 /// groups (16), the awake vehicles' frame (32, vehicle sleep), the larger groups (48),
 /// the split group path's groups (64), members (80) and tests (96), and every vehicle's
-/// step in every frame for self-collision split with vehicle contact (112).
+/// step in every frame for self-collision split with vehicle contact (112). (Then the
+/// fleet-wide contact front's 128, 144 and 176; self-collision split's awake vehicles
+/// without vehicle contact at 160, written by vehicle sleep's awake list, which rewrites
+/// the plan's arguments every frame from the plan's values kept at words 3, 7 and 11.)
 pub const ARGS_BYTES: u64 = 192;
 /// The vehicle sleep awake list's pass ([`Kernel::Sleep`]).
 pub const SLEEP_LIST: &str = "explicit_beams_sleep_list";
@@ -2975,6 +2978,8 @@ pub struct FramePlanner {
     /// Measurement only ([`Self::set_sleep_listing`]): false dispatches every vehicle,
     /// a sleeping one's workgroup returning at once.
     sleep_listing: bool,
+    /// [`Self::set_wide_sleep`].
+    wide_sleep: bool,
     /// Some vehicle has surface contact ([`ExplicitLayout::surface`]).
     surface: bool,
     /// The host runs the surface pass as its own pipelines ([`Self::set_surface_split`]).
@@ -3000,6 +3005,7 @@ impl FramePlanner {
             frames: 0,
             sleep_rec: layout.sleep.map_or(0, |s| s.header),
             sleep_listing: true,
+            wide_sleep: false,
             surface: layout.surface,
             surface_split: false,
             loop_unit: layout.loop_unit,
@@ -3051,8 +3057,9 @@ impl FramePlanner {
     /// Frames dispatch the awake vehicles only (vehicle sleep on, more than one vehicle:
     /// the awake list's pass, [`Kernel::Sleep`], writes the indirect arguments).
     pub fn sleep_listed(&self) -> bool {
-        // Split frames dispatch every vehicle (a sleeping one returns at once): each
-        // segment binds its own parameter copy, which the indirect dispatch has not.
+        // The surface pass's split frames dispatch every vehicle (a sleeping one returns
+        // at once): each segment binds its own parameter copy, which the indirect
+        // dispatch has not.
         self.sleep_on() && self.nv > 1 && self.sleep_listing && !self.split_frames(true)
     }
 
@@ -3107,10 +3114,19 @@ impl FramePlanner {
         self.contact.replan.store(true, Ordering::Relaxed);
     }
 
-    /// Wide passes on (and possible), and contact not active, and no vehicle sleep (it
-    /// runs in the vehicle workgroups only).
+    /// Wide passes on (and possible), and contact not active, and no vehicle sleep,
+    /// except for a lone vehicle on a host whose wide kernels hold sleep's rule
+    /// ([`Self::set_wide_sleep`]): the wide passes step every vehicle in step, and a
+    /// sleeping vehicle's step count stands, so a fleet with sleep keeps a workgroup (or
+    /// a step's dispatches) a vehicle.
     pub fn is_wide(&self) -> bool {
-        self.wide_ok && self.wide_on && !self.contact_active() && !self.sleep_on()
+        self.wide_ok && self.wide_on && !self.contact_active() && (!self.sleep_on() || (self.wide_sleep && self.nv == 1))
+    }
+
+    /// A host whose wide passes run vehicle sleep for a lone vehicle (the kernel's
+    /// sleepMarkNode, sleepSettleOne; off: wide frames only without sleep).
+    pub fn set_wide_sleep(&mut self, on: bool) {
+        self.wide_sleep = on;
     }
 
     /// Run frames as the wide passes or one workgroup per vehicle; returns

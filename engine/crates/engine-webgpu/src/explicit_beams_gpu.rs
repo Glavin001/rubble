@@ -128,6 +128,8 @@ pub struct ExplicitBeamsGpu {
     /// The level slots this frame's parameters carry ([`Self::fleet_level_slots`], fixed
     /// when they are written: the dispatches follow them, whatever a report read since).
     level_slots: std::cell::Cell<u32>,
+    /// The last frame ran a split path ([`Self::split_path_used`]).
+    split_last: std::cell::Cell<bool>,
     /// Measurement only (time; results meaningless): self split dispatches not encoded
     /// (bit 0 the walks, bit 1 the pairs; [`ExplicitBeamsGpu::set_self_split_skip`]).
     self_split_skip: u32,
@@ -543,6 +545,9 @@ const SPLIT_TESTS_ARGS: u64 = 96;
 /// Self-collision split with vehicle contact: every vehicle's step in every frame
 /// (the kernel's vvArgs words 28..30).
 const SPLIT_ALL_ARGS: u64 = 112;
+/// Self-collision split without vehicle contact, vehicle sleep listed: the awake
+/// vehicles' steps (the awake list's words 40..42, `explicit_beams_sleep.slang`).
+const SELF_AWAKE_ARGS: u64 = 160;
 /// The kernel's step-word phases (`explicit_beams_split.slang`): the triangle tests in
 /// their own dispatches, the levels (and the tests' pairs) after them.
 const SPLIT_TESTS: u32 = 0x2000_0000;
@@ -1694,6 +1699,9 @@ impl ExplicitBeamsGpu {
         if std::env::var("RUBBLE_SLEEP_LIST").as_deref() == Ok("0") {
             planner.set_sleep_listing(false);
         }
+        // A lone vehicle with sleep keeps the wide passes (their kernels hold sleep's
+        // rule; `RUBBLE_WIDE_SLEEP=0`: a workgroup or a step's dispatches, as before).
+        planner.set_wide_sleep(std::env::var("RUBBLE_WIDE_SLEEP").as_deref() != Ok("0"));
         let one = vehicles.len() <= 1;
         let gpu = Self {
             device: device.clone(),
@@ -1744,6 +1752,7 @@ impl ExplicitBeamsGpu {
             wide_part: std::cell::Cell::new(0),
             self_split_vv: std::cell::Cell::new(false),
             level_slots: std::cell::Cell::new(0),
+            split_last: std::cell::Cell::new(false),
             self_split_skip: 0,
             extra_dispatch: ExtraDispatch::from_env(device),
             split_dispatch_timing: std::env::var("RUBBLE_SPLIT_DISPATCH_TIMING").as_deref() == Ok("1"),
@@ -2028,6 +2037,11 @@ impl ExplicitBeamsGpu {
             self.queue
                 .write_buffer(&self.misc, s.record_offset(0), bytemuck::cast_slice(&zeros));
         }
+        if on != self.planner.sleep_on() {
+            // The awake list rewrites the contact plan's indirect arguments every frame
+            // it runs: a new plan writes them again for the frames that follow.
+            self.planner.request_replan();
+        }
         self.planner.set_sleep(on)
     }
 
@@ -2036,10 +2050,44 @@ impl ExplicitBeamsGpu {
         self.planner.sleep_on()
     }
 
+    /// Vehicle sleep's thresholds from the next frame on (only with room: the header
+    /// record's dwell, speed and reach). Still counts and anchors stand: a vehicle whose
+    /// count already passed a shorter dwell sleeps at the next frame's end, one asleep
+    /// stays asleep until something wakes it. Returns whether there was room.
+    pub fn set_sleep_config(&mut self, cfg: engine_softbody::explicit_sleep::VehicleSleep) -> bool {
+        let Some(s) = self.layout.sleep.as_mut() else {
+            return false;
+        };
+        s.cfg = cfg;
+        let words = [cfg.dwell, cfg.speed.to_bits(), cfg.reach.to_bits()];
+        self.queue
+            .write_buffer(&self.misc, u64::from(s.header) * 16 + 4, bytemuck::cast_slice(&words));
+        true
+    }
+
+    /// Tests and measurement: vehicle sleep's own state, beside [`Self::state_words`]:
+    /// every vehicle's record (still steps, flags) and every node's anchor. Empty
+    /// without room.
+    #[doc(hidden)]
+    pub fn sleep_words(&self) -> Vec<(&'static str, Vec<u32>)> {
+        let Some(s) = self.layout.sleep else {
+            return Vec::new();
+        };
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        let beams: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[4])).to_vec();
+        let (r0, a0) = (s.base as usize * 4, s.anchor as usize * 4);
+        vec![
+            ("sleep records", misc[r0..r0 + 4 * self.layout.vehicles()].to_vec()),
+            ("sleep anchors", beams[a0..a0 + 4 * self.layout.total[0] as usize].to_vec()),
+        ]
+    }
+
     /// Measurement only: dispatch through the awake list (the default) or every vehicle
     /// with a sleeping one's workgroup returning at once (`RUBBLE_SLEEP_LIST=0` at
     /// creation). The same results.
     pub fn set_sleep_listing(&mut self, on: bool) {
+        // (The awake list rewrites the contact plan's indirect arguments: a new plan.)
+        self.planner.request_replan();
         self.planner.set_sleep_listing(on);
     }
 
@@ -3155,6 +3203,7 @@ impl ExplicitBeamsGpu {
         let alt = self.alt_pipes();
         let vv = self.self_split_vv.get();
         let split = vv || self.group_split_on(steps);
+        self.split_last.set(split || self.self_split_frame.get() > 0);
         if split {
             // The solo frame as planned (every vehicle when no group formed, else none),
             // then the split path's dispatches (below) in place of the groups' frames:
@@ -3923,6 +3972,18 @@ impl ExplicitBeamsGpu {
         self.self_split_frame.set(if selfs { steps } else { 0 });
         let vv = !selfs && self.self_split_vv_on(steps, &cmds);
         self.self_split_vv.set(vv);
+        // Vehicle sleep's awake-indexed dispatch on a split path (a step a dispatch): the
+        // kernel's sleepPad0 = 2 in every copy. The awake list's kernel then also wakes
+        // the sleeping members of a group with an awake member and writes the split
+        // dispatches' arguments (explicit_beams_sleep.slang).
+        if self.planner.sleep_listed() && (selfs || vv || self.group_split_on(steps)) {
+            self.planner.words[plan::W_SLEEP + 1] = 2;
+            let at = 4 * (plan::W_SLEEP + 1);
+            for k in 0..=steps as usize {
+                let at = PARAM_STRIDE as usize * k + at;
+                bytes[at..at + 4].copy_from_slice(&2u32.to_le_bytes());
+            }
+        }
         // A wide frame with the reused pair list: every copy (step k: the wide passes, the
         // list kernel, the walk and the pairs) carries PERF_WIDE_LIST.
         let wide = cmds.iter().any(|c| matches!(c, Cmd::Dispatch { kernel: Kernel::Wide(_), .. }));
@@ -4012,8 +4073,9 @@ impl ExplicitBeamsGpu {
 
     /// Contact groups run split across workgroups (contact-groups-design.md) on, or off
     /// (each group in one workgroup, as before): the same results bit for bit. Off by
-    /// default (`RUBBLE_GROUP_SPLIT=1` on). Not with vehicle sleep, the test kernel
-    /// variants or the diagnostic pipelines (those frames keep the groups' workgroup).
+    /// default (`RUBBLE_GROUP_SPLIT=1` on). Not with the test kernel variants or the
+    /// diagnostic pipelines (those frames keep the groups' workgroup). With vehicle sleep
+    /// the same rule as the groups' workgroup, bit for bit ([`Self::set_sleep`]).
     pub fn set_group_split(&mut self, on: bool) {
         self.group_split = on;
     }
@@ -4036,7 +4098,7 @@ impl ExplicitBeamsGpu {
     /// Self-collision's listed pairs across workgroups (selfcol-design.md) on, or tested
     /// in each vehicle's workgroup (off, as before): the same results bit for bit. Off by
     /// default (`RUBBLE_SELF_SPLIT=1` on). For frames on the per-vehicle frame kernel
-    /// alone: no vehicle contact, sleep, surface contact, wide passes, test variants or
+    /// alone: no vehicle contact, surface contact, wide passes, test variants or
     /// diagnostic pipelines (those frames keep the tests in the workgroup).
     pub fn set_self_split(&mut self, on: bool) {
         self.self_split = on;
@@ -4048,17 +4110,31 @@ impl ExplicitBeamsGpu {
         self.self_split_frame.get() > 0 || self.self_split_vv.get()
     }
 
+    /// A lone vehicle with sleep on the wide passes (on, the default) or not (tests: the
+    /// same results either way).
+    #[doc(hidden)]
+    pub fn set_wide_sleep(&mut self, on: bool) {
+        self.planner.set_wide_sleep(on);
+    }
+
+    /// Whether the last frame ran a step a dispatch: contact groups across workgroups
+    /// ([`Self::set_group_split`]) or self-collision split, with or without vehicle
+    /// contact (tests: the fast paths were taken, not a workgroup a vehicle or group).
+    #[doc(hidden)]
+    pub fn split_path_used(&self) -> bool {
+        self.split_last.get()
+    }
+
     /// Whether this frame (its commands) runs self-collision split with vehicle contact:
     /// on the split group path's dispatches, every vehicle's step in every substep's
     /// vehicles' dispatch (a solo vehicle's cut at its tests, a contact group's member's
     /// whole), then the walk and pairs dispatches over the solo vehicles, then the
     /// groups' contact passes (none without a group). The same conditions as that path
-    /// (no sleep, the shipped kernels, the parameter copies, the fleet bound), and no
-    /// surface contact (the self split's modules are built without it).
+    /// (the shipped kernels, the parameter copies, the fleet bound), and no surface
+    /// contact (the self split's modules are built without it).
     fn self_split_vv_on(&self, steps: u32, cmds: &[Cmd]) -> bool {
         self.self_split
             && self.planner.contact_active()
-            && !self.planner.sleep_on()
             && !self.planner.has_surface()
             && self.variant == KernelVariant::Current
             && self.debug_big.is_none()
@@ -4070,7 +4146,7 @@ impl ExplicitBeamsGpu {
             && self.self_split_ready(true)
             && cmds.iter().all(|c| match c {
                 Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => {
-                    matches!(kernel, Kernel::Vv(_) | Kernel::Solo | Kernel::Contact | Kernel::ContactBig)
+                    matches!(kernel, Kernel::Vv(_) | Kernel::Sleep | Kernel::Solo | Kernel::Contact | Kernel::ContactBig)
                 }
                 Cmd::Copy { .. } => true,
             })
@@ -4080,7 +4156,6 @@ impl ExplicitBeamsGpu {
     fn self_split_on(&self, steps: u32, cmds: &[Cmd]) -> bool {
         self.self_split
             && !self.planner.contact_active()
-            && !self.planner.sleep_on()
             && !self.planner.has_surface()
             // (Ablate: measurement only, the step module's ablation build.)
             && matches!(self.variant, KernelVariant::Current | KernelVariant::Ablate)
@@ -4092,7 +4167,8 @@ impl ExplicitBeamsGpu {
             && self.self_split_ready(false)
             && cmds.iter().any(|c| matches!(c, Cmd::Dispatch { kernel: Kernel::Frame, .. } | Cmd::Indirect { kernel: Kernel::Frame, .. }))
             && cmds.iter().all(|c| match c {
-                Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => *kernel == Kernel::Frame,
+                // (Vehicle sleep's awake list before the frame, when it is listed.)
+                Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => matches!(kernel, Kernel::Frame | Kernel::Sleep),
                 Cmd::Copy { .. } => true,
             })
     }
@@ -4142,7 +4218,12 @@ impl ExplicitBeamsGpu {
             SelfDispatch::Step { copy, groups } => {
                 pass.set_pipeline(if self.variant == KernelVariant::Ablate { &p.ablate_pipes()[0] } else { &p.solo_pipes()[0] });
                 pass.set_bind_group(0, &p.step_bind, &at(copy));
-                pass.dispatch_workgroups(groups, 1, 1);
+                if self.planner.sleep_listed() {
+                    // Vehicle sleep: the awake vehicles only (the awake list's arguments).
+                    pass.dispatch_workgroups_indirect(&self.contact.args, SELF_AWAKE_ARGS);
+                } else {
+                    pass.dispatch_workgroups(groups, 1, 1);
+                }
             }
             SelfDispatch::List { copy, groups } => {
                 pass.set_pipeline(p.list_pipe());
@@ -4296,6 +4377,12 @@ impl ExplicitBeamsGpu {
                 self.copy(&mut enc, cmd);
                 continue;
             }
+            if matches!(cmd, Cmd::Dispatch { kernel: Kernel::Sleep, .. }) {
+                // (Vehicle sleep's awake list, before the frame's dispatches.)
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                self.dispatch(&mut pass, cmd, None);
+                continue;
+            }
             for (i, &d) in sched.iter().enumerate() {
                 let k = 2 * i as u32;
                 let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -4423,7 +4510,6 @@ impl ExplicitBeamsGpu {
     fn group_split_on(&self, steps: u32) -> bool {
         self.group_split
             && self.planner.contact_active()
-            && !self.planner.sleep_on()
             && self.variant == KernelVariant::Current
             && self.debug_big.is_none()
             && self.debug_solo.is_none()
