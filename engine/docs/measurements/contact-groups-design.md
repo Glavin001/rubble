@@ -530,3 +530,58 @@ Not built (stage 3c): the levels themselves across the GPU. They are two-thirds 
   levels, and along one contact point's chain of hits, the order stays;
 - the snapshot and the two-body clears as threads over hits (they are independent of
   the levels: before the first and after the last).
+
+Built: §8.8.
+
+### 8.8 Stage 3c (2026-11-16): built, bit for bit, off by default
+
+Perf flag 524288 (`PERF_FLEET_LEVELS`, with 4096, 8192, 16384 and 65536); kernel
+`explicit_beams_fleet_levels.slang` (included by `explicit_beams_fleet.slang`), module
+`explicit_beams_split_fleetlevels` (four variants; 124 explicit modules); measurements in
+`vehicle-perf-first-principles.md` §8.32. A substep with it:
+
+| dispatch | module, step word | threads | sized by |
+|---|---|---|---|
+| the groups' levels (`fleetLevelsDefer`) | `split_group`, `SPLIT_LEVELS` | a workgroup a group | the contact plan |
+| the levels' plan (`fleetLevelsPlan`) | `fleet_plan`, `SPLIT_LV \| 5 << 8 \| L` | one workgroup | the contact plan (36) |
+| the snapshot | `fleetlevels`, `SPLIT_LV \| 4 << 8` | a node of a hit | the plan (first buffer, word 16) |
+| level l's hits, then its three residual phases | `fleetlevels`, `SPLIT_LV \| phase << 8 \| l` | a hit of level l | the plan (word 16 + 4 l) |
+| the end (`fleetLevelsEnd`) | `split_group`, `SPLIT_LV \| 6 << 8 \| L` | a workgroup a group | the contact plan |
+
+- **A group's part**: its owners' levels by fleetLevelsAny's rule and rounds; each member
+  marked with the step (gNext after the fleet's counters, `flLvMark`). A group with a hit
+  list past its room, or that takes the small groups' levels (an owner past 128 hits),
+  is marked 0 and keeps its own levels whole, as before.
+- **The plan**: the marked owners with hits by slot (1 .. L, L + 1 for a higher level;
+  within a slot in any order), their hits' prefix, each dispatch's size.
+- **A level's dispatch**: thread g finds its owner by a binary search of the prefix
+  within its slot, then runs the group's own leaf function for that one hit
+  (`vvApplyOrdered` with the hit alone on its lane: the chain of hits on its contact point
+  when it heads one; the residual phases), the owner's state through the address helpers
+  as one owner on the thread (`gFl` 1), its parity and beam-sum tag from its mark.
+- **The end**: levels past L in the group's workgroup (as fleetLevelsAny's), the two-body
+  counts cleared, the owners' records ended, the fleet's arguments zeroed (the levels'
+  too), the frame's end after the last step.
+- **Its parameter copies**: four a slot and three, after the steps' (`PARAM_LEVEL_COPIES`
+  more copies in the buffer: 16 slots at 34 steps), whatever the step: a level dispatch
+  needs no step, each owner's is its mark.
+- **The staged hit kept**: the residual phases' `vvStagedHit` (the hit's geometry and
+  first-pass force) reads nothing a phase writes; phase 0 keeps it (gBeams after the
+  owners' boxes, 4,096 hits a step, past them taken again), phases 1 and 2 load it.
+- **Slots as the levels ask**: a group's levels report its highest level and its owners
+  with hits past it (gAcc's fleet counters 0 and 1, read with the status every 16 frames,
+  zeroed after each read). The frame's slots are the reported highest level when some
+  group had two owners or more in one level, held four reads, else 0: no levels'
+  dispatches, the groups keep their own levels (the copies carry the slots past bit 24 of
+  the perf flags). `RUBBLE_FLEET_LEVEL_SLOTS=n` fixes them (tests, measurements).
+
+**What it found**: the levels are latency-bound chains, not wide work. Each phase of a
+level waits for its slowest hit, one thread's 25 to 40 µs of dependent loads, and the
+levels of a substep run in turn. Spreading a level's owners across the GPU wins only
+when a level holds several owners (32 cars crashing, t 1 to 4 s: 1 to 4 owners a level,
+7 to 21 % off the frame); late in the 32-car run and at eight cars the levels hold one
+owner each (a chain of 6 to 12 at 32 cars), which the group's one workgroup already runs
+at the same latency without 4 L + 3 more dispatches a substep (2 to 2.4 µs each, empty
+or not). Off by default: not faster over whole runs (§8.32). What would cut the levels
+further is one hit's latency (the staged geometry kept in the group's own levels too, a
+hit's four nodes on four threads), not more parallelism across hits.
