@@ -2034,6 +2034,35 @@ since t 12 s; `--rest-probe 60`, then `--sleep-loss` 5.1 s each): its fastest no
 frame's end 1.47 m/s, 86 nodes past 0.25 m/s within a second, the farthest 7.2 mm in a
 dwell; no setting of the sweep above (default to 3 m/s, 5 mm) sleeps it.
 
+**The 25° pile's ringing, by energy term (2026-11-16, later;
+`explicit-vehicles-in-world.md` §10.8 "Where the 25° pile's ringing comes from").** From
+the t 25 s fixture, the cars' states carried to the CPU reference:
+
+| run (3 s) | car 7: nodes past 0.25 m/s a quarter second | kinetic energy, J |
+|---|---|---|
+| GPU fleet as saved (`--rest-parts`) | 18 (up to 1.9 m/s) | 0.58 relative to the body |
+| CPU, car 7 alone (with or without its anti-clip memory) | 232, 14, 3, 1, then 0 | 3.0 (the carry's jolt), then 0.1 |
+| GPU standalone twin of that CPU state | the CPU's, to 0.03 J | 0.1 to 0.4 |
+| GPU fleet, vehicle contact off for the probe | 0 (cars 0, 1, 3 collapse: 539 to 545 nodes at 5 to 6 m/s) | 0.09 |
+| GPU fleet, any lossless switch off (pair reuse, candidate list, fold, group or self split) | 18: every number the same | 0.58 |
+| CPU fleet of cars 0, 1, 3, 6, 7 with vehicle contact | 15 to 29 | 0.6 to 1.4 |
+| the same, final-velocity guard on | 17 to 26 | 0.6 to 1.4 |
+| the same, position steps' budget × 0.5 (`SHIFT_BUDGET`) | 10 to 28 | 0.6 to 1.4 |
+| the same, no position-step budget (`SHIFT_BUDGET=0`) | 19, 13, 16, 14, 14, 2, 1, 1, 3, 1, 4 | 0.06 to 0.15 after 1.5 s; the cars sink into each other, −10 to −80 J of potential energy a quarter |
+
+The CPU fleet's ledger, a quarter second (rule as shipped): vehicle contact's normal force
+−84 to −122 J, its friction −5 to −7 J, its position steps +89 to +135 J; self-contact
++5 to +31 J; the rock −3 to −5 J; mechanical energy −8 to +4 J; 13,100 vehicle-contact
+hits a quarter. The cars rest on each other: pair gaps (`--pair-gaps`) of 0 between cars
+0–3, 0–7, 1–3, 3–7 and 6–7; car 2 is 6 m off.
+
+*Sleep where the cars do rest, longer runs* (25°, default thresholds, 90 s World runs):
+
+| run | asleep | vehicle GPU at rest, ms a World step | loss against never sleeping |
+|---|---|---|---|
+| one car (at rest from t 9 s) | at t 73.6 s, never woken | 4.9 awake (median); asleep the World skips its step: 0.03 ms wall | largest node 2.1 mm at t 90 s; 3 J of potential energy the frozen car did not lose |
+| eight cars | none in 90 s | 28.6 (median, shared GPU) | 0 |
+
 **The gate (the pile at rest ≤ 1 ms of vehicle GPU a step) is not met.** On the 50°
 and rolling mountains the pile is not at rest: the physics (slopes past the friction
 angle) keeps a car and torn-off parts sliding. Where it rests (25°) the per-node rule

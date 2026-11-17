@@ -1247,6 +1247,71 @@ together and would need a member frozen inside an awake group); or a stillness t
 that a ringing light node or a swinging panel does not fail (a measured loss either
 way).
 
+**Where the 25° pile's ringing comes from** (2026-11-16, later). Tools:
+`vehicle_lab --measure rest-ledger` (the CPU reference's own car resting, its energy by
+term, `--rest-ablate friction|anticlip|selfcol|ror`), and from a GPU fixture
+`--cpu-ledger V` (car V's positions, velocities, broken flags, rest lengths and, with
+`--cpu-clip 1`, anti-clip memory on the CPU reference), `--gpu-twin` (that CPU state
+uploaded to a standalone GPU fleet, both stepped), `--cpu-world A,B,…` (several such
+cars in one CPU fleet with vehicle contact and the fleet's energy ledger), `--pair-gaps`,
+and `--rest-parts` with the lab's switches off one at a time.
+
+1. *Not the GPU.* Car 7 of the pile (18 nodes past 0.25 m/s, up to 1.9 m/s) carried to
+   the CPU alone calms within a second (0 such nodes, 0.06 to 0.16 m/s, 0.1 J), with or
+   without its anti-clip memory; uploaded from there to a standalone GPU fleet it does
+   the same as the CPU (kinetic energy within 0.03 J, the same fast-node counts). The
+   lab's lossless switches (reused pair list, coupling candidate list and fold, group and
+   self-collision split) change nothing.
+2. *Vehicle contact.* With vehicle contact off the ringing of car 7 stops (0 nodes, 0.11
+   m/s) and cars 0, 1 and 3 collapse into each other (500+ nodes at 5 m/s): those cars rest
+   on each other. The pair gaps agree: cars 0–3, 0–7, 1–3, 3–7 and 6–7 have nodes inside
+   each other's triangle boxes; the pile's contact group of six is one island of five
+   cars that touch, plus car 2 six metres off.
+3. *The ledger* (cars 0, 1, 3, 6, 7 in one CPU fleet, a line a quarter second): about
+   13,100 vehicle-contact hits a quarter (26 a step) all along; vehicle contact's normal
+   force takes 84 to 122 J a quarter out and its §37 position steps put 89 to 135 J back
+   (each step may store up to the approach energy the normal force removed,
+   `shift_depth`'s budget); self-contact +5 to +31 J a quarter; the rock −3 to −5 J; the
+   fleet's mechanical energy −8 to +4 J a quarter. A node held against another car's
+   triangle by its beams and gravity is stopped, stepped out, pulled back and stopped
+   again: a near-lossless cycle that keeps 20 to 29 nodes of car 7 ringing (about 1 J)
+   for good. The final-velocity work guard (`final_guard`, off by default) changes
+   nothing. With the position steps' budget halved (`SHIFT_BUDGET=0.5`, a CPU measurement
+   switch) the cycle still runs; with none (`SHIFT_BUDGET=0`) car 7 calms in 1.5 s (1 to 4
+   nodes, 0.1 J) but the cars sink into each other (−10 to −80 J of potential energy a
+   quarter).
+4. *A car alone on 25°* (the CPU reference's own run, 14 to 30 s): no ringing (0 nodes
+   past 0.25 m/s); a slow sway of the whole body, 0.06 to 1.6 J, decaying over tens of
+   seconds; the rock's contact takes 1.2 J a second out. Its fastest node stays under 0.2
+   m/s, but the sway moves it more than 0.1 mm in half a second.
+
+So the ringing is vehicle contact's rule at rest, not a GPU fault and not a single
+contact doing positive work: §37's normal force and its budgeted position step together
+do no positive work, as specified, but for a node pressed against another vehicle they
+return nearly all of what they take, so the node never settles. That is the contact law
+as specified (`jbeam-semantics-spec.md` §37, §37.1's open floor), not a coding error; a
+change (for example a position step that stores only a part of the budget, or a resting
+contact that holds its depth) changes every BeamNG-profile contact and is for the owner
+to decide, with its own measurements. Not changed here.
+
+**Sleep design (a) against this pile.** A member of a contact group sleeping on its
+own when its partners exert nothing on it would release only car 2 (6 m from the
+others; and car 2 has its own 7 ringing nodes at 1.1 m/s, which vehicle contact does not
+cause). The other five rest on each other with 26 contact hits a step: their partners
+do exert forces on them, so (a) does not apply. (a) was not built; the gate on this pile
+needs the resting contact to settle, or a stillness test that tolerates the cycle
+(design (b)), which is a looser rule with a measured loss.
+
+**The gate, measured on 25°** (90 s World runs, default thresholds): one car comes to
+rest at t 9 s, sways slowly and sleeps at t 73.6 s; the World then skips its step (0.03
+ms wall against 4.9 ms of vehicle GPU awake); at t 90 s it is 2.1 mm from never sleeping.
+The eight never sleep in 90 s (28.6 ms of vehicle GPU a step on the shared GPU).
+
+**The rolling gully's failure at t 36 s** is not this: the debris that fails there has
+left the terrain's window and falls free (nodes at 500 to 720 km/h, no contact), where
+the non-finite state (after the fix) or the shapes-room overflow (before) is reached.
+Left as a follow-up.
+
 **Proofs of the fix** (2026-11-16, the GPU shared with three other sessions): CPU
 `explicit_rigid` 5 (the new BeamNG-contact test fails on the old rule), `energy_ledger` 7;
 GPU suites, all pass: `sleep_fast_gpu` 2, `explicit_sleep_gpu` 3, `group_split_gpu` 3,
