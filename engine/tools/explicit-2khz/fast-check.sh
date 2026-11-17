@@ -7,7 +7,8 @@
 #       after a change of the buffers' layout)  saves the fixtures: CARS cars (default
 #       1 2 4 8) driven to the moments below, into out/fixtures/cars<N>_t<T>.fx
 #   tools/explicit-2khz/fast-check.sh SWITCH [FIXTURE ...]
-#       SWITCH: a `vehicle_lab --ab-switch` value (perf=<mask>, groupsplit, wide, ...).
+#       SWITCH: a `vehicle_lab --ab-switch` value (perf=<mask>, groupsplit, wide, sleep,
+#       sleeplist, ...; vehicle sleep's own checks: sleep-check.sh).
 #       FIXTURE: files or name parts (default: every fixture). One line a fixture:
 #       its name, ms a frame with the switch on and off, and the verdict.
 #   FRAMES=n (default 4) frames each way; PROFILE=fast|release (default fast: no
@@ -24,7 +25,7 @@ car="${CAR:-$HOME/Development/rubble-artifacts/sedan-live/mods/sedan_new}"
 cd "$engine" || exit 1
 [ "$profile" = release ] && flag="--release" || flag="--profile $profile"
 # shellcheck disable=SC2086
-bin="$engine/target/$profile/examples/vehicle_lab"
+bin="${LAB_BIN:-$engine/target/$profile/examples/vehicle_lab}"
 # The machine's one GPU job at a time: the whole check under one hold of the lock (a hold
 # a fixture would wait behind another job's minutes each time), the build before it.
 if [ -z "$FAST_CHECK_LOCKED" ]; then
@@ -43,8 +44,13 @@ if [ "$1" = "--make" ]; then
     case "$n" in
       1) at="2.5,6,20"; secs=20.3 ;;
       32) at="1,2.5,4"; secs=4.3 ;;
+      # (Eight cars: also the pile at rest, where vehicle sleep acts.)
+      8) at="2,3.7,8,16,20,30"; secs=30.3 ;;
       *) at="2,3.7,8,16"; secs=16.3 ;;
     esac
+    # (AT="3,3.4,4.2,5" SECS=5.3: moments of one's own, e.g. the first collisions' fast
+    # relative motion, into FIXTURES=<another directory>.)
+    at="${AT:-$at}"; secs="${SECS:-$secs}"
     lab "$n" --ab "$at" --ab-switch "perf=0" --ab-frames 1 --save-fixtures "$fixtures" --secs "$secs" 2>&1 | grep -E "fixture|^Error"
   done
   exit 0
@@ -75,7 +81,8 @@ for f in $list; do
     echo "FAIL $name: ${line:-no verdict}"
     echo "$out" | grep -E "differ|records|^Error|panicked" | head -6 | sed 's/^/       /'
   fi
-  [ -n "$EXTRA" ] && echo "$out" | grep -E "profile at|explicit |split ablation|untimed|group of" | sed 's/^/     /'
+  echo "$out" | grep -E "kept candidates \(on\)" | sed 's/^ */     /'
+  [ -n "$EXTRA" ] && echo "$out" | grep -E "profile at|explicit |split ablation|untimed|group of|sleep \\(" | sed 's/^/     /'
 done
 echo "fast check: $(( $(date +%s) - start )) s"
 exit $bad
