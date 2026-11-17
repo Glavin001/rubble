@@ -143,3 +143,96 @@ the phone in question is not known until it is tried there. The kernels' shader
 compile (WebKit's GPU process) was not measured either: if the phone still closes
 the tab at the compile step with these numbers, that points at the GPU process
 rather than the tab's memory.
+
+## The iPhone's `GPUOutOfMemoryError` (2026-11-17)
+
+The same iPhone, with the cuts above, loaded `vehicle-lab.html?mode=mountain&car=gen`
+further and stopped with `gpu: [object GPUOutOfMemoryError]`: WebKit's out-of-memory
+error had an empty message, and the page printed the object. Nothing here was run on
+a phone; the iOS figures are WebKit's code and a public survey, the rest is desktop
+Chrome (`lab-memory.mjs`, M3 Max) and Chrome with iOS's limits forced (`--ios`).
+
+### What iOS allows
+
+* One buffer: WebKit (`HardwareCapabilities.mm`) sets `maxBufferSize` and
+  `maxStorageBufferBindingSize` both to max(256 MiB, min(1 GiB, Metal's
+  `maxBufferLength` / 3)). Every iOS device reports at least 268,435,456 bytes, 96 %
+  at least 644 MB, 82 % 1 GiB (web3dsurvey). The car's largest buffer, the skin's
+  bind records, was 267,358,144 bytes on main (1 MB under the least limit) and is
+  157 MB since #116: **no single buffer is over a limit**, and no solver buffer is
+  near one (the largest, `b33`, 16 MB).
+* All of them together: WebKit raises `GPUOutOfMemoryError` ("Allocation failure.",
+  which reached the page empty) when Metal's `newBufferWithLength` (or a texture's
+  allocation) returns nil. WebKit charges Metal's allocations to the tab's WebContent
+  process (its memory attribution), so they count, with the tab's JS and wasm heaps,
+  against the limit iOS refuses or kills a process at. **What pushed it over is the
+  total**: the tab's own memory (1.0 GB settled for the full car, 528 MB of it a wasm
+  heap that never shrinks) plus the GPU's 312 MB.
+
+### Per car, 1 and 8 cars (MB; mountain; desktop Chrome)
+
+| | 1 car, before | 1 car, after | 8 cars, before | 8 cars, after |
+|---|---:|---:|---:|---:|
+| GPU buffers, settled | 274 | 274 | 1741 | 690 |
+| of which `showcase-binds` (the skin, 150 MiB a car) | 150 | 150 | 1200 | 150 (shared) |
+| `showcase-attrs`, `-out` and index lists (per car) | 52 | 52 | 416 | 416 |
+| GPU textures | 38.5 | 38.5 | 21.6 | 21.6 |
+| wasm heap (the page's) | 528 | 77 | 532 | 532 |
+| JS heap, settled | 178 | 178 | 1388 | 1389 |
+| renderer footprint, settled | 1034 | 584 | 2480 | 2317 |
+| renderer footprint, peak | 1230 | 947 | 2906 | 2568 |
+
+(8 cars, after: measured before the worker, with the shared bind buffer only.) The
+World's own buffers are ~100 MB whatever the car (`b33` 16, `readRanges` 14–44, `b27`
+8, …). 8 cars before: the same bind records packed eight times, and eight 173 MB
+visuals in JS (one a paint; not changed here).
+
+### What changed (lossless; the desktop default draws the same pixels)
+
+1. The error line (`gpu-errors.mjs`): the error's kind, the browser's text or that
+   it gave none, the phase (the renderers' and the cars' uploads run in their own
+   error scopes), the buffers and textures created then or last (labels, sizes),
+   what is live on the device, and its `maxBufferSize` / `maxStorageBufferBindingSize`.
+2. The visual is built in a worker of its own (`visual-worker.mjs`, the same wasm and
+   the same call): the ~450 MB of wasm heap its build grows go with the worker. The
+   page's wasm heap 528 → 77 MB; the tab settled 1034 → 584 MB, its peak 1230 → 947.
+3. Cars of one model share the skin's bind buffer (`showcase-car-render.mjs`
+   `bindsLike`): a paint and a car index do not enter the bind records
+   (`skin-upload-identity.mjs --paint --vehicle`: the same hash; only `showcase-attrs`
+   and `-params` differ). 8 cars: 1741 → 690 MB.
+
+Before / after, desktop default (`vehicle-lab-record.mjs`, the generated sedan at rest
+and in the 56 km/h offset crash): the same stats JSON, and the same stills byte for
+byte but one (one frame grab 1.5 s into the crash: 5 levels at most, mean 0.0001).
+
+### The lighter car detail (the generated sedan's own, for small devices)
+
+`vehicle_gen_rig` also writes `sedan.lite.glb` / `sedan.lite.rskin`: the same design
+built with its body meshed at a 35 mm target edge instead of 20 mm (`LITE_EDGE`; the
+longest-edge cap scales with it and is unchanged at 20 mm), every part under the
+same name, bound by the same binder to the same lattice. The JBeam and `.pc` are the
+same bytes (`rig_export.rs`), the lab's damage units are the same, and the crash and
+rest runs' physics readouts are the same number for number. 280,629 vertices and
+6.5 M skin entries (57 % and 47 % of the art's); the files 68 MB instead of 140.
+Coarser targets drop parts (the door cards at 40 mm), so 35 mm is the coarsest
+tried that keeps every mesh.
+
+The lab's "Car detail" control: auto (full unless the device cannot hold it), full,
+lighter. Auto picks the lighter one where the footprint guard refuses the full one,
+on an iPhone or iPad's WebKit (no `deviceMemory`, so the tab's budget cannot be read,
+and the full car is what failed there), or after the full one's build ran out of GPU
+memory on this device (rebuilt once, lighter, saying why). With the lighter detail
+chosen that way the lab runs one car, and says so.
+
+| mountain, 1 car (MB) | full, after | lighter, `--ios` |
+|---|---:|---:|
+| renderer footprint, peak / settled | 947 / 584 | 428 / 409 |
+| GPU buffers + textures | 274 + 38.5 | 175 + 38.5 |
+| `showcase-binds` | 150 | 74 |
+| visual kept in JS | 173 | 88 |
+
+With `--ios` (an iPhone's user agent, no `deviceMemory`, the adapter's two buffer
+limits at 256 MiB and the device created with them) the lab picks the lighter detail,
+loads in 2.9 s and runs (17 → 549 World steps in 8 s). The authored sedan, which
+runs on that iPhone, measured 415 MB peak and 150 MB GPU. Whether the phone holds
+the lighter generated sedan is the owner's check on the phone.

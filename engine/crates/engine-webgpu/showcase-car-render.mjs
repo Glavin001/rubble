@@ -2019,6 +2019,8 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   const fxBind = device.createBindGroup({ layout: fxPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: frameBuf } }, { binding: 1, resource: { buffer: fxBuf } }] });
   const cars = new Map();
   let nextId = 1;
+  // The cars using each bind buffer (addCar's bindsLike shares one between cars).
+  const bindUsers = new Map();
   let nodesBuf = null;
   let miscBuf = null;
   let beamsBuf = null;
@@ -2148,8 +2150,12 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * its index (for its origin). Returns an id. `visual.closedPanels`: its painted
      * panels are closed solids (skin, edge walls, inner face), so the back of a paint
      * face is drawn only round a tear (beamng-mod.mjs sets it from the model).
+     * `bindsLike`: a car whose visual is this one's geometry and skin (the same
+     * model, another paint: the bind records hold no colour and no per-car index), so
+     * its bind buffers (the skin's, 157 MB for a generated car) are used as they are
+     * instead of packing the same bytes again. Ignored when that car's levels differ.
      */
-    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0, dataBase = 0, wheelRecords = null, retireAt = 0, labelAt = 0 } = {}) {
+    addCar(visual, { nodeOffset = 0, vehicle = 0, beamOffset = 0, lod = null, texBase = 0, dataBase = 0, wheelRecords = null, retireAt = 0, labelAt = 0, bindsLike = null } = {}) {
       const nodeCount = visual.nodeCount;
       // Every level of detail is the same car: closed solids or sheets.
       const closedPanels = !!visual.closedPanels;
@@ -2259,7 +2265,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         // pack a vertex's entries hold the packed data's views, and a closure kept on
         // the level (`pw`) would keep its whole scope, so those views and the data
         // (hundreds of MB for a generated car's skin) would outlive the upload.
-        const binds = packBinds(v, n);
+        const like = sameAs?.levels[lvIndex];
+        const binds = like && like.n === n ? like.binds : packBinds(v, n);
+        bindUsers.set(binds, (bindUsers.get(binds) ?? 0) + 1);
         // Deformed (position | torn, normal | damage, plastic | scrape) per
         // vertex: the compute pass writes it, the draw reads it as a vertex
         // buffer. Starts at the rest pose.
@@ -2479,6 +2487,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       };
       const car = { nodeOffset, beamOffset, levelOf: (index) => car.levels.find((lv) => lv.index === index || lv.floorIndex === index) };
       const extra = (Array.isArray(lod) ? lod : [lod]).filter(Boolean).slice(0, 2);
+      const sameAs = bindsLike != null && cars.get(bindsLike)?.levels.length === 1 + extra.length ? cars.get(bindsLike) : null;
       const levels = [visual, ...extra].map((v, k) => level(v, k));
       syncSets();
       [drawBind, glassBind] = makeDrawBinds();
@@ -2528,7 +2537,11 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     removeCar(id) {
       const car = cars.get(id);
       if (!car) return;
-      for (const lv of car.levels) for (const b of [lv.binds, lv.out, lv.attrs, lv.index, lv.floorIndex, lv.params]) b.destroy();
+      for (const lv of car.levels) {
+        for (const b of [lv.out, lv.attrs, lv.index, lv.floorIndex, lv.params]) b.destroy();
+        const users = (bindUsers.get(lv.binds) ?? 1) - 1;
+        if (users > 0) bindUsers.set(lv.binds, users); else { bindUsers.delete(lv.binds); lv.binds.destroy(); }
+      }
       for (const b of [car.topo, car.nodeN, car.lod, car.args, car.cutArgs, car.cutSeen]) b?.destroy();
       cars.delete(id);
       // The last car gone: the texture sets' table starts over.

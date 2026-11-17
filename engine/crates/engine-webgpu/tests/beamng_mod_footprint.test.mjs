@@ -11,7 +11,7 @@ export async function resolve(spec, ctx, next) {
     'export const jbeamVisual = () => null; export const jbeamVisualSkinned = () => null; export const decodeTexture = () => null;'), shortCircuit: true };
   return next(spec, ctx);
 }`));
-const { modFootprint, footprintCheck, modModelSizes } = await import('../beamng-mod.mjs');
+const { modFootprint, footprintCheck, modModelSizes, modModelNames } = await import('../beamng-mod.mjs');
 
 const MB = 2 ** 20, GB = 2 ** 30;
 // The generated sedan's files (sedan.glb, sedan.rskin).
@@ -52,6 +52,20 @@ test('the model files\' sizes come from their headers, before downloading them',
     if (String(url).endsWith('files.json')) return new Response(JSON.stringify(['car/car.jbeam', 'car/car.glb', 'car/car.rskin']));
     return new Response(null, { status: 200, headers: { 'Content-Length': String(url).endsWith('.glb') ? '500' : '7000' } });
   };
-  assert.deepEqual(await modModelSizes('./m'), { glb: 500, skin: 7000 });
+  assert.deepEqual(await modModelSizes('./m'), { glb: 500, skin: 7000, detail: 'full', hasLite: false });
   assert.deepEqual(seen.filter(([u]) => !u.endsWith('files.json')).map(([, m]) => m), ['HEAD', 'HEAD']);
+  // A folder without a lighter render gives its art for either detail.
+  assert.deepEqual(await modModelSizes('./m', 'lite'), { glb: 500, skin: 7000, detail: 'full', hasLite: false });
+});
+
+test('a generated car\'s lighter render is picked only when asked for, by its own names', async () => {
+  const list = ['car/car.jbeam', 'car/car.glb', 'car/car.rskin', 'car/car.lite.glb', 'car/car.lite.rskin'];
+  assert.deepEqual(modModelNames(list), { glbName: 'car/car.glb', skinName: 'car/car.rskin', detail: 'full', hasLite: true });
+  assert.deepEqual(modModelNames(list, 'lite'), { glbName: 'car/car.lite.glb', skinName: 'car/car.lite.rskin', detail: 'lite', hasLite: true });
+  // (Listed lighter first: the art is still the full one.)
+  assert.equal(modModelNames([...list].reverse()).skinName, 'car/car.rskin');
+  globalThis.fetch = async (url) => (String(url).endsWith('files.json') ? new Response(JSON.stringify(list))
+    : new Response(null, { status: 200, headers: { 'Content-Length': String(url).includes('.lite.') ? (String(url).endsWith('.glb') ? '9' : '60') : (String(url).endsWith('.glb') ? '16' : '124') } }));
+  assert.deepEqual(await modModelSizes('./m', 'lite'), { glb: 9, skin: 60, detail: 'lite', hasLite: true });
+  assert.deepEqual(await modModelSizes('./m'), { glb: 16, skin: 124, detail: 'full', hasLite: true });
 });
