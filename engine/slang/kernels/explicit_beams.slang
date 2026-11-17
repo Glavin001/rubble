@@ -1633,6 +1633,10 @@ static const uint PERF_HITS_LOCAL = 1048576u;
 // perfFlags bit 2097152 (explicit_plan::PERF_TYRE_EARLY, with PERF_TYRE_AHEAD): the
 // wheels' second part loaded before the hits (explicit_beams_drive.slang drvTyreLoad).
 static const uint PERF_TYRE_EARLY = 2097152u;
+// perfFlags bit 4194304 (explicit_plan::PERF_WHEELS_APART, with PERF_AHEAD_APART): the
+// coupling and the wheels of the list dispatch on workgroups of their own
+// (wideCoupleApart, wideWheelsApart).
+static const uint PERF_WHEELS_APART = 4194304u;
 static const uint HIT_ROLE_WORDS = 20u;
 uint hitRoleAt(uint v, uint i) { return hitFbAt(v, HIT_CAP) + i * HIT_ROLE_WORDS; }
 
@@ -8368,6 +8372,63 @@ void wideAheadApart(uint v, uint lane)
     if (aheadDrive) driveTyresPre(drvC, drvHas, drvApart, LANES - 1u - lane);
 }
 
+// perfFlags bit 4194304 (explicit_plan::PERF_WHEELS_APART, with PERF_AHEAD_APART): the
+// coupling's and the wheels' work of wideAheadApart on two workgroups, the coupling's at
+// vehicles + v, the wheels' at 2 · vehicles + v. In wideAheadApart every lane runs its
+// share of the coupling's phases (its nodes' counts, its shapes and bodies) and lanes
+// 255..252 also their wheels', so a phase there costs the sum of the two chains on those
+// lanes. The same calls, on the same lanes, between the same barriers; neither part reads
+// what the other writes (the wheels read the nodes, their records and the static boxes; the
+// coupling writes its bodies, spheres, lists, counts and workgroup copies), as they already
+// ran beside each other.
+void wideCoupleApart(uint v, uint lane)
+{
+    uint s = gP.pad2;
+    if (lane == 0u)
+    {
+        coupleBegin();
+        cplGsClear();
+        cplGsAdd(0u, v, 0u, 0u);
+        cplFoldMark(v);
+    }
+    sync();
+    if (s + 1u >= gP.steps || (gP.perfFlags & PERF_WIDE_FUSED) == 0u) return;
+    uint coupleOn = gsUniformCouple;
+    bool aheadFold = (coupleOn & CPL_FOLD_FRAME) != 0u;
+    if (!aheadFold) coupleStep(v, lane, s + 1u, coupleOn);
+    bool cBody = false;
+    float4 cC0 = float4(0.0, 0.0, 0.0, 0.0);
+    float4 cQ = float4(0.0, 0.0, 0.0, 1.0);
+    float4 cC2 = float4(0.0, 0.0, 0.0, 0.0);
+    float3 cW = float3(0.0, 0.0, 0.0);
+    if (aheadFold) cplFoldB(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+    sync();
+    if (aheadFold) cplFoldC(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+}
+void wideWheelsApart(uint v, uint lane)
+{
+    uint s = gP.pad2;
+    uint4 misc = gMisc[v];
+    if (lane == 0u) driveBegin();
+    sync();
+    if (s + 1u >= gP.steps || (gP.perfFlags & PERF_WIDE_FUSED) == 0u) return;
+    uint driveOn = gsUniformDrive;
+    bool aheadDrive = driveOn != 0u;
+    DrvCtx drvC = (DrvCtx)0;
+    bool drvHas = false;
+    bool drvApart = false;
+    if (aheadDrive)
+    {
+        driveAheadCtx(v, LANES - 1u - lane, drvC, drvHas, drvApart);
+        driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 0u, misc.w + s + 1u);
+    }
+    sync();
+    if (aheadDrive) driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 1u, misc.w + s + 1u);
+    if ((gP.perfFlags & PERF_TYRE_AHEAD) == 0u) return;
+    sync();
+    if (aheadDrive) driveTyresPre(drvC, drvHas, drvApart, LANES - 1u - lane);
+}
+
 // The reused pair list's part of a step in the wide passes (PERF_WIDE_LIST), a workgroup a
 // vehicle after the step's wide_beams: what explicit_beams_self_step runs of a step
 // between its beams and its pairs dispatch, and nothing else (a small kernel: a dispatch
@@ -8381,6 +8442,13 @@ void wideAheadApart(uint v, uint lane)
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    if ((gP.perfFlags & (PERF_AHEAD_APART | PERF_WHEELS_APART)) == (PERF_AHEAD_APART | PERF_WHEELS_APART)
+        && gid.x >= gP.vehicles)
+    {
+        if (gid.x >= 2u * gP.vehicles) wideWheelsApart(gid.x - 2u * gP.vehicles, lid.x);
+        else wideCoupleApart(gid.x - gP.vehicles, lid.x);
+        return ebLoopCapFlush();
+    }
     if ((gP.perfFlags & PERF_AHEAD_APART) != 0u && gid.x >= gP.vehicles)
     {
         wideAheadApart(gid.x - gP.vehicles, lid.x);

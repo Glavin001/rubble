@@ -330,6 +330,12 @@ pub const PERF_HITS_LOCAL: u32 = 1048576;
 /// accumulators after (the kernel's PERF_TYRE_EARLY, `drvTyreLoad`, `drvTyreFinish`).
 /// vehicle-perf-first-principles.md §8.33.
 pub const PERF_TYRE_EARLY: u32 = 2097152;
+/// [`W_PERF_FLAGS`], with [`PERF_AHEAD_APART`]: the coupling's and the wheels' work of the
+/// list dispatch on two workgroups a vehicle (the kernel's PERF_WHEELS_APART,
+/// `wideCoupleApart` at vehicles + v, `wideWheelsApart` at 2 · vehicles + v; the host
+/// dispatches three times the vehicles), in place of one where lanes 255..252 carry both.
+/// vehicle-perf-first-principles.md §8.34.
+pub const PERF_WHEELS_APART: u32 = 4194304;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),

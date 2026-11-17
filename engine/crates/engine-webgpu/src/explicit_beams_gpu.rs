@@ -3150,7 +3150,10 @@ impl ExplicitBeamsGpu {
     /// [`plan::PERF_AHEAD_APART`] (and the fused coupling and wheels) a second workgroup a
     /// vehicle for step s + 1's coupling and wheels (the kernel's `wideAheadApart`).
     fn list_groups(&self, nv: u32) -> u32 {
-        if self.wide_fused && self.planner.perf_flags() & plan::PERF_AHEAD_APART != 0 {
+        let f = self.planner.perf_flags();
+        if self.wide_fused && f & plan::PERF_AHEAD_APART != 0 && f & plan::PERF_WHEELS_APART != 0 {
+            3 * nv
+        } else if self.wide_fused && f & plan::PERF_AHEAD_APART != 0 {
             2 * nv
         } else {
             nv

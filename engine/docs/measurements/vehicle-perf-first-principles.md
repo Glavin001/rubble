@@ -2146,3 +2146,81 @@ bit. The kernel-dir A/B is a second lab given A's state at the saved moment (`ve
 B is "a second lab of the same options ... given A's state"), so state that the snapshot does
 not carry, or the override's own compile of the same WGSL, would differ there and nowhere
 else; which one is not established.
+
+### 8.34 The list dispatch's three workgroups, measured and split: under 5 %, stopped (2026-11-16)
+
+The owner's request after §8.33: split the single-lane chains of the list dispatch's three
+workgroups (the list's own phases, the coupling, the wheels) as one attempt, designed from a
+measurement of each chain first; then the nodes pass's coupling contacts; stop if the
+combined change gains under 5 %. It did (−2 to −3 %), so the nodes pass was not started.
+
+**Measured first** (one car, t 20 and t 6, the new default flags; time-only switches that
+skip or end a part early, removed after use; each figure the list pass timed apart, ms a
+frame of 34 steps; a skipped part changes the state, so each figure is that pass's time
+only):
+
+| list dispatch with | t 20 | t 6 |
+|---|---|---|
+| all three workgroups (the default) | 1.49–1.51 | 1.51–1.52 |
+| the dispatch, no work in any workgroup | 0.31–0.36 | 0.31–0.36 |
+| the coupling's and wheels' workgroup alone | 1.50–1.52 | 1.52 |
+| … its wheels only (coupling off) | 1.05–1.07 | 1.07 |
+| … its coupling only (wheels off) | 0.92–0.94 | 0.94 |
+| … its wheels without the rays | 0.87 | 0.90 |
+| … its wheels without the tyres' first part | 0.90 | 0.92 |
+| the list workgroup alone | 1.31–1.33 | 1.39 |
+| … ended after its header and state load | 0.37 | 0.36 |
+| … ended after the tracking | 0.68 | 0.69 |
+| … ended after the throttles, tested list and clears | 0.78 | 0.79 |
+| … ended after the decision and the brute pairs | 1.21 | 1.08 |
+| … without its tests (the save kept) | 1.22 | 1.18 |
+
+Above the dispatch's own 0.31–0.36: the wheels' work 0.70 (context and bars ≈0.37, rays
+≈0.18, tyres' first part ≈0.15), the coupling's 0.57, and together on one workgroup 1.15:
+**they add, not overlap**, because every lane runs its share of the coupling's per-node
+count and lanes 255..252 also run the wheels. The list workgroup's work is 1.0: the tracking
+0.32, the throttles and tested list 0.10, the decision with the brute pairs 0.30–0.43, the
+tests 0.13–0.21, the header and load 0.06.
+
+**Built and kept (off): perf flag 4194304, `PERF_WHEELS_APART`** (with `PERF_AHEAD_APART`;
+`wideCoupleApart`, `wideWheelsApart`; the host dispatches three workgroups a vehicle). The
+coupling on workgroup vehicles + v, the wheels on 2 · vehicles + v: the same calls on the
+same lanes between the same barriers (neither reads what the other writes; they already ran
+beside each other). Bit for bit (`fast-check.sh perf=4194304`, every fixture, 20 frames;
+Chrome compiles all 116 modules; `explicit_loop_cap`). The list pass: 1.51 → 1.29–1.37 (now
+the list workgroup's 1.31 sets it; the wheels' workgroup alone is 0.94–0.97, the coupling's
+0.88–0.89). Wall at the saved moments (`--ab-perf-masks`, median): t 20 4.80 → 4.67–4.68, t 6
+4.84 → 4.79, t 2.5 4.05 → 3.67 (falling, no hits: the list is the frame's longest pass there).
+−2 to −3 % at rest and at the crash.
+
+**Tried, not kept** (each bit for bit on the one-car fixtures, each removed):
+- *The tested triangles listed by a scan* in place of one shared counter's atomic add a
+  tested triangle: the list pass 1.29 → 1.48, slower (three more barriers and two 16-step
+  scans cost more than ≈260 atomics on one workgroup word).
+- *The brute pairs' contacters from a workgroup copy* (`trianglePairs` reads each
+  contacter's node and position; every lane reads the same ones in the same order): list
+  pass unchanged (1.29 → 1.31).
+- *The tracking's main-body position keys as each lane's maximum, added once* (in place of
+  an atomic max a node and key on six shared words): unchanged (1.29 → 1.30).
+
+Neither of the last two was the chain: two dependent device loads a contacter and the
+atomics on six words were not what the list workgroup's phases wait on. What they do wait
+on was not found: each phase is a lane's two or three nodes or triangles, a handful of
+dependent loads each, which the per-access cost of §8.23 puts at 2–4 µs a phase, not the
+9–13 µs measured for the tracking and the decision.
+
+**Stop.** The combined change (wheels apart, scan, contacters local, tracking local) gained
+under 5 % (the wheels apart −2 to −3 %; the rest 0 or a loss). Not built: the coupling's
+per-node count on spare workgroups of the hits dispatch (its inputs are complete there and
+nothing between reads its outputs; it would take the coupling's workgroup from 0.88 toward
+0.6, but the list workgroup's 1.31 sets the dispatch), the wheels' context with its hubs a lane
+each (≈0.1 of the wheels' 0.70), and the nodes pass's coupling contacts. Whole runs and the
+suites were not repeated for `PERF_WHEELS_APART`: it stays off.
+
+**What stands between this and 2.5 ms** (one car, ≈4.2 ms natively): the list dispatch is
+now the list workgroup's 1.31 (of which 0.31 is the dispatch with its timestamps); below it
+the wheels' 0.95 and the coupling's 0.88. Shortening the dispatch past 0.95 needs the list
+workgroup's phases understood first: they cost three to four times what their loads
+predict, and two lossless changes aimed at the obvious chains moved nothing. The next
+measurement is a lane-level one (a timestamp per phase and lane on Metal), not another
+ablation.
