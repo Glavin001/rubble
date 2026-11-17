@@ -20,8 +20,9 @@ const GEN = { glb: 16_268_632, skin: 123_844_942 };
 test('a bigger model costs more, in the tab and on the GPU', () => {
   const small = modFootprint({ glb: 1 * MB, skin: 2 * MB }), big = modFootprint(GEN);
   assert.ok(big.tab > small.tab && big.gpu > small.gpu && big.largestBuffer > small.largestBuffer);
-  // The skin's bind buffer is the largest single buffer: about twice the sidecar.
-  assert.ok(big.largestBuffer > 1.9 * GEN.skin && big.largestBuffer < 2.3 * GEN.skin);
+  // The skin's bind buffer is the largest single buffer: 157,440,000 bytes for the
+  // sedan (its entries as grid steps, 8 a slot; showcase-car-render.mjs), a little over.
+  assert.ok(big.largestBuffer > 157_440_000 && big.largestBuffer < 1.05 * 157_440_000);
 });
 
 test('a device that reports too little memory is refused, with the numbers', () => {

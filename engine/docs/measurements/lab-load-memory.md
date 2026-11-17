@@ -94,7 +94,8 @@ WebKit's own and was not measured.
 4. Renderer (aabf452a): the bind buffer packed and written 8 MB at a time.
 5. Guard (9f37b1f8): before downloading, the car's footprint estimated from its
    files' sizes (`modFootprint`: tab ≈ 450 MB + 6.0 × model bytes, GPU ≈ 170 MB +
-   2.15 × rskin bytes, largest buffer ≈ 2.16 × rskin bytes, from the table above)
+   2.15 × rskin bytes, largest buffer ≈ 2.16 × rskin bytes, from the table above;
+   1.26 and 1.28 since the bind buffer's entries are grid steps, §8.30)
    against `navigator.deviceMemory` (half of it for a tab) and the adapter's
    `maxStorageBufferBindingSize` / `maxBufferSize`. Refused: the error line and its
    banner give the numbers and a "Load it anyway" button. Checked with
@@ -115,9 +116,10 @@ in-place skin binds the same visual (its `Debug`, every float) as the decoded on
 
 Lossless, not done (each needs a design choice or touches drawing code):
 
-* The bind buffer at 8 B an entry (u16 node, 3 i16 steps; the shader scales by
-  powers of two, exact): `showcase-binds` 255 → about 140 MB on the GPU. A change to
-  the skin shader's data layout.
+* Done since (`vehicle-perf-first-principles.md` §8.30): the bind buffer at 8 B an
+  entry (u16 node, 3 i16 steps; the shader scales by powers of two, exact):
+  `showcase-binds` 267 → 157 MB a car on the GPU, and half the bytes the skinning pass
+  reads a frame. `modFootprint`'s GPU figures follow.
 * The visual's weights held as steps in Rust (`ShowcaseVisual`): the wasm
   high-water 515 → about 405 MB. Its CPU users (`vehicle_compare`, `skin::deform`,
   lint) read f32 today.

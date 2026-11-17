@@ -526,24 +526,24 @@ export function createSceneRenderer(device, { format, depthFormat = 'depth32floa
       pass.setPipeline(P.ghost); pass.setBindGroup(0, g.box); pass.draw(3 * hullTris, Math.max(0, n - firstCollider), 0, firstCollider);
     },
     /** The shadow map: colliders, then `extra(pass, lightVP)` (the cars). */
-    shadowPass(encoder, world, extra) {
+    shadowPass(encoder, world, extra, { timestampWrites = undefined, perfSkip = null } = {}) {
       const g = bind(world);
-      const pass = encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
+      const pass = encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' }, ...(timestampWrites ? { timestampWrites } : {}) });
       const n = world.colliderCount();
-      pass.setPipeline(P.boxS); pass.setBindGroup(0, g.boxS); pass.draw(3 * hullTris, Math.max(0, n - firstCollider), 0, firstCollider);
-      pass.setPipeline(P.sphereS); pass.setBindGroup(0, g.sphereS); pass.draw(24 * 16 * 6, Math.min(n, sphereCols));
+      if (!perfSkip?.has('boxes')) { pass.setPipeline(P.boxS); pass.setBindGroup(0, g.boxS); pass.draw(3 * hullTris, Math.max(0, n - firstCollider), 0, firstCollider); }
+      if (!perfSkip?.has('spheres')) { pass.setPipeline(P.sphereS); pass.setBindGroup(0, g.sphereS); pass.draw(24 * 16 * 6, Math.min(n, sphereCols)); }
       pass.setPipeline(P.rodS); pass.setBindGroup(0, g.rodS); pass.draw(36);
       extra?.(pass, lightVP);
       pass.end();
     },
     /** Sky, ground, colliders and the rod into `pass`. */
-    draw(pass, world) {
+    draw(pass, world, { perfSkip = null } = {}) {
       const g = bind(world);
       const n = world.colliderCount();
       pass.setPipeline(P.sky); pass.setBindGroup(0, g.box); pass.draw(3);
       pass.setPipeline(P.ground); pass.setBindGroup(0, g.box); pass.draw(6);
-      pass.setPipeline(P.box); pass.setBindGroup(0, g.box); pass.draw(3 * hullTris, Math.max(0, n - firstCollider), 0, firstCollider);
-      pass.setPipeline(P.sphere); pass.setBindGroup(0, g.sphere); pass.draw(24 * 16 * 6, Math.min(n, sphereCols));
+      if (!perfSkip?.has('boxes')) { pass.setPipeline(P.box); pass.setBindGroup(0, g.box); pass.draw(3 * hullTris, Math.max(0, n - firstCollider), 0, firstCollider); }
+      if (!perfSkip?.has('spheres')) { pass.setPipeline(P.sphere); pass.setBindGroup(0, g.sphere); pass.draw(24 * 16 * 6, Math.min(n, sphereCols)); }
       pass.setPipeline(P.rod); pass.setBindGroup(0, g.rod); pass.draw(36);
     },
   };

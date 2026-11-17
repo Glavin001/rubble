@@ -948,8 +948,8 @@
       // report has the car's skinning and the shadow map (before the picture) and the
       // picture itself, a drawn frame.
       const dq = drawTimer(device);
-      if (dq) enc.beginComputePass({ label: 'draw-start', timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 0 } }).end();
-      cars.update(enc, { dt: simDt, floorY: M ? -1e5 : 0, lead });
+      const stamp = (k) => (dq ? { timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1 } } : {});
+      cars.update(enc, { dt: simDt, floorY: M ? -1e5 : 0, lead, ...stamp(0) });
       const wire = (get('beams') || get('nodes')) ? w.wire : null;
       if (wire) {
         const f = new Float32Array(60);
@@ -957,14 +957,14 @@
         device.queue.writeBuffer(wire.frameBuf, 0, f);
         wire.r.gather(enc, lead);
       }
-      env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }));
+      env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }), { ...stamp(1), perfSkip: drawSkip });
       const tex = context.getCurrentTexture().createView();
       const pass = enc.beginRenderPass({
         colorAttachments: [{ view: w.msaaTex.createView(), resolveTarget: tex, loadOp: 'clear', storeOp: 'discard', clearValue: [0, 0, 0, 1] }],
         depthStencilAttachment: { view: w.depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' },
-        ...(dq ? { timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 1, endOfPassWriteIndex: 2 } } : {}),
+        ...stamp(2),
       });
-      env.draw(pass, world);
+      env.draw(pass, world, { perfSkip: drawSkip });
       if (get('body')) cars.draw(pass, { viewProj: vp, eye: cam.eye, light: env.sun, height: canvas.height });
       wire?.r.drawOpaque(pass);
       env.drawGhosts(pass, world);
@@ -978,15 +978,15 @@
         if (finish && wantBeams) lastBeamRead = now;
       }
       const camFinish = camReadback(w, enc);
-      if (dq) { enc.resolveQuerySet(dq.set, 0, 3, dq.resolve, 0); enc.copyBufferToBuffer(dq.resolve, 0, dq.read, 0, 24); }
+      if (dq) { enc.resolveQuerySet(dq.set, 0, 6, dq.resolve, 0); enc.copyBufferToBuffer(dq.resolve, 0, dq.read, 0, 48); }
       device.queue.submit([enc.finish()]);
       if (dq) {
         dq.busy = true;
         dq.read.mapAsync(GPUMapMode.READ).then(() => {
           const t = new BigUint64Array(dq.read.getMappedRange().slice(0));
           dq.read.unmap(); dq.busy = false;
-          const before = Number(t[1] - t[0]) / 1e6, picture = Number(t[2] - t[1]) / 1e6;
-          if (before >= 0 && picture >= 0 && before < 1000 && picture < 1000) { drawGpu.before.push(before); drawGpu.picture.push(picture); if (drawGpu.before.length > 120) { drawGpu.before.shift(); drawGpu.picture.shift(); } }
+          const ms = [0, 1, 2].map((k) => Number(t[2 * k + 1] - t[2 * k]) / 1e6);
+          if (ms.every((x) => x >= 0 && x < 1000)) { drawGpu.skin.push(ms[0]); drawGpu.shadow.push(ms[1]); drawGpu.picture.push(ms[2]); if (drawGpu.skin.length > 120) { drawGpu.skin.shift(); drawGpu.shadow.shift(); drawGpu.picture.shift(); } }
         }).catch(() => { dq.busy = false; });
       }
       // (The recorder waits for both; the live page lets the camera's land when it does.)
@@ -995,15 +995,18 @@
     }
     // The draw timer's queries and buffers, one set a device; null without timestamp
     // queries or while the last reading is still out (that frame is not timed).
-    const drawGpu = { before: [], picture: [] };
+    const drawGpu = { skin: [], shadow: [], picture: [] };
+    // Profiling (window.__drawSkip): parts of the drawing left out, to measure them;
+    // drawHold: the frame loop stands still (window.__drawCost draws alone).
+    let drawSkip = null, drawHold = false;
     let drawQ = null;
     function drawTimer(device) {
       if (!device.features.has('timestamp-query')) return null;
       if (!drawQ || drawQ.device !== device) {
-        drawQ = { device, busy: false, set: device.createQuerySet({ type: 'timestamp', count: 3 }),
-          resolve: device.createBuffer({ size: 24, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
-          read: device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) };
-        drawGpu.before.length = 0; drawGpu.picture.length = 0;
+        drawQ = { device, busy: false, set: device.createQuerySet({ type: 'timestamp', count: 6 }),
+          resolve: device.createBuffer({ size: 48, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+          read: device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) };
+        drawGpu.skin.length = 0; drawGpu.shadow.length = 0; drawGpu.picture.length = 0;
       }
       return drawQ.busy ? null : drawQ;
     }
@@ -1031,7 +1034,7 @@
         const d = [...r.dts].sort((x, y) => x - y), n = r.frames, f1 = (x) => +x.toFixed(2);
         perfLog.push({ page: +(r.at / 1000).toFixed(1), sim: +(W?.lab.time() ?? 0).toFixed(2), fps: n, steps: r.taken, refused: r.refused, drawn: r.drawn, undrawn: r.undrawn, idle: r.idle,
           dt: [f1(d[n >> 1] ?? 0), f1(d[Math.floor(0.95 * (n - 1))] ?? 0), f1(r.dtMax)], cpuStep: [f1(r.stepMs / n), f1(r.stepMax)], cpuPoll: [f1(r.pollMs / n), f1(r.pollMax)], cpuDraw: [f1(r.drawMs / Math.max(1, r.drawn)), f1(r.drawMax)],
-          gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, gpuDraw: drawGpu.before.length ? [f1(median(drawGpu.before)), f1(median(drawGpu.picture))] : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
+          gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, gpuDraw: drawGpu.skin.length ? [f1(median(drawGpu.skin)), f1(median(drawGpu.shadow)), f1(median(drawGpu.picture))] : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
         perfLog[perfLog.length - 1].scale = +renderScale().toFixed(3) + (autoDrawEvery > 1 ? '@1/' + autoDrawEvery : '');
         renderAuto(r.refused);
         if (perfLog.length > 180) perfLog.shift();
@@ -1202,12 +1205,30 @@
         worldRate: W ? Math.round(W.RATE) : null, gpuTiming: W?.timing ?? null,
         state: window.__state?.(), gpu: W && W.timing !== 'off' ? window.__gpu() : 'GPU timing is off: set "GPU timing" to "rigid · vehicle" (rebuilds) for GPU ms a step',
         load: window.__loadTimes ?? null, failed: window.__failed ?? null,
-        columns: 'page s, sim s, display frames, steps taken, steps refused (GPU not ready), frames drawn, frames not drawn, frames with nothing owed, frame interval ms [p50, p95, max], CPU ms in step calls [mean a frame, max], in readback poll [mean, max], in draw [mean a drawn frame, max], GPU ms a step (median) or null, bodies, readback windows skipped (total), frames while hidden, render scale, GPU ms a drawn frame [skinning and shadow map / the picture] (median; needs GPU timing on)',
+        columns: 'page s, sim s, display frames, steps taken, steps refused (GPU not ready), frames drawn, frames not drawn, frames with nothing owed, frame interval ms [p50, p95, max], CPU ms in step calls [mean a frame, max], in readback poll [mean, max], in draw [mean a drawn frame, max], GPU ms a step (median) or null, bodies, readback windows skipped (total), frames while hidden, render scale, GPU ms a drawn frame [skinning / shadow map / the picture] (median; needs GPU timing on)',
       };
       const rows = perfLog.map((r) => [r.page, r.sim, r.fps, r.steps, r.refused, r.drawn, r.undrawn, r.idle, r.dt.join('/'), r.cpuStep.join('/'), r.cpuPoll.join('/'), r.cpuDraw.join('/'), r.gpu ?? '-', r.bodies, r.readsSkipped, r.hidden, r.scale, r.gpuDraw ? r.gpuDraw.join('/') : '-'].join('\t'));
       return JSON.stringify(head, null, 1) + '\n\nper second (last ' + rows.length + ' s):\n' + rows.join('\n') + '\n';
     }
     window.__perfReport = perfReport;
+    // The drawing's cost, measured (engine/tools/vehicle-lab/draw-cost.js): parts left
+    // out (the car renderer's setPerfSkip names; boxes, spheres: the scene's), the
+    // medians of the last drawn frames' GPU ms, what is drawn (a car's levels), and the
+    // wall time of `n` draws alone, each waited for (pause the World first).
+    window.__drawSkip = (names) => { drawSkip = names?.length ? new Set(names) : null; W.cars.setPerfSkip(['reflect', ...(names ?? [])]); drawGpu.skin.length = 0; drawGpu.shadow.length = 0; drawGpu.picture.length = 0; };
+    window.__recut = () => W.cars.recut();
+    window.__drawGpu = () => ({ n: drawGpu.skin.length, skin: median(drawGpu.skin), shadow: median(drawGpu.shadow), picture: median(drawGpu.picture) });
+    window.__drawStats = () => ({ canvas: [canvas.width, canvas.height], colliders: W.world.colliderCount(), bodies: W.world.bodyCount(), cars: W.cars.stats() });
+    window.__drawCost = async (n = 30, batch = 1) => {
+      const w = W;
+      drawHold = true;
+      try {
+        await w.device.queue.onSubmittedWorkDone();
+        const t0 = performance.now();
+        for (let i = 0; i < n; i += batch) { for (let k = 0; k < batch; k++) draw(0, 0, 0, false); await w.device.queue.onSubmittedWorkDone(); }
+        return (performance.now() - t0) / (Math.ceil(n / batch) * batch);
+      } finally { drawHold = false; }
+    };
     $('perfCopy').onclick = async () => {
       const b = $('perfCopy'), text = await perfReport();
       let ok = false;
@@ -1265,7 +1286,7 @@
         requestAnimationFrame(frame);
         const w = W;
         // Stopped (an unstable state): no more steps or frames until a restart.
-        if (!w || window.__failed || w.stop?.stopped) { lastNow = null; return; }
+        if (!w || window.__failed || w.stop?.stopped || drawHold) { lastNow = null; return; }
         w.stop?.check(w.lab.time());
         frames++;
         if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
