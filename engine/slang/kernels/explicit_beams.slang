@@ -303,6 +303,10 @@ struct Params
     uint vvFleet;
     uint vvFleetNext;
     uint vvFleetBox;
+    // The partners' room (explicit_plan's W_VV_ROOM): the candidate run, the hit list and
+    // their ranks hold this many times the fleet's contact points, and a node's two-body
+    // point counts this many owners (0: VV_PART, a layout before the word).
+    uint vvRoom;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -1579,6 +1583,9 @@ static const uint PERF_WIDE_LIST = 16u;
 // them read what step s's node phase and hits left, as the aux dispatch before step
 // s + 1's nodes did).
 static const uint PERF_WIDE_FUSED = 32u;
+// explicit_plan::PERF_AHEAD_APART and PERF_TYRE_AHEAD (wideAheadApart, driveTyresPost).
+static const uint PERF_AHEAD_APART = 131072u;
+static const uint PERF_TYRE_AHEAD = 262144u;
 // perfFlags bit 64 (explicit_plan::PERF_VV_STREAM): the larger groups' contact pass keeps,
 // beside each gathered candidate, its travel over the step, its vehicle and whether that
 // vehicle has anti-clip (written where the candidate is gathered), so a triangle's
@@ -1608,6 +1615,20 @@ static const uint PERF_FLEET_STATE = 4096u;
 // front and tests as fleet-wide dispatches (explicit_beams_fleet.slang fleetFront,
 // fleetPlan, fleetWideTests).
 static const uint PERF_FLEET_FRONT = 8192u;
+// perfFlags bit 16384 (explicit_plan::PERF_FLEET_ANY; §8 stage 3), with both: a contact
+// group of any size on the fleet-wide front and tests, its levels for any number of
+// owners (fleetLevelsAny), in place of the larger groups' pass (vvPass) past VV_PART.
+static const uint PERF_FLEET_ANY = 16384u;
+// perfFlags bit 65536 (explicit_plan::PERF_FLEET_POST), with the front fleet-wide: the
+// listed triangles' throttle updates a thread each in a dispatch of their own
+// (fleetPost), in place of the group's workgroup with its first level.
+static const uint PERF_FLEET_POST = 65536u;
+// perfFlags bit 32768 (explicit_plan::PERF_FLEET_KEEP; contact-groups-design.md §8.10),
+// with PERF_FLEET_FRONT: vehicle contact's (triangle, contact point) candidates kept
+// from one substep to the next (explicit_beams_fleet.slang fk*), built with a margin and
+// rebuilt when the vehicles have moved past it, in place of the gather, grids, sorted
+// copy and walk every substep. The exact tests are the same on the same pairs.
+static const uint PERF_FLEET_KEEP = 32768u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 // perfFlags bit 1024 (explicit_plan::PERF_HIT_ROLES, with PERF_HIT_FB): a two-body
 // dissipative vehicle's hits applied a (hit, role) a lane. A hit's first-pass adds, its
@@ -1620,6 +1641,31 @@ uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 // inverse mass, then the total xyz; HIT_ROLE_WORDS words a hit): the same sums of the
 // same bits in the same order, more barriers and shorter chains (selfResidualRoles).
 static const uint PERF_HIT_ROLES = 1024u;
+// perfFlags bit 1048576 (explicit_plan::PERF_HITS_LOCAL, with PERF_HIT_ROLES and
+// PERF_HIT_FB): in the wide hits kernel, a two-body dissipative vehicle's step with
+// 1..HITS_LOCAL_CAP hits applied from workgroup memory (selfApplyLocal): each (hit,
+// role)'s node record and accumulators loaded once, the round and the residual pass's
+// seven phases on those copies, written back once. The same arithmetic in the same
+// order on the same bits; only where the values wait between phases changes.
+static const uint PERF_HITS_LOCAL = 1048576u;
+// perfFlags bit 33554432 (explicit_plan::PERF_SELF_HITS_LOCAL, with PERF_HIT_ROLES and
+// PERF_HIT_FB): the same on the self-collision split path, where a car's own step is the
+// step dispatch's (a solo car: step k - 1's rest at the next step dispatch's start; a
+// contact group's member: memberRest): selfApplyLocal in place of selfApply for a
+// two-body dissipative car with 1..HITS_LOCAL_CAP hits (selfApplyLocalKeep).
+static const uint PERF_SELF_HITS_LOCAL = 33554432u;
+// perfFlags bit 67108864 (explicit_plan::PERF_SPLIT_WHEELS_AHEAD, with PERF_MEMBER_LIST and
+// self-collision split): a contact group member's raycast wheels' rays and bars of step
+// s + 1 on a workgroup of their own in step s's rest dispatch (explicit_beams_split.slang
+// splitWheelsAhead), its tyres at step s + 1's start as before (splitTyres).
+static const uint PERF_SPLIT_WHEELS_AHEAD = 67108864u;
+// perfFlags bit 2097152 (explicit_plan::PERF_TYRE_EARLY, with PERF_TYRE_AHEAD): the
+// wheels' second part loaded before the hits (explicit_beams_drive.slang drvTyreLoad).
+static const uint PERF_TYRE_EARLY = 2097152u;
+// perfFlags bit 4194304 (explicit_plan::PERF_WHEELS_APART, with PERF_AHEAD_APART): the
+// coupling and the wheels of the list dispatch on workgroups of their own
+// (wideCoupleApart, wideWheelsApart).
+static const uint PERF_WHEELS_APART = 4194304u;
 static const uint HIT_ROLE_WORDS = 20u;
 uint hitRoleAt(uint v, uint i) { return hitFbAt(v, HIT_CAP) + i * HIT_ROLE_WORDS; }
 
@@ -5855,6 +5901,43 @@ uint flPartner(uint d) { return gNext[gP.vvPairs + (d ^ 1u)]; }
 // gBeams at vvFleetBox: per owner vehicle 4 records of the step.
 uint flBoxAt(uint v) { return gP.vvFleetBox + 4u * v; }
 
+// --- Vehicle contact's kept candidates (PERF_FLEET_KEEP): addresses, after the fleet
+// state's own (explicit_plan::fleet_acc_words, fleet_next_words; the passes are
+// explicit_beams_fleet.slang's fk*) ---
+// gAcc: per vehicle FK_ACC words (for its calm and its wild tracked nodes, the farthest
+// one has moved since the build relative to the vehicle's reference motion and the
+// fastest one's travel over a step, float bits, zero between passes; its kept pairs; the
+// box of its wild candidates at the build, vvKey's keys; its tracked nodes' motions
+// summed, fixed point, zero between passes), then FK_ACC_CTL words.
+static const uint FK_ACC = 14u;
+static const uint FK_SUM = 11u;
+static const uint FK_DEV = 0u; // calm; + 2: wild
+static const uint FK_TRAV = 1u; // calm; + 2: wild
+static const uint FK_PAIRS = 4u;
+static const uint FK_WILD_BOX = 5u;
+static const uint FK_ACC_CTL = 4u;
+uint fkAcc(uint v, uint w) { return flCtl(FL_CTL) + v * FK_ACC + w; }
+uint fkAccCtl(uint i) { return fkAcc(gP.vehicles, 0u) + i; }
+// gNext: per triangle whether its throttle step listed it this pass; per vehicle its
+// partners the build covered (a count, then FK_COVER vehicles, the top bit: one of that
+// partner's points was near one of this vehicle's triangles at the build); the prefixes over the
+// vehicles of the build's candidate runs and of the kept pairs (one more each for the
+// total); per vehicle its origin at the build (float bits); FK_CTL words.
+static const uint FK_COVER = 8u;
+static const uint FK_CTL = 16u;
+uint fkListed(uint gt) { return flCtlNext(FL_CTL) + gt; }
+uint fkCover(uint v, uint i) { return fkListed(gP.totalTris) + v * (FK_COVER + 1u) + i; }
+uint fkRun(uint v) { return fkCover(gP.vehicles, 0u) + v; }
+uint fkPrefix(uint v) { return fkRun(gP.vehicles + 1u) + v; }
+uint fkOrigin(uint v) { return fkPrefix(gP.vehicles + 1u) + 3u * v; }
+// (Per vehicle six words, float bits: its reference motion of this pass, 0..2, and its
+// tracked nodes' mean motion of the pass before, 3..5.)
+uint fkMean(uint v, uint i) { return fkOrigin(gP.vehicles) + 6u * v + i; }
+uint fkCtl(uint i) { return fkMean(gP.vehicles, 0u) + i; }
+// gBeams after the owners' boxes: per node its position (its vehicle's frame) at the build
+// and its class there (.w: 0 calm, 1 wild).
+uint fkRef(uint n) { return gP.vvFleetBox + 4u * gP.vehicles + n; }
+
 // A value one lane decided, read by every lane as uniform (the WGSL
 // post-process turns its reads into workgroupUniformLoad).
 groupshared uint gsUniformLanes;
@@ -6752,7 +6835,14 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
     // Vehicle sleep, awake-indexed: the workgroup's awake vehicle (or contact group).
     bool sleepListed = gP.sleepRec != 0u && gP.sleepPad0 != 0u;
+#ifdef EB_SOLO_STEP
+    // (A step a dispatch: the entry picked the workgroup's vehicle, sleepPick, and gave
+    // it as gid.x; past the awake vehicles, the one workgroup a dispatch keeps when none
+    // is awake: nothing to step.)
+    if (sleepListed && v >= gP.vehicles) return ebLoopCapFlush();
+#else
     if (sleepListed) v = sleepPick(gid.x, lane);
+#endif
 #ifdef EB_VV_SOLO
 #ifdef EB_VV_GROUPS
     // Workgroups past the vehicles step the contact groups (one dispatch: groups
@@ -6911,7 +7001,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (gP.pad2 > 0u)
     {
         uint parityR = (stepBase + gP.pad2 - 1u) & 1u;
-        if (lane == 0u) selfSplitHits(v);
+        if (lane == 0u)
+        {
+            selfSplitHits(v);
+            // (PERF_SELF_HITS_LOCAL: 2, the hits from workgroup memory; uniform after the
+            // barrier below.)
+            if (selfHitsLocalOn(v)) gsUniformHits = 2u;
+        }
 #ifdef EB_ABLATE
         if (selfOn != 0u && !EB_A2(64u))
 #else
@@ -6919,7 +7015,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         {
             sync();
-            selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parityR);
+            uint hitsOn = gsUniformHits;
+            if (hitsOn == 2u)
+                selfApplyLocalKeep(v, lane, beamOff, groupOff, groupCount, parityR);
+            else
+                selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parityR);
         }
         surfaceStep(v, lane, surfOn, parityR);
 #ifdef EB_AERO
@@ -7376,8 +7476,10 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
     {
         // Not the last step (its closing barrier passed): the hit flag and the pair
-        // list's state for the next.
+        // list's state for the next, and this step's motion for the frame end's sleep
+        // rule.
         soloStepSave(v, lane);
+        if (sleepOn) sleepMark(v, sleepMove);
         return ebLoopCapFlush();
     }
 #endif
@@ -7475,6 +7577,12 @@ void explicit_beams_wide_begin(uint3 id : SV_DispatchThreadID)
 {
     uint v = id.x;
     if (v >= gP.vehicles) return ebLoopCapFlush();
+    // (Vehicle sleep: a sleeping vehicle is not stepped; no rebase.)
+    if (sleepAsleep(v))
+    {
+        gMisc[gP.wideMisc + 1u + v] = uint4(0u, 0u, 0u, 0u);
+        return ebLoopCapFlush();
+    }
     Vehicle x = vehicleAt(v);
     float3 first = gNodes[x.nodeOff * 3u].xyz;
     float3 shift = length(first) > REBASE_RADIUS ? first : float3(0.0, 0.0, 0.0);
@@ -7526,6 +7634,7 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_Gr
     {
         uint4 info = gStatic[gP.nodeInfoBase + i];
         uint v = info.w;
+        if (sleepAsleep(v)) return ebLoopCapFlush();
         Vehicle x = vehicleAt(v);
         float3 origin = vehicleOrigin(v);
         bool centred = gP.centredDv != 0u && (x.flags & FLAG_CENTRED) != 0u;
@@ -7534,9 +7643,14 @@ void explicit_beams_wide_nodes(uint3 id : SV_DispatchThreadID, uint3 lid : SV_Gr
         nodeUpdate(i, info, v, i - x.nodeOff, vehicleStep(v), origin, x.flags, x.ground, x.boxOff, x.boxCount,
                    x.beamOff, x.groupOff, x.groupCount, true);
         if (centred) centredDelta(i, v0);
+        // Vehicle sleep: this step's motion (with centred damping, after its correction:
+        // wide_centred_nodes), as the frame's sleepTrack after its node phase.
+        if (gP.sleepRec != 0u && !centred) sleepMarkNode(v, i);
         return ebLoopCapFlush();
     }
     i -= gP.totalNodes;
+    // (Vehicle sleep, a lone vehicle: asleep, nothing of its step runs.)
+    if (sleepAsleep(0u)) return ebLoopCapFlush();
     if (i < gP.groupTotal)
     {
         // Every vehicle has the same step parity.
@@ -7570,6 +7684,7 @@ void explicit_beams_wide_centred_beams(uint3 id : SV_DispatchThreadID)
     uint j = id.x;
     if (j >= gP.totalBeams) return;
     uint v = gStatic[gP.beamBase + j * 3u].z >> 16;
+    if (sleepAsleep(v)) return;
     uint flagsV = vehicleAt(v).flags;
     if ((flagsV & FLAG_CENTRED) != 0u) centredBeam(j, (flagsV & FLAG_CENTRED_OBJECTIVE) != 0u);
 }
@@ -7581,9 +7696,14 @@ void explicit_beams_wide_centred_nodes(uint3 id : SV_DispatchThreadID)
     uint i = id.x;
     if (i >= gP.totalNodes) return ebLoopCapFlush();
     uint v = gStatic[gP.nodeInfoBase + i].w;
+    if (sleepAsleep(v)) return ebLoopCapFlush();
     Vehicle x = vehicleAt(v);
     if ((x.flags & FLAG_CENTRED) != 0u)
+    {
         centredNode(i, x.beamOff, x.groupOff, x.groupCount, (vehicleStep(v) + 1u) & 1u);
+        // (Vehicle sleep: the node's motion after the correction.)
+        if (gP.sleepRec != 0u) sleepMarkNode(v, i);
+    }
     ebLoopCapFlush();
 }
 
@@ -7613,6 +7733,7 @@ void wideGeoThread(uint gt)
 {
     if (gt >= gP.totalTris || gP.triGeo == 0u) return;
     uint v = gStatic[gP.triBase + gt].w;
+    if (sleepAsleep(v)) return;
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
     if (r2.y == 0u) return;
@@ -7638,6 +7759,7 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
     if (i < gP.totalBeams)
     {
         uint v = gStatic[gP.beamBase + i * 3u].z >> 16;
+        if (sleepAsleep(v)) return ebLoopCapFlush();
         Vehicle x = vehicleAt(v);
         beamUpdate(i, i - x.beamOff, (x.flags & FLAG_FAST_INV_SQRT) != 0u, x.groupOff, vehicleStep(v) & 1u);
         return ebLoopCapFlush();
@@ -7656,7 +7778,7 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
         uint h = gLists[pos];
         uint v = gStatic[gP.nodeInfoBase + h].w;
         float cell = asfloat(gVt.rec[v * 4u + 3u].w);
-        if (cell > 0.0)
+        if (cell > 0.0 && !sleepAsleep(v))
         {
             float3 p = gNodes[h * 3u].xyz;
             uint b = gridBucket(int3(floor(p / cell)));
@@ -7678,7 +7800,7 @@ void explicit_beams_wide_beams(uint3 id : SV_DispatchThreadID)
         // beams).
         uint v = gStatic[gP.triBase + i].w;
         Vehicle x = vehicleAt(v);
-        if (x.candCount == 0u) return ebLoopCapFlush();
+        if (x.candCount == 0u || sleepAsleep(v)) return ebLoopCapFlush();
         int w = wideStep() > 0u ? triangleFinish(i) : asint(gMisc[gP.vehicles + i].x);
         if (w <= 0)
         {
@@ -7696,6 +7818,7 @@ void grabApplyWide()
     uint4 g = gMisc[grabRec()];
     if (g.x == 0u || g.y >= gP.totalNodes) return;
     uint v = gStatic[gP.nodeInfoBase + g.y].w;
+    if (sleepAsleep(v)) return;
     Vehicle x = vehicleAt(v);
     grabApply(x.nodeOff, x.nodeCount, vehicleOrigin(v));
 }
@@ -7754,7 +7877,7 @@ void explicit_beams_wide_tris(uint3 id : SV_DispatchThreadID)
     if (gt >= gP.totalTris) return ebLoopCapFlush();
     uint v = gStatic[gP.triBase + gt].w;
     Vehicle x = vehicleAt(v);
-    if (x.candCount == 0u) return ebLoopCapFlush();
+    if (x.candCount == 0u || sleepAsleep(v)) return ebLoopCapFlush();
     uint step = vehicleStep(v);
     uint k = gt - x.triOff;
     if (k >= uint(gAcc[gP.testedBase + v * 2u + (step & 1u)].load())) return ebLoopCapFlush();
@@ -7769,6 +7892,417 @@ void explicit_beams_wide_tris(uint3 id : SV_DispatchThreadID)
     ebLoopCapFlush();
 }
 
+// --- PERF_HITS_LOCAL: selfApply's two-body path from workgroup memory ---
+// With PERF_HIT_FB and PERF_HIT_ROLES, a two-body dissipative vehicle's selfApply is:
+// hitFbFill; one round (two-body: no hit reads another's force, so round 1 computes
+// every open hit); selfResidualRoles' seven phases. Every value those phases pass
+// between them is a node's (its beam force, mass, hit count, accumulators A and B) or a
+// hit's (its record, its role records), each re-read from device memory in every phase
+// (a chain of dependent device accesses at 0.15-0.2 us each, §8.23). Here item q (hit
+// q >> 2, role q & 3: 0 the contacter, 1..3 the triangle's n0, n1, n2) on lane q loads
+// them once; the phases run on workgroup copies; the accumulators are written back once.
+// A node named by several items has one copy (the first item naming it: its slot), so
+// the integer adds of every item land on one sum as they did in device memory (integer
+// adds: any order gives the same bits). Each float computes the same strict arithmetic
+// on the same bits in the same order as selfTwoBodyCore, hitRolePhase and
+// hitCombinePhase. The scratch records those phases leave in gNext (the beam forces, the
+// hit's force, round, residual, its role records and total) are written as they leave
+// them. Workgroup arrays: the list kernels' (gsTested, gsPairs, gsCount), which the hits
+// kernel does not otherwise use. Its barriers are workgroup barriers only (sync() adds a
+// device-memory barrier, which waits for the phase's outstanding device writes): no lane
+// here reads a device word another lane wrote here (the phases exchange values through
+// the workgroup copies), and the caller's sync() after it orders its device writes for
+// the tyres.
+static const uint HITS_LOCAL_CAP = 48u;
+// gsTested: per item LQ words at q * LQ (node, slot | immovable << 31, mass, beam force
+// xyz, inverse mass of its hit count), then per hit LH words at LH_BASE + i * LH (alpha,
+// beta, normal xyz, relative velocity xyz, first-pass force xyz, residual r).
+static const uint LQ = 7u;
+static const uint LH = 12u;
+static const uint LH_BASE = HITS_LOCAL_CAP * 4u * LQ;
+// gsPairs: per item its role record (acceleration xyz, inverse mass) at q * 4, then per
+// hit its total xyz at LT_BASE + i * 3.
+static const uint LT_BASE = HITS_LOCAL_CAP * 4u * 4u;
+// gsCount: per slot A xyz at slot * 3 and B xyz at LB_BASE + slot * 3 (as uint: the
+// same two's complement adds).
+static const uint LB_BASE = HITS_LOCAL_CAP * 4u * 3u;
+
+// The node acceleration of item q's slot copy (resAccNow's arithmetic): beams and A,
+// with B when `withB`.
+float3 localAccNow(uint q, uint slot, bool withB)
+{
+    uint s = gsTested[q * LQ + 1u];
+    if ((s >> 31) != 0u) return float3(0.0, 0.0, 0.0);
+    float3 f = asfloat(uint3(gsTested[q * LQ + 3u], gsTested[q * LQ + 4u], gsTested[q * LQ + 5u]));
+    int3 a = int3(asint(gsCount[slot * 3u].load()), asint(gsCount[slot * 3u + 1u].load()),
+                  asint(gsCount[slot * 3u + 2u].load()));
+    if (withB)
+        a += int3(asint(gsCount[LB_BASE + slot * 3u].load()), asint(gsCount[LB_BASE + slot * 3u + 1u].load()),
+                  asint(gsCount[LB_BASE + slot * 3u + 2u].load()));
+    float3 c = float3(float(a.x), float(a.y), float(a.z)) * (1.0 / FIXED);
+    return sdiv3(sadd3(f, c), asfloat(gsTested[q * LQ + 2u]));
+}
+
+// Item q's selfAcc (beams over mass; 0 immovable) and own inverse mass from its copy.
+float3 localSelfAcc(uint q)
+{
+    if ((gsTested[q * LQ + 1u] >> 31) != 0u) return float3(0.0, 0.0, 0.0);
+    float3 f = asfloat(uint3(gsTested[q * LQ + 3u], gsTested[q * LQ + 4u], gsTested[q * LQ + 5u]));
+    return sdiv3(f, asfloat(gsTested[q * LQ + 2u]));
+}
+float localOwnInvMass(uint q)
+{
+    if ((gsTested[q * LQ + 1u] >> 31) != 0u) return 0.0;
+    return sdiv(1.0, asfloat(gsTested[q * LQ + 2u]));
+}
+
+// The round's position step d for item q's node (gsPairs is free until phase 1).
+void localShift(uint q, float3 d)
+{
+    gsPairs[q * 4u] = asuint(d.x);
+    gsPairs[q * 4u + 1u] = asuint(d.y);
+    gsPairs[q * 4u + 2u] = asuint(d.z);
+    gsPairs[q * 4u + 3u] = 1u;
+}
+
+void localAdd(uint at, int3 d)
+{
+    gsCount[at].add(asuint(d.x));
+    gsCount[at + 1u].add(asuint(d.y));
+    gsCount[at + 2u].add(asuint(d.z));
+}
+
+void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCount, uint parity);
+// PERF_SELF_HITS_LOCAL (lane 0, the step's hit count final): whether vehicle v's hits of
+// this step take selfApplyLocal on the self split path, as the wide hits kernel decides
+// for PERF_HITS_LOCAL (a workgroup of at least 256 lanes: 4 · HITS_LOCAL_CAP items and
+// REUSE_WORDS kept words, a lane each).
+bool selfHitsLocalOn(uint v)
+{
+    if ((gP.perfFlags & PERF_SELF_HITS_LOCAL) == 0u || LANES < 256u) return false;
+    uint hits = uint(gAcc[hitAcc(v)].load());
+    return hits > 0u && hits <= HITS_LOCAL_CAP && hitRolesOn(v);
+}
+// PERF_SELF_HITS_LOCAL, every lane (the caller's choice uniform): selfApplyLocal on the
+// self split path. There gsCount keeps the pair list's state past the buckets
+// (soloStepLoad's REUSE_WORDS words, which the step reads on), and selfApplyLocal's
+// accumulator copies use gsCount's first 4 · HITS_LOCAL_CAP · 6 words: each lane keeps one
+// of those words in a register across it and puts it back. gsTested and gsPairs hold
+// nothing there yet (the step fills them after). Then the device barrier selfApply's
+// callers have after it, and gsUniformHits as selfApply leaves it (1: the caller's
+// selfSplitHits set it).
+void selfApplyLocalKeep(uint v, uint lane, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint kept = lane < REUSE_WORDS ? gsCount[GRID_BUCKETS + lane].load() : 0u;
+    GroupMemoryBarrierWithGroupSync();
+    selfApplyLocal(v, lane, beamOff, groupOff, groupCount, parity);
+    sync();
+    if (lane < REUSE_WORDS) gsCount[GRID_BUCKETS + lane].store(kept);
+    if (lane == 0u) gsUniformHits = 1u;
+}
+
+// selfApply for vehicle v with PERF_HITS_LOCAL (the caller checked: hitRolesOn(v), 1..
+// HITS_LOCAL_CAP hits, every lane here: the barriers are unconditional).
+void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint count = uint(gAcc[hitAcc(v)].load());
+    uint q = lane;
+    bool item = q < count * 4u && count <= HITS_LOCAL_CAP;
+    uint i = q >> 2;
+    uint role = q & 3u;
+    bool lead = item && role == 0u;
+    uint at = hitList(v) + i * HIT_WORDS;
+    uint x = 0u;
+    uint fbAt = 0u;
+    bool immovable = false;
+    int3 a0 = int3(0, 0, 0);
+    int3 b0 = int3(0, 0, 0);
+    // The hit's own words (its lead lane keeps them for the round).
+    uint h = 0u;
+    uint t0 = 0u;
+    uint t1 = 0u;
+    uint t2 = 0u;
+    float alpha = 0.0;
+    float beta = 0.0;
+    float3 nn = float3(0.0, 0.0, 0.0);
+    float3 vv = float3(0.0, 0.0, 0.0);
+    float pen = 0.0;
+    float friction = 0.0;
+    uint marked = 0u;
+    float3 f1 = float3(0.0, 0.0, 0.0);
+    // Load: hitFbFill's beam force (and its record), the node's mass, flags, hit count
+    // and accumulators; the lead lane the hit's record.
+    if (item)
+    {
+        uint nodeOff = gStatic[v * 4u].x;
+        x = role == 0u ? nodeOff + (gNext[at] & 0xFFFFu) : gNext[at + 7u + role];
+        uint info = gStatic[gP.nodeInfoBase + x].x;
+        immovable = (info & NODE_IMMOVABLE) != 0u;
+        float mass = gNodes[x * 3u].w;
+        float3 fb = beamSum(gNodes[x * 3u + 2u].xyz, gStatic[gP.nodeInfoBase + x], beamOff, groupOff, groupCount, parity,
+                            false);
+        fbAt = hitFbAt(v, i) + role * 3u;
+        gNext[fbAt] = asuint(fb.x);
+        gNext[fbAt + 1u] = asuint(fb.y);
+        gNext[fbAt + 2u] = asuint(fb.z);
+        float imSelf = immovable ? 0.0 : sdiv(float(uint(gAcc[gP.selfSplit + x].load())), mass);
+        a0 = int3(gAcc[x * 3u].load(), gAcc[x * 3u + 1u].load(), gAcc[x * 3u + 2u].load());
+        uint b = resAt(x);
+        b0 = int3(gAcc[b + 1u].load(), gAcc[b + 2u].load(), gAcc[b + 3u].load());
+        gsTested[q * LQ] = x;
+        gsTested[q * LQ + 2u] = asuint(mass);
+        gsTested[q * LQ + 3u] = asuint(fb.x);
+        gsTested[q * LQ + 4u] = asuint(fb.y);
+        gsTested[q * LQ + 5u] = asuint(fb.z);
+        gsTested[q * LQ + 6u] = asuint(imSelf);
+        gsPairs[q * 4u + 3u] = 0u;
+        if (lead)
+        {
+            h = x;
+            t0 = gNext[at + 8u];
+            t1 = gNext[at + 9u];
+            t2 = gNext[at + 10u];
+            alpha = asfloat(gNext[at + 1u]);
+            beta = asfloat(gNext[at + 2u]);
+            nn = asfloat(uint3(gNext[at + 12u], gNext[at + 13u], gNext[at + 14u]));
+            pen = asfloat(gNext[at + 15u]);
+            vv = asfloat(uint3(gNext[at + 16u], gNext[at + 17u], gNext[at + 18u]));
+            friction = asfloat(gNext[at + 20u]);
+            marked = gNext[at + 6u];
+            f1 = asfloat(uint3(gNext[at + 3u], gNext[at + 4u], gNext[at + 5u]));
+            uint hb = LH_BASE + i * LH;
+            gsTested[hb] = asuint(alpha);
+            gsTested[hb + 1u] = asuint(beta);
+            gsTested[hb + 2u] = asuint(nn.x);
+            gsTested[hb + 3u] = asuint(nn.y);
+            gsTested[hb + 4u] = asuint(nn.z);
+            gsTested[hb + 5u] = asuint(vv.x);
+            gsTested[hb + 6u] = asuint(vv.y);
+            gsTested[hb + 7u] = asuint(vv.z);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // Slots: the first item naming the node; its copy of A and B starts as the device's.
+    uint slot = q;
+    if (item)
+    {
+        for (uint k = 0u, kStop = EB_END(k, q, 1u); k < kStop; k++)
+        {
+            if (gsTested[k * LQ] == x)
+            {
+                slot = k;
+                break;
+            }
+        }
+        gsTested[q * LQ + 1u] = slot | (immovable ? 0x80000000u : 0u);
+        if (slot == q)
+        {
+            gsCount[q * 3u].store(asuint(a0.x));
+            gsCount[q * 3u + 1u].store(asuint(a0.y));
+            gsCount[q * 3u + 2u].store(asuint(a0.z));
+            gsCount[LB_BASE + q * 3u].store(asuint(b0.x));
+            gsCount[LB_BASE + q * 3u + 1u].store(asuint(b0.y));
+            gsCount[LB_BASE + q * 3u + 2u].store(asuint(b0.z));
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    float gamma = nf(nf(1.0 - alpha) - beta);
+    // The round (selfRound's two-body branch, selfTwoBodyCore with shifts): the hit's
+    // four items are q, q + 1 (n0 = t0), q + 2 (n1 = t1), q + 3 (n2 = t2).
+    if (lead)
+    {
+        if (marked == 0u)
+        {
+            float imt = nf(nf(selfTerm(alpha, asfloat(gsTested[(q + 2u) * LQ + 6u]))
+                              + selfTerm(beta, asfloat(gsTested[(q + 3u) * LQ + 6u])))
+                           + selfTerm(gamma, asfloat(gsTested[(q + 1u) * LQ + 6u])));
+            float inv = nf(asfloat(gsTested[q * LQ + 6u]) + imt);
+            float m = inv > 0.0 ? sdiv(1.0, inv) : 0.0;
+            float3 a3 = sscale(localSelfAcc(q + 2u), alpha);
+            a3 = sadd3(a3, sscale(localSelfAcc(q + 3u), beta));
+            a3 = sadd3(a3, sscale(localSelfAcc(q + 1u), gamma));
+            float3 ah = localSelfAcc(q);
+            float3 fh = sscale(ssub3(ah, a3), m);
+            uint hv = gStatic[gP.nodeInfoBase + h].w;
+            Surface surf = contactSurfaceV(hv, hv);
+            float budget;
+            float3 f = contactResponse(fh, vv, m, nn, surf, pen, friction, budget);
+            if (surf.dissipative != 0u && any(f != float3(0.0, 0.0, 0.0)))
+            {
+                float delta = shiftDepth(pen, budget, sdot(fh, nn));
+                if (delta > 0.0)
+                {
+                    // The position steps for the items' own lanes to add (shiftAdd's
+                    // integer adds: any order).
+                    float qd = smul(delta, m);
+                    localShift(q, sscale(nn, smul(qd, localOwnInvMass(q))));
+                    if (alpha > 0.0) localShift(q + 2u, sscale(nn, -smul(alpha, smul(qd, localOwnInvMass(q + 2u)))));
+                    if (beta > 0.0) localShift(q + 3u, sscale(nn, -smul(beta, smul(qd, localOwnInvMass(q + 3u)))));
+                    if (gamma > 0.0) localShift(q + 1u, sscale(nn, -smul(gamma, smul(qd, localOwnInvMass(q + 1u)))));
+                }
+            }
+            f1 = f;
+            gNext[at + 3u] = asuint(f.x);
+            gNext[at + 4u] = asuint(f.y);
+            gNext[at + 5u] = asuint(f.z);
+            gNext[at + 6u] = 1u;
+        }
+        uint hb = LH_BASE + i * LH;
+        gsTested[hb + 8u] = asuint(f1.x);
+        gsTested[hb + 9u] = asuint(f1.y);
+        gsTested[hb + 10u] = asuint(f1.z);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // hitRolePhase's and hitCombinePhase's phases 0..6 on the copies.
+    uint share = role == 0u ? 1u : (role == 1u ? 4u : role);
+    uint hb = LH_BASE + i * LH;
+    float ia = 0.0;
+    float ib = 0.0;
+    float ig = 0.0;
+    float3 if1 = float3(0.0, 0.0, 0.0);
+    if (item)
+    {
+        ia = asfloat(gsTested[hb]);
+        ib = asfloat(gsTested[hb + 1u]);
+        ig = nf(nf(1.0 - ia) - ib);
+        if1 = asfloat(uint3(gsTested[hb + 8u], gsTested[hb + 9u], gsTested[hb + 10u]));
+        localAdd(slot * 3u, toFixed3(hitShare(if1, share, ia, ib, ig)));
+        if (gsPairs[q * 4u + 3u] != 0u)
+            shiftAdd(x, asfloat(uint3(gsPairs[q * 4u], gsPairs[q * 4u + 1u], gsPairs[q * 4u + 2u])));
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (item)
+    {
+        float3 acc = localAccNow(q, slot, false);
+        gsPairs[q * 4u] = asuint(acc.x);
+        gsPairs[q * 4u + 1u] = asuint(acc.y);
+        gsPairs[q * 4u + 2u] = asuint(acc.z);
+        gsPairs[q * 4u + 3u] = gsTested[q * LQ + 6u];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (lead)
+    {
+        // The roles' records: the contacter, n0, n1, n2.
+        float3 ah = asfloat(uint3(gsPairs[q * 4u], gsPairs[q * 4u + 1u], gsPairs[q * 4u + 2u]));
+        float imh = asfloat(gsPairs[q * 4u + 3u]);
+        float3 r0 = asfloat(uint3(gsPairs[q * 4u + 4u], gsPairs[q * 4u + 5u], gsPairs[q * 4u + 6u]));
+        float im0 = asfloat(gsPairs[q * 4u + 7u]);
+        float3 r1 = asfloat(uint3(gsPairs[q * 4u + 8u], gsPairs[q * 4u + 9u], gsPairs[q * 4u + 10u]));
+        float im1 = asfloat(gsPairs[q * 4u + 11u]);
+        float3 r2 = asfloat(uint3(gsPairs[q * 4u + 12u], gsPairs[q * 4u + 13u], gsPairs[q * 4u + 14u]));
+        float im2 = asfloat(gsPairs[q * 4u + 15u]);
+        float3 aw = sscale(r1, alpha);
+        aw = sadd3(aw, sscale(r2, beta));
+        aw = sadd3(aw, sscale(r0, gamma));
+        float imt = nf(nf(selfTerm(alpha, im1) + selfTerm(beta, im2)) + selfTerm(gamma, im0));
+        float a = sdot(ssub3(ah, aw), nn);
+        float vn = sdot(vv, nn);
+        float xx = nf(vn + max(vn, 0.0));
+        float r = 0.0;
+        if (vn < 0.0 && nf(smul(a, STEP) + xx) < 0.0)
+        {
+            float inv = nf(imh + imt);
+            if (inv > 0.0)
+            {
+                float m = sdiv(1.0, inv);
+                float rr = nf(-smul(a, m) - sdiv(smul(xx, m), STEP));
+                r = rr > 0.0 ? rr : 0.0;
+            }
+        }
+        gNext[at + 21u] = asuint(r);
+        gsTested[hb + 11u] = asuint(r);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (item)
+    {
+        float r = asfloat(gsTested[hb + 11u]);
+        if (r > 0.0)
+        {
+            float3 inn = asfloat(uint3(gsTested[hb + 2u], gsTested[hb + 3u], gsTested[hb + 4u]));
+            float3 s = hitShare(sscale(inn, r), share, ia, ib, ig);
+            localAdd(LB_BASE + slot * 3u, int3(toFixed(s.x), toFixed(s.y), toFixed(s.z)));
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint rec = hitRoleAt(v, i) + role * 4u;
+    if (item)
+    {
+        float3 acc = localAccNow(q, slot, true);
+        float im = localOwnInvMass(q);
+        gsPairs[q * 4u] = asuint(acc.x);
+        gsPairs[q * 4u + 1u] = asuint(acc.y);
+        gsPairs[q * 4u + 2u] = asuint(acc.z);
+        gsPairs[q * 4u + 3u] = asuint(im);
+        gNext[rec] = asuint(acc.x);
+        gNext[rec + 1u] = asuint(acc.y);
+        gNext[rec + 2u] = asuint(acc.z);
+        gNext[rec + 3u] = asuint(im);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (lead)
+    {
+        float3 ah = asfloat(uint3(gsPairs[q * 4u], gsPairs[q * 4u + 1u], gsPairs[q * 4u + 2u]));
+        float imh = asfloat(gsPairs[q * 4u + 3u]);
+        float3 r0 = asfloat(uint3(gsPairs[q * 4u + 4u], gsPairs[q * 4u + 5u], gsPairs[q * 4u + 6u]));
+        float im0 = asfloat(gsPairs[q * 4u + 7u]);
+        float3 r1 = asfloat(uint3(gsPairs[q * 4u + 8u], gsPairs[q * 4u + 9u], gsPairs[q * 4u + 10u]));
+        float im1 = asfloat(gsPairs[q * 4u + 11u]);
+        float3 r2 = asfloat(uint3(gsPairs[q * 4u + 12u], gsPairs[q * 4u + 13u], gsPairs[q * 4u + 14u]));
+        float im2 = asfloat(gsPairs[q * 4u + 15u]);
+        float3 aw = sscale(r1, alpha);
+        aw = sadd3(aw, sscale(r2, beta));
+        aw = sadd3(aw, sscale(r0, gamma));
+        float imt = nf(nf(selfTerm(alpha, im1) + selfTerm(beta, im2)) + selfTerm(gamma, im0));
+        float3 f = f1;
+        float r = asfloat(gsTested[hb + 11u]);
+        if (r > 0.0) f = sadd3(f, sscale(nn, r));
+        if (!all(f == float3(0.0, 0.0, 0.0)))
+        {
+            float3 a = ssub3(ah, aw);
+            float inv = nf(imh + imt);
+            float3 rest = ssub3(a, sscale(f, inv));
+            float aa = sdot(f, sadd3(sadd3(vv, vv), sscale(rest, STEP)));
+            float bb = smul(smul(STEP, sdot(f, f)), inv);
+            if (nf(aa + bb) > 0.0 && bb > 0.0)
+            {
+                float k = aa < 0.0 ? min(sdiv(-aa, bb), 1.0) : 0.0;
+                f = sadd3(f, sscale(f, -nf(1.0 - k)));
+            }
+        }
+        uint tr = hitRoleAt(v, i) + 16u;
+        gNext[tr] = asuint(f.x);
+        gNext[tr + 1u] = asuint(f.y);
+        gNext[tr + 2u] = asuint(f.z);
+        gsPairs[LT_BASE + i * 3u] = asuint(f.x);
+        gsPairs[LT_BASE + i * 3u + 1u] = asuint(f.y);
+        gsPairs[LT_BASE + i * 3u + 2u] = asuint(f.z);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (item)
+    {
+        float3 total = asfloat(uint3(gsPairs[LT_BASE + i * 3u], gsPairs[LT_BASE + i * 3u + 1u], gsPairs[LT_BASE + i * 3u + 2u]));
+        float3 st = hitShare(total, share, ia, ib, ig);
+        int3 d = toFixed3(st) - toFixed3(hitShare(if1, share, ia, ib, ig));
+        localAdd(slot * 3u, d);
+        cfAdd(x, st);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // Write back: each slot's A as the device's plus its adds; B cleared (phase 6's
+    // stores).
+    if (item && slot == q)
+    {
+        int3 a = int3(asint(gsCount[q * 3u].load()), asint(gsCount[q * 3u + 1u].load()), asint(gsCount[q * 3u + 2u].load()));
+        int3 d = a - a0;
+        if (d.x != 0) gAcc[x * 3u].add(d.x);
+        if (d.y != 0) gAcc[x * 3u + 1u].add(d.y);
+        if (d.z != 0) gAcc[x * 3u + 2u].add(d.z);
+        uint b = resAt(x);
+        gAcc[b + 1u].store(0);
+        gAcc[b + 2u].store(0);
+        gAcc[b + 3u].store(0);
+    }
+}
+
 // After the triangles: a workgroup per vehicle resolves its deferred breaks and
 // applies its self-collision hits in order (selfApply).
 [shader("compute")]
@@ -7777,13 +8311,22 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
 {
     uint v = gid.x;
     uint lane = lid.x;
+    // Vehicle sleep: a sleeping vehicle is not stepped.
+    if (gP.sleepRec != 0u)
+    {
+        if (sleepSkip(v, lane)) return ebLoopCapFlush();
+    }
     Vehicle x = vehicleAt(v);
     uint parity = vehicleStep(v) & 1u;
     if (lane == 0u)
     {
         driveBegin();
         resolvePending(v, parity);
-        gsUniformHits = uint(gAcc[hitAcc(v)].load()) > 0u ? 1u : 0u;
+        uint hits = uint(gAcc[hitAcc(v)].load());
+        gsUniformHits = hits > 0u ? 1u : 0u;
+        // PERF_HITS_LOCAL: 2, the hits from workgroup memory (selfApplyLocal).
+        if ((gP.perfFlags & PERF_HITS_LOCAL) != 0u && hits > 0u && hits <= HITS_LOCAL_CAP && hitRolesOn(v))
+            gsUniformHits = 2u;
         gsUniformOpen = 0u;
         // The reused pair list (PERF_WIDE_LIST): a walk's list of this step recorded in the
         // list's saved state as pairReuseTests records a build's (the self split's
@@ -7805,13 +8348,34 @@ void explicit_beams_wide_hits(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
     sync();
     uint on = gsUniformHits;
     uint driveOn = gsUniformDrive;
-    if (on != 0u)
+    // PERF_TYRE_EARLY: the next step's tyres' second part loaded before the hits.
+    bool tyreEarly = (gP.perfFlags & (PERF_TYRE_EARLY | PERF_TYRE_AHEAD | PERF_AHEAD_APART | PERF_WIDE_FUSED))
+                         == (PERF_TYRE_EARLY | PERF_TYRE_AHEAD | PERF_AHEAD_APART | PERF_WIDE_FUSED)
+                     && wideStep() + 1u < gP.steps && driveOn != 0u;
+    DrvPostIn tyreIn = (DrvPostIn)0;
+    if (tyreEarly) tyreIn = drvTyreLoad(v, 255u - lane, vehicleStep(v) + 1u);
+    if (on == 2u)
+        selfApplyLocal(v, lane, x.beamOff, x.groupOff, x.groupCount, parity);
+    else if (on != 0u)
         selfApply(v, true, lane, 256u, lane, vehicleOrigin(v), x.range, x.beamOff, x.groupOff, x.groupCount, parity);
     // The next step's tyres (PERF_WIDE_FUSED), after this step's hits: their hubs'
     // accumulators are final (its rays and bars ran beside this step's list phases).
     if ((gP.perfFlags & PERF_WIDE_FUSED) != 0u && wideStep() + 1u < gP.steps && driveOn != 0u)
     {
         if (on != 0u) sync();
+        // (PERF_TYRE_AHEAD: their first part ran on the list dispatch's coupling and
+        // wheels workgroup; the rest here.)
+        if (tyreEarly)
+        {
+            if (tyreIn.ok) drvTyreFinish(tyreIn);
+            else driveTyresPost(v, 255u - lane, vehicleStep(v) + 1u);
+            return ebLoopCapFlush();
+        }
+        if ((gP.perfFlags & (PERF_TYRE_AHEAD | PERF_AHEAD_APART)) == (PERF_TYRE_AHEAD | PERF_AHEAD_APART))
+        {
+            driveTyresPost(v, 255u - lane, vehicleStep(v) + 1u);
+            return ebLoopCapFlush();
+        }
         DrvCtx drvC;
         bool drvHas;
         bool drvApart;
@@ -7831,7 +8395,7 @@ void explicit_beams_wide_end(uint3 id : SV_DispatchThreadID)
     if (i < gP.totalTris)
     {
         uint v = gStatic[gP.triBase + i].w;
-        if (gStatic[v * 4u + 2u].y > 0u) triangleFinish(i);
+        if (gStatic[v * 4u + 2u].y > 0u && !sleepAsleep(v)) triangleFinish(i);
         return;
     }
     i -= gP.totalTris;
@@ -7839,7 +8403,7 @@ void explicit_beams_wide_end(uint3 id : SV_DispatchThreadID)
     {
         uint v = gStatic[gP.beamBase + i * 3u].z >> 16;
         Vehicle x = vehicleAt(v);
-        if (x.groupCount > 0u) groupDrops(i, x.beamOff, x.groupOff, (vehicleStep(v) - 1u) & 1u, true);
+        if (x.groupCount > 0u && !sleepAsleep(v)) groupDrops(i, x.beamOff, x.groupOff, (vehicleStep(v) - 1u) & 1u, true);
     }
 }
 
@@ -7848,9 +8412,17 @@ void explicit_beams_wide_end(uint3 id : SV_DispatchThreadID)
 void explicit_beams_wide_close(uint3 id : SV_DispatchThreadID)
 {
     uint v = id.x;
-    if (v >= gP.vehicles) return;
+    if (v >= gP.vehicles) return ebLoopCapFlush();
+    // Vehicle sleep: a sleeping vehicle's step count stands; an awake one's frame-end rule
+    // (the frame's sleepSettle, on this thread).
+    if (gP.sleepRec != 0u)
+    {
+        if (sleepAsleep(v)) return ebLoopCapFlush();
+        sleepSettleOne(v, gP.steps);
+    }
     uint4 m = gMisc[v];
     gMisc[v] = uint4(m.xyz, m.w + wideStep());
+    ebLoopCapFlush();
 }
 
 // The rigid coupling's and the raycast wheels' part of a step in the wide passes: a
@@ -7865,6 +8437,11 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
     uint v = gid.x;
     uint lane = lid.x;
     uint s = wideStep();
+    // Vehicle sleep: a sleeping vehicle is not stepped.
+    if (gP.sleepRec != 0u)
+    {
+        if (sleepSkip(v, lane)) return ebLoopCapFlush();
+    }
     if (lane == 0u)
     {
         coupleBegin();
@@ -7891,6 +8468,120 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
 }
 
 #ifdef EB_SELF_SPLIT
+// perfFlags bit 131072 (explicit_plan::PERF_AHEAD_APART, with PERF_WIDE_FUSED): step
+// s + 1's coupling and wheels (what the list kernel runs beside its own phases: the
+// coupling's step or its fold, the wheels' rays and bars) on a workgroup of their own,
+// vehicle v's at workgroup vehicles + v of the list's dispatch, in place of on the list
+// workgroup's lanes. The same calls on the same lanes with the same barriers between
+// them: what they read (the nodes after this step's node phase, the coupling's records
+// and sums, the wheels' records, the static shapes) and write (the coupling's bodies,
+// spheres and counts, the wheels' scratch records) the list's phases neither write nor
+// read, so they ran beside them already; on a core of their own the list's longest
+// phases no longer carry them. (Its own function behind an early return: the list's
+// code is unchanged.)
+// perfFlags bit 262144 (explicit_plan::PERF_TYRE_AHEAD, with PERF_AHEAD_APART): the
+// tyres split at their hubs' forces (explicit_beams_drive.slang drvTyrePre,
+// drvTyrePost): the first part here, the second in the hits kernel after selfApply.
+void wideAheadApart(uint v, uint lane)
+{
+    uint s = gP.pad2;
+    uint4 misc = gMisc[v];
+    if (lane == 0u)
+    {
+        coupleBegin();
+        driveBegin();
+        cplGsClear();
+        cplGsAdd(0u, v, 0u, 0u);
+        cplFoldMark(v);
+    }
+    sync();
+    if (s + 1u >= gP.steps || (gP.perfFlags & PERF_WIDE_FUSED) == 0u) return;
+    uint coupleOn = gsUniformCouple;
+    uint driveOn = gsUniformDrive;
+    bool aheadFold = (coupleOn & CPL_FOLD_FRAME) != 0u;
+    if (!aheadFold) coupleStep(v, lane, s + 1u, coupleOn);
+    bool aheadDrive = driveOn != 0u;
+    bool cBody = false;
+    float4 cC0 = float4(0.0, 0.0, 0.0, 0.0);
+    float4 cQ = float4(0.0, 0.0, 0.0, 1.0);
+    float4 cC2 = float4(0.0, 0.0, 0.0, 0.0);
+    float3 cW = float3(0.0, 0.0, 0.0);
+    DrvCtx drvC = (DrvCtx)0;
+    bool drvHas = false;
+    bool drvApart = false;
+    if (aheadFold) cplFoldB(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+    if (aheadDrive)
+    {
+        driveAheadCtx(v, LANES - 1u - lane, drvC, drvHas, drvApart);
+        driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 0u, misc.w + s + 1u);
+    }
+    sync();
+    if (aheadFold) cplFoldC(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+    if (aheadDrive) driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 1u, misc.w + s + 1u);
+    // PERF_TYRE_AHEAD: the tyres' part before their hubs' forces (after the bars), and
+    // the end; the hits kernel runs the rest (driveTyresPost).
+    if ((gP.perfFlags & PERF_TYRE_AHEAD) == 0u) return;
+    sync();
+    if (aheadDrive) driveTyresPre(drvC, drvHas, drvApart, LANES - 1u - lane);
+}
+
+// perfFlags bit 4194304 (explicit_plan::PERF_WHEELS_APART, with PERF_AHEAD_APART): the
+// coupling's and the wheels' work of wideAheadApart on two workgroups, the coupling's at
+// vehicles + v, the wheels' at 2 · vehicles + v. In wideAheadApart every lane runs its
+// share of the coupling's phases (its nodes' counts, its shapes and bodies) and lanes
+// 255..252 also their wheels', so a phase there costs the sum of the two chains on those
+// lanes. The same calls, on the same lanes, between the same barriers; neither part reads
+// what the other writes (the wheels read the nodes, their records and the static boxes; the
+// coupling writes its bodies, spheres, lists, counts and workgroup copies), as they already
+// ran beside each other.
+void wideCoupleApart(uint v, uint lane)
+{
+    uint s = gP.pad2;
+    if (lane == 0u)
+    {
+        coupleBegin();
+        cplGsClear();
+        cplGsAdd(0u, v, 0u, 0u);
+        cplFoldMark(v);
+    }
+    sync();
+    if (s + 1u >= gP.steps || (gP.perfFlags & PERF_WIDE_FUSED) == 0u) return;
+    uint coupleOn = gsUniformCouple;
+    bool aheadFold = (coupleOn & CPL_FOLD_FRAME) != 0u;
+    if (!aheadFold) coupleStep(v, lane, s + 1u, coupleOn);
+    bool cBody = false;
+    float4 cC0 = float4(0.0, 0.0, 0.0, 0.0);
+    float4 cQ = float4(0.0, 0.0, 0.0, 1.0);
+    float4 cC2 = float4(0.0, 0.0, 0.0, 0.0);
+    float3 cW = float3(0.0, 0.0, 0.0);
+    if (aheadFold) cplFoldB(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+    sync();
+    if (aheadFold) cplFoldC(v, lane, LANES, s + 1u, cBody, cC0, cQ, cC2, cW);
+}
+void wideWheelsApart(uint v, uint lane)
+{
+    uint s = gP.pad2;
+    uint4 misc = gMisc[v];
+    if (lane == 0u) driveBegin();
+    sync();
+    if (s + 1u >= gP.steps || (gP.perfFlags & PERF_WIDE_FUSED) == 0u) return;
+    uint driveOn = gsUniformDrive;
+    bool aheadDrive = driveOn != 0u;
+    DrvCtx drvC = (DrvCtx)0;
+    bool drvHas = false;
+    bool drvApart = false;
+    if (aheadDrive)
+    {
+        driveAheadCtx(v, LANES - 1u - lane, drvC, drvHas, drvApart);
+        driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 0u, misc.w + s + 1u);
+    }
+    sync();
+    if (aheadDrive) driveAheadPart(drvC, drvHas, drvApart, LANES - 1u - lane, 1u, misc.w + s + 1u);
+    if ((gP.perfFlags & PERF_TYRE_AHEAD) == 0u) return;
+    sync();
+    if (aheadDrive) driveTyresPre(drvC, drvHas, drvApart, LANES - 1u - lane);
+}
+
 // The reused pair list's part of a step in the wide passes (PERF_WIDE_LIST), a workgroup a
 // vehicle after the step's wide_beams: what explicit_beams_self_step runs of a step
 // between its beams and its pairs dispatch, and nothing else (a small kernel: a dispatch
@@ -7904,10 +8595,35 @@ void explicit_beams_wide_aux(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadI
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    if ((gP.perfFlags & PERF_AHEAD_APART) != 0u && gid.x >= gP.vehicles && gP.sleepRec != 0u)
+    {
+        // Vehicle sleep: a sleeping vehicle's coupling and wheels are not stepped either
+        // (as on the list workgroup's lanes, below).
+        uint va = gid.x - gP.vehicles;
+        if (va >= gP.vehicles) va -= gP.vehicles;
+        if (sleepSkip(va, lid.x)) return ebLoopCapFlush();
+    }
+    if ((gP.perfFlags & (PERF_AHEAD_APART | PERF_WHEELS_APART)) == (PERF_AHEAD_APART | PERF_WHEELS_APART)
+        && gid.x >= gP.vehicles)
+    {
+        if (gid.x >= 2u * gP.vehicles) wideWheelsApart(gid.x - 2u * gP.vehicles, lid.x);
+        else wideCoupleApart(gid.x - gP.vehicles, lid.x);
+        return ebLoopCapFlush();
+    }
+    if ((gP.perfFlags & PERF_AHEAD_APART) != 0u && gid.x >= gP.vehicles)
+    {
+        wideAheadApart(gid.x - gP.vehicles, lid.x);
+        return ebLoopCapFlush();
+    }
     selfSplitArgsClear(gid.x, lid.x);
     uint v = gid.x;
     uint lane = lid.x;
     uint s = gP.pad2;
+    // Vehicle sleep: a sleeping vehicle is not stepped.
+    if (gP.sleepRec != 0u)
+    {
+        if (sleepSkip(v, lane)) return ebLoopCapFlush();
+    }
     uint4 r0 = gStatic[v * 4u];
     uint4 r1 = gStatic[v * 4u + 1u];
     uint4 r2 = gStatic[v * 4u + 2u];
@@ -7948,7 +8664,8 @@ void explicit_beams_wide_list(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThread
         return ebLoopCapFlush();
     }
     // Step s + 1's coupling and wheels beside this step's list phases (uniform).
-    bool ahead = (gP.perfFlags & PERF_WIDE_FUSED) != 0u && s + 1u < gP.steps;
+    // (PERF_AHEAD_APART: on a workgroup of their own, wideAheadApart.)
+    bool ahead = (gP.perfFlags & (PERF_WIDE_FUSED | PERF_AHEAD_APART)) == PERF_WIDE_FUSED && s + 1u < gP.steps;
     uint coupleOn = gsUniformCouple;
     uint driveOn = gsUniformDrive;
     bool aheadFold = ahead && (coupleOn & CPL_FOLD_FRAME) != 0u;
@@ -8423,7 +9140,9 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     gArgs[17] = 1u;
     gArgs[18] = 1u;
     gArgs[20] = groups == 0u ? 0u : nv;
-    gArgs[21] = 1u;
+    // (Two rows: the second the members' wheels ahead in the self split's rest dispatch,
+    // PERF_SPLIT_WHEELS_AHEAD; every other use of these words returns there at once.)
+    gArgs[21] = 2u;
     gArgs[22] = 1u;
     // Its triangle tests across workgroups (explicit_beams_split.slang SPLIT_TEST_WGS a
     // group; words 24..26).
@@ -8440,7 +9159,11 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     // without a group: a thread a pair (words 32..34, in workgroups of 256 at least) and
     // one workgroup (36..38: the first plan, which sizes the rest).
     uint any = groups == 0u ? 0u : 1u;
-    gArgs[32] = any * ((gNext[flAdjFirst(nv)] / 2u + 255u) / 256u);
+    // (With the kept candidates, PERF_FLEET_KEEP, also a thread a node: its motion since
+    // the list's build, fkTrack.)
+    uint scanThreads = gNext[flAdjFirst(nv)] / 2u;
+    if ((gP.perfFlags & PERF_FLEET_KEEP) != 0u) scanThreads = max(scanThreads, gP.totalNodes);
+    gArgs[32] = any * ((scanThreads + 255u) / 256u);
     gArgs[33] = 1u;
     gArgs[34] = 1u;
     gArgs[36] = any;
@@ -8451,6 +9174,10 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     gArgs[44] = larger ? groups : 0u;
     gArgs[45] = 1u;
     gArgs[46] = 1u;
+    // The plan's values of words 32 and 44, kept for vehicle sleep's awake list, which
+    // rewrites those arguments every frame (explicit_beams_sleep.slang).
+    gArgs[7] = gArgs[32];
+    gArgs[11] = gArgs[44];
 }
 
 void vvEmitPair(uint a, uint b)
@@ -9658,7 +10385,11 @@ void vvFrame(inout VvTri t, float3 p1, float3 p2)
 // (exactly 0 for v = a, and for every vehicle while the origins are 0). The contact's
 // geometry (triangles, contact points, votes, anti-clip) is in the owner's frame, its
 // selection (frame bounds, boxes, prefilters) in the World's.
-float3 vvRel(uint v, uint a) { return asfloat(gMisc[v].xyz) - asfloat(gMisc[a].xyz); }
+// (nf3: a compiler allowed to reassociate, as Metal's is, would otherwise turn
+// `vvRel(v, a) + x` into another order in one inlined copy and not in another, and one
+// contact point would have two positions: the gather's and the kept pairs' tests of
+// vehicle contact differed in the last bit; contact-groups-design.md §8.10.)
+float3 vvRel(uint v, uint a) { return nf3(asfloat(gMisc[v].xyz) - asfloat(gMisc[a].xyz)); }
 
 VvTri vvTriangle(uint gt, float3 origin, float r)
 {
@@ -9716,7 +10447,7 @@ uint flSlot(uint va, uint vh)
         uint d = gNext[flAdjAt(e)];
         if (flPartner(d) == vh)
         {
-            slot = min(gNext[flSlotAt(d)], VV_PART - 1u);
+            slot = min(gNext[flSlotAt(d)], vvRoom() - 1u);
             break;
         }
     }
@@ -9732,11 +10463,18 @@ uint vvSplitPoint(uint slot, uint n)
 }
 // An owner's hit list's room and the point slots a full clear zeroes.
 uint vvHitRoom(uint a, uint points) { return gFl != 0u ? 2u * uint(gAcc[flOwn(flVehOf(a)) + FL_OFFERED].load()) : 2u * points; }
-uint vvSplitSlots(uint k) { return gFl != 0u ? VV_PART : k; }
+uint vvSplitSlots(uint k) { return gFl != 0u ? vvRoom() : k; }
 #else
 uint vvSplitPoint(uint slot, uint n) { return gP.vvSplit + (1u + slot) * gP.totalNodes + n; }
 uint vvHitRoom(uint a, uint points) { return 2u * points; }
 uint vvSplitSlots(uint k) { return k; }
+#endif
+// The listed triangles' throttle updates already made by threads over the fleet
+// (explicit_beams_fleet.slang, PERF_FLEET_POST): the levels leave them out.
+#ifdef EB_VV_FLEET
+bool vvPostDone() { return gFl != 0u && (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_POST)) == (PERF_FLEET_FRONT | PERF_FLEET_POST); }
+#else
+bool vvPostDone() { return false; }
 #endif
 // A two-body hit found by a walk: its nodes' hit counts of this owner's turn.
 void vvSplitCount(VvTri t, uint h, uint slot)
@@ -9783,7 +10521,7 @@ void vvSplitClear(uint off, uint k, uint slots, uint lane)
         for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
         {
             gAcc[vvSplitTri(r0.x + i)].store(0);
-            for (uint sl = 0u; sl < VV_PART; sl++)
+            for (uint sl = 0u, slStop = EB_END(sl, min(slots, EB_MAX_MEMBERS), 1u); sl < slStop; sl++)
             {
                 // (The slot's own word, whatever the owners' addressing.)
                 if (sl < slots) gAcc[gP.vvSplit + (1u + sl) * gP.totalNodes + r0.x + i].store(0);
@@ -10883,15 +11621,20 @@ void vvLevelsSet(uint k, uint lane)
 // A box over more than GRID_MAX_CELLS cells tests every
 // candidate as before.
 uint vvTotalCp() { return gP.vvHits - (gP.vvBig + gP.vehicles); }
+// The partners' room and the regions' unit: that many times the fleet's contact points
+// (the run and its sorted copy in gBeams; in gNext four units of hits, one of candidate
+// ranks, four of the hits' order).
+uint vvRoom() { return gP.vvRoom != 0u ? gP.vvRoom : VV_PART; }
+uint vvRoomCp() { return vvRoom() * vvTotalCp(); }
 #ifdef EB_VV_FLEET
 // (gFl: the one owner's sorted copy at its part's place, every bucket of its own grid.)
-uint vvSortAt(uint runOff) { return gP.vvRun + VV_PART * vvTotalCp() + (gFl != 0u ? flRun(gFlV) : VV_PART * runOff); }
+uint vvSortAt(uint runOff) { return gP.vvRun + vvRoomCp() + (gFl != 0u ? flRun(gFlV) : VV_PART * runOff); }
 uint vvGridBucket(uint a, int3 c) { return gFl != 0u ? gridBucket(c) : a * (GRID_BUCKETS / VV_PART) + (gridBucket(c) & (GRID_BUCKETS / VV_PART - 1u)); }
 #else
-uint vvSortAt(uint runOff) { return gP.vvRun + VV_PART * vvTotalCp() + VV_PART * runOff; }
+uint vvSortAt(uint runOff) { return gP.vvRun + vvRoomCp() + VV_PART * runOff; }
 uint vvGridBucket(uint a, int3 c) { return a * (GRID_BUCKETS / VV_PART) + (gridBucket(c) & (GRID_BUCKETS / VV_PART - 1u)); }
 #endif
-uint vvRankAt(uint runOff, uint points, uint a, uint e) { return gP.vvHits + 4u * VV_PART * vvTotalCp() + VV_PART * runOff + a * points + e; }
+uint vvRankAt(uint runOff, uint points, uint a, uint e) { return gP.vvHits + 4u * vvRoomCp() + VV_PART * runOff + a * points + e; }
 // The grid's cell: the owner's self-collision cell, else half a metre (any size gives
 // the same candidates; it only sets how many are visited).
 float vvGridCell(uint va)
@@ -11362,7 +12105,7 @@ void vvPairTest(uint a, uint va, uint gt, uint idx, uint runOff, uint points, fl
 // in their point's bucket (a counting sort of the hit indices by point, owner a's buckets
 // a·256 …, in gsCount/gsOff: free in the levels, the grid's last use was the tests): the
 // same chain, the same order, the same results.
-uint vvOrderAt(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 5u * VV_PART * vvTotalCp() + 4u * VV_PART * runOff + 2u * a * points + i; }
+uint vvOrderAt(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 5u * vvRoomCp() + 4u * VV_PART * runOff + 2u * a * points + i; }
 uint vvHitBucket(uint a, uint h) { return a * (GRID_BUCKETS / VV_PART) + (((h * 2654435761u) >> 22) & (GRID_BUCKETS / VV_PART - 1u)); }
 
 // Every lane (uniform): the hit lists of level l's owners bucketed by point.
@@ -11843,7 +12586,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         // Measurement only: 524288 the levels (the hits' application).
         if ((gP.ablate & 524288u) != 0u) break;
 #endif
-        if (l == 1u && (gP.ablate & 131072u) == 0u)
+        if (l == 1u && (gP.ablate & 131072u) == 0u && !vvPostDone())
         {
             uint total = 0u;
             for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();

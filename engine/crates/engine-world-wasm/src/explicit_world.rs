@@ -253,6 +253,39 @@ impl WebWorld {
         }
     }
 
+    /// A perf flag's bit-for-bit check in the browser (`vehicle_lab --ab-switch perf=MASK`'s
+    /// A/B, on this device): from the vehicles' state now, `frames` frames of `steps` steps
+    /// with the flags `| mask`, the state staged; the state put back, the same frames with
+    /// the flags `& !mask`, staged; the state and the flags put back. Every copy and frame
+    /// is submitted before this returns (the page's next step runs from the state it
+    /// left); resolves, once both copies are mapped, to the differences
+    /// (`engine_webgpu::state_differences`, one line per differing run of state words;
+    /// the vehicle-contact plan's records masked as natively): empty, bit for bit.
+    #[wasm_bindgen(js_name = explicitAb)]
+    pub fn explicit_ab(&mut self, mask: u32, frames: u32, steps: u32) -> Result<js_sys::Promise, JsValue> {
+        let g = self.world.explicit_vehicles_mut().ok_or_else(|| err("explicitAb: no explicit vehicles"))?;
+        let flags = g.perf_flags();
+        let snap = g.snapshot();
+        let mut staged = Vec::new();
+        for on in [true, false] {
+            g.restore(&snap);
+            g.set_perf_flags(if on { flags | mask } else { flags & !mask });
+            for _ in 0..frames {
+                g.frame(steps);
+            }
+            staged.push(g.stage_state());
+        }
+        g.restore(&snap);
+        g.set_perf_flags(flags);
+        Ok(wasm_bindgen_futures::future_to_promise(async move {
+            for s in &staged {
+                crate::read::map_read(s.buffer()).await?;
+            }
+            let lines = engine_webgpu::state_differences(&staged[0].ab_words(), &staged[1].ab_words(), 64);
+            Ok(lines.into_iter().map(JsValue::from).collect::<js_sys::Array>().into())
+        }))
+    }
+
     /// Whether the explicit frame runs as the wide passes.
     #[wasm_bindgen(js_name = explicitWide)]
     pub fn explicit_wide(&self) -> bool {
