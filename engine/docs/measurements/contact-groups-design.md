@@ -591,7 +591,9 @@ What forces a build or is handled exactly:
 | two-body counts | `vvSplitCount` at the same hits |
 | the frame boundary | the list, the records and the bound's inputs are in the buffers (snapshots hold them); the plan's new pair list is compared with the build's covered partners by vehicle |
 | another path writing the pair region (the flag off for a frame) | the signature in each owner's first two words is gone: a build |
-| a build past an owner's room (32,767 pairs) or the run's | that pass tests in the padded walk; the front's own path for the next 136 passes |
+| a build past an owner's room (32,767 pairs) or the run's | the build's listing stops (the list is void); that pass's tests walk the walk's own boxes over the build's candidates (the triangle's box grown by its range, its travel, the owner's fastest candidate's and `CLIP_DEPTH`, as `vvTriangleCandsList`), a part of a listed triangle a thread, each pair decided by `fkPairTry`; the front's own path for the next 136 passes, doubled for each such build in a row (to 16 times); the next build with no fewer candidates than that one skips its listing |
+| a list outlived in fewer than 8 passes (tumbling cars) | the front's own path for the next 68 passes instead of another build |
+| passes left on the front's own path | no tracking (the bounds decide nothing; the reference motion and the heat are choices) |
 | NaN or infinite positions and speeds | the bounds are compared as bit patterns; anything not finite: the front's own path |
 
 The dispatches do not change: a pass that reuses the list runs its tests in the grids'
@@ -627,3 +629,12 @@ every copy rounds `o_vb − o_va` alone and then adds; the two Chrome states are
 fixtures. (Any expression a kept test repeats from the walk must be unfusable or the
 same stored value: the same rule as Metal's fast math elsewhere in the kernels.)
 `vehicle-perf-first-principles.md` §8.28 has the evidence and the checks.
+
+The worst step (2026-11-17). The run's worst steps with the flag were builds past an
+owner's room, retried every 136 passes: each listed pairs it threw away and tested in
+the build's padded boxes, a thread a triangle, 7 to 10 ms in one pass. The rows above
+make that pass about a pass of today's front. The flag is now bit for bit in Chrome on
+the ledges and on the rolling gully, faster at the median everywhere and at the worst on
+the ledges, but not at the worst on the rolling gully, where the cars pile and the list is
+past its room or outlived in a few passes; so it stays off (§8.28). The limit that
+remains: one owner past its room sends every owner to the front's own path.
