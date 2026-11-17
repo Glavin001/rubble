@@ -2206,6 +2206,21 @@ is unchanged, bit for bit).
   (`ExplicitBeams::ground_lift`, GPU `groundContact` and `takeSteps`), capped by
   the contact's budget as every §37 step is; boxes and shapes have no depth term
   (p = 0) and get none. Ledger: `EnergyLedger::w_ground_shift`.
+  **Fix (2026-11-16): the World's static bodies too.** A World's static or kinematic
+  body is a shape to the vehicle (the rigid coupling's infinite-mass proxy, "the static
+  shape rule"), but its contact kept RoR's surface (`ContactSurface::BOX`: no §37 cap,
+  the bit-trick friction) on the BeamNG profile, so the same rock as a native static
+  shape and as a World body gave different results (15 cm apart after 1 s of a crash
+  into a wall). It now takes the vehicle's surface, as the node pass's boxes and shapes
+  do (CPU `ProxySet::node_contact_with`'s `stat`, GPU `cplStaticOwnSurface` /
+  `cplStaticContactV`); the RoR profile is unchanged bit for bit, and dynamic proxies
+  (the two-body branch) are unchanged. Found by the mountain's wrecks at rest
+  (`explicit-vehicles-in-world.md` §10.8): on RoR's rule the rock kept 7 to 30 nodes of
+  a crushed car above 0.25 m/s (0.8 to 2.8 m/s relative to its body, 2.3 to 6.4 J) for
+  good; with the coupling off they decayed (27 to 2 nodes in 1 s); with the fix 0 to 2
+  nodes, 0.27 to 0.76 m/s, 0.2 to 1.4 J. Checked: `engine-softbody/tests/explicit_rigid.rs`
+  `static_proxy_is_the_static_shape_bit_for_bit_on_the_beamng_contact` (fails on the
+  old rule).
 * **The residual stop.** A two-body hit's stop uses the split reduced mass, so a hit
   whose nodes are in other hits stops only m_split·inv of its pair's approach
   alone. The rest, (vn + h·a)(1 − m_split·inv), stayed as a ghost speed that the

@@ -442,6 +442,20 @@ bool surfProxyFast(uint v, uint k, out float3 vb);
 
 float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction);
 bool cplListOn();
+
+// Vehicle v's static shape rule against an infinite-mass proxy takes its own surface
+// (jbeam-semantics-spec.md §37.1: on the BeamNG profile the node pass's ground, boxes and
+// shapes are dissipative and their friction law exact, and a World's static body is the
+// same shape): true for a vehicle with either flag. The RoR profile keeps the plain
+// boxSurface() path, bit for bit (its own function: Metal's codegen of it stays).
+bool cplStaticOwnSurface(uint v)
+{
+    return (gStatic[v * 4u + 3u].x & (FLAG_DISSIPATIVE | FLAG_EXACT_FRICTION)) != 0u;
+}
+float3 cplStaticContactV(float3 f, float3 u, float mass, float3 n, uint v, float friction)
+{
+    return contactForce(f, u, mass, n, surfaceV(boxSurface(), v), 0.0, friction);
+}
 float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mass, float friction)
 {
     // The candidate list (cplList*, lossless): its own function (Metal's codegen of the
@@ -489,7 +503,8 @@ float3 cplContacts(uint v, uint local, float3 x, float3 f, float3 vel, float mas
         {
             // Infinite mass: the static shape rule (relative to a kinematic body's motion).
             float3 u = all(vb == float3(0.0, 0.0, 0.0)) ? vel : vel - vb;
-            fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
+            if (cplStaticOwnSurface(v)) fc = cplStaticContactV(f, u, mass, n4.xyz, v, friction);
+            else fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
         }
         else
         {
@@ -1001,7 +1016,8 @@ float3 cplContactsListed(uint v, uint local, float3 x, float3 f, float3 vel, flo
         {
             // Infinite mass: the static shape rule (relative to a kinematic body's motion).
             float3 u = all(vb == float3(0.0, 0.0, 0.0)) ? vel : vel - vb;
-            fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
+            if (cplStaticOwnSurface(v)) fc = cplStaticContactV(f, u, mass, n4.xyz, v, friction);
+            else fc = contactForce(f, u, mass, n4.xyz, boxSurface(), 0.0, friction);
         }
         else
         {

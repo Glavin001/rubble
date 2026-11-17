@@ -14,6 +14,16 @@
 // first) and the frame's indirect arguments; the frame's workgroups past the count step
 // the contact groups. Sleeping vehicles are not dispatched at all.
 //
+// The split paths (a step a dispatch: explicit_beams_split.slang, explicit_beams_selfsplit.slang,
+// explicit_beams_fleet.slang) take the same rule: a vehicle's or a member's step marks its
+// motion in its flags (sleepMark) at the end of its dispatch, the frame's last dispatch
+// settles (sleepSettle, sleepGroupEnd), a sleeping vehicle's or group's workgroups return
+// at once and its pairs are no one's partners. Listed there (gP.sleepPad0 = 2), the awake
+// list's kernel also wakes the sleeping members of a group with an awake member (the
+// groups' frame start would: the members' steps are dispatched from the list, which must
+// hold them), and writes the split dispatches' arguments: no sleeping vehicle is
+// dispatched, and with every vehicle asleep nothing is.
+//
 // Every barrier here is under gP.sleepRec != 0 (a uniform) and each function is called
 // by every lane: workgroup-uniform control flow. The paths are their own functions,
 // called behind that uniform test (Metal's codegen of the shipped paths stays as it
@@ -30,6 +40,26 @@ uint sleepList() { return gMisc[gP.sleepRec + 1u].z; }
 uint sleepVRec(uint v) { return gMisc[gP.sleepRec].x + v; }
 uint sleepFlags(uint v) { return gMisc[gP.sleepRec + 1u].x + 2u * v; }
 uint sleepAnchor(uint gi) { return gMisc[gP.sleepRec + 1u].y + gi; }
+
+// Vehicle v sleeps (no barrier: data, or a condition of code without barriers).
+bool sleepAsleep(uint v)
+{
+    if (gP.sleepRec == 0u) return false;
+    return (gMisc[sleepVRec(v)].y & SLEEP_ASLEEP) != 0u;
+}
+// The awake-indexed dispatch is on (uniform: the parameters).
+bool sleepListedOn() { return gP.sleepRec != 0u && gP.sleepPad0 != 0u; }
+// The awake vehicles' count, and row y of a dispatch over them (no barrier: for kernels
+// without barriers; gP.vehicles past the count).
+uint sleepRows() { return gNext[sleepList()]; }
+uint sleepRow(uint y) { return y < gNext[sleepList()] ? gNext[sleepList() + 1u + y] : gP.vehicles; }
+
+// The fleet-wide passes (explicit_beams_wide_*, a thread an element; the host runs them
+// with sleep for a lone vehicle only: they step every vehicle in step, and a sleeping
+// one's step count stands): a thread of a sleeping vehicle's element returns at once
+// (sleepAsleep; the workgroup-a-vehicle kernels: sleepSkip), a node's thread marks its
+// motion after its update (sleepMarkNode), and the frame's closing thread a vehicle runs
+// the frame-end rule on its own (sleepSettleOne: sleepSettle's arithmetic, in a row).
 
 // A node faster than the speed bound along an axis (NaN: moving).
 bool sleepMoving(uint gi, float speed)
@@ -69,6 +99,12 @@ bool sleepTrack(uint nodeOff, uint nodeCount, uint lane, bool moving)
     for (uint i = lane, iStop = EB_END(i, nodeCount, LANES); i < iStop && !moving; i += LANES)
         moving = sleepMoving(nodeOff + i, speed);
     return moving;
+}
+
+// Node gi of vehicle v after its update: moving (a thread a node).
+void sleepMarkNode(uint v, uint gi)
+{
+    if (sleepMoving(gi, asfloat(sleepHdr().z))) gAcc[sleepFlags(v)].store(1);
 }
 
 // A lane found vehicle v moving this frame.
@@ -121,6 +157,44 @@ bool sleepSettle(uint v, uint lane, uint steps, bool solo)
         gMisc[h.x + v] = uint4(still, flags, 0u, 0u);
     }
     return reached;
+}
+
+// sleepSettle for a solo vehicle on one thread (the fleet-wide passes' close): the same
+// rule on the same words, the nodes in a row.
+void sleepSettleOne(uint v, uint steps)
+{
+    uint4 h = sleepHdr();
+    float reach = asfloat(h.w);
+    uint4 r0 = gStatic[v * 4u];
+    uint acc = sleepFlags(v);
+    bool moving = gAcc[acc].load() != 0;
+    uint4 rec = gMisc[h.x + v];
+    bool anchored = !moving && (rec.y & SLEEP_ANCHORED) != 0u;
+    bool far = false;
+    if (anchored)
+    {
+        for (uint i = 0u, iStop = EB_END(i, r0.y, 1u); i < iStop && !far; i++)
+        {
+            uint gi = r0.x + i;
+            float3 d = abs(ssub3(gNodes[gi * 3u].xyz, gBeams[sleepAnchor(gi)].xyz));
+            far = !(d.x <= reach && d.y <= reach && d.z <= reach);
+        }
+    }
+    bool displaced = !moving && (!anchored || far);
+    if (displaced)
+    {
+        for (uint i = 0u, iStop = EB_END(i, r0.y, 1u); i < iStop; i++)
+        {
+            uint gi = r0.x + i;
+            gBeams[sleepAnchor(gi)] = float4(gNodes[gi * 3u].xyz, 0.0);
+        }
+    }
+    gAcc[acc].store(0);
+    gAcc[acc + 1u].store(0);
+    uint still = (moving || displaced) ? 0u : min(rec.x + steps, 0x7FFFFFFFu);
+    bool reached = still >= h.y;
+    uint flags = (moving ? 0u : SLEEP_ANCHORED) | (reached ? SLEEP_ASLEEP : 0u);
+    gMisc[h.x + v] = uint4(still, flags, 0u, 0u);
 }
 
 // A contact group's frame start (its members unsorted at off): an awake member wakes
@@ -204,6 +278,26 @@ void explicit_beams_sleep_list(uint3 lid : SV_GroupThreadID)
     uint nv = gP.vehicles;
     uint base = sleepHdr().x;
     uint list = sleepList();
+    // The split paths' listed dispatch (gP.sleepPad0 = 2): a contact group with an awake
+    // member wakes its sleeping members here, as its frame start does (sleepGroupSkip),
+    // so that the list holds them. A lane a group; a vehicle is in one group.
+    if (gP.sleepPad0 == 2u && gP.vvOn != 0u)
+    {
+        for (uint g = lane, gStop = EB_END(g, gArgs[3], 256u); g < gStop; g += 256u)
+        {
+            uint4 G = gMisc[gP.vvGroups + g];
+            bool awake = false;
+            for (uint m = 0u, mStop = EB_END(m, G.y, 1u); m < mStop; m++)
+                awake = awake || (gMisc[base + gNext[gP.vvMembers + G.x + m]].y & SLEEP_ASLEEP) == 0u;
+            if (!awake) continue;
+            for (uint m = 0u, mStop = EB_END(m, G.y, 1u); m < mStop; m++)
+            {
+                uint r = base + gNext[gP.vvMembers + G.x + m];
+                if ((gMisc[r].y & SLEEP_ASLEEP) != 0u) gMisc[r] = uint4(0u, 0u, 0u, 0u);
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
     uint run = 0u;
     for (uint c = 0u, cStop = EB_END_UNIFORM(c, (nv + 255u) / 256u, 1u, EB_MAX_CHUNKS); c < cStop; c++)
     {
@@ -241,6 +335,30 @@ void explicit_beams_sleep_list(uint3 lid : SV_GroupThreadID)
             gArgs[4] = groups == 0u ? 0u : run + groups;
             gArgs[5] = 1u;
             gArgs[6] = 1u;
+        }
+        if (gP.sleepPad0 == 2u)
+        {
+            // The split paths' dispatches (vvArgs' words, from the plan's values it kept
+            // at words 3, 7 and 11): the vehicles' steps over the awake vehicles; the
+            // groups', the tests' and the fleet-wide front's none when no vehicle is awake
+            // (every group then sleeps). Self-collision split's vehicles' dispatch keeps
+            // one workgroup when none is awake (it returns at once: its first workgroup
+            // clears the walk's and pairs' arguments, explicit_beams_selfsplit.slang).
+            gArgs[40] = max(run, 1u);
+            gArgs[41] = 1u;
+            gArgs[42] = 1u;
+            if (gP.vvOn != 0u)
+            {
+                uint groups = gArgs[3];
+                uint on = run == 0u ? 0u : 1u;
+                gArgs[16] = on * groups;
+                gArgs[20] = groups == 0u ? 0u : run;
+                gArgs[24] = on * groups * 64u;
+                gArgs[28] = max(run, 1u);
+                gArgs[32] = on * gArgs[7];
+                gArgs[36] = (on != 0u && groups != 0u) ? 1u : 0u;
+                gArgs[44] = on * gArgs[11];
+            }
         }
     }
     ebLoopCapFlush();

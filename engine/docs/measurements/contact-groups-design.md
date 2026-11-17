@@ -275,8 +275,10 @@ workgroup a group; the members' steps and the tests are what spreads.
 - Groups past four members keep the owner-after-owner pass (`vvPass`) in one workgroup:
   their members' steps spread, their pass does not. A pile-up of more than four cars in
   one component pays it (§6).
-- Vehicle sleep, the test kernel variants and the diagnostic pipelines keep the group's
-  workgroup (the host's `group_split_on`).
+- The test kernel variants and the diagnostic pipelines keep the group's workgroup (the
+  host's `group_split_on`). Vehicle sleep no longer does (2026-11-16): the split path
+  runs sleep's rule as the group's workgroup does, bit for bit
+  (`explicit-vehicles-in-world.md` §10.7).
 - WebGPU only (native wgpu and browsers). Metal and CUDA run the old group path
   (known-bugs P1's table).
 
@@ -430,7 +432,7 @@ measured for the fleet.
 Kernel `engine/slang/kernels/explicit_beams_fleet.slang`; addresses `fl*` in
 `explicit_beams.slang`; perf flags 4096 (`PERF_FLEET_STATE`) and 8192
 (`PERF_FLEET_FRONT`), both on by default; measurements in
-`vehicle-perf-first-principles.md` §8.25. Stage 3 (the levels) is not built: §8.7.
+`vehicle-perf-first-principles.md` §8.25. Stage 3: §8.7.
 
 **Stage 1, the state by vehicle (flag 4096), under the groups' own dispatches.**
 
@@ -496,27 +498,125 @@ A group past `VV_PART` members still takes the larger groups' pass (`vvPass`) in
 own workgroup (a dispatch that has workgroups only when such a group exists), and its
 pairs are no one's partners in the fleet-wide passes (`flVehicleOn`).
 
-### 8.7 Stage 3, not built: what it needs
+### 8.7 Stage 3 (2026-11-16): any size built; the levels across the GPU not
 
-The levels in the group's workgroup are now the largest part of contact after the
-walk (3.2 ms a frame of eight cars at rest), and a group past `VV_PART` is unchanged
-(32 cars: 139–270 ms a frame). What stage 3 has to add, from building the first two:
+Measurements and proofs: `vehicle-perf-first-principles.md` §8.29. Built, both perf flags
+on by default:
 
-- the owners' levels by relaxation over the pairs (one workgroup, a round a barrier)
-  and the hits' prefix (`flPrefixAt(3, v)` is reserved);
+- **Groups of any size on the fleet-wide passes** (16384, `PERF_FLEET_ANY`): the front
+  and tests of 8.6 for every group (`flVehicleOn` for all), and the levels in
+  `fleetLevelsAny` in the group's workgroup for any number of owners. The owners' levels
+  by relaxation (8.3) over the owners with hits only, an owner's partners as two words
+  of bits by member (a group has at most 64); the hits' chains by scan (no workgroup
+  buckets); every visit limited to the owners with hits and the lanes their lists
+  reach. A small group whose owner lists more than 128 hits keeps the small groups'
+  levels (its hits ordered by buckets). The larger groups' pass (`vvPass`) is no longer
+  on the default path. 32 cars: 132–249 → 31–50 ms a frame.
+- **The throttle updates as threads over the fleet** (65536, `PERF_FLEET_POST`): every
+  listed triangle's throttle update and a later owner's reset, a dispatch of a thread
+  each after the listed pairs' tests (they read and write the triangle's own record and
+  marks, nothing a hit touches), out of the first level.
+
+Not built (stage 3c): the levels themselves across the GPU. They are two-thirds of the
+32-car frame (21–35 ms of 31–50), all in the one group's workgroup. What it needs:
+
+- a prefix of the hits by level over the fleet (`flPrefixAt(3, v)` is reserved) and
+  the levels' rounds as one workgroup of the plan;
 - a dispatch a level and phase (application, three residual phases) that knows its
   level: the step's three parameter copies are used up as phases, so levels need
   copies of their own (past `PARAM_COPIES`, a level and phase each) or a module a
-  phase; with L level slots that is 4 L dispatches a substep, empty past the highest
-  level in use, and one workgroup that loops the levels past L (lossless, slow, rare);
-- the hits' chains without the workgroup's buckets (a scan of the owner's hits for a
-  short list, a counting sort in global memory for a long one);
-- the snapshot, the throttle updates and the two-body clears as threads over hits and
-  listed triangles (independent of the levels: these could go first);
-- then `flVehicleOn` for every group, the two-body slot limit as the only bound on
-  partners, and `vvPass` out of the default path.
+  phase reading its level from an argument word the plan writes; with L level slots
+  that is 4 L dispatches a substep, empty past the highest level in use, and one
+  workgroup that loops the levels past L (lossless, slow, rare);
+- within a level nothing is ordered (its owners touch disjoint vehicles); between
+  levels, and along one contact point's chain of hits, the order stays;
+- the snapshot and the two-body clears as threads over hits (they are independent of
+  the levels: before the first and after the last).
 
-### 8.8 The candidates kept across substeps (2026-11-16)
+Built: §8.8.
+
+### 8.8 Stage 3c (2026-11-16): built, bit for bit, off by default
+
+Perf flag 524288 (`PERF_FLEET_LEVELS`, with 4096, 8192, 16384 and 65536); kernel
+`explicit_beams_fleet_levels.slang` (included by `explicit_beams_fleet.slang`), module
+`explicit_beams_split_fleetlevels` (four variants; 124 explicit modules); measurements in
+`vehicle-perf-first-principles.md` §8.32. A substep with it:
+
+| dispatch | module, step word | threads | sized by |
+|---|---|---|---|
+| the groups' levels (`fleetLevelsDefer`) | `split_group`, `SPLIT_LEVELS` | a workgroup a group | the contact plan |
+| the levels' plan (`fleetLevelsPlan`) | `fleet_plan`, `SPLIT_LV \| 5 << 8 \| L` | one workgroup | the contact plan (36) |
+| the snapshot | `fleetlevels`, `SPLIT_LV \| 4 << 8` | a node of a hit | the plan (first buffer, word 16) |
+| level l's hits, then its three residual phases | `fleetlevels`, `SPLIT_LV \| phase << 8 \| l` | a hit of level l | the plan (word 16 + 4 l) |
+| the end (`fleetLevelsEnd`) | `split_group`, `SPLIT_LV \| 6 << 8 \| L` | a workgroup a group | the contact plan |
+
+- **A group's part**: its owners' levels by fleetLevelsAny's rule and rounds; each member
+  marked with the step (gNext after the fleet's counters, `flLvMark`). A group with a hit
+  list past its room, or that takes the small groups' levels (an owner past 128 hits),
+  is marked 0 and keeps its own levels whole, as before.
+- **The plan**: the marked owners with hits by slot (1 .. L, L + 1 for a higher level;
+  within a slot in any order), their hits' prefix, each dispatch's size.
+- **A level's dispatch**: thread g finds its owner by a binary search of the prefix
+  within its slot, then runs the group's own leaf function for that one hit
+  (`vvApplyOrdered` with the hit alone on its lane: the chain of hits on its contact point
+  when it heads one; the residual phases), the owner's state through the address helpers
+  as one owner on the thread (`gFl` 1), its parity and beam-sum tag from its mark.
+- **The end**: levels past L in the group's workgroup (as fleetLevelsAny's), the two-body
+  counts cleared, the owners' records ended, the fleet's arguments zeroed (the levels'
+  too), the frame's end after the last step.
+- **Its parameter copies**: four a slot and three, after the steps' (`PARAM_LEVEL_COPIES`
+  more copies in the buffer: 16 slots at 34 steps), whatever the step: a level dispatch
+  needs no step, each owner's is its mark.
+- **The staged hit kept**: the residual phases' `vvStagedHit` (the hit's geometry and
+  first-pass force) reads nothing a phase writes; phase 0 keeps it (gBeams after the
+  owners' boxes, 4,096 hits a step, past them taken again), phases 1 and 2 load it.
+- **Slots as the levels ask**: a group's levels report its highest level and its owners
+  with hits past it (gAcc's fleet counters 0 and 1, read with the status every 16 frames,
+  zeroed after each read). The frame's slots are the reported highest level when some
+  group had two owners or more in one level, held four reads, else 0: no levels'
+  dispatches, the groups keep their own levels (the copies carry the slots in bits 27 to 31 of
+  the perf flags). `RUBBLE_FLEET_LEVEL_SLOTS=n` fixes them (tests, measurements).
+
+**What it found**: the levels are latency-bound chains, not wide work. Each phase of a
+level waits for its slowest hit, one thread's 25 to 40 µs of dependent loads, and the
+levels of a substep run in turn. Spreading a level's owners across the GPU wins only
+when a level holds several owners (32 cars crashing, t 1 to 4 s: 1 to 4 owners a level,
+7 to 21 % off the frame); late in the 32-car run and at eight cars the levels hold one
+owner each (a chain of 6 to 12 at 32 cars), which the group's one workgroup already runs
+at the same latency without 4 L + 3 more dispatches a substep (2 to 2.4 µs each, empty
+or not). Off by default: not faster over whole runs (§8.32). What would cut the levels
+further is one hit's latency (the staged geometry kept in the group's own levels too, a
+hit's four nodes on four threads), not more parallelism across hits: §8.9.
+
+### 8.9 One hit's latency in the group's levels; two front dispatches fused (2026-11-17)
+
+Kernel `explicit_beams_fleet_hitlat.slang` (included by `explicit_beams_fleet.slang`; no
+new module). Both on by default; measurements in `vehicle-perf-first-principles.md` §8.32.
+
+- **8388608 `PERF_FLEET_HITLAT`** (with 16384): `fleetLevelsLat` in place of
+  `fleetLevelsAny`, the same rule, rounds, order and leaf functions, three changes of how:
+  the group's listed hits flattened over the workgroup's lanes (a lane a hit of the level,
+  whatever its owner: a level's owners side by side, not in turn; a prefix of the owners'
+  hits in `gsOff` past 512, a binary search a lane); the snapshot a lane a node of a hit;
+  and a hit's staged geometry and first-pass force (`vvStagedHit`) taken once in residual
+  phase 0 and kept in the lane's registers for phases 1 and 2 (it reads nothing a phase
+  writes; the lane that stages a hit is the one that finishes it; a lane's second hit,
+  past 512 hits a level, is staged again). A list past its room: `fleetLevelsAny` itself.
+  Not done: a hit's four nodes' forces on four lanes (the four `vvResAcc` loads are
+  already independent in one thread), and the application's staging reused for the
+  residual phases (it is taken in other coordinates: `vvTry` relative to the owner, the
+  staged hit in world coordinates, so the values differ in their last bits).
+- **16777216 `PERF_FLEET_FUSE`** (with 8192): the pairs' scans in the owners' plan's
+  workgroup (its lanes over the plan's pairs, then its prefix as before), and each owner's
+  candidates' sorted copy in its grid's workgroup after its offsets: the same writes from
+  the same functions, two dispatches fewer a substep (the host leaves out the scans' and
+  the sorted copy's). The other front dispatches each wait on a whole earlier dispatch
+  (a prefix over every owner, or every owner's counts) and stay.
+
+The level slots of §8.8 moved to bits 27 to 31 of the copies' perf flags (bit 24 is this
+flag's).
+
+### 8.10 The candidates kept across substeps (2026-11-16)
 
 Perf flag 32768 (`PERF_FLEET_KEEP`, with 8192; off by default; a checkbox on the lab
 page), kernel functions `fk*` in `explicit_beams_fleet.slang`; proofs, measurements and
@@ -640,3 +740,19 @@ past its room or outlived in a few passes; so it stays off (§8.28). The limit t
 remains: one owner past its room sends every owner to the front's own path. A list per
 car (an excluded car's pairs on today's front, the others reused) was built and measured
 slower on both terrains, and reverted (§8.28).
+
+With the fused front (§8.9, `PERF_FLEET_FUSE`) the two share the grids' dispatch: a
+build's owner sorts its own run there after its offsets (`fuseSortCands`, the build's
+`fkSortCandOf`), a pass that reuses the list tests it there as before, and the pairs'
+scans keep their own dispatch while the kept candidates are on (it is also a thread a
+node, `fkTrack`: `fuseScansOn`). Both can be on; `fleet_contact_gpu` checks the kept
+candidates against off with the fused front on (the default).
+
+With the throttles across the fleet (`PERF_FLEET_POST`, §8 stage 3) the kept candidates
+do not combine: that dispatch is sized and indexed by the walk's prefix of the listed
+triangles, which a pass that reuses the kept pairs never computes, so the throttle
+updates of such a pass were skipped (found by `fleet_contact_gpu` on the integration
+branch: two sedans head-on, frame 4, four words). With the kept candidates on, the host
+drops `PERF_FLEET_POST` and the levels across the GPU (`PERF_FLEET_LEVELS`, which leave
+the throttles to that dispatch), and the groups' levels update the listed triangles' throttles
+by each owner's listed count, as before the switch (`flPostOn`).
