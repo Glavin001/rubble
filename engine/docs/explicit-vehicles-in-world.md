@@ -1247,6 +1247,14 @@ together and would need a member frozen inside an awake group); or a stillness t
 that a ringing light node or a swinging panel does not fail (a measured loss either
 way).
 
+**Proofs of the fix** (2026-11-16, the GPU shared with three other sessions): CPU
+`explicit_rigid` 5 (the new BeamNG-contact test fails on the old rule), `energy_ledger` 7;
+GPU suites, all pass: `sleep_fast_gpu` 2, `explicit_sleep_gpu` 3, `group_split_gpu` 3,
+`self_split_gpu` 8, `fleet_contact_gpu` 1, `explicit_beams_bitwise` 12,
+`explicit_loop_cap` 5; engine-world `explicit_vehicles` 11 (the coupling's GPU against
+its CPU reference), `explicit_sleep` 1; Metal `vehicle_parity` 4. `sleep-check.sh`: every
+check "state bit for bit: true". Chrome: all 116 modules compile.
+
 ## 11. The vehicles in the World broadphase (2026-11-06)
 
 Branch `feat/softbody-world-broadphase`; measurements in
