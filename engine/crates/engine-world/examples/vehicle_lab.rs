@@ -1320,6 +1320,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // groupsplit` compares the sleep words too (the split paths against a workgroup a
     // group, the reference for sleep's rule).
     let sleep_ab = arg("--ab-switch").as_deref() == Some("sleep");
+    // `--ab-switch vvgrid`: vehicle contact's candidate grid (`set_vv_grid`, with it the
+    // state by owner vehicle and the fleet-wide front) against every candidate tested.
+    let vvgrid_ab = arg("--ab-switch").as_deref() == Some("vvgrid");
     let sleeplist_ab = arg("--ab-switch").as_deref() == Some("sleeplist");
     let sleep_cfg = options(&script).vehicle_sleep_cfg;
     let kernel_ab = arg("--ab-switch").as_deref() == Some("kernel");
@@ -1336,6 +1339,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             x.set_sleep(on);
         } else if sleeplist_ab {
             x.set_sleep_listing(on);
+        } else if vvgrid_ab {
+            x.set_vv_grid(on);
         } else if fused_ab {
             x.set_wide(true);
             x.set_wide_list(true);
@@ -1410,6 +1415,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         // (AB_PRE=k: k frames of 34 steps with the run's own flags first, the A/B from the
         // state after them: a fixture's first differing frame found, then checked alone.)
         let pre: u32 = std::env::var("AB_PRE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        // (AB_SPLIT_ABLATE=M: the split path's measurement word for every frame after.)
+        if let Some(m) = std::env::var("AB_SPLIT_ABLATE").ok().and_then(|v| v.parse::<u32>().ok()) {
+            x.set_split_ablation(m);
+        }
         for _ in 0..pre {
             x.frame(34);
         }
@@ -2396,7 +2405,118 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     // summary's counts are then of the last frame alone.)
                     if env_u("AB_EACH", 0) != 0 {
                         let fk = x.take_fleet_keep_stats();
-                        println!("     frame ({}): {:.2} ms, builds {} (calm {}, between {}, cover {}), reused {}, own path {}", if on { "on" } else { "off" }, dt * 1e3, fk[0], fk[5], fk[9], fk[6], fk[1], fk[3]);
+                        println!("     frame ({}): {:.2} ms, builds {} (calm {}, between {}, cover {}), reused {}, own path {}; contact status {:?}", if on { "on" } else { "off" }, dt * 1e3, fk[0], fk[5], fk[9], fk[6], fk[1], fk[3], x.contact_status());
+                        // (AB_EACH=2: each car's self-collision hits of the last step, its
+                        // nodes' span (m), the non-finite nodes, and the contact groups.)
+                        if env_u("AB_EACH", 0) == 2 {
+                            let pos = x.positions();
+                            let vel = x.velocities();
+                            let spans: Vec<String> = pos
+                                .iter()
+                                .zip(&vel)
+                                .map(|(p, u)| {
+                                    let (lo, hi) = p.iter().filter(|q| q.is_finite()).fold((glam::Vec3::MAX, glam::Vec3::MIN), |(a, b), q| (a.min(*q), b.max(*q)));
+                                    let bad = p.iter().filter(|q| !q.is_finite()).count();
+                                    let fast = u.iter().map(|q| q.length()).fold(0.0f32, f32::max);
+                                    format!("{:.0}m/{bad}nf/{fast:.0}m/s", (hi - lo).max_element())
+                                })
+                                .collect();
+                            println!("       self hits {:?}; spans {}; groups {:?}", x.self_hit_counts(), spans.join(" "), x.contact_group_sizes());
+                        }
+                        // (AB_NODE=V:I: car V's node I, its collision triangles (longest
+                        // edge, throttles, every other car's node inside one within 0.1 m of
+                        // its plane, with the weights), and its beams (broken or not; those
+                        // now longer than a metre in full).)
+                        if let Some((nv_, ni_)) = std::env::var("AB_NODE").ok().and_then(|s| {
+                            let (a, b) = s.split_once(':')?;
+                            Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
+                        }) {
+                            let pos = x.positions();
+                            let vel = x.velocities();
+                            println!("       node {nv_}:{ni_}: v {:?} at {:?}", vel[nv_][ni_], pos[nv_][ni_]);
+                            let p = &pos[nv_];
+                            let tris: Vec<String> = template
+                                .triangles
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, t)| t.nodes.contains(&(ni_ as u32)))
+                                .map(|(k, t)| {
+                                    let [a, b, c] = t.nodes.map(|n| p[n as usize]);
+                                    format!("tri {k} {:?} longest edge {:.2} m", t.nodes, a.distance(b).max(b.distance(c)).max(c.distance(a)))
+                                })
+                                .collect();
+                            println!("         its triangles: {}", tris.join("; "));
+                            let thr = x.contact_throttles();
+                            let near: Vec<String> = template
+                                .triangles
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, t)| t.nodes.contains(&(ni_ as u32)))
+                                .map(|(k, _)| format!("{k}: {:?}", thr[nv_].get(k)))
+                                .collect();
+                            println!("         their throttles (wait, idle): {}", near.join(", "));
+                            for (k, t) in template.triangles.iter().enumerate().filter(|(_, t)| t.nodes.contains(&(ni_ as u32))) {
+                                let [p0, p1, p2] = t.nodes.map(|n| p[n as usize]);
+                                let (u, w) = (p1 - p0, p2 - p0);
+                                let n = u.cross(w).normalize();
+                                let det = u.dot(w.cross(n));
+                                let (ra, rb) = (w.cross(n) / det, n.cross(u) / det);
+                                for (o, q) in pos.iter().enumerate().filter(|(o, _)| *o != nv_) {
+                                    for (j, y) in q.iter().enumerate() {
+                                        let d = *y - p0;
+                                        let (a, b) = (ra.dot(d), rb.dot(d));
+                                        let g = 1.0 - a - b;
+                                        let dist = n.dot(d);
+                                        if a >= 0.0 && b >= 0.0 && g >= 0.0 && dist.abs() < 0.1 {
+                                            println!("           tri {k} {:?}: car {o} node {j} inside, plane distance {dist:.4}, weights (n0 {g:.4}, n1 {a:.4}, n2 {b:.4})", t.nodes);
+                                        }
+                                    }
+                                }
+                            }
+                            let beams = x.beams();
+                            let mine: Vec<String> = template
+                                .beams
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, b)| b.a as usize == ni_ || b.b as usize == ni_)
+                                .map(|(k, b)| format!("{k} {}-{}{}", b.a, b.b, if beams[nv_][k].broken { " broken" } else { "" }))
+                                .collect();
+                            println!("         its beams: {}", mine.join(", "));
+                            for (k, b) in template.beams.iter().enumerate().filter(|(_, b)| (b.a as usize == ni_ || b.b as usize == ni_)) {
+                                let len = pos[nv_][b.a as usize].distance(pos[nv_][b.b as usize]);
+                                if len > 1.0 {
+                                    println!("           beam {k}: {:?} {:?} k {} c {} rest {} strength {} limit_k {} bounds {}..{} group {} shock {}; now {len:.1} m, rest now {}", b.kind, b.ty, b.k, b.c, b.rest0, b.strength, b.limit_k, b.short_bound, b.long_bound, b.group, b.shock, beams[nv_][k].rest);
+                                }
+                            }
+                        }
+                        // (AB_EACH=3: each car's three fastest nodes, where they are, and
+                        // the nearest node of another car.)
+                        if env_u("AB_EACH", 0) == 3 {
+                            let pos = x.positions();
+                            let vel = x.velocities();
+                            for (v, (p, u)) in pos.iter().zip(&vel).enumerate() {
+                                let mut by: Vec<usize> = (0..u.len()).collect();
+                                by.sort_by(|&a, &b| u[b].length().total_cmp(&u[a].length()));
+                                for &i in by.iter().take(3) {
+                                    let near = pos
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(w, _)| *w != v)
+                                        .flat_map(|(w, q)| q.iter().enumerate().map(move |(j, y)| (w, j, *y)))
+                                        .map(|(w, j, y)| (y.distance(p[i]), w, j))
+                                        .fold((f32::MAX, 0, 0), |a, b| if b.0 < a.0 { b } else { a });
+                                    println!(
+                                        "       car {v} node {i}: v {:.1} m/s {:?} at {:?}; nearest other car {} node {} at {:.3} m",
+                                        u[i].length(),
+                                        u[i],
+                                        p[i],
+                                        near.1,
+                                        near.2,
+                                        near.0
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 let ms = sum * 1e3 / f64::from(frames);
@@ -2499,6 +2619,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     "vehicle sleep"
                 } else if sleeplist_ab {
                     "sleep listing"
+                } else if vvgrid_ab {
+                    "vehicle contact grid"
                 } else if wide_ab {
                     "wide passes"
                 } else if perf_ab.is_some() {
