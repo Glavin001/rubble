@@ -18,7 +18,7 @@
 import * as THREE from 'three/webgpu';
 import {
   Fn, storage, instanceIndex, attribute, vec3, vec4, float, uint, varying, positionLocal, normalLocal,
-  cameraViewMatrix, floatBitsToUint, uniform, mix, hash, select, normalize, cross, dot, length, clamp, fract, abs,
+  cameraViewMatrix, floatBitsToUint, uniform, mix, hash, select, normalize, cross, dot, length, clamp, fract, abs, positionWorld, smoothstep, max, step, sin,
 } from 'three/tsl';
 
 /** Engine record layouts in vec4 units (engine-schema `Body`, 112 bytes; `Collider`, 64). */
@@ -52,7 +52,13 @@ export const DEFAULT_LOOKS = {
   glass: { color: 0x9fc6d6, vary: 0.05, roughness: 0.05, metalness: 0, opacity: 0.45 },
   steel: { color: 0xa8adb3, vary: 0.05, roughness: 0.35, metalness: 0.9 },
   ball: { color: 0xc0c6cf, vary: 0, roughness: 0.3, metalness: 0.8 },
-  ground: { color: 0x3a3f46, vary: 0, roughness: 0.95, metalness: 0 },
+  // Static geometry: walls, ramps, slabs.
+  ground: { color: 0x8d8a84, vary: 0.08, roughness: 0.92, metalness: 0, grid: 2 },
+  // Vehicles' rigid parts: a car paint per body from the palette.
+  vehicle: { palette: [0xc0392b, 0x2e86c1, 0xf1c40f, 0x27ae60, 0xecf0f1, 0x34495e, 0xe67e22, 0x8e44ad], roughness: 0.38, metalness: 0.35 },
+  character: { color: 0x3b82f6, vary: 0, roughness: 0.6, metalness: 0 },
+  // The ground plane: a two-tone grid in world space.
+  plane: { color: 0x4b5157, color2: 0x555c63, line: 0x6b737b, cell: 4, roughness: 0.95, metalness: 0 },
 };
 
 /** Debug colourings shared by every group (`rubble.colorMode`). */
@@ -228,8 +234,16 @@ export class RubbleThree {
     // Planes: a large quad on each (`normal · x = offset`), in the ground look.
     for (const pl of manifest.planes) {
       const n = new THREE.Vector3(...pl.normal).normalize();
-      const look = this.looks.ground;
-      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshStandardNodeMaterial({ color: look.color, roughness: look.roughness, metalness: look.metalness }));
+      const look = this.looks.plane;
+      const material = new THREE.MeshStandardNodeMaterial({ roughness: look.roughness, metalness: look.metalness });
+      const c = (hex) => { const k = new THREE.Color(hex); return vec3(k.r, k.g, k.b); };
+      // Checker cells with soft grid lines (positionWorld: the plane's own frame is world).
+      const uv = positionWorld.xz.div(look.cell);
+      const g = abs(fract(uv).sub(0.5));
+      const line = smoothstep(0.46, 0.5, max(g.x, g.y));
+      const checker = step(0, sin(uv.x.mul(Math.PI)).mul(sin(uv.y.mul(Math.PI))));
+      material.colorNode = mix(mix(c(look.color), c(look.color2), checker), c(look.line), line.mul(0.6));
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), material);
       mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
       mesh.position.copy(n).multiplyScalar(pl.offset);
       mesh.receiveShadow = this.receiveShadow;
@@ -291,6 +305,8 @@ export class RubbleThree {
     return this._material(geometry, g, ctx, collider, local, () => normalLocal);
   }
 
+  _rgb(hex) { const c = new THREE.Color(hex); return [c.r, c.g, c.b]; }
+
   _material(geometry, g, ctx, collider, local, localNormal) {
     const look = this.looks[g.tag] ?? this.looks.default;
     const material = new THREE.MeshStandardNodeMaterial({
@@ -313,13 +329,26 @@ export class RubbleThree {
     const worldNormal = quatRotate(bodyRot, quatRotate(localRot, localNormal(params)));
     material.positionNode = worldPos;
     material.normalNode = varying(normalize(cameraViewMatrix.mul(vec4(worldNormal, 0)).xyz));
-    const base = new THREE.Color(look.color);
-    const tint = varying(hash(bodyIdx).mul(2).sub(1).mul(look.vary ?? 0));
-    const lit = vec3(base.r, base.g, base.b).mul(tint.mul(0.5).add(1));
+    let lit;
+    if (look.palette) {
+      // One paint per body, picked from the palette by the body's index.
+      const pick = varying(hash(bodyIdx).mul(look.palette.length).floor());
+      lit = vec3(...this._rgb(look.palette[0]));
+      for (let k = 1; k < look.palette.length; k++) lit = select(pick.greaterThanEqual(float(k)), vec3(...this._rgb(look.palette[k])), lit);
+    } else {
+      const tint = varying(hash(bodyIdx).mul(2).sub(1).mul(look.vary ?? 0));
+      lit = vec3(...this._rgb(look.color)).mul(tint.mul(0.5).add(1));
+    }
     const asleep = floatBitsToUint(b2.w).bitAnd(uint(4)).notEqual(uint(0));
     const sleepColor = varying(select(asleep, vec3(0.28, 0.48, 0.82), vec3(0.95, 0.58, 0.16)));
     const speed = varying(clamp(length(b3.xyz).div(3), 0, 1));
     const speedColor = mix(vec3(0.22, 0.32, 0.48), vec3(0.95, 0.22, 0.16), speed);
+    if (look.grid) {
+      // Static surfaces: a faint world-space grid, so motion over them reads.
+      const uv = positionWorld.xz.div(look.grid);
+      const g = abs(fract(uv).sub(0.5));
+      lit = mix(lit, lit.mul(1.18), smoothstep(0.47, 0.5, max(g.x, g.y)));
+    }
     material.colorNode = select(this.colorMode.equal(uint(1)), sleepColor,
       select(this.colorMode.equal(uint(2)), speedColor, lit));
     return new THREE.Mesh(geometry, material);

@@ -82,6 +82,11 @@ impl RigidSceneDef {
         p.sleep_lin = s.sleep_lin.unwrap_or(0.15) as f32;
         p.sleep_ang = s.sleep_ang.unwrap_or(0.15) as f32;
         p.sleep_time = s.sleep_time.unwrap_or(0.5) as f32;
+        // The ring's measured default (demo.html's, now the scene's own): sparse colouring
+        // from colour 10; every other scene keeps the engine default (32).
+        if self.scene == "ring110k" {
+            def.features.sparse_colors = 10;
+        }
         Ok(def)
     }
 

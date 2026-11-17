@@ -15,7 +15,7 @@ const HELP = {
   bullets: '<kbd>F</kbd> fire · <kbd>R</kbd> reset · drag to orbit',
 };
 
-export async function setup({ world, placed, sceneDef, ui, aim: shellAim, lookFrom, setShadowRadius, camera, controls }) {
+export async function setup({ world, placed, sceneDef, ui, aim: shellAim, lookFrom, setShadowRadius, camera, controls: orbit }) {
   const scene = sceneDef.scene;
   const shotSpeed = sceneDef.speed, lookAhead = sceneDef.lookAhead;
   // Menus: scene, shot speed, look-ahead (each reloads with its switch).
@@ -199,7 +199,7 @@ export async function setup({ world, placed, sceneDef, ui, aim: shellAim, lookFr
     if (scene === 'character' && S.motion?.characters[S.player]) {
       const p = S.motion.characters[S.player].position;
       const k = Math.min(1, dt * 8);
-      const t = controls.target;
+      const t = orbit.target;
       const dx = (p[0] - t.x) * k, dy = (p[1] + 0.8 - t.y) * k, dz = (p[2] - t.z) * k;
       t.set(t.x + dx, t.y + dy, t.z + dz);
       camera.position.set(camera.position.x + dx, camera.position.y + dy, camera.position.z + dz);

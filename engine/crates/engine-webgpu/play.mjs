@@ -6,7 +6,8 @@
 // HUD fields, camera and checks.
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { createScene, sceneFromQuery, presetList, pollFrame, stepFrames, errorText } from './rubble-world.mjs';
+import { positionWorldDirection, mix, color, smoothstep } from 'three/tsl';
+import { createScene, sceneFromQuery, presetList, pollFrame, stepFrames, drain, macrotask, errorText } from './rubble-world.mjs';
 import { RubbleThree } from './rubble-three.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -60,11 +61,17 @@ if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
 const family = await import(`./play-${preset.family}.mjs`);
 const sceneDef = await sceneFromQuery(preset.family, query);
 statusEl.textContent = 'building the world…';
-const world = await createScene(sceneDef, { gpuTiming: 'step', ...(family.settings?.(sceneDef) ?? {}) });
+// GPU step timing (the HUD's GPU ms) when the adapter has timestamp queries.
+const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+const settings = { gpuTiming: adapter?.features.has('timestamp-query') ? (qs.get('timing') ?? 'step') : 'off', ...(family.settings?.(sceneDef) ?? {}) };
+// A family may build its own world (the rigid family's snapshot scenes); otherwise the
+// scene's world, placed in Rust.
+const made = await family.create?.(sceneDef, settings);
+const world = made?.world ?? await createScene(sceneDef, settings);
 const device = world.device();
 device.lost.then((i) => fail('device lost: ' + i.message));
 device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
-const placed = world.placeScene(sceneDef);
+const placed = made ? made.placed : world.placeScene(sceneDef);
 
 // ---------------------------------------------------------------- three.js on the World's device
 const renderer = new THREE.WebGPURenderer({ device, antialias: true });
@@ -77,9 +84,13 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 document.body.prepend(renderer.domElement);
 
 const view = new THREE.Scene();
-const sky = new THREE.Color(0x9fb3c8);
-view.background = sky;
-view.fog = new THREE.Fog(sky, 200, 900);
+const sky = new THREE.Color(0xb7c6d6);
+// A sky gradient from the horizon (the fog's colour) up to the zenith.
+{
+  const dirY = positionWorldDirection.y;
+  view.backgroundNode = mix(color(0xb7c6d6), color(0x5d86b8), smoothstep(0.0, 0.6, dirY));
+}
+view.fog = new THREE.Fog(sky, 250, 1100);
 view.add(new THREE.HemisphereLight(0xe8f0ff, 0x4a4032, 1.25));
 const sun = new THREE.DirectionalLight(0xfff1dc, 2.8);
 sun.castShadow = true;
@@ -174,6 +185,17 @@ const aim = () => {
 scene = await family.setup({
   world, placed, sceneDef, preset, THREE, view, camera, controls, rubble, renderer, ui, held, aim, lookFrom,
   setShadowRadius: (r) => { shadowRadius = r; },
+  counters: () => counters,
+  // One step as soon as a readback slot is free, no drain (checks submit steps this way,
+  // as demo.html's did), and a drain of every step taken.
+  stepOne: async () => {
+    manual = true;
+    while (!world.canStep()) { await macrotask(); pollFrame(world, onFrame); }
+    scene?.beforeStep?.();
+    world.step();
+    pollFrame(world, onFrame);
+  },
+  drain: () => drain(world, onFrame),
 });
 placeSun();
 
@@ -191,7 +213,8 @@ function draw() {
   placeSun();
   renderer.render(view, camera);
 }
-let manual = false;
+// ?paused=1: the loop draws but takes no steps until __run() (checks start from the placed state).
+let manual = qs.get('paused') === '1';
 let lastT = performance.now(), fpsAcc = 0, fpsN = 0, fps = 0;
 function frame() {
   const now = performance.now();
