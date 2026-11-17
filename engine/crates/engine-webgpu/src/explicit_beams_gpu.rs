@@ -5308,6 +5308,8 @@ mod self_split_tests {
                             assert!(copy <= steps && copy < plan::PARAM_COPIES);
                             assert!(x.binds_args());
                         }
+                        // (The wide passes' list dispatch: not in this schedule.)
+                        SelfDispatch::List { .. } => panic!("a list dispatch in the self split schedule"),
                         SelfDispatch::Walk { copy, offset } | SelfDispatch::Pairs { copy, offset } => {
                             assert!(!x.binds_args(), "an indirect dispatch binds its arguments");
                             assert!(copy < steps);

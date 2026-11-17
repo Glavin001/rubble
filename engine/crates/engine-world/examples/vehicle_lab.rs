@@ -1435,18 +1435,24 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             // 32768 buckets and application, 65536 snapshot, 131072 throttle updates.
             if let Some(masks) = arg("--ab-split-ablate") {
                 let mut line = Vec::new();
-                for m in masks.split(',').filter_map(|m| m.parse::<u32>().ok()) {
+                // (`M:M2`: with the second measurement word M2 as well, `set_ablation2`.)
+                for entry in masks.split(',') {
+                    let mut parts = entry.split(':').map(|p| p.parse::<u32>().ok());
+                    let Some(Some(m)) = parts.next() else { continue };
+                    let m2 = parts.next().flatten().unwrap_or(0);
                     x.restore(&snap);
                     x.set_split_ablation(m);
+                    x.set_ablation2(m2);
                     x.wait();
                     let t = std::time::Instant::now();
                     for _ in 0..20 {
                         x.frame(34);
                         x.wait();
                     }
-                    line.push(format!("{m}: {:.2}", t.elapsed().as_secs_f64() * 1e3 / 20.0));
+                    line.push(format!("{entry}: {:.2}", t.elapsed().as_secs_f64() * 1e3 / 20.0));
                 }
                 x.set_split_ablation(0);
+                x.set_ablation2(0);
                 x.restore(&snap);
                 println!("   split ablation at t {:.1} (ms a frame): {}", lab.bench.t, line.join(", "));
             }
@@ -2172,6 +2178,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             if std::env::args().any(|a| a == "--ab-profile") {
                 x.restore(&snap);
                 x.set_self_split(true);
+                // (AB_PROFILE_A2=M2: with the second measurement word, time only.)
+                x.set_ablation2(std::env::var("AB_PROFILE_A2").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
                 x.wait();
                 let mut sums: Vec<(&str, f64, u32)> = Vec::new();
                 let t = std::time::Instant::now();
@@ -2188,6 +2196,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     }
                 }
                 let wall = t.elapsed().as_secs_f64() * 1e3 / f64::from(frames.max(1));
+                x.set_ablation2(0);
                 let f = f64::from(frames.max(1));
                 println!(
                     "   self split profile at t {:.1} ({frames} frames, ms/frame, dispatches/frame): {}; wall {wall:.2}",
