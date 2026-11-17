@@ -81,6 +81,7 @@
       <div class="row">
         <label class="muted" for="car">Car</label><select id="car" data-opt="build"></select>
         <label class="muted" for="res" title="The authored sedan's model detail: how many nodes and beams its body has (low is the fastest; high the finest crumpling). The generated sedan has one version. Rebuilds the simulation in place.">Detail</label><select id="res" data-opt="build"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>
+        <label class="muted" for="visual" title="The generated sedan's drawn mesh (car detail): full, or a lighter render of the same design (its body meshed coarser, about half the vertices and skin entries, bound to the same nodes; the physics is the same car). Auto: full, unless this device's memory or GPU limits cannot hold it (then the lighter one, and the status line says why). Rebuilds the lab in place.">Car detail</label><select id="visual" data-opt="build"><option value="auto">auto</option><option value="full">full</option><option value="lite">lighter</option></select>
         <label class="muted" for="cam">Camera</label><select id="cam" data-opt="live"></select>
         <span id="followRow"><label class="muted" for="follow" title="Which car the camera follows (V cycles). The readouts are the first car's. Applies as it runs.">follows</label><select id="follow" data-opt="live"><option value="0">car 1</option></select></span>
       </div>
@@ -274,7 +275,8 @@
     import { createVehicleLab, loadWasm, showcaseCar, pollFrame, stepFrames, errorText, FramePacer } from './rubble-world.mjs';
     import { createShowcaseCarRenderer } from './showcase-car-render.mjs';
     import { createCrashLabRenderer } from './crash-lab-render.mjs';
-    import { loadMod, modVisual, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
+    import { loadMod, modVisual, modVisualApart, modModels, releaseModels, modTextures, modModelSizes, modFootprint, footprintCheck } from './beamng-mod.mjs';
+    import { trackGpuAllocations, gpuErrorText, gpuPhase } from './gpu-errors.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
     import { createStabilityStop } from './stability-stop.mjs';
@@ -286,6 +288,8 @@
     const fail = (e) => { errEl.textContent = errorText(e); window.__failed = String(e?.message ?? e); console.error(e); };
     const warn = (e) => { errEl.textContent = String(e?.message ?? e); setTimeout(() => { if (!window.__failed) errEl.textContent = ''; }, 5000); };
     if (!navigator.gpu) { fail('WebGPU is not available in this browser'); throw new Error('no WebGPU'); }
+    // Every buffer and texture's label and size, for a GPU error's words (gpu-errors.mjs).
+    trackGpuAllocations();
     const progress = (text) => { busyEl.textContent = text; busyEl.style.display = text ? 'block' : 'none'; statusEl.textContent = text || statusEl.textContent; };
 
     // ---------------------------------------------------------------- options: controls ↔ URL
@@ -341,6 +345,7 @@
     const shapeUi = () => {
       // The model detail is the authored sedan's; the generated sedan and the mods have one version.
       $('res').disabled = get('car') !== 'sedan';
+      $('visual').disabled = get('car') === 'sedan';
       const s = get('shape'); $('dimBox').style.display = s === 'box' ? '' : 'none'; $('dimR').style.display = s === 'box' ? 'none' : ''; $('dimL').style.display = $('cylAxis').style.display = s === 'cylinder' ? '' : 'none';
       const k = get('crashKind'); $('rowOverlap').style.display = k === 'offset' ? '' : 'none'; $('rowOffset').style.display = k === 'pole' || k === 'sidepole' ? '' : 'none'; $('rowAngle').style.display = k === 'wall' || k === 'offset' ? '' : 'none';
       document.body.classList.toggle('clean', get('clean') || RECORD);
@@ -411,10 +416,41 @@
     const PAINTS = [[0.6, 0.04, 0.03], [0.02, 0.12, 0.42], [0.7, 0.45, 0.02], [0.03, 0.3, 0.1], [0.55, 0.55, 0.57], [0.25, 0.03, 0.35], [0.02, 0.35, 0.4], [0.05, 0.05, 0.06]];
     const carCache = new Map();
     const waived = new Set();
+    // The drawn mesh of a generated car (the "Car detail" control): 'full' or 'lite'
+    // (beamng-mod.mjs modModelNames: the same design meshed coarser, bound to the same
+    // nodes; the physics files are the same). Auto picks full unless this device cannot
+    // hold it: its footprint (modFootprint) over the memory the browser reports or the
+    // GPU's buffer limits; or a phone or tablet's WebKit (iOS: every browser there),
+    // which reports no memory and closes a tab, or refuses its GPU buffers
+    // (GPUOutOfMemoryError), well before the full car's ~1.5 GB with its GPU memory
+    // (engine/docs/measurements/lab-load-memory.md); or the full car's build ran out
+    // of GPU memory here before (`outOfMemory`). `{ detail, why }`.
+    const outOfMemory = new Set();
+    const appleMobile = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    // Cars on a device the auto detail found short of memory (the status line says so).
+    const SMALL_DEVICE_CARS = 1;
+    let smallDevice = '';
+    async function detailOf(kind) {
+      const m = MODS[kind], want = get('visual');
+      const full = await modModelSizes(m.base, 'full');
+      if (!full.hasLite) return { detail: 'full', why: '' };
+      if (want === 'full' || want === 'lite') return { detail: want, why: '' };
+      if (outOfMemory.has(kind)) return { detail: 'lite', why: `the full ${m.name} ran out of GPU memory on this device` };
+      const adapter = await navigator.gpu.requestAdapter().catch(() => null);
+      const check = footprintCheck(modFootprint(full), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
+      if (!check.fits) return { detail: 'lite', why: check.message };
+      if (!navigator.deviceMemory && appleMobile()) return { detail: 'lite', why: 'this phone or tablet does not say how much memory a tab may use, and iOS closes the tab or refuses its GPU memory before the full car fits' };
+      return { detail: 'full', why: '' };
+    }
     async function carOf(kind) {
       // The authored sedan has three model details (its node and beam counts): each is its own car.
-      const key = kind === 'sedan' ? `sedan:${get('res')}` : kind;
+      // A generated car's two drawn meshes are two entries (the physics files are the same).
+      const chosen = kind === 'sedan' ? null : await detailOf(kind);
+      smallDevice = chosen?.why ?? '';
+      const key = kind === 'sedan' ? `sedan:${get('res')}` : `${kind}:${chosen.detail}`;
       if (carCache.has(key)) return carCache.get(key);
+      // The other drawn mesh of this car, if it was loaded, is dropped (a phone cannot keep both).
+      for (const k of [...carCache.keys()]) if (k.startsWith(`${kind}:`)) carCache.delete(k);
       const t = performance.now();
       let entry;
       if (kind === 'sedan') {
@@ -427,20 +463,28 @@
         // Before downloading it: whether it fits this device (its estimated footprint
         // against navigator.deviceMemory, where given, and the GPU's limits). A car
         // that does not is refused with the numbers (fail(), the banner) and a button
-        // to load it anyway, never loaded smaller.
+        // to load it anyway. (Its drawn mesh is the one detailOf chose: auto picks the
+        // lighter one only where the full one does not fit; the physics is the same.)
         if (!waived.has(kind)) {
           progress(`checking that the ${m.name} fits this device…`);
           const adapter = await navigator.gpu.requestAdapter().catch(() => null);
-          const check = footprintCheck(modFootprint(await modModelSizes(m.base)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
+          const check = footprintCheck(modFootprint(await modModelSizes(m.base, chosen.detail)), { deviceMemory: navigator.deviceMemory, limits: adapter?.limits ?? null, name: m.name });
           if (!check.fits) throw Object.assign(new Error(check.message), { footprint: kind });
         }
         progress(`downloading the ${m.name}…`);
-        const mod = await loadMod(m.base, { pc: m.pc });
+        const mod = await loadMod(m.base, { pc: m.pc, detail: chosen.detail });
         progress(`binding the ${m.name}'s body to its nodes…`); await new Promise((r) => setTimeout(r));
         // The model files (a generated car's glb and rskin, ~140 MB) are dropped once a
         // visual is built and fetched again (the HTTP cache) for another paint.
-        const make = async (paint) => { await modModels(mod); try { return modVisual(mod, { native: true, raycast: true, paint }); } finally { releaseModels(mod); } };
-        entry = { kind, name: m.name, visuals: [await make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: mod.modelBytes };
+        // Each visual is built in a worker of its own (modVisualApart): the wasm heap
+        // the build grows (~530 MB for the generated sedan) goes with the worker.
+        const make = async (paint) => {
+          await modModels(mod);
+          try { return await modVisualApart(mod, { native: true, raycast: true, paint }); }
+          catch (e) { console.warn('the visual\'s worker failed; building it on the page', e); await modModels(mod); return modVisual(mod, { native: true, raycast: true, paint }); }
+          finally { releaseModels(mod); }
+        };
+        entry = { kind, name: m.name, visuals: [await make(PAINTS[0])], make, vehicle: { jbeam: mod.files, pc: mod.pc }, mod, textures: null, bytes: mod.modelBytes, detail: mod.detail };
       }
       entry.loadMs = performance.now() - t;
       carCache.set(key, entry);
@@ -467,7 +511,7 @@
       else autoQuiet = 0;
       if (autoScale !== was) configure();
     }
-    let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0;
+    let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0, buildGen = 0;
     const scene = () => (mode === 'mountain' ? 'mountain' : 'flat');
     const mountainSpec = () => ({ terrain: get('terrain'), seed: get('seed'), steepness: get('steepness'), roughness: get('roughness'), launch: get('launch'), loose: get('loose'), rockslide: get('rockslide'), start: get('start') });
     const configure = () => {
@@ -487,9 +531,12 @@
       // The loading card: each kernel's compile as Rust reports it (load-progress.mjs).
       const loading = createLoading({ title: 'Loading the vehicle lab' });
       loading.stage('Building the car');
+      let buildingCar = null;
       try {
-        const car = await carOf(get('car'));
-        const nCars = Math.min(8, Math.max(1, Math.round(get('cars') || 1))), n = nCars + (get('parked') ? 1 : 0);
+        const car = buildingCar = await carOf(get('car'));
+        // A device the auto detail found short of memory runs SMALL_DEVICE_CARS (the status says so).
+        const asked = Math.min(8, Math.max(1, Math.round(get('cars') || 1)));
+        const nCars = smallDevice ? Math.min(SMALL_DEVICE_CARS, asked) : asked, n = nCars + (get('parked') ? 1 : 0);
         // The second car's paint: built when first asked for (kept, like the first).
         while (car.visuals.length < Math.min(n, PAINTS.length)) { progress(`building another ${car.name}'s body…`); await new Promise((r) => setTimeout(r)); car.visuals.push(await car.make(PAINTS[car.visuals.length])); }
         const vis0 = car.visuals[0].visual;
@@ -502,22 +549,30 @@
         };
         progress(`compiling the ${car.name}'s kernels and building the lab…`);
         const old = W; W = null;
+        // The previous World and renderers go first: a phone cannot hold two.
+        try { old?.cars.destroy(); old?.lab.free(); old?.world.free(); } catch (e) { console.warn(e); }
         const { world, lab, materials } = await createVehicleLab(spec, loading.progress);
         loading.stage('Building the renderers');
-        try { old?.cars.destroy(); old?.lab.free(); old?.world.free(); } catch (e) { console.warn(e); }
         const device = world.device();
         device.lost.then((i) => { if (W?.device === device) lost(i.message); });
-        device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+        // An error after the build: its kind, the browser's text (WebKit's out-of-memory
+        // error can have none), what was created last, the device's buffer limits.
+        // (Errors of a device a later build replaced are not this one's.)
+        const gen = ++buildGen;
+        device.addEventListener('uncapturederror', (e) => { if (gen !== buildGen) return; fail(gpuErrorText(e.error, device)); if (e.error?.constructor?.name === 'GPUOutOfMemoryError') outOfMemoryRetry(car); });
         // The ground slab (the World's first collider) is left to the renderer's ground.
-        const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, firstCollider: 1, sphereCols: 2048 });
-        const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'] });
-        cars.setSolver(world.explicitNodesBuffer(), world.explicitMiscBuffer(), world.explicitBeamsBuffer());
-        if (car.mod) {
-          progress('decoding the textures…');
-          car.textures ??= await Promise.all([modTextures(car.mod, vis0.textures), modTextures(car.mod, vis0.dataTextures)]);
-          if (car.textures[0].length) cars.setTextures(car.textures[0], 1024);
-          if (car.textures[1].length) cars.setDataTextures(car.textures[1], 1024);
-        }
+        const { env, cars } = await gpuPhase(device, `building the ${car.name}'s renderers`, async () => {
+          const env = createSceneRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, firstCollider: 1, sphereCols: 2048 });
+          const cars = createShowcaseCarRenderer(device, { format, depthFormat: DEPTH, sampleCount: SAMPLES, perfSkip: ['reflect'] });
+          cars.setSolver(world.explicitNodesBuffer(), world.explicitMiscBuffer(), world.explicitBeamsBuffer());
+          if (car.mod) {
+            progress('decoding the textures…');
+            car.textures ??= await Promise.all([modTextures(car.mod, vis0.textures), modTextures(car.mod, vis0.dataTextures)]);
+            if (car.textures[0].length) cars.setTextures(car.textures[0], 1024);
+            if (car.textures[1].length) cars.setDataTextures(car.textures[1], 1024);
+          }
+          return { env, cars };
+        }).catch((e) => { try { world.free(); lab.free(); } catch {} throw e; });
         const spans = world.explicitSpans();
         const [nOff, nSize, oOff, oSize, cOff, cSize, bOff, bSize] = lab.readPlan();
         const w = { world, lab, device, env, cars, car, n, spans, hidden: new Set(), carIds: [], timing, RATE: 1 / world.solver().dt, pacer: null,
@@ -537,7 +592,8 @@
         $('followRow').style.display = nv > 1 ? '' : 'none';
         w.pacer = new FramePacer(w.RATE, 0);
         w.wire = structureView(device, world);
-        for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i));
+        await gpuPhase(device, `uploading ${n === 1 ? 'the car' : `${n} cars`} to the GPU (${car.detail === 'lite' ? 'the lighter' : 'the full'} mesh)`, () => { for (let i = 0; i < n; i++) w.carIds.push(addCar(w, i)); })
+          .catch((e) => { try { w.cars.destroy(); w.env?.destroy?.(); world.free(); lab.free(); } catch {} throw e; });
         // Cutaway (drawing only): material groups left out of the car's triangles.
         $('cutaway').textContent = '';
         for (const [id, name] of (vis0.materials || []).entries()) {
@@ -559,20 +615,35 @@
         await restart(true);
         lastBuildMs = performance.now() - t0;
         firstLoadMs ??= performance.now() - tLoad;
-        statusEl.textContent = `built in ${(lastBuildMs / 1000).toFixed(1)} s (first load ${(firstLoadMs / 1000).toFixed(1)} s${car.bytes ? `; the car's model ${(car.bytes / 1e6).toFixed(0)} MB, parsed once` : ''})`;
+        statusEl.textContent = `built in ${(lastBuildMs / 1000).toFixed(1)} s (first load ${(firstLoadMs / 1000).toFixed(1)} s${car.bytes ? `; the car's model ${(car.bytes / 1e6).toFixed(0)} MB, parsed once` : ''})`
+          + (car.detail === 'lite' ? `; car detail: lighter${smallDevice ? ` (auto: ${smallDevice})` : ''}` : '')
+          + (nCars < asked ? `; ${nCars} car${nCars > 1 ? 's' : ''} on this device (its memory), not ${asked}` : '');
+        window.__carDetail = car.detail ?? null;
         progress('');
         window.__loadTimes = loading.done();
         window.__ready = true;
       } catch (e) {
-        progress(''); if (loading.active()) loading.fail({ detail: e.footprint ? e.message : errorText(e) });
+        progress(''); if (loading.active()) loading.fail({ detail: e.footprint || e.name === 'GpuError' ? e.message : errorText(e) });
+        // The full mesh ran out of GPU memory (auto detail): the lighter one, once.
+        if ((e.outOfMemory || /out ?of ?memory/i.test(String(e?.message))) && outOfMemoryRetry(buildingCar)) return;
         if (e.footprint) {
           // Too big for this device: the reason, and the choice to load it anyway.
           errEl.textContent = `Not loaded: ${e.message} `; window.__failed = e.message;
           const b = document.createElement('button'); b.textContent = 'Load it anyway';
           b.onclick = () => { waived.add(e.footprint); errEl.textContent = ''; window.__failed = null; build(); };
           errEl.append(b);
-        } else fail(e);
+        } else fail(e?.name === 'GpuError' ? e.message : e);
       } finally { building = false; if (buildAgain) { buildAgain = false; build(); } }
+    }
+    // The full drawn mesh ran out of GPU memory and the detail is auto: rebuild with the
+    // lighter one (once per car), saying why. Whether it did.
+    function outOfMemoryRetry(car) {
+      if (!car?.kind || car.kind === 'sedan' || car.detail !== 'full' || get('visual') !== 'auto' || outOfMemory.has(car.kind)) return false;
+      outOfMemory.add(car.kind);
+      carCache.delete(`${car.kind}:full`);
+      buildGen++;
+      setTimeout(() => { window.__failed = null; warn(`The full ${MODS[car.kind]?.name ?? 'car'} ran out of GPU memory here: rebuilding with the lighter car detail.`); build(); });
+      return true;
     }
     // The GPU device was lost (a driver reset, the GPU process restarted, memory): the
     // simulation is gone with it. Say so, and offer the rebuild (the parsed car is kept).
@@ -615,7 +686,11 @@
     };
     function addCar(w, i) {
       const v = w.car.visuals[i % w.car.visuals.length].visual, cut = i === 0 && w.hidden.size > 0;
-      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord(), labelAt: w.world.explicitPieceLabelRecord() });
+      // A generated car's paints are one model: the cars share the skin's bind buffer
+      // (showcase-car-render.mjs bindsLike; the same bytes, one copy on the GPU). Not a
+      // cutaway's car (another mesh).
+      const like = w.car.mod && !cut ? w.carIds.find((id, k) => id != null && k !== i && !(k === 0 && w.hidden.size > 0)) : undefined;
+      return w.cars.addCar(cut ? without(w, v) : v, { nodeOffset: w.spans[2 * i], beamOffset: w.spans[2 * i + 1], vehicle: i, lod: cut ? null : v.lod, wheelRecords: w.world.explicitWheelRecords(i), retireAt: w.world.explicitRetireRecord(), labelAt: w.world.explicitPieceLabelRecord(), bindsLike: like ?? null });
     }
 
     // ---------------------------------------------------------------- restart (in place)
@@ -972,8 +1047,8 @@
       // report has the car's skinning and the shadow map (before the picture) and the
       // picture itself, a drawn frame.
       const dq = drawTimer(device);
-      if (dq) enc.beginComputePass({ label: 'draw-start', timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 0 } }).end();
-      cars.update(enc, { dt: simDt, floorY: M ? -1e5 : 0, lead });
+      const stamp = (k) => (dq ? { timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1 } } : {});
+      cars.update(enc, { dt: simDt, floorY: M ? -1e5 : 0, lead, ...stamp(0) });
       const wire = (get('beams') || get('nodes')) ? w.wire : null;
       if (wire) {
         const f = new Float32Array(60);
@@ -981,14 +1056,14 @@
         device.queue.writeBuffer(wire.frameBuf, 0, f);
         wire.r.gather(enc, lead);
       }
-      env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }));
+      env.shadowPass(enc, world, (pass, lvp) => cars.drawDepth(pass, { viewProj: lvp, format: 'depth32float' }), { ...stamp(1), perfSkip: drawSkip });
       const tex = context.getCurrentTexture().createView();
       const pass = enc.beginRenderPass({
         colorAttachments: [{ view: w.msaaTex.createView(), resolveTarget: tex, loadOp: 'clear', storeOp: 'discard', clearValue: [0, 0, 0, 1] }],
         depthStencilAttachment: { view: w.depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' },
-        ...(dq ? { timestampWrites: { querySet: dq.set, beginningOfPassWriteIndex: 1, endOfPassWriteIndex: 2 } } : {}),
+        ...stamp(2),
       });
-      env.draw(pass, world);
+      env.draw(pass, world, { perfSkip: drawSkip });
       if (get('body')) cars.draw(pass, { viewProj: vp, eye: cam.eye, light: env.sun, height: canvas.height });
       wire?.r.drawOpaque(pass);
       env.drawGhosts(pass, world);
@@ -1002,15 +1077,15 @@
         if (finish && wantBeams) lastBeamRead = now;
       }
       const camFinish = camReadback(w, enc);
-      if (dq) { enc.resolveQuerySet(dq.set, 0, 3, dq.resolve, 0); enc.copyBufferToBuffer(dq.resolve, 0, dq.read, 0, 24); }
+      if (dq) { enc.resolveQuerySet(dq.set, 0, 6, dq.resolve, 0); enc.copyBufferToBuffer(dq.resolve, 0, dq.read, 0, 48); }
       device.queue.submit([enc.finish()]);
       if (dq) {
         dq.busy = true;
         dq.read.mapAsync(GPUMapMode.READ).then(() => {
           const t = new BigUint64Array(dq.read.getMappedRange().slice(0));
           dq.read.unmap(); dq.busy = false;
-          const before = Number(t[1] - t[0]) / 1e6, picture = Number(t[2] - t[1]) / 1e6;
-          if (before >= 0 && picture >= 0 && before < 1000 && picture < 1000) { drawGpu.before.push(before); drawGpu.picture.push(picture); if (drawGpu.before.length > 120) { drawGpu.before.shift(); drawGpu.picture.shift(); } }
+          const ms = [0, 1, 2].map((k) => Number(t[2 * k + 1] - t[2 * k]) / 1e6);
+          if (ms.every((x) => x >= 0 && x < 1000)) { drawGpu.skin.push(ms[0]); drawGpu.shadow.push(ms[1]); drawGpu.picture.push(ms[2]); if (drawGpu.skin.length > 120) { drawGpu.skin.shift(); drawGpu.shadow.shift(); drawGpu.picture.shift(); } }
         }).catch(() => { dq.busy = false; });
       }
       // (The recorder waits for both; the live page lets the camera's land when it does.)
@@ -1019,15 +1094,18 @@
     }
     // The draw timer's queries and buffers, one set a device; null without timestamp
     // queries or while the last reading is still out (that frame is not timed).
-    const drawGpu = { before: [], picture: [] };
+    const drawGpu = { skin: [], shadow: [], picture: [] };
+    // Profiling (window.__drawSkip): parts of the drawing left out, to measure them;
+    // drawHold: the frame loop stands still (window.__drawCost draws alone).
+    let drawSkip = null, drawHold = false;
     let drawQ = null;
     function drawTimer(device) {
       if (!device.features.has('timestamp-query')) return null;
       if (!drawQ || drawQ.device !== device) {
-        drawQ = { device, busy: false, set: device.createQuerySet({ type: 'timestamp', count: 3 }),
-          resolve: device.createBuffer({ size: 24, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
-          read: device.createBuffer({ size: 24, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) };
-        drawGpu.before.length = 0; drawGpu.picture.length = 0;
+        drawQ = { device, busy: false, set: device.createQuerySet({ type: 'timestamp', count: 6 }),
+          resolve: device.createBuffer({ size: 48, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+          read: device.createBuffer({ size: 48, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) };
+        drawGpu.skin.length = 0; drawGpu.shadow.length = 0; drawGpu.picture.length = 0;
       }
       return drawQ.busy ? null : drawQ;
     }
@@ -1055,7 +1133,7 @@
         const d = [...r.dts].sort((x, y) => x - y), n = r.frames, f1 = (x) => +x.toFixed(2);
         perfLog.push({ page: +(r.at / 1000).toFixed(1), sim: +(W?.lab.time() ?? 0).toFixed(2), fps: n, steps: r.taken, refused: r.refused, drawn: r.drawn, undrawn: r.undrawn, idle: r.idle,
           dt: [f1(d[n >> 1] ?? 0), f1(d[Math.floor(0.95 * (n - 1))] ?? 0), f1(r.dtMax)], cpuStep: [f1(r.stepMs / n), f1(r.stepMax)], cpuPoll: [f1(r.pollMs / n), f1(r.pollMax)], cpuDraw: [f1(r.drawMs / Math.max(1, r.drawn)), f1(r.drawMax)],
-          gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, gpuDraw: drawGpu.before.length ? [f1(median(drawGpu.before)), f1(median(drawGpu.picture))] : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
+          gpu: W?.timing !== 'off' && gpuTotal.length ? f1(median(gpuTotal)) : null, gpuDraw: drawGpu.skin.length ? [f1(median(drawGpu.skin)), f1(median(drawGpu.shadow)), f1(median(drawGpu.picture))] : null, bodies: W?.world.bodyCount() ?? 0, readsSkipped, hidden: r.hidden });
         perfLog[perfLog.length - 1].scale = +renderScale().toFixed(3) + (autoDrawEvery > 1 ? '@1/' + autoDrawEvery : '');
         renderAuto(r.refused);
         if (perfLog.length > 180) perfLog.shift();
@@ -1226,12 +1304,30 @@
         worldRate: W ? Math.round(W.RATE) : null, gpuTiming: W?.timing ?? null,
         state: window.__state?.(), gpu: W && W.timing !== 'off' ? window.__gpu() : 'GPU timing is off: set "GPU timing" to "rigid · vehicle" (rebuilds) for GPU ms a step',
         load: window.__loadTimes ?? null, failed: window.__failed ?? null,
-        columns: 'page s, sim s, display frames, steps taken, steps refused (GPU not ready), frames drawn, frames not drawn, frames with nothing owed, frame interval ms [p50, p95, max], CPU ms in step calls [mean a frame, max], in readback poll [mean, max], in draw [mean a drawn frame, max], GPU ms a step (median) or null, bodies, readback windows skipped (total), frames while hidden, render scale, GPU ms a drawn frame [skinning and shadow map / the picture] (median; needs GPU timing on)',
+        columns: 'page s, sim s, display frames, steps taken, steps refused (GPU not ready), frames drawn, frames not drawn, frames with nothing owed, frame interval ms [p50, p95, max], CPU ms in step calls [mean a frame, max], in readback poll [mean, max], in draw [mean a drawn frame, max], GPU ms a step (median) or null, bodies, readback windows skipped (total), frames while hidden, render scale, GPU ms a drawn frame [skinning / shadow map / the picture] (median; needs GPU timing on)',
       };
       const rows = perfLog.map((r) => [r.page, r.sim, r.fps, r.steps, r.refused, r.drawn, r.undrawn, r.idle, r.dt.join('/'), r.cpuStep.join('/'), r.cpuPoll.join('/'), r.cpuDraw.join('/'), r.gpu ?? '-', r.bodies, r.readsSkipped, r.hidden, r.scale, r.gpuDraw ? r.gpuDraw.join('/') : '-'].join('\t'));
       return JSON.stringify(head, null, 1) + '\n\nper second (last ' + rows.length + ' s):\n' + rows.join('\n') + '\n';
     }
     window.__perfReport = perfReport;
+    // The drawing's cost, measured (engine/tools/vehicle-lab/draw-cost.js): parts left
+    // out (the car renderer's setPerfSkip names; boxes, spheres: the scene's), the
+    // medians of the last drawn frames' GPU ms, what is drawn (a car's levels), and the
+    // wall time of `n` draws alone, each waited for (pause the World first).
+    window.__drawSkip = (names) => { drawSkip = names?.length ? new Set(names) : null; W.cars.setPerfSkip(['reflect', ...(names ?? [])]); drawGpu.skin.length = 0; drawGpu.shadow.length = 0; drawGpu.picture.length = 0; };
+    window.__recut = () => W.cars.recut();
+    window.__drawGpu = () => ({ n: drawGpu.skin.length, skin: median(drawGpu.skin), shadow: median(drawGpu.shadow), picture: median(drawGpu.picture) });
+    window.__drawStats = () => ({ canvas: [canvas.width, canvas.height], colliders: W.world.colliderCount(), bodies: W.world.bodyCount(), cars: W.cars.stats() });
+    window.__drawCost = async (n = 30, batch = 1) => {
+      const w = W;
+      drawHold = true;
+      try {
+        await w.device.queue.onSubmittedWorkDone();
+        const t0 = performance.now();
+        for (let i = 0; i < n; i += batch) { for (let k = 0; k < batch; k++) draw(0, 0, 0, false); await w.device.queue.onSubmittedWorkDone(); }
+        return (performance.now() - t0) / (Math.ceil(n / batch) * batch);
+      } finally { drawHold = false; }
+    };
     $('perfCopy').onclick = async () => {
       const b = $('perfCopy'), text = await perfReport();
       let ok = false;
@@ -1289,7 +1385,7 @@
         requestAnimationFrame(frame);
         const w = W;
         // Stopped (an unstable state): no more steps or frames until a restart.
-        if (!w || window.__failed || w.stop?.stopped) { lastNow = null; return; }
+        if (!w || window.__failed || w.stop?.stopped || drawHold) { lastNow = null; return; }
         w.stop?.check(w.lab.time());
         frames++;
         if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }

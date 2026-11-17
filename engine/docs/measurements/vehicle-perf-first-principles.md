@@ -2292,6 +2292,66 @@ two-thirds of the frame, all in the one group's workgroup. What is left, precise
    the fleet they are one workgroup of the plan, rounds bounded by the longest chain
    of touching owners (`EB_MAX_MEMBERS + 2`).
 
+### 8.30 The vehicle lab's drawing: skinning a third of what it was, the same picture (2026-11-16)
+
+The lab's report column "GPU ms a drawn frame" with five generated sedans
+(`vehicle-lab.html?mode=mountain&car=gen&cars=5`) read about 14 ms for "skinning and
+shadow map", and it did not fall with the render scale. Split into three timers
+(skinning / shadow map / the picture), it was the skin compute pass: 13.3 ms, the
+shadow map 0.5. Two causes, both removed without changing what is drawn:
+
+* `cutTris` rewrote both drawn index lists of every car on every drawn frame, each
+  triangle reading its three vertices' whole weighted entry lists, though the lists
+  depend only on the piece labels (written when a piece comes off). `cutCheck` (one
+  invocation a car) compares the car's label words with the copy the lists were cut
+  by and dispatches the cut indirectly only when they differ.
+* A weighted vertex's entries were 16 B (u32 node, three f32), 4 to a 64-byte slot.
+  They are now the `.rskin`'s own 8 B (u16 node, three i16 steps of 2^-13 and 2^-9),
+  8 to a slot, scaled in the shader (powers of two: exact). The bind buffer is
+  267 → 157 MB a car (`modFootprint` follows: 1.26 / 1.28 a rskin byte).
+
+Skinning runs once a drawn frame, only on drawn frames (`cars.update` is called from
+`draw()` alone), and does not depend on the canvas (render scale 0.5 and 1 give the
+same ms). Chrome, M3 Max, 1280×720, page visible (headless, not throttled), the World
+paused and draws submitted alone (`engine/tools/vehicle-lab/draw-cost.js`; before =
+main with the timers only):
+
+| GPU ms a drawn frame | 1 car | 5 cars | 8 cars |
+|---|---|---|---|
+| skinning, before | 2.59 | 13.2 | 21.0 |
+| skinning, floor | 0.43 | 2.2 | 3.5 |
+| skinning, after | 0.75 | 3.73 | 5.96 |
+| shadow map, before / after | 0.24 / 0.24 | 0.47 / 0.49 | 0.66 / 0.68 |
+| picture, before / after | 3.1 / 3.3 | 9.2 / 8.5–9.0 | 12.4–12.9 / 11.3–11.9 |
+| World steps a second while stepping, before / after | 60 / 60 | 14 / 22 | 10 / 16 |
+| FPS while stepping, before / after | 60 / 60 | 35 / 54 | 24 / 38 |
+
+The skinning floor is bandwidth: per car per frame about 157 MB of binds read (64 B a
+vertex and 8 B an entry) and 15.7 MB written (490,997 vertices × 32 B), about 173 MB,
+0.43 ms at 400 GB/s. After is 1.7× it at every car count. The shadow map (427,478
+opaque triangles a car, depth only, about 0.06 ms a car) is not worth an option
+trading its resolution or rate, so none was added. The picture did not change and is
+the largest part now: with five cars the opaque cars are about 6.6 of its 8.5–9 ms,
+and a quarter of the pixels (render scale 0.5) takes off only 1.2–1.5 ms; leaving out
+the fragment discards changes nothing. Its cost follows the triangles (2 cm edges, far
+below a pixel at the lab's distances), which is what the renderer's levels of detail
+(`LOD_PX` = 3) are for; the generated car has one level.
+
+The picture is the same. `skin_parity_gpu`: 4000 of 4000 vertices bit for bit from the
+8-byte entries as from the f32 ones. The recut check (crash for 5 s, pause, cut every
+list again from the labels as they are): 0 of 921,600 pixels differ. Stills of every
+frame of the first 1.2 s, five cars, frame-locked recording, two runs of main and two of
+this branch: the first 48 frames (0.8 s) are the same bytes in all four, and after that
+the runs drift apart as two runs of main do (main against main 89 → 56 dB by 1.2 s,
+main against this branch 89–94 → 46–69 dB): Chrome's World is not reproducible run to
+run, so later frames are within run-to-run noise and exact identity under deformation
+rests on the parity test and the recut check.
+
+Not done (follow-ups): skip skinning while nothing it reads has changed (the World
+paused, or a car asleep), which needs a GPU-side check like `cutCheck` because the
+level pick follows the camera; levels of detail for the generated car (changes the
+picture by design, needs the owner's decision and work on the asset side).
+
 ### 8.31 One car's own step: fixed cost against work, and the wheels off the list's and the hits' core (2026-11-16)
 
 The lab's car alone (`sedan_new`: 548 nodes, 4,251 beams, 528 collision triangles, four

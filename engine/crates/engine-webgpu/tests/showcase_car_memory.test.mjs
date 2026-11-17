@@ -88,21 +88,65 @@ test('a skinned car\'s uploads are the same bytes (binds, rest pose, attributes,
 });
 
 // The weights as the sidecar stores them (showcase.rs visual_js when every one is on
-// its grid): u16 nodes, i16 steps of wtGrid's (A, dA) steps. Half the bytes of
-// wtNode + wtW, and the same uploads.
-test('a skin\'s weights as grid steps upload the same bytes as f32 weights', () => {
-  const v = skinnedVisual();
-  const grid = new Float32Array([2 ** -13, 2 ** -9]);
+// its grid): u16 nodes, i16 steps of wtGrid's (A, dA) steps.
+function asSteps(v, grid) {
   const q = new Int16Array(v.wtW.length);
   for (let k = 0; k < q.length; k++) q[k] = v.wtW[k] / grid[k % 3 === 0 ? 0 : 1];
-  const compact = { ...v, wtNode: undefined, wtW: undefined, wtNode16: Uint16Array.from(v.wtNode), wtQ: q, wtGrid: grid };
-  const bytes = (visual) => {
-    const { device, image } = fakeDevice();
-    createShowcaseCarRenderer(device, { format: 'bgra8unorm' }).addCar(visual);
-    return sha(image('showcase-binds'));
-  };
-  assert.equal(bytes(compact), '559f728b0c7b6e43');
-  assert.equal(bytes(v), '559f728b0c7b6e43');
+  return { ...v, wtNode: undefined, wtW: undefined, wtNode16: Uint16Array.from(v.wtNode), wtQ: q, wtGrid: grid };
+}
+const bindImage = (visual) => {
+  const { device, image } = fakeDevice();
+  createShowcaseCarRenderer(device, { format: 'bgra8unorm' }).addCar(visual);
+  return image('showcase-binds');
+};
+// A bind image's vertices as (flags without the packed bit, record words 4..14, entries
+// [node, A, dA/dT, dA/dB] as f32 values), read as SKIN_WGSL reads either form:
+// weightedVertex's 4 entries a 64-byte slot, weightedPacked's 8 (2 words an entry, the
+// steps times Q_A = 2^-13 and Q_D = 2^-9).
+function decodeBinds(image, n) {
+  const u = new Uint32Array(image.buffer, image.byteOffset, image.byteLength / 4), f = new Float32Array(u.buffer, u.byteOffset, u.length);
+  const i16 = (x) => (x << 16) >> 16;
+  const verts = [];
+  let slots = 0;
+  for (let i = 0; i < n; i++) {
+    const o = 16 * i, count = u[o], first = u[o + 3], packed = (u[o + 15] >>> 27) & 1;
+    const entries = [];
+    for (let e = 0; e < count; e++) {
+      if (packed) {
+        const q = 16 * first + 2 * e;
+        entries.push([u[q] & 0xffff, Math.fround(i16(u[q] >>> 16) * 2 ** -13), Math.fround(i16(u[q + 1] & 0xffff) * 2 ** -9), Math.fround(i16(u[q + 1] >>> 16) * 2 ** -9)]);
+      } else {
+        const q = 16 * first + 4 * e;
+        entries.push([u[q], f[q + 1], f[q + 2], f[q + 3]]);
+      }
+    }
+    slots += Math.ceil(count / (packed ? 8 : 4));
+    verts.push({ packed, flags: u[o + 15] & ~(1 << 27), slot: first, words: [...u.subarray(o + 4, o + 15)], entries });
+  }
+  return { verts, slots, records: u.length / 16 };
+}
+
+// Grid steps on the shader's grid upload packed (8 entries a slot, not 4): the same
+// vertices and the same f32 weights as the f32 form, from half the entry bytes.
+test('a skin\'s weights as grid steps upload packed, the same values as f32 weights', () => {
+  const v = tiled(50), n = v.vertexCount;
+  const plain = decodeBinds(bindImage(v), n);
+  const packed = decodeBinds(bindImage(asSteps(v, new Float32Array([2 ** -13, 2 ** -9]))), n);
+  assert.ok(plain.verts.every((x) => !x.packed) && packed.verts.every((x) => x.packed));
+  const values = (d) => d.verts.map(({ flags, words, entries }) => ({ flags, words, entries }));
+  assert.deepEqual(values(packed), values(plain));
+  // Every third vertex has nine entries: three slots of 4, two of 8; the others one.
+  assert.equal(plain.slots, 50 * (3 + 1 + 1));
+  assert.equal(packed.slots, 50 * (2 + 1 + 1));
+  assert.equal(packed.records, n + packed.slots);
+  assert.equal(sha(bindImage(skinnedVisual())), '559f728b0c7b6e43');
+});
+
+// Steps of another grid than the shader's stay in the f32 form (the same bytes as f32 weights).
+test('a skin\'s weights on another grid upload as f32 weights', () => {
+  const v = skinnedVisual();
+  assert.equal(sha(bindImage(asSteps(v, new Float32Array([2 ** -12, 2 ** -9])))), sha(bindImage({ ...v, wtW: v.wtW.map((x, k) => (k % 3 === 0 ? Math.trunc(x / 2 ** -12) * 2 ** -12 : x)) })));
+  assert.ok(decodeBinds(bindImage(asSteps(v, new Float32Array([2 ** -12, 2 ** -9]))), 3).verts.every((x) => !x.packed));
 });
 
 test('addCar keeps no CPU copy of what it uploaded', async () => {
