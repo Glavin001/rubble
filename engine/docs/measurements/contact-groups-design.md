@@ -734,3 +734,12 @@ build's owner sorts its own run there after its offsets (`fuseSortCands`, the bu
 scans keep their own dispatch while the kept candidates are on (it is also a thread a
 node, `fkTrack`: `fuseScansOn`). Both can be on; `fleet_contact_gpu` checks the kept
 candidates against off with the fused front on (the default).
+
+With the throttles across the fleet (`PERF_FLEET_POST`, §8 stage 3) the kept candidates
+do not combine: that dispatch is sized and indexed by the walk's prefix of the listed
+triangles, which a pass that reuses the kept pairs never computes, so the throttle
+updates of such a pass were skipped (found by `fleet_contact_gpu` on the integration
+branch: two sedans head-on, frame 4, four words). With the kept candidates on, the host
+drops `PERF_FLEET_POST` and the levels across the GPU (`PERF_FLEET_LEVELS`, which leave
+the throttles to that dispatch), and the groups' levels update the listed triangles' throttles
+by each owner's listed count, as before the switch (`flPostOn`).

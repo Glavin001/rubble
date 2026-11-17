@@ -4444,6 +4444,15 @@ impl ExplicitBeamsGpu {
             // (Groups of any size on the fleet-wide passes: only with the front there.)
             flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY | plan::PERF_FLEET_POST | plan::PERF_FLEET_FUSE | plan::PERF_FLEET_HITLAT | plan::PERF_FLEET_KEEP);
         }
+        // (The kept candidates, PERF_FLEET_KEEP: the listed triangles' throttle updates stay
+        // in the groups' levels, which find them by each owner's listed count. The
+        // throttles' own dispatch is sized and indexed by the walk's prefix of the listed
+        // triangles, which a pass that reuses the kept pairs does not compute; and the
+        // levels across the GPU leave the throttles to that dispatch. The kernel's
+        // flPostOn says the same.)
+        if flags & plan::PERF_FLEET_KEEP != 0 {
+            flags &= !(plan::PERF_FLEET_POST | plan::PERF_FLEET_LEVELS);
+        }
         // (The levels across the GPU: with groups of any size and the throttles across the
         // fleet, once their module is compiled.)
         let levels = plan::PERF_FLEET_STATE | plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY | plan::PERF_FLEET_POST;

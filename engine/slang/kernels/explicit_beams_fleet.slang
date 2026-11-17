@@ -926,13 +926,15 @@ void fleetLevelsAny(uint k, uint off, uint parity, uint lane, uint tag)
 // marks and nothing a hit touches, so here they are a thread a listed triangle, in a
 // dispatch after the listed pairs' tests and before the groups' levels, which then leave
 // them out (flPostOn). Sized by the walk's dispatch (at least a thread a listed triangle).
-bool flPostOn() { return (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_POST)) == (PERF_FLEET_FRONT | PERF_FLEET_POST); }
+// (Not with the kept candidates, PERF_FLEET_KEEP: a pass that reuses them computes no
+// walk, so no prefix of the listed triangles; the host drops the flag then as well.)
+bool flPostOn() { return (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_POST | PERF_FLEET_KEEP)) == (PERF_FLEET_FRONT | PERF_FLEET_POST); }
 
 #ifdef EB_FLEET_POST
 void fleetPost(uint tid)
 {
     uint nv = gP.vehicles;
-    if (tid >= gNext[flPrefixAt(1u, nv)]) return;
+    if (!flPostOn() || tid >= gNext[flPrefixAt(1u, nv)]) return;
     uint va = flFind(1u, tid);
     uint triOff = gStatic[va * 4u + 1u].x;
     uint gt = triOff + gNext[vvTestedAt(triOff + tid - gNext[flPrefixAt(1u, va)])];
