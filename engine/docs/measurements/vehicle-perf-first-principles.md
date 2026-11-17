@@ -1996,3 +1996,153 @@ against unticked (`vehicle-lab-record.mjs --probe` on the mountain, one car), th
   (natively; six on the page, without the centred damping) is 1.0–1.4 ms (8 × 2 µs × 34 =
   0.54 of it boundaries): the 1 ms target needs both the chains in workgroup memory and
   fewer dependent dispatches a substep (four would be 0.27 ms).
+
+### 8.33 One car's own step: §8.31's switches on by default, the hits from workgroup memory (2026-11-16)
+
+The lab's car alone (`sedan_new`, as §8.31), native M3 Max and Chrome on the same machine.
+The GPU was shared with three other sessions' jobs through the lock throughout: each
+measurement below ran alone on the GPU, but wall figures move by a few percent between runs,
+and the A/B pairs ran interleaved in one hold of the lock.
+
+**§8.31's two switches in Chrome.** The lab page (`vehicle-lab-record.mjs --probe`, mountain,
+one car, 40 s, the page's own loop, vehicles' GPU ms a World step from t 0.5 s), with the
+boxes "wheels apart from the list" and "tyres mostly ahead" off and on. Two rounds. The first
+page of each round is slower than any later one whatever its flags (a cold GPU: 6.03 and 5.75
+ms where the same flags give 5.40 and 4.50 warm), so the comparison is between warm pages:
+
+| flags | median | p95 | p99 | worst |
+|---|---|---|---|---|
+| neither (warm, round 2) | 5.40 | 6.10 | 6.32 | 11.25 |
+| both (rounds 1, 2, 2) | **4.73, 4.87, 4.82** | 5.31, 5.56, 5.47 | 5.55, 5.88, 5.66 | 8.22, 10.57, 10.38 |
+
+−10 to −12 % of the median and −9 to −13 % of p95: faster in Chrome as natively (§8.31's
+−13 %), and bit for bit (§8.31's proofs, and the suites below with them on). **Both are on by
+default now** (`perf_flags_default`, and their boxes ticked). The page's worst step, near
+t 31.9 s in every warm run whatever the flags, is the page's.
+
+**Built: the hits from workgroup memory** (perf flag 1048576, `PERF_HITS_LOCAL`, with
+`PERF_HIT_ROLES` and `PERF_HIT_FB`; `selfApplyLocal` in the wide hits kernel). With those
+switches a two-body dissipative car's `selfApply` is the beam forces' fill, one round (no hit
+reads another's force, so round 1 computes them all) and the residual pass's seven phases.
+Every value the phases pass to each other is a node's (beam force, mass, hit count,
+accumulators A and B) or a hit's (record, role records), and each phase read them again from
+device memory. Now item q (hit q >> 2, role q & 3) on lane q loads its node's values once; a
+node named by several items has one copy (the first item naming it); the round and the seven
+phases run on the copies (the integer adds as workgroup atomics on the copy: the same
+integers); the accumulators are written back once, as the device's value plus the copy's
+adds. Every float is the same strict arithmetic on the same bits in the same order as
+`selfTwoBodyCore`, `hitRolePhase` and `hitCombinePhase`; the scratch records those leave in
+`gNext` are written as they leave them. 1..48 hits a step (192 items on the kernel's 256
+lanes); more, or another kind of car, takes `selfApply` as before. The arrays are the list
+kernels' (`gsTested`, `gsPairs`, `gsCount`; 17 KB with the module's others, under Chrome's
+32 KB), which the hits kernel did not use, so no new workgroup variable. Two refinements,
+each measured alone: its barriers are workgroup barriers (no lane there reads a device word
+another lane wrote there; `sync()` also waits for the phase's device writes): no change. The
+round's four position steps a hit are added by the items' own lanes (`shiftAdd`'s integer
+adds, from workgroup memory) instead of twelve atomics in a row on the hit's lane: hits pass
+−0.07 ms.
+
+Proofs (the flag against without it, on top of §8.31's flags):
+- `fast-check.sh perf=1048576` on all fifteen fixtures (one car at t 2.5, 6, 20 s; two, four
+  and eight cars at 2, 3.7, 8, 16 s), 4 and 20 frames, every state word the same; again after
+  each refinement. (Two or more cars run the contact path, where the flag does not act.)
+- The `--ab-perf-masks` replays (60 frames a mask, three rounds): every mask's frames end in
+  the same state ("=").
+- Chrome compiles all 116 modules (`EXPLICIT_WGSL_MODULES_ONLY=1 explicit-wgsl-check.mjs`).
+- Suites with every switch of this section on (`RUBBLE_PERF_FLAGS=3555265`): engine-webgpu
+  `explicit_loop_cap` 5, `explicit_beams_bitwise` 12, `explicit_contact_gpu` 13,
+  `self_split_gpu` 8, `explicit_pair_reuse_gpu` 2, `explicit_beam_order_gpu` 3,
+  `showcase_car_gpu` 6 (1 ignored, as before), `explicit_drive_gpu` 3; engine-world
+  `explicit_vehicles` 11, `vehicle_lab_reset` 3; engine-metal `vehicle_parity` 4,
+  `explicit_drive_parity` 1: PASS. (Of these only `vehicle_lab_reset` runs the lab's fused
+  wide schedule where the flags act; the A/B on the same state is the new path's proof, as
+  §8.31 says.)
+
+**Tried, not kept on** (perf flag 2097152, `PERF_TYRE_EARLY`, off; bit for bit on all fifteen
+fixtures, 20 frames): the tyres' second part loading its records, its hubs' masses and beam
+sums on the wheels' lanes while the other lanes apply the hits, and reading only the hubs'
+accumulators after (`drvTyreLoad`, `drvTyreFinish`). Hits pass −0.02 ms, wall unchanged: the
+tyres were 0.08 ms of the pass (below), not on its critical path.
+
+**Where the hits pass goes now** (t 20, timed apart; time-only switches, removed after use):
+the dispatch with nothing to apply, its lane-0 header and the tyres 0.41 (the tyres 0.08);
+the load 0.22; the round 0.45 before the position steps moved, ≈0.38 after; the seven phases
+and the write-back 0.21. The round is one lane a hit running `selfTwoBodyCore`'s strict
+contact rule (`contactResponse`, `noPositiveWork`) on values already in workgroup memory: its
+time is that chain's arithmetic, not memory.
+
+**The list dispatch** (time-only switches at t 20): without the coupling's and wheels'
+workgroup 1.31–1.32 ms; without its coupling 1.30; without its wheels 1.30; without the list
+workgroup 1.52. Each of the three (the list's phases, the coupling's, the wheels') is about
+1.3 ms on its own, so shortening any one of them alone does not shorten the dispatch.
+
+**Per pass: before, floor, after** (one car at rest, t 20, ms a frame, timed apart; before:
+§8.31's both flags; floor: §8.31's):
+
+| pass | before | floor | after |
+|---|---|---|---|
+| hits | 1.78–1.79 | 0.3–0.6 | **1.22** |
+| list (list workgroup; coupling and wheels workgroup) | 1.50–1.51 (1.31; ≈1.5) | 0.2–0.3 | 1.51 |
+| nodes | 0.85 | 0.15 | 0.85 |
+| beams | 0.54 | 0.15 | 0.54 |
+| walk and pairs | 0.51 | 0.1 | 0.51 |
+| centred damping (native only) | 0.50 | 0.1 | 0.50 |
+
+Wall at the saved moments (`--ab-perf-masks`, median / fastest tenth, ms a frame): t 20 5.09 /
+5.01 → **4.68 / 4.45**; t 6 5.15 / 5.10 → **4.77 / 4.66**; t 2.5 (6 hits, falling) 4.05 →
+4.08 (no change). −8 % at the crash and at rest.
+
+**Whole 40 s run, one car** (vehicles' GPU ms a World step from t 0.5 s; native
+`vehicle_lab --measure mountain-perf --secs 40`, release, two rounds interleaved; Chrome as
+above):
+
+| flags | median | p95 | p99 | worst |
+|---|---|---|---|---|
+| native, the old default (16321) | 5.25, 5.25 | 5.52, 5.56 | 5.64, 5.65 | 8.85, 8.24 |
+| native, + §8.31's two | 4.57, 4.58 | 4.76, 4.79 | 4.88, 4.89 | 7.96, 6.30 |
+| native, + the hits from workgroup memory (the new default) | **4.22, 4.25** | **4.40, 4.45** | 4.50, 4.58 | 4.75, 7.87 |
+| Chrome, neither of §8.31's (warm) | 5.40 | 6.10 | 6.32 | 11.25 |
+| Chrome, + §8.31's two (warm) | 4.73, 4.87, 4.82 | 5.31, 5.56, 5.47 | 5.55, 5.88, 5.66 | 8.22, 10.57, 10.38 |
+| Chrome, the new default (warm) | **4.57, 4.50** | 5.36, 5.42 | 5.57, 5.65 | 7.60, 10.57 |
+
+The new default against the old: native median −19 %, p95 −20 %; Chrome median −15 to −17 %.
+The hits switch alone: native −7.5 % median and p95; Chrome −3 to −7 % median, p95 unchanged
+within the runs' spread. The native worst is still the crash step near t 7.13 s in three of
+four runs (§8.31: it moves with something other than these switches).
+
+**Default: `PERF_HITS_LOCAL` on** (bit for bit, faster natively and in Chrome), its box
+ticked; `PERF_TYRE_EARLY` off, its box unticked. With the new default: engine-metal
+`vehicle_parity` 4, engine-world `vehicle_lab_reset` 3 and `explicit_vehicles` 11: PASS.
+With the old default (16321: the old path's Metal codegen after the edits): engine-metal
+`vehicle_parity` 4, `explicit_parity` 7, `explicit_drive_parity` 1: PASS.
+
+**Stop.** After the hits from workgroup memory (−7 to −8 %), three attempts in a row gained
+under 5 % of the frame: the tyres loaded early (0 %), the workgroup barriers (0 %), the
+position steps on the items' lanes (−1.5 %). What the measurements say about the next step:
+- No single pass now holds a cause that a change of where values wait removes. The hits
+  pass's largest part (0.38) is a chain of strict arithmetic, not memory; its fixed part
+  (0.41) is the dispatch, the header and the tyres.
+- The list dispatch is three workgroups of about 1.3 ms each (the list's phases, the
+  coupling's step or fold, the wheels' rays, bars and first tyre part). Only shortening all
+  three moves it; each is a chain of a few lanes through its own records.
+
+**What stands between this and 2.5 ms and 1 ms** (one car, ≈4.2 ms a step natively, ≈4.5 in
+Chrome):
+- To 2.5 ms (−1.7 ms natively, −2.0 in Chrome): the list dispatch (1.5 → its floor 0.3 would
+  be −1.2), the hits (1.22 → 0.6: −0.6), the nodes (0.85 → 0.3: the coupling's contacts and
+  the node record's loads, −0.5). Each needs its single-lane chains split across lanes (the
+  list's tracking, decision and build; the coupling's bodies and folds; drvCtx's loops over
+  the hubs and curves, a lane a hub), not workgroup memory alone: the hits show that once the
+  values are local, the arithmetic chain is what remains.
+- To 1 ms: §8.31's sum of floors with eight dependent dispatches a substep is 1.0–1.4 ms;
+  1 ms needs the floors and about four dependent dispatches a substep (each ≈2 µs × 34), and
+  natively no centred damping's two passes (0.5).
+
+**The kernel-dir harness at t 20** (`--ab-switch kernel --ab-kernel-dir` with this build's own
+WGSL differs at the one-car t 20 fixture, §8.31). Not reproduced here, and no race found in
+the one-car path: every same-build replay at t 20 in this section (fast-check with four
+switches, 4 and 20 frames, and every `--ab-perf-masks` replay, eleven runs) ended bit for
+bit. The kernel-dir A/B is a second lab given A's state at the saved moment (`vehicle_lab.rs`:
+B is "a second lab of the same options ... given A's state"), so state that the snapshot does
+not carry, or the override's own compile of the same WGSL, would differ there and nowhere
+else; which one is not established.
