@@ -876,6 +876,19 @@ struct VsOut {
       device.queue.submit([enc.finish()]);
     }
     drawWorld();
+    // Render cost alone (renderer comparisons, three.html): `n` draws of the current
+    // state, each waited for on the GPU; ms per draw.
+    window.__renderBench = async (n = 60) => {
+      const ts = [];
+      for (let i = 0; i < n; i++) {
+        const t = performance.now();
+        drawWorld();
+        await device.queue.onSubmittedWorkDone();
+        ts.push(performance.now() - t);
+      }
+      ts.sort((a, b) => a - b);
+      return { p50: ts[n >> 1], p90: ts[Math.floor(n * 0.9)], min: ts[0] };
+    };
 
     const tpsVal = document.getElementById('tpsVal');
     const fpsVal = document.getElementById('fpsVal');

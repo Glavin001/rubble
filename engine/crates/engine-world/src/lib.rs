@@ -52,6 +52,7 @@ mod math;
 mod motion;
 mod queries;
 mod readback;
+mod render_manifest;
 mod rig;
 mod snapshot_import;
 mod support_loss;
@@ -110,6 +111,7 @@ pub use motion::{
 };
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
+pub use render_manifest::{RenderGroup, RenderManifest, RenderPlane, RenderTag};
 pub use rig::{SoftBeam, VehicleDamage};
 pub use snapshot_import::SnapshotImport;
 pub use terrain::{

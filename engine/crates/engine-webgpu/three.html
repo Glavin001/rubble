@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rubble × three.js</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0d1117; color: #e6edf3; font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+    .panel { position: fixed; left: 12px; top: 12px; max-width: 460px; padding: 10px 12px; background: rgba(13, 17, 23, 0.82); border: 1px solid #30363d; border-radius: 8px; }
+    .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+    .muted { color: #8b949e; }
+    select, button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 3px 8px; font: inherit; }
+    #err { color: #f85149; white-space: pre-wrap; }
+    h1 { font-size: 14px; margin: 0 0 4px; }
+  </style>
+  <script type="importmap">{ "imports": {
+    "rubble-gpu-wait": "./fracture/gpu-wait.mjs",
+    "three": "./generated/three/three.webgpu.js",
+    "three/webgpu": "./generated/three/three.webgpu.js",
+    "three/tsl": "./generated/three/three.tsl.js",
+    "three/addons/": "./generated/three/addons/"
+  } }</script>
+</head>
+<body>
+  <div class="panel">
+    <h1>Rubble × three.js</h1>
+    <div class="row">
+      <label class="muted" for="scene">Scene</label><select id="scene"></select>
+      <label class="muted" for="color">Colour</label>
+      <select id="color"><option value="0">material</option><option value="1">awake / asleep</option><option value="2">speed</option></select>
+      <label><input type="checkbox" id="shadows" checked /> shadows</label>
+      <label><input type="checkbox" id="run" checked /> run</label>
+      <button id="reset">reset</button>
+    </div>
+    <div id="stats" class="muted"></div>
+    <div id="err"></div>
+  </div>
+  <script type="module">
+    // Physics and the scene are Rust (rubble::play, the rigid family); three.js draws the
+    // World on the World's own device through rubble-three.mjs, reading its buffers in place.
+    import * as THREE from 'three/webgpu';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { createScene, sceneFromQuery, pollFrame, stepFrames, saveState, errorText } from './rubble-world.mjs';
+    import { parseDemoQuery, demoSolver, SLEEP_OFF_TIME } from './demo-config.mjs';
+    import { RubbleThree } from './rubble-three.mjs';
+
+    const $ = (id) => document.getElementById(id);
+    const fail = (e) => { $('err').textContent = errorText(e); window.__failed = String(e?.message ?? e); };
+    addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
+    addEventListener('error', (e) => fail(e.error || e.message));
+    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
+
+    const qs = new URLSearchParams(location.search);
+    const SCENES = ['wall', 'ring', 'gables', 'pyramid', 'pile', 'columns', 'ring110k', 'gables506k'];
+    const scene = qs.get('scene') ?? 'ring';
+    for (const s of SCENES) $('scene').add(new Option(s, s, false, s === scene));
+    $('scene').onchange = () => { qs.set('scene', $('scene').value); location.search = qs.toString(); };
+
+    // ---- Rubble: the scene and its world, built in Rust.
+    // The scene's solver settings as demo.html runs it (demo-config.mjs; to become
+    // the preset's own, in Rust).
+    const Q = parseDemoQuery(location.search);
+    const solver = demoSolver(Q.cfg, Q.sleepOn ? Q.sleepEnabledTime : SLEEP_OFF_TIME);
+    const sceneDef = await sceneFromQuery('rigid', location.search);
+    const world = await createScene(sceneDef, { contacts: Q.contacts, features: Q.features, solver, gpuTiming: 'step', killBelow: -50 });
+    const device = world.device();
+    device.lost.then((i) => fail(`device lost: ${i.message}`));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + (e.error?.message ?? e.error)));
+    const placed = world.placeScene(sceneDef);
+    const initial = await saveState(world);
+
+    // ---- three.js, on the World's device.
+    const renderer = new THREE.WebGPURenderer({ device, antialias: true });
+    await renderer.init();
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    document.body.prepend(renderer.domElement);
+
+    const view = new THREE.Scene();
+    view.background = new THREE.Color(0x1b2430);
+    view.fog = new THREE.Fog(0x1b2430, 150, 600);
+    view.add(new THREE.HemisphereLight(0xdde8ff, 0x3a3226, 1.2));
+    const sun = new THREE.DirectionalLight(0xfff2e0, 2.6);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(4096, 4096);
+    view.add(sun, sun.target);
+
+    const rubble = new RubbleThree(renderer, world);
+    view.add(rubble.object);
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(2000, 2000), new THREE.MeshStandardNodeMaterial({ color: 0x3a3f46, roughness: 0.95 }));
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    view.add(ground);
+
+    // Frame the scene from its bounds (the scene's own placement).
+    const box = new THREE.Box3();
+    const p0 = placed.initial;
+    for (let i = 3; i < p0.length; i += 3 * Math.max(1, Math.floor(p0.length / 6000))) box.expandByPoint(new THREE.Vector3(p0[i], p0[i + 1], p0[i + 2]));
+    if (box.isEmpty()) box.set(new THREE.Vector3(-10, 0, -10), new THREE.Vector3(10, 10, 10));
+    const centre = box.getCenter(new THREE.Vector3());
+    const radius = Math.max(5, box.getSize(new THREE.Vector3()).length() / 2);
+    const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 4000);
+    camera.position.copy(centre).add(new THREE.Vector3(radius * 1.2, radius * 0.8, radius * 1.4));
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.copy(centre);
+    controls.update();
+    ground.position.y = 0;
+    sun.position.copy(centre).add(new THREE.Vector3(radius, radius * 2, radius * 0.6));
+    sun.target.position.copy(centre);
+    const s = sun.shadow.camera;
+    s.left = s.bottom = -radius * 1.3; s.right = s.top = radius * 1.3; s.near = 0.1; s.far = radius * 6;
+    s.updateProjectionMatrix();
+
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+    $('color').onchange = () => { rubble.colorMode.value = Number($('color').value); };
+    $('shadows').onchange = () => { sun.castShadow = $('shadows').checked; };
+    $('reset').onclick = () => world.restoreState(initial);
+
+    // ---- The loop: a step whenever a readback slot is free, then draw the latest poses.
+    let gpuMs = 0, steps = 0, frames = 0, lastT = performance.now(), fps = 0, renderCpu = 0;
+    const onFrame = (f) => { for (const t of f.gpuTimes()) { gpuMs = t.totalMs; steps++; } };
+    function frame() {
+      if ($('run').checked && world.canStep()) world.step();
+      pollFrame(world, onFrame);
+      rubble.update();
+      controls.update();
+      const t0 = performance.now();
+      renderer.render(view, camera);
+      renderCpu = performance.now() - t0;
+      frames++;
+      const now = performance.now();
+      if (now - lastT > 500) {
+        fps = (frames * 1000) / (now - lastT);
+        frames = 0; lastT = now;
+        const st = rubble.stats();
+        $('stats').textContent = `${scene} · ${world.bodyCount() - 1} bodies · ${fps.toFixed(0)} fps · step ${world.simSteps()} · GPU step ${gpuMs.toFixed(2)} ms · draw CPU ${renderCpu.toFixed(2)} ms · ${st.draws} draws, ${st.instances} instances`;
+      }
+    }
+    renderer.setAnimationLoop(frame);
+
+    // Automation: frame-time samples over `n` displayed frames.
+    window.__bench = async (n = 120) => {
+      const ts = [];
+      let prev = performance.now();
+      await new Promise((done) => {
+        const tick = () => { const t = performance.now(); ts.push(t - prev); prev = t; if (ts.length >= n) done(); else requestAnimationFrame(tick); };
+        requestAnimationFrame(tick);
+      });
+      ts.sort((a, b) => a - b);
+      return { frameMs: { p50: ts[n >> 1], p90: ts[Math.floor(n * 0.9)] }, gpuStepMs: gpuMs, renderCpuMs: renderCpu, ...rubble.stats(), bodies: world.bodyCount() - 1, steps: world.simSteps() };
+    };
+    // Render cost alone (renderer comparisons with demo.html): `n` draws of the current
+    // state, each waited for on the GPU; ms per draw.
+    window.__renderBench = async (n = 60) => {
+      renderer.setAnimationLoop(null);
+      const ts = [];
+      for (let i = 0; i < n; i++) {
+        const t = performance.now();
+        rubble.update();
+        renderer.render(view, camera);
+        await device.queue.onSubmittedWorkDone();
+        ts.push(performance.now() - t);
+      }
+      renderer.setAnimationLoop(frame);
+      ts.sort((a, b) => a - b);
+      return { p50: ts[n >> 1], p90: ts[Math.floor(n * 0.9)], min: ts[0], ...rubble.stats() };
+    };
+    // Automation: `n` steps as fast as readbacks allow, then a draw of the result.
+    window.__step = async (n = 1) => {
+      renderer.setAnimationLoop(null);
+      await stepFrames(world, n, onFrame);
+      rubble.update();
+      renderer.render(view, camera);
+      return { steps: world.simSteps() };
+    };
+    window.__world = world;
+    window.__ready = true;
+  </script>
+</body>
+</html>
