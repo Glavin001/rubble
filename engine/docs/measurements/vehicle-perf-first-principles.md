@@ -1951,12 +1951,12 @@ frame; 0.09 to 0.10 ms beside a 191 to 302 ms frame (0.05 %) for 32 cars on the 
 (`explicit-vehicles-in-world.md` §10.7 for what an exact skip of sleeping vehicles there
 would need).
 
-**The lab's default.** The page has vehicle sleep on at the engine's thresholds (0.25
-m/s, 0.1 mm, 1000 steps): parked on level ground the cars sleep 6 to 7 s after they are
-set down (a second or two after they stop settling) and the World stops stepping; on
-the mountain nothing sleeps
-and the run costs 1 % more (one car on the wide passes 4 to 12 %). `LabOptions` keeps it
-off for hosts and tests, which ask for it. Left for the owner: whether the mountain pile
+**The lab's default.** The page's "vehicle sleep" control starts off, as `LabOptions`
+and the engine have it (hosts and tests ask for it). Turned on, at the engine's
+thresholds (0.25 m/s, 0.1 mm, 1000 steps): parked on level ground the cars sleep 6 to 7 s
+after they are set down (a second or two after they stop settling) and the World stops
+stepping; on the mountain nothing sleeps and the run costs 1 % more (one car on the wide
+passes 4 to 12 %). Left for the owner: whether the mountain pile
 should sleep at all. No threshold short of freezing visibly moving wreckage does it; the
 other route is the residual motion itself (the flailing parts and the creep), which is a
 physics question with its own evidence to gather.
