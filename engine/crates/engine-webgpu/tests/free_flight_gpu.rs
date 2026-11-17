@@ -168,6 +168,11 @@ fn free_flight_steps_bit_for_bit() {
     bit_for_bit("intact car tumbling at 2 rev/s", s, 1000);
 
     let mut s = spawn();
+    let axis = long_axis(&s);
+    spin(&mut s, &|_| true, axis * tau, axis * 25.0);
+    bit_for_bit("flying at 25 m/s rolling at 1 rev/s", s, 1000);
+
+    let mut s = spawn();
     let door = own_nodes("sedan_door_FL");
     let mut cut = 0;
     for j in 0..s.beams.len() {

@@ -246,6 +246,94 @@ fn fly(air: Air, w: DVec3) -> Spun {
     }
 }
 
+/// The air's torque about the centre of mass (N·m) by the solver's own
+/// per-triangle law (`aero_tri_force`, spec §31) at the present state.
+fn aero_torque(s: &ExplicitBeams) -> DVec3 {
+    use engine_softbody::explicit_beams::ExplicitKind as K;
+    use engine_softbody::explicit_jbeam_ext::aero_tri_force;
+    let c = motion(s, None).x - s.origin.as_dvec3();
+    let mut t = DVec3::ZERO;
+    for (j, b) in s.beams.iter().enumerate() {
+        if b.kind != K::JbeamAeroTri {
+            continue;
+        }
+        let ext = &s.beam_ext[s.ext_of[j] as usize - 1];
+        let ids = [b.a as usize, b.b as usize, ext.index(0) as usize];
+        let f = aero_tri_force(
+            ids.map(|i| s.nodes[i].pos),
+            ids.map(|i| s.nodes[i].vel),
+            ext,
+        );
+        for i in ids {
+            t += (s.nodes[i].pos.as_dvec3() - c).cross(f.as_dvec3());
+        }
+    }
+    t
+}
+
+/// Where a free-flying car's spin goes (the lab's report: a car rolling in the
+/// air loses its spin). The car flies at 25 m/s and rolls at 1 rev/s (the
+/// mountain's speeds). Without air its angular momentum about the centre of mass
+/// is constant; with the page's air every bit of the change is the air's torque
+/// by the solver's own aero law, evaluated from the state step by step and
+/// integrated (nothing else, such as internal damping, acts on the rigid
+/// rotation).
+///
+/// Measured (2026-11-17, CPU reference): with the page's air |L| 3,246.8 →
+/// 3,203.5 kg·m²/s in 1 s (−1.33 %); the air's torque integrated is 48.6 and
+/// differs from ΔL by 0.04 kg·m²/s (0.1 %). Without air ΔL is 0.02 kg·m²/s
+/// (f32). In the GPU World on the mountain (`examples/door_orbit`,
+/// `tools/free-flight/spin_ledger.py`) the body's clean airborne spans lose
+/// 3–9 % a second, and the same law's torque accounts for it to 0.1–1 % of |L|
+/// a second: the air, at the speeds and turn rates of a tumbling car.
+#[test]
+fn a_flying_car_loses_spin_only_to_the_air() {
+    for (name, air) in VARIANTS {
+        if !air.centred {
+            continue;
+        }
+        let mut s = spawn(air);
+        let axis = long_axis(&s);
+        let fwd = axis.as_vec3();
+        for n in &mut s.nodes {
+            n.vel += fwd * 25.0;
+        }
+        spin(&mut s, axis * std::f64::consts::TAU);
+        let l0 = motion(&s, None).l;
+        let h = STEP as f64;
+        let mut by_air = DVec3::ZERO;
+        let steps = (1.0 / STEP).round() as usize;
+        for _ in 0..steps {
+            // The forces of a step act at its start state (the force restart
+            // after the node update; the aero records in the beam pass).
+            s.step();
+            by_air += aero_torque(&s) * h;
+        }
+        let l1 = motion(&s, None).l;
+        let dl = l1 - l0;
+        eprintln!(
+            "{name}, 25 m/s rolling at 1 rev/s: |L| {:.1} → {:.1} kg·m²/s ({:+.2} % in 1 s); the air's torque integrated {:.1}, |ΔL − its| {:.2} kg·m²/s",
+            l0.length(),
+            l1.length(),
+            100.0 * (l1.length() / l0.length() - 1.0),
+            by_air.length(),
+            (dl - by_air).length()
+        );
+        if air.drag {
+            assert!(l1.length() < l0.length(), "{name}: the air added spin");
+            assert!(
+                (dl - by_air).length() < 0.05 * dl.length(),
+                "{name}: ΔL {dl:?} is not the air's torque {by_air:?}"
+            );
+        } else {
+            assert!(
+                (dl.length() / l0.length()) < 1e-4,
+                "{name}: spin lost without air: {dl:?}"
+            );
+        }
+    }
+}
+
 /// 1. The intact car rolling at 2 rev/s about its long axis, and tumbling at
 /// 2 rev/s about a skew axis, for 1 s.
 ///
