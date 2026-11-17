@@ -287,6 +287,9 @@ cached vibe-city "$vibe_key" "$WEB/generated/vibe-city" vibe_city
 step "Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
 (cd "$ENGINE/scenes/dune-buggy" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}" run bake-mesh.mjs)
 
+step "three.js, the pages' renderer (pinned in engine-webgpu/package.json, vendored)"
+(cd "$WEB" && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error && node vendor-three.mjs)
+
 step "Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -303,7 +306,7 @@ else
     fi
   done
 fi
-cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/vehicle-lab.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$WEB"/vehicle-designer.html "$OUT"/
+cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$WEB"/terrain.html "$WEB"/impact.html "$WEB"/showcase.html "$WEB"/broadside.html "$WEB"/timber.html "$WEB"/city.html "$WEB"/one-world.html "$WEB"/brick-ring-drive.html "$WEB"/vehicle-lab.html "$WEB"/explicit-world.html "$WEB"/crash-orbit.html "$WEB"/showcase-car.html "$WEB"/vehicle-designer.html "$WEB"/three.html "$OUT"/
 cp "$WEB"/*.mjs "$OUT"/
 cp -R "$WEB"/generated "$OUT"/generated
 cp -R "$WEB"/fracture "$OUT"/fracture
@@ -320,6 +323,7 @@ for v in "$ENGINE"/scenes/vehicles/*/; do
   cp "$v/$n.glb" "$OUT/models/vehicles/$n/"
   if [[ -f "$v/renders/${n}_front34.jpg" ]]; then cp "$v/renders/${n}_front34.jpg" "$OUT/models/vehicles/$n/renders/"; fi
 done
+rm -f "$OUT"/vendor-three.mjs
 find "$OUT" \( -name '*.test.mjs' -o -name '.gitignore' -o -name '*-check.mjs' \) -delete
 rm -rf "$OUT"/generated/*/.gitignore "$OUT"/generated/*/package.json
 # Every page the landing page links to must be in the site.
