@@ -259,6 +259,8 @@ impl ExplicitVehicles {
             entry(0, wgpu::BufferBindingType::Uniform),
             entry(1, ro),
             entry(2, ro),
+            // (gMisc: the vehicles' group boxes, pieceAccept.)
+            entry(5, rw),
             entry(8, rw),
             entry(9, rw),
             entry(13, ro),
@@ -501,10 +503,11 @@ impl ExplicitVehicles {
     /// cpl_query's bind group ([`Self::bgl_q`]).
     fn bind_query(&self, sim: &engine_webgpu::WgpuSim) -> wgpu::BindGroup {
         let (ids, aabbs) = sim.rest_buffers();
-        let bufs: [(u32, &wgpu::Buffer); 9] = [
+        let bufs: [(u32, &wgpu::Buffer); 10] = [
             (0, &self.params),
             (1, sim.body_buffer()),
             (2, sim.collider_buffer()),
+            (5, self.gpu.misc_buffer()),
             (8, sim.scratch_buffer()),
             (9, &self.work),
             (13, ids),

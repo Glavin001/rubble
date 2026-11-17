@@ -2753,7 +2753,41 @@ impl ExplicitBeamsGpu {
         }
         self.labelled[v] = active != 0;
         let flag = [active, 0, 0, 0];
-        let rec = self.layout.piece_box_rec as usize + v * plan::PIECE_BOX_RECS + 12;
+        let rec = self.layout.piece_box_rec as usize + v * plan::PIECE_BOX_RECS + plan::PIECE_BOX_RECS - 1;
+        self.queue.write_buffer(&self.misc, (rec * 16) as u64, bytemuck::cast_slice(&flag));
+    }
+
+    /// The coupling's groups for vehicle `v` alone (one per node, 0..[`plan::COUPLING_GROUPS`]),
+    /// in place of its piece labels' copy ([`Self::set_piece_labels`] keeps the pair
+    /// list's): the coupling takes each group's node box every window and a collider is a
+    /// proxy only when it can reach one of them ([`Self::set_piece_windows`]). Any grouping
+    /// gives the same contacts; groups of nodes near each other keep the proxies few when a
+    /// vehicle's parts lie far apart (a piece's box spans all its nodes, wherever they
+    /// are). All zero: one group. Applies from the next frame; a later
+    /// `set_piece_labels(v, …)` replaces them.
+    pub fn set_coupling_groups(&mut self, v: usize, groups: &[u8]) {
+        let Some(span) = self.layout.spans.get(v).copied() else { return };
+        let total = self.layout.total[0] as usize;
+        if self.label_words.is_empty() {
+            self.label_words = vec![0u32; total.div_ceil(32).max(1) * 4];
+        }
+        let first = span.node_off as usize;
+        let top = plan::COUPLING_GROUPS as u8 - 1;
+        let mut active = 0u32;
+        for i in first..first + span.nodes as usize {
+            let l = u32::from(groups.get(i - first).copied().unwrap_or(0).min(top));
+            active |= u32::from(l != 0);
+            let (w, sh) = (i / 8, (i % 8) * 4);
+            self.label_words[w] = (self.label_words[w] & !(0xF << sh)) | (l << sh);
+        }
+        if span.nodes > 0 {
+            let (r0, r1) = (first / 32, (first + span.nodes as usize - 1) / 32);
+            let rec = self.layout.label_rec as usize;
+            self.queue.write_buffer(&self.misc, ((rec + r0) * 16) as u64, bytemuck::cast_slice(&self.label_words[r0 * 4..(r1 + 1) * 4]));
+        }
+        self.labelled[v] = active != 0;
+        let flag = [active, 0, 0, 0];
+        let rec = self.layout.piece_box_rec as usize + v * plan::PIECE_BOX_RECS + plan::PIECE_BOX_RECS - 1;
         self.queue.write_buffer(&self.misc, (rec * 16) as u64, bytemuck::cast_slice(&flag));
     }
 

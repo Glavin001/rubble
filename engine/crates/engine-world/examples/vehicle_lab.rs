@@ -2588,6 +2588,18 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 wide = wide.max(f64::from(p.x.abs()));
                 vn = vn.max(v.as_dvec3().dot(up));
             }
+            // (`--watch-from T`: from T s, each car's fastest node every step.)
+            if arg("--watch-from").and_then(|x| x.parse::<f64>().ok()).is_some_and(|t| lab.bench.t >= t) {
+                let w: Vec<String> = vs
+                    .iter()
+                    .zip(&ps)
+                    .map(|(v, p)| {
+                        let (i, s) = v.iter().enumerate().fold((0, 0.0f32), |b, (i, q)| if q.length() > b.1 { (i, q.length()) } else { b });
+                        format!("{i}:{s:.0}@{:.0},{:.0},{:.0}", p[i].x, p[i].y, p[i].z)
+                    })
+                    .collect();
+                println!("   watch t {:.4}: {}", lab.bench.t, w.join(" "));
+            }
             // (A node past a wall's inner face: where, the first time each car has one.)
             for (car, (p, v)) in ps.iter().zip(&vs).enumerate() {
                 if escaped.contains(&car) {
@@ -2610,6 +2622,16 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             if k % 60 == 59 {
                 if let Some(path) = arg("--trace") {
                     std::fs::write(path, tr.as_str())?;
+                }
+            }
+        }
+        if lab.bench.car.non_finite {
+            // (The coupling's status is read every few windows: a room it overflowed
+            // shows a few steps on, as the step's error.)
+            for _ in 0..16 {
+                if let Err(e) = world.step().and_then(|_| world.poll_blocking()) {
+                    println!("   after the non-finite state: {e}");
+                    break;
                 }
             }
         }
@@ -2646,6 +2668,32 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
+            }
+            // `--piece-boxes`: each car's coupling piece boxes (label: its size, m) and its
+            // live chunks.
+            if std::env::args().any(|a| a == "--piece-boxes") {
+                if let Some(x) = world.explicit_vehicles() {
+                    let (_, rec) = x.piece_window_records();
+                    if rec != 0 {
+                        use engine_webgpu::explicit_coupling::read_words;
+                        let recs = 25u64; // (engine_exec::explicit_plan::PIECE_BOX_RECS)
+                        let mut line = Vec::new();
+                        for v in 0..x.vehicle_count() as u64 {
+                            let w = read_words(world.device(), world.queue(), x.misc_buffer(), (u64::from(rec) + v * recs) * 16, recs * 16);
+                            let un = |k: u32| f32::from_bits(if k & 0x8000_0000 != 0 { k & 0x7FFF_FFFF } else { !k });
+                            let boxes: Vec<String> = (0..(w.len() - 4) / 6)
+                                .filter(|g| w[6 * g] != u32::MAX)
+                                .map(|g| {
+                                    let lo = glam::Vec3::new(un(w[6 * g]), un(w[6 * g + 1]), un(w[6 * g + 2]));
+                                    let hi = glam::Vec3::new(un(w[6 * g + 3]), un(w[6 * g + 4]), un(w[6 * g + 5]));
+                                    format!("{g}:{:.0}", (hi - lo).length())
+                                })
+                                .collect();
+                            line.push(format!("[{}]", boxes.join(" ")));
+                        }
+                        println!("   piece boxes m: {}; chunks live {}", line.join(" "), lab.bench.stats()["mountain"]["chunksLive"]);
+                    }
+                }
             }
             if let Some(x) = world.explicit_vehicles_mut() {
                 let rc = x.take_reuse_cause();

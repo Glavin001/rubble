@@ -635,8 +635,11 @@ pub const W_RETIRE_BASE: usize = 95;
 pub const PIECE_GROUPS: usize = 8;
 pub const PIECE_LOOSE: u8 = 7;
 /// gMisc records per vehicle of the coupling's piece boxes (vehicle_coupling.slang
-/// PIECE_BOX_RECS): 8 boxes of 6 keys, then the labels-in-use word.
-pub const PIECE_BOX_RECS: usize = 13;
+/// PIECE_BOX_RECS): 16 boxes of 6 keys, then the labels-in-use word.
+pub const PIECE_BOX_RECS: usize = 25;
+/// The coupling's groups a vehicle's nodes may be put in (vehicle_coupling.slang PIECES;
+/// `ExplicitBeamsGpu::set_coupling_groups`).
+pub const COUPLING_GROUPS: usize = 16;
 /// Params word: the loop budget (explicit_loop_cap.slang `EB_LOOP_BUDGET`).
 pub const W_LOOP_BUDGET: usize = 88;
 /// The loop budget's floor and ceiling (passes of one invocation in a frame).

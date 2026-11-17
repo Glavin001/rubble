@@ -70,10 +70,10 @@ fn run(windows: bool) -> (u32, Vec<(usize, glam::Vec3, glam::Vec3)>, Vec<u32>) {
     let (d, q) = (world.device(), world.queue());
     let rec = u64::from(x.layout().piece_box_rec) * 16;
     eprintln!("piece window records {:?}, layout {} {}", x.piece_window_records(), x.layout().label_rec, x.layout().piece_box_rec);
-    let keys = read_words(d, q, x.misc_buffer(), rec, 13 * 16);
+    let keys = read_words(d, q, x.misc_buffer(), rec, 25 * 16); // (PIECE_BOX_RECS: 16 boxes, the flag)
     let o = read_words(d, q, x.misc_buffer(), p.origin.0, p.origin.1);
     let origin = glam::Vec3::new(f32::from_bits(o[0]), f32::from_bits(o[1]), f32::from_bits(o[2]));
-    let boxes = (0..8)
+    let boxes = (0..16)
         .filter(|&g| keys[6 * g] != 0xFFFF_FFFF)
         .map(|g| {
             let k = |j: usize| unordered(keys[6 * g + j]);
