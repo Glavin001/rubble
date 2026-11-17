@@ -18,6 +18,55 @@ Principles (unchanged from the lab):
 - Lossless: no scene loses bodies, contacts, iterations or detail in the move. Every page
   keeps its frame time (checked before and after each phase, one GPU run at a time).
 
+## 2026-11-17: three.js draws every page (branch `claude/playground-threejs`)
+
+Decision (user, 2026-11-17): the web demos render with **three.js** (`WebGPURenderer`),
+and they prove that Rubble and three.js integrate easily and run fast. That replaces this
+plan's Slang render layers (phase 4's `layers.mjs` stays only until `demo.html` moves).
+Physics, scenes, scripts, settings and every physics-derived visual quantity (skins,
+damage) stay Rust/Slang; three.js does drawing, materials, lights and shadows. Unreal is
+out of scope for now; the client API stays neutral so it can follow (one registry, the
+same manifest over the C API).
+
+How it fits together:
+
+- `World::render_manifest()` (engine-world `render_manifest.rs`; wasm `renderManifest()`,
+  `renderVersion()`): every drawable collider grouped by geometry (box, sphere and capsule
+  collider lists; hulls and heightfields merged per tag with a collider per vertex), planes
+  apart, skips counted with their reason.
+- `rubble-three.mjs` (`RubbleThree`): three.js on `world.device()`; TSL vertex stages read
+  the World's body, collider, motion (projectile tracers) and vehicle (wheels) buffers in
+  place, bound as three storage attributes over the engine's own `GPUBuffer`s: no
+  readback, no copy, one draw per group.
+- three.js 0.186.1 is pinned in `engine-webgpu/package.json` and vendored into
+  `generated/three` (`vendor-three.mjs`, run by `build-web.sh`); pages import it through
+  their import map (`three/webgpu`, `three/tsl`, `three/addons/`).
+- `play.html` / `play.mjs`: the shell on three.js; the menu is the Rust registry grouped by
+  `Family::hub`. Families on it: rigid (every table scene, snapshot rigs with their joint
+  controls, `__regression()`: ring110k and gables506k oracles pass), motion, terrain,
+  vehicle (drive, chase camera, wheels).
+- `fracture/render-three.mjs` replaces `fracture/render.mjs` behind its interface: the lab,
+  compare (Why Rubble), Broadside and the timber yard draw with three.js (`?renderer=slang`
+  keeps the old draw for A/B).
+
+Render cost against the hand-written renderers (headless Chrome 1280×720, draw plus GPU
+wait, median; three.js with PBR and a shadow pass): ring 0.6 vs 0.6 ms, ring110k 1.8 vs
+1.5 ms, gables506k 3.4 vs 4.2 ms, the lab's 49-house grid at its peak 1.8 vs 2.3 ms.
+
+Still on their own renderers, in order of the remaining work:
+
+1. The soft-body cluster (`softbody`, `vehicle-lab`, `one-world`, `explicit-world`,
+   `brick-ring-drive`, `showcase-car`, `crash-orbit`): their car renderer
+   (`showcase-car-render.mjs`) also computes the skin, node frames, components and damage
+   in WGSL dispatched from JS. Move those passes into engine Slang kernels Rust dispatches
+   (with parity against `node_frames.rs` / `skin.rs`), expose the deformed skin as an
+   output buffer, and draw it with three.js materials (paint, glass, mirrors).
+2. Deformable terrain (`impact`, `showcase`): the MPM surface and particles as World
+   outputs drawn by three.js.
+3. `vehicle.html`, `city.html`, `demo.html` (benchmark protocol and kernel A/B switches
+   into the rigid family), then each page becomes a redirect to its preset.
+4. Phases 5–6 as below (one check matrix, one wasm, typed bindings, docs).
+
 ## Status (2026-11-05, branch `claude/amazing-euler-eefda7`)
 
 | Phase | State |
