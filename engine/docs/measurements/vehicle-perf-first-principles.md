@@ -2022,6 +2022,31 @@ same step at t 30.33) and p95 0.4 ms higher; in Chrome the worst is 43.4 and 43.
 past an owner's room or outlived in a few passes, and most passes run today's front, likely with
 the flag's own costs on top (the scans' tracking and the first plan's checks). The rule
 for a default is faster at the median and the worst on the page's terrains, so it stays
-a switch and the page's box stays unchecked. Next: a build that covers only the owners
-under their room (today's front for the others, in the same pass), so a pile does not
-send every owner to today's front.
+a switch and the page's box stays unchecked.
+
+**Per car, tried and reverted (2026-11-17; commit 36173635, reverted by d3ac5fe2).** The
+next step named above: a car past its room, or a culprit of a list outlived in a few
+passes, is *excluded* (its pairs on today's front, for 272 passes, or the overflow wait
+doubled) while every other car keeps reusing its list. A pass that reuses the list with a
+car excluded (`FK_MIX`) runs the kept pairs' tests and today's front for the excluded
+cars' pairs: their points gathered alone, an excluded owner's walk listing into its own
+pair region, another owner's tested inline so its kept list stays; a car is back only
+through a build; a build's tests walk the walk's own boxes (the new list is for the next
+pass). Bit for bit on the 23 fixtures (60 frames on the Chrome and overflow ones), but
+slower than the fleet-wide list everywhere, natively (median / p95 / worst ms):
+
+| run | per car | fleet-wide list (kept) | flag off |
+|---|---|---|---|
+| ledges, 40 s | 14.42 / 19.65 / 25.85 | 13.34 / 16.09 / 22.65 | 17.94 / 19.38 / 25.52 |
+| rolling gully, 36 s | 25.56 / 41.07 / 50.81 | 23.81 / 39.61 / 49.02 | 24.43 / 39.17 / 49.21 |
+
+From the page's rolling states, 20 frames: t 20 22.26 against 22.08 ms off, t 25 24.19
+against 23.51, t 28 33.53 against 32.95, with 99.6 % of passes reusing the list: on the
+gully almost every pair of contact is a piled car's, so a mixed pass is today's front
+plus the kept tests and the inline walks beside it (with lists outlived after 8 passes a
+build came every 8 passes: 28.6 against 24.0 ms frames at t 25; 32 passes and 272 for the
+exclusion brought that down, not below the flag off). The fleet-wide list is kept; the
+kernel at the branch's head is 40a7c4fe's, whose proofs and timings are above. What
+would be needed for per car to pay: the excluded cars' pairs listed beside the kept list
+(a pair region shared, not tested inline) and a build that keeps reading its list in its
+own pass; both change today's walk's code, measured first for its own cost.

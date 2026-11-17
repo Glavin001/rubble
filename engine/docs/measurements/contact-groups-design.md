@@ -637,4 +637,6 @@ make that pass about a pass of today's front. The flag is now bit for bit in Chr
 the ledges and on the rolling gully, faster at the median everywhere and at the worst on
 the ledges, but not at the worst on the rolling gully, where the cars pile and the list is
 past its room or outlived in a few passes; so it stays off (§8.28). The limit that
-remains: one owner past its room sends every owner to the front's own path.
+remains: one owner past its room sends every owner to the front's own path. A list per
+car (an excluded car's pairs on today's front, the others reused) was built and measured
+slower on both terrains, and reverted (§8.28).
