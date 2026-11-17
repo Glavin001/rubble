@@ -1318,7 +1318,11 @@ GPU suites, all pass: `sleep_fast_gpu` 2, `explicit_sleep_gpu` 3, `group_split_g
 `self_split_gpu` 8, `fleet_contact_gpu` 1, `explicit_beams_bitwise` 12,
 `explicit_loop_cap` 5; engine-world `explicit_vehicles` 11 (the coupling's GPU against
 its CPU reference), `explicit_sleep` 1; Metal `vehicle_parity` 4. `sleep-check.sh`: every
-check "state bit for bit: true". Chrome: all 116 modules compile.
+check "state bit for bit: true". Chrome: all 116 modules compile. Later the same day:
+`explicit_contact_gpu` 13, `showcase_car_gpu` 6, `explicit_pair_reuse_gpu` 2,
+`explicit_beam_order_gpu` 3, `debris_retire_gpu` 1, `vv_grid_gpu` 2, `explicit_rigid_gpu` 6,
+`explicit_surface_proxy_gpu` 4; engine-world `vehicle_lab_reset` 3,
+`vehicle_lab_piece_windows` 1: all pass.
 
 ## 11. The vehicles in the World broadphase (2026-11-06)
 
