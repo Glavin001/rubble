@@ -3842,7 +3842,8 @@ impl ExplicitBeamsGpu {
         if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) || self.layout.spans.is_empty() || steps == 0 {
             return None;
         }
-        const CAP: u32 = 2048;
+        // (Up to 4,096 dispatches a frame: with 16 level slots a 34-step frame has ~3,000.)
+        const CAP: u32 = 4096;
         let set = self.device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("explicit-beams-dispatch-profile"),
             ty: wgpu::QueryType::Timestamp,
