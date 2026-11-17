@@ -2676,7 +2676,7 @@ impl ExplicitBeamsGpu {
         }
         let nv = self.layout.spans.len();
         let end = at + plan::fleet_next_words(nv, w[49] as usize, self.layout.total[2] as usize);
-        let ctl = end - plan::FLEET_CTL_WORDS - nv;
+        let ctl = end - plan::FLEET_CTL_WORDS;
         let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
         // (Word 14 is the passes' clock, not a count of this window.)
         let out = std::array::from_fn(|k| u64::from(next[ctl + if k == 9 { 15 } else { 5 + k }]));
@@ -2697,7 +2697,7 @@ impl ExplicitBeamsGpu {
         }
         let nv = self.layout.spans.len();
         let end = at + plan::fleet_next_words(nv, w[49] as usize, self.layout.total[2] as usize);
-        let mean = end - plan::FLEET_CTL_WORDS - nv - 6 * nv;
+        let mean = end - plan::FLEET_CTL_WORDS - 6 * nv;
         let origin = mean - 3 * nv;
         let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
         let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();

@@ -230,10 +230,9 @@ pub const fn fleet_next_words(nv: usize, pair_cap: usize, tris: usize) -> usize 
 /// The kernel's FK_COVER: the partners of a vehicle a build of the kept candidates covers.
 pub const FLEET_KEEP_COVER: usize = 8;
 /// Words of [`W_VV_FLEET_NEXT`] the kept candidates take ([`PERF_FLEET_KEEP`]), at its end;
-/// their counters ([`FLEET_CTL_WORDS`]), then a word per vehicle (its exclusion: the kernel's
-/// fkVeh) last.
+/// their counters ([`FLEET_CTL_WORDS`]) last.
 pub const fn fleet_keep_words(nv: usize, tris: usize) -> usize {
-    tris + nv * (FLEET_KEEP_COVER + 1) + 2 * (nv + 1) + 9 * nv + FLEET_CTL_WORDS + nv
+    tris + nv * (FLEET_KEEP_COVER + 1) + 2 * (nv + 1) + 9 * nv + FLEET_CTL_WORDS
 }
 /// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
 /// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
