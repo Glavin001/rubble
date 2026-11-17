@@ -334,14 +334,14 @@ pub const PERF_TYRE_EARLY: u32 = 2097152;
 /// list dispatch on two workgroups a vehicle (the kernel's PERF_WHEELS_APART,
 /// `wideCoupleApart` at vehicles + v, `wideWheelsApart` at 2 · vehicles + v; the host
 /// dispatches three times the vehicles), in place of one where lanes 255..252 carry both.
-/// vehicle-perf-first-principles.md §8.34.
+/// vehicle-perf-first-principles.md §8.34, §8.35.
 pub const PERF_WHEELS_APART: u32 = 4194304;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
 /// [`PERF_HIT_ROLES`] and [`PERF_WIDE_GEO`] (§8.22), [`PERF_FLEET_STATE`] and
 /// [`PERF_FLEET_FRONT`] (§8.25), [`PERF_AHEAD_APART`], [`PERF_TYRE_AHEAD`] (§8.31) and
-/// [`PERF_HITS_LOCAL`] (§8.33); `RUBBLE_PERF_FLAGS=<mask>` overrides
+/// [`PERF_HITS_LOCAL`] (§8.33), [`PERF_WHEELS_APART`] (§8.35); `RUBBLE_PERF_FLAGS=<mask>` overrides
 /// (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
     std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(
@@ -356,7 +356,8 @@ pub fn perf_flags_default() -> u32 {
             | PERF_FLEET_FRONT
             | PERF_AHEAD_APART
             | PERF_TYRE_AHEAD
-            | PERF_HITS_LOCAL,
+            | PERF_HITS_LOCAL
+            | PERF_WHEELS_APART,
     )
 }
 /// A beam-order entry's class: one beam by beamUpdate.

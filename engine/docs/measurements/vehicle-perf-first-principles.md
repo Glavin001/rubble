@@ -2210,12 +2210,11 @@ dependent loads each, which the per-access cost of §8.23 puts at 2–4 µs a ph
 9–13 µs measured for the tracking and the decision.
 
 **Stop.** The combined change (wheels apart, scan, contacters local, tracking local) gained
-under 5 % (the wheels apart −2 to −3 %; the rest 0 or a loss). Not built: the coupling's
+under 5 % (the wheels apart −2 to −3 %; the rest 0 or a loss; §8.35 turns the wheels apart on). Not built: the coupling's
 per-node count on spare workgroups of the hits dispatch (its inputs are complete there and
 nothing between reads its outputs; it would take the coupling's workgroup from 0.88 toward
 0.6, but the list workgroup's 1.31 sets the dispatch), the wheels' context with its hubs a lane
-each (≈0.1 of the wheels' 0.70), and the nodes pass's coupling contacts. Whole runs and the
-suites were not repeated for `PERF_WHEELS_APART`: it stays off.
+each (≈0.1 of the wheels' 0.70), and the nodes pass's coupling contacts. Its whole runs and suites are in §8.35.
 
 **What stands between this and 2.5 ms** (one car, ≈4.2 ms natively): the list dispatch is
 now the list workgroup's 1.31 (of which 0.31 is the dispatch with its timestamps); below it
@@ -2223,4 +2222,88 @@ the wheels' 0.95 and the coupling's 0.88. Shortening the dispatch past 0.95 need
 workgroup's phases understood first: they cost three to four times what their loads
 predict, and two lossless changes aimed at the obvious chains moved nothing. The next
 measurement is a lane-level one (a timestamp per phase and lane on Metal), not another
-ablation.
+ablation (done in §8.35, as a standalone microbenchmark).
+
+### 8.35 Why a single workgroup's phase costs 3× its loads: a microbenchmark (2026-11-16)
+
+`cargo run --release -p engine-webgpu --example phase_cost` (native wgpu on Metal, M3 Max,
+through the GPU lock). One dispatch of 256-lane workgroups runs 1 or 1025 barrier phases;
+in each, every lane takes `items` items of `k` dependent loads (each load's value addresses
+the next), optionally with a store, an atomic or strict arithmetic, then a barrier; µs a
+phase = the difference / 1024. One factor varies at a time from the base (a read-write
+storage buffer of 2^16 records, 1 MB; 2 items; storage and workgroup barriers as `sync()`;
+one workgroup). A second part times one workgroup running n dependent fma steps, written
+out (n distinct instructions) or as a loop, each dispatch after an empty one (code hot) or
+after a 16,384-statement kernel (code cold).
+
+| µs a phase (1 MB table) | k 0 | k 1 | k 4 | k 16 |
+|---|---|---|---|---|
+| base (read-write, 2 items) | 0.44 | 1.11 | 2.39 | 6.96 |
+| read-only buffer | 0.43 | 1.09 | 2.37 | 6.97 |
+| atomic loads | 0.35 | 1.08 | 2.77 | 9.65 |
+| strict arithmetic on each load (an XOR with a uniform) | 0.35 | 1.07 | 2.38 | 7.17 |
+| a uniform word in each load's index | 0.36 | 1.07 | 2.36 | 7.09 |
+| workgroup barrier only | 0.40 | 1.06 | 2.36 | 6.95 |
+| + a store an item | 0.79 | 1.32 | 2.06 | 4.55 |
+| + a device atomic add an item | 0.66 | 1.32 | 1.89 | 4.30 |
+| + a shared atomic add on one word an item | 0.56 | 1.24 | 1.85 | 4.26 |
+| + a device atomic max on 8 words an item | 0.44 | 1.13 | 1.73 | 4.14 |
+
+Base with k 4: 1 item 1.40, 3 items 3.35; 3 workgroups 2.36, 16 workgroups 2.37, 128
+workgroups 5.79. The 64 MB table doubles the per-load cost (k 16: 14.25) and 128 workgroups
+on it 25.55.
+
+| one workgroup, n dependent fma | written out, hot / cold | as a loop (two integer `%` and a conversion an iteration), hot / cold |
+|---|---|---|
+| 256 | 1.97 / 2.43 | 14.65 / 14.02 |
+| 1,024 | 8.38 / 8.16 | 55.89 / 55.39 |
+| 4,096 | 32.09 / 31.49 | 220.72 / 220.40 |
+
+What they say:
+- **A dependent device load costs 0.2 µs** in a phase (the k slope: (6.96 − 1.11) / 30 items' loads
+  ≈ 0.2 µs at 1 MB, 0.4 at 64 MB): §8.23's figure. A read-only buffer, a uniform in the
+  index, the strict arithmetic's opaque zero and the barrier kind change nothing; an atomic
+  load costs 1.4×. A barrier phase with nothing in it is 0.35–0.44 µs. Stores and atomics
+  after the chain overlap it (k 16 drops to 4–4.5: the next item's chain starts while the
+  write drains). So none of the factors the brief named makes a phase 3× its loads.
+- **The code's size does not matter**: 4,096 distinct instructions run cold cost what they
+  cost hot (32 µs either way). The instruction cache is not it.
+- **A dependent ALU step costs ≈8 ns** on a single workgroup (1.97 µs / 256 fma: the chain's
+  latency, nothing hides it), and an integer division or modulo far more (the loop's
+  iteration, two `%` and a conversion around one fma: 57 ns). Twenty-five dependent ALU
+  steps cost as much as one device load.
+
+So the list workgroup's phases (9–13 µs where their loads give 2–4) are paying for
+**dependent arithmetic, not memory**: the rest is ≈700–1,100 dependent ALU steps a lane a
+phase, or ≈100–150 integer divisions. The kernels' code is built of such chains: every
+strict float operation is the operation and an XOR (twice the chain), every array access
+carries a bounds clamp (WGSL's), every capped loop computes its end (`ebEnd`'s selects and,
+for a runtime step, a division), and the index arithmetic of the list's phases divides by
+runtime values (`p / lanes`, `p % lanes`, `i / yz`, `(i / span.z) % span.y`). The same
+explains §8.33's round (0.38 ms, its values already in workgroup memory): the strict contact
+rule is a long dependent chain at 8 ns a step.
+
+**Does a lossless change follow?** Not a small one. The chains' length is their arithmetic:
+the strict operations' XORs are what keeps them bit for bit across targets (a thread-local
+opaque zero was tried in §8.23 and moved bits); the bounds clamps are WGSL's. What would
+shorten them is splitting a lane's chain across lanes (a phase's items over more lanes, a
+contact rule's independent sub-expressions on separate lanes) or removing integer division
+from the index arithmetic of the hottest loops (divisions by `lanes`, `subs`, `yz`, which
+are runtime values there; replaced by a precomputed reciprocal or a nested loop, the same
+indices). The latter is lossless by construction (integer indices only) but each site is a
+few percent of one phase; none was built here. Flag 16777216 stays unused.
+
+**`PERF_WHEELS_APART` (4194304), decided by the rule.** Suites with it on
+(`RUBBLE_PERF_FLAGS=5652417`): engine-webgpu `explicit_loop_cap` 5, `explicit_beams_bitwise`
+12, `explicit_contact_gpu` 13, `self_split_gpu` 8, `explicit_pair_reuse_gpu` 2,
+`explicit_beam_order_gpu` 3, `showcase_car_gpu` 6 (1 ignored), `explicit_drive_gpu` 3;
+engine-world `explicit_vehicles` 11, `vehicle_lab_reset` 3; engine-metal `vehicle_parity` 4,
+`explicit_drive_parity` 1; with the old default `vehicle_parity` 4: PASS. Chrome (the lab
+page, mountain, one car, 40 s, warm pages, vehicles' GPU ms a step): default 4.60, 4.58
+median (p95 5.36, 5.51); wheels apart 4.52, 4.43 (p95 5.36, 5.36): −2 to −3 % median, p95
+the same. Native whole runs (vehicles' GPU ms a World step from t 0.5 s, five rounds interleaved,
+median / p95): default 3.96 / 4.38 (the session's first run), 4.27 / 4.45, 4.26 / 4.46,
+4.27 / 4.46, 4.24 / 4.41; wheels apart 4.15 / 4.37, 4.17 / 4.37, 4.17 / 4.39, 4.17 / 4.37,
+4.13 / 4.30: −2.4 % median and −2 % p95 in the four rounds after the first. Bit for bit,
+faster natively and in Chrome: **on by default** (`perf_flags_default`, its box ticked).
+One car's step is now ≈4.15 ms natively and ≈4.45–4.5 in Chrome.
