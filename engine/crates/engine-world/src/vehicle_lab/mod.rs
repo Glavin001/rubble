@@ -1723,7 +1723,7 @@ impl Bench {
 
     /// On the mountain: where a ray first meets the live chunks' drawn rock, and where it
     /// leaves the last lid it crosses (`Mountain::ray`).
-    fn mountain_ray(&self, o: DVec3, d: Vec3) -> (Option<f32>, Option<f32>) {
+    pub fn mountain_ray(&self, o: DVec3, d: Vec3) -> (Option<f32>, Option<f32>) {
         let Some(m) = &self.mountain else {
             return (None, None);
         };
