@@ -574,11 +574,17 @@ pub struct Built {
 /// Rig a design and bind its art `.glb` to the lattice.
 pub fn build(input: VgInput) -> Result<Built, String> {
     let rig = rig::rig_with(&input);
-    let axle_f = input.rig.dims.axle_f;
+    let skin = bind_art(&input, &rig, &input.glb)?;
+    Ok(Built { input, rig, skin })
+}
+
+/// An art `.glb`'s weighted skins on `rig`'s lattice (the design's own art, or a
+/// lighter render of it: [`lite_art`]).
+fn bind_art(input: &VgInput, rig: &Rig, glb: &Glb) -> Result<Skin, String> {
     let skin = gen3::skins_with(
-        &input.glb,
+        glb,
         &rig.car,
-        axle_f,
+        input.rig.dims.axle_f,
         &VgInput::vg_part_of,
         // (a solid whose part's definition names its nodes: rigid as defined)
         &|m| match rig.car.bind.get(m) {
@@ -587,7 +593,66 @@ pub fn build(input: VgInput) -> Result<Built, String> {
         },
     )?;
     skin.packable()?;
-    Ok(Built { input, rig, skin })
+    Ok(skin)
+}
+
+/// The body mesh's target edge length of the lighter render ([`lite_art`], metres;
+/// the design's own art is meshed at `engine_vehiclegen::BuildOpts::default().h`).
+pub const LITE_EDGE: f64 = 0.035;
+
+/// A lighter render of a Rust-generator design rigged as `b`: the same design
+/// (`params`, as `VgInput::from_rust` took them) with its body meshed at edge `h`
+/// (coarser than the art's), every part under the same name, and its own skins
+/// bound to `b`'s lattice by the same binder. The physics (`b.rig`, the JBeam parts)
+/// is not touched: only what is drawn is lighter. For devices that cannot hold the
+/// full art (a phone's GPU memory); the page picks it only there.
+/// Returns the `.glb` bytes and its skins.
+pub fn lite_art(b: &Built, params: &str, h: f64) -> Result<(Vec<u8>, Skin), String> {
+    use engine_vehiclegen::export::{glb, render_parts};
+    let name = b.input.design();
+    let d = engine_vehiclegen::design_from_json(name, params)?;
+    let opts = engine_vehiclegen::BuildOpts {
+        h,
+        ..Default::default()
+    };
+    let built = engine_vehiclegen::build(d.as_ref(), opts);
+    let bytes = glb(
+        &render_parts(&built.parts),
+        &built.markers,
+        built.paint,
+        built.metallic,
+        built.roughness,
+    );
+    let lite = crate::glb::read(&bytes)?;
+    // The same meshes, by name and order: the JBeam's flexbody rows name them.
+    let names = |g: &Glb| g.meshes.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+    let (lo, art) = (names(&lite), names(&b.input.glb));
+    if lo != art {
+        let only = |a: &[String], b: &[String]| {
+            a.iter()
+                .filter(|n| !b.contains(n))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(format!(
+            "{name}: the lighter render's meshes differ from the art's (only in the lighter: [{}]; only in the art: [{}]; {} and {} meshes)",
+            only(&lo, &art),
+            only(&art, &lo),
+            lo.len(),
+            art.len()
+        ));
+    }
+    let skin = bind_art(&b.input, &b.rig, &lite)?;
+    Ok((bytes, skin))
+}
+
+/// The lighter render's files beside the art's (`<design>.lite.glb`, `.lite.rskin`).
+pub fn lite_glb_file(design: &str) -> String {
+    format!("{design}.lite.glb")
+}
+pub fn lite_skin_file(design: &str) -> String {
+    format!("{design}.lite.rskin")
 }
 
 /// The JBeam parts and the `.pc` alone (no render model, no skins): what the
@@ -595,12 +660,8 @@ pub fn build(input: VgInput) -> Result<Built, String> {
 pub fn physics_files(input: &VgInput, rig: &Rig) -> Vec<(String, Vec<u8>)> {
     let name = input.design().to_string();
     let axle_f = input.rig.dims.axle_f;
-    let mut flex = gen3::flex_rows_with(
-        &input.glb,
-        axle_f,
-        &VgInput::vg_part_of,
-        &skin_file(&name),
-    );
+    let mut flex =
+        gen3::flex_rows_with(&input.glb, axle_f, &VgInput::vg_part_of, &skin_file(&name));
     // A definition part's solid is listed in that part's own JBeam part.
     for (_, f) in &mut flex {
         if let Some(owner) = rig.car.bind.get(&f.mesh).and_then(|x| x.owner.clone()) {
@@ -615,8 +676,7 @@ pub fn physics_files(input: &VgInput, rig: &Rig) -> Vec<(String, Vec<u8>)> {
         .values()
         .filter_map(|f| f.deform_group.as_ref().map(|g| g.0.as_str()))
         .collect();
-    let mut groups =
-        gen3::deform_groups_with(&input.glb, &rig.car, axle_f, &VgInput::vg_part_of);
+    let mut groups = gen3::deform_groups_with(&input.glb, &rig.car, axle_f, &VgInput::vg_part_of);
     groups.retain(|g| !own.contains(&g.0.as_str()));
     super::export::jbeam_files(&rig.car, &flex, &groups)
         .into_iter()
@@ -628,6 +688,11 @@ pub fn physics_files(input: &VgInput, rig: &Rig) -> Vec<(String, Vec<u8>)> {
 /// `.pc` (parts named `<design>_body` …), the art `.glb` and its `.rskin`,
 /// then `files.json`.
 pub fn files(b: &Built) -> Vec<(String, Vec<u8>)> {
+    files_with(b, None)
+}
+
+/// [`files`], with a lighter render ([`lite_art`]) beside the art when given.
+pub fn files_with(b: &Built, lite: Option<&(Vec<u8>, Skin)>) -> Vec<(String, Vec<u8>)> {
     let name = b.input.design().to_string();
     let mut out = physics_files(&b.input, &b.rig);
     out.push((
@@ -635,6 +700,10 @@ pub fn files(b: &Built) -> Vec<(String, Vec<u8>)> {
         b.input.glb_bytes.clone(),
     ));
     out.push((format!("{name}/{}", skin_file(&name)), b.skin.encode()));
+    if let Some((glb, skin)) = lite {
+        out.push((format!("{name}/{}", lite_glb_file(&name)), glb.clone()));
+        out.push((format!("{name}/{}", lite_skin_file(&name)), skin.encode()));
+    }
     let list: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
     let index = serde_json::to_string(&list).unwrap();
     out.push(("files.json".into(), index.into_bytes()));

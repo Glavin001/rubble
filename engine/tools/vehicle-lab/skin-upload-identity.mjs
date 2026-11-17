@@ -5,8 +5,12 @@
 //
 //   node engine/tools/vehicle-lab/skin-upload-identity.mjs \
 //     [--mod ~/Development/rubble-artifacts/sedan-live/mods/sedan_new] [--pc sedan/sedan.pc] \
-//     [--wasm engine/crates/engine-webgpu/generated/world-wasm] [--renderer path/showcase-car-render.mjs]
+//     [--wasm engine/crates/engine-webgpu/generated/world-wasm] [--renderer path/showcase-car-render.mjs] \
+//     [--paint r,g,b] [--vehicle k] [--detail full|lite]
 //
+// --paint and --vehicle: another car of the lab's (its paint, its index): the bind
+// buffer must hash the same as the first car's for the lab to share it (bindsLike).
+// --detail lite: the folder's lighter render (beamng-mod.mjs modModelNames).
 // --wasm: a folder with engine_world_wasm.js and engine_world_wasm_bg.wasm (a build).
 // Prints one JSON object: { label: sha256 of every write to it, in order }.
 import { register } from 'node:module';
@@ -45,9 +49,11 @@ const list = JSON.parse(readFileSync(join(MOD, 'files.json'), 'utf8'));
 const text = (f) => [f, readFileSync(join(MOD, f), 'utf8')];
 const files = list.filter((f) => f.endsWith('.jbeam')).map(text);
 const materials = list.filter((f) => f.endsWith('.materials.json')).map(text);
-const glb = new Uint8Array(readFileSync(join(MOD, list.find((f) => f.endsWith('.glb') && f.includes('/')))));
-const skin = new Uint8Array(readFileSync(join(MOD, list.find((f) => f.endsWith('.rskin')))));
-const spec = { jbeam: files, pc: readFileSync(join(MOD, PC), 'utf8'), native: true, wheels: 'raycast', paint: [0.6, 0.04, 0.03], materials };
+const lite = (f) => /\.lite\.(glb|rskin)$/.test(f), wantLite = opt('--detail', 'full') === 'lite';
+const glb = new Uint8Array(readFileSync(join(MOD, list.find((f) => f.endsWith('.glb') && f.includes('/') && lite(f) === wantLite))));
+const skin = new Uint8Array(readFileSync(join(MOD, list.find((f) => f.endsWith('.rskin') && lite(f) === wantLite))));
+const PAINT = opt('--paint', '0.6,0.04,0.03').split(',').map(Number), VEHICLE = Number(opt('--vehicle', '0'));
+const spec = { jbeam: files, pc: readFileSync(join(MOD, PC), 'utf8'), native: true, wheels: 'raycast', paint: PAINT, materials };
 const r = wasm.jbeamVisualSkinned(spec, [], glb, skin);
 const visual = r.visual;
 
@@ -67,7 +73,7 @@ const device = new Proxy({}, { get: (_, k) => (k === 'queue' ? queue : k === 'cr
 const { createShowcaseCarRenderer } = await import(pathToFileURL(RENDERER).href);
 const cars = createShowcaseCarRenderer(device, { format: 'bgra8unorm', depthFormat: 'depth32float', sampleCount: 4 });
 // As the lab adds its first car: raycast wheels' records stand in (4 words a wheel).
-cars.addCar(visual, { nodeOffset: 0, beamOffset: 0, vehicle: 0, lod: visual.lod ?? null, wheelRecords: new Uint32Array(16), retireAt: 1, labelAt: 2 });
+cars.addCar(visual, { nodeOffset: 0, beamOffset: 0, vehicle: VEHICLE, lod: visual.lod ?? null, wheelRecords: new Uint32Array(16), retireAt: 1, labelAt: 2 });
 const out = { vertices: visual.vertexCount, weights: visual.wtQ ? 'grid steps (wtQ)' : 'f32 (wtW)' };
 for (const b of buffers.filter((b) => b.label?.startsWith('showcase-') && !/frame|view|fx|contact|mirror/.test(b.label)).sort((x, y) => (x.label < y.label ? -1 : 1))) {
   out[b.label] = `${b.size} bytes ${createHash('sha256').update(b.image).digest('hex').slice(0, 24)}`;
