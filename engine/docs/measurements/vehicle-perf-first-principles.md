@@ -2939,3 +2939,130 @@ median / p95): default 3.96 / 4.38 (the session's first run), 4.27 / 4.45, 4.26 
 faster natively and in Chrome: **on by default** (`perf_flags_default`, its box ticked).
 One car's step is now ≈4.15 ms natively and ≈4.45–4.5 in Chrome.
 
+
+### 8.36 A car's own step on the multi-car path: what carries it, two switches built, both off (2026-11-17)
+
+On the integration branch of #115, #118, #119 and #120 (`perf/vehicles-integrated`), eight
+cars on the mountain, native M3 Max. The GPU was shared with other sessions' jobs through
+the lock, so wall figures are for ranking. §8.33's one-car gains do not reach cars that
+touch. Touching cars run the self-collision split path, where a car's own step is the
+members' dispatch (`explicit beams split member` with `EB_SELF_SPLIT`, labelled
+`explicit self step`: `splitMember`, which runs `splitCoupleStep`, `splitDriveStep` and
+`contactMemberStep`) plus the members' rest dispatch (`memberRest`, labelled `explicit self
+members' hits`). None of these is one of the wide passes that §8.31–§8.33 changed.
+
+**Measured first.** At t 3.7, 16 and 30 s every car is a member of a contact group: the
+step dispatch's solo-car parts cost nothing there. The tools were `vehicle_lab --ab-profile`
+(each dispatch a timed pass, 10 frames) and `--ab-split-ablate M:M2`. The ablation used
+time-only bits of the second measurement word (`AB_PROFILE_A2`) that skip one part each;
+they were removed after use. ms a frame of 34 steps:
+
+| the members' step dispatch with | t 3.7 | t 16 |
+|---|---|---|
+| everything (the default) | 5.92 | 6.05 |
+| no node updates | 4.64 | 4.69 |
+| no beam updates | 5.14 | 5.28 |
+| no coupling step and no wheels | 4.42 | 4.52 |
+| `contactMemberStep` returning at once (dispatch, prologue, coupling, wheels) | 1.93 | 1.99 |
+| everything returning at once (the dispatch alone) | 0.32 | 0.32 |
+
+| the members' rest dispatch with | t 3.7 | t 16 |
+|---|---|---|
+| everything | 1.68 | 1.75 |
+| no `selfApply` | 0.35 | 0.35 |
+
+So the 6 ms are: the dispatch 0.32 and the prologue ≈0.1; the coupling's step and the
+wheels ≈1.5 (the wheels' rays and bars ≈0.2 of that, below); the node phase 1.3; the beam
+phase 0.75; and the rest of `contactMemberStep` (the triangles' finish, the grid's counts,
+scan and sorted copy, the list's build or tests) ≈2.0. The members' hits are another 1.7,
+of which `selfApply` is 1.35.
+
+**Built (each lossless, its own function behind an early return, off by default):**
+
+- *Perf flag 33554432, `PERF_SELF_HITS_LOCAL`*, with `PERF_HIT_ROLES` and `PERF_HIT_FB`. This
+  is §8.33's `selfApplyLocal` on the self split path: a member's rest and a solo car's
+  step k − 1 rest, for a two-body dissipative car with 1..48 hits. On this path `gsCount`
+  keeps the pair list's state words past the buckets (`soloStepLoad`), and
+  `selfApplyLocal`'s accumulator copies overlap them, so each lane keeps one of those words
+  in a register across the call and puts it back (`selfApplyLocalKeep`). `gsTested` and
+  `gsPairs` hold nothing yet at that point.
+- *Perf flag 67108864, `PERF_SPLIT_WHEELS_AHEAD`*, with `PERF_MEMBER_LIST` and self split. A
+  member's raycast wheels' rays and bars of step s + 1 run on a workgroup of their own in
+  step s's rest dispatch (a second row of its arguments, `splitWheelsAhead`). Step s + 1
+  then runs only the tyres (`splitTyres`), which read their hubs' forces after the levels.
+  The rays and bars read the nodes, which nothing writes between a node phase and the next
+  (the walk, the pairs, the rest and the levels write accumulators and position steps), and
+  they write the wheels' scratch records, which only the tyres read. These are the same
+  calls as `driveAheadPart`, which the solo frame's `PERF_DRIVE_AHEAD` and §8.31 run. The
+  members' and rest dispatches' arguments now always have two rows, and every other use
+  returns at once on the second.
+- *Not built: the coupling's step off the member's workgroup*, the larger part of the
+  1.5 ms. On this path `splitCoupleStep` leaves its spheres, the nodes' ranges and the
+  reaction sums in the member workgroup's own memory (`gsCpl`), and the node phase reads
+  them from there. A coupling step on another workgroup would have to reload all of that
+  into the member's workgroup, and that reload is most of the coupling's chain. §8.31's
+  `PERF_AHEAD_APART` could move it only because the wide node phase reads the buffers.
+
+**Proofs.**
+- `fast-check.sh perf=33554432`, `perf=67108864` and `perf=100663296` (both), all 20
+  fixtures (1, 2, 4, 8 and 32 cars): every state word the same.
+- Chrome compiles all 124 modules.
+- Suites with both on (`RUBBLE_PERF_FLAGS=131563457`), all PASS:
+  - webgpu: `explicit_loop_cap` 5, `explicit_beams_bitwise` 12, `self_split_gpu` 8, `group_split_gpu` 3, `fleet_contact_gpu` 1, `explicit_contact_gpu` 13, `explicit_drive_gpu` 3, `sleep_fast_gpu` 2, `explicit_sleep_gpu` 3.
+  - world: `explicit_vehicles` 11, `vehicle_lab_reset` 3.
+  - metal: `vehicle_parity` 4, `explicit_drive_parity` 1.
+- `PERF_SELF_HITS_LOCAL` alone passed the same subset, without the bitwise, drive, sleep and reset suites.
+
+**Per phase at eight cars** (`--ab-profile`, ms a frame; floors from §8.31's per-pass floors, one car's work
+on a workgroup of its own):
+
+| phase | before (t 3.7 / t 16) | floor | after, both on (t 3.7 / t 16) |
+|---|---|---|---|
+| members' rest (`explicit self members' hits`) | 1.69 / 1.76 | 0.35 (its dispatch and load, no `selfApply`) | **1.18 / 1.35** |
+| members' step (`explicit self step`) | 5.89 / 6.05 | ≈1.1 (the dispatch 0.32; nodes, beams, list ≈0.15 + 0.15 + 0.3; the chains in workgroup memory) | **5.65 / 5.83** |
+| of which the wheels' rays and bars | ≈0.2 | 0 (beside the rest) | ≈0 |
+| of which the coupling's step | ≈1.3 | — | ≈1.3 (not moved) |
+| untimed frame | 14.77 / 25.01 | | 14.07 / 24.59 |
+
+**Whole 40 s runs** (vehicle GPU ms a World step from t ≥ 0.5 s, median / p95 / worst;
+off is the integration default `30900161`, on adds both switches `131563457`; runs interleaved, each alone on the GPU):
+
+| | off | on |
+|---|---|---|
+| native, 8 cars (`sedan_new`), round 1 | 22.24 / 24.68 / 29.55 | 21.80 / 24.15 / 29.06 |
+| native, 8 cars, round 2 | 22.22 / 24.66 / 29.13 | 21.85 / 24.08 / 29.05 |
+| native, 1 car (the wide passes: neither acts) | 4.42 / 4.58 / 4.81 | 4.46 / 4.61 / 5.16 |
+| Chrome, 8 cars (`car=gen`, ~18.6 s simulated), round 1 | 18.95 / 23.25 / 27.99 | 18.76 / 23.28 / 27.32 |
+| Chrome, 8 cars, round 2 | 18.71 / 23.08 / 26.94 | 18.70 / 23.08 / 28.54 |
+| Chrome, 1 car | 3.61 / 4.37 / 6.88 | 3.56 / 3.95 / 6.02 |
+
+Natively the pair gains −1.7 to −2.0 % at the median and −2.2 to −2.4 % at p95 for eight cars.
+In Chrome it is −1 % in one round and level in the other. Both switches stay **off**: the
+rule for a default is faster in wall time natively and in Chrome, and the Chrome gain is
+inside the runs' spread. The lab page's boxes "touching cars' hits in core memory" and
+"touching cars' wheels ahead" are unticked.
+
+**What remains above 10 ms at eight cars** (t 16, `--ab-profile`, ms a frame of 34 steps,
+both switches on; the untimed frame is 24.6):
+- the groups' levels (`split levels`) 7.0;
+- the fleet walk 6.3;
+- the members' step 5.8: the coupling ≈1.3, the nodes 1.3, the beams 0.75, the rest of
+  `contactMemberStep` ≈2.0, the dispatch 0.3;
+- the members' hits 1.35;
+- the front's other dispatches 4.4 (triangles and points 1.2, owners' parts 0.9, grids 0.7,
+  pairs 0.6, the two prefixes 0.9, throttles 0.24);
+- self pairs and walk 1.3.
+
+At t 3.7 the frame is 14.1: the members' step 5.7, members' hits 1.2, the fleet walk 1.3,
+the levels 1.0, and the front's dispatches 3.3. The levels and the walk at t 16 are the
+pile's (§8.32: one owner a level, latency-bound chains). They are larger than §8.32's
+figures on this branch's scene, main's rolling terrain since #117.
+
+**What remains above 2.5 ms for one car's own step.** Natively, one car is 4.4 ms a step
+on the wide passes (§8.33's passes: hits 1.2, list 1.5, nodes 0.85, beams 0.54, walk and
+pairs 0.51, centred damping 0.5). On the multi-car path, a member's own step is 5.8 + 1.35
+ms a frame for all eight members side by side. What is left is single-workgroup chains:
+the coupling, and the node and beam phases (one workgroup over 548 nodes and 4,251
+beams). The next levers would be the member's node and beam phases on the wide passes'
+threads, since §8.31's wide node and beam passes are 0.85 and 0.54 for one car, and the
+coupling's workgroup copies built where its node phase runs.
