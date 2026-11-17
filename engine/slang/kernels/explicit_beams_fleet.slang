@@ -1509,18 +1509,29 @@ void fleetPlan(uint lane, uint word)
     // (The kept candidates' mode, uniform. A build: the walk a thread a part of every
     // triangle; then the kept pairs' prefix, their threads, and whether an owner's list
     // is past its room: then the pairs' dispatch walks again with its tests (the walk's own boxes),
-    // a thread a triangle, and the list is not kept.)
+    // a part of a listed triangle a thread, and the list is not kept.)
     uint mode = splitUniform(lane, fkMode());
     if (mode == FK_BUILD && (word & SPLIT_TESTS) != 0u)
     {
+        // (The listed triangles' prefix, as today's front has it: a build past an owner's
+        // room walks its tests over them.)
+        flPrefix(1u, FL_LISTED, lane);
         if (lane == 0u)
         {
             // (No owner with a candidate: no walk.)
             uint any = 0u;
             for (uint v = 0u, vStop = EB_END(v, nv, 1u); v < vStop; v++) any += fkCands(v);
             uint subs = clamp(FL_WALK_THREADS / max(gP.totalTris, 1u), 1u, 64u);
-            gNext[fkCtl(FK_SUBS)] = subs;
-            gArgs2[FL_ARGS2_WALK] = any != 0u ? flWorkgroups(gP.totalTris * subs) : 0u;
+            // A build that would be past an owner's room again: the candidates of the last
+            // build past it (FK_SUBS above its 7 bits), and no fewer now. No listing (the
+            // list would be void): the pass goes as one past the room, its tests in the
+            // walk's own boxes. (A choice of path alone: those tests are exact either way;
+            // repeated, a pile's every build attempt listed 32,767 pairs to throw away.)
+            uint over = gNext[fkCtl(FK_SUBS)] >> 7u;
+            bool skip = over != 0u && any >= over;
+            if (skip) gAcc[fkAccCtl(2u)].store(1);
+            gNext[fkCtl(FK_SUBS)] = subs | (over << 7u);
+            gArgs2[FL_ARGS2_WALK] = any != 0u && !skip ? flWorkgroups(gP.totalTris * subs) : 0u;
             gArgs2[FL_ARGS2_WALK + 1u] = 1u;
             gArgs2[FL_ARGS2_WALK + 2u] = 1u;
         }
@@ -1535,14 +1546,24 @@ void fleetPlan(uint lane, uint word)
             for (uint v = 0u, vStop = EB_END(v, nv, 1u); v < vStop; v++) most = max(most, uint(gAcc[fkAcc(v, FK_PAIRS)].load()));
             uint total = gNext[fkPrefix(nv)];
             gNext[fkCtl(FK_MOST)] = max(gNext[fkCtl(FK_MOST)], most);
-            if (most > FK_CAP)
+            uint cands = 0u;
+            for (uint v = 0u, vStop = EB_END(v, nv, 1u); v < vStop; v++) cands += fkCands(v);
+            uint subs = gNext[fkCtl(FK_SUBS)] & 127u;
+            if (most > FK_CAP || gAcc[fkAccCtl(2u)].load() != 0)
             {
                 gNext[fkCtl(FK_MODE)] = FK_OVER;
                 gNext[fkCtl(FK_WAIT)] = FK_BACKOFF;
-                total = gP.totalTris;
+                // (Its tests: each listed triangle in parts, as today's walk: FK_SUBS's low
+                // bits now the parts. The candidates this time above them: the next build
+                // with no fewer skips its listing.)
+                uint listed = gNext[flPrefixAt(1u, nv)];
+                uint parts = clamp(FL_WALK_THREADS / max(listed, 1u), 1u, 64u);
+                total = listed * parts;
+                gNext[fkCtl(FK_SUBS)] = parts | (min(max(cands, 1u), 0x1FFFFFFu) << 7u);
             }
             else
             {
+                gNext[fkCtl(FK_SUBS)] = subs;
                 // (Valid, and the pass it was built in: FK_PASS counts from 1 here.)
                 gNext[fkCtl(FK_VALID)] = max(gNext[fkCtl(FK_PASS)], 1u);
                 gNext[fkCtl(FK_BUILDS)] += 1u;
@@ -1626,11 +1647,20 @@ void fleetWideTests(uint g, uint lane, uint word)
         {
             if ((word & SPLIT_LEVELS) == 0u)
             {
-                uint subs = gNext[fkCtl(FK_SUBS)];
+                uint subs = gNext[fkCtl(FK_SUBS)] & 127u;
                 if (subs != 0u && tid < gP.totalTris * subs) fkWalk(tid / subs, tid % subs, subs, false);
             }
             else if (mode == FK_BUILD) fkTest(tid);
-            else if (tid < gP.totalTris) fkWalk(tid, 0u, 1u, true);
+            else
+            {
+                // (Past an owner's room: listed triangle q's part, as flWalk.)
+                uint subs = gNext[fkCtl(FK_SUBS)] & 127u;
+                if (subs == 0u || tid >= listed * subs) return;
+                uint q = tid / subs;
+                uint va = flFind(1u, q);
+                uint triOff = gStatic[va * 4u + 1u].x;
+                fkWalk(triOff + gNext[vvTestedAt(triOff + q - gNext[flPrefixAt(1u, va)])], tid % subs, subs, true);
+            }
             return;
         }
     }
