@@ -1654,6 +1654,11 @@ static const uint PERF_HITS_LOCAL = 1048576u;
 // contact group's member: memberRest): selfApplyLocal in place of selfApply for a
 // two-body dissipative car with 1..HITS_LOCAL_CAP hits (selfApplyLocalKeep).
 static const uint PERF_SELF_HITS_LOCAL = 33554432u;
+// perfFlags bit 67108864 (explicit_plan::PERF_SPLIT_WHEELS_AHEAD, with PERF_MEMBER_LIST and
+// self-collision split): a contact group member's raycast wheels' rays and bars of step
+// s + 1 on a workgroup of their own in step s's rest dispatch (explicit_beams_split.slang
+// splitWheelsAhead), its tyres at step s + 1's start as before (splitTyres).
+static const uint PERF_SPLIT_WHEELS_AHEAD = 67108864u;
 // perfFlags bit 2097152 (explicit_plan::PERF_TYRE_EARLY, with PERF_TYRE_AHEAD): the
 // wheels' second part loaded before the hits (explicit_beams_drive.slang drvTyreLoad).
 static const uint PERF_TYRE_EARLY = 2097152u;
@@ -9135,7 +9140,9 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     gArgs[17] = 1u;
     gArgs[18] = 1u;
     gArgs[20] = groups == 0u ? 0u : nv;
-    gArgs[21] = 1u;
+    // (Two rows: the second the members' wheels ahead in the self split's rest dispatch,
+    // PERF_SPLIT_WHEELS_AHEAD; every other use of these words returns there at once.)
+    gArgs[21] = 2u;
     gArgs[22] = 1u;
     // Its triangle tests across workgroups (explicit_beams_split.slang SPLIT_TEST_WGS a
     // group; words 24..26).

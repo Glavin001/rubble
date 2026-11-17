@@ -100,6 +100,64 @@ void splitDriveStep(uint v, uint lane, uint s, uint on)
     sync();
 }
 
+// --- PERF_SPLIT_WHEELS_AHEAD: a member's wheels' rays and bars off its step's workgroup ---
+// A member's step starts with its coupling's step and its wheels (splitDriveStep: the rays,
+// the bars, the tyres, a barrier after each), a chain of a few lanes ahead of its node
+// phase. The rays and the bars read the nodes' positions and velocities (final from a
+// step's node phase to the next: the walk, the pairs, the members' rest and the groups'
+// levels write accumulators and position steps, not nodes), the static shapes and the
+// drive's records, and write the wheels' scratch records, which only the tyres read
+// (driveAheadPart, as the solo frame's PERF_DRIVE_AHEAD and the wide passes'
+// PERF_AHEAD_APART run them). So step s + 1's run on a workgroup of their own in step s's
+// rest dispatch (its second row, splitWheelsAhead), beside the members' rests; step s + 1
+// then runs only the tyres, which read their hubs' forces after the levels. The same calls
+// on the same lanes with the same barriers between; the frame's first step runs all three.
+// (Self split only: its rest dispatch is the one between a member's steps.)
+bool splitWheelsAheadOn()
+{
+#ifdef EB_SELF_SPLIT
+    return (gP.perfFlags & (PERF_SPLIT_WHEELS_AHEAD | PERF_MEMBER_LIST)) == (PERF_SPLIT_WHEELS_AHEAD | PERF_MEMBER_LIST)
+           && pairReuseOn();
+#else
+    return false;
+#endif
+}
+// Step s's tyres and end alone (its rays and bars ran ahead): driveWheelsSplit's last part.
+void splitTyres(uint v, uint lane, uint s, uint on)
+{
+    if (on == 0u) return;
+    uint w = lane < DRV_MAX_WHEELS ? lane : DRV_MAX_WHEELS;
+    DrvCtx c;
+    bool has;
+    bool apart;
+    driveAheadCtx(v, w, c, has, apart);
+    driveAheadPart(c, has, apart, w, 2u, gMisc[v].w + s);
+    sync();
+}
+// The rest dispatch's second row: member v's rays and bars of step s + 1 (every lane;
+// uniform returns).
+void splitWheelsAhead(uint v, uint lane, uint s)
+{
+    if (s + 1u >= gP.steps || !splitWheelsAheadOn()) return;
+    uint4 fl = v < gP.vehicles ? gMisc[vvRec(v, VV_FLAGS)] : uint4(0u, 0u, 0u, 0u);
+    uint4 G = fl.y != 0u ? gMisc[gP.vvGroups + fl.z] : uint4(0u, 0u, 0u, 0u);
+    uint k = splitUniform(lane, v < gP.vehicles && sleepAsleep(v) ? 0u : G.y);
+    if (k == 0u) return;
+    if (lane == 0u) driveBegin();
+    sync();
+    uint driveOn = gsUniformDrive;
+    if (driveOn == 0u) return;
+    uint w = lane < DRV_MAX_WHEELS ? lane : DRV_MAX_WHEELS;
+    DrvCtx c;
+    bool has;
+    bool apart;
+    driveAheadCtx(v, w, c, has, apart);
+    uint step = gMisc[v].w + s + 1u;
+    driveAheadPart(c, has, apart, w, 0u, step);
+    sync();
+    driveAheadPart(c, has, apart, w, 1u, step);
+}
+
 // Vehicle v's step s (parameter copy s) when it is a member of a contact group this
 // frame; any other vehicle returns at once.
 void splitMember(uint v, uint lane, uint s)
@@ -129,7 +187,12 @@ void splitMember(uint v, uint lane, uint s)
     sync();
     uint stepBase = gMisc[vvMember(off, 0u)].w;
     splitCoupleStep(v, rank, k, lane, s, coupleOn);
-    splitDriveStep(v, lane, s, driveOn);
+    // (PERF_SPLIT_WHEELS_AHEAD: this step's rays and bars ran in the last step's rest
+    // dispatch; uniform.)
+    if (s > 0u && splitWheelsAheadOn())
+        splitTyres(v, lane, s, driveOn);
+    else
+        splitDriveStep(v, lane, s, driveOn);
     // Every member on the whole of its workgroup with the one member step
     // (contactMemberStep), whatever the group's size: the same results as a small
     // group's partitioned step in the groups' own workgroup (contactMembersStepAt, which
@@ -592,11 +655,24 @@ void memberRest(uint v, uint lane, uint s)
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+    // (A second row of workgroups: the self split rest dispatch's wheels ahead,
+    // PERF_SPLIT_WHEELS_AHEAD; nothing in any other dispatch of these arguments.)
+#ifdef EB_SELF_SPLIT
+    if (gid.y != 0u && (gP.pad2 & SPLIT_LEVELS) == 0u) return ebLoopCapFlush();
+#else
+    if (gid.y != 0u) return ebLoopCapFlush();
+#endif
     // Vehicle sleep's awake-indexed dispatch: the workgroup's awake vehicle (gP.vehicles
     // or more past them: nothing to step).
     uint3 vid = gid;
     if (sleepListedOn()) vid.x = sleepPick(gid.x, lid.x);
 #ifdef EB_SELF_SPLIT
+    if ((gP.pad2 & SPLIT_LEVELS) != 0u && gid.y != 0u)
+    {
+        splitWheelsAhead(vid.x, lid.x, gP.pad2 & SPLIT_STEP);
+        ebLoopCapFlush();
+        return;
+    }
     // The members' rest of step s (the step word's SPLIT_LEVELS: after the step's walk
     // and pairs dispatches, before the groups' pass).
     if ((gP.pad2 & SPLIT_LEVELS) != 0u)

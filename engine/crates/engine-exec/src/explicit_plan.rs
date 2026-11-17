@@ -425,6 +425,11 @@ pub const PERF_WHEELS_APART: u32 = 4194304;
 /// rest): `selfApplyLocal` with the pair list's state words kept (the kernel's
 /// PERF_SELF_HITS_LOCAL, `selfApplyLocalKeep`). vehicle-perf-first-principles.md §8.36.
 pub const PERF_SELF_HITS_LOCAL: u32 = 33554432;
+/// [`W_PERF_FLAGS`], with [`PERF_MEMBER_LIST`] and self-collision split: a contact group
+/// member's raycast wheels' rays and bars of step s + 1 on a workgroup of their own in
+/// step s's rest dispatch (its second row), its tyres at step s + 1's start (the kernel's
+/// PERF_SPLIT_WHEELS_AHEAD, `splitWheelsAhead`, `splitTyres`). §8.36.
+pub const PERF_SPLIT_WHEELS_AHEAD: u32 = 67108864;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
