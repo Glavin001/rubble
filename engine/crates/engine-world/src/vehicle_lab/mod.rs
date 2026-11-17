@@ -2688,6 +2688,24 @@ impl Lab {
             .collect()
     }
 
+    /// A saved state as a fixture file (`vehicle_lab --save-fixtures`, read by
+    /// `--from-fixture`; the page's A/B saves the same): the lab's time, every car's
+    /// [`Self::fleet_host_state`], then the solver's snapshot bytes
+    /// (`ExplicitBeamsGpu::snapshot_to_bytes`).
+    pub fn fixture_bytes(&self, snapshot: &[u8]) -> Vec<u8> {
+        let host = self.fleet_host_state();
+        let mut out = self.bench.t.to_bits().to_le_bytes().to_vec();
+        out.extend((host.len() as u32).to_le_bytes());
+        for (labels, retired) in &host {
+            out.extend((labels.len() as u32).to_le_bytes());
+            out.extend(labels);
+            out.extend((retired.len() as u32).to_le_bytes());
+            out.extend(retired.iter().map(|r| u8::from(*r)));
+        }
+        out.extend_from_slice(snapshot);
+        out
+    }
+
     pub fn command(&mut self, world: &mut World, cmd: &Value) -> anyhow::Result<Value> {
         // { ownTravel: bool }: the cars' anti-clip padding by each contacter's own travel
         // (LabOptions::own_travel_reach), now and after a restart.

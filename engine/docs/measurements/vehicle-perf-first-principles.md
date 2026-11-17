@@ -1835,6 +1835,127 @@ steps 5.8, the levels 3.3, the front 2.6, members' self-collision hits 1.7, the 
 (139–270 ms): a group past eight members still takes the larger groups' pass on one
 core, which the next stage removes.
 
+### 8.28 Vehicle contact's candidates kept across substeps: bit for bit natively and in Chrome, off by default (2026-11-16)
+
+`contact-groups-design.md` §8.10 (the design, the soundness argument and the limits). Perf
+flag 32768 (`PERF_FLEET_KEEP`, with 8192), kernel functions `fk*` in
+`explicit_beams_fleet.slang`; a checkbox on the lab page, unchecked. The (triangle,
+contact point) pairs the front and the walk find every substep are kept as a Verlet list
+with conservative allowances (calm 5 cm, wild 35 cm, between vehicles 5–30 cm chosen at
+the build, 30 cm more for vehicles not near each other). The exact tests run on the kept
+pairs every pass, and the list is built again when a node or a pair of vehicles may
+have moved past its allowance.
+
+**Proofs, natively** (M3 Max; the GPU shared with other sessions):
+
+- `fast-check.sh perf=32768`: the 18 fixtures (1, 2, 4, 8 and 32 cars), the eight
+  first-collision fixtures (four and eight cars at t 3, 3.4, 4.2, 5) at 4, 20 and 60
+  frames, eight cars at t 9 s, and 12 early fixtures (2, 4 and 8 cars at t 0.5, 0.9,
+  1.1, 1.3 s, 60 frames each: the first builds, an owner past its room, the front's own
+  path after it). Every state word the same. Also with a build's room cut down
+  (a temporary build): the overflow path, its wait and the build after it, bit for bit.
+- `fleet_contact_gpu`: two sedans head-on (60 frames) and a column of six (40), with and
+  without self split, the flag against the front's search every substep: bit for bit,
+  and the list was built and reused (5 builds and 68 passes reused; 6 and 115).
+- `perf-verify.sh` with the flag on (the host's default set plus 32768):
+  `explicit_loop_cap` 5, `fleet_contact_gpu` 1, `group_split_gpu` 3, `self_split_gpu` 8,
+  `explicit_contact_gpu` 13, `explicit_beams_bitwise` 12, `explicit_pair_reuse_gpu` 2,
+  `vv_grid_gpu` 2, engine-world `explicit_vehicles` 11, Metal `vehicle_parity` 4: PASS.
+- Chrome: all 116 modules compile.
+
+**Reuse and time, from one state each way, ms a frame of 34 substeps, on / off**
+(4 frames, after merging main; the on run is read 0.1–0.3 ms slow by the harness
+itself: `perf=0`, the same both ways, gives 4.77 / 4.48 for one car):
+
+| fixture | passes reusing the list | on / off |
+|---|---|---|
+| 1 car, t 2.5, 6, 20 | (no vehicle pairs) | 4.78 / 4.56, 6.24 / 5.98, 6.00 / 5.82 (20 frames: the harness's bias) |
+| 2 cars, t 2, 3.7, 8, 16 | 97.1, 96.3, 95.6, 95.6 % | 9.28 / 10.53, 11.06 / 11.31, 10.69 / 11.18, 11.13 / 11.31 |
+| 4 cars, t 2, 3.7, 8, 16 | (none at t 2), 94.1, 94.9, 95.6 % | 9.52 / 8.90, 17.63 / 19.28, 14.85 / 16.68, 12.80 / 14.68 |
+| 8 cars, t 2, 3.7, 8, 16 | 97.1, 94.9, 94.1, 94.9 % | 13.15 / 14.47, 17.11 / 18.62, 15.39 / 17.31, 15.61 / 20.21 |
+| 4 cars, first collisions, t 3, 3.4, 4.2, 5 (60 frames) | 95.2, 94.6, 93.5, 92.5 % | 16.71 / 18.44, 17.24 / 18.83, 17.01 / 18.63, 17.64 / 19.20 |
+| 8 cars, first collisions, t 3, 3.4, 4.2, 5 (60 frames) | 95.9, 95.9, 95.3, 95.3 % | 14.61 / 16.10, 20.11 / 21.94, 17.95 / 19.97, 14.88 / 17.06 |
+| 32 cars, t 1, 2.5, 4 | (one group past `VV_PART`: not on the fleet-wide front) | 213.1 / 212.7, 139.1 / 139.1, 270.5 / 269.9 |
+
+Eight cars at t 16 s by dispatch kind (20 frames): the walk 4.48 → 0.34 ms a frame
+(2 of 34 substeps build), the listed pairs, both prefixes and the sorted copy 1.79 →
+0.42; the scans 0.34 → 0.51 and the grids 0.52 → 0.67 (the bound's thread a node and
+the kept pairs' tests), owners' parts 0.70 → 0.98. Untimed frame 20.9 → 14.8 ms.
+
+**Whole 40 s run, eight cars, native** (vehicle GPU ms a World step, t ≥ 0.5 s, 2,383
+steps): on 14.05 / 16.73 / 26.6 (median / p95 / worst), off 18.68 / 19.53 / 25.7. Both
+runs end in the same state (the energies a car and their total, −16,284 kJ, the same).
+
+**Chrome: first not the same run; the cause, found and fixed.** (The earlier
+finding: the lab page, eight cars, real-time loop, the first car at rest at y −164.66
+with the flag and at y −311 without it, every run.)
+
+- *The tool.* `WebWorld.explicitAb(mask, frames, steps)` (engine-world-wasm): from the
+  page's state, the vehicles' frames with the flag on, the state staged
+  (`ExplicitBeamsGpu::stage_state`, a MAP_READ copy), the state put back, the same
+  frames with it off, staged, put back; resolved to the differing runs of state words
+  (`state_differences`; the planning records masked as `vehicle_lab --ab-switch` does).
+  `WebVehicleLab.fixture` saves the page's state in the native fixture format.
+  `vehicle-lab-record.mjs --probe --ab MASK` drives it; `--locked` runs the page
+  frame-locked; `--ab 0 --abSaveAll TAG` saves a state every second; natively
+  `vehicle_lab --from-fixture A --compare-fixture B` compares two. The command is in
+  AGENTS.md (rung 3).
+- *The page in real time is not one run.* Its readbacks land a speed-dependent number
+  of steps later, so two runs with the flag off differed (coupling records at t 4 to
+  8 s) in one pair of runs and were equal in another. The end positions of real-time runs
+  therefore cannot date a divergence.
+- *Frame-locked* (each step's readback awaited), the page is one run: flag on and off
+  every state word the same at every second to t 20, nodes apart at t 21.
+- *The in-page A/B* (20 frames a second) missed it: the difference begins in frame 31 of
+  that second. The page's t 20 state replayed natively (`fast-check.sh perf=32768`)
+  differs too, so it is not Chrome's: frames 1 to 30 bit for bit, frame 31 differs, at
+  its step 27 (`AB_PRE=30` saves the state before that frame; `AB_STEPS` bisects it).
+- *Which test.* A build every pass still differs, so it is not the reuse bound. The
+  walk's own pairs tested by a copy of `fkPairTry` differ from `vvPairTest`; with the
+  gathered position (the run's `E.xyz`) in place of the recomputed one, equal. The two
+  are the same source, `nf3(vvRel(vb, va) + x)`, but two inlined copies, and Metal's
+  compiler (naga natively, Tint in Chrome) may reassociate: one copy rounded
+  `(o_vb − o_va) + x` in another order, a contact point had two positions differing in
+  the last bit, and a pair at a test's edge hit on one path only. Native fixtures never
+  met it: it needs the origins far apart (t 20 s down the mountain) and a point at an edge.
+- *The fix.* `vvRel` is unfusable (`nf3(o_v − o_a)`): every copy rounds the difference
+  alone. No other change; the flag's design was sound.
+
+**Proofs after the fix.**
+
+- `fast-check.sh perf=32768`: the 18 standard fixtures and the two Chrome states (t 20.0
+  and 20.5 s, now in `out/fixtures`: cars8_t20.0chrome, cars8_t20.5chrome) bit for bit;
+  60 frames on the Chrome states and on 8 cars t 8 and 16, 4 cars t 8: bit for bit.
+- Chrome, the lab page frame-locked, eight cars, the mountain with ledges: flag on and
+  off saved every second to t 40 and compared natively: every state word the same at
+  all 40 seconds; the first car ends at (−6.33, −356.70, 301.84) both ways. The in-page
+  A/B (`--locked --ab 32768`, 20 frames every second to t 40): 40 of 40 bit for bit,
+  and the run ends at the same place (the A/B does not perturb the page).
+- `perf-verify.sh 49089` (the host's default set plus 32768): `explicit_loop_cap` 5,
+  `fleet_contact_gpu` 1, `group_split_gpu` 3, `self_split_gpu` 8,
+  `explicit_contact_gpu` 13, `explicit_beams_bitwise` 12, `explicit_pair_reuse_gpu` 2,
+  `vv_grid_gpu` 2, `staged_state_gpu` 1 (new: the browser readers equal the blocking
+  ones), engine-world `explicit_vehicles` 11; engine-metal `vehicle_parity` 4. Chrome: all 116 modules
+  compile.
+
+**Time after the fix** (vehicles' GPU ms a World step, t ≥ 0.5 s, median / p95 / worst):
+
+- native, whole 40 s eight-car run: on 13.47 / 16.81 / 26.91 (worst at t 1.02), off
+  18.73 / 19.52 / 22.99; wall 47.1 against 52.3 s; both runs end with the same energies
+  (total −16,284 kJ).
+- Chrome, the page's own real-time loop, headless, 170 s of page time, off / on / on /
+  off: off 17.82 / 20.65 / 26.00, on 15.81 / 19.42 / 30.99, on 15.86 / 19.46 / 30.77, off
+  17.74 / 20.66 / 25.46 (the steps the page took in 170 s: 2,845 and 2,870 off, 2,983
+  and 2,990 on).
+
+**Default: off.** Bit for bit natively and in Chrome now, and faster at the median
+(28 % natively, about 11 % in Chrome), but the worst step is worse both ways (native
+26.9 against 23.0 ms; Chrome 31.0 and 30.8 against 26.0 and 25.5 ms, both flag-on runs at
+t 28.17 s: a build of the list where the walk would be cheaper). The rule for a default
+is faster at the median and the worst, so it stays a switch. Next: what the build at
+t 28.17 costs (`--ab-profile` on a fixture there) and whether a build can be spread or
+cut, so the worst step is no slower than the walk's.
+
 ### 8.29 Contact groups of any size on the fleet-wide passes; the levels visit the owners with hits; the throttle updates across the fleet (2026-11-16)
 
 `contact-groups-design.md` §8 stage 3 (what is built: its §8.7). Two perf flags, both

@@ -54,12 +54,20 @@ fn generated() -> String {
 /// group, the most hits an owner listed in a frame's last pass with the switches on, and
 /// the highest level of a frame's last pass (with the levels for any number of owners).
 fn fleet_matches(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool) -> Option<[u32; 4]> {
+    fleet_matches_with(label, fleet, frames, steps, mask, self_split, 0).map(|r| r.0)
+}
+
+/// [`fleet_matches`], with the kept candidates' counts of the frames with the switches on
+/// (`ExplicitBeamsGpu::take_fleet_keep_stats`: builds, passes that reused the kept pairs,
+/// pairs kept over the builds, passes on the front's own path, the most pairs an owner
+/// kept).
+fn fleet_matches_kept(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool) -> Option<([u32; 4], [u64; 10])> {
     fleet_matches_with(label, fleet, frames, steps, mask, self_split, 0)
 }
 
-/// [`fleet_matches`] with the second measurement word `word2` (bit 31: the levels for any
-/// number of owners for the small groups too, with `PERF_FLEET_ANY`).
-fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool, word2: u32) -> Option<[u32; 4]> {
+/// [`fleet_matches_kept`] with the second measurement word `word2` (bit 31: the levels for
+/// any number of owners for the small groups too, with `PERF_FLEET_ANY`).
+fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps: u32, mask: u32, self_split: bool, word2: u32) -> Option<([u32; 4], [u64; 10])> {
     let (_, device, queue) = default_device().ok()?;
     let mut gpu = ExplicitBeamsGpu::new(&device, &queue, &fleet);
     gpu.set_vehicle_contact(true);
@@ -69,6 +77,7 @@ fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps
     gpu.set_ablation2(word2);
     let flags = gpu.perf_flags();
     let (mut grouped, mut largest, mut hits, mut top) = (0u32, 0u32, 0u32, 0u32);
+    let mut kept = [0u64; 10];
     for f in 0..frames {
         gpu.wait();
         let snap = gpu.snapshot();
@@ -78,10 +87,16 @@ fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps
         let off = gpu.state_words();
         let sizes = gpu.contact_group_sizes();
         gpu.restore(&snap);
+        // (The counts are in the snapshot: this frame's alone.)
+        gpu.take_fleet_keep_stats();
         gpu.set_perf_flags(flags | mask);
         gpu.frame(steps);
         gpu.wait();
         let on = gpu.state_words();
+        let k = gpu.take_fleet_keep_stats();
+        for i in 0..10 {
+            kept[i] = if matches!(i, 4 | 7 | 8) { kept[i].max(k[i]) } else { kept[i] + k[i] };
+        }
         if let Some(d) = first_diff(&off, &on) {
             panic!(
                 "{label} (self split {self_split}): frame {f} (groups {sizes:?}): perf flags {mask} on differ from off at {d}; counts {:?}",
@@ -100,12 +115,12 @@ fn fleet_matches_with(label: &str, fleet: Vec<ExplicitBeams>, frames: u32, steps
     eprintln!(
         "{label} (self split {self_split}, perf flags {mask}): {frames} frames bit for bit, {grouped} with a contact group (largest {largest}), most hits an owner {hits}, highest level {top}"
     );
-    Some([grouped, largest, hits, top])
+    Some(([grouped, largest, hits, top], kept))
 }
 
 #[test]
 fn owners_state_by_vehicle_is_bit_for_bit() {
-    use engine_exec::explicit_plan::{PERF_FLEET_FRONT, PERF_FLEET_STATE};
+    use engine_exec::explicit_plan::{PERF_FLEET_FRONT, PERF_FLEET_KEEP, PERF_FLEET_STATE};
     let text = generated();
     // The state by vehicle under the groups' dispatches (stage 1), then with the front and
     // the tests as fleet-wide dispatches too (stage 2), each against the groups' slots.
@@ -126,6 +141,31 @@ fn owners_state_by_vehicle_is_bit_for_bit() {
             .collect();
         let Some([grouped, largest, hits, _]) = fleet_matches("a column of six", fleet, 30, 17, mask, self_split) else { return };
         assert!(grouped > 10 && largest > 4 && hits > 0, "a group past four members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
+    }
+    // Vehicle contact's candidates kept across substeps (`PERF_FLEET_KEEP`,
+    // contact-groups-design.md §8.10), on top of the fleet-wide front: the same two
+    // scenes, the list kept from frame to frame (it is in the snapshot), every state word
+    // the same as with the front's own search every substep; and the list was reused, not
+    // only built. (In this test, not one of its own: see the head of the file.)
+    for self_split in [false, true] {
+        let a = sedan(&text, Vec3::ZERO, 0.0, Vec3::new(0.0, 0.0, 12.0));
+        let front = a.nodes.iter().map(|n| n.pos.z).fold(f32::MIN, f32::max);
+        let probe = sedan(&text, Vec3::ZERO, 180.0, Vec3::ZERO);
+        let back = probe.nodes.iter().map(|n| n.pos.z).fold(f32::MAX, f32::min);
+        let b = sedan(&text, Vec3::new(0.0, 0.0, front + 1.0 - back), 180.0, Vec3::new(0.0, 0.0, -12.0));
+        let Some(([grouped, _, hits, _], kept)) = fleet_matches_kept("two sedans head-on, candidates kept", vec![a, b], 60, 17, PERF_FLEET_KEEP, self_split) else { return };
+        eprintln!("   kept candidates: {kept:?} (builds, passes reused, pairs kept, passes on the front's own path, most an owner, builds for a calm node, for cover, largest bound and the allowance between vehicles as float bits, builds for two vehicles' motion)");
+        assert!(grouped > 10 && hits > 0, "the cars met and hit ({grouped} frames grouped, {hits} hits)");
+        assert!(kept[0] > 0 && kept[1] > kept[0], "the kept list was built and reused more often than built: {kept:?}");
+        let (lo, hi) = probe.nodes.iter().fold((f32::MAX, f32::MIN), |(l, h), n| (l.min(n.pos.z), h.max(n.pos.z)));
+        let pitch = hi - lo + 0.3;
+        let fleet: Vec<ExplicitBeams> = (0..6)
+            .map(|i| sedan(&text, Vec3::new(0.0, 0.0, i as f32 * pitch), 0.0, if i == 0 { Vec3::new(0.0, 0.0, 15.0) } else { Vec3::ZERO }))
+            .collect();
+        let Some(([grouped, largest, hits, _], kept)) = fleet_matches_kept("a column of six, candidates kept", fleet, 40, 17, PERF_FLEET_KEEP, self_split) else { return };
+        eprintln!("   kept candidates: {kept:?}");
+        assert!(grouped > 10 && largest > 4 && hits > 0, "a group past four members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
+        assert!(kept[0] > 0 && kept[1] > kept[0], "the kept list was built and reused more often than built: {kept:?}");
     }
     groups_of_any_size_are_bit_for_bit();
 }
@@ -151,7 +191,7 @@ fn groups_of_any_size_are_bit_for_bit() {
     for self_split in [true, false] {
         let Some([grouped, largest, hits, _]) = fleet_matches("a column of ten", column(10, 15.0), 40, 17, PERF_FLEET_ANY, self_split) else { return };
         assert!(grouped > 10 && largest > 8 && hits > 0, "a group past eight members formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
-        let Some([grouped, largest, hits, _]) = fleet_matches_with("a column of six, the levels for any size", column(6, 15.0), 30, 17, PERF_FLEET_ANY, self_split, 0x8000_0000) else { return };
+        let Some(([grouped, largest, hits, _], _)) = fleet_matches_with("a column of six, the levels for any size", column(6, 15.0), 30, 17, PERF_FLEET_ANY, self_split, 0x8000_0000) else { return };
         assert!(grouped > 10 && largest > 4 && hits > 0, "a group formed and hit ({grouped} frames, largest {largest}, {hits} hits)");
     }
     // The listed triangles' throttle updates as threads over the fleet

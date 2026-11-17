@@ -142,6 +142,11 @@ fn options(script: &Value) -> LabOptions {
             };
         }
     }
+    // `--terrain ledges|rolling`: the mountain's ground (the offline default is ledges, the
+    // page's rolling).
+    if let Some(t) = arg("--terrain") {
+        m["terrain"] = json!(t);
+    }
     if let Some(r) = arg("--rockslide") {
         m["rockslide"] = json!(r == "1");
     }
@@ -935,26 +940,56 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         x.restore(&snap);
         x.wait();
         lab.bench.t = t;
+        // (AB_PRE=k: k frames of 34 steps with the run's own flags first, the A/B from the
+        // state after them: a fixture's first differing frame found, then checked alone.)
+        let pre: u32 = std::env::var("AB_PRE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        for _ in 0..pre {
+            x.frame(34);
+        }
+        x.wait();
+        lab.bench.t = t + f64::from(pre) / 60.0;
+        let t = lab.bench.t;
         ab = vec![t];
+        // `--compare-fixture B`: this fixture's state words against B's (two runs' states at
+        // one time, e.g. the page's flag-on and flag-off runs saved by vehicle-lab-record.mjs
+        // --abSaveAll), the verdict's masking; host state (labels, retired nodes) compared
+        // as bytes. Exits.
+        if let Some(other) = arg("--compare-fixture") {
+            let words = |x: &mut engine_webgpu::ExplicitBeamsGpu| {
+                let s = x.stage_state();
+                let (tx, rx) = std::sync::mpsc::channel();
+                s.buffer().slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    let _ = tx.send(r);
+                });
+                x.wait();
+                rx.recv().expect("map").expect("map ok");
+                s.ab_words()
+            };
+            let a = words(x);
+            let b_bytes = std::fs::read(&other)?;
+            let snap_b = x.snapshot_from_bytes(&b_bytes[at..]);
+            x.restore(&snap_b);
+            x.wait();
+            let b = words(x);
+            let tb = f64::from_bits(u64::from_le_bytes(b_bytes[0..8].try_into()?));
+            println!("compare {file} (t {t:.3}) with {other} (t {tb:.3}); host state the same: {}", bytes[8..at] == b_bytes[8..at]);
+            let d = engine_webgpu::state_differences(&a, &b, 64);
+            for l in &d {
+                println!("   {l}");
+            }
+            println!("   state bit for bit: {}", d.is_empty());
+            std::process::exit(i32::from(!d.is_empty()));
+        }
     }
     for k in 0..windows {
         if ab.first().is_some_and(|&t| lab.bench.t >= t) {
             ab.remove(0);
             if let Some(dir) = &save_dir {
                 std::fs::create_dir_all(dir)?;
-                let host = lab.fleet_host_state();
                 let x = world.explicit_vehicles().expect("vehicles");
                 let snap = x.snapshot();
-                let mut out = lab.bench.t.to_bits().to_le_bytes().to_vec();
-                out.extend((host.len() as u32).to_le_bytes());
-                for (labels, retired) in &host {
-                    out.extend((labels.len() as u32).to_le_bytes());
-                    out.extend(labels);
-                    out.extend((retired.len() as u32).to_le_bytes());
-                    out.extend(retired.iter().map(|r| u8::from(*r)));
-                }
-                out.extend(x.snapshot_to_bytes(&snap));
-                let file = dir.join(format!("cars{}_t{:.1}.fx", host.len(), lab.bench.t));
+                let out = lab.fixture_bytes(&x.snapshot_to_bytes(&snap));
+                let file = dir.join(format!("cars{}_t{:.1}.fx", lab.fleet_host_state().len(), lab.bench.t));
                 std::fs::write(&file, &out)?;
                 println!("   fixture {} ({:.1} MB)", file.display(), out.len() as f64 / 1e6);
             }
@@ -1337,11 +1372,45 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     let t = std::time::Instant::now();
                     x.frame(ab_steps);
                     x.wait();
-                    sum += t.elapsed().as_secs_f64();
+                    let dt = t.elapsed().as_secs_f64();
+                    sum += dt;
+                    // (AB_EACH=1: each frame's wall ms and, with the kept candidates, its
+                    // builds, reused passes and passes on the front's own path; the
+                    // summary's counts are then of the last frame alone.)
+                    if env_u("AB_EACH", 0) != 0 {
+                        let fk = x.take_fleet_keep_stats();
+                        println!("     frame ({}): {:.2} ms, builds {} (calm {}, between {}, cover {}), reused {}, own path {}", if on { "on" } else { "off" }, dt * 1e3, fk[0], fk[5], fk[9], fk[6], fk[1], fk[3]);
+                    }
                 }
                 let ms = sum * 1e3 / f64::from(frames);
+                // Vehicle contact's kept candidates (PERF_FLEET_KEEP), when this run used
+                // them (counted from the snapshot's own counts: a fixture's are zero).
+                let fk = x.take_fleet_keep_stats();
+                if fk[0] + fk[1] > 0 {
+                    println!(
+                        "     kept candidates ({}): {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, allowance between vehicles {:.3} m",
+                        if on { "on" } else { "off" },
+                        fk[0],
+                        fk[5],
+                        fk[9],
+                        fk[6],
+                        fk[1],
+                        100.0 * fk[1] as f64 / (fk[0] + fk[1] + fk[3]).max(1) as f64,
+                        fk[3],
+                        fk[2] as f64 / fk[0].max(1) as f64,
+                        fk[4],
+                        f32::from_bits(fk[7] as u32),
+                        f32::from_bits(fk[8] as u32)
+                    );
+                }
                 if env_u("AB_COUNTS", 0) != 0 {
                     println!("     counts ({}): {:?}", if on { "on" } else { "off" }, x.contact_group_counts());
+                }
+                // (FK_MOTION=1: the kept candidates' reference motions after the frames.)
+                if on && env_u("FK_MOTION", 0) != 0 {
+                    for (v, m) in x.fleet_keep_motion().iter().enumerate() {
+                        println!("     kept motion, car {v}: reference {:?}, mean {:?}, origin change {:?}", &m[0..3], &m[3..6], &m[6..9]);
+                    }
                 }
                 // The switch's own header bit back, so the words compare the state alone.
                 switch(x, true, &labels);
@@ -1523,6 +1592,23 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         100.0 * st[1] as f64 / (st[0] + st[1]) as f64,
                         st[2] as f64 / st[0] as f64,
                         st[3]
+                    );
+                }
+                let fk = x.take_fleet_keep_stats();
+                if fk[0] + fk[1] > 0 {
+                    println!(
+                        "   vehicle contact's kept candidates: {} builds ({} for a calm node, {} for two vehicles, {} for cover), {} passes reused ({:.1} %), {} passes on the front's own path; {:.0} pairs a build, most an owner {}; largest bound at a build {:.3} m, allowance between vehicles {:.3} m",
+                        fk[0],
+                        fk[5],
+                        fk[9],
+                        fk[6],
+                        fk[1],
+                        100.0 * fk[1] as f64 / (fk[0] + fk[1] + fk[3]).max(1) as f64,
+                        fk[3],
+                        fk[2] as f64 / fk[0].max(1) as f64,
+                        fk[4],
+                        f32::from_bits(fk[7] as u32),
+                        f32::from_bits(fk[8] as u32)
                     );
                 }
             }

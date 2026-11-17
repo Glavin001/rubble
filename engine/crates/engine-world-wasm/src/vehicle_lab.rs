@@ -241,6 +241,23 @@ impl WebVehicleLab {
         self.lab.bench.busy()
     }
 
+    /// The state now as a fixture file (`Lab::fixture_bytes`: the format `vehicle_lab
+    /// --save-fixtures` writes and `--from-fixture` / `fast-check.sh FILE` replay
+    /// natively), resolved once the snapshot's copy is mapped. The snapshot is taken
+    /// now (after the work submitted so far).
+    pub fn fixture(&self, world: &WebWorld) -> Result<js_sys::Promise, JsValue> {
+        let g = world.world.explicit_vehicles().ok_or_else(|| err("fixture: no explicit vehicles"))?;
+        let staged = g.stage_snapshot(&g.snapshot());
+        // (The host state now; only the snapshot's bytes wait for the map.)
+        let head = self.lab.fixture_bytes(&[]);
+        Ok(wasm_bindgen_futures::future_to_promise(async move {
+            crate::read::map_read(staged.buffer()).await?;
+            let mut out = head;
+            out.extend(staged.bytes());
+            Ok(js_sys::Uint8Array::from(out.as_slice()).into())
+        }))
+    }
+
     /// The lab's World time (s).
     pub fn time(&self) -> f64 {
         self.lab.bench.t

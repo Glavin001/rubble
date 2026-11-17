@@ -66,6 +66,17 @@ impl WebWorld {
     }
 }
 
+/// Map a MAP_READ buffer whose copy is submitted, awaited (never blocking).
+pub(crate) async fn map_read(buffer: &wgpu::Buffer) -> Result<(), JsValue> {
+    let (tx, rx) = futures_channel::oneshot::channel();
+    buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    rx.await
+        .map_err(|_| crate::err("map dropped"))?
+        .map_err(|e| crate::err(format!("map: {e}")))
+}
+
 /// Copies of `(buffer, byte offset, byte size)` ranges, back to back, resolved
 /// once mapped as one `Uint32Array` (sizes are multiples of 4).
 pub(crate) fn read_ranges(world: &rubble::World, ranges: Vec<(wgpu::Buffer, u64, u64)>) -> js_sys::Promise {

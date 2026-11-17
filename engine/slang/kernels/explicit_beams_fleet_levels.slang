@@ -56,7 +56,7 @@ static const uint LV_REPORT = 0u;
 // (LV_MARK | the step: its group's levels are the fleet's this step; 0 not), the marked
 // owners with hits in slot order, the hits' prefix in that order (one more), then per slot
 // (index 1 .. L + 2; 0 the totals) its first owner's place and its first hit.
-uint flLvAt(uint i) { return flCtlNext(FL_CTL) + i; }
+uint flLvAt(uint i) { return fkCtl(FL_CTL) + i; }
 uint flLvMark(uint v) { return flLvAt(v); }
 uint flLvOwner(uint i) { return flLvAt(gP.vehicles + i); }
 uint flLvPrefix(uint i) { return flLvAt(2u * gP.vehicles + i); }
@@ -480,7 +480,7 @@ void fleetLevelsWide(uint tid, uint word)
 // gBeams after the owners' boxes (explicit_plan's FLEET_LEVEL_CACHE): four records a hit of
 // the step, at its place g in slot order: (alpha, beta, gamma, staged), (nn), (v), (f1).
 static const uint LV_CACHE = 4096u;
-uint flLvCache(uint g) { return gP.vvFleetBox + 4u * gP.vehicles + 4u * g; }
+uint flLvCache(uint g) { return gP.vvFleetBox + 4u * gP.vehicles + gP.totalNodes + 4u * g; }
 
 // vvResidualPhase for hit i of owner va (place g) alone. Its staged geometry and first-pass
 // force (vvStagedHit) read only what no phase of the pass writes (positions, velocities,

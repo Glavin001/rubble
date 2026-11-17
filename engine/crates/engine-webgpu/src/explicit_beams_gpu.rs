@@ -195,6 +195,148 @@ pub struct GpuSnapshot {
     state: PlannerState,
 }
 
+/// The state buffers copied for a read that resolves later ([`ExplicitBeamsGpu::stage_state`]):
+/// map [`Self::buffer`] (a browser host: `map_async`, awaited), then [`Self::ab_words`].
+/// A bit-for-bit A/B of two paths from one state in a host that cannot block.
+#[doc(hidden)]
+pub struct StagedState {
+    staging: wgpu::Buffer,
+    /// Byte sizes of nodes, beams, acc, groups, misc, next, back to back.
+    sizes: [u64; 6],
+    layout: ExplicitLayout,
+    words: Vec<u32>,
+    vv: std::ops::Range<usize>,
+}
+
+impl StagedState {
+    /// The MAP_READ copy (its copy already submitted).
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.staging
+    }
+
+    /// Once [`Self::buffer`] is mapped: [`ExplicitBeamsGpu::state_words`] with the
+    /// vehicle-contact plan's records masked ([`ExplicitBeamsGpu::vv_record_words`],
+    /// planning state: as `vehicle_lab --ab-switch`'s verdict), then
+    /// [`ExplicitBeamsGpu::coupling_words`]. Unmaps the buffer.
+    pub fn ab_words(&self) -> Vec<(&'static str, Vec<u32>)> {
+        let all: Vec<u32> = {
+            let data = self.staging.slice(..).get_mapped_range().expect("staged state: map it first");
+            bytemuck::pod_collect_to_vec(&data[..])
+        };
+        self.staging.unmap();
+        let mut parts = Vec::with_capacity(6);
+        let mut at = 0usize;
+        for s in self.sizes {
+            let n = (s / 4) as usize;
+            parts.push(all[at..at + n].to_vec());
+            at += n;
+        }
+        let coupling = coupling_words_of(&self.layout, &parts[4], &parts[2]);
+        let [nodes, beams, acc, groups, misc, next]: [Vec<u32>; 6] = parts.try_into().unwrap();
+        let mut out = plan::state_words(&self.layout, &self.words, nodes, &beams, &acc, groups, misc, &next);
+        for (name, v) in &mut out {
+            if *name == "misc" {
+                v[self.vv.clone()].fill(0);
+            }
+        }
+        out.extend(coupling);
+        out
+    }
+}
+
+/// Two [`StagedState::ab_words`] compared: one line per run of consecutive differing words
+/// (its name, the run, the first pair), at most `cap` lines; empty when bit for bit.
+#[doc(hidden)]
+pub fn state_differences(a: &[(&'static str, Vec<u32>)], b: &[(&'static str, Vec<u32>)], cap: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut more = 0usize;
+    for ((name, x), (name_b, y)) in a.iter().zip(b) {
+        if name != name_b || x.len() != y.len() {
+            out.push(format!("{name}: {} words / {name_b}: {} words", x.len(), y.len()));
+            continue;
+        }
+        let total = x.iter().zip(y).filter(|(p, q)| p != q).count();
+        let mut i = 0;
+        while i < x.len() {
+            if x[i] == y[i] {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < x.len() && x[i] != y[i] {
+                i += 1;
+            }
+            if out.len() < cap {
+                out.push(format!(
+                    "{name} [{start}..{i}] of {} ({total} differ in all): {:#x} / {:#x} ({} / {})",
+                    x.len(),
+                    x[start],
+                    y[start],
+                    f32::from_bits(x[start]),
+                    f32::from_bits(y[start])
+                ));
+            } else {
+                more += 1;
+            }
+        }
+    }
+    if a.len() != b.len() {
+        out.push(format!("{} runs of words / {}", a.len(), b.len()));
+    }
+    if more > 0 {
+        out.push(format!("… {more} more runs"));
+    }
+    out
+}
+
+/// A [`GpuSnapshot`] copied for a read that resolves later ([`ExplicitBeamsGpu::stage_snapshot`]):
+/// map [`Self::buffer`], then [`Self::bytes`] (as [`ExplicitBeamsGpu::snapshot_to_bytes`]).
+#[doc(hidden)]
+pub struct StagedSnapshot {
+    staging: wgpu::Buffer,
+    sizes: Vec<u64>,
+    state: [u32; 5],
+}
+
+impl StagedSnapshot {
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.staging
+    }
+
+    /// Once [`Self::buffer`] is mapped: the snapshot's bytes, the format of
+    /// [`ExplicitBeamsGpu::snapshot_to_bytes`]. Unmaps the buffer.
+    pub fn bytes(&self) -> Vec<u8> {
+        let all: Vec<u32> = {
+            let data = self.staging.slice(..).get_mapped_range().expect("staged snapshot: map it first");
+            bytemuck::pod_collect_to_vec(&data[..])
+        };
+        self.staging.unmap();
+        let mut out: Vec<u32> = self.state.to_vec();
+        out.push(self.sizes.len() as u32);
+        let mut at = 0usize;
+        for s in &self.sizes {
+            let n = (s / 4) as usize;
+            out.push(n as u32);
+            out.extend_from_slice(&all[at..at + n]);
+            at += n;
+        }
+        bytemuck::cast_slice(&out).to_vec()
+    }
+}
+
+/// [`ExplicitBeamsGpu::coupling_words`] from the misc and acc words.
+fn coupling_words_of(layout: &ExplicitLayout, misc: &[u32], acc: &[u32]) -> Vec<(&'static str, Vec<u32>)> {
+    let Some(c) = layout.coupling else {
+        return Vec::new();
+    };
+    let m0 = c.misc_base as usize * 4;
+    let a0 = c.acc_base as usize;
+    vec![
+        ("coupling records", misc[m0..m0 + c.misc_words() as usize * 4].to_vec()),
+        ("coupling sums", acc[a0..a0 + c.acc_words() as usize].to_vec()),
+    ]
+}
+
 /// Vehicle–vehicle contact's pipelines, buffers and status reads.
 struct Contact {
     /// Its pipelines: built only for a fleet of more than one vehicle (a single
@@ -1457,7 +1599,7 @@ impl ExplicitBeamsGpu {
                 // kernel's flCtl.)
                 let fleet = u64::from(layout.words[plan::W_VV_FLEET]);
                 let n = layout.spans.len();
-                if fleet == 0 { 0 } else { 4 * (fleet + (plan::fleet_acc_words(n) - plan::FLEET_CTL_WORDS) as u64) }
+                if fleet == 0 { 0 } else { 4 * (fleet + (n * (plan::FLEET_OWN_WORDS + 1 + 1024)) as u64) }
             }),
             &upload.bytes(plan::BIND_ARGS),
             vehicles.len() > 1,
@@ -2594,6 +2736,64 @@ impl ExplicitBeamsGpu {
         self.planner.words[plan::W_PAIR_STREAK] = steps;
     }
 
+    /// Measurement: vehicle contact's kept candidates ([`plan::PERF_FLEET_KEEP`], the
+    /// kernel's fkCtl) since the last call (which clears them): (builds, contact passes
+    /// that reused the kept pairs, pairs kept summed over the builds, passes with partners
+    /// on the front's own path, the most pairs one owner kept at a build, builds because
+    /// a calm node had moved past its allowance, builds because a pair was not covered or
+    /// no list was kept, the largest bound at a build that ended a list for motion (a
+    /// node's, or two vehicles') and the current list's allowance for two vehicles'
+    /// relative motion, both float bits, builds because two vehicles had moved past it;
+    /// the other builds are a wild node's). Zeros without the fleet state.
+    #[doc(hidden)]
+    pub fn take_fleet_keep_stats(&mut self) -> [u64; 10] {
+        let w = &self.planner.words;
+        let at = w[plan::W_VV_FLEET_NEXT] as usize;
+        if at == 0 {
+            return [0; 10];
+        }
+        let nv = self.layout.spans.len();
+        // (The kept candidates' region ends before the levels'.)
+        let end = at + plan::fleet_next_words(nv, w[49] as usize, self.layout.total[2] as usize) - plan::fleet_level_words(nv);
+        let ctl = end - plan::FLEET_CTL_WORDS;
+        let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
+        // (Word 14 is the passes' clock, not a count of this window.)
+        let out = std::array::from_fn(|k| u64::from(next[ctl + if k == 9 { 15 } else { 5 + k }]));
+        self.queue.write_buffer(&self.bufs[8], ((ctl + 5) * 4) as u64, &[0u8; 32]);
+        self.queue.write_buffer(&self.bufs[8], ((ctl + 15) * 4) as u64, &[0u8; 4]);
+        out
+    }
+
+    /// Measurement: per vehicle, the kept candidates' reference motion of the next pass
+    /// and its tracked nodes' mean motion of the last (the kernel's fkMean; metres since
+    /// the list's build), then its origin's change since the build.
+    #[doc(hidden)]
+    pub fn fleet_keep_motion(&self) -> Vec<[f32; 9]> {
+        let w = &self.planner.words;
+        let at = w[plan::W_VV_FLEET_NEXT] as usize;
+        if at == 0 {
+            return Vec::new();
+        }
+        let nv = self.layout.spans.len();
+        // (The kept candidates' region ends before the levels'.)
+        let end = at + plan::fleet_next_words(nv, w[49] as usize, self.layout.total[2] as usize) - plan::fleet_level_words(nv);
+        let mean = end - plan::FLEET_CTL_WORDS - 6 * nv;
+        let origin = mean - 3 * nv;
+        let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
+        let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
+        (0..nv)
+            .map(|v| {
+                std::array::from_fn(|k| {
+                    if k < 6 {
+                        f32::from_bits(next[mean + 6 * v + k])
+                    } else {
+                        f32::from_bits(misc[v * 4 + k - 6]) - f32::from_bits(next[origin + 3 * v + k - 6])
+                    }
+                })
+            })
+            .collect()
+    }
+
     /// Measurement: the reused pair list's statistics summed over the vehicles since the
     /// last call (which clears them): (lists built, steps that reused one, pairs listed
     /// at the builds, the most listed at one build). Zeros without the pair list.
@@ -3486,23 +3686,67 @@ impl ExplicitBeamsGpu {
     /// without the coupling.
     #[doc(hidden)]
     pub fn coupling_words(&self) -> Vec<(&'static str, Vec<u32>)> {
-        let Some(c) = self.layout.coupling else {
+        if self.layout.coupling.is_none() {
             return Vec::new();
-        };
+        }
         let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
         let acc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[5])).to_vec();
-        let m0 = c.misc_base as usize * 4;
-        let a0 = c.acc_base as usize;
-        vec![
-            (
-                "coupling records",
-                misc[m0..m0 + c.misc_words() as usize * 4].to_vec(),
-            ),
-            (
-                "coupling sums",
-                acc[a0..a0 + c.acc_words() as usize].to_vec(),
-            ),
-        ]
+        coupling_words_of(&self.layout, &misc, &acc)
+    }
+
+    /// Tests and the browser A/B: the state buffers copied into one MAP_READ buffer (the
+    /// copy submitted now, after the work submitted so far), to be read once mapped
+    /// ([`StagedState::ab_words`]: [`Self::state_words`] with the vehicle-contact plan's
+    /// records masked, then [`Self::coupling_words`]). Never blocks.
+    #[doc(hidden)]
+    pub fn stage_state(&self) -> StagedState {
+        let src = &self.bufs[3..9];
+        let sizes: [u64; 6] = std::array::from_fn(|i| src[i].size());
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-staged-state"),
+            size: sizes.iter().sum(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let mut at = 0;
+        for (b, s) in src.iter().zip(sizes) {
+            enc.copy_buffer_to_buffer(b, 0, &staging, at, s);
+            at += s;
+        }
+        self.queue.submit([enc.finish()]);
+        StagedState {
+            staging,
+            sizes,
+            layout: self.layout.clone(),
+            words: self.planner.words.to_vec(),
+            vv: self.vv_record_words(),
+        }
+    }
+
+    /// Tests and the browser A/B: [`Self::snapshot_to_bytes`] without blocking (the copy
+    /// submitted now; [`StagedSnapshot::bytes`] once mapped).
+    #[doc(hidden)]
+    pub fn stage_snapshot(&self, snap: &GpuSnapshot) -> StagedSnapshot {
+        let sizes: Vec<u64> = snap.copies.iter().map(wgpu::Buffer::size).collect();
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("explicit-beams-staged-snapshot"),
+            size: sizes.iter().sum::<u64>().max(4),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let mut at = 0;
+        for (c, s) in snap.copies.iter().zip(&sizes) {
+            enc.copy_buffer_to_buffer(c, 0, &staging, at, *s);
+            at += s;
+        }
+        self.queue.submit([enc.finish()]);
+        StagedSnapshot {
+            staging,
+            sizes,
+            state: snap.state.to_words(),
+        }
     }
 
     /// Tests and measurement: per vehicle, the surface pair path's last step (pairs
@@ -4017,7 +4261,7 @@ impl ExplicitBeamsGpu {
         }
         if !front {
             // (Groups of any size on the fleet-wide passes: only with the front there.)
-            flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY | plan::PERF_FLEET_POST | plan::PERF_FLEET_FUSE | plan::PERF_FLEET_HITLAT);
+            flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY | plan::PERF_FLEET_POST | plan::PERF_FLEET_FUSE | plan::PERF_FLEET_HITLAT | plan::PERF_FLEET_KEEP);
         }
         // (The levels across the GPU: with groups of any size and the throttles across the
         // fleet, once their module is compiled.)
@@ -4170,8 +4414,10 @@ impl ExplicitBeamsGpu {
                 }
                 // (PERF_FLEET_FUSE: the scans in the plan's workgroup, the sorted copy in the
                 // grids' workgroups.)
+                // (With the kept candidates the scans' dispatch stays: it also tracks every
+                // node, fkTrack; the kernel's fuseScansOn.)
                 let fuse = self.fleet_flags() & plan::PERF_FLEET_FUSE != 0;
-                if !fuse {
+                if !fuse || self.fleet_flags() & plan::PERF_FLEET_KEEP != 0 {
                     out.push(GroupOp::Fleet { copy: c0, kernel: 0, args: FLEET_SCAN_ARGS, from: 0, part: 0 });
                 }
                 out.push(GroupOp::Fleet { copy: c0, kernel: 1, args: FLEET_FIRST_ARGS, from: 0, part: 1 });

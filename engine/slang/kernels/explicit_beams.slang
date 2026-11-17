@@ -1620,6 +1620,12 @@ static const uint PERF_FLEET_ANY = 16384u;
 // listed triangles' throttle updates a thread each in a dispatch of their own
 // (fleetPost), in place of the group's workgroup with its first level.
 static const uint PERF_FLEET_POST = 65536u;
+// perfFlags bit 32768 (explicit_plan::PERF_FLEET_KEEP; contact-groups-design.md §8.10),
+// with PERF_FLEET_FRONT: vehicle contact's (triangle, contact point) candidates kept
+// from one substep to the next (explicit_beams_fleet.slang fk*), built with a margin and
+// rebuilt when the vehicles have moved past it, in place of the gather, grids, sorted
+// copy and walk every substep. The exact tests are the same on the same pairs.
+static const uint PERF_FLEET_KEEP = 32768u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 // perfFlags bit 1024 (explicit_plan::PERF_HIT_ROLES, with PERF_HIT_FB): a two-body
 // dissipative vehicle's hits applied a (hit, role) a lane. A hit's first-pass adds, its
@@ -5867,6 +5873,43 @@ uint flPartner(uint d) { return gNext[gP.vvPairs + (d ^ 1u)]; }
 // gBeams at vvFleetBox: per owner vehicle 4 records of the step.
 uint flBoxAt(uint v) { return gP.vvFleetBox + 4u * v; }
 
+// --- Vehicle contact's kept candidates (PERF_FLEET_KEEP): addresses, after the fleet
+// state's own (explicit_plan::fleet_acc_words, fleet_next_words; the passes are
+// explicit_beams_fleet.slang's fk*) ---
+// gAcc: per vehicle FK_ACC words (for its calm and its wild tracked nodes, the farthest
+// one has moved since the build relative to the vehicle's reference motion and the
+// fastest one's travel over a step, float bits, zero between passes; its kept pairs; the
+// box of its wild candidates at the build, vvKey's keys; its tracked nodes' motions
+// summed, fixed point, zero between passes), then FK_ACC_CTL words.
+static const uint FK_ACC = 14u;
+static const uint FK_SUM = 11u;
+static const uint FK_DEV = 0u; // calm; + 2: wild
+static const uint FK_TRAV = 1u; // calm; + 2: wild
+static const uint FK_PAIRS = 4u;
+static const uint FK_WILD_BOX = 5u;
+static const uint FK_ACC_CTL = 4u;
+uint fkAcc(uint v, uint w) { return flCtl(FL_CTL) + v * FK_ACC + w; }
+uint fkAccCtl(uint i) { return fkAcc(gP.vehicles, 0u) + i; }
+// gNext: per triangle whether its throttle step listed it this pass; per vehicle its
+// partners the build covered (a count, then FK_COVER vehicles, the top bit: one of that
+// partner's points was near one of this vehicle's triangles at the build); the prefixes over the
+// vehicles of the build's candidate runs and of the kept pairs (one more each for the
+// total); per vehicle its origin at the build (float bits); FK_CTL words.
+static const uint FK_COVER = 8u;
+static const uint FK_CTL = 16u;
+uint fkListed(uint gt) { return flCtlNext(FL_CTL) + gt; }
+uint fkCover(uint v, uint i) { return fkListed(gP.totalTris) + v * (FK_COVER + 1u) + i; }
+uint fkRun(uint v) { return fkCover(gP.vehicles, 0u) + v; }
+uint fkPrefix(uint v) { return fkRun(gP.vehicles + 1u) + v; }
+uint fkOrigin(uint v) { return fkPrefix(gP.vehicles + 1u) + 3u * v; }
+// (Per vehicle six words, float bits: its reference motion of this pass, 0..2, and its
+// tracked nodes' mean motion of the pass before, 3..5.)
+uint fkMean(uint v, uint i) { return fkOrigin(gP.vehicles) + 6u * v + i; }
+uint fkCtl(uint i) { return fkMean(gP.vehicles, 0u) + i; }
+// gBeams after the owners' boxes: per node its position (its vehicle's frame) at the build
+// and its class there (.w: 0 calm, 1 wild).
+uint fkRef(uint n) { return gP.vvFleetBox + 4u * gP.vehicles + n; }
+
 // A value one lane decided, read by every lane as uniform (the WGSL
 // post-process turns its reads into workgroupUniformLoad).
 groupshared uint gsUniformLanes;
@@ -8452,7 +8495,11 @@ void vvArgs(uint nv, uint groups, bool big, bool larger)
     // without a group: a thread a pair (words 32..34, in workgroups of 256 at least) and
     // one workgroup (36..38: the first plan, which sizes the rest).
     uint any = groups == 0u ? 0u : 1u;
-    gArgs[32] = any * ((gNext[flAdjFirst(nv)] / 2u + 255u) / 256u);
+    // (With the kept candidates, PERF_FLEET_KEEP, also a thread a node: its motion since
+    // the list's build, fkTrack.)
+    uint scanThreads = gNext[flAdjFirst(nv)] / 2u;
+    if ((gP.perfFlags & PERF_FLEET_KEEP) != 0u) scanThreads = max(scanThreads, gP.totalNodes);
+    gArgs[32] = any * ((scanThreads + 255u) / 256u);
     gArgs[33] = 1u;
     gArgs[34] = 1u;
     gArgs[36] = any;
@@ -9670,7 +9717,11 @@ void vvFrame(inout VvTri t, float3 p1, float3 p2)
 // (exactly 0 for v = a, and for every vehicle while the origins are 0). The contact's
 // geometry (triangles, contact points, votes, anti-clip) is in the owner's frame, its
 // selection (frame bounds, boxes, prefilters) in the World's.
-float3 vvRel(uint v, uint a) { return asfloat(gMisc[v].xyz) - asfloat(gMisc[a].xyz); }
+// (nf3: a compiler allowed to reassociate, as Metal's is, would otherwise turn
+// `vvRel(v, a) + x` into another order in one inlined copy and not in another, and one
+// contact point would have two positions: the gather's and the kept pairs' tests of
+// vehicle contact differed in the last bit; contact-groups-design.md §8.10.)
+float3 vvRel(uint v, uint a) { return nf3(asfloat(gMisc[v].xyz) - asfloat(gMisc[a].xyz)); }
 
 VvTri vvTriangle(uint gt, float3 origin, float r)
 {

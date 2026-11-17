@@ -350,9 +350,24 @@ void fuseScans(uint lane, uint s)
     }
 }
 
-void fuseSortCands(uint va, uint lane)
+void fuseSortCands(uint va, uint lane, bool build)
 {
     sync();
-    uint cands = flCands(va);
-    for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES) flSortCand(va, e);
+    // (A build of the kept candidates, PERF_FLEET_KEEP: its own run's, fkSortCand's.)
+    uint cands = build ? fkCands(va) : flCands(va);
+    for (uint e = lane, eStop = EB_END(e, cands, LANES); e < eStop; e += LANES)
+    {
+        if (build) fkSortCandOf(va, e);
+        else flSortCand(va, e);
+    }
 }
+// Candidate e of owner va's part of a build's run to its place in the sorted copy.
+void fkSortCandOf(uint va, uint e)
+{
+    uint base = gNext[fkRun(va)];
+    uint br = gNext[gP.vvHits + 4u * VV_PART * vvTotalCp() + base + e];
+    gBeams[gP.vvRun + VV_PART * vvTotalCp() + base + gNext[flOffAt(va) + (br & (GRID_BUCKETS - 1u))] + (br >> 10)] = gBeams[gP.vvRun + base + e];
+}
+// The plan's scans (PERF_FLEET_FUSE) unless the kept candidates are on: their scans'
+// dispatch is also a thread a node (fkTrack), so it stays, and the host keeps it.
+bool fuseScansOn() { return flFuseOn() && (gP.perfFlags & PERF_FLEET_KEEP) == 0u; }
