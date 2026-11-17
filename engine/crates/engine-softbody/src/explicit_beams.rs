@@ -1448,6 +1448,7 @@ pub fn surface_response(
 /// (first order), capped to the budget: δ ≤ budget/|fn|; with fn ≥ 0 the move
 /// releases energy and is not capped.
 pub fn shift_depth(p: f32, budget: f32, fn_: f32) -> f32 {
+    let budget = budget * shift_budget_scale();
     let full = 0.2 * p;
     if fn_ >= 0.0 || -fn_ * full <= budget {
         full
@@ -4924,6 +4925,13 @@ impl ExplicitBeams {
         }
         out
     }
+}
+
+/// A measurement switch (CPU only; `SHIFT_BUDGET=x`, default 1): the share of a
+/// contact's budget its position step may store ([`shift_depth`]). 1 is the rule.
+pub fn shift_budget_scale() -> f32 {
+    static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("SHIFT_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0))
 }
 
 /// §37.1's friction guard (on; `FRICTION_GUARD=0`, a measurement switch: off).

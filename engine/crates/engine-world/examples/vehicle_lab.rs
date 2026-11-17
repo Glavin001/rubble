@@ -819,6 +819,108 @@ fn cpu_ledger_from(template: &ExplicitBeams, pos: &[glam::Vec3], vel: &[glam::Ve
     ledger_loop(&mut lab, secs)
 }
 
+/// `--cpu-world`: GPU cars' states (positions, velocities, broken flags, rest lengths,
+/// anti-clip memory) as CPU vehicles, each on its own CPU lab's mountain for one window to
+/// take that window's rock proxies, then all in one `ExplicitBeamsWorld` with vehicle
+/// contact and the energy ledger. Per quarter second (`--ledger-secs`, default 3 s): per
+/// car its kinetic energy and nodes past 0.25 m/s, and the ledger's terms over the
+/// quarter: vehicle contact's normal and friction work, its position steps, self-contact,
+/// the node pass's contacts (ground, rock), the beams' dissipation.
+fn cpu_world_from(
+    template: &ExplicitBeams,
+    cars: &[usize],
+    pos: &[Vec<glam::Vec3>],
+    vel: &[Vec<glam::Vec3>],
+    beams: &[Vec<engine_webgpu::GpuBeam>],
+    clip: &[Vec<[u32; 4]>],
+) -> anyhow::Result<()> {
+    use engine_softbody::explicit_contact::ExplicitBeamsWorld;
+    let secs: f64 = arg("--ledger-secs").and_then(|x| x.parse().ok()).unwrap_or(3.0);
+    let script = json!({ "scene": "mountain", "cars": 1, "events": [] });
+    let mut sims = Vec::new();
+    for &v in cars {
+        let mut lab = CpuLab::new(template, options(&script))?;
+        lab.bench.set_script(&script)?;
+        let put = |lab: &mut CpuLab| {
+            let o = lab.sim.origin;
+            for (i, n) in lab.sim.nodes.iter_mut().enumerate() {
+                n.pos = pos[v][i] - o;
+                n.vel = vel[v][i];
+            }
+            for (b, g) in lab.sim.beams.iter_mut().zip(&beams[v]) {
+                b.broken = g.broken;
+                b.rest = g.rest;
+            }
+            if clip[v].len() == lab.sim.nodes.len() {
+                lab.sim.clip_sides = clip[v].clone();
+            }
+        };
+        put(&mut lab);
+        lab.step()?;
+        put(&mut lab);
+        let mut set = None;
+        // (One step's window: its proxies; then the state again.)
+        lab.step_observed(&mut |s: &ExplicitBeams| {
+            set = s.rigid.as_deref().cloned();
+        })?;
+        put(&mut lab);
+        let mut sim = lab.sim.clone();
+        sim.rigid = set.map(Box::new);
+        sim.trace = None;
+        sims.push(sim);
+    }
+    let mut w = ExplicitBeamsWorld::new(sims);
+    w.final_guard = arg("--final-guard").as_deref() == Some("1");
+    w.enable_ledger();
+    println!("cpu world of cars {cars:?}: final guard {}", w.final_guard);
+    let steps_q = 500u32;
+    let quarters = (secs * 4.0).round() as u32;
+    let snap = |l: &engine_softbody::explicit_contact::EnergyLedger| [l.w_contact_normal, l.w_contact_friction, l.w_contact_shift, l.w_self_contact, l.w_ground_vertical + l.w_ground_horizontal, l.beam_dissipation(), l.mechanical()];
+    let mut last = snap(w.ledger.as_ref().unwrap());
+    for q in 0..quarters {
+        let mut fast = vec![std::collections::HashSet::new(); cars.len()];
+        let mut hits = 0u64;
+        for _ in 0..steps_q {
+            w.step();
+            hits += u64::from(w.last.hits);
+            for (k, v) in w.vehicles.iter().enumerate() {
+                for (i, n) in v.nodes.iter().enumerate() {
+                    if n.vel.abs().max_element() > 0.25 {
+                        fast[k].insert(i);
+                    }
+                }
+            }
+        }
+        let now = snap(w.ledger.as_ref().unwrap());
+        let d: Vec<f64> = now.iter().zip(&last).map(|(a, b)| a - b).collect();
+        let per: Vec<String> = w
+            .vehicles
+            .iter()
+            .zip(&fast)
+            .zip(cars)
+            .map(|((v, f), c)| {
+                let ke: f64 = v.nodes.iter().map(|n| 0.5 * f64::from(n.mass) * f64::from(n.vel.length_squared())).sum();
+                format!("car {c} {ke:.2} J {}n", f.len())
+            })
+            .collect();
+        println!(
+            "  +{:.2} s: {}; vehicle contact normal {:+.3} friction {:+.3} shift {:+.3}, self {:+.3}, rock/ground {:+.3}, beams dissipated {:.3}, mechanical {:+.3} J; hits {}",
+            f64::from(q + 1) * 0.25,
+            per.join(", "),
+            d[0],
+            d[1],
+            d[2],
+            d[3],
+            d[4],
+            d[5],
+            d[6],
+            hits
+        );
+        last = now;
+    }
+    Ok(())
+}
+
 /// `--gpu-twin`: from the CPU lab's state now, the same vehicle uploaded to a standalone
 /// GPU fleet (`ExplicitBeamsGpu::with_coupling`, the window's proxies written as the CPU
 /// holds them: the mountain's static rock) and both stepped `secs`, 17 steps a frame.
@@ -1803,6 +1905,19 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 if from_fixture.is_some() {
                     std::process::exit(0);
                 }
+            }
+            // `--cpu-world A,B,…`: those vehicles' states (as `--cpu-ledger` carries them)
+            // in one CPU reference fleet with vehicle contact (`ExplicitBeamsWorld`, each
+            // with its own window's rock proxies) and its energy ledger by term:
+            // `cpu_world_from`. `--final-guard 1`: §37.1's work guard on the final
+            // velocities for vehicle contact (`ExplicitBeamsWorld::final_guard`).
+            if let Some(list) = arg("--cpu-world") {
+                x.restore(&snap);
+                x.wait();
+                let (pos, vel, beams, clip) = (x.positions(), x.velocities(), x.beams(), x.clip_sides());
+                let cars: Vec<usize> = list.split(',').filter_map(|v| v.parse().ok()).collect();
+                cpu_world_from(template, &cars, &pos, &vel, &beams, &clip)?;
+                std::process::exit(0);
             }
             // `--cpu-ledger V`: vehicle V's state on the CPU reference, its energy ledger
             // (`cpu_ledger_from`), then exit.
