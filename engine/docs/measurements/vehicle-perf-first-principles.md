@@ -1708,6 +1708,12 @@ density 1, which the scene renderer does not draw). Parts thrown over a wall had
 ground and fell without end; one such node set its car's contact reach and pair-list
 rebuilds. With the lid no node passes 25 km/h late in the run.
 
+*Replaced 2026-11-17:* on the rolling terrain the lid was an invisible ceiling the cars
+met in mid-air (one car, 40 s: four touches, the first at 1.25 s right off the lip; at
+13.3 s its spin fell from 15.6 to 4.3 rad/s while it slid along the lid). The canyon now
+has no ceiling: its walls go on undrawn above their drawn rock to 500 m over the fall line
+(`mountain.rs` `WALL_TOP`). `LAB_NO_LID` is gone.
+
 **The page's switches.** The page sends its perf flags as its checkboxes' sum, so a
 switch without a checkbox was off on the page: the members' pair lists (256, §8.19) and
 the contact hits' beam sums (512, §8.21) never ran in Chrome until they got theirs
