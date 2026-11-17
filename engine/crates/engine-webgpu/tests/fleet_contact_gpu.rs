@@ -197,4 +197,23 @@ fn levels_across_the_gpu_are_bit_for_bit(column: &dyn Fn(usize, f32) -> Vec<Expl
     }
     std::env::remove_var("RUBBLE_FLEET_LEVEL_SLOTS");
     assert!(deepest >= 3, "the column's levels reached {deepest}: too few to pass a slot");
+    // One hit's latency cut in the group's levels (`explicit_plan::PERF_FLEET_HITLAT`,
+    // fleetLevelsLat) and the front's fused dispatches (`PERF_FLEET_FUSE`), each against
+    // the switch off: the column of ten and the two columns of six.
+    use engine_exec::explicit_plan::{PERF_FLEET_FUSE, PERF_FLEET_HITLAT};
+    for mask in [PERF_FLEET_HITLAT, PERF_FLEET_FUSE, PERF_FLEET_HITLAT | PERF_FLEET_FUSE] {
+        for self_split in [true, false] {
+            let Some([grouped, largest, hits, top]) = fleet_matches("a column of ten", column(10, 15.0), 40, 17, mask, self_split) else { return };
+            assert!(grouped > 10 && largest > 8 && hits > 0 && top >= 3, "a deep group formed and hit ({grouped} frames, largest {largest}, {hits} hits, level {top})");
+        }
+        let mut two = column(6, 15.0);
+        for mut v in column(6, 12.0) {
+            for n in &mut v.nodes {
+                n.pos.x += 10.0;
+            }
+            two.push(v);
+        }
+        let Some([grouped, _, hits, _]) = fleet_matches("two columns of six", two, 30, 17, mask, true) else { return };
+        assert!(grouped > 10 && hits > 0, "groups formed and hit ({grouped} frames, {hits} hits)");
+    }
 }

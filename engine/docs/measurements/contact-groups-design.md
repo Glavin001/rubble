@@ -584,4 +584,32 @@ owner each (a chain of 6 to 12 at 32 cars), which the group's one workgroup alre
 at the same latency without 4 L + 3 more dispatches a substep (2 to 2.4 µs each, empty
 or not). Off by default: not faster over whole runs (§8.32). What would cut the levels
 further is one hit's latency (the staged geometry kept in the group's own levels too, a
-hit's four nodes on four threads), not more parallelism across hits.
+hit's four nodes on four threads), not more parallelism across hits: §8.9.
+
+### 8.9 One hit's latency in the group's levels; two front dispatches fused (2026-11-17)
+
+Kernel `explicit_beams_fleet_hitlat.slang` (included by `explicit_beams_fleet.slang`; no
+new module). Both on by default; measurements in `vehicle-perf-first-principles.md` §8.32.
+
+- **8388608 `PERF_FLEET_HITLAT`** (with 16384): `fleetLevelsLat` in place of
+  `fleetLevelsAny`, the same rule, rounds, order and leaf functions, three changes of how:
+  the group's listed hits flattened over the workgroup's lanes (a lane a hit of the level,
+  whatever its owner: a level's owners side by side, not in turn; a prefix of the owners'
+  hits in `gsOff` past 512, a binary search a lane); the snapshot a lane a node of a hit;
+  and a hit's staged geometry and first-pass force (`vvStagedHit`) taken once in residual
+  phase 0 and kept in the lane's registers for phases 1 and 2 (it reads nothing a phase
+  writes; the lane that stages a hit is the one that finishes it; a lane's second hit,
+  past 512 hits a level, is staged again). A list past its room: `fleetLevelsAny` itself.
+  Not done: a hit's four nodes' forces on four lanes (the four `vvResAcc` loads are
+  already independent in one thread), and the application's staging reused for the
+  residual phases (it is taken in other coordinates: `vvTry` relative to the owner, the
+  staged hit in world coordinates, so the values differ in their last bits).
+- **16777216 `PERF_FLEET_FUSE`** (with 8192): the pairs' scans in the owners' plan's
+  workgroup (its lanes over the plan's pairs, then its prefix as before), and each owner's
+  candidates' sorted copy in its grid's workgroup after its offsets: the same writes from
+  the same functions, two dispatches fewer a substep (the host leaves out the scans' and
+  the sorted copy's). The other front dispatches each wait on a whole earlier dispatch
+  (a prefix over every owner, or every owner's counts) and stay.
+
+The level slots of §8.8 moved to bits 27 to 31 of the copies' perf flags (bit 24 is this
+flag's).

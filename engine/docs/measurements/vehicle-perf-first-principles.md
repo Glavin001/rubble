@@ -2042,3 +2042,68 @@ eleven small dispatches are 3.9 ms (most 10–20 µs a substep each, latency, no
 hit is the lane that finishes it; a hit's four nodes' forces on four threads), and fewer
 passes over a hit (three residual phases and the application each take its triangle and
 clip test again).
+
+**Then: one hit's latency, and two front dispatches fused (2026-11-17).**
+`contact-groups-design.md` §8.9. Perf flags 8388608 (`PERF_FLEET_HITLAT`: the group's
+hits flattened over its lanes, the snapshot a lane a node, a hit's staged geometry kept in
+its lane's registers across the residual phases) and 16777216 (`PERF_FLEET_FUSE`: the
+pairs' scans in the plan's workgroup, the sorted copy in the grids' workgroups), both on
+by default, a checkbox each on the lab page (checked).
+
+Proofs: `fast-check.sh` with `perf=8388608`, `perf=16777216` and both, all 18 fixtures
+(1, 2, 4, 8, 32 cars), and both at `FRAMES=20` on the 8- and 32-car fixtures: every
+fixture "bit for bit: true". `perf-verify.sh 25264065` (the defaults before and both):
+`fleet_contact_gpu` 1, `group_split_gpu` 3, `self_split_gpu` 8, `explicit_contact_gpu`
+13, `explicit_beams_bitwise` 12, `explicit_loop_cap` 5, `explicit_vehicles` 11, Metal
+`vehicle_parity` 4: PASS. `fleet_contact_gpu` adds each flag and both against off on the column of ten (at
+least 3 levels deep, asserted) and two columns of six, with and without self split
+(passes with the defaults and with `RUBBLE_PERF_FLAGS=25264065`). Chrome: all 124 modules compile. Whole 40 s runs end in the same state.
+
+ms a frame by dispatch kind (`--ab-profile`, the same fixtures, both off / both on):
+
+| | 8 cars t 3.7 | 8 cars t 16 | 32 cars t 4 | 32 cars t 25 |
+|---|---|---|---|---|
+| the levels (`split levels`) | 7.09 / 5.49 | 1.04 / 1.04 | 32.9 / 17.4 | 49.3 / 31.3 |
+| scans + sorted copy | 0.61 / 0 | 0.63 / 0 | 0.92 / 0 | 1.92 / 0 |
+| owners' parts + grids (now with them) | 1.10 / 1.33 | 1.15 / 1.47 | 2.01 / 2.49 | 2.46 / 3.49 |
+| untimed frame | 20.0 / 18.0 | 17.8 / 17.4 | 54.9 / 39.3 | 117.8 / 97.5 |
+
+fast-check at 20 frames, on / off: 32 cars t 1, 2.5, 4: 32.6 / 49.2, 33.5 / 50.6,
+38.8 / 51.2; 8 cars t 2, 3.7, 8, 16: 12.3 / 12.7, 17.9 / 19.7, 15.0 / 15.3, 17.4 / 17.7.
+The level's floor moved: at t 25 (12 levels a substep, one owner each) 0.94 ms a substep
+against 1.47; a level is now about 77 µs (its application and three residual phases).
+
+Whole 40 s runs (vehicle GPU ms a step, t ≥ 0.5 s, median / p95 / worst):
+
+| | off | on |
+|---|---|---|
+| 8 cars, native | 16.51 / 17.48 / 23.28 | 16.38 / 17.09 / 23.10 |
+| 32 cars, native | 115.4 / 131.5 / 164.3 | 95.2 / 109.6 / 118.0 |
+| 8 cars, Chrome (page visible, ~10 s simulated) | 15.60 / 21.90 / 24.38 | 15.50 / 19.94 / 24.80 |
+
+**Default on**: bit for bit; faster natively (32 cars by a fifth, 8 cars a little) and in
+Chrome at the median and p95 (its worst within the runs' noise).
+
+**Eight cars with the other two branches** (a local merge of this branch,
+`perf/fleet-candidates` and `perf/own-step`, not pushed; native, 8 cars, mountain):
+
+| ms a frame (`--ab-profile`) | merge, kept candidates and these off | with `PERF_FLEET_KEEP` and `PERF_FLEET_HITLAT` |
+|---|---|---|
+| t 3.7: the cars' own steps (self step) | 5.75 | 5.76 |
+| levels | 7.03 | 5.61 |
+| members' self-collision hits | 1.65 | 1.67 |
+| walk | 1.00 | 0.25 (one build) |
+| owners' parts, grids, scans, triangles and points | 2.23 | 2.58 |
+| listed prefix, pairs' prefix, pairs, sorted copy, throttles | 2.02 | 0.14 |
+| self pairs + self walk | 1.26 | 1.26 |
+| untimed frame | 20.1 | 16.8 |
+| t 16: untimed frame | 17.9 | 13.1 (self step 5.98, members' hits 1.71, levels 1.05, owners' parts 1.05, self pairs 0.86) |
+| whole 40 s, vehicles median / p95 / worst | 16.16 / 17.49 / 23.80 | 11.97 / 14.48 / 18.97 |
+
+(`PERF_FLEET_FUSE` is not in the merge's measurement: its sorted copy and the kept
+candidates' build share the grids' dispatch, which needs joining first.) With the three
+the eight-car frame is 12–17 ms; the gate (10 ms) is not met. What is left, at t 16:
+the cars' own steps (6.0 ms, the same in the merge as without `perf/own-step`: its
+changes did not show on this path), the members' self-collision hits (1.7), the front's
+remaining dispatches (3.2, ten small ones), the levels (1.0) and self pairs (0.9). At t 3.7 the levels are still 5.6 ms: two
+levels of one owner each, each about 75 µs a substep of one thread's chains.
