@@ -303,6 +303,10 @@ struct Params
     uint vvFleet;
     uint vvFleetNext;
     uint vvFleetBox;
+    // The partners' room (explicit_plan's W_VV_ROOM): the candidate run, the hit list and
+    // their ranks hold this many times the fleet's contact points, and a node's two-body
+    // point counts this many owners (0: VV_PART, a layout before the word).
+    uint vvRoom;
 };
 
 // Slide nodes in parallel (EB_AERO frame, see slideNode): gStatic at vehExtBase per
@@ -1608,6 +1612,14 @@ static const uint PERF_FLEET_STATE = 4096u;
 // front and tests as fleet-wide dispatches (explicit_beams_fleet.slang fleetFront,
 // fleetPlan, fleetWideTests).
 static const uint PERF_FLEET_FRONT = 8192u;
+// perfFlags bit 16384 (explicit_plan::PERF_FLEET_ANY; §8 stage 3), with both: a contact
+// group of any size on the fleet-wide front and tests, its levels for any number of
+// owners (fleetLevelsAny), in place of the larger groups' pass (vvPass) past VV_PART.
+static const uint PERF_FLEET_ANY = 16384u;
+// perfFlags bit 65536 (explicit_plan::PERF_FLEET_POST), with the front fleet-wide: the
+// listed triangles' throttle updates a thread each in a dispatch of their own
+// (fleetPost), in place of the group's workgroup with its first level.
+static const uint PERF_FLEET_POST = 65536u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 // perfFlags bit 1024 (explicit_plan::PERF_HIT_ROLES, with PERF_HIT_FB): a two-body
 // dissipative vehicle's hits applied a (hit, role) a lane. A hit's first-pass adds, its
@@ -9716,7 +9728,7 @@ uint flSlot(uint va, uint vh)
         uint d = gNext[flAdjAt(e)];
         if (flPartner(d) == vh)
         {
-            slot = min(gNext[flSlotAt(d)], VV_PART - 1u);
+            slot = min(gNext[flSlotAt(d)], vvRoom() - 1u);
             break;
         }
     }
@@ -9732,11 +9744,18 @@ uint vvSplitPoint(uint slot, uint n)
 }
 // An owner's hit list's room and the point slots a full clear zeroes.
 uint vvHitRoom(uint a, uint points) { return gFl != 0u ? 2u * uint(gAcc[flOwn(flVehOf(a)) + FL_OFFERED].load()) : 2u * points; }
-uint vvSplitSlots(uint k) { return gFl != 0u ? VV_PART : k; }
+uint vvSplitSlots(uint k) { return gFl != 0u ? vvRoom() : k; }
 #else
 uint vvSplitPoint(uint slot, uint n) { return gP.vvSplit + (1u + slot) * gP.totalNodes + n; }
 uint vvHitRoom(uint a, uint points) { return 2u * points; }
 uint vvSplitSlots(uint k) { return k; }
+#endif
+// The listed triangles' throttle updates already made by threads over the fleet
+// (explicit_beams_fleet.slang, PERF_FLEET_POST): the levels leave them out.
+#ifdef EB_VV_FLEET
+bool vvPostDone() { return gFl != 0u && (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_POST)) == (PERF_FLEET_FRONT | PERF_FLEET_POST); }
+#else
+bool vvPostDone() { return false; }
 #endif
 // A two-body hit found by a walk: its nodes' hit counts of this owner's turn.
 void vvSplitCount(VvTri t, uint h, uint slot)
@@ -9783,7 +9802,7 @@ void vvSplitClear(uint off, uint k, uint slots, uint lane)
         for (uint i = lane, iStop = EB_END(i, r0.y, LANES); i < iStop; i += LANES)
         {
             gAcc[vvSplitTri(r0.x + i)].store(0);
-            for (uint sl = 0u; sl < VV_PART; sl++)
+            for (uint sl = 0u, slStop = EB_END(sl, min(slots, EB_MAX_MEMBERS), 1u); sl < slStop; sl++)
             {
                 // (The slot's own word, whatever the owners' addressing.)
                 if (sl < slots) gAcc[gP.vvSplit + (1u + sl) * gP.totalNodes + r0.x + i].store(0);
@@ -10883,15 +10902,20 @@ void vvLevelsSet(uint k, uint lane)
 // A box over more than GRID_MAX_CELLS cells tests every
 // candidate as before.
 uint vvTotalCp() { return gP.vvHits - (gP.vvBig + gP.vehicles); }
+// The partners' room and the regions' unit: that many times the fleet's contact points
+// (the run and its sorted copy in gBeams; in gNext four units of hits, one of candidate
+// ranks, four of the hits' order).
+uint vvRoom() { return gP.vvRoom != 0u ? gP.vvRoom : VV_PART; }
+uint vvRoomCp() { return vvRoom() * vvTotalCp(); }
 #ifdef EB_VV_FLEET
 // (gFl: the one owner's sorted copy at its part's place, every bucket of its own grid.)
-uint vvSortAt(uint runOff) { return gP.vvRun + VV_PART * vvTotalCp() + (gFl != 0u ? flRun(gFlV) : VV_PART * runOff); }
+uint vvSortAt(uint runOff) { return gP.vvRun + vvRoomCp() + (gFl != 0u ? flRun(gFlV) : VV_PART * runOff); }
 uint vvGridBucket(uint a, int3 c) { return gFl != 0u ? gridBucket(c) : a * (GRID_BUCKETS / VV_PART) + (gridBucket(c) & (GRID_BUCKETS / VV_PART - 1u)); }
 #else
-uint vvSortAt(uint runOff) { return gP.vvRun + VV_PART * vvTotalCp() + VV_PART * runOff; }
+uint vvSortAt(uint runOff) { return gP.vvRun + vvRoomCp() + VV_PART * runOff; }
 uint vvGridBucket(uint a, int3 c) { return a * (GRID_BUCKETS / VV_PART) + (gridBucket(c) & (GRID_BUCKETS / VV_PART - 1u)); }
 #endif
-uint vvRankAt(uint runOff, uint points, uint a, uint e) { return gP.vvHits + 4u * VV_PART * vvTotalCp() + VV_PART * runOff + a * points + e; }
+uint vvRankAt(uint runOff, uint points, uint a, uint e) { return gP.vvHits + 4u * vvRoomCp() + VV_PART * runOff + a * points + e; }
 // The grid's cell: the owner's self-collision cell, else half a metre (any size gives
 // the same candidates; it only sets how many are visited).
 float vvGridCell(uint va)
@@ -11362,7 +11386,7 @@ void vvPairTest(uint a, uint va, uint gt, uint idx, uint runOff, uint points, fl
 // in their point's bucket (a counting sort of the hit indices by point, owner a's buckets
 // a·256 …, in gsCount/gsOff: free in the levels, the grid's last use was the tests): the
 // same chain, the same order, the same results.
-uint vvOrderAt(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 5u * VV_PART * vvTotalCp() + 4u * VV_PART * runOff + 2u * a * points + i; }
+uint vvOrderAt(uint runOff, uint points, uint a, uint i) { return gP.vvHits + 5u * vvRoomCp() + 4u * VV_PART * runOff + 2u * a * points + i; }
 uint vvHitBucket(uint a, uint h) { return a * (GRID_BUCKETS / VV_PART) + (((h * 2654435761u) >> 22) & (GRID_BUCKETS / VV_PART - 1u)); }
 
 // Every lane (uniform): the hit lists of level l's owners bucketed by point.
@@ -11843,7 +11867,7 @@ void vvPassSmallLevels(uint k, uint off, uint runOff, uint points, uint parity, 
         // Measurement only: 524288 the levels (the hits' application).
         if ((gP.ablate & 524288u) != 0u) break;
 #endif
-        if (l == 1u && (gP.ablate & 131072u) == 0u)
+        if (l == 1u && (gP.ablate & 131072u) == 0u && !vvPostDone())
         {
             uint total = 0u;
             for (uint a = 0u, aStop = EB_END(a, k, 1u); a < aStop; a++) total += gsVvList4[a].load();

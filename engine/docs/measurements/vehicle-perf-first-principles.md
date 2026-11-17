@@ -1834,3 +1834,276 @@ steps 5.8, the levels 3.3, the front 2.6, members' self-collision hits 1.7, the 
 1.8, listed pairs 0.8, self pairs and walk 1.4. Thirty-two cars are unchanged
 (139–270 ms): a group past eight members still takes the larger groups' pass on one
 core, which the next stage removes.
+
+### 8.29 Contact groups of any size on the fleet-wide passes; the levels visit the owners with hits; the throttle updates across the fleet (2026-11-16)
+
+`contact-groups-design.md` §8 stage 3 (what is built: its §8.7). Two perf flags, both
+on by default, each a checkbox on the lab page:
+
+- **16384 `PERF_FLEET_ANY`** (with 8192): a contact group of any size takes the
+  fleet-wide front and tests and its levels in `fleetLevelsAny`, in place of the larger
+  groups' pass (`vvPass`) on one core past `VV_PART` (8) members. The levels: the
+  group's owners with hits are listed first (usually a few of the group's), and only
+  they are visited, on the lanes their hit lists reach; an owner's partners are two
+  words of bits by member, and its level (one past the highest earlier owner with hits
+  that is its partner or shares one: `vvLevelsSet`'s rule) is relaxed over those bit
+  sets until none changes. A small group takes these levels too, unless one of its
+  owners lists more than 128 hits (then the small groups' own levels, whose hits are
+  ordered by buckets). Params word 105 (`vvRoom`): the run, hit list and two-body point
+  slots, eight times the fleet's contact points before, which 32 crashing cars pass.
+- **65536 `PERF_FLEET_POST`** (with 8192): every listed triangle's throttle update and
+  a later owner's reset, which ran in the group's workgroup with its first level (528
+  triangles a car on one core every substep, hits or not), are a thread each in a
+  dispatch of their own after the listed pairs' tests (`explicit_beams_split_fleetpost`,
+  four variants; 120 explicit modules). (32768 is `perf/fleet-candidates`'
+  `PERF_FLEET_KEEP`.)
+
+**Proofs** (native M3 Max, the GPU shared with other sessions through a lock):
+
+- `fast-check.sh` on the 18 fixtures (1, 2, 4, 8, 32 cars): `perf=16384`,
+  `perf=65536` and `perf=81920` (both), each fixture "bit for bit: true"; `perf=81920`
+  again at `FRAMES=20`, and on the four pre-lid four-car fixtures at 20 frames: true.
+- `fleet_contact_gpu`: a column of ten (a group past eight members, asserted) with
+  16384 and with both, a column of six with 65536 alone and with the levels for any
+  size forced on small groups, each with and without self split: pass, with the
+  default flags and with `RUBBLE_PERF_FLAGS=98241` (the defaults before, plus both).
+- `perf-verify.sh 98241`: `group_split_gpu` 3, `self_split_gpu` 8,
+  `explicit_contact_gpu` 13, `explicit_beams_bitwise` 12, `explicit_loop_cap` 5,
+  `explicit_vehicles` 11, Metal `vehicle_parity` 4: PASS. (98241 is now the default.)
+- Chrome: "all 120 modules compile in Chrome".
+
+**Native, ms a frame of 34 substeps, on / off** (fast-check, 4 frames each way from one
+state; `perf=81920`):
+
+| cars | fixtures (t s) | on / off |
+|---|---|---|
+| 1 | 2.5, 6, 20 | 5.6 / 4.4, 7.2 / 5.9, 6.7 / 5.9 |
+| 2 | 2, 3.7, 8, 16 | 10.2 / 10.0, 11.7 / 12.0, 10.7 / 10.9, 10.4 / 10.9 |
+| 4 | 2, 3.7, 8, 16 | 9.5 / 8.9, 17.9 / 18.4, 15.5 / 16.2, 13.3 / 14.2 |
+| 8 | 2, 3.7, 8, 16 | 12.6 / 14.0, 16.5 / 18.1, 14.9 / 16.8, 16.7 / 18.8 |
+| 32 | 1, 2.5, 4 | **37.2 / 198.7, 30.8 / 131.8, 49.6 / 249.3** |
+
+One car has no contact group, so neither flag runs; the same switch with an unused bit
+(`perf=1048576`) reads 6.4 / 4.4, 7.1 / 5.8, 6.2 / 5.9: the "on" side is measured
+first from a cold state, a bias of the harness, not a cost. At 20 frames the 32-car
+fixtures read 49 / 218, 50 / 175, 51 / 252, eight cars 12.5–19.6 against 13.9–21.3.
+
+**Where the 32-car frame is now** (`--ab-profile`, both flags on, ms a frame): the
+levels 35.4 / 21.4 / 32.7 at t 1, 2.5, 4 (one workgroup for the one group of 32: the
+levels in turn, three residual phases each, a barrier between), the cars' own steps
+6.0–8.3, the walk 1.8–4.1, self-collision 3.5–5.0, the rest of the front 3–4, the
+throttle dispatch 0.25. Before, the larger groups' pass was 141–244 ms of it. Eight cars
+at t 16: the levels 3.38 → 0.99 ms a frame, the throttle dispatch 0.23.
+
+**Chrome, eight cars** (`vehicle-lab-record.mjs --probe --secs 40`,
+`mode=mountain&car=gen&cars=8&timing=step`, page visible, vehicle GPU ms a World step,
+t ≥ 0.5 s, about 10 s simulated each):
+
+| | median | p95 | worst |
+|---|---|---|---|
+| both off | 17.2 | 23.1 | 25.3 |
+| both on | 15.5 | 21.8 | 24.4 |
+| both on (second run) | 15.6 | 21.6 | 25.1 |
+| both off (second run) | 16.5 | 22.7 | 25.0 |
+
+Not measured in Chrome: more than eight cars (the page builds at most eight, whatever
+its car count says).
+
+**Default on**: every state word the same, faster natively from two cars up (32 cars
+four to five times) and faster in Chrome at eight cars.
+
+**Not built: the levels across the GPU (stage 3c).** At 32 cars the levels are now
+two-thirds of the frame, all in the one group's workgroup. What is left, precisely:
+
+1. *The order (b).* The levels are already order-independent in what they compute (a
+   level is a set of owners whose touched vehicles are disjoint, so within a level
+   nothing depends on the order of owners or hits); what is ordered is the levels
+   themselves (level l reads the nodes level l − 1 wrote) and, inside an owner, the
+   chain of hits on one contact point (`vvApplyOrdered`'s scan). Both stay.
+2. *The levels as dispatches (c).* A dispatch a level and phase (application, three
+   residual phases) over every hit of that level in the fleet, a thread a hit, sized
+   from a prefix of the hits by level (`flPrefixAt(3, v)` is reserved). A dispatch
+   needs its level: the step's three parameter copies are used up as phases, so the
+   levels need copies of their own (a level and phase each, past `PARAM_COPIES`) or a
+   module a phase reading the level from an argument word the plan writes. With L
+   level slots that is 4 L dispatches a substep, empty past the highest level in use,
+   and the group's workgroup looping the levels past L (lossless, slow, rare). The
+   snapshot and the two-body clears are threads over hits already independent of the
+   levels (before the first and after the last).
+3. *The levels' rounds* run in the workgroup today (a lane an owner with hits); over
+   the fleet they are one workgroup of the plan, rounds bounded by the longest chain
+   of touching owners (`EB_MAX_MEMBERS + 2`).
+
+### 8.32 The levels across the GPU (stage 3c): built and bit for bit; the levels are chains, so off by default (2026-11-16)
+
+`contact-groups-design.md` §8.8 (what is built). Perf flag 524288 (`PERF_FLEET_LEVELS`,
+with 16384 and 65536), a checkbox on the lab page (unchecked). Module
+`explicit_beams_split_fleetlevels` (four variants; 124 explicit modules). The fixtures
+were made again: the fleet's gNext region and gBeams grew (the levels' state, the staged
+hits kept).
+
+**Measured first: the levels in use** (`vehicle_lab … --ab-profile` with `AB_LEVELS=n`:
+each frame's last pass, its owners with hits by level; the levels' dispatch timed alone):
+
+| scene | levels (top) | owners a level | hits a level | the levels, ms a frame (µs a substep) | untimed frame, ms |
+|---|---|---|---|---|---|
+| 8 cars, t 3.7 | 1–2 | 1 | 1–4 | 7.10 (212) | 19.3 |
+| 8 cars, t 16 | 0 (in the sampled passes) | – | – | 1.04 (31) | 17.6 |
+| 32 cars, t 1 | 2–9 | 1–4 | 1–10 | 36.0 (1,075) | 53.0 |
+| 32 cars, t 2.5 | 2–6 | 1–2 | 1–8 | 21.5 (646) | 42.5 |
+| 32 cars, t 4 | 5–8 | 1–2 | 1–14 | 33.0 (987) | 54.7 |
+| 32 cars, t 12 | 6–7 | 1 | 1–27 | 27.6 (824); the walk 29.1 | 75.9 |
+| 32 cars, t 25 | 11–12 | 1 | 1–8 | 49.8 (1,486); the walk 48.4 | 117.8 |
+
+A few hits, in a chain of levels. Ten hits cost a millisecond a substep because one hit's
+phase is one thread's chain of dependent loads (the triangle, the clip test or the vote,
+four nodes' forces, the snapshot): 25 to 40 µs measured as a dispatch of its own (about
+10 µs of it the timing's own pass). A level is four such phases in turn (the hits, three
+residual phases); the levels of a substep are in turn.
+
+**The floor** (with today's work a hit): levels × 4 phases × one hit's latency, plus a
+dispatch's 2 µs for each when they are dispatches. At t 25 (12 levels, one owner each):
+12 × 4 × ~30 µs ≈ 1.4 ms a substep, 49 ms a frame; measured 49.8. The group's one
+workgroup is already at that floor whenever a level holds one owner: spreading a level's
+hits across the GPU removes nothing from a chain and adds 4 L + 3 dispatches a substep.
+It removes the owners' turns within a level (the workgroup takes a level's owners one
+after another) only where a level holds several.
+
+**Proofs** (native M3 Max; the GPU shared with other sessions through the lock):
+
+- `fast-check.sh perf=524288`, the 18 fixtures (1, 2, 4, 8, 32 cars): with 16 slots forced
+  (`RUBBLE_FLEET_LEVEL_SLOTS=16`), with the slots as the levels ask, and before the staged
+  hits were kept: every fixture "bit for bit: true"; 8 and 32 cars at `FRAMES=20` with 16
+  slots; 32 cars at 20 frames with 2 slots (levels 3 and up in the end dispatch's
+  workgroup): true.
+- A loop-budget run (`RUBBLE_LOOP_BUDGET=200000`, 32 cars, the flag on): no cap reached.
+- `perf-verify.sh 622529` (the defaults and the flag, 16 slots forced): `fleet_contact_gpu`
+  (new: a column of ten pushed from behind, with 16, 2 and 1 slots, with and without self
+  split, its levels at least 3 deep, asserted; two columns of six side by side: two
+  groups in the same dispatches), `group_split_gpu` 3, `self_split_gpu` 8,
+  `explicit_contact_gpu` 13, `explicit_beams_bitwise` 12, `explicit_loop_cap` 5,
+  `explicit_vehicles` 11, Metal `vehicle_parity` 4: PASS.
+- Chrome: "all 124 modules compile in Chrome".
+- Whole 40 s runs with it on end in the same state as off (8 and 32 cars: every car's
+  speed and energy the same at t 40).
+
+**Native, ms a frame, on / off** (fast-check A/B from one state, 20 frames, 16 slots
+forced): 32 cars t 1, 2.5, 4: 41.2 / 49.1, 41.3 / 50.6, 47.4 / 50.8; 8 cars t 2, 3.7, 8,
+16: 16.5 / 12.7, 22.9 / 19.8, 19.2 / 15.3, 20.6 / 17.7 (four slots' dispatches, 67 a
+substep, cost 3 to 4 ms; with 5 slots the eight-car frames were 1.2 to 1.9 ms slower).
+The untimed frame after it (`--ab-profile`, 10 frames, 5 slots): 32 cars t 1 41.9 against
+53.1, t 4 47.1–48.0 against 54.7; 8 cars t 3.7 21.1 against 19.9, t 16 19.4 against 17.7.
+
+Inside it at 32 cars t 4 (timed apart; 5 slots): hits 7.1 ms a frame (170 dispatches of
+42 µs), residual phases 13.3 (510 of 26), the end 7.5 (the levels past 5 in the group's
+workgroup), the groups' part 2.3, snapshot 0.7, plan 0.5. Keeping the staged hit for the
+residual phases took a residual phase from 36–38 to 26–31 µs.
+
+**So the slots follow the levels**: a group reports its highest level and whether one
+of its levels held two owners or more; the host reads it with the status (every 16
+frames) and gives the next frames that many slots, or none (the groups' own levels, no
+extra dispatch) when every level held one owner, for four reads after the last such
+report. With that, at 8 cars the flag costs nothing (fast-check, 18 fixtures, within
+±0.9 ms either way) and the whole runs:
+
+| vehicles GPU ms a step, t ≥ 0.5 s, 40 s | median | p95 | worst |
+|---|---|---|---|
+| 8 cars, off | 15.73 | 17.14 | 22.17 |
+| 8 cars, on | 15.95 | 16.90 | 23.39 |
+| 32 cars, off | 115.4 | 131.5 | 164.3 |
+| 32 cars, on | 116.9 | 133.4 | 142.1 |
+
+At 32 cars the run is dominated by its later part, where the levels are a chain (and
+the walk as large as the levels: 29–48 ms a frame); the slots stay off there. The crash's
+first seconds, where levels hold several owners, are faster (the fixtures above), and the
+worst step drops 164 → 142 ms; the median does not move.
+
+**Chrome, eight cars** (`run.sh --probe --secs 40`,
+`mountain:mode=mountain&car=gen&timing=step&cars=8`, `&fleetLevels=1` for on; vehicle GPU
+ms a World step, t ≥ 0.5 s, about 10 s simulated each): off 16.32 / 22.31 / 25.40
+(median / p95 / worst), on 15.95 / 21.38 / 24.14: within the runs' noise (§8.29's two
+runs of one setting differ by 0.7 ms at the median).
+
+**Default: off.** Bit for bit, but not faster over whole runs natively (32 cars: the median
+and p95 a little slower, the worst 22 ms faster; 8 cars: the same) nor, beyond noise, in
+Chrome.
+
+**Eight cars above 10 ms, what the rest is** (`--ab-profile`, defaults, ms a frame of 34
+substeps; t 3.7 / t 16): the cars' own steps (self step) 5.7 / 6.0; the levels 7.1 / 1.0;
+the members' self-collision hits 1.7 / 1.7; the walk 1.0 / 4.4; self pairs 0.8 / 0.9;
+triangles and points 0.7 / 1.0; owners' parts 0.6 / 0.6; listed pairs 0.6 / 0.5; grids
+0.46 / 0.47; the two prefixes 0.67 / 0.68; sorted copy 0.31 / 0.32; scans 0.30 / 0.30;
+throttles 0.23 / 0.23; untimed 19.3 / 17.6 ms (whole run median 15.7). Without the levels
+and the walk the rest is about 11 ms, half of it the cars' own steps. The fleet front's
+eleven small dispatches are 3.9 ms (most 10–20 µs a substep each, latency, not work).
+
+**What would cut the levels further**: one hit's latency, not parallelism across hits
+(the staged geometry kept in the group's own levels too, where the lane that stages a
+hit is the lane that finishes it; a hit's four nodes' forces on four threads), and fewer
+passes over a hit (three residual phases and the application each take its triangle and
+clip test again).
+
+**Then: one hit's latency, and two front dispatches fused (2026-11-17).**
+`contact-groups-design.md` §8.9. Perf flags 8388608 (`PERF_FLEET_HITLAT`: the group's
+hits flattened over its lanes, the snapshot a lane a node, a hit's staged geometry kept in
+its lane's registers across the residual phases) and 16777216 (`PERF_FLEET_FUSE`: the
+pairs' scans in the plan's workgroup, the sorted copy in the grids' workgroups), both on
+by default, a checkbox each on the lab page (checked).
+
+Proofs: `fast-check.sh` with `perf=8388608`, `perf=16777216` and both, all 18 fixtures
+(1, 2, 4, 8, 32 cars), and both at `FRAMES=20` on the 8- and 32-car fixtures: every
+fixture "bit for bit: true". `perf-verify.sh 25264065` (the defaults before and both):
+`fleet_contact_gpu` 1, `group_split_gpu` 3, `self_split_gpu` 8, `explicit_contact_gpu`
+13, `explicit_beams_bitwise` 12, `explicit_loop_cap` 5, `explicit_vehicles` 11, Metal
+`vehicle_parity` 4: PASS. `fleet_contact_gpu` adds each flag and both against off on the column of ten (at
+least 3 levels deep, asserted) and two columns of six, with and without self split
+(passes with the defaults and with `RUBBLE_PERF_FLAGS=25264065`). Chrome: all 124 modules compile. Whole 40 s runs end in the same state.
+
+ms a frame by dispatch kind (`--ab-profile`, the same fixtures, both off / both on):
+
+| | 8 cars t 3.7 | 8 cars t 16 | 32 cars t 4 | 32 cars t 25 |
+|---|---|---|---|---|
+| the levels (`split levels`) | 7.09 / 5.49 | 1.04 / 1.04 | 32.9 / 17.4 | 49.3 / 31.3 |
+| scans + sorted copy | 0.61 / 0 | 0.63 / 0 | 0.92 / 0 | 1.92 / 0 |
+| owners' parts + grids (now with them) | 1.10 / 1.33 | 1.15 / 1.47 | 2.01 / 2.49 | 2.46 / 3.49 |
+| untimed frame | 20.0 / 18.0 | 17.8 / 17.4 | 54.9 / 39.3 | 117.8 / 97.5 |
+
+fast-check at 20 frames, on / off: 32 cars t 1, 2.5, 4: 32.6 / 49.2, 33.5 / 50.6,
+38.8 / 51.2; 8 cars t 2, 3.7, 8, 16: 12.3 / 12.7, 17.9 / 19.7, 15.0 / 15.3, 17.4 / 17.7.
+The level's floor moved: at t 25 (12 levels a substep, one owner each) 0.94 ms a substep
+against 1.47; a level is now about 77 µs (its application and three residual phases).
+
+Whole 40 s runs (vehicle GPU ms a step, t ≥ 0.5 s, median / p95 / worst):
+
+| | off | on |
+|---|---|---|
+| 8 cars, native | 16.51 / 17.48 / 23.28 | 16.38 / 17.09 / 23.10 |
+| 32 cars, native | 115.4 / 131.5 / 164.3 | 95.2 / 109.6 / 118.0 |
+| 8 cars, Chrome (page visible, ~10 s simulated) | 15.60 / 21.90 / 24.38 | 15.50 / 19.94 / 24.80 |
+
+**Default on**: bit for bit; faster natively (32 cars by a fifth, 8 cars a little) and in
+Chrome at the median and p95 (its worst within the runs' noise).
+
+**Eight cars with the other two branches** (a local merge of this branch,
+`perf/fleet-candidates` and `perf/own-step`, not pushed; native, 8 cars, mountain):
+
+| ms a frame (`--ab-profile`) | merge, kept candidates and these off | with `PERF_FLEET_KEEP` and `PERF_FLEET_HITLAT` |
+|---|---|---|
+| t 3.7: the cars' own steps (self step) | 5.75 | 5.76 |
+| levels | 7.03 | 5.61 |
+| members' self-collision hits | 1.65 | 1.67 |
+| walk | 1.00 | 0.25 (one build) |
+| owners' parts, grids, scans, triangles and points | 2.23 | 2.58 |
+| listed prefix, pairs' prefix, pairs, sorted copy, throttles | 2.02 | 0.14 |
+| self pairs + self walk | 1.26 | 1.26 |
+| untimed frame | 20.1 | 16.8 |
+| t 16: untimed frame | 17.9 | 13.1 (self step 5.98, members' hits 1.71, levels 1.05, owners' parts 1.05, self pairs 0.86) |
+| whole 40 s, vehicles median / p95 / worst | 16.16 / 17.49 / 23.80 | 11.97 / 14.48 / 18.97 |
+
+(`PERF_FLEET_FUSE` is not in the merge's measurement: its sorted copy and the kept
+candidates' build share the grids' dispatch, which needs joining first.) With the three
+the eight-car frame is 12–17 ms; the gate (10 ms) is not met. What is left, at t 16:
+the cars' own steps (6.0 ms, the same in the merge as without `perf/own-step`: its
+changes did not show on this path), the members' self-collision hits (1.7), the front's
+remaining dispatches (3.2, ten small ones), the levels (1.0) and self pairs (0.9). At t 3.7 the levels are still 5.6 ms: two
+levels of one owner each, each about 75 µs a substep of one thread's chains.

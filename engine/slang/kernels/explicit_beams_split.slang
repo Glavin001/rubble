@@ -256,7 +256,11 @@ void splitGroupStep(uint g, uint lane, uint word)
 #ifdef EB_VV_FLEET
     // The owners' state by vehicle (PERF_FLEET_STATE, explicit_beams_fleet.slang; the
     // host sets it only with the tests split, the candidates' grid and the pair list).
-    if (small && (tests || levels) && (gP.perfFlags & PERF_FLEET_STATE) != 0u && (gP.ablate & 512u) == 0u)
+    // (PERF_FLEET_ANY, which the host sets only with the front fleet-wide: a group of any
+    // size on the fleet-wide passes, its levels fleetLevelsAny; the second measurement word's
+    // bit 0x80000000, tests only (set_ablation2), takes those levels whatever the hit lists.)
+    bool anySize = (gP.perfFlags & (PERF_FLEET_FRONT | PERF_FLEET_ANY)) == (PERF_FLEET_FRONT | PERF_FLEET_ANY);
+    if ((small || anySize) && (tests || levels) && (gP.perfFlags & PERF_FLEET_STATE) != 0u && (gP.ablate & 512u) == 0u)
     {
         if (!levels)
         {
@@ -272,8 +276,30 @@ void splitGroupStep(uint g, uint lane, uint word)
             fleetGroupFront(g, k, off, runOff, parity, lane);
             return;
         }
-        fleetGroupLevels(k, off, runOff, points, parity, lane,
-                         (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((stepBase + s + 1u) | 0x80000000u) : 0u);
+        uint tag = (gP.perfFlags & PERF_VV_BEAM_SUM) != 0u ? ((stepBase + s + 1u) | 0x80000000u) : 0u;
+        // With PERF_FLEET_ANY every group takes the levels for any number of owners (they
+        // visit the owners with hits alone, on the lanes with a hit); a small group one of
+        // whose owners lists more than FL_SCAN_MOST hits keeps the small groups' levels,
+        // whose hits' order is by buckets, not by scan.
+        uint longest = 0u;
+        if (small && anySize && (gP.beamOrderPad0 & 0x80000000u) == 0u)
+        {
+            if (lane == 0u)
+            {
+                for (uint m = 0u, mStop = EB_END(m, k, 1u); m < mStop; m++) longest = max(longest, flHits(vvMember(off, m)));
+            }
+            longest = splitUniform(lane, longest);
+        }
+        // (PERF_FLEET_LEVELS: the levels of a group whose hit lists fit across the GPU,
+        // explicit_beams_fleet.slang fleetLevelsDefer; the pass's end then in the levels'
+        // end dispatch.)
+        if (flLevelsOn() && fleetLevelsDefer(k, off, lane, s, !(small && (!anySize || longest > FL_SCAN_MOST)))) return;
+        if (small && (!anySize || longest > FL_SCAN_MOST))
+            fleetGroupLevels(k, off, runOff, points, parity, lane, tag);
+        else if (flHitLatOn())
+            fleetLevelsLat(k, off, parity, lane, tag);
+        else
+            fleetLevelsAny(k, off, parity, lane, tag);
         splitGroupEnd(off, k, lane, s);
         return;
     }
@@ -555,6 +581,15 @@ void explicit_beams_split_member(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThr
 [numthreads(EB_LANES, 1, 1)]
 void explicit_beams_split_group(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
+#ifdef EB_VV_FLEET
+    // (The levels across the GPU's end dispatch: explicit_beams_fleet.slang.)
+    if ((gP.pad2 & 0xF0000000u) == SPLIT_LV)
+    {
+        fleetLevelsEnd(gid.x, lid.x, gP.pad2);
+        ebLoopCapFlush();
+        return;
+    }
+#endif
     if (gP.pad2 == SPLIT_BEGIN)
         splitGroupBegin(gid.x, lid.x);
     else

@@ -177,6 +177,9 @@ pub const STATE_BINDINGS: std::ops::RangeInclusive<u32> = 3..=8;
 /// step word) plus the frame's end, at the uniform offset alignment.
 pub const PARAM_STRIDE: u64 = 512;
 pub const PARAM_COPIES: u32 = 129;
+/// More copies past those for the levels across the GPU ([`PERF_FLEET_LEVELS`]): four a
+/// level slot and three more, after a frame's steps' copies.
+pub const PARAM_LEVEL_COPIES: u32 = 4 * FLEET_LEVEL_MAX as u32 + 3;
 /// Words of the kernel's Params (word 87 the parking brakes' base, word 88 the loop
 /// budget, 89 the triangles' per-step geometry, 90 the grid walk's pairs, 91 the pair
 /// list's build records, 92 its margin ([`W_PAIR_REUSE`]), 93 its backoff
@@ -185,7 +188,27 @@ pub const PARAM_COPIES: u32 = 129;
 /// second ablation mask, 98 [`W_PERF_FLAGS`], 99–101 vehicle contact's own scratch
 /// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`]), 102–104 vehicle contact's
 /// state by owner vehicle ([`W_VV_FLEET`], [`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`])).
-pub const PARAM_WORDS: usize = 105;
+pub const PARAM_WORDS: usize = 106;
+/// Params word: the partners' room (the kernel's `vvRoom`): vehicle contact's candidate
+/// run, hit list and ranks hold this many times the fleet's contact points and a node's
+/// two-body point counts this many owners ([`vv_room`]). Past it the contact status
+/// reports it (the kernel's FL_ERR_RUN, FL_ERR_SLOTS); it cannot be passed by a fleet of
+/// at most `VV_ROOM_MAX + 1` vehicles.
+pub const W_VV_ROOM: usize = 105;
+/// The most partners the regions are sized for, whatever the fleet's size.
+pub const VV_ROOM_MAX: usize = 32;
+/// The partners' room of a fleet of `nv` vehicles: every other vehicle, at least
+/// [`VV_PART`] (the contact groups' own slots) and at most [`VV_ROOM_MAX`].
+pub const fn vv_room(nv: usize) -> usize {
+    let others = if nv > 0 { nv - 1 } else { 0 };
+    if others < VV_PART {
+        VV_PART
+    } else if others > VV_ROOM_MAX {
+        VV_ROOM_MAX
+    } else {
+        others
+    }
+}
 /// Params word: vehicle contact's state by owner vehicle in gAcc (the kernel's `vvFleet`,
 /// explicit_beams_fleet.slang; contact-groups-design.md §8): per vehicle
 /// [`FLEET_OWN_WORDS`] counters of the pass (offered, listed, candidates, pairs, hits,
@@ -216,8 +239,10 @@ pub const fn fleet_next_words(nv: usize, pair_cap: usize, tris: usize) -> usize 
     // adjacency firsts, entries, bits, slots; then five prefixes over the vehicles (+ 1
     // each: run base, listed, pairs, hits, and the contact points', static); then per
     // vehicle: step base, last counts (4), level; the fleet's listed triangles; the
-    // fleet's counters.
-    (nv + 1) + 6 * pair_cap + 5 * (nv + 1) + 6 * nv + tris + FLEET_CTL_WORDS
+    // fleet's counters; then the levels across the GPU's (explicit_beams_fleet_levels.slang
+    // flLvAt): per vehicle its mark, the owners in slot order, their hits' prefix (+ 1),
+    // per slot its first owner and first hit (FLEET_LEVEL_MAX + 3 each).
+    (nv + 1) + 6 * pair_cap + 5 * (nv + 1) + 6 * nv + tris + FLEET_CTL_WORDS + 3 * nv + 1 + 2 * (FLEET_LEVEL_MAX + 3)
 }
 /// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
 /// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
@@ -307,14 +332,50 @@ pub const PERF_FLEET_STATE: u32 = 4096;
 /// dispatch over every owner, in place of a workgroup a group for the front and 64 a
 /// group for the tests.
 pub const PERF_FLEET_FRONT: u32 = 8192;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_STATE`] and [`PERF_FLEET_FRONT`]: a contact group of
+/// any size (to the kernel's `VV_MAX_GROUP`) on the fleet-wide front and tests, its
+/// levels for any number of owners (the kernel's PERF_FLEET_ANY, `fleetLevelsAny`:
+/// contact-groups-design.md §8 stage 3), in place of the larger groups' pass on one
+/// core past [`VV_PART`] members.
+pub const PERF_FLEET_ANY: u32 = 16384;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_FRONT`]: the listed triangles' throttle updates after
+/// a contact pass's tests a thread each across the fleet (the kernel's PERF_FLEET_POST,
+/// `fleetPost`), in place of the group's workgroup with its first level.
+pub const PERF_FLEET_POST: u32 = 65536;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_ANY`] and [`PERF_FLEET_POST`]: a contact group's
+/// levels across the GPU (the kernel's PERF_FLEET_LEVELS, explicit_beams_fleet_levels.slang;
+/// contact-groups-design.md §8.7, stage 3c): the snapshot, then a dispatch a level and phase
+/// (the hits' application, the three residual phases), a thread a hit of every group, in
+/// place of the group's one workgroup; levels past the host's slots in the group's
+/// workgroup after them.
+pub const PERF_FLEET_LEVELS: u32 = 524288;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_ANY`]: a group's levels with its listed hits
+/// flattened over the workgroup's lanes, the snapshot a lane a node, and a hit's staged
+/// geometry kept in its lane's registers across the residual phases (the kernel's
+/// PERF_FLEET_HITLAT, `fleetLevelsLat`; contact-groups-design.md §8.9).
+pub const PERF_FLEET_HITLAT: u32 = 8388608;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_FRONT`]: the pairs' scans in the owners' plan's
+/// workgroup and each owner's candidates' sorted copy in its grid's workgroup, two
+/// dispatches fewer a substep (the kernel's PERF_FLEET_FUSE).
+pub const PERF_FLEET_FUSE: u32 = 16777216;
+/// The kernel's LV_MAX: level slots at most (the levels' dispatches a step: four a slot).
+pub const FLEET_LEVEL_MAX: usize = 16;
+/// The level slots of a frame travel in the levels' parameter copies' perf flags, at this
+/// shift (the kernel's LV_SLOTS_SHIFT; 0: the levels are found and reported, not spread).
+pub const FLEET_LEVEL_SLOTS_SHIFT: u32 = 27;
+/// The kernel's LV_CACHE: a step's hits on the levels across the GPU whose staged geometry
+/// the residual phases keep (past it they take it again: the same values).
+pub const FLEET_LEVEL_CACHE: usize = 4096;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
 /// [`PERF_HIT_ROLES`] and [`PERF_WIDE_GEO`] (§8.22), [`PERF_FLEET_STATE`] and
-/// [`PERF_FLEET_FRONT`] (§8.25); `RUBBLE_PERF_FLAGS=<mask>` overrides
+/// [`PERF_FLEET_FRONT`] (§8.25), [`PERF_FLEET_ANY`] and [`PERF_FLEET_POST`] (§8.29),
+/// [`PERF_FLEET_HITLAT`] and [`PERF_FLEET_FUSE`] (§8.32);
+/// `RUBBLE_PERF_FLAGS=<mask>` overrides
 /// (a measurement; 0: every switch off).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST | PERF_VV_BEAM_SUM | PERF_HIT_ROLES | PERF_WIDE_GEO | PERF_FLEET_STATE | PERF_FLEET_FRONT)
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST | PERF_VV_BEAM_SUM | PERF_HIT_ROLES | PERF_WIDE_GEO | PERF_FLEET_STATE | PERF_FLEET_FRONT | PERF_FLEET_ANY | PERF_FLEET_POST | PERF_FLEET_HITLAT | PERF_FLEET_FUSE)
 }
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;
@@ -1046,7 +1107,7 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
         0 => {}
         2 => {
             return Err(format!(
-                "the owners' candidates passed the fleet-wide run's room ({VV_PART} times the                  fleet's contact points: too many vehicles in contact with one another at                  once; that step's contact pass was cut short)"
+                "the owners' candidates passed the fleet-wide run's room ({VV_ROOM_MAX} times the                  fleet's contact points: too many vehicles in contact with one another at                  once; that step's contact pass was cut short)"
             ))
         }
         3 => {
@@ -1057,7 +1118,7 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
         }
         4 => {
             return Err(format!(
-                "a vehicle had more than {VV_PART} partners with two-body contact at once                  (the two-body point counts hold {VV_PART} owners a node)"
+                "a vehicle had more than {VV_ROOM_MAX} partners with two-body contact at once                  (the two-body point counts hold {VV_ROOM_MAX} owners a node)"
             ))
         }
         _ => return Err("the overlapping-pair list overflowed".into()),
@@ -1986,7 +2047,7 @@ impl ExplicitUpload {
         let vv_run = beams.len() as u32;
         // (Then as many again: the small groups' candidates sorted by cell, the kernel's
         // vvSortAt.)
-        beams.extend(std::iter::repeat_n([0.0f32; 4], 2 * VV_PART * total_cp));
+        beams.extend(std::iter::repeat_n([0.0f32; 4], 2 * vv_room(nv) * total_cp));
         // Two-body contact (jbeam-semantics-spec.md §10.3): per node its force at
         // the contact pass's start.
         let two_body = nv > 1 && vehicles.iter().any(|v| v.two_body_contact);
@@ -2092,7 +2153,7 @@ impl ExplicitUpload {
         // kernel's vvRankAt.)
         // (Then the levels' hit buckets: per group 16 words a contact point, the kernel's
         // vvOrderAt.)
-        let slot_list_base = (vv_hits as usize + 9 * VV_PART * total_cp) as u32;
+        let slot_list_base = (vv_hits as usize + 9 * vv_room(nv) * total_cp) as u32;
         // Then per vehicle its self-collision hit list and pending beams (the
         // kernel's hitList, pendList), and in gAcc two counters (hitAcc).
         let hit_base = slot_list_base as usize + slot_list_len as usize;
@@ -2177,7 +2238,7 @@ impl ExplicitUpload {
         // per node its triangle-hit count, then VV_SPLIT_SLOTS − 1 point-hit slots.
         let vv_split = if two_body {
             let at = acc_init.len() as u32;
-            acc_init.extend(std::iter::repeat_n(0, VV_SPLIT_SLOTS * total_nodes));
+            acc_init.extend(std::iter::repeat_n(0, (1 + vv_room(nv)) * total_nodes));
             at
         } else {
             0
@@ -2419,7 +2480,9 @@ impl ExplicitUpload {
         };
         let vv_fleet_box = if nv > 1 {
             let at = beams.len() as u32;
-            beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * nv));
+            // (Then the levels across the GPU's staged hits: FLEET_LEVEL_CACHE hits, four
+            // records each; explicit_beams_fleet_levels.slang flLvCache.)
+            beams.extend(std::iter::repeat_n([0.0f32; 4], 4 * nv + 4 * FLEET_LEVEL_CACHE));
             at
         } else {
             0
@@ -2662,6 +2725,7 @@ impl ExplicitUpload {
         words[W_VV_FLEET] = vv_fleet;
         words[W_VV_FLEET_NEXT] = vv_fleet_next;
         words[W_VV_FLEET_BOX] = vv_fleet_box;
+        words[W_VV_ROOM] = vv_room(nv) as u32;
         let total = [
             total_nodes as u32,
             total_beams as u32,
@@ -2773,9 +2837,9 @@ impl ExplicitUpload {
     }
 }
 
-/// Bytes of the parameter buffer ([`PARAM_COPIES`] copies).
+/// Bytes of the parameter buffer ([`PARAM_COPIES`] copies, then [`PARAM_LEVEL_COPIES`]).
 pub const fn params_bytes() -> u64 {
-    PARAM_STRIDE * PARAM_COPIES as u64
+    PARAM_STRIDE * (PARAM_COPIES + PARAM_LEVEL_COPIES) as u64
 }
 
 // --- Per-frame planning.

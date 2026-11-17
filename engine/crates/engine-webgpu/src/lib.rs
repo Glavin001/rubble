@@ -137,7 +137,15 @@ pub const EXPLICIT_BEAMS_SURF_SPLIT: [(&str, &str); 13] = [
 /// front as fleet-wide dispatches (`explicit_beams_fleet_front`, `explicit_beams_fleet_plan`:
 /// explicit_beams_fleet.slang, contact-groups-design.md §8).
 /// WebGPU only (native wgpu and browsers).
-pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 20] = [
+pub const EXPLICIT_BEAMS_SPLIT_GROUPS: [(&str, &str); 28] = [
+    ("explicit_beams_split_fleetlevels", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels.wgsl"))),
+    ("explicit_beams_split_fleetlevels_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_wide.wgsl"))),
+    ("explicit_beams_split_fleetlevels_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_aero.wgsl"))),
+    ("explicit_beams_split_fleetlevels_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetlevels_aero_wide.wgsl"))),
+    ("explicit_beams_split_fleetpost", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost.wgsl"))),
+    ("explicit_beams_split_fleetpost_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost_wide.wgsl"))),
+    ("explicit_beams_split_fleetpost_aero", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost_aero.wgsl"))),
+    ("explicit_beams_split_fleetpost_aero_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetpost_aero_wide.wgsl"))),
     ("explicit_beams_split_fleetfront", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront.wgsl"))),
     ("explicit_beams_split_fleetplan", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetplan.wgsl"))),
     ("explicit_beams_split_fleetfront_wide", include_str!(concat!(env!("OUT_DIR"), "/wgsl/explicit_beams_split_fleetfront_wide.wgsl"))),
