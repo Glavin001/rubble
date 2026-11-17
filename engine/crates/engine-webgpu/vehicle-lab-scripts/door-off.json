@@ -1,0 +1,14 @@
+{
+  "title": "Doors shot off a car tumbling down the mountain (do torn parts orbit the body?)",
+  "mode": "mountain",
+  "scene": "mountain",
+  "mountain": { "seed": 1, "steepness": 50, "roughness": 0.6, "terrain": "rolling" },
+  "duration": 12,
+  "events": [
+    { "t": 0.0, "cam": "tumble" },
+    { "t": 3.0, "fire": { "shape": "box", "size": [0.6, 0.6, 0.6], "material": "steel", "speed": 90, "aim": { "side": "left", "height": 0.8, "along": 0.7, "distance": 6 } } },
+    { "t": 3.0, "fire": { "shape": "box", "size": [0.6, 0.6, 0.6], "material": "steel", "speed": 90, "aim": { "side": "left", "height": 0.8, "along": -0.5, "distance": 6 } } },
+    { "t": 5.0, "fire": { "shape": "box", "size": [0.6, 0.6, 0.6], "material": "steel", "speed": 90, "aim": { "side": "right", "height": 0.8, "along": 0.7, "distance": 6 } } },
+    { "t": 5.0, "fire": { "shape": "box", "size": [0.6, 0.6, 0.6], "material": "steel", "speed": 90, "aim": { "side": "right", "height": 0.8, "along": -0.5, "distance": 6 } } }
+  ]
+}
