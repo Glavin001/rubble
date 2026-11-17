@@ -1215,6 +1215,15 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     println!("debris time to live {:?}; notes {:?}", lab.bench.debris.ttl, lab.bench.notes);
     let flag = |k: &str| arg(k).map(|x| x == "1");
     if let Some(x) = world.explicit_vehicles_mut() {
+        // `--vv 0`: vehicle–vehicle contact off (a measurement: the cars pass through
+        // each other).
+        if let Some(on) = flag("--vv") {
+            x.set_vehicle_contact(on);
+        }
+        // `--vv-grid 0`: vehicle contact's candidates without its grid (lossless).
+        if let Some(on) = flag("--vv-grid") {
+            x.set_vv_grid(on);
+        }
         if let Some(on) = flag("--surface-pairs") {
             x.set_surface_pairs(on);
         }

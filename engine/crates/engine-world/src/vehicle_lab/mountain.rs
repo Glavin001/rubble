@@ -354,6 +354,31 @@ impl MountainSpec {
                     tag: 2400.0,
                     loose: false,
                 });
+                // Undrawn walls round it to WALL_TOP, as the canyon's: at its sides (on
+                // over the lip, where the slope's walls lean away above it) and at its back,
+                // so a part thrown back up the mountain does not leave it either.
+                let tall = 0.5 * (WALL_TOP + SLAB);
+                let reach = WALL_TOP;
+                for side in [-1.0f32, 1.0] {
+                    shapes.push(MountainShape {
+                        geom: RockGeom::Box {
+                            half: Vec3::new(1.5, tall, 0.5 * (41.0 + reach)),
+                        },
+                        pos: Vec3::new(side * (0.5 * w + 1.5), tall - SLAB, 0.5 * (reach - 41.0)),
+                        rot: Quat::IDENTITY,
+                        tag: UNDRAWN_TAG,
+                        loose: false,
+                    });
+                }
+                shapes.push(MountainShape {
+                    geom: RockGeom::Box {
+                        half: Vec3::new(0.5 * w + 3.0, tall, 1.5),
+                    },
+                    pos: Vec3::new(0.0, tall - SLAB, -41.5),
+                    rot: Quat::IDENTITY,
+                    tag: UNDRAWN_TAG,
+                    loose: false,
+                });
             }
             return MountainChunk {
                 index: k,
@@ -773,6 +798,19 @@ mod tests {
 
     #[test]
     fn the_canyon_has_no_ceiling_and_its_walls_rise_to_wall_top() {
+        // The plateau: undrawn walls at its sides (and on above the lip) and its back.
+        let m = MountainSpec::default();
+        let c = m.chunk(-1);
+        for (o, d) in [
+            (DVec3::new(0.0, 2.0, -20.0), Vec3::X),
+            (DVec3::new(0.0, 300.0, -20.0), Vec3::NEG_X),
+            (DVec3::new(0.0, 60.0, 30.0), Vec3::X),
+            (DVec3::new(0.0, 5.0, -20.0), Vec3::NEG_Z),
+        ] {
+            let (_, undrawn) = m.ray(&c, o, d);
+            assert!(undrawn.is_some(), "no plateau wall from {o} along {d}");
+        }
+        assert_eq!(m.ray(&c, DVec3::new(0.0, 400.0, -20.0), Vec3::NEG_Y).1, None, "a ceiling over the plateau");
         for terrain in [Terrain::Rolling, Terrain::Ledges] {
             let m = MountainSpec {
                 terrain,
