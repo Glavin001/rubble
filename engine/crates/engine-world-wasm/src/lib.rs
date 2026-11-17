@@ -534,6 +534,17 @@ pub(crate) async fn creation_check(world: &World) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub struct WebWorld {
     world: World,
+    /// The placed scene's script and actions (`placeScene`), run before every step.
+    director: Option<rubble::play::Director>,
+}
+
+impl WebWorld {
+    pub(crate) fn of(world: World) -> WebWorld {
+        WebWorld {
+            world,
+            director: None,
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -544,7 +555,7 @@ impl WebWorld {
         let (info, device, queue) = web_device().await?;
         let world = res(World::new(GpuContext::Shared { info, device, queue }, &def))?;
         creation_check(&world).await?;
-        Ok(WebWorld { world })
+        Ok(WebWorld::of(world))
     }
 
     /// The device's limits that size a world (requested as the adapter's): for a page's
@@ -605,6 +616,9 @@ impl WebWorld {
         if !self.can_step() {
             let _ = self.world.device().poll(wgpu::PollType::Poll);
             return Ok(false);
+        }
+        if let Some(d) = &mut self.director {
+            res(d.before_step(&mut self.world))?;
         }
         res(self.world.step())?;
         RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);

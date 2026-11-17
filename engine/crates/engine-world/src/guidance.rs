@@ -16,7 +16,8 @@ use crate::{BodyId, DestructibleId, World};
 pub use engine_schema::guidance::{
     GuidanceCapacity, GuidanceSettings, GuideEnd, GuideState, ZoneMotion, ZoneShape, GUIDE_PATH_KEYS,
 };
-use engine_schema::guidance::{GuideBodyGpu, GuideZoneGpu, ZoneDesc};
+pub use engine_schema::guidance::ZoneDesc;
+use engine_schema::guidance::{GuideBodyGpu, GuideZoneGpu};
 
 /// What a zone is attached to.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -104,6 +105,34 @@ impl World {
             gpu.push(self.zone_gpu(z).map_err(|e| e.context(format!("guidance zone {k}")))?);
         }
         self.sim.set_guide_zones(&gpu)
+    }
+
+    /// [`Self::set_guidance_zones`] from zone descriptions (a body anchor by slot), as the
+    /// scene scripts and pages write them.
+    pub fn set_guidance_zone_descs(&mut self, zones: &[ZoneDesc]) -> anyhow::Result<()> {
+        let mut out = Vec::with_capacity(zones.len());
+        for (k, z) in zones.iter().enumerate() {
+            let anchor = match z.anchor_body {
+                Some(i) => ZoneAnchor::Body(
+                    self.body_at(i)
+                        .ok_or_else(|| anyhow::anyhow!("zone {k}: no body in slot {i}"))?,
+                ),
+                None => ZoneAnchor::World(z.position),
+            };
+            out.push(GuidanceZone {
+                anchor,
+                anchor_relative: z.anchor_relative,
+                yaw: z.yaw,
+                offset: z.offset,
+                shape: z.shape,
+                weight: z.weight,
+                quota: z.quota,
+                active: z.active,
+                tags: z.tags,
+                motion: z.motion.clone(),
+            });
+        }
+        self.set_guidance_zones(&out)
     }
 
     fn zone_gpu(&self, z: &GuidanceZone) -> anyhow::Result<GuideZoneGpu> {

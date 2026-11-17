@@ -15,7 +15,8 @@
 //! (three.js on the web, Unreal over the C API) reads poses where the solver writes them.
 //!
 //! Bodies drawn: user bodies, threshold-destructible pieces, vehicle-owned rigid parts
-//! and characters. Soft-body nodes and terrain surface patches have their own outputs
+//! (not their wheel rims: wheels are drawn from the vehicle pool, which has their
+//! steering, spin and suspension) and characters. Soft-body nodes and terrain surface patches have their own outputs
 //! (skins, the deformable surface) and are left out. Planes are listed apart (a renderer
 //! draws its own ground). A collider the manifest cannot describe is counted in
 //! `skipped` with the reason, never silently dropped.
@@ -134,10 +135,11 @@ impl MeshAcc {
 }
 
 impl World {
-    /// Changes whenever a collider is added, removed or rewritten, or the body and
-    /// collider buffers are replaced: a renderer rebuilds its groups when it does.
+    /// Changes whenever a collider is added, removed or rewritten, or a heightfield is
+    /// edited: a renderer rebuilds its groups when it does. (A renderer also rebinds
+    /// when the body or collider buffer is a new object.)
     pub fn render_version(&self) -> u64 {
-        self.sim.collider_epoch()
+        self.sim.collider_epoch().wrapping_add(self.render_epoch)
     }
 
     /// Every drawable collider, grouped for drawing (see the module docs).
@@ -169,6 +171,10 @@ impl World {
                 }
                 Owner::TerrainPatch => {
                     skip("terrain surface patch (drawn by the terrain surface)");
+                    continue;
+                }
+                Owner::Vehicle if rec.material == crate::WHEEL_RIM_MATERIAL => {
+                    skip("wheel rim (drawn from the vehicle pool)");
                     continue;
                 }
                 Owner::Vehicle => TAG_VEHICLE,

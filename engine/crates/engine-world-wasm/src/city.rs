@@ -170,7 +170,7 @@ impl WebWorld {
             &def,
         ))?;
         crate::creation_check(&world).await?;
-        Ok(WebWorld { world })
+        Ok(WebWorld::of(world))
     }
 
     /// Replace this world with a fresh one for `city` on the same device (a page

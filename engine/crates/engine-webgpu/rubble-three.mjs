@@ -18,7 +18,7 @@
 import * as THREE from 'three/webgpu';
 import {
   Fn, storage, instanceIndex, attribute, vec3, vec4, float, uint, varying, positionLocal, normalLocal,
-  cameraViewMatrix, floatBitsToUint, uniform, mix, hash, select, normalize, cross, dot, length, clamp, fract,
+  cameraViewMatrix, floatBitsToUint, uniform, mix, hash, select, normalize, cross, dot, length, clamp, fract, abs,
 } from 'three/tsl';
 
 /** Engine record layouts in vec4 units (engine-schema `Body`, 112 bytes; `Collider`, 64). */
@@ -86,6 +86,8 @@ export class RubbleThree {
 
   /** Rebuild when the World's shapes or buffers changed; cheap otherwise. Call each frame. */
   update() {
+    this._updateProjectiles();
+    this._updateWheels();
     const buffers = [this.world.bodyBuffer(), this.world.colliderBuffer()];
     const version = this.world.renderVersion();
     if (version === this._version && buffers.every((b, i) => b === this._buffers[i])) return false;
@@ -93,6 +95,109 @@ export class RubbleThree {
     this._buffers = buffers;
     this._build(this.world.renderManifest(), buffers);
     return true;
+  }
+
+  // Projectiles (the World's motion pool, `projectileLayout()`): each live one a tracer
+  // stretched along its velocity, read in place; dead slots collapse to nothing.
+  _updateProjectiles() {
+    const layout = this.world.projectileLayout?.();
+    const slots = layout?.projectileSlots ?? 0;
+    const pool = slots ? this.world.motionBuffer() : null;
+    if (!slots) {
+      if (this._tracers) this._tracers.visible = false;
+      return;
+    }
+    if (this._tracers && this._tracerPool === pool) {
+      this._tracers.geometry.instanceCount = slots;
+      this._tracers.visible = true;
+      return;
+    }
+    if (this._tracers) { this.object.remove(this._tracers); this._tracers.geometry.dispose(); this._tracers.material.dispose(); }
+    this._tracerPool = pool;
+    const base = new THREE.BoxGeometry(1, 1, 1);
+    const geometry = new THREE.InstancedBufferGeometry().copy(base);
+    base.dispose();
+    geometry.instanceCount = slots;
+    const poolF = externalStorage(this.renderer, pool, 'vec4');
+    const poolU = externalStorage(this.renderer, pool, 'uvec4');
+    const rec = uint(layout.projectileBase).add(instanceIndex.mul(uint(layout.projectileStride)));
+    const p = poolF.element(rec);
+    const v = poolF.element(rec.add(1));
+    const alive = poolU.element(rec.add(2)).x.bitAnd(uint(1)).notEqual(uint(0));
+    const dir = normalize(v.xyz.add(vec3(0, 1e-6, 0)));
+    const len = clamp(length(v.xyz).mul(0.004), 0.2, 3.0);
+    const up = select(abs(dir.y).greaterThan(0.9), vec3(1, 0, 0), vec3(0, 1, 0));
+    const x = normalize(cross(up, dir));
+    const y = cross(dir, x);
+    const c = positionLocal;
+    const w = p.xyz.add(x.mul(c.x.mul(0.06))).add(y.mul(c.y.mul(0.06))).sub(dir.mul(c.z.add(0.5).mul(len)));
+    const material = new THREE.MeshBasicNodeMaterial();
+    material.positionNode = select(alive, w, vec3(0, -1e6, 0));
+    material.colorNode = vec3(1.0, 0.85, 0.3);
+    this._tracers = new THREE.Mesh(geometry, material);
+    this._tracers.name = 'rubble:projectiles';
+    this._tracers.frustumCulled = false;
+    this.object.add(this._tracers);
+  }
+
+  // Raycast-vehicle wheels (the World's vehicle pool, `vehicleRecordLayout()`): a
+  // cylinder per wheel slot, posed from its record (steering, spin, suspension) and, once
+  // severed, from its parked body. Disabled and unused slots collapse to nothing.
+  _updateWheels() {
+    const L = this.world.vehicleRecordLayout?.();
+    const n = L?.wheels ?? 0;
+    const pool = n ? this.world.vehiclePoolBuffer() : null;
+    const bodies = this.world.bodyBuffer();
+    if (!n) {
+      if (this._wheels) this._wheels.visible = false;
+      return;
+    }
+    if (this._wheels && this._wheelPool === pool && this._wheelBodies === bodies) {
+      this._wheels.geometry.instanceCount = n;
+      this._wheels.visible = true;
+      return;
+    }
+    if (this._wheels) { this.object.remove(this._wheels); this._wheels.geometry.dispose(); this._wheels.material.dispose(); }
+    this._wheelPool = pool;
+    this._wheelBodies = bodies;
+    const base = new THREE.CylinderGeometry(1, 1, 2, 28, 1);
+    base.rotateZ(Math.PI / 2); // axis along x: x the axle, y up, z forward
+    const geometry = new THREE.InstancedBufferGeometry().copy(base);
+    base.dispose();
+    geometry.instanceCount = n;
+    const vF = externalStorage(this.renderer, pool, 'vec4');
+    const vU = externalStorage(this.renderer, pool, 'uvec4');
+    const bF = externalStorage(this.renderer, bodies, 'vec4');
+    const wr = uint(L.wheelBase).add(instanceIndex.mul(uint(L.WHEEL_STRIDE)));
+    const cfg = vU.element(wr);
+    const dyn = vU.element(wr.add(uint(L.W_C0))).z;
+    const vr = uint(L.vehicleBase).add(cfg.x.mul(uint(L.VEH_STRIDE)));
+    const up = normalize(vF.element(vr.add(uint(L.V_UP))).xyz);
+    const fwd = normalize(vF.element(vr.add(uint(L.V_FWD))).xyz);
+    const axle = normalize(cross(up, fwd));
+    const radius = vF.element(wr.add(uint(L.W_HP))).w;
+    const width = vF.element(wr.add(uint(L.W_DIR))).w;
+    const detached = dyn.bitAnd(uint(L.WD_DETACHED)).notEqual(uint(0));
+    const park = vU.element(wr.add(uint(L.W_PARK))).x.mul(BODY_VEC4);
+    const pos = select(detached, bF.element(park).xyz, vF.element(wr.add(uint(L.W_O_POS))).xyz);
+    const q = select(detached, bF.element(park.add(1)), vF.element(wr.add(uint(L.W_O_ROT))));
+    const hidden = cfg.y.bitAnd(uint(L.WF_ENABLED)).equal(uint(0)).or(dyn.bitAnd(uint(L.WD_DISABLED)).notEqual(uint(0)));
+    const m = positionLocal;
+    const local = axle.mul(m.x.mul(width).mul(0.5)).add(up.mul(m.y.mul(radius))).add(fwd.mul(m.z.mul(radius)));
+    const nl = normalLocal;
+    const worldNormal = quatRotate(q, axle.mul(nl.x).add(up.mul(nl.y)).add(fwd.mul(nl.z)));
+    const material = new THREE.MeshStandardNodeMaterial({ roughness: 0.85, metalness: 0.1 });
+    material.positionNode = select(hidden, vec3(0, -1e6, 0), pos.add(quatRotate(q, local)));
+    material.normalNode = varying(normalize(cameraViewMatrix.mul(vec4(worldNormal, 0)).xyz));
+    // Tyre black, a grey rim on the faces (r < 0.62 of the radius).
+    const rim = varying(abs(m.x).greaterThan(0.98).and(length(m.yz).lessThan(0.62)).select(float(1), float(0)));
+    material.colorNode = mix(vec3(0.07, 0.07, 0.08), vec3(0.55, 0.57, 0.62), rim);
+    this._wheels = new THREE.Mesh(geometry, material);
+    this._wheels.name = 'rubble:wheels';
+    this._wheels.frustumCulled = false;
+    this._wheels.castShadow = this.castShadow;
+    this._wheels.receiveShadow = this.receiveShadow;
+    this.object.add(this._wheels);
   }
 
   /** Draw call and instance totals (for HUDs). */
@@ -120,6 +225,18 @@ export class RubbleThree {
     const collidersF = externalStorage(this.renderer, colliderBuf, 'vec4');
     const collidersU = externalStorage(this.renderer, colliderBuf, 'uvec4');
     const ctx = { bodies, collidersF, collidersU };
+    // Planes: a large quad on each (`normal · x = offset`), in the ground look.
+    for (const pl of manifest.planes) {
+      const n = new THREE.Vector3(...pl.normal).normalize();
+      const look = this.looks.ground;
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshStandardNodeMaterial({ color: look.color, roughness: look.roughness, metalness: look.metalness }));
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+      mesh.position.copy(n).multiplyScalar(pl.offset);
+      mesh.receiveShadow = this.receiveShadow;
+      mesh.name = `rubble:plane:${pl.collider}`;
+      this.object.add(mesh);
+      this._meshes.push(mesh);
+    }
     for (const g of manifest.groups) {
       const mesh = g.kind === 'mesh' ? this._meshGroup(g, ctx) : this._primitiveGroup(g, ctx);
       if (!mesh) continue;
