@@ -572,7 +572,7 @@ Perf flag 524288 (`PERF_FLEET_LEVELS`, with 4096, 8192, 16384 and 65536); kernel
   with hits past it (gAcc's fleet counters 0 and 1, read with the status every 16 frames,
   zeroed after each read). The frame's slots are the reported highest level when some
   group had two owners or more in one level, held four reads, else 0: no levels'
-  dispatches, the groups keep their own levels (the copies carry the slots past bit 24 of
+  dispatches, the groups keep their own levels (the copies carry the slots in bits 27 to 31 of
   the perf flags). `RUBBLE_FLEET_LEVEL_SLOTS=n` fixes them (tests, measurements).
 
 **What it found**: the levels are latency-bound chains, not wide work. Each phase of a

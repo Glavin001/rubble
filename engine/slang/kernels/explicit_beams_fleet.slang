@@ -1125,6 +1125,8 @@ void explicit_beams_fleet_plan(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThrea
         ebLoopCapFlush();
         return;
     }
+    // (PERF_FLEET_FUSE: the pairs' scans in this workgroup first.)
+    if (flFuseOn() && (gP.pad2 & (SPLIT_TESTS | SPLIT_LEVELS)) == 0u) fuseScans(lid.x, gP.pad2 & SPLIT_STEP);
     fleetPlan(lid.x, gP.pad2);
     ebLoopCapFlush();
 }
@@ -1141,6 +1143,8 @@ void fleetWideTests(uint g, uint lane, uint word)
     {
         uint offered = splitUniform(lane, g < nv ? uint(gAcc[flOwn(g) + FL_OFFERED].load()) : 0u);
         if (offered != 0u) flOffsets(g, lane);
+        // (PERF_FLEET_FUSE: the owner's sorted copy here, explicit_beams_fleet_hitlat.slang.)
+        if (offered != 0u && flFuseOn()) fuseSortCands(g, lane);
         return;
     }
     uint tid = g * LANES + lane;
@@ -1169,3 +1173,5 @@ void fleetWideTests(uint g, uint lane, uint word)
 
 // Stage 3c: the levels across the GPU (PERF_FLEET_LEVELS).
 #include "explicit_beams_fleet_levels.slang"
+// One hit's latency in the levels; the front's fused dispatches.
+#include "explicit_beams_fleet_hitlat.slang"

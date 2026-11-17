@@ -46,7 +46,7 @@ bool flLevelsOn()
 // The frame's level slots (the host's, in the copies' perf flags past the switches:
 // explicit_plan::FLEET_LEVEL_SLOTS_SHIFT). 0: the levels' dispatches are not in this
 // frame; the groups find and report their levels (fleetLevelsDefer) and keep them.
-static const uint LV_SLOTS_SHIFT = 24u;
+static const uint LV_SLOTS_SHIFT = 27u;
 uint lvSlots() { return (gP.perfFlags >> LV_SLOTS_SHIFT) & 31u; }
 // gAcc's fleet counters 0 and 1 (flCtl): the frame's highest level of a group and its most
 // owners with hits past its levels (some level holds two or more: the levels' dispatches

@@ -349,11 +349,20 @@ pub const PERF_FLEET_POST: u32 = 65536;
 /// place of the group's one workgroup; levels past the host's slots in the group's
 /// workgroup after them.
 pub const PERF_FLEET_LEVELS: u32 = 524288;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_ANY`]: a group's levels with its listed hits
+/// flattened over the workgroup's lanes, the snapshot a lane a node, and a hit's staged
+/// geometry kept in its lane's registers across the residual phases (the kernel's
+/// PERF_FLEET_HITLAT, `fleetLevelsLat`; contact-groups-design.md §8.9).
+pub const PERF_FLEET_HITLAT: u32 = 8388608;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_FRONT`]: the pairs' scans in the owners' plan's
+/// workgroup and each owner's candidates' sorted copy in its grid's workgroup, two
+/// dispatches fewer a substep (the kernel's PERF_FLEET_FUSE).
+pub const PERF_FLEET_FUSE: u32 = 16777216;
 /// The kernel's LV_MAX: level slots at most (the levels' dispatches a step: four a slot).
 pub const FLEET_LEVEL_MAX: usize = 16;
 /// The level slots of a frame travel in the levels' parameter copies' perf flags, at this
 /// shift (the kernel's LV_SLOTS_SHIFT; 0: the levels are found and reported, not spread).
-pub const FLEET_LEVEL_SLOTS_SHIFT: u32 = 24;
+pub const FLEET_LEVEL_SLOTS_SHIFT: u32 = 27;
 /// The kernel's LV_CACHE: a step's hits on the levels across the GPU whose staged geometry
 /// the residual phases keep (past it they take it again: the same values).
 pub const FLEET_LEVEL_CACHE: usize = 4096;

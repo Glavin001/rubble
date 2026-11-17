@@ -4016,7 +4016,7 @@ impl ExplicitBeamsGpu {
         }
         if !front {
             // (Groups of any size on the fleet-wide passes: only with the front there.)
-            flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY | plan::PERF_FLEET_POST);
+            flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY | plan::PERF_FLEET_POST | plan::PERF_FLEET_FUSE | plan::PERF_FLEET_HITLAT);
         }
         // (The levels across the GPU: with groups of any size and the throttles across the
         // fleet, once their module is compiled.)
@@ -4167,11 +4167,18 @@ impl ExplicitBeamsGpu {
                 if self.fleet_flags() & plan::PERF_FLEET_ANY == 0 {
                     out.push(GroupOp::Group { copy: ct, tests: false, args: FLEET_LARGER_ARGS, part: 5 });
                 }
-                out.push(GroupOp::Fleet { copy: c0, kernel: 0, args: FLEET_SCAN_ARGS, from: 0, part: 0 });
+                // (PERF_FLEET_FUSE: the scans in the plan's workgroup, the sorted copy in the
+                // grids' workgroups.)
+                let fuse = self.fleet_flags() & plan::PERF_FLEET_FUSE != 0;
+                if !fuse {
+                    out.push(GroupOp::Fleet { copy: c0, kernel: 0, args: FLEET_SCAN_ARGS, from: 0, part: 0 });
+                }
                 out.push(GroupOp::Fleet { copy: c0, kernel: 1, args: FLEET_FIRST_ARGS, from: 0, part: 1 });
                 out.push(GroupOp::Fleet { copy: ct, kernel: 0, args: FLEET_ELEMENT_ARGS, from: 1, part: 2 });
                 out.push(GroupOp::Fleet { copy: c0, kernel: 2, args: FLEET_GRID_ARGS, from: 1, part: 3 });
-                out.push(GroupOp::Fleet { copy: cl, kernel: 0, args: FLEET_SORT_ARGS, from: 1, part: 4 });
+                if !fuse {
+                    out.push(GroupOp::Fleet { copy: cl, kernel: 0, args: FLEET_SORT_ARGS, from: 1, part: 4 });
+                }
                 out.push(GroupOp::Fleet { copy: ct, kernel: 1, args: FLEET_ONE_ARGS, from: 1, part: 5 });
                 out.push(GroupOp::Fleet { copy: ct, kernel: 2, args: FLEET_WALK_ARGS, from: 2, part: 6 });
                 out.push(GroupOp::Fleet { copy: cl, kernel: 1, args: FLEET_ONE_ARGS, from: 1, part: 7 });
