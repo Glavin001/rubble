@@ -1967,3 +1967,78 @@ physics question with its own evidence to gather.
 … --sleep-dwell …] --secs 40 [--save-final F | --compare-final F]` for the World runs,
 `--scene flat` for the arena, and `--from-fixture F --rest-probe 120 --sleep-loss
 "off;0.25,0.1,1000;…" --loss-frames N` for the solver alone from a saved state.
+
+**By part, and a contact fix (2026-11-16, later; `explicit-vehicles-in-world.md` §10.8).**
+`vehicle_lab --from-fixture F --rest-parts N [--rest-every K] [--rest-vv 0]
+[--rest-coupling 0]`: from a saved state, the solver alone, sleep off. Per car, every K
+frames: its main body's (heaviest piece over unbroken beams) centre-of-mass speed and
+angular velocity, its body nodes' speed relative to that rigid motion, its loose pieces,
+whether each fast body node has another car's node within 15 cm or a node of its own not
+beamed to it within twice the contact band, and its kinetic + potential energy. The
+machine's GPU was shared with three other sessions throughout (times for ranking).
+
+*The pile on the 50° mountain at t 30 s, as §8.27 had it (state saved before the fix),
+3 s:*
+
+| part | measured |
+|---|---|
+| car 3 | slides: centre of mass 5.8 to 20.9 m/s (the probe's proxies stay where the World left them, so it also falls off them; in the World it slides at up to 28 km/h) |
+| the seven others, rigid motion | centre of mass under 0.1 m/s (0 to 8 mm in half a second), under 0.12 rad/s |
+| their loose pieces (3 to 5 a car, 0.9 to 25.5 kg) | under 0.09 m/s |
+| their bodies' own nodes | 17 to 230 a car past 0.25 m/s within half a second, the fastest 0.7 to 16 m/s relative to the body, all beams intact; 0.4 to 32 J relative to the body, not decaying over 3 s; none near another car, at most 2 near a self-contact |
+| vehicle contact off | every number the same: no vehicle contact force acts; the eight are one contact group by overlapping frame bounds only |
+
+*One car at rest at t 20 s (the same state each way), 1 s:*
+
+| | fast body nodes at a line | fastest, relative to the body, m/s | relative kinetic energy, J |
+|---|---|---|---|
+| before the fix | 3 to 30 | 0.8 to 2.8 | 2.3 to 6.4, for good |
+| rigid coupling off (free fall; before the fix) | 27, 6, 7, 5, 2, 2 | 1.7 falling to 0.45 | 14.5 falling to 1.2 |
+| after the fix | 0 to 2 | 0.27 to 0.76 | 0.2 to 1.4 |
+
+The rock kept the bodies ringing: the World's static bodies took RoR's contact rule on
+BeamNG-profile vehicles (jbeam-semantics-spec.md §37.1, "Fix (2026-11-16)"). A physics
+fix, its own commit, changing results for BeamNG-profile vehicles against static and
+kinematic World bodies.
+
+*Whole runs after the fix* (eight cars, 40 s, `--rockslide 0 --self-split 1`; vehicle
+GPU ms a World step on the shared machine):
+
+| scene | what rests | default sleep | sleep off | vehicle GPU ms a step |
+|---|---|---|---|---|
+| ledges 50° (the measurements' mountain) | six cars median 0 km/h from t 20 to 24 s, fastest nodes 1 to 8 km/h; car 2 slides on at 30 to 134 km/h; cars 3 and 7 have torn-off parts sliding hundreds of metres below (frame bounds 290 to 567 m) | nothing sleeps; final positions those of sleep off (0.0 mm), energy the same | reference | 25.8 median (sleep on and off alike) |
+| rolling gully (the page's default) | nothing: every car slides on at 40 to 140 km/h at t 33 to 36 s; torn-off parts leave the terrain's window and fall (nodes at 500 to 720 km/h) | n/a: the run fails at t 36.05 (non-finite node state); before the fix it fails at t 37.3 (more colliders than the shapes room): the fallen debris, a pre-existing failure | | 30 to 36 wall (no GPU summary: the run failed) |
+| ledges at 25° (below the kinetic friction angle) | all eight at rest by t 14 s; 4 J kinetic in all at t 40 s | nothing sleeps in 40 s; final positions those of sleep off (0.0 mm) | reference | 28.5 / 27.8 median |
+| one car, ledges 50° (30 s) | at rest on a shelf from t 12 s (0.0 km/h; under 3 J kinetic at t 30 s) | never sleeps | not run | 5.53 median |
+| one car, ledges 25° (30 s) | at rest from t 9 s (0.0 to 0.3 km/h; under 0.5 J at t 30 s) | never sleeps | not run | 5.45 median |
+
+*The 25° pile at t 25 s, by part (1.5 s):* centres of mass under 0.014 m/s; 0.05 to
+0.58 J relative kinetic energy a car; 0 to 18 body nodes past 0.25 m/s, the fastest
+light skin nodes (0.27 to 0.54 kg; median node 1.4 kg) at 0.7 to 2.1 m/s with every
+beam intact, under 1 cm of travel; dangling panels (2 of 6 beams) swinging 4 cm in half a
+second. Contact groups: one of six, two cars alone.
+
+*Sleep loss there* (`--sleep-loss`, 300 frames = 5.1 s each, the solver alone):
+
+| setting | first asleep after, s (by car) | asleep at the end | largest node difference from never sleeping, mm |
+|---|---|---|---|
+| off | n/a | 0 of 8 | reference |
+| default 0.25, 0.1, 1000 | none | 0 of 8 | 0 |
+| 0.5, 0.5, 1000 | car 5: 1.28 | 1 | 2.9 (car 5) |
+| 1, 1, 1000 | car 5: 1.09 | 1 | 2.9 |
+| 2, 2, 1000 | car 5: 0.53 | 1 | 3.0 |
+| 3, 5, 1000 | car 4: 0.97, car 5: 0.53 | 2 | 7.5, 3.0 |
+
+*One car at rest on the 50° mountain's shelf* (after the fix, saved at t 20 s, at rest
+since t 12 s; `--rest-probe 60`, then `--sleep-loss` 5.1 s each): its fastest node at a
+frame's end 1.47 m/s, 86 nodes past 0.25 m/s within a second, the farthest 7.2 mm in a
+dwell; no setting of the sweep above (default to 3 m/s, 5 mm) sleeps it.
+
+**The gate (the pile at rest ≤ 1 ms of vehicle GPU a step) is not met.** On the 50°
+and rolling mountains the pile is not at rest: the physics (slopes past the friction
+angle) keeps a car and torn-off parts sliding. Where it rests (25°) the per-node rule
+does not sleep a contact group whose members ring under a centimetre or carry a
+swinging panel, at any threshold up to 3 m/s and 5 mm. Asleep, a World step costs
+0.03 ms (§8.27, the flat arena), so the gate needs the rule, not the dispatch: §10.8 for
+the two designs (a group member sleeping inside an awake group; a stillness test a
+ringing node or a swinging panel does not fail), each a measured, configurable loss.

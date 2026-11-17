@@ -1172,7 +1172,8 @@ thresholds, nor at 1 m/s and 1 mm: the cars are not at rest by the rule (loose p
 keep moving at metres a second, and the pile is one contact group, which sleeps
 together). At 15 m/s and 400 mm it sleeps at 24.4 s and loses a later slide of 21 m.
 The measurements, the loss tables and the lab's default are in
-`measurements/vehicle-perf-first-principles.md` §8.27.
+`measurements/vehicle-perf-first-principles.md` §8.27; why, by part, and a contact fix
+it found: §10.8.
 
 **The coupling plan for sleeping vehicles: measured, not changed.** `cpl_plan` still runs
 a workgroup a vehicle and writes a sleeping vehicle's proxies. It costs 0.03 to 0.05 ms
@@ -1190,6 +1191,61 @@ vehicle's share counts from its kept records.
 the buffers' layout: fixtures saved before this are of another layout
 (`fast-check.sh --make` again; the eight-car set now also saves the pile at t 20 and
 30 s). `tools/explicit-2khz/sleep-check.sh` is sleep's own first rung.
+
+### 10.8 Why the mountain pile does not rest, by part; a contact fix (2026-11-16)
+
+§10.7 found the lab's eight-car mountain pile never sleeps. Measured by part
+(`vehicle_lab --from-fixture F --rest-parts N`: from a saved state, the solver alone,
+sleep off; per car its main body's rigid motion, each body node's velocity relative to
+it, the loose pieces, what is near the fast nodes, energy by car; ablations
+`--rest-vv 0`, `--rest-coupling 0`). Numbers in
+`measurements/vehicle-perf-first-principles.md` §8.27 ("By part").
+
+* **Whole cars and torn-off parts sliding: correct physics.** The mountain's slopes are
+  50° (the rolling gully's are 38° or more everywhere), past the contact's friction
+  angles: the sedan's nodes have friction 0.7 against the rock's 1.2 static and 0.75
+  kinetic, so a node holds below 40° and slides on above 28°. The scene is built for
+  this ("a sliding car keeps sliding", `vehicle_lab/mountain.rs`); a real car with its
+  wheels locked holds to about 40 to 45° and the lab's sedan has no parking brake. One
+  car of the pile slides off at up to 134 km/h, and torn-off parts too heavy for the
+  debris time to live (10 kg) slide hundreds of metres down, so their car's frame bounds
+  span hundreds of metres.
+* **Loose parts flailing: no.** At rest the cars' loose pieces (3 to 7 a car, 0.3 to
+  25 kg) move under 0.1 m/s; what moves are pieces sliding away (above) and dangling
+  panels (a node holding 2 to 4 of its 6 or 7 beams) swinging 4 to 30 cm in half a second.
+* **Cars against each other: nothing.** With vehicle contact off for the probe every
+  number is the same bit for bit: no vehicle contact force acts in the pile. The eight
+  are one contact group only because their frame bounds overlap.
+* **The bodies' own nodes: a contact bug, fixed.** Every resting car (rigid motion under
+  2 mm in half a second) kept tens of nodes of intact structure above 0.25 m/s, single
+  nodes at 1 to 16 m/s, 0.4 to 32 J of motion relative to its body, for good. With the
+  rigid coupling off (free fall) it decayed in a second; so the rock kept it up. The
+  World's static bodies took RoR's contact surface on BeamNG-profile vehicles, where
+  the node pass's own shapes take §37's (never positive work) and the exact friction
+  law: jbeam-semantics-spec.md §37.1, "Fix (2026-11-16)". Fixed at the source, a
+  separate commit: from the same state the lone car keeps 0 to 2 such nodes (was 7 to
+  30) and 0.2 to 1.4 J (was 2.3 to 6.4).
+* **What is left on ground that holds the cars** (the same mountain at 25°, below the
+  kinetic angle: the eight are at rest by t 14 s, 4 J of kinetic energy in all at t 40 s):
+  a few light skin nodes (0.27 to 0.54 kg; the car's median node is 1.4 kg) ringing at
+  0.7 to 2 m/s with every beam intact, under 1 J a car and under 1 cm of travel, and the
+  dangling panels. Sleep's rule (any node past 0.25 m/s, any node past 0.1 mm) sees both.
+
+**Sleep there** (thresholds as speed m/s, reach mm, dwell steps; the solver alone from
+the 25° pile at t 25 s, 5.1 s each): the default sleeps nothing; 0.5/0.5, 1/1 and 2/2
+sleep the one car on its own (after 0.5 to 1.3 s, 2.9 to 3.0 mm from never sleeping);
+3/5 a second (7.5 mm); the contact group of six never, since one member always has a
+swinging panel. One car alone at rest on the 50° mountain's shelf (fastest node 1.47 m/s,
+7 mm of travel in a dwell) sleeps under none of these settings. The whole 40 s World run at the default never sleeps and ends where the
+never-sleep run does (0.0 mm). So the owner's gate (the pile at rest ≤ 1 ms a step) is
+not met: on the 50° and rolling mountains there is no rest to sleep (the physics is
+right), and where there is rest the per-node rule is held by motion that is real
+(panels) or under a centimetre (ringing). What would sleep it, not built: a car of a
+contact group sleeping on its own when its partners exert nothing on it (the bounds
+overlap but no contact acts: shown above, but the split solver steps a group's members
+together and would need a member frozen inside an awake group); or a stillness test
+that a ringing light node or a swinging panel does not fail (a measured loss either
+way).
 
 ## 11. The vehicles in the World broadphase (2026-11-06)
 
