@@ -390,16 +390,65 @@ pub const FLEET_LEVEL_CACHE: usize = 4096;
 /// vehicles' nodes may have moved past the list's allowances; in place of the gather, the
 /// grids, the sorted copy and the walk every substep.
 pub const PERF_FLEET_KEEP: u32 = 32768;
+/// [`W_PERF_FLAGS`], on a wide frame with the reused pair list and [`PERF_WIDE_FUSED`]:
+/// step s + 1's coupling and wheels (rays, bars) on a workgroup of their own in the list
+/// kernel's dispatch (the kernel's PERF_AHEAD_APART, `wideAheadApart`: workgroup
+/// vehicles + v, the host dispatches twice the vehicles), in place of on the list
+/// workgroup's lanes beside its phases. vehicle-perf-first-principles.md §8.31.
+pub const PERF_AHEAD_APART: u32 = 131072;
+/// [`W_PERF_FLAGS`], with [`PERF_AHEAD_APART`]: the raycast wheels' tyres split at their
+/// hubs' forces (the kernel's PERF_TYRE_AHEAD, `drvTyrePre` and `drvTyrePost`): the part
+/// before them on the coupling's and wheels' workgroup of the list dispatch, the rest after
+/// the step's hits as before. vehicle-perf-first-principles.md §8.31.
+pub const PERF_TYRE_AHEAD: u32 = 262144;
+/// [`W_PERF_FLAGS`], with [`PERF_HIT_ROLES`] and [`PERF_HIT_FB`]: in the wide hits kernel a
+/// two-body dissipative vehicle's step with 1..48 self-collision hits applied from
+/// workgroup memory (the kernel's PERF_HITS_LOCAL, `selfApplyLocal`): each (hit, role)'s
+/// node values and accumulators loaded once, the round and the residual pass's phases on
+/// those copies, the accumulators written back once. vehicle-perf-first-principles.md §8.33.
+pub const PERF_HITS_LOCAL: u32 = 1048576;
+/// [`W_PERF_FLAGS`], with [`PERF_TYRE_AHEAD`]: a wheel's second part (the tyre after its
+/// hubs' forces) on the hits kernel loads its records, its hub nodes' masses and beam sums
+/// before the step's hits, while the other lanes apply them, and reads only the hubs'
+/// accumulators after (the kernel's PERF_TYRE_EARLY, `drvTyreLoad`, `drvTyreFinish`).
+/// vehicle-perf-first-principles.md §8.33.
+pub const PERF_TYRE_EARLY: u32 = 2097152;
+/// [`W_PERF_FLAGS`], with [`PERF_AHEAD_APART`]: the coupling's and the wheels' work of the
+/// list dispatch on two workgroups a vehicle (the kernel's PERF_WHEELS_APART,
+/// `wideCoupleApart` at vehicles + v, `wideWheelsApart` at 2 · vehicles + v; the host
+/// dispatches three times the vehicles), in place of one where lanes 255..252 carry both.
+/// vehicle-perf-first-principles.md §8.34, §8.35.
+pub const PERF_WHEELS_APART: u32 = 4194304;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
 /// [`PERF_HIT_ROLES`] and [`PERF_WIDE_GEO`] (§8.22), [`PERF_FLEET_STATE`] and
 /// [`PERF_FLEET_FRONT`] (§8.25), [`PERF_FLEET_ANY`] and [`PERF_FLEET_POST`] (§8.29),
-/// [`PERF_FLEET_HITLAT`] and [`PERF_FLEET_FUSE`] (§8.32);
-/// `RUBBLE_PERF_FLAGS=<mask>` overrides
-/// (a measurement; 0: every switch off).
+/// [`PERF_AHEAD_APART`], [`PERF_TYRE_AHEAD`] (§8.31), [`PERF_FLEET_HITLAT`] and
+/// [`PERF_FLEET_FUSE`] (§8.32), [`PERF_HITS_LOCAL`] (§8.33), [`PERF_WHEELS_APART`] (§8.35);
+/// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off). Not
+/// [`PERF_FLEET_KEEP`]: bit for bit natively, but the lab page in Chrome ends elsewhere
+/// with it (§8.28).
 pub fn perf_flags_default() -> u32 {
-    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(PERF_HIT_FB | PERF_VV_STREAM | PERF_VV_BIG_GRID | PERF_MEMBER_LIST | PERF_VV_BEAM_SUM | PERF_HIT_ROLES | PERF_WIDE_GEO | PERF_FLEET_STATE | PERF_FLEET_FRONT | PERF_FLEET_ANY | PERF_FLEET_POST | PERF_FLEET_HITLAT | PERF_FLEET_FUSE)
+    std::env::var("RUBBLE_PERF_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(
+        PERF_HIT_FB
+            | PERF_VV_STREAM
+            | PERF_VV_BIG_GRID
+            | PERF_MEMBER_LIST
+            | PERF_VV_BEAM_SUM
+            | PERF_HIT_ROLES
+            | PERF_WIDE_GEO
+            | PERF_FLEET_STATE
+            | PERF_FLEET_FRONT
+            | PERF_FLEET_ANY
+            | PERF_FLEET_POST
+            | PERF_FLEET_HITLAT
+            | PERF_FLEET_FUSE
+            | PERF_AHEAD_APART
+            | PERF_TYRE_AHEAD
+            | PERF_HITS_LOCAL
+            | PERF_WHEELS_APART,
+    )
 }
 /// A beam-order entry's class: one beam by beamUpdate.
 pub const BEAM_ORDER_SINGLE: u32 = 0;

@@ -2055,6 +2055,168 @@ two-thirds of the frame, all in the one group's workgroup. What is left, precise
    the fleet they are one workgroup of the plan, rounds bounded by the longest chain
    of touching owners (`EB_MAX_MEMBERS + 2`).
 
+### 8.31 One car's own step: fixed cost against work, and the wheels off the list's and the hits' core (2026-11-16)
+
+The lab's car alone (`sedan_new`: 548 nodes, 4,251 beams, 528 collision triangles, four
+raycast wheels, the World coupling on), native M3 Max, ms a frame of 34 substeps, from the
+saved moments of `fast-check.sh` (t 2.5, 6 and 20 s; t 20 is the wreck at rest, 9 hits a
+step). Wall figures are `--ab-perf-masks` (60 frames a mask from one snapshot, median /
+fastest tenth); pass figures are its per-pass timestamps (each dispatch a timed pass of its
+own). The GPU was shared with another session's jobs throughout (through the lock), so wall
+figures move by a few percent between runs; the A/B pairs below ran interleaved.
+
+**What a dispatch costs here.** `RUBBLE_EXTRA_DISPATCH=n` (a measurement-only host switch,
+`ExplicitBeamsGpu::extra_dispatch`) adds n dependent dispatches of a trivial kernel (one
+workgroup of 64 threads adding one to a word) after each of the frame's 279 dispatch
+points (176 wide commands, 103 list, walk and pairs dispatches); `_INDIRECT=1` makes them
+indirect dispatches of zero workgroups. t 20, fastest tenth: 5.72–5.74 without; one more
+6.38 (+0.65 ms, 2.3 µs each), two 6.76 (+1.03, 1.85 µs), four 7.79 (+2.06, 1.85 µs); two
+empty indirect 6.34 (+0.61, 1.1 µs each). **A dependent dispatch costs about 2 µs in the
+frame, an empty indirect one about 1 µs**, not the 5–8 µs of a dispatch timed in a pass of
+its own (§8.23: the timestamps add ≈3.4 µs a pass, (6.64 − 5.81) / 243). The frame's 175
+dispatches with work and 68 empty indirect ones are **≈0.4–0.5 ms of fixed cost (8 %)**.
+Fusing passes saves ≈0.07 ms a frame per dispatch removed from each substep; it is not where
+most of the frame goes.
+
+**Per pass: fixed, work, floor** (t 20, timed apart, ms a frame; the "of which" splits are
+time-only switches that skip a part (removed after use; they change results, so each
+reading is that pass's own time only); floor: the work's bytes at 400 GB/s and its longest
+dependent chain at 0.15–0.2 µs an access (§8.23's measured per-access cost), plus the
+in-frame boundary of 2 µs, × 34):
+
+| pass | dispatches a frame | timed apart | of which | floor |
+|---|---|---|---|---|
+| nodes | 34 | 0.84–0.88 | the dispatch with no node updated (boundary, timestamps, the coupling header's lane and barrier) 0.20; node updates 0.67, of which the static shapes' and the coupling's proxy contacts 0.38 | 0.15 (0.17 MB a substep: 0.4 µs; ≈10 accesses in series) |
+| beams | 34 | 0.52–0.55 | with no beam updated (the triangles' geometry threads, §8.23's 2048) 0.35; the beam updates 0.18 | 0.15 (0.78 MB a substep: 2 µs) |
+| list kernel | 35 | 1.97–2.05 | step s + 1's coupling and wheels (the rays, the bars) 0.68–0.69, of which the rays' loop over the static shapes 0.13; the list's own phases 1.28 (the pieces' tests 0.02) | 0.2–0.3 |
+| walk and pairs | 68 | 0.49–0.51 | 0.19 of it the empty indirect walks and pairs (§8.23) | 0.1 |
+| hits | 34 | 2.16–2.21 | the next step's tyres 0.50; `selfApply` ≈1.4 (§8.23: fill 0.23, round 0.55, residual 0.79); the dispatch with nothing to apply 0.29 | 0.3–0.6 |
+| centred damping (two passes; native only) | 68 | 0.50 | | 0.1 |
+| begin, rebase, step 0's aux, end, close | 6 | 0.09 | | |
+| **frame (wall)** | 243 | 5.72–5.83 | boundaries ≈0.45 | §1.3: 0.3–0.5 |
+
+The two one-workgroup kernels (list, hits) are 4.2 of the 6.6 ms timed. Inside them the
+largest single item was not self-collision: **the four raycast wheels cost 1.19 ms a frame
+(0.69 in the list kernel, 0.50 in the hits kernel), 0.85 ms of wall time**, a serial chain
+of a few lanes (drvCtx's loops over the hubs and curves, a ray per wheel, the bars, the
+tyre: about a hundred dependent accesses a step) that rides on the critical path of the
+workgroup it shares.
+
+**Built: the wheels off the list's core, then the tyres split at their hubs' forces.**
+
+*Perf flag 131072, `PERF_AHEAD_APART`* (with `PERF_WIDE_FUSED`; `wideAheadApart`). The list
+kernel's dispatch gets a second workgroup a vehicle (vehicles + v) that runs step s + 1's
+coupling (its step or its fold, phases B and C) and its wheels' rays and bars: the same
+calls on the same lanes with the same barrier between, in place of on the list workgroup's
+lanes beside its phases. They read the nodes after the step's node phase, the coupling's
+records and sums, the wheels' records and the static shapes, and write the coupling's
+bodies, spheres and counts and the wheels' scratch records; the list's phases write none
+of these and read none of what they write (they ran beside them already, between the same
+barriers); the tyres that read the scratch records are in the next dispatch. On a core of
+their own they no longer lengthen the list's phases. The list workgroup's code changes
+only in that `ahead` is false with the flag; the new path is its own function behind an
+early return.
+
+*Perf flag 262144, `PERF_TYRE_AHEAD`* (with 131072; `drvTyrePre`, `drvTyrePost`,
+`driveTyresPre`, `driveTyresPost` in `explicit_beams_drive.slang`). A tyre reads its hubs'
+forces (`drvForceNow`: the beam sums and the contact accumulators after the step's hits)
+and nothing else that the walk, the pairs or the hits change. `drvTyrePre`, on the wheels'
+workgroup after the bars, runs everything that does not need them (the frame, hub and axle,
+the steer angle with Ackermann, the tyre's frame, spin drive and brake, slip ratio and slip
+angle, both friction curves, the friction ellipse's shape, the outputs 17..19, the
+vehicle's end record); `drvTyrePost`, on the hits kernel's lanes after `selfApply`, reads
+the hubs' forces and runs the rest (the spin solves, the ellipse's cap, the state records,
+the hub forces). The values cross in eight float records a wheel after the vehicle's wheels
+(`DriveLayout::stride_for`: 20 + 31 records a wheel, `TYRE_PRE_RECS`), written as floats
+and read back exactly, cleared by the second part, so a frame leaves them zero as without
+the split. `drvTyre`'s arithmetic in its order, the ellipse's shape computed always where it
+was computed only when the ellipse binds (pure, read only there).
+
+**Proofs.**
+- `fast-check.sh perf=131072`: the seven fixtures (one car at t 2.5, 6, 20; two cars at 2,
+  3.7, 8, 16 s), 4 and 20 frames, every state word the same. After the drive layout change
+  (new fixtures, `out/fixtures2`): `perf=262144` with `RUBBLE_PERF_FLAGS=147393` (the tyre
+  split against the wheels apart alone) and `perf=393216` (both against neither), seven
+  fixtures, 20 frames, every word the same. (Two cars run the contact path, where neither
+  flag acts: those lines prove only that nothing else moved.)
+- The old path against main's kernels after the first change (`--ab-switch kernel
+  --ab-kernel-dir` on a copy of main's WGSL, the flag off; before the drive layout change,
+  after which main's kernels and these share no fixtures): one car at t 2.5 and 6, two cars at all four moments, every
+  word the same. One car at t 20 differs (103 node words, 114 beam words, first node word
+  5304: 0x4135f235 / 0x4135f244), **and so does this build's WGSL against itself** (the same
+  words): the kernel-dir harness is not bit-reproducible at that moment, independent of any
+  kernel change. §8.23's rejection of the thread-local opaque zero quotes exactly these words,
+  so that verdict was the harness's, not the change's (not re-measured here).
+- Chrome: all 116 modules compile after each step (`explicit-wgsl-check.mjs`; no new
+  module, no new workgroup variable).
+- Suites with both flags on (`perf-verify.sh 409537`): `explicit_loop_cap` 5,
+  `explicit_beams_bitwise` 12, `explicit_contact_gpu` 13, `self_split_gpu` 8,
+  `explicit_pair_reuse_gpu` 2, `explicit_beam_order_gpu` 3, `showcase_car_gpu` 6 (1
+  ignored, as before), `explicit_drive_gpu` 3, engine-world `explicit_vehicles` 11,
+  `explicit_drive_world` 1, `vehicle_lab_reset` 3, engine-metal `vehicle_parity` 4,
+  `explicit_drive_parity` 1: PASS. With the default flags (the old path's Metal codegen
+  after the edits): `vehicle_parity` 4, `explicit_drive_parity` 1, `explicit_parity` 7:
+  PASS.
+- Of these only `vehicle_lab_reset` runs the lab's fused wide schedule (the World with
+  `wide_fused`), where the flags act; the GPU == CPU suites do not. The new paths' proof is
+  the A/B against the shipped path on the same state, which the suites and §8.8–§8.9 hold
+  to the CPU reference.
+
+**Gain** (`--ab-perf-masks` from the saved moments, interleaved, fastest tenth / median, ms
+a frame):
+
+| moment | neither | 131072 | both (393216) |
+|---|---|---|---|
+| t 2.5 (falling, first contact) | 4.31 / 4.41 | 4.05 / 4.16 | 3.89 / 3.99 |
+| t 6 (crash) | 5.43 / 5.47 | 4.85 / 4.90 | 4.63 / 4.67 |
+| t 20 (wreck at rest) | 5.31 / 5.76 | 5.07 / 5.25 | 4.99 / 5.08 |
+
+Passes at t 20 (timed apart): list 2.01 → 1.35 → 1.51, hits 2.19 → 2.19 → 1.75; every
+other pass within 0.005. The first change is −5 to −11 % of the frame; the second −2 to
+−5 % more (the wheels' workgroup becomes the list dispatch's longest at 1.51 against the
+list's own 1.3, so part of what leaves the hits kernel is paid there). Spreading the four
+wheels over four SIMD groups (wheel w on lane 32w) in both places: no gain (tried, removed).
+
+**Whole 40 s run** (native, release, `--secs 40`, the vehicles' GPU ms a World step from
+t 0.5 s, three rounds interleaved, each run alone on the GPU through the lock):
+
+| flags | median | p95 | p99 | worst |
+|---|---|---|---|---|
+| default (16321) | 5.23, 5.24, 5.28 | 5.52, 5.50, 5.53 | 5.65, 5.64, 5.66 | 5.84, 8.83, 6.96 |
+| + 131072 | 4.87, 4.72, 4.72 | 5.11, 4.97, 4.93 | 5.23, 5.06, 5.04 | 5.51, 8.12, 5.49 |
+| + 131072 + 262144 | **4.55, 4.56, 4.55** | **4.74, 4.74, 4.72** | 4.86, 4.86, 4.82 | 7.52, 7.87, 5.25 |
+
+Median −13 %, p95 −14 %, p99 −14 %. The worst is one step near t 7.13 s (the crash): 5.8
+to 8.8 ms with the default flags as well, so it moves with something other than these
+switches (not investigated here); without it the worst is 5.25–5.49 with the flags against
+5.84 without. (The scene is main's after PR #117, whose rolling terrain is the lab's
+default now: these are not §8.26's figures, 4.77 / 5.03 / 5.30 on the terrain before it.)
+
+**Default: both off.** Bit for bit and faster natively at every moment and over the
+whole run, but not measured in Chrome (the page's checkboxes "wheels apart from the list"
+and "tyres mostly ahead" are untested in a browser; Chrome only compiled the modules), and
+the rule for a default is both. To turn them on: the lab page with both boxes ticked
+against unticked (`vehicle-lab-record.mjs --probe` on the mountain, one car), then add
+`PERF_AHEAD_APART | PERF_TYRE_AHEAD` to `perf_flags_default` and tick the boxes by default.
+
+**What stands between this and 1 ms** (one car at rest, ≈4.6–5.0 ms a frame now):
+- The hits kernel, 1.75: `selfApply`'s fill, rounds and residual pass (≈1.4) at 9–16 hits,
+  each phase a chain of device accesses at 0.15–0.2 µs whatever their kind (§8.23), and
+  the dispatch with nothing to apply (0.29). Its floor is 0.3–0.6: it needs the hits'
+  working set in workgroup memory for the rounds (an access there is tens of
+  nanoseconds), not fewer atomics.
+- The list dispatch, 1.5: now the wheels' workgroup (rays, bars, tyre's first part) sets
+  it; the list's own phases are 1.3. Both are long single-lane chains (drvCtx alone loops
+  over the hubs and curves in series); the same remedy as the hits.
+- The nodes, 0.85 against 0.15: the coupling's and static shapes' contacts (0.38) and the
+  dispatch's own lane-0 header and barrier (0.20 with no node updated).
+- Fixed cost: ≈0.45 ms of boundaries (243 dispatches), the centred damping's two passes
+  (0.5 natively), the empty walks and pairs (0.19).
+- The sum of the per-pass floors with today's eight dependent dispatches a substep
+  (natively; six on the page, without the centred damping) is 1.0–1.4 ms (8 × 2 µs × 34 =
+  0.54 of it boundaries): the 1 ms target needs both the chains in workgroup memory and
+  fewer dependent dispatches a substep (four would be 0.27 ms).
+
 ### 8.32 The levels across the GPU (stage 3c): built and bit for bit; the levels are chains, so off by default (2026-11-16)
 
 `contact-groups-design.md` §8.8 (what is built). Perf flag 524288 (`PERF_FLEET_LEVELS`,
@@ -2228,3 +2390,315 @@ the cars' own steps (6.0 ms, the same in the merge as without `perf/own-step`: i
 changes did not show on this path), the members' self-collision hits (1.7), the front's
 remaining dispatches (3.2, ten small ones), the levels (1.0) and self pairs (0.9). At t 3.7 the levels are still 5.6 ms: two
 levels of one owner each, each about 75 µs a substep of one thread's chains.
+
+### 8.33 One car's own step: §8.31's switches on by default, the hits from workgroup memory (2026-11-16)
+
+The lab's car alone (`sedan_new`, as §8.31), native M3 Max and Chrome on the same machine.
+The GPU was shared with three other sessions' jobs through the lock throughout: each
+measurement below ran alone on the GPU, but wall figures move by a few percent between runs,
+and the A/B pairs ran interleaved in one hold of the lock.
+
+**§8.31's two switches in Chrome.** The lab page (`vehicle-lab-record.mjs --probe`, mountain,
+one car, 40 s, the page's own loop, vehicles' GPU ms a World step from t 0.5 s), with the
+boxes "wheels apart from the list" and "tyres mostly ahead" off and on. Two rounds. The first
+page of each round is slower than any later one whatever its flags (a cold GPU: 6.03 and 5.75
+ms where the same flags give 5.40 and 4.50 warm), so the comparison is between warm pages:
+
+| flags | median | p95 | p99 | worst |
+|---|---|---|---|---|
+| neither (warm, round 2) | 5.40 | 6.10 | 6.32 | 11.25 |
+| both (rounds 1, 2, 2) | **4.73, 4.87, 4.82** | 5.31, 5.56, 5.47 | 5.55, 5.88, 5.66 | 8.22, 10.57, 10.38 |
+
+−10 to −12 % of the median and −9 to −13 % of p95: faster in Chrome as natively (§8.31's
+−13 %), and bit for bit (§8.31's proofs, and the suites below with them on). **Both are on by
+default now** (`perf_flags_default`, and their boxes ticked). The page's worst step, near
+t 31.9 s in every warm run whatever the flags, is the page's.
+
+**Built: the hits from workgroup memory** (perf flag 1048576, `PERF_HITS_LOCAL`, with
+`PERF_HIT_ROLES` and `PERF_HIT_FB`; `selfApplyLocal` in the wide hits kernel). With those
+switches a two-body dissipative car's `selfApply` is the beam forces' fill, one round (no hit
+reads another's force, so round 1 computes them all) and the residual pass's seven phases.
+Every value the phases pass to each other is a node's (beam force, mass, hit count,
+accumulators A and B) or a hit's (record, role records), and each phase read them again from
+device memory. Now item q (hit q >> 2, role q & 3) on lane q loads its node's values once; a
+node named by several items has one copy (the first item naming it); the round and the seven
+phases run on the copies (the integer adds as workgroup atomics on the copy: the same
+integers); the accumulators are written back once, as the device's value plus the copy's
+adds. Every float is the same strict arithmetic on the same bits in the same order as
+`selfTwoBodyCore`, `hitRolePhase` and `hitCombinePhase`; the scratch records those leave in
+`gNext` are written as they leave them. 1..48 hits a step (192 items on the kernel's 256
+lanes); more, or another kind of car, takes `selfApply` as before. The arrays are the list
+kernels' (`gsTested`, `gsPairs`, `gsCount`; 17 KB with the module's others, under Chrome's
+32 KB), which the hits kernel did not use, so no new workgroup variable. Two refinements,
+each measured alone: its barriers are workgroup barriers (no lane there reads a device word
+another lane wrote there; `sync()` also waits for the phase's device writes): no change. The
+round's four position steps a hit are added by the items' own lanes (`shiftAdd`'s integer
+adds, from workgroup memory) instead of twelve atomics in a row on the hit's lane: hits pass
+−0.07 ms.
+
+Proofs (the flag against without it, on top of §8.31's flags):
+- `fast-check.sh perf=1048576` on all fifteen fixtures (one car at t 2.5, 6, 20 s; two, four
+  and eight cars at 2, 3.7, 8, 16 s), 4 and 20 frames, every state word the same; again after
+  each refinement. (Two or more cars run the contact path, where the flag does not act.)
+- The `--ab-perf-masks` replays (60 frames a mask, three rounds): every mask's frames end in
+  the same state ("=").
+- Chrome compiles all 116 modules (`EXPLICIT_WGSL_MODULES_ONLY=1 explicit-wgsl-check.mjs`).
+- Suites with every switch of this section on (`RUBBLE_PERF_FLAGS=3555265`): engine-webgpu
+  `explicit_loop_cap` 5, `explicit_beams_bitwise` 12, `explicit_contact_gpu` 13,
+  `self_split_gpu` 8, `explicit_pair_reuse_gpu` 2, `explicit_beam_order_gpu` 3,
+  `showcase_car_gpu` 6 (1 ignored, as before), `explicit_drive_gpu` 3; engine-world
+  `explicit_vehicles` 11, `vehicle_lab_reset` 3; engine-metal `vehicle_parity` 4,
+  `explicit_drive_parity` 1: PASS. (Of these only `vehicle_lab_reset` runs the lab's fused
+  wide schedule where the flags act; the A/B on the same state is the new path's proof, as
+  §8.31 says.)
+
+**Tried, not kept on** (perf flag 2097152, `PERF_TYRE_EARLY`, off; bit for bit on all fifteen
+fixtures, 20 frames): the tyres' second part loading its records, its hubs' masses and beam
+sums on the wheels' lanes while the other lanes apply the hits, and reading only the hubs'
+accumulators after (`drvTyreLoad`, `drvTyreFinish`). Hits pass −0.02 ms, wall unchanged: the
+tyres were 0.08 ms of the pass (below), not on its critical path.
+
+**Where the hits pass goes now** (t 20, timed apart; time-only switches, removed after use):
+the dispatch with nothing to apply, its lane-0 header and the tyres 0.41 (the tyres 0.08);
+the load 0.22; the round 0.45 before the position steps moved, ≈0.38 after; the seven phases
+and the write-back 0.21. The round is one lane a hit running `selfTwoBodyCore`'s strict
+contact rule (`contactResponse`, `noPositiveWork`) on values already in workgroup memory: its
+time is that chain's arithmetic, not memory.
+
+**The list dispatch** (time-only switches at t 20): without the coupling's and wheels'
+workgroup 1.31–1.32 ms; without its coupling 1.30; without its wheels 1.30; without the list
+workgroup 1.52. Each of the three (the list's phases, the coupling's, the wheels') is about
+1.3 ms on its own, so shortening any one of them alone does not shorten the dispatch.
+
+**Per pass: before, floor, after** (one car at rest, t 20, ms a frame, timed apart; before:
+§8.31's both flags; floor: §8.31's):
+
+| pass | before | floor | after |
+|---|---|---|---|
+| hits | 1.78–1.79 | 0.3–0.6 | **1.22** |
+| list (list workgroup; coupling and wheels workgroup) | 1.50–1.51 (1.31; ≈1.5) | 0.2–0.3 | 1.51 |
+| nodes | 0.85 | 0.15 | 0.85 |
+| beams | 0.54 | 0.15 | 0.54 |
+| walk and pairs | 0.51 | 0.1 | 0.51 |
+| centred damping (native only) | 0.50 | 0.1 | 0.50 |
+
+Wall at the saved moments (`--ab-perf-masks`, median / fastest tenth, ms a frame): t 20 5.09 /
+5.01 → **4.68 / 4.45**; t 6 5.15 / 5.10 → **4.77 / 4.66**; t 2.5 (6 hits, falling) 4.05 →
+4.08 (no change). −8 % at the crash and at rest.
+
+**Whole 40 s run, one car** (vehicles' GPU ms a World step from t 0.5 s; native
+`vehicle_lab --measure mountain-perf --secs 40`, release, two rounds interleaved; Chrome as
+above):
+
+| flags | median | p95 | p99 | worst |
+|---|---|---|---|---|
+| native, the old default (16321) | 5.25, 5.25 | 5.52, 5.56 | 5.64, 5.65 | 8.85, 8.24 |
+| native, + §8.31's two | 4.57, 4.58 | 4.76, 4.79 | 4.88, 4.89 | 7.96, 6.30 |
+| native, + the hits from workgroup memory (the new default) | **4.22, 4.25** | **4.40, 4.45** | 4.50, 4.58 | 4.75, 7.87 |
+| Chrome, neither of §8.31's (warm) | 5.40 | 6.10 | 6.32 | 11.25 |
+| Chrome, + §8.31's two (warm) | 4.73, 4.87, 4.82 | 5.31, 5.56, 5.47 | 5.55, 5.88, 5.66 | 8.22, 10.57, 10.38 |
+| Chrome, the new default (warm) | **4.57, 4.50** | 5.36, 5.42 | 5.57, 5.65 | 7.60, 10.57 |
+
+The new default against the old: native median −19 %, p95 −20 %; Chrome median −15 to −17 %.
+The hits switch alone: native −7.5 % median and p95; Chrome −3 to −7 % median, p95 unchanged
+within the runs' spread. The native worst is still the crash step near t 7.13 s in three of
+four runs (§8.31: it moves with something other than these switches).
+
+**Default: `PERF_HITS_LOCAL` on** (bit for bit, faster natively and in Chrome), its box
+ticked; `PERF_TYRE_EARLY` off, its box unticked. With the new default: engine-metal
+`vehicle_parity` 4, engine-world `vehicle_lab_reset` 3 and `explicit_vehicles` 11: PASS.
+With the old default (16321: the old path's Metal codegen after the edits): engine-metal
+`vehicle_parity` 4, `explicit_parity` 7, `explicit_drive_parity` 1: PASS.
+
+**Stop.** After the hits from workgroup memory (−7 to −8 %), three attempts in a row gained
+under 5 % of the frame: the tyres loaded early (0 %), the workgroup barriers (0 %), the
+position steps on the items' lanes (−1.5 %). What the measurements say about the next step:
+- No single pass now holds a cause that a change of where values wait removes. The hits
+  pass's largest part (0.38) is a chain of strict arithmetic, not memory; its fixed part
+  (0.41) is the dispatch, the header and the tyres.
+- The list dispatch is three workgroups of about 1.3 ms each (the list's phases, the
+  coupling's step or fold, the wheels' rays, bars and first tyre part). Only shortening all
+  three moves it; each is a chain of a few lanes through its own records.
+
+**What stands between this and 2.5 ms and 1 ms** (one car, ≈4.2 ms a step natively, ≈4.5 in
+Chrome):
+- To 2.5 ms (−1.7 ms natively, −2.0 in Chrome): the list dispatch (1.5 → its floor 0.3 would
+  be −1.2), the hits (1.22 → 0.6: −0.6), the nodes (0.85 → 0.3: the coupling's contacts and
+  the node record's loads, −0.5). Each needs its single-lane chains split across lanes (the
+  list's tracking, decision and build; the coupling's bodies and folds; drvCtx's loops over
+  the hubs and curves, a lane a hub), not workgroup memory alone: the hits show that once the
+  values are local, the arithmetic chain is what remains.
+- To 1 ms: §8.31's sum of floors with eight dependent dispatches a substep is 1.0–1.4 ms;
+  1 ms needs the floors and about four dependent dispatches a substep (each ≈2 µs × 34), and
+  natively no centred damping's two passes (0.5).
+
+**The kernel-dir harness at t 20** (`--ab-switch kernel --ab-kernel-dir` with this build's own
+WGSL differs at the one-car t 20 fixture, §8.31). Not reproduced here, and no race found in
+the one-car path: every same-build replay at t 20 in this section (fast-check with four
+switches, 4 and 20 frames, and every `--ab-perf-masks` replay, eleven runs) ended bit for
+bit. The kernel-dir A/B is a second lab given A's state at the saved moment (`vehicle_lab.rs`:
+B is "a second lab of the same options ... given A's state"), so state that the snapshot does
+not carry, or the override's own compile of the same WGSL, would differ there and nowhere
+else; which one is not established.
+
+### 8.34 The list dispatch's three workgroups, measured and split: under 5 %, stopped (2026-11-16)
+
+The owner's request after §8.33: split the single-lane chains of the list dispatch's three
+workgroups (the list's own phases, the coupling, the wheels) as one attempt, designed from a
+measurement of each chain first; then the nodes pass's coupling contacts; stop if the
+combined change gains under 5 %. It did (−2 to −3 %), so the nodes pass was not started.
+
+**Measured first** (one car, t 20 and t 6, the new default flags; time-only switches that
+skip or end a part early, removed after use; each figure the list pass timed apart, ms a
+frame of 34 steps; a skipped part changes the state, so each figure is that pass's time
+only):
+
+| list dispatch with | t 20 | t 6 |
+|---|---|---|
+| all three workgroups (the default) | 1.49–1.51 | 1.51–1.52 |
+| the dispatch, no work in any workgroup | 0.31–0.36 | 0.31–0.36 |
+| the coupling's and wheels' workgroup alone | 1.50–1.52 | 1.52 |
+| … its wheels only (coupling off) | 1.05–1.07 | 1.07 |
+| … its coupling only (wheels off) | 0.92–0.94 | 0.94 |
+| … its wheels without the rays | 0.87 | 0.90 |
+| … its wheels without the tyres' first part | 0.90 | 0.92 |
+| the list workgroup alone | 1.31–1.33 | 1.39 |
+| … ended after its header and state load | 0.37 | 0.36 |
+| … ended after the tracking | 0.68 | 0.69 |
+| … ended after the throttles, tested list and clears | 0.78 | 0.79 |
+| … ended after the decision and the brute pairs | 1.21 | 1.08 |
+| … without its tests (the save kept) | 1.22 | 1.18 |
+
+Above the dispatch's own 0.31–0.36: the wheels' work 0.70 (context and bars ≈0.37, rays
+≈0.18, tyres' first part ≈0.15), the coupling's 0.57, and together on one workgroup 1.15:
+**they add, not overlap**, because every lane runs its share of the coupling's per-node
+count and lanes 255..252 also run the wheels. The list workgroup's work is 1.0: the tracking
+0.32, the throttles and tested list 0.10, the decision with the brute pairs 0.30–0.43, the
+tests 0.13–0.21, the header and load 0.06.
+
+**Built and kept (off): perf flag 4194304, `PERF_WHEELS_APART`** (with `PERF_AHEAD_APART`;
+`wideCoupleApart`, `wideWheelsApart`; the host dispatches three workgroups a vehicle). The
+coupling on workgroup vehicles + v, the wheels on 2 · vehicles + v: the same calls on the
+same lanes between the same barriers (neither reads what the other writes; they already ran
+beside each other). Bit for bit (`fast-check.sh perf=4194304`, every fixture, 20 frames;
+Chrome compiles all 116 modules; `explicit_loop_cap`). The list pass: 1.51 → 1.29–1.37 (now
+the list workgroup's 1.31 sets it; the wheels' workgroup alone is 0.94–0.97, the coupling's
+0.88–0.89). Wall at the saved moments (`--ab-perf-masks`, median): t 20 4.80 → 4.67–4.68, t 6
+4.84 → 4.79, t 2.5 4.05 → 3.67 (falling, no hits: the list is the frame's longest pass there).
+−2 to −3 % at rest and at the crash.
+
+**Tried, not kept** (each bit for bit on the one-car fixtures, each removed):
+- *The tested triangles listed by a scan* in place of one shared counter's atomic add a
+  tested triangle: the list pass 1.29 → 1.48, slower (three more barriers and two 16-step
+  scans cost more than ≈260 atomics on one workgroup word).
+- *The brute pairs' contacters from a workgroup copy* (`trianglePairs` reads each
+  contacter's node and position; every lane reads the same ones in the same order): list
+  pass unchanged (1.29 → 1.31).
+- *The tracking's main-body position keys as each lane's maximum, added once* (in place of
+  an atomic max a node and key on six shared words): unchanged (1.29 → 1.30).
+
+Neither of the last two was the chain: two dependent device loads a contacter and the
+atomics on six words were not what the list workgroup's phases wait on. What they do wait
+on was not found: each phase is a lane's two or three nodes or triangles, a handful of
+dependent loads each, which the per-access cost of §8.23 puts at 2–4 µs a phase, not the
+9–13 µs measured for the tracking and the decision.
+
+**Stop.** The combined change (wheels apart, scan, contacters local, tracking local) gained
+under 5 % (the wheels apart −2 to −3 %; the rest 0 or a loss; §8.35 turns the wheels apart on). Not built: the coupling's
+per-node count on spare workgroups of the hits dispatch (its inputs are complete there and
+nothing between reads its outputs; it would take the coupling's workgroup from 0.88 toward
+0.6, but the list workgroup's 1.31 sets the dispatch), the wheels' context with its hubs a lane
+each (≈0.1 of the wheels' 0.70), and the nodes pass's coupling contacts. Its whole runs and suites are in §8.35.
+
+**What stands between this and 2.5 ms** (one car, ≈4.2 ms natively): the list dispatch is
+now the list workgroup's 1.31 (of which 0.31 is the dispatch with its timestamps); below it
+the wheels' 0.95 and the coupling's 0.88. Shortening the dispatch past 0.95 needs the list
+workgroup's phases understood first: they cost three to four times what their loads
+predict, and two lossless changes aimed at the obvious chains moved nothing. The next
+measurement is a lane-level one (a timestamp per phase and lane on Metal), not another
+ablation (done in §8.35, as a standalone microbenchmark).
+
+### 8.35 Why a single workgroup's phase costs 3× its loads: a microbenchmark (2026-11-16)
+
+`cargo run --release -p engine-webgpu --example phase_cost` (native wgpu on Metal, M3 Max,
+through the GPU lock). One dispatch of 256-lane workgroups runs 1 or 1025 barrier phases;
+in each, every lane takes `items` items of `k` dependent loads (each load's value addresses
+the next), optionally with a store, an atomic or strict arithmetic, then a barrier; µs a
+phase = the difference / 1024. One factor varies at a time from the base (a read-write
+storage buffer of 2^16 records, 1 MB; 2 items; storage and workgroup barriers as `sync()`;
+one workgroup). A second part times one workgroup running n dependent fma steps, written
+out (n distinct instructions) or as a loop, each dispatch after an empty one (code hot) or
+after a 16,384-statement kernel (code cold).
+
+| µs a phase (1 MB table) | k 0 | k 1 | k 4 | k 16 |
+|---|---|---|---|---|
+| base (read-write, 2 items) | 0.44 | 1.11 | 2.39 | 6.96 |
+| read-only buffer | 0.43 | 1.09 | 2.37 | 6.97 |
+| atomic loads | 0.35 | 1.08 | 2.77 | 9.65 |
+| strict arithmetic on each load (an XOR with a uniform) | 0.35 | 1.07 | 2.38 | 7.17 |
+| a uniform word in each load's index | 0.36 | 1.07 | 2.36 | 7.09 |
+| workgroup barrier only | 0.40 | 1.06 | 2.36 | 6.95 |
+| + a store an item | 0.79 | 1.32 | 2.06 | 4.55 |
+| + a device atomic add an item | 0.66 | 1.32 | 1.89 | 4.30 |
+| + a shared atomic add on one word an item | 0.56 | 1.24 | 1.85 | 4.26 |
+| + a device atomic max on 8 words an item | 0.44 | 1.13 | 1.73 | 4.14 |
+
+Base with k 4: 1 item 1.40, 3 items 3.35; 3 workgroups 2.36, 16 workgroups 2.37, 128
+workgroups 5.79. The 64 MB table doubles the per-load cost (k 16: 14.25) and 128 workgroups
+on it 25.55.
+
+| one workgroup, n dependent fma | written out, hot / cold | as a loop (two integer `%` and a conversion an iteration), hot / cold |
+|---|---|---|
+| 256 | 1.97 / 2.43 | 14.65 / 14.02 |
+| 1,024 | 8.38 / 8.16 | 55.89 / 55.39 |
+| 4,096 | 32.09 / 31.49 | 220.72 / 220.40 |
+
+What they say:
+- **A dependent device load costs 0.2 µs** in a phase (the k slope: (6.96 − 1.11) / 30 items' loads
+  ≈ 0.2 µs at 1 MB, 0.4 at 64 MB): §8.23's figure. A read-only buffer, a uniform in the
+  index, the strict arithmetic's opaque zero and the barrier kind change nothing; an atomic
+  load costs 1.4×. A barrier phase with nothing in it is 0.35–0.44 µs. Stores and atomics
+  after the chain overlap it (k 16 drops to 4–4.5: the next item's chain starts while the
+  write drains). So none of the factors the brief named makes a phase 3× its loads.
+- **The code's size does not matter**: 4,096 distinct instructions run cold cost what they
+  cost hot (32 µs either way). The instruction cache is not it.
+- **A dependent ALU step costs ≈8 ns** on a single workgroup (1.97 µs / 256 fma: the chain's
+  latency, nothing hides it), and an integer division or modulo far more (the loop's
+  iteration, two `%` and a conversion around one fma: 57 ns). Twenty-five dependent ALU
+  steps cost as much as one device load.
+
+So the list workgroup's phases (9–13 µs where their loads give 2–4) are paying for
+**dependent arithmetic, not memory**: the rest is ≈700–1,100 dependent ALU steps a lane a
+phase, or ≈100–150 integer divisions. The kernels' code is built of such chains: every
+strict float operation is the operation and an XOR (twice the chain), every array access
+carries a bounds clamp (WGSL's), every capped loop computes its end (`ebEnd`'s selects and,
+for a runtime step, a division), and the index arithmetic of the list's phases divides by
+runtime values (`p / lanes`, `p % lanes`, `i / yz`, `(i / span.z) % span.y`). The same
+explains §8.33's round (0.38 ms, its values already in workgroup memory): the strict contact
+rule is a long dependent chain at 8 ns a step.
+
+**Does a lossless change follow?** Not a small one. The chains' length is their arithmetic:
+the strict operations' XORs are what keeps them bit for bit across targets (a thread-local
+opaque zero was tried in §8.23 and moved bits); the bounds clamps are WGSL's. What would
+shorten them is splitting a lane's chain across lanes (a phase's items over more lanes, a
+contact rule's independent sub-expressions on separate lanes) or removing integer division
+from the index arithmetic of the hottest loops (divisions by `lanes`, `subs`, `yz`, which
+are runtime values there; replaced by a precomputed reciprocal or a nested loop, the same
+indices). The latter is lossless by construction (integer indices only) but each site is a
+few percent of one phase; none was built here. Flag 16777216 stays unused.
+
+**`PERF_WHEELS_APART` (4194304), decided by the rule.** Suites with it on
+(`RUBBLE_PERF_FLAGS=5652417`): engine-webgpu `explicit_loop_cap` 5, `explicit_beams_bitwise`
+12, `explicit_contact_gpu` 13, `self_split_gpu` 8, `explicit_pair_reuse_gpu` 2,
+`explicit_beam_order_gpu` 3, `showcase_car_gpu` 6 (1 ignored), `explicit_drive_gpu` 3;
+engine-world `explicit_vehicles` 11, `vehicle_lab_reset` 3; engine-metal `vehicle_parity` 4,
+`explicit_drive_parity` 1; with the old default `vehicle_parity` 4: PASS. Chrome (the lab
+page, mountain, one car, 40 s, warm pages, vehicles' GPU ms a step): default 4.60, 4.58
+median (p95 5.36, 5.51); wheels apart 4.52, 4.43 (p95 5.36, 5.36): −2 to −3 % median, p95
+the same. Native whole runs (vehicles' GPU ms a World step from t 0.5 s, five rounds interleaved,
+median / p95): default 3.96 / 4.38 (the session's first run), 4.27 / 4.45, 4.26 / 4.46,
+4.27 / 4.46, 4.24 / 4.41; wheels apart 4.15 / 4.37, 4.17 / 4.37, 4.17 / 4.39, 4.17 / 4.37,
+4.13 / 4.30: −2.4 % median and −2 % p95 in the four rounds after the first. Bit for bit,
+faster natively and in Chrome: **on by default** (`perf_flags_default`, its box ticked).
+One car's step is now ≈4.15 ms natively and ≈4.45–4.5 in Chrome.
+
