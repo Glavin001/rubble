@@ -68,8 +68,9 @@ void flError(int code) { gAcc[vvCtl(VV_OVERFLOW)].max(code); }
 // the heat, the reference motion and the allowance between vehicles are choices that
 // cannot make a list unsound: the build's boxes and the bound use the same ones.
 // What is not kept: a pass with a node too fast for a build's allowances, or a bound not
-// finite, takes today's path; a build past an owner's room (FK_CAP pairs: its tests in the
-// padded walk that pass) or the run's is followed by FK_BACKOFF passes on today's path;
+// finite, takes today's path; a build past an owner's room (FK_CAP pairs: the listing stops,
+// that pass's tests walk the walk's own boxes over the build's candidates) or the run's is
+// followed by FK_BACKOFF passes on today's path;
 // the list's first two words an owner are a signature, so another path's list in the same
 // region (the flag off for a frame) ends the kept one.
 static const float FK_CALM = 0.05; // a calm node's motion and travel since the build, at most
@@ -86,11 +87,13 @@ static const uint FK_MAX_CELLS = 216u; // a box over more cells walks every cand
 static const uint FK_CAP = TRI_PAIR_CAP - 1u;
 static const uint FK_MAGIC = 0xFFFFFFFFu;
 static const uint FK_BACKOFF = 136u;
+static const uint FK_SHORT = 8u; // a list that lasted fewer passes: today's path for FK_THRASH_WAIT
+static const uint FK_THRASH_WAIT = 68u;
 // The pass's mode (fkCtl(FK_MODE), written by the first plan).
 static const uint FK_OFF = 0u; // today's front
 static const uint FK_REUSE = 1u; // the kept pairs' tests alone
 static const uint FK_BUILD = 2u; // the padded front, then the kept pairs' tests
-static const uint FK_OVER = 3u; // a build past an owner's room: its tests in the padded walk
+static const uint FK_OVER = 3u; // a build past an owner's room: its tests in the walk's own boxes (fkWalk)
 // fkCtl's words.
 static const uint FK_MODE = 0u;
 static const uint FK_VALID = 1u;
@@ -1023,7 +1026,16 @@ uint fkDecide(uint lane)
         {
             if (wait != 0u) gNext[fkCtl(FK_WAIT)] = wait - 1u;
             else if (c == 0u && gNext[fkCtl(FK_VALID)] != 0u) mode = FK_REUSE;
-            else if (c < 5u) mode = FK_BUILD;
+            else if (c < 5u)
+            {
+                // A list that lasted fewer than FK_SHORT passes (wild nodes, tumbling cars:
+                // a build every few passes costs more than today's front): today's path for
+                // the next FK_THRASH_WAIT passes instead of another build. (A choice of path
+                // alone: today's front is exact; FK_VALID holds the pass of the list's build.)
+                uint built = gNext[fkCtl(FK_VALID)];
+                if (built != 0u && gNext[fkCtl(FK_PASS)] - built < FK_SHORT) gNext[fkCtl(FK_WAIT)] = FK_THRASH_WAIT;
+                else mode = FK_BUILD;
+            }
             // (Measurement, of builds that end a list: the largest node bound at one for a
             // node's motion; at one for two vehicles', their bound, in the same word.)
             bool had = gNext[fkCtl(FK_VALID)] != 0u && gNext[fkCtl(FK_REUSED)] != 0u;
@@ -1496,7 +1508,7 @@ void fleetPlan(uint lane, uint word)
     }
     // (The kept candidates' mode, uniform. A build: the walk a thread a part of every
     // triangle; then the kept pairs' prefix, their threads, and whether an owner's list
-    // is past its room: then the pairs' dispatch is the padded walk again with its tests,
+    // is past its room: then the pairs' dispatch walks again with its tests (the walk's own boxes),
     // a thread a triangle, and the list is not kept.)
     uint mode = splitUniform(lane, fkMode());
     if (mode == FK_BUILD && (word & SPLIT_TESTS) != 0u)
@@ -1531,7 +1543,8 @@ void fleetPlan(uint lane, uint word)
             }
             else
             {
-                gNext[fkCtl(FK_VALID)] = 1u;
+                // (Valid, and the pass it was built in: FK_PASS counts from 1 here.)
+                gNext[fkCtl(FK_VALID)] = max(gNext[fkCtl(FK_PASS)], 1u);
                 gNext[fkCtl(FK_BUILDS)] += 1u;
                 gNext[fkCtl(FK_KEPT)] += total;
             }
