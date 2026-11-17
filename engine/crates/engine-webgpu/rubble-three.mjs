@@ -28,11 +28,12 @@ export const COLLIDER_VEC4 = 4;
 /**
  * A three storage attribute over a GPUBuffer three did not create: three binds
  * `backend.get(attribute).buffer` when it is set, so the engine's buffer is used as is.
- * `type` is the WGSL element ('vec4' or 'uvec4').
+ * `type` is the WGSL element ('vec4', 'uvec4', 'float' or 'uint').
  */
 export function externalStorage(renderer, gpuBuffer, type = 'vec4') {
-  const array = type === 'uvec4' ? new Uint32Array(4) : new Float32Array(4);
-  const attr = new THREE.StorageBufferAttribute(array, 4);
+  const size = type === 'uint' || type === 'float' ? 1 : 4;
+  const array = type.startsWith('u') ? new Uint32Array(size) : new Float32Array(size);
+  const attr = new THREE.StorageBufferAttribute(array, size);
   renderer.backend.get(attr).buffer = gpuBuffer;
   return storage(attr, type, 0).toReadOnly();
 }
