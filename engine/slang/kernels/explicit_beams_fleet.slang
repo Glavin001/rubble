@@ -93,7 +93,7 @@ static const uint FK_THRASH_WAIT = 68u;
 static const uint FK_OFF = 0u; // today's front
 static const uint FK_REUSE = 1u; // the kept pairs' tests alone
 static const uint FK_BUILD = 2u; // the padded front, then the kept pairs' tests
-static const uint FK_OVER = 3u; // a build past an owner's room: its tests in the walk's own boxes (fkWalk)
+static const uint FK_MIX = 3u; // the kept pairs' tests, and today's front (inline) for the pairs of excluded vehicles
 // fkCtl's words.
 static const uint FK_MODE = 0u;
 static const uint FK_VALID = 1u;
@@ -126,6 +126,16 @@ static const uint FK_W_PAIRS = 101u;
 float fkBetween() { return min(max(asfloat(gNext[fkCtl(FK_BTW)]), FK_BETWEEN), FK_BETWEEN_MOST); }
 bool fkOn() { return (gP.perfFlags & PERF_FLEET_KEEP) != 0u && gP.vvTriPairs != 0u; }
 uint fkMode() { return fkOn() ? gNext[fkCtl(FK_MODE)] : FK_OFF; }
+// Per vehicle (fkVeh, after the counters): the passes left while it is excluded (low 16
+// bits: every pair with it on today's front, the others kept), its builds past its room in
+// a row (bits 16..19), whether it was excluded at the list's build (FK_V_AT_BUILD: its
+// pairs are not listed) and whether a pair of it went past the allowance between vehicles
+// this pass (FK_V_BETWEEN, fkPairCheck).
+static const uint FK_V_AT_BUILD = 1u << 20u;
+static const uint FK_V_BETWEEN = 1u << 21u;
+uint fkVeh(uint v) { return fkCtl(FK_CTL + v); }
+// Excluded this pass (read after the first plan's decision).
+bool fkExcluded(uint v) { return (gNext[fkVeh(v)] & 0xFFFFu) != 0u; }
 // FK_WAIT: the passes left on today's path (low 16 bits) and how many builds past a room
 // in a row (above): each one doubles the next wait, to FK_BACKOFF << 4 at most; a build
 // that keeps its list clears it. (Choices of path alone.)
@@ -282,12 +292,15 @@ void flPoint(uint vb, uint i)
     float3 o = asfloat(gMisc[vb].xyz);
     float3 x = nf3(o + gNodes[h * 3u].xyz);
     float3 vh3 = gNodes[h * 3u + 1u].xyz;
+    // (A pass that reuses the list with vehicles excluded: their pairs alone.)
+    bool mix = fkMode() == FK_MIX;
     uint e1 = gNext[flAdjFirst(vb + 1u)];
     for (uint e = gNext[flAdjFirst(vb)], eStop = EB_END(e, e1, 1u); e < eStop; e++)
     {
         uint d = gNext[flAdjAt(e)];
         if ((gNext[flBitsAt(d)] & 1u) == 0u) continue;
         uint va = flPartner(d);
+        if (mix && !fkExcluded(va) && !fkExcluded(vb)) continue;
         float4 B0 = gBeams[flBoxAt(va)];
         float4 B1 = gBeams[flBoxAt(va) + 1u];
         float ex = 0.0;
@@ -717,7 +730,11 @@ uint flCount(uint v, uint word)
 {
     // (The kept candidates' counts: the build's run of an owner, its kept pairs.)
     if (word == FK_W_RUN) return fkOffered(v);
-    if (word == FK_W_PAIRS) return min(uint(gAcc[fkAcc(v, FK_PAIRS)].load()), FK_CAP);
+    if (word == FK_W_PAIRS)
+    {
+        uint n = uint(gAcc[fkAcc(v, FK_PAIRS)].load());
+        return n <= FK_CAP ? n : 0u;
+    }
     uint n = uint(gAcc[flOwn(v) + word].load());
     return word == FL_PAIRS && n > TRI_PAIR_CAP ? 0u : n;
 }
@@ -971,6 +988,13 @@ uint fkPairCheck(uint p)
     if ((bits & 5u) != 1u) return 0u;
     uint va = gNext[gP.vvPairs + 2u * p];
     uint vb = gNext[gP.vvPairs + 2u * p + 1u];
+    // A pair of a vehicle excluded through this pass is today's front's (more than one pass
+    // left: the first plan's decision takes one). A vehicle excluded at the build and back:
+    // its pairs are not listed, a build.
+    uint xa = gNext[fkVeh(va)];
+    uint xb = gNext[fkVeh(vb)];
+    if ((xa & 0xFFFFu) > 1u || (xb & 0xFFFFu) > 1u) return 0u;
+    if (((xa | xb) & FK_V_AT_BUILD) != 0u) return 4u;
     uint code = max(fkVehicleCheck(va), fkVehicleCheck(vb));
     if (code == 5u) return 5u;
     // Covered by the build, each way; near when a point of either was within FK_FAR of a
@@ -1001,7 +1025,14 @@ uint fkPairCheck(uint p)
     if (bb >= 0x7F800000u) return 5u;
     // (Measurement: the largest of the pass.)
     gAcc[fkAccCtl(3u)].max(int(bb));
-    return bb > asuint(limit) ? 3u : code;
+    if (bb > asuint(limit))
+    {
+        // (Both vehicles marked: the culprits, if the first plan excludes them.)
+        gNext[fkVeh(va)] = gNext[fkVeh(va)] | FK_V_BETWEEN;
+        gNext[fkVeh(vb)] = gNext[fkVeh(vb)] | FK_V_BETWEEN;
+        return 3u;
+    }
+    return code;
 }
 
 // The first plan's decision of the pass (every lane; uniform): the mode, with a build's
@@ -1013,15 +1044,29 @@ void fkCheck(uint lane)
     uint epoch = gNext[fkCtl(FK_EPOCH)];
     uint code = 0u;
     uint pairs = gNext[flAdjFirst(nv)] / 2u;
-    for (uint p = lane, pStop = EB_END(p, pairs, LANES); p < pStop; p += LANES) code = max(code, fkPairCheck(p));
+    bool cover = false;
+    for (uint p = lane, pStop = EB_END(p, pairs, LANES); p < pStop; p += LANES)
+    {
+        uint pc = fkPairCheck(p);
+        if (pc == 4u) cover = true;
+        code = max(code, pc);
+    }
     // (Another path's list in an owner's region: the kept one is gone.)
     for (uint v = lane, vStop = EB_END(v, nv, LANES); v < vStop; v += LANES)
     {
-        if (gNext[vvTriPairsAt(v)] != FK_MAGIC || gNext[vvTriPairsAt(v) + 1u] != epoch) code = max(code, 4u);
+        if ((gNext[fkVeh(v)] & 0xFFFFu) <= 1u && (gNext[vvTriPairsAt(v)] != FK_MAGIC || gNext[vvTriPairsAt(v) + 1u] != epoch))
+        {
+            code = max(code, 4u);
+            cover = true;
+        }
+        // (A node too fast for a build's allowances, any vehicle's, excluded or not: no
+        // build this pass, its padded gather would not hold every pair.)
+        if (fkVehicleCheck(v) == 5u) code = 5u;
         // (Measurement: the vehicles' largest bounds of the pass.)
         gAcc[fkAccCtl(1u)].max(max(gAcc[fkAcc(v, FK_DEV)].load(), gAcc[fkAcc(v, FK_DEV + 2u)].load()));
     }
     if (code != 0u) gAcc[fkAccCtl(0u)].max(int(code));
+    if (cover) gAcc[fkAccCtl(2u)].store(1);
 }
 // … and after a barrier.
 uint fkDecide(uint lane)
@@ -1030,25 +1075,34 @@ uint fkDecide(uint lane)
     uint epoch = gNext[fkCtl(FK_EPOCH)];
     uint pairs = gNext[flAdjFirst(nv)] / 2u;
     uint mode = FK_OFF;
+    uint exclude = 0u;
     if (lane == 0u)
     {
         uint c = uint(gAcc[fkAccCtl(0u)].load());
         gAcc[fkAccCtl(0u)].store(0);
+        bool cover = gAcc[fkAccCtl(2u)].load() != 0;
+        gAcc[fkAccCtl(2u)].store(0);
         uint wait = fkWaitLeft();
         if (gNext[flPrefixAt(0u, nv)] != 0u)
         {
+            uint built = gNext[fkCtl(FK_VALID)];
+            bool valid = built != 0u;
+            bool motion = c == 1u || c == 2u || c == 3u || c == 5u;
+            // A list that lasted fewer than FK_SHORT passes, or a node too fast for a build:
+            // the vehicles past their allowances (the culprits) are excluded for
+            // FK_THRASH_WAIT passes, their pairs on today's front, and every other vehicle
+            // keeps its pairs. (Choices of path alone: today's front is exact; FK_VALID
+            // holds the pass of the list's build.)
+            bool shortLived = valid && gNext[fkCtl(FK_PASS)] - built < FK_SHORT;
             if (wait != 0u) gNext[fkCtl(FK_WAIT)] -= 1u;
-            else if (c == 0u && gNext[fkCtl(FK_VALID)] != 0u) mode = FK_REUSE;
-            else if (c < 5u)
+            else if (motion && (c == 5u || shortLived))
             {
-                // A list that lasted fewer than FK_SHORT passes (wild nodes, tumbling cars:
-                // a build every few passes costs more than today's front): today's path for
-                // the next FK_THRASH_WAIT passes instead of another build. (A choice of path
-                // alone: today's front is exact; FK_VALID holds the pass of the list's build.)
-                uint built = gNext[fkCtl(FK_VALID)];
-                if (built != 0u && gNext[fkCtl(FK_PASS)] - built < FK_SHORT) gNext[fkCtl(FK_WAIT)] = (gNext[fkCtl(FK_WAIT)] & 0xFFFF0000u) | FK_THRASH_WAIT;
-                else mode = FK_BUILD;
+                exclude = 1u;
+                if (valid && !cover) mode = FK_REUSE;
+                else if (c < 5u) mode = FK_BUILD;
             }
+            else if (c == 0u && valid) mode = FK_REUSE;
+            else if (c < 5u) mode = FK_BUILD;
             // (Measurement, of builds that end a list: the largest node bound at one for a
             // node's motion; at one for two vehicles', their bound, in the same word.)
             bool had = gNext[fkCtl(FK_VALID)] != 0u && gNext[fkCtl(FK_REUSED)] != 0u;
@@ -1062,14 +1116,24 @@ uint fkDecide(uint lane)
         gAcc[fkAccCtl(3u)].store(0);
         gNext[fkCtl(FK_PASS)] += 1u;
     }
-    if (lane == 0u) gsUniformLanes = mode;
+    if (lane == 0u) gsUniformLanes = mode | (exclude << 8u);
     sync();
-    mode = gsUniformLanes;
+    mode = gsUniformLanes & 255u;
+    exclude = gsUniformLanes >> 8u;
     // Each vehicle's reference motion of the next pass: its tracked nodes' mean motion of
     // this one plus its change over this pass; from a build, whose records are this pass's
     // positions, that change alone. The pass's bounds and sums back to zero.
     for (uint v = lane, vStop = EB_END(v, nv, LANES); v < vStop; v += LANES)
     {
+        // Its exclusion: a pass less, or the passes of a culprit's (its bounds before they
+        // go back to zero below, or a pair of it past the allowance between vehicles).
+        uint st = gNext[fkVeh(v)];
+        uint left = st & 0xFFFFu;
+        if (left != 0u) left -= 1u;
+        if (exclude != 0u && (fkVehicleCheck(v) != 0u || (st & FK_V_BETWEEN) != 0u)) left = max(left, FK_THRASH_WAIT);
+        // (Excluded: its list is not kept on its return, a build then.)
+        gNext[fkVeh(v)] = (st & ~(0xFFFFu | FK_V_BETWEEN)) | left | (left != 0u ? FK_V_AT_BUILD : 0u);
+        if (left != 0u) gAcc[fkAccCtl(2u)].add(1);
         float visits = float(max(fkSampled(v), 1u)) * 4096.0;
         float3 mean = float3(float(gAcc[fkAcc(v, FK_SUM)].load()), float(gAcc[fkAcc(v, FK_SUM + 1u)].load()), float(gAcc[fkAcc(v, FK_SUM + 2u)].load())) / visits;
         float3 delta = mean - asfloat(uint3(gNext[fkMean(v, 3u)], gNext[fkMean(v, 4u)], gNext[fkMean(v, 5u)]));
@@ -1086,6 +1150,17 @@ uint fkDecide(uint lane)
         for (uint w = 0u; w < 4u; w++) gAcc[fkAcc(v, w)].store(0);
         for (uint w = 0u; w < 3u; w++) gAcc[fkAcc(v, FK_SUM + w)].store(0);
     }
+    sync();
+    // A pass that reuses the list with a vehicle excluded: today's front, inline, for its
+    // pairs (FK_MIX).
+    if (lane == 0u)
+    {
+        if (mode == FK_REUSE && gAcc[fkAccCtl(2u)].load() != 0) mode = FK_MIX;
+        gAcc[fkAccCtl(2u)].store(0);
+        gsUniformLanes = mode;
+    }
+    sync();
+    mode = gsUniformLanes;
     if (mode == FK_BUILD)
     {
         if (lane == 0u) gsUniformOpen = 0u;
@@ -1119,8 +1194,10 @@ uint fkDecide(uint lane)
             for (uint w = 0u; w < 6u; w++) gAcc[fkAcc(v, FK_WILD_BOX + w)].store(w < 3u ? VV_INT_MAX : VV_INT_MIN);
             gNext[vvTriPairsAt(v)] = FK_MAGIC;
             gNext[vvTriPairsAt(v) + 1u] = epoch + 1u;
+            // (Excluded now: none of its pairs is listed; back later, a build.)
+            uint st = gNext[fkVeh(v)];
+            gNext[fkVeh(v)] = (st & ~FK_V_AT_BUILD) | ((st & 0xFFFFu) != 0u ? FK_V_AT_BUILD : 0u);
         }
-        if (lane == 0u) gAcc[fkAccCtl(2u)].store(0);
         if (tooMany) gsUniformOpen = 1u;
         // The fastest relative motion of two partners over the last pass (their reference
         // motions at a build are that pass's mean motions): the list's allowance for it.
@@ -1150,7 +1227,7 @@ uint fkDecide(uint lane)
     if (lane == 0u)
     {
         gNext[fkCtl(FK_MODE)] = mode;
-        if (mode == FK_REUSE) gNext[fkCtl(FK_REUSED)] += 1u;
+        if (mode == FK_REUSE || mode == FK_MIX) gNext[fkCtl(FK_REUSED)] += 1u;
         if (mode == FK_OFF && gNext[flPrefixAt(0u, nv)] != 0u) gNext[fkCtl(FK_FELL)] += 1u;
     }
     return mode;
@@ -1165,6 +1242,9 @@ uint fkDecide(uint lane)
 void fkPairTry(uint va, uint gt, uint h)
 {
     if (gNext[fkListed(gt)] == 0u) return;
+    // (A kept pair of an excluded vehicle, in a pass that reuses the list: today's front
+    // tests it. A build's tests, in the walk's own boxes, test every pair.)
+    if (fkMode() != FK_BUILD && (fkExcluded(va) || fkExcluded(gStatic[gP.nodeInfoBase + h].w))) return;
     uint own = flOwn(va);
     uint offered = uint(gAcc[own + FL_OFFERED].load());
     if (offered == 0u) return;
@@ -1218,6 +1298,8 @@ void fkTest(uint tid)
     uint nv = gP.vehicles;
     if (tid >= gNext[fkPrefix(nv)]) return;
     uint va = flFind(FK_ROW_PAIRS, tid);
+    // (An excluded owner: its region may hold today's listed pairs, not its kept list.)
+    if (fkExcluded(va)) return;
     uint at = vvTriPairsAt(va) + 2u * (1u + tid - gNext[fkPrefix(va)]);
     fkPairTry(va, gNext[at], gNext[at + 1u]);
 }
@@ -1273,7 +1355,7 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
     float pad = (wildNear ? padW : padC) + FK_FAR;
     if (test)
     {
-        // A build past an owner's room (FK_OVER): this pass's tests. Their cells are those
+        // A build's tests (every pair, of excluded vehicles too). Their cells are those
         // of the walk's own box (vvTriangleCandsList's: the triangle's box grown by its
         // range, its travel, the fastest candidate's travel and CLIP_DEPTH; room for the
         // two boxes' rounding), not the build's padded one: every pair today's walk lists
@@ -1285,8 +1367,8 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
         pad = asfloat(gStatic[va * 4u + 3u].z) + nf(nf(travel + smul(vmax, STEP)) + CLIP_DEPTH) + 0.002
               + 4.0e-6 * max(m3.x, max(m3.y, m3.z));
     }
-    // (A build whose list is void, an owner past its room: no more listing.)
-    else if (gAcc[fkAccCtl(2u)].load() != 0) return;
+    // (An owner excluded, or past its room: no listing; its pairs are today's front's.)
+    else if (fkExcluded(va) || uint(gAcc[fkAcc(va, FK_PAIRS)].load()) >= FK_CAP) return;
     uint nearDone = 0xFFFFFFFFu;
     float3 lo = tlo - float3(pad, pad, pad);
     float3 hi = thi + float3(pad, pad, pad);
@@ -1301,6 +1383,8 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
         for (uint e = sub, eStop = EB_END(e, cands, subs); e < eStop; e += subs)
         {
             float4 E = gBeams[run + e];
+            // (A candidate of an excluded vehicle: not listed, not near.)
+            if (!test && fkExcluded(gStatic[gP.nodeInfoBase + asuint(E.w)].w)) continue;
             float ph = fkWild(gBeams[fkRef(asuint(E.w))]) ? padW : padC;
             float pf = ph + FK_FAR;
             if (any(E.xyz < tlo - float3(pf, pf, pf)) || any(E.xyz > thi + float3(pf, pf, pf))) continue;
@@ -1317,11 +1401,7 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
                 gNext[at + 2u * (n + 1u)] = gt;
                 gNext[at + 2u * (n + 1u) + 1u] = asuint(E.w);
             }
-            else
-            {
-                gAcc[fkAccCtl(2u)].store(1);
-                return;
-            }
+            else return;
         }
         return;
     }
@@ -1342,6 +1422,8 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
             EB_PASS(eGuard);
             float4 E = gBeams[sorted + e];
             if (any(int3(floor(E.xyz * FK_PER_CELL)) != cc)) continue;
+            // (A candidate of an excluded vehicle: not listed, not near.)
+            if (!test && fkExcluded(gStatic[gP.nodeInfoBase + asuint(E.w)].w)) continue;
             float ph = fkWild(gBeams[fkRef(asuint(E.w))]) ? padW : padC;
             float pf = ph + FK_FAR;
             if (any(E.xyz < tlo - float3(pf, pf, pf)) || any(E.xyz > thi + float3(pf, pf, pf))) continue;
@@ -1358,11 +1440,7 @@ void fkWalk(uint gt, uint sub, uint subs, bool test)
                 gNext[at + 2u * (n + 1u)] = gt;
                 gNext[at + 2u * (n + 1u) + 1u] = asuint(E.w);
             }
-            else
-            {
-                gAcc[fkAccCtl(2u)].store(1);
-                return;
-            }
+            else return;
         }
     }
 }
@@ -1503,6 +1581,8 @@ void fleetPlan(uint lane, uint word)
                 sort = 0u;
                 on = 0u;
             }
+            // (Mixed: the kept pairs' tests and today's front for the excluded vehicles' pairs.)
+            if (mode == FK_MIX) grids = max(grids, flWorkgroups(gNext[fkPrefix(nv)]));
             if (mode == FK_BUILD) sort = flWorkgroups(gNext[fkRun(nv)]);
             gArgs[FL_ARGS_ELEMENTS] = any * flWorkgroups(max(max(gP.totalTris, gNext[flPrefixAt(4u, nv)]), mode == FK_BUILD ? gP.totalNodes : 0u));
             gArgs[FL_ARGS_ELEMENTS + 1u] = 1u;
@@ -1526,8 +1606,7 @@ void fleetPlan(uint lane, uint word)
     uint mode = splitUniform(lane, fkMode());
     if (mode == FK_BUILD && (word & SPLIT_TESTS) != 0u)
     {
-        // (The listed triangles' prefix, as today's front has it: a build past an owner's
-        // room walks its tests over them.)
+        // (The listed triangles' prefix, as today's front has it: a build's tests walk them.)
         flPrefix(1u, FL_LISTED, lane);
         if (lane == 0u)
         {
@@ -1535,16 +1614,8 @@ void fleetPlan(uint lane, uint word)
             uint any = 0u;
             for (uint v = 0u, vStop = EB_END(v, nv, 1u); v < vStop; v++) any += fkCands(v);
             uint subs = clamp(FL_WALK_THREADS / max(gP.totalTris, 1u), 1u, 64u);
-            // A build that would be past an owner's room again: the candidates of the last
-            // build past it (FK_SUBS above its 7 bits), and no fewer now. No listing (the
-            // list would be void): the pass goes as one past the room, its tests in the
-            // walk's own boxes. (A choice of path alone: those tests are exact either way;
-            // repeated, a pile's every build attempt listed 32,767 pairs to throw away.)
-            uint over = gNext[fkCtl(FK_SUBS)] >> 7u;
-            bool skip = over != 0u && any >= over;
-            if (skip) gAcc[fkAccCtl(2u)].store(1);
-            gNext[fkCtl(FK_SUBS)] = subs | (over << 7u);
-            gArgs2[FL_ARGS2_WALK] = any != 0u && !skip ? flWorkgroups(gP.totalTris * subs) : 0u;
+            gNext[fkCtl(FK_SUBS)] = subs;
+            gArgs2[FL_ARGS2_WALK] = any != 0u ? flWorkgroups(gP.totalTris * subs) : 0u;
             gArgs2[FL_ARGS2_WALK + 1u] = 1u;
             gArgs2[FL_ARGS2_WALK + 2u] = 1u;
         }
@@ -1553,37 +1624,38 @@ void fleetPlan(uint lane, uint word)
     if (mode == FK_BUILD)
     {
         flPrefix(FK_ROW_PAIRS, FK_W_PAIRS, lane);
+        // An owner past its room: excluded (its list void, not counted in the prefix), for
+        // FK_BACKOFF passes doubled for each such build of it in a row (to 16 times); the
+        // others keep theirs. An owner within its room: its streak back to none.
+        for (uint v = lane, vStop = EB_END(v, nv, LANES); v < vStop; v += LANES)
+        {
+            uint st = gNext[fkVeh(v)];
+            uint streak = (st >> 16u) & 15u;
+            if (uint(gAcc[fkAcc(v, FK_PAIRS)].load()) > FK_CAP)
+            {
+                uint left = max(st & 0xFFFFu, FK_BACKOFF << min(streak, 4u));
+                gNext[fkVeh(v)] = (st & ~(0xFFFFu | (15u << 16u))) | FK_V_AT_BUILD | (min(streak + 1u, 4u) << 16u) | left;
+            }
+            else if ((st & 0xFFFFu) == 0u) gNext[fkVeh(v)] = st & ~(15u << 16u);
+        }
         if (lane == 0u)
         {
             uint most = 0u;
             for (uint v = 0u, vStop = EB_END(v, nv, 1u); v < vStop; v++) most = max(most, uint(gAcc[fkAcc(v, FK_PAIRS)].load()));
             uint total = gNext[fkPrefix(nv)];
             gNext[fkCtl(FK_MOST)] = max(gNext[fkCtl(FK_MOST)], most);
-            uint cands = 0u;
-            for (uint v = 0u, vStop = EB_END(v, nv, 1u); v < vStop; v++) cands += fkCands(v);
-            uint subs = gNext[fkCtl(FK_SUBS)] & 127u;
-            if (most > FK_CAP || gAcc[fkAccCtl(2u)].load() != 0)
-            {
-                gNext[fkCtl(FK_MODE)] = FK_OVER;
-                fkBackoff();
-                // (Its tests: each listed triangle in parts, as today's walk: FK_SUBS's low
-                // bits now the parts. The candidates this time above them: the next build
-                // with no fewer skips its listing.)
-                uint listed = gNext[flPrefixAt(1u, nv)];
-                uint parts = clamp(FL_WALK_THREADS / max(listed, 1u), 1u, 64u);
-                total = listed * parts;
-                gNext[fkCtl(FK_SUBS)] = parts | (min(max(cands, 1u), 0x1FFFFFFu) << 7u);
-            }
-            else
-            {
-                gNext[fkCtl(FK_SUBS)] = subs;
-                // (Valid, and the pass it was built in: FK_PASS counts from 1 here.)
-                gNext[fkCtl(FK_VALID)] = max(gNext[fkCtl(FK_PASS)], 1u);
-                gNext[fkCtl(FK_WAIT)] = 0u;
-                gNext[fkCtl(FK_BUILDS)] += 1u;
-                gNext[fkCtl(FK_KEPT)] += total;
-            }
-            gArgs2[FL_ARGS2_PAIRS] = flWorkgroups(total);
+            // (Valid, and the pass it was built in: FK_PASS counts from 1 here.)
+            gNext[fkCtl(FK_VALID)] = max(gNext[fkCtl(FK_PASS)], 1u);
+            gNext[fkCtl(FK_WAIT)] = 0u;
+            gNext[fkCtl(FK_BUILDS)] += 1u;
+            gNext[fkCtl(FK_KEPT)] += total;
+            // This pass's tests: each listed triangle in parts, in the walk's own boxes over
+            // the build's candidates (every pair, of excluded vehicles too); FK_SUBS now the
+            // parts.
+            uint listed = gNext[flPrefixAt(1u, nv)];
+            uint parts = clamp(FL_WALK_THREADS / max(listed, 1u), 1u, 64u);
+            gNext[fkCtl(FK_SUBS)] = parts;
+            gArgs2[FL_ARGS2_PAIRS] = flWorkgroups(listed * parts);
             gArgs2[FL_ARGS2_PAIRS + 1u] = 1u;
             gArgs2[FL_ARGS2_PAIRS + 2u] = 1u;
         }
@@ -1651,20 +1723,20 @@ void fleetWideTests(uint g, uint lane, uint word)
             fkTest(tid);
             return;
         }
+        if ((packed >> 30) == FK_MIX) fkTest(tid);
         if ((packed & 0x3FFFFFFFu) != 0u) flOffsets(g, lane);
         return;
     }
     uint listed = gNext[flPrefixAt(1u, nv)];
     {
         uint mode = fkMode();
-        if (mode == FK_BUILD || mode == FK_OVER)
+        if (mode == FK_BUILD)
         {
             if ((word & SPLIT_LEVELS) == 0u)
             {
                 uint subs = gNext[fkCtl(FK_SUBS)] & 127u;
                 if (subs != 0u && tid < gP.totalTris * subs) fkWalk(tid / subs, tid % subs, subs, false);
             }
-            else if (mode == FK_BUILD) fkTest(tid);
             else
             {
                 // (Past an owner's room: listed triangle q's part, as flWalk.)
@@ -1675,6 +1747,20 @@ void fleetWideTests(uint g, uint lane, uint word)
                 uint triOff = gStatic[va * 4u + 1u].x;
                 fkWalk(triOff + gNext[vvTestedAt(triOff + q - gNext[flPrefixAt(1u, va)])], tid % subs, subs, true);
             }
+            return;
+        }
+        if (mode == FK_MIX && (word & SPLIT_LEVELS) == 0u)
+        {
+            // (Mixed: today's walk for the excluded vehicles' pairs.)
+            uint subs = gNext[flCtlNext(0u)];
+            if (subs == 0u || tid >= listed * subs) return;
+            uint q = tid / subs;
+            uint va = flFind(1u, q);
+            // (An excluded owner's pair region is today's front's while it is excluded:
+            // its walk lists, its pairs are tested in the listed pairs' dispatch. Another
+            // owner's holds its kept list: its excluded partners' pairs are tested inline.)
+            if (fkExcluded(va)) flWalk(va, q - gNext[flPrefixAt(1u, va)], tid % subs, subs);
+            else if (flCands(va) != 0u) flWalkInline(va, q - gNext[flPrefixAt(1u, va)], tid % subs, subs);
             return;
         }
     }
