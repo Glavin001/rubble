@@ -1241,7 +1241,7 @@ impl Bench {
                     .ok_or_else(|| anyhow::anyhow!("vehicle lab: pick needs a direction"))?
                     .normalize();
                 let (target, on) = self.pick(o, d);
-                // On the mountain a camera above the canyon's lid (not drawn) launches from
+                // On the mountain a camera beyond a canyon wall's undrawn part launches from
                 // where the view ray leaves it, so the shot is not stopped by it.
                 let o = match self.mountain_ray(o, d).1 {
                     Some(t) if f64::from(t) + 0.3 < (target - o).length() => o + (d * (t + 0.3)).as_dvec3(),

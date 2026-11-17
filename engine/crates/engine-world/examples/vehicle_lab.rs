@@ -756,19 +756,21 @@ fn beam_census(template: &ExplicitBeams) {
     );
 }
 
-const TRACE_HEADER: &str = "t,cx,cy,cz,s,n_com,n_top,n_low,x_lo,x_hi,ground,speed,wx,wy,wz,w,lid_gap,vx,vy,vz,lx,ly,lz\n";
+const TRACE_HEADER: &str = "t,cx,cy,cz,s,n_com,n_top,n_low,x_lo,x_hi,ground,speed,wx,wy,wz,w,lid_gap,vx,vy,vz,lx,ly,lz,fleet_top,fleet_x,fleet_vn\n";
 
 /// One `--trace` row for a car: the time; its centre of mass (world); its arc `s` down the
 /// fall line and its height `n_com` over the fall line along the slope's normal; its
 /// highest and lowest nodes' heights over the line (`n_top`, `n_low`); its nodes' extent
 /// across the canyon (`x_lo`, `x_hi`); the drawn ground's distance under the centre
 /// along the normal; its centre's speed; its angular velocity about the centre of mass
-/// (rad/s, `ω = I⁻¹ L` from every node's mass); the gap between its highest node and
-/// the canyon lid's underside (`LID_UP − 0.5` over the line on the slope; none on the
-/// plateau); then the centre's velocity and the angular momentum `L` about the centre
+/// (rad/s, `ω = I⁻¹ L` from every node's mass); `lid_gap`, the gap between its highest
+/// node and the drawn walls' top (`WALL_DRAWN_TOP`, 13 m over the line, where the
+/// canyon's lid was until 2026-11-17; none on the plateau); then the centre's velocity and the angular momentum `L` about the centre
 /// (kg m²/s). In free flight `L` stays (only air drag acts) while `|ω|` may not: a
 /// tumbling body hands its spin between axes. Step to step, `Δv/dt − g` and `ΔL/dt` are
-/// the contact force per kg and the contact torque: a touch shows in them.
+/// the contact force per kg and the contact torque: a touch shows in them. (The caller
+/// appends the fleet's highest node over the fall line, its widest |x| and its fastest
+/// node away from the slope.)
 fn trace_row(out: &mut String, lab: &Lab, template: &ExplicitBeams, p: &[Vec3], v: &[Vec3]) {
     use glam::{DMat3, DVec3};
     let spec = lab.bench.opts.mountain;
@@ -809,7 +811,7 @@ fn trace_row(out: &mut String, lab: &Lab, template: &ExplicitBeams, p: &[Vec3], 
     let w = i.inverse() * l;
     let ground = lab.bench.mountain_ray(c, (-up).as_vec3()).0.map_or(f64::NAN, f64::from);
     let s = c.dot(along);
-    let lid = if s > 0.0 { f64::from(rubble::vehicle_lab::mountain::LID_UP) - 0.5 - top } else { f64::NAN };
+    let lid = if s > 0.0 { f64::from(rubble::vehicle_lab::mountain::WALL_DRAWN_TOP) - top } else { f64::NAN };
     out.push_str(&format!(
         "{:.4},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4},{:.3},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2}\n",
         lab.bench.t, c.x, c.y, c.z, s, c.dot(up), top, low, xlo, xhi, ground, vc.length(), w.x, w.y, w.z, w.length(), lid,
@@ -1200,6 +1202,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     // `--trace FILE`: a CSV row a World step of the first car's rigid motion (see
     // `trace_row`): its spin, its height over the fall line and what it can touch.
     let mut trace = arg("--trace").map(|_| String::from(TRACE_HEADER));
+    let mut escaped: Vec<usize> = Vec::new();
     let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |d| {
         d.gpu_timing = match timing.as_deref() {
             Some("phases") => GpuTiming::Phases,
@@ -2573,7 +2576,42 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         }
         lab.read_blocking(&world, k % 6 == 5)?;
         if let (Some(tr), Some(x)) = (trace.as_mut(), world.explicit_vehicles()) {
-            trace_row(tr, &lab, template, &x.positions()[0], &x.velocities()[0]);
+            let (ps, vs) = (x.positions(), x.velocities());
+            trace_row(tr, &lab, template, &ps[0], &vs[0]);
+            // The fleet's every node (debris included): the highest over the fall line,
+            // the farthest across, and the fastest away from the slope.
+            let th = f64::from(lab.bench.opts.mountain.steepness).to_radians();
+            let up = glam::DVec3::new(0.0, th.cos(), th.sin());
+            let (mut top, mut wide, mut vn) = (f64::MIN, 0.0f64, f64::MIN);
+            for (p, v) in ps.iter().flatten().zip(vs.iter().flatten()) {
+                top = top.max(p.as_dvec3().dot(up));
+                wide = wide.max(f64::from(p.x.abs()));
+                vn = vn.max(v.as_dvec3().dot(up));
+            }
+            // (A node past a wall's inner face: where, the first time each car has one.)
+            for (car, (p, v)) in ps.iter().zip(&vs).enumerate() {
+                if escaped.contains(&car) {
+                    continue;
+                }
+                // (Or under the ground: deeper than the slabs under the fall line.)
+                if let Some(i) = p.iter().position(|q| q.x.abs() > 18.5 || q.as_dvec3().dot(up) < -6.0) {
+                    escaped.push(car);
+                    let along = glam::DVec3::new(0.0, -th.sin(), th.cos());
+                    let q = p[i].as_dvec3();
+                    println!(
+                        "   escape: t {:.3} car {car} node {i} at x {:.2}, {:.2} m over the line, {:.1} m along; v {:?}; its car's median node x {:.1}, {:.1} m along",
+                        lab.bench.t, q.x, q.dot(up), q.dot(along), v[i], p[p.len() / 2].x, p[p.len() / 2].as_dvec3().dot(along)
+                    );
+                }
+            }
+            tr.pop();
+            tr.push_str(&format!(",{top:.3},{wide:.3},{vn:.3}\n"));
+            // (Written every second as well: a run that stops early keeps its trace.)
+            if k % 60 == 59 {
+                if let Some(path) = arg("--trace") {
+                    std::fs::write(path, tr.as_str())?;
+                }
+            }
         }
         anyhow::ensure!(
             !lab.bench.car.non_finite,

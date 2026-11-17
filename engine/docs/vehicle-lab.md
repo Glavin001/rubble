@@ -128,7 +128,7 @@ So that every lab car of one template has one layout, the arena's ramp and kerb 
 
 Both terrains:
 
-- **Shooting on the mountain.** The launcher panel shows in Mountain mode, and a click (or `F`) fires as in Shoot. The pick meets the car's skin, else the mountain's drawn rock (its boxes and spheres, `MountainSpec::ray`), else the air beside the car. The canyon's lid is not drawn, so a shot from a camera above it starts where the view ray leaves it. A shot is removed 30 s after it is fired (`MOUNTAIN_SHOT_TTL`): one that missed rolls on down without end. The page's stability stop keeps only its non-finite check in Mountain mode, since shots put energy into the cars.
+- **Shooting on the mountain.** The launcher panel shows in Mountain mode, and a click (or `F`) fires as in Shoot. The pick meets the car's skin, else the mountain's drawn rock (its boxes and spheres, `MountainSpec::ray`), else the air beside the car. The canyon has no ceiling; its walls go on undrawn above their drawn rock to 500 m over the fall line (`WALL_TOP`), so nothing thrown up leaves it, and a shot from a camera beyond a wall starts where the view ray leaves the wall. A shot is removed 30 s after it is fired (`MOUNTAIN_SHOT_TTL`): one that missed rolls on down without end. The page's stability stop keeps only its non-finite check in Mountain mode, since shots put energy into the cars.
 
 Chunks are made 8 ahead of the car's chunk (192 m, beyond the fog) and removed 2 behind, at most one new chunk per step.
 

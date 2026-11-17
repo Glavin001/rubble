@@ -138,10 +138,17 @@ pub struct MountainChunk {
 /// Spike hulls in the palette.
 pub const PALETTE: usize = 12;
 const SLAB: f32 = 3.0;
-/// The canyon's lid: its height above the chunk's line (the walls' tops, m), and its
-/// shapes' tag (a density no rock has: a page draws nothing for it).
-pub const LID_UP: f32 = 13.5;
-pub const LID_TAG: f32 = 1.0;
+/// The canyon walls' drawn rock: its top over the chunk's line (m).
+pub const WALL_DRAWN_TOP: f32 = 13.0;
+/// The canyon walls' full height over the chunk's line (m): above the drawn rock each
+/// wall goes on, undrawn, to here. There is no ceiling: a car or a part thrown up comes
+/// back down between the walls. To clear a wall a body would have to leave the slope at
+/// `sqrt(2 g cos θ (WALL_TOP − h))` along its normal: on the steepest slope (60°) from
+/// 5 m over the line, 70 m/s (250 km/h).
+pub const WALL_TOP: f32 = 500.0;
+/// An undrawn collider's tag (a density no rock has: the scene renderer draws nothing
+/// of density 0.5–1.5).
+pub const UNDRAWN_TAG: f32 = 1.0;
 /// Rolling: the flat bed's share of the width, the banks' rise to the walls (degrees), a
 /// profile segment's length (m) and the lowest local slope the swell may make (degrees:
 /// over the rock's kinetic friction angle, 37°, so a sliding car keeps sliding).
@@ -387,11 +394,10 @@ impl MountainSpec {
             });
             segs.push((a, b, rot, normal, len));
         }
-        // The canyon walls, along the chunk's own line, and the lid: a slab across the
-        // canyon on top of its walls (LID_UP m above the chunk's line), so that nothing
-        // thrown up in a crash leaves the canyon. A part over a wall had no ground and fell
-        // without end (past 1,000 km/h within a run).
-        self.walls_and_lid(&mut shapes);
+        // The canyon walls, along the chunk's own line, WALL_TOP m tall, so that nothing
+        // thrown up in a crash leaves the canyon: a part over a wall had no ground and
+        // fell without end (past 1,000 km/h within a run).
+        self.walls(&mut shapes);
         // Rocks on the slabs.
         let mut r = Rng::new(self.seed, k, 2);
         let total: f32 = segs.iter().map(|s| s.4).sum();
@@ -469,40 +475,45 @@ impl MountainSpec {
         }
     }
 
-    /// The canyon's walls and lid along chunk `k`'s own line (both terrains).
-    fn walls_and_lid(&self, shapes: &mut Vec<MountainShape>) {
+    /// The canyon's walls along chunk `k`'s own line (both terrains): the drawn rock to
+    /// [`WALL_DRAWN_TOP`] over the line, then an undrawn slab on it to [`WALL_TOP`]. No
+    /// ceiling: until 2026-11-17 a lid closed the canyon 13 m over the line, and a car
+    /// that bounced that high met an invisible ceiling that stopped its tumbling in
+    /// mid-air.
+    fn walls(&self, shapes: &mut Vec<MountainShape>) {
         let (l, w) = (self.chunk, self.width);
         let t = self.theta() as f32;
         let rot = Quat::from_rotation_x(t);
         let mid = Vec3::new(0.0, -0.5 * l * t.sin(), 0.5 * l * t.cos());
+        let half_len = 0.5 * l + 0.5;
+        // (The drawn rock: 18 m along the normal, from 5 m under the line.)
+        let drawn = 9.0;
+        let up = 0.5 * (WALL_TOP - WALL_DRAWN_TOP);
         for side in [-1.0f32, 1.0] {
+            let x = Vec3::new(side * (0.5 * w + 1.5), 0.0, 0.0);
             shapes.push(MountainShape {
                 geom: RockGeom::Box {
-                    half: Vec3::new(1.5, 9.0, 0.5 * l + 0.5),
+                    half: Vec3::new(1.5, drawn, half_len),
                 },
-                pos: mid
-                    + Vec3::new(side * (0.5 * w + 1.5), 0.0, 0.0)
-                    + rot * Vec3::new(0.0, 4.0, 0.0),
+                pos: mid + x + rot * Vec3::new(0.0, WALL_DRAWN_TOP - drawn, 0.0),
                 rot,
                 tag: 2400.0,
                 loose: false,
             });
-        }
-        if std::env::var("LAB_NO_LID").is_err() {
             shapes.push(MountainShape {
                 geom: RockGeom::Box {
-                    half: Vec3::new(0.5 * w + 3.0, 0.5, 0.5 * l + 0.5),
+                    half: Vec3::new(1.5, up, half_len),
                 },
-                pos: mid + rot * Vec3::new(0.0, LID_UP, 0.0),
+                pos: mid + x + rot * Vec3::new(0.0, WALL_DRAWN_TOP + up, 0.0),
                 rot,
-                tag: LID_TAG,
+                tag: UNDRAWN_TAG,
                 loose: false,
             });
         }
     }
 
     /// Rolling: chunk `k`'s shapes (k ≥ 0), in its frame. Per profile segment a bed slab
-    /// and two bank slabs hinged on its edges; the walls and lid; then humps, boulders,
+    /// and two bank slabs hinged on its edges; the walls; then humps, boulders,
     /// crags on the banks and loose rocks, from the chunk's own stream.
     fn rolling_shapes(&self, k: i64) -> Vec<MountainShape> {
         let w = self.width;
@@ -547,7 +558,7 @@ impl MountainSpec {
             }
             segs.push((a, b, rot, normal, len));
         }
-        self.walls_and_lid(&mut shapes);
+        self.walls(&mut shapes);
         let total: f32 = segs.iter().map(|s| s.4).sum();
         let mut r = Rng::new(self.seed, k, 3);
         // A point on the ground: `at` m along the chunk's profile, `x` across (on a bank
@@ -647,7 +658,8 @@ impl MountainSpec {
 
     /// Where a ray (`o` world, `d` unit) first meets chunk `c`'s drawn shapes (boxes and
     /// spheres; a crag is skipped, the ground behind it is met), and where it leaves the
-    /// chunk's lid (the lid is not drawn: a shot from a camera above it starts under it).
+    /// last undrawn shape it crosses (a wall's undrawn part: a shot from a camera beyond a
+    /// wall starts inside the canyon).
     pub fn ray(&self, c: &MountainChunk, o: DVec3, d: Vec3) -> (Option<f32>, Option<f32>) {
         let (mut hit, mut lid) = (None::<f32>, None::<f32>);
         for s in &c.shapes {
@@ -685,7 +697,7 @@ impl MountainSpec {
             if t1 <= 0.0 {
                 continue;
             }
-            if s.tag == LID_TAG {
+            if s.tag == UNDRAWN_TAG {
                 lid = Some(lid.map_or(t1, |x: f32| x.max(t1)));
             } else if t0 > 0.0 {
                 hit = Some(hit.map_or(t0, |x: f32| x.min(t0)));
@@ -760,23 +772,47 @@ mod tests {
     }
 
     #[test]
-    fn a_ray_down_onto_the_rolling_mountain_meets_its_ground_not_its_lid() {
-        let m = MountainSpec {
-            terrain: Terrain::Rolling,
-            ..Default::default()
-        };
-        let c = m.chunk(3);
-        // From 20 m over the chunk's middle (above the lid), straight down along the normal.
-        let t = m.theta();
-        let up = DVec3::new(0.0, t.cos(), t.sin());
-        let o = m.line(3.5 * f64::from(m.chunk)) + up * 20.0;
-        let (hit, lid) = m.ray(&c, o, (-up).as_vec3());
-        let (hit, lid) = (hit.expect("the ground"), lid.expect("the lid"));
-        assert!(
-            lid > 20.0 - LID_UP - 1.0 && lid < 20.0 - LID_UP + 1.0,
-            "{lid}"
-        );
-        assert!(hit > 17.0 && hit < 23.0, "{hit}");
+    fn the_canyon_has_no_ceiling_and_its_walls_rise_to_wall_top() {
+        for terrain in [Terrain::Rolling, Terrain::Ledges] {
+            let m = MountainSpec {
+                terrain,
+                ..Default::default()
+            };
+            let c = m.chunk(3);
+            let t = m.theta();
+            let up = DVec3::new(0.0, t.cos(), t.sin());
+            let axis = m.line(3.5 * f64::from(m.chunk));
+            // Straight down the normal from far over the canyon's axis: the ground, and
+            // nothing undrawn on the way (no lid).
+            let (hit, undrawn) = m.ray(&c, axis + up * 400.0, (-up).as_vec3());
+            let hit = hit.expect("the ground");
+            assert!(hit > 397.0 && hit < 403.0, "{terrain:?}: {hit}");
+            assert_eq!(undrawn, None, "{terrain:?}: a ceiling over the canyon");
+            // Across the canyon at any height up to the walls' top: a wall on each side,
+            // drawn up to WALL_DRAWN_TOP and undrawn above it.
+            for h in [9.0, 12.0, 14.0, 100.0, f64::from(WALL_TOP) - 1.0] {
+                for side in [-1.0f32, 1.0] {
+                    let (hit, undrawn) = m.ray(&c, axis + up * h, Vec3::new(side, 0.0, 0.0));
+                    if h < f64::from(WALL_DRAWN_TOP) {
+                        let at =
+                            hit.unwrap_or_else(|| panic!("{terrain:?}: no drawn wall {h} m up"));
+                        assert!(
+                            (at - 0.5 * m.width).abs() < 0.5,
+                            "{terrain:?}: {at} m, {h} m up"
+                        );
+                    } else {
+                        assert_eq!(hit, None, "{terrain:?}: drawn rock {h} m up");
+                        // (Where the ray leaves the wall: its far face.)
+                        let out =
+                            undrawn.unwrap_or_else(|| panic!("{terrain:?}: no wall {h} m up"));
+                        assert!(
+                            (out - (0.5 * m.width + 3.0)).abs() < 0.5,
+                            "{terrain:?}: {out} m, {h} m up"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -815,7 +851,13 @@ mod tests {
         let c = m.chunk(400);
         assert!(c.origin.length() > 9000.0);
         for s in &c.shapes {
-            assert!(s.pos.length() < 80.0, "{:?}", s.pos);
+            // (A wall's undrawn part stands halfway up the walls' height.)
+            let reach = if s.tag == UNDRAWN_TAG {
+                0.5 * WALL_TOP + 40.0
+            } else {
+                80.0
+            };
+            assert!(s.pos.length() < reach, "{:?}", s.pos);
         }
         assert_eq!(m.chunk_of(c.origin + DVec3::new(0.0, -1.0, 1.0)), 400);
     }
