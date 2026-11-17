@@ -2066,6 +2066,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 const N: u32 = 10;
                 let mut plain = 0.0;
                 x.restore(&snap);
+                // (AB_PROFILE_A2=M2: with the second measurement word, time only.)
+                let a2: u32 = std::env::var("AB_PROFILE_A2").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                x.set_ablation2(a2);
                 for i in 0..3 + N {
                     let t = std::time::Instant::now();
                     x.frame(34);
@@ -2121,6 +2124,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     }
                     println!("   levels at t {:.1} (each frame's last pass: top: owners/hits by level): {}", lab.bench.t, lines.join("  "));
                 }
+                x.set_ablation2(0);
                 if got == 0 {
                     println!("   profile at t {:.1}: no timestamps, or too many dispatches", lab.bench.t);
                 } else {

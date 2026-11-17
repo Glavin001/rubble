@@ -568,10 +568,16 @@ void memberRest(uint v, uint lane, uint s)
         gsUniformHits = gAcc[hitAcc(v)].load() != 0 ? 1u : 0u;
         gsUniformOpen = 0u;
         gsUniformLanes = r1.y > 0u ? 1u : 0u;
+        // (PERF_SELF_HITS_LOCAL: the hits from workgroup memory.)
+        if (gsUniformLanes != 0u && selfHitsLocalOn(v)) gsUniformHits = 2u;
     }
     sync();
     uint selfOn = gsUniformLanes;
-    if (selfOn != 0u) selfApply(v, true, lane, LANES, lane, origin, asfloat(r3.z), r0.z, r2.z, r2.w, parity);
+    uint hitsOn = gsUniformHits;
+    if (selfOn != 0u && hitsOn == 2u)
+        selfApplyLocalKeep(v, lane, r0.z, r2.z, r2.w, parity);
+    else if (selfOn != 0u)
+        selfApply(v, true, lane, LANES, lane, origin, asfloat(r3.z), r0.z, r2.z, r2.w, parity);
 #ifdef EB_AERO
     uint4 aero2 = gStatic[gP.aeroBase + v * 3u + 2u];
     if (lane == LANES - 1u && (r3.x & FLAG_SLIDES) != 0u) slidePass(aero2.x, aero2.y, SLIDE_FRAME, r2.z, parity);

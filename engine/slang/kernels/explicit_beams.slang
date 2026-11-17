@@ -1648,6 +1648,12 @@ static const uint PERF_HIT_ROLES = 1024u;
 // seven phases on those copies, written back once. The same arithmetic in the same
 // order on the same bits; only where the values wait between phases changes.
 static const uint PERF_HITS_LOCAL = 1048576u;
+// perfFlags bit 33554432 (explicit_plan::PERF_SELF_HITS_LOCAL, with PERF_HIT_ROLES and
+// PERF_HIT_FB): the same on the self-collision split path, where a car's own step is the
+// step dispatch's (a solo car: step k - 1's rest at the next step dispatch's start; a
+// contact group's member: memberRest): selfApplyLocal in place of selfApply for a
+// two-body dissipative car with 1..HITS_LOCAL_CAP hits (selfApplyLocalKeep).
+static const uint PERF_SELF_HITS_LOCAL = 33554432u;
 // perfFlags bit 2097152 (explicit_plan::PERF_TYRE_EARLY, with PERF_TYRE_AHEAD): the
 // wheels' second part loaded before the hits (explicit_beams_drive.slang drvTyreLoad).
 static const uint PERF_TYRE_EARLY = 2097152u;
@@ -6990,7 +6996,13 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (gP.pad2 > 0u)
     {
         uint parityR = (stepBase + gP.pad2 - 1u) & 1u;
-        if (lane == 0u) selfSplitHits(v);
+        if (lane == 0u)
+        {
+            selfSplitHits(v);
+            // (PERF_SELF_HITS_LOCAL: 2, the hits from workgroup memory; uniform after the
+            // barrier below.)
+            if (selfHitsLocalOn(v)) gsUniformHits = 2u;
+        }
 #ifdef EB_ABLATE
         if (selfOn != 0u && !EB_A2(64u))
 #else
@@ -6998,7 +7010,11 @@ void explicit_beams_frame(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
         {
             sync();
-            selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parityR);
+            uint hitsOn = gsUniformHits;
+            if (hitsOn == 2u)
+                selfApplyLocalKeep(v, lane, beamOff, groupOff, groupCount, parityR);
+            else
+                selfApply(v, true, lane, LANES, lane, origin, range, beamOff, groupOff, groupCount, parityR);
         }
         surfaceStep(v, lane, surfOn, parityR);
 #ifdef EB_AERO
@@ -7949,6 +7965,35 @@ void localAdd(uint at, int3 d)
     gsCount[at].add(asuint(d.x));
     gsCount[at + 1u].add(asuint(d.y));
     gsCount[at + 2u].add(asuint(d.z));
+}
+
+void selfApplyLocal(uint v, uint lane, uint beamOff, uint groupOff, uint groupCount, uint parity);
+// PERF_SELF_HITS_LOCAL (lane 0, the step's hit count final): whether vehicle v's hits of
+// this step take selfApplyLocal on the self split path, as the wide hits kernel decides
+// for PERF_HITS_LOCAL (a workgroup of at least 256 lanes: 4 · HITS_LOCAL_CAP items and
+// REUSE_WORDS kept words, a lane each).
+bool selfHitsLocalOn(uint v)
+{
+    if ((gP.perfFlags & PERF_SELF_HITS_LOCAL) == 0u || LANES < 256u) return false;
+    uint hits = uint(gAcc[hitAcc(v)].load());
+    return hits > 0u && hits <= HITS_LOCAL_CAP && hitRolesOn(v);
+}
+// PERF_SELF_HITS_LOCAL, every lane (the caller's choice uniform): selfApplyLocal on the
+// self split path. There gsCount keeps the pair list's state past the buckets
+// (soloStepLoad's REUSE_WORDS words, which the step reads on), and selfApplyLocal's
+// accumulator copies use gsCount's first 4 · HITS_LOCAL_CAP · 6 words: each lane keeps one
+// of those words in a register across it and puts it back. gsTested and gsPairs hold
+// nothing there yet (the step fills them after). Then the device barrier selfApply's
+// callers have after it, and gsUniformHits as selfApply leaves it (1: the caller's
+// selfSplitHits set it).
+void selfApplyLocalKeep(uint v, uint lane, uint beamOff, uint groupOff, uint groupCount, uint parity)
+{
+    uint kept = lane < REUSE_WORDS ? gsCount[GRID_BUCKETS + lane].load() : 0u;
+    GroupMemoryBarrierWithGroupSync();
+    selfApplyLocal(v, lane, beamOff, groupOff, groupCount, parity);
+    sync();
+    if (lane < REUSE_WORDS) gsCount[GRID_BUCKETS + lane].store(kept);
+    if (lane == 0u) gsUniformHits = 1u;
 }
 
 // selfApply for vehicle v with PERF_HITS_LOCAL (the caller checked: hitRolesOn(v), 1..

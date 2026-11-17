@@ -419,6 +419,12 @@ pub const PERF_TYRE_EARLY: u32 = 2097152;
 /// dispatches three times the vehicles), in place of one where lanes 255..252 carry both.
 /// vehicle-perf-first-principles.md §8.34, §8.35.
 pub const PERF_WHEELS_APART: u32 = 4194304;
+/// [`W_PERF_FLAGS`], with [`PERF_HIT_ROLES`] and [`PERF_HIT_FB`]: [`PERF_HITS_LOCAL`]'s hits
+/// from workgroup memory on the self-collision split path, where a car's own step is the
+/// step dispatch's (a contact group member's rest, `memberRest`; a solo car's step k - 1
+/// rest): `selfApplyLocal` with the pair list's state words kept (the kernel's
+/// PERF_SELF_HITS_LOCAL, `selfApplyLocalKeep`). vehicle-perf-first-principles.md §8.36.
+pub const PERF_SELF_HITS_LOCAL: u32 = 33554432;
 /// The switches a host starts with: [`PERF_HIT_FB`] (bit for bit and faster natively and
 /// in Chrome: vehicle-perf-first-principles.md §7), [`PERF_VV_STREAM`] (§8.13),
 /// [`PERF_VV_BIG_GRID`] (§8.14), [`PERF_MEMBER_LIST`] (§8.19), [`PERF_VV_BEAM_SUM`] (§8.21),
