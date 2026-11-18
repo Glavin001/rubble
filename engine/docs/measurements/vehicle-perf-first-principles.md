@@ -2072,7 +2072,7 @@ swinging panel, at any threshold up to 3 m/s and 5 mm. Asleep, a World step cost
 the two designs (a group member sleeping inside an awake group; a stillness test a
 ringing node or a swinging panel does not fail), each a measured, configurable loss.
 
-### 8.28 Vehicle contact's candidates kept across substeps: bit for bit natively and in Chrome, off by default (2026-11-16)
+### 8.28 Vehicle contact's candidates kept across substeps: bit for bit natively and in Chrome, off by default (2026-11-16, 17)
 
 `contact-groups-design.md` §8.10 (the design, the soundness argument and the limits). Perf
 flag 32768 (`PERF_FLEET_KEEP`, with 8192), kernel functions `fk*` in
@@ -2157,6 +2157,14 @@ with the flag and at y −311 without it, every run.)
   met it: it needs the origins far apart (t 20 s down the mountain) and a point at an edge.
 - *The fix.* `vvRel` is unfusable (`nf3(o_v − o_a)`): every copy rounds the difference
   alone. No other change; the flag's design was sound.
+- *The default path (flag off) against main's kernels* (`fast-check.sh kernel`,
+  `--ab-kernel-dir` a copy of main's build's `OUT_DIR/wgsl`; 44 of the WGSL modules
+  differ in text): bit for bit on 19 of the 20 fixtures, the two Chrome states included.
+  The one-car t 20 fixture differs (103 node and 114 beam words), and it differs the
+  same way, word for word, with this build's own kernels as the other side: the
+  harness's second lab, not the change (the one-car case another agent reported). So
+  the fix changed no result on any fixture; where Metal reassociated `vvRel` before it
+  did so in the same way in both of the walk's own copies.
 
 **Proofs after the fix.**
 
@@ -2175,23 +2183,110 @@ with the flag and at y −311 without it, every run.)
   ones), engine-world `explicit_vehicles` 11; engine-metal `vehicle_parity` 4. Chrome: all 116 modules
   compile.
 
-**Time after the fix** (vehicles' GPU ms a World step, t ≥ 0.5 s, median / p95 / worst):
+**Time after the fix, before the worst step's work** (vehicles' GPU ms a World step,
+t ≥ 0.5 s, median / p95 / worst): native, whole 40 s eight-car run, on 13.47 / 16.81 /
+26.91 (worst at t 1.02), off 18.73 / 19.52 / 22.99. Chrome, the page's own real-time
+loop, 170 s: off 17.82 / 20.65 / 26.00 and 17.74 / 20.66 / 25.46, on 15.81 / 19.42 /
+30.99 and 15.86 / 19.46 / 30.77 (both at t 28.17). Faster at the median, slower at the
+worst.
 
-- native, whole 40 s eight-car run: on 13.47 / 16.81 / 26.91 (worst at t 1.02), off
-  18.73 / 19.52 / 22.99; wall 47.1 against 52.3 s; both runs end with the same energies
-  (total −16,284 kJ).
-- Chrome, the page's own real-time loop, headless, 170 s of page time, off / on / on /
-  off: off 17.82 / 20.65 / 26.00, on 15.81 / 19.42 / 30.99, on 15.86 / 19.46 / 30.77, off
-  17.74 / 20.66 / 25.46 (the steps the page took in 170 s: 2,845 and 2,870 off, 2,983
-  and 2,990 on).
+**The worst step** (`AB_EACH=1`: each frame's time and its builds, reused passes and
+passes on today's path; states saved just before, natively and from the page):
 
-**Default: off.** Bit for bit natively and in Chrome now, and faster at the median
-(28 % natively, about 11 % in Chrome), but the worst step is worse both ways (native
-26.9 against 23.0 ms; Chrome 31.0 and 30.8 against 26.0 and 25.5 ms, both flag-on runs at
-t 28.17 s: a build of the list where the walk would be cheaper). The rule for a default
-is faster at the median and the worst, so it stays a switch. Next: what the build at
-t 28.17 costs (`--ab-profile` on a fixture there) and whether a build can be spread or
-cut, so the worst step is no slower than the walk's.
+- *What it was.* Not a build that keeps its list: a build *past an owner's room*
+  (`FK_OVER`, an owner over 32,767 pairs: the cars' first collisions at t 1, a pile at
+  t 28 on the ledges and t 30 on the rolling gully), retried every 136 passes. Its pass
+  listed pairs it then threw away and walked its tests in the build's padded boxes,
+  a thread a triangle: 7 to 10 ms in one pass (Chrome t 28: 31.2 ms frames against
+  24 ms beside them; rolling t 30, natively: 42 against 32 ms, every fourth frame).
+  On the rolling gully, tumbling cars also built every third pass (a wild node past
+  35 cm), a build costing more than the walk it saves.
+- *What changed* (behind the same flag; each a choice of path or an order of work, the
+  tests the same):
+  1. that pass's tests walk the *walk's own* boxes (the triangle's box grown by its
+     range, its travel, the owner's fastest candidate's travel and `CLIP_DEPTH`,
+     `vvTriangleCandsList`'s), over the build's candidates, a part of a *listed*
+     triangle a thread as today's walk; `fkPairTry` decides each pair exactly;
+  2. the build's listing stops once an owner is past its room (the list is void);
+  3. a build with no fewer candidates than the last one past the room skips its listing
+     (it would be past it again);
+  4. builds past the room in a row double the next wait, up to 16 times 136 passes;
+  5. a list that lasted fewer than 8 passes sends the next 68 to today's front;
+  6. no tracking while the passes left are today's path.
+- *After* (frames around the same moments): Chrome t 28 attempts 24.7 / 24.3 ms beside
+  24.1; native t 0.9 attempts no longer above their neighbours; rolling t 30 attempts
+  33.1 against 32.5 ms.
+
+**Proofs at the final kernel** (commit 40a7c4fe):
+
+- `fast-check.sh perf=32768`: 23 fixtures bit for bit; new rung-1 fixtures: eight cars at
+  t 0.9 (native, builds past the room), the page's ledges state at t 28 and its rolling
+  state at t 30 (`cars8_t28.0chrome`, `cars8_t30.0rolling`); 60 frames on the Chrome
+  states and on t 0.9: bit for bit.
+- Chrome, frame-locked, flag on and off, every second compared natively: ledges 40 of 40
+  bit for bit; rolling gully 36 of 36 (the page stops at t ≈ 36.5 in both runs, flag on
+  or off: a read-back map fails as the World passes its coupling's shapes room, which
+  the native lab reports at t 37 on rolling ground: "more colliders than the shapes
+  room", flag on or off; not this flag).
+- `perf-verify.sh default` and `perf-verify.sh 49089`: `explicit_loop_cap` 5,
+  `fleet_contact_gpu` 1, `group_split_gpu` 3, `self_split_gpu` 8, `explicit_contact_gpu`
+  13, `explicit_beams_bitwise` 12, `explicit_pair_reuse_gpu` 2, `vv_grid_gpu` 2,
+  `staged_state_gpu` 1, engine-world `explicit_vehicles` 11: PASS both ways; engine-metal
+  `vehicle_parity` 4: PASS both ways. Chrome: all 116 modules compile.
+
+**Time at the final kernel** (vehicles' GPU ms a World step, t ≥ 0.5 s, median / p95 /
+worst):
+
+| run | flag on | flag off |
+|---|---|---|
+| native, ledges, 40 s | 13.34 / 16.09 / 22.65 | 18.51 / 19.34 / 25.29 |
+| native, rolling gully, 36 s | 23.81 / 39.61 / 49.02 | 24.06 / 39.24 / 49.10 |
+| Chrome real time, ledges, 170 s (off / on / on / off) | 15.87 / 19.22 / 25.21; 15.84 / 19.23 / 25.46 | 17.80 / 20.73 / 25.52; 17.74 / 21.22 / 57.30 |
+| Chrome real time, rolling gully, 120 s (off / on / on / off; t 30.6–31.9 s reached) | 18.25 / 35.19 / 43.44; 18.30 / 35.11 / 43.53 | 21.75 / 33.10 / 39.39; 21.48 / 34.93 / 42.94 |
+
+Both native pairs end with the same energies (ledges −16,284 kJ, rolling −85,260 kJ).
+(The ledges' 57.3 ms off is one step of one run, not seen in the other three. Rolling
+runs in Chrome are 120 s of page time: at 170 s the page reaches t 37 to 40, where the
+scene itself passes its coupling's shapes room and the page stops, flag on or off.)
+
+**Default: still off.** Bit for bit natively and in Chrome on both terrains, and faster
+at the median everywhere (ledges 28 % natively and 11 % in Chrome, rolling 1 % natively
+and 15 % in Chrome); the worst step is now better on the ledges both ways (22.7 against
+25.3 ms natively; 25.2 and 25.5 against 25.5 ms in Chrome). On the page's own terrain,
+the rolling gully, it is not: natively the worst is a tie (49.02 against 49.10 ms, the
+same step at t 30.33) and p95 0.4 ms higher; in Chrome the worst is 43.4 and 43.5 against
+39.4 and 42.9 ms and p95 about 1 ms higher. There the cars pile and tumble, the list is
+past an owner's room or outlived in a few passes, and most passes run today's front, likely with
+the flag's own costs on top (the scans' tracking and the first plan's checks). The rule
+for a default is faster at the median and the worst on the page's terrains, so it stays
+a switch and the page's box stays unchecked.
+
+**Per car, tried and reverted (2026-11-17; commit 36173635, reverted by d3ac5fe2).** The
+next step named above: a car past its room, or a culprit of a list outlived in a few
+passes, is *excluded* (its pairs on today's front, for 272 passes, or the overflow wait
+doubled) while every other car keeps reusing its list. A pass that reuses the list with a
+car excluded (`FK_MIX`) runs the kept pairs' tests and today's front for the excluded
+cars' pairs: their points gathered alone, an excluded owner's walk listing into its own
+pair region, another owner's tested inline so its kept list stays; a car is back only
+through a build; a build's tests walk the walk's own boxes (the new list is for the next
+pass). Bit for bit on the 23 fixtures (60 frames on the Chrome and overflow ones), but
+slower than the fleet-wide list everywhere, natively (median / p95 / worst ms):
+
+| run | per car | fleet-wide list (kept) | flag off |
+|---|---|---|---|
+| ledges, 40 s | 14.42 / 19.65 / 25.85 | 13.34 / 16.09 / 22.65 | 17.94 / 19.38 / 25.52 |
+| rolling gully, 36 s | 25.56 / 41.07 / 50.81 | 23.81 / 39.61 / 49.02 | 24.43 / 39.17 / 49.21 |
+
+From the page's rolling states, 20 frames: t 20 22.26 against 22.08 ms off, t 25 24.19
+against 23.51, t 28 33.53 against 32.95, with 99.6 % of passes reusing the list: on the
+gully almost every pair of contact is a piled car's, so a mixed pass is today's front
+plus the kept tests and the inline walks beside it (with lists outlived after 8 passes a
+build came every 8 passes: 28.6 against 24.0 ms frames at t 25; 32 passes and 272 for the
+exclusion brought that down, not below the flag off). The fleet-wide list is kept; the
+kernel at the branch's head is 40a7c4fe's, whose proofs and timings are above. What
+would be needed for per car to pay: the excluded cars' pairs listed beside the kept list
+(a pair region shared, not tested inline) and a build that keeps reading its list in its
+own pass; both change today's walk's code, measured first for its own cost.
 
 ### 8.29 Contact groups of any size on the fleet-wide passes; the levels visit the owners with hits; the throttle updates across the fleet (2026-11-16)
 

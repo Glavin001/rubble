@@ -126,6 +126,15 @@ static const uint FK_W_PAIRS = 101u;
 float fkBetween() { return min(max(asfloat(gNext[fkCtl(FK_BTW)]), FK_BETWEEN), FK_BETWEEN_MOST); }
 bool fkOn() { return (gP.perfFlags & PERF_FLEET_KEEP) != 0u && gP.vvTriPairs != 0u; }
 uint fkMode() { return fkOn() ? gNext[fkCtl(FK_MODE)] : FK_OFF; }
+// FK_WAIT: the passes left on today's path (low 16 bits) and how many builds past a room
+// in a row (above): each one doubles the next wait, to FK_BACKOFF << 4 at most; a build
+// that keeps its list clears it. (Choices of path alone.)
+uint fkWaitLeft() { return gNext[fkCtl(FK_WAIT)] & 0xFFFFu; }
+void fkBackoff()
+{
+    uint streak = gNext[fkCtl(FK_WAIT)] >> 16u;
+    gNext[fkCtl(FK_WAIT)] = (min(streak + 1u, 4u) << 16u) | (FK_BACKOFF << min(streak, 4u));
+}
 // Owner v's room in the build's candidate run: its covered partners' contact points.
 uint fkOffered(uint v)
 {
@@ -1171,6 +1180,10 @@ void fkTrackNode(uint n, uint v)
 void fkTrack(uint tid)
 {
     if (tid >= gP.totalNodes) return;
+    // (Passes left on today's path: this pass's bounds decide nothing, the pass is today's
+    // whatever they say. The reference motion they would feed is any vector and the heat a
+    // class: both choices. With none left they are tracked: a build needs them.)
+    if (fkWaitLeft() > 1u) return;
     uint v = gStatic[gP.nodeInfoBase + tid].w;
     if (flVehicleOn(v)) fkTrackNode(tid, v);
 }
@@ -1332,10 +1345,10 @@ uint fkDecide(uint lane)
     {
         uint c = uint(gAcc[fkAccCtl(0u)].load());
         gAcc[fkAccCtl(0u)].store(0);
-        uint wait = gNext[fkCtl(FK_WAIT)];
+        uint wait = fkWaitLeft();
         if (gNext[flPrefixAt(0u, nv)] != 0u)
         {
-            if (wait != 0u) gNext[fkCtl(FK_WAIT)] = wait - 1u;
+            if (wait != 0u) gNext[fkCtl(FK_WAIT)] -= 1u;
             else if (c == 0u && gNext[fkCtl(FK_VALID)] != 0u) mode = FK_REUSE;
             else if (c < 5u)
             {
@@ -1344,7 +1357,7 @@ uint fkDecide(uint lane)
                 // the next FK_THRASH_WAIT passes instead of another build. (A choice of path
                 // alone: today's front is exact; FK_VALID holds the pass of the list's build.)
                 uint built = gNext[fkCtl(FK_VALID)];
-                if (built != 0u && gNext[fkCtl(FK_PASS)] - built < FK_SHORT) gNext[fkCtl(FK_WAIT)] = FK_THRASH_WAIT;
+                if (built != 0u && gNext[fkCtl(FK_PASS)] - built < FK_SHORT) gNext[fkCtl(FK_WAIT)] = (gNext[fkCtl(FK_WAIT)] & 0xFFFF0000u) | FK_THRASH_WAIT;
                 else mode = FK_BUILD;
             }
             // (Measurement, of builds that end a list: the largest node bound at one for a
@@ -1440,7 +1453,7 @@ uint fkDecide(uint lane)
         {
             gNext[fkCtl(FK_VALID)] = 0u;
             gNext[fkCtl(FK_EPOCH)] = epoch + 1u;
-            if (mode == FK_OFF) gNext[fkCtl(FK_WAIT)] = FK_BACKOFF;
+            if (mode == FK_OFF) fkBackoff();
             gNext[fkCtl(FK_BTW)] = asuint(min(FK_BETWEEN_PASSES * asfloat(uint(gAcc[fkAccCtl(3u)].load())) + FK_BETWEEN, FK_BETWEEN_MOST));
             gAcc[fkAccCtl(3u)].store(0);
         }
@@ -1863,7 +1876,7 @@ void fleetPlan(uint lane, uint word)
             if (most > FK_CAP || gAcc[fkAccCtl(2u)].load() != 0)
             {
                 gNext[fkCtl(FK_MODE)] = FK_OVER;
-                gNext[fkCtl(FK_WAIT)] = FK_BACKOFF;
+                fkBackoff();
                 // (Its tests: each listed triangle in parts, as today's walk: FK_SUBS's low
                 // bits now the parts. The candidates this time above them: the next build
                 // with no fewer skips its listing.)
@@ -1877,6 +1890,7 @@ void fleetPlan(uint lane, uint word)
                 gNext[fkCtl(FK_SUBS)] = subs;
                 // (Valid, and the pass it was built in: FK_PASS counts from 1 here.)
                 gNext[fkCtl(FK_VALID)] = max(gNext[fkCtl(FK_PASS)], 1u);
+                gNext[fkCtl(FK_WAIT)] = 0u;
                 gNext[fkCtl(FK_BUILDS)] += 1u;
                 gNext[fkCtl(FK_KEPT)] += total;
             }
