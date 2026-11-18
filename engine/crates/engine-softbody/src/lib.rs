@@ -15,6 +15,7 @@ pub mod color;
 pub mod cpu;
 pub mod crash_rigs;
 pub mod damage;
+pub mod drive_ai;
 pub mod desc;
 pub mod elements;
 pub mod explicit_aero;
