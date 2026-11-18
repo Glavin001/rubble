@@ -756,6 +756,69 @@ fn beam_census(template: &ExplicitBeams) {
     );
 }
 
+const TRACE_HEADER: &str = "t,cx,cy,cz,s,n_com,n_top,n_low,x_lo,x_hi,ground,speed,wx,wy,wz,w,lid_gap,vx,vy,vz,lx,ly,lz,fleet_top,fleet_x,fleet_vn\n";
+
+/// One `--trace` row for a car: the time; its centre of mass (world); its arc `s` down the
+/// fall line and its height `n_com` over the fall line along the slope's normal; its
+/// highest and lowest nodes' heights over the line (`n_top`, `n_low`); its nodes' extent
+/// across the canyon (`x_lo`, `x_hi`); the drawn ground's distance under the centre
+/// along the normal; its centre's speed; its angular velocity about the centre of mass
+/// (rad/s, `ω = I⁻¹ L` from every node's mass); `lid_gap`, the gap between its highest
+/// node and the drawn walls' top (`WALL_DRAWN_TOP`, 13 m over the line, where the
+/// canyon's lid was until 2026-11-17; none on the plateau); then the centre's velocity and the angular momentum `L` about the centre
+/// (kg m²/s). In free flight `L` stays (only air drag acts) while `|ω|` may not: a
+/// tumbling body hands its spin between axes. Step to step, `Δv/dt − g` and `ΔL/dt` are
+/// the contact force per kg and the contact torque: a touch shows in them. (The caller
+/// appends the fleet's highest node over the fall line, its widest |x| and its fastest
+/// node away from the slope.)
+fn trace_row(out: &mut String, lab: &Lab, template: &ExplicitBeams, p: &[Vec3], v: &[Vec3]) {
+    use glam::{DMat3, DVec3};
+    let spec = lab.bench.opts.mountain;
+    let th = f64::from(spec.steepness).to_radians();
+    let up = DVec3::new(0.0, th.cos(), th.sin());
+    let along = DVec3::new(0.0, -th.sin(), th.cos());
+    // The car's body: nodes within 4 m of the nodes' median point (debris broken off
+    // and retired nodes parked away are left out).
+    let med = |f: fn(&Vec3) -> f32| {
+        let mut a: Vec<f32> = p.iter().map(f).collect();
+        a.sort_by(f32::total_cmp);
+        a[a.len() / 2]
+    };
+    let mid = Vec3::new(med(|q| q.x), med(|q| q.y), med(|q| q.z));
+    let near: Vec<bool> = p.iter().map(|q| q.distance(mid) < 4.0).collect();
+    let (mut m, mut c, mut vc) = (0.0f64, DVec3::ZERO, DVec3::ZERO);
+    for (((q, w), n), _) in p.iter().zip(v).zip(&template.nodes).zip(&near).filter(|x| *x.1) {
+        let mi = f64::from(n.mass);
+        m += mi;
+        c += q.as_dvec3() * mi;
+        vc += w.as_dvec3() * mi;
+    }
+    c /= m;
+    vc /= m;
+    let (mut l, mut i) = (DVec3::ZERO, DMat3::ZERO);
+    let (mut top, mut low, mut xlo, mut xhi) = (f64::MIN, f64::MAX, f64::MAX, f64::MIN);
+    for (((q, w), n), _) in p.iter().zip(v).zip(&template.nodes).zip(&near).filter(|x| *x.1) {
+        let mi = f64::from(n.mass);
+        let r = q.as_dvec3() - c;
+        l += r.cross(w.as_dvec3() - vc) * mi;
+        i += (DMat3::IDENTITY * r.length_squared() - DMat3::from_cols(r * r.x, r * r.y, r * r.z)) * mi;
+        let h = q.as_dvec3().dot(up);
+        top = top.max(h);
+        low = low.min(h);
+        xlo = xlo.min(f64::from(q.x));
+        xhi = xhi.max(f64::from(q.x));
+    }
+    let w = i.inverse() * l;
+    let ground = lab.bench.mountain_ray(c, (-up).as_vec3()).0.map_or(f64::NAN, f64::from);
+    let s = c.dot(along);
+    let lid = if s > 0.0 { f64::from(rubble::vehicle_lab::mountain::WALL_DRAWN_TOP) - top } else { f64::NAN };
+    out.push_str(&format!(
+        "{:.4},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4},{:.3},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2}\n",
+        lab.bench.t, c.x, c.y, c.z, s, c.dot(up), top, low, xlo, xhi, ground, vc.length(), w.x, w.y, w.z, w.length(), lid,
+        vc.x, vc.y, vc.z, l.x, l.y, l.z
+    ));
+}
+
 /// `--measure rest-ledger` (CPU reference, one car on the mountain; `--steepness`,
 /// `--rockslide 0` …): the car's energy ledger by term while it rests. Each 2 kHz step's
 /// velocity change is split as `EnergyLedger::account` splits it: the beams' and
@@ -1136,6 +1199,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
         template.commands.len(), template.slides.len(), template.brakes.len(), template.drive.is_some(), template.shapes.len()
     );
     let timing = arg("--timing");
+    // `--trace FILE`: a CSV row a World step of the first car's rigid motion (see
+    // `trace_row`): its spin, its height over the fall line and what it can touch.
+    let mut trace = arg("--trace").map(|_| String::from(TRACE_HEADER));
+    let mut escaped: Vec<usize> = Vec::new();
     let (mut world, mut lab) = Lab::build(GpuContext::Default, template, opts, |d| {
         d.gpu_timing = match timing.as_deref() {
             Some("phases") => GpuTiming::Phases,
@@ -1148,6 +1215,15 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
     println!("debris time to live {:?}; notes {:?}", lab.bench.debris.ttl, lab.bench.notes);
     let flag = |k: &str| arg(k).map(|x| x == "1");
     if let Some(x) = world.explicit_vehicles_mut() {
+        // `--vv 0`: vehicle–vehicle contact off (a measurement: the cars pass through
+        // each other).
+        if let Some(on) = flag("--vv") {
+            x.set_vehicle_contact(on);
+        }
+        // `--vv-grid 0`: vehicle contact's candidates without its grid (lossless).
+        if let Some(on) = flag("--vv-grid") {
+            x.set_vv_grid(on);
+        }
         if let Some(on) = flag("--surface-pairs") {
             x.set_surface_pairs(on);
         }
@@ -2508,6 +2584,66 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             gpu_steps.push((lab.bench.t, g.span_ms, veh, frame));
         }
         lab.read_blocking(&world, k % 6 == 5)?;
+        if let (Some(tr), Some(x)) = (trace.as_mut(), world.explicit_vehicles()) {
+            let (ps, vs) = (x.positions(), x.velocities());
+            trace_row(tr, &lab, template, &ps[0], &vs[0]);
+            // The fleet's every node (debris included): the highest over the fall line,
+            // the farthest across, and the fastest away from the slope.
+            let th = f64::from(lab.bench.opts.mountain.steepness).to_radians();
+            let up = glam::DVec3::new(0.0, th.cos(), th.sin());
+            let (mut top, mut wide, mut vn) = (f64::MIN, 0.0f64, f64::MIN);
+            for (p, v) in ps.iter().flatten().zip(vs.iter().flatten()) {
+                top = top.max(p.as_dvec3().dot(up));
+                wide = wide.max(f64::from(p.x.abs()));
+                vn = vn.max(v.as_dvec3().dot(up));
+            }
+            // (`--watch-from T`: from T s, each car's fastest node every step.)
+            if arg("--watch-from").and_then(|x| x.parse::<f64>().ok()).is_some_and(|t| lab.bench.t >= t) {
+                let w: Vec<String> = vs
+                    .iter()
+                    .zip(&ps)
+                    .map(|(v, p)| {
+                        let (i, s) = v.iter().enumerate().fold((0, 0.0f32), |b, (i, q)| if q.length() > b.1 { (i, q.length()) } else { b });
+                        format!("{i}:{s:.0}@{:.0},{:.0},{:.0}", p[i].x, p[i].y, p[i].z)
+                    })
+                    .collect();
+                println!("   watch t {:.4}: {}", lab.bench.t, w.join(" "));
+            }
+            // (A node past a wall's inner face: where, the first time each car has one.)
+            for (car, (p, v)) in ps.iter().zip(&vs).enumerate() {
+                if escaped.contains(&car) {
+                    continue;
+                }
+                // (Or under the ground: deeper than the slabs under the fall line.)
+                if let Some(i) = p.iter().position(|q| q.x.abs() > 18.5 || q.as_dvec3().dot(up) < -6.0) {
+                    escaped.push(car);
+                    let along = glam::DVec3::new(0.0, -th.sin(), th.cos());
+                    let q = p[i].as_dvec3();
+                    println!(
+                        "   escape: t {:.3} car {car} node {i} at x {:.2}, {:.2} m over the line, {:.1} m along; v {:?}; its car's median node x {:.1}, {:.1} m along",
+                        lab.bench.t, q.x, q.dot(up), q.dot(along), v[i], p[p.len() / 2].x, p[p.len() / 2].as_dvec3().dot(along)
+                    );
+                }
+            }
+            tr.pop();
+            tr.push_str(&format!(",{top:.3},{wide:.3},{vn:.3}\n"));
+            // (Written every second as well: a run that stops early keeps its trace.)
+            if k % 60 == 59 {
+                if let Some(path) = arg("--trace") {
+                    std::fs::write(path, tr.as_str())?;
+                }
+            }
+        }
+        if lab.bench.car.non_finite {
+            // (The coupling's status is read every few windows: a room it overflowed
+            // shows a few steps on, as the step's error.)
+            for _ in 0..16 {
+                if let Err(e) = world.step().and_then(|_| world.poll_blocking()) {
+                    println!("   after the non-finite state: {e}");
+                    break;
+                }
+            }
+        }
         anyhow::ensure!(
             !lab.bench.car.non_finite,
             "non-finite node state at t = {:.3} s",
@@ -2541,6 +2677,32 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
+            }
+            // `--piece-boxes`: each car's coupling piece boxes (label: its size, m) and its
+            // live chunks.
+            if std::env::args().any(|a| a == "--piece-boxes") {
+                if let Some(x) = world.explicit_vehicles() {
+                    let (_, rec) = x.piece_window_records();
+                    if rec != 0 {
+                        use engine_webgpu::explicit_coupling::read_words;
+                        let recs = 25u64; // (engine_exec::explicit_plan::PIECE_BOX_RECS)
+                        let mut line = Vec::new();
+                        for v in 0..x.vehicle_count() as u64 {
+                            let w = read_words(world.device(), world.queue(), x.misc_buffer(), (u64::from(rec) + v * recs) * 16, recs * 16);
+                            let un = |k: u32| f32::from_bits(if k & 0x8000_0000 != 0 { k & 0x7FFF_FFFF } else { !k });
+                            let boxes: Vec<String> = (0..(w.len() - 4) / 6)
+                                .filter(|g| w[6 * g] != u32::MAX)
+                                .map(|g| {
+                                    let lo = glam::Vec3::new(un(w[6 * g]), un(w[6 * g + 1]), un(w[6 * g + 2]));
+                                    let hi = glam::Vec3::new(un(w[6 * g + 3]), un(w[6 * g + 4]), un(w[6 * g + 5]));
+                                    format!("{g}:{:.0}", (hi - lo).length())
+                                })
+                                .collect();
+                            line.push(format!("[{}]", boxes.join(" ")));
+                        }
+                        println!("   piece boxes m: {}; chunks live {}", line.join(" "), lab.bench.stats()["mountain"]["chunksLive"]);
+                    }
+                }
             }
             if let Some(x) = world.explicit_vehicles_mut() {
                 let rc = x.take_reuse_cause();
@@ -2693,6 +2855,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             );
             (sum, worst, n) = (0.0, 0.0, 0);
         }
+    }
+    if let (Some(tr), Some(path)) = (trace, arg("--trace")) {
+        std::fs::write(path, tr)?;
     }
     if let Some(x) = world.explicit_vehicles() {
         x.kernel_status().map_err(anyhow::Error::msg)?;

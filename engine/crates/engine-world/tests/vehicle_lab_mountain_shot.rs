@@ -1,6 +1,6 @@
 //! Shooting on the rolling mountain (CPU reference): a click's ray from a camera behind
 //! and above the falling car (led by its travel) picks the car (or the mountain's rock beside it), the shot
-//! flies from under the canyon's undrawn lid and strikes the car; a ray at the slope
+//! flies (the canyon has no ceiling) and strikes the car; a ray at the slope
 //! picks the mountain, not the air.
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitBeamsSettings};
@@ -50,8 +50,8 @@ fn a_shot_on_the_rolling_mountain_picks_the_car_and_strikes_it() {
         lab.step().unwrap();
     }
     let c = lab.bench.car.centre;
-    // A camera 30 m up the fall line and 25 m over it: above the lid (13.5 m), as a
-    // camera zoomed out would be. A ray at the car picks the car.
+    // A camera 30 m up the fall line and 25 m over it: above the drawn walls (13 m), as
+    // a camera zoomed out would be. A ray at the car picks the car.
     let th = 50f64.to_radians();
     let (up, normal) = (
         DVec3::new(0.0, th.sin(), -th.cos()),
@@ -67,7 +67,7 @@ fn a_shot_on_the_rolling_mountain_picks_the_car_and_strikes_it() {
         .unwrap();
     assert_eq!(r["pick"]["on"], "car", "{r}");
     assert!((arr(&r["pick"]["target"]) - c).length() < 3.0, "{r}");
-    // A ray at the slope well beside the car meets the mountain's rock, under the lid.
+    // A ray at the slope well beside the car meets the mountain's rock.
     let beside = c + DVec3::new(9.0, 0.0, 0.0) - up * 8.0;
     let d = (beside - eye).normalize();
     let r = lab
@@ -80,7 +80,7 @@ fn a_shot_on_the_rolling_mountain_picks_the_car_and_strikes_it() {
     let t = arr(&r["pick"]["target"]);
     assert!(
         (t - eye).dot(normal) < -20.0,
-        "the rock is below the lid: {r}"
+        "the rock is below the walls' top: {r}"
     );
 
     // A steel ball fired after the car along its own path, from 6 m behind, strikes it.

@@ -126,11 +126,12 @@ pub fn vehicle_lab_materials() -> JsValue {
 impl WebVehicleLab {
     /// Where to read the car each step, as byte (offset, size) pairs: its nodes
     /// (`explicitNodesBuffer`), its origin record and its coupling records
-    /// (`explicitMiscBuffer`), its beams (`explicitBeamsBuffer`).
+    /// (`explicitMiscBuffer`), its beams (`explicitBeamsBuffer`), then the other cars'
+    /// nodes (`explicitNodesBuffer`, read with the beams).
     #[wasm_bindgen(js_name = readPlan)]
     pub fn read_plan(&self) -> Vec<f64> {
         let p = self.lab.read_plan();
-        [p.nodes, p.origin, p.coupling, p.beams]
+        [p.nodes, p.origin, p.coupling, p.beams, p.fleet_nodes]
             .iter()
             .flat_map(|r| [r.0 as f64, r.1 as f64])
             .collect()
@@ -143,9 +144,10 @@ impl WebVehicleLab {
         res(self.lab.before_step(&mut world.world))
     }
 
-    /// One step's readback ([`Self::read_plan`]'s ranges as words; `beams` when read),
-    /// copied at the lab's time `taken` ([`Self::time`] when the copy was encoded; none:
-    /// now). A readback arrives frames later: the camera needs the state's own time.
+    /// One step's readback ([`Self::read_plan`]'s ranges as words; `beams` and
+    /// `fleet_nodes` when read), copied at the lab's time `taken` ([`Self::time`] when the
+    /// copy was encoded; none: now). A readback arrives frames later: the camera needs the
+    /// state's own time.
     pub fn ingest(
         &mut self,
         nodes: &[u32],
@@ -153,8 +155,9 @@ impl WebVehicleLab {
         coupling: &[u32],
         beams: Option<Vec<u32>>,
         taken: Option<f64>,
+        fleet_nodes: Option<Vec<u32>>,
     ) -> Result<(), JsValue> {
-        res(self.lab.ingest_at(nodes, origin, coupling, beams.as_deref(), taken))
+        res(self.lab.ingest_at(nodes, origin, coupling, beams.as_deref(), taken, fleet_nodes.as_deref()))
     }
 
     /// One command (`rubble::vehicle_lab::Bench::command`): fire, plates, plateControl,

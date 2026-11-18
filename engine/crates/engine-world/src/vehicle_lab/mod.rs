@@ -697,6 +697,10 @@ pub struct Bench {
     /// nodes stay within the kernel's rebase radius, 100 m, of its origin): the
     /// mountain keeps ground under each of them.
     pub fleet: Vec<DVec3>,
+    /// On the mountain, per vehicle (the first car first): the chunks its nodes lay on at
+    /// its last node reading (retired nodes left out). The mountain keeps them, and their
+    /// neighbours, live: a part at rest far behind its car keeps its ground.
+    pub held: Vec<std::collections::BTreeSet<i64>>,
     script: Vec<(f64, Value)>,
     script_at: usize,
     pub script_end: Option<f64>,
@@ -718,6 +722,10 @@ pub struct Bench {
     pub debris: DebrisTracker,
     pub retire_due: Option<Vec<bool>>,
 }
+
+/// The most mountain chunks the lab keeps live under the cars' parts outside the cars'
+/// own windows ([`Bench::held`]): an explicit limit, an error past it.
+pub const MAX_HELD_CHUNKS: usize = 48;
 
 const KIND_SHOT: u8 = 0;
 const KIND_PLATE: u8 = 1;
@@ -750,6 +758,7 @@ impl Bench {
             obstacles: Vec::new(),
             mountain,
             fleet: Vec::new(),
+            held: Vec::new(),
             script: Vec::new(),
             script_at: 0,
             script_end: None,
@@ -1241,7 +1250,7 @@ impl Bench {
                     .ok_or_else(|| anyhow::anyhow!("vehicle lab: pick needs a direction"))?
                     .normalize();
                 let (target, on) = self.pick(o, d);
-                // On the mountain a camera above the canyon's lid (not drawn) launches from
+                // On the mountain a camera beyond a canyon wall's undrawn part launches from
                 // where the view ray leaves it, so the shot is not stopped by it.
                 let o = match self.mountain_ray(o, d).1 {
                     Some(t) if f64::from(t) + 0.3 < (target - o).length() => o + (d * (t + 0.3)).as_dvec3(),
@@ -1388,6 +1397,26 @@ impl Bench {
         self.script_end.is_some_and(|d| self.t >= d)
     }
 
+    /// Vehicle `v`'s nodes (about `origin`) at a reading: the mountain chunks they lie on
+    /// ([`Self::held`]; retired nodes and non-finite ones left out). Nothing off the
+    /// mountain.
+    pub fn hold_ground(&mut self, v: usize, origin: DVec3, pos: &[Vec3], retired: &[bool]) {
+        let Some(m) = &self.mountain else {
+            return;
+        };
+        let mut on = std::collections::BTreeSet::new();
+        for (i, p) in pos.iter().enumerate() {
+            if retired.get(i).copied().unwrap_or(false) || !p.is_finite() {
+                continue;
+            }
+            on.insert(m.spec.chunk_of(origin + p.as_dvec3()));
+        }
+        if self.held.len() <= v {
+            self.held.resize(v + 1, Default::default());
+        }
+        self.held[v] = on;
+    }
+
     fn stream_mountain(&mut self, rig: &mut dyn Rig, all: bool) -> anyhow::Result<()> {
         let Some(m) = self.mountain.as_mut() else {
             return Ok(());
@@ -1409,6 +1438,28 @@ impl Bench {
                 let k = m.spec.chunk_of(*o);
                 windows.push(((k - reach - behind).max(-1), k + reach + ahead));
             }
+        }
+        // Ground under every node the last readings saw, one chunk either way (a part in
+        // flight between readings stays within it): a part at rest far behind its car
+        // keeps its chunk, which fell away under it before. At most MAX_HELD_CHUNKS chunks
+        // beyond the cars' own windows; past that the run stops with an error rather than
+        // drop ground from under a part.
+        if self.car.readings > 0 {
+            let mut held: Vec<i64> = self
+                .held
+                .iter()
+                .flatten()
+                .flat_map(|&k| [k - 1, k, k + 1])
+                .filter(|&k| k >= -1 && !windows.iter().any(|(a, b)| k >= *a && k <= *b))
+                .collect();
+            held.sort_unstable();
+            held.dedup();
+            anyhow::ensure!(
+                held.len() <= MAX_HELD_CHUNKS,
+                "vehicle lab: the cars' parts lie on {} mountain chunks outside the cars' own windows, more than the {MAX_HELD_CHUNKS} the lab keeps (MAX_HELD_CHUNKS); their ground would be dropped from under them",
+                held.len()
+            );
+            windows.extend(held.into_iter().map(|k| (k, k)));
         }
         let keep = |k: i64| windows.iter().any(|(a, b)| k >= *a && k <= *b);
         let gone: Vec<i64> = m.live.keys().copied().filter(|k| !keep(*k)).collect();
@@ -1572,6 +1623,9 @@ impl Bench {
     pub fn read_at(&mut self, car: &CarRead, frame: &ProxyFrame, taken: f64) {
         let before = self.car.speed;
         self.car.read(&self.model, car, frame, taken);
+        let retired = std::mem::take(&mut self.debris.retired);
+        self.hold_ground(0, car.origin, car.pos, &retired);
+        self.debris.retired = retired;
         // The pieces the unbroken beams leave; small ones retired after their time.
         if let Some(b) = car.beams {
             let pieces = Pieces::from_beams(
@@ -1758,7 +1812,7 @@ impl Bench {
 
     /// On the mountain: where a ray first meets the live chunks' drawn rock, and where it
     /// leaves the last lid it crosses (`Mountain::ray`).
-    fn mountain_ray(&self, o: DVec3, d: Vec3) -> (Option<f32>, Option<f32>) {
+    pub fn mountain_ray(&self, o: DVec3, d: Vec3) -> (Option<f32>, Option<f32>) {
         let Some(m) = &self.mountain else {
             return (None, None);
         };
@@ -2175,6 +2229,9 @@ pub struct ReadPlan {
     pub origin: (u64, u64),
     pub coupling: (u64, u64),
     pub beams: (u64, u64),
+    /// The first car's copies' nodes (laid out after its own, each as long), read with
+    /// the beams: the mountain keeps ground under their parts ([`Bench::held`]).
+    pub fleet_nodes: (u64, u64),
 }
 
 /// A car's place for the camera, from its own small readback every frame
@@ -2190,6 +2247,91 @@ pub struct FollowPose {
     /// The lab's time the state was copied at (s).
     pub t: f64,
     pub readings: u64,
+}
+
+/// The cell of [`coupling_groups`] (m).
+const GROUP_CELL: f32 = 4.0;
+
+/// A vehicle's nodes (`pos`, any frame) in groups for the coupling's windows
+/// (`ExplicitBeamsGpu::set_coupling_groups`): nodes in touching [`GROUP_CELL`] cells share
+/// a group, so each group's box is about its own nodes, not the span between the car and
+/// a part far from it (a piece's box spans every node of the piece, wherever it lies).
+/// The most nodes' group is 0; past the coupling's 16 groups the two nearest merge. Any
+/// grouping gives the same contacts (the coupling takes each group's box every window);
+/// these keep the proxies few. Non-finite nodes go in group 0.
+pub fn coupling_groups(pos: &[Vec3]) -> Vec<u8> {
+    const MOST: usize = 16;
+    let cell = |p: &Vec3| (p / GROUP_CELL).floor().as_ivec3();
+    let mut cells: HashMap<glam::IVec3, usize> = HashMap::new();
+    for p in pos.iter().filter(|p| p.is_finite()) {
+        let n = cells.len();
+        cells.entry(cell(p)).or_insert(n);
+    }
+    // Touching cells: one component (union-find).
+    let mut up: Vec<usize> = (0..cells.len()).collect();
+    fn root(up: &mut [usize], mut i: usize) -> usize {
+        while up[i] != i {
+            up[i] = up[up[i]];
+            i = up[i];
+        }
+        i
+    }
+    let list: Vec<(glam::IVec3, usize)> = cells.iter().map(|(c, i)| (*c, *i)).collect();
+    for (c, i) in &list {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(&j) = cells.get(&(*c + glam::IVec3::new(dx, dy, dz))) {
+                        let (a, b) = (root(&mut up, *i), root(&mut up, j));
+                        if a != b {
+                            up[a.max(b)] = a.min(b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Per component: its nodes and centre.
+    let mut comp: HashMap<usize, (usize, Vec3)> = HashMap::new();
+    let mut of = vec![usize::MAX; pos.len()];
+    for (k, p) in pos.iter().enumerate().filter(|(_, p)| p.is_finite()) {
+        let r = root(&mut up, cells[&cell(p)]);
+        of[k] = r;
+        let e = comp.entry(r).or_insert((0, Vec3::ZERO));
+        e.0 += 1;
+        e.1 += *p;
+    }
+    let mut groups: Vec<(Vec<usize>, usize, Vec3)> = comp.into_iter().map(|(r, (n, s))| (vec![r], n, s / n as f32)).collect();
+    // Past the room: the two nearest merge.
+    while groups.len() > MOST {
+        let mut best = (f32::MAX, 0, 1);
+        for a in 0..groups.len() {
+            for b in a + 1..groups.len() {
+                let d = groups[a].2.distance_squared(groups[b].2);
+                if d < best.0 {
+                    best = (d, a, b);
+                }
+            }
+        }
+        let (_, a, b) = best;
+        let g = groups.swap_remove(b);
+        let n = groups[a].1 + g.1;
+        groups[a].2 = (groups[a].2 * groups[a].1 as f32 + g.2 * g.1 as f32) / n as f32;
+        groups[a].1 = n;
+        groups[a].0.extend(g.0);
+    }
+    // The most nodes first (ties: by the lowest root, for a stable order).
+    for g in &mut groups {
+        g.0.sort_unstable();
+    }
+    groups.sort_by(|a, b| b.1.cmp(&a.1).then(a.0[0].cmp(&b.0[0])));
+    let mut id: HashMap<usize, u8> = HashMap::new();
+    for (k, g) in groups.iter().enumerate() {
+        for &r in &g.0 {
+            id.insert(r, k as u8);
+        }
+    }
+    of.iter().map(|r| id.get(r).copied().unwrap_or(0)).collect()
 }
 
 /// One of the other cars' debris state ([`Lab`]'s `fleet`).
@@ -2217,6 +2359,10 @@ pub struct Lab {
     /// The piece labels last sent to the GPU, and new ones to send before the next step.
     labels: Vec<u8>,
     labels_due: Option<Vec<u8>>,
+    /// Per vehicle (the first car first) the coupling's groups last sent
+    /// ([`coupling_groups`]), and new ones to send before the next step.
+    groups: Vec<Vec<u8>>,
+    groups_due: Vec<Option<Vec<u8>>>,
     /// The other cars of the multi-car run (cars 1 ..: copies of the first): each its
     /// pieces' debris time to live and piece labels, as the first car's, from the same
     /// beam reading. Without them a torn-off part of another car was never retired,
@@ -2440,6 +2586,13 @@ impl Lab {
                 s.beams == span.beams && s.beam_off == span.beam_off + k as u32 * span.beams
             })
             .count();
+        // (And those whose nodes follow its own the same way.)
+        let fleet_nodes = (1..=fleet_cars)
+            .take_while(|&k| {
+                let s = x.layout().spans[k];
+                s.nodes == span.nodes && s.node_off == span.node_off + k as u32 * span.nodes
+            })
+            .count();
         let plan = ReadPlan {
             nodes: (u64::from(span.node_off) * 48, u64::from(span.nodes) * 48),
             // (Every vehicle's origin record: the mountain's ground follows them all.)
@@ -2451,6 +2604,7 @@ impl Lab {
             // (The first car's beams, then its copies': the copies are laid out after it,
             // each as long.)
             beams: (u64::from(span.beam_off) * 32, u64::from(span.beams) * 32 * (1 + fleet_cars as u64)),
+            fleet_nodes: (u64::from(span.node_off + span.nodes) * 48, u64::from(span.nodes) * 48 * fleet_nodes as u64),
         };
         let spans = x
             .layout()
@@ -2471,6 +2625,8 @@ impl Lab {
             car: cars[0].clone(),
             labels: Vec::new(),
             labels_due: None,
+            groups: Vec::new(),
+            groups_due: Vec::new(),
             fleet: Vec::new(),
             spans,
             follow: FollowPose::default(),
@@ -2863,6 +3019,18 @@ impl Lab {
         )
     }
 
+    /// Vehicle `v`'s coupling groups from its nodes at a reading ([`coupling_groups`]):
+    /// sent before the next step when they changed.
+    fn group(&mut self, v: usize, pos: &[Vec3]) {
+        let g = coupling_groups(pos);
+        if self.groups_due.len() <= v {
+            self.groups_due.resize(v + 1, None);
+        }
+        if self.groups.get(v) != Some(&g) {
+            self.groups_due[v] = Some(g);
+        }
+    }
+
     /// The other cars' debris state, fresh (a build or a restart).
     fn fleet_reset(&mut self, cars: usize) {
         let ttl = self.bench.debris.ttl;
@@ -2880,6 +3048,7 @@ impl Lab {
                 }
             }
         }
+        let labels_sent = self.labels_due.is_some();
         if let Some(labels) = self.labels_due.take() {
             if let Some(x) = world.explicit_vehicles_mut() {
                 let zeros = vec![0u8; self.car.nodes.len()];
@@ -2887,8 +3056,12 @@ impl Lab {
             }
             self.labels = labels;
         }
+        // (Labels replace the coupling's copy: the groups go again after them.)
+        let mut relabelled = vec![false; 1 + self.fleet.len()];
+        relabelled[0] = labels_sent;
         for (k, c) in self.fleet.iter_mut().enumerate() {
             let v = k + 1;
+            relabelled[v] = c.labels_due.is_some();
             if let Some(retired) = c.retire_due.take() {
                 if let Some(x) = world.explicit_vehicles_mut() {
                     if let Err(e) = x.set_retired(v, &retired) {
@@ -2903,6 +3076,21 @@ impl Lab {
                     x.set_piece_labels(v, if labels.is_empty() { &zeros } else { &labels });
                 }
                 c.labels = labels;
+            }
+        }
+        for (v, again) in relabelled.into_iter().enumerate() {
+            let due = self.groups_due.get_mut(v).and_then(Option::take);
+            if due.is_none() && !again {
+                continue;
+            }
+            if self.groups.len() <= v {
+                self.groups.resize(v + 1, Vec::new());
+            }
+            if let Some(g) = due {
+                self.groups[v] = g;
+            }
+            if let Some(x) = world.explicit_vehicles_mut() {
+                x.set_coupling_groups(v, &self.groups[v]);
             }
         }
         self.bench.before_step(&mut WorldRig {
@@ -2921,7 +3109,7 @@ impl Lab {
         coupling: &[u32],
         beams: Option<&[u32]>,
     ) -> anyhow::Result<()> {
-        self.ingest_at(nodes, origin, coupling, beams, None)
+        self.ingest_at(nodes, origin, coupling, beams, None, None)
     }
 
     /// [`Self::ingest`] of a state copied at the lab's time `taken` (s; none: now).
@@ -2932,6 +3120,7 @@ impl Lab {
         coupling: &[u32],
         beams: Option<&[u32]>,
         taken: Option<f64>,
+        fleet_nodes: Option<&[u32]>,
     ) -> anyhow::Result<()> {
         let n = nodes.len() / 12;
         let f = |w: u32| f32::from_bits(w);
@@ -2957,6 +3146,18 @@ impl Lab {
             f64::from(f(origin[1])),
             f64::from(f(origin[2])),
         );
+        // The other cars' nodes (read with the beams): the ground under their parts.
+        if let Some(fleet) = fleet_nodes.filter(|w| n > 0 && !w.is_empty()) {
+            for (k, w) in fleet.chunks_exact(12 * n).enumerate() {
+                let p: Vec<Vec3> = (0..n).map(|i| Vec3::new(f(w[12 * i]), f(w[12 * i + 1]), f(w[12 * i + 2]))).collect();
+                let at = self.bench.fleet.get(k + 1).copied().unwrap_or(o);
+                let retired: &[bool] = self.fleet.get(k).map_or(&[], |c| &c.debris.retired);
+                let retired = retired.to_vec();
+                self.bench.hold_ground(k + 1, at, &p, &retired);
+                self.group(k + 1, &p);
+            }
+        }
+        self.group(0, &pos);
         let frame = monitor::decode_coupling(&self.layout, coupling).map_err(anyhow::Error::msg)?;
         // (The reading holds the first car's beams, then its copies'.)
         let own = 8 * self.bench.model.beams.len();
@@ -3023,6 +3224,110 @@ impl Lab {
         let origin = read_words(d, q, x.misc_buffer(), p.origin.0, p.origin.1);
         let coupling = read_words(d, q, x.misc_buffer(), p.coupling.0, p.coupling.1);
         let b = beams.then(|| read_words(d, q, x.beams_buffer(), p.beams.0, p.beams.1));
-        self.ingest(&nodes, &origin, &coupling, b.as_deref())
+        let fleet = (beams && p.fleet_nodes.1 > 0).then(|| read_words(d, q, x.nodes_buffer(), p.fleet_nodes.0, p.fleet_nodes.1));
+        self.ingest_at(&nodes, &origin, &coupling, b.as_deref(), None, fleet.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host that keeps nothing: keys only.
+    struct NoRig(u32);
+    impl Rig for NoRig {
+        fn spawn(&mut self, _: &ObjDef) -> anyhow::Result<u32> {
+            self.0 += 1;
+            Ok(self.0)
+        }
+        fn set_velocity(&mut self, _: u32, _: Vec3) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove(&mut self, _: u32) {}
+        fn set_drive(&mut self, _: DriveInput) {}
+    }
+
+    fn bench() -> Bench {
+        let text = engine_softbody::procedural::car_truck(&engine_softbody::procedural::CarParams {
+            minimass: 10.0,
+            ..engine_softbody::procedural::CarParams::sedan()
+        });
+        let car = ExplicitBeams::from_truck_raycast(
+            &text,
+            None,
+            Vec3::ZERO,
+            0.0,
+            Vec3::ZERO,
+            engine_softbody::explicit_beams::ExplicitBeamsSettings::default(),
+        )
+        .unwrap()
+        .0;
+        let opts = LabOptions::from_json(&serde_json::json!({
+            "scene": "mountain", "mountain": { "terrain": "rolling", "rockslide": false } }));
+        Bench::new(opts, &car, 1.0 / 60.0)
+    }
+
+    /// The car far down the mountain and a part of it at rest 300 m back up the fall
+    /// line: the chunk under the part, and its neighbours, stay live while the part is
+    /// there, and go once it is retired. Before, the chunk fell away from under the part
+    /// when the car left it behind, and the part fell without end.
+    #[test]
+    fn a_part_left_far_behind_keeps_its_ground() {
+        let mut b = bench();
+        let mut rig = NoRig(0);
+        b.begin(&mut rig).unwrap();
+        let spec = b.opts.mountain;
+        let back = spec.line(100.0) + DVec3::new(0.0, 0.5, 0.0);
+        let k = spec.chunk_of(back);
+        let nodes = [back.as_vec3(), spec.line(400.0).as_vec3()];
+        b.car.readings = 1;
+        b.car.centre = spec.line(400.0);
+        b.hold_ground(0, DVec3::ZERO, &nodes, &[]);
+        for _ in 0..80 {
+            b.before_step(&mut rig).unwrap();
+        }
+        let live = |b: &Bench, k: i64| b.mountain.as_ref().unwrap().live.contains_key(&k);
+        for j in k - 1..=k + 1 {
+            assert!(live(&b, j), "chunk {j} under (or beside) the part was dropped");
+        }
+        assert!(!live(&b, k + 4), "a chunk between the part and the car is kept");
+        // The part retired: its ground goes.
+        b.hold_ground(0, DVec3::ZERO, &nodes, &[true, false]);
+        b.before_step(&mut rig).unwrap();
+        assert!(!live(&b, k), "a retired part's chunk is kept");
+    }
+
+    /// A car's body and a part 300 m from it: two coupling groups, the body's 0, so the
+    /// coupling's boxes are each about their own nodes; past 16 scattered parts the
+    /// nearest share a group.
+    #[test]
+    fn coupling_groups_follow_where_the_nodes_lie() {
+        let mut pos: Vec<Vec3> = (0..40).map(|i| Vec3::new((i % 4) as f32 * 0.5, 0.5, (i / 4) as f32 * 0.45)).collect();
+        pos.extend((0..3).map(|i| Vec3::new(0.1 * i as f32, 0.0, -300.0)));
+        pos.push(Vec3::NAN);
+        let g = coupling_groups(&pos);
+        assert!(g[..40].iter().all(|&x| x == 0), "{g:?}");
+        assert!(g[40..43].iter().all(|&x| x == 1), "{g:?}");
+        assert_eq!(g[43], 0);
+        let far: Vec<Vec3> = (0..40).map(|i| Vec3::new(0.0, 0.0, 30.0 * i as f32)).collect();
+        let g = coupling_groups(&far);
+        assert_eq!(g.iter().copied().max(), Some(15), "{g:?}");
+    }
+
+    /// More chunks under parts than MAX_HELD_CHUNKS: an error, never ground dropped.
+    #[test]
+    fn too_many_held_chunks_is_an_error() {
+        let mut b = bench();
+        let mut rig = NoRig(0);
+        b.begin(&mut rig).unwrap();
+        let spec = b.opts.mountain;
+        b.car.readings = 1;
+        b.car.centre = spec.line(20_000.0);
+        let parts: Vec<Vec3> = (0..=MAX_HELD_CHUNKS as i64)
+            .map(|i| spec.line(f64::from(spec.chunk) * (4.0 * i as f64 + 0.5)).as_vec3())
+            .collect();
+        b.hold_ground(0, DVec3::ZERO, &parts, &[]);
+        let e = b.before_step(&mut rig).unwrap_err().to_string();
+        assert!(e.contains("MAX_HELD_CHUNKS"), "{e}");
     }
 }
