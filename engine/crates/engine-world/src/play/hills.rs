@@ -18,7 +18,7 @@ pub const DX: f64 = 0.25;
 pub const DZ: f64 = 0.25;
 
 /// A hills scene: how many bodies.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(default)]
 pub struct HillsDef {
     pub n: u32,

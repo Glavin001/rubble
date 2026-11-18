@@ -463,7 +463,7 @@ fn vertex(p: [f32; 3], n: [f32; 3], color: [f32; 3], id: f32, out: &mut Vec<f32>
 
 /// A range scene as a [`super::SceneDef`]: Broadside or the timber yard, its fracture
 /// level and its take, as the range page reads them (`?scene=`, `?level=`, `?take=raze`).
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RangeSceneDef {
     /// `broadside` or `timber`.

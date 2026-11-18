@@ -6,6 +6,10 @@ one viewer (native) and the C API, on one `World`. A demo is a choice of **scene
 (`rubble::lab`, [lab-world-plan.md](lab-world-plan.md)) already works this way. This plan
 extends that pattern to the rest.
 
+The bindings over it (one Rust function per operation; the same names in wasm and C;
+TypeScript types generated from the Rust ones) are planned and tracked in
+[unified-bindings.md](unified-bindings.md).
+
 Principles (unchanged from the lab):
 
 - Every capability is a Rust API in `engine-world`. Scenes, actions and scripts are Rust,

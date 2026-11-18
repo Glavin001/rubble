@@ -1,0 +1,18 @@
+{
+  // The web layer's type check (`npm run typecheck`): the files that opt in with
+  // `// @ts-check` against the world wasm's generated declarations
+  // (generated/world-wasm, after `RUBBLE_WEB_PARTS=world bash engine/scripts/build-web.sh`)
+  // and the shared data types generated from Rust (types/rubble-play.d.ts).
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "lib": ["es2022", "dom"]
+  },
+  "files": ["rubble-world.mjs"]
+}

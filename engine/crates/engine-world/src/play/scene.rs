@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// A rigid benchmark scene (`demo.html`): one of [`rigid::BUILT`], the pyramid's
 /// `levels` (none: the scene's), continuous collision for its balls, Morton upload order.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RigidSceneDef {
     pub scene: String,
@@ -105,7 +105,7 @@ impl RigidSceneDef {
 }
 
 /// A scene of any family that places its content in Rust.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(tag = "family", rename_all = "camelCase")]
 pub enum SceneDef {
     Rigid(RigidSceneDef),
@@ -483,7 +483,7 @@ pub struct Playground {
 }
 
 /// A playground's counts as of its last step.
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayStats {
     pub steps: u64,
@@ -524,8 +524,7 @@ impl Playground {
             });
         }
         let mut world = World::new(gpu, &scene.world_def()?)?;
-        let placed = scene.place(&mut world)?;
-        let director = super::Director::new(&scene, &placed, &mut world)?;
+        let (placed, director) = super::api::place(&scene, &mut world)?;
         Ok(Playground {
             scene,
             director,

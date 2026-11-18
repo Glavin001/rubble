@@ -4,5 +4,11 @@
   "description": "The web demos' JavaScript dependencies: three.js, the renderer (vendored into generated/three by engine/scripts/build-web.sh).",
   "dependencies": {
     "three": "0.186.1"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
   }
 }

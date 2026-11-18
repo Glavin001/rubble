@@ -14,7 +14,7 @@ pub const G: f64 = 9.81;
 pub const APPROACH: f64 = 0.12;
 
 /// `impact.html`'s switches.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ImpactSceneDef {
     /// `impact` or `explosion` (`?mode=`).

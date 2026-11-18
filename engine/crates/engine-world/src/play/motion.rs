@@ -18,7 +18,7 @@ pub const SCENES: [(&str, &str); 3] = [
 ];
 
 /// A motion scene and the page's switches.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MotionSceneDef {
     pub scene: String,

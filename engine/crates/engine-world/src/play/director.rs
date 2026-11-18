@@ -15,14 +15,14 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 
 /// A camera ray: where the player looks from and along (unit length).
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, ts_rs::TS)]
 pub struct Aim {
     pub eye: [f64; 3],
     pub dir: [f64; 3],
 }
 
 /// Something the player does to a placed scene.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ts_rs::TS)]
 #[serde(tag = "action", rename_all = "camelCase")]
 pub enum Action {
     /// Every body (and character) back to its start, at rest; the script starts over.
@@ -31,6 +31,7 @@ pub enum Action {
     /// bullet along `aim`.
     Fire {
         #[serde(default)]
+        #[ts(optional)]
         aim: Option<Aim>,
     },
     /// The cannon (B): a pooled heavy ball, or the character's CCD rocket, along `aim`.
@@ -41,6 +42,7 @@ pub enum Action {
     /// spot), its earth heaped on a rim, bodies near it blasted outward.
     Crater {
         #[serde(default)]
+        #[ts(optional)]
         at: Option<[f64; 2]>,
     },
     /// A random tenth of the bodies lifted 10 m, at rest.
@@ -48,8 +50,10 @@ pub enum Action {
     /// Directed debris on or off, and its strength (0 subtle, 1 cinematic, 2 exaggerated).
     Guide {
         #[serde(default)]
+        #[ts(optional)]
         on: Option<bool>,
         #[serde(default)]
+        #[ts(optional)]
         strength: Option<u32>,
     },
     /// The city's scenario (`?scenario=`), started once its houses have settled.
@@ -70,6 +74,7 @@ pub enum Action {
     /// meteor run's play scene has room for it (else it says why).
     Strike {
         #[serde(default)]
+        #[ts(optional)]
         at: Option<[f64; 2]>,
     },
     /// The player's controls on the car they drive (the meteor run's play): throttle
@@ -77,18 +82,23 @@ pub enum Action {
     /// handbrake (0..1). Held until the next.
     Drive {
         #[serde(default)]
+        #[ts(as = "Option<f64>", optional)]
         forward: f64,
         #[serde(default)]
+        #[ts(as = "Option<f64>", optional)]
         steer: f64,
         #[serde(default)]
+        #[ts(as = "Option<f64>", optional)]
         handbrake: f64,
     },
     /// The meteor range's carts moving, and steering that knows their routes (the host
     /// resets the scene after).
     Targets {
         #[serde(default)]
+        #[ts(optional)]
         moving: Option<bool>,
         #[serde(default)]
+        #[ts(optional)]
         routes: Option<bool>,
     },
 }
@@ -116,7 +126,7 @@ impl Action {
 }
 
 /// Something a director did (the script's own volleys included), for the host's HUD.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq, ts_rs::TS)]
 pub struct Event {
     /// The step it happened before.
     pub step: u64,

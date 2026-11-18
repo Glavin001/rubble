@@ -31,7 +31,7 @@ const SCENES: [&str; 5] = ["drive", "drive1", "pass", "bts", "play"];
 
 /// `showcase.html`'s switches: each number as the page's `num(k, d)` reads it (present and
 /// finite, else none: the scene's default).
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ShowcaseSceneDef {
     /// `drive`, `drive1`, `pass`, `bts` or `play`.

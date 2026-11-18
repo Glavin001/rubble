@@ -65,7 +65,7 @@ fn friction(slot: u32) -> f32 {
 }
 
 /// An imported vehicle: `.truck` text, or JBeam files (name, text) and a part config.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ts_rs::TS)]
 #[serde(default)]
 pub struct ImportSource {
     pub truck: Option<String>,
@@ -74,7 +74,7 @@ pub struct ImportSource {
 }
 
 /// A soft scene and the page's switches.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SoftSceneDef {
     pub scene: String,

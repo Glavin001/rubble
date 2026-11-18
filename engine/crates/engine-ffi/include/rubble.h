@@ -1569,7 +1569,8 @@ enum RbResult rbBody_GetPoseIndex(struct RbWorld *world, RbBodyId body, uint32_t
 
 void rbDestroyWorld(struct RbWorld *world);
 
-// Advance one fixed step. Never waits on results (see `rbWorld_Poll`).
+// Advance one fixed step. Never waits on results (see `rbWorld_Poll`). A placed
+// scene's script (`rbWorld_PlaceScene`) runs first, as on every host.
 enum RbResult rbWorld_Step(struct RbWorld *world);
 
 // Compile the kernels of `groups` (`RB_KERNELS_*`, combined with `|`) now.
@@ -2202,6 +2203,80 @@ enum RbResult rbPlay_Step(struct RbPlay *play, uint32_t steps);
 
 // The play's counts as of its last step.
 enum RbResult rbPlay_GetStats(struct RbPlay *play, struct RbPlayStats *out);
+
+// Every preset (`PresetInfo[]` JSON): name, title, family, hub, page, query, and whether
+// its scene is placed in Rust (`placed`: `rbPresetScene` gives it).
+enum RbResult rbPresetList(const char **out_json);
+
+// Preset `name`'s scene (`SceneDef` JSON), as its page builds it.
+enum RbResult rbPresetScene(const char *name, const char **out_json);
+
+// The scene family `family`'s page builds from URL switches `query` (`scene=tbone&speed=80`;
+// null or empty: its defaults), as `SceneDef` JSON a host may edit before placing it.
+enum RbResult rbSceneFromQuery(const char *family, const char *query, const char **out_json);
+
+// The world scene `scene_json` (`SceneDef`) needs, on the default GPU, nothing placed
+// yet (`rbWorld_PlaceScene`). `coordinates`: the host's, as `RbWorldDef::coordinates`.
+enum RbResult rbCreateSceneWorld(const char *scene_json,
+                                 enum RbCoordinates coordinates,
+                                 struct RbWorld **out);
+
+// `rbCreateSceneWorld` on the host renderer's Metal device and queue (as
+// `rbCreateWorldOnMetal`). Apple platforms only (elsewhere `RB_UNSUPPORTED`).
+enum RbResult rbCreateSceneWorldOnMetal(const char *scene_json,
+                                        enum RbCoordinates coordinates,
+                                        void *mtl_device,
+                                        void *mtl_command_queue,
+                                        struct RbWorld **out);
+
+// Place scene `scene_json` (`SceneDef`) in this world (made by `rbCreateSceneWorld` from
+// the same scene) and start its script, which then runs before every `rbWorld_Step`.
+// `out_json` (optional): the family's placement (handles and layout) as JSON.
+enum RbResult rbWorld_PlaceScene(struct RbWorld *world,
+                                 const char *scene_json,
+                                 const char **out_json);
+
+// A player action on the placed scene before the next step (`Action` JSON:
+// `{"action":"fire","aim":{"eye":[..],"dir":[..]}}`, `{"action":"reset"}`, ...).
+enum RbResult rbWorld_Act(struct RbWorld *world, const char *action_json);
+
+// The placed scene's frame scripts before the frame's steps (the crusher's winch, the
+// traffic drivers): `dt` the frame's time (s); `user_car` the soft body the player steers
+// now (−1: none; its driver leaves it alone). No scene placed: nothing.
+enum RbResult rbWorld_BeforeFrame(struct RbWorld *world, double dt, int32_t user_car);
+
+// After the frame's steps: start the reads the scripts use next frame (never waits).
+enum RbResult rbWorld_AfterFrame(struct RbWorld *world);
+
+// Frame-locked runs: start every read the next `rbWorld_BeforeFrame` needs; then poll
+// while `rbWorld_ScriptPending`.
+enum RbResult rbWorld_PrepareFrame(struct RbWorld *world);
+
+// Whether a script read is still in flight (`out_pending`).
+enum RbResult rbWorld_ScriptPending(struct RbWorld *world, bool *out_pending);
+
+// The soft body the player drives (the ram aims at it). No scene placed: nothing.
+enum RbResult rbWorld_SetPlayer(struct RbWorld *world, uint32_t soft);
+
+// Whether the placed scene's script fires on its own. No scene placed: nothing.
+enum RbResult rbWorld_SetAutofire(struct RbWorld *world, bool on);
+
+// The placed scene's script state (JSON; `null` with no scene placed).
+enum RbResult rbWorld_GetScriptState(struct RbWorld *world, const char **out_json);
+
+// What the placed scene's director did since the last call (`Event[]` JSON, oldest first):
+// the script's own volleys as well as the player's actions.
+enum RbResult rbWorld_TakeEvents(struct RbWorld *world, const char **out_json);
+
+// Changes whenever a collider is added, removed or rewritten, or a heightfield is edited:
+// a renderer rebuilds its draw groups when it does.
+enum RbResult rbWorld_GetRenderVersion(struct RbWorld *world, uint64_t *out_version);
+
+// What to draw (`RenderManifest` JSON): every drawable collider grouped by geometry
+// (instanced boxes, spheres and capsules by collider index; merged hull and heightfield
+// meshes), planes, and what was skipped and why. In Rubble's frame: a vertex reaches the
+// world through its collider's and body's poses (`engine-world/src/render_manifest.rs`).
+enum RbResult rbWorld_GetRenderManifest(struct RbWorld *world, const char **out_json);
 
 // Defaults in `coordinates`' units (lengths, speeds, densities, energies).
 struct RbTerrainDef rbDefaultTerrainDef(enum RbCoordinates coordinates);

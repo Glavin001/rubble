@@ -176,7 +176,7 @@ if part world; then
   wasm-pack build crates/engine-vehiclegen-wasm --release --target web \
     --out-dir ../engine-webgpu/generated/vehiclegen-wasm --no-typescript
   CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm --release --target web \
-    --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
+    --out-dir ../engine-webgpu/generated/world-wasm
 fi
 if part stress; then
   step "Stress-solver wasm (the Fracture lab's blast_parity, load path and local impact modes)"

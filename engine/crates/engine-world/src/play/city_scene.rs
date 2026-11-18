@@ -8,7 +8,7 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 
 /// `city.html`'s switches.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CitySceneDef {
     /// Houses (`?k=`, default 1,024).

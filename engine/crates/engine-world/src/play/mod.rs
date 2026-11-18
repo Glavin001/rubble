@@ -29,6 +29,7 @@
 //!   stress solver, Rubble) on scenarios built to tell them apart.
 //! - The fracture lab ([`crate::lab`]): every lab scene under every bond model.
 
+pub mod api;
 pub mod balls;
 pub mod broadside;
 #[cfg(feature = "stress")]

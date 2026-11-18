@@ -40,32 +40,48 @@ pub const TAG_VEHICLE: RenderTag = "vehicle";
 pub const TAG_CHARACTER: RenderTag = "character";
 
 /// One draw group of [`RenderManifest`].
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RenderGroup {
     /// A unit box (−1..1) instanced over `colliders`.
     #[serde(rename_all = "camelCase")]
-    Box { tag: RenderTag, colliders: Vec<u32> },
+    Box {
+        tag: RenderTag,
+        #[ts(type = "ArrayLike<number>")]
+        colliders: Vec<u32>,
+    },
     /// A unit sphere instanced over `colliders`.
     #[serde(rename_all = "camelCase")]
-    Sphere { tag: RenderTag, colliders: Vec<u32> },
+    Sphere {
+        tag: RenderTag,
+        #[ts(type = "ArrayLike<number>")]
+        colliders: Vec<u32>,
+    },
     /// A capsule along local Y instanced over `colliders`.
     #[serde(rename_all = "camelCase")]
-    Capsule { tag: RenderTag, colliders: Vec<u32> },
+    Capsule {
+        tag: RenderTag,
+        #[ts(type = "ArrayLike<number>")]
+        colliders: Vec<u32>,
+    },
     /// Merged triangles in their colliders' frames: flat xyz `positions` and `normals`,
     /// `indices` (counter-clockwise from outside), one collider per vertex.
     #[serde(rename_all = "camelCase")]
     Mesh {
         tag: RenderTag,
+        #[ts(type = "ArrayLike<number>")]
         positions: Vec<f32>,
+        #[ts(type = "ArrayLike<number>")]
         normals: Vec<f32>,
+        #[ts(type = "ArrayLike<number>")]
         indices: Vec<u32>,
+        #[ts(type = "ArrayLike<number>")]
         vertex_colliders: Vec<u32>,
     },
 }
 
 /// A plane collider: `normal · x = offset`, in world space.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderPlane {
     pub collider: u32,
@@ -74,7 +90,7 @@ pub struct RenderPlane {
 }
 
 /// What [`World::render_manifest`] returns.
-#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, PartialEq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderManifest {
     /// [`World::render_version`] when this was made.

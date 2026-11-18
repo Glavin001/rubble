@@ -5,51 +5,37 @@
 
 use crate::vehicle::{from_js, js};
 use crate::{err, handle, res, WebWorld};
-use rubble::play::{Family, Placed, SceneDef};
+use rubble::play::{api, Placed, SceneDef};
 use rubble::*;
 use wasm_bindgen::prelude::*;
 
-fn family(name: &str) -> Result<Family, JsValue> {
-    Family::from_name(name)
-        .filter(|f| rubble::play::scene::placed_here(*f))
-        .ok_or_else(|| err(format!("family {name}: not placed through SceneDef")))
-}
+// The data types every binding shares, generated from the Rust types
+// (`rubble::play::api::typescript`), in this module's own declarations.
+#[wasm_bindgen(typescript_custom_section)]
+const PLAY_TYPES: &str = include_str!("../../engine-webgpu/types/rubble-play.d.ts");
 
 /// The scene a family's page builds from its URL query (`location.search`): a `SceneDef`
 /// (`{ family, ... }`, camelCase) the page may add to (an import's source, the explicit
-/// sim's shapes) before `createScene`.
-#[wasm_bindgen(js_name = sceneFromQuery)]
-pub fn scene_from_query(family_name: &str, query: &str) -> Result<JsValue, JsValue> {
-    let def = res(SceneDef::from_query(family(family_name)?, query))?;
-    Ok(js(serde_json::to_value(def).map_err(err)?))
+/// sim's shapes) before `createScene` (`play::api::scene_from_query`).
+#[wasm_bindgen(js_name = sceneFromQuery, unchecked_return_type = "SceneDef")]
+pub fn scene_from_query(family: &str, query: &str) -> Result<JsValue, JsValue> {
+    to_js(&res(api::scene_from_query(family, query))?)
 }
 
-/// Preset `name`'s scene (`Preset::scene_def`), as `sceneFromQuery` gives it.
-/// Every preset (`rubble::play::presets`): `[{ name, title, family, hub, page, query, placed }]`,
-/// `placed`: its scene is placed through `SceneDef` (the playground shell can run it).
-#[wasm_bindgen(js_name = presetList)]
-pub fn preset_list() -> JsValue {
-    js(serde_json::Value::Array(
-        rubble::play::presets()
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "name": p.name, "title": p.title, "family": p.family.name(), "hub": p.family.hub(),
-                    "page": p.page, "query": p.query,
-                    "placed": rubble::play::scene::placed_here(p.family),
-                })
-            })
-            .collect(),
-    ))
+/// Every preset (`play::api::preset_list`).
+#[wasm_bindgen(js_name = presetList, unchecked_return_type = "PresetInfo[]")]
+pub fn preset_list() -> Result<JsValue, JsValue> {
+    to_js(&api::preset_list())
 }
 
-#[wasm_bindgen(js_name = presetScene)]
+/// Preset `name`'s scene (`play::api::preset_scene`), as `sceneFromQuery` gives it.
+#[wasm_bindgen(js_name = presetScene, unchecked_return_type = "SceneDef")]
 pub fn preset_scene(name: &str) -> Result<JsValue, JsValue> {
-    let p = rubble::play::preset(name).ok_or_else(|| err(format!("unknown preset {name}")))?;
-    let def = p
-        .scene_def()
-        .ok_or_else(|| err(format!("preset {name} is not placed through SceneDef")))?;
-    Ok(js(serde_json::to_value(res(def)?).map_err(err)?))
+    to_js(&res(api::preset_scene(name))?)
+}
+
+fn to_js(v: &impl serde::Serialize) -> Result<JsValue, JsValue> {
+    Ok(js(serde_json::to_value(v).map_err(err)?))
 }
 
 #[wasm_bindgen]
@@ -58,7 +44,10 @@ impl WebWorld {
     /// `settings` (`WorldDef` fields, as `create` takes them: features, contacts, solver,
     /// gpuTiming, killBelow, ...) over it; `undefined`: none.
     #[wasm_bindgen(js_name = createScene)]
-    pub async fn create_scene(def: JsValue, settings: JsValue) -> Result<WebWorld, JsValue> {
+    pub async fn create_scene(
+        #[wasm_bindgen(unchecked_param_type = "SceneDef")] def: JsValue,
+        settings: JsValue,
+    ) -> Result<WebWorld, JsValue> {
         let scene: SceneDef = from_js("SceneDef", def)?;
         let mut wd = res(scene.world_def())?;
         if !settings.is_undefined() && !settings.is_null() {
@@ -81,10 +70,13 @@ impl WebWorld {
     /// placement (camelCase); a rigid scene's as typed arrays: `bodies` (handles),
     /// `gpuToScene`, `initial` (each scene body's start, xyz).
     #[wasm_bindgen(js_name = placeScene)]
-    pub fn place_scene(&mut self, def: JsValue) -> Result<JsValue, JsValue> {
+    pub fn place_scene(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "SceneDef")] def: JsValue,
+    ) -> Result<JsValue, JsValue> {
         let scene: SceneDef = from_js("SceneDef", def)?;
-        let placed = res(scene.place(&mut self.world))?;
-        self.director = Some(res(rubble::play::Director::new(&scene, &placed, &mut self.world))?);
+        let (placed, director) = res(api::place(&scene, &mut self.world))?;
+        self.director = Some(director);
         if let Placed::Rigid(p) = &placed {
             let o = js_sys::Object::new();
             let bodies: Vec<f64> = p.bodies.iter().map(|b| handle(b.to_bits())).collect();
@@ -111,7 +103,10 @@ impl WebWorld {
 
     /// Do a player action on the placed scene before the next step (`play::Action`, e.g.
     /// `{action: 'fire', aim: {eye, dir}}`, `{action: 'reset'}`).
-    pub fn act(&mut self, action: JsValue) -> Result<(), JsValue> {
+    pub fn act(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "Action")] action: JsValue,
+    ) -> Result<(), JsValue> {
         let action: rubble::play::Action = from_js("Action", action)?;
         let d = self
             .director
@@ -172,7 +167,7 @@ impl WebWorld {
 
     /// What the placed scene's director did since the last call (`[{step, what}]`, oldest
     /// first): the script's own volleys as well as the player's actions.
-    #[wasm_bindgen(js_name = takeEvents)]
+    #[wasm_bindgen(js_name = takeEvents, unchecked_return_type = "Event[]")]
     pub fn take_events(&mut self) -> Result<JsValue, JsValue> {
         let ev = self.director.as_mut().map(|d| d.take_events()).unwrap_or_default();
         Ok(js(serde_json::to_value(ev).map_err(err)?))

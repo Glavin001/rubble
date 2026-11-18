@@ -808,7 +808,7 @@ impl WebWorld {
     /// A group is `{ kind: 'box' | 'sphere' | 'capsule', tag, colliders: Uint32Array }` or
     /// `{ kind: 'mesh', tag, positions, normals: Float32Array, indices, vertexColliders:
     /// Uint32Array }`, read with [`Self::body_buffer`] and [`Self::collider_buffer`].
-    #[wasm_bindgen(js_name = renderManifest)]
+    #[wasm_bindgen(js_name = renderManifest, unchecked_return_type = "RenderManifest")]
     pub fn render_manifest(&self) -> Result<JsValue, JsValue> {
         render_manifest_js(&self.world.render_manifest())
     }

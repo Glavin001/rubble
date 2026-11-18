@@ -22,6 +22,8 @@ mod controls;
 mod guidance;
 pub mod lab;
 pub mod play;
+mod scene;
+pub use scene::*;
 pub use controls::*;
 use controls::text;
 mod terrain;
@@ -943,6 +945,10 @@ pub struct RbWorld {
     /// retained while the world lives).
     #[cfg(target_vendor = "apple")]
     imported: std::collections::HashMap<usize, wgpu::Buffer>,
+    /// The placed scene's script and actions (`rbWorld_PlaceScene`), run before every step.
+    director: Option<rubble::play::Director>,
+    /// The last JSON this world handed out (`rbWorld_TakeEvents`, ...), kept until the next.
+    json: CString,
 }
 
 thread_local! {
@@ -1713,17 +1719,25 @@ unsafe fn create_world(def: *const RbWorldDef, gpu: GpuContext, out: *mut *mut R
     let d = read(def, "null world def")?;
     let (world_def, coords) = world_def_of(&d)?;
     let world = World::new(gpu, &world_def)?;
-    let boxed = Box::new(RbWorld {
-        world,
-        coords,
-        store: FrameStore::default(),
-        pending: VecDeque::new(),
-        linear_joints: Default::default(),
-        prewarms: Vec::new(),
-        #[cfg(target_vendor = "apple")]
-        imported: Default::default(),
-    });
-    write(out, Box::into_raw(boxed))
+    write(out, Box::into_raw(Box::new(RbWorld::of(world, coords))))
+}
+
+impl RbWorld {
+    /// A world handle over `world`, nothing placed.
+    pub(crate) fn of(world: World, coords: Coords) -> RbWorld {
+        RbWorld {
+            world,
+            coords,
+            store: FrameStore::default(),
+            pending: VecDeque::new(),
+            linear_joints: Default::default(),
+            prewarms: Vec::new(),
+            #[cfg(target_vendor = "apple")]
+            imported: Default::default(),
+            director: None,
+            json: CString::default(),
+        }
+    }
 }
 
 #[no_mangle]
@@ -1858,10 +1872,17 @@ pub unsafe extern "C" fn rbDestroyWorld(world: *mut RbWorld) {
     }
 }
 
-/// Advance one fixed step. Never waits on results (see `rbWorld_Poll`).
+/// Advance one fixed step. Never waits on results (see `rbWorld_Poll`). A placed
+/// scene's script (`rbWorld_PlaceScene`) runs first, as on every host.
 #[no_mangle]
 pub unsafe extern "C" fn rbWorld_Step(world: *mut RbWorld) -> RbResult {
-    guard_args(|| world_mut(world)?.world.step())
+    guard_args(|| {
+        let w = world_mut(world)?;
+        if let Some(d) = &mut w.director {
+            d.before_step(&mut w.world)?;
+        }
+        w.world.step()
+    })
 }
 
 /// Compile the kernels of `groups` (`RB_KERNELS_*`, combined with `|`) now.

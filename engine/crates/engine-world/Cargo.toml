@@ -22,6 +22,7 @@ web-time.workspace = true
 bytemuck.workspace = true
 anyhow.workspace = true
 serde.workspace = true
+ts-rs.workspace = true
 serde_json = { workspace = true, optional = true }
 # The fracture lab's stress-solver modes (`StrengthModel::Threshold`): the stress
 # oracle's GPU fracture and contact ingest on the world's device, its scene import
