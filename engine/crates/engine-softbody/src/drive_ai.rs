@@ -233,10 +233,19 @@ pub struct DerbyCarView {
 enum Plan {
     /// Driving at its target car.
     Hunt,
-    /// Reversing away after a hit, before it rams again (s left).
-    BackOff(f32),
-    /// Reversing out of a wall or a car it is stuck against (s left).
-    Unstick(f32),
+    /// Reversing away (after a hit, before it rams again; or out of a wall or a car it
+    /// is stuck against): for at least `min` s and until `dist` m from `from`, at most
+    /// [`REVERSE_MOST`] s; `slow`: seconds it has hardly moved while reversing.
+    Reverse {
+        hit: bool,
+        t: f32,
+        min: f32,
+        dist: f32,
+        from: Vec3,
+        slow: f32,
+    },
+    /// Wedged both ways: forward on full lock away from the target (s left).
+    Wiggle(f32),
     /// Taking ramp `ramp`: to its run-up (`launched` false), then up it and off.
     Jump { ramp: usize, launched: bool, t: f32 },
 }
@@ -254,6 +263,13 @@ pub struct DerbyAi {
     last_speed: f32,
     /// Its own temperament: 0.85 to 1.15 times the field's speed.
     temper: f32,
+    /// Seconds it waits at the start (the field does not all leave at once and meet
+    /// head-on in the middle).
+    delay: f32,
+    /// Which flank of its target it aims at (−1 or 1, m to the target's right): side
+    /// hits, not nose to nose (two crushed noses ride up on each other, and a raycast
+    /// wheel resting on another car finds no ground: such a pile cannot drive apart).
+    flank: f32,
 }
 
 /// A derby field's drivers, deterministic from `seed`.
@@ -264,6 +280,8 @@ pub fn derby_drivers(n: usize, seed: u64) -> Vec<DerbyAi> {
                 .wrapping_mul(2_654_435_761)
                 .wrapping_add((i as u32).wrapping_mul(7919).wrapping_add(13));
             let temper = 0.85 + 0.3 * rand_u(&mut s);
+            let delay = 2.0 * rand_u(&mut s);
+            let flank = if rand_u(&mut s) < 0.5 { -1.0 } else { 1.0 };
             DerbyAi {
                 seed: s,
                 target: None,
@@ -272,10 +290,15 @@ pub fn derby_drivers(n: usize, seed: u64) -> Vec<DerbyAi> {
                 slow: 0.0,
                 last_speed: 0.0,
                 temper,
+                delay,
+                flank,
             }
         })
         .collect()
 }
+
+/// The longest a derby driver reverses (s).
+const REVERSE_MOST: f32 = 3.5;
 
 fn flat(v: Vec3) -> Vec3 {
     Vec3::new(v.x, 0.0, v.z)
@@ -299,8 +322,9 @@ impl DerbyAi {
     pub fn plan_name(&self) -> &'static str {
         match self.plan {
             Plan::Hunt => "hunting",
-            Plan::BackOff(_) => "backing off",
-            Plan::Unstick(_) => "reversing out",
+            Plan::Reverse { hit: true, .. } => "backing off",
+            Plan::Reverse { hit: false, .. } => "reversing out",
+            Plan::Wiggle(_) => "wriggling free",
             Plan::Jump { .. } => "taking the ramp",
         }
     }
@@ -368,6 +392,11 @@ fn derby_input(
         // Out, or on its side or roof: hands off.
         return none;
     }
+    if c.delay > 0.0 {
+        // Its start, held on the brake.
+        c.delay -= dt;
+        return DriveInput { brake: 1.0, ..none };
+    }
     let speed = me.speed;
     let hit = c.last_speed - speed.abs() > 3.5 && c.last_speed > 4.0;
     c.last_speed = speed.abs();
@@ -398,6 +427,7 @@ fn derby_input(
             claims[t] += 1;
         }
         c.retarget = 4.0 + 4.0 * rand_u(&mut c.seed);
+        c.flank = if rand_u(&mut c.seed) < 0.5 { -1.0 } else { 1.0 };
         // Now and then a ramp instead (more often the wilder the field).
         if matches!(c.plan, Plan::Hunt)
             && !arena.ramps.is_empty()
@@ -419,7 +449,10 @@ fn derby_input(
             let d = flat(o.p - me.p).length();
             // Lead the target by its own motion, by about the time to reach it.
             let lead = (d / speed.abs().max(6.0)).min(1.2) * 0.8;
-            let p = o.p + o.fwd * o.speed * lead;
+            // At one flank: a side hit (the aim comes onto the car itself in the last
+            // few metres, so it still connects).
+            let side = o.fwd.cross(o.up) * c.flank * (1.4 * (d / 12.0).min(1.0));
+            let p = o.p + o.fwd * o.speed * lead + side;
             // Close in: flat out (a ram); further: the field's speed.
             (flat(p - me.p), if d < 14.0 { top * 1.25 } else { top })
         }
@@ -489,31 +522,73 @@ fn derby_input(
         handbrake: 0.0,
     };
 
-    // A hit (its speed gone at once) near its target: back off, then ram again.
+    // A hit (its speed gone at once) near its target: back off a run-up's length, then
+    // ram again.
     let near_target = c
         .target
         .and_then(|t| cars[t].pose)
         .is_some_and(|o| flat(o.p - me.p).length() < 7.0);
     if hit && near_target && matches!(c.plan, Plan::Hunt) {
-        c.plan = Plan::BackOff(0.9 + 0.8 * rand_u(&mut c.seed));
+        c.plan = Plan::Reverse {
+            hit: true,
+            t: 0.0,
+            min: 1.2,
+            dist: 6.0 + 6.0 * rand_u(&mut c.seed),
+            from: me.p,
+            slow: 0.0,
+        };
     }
-    // Stuck (slower than a walk with the throttle on): reverse out, the wheel turned the
-    // other way.
-    c.slow = if speed.abs() < 0.8 && input.forward > 0.0 {
+    // Stuck (slower than a walk with the throttle on): reverse out.
+    c.slow = if speed.abs() < 0.8
+        && input.forward > 0.0
+        && matches!(c.plan, Plan::Hunt | Plan::Jump { .. })
+    {
         c.slow + dt
     } else {
         0.0
     };
-    if c.slow > 1.4 && !matches!(c.plan, Plan::Unstick(_) | Plan::BackOff(_)) {
-        c.plan = Plan::Unstick(1.3 + 0.6 * rand_u(&mut c.seed));
+    if c.slow > 1.2 {
+        c.plan = Plan::Reverse {
+            hit: false,
+            t: 0.0,
+            min: 1.5,
+            dist: 4.0 + 4.0 * rand_u(&mut c.seed),
+            from: me.p,
+            slow: 0.0,
+        };
         c.slow = 0.0;
     }
     match &mut c.plan {
-        Plan::BackOff(t) | Plan::Unstick(t) => {
-            *t -= dt;
+        Plan::Reverse {
+            t,
+            min,
+            dist,
+            from,
+            slow,
+            ..
+        } => {
+            *t += dt;
+            // The wheel turned the other way, so the nose swings toward the target.
             input = DriveInput {
                 forward: -1.0,
                 steer: -steer,
+                brake: 0.0,
+                handbrake: 0.0,
+            };
+            *slow = if speed.abs() < 0.6 { *slow + dt } else { 0.0 };
+            let far = flat(me.p - *from).length() >= *dist;
+            if *slow > 1.5 {
+                // Wedged backwards too: forward on full lock, away from the target.
+                c.plan = Plan::Wiggle(1.0 + 0.5 * rand_u(&mut c.seed));
+            } else if (*t >= *min && far) || *t >= REVERSE_MOST {
+                c.plan = Plan::Hunt;
+            }
+        }
+        Plan::Wiggle(t) => {
+            *t -= dt;
+            input = DriveInput {
+                forward: 1.0,
+                steer: if steer > 0.0 { -1.0 } else { 1.0 },
                 brake: 0.0,
                 handbrake: 0.0,
             };
@@ -529,6 +604,13 @@ fn derby_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Past their start delays.
+    fn started(ai: &mut [DerbyAi]) {
+        for a in ai {
+            a.delay = 0.0;
+        }
+    }
 
     fn pose(x: f32, z: f32, fwd: Vec3) -> Option<Pose> {
         Some(Pose {
@@ -583,6 +665,7 @@ mod tests {
             ..AiArena::default()
         };
         let mut ai = derby_drivers(2, 1);
+        started(&mut ai);
         let i = derby_inputs(&mut ai, &cars, &arena, Some(0), Some(0), 1.0, 1.0 / 60.0)[1].unwrap();
         assert_eq!(ai[1].target(), Some(0));
         assert!(i.forward > 0.0, "{i:?}");
@@ -613,6 +696,7 @@ mod tests {
             },
         ];
         let mut ai = derby_drivers(3, 3);
+        started(&mut ai);
         let i = derby_inputs(&mut ai, &cars, &AiArena::default(), None, None, 0.5, 0.1);
         assert_eq!(i[1], Some(DriveInput::default()));
         assert_eq!(i[2], Some(DriveInput::default()));

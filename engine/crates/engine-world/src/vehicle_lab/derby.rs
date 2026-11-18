@@ -418,9 +418,11 @@ impl DerbyGame {
         let Some(car) = self.cars.get_mut(v) else {
             return;
         };
-        // Full damage at a tenth of the beams bent, a broken beam counting as three.
+        // Full damage at half the beams bent, a broken beam counting as three (measured on
+        // the generated sedan: one head-on hit at 50 km/h bends about 600 of its 4251 beams
+        // and breaks about 60, which reads as a third).
         car.damage =
-            ((yielded as f32 + 3.0 * broken as f32) / (0.1 * total.max(1) as f32)).min(1.0);
+            ((yielded as f32 + 3.0 * broken as f32) / (0.5 * total.max(1) as f32)).min(1.0);
         if let Some(a) = attached {
             car.wheels_off = a.iter().filter(|x| !**x).count() as u32;
             car.attached = a;
@@ -448,8 +450,14 @@ impl DerbyGame {
         }
         let n = self.cars.len();
         if self.readings > 0 && !self.over {
+            // This tick's knock-outs, then applied together.
+            let mut outs: Vec<(usize, &'static str)> = Vec::new();
             for v in 0..n {
                 let Some(p) = self.cars[v].pose else { continue };
+                if self.cars[v].out.is_some() {
+                    continue;
+                }
+                let t = self.t;
                 let car = &mut self.cars[v];
                 car.flipped_for = if p.up.y < 0.25 {
                     car.flipped_for + dt
@@ -460,21 +468,40 @@ impl DerbyGame {
                     .anchor
                     .is_none_or(|(a, _)| (p.p - a).length() > STILL_REACH);
                 if moved {
-                    car.anchor = Some((p.p, self.t));
+                    car.anchor = Some((p.p, t));
                 }
-                let still = car.anchor.map_or(0.0, |(_, t)| self.t - t);
-                let (flipped, wheels) = (car.flipped_for, car.wheels_off);
+                let still = car.anchor.map_or(0.0, |(_, at)| t - at);
                 let outside =
                     Vec3::new(p.p.x, 0.0, p.p.z).length() > RADIUS + 4.0 || p.p.y < GROUND - 5.0;
-                if flipped > FLIPPED_OUT {
-                    self.knock_out(v, "rolled over");
-                } else if wheels >= WHEELS_OUT {
-                    self.knock_out(v, "wheels torn off");
+                let why = if car.flipped_for > FLIPPED_OUT {
+                    Some("rolled over")
+                } else if car.wheels_off >= WHEELS_OUT {
+                    Some("wheels torn off")
                 } else if outside {
-                    self.knock_out(v, "thrown out of the arena");
+                    Some("thrown out of the arena")
                 } else if still > STILL_OUT {
-                    self.knock_out(v, "stopped moving");
+                    Some("stopped moving")
+                } else {
+                    None
+                };
+                if let Some(w) = why {
+                    outs.push((v, w));
                 }
+            }
+            // Every car still in out at once (a pile that stopped together): the least
+            // damaged of them stays in and wins.
+            let left = (0..n).filter(|&v| self.cars[v].out.is_none()).count();
+            if left > 0 && outs.len() == left {
+                let spare = outs.iter().map(|o| o.0).min_by(|a, b| {
+                    self.cars[*a]
+                        .damage
+                        .total_cmp(&self.cars[*b].damage)
+                        .then(a.cmp(b))
+                });
+                outs.retain(|o| Some(o.0) != spare);
+            }
+            for (v, why) in outs {
+                self.knock_out(v, why);
             }
             let alive: Vec<usize> = (0..n).filter(|&v| self.cars[v].out.is_none()).collect();
             let timeout = self.t >= ROUND_LIMIT;
