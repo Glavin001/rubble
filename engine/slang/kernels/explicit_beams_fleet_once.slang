@@ -173,6 +173,132 @@ void lvTryAdds(LvApp s, uint h, uint4 tn)
     cfAdd(tn.x, sscale(s.f, s.gamma));
 }
 
+// A hit's node as the residual phases read it (vvResAcc): what does not change within
+// the levels (immovable, its beams' sum, its mass, its slide slot, the force log's flag),
+// taken once; its accumulators read at each use.
+struct LvNode
+{
+    bool still;
+    float3 bs;
+    float w;
+    uint slot1;
+    bool cf;
+};
+
+LvNode lvNode(uint x, uint vx, uint parity)
+{
+    LvNode n;
+    uint4 info = gStatic[gP.nodeInfoBase + x];
+    n.still = !vvImmovable(x);
+    n.bs = vvBeamSumOf(x, vx, parity);
+    n.w = gNodes[x * 3u].w;
+#ifdef EB_AERO
+    n.slot1 = info.x >> NODE_SLOT_SHIFT;
+#else
+    n.slot1 = 0u;
+#endif
+    n.cf = gP.cfAcc != 0u && (gStatic[info.w * 4u + 3u].x & FLAG_CFORCE) != 0u;
+    return n;
+}
+
+// vvResAcc of a node taken by lvNode.
+float3 lvAcc(LvNode n, uint x, bool withB)
+{
+    if (!n.still) return float3(0.0, 0.0, 0.0);
+    int3 a = int3(gAcc[x * 3u].load(), gAcc[x * 3u + 1u].load(), gAcc[x * 3u + 2u].load());
+    if (withB)
+    {
+        uint at = resAt(x);
+        a += int3(gAcc[at + 1u].load(), gAcc[at + 2u].load(), gAcc[at + 3u].load());
+    }
+    float3 c = sadd3(n.bs, float3(float(a.x), float(a.y), float(a.z)) * (1.0 / FIXED));
+#ifdef EB_AERO
+    if (n.slot1 != 0u) c = sadd3(c, gBeams[gP.slideAcc + min(n.slot1 - 1u, max(gP.slotTotal, 1u) - 1u)].xyz);
+#endif
+    return sdiv3(c, n.w);
+}
+
+// A staged hit's residual phases' values that do not change within the levels: its four
+// nodes (h, then the triangle's n1, n2, n0), vvResOf's inverse mass and vvGuardOf's.
+struct LvRes
+{
+    LvNode nh;
+    LvNode n1;
+    LvNode n2;
+    LvNode n0;
+    float inv;
+    float guardInv;
+};
+
+LvRes lvResStage(uint va, uint vh, uint h, uint4 tn, float alpha, float beta, float gamma, uint parity, uint slot)
+{
+    LvRes s;
+    s.nh = lvNode(h, vh, parity);
+    s.n1 = lvNode(tn.y, va, parity);
+    s.n2 = lvNode(tn.z, va, parity);
+    s.n0 = lvNode(tn.x, va, parity);
+    // (vvResOf's.)
+    float imh = vvImmovable(h) ? 0.0 : sdiv(vvSplitK(vvSplitPoint(slot, h)), gNodes[h * 3u].w);
+    float i1 = (alpha > 0.0 && !vvImmovable(tn.y)) ? smul(smul(alpha, alpha), sdiv(vvSplitK(vvSplitTri(tn.y)), gNodes[tn.y * 3u].w)) : 0.0;
+    float i2 = (beta > 0.0 && !vvImmovable(tn.z)) ? smul(smul(beta, beta), sdiv(vvSplitK(vvSplitTri(tn.z)), gNodes[tn.z * 3u].w)) : 0.0;
+    float i0 = (gamma > 0.0 && !vvImmovable(tn.x)) ? smul(smul(gamma, gamma), sdiv(vvSplitK(vvSplitTri(tn.x)), gNodes[tn.x * 3u].w)) : 0.0;
+    s.inv = nf(imh + nf(nf(i1 + i2) + i0));
+    // (vvGuardOf's.)
+    s.guardInv = nf(ownInvMass(h)
+                    + nf(nf(selfTerm(alpha, ownInvMass(tn.y)) + selfTerm(beta, ownInvMass(tn.z))) + selfTerm(gamma, ownInvMass(tn.x))));
+    return s;
+}
+
+// vvResOf with the staged values.
+float lvResOf(LvRes s, uint h, uint4 tn, float alpha, float beta, float gamma, float3 nn, float3 v)
+{
+    float3 at = sadd3(sadd3(sscale(lvAcc(s.n1, tn.y, false), alpha), sscale(lvAcc(s.n2, tn.z, false), beta)),
+                      sscale(lvAcc(s.n0, tn.x, false), gamma));
+    float an = sdot(ssub3(lvAcc(s.nh, h, false), at), nn);
+    float vn = sdot(v, nn);
+    if (!(vn < 0.0 && nf(smul(an, STEP) + vn) < 0.0)) return 0.0;
+    if (!(s.inv > 0.0)) return 0.0;
+    float m = sdiv(1.0, s.inv);
+    float r = nf(-smul(an, m) - sdiv(smul(vn, m), STEP));
+    return r > 0.0 ? r : 0.0;
+}
+
+// vvGuardOf with the staged values.
+bool lvGuardOf(LvRes s, uint h, uint4 tn, float alpha, float beta, float gamma, float3 v, float3 t, out float3 g)
+{
+    g = float3(0.0, 0.0, 0.0);
+    if (all(t == float3(0.0, 0.0, 0.0))) return false;
+    float3 a = ssub3(lvAcc(s.nh, h, true),
+                     sadd3(sadd3(sscale(lvAcc(s.n1, tn.y, true), alpha), sscale(lvAcc(s.n2, tn.z, true), beta)),
+                           sscale(lvAcc(s.n0, tn.x, true), gamma)));
+    float inv = s.guardInv;
+    float3 rest = ssub3(a, sscale(t, inv));
+    float aa = sdot(t, sadd3(sadd3(v, v), sscale(rest, STEP)));
+    float bb = smul(smul(STEP, sdot(t, t)), inv);
+    if (!(nf(aa + bb) > 0.0 && bb > 0.0)) return false;
+    float k = aa < 0.0 ? min(sdiv(-aa, bb), 1.0) : 0.0;
+    g = sscale(t, -nf(1.0 - k));
+    return true;
+}
+
+// resFinal with the force log's flags staged.
+void lvResFinal(LvRes s, uint h, uint4 tn, float alpha, float beta, float gamma, float3 f1, float3 total)
+{
+    uint4 n4 = uint4(h, tn.y, tn.z, tn.x);
+    for (uint role = 1u; role <= 4u; role++)
+    {
+        uint x = role == 1u ? n4.x : (role == 2u ? n4.y : (role == 3u ? n4.z : n4.w));
+        bool cf = role == 1u ? s.nh.cf : (role == 2u ? s.n1.cf : (role == 3u ? s.n2.cf : s.n0.cf));
+        float3 st = hitShare(total, role, alpha, beta, gamma);
+        int3 d = toFixed3(st) - toFixed3(hitShare(f1, role, alpha, beta, gamma));
+        uint at = resAt(x);
+        if (d.x != 0) gAcc[at + 4u].add(d.x);
+        if (d.y != 0) gAcc[at + 5u].add(d.y);
+        if (d.z != 0) gAcc[at + 6u].add(d.z);
+        if (cf) gAcc[gP.cfAcc + 3u * x].add(toFixed(ssqrt(sdot(st, st))));
+    }
+}
+
 // fleetLevelsLat with each hit worked out once (see above). Every lane of the group's
 // workgroup; a hit list past its room: fleetLevelsAny; more hits than lanes:
 // fleetLevelsLat.
@@ -268,6 +394,7 @@ void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
     bool two = false;
     LvApp app = lvAppNone();
     LatKept kept;
+    LvRes rs;
     kept.staged = false;
     kept.alpha = 0.0;
     kept.beta = 0.0;
@@ -310,6 +437,7 @@ void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
             kept.nn = nn;
             kept.v = v;
             kept.f1 = f1;
+            if (staged) rs = lvResStage(va, vh, h, tn, alpha, beta, gamma, parity, a);
         }
     }
     // Every hit two-body: a level's merge beside the next level's application.
@@ -417,7 +545,7 @@ void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
         {
             if (mine && lv == l && kept.staged)
             {
-                rr = vvResOf(va, vh, h, tn, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v, parity, a);
+                rr = lvResOf(rs, h, tn, kept.alpha, kept.beta, kept.gamma, kept.nn, kept.v);
                 if (rr > 0.0) resStage(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, sscale(kept.nn, rr));
             }
             sync();
@@ -426,8 +554,8 @@ void fleetLevelsOnce(uint k, uint off, uint parity, uint lane, uint tag)
                 float3 total = kept.f1;
                 if (rr > 0.0) total = sadd3(total, sscale(kept.nn, rr));
                 float3 g;
-                if (vvGuardOf(va, vh, h, tn, kept.alpha, kept.beta, kept.gamma, kept.v, total, parity, g)) total = sadd3(total, g);
-                resFinal(h, tn.x, tn.y, tn.z, kept.alpha, kept.beta, kept.gamma, kept.f1, total);
+                if (lvGuardOf(rs, h, tn, kept.alpha, kept.beta, kept.gamma, kept.v, total, g)) total = sadd3(total, g);
+                lvResFinal(rs, h, tn, kept.alpha, kept.beta, kept.gamma, kept.f1, total);
             }
             sync();
             if (!fuse)

@@ -756,3 +756,40 @@ branch: two sedans head-on, frame 4, four words). With the kept candidates on, t
 drops `PERF_FLEET_POST` and the levels across the GPU (`PERF_FLEET_LEVELS`, which leave
 the throttles to that dispatch), and the groups' levels update the listed triangles' throttles
 by each owner's listed count, as before the switch (`flPostOn`).
+
+### 8.11 A group's levels with each hit worked out once (2026-11-18)
+
+Perf flag 4 (`PERF_LEVELS_ONCE`, with 8388608 `PERF_FLEET_HITLAT`); kernel
+`explicit_beams_fleet_once.slang` (included by `explicit_beams_fleet.slang`; no new
+module, no workgroup memory); measurements and the default in
+`vehicle-perf-first-principles.md` §8.37. `fleetLevelsOnce` in place of `fleetLevelsLat`:
+the same rule, rounds, order and leaf functions on the same state.
+
+Why it can: within the levels nothing a hit's values come from changes. Positions,
+velocities, the snapshot (forces at the pass's start and the nodes' beam sums), the
+two-body counts and the held clip sides are written before the snapshot's barrier and
+only read in the levels; the levels write the accumulators A, their residual stages B and
+D, the position steps and the contact-force log, integer sums all. So a two-body hit's
+application (`vvTry`: triangle, clip test or vote, reduced mass, force from the snapshot)
+is the same value whenever it is taken, and so is the residual phases' staging
+(`vvStagedHit`, in World coordinates; §8.9).
+
+What changes, a lane a hit (a list of more hits than lanes: `fleetLevelsLat` itself):
+
+- **Found once**: after the snapshot each lane finds its hit (owner, list entry, triangle,
+  node, then its level after the rounds) and keeps it in registers, in place of four
+  loads in a row at every phase of its level.
+- **Worked out once, ahead**: a two-body hit's application in the owner's coordinates,
+  exactly as `vvTry` (`lvTryStage`: its expressions in its order, without the adds), and
+  its residual staging in the World's, both right after the snapshot, side by side for
+  all of the group's hits. In its level only the adds (`lvTryAdds`).
+- **Each lane its own hit**: a two-body hit's force reads the snapshot, not the
+  accumulators, so the contact point's chain on one lane (`vvApplyOrdered`) is not needed:
+  each lane adds its own hit (integer adds in any order: the same sums). A pair that is
+  not two-body keeps `vvApplyOrdered` in its level.
+- **Phase 1's r kept from phase 0**: both read A, which phase 0 does not write (it adds
+  to B).
+- **The merge beside the next level**: when every hit of the group is two-body, level l's
+  merge (phase 2: B cleared, D into A) runs beside level l + 1's application (which reads
+  neither, and adds into A), the last level's after the loop: three barriers a level in
+  place of four.
