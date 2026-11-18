@@ -5,7 +5,8 @@
 //   node engine/crates/engine-webgpu/tools/page-bench.mjs 'terrain.html?n=2000' ...
 //   STEPS=300 WARM=60 node ... --json out.json
 //
-// SHOT=<dir> saves a screenshot after SHOT_MS of the page's own loop instead.
+// SHOT=<dir> saves a screenshot after SHOT_MS of the page's own loop instead (or after
+// SHOT_EXPR, awaited in the page).
 // READY=<expr> also counts the page as ready when <expr> is true; READY_S=<s> waits that
 // long for it (default 180).
 // CHECK=1 runs window.__check() (or the expression EXPR) instead and prints its result.
@@ -107,8 +108,10 @@ for (const page of pages) {
   }
   if (!ready) throw new Error(`${page}: never ready`);
   if (process.env.SHOT) {
-    // A few frames of the page's own loop, then a screenshot.
-    await new Promise((r) => setTimeout(r, Number(process.env.SHOT_MS || 3000)));
+    // A few frames of the page's own loop (or SHOT_EXPR, awaited: e.g. a fixed step
+    // count, so two pages are compared at the same state), then a screenshot.
+    if (process.env.SHOT_EXPR) await evaluate(`(async () => { await (${process.env.SHOT_EXPR}); return 1; })()`);
+    else await new Promise((r) => setTimeout(r, Number(process.env.SHOT_MS || 3000)));
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     const file = join(process.env.SHOT, page.replace(/[^a-z0-9]+/gi, '_') + '.png');
     writeFileSync(file, Buffer.from(shot.result.data, 'base64'));

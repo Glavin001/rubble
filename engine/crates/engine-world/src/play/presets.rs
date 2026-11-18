@@ -20,13 +20,33 @@ pub enum Family {
     Motion,
     /// The heightfield collider (`terrain.html`).
     Terrain,
-    /// Meteors on deformable (MPM) ground (`impact.html`, `showcase.html`).
+    /// A meteor or a charge on deformable (MPM) ground (`impact.html`).
     Impact,
+    /// The meteor run on deformable ground (`showcase.html`).
+    Showcase,
     /// The large-maps city (`city.html`).
     City,
 }
 
 impl Family {
+    pub const ALL: [Family; 10] = [
+        Family::Rigid,
+        Family::Lab,
+        Family::Range,
+        Family::Vehicle,
+        Family::Soft,
+        Family::Motion,
+        Family::Terrain,
+        Family::Impact,
+        Family::Showcase,
+        Family::City,
+    ];
+
+    /// The family named `name` ([`Self::name`]).
+    pub fn from_name(name: &str) -> Option<Family> {
+        Self::ALL.into_iter().find(|f| f.name() == name)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Family::Rigid => "rigid",
@@ -37,7 +57,18 @@ impl Family {
             Family::Motion => "motion",
             Family::Terrain => "terrain",
             Family::Impact => "impact",
+            Family::Showcase => "showcase",
             Family::City => "city",
+        }
+    }
+
+    /// The playground hub the family's presets are listed under (play.html's menu).
+    pub fn hub(self) -> &'static str {
+        match self {
+            Family::Lab | Family::Range | Family::City => "Destruction",
+            Family::Vehicle | Family::Soft => "Vehicles",
+            Family::Terrain | Family::Impact | Family::Showcase => "Terrain",
+            Family::Rigid | Family::Motion => "Scale & motion",
         }
     }
 }
@@ -222,8 +253,8 @@ const PRESETS: &[Preset] = &[
     // fracture/
     p("lab", "Fracture lab", Lab, "fracture/", ""),
     // broadside.html, timber.html
-    p("broadside", "Broadside", Range, "broadside.html", ""),
-    p("timber-yard", "Timber yard", Range, "timber.html", ""),
+    p("broadside", "Broadside", Range, "broadside.html", "scene=broadside"),
+    p("timber-yard", "Timber yard", Range, "timber.html", "scene=timber"),
     // vehicle.html
     p("vehicles", "Vehicles", Vehicle, "vehicle.html", ""),
     p("bridge", "Bridge", Vehicle, "vehicle.html", "scene=bridge"),
@@ -400,21 +431,21 @@ const PRESETS: &[Preset] = &[
     p(
         "showcase",
         "Meteor run showcase",
-        Impact,
+        Showcase,
         "showcase.html",
         "",
     ),
     p(
         "showcase-play",
         "Meteor run (play)",
-        Impact,
+        Showcase,
         "showcase.html",
         "scene=play",
     ),
     p(
         "showcase-bts",
         "Meteor run (behind the scenes)",
-        Impact,
+        Showcase,
         "showcase.html",
         "scene=bts",
     ),

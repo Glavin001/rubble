@@ -6,6 +6,8 @@
 //! - [`scene`]: one [`SceneDef`] over the families placed here (rigid, vehicles, soft
 //!   bodies, motion, terrain): its world, its placement, a preset's query, and
 //!   [`Playground`], a placed scene stepped.
+//! - [`director`]: what happens after placement: the player's [`Action`]s and each scene's
+//!   own script, run before every step.
 //! - [`presets`]: the registry, every demo by name, with the page that hosts it today.
 //! - [`rigid`]: the rigid benchmark scenes (wall, ring, gables, pyramid, pile, columns).
 //! - [`hills`]: the terrain demo's heightfield and its bodies.
@@ -19,6 +21,8 @@
 //! - [`range`]: a baked Shardwright GLB as a threshold destructible on a ground slab, the
 //!   balls fired at it and its crush debris; [`broadside`] and [`timber_yard`] are its
 //!   scripted takes.
+//! - [`impact`] and [`showcase`]: the meteor impact and the meteor run on deformable
+//!   (MPM) ground.
 //! - [`stage`]: what a host draws for a range scene (its poses interpolated between steps,
 //!   its extra meshes) and its stats.
 //! - [`compare`]: destruction approaches side by side (impact threshold, support graph,
@@ -29,16 +33,22 @@ pub mod balls;
 pub mod broadside;
 #[cfg(feature = "stress")]
 pub mod compare;
+pub mod city_scene;
+pub mod director;
 pub mod hills;
+pub mod impact;
 pub mod motion;
 pub mod presets;
 pub mod range;
 pub mod rigid;
 pub mod scene;
+pub mod showcase;
 pub mod softbody;
 pub mod stage;
 pub mod timber_yard;
+pub mod vehicle_director;
 pub mod vehicles;
 
+pub use director::{Action, Aim, Director, Event};
 pub use presets::{preset, presets, Family, Preset};
-pub use scene::{Placed, PlayStats, Playground, RigidSceneDef, SceneDef};
+pub use scene::{repo_asset, Placed, PlayStats, Playground, RigidSceneDef, SceneDef, Stage};

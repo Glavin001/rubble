@@ -534,6 +534,17 @@ pub(crate) async fn creation_check(world: &World) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub struct WebWorld {
     world: World,
+    /// The placed scene's script and actions (`placeScene`), run before every step.
+    director: Option<rubble::play::Director>,
+}
+
+impl WebWorld {
+    pub(crate) fn of(world: World) -> WebWorld {
+        WebWorld {
+            world,
+            director: None,
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -544,7 +555,7 @@ impl WebWorld {
         let (info, device, queue) = web_device().await?;
         let world = res(World::new(GpuContext::Shared { info, device, queue }, &def))?;
         creation_check(&world).await?;
-        Ok(WebWorld { world })
+        Ok(WebWorld::of(world))
     }
 
     /// The device's limits that size a world (requested as the adapter's): for a page's
@@ -605,6 +616,9 @@ impl WebWorld {
         if !self.can_step() {
             let _ = self.world.device().poll(wgpu::PollType::Poll);
             return Ok(false);
+        }
+        if let Some(d) = &mut self.director {
+            res(d.before_step(&mut self.world))?;
         }
         res(self.world.step())?;
         RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -782,6 +796,22 @@ impl WebWorld {
     pub fn hull_arena_buffer(&self) -> JsValue {
         gpu_buffer(self.world.sim().hull_arena_buffer())
     }
+
+    /// Changes whenever a collider is added, removed or rewritten
+    /// (`World::render_version`): rebuild draw groups when it does.
+    #[wasm_bindgen(js_name = renderVersion)]
+    pub fn render_version(&self) -> f64 {
+        self.world.render_version() as f64
+    }
+
+    /// What to draw (`World::render_manifest`): `{ version, groups, planes, skipped }`.
+    /// A group is `{ kind: 'box' | 'sphere' | 'capsule', tag, colliders: Uint32Array }` or
+    /// `{ kind: 'mesh', tag, positions, normals: Float32Array, indices, vertexColliders:
+    /// Uint32Array }`, read with [`Self::body_buffer`] and [`Self::collider_buffer`].
+    #[wasm_bindgen(js_name = renderManifest)]
+    pub fn render_manifest(&self) -> Result<JsValue, JsValue> {
+        render_manifest_js(&self.world.render_manifest())
+    }
 }
 
 /// Solver flag bits (`AvbdParams::flags`).
@@ -839,4 +869,44 @@ fn handle(bits: u64) -> f64 {
 
 fn bits(handle: f64) -> u64 {
     handle as u64
+}
+
+/// A render manifest as JS, its arrays as typed arrays (meshes can be large).
+fn render_manifest_js(m: &rubble::RenderManifest) -> Result<JsValue, JsValue> {
+    use rubble::RenderGroup;
+    use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
+    let set = |o: &Object, k: &str, v: JsValue| Reflect::set(o, &k.into(), &v).map(|_| ());
+    let groups = Array::new();
+    for g in &m.groups {
+        let o = Object::new();
+        match g {
+            RenderGroup::Box { tag, colliders }
+            | RenderGroup::Sphere { tag, colliders }
+            | RenderGroup::Capsule { tag, colliders } => {
+                let kind = match g {
+                    RenderGroup::Box { .. } => "box",
+                    RenderGroup::Sphere { .. } => "sphere",
+                    _ => "capsule",
+                };
+                set(&o, "kind", kind.into())?;
+                set(&o, "tag", (*tag).into())?;
+                set(&o, "colliders", Uint32Array::from(colliders.as_slice()).into())?;
+            }
+            RenderGroup::Mesh { tag, positions, normals, indices, vertex_colliders } => {
+                set(&o, "kind", "mesh".into())?;
+                set(&o, "tag", (*tag).into())?;
+                set(&o, "positions", Float32Array::from(positions.as_slice()).into())?;
+                set(&o, "normals", Float32Array::from(normals.as_slice()).into())?;
+                set(&o, "indices", Uint32Array::from(indices.as_slice()).into())?;
+                set(&o, "vertexColliders", Uint32Array::from(vertex_colliders.as_slice()).into())?;
+            }
+        }
+        groups.push(&o);
+    }
+    let out = Object::new();
+    set(&out, "version", (m.version as f64).into())?;
+    set(&out, "groups", groups.into())?;
+    set(&out, "planes", serde_wasm_bindgen::to_value(&m.planes)?)?;
+    set(&out, "skipped", serde_wasm_bindgen::to_value(&m.skipped)?)?;
+    Ok(out.into())
 }
