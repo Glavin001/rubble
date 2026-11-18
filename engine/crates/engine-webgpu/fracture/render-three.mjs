@@ -210,6 +210,9 @@ export async function createRenderer(device, canvas, simulation, scene, onShoot 
       return performance.now() - t;
     },
     draw(showBonds) {
+      // A canvas with no size (hidden, not laid out yet) is not drawn: a zero-sized
+      // swapchain texture fails the frame's command buffer.
+      if (!canvas.clientWidth || !canvas.clientHeight) return;
       const dpr = Math.min(devicePixelRatio, 2), w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
       if (w !== width || h !== height) { width = w; height = h; renderer.setPixelRatio(dpr); renderer.setSize(canvas.clientWidth, canvas.clientHeight, false); }
       input.update();

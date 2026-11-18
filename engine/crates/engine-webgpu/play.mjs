@@ -12,10 +12,16 @@ import { RubbleThree } from './rubble-three.mjs';
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
+// The first failure is the cause (later GPU errors are usually "invalid due to a previous
+// error"): it stays on screen; every one goes to the console.
+let failures = 0;
 const fail = (e) => {
-  $('err').textContent = errorText(e);
-  statusEl.textContent = 'stopped';
-  window.__failed = String(e?.message ?? e);
+  console.error('playground:', e);
+  if (failures++ === 0) {
+    $('err').textContent = errorText(e);
+    window.__failed = String(e?.message ?? e);
+  } else $('err').dataset.more = ` (+${failures - 1} more in the console)`;
+  statusEl.textContent = `stopped${$('err').dataset.more ?? ''}`;
 };
 addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
 addEventListener('error', (e) => fail(e.error || e.message));
@@ -77,7 +83,7 @@ const placed = made ? made.placed : world.placeScene(sceneDef);
 const renderer = new THREE.WebGPURenderer({ device, antialias: true });
 await renderer.init();
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(innerWidth, innerHeight);
+renderer.setSize(innerWidth, innerHeight, false);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -123,11 +129,22 @@ function placeSun() {
   s.far = shadowRadius * 6;
   s.updateProjectionMatrix();
 }
-addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-});
+// The drawing buffer follows the canvas's laid-out size (CSS: the whole window), checked
+// every frame; a canvas with no size (hidden, not laid out yet) is not drawn: a zero-sized
+// swapchain texture fails the frame's command buffer.
+let sized = [0, 0];
+function fitCanvas() {
+  const c = renderer.domElement, w = c.clientWidth, h = c.clientHeight;
+  if (!w || !h) return false;
+  if (w !== sized[0] || h !== sized[1]) {
+    sized = [w, h];
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------- controls and input
 const keys = {};
@@ -211,7 +228,7 @@ function draw() {
   rubble.update();
   controls.update();
   placeSun();
-  renderer.render(view, camera);
+  if (fitCanvas()) renderer.render(view, camera);
 }
 // ?paused=1: the loop draws but takes no steps until __run() (checks start from the placed state).
 let manual = qs.get('paused') === '1';
