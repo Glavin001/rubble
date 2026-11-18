@@ -2294,6 +2294,77 @@ would be needed for per car to pay: the excluded cars' pairs listed beside the k
 (a pair region shared, not tested inline) and a build that keeps reading its list in its
 own pass; both change today's walk's code, measured first for its own cost.
 
+**Per car, listed beside the kept list: built, bit for bit, slower; reverted (2026-11-18;
+commits 14cbaa61 and after on `perf/keep-rolling`, reverted there).** The design named above,
+on main after #119, #122 and #123, behind a companion flag (8, `PERF_FLEET_CAR`, with 32768).
+
+- *Today's walk, measured first* (main's kernels, flag off, `--ab-profile`, 10 frames of 34
+  substeps, ms a frame / µs a pass): rolling gully t 25 6.19 / 182 (19 % of a 31.0 ms
+  frame), t 30 6.71 / 197 (20 %); ledges t 16 2.71 / 80 (14 %). The change to the walk itself
+  is one term: `vvPairAdd` adds the owner's first place after its kept list
+  (`fkWalkBase`, 0 unless a pass reuses the list with a car excluded); `vvTriangleCandsList`
+  is unchanged.
+- *What was built.* One predicate splits the pairs in every dispatch of a pass: a pair with
+  an excluded car (as owner or as the point's vehicle) is today's front's, every other pair
+  the kept list's. A pass that reuses the list with a car excluded (`FK_MIX`): the kept
+  pairs' tests for the others; today's gather (those pairs alone), grids, sorted copy and
+  walk for the excluded cars' pairs, the walk's pairs listed in the owner's pair region
+  after its kept list and tested in the listed pairs' dispatch (no inline tests). A build:
+  the padded gather of every pair (its box now also holds every point `flPoint`'s would,
+  whatever its speed), the list of the pairs of two cars not excluded, then in the same
+  pass the tests of its new list and, a part of a listed triangle a thread, the excluded
+  cars' pairs in the walk's own boxes; an owner past its room is excluded at that build
+  (FK_BACKOFF passes, doubled per build past it in a row), the others keep their lists. A
+  car with a node too fast for any build is excluded instead of sending the fleet to
+  today's path. A culprit of a list outlived in fewer than 8 passes is excluded for 68
+  passes; a car comes back only through a build; an excluded car's nodes are not tracked.
+- *Proofs.* `fast-check.sh` on 22 fixtures (1, 2, 4, 8 cars, ledges; the overflow moment,
+  eight cars at t 0.9; the rolling gully at t 20, 25, 28, 30 saved natively with
+  `--terrain rolling`): bit for bit with `RUBBLE_PERF_FLAGS=30932929 perf=8` (per car
+  against the fleet-wide list) and `perf=32776` (per car against off), 4 frames; 20 frames
+  on ledges t 16 and t 30, rolling t 25 and t 30, and t 0.9: bit for bit. Chrome's module
+  check found one barrier: the build's plan read a workgroup value inside lane 0's branch
+  (`workgroupUniformLoad` from non-uniform control flow, `explicit_beams_split_fleetplan`
+  and its variants); read before the branch, fixed: all 124 modules compile. The suites, Chrome's A/B and the 40 s
+  runs were not run: the change is slower on every fixture (below).
+- *Time* (ms a frame, 20 frames from one state each way, per car / fleet-wide list):
+
+| fixture | attempt 1 (as designed) | attempt 2 (+ the mixed walk culled by its candidates' box) | attempt 3 (+ the mixed walk's parts over the owners with candidates alone) |
+|---|---|---|---|
+| ledges, 8 cars, t 16 | 17.79 untimed (fleet-wide 14.60, off 16.85) | 19.19 / 15.50 | 19.41 / 15.45 |
+| rolling, t 25 | 36.42 untimed (fleet-wide 28.72, off 27.33) | 36.85 / 28.60 | 36.72 / 28.60 |
+| ledges, t 30 | | 25.90 / 19.45 | 26.08 / 19.59 |
+| ledges, t 0.9 (overflow) | | 13.57 / 11.71 | 13.44 / 11.81 |
+| rolling, t 30 | | | 35.18 / 29.32 |
+
+  Three attempts in a row, each slower, none a gain: stopped there.
+- *Why.* The per-owner counts of a mixed pass at ledges t 16 (`AB_COUNTS`): every one of
+  the eight owners had candidates of today's front (316 to 3,773), with all 528 of its
+  triangles listed, and a build every second frame for cover. One car is excluded almost
+  all the time (the culprit of the lists the fleet-wide run outlives: its 69 passes on
+  today's path in 20 frames), it returns through a build every 68 passes and is excluded
+  again at once; in a pile every other car touches it, so every owner gathers its points
+  and walks every listed triangle: the walk is today's (2.80 ms, 82 µs a pass, against
+  2.63 / 77 off), with the kept tests, the tracking and the builds on top. Culling a mixed
+  walk's triangles by the box of the owner's front candidates (attempt 2) and giving the
+  walk's parts only to owners with such candidates (attempt 3) changed nothing: those
+  candidates are a whole car beside every owner. On the rolling gully the list is now
+  kept (90 % of passes reuse it, where the fleet-wide list never builds: every build there
+  is past an owner's room), but builds come every 10 passes (65 in 20 frames, wild nodes)
+  and each one's tests of the excluded cars in the walk's own boxes cost 7.1 ms a frame in
+  the listed pairs' dispatch (0.6 off); the walk stays 7.3 to 7.8 ms.
+- *Found on the way: the fleet-wide list's own cost on today's main.* With 32768 the host
+  drops `PERF_FLEET_POST` (the levels' throttle updates) and the fused scans
+  (`fuseScansOn`), both default since §8.29 and §8.32. Rolling t 25, flag on against off:
+  the split levels 8.06 against 7.16 ms a frame, the scans' dispatch 0.37 against none, the
+  owners' parts 1.08 against 0.88, the walk the same (6.19): 28.72 against 27.33 ms
+  untimed. Ledges t 16: 14.60 against 16.85 (the walk 0.82 against 2.63). So on the
+  page's terrain the fleet-wide flag now costs about 1.4 ms a frame before any walk is
+  saved; making the kept list compatible with the throttle updates across the fleet and
+  with the fused scans is the cheaper next step than per car.
+
+The fleet-wide list (40a7c4fe's) stays as it was, off by default.
+
 ### 8.29 Contact groups of any size on the fleet-wide passes; the levels visit the owners with hits; the throttle updates across the fleet (2026-11-16)
 
 `contact-groups-design.md` §8 stage 3 (what is built: its §8.7). Two perf flags, both

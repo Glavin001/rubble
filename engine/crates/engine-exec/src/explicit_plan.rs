@@ -255,11 +255,10 @@ pub const fn fleet_level_words(nv: usize) -> usize {
 }
 /// The kernel's FK_COVER: the partners of a vehicle a build of the kept candidates covers.
 pub const FLEET_KEEP_COVER: usize = 8;
-/// Words of [`W_VV_FLEET_NEXT`] the kept candidates take ([`PERF_FLEET_KEEP`]), at its end:
-/// a word per vehicle (its exclusion, [`PERF_FLEET_CAR`]: the kernel's fkVeh), then their
-/// counters ([`FLEET_CTL_WORDS`]) last.
+/// Words of [`W_VV_FLEET_NEXT`] the kept candidates take ([`PERF_FLEET_KEEP`]), at its end;
+/// their counters ([`FLEET_CTL_WORDS`]) last.
 pub const fn fleet_keep_words(nv: usize, tris: usize) -> usize {
-    tris + nv * (FLEET_KEEP_COVER + 1) + 2 * (nv + 1) + 9 * nv + nv + FLEET_CTL_WORDS
+    tris + nv * (FLEET_KEEP_COVER + 1) + 2 * (nv + 1) + 9 * nv + FLEET_CTL_WORDS
 }
 /// Params word: vehicle contact's scratch in gAcc (the kernel's `vvScratch`, `splitVvAt`):
 /// per vehicle `GRID_BUCKETS` words, a contact group's counters between its pass's
@@ -391,13 +390,6 @@ pub const FLEET_LEVEL_CACHE: usize = 4096;
 /// vehicles' nodes may have moved past the list's allowances; in place of the gather, the
 /// grids, the sorted copy and the walk every substep.
 pub const PERF_FLEET_KEEP: u32 = 32768;
-/// [`W_PERF_FLAGS`], with [`PERF_FLEET_KEEP`]: the kept list per car (the kernel's
-/// PERF_FLEET_CAR, explicit_beams_fleet.slang FK_MIX; contact-groups-design.md §8.10): a
-/// car past its room, too fast for a build or the culprit of a list outlived in a few
-/// passes is excluded, every pair it is in on today's front (that walk's pairs listed after
-/// the owner's kept list), while the other cars' pairs stay kept; a build tests its own new
-/// list in its pass. The exact tests are the same on the same pairs.
-pub const PERF_FLEET_CAR: u32 = 8;
 /// [`W_PERF_FLAGS`], on a wide frame with the reused pair list and [`PERF_WIDE_FUSED`]:
 /// step s + 1's coupling and wheels (rays, bars) on a workgroup of their own in the list
 /// kernel's dispatch (the kernel's PERF_AHEAD_APART, `wideAheadApart`: workgroup

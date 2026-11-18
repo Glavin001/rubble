@@ -1629,12 +1629,6 @@ static const uint PERF_FLEET_POST = 65536u;
 // rebuilt when the vehicles have moved past it, in place of the gather, grids, sorted
 // copy and walk every substep. The exact tests are the same on the same pairs.
 static const uint PERF_FLEET_KEEP = 32768u;
-// perfFlags bit 8 (explicit_plan::PERF_FLEET_CAR), with PERF_FLEET_KEEP: the kept list per
-// car (contact-groups-design.md §8.10): a car past its room, too fast for a build or the
-// culprit of a list outlived in a few passes is excluded, its pairs on today's front
-// (listed after each owner's kept list in its pair region), while every other car's pairs
-// stay kept (explicit_beams_fleet.slang FK_MIX, fkExcluded).
-static const uint PERF_FLEET_CAR = 8u;
 uint hitFbAt(uint v, uint i) { return pendList(v) + PEND_CAP + i * 12u; }
 // perfFlags bit 1024 (explicit_plan::PERF_HIT_ROLES, with PERF_HIT_FB): a two-body
 // dissipative vehicle's hits applied a (hit, role) a lane. A hit's first-pass adds, its
@@ -5939,9 +5933,7 @@ uint fkOrigin(uint v) { return fkPrefix(gP.vehicles + 1u) + 3u * v; }
 // (Per vehicle six words, float bits: its reference motion of this pass, 0..2, and its
 // tracked nodes' mean motion of the pass before, 3..5.)
 uint fkMean(uint v, uint i) { return fkOrigin(gP.vehicles) + 6u * v + i; }
-// (Per vehicle a word, PERF_FLEET_CAR: its exclusion, explicit_beams_fleet.slang fkVeh.)
-uint fkVeh(uint v) { return fkMean(gP.vehicles, 0u) + v; }
-uint fkCtl(uint i) { return fkVeh(gP.vehicles) + i; }
+uint fkCtl(uint i) { return fkMean(gP.vehicles, 0u) + i; }
 // gBeams after the owners' boxes: per node its position (its vehicle's frame) at the build
 // and its class there (.w: 0 calm, 1 wild).
 uint fkRef(uint n) { return gP.vvFleetBox + 4u * gP.vehicles + n; }
@@ -11477,10 +11469,7 @@ static uint gVvO; // gNext: the grid's offsets
 #ifdef EB_VV_FLEET
 // (With the owners' state by vehicle, gFl: the owner's record and its own grid's offsets.)
 uint vvHitAdd(uint a) { return uint(gAcc[gFl != 0u ? flOwn(flVehOf(a)) + FL_HITS : gVvC + VV_PART + a].add(1)); }
-// (A listed pair's place: with the kept list per car, after the owner's kept list in a
-// pass that reuses it, fkWalkBase; else 0.)
-uint fkWalkBase(uint v);
-uint vvPairAdd(uint a) { return gFl != 0u ? uint(gAcc[flOwn(flVehOf(a)) + FL_PAIRS].add(1)) + fkWalkBase(flVehOf(a)) : uint(gAcc[gVvC + a].add(1)); }
+uint vvPairAdd(uint a) { return uint(gAcc[gFl != 0u ? flOwn(flVehOf(a)) + FL_PAIRS : gVvC + a].add(1)); }
 float vvSpeedAt(uint a) { return asfloat(uint(gAcc[gFl != 0u ? flOwn(flVehOf(a)) + FL_FAST : gVvC + 2u * VV_PART + a].load())); }
 uint vvOffAt(uint b) { return gNext[(gFl != 0u ? gP.vvScratchOff + gFlV * (GRID_BUCKETS + 1u) : gVvO) + b]; }
 #else

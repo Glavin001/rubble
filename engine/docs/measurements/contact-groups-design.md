@@ -741,6 +741,24 @@ remains: one owner past its room sends every owner to the front's own path. A li
 car (an excluded car's pairs on today's front, the others reused) was built and measured
 slower on both terrains, and reverted (§8.28).
 
+A second list per car (2026-11-18, §8.28) did what the first one was missing: the excluded
+cars' pairs listed after each owner's kept list in its pair region (no inline tests; the
+walk's only change is the place `vvPairAdd` returns), a build's tests read from its own
+new list in its pass, an owner past its room excluded alone, a car too fast for a build
+excluded instead of the fleet's falling back. Bit for bit on 22 fixtures, both terrains,
+and 20 to 30 % slower than the fleet-wide list (ledges t 16 19.4 against 15.5 ms a frame,
+rolling t 25 36.7 against 28.6), in three attempts. The limit is not where the pairs are
+listed but which pairs a pile has: the car that outlives the lists is in contact with every
+other car, so while it is excluded every owner gathers its points and walks every listed
+triangle, and a mixed pass is today's walk with the kept tests on top; on the rolling gully
+the lists are kept, but wild nodes force a build every ten passes. Reverted. A list per car
+would pay only where an excluded car touches few others.
+
+The fleet-wide list on today's main also gives up two default switches: the throttle
+updates across the fleet (`PERF_FLEET_POST`, `flPostOn`, above) and the fused scans
+(`fuseScansOn`); on the rolling gully that is about 1.4 ms a frame (levels +0.9, scans
++0.4) with no walk saved. A kept list that keeps both is the next step (§8.28).
+
 With the fused front (§8.9, `PERF_FLEET_FUSE`) the two share the grids' dispatch: a
 build's owner sorts its own run there after its offsets (`fuseSortCands`, the build's
 `fkSortCandOf`), a pass that reuses the list tests it there as before, and the pairs'

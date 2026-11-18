@@ -2933,7 +2933,7 @@ impl ExplicitBeamsGpu {
         let nv = self.layout.spans.len();
         // (The kept candidates' region ends before the levels'.)
         let end = at + plan::fleet_next_words(nv, w[49] as usize, self.layout.total[2] as usize) - plan::fleet_level_words(nv);
-        let mean = end - plan::FLEET_CTL_WORDS - nv - 6 * nv;
+        let mean = end - plan::FLEET_CTL_WORDS - 6 * nv;
         let origin = mean - 3 * nv;
         let next: Vec<u32> = bytemuck::cast_slice(&self.read(&self.bufs[8])).to_vec();
         let misc: Vec<u32> = bytemuck::cast_slice(&self.read(&self.misc)).to_vec();
@@ -4477,10 +4477,6 @@ impl ExplicitBeamsGpu {
         if !front {
             // (Groups of any size on the fleet-wide passes: only with the front there.)
             flags &= !(plan::PERF_FLEET_FRONT | plan::PERF_FLEET_ANY | plan::PERF_FLEET_POST | plan::PERF_FLEET_FUSE | plan::PERF_FLEET_HITLAT | plan::PERF_FLEET_KEEP);
-        }
-        // (The kept list per car: only with the kept candidates.)
-        if flags & plan::PERF_FLEET_KEEP == 0 {
-            flags &= !plan::PERF_FLEET_CAR;
         }
         // (The kept candidates, PERF_FLEET_KEEP: the listed triangles' throttle updates stay
         // in the groups' levels, which find them by each owner's listed count. The
