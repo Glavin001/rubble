@@ -2031,3 +2031,5 @@ void fleetWideTests(uint g, uint lane, uint word)
 #include "explicit_beams_fleet_levels.slang"
 // One hit's latency in the levels; the front's fused dispatches.
 #include "explicit_beams_fleet_hitlat.slang"
+// A group's levels with each hit worked out once.
+#include "explicit_beams_fleet_once.slang"

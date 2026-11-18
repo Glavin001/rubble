@@ -370,6 +370,14 @@ pub const PERF_FLEET_LEVELS: u32 = 524288;
 /// geometry kept in its lane's registers across the residual phases (the kernel's
 /// PERF_FLEET_HITLAT, `fleetLevelsLat`; contact-groups-design.md §8.9).
 pub const PERF_FLEET_HITLAT: u32 = 8388608;
+/// [`W_PERF_FLAGS`], with [`PERF_FLEET_HITLAT`]: a group's levels with each hit worked out
+/// once (the kernel's PERF_LEVELS_ONCE, `fleetLevelsOnce`; contact-groups-design.md
+/// §8.11): a lane's hit found, its two-body application (vvTry's values, in the owner's
+/// coordinates) and its residual staging (in the World's) taken once after the snapshot
+/// and kept in the lane's registers; in each level only the adds, the residual phases'
+/// loads of the accumulators and their adds; a level's merge beside the next level's
+/// application when every hit is two-body.
+pub const PERF_LEVELS_ONCE: u32 = 4;
 /// [`W_PERF_FLAGS`], with [`PERF_FLEET_FRONT`]: the pairs' scans in the owners' plan's
 /// workgroup and each owner's candidates' sorted copy in its grid's workgroup, two
 /// dispatches fewer a substep (the kernel's PERF_FLEET_FUSE).
