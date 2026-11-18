@@ -15,28 +15,18 @@ const HELP = {
   bullets: '<kbd>F</kbd> fire · <kbd>R</kbd> reset · drag to orbit',
 };
 
-export async function setup({ world, placed, sceneDef, ui, aim: shellAim, lookFrom, setShadowRadius, camera, controls: orbit }) {
+export async function setup({ world, placed, sceneDef, ui, aim: shellAim, lookFrom, setShadowRadius, camera, controls: orbit, on }) {
   const scene = sceneDef.scene;
   const shotSpeed = sceneDef.speed, lookAhead = sceneDef.lookAhead;
-  // Menus: scene, shot speed, look-ahead (each reloads with its switch).
-  const go = (k, v) => { const u = new URL(location.href); u.searchParams.set(k, v); location.href = u.href; };
-  const controls = document.getElementById('controls');
-  const sceneSel = document.createElement('select');
-  for (const [id, t] of Object.entries(SCENES)) sceneSel.add(new Option(t, id, false, id === scene));
-  sceneSel.onchange = () => go('scene', sceneSel.value);
-  const speedSel = document.createElement('select');
-  for (const v of SPEEDS) speedSel.add(new Option(`${v} m/s`, v, false, v === shotSpeed));
-  speedSel.onchange = () => go('speed', speedSel.value);
-  const la = document.createElement('label');
-  la.innerHTML = '<input type="checkbox"> look-ahead';
-  la.firstChild.checked = lookAhead;
-  la.firstChild.onchange = (e) => go('lookahead', e.target.checked ? '1' : '0');
-  controls.append(sceneSel, speedSel, la);
+  // Menus: scene, shot speed, look-ahead (each rebuilds the scene in place).
+  ui.select('Scene', 'scene', Object.entries(SCENES), scene);
+  ui.select('Shot speed', 'speed', SPEEDS.map((v) => [v, `${v} m/s`]), shotSpeed);
+  ui.checkbox('look-ahead', 'lookahead', lookAhead, { values: ['1', '0'], title: 'Speculative contacts ahead of fast bodies' });
   ui.help(HELP[scene]);
   const logEl = document.createElement('pre');
   logEl.className = 'muted';
   logEl.style.cssText = 'max-height: 140px; overflow: auto; margin: 4px 0 0; font-size: 11px;';
-  document.getElementById('hud').append(logEl);
+  ui.block().append(logEl);
 
   // Characters: handle -> { start, jumps sent }.
   const characters = new Map(placed.characters.map((c) => [c.h, { start: c.start, jumps: 0 }]));
@@ -84,8 +74,8 @@ export async function setup({ world, placed, sceneDef, ui, aim: shellAim, lookFr
   // Keys: held ones for walking; F, B, R, Space.
   const keys = new Set();
   let jumpSeq = 0;
-  addEventListener('keyup', (e) => keys.delete(e.code));
-  addEventListener('blur', () => keys.clear());
+  on(window, 'keyup', (e) => keys.delete(e.code));
+  on(window, 'blur', () => keys.clear());
   const key = (...c) => c.some((k) => keys.has(k));
   const aim = shellAim;
   function fire() {
