@@ -761,7 +761,7 @@ by each owner's listed count, as before the switch (`flPostOn`).
 
 Perf flag 4 (`PERF_LEVELS_ONCE`, with 8388608 `PERF_FLEET_HITLAT`); kernel
 `explicit_beams_fleet_once.slang` (included by `explicit_beams_fleet.slang`; no new
-module, no workgroup memory); measurements and the default in
+module, no workgroup memory); on by default; measurements and the default in
 `vehicle-perf-first-principles.md` §8.37. `fleetLevelsOnce` in place of `fleetLevelsLat`:
 the same rule, rounds, order and leaf functions on the same state.
 

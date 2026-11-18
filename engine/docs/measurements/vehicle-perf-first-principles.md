@@ -3227,3 +3227,138 @@ the coupling, and the node and beam phases (one workgroup over 548 nodes and 4,2
 beams). The next levers would be the member's node and beam phases on the wide passes'
 threads, since §8.31's wide node and beam passes are 0.85 and 0.54 for one car, and the
 coupling's workgroup copies built where its node phase runs.
+
+### 8.37 The contact levels' hits worked out once, ahead of the levels (2026-11-18)
+
+`contact-groups-design.md` §8.11 (what is built and why it is the same). Perf flag 4
+(`PERF_LEVELS_ONCE`, with `PERF_FLEET_HITLAT`), kernel `explicit_beams_fleet_once.slang`
+(`fleetLevelsOnce`), a checkbox on the lab page ("contact levels' hits worked out
+ahead"). Main at 366bc068, the eight- and 32-car mountain (main's rolling gully), native
+M3 Max; the GPU shared with another session's jobs through the lock (wall figures for
+ranking).
+
+**Measured first: where a hit's time goes.** A level is the hits' application, then three
+residual phases, each behind a barrier and each as long as its slowest hit. In each
+phase the hit's lane found its hit again (owner, list entry, triangle, node: four loads
+in a row), and the application and residual phase 0 each worked out the triangle, the
+clip test or vote, the two-body counts' slot (a walk of the owner's partners) and the
+reduced mass, then the force, in two coordinate frames (owner, World); phases 0 and 1
+each summed the four nodes' accelerations from loads of a flag, a tag, a beam sum and a
+mass before the accumulators. None of that changes within the levels; only the
+accumulators do. The levels in use (`AB_LEVELS`, owners / hits by level, four frames'
+last passes): 8 cars t 3.7: four levels of 1–2 owners and 4–22 hits; t 16: none or one;
+t 30: two levels of one hit; 32 cars t 1: 1–2 levels; t 4: 14 levels of 1–2 owners and
+1–33 hits.
+
+**Built, two steps** (each bit for bit on all 20 fixtures before the next):
+1. the hit found and both stagings (application in the owner's coordinates, residual in
+   the World's) taken once after the snapshot for every hit of the group side by side, in
+   registers; each two-body hit applied by its own lane; phase 1's r kept from phase 0;
+   a level's merge beside the next level's application (three barriers a level, not
+   four);
+2. the residual phases' unchanging values staged too (each node's immovable flag, beam
+   sum, mass and force-log flag; `vvResOf`'s and `vvGuardOf`'s inverse masses), so a
+   residual phase loads only the accumulators it reads.
+
+**Per phase** (`--ab-profile`, the levels' dispatch `explicit split levels`, ms a frame of
+34 substeps; before: main's defaults 30900161; the untimed frame in brackets):
+
+| fixture | levels (top) | before | step 1 | step 2 (the flag) | a level, µs before → after |
+|---|---|---|---|---|---|
+| 8 cars t 3.7 | 4 | 9.63 (23.1) | 6.69 (20.3) | **6.21 (19.6)** | 71 → 46 |
+| 8 cars t 16 | 0–1 | 1.06 (17.1) | 1.12 (17.1) | 1.18 (17.2) | — |
+| 8 cars t 30 | 2 | 5.42 (22.9) | 4.33 (22.1) | **4.27 (21.9)** | — |
+| 32 cars t 1 | 1–2 | 5.67 (23.4) | 4.67 (21.7) | **4.51 (21.6)** | — |
+| 32 cars t 2.5 | | 2.03 (19.7) | 1.89 (18.9) | 2.02 (19.0) | — |
+| 32 cars t 4 | 14 | 31.6 (54.7) | 16.1 (38.7) | **13.7 (36.7)** | 66 → 29 |
+
+(A level's µs: the dispatch a substep over the levels, the substep's fixed part, the
+snapshot, the rule's rounds and the staging, included.)
+
+**The floor** with this work a hit: a level is three barriers, and between them one
+dependent round trip each: the application's atomic adds (beside the level before's
+merge: an exchange, then an add), phase 0's accumulator loads then its adds into B,
+phase 1's loads of A and B then its adds into D. About 3 × (a barrier and two dependent
+device-memory accesses, ~3–4 µs) ≈ 10–12 µs a level, plus the substep's fixed part (the
+snapshot, the rounds, one staging: about 1.5–2 levels' worth at 8 cars t 30). At 32 cars
+t 4 the level is 29 µs, at 8 cars t 3.7 46 µs (more owners and hits a level, the
+slowest lane's hit sets it): within 2.5–4× of that floor, from 6–7×. What is left in a
+lane is the residual phases' arithmetic (the guard's divisions) and the force log's adds.
+
+**Proofs.**
+- `fast-check.sh perf=4`, all 20 fixtures (1, 2, 4, 8 and 32 cars), after each step: every
+  state word the same; 8 and 32 cars at `FRAMES=20`: the same.
+- Chrome: all 124 modules compile (`EXPLICIT_WGSL_MODULES_ONLY=1`), after each step.
+- `perf-verify.sh 30900165` (the defaults and the flag): `fleet_contact_gpu` 1 (new: the
+  flag against off on the column of ten, at least 3 levels deep, with and without self
+  split, and the two columns of six), `group_split_gpu` 3, `self_split_gpu` 8,
+  `explicit_contact_gpu` 13, `explicit_beams_bitwise` 12, `free_flight_gpu` 1,
+  `explicit_loop_cap` 5, `explicit_vehicles` 11, Metal `vehicle_parity` 4: PASS.
+- The scenario matrix (`tools/scenario-matrix/run.sh perf=4`, PR #127): PASS, every row bit
+  for bit, none slower past its threshold:
+
+| row | on ms | off ms | delta |
+|---|---|---|---|
+| drive | 3.700 | 3.672 | +0.8 % |
+| tumble | 3.487 | 3.478 | +0.3 % |
+| wall | 4.655 | 4.624 | +0.7 % |
+| pile2 | 8.660 | 8.494 | +2.0 % |
+| pile8 | 15.146 | 15.030 | +0.8 % |
+| pile32 | 38.184 | 57.261 | **−33.3 %** |
+| headon | 13.838 | 16.327 | **−15.2 %** |
+| side | 9.809 | 9.900 | −0.9 % |
+| bricks | 3.947 | 3.911 | +0.9 % |
+| rocks | 4.361 | 4.334 | +0.6 % |
+| barrier | 7.293 | 7.269 | +0.3 % |
+| truss | 1.774 | 1.756 | +1.0 % |
+
+- Whole 40 s runs end in the same state with the flag as without (`--compare-final`: every
+  car's largest node difference 0.0 mm, 8 and 32 cars).
+
+**Whole 40 s runs, native** (release, vehicles' GPU ms a World step, t ≥ 0.5 s, 2,371
+steps; runs interleaved, each alone on the GPU through the lock):
+
+| | median | p95 | p99 | worst |
+|---|---|---|---|---|
+| 8 cars, off, round 1 | 18.10 | 23.26 | 23.81 | 28.27 |
+| 8 cars, on, round 1 | **17.77** | **21.95** | 22.45 | **22.78** |
+| 8 cars, off, round 2 | 18.00 | 23.23 | 23.74 | 28.14 |
+| 8 cars, on, round 2 | **17.74** | **22.00** | 22.50 | **23.55** |
+| 32 cars, off | 95.41 | 105.88 | 409.6 | 423.9 (t 18.32) |
+| 32 cars, on | **77.36** | **86.50** | 390.3 | 405.0 (t 18.32) |
+
+Eight cars: −1.6 % at the median, −5.4 % at p95, −17 to −19 % at the worst (the crash's
+levels at t 5.35). Thirty-two cars: −19 % at the median and −18 % at p95; the worst is a
+step at t 18.32 that is not the levels' (400 ms either way).
+
+**Chrome.** Rung 3's frame-locked A/B (`run.sh --probe --locked --ab 4 --abUntil 40`,
+`mode=mountain&cars=8&timing=step`, the ledges and the rolling gully): 40 samples each, 0
+differ. Whole page runs (`run.sh --probe --secs 40`,
+`mode=mountain&car=gen&timing=step&cars=8`, `&levelsOnce=1` for on; vehicle GPU ms a World
+step, t ≥ 0.5 s, about 19–20 s simulated; interleaved off, on, off, on):
+
+| | steps | median | p95 | p99 | worst |
+|---|---|---|---|---|---|
+| off, round 1 | 1,111 | 20.26 | 24.13 | 26.56 | 28.55 |
+| on, round 1 | 1,176 | **16.87** | **18.48** | 19.42 | **20.51** |
+| off, round 2 | 1,112 | 20.30 | 24.44 | 26.77 | 29.86 |
+| on, round 2 | 1,175 | **16.84** | **18.45** | 19.20 | **19.99** |
+
+−17 % at the median, −24 % at p95, −29 % at the worst; the page also simulates 6 % more
+in the same 40 s. (A real-time page run is not frame-locked; the second round's on run
+ended with the first car elsewhere, so its cars took another path; the frame-locked A/B is
+the proof of sameness.)
+
+**Default: on** (main's default becomes 30900165). Bit for bit natively (fixtures, suites,
+the scenario matrix, whole runs' final states) and in Chrome (frame-locked A/B on both
+terrains), and faster in wall time natively and in Chrome at the median, p95 and the
+worst. The lab page's box "contact levels' hits worked out ahead" is ticked.
+
+**What remains in the levels.** At 32 cars t 4 the levels are still 13.7 ms of a 37 ms
+frame (14 levels a substep, 29 µs each); at 8 cars t 3.7 6.2 ms of 20. A level is now three
+barriers around short chains; cutting further means fewer barriers a level (phase 0's
+residual and phase 1's guard need every hit's B, so a barrier between them is inherent;
+two levels whose owners share no vehicle could be one, which the rule already makes
+them) or fewer levels (the rule's levels are the owners' partner conflicts; a finer rule,
+by contact point and triangle node rather than by vehicle, would let more hits share a
+level).
