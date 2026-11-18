@@ -147,6 +147,10 @@ The 110k ring settles into sleep (110k → 30k awake, rigid 20–30 ms a step). 
 
 ### C4. Native timing shows `cpl_share` at 3.86 ms (Suspected mis-attribution)
 That pass does trivial work, so the timestamps are probably attributed to the wrong pass.
+2026-11-18 (`docs/measurements/scenario-matrix.md`, "Findings on the way"): with
+`--timing step` on Metal `cpl_share` reads 0.06 to 7.4 ms from one second to the next on one
+car, and a step's span can read 70 ms (2,536 ms once) against an 8 to 11 ms wall time. Judge
+the World step by wall clock (`run.sh --world`, `vehicle_lab --end-world`).
 
 ### C5. The coupling window spans pieces torn off the car (Confirmed, 2026-11-14)
 `vehicle_coupling.slang` `cpl_bounds` takes one box over all of a vehicle's (unretired) nodes. On the lab's mountain the wheels and 30–45 kg parts that fall off keep 107–135 proxy bodies in the window from 23 s (lab-mountain-perf.md §6); the debris time to live only removes small pieces. Lossless fix: a window per piece (the pair list's piece labels already give them).
