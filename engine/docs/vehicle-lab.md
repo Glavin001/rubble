@@ -153,6 +153,19 @@ Chunks are made 8 ahead of the car's chunk (192 m, beyond the fog) and removed 2
 - **Round** (`DerbyGame`): a car is out on its roof or side for 3 s, with two wheels off its main body, thrown out of the arena, or not having moved 2 m in 12 s. The last car in wins; at 3 minutes the least damaged car still in. If every car left would go out on the same step (a pile that stopped together), the least damaged stays in. Damage is the car's beams bent plus three times its beams broken, over half its beam count. After the round every car brakes; "New round" (or `R`) restarts in place.
 - **Controls** (all on the page, applied as it runs unless noted): cars (rebuild), "you drive car 1" (off: spectator, every car the AI's), AI aggression, obstacles (restart), AI seed (restart). Car 1 drives with the Drive mode's keys (`W` `A` `S` `D` or the arrows, `Space` handbrake); the chase camera follows it, and `V` cycles the followed car.
 - **Surface contact** is off by default in the Derby, as on the mountain: the walls and ramps are the solver's static shapes, and without it the fleet-wide passes keep many cars faster.
+- **Known limit: a car on debris or on another car cannot drive.** Raycast wheels see the ground and the static shapes, not rigid bodies or other cars (F7). A car whose body comes to rest on fallen bricks, or whose crushed nose rides up onto another car, has its driven wheels in the air and stays put whatever its input; the round then knocks it out ("stopped moving"). The AI aims at its target's flank and staggers its start so that four cars rarely meet nose to nose in the middle (the first version's 4-way head-on pile stopped every car at once).
+
+**Measured** (2026-11-18, M3 Max, headless Chrome, `vehicle-lab-record.mjs --probe --secs 30 --eval tools/vehicle-lab/derby-probe.js`, spectator, the page's own real-time loop, GPU timing per step on, which itself costs a few ms a step). A World step is 1/60 s of physics (33 steps of the 2 kHz solver); real time is 60 steps a second.
+
+| Cars | GPU ms a World step, median (p95), main | Steps/s reached, main | With PR 128 (contact levels hit once) merged |
+| --- | --- | --- | --- |
+| 4 | 18.4 (21.6) | 30–34 | 14.4 (17.4) ms, ~36/s |
+| 8 | 22.3 (27.9) | 21–30 | 17.8 (22.1) ms, ~29/s |
+| 12 | 21.6 (29.0) | 20–24 | not measured |
+| 16 | 25.8 (34.4) | 16–20 | 21.8 (26.8) ms, ~18/s |
+| 32 | 26.2 (37.0) | 11–13 | 24.3 (29.8) ms, ~11/s |
+
+With GPU timing off, 4 cars ran at 59 steps a second until they met and about 30 once in contact: car-to-car contact is what costs. No count holds 60 (or 120) steps a second once cars are in contact; 32 cars are also limited by the page (readbacks and drawing 32 cars). The props (about 100 rigid bodies) cost 1–2 ms of rigid solver a step.
 
 ## Engine measurements
 
