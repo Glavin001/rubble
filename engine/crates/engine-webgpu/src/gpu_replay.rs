@@ -170,11 +170,17 @@ pub fn env_hook(sim: &mut WgpuSim) -> bool {
             if let Ok(path) = std::env::var("RUBBLE_KERNEL_REPLAY_OUT") {
                 let mut j = r.to_json();
                 j["table"] = serde_json::Value::String(r.table(0));
-                let host: Vec<serde_json::Value> = crate::host_profile::drain()
+                // Host spans so far (`RUBBLE_HOST_PROFILE=1`): per name, the median ms an
+                // occurrence and the count.
+                let mut by: std::collections::BTreeMap<&str, Vec<f64>> = Default::default();
+                for sp in crate::host_profile::drain() {
+                    by.entry(sp.name).or_default().push(sp.dur_ms);
+                }
+                let host: serde_json::Map<String, serde_json::Value> = by
                     .iter()
-                    .map(|s| serde_json::json!({ "n": s.name, "s": s.start_ms, "d": s.dur_ms }))
+                    .map(|(k, v)| (k.to_string(), serde_json::json!({ "median": median(v), "p90": quantile(v, 0.9), "n": v.len() })))
                     .collect();
-                let doc = serde_json::json!({ "replay": j, "host_spans_since_start": host.len() });
+                let doc = serde_json::json!({ "replay": j, "native": { "steps": sim.steps_done }, "host": host });
                 if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap_or_default()) {
                     eprintln!("kernel replay: cannot write {path}: {e}");
                 }
@@ -281,6 +287,19 @@ impl Timer {
     fn ms(&self, (a, b): (u64, u64)) -> f64 {
         b.saturating_sub(a) as f64 * self.period_ms
     }
+}
+
+/// Wait until the GPU has finished everything submitted so far (native `poll`, the
+/// browser's JSPI wait on `onSubmittedWorkDone`).
+fn wait_idle(device: &wgpu::Device, queue: &wgpu::Queue) {
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = done.clone();
+    queue.on_submitted_work_done(move || flag.store(true, std::sync::atomic::Ordering::Release));
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    engine_gpu_wait::until(|| {
+        let _ = device.poll(wgpu::PollType::Poll);
+        done.load(std::sync::atomic::Ordering::Acquire)
+    });
 }
 
 /// Map `buf` (MAP_READ) and copy its first `size` bytes out, waiting for the GPU.
@@ -424,12 +443,17 @@ impl WgpuSim {
                 compilation_options: Default::default(),
                 cache: None,
             });
-            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay empty") });
             for r in 0..=reps {
-                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("replay:empty"), timestamp_writes: Some(timer.writes(r)) });
-                pass.set_pipeline(&noop);
-                pass.dispatch_workgroups(1, 1, 1);
+                wait_idle(&device, &queue);
+                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay empty") });
+                {
+                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("replay:empty"), timestamp_writes: Some(timer.writes(r)) });
+                    pass.set_pipeline(&noop);
+                    pass.dispatch_workgroups(1, 1, 1);
+                }
+                queue.submit([enc.finish()]);
             }
+            let enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay empty") });
             let t = timer.finish(&device, &queue, enc, reps + 1);
             report.empty_pass_ms = t[1..].iter().map(|&x| timer.ms(x)).collect();
         }
@@ -450,8 +474,14 @@ impl WgpuSim {
         let mut in_seq: Vec<Vec<f64>> = vec![Vec::new(); items.len()];
         for shape in 0..3u32 {
             for r in 0..=reps {
-                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay step") });
+                // The restore in a submission of its own, finished before the timed one: a
+                // pass's begin timestamp is taken when Metal starts it, which can be before
+                // the work encoded ahead of it has finished.
+                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay restore") });
                 restore_all(&mut enc, self, &input);
+                queue.submit([enc.finish()]);
+                wait_idle(&device, &queue);
+                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay step") });
                 let slots = match shape {
                     0 => {
                         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("replay:step"), timestamp_writes: Some(timer.writes(0)) });
@@ -496,14 +526,18 @@ impl WgpuSim {
                         report.phases_sum_ms.push(sum);
                         report.phases_span_ms.push(span);
                         for (i, &x) in t.iter().enumerate() {
-                            phase_samples[i].push(timer.ms(x));
+                            let from = if i == 0 { x.0 } else { t[i - 1].1 };
+                            phase_samples[i].push(timer.ms((from, x.1)));
                         }
                     }
                     _ => {
                         report.dispatch_split_sum_ms.push(sum);
                         report.dispatch_split_span_ms.push(span);
+                        // Completion to completion: each pass's end after the previous one's
+                        // (the first from its own begin). These sum to the span.
                         for (i, &x) in t.iter().enumerate() {
-                            in_seq[i].push(timer.ms(x));
+                            let from = if i == 0 { x.0 } else { t[i - 1].1 };
+                            in_seq[i].push(timer.ms((from, x.1)));
                         }
                     }
                 }
@@ -540,13 +574,19 @@ impl WgpuSim {
             }
             let runs = if opts.whole_step_only { 0 } else { reps + 1 };
             for r in 0..runs {
+                // Restore, finish, then the timed pass alone in its submission (see above).
                 for &i in &bound {
                     let src = input[i].as_ref().expect("copyable");
                     enc.copy_buffer_to_buffer(src, 0, &self.bufs[i], 0, src.size());
                 }
+                queue.submit([std::mem::replace(&mut enc, device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay dispatch") })).finish()]);
+                wait_idle(&device, &queue);
                 let label = format!("replay:{}/{}", it.phase, it.kernel);
-                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(&label), timestamp_writes: Some(timer.writes(r)) });
-                self.replay_one(&mut pass, it);
+                {
+                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(&label), timestamp_writes: Some(timer.writes(r)) });
+                    self.replay_one(&mut pass, it);
+                }
+                queue.submit([std::mem::replace(&mut enc, device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("kernel replay dispatch") })).finish()]);
             }
             if opts.whole_step_only {
                 // Advance without timing: restore, run once.
