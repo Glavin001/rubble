@@ -52,6 +52,9 @@ impl WebWorld {
     #[wasm_bindgen(js_name = setDebugLabels)]
     pub fn set_debug_labels(&mut self, on: bool) {
         self.world.sim_mut().set_debug_labels(on);
+        if let Some(x) = self.world.explicit_vehicles() {
+            x.set_debug_labels(on);
+        }
     }
 
     /// The kernel replay of the next step (`WgpuSim::kernel_replay`): 1 when it ran (read

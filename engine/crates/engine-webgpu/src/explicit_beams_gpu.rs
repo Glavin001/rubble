@@ -111,6 +111,9 @@ pub struct ExplicitBeamsGpu {
     self_split: bool,
     self_split_pipes: std::sync::OnceLock<SelfSplit>,
     self_split_frame: std::cell::Cell<u32>,
+    /// Debug groups named after each dispatch's kernel (`gpu_labels`; `set_debug_labels`,
+    /// `RUBBLE_GPU_LABELS=1`). The same work either way.
+    debug_labels: std::cell::Cell<bool>,
     /// The wide passes with the reused pair list ([`Self::set_wide_list`]), and the steps
     /// of the frame being encoded when it runs so (0: not).
     wide_list: bool,
@@ -1746,6 +1749,7 @@ impl ExplicitBeamsGpu {
             self_split: self_split_default(),
             self_split_pipes: std::sync::OnceLock::new(),
             self_split_frame: std::cell::Cell::new(0),
+            debug_labels: std::cell::Cell::new(crate::gpu_labels::env_enabled()),
             wide_list: std::env::var("RUBBLE_WIDE_LIST").as_deref() == Ok("1"),
             wide_fused: std::env::var("RUBBLE_WIDE_FUSED").as_deref() == Ok("1"),
             wide_list_frame: std::cell::Cell::new(0),
@@ -3271,7 +3275,7 @@ impl ExplicitBeamsGpu {
                     let k = first + labels.len() as u32;
                     let timed = (labels.len() as u32) < cap;
                     let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("explicit_beams"),
+                        label: Some(label),
                         timestamp_writes: timed.then_some(wgpu::ComputePassTimestampWrites {
                             query_set: q,
                             beginning_of_pass_write_index: Some(2 * k),
@@ -3341,8 +3345,15 @@ impl ExplicitBeamsGpu {
                 label: Some("explicit_beams"),
                 timestamp_writes: stamps(i == 0, last),
             });
+            let labels_on = self.debug_labels.get();
             for cmd in *run {
+                if labels_on {
+                    pass.push_debug_group(&format!("explicit/{}", kernel_name(cmd)));
+                }
                 self.dispatch(&mut pass, cmd, alt);
+                if labels_on {
+                    pass.pop_debug_group();
+                }
             }
             if split && last {
                 self.dispatch_group_split(&mut pass, steps);
@@ -4134,6 +4145,12 @@ impl ExplicitBeamsGpu {
     /// default (`RUBBLE_SELF_SPLIT=1` on). For frames on the per-vehicle frame kernel
     /// alone: no vehicle contact, surface contact, wide passes, test variants or
     /// diagnostic pipelines (those frames keep the tests in the workgroup).
+    /// Name the frame's GPU work: a debug group `explicit/<kernel>` around each dispatch
+    /// (Chrome GPU traces, Xcode captures). The same work either way.
+    pub fn set_debug_labels(&self, on: bool) {
+        self.debug_labels.set(on);
+    }
+
     pub fn set_self_split(&mut self, on: bool) {
         self.self_split = on;
     }
