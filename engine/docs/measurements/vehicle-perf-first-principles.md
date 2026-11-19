@@ -4025,8 +4025,8 @@ work 24 times, in series, each for one lane:
 
 - *The proxies' integration* scanned the shapes for the body's own (`if (shape.body !=
   lid) continue;`), then exchanged six sums, integrated and normalised. 24 bodies: 30 µs a
-  substep, 1.0 ms a frame, a third of the node-contact frame, and for weeks' worth of
-  reading it had been taken for the nodes' shape tests. With each body's shapes in a list
+  substep, 1.0 ms a frame, a third of the node-contact frame, and until the profiler
+  split the group it had been read as the nodes' shape tests. With each body's shapes in a list
   of its own (`T_BSH`) the loop is one iteration: 0.09 ms. Node contact on the boxes
   2.69 → 1.83; mechanism 3's table above is the new figures.
 - *The search* stored a pair inside the loop over the near slots: every (slot, lane) hit
