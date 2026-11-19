@@ -409,6 +409,9 @@ inline V3 noPositiveWorkBody(V3 c, V3 f, V3 v, float m, V3 n, BodyK bk)
 #ifndef SURF_STAGED
 #define SURF_STAGED 1
 #endif
+#ifndef SURF_FALLBACK
+#define SURF_FALLBACK 1
+#endif
 #define HCAP ((NGS - SHB) / 2u > 512u ? 512u : (NGS - SHB) / 2u)
 #define HTRI (HCAP * 3u / 8u)
 #define HSEG (HCAP - HTRI)
@@ -772,35 +775,11 @@ kernel void floorFrame(
             sh[7] = f4(p, 0);
 #if SURF
             {
-                // surface_shape: the strict pose (fq::shape_pose), a box's axes, the cull box
-                // (fq::bounds). A fast body would need the casts (§38.4), which are not here:
-                // the status says so.
-                device float4* row = surfRow + (NBOX + lid) * SRW;
-                float4 rq;
-                float3 sp = fqPose(fv(bd[0]), brot, float3(0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 1.0f), rq);
-                FqShape fs;
-                fs.b = float3(0.0f, 0.0f, 0.0f); fs.hull = 0u; fs.nv = 0u; fs.nf = 0u; fs.ne = 0u; fs.moved = 0u; fs.off = float3(0.0f, 0.0f, 0.0f);
-                fs.c = sp;
-                fs.ax0 = fqRot(rq, float3(1.0f, 0.0f, 0.0f)); fs.ax1 = fqRot(rq, float3(0.0f, 1.0f, 0.0f)); fs.ax2 = fqRot(rq, float3(0.0f, 0.0f, 1.0f));
+                // (A fast body would need surface contact's casts, §38.4, which are not
+                // here: the status says so. cast_velocities' test.)
                 float ext, radius;
-                if (as_type<uint>(sh[0].y) == 1u)
-                {
-                    fs.kind = FQ_SPH; fs.hext = float3(sh[0].z, 0.0f, 0.0f);
-                    ext = sh[0].z; radius = sh[0].z;
-                }
-                else
-                {
-                    V3 hf = v3(sh[1]);
-                    fs.kind = FQ_BOX; fs.hext = fv(hf);
-                    ext = rmin(rmin(hf.x, hf.y), hf.z); radius = len3(hf);
-                }
-                float3 flo, fhi;
-                fqBounds(fs, flo, fhi);
-                row[0] = f4(fs.c, as_type<float>(fs.kind));
-                row[1] = f4(fs.ax0, 0.0f); row[2] = f4(fs.ax1, 0.0f); row[3] = f4(fs.ax2, 0.0f);
-                row[4] = f4(fs.hext, sh[0].x);
-                row[5] = f4(flo, 0.0f); row[6] = f4(fhi, 0.0f);
-                row[7] = float4(as_type<float>(lid), 0.0f, 0.0f, 0.0f);
+                if (as_type<uint>(sh[0].y) == 1u) { ext = sh[0].z; radius = sh[0].z; }
+                else { V3 hf = v3(sh[1]); ext = rmin(rmin(hf.x, hf.y), hf.z); radius = len3(hf); }
                 float travel = len3(v3(bd[2])) * H + (len3(v3(bd[3])) * (radius + 0.01f)) * H;
                 if (travel > 0.5f * ext) atomic_fetch_or_explicit(&tgS[11], 8, memory_order_relaxed);
             }
@@ -2323,6 +2302,12 @@ kernel void floorFrame(
         // SKIP bits, timing only: 21 no pass; 22 the search alone; 24 no staged stage; 25 no
         // stage B; 26 no stage R; 23 nothing emitted or applied.
         uint3 sHitN = uint3(0u, 0u, 0u);
+#ifndef SURF_EMPTY
+#define SURF_EMPTY 0
+#endif
+        // (SURF_EMPTY, a measurement: the pass's code left out of the kernel, the words
+        // around it kept; it tells the pass's cost from its code's presence.)
+#if !SURF_EMPTY
         if (!SKIP(21))
         {
             // A slot is near when the body's box (reduced in the S1 phase, after the node
@@ -2331,28 +2316,78 @@ kernel void floorFrame(
             // array.
             if (lid < NSS)
             {
-                device const float4* row = surfRow + lid * SRW;
-                float4 lo = row[5], hi = row[6];
                 V3 clo = v3(unordF(atomic_load_explicit(&tgS[0], memory_order_relaxed)), unordF(atomic_load_explicit(&tgS[1], memory_order_relaxed)), unordF(atomic_load_explicit(&tgS[2], memory_order_relaxed)));
                 V3 chi = v3(unordF(atomic_load_explicit(&tgS[3], memory_order_relaxed)), unordF(atomic_load_explicit(&tgS[4], memory_order_relaxed)), unordF(atomic_load_explicit(&tgS[5], memory_order_relaxed)));
-                if (clo.x - CR <= hi.x && clo.y - CR <= hi.y && clo.z - CR <= hi.z && chi.x + CR >= lo.x && chi.y + CR >= lo.y && chi.z + CR >= lo.z)
+                #define SURF_BOXNEAR(lo_, hi_, pad_) (clo.x - (pad_) <= hi_.x && clo.y - (pad_) <= hi_.y && clo.z - (pad_) <= hi_.z && chi.x + (pad_) >= lo_.x && chi.y + (pad_) >= lo_.y && chi.z + (pad_) >= lo_.z)
+                const uint o = SB(lid);
+                bool nearS = false;
+                if (lid < NBOX)
                 {
-                    const uint o = SB(lid);
-                    tgG[o] = lo.x; tgG[o + 1u] = lo.y; tgG[o + 2u] = lo.z;
-                    tgG[o + 3u] = hi.x; tgG[o + 4u] = hi.y; tgG[o + 5u] = hi.z;
-                    for (uint k = 0u; k < 5u; k++)
+                    // A fixed box: its rows as uploaded.
+                    device const float4* row = surfRow + lid * SRW;
+                    float4 lo = row[5], hi = row[6];
+                    if (SURF_BOXNEAR(lo, hi, CR))
                     {
-                        float4 r = row[k];
-                        tgG[o + 6u + k * 3u] = r.x; tgG[o + 7u + k * 3u] = r.y; tgG[o + 8u + k * 3u] = r.z;
+                        nearS = true;
+                        tgG[o] = lo.x; tgG[o + 1u] = lo.y; tgG[o + 2u] = lo.z;
+                        tgG[o + 3u] = hi.x; tgG[o + 4u] = hi.y; tgG[o + 5u] = hi.z;
+                        for (uint k = 0u; k < 5u; k++)
+                        {
+                            float4 r = row[k];
+                            tgG[o + 6u + k * 3u] = r.x; tgG[o + 7u + k * 3u] = r.y; tgG[o + 8u + k * 3u] = r.z;
+                        }
+                        tgG[o + 21u] = row[0].w; tgG[o + 22u] = row[4].w; tgG[o + 23u] = row[7].x;
                     }
-                    tgG[o + 21u] = row[0].w; tgG[o + 22u] = row[4].w; tgG[o + 23u] = row[7].x;
-                    atomic_fetch_or_explicit(&tgS[6u + (lid >> 5)], int(1u << (lid & 31u)), memory_order_relaxed);
                 }
+#if RIGID
+                else
+                {
+                    // A proxy's shape. First against the node pass's box of the same pose (R0:
+                    // at least as wide as the surface's, 1e-4 for the two arithmetics): the
+                    // strict pose is worked out only for a shape that may be near (it was a
+                    // third of the pass's cost with nothing near).
+                    const uint k = lid - NBOX;
+                    device const float4* sh = rigShape + k * SHW;
+                    float4 blo = sh[5], bhi = sh[6];
+                    if (SURF_BOXNEAR(blo, bhi, CR + 1e-4f))
+                    {
+                        // surface_shape: the strict pose (fq::shape_pose), a box's axes, the
+                        // cull box (fq::bounds).
+                        device const float4* bd = rigBody + as_type<uint>(sh[0].x) * BDW;
+                        float4 rq;
+                        float3 sp = fqPose(fv(bd[0]), bd[1], float3(0.0f, 0.0f, 0.0f), float4(0.0f, 0.0f, 0.0f, 1.0f), rq);
+                        FqShape fs;
+                        fs.b = float3(0.0f, 0.0f, 0.0f); fs.hull = 0u; fs.nv = 0u; fs.nf = 0u; fs.ne = 0u; fs.moved = 0u; fs.off = float3(0.0f, 0.0f, 0.0f);
+                        fs.c = sp;
+                        fs.ax0 = fqRot(rq, float3(1.0f, 0.0f, 0.0f)); fs.ax1 = fqRot(rq, float3(0.0f, 1.0f, 0.0f)); fs.ax2 = fqRot(rq, float3(0.0f, 0.0f, 1.0f));
+                        if (as_type<uint>(sh[0].y) == 1u) { fs.kind = FQ_SPH; fs.hext = float3(sh[0].z, 0.0f, 0.0f); }
+                        else { fs.kind = FQ_BOX; fs.hext = fv(sh[1]); }
+                        float3 flo, fhi;
+                        fqBounds(fs, flo, fhi);
+                        if (SURF_BOXNEAR(flo, fhi, CR))
+                        {
+                            nearS = true;
+                            tgG[o] = flo.x; tgG[o + 1u] = flo.y; tgG[o + 2u] = flo.z;
+                            tgG[o + 3u] = fhi.x; tgG[o + 4u] = fhi.y; tgG[o + 5u] = fhi.z;
+                            tgG[o + 6u] = fs.c.x; tgG[o + 7u] = fs.c.y; tgG[o + 8u] = fs.c.z;
+                            tgG[o + 9u] = fs.ax0.x; tgG[o + 10u] = fs.ax0.y; tgG[o + 11u] = fs.ax0.z;
+                            tgG[o + 12u] = fs.ax1.x; tgG[o + 13u] = fs.ax1.y; tgG[o + 14u] = fs.ax1.z;
+                            tgG[o + 15u] = fs.ax2.x; tgG[o + 16u] = fs.ax2.y; tgG[o + 17u] = fs.ax2.z;
+                            tgG[o + 18u] = fs.hext.x; tgG[o + 19u] = fs.hext.y; tgG[o + 20u] = fs.hext.z;
+                            tgG[o + 21u] = as_type<float>(fs.kind); tgG[o + 22u] = sh[0].x; tgG[o + 23u] = as_type<float>(k);
+                        }
+                    }
+                }
+#endif
+                if (nearS) atomic_fetch_or_explicit(&tgS[6u + (lid >> 5)], int(1u << (lid & 31u)), memory_order_relaxed);
             }
             BAR;
             const uint sa0 = uint(atomic_load_explicit(&tgS[6], memory_order_relaxed)), sa1 = uint(atomic_load_explicit(&tgS[7], memory_order_relaxed));
             if ((sa0 | sa1) != 0u)
             {
+                // (Writing the lane's own state to its rows for the length of the pass and
+                // reading it back after was measured and not kept: the parked frame the same,
+                // the frames in contact 0.36 ms longer.)
                 // The search: every element's padded box against the near slots' cull boxes
                 // (`near`, `seg_near`); a pair that passes goes on the step's list.
                 // (The slots an element is near as bits first, then its pairs listed one
@@ -2383,7 +2418,7 @@ kernel void floorFrame(
                 }
                 if (isNode)
                 {
-                    float3 x0 = fv(v3(0, 0, 0) + Pown);
+                    float3 x0 = fv(v3(0, 0, 0) + TGP(ni));
                     float3 tlo = ssub3(x0, float3(CR, CR, CR));
                     float3 thi = sadd3(x0, float3(CR, CR, CR));
                     SURF_NEAR(NT + NSEG + ni, tlo, thi)
@@ -2624,8 +2659,13 @@ kernel void floorFrame(
                                     fprintf(stderr, "FALLBACK tri kc %u\n", kc);
 #endif
                                     // (More candidates at the least gap than a pair keeps: the
-                                    // whole query, the same result.)
+                                    // whole query, the same result; or, SURF_FALLBACK 0, the
+                                    // status says so and the kernel is that much smaller.)
+#if SURF_FALLBACK
                                     hit = fqContact(fs, x0, x1, x2, CR, w, nn, g, q);
+#else
+                                    atomic_fetch_or_explicit(&tgS[11], 64, memory_order_relaxed);
+#endif
                                 }
                                 else if (ok)
                                 {
@@ -2707,7 +2747,11 @@ kernel void floorFrame(
 #ifdef EMU_TRACE
                                     fprintf(stderr, "FALLBACK seg kc %u\n", kc);
 #endif
+#if SURF_FALLBACK
                                     hit = fqSegContact(fs, x0, x1, CR, w, nn, g, q, two, w2, q2);
+#else
+                                    atomic_fetch_or_explicit(&tgS[11], 64, memory_order_relaxed);
+#endif
                                 }
                                 else if (ok)
                                 {
@@ -2891,6 +2935,7 @@ kernel void floorFrame(
                 }
             }
         }
+#endif
 #endif
 #if RIGID
         // ---- the proxies integrate the step's reactions (end_step) ----

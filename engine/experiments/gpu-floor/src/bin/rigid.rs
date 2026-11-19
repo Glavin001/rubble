@@ -79,6 +79,14 @@ fn main() -> anyhow::Result<()> {
         if flag("--direct") {
             extra += "#define SURF_STAGED 0\n";
         }
+        // --no-fallback: a staged pair with more than 16 candidates at its least gap sets the
+        // status instead of taking the whole query (a smaller kernel).
+        if flag("--surf-empty") {
+            extra += "#define SURF_EMPTY 1\n";
+        }
+        if flag("--no-fallback") {
+            extra += "#define SURF_FALLBACK 0\n";
+        }
         let prof: Option<usize> = arg("--profile").map(|x| x.parse().unwrap());
         if prof.is_some() {
             extra += "#define PER_STEP 1\n";
@@ -172,7 +180,7 @@ fn main() -> anyhow::Result<()> {
         };
         let all = med(0);
         println!("phases ({cars} cars; ms a frame at the last state): whole {all:.4}");
-        for (bit, name) in [(13u32, "rigid shapes and proxies"), (0, "S0 node pass"), (1, "S1 centred scalars"), (2, "C1+C2 centred gather"), (3, "S3 beams"), (4, "S4 force gather"), (5, "S4 pair rows"), (8, "hit passes")] {
+        for (bit, name) in [(13u32, "rigid shapes and proxies"), (0, "S0 node pass"), (1, "S1 centred scalars"), (2, "C1+C2 centred gather"), (3, "S3 beams"), (4, "S4 force gather"), (5, "S4 pair rows"), (8, "hit passes"), (21, "surface pass (and its box)")] {
             println!("  {name:26} {:.4} ms", all - med(1 << bit));
         }
         return Ok(());
