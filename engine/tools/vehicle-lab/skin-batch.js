@@ -46,14 +46,15 @@
     for (const m of [...(ref ? ['ref'] : []), ...MODES]) out.push(`  ${m.padEnd(5)} ${hashes[m]}`);
     out.push('  setting | skinning | shadow | picture | sum    | wall ms a draw   (World paused, draws alone)');
     for (let r = 0; r < ROUNDS; r++) {
-      for (const parts of PARTS) for (const m of MODES) {
-        set(m);
+      for (const parts of PARTS) for (const m of [...(ref ? ['ref'] : []), ...MODES]) {
+        if (m === 'ref') { set('off'); window.__skinCode(ref); } else set(m);
         window.__drawSkip(parts);
         await window.__drawCost(BATCH, BATCH);
         window.__drawSkip(parts);
         const wall = await window.__drawCost(DRAWS, BATCH);
         await sleep(100);
         const g = window.__drawGpu();
+        if (m === 'ref') window.__skinCode(null);
         out.push(`  ${(m + (parts.length ? ' -' + parts.join(',') : '')).padEnd(7)} | ${f(g.skin)}   | ${f(g.shadow)} | ${f(g.picture)}  | ${f(g.skin + g.shadow + g.picture)} | ${f(wall)}`);
       }
     }
