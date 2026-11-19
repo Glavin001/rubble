@@ -75,6 +75,23 @@ impl EncodeState {
 
 /// GPU execution time of a completed command buffer (`GPUEndTime - GPUStartTime`).
 #[allow(unexpected_cfgs)] // objc 0.2 msg_send! checks a cargo-clippy feature
+/// A dispatch's debug-group name: the plan's kernel, its entry when another, the pass
+/// and the invocations (direct dispatches).
+fn dispatch_label(kernel: &str, entry: &str, pass: u32, threads: Option<u64>) -> String {
+    let mut s = kernel.to_string();
+    if entry != kernel {
+        s.push_str(&format!(" ({entry})"));
+    }
+    if pass != 0 {
+        s.push_str(&format!(" pass {pass}"));
+    }
+    match threads {
+        Some(t) => s.push_str(&format!(" x{t}")),
+        None => s.push_str(" indirect"),
+    }
+    s
+}
+
 pub(crate) fn gpu_ms(cb: &CommandBufferRef) -> f64 {
     use metal::foreign_types::ForeignTypeRef;
     use objc::{msg_send, sel, sel_impl};
@@ -124,6 +141,10 @@ pub struct MetalSim {
     kernel_cache: std::cell::RefCell<std::collections::HashMap<&'static str, usize>>,
     /// Steps the counters in `last_counters` describe.
     counted_steps: u32,
+    /// `RUBBLE_CAPTURE_STEP`: the step written to a `.gputrace` (crate::profile).
+    capture: Option<crate::profile::CaptureRequest>,
+    /// Completed command buffers' GPU intervals, while [`Self::set_gpu_log`] is on.
+    gpu_log: Option<Vec<crate::profile::GpuSpan>>,
     /// The terrain pool (`terrain_enable`), its kernels and pending writes.
     pub(crate) terrain: Option<crate::terrain::MetalTerrain>,
     /// Fast math for terrain kernels (`ENGINE_FAST_MATH`, `ENGINE_STRICT_KERNELS`).
@@ -137,6 +158,7 @@ pub struct MetalSim {
 impl MetalSim {
     /// Persistent-contact world with every default the WebGPU host ships.
     pub fn new(capacity: WorldCapacity) -> anyhow::Result<Self> {
+        crate::profile::prepare_env();
         let device = Device::system_default().ok_or_else(|| anyhow::anyhow!("no Metal device"))?;
         let queue = device.new_command_queue();
         let chip = device.name().to_string();
@@ -165,23 +187,11 @@ impl MetalSim {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let options = |fast_math: bool| {
-            let o = CompileOptions::new();
-            o.set_fast_math_enabled(fast_math);
-            o
-        };
-        let (fast_opts, strict_opts) = (options(fast), options(false));
         let pipes = RIGID_KERNELS
             .iter()
             .map(|k| {
-                let compile = if strict.iter().any(|s| k.entry.starts_with(s.as_str())) {
-                    &strict_opts
-                } else {
-                    &fast_opts
-                };
-                let lib = device
-                    .new_library_with_source(k.msl, compile)
-                    .map_err(|e| anyhow::anyhow!("compile {}: {e}", k.entry))?;
+                let fast_math = fast && !strict.iter().any(|s| k.entry.starts_with(s.as_str()));
+                let lib = crate::profile::new_library(&device, k.msl, k.entry, fast_math)?;
                 let func = lib
                     .get_function(k.entry, None)
                     .map_err(|e| anyhow::anyhow!("function {}: {e}", k.entry))?;
@@ -246,6 +256,8 @@ impl MetalSim {
             profile_cbs: Vec::new(),
             kernel_cache: Default::default(),
             counted_steps: 0,
+            capture: crate::profile::CaptureRequest::from_env(),
+            gpu_log: None,
             terrain: None,
             fast_math: (fast, strict),
             terrain_impulses_pending: false,
@@ -487,44 +499,32 @@ impl MetalSim {
             self.steps_done += 1;
             return Ok(());
         }
-        let (cell, levels) = rigid_plan::grid_cell(&self.host_cols, &self.host_bodies, false);
-        self.params.grid_cell_size = cell;
-        self.grid_levels = levels;
-        // A ring slot is reused only after the step that last used it finished.
-        while self.in_flight.len() >= RING {
-            let cb = self.in_flight.pop_front().unwrap();
-            cb.wait_until_completed();
+        let capture = self.capture.clone().filter(|c| c.step == self.steps_done);
+        if let Some(c) = &capture {
+            self.wait_all();
+            if let Err(e) = crate::profile::begin_capture(&self.queue, &c.out) {
+                eprintln!("rubble: no GPU capture: {e}");
+            }
         }
-        let m = self.step_modes();
-        let i = self.step_inputs(&m);
-        let s = rigid_plan::host_words(
-            &self.capacity,
-            &m,
-            &i,
-            &rigid_plan::HostState {
-                contacts_parity: self.contacts_parity,
-                grid_levels: self.grid_levels,
-                has_filters: false,
-                record_hash: self.record_hash(),
-                np_defer_limit: 0,
-                persist_list_limit: 0,
-            },
-        );
-        let base = self.ring as u64 * SLOT_BYTES;
-        self.ring = (self.ring + 1) % RING;
-        write(&self.upload, base + UP_SCRATCH, bytemuck::cast_slice(&s));
-        let host = rigid_plan::host_uniforms(&self.params, &s);
-        write(&self.upload, base + UP_HOST, bytemuck::bytes_of(&host));
-        write(
-            &self.upload,
-            base + UP_COUNTERS,
-            bytemuck::bytes_of(&rigid_plan::step_counters(&i)),
-        );
-        write(&self.upload, base + UP_COLORS, &[0u8; 512]);
-        let cmds = rigid_plan::encode_step(&m, &i, false, true);
+        let (cmds, base) = self.prepare_step()?;
+        let labels = crate::profile::labels_enabled();
+        let phase_of = if labels {
+            crate::profile::phases_of(&cmds, |c| match *c {
+                Cmd::Phase { name } => Some(name),
+                _ => None,
+            })
+        } else {
+            Vec::new()
+        };
 
         let mut cb = self.queue.new_command_buffer().to_owned();
+        if labels {
+            cb.set_label(&format!("rubble step {}", self.steps_done));
+        }
         let blit = cb.new_blit_command_encoder();
+        if labels {
+            blit.set_label("uploads and counter copies");
+        }
         // Host words and uniform first: the plan's copies then forward last
         // step's GPU counts into the uniform and reset the counters.
         blit.copy_from_buffer(&self.upload, base + UP_SCRATCH, &self.bufs[21], 0, 256);
@@ -567,12 +567,24 @@ impl MetalSim {
         };
         let mut e = begin(&cb);
         let mut st = EncodeState::new();
-        for c in &cmds {
+        // Labels: the open phase group of the encoder.
+        let mut group: Option<&'static str> = None;
+        for (at, c) in cmds.iter().enumerate() {
+            if labels && matches!(c, Cmd::Dispatch { .. } | Cmd::Indirect { .. }) && group != Some(phase_of[at]) {
+                if group.is_some() {
+                    e.pop_debug_group();
+                }
+                e.push_debug_group(phase_of[at]);
+                group = Some(phase_of[at]);
+            }
             match *c {
                 Cmd::Copy { .. } => {}
                 // Profiling: one command buffer per phase, timed by the GPU.
                 Cmd::Phase { name } => {
                     if self.profiling {
+                        if group.take().is_some() {
+                            e.pop_debug_group();
+                        }
                         e.end_encoding();
                         cb.commit();
                         self.profile_cbs.push((name, cb));
@@ -588,25 +600,85 @@ impl MetalSim {
                 } => {
                     let k = self.bind(&e, &mut st, kernel, pass, false)?;
                     let (x, y) = groups(threads);
+                    if labels {
+                        e.push_debug_group(&dispatch_label(kernel, k.entry, pass, Some(threads)));
+                    }
                     e.dispatch_thread_groups(MTLSize::new(x, y, 1), Self::threads(k));
+                    if labels {
+                        e.pop_debug_group();
+                    }
                 }
                 Cmd::Indirect { kernel, slot, pass } => {
                     let k = self.bind(&e, &mut st, kernel, pass, true)?;
+                    if labels {
+                        e.push_debug_group(&dispatch_label(kernel, k.entry, pass, None));
+                    }
                     e.dispatch_thread_groups_indirect(
                         &self.bufs[23],
                         u64::from(slot) * 12,
                         Self::threads(k),
                     );
+                    if labels {
+                        e.pop_debug_group();
+                    }
                 }
             }
         }
+        if group.is_some() {
+            e.pop_debug_group();
+        }
         e.end_encoding();
         cb.commit();
+        if let Some(c) = &capture {
+            cb.wait_until_completed();
+            crate::profile::end_capture(&c.out);
+        }
         self.in_flight.push_back(cb);
         self.terrain_impulses_pending = false;
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
         Ok(())
+    }
+
+    /// The step's host words into a ring slot and its command list: (commands, the
+    /// slot's byte offset in the upload buffer).
+    fn prepare_step(&mut self) -> Result<(Vec<Cmd>, u64), ExecError> {
+        let (cell, levels) = rigid_plan::grid_cell(&self.host_cols, &self.host_bodies, false);
+        self.params.grid_cell_size = cell;
+        self.grid_levels = levels;
+        // A ring slot is reused only after the step that last used it finished.
+        while self.in_flight.len() >= RING {
+            let cb = self.in_flight.pop_front().unwrap();
+            cb.wait_until_completed();
+            self.log_gpu(&cb, "step");
+        }
+        let m = self.step_modes();
+        let i = self.step_inputs(&m);
+        let s = rigid_plan::host_words(
+            &self.capacity,
+            &m,
+            &i,
+            &rigid_plan::HostState {
+                contacts_parity: self.contacts_parity,
+                grid_levels: self.grid_levels,
+                has_filters: false,
+                record_hash: self.record_hash(),
+                np_defer_limit: 0,
+                persist_list_limit: 0,
+            },
+        );
+        let base = self.ring as u64 * SLOT_BYTES;
+        self.ring = (self.ring + 1) % RING;
+        write(&self.upload, base + UP_SCRATCH, bytemuck::cast_slice(&s));
+        let host = rigid_plan::host_uniforms(&self.params, &s);
+        write(&self.upload, base + UP_HOST, bytemuck::bytes_of(&host));
+        write(
+            &self.upload,
+            base + UP_COUNTERS,
+            bytemuck::bytes_of(&rigid_plan::step_counters(&i)),
+        );
+        write(&self.upload, base + UP_COLORS, &[0u8; 512]);
+        Ok((rigid_plan::encode_step(&m, &i, false, true), base))
     }
 
     fn threads(k: &RigidKernel) -> MTLSize {
@@ -673,6 +745,24 @@ impl MetalSim {
     pub(crate) fn wait_all(&mut self) {
         while let Some(cb) = self.in_flight.pop_front() {
             cb.wait_until_completed();
+            self.log_gpu(&cb, "step");
+        }
+    }
+
+    /// Keep each completed step's GPU interval ([`Self::take_gpu_log`]) from now on, or stop.
+    pub fn set_gpu_log(&mut self, on: bool) {
+        self.gpu_log = on.then(Vec::new);
+    }
+
+    /// The GPU intervals of the steps completed since the log was turned on or last taken.
+    pub fn take_gpu_log(&mut self) -> Vec<crate::profile::GpuSpan> {
+        self.gpu_log.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    fn log_gpu(&mut self, cb: &CommandBufferRef, label: &str) {
+        if let Some(log) = &mut self.gpu_log {
+            let (start_s, end_s) = crate::profile::gpu_interval(cb);
+            log.push(crate::profile::GpuSpan { label: label.to_string(), start_s, end_s });
         }
     }
 
@@ -697,23 +787,138 @@ impl MetalSim {
     /// One step with GPU time per phase (ms, summed over the iterations' primal
     /// and dual segments). Splitting the step adds a little submission cost.
     pub fn step_profiled(&mut self) -> Result<Vec<(&'static str, f64)>, ExecError> {
+        let mut out: Vec<(&'static str, f64)> = Vec::new();
+        for s in self.step_profiled_spans()?.into_iter().filter(|s| s.label != "tail") {
+            let ms = (s.end_s - s.start_s) * 1e3;
+            match out.iter_mut().find(|(n, _)| *n == s.label) {
+                Some(slot) => slot.1 += ms,
+                None => out.push((s.label, ms)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// One step split into a command buffer per plan phase (as [`Self::step_profiled`]),
+    /// each phase's GPU interval in order (a phase that recurs, as the solver's primal
+    /// and dual per iteration, appears once per segment). The last span, `tail`, is the
+    /// commands after the last phase marker.
+    pub fn step_profiled_spans(&mut self) -> Result<Vec<crate::profile::PhaseSpan>, ExecError> {
         self.wait_all();
         self.profiling = true;
         self.profile_cbs.clear();
         let r = self.step_submit();
         self.profiling = false;
         r?;
+        // The commands past the last marker went in the step's own command buffer.
+        let tail = self.in_flight.back().cloned();
         self.drain()?;
-        let mut out: Vec<(&'static str, f64)> = Vec::new();
-        for (name, cb) in self.profile_cbs.drain(..) {
+        let mut out = Vec::new();
+        for (name, cb) in self.profile_cbs.drain(..).chain(tail.map(|cb| ("tail", cb))) {
             cb.wait_until_completed();
-            let ms = gpu_ms(&cb);
-            match out.iter_mut().find(|(n, _)| *n == name) {
-                Some(slot) => slot.1 += ms,
-                None => out.push((name, ms)),
-            }
+            let (start_s, end_s) = crate::profile::gpu_interval(&cb);
+            out.push(crate::profile::PhaseSpan { label: name, start_s, end_s });
         }
         Ok(out)
+    }
+
+    /// The next step as replay operations over [`Self::replay_buffers`] (measurement
+    /// only: nothing is submitted and the world does not advance; the step's host
+    /// words go to a free ring slot). The uploads and the plan's copies come first, as
+    /// the step encodes them, then every dispatch in order. Err when every body sleeps
+    /// (the step would be skipped).
+    pub fn replay_ops(&mut self) -> Result<Vec<crate::profile::ReplayOp>, ExecError> {
+        use crate::profile::{writable_buffers, Grid, ReplayDispatch, ReplayOp};
+        self.wait_all();
+        if self.last_counters.awake_count == 0 && self.steps_done > 0 && self.counted_steps == self.steps_done {
+            return Err(ExecError::Backend("replay: every body sleeps; the step would be skipped".into()));
+        }
+        let (cmds, base) = self.prepare_step()?;
+        let phase_of = crate::profile::phases_of(&cmds, |c| match *c {
+            Cmd::Phase { name } => Some(name),
+            _ => None,
+        });
+        let upload = self.bufs.len();
+        let copy = |src, src_offset, dst, dst_offset, size| ReplayOp::Copy {
+            src,
+            src_offset,
+            dst,
+            dst_offset,
+            size,
+            phase: "upload".into(),
+        };
+        let mut ops = vec![
+            copy(upload, base + UP_SCRATCH, 21, 0, 256),
+            copy(upload, base + UP_HOST, 6, 0, std::mem::size_of::<rigid_plan::HostUniforms>() as u64),
+            copy(upload, base + UP_COLORS, 17, 0, 512),
+        ];
+        for c in &cmds {
+            if let Cmd::Copy { src, src_offset, dst, dst_offset, size } = *c {
+                let (from, offset) = if src == COUNTER_UPLOAD {
+                    (upload, base + UP_COUNTERS + u64::from(src_offset))
+                } else {
+                    (src as usize, u64::from(src_offset))
+                };
+                ops.push(copy(from, offset, dst as usize, u64::from(dst_offset), u64::from(size)));
+            }
+        }
+        for (at, c) in cmds.iter().enumerate() {
+            let (kernel, pass, grid) = match *c {
+                Cmd::Dispatch { kernel, threads, pass } => {
+                    let (x, y) = groups(threads);
+                    (kernel, pass, Grid::Groups(x, y, 1))
+                }
+                Cmd::Indirect { kernel, slot, pass } => (kernel, pass, Grid::Indirect { buf: 23, offset: u64::from(slot) * 12 }),
+                _ => continue,
+            };
+            let idx = self.kernel_index(kernel)?;
+            let k = &RIGID_KERNELS[idx];
+            let indirect = matches!(grid, Grid::Indirect { .. });
+            let binds = k
+                .binds
+                .iter()
+                .map(|&(index, slot)| {
+                    let b = if slot == 22 {
+                        Some((22usize, u64::from(pass) * PASS_ALIGN))
+                    } else if slot == 23 && indirect {
+                        None
+                    } else {
+                        Some((slot as usize, 0))
+                    };
+                    (u64::from(index), b)
+                })
+                .collect();
+            ops.push(ReplayOp::Dispatch(Box::new(ReplayDispatch {
+                kernel: kernel.to_string(),
+                entry: k.entry.to_string(),
+                phase: phase_of[at].to_string(),
+                pso: self.pipes[idx].clone(),
+                group: Self::threads(k),
+                grid,
+                binds,
+                writable: writable_buffers(k.msl, k.entry),
+            })));
+        }
+        Ok(ops)
+    }
+
+    /// The buffers [`Self::replay_ops`] indexes: every binding, then the upload ring.
+    pub fn replay_buffers(&self) -> Vec<&Buffer> {
+        self.bufs.iter().chain(std::iter::once(&self.upload)).collect()
+    }
+
+    /// The Metal device and queue (the profiler's replay runs on them).
+    pub fn device_queue(&self) -> (&Device, &CommandQueue) {
+        (&self.device, &self.queue)
+    }
+
+    /// Steps submitted so far.
+    pub fn steps_done(&self) -> u32 {
+        self.steps_done
+    }
+
+    /// Bodies uploaded.
+    pub fn body_count(&self) -> u32 {
+        self.body_count
     }
 
     pub fn download_bodies(&mut self) -> Vec<BodyState> {
