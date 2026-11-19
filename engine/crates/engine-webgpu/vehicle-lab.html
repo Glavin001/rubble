@@ -307,6 +307,7 @@
     import { trackGpuAllocations, gpuErrorText, gpuPhase } from './gpu-errors.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { createLoading } from './load-progress.mjs';
+    import { attachProfiler } from './profiler.mjs';
     import { createStabilityStop } from './stability-stop.mjs';
 
     const qs = new URLSearchParams(location.search);
@@ -551,6 +552,8 @@
       else autoQuiet = 0;
       if (autoScale !== was) configure();
     }
+    // The profiler panel (a toggle beside "Copy perf report"): frame breakdown, GPU per step, kernel replay.
+    const prof = attachProfiler(() => W?.world, { parent: document.getElementById('perfCopy').parentElement });
     let W = null, building = false, buildAgain = false, firstLoadMs = null, lastBuildMs = 0, buildGen = 0;
     const scene = () => (mode === 'mountain' ? 'mountain' : mode === 'derby' ? 'derby' : 'flat');
     // The derby's settings (rubble::vehicle_lab::derby::DerbySpec).
@@ -1535,7 +1538,7 @@
           if (refused > 0) refusedAt = now;
           let drew = !(owed === 0 && scale > 0 && now - refusedAt < 3000);
           if (drew && autoDrawEvery > 1 && scale > 0 && (++drawTick % autoDrawEvery) !== 0) drew = false;
-          if (drew) draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0);
+          if (drew) prof.span('page.draw', () => draw(paused ? 0 : Math.min(w.pacer.lead(), 1 / w.RATE), taken / w.RATE, w.pacer.shownDt() || dt, taken > 0));
           perfTick(now, dt * 1000, taken, refused, owed, drew, t1 - t0, t3 - t2, drew ? performance.now() - t3 : 0);
           if (now - hudAt > 250) { hud(); hudAt = now; if (lastStats?.scriptDone) window.__done = true; }
         } catch (e) { fail(e); }

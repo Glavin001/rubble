@@ -8,8 +8,10 @@ import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
   hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
   showcaseLayout, brickRingLayout, createVehicleLab as createVehicleLabWasm, vehicleLabMaterials,
-  sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
+  sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene, setHostProfile, hostSpans,
 } from './generated/world-wasm/engine_world_wasm.js';
+// The profilers' host spans (engine_webgpu::host_profile; profiler.mjs).
+export { setHostProfile, hostSpans };
 
 // hiresCarJbeam: the high-resolution test car (engine_softbody::hires) as JBeam text, once loaded.
 // explicitSedanTruck(tyres): the explicit solver's procedural sedan as .truck text.
@@ -171,6 +173,12 @@ export function errorText(e) {
 }
 
 /** Bytes of the wasm heap (its linear memory), once loaded. */
+/** The wasm module's raw exports (profiler.mjs wraps a waiting export in WebAssembly.promising). */
+export async function wasmExports() {
+  ready ??= init();
+  return await ready;
+}
+
 export async function wasmHeapBytes() {
   return (await ready)?.memory?.buffer.byteLength ?? 0;
 }

@@ -84,6 +84,7 @@
     import { loadMod, modVisual, modTextures, LOCAL_MODS } from './beamng-mod.mjs';
     import { createSceneRenderer } from './one-world-render.mjs';
     import { measureCrush } from './crash-measure.mjs';
+    import { attachProfiler } from './profiler.mjs';
 
     const qs = new URLSearchParams(location.search);
     const RECORD = qs.has('record');
@@ -151,6 +152,8 @@
     let made;
     try { made = await createBrickRingDrive(spec, loading.progress); } catch (e) { loading.fail({ detail: errorText(e) }); fail(e); throw e; }
     const { world, layout } = made;
+    // The profiler panel (a toggle beside the controls): frame breakdown, GPU per step, kernel replay.
+    const prof = attachProfiler(() => world, { parent: document.getElementById('controls') });
     loading.stage('Building the renderers');
     const buildMs = performance.now() - t0;
     document.getElementById('capSub').textContent = `${N > 1 ? 'two ' + NAME[1] : 'the ' + NAME[0]} through ${layout.bricks.toLocaleString('en-US')} rigid bricks`;
@@ -718,7 +721,7 @@
           simSteps += taken; simCount += taken;
           if (now - simAt > 1000) { simRate = simCount * 1000 / (now - simAt); simCount = 0; simAt = now; }
           pollFrame(world, onFrame);
-          draw(Math.min(pacer.lead(), 1 / RATE), taken / RATE, pacer.shownDt() || dt);
+          prof.span('page.draw', () => draw(Math.min(pacer.lead(), 1 / RATE), taken / RATE, pacer.shownDt() || dt));
           if (now - hudAt > 250) { hud(scale); hudAt = now; }
         } catch (e) { fail(e); return; }
         requestAnimationFrame(frame);
