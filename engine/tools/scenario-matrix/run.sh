@@ -14,27 +14,26 @@
 #   FRAMES=n (default 10) frames a half, ROUNDS=r (default 3) the halves in turn; PROFILE_SPLIT=1 each row's frame by dispatch
 #   kind (slower); PROFILE=fast|release (default fast); THRESHOLD=% and NOISE_MS=ms.
 #
-# Where it runs: on Modal by default, every row in a GPU container of its own at once
-# (tools/modal/gpu_run.sh --matrix; the build is local Docker, free). No local GPU and
-# no lock: any number of agents at once. Each row's on and off halves share one
-# container, so the verdict's speed comparison holds (directionally: a T4 through
-# Vulkan, not the Mac); bit for bit is exact. The saved states upload once (by hash).
-#   MODAL_OPTS="--gpu L4 --allow-cold-compile --timeout 1500" passes gpu_run options
-#   (a kernel version new on Modal's driver needs --allow-cold-compile once).
-#   tools/scenario-matrix/run.sh --local ...   the Mac's GPU instead (under the GPU lock):
-#       for final Metal timings.
+# Where it runs: the Mac's GPU, under the GPU lock (the default).
+#   tools/scenario-matrix/run.sh --modal ...   opt-in: every row in a T4 container of its
+#       own on Modal through Vulkan (tools/modal/gpu_run.sh --matrix; build in local
+#       Docker). Not for kernel edits: NVIDIA compiles each new kernel version on Modal's
+#       hosts (one explicit-beams pipeline took over 28 minutes, past the cap), so a
+#       changed kernel costs dollars before a row runs. The Modal target is CUDA
+#       (engine-cuda, compiled locally with nvcc); the matrix does not run there yet.
+#   MODAL_OPTS="--gpu L4 --allow-cold-compile --timeout 1500" passes gpu_run options.
 #
 # Rows and how the states are made: docs/measurements/scenario-matrix.md.
 here="$(cd "$(dirname "$0")" && pwd)"
 engine="$(cd "$here/../.." && pwd)"
 profile="${PROFILE:-fast}"
 cd "$engine" || exit 1
-if [ "$1" = "--local" ]; then
+if [ "$1" = "--modal" ]; then
   shift
-elif [ -z "$SCENARIO_MATRIX_LOCKED" ]; then
   # shellcheck disable=SC2086
   exec "$engine/tools/modal/gpu_run.sh" ${MODAL_OPTS:-} --matrix -- "$@"
 fi
+[ "$1" = "--local" ] && shift  # the default; kept for scripts that pass it
 [ "$profile" = release ] && flag="--release" || flag="--profile $profile"
 export LAB_BIN="${LAB_BIN:-$engine/target/$profile/examples/vehicle_lab}"
 if [ -z "$SCENARIO_MATRIX_LOCKED" ]; then

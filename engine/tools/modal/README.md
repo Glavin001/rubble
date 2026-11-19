@@ -152,7 +152,11 @@ retries and the median in that one container, so the speed comparison is between
 runs on one GPU), and the local side prints one table and one verdict. `run.sh --make`
 saves new states on Modal and writes them back to `engine/out/scenario-matrix/`.
 Options for gpu_run go in `MODAL_OPTS`, e.g. `MODAL_OPTS="--allow-cold-compile
---timeout 1500"` for a kernel version new on Modal.
+--timeout 1500"` for a kernel version new on Modal. This route is opt-in
+(`run.sh --modal`): on 2026-11-19 the warm-up for one kernel version hit the 1800 s cap
+on both drivers with 16 cores (one `explicit_beams_split_member_wide` pipeline compiled
+for over 1,700 s on one thread, so more cores do not help), about $2 across tries with
+no states made. Kernel edits go to the CUDA route instead.
 
 ## Cold kernel compiles (WebGPU route; read this first)
 
