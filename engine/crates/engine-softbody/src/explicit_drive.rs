@@ -42,6 +42,7 @@
 //! not the World's moving rigid bodies.
 
 use crate::explicit_beams::{to_fixed, ExplicitBeams, StaticShape, CONTACT_FIXED, STEP};
+use crate::explicit_rigid::{ProxyGeom, ProxyShape, RigidProxy};
 use crate::pack::{raycast_core, SpawnOptions};
 use crate::SoftVehicleDesc;
 use glam::Vec3;
@@ -138,6 +139,13 @@ pub struct DriveConfig {
     /// hubs turned 25° under throttle), which the tyres' rings and rigidity beams
     /// held on beam tyres.
     pub hub_axles: bool,
+    /// The rays also meet the vehicle's rigid proxies ([`ExplicitBeams::rigid`], the
+    /// World's bodies near it) and the wheels push back on them
+    /// ([`drive_pass`]'s module docs; the World's `wheels_hit_bodies` setting). Off (the
+    /// default here): the ground and the static shapes only, every step as before.
+    ///
+    /// [`ExplicitBeams::rigid`]: crate::explicit_beams::ExplicitBeams::rigid
+    pub see_bodies: bool,
 }
 
 /// The driver's input (per vehicle, set per frame by the host).
@@ -330,12 +338,18 @@ const TAU: u32 = 0x40c90fdb;
 /// Below this a direction is parallel to a slab (no division).
 const PARALLEL: f32 = 1e-12;
 
-/// A ray hit: distance and outward unit normal.
+/// A ray hit: distance, outward unit normal and the surface it is on: [`NO_SHAPE`] for
+/// the ground, a box or a static shape, else the index of a rigid proxy shape in the
+/// vehicle's [`crate::explicit_rigid::ProxySet`] ([`DriveConfig::see_bodies`]).
 #[derive(Clone, Copy, Debug)]
 struct Hit {
     t: f32,
     n: Vec3,
+    shape: u32,
 }
+
+/// [`Hit::shape`] of a static surface.
+const NO_SHAPE: u32 = u32::MAX;
 
 /// Ray `p + t·d` (t ≥ 0) against the slab box `lo..hi` in a frame whose axes are
 /// `ax` (world): the entering face. `pl`, `dl` the ray in that frame.
@@ -367,7 +381,7 @@ fn slab(pl: Vec3, dl: Vec3, lo: Vec3, hi: Vec3, ax: [Vec3; 3]) -> Option<Hit> {
         }
     }
     if t_in >= 0.0 && t_in <= t_out {
-        Some(Hit { t: t_in, n })
+        Some(Hit { t: t_in, n, shape: NO_SHAPE })
     } else {
         None
     }
@@ -392,6 +406,7 @@ fn ray_sphere(p: Vec3, d: Vec3, c: Vec3, r: f32) -> Option<Hit> {
     Some(Hit {
         t,
         n: nrm(p + d * t - c),
+        shape: NO_SHAPE,
     })
 }
 
@@ -462,12 +477,13 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
                     best = Some(Hit {
                         t,
                         n: Vec3::new(0.0, ny, 0.0),
+                        shape: NO_SHAPE,
                     });
                 }
             }
             if let Some((t, y, n)) = ray_tube(p, d, centre, Vec3::Y, radius) {
                 if y >= -half_height && y <= half_height {
-                    closer(&mut best, Some(Hit { t, n }));
+                    closer(&mut best, Some(Hit { t, n, shape: NO_SHAPE }));
                 }
             }
             best
@@ -481,7 +497,7 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
                 let ax = div3(ab, l);
                 if let Some((t, y, n)) = ray_tube(p, d, a, ax, radius) {
                     if y >= 0.0 && y <= l {
-                        closer(&mut best, Some(Hit { t, n }));
+                        closer(&mut best, Some(Hit { t, n, shape: NO_SHAPE }));
                     }
                 }
             }
@@ -494,12 +510,12 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
 /// The nearest hit of the ray `p + t·d`, t ≤ `t_max`, `p` in the vehicle's frame (its
 /// origin `ow`): ground (its height in that frame), boxes and shapes (World positions:
 /// the ray's start moved to the World) in order.
-fn ray_cast(s: &ExplicitBeams, p: Vec3, ow: Vec3, d: Vec3, t_max: f32) -> Option<Hit> {
+fn ray_cast(s: &ExplicitBeams, p: Vec3, ow: Vec3, d: Vec3, t_max: f32, bodies: bool) -> Option<Hit> {
     let mut best: Option<Hit> = None;
     let ground = s.ground - ow.y;
     if d.y < -PARALLEL && p.y >= ground {
         let t = dv(ground - p.y, d.y);
-        best = Some(Hit { t, n: Vec3::Y });
+        best = Some(Hit { t, n: Vec3::Y, shape: NO_SHAPE });
     }
     let p = ow + p;
     for b in &s.boxes {
@@ -516,7 +532,139 @@ fn ray_cast(s: &ExplicitBeams, p: Vec3, ow: Vec3, d: Vec3, t_max: f32) -> Option
         };
         closer(&mut best, h);
     }
+    if bodies {
+        if let Some(r) = s.rigid.as_deref() {
+            for (k, sh) in r.shapes.iter().enumerate() {
+                let b = &r.bodies[sh.body as usize];
+                if let Some(mut h) = ray_proxy(p, d, b, sh) {
+                    h.shape = k as u32;
+                    closer(&mut best, Some(h));
+                }
+            }
+        }
+    }
     best.filter(|h| h.t <= t_max)
+}
+
+/// Ray `p + t·d` (World) against a convex hull's world planes (`n · x ≤ off` inside),
+/// from outside: the entering plane.
+fn ray_planes(p: Vec3, d: Vec3, planes: impl Iterator<Item = (Vec3, f32)>) -> Option<Hit> {
+    let mut t_in = f32::MIN;
+    let mut t_out = f32::MAX;
+    let mut n = Vec3::ZERO;
+    for (pn, off) in planes {
+        let dist = dot(pn, p) - off;
+        let den = dot(pn, d);
+        if den.abs() < PARALLEL {
+            if dist > 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let t = dv(-dist, den);
+        if den < 0.0 {
+            if t > t_in {
+                t_in = t;
+                n = pn;
+            }
+        } else if t < t_out {
+            t_out = t;
+        }
+    }
+    if t_in >= 0.0 && t_in <= t_out {
+        Some(Hit { t: t_in, n, shape: NO_SHAPE })
+    } else {
+        None
+    }
+}
+
+/// Ray `p + t·d` (World) against rigid proxy shape `sh` of body `b` at the body's pose
+/// now (the pose the node pass this step meets it at): the kernel's `drvProxy`.
+fn ray_proxy(p: Vec3, d: Vec3, b: &RigidProxy, sh: &ProxyShape) -> Option<Hit> {
+    let c = b.pos + b.rot * sh.local_pos;
+    let q = b.rot * sh.local_rot;
+    match &sh.geom {
+        ProxyGeom::Box { half } => {
+            let axes = [q * Vec3::X, q * Vec3::Y, q * Vec3::Z];
+            let o = p - c;
+            let pl = Vec3::new(dot(axes[0], o), dot(axes[1], o), dot(axes[2], o));
+            let dl = Vec3::new(dot(axes[0], d), dot(axes[1], d), dot(axes[2], d));
+            slab(pl, dl, -*half, *half, axes)
+        }
+        ProxyGeom::Sphere { radius } => ray_sphere(p, d, c, *radius),
+        ProxyGeom::Capsule { radius, half_len } => {
+            let ax = q * Vec3::Y;
+            let (a, e) = (c - ax * *half_len, c + ax * *half_len);
+            let mut best = ray_sphere(p, d, a, *radius);
+            closer(&mut best, ray_sphere(p, d, e, *radius));
+            let l = 2.0 * *half_len;
+            if l > 0.0 {
+                if let Some((t, y, n)) = ray_tube(p, d, a, ax, *radius) {
+                    if y >= 0.0 && y <= l {
+                        closer(&mut best, Some(Hit { t, n, shape: NO_SHAPE }));
+                    }
+                }
+            }
+            best
+        }
+        ProxyGeom::Hull { planes, .. } => ray_planes(
+            p,
+            d,
+            planes.iter().map(|&(n, off)| {
+                let wn = q * n;
+                (wn, off + dot(wn, c))
+            }),
+        ),
+    }
+}
+
+/// A wheel's contact on a rigid proxy body: the body's velocity at the contact point
+/// `at` (World), and the hub's effective mass against it and the share of the hub's
+/// force the tyre's stick force cancels (explicit-vehicles-in-world.md §1's two-body form:
+/// m_red = 1/(1/m + w_b), share = (1/m)/(1/m + w_b); 1 and m on an infinite-mass body).
+#[derive(Clone, Copy, Debug)]
+struct Surface {
+    vb: Vec3,
+    m: f32,
+    share: f32,
+    at: Vec3,
+}
+
+/// The velocity of proxy shape `k`'s body at World point `x`.
+fn proxy_velocity(s: &ExplicitBeams, k: u32, x: Vec3) -> Vec3 {
+    let r = s.rigid.as_deref().expect("a proxy hit has proxies");
+    let b = &r.bodies[r.shapes[k as usize].body as usize];
+    b.vel + b.ang_vel.cross(x - b.pos)
+}
+
+/// Wheel `k`'s surface on its hit `ht` (a proxy shape) at `at`, hub mass `m`. The body's
+/// inverse mass at the point along the normal is split among this vehicle's wheels on
+/// the same body this step and the vehicles holding it (as node contact splits it among
+/// the nodes touching it, explicit-vehicles-in-world.md §1).
+fn surface(s: &ExplicitBeams, hits: &[Option<Hit>; MAX_WHEELS], k: usize, ht: Hit, at: Vec3, m: f32) -> Surface {
+    let r = s.rigid.as_deref().expect("a proxy hit has proxies");
+    let body = r.shapes[ht.shape as usize].body;
+    let b = &r.bodies[body as usize];
+    let vb = b.vel + b.ang_vel.cross(at - b.pos);
+    if b.is_static() {
+        return Surface { vb, m, share: 1.0, at };
+    }
+    let same = hits
+        .iter()
+        .filter(|h| h.is_some_and(|h| h.shape != NO_SHAPE && r.shapes[h.shape as usize].body == body))
+        .count();
+    debug_assert!(same >= 1 && hits[k].is_some());
+    let rr = at - b.pos;
+    let rn = rr.cross(ht.n);
+    let split = same as f32 * b.share.max(1.0);
+    let wb = split * (b.inv_mass + rn.dot(b.inv_inertia_mul(rn)));
+    let wn = 1.0 / m;
+    Surface {
+        vb,
+        m: 1.0 / (wn + wb),
+        share: wn / (wn + wb),
+        at,
+    }
 }
 
 /// The spin solve: with a hub of mass `m`, forward velocity `u` and forward force
@@ -681,13 +829,20 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
             nrm(fw * (dot(a, fw) - r0) + up * (dot(a, up) - r1) + left * (dot(a, left) - r2 + 1.0));
         axle[k] = a;
         let hp = xh + up * w.rest_len;
-        let hit = ray_cast(s, hp, ow, -up, w.susp_max + w.radius);
+        let hit = ray_cast(s, hp, ow, -up, w.susp_max + w.radius, c.see_bodies);
         len[k] = w.susp_max;
         if let Some(ht) = hit {
             let cos_t = dot(ht.n, up);
             if cos_t >= c.max_slope_cos {
                 let l = ht.t - w.radius;
-                let rate = dv(dot(vh, ht.n), cos_t);
+                // On a rigid body: the hub's velocity relative to the body's surface at
+                // the contact point.
+                let vr = if ht.shape == NO_SHAPE {
+                    vh
+                } else {
+                    vh - proxy_velocity(s, ht.shape, ow + (hp - up * ht.t))
+                };
+                let rate = dv(dot(vr, ht.n), cos_t);
                 let fs = w.k * (l - w.susp_max) + w.c * rate;
                 let mut f = if fs < 0.0 { -fs } else { 0.0 };
                 if l < w.susp_min && w.bump_k > 0.0 {
@@ -708,6 +863,15 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
             let diff = len[l] - len[r];
             load[l] = (load[l] - kar * diff).max(0.0);
             load[r] = (load[r] + kar * diff).max(0.0);
+        }
+    }
+    // On rigid bodies: each such wheel's surface (velocity, effective mass, share).
+    let mut surf: [Option<Surface>; MAX_WHEELS] = [None; MAX_WHEELS];
+    for k in 0..nw {
+        if let Some(ht) = hits[k].filter(|h| h.shape != NO_SHAPE) {
+            let w = &c.wheels[k];
+            let hp = hubs[k].1 + up * w.rest_len;
+            surf[k] = Some(surface(s, &hits, k, ht, ow + (hp - up * ht.t), hubs[k].0));
         }
     }
     // 3. Tyres, spin, forces.
@@ -755,6 +919,13 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
         let mut out = st;
         let mut force = Vec3::ZERO;
         let (w_new, kappa, alpha) = if let Some(ht) = hits[k] {
+            // On a rigid body (its own path; the static one is unchanged): the two-body
+            // form, the hub against the body's surface (relative velocity, the reduced
+            // mass and the hub's force's share, as node contact's rule).
+            let (m, vh) = match surf[k] {
+                Some(sf) => (sf.m, vh - sf.vb),
+                None => (m, vh),
+            };
             let n = ht.n;
             let fn_ = load[k];
             b += w.rolling * fn_ * r;
@@ -764,6 +935,10 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
                 s.force_now(w.node1 as usize)
             } else {
                 s.force_now(w.node1 as usize) + s.force_now(w.node2 as usize)
+            };
+            let fpre = match surf[k] {
+                Some(sf) => fpre * sf.share,
+                None => fpre,
             };
             let vt = dot(vh, t);
             let vs = dot(vh, sd);
@@ -855,6 +1030,12 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
                 let r2 = dv(s.nodes[n2 as usize].mass, m);
                 apply(s, n1, force * r1);
                 apply(s, n2, force * r2);
+            }
+            // Equal and opposite on the body, at the contact point.
+            if let Some(sf) = surf[k] {
+                if let (Some(r), Some(ht)) = (s.rigid.as_deref_mut(), hits[k]) {
+                    r.add_surface_reaction(ht.shape as usize, -force, sf.at);
+                }
             }
         }
     }
@@ -1103,6 +1284,7 @@ impl DriveConfig {
                 surface: 1.0,
                 anti_roll,
                 hub_axles: false,
+                see_bodies: false,
             },
             notes,
         ))
