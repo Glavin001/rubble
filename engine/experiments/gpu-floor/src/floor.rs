@@ -1246,6 +1246,7 @@ pub fn fq_msl() -> String {
     patch("FqAcc fqAccNew()", "    a.lim = 3.0e38f;", "    a.lim = 3.0e38f; a.ilo = 0u; a.ihi = 6u;");
     patch("void fqSegTri(", "for (uint i = 0u; i < 6u; i++)", "for (uint i = a.ilo; i < a.ihi; i++)");
     patch("void fqEdgeBeam(", "for (uint i = 0u; i < 3u; i++)", "for (uint i = a.ilo; i < min(a.ihi, 3u); i++)");
+    patch("void fqEdgesInside(", "for (uint k = 0u; k < 3u; k++)", "for (uint k = a.ilo / 2u; k < min((a.ihi + 1u) / 2u, 3u); k++)");
     patch("void fqEdgesInside(", "        for (uint e = 0u; e < 2u; e++)\n        {", "        for (uint e = 0u; e < 2u; e++)\n        {\n            if (k * 2u + e < a.ilo || k * 2u + e >= a.ihi) continue;");
     patch("void fqBeamInside(", "    for (uint e = 0u; e < 2u; e++)\n    {", "    for (uint e = 0u; e < 2u; e++)\n    {\n        if (e < a.ilo || e >= a.ihi) continue;");
     out += "inline float3 fqHullVertex(FqShape s, uint i) { return float3(0.0f, 0.0f, 0.0f); }\ninline uint2 fqHullEdge(FqShape s, uint e) { return uint2(0u, 0u); }\ninline float4 fqHullPlane(FqShape s, uint f) { return float4(0.0f, 0.0f, 0.0f, 0.0f); }\ninline bool fqCullsOn() { return true; }\n";

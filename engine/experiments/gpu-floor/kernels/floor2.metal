@@ -2417,7 +2417,9 @@ kernel void floorFrame(
                     #define SURF_BODY_HIT(bi_)
 #endif
                     // A hit: its record, how many hits name each node with a weight (the mass
-                    // split) and each body; the next node pass reads its nodes' sums.
+                    // split) and each body; the next node pass reads its nodes' sums. (Counting
+                    // in a lane-a-hit phase before the apply instead measured slower on the
+                    // rocks, 2.49 -> 2.56, and no faster elsewhere.)
                     #define SURF_EMIT(n0_, n1_, n2_, slot_, w_, g_, nn_, q_, two_, w2_, q2_) { \
                         const uint bi_ = as_type<uint>(tgG[SB(slot_) + 22u]); \
                         for (uint h2_ = 0u; h2_ < ((two_) ? 2u : 1u); h2_++) { \
@@ -2489,21 +2491,20 @@ kernel void floorFrame(
                                     atomic_store_explicit(HPKC(hh), 0u, memory_order_relaxed);
                                     // Its tasks: the box edges within the band of the element's box
                                     // (fqFar: a farther edge has no candidate within the band, so
-                                    // none that counts), and the element's run inside the box (12).
-                                    // Listed, so that a lane has one (every edge of every pair was
-                                    // five tasks a lane against a wall of bricks).
+                                    // none that counts), listed so that a lane has one (every edge
+                                    // of every pair was five tasks a lane against a wall of bricks).
+                                    // The element's run inside the box (task 12) is the pair's own
+                                    // lane's: among the edges' tasks it made every warp walk both.
                                     float3 tlo = min(min(x0, x1), x2), thi = max(max(x0, x1), x2);
-                                    for (uint ed = 0u; ed < 13u; ed++)
+                                    uint em = 0u;
+                                    for (uint ed = 0u; ed < 12u; ed++)
                                     {
-                                        if (ed < 12u)
-                                        {
-                                            float3 e0, e1;
-                                            fqWalkEdge(fs, ed, e0, e1);
-                                            if (fqFar(e0, e1, tlo, thi, CR)) continue;
-                                        }
-                                        const uint t = uint(atomic_fetch_add_explicit(&tgS[isT ? 14 : 15], 1, memory_order_relaxed));
-                                        surfTaskL[(isT ? 0u : HTRI * 13u) + t] = hh | ed << 16;
+                                        float3 e0, e1;
+                                        fqWalkEdge(fs, ed, e0, e1);
+                                        em |= fqFar(e0, e1, tlo, thi, CR) ? 0u : 1u << ed;
                                     }
+                                    uint t = uint(atomic_fetch_add_explicit(&tgS[isT ? 14 : 15], int(popcount(em)), memory_order_relaxed));
+                                    for (; em != 0u; em &= em - 1u, t++) surfTaskL[(isT ? 0u : HTRI * 13u) + t] = hh | ctz(em) << 16;
                                     continue;
                                 }
                                 // (No room for another staged pair: the whole query here, the
@@ -2533,9 +2534,8 @@ kernel void floorFrame(
                         // Stage A, a lane a task (pair, box edge), triangles' from lane 0 up and
                         // beams' from the last lane down, so a warp runs one kind: each
                         // candidate's gap, and the pair's least (the walk's first pass).
-                        #define SURF_TASK_A(isT_, t_, base_) { \
-                            const uint tw_ = surfTaskL[(base_) + (t_)]; \
-                            const uint hh_ = tw_ & 0xFFFFu, ed_ = tw_ >> 16; \
+                        #define SURF_TASK_A(isT_, hhx_, edx_) { \
+                            const uint hh_ = (hhx_), ed_ = (edx_); \
                             SURF_PAIR(isT_, hh_) \
                             float3 e0 = float3(0.0f, 0.0f, 0.0f), e1 = e0; \
                             if (ed_ < 12u) fqWalkEdge(fs, ed_, e0, e1); \
@@ -2549,8 +2549,10 @@ kernel void floorFrame(
                             taskG4[(hh_ * 13u + ed_) * 2u] = float4(gs_[0], gs_[1], gs_[2], gs_[3]); \
                             taskG4[(hh_ * 13u + ed_) * 2u + 1u] = float4(gs_[4], gs_[5], gmin_, 0.0f); \
                             atomic_fetch_min_explicit(HPGX(hh_), ordF(gmin_), memory_order_relaxed); }
-                        for (uint t = lid; t < nTriT; t += LANES) SURF_TASK_A(true, t, 0u)
-                        for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) SURF_TASK_A(false, t, HTRI * 13u)
+                        for (uint t = lid; t < nTriT; t += LANES) { const uint tw = surfTaskL[t]; SURF_TASK_A(true, tw & 0xFFFFu, tw >> 16) }
+                        for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) { const uint tw = surfTaskL[HTRI * 13u + t]; SURF_TASK_A(false, tw & 0xFFFFu, tw >> 16) }
+                        if (lid < nTriH) SURF_TASK_A(true, lid, 12u)
+                        if (lid >= LANES - nSegH) SURF_TASK_A(false, HTRI + ((LANES - 1u) - lid), 12u)
                         BAR;
                         // Stage B: a task's candidates within the tie of the pair's least gap,
                         // each walked again alone (the pair's second pass: its sum is the
@@ -2558,9 +2560,8 @@ kernel void floorFrame(
                         // (Its kept candidates one after another, whichever they are: a loop
                         // over the six with the others skipped runs the walk six times a warp,
                         // each lane's turn being a different one.)
-                        #define SURF_TASK_B(isT_, t_, base_) { \
-                            const uint tw_ = surfTaskL[(base_) + (t_)]; \
-                            const uint hh_ = tw_ & 0xFFFFu, ed_ = tw_ >> 16; \
+                        #define SURF_TASK_B(isT_, hhx_, edx_) { \
+                            const uint hh_ = (hhx_), ed_ = (edx_); \
                             const float4 gB_ = taskG4[(hh_ * 13u + ed_) * 2u + 1u]; \
                             const float GX_ = unordF(atomic_load_explicit(HPGX(hh_), memory_order_relaxed)); \
                             if (GX_ <= CR && gB_.z <= nf(GX_ + FQ_TIE)) { \
@@ -2583,8 +2584,10 @@ kernel void floorFrame(
                                         rec_[1] = f4(a.q, 0.0f); rec_[2] = f4(a.cs, 0.0f); } } } }
                         if (!SKIP(25))
                         {
-                            for (uint t = lid; t < nTriT; t += LANES) SURF_TASK_B(true, t, 0u)
-                            for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) SURF_TASK_B(false, t, HTRI * 13u)
+                            for (uint t = lid; t < nTriT; t += LANES) { const uint tw = surfTaskL[t]; SURF_TASK_B(true, tw & 0xFFFFu, tw >> 16) }
+                            for (uint t = (LANES - 1u) - lid; t < nSegT; t += LANES) { const uint tw = surfTaskL[HTRI * 13u + t]; SURF_TASK_B(false, tw & 0xFFFFu, tw >> 16) }
+                            if (lid < nTriH) SURF_TASK_B(true, lid, 12u)
+                            if (lid >= LANES - nSegH) SURF_TASK_B(false, HTRI + ((LANES - 1u) - lid), 12u)
                         }
                         BAR;
                         // Stage R, a lane a pair: the query's steps between its walks
