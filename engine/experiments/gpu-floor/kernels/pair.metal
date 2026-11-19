@@ -24,6 +24,7 @@
         #define XSHIFT(c) ((device atomic_int*)(CB(c) + O_SHIFT))
         #define XCLIP(c) ((device atomic_uint*)(CB(c) + O_CLIP))
         #define XFLAG(c) ((device atomic_uint*)(CB(c) + O_MISC + 12))
+        #define XTOUCH(c, n) atomic_fetch_or_explicit(&((device atomic_uint*)(CB(c) + O_TOUCH))[(n) >> 5], 1u << ((n) & 31u), memory_order_relaxed)
         #define XSTAGE(c) ((device atomic_int*)(cb + O_XSTG + (c) * NN * 6))
         #define XSPLIT(c) ((device atomic_uint*)(cb + O_XSPL + (c) * NN))
         #define XTRI (cb + O_XTRI)
@@ -47,7 +48,8 @@
         #define ISTORE(p, v) atomic_store_explicit(p, v, memory_order_relaxed)
         #define XNA(c) ((device atomic_uint*)(CB(c) + O_NODE))
         #define XLD3(c, w) v3(as_type<float>(ILOAD(&XNA(c)[(w) * 4u])), as_type<float>(ILOAD(&XNA(c)[(w) * 4u + 1u])), as_type<float>(ILOAD(&XNA(c)[(w) * 4u + 2u])))
-        #if XATOM >= 1
+        // (XATOM 3: what the partner stored atomically read with one plain vector load.)
+        #if XATOM == 1 || XATOM == 2
         #define XNV(c, w) XLD3(c, w)
         #else
         #define XNV(c, w) v3(XNODE(c)[w])
@@ -295,6 +297,7 @@
                     uint old = atomic_fetch_min_explicit(&XCLIP(b)[h * 4 + 2], word, memory_order_relaxed);
                     atomic_fetch_min_explicit(&XCLIP(b)[h * 4 + 3], max(old, word), memory_order_relaxed);
                     atomic_fetch_or_explicit(XFLAG(b), 4u, memory_order_relaxed);
+                    XTOUCH(b, h); XTOUCH(a, tn.x); XTOUCH(a, tn.y); XTOUCH(a, tn.z);
                     float pen = rmin(CR - dd, CR);
                     uint hi_ = (uint)atomic_fetch_add_explicit(&tgX[18], 1, memory_order_relaxed);
                     if (hi_ < HCAP)

@@ -357,6 +357,11 @@ kernel void floorFrame(
     #define pairs (cb + O_PAIRS)
     #define pBuild ((device float4*)(cb + O_PBUILD))
     #define clip ((device atomic_uint*)(cb + O_CLIP))
+    // A bit a node: something wrote its contact sums, its position step or a side for it
+    // since its last node pass. Only those nodes read and clear them (every node doing so
+    // on every step after a contact was up to 22 device atomics a node).
+    #define touched ((device atomic_uint*)(cb + O_TOUCH))
+    #define TOUCH(n) atomic_fetch_or_explicit(&touched[(n) >> 5], 1u << ((n) & 31u), memory_order_relaxed)
     #define hitBuf ((device float4*)(cb + O_HITS))
     #define stage ((device atomic_int*)(cb + O_SCRATCH))
     #define fPub ((device float*)(cb + O_SCRATCH + NN * 6))
@@ -636,16 +641,20 @@ kernel void floorFrame(
             if (dead) triDead[tri] = 1u;
         }
         bool inC = false;
+        bool tch = false;
+        const bool anyTouch = fRoll || fHits || fShift;
         if (isNode && !SKIP(0))
         {
             const float mass = massN;
+            if (anyTouch) tch = ((atomic_load_explicit(&touched[ni >> 5], memory_order_relaxed) >> (ni & 31u)) & 1u) != 0u;
 #if HAS_IMMOVABLE
             const uint nflags = as_type<uint>(nodeStatic[ni].z);
 #else
             const uint nflags = 0u;
 #endif
             V3 P0 = Pown, V0 = Vown;
-            if (fRoll)
+            // (A node neither written nor holding a side has four empty words: no roll.)
+            if (fRoll && (tch || tgHeld[ni] != 0))
             {
                 uint m2 = atomic_load_explicit(&clip[ni * 4 + 2], memory_order_relaxed);
                 uint m3 = atomic_load_explicit(&clip[ni * 4 + 3], memory_order_relaxed);
@@ -655,7 +664,7 @@ kernel void floorFrame(
                 atomic_store_explicit(&clip[ni * 4 + 3], CLIP_EMPTY, memory_order_relaxed);
                 tgHeld[ni] = m2 != CLIP_EMPTY ? 1 : 0;
             }
-            if (fHits)
+            if (fHits && tch)
             {
                 for (uint q = 0; q < 6; q++) atomic_store_explicit(&stage[ni * 6 + q], 0, memory_order_relaxed);
                 atomic_store_explicit(&split[ni], 0u, memory_order_relaxed);
@@ -707,11 +716,16 @@ kernel void floorFrame(
                     P0 = P0 + V0 * H;
                     if (fShift)
                     {
-                        P0 = P0 + v3(float(SHL(ni * 3)), float(SHL(ni * 3 + 1)), float(SHL(ni * 3 + 2))) * (1.0f / 16777216.0f);
-                        SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2);
+                        // (An unwritten node's step is zero: the same add of +0.)
+                        if (tch)
+                        {
+                            P0 = P0 + v3(float(SHL(ni * 3)), float(SHL(ni * 3 + 1)), float(SHL(ni * 3 + 2))) * (1.0f / 16777216.0f);
+                            SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2);
+                        }
+                        else P0 = P0 + v3(0, 0, 0);
                     }
                 }
-                else if (fShift) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
+                else if (fShift && tch) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
                 { Pown = (P0); SETP(ni, Pown); }
                 { Vown = (V0); SETV(ni, Vown); }
             }
@@ -810,10 +824,10 @@ kernel void floorFrame(
                 {
                     V0 = V0 + (F0 / massN) * H;
                     P0 = P0 + V0 * H;
-                    if (fShift) P0 = P0 + v3(float(SHL(ni * 3)), float(SHL(ni * 3 + 1)), float(SHL(ni * 3 + 2))) * (1.0f / 16777216.0f);
+                    if (fShift) P0 = P0 + (tch ? v3(float(SHL(ni * 3)), float(SHL(ni * 3 + 1)), float(SHL(ni * 3 + 2))) * (1.0f / 16777216.0f) : v3(0, 0, 0));
                     if (lift != 0.0f) P0.y = P0.y + lift;
                 }
-                if (fShift) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
+                if (fShift && tch) { SHZ(ni * 3); SHZ(ni * 3 + 1); SHZ(ni * 3 + 2); }
                 { Pown = (P0); SETP(ni, Pown); }
                 { Vown = (V0); SETV(ni, Vown); }
             }
@@ -823,6 +837,8 @@ kernel void floorFrame(
         if (lid == 2) atomic_store_explicit(&tgCount[2], 0u, memory_order_relaxed);
         if (lid == 1) atomic_store_explicit(&tgCount[1], 0u, memory_order_relaxed);
         BAR;
+        // (The node pass has read the written nodes' bits: cleared before this step's writers.)
+        if (anyTouch && lid < ((NN + 31u) >> 5)) atomic_store_explicit(&touched[lid], 0u, memory_order_relaxed);
         if (lid == 0)
         {
             tgFlags[F_HELD] = tgFlags[F_REC]; tgFlags[F_REC] = 0u; tgFlags[F_HITS] = 0u; tgFlags[F_SHIFT] = 0u;
@@ -1532,6 +1548,7 @@ kernel void floorFrame(
                     uint old = atomic_fetch_min_explicit(&clip[h * 4 + 2], word, memory_order_relaxed);
                     atomic_fetch_min_explicit(&clip[h * 4 + 3], max(old, word), memory_order_relaxed);
                     tgFlags[F_REC] = 1u;
+                    TOUCH(h); TOUCH(tn.x); TOUCH(tn.y); TOUCH(tn.z);
                     float pen = rmin(CR - dd, CR);
                     V3 nn = F.n * side;
                     uint i = atomic_fetch_add_explicit(&tgCount[2], 1u, memory_order_relaxed);

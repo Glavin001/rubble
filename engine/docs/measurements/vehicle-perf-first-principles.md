@@ -3378,12 +3378,26 @@ reference's own plane and the wall its static box (the same contact law), 34 sub
 frame. Native M3 Max, through the GPU lock; logs in
 `~/Development/rubble-artifacts/gpu-floor/`.
 
+**Three mechanisms.** What a soft body can touch decides how its step is laid out, and
+there are three cases that differ in mechanism, not in wording: (1) one body and a fixed
+world (the ground, static boxes): nothing leaves its workgroup; (2) a body against another
+soft body (a car, a node-beam structure, the same thing): two workgroups on two cores must
+step in lockstep and exchange state every substep; (3) a body against the rigid World: the
+rigid bodies come in as proxies once a frame, live in the body's workgroup for the frame's
+34 substeps and go back with the impulses they took. Each has its own kernel path
+(`kernels/floor2.metal` with `pair.metal` or the `RIGID` blocks compiled in) and its own
+scenes (`floor`, `pair --scene headon|side|rear|apart`, `rigid --scene bricks|rocks`).
+
 **How it is checked.**
-- *The kernel's logic, with no GPU*: `floor --emu` compiles the Metal source as C++ (a
-  small header stands in for the shading language; each lane is a coroutine, a barrier the
-  point where every lane has finished its phase) and compares every state word with
-  `ExplicitBeams::step` after each frame or each substep, lanes in either order. It found
-  the one bug of the first kernel (a start-up race on a counter) before any GPU time.
+- *The kernel's logic, with no GPU*: `--emu` compiles the Metal source as C++ (a small
+  header stands in for the shading language; each lane is a coroutine, a barrier the point
+  where every lane has finished its phase, a cross-workgroup barrier the point where every
+  workgroup has) and compares every state word with the CPU reference after each frame or
+  each substep, lanes and workgroups in either order. It found three bugs before any GPU
+  time: a start-up race on a counter, a workgroup memory shared between emulated groups,
+  and a real race in the two-workgroup contact pass (a body one barrier ahead of its
+  partner overwrote what it had published). `EMU_TRACE=1` prints the kernel's own counts,
+  which is how the wasted candidates below were found.
 - *On the GPU, strict*: fast math off **and** `#pragma clang fp contract(off)`. With fast
   math off alone Metal still emits `llvm.fmuladd` (9 % of a·b + c differ from the CPU's);
   with the pragma a·b + c, a/b and √a are the CPU's bits over 4 M random inputs
@@ -3394,12 +3408,22 @@ frame. Native M3 Max, through the GPU lock; logs in
   the free run's deviation (farthest node, centre of mass, kinetic energy, broken and bent
   beams) against the reference's own spread over three such starts.
 
-**Strict is bit for bit on the GPU** in the four cases, every frame, every state word (node
-positions, velocities and forces; live beams' rest lengths, thresholds, strengths and
+**Strict is bit for bit on the GPU, all three mechanisms**, every frame, every state word
+(node positions, velocities and forces; live beams' rest lengths, thresholds, strengths and
 slopes; broken flags; deform groups; dead triangles; fired groups; contact sums and
-position steps; anti-clip memory): a 5 cm drop to rest (120 frames), a 3 m fall and landing
-(120 frames, 9 beams broken), a 16 m/s wall crash (120 frames, up to 27 self-contacts a
-step), and a restart from the CPU's state 12 frames into that crash (60 frames).
+position steps; anti-clip memory; for mechanism 3 the rigid bodies' poses, velocities,
+counts, impulses, moments and peaks):
+- one body: a 5 cm drop to rest, a 3 m fall and landing, a 16 m/s wall crash (120 frames,
+  up to 27 self-contacts a step), and a restart from the CPU's state 12 frames into that
+  crash;
+- two bodies: head-on at 14 m/s each (30 frames, about 2,000 body-body hits a frame, 52
+  beams broken), a side impact (20 frames, and 204 substeps one dispatch each), a rear
+  impact (20 frames), and two bodies apart;
+- a body and rigid bodies: the car at 11 m/s into 24 loose 25 kg boxes (30 frames), and four
+  0.5 to 1 t spheres falling on the parked car (30 frames). The coupling is two-way, as the
+  reference's: each node inside a shape gets the two-body contact rule against that body's
+  mass and inertia at the contact point, the reaction and its moment are summed per shape
+  in fixed point, and the bodies integrate them every substep.
 
 **The cost model, measured at 1,024 lanes** (`microbench`, µs a barrier phase of one
 threadgroup; 40 threadgroups give the same figures, one a core):
@@ -3410,11 +3434,13 @@ threadgroup; 40 threadgroups give the same figures, one a core):
 | 128 dependent fma: 1 / 8 / 32 warps active | 0.24 / 0.42 / 1.51 | a phase is bound by the core's throughput, 0.35 ns a warp-instruction, not by its longest chain (1.3 ns a step with one warp) |
 | 4 chains of 32 fma one after another / interleaved | 1.47 / 1.44 | interleaving buys nothing |
 | the same work in 16 of 32 warps | half | an idle warp is free |
-| threadgroup-memory loads | 3.4 ns a warp for a scalar, 4.2 ns for three adjacent floats | about ten instructions an access, the same as a streamed device load; adjacent words nearly free |
+| threadgroup-memory loads: a scalar / 3 adjacent floats / 6 adjacent | 3.1 / 2.5 / 4.9 ns a warp | about ten instructions an access, the same as a streamed device load; a load is three or four floats, so position and velocity side by side are two loads, not one |
 | device loads: 4 streamed / 4 scattered / 16 scattered a lane | 3.9 / 23 / 29 ns a warp-load | 10 to 80 instructions each |
 | device atomic add: own word / 4 scattered | 2.6 / 38 ns | |
 | live registers a lane, each updated a phase: 16 / 48 / 80 / 112 / 160 | 0.19 / 0.32 / 1.1 / 5.0 / 4.2 ns an update | past about 48 they spill: 3× at 80, 15× at 112 |
 | 16 dependent √ or ÷: fast math / strict | 0.7 / 2.7 (√), 4.1 (÷) ns a warp | strict √ and ÷ cost 4 to 6× |
+| a barrier across workgroups on different cores (a device counter and a bounded spin) | +0.1 to 0.7 µs, 0 missed for 2 to 40 groups | lockstep across cores is affordable |
+| a word one workgroup stores, read by a workgroup on another core in the same dispatch (`xsync --data`, 2,000 rounds) | plain store: wrong on every read; atomic store: right on every read | see below |
 
 This corrects §8.35's reading (8 ns a dependent step was eight warps sharing the core) and
 §2.2's cause (it is not latency): **a car's step on one core costs its warps' instructions,
@@ -3423,19 +3449,26 @@ its memory accesses at about ten instructions each (threadgroup or streamed devi
 core is saturated by about eight busy warps, so a workgroup's phases do not overlap and a
 second workgroup on the same core waits.
 
-Two things the compiler does that the source does not show (both seen in
-`xcrun metal -S -emit-llvm`, both cost the first kernels most of their time):
+Three things the compiler and the GPU do that the source does not show:
 - with fast math off it still fuses a·b + c (above);
 - it does not unroll a constant loop with a large body, and an array indexed by the loop
   variable then stays in stack memory: the kernel's four "register" slots a lane were
-  loads and stores until the loop was written out once a slot.
+  loads and stores until the loop was written out once a slot (both seen in
+  `xcrun metal -S -emit-llvm`; they cost the first kernels most of their time);
+- **what two workgroups share within a dispatch must be atomic on both sides.** A plain
+  store by one workgroup was never seen by a workgroup on another core (4,095,999 of
+  4,096,000 reads stale with two groups, the same with 3, 8, 39 and 40), not even through
+  an atomic load, and a plain load did not see another group's atomic add to a word its own
+  group had stored. With atomic stores every read was right. The first body-against-body
+  kernel was bit for bit in the emulator and wrong on the GPU for exactly this (its bodies
+  published their nodes with plain stores); with atomic stores and loads it is bit for bit.
 
 **The kernels.** `kernels/floor.metal` (first layout, kept for the ledger) and
 `kernels/floor2.metal` (second layout, from the cost model), one workgroup of 1,024 lanes a
 body, all 34 substeps a dispatch, every count a compile-time constant:
 - a beam's hot words (its ends, k, c, rest length, last extension rate) in registers, four
   slots a lane; everything else of a beam read only on the step it yields, breaks, or is
-  one of the car's 71 special elements;
+  one of the car's 71 special elements; a lane's own node in registers too;
 - a beam hands its ends one scalar (force over length) through threadgroup memory; a node
   gathers its beams in the reference's order from a streamed list as (x_self − x_other)·g,
   which is the reference's push bit for bit at both ends (IEEE subtraction and
@@ -3443,9 +3476,13 @@ body, all 34 substeps a dispatch, every count a compile-time constant:
   no bit of a sum that began at +0 or at the weight);
 - self-collision: a lane a triangle over its own row of an exact pair list (every pair the
   reference's box test could pass, rebuilt when a node has moved more than the skin
-  allows), each pair filtered by two plane distances (now and a step ago); pairs that pass,
-  and nodes in ground or box contact, go on compact lists and get their full rule a lane an
-  item (a warp pays for its slowest lane);
+  allows), each pair filtered by the rule's own cheap tests (crossed the plane over the
+  step; or holds a side for this triangle; or inside the band **and over the triangle**);
+  pairs that pass, and nodes in ground or box contact, go on compact lists and get their
+  full rule a lane an item (a warp pays for its slowest lane). The last test matters: with
+  the band alone the filter passed 722 pairs a substep at rest (points of the same panel,
+  beside the triangle), all of which the full rule then dropped; with it 0 to 2 at rest
+  and 5 to 13 in the wall crash (was about 800), the same bits;
 - contact sums, side memory, break groups and triangle breaks live in device memory and are
   touched only on steps flagged as having them; a hot-state image starts a dispatch with six
   streamed loads a lane.
@@ -3453,49 +3490,175 @@ body, all 34 substeps a dispatch, every count a compile-time constant:
 A substep without contacts is seven barrier phases (0.5 µs of barriers).
 
 **One body and a fixed world (mechanism 1), measured.** ms a frame of 34 substeps, one car,
-medians (`batch-v2k`); production's figures are §8.37's scenario-matrix rows on the same
-machine a day earlier (not re-run here: the GPU queue):
+medians (`batch-v2m`; the GPU was shared with other sessions' queued jobs, so ±0.1);
+production's figures are the scenario matrix's rows on the same machine
+(`scenario-matrix.md`, not re-run here):
 
 | | at rest | wall crash, 16 m/s | 3 m fall | bit for bit |
 |---|---|---|---|---|
-| production (matrix rows drive / tumble / wall) | 3.5–3.7 | 4.7 | | (its own suites) |
+| production (matrix rows drive / tumble / wall) | 3.2 | 4.1 | | (its own suites) |
 | first layout, strict | 3.00 | 3.68 | 3.17 | yes |
-| second layout, strict | 1.32 | 2.60 | 1.51 | yes |
-| second layout, fast math + native functions | 1.23 | 2.16 | | no: see closeness |
+| second layout, strict | 1.29–1.35 | 2.5–2.7 | 1.18 | yes |
+| second layout, fast math + native functions | 1.11–1.20 | 2.2–2.4 | | no: see closeness |
 | the reference on one CPU core | ≈10.5 | ≈10.4 | ≈10.5 | |
 
-A dispatch with every phase left out is 0.10 ms. At rest the second layout's phases are
-(ms a frame): node pass 0.14, centred gather 0.17, beams 0.27, force gather 0.26, pair rows
-0.39, the rest the centred scalars and the fixed cost. In the crash the pair rows (1.2–1.4,
-with the list rebuilt on a fifth of the steps) and the hit passes (0.6–0.9) lead.
+A dispatch with every phase left out is 0.10 ms. At rest the phases are (ms a frame,
+strict): node pass 0.18, centred gather 0.21, beams 0.23, force gather 0.27, pair rows
+0.30, the rest the centred scalars and the fixed cost. In the crumpled car after the crash
+the pair rows are no longer than at rest (2,899 listed pairs in 110 warp-iterations a
+substep against 2,827 in 99): what the crash adds is the handful of contacts' own phases
+(the candidates' full rule, four hit passes of about 0.8 ms a frame for some nine hits a
+step, the nodes on the ground and the wall 0.4 ms), each a few lanes reading and summing
+through scattered device memory and atomics at 20 to 40 ns an access, and the list's
+rebuilds.
 
 **It did not reach §1.3's 0.3–0.5 ms, and why.** That estimate charged memory at cache
-bandwidth and arithmetic at the core's FLOPS. The core charges otherwise: a substep here is
-about 3,500 warp memory accesses (≈13 µs) and about 30,000 warp instructions (≈10 µs),
-against the ≈9 µs of §1.3. Three rounds of changes that cut instructions (unrolled gathers,
-compact lists, a two-level list build, static slot classes) did not move the total, which is
-what memory-bound looks like. The next lever is fewer memory accesses a beam (18 a substep
-now: its four end vectors in two phases, its scalar written twice, its two entries read in
-two gathers): positions and velocities interleaved so an end is one access, and node-major
-lanes that own their beams so one end is already in registers. Not built.
+bandwidth and arithmetic at the core's FLOPS. The core charges otherwise: a substep at rest
+is about 3,400 warp memory accesses and about 30,000 warp instructions, which the table
+above prices at about 20 µs; the measured substep is 35 to 38 µs. The gathers cost about
+29 ns a warp-entry and the pair rows about 90 ns a warp-pair, two to five times their
+loads and instructions, the same unexplained factor as §8.35's. Changes that cut
+instructions (unrolled gathers, compact lists, a two-level list build, static slot
+classes) did not move the total. Three layouts aimed at memory were then built and
+measured, and none paid:
 
-**Many bodies apart: a staircase of 40.** One workgroup is one core's work, so (fast, at
-rest, ms a frame): 1 car 1.31, 8: 1.37, 40: 1.51, **41: 2.81**, 80: 3.12, **81: 4.33**, 120:
-4.63, 121: 6.00, 160: 6.20, 161: 7.40, 200: 7.63, 400: 16.0. N cars cost
-⌈N / 40⌉ × one car's time; 100 cars in a wall crash, strict, 10.5 ms. Production's 32 cars
+| layout | what it removes | at rest, ms a frame |
+|---|---|---|
+| a lane's own node in registers; the held byte read only after a contact | about 7 % of a substep's accesses | in the figures above |
+| position and velocity side by side in threadgroup memory (`--tgpv`) | an end of a beam in one load: but a load is 3 to 4 floats | 1.29 against 1.29 |
+| each node's lane owns three of its beams (`--own`, every node can: 1,644 of 3,164 plain beams), adding their force from registers | 3 of a node's 13 gathered entries twice a substep; half the loads of those beams | 1.14 against 1.11 (fast): the gathers fall by 0.19 ms and the beam phases take it back |
+
+So the floor found for this car on this GPU is **about 1.1 ms a frame fast, 1.3 strict**:
+a third of production, three to four times §1.3's estimate. What is left is not waste the
+counts show; it is the price of a warp-iteration here, which the microbenchmark's
+primitives under-predict (most likely the kernel's sixty-odd live values a lane against
+the forty-eight that stay in registers; a row loop that keeps fewer alive is the next
+experiment, `--row4`, `--regmode`).
+
+**Body against body (mechanism 2).** Two workgroups a pair, one a body. Metal has no
+barrier across workgroups: each group's lane 0 adds one to a device counter after its own
+barrier and waits (a bounded number of loads) until every group has; a miss is a status
+bit and was never seen. After a step each body reduces its box and top speed on one warp
+and publishes them; the bodies meet; if the boxes are apart (the reference's own test)
+that is all, one meeting a substep. If they meet, each publishes its nodes (atomic
+stores), they meet again, and each body does the half of the reference's contact pass
+that its own triangles own, both at once: the partner's nodes copied into the beam
+scalars' array (free between two beam passes); its triangles against the partner's box;
+the survivors against the partner's clusters of contact points; each (triangle, cluster)
+against the cluster's points by the reference's padded box test; each candidate through
+the contact rule (frame, held side, swept crossing, side vote). Every stage's survivors
+are a compact list, a lane an item. The culls before the reference's test only drop what
+that test drops (the same rounded terms, a pad no smaller). Then the owners' turns, owner
+0's and then owner 1's as the reference orders them (first pass from the forces at the
+pass's start, residual, work guard, the sums), the other body waiting at the barrier;
+integer sums, so a turn is order-free inside. What a body publishes lives in two slots by
+the substep's parity, because a body can run one barrier ahead of its partner.
+
+The first design had a third workgroup do the whole pass with both bodies copied into its
+memory: it cost about 110 µs a substep in contact while the two bodies' cores idled, and
+13 pairs filled the GPU's 40 cores. On the bodies' own cores, strict, ms a frame for the
+pair (two cars), bit for bit in every scene (`batch-pair2`):
+
+| scene | strict | fast + native | production (matrix) |
+|---|---|---|---|
+| two bodies apart (boxes apart) | 1.85 | 1.56 | |
+| head-on, 14 m/s each, mid-crush | 6.1–6.4 | 5.3 | 15.4 |
+| side impact: at the impact / after it | 5.4 / 3.0 | 5.4 / 2.6 | 9.3 |
+| rear impact, after it | 3.1 | | |
+
+Two cars crushing each other cost about twice one car crushing against a wall (each body
+is in its own crash, with its own self-contacts, breaks and list rebuilds) plus the pass:
+about 600 candidates and 10 to 20 hits a body a substep in the head-on.
+
+**Body against rigid bodies (mechanism 3).** The reference's proxy set in the body's
+workgroup: each substep a warp reduces the body's box, a lane a shape places its shape
+(glam's NEON quaternion arithmetic written out in its operation order, so the poses are
+the reference's bits) and marks it active if its bounds meet the box; a node tests the
+active shapes (bounds first), counts into the body it is inside (the rule's mass split)
+and, on the contact nodes' compact list, takes the two-body rule against that body at the
+contact point; reactions and moments are summed per shape in 1/32 N fixed point; a lane a
+body integrates them. Boxes and spheres on dynamic bodies are ported; static bodies, hulls
+and capsules are not. ms a frame, one car, bit for bit strict in both scenes
+(`batch-rigid`):
+
+| scene | strict | fast + native | production (matrix) |
+|---|---|---|---|
+| the car at 11 m/s into 24 boxes: the run's median / mid-impact | 3.2 / 3.9 | 2.9 / 3.9 | 3.4 (60 bricks) |
+| four rocks onto the parked car: the run's median / under the rocks | 2.8 / 2.6 | 2.4 / 2.5 | 3.8 |
+
+This one is the least far below production: a node tests every active shape every
+substep (548 nodes against up to 24 boxes), which the next step would replace with the
+compact lists the other two mechanisms use.
+
+**The scaling staircase, each mechanism's scenes.** One workgroup is one core's work and
+the GPU has 40, so N workgroups cost ⌈N / 40⌉ times one (fast + native, ms a frame, all
+copies in one dispatch; a pair is two workgroups, so its tread is 20 pairs):
+
+| workgroups | 1 | 20 | 40 | 41 | 80 | 81 | 120 | 200 |
+|---|---|---|---|---|---|---|---|---|
+| one body at rest | 1.21 | 1.31 | 1.59 | 2.63 | 2.98 | 4.22 | 4.58 | 7.57 |
+| one body, wall, mid-crash | 2.69 | 2.91 | 3.29 | 5.92 | 6.47 | 9.19 | 9.66 | 15.8 |
+| one body, 3 m fall, landing | 2.32 | 2.48 | 2.99 | 5.22 | 5.86 | 7.99 | 8.55 | 14.2 |
+| a body into 24 boxes, mid-impact | 3.90 | 4.00 | 4.34 | 8.14 | 8.70 | 12.5 | 13.2 | 21.8 |
+| a body under four rocks | 2.51 | 2.61 | 2.99 | 5.56 | 6.24 | 8.64 | 9.27 | 15.5 |
+
+| pairs (two workgroups each) | 1 | 8 | 20 | 21 | 40 | 41 | 60 |
+|---|---|---|---|---|---|---|---|
+| head-on, mid-crush | 5.46 | 5.64 | 6.29 | 11.7 | 12.5 | 17.9 | 18.8 |
+| side impact, at the impact | 5.43 | | 6.27 | 11.6 | 12.6 | | |
+| bodies apart | 1.56 | | 1.74 | 3.34 | 3.55 | | |
+
+A tread rises by 10 to 30 % from its first workgroup to its fortieth (the cores share
+memory bandwidth and the clock), then the next workgroup starts a new tread. 200 cars at
+rest are 7.6 ms; 100 cars in 50 head-on crashes would be about 18 ms. Production's 32 cars
 apart were 11.75 ms (§1.5).
 
-**Closeness of the fast builds.** At rest the one-frame defect is inside the reference's
-own (median 0.015 mm against 0.049 mm from a micron; worst 0.49 against 0.72). In the wall
-crash it is the same size as the reference's own over the run (median 0.06 mm against 0.22,
-p90 2.7 against 4.9, worst 8.1 against 9.7) though single frames differ (a contact or a
-yield lands a frame apart), and the free run stays inside three times the reference's own
-spread. Fast math is worth 7 % at rest and 17 % in the crash here, most of it the strict
-divisions and square roots of the contact rules.
+**Closeness of the fast builds.** One body at rest: the one-frame defect is inside the
+reference's own from a micron (median 0.026 mm against 0.074, p90 0.10 against 0.24, worst
+0.49 against 0.72); the free run's positions stay inside the reference's spread, and the
+check's kinetic-energy term flags it (28 % against 4 % of a kinetic energy that is nearly
+zero in a settled car: a weakness of that metric at rest, not of the build). Wall crash:
+the defect is the size of the reference's own over the run (median 0.06 mm against 0.22,
+p90 2.7 against 4.9, worst 8.1 against 9.7) though single frames differ by more than ten
+times that frame's reference value (a contact or a yield lands a frame apart), and the
+free run stays inside three times the reference's spread. Two bodies head-on: the farthest
+node from the reference is 350 to 1,080 mm over 30 frames against 470 to 870 mm for the
+reference's own from a micron (a head-on crash is chaotic; the same broken-beam counts);
+side impact 4.5 mm against 7.0 at the impact. Fast math with native functions is worth 8
+to 15 %.
 
 **The ledger (first layout, wall crash, fast math, ms a frame; `batch-v1`):** counts as
 uniforms instead of constants +6 % (3.40 → 3.60); a dispatch a substep instead of a frame
 +72 % (5.84: 34 loads of the state); unordered force sums through device atomics +18 %
 (slower, not faster: device atomics cost more than the ordered gather); native functions
 in place of the specified sequences 0 % there (memory-bound) and 5 % on the second layout;
-strict against fast +8 %.
+strict against fast +8 %. Second layout: the filter's over-the-triangle test −9 % at rest
+and −5 % after the crash; position and velocity side by side 0 %; the owning layout 0 %.
+
+**What to take back to production, in order of payoff.**
+1. *All 34 substeps in one dispatch, the state in registers and threadgroup memory, a hot
+   image between dispatches.* The first layout's per-substep dispatch cost +72 %;
+   production pays a dispatch per substep and reloads. This is most of the 3× at rest.
+2. *A beam's hot words in registers and one scalar an end through threadgroup memory,
+   gathered per node in the reference's order.* Exact, and it is what took 3.0 to 1.3 ms.
+   Needs slot loops written out (the compiler does not unroll them).
+3. *Compact lists, a lane an item, for everything rare*: contact nodes, self-collision
+   candidates, hits, and each stage of vehicle contact's search. A warp pays for its
+   slowest lane.
+4. *Vehicle contact on the bodies' own cores, in lockstep across cores*, detection on
+   both at once: 5.3 to 6.4 ms for a head-on pair against 15.4. Requires that every word
+   two workgroups share be atomic on both sides (measured above; a silent wrong answer
+   otherwise).
+5. *A strict Metal build is fast math off plus `fp contract(off)`*: no XOR barriers, and
+   bit for bit with the CPU reference.
+6. *Check kernels on the CPU first.* The emulator found every logic bug of these kernels,
+   including a cross-core race, in seconds and without the GPU queue.
+Not worth taking: position and velocity interleaved, node-owned beams, unordered atomic
+sums, native math on a memory-bound path.
+
+**Not built, and what the numbers do not cover.** Raycast wheels and the drivetrain (the
+scenes' cars have none, as the scenario matrix's soft rows); piles of three or more bodies
+(the owners' turns generalise, the pairing does not yet); static, hull and capsule
+proxies; Chrome and WGSL (Metal only, by the brief); a body split over several cores.
+Production's figures are the matrix's, on its own scenes: the same car and speeds, not the
+same frames.

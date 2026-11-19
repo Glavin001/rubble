@@ -70,6 +70,7 @@ pub struct Statics {
 /// The second layout's one buffer a car: each part's offset in 4-byte words.
 #[derive(Clone, Default, Debug)]
 pub struct V2Off {
+    pub touch: usize,
     pub node: usize,
     pub rec: usize,
     pub groups: usize,
@@ -110,6 +111,8 @@ pub fn v2_put(big: &mut [u8], o: &V2Off, s: &State) {
     put_at(big, o.shift, bytemuck::cast_slice(&s.shift));
     put_at(big, o.misc, bytemuck::cast_slice(&s.misc));
     put_at(big, o.clip, bytemuck::cast_slice(&s.clip));
+    // (An uploaded state's pending sums are any node's: every node's bit set.)
+    put_at(big, o.touch, &[0xFFu8; 128]);
     if o.rig_words != 0 && s.rig.len() == o.rig_words {
         put_at(big, o.rig, bytemuck::cast_slice(&s.rig));
     }
@@ -1254,6 +1257,8 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     // A contact pair's pass (pair.metal): what a body publishes for its partner (box, top
     // speed, hit count); the owner's staging sums and hit counts for both bodies' nodes;
     // its lists (triangles, triangle and cluster, candidates) and its hits.
+    let o_touch = take(32);
+    o.touch = o_touch;
     let xcnd_cap = 8192usize;
     let x_pub = take(16);
     let x_stg = take(nn * 12);
@@ -1269,7 +1274,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n#define OWN {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig, st.own as u32) + &format!(
-        "#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n"
+        "#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n"
     ) + &format!(
         "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define O_CLU {}\n#define CAR_WORDS {}\n",
         o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.cand, o.clu, o.words
