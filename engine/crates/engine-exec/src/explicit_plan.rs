@@ -450,7 +450,8 @@ pub const PERF_HIT_SLOT_MAP: u32 = 134217728;
 /// [`PERF_HIT_ROLES`] and [`PERF_WIDE_GEO`] (§8.22), [`PERF_FLEET_STATE`] and
 /// [`PERF_FLEET_FRONT`] (§8.25), [`PERF_FLEET_ANY`] and [`PERF_FLEET_POST`] (§8.29),
 /// [`PERF_AHEAD_APART`], [`PERF_TYRE_AHEAD`] (§8.31), [`PERF_FLEET_HITLAT`] and
-/// [`PERF_FLEET_FUSE`] (§8.32), [`PERF_LEVELS_ONCE`] (§8.37), [`PERF_HITS_LOCAL`] (§8.33), [`PERF_WHEELS_APART`] (§8.35);
+/// [`PERF_FLEET_FUSE`] (§8.32), [`PERF_LEVELS_ONCE`] (§8.37), [`PERF_HITS_LOCAL`] (§8.33), [`PERF_WHEELS_APART`] (§8.35),
+/// [`PERF_HIT_SLOT_MAP`] (§8.45);
 /// `RUBBLE_PERF_FLAGS=<mask>` overrides (a measurement; 0: every switch off). Not
 /// [`PERF_FLEET_KEEP`]: bit for bit natively, but the lab page in Chrome ends elsewhere
 /// with it (§8.28).
@@ -473,7 +474,8 @@ pub fn perf_flags_default() -> u32 {
             | PERF_AHEAD_APART
             | PERF_TYRE_AHEAD
             | PERF_HITS_LOCAL
-            | PERF_WHEELS_APART,
+            | PERF_WHEELS_APART
+            | PERF_HIT_SLOT_MAP,
     )
 }
 /// A beam-order entry's class: one beam by beamUpdate.
