@@ -49,8 +49,9 @@ struct Params
 // A barrier across the workgroups of a contact pair (each on its own core; Metal has
 // none): after this group's own barrier its lane 0 adds one to a device counter and waits,
 // a bounded number of loads, until every group has; the other lanes wait at the group's
-// barrier. Hitting the bound (a group that did not run beside the others) is a status bit.
-#define XBAR { BAR; if (lid == 0u) { xround++; atomic_fetch_add_explicit(xcnt, 1u, memory_order_relaxed); const uint want_ = NGROUPS * xround; uint i_ = 0u; for (; i_ < XCAP; i_++) { if (atomic_load_explicit(xcnt, memory_order_relaxed) >= want_) break; } if (i_ >= XCAP) xlate = 1u; } BAR; }
+// barrier. Hitting the bound (a group that did not run beside the others) is a status bit,
+// and this group stops waiting for the rest of the dispatch (one bounded wait at most).
+#define XBAR { BAR; if (lid == 0u) { xround++; atomic_fetch_add_explicit(xcnt, 1u, memory_order_relaxed); if (xlate == 0u) { const uint want_ = NGROUPS * xround; uint i_ = 0u; for (; i_ < XCAP; i_++) { if (atomic_load_explicit(xcnt, memory_order_relaxed) >= want_) break; } if (i_ >= XCAP) xlate = 1u; } } BAR; }
 #define KRETURN return
 #endif
 // TGVEC: a node's position (velocity, a vector slot) as one three-float element of
@@ -210,8 +211,10 @@ kernel void floorFrame(
 #if PAIR
     TGDECL(atomic_int, tgX, 16);
     uint xround = 0u, xlate = 0u;
-    device atomic_uint* const xcnt = (device atomic_uint*)(big + NCARS * CAR_WORDS + O_MISC + 14);
-    if (car >= NCARS)
+    // (Groups in threes: two bodies, then their contact group, whose block holds the
+    // pair's barrier counter.)
+    device atomic_uint* const xcnt = (device atomic_uint*)(big + (car / 3u * 3u + 2u) * CAR_WORDS + O_MISC + 14);
+    if (car % 3u == 2u)
     {
 //@PAIR_ROLE
         if (lid == 0 && xlate != 0u) misc[1] = misc[1] | 8u;

@@ -122,6 +122,21 @@ fn main() -> anyhow::Result<()> {
     }
     // Work in half the warps: does an idle warp cost?
     rows.push(("128 dependent fma in 16 of 32 warps".into(), String::new(), fma(128), tgb, 16, 0));
+    // Threadgroup loads with no modulo in the index (a mask): what a load itself costs.
+    for n in [8usize, 32] {
+        let body = (0..n).map(|i| format!("acc += tg[(ix + {}u) & 4095u];", i * 191)).collect::<Vec<_>>().join("\n");
+        rows.push((format!("{n} threadgroup loads, masked index, 32 warps"), String::new(), body, tgb, 32, 0));
+    }
+    {
+        let body = (0..8).map(|i| format!("{{ uint o = (ix + {}u) & 4088u; acc += tg[o] + tg[o + 1u] + tg[o + 2u]; }}", i * 191)).collect::<Vec<_>>().join("\n");
+        rows.push(("8 threadgroup loads of 3 adjacent floats, masked index, 32 warps".into(), String::new(), body, tgb, 32, 0));
+        let body = (0..8).map(|i| format!("{{ uint o = (ix + {}u) & 4088u; acc += tg[o] + tg[o + 1u] + tg[o + 2u] + tg[o + 3u] + tg[o + 4u] + tg[o + 5u]; }}", i * 191)).collect::<Vec<_>>().join("\n");
+        rows.push(("8 threadgroup loads of 6 adjacent floats, masked index, 32 warps".into(), String::new(), body, tgb, 32, 0));
+        let body = (0..8).map(|i| format!("acc += float((ix + {}u) & 4095u) * 1.0e-6f;", i * 191)).collect::<Vec<_>>().join("\n");
+        rows.push(("8 masked index computations alone (no load), 32 warps".into(), String::new(), body, tgb, 32, 0));
+        let body = (0..8).map(|i| format!("acc += float((ix + {}u) % 6144u) * 1.0e-6f;", i * 191)).collect::<Vec<_>>().join("\n");
+        rows.push(("8 modulo index computations alone (no load), 32 warps".into(), String::new(), body, tgb, 32, 0));
+    }
     // A branch the lanes of a warp disagree on (odd and even lanes), against one they agree on.
     let two = |cond: &str| format!("if ({cond}) {{ {} }} else {{ {} }}", fma(64), fma(64).replace("0.001f", "0.002f"));
     rows.push(("64 fma in one of two branches, warps agree".into(), String::new(), two("(lid & 32u) != 0u"), tgb, 32, 0));
@@ -130,7 +145,11 @@ fn main() -> anyhow::Result<()> {
     rows.push(("16 dependent sqrt, 32 warps".into(), String::new(), (0..16).map(|_| "acc = sqrt(acc + 1.5f);".to_string()).collect::<Vec<_>>().join("\n"), tgb, 32, 0));
     rows.push(("16 dependent divides, 32 warps".into(), String::new(), (0..16).map(|_| "acc = 1.5f / (acc + 0.25f);".to_string()).collect::<Vec<_>>().join("\n"), tgb, 32, 0));
     println!("{groups} threadgroup(s) of 1,024 lanes; µs a phase (fast math on / off)");
+    let only = std::env::args().skip(1).find(|a| a.starts_with("only=")).map(|a| a[5..].to_string());
     for (name, pre, body, barrier, warps, n) in rows {
+        if only.as_ref().is_some_and(|o| !name.contains(o.as_str())) {
+            continue;
+        }
         let src = kernel(&body, &pre, barrier);
         let mut cells = Vec::new();
         for fast in [true, false] {

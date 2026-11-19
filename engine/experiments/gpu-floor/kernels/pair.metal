@@ -10,7 +10,7 @@
         // on a compact list, a lane an item. The owners' turns run one after the other
         // (owner 0's hits are applied before owner 1's residual and guard read the forces),
         // each turn order-free inside.
-        #define CB(c) (big + (c) * CAR_WORDS)
+        #define CB(c) (big + (car - 2u + (c)) * CAR_WORDS)
         #define XNODE(c) ((device float4*)(CB(c) + O_NODE))
         #define XACC(c) ((device atomic_int*)(CB(c) + O_ACC))
         #define XSHIFT(c) ((device atomic_int*)(CB(c) + O_SHIFT))

@@ -3,7 +3,7 @@
 //!   pair --scene headon|side|rear|apart [--speed V] [--gap G] [--frames F]
 use engine_softbody::explicit_beams::JbeamWheels;
 use engine_softbody::explicit_contact::ExplicitBeamsWorld;
-use gpu_floor::{car, floor::*};
+use gpu_floor::{car, floor::*, gpu::Gpu};
 
 fn arg(k: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
@@ -63,6 +63,117 @@ fn main() -> anyhow::Result<()> {
             }
         }
         println!("emu: bit for bit over {frames} frames");
+        return Ok(());
+    }
+    if std::env::args().any(|a| a == "--gpu") {
+        // The pair kernel on the GPU: `--pairs N` pairs in one dispatch (three workgroups a
+        // pair), pair 0 checked against the reference every frame, then timed.
+        let flag = |k: &str| std::env::args().any(|a| a == k);
+        let pairs: usize = arg("--pairs").map_or(1, |x| x.parse().unwrap());
+        let time: usize = arg("--time").map_or(30, |x| x.parse().unwrap());
+        let fast = flag("--fast");
+        let (mut l, mut st) = layout_and_statics(&w.vehicles[0])?;
+        make_v2(&w.vehicles[0], &mut l, &mut st)?;
+        st.pair = 2;
+        let mut extra = String::from("#define RUNTIME_SIZES 0\n");
+        if flag("--native") {
+            extra += "#define NATIVE 1\n";
+        }
+        if let Some(m) = arg("--regmode") {
+            extra += &format!("#define REGMODE {m}\n");
+        }
+        let mut f = Floor::new(Gpu::new()?, l, &st, 3 * pairs, fast, &extra)?;
+        let (mt, _, tg) = f.threads_ok();
+        println!("pipeline: max threads {mt}, threadgroup memory {tg} B; {pairs} pair(s), {} workgroups", 3 * pairs);
+        if flag("--compile-only") {
+            return Ok(());
+        }
+        anyhow::ensure!(mt as usize >= LANES);
+        for p in 0..pairs {
+            for c in 0..2 {
+                f.upload(3 * p + c, &state_of(&w.vehicles[c], &f.l, &st));
+            }
+        }
+        let first: Vec<Vec<Vec<u8>>> = (0..3 * pairs).map(|g| f.snapshot(g)).collect();
+        // The reference's own sensitivity: the same run from a start moved by a micron.
+        let mut wp = {
+            let mut cars: Vec<_> = w.vehicles.clone();
+            let mut sd = 0x9E37_79B9u32;
+            for c in &mut cars {
+                for n in &mut c.nodes {
+                    let mut r = || {
+                        sd = sd.wrapping_mul(1664525).wrapping_add(1013904223);
+                        ((sd >> 8) as f32 / 8388608.0 - 1.0) * 1.0e-6
+                    };
+                    n.pos += glam::Vec3::new(r(), r(), r());
+                }
+            }
+            ExplicitBeamsWorld::new(cars)
+        };
+        let dev = |a: &ExplicitBeamsWorld, pos: &dyn Fn(usize, usize) -> glam::Vec3| -> f64 {
+            let mut m = 0.0f64;
+            for c in 0..2 {
+                for (i, n) in a.vehicles[c].nodes.iter().enumerate() {
+                    let d = (pos(c, i) - n.pos).length() as f64;
+                    m = m.max(if d.is_nan() { f64::INFINITY } else { d });
+                }
+            }
+            m
+        };
+        let mut first_bad = None;
+        let mut status = 0u32;
+        let mut ms_run = Vec::new();
+        println!("frame | gpu ms | differing words (both bodies) | body-body hits in the frame | farthest node from the reference, mm | the reference's own from a micron, mm | broken (reference)");
+        for fr in 1..=frames {
+            ms_run.push(f.run(1));
+            let mut hits = 0;
+            for _ in 0..STEPS {
+                w.step();
+                wp.step();
+                hits += w.last.hits;
+            }
+            let g: Vec<State> = (0..2).map(|c| f.download(c)).collect();
+            let bad: usize = (0..2).map(|c| compare(&w.vehicles[c], &g[c]).0).sum();
+            status |= f.download(2).misc[1] | g[0].misc[1] | g[1].misc[1];
+            let d = dev(&w, &|c, i| glam::Vec3::new(g[c].node[i * 3][0], g[c].node[i * 3][1], g[c].node[i * 3][2]));
+            let dr = dev(&w, &|c, i| wp.vehicles[c].nodes[i].pos);
+            if bad != 0 && first_bad.is_none() {
+                first_bad = Some(fr);
+                for c in 0..2 {
+                    for n in compare(&w.vehicles[c], &g[c]).1.iter().take(4) {
+                        println!("  body {c}: {n}");
+                    }
+                }
+            }
+            if fr % 5 == 0 || fr == frames {
+                let broken: Vec<usize> = w.vehicles.iter().map(|v| v.beams.iter().filter(|b| b.broken).count()).collect();
+                println!("{fr:5} | {:7.3} | {bad:6} | {hits:5} | {:9.4} | {:9.4} | {broken:?}", ms_run[fr - 1], d * 1e3, dr * 1e3);
+            }
+        }
+        println!("check: {}; kernel status {status:#x} (0: no list overflowed, no cross-group barrier missed)", match first_bad { None => "both bodies bit for bit every frame".to_string(), Some(fr) => format!("first differing word at frame {fr}") });
+        let q = |ms: &mut Vec<f64>| {
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p = |x: f64| ms[((ms.len() - 1) as f64 * x) as usize];
+            format!("median {:.4} p95 {:.4} worst {:.4} best {:.4}", p(0.5), p(0.95), ms[ms.len() - 1], ms[0])
+        };
+        f.flush = false;
+        let last: Vec<Vec<Vec<u8>>> = (0..3).map(|g| f.snapshot(g)).collect();
+        // The run again from the start, every pair the same, timed.
+        for g in 0..3 * pairs {
+            f.restore(g, &first[g]);
+        }
+        let mut ms: Vec<f64> = (0..frames).map(|_| f.run(1)).collect();
+        let mut ms = ms.split_off(ms.len().min(3));
+        println!("timing, the run ({pairs} pair(s), a frame a dispatch, frames 4..{frames}): {} ms a frame", q(&mut ms));
+        let mut ms: Vec<f64> = (0..time)
+            .map(|_| {
+                for g in 0..3 * pairs {
+                    f.restore(g, &last[g % 3]);
+                }
+                f.run(1)
+            })
+            .collect();
+        println!("timing, the last state ({pairs} pair(s), {time} dispatches from it): {} ms", q(&mut ms));
         return Ok(());
     }
     let t0 = std::time::Instant::now();

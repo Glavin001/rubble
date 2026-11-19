@@ -400,7 +400,7 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
             l.nn, l.nr, l.nt, l.ng, l.nd, LANES, STEPS / per_frame, (l.nc > 0) as u32, l.nc.max(1), l.ncw, st.cr.to_bits(), st.list_reach.to_bits(),
             extra, st.v2_defs, helpers,
             unroll_slots(&if st.pair != 0 {
-                format!("#define PAIR 1\n#define NCARS {}\n#define NGROUPS {}\n#define XCAP 4194304u\n{}", st.pair, st.pair + 1, include_str!("../kernels/floor2.metal").replace("//@PAIR_ROLE", include_str!("../kernels/pair.metal")))
+                format!("#define PAIR 1\n#define NCARS {}\n#define NGROUPS {}\n#define XCAP 1048576u\n{}", st.pair, st.pair + 1, include_str!("../kernels/floor2.metal").replace("//@PAIR_ROLE", include_str!("../kernels/pair.metal")))
             } else {
                 include_str!("../kernels/floor2.metal").to_string()
             })
@@ -424,6 +424,7 @@ pub struct Floor {
     /// The second layout: the beams' two deferred words written to their records each
     /// dispatch (to read the beams; off for timing).
     pub flush: bool,
+    pair: usize,
     pub l: Layout,
     pub cars: usize,
     pso: ComputePipelineState,
@@ -476,6 +477,7 @@ impl Floor {
             node: if st.v2_tab.is_empty() { z(l.nn * 3 * 16) } else { z(st.v2_off.words * 4) },
             off: st.v2_off.clone(),
             flush: true,
+            pair: st.pair,
             rec: z(l.nr * 3 * 16),
             add: z(l.nadd * 16),
             cen: if st.v2_tab.is_empty() { z(l.ncen * 16) } else { gpu.buffer(&st.v2_tab) },
@@ -592,6 +594,12 @@ impl Floor {
     pub fn run_skip(&self, frames: u32, skip: u32) -> f64 {
         let l = &self.l;
         let steps = STEPS / self.per_frame;
+        if self.pair != 0 {
+            // (Each pair's cross-group barrier counter starts at zero each dispatch.)
+            for g in (2..self.cars).step_by(3) {
+                unsafe { *((self.node.contents() as *mut u32).add(g * self.off.words + self.off.misc + 14)) = 0 };
+            }
+        }
         write(&self.params, &[self.cars as u32, if self.per_frame > 1 { 1 } else { frames }, 0.0f32.to_bits(), skip, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, steps as u32, l.ng as u32, l.rs as u32, self.flush as u32]);
         let mut bufs: Vec<&Buffer> = vec![&self.params, &self.node, &self.stat[0], &self.stat[1], &self.stat[2], &self.stat[3], &self.stat[4], &self.stat[5]];
         bufs.extend([&self.rec, &self.stat[6], &self.stat[7], &self.add, &self.cen, &self.stat[8], &self.stat[9], &self.groups, &self.deform, &self.stat[10], &self.tri_dead, &self.acc, &self.shift, &self.misc]);
@@ -838,8 +846,10 @@ impl Emu {
         if self.v2 && self.groups > 1 {
             // (The cross-group barrier's counter starts at zero each dispatch.)
             let n = self.off.words * 4;
-            let at = (self.groups - 1) * n + (self.off.misc + 14) * 4;
-            self.bufs[1][at..at + 4].fill(0);
+            for g in (2..self.groups).step_by(3) {
+                let at = g * n + (self.off.misc + 14) * 4;
+                self.bufs[1][at..at + 4].fill(0);
+            }
         }
         let p: [u32; 12] = [self.groups as u32, frames, 0.0f32.to_bits(), 0, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, self.steps as u32, l.ng as u32, l.rs as u32, 1];
         self.bufs[0] = bytemuck::cast_slice(&p).to_vec();
