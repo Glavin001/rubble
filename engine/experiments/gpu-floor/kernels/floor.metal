@@ -12,6 +12,9 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef NATIVE
+#define NATIVE 0
+#endif
 #define H 0.0005f
 #define GRAVITY (-9.807f)
 #define MIN_REST 0.1f
@@ -68,6 +71,11 @@ inline float exactInvSqrt(float x)
 // (length, inverse length)
 inline float2 exactLength(float q)
 {
+#if NATIVE
+    // (The ledger's "native functions" row: the GPU's own square root and reciprocal.)
+    float ln = sqrt(q);
+    return float2(ln, 1.0f / ln);
+#endif
     float y = exactInvSqrt(q);
     float l = q * y;
     return float2(fma(fma(-l, l, q), 0.5f * y, l), y);
@@ -79,6 +87,9 @@ inline float exactExp(float x)
 {
     if (x < -87.0f) return 0.0f;
     if (x > 88.0f) return 3.4e38f;
+#if NATIVE
+    return exp(x);
+#endif
     float k = floor(x * 1.44269504088896340736f + 0.5f);
     float r = (x - k * LN2_HI) - k * LN2_LO;
     float p = EXP_C[7];
@@ -88,6 +99,9 @@ inline float exactExp(float x)
 inline float exactLn(float x)
 {
     if (!(x >= 1.17549435e-38f)) return -1000.0f;
+#if NATIVE
+    return log(x);
+#endif
     uint b = as_type<uint>(x);
     float e = float(int(b >> 23) - 127);
     float m = as_type<float>((b & 0x007FFFFFu) | 0x3F800000u);
@@ -117,6 +131,9 @@ inline float exactAtan2(float y, float x)
     bool swp = ay > ax;
     float lo = swp ? ax : ay, hi = swp ? ay : ax;
     if (hi == 0.0f) return 0.0f;
+#if NATIVE
+    return atan2(y, x);
+#endif
     float a = lo / hi;
     float t = a, base = 0.0f;
     if (a > as_type<float>(0x3ed413cdu)) { t = (a - 1.0f) / (a + 1.0f); base = 0.78539816339744830962f; }

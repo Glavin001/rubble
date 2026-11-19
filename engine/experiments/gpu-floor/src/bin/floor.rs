@@ -108,6 +108,11 @@ fn main() -> anyhow::Result<()> {
     if flag("--per-step") {
         extra += "#define PER_STEP 1\n";
     }
+    // --native (with --fast): the GPU's own sqrt, reciprocal, exp, log, atan2 in place of the
+    // reference's specified sequences.
+    if flag("--native") {
+        extra += "#define NATIVE 1\n";
+    }
     // --no-hoist: the records' static words loaded every substep (a ledger measurement).
     if flag("--no-hoist") {
         extra += "#define HOIST 0\n";
