@@ -164,6 +164,9 @@ kernel void floorFrame(
     const bool isTri = tri != NONE;
     const uint ni = isNode ? nd : 0u;
     V3 F0 = v3(nodeState[ni * 3 + 2]);
+    // (The node's mass in a register: three device loads a step otherwise. Friction and the
+    // flags are read where a contact or an immovable node needs them.)
+    const float massN = nodeStatic[ni].x;
     if (isNode)
     {
         float4 p = nodeState[ni * 3], v = nodeState[ni * 3 + 1];
@@ -272,9 +275,12 @@ kernel void floorFrame(
         }
         if (isNode && !SKIP(0))
         {
-            float4 ns = nodeStatic[ni];
-            const float mass = ns.x, friction = ns.y;
-            const uint nflags = as_type<uint>(ns.z);
+            const float mass = massN;
+#if HAS_IMMOVABLE
+            const uint nflags = as_type<uint>(nodeStatic[ni].z);
+#else
+            const uint nflags = 0u;
+#endif
             V3 P0 = TGP(ni), V0 = TGV(ni);
             if (fRoll)
             {
@@ -308,7 +314,7 @@ kernel void floorFrame(
             {
                 float budget;
                 float depth = P.ground - x.y;
-                V3 c = contactResponse(F0, V0, mass, v3(0, 1, 0), GROUND, depth, friction, budget);
+                V3 c = contactResponse(F0, V0, mass, v3(0, 1, 0), GROUND, depth, nodeStatic[ni].y, budget);
                 if (!isZero3(c)) lift = shiftDepth(depth, budget, F0.y);
                 F0 = F0 + c;
             }
@@ -325,7 +331,7 @@ kernel void floorFrame(
                     for (uint q = 0; q < 5; q++)
                         if (dd[q] < dist) { dist = dd[q]; normal = nn[q]; }
                     float budget;
-                    V3 c = contactResponse(F0, V0, mass, normal, BOXS, 0.0f, friction, budget);
+                    V3 c = contactResponse(F0, V0, mass, normal, BOXS, 0.0f, nodeStatic[ni].y, budget);
                     F0 = F0 + c;
                 }
             }
@@ -451,11 +457,12 @@ kernel void floorFrame(
                     c = c + ((e & (1u << 30)) != 0u ? -vv : vv);
                 }
             }
-            float4 ns = nodeStatic[ni];
             Pn = Ps; Vn = TGV(ni);
-            if ((as_type<uint>(ns.z) & NODE_IMMOVABLE) == 0u)
+#if HAS_IMMOVABLE
+            if ((as_type<uint>(nodeStatic[ni].z) & NODE_IMMOVABLE) == 0u)
+#endif
             {
-                V3 dv = (c / ns.x) * H;
+                V3 dv = (c / massN) * H;
                 Vn = Vn + dv;
                 Pn = Pn + dv * H;
             }
@@ -688,12 +695,13 @@ kernel void floorFrame(
                         uint h = cands[c];
                         V3 p = v3(0, 0, 0) + TGP(h);
                         if (p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z) continue;
-                        if (n < PROW - 1u) pairs[tri * PROW + 1u + n] = h;
+                        if (n < PROW - 2u) pairs[tri * PROW + 2u + n] = h;
                         n++;
                     }
                 }
-                if (n > PROW - 1u) { tgFlags[F_STATUS] = tgFlags[F_STATUS] | 1u; n = PROW - 1u; }
+                if (n > PROW - 2u) { tgFlags[F_STATUS] = tgFlags[F_STATUS] | 1u; n = PROW - 2u; }
                 pairs[tri * PROW] = n;
+                pairs[tri * PROW + 1u] = tn.x | tn.y << 10 | tn.z << 20;
             }
             if (isNode) pBuild[ni] = f4(TGP(ni), 0);
             if (lid == 0) { V3 pr = TGP(REFNODE); tgPB[0] = pr.x; tgPB[1] = pr.y; tgPB[2] = pr.z; }
@@ -704,9 +712,8 @@ kernel void floorFrame(
         // ---- S4: the beam pass gathered per node; the triangles' listed pairs ----
         if (isNode && !SKIP(4))
         {
-            float4 ns = nodeStatic[ni];
             V3 Ps = TGP(ni);
-            V3 f = v3(0.0f, ns.x * GRAVITY, 0.0f);
+            V3 f = v3(0.0f, massN * GRAVITY, 0.0f);
             // (A broken beam's scalar is zero: adding ±0 changes no bit of a sum that began at
             // +0 or at the weight, so it is the reference's skipped add.)
             uint4 cur = uint4(0u);
@@ -753,10 +760,13 @@ kernel void floorFrame(
 #if COLLIDE
         if (isTri && !SKIP(5))
         {
-            const uint n = min(pairs[tri * PROW], (uint)(PROW - 1u));
+            // (The row's first load: its count, its triangle's nodes, its first two pairs.)
+            device const uint4* row4 = (device const uint4*)(pairs + tri * PROW);
+            uint4 cur = row4[0];
+            const uint n = min(cur.x, (uint)(PROW - 2u));
             if (n != 0u)
             {
-                uint4 tn = tris[tri];
+                uint4 tn = uint4(cur.y & 1023u, (cur.y >> 10) & 1023u, (cur.y >> 20) & 1023u, 0u);
                 V3 p[3], v[3], b[3];
                 for (uint q = 0; q < 3; q++)
                 {
@@ -767,13 +777,11 @@ kernel void floorFrame(
                 }
                 Frame F = triFrame(p[0], p[1], p[2]);
                 Frame B = triFrame(b[0], b[1], b[2]);
-                device const uint4* row4 = (device const uint4*)(pairs + tri * PROW);
-                uint4 cur = uint4(0u);
-                for (uint k = 0; k < PROW - 1u; k++)
+                for (uint k = 0; k < PROW - 2u; k++)
                 {
                     if (k >= n) break;
-                    uint kk1 = k + 1u;
-                    if (k == 0u || (kk1 & 3u) == 0u) cur = row4[kk1 >> 2];
+                    uint kk1 = k + 2u;
+                    if ((kk1 & 3u) == 0u) cur = row4[kk1 >> 2];
                     uint h = cur[kk1 & 3u];
                     V3 ph = v3(0, 0, 0) + TGP(h);
                     V3 vh = TGV(h);

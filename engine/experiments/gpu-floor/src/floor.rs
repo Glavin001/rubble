@@ -928,7 +928,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     tri_order.sort_by_key(|&t| (std::cmp::Reverse(counts[t]), t));
     anyhow::ensure!(nt <= LANES);
     let prow = ((PAIR_CAP / nt.max(1)) & !3).min(124);
-    anyhow::ensure!(counts.iter().all(|&c| c + 1 < prow), "a triangle's pairs past its row ({} of {prow})", counts.iter().max().unwrap());
+    anyhow::ensure!(counts.iter().all(|&c| c + 2 < prow), "a triangle's pairs past its row ({} of {prow})", counts.iter().max().unwrap());
     let t_lane = 0usize;
     let t_vidx = t_lane + LANES * 4;
     let t_ent = (t_vidx + nr + 3) & !3;
@@ -986,8 +986,8 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
         "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define CAR_WORDS {}\n",
         o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.words
     ) + &format!(
-        "#define NGS {ngs}\n#define NV {}\n#define AERO_LO {aero_lo}\n#define CPL_BASE {cpl_base}\n#define T_LANE {t_lane}\n#define T_VIDX {t_vidx}\n#define T_ENT {t_ent}\n#define MAXENT {maxent}\n#define PROW {prow}\n#define REFNODE 0\n",
-        nv.max(1)
+        "#define NGS {ngs}\n#define NV {}\n#define AERO_LO {aero_lo}\n#define CPL_BASE {cpl_base}\n#define T_LANE {t_lane}\n#define T_VIDX {t_vidx}\n#define T_ENT {t_ent}\n#define MAXENT {maxent}\n#define PROW {prow}\n#define REFNODE 0\n#define HAS_IMMOVABLE {}\n",
+        nv.max(1), s.nodes.iter().any(|n| n.flags & 2 != 0) as u32
     );
     l.rs = 4;
     Ok(())
