@@ -31,6 +31,13 @@ struct Params
 #define Z_STEPS STEPS
 #endif
 #define RS 4
+// REGMODE: which of a slot's words stay in registers between phases (the rest come from
+// the slot's hot record, one streamed device load a slot a phase). 0: w0, k, c, rest, up;
+// 1: w0, c, up; 2: w0, up.
+#ifndef REGMODE
+#define REGMODE 1
+#endif
+#define HOTS(s) hot[lid * 6 + (s)]
 #define BAR threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)
 #define TGP(i) v3(tgPos[(i) * 3], tgPos[(i) * 3 + 1], tgPos[(i) * 3 + 2])
 #define TGV(i) v3(tgVel[(i) * 3], tgVel[(i) * 3 + 1], tgVel[(i) * 3 + 2])
@@ -177,24 +184,46 @@ kernel void floorFrame(
     // The slots' hot words: from the image the last dispatch left (six streamed loads), or
     // built from the records (the first dispatch after an upload).
     uint w0[RS];
-    float kk[RS], cc[RS], rest[RS], up[RS];
+    float up[RS];
+#if REGMODE < 2
+    float cc[RS];
+#endif
+#if REGMODE < 1
+    float kk[RS], rest[RS];
+#endif
     float G = 3.0e38f, L = 3.0e38f;
     const bool hotOk = misc[11] == 1u;
     if (hotOk)
     {
-        uint4 hw = as_type<uint4>(hot[lid * 6]);
-        float4 hk = hot[lid * 6 + 1], hc = hot[lid * 6 + 2], hr = hot[lid * 6 + 3], hu = hot[lid * 6 + 4], hg = hot[lid * 6 + 5];
+        uint4 hw = as_type<uint4>(hot[lid * 6 + 4]);
+        float4 hg = hot[lid * 6 + 5];
         w0[0] = hw.x; w0[1] = hw.y; w0[2] = hw.z; w0[3] = hw.w;
-        kk[0] = hk.x; kk[1] = hk.y; kk[2] = hk.z; kk[3] = hk.w;
-        cc[0] = hc.x; cc[1] = hc.y; cc[2] = hc.z; cc[3] = hc.w;
-        rest[0] = hr.x; rest[1] = hr.y; rest[2] = hr.z; rest[3] = hr.w;
-        up[0] = hu.x; up[1] = hu.y; up[2] = hu.z; up[3] = hu.w;
         G = hg.x; L = hg.y;
+        for (uint s = 0; s < RS; s++)
+        {
+            float4 hs = HOTS(s);
+            up[s] = hs.w;
+#if REGMODE < 2
+            cc[s] = hs.y;
+#endif
+#if REGMODE < 1
+            kk[s] = hs.x; rest[s] = hs.z;
+#endif
+        }
     }
     for (uint s = 0; s < RS && !hotOk; s++)
     {
         uint r = perm[s * LANES + lid];
-        w0[s] = NONE; kk[s] = 0.0f; cc[s] = 0.0f; rest[s] = 0.0f; up[s] = 0.0f;
+        w0[s] = NONE;
+        float4 hs = float4(0);
+        up[s] = 0.0f;
+#if REGMODE < 2
+        cc[s] = 0.0f;
+#endif
+#if REGMODE < 1
+        kk[s] = 0.0f; rest[s] = 0.0f;
+#endif
+        HOTS(s) = hs;
         if (r == NONE) continue;
         uint4 a = recA[r];
         uint kind = a.z & 0xFFu;
@@ -203,7 +232,7 @@ kernel void floorFrame(
         {
             w0[s] = a.x | a.y << 10 | (st1.w == 0.0f ? W_ALIVE : 0u) | (st1.z != 0.0f ? W_SLOPE : 0u) | (kind == K_JSUPPORT ? C_SUPPORT : C_PLAIN) << 30;
             float4 kc = recK[r];
-            kk[s] = kc.x; cc[s] = kc.y; rest[s] = st0.x; up[s] = ax.x;
+            hs = float4(kc.x, kc.y, st0.x, ax.x);
             if (st1.w == 0.0f)
             {
                 G = fmin(G, fmin(st0.w, st1.x));
@@ -214,7 +243,7 @@ kernel void floorFrame(
         {
             float4 e1 = recE[r * 2];
             w0[s] = a.x | a.y << 10 | as_type<uint>(e1.x) << 20 | C_AERO << 30;
-            kk[s] = e1.y; cc[s] = e1.z; rest[s] = e1.w;
+            hs = float4(e1.y, e1.z, e1.w, 0.0f);
         }
         else
         {
@@ -228,6 +257,14 @@ kernel void floorFrame(
                 cplV[ci * 6 + 3] = vb.x; cplV[ci * 6 + 4] = vb.y; cplV[ci * 6 + 5] = vb.z;
             }
         }
+        HOTS(s) = hs;
+        up[s] = hs.w;
+#if REGMODE < 2
+        cc[s] = hs.y;
+#endif
+#if REGMODE < 1
+        kk[s] = hs.x; rest[s] = hs.z;
+#endif
     }
     if (lid < NG) atomic_store_explicit(&masters[lid], NONE, memory_order_relaxed);
     if (lid < 4) atomic_store_explicit(&tgCount[lid], 0u, memory_order_relaxed);
@@ -371,7 +408,11 @@ kernel void floorFrame(
                     V3 d = TGP(a) - TGP(b);
                     float inv = exactLength(dot3(d, d)).y;
                     float du = dot3(TGV(a) - TGV(b), d) * inv - up[s];
+#if REGMODE < 2
                     gc = ((-0.5f * cc[s]) * du) * inv;
+#else
+                    gc = ((-0.5f * HOTS(s).y) * du) * inv;
+#endif
                 }
                 tgG[s * LANES + lid] = gc;
                 continue;
@@ -487,7 +528,8 @@ kernel void floorFrame(
             if (cls == C_AERO)
             {
                 uint a = w & 1023u, b = (w >> 10) & 1023u, c = (w >> 20) & 1023u;
-                V3 f = aeroTri(TGP(a), TGP(b), TGP(c), TGV(a), TGV(b), TGV(c), kk[s], cc[s], rest[s]);
+                float4 ha = HOTS(s);
+                V3 f = aeroTri(TGP(a), TGP(b), TGP(c), TGV(a), TGV(b), TGV(c), ha.x, ha.y, ha.z);
                 PUTV(lid - AERO_LO, f);
                 continue;
             }
@@ -503,10 +545,21 @@ kernel void floorFrame(
                 V3 pa = TGP(a), pb = TGP(b), va = TGV(a), vb = TGV(b);
                 V3 d = pa - pb;
                 float2 li = exactLength(dot3(d, d));
-                float e = li.x - rest[s];
+#if REGMODE >= 1
+                float4 hs = HOTS(s);
+                const float kS = hs.x, rS = hs.z;
+#else
+                const float kS = kk[s], rS = rest[s];
+#endif
+#if REGMODE >= 2
+                const float cS = hs.y;
+#else
+                const float cS = cc[s];
+#endif
+                float e = li.x - rS;
                 float u = dot3(va - vb, d) * li.y;
-                float k = kk[s];
-                float damp = cc[s] * u;
+                float k = kS;
+                float damp = cS * u;
                 bool slow = false, slopeOn = true;
                 if (cls == C_SUPPORT && e > 0.0f)
                 {
@@ -519,7 +572,12 @@ kernel void floorFrame(
                 {
                     // The step it may yield or break: the whole rule from its records.
                     Slow o = slowScalar(perm[s * LANES + lid], recA, recK, recB, recE, recState, masters, pa, pb, va, vb);
+#if REGMODE < 1
                     rest[s] = o.rest;
+#else
+                    hs.z = o.rest;
+                    HOTS(s) = hs;
+#endif
                     up[s] = o.u;
                     w0[s] = (w & ~(W_ALIVE | W_SLOPE | W_DEFORM)) | ((o.bits & 1u) != 0u ? W_ALIVE : 0u) | ((o.bits & 2u) != 0u ? W_SLOPE : 0u) | ((o.bits & 4u) != 0u ? W_DEFORM : 0u);
                     if ((o.bits & 8u) != 0u) tgFlags[F_FIRED] = 1u;
@@ -775,8 +833,15 @@ kernel void floorFrame(
                     v[q] = TGV(i);
                     b[q] = p[q] - v[q] * H;
                 }
-                Frame F = triFrame(p[0], p[1], p[2]);
-                Frame B = triFrame(b[0], b[1], b[2]);
+                // (Only what the filter reads stays live over the row: two points and two
+                // plane normals; a pair that passes rebuilds the rest, the same values.)
+                V3 f0, frd, b0, brd;
+                bool fok, bok;
+                {
+                    Frame F = triFrame(p[0], p[1], p[2]);
+                    Frame B = triFrame(b[0], b[1], b[2]);
+                    f0 = F.p0; frd = F.rd; fok = F.ok; b0 = B.p0; brd = B.rd; bok = B.ok;
+                }
                 for (uint k = 0; k < PROW - 2u; k++)
                 {
                     if (k >= n) break;
@@ -785,11 +850,21 @@ kernel void floorFrame(
                     uint h = cur[kk1 & 3u];
                     V3 ph = v3(0, 0, 0) + TGP(h);
                     V3 vh = TGV(h);
-                    float d1 = F.ok ? dot3(F.rd, ph - F.p0) : 0.0f;
-                    float d0 = B.ok ? dot3(B.rd, (ph - vh * H) - B.p0) : 0.0f;
+                    float d1 = fok ? dot3(frd, ph - f0) : 0.0f;
+                    float d0 = bok ? dot3(brd, (ph - vh * H) - b0) : 0.0f;
                     bool cand = tgHeld[h] != 0 || (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f) || fabs(d1) <= CR;
                     if (!cand) continue;
                     // The full rule (explicit_beams.rs collision_pass, clip_hit).
+                    V3 p[3], v[3], b[3];
+                    for (uint q = 0; q < 3; q++)
+                    {
+                        uint i = tn[q];
+                        p[q] = v3(0, 0, 0) + TGP(i);
+                        v[q] = TGV(i);
+                        b[q] = p[q] - v[q] * H;
+                    }
+                    Frame F = triFrame(p[0], p[1], p[2]);
+                    Frame B = triFrame(b[0], b[1], b[2]);
                     float tv = rmax(rmax(rmax(0.0f, len3(v[0])), len3(v[1])), len3(v[2]));
                     float reach = (CR + (tv + vmax) * H) + CLIP_DEPTH;
                     V3 lo = v3(rmin(rmin(p[0].x, p[1].x), p[2].x) - reach, rmin(rmin(p[0].y, p[1].y), p[2].y) - reach, rmin(rmin(p[0].z, p[1].z), p[2].z) - reach);
@@ -1022,22 +1097,24 @@ kernel void floorFrame(
         nodeState[ni * 3 + 1] = f4(TGV(ni), 0);
         nodeState[ni * 3 + 2] = f4(F0, 0);
     }
-    hot[lid * 6] = as_type<float4>(uint4(w0[0], w0[1], w0[2], w0[3]));
-    hot[lid * 6 + 1] = float4(kk[0], kk[1], kk[2], kk[3]);
-    hot[lid * 6 + 2] = float4(cc[0], cc[1], cc[2], cc[3]);
-    hot[lid * 6 + 3] = float4(rest[0], rest[1], rest[2], rest[3]);
-    hot[lid * 6 + 4] = float4(up[0], up[1], up[2], up[3]);
+    hot[lid * 6 + 4] = as_type<float4>(uint4(w0[0], w0[1], w0[2], w0[3]));
     hot[lid * 6 + 5] = float4(G, L, 0.0f, 0.0f);
-    // The records' copies of the two words the hot path keeps (the last extension rate and
-    // the damping slope), when the host asks to read the beams (P.pad2 bit 0).
-    for (uint s = 0; s < RS && (P.pad2 & 1u) != 0u; s++)
+    for (uint s = 0; s < RS; s++)
     {
+        float4 hs = HOTS(s);
+        hs.w = up[s];
+#if REGMODE < 1
+        hs.x = kk[s]; hs.z = rest[s];
+#endif
+        HOTS(s) = hs;
+        // The records' copies of the two words the hot path keeps (the last extension rate
+        // and the damping slope), when the host asks to read the beams (P.pad2 bit 0).
         uint w = w0[s];
-        if (w == NONE || (w >> 30) >= C_AERO) continue;
+        if ((P.pad2 & 1u) == 0u || w == NONE || (w >> 30) >= C_AERO) continue;
         uint r = perm[s * LANES + lid];
         recState[r * 3 + 2] = float4(up[s], 0.0f, 0.0f, 0.0f);
         float4 s1 = recState[r * 3 + 1];
-        s1.z = (w & W_SLOPE) != 0u ? cc[s] : 0.0f;
+        s1.z = (w & W_SLOPE) != 0u ? hs.y : 0.0f;
         recState[r * 3 + 1] = s1;
     }
     if (lid < NG)

@@ -57,6 +57,9 @@ fn main() -> anyhow::Result<()> {
         // --by-step: one substep a run, compared after each (finds the first differing step).
         let by_step = flag("--by-step");
         extra += if flag("--runtime-sizes") || by_step { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" };
+        if let Some(m) = arg("--regmode") {
+            extra += &format!("#define REGMODE {m}\n");
+        }
         if flag("--no-hoist") {
             extra += "#define HOIST 0\n";
         }
@@ -124,6 +127,10 @@ fn main() -> anyhow::Result<()> {
     // --no-hoist: the records' static words loaded every substep (a ledger measurement).
     if flag("--no-hoist") {
         extra += "#define HOIST 0\n";
+    }
+    // --regmode N (second layout): which slot words stay in registers (0 all, 1 default, 2 fewest).
+    if let Some(m) = arg("--regmode") {
+        extra += &format!("#define REGMODE {m}\n");
     }
     let extra = extra.as_str();
     let mut f = Floor::new(gpu, l, &st, cars.max(2), fast, extra)?;
