@@ -325,7 +325,7 @@
     const MODES = { shoot: 'Shoot', compactor: 'Compactor', mountain: 'Mountain', drive: 'Drive', crash: 'Crash test', derby: 'Derby' };
     // The derby's camera per mode (Derby: the chase camera on the player's car).
     const modeCam = (k) => (k === 'mountain' ? 'overhead' : k === 'drive' || k === 'derby' ? 'chase' : 'orbit');
-    const SCRIPTS = ['shoot-box', 'shoot-sphere', 'shoot-cylinder', 'compactor-top', 'compactor-sides', 'compactor-ends', 'mountain', 'drive-wall', 'drive-bricks'];
+    const SCRIPTS = ['shoot-box', 'shoot-sphere', 'shoot-cylinder', 'compactor-top', 'compactor-sides', 'compactor-ends', 'mountain', 'drive-wall', 'drive-bricks', 'drive-ramp-bricks'];
     $('script').add(new Option('none (free play)', ''));
     for (const s of SCRIPTS) $('script').add(new Option(s, s));
     const CAMS = { overhead: 'Overhead chase', orbit: 'Orbit (drag)', chase: 'Chase', tumble: 'Tumble', side: 'Side', top: 'Top' };
