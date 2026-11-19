@@ -5077,6 +5077,16 @@ impl ExplicitBeamsGpu {
         self.layout.velocities(&self.read_f4(&self.nodes))
     }
 
+    /// Per vehicle, node masses (kg; the node records' fourth word).
+    pub fn masses(&self) -> Vec<Vec<f32>> {
+        let f = self.read_f4(&self.nodes);
+        self.layout
+            .spans
+            .iter()
+            .map(|s| (0..s.nodes).map(|i| f[(s.node_off + i) as usize * 3][3]).collect())
+            .collect()
+    }
+
     /// Per vehicle, its wings' broken flags (file order).
     pub fn wings_broken(&self) -> Vec<Vec<bool>> {
         self.layout.wings_broken(&self.read_f4(&self.beams))

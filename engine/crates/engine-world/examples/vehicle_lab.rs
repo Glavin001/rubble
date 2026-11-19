@@ -2357,6 +2357,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 println!("   self split skips at t {:.1} (ms/frame): {}", lab.bench.t, line.join(", "));
             }
             let mut out = Vec::new();
+            // (Each side's world positions, broken beams, nodes' kinetic energy: the
+            // tolerance report below, for a switch that is not bit for bit by design.)
+            let mut physical: Vec<(Vec<Vec<glam::Vec3>>, usize, f64)> = Vec::new();
             if kernel_ab {
                 let timed = |y: &mut engine_webgpu::ExplicitBeamsGpu, snap: &engine_webgpu::GpuSnapshot| {
                     // Two untimed frames first (a lazily created pipeline compiles there).
@@ -2529,6 +2532,15 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 let mut extra = x.coupling_words();
                 extra.extend(sleep_words);
                 out.push((ms, x.state_words(), extra));
+                let broken = x.beams().iter().flatten().filter(|b| b.broken).count();
+                let masses = x.masses();
+                let ke: f64 = x
+                    .velocities()
+                    .iter()
+                    .zip(&masses)
+                    .flat_map(|(v, m)| v.iter().zip(m).map(|(v, m)| 0.5 * f64::from(*m) * f64::from(v.length_squared())))
+                    .sum();
+                physical.push((x.positions(), broken, ke));
             }
             // The vehicle-contact plan's records are planning state, as in
             // tests/explicit_vehicles.rs: a vehicle's "big" flag is whichever vehicle
@@ -2581,6 +2593,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 lab.bench.t,
                 if kernel_ab {
                     "this kernel (on) / --ab-kernel-dir's (off)"
+                } else if bitexact_ab {
+                    "bit-exact (on) / fast (off)"
                 } else if groupsplit_ab {
                     "group split"
                 } else if sleep_ab {
@@ -2616,6 +2630,26 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 && out[0].2.iter().zip(&out[1].2).filter(|((n, _), _)| n.starts_with("sleep")).all(|((_, a), (_, b))| a == b);
             if wide_ab {
                 println!("   wide: nodes, beams and groups bit for bit: {physics}");
+            }
+            // The two sides' physical difference (for a switch not bit for bit by design,
+            // as bitexact): the largest node distance per car, the broken beams and the
+            // nodes' kinetic energy each side, and whether every position is finite.
+            if physical.len() == 2 {
+                let (pa, ba, ka) = &physical[0];
+                let (pb, bb, kb) = &physical[1];
+                let worst: Vec<f32> = pa
+                    .iter()
+                    .zip(pb)
+                    .map(|(a, b)| a.iter().zip(b).map(|(p, q)| (*p - *q).length()).fold(0.0f32, f32::max))
+                    .collect();
+                let finite = pa.iter().chain(pb).flatten().all(|p| p.is_finite());
+                println!(
+                    "   A/B physical: largest node difference {:.3} mm (cars: {}); broken beams on {ba} / off {bb}; kinetic energy on {:.1} / off {:.1} J; finite {finite}",
+                    worst.iter().fold(0.0f32, |m, w| m.max(*w)) * 1e3,
+                    worst.iter().map(|w| format!("{:.2}", w * 1e3)).collect::<Vec<_>>().join(" "),
+                    ka,
+                    kb
+                );
             }
             // (AB_TIME_ONLY=1: a measurement switch that changes the results on purpose.)
             anyhow::ensure!(same || (wide_ab && physics) || std::env::var("AB_TIME_ONLY").is_ok(), "the A/B switch changed the state");
