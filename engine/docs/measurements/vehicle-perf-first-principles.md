@@ -3537,6 +3537,67 @@ primitives under-predict. Two guesses at the cause were tested and are not it
 indexed by a variable (four points a load by name: 1.29 against 1.32, kept as the
 default). It stays open.
 
+**Crash states: a profiler that can be trusted, and what it found.** Leaving one phase out
+of a whole frame (how the phase figures above were first taken) mis-measures any phase the
+later substeps depend on: they then run from another state (the centred scalars came out at
+−6 ms, the two-body pass anywhere from 1.2 to 2.0). `--profile F` runs a kernel of one
+substep a dispatch: each of frame F + 1's 34 substeps from its own saved state, cut short
+after one more phase group at a time; a group's cost is the difference, and nothing before
+it changes. The groups sum to the measured frame within a few percent (4.46 against 4.51 ms).
+It still is not a full-frame A/B: two changes its sums favoured made the frame slower
+(below), so every change here was kept or dropped on the whole frame, side by side in one
+batch.
+
+The head-on frame (two cars, 14 m/s each, mid-crush, fast), ms a frame by group, when the
+profiler first ran and now:
+
+| group | then | now |
+|---|---|---|
+| the two-body owners' turns | 1.53 | 0.87 |
+| the bodies' own hit passes | 0.46 | 0.24–0.35 |
+| two-body: boxes, publication, the partner's nodes, the triangles' cull and clusters | 0.56 | 0.43 |
+| two-body: cluster points' box test, candidates' rule | 0.20, 0.21 | 0.20, 0.18 |
+| the pair list's rebuilds | 0.38 (0.6 with one list) | 0.29–0.40 |
+| beams, gathers, rows, node pass, self candidates | 1.1 | 1.1 |
+| **the frame** | **4.5** (5.7 before the profiler) | **3.5** |
+
+What it showed is one thing: **a phase in which a few lanes each run a long chain costs
+that chain, however few the lanes.** A chain runs at about 1.3 ns an instruction and about
+37 ns a device atomic one after another (`xsync --spin`: forty scattered atomic adds a
+lane in one warp, 1.5 µs), against 0.35 ns a warp-instruction when the core is full.
+"A lane an item" lists (above) take rare work out of the wide phases, and each such phase
+then costs its longest chain: 1 to 3 µs, twenty times a substep. The hits were the worst
+case: each hit's lane walked some 170 scattered device words over its passes (the nodes'
+forces, masses, hit counts, staged sums, contact sums). What was changed, each bit for bit
+with the reference on the GPU, with its effect on the head-on frame:
+- *only the nodes a contact wrote read their contact words*: on any step after a contact
+  every node cleared and read its contact sums, position step, side memory and staging, up
+  to 22 device atomics a node; now four bits a node say what was written for it
+  (5.66 → 5.22 ms);
+- *what another workgroup stored atomically read with one plain vector load* in place of
+  three atomic loads (5.22 → 4.87);
+- *two pair lists*: a wide one (skin 0.30 m) built from the clusters, the working one
+  (skin 0.05 m) filtered from it: the same rows in the same order. In the head-on the
+  working list is rebuilt on 15 of 34 substeps (a node may move 15 mm against the reference
+  node before the list must be rebuilt, and the crush zone does that in two or three
+  steps); from the clusters that cost a warp every cluster's nodes for its one lane that
+  needs them (4.87 → 4.43; the wall crash's wide builds 135 → 41 in 20 frames);
+- *the hit passes from threadgroup memory*: each hit node gets a slot in the beam scalars'
+  array (free between two beam passes), named by an atomic minimum over the hits that touch
+  it and filled by the node's own lane from its registers; the passes read and sum there
+  (4.51 → 3.60; the turns 1.53 → 0.85);
+- *a body's clusters' boxes published by the body* instead of rebuilt by its partner from
+  28 scattered loads a lane (3.60 → 3.50).
+What was tried and dropped, measured side by side (`batch-eleven`): the hits' sums carried
+on to the nodes' lanes' registers, and a row's first candidate run by the row's own lane
+(3.60 → 3.84, and the car at rest 1.09 → 1.17: six more live values a lane and a long
+branch inside the widest phase cost more than the phases they removed); the two-body rule
+run by the lane that finds a point in a triangle's box (3.84 → 4.03: a warp waits for its
+slowest lane, which is what the lists were for); velocity and force published only for
+the nodes a partner can reach (no change: a streamed atomic store is cheap, it is the
+chains that are not). A workgroup waiting at the cross-group barrier does not slow the one
+still working (`xsync --spin`).
+
 **Body against body (mechanism 2).** Two workgroups a pair, one a body. Metal has no
 barrier across workgroups: each group's lane 0 adds one to a device counter after its own
 barrier and waits (a bounded number of loads) until every group has; a miss is a status
