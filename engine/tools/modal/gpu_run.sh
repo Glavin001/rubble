@@ -259,6 +259,11 @@ stop_cli() {
     docker rm -f "$cli_name" >/dev/null 2>&1 || true
   fi
 }
+# Heartbeat for the Modal client (gpu_run.py's watcher): touched while this shell
+# lives; the loop ends with it, even when the shell is SIGKILLed (no trap runs then),
+# and the client then stops its app and containers within about a minute.
+touch "$run/heartbeat"
+( while kill -0 $$ 2>/dev/null; do touch "$run/heartbeat" 2>/dev/null; sleep 5; done ) &
 trap 'stop_cli; cleanup' EXIT
 trap 'exit 130' INT TERM
 # The matrix's saved states (read to upload by hash; --make writes the new ones back).

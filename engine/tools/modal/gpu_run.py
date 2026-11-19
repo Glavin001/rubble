@@ -81,8 +81,11 @@ GPU_PRICE = {"T4": 0.000164, "L4": 0.000222, "L40S": 0.000542}
 CPUS, MEM_GIB = 4, 8
 CPU_PRICE, MEM_PRICE = 0.0000131, 0.00000222
 MAX_TIMEOUT = 1800
-# Fan-out: reruns of a cold shard hoping for a warm host before it compiles itself.
-COLD_RETRIES = 2
+# Fan-out: reruns of a cold shard hoping to land on a warm host (~5 s each); warm-up
+# containers' cores (the NVIDIA compile is CPU work; 8 cores did not finish this
+# kernel version in 24 minutes, 16 take ~19) and rounds of them to reach the drivers
+# the cold shards need.
+COLD_RETRIES, WARM_CPUS, WARM_TRIES = 2, 16, 3
 
 COLD_GUARD = (
     "STOPPED: this kernel version has not been compiled on {driver} yet. Its warm-up "
@@ -348,22 +351,30 @@ def _run_impl(archive_key: str, spec: dict) -> dict:
         _say(f"kernel version {kernel}: {'warmed on this driver before' if seen else 'NEW on this driver (cold)'}")
     if not seen and not spec.get("allow_cold"):
         _say(COLD_GUARD.format(driver=cache_key, cpus=spec.get("cpus", CPUS)))
-        return {"code": 3, "secs": time.time() - started, "results": [], "lines": []}
+        return {"code": 3, "secs": time.time() - started, "results": [], "lines": [], "driver": cache_key}
+    if spec.get("warm_only") and seen:
+        # A fan-out's warm-up landed on a driver that is warm already: nothing to do.
+        _say(f"warm-up: {cache_key} is warm for this kernel version already")
+        return {"code": 0, "secs": time.time() - started, "results": [], "lines": [],
+                "driver": cache_key, "already": True}
+    warm_code = 0
     if probe and spec.get("warm", True):
         _say("warm-up: the selection's pipelines, every core at once")
-        code, secs = _run([probe["exec"], "--warm"], "/work", base, deadline, 0)
-        _say(f"warm-up: exit {code}, {secs:.1f} s")
+        warm_code, secs = _run([probe["exec"], "--warm"], "/work", base, deadline, 0)
+        _say(f"warm-up: exit {warm_code}, {secs:.1f} s")
         # Marked seen once the cache holding the warm-up is saved (end of the run).
-        mark_seen = code == 0 and cache_on and bool(kernel) and not seen
+        mark_seen = warm_code == 0 and cache_on and bool(kernel) and not seen
     if spec.get("warm_only"):
-        # A fan-out's first step on a cold kernel version: compile once here, save the
-        # cache, and let the shards start warm.
+        # A fan-out's warm-up container: compile once here, save the cache (a partial
+        # one too: the next warm-up of this version resumes from it), let the shards
+        # start warm. Its exit is the warm-up's: a killed warm-up stops the fan-out.
         if cache_on:
             try:
                 _cache_out(cache_key, kernel, cache_since, spec["id"], mark_seen, was_warmed)
             except Exception as e:  # noqa: BLE001
                 _say(f"shader cache: not saved ({e})")
-        return {"code": 0, "secs": time.time() - started, "results": [], "lines": [], "driver": cache_key}
+        return {"code": warm_code, "secs": time.time() - started, "results": [], "lines": [],
+                "driver": cache_key}
     shard = spec.get("shard")
     runs = [e for e in exes if e["role"] == "run"]
     if shard and shard.get("exe"):
@@ -508,10 +519,34 @@ def _shards(s: dict, manifest: dict, run_dir: Path) -> list[dict]:
     return []
 
 
+def _watch_heartbeat(hb: Path, stale: float = 60.0) -> None:
+    """gpu_run.sh touches `hb` every few seconds while its shell lives. If it stops (the
+    wrapper was killed, even by SIGKILL, which no trap sees), exit this client: Modal
+    then stops the ephemeral app and every container it spawned, instead of a fan-out
+    running on, billed, with nobody waiting for it."""
+    import threading
+
+    def loop() -> None:
+        while True:
+            time.sleep(10)
+            try:
+                age = time.time() - hb.stat().st_mtime
+            except OSError:
+                age = stale + 1
+            if age > stale:
+                print(f"[gpu_run] the local wrapper is gone (no heartbeat for {age:.0f} s): "
+                      "stopping this run and its containers", flush=True)
+                os._exit(130)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 @app.local_entrypoint()
 def main(archive: str, spec: str):
     s = json.loads(Path(spec).read_text())
     run_dir = Path(spec).parent
+    if (run_dir / "heartbeat").exists():
+        _watch_heartbeat(run_dir / "heartbeat")
     cap = int(s["cap"])
     if not 30 <= cap <= MAX_TIMEOUT:
         raise SystemExit(f"--timeout must be 30..{MAX_TIMEOUT} s")
@@ -556,63 +591,98 @@ def main(archive: str, spec: str):
 
 
 def _fanout(fn, key: str, s: dict, shards: list[dict], run_dir: Path, rate: float, t0: float) -> None:
-    """Every shard in a container of its own, all spawned at once; wait for all."""
+    """Every shard in a container of its own, all spawned at once; wait for all.
+
+    Cold kernels (a shard's kernel version not compiled on its host's driver): never one
+    compile per shard (12 matrix rows would pay the ~18-minute warm-up twelve times).
+    With --allow-cold-compile the drivers the cold shards found get one warm-up each
+    (WARM_CPUS cores, the full cap, landing retried until it reaches a driver that needs
+    it), then the cold shards rerun, retried to land on a warm host. A warm-up that fails
+    or is killed stops the fan-out. Without --allow-cold-compile they are reported."""
     budget = int(s["cap"]) + int(s["queue"])
-    billed_extra = 0.0
-    s = {**s, "cold_retry": bool(s.get("allow_cold"))}
-    if s.get("allow_cold"):
-        # One warm-up container first (every core of it compiles the pipelines); the
-        # shards then start from its cache instead of each compiling the same kernels.
-        print("[gpu_run] fan-out: cold compiles allowed: one warm-up container first", flush=True)
-        warm = fn.spawn(key, {**s, "warm_only": True, "id": f"{s['id']}-warm"})
-        try:
-            w = warm.get(timeout=budget)
-            billed_extra += w["secs"]
-            print(f"[gpu_run] warm-up: exit {w['code']}, {w['secs']:.0f} s on {w.get('driver', '?')}", flush=True)
-        except TimeoutError:
-            warm.cancel()
-            print("[gpu_run] warm-up: no result in time; the shards compile what they use", flush=True)
-        s = {**s, "allow_cold": False}
+    allow_cold = bool(s.get("allow_cold"))
+    s = {**s, "allow_cold": False}
+    costs: list[tuple[float, float]] = []  # (container seconds, $/s) not in `done`
+    gpu = s["gpu"]
+    warm_rate = GPU_PRICE[gpu] + WARM_CPUS * CPU_PRICE + MEM_GIB * MEM_PRICE
+    warm_fn = run.with_options(gpu=gpu, timeout=MAX_TIMEOUT, cpu=WARM_CPUS)
     print(f"[gpu_run] fan-out: {len(shards)} containers ({s['fanout']}), all at once", flush=True)
 
     def spawn(i: int, sh: dict, **extra):
         spec = {**s, "shard": {k: v for k, v in sh.items() if k != "local"}, "id": f"{s['id']}-{i}", **extra}
         return fn.spawn(key, spec)
 
-    def collect(sh: dict, call) -> dict | None:
+    def collect(label: str, call, timeout: float) -> dict | None:
         # The calls run in parallel: each wait is bounded by the per-call budget.
         try:
-            return call.get(timeout=budget)
+            return call.get(timeout=timeout)
         except TimeoutError:
             call.cancel()
             return None
         except Exception as e:  # noqa: BLE001 - one shard's crash is that shard's failure
-            print(f"[{sh['label']}] [gpu_run] call failed: {e}", flush=True)
+            print(f"[{label}] [gpu_run] call failed: {e}", flush=True)
             return {"code": 1, "secs": 0.0, "results": [], "lines": []}
 
     calls = [(sh, spawn(i, sh)) for i, sh in enumerate(shards)]
-    done: list[tuple[dict, dict | None]] = [(sh, collect(sh, c)) for sh, c in calls]
-    # A shard on a host whose driver the warm-up did not reach (Modal mixes driver
-    # versions; the cache is per driver) found its kernels cold. Compiling there costs
-    # the same minutes again, so first try to land on a warm host: up to COLD_RETRIES
-    # cheap reruns (the guard stops a cold one in ~5 s), then compile only what that
-    # shard uses.
-    if s.get("cold_retry"):
-        for attempt in range(COLD_RETRIES + 1):
-            again = [i for i, (sh, o) in enumerate(done) if o and o["code"] == 3]
-            if not again:
+    done: list[tuple[dict, dict | None]] = [(sh, collect(sh["label"], c, budget)) for sh, c in calls]
+
+    def cold() -> list[int]:
+        return [i for i, (_, o) in enumerate(done) if o and o["code"] == 3]
+
+    def rerun(idx: list[int]) -> None:
+        for i in idx:
+            costs.append((done[i][1]["secs"], rate))  # type: ignore[index]
+        again = [(i, spawn(i, done[i][0])) for i in idx]
+        for i, c in again:
+            done[i] = (done[i][0], collect(done[i][0]["label"], c, budget))
+
+    stopped = ""
+    if allow_cold and cold():
+        need = {done[i][1].get("driver", "?") for i in cold()}  # type: ignore[union-attr]
+        print(f"[gpu_run] {len(cold())} shard(s) cold on {', '.join(sorted(need))}: one warm-up per "
+              f"driver ({WARM_CPUS} cores, cap {MAX_TIMEOUT} s), then those shards again", flush=True)
+        for attempt in range(WARM_TRIES):
+            if not need:
                 break
-            last = attempt == COLD_RETRIES
-            print(f"[gpu_run] {len(again)} shard(s) on a cold driver: "
-                  + ("compiling their own pipelines" if last else f"retry {attempt + 1} for a warm host"),
-                  flush=True)
-            billed_extra += sum(done[i][1]["secs"] for i in again)  # type: ignore[index]
-            extra = {"allow_cold": True, "warm": False} if last else {}
-            reruns = [(i, spawn(i, done[i][0], **extra)) for i in again]
-            for i, c in reruns:
-                done[i] = (done[i][0], collect(done[i][0], c))
+            # One warm-up per driver still needed, at once; where each lands is Modal's.
+            ws = [warm_fn.spawn(key, {**s, "warm_only": True, "allow_cold": True, "cap": MAX_TIMEOUT,
+                                      "cpus": WARM_CPUS, "id": f"{s['id']}-warm{attempt}-{n}"})
+                  for n in range(len(need))]
+            for w in ws:
+                r = collect("warm-up", w, MAX_TIMEOUT + int(s["queue"]))
+                if r is None or r["code"] != 0:
+                    stopped = (f"a warm-up failed ({'no result' if r is None else 'exit ' + str(r['code'])}"
+                               f"{' on ' + r['driver'] if r and r.get('driver') else ''})")
+                    if r:
+                        costs.append((r["secs"], warm_rate))
+                    continue
+                costs.append((r["secs"], warm_rate))
+                d = r.get("driver", "?")
+                took = "already warm" if r.get("already") else f"{r['secs']:.0f} s"
+                print(f"[gpu_run] warm-up on {d}: {took}", flush=True)
+                need.discard(d)
+            if stopped:
+                break
+        if stopped:
+            print(f"[gpu_run] {stopped}: stopping; the cold shards are not rerun (nothing compiles "
+                  "per shard)", flush=True)
+        else:
+            for _ in range(COLD_RETRIES):
+                if not cold():
+                    break
+                print(f"[gpu_run] {len(cold())} shard(s) again, for a warm host", flush=True)
+                rerun(cold())
+    elif cold():
+        for _ in range(COLD_RETRIES):
+            # Another host may be warm already (Modal mixes driver versions).
+            idx = cold()
+            if not idx:
+                break
+            print(f"[gpu_run] {len(idx)} shard(s) cold on their host's driver: again, for a warm host", flush=True)
+            rerun(idx)
     wall = time.time() - t0
-    billed = sum(o["secs"] for _, o in done if o) + billed_extra
+    billed_cost = sum(o["secs"] for _, o in done if o) * rate + sum(sec * r for sec, r in costs)
+    billed = sum(o["secs"] for _, o in done if o) + sum(sec for sec, _ in costs)
     print("\n[gpu_run] fan-out summary:", flush=True)
     worst = 0
     for sh, o in done:
@@ -632,7 +702,7 @@ def _fanout(fn, key: str, s: dict, shards: list[dict], run_dir: Path, rate: floa
               "with --allow-cold-compile --timeout 1500 (one warm-up per driver; later runs are warm)",
               flush=True)
     print(f"[gpu_run] {len(shards)} containers, wall {wall:.1f} s; billed {billed:.0f} container-s, "
-          f"about ${billed * rate:.4f}", flush=True)
+          f"about ${billed_cost:.4f}", flush=True)
     (run_dir / "exit_code").write_text(str(worst))
     if worst:
         raise SystemExit(worst)
