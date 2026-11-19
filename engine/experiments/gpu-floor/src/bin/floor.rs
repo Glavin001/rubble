@@ -65,6 +65,9 @@ fn main() -> anyhow::Result<()> {
         if flag("--no-rowover") {
             extra += "#define ROWOVER 0\n";
         }
+        if flag("--row4") {
+            extra += "#define ROW4 1\n";
+        }
         if let Some(m) = arg("--regmode") {
             extra += &format!("#define REGMODE {m}\n");
         }
@@ -159,6 +162,9 @@ fn main() -> anyhow::Result<()> {
     // --no-rowover: the pair rows' filter without the over-the-triangle test (a measurement).
     if flag("--no-rowover") {
         extra += "#define ROWOVER 0\n";
+    }
+    if flag("--row4") {
+        extra += "#define ROW4 1\n";
     }
     // --no-hoist: the records' static words loaded every substep (a ledger measurement).
     if flag("--no-hoist") {

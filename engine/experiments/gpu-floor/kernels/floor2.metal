@@ -79,6 +79,10 @@ struct Params
 #ifndef ROWOVER
 #define ROWOVER 1
 #endif
+// ROW4: the pair rows' points four a load, each by name (no vector indexed by a variable).
+#ifndef ROW4
+#define ROW4 0
+#endif
 // TGPV: a node's position and velocity next to each other (an end of a beam is then six
 // adjacent floats, where adjacent loads are nearly free).
 #ifndef TGPV
@@ -1388,44 +1392,64 @@ kernel void floorFrame(
                     fra = F.ra; frb = F.rb;
 #endif
                 }
+                // One listed point against the triangle. (A point that holds no side for this
+                // triangle and did not cross its plane is a contact only inside the band and
+                // over the triangle: the rule's own tests, the same values. Most points near a
+                // panel's plane are its neighbours, beside the triangle, and stop here. One
+                // that may be a contact goes on the step's list: the full rule runs a lane a
+                // pair after the barrier.)
+#if ROWOVER
+                #define ROW_FIRST ((d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f))
+                #define ROW_MORE \
+                    if (!cand && anyHeld && tgHeld[h] != 0) \
+                    { \
+                        const uint c0 = atomic_load_explicit(&clip[h * 4], memory_order_relaxed), c1 = atomic_load_explicit(&clip[h * 4 + 1], memory_order_relaxed); \
+                        const uint key = CLIP_SELF << 20 | tri; \
+                        cand = (c0 != CLIP_EMPTY && (c0 >> 1) == key) || (c1 != CLIP_EMPTY && (c1 >> 1) == key); \
+                    } \
+                    if (!cand && fabs(d1) <= CR) \
+                    { \
+                        const float al = fok ? dot3(fra, ph - f0) : 0.0f, be = fok ? dot3(frb, ph - f0) : 0.0f; \
+                        cand = al >= 0.0f && be >= 0.0f && ((1.0f - al) - be) >= 0.0f; \
+                    }
+#else
+                #define ROW_FIRST ((anyHeld && tgHeld[h] != 0) || (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f) || fabs(d1) <= CR)
+                #define ROW_MORE
+#endif
+                #define ROW_ONE(HV) do { \
+                    const uint h = (HV); \
+                    V3 ph = v3(0, 0, 0) + TGP(h); \
+                    V3 vh = TGV(h); \
+                    float d1 = fok ? dot3(frd, ph - f0) : 0.0f; \
+                    float d0 = bok ? dot3(brd, (ph - vh * H) - b0) : 0.0f; \
+                    bool cand = ROW_FIRST; \
+                    ROW_MORE \
+                    if (!cand) break; \
+                    uint ci = atomic_fetch_add_explicit(&tgCount[1], 1u, memory_order_relaxed); \
+                    if (ci < CAND_CAP) candBuf[ci] = tri << 16 | h; \
+                } while (false)
+#if ROW4
+                // (Four points a load, each by its own name: a vector indexed by a variable
+                // is a store and a load.)
+                ROW_ONE(cur.z);
+                if (n > 1u) ROW_ONE(cur.w);
+                for (uint k = 2u; k < n; k += 4u)
+                {
+                    cur = row4[(k + 2u) >> 2];
+                    ROW_ONE(cur.x);
+                    if (k + 1u < n) ROW_ONE(cur.y);
+                    if (k + 2u < n) ROW_ONE(cur.z);
+                    if (k + 3u < n) ROW_ONE(cur.w);
+                }
+#else
                 for (uint k = 0; k < PROW - 2u; k++)
                 {
                     if (k >= n) break;
                     uint kk1 = k + 2u;
                     if ((kk1 & 3u) == 0u) cur = row4[kk1 >> 2];
-                    uint h = cur[kk1 & 3u];
-                    V3 ph = v3(0, 0, 0) + TGP(h);
-                    V3 vh = TGV(h);
-                    float d1 = fok ? dot3(frd, ph - f0) : 0.0f;
-                    float d0 = bok ? dot3(brd, (ph - vh * H) - b0) : 0.0f;
-#if ROWOVER
-                    // (A point that holds no side and did not cross the plane is a contact
-                    // only inside the band and over the triangle: the rule's own test, the
-                    // same values. Most points near a panel's plane are its neighbours,
-                    // beside the triangle, and stop here.)
-                    bool cand = (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f);
-                    if (!cand && anyHeld && tgHeld[h] != 0)
-                    {
-                        // (A side held for another triangle is no side here: the rule's key.)
-                        const uint c0 = atomic_load_explicit(&clip[h * 4], memory_order_relaxed), c1 = atomic_load_explicit(&clip[h * 4 + 1], memory_order_relaxed);
-                        const uint key = CLIP_SELF << 20 | tri;
-                        cand = (c0 != CLIP_EMPTY && (c0 >> 1) == key) || (c1 != CLIP_EMPTY && (c1 >> 1) == key);
-                    }
-                    if (!cand && fabs(d1) <= CR)
-                    {
-                        const float al = fok ? dot3(fra, ph - f0) : 0.0f, be = fok ? dot3(frb, ph - f0) : 0.0f;
-                        cand = al >= 0.0f && be >= 0.0f && ((1.0f - al) - be) >= 0.0f;
-                    }
-#else
-                    bool cand = (anyHeld && tgHeld[h] != 0) || (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f) || fabs(d1) <= CR;
-#endif
-                    if (!cand) continue;
-                    // A pair that may be a contact goes on the step's list: the full rule runs
-                    // a lane a pair after the barrier (a warp pays for its slowest lane, and
-                    // these are a few among thousands).
-                    uint ci = atomic_fetch_add_explicit(&tgCount[1], 1u, memory_order_relaxed);
-                    if (ci < CAND_CAP) candBuf[ci] = tri << 16 | h;
+                    ROW_ONE(cur[kk1 & 3u]);
                 }
+#endif
             }
         }
 #endif
