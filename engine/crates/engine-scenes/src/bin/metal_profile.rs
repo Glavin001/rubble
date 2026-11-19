@@ -260,7 +260,8 @@ fn rigid(name: &str, a: &Args) -> anyhow::Result<Report> {
         let ops = sim.replay_ops()?;
         let (device, queue) = sim.device_queue();
         let t0 = host_seconds();
-        let r = profile::replay(device, queue, &sim.replay_buffers(), &ops, a.reps);
+        // State: the bodies (binding 0).
+        let r = profile::replay(device, queue, &sim.replay_buffers(), &ops, a.reps, &[0]);
         eprintln!(
             "{name}: replayed {} ops x{} in {:.1} s",
             ops.len(),
@@ -369,7 +370,8 @@ fn cars(spec: &str, a: &Args) -> anyhow::Result<Report> {
     let replay = if a.replay {
         let ops = g.replay_ops(steps);
         let (device, queue) = g.device_queue();
-        let r = profile::replay(device, queue, &g.replay_buffers(), &ops, a.reps);
+        let nodes = engine_exec::explicit_plan::BIND_NODES as usize;
+        let r = profile::replay(device, queue, &g.replay_buffers(), &ops, a.reps, &[nodes]);
         Some(r)
     } else {
         None
@@ -467,6 +469,20 @@ fn text(r: &Report) -> String {
             floor * n as f64,
             sum - floor * n as f64,
             step - (sum - floor * n as f64)
+        );
+        let mut distinct = rp.whole_step_hashes.clone();
+        distinct.sort();
+        distinct.dedup();
+        let _ = writeln!(
+            s,
+            "  whole step from one input, {} runs: {} distinct end states ({})",
+            rp.whole_step_hashes.len(),
+            distinct.len(),
+            if distinct.len() == 1 {
+                "bit-for-bit reproducible"
+            } else {
+                "NOT reproducible run to run"
+            }
         );
         if !empty.is_empty() {
             let alone: f64 = empty.iter().map(|o| o.median_ms).sum();

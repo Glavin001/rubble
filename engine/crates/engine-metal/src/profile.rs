@@ -381,6 +381,9 @@ pub struct ReplayReport {
     pub whole_step_ms: Vec<f64>,
     /// An empty kernel's command buffer: the floor every op's time includes.
     pub launch_floor_ms: Vec<f64>,
+    /// FNV-1a of the state buffers after each whole-step run (all from the same input):
+    /// one distinct value means the step is bit-for-bit reproducible.
+    pub whole_step_hashes: Vec<String>,
 }
 
 /// FNV-1a of bytes (state hashes for bit-for-bit checks between runs).
@@ -557,6 +560,7 @@ pub fn replay(
     bufs: &[&Buffer],
     ops: &[ReplayOp],
     reps: u32,
+    state: &[usize],
 ) -> ReplayReport {
     let reps = reps.max(1);
     let pristine = clone_all(device, queue, bufs);
@@ -593,6 +597,7 @@ pub fn replay(
     // The whole step in one command buffer, one compute encoder per run of dispatches
     // (serial, as the hosts encode it), copies in blit encoders between them.
     let mut whole_step_ms = Vec::new();
+    let mut whole_step_hashes = Vec::new();
     for _ in 0..reps {
         restore_all();
         whole_step_ms.push(timed(queue, "whole step", |cb| {
@@ -619,6 +624,18 @@ pub fn replay(
                 e.end_encoding();
             }
         }));
+        let mut h = Vec::new();
+        for &b in state {
+            // SAFETY: shared buffer, GPU idle.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    work[b].contents() as *const u8,
+                    work[b].length() as usize,
+                )
+            };
+            h.push(format!("{:016x}", fnv1a(bytes)));
+        }
+        whole_step_hashes.push(h.join("-"));
     }
 
     // Each op alone, in step order, from the state the ops before it left.
@@ -716,6 +733,7 @@ pub fn replay(
         ops: out,
         whole_step_ms,
         launch_floor_ms,
+        whole_step_hashes,
     }
 }
 
