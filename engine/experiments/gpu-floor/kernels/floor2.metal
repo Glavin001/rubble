@@ -41,6 +41,7 @@ struct Params
 #define BAR threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)
 #ifndef EMU
 #define TGDECL(type, name, count) threadgroup type name[count]
+#define TGPTR(type) threadgroup type*
 #endif
 #ifndef PAIR
 #define PAIR 0
@@ -85,6 +86,13 @@ struct Params
 #ifndef ROW4
 #define ROW4 1
 #endif
+// HITTG: the hit passes' per-node words (force, mass, hit count, staged sums) in threadgroup
+// memory, a slot a node; 0: in device memory (each hit then walks some 170 scattered words).
+#ifndef HITTG
+#define HITTG 1
+#endif
+// (A slot is 11 words of the beam scalars' array; a hit has four.)
+#define H2CAP (NGS / 44u)
 // TGPV: a node's position and velocity next to each other (an end of a beam is then six
 // adjacent floats, where adjacent loads are nearly free).
 #ifndef TGPV
@@ -369,6 +377,8 @@ kernel void floorFrame(
     // clear those words, and only the kinds written (every node doing all of it on every
     // step after a contact was up to 22 device atomics a node).
     #define touched ((device atomic_uint*)(cb + O_TOUCH))
+    // A hit node's slot: the smallest (hit, corner) number that names it; NONE between steps.
+    #define hmap ((device atomic_uint*)(cb + O_HMAP))
     #define TOUCHK(n, k) atomic_fetch_or_explicit(&touched[(n) >> 3], (uint)(k) << (((n) & 7u) * 4u), memory_order_relaxed)
     #define hitBuf ((device float4*)(cb + O_HITS))
     #define stage ((device atomic_int*)(cb + O_SCRATCH))
@@ -1683,10 +1693,23 @@ kernel void floorFrame(
                     uint old = atomic_fetch_min_explicit(&clip[h * 4 + 2], word, memory_order_relaxed);
                     atomic_fetch_min_explicit(&clip[h * 4 + 3], max(old, word), memory_order_relaxed);
                     tgFlags[F_REC] = 1u;
-                    TOUCHK(h, 13u); TOUCHK(tn.x, 9u); TOUCHK(tn.y, 9u); TOUCHK(tn.z, 9u);
                     float pen = rmin(CR - dd, CR);
                     V3 nn = F.n * side;
                     uint i = atomic_fetch_add_explicit(&tgCount[2], 1u, memory_order_relaxed);
+#if HITTG
+                    TOUCHK(h, 5u); TOUCHK(tn.x, 1u); TOUCHK(tn.y, 1u); TOUCHK(tn.z, 1u);
+                    if (i < H2CAP)
+                    {
+                        hitBuf[i * HITW] = as_type<float4>(uint4(h, tn.x, tn.y, tn.z));
+                        hitBuf[i * HITW + 1] = float4(wgt.x, wgt.y, wgt.z, pen);
+                        hitBuf[i * HITW + 2] = f4(nn, 0);
+                        atomic_fetch_min_explicit(&hmap[h], i * 4u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&hmap[tn.x], i * 4u + 1u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&hmap[tn.y], i * 4u + 2u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&hmap[tn.z], i * 4u + 3u, memory_order_relaxed);
+                    }
+#else
+                    TOUCHK(h, 13u); TOUCHK(tn.x, 9u); TOUCHK(tn.y, 9u); TOUCHK(tn.z, 9u);
                     if (i < HIT_CAP)
                     {
                         hitBuf[i * HITW] = as_type<float4>(uint4(h, tn.x, tn.y, tn.z));
@@ -1697,6 +1720,7 @@ kernel void floorFrame(
                     atomic_fetch_add_explicit(&split[tn.x], 1u, memory_order_relaxed);
                     atomic_fetch_add_explicit(&split[tn.y], 1u, memory_order_relaxed);
                     atomic_fetch_add_explicit(&split[tn.z], 1u, memory_order_relaxed);
+#endif
             }
             BAR;
         }
@@ -1706,6 +1730,198 @@ kernel void floorFrame(
 #ifdef EMU_TRACE
         if (lid == 0u) fprintf(stderr, "T car %u step %u: self candidates %u hits %u\n", car, step, ncand, nhits);
 #endif
+#if HITTG
+        // ---- the step's hits: the two-body rule's passes, from threadgroup memory ----
+        // Each of a hit's four nodes has a slot in the beam scalars' array (free until the
+        // next beam pass): the node's force, its mass, how many hits name it, and its staged
+        // sums. A node's slot is the smallest (hit, corner) number that names it (an atomic
+        // min a node where the hit was recorded); the node's own lane fills it from its
+        // registers, and a hit's lane keeps its record and its four slots in registers over
+        // the passes.
+        if (nhits != 0u && !SKIP(8))
+        {
+            const uint nh = min(nhits, (uint)H2CAP);
+            const uint mySlot = isNode ? atomic_load_explicit(&hmap[ni], memory_order_relaxed) : NONE;
+            uint4 hid = uint4(0u), hsl = uint4(0u);
+            float4 hwp = float4(0.0f);
+            V3 hnn = v3(0, 0, 0), hf = v3(0, 0, 0);
+            float hres = 0.0f;
+            if (mySlot != NONE)
+            {
+                const uint o = mySlot * 11u;
+                tgG[o] = F0.x; tgG[o + 1u] = F0.y; tgG[o + 2u] = F0.z;
+#if HAS_IMMOVABLE
+                tgG[o + 3u] = (as_type<uint>(nodeStatic[ni].z) & NODE_IMMOVABLE) != 0u ? 0.0f : massN;
+#else
+                tgG[o + 3u] = massN;
+#endif
+                tgG[o + 4u] = 0.0f; tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
+                tgG[o + 8u] = 0.0f; tgG[o + 9u] = 0.0f; tgG[o + 10u] = 0.0f;
+            }
+            if (lid < nh)
+            {
+                hid = as_type<uint4>(hitBuf[lid * HITW]);
+                hwp = hitBuf[lid * HITW + 1];
+                hnn = v3(hitBuf[lid * HITW + 2]);
+                hsl = uint4(atomic_load_explicit(&hmap[hid.x], memory_order_relaxed), atomic_load_explicit(&hmap[hid.y], memory_order_relaxed),
+                            atomic_load_explicit(&hmap[hid.z], memory_order_relaxed), atomic_load_explicit(&hmap[hid.w], memory_order_relaxed));
+            }
+            if (lid == 0)
+            {
+                tgFlags[F_HITS] = 1u;
+                tgFlags[F_MOST] = max(tgFlags[F_MOST], nhits);
+                if (nhits > H2CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 2u;
+            }
+            BAR;
+            #define SLF(s_) v3(tgG[(s_) * 11u], tgG[(s_) * 11u + 1u], tgG[(s_) * 11u + 2u])
+            #define SLM(s_) tgG[(s_) * 11u + 3u]
+            #define SLKP(s_) ((TGPTR(atomic_uint))&tgG[(s_) * 11u + 4u])
+            #define SLK(s_) atomic_load_explicit(SLKP(s_), memory_order_relaxed)
+            #define SLS(s_, q_) ((TGPTR(atomic_int))&tgG[(s_) * 11u + 5u + (q_)])
+            #define SLL(s_, q_) atomic_load_explicit(SLS(s_, q_), memory_order_relaxed)
+            #define SACC(f_, s_) (SLM(s_) == 0.0f ? v3(0, 0, 0) : (f_) / SLM(s_))
+            #define SIM(s_, k_) (SLM(s_) == 0.0f ? 0.0f : float(k_) / SLM(s_))
+            #define SNF(s_) (SLF(s_) + v3(0, 0, 0))
+            #define HV(i_) TGV(i_)
+            // How many hits name each node; the map cleared for the next step.
+            if (lid < nh)
+            {
+                atomic_fetch_add_explicit(SLKP(hsl.x), 1u, memory_order_relaxed);
+                atomic_fetch_add_explicit(SLKP(hsl.y), 1u, memory_order_relaxed);
+                atomic_fetch_add_explicit(SLKP(hsl.z), 1u, memory_order_relaxed);
+                atomic_fetch_add_explicit(SLKP(hsl.w), 1u, memory_order_relaxed);
+            }
+            if (mySlot != NONE) atomic_store_explicit(&hmap[ni], NONE, memory_order_relaxed);
+            BAR;
+            // The first pass.
+            if (lid < nh)
+            {
+                const uint hn = hid.x, i0 = hid.y, i1 = hid.z, i2 = hid.w;
+                const uint sh = hsl.x, s0 = hsl.y, s1 = hsl.z, s2 = hsl.w;
+                const float alpha = hwp.x, beta = hwp.y, gamma = hwp.z, depth = hwp.w;
+                const V3 n = hnn;
+                V3 v = HV(hn) - ((HV(i1) * alpha + HV(i2) * beta) + HV(i0) * gamma);
+                float imh = SIM(sh, SLK(sh));
+                float imt = tbInvMass(SIM(s1, SLK(s1)), SIM(s2, SLK(s2)), SIM(s0, SLK(s0)), alpha, beta, gamma);
+                float inv = imh + imt;
+                float m = inv > 0.0f ? 1.0f / inv : 0.0f;
+                V3 at = (SACC(SNF(s1), s1) * alpha + SACC(SNF(s2), s2) * beta) + SACC(SNF(s0), s0) * gamma;
+                V3 fh = (SACC(SNF(sh), sh) - at) * m;
+                float budget;
+                V3 f = contactResponse(fh, v, m, n, BOXS, depth, nodeStatic[hn].y, budget);
+                if (!isZero3(f))
+                {
+                    float delta = shiftDepth(depth, budget, dot3(fh, n));
+                    if (delta > 0.0f)
+                    {
+                        float q = delta * m;
+                        V3 dh = n * (q * SIM(sh, 1u));
+                        TOUCHK(hn, 2u);
+                        for (uint a = 0; a < 3; a++) atomic_fetch_add_explicit((device atomic_int*)&shift[hn * 3 + a], toFixedShift(a == 0 ? dh.x : (a == 1 ? dh.y : dh.z)), memory_order_relaxed);
+                        uint ti[3] = {i1, i2, i0};
+                        uint tsl[3] = {s1, s2, s0};
+                        float tw[3] = {alpha, beta, gamma};
+                        for (uint e = 0; e < 3; e++)
+                        {
+                            if (tw[e] > 0.0f)
+                            {
+                                V3 dt = n * -(tw[e] * (q * SIM(tsl[e], 1u)));
+                                TOUCHK(ti[e], 2u);
+                                for (uint a = 0; a < 3; a++) atomic_fetch_add_explicit((device atomic_int*)&shift[ti[e] * 3 + a], toFixedShift(a == 0 ? dt.x : (a == 1 ? dt.y : dt.z)), memory_order_relaxed);
+                            }
+                        }
+                        tgFlags[F_SHIFT] = 1u;
+                    }
+                }
+                hf = f;
+                V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
+                uint ss[4] = {sh, s1, s2, s0};
+                for (uint e = 0; e < 4; e++)
+                {
+                    atomic_fetch_add_explicit(SLS(ss[e], 0u), toFixed(fs[e].x), memory_order_relaxed);
+                    atomic_fetch_add_explicit(SLS(ss[e], 1u), toFixed(fs[e].y), memory_order_relaxed);
+                    atomic_fetch_add_explicit(SLS(ss[e], 2u), toFixed(fs[e].z), memory_order_relaxed);
+                }
+            }
+            BAR;
+            // The residual pass, from the forces with the first pass's sums.
+            #define SNOW1(s_) (SLF(s_) + v3(float(SLL(s_, 0u)), float(SLL(s_, 1u)), float(SLL(s_, 2u))) * (1.0f / 32.0f))
+            if (lid < nh)
+            {
+                const uint hn = hid.x, i0 = hid.y, i1 = hid.z, i2 = hid.w;
+                const uint sh = hsl.x, s0 = hsl.y, s1 = hsl.z, s2 = hsl.w;
+                const float alpha = hwp.x, beta = hwp.y, gamma = hwp.z;
+                const V3 n = hnn;
+                V3 v = HV(hn) - ((HV(i1) * alpha + HV(i2) * beta) + HV(i0) * gamma);
+                V3 at = (SACC(SNOW1(s1), s1) * alpha + SACC(SNOW1(s2), s2) * beta) + SACC(SNOW1(s0), s0) * gamma;
+                float a = dot3(SACC(SNOW1(sh), sh) - at, n);
+                float vn = dot3(v, n);
+                float x = vn + rmax(vn, 0.0f);
+                float r = 0.0f;
+                if (vn < 0.0f && a * H + x < 0.0f)
+                {
+                    float inv = SIM(sh, SLK(sh)) + tbInvMass(SIM(s1, SLK(s1)), SIM(s2, SLK(s2)), SIM(s0, SLK(s0)), alpha, beta, gamma);
+                    if (inv > 0.0f)
+                    {
+                        float m = 1.0f / inv;
+                        float rr = -(a * m) - (x * m) / H;
+                        if (rr > 0.0f) r = rr;
+                    }
+                }
+                hres = r;
+                if (r > 0.0f)
+                {
+                    V3 f = n * r;
+                    V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
+                    uint ss[4] = {sh, s1, s2, s0};
+                    for (uint e = 0; e < 4; e++)
+                    {
+                        atomic_fetch_add_explicit(SLS(ss[e], 3u), toFixed(fs[e].x), memory_order_relaxed);
+                        atomic_fetch_add_explicit(SLS(ss[e], 4u), toFixed(fs[e].y), memory_order_relaxed);
+                        atomic_fetch_add_explicit(SLS(ss[e], 5u), toFixed(fs[e].z), memory_order_relaxed);
+                    }
+                }
+            }
+            BAR;
+            // The work guard, from the forces with both passes' sums; each hit's total into
+            // its nodes' contact sums.
+            #define SSUM2(s_, a_) (SLL(s_, a_) + SLL(s_, 3u + (a_)))
+            #define SNOW2(s_) (SLF(s_) + v3(float(SSUM2(s_, 0u)), float(SSUM2(s_, 1u)), float(SSUM2(s_, 2u))) * (1.0f / 32.0f))
+            if (lid < nh)
+            {
+                const uint hn = hid.x, i0 = hid.y, i1 = hid.z, i2 = hid.w;
+                const uint sh = hsl.x, s0 = hsl.y, s1 = hsl.z, s2 = hsl.w;
+                const float alpha = hwp.x, beta = hwp.y, gamma = hwp.z;
+                const V3 n = hnn;
+                V3 t = hf;
+                if (hres > 0.0f) t = t + n * hres;
+                V3 f = t;
+                if (!isZero3(t))
+                {
+                    V3 v = HV(hn) - ((HV(i1) * alpha + HV(i2) * beta) + HV(i0) * gamma);
+                    V3 a = SACC(SNOW2(sh), sh) - ((SACC(SNOW2(s1), s1) * alpha + SACC(SNOW2(s2), s2) * beta) + SACC(SNOW2(s0), s0) * gamma);
+                    float inv = SIM(sh, 1u) + tbInvMass(SIM(s1, 1u), SIM(s2, 1u), SIM(s0, 1u), alpha, beta, gamma);
+                    V3 aRest = a - t * inv;
+                    float aa = dot3(t, (v + v) + aRest * H);
+                    float bb = (H * dot3(t, t)) * inv;
+                    if (aa + bb > 0.0f && bb > 0.0f)
+                    {
+                        float sc = aa < 0.0f ? rmin(-aa / bb, 1.0f) : 0.0f;
+                        f = t + t * -(1.0f - sc);
+                    }
+                }
+                V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
+                uint ns[4] = {hn, i1, i2, i0};
+                for (uint e = 0; e < 4; e++)
+                {
+                    atomic_fetch_add_explicit(&acc[ns[e] * 3], toFixed(fs[e].x), memory_order_relaxed);
+                    atomic_fetch_add_explicit(&acc[ns[e] * 3 + 1], toFixed(fs[e].y), memory_order_relaxed);
+                    atomic_fetch_add_explicit(&acc[ns[e] * 3 + 2], toFixed(fs[e].z), memory_order_relaxed);
+                }
+            }
+            BAR;
+        }
+#else
         if (nhits != 0u && !SKIP(8))
         {
             // ---- the step's hits: the forces published, then the two-body rule's passes ----
@@ -1854,6 +2070,7 @@ kernel void floorFrame(
             }
             BAR;
         }
+#endif
 #endif
 #if RIGID
         // ---- the proxies integrate the step's reactions (end_step) ----

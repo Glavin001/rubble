@@ -59,6 +59,7 @@ struct XWait { bool await_ready() { return false; } void await_suspend(std::coro
 #define XBAR co_await XWait{}
 #define KRETURN co_return
 // A workgroup's own memory: one copy a group (the kernel's `car` is its group).
+#define TGPTR(type) type*
 #define TGDECL(type, name, count) static type name##_all[64][count]; type* const name = name##_all[car]
 #define kernel
 #define device

@@ -76,6 +76,8 @@ pub struct Statics {
 #[derive(Clone, Default, Debug)]
 pub struct V2Off {
     pub touch: usize,
+    pub hmap: usize,
+    pub xmap: usize,
     pub pairs_out: usize,
     pub pbuild_out: usize,
     pub node: usize,
@@ -120,6 +122,9 @@ pub fn v2_put(big: &mut [u8], o: &V2Off, s: &State) {
     put_at(big, o.clip, bytemuck::cast_slice(&s.clip));
     // (An uploaded state's pending sums are any node's: every node's bit set.)
     put_at(big, o.touch, &[0xFFu8; 512]);
+    // (No hit node has a slot between steps.)
+    put_at(big, o.hmap, &vec![0xFFu8; s.node.len() / 3 * 4]);
+    put_at(big, o.xmap, &vec![0xFFu8; s.node.len() / 3 * 8]);
     if o.rig_words != 0 && s.rig.len() == o.rig_words {
         put_at(big, o.rig, bytemuck::cast_slice(&s.rig));
     }
@@ -1344,6 +1349,8 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     // speed, hit count); the owner's staging sums and hit counts for both bodies' nodes;
     // its lists (triangles, triangle and cluster, candidates) and its hits.
     let o_touch = take(128);
+    o.hmap = take(nn);
+    o.xmap = take(nn * 2);
     o.touch = o_touch;
     let xcnd_cap = 8192usize;
     let x_pub = take(16);
@@ -1360,8 +1367,8 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n#define OWN {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig, st.own as u32) + &format!(
-        "#define LIST2 {}\n#define LIST_REACH_OUT as_type<float>({}u)\n#define O_PAIRSO {}\n#define O_PBUILDO {}\n#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n",
-        list2 as u32, st.list_reach_out.to_bits(), o.pairs_out, o.pbuild_out
+        "#define O_HMAP {}\n#define O_XMAP {}\n#define LIST2 {}\n#define LIST_REACH_OUT as_type<float>({}u)\n#define O_PAIRSO {}\n#define O_PBUILDO {}\n#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n",
+        o.hmap, o.xmap, list2 as u32, st.list_reach_out.to_bits(), o.pairs_out, o.pbuild_out
     ) + &format!(
         "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define O_CLU {}\n#define CAR_WORDS {}\n",
         o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.cand, o.clu, o.words

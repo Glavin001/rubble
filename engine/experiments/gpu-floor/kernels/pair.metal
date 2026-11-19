@@ -32,7 +32,21 @@
         #define XCND (cb + O_XCND)
         #define XHIT ((device float4*)(cb + O_XHIT))
         #define HX 8
-        #define HCAP 1024
+        // A turn's per-node words in threadgroup memory: a slot a node, 14 words of the beam
+        // scalars' array (force 3, mass, hits that name it, staged sums 6, contact sums at
+        // the turn's start 3); a hit has four, so this many hits a turn.
+        #define XH2CAP (NGS / 56u)
+        #define XMAPA ((device atomic_uint*)(cb + O_XMAP))
+        #define XMAPB ((device atomic_uint*)(cb + O_XMAP + NN))
+        #define XLF(s_) v3(tgG[(s_) * 14u], tgG[(s_) * 14u + 1u], tgG[(s_) * 14u + 2u])
+        #define XLM(s_) tgG[(s_) * 14u + 3u]
+        #define XLKP(s_) ((TGPTR(atomic_uint))&tgG[(s_) * 14u + 4u])
+        #define XLK(s_) atomic_load_explicit(XLKP(s_), memory_order_relaxed)
+        #define XLS(s_, q_) ((TGPTR(atomic_int))&tgG[(s_) * 14u + 5u + (q_)])
+        #define XLL(s_, q_) atomic_load_explicit(XLS(s_, q_), memory_order_relaxed)
+        #define XLA(s_, q_) as_type<int>(tgG[(s_) * 14u + 11u + (q_)])
+        #define XSACC(f_, s_) (XLM(s_) == 0.0f ? v3(0, 0, 0) : (f_) / XLM(s_))
+        #define XSIM(s_, k_) (XLM(s_) == 0.0f ? 0.0f : (k_) / XLM(s_))
         // The partner's nodes in this group's memory: position and travel a step (|v|·h,
         // the pad's term), four floats a node; then its clusters' boxes. Its velocities
         // are read from its block where a candidate or a hit needs one.
@@ -331,7 +345,7 @@
                     XTOUCHK(b, h, 5u); XTOUCHK(a, tn.x, 1u); XTOUCHK(a, tn.y, 1u); XTOUCHK(a, tn.z, 1u);
                     float pen = rmin(CR - dd, CR);
                     uint hi_ = (uint)atomic_fetch_add_explicit(&tgX[18], 1, memory_order_relaxed);
-                    if (hi_ < HCAP)
+                    if (hi_ < XH2CAP)
                     {
                         device float4* hr = XHIT + hi_ * HX;
                         hr[0] = as_type<float4>(uint4(h, tn.x, tn.y, tn.z));
@@ -345,10 +359,11 @@
                             V3 f = XF(xc, ids[e]) + v3(float(ILOAD(&XACC(xc)[ids[e] * 3])), float(ILOAD(&XACC(xc)[ids[e] * 3 + 1])), float(ILOAD(&XACC(xc)[ids[e] * 3 + 2]))) * (1.0f / 32.0f);
                             hr[4 + e] = f4(f, 0);
                         }
-                        atomic_fetch_add_explicit(&XSPLIT(b)[h], 1u, memory_order_relaxed);
-                        atomic_fetch_add_explicit(&XSPLIT(a)[tn.x], 1u, memory_order_relaxed);
-                        atomic_fetch_add_explicit(&XSPLIT(a)[tn.y], 1u, memory_order_relaxed);
-                        atomic_fetch_add_explicit(&XSPLIT(a)[tn.z], 1u, memory_order_relaxed);
+                        // (Each node's slot for the turn: the smallest (hit, corner) that names it.)
+                        atomic_fetch_min_explicit(&XMAPB[h], hi_ * 4u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&XMAPA[tn.x], hi_ * 4u + 1u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&XMAPA[tn.y], hi_ * 4u + 2u, memory_order_relaxed);
+                        atomic_fetch_min_explicit(&XMAPA[tn.z], hi_ * 4u + 3u, memory_order_relaxed);
                     }
                 }
                 BAR;
@@ -356,13 +371,13 @@
                 {
                 if (lid == 0u)
                 {
-                    if ((uint)TXI(18) > HCAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 2u;
-                    ISTORE(&XPUB(ME)[7], min((uint)TXI(18), (uint)HCAP));
+                    if ((uint)TXI(18) > XH2CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 2u;
+                    ISTORE(&XPUB(ME)[7], min((uint)TXI(18), (uint)XH2CAP));
                 }
                 XBAR; // both bodies' hits are known
                 if (lid == 0u)
                 {
-                    ISTORE(&tgX[19u + ME], (int)min((uint)TXI(18), (uint)HCAP));
+                    ISTORE(&tgX[19u + ME], (int)min((uint)TXI(18), (uint)XH2CAP));
                     ISTORE(&tgX[19u + PA], (int)ILOAD(&XPUB(PA)[7]));
         #ifdef EMU_TRACE
                     fprintf(stderr, "car %u step %u: tris %d tc %d cands %d hits %d,%d\n", car, step, TXI(15), TXI(16), TXI(17), TXI(19), TXI(20));
@@ -377,23 +392,73 @@
                     if (a == ME)
                     {
                     #define HREC(k) (XHIT + (k) * HX)
-                    #define XNOW(c, i, extra) (XF(c, i) + v3(float(ILOAD(&XACC(c)[(i) * 3]) + (extra)[0]), float(ILOAD(&XACC(c)[(i) * 3 + 1]) + (extra)[1]), float(ILOAD(&XACC(c)[(i) * 3 + 2]) + (extra)[2])) * (1.0f / 32.0f))
-                    // The first pass, from the forces at the pass's start.
-                    for (uint k = lid; k < nh; k += LANES)
+                    // T0: the turn's slots filled. This body's nodes by their own lanes (the
+                    // force from the lane's register); the partner's points by the hit that
+                    // names the slot. A hit's lane keeps its record and slots in registers.
+                    const uint mySlot = isNode ? ILOAD(&XMAPA[ni]) : NONE;
+                    uint4 hid = uint4(0u), hsl = uint4(0u);
+                    float4 hwp = float4(0.0f);
+                    V3 hnn = v3(0, 0, 0), hf = v3(0, 0, 0), hpv = v3(0, 0, 0);
+                    float hres = 0.0f;
+                    if (mySlot != NONE)
                     {
-                        device float4* hr = HREC(k);
-                        uint4 id = as_type<uint4>(hr[0]);
-                        float4 wp = hr[1];
-                        V3 n = v3(hr[2]);
-                        const uint h = id.x, i0 = id.y, i1 = id.z, i2 = id.w;
-                        const float alpha = wp.x, beta = wp.y, gamma = wp.z, depth = wp.w;
-                        V3 v = PV(h) - ((TGV(i1) * alpha + TGV(i2) * beta) + TGV(i0) * gamma);
-                        const float imh = XIM(h, float(ILOAD(&XSPLIT(b)[h])));
-                        const float im1 = XIM(i1, float(ILOAD(&XSPLIT(a)[i1]))), im2 = XIM(i2, float(ILOAD(&XSPLIT(a)[i2]))), im0 = XIM(i0, float(ILOAD(&XSPLIT(a)[i0])));
+                        const uint o = mySlot * 14u;
+                        tgG[o] = F0.x; tgG[o + 1u] = F0.y; tgG[o + 2u] = F0.z;
+                        tgG[o + 3u] = XIMM(ni) ? 0.0f : massN;
+                        tgG[o + 4u] = 0.0f; tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
+                        tgG[o + 8u] = 0.0f; tgG[o + 9u] = 0.0f; tgG[o + 10u] = 0.0f;
+                        tgG[o + 11u] = as_type<float>(ILOAD(&XACC(a)[ni * 3]));
+                        tgG[o + 12u] = as_type<float>(ILOAD(&XACC(a)[ni * 3 + 1]));
+                        tgG[o + 13u] = as_type<float>(ILOAD(&XACC(a)[ni * 3 + 2]));
+                    }
+                    if (lid < nh)
+                    {
+                        device float4* hr = HREC(lid);
+                        hid = as_type<uint4>(hr[0]);
+                        hwp = hr[1];
+                        hnn = v3(hr[2]);
+                        hpv = PV(hid.x);
+                        hsl = uint4(ILOAD(&XMAPB[hid.x]), ILOAD(&XMAPA[hid.y]), ILOAD(&XMAPA[hid.z]), ILOAD(&XMAPA[hid.w]));
+                        if (hsl.x == lid * 4u)
+                        {
+                            const uint o = hsl.x * 14u, h = hid.x;
+                            V3 fb = XF(b, h);
+                            tgG[o] = fb.x; tgG[o + 1u] = fb.y; tgG[o + 2u] = fb.z;
+                            tgG[o + 3u] = XIMM(h) ? 0.0f : XM(h);
+                            tgG[o + 4u] = 0.0f; tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
+                            tgG[o + 8u] = 0.0f; tgG[o + 9u] = 0.0f; tgG[o + 10u] = 0.0f;
+                            tgG[o + 11u] = as_type<float>(ILOAD(&XACC(b)[h * 3]));
+                            tgG[o + 12u] = as_type<float>(ILOAD(&XACC(b)[h * 3 + 1]));
+                            tgG[o + 13u] = as_type<float>(ILOAD(&XACC(b)[h * 3 + 2]));
+                        }
+                    }
+                    BAR;
+                    // T1: how many hits name each node; the maps cleared for the next step.
+                    if (lid < nh)
+                    {
+                        atomic_fetch_add_explicit(XLKP(hsl.x), 1u, memory_order_relaxed);
+                        atomic_fetch_add_explicit(XLKP(hsl.y), 1u, memory_order_relaxed);
+                        atomic_fetch_add_explicit(XLKP(hsl.z), 1u, memory_order_relaxed);
+                        atomic_fetch_add_explicit(XLKP(hsl.w), 1u, memory_order_relaxed);
+                        if (hsl.x == lid * 4u) ISTORE(&XMAPB[hid.x], NONE);
+                    }
+                    if (mySlot != NONE) ISTORE(&XMAPA[ni], NONE);
+                    BAR;
+                    // The first pass, from the forces at the pass's start.
+                    if (lid < nh)
+                    {
+                        device float4* hr = HREC(lid);
+                        const uint h = hid.x, i0 = hid.y, i1 = hid.z, i2 = hid.w;
+                        const uint sh = hsl.x, s0 = hsl.y, s1 = hsl.z, s2 = hsl.w;
+                        const float alpha = hwp.x, beta = hwp.y, gamma = hwp.z, depth = hwp.w;
+                        const V3 n = hnn;
+                        V3 v = hpv - ((TGV(i1) * alpha + TGV(i2) * beta) + TGV(i0) * gamma);
+                        const float imh = XSIM(sh, float(XLK(sh)));
+                        const float im1 = XSIM(s1, float(XLK(s1))), im2 = XSIM(s2, float(XLK(s2))), im0 = XSIM(s0, float(XLK(s0)));
                         float inv = imh + tbInvMass(im1, im2, im0, alpha, beta, gamma);
                         float m = inv > 0.0f ? 1.0f / inv : 0.0f;
-                        V3 at = (XACCEL(v3(hr[5]), i1) * alpha + XACCEL(v3(hr[6]), i2) * beta) + XACCEL(v3(hr[7]), i0) * gamma;
-                        V3 fh = (XACCEL(v3(hr[4]), h) - at) * m;
+                        V3 at = (XSACC(v3(hr[5]), s1) * alpha + XSACC(v3(hr[6]), s2) * beta) + XSACC(v3(hr[7]), s0) * gamma;
+                        V3 fh = (XSACC(v3(hr[4]), sh) - at) * m;
                         float budget;
                         V3 f = contactResponse(fh, v, m, n, BOXS, depth, nodeStatic[h].y, budget);
                         if (!isZero3(f))
@@ -425,36 +490,33 @@
                                 }
                             }
                         }
-                        hr[3] = f4(f, 0);
+                        hf = f;
                         V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
-                        uint ns[4] = {h, i1, i2, i0};
+                        uint ss[4] = {sh, s1, s2, s0};
                         for (uint e = 0; e < 4u; e++)
                         {
-                            device atomic_int* st = XSTAGE(e == 0u ? b : a) + ns[e] * 6;
-                            atomic_fetch_add_explicit(&st[0], toFixed(fs[e].x), memory_order_relaxed);
-                            atomic_fetch_add_explicit(&st[1], toFixed(fs[e].y), memory_order_relaxed);
-                            atomic_fetch_add_explicit(&st[2], toFixed(fs[e].z), memory_order_relaxed);
+                            atomic_fetch_add_explicit(XLS(ss[e], 0u), toFixed(fs[e].x), memory_order_relaxed);
+                            atomic_fetch_add_explicit(XLS(ss[e], 1u), toFixed(fs[e].y), memory_order_relaxed);
+                            atomic_fetch_add_explicit(XLS(ss[e], 2u), toFixed(fs[e].z), memory_order_relaxed);
                         }
                     }
                     BAR;
                     // The residual pass, from the forces now (with the first pass's sums).
-                    for (uint k = lid; k < nh; k += LANES)
+                    #define XNOW1(s_) (XLF(s_) + v3(float(XLA(s_, 0u) + XLL(s_, 0u)), float(XLA(s_, 1u) + XLL(s_, 1u)), float(XLA(s_, 2u) + XLL(s_, 2u))) * (1.0f / 32.0f))
+                    if (lid < nh)
                     {
-                        device float4* hr = HREC(k);
-                        uint4 id = as_type<uint4>(hr[0]);
-                        float4 wp = hr[1];
-                        V3 n = v3(hr[2]);
-                        const uint h = id.x, i0 = id.y, i1 = id.z, i2 = id.w;
-                        const float alpha = wp.x, beta = wp.y, gamma = wp.z;
-                        #define S1(c, i) int3(ILOAD(&XSTAGE(c)[(i) * 6]), ILOAD(&XSTAGE(c)[(i) * 6 + 1]), ILOAD(&XSTAGE(c)[(i) * 6 + 2]))
-                        V3 v = PV(h) - ((TGV(i1) * alpha + TGV(i2) * beta) + TGV(i0) * gamma);
-                        V3 at = (XACCEL(XNOW(a, i1, S1(a, i1)), i1) * alpha + XACCEL(XNOW(a, i2, S1(a, i2)), i2) * beta) + XACCEL(XNOW(a, i0, S1(a, i0)), i0) * gamma;
-                        float an = dot3(XACCEL(XNOW(b, h, S1(b, h)), h) - at, n);
+                        const uint i0 = hid.y, i1 = hid.z, i2 = hid.w;
+                        const uint sh = hsl.x, s0 = hsl.y, s1 = hsl.z, s2 = hsl.w;
+                        const float alpha = hwp.x, beta = hwp.y, gamma = hwp.z;
+                        const V3 n = hnn;
+                        V3 v = hpv - ((TGV(i1) * alpha + TGV(i2) * beta) + TGV(i0) * gamma);
+                        V3 at = (XSACC(XNOW1(s1), s1) * alpha + XSACC(XNOW1(s2), s2) * beta) + XSACC(XNOW1(s0), s0) * gamma;
+                        float an = dot3(XSACC(XNOW1(sh), sh) - at, n);
                         float vn = dot3(v, n);
                         float r = 0.0f;
                         if (vn < 0.0f && an * H + vn < 0.0f)
                         {
-                            float inv = XIM(h, float(ILOAD(&XSPLIT(b)[h]))) + tbInvMass(XIM(i1, float(ILOAD(&XSPLIT(a)[i1]))), XIM(i2, float(ILOAD(&XSPLIT(a)[i2]))), XIM(i0, float(ILOAD(&XSPLIT(a)[i0]))), alpha, beta, gamma);
+                            float inv = XSIM(sh, float(XLK(sh))) + tbInvMass(XSIM(s1, float(XLK(s1))), XSIM(s2, float(XLK(s2))), XSIM(s0, float(XLK(s0))), alpha, beta, gamma);
                             if (inv > 0.0f)
                             {
                                 float m = 1.0f / inv;
@@ -462,43 +524,38 @@
                                 if (rr > 0.0f) r = rr;
                             }
                         }
-                        float4 h3 = hr[3];
-                        hr[3] = float4(h3.x, h3.y, h3.z, r);
+                        hres = r;
                         if (r > 0.0f)
                         {
                             V3 f = n * r;
                             V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
-                            uint ns[4] = {h, i1, i2, i0};
+                            uint ss[4] = {sh, s1, s2, s0};
                             for (uint e = 0; e < 4u; e++)
                             {
-                                device atomic_int* st = XSTAGE(e == 0u ? b : a) + ns[e] * 6;
-                                atomic_fetch_add_explicit(&st[3], toFixed(fs[e].x), memory_order_relaxed);
-                                atomic_fetch_add_explicit(&st[4], toFixed(fs[e].y), memory_order_relaxed);
-                                atomic_fetch_add_explicit(&st[5], toFixed(fs[e].z), memory_order_relaxed);
+                                atomic_fetch_add_explicit(XLS(ss[e], 3u), toFixed(fs[e].x), memory_order_relaxed);
+                                atomic_fetch_add_explicit(XLS(ss[e], 4u), toFixed(fs[e].y), memory_order_relaxed);
+                                atomic_fetch_add_explicit(XLS(ss[e], 5u), toFixed(fs[e].z), memory_order_relaxed);
                             }
                         }
                     }
                     BAR;
                     // The work guard, from the forces now (with both passes' sums); each
                     // hit's total into the bodies' contact sums.
-                    for (uint k = lid; k < nh; k += LANES)
+                    #define XNOW2(s_) (XLF(s_) + v3(float(XLA(s_, 0u) + (XLL(s_, 0u) + XLL(s_, 3u))), float(XLA(s_, 1u) + (XLL(s_, 1u) + XLL(s_, 4u))), float(XLA(s_, 2u) + (XLL(s_, 2u) + XLL(s_, 5u)))) * (1.0f / 32.0f))
+                    if (lid < nh)
                     {
-                        device float4* hr = HREC(k);
-                        uint4 id = as_type<uint4>(hr[0]);
-                        float4 wp = hr[1];
-                        V3 n = v3(hr[2]);
-                        float4 h3 = hr[3];
-                        const uint h = id.x, i0 = id.y, i1 = id.z, i2 = id.w;
-                        const float alpha = wp.x, beta = wp.y, gamma = wp.z;
-                        #define S2(c, i) int3(ILOAD(&XSTAGE(c)[(i) * 6]) + ILOAD(&XSTAGE(c)[(i) * 6 + 3]), ILOAD(&XSTAGE(c)[(i) * 6 + 1]) + ILOAD(&XSTAGE(c)[(i) * 6 + 4]), ILOAD(&XSTAGE(c)[(i) * 6 + 2]) + ILOAD(&XSTAGE(c)[(i) * 6 + 5]))
-                        V3 t = v3(h3);
-                        if (h3.w > 0.0f) t = t + n * h3.w;
+                        const uint h = hid.x, i0 = hid.y, i1 = hid.z, i2 = hid.w;
+                        const uint sh = hsl.x, s0 = hsl.y, s1 = hsl.z, s2 = hsl.w;
+                        const float alpha = hwp.x, beta = hwp.y, gamma = hwp.z;
+                        const V3 n = hnn;
+                        V3 t = hf;
+                        if (hres > 0.0f) t = t + n * hres;
                         V3 f = t;
                         if (!isZero3(t))
                         {
-                            V3 v = PV(h) - ((TGV(i1) * alpha + TGV(i2) * beta) + TGV(i0) * gamma);
-                            V3 ac = XACCEL(XNOW(b, h, S2(b, h)), h) - ((XACCEL(XNOW(a, i1, S2(a, i1)), i1) * alpha + XACCEL(XNOW(a, i2, S2(a, i2)), i2) * beta) + XACCEL(XNOW(a, i0, S2(a, i0)), i0) * gamma);
-                            float inv = XIM(h, 1.0f) + tbInvMass(XIM(i1, 1.0f), XIM(i2, 1.0f), XIM(i0, 1.0f), alpha, beta, gamma);
+                            V3 v = hpv - ((TGV(i1) * alpha + TGV(i2) * beta) + TGV(i0) * gamma);
+                            V3 ac = XSACC(XNOW2(sh), sh) - ((XSACC(XNOW2(s1), s1) * alpha + XSACC(XNOW2(s2), s2) * beta) + XSACC(XNOW2(s0), s0) * gamma);
+                            float inv = XSIM(sh, 1.0f) + tbInvMass(XSIM(s1, 1.0f), XSIM(s2, 1.0f), XSIM(s0, 1.0f), alpha, beta, gamma);
                             V3 aRest = ac - t * inv;
                             float aa = dot3(t, (v + v) + aRest * H);
                             float bb = (H * dot3(t, t)) * inv;
@@ -508,17 +565,7 @@
                                 f = t + t * -(1.0f - sc);
                             }
                         }
-                        hr[3] = f4(f, 0);
-                    }
-                    BAR;
-                    for (uint k = lid; k < nh; k += LANES)
-                    {
-                        device float4* hr = HREC(k);
-                        uint4 id = as_type<uint4>(hr[0]);
-                        float4 wp = hr[1];
-                        V3 f = v3(hr[3]);
-                        const uint h = id.x, i0 = id.y, i1 = id.z, i2 = id.w;
-                        V3 fs[4] = {f, -(f * wp.x), -(f * wp.y), -(f * wp.z)};
+                        V3 fs[4] = {f, -(f * alpha), -(f * beta), -(f * gamma)};
                         uint ns[4] = {h, i1, i2, i0};
                         for (uint e = 0; e < 4u; e++)
                         {
@@ -526,9 +573,6 @@
                             atomic_fetch_add_explicit(&XACC(xc)[ns[e] * 3], toFixed(fs[e].x), memory_order_relaxed);
                             atomic_fetch_add_explicit(&XACC(xc)[ns[e] * 3 + 1], toFixed(fs[e].y), memory_order_relaxed);
                             atomic_fetch_add_explicit(&XACC(xc)[ns[e] * 3 + 2], toFixed(fs[e].z), memory_order_relaxed);
-                            // (This turn's staging and counts cleared for the next step.)
-                            for (uint q = 0; q < 6u; q++) atomic_store_explicit(&(XSTAGE(xc) + ns[e] * 6)[q], 0, memory_order_relaxed);
-                            atomic_store_explicit(&XSPLIT(xc)[ns[e]], 0u, memory_order_relaxed);
                         }
                         atomic_fetch_or_explicit(XFLAG(a), 1u, memory_order_relaxed);
                         atomic_fetch_or_explicit(XFLAG(b), 1u, memory_order_relaxed);
