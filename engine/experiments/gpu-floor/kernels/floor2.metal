@@ -1707,6 +1707,11 @@ kernel void floorFrame(
                         atomic_fetch_min_explicit(&hmap[tn.x], i * 4u + 1u, memory_order_relaxed);
                         atomic_fetch_min_explicit(&hmap[tn.y], i * 4u + 2u, memory_order_relaxed);
                         atomic_fetch_min_explicit(&hmap[tn.z], i * 4u + 3u, memory_order_relaxed);
+                        // (How many hits name each node: taken into its slot by its own lane.)
+                        atomic_fetch_add_explicit(&split[h], 1u, memory_order_relaxed);
+                        atomic_fetch_add_explicit(&split[tn.x], 1u, memory_order_relaxed);
+                        atomic_fetch_add_explicit(&split[tn.y], 1u, memory_order_relaxed);
+                        atomic_fetch_add_explicit(&split[tn.z], 1u, memory_order_relaxed);
                     }
 #else
                     TOUCHK(h, 13u); TOUCHK(tn.x, 9u); TOUCHK(tn.y, 9u); TOUCHK(tn.z, 9u);
@@ -1755,7 +1760,8 @@ kernel void floorFrame(
 #else
                 tgG[o + 3u] = massN;
 #endif
-                tgG[o + 4u] = 0.0f; tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
+                tgG[o + 4u] = as_type<float>(atomic_exchange_explicit(&split[ni], 0u, memory_order_relaxed));
+                tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
                 tgG[o + 8u] = 0.0f; tgG[o + 9u] = 0.0f; tgG[o + 10u] = 0.0f;
             }
             if (lid < nh)
@@ -1783,17 +1789,8 @@ kernel void floorFrame(
             #define SIM(s_, k_) (SLM(s_) == 0.0f ? 0.0f : float(k_) / SLM(s_))
             #define SNF(s_) (SLF(s_) + v3(0, 0, 0))
             #define HV(i_) TGV(i_)
-            // How many hits name each node; the map cleared for the next step.
-            if (lid < nh)
-            {
-                atomic_fetch_add_explicit(SLKP(hsl.x), 1u, memory_order_relaxed);
-                atomic_fetch_add_explicit(SLKP(hsl.y), 1u, memory_order_relaxed);
-                atomic_fetch_add_explicit(SLKP(hsl.z), 1u, memory_order_relaxed);
-                atomic_fetch_add_explicit(SLKP(hsl.w), 1u, memory_order_relaxed);
-            }
+            // The first pass (and the map cleared for the next step).
             if (mySlot != NONE) atomic_store_explicit(&hmap[ni], NONE, memory_order_relaxed);
-            BAR;
-            // The first pass.
             if (lid < nh)
             {
                 const uint hn = hid.x, i0 = hid.y, i1 = hid.z, i2 = hid.w;

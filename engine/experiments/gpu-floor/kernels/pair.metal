@@ -360,6 +360,11 @@
                         atomic_fetch_min_explicit(&XMAPA[tn.x], hi_ * 4u + 1u, memory_order_relaxed);
                         atomic_fetch_min_explicit(&XMAPA[tn.y], hi_ * 4u + 2u, memory_order_relaxed);
                         atomic_fetch_min_explicit(&XMAPA[tn.z], hi_ * 4u + 3u, memory_order_relaxed);
+                        // (How many hits name each node: taken into its slot when it is filled.)
+                        atomic_fetch_add_explicit(&XSPLIT(b)[h], 1u, memory_order_relaxed);
+                        atomic_fetch_add_explicit(&XSPLIT(a)[tn.x], 1u, memory_order_relaxed);
+                        atomic_fetch_add_explicit(&XSPLIT(a)[tn.y], 1u, memory_order_relaxed);
+                        atomic_fetch_add_explicit(&XSPLIT(a)[tn.z], 1u, memory_order_relaxed);
                     }
                 }
                 BAR;
@@ -401,7 +406,8 @@
                         const uint o = mySlot * 14u;
                         tgG[o] = F0.x; tgG[o + 1u] = F0.y; tgG[o + 2u] = F0.z;
                         tgG[o + 3u] = XIMM(ni) ? 0.0f : massN;
-                        tgG[o + 4u] = 0.0f; tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
+                        tgG[o + 4u] = as_type<float>(atomic_exchange_explicit(&XSPLIT(a)[ni], 0u, memory_order_relaxed));
+                        tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
                         tgG[o + 8u] = 0.0f; tgG[o + 9u] = 0.0f; tgG[o + 10u] = 0.0f;
                         tgG[o + 11u] = as_type<float>(ILOAD(&XACC(a)[ni * 3]));
                         tgG[o + 12u] = as_type<float>(ILOAD(&XACC(a)[ni * 3 + 1]));
@@ -421,7 +427,8 @@
                             V3 fb = XF(b, h);
                             tgG[o] = fb.x; tgG[o + 1u] = fb.y; tgG[o + 2u] = fb.z;
                             tgG[o + 3u] = XIMM(h) ? 0.0f : XM(h);
-                            tgG[o + 4u] = 0.0f; tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
+                            tgG[o + 4u] = as_type<float>(atomic_exchange_explicit(&XSPLIT(b)[h], 0u, memory_order_relaxed));
+                            tgG[o + 5u] = 0.0f; tgG[o + 6u] = 0.0f; tgG[o + 7u] = 0.0f;
                             tgG[o + 8u] = 0.0f; tgG[o + 9u] = 0.0f; tgG[o + 10u] = 0.0f;
                             tgG[o + 11u] = as_type<float>(ILOAD(&XACC(b)[h * 3]));
                             tgG[o + 12u] = as_type<float>(ILOAD(&XACC(b)[h * 3 + 1]));
@@ -429,18 +436,10 @@
                         }
                     }
                     BAR;
-                    // T1: how many hits name each node; the maps cleared for the next step.
-                    if (lid < nh)
-                    {
-                        atomic_fetch_add_explicit(XLKP(hsl.x), 1u, memory_order_relaxed);
-                        atomic_fetch_add_explicit(XLKP(hsl.y), 1u, memory_order_relaxed);
-                        atomic_fetch_add_explicit(XLKP(hsl.z), 1u, memory_order_relaxed);
-                        atomic_fetch_add_explicit(XLKP(hsl.w), 1u, memory_order_relaxed);
-                        if (hsl.x == lid * 4u) ISTORE(&XMAPB[hid.x], NONE);
-                    }
+                    // The first pass, from the forces at the pass's start (and the maps cleared
+                    // for the next step).
+                    if (lid < nh && hsl.x == lid * 4u) ISTORE(&XMAPB[hid.x], NONE);
                     if (mySlot != NONE) ISTORE(&XMAPA[ni], NONE);
-                    BAR;
-                    // The first pass, from the forces at the pass's start.
                     if (lid < nh)
                     {
                         device float4* hr = HREC(lid);
