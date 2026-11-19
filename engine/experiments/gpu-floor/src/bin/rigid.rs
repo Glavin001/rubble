@@ -126,6 +126,24 @@ fn main() -> anyhow::Result<()> {
             })
             .collect();
         println!("timing, the last state ({cars} cars, {time} dispatches from it): {} ms", q(&mut ms));
+        // Each part's cost at that state: the frame with it left out against the whole.
+        let med = |skip: u32| {
+            let mut ms: Vec<f64> = (0..time.max(12))
+                .map(|_| {
+                    for g in 0..cars {
+                        f.restore(g, &last);
+                    }
+                    f.run_skip(1, skip)
+                })
+                .collect();
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            ms[ms.len() / 2]
+        };
+        let all = med(0);
+        println!("phases ({cars} cars; ms a frame at the last state): whole {all:.4}");
+        for (bit, name) in [(13u32, "rigid shapes and proxies"), (0, "S0 node pass"), (1, "S1 centred scalars"), (2, "C1+C2 centred gather"), (3, "S3 beams"), (4, "S4 force gather"), (5, "S4 pair rows"), (8, "hit passes")] {
+            println!("  {name:26} {:.4} ms", all - med(1 << bit));
+        }
         return Ok(());
     }
     let t0 = std::time::Instant::now();

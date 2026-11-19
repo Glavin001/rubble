@@ -62,20 +62,7 @@
             V3 lo = v3(rmin(rmin(p0.x, p1.x), p2.x) - CR, rmin(rmin(p0.y, p1.y), p2.y) - CR, rmin(rmin(p0.z, p1.z), p2.z) - CR); \
             V3 hi = v3(rmax(rmax(p0.x, p1.x), p2.x) + CR, rmax(rmax(p0.y, p1.y), p2.y) + CR, rmax(rmax(p0.z, p1.z), p2.z) + CR);
         {
-            // A: this body's nodes published; its box and top speed (a warp reduces them).
-            if (isNode)
-            {
-        #if XATOM >= 2
-                device atomic_uint* na = (device atomic_uint*)(nodeState + ni * 3);
-                ISTORE(&na[0], as_type<uint>(Pown.x)); ISTORE(&na[1], as_type<uint>(Pown.y)); ISTORE(&na[2], as_type<uint>(Pown.z));
-                ISTORE(&na[4], as_type<uint>(Vown.x)); ISTORE(&na[5], as_type<uint>(Vown.y)); ISTORE(&na[6], as_type<uint>(Vown.z));
-                ISTORE(&na[8], as_type<uint>(F0.x)); ISTORE(&na[9], as_type<uint>(F0.y)); ISTORE(&na[10], as_type<uint>(F0.z));
-        #else
-                nodeState[ni * 3] = f4(Pown, 0);
-                nodeState[ni * 3 + 1] = f4(Vown, 0);
-                nodeState[ni * 3 + 2] = f4(F0, 0);
-        #endif
-            }
+            // A: this body's box and top speed (a warp reduces them).
             if (lid < 32u)
             {
                 V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
@@ -111,7 +98,7 @@
                 // (The bodies' boxes with BOX_MARGIN apart: no pass.)
                 const bool apart = (h0.x + 0.05f) < (l1.x - 0.05f) || (h0.y + 0.05f) < (l1.y - 0.05f) || (h0.z + 0.05f) < (l1.z - 0.05f) ||
                                    (h1.x + 0.05f) < (l0.x - 0.05f) || (h1.y + 0.05f) < (l0.y - 0.05f) || (h1.z + 0.05f) < (l0.z - 0.05f);
-                ISTORE(&tgX[14], apart ? 0 : 1);
+                ISTORE(&tgX[14], (apart || SKIP(12)) ? 0 : 1);
         #ifdef EMU_TRACE
                 fprintf(stderr, "car %u step %u: apart %d box0 %g..%g box1 %g..%g\n", car, step, (int)apart, l0.x, h0.x, l1.x, h1.x);
         #endif
@@ -119,6 +106,22 @@
             BAR;
             if (TXI(14) != 0)
             {
+                // The boxes meet: this body's nodes published for its partner (atomic
+                // stores: a plain one is not seen on another core), and the bodies meet again.
+                if (isNode)
+                {
+        #if XATOM >= 2
+                    device atomic_uint* na = (device atomic_uint*)(nodeState + ni * 3);
+                    ISTORE(&na[0], as_type<uint>(Pown.x)); ISTORE(&na[1], as_type<uint>(Pown.y)); ISTORE(&na[2], as_type<uint>(Pown.z));
+                    ISTORE(&na[4], as_type<uint>(Vown.x)); ISTORE(&na[5], as_type<uint>(Vown.y)); ISTORE(&na[6], as_type<uint>(Vown.z));
+                    ISTORE(&na[8], as_type<uint>(F0.x)); ISTORE(&na[9], as_type<uint>(F0.y)); ISTORE(&na[10], as_type<uint>(F0.z));
+        #else
+                    nodeState[ni * 3] = f4(Pown, 0);
+                    nodeState[ni * 3 + 1] = f4(Vown, 0);
+                    nodeState[ni * 3 + 2] = f4(F0, 0);
+        #endif
+                }
+                XBAR;
                 // D: the partner's nodes into this group's memory; its clusters' boxes; this
                 // body's triangles against the partner's box.
                 for (uint k = lid; k < NN; k += LANES)

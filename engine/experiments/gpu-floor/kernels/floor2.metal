@@ -537,15 +537,22 @@ kernel void floorFrame(
     {
 #if RIGID
         // ---- R0: the proxies placed (explicit_rigid.rs begin_step) ----
-        if (isNode)
+        // (The body's box: a warp reduces the nodes from threadgroup memory.)
+        if (lid < 32u)
         {
-            V3 x = v3(0, 0, 0) + Pown;
-            atomic_fetch_min_explicit(&tgX[0], ordF(x.x), memory_order_relaxed);
-            atomic_fetch_min_explicit(&tgX[1], ordF(x.y), memory_order_relaxed);
-            atomic_fetch_min_explicit(&tgX[2], ordF(x.z), memory_order_relaxed);
-            atomic_fetch_max_explicit(&tgX[3], ordF(x.x), memory_order_relaxed);
-            atomic_fetch_max_explicit(&tgX[4], ordF(x.y), memory_order_relaxed);
-            atomic_fetch_max_explicit(&tgX[5], ordF(x.z), memory_order_relaxed);
+            V3 lo = v3(3.0e38f, 3.0e38f, 3.0e38f), hi = v3(-3.0e38f, -3.0e38f, -3.0e38f);
+            for (uint j = lid; j < NN; j += 32u)
+            {
+                V3 x = v3(0, 0, 0) + TGP(j);
+                lo = v3(rmin(lo.x, x.x), rmin(lo.y, x.y), rmin(lo.z, x.z));
+                hi = v3(rmax(hi.x, x.x), rmax(hi.y, x.y), rmax(hi.z, x.z));
+            }
+            atomic_fetch_min_explicit(&tgX[0], ordF(lo.x), memory_order_relaxed);
+            atomic_fetch_min_explicit(&tgX[1], ordF(lo.y), memory_order_relaxed);
+            atomic_fetch_min_explicit(&tgX[2], ordF(lo.z), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgX[3], ordF(hi.x), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgX[4], ordF(hi.y), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgX[5], ordF(hi.z), memory_order_relaxed);
         }
         if (lid < NSH)
         {
@@ -592,7 +599,8 @@ kernel void floorFrame(
                 atomic_fetch_or_explicit(&tgAct[lid >> 5], 1u << (lid & 31u), memory_order_relaxed);
         }
         BAR;
-        const uint act0 = atomic_load_explicit(&tgAct[0], memory_order_relaxed), act1 = atomic_load_explicit(&tgAct[1], memory_order_relaxed);
+        // (SKIP(13), timing only: no shape is tested and no proxy integrates.)
+        const uint act0 = SKIP(13) ? 0u : atomic_load_explicit(&tgAct[0], memory_order_relaxed), act1 = SKIP(13) ? 0u : atomic_load_explicit(&tgAct[1], memory_order_relaxed);
         if (lid < 6u) atomic_store_explicit(&tgX[lid], lid < 3u ? 0x7FFFFFFF : int(0x80000000), memory_order_relaxed);
 #endif
         // ---- S0: the node pass ----
@@ -1668,7 +1676,7 @@ kernel void floorFrame(
 #endif
 #if RIGID
         // ---- the proxies integrate the step's reactions (end_step) ----
-        if (lid < NB)
+        if (lid < NB && !SKIP(13))
         {
             device float4* bd = rigBody + lid * BDW;
             V3 bpos = v3(bd[0]), bvel = v3(bd[2]), bang = v3(bd[3]);
