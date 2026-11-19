@@ -3453,3 +3453,74 @@ the work left is in the drawing itself, lossless first:
 * the cars' opaque picture follows the triangles (a quarter of the pixels takes off only
   10–15 %): levels of detail for the generated car (a different picture by design, the
   asset side: §8.30's follow-up).
+
+
+### 8.39 The cars of one model skinned in one pass, and a retired check read once (2026-11-19)
+
+§8.38 left the skin as the drawing's largest lossless part: eight generated cars 6.1 ms a
+picture, each car reading the shared 157 MB of binds. Headless Chrome on the M3 Max,
+1280×720, the GPU shared with other sessions' jobs through the lock (rounds interleaved
+to rank).
+
+**Built** (`showcase-car-render.mjs`; the page's control "Skin cars of one model":
+together (wide, the default), together (loop), one by one; live):
+* *The batch* (`skinBatchWgsl`): the cars of one model (one bind buffer, one level of
+  detail each) skinned in one dispatch with SKIN_WGSL's own `skin` code. A car's skinned
+  vertices, node state and tables become 256-byte aligned ranges of one pooled buffer each
+  (moved there once, at the update after cars are added or removed); every other pass
+  binds the car's range and sees what it saw before; the batch binds the pools whole and
+  a table (`carTab`, a uniform) holds each car's Params and range bases. Wide: a workgroup
+  a (car, block of vertices), the cars of a block side by side, so a block's binds come
+  from memory for the first car and from the cache for the others. Loop: an invocation a
+  vertex, every car in turn.
+* *A weighted vertex's retired check in its entries' pass* (`weightedPacked`,
+  `weightedVertex` return it): `vertexRetired` walked the entries again and read the
+  whole 64-byte slot for each entry (32 slot reads for a vertex of 32 entries), for every
+  vertex of the generated car. The same answer from the pass that already reads them.
+
+**Lossless, checked.** `tools/vehicle-lab/skin-batch.sh` (`skin-batch.js`): at two
+states per scene (cars apart at t 1.5 s; in contact, or down the mountain, at t 9 s), the
+World paused, every car's skinned vertices read back and hashed under five settings on
+the same state: one by one with the base commit's kernel (`BASE`, loaded from
+`generated/skin-ref`), one by one with this kernel, wide, loop, one by one again. Derby 4,
+derby 8, mountain 8, both states: every car's bytes the same (PASS). The draw passes are
+unchanged and read the same vertex bytes, so the picture is the same. Two other variants
+were built and dropped: each node's shown position computed once a car before the skin
+(the same bits, no faster); a packed vertex's entries read once for every car with
+per-car sums in registers (different bits under Chrome's Metal compiler, and slower).
+
+**GPU ms a picture, World paused** (medians of 3 interleaved rounds; skinning includes
+the node passes, ≈0.36 ms for eight cars):
+
+| | skinning, before → after | shadow map | picture | a picture, before → after |
+|---|---|---|---|---|
+| derby, 4 cars apart | 2.96 → 1.25 | 0.35 | 4.5 | 7.8 → 6.0 |
+| derby, 4 cars in contact | 2.98 → 1.25 | 0.37 | 5.8 | 9.2 → 7.4 |
+| derby, 8 cars apart | 6.03 → 2.50 | 0.61 | 5.3–6.7 | 12.4 → 9.4 |
+| derby, 8 cars in contact | 6.00 → 2.49 | 0.68 | 4.4 | 11.1 → 7.6 |
+| mountain, 8 cars (t 1.5 / 9 s) | 5.85 → 2.47 | 0.82 / 0.70 | 10.0 / 4.9 | 17.1 → 13.1 / 11.4 → 8.1 |
+
+One by one with this kernel (the retired check alone): 2.1–2.2 ms (4 cars), 4.2–4.5
+(8 cars). Wide and loop are within 0.1 ms of each other; wide is the default.
+
+**The page's real-time loop** (`skin-batch-live.sh`: one run a scene, before and after
+alternating in 6 s windows, 4 rounds; real time is 60 steps a second; the drawing gives
+way, 30 pictures a second at its floor):
+
+| | World steps/s, before → after | pictures/s |
+|---|---|---|
+| derby, 4 cars in contact | 47 (78 %) → 49 (82 %) | 30 → 30 |
+| derby, 8 cars in contact | 35 (58 %) → 39 (65 %) | 27 → 30 |
+| mountain, 8 cars | 36 (59 %) → 36 (60 %) | 28 → 28 |
+
+Cars apart keep real time before and after (§8.38). The page's per-second GPU ms of a
+drawn frame is a rolling median of timer readbacks, skipped while the GPU is busy, so it
+lags across 6 s windows: the paused table is the clean one. The mountain is physics
+bound (§8.38: 80 % of real time with nothing drawn).
+
+**What is left.** The batched skin is ≈0.27 ms a car and grows with the cars, so it is
+not the binds' bandwidth (157 MB once is ≈0.5 ms): it is the per-car work of ≈25 entries
+a vertex (each a gathered node position and three multiply-adds) over 491k vertices. The
+picture (4.4–6.7 ms for eight cars, 10 on the mountain at its start) follows the
+triangles, not the pixels (§8.38): levels of detail are the lever, a different picture by
+design (the "Car detail: lighter" control already draws about half the vertices).
