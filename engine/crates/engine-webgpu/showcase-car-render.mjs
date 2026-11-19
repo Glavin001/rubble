@@ -1176,6 +1176,59 @@ const SKIN_POS_WGSL = (() => {
   return s;
 })();
 
+// Every car of one model skinned in one dispatch (the batch): SKIN_WGSL's skin, the
+// same code, run for each car of the batch. The cars share the bind buffer (addCar's
+// bindsLike: 157 MB for a generated car), so a vertex's binds are read from memory
+// once for all of them (and from the cache for the next car) instead of once a car.
+// A car's own buffers (its skinned vertices, node state and tables) are ranges of
+// one pooled buffer each (the renderer's pools; every other pass binds the car's
+// range, so it sees what it saw before), and carTab holds per car its Params and the
+// ranges' first elements: row 0 (count), then BATCH_ROW vec4 a car (Params' 23 words,
+// then the out, node state and topology bases).
+const MAX_BATCH = 64;
+const BATCH_ROW = 7;
+const skinBatchWgsl = (code) => {
+  let s = code;
+  const swap = (a, b) => { if (!s.includes(a)) throw new Error('showcase skin batch: missing ' + a); s = s.replace(a, b); };
+  swap('@group(0) @binding(4) var<uniform> params: Params;', `@group(0) @binding(4) var<uniform> carTab: array<vec4u, ${1 + BATCH_ROW * MAX_BATCH}>;
+var<private> params: Params;
+var<private> outAt: u32;
+var<private> nodeAt: u32;
+var<private> topoAt: u32;`);
+  s = s.replace(/\boutv\[/g, 'outv[outAt + ').replace(/\bnodeN\[/g, 'nodeN[nodeAt + ').replace(/\btopo\[/g, 'topo[topoAt + ');
+  swap(`@compute @workgroup_size(${WG})\nfn skin(@builtin(global_invocation_id) gid: vec3u) {\n  let i = gid.x;\n`, 'fn skinOne(i: u32) {\n');
+  // nodeComponents (not used here) has barriers, which need uniform control flow, and
+  // params is no longer a uniform: left out of this module.
+  const nc = s.replace(/@compute @workgroup_size\(\d+\)\nfn nodeComponents\([\s\S]*?\n\}\n/, '');
+  if (nc === s) throw new Error('showcase skin batch: missing nodeComponents');
+  s = nc;
+  const word = (k) => `cw(c, ${k}u)`;
+  return s + `
+// The batch (skinBatchWgsl): car c's word k of its row.
+fn cw(c: u32, k: u32) -> u32 { return carTab[1u + c * ${BATCH_ROW}u + k / 4u][k % 4u]; }
+fn carAt(c: u32) {
+  params = Params(${Array.from({ length: 23 }, (_, k) => word(k)).join(', ')});
+  outAt = ${word(23)}; nodeAt = ${word(24)}; topoAt = ${word(25)};
+}
+fn batchCars() -> u32 { return min(carTab[0].x, ${MAX_BATCH}u); }
+// One invocation a vertex, every car in turn (its binds from the cache after the first).
+@compute @workgroup_size(${WG})
+fn skinCars(@builtin(global_invocation_id) gid: vec3u) {
+  let cars = batchCars();
+  for (var c = 0u; c < cars; c++) { carAt(c); skinOne(gid.x); }
+}
+// One invocation a vertex and car: workgroup (car, block of vertices), the cars of a
+// block side by side.
+@compute @workgroup_size(${WG})
+fn skinCarsWide(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  if (wid.x >= batchCars()) { return; }
+  carAt(wid.x);
+  skinOne(wid.y * ${WG}u + lid.x);
+}
+`;
+};
+const SKIN_BATCH_WGSL = skinBatchWgsl(SKIN_WGSL);
+
 // The skinned vertex buffer: per vertex (position, tear | damage as two
 // f16), (normal, plastic strain | scrape as two f16).
 const OUT_STRIDE = 32;
@@ -2025,11 +2078,99 @@ export function createShowcaseCarRenderer(device, opts = {}) {
   let miscBuf = null;
   let beamsBuf = null;
   let posBuf = null, restBuf = null, posMisc = null, posPipes = null;
+  // A car's out, node state and topology are its own buffer or a range of a pool's
+  // ({ buffer, offset, size }); every use goes through rng.
+  const rng = (x) => (x.buffer ? x : { buffer: x, offset: 0, size: x.size });
   const bindFor = (car, lv, src0, src1, beams) => device.createBindGroup({
     layout: skinLayout,
     entries: [src0, src1, lv.binds, lv.out, lv.params, car.topo, beams, car.nodeN, fxuBuf, fxBuf]
-      .map((buffer, binding) => ({ binding, resource: { buffer } })),
+      .map((buffer, binding) => ({ binding, resource: rng(buffer) })),
   });
+  // The skin batch (skinBatchWgsl): the cars of one model (one bind buffer, one level
+  // of detail each) skinned in one dispatch. 'wide': an invocation a vertex and car,
+  // the cars of a block of vertices side by side; 'loop': an invocation a vertex, every
+  // car in turn; 'off': a dispatch a car (as before). The same skin either way.
+  let batchMode = opts.skinBatch ?? 'wide';
+  let batchPipes = null;
+  const batchPipe = () => {
+    if (!batchPipes) {
+      const module = device.createShaderModule({ label: 'showcase-skin-batch', code: crease(SKIN_BATCH_WGSL) });
+      batchPipes = {
+        loop: device.createComputePipeline({ label: 'showcase-skin-cars', layout: pipeLayout, compute: { module, entryPoint: 'skinCars' } }),
+        wide: device.createComputePipeline({ label: 'showcase-skin-cars-wide', layout: pipeLayout, compute: { module, entryPoint: 'skinCarsWide' } }),
+      };
+    }
+    return batchPipes[batchMode];
+  };
+  // Pools, per model with two or more such cars: one buffer each for their skinned
+  // vertices, node state and topology (a 256-byte aligned range a car, the contents
+  // moved there once), and the batch's table (carTab). Made at the update after cars
+  // are added or removed; the buffers they replace are destroyed at the next update
+  // (after the frame that last used them is submitted).
+  const pools = new Set();
+  let poolsDirty = true;
+  let retired = [];
+  const POOL_ALIGN = 256;
+  const alignUp = (x) => Math.ceil(x / POOL_ALIGN) * POOL_ALIGN;
+  const buildPool = (group) => {
+    const at = [];
+    let o = 0, nn = 0, t = 0;
+    for (const car of group) {
+      at.push({ out: o, node: nn, topo: t });
+      o += alignUp(rng(car.levels[0].out).size); nn += alignUp(rng(car.nodeN).size); t += alignUp(rng(car.topo).size);
+    }
+    const pool = {
+      cars: group, n: group[0].levels[0].n, binds: group[0].levels[0].binds, at, bind: null, bindNodes: null,
+      out: device.createBuffer({ label: 'showcase-out-pool', size: o, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }),
+      nodeN: device.createBuffer({ label: 'showcase-node-state-pool', size: nn, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }),
+      topo: device.createBuffer({ label: 'showcase-topology-pool', size: t, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }),
+      tab: device.createBuffer({ label: 'showcase-skin-batch-table', size: 16 * (1 + BATCH_ROW * MAX_BATCH), usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
+    };
+    const enc = device.createCommandEncoder({ label: 'showcase-pool-move' });
+    const move = (src, dst, offset) => {
+      const s = rng(src);
+      enc.copyBufferToBuffer(s.buffer, s.offset, dst, offset, s.size);
+      if (!src.buffer) retired.push(src);
+      return { buffer: dst, offset, size: s.size };
+    };
+    group.forEach((car, k) => {
+      const lv = car.levels[0];
+      lv.out = move(lv.out, pool.out, at[k].out);
+      car.nodeN = move(car.nodeN, pool.nodeN, at[k].node);
+      car.topo = move(car.topo, pool.topo, at[k].topo);
+      car.pool = pool;
+    });
+    device.queue.submit([enc.finish()]);
+    for (const car of group) {
+      if (nodesBuf) car.skinBind = makeSkinBind(car);
+      car.posBind = makePosBind(car);
+    }
+    pools.add(pool);
+    return pool;
+  };
+  const syncPools = () => {
+    poolsDirty = false;
+    const groups = new Map();
+    for (const car of cars.values()) {
+      if (car.levels.length !== 1) continue;
+      const b = car.levels[0].binds;
+      if (groups.has(b)) groups.get(b).push(car); else groups.set(b, [car]);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2 || group.length > MAX_BATCH) continue;
+      const p = group[0].pool;
+      if (p && p.cars.length === group.length && group.every((c, k) => c.pool === p && p.cars[k] === c)) continue;
+      buildPool(group);
+    }
+    // A pool no car uses any more (its cars moved to a new one, or removed).
+    for (const p of pools) {
+      if ([...cars.values()].some((c) => c.pool === p)) continue;
+      retired.push(p.out, p.nodeN, p.topo, p.tab);
+      pools.delete(p);
+    }
+  };
+  // The pools whose cars are all still theirs (a removed car's pool waits for the next sync).
+  const batches = () => [...pools].filter((p) => p.cars.every((c) => c.pool === p && cars.get(c.id) === c));
   const makePosBind = (car) => posBuf && car.levels.map((lv) => bindFor(car, lv, posBuf, posMisc ?? posBuf, restBuf));
   const makeSkinBind = (car) => car.levels.map((lv) => bindFor(car, lv, nodesBuf, miscBuf, beamsBuf));
   // cutTris (made on first use): per level its two lists' bind groups, in the order of
@@ -2507,7 +2648,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       });
       Object.assign(car, {
         nodeCount, vehicle, levels, units, stateAt, unitNames: visual.unitNames ?? [], skinBind: null, posBind: null,
-        topo: upload('showcase-topology', topo),
+        topo: upload('showcase-topology', topo, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC),
         // Per node NS vec4, per unit 1, the level state 1 (zeros: nothing yet).
         nodeN: device.createBuffer({ label: 'showcase-node-state', size: (stateAt + units + 1) * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }),
         lod: upload('showcase-lod', lodData, GPUBufferUsage.UNIFORM),
@@ -2521,7 +2662,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       if (nodesBuf) { car.skinBind = makeSkinBind(car); car.cutBind = makeCutBind(car); }
       car.posBind = makePosBind(car);
       const id = nextId++;
+      car.id = id;
       cars.set(id, car);
+      poolsDirty = true;
       return id;
     },
     /** Move a car to another vehicle slot (after a rebuild with a new layout). */
@@ -2538,12 +2681,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       const car = cars.get(id);
       if (!car) return;
       for (const lv of car.levels) {
-        for (const b of [lv.out, lv.attrs, lv.index, lv.floorIndex, lv.params]) b.destroy();
+        // (A pool's range is the pool's: freed with the pool, at the next update.)
+        for (const b of [lv.out, lv.attrs, lv.index, lv.floorIndex, lv.params]) if (!b.buffer) b.destroy();
         const users = (bindUsers.get(lv.binds) ?? 1) - 1;
         if (users > 0) bindUsers.set(lv.binds, users); else { bindUsers.delete(lv.binds); lv.binds.destroy(); }
       }
-      for (const b of [car.topo, car.nodeN, car.lod, car.args, car.cutArgs, car.cutSeen]) b?.destroy();
+      for (const b of [car.topo, car.nodeN, car.lod, car.args, car.cutArgs, car.cutSeen]) if (b && !b.buffer) b.destroy();
       cars.delete(id);
+      poolsDirty = true;
       // The last car gone: the texture sets' table starts over.
       if (!cars.size) setWords = [0, 0, 0, 0];
     },
@@ -2556,9 +2701,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     readNodeState(encoder, id) {
       const car = cars.get(id);
       if (!car) return async () => null;
-      const size = car.nodeN.size;
+      const s = rng(car.nodeN), size = s.size;
       const rb = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-      encoder.copyBufferToBuffer(car.nodeN, 0, rb, 0, size);
+      encoder.copyBufferToBuffer(s.buffer, s.offset, rb, 0, size);
       return async () => {
         await rb.mapAsync(GPUMapMode.READ);
         const out = new Float32Array(rb.getMappedRange().slice(0));
@@ -2569,8 +2714,9 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     writeNodeState(id, data) {
       const car = cars.get(id);
       if (!car) throw new Error(`showcase writeNodeState: no car ${id}`);
-      if (data.byteLength !== car.nodeN.size) throw new Error(`showcase writeNodeState: ${data.byteLength} bytes for a ${car.nodeN.size}-byte state`);
-      device.queue.writeBuffer(car.nodeN, 0, data);
+      const s = rng(car.nodeN);
+      if (data.byteLength !== s.size) throw new Error(`showcase writeNodeState: ${data.byteLength} bytes for a ${s.size}-byte state`);
+      device.queue.writeBuffer(s.buffer, s.offset, data);
     },
     /**
      * The damage units' state as the renderer holds it (for checks): per car id
@@ -2584,7 +2730,8 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         if (!car.units) continue;
         const size = car.units * 16;
         const rb = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-        encoder.copyBufferToBuffer(car.nodeN, car.stateAt * 16, rb, 0, size);
+        const s = rng(car.nodeN);
+        encoder.copyBufferToBuffer(s.buffer, s.offset + car.stateAt * 16, rb, 0, size);
         reads.push([id, car, rb]);
       }
       return async () => {
@@ -2622,6 +2769,32 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       device.queue.writeBuffer(fxuBuf, 0, fxu);
       if (live) fxLive = true;
       const pipes = usePos ? posPipes : { normal: normalPipe, frames: framePipe, comps: compPipe, skin: skinPipe, pick: pickPipe };
+      // The skin batches (from the solver's buffers): their cars' skin after every car's
+      // node passes, one dispatch a model.
+      for (const b of retired) b.destroy();
+      retired = [];
+      const batchOn = batchMode !== 'off' && !usePos;
+      if (batchOn && poolsDirty) syncPools();
+      const batched = batchOn ? batches() : [];
+      const inBatch = new Set(batched.flatMap((p) => p.cars));
+      for (const p of batched) {
+        if (p.bindNodes !== nodesBuf) {
+          p.bindNodes = nodesBuf;
+          p.bind = device.createBindGroup({
+            label: 'showcase-skin-batch',
+            layout: skinLayout,
+            entries: [nodesBuf, miscBuf, p.binds, p.out, p.tab, p.topo, beamsBuf, p.nodeN, fxuBuf, fxBuf].map((buffer, binding) => ({ binding, resource: { buffer } })),
+          });
+        }
+        const tab = new Uint32Array(4 + 4 * BATCH_ROW * p.cars.length);
+        tab[0] = p.cars.length;
+        p.cars.forEach((car, k) => {
+          const r = 4 + 4 * BATCH_ROW * k;
+          tab.set(car.levels[0].pw(), r);
+          tab[r + 23] = rng(car.levels[0].out).offset / 16; tab[r + 24] = rng(car.nodeN).offset / 16; tab[r + 25] = rng(car.topo).offset / 4;
+        });
+        device.queue.writeBuffer(p.tab, 0, tab);
+      }
       const pass = encoder.beginComputePass({ label: usePos ? 'showcase-skin-pos' : 'showcase-skin', ...(timestampWrites ? { timestampWrites } : {}) });
       let anyGroup = null;
       for (const car of cars.values()) {
@@ -2645,7 +2818,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         pass.setPipeline(pipes.pick);
         pass.setBindGroup(1, car.pickBind);
         pass.dispatchWorkgroups(1);
-        if (!skip.has('skin')) {
+        if (!skip.has('skin') && !inBatch.has(car)) {
           pass.setPipeline(pipes.skin);
           car.levels.forEach((lv, k) => {
             pass.setBindGroup(0, groups[k]);
@@ -2663,6 +2836,14 @@ export function createShowcaseCarRenderer(device, opts = {}) {
             pass.setBindGroup(0, bind);
             pass.dispatchWorkgroupsIndirect(car.cutArgs, 16 * k);
           });
+        }
+      }
+      if (batched.length && !skip.has('skin')) {
+        pass.setPipeline(batchPipe());
+        for (const p of batched) {
+          pass.setBindGroup(0, p.bind);
+          const blocks = Math.ceil(p.n / WG);
+          if (batchMode === 'wide') pass.dispatchWorkgroups(p.cars.length, blocks); else pass.dispatchWorkgroups(blocks);
         }
       }
       if (live && anyGroup && !skip.has('fxStep')) {
@@ -2693,7 +2874,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         pass.setBindGroup(0, bind);
         for (const car of cars.values()) {
           car.levels.forEach((lv, k) => {
-            pass.setVertexBuffer(0, lv.out);
+            { const o = rng(lv.out); pass.setVertexBuffer(0, o.buffer, o.offset, o.size); }
             pass.setVertexBuffer(1, lv.attrs);
             pass.setIndexBuffer(lv.floorIndex, 'uint32');
             pass.drawIndexedIndirect(car.args, k * 92 + 72);
@@ -2710,7 +2891,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         pass.setBindGroup(0, contactBind);
         for (const car of cars.values()) {
           car.levels.forEach((lv, k) => {
-            pass.setVertexBuffer(0, lv.out);
+            { const o = rng(lv.out); pass.setVertexBuffer(0, o.buffer, o.offset, o.size); }
             pass.setVertexBuffer(1, lv.attrs);
             pass.setIndexBuffer(lv.floorIndex, 'uint32');
             pass.drawIndexedIndirect(car.args, k * 92 + 52);
@@ -2734,7 +2915,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
         pass.setBindGroup(0, bind);
         for (const car of cars.values()) {
           car.levels.forEach((lv, k) => {
-            pass.setVertexBuffer(0, lv.out);
+            { const o = rng(lv.out); pass.setVertexBuffer(0, o.buffer, o.offset, o.size); }
             pass.setVertexBuffer(1, lv.attrs);
             pass.setIndexBuffer(lv.index, 'uint32');
             pass.drawIndexedIndirect(car.args, k * 92 + at);
@@ -2773,7 +2954,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       pass.setBindGroup(0, depthOnly.bind);
       for (const car of cars.values()) {
         car.levels.forEach((lv, k) => {
-          pass.setVertexBuffer(0, lv.out);
+          { const o = rng(lv.out); pass.setVertexBuffer(0, o.buffer, o.offset, o.size); }
           pass.setIndexBuffer(lv.index, 'uint32');
           pass.drawIndexedIndirect(car.args, k * 92 + 12);
         });
@@ -2784,15 +2965,30 @@ export function createShowcaseCarRenderer(device, opts = {}) {
      * update's passes: normals, comps, frames, skin, cut, fxStep; depth: drawDepth).
      */
     setPerfSkip(names) { skip.clear(); for (const n of names ?? []) skip.add(n); },
+    /**
+     * How the cars of one model are skinned: 'wide' (default) or 'loop', one dispatch
+     * for all of them (skinBatchWgsl), or 'off', a dispatch a car. The same skin.
+     */
+    setSkinBatch(mode) {
+      if (!['wide', 'loop', 'off'].includes(mode)) throw new Error(`showcase setSkinBatch: ${mode} (wide, loop or off)`);
+      batchMode = mode;
+      poolsDirty = true;
+    },
+    /** The skinned vertices of car `id`'s level `k` as a range ({ buffer, offset, size }), for checks. */
+    outRange(id, k = 0) { const lv = cars.get(id)?.levels[k]; return lv ? rng(lv.out) : null; },
     /** Cut every car's drawn lists again at the next update, whatever its piece labels (a check: the lists must come out the same). */
     recut() { for (const car of cars.values()) cutAgain(car); },
     /** Per car, per level of detail: vertices, opaque and blended triangles, bind bytes. */
     stats() {
-      return [...cars.values()].map((car) => ({ nodes: car.nodeCount, units: car.units, cut: !!car.cutBind,
+      return [...cars.values()].map((car) => ({ nodes: car.nodeCount, units: car.units, cut: !!car.cutBind, batched: batchMode !== 'off' && !!car.pool && batches().includes(car.pool),
         levels: car.levels.map((lv) => ({ vertices: lv.n, opaqueTriangles: lv.opaqueCount / 3, glassTriangles: lv.glassCount / 3, floorTriangles: lv.midCount / 3, bindBytes: lv.binds.size, edge: lv.edge })) }));
     },
     destroy() {
       for (const id of [...cars.keys()]) this.removeCar(id);
+      for (const p of pools) retired.push(p.out, p.nodeN, p.topo, p.tab);
+      pools.clear();
+      for (const b of retired) b.destroy();
+      retired = [];
       frameBuf.destroy();
       mirrorBuf.destroy();
       viewBuf.destroy();
@@ -2804,4 +3000,4 @@ export function createShowcaseCarRenderer(device, opts = {}) {
 
 // The compute shaders' source (the skin from the solver's buffers, and from
 // world positions), for offline validation.
-export const SHOWCASE_SKIN_WGSL = { skin: SKIN_WGSL, pos: SKIN_POS_WGSL };
+export const SHOWCASE_SKIN_WGSL = { skin: SKIN_WGSL, pos: SKIN_POS_WGSL, batch: SKIN_BATCH_WGSL };
