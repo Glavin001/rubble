@@ -75,6 +75,10 @@ struct Params
 #ifndef TGVEC
 #define TGVEC 1
 #endif
+// ROWOVER: the pair rows' filter also tests that a point in the band is over the triangle.
+#ifndef ROWOVER
+#define ROWOVER 1
+#endif
 // TGPV: a node's position and velocity next to each other (an end of a beam is then six
 // adjacent floats, where adjacent loads are nearly free).
 #ifndef TGPV
@@ -1278,6 +1282,9 @@ kernel void floorFrame(
             device const uint4* row4 = (device const uint4*)(pairs + tri * PROW);
             uint4 cur = row4[0];
             const uint n = min(cur.x, (uint)(PROW - 2u));
+#ifdef EMU_TRACE
+            if (step == 5u && frame == 0u) fprintf(stderr, "row lane %u n %u\n", lid, n);
+#endif
             if (n != 0u)
             {
                 const uint t0 = cur.y & 1023u, t1 = (cur.y >> 10) & 1023u, t2 = (cur.y >> 20) & 1023u;
@@ -1285,12 +1292,18 @@ kernel void floorFrame(
                 // plane normals; a pair that passes rebuilds the rest, the same values. No
                 // arrays: an array indexed in a loop is stack memory.)
                 V3 f0, frd, b0, brd;
+#if ROWOVER
+                V3 fra, frb;
+#endif
                 bool fok, bok;
                 {
                     V3 q0 = v3(0, 0, 0) + TGP(t0), q1 = v3(0, 0, 0) + TGP(t1), q2 = v3(0, 0, 0) + TGP(t2);
                     Frame F = triFrame(q0, q1, q2);
                     Frame B = triFrame(q0 - TGV(t0) * H, q1 - TGV(t1) * H, q2 - TGV(t2) * H);
                     f0 = F.p0; frd = F.rd; fok = F.ok; b0 = B.p0; brd = B.rd; bok = B.ok;
+#if ROWOVER
+                    fra = F.ra; frb = F.rb;
+#endif
                 }
                 for (uint k = 0; k < PROW - 2u; k++)
                 {
@@ -1302,7 +1315,27 @@ kernel void floorFrame(
                     V3 vh = TGV(h);
                     float d1 = fok ? dot3(frd, ph - f0) : 0.0f;
                     float d0 = bok ? dot3(brd, (ph - vh * H) - b0) : 0.0f;
+#if ROWOVER
+                    // (A point that holds no side and did not cross the plane is a contact
+                    // only inside the band and over the triangle: the rule's own test, the
+                    // same values. Most points near a panel's plane are its neighbours,
+                    // beside the triangle, and stop here.)
+                    bool cand = (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f);
+                    if (!cand && anyHeld && tgHeld[h] != 0)
+                    {
+                        // (A side held for another triangle is no side here: the rule's key.)
+                        const uint c0 = atomic_load_explicit(&clip[h * 4], memory_order_relaxed), c1 = atomic_load_explicit(&clip[h * 4 + 1], memory_order_relaxed);
+                        const uint key = CLIP_SELF << 20 | tri;
+                        cand = (c0 != CLIP_EMPTY && (c0 >> 1) == key) || (c1 != CLIP_EMPTY && (c1 >> 1) == key);
+                    }
+                    if (!cand && fabs(d1) <= CR)
+                    {
+                        const float al = fok ? dot3(fra, ph - f0) : 0.0f, be = fok ? dot3(frb, ph - f0) : 0.0f;
+                        cand = al >= 0.0f && be >= 0.0f && ((1.0f - al) - be) >= 0.0f;
+                    }
+#else
                     bool cand = (anyHeld && tgHeld[h] != 0) || (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f) || fabs(d1) <= CR;
+#endif
                     if (!cand) continue;
                     // A pair that may be a contact goes on the step's list: the full rule runs
                     // a lane a pair after the barrier (a warp pays for its slowest lane, and
@@ -1316,6 +1349,9 @@ kernel void floorFrame(
         BAR;
 #if COLLIDE
         const uint ncand = atomic_load_explicit(&tgCount[1], memory_order_relaxed);
+#ifdef EMU_TRACE
+        if (lid == 0u && (step == 5u || step == 20u)) fprintf(stderr, "cands frame %u step %u: %u\n", frame, step, ncand);
+#endif
         if (ncand != 0u)
         {
             if (lid == 0 && ncand > CAND_CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 4u;

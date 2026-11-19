@@ -958,6 +958,9 @@ impl Emu {
         std::fs::write(&fin, blob)?;
         let out = std::process::Command::new(&self.exe).arg(&fin).arg(&fout).arg(if self.reverse { "1" } else { "0" }).output()?;
         anyhow::ensure!(out.status.success(), "emu run: {:?}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+        if std::env::var("EMU_TRACE").is_ok() {
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
+        }
         let blob = std::fs::read(&fout)?;
         let mut at = 0;
         for b in &mut self.bufs {

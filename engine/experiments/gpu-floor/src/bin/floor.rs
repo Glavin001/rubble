@@ -57,6 +57,9 @@ fn main() -> anyhow::Result<()> {
         // --by-step: one substep a run, compared after each (finds the first differing step).
         let by_step = flag("--by-step");
         extra += if flag("--runtime-sizes") || by_step { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" };
+        if flag("--no-rowover") {
+            extra += "#define ROWOVER 0\n";
+        }
         if let Some(m) = arg("--regmode") {
             extra += &format!("#define REGMODE {m}\n");
         }
@@ -129,6 +132,10 @@ fn main() -> anyhow::Result<()> {
     // reference's specified sequences.
     if flag("--native") {
         extra += "#define NATIVE 1\n";
+    }
+    // --no-rowover: the pair rows' filter without the over-the-triangle test (a measurement).
+    if flag("--no-rowover") {
+        extra += "#define ROWOVER 0\n";
     }
     // --no-hoist: the records' static words loaded every substep (a ledger measurement).
     if flag("--no-hoist") {
