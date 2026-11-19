@@ -1578,8 +1578,10 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
             // load on the machine: the low figures are the comparable ones); "=": the
             // frames ended in the first mask's state, bit for bit. A lossless switch's
             // cost or gain, and a kernel's time-only measurement bits when a build has any.
+            // Mask bit 31 (2147483648) runs that mask with bit-exact results off.
             if let Some(masks) = arg("--ab-perf-masks") {
                 let f = x.perf_flags();
+                let bit_exact0 = x.bit_exact();
                 let masks: Vec<u32> = masks.split(',').filter_map(|m| m.parse().ok()).collect();
                 let mut ms = vec![Vec::new(); masks.len()];
                 // (On the fleet-wide passes: each mask's GPU ms a frame by pass, every
@@ -1590,7 +1592,9 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 for _ in 0..3 {
                     for (k, m) in masks.iter().enumerate() {
                         x.restore(&snap);
-                        x.set_perf_flags(f ^ m);
+                        // (Mask bit 31: bit-exact results off, the fast setting.)
+                        x.set_bit_exact(m & 0x8000_0000 == 0 && bit_exact0);
+                        x.set_perf_flags(f ^ (m & 0x7FFF_FFFF));
                         x.wait();
                         for _ in 0..3 {
                             x.frame(34);
@@ -1615,6 +1619,7 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                     }
                 }
                 println!("   self-collision hits of the last step, per vehicle: {:?}", x.self_hit_counts());
+                x.set_bit_exact(bit_exact0);
                 x.set_perf_flags(f);
                 x.restore(&snap);
                 println!(
@@ -2652,7 +2657,8 @@ fn mountain_perf(template: &ExplicitBeams, gpu: bool) -> anyhow::Result<()> {
                 );
             }
             // (AB_TIME_ONLY=1: a measurement switch that changes the results on purpose.)
-            anyhow::ensure!(same || (wide_ab && physics) || std::env::var("AB_TIME_ONLY").is_ok(), "the A/B switch changed the state");
+            // (bitexact: not bit for bit by design; the physical line above is its verdict.)
+            anyhow::ensure!(same || bitexact_ab || (wide_ab && physics) || std::env::var("AB_TIME_ONLY").is_ok(), "the A/B switch changed the state");
             x.restore(&snap);
             switch(x, true, &labels);
             x.wait();
