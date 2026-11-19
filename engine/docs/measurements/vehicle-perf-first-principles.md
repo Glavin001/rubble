@@ -3531,9 +3531,11 @@ measured, and none paid:
 So the floor found for this car on this GPU is **about 1.1 ms a frame fast, 1.3 strict**:
 a third of production, three to four times §1.3's estimate. What is left is not waste the
 counts show; it is the price of a warp-iteration here, which the microbenchmark's
-primitives under-predict (most likely the kernel's sixty-odd live values a lane against
-the forty-eight that stay in registers; a row loop that keeps fewer alive is the next
-experiment, `--row4`, `--regmode`).
+primitives under-predict. Two guesses at the cause were tested and are not it
+(`batch-rows`, strict, at rest): the slot words' registers (twelve fewer live a lane,
+`--regmode 2`: 1.39 against 1.32, the rows' phase unchanged at 0.34) and the row's vector
+indexed by a variable (four points a load by name: 1.29 against 1.32, kept as the
+default). It stays open.
 
 **Body against body (mechanism 2).** Two workgroups a pair, one a body. Metal has no
 barrier across workgroups: each group's lane 0 adds one to a device counter after its own
