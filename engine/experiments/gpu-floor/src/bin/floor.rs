@@ -148,7 +148,8 @@ fn main() -> anyhow::Result<()> {
     // --runtime-sizes: the counts as uniforms (a ledger measurement).
     extra += if flag("--runtime-sizes") { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" };
     // --per-step: one dispatch a substep (34 a frame), the state reloaded each time.
-    if flag("--per-step") {
+    let prof: Option<usize> = arg("--profile").map(|x| x.parse().unwrap());
+    if flag("--per-step") || prof.is_some() {
         extra += "#define PER_STEP 1\n";
     }
     // --native (with --fast): the GPU's own sqrt, reciprocal, exp, log, atan2 in place of the
@@ -185,6 +186,14 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::ensure!(mt as usize >= LANES, "the kernel cannot run {LANES} lanes a threadgroup ({mt})");
+    if let Some(fr) = prof {
+        // --profile F: where frame F + 1's time goes (floor.rs profile), from the CPU's state.
+        f.single = true;
+        f.cars = 1;
+        f.upload(0, &state_of(&cpu, &f.l, &st));
+        profile(&f, 1, fr, 15, &GROUPS);
+        return Ok(());
+    }
     // The reference's run, and its own sensitivity: the same run from starts moved by up
     // to a micron a node (three of them). A deviation of the GPU's free run inside that
     // spread is what the reference itself does under a change no one could measure.

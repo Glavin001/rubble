@@ -91,11 +91,12 @@ fn main() -> anyhow::Result<()> {
             extra += &format!("#define XATOM {m}\n");
         }
         let by_step = flag("--by-step");
-        if by_step {
+        let prof: Option<usize> = arg("--profile").map(|x| x.parse().unwrap());
+        if by_step || prof.is_some() {
             extra += "#define PER_STEP 1\n";
         }
         let mut f = Floor::new(Gpu::new()?, l, &st, 2 * pairs, fast, &extra)?;
-        f.single = by_step;
+        f.single = by_step || prof.is_some();
         let (mt, _, tg) = f.threads_ok();
         println!("pipeline: max threads {mt}, threadgroup memory {tg} B; {pairs} pair(s), {} workgroups", 2 * pairs);
         if flag("--compile-only") {
@@ -106,6 +107,13 @@ fn main() -> anyhow::Result<()> {
             for c in 0..2 {
                 f.upload(2 * p + c, &state_of(&w.vehicles[c], &f.l, &st));
             }
+        }
+        if let Some(fr) = prof {
+            // --profile F: where frame F + 1's time goes (floor.rs profile).
+            let mut groups = GROUPS.to_vec();
+            groups.push(("contact pass (boxes meet)", 1 << 12));
+            profile(&f, 2 * pairs, fr, time.max(9), &groups);
+            return Ok(());
         }
         if by_step {
             // One substep a dispatch, compared after each: the first differing step, its

@@ -34,7 +34,7 @@ pub const HIT_CAP: usize = 4096;
 /// The pair list's box: the contact band, anti-clip's depth and a skin.
 pub const LIST_SKIN: f32 = 0.05;
 /// The wide list's skin.
-pub const LIST_SKIN_OUT: f32 = 0.15;
+pub const LIST_SKIN_OUT: f32 = 0.30;
 
 /// Static data, the same for every car.
 pub struct Statics {
@@ -739,6 +739,65 @@ impl Floor {
     }
 }
 
+/// Where a frame's time goes, without the confounds of leaving one phase out of a whole
+/// frame (the later substeps then run from another state). The kernel is one substep a
+/// dispatch (`PER_STEP`, `single`); after `frame` frames, each of the next 34 substeps is
+/// run from its own saved state with its phases enabled one group more at a time (a
+/// substep cut short after group k: nothing after it runs, nothing before it changes), the
+/// median of `reps` dispatches each. A group's cost is the difference; the sum over the
+/// 34 substeps is its ms a frame. `groups` are (name, the skip bits that group clears), in
+/// the kernel's order.
+pub fn profile(f: &Floor, blocks: usize, frame: usize, reps: usize, groups: &[(&str, u32)]) {
+    let all: u32 = groups.iter().fold(0, |m, g| m | g.1);
+    for _ in 0..frame * STEPS {
+        f.run(1);
+    }
+    let mut t = vec![0.0f64; groups.len() + 1];
+    for _ in 0..STEPS {
+        let snap: Vec<Vec<Vec<u8>>> = (0..blocks).map(|g| f.snapshot(g)).collect();
+        let back = || {
+            for g in 0..blocks {
+                f.restore(g, &snap[g]);
+            }
+        };
+        let mut mask = all;
+        for k in 0..=groups.len() {
+            if k > 0 {
+                mask &= !groups[k - 1].1;
+            }
+            let mut ms: Vec<f64> = (0..reps)
+                .map(|_| {
+                    back();
+                    f.run_skip(1, mask)
+                })
+                .collect();
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            t[k] += ms[ms.len() / 2];
+        }
+        back();
+        f.run(1);
+    }
+    println!("profile, frame {} (ms a frame; each substep cut short after one more group, {reps} dispatches each):", frame + 1);
+    println!("  {:30} {:.4}  (34 dispatches of an empty substep: the state's load and write-back)", "nothing", t[0]);
+    for (k, g) in groups.iter().enumerate() {
+        println!("  {:30} {:.4}", g.0, t[k + 1] - t[k]);
+    }
+    println!("  {:30} {:.4}", "all groups", t[groups.len()] - t[0]);
+}
+
+/// The one-body substep's groups for [`profile`], in the kernel's order.
+pub const GROUPS: [(&str, u32); 9] = [
+    ("S0 node pass", 1 << 0),
+    ("S1 centred scalars", 1 << 1),
+    ("C1+C2 centred gather", 1 << 2),
+    ("S3 beams, list check", 1 << 3 | 1 << 6),
+    ("pair list rebuilds", 1 << 14),
+    ("S4 force gather", 1 << 4),
+    ("S4 pair rows", 1 << 5),
+    ("self candidates' rule", 1 << 15),
+    ("self hit passes", 1 << 8),
+];
+
 /// Every state word of the GPU's car against the CPU reference's: (differing words, a
 /// description of the first few).
 pub fn compare(cpu: &ExplicitBeams, g: &State) -> (usize, Vec<String>) {
@@ -1010,7 +1069,7 @@ impl Emu {
 
 
 /// `--skin M` and `--skin-out M` of the command line: the working and the wide pair
-/// lists' skins (m; defaults 0.05 and 0.15; a wide skin no larger than the working one:
+/// lists' skins (m; defaults 0.05 and 0.30; a wide skin no larger than the working one:
 /// one list, built from the clusters every time).
 pub fn list_args(st: &mut Statics) {
     let a: Vec<String> = std::env::args().collect();

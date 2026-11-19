@@ -1273,7 +1273,7 @@ kernel void floorFrame(
 #ifdef EMU_TRACE
         if (lid == 0u && tgFlags[F_REBUILD] != 0u) fprintf(stderr, "T car %u step %u: pair list rebuilt\n", car, step);
 #endif
-        if (tgFlags[F_REBUILD] != 0u)
+        if (tgFlags[F_REBUILD] != 0u && !SKIP(14))
         {
 #if LIST2
             // Two lists. The wide one (every pair within LIST_REACH_OUT, built by the
@@ -1610,7 +1610,7 @@ kernel void floorFrame(
 #ifdef EMU_TRACE
         if (lid == 0u && (step == 5u || step == 20u)) fprintf(stderr, "cands frame %u step %u: %u\n", frame, step, ncand);
 #endif
-        if (ncand != 0u)
+        if (ncand != 0u && !SKIP(15))
         {
             if (lid == 0 && ncand > CAND_CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 4u;
             for (uint kc = lid; kc < min(ncand, (uint)CAND_CAP); kc += LANES)

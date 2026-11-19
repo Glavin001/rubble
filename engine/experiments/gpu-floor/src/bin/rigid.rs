@@ -69,7 +69,12 @@ fn main() -> anyhow::Result<()> {
         if flag("--native") {
             extra += "#define NATIVE 1\n";
         }
+        let prof: Option<usize> = arg("--profile").map(|x| x.parse().unwrap());
+        if prof.is_some() {
+            extra += "#define PER_STEP 1\n";
+        }
         let mut f = Floor::new(Gpu::new()?, l, &st, cars, flag("--fast"), &extra)?;
+        f.single = prof.is_some();
         let (mt, _, tg) = f.threads_ok();
         println!("pipeline: max threads {mt}, threadgroup memory {tg} B");
         if flag("--compile-only") {
@@ -77,6 +82,15 @@ fn main() -> anyhow::Result<()> {
         }
         anyhow::ensure!(mt as usize >= LANES);
         f.upload(0, &state_of(&c, &f.l, &st));
+        if let Some(fr) = prof {
+            // --profile F: where frame F + 1's time goes (the shapes' tests are inside the
+            // node pass: its cost with and without them).
+            f.cars = 1;
+            let mut groups = vec![("S0 node pass, no shapes", 1u32 << 0), ("rigid shapes and proxies", 1 << 13)];
+            groups.extend_from_slice(&GROUPS[1..]);
+            profile(&f, 1, fr, time.max(9), &groups);
+            return Ok(());
+        }
         let first = f.snapshot(0);
         let mut first_bad = None;
         let mut status = 0;
