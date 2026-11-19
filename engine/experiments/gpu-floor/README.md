@@ -41,6 +41,11 @@ python3 scripts/with-gpu-lock.py --limit 600 -- env RUBBLE_GPU_LOCK=0 ./target/f
 python3 scripts/with-gpu-lock.py --limit 600 -- env RUBBLE_GPU_LOCK=0 ./target/fast/rigid --scene rocks --gpu --frames 14
 ```
 
+`--profile F` (all three drivers, with `--gpu` on `pair` and `rigid`) says where frame
+F + 1's time goes: a substep a dispatch from its own saved state, cut short after one more
+phase group at a time. Judge a change on the whole frame, two builds in one batch: the
+profiler's sums have favoured changes that made the frame slower.
+
 A dispatch outside the lock is refused (`Gpu::run_n`). Strict (the default) is fast math
 off plus `#pragma clang fp contract(off)` and is bit for bit with the reference; `--fast
 --native` is the fast variant, judged by the closeness report the drivers print.
