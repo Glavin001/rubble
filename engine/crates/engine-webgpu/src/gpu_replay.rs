@@ -76,6 +76,9 @@ pub struct KernelReplayReport {
     pub phases_span_ms: Vec<f64>,
     /// Each phase's median over the reps, in plan order.
     pub phases: Vec<(String, f64)>,
+    /// Pass per phase: the GPU's idle time before each phase's pass (its begin after the
+    /// previous pass's end; the first 0), medians, in plan order.
+    pub phase_gaps_ms: Vec<f64>,
     /// Pass per dispatch in sequence: per rep, sum and span.
     pub dispatch_split_sum_ms: Vec<f64>,
     pub dispatch_split_span_ms: Vec<f64>,
@@ -90,7 +93,27 @@ impl KernelReplayReport {
         use serde_json::json;
         let stat = |v: &[f64]| json!({ "median": median(v), "p90": quantile(v, 0.9), "min": quantile(v, 0.0), "samples": v });
         let whole = median(&self.whole_step_ms);
-        let isolated_sum: f64 = self.dispatches.iter().map(|d| median(&d.isolated_ms)).sum();
+        let isolated_sum: f64 = self.dispatches.iter().filter(|d| !d.empty()).map(|d| median(&d.isolated_ms)).sum();
+        // Per kernel (phase/kernel): dispatches, workgroups, in-sequence and isolated ms.
+        let mut by: Vec<((&str, &str), (u32, u64, f64, f64))> = Vec::new();
+        for d in &self.dispatches {
+            let k = (d.phase, d.kernel);
+            let i = match by.iter().position(|(x, _)| *x == k) {
+                Some(i) => i,
+                None => {
+                    by.push((k, (0, 0, 0.0, 0.0)));
+                    by.len() - 1
+                }
+            };
+            let a = &mut by[i].1;
+            a.0 += 1;
+            a.1 += u64::from(d.workgroups.iter().product::<u32>());
+            a.2 += median(&d.in_sequence_ms);
+            if !d.empty() {
+                a.3 += median(&d.isolated_ms);
+            }
+        }
+        by.sort_by(|a, b| b.1 .2.total_cmp(&a.1 .2));
         let in_sequence_sum: f64 = self.dispatches.iter().map(|d| median(&d.in_sequence_ms)).sum();
         json!({
             "step": self.step,
@@ -105,7 +128,11 @@ impl KernelReplayReport {
             "empty_pass_ms": stat(&self.empty_pass_ms),
             "isolated_sum_ms": isolated_sum,
             "in_sequence_sum_ms": in_sequence_sum,
-            "phases": self.phases.iter().map(|(p, ms)| json!({ "phase": p, "ms": ms })).collect::<Vec<_>>(),
+            "kernels": by.iter().map(|((p, k), (n, wg, seq, iso))| json!({
+                "phase": p, "kernel": k, "dispatches": n, "workgroups": wg, "in_sequence_ms": seq, "isolated_ms": iso,
+                "share_of_step": if whole > 0.0 { seq / whole } else { 0.0 },
+            })).collect::<Vec<_>>(),
+            "phases": self.phases.iter().zip(self.phase_gaps_ms.iter().chain(std::iter::repeat(&0.0))).map(|((p, ms), gap)| json!({ "phase": p, "ms": ms, "idle_before_ms": gap })).collect::<Vec<_>>(),
             "dispatches": self.dispatches.iter().map(|d| {
                 let iso = median(&d.isolated_ms);
                 json!({
@@ -114,6 +141,7 @@ impl KernelReplayReport {
                     "kernel": d.kernel,
                     "workgroups": d.workgroups,
                     "indirect": d.indirect,
+                    "empty": d.empty(),
                     "isolated_ms": stat(&d.isolated_ms),
                     "in_sequence_ms": stat(&d.in_sequence_ms),
                     "share_of_step": if whole > 0.0 { iso / whole } else { 0.0 },
@@ -128,22 +156,48 @@ impl KernelReplayReport {
         use std::fmt::Write;
         let mut out = String::new();
         let whole = median(&self.whole_step_ms);
-        let iso: f64 = self.dispatches.iter().map(|d| median(&d.isolated_ms)).sum();
+        let iso: f64 = self.dispatches.iter().filter(|d| !d.empty()).map(|d| median(&d.isolated_ms)).sum();
+        let empties = self.dispatches.iter().filter(|d| d.empty()).count();
         let seq: f64 = self.dispatches.iter().map(|d| median(&d.in_sequence_ms)).sum();
         let empty = median(&self.empty_pass_ms);
         let _ = writeln!(out, "kernel replay at step {} ({} reps, {} dispatches, snapshot {:.1} MB)", self.step, self.reps, self.dispatches.len(), self.snapshot_bytes as f64 / 1e6);
         let _ = writeln!(out, "  whole step (one pass)        {whole:8.3} ms  p90 {:.3}", quantile(&self.whole_step_ms, 0.9));
         let _ = writeln!(out, "  pass per phase: sum / span   {:8.3} / {:.3} ms", median(&self.phases_sum_ms), median(&self.phases_span_ms));
+        let gaps: f64 = self.phase_gaps_ms.iter().sum();
+        let _ = writeln!(out, "    idle between phase passes {gaps:8.3} ms: {}", self.phases.iter().zip(&self.phase_gaps_ms).skip(1).map(|((p, _), g)| format!("{p} {g:.3}")).collect::<Vec<_>>().join(", "));
         let _ = writeln!(out, "  pass per dispatch: sum / span{:8.3} / {:.3} ms", median(&self.dispatch_split_sum_ms), median(&self.dispatch_split_span_ms));
-        let _ = writeln!(out, "  isolated sum                 {iso:8.3} ms   (empty pass {empty:.4} ms x {} = {:.3} ms)", self.dispatches.len(), empty * self.dispatches.len() as f64);
+        let _ = writeln!(out, "  isolated sum                 {iso:8.3} ms   ({empties} empty dispatches left out; empty pass {empty:.4} ms)");
         let _ = writeln!(out, "  in-sequence sum              {seq:8.3} ms");
+        // Per kernel, by in-sequence time (completion deltas: they sum to the split span).
+        let mut by: Vec<((&str, &str), (u32, u64, f64, f64))> = Vec::new();
+        for d in &self.dispatches {
+            let k = (d.phase, d.kernel);
+            let i = by.iter().position(|(x, _)| *x == k).unwrap_or_else(|| {
+                by.push((k, (0, 0, 0.0, 0.0)));
+                by.len() - 1
+            });
+            let a = &mut by[i].1;
+            a.0 += 1;
+            a.1 += u64::from(d.workgroups.iter().product::<u32>());
+            a.2 += median(&d.in_sequence_ms);
+            if !d.empty() {
+                a.3 += median(&d.isolated_ms);
+            }
+        }
+        by.sort_by(|a, b| b.1 .2.total_cmp(&a.1 .2));
+        let _ = writeln!(out, "  per kernel: {:<12} {:<34} {:>4} {:>10} {:>9} {:>9} {:>6}", "phase", "kernel", "n", "workgroups", "in-seq", "iso", "share");
+        for ((p, k), (n, wg, seq, iso)) in by.iter().take(if top == 0 { usize::MAX } else { top }) {
+            let _ = writeln!(out, "              {p:<12} {k:<34} {n:>4} {wg:>10} {seq:>9.4} {iso:>9.4} {:>5.1}%", if whole > 0.0 { 100.0 * seq / whole } else { 0.0 });
+        }
         let mut rows: Vec<&ReplayedDispatch> = self.dispatches.iter().collect();
-        rows.sort_by(|a, b| median(&b.isolated_ms).total_cmp(&median(&a.isolated_ms)));
+        rows.sort_by(|a, b| median(&b.in_sequence_ms).total_cmp(&median(&a.in_sequence_ms)));
         let _ = writeln!(out, "  {:>4} {:<14} {:<34} {:>16} {:>9} {:>9} {:>9} {:>6}", "#", "phase", "kernel", "workgroups", "iso ms", "p90", "in-seq", "share");
         for d in rows.iter().take(if top == 0 { usize::MAX } else { top }) {
             let m = median(&d.isolated_ms);
             let wg = format!("{}x{}x{}{}", d.workgroups[0], d.workgroups[1], d.workgroups[2], if d.indirect { "*" } else { "" });
-            let _ = writeln!(out, "  {:>4} {:<14} {:<34} {:>16} {:>9.4} {:>9.4} {:>9.4} {:>5.1}%", d.index, d.phase, d.kernel, wg, m, quantile(&d.isolated_ms, 0.9), median(&d.in_sequence_ms), if whole > 0.0 { 100.0 * m / whole } else { 0.0 });
+            let seq = median(&d.in_sequence_ms);
+            let iso = if d.empty() { "empty".to_string() } else { format!("{m:.4}") };
+            let _ = writeln!(out, "  {:>4} {:<14} {:<34} {:>16} {:>9} {:>9.4} {:>9.4} {:>5.1}%", d.index, d.phase, d.kernel, wg, iso, quantile(&d.isolated_ms, 0.9), seq, if whole > 0.0 { 100.0 * seq / whole } else { 0.0 });
         }
         out
     }
@@ -192,6 +246,15 @@ pub fn env_hook(sim: &mut WgpuSim) -> bool {
             eprintln!("kernel replay at step {}: {e:#}", sim.steps_done);
             false
         }
+    }
+}
+
+impl ReplayedDispatch {
+    /// No workgroups (an indirect dispatch whose count was zero): its isolated time is the
+    /// cost of an empty pass on its own, not the kernel's (on wgpu-on-Metal that can be
+    /// milliseconds where the same dispatch in sequence takes a microsecond).
+    pub fn empty(&self) -> bool {
+        self.workgroups.iter().product::<u32>() == 0
     }
 }
 
@@ -471,6 +534,7 @@ impl WgpuSim {
             v
         };
         let mut phase_samples: Vec<Vec<f64>> = vec![Vec::new(); phases.len()];
+        let mut gap_samples: Vec<Vec<f64>> = vec![Vec::new(); phases.len()];
         let mut in_seq: Vec<Vec<f64>> = vec![Vec::new(); items.len()];
         for shape in 0..3u32 {
             for r in 0..=reps {
@@ -526,8 +590,8 @@ impl WgpuSim {
                         report.phases_sum_ms.push(sum);
                         report.phases_span_ms.push(span);
                         for (i, &x) in t.iter().enumerate() {
-                            let from = if i == 0 { x.0 } else { t[i - 1].1 };
-                            phase_samples[i].push(timer.ms((from, x.1)));
+                            phase_samples[i].push(timer.ms(x));
+                            gap_samples[i].push(if i == 0 { 0.0 } else { timer.ms((t[i - 1].1, x.0)) });
                         }
                     }
                     _ => {
@@ -544,6 +608,7 @@ impl WgpuSim {
             }
         }
         report.phases = phases.iter().zip(&phase_samples).map(|(p, s)| (p.to_string(), median(s))).collect();
+        report.phase_gaps_ms = gap_samples.iter().map(|s| median(s)).collect();
 
         // Indirect workgroup counts as each dispatch sees them, and 4. the isolated replay.
         let args = device.create_buffer(&wgpu::BufferDescriptor {

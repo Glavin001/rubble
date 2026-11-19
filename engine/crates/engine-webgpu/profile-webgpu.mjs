@@ -49,7 +49,12 @@ const server = createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   const path = normalize(join(ROOT, p));
   if (!path.startsWith(ROOT) || !existsSync(path) || statSync(path).isDirectory()) { res.writeHead(404).end(); return; }
-  res.writeHead(200, { 'content-type': TYPES[extname(path)] || 'application/octet-stream', 'cache-control': 'no-store' });
+  // Cross-origin isolated (COOP + COEP): performance.now() at 5 µs instead of 100 µs, so
+  // host spans are measurable. Every asset is same-origin; set COEP=credentialless if a
+  // page ever loads a cross-origin one.
+  res.writeHead(200, { 'content-type': TYPES[extname(path)] || 'application/octet-stream', 'cache-control': 'no-store',
+    'cross-origin-opener-policy': 'same-origin', 'cross-origin-embedder-policy': process.env.COEP || 'require-corp',
+    'cross-origin-resource-policy': 'same-origin' });
   res.end(readFileSync(realpathSync(path)));
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -122,6 +127,14 @@ const adapter = await evaluate(`(async () => { const a = await navigator.gpu.req
   const i = a.info || {}; return { vendor: i.vendor, architecture: i.architecture, description: i.description,
   features: [...a.features].sort(), userAgent: navigator.userAgent, jspi: 'Suspending' in WebAssembly }; })()`);
 
+// Timer resolution: without cross-origin isolation Chrome rounds performance.now() to 0.1 ms
+// and every host span reads 0.0 or 0.1. Measured, and refused unless isolated.
+const timer = await evaluate(`(() => { const d = new Set(); let a = performance.now();
+  for (let i = 0; i < 200000 && d.size < 50; i++) { const b = performance.now(); if (b > a) { d.add(+(b - a).toFixed(4)); a = b; } }
+  return { crossOriginIsolated: self.crossOriginIsolated, resolutionMs: Math.min(...d) }; })()`);
+console.log(`  crossOriginIsolated ${timer.crossOriginIsolated}, performance.now() resolution ${timer.resolutionMs} ms`);
+if (!timer.crossOriginIsolated && !args.includes('--allow-coarse-timer')) throw new Error('the page is not cross-origin isolated: performance.now() is 0.1 ms coarse (COOP/COEP headers missing)');
+
 // Visibility and the rAF rate, before anything is measured.
 const raf = await evaluate(`new Promise((done) => { let n = 0; const t0 = performance.now();
   const f = () => { n++; if (performance.now() - t0 < 1000) requestAnimationFrame(f); else done({ hz: n * 1000 / (performance.now() - t0), visibility: document.visibilityState }); };
@@ -167,7 +180,7 @@ if (REPLAY > 0) {
 const pageState = await evaluate('JSON.stringify(window.__state?.() ?? null)').then((s) => JSON.parse(s)).catch(() => null);
 
 const result = {
-  name: NAME, page: PAGE, query: QUERY, at: new Date().toISOString(), readyS, raf, adapter,
+  name: NAME, page: PAGE, query: QUERY, at: new Date().toISOString(), readyS, raf, timer, adapter,
   flags: { labels: args.includes('--labels'), warmS: WARM, secs: SECS, traceS: TRACE },
   summary, trace: traceTable, replay, pageErrors: pageErrors.slice(0, 20), pageState,
 };
@@ -186,8 +199,9 @@ function analyzeTrace(trace) {
     if (e.name === 'process_name') pname.set(e.pid, e.args?.name);
     if (e.name === 'thread_name') tname.set(`${e.pid}:${e.tid}`, e.args?.name);
   }
-  const ts = ev.filter((e) => e.ts).map((e) => e.ts);
-  const spanUs = ts.length ? Math.max(...ts) - Math.min(...ts) : 1;
+  let lo = Infinity, hi = -Infinity;
+  for (const e of ev) if (e.ts) { if (e.ts < lo) lo = e.ts; if (e.ts > hi) hi = e.ts; }
+  const spanUs = hi > lo ? hi - lo : 1;
   const per = new Map(); const open = new Map();
   const add = (e, dur) => {
     const key = `${pname.get(e.pid) || e.pid} / ${tname.get(`${e.pid}:${e.tid}`) || e.tid}`;
@@ -214,6 +228,7 @@ function textTable(r) {
   const L = [];
   L.push(`${r.name}: ${r.page}?${r.query}`);
   L.push(`  ${r.adapter.description || r.adapter.vendor} · ${r.raf.visibility} · rAF ${s.rafHz.toFixed(1)} Hz · ${s.frames} frames in ${s.seconds.toFixed(1)} s · ${s.stepsTimed} GPU-timed steps`);
+  L.push(`  host timer: crossOriginIsolated ${r.timer.crossOriginIsolated}, resolution ${r.timer.resolutionMs} ms`);
   L.push(`  timestamp features: ${r.adapter.features.filter((x) => x.includes('timestamp')).join(', ') || 'none'}`);
   L.push('  per display frame (ms)            median      p90      max');
   const row = (k, v) => L.push(`    ${k.padEnd(32)} ${f(v.median).padStart(7)} ${f(v.p90).padStart(8)} ${f(v.max).padStart(8)}`);

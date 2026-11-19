@@ -110,7 +110,7 @@ export function attachProfiler(getWorld, opts = {}) {
       const hostTop = (f) => (f.host['world.step'] || 0) + (f.host['world.poll'] || 0);
       return {
         frames: fr.length, seconds: span, rafHz: span ? fr.length / span : 0, stepsTimed: steps,
-        visibility: document.visibilityState,
+        visibility: document.visibilityState, crossOriginIsolated: self.crossOriginIsolated,
         frameDt: stat(fr.map((f) => f.dt)),
         js: stat(fr.map((f) => f.js)),
         jsOther: stat(fr.map((f) => Math.max(0, f.js - hostTop(f) - Object.values(f.page).reduce((a, b) => a + b, 0)))),
@@ -190,6 +190,7 @@ function panel(prof, parent) {
   function render() {
     const s = prof.summary();
     const rows = [
+      self.crossOriginIsolated ? '' : 'not cross-origin isolated: performance.now() is 0.1 ms coarse (serve with COOP/COEP)',
       `frames ${s.frames} · rAF ${s.rafHz.toFixed(0)} Hz · ${s.visibility} · dt ${f2(s.frameDt.median)} ms`,
       `JS per frame ${f2(s.js.median)} ms (p90 ${f2(s.js.p90)}) · other JS ${f2(s.jsOther.median)}`,
       s.suspendedMs.median > 0 ? `suspended on GPU waits ${f2(s.suspendedMs.median)} ms` : '',
