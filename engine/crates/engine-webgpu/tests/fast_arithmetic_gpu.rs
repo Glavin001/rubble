@@ -6,12 +6,15 @@
 //! bits, so "the same within a tolerance" needs a yardstick that is not chosen by hand.
 //!
 //! The yardstick: the bit-exact kernel (the CPU reference bit for bit:
-//! `explicit_beams_gpu.rs`, `explicit_beams_bitwise.rs`) run twice, once as spawned and
-//! once with every node's velocity moved by one unit in the last place (what another
-//! machine's rounding does to a state). How far those two runs end apart is the scene's
-//! own sensitivity to last bits. The fast setting must end no farther from the
-//! bit-exact run than SPREAD_FACTOR times that, with a small absolute floor (a scene
-//! that amplifies nothing still rounds differently). Per scene and run, physical
+//! `explicit_beams_gpu.rs`, `explicit_beams_bitwise.rs`) run as spawned and from
+//! spawn states no one could tell apart ([`nudged`]): every node's velocity one unit in
+//! the last place up or down (what another machine's rounding does to a state once), and
+//! the spawn speed 1e-5 larger or smaller (0.1 mm/s at 36 km/h: far below any
+//! measurement of a crash's start; the fast setting rounds differently at every
+//! operation of every step, a larger perturbation than one last bit once). How far those
+//! runs end from the bit-exact one is the scene's own spread. The fast setting must end
+//! no farther than SPREAD_FACTOR times the largest of them, with a small absolute floor
+//! (a scene that amplifies nothing still rounds differently). Per scene and run, physical
 //! invariants too:
 //! - every position finite;
 //! - the mechanical energy (kinetic plus gravity's potential) never above its start by
@@ -42,7 +45,7 @@ const FLOOR_BROKEN: usize = 2;
 const ENERGY_SLACK: f64 = 0.01;
 const SPAWN_SLACK_M: f64 = 0.02;
 /// The yardstick's last-bit changes of the spawn state ([`nudged`]).
-const NUDGES: u32 = 3;
+const NUDGES: u32 = 4;
 const GRAVITY: f64 = 9.807;
 
 fn sedan() -> String {
@@ -80,8 +83,9 @@ fn front(sim: &ExplicitBeams) -> f32 {
     sim.nodes.iter().map(|n| -n.pos.x).fold(f32::MIN, f32::max)
 }
 
-/// Last-bit changes of the spawn state (the yardstick's runs): k 0 every node's velocity
-/// one unit in the last place up, k 1 down, k 2 every position up.
+/// Changes of the spawn state no one could tell apart (the yardstick's runs): k 0 every
+/// node's velocity one unit in the last place up, k 1 down, k 2 every velocity times
+/// 1 + 1e-5, k 3 times 1 - 1e-5.
 fn nudged(fleet: &[ExplicitBeams], k: u32) -> Vec<ExplicitBeams> {
     let up = |x: f32| {
         if x == 0.0 {
@@ -110,7 +114,8 @@ fn nudged(fleet: &[ExplicitBeams], k: u32) -> Vec<ExplicitBeams> {
                 match k {
                     0 => n.vel = f(n.vel, &up),
                     1 => n.vel = f(n.vel, &down),
-                    _ => n.pos = f(n.pos, &up),
+                    2 => n.vel *= 1.0 + 1e-5,
+                    _ => n.vel *= 1.0 - 1e-5,
                 }
             }
             s

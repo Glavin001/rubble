@@ -20,8 +20,10 @@ bit; 0 runs them in the fast setting).
 
 The switch `bitexact` is bit-exact results themselves (on: strict arithmetic; off: the
 fast setting). Its two sides are not bit for bit by design, so its rows are judged by
-tolerance instead (TOL_MM, default 1.0: the largest node distance between the sides
-after the frames; TOL_BROKEN, default 2: the broken beams' difference; every position
+tolerance instead (TOL_MM, default 1000: the largest node distance between the sides
+after the frames, a blow-up detector only: a crash amplifies last bits to centimetres and
+a torn piece to decimetres within 10 frames; TOL_BROKEN, default 2, plus 1 % of the
+broken beams: their difference; every position
 finite), and a row fails as slower when the fast side (off) is slower than the strict one.
 The tolerances come from the fast setting's own spread: vehicle-perf-first-principles.md
 §8.38.
@@ -48,7 +50,7 @@ RETRIES = int(os.environ.get("RETRIES", "2"))
 THRESHOLD = float(os.environ.get("THRESHOLD", "5"))
 NOISE_MS = float(os.environ.get("NOISE_MS", "0.05"))
 BIT_EXACT = os.environ.get("BIT_EXACT", "1")
-TOL_MM = float(os.environ.get("TOL_MM", "1.0"))
+TOL_MM = float(os.environ.get("TOL_MM", "1000"))
 TOL_BROKEN = int(os.environ.get("TOL_BROKEN", "2"))
 PHYSICAL = re.compile(r"A/B physical: largest node difference ([\d.]+) mm .*broken beams on (\d+) / off (\d+); "
                       r"kinetic energy on ([\d.]+) / off ([\d.]+) J; finite (true|false)")
@@ -156,7 +158,7 @@ def replay(row, switch):
     if phys:
         mm, b_on, b_off, finite = float(phys.group(1)), int(phys.group(2)), int(phys.group(3)), phys.group(6) == "true"
         tol = {"mm": mm, "broken": (b_on, b_off), "ke": (float(phys.group(4)), float(phys.group(5))),
-               "pass": finite and mm <= TOL_MM and abs(b_on - b_off) <= TOL_BROKEN}
+               "pass": finite and mm <= TOL_MM and abs(b_on - b_off) <= TOL_BROKEN + b_on // 100}
     if switch == "bitexact":
         # (Not bit for bit by design: the tolerance decides.)
         bfb = tol is not None and tol["pass"]
@@ -184,7 +186,7 @@ def main():
         print(f"{'row':<8} {'bodies':>6} {'ms/frame':>9} {'target':>7} {'':>6} {'run s':>5}  what")
     else:
         if switch == "bitexact":
-            print(f"(bitexact: 'on' is bit-exact, 'off' the fast setting; 'bit4bit' is the tolerance verdict: <= {TOL_MM:g} mm, <= {TOL_BROKEN} broken beams' difference, finite)")
+            print(f"(bitexact: 'on' is bit-exact, 'off' the fast setting; 'bit4bit' is the tolerance verdict: <= {TOL_MM:g} mm, <= {TOL_BROKEN} + 1 % broken beams' difference, finite; the scene-calibrated tolerance is tests/fast_arithmetic_gpu.rs)")
         print(f"scenario matrix: --ab-switch {switch} ({ROUNDS} x {FRAMES} frames of 34 steps each way in turn, each frame's best round, mean ms a frame; slower fails past {THRESHOLD:g} % and {NOISE_MS:g} ms)")
         print(f"{'row':<8} {'bit4bit':>7} {'on ms':>8} {'off ms':>8} {'delta':>8}  {'':<6} {'run s':>5}  what")
     for row in rows:
