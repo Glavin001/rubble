@@ -949,7 +949,11 @@ kernel void floorFrame(
         BAR;
         const uint ncon = atomic_load_explicit(&tgCount[3], memory_order_relaxed);
 #ifdef EMU_TRACE
+#if RIGID
+        if (lid == 0u) fprintf(stderr, "T car %u step %u: ground/box/proxy contact nodes %u, flags roll %d hits %d shift %d, active shapes %u\n", car, step, ncon, (int)fRoll, (int)fHits, (int)fShift, popcount(act0) + popcount(act1));
+#else
         if (lid == 0u) fprintf(stderr, "T car %u step %u: ground/box/proxy contact nodes %u, flags roll %d hits %d shift %d\n", car, step, ncon, (int)fRoll, (int)fHits, (int)fShift);
+#endif
 #endif
         if (ncon != 0u)
         {
@@ -958,7 +962,8 @@ kernel void floorFrame(
             // begin_step), a lane a node; the shapes a node is inside kept as bits for its
             // rule.
             uint cm0 = 0u, cm1 = 0u;
-            if ((act0 | act1) != 0u)
+            // (SKIP(28), timing only: the listed nodes test no shape.)
+            if ((act0 | act1) != 0u && !SKIP(28))
             {
                 if (lid < min(ncon, (uint)NN))
                 {
@@ -2545,6 +2550,9 @@ kernel void floorFrame(
                         // Stage B: a task's candidates within the tie of the pair's least gap,
                         // each walked again alone (the pair's second pass: its sum is the
                         // candidate) and recorded with its place in the walk.
+                        // (Its kept candidates one after another, whichever they are: a loop
+                        // over the six with the others skipped runs the walk six times a warp,
+                        // each lane's turn being a different one.)
                         #define SURF_TASK_B(isT_, t_, base_) { \
                             const uint tw_ = surfTaskL[(base_) + (t_)]; \
                             const uint hh_ = tw_ & 0xFFFFu, ed_ = tw_ >> 16; \
@@ -2555,9 +2563,10 @@ kernel void floorFrame(
                                 SURF_PAIR(isT_, hh_) \
                                 float3 e0 = float3(0.0f, 0.0f, 0.0f), e1 = e0; \
                                 if (ed_ < 12u) fqWalkEdge(fs, ed_, e0, e1); \
-                                for (uint i_ = 0u; i_ < 6u; i_++) { \
-                                    const float gi_ = i_ < 4u ? gA_[i_] : gB_[i_ - 4u]; \
-                                    if (!(gi_ <= nf(GX_ + FQ_TIE))) continue; \
+                                uint km_ = 0u; \
+                                for (uint i_ = 0u; i_ < 6u; i_++) km_ |= ((i_ < 4u ? gA_[i_] : gB_[i_ - 4u]) <= nf(GX_ + FQ_TIE)) ? 1u << i_ : 0u; \
+                                for (; km_ != 0u; km_ &= km_ - 1u) { \
+                                    const uint i_ = ctz(km_); \
                                     FqAcc a = fqAccNew(); \
                                     a.gx = GX_; a.pass = 1u; a.ilo = i_; a.ihi = i_ + 1u; \
                                     surfCand(isT_, fs, e0, e1, x0, x1, x2, ed_, a); \
@@ -2877,16 +2886,21 @@ kernel void floorFrame(
 #endif
 #if RIGID
         // ---- the proxies integrate the step's reactions (end_step) ----
-        if (lid < NB && !SKIP(13))
+        // (SKIP(27), timing only: no proxy integrates.)
+        if (lid < NB && !SKIP(13) && !SKIP(27))
         {
             device float4* bd = rigBody + lid * BDW;
             V3 bpos = v3(bd[0]), bvel = v3(bd[2]), bang = v3(bd[3]);
             float4 brot = bd[1];
             V3 force = v3(0, 0, 0), torque = v3(0, 0, 0);
-            for (uint k = 0; k < NSH; k++)
+            // (A body's shapes from its own list, in shape order: a scan of every shape for the
+            // body's own made each lane's turn a different iteration, and the warp then ran
+            // the shape's part once a body in series: 1.0 ms a frame with 24 bodies.)
+            const uint bw = tab[T_BSH + lid];
+            for (uint j = 0; j < (bw >> 16); j++)
             {
+                const uint k = tab[T_BSH + NB + (bw & 0xFFFFu) + j];
                 device float4* sh = rigShape + k * SHW;
-                if (as_type<uint>(sh[0].x) != lid) continue;
                 V3 f = v3(float(atomic_exchange_explicit(&rigSum[k * 6], 0, memory_order_relaxed)) / 32.0f, float(atomic_exchange_explicit(&rigSum[k * 6 + 1], 0, memory_order_relaxed)) / 32.0f, float(atomic_exchange_explicit(&rigSum[k * 6 + 2], 0, memory_order_relaxed)) / 32.0f);
                 V3 m = v3(float(atomic_exchange_explicit(&rigSum[k * 6 + 3], 0, memory_order_relaxed)) / 32.0f, float(atomic_exchange_explicit(&rigSum[k * 6 + 4], 0, memory_order_relaxed)) / 32.0f, float(atomic_exchange_explicit(&rigSum[k * 6 + 5], 0, memory_order_relaxed)) / 32.0f);
                 sh[3] = f4(v3(sh[3]) + f * H, 0);

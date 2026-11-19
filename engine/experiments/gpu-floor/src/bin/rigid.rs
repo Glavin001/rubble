@@ -96,7 +96,7 @@ fn main() -> anyhow::Result<()> {
             // --profile F: where frame F + 1's time goes (the shapes' tests are inside the
             // node pass: its cost with and without them).
             f.cars = 1;
-            let mut groups = vec![("S0 node pass, no shapes", 1u32 << 0), ("rigid shapes and proxies", 1 << 13)];
+            let mut groups = vec![("S0 node pass, no shapes", 1u32 << 0), ("rigid: nodes in the union listed", 1 << 13), ("rigid: listed nodes' shapes, rule", 1 << 28), ("rigid: proxies integrate", 1 << 27)];
             groups.extend_from_slice(&GROUPS[1..]);
             if c.surface_contact {
                 groups.extend_from_slice(&[("surface: near slots, search", 1 << 21), ("surface: cull, tasks, direct tests", 1 << 22), ("surface: A, an edge's least gap", 1 << 24), ("surface: B, kept candidates", 1 << 25), ("surface: R, a pair's contact", 1 << 26), ("surface: slots, hits applied", 1 << 23)]);

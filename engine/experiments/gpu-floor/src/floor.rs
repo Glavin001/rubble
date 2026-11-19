@@ -1489,6 +1489,22 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
         tab.extend_from_slice(&[b.a | b.b << 16, j]);
     }
     tab.extend_from_slice(&[0; 4]);
+    // Each proxy body's shapes (the kernel's end_step): a word a body (first entry, count
+    // << 16), then the shapes' indices by body, in shape order.
+    let t_bsh = tab.len();
+    if let Some(r) = s.rigid.as_ref() {
+        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); r.bodies.len()];
+        for (k, sh) in r.shapes.iter().enumerate() {
+            lists[sh.body as usize].push(k as u32);
+        }
+        let mut at = 0u32;
+        for l in &lists {
+            tab.push(at | (l.len() as u32) << 16);
+            at += l.len() as u32;
+        }
+        tab.extend(lists.iter().flatten());
+    }
+    tab.extend_from_slice(&[0; 4]);
     let mut o = V2Off::default();
     let mut at = 0usize;
     let mut take = |words: usize| {
@@ -1566,7 +1582,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n#define OWN {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig, st.own as u32) + &format!(
-        "#define SURF {}\n#define NSS {}u\n#define NSEG {}u\n#define T_SEG {t_seg}u\n#define O_SURF {}u\n", st.surface as u32, nss.max(1), segs.len(), o.surf
+        "#define SURF {}\n#define NSS {}u\n#define NSEG {}u\n#define T_SEG {t_seg}u\n#define T_BSH {t_bsh}u\n#define O_SURF {}u\n", st.surface as u32, nss.max(1), segs.len(), o.surf
     ) + &format!(
         "#define O_HMAP {}\n#define O_XMAP {}\n#define O_XCLB {x_clb}\n#define LIST2 {}\n#define LIST_REACH_OUT as_type<float>({}u)\n#define O_PAIRSO {}\n#define O_PBUILDO {}\n#define O_TOUCH {o_touch}\n#define O_XPUB {x_pub}\n#define O_XSTG {x_stg}\n#define O_XSPL {x_spl}\n#define O_XTRI {x_tri}\n#define O_XTC {x_tc}\n#define O_XCND {x_cnd}\n#define XCND_CAP {xcnd_cap}u\n#define O_XHIT {x_hit}\n",
         o.hmap, o.xmap, list2 as u32, st.list_reach_out.to_bits(), o.pairs_out, o.pbuild_out
