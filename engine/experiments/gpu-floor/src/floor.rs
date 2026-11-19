@@ -903,7 +903,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
                 _ => {
                     anyhow::ensure!(scalar(b.kind) && gidx[j] != NONE, "record {j}: no slot");
                     let other = if q == 0 { b.b } else { b.a };
-                    other * 3 | gidx[j] << 11
+                    other | gidx[j] << 11
                 }
             };
             ents[n as usize].push(e);

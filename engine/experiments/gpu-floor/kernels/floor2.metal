@@ -39,16 +39,34 @@ struct Params
 #endif
 #define HOTS(s) hot[lid * 6 + (s)]
 #define BAR threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)
+// TGVEC: a node's position (velocity, a vector slot) as one three-float element of
+// threadgroup memory: one address and one load in place of three.
+#ifndef TGVEC
+#define TGVEC 1
+#endif
+#if TGVEC
+inline V3 v3p(packed_float3 a) { return v3(a.x, a.y, a.z); }
+#define TGP(i) v3p(tgPos[i])
+#define TGV(i) v3p(tgVel[i])
+#define GETV(vi) v3p(tgVec[vi])
+#define SETP(i, val) { V3 _v = (val); tgPos[i] = packed_float3(_v.x, _v.y, _v.z); }
+#define SETV(i, val) { V3 _v = (val); tgVel[i] = packed_float3(_v.x, _v.y, _v.z); }
+#define PUTV(vi, val) { V3 _v = (val); tgVec[vi] = packed_float3(_v.x, _v.y, _v.z); }
+#else
 #define TGP(i) v3(tgPos[(i) * 3], tgPos[(i) * 3 + 1], tgPos[(i) * 3 + 2])
 #define TGV(i) v3(tgVel[(i) * 3], tgVel[(i) * 3 + 1], tgVel[(i) * 3 + 2])
+#define GETV(vi) v3(tgVec[(vi) * 3], tgVec[(vi) * 3 + 1], tgVec[(vi) * 3 + 2])
+#define SETP(i, val) { V3 _v = (val); tgPos[(i) * 3] = _v.x; tgPos[(i) * 3 + 1] = _v.y; tgPos[(i) * 3 + 2] = _v.z; }
+#define SETV(i, val) { V3 _v = (val); tgVel[(i) * 3] = _v.x; tgVel[(i) * 3 + 1] = _v.y; tgVel[(i) * 3 + 2] = _v.z; }
 #define PUTV(vi, val) { V3 _v = (val); tgVec[(vi) * 3] = _v.x; tgVec[(vi) * 3 + 1] = _v.y; tgVec[(vi) * 3 + 2] = _v.z; }
-// Slot word of a two-node beam: 3·a (11 bits), 3·b (11), alive (bit 22), slope on (23),
+#endif
+// Slot word of a two-node beam: a (11 bits), b (11), alive (bit 22), slope on (23),
 // deform asked (24), class (30..31). Of an aero triangle: its three nodes, 10 bits each.
 #define W_ALIVE (1u << 22)
 #define W_SLOPE (1u << 23)
 #define W_DEFORM (1u << 24)
-#define TG3P(o) v3(tgPos[o], tgPos[(o) + 1u], tgPos[(o) + 2u])
-#define TG3V(o) v3(tgVel[o], tgVel[(o) + 1u], tgVel[(o) + 2u])
+#define TG3P(o) TGP(o)
+#define TG3V(o) TGV(o)
 #define ENT_ADD(acc, e) { uint o3_ = (e) & 2047u; acc = acc + (Ps - TG3P(o3_)) * tgG[(e) >> 11]; }
 #define C_PLAIN 0u
 #define C_SUPPORT 1u
@@ -133,10 +151,16 @@ kernel void floorFrame(
     uint lid [[thread_position_in_threadgroup]],
     uint car [[threadgroup_position_in_grid]])
 {
+#if TGVEC
+    threadgroup packed_float3 tgPos[NN];
+    threadgroup packed_float3 tgVel[NN];
+    threadgroup packed_float3 tgVec[NV];
+#else
     threadgroup float tgPos[NN * 3];
     threadgroup float tgVel[NN * 3];
-    threadgroup float tgG[NGS];
     threadgroup float tgVec[NV * 3];
+#endif
+    threadgroup float tgG[NGS];
     threadgroup uchar tgHeld[NN];
     threadgroup atomic_uint tgCount[4]; // [0] the fastest node (bits), [2] hits
     threadgroup uint tgFlags[TG_FLAGS];
@@ -181,8 +205,8 @@ kernel void floorFrame(
     if (isNode)
     {
         float4 p = nodeState[ni * 3], v = nodeState[ni * 3 + 1];
-        tgPos[ni * 3] = p.x; tgPos[ni * 3 + 1] = p.y; tgPos[ni * 3 + 2] = p.z;
-        tgVel[ni * 3] = v.x; tgVel[ni * 3 + 1] = v.y; tgVel[ni * 3 + 2] = v.z;
+        SETP(ni, v3(p));
+        SETV(ni, v3(v));
         tgHeld[ni] = (atomic_load_explicit(&clip[ni * 4], memory_order_relaxed) != CLIP_EMPTY) ? 1 : 0;
     }
     // The slots' hot words: from the image the last dispatch left (six streamed loads), or
@@ -234,7 +258,7 @@ kernel void floorFrame(
         float4 st0 = recState[r * 3], st1 = recState[r * 3 + 1], ax = recState[r * 3 + 2];
         if (kind == K_JPLAIN || kind == K_JSUPPORT)
         {
-            w0[s] = a.x * 3u | (a.y * 3u) << 11 | (st1.w == 0.0f ? W_ALIVE : 0u) | (st1.z != 0.0f ? W_SLOPE : 0u) | (kind == K_JSUPPORT ? C_SUPPORT : C_PLAIN) << 30;
+            w0[s] = a.x | a.y << 11 | (st1.w == 0.0f ? W_ALIVE : 0u) | (st1.z != 0.0f ? W_SLOPE : 0u) | (kind == K_JSUPPORT ? C_SUPPORT : C_PLAIN) << 30;
             float4 kc = recK[r];
             hs = float4(kc.x, kc.y, st0.x, ax.x);
             if (st1.w == 0.0f)
@@ -384,8 +408,8 @@ kernel void floorFrame(
                 if (fShift) P0 = P0 + dshift;
                 if (lift != 0.0f) P0.y = P0.y + lift;
             }
-            tgPos[ni * 3] = P0.x; tgPos[ni * 3 + 1] = P0.y; tgPos[ni * 3 + 2] = P0.z;
-            tgVel[ni * 3] = V0.x; tgVel[ni * 3 + 1] = V0.y; tgVel[ni * 3 + 2] = V0.z;
+            SETP(ni, P0);
+            SETV(ni, V0);
         }
         if (lid == 0) atomic_store_explicit(&tgCount[0], 0u, memory_order_relaxed);
         if (lid == 2) atomic_store_explicit(&tgCount[2], 0u, memory_order_relaxed);
@@ -495,12 +519,12 @@ kernel void floorFrame(
                 if ((e >> 31) == 0u)
                 {
                     uint o3 = e & 2047u;
-                    c = c + (Ps - v3(tgPos[o3], tgPos[o3 + 1u], tgPos[o3 + 2u])) * tgG[e >> 11];
+                    c = c + (Ps - TGP(o3)) * tgG[e >> 11];
                 }
                 else if ((e & (1u << 29)) == 0u)
                 {
                     uint vi = e & 0xFFFu;
-                    V3 vv = v3(tgVec[vi * 3], tgVec[vi * 3 + 1], tgVec[vi * 3 + 2]);
+                    V3 vv = GETV(vi);
                     c = c + ((e & (1u << 30)) != 0u ? -vv : vv);
                 }
             }
@@ -519,8 +543,8 @@ kernel void floorFrame(
         // ---- C2: published ----
         if (isNode && !SKIP(2))
         {
-            tgPos[ni * 3] = Pn.x; tgPos[ni * 3 + 1] = Pn.y; tgPos[ni * 3 + 2] = Pn.z;
-            tgVel[ni * 3] = Vn.x; tgVel[ni * 3 + 1] = Vn.y; tgVel[ni * 3 + 2] = Vn.z;
+            SETP(ni, Pn);
+            SETV(ni, Vn);
         }
         BAR;
 
@@ -798,12 +822,12 @@ kernel void floorFrame(
                 if ((e >> 31) == 0u)
                 {
                     uint o3 = e & 2047u;
-                    f = f + (Ps - v3(tgPos[o3], tgPos[o3 + 1u], tgPos[o3 + 2u])) * tgG[e >> 11];
+                    f = f + (Ps - TGP(o3)) * tgG[e >> 11];
                 }
                 else
                 {
                     uint vi = e & 0xFFFu;
-                    V3 vv = v3(tgVec[vi * 3], tgVec[vi * 3 + 1], tgVec[vi * 3 + 2]);
+                    V3 vv = GETV(vi);
                     f = f + ((e & (1u << 30)) != 0u ? -vv : vv);
                 }
             }

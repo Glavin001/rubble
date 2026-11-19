@@ -60,6 +60,9 @@ fn main() -> anyhow::Result<()> {
         if let Some(m) = arg("--regmode") {
             extra += &format!("#define REGMODE {m}\n");
         }
+        if flag("--no-tgvec") {
+            extra += "#define TGVEC 0\n";
+        }
         if flag("--no-hoist") {
             extra += "#define HOIST 0\n";
         }
@@ -131,6 +134,9 @@ fn main() -> anyhow::Result<()> {
     // --regmode N (second layout): which slot words stay in registers (0 all, 1 default, 2 fewest).
     if let Some(m) = arg("--regmode") {
         extra += &format!("#define REGMODE {m}\n");
+    }
+    if flag("--no-tgvec") {
+        extra += "#define TGVEC 0\n";
     }
     let extra = extra.as_str();
     let mut f = Floor::new(gpu, l, &st, cars.max(2), fast, extra)?;
