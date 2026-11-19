@@ -171,3 +171,95 @@ fn a_wheel_on_a_crate_pushes_it_and_momentum_is_conserved() {
     // Momentum: the exchange is car_fw * m; closed to well under 1 % of it.
     assert!((p1 - p0).length() < 0.005 * car_fw * m, "momentum {p0} -> {p1}");
 }
+
+/// A soft flatbed vehicle (no wheels): a 6 × 6 m two-layer node lattice 0.8 m deep,
+/// 2 t, its top face collision triangles, lying on its own ground at y = 0 centred at
+/// (`cx`, `cz`).
+fn flatbed(cx: f32, cz: f32) -> ExplicitBeams {
+    let n = 13;
+    let id = |i: usize, j: usize, k: usize| (j * n + k) * n + i;
+    let mut text = String::from("flatbed\n\nglobals\n2000, 0, tracks/semi\n\nminimass\n4\n\nset_beam_defaults 200000, 400, 400000, 4000000\n\nnodes\n");
+    for j in 0..2 {
+        for k in 0..n {
+            for i in 0..n {
+                text += &format!("{}, {}, {}, {}, n\n", id(i, j, k), cx - 3.0 + 0.5 * i as f32, 0.8 * j as f32, cz - 3.0 + 0.5 * k as f32);
+            }
+        }
+    }
+    text += "\nbeams\n";
+    for j in 0..2usize {
+        for k in 0..n {
+            for i in 0..n {
+                for (di, dj, dk) in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 0, -1), (1, 1, 0), (0, 1, 1), (1, -1, 0), (0, -1, 1)] {
+                    let (i2, j2, k2) = (i as i32 + di, j as i32 + dj, k as i32 + dk);
+                    if (0..n as i32).contains(&i2) && (0..2).contains(&j2) && (0..n as i32).contains(&k2) {
+                        text += &format!("{}, {}\n", id(i, j, k), id(i2 as usize, j2 as usize, k2 as usize));
+                    }
+                }
+            }
+        }
+    }
+    text += "\nsubmesh\ncab\n";
+    for k in 0..n - 1 {
+        for i in 0..n - 1 {
+            let (a, b, c, d) = (id(i, 1, k), id(i + 1, 1, k), id(i + 1, 1, k + 1), id(i, 1, k + 1));
+            text += &format!("{a}, {c}, {b}, c\n{a}, {d}, {c}, c\n");
+        }
+    }
+    text += "\nend\n";
+    let mut s = ExplicitBeams::from_truck(&text, Vec3::ZERO, Vec3::ZERO, settings()).expect("flatbed");
+    s.ground = 0.0;
+    s.fixed_contact = true;
+    s.finish();
+    s
+}
+
+/// A raycast sedan (A) dropped onto a soft flatbed vehicle (B) in a world with vehicle
+/// contact. Settled 1.5 s, then A at full throttle for 3 s. Returns (A's wheels in
+/// contact after settling, A's wheel load over its weight, how far B's top sank under A
+/// against B alone (m), A's travel along its forward relative to B (m)).
+fn car_on_car(see: bool) -> (usize, f32, f32, f32) {
+    use engine_softbody::explicit_contact::ExplicitBeamsWorld;
+    let mut a = car(0.95, Some(0.0), see);
+    a.fixed_contact = true;
+    let fw = forward(&a);
+    let (xa, _, ma) = com(&a);
+    let b = flatbed(xa.x, xa.z);
+    let top = |b: &ExplicitBeams| {
+        let t: Vec<f32> = b.nodes.iter().map(|n| b.origin.y + n.pos.y).filter(|&y| y > 0.4).collect();
+        t.iter().sum::<f32>() / t.len() as f32
+    };
+    let mut alone = b.clone();
+    alone.run(1.5);
+    let mut w = ExplicitBeamsWorld::new(vec![a, b]);
+    for _ in 0..90 {
+        w.frame_60();
+    }
+    let g = 9.807;
+    let d = w.vehicles[0].drive.as_ref().unwrap();
+    let contact = d.wheels.iter().filter(|s| s.contact).count();
+    let la = d.wheels.iter().map(|s| s.load).sum::<f32>() / (ma * g);
+    let sank = top(&alone) - top(&w.vehicles[1]);
+    let rel = |w: &ExplicitBeamsWorld| com(&w.vehicles[0]).0 - com(&w.vehicles[1]).0;
+    let r0 = rel(&w);
+    w.vehicles[0].drive.as_mut().unwrap().input = THROTTLE;
+    for _ in 0..180 {
+        w.frame_60();
+    }
+    let went = (rel(&w) - r0).dot(fw);
+    eprintln!("car on a vehicle, see {see}: A's wheels in contact {contact}, A load/weight {la:.3}, B's top sank {:.1} mm, A went {went:.2} m", sank * 1e3);
+    (contact, la, sank, went)
+}
+
+#[test]
+fn a_car_on_another_vehicle_drives_and_weighs_on_it() {
+    let (contact, la, sank, went) = car_on_car(true);
+    assert!(contact == 4, "A stands on its four wheels on B ({contact} in contact)");
+    // A's weight goes through its wheels into B's triangles' nodes.
+    assert!((la - 1.0).abs() < 0.1, "A's wheels carry its weight: {la}");
+    assert!(sank > 1.0e-4, "B's top sank under A's weight: {sank} m");
+    assert!(went > 2.5, "A drove on B: {went} m");
+    let (c0, _, _, stuck) = car_on_car(false);
+    assert_eq!(c0, 0, "without the setting A's wheels hang");
+    assert!(stuck.abs() < 0.5, "without the setting A cannot drive: {stuck} m");
+}

@@ -190,6 +190,44 @@ pub struct Drive {
     pub wheels: Vec<WheelState>,
     /// The vehicle's forward speed at the last step (m/s).
     pub speed: f32,
+    /// [`DriveConfig::see_bodies`] in a world of vehicles
+    /// ([`crate::explicit_contact::ExplicitBeamsWorld`]): the other vehicles' collision
+    /// triangles as they stand at this step's start, and this vehicle's index among them
+    /// (the world sets them before each step; None: none).
+    pub partners: Option<std::sync::Arc<PartnerScene>>,
+    pub owner: u32,
+    /// The reactions of this step's wheels on other vehicles' triangles, for the world to
+    /// apply after the step (the vehicle-contact pass's timing: the next step's node pass).
+    pub reactions: Vec<WheelReaction>,
+}
+
+/// Other vehicles' collision triangles a vehicle's raycast wheels may stand on: every
+/// live collision triangle of every vehicle at a step's start, World positions.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PartnerScene {
+    /// Per vehicle its nodes' box (World) and its triangles' range in [`Self::tris`].
+    pub vehicles: Vec<(Vec3, Vec3, u32, u32)>,
+    pub tris: Vec<PartnerTri>,
+}
+
+/// A collision triangle of a [`PartnerScene`]: its vehicle, its nodes (vehicle-local),
+/// their World positions, velocities and inverse masses (0: immovable).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartnerTri {
+    pub vehicle: u32,
+    pub nodes: [u32; 3],
+    pub x: [Vec3; 3],
+    pub v: [Vec3; 3],
+    pub im: [f32; 3],
+}
+
+/// A wheel's force's reaction on another vehicle's triangle: −`force`·w_k on node k.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WheelReaction {
+    pub vehicle: u32,
+    pub nodes: [u32; 3],
+    pub w: [f32; 3],
+    pub force: Vec3,
 }
 
 fn sgn(x: f32) -> f32 {
@@ -346,10 +384,15 @@ struct Hit {
     t: f32,
     n: Vec3,
     shape: u32,
+    /// On another vehicle's triangle: the barycentric weights of its three nodes.
+    w: [f32; 3],
 }
 
 /// [`Hit::shape`] of a static surface.
 const NO_SHAPE: u32 = u32::MAX;
+/// [`Hit::shape`] of another vehicle's collision triangle: this bit and its index in the
+/// [`PartnerScene`]'s triangles.
+const PARTNER: u32 = 1 << 31;
 
 /// Ray `p + t·d` (t ≥ 0) against the slab box `lo..hi` in a frame whose axes are
 /// `ax` (world): the entering face. `pl`, `dl` the ray in that frame.
@@ -381,7 +424,7 @@ fn slab(pl: Vec3, dl: Vec3, lo: Vec3, hi: Vec3, ax: [Vec3; 3]) -> Option<Hit> {
         }
     }
     if t_in >= 0.0 && t_in <= t_out {
-        Some(Hit { t: t_in, n, shape: NO_SHAPE })
+        Some(Hit { t: t_in, n, shape: NO_SHAPE, w: [0.0; 3] })
     } else {
         None
     }
@@ -407,6 +450,7 @@ fn ray_sphere(p: Vec3, d: Vec3, c: Vec3, r: f32) -> Option<Hit> {
         t,
         n: nrm(p + d * t - c),
         shape: NO_SHAPE,
+        w: [0.0; 3],
     })
 }
 
@@ -478,12 +522,13 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
                         t,
                         n: Vec3::new(0.0, ny, 0.0),
                         shape: NO_SHAPE,
+                        w: [0.0; 3],
                     });
                 }
             }
             if let Some((t, y, n)) = ray_tube(p, d, centre, Vec3::Y, radius) {
                 if y >= -half_height && y <= half_height {
-                    closer(&mut best, Some(Hit { t, n, shape: NO_SHAPE }));
+                    closer(&mut best, Some(Hit { t, n, shape: NO_SHAPE, w: [0.0; 3] }));
                 }
             }
             best
@@ -497,7 +542,7 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
                 let ax = div3(ab, l);
                 if let Some((t, y, n)) = ray_tube(p, d, a, ax, radius) {
                     if y >= 0.0 && y <= l {
-                        closer(&mut best, Some(Hit { t, n, shape: NO_SHAPE }));
+                        closer(&mut best, Some(Hit { t, n, shape: NO_SHAPE, w: [0.0; 3] }));
                     }
                 }
             }
@@ -510,12 +555,20 @@ fn ray_shape(p: Vec3, d: Vec3, s: &StaticShape) -> Option<Hit> {
 /// The nearest hit of the ray `p + t·d`, t ≤ `t_max`, `p` in the vehicle's frame (its
 /// origin `ow`): ground (its height in that frame), boxes and shapes (World positions:
 /// the ray's start moved to the World) in order.
-fn ray_cast(s: &ExplicitBeams, p: Vec3, ow: Vec3, d: Vec3, t_max: f32, bodies: bool) -> Option<Hit> {
+fn ray_cast(
+    s: &ExplicitBeams,
+    p: Vec3,
+    ow: Vec3,
+    d: Vec3,
+    t_max: f32,
+    bodies: bool,
+    partners: Option<(&PartnerScene, u32)>,
+) -> Option<Hit> {
     let mut best: Option<Hit> = None;
     let ground = s.ground - ow.y;
     if d.y < -PARALLEL && p.y >= ground {
         let t = dv(ground - p.y, d.y);
-        best = Some(Hit { t, n: Vec3::Y, shape: NO_SHAPE });
+        best = Some(Hit { t, n: Vec3::Y, shape: NO_SHAPE, w: [0.0; 3] });
     }
     let p = ow + p;
     for b in &s.boxes {
@@ -542,8 +595,55 @@ fn ray_cast(s: &ExplicitBeams, p: Vec3, ow: Vec3, d: Vec3, t_max: f32, bodies: b
                 }
             }
         }
+        if let Some((sc, owner)) = partners {
+            // The ray's box: other vehicles whose node box it meets (the rest cannot hold
+            // a hit), their triangles in order.
+            let e = p + d * t_max;
+            let (rlo, rhi) = (p.min(e), p.max(e));
+            for (v, &(lo, hi, t0, t1)) in sc.vehicles.iter().enumerate() {
+                if v as u32 == owner || rhi.cmplt(lo).any() || hi.cmplt(rlo).any() {
+                    continue;
+                }
+                for i in t0..t1 {
+                    if let Some(mut h) = ray_triangle(p, d, &sc.tris[i as usize].x) {
+                        h.shape = PARTNER | i;
+                        closer(&mut best, Some(h));
+                    }
+                }
+            }
+        }
     }
     best.filter(|h| h.t <= t_max)
+}
+
+/// Ray `p + t·d` (World) against a triangle (Möller and Trumbore), either side: the
+/// distance, the unit normal facing the ray's start and the weights of its corners.
+/// The kernel's `drvTriangle`, the same arithmetic in the same order.
+fn ray_triangle(p: Vec3, d: Vec3, x: &[Vec3; 3]) -> Option<Hit> {
+    let e1 = x[1] - x[0];
+    let e2 = x[2] - x[0];
+    let pv = d.cross(e2);
+    let det = dot(e1, pv);
+    if det.abs() < PARALLEL {
+        return None;
+    }
+    let tv = p - x[0];
+    let u = dv(dot(tv, pv), det);
+    if !(u >= 0.0 && u <= 1.0) {
+        return None;
+    }
+    let qv = tv.cross(e1);
+    let v = dv(dot(d, qv), det);
+    if !(v >= 0.0 && u + v <= 1.0) {
+        return None;
+    }
+    let t = dv(dot(e2, qv), det);
+    if !(t >= 0.0) {
+        return None;
+    }
+    let n = nrm(e1.cross(e2));
+    let n = if dot(n, d) > 0.0 { -n } else { n };
+    Some(Hit { t, n, shape: NO_SHAPE, w: [(1.0 - u) - v, u, v] })
 }
 
 /// Ray `p + t·d` (World) against a convex hull's world planes (`n · x ≤ off` inside),
@@ -572,7 +672,7 @@ fn ray_planes(p: Vec3, d: Vec3, planes: impl Iterator<Item = (Vec3, f32)>) -> Op
         }
     }
     if t_in >= 0.0 && t_in <= t_out {
-        Some(Hit { t: t_in, n, shape: NO_SHAPE })
+        Some(Hit { t: t_in, n, shape: NO_SHAPE, w: [0.0; 3] })
     } else {
         None
     }
@@ -601,7 +701,7 @@ fn ray_proxy(p: Vec3, d: Vec3, b: &RigidProxy, sh: &ProxyShape) -> Option<Hit> {
             if l > 0.0 {
                 if let Some((t, y, n)) = ray_tube(p, d, a, ax, *radius) {
                     if y >= 0.0 && y <= l {
-                        closer(&mut best, Some(Hit { t, n, shape: NO_SHAPE }));
+                        closer(&mut best, Some(Hit { t, n, shape: NO_SHAPE, w: [0.0; 3] }));
                     }
                 }
             }
@@ -630,6 +730,33 @@ struct Surface {
     at: Vec3,
 }
 
+/// The velocity of another vehicle's triangle at hit `ht` (its nodes' by the weights).
+fn partner_velocity(sc: &PartnerScene, ht: Hit) -> Vec3 {
+    let tri = &sc.tris[(ht.shape & !PARTNER) as usize];
+    tri.v[0] * ht.w[0] + tri.v[1] * ht.w[1] + tri.v[2] * ht.w[2]
+}
+
+/// A wheel's surface on another vehicle's triangle: the point's inverse mass from its
+/// nodes' by their weights (vehicle contact's two-body rule,
+/// [`crate::explicit_contact::two_body_inverse_mass`]), split among this vehicle's
+/// wheels on the same vehicle this step.
+fn partner_surface(sc: &PartnerScene, hits: &[Option<Hit>; MAX_WHEELS], ht: Hit, at: Vec3, m: f32) -> Surface {
+    let tri = &sc.tris[(ht.shape & !PARTNER) as usize];
+    let vb = partner_velocity(sc, ht);
+    let same = hits
+        .iter()
+        .filter(|h| h.is_some_and(|h| h.shape != NO_SHAPE && h.shape & PARTNER != 0 && sc.tris[(h.shape & !PARTNER) as usize].vehicle == tri.vehicle))
+        .count();
+    let wb = same as f32 * crate::explicit_contact::two_body_inverse_mass(tri.im, ht.w);
+    let wn = 1.0 / m;
+    Surface {
+        vb,
+        m: 1.0 / (wn + wb),
+        share: wn / (wn + wb),
+        at,
+    }
+}
+
 /// The velocity of proxy shape `k`'s body at World point `x`.
 fn proxy_velocity(s: &ExplicitBeams, k: u32, x: Vec3) -> Vec3 {
     let r = s.rigid.as_deref().expect("a proxy hit has proxies");
@@ -651,7 +778,7 @@ fn surface(s: &ExplicitBeams, hits: &[Option<Hit>; MAX_WHEELS], k: usize, ht: Hi
     }
     let same = hits
         .iter()
-        .filter(|h| h.is_some_and(|h| h.shape != NO_SHAPE && r.shapes[h.shape as usize].body == body))
+        .filter(|h| h.is_some_and(|h| h.shape & PARTNER == 0 && r.shapes[h.shape as usize].body == body))
         .count();
     debug_assert!(same >= 1 && hits[k].is_some());
     let rr = at - b.pos;
@@ -736,6 +863,11 @@ fn apply(s: &mut ExplicitBeams, i: u32, f: Vec3) {
         to_fixed(f.z) as f32,
     ) * (1.0 / CONTACT_FIXED);
     s.nodes[i as usize].force += q;
+}
+
+/// [`apply`] for a host (another vehicle's reaction from a wheel).
+pub fn apply_contact(s: &mut ExplicitBeams, i: u32, f: Vec3) {
+    apply(s, i, f);
 }
 
 /// One step's raycast wheels of `s` (before its node pass; see the module docs).
@@ -829,7 +961,8 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
             nrm(fw * (dot(a, fw) - r0) + up * (dot(a, up) - r1) + left * (dot(a, left) - r2 + 1.0));
         axle[k] = a;
         let hp = xh + up * w.rest_len;
-        let hit = ray_cast(s, hp, ow, -up, w.susp_max + w.radius, c.see_bodies);
+        let partners = d.partners.as_deref().filter(|_| c.see_bodies).map(|sc| (sc, d.owner));
+        let hit = ray_cast(s, hp, ow, -up, w.susp_max + w.radius, c.see_bodies, partners);
         len[k] = w.susp_max;
         if let Some(ht) = hit {
             let cos_t = dot(ht.n, up);
@@ -839,6 +972,8 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
                 // the contact point.
                 let vr = if ht.shape == NO_SHAPE {
                     vh
+                } else if ht.shape & PARTNER != 0 {
+                    vh - partner_velocity(d.partners.as_deref().unwrap(), ht)
                 } else {
                     vh - proxy_velocity(s, ht.shape, ow + (hp - up * ht.t))
                 };
@@ -871,7 +1006,12 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
         if let Some(ht) = hits[k].filter(|h| h.shape != NO_SHAPE) {
             let w = &c.wheels[k];
             let hp = hubs[k].1 + up * w.rest_len;
-            surf[k] = Some(surface(s, &hits, k, ht, ow + (hp - up * ht.t), hubs[k].0));
+            let at = ow + (hp - up * ht.t);
+            surf[k] = Some(if ht.shape & PARTNER != 0 {
+                partner_surface(d.partners.as_deref().unwrap(), &hits, ht, at, hubs[k].0)
+            } else {
+                surface(s, &hits, k, ht, at, hubs[k].0)
+            });
         }
     }
     // 3. Tyres, spin, forces.
@@ -1032,8 +1172,16 @@ pub fn drive_pass(s: &mut ExplicitBeams) {
                 apply(s, n2, force * r2);
             }
             // Equal and opposite on the body, at the contact point.
-            if let Some(sf) = surf[k] {
-                if let (Some(r), Some(ht)) = (s.rigid.as_deref_mut(), hits[k]) {
+            if let (Some(sf), Some(ht)) = (surf[k], hits[k]) {
+                if ht.shape & PARTNER != 0 {
+                    let tri = d.partners.as_deref().unwrap().tris[(ht.shape & !PARTNER) as usize];
+                    d.reactions.push(WheelReaction {
+                        vehicle: tri.vehicle,
+                        nodes: tri.nodes,
+                        w: ht.w,
+                        force: -force,
+                    });
+                } else if let Some(r) = s.rigid.as_deref_mut() {
                     r.add_surface_reaction(ht.shape as usize, -force, sf.at);
                 }
             }
@@ -1056,6 +1204,9 @@ impl Drive {
             tc_cut: 0.0,
             wheels: vec![WheelState::default(); n],
             speed: 0.0,
+            partners: None,
+            owner: 0,
+            reactions: Vec::new(),
         }
     }
 
