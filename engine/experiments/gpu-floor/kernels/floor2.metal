@@ -81,7 +81,7 @@ struct Params
 #endif
 // ROW4: the pair rows' points four a load, each by name (no vector indexed by a variable).
 #ifndef ROW4
-#define ROW4 0
+#define ROW4 1
 #endif
 // TGPV: a node's position and velocity next to each other (an end of a beam is then six
 // adjacent floats, where adjacent loads are nearly free).

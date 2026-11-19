@@ -141,6 +141,18 @@ fn main() -> anyhow::Result<()> {
     let two = |cond: &str| format!("if ({cond}) {{ {} }} else {{ {} }}", fma(64), fma(64).replace("0.001f", "0.002f"));
     rows.push(("64 fma in one of two branches, warps agree".into(), String::new(), two("(lid & 32u) != 0u"), tgb, 32, 0));
     rows.push(("64 fma in one of two branches, lanes of a warp disagree".into(), String::new(), two("(lid & 1u) != 0u"), tgb, 32, 0));
+    // A loop shaped like a pair row: a point a pass (two vector loads at the point's own
+    // address, two plane distances, a rare branch); the lanes of a warp agreeing on the
+    // count (8) or not (4 to 11, so the warp runs 11), and with 48 more values kept alive.
+    let row = |count: &str| format!(
+        "uint n_ = {count}; float3 a0 = float3(acc, 0.5f, 0.25f), a1 = float3(0.3f, acc, 0.1f), a2 = float3(0.2f, 0.1f, acc), a3 = float3(acc, acc, 0.5f);\nfor (uint k = 0; k < 12u; k++) {{ if (k >= n_) break; uint h = (ix + k * 191u) & 1023u; float3 pp = float3(tg[h * 3u], tg[h * 3u + 1u], tg[h * 3u + 2u]); float3 qq = float3(tg[3072u + h * 3u], tg[3073u + h * 3u], tg[3074u + h * 3u]); float d1 = dot(pp - a0, a1); float d0 = dot((pp - qq * 0.0005f) - a2, a3); if (d1 * d0 < -1.0e30f) atomic_fetch_add_explicit(&tga[0], 1u, memory_order_relaxed); acc += (d1 + d0) * 1.0e-9f; }}"
+    );
+    rows.push(("row-like loop, 8 points a lane, lanes agree".into(), String::new(), row("8u"), tgb, 32, 0));
+    rows.push(("row-like loop, 4 to 11 points a lane (a warp runs 11)".into(), String::new(), row("4u + (lid & 7u)"), tgb, 32, 0));
+    {
+        let (pre, body) = regs(48);
+        rows.push(("row-like loop, 8 points, with 48 more live registers updated".into(), pre, format!("{body}\n{}", row("8u")), tgb, 32, 0));
+    }
     // sqrt and divide.
     rows.push(("16 dependent sqrt, 32 warps".into(), String::new(), (0..16).map(|_| "acc = sqrt(acc + 1.5f);".to_string()).collect::<Vec<_>>().join("\n"), tgb, 32, 0));
     rows.push(("16 dependent divides, 32 warps".into(), String::new(), (0..16).map(|_| "acc = 1.5f / (acc + 0.25f);".to_string()).collect::<Vec<_>>().join("\n"), tgb, 32, 0));
