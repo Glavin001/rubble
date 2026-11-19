@@ -188,6 +188,8 @@ kernel void floorFrame(
     #define cplV ((device float*)(cb + O_SCRATCH + NN * 11))
     #define hot ((device float4*)(cb + O_HOT))
     #define candBuf (cb + O_CAND)
+    #define conBuf (cb + O_CAND + 2048)
+    #define liftBuf ((device float*)(cb + O_CAND + 3072))
     #define ent4 ((device const uint4*)(tab + T_ENT))
 
     // This lane's roles.
@@ -339,6 +341,7 @@ kernel void floorFrame(
             }
             if (dead) triDead[tri] = 1u;
         }
+        bool inC = false;
         if (isNode && !SKIP(0))
         {
             const float mass = massN;
@@ -368,49 +371,106 @@ kernel void floorFrame(
                 F0 = F0 + v3(float(ax_), float(ay_), float(az_)) * (1.0f / 32.0f);
             }
             else F0 = F0 + v3(0, 0, 0);
-            V3 dshift = v3(0, 0, 0);
-            if (fShift)
-            {
-                dshift = v3(float(shift[ni * 3]), float(shift[ni * 3 + 1]), float(shift[ni * 3 + 2])) * (1.0f / 16777216.0f);
-                shift[ni * 3] = 0; shift[ni * 3 + 1] = 0; shift[ni * 3 + 2] = 0;
-            }
-            float lift = 0.0f;
+            // A node in the ground or a static box goes on the step's list: its contact
+            // rule (exponentials, divisions) runs a lane a node after the barrier, and it is
+            // integrated after that. Every other node is integrated here.
             V3 x = v3(0, 0, 0) + P0;
-            if (P.ground > x.y)
-            {
-                float budget;
-                float depth = P.ground - x.y;
-                V3 c = contactResponse(F0, V0, mass, v3(0, 1, 0), GROUND, depth, nodeStatic[ni].y, budget);
-                if (!isZero3(c)) lift = shiftDepth(depth, budget, F0.y);
-                F0 = F0 + c;
-            }
+            inC = P.ground > x.y;
 #if NBOX > 0
             for (uint b = 0; b < NBOX; b++)
             {
                 float3 lo = BOX_LO[b], hi = BOX_HI[b];
-                if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)
-                {
-                    V3 normal = v3(0.0f, 0.0f, -1.0f);
-                    float dist = x.z - lo.z;
-                    float dd[5] = {hi.z - x.z, x.x - lo.x, hi.x - x.x, x.y - lo.y, hi.y - x.y};
-                    V3 nn[5] = {v3(0.0f, 0.0f, 1.0f), v3(-1.0f, 0.0f, 0.0f), v3(1.0f, 0.0f, 0.0f), v3(0.0f, -1.0f, 0.0f), v3(0.0f, 1.0f, 0.0f)};
-                    for (uint q = 0; q < 5; q++)
-                        if (dd[q] < dist) { dist = dd[q]; normal = nn[q]; }
-                    float budget;
-                    V3 c = contactResponse(F0, V0, mass, normal, BOXS, 0.0f, nodeStatic[ni].y, budget);
-                    F0 = F0 + c;
-                }
+                if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z) inC = true;
             }
 #endif
-            if ((nflags & NODE_IMMOVABLE) == 0u)
+            if (inC)
             {
-                V0 = V0 + (F0 / mass) * H;
-                P0 = P0 + V0 * H;
-                if (fShift) P0 = P0 + dshift;
-                if (lift != 0.0f) P0.y = P0.y + lift;
+                uint ci = atomic_fetch_add_explicit(&tgCount[3], 1u, memory_order_relaxed);
+                conBuf[ci] = ni;
+                fPub[ni * 3] = F0.x; fPub[ni * 3 + 1] = F0.y; fPub[ni * 3 + 2] = F0.z;
             }
-            SETP(ni, P0);
-            SETV(ni, V0);
+            else
+            {
+                if ((nflags & NODE_IMMOVABLE) == 0u)
+                {
+                    V0 = V0 + (F0 / mass) * H;
+                    P0 = P0 + V0 * H;
+                    if (fShift)
+                    {
+                        P0 = P0 + v3(float(shift[ni * 3]), float(shift[ni * 3 + 1]), float(shift[ni * 3 + 2])) * (1.0f / 16777216.0f);
+                        shift[ni * 3] = 0; shift[ni * 3 + 1] = 0; shift[ni * 3 + 2] = 0;
+                    }
+                }
+                else if (fShift) { shift[ni * 3] = 0; shift[ni * 3 + 1] = 0; shift[ni * 3 + 2] = 0; }
+                SETP(ni, P0);
+                SETV(ni, V0);
+            }
+        }
+        BAR;
+        const uint ncon = atomic_load_explicit(&tgCount[3], memory_order_relaxed);
+        if (ncon != 0u)
+        {
+            for (uint kc = lid; kc < min(ncon, (uint)NN); kc += LANES)
+            {
+                const uint n = conBuf[kc];
+                float4 ns = nodeStatic[n];
+                const float mq = ns.x, frq = ns.y;
+                V3 Pq = TGP(n), Vq = TGV(n);
+                V3 Fq = v3(fPub[n * 3], fPub[n * 3 + 1], fPub[n * 3 + 2]);
+                float lift = 0.0f;
+                V3 x = v3(0, 0, 0) + Pq;
+                if (P.ground > x.y)
+                {
+                    float budget;
+                    float depth = P.ground - x.y;
+                    V3 c = contactResponse(Fq, Vq, mq, v3(0, 1, 0), GROUND, depth, frq, budget);
+                    if (!isZero3(c)) lift = shiftDepth(depth, budget, Fq.y);
+                    Fq = Fq + c;
+                }
+#if NBOX > 0
+                for (uint b = 0; b < NBOX; b++)
+                {
+                    float3 lo = BOX_LO[b], hi = BOX_HI[b];
+                    if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)
+                    {
+                        V3 normal = v3(0.0f, 0.0f, -1.0f);
+                        float dist = x.z - lo.z;
+                        float dd[5] = {hi.z - x.z, x.x - lo.x, hi.x - x.x, x.y - lo.y, hi.y - x.y};
+                        V3 nn[5] = {v3(0.0f, 0.0f, 1.0f), v3(-1.0f, 0.0f, 0.0f), v3(1.0f, 0.0f, 0.0f), v3(0.0f, -1.0f, 0.0f), v3(0.0f, 1.0f, 0.0f)};
+                        for (uint q = 0; q < 5; q++)
+                            if (dd[q] < dist) { dist = dd[q]; normal = nn[q]; }
+                        float budget;
+                        V3 c = contactResponse(Fq, Vq, mq, normal, BOXS, 0.0f, frq, budget);
+                        Fq = Fq + c;
+                    }
+                }
+#endif
+                fPub[n * 3] = Fq.x; fPub[n * 3 + 1] = Fq.y; fPub[n * 3 + 2] = Fq.z;
+                liftBuf[n] = lift;
+            }
+            BAR;
+            if (isNode && inC)
+            {
+                V3 P0 = TGP(ni), V0 = TGV(ni);
+                F0 = v3(fPub[ni * 3], fPub[ni * 3 + 1], fPub[ni * 3 + 2]);
+                const float lift = liftBuf[ni];
+#if HAS_IMMOVABLE
+                const uint nflags = as_type<uint>(nodeStatic[ni].z);
+#else
+                const uint nflags = 0u;
+#endif
+                if ((nflags & NODE_IMMOVABLE) == 0u)
+                {
+                    V0 = V0 + (F0 / massN) * H;
+                    P0 = P0 + V0 * H;
+                    if (fShift) P0 = P0 + v3(float(shift[ni * 3]), float(shift[ni * 3 + 1]), float(shift[ni * 3 + 2])) * (1.0f / 16777216.0f);
+                    if (lift != 0.0f) P0.y = P0.y + lift;
+                }
+                if (fShift) { shift[ni * 3] = 0; shift[ni * 3 + 1] = 0; shift[ni * 3 + 2] = 0; }
+                SETP(ni, P0);
+                SETV(ni, V0);
+            }
+            if (lid == 3) atomic_store_explicit(&tgCount[3], 0u, memory_order_relaxed);
         }
         if (lid == 0) atomic_store_explicit(&tgCount[0], 0u, memory_order_relaxed);
         if (lid == 2) atomic_store_explicit(&tgCount[2], 0u, memory_order_relaxed);
