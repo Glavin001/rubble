@@ -3810,12 +3810,13 @@ and capsules are not. ms a frame, one car, bit for bit strict in both scenes
 
 | scene | strict | fast + native | production (matrix) |
 |---|---|---|---|
-| the car at 11 m/s into 24 boxes: the run's median / mid-impact | 3.0 / 3.0 | / 3.1 | 3.4 (60 bricks) |
-| four rocks onto the parked car: the run's median / under the rocks | 2.2 / 2.2 | / 2.0 | 3.8 |
+| the car at 11 m/s into 24 boxes, mid-impact | 2.08 | 1.83 | 3.4 (60 bricks) |
+| four rocks onto the parked car, under the rocks | 2.06 | 1.66 | 3.8 |
 
-This one is the least far below production: a node tests every active shape every
-substep (548 nodes against up to 24 boxes), which the next step would replace with the
-compact lists the other two mechanisms use.
+(First measured at 3.0 and 3.1 for the boxes, 2.2 and 2.0 for the rocks, and read as "a node
+tests every active shape". It was not that: 1.0 ms of the boxes' frame was the 24 bodies'
+integration, each body's lane scanning the shapes for its own. See "a loop in which each
+lane's turn is a different iteration" under surface contact below.)
 
 **The scaling staircase, each mechanism's scenes.** One workgroup is one core's work and
 the GPU has 40, so N workgroups cost ⌈N / 40⌉ times one (fast + native, ms a frame, all
@@ -3825,8 +3826,8 @@ copies in one dispatch; a pair is two workgroups, so its tread is 20 pairs):
 |---|---|---|---|---|---|---|---|---|
 | one body at rest | 1.10 | 1.12 | 1.21 | 2.31 | 2.57 | 3.63 | 3.83 | 6.23 |
 | one body, wall, mid-crash | 1.83 | 1.90 | 2.20 | 4.02 | 4.51 | 6.33 | 6.86 | 11.3 |
-| a body into 24 boxes, mid-impact | 3.06 | | 3.60 | 6.59 | 7.29 | 10.2 | | 20.4 |
-| a body under four rocks | 2.01 | | 2.42 | 4.41 | 5.03 | 7.01 | | 14.2 |
+| a body into 24 boxes, mid-impact | 1.83 | | 2.20 | 4.02 | 4.62 | | | 13.1 |
+| a body under four rocks | 1.66 | | 1.96 | 3.60 | 4.17 | | | 11.8 |
 
 | pairs (two workgroups each) | 1 | 8 | 20 | 21 | 40 | 41 | 60 |
 |---|---|---|---|---|---|---|---|
@@ -3883,6 +3884,7 @@ Slang through wgpu, one dispatch a substep, and some of this it already has in a
 | 9 | A body publishes its clusters' boxes for its partner's cull | head-on 3.60 → 3.50 (−3 %) | yes | with 3 only |
 | 10 | A row loop with no vector indexed by a variable (four points a load, by name) | rest 1.32 → 1.29 (−2 %) | yes | trivial |
 | 11 | Fast math with native functions | 10 to 20 % (rest 1.25 → 1.09, head-on 4.2 → 3.5) | **no**: within the closeness report above | an option, as now |
+| 12 | A lane's item given to it (a list, or `ctz` over a mask of hits) instead of a scan with a skip; appends after the loop, not inside it | 24 proxy bodies' integration 1.0 → 0.09 ms a frame (node contact on the bricks 2.69 → 1.83); surface search 0.57 → 0.17 | yes | per loop: the production kernels' own scans (a body's shapes, candidates appended inside a row or cluster loop) are to be read for it |
 
 Two that are not kernel changes and paid for all of the above: the strict Metal build is
 fast math off plus `#pragma clang fp contract(off)` (no XOR barriers; that is what made
@@ -3906,8 +3908,7 @@ rows, which is the car at rest. Next: the wide list built a lane an item, as the
 search is (its clusters still cost a warp every cluster for one lane); the list's test of
 how far nodes have moved taken against a reference near the pair, not one node of the
 car (the crush zone moves 7 mm a step against the far end and is rebuilt every two or
-three steps for it); a body's rigid shapes on lists (a node still tests every active shape,
-1.2 ms with 24 boxes). Each is tens of percent of its group, not of the frame: the frame
+three steps for it). Each is tens of percent of its group, not of the frame: the frame
 is now spread over a dozen groups, none above a quarter.
 
 **Surface contact (the car's skin against the world's shapes), added 2026-11-19.**
@@ -3993,48 +3994,94 @@ the whole query in its lane.
 *Cost* (ms a frame, one sedan, fast | strict; the node-contact column is the same scene
 and frame without surface contact, which is another trajectory by then):
 
-| state | node contact | surface, staged | surface, a lane a pair (`--direct`) |
+| state | node contact | surface contact | first version, a lane a pair |
 |---|---|---|---|
-| parked 0.3 m from a post, nothing near | 1.29 \| 1.43 | 1.45 \| 1.70 | |
-| a loose 3 t post, 11 m/s, frame 5 | 2.19 | 3.65 \| 4.68 | 3.97 \| 5.53 |
-| 24 bricks, frame 12 | 2.76 | 4.72 \| 5.68 | 5.06 \| 6.76 |
-| four falling rocks (spheres), frame 14 | 1.81 | 2.77 \| 3.36 | 2.78 \| 3.34 |
+| parked 0.3 m from a post, nothing near | 1.26 \| 1.46 | 1.51 \| 1.69 | |
+| a loose 3 t post, 11 m/s, frame 5 | 2.13 \| 2.66 | 3.53 \| 4.35 | 3.97 \| 5.53 |
+| 24 bricks, frame 12 | 1.83 \| 2.08 | 3.47 \| 4.22 | 5.06 \| 6.76 |
+| four falling rocks (spheres), frame 14 | 1.66 \| 2.06 | 2.52 \| 3.04 | 2.78 \| 3.34 |
 
-Surface contact in contact with boxes is 1.5 to 2.0 ms a frame on top (1.0 with
-spheres), 0.15 when nothing is near. Staging took 0.3 (fast) and 0.9 to 1.1 (strict) off
-the boxes' frames, not the several-fold the query's latency suggested: the pass is now six
-short stages of 4 to 16 µs a substep each, and none of them is the query any more. Where
-the time is (the profiler, fast, ms a frame):
+Surface contact in contact is 0.9 (spheres) to 1.6 ms (boxes) a frame on top of node
+contact, 0.25 when nothing is near. In copies (fast, in contact): post 1: 3.54, 40: 4.67,
+41: 8.11, 80: 9.59; bricks 1: 3.47, 40: 4.51, 41: 7.93, 80: 9.20; rocks 1: 2.51,
+40: 3.15, 41: 5.64, 80: 6.59. The same staircase as without it: a body a core.
+
+*How it got there, and what each step measured* (whole frames, two builds in one batch;
+fast | strict where both were taken):
+
+| step | post | bricks | rocks |
+|---|---|---|---|
+| a lane a pair, the whole query | 3.97 \| 5.53 | 5.06 \| 6.76 | 2.78 \| 3.34 |
+| the box tests staged (a lane a pair and box edge) | 3.65 \| 4.68 | 4.72 \| 5.68 | 2.77 \| 3.36 |
+| a body's shapes from its own list (the proxies' integration) | 3.68 \| 4.69 | 3.87 \| 4.79 | 2.70 \| 3.24 |
+| the search's pairs listed from a mask | 3.63 \| 4.62 | 3.56 \| 4.47 | 2.49 \| 3.04 |
+| the run inside a box apart from the edges' tasks, the tasks reserved from a mask | 3.56 \| 4.40 | 3.47 \| 4.26 | 2.53 \| 3.06 |
+
+**A loop in which each lane's turn is a different iteration.** This is what the last three
+steps have in common, and it is the finding of the round. A warp runs a loop's body once
+for every iteration in which *any* of its lanes takes it. Written as "scan the items, skip
+the ones that are not mine, do the work on mine", 24 lanes with one item each run the
+work 24 times, in series, each for one lane:
+
+- *The proxies' integration* scanned the shapes for the body's own (`if (shape.body !=
+  lid) continue;`), then exchanged six sums, integrated and normalised. 24 bodies: 30 µs a
+  substep, 1.0 ms a frame, a third of the node-contact frame, and for weeks' worth of
+  reading it had been taken for the nodes' shape tests. With each body's shapes in a list
+  of its own (`T_BSH`) the loop is one iteration: 0.09 ms. Node contact on the boxes
+  2.69 → 1.83; mechanism 3's table above is the new figures.
+- *The search* stored a pair inside the loop over the near slots: every (slot, lane) hit
+  of a warp ran the store and its atomic alone. The slots an element is near are now bits
+  of a mask, and the pairs are listed afterwards in a loop over the mask's bits, where
+  each lane's j-th pair is the same iteration: the search 0.57 → 0.17 on the bricks.
+- *Stage B* looped over a task's six candidates and walked the kept ones: six walks a warp
+  for lanes that keep one or two each. A mask of the kept, then its bits in turn.
+- *Stage A* held the run-inside task among the edges' tasks, so every warp with one ran
+  both walks six times. The run inside is the pair's own lane's task now, and a single
+  candidate of it clips one edge, not three.
+
+The rule for a kernel: **give a lane its item directly (a list, or `ctz` over a mask),
+never a scan with a skip.** A scan is right only when most lanes take most iterations.
+The two-body pass has the same shape in its triangle-against-cluster and cluster-point
+loops (`pair.metal`, an append inside a loop of 20 clusters and of 32 points), which is
+where the head-on's 0.8 ms of search is; that is the next thing to do with it.
+
+Measured and not kept, each because the whole frame said so: the node pass's shape tests
+behind the active shapes' union box, with the shapes' boxes in workgroup memory (the
+bricks' union is the whole car: 4.71 → 4.76); a hit's node counts in a lane-a-hit phase
+before the apply (rocks 2.49 → 2.56); the lane's own state written to its rows for the
+length of the pass (below).
+
+*Where the time is now* (the profiler, fast, ms a frame; its groups trade a tenth with
+their neighbours, the whole frame is the measure):
 
 | group | post | bricks | rocks |
 |---|---|---|---|
-| near slots, search | 0.21 | 0.56 | 0.41 |
-| cull, tasks, direct tests | 0.35 | 0.36 | 0.33 |
-| A, an edge's gaps | 0.48 | 0.34 | 0 |
-| B, kept candidates | 0.15 | 0.18 | 0 |
-| R, a pair's contact | 0.42 | 0.41 | 0 |
-| hits applied | 0.29 | 0.26 | 0.26 |
+| near slots, search | 0.21 | 0.33 | 0.26 |
+| cull, tasks, direct tests | 0.35 | 0.32 | 0.32 |
+| A, an edge's gaps | 0.38 | 0.36 | 0 |
+| B, kept candidates | 0.19 | 0.14 | 0 |
+| R, a pair's contact | 0.42 | 0.42 | 0 |
+| hits applied | 0.27 | 0.42 | 0.27 |
+| the proxies' integration | 0.09 | 0.09 | 0.11 |
 
-Two earlier arrangements, both bit for bit, measured the same frame time within 0.2 ms:
-the working data in device memory (each stage then pays the chain pair → shape rows →
-element at 0.2 µs a dependent load: the cull stage 0.39 against 0.35 with the shapes, the
-staged pairs and the forces in the scalars' array, the hits' stage 0.39 against 0.28
-without its slot phase), and every edge of every pair a task with no list (stage A 0.73
-on the bricks, five tasks a lane, against 0.34 with the far edges culled first).
+*With nothing near* the pass costs 0.25 ms a frame, and that is three things, measured
+apart on the parked car (fast): the pass's first phase, 0.05 (the frame with it left out
+by a switch); its bookkeeping (the box reduction, the fast-body test, the counters' resets),
+0.06 (a build with the pass's code removed: 1.32 against 1.26); and 0.14 to 0.2 for the
+pass's code being in the kernel at all, not run (1.46 with the pass switched off against
+1.32 with its code removed). It is not the lane's state being live across that code:
+writing the state to its rows before the pass and reading it back after left the parked
+frame where it was and made the frames in contact 0.36 ms longer. It does not follow the
+kernel's size either (the build without the fallback queries is the same). Unexplained,
+and worth a seventh of an idle frame: the next thing to find out, with the same build
+(`--surf-empty`) cut down a part at a time.
 
-*In copies* (fast, in contact, ms a frame): post 1: 3.65, 40: 4.87, 41: 8.46, 80: 9.99;
-bricks 1: 4.72, 40: 5.87, 41: 10.6, 80: 11.9; rocks 1: 2.77, 40: 3.41, 41: 6.18,
-80: 7.04. The same staircase as without it: a body a core.
-
-*What is left, in order.* The search runs every substep against every near slot (0.2 to
-0.56): the body's other searches keep a list valid over several steps, and so can this
-one. The node contact's own tests against the same shapes are the largest group of the
-bricks' frame (1.2 ms: every node, every active shape, twice) and can take their pairs
-from this pass's near list. The idle 0.15 is the proxies' strict poses and the box
-reduction, both needed only once a slot is near. The overlap axis runs in one lane a
-crossing pair (about 5 µs a substep when one exists). And the query itself: four walks
-of up to 78 candidates is the reference's definition, so a cheaper exact box test is a
-change to both twins on the engine side, not to a kernel.
+*What is left, in order.* That 0.14. Then the stages are each a few tenths with no one
+cause: the kept candidates' rows are read from device memory in stage R (three scattered
+rows a candidate a pass); a hit's 24 fixed-point adds are device atomics; the search runs
+every substep where the body's other searches keep a list over several. And the query
+itself: four walks of up to 78 candidates is the reference's definition, so a cheaper
+exact box test is a change to both twins on the engine side, not to a kernel.
 
 **Not built, and what the numbers do not cover.** Raycast wheels and the drivetrain (the
 scenes' cars have none, as the scenario matrix's soft rows); piles of three or more bodies
