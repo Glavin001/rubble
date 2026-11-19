@@ -77,6 +77,7 @@ pub struct V2Off {
     pub hits: usize,
     pub scratch: usize,
     pub hot: usize,
+    pub cand: usize,
     pub words: usize,
 }
 
@@ -978,13 +979,14 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     o.hits = take(HIT_CAP * HITW * 4);
     o.scratch = take(nn * 12);
     o.hot = take(LANES * 24);
+    o.cand = take(4096);
     o.words = at;
     st.perm = perm;
     st.v2_tab = tab;
     st.v2_off = o.clone();
     st.v2_defs = format!(
-        "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define CAR_WORDS {}\n",
-        o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.words
+        "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 4096\n#define CAR_WORDS {}\n",
+        o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.cand, o.words
     ) + &format!(
         "#define NGS {ngs}\n#define NV {}\n#define AERO_LO {aero_lo}\n#define CPL_BASE {cpl_base}\n#define T_LANE {t_lane}\n#define T_VIDX {t_vidx}\n#define T_ENT {t_ent}\n#define MAXENT {maxent}\n#define PROW {prow}\n#define REFNODE 0\n#define HAS_IMMOVABLE {}\n#define FULL_PLAIN_SLOTS {}\n",
         nv.max(1), s.nodes.iter().any(|n| n.flags & 2 != 0) as u32,

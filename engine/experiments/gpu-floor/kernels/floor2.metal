@@ -187,6 +187,7 @@ kernel void floorFrame(
     #define masters ((device atomic_uint*)(cb + O_SCRATCH + NN * 10))
     #define cplV ((device float*)(cb + O_SCRATCH + NN * 11))
     #define hot ((device float4*)(cb + O_HOT))
+    #define candBuf (cb + O_CAND)
     #define ent4 ((device const uint4*)(tab + T_ENT))
 
     // This lane's roles.
@@ -413,6 +414,7 @@ kernel void floorFrame(
         }
         if (lid == 0) atomic_store_explicit(&tgCount[0], 0u, memory_order_relaxed);
         if (lid == 2) atomic_store_explicit(&tgCount[2], 0u, memory_order_relaxed);
+        if (lid == 1) atomic_store_explicit(&tgCount[1], 0u, memory_order_relaxed);
         BAR;
         if (lid == 0)
         {
@@ -880,7 +882,30 @@ kernel void floorFrame(
                     float d0 = bok ? dot3(brd, (ph - vh * H) - b0) : 0.0f;
                     bool cand = tgHeld[h] != 0 || (d0 > 0.0f && d1 < 0.0f) || (d0 < 0.0f && d1 > 0.0f) || fabs(d1) <= CR;
                     if (!cand) continue;
-                    // The full rule (explicit_beams.rs collision_pass, clip_hit).
+                    // A pair that may be a contact goes on the step's list: the full rule runs
+                    // a lane a pair after the barrier (a warp pays for its slowest lane, and
+                    // these are a few among thousands).
+                    uint ci = atomic_fetch_add_explicit(&tgCount[1], 1u, memory_order_relaxed);
+                    if (ci < CAND_CAP) candBuf[ci] = tri << 16 | h;
+                }
+            }
+        }
+#endif
+        BAR;
+#if COLLIDE
+        const uint ncand = atomic_load_explicit(&tgCount[1], memory_order_relaxed);
+        if (ncand != 0u)
+        {
+            if (lid == 0 && ncand > CAND_CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 4u;
+            for (uint kc = lid; kc < min(ncand, (uint)CAND_CAP); kc += LANES)
+            {
+                // The full rule (explicit_beams.rs collision_pass, clip_hit).
+                const uint cw = candBuf[kc];
+                const uint tri = cw >> 16, h = cw & 0xFFFFu;
+                const uint hdr = pairs[tri * PROW + 1u];
+                const uint t0 = hdr & 1023u, t1 = (hdr >> 10) & 1023u, t2 = (hdr >> 20) & 1023u;
+                V3 ph = v3(0, 0, 0) + TGP(h);
+                V3 vh = TGV(h);
                     const uint4 tn = uint4(t0, t1, t2, 0u);
                     const V3 pA = v3(0, 0, 0) + TGP(t0), pB = v3(0, 0, 0) + TGP(t1), pC = v3(0, 0, 0) + TGP(t2);
                     const V3 vA = TGV(t0), vB = TGV(t1), vC = TGV(t2);
@@ -955,11 +980,10 @@ kernel void floorFrame(
                     atomic_fetch_add_explicit(&split[tn.x], 1u, memory_order_relaxed);
                     atomic_fetch_add_explicit(&split[tn.y], 1u, memory_order_relaxed);
                     atomic_fetch_add_explicit(&split[tn.z], 1u, memory_order_relaxed);
-                }
             }
+            BAR;
         }
 #endif
-        BAR;
 #if COLLIDE
         const uint nhits = atomic_load_explicit(&tgCount[2], memory_order_relaxed);
         if (nhits != 0u && !SKIP(8))
