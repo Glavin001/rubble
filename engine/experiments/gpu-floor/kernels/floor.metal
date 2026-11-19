@@ -505,10 +505,29 @@ struct Params
     uint frames;
     float ground;
     uint skip; // timing only: phases left out (bit k: phase k)
+    // RUNTIME_SIZES (a ledger measurement): the counts as uniforms, as a general kernel has them.
+    uint rtLanes, rtNN, rtNT, rtNC, rtSteps, rtNG, rtRS, pad2;
 };
 
 #define TG_FLAGS 8
 #define SKIP(k) ((P.skip & (1u << (k))) != 0u)
+#if RUNTIME_SIZES
+#define Z_LANES P.rtLanes
+#define Z_NN P.rtNN
+#define Z_NT P.rtNT
+#define Z_NC P.rtNC
+#define Z_STEPS P.rtSteps
+#define Z_NG P.rtNG
+#define Z_RS P.rtRS
+#else
+#define Z_LANES LANES
+#define Z_NN NN
+#define Z_NT NT
+#define Z_NC NC
+#define Z_STEPS STEPS
+#define Z_NG NG
+#define Z_RS RS
+#endif
 #ifndef FAST_SUMS
 #define FAST_SUMS 0
 #endif
@@ -594,7 +613,7 @@ kernel void floorFrame(
     hitBuf += car * HIT_CAP * HITW;
 #endif
 
-    const bool isNode = lid < NN;
+    const bool isNode = lid < Z_NN;
     const uint ni = isNode ? lid : 0u;
     // Node registers.
     V3 P0 = v3(nodeState[ni * 3]), V0 = v3(nodeState[ni * 3 + 1]), F0 = v3(nodeState[ni * 3 + 2]);
@@ -606,15 +625,15 @@ kernel void floorFrame(
     // Record registers.
     uint rec[RS];
     float4 s0[RS], s1[RS], ax[RS];
-    for (uint s = 0; s < RS; s++)
+    for (uint s = 0; s < Z_RS; s++)
     {
-        rec[s] = perm[s * LANES + lid];
+        rec[s] = perm[s * Z_LANES + lid];
         uint r = rec[s] == NONE ? 0u : rec[s];
         s0[s] = recState[r * 3];
         s1[s] = recState[r * 3 + 1];
         ax[s] = recState[r * 3 + 2];
     }
-    for (uint g = lid; g < NG; g += LANES) atomic_store_explicit(&tgMaster[g], NONE, memory_order_relaxed);
+    for (uint g = lid; g < Z_NG; g += Z_LANES) atomic_store_explicit(&tgMaster[g], NONE, memory_order_relaxed);
     if (lid == 0)
     {
         tgFlags[0] = misc[0]; // shifts pending from the last collision pass
@@ -625,21 +644,21 @@ kernel void floorFrame(
         tgFlags[6] = misc[1]; // status
     }
 #if COLLIDE
-    for (uint q = lid; q < 4; q += LANES) atomic_store_explicit(&tgCount[q], 0u, memory_order_relaxed);
+    for (uint q = lid; q < 4; q += Z_LANES) atomic_store_explicit(&tgCount[q], 0u, memory_order_relaxed);
     if (lid == 0) atomic_store_explicit(&tgCount[1], misc[2], memory_order_relaxed);
     if (lid == 0) tgFlags[2] = misc[3]; // the list must be built
 #endif
     threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
 
     for (uint frame = 0; frame < P.frames; frame++)
-    for (uint step = 0; step < STEPS; step++)
+    for (uint step = 0; step < Z_STEPS; step++)
     {
         // ---- S0: the node pass ----
         bool shiftsPending = tgFlags[0] != 0u;
         if ((frame != 0u || step != 0u) && !SKIP(11))
         {
             // The groups the last beam pass set off (torsion watches read them).
-            for (uint g = lid; g < NG; g += LANES)
+            for (uint g = lid; g < Z_NG; g += Z_LANES)
             {
                 groupsLast[g] = atomic_load_explicit(&tgMaster[g], memory_order_relaxed) != NONE ? 1u : 0u;
                 atomic_store_explicit(&tgMaster[g], NONE, memory_order_relaxed);
@@ -716,7 +735,7 @@ kernel void floorFrame(
             tgDv[ni * 3] = dv.x; tgDv[ni * 3 + 1] = dv.y; tgDv[ni * 3 + 2] = dv.z;
         }
         // Triangle breaks (spec §18): from the broken flags as the beam pass starts.
-        for (uint t = lid; t < NT && !SKIP(9); t += LANES)
+        for (uint t = lid; t < Z_NT && !SKIP(9); t += Z_LANES)
         {
             if (triDead[t] == 0u)
             {
@@ -738,7 +757,7 @@ kernel void floorFrame(
         if (lid == 0) { tgFlags[0] = 0u; tgFlags[1] = 0u; tgFlags[3] = 0u; }
 
         // ---- S1: the centred damping's slots (last beam pass's slopes) ----
-        for (uint s = 0; s < RS && !SKIP(1); s++)
+        for (uint s = 0; s < Z_RS && !SKIP(1); s++)
         {
             uint r = rec[s];
             if (r == NONE) continue;
@@ -832,10 +851,10 @@ kernel void floorFrame(
         bool deformReq[RS];
 #if FAST_SUMS
         V3 lastPush[RS];
-        for (uint s = 0; s < RS; s++) lastPush[s] = v3(0, 0, 0);
+        for (uint s = 0; s < Z_RS; s++) lastPush[s] = v3(0, 0, 0);
 #endif
-        for (uint s = 0; s < RS; s++) deformReq[s] = false;
-        for (uint s = 0; s < RS && !SKIP(3); s++)
+        for (uint s = 0; s < Z_RS; s++) deformReq[s] = false;
+        for (uint s = 0; s < Z_RS && !SKIP(3); s++)
         {
             uint r = rec[s];
             if (r == NONE) continue;
@@ -983,7 +1002,7 @@ kernel void floorFrame(
         if (anyFired)
         {
             // Beams after a group's first break in this pass were skipped: take theirs back.
-            for (uint s = 0; s < RS; s++)
+            for (uint s = 0; s < Z_RS; s++)
             {
                 uint r = rec[s];
                 if (r == NONE) continue;
@@ -1029,7 +1048,7 @@ kernel void floorFrame(
             tgF[ni * 3] = F0.x; tgF[ni * 3 + 1] = F0.y; tgF[ni * 3 + 2] = F0.z;
 #endif
         }
-        for (uint s = 0; s < RS && !SKIP(10); s++)
+        for (uint s = 0; s < Z_RS && !SKIP(10); s++)
         {
             uint r = rec[s];
             if (r == NONE) continue;
@@ -1067,7 +1086,7 @@ kernel void floorFrame(
         // ---- S5: self-collision ----
         // S5a: each triangle's frames and boxes; whether the pair list still holds.
         const float vmax = as_type<float>(atomic_load_explicit(&tgCount[0], memory_order_relaxed));
-        for (uint t = lid; t < NT && !SKIP(5); t += LANES)
+        for (uint t = lid; t < Z_NT && !SKIP(5); t += Z_LANES)
         {
             uint4 tn = tris[t];
             V3 p[3], v[3];
@@ -1120,9 +1139,9 @@ kernel void floorFrame(
         if (tgFlags[2] != 0u)
         {
             // S5b: the list built: every allowed pair inside the list box.
-            for (uint k = lid; k < NT * NC; k += LANES)
+            for (uint k = lid; k < Z_NT * Z_NC; k += Z_LANES)
             {
-                uint t = k / NC, c = k - t * NC;
+                uint t = k / Z_NC, c = k - t * Z_NC;
                 if ((allowed[t * NCW + (c >> 5)] & (1u << (c & 31u))) == 0u) continue;
                 device float4* g = triGeo + t * GEO;
                 if (g[9].w != 0.0f) continue; // a dead triangle stays dead
@@ -1144,7 +1163,7 @@ kernel void floorFrame(
         }
         // S5c: the listed pairs: the box test, then anti-clip's hit test.
         const uint npairs = min(atomic_load_explicit(&tgCount[1], memory_order_relaxed), (uint)PAIR_CAP);
-        for (uint k = lid; k < npairs && !SKIP(7); k += LANES)
+        for (uint k = lid; k < npairs && !SKIP(7); k += Z_LANES)
         {
             uint pr = pairs[k];
             uint t = pr >> 16, h = pr & 0xFFFFu;
@@ -1240,7 +1259,7 @@ kernel void floorFrame(
             }
             const uint nh = min(nhits, (uint)HIT_CAP);
             // S6: the two-body rule's first pass, from the forces at the pass's start.
-            for (uint k = lid; k < nh; k += LANES)
+            for (uint k = lid; k < nh; k += Z_LANES)
             {
                 uint4 id = as_type<uint4>(hitBuf[k * HITW]);
                 float4 wp = hitBuf[k * HITW + 1];
@@ -1299,7 +1318,7 @@ kernel void floorFrame(
             threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
             // S7: the residual pass, from the forces with the first pass's sums.
             #define NOW1(i) (v3(tgF[(i) * 3], tgF[(i) * 3 + 1], tgF[(i) * 3 + 2]) + v3(float(atomic_load_explicit(&stage[(i) * 6], memory_order_relaxed)), float(atomic_load_explicit(&stage[(i) * 6 + 1], memory_order_relaxed)), float(atomic_load_explicit(&stage[(i) * 6 + 2], memory_order_relaxed))) * (1.0f / 32.0f))
-            for (uint k = lid; k < nh; k += LANES)
+            for (uint k = lid; k < nh; k += Z_LANES)
             {
                 uint4 id = as_type<uint4>(hitBuf[k * HITW]);
                 float4 wp = hitBuf[k * HITW + 1];
@@ -1344,7 +1363,7 @@ kernel void floorFrame(
             // S8: the work guard, from the forces with both passes' sums; the totals added.
             #define SUM2(i, a) (atomic_load_explicit(&stage[(i) * 6 + (a)], memory_order_relaxed) + atomic_load_explicit(&stage[(i) * 6 + 3 + (a)], memory_order_relaxed))
             #define NOW2(i) (v3(tgF[(i) * 3], tgF[(i) * 3 + 1], tgF[(i) * 3 + 2]) + v3(float(SUM2(i, 0)), float(SUM2(i, 1)), float(SUM2(i, 2))) * (1.0f / 32.0f))
-            for (uint k = lid; k < nh; k += LANES)
+            for (uint k = lid; k < nh; k += Z_LANES)
             {
                 uint4 id = as_type<uint4>(hitBuf[k * HITW]);
                 float4 wp = hitBuf[k * HITW + 1];
@@ -1390,7 +1409,7 @@ kernel void floorFrame(
         nodeState[ni * 3 + 1] = f4(V0, 0);
         nodeState[ni * 3 + 2] = f4(F0, 0);
     }
-    for (uint s = 0; s < RS; s++)
+    for (uint s = 0; s < Z_RS; s++)
     {
         uint r = rec[s];
         if (r == NONE) continue;
@@ -1398,7 +1417,7 @@ kernel void floorFrame(
         recState[r * 3 + 1] = s1[s];
         recState[r * 3 + 2] = ax[s];
     }
-    for (uint g = lid; g < NG; g += LANES)
+    for (uint g = lid; g < Z_NG; g += Z_LANES)
         groupsLast[g] = atomic_load_explicit(&tgMaster[g], memory_order_relaxed) != NONE ? 1u : 0u;
     if (lid == 0)
     {

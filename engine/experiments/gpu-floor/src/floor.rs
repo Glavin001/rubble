@@ -309,7 +309,7 @@ pub fn state_of(s: &ExplicitBeams, l: &Layout, st: &Statics) -> State {
     State { node, rec, add, groups_last, deform, tri_dead, acc, shift, misc, clip }
 }
 
-pub fn msl(l: &Layout, st: &Statics, extra: &str) -> String {
+pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
     let f3 = |v: [f32; 3]| format!("float3(as_type<float>({}u), as_type<float>({}u), as_type<float>({}u))", v[0].to_bits(), v[1].to_bits(), v[2].to_bits());
     let boxes = if st.boxes.is_empty() {
         "#define NBOX 0\n".to_string()
@@ -323,7 +323,7 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str) -> String {
     let extra = format!("{extra}\n{boxes}");
     format!(
         "#define NN {}\n#define NR {}\n#define NT {}\n#define NG {}\n#define ND {}\n#define RS {}\n#define LANES {}\n#define STEPS {}\n#define NADD {}\n#define NCEN {}\n#define NODE_MAX_ADD {}\n#define NODE_MAX_CEN {}\n#define COLLIDE {}\n#define NC {}\n#define NCW {}\n#define GEO {GEO}\n#define HITW {HITW}\n#define PAIR_CAP {PAIR_CAP}\n#define HIT_CAP {HIT_CAP}\n#define CR as_type<float>({}u)\n#define LIST_REACH as_type<float>({}u)\n#define LIST_EPS 0.001f\n{}\n{}",
-        l.nn, l.nr, l.nt, l.ng, l.nd, l.rs, LANES, STEPS, l.nadd, l.ncen, l.max_add, l.max_cen,
+        l.nn, l.nr, l.nt, l.ng, l.nd, l.rs, LANES, STEPS / per_frame, l.nadd, l.ncen, l.max_add, l.max_cen,
         (l.nc > 0) as u32, l.nc.max(1), l.ncw, st.cr.to_bits(), st.list_reach.to_bits(), extra,
         include_str!("../kernels/floor.metal")
     )
@@ -332,6 +332,8 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str) -> String {
 /// The GPU side: N cars' buffers.
 pub struct Floor {
     pub gpu: Gpu,
+    /// Dispatches a frame (1: all substeps in one; STEPS: one a substep).
+    pub per_frame: usize,
     pub l: Layout,
     pub cars: usize,
     pso: ComputePipelineState,
@@ -357,7 +359,8 @@ pub struct Floor {
 
 impl Floor {
     pub fn new(gpu: Gpu, l: Layout, st: &Statics, cars: usize, fast: bool, extra: &str) -> anyhow::Result<Self> {
-        let pso = gpu.pipeline(&msl(&l, st, extra), "floorFrame", fast)?;
+        let per_frame = if extra.contains("PER_STEP") { STEPS } else { 1 };
+        let pso = gpu.pipeline(&msl(&l, st, extra, per_frame), "floorFrame", fast)?;
         let stat = vec![
             gpu.buffer(&st.node_static),
             gpu.buffer(&st.node_range),
@@ -374,7 +377,7 @@ impl Floor {
             gpu.buffer(&st.tris),
             gpu.buffer(&st.allowed),
         ];
-        let params = gpu.buffer(&[cars as u32, 1u32, 0.0f32.to_bits(), 0u32]);
+        let params = gpu.zeros(64);
         let z = |bytes: usize| gpu.zeros(bytes * cars);
         Ok(Self {
             node: z(l.nn * 3 * 16),
@@ -394,6 +397,7 @@ impl Floor {
             hits: z(HIT_CAP * HITW * 16),
             stage: z(l.nn * 48),
             gpu,
+            per_frame,
             l,
             cars,
             pso,
@@ -452,11 +456,14 @@ impl Floor {
 
     /// Timing only: `skip` leaves phases out (bit k: phase k of the kernel).
     pub fn run_skip(&self, frames: u32, skip: u32) -> f64 {
-        write(&self.params, &[self.cars as u32, frames, 0.0f32.to_bits(), skip]);
+        let l = &self.l;
+        let steps = STEPS / self.per_frame;
+        write(&self.params, &[self.cars as u32, if self.per_frame > 1 { 1 } else { frames }, 0.0f32.to_bits(), skip, LANES as u32, l.nn as u32, l.nt as u32, l.nc.max(1) as u32, steps as u32, l.ng as u32, l.rs as u32, 0]);
         let mut bufs: Vec<&Buffer> = vec![&self.params, &self.node, &self.stat[0], &self.stat[1], &self.stat[2], &self.stat[3], &self.stat[4], &self.stat[5]];
         bufs.extend([&self.rec, &self.stat[6], &self.stat[7], &self.add, &self.cen, &self.stat[8], &self.stat[9], &self.groups, &self.deform, &self.stat[10], &self.tri_dead, &self.acc, &self.shift, &self.misc]);
         bufs.extend([&self.stat[11], &self.stat[12], &self.stat[13], &self.tri_geo, &self.pairs, &self.pbuild, &self.clip, &self.hits, &self.stage]);
-        self.gpu.run(&self.pso, &bufs, self.cars as u64, LANES as u64)
+        let n = if self.per_frame > 1 { self.per_frame * frames as usize } else { 1 };
+        self.gpu.run_n(&self.pso, &bufs, self.cars as u64, LANES as u64, n)
     }
 }
 

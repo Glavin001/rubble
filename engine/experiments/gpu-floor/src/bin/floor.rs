@@ -42,7 +42,17 @@ fn main() -> anyhow::Result<()> {
     let gpu = Gpu::new()?;
     // --fast: Metal's fast math; --sums: unordered (atomic) beam and centred sums.
     let sums = flag("--sums");
-    let extra = if sums { "#define FAST_SUMS 1" } else { "" };
+    let mut extra = String::new();
+    if sums {
+        extra += "#define FAST_SUMS 1\n";
+    }
+    // --runtime-sizes: the counts as uniforms (a ledger measurement).
+    extra += if flag("--runtime-sizes") { "#define RUNTIME_SIZES 1\n" } else { "#define RUNTIME_SIZES 0\n" };
+    // --per-step: one dispatch a substep (34 a frame), the state reloaded each time.
+    if flag("--per-step") {
+        extra += "#define PER_STEP 1\n";
+    }
+    let extra = extra.as_str();
     let f = Floor::new(gpu, l, &st, cars, fast, extra)?;
     let (mt, w, tg) = f.threads_ok();
     println!("pipeline: max threads {mt}, simd {w}, threadgroup memory {tg} B");

@@ -39,13 +39,20 @@ impl Gpu {
 
     /// One dispatch of `groups` threadgroups of `threads`; returns the GPU ms.
     pub fn run(&self, pso: &ComputePipelineState, bufs: &[&Buffer], groups: u64, threads: u64) -> f64 {
+        self.run_n(pso, bufs, groups, threads, 1)
+    }
+
+    /// `n` dependent dispatches in one serial encoder (in order; each sees the last one's writes).
+    pub fn run_n(&self, pso: &ComputePipelineState, bufs: &[&Buffer], groups: u64, threads: u64, n: usize) -> f64 {
         let cb = self.queue.new_command_buffer();
         let enc = cb.new_compute_command_encoder();
         enc.set_compute_pipeline_state(pso);
         for (i, b) in bufs.iter().enumerate() {
             enc.set_buffer(i as u64, Some(b), 0);
         }
-        enc.dispatch_thread_groups(MTLSize::new(groups, 1, 1), MTLSize::new(threads, 1, 1));
+        for _ in 0..n {
+            enc.dispatch_thread_groups(MTLSize::new(groups, 1, 1), MTLSize::new(threads, 1, 1));
+        }
         enc.end_encoding();
         cb.commit();
         cb.wait_until_completed();
