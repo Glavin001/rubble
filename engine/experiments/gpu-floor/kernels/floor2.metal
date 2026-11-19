@@ -172,7 +172,7 @@ inline V3 contactForcePlain(V3 f, V3 v, float m, V3 n, float friction)
     float g = BOXS.mc + (BOXS.ms - BOXS.mc) * e;
     return r * n - ((g + rmin(BOXS.t2 * sigma, 5.0f)) * gr) * sl;
 }
-// Shape rows (float4): 0 body, kind (0 box, 1 sphere), radius, peak; 1 half; 2 reference;
+// Shape rows (float4): 0 body, kind (0 box, 1 sphere), radius, peak; 1 hf3; 2 reference;
 // 3 impulse; 4 moment; 5 lo, identity; 6 hi; 7 centre; 8..10 axes. Body rows: 0 pos,
 // inverse mass; 1 rot; 2 vel, share; 3 ang vel; 4 inverse inertia, the step's count.
 #define SHW 11
@@ -191,11 +191,11 @@ inline bool rigidFace(device const float4* sh, V3 x, thread V3& normal)
         normal = l > 0.0f ? v3(d.x / l, d.y / l, d.z / l) : v3(0.0f, 1.0f, 0.0f);
         return true;
     }
-    V3 half = v3(sh[1]);
+    V3 hf3 = v3(sh[1]);
     if (lo.w != 0.0f)
     {
         // An identity rotation: box_face on the axis-aligned box.
-        V3 blo = c - half, bhi = c + half;
+        V3 blo = c - hf3, bhi = c + hf3;
         if (!(x.x > blo.x && x.x < bhi.x && x.y > blo.y && x.y < bhi.y && x.z > blo.z && x.z < bhi.z)) return false;
         normal = v3(0.0f, 0.0f, -1.0f);
         float dist = x.z - blo.z;
@@ -209,14 +209,14 @@ inline bool rigidFace(device const float4* sh, V3 x, thread V3& normal)
     V3 a0 = v3(sh[8]), a1 = v3(sh[9]), a2 = v3(sh[10]);
     V3 d = x - c;
     V3 l = v3(dot3(a0, d), dot3(a1, d), dot3(a2, d));
-    if (!(l.x > -half.x && l.x < half.x && l.y > -half.y && l.y < half.y && l.z > -half.z && l.z < half.z)) return false;
+    if (!(l.x > -hf3.x && l.x < hf3.x && l.y > -hf3.y && l.y < hf3.y && l.z > -hf3.z && l.z < hf3.z)) return false;
     normal = -a2;
-    float dist = l.z + half.z;
-    if (half.z - l.z < dist) { dist = half.z - l.z; normal = a2; }
-    if (l.x + half.x < dist) { dist = l.x + half.x; normal = -a0; }
-    if (half.x - l.x < dist) { dist = half.x - l.x; normal = a0; }
-    if (l.y + half.y < dist) { dist = l.y + half.y; normal = -a1; }
-    if (half.y - l.y < dist) { dist = half.y - l.y; normal = a1; }
+    float dist = l.z + hf3.z;
+    if (hf3.z - l.z < dist) { dist = hf3.z - l.z; normal = a2; }
+    if (l.x + hf3.x < dist) { dist = l.x + hf3.x; normal = -a0; }
+    if (hf3.x - l.x < dist) { dist = hf3.x - l.x; normal = a0; }
+    if (l.y + hf3.y < dist) { dist = l.y + hf3.y; normal = -a1; }
+    if (hf3.y - l.y < dist) { dist = hf3.y - l.y; normal = a1; }
     return true;
 }
 #endif
@@ -518,8 +518,8 @@ kernel void floorFrame(
                 float xx = q.x * x2, xy = q.x * y2, xz = q.x * z2, yy = q.y * y2, yz = q.y * z2, zz = q.z * z2;
                 float wx = q.w * x2, wy = q.w * y2, wz = q.w * z2;
                 V3 a0 = v3(1.0f - (yy + zz), xy + wz, xz - wy), a1 = v3(xy - wz, 1.0f - (xx + zz), yz + wx), a2 = v3(xz + wy, yz - wx, 1.0f - (xx + yy));
-                V3 half = v3(sh[1]);
-                V3 ext = v3((fabs(a0.x) * half.x + fabs(a1.x) * half.y) + fabs(a2.x) * half.z, (fabs(a0.y) * half.x + fabs(a1.y) * half.y) + fabs(a2.y) * half.z, (fabs(a0.z) * half.x + fabs(a1.z) * half.y) + fabs(a2.z) * half.z);
+                V3 hf3 = v3(sh[1]);
+                V3 ext = v3((fabs(a0.x) * hf3.x + fabs(a1.x) * hf3.y) + fabs(a2.x) * hf3.z, (fabs(a0.y) * hf3.x + fabs(a1.y) * hf3.y) + fabs(a2.y) * hf3.z, (fabs(a0.z) * hf3.x + fabs(a1.z) * hf3.y) + fabs(a2.z) * hf3.z);
                 lo = p - ext; hi = p + ext;
                 sh[8] = f4(a0, 0); sh[9] = f4(a1, 0); sh[10] = f4(a2, 0);
             }
