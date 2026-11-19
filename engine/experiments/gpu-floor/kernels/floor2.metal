@@ -35,7 +35,7 @@ struct Params
 // the slot's hot record, one streamed device load a slot a phase). 0: w0, k, c, rest, up;
 // 1: w0, c, up; 2: w0, up.
 #ifndef REGMODE
-#define REGMODE 1
+#define REGMODE 0
 #endif
 #define HOTS(s) hot[lid * 6 + (s)]
 #define BAR threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)
@@ -59,13 +59,25 @@ struct Params
 #ifndef TGVEC
 #define TGVEC 1
 #endif
+// TGPV: a node's position and velocity next to each other (an end of a beam is then six
+// adjacent floats, where adjacent loads are nearly free).
+#ifndef TGPV
+#define TGPV 0
+#endif
 #if TGVEC
 inline V3 v3p(packed_float3 a) { return v3(a.x, a.y, a.z); }
+#if TGPV
+#define TGP(i) v3p(tgPos[(i) * 2u])
+#define TGV(i) v3p(tgPos[(i) * 2u + 1u])
+#define SETP(i, val) { V3 _v = (val); tgPos[(i) * 2u] = packed_float3(_v.x, _v.y, _v.z); }
+#define SETV(i, val) { V3 _v = (val); tgPos[(i) * 2u + 1u] = packed_float3(_v.x, _v.y, _v.z); }
+#else
 #define TGP(i) v3p(tgPos[i])
 #define TGV(i) v3p(tgVel[i])
-#define GETV(vi) v3p(tgVec[vi])
 #define SETP(i, val) { V3 _v = (val); tgPos[i] = packed_float3(_v.x, _v.y, _v.z); }
 #define SETV(i, val) { V3 _v = (val); tgVel[i] = packed_float3(_v.x, _v.y, _v.z); }
+#endif
+#define GETV(vi) v3p(tgVec[vi])
 #define PUTV(vi, val) { V3 _v = (val); tgVec[vi] = packed_float3(_v.x, _v.y, _v.z); }
 #else
 #define TGP(i) v3(tgPos[(i) * 3], tgPos[(i) * 3 + 1], tgPos[(i) * 3 + 2])
@@ -287,8 +299,12 @@ kernel void floorFrame(
     uint car [[threadgroup_position_in_grid]])
 {
 #if TGVEC
+#if TGPV
+    TGDECL(packed_float3, tgPos, NN * 2);
+#else
     TGDECL(packed_float3, tgPos, NN);
     TGDECL(packed_float3, tgVel, NN);
+#endif
     TGDECL(packed_float3, tgVec, NV);
 #else
     TGDECL(float, tgPos, NN * 3);
