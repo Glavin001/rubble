@@ -53,6 +53,10 @@ pub struct Statics {
     pub list_reach: f32,
     pub cr: f32,
     pub boxes: Vec<([f32; 3], [f32; 3])>,
+    /// The second layout's table (lanes, node entry lists, vector indices) and defines;
+    /// empty: the first layout.
+    pub v2_tab: Vec<u32>,
+    pub v2_defs: String,
 }
 
 /// One car's state in the kernel's layout.
@@ -232,7 +236,7 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     let list_reach = cr + engine_softbody::explicit_contact::CLIP_DEPTH + LIST_SKIN;
     Ok((
         Layout { nn, nr, nt, ng, nd, rs, nadd, ncen, max_add, max_cen, nc, ncw },
-        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect() },
+        Statics { node_static, node_range, rec_a, rec_k, rec_b, rec_e, rec_ent, rec_cen, add_info, perm, tri_breaks, cands: s.candidates.clone(), tris, allowed, list_reach, cr, boxes: s.boxes.iter().map(|b| (b.lo.to_array(), b.hi.to_array())).collect(), v2_tab: Vec::new(), v2_defs: String::new() },
     ))
 }
 
@@ -300,6 +304,13 @@ pub fn state_of(s: &ExplicitBeams, l: &Layout, st: &Statics) -> State {
     let mut misc = vec![0u32; 16];
     misc[0] = pending as u32;
     misc[3] = 1; // the pair list is built at the first step
+    // (The second layout's event flags, set so that its first step looks: contact sums and
+    // stage words, side memory, the groups the last beam pass set off, triangle breaks.)
+    misc[4] = 1;
+    misc[7] = 1;
+    misc[8] = 1;
+    misc[9] = if s.groups_now.is_empty() { 0 } else { 2 };
+    misc[10] = 1;
     let mut clip = vec![engine_softbody::explicit_contact::CLIP_EMPTY; l.nn * 4];
     if s.clip_sides.len() == l.nn {
         for (i, c) in s.clip_sides.iter().enumerate() {
@@ -321,6 +332,15 @@ pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
         )
     };
     let extra = format!("{extra}\n{boxes}");
+    if !st.v2_tab.is_empty() {
+        let v1 = include_str!("../kernels/floor.metal");
+        let helpers = &v1[..v1.find("// ---- buffers ---").expect("the marker")];
+        return format!(
+            "#define NN {}\n#define NR {}\n#define NT {}\n#define NG {}\n#define ND {}\n#define LANES {}\n#define STEPS {}\n#define COLLIDE {}\n#define NC {}\n#define NCW {}\n#define HITW {HITW}\n#define HIT_CAP {HIT_CAP}\n#define CR as_type<float>({}u)\n#define LIST_REACH as_type<float>({}u)\n#define LIST_EPS 0.001f\n#ifndef RUNTIME_SIZES\n#define RUNTIME_SIZES 0\n#endif\n{}\n{}\n{}\n{}",
+            l.nn, l.nr, l.nt, l.ng, l.nd, LANES, STEPS / per_frame, (l.nc > 0) as u32, l.nc.max(1), l.ncw, st.cr.to_bits(), st.list_reach.to_bits(),
+            extra, st.v2_defs, helpers, include_str!("../kernels/floor2.metal")
+        );
+    }
     format!(
         "#define NN {}\n#define NR {}\n#define NT {}\n#define NG {}\n#define ND {}\n#define RS {}\n#define LANES {}\n#define STEPS {}\n#define NADD {}\n#define NCEN {}\n#define NODE_MAX_ADD {}\n#define NODE_MAX_CEN {}\n#define COLLIDE {}\n#define NC {}\n#define NCW {}\n#define GEO {GEO}\n#define HITW {HITW}\n#define PAIR_CAP {PAIR_CAP}\n#define HIT_CAP {HIT_CAP}\n#define CR as_type<float>({}u)\n#define LIST_REACH as_type<float>({}u)\n#define LIST_EPS 0.001f\n{}\n{}",
         l.nn, l.nr, l.nt, l.ng, l.nd, l.rs, LANES, STEPS / per_frame, l.nadd, l.ncen, l.max_add, l.max_cen,
@@ -334,6 +354,7 @@ pub struct Floor {
     pub gpu: Gpu,
     /// Dispatches a frame (1: all substeps in one; STEPS: one a substep).
     pub per_frame: usize,
+    v2: bool,
     pub l: Layout,
     pub cars: usize,
     pso: ComputePipelineState,
@@ -386,7 +407,8 @@ impl Floor {
             node: z(l.nn * 3 * 16),
             rec: z(l.nr * 3 * 16),
             add: z(l.nadd * 16),
-            cen: z(l.ncen * 16),
+            cen: if st.v2_tab.is_empty() { z(l.ncen * 16) } else { gpu.buffer(&st.v2_tab) },
+            v2: !st.v2_tab.is_empty(),
             groups: z(l.ng * 4),
             deform: z(l.nd * 4),
             tri_dead: z(l.nt * 4),
@@ -421,7 +443,9 @@ impl Floor {
         put(&self.node, car * l.nn * 48, bytemuck::cast_slice(&s.node));
         put(&self.rec, car * l.nr * 48, bytemuck::cast_slice(&s.rec));
         put(&self.add, car * l.nadd * 16, bytemuck::cast_slice(&s.add));
-        put(&self.cen, car * l.ncen * 16, &vec![0u8; l.ncen * 16]);
+        if !self.v2 {
+            put(&self.cen, car * l.ncen * 16, &vec![0u8; l.ncen * 16]);
+        }
         put(&self.groups, car * l.ng * 4, bytemuck::cast_slice(&s.groups_last));
         put(&self.deform, car * l.nd * 4, bytemuck::cast_slice(&s.deform));
         put(&self.tri_dead, car * l.nt * 4, bytemuck::cast_slice(&s.tri_dead));
@@ -456,7 +480,7 @@ impl Floor {
     fn per_car(&self) -> Vec<(&Buffer, usize)> {
         let l = &self.l;
         vec![
-            (&self.node, l.nn * 48), (&self.rec, l.nr * 48), (&self.add, l.nadd * 16), (&self.cen, l.ncen * 16), (&self.groups, l.ng * 4),
+            (&self.node, l.nn * 48), (&self.rec, l.nr * 48), (&self.add, l.nadd * 16), (&self.cen, if self.v2 { 0 } else { l.ncen * 16 }), (&self.groups, l.ng * 4),
             (&self.deform, l.nd * 4), (&self.tri_dead, l.nt * 4), (&self.acc, l.nn * 12), (&self.shift, l.nn * 12), (&self.misc, 64),
             (&self.tri_geo, l.nt * GEO * 16), (&self.pairs, PAIR_CAP * 4), (&self.pbuild, l.nn * 16), (&self.clip, l.nn * 16),
             (&self.hits, HIT_CAP * HITW * 16), (&self.stage, l.nn * 48),
@@ -529,7 +553,12 @@ pub fn compare(cpu: &ExplicitBeams, g: &State) -> (usize, Vec<String>) {
             continue;
         }
         let slope = cpu.damp_slopes.get(j).copied().unwrap_or(0.0);
+        let v2 = g.misc[15] == 2;
         for (name, gv, cv) in [("rest", s0[0], b.rest), ("tc", s0[1], b.tc), ("tt", s0[2], b.tt), ("gate", s0[3], b.gate), ("strength", s1[0], b.strength), ("force", s1[1], b.force), ("slope", s1[2], slope)] {
+            // (The second layout keeps no last force: an output no rule reads.)
+            if v2 && name == "force" {
+                continue;
+            }
             if gv.to_bits() != cv.to_bits() {
                 bad += 1;
                 note(format!("beam {j} ({:?}) {name} gpu {gv:e} cpu {cv:e}", b.kind));
@@ -605,6 +634,7 @@ pub struct Emu {
     /// The 31 buffers in binding order.
     pub bufs: Vec<Vec<u8>>,
     pub reverse: bool,
+    v2: bool,
     /// Substeps a run (RUNTIME_SIZES kernels only; else STEPS).
     pub steps: usize,
 }
@@ -617,7 +647,7 @@ impl Emu {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("emu");
         let exe = dir.join("emu");
         let out = std::process::Command::new("xcrun")
-            .args(["clang++", "-std=c++20", "-O1", "-ffp-contract=off", "-w", "-I"])
+            .args(["clang++", "-std=c++20", "-O1", "-ffp-contract=off", "-w", if st.v2_tab.is_empty() { "-DV1" } else { "-DV2" }, "-I"])
             .arg(&here)
             .arg("-I")
             .arg(here.join("metal_stdlib_dir"))
@@ -646,13 +676,13 @@ impl Emu {
         bufs[22] = if st.cands.is_empty() { z(16) } else { b(bytemuck::cast_slice(&st.cands)) };
         bufs[23] = b(bytemuck::cast_slice(&st.tris));
         bufs[24] = b(bytemuck::cast_slice(&st.allowed));
-        bufs[12] = z(l.ncen * 16);
+        bufs[12] = if st.v2_tab.is_empty() { z(l.ncen * 16) } else { b(bytemuck::cast_slice(&st.v2_tab)) };
         bufs[25] = z(l.nt * GEO * 16);
         bufs[26] = z(PAIR_CAP * 4);
         bufs[27] = z(l.nn * 16);
         bufs[29] = z(HIT_CAP * HITW * 16);
         bufs[30] = z(l.nn * 48);
-        Ok(Self { l, exe, dir: dir.to_path_buf(), bufs, reverse: false, steps: STEPS })
+        Ok(Self { l, exe, dir: dir.to_path_buf(), bufs, reverse: false, v2: !st.v2_tab.is_empty(), steps: STEPS })
     }
 
     pub fn upload(&mut self, s: &State) {
@@ -660,7 +690,9 @@ impl Emu {
         self.bufs[1] = b(bytemuck::cast_slice(&s.node));
         self.bufs[8] = b(bytemuck::cast_slice(&s.rec));
         self.bufs[11] = b(bytemuck::cast_slice(&s.add));
-        self.bufs[12].fill(0);
+        if !self.v2 {
+            self.bufs[12].fill(0);
+        }
         self.bufs[15] = b(bytemuck::cast_slice(&s.groups_last));
         self.bufs[16] = b(bytemuck::cast_slice(&s.deform));
         self.bufs[18] = b(bytemuck::cast_slice(&s.tri_dead));
@@ -712,4 +744,134 @@ impl Emu {
         }
         Ok(())
     }
+}
+
+
+/// The second layout (kernels/floor2.metal) for this car: which lane holds which node,
+/// triangle and beam slots, each node's entry list in the reference's add order, and the
+/// vector slots of the elements whose force is not along a beam.
+pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::Result<()> {
+    use ExplicitKind as K;
+    let (nn, nr, nt) = (l.nn, l.nr, l.nt);
+    anyhow::ensure!(nn <= 1023 && nr < (1 << 24));
+    let scalar = |k: K| matches!(k, K::JbeamPlain | K::JbeamSupport | K::JbeamBounded | K::JbeamAniso | K::Plain);
+    for b in &s.beams {
+        if matches!(b.kind, K::JbeamPlain | K::JbeamSupport) {
+            anyhow::ensure!(b.ty.code() == 0 && b.a != b.b, "a plain or support beam the fast path does not cover");
+        }
+    }
+    // Scalar owners: plain by yield gate (a lane's slots near each other), supports, the rest.
+    let mut plain: Vec<usize> = (0..nr).filter(|&j| s.beams[j].kind == K::JbeamPlain).collect();
+    plain.sort_by(|&x, &y| s.beams[y].gate.min(s.beams[y].strength).total_cmp(&s.beams[x].gate.min(s.beams[x].strength)).then(x.cmp(&y)));
+    let mut owners = plain;
+    owners.extend((0..nr).filter(|&j| s.beams[j].kind == K::JbeamSupport));
+    owners.extend((0..nr).filter(|&j| scalar(s.beams[j].kind) && !matches!(s.beams[j].kind, K::JbeamPlain | K::JbeamSupport)));
+    let full = 3 * LANES;
+    let tail = owners.len().saturating_sub(full);
+    let aero_lo = tail.div_ceil(32) * 32;
+    let ngs = if owners.len() > full { owners.len() } else { full };
+    anyhow::ensure!(ngs <= 4096);
+    let mut perm = vec![NONE; 4 * LANES];
+    let mut gidx = vec![NONE; nr];
+    for (j, &r) in owners.iter().enumerate() {
+        let (slot, lane) = if j < full { (j % 3, j / 3) } else { (3, j - full) };
+        perm[slot * LANES + lane] = r as u32;
+        gidx[r] = (slot * LANES + lane) as u32;
+    }
+    // Vector owners in slot 3 from AERO_LO: aero triangles, couplers, torsion bars.
+    let aero: Vec<usize> = (0..nr).filter(|&j| s.beams[j].kind == K::JbeamAeroTri).collect();
+    let cpl: Vec<usize> = (0..nr).filter(|&j| s.beams[j].kind == K::JbeamCoupler).collect();
+    let tor: Vec<usize> = (0..nr).filter(|&j| s.beams[j].kind == K::JbeamTorsion).collect();
+    anyhow::ensure!(aero_lo + aero.len() + cpl.len() + tor.len() <= LANES, "no room for the vector elements");
+    let mut vidx = vec![0u32; nr];
+    let mut lane = aero_lo;
+    for (i, &r) in aero.iter().enumerate() {
+        perm[3 * LANES + lane] = r as u32;
+        vidx[r] = i as u32;
+        lane += 1;
+    }
+    let cpl_base = aero.len();
+    for (i, &r) in cpl.iter().enumerate() {
+        perm[3 * LANES + lane] = r as u32;
+        vidx[r] = (cpl_base + i) as u32;
+        lane += 1;
+    }
+    for (i, &r) in tor.iter().enumerate() {
+        perm[3 * LANES + lane] = r as u32;
+        vidx[r] = (cpl_base + cpl.len() + 4 * i) as u32;
+        lane += 1;
+    }
+    let nv = cpl_base + cpl.len() + 4 * tor.len();
+    anyhow::ensure!(nv <= 4096 && cpl.len() * 6 <= nn);
+    // Each node's entries in the reference's add order.
+    let mut ents: Vec<Vec<u32>> = vec![Vec::new(); nn];
+    for j in 0..nr {
+        let b = &s.beams[j];
+        for (q, &n) in adds_of(s, j).iter().enumerate() {
+            let e = match b.kind {
+                K::JbeamAeroTri => 1 << 31 | 1 << 29 | vidx[j],
+                K::JbeamCoupler => 1 << 31 | (q as u32) << 30 | vidx[j],
+                K::JbeamTorsion => 1 << 31 | (vidx[j] + q as u32),
+                _ => {
+                    anyhow::ensure!(scalar(b.kind) && gidx[j] != NONE, "record {j}: no slot");
+                    let other = if q == 0 { b.b } else { b.a };
+                    other | gidx[j] << 10
+                }
+            };
+            ents[n as usize].push(e);
+        }
+    }
+    // Nodes on lanes by entry count (a warp's lanes loop alike); triangles by their pair
+    // count in this pose.
+    let mut order: Vec<usize> = (0..nn).collect();
+    order.sort_by_key(|&i| (std::cmp::Reverse(ents[i].len()), i));
+    let reach = st.list_reach;
+    let count = |t: usize| -> usize {
+        let p = s.triangles[t].nodes.map(|i| s.nodes[i as usize].pos + s.origin);
+        let lo = p[0].min(p[1]).min(p[2]) - Vec3::splat(reach);
+        let hi = p[0].max(p[1]).max(p[2]) + Vec3::splat(reach);
+        (0..l.nc).filter(|&c| st.allowed[t * l.ncw + c / 32] >> (c % 32) & 1 != 0).filter(|&c| {
+            let x = s.nodes[s.candidates[c] as usize].pos + s.origin;
+            !(x.cmplt(lo).any() || x.cmpgt(hi).any())
+        }).count()
+    };
+    let counts: Vec<usize> = (0..nt).map(count).collect();
+    let mut tri_order: Vec<usize> = (0..nt).collect();
+    tri_order.sort_by_key(|&t| (std::cmp::Reverse(counts[t]), t));
+    anyhow::ensure!(nt <= LANES);
+    let prow = ((PAIR_CAP / nt.max(1)) & !3).min(124);
+    anyhow::ensure!(counts.iter().all(|&c| c + 1 < prow), "a triangle's pairs past its row ({} of {prow})", counts.iter().max().unwrap());
+    let t_lane = 0usize;
+    let t_vidx = t_lane + LANES * 4;
+    let t_ent = (t_vidx + nr + 3) & !3;
+    let mut tab = vec![0u32; t_ent];
+    tab[t_vidx..t_vidx + nr].copy_from_slice(&vidx);
+    let mut maxent = 0;
+    for lane in 0..LANES {
+        let (mut node, mut start, mut cnt) = (NONE, 0u32, 0u32);
+        if lane < nn {
+            let i = order[lane];
+            node = i as u32;
+            start = (tab.len() - t_ent) as u32;
+            cnt = ents[i].len() as u32;
+            maxent = maxent.max(ents[i].len());
+            tab.extend_from_slice(&ents[i]);
+            while tab.len() % 4 != 0 {
+                tab.push(0);
+            }
+        }
+        tab[t_lane + lane * 4] = node;
+        tab[t_lane + lane * 4 + 1] = start;
+        tab[t_lane + lane * 4 + 2] = cnt;
+        tab[t_lane + lane * 4 + 3] = if lane < nt { tri_order[lane] as u32 } else { NONE };
+    }
+    tab.extend_from_slice(&[0; 8]);
+    st.perm = perm;
+    st.v2_tab = tab;
+    st.v2_defs = format!(
+        "#define NGS {ngs}\n#define NV {}\n#define AERO_LO {aero_lo}\n#define CPL_BASE {cpl_base}\n#define T_LANE {t_lane}\n#define T_VIDX {t_vidx}\n#define T_ENT {t_ent}\n#define MAXENT {maxent}\n#define PROW {prow}\n#define REFNODE 0\n",
+        nv.max(1)
+    );
+    l.rs = 4;
+    Ok(())
 }

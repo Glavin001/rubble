@@ -37,7 +37,11 @@ fn main() -> anyhow::Result<()> {
     for _ in 0..handoff * STEPS {
         cpu.step();
     }
-    let (l, st) = layout_and_statics(&cpu)?;
+    let (mut l, mut st) = layout_and_statics(&cpu)?;
+    // --v2: the second layout (kernels/floor2.metal).
+    if flag("--v2") {
+        make_v2(&cpu, &mut l, &mut st)?;
+    }
     println!("layout: nodes {} records {} lanes {} slots {} add entries {} (max {}) centred entries {} (max {}) groups {}", l.nn, l.nr, LANES, l.rs, l.nadd, l.max_add, l.ncen, l.max_cen, l.ng);
     if flag("--emu") {
         // The kernel's source on the CPU, against the reference (no GPU).
