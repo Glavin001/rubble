@@ -3662,13 +3662,15 @@ steps) against 9.35 / 12.23 / 13.17 off (1,512 steps, a run before a machine res
 flat arena the cars ram at speed, as in the mountain's first collisions: lists past the
 fleet's room or outlived in a few passes, and the flag's own cost on top.
 
-**Default: still off.** Bit for bit everywhere it was checked (fixtures on both terrains, the
-suites, the matrix, whole runs' final states, Chrome's frame-locked A/B on both terrains),
-and faster at the median on both terrains natively (−15 %) and in Chrome (−6 to −12 %). The
-rule was faster everywhere, and three places are not: the worst step of the native ledges run
+**Default: on** (the owner's decision, 2026-11-19: "just as good or faster and prepares us for
+the future"; main's default becomes 30932933, the lab page's box is ticked). Bit for bit
+everywhere it was checked (fixtures on both terrains, the suites, the matrix, whole runs'
+final states, Chrome's frame-locked A/B on both terrains), and faster at the median on both
+terrains natively (−15 %) and in Chrome (−6 to −12 %). The earlier rule was faster
+everywhere, and these places are not: the worst step of the native ledges run
 (+2 % in both rounds: the crash's levels and a build in one step), 32 cars (a tie, +0.5 % and
 −1.2 %: the list never holds there), the rolling gully's first 20 s in Chrome (+0.4 to
-1.6 %, the flag's own cost before the cars pile), and the derby (+6 % at 8 cars). The lab page's box stays unchecked. The
+1.6 %, the flag's own cost before the cars pile), and the derby (+6 % at 8 cars, one noisy real-time run each way). The
 stop rule ended the work: after the composition (−12 to −19 % on the 8-car fixtures) and the
 fleet's room (−12 to −16 % on the rolling gully), three attempts in a row each under 5 %
 (the per-lane tracking, no tracking after idle passes, 16 partners covered).
