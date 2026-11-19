@@ -25,7 +25,8 @@ kernel cannot wedge the Mac (`engine/tools/modal/README.md`).
 - Vulkan on Modal (wgpu crates, the World, `run.sh --modal`) is opt-in and never after
   a kernel edit: NVIDIA compiles each new kernel version on Modal's hosts (over 28
   minutes for one explicit-beams pipeline).
-- The scenario matrix (`run.sh SWITCH`), Metal, headless Chrome / WebGPU pages and
+- The scenario matrix on CUDA: `run.sh --cuda SWITCH` (Modal, no lock).
+- The scenario matrix on Metal (`run.sh SWITCH`), Metal, headless Chrome / WebGPU pages and
   wgpu work run on the Mac's GPU, following the rules below.
 
 ## Launching runs

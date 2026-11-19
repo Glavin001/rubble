@@ -158,6 +158,27 @@ on both drivers with 16 cores (one `explicit_beams_split_member_wide` pipeline c
 for over 1,700 s on one thread, so more cores do not help), about $2 across tries with
 no states made. Kernel edits go to the CUDA route instead.
 
+## The scenario matrix on CUDA
+
+`tools/scenario-matrix/run.sh --cuda SWITCH [ROW ...]` (from `engine/`) runs every row in
+a T4 container of its own (`gpu_run.sh --matrix-cuda`): engine-cuda's `explicit_replay`
+replays the row's portable fixture (`engine_exec::explicit_plan::portable`: every binding
+as the GPU held it, the layout, the planner's settings and the host's frame paths) with
+the switch on and off, and matrix.py prints the usual table and verdict. No World, scene
+or vehicle is built on Modal, so nothing compiles there; the device code is built locally
+(the 33 modules the rows need, listed by `explicit_replay --modules`).
+
+Once, after `run.sh --make` (on the Mac, under the GPU lock; reads each `ROW.fx` back as
+`portable/ROW.pfx`): `python3 scripts/with-gpu-lock.py -- env RUBBLE_GPU_LOCK=0 python3
+tools/scenario-matrix/matrix.py --make-portable`.
+
+Bit for bit is exact within CUDA. A switch that runs other modules (the split paths)
+needs `ENGINE_CUDA_FMAD=0` for that: by default nvcc fuses multiply-adds per module, so two
+modules doing the same arithmetic can differ in the last bit. Measured 2026-11-19 (T4):
+`perf=0` every row bit for bit, deltas within 2.4 %; `groupsplit` (strict) every row bit for
+bit, the contact rows 3 to 20 times faster with it. A run: about 4 minutes of local build
+after a kernel edit, then 50 to 120 container-seconds (2 to 4 cents) for the 12 rows.
+
 ## Cold kernel compiles (WebGPU route; read this first)
 
 wgpu creates each compute pipeline from SPIR-V, and NVIDIA's driver compiles it on the
