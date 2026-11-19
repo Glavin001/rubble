@@ -3362,3 +3362,212 @@ two levels whose owners share no vehicle could be one, which the rule already ma
 them) or fewer levels (the rule's levels are the owners' partner conflicts; a finer rule,
 by contact point and triangle node rather than by vehicle, would let more hits share a
 level).
+
+### 8.38 Bit-exact results as a setting, off by default: the fast arithmetic (2026-11-19)
+
+**Owner decision (2026-11-19).** Bit-identical results across machines are needed for
+testing and reproduction, not at run time. They become an engine-wide setting, **off by
+default**; on, everything works exactly as before (bit for bit, GPU == CPU reference),
+and every bit-for-bit suite runs with it on. The equations, the 2 kHz rate, the contacts
+and their rules (anti-clip, the two-body mass split, the no-positive-work residual), the
+iterations and the tolerances do not change. Runtime quality is that destruction looks
+and behaves right; last-bit variation between machines and runs is acceptable.
+
+**What is built** (branch `perf/fast-determinism`):
+- `ExplicitVehiclesDef::bit_exact` (World; `World::set_explicit_bit_exact` at run time),
+  `LabOptions::bit_exact` (lab JSON `bitExact`, the live command `{ bitExact }`, the
+  page's box "bit-exact results (testing)", `vehicle_lab --bit-exact 0|1`), default off;
+  `RUBBLE_BIT_EXACT=1` turns the default on. `ExplicitBeamsGpu`'s own constructors stay
+  bit-exact (its suites are the GPU == CPU contract); `with_settings(…, bit_exact)` and
+  `set_bit_exact` choose. A change remakes the pipelines (each compiled at first use) and
+  no state. `compute_specs_for(…, bit_exact)` gives a browser host the modules it will
+  create.
+- **Strict float operations** (`slang/physics/strict.slang`): every intermediate passes
+  through `nf`, an XOR with `gP.vehicles >> 31` that the compilers cannot know is zero,
+  and `sdiv` / `ssqrt` take one exact fma correction. With bit-exact off the host creates
+  its pipelines from the same WGSL with those three helpers' bodies replaced at run time
+  (`engine-webgpu/src/fast_float.rs`, `fast_float_wgsl`): `nf(x)` returns `x`, `sdiv` is
+  `a / b`, `ssqrt` is `sqrt`. Nothing else changes: every equation, operand and branch
+  is the kernel's; the compiler may now fuse multiply-adds and reassociate. `noFuseBits`
+  and `opaqueCount` keep the uniform (`opaqueCount` keeps loops loops for compile time,
+  `kernel-compile-time.md`). Strict mode's modules are the build's text byte for byte:
+  no Slang file changed, so engine-metal and CUDA (strict, parity hosts) are untouched.
+  The rewrite fails loudly if Slang's emitted shape changes (a unit test runs it over
+  every shipped module).
+- Harnesses that compare bit for bit turn it on themselves: `perf-verify.sh`
+  (`RUBBLE_BIT_EXACT=1`), `fast-check.sh` (`BIT_EXACT`, default 1, and `--bit-exact`),
+  the scenario matrix (`BIT_EXACT`, default 1), the Chrome A/B (`vehicle-lab-record.mjs
+  --ab` adds `bitExact=1`), and the World suites' definitions (`bit_exact: true`).
+- `--ab-switch bitexact` (on = bit-exact, off = fast; prints each side's physical
+  difference: largest node distance, broken beams, kinetic energy, finiteness) and
+  `--ab-perf-masks …,2147483648` (bit 31: that mask with bit-exact off, per wide pass).
+
+**Fixed-order contact sums: nothing converted, and why.** Every contact force already
+goes into integer fixed-point atomics (`accAdd`, `toFixed`), so the order of the adds is
+already free. What the levels (`vvLevelsSet`, `fleetLevels*`, `vvApplyOrderedBuckets`)
+and `selfApply`'s rounds order is not the sum but the **contact rule's input**: a hit's
+force reads its node's force with every earlier hit's share on that node added
+(`hitForce`'s `sum`; the vehicle-contact spec §3.1, the CPU reference, Rigs of Rods'
+sequential loop), and `contactResponse` stops the approach with `r = −f·n − (vn +
+max(vn, 0))·m/h` from that force. Applying every hit in one parallel pass would give each
+hit the node's force without the others' shares: two hits on one node would each cancel
+the same normal force (twice the stopping force, energy put in) and each friction cone
+would be sized from the wrong normal force. That changes the rule, not the order of
+additions, so they stay ordered in both settings. The residual and guard phases read the
+accumulated A and B for the same reason. The other order-keeping parts the brief asked
+about: the beams' CSR gather sums each node's incidence forces in a fixed order (in the
+fast setting the compiler may already reassociate that sum; a scatter would need float
+atomics, which WGSL lacks, or fixed-point beam forces, a change of the arithmetic: not
+built); `resolvePending` (break exceptions in spawn order: the break groups' rule); the
+grid scans (integer; they place candidates, not sums); `selfSerial` past `HIT_CAP` (the
+rule's one-lane fallback). None is order kept only for the bits.
+
+**Tolerance tests** (`engine-webgpu/tests/fast_arithmetic_gpu.rs`). The yardstick is not
+chosen by hand: the bit-exact kernel run as spawned and from four spawn states no one
+could tell apart (every node velocity one unit in the last place up, down; every
+velocity times 1 ± 1e-5). The fast setting must end within 4× the largest distance those
+runs end from the bit-exact one (floor 2 mm and 2 beams); its energy (kinetic plus
+gravity) may not rise past the start by more than 1 % of the start's kinetic energy plus
+the weight times 2 cm (the spawn's own elastic energy); every position finite; and it is
+deterministic run to run on one machine (every state word, twice). One second (60 frames
+of 34 steps), the repo sedan:
+
+| scene | fast vs bit-exact (mm): largest node / centroid / front / ride height | spread, the largest of 4 nudges (mm) | broken beams: bit-exact / fast / nudges |
+|---|---|---|---|
+| parked | 0.47 / 0.29 / 0.03 / 0.003 | 0 (a car at rest is not moved by 1e-5 of zero): the floor | 0 / 0 / 0 |
+| wall, 100 km/h | 229 / 5.4 / 1.4 / 4.3 | 270 / 3.6 / 12.3 / 2.7 | 266 / 266 / 266 ×4 |
+| head-on, 50 km/h each | 1418 / 8.3 / 10.6 / 1.1 | 1481 / 19.1 / 22.9 / 4.3 | 359 / 364 / 359, 359, 319, 364 |
+
+All three pass. They show: the fast setting is deterministic on one machine (its own
+run-to-run spread is zero; it differs only from the strict order), and a crash amplifies
+differences far below measurement to the size of a torn piece's flight (1.4 m at the
+largest node) and to tens of broken beams (319 to 364 from a 1e-5 change of speed). By
+that yardstick the fast setting is one more indistinguishable start, not another
+behaviour. (A single 1-ulp nudge was too narrow a yardstick: the head-on's front moved
+10.6 mm in the fast setting and 0.8 mm under one nudge; four nudges, two of them 1e-5 of
+speed, give 22.9 mm.)
+
+**Fixtures** (`fast-check.sh bitexact`, 20 frames each way from one state, native, cargo
+profile `fast`, M3 Max, under the lock; ms a frame of 34 steps; the largest node
+distance after 20 frames was 0.05 mm with one car, 0.21 with two, 0.13 with eight):
+
+| fixture | bit-exact | fast | |
+|---|---|---|---|
+| 1 car t 2.5 (free fall) | 3.26 | 3.51 | +8 % |
+| 1 car t 6 | 4.78 | 4.63 | −3 % |
+| 1 car t 20 (wreck at rest) | 4.64 | 4.52 | −3 % |
+| 2 cars t 2 / 3.7 / 8 / 16 | 7.25 / 8.26 / 11.96 / 12.00 | 7.15 / 7.78 / 11.26 / 11.69 | −1 / −6 / −6 / −3 % |
+| 8 cars t 2 / 3.7 / 8 / 16 / 20 / 30 | 11.81 / 18.83 / 14.90 / 16.70 / 17.30 / 21.46 | 11.18 / 17.12 / 13.89 / 15.63 / 16.20 / 19.70 | −5 / −9 / −7 / −6 / −6 / −8 % |
+| 32 cars t 1 / 2.5 / 4 | 23.34 / 19.10 / 35.89 | 19.97 / 17.93 / 33.35 | −14 / −6 / −7 % |
+
+**One car's passes** (`--ab-perf-masks 0,2147483648`, GPU ms a frame, each dispatch timed
+apart, 24 frames; the wall line: median / fastest tenth of 60 frames):
+
+| pass | t 20, bit-exact → fast | t 6 | t 2.5 |
+|---|---|---|---|
+| hits | 1.605 → 1.361 | 1.535 → 1.287 | 0.411 → 0.389 |
+| list | 1.387 → 1.358 | 1.371 → 1.345 | 0.965 → 0.872 |
+| nodes | 0.872 → 0.805 | 1.033 → 0.900 | 0.801 → 0.775 |
+| beams | 0.548 → 0.453 | 0.544 → 0.451 | 0.546 → 0.448 |
+| pairs | 0.553 → 0.503 | 0.528 → 0.476 | 0.465 → 0.430 |
+| centred beams / nodes | 0.220 / 0.310 → 0.198 / 0.316 | 0.219 / 0.302 → 0.197 / 0.303 | 0.220 / 0.302 → 0.196 / 0.304 |
+| aux | 0.073 → 0.064 | 0.073 → 0.063 | 0.074 → 0.065 |
+| wall | 4.71 / 4.64 → 4.39 / 4.33 | 4.71 / 4.64 → 4.35 / 4.27 | 3.25 / 3.18 → 3.13 / 3.06 |
+
+The hits (−15 %: the contact rule's long dependent chain, §8.35) and the beams (−17 %)
+shrink most; the list and the centred nodes (loads and integer index arithmetic) hardly
+move. That bears out §8.35 only in part: the XOR doubles a dependent chain only where the
+chain is float arithmetic; most phases are bound by loads and integer index arithmetic.
+
+**Scenario matrix** (`run.sh bitexact`; several values where a row was run again):
+
+| row | bit-exact ms | fast ms | fast vs bit-exact | largest node difference after 10 frames |
+|---|---|---|---|---|
+| drive | 3.310 / 3.524 | 3.231 / 3.331 | −2.4 / −5.5 % | 0.016 mm |
+| tumble | 3.241 / 3.390 | 3.278 / 3.218 | +1.1 / −5.1 % | 0.055 mm |
+| wall | 4.321 | 4.092 | −5.3 % | 8.2 mm |
+| pile2 | 8.330 | 7.900 | −5.2 % | 30.9 mm |
+| pile8 | 15.204 | 14.300 | −5.9 % | 16.6 mm |
+| pile32 | 39.550 | 36.207 | −8.5 % | 399 mm (broken beams 1113 / 1117) |
+| headon | 13.355 | 12.335 | −7.6 % | 126 mm |
+| side | 9.248 | 8.531 | −7.8 % | 2.9 mm |
+| bricks | 4.349 / 3.718 / 3.842 | 4.710 / 3.835 / 3.812 | +8.3 / +3.1 / −0.8 % | 0.29 mm |
+| rocks | 4.872 / 4.202 / 4.322 | 5.281 / 3.963 / 3.952 | +8.4 / −5.7 / −8.6 % | 11.7 mm |
+| barrier | 7.385 | 7.038 | −4.7 % | 1.5 mm |
+| truss | 2.706 / 1.777 / 1.924 | 3.131 / 1.844 / 2.000 | +16 / +3.8 / +4.0 % | 0.002 mm |
+
+The first round of bricks, rocks and truss ran beside other load (their slower fast
+halves did not repeat); in two reruns of five rounds bricks and rocks are level or
+faster. The truss (no vehicle, no self-collision, its frame the beam and node passes) is
+3–4 % slower in the fast setting both times, inside the matrix's 5 % threshold.
+
+**Whole 40 s runs, native** (release, `vehicle_lab --measure mountain-perf`, vehicles' GPU
+ms a World step from t 0.5 s, median / p95 / worst; each alone under the GPU lock, but
+the machine's user pages are not under it: a run whose p95 is far over its median had
+company):
+
+| | bit-exact | fast |
+|---|---|---|
+| 1 car, round 1 | 4.63 / 4.87 / 5.39 | 4.82 / 11.91 / 20.74 (company) |
+| 1 car, round 2 | 5.33 / 9.50 / 17.65 (company) | **3.95 / 4.46** / 11.57 |
+| 8 cars, round 1 | 18.17 / 28.86 / 52.89 | **15.97 / 19.36 / 23.71** |
+| 8 cars, round 2 | 17.74 / 21.96 / 23.33 | **15.91 / 18.76 / 23.03** |
+| 8 cars, launch speed × (1 ± 1e-5) | 17.39 / 18.95 / 21.62; 19.37 / 21.67 / 25.06 | |
+| 32 cars | 79.29 / 88.93 / 436.4 | stopped by the 20-minute limit at t 20 (below) |
+
+Each setting is deterministic run to run (both rounds of a setting end in the same state,
+0.0 mm); the two settings end in different states, and so do bit-exact runs whose launch
+speed differs by 1e-5: the eight cars end 0.06 to 1.2 km from the reference run's places
+either way (cars that slid on down the mountain in one run stop in another). A whole
+run's work therefore differs between the settings as it does between two launch speeds;
+its timing compares workloads as well as arithmetic. The fixtures above (one state, both
+ways) are the like-for-like figures.
+
+The 32-car fast run's frame rose to 700–860 ms from t 11 s (the bit-exact run had such
+frames only at t 18–19, 250 ms). The same state at t 12 run both ways (`--ab 12
+--ab-switch bitexact --ab-profile`): bit-exact 637 ms a frame, fast 548 ms; `explicit
+fleet pairs` alone 528 ms (15.5 ms a dispatch) and the fleet walk 87 ms. The cliff is the
+state's (a pile whose vehicle-contact pairs explode), reached by the fast run's path and
+not by this bit-exact one; both settings pay it. A follow-up for the fleet pairs, not a
+fast-setting issue.
+
+**Chrome** (headless, the lab page's own real-time loop, `vehicle-lab-record.mjs --probe`,
+vehicles' GPU ms a World step from t 0.5 s, median / p95; the page is not frame-locked, so
+two runs take two paths):
+
+| | bit-exact | fast |
+|---|---|---|
+| 1 car mountain, 40 s, round 1 | 4.27 / 5.29 | 4.80 / 6.19 |
+| 1 car mountain, 40 s, round 2 | 4.30 / 5.66 | 4.39 / 5.32 |
+| 8 cars mountain, first 5 s | 15.55 / 18.34 | **14.39 / 17.92** |
+| derby 4 cars, first 5 s | 5.97 / 7.16 | **5.52 / 6.17** |
+| 8 cars mountain, 40 s (bit-exact only) | 16.51 / 20.45; 16.53 / 20.57 | |
+| derby 4 / 8 cars, 40 s (bit-exact only) | 11.27 / 16.16; 16.50 / 20.19 | |
+
+All 124 fast modules pass Chrome's validation (`EXPLICIT_WGSL_MODULES_ONLY=1`, Tint,
+uniformity included). One car in Chrome does not gain (+12 % and +2 % median in two
+rounds): its frame is the wide passes, and Chrome's Metal back end compiles other MSL
+than naga's; the native gain (−7 %) does not carry over. The multi-car paths gain in
+Chrome as natively (−7 to −8 % in the first seconds). **A cold start in the fast setting
+is long in Chrome**: its modules are other text than the bit-exact ones, so nothing is
+cached the first time; the 8-car page took 190 s to start (two earlier attempts passed
+the recorder's 4-minute start limit while compiling), and the deferred modules compile
+while the page runs. The whole 40 s Chrome runs of 8 cars and the derby in the fast
+setting were not completed (the cold compiles and the session's shared GPU queue); only
+their first 5 s, warm.
+
+**What pays, what does not, what is kept.** Kept: the fast arithmetic as the World's and
+the lab's default (bit-exact off). Natively it is 3–14 % faster on every fixture but
+one-car free fall (+8 %), 5–9 % on the matrix's contact rows, and 7–8 % in Chrome on the
+multi-car paths, within the scene's own spread by the suite's yardstick. Not a gain: one
+car in Chrome (level to slower), the truss (3–4 % slower, inside the noise threshold),
+one car in free fall natively. No fixed-order contact sum was converted (the rule reads
+them). §8.35's reading that the strict XOR doubles every dependent chain overstated its
+share: one car's frame drops 7 %, not the 30–50 % a doubled ALU chain would give, because
+most phases wait on loads and integer index arithmetic.
+
+**Proofs that bit-exact is unchanged.** No Slang source changed; with bit-exact on the
+host passes the build's WGSL as before (`host_wgsl(src, true)` is the uniform-load
+rewrite alone, as on main). Suites with `RUBBLE_BIT_EXACT=1` (`perf-verify.sh default`):
+explicit_loop_cap 5, explicit_beams_bitwise 12, explicit_contact_gpu 13, explicit_pair_reuse_gpu 2, explicit_beam_order_gpu 3, debris_retire_gpu 1, showcase_car_gpu 6 (1 ignored, as before), vv_grid_gpu 2, fleet_contact_gpu 1, self_split_gpu 8, engine-world explicit_vehicles 11: PASS; vehicle_lab_reset, vehicle_lab_piece_windows and explicit_drive_world were queued when the machine restarted (not yet confirmed). engine-metal `vehicle_parity` was not run: no file it compiles or
+runs changed.
