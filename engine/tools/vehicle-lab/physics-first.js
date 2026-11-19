@@ -31,11 +31,11 @@
   const rows = window.__perfLog();
   const dmgAt = (t) => { let d = 0; for (const r of derby) if (r.t <= t) d = r.dmg; return d; };
   const f = (x, d = 1) => (x == null ? '-' : Number(x).toFixed(d));
-  const out = ['page s | sim s | off | rAF/s | steps/s | refused | drawn/s | frame p50/p95/max ms | GPU ms/step | GPU ms/drawn frame skin/shadow/picture | scale | max damage'];
+  const out = ['page s | sim s | off | rAF/s | steps/s | refused | drawn/s | frame p50/p95/max ms | GPU ms/step | GPU ms/drawn frame skin/shadow/picture | scale | CPU ms step/poll/draw (mean, max) | max damage'];
   for (const r of rows) {
     if (r.page * 1000 < t0 - 500) continue;
     const off = r.page >= offAt - 0.01 && r.page < offAt + DRAWOFF - 0.5;
-    out.push([f(r.page), f(r.sim, 2), off ? 'OFF' : '', r.fps, r.steps, r.refused, r.drawn, r.dt.join('/'), f(r.gpu, 2), r.gpuDraw ? r.gpuDraw.join('/') : '-', r.scale, f(100 * dmgAt(r.sim), 0) + '%'].join(' | '));
+    out.push([f(r.page), f(r.sim, 2), off ? 'OFF' : '', r.fps, r.steps, r.refused, r.drawn, r.dt.join('/'), f(r.gpu, 2), r.gpuDraw ? r.gpuDraw.join('/') : '-', r.scale, `${r.cpuStep.join(',')}/${r.cpuPoll.join(',')}/${r.cpuDraw.join(',')}`, f(100 * dmgAt(r.sim), 0) + '%'].join(' | '));
   }
   return out.join('\n');
 })()

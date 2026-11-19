@@ -6,7 +6,7 @@
 //   <script type="importmap">{ "imports": { "rubble-gpu-wait": "./fracture/gpu-wait.mjs" } }</script>
 import init, {
   WebWorld, WebCity, solverFlags, softCalibratedSettings, terrainSettings, terrainPredictImpact, terrainPredictExplosion, terrainLayout,
-  hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer,
+  hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, vehicleTownLayout, FramePacer, DrawPacer, setStepsInFlight,
   showcaseLayout, brickRingLayout, createVehicleLab as createVehicleLabWasm, vehicleLabMaterials,
   sceneFromQuery as wasmSceneFromQuery, presetScene as wasmPresetScene,
 } from './generated/world-wasm/engine_world_wasm.js';
@@ -19,7 +19,9 @@ import init, {
 // jbeamVisualSkinned(spec, meshes, glb, skin): the same for a vehicle whose
 // flexbodies are a glTF render model with weighted skins (flexskin, `.rskin`).
 // FramePacer(rate, gpuBudget): fixed steps per displayed frame (engine-world-wasm frame_pacer.rs).
-export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, FramePacer };
+// setStepsInFlight(n): World steps kept ahead of their readbacks (pacing only; lib.rs).
+// DrawPacer(): which displayed frames are drawn while the World steps, physics first (draw_pacer.rs).
+export { WebWorld, WebCity, softCalibratedSettings, hiresCarJbeam, explicitSedanTruck, showcaseCar, jbeamVisual, jbeamVisualSkinned, decodeTexture, FramePacer, DrawPacer, setStepsInFlight };
 let ready = null;
 
 /** The wasm's world-less functions (terrain settings, predictions, buffer layout), once loaded. */
