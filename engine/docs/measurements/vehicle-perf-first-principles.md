@@ -3362,3 +3362,61 @@ two levels whose owners share no vehicle could be one, which the rule already ma
 them) or fewer levels (the rule's levels are the owners' partner conflicts; a finer rule,
 by contact point and triangle node rather than by vehicle, would let more hits share a
 level).
+
+
+### 8.38 The floor measured directly: a purpose-built kernel for one sedan (2026-11-19)
+
+`engine/experiments/gpu-floor` (a workspace member nothing depends on): a hand-written
+Metal kernel for the lab's generated sedan alone, checked against the CPU reference, to
+measure what the car's physics costs once the production kernels' generality is gone. The
+car as the reference steps it: 548 nodes, 4,251 beam records (3,581 beams and 670
+aero-triangle records), 528 collision triangles, 424 contacters; centred damping, anti-clip
+with the swept test, the two-body rule, the residual pass and the work guard, fixed-point
+contact sums, dissipative exact-friction contact. Left out, as the brief asked: the World's
+coupling, raycast wheels, sleep, debris, surface contact, other cars. The ground is the
+reference's own plane and the wall its static box (the same contact law), 34 substeps a
+frame. Native M3 Max, through the GPU lock; logs in
+`~/Development/rubble-artifacts/gpu-floor/`.
+
+**How it is checked.**
+- *The kernel's logic, with no GPU*: `floor --emu` compiles the Metal source as C++ (a
+  small header stands in for the shading language; each lane is a coroutine, a barrier the
+  point where every lane has finished its phase) and compares every state word with
+  `ExplicitBeams::step` after each frame or each substep, lanes in either order. It found
+  the one bug of the first kernel (a start-up race on a counter) before any GPU time.
+- *On the GPU, strict*: fast math off **and** `#pragma clang fp contract(off)`. With fast
+  math off alone Metal still emits `llvm.fmuladd` (9 % of a·b + c differ from the CPU's);
+  with the pragma a·b + c, a/b and √a are the CPU's bits over 4 M random inputs
+  (`mathprobe`). No XOR barriers are needed for a strict Metal build.
+- *Closeness, for builds that are not bit for bit*: the one-frame defect (a second car
+  restarted from the reference's state every frame: worst node position and velocity
+  error) against the reference's own one-frame spread from starts moved by a micron; and
+  the free run's deviation (farthest node, centre of mass, kinetic energy, broken and bent
+  beams) against the reference's own spread over three such starts.
+
+**Strict is bit for bit on the GPU** in the four cases, every frame, every state word (node
+positions, velocities and forces; live beams' rest lengths, thresholds, strengths and
+slopes; broken flags; deform groups; dead triangles; fired groups; contact sums and
+position steps; anti-clip memory): a 5 cm drop to rest (120 frames), a 3 m fall and landing
+(120 frames, 9 beams broken), a 16 m/s wall crash (120 frames, up to 27 self-contacts a
+step), and a restart from the CPU's state 12 frames into that crash (60 frames).
+
+**The cost model, measured at 1,024 lanes** (`microbench`, µs a barrier phase of one
+threadgroup; 40 threadgroups give the same figures, one a core):
+
+| what | measured | so |
+|---|---|---|
+| an empty barrier phase | 0.073 | barriers are free |
+| 128 dependent fma: 1 / 8 / 32 warps active | 0.24 / 0.42 / 1.51 | a phase is bound by the core's throughput, 0.35 ns a warp-instruction, not by its longest chain (1.3 ns a step with one warp) |
+| 4 chains of 32 fma one after another / interleaved | 1.47 / 1.44 | interleaving buys nothing |
+| the same work in 16 of 32 warps | half | an idle warp is free |
+| threadgroup-memory loads | ≈0.4 ns a warp-load | about one instruction |
+| device loads: 4 streamed / 4 scattered / 16 scattered a lane | 3.9 / 23 / 29 ns a warp-load | 10 to 80 instructions each |
+| device atomic add: own word / 4 scattered | 2.6 / 38 ns | |
+| live registers a lane, each updated a phase: 16 / 48 / 80 / 112 / 160 | 0.19 / 0.32 / 1.1 / 5.0 / 4.2 ns an update | past about 48 they spill: 3× at 80, 15× at 112 |
+| 16 dependent √ or ÷: fast math / strict | 0.7 / 2.7 (√), 4.1 (÷) ns a warp | strict √ and ÷ cost 4 to 6× |
+
+This corrects §8.35's reading (8 ns a dependent step was eight warps sharing the core) and
+§2.2's cause (it is not latency): **a car's step on one core costs its warps' instructions,
+its device-memory accesses at 10 to 80 instructions each, and whatever its lanes keep
+alive past about 48 registers.**
