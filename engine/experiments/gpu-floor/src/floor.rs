@@ -81,6 +81,8 @@ pub struct V2Off {
     pub hot: usize,
     pub cand: usize,
     pub clu: usize,
+    pub rig: usize,
+    pub rig_words: usize,
     pub words: usize,
 }
 
@@ -103,6 +105,9 @@ pub fn v2_put(big: &mut [u8], o: &V2Off, s: &State) {
     put_at(big, o.shift, bytemuck::cast_slice(&s.shift));
     put_at(big, o.misc, bytemuck::cast_slice(&s.misc));
     put_at(big, o.clip, bytemuck::cast_slice(&s.clip));
+    if o.rig_words != 0 && s.rig.len() == o.rig_words {
+        put_at(big, o.rig, bytemuck::cast_slice(&s.rig));
+    }
 }
 pub fn v2_get(big: &[u8], o: &V2Off, l: &Layout) -> State {
     State {
@@ -116,6 +121,7 @@ pub fn v2_get(big: &[u8], o: &V2Off, l: &Layout) -> State {
         shift: get_at(big, o.shift, l.nn * 3),
         misc: get_at(big, o.misc, 16),
         clip: get_at(big, o.clip, l.nn * 4),
+        rig: get_at(big, o.rig, o.rig_words),
     }
 }
 
@@ -132,6 +138,85 @@ pub struct State {
     pub shift: Vec<i32>,
     pub misc: Vec<u32>,
     pub clip: Vec<u32>,
+    /// The rigid proxies' block (mechanism 3; empty without).
+    pub rig: Vec<u32>,
+}
+
+pub const BDW: usize = 5;
+pub const SHW: usize = 11;
+
+/// A proxy set as the kernel's rigid block: body rows, counts, shape rows, sums.
+pub fn rigid_state(r: &engine_softbody::explicit_rigid::ProxySet) -> anyhow::Result<Vec<u32>> {
+    use engine_softbody::explicit_rigid::ProxyGeom;
+    let (nb, nsh) = (r.bodies.len(), r.shapes.len());
+    anyhow::ensure!(nb <= 64 && nsh <= 64 && !r.frozen, "the rigid block holds 64 bodies and 64 shapes");
+    let mut w = vec![0u32; nb * BDW * 4 + 64 + nsh * SHW * 4 + nsh * 6];
+    let mut put = |at: usize, v: [f32; 4]| {
+        for k in 0..4 {
+            w[at + k] = v[k].to_bits();
+        }
+    };
+    for (i, b) in r.bodies.iter().enumerate() {
+        anyhow::ensure!(b.inv_mass > 0.0, "a static proxy body (not ported)");
+        let at = i * BDW * 4;
+        put(at, [b.pos.x, b.pos.y, b.pos.z, b.inv_mass]);
+        put(at + 4, [b.rot.x, b.rot.y, b.rot.z, b.rot.w]);
+        put(at + 8, [b.vel.x, b.vel.y, b.vel.z, b.share]);
+        put(at + 12, [b.ang_vel.x, b.ang_vel.y, b.ang_vel.z, 0.0]);
+        put(at + 16, [b.inv_inertia.x, b.inv_inertia.y, b.inv_inertia.z, f32::from_bits(b.count)]);
+    }
+    let base = nb * BDW * 4 + 64;
+    for (k, s) in r.shapes.iter().enumerate() {
+        anyhow::ensure!(s.local_pos == Vec3::ZERO && s.local_rot == glam::Quat::IDENTITY, "a shape off its body's frame (not ported)");
+        let at = base + k * SHW * 4;
+        let (kind, radius, half) = match &s.geom {
+            ProxyGeom::Box { half } => (0u32, 0.0, *half),
+            ProxyGeom::Sphere { radius } => (1, *radius, Vec3::ZERO),
+            g => anyhow::bail!("proxy geometry {g:?} not ported"),
+        };
+        put(at, [f32::from_bits(s.body), f32::from_bits(kind), radius, s.peak]);
+        put(at + 4, [half.x, half.y, half.z, 0.0]);
+        put(at + 8, [s.reference.x, s.reference.y, s.reference.z, 0.0]);
+        put(at + 12, [s.impulse.x, s.impulse.y, s.impulse.z, 0.0]);
+        put(at + 16, [s.moment.x, s.moment.y, s.moment.z, 0.0]);
+    }
+    Ok(w)
+}
+
+/// The kernel's rigid block against the reference's proxies: differing words and the first few.
+pub fn compare_rigid(r: &engine_softbody::explicit_rigid::ProxySet, w: &[u32]) -> (usize, Vec<String>) {
+    let (nb, mut bad, mut notes) = (r.bodies.len(), 0usize, Vec::new());
+    let mut chk = |name: String, g: u32, c: f32| {
+        if g != c.to_bits() {
+            bad += 1;
+            if notes.len() < 10 {
+                notes.push(format!("{name} gpu {:e} cpu {c:e}", f32::from_bits(g)));
+            }
+        }
+    };
+    for (i, b) in r.bodies.iter().enumerate() {
+        let at = i * BDW * 4;
+        for (name, off, v) in [("pos", 0, [b.pos.x, b.pos.y, b.pos.z]), ("vel", 8, [b.vel.x, b.vel.y, b.vel.z]), ("ang", 12, [b.ang_vel.x, b.ang_vel.y, b.ang_vel.z])] {
+            for k in 0..3 {
+                chk(format!("body {i} {name}[{k}]"), w[at + off + k], v[k]);
+            }
+        }
+        for (k, v) in [b.rot.x, b.rot.y, b.rot.z, b.rot.w].into_iter().enumerate() {
+            chk(format!("body {i} rot[{k}]"), w[at + 4 + k], v);
+        }
+        chk(format!("body {i} count"), w[at + 19], f32::from_bits(b.count));
+    }
+    let base = nb * BDW * 4 + 64;
+    for (k, s) in r.shapes.iter().enumerate() {
+        let at = base + k * SHW * 4;
+        for (name, off, v) in [("impulse", 12, s.impulse), ("moment", 16, s.moment), ("reference", 8, s.reference)] {
+            for q in 0..3 {
+                chk(format!("shape {k} {name}[{q}]"), w[at + off + q], v[q]);
+            }
+        }
+        chk(format!("shape {k} peak"), w[at + 3], s.peak);
+    }
+    (bad, notes)
 }
 
 fn fb(x: u32) -> f32 {
@@ -160,7 +245,7 @@ pub fn layout_and_statics(s: &ExplicitBeams) -> anyhow::Result<(Layout, Statics)
     anyhow::ensure!(s.damp_filters.is_empty() && s.shocks2.is_empty() && s.triggers.is_empty());
     anyhow::ensure!(s.settings.centred_damping && s.settings.centred_objective && !s.settings.fast_inv_sqrt);
     anyhow::ensure!(!s.settings.drag && !s.plastic_strength_drop && s.fixed_contact && s.dissipative_contact && s.exact_friction);
-    anyhow::ensure!(s.damp_scheme == 0 && s.shapes.is_empty() && s.rigid.is_none() && !s.surface_contact);
+    anyhow::ensure!(s.damp_scheme == 0 && s.shapes.is_empty() && !s.surface_contact);
     anyhow::ensure!(s.contact_force.is_none() && s.wings.is_empty() && s.fusedrag.is_none() && s.slides.is_empty());
     let ng = s.beams.iter().map(|b| b.group.unsigned_abs() as usize).max().unwrap_or(0).max(
         s.torsion_watch.iter().flatten().copied().max().unwrap_or(0) as usize,
@@ -377,7 +462,11 @@ pub fn state_of(s: &ExplicitBeams, l: &Layout, st: &Statics) -> State {
             clip[i * 4..i * 4 + 4].copy_from_slice(c);
         }
     }
-    State { node, rec, add, groups_last, deform, tri_dead, acc, shift, misc, clip }
+    let rig = match &s.rigid {
+        Some(r) => rigid_state(r).expect("the rigid block"),
+        None => Vec::new(),
+    };
+    State { node, rec, add, groups_last, deform, tri_dead, acc, shift, misc, clip, rig }
 }
 
 pub fn msl(l: &Layout, st: &Statics, extra: &str, per_frame: usize) -> String {
@@ -557,6 +646,7 @@ impl Floor {
             shift: get(&self.shift, car * l.nn * 3, l.nn * 3),
             misc: get(&self.misc, car * 16, 16),
             clip: get(&self.clip, car * l.nn * 4, l.nn * 4),
+            rig: Vec::new(),
         }
     }
 
@@ -838,6 +928,7 @@ impl Emu {
             shift: g(&self.bufs[20]),
             misc: g(&self.bufs[21]),
             clip: g(&self.bufs[28]),
+            rig: Vec::new(),
         }
     }
 
@@ -1070,12 +1161,15 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     o.hot = take(LANES * 24);
     o.cand = take(4096);
     o.clu = take(nclu * 8);
+    let (nb, nsh) = s.rigid.as_ref().map_or((0, 0), |r| (r.bodies.len(), r.shapes.len()));
+    o.rig_words = if nb != 0 { nb * BDW * 4 + 64 + nsh * SHW * 4 + nsh * 6 } else { 0 };
+    o.rig = take(o.rig_words);
     o.words = at;
     st.perm = perm;
     st.allowed = allowed_c;
     st.v2_tab = tab;
     st.v2_off = o.clone();
-    st.v2_defs = format!(
+    st.v2_defs = format!("#define RIGID {}\n#define NB {}\n#define NSH {}\n#define O_RIG {}\n", (nb != 0) as u32, nb.max(1), nsh.max(1), o.rig) + &format!(
         "#define O_NODE {}\n#define O_REC {}\n#define O_GROUPS {}\n#define O_DEFORM {}\n#define O_TRIDEAD {}\n#define O_ACC {}\n#define O_SHIFT {}\n#define O_MISC {}\n#define O_PAIRS {}\n#define O_PBUILD {}\n#define O_CLIP {}\n#define O_HITS {}\n#define O_SCRATCH {}\n#define O_HOT {}\n#define O_CAND {}\n#define CAND_CAP 2048\n#define O_CLU {}\n#define CAR_WORDS {}\n",
         o.node, o.rec, o.groups, o.deform, o.tridead, o.acc, o.shift, o.misc, o.pairs, o.pbuild, o.clip, o.hits, o.scratch, o.hot, o.cand, o.clu, o.words
     ) + &format!(

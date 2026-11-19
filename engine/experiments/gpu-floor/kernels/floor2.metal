@@ -101,6 +101,126 @@ inline V3 v3p(packed_float3 a) { return v3(a.x, a.y, a.z); }
 #define F_BROKE 10
 #define TG_FLAGS 12
 
+#ifndef RIGID
+#define RIGID 0
+#endif
+#if RIGID
+// ---- mechanism 3: rigid bodies as proxies (explicit_rigid.rs ProxySet) ----------------
+// The reference's quaternion arithmetic is glam's NEON code: written out here in its
+// operation order (a horizontal add is (x + y) + (z + w); a dot of three, (x + y) + (z + 0)).
+inline float dot3n(V3 a, V3 b) { return ((a.x * b.x) + (a.y * b.y)) + ((a.z * b.z) + 0.0f); }
+inline float4 qmul(float4 l, float4 r)
+{
+    float4 t0 = float4(l.w * r.x, l.w * r.y, l.w * r.z, l.w * r.w);
+    float4 t1 = float4(l.x * r.w, -(l.x * r.z), l.x * r.y, -(l.x * r.x));
+    float4 t2 = float4(l.y * r.z, l.y * r.w, -(l.y * r.x), -(l.y * r.y));
+    float4 t3 = float4(-(l.z * r.y), l.z * r.x, l.z * r.w, -(l.z * r.z));
+    return float4((t0.x + t1.x) + (t2.x + t3.x), (t0.y + t1.y) + (t2.y + t3.y), (t0.z + t1.z) + (t2.z + t3.z), (t0.w + t1.w) + (t2.w + t3.w));
+}
+inline V3 qrot(float4 q, V3 v)
+{
+    V3 b = v3(q.x, q.y, q.z);
+    float b2 = dot3n(b, b);
+    float k0 = (q.w * q.w) - b2, k1 = dot3n(v, b) * 2.0f, k2 = q.w * 2.0f;
+    V3 c = cross3(b, v);
+    return v3((v.x * k0 + b.x * k1) + c.x * k2, (v.y * k0 + b.y * k1) + c.y * k2, (v.z * k0 + b.z * k1) + c.z * k2);
+}
+inline float4 qnormalize(float4 q)
+{
+    float len = sqrt(((q.x * q.x) + (q.y * q.y)) + ((q.z * q.z) + (q.w * q.w)));
+    float rc = 1.0f / len;
+    return float4(q.x * rc, q.y * rc, q.z * rc, q.w * rc);
+}
+inline bool qidentity(float4 q) { return q.x == 0.0f && q.y == 0.0f && q.z == 0.0f && q.w == 1.0f; }
+inline V3 invInertiaMul(float4 rot, V3 ii, V3 v)
+{
+    V3 l = qrot(float4(-rot.x, -rot.y, -rot.z, rot.w), v);
+    return qrot(rot, v3(ii.x * l.x, ii.y * l.y, ii.z * l.z));
+}
+// The bit-trick exponential and power (the rigid rule's surface is not the exact one).
+inline float approxExp(float x)
+{
+    if (x < -15.0f) return 0.0f;
+    if (x > 88.0f) return 1e38f;
+    return as_type<float>(int(12102203.0f * x + 1064652319.0f));
+}
+inline float approxPow(float x, float y)
+{
+    float e = float(as_type<int>(x) - 1065353216);
+    return as_type<float>(int(y * e + 1065353216.0f));
+}
+// contact_force on the plain box surface (RoR's rule: not dissipative, bit-trick friction), depth 0.
+inline V3 contactForcePlain(V3 f, V3 v, float m, V3 n, float friction)
+{
+    float vn = dot3(v, n);
+    float fn = dot3(f, n);
+    float r = -fn;
+    if (vn < 0.0f) r -= (((0.8f * vn) - ((0.2f * 0.0f) / H)) * m) / H;
+    if (r <= 0.0f) return v3(0, 0, 0);
+    V3 sf = f - fn * n;
+    V3 sl = v - vn * n;
+    float sigma = len3(sl);
+    if (sigma > 0.0f) sl = sl / sigma;
+    float gr = (r * BOXS.strength) * friction;
+    float ms = BOXS.ms * gr;
+    if (sigma < BOXS.va && gr > 0.0f && dot3(sf, sf) <= ms * ms)
+    {
+        float e = approxExp(-sigma / BOXS.va);
+        return (r * n - (ms * (1.0f - e)) * sl) - sf;
+    }
+    float e = approxExp(-approxPow(sigma / BOXS.vs, BOXS.alpha));
+    float g = BOXS.mc + (BOXS.ms - BOXS.mc) * e;
+    return r * n - ((g + rmin(BOXS.t2 * sigma, 5.0f)) * gr) * sl;
+}
+// Shape rows (float4): 0 body, kind (0 box, 1 sphere), radius, peak; 1 half; 2 reference;
+// 3 impulse; 4 moment; 5 lo, identity; 6 hi; 7 centre; 8..10 axes. Body rows: 0 pos,
+// inverse mass; 1 rot; 2 vel, share; 3 ang vel; 4 inverse inertia, the step's count.
+#define SHW 11
+#define BDW 5
+// shape_face: the outward normal of the surface nearest a point strictly inside.
+inline bool rigidFace(device const float4* sh, V3 x, thread V3& normal)
+{
+    float4 lo = sh[5], hi = sh[6];
+    if (!(x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z)) return false;
+    V3 c = v3(sh[7]);
+    if (as_type<uint>(sh[0].y) == 1u)
+    {
+        V3 d = x - c;
+        float l = sqrt((d.x * d.x + d.y * d.y) + d.z * d.z);
+        if (!(l < sh[0].z)) return false;
+        normal = l > 0.0f ? v3(d.x / l, d.y / l, d.z / l) : v3(0.0f, 1.0f, 0.0f);
+        return true;
+    }
+    V3 half = v3(sh[1]);
+    if (lo.w != 0.0f)
+    {
+        // An identity rotation: box_face on the axis-aligned box.
+        V3 blo = c - half, bhi = c + half;
+        if (!(x.x > blo.x && x.x < bhi.x && x.y > blo.y && x.y < bhi.y && x.z > blo.z && x.z < bhi.z)) return false;
+        normal = v3(0.0f, 0.0f, -1.0f);
+        float dist = x.z - blo.z;
+        if (bhi.z - x.z < dist) { dist = bhi.z - x.z; normal = v3(0.0f, 0.0f, 1.0f); }
+        if (x.x - blo.x < dist) { dist = x.x - blo.x; normal = v3(-1.0f, 0.0f, 0.0f); }
+        if (bhi.x - x.x < dist) { dist = bhi.x - x.x; normal = v3(1.0f, 0.0f, 0.0f); }
+        if (x.y - blo.y < dist) { dist = x.y - blo.y; normal = v3(0.0f, -1.0f, 0.0f); }
+        if (bhi.y - x.y < dist) { dist = bhi.y - x.y; normal = v3(0.0f, 1.0f, 0.0f); }
+        return true;
+    }
+    V3 a0 = v3(sh[8]), a1 = v3(sh[9]), a2 = v3(sh[10]);
+    V3 d = x - c;
+    V3 l = v3(dot3(a0, d), dot3(a1, d), dot3(a2, d));
+    if (!(l.x > -half.x && l.x < half.x && l.y > -half.y && l.y < half.y && l.z > -half.z && l.z < half.z)) return false;
+    normal = -a2;
+    float dist = l.z + half.z;
+    if (half.z - l.z < dist) { dist = half.z - l.z; normal = a2; }
+    if (l.x + half.x < dist) { dist = l.x + half.x; normal = -a0; }
+    if (half.x - l.x < dist) { dist = half.x - l.x; normal = a0; }
+    if (l.y + half.y < dist) { dist = l.y + half.y; normal = -a1; }
+    if (half.y - l.y < dist) { dist = half.y - l.y; normal = a1; }
+    return true;
+}
+#endif
+
 struct Slow { float g; float u; float rest; uint bits; };
 // One two-node beam's whole rule from its device records (the step it may yield or break,
 // and the special kinds every step): bits 1 alive, 2 slope on, 4 deform asked, 8 its group
@@ -208,8 +328,17 @@ kernel void floorFrame(
     #define liftBuf ((device float*)(cb + O_CAND + 3072))
     #define ent4 ((device const uint4*)(tab + T_ENT))
 
-#if PAIR
+#if RIGID
+    TGDECL(atomic_uint, tgAct, 2);
+    #define rigBody ((device float4*)(cb + O_RIG))
+    #define rigCount ((device atomic_uint*)(cb + O_RIG + NB * BDW * 4))
+    #define rigShape ((device float4*)(cb + O_RIG + NB * BDW * 4 + 64))
+    #define rigSum ((device atomic_int*)(cb + O_RIG + NB * BDW * 4 + 64 + NSH * SHW * 4))
+#endif
+#if PAIR || RIGID
     TGDECL(atomic_int, tgX, 16);
+#endif
+#if PAIR
     uint xround = 0u, xlate = 0u;
     // (Groups in threes: two bodies, then their contact group, whose block holds the
     // pair's barrier counter.)
@@ -338,11 +467,84 @@ kernel void floorFrame(
         float4 pb = pBuild[REFNODE];
         tgPB[0] = pb.x; tgPB[1] = pb.y; tgPB[2] = pb.z;
     }
+#if RIGID
+    // begin_window: each shape's impulse, moment and peak cleared, its reference its pose.
+    if (lid < NSH)
+    {
+        device float4* sh = rigShape + lid * SHW;
+        device const float4* bd = rigBody + as_type<uint>(sh[0].x) * BDW;
+        V3 p = v3(bd[0]) + qrot(bd[1], v3(0, 0, 0));
+        sh[2] = f4(p, 0);
+        sh[3] = float4(0); sh[4] = float4(0);
+        float4 h0 = sh[0]; h0.w = 0.0f; sh[0] = h0;
+    }
+    if (lid < 6u) atomic_store_explicit(&tgX[lid], lid < 3u ? 0x7FFFFFFF : int(0x80000000), memory_order_relaxed);
+#endif
     BAR;
 
     for (uint frame = 0; frame < P.frames; frame++)
     for (uint step = 0; step < Z_STEPS; step++)
     {
+#if RIGID
+        // ---- R0: the proxies placed (explicit_rigid.rs begin_step) ----
+        if (isNode)
+        {
+            V3 x = v3(0, 0, 0) + TGP(ni);
+            atomic_fetch_min_explicit(&tgX[0], ordF(x.x), memory_order_relaxed);
+            atomic_fetch_min_explicit(&tgX[1], ordF(x.y), memory_order_relaxed);
+            atomic_fetch_min_explicit(&tgX[2], ordF(x.z), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgX[3], ordF(x.x), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgX[4], ordF(x.y), memory_order_relaxed);
+            atomic_fetch_max_explicit(&tgX[5], ordF(x.z), memory_order_relaxed);
+        }
+        if (lid < NSH)
+        {
+            device float4* sh = rigShape + lid * SHW;
+            device const float4* bd = rigBody + as_type<uint>(sh[0].x) * BDW;
+            float4 brot = bd[1];
+            V3 p = v3(bd[0]) + qrot(brot, v3(0, 0, 0));
+            float4 q = qmul(brot, float4(0.0f, 0.0f, 0.0f, 1.0f));
+            V3 lo, hi;
+            float ident = 0.0f;
+            if (as_type<uint>(sh[0].y) == 1u)
+            {
+                float r = sh[0].z;
+                lo = p - v3(r, r, r); hi = p + v3(r, r, r);
+            }
+            else
+            {
+                if (qidentity(q)) ident = 1.0f; else q = qnormalize(q);
+                float x2 = q.x + q.x, y2 = q.y + q.y, z2 = q.z + q.z;
+                float xx = q.x * x2, xy = q.x * y2, xz = q.x * z2, yy = q.y * y2, yz = q.y * z2, zz = q.z * z2;
+                float wx = q.w * x2, wy = q.w * y2, wz = q.w * z2;
+                V3 a0 = v3(1.0f - (yy + zz), xy + wz, xz - wy), a1 = v3(xy - wz, 1.0f - (xx + zz), yz + wx), a2 = v3(xz + wy, yz - wx, 1.0f - (xx + yy));
+                V3 half = v3(sh[1]);
+                V3 ext = v3((fabs(a0.x) * half.x + fabs(a1.x) * half.y) + fabs(a2.x) * half.z, (fabs(a0.y) * half.x + fabs(a1.y) * half.y) + fabs(a2.y) * half.z, (fabs(a0.z) * half.x + fabs(a1.z) * half.y) + fabs(a2.z) * half.z);
+                lo = p - ext; hi = p + ext;
+                sh[8] = f4(a0, 0); sh[9] = f4(a1, 0); sh[10] = f4(a2, 0);
+            }
+            V3 mx = v3(rmax(fabs(lo.x), fabs(hi.x)), rmax(fabs(lo.y), fabs(hi.y)), rmax(fabs(lo.z), fabs(hi.z)));
+            float pad = 0.01f + 1e-5f * rmax(mx.x, rmax(mx.y, mx.z));
+            sh[5] = f4(lo - v3(pad, pad, pad), ident);
+            sh[6] = f4(hi + v3(pad, pad, pad), 0);
+            sh[7] = f4(p, 0);
+        }
+        if (lid < 2u) atomic_store_explicit(&tgAct[lid], 0u, memory_order_relaxed);
+        BAR;
+        if (lid < NSH)
+        {
+            // The shapes whose bounds meet the body's box: the only ones a node tests.
+            device const float4* sh = rigShape + lid * SHW;
+            float4 lo = sh[5], hi = sh[6];
+            V3 clo = v3(unordF(atomic_load_explicit(&tgX[0], memory_order_relaxed)), unordF(atomic_load_explicit(&tgX[1], memory_order_relaxed)), unordF(atomic_load_explicit(&tgX[2], memory_order_relaxed)));
+            V3 chi = v3(unordF(atomic_load_explicit(&tgX[3], memory_order_relaxed)), unordF(atomic_load_explicit(&tgX[4], memory_order_relaxed)), unordF(atomic_load_explicit(&tgX[5], memory_order_relaxed)));
+            if (!(hi.x < clo.x || hi.y < clo.y || hi.z < clo.z || lo.x > chi.x || lo.y > chi.y || lo.z > chi.z))
+                atomic_fetch_or_explicit(&tgAct[lid >> 5], 1u << (lid & 31u), memory_order_relaxed);
+        }
+        BAR;
+        const uint act0 = atomic_load_explicit(&tgAct[0], memory_order_relaxed), act1 = atomic_load_explicit(&tgAct[1], memory_order_relaxed);
+        if (lid < 6u) atomic_store_explicit(&tgX[lid], lid < 3u ? 0x7FFFFFFF : int(0x80000000), memory_order_relaxed);
+#endif
         // ---- S0: the node pass ----
         const bool fShift = tgFlags[F_SHIFT] != 0u, fHits = tgFlags[F_HITS] != 0u;
         const bool fRoll = tgFlags[F_REC] != 0u || tgFlags[F_HELD] != 0u;
@@ -413,6 +615,22 @@ kernel void floorFrame(
                 if (x.x > lo.x && x.x < hi.x && x.y > lo.y && x.y < hi.y && x.z > lo.z && x.z < hi.z) inC = true;
             }
 #endif
+#if RIGID
+            if ((act0 | act1) != 0u)
+            {
+                // The nodes inside each body's shapes, counted (the rule's mass split).
+                for (uint k = 0; k < NSH; k++)
+                {
+                    if (((k < 32u ? act0 : act1) & (1u << (k & 31u))) == 0u) continue;
+                    V3 nrm;
+                    if (rigidFace(rigShape + k * SHW, x, nrm))
+                    {
+                        atomic_fetch_add_explicit(&rigCount[as_type<uint>(rigShape[k * SHW].x)], 1u, memory_order_relaxed);
+                        inC = true;
+                    }
+                }
+            }
+#endif
             if (inC)
             {
                 uint ci = atomic_fetch_add_explicit(&tgCount[3], 1u, memory_order_relaxed);
@@ -473,6 +691,43 @@ kernel void floorFrame(
                         V3 c = contactResponse(Fq, Vq, mq, normal, BOXS, 0.0f, frq, budget);
                         Fq = Fq + c;
                     }
+                }
+#endif
+#if RIGID
+                if ((act0 | act1) != 0u)
+                {
+                    // node_contact_with: every shape the node is inside, in shape order.
+                    V3 total = v3(0, 0, 0);
+                    for (uint k = 0; k < NSH; k++)
+                    {
+                        if (((k < 32u ? act0 : act1) & (1u << (k & 31u))) == 0u) continue;
+                        device const float4* sh = rigShape + k * SHW;
+                        V3 normal;
+                        if (!rigidFace(sh, x, normal)) continue;
+                        const uint bi = as_type<uint>(sh[0].x);
+                        device const float4* bd = rigBody + bi * BDW;
+                        V3 bpos = v3(bd[0]);
+                        V3 f = Fq + total;
+                        V3 r = x - bpos;
+                        V3 rn = cross3(r, normal);
+                        float splitK = float(max(atomic_load_explicit(&rigCount[bi], memory_order_relaxed), 1u)) * rmax(bd[2].w, 1.0f);
+                        float wb = splitK * (bd[0].w + dot3(rn, invInertiaMul(bd[1], v3(bd[4]), rn)));
+                        float wn = 1.0f / mq;
+                        float mred = 1.0f / (wn + wb);
+                        float share = wn / (wn + wb);
+                        V3 vb = v3(bd[2]) + cross3(v3(bd[3]), r);
+                        V3 fc = contactForcePlain(f * share, Vq - vb, mred, normal, frq);
+                        total = total + fc;
+                        V3 react = -fc;
+                        V3 mom = cross3(x - v3(sh[2]), react);
+                        atomic_fetch_add_explicit(&rigSum[k * 6], int(round(react.x * 32.0f)), memory_order_relaxed);
+                        atomic_fetch_add_explicit(&rigSum[k * 6 + 1], int(round(react.y * 32.0f)), memory_order_relaxed);
+                        atomic_fetch_add_explicit(&rigSum[k * 6 + 2], int(round(react.z * 32.0f)), memory_order_relaxed);
+                        atomic_fetch_add_explicit(&rigSum[k * 6 + 3], int(round(mom.x * 32.0f)), memory_order_relaxed);
+                        atomic_fetch_add_explicit(&rigSum[k * 6 + 4], int(round(mom.y * 32.0f)), memory_order_relaxed);
+                        atomic_fetch_add_explicit(&rigSum[k * 6 + 5], int(round(mom.z * 32.0f)), memory_order_relaxed);
+                    }
+                    Fq = Fq + total;
                 }
 #endif
                 fPub[n * 3] = Fq.x; fPub[n * 3 + 1] = Fq.y; fPub[n * 3 + 2] = Fq.z;
@@ -1262,6 +1517,48 @@ kernel void floorFrame(
             }
             BAR;
         }
+#endif
+#if RIGID
+        // ---- the proxies integrate the step's reactions (end_step) ----
+        if (lid < NB)
+        {
+            device float4* bd = rigBody + lid * BDW;
+            V3 bpos = v3(bd[0]), bvel = v3(bd[2]), bang = v3(bd[3]);
+            float4 brot = bd[1];
+            V3 force = v3(0, 0, 0), torque = v3(0, 0, 0);
+            for (uint k = 0; k < NSH; k++)
+            {
+                device float4* sh = rigShape + k * SHW;
+                if (as_type<uint>(sh[0].x) != lid) continue;
+                V3 f = v3(float(atomic_exchange_explicit(&rigSum[k * 6], 0, memory_order_relaxed)) / 32.0f, float(atomic_exchange_explicit(&rigSum[k * 6 + 1], 0, memory_order_relaxed)) / 32.0f, float(atomic_exchange_explicit(&rigSum[k * 6 + 2], 0, memory_order_relaxed)) / 32.0f);
+                V3 m = v3(float(atomic_exchange_explicit(&rigSum[k * 6 + 3], 0, memory_order_relaxed)) / 32.0f, float(atomic_exchange_explicit(&rigSum[k * 6 + 4], 0, memory_order_relaxed)) / 32.0f, float(atomic_exchange_explicit(&rigSum[k * 6 + 5], 0, memory_order_relaxed)) / 32.0f);
+                sh[3] = f4(v3(sh[3]) + f * H, 0);
+                sh[4] = f4(v3(sh[4]) + m * H, 0);
+                float4 h0 = sh[0];
+                h0.w = rmax(h0.w, len3(f));
+                sh[0] = h0;
+                force = force + f;
+                torque = torque + (m + cross3(v3(sh[2]) - bpos, f));
+            }
+            if (bd[0].w != 0.0f)
+            {
+                bvel = bvel + force * (bd[0].w * H);
+                bang = bang + invInertiaMul(brot, v3(bd[4]), torque) * H;
+            }
+            bpos = bpos + bvel * H;
+            if (!isZero3(bang))
+            {
+                float4 dq = qmul(float4(bang.x, bang.y, bang.z, 0.0f), brot);
+                brot = qnormalize(float4(brot.x + (0.5f * H) * dq.x, brot.y + (0.5f * H) * dq.y, brot.z + (0.5f * H) * dq.z, brot.w + (0.5f * H) * dq.w));
+            }
+            bd[0] = f4(bpos, bd[0].w);
+            bd[1] = brot;
+            bd[2] = f4(bvel, bd[2].w);
+            bd[3] = f4(bang, 0);
+            // (The count as the reference's begin_step left it, for the host; then cleared.)
+            bd[4] = f4(v3(bd[4]), as_type<float>(atomic_exchange_explicit(&rigCount[lid], 0u, memory_order_relaxed)));
+        }
+        BAR;
 #endif
 #if PAIR
         // Lockstep with the pair's contact group: this body's nodes published; the contact

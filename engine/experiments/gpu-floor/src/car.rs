@@ -126,3 +126,50 @@ pub fn pair_scene(template: &ExplicitBeams, name: &str, speed: f32, gap: f32) ->
     }
     Ok(cars)
 }
+
+/// Mechanism 3's scenes: the car with rigid bodies as the reference's proxies
+/// (`explicit_rigid::ProxySet`: the two-way coupling inside the 2 kHz step; the rigid
+/// World's own step between frames is not part of it, so the bodies move only by what the
+/// car does to them). "bricks": the car at `speed` into a wall of 25 kg boxes; "rocks":
+/// four spheres of 0.5 to 1 t coming down on the parked car at 6 m/s.
+pub fn rigid_scene(template: &ExplicitBeams, name: &str, speed: f32) -> anyhow::Result<ExplicitBeams> {
+    use engine_softbody::explicit_rigid::{ProxyGeom, ProxySet, ProxyShape, RigidProxy};
+    let mut car = place(template, 0.02, if name == "bricks" { speed } else { 0.0 });
+    car.drive = None;
+    let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+    for n in &car.nodes {
+        lo = lo.min(n.pos);
+        hi = hi.max(n.pos);
+    }
+    let mut set = ProxySet::default();
+    let mut body = |set: &mut ProxySet, pos: Vec3, vel: Vec3, mass: f32, inertia: Vec3, geom: ProxyGeom| {
+        let b = set.bodies.len() as u32;
+        set.bodies.push(RigidProxy { body: b, pos, rot: Quat::IDENTITY, vel, ang_vel: Vec3::ZERO, inv_mass: 1.0 / mass, inv_inertia: Vec3::ONE / inertia, share: 1.0, count: 0 });
+        set.shapes.push(ProxyShape::new(b, Vec3::ZERO, Quat::IDENTITY, geom, b, None));
+    };
+    match name {
+        "bricks" => {
+            // 6 wide, 4 high, 0.4 x 0.25 x 0.2 m, 25 kg, running bond, 0.3 m ahead.
+            let half = Vec3::new(0.2, 0.125, 0.1);
+            let m = 25.0f32;
+            let i = Vec3::new(half.y * half.y + half.z * half.z, half.x * half.x + half.z * half.z, half.x * half.x + half.y * half.y) * (m / 3.0);
+            for row in 0..4 {
+                for col in 0..6 {
+                    let x = (col as f32 - 2.5) * 0.41 + if row % 2 == 1 { 0.2 } else { 0.0 };
+                    body(&mut set, Vec3::new(x, 0.13 + row as f32 * 0.255, hi.z + 0.3 + half.z), Vec3::ZERO, m, i, ProxyGeom::Box { half });
+                }
+            }
+        }
+        "rocks" => {
+            for (k, (r, m)) in [(0.35f32, 500.0f32), (0.4, 700.0), (0.45, 850.0), (0.5, 1000.0)].into_iter().enumerate() {
+                let z = lo.z + (hi.z - lo.z) * (0.2 + 0.2 * k as f32);
+                let x = if k % 2 == 0 { -0.3 } else { 0.3 };
+                body(&mut set, Vec3::new(x, hi.y + r + 0.2 + 0.3 * k as f32, z), Vec3::new(0.0, -6.0, 0.0), m, Vec3::splat(0.4 * m * r * r), ProxyGeom::Sphere { radius: r });
+            }
+        }
+        other => anyhow::bail!("unknown rigid scene {other} (bricks, rocks)"),
+    }
+    set.begin_window();
+    car.rigid = Some(Box::new(set));
+    Ok(car)
+}

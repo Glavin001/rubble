@@ -23,7 +23,7 @@ struct uint3 { uint x, y, z; uint3() : x(0), y(0), z(0) {} uint3(uint a, uint b,
 struct uint4 { uint x, y, z, w; uint4() : x(0), y(0), z(0), w(0) {} explicit uint4(uint a) : x(a), y(a), z(a), w(a) {} uint4(uint a, uint b, uint c, uint d) : x(a), y(b), z(c), w(d) {}
     uint operator[](uint i) const { return (&x)[i]; } };
 template <class T, class U> inline T as_type(U u) { static_assert(sizeof(T) == sizeof(U), "as_type"); T t; memcpy(&t, &u, sizeof(T)); return t; }
-using std::fabs; using std::floor; using std::copysign; using std::rint; using std::sqrt; using std::fmin; using std::fmax; using std::abs;
+using std::round; using std::fabs; using std::floor; using std::copysign; using std::rint; using std::sqrt; using std::fmin; using std::fmax; using std::abs;
 using std::fma;
 inline float clamp(float x, float lo, float hi) { return fmin(fmax(x, lo), hi); }
 inline uint min(uint a, uint b) { return a < b ? a : b; }
