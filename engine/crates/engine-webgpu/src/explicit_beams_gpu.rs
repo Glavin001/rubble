@@ -1619,13 +1619,15 @@ impl ExplicitBeamsGpu {
             mapped_at_creation: false,
         });
         queue.write_buffer(&params, 0, bytemuck::cast_slice(&layout.words));
-        // (COPY_DST: the parking brake input lives in its records.)
+        // (COPY_DST: the parking brake input lives in its records. COPY_SRC, here and on
+        // the lists and the vehicle table: a portable fixture reads every binding back,
+        // Self::portable.)
         let statics = init(
             "explicit-beams-static",
             plan::BIND_STATIC,
-            storage | wgpu::BufferUsages::COPY_DST,
+            storage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
         );
-        let lists = init("explicit-beams-lists", plan::BIND_LISTS, storage);
+        let lists = init("explicit-beams-lists", plan::BIND_LISTS, storage | wgpu::BufferUsages::COPY_SRC);
         let nodes = init("explicit-beams-nodes", plan::BIND_NODES, state);
         let beams = init("explicit-beams-beams", plan::BIND_BEAMS, state);
         let acc = init("explicit-beams-acc", plan::BIND_ACC, state);
@@ -3655,6 +3657,32 @@ impl ExplicitBeamsGpu {
     /// Tests only: a copy of every buffer a frame writes and of the host's contact
     /// plan state, to run the same frame again ([`Self::restore`]).
     #[doc(hidden)]
+    /// This state as a portable fixture (`engine_exec::explicit_plan::portable`): every
+    /// binding's bytes as the GPU holds them, the layout, the planner's settings and this
+    /// host's frame paths, for a host with no World to replay (waits; blocking reads).
+    /// Binding 0 holds the planner's words in copy 0: a frame rewrites the parameters
+    /// before any dispatch reads them.
+    pub fn portable(&self, t: f64, note: &str) -> plan::portable::Portable {
+        let mut params = vec![0u8; plan::params_bytes() as usize];
+        params[..4 * plan::PARAM_WORDS].copy_from_slice(bytemuck::cast_slice(&self.planner.words));
+        let mut bindings = vec![params];
+        for b in 1..9 {
+            bindings.push(self.read(&self.bufs[b]));
+        }
+        // (No wide passes: no table; the upload's 16 zero bytes.)
+        bindings.push(self.wide.as_ref().map_or_else(|| vec![0u8; 16], |w| self.read(&w.table)));
+        bindings.push(self.read(&self.contact.args));
+        let switches = plan::portable::HostSwitches {
+            group_split: self.group_split,
+            group_split_tests: self.group_split_tests,
+            self_split: self.self_split,
+            wide_list: self.wide_list,
+            wide_fused: self.wide_fused,
+            vv_grid: self.vv_grid,
+        };
+        plan::portable::Portable::new(t, note, self.layout.clone(), self.planner.settings(), switches, bindings)
+    }
+
     pub fn snapshot(&self) -> GpuSnapshot {
         let mut enc = self
             .device
@@ -4593,7 +4621,7 @@ impl Wide {
         let table = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("explicit-beams-vehicle-table"),
             size: plan::TABLE_BYTES,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         queue.write_buffer(&table, 0, bytemuck::cast_slice(vehicle_recs));

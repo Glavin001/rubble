@@ -40,6 +40,9 @@
 #                        binary), all at once; one summary and exit code
 #   --fanout-tests       one container per test (names listed at build time), all
 #                        at once: the shortest wall time for a suite
+#   --matrix-cuda        the same on CUDA: engine-cuda's explicit_replay from each row's
+#                        portable fixture (engine/out/scenario-matrix/portable/ROW.pfx,
+#                        matrix.py --make-portable); the modules the fixtures need only
 #   --matrix             the scenario matrix, one container per row (what
 #                        tools/scenario-matrix/run.sh calls): the arguments after
 #                        `--` are matrix.py's (SWITCH | --baseline | --make, rows)
@@ -74,6 +77,7 @@ while [ $# -gt 0 ]; do
     --fanout) fanout=exe; shift ;;
     --fanout-tests) fanout=tests; pack_opts=(--list-tests); shift ;;
     --matrix) fanout=matrix; shift ;;
+    --matrix-cuda) fanout=matrix; matrix_cuda=1; shift ;;
     --) shift; break ;;
     -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
     *) echo "gpu_run: unknown option $1 (the cargo selection goes after --)" >&2; exit 2 ;;
@@ -99,7 +103,21 @@ if [ "$fanout" = matrix ]; then
     if [ -n "$v" ]; then envs+=("$k=$v"); fi
   done
   mkdir -p "$repo/engine/out/scenario-matrix"
-  set -- -p engine-world --example vehicle_lab
+  if [ -n "${matrix_cuda:-}" ]; then
+    envs+=("MATRIX_CUDA=1")
+    # The device code the rows' fixtures may launch (their layouts' modules, listed by
+    # explicit_replay --modules on this machine: no device needed), unless given.
+    if [ -z "${ENGINE_CUDA_EXPLICIT_MODULES:-}" ]; then
+      pfx=()
+      for r in "${matrix_rows[@]}"; do pfx+=("$repo/engine/out/scenario-matrix/portable/$r.pfx"); done
+      ENGINE_CUDA_EXPLICIT_MODULES="$(cd "$repo/engine" && ENGINE_CUDA_EXPLICIT_MODULES=none cargo run -q --profile fast -p engine-cuda --example explicit_replay -- --modules "${pfx[@]}")" || {
+        echo "gpu_run: --matrix-cuda: no portable fixtures for the rows (matrix.py --make-portable)" >&2; exit 2; }
+      export ENGINE_CUDA_EXPLICIT_MODULES
+    fi
+    set -- -p engine-cuda --example explicit_replay
+  else
+    set -- -p engine-world --example vehicle_lab
+  fi
 fi
 case "$gpu" in T4|L4|L40S) ;; *) echo "gpu_run: --gpu must be T4, L4 or L40S" >&2; exit 2 ;; esac
 case "$cap" in ''|*[!0-9]*) echo "gpu_run: --timeout takes seconds" >&2; exit 2 ;; esac

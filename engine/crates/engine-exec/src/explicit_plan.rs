@@ -28,6 +28,7 @@
 
 pub mod coupling;
 pub mod drive;
+pub mod portable;
 pub mod schedule;
 
 use engine_softbody::explicit_beams::{ExplicitBeams, ExplicitKind, StaticShape};
@@ -51,7 +52,7 @@ impl GpuBeam {
 }
 
 /// A vehicle's place in the shared buffers.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub node_off: u32,
     pub nodes: u32,
@@ -65,7 +66,7 @@ pub struct Span {
 }
 
 /// Room for rigid-body proxies per vehicle (`ExplicitBeamsGpu::with_coupling`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingCapacity {
     /// Proxy bodies, shapes (at most 1024, at least the bodies) and hull planes (at most
     /// 65535) per vehicle.
@@ -77,7 +78,7 @@ pub struct CouplingCapacity {
 /// Where the coupling's records live (`explicit_beams_rigid.slang`): gMisc records from
 /// `misc_base`, `recs` per vehicle (a header, then 5 per body, 7 per shape, 1 per plane);
 /// gAcc words from `acc_base`, `bodies + 6 shapes` per vehicle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CouplingLayout {
     pub cap: CouplingCapacity,
     pub vehicles: u32,
@@ -196,6 +197,21 @@ pub const PARAM_LEVEL_COPIES: u32 = 4 * FLEET_LEVEL_MAX as u32 + 3;
 /// ([`W_VV_SCRATCH`], [`W_VV_SCRATCH_OFF`], [`W_VV_TRI_PAIRS`]), 102–104 vehicle contact's
 /// state by owner vehicle ([`W_VV_FLEET`], [`W_VV_FLEET_NEXT`], [`W_VV_FLEET_BOX`])).
 pub const PARAM_WORDS: usize = 106;
+
+/// [`PARAM_WORDS`] words through serde as a sequence (serde's arrays stop at 32).
+pub mod param_words_serde {
+    use super::PARAM_WORDS;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(w: &[u32; PARAM_WORDS], s: S) -> Result<S::Ok, S::Error> {
+        w.as_slice().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u32; PARAM_WORDS], D::Error> {
+        let v = Vec::<u32>::deserialize(d)?;
+        v.try_into().map_err(|v: Vec<u32>| serde::de::Error::custom(format!("{} parameter words, not {PARAM_WORDS}", v.len())))
+    }
+}
 /// Params word: the partners' room (the kernel's `vvRoom`): vehicle contact's candidate
 /// run, hit list and ranks hold this many times the fleet's contact points and a node's
 /// two-body point counts this many owners ([`vv_room`]). Past it the contact status
@@ -1347,7 +1363,7 @@ pub enum Cmd {
 /// The status a host reads every [`STATUS_EVERY`] frames: 4 contact counters
 /// (outside, overflow, unconverged, too big) at byte `base + 16` of gAcc, and the
 /// loop-cap flag at byte `cap` (the kernel's `EB_LOOP_CAP`, every target).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StatusWords {
     pub base: u64,
     pub cap: u64,
@@ -1406,7 +1422,7 @@ pub fn contact_error(w: &[i32]) -> Result<(), String> {
 }
 
 /// Vehicle sleep's records (`explicit_beams_sleep.slang`).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SleepLayout {
     /// gMisc record of the header (the Params word [`W_SLEEP`] when on), and of vehicle
     /// 0's record (one per vehicle: still steps, flags, 0, 0).
@@ -1443,7 +1459,7 @@ pub struct ExplicitUpload {
 }
 
 /// Where everything lives, and the fleet's module choice.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitLayout {
     /// gAcc word of the first vehicle's self-collision hit counters (two words a
     /// vehicle: the step's hits, its pending beams; the kernel's hitAcc).
@@ -1459,6 +1475,7 @@ pub struct ExplicitLayout {
     /// Spawn rest lengths of every beam, in buffer order.
     pub rest0: Vec<f32>,
     /// The parameter words at upload.
+    #[serde(with = "param_words_serde")]
     pub words: [u32; PARAM_WORDS],
     /// JBeam deform group words (spec §19): gGroups word of the first, and per
     /// vehicle (first, count).
@@ -3127,8 +3144,20 @@ struct ContactPlan {
     fresh: bool,
 }
 
+/// A planner's words, state and frame choices ([`FramePlanner::settings`]).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PlannerSettings {
+    pub words: Vec<u32>,
+    pub state: PlannerState,
+    pub contact_on: bool,
+    pub wide_on: bool,
+    pub sleep_listing: bool,
+    pub wide_sleep: bool,
+    pub surface_split: bool,
+}
+
 /// The planner's state a host saves with a GPU snapshot (tests).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlannerState {
     left: u32,
     fresh: bool,
@@ -3508,6 +3537,31 @@ impl FramePlanner {
         self.contact.fresh = s.fresh;
         self.frames = s.frames;
         self.contact.replan.store(s.replan, Ordering::Relaxed);
+    }
+
+    /// Everything this planner holds that its layout does not give it: the words, the
+    /// contact plan's state, the host's frame choices ([`portable`]).
+    pub fn settings(&self) -> PlannerSettings {
+        PlannerSettings {
+            words: self.words.to_vec(),
+            state: self.state(),
+            contact_on: self.contact.on,
+            wide_on: self.wide_on,
+            sleep_listing: self.sleep_listing,
+            wide_sleep: self.wide_sleep,
+            surface_split: self.surface_split,
+        }
+    }
+
+    /// Put back [`Self::settings`] (on a planner made from the same layout).
+    pub fn apply(&mut self, s: &PlannerSettings) {
+        self.words.copy_from_slice(&s.words);
+        self.restore(s.state);
+        self.contact.on = s.contact_on;
+        self.wide_on = s.wide_on;
+        self.sleep_listing = s.sleep_listing;
+        self.wide_sleep = s.wide_sleep;
+        self.surface_split = s.surface_split;
     }
 
     /// The wide passes of a frame: (parameter copy, pass, workgroups).

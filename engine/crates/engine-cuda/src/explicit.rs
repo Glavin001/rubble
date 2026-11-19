@@ -201,6 +201,29 @@ impl CudaExplicitBeams {
             .collect()
     }
 
+    /// Every module a replay of a fleet of this layout may launch, whatever its switches:
+    /// [`Self::modules_for_layout`], vehicle sleep's list, and the split paths' modules at
+    /// the fleet's frame variant (the device code a matrix build embeds).
+    pub fn modules_for_replay(layout: &ExplicitLayout) -> Vec<String> {
+        let (aero, lanes) = (layout.aero, layout.lanes);
+        let mut out: Vec<String> = Self::modules_for_layout(layout).into_iter().map(str::to_string).collect();
+        if layout.sleep.is_some() {
+            out.push(Kernel::Sleep.module_for(aero, lanes, layout.surface).to_string());
+        }
+        for which in ["member", "group", "tests", "fleetfront", "fleetplan", "fleetpost", "fleetlevels"] {
+            out.push(plan::split_module_name(which, aero, lanes));
+        }
+        for vv in [false, true] {
+            out.extend(plan::self_split_module_names(aero, lanes, vv).into_iter().map(|(m, _, _)| m));
+        }
+        if !aero {
+            out.push(plan::wide_list_module_name(lanes).to_string());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// [`Self::modules_for_layout`] of `vehicles` (host only, no device): e.g. the
     /// modules a test's fleets need (`ci_explicit_modules.txt`).
     pub fn modules_for(vehicles: &[ExplicitBeams], cap: Option<CouplingCapacity>) -> Vec<&'static str> {
@@ -215,6 +238,31 @@ impl CudaExplicitBeams {
     /// [`Self::new`] with room for rigid-body proxies per vehicle (the coupling,
     /// `explicit_beams_rigid.slang`); off until [`Self::set_coupling_on`].
     pub fn with_coupling(vehicles: &[ExplicitBeams], cap: Option<CouplingCapacity>) -> anyhow::Result<Self> {
+        let upload = ExplicitUpload::new(vehicles, cap);
+        let bindings = (0..BIND_COUNT as u32).map(|b| upload.bytes(b)).collect();
+        Self::from_parts(upload.layout, bindings)
+    }
+
+    /// A portable fixture's state (`engine_exec::explicit_plan::portable`, saved by another
+    /// host: every binding, the layout, the planner's settings and that host's frame
+    /// paths): the same frames from it, with no vehicles or World here.
+    pub fn from_portable(p: &plan::portable::Portable) -> anyhow::Result<Self> {
+        let mut g = Self::from_parts(p.header.layout.clone(), p.bindings.clone())?;
+        g.planner.apply(&p.header.planner);
+        let s = p.header.switches;
+        g.group_split = s.group_split;
+        g.group_split_tests = s.group_split_tests;
+        g.self_split = s.self_split;
+        g.wide_list = s.wide_list;
+        g.wide_fused = s.wide_fused;
+        // (The grid's switch is a word in the bindings, already as that host had it.)
+        g.vv_grid = s.vv_grid;
+        Ok(g)
+    }
+
+    /// Device buffers of `bindings` for a fleet of `layout`, its modules loaded.
+    fn from_parts(layout: ExplicitLayout, bindings: Vec<Vec<u8>>) -> anyhow::Result<Self> {
+        anyhow::ensure!(bindings.len() == BIND_COUNT, "{} bindings, not {BIND_COUNT}", bindings.len());
         anyhow::ensure!(
             Self::has_ptx(),
             "engine-cuda was built without nvcc: no explicit-beams PTX embedded (see engine/TOOLCHAIN.md)"
@@ -229,12 +277,9 @@ impl CudaExplicitBeams {
         unsafe { result::ctx::set_current(ctx) }.map_err(map)?;
         let stream = result::stream::create(result::stream::StreamKind::NonBlocking).map_err(map)?;
 
-        let upload = ExplicitUpload::new(vehicles, cap);
-        let layout = upload.layout.clone();
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         let mut sizes = Vec::with_capacity(BIND_COUNT);
-        for b in 0..BIND_COUNT as u32 {
-            let bytes = upload.bytes(b);
+        for bytes in bindings {
             let ptr = unsafe { result::malloc_sync(bytes.len()) }.map_err(map)?;
             unsafe { result::memcpy_htod_sync(ptr, &bytes) }.map_err(map)?;
             bufs.push(ptr);
@@ -478,16 +523,19 @@ impl CudaExplicitBeams {
     fn launch(&mut self, key: Key, grid: (u32, u32, u32), param_copy: u32, args: [Option<ArgBuf>; 2]) -> Result<(), ExecError> {
         let stream = self.stream;
         let params = self.bufs[BIND_PARAMS as usize];
-        if let Key::Split(name) = &key {
-            if !self.kernels.contains_key(&key) {
-                // A split path's module, loaded at its first launch.
-                let t = CUDA_EXPLICIT_KERNELS
-                    .iter()
-                    .find(|t| t.name == name.as_str())
-                    .ok_or_else(|| ExecError::Backend(format!("CUDA: explicit module {name} not built")))?;
-                let k = load_kernel(t, &self.bufs, &self.sizes).map_err(|e| ExecError::Backend(e.to_string()))?;
-                self.kernels.insert(key.clone(), k);
-            }
+        if !self.kernels.contains_key(&key) {
+            // A module the fleet's first frames did not need (a split path's, vehicle
+            // sleep's list, the surface segments), loaded at its first launch.
+            let name = match &key {
+                Key::Plan(k) => k.module_for(self.layout.aero, self.layout.lanes, self.layout.surface).to_string(),
+                Key::Split(name) => name.clone(),
+            };
+            let t = CUDA_EXPLICIT_KERNELS
+                .iter()
+                .find(|t| t.name == name.as_str())
+                .ok_or_else(|| ExecError::Backend(format!("CUDA: explicit module {name} not built")))?;
+            let k = load_kernel(t, &self.bufs, &self.sizes).map_err(|e| ExecError::Backend(e.to_string()))?;
+            self.kernels.insert(key.clone(), k);
         }
         let bound: Vec<Option<(sys::CUdeviceptr, u64)>> = args.iter().map(|a| a.map(|b| self.arg_buf(b))).collect();
         let k = self

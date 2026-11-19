@@ -16,6 +16,9 @@ one state, the same build), compares every state word and times each frame apart
         the same state); fails a row where the World adds more than WORLD_MS. The rows with
         a scenario file by default (the mountain rows drive for seconds first: name them).
     matrix.py --rows ARGS...            the row names ARGS pick (for the Modal runner)
+    matrix.py --make-portable [ROW ...] each row's saved state as a portable fixture
+        (out/scenario-matrix/portable/ROW.pfx) for the CUDA replay (REPLAY_BIN=explicit_replay
+        runs the rows on it: tools/modal/gpu_run.sh --matrix-cuda -- SWITCH [ROW ...])
     matrix.py --end-state DIR [ROW ...] each row's state after END_FRAMES (default 20)
         frames from its moment, into DIR/ROW.fx (one build's; a host refactor's gate)
     matrix.py --compare-end A B [ROW ...]  two builds' end states, every state word:
@@ -39,6 +42,10 @@ ENGINE = os.path.abspath(os.path.join(HERE, "..", ".."))
 SCENES = os.path.join(HERE, "scenes")
 STATES = os.environ.get("STATES", os.path.join(ENGINE, "out", "scenario-matrix"))
 BIN = os.environ.get("LAB_BIN", os.path.join(ENGINE, "target", "fast", "examples", "vehicle_lab"))
+# CUDA: engine-cuda's explicit_replay replays each row from its portable fixture
+# (STATES/portable/ROW.pfx, `--make-portable`) in place of vehicle_lab (gpu_run.sh
+# --matrix-cuda sets it on Modal).
+REPLAY = os.environ.get("REPLAY_BIN")
 CAR = os.environ.get("CAR", os.path.expanduser("~/Development/rubble-artifacts/sedan-live/mods/sedan_new"))
 FRAMES = int(os.environ.get("FRAMES", "10"))
 ROUNDS = int(os.environ.get("ROUNDS", "3"))
@@ -93,6 +100,28 @@ def state_file(row):
     return os.path.join(STATES, row[0] + ".fx")
 
 
+def portable_file(row):
+    return os.path.join(STATES, "portable", row[0] + ".pfx")
+
+
+def make_portable(rows):
+    """Each row's saved state as a portable fixture (every binding, the layout, the
+    planner, the host's paths), for a host with no World: the CUDA replay."""
+    os.makedirs(os.path.join(STATES, "portable"), exist_ok=True)
+    bad = []
+    for row in rows:
+        cmd = lab_args(row) + ["--from-fixture", state_file(row), "--save-portable", portable_file(row)]
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=ENGINE)
+        line = next((l for l in p.stdout.splitlines() if l.startswith("portable ")), None)
+        if p.returncode != 0 or line is None:
+            bad.append(row[0])
+            print(f"FAIL {row[0]}: exit {p.returncode}")
+            print("\n".join((p.stdout + p.stderr).splitlines()[-8:]))
+            continue
+        print(f"{row[0]:<8} {line}")
+    return 0 if not bad else 1
+
+
 def pick(names):
     if not names:
         return ROWS
@@ -129,8 +158,11 @@ FRAME = re.compile(r"frames \((on|off)\): median ([\d.]+) ms, min ([\d.]+), max 
 
 
 def replay(row, switch):
-    cmd = lab_args(row) + ["--from-fixture", state_file(row), "--ab-switch", switch,
-                           "--ab-frames", str(FRAMES)]
+    if REPLAY:
+        cmd = [REPLAY, "--fixture", portable_file(row), "--ab-switch", switch, "--ab-frames", str(FRAMES)]
+    else:
+        cmd = lab_args(row) + ["--from-fixture", state_file(row), "--ab-switch", switch,
+                               "--ab-frames", str(FRAMES)]
     if os.environ.get("PROFILE_SPLIT") == "1":
         cmd.append("--ab-profile")
     t0 = time.time()
@@ -250,6 +282,8 @@ def main():
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
+    if args[0] == "--make-portable":
+        return make_portable(pick(args[1:]))
     if args[0] == "--end-state" and len(args) >= 2:
         return end_state(args[1], pick(args[2:]))
     if args[0] == "--compare-end" and len(args) >= 3:
@@ -269,9 +303,10 @@ def main():
     baseline = args[0] == "--baseline"
     switch = "perf=0" if baseline else args[0]
     rows = pick(args[1:])
-    missing = [r[0] for r in rows if not os.path.isfile(state_file(r))]
+    missing = [r[0] for r in rows if not os.path.isfile(portable_file(r) if REPLAY else state_file(r))]
     if missing:
-        sys.exit(f"no saved state for {', '.join(missing)} in {STATES}: run.sh --make")
+        sys.exit(f"no saved state for {', '.join(missing)} in {STATES}: run.sh --make"
+                 + (" then matrix.py --make-portable" if REPLAY else ""))
     t_all = time.time()
     bad = []
     if baseline:

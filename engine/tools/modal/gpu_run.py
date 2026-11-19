@@ -422,12 +422,14 @@ def _run_impl(archive_key: str, spec: dict) -> dict:
 def _matrix_row(spec: dict, shard: dict, runs: list[dict], base: dict, deadline: float):
     """One scenario-matrix row: matrix.py against the shipped vehicle_lab, the row's
     saved state from the states Volume (or, for --make, saved into it)."""
-    lab = next((e for e in runs if e["name"] == "vehicle_lab"), None)
+    cuda = base.get("MATRIX_CUDA") == "1"
+    exe = "explicit_replay" if cuda else "vehicle_lab"
+    lab = next((e for e in runs if e["name"] == exe), None)
     if lab is None:
-        _say("matrix: the archive has no vehicle_lab")
+        _say(f"matrix: the archive has no {exe}")
         return 1, [], []
     states = Path("/tmp/states")
-    states.mkdir(parents=True, exist_ok=True)
+    (states / "portable").mkdir(parents=True, exist_ok=True)
     row = shard["row"]
     make = spec["matrix_args"][:1] == ["--make"]
     if not make:
@@ -435,9 +437,11 @@ def _matrix_row(spec: dict, shard: dict, runs: list[dict], base: dict, deadline:
         if not src.is_file():
             _say(f"matrix: no saved state {shard['state']} in the states volume")
             return 1, [], []
-        (states / f"{row}.fx").symlink_to(src)
+        (states / ("portable" if cuda else "") / f"{row}{'.pfx' if cuda else '.fx'}").symlink_to(src)
     env = {**base, "LAB_BIN": lab["exec"], "STATES": str(states),
            "CAR": base.get("CAR", "/scenarios/sedan_new")}
+    if cuda:
+        env["REPLAY_BIN"] = lab["exec"]
     lines: list[str] = []
     cmd = ["python3", MATRIX_PY, *spec["matrix_args"], row]
     _say(f"=== row {row}: {' '.join(cmd[2:])}")
@@ -504,15 +508,19 @@ def _shards(s: dict, manifest: dict, run_dir: Path) -> list[dict]:
         return out
     if mode == "matrix":
         make = s["matrix_args"][:1] == ["--make"]
+        # (CUDA: each row's portable fixture, matrix.py --make-portable.)
+        cuda = s["env"].get("MATRIX_CUDA") == "1"
+        rel, ext = ("portable/", ".pfx") if cuda else ("", ".fx")
         shards = []
         for row in s["matrix_rows"]:
             sh = {"label": row, "row": row}
             if not make:
-                local = run_dir / "states" / f"{row}.fx"
+                local = run_dir / "states" / f"{rel}{row}{ext}"
                 if not local.is_file():
                     raise SystemExit(f"[gpu_run] no saved state for row {row} "
-                                     f"(engine/out/scenario-matrix/{row}.fx): run.sh --make {row}")
-                sh["state"] = _sha256(local) + ".fx"
+                                     f"(engine/out/scenario-matrix/{rel}{row}{ext}): run.sh --make {row}"
+                                     + (", then matrix.py --make-portable" if cuda else ""))
+                sh["state"] = _sha256(local) + ext
                 sh["local"] = str(local)
             shards.append(sh)
         return shards
