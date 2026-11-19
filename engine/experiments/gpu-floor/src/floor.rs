@@ -1523,7 +1523,7 @@ pub fn make_v2(s: &ExplicitBeams, l: &mut Layout, st: &mut Statics) -> anyhow::R
     anyhow::ensure!(nss <= 64 && nt + segs.len() + nn < 65536, "surface contact holds 64 slots");
     anyhow::ensure!(!st.surface || (nss != 0 && st.pair == 0), "surface contact: a world shape, and one body a group");
     // (Then the staged box tests: 512 pairs of 200 words, 13 tasks of eight words a pair.)
-    o.surf = take(if st.surface { nss * 32 + 4096 + 512 * 16 + 64 + 512 * 200 + 512 * 13 * 8 } else { 0 });
+    o.surf = take(if st.surface { nss * 32 + 4096 + 512 * 16 + 64 + 512 * 200 + 512 * 13 * 8 + 512 * 13 + 8 } else { 0 });
     anyhow::ensure!(!st.surface || ngs >= nss * 24 + nn * 3 + 64 && nn <= 1024, "surface contact: the scalars' array ({ngs}) does not hold {nss} slots and the nodes' forces");
     for b in &s.boxes {
         if !st.surface {

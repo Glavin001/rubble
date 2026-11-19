@@ -24,6 +24,35 @@ kernel void fqlat(device const float* in [[buffer(0)]], device uint* out [[buffe
     for (uint rep = 0u; rep < 16u; rep++)
         for (uint i = 0u; i < n; i++) fqCase(in + i * 28u, out + (lid * n + i) * 24u);
 }
+// The same with values live across the queries (the car kernel keeps some forty a lane:
+// its node, its beams' hot words): LIVE of them loaded before, used after.
+#ifndef LIVE
+#define LIVE 0
+#endif
+kernel void fqlive(device const float* in [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& n [[buffer(2)]],
+    uint lid [[thread_position_in_threadgroup]])
+{
+    float4 v0 = float4(in[lid + 0u], in[lid + 1u], in[lid + 2u], in[lid + 3u]), v1 = v0 * 1.5f + float4(in[lid + 4u]), v2 = v1 * v0 + float4(in[lid + 5u]), v3 = v2 - v0 * in[lid + 6u];
+    float4 v4 = v3 * 0.7f + v1, v5 = v4 * v2 + float4(in[lid + 7u]), v6 = v5 - v3 * in[lid + 8u], v7 = v6 * 1.1f + v0, v8 = v7 * v1 - v2, v9 = v8 + v4 * v5;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint rep = 0u; rep < 16u; rep++)
+        for (uint i = 0u; i < n; i++) fqCase(in + i * 28u, out + (lid * n + i) * 24u);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float4 r = v0;
+#if LIVE >= 8
+    r += v1;
+#endif
+#if LIVE >= 16
+    r += v2 + v3;
+#endif
+#if LIVE >= 24
+    r += v4 + v5;
+#endif
+#if LIVE >= 40
+    r += v6 + v7 + v8 + v9;
+#endif
+    out[lid * n * 24u] += as_type<uint>(r.x + r.y + r.z + r.w);
+}
 static void fqCase(device const float* c, device uint* res)
 {
     FqShape s;
@@ -209,9 +238,10 @@ fn main() -> anyhow::Result<()> {
         // a pair, so a phase costs its slowest query, not their sum).
         let g = gpu_floor::gpu::Gpu::new()?;
         let src = format!("#pragma clang fp contract(off)\n#include <metal_stdlib>\nusing namespace metal;\n{}\n{}", gpu_floor::floor::fq_msl(), KERNEL);
-        for (fast, name) in [(false, "strict"), (true, "fast math")] {
+        for (fast, name, live) in [(false, "strict", 0), (true, "fast math", 0), (true, "fast math, 4 floats live across", 4), (true, "fast math, 16 live across", 16), (true, "fast math, 40 live across", 40)] {
             let src = if fast { src.replace("#pragma clang fp contract(off)\n", "") } else { src.clone() };
-            let pso = g.pipeline(&src, "fqlat", fast)?;
+            let src = format!("#define LIVE {live}\n{src}");
+            let pso = g.pipeline(&src, if live == 0 { "fqlat" } else { "fqlive" }, fast)?;
             println!("latency, {name} (microseconds a query; one warp, 32 cases x 16):");
             for ((kind, sphere, outcome), ids) in &cats {
                 if ids.len() < 32 {
