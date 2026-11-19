@@ -1495,6 +1495,8 @@
     // Checks: every car's skinned vertices (level 0) as the last draw left them, read
     // back after one draw (skinned whatever changed): per car its SHA-256 and byte count.
     // Pause the World first; compare across the "skin cars of one model" settings.
+    // Checks: the one-by-one skin from another build's kernel source (null: this one's).
+    window.__skinCode = (code) => { W.cars.setSkinCode(code); W.skinGen++; };
     window.__skinOut = async () => {
       const w = W;
       await window.__drawCost(1, 1);

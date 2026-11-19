@@ -7,7 +7,8 @@
 //
 // At each of SAMPLES (simulated seconds) it pauses the World and, on that one state,
 // skins with every setting of "skin cars of one model" (one by one, wide, loop, one by
-// one again) and reads back every car's skinned vertices (window.__skinOut): the bytes
+// one again; with window.__skinRefUrl, also one by one with that module's kernel, e.g.
+// the code before a change: skin-batch.sh puts the base commit's there) and reads back every car's skinned vertices (window.__skinOut): the bytes
 // must be the same bit for bit. Then it times the drawing alone with each setting,
 // ROUNDS rounds interleaved (window.__drawCost; the GPU ms of skinning, shadow map and
 // picture from the page's timers). Returns the table as text.
@@ -22,24 +23,27 @@
   const pause = () => document.getElementById('pause').click();
   const out = [];
   let same = true;
+  const ref = window.__skinRefUrl ? (await import(window.__skinRefUrl)).SHOWCASE_SKIN_WGSL.skin : null;
+  if (ref) out.push(`reference kernel: ${window.__skinRefUrl}`);
   for (const t of SAMPLES) {
     for (let i = 0; i < 600 && !(window.__state().t >= t); i++) await sleep(100);
     pause();
     await sleep(300);
     const st = window.__state();
     const hashes = {};
-    for (const mode of ['off', 'wide', 'loop', 'off']) {
-      set(mode);
+    for (const mode of [...(ref ? ['ref'] : []), 'off', 'wide', 'loop', 'off']) {
+      if (mode === 'ref') { set('off'); window.__skinCode(ref); } else set(mode);
       const h = await window.__skinOut();
+      if (mode === 'ref') window.__skinCode(null);
       const key = h.map((x) => x.sha.slice(0, 12)).join(' ');
       if (hashes[mode] && hashes[mode] !== key) { same = false; out.push(`t ${st.t.toFixed(2)}: one by one twice differs`); }
       hashes[mode] = key;
     }
     const cars = window.__drawStats().cars;
-    const ok = hashes.off === hashes.wide && hashes.off === hashes.loop;
+    const ok = hashes.off === hashes.wide && hashes.off === hashes.loop && (!ref || hashes.ref === hashes.off);
     if (!ok) same = false;
-    out.push(`t ${st.t.toFixed(2)} s, ${cars.length} cars (${cars.filter((c) => c.batched).length} batched under the last setting), skinned vertices ${ok ? 'the same bit for bit' : 'DIFFER'} (off | wide | loop):`);
-    for (const m of MODES) out.push(`  ${m.padEnd(5)} ${hashes[m]}`);
+    out.push(`t ${st.t.toFixed(2)} s, ${cars.length} cars (${cars.filter((c) => c.batched).length} batched under the last setting), skinned vertices ${ok ? 'the same bit for bit' : 'DIFFER'} (${ref ? 'reference | ' : ''}off | wide | loop):`);
+    for (const m of [...(ref ? ['ref'] : []), ...MODES]) out.push(`  ${m.padEnd(5)} ${hashes[m]}`);
     out.push('  setting | skinning | shadow | picture | sum    | wall ms a draw   (World paused, draws alone)');
     for (let r = 0; r < ROUNDS; r++) {
       for (const parts of PARTS) for (const m of MODES) {

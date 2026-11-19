@@ -825,7 +825,10 @@ fn wheelVertex(i: u32, bd: Bind) {
 // P = sum A q, U = sum a q, V = sum b q, W = (U x V)/|U x V|;
 // x = P + off.x U/|U| + off.y (W x U/|U|) + off.z W;
 // n = normalize(nt (V x W) + nb (W x U) + nn (U x V)).
-struct Weighted { pos: vec3f, nrm: vec3f, ids: vec3u };
+// retired: whether any of its nodes is retired debris (vertexRetired's answer for it,
+// found in the same pass over its entries instead of a second one that reads every
+// slot again for each entry).
+struct Weighted { pos: vec3f, nrm: vec3f, ids: vec3u, retired: bool };
 // Packed entries (flags bit 27; the wasm's wtNode16 and wtQ: the .rskin sidecar's own
 // form): 8 entries a 64-byte slot, 2 words each, (node | A's steps << 16, dA/dT's steps
 // | dA/dB's steps << 16), the steps i16 counts of Q_A and Q_D. Both are powers of two,
@@ -847,6 +850,8 @@ fn wNode(bd: Bind, e: u32) -> u32 {
 fn weightedPacked(bd: Bind) -> Weighted {
   var p = vec3f(0.0); var u = vec3f(0.0); var v = vec3f(0.0);
   var ids = vec3u(0u);
+  var ret = false;
+  let rc = params.retireAt != 0u;
   var e = 0u;
   for (var s = 0u; e < bd.n0; s++) {
     var w = slotWords(binds[bd.vehicle + s]);
@@ -855,6 +860,7 @@ fn weightedPacked(bd: Bind) -> Weighted {
       let w1 = w[2u * k + 1u];
       let node = w0 & 0xffffu;
       let q = nodePos(node);
+      if (rc && !ret) { ret = retiredNode(node); }
       // (Arithmetic shifts: the steps are signed.)
       p += q * (f32(bitcast<i32>(w0) >> 16u) * Q_A);
       u += q * (f32(bitcast<i32>(w1 << 16u) >> 16u) * Q_D);
@@ -871,7 +877,7 @@ fn weightedPacked(bd: Bind) -> Weighted {
   let vn = cross(wn, un);
   let pos = p + un * bd.a + vn * bd.b + wn * bd.h;
   let n = cross(v, wn) * bd.nt + cross(wn, u) * bd.nb + c * bd.nn;
-  return Weighted(pos, n * (1.0 / max(length(n), 1e-20)), ids);
+  return Weighted(pos, n * (1.0 / max(length(n), 1e-20)), ids, ret);
 }
 fn wEntry(slot: u32, e: u32) -> vec4u {
   let b = binds[slot + e / 4u];
@@ -885,9 +891,12 @@ fn weightedVertex(bd: Bind) -> Weighted {
   if ((bd.flags & PACKED) != 0u) { return weightedPacked(bd); }
   var p = vec3f(0.0); var u = vec3f(0.0); var v = vec3f(0.0);
   var ids = vec3u(0u);
+  var ret = false;
+  let rc = params.retireAt != 0u;
   for (var e = 0u; e < bd.n0; e++) {
     let w = wEntry(bd.vehicle, e);
     let q = nodePos(w.x);
+    if (rc && !ret) { ret = retiredNode(w.x); }
     p += q * bitcast<f32>(w.y);
     u += q * bitcast<f32>(w.z);
     v += q * bitcast<f32>(w.w);
@@ -901,7 +910,7 @@ fn weightedVertex(bd: Bind) -> Weighted {
   let vn = cross(wn, un);
   let pos = p + un * bd.a + vn * bd.b + wn * bd.h;
   let n = cross(v, wn) * bd.nt + cross(wn, u) * bd.nb + c * bd.nn;
-  return Weighted(pos, n * (1.0 / max(length(n), 1e-20)), ids);
+  return Weighted(pos, n * (1.0 / max(length(n), 1e-20)), ids, ret);
 }
 
 // The nodes that move a vertex: a weighted vertex's entries, a node-frame vertex's
@@ -1016,6 +1025,8 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
   var w: vec3f;
   var tear: f32;
   var nrm: vec3f;
+  // A weighted vertex's retired check, from its entries' pass (vertexRetired's case 1).
+  var retW = false;
   if (blended) {
     let r = blendVertex(bd);
     pos = r.pos + origin();
@@ -1031,6 +1042,7 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
     n = r.nrm;
     w = vec3f(1.0 / 3.0);
     tear = 0.0;
+    retW = r.retired;
     bd.n0 = r.ids.x; bd.n1 = r.ids.y; bd.n2 = r.ids.z;
   } else {
   if (bd.vehicle != 0u) {
@@ -1147,7 +1159,10 @@ fn skin(@builtin(global_invocation_id) gid: vec3u) {
       fxSpawn(pos, v * 0.8 + fxRndDir(seed, 6u) * 1.2 + vec3f(0.0, 0.8, 0.0), 4.0, 5u | (col << 8u));
     }
   }
-  if (params.retireAt != 0u && vertexRetired(binds[i])) { tear = 1.0; }
+  if (params.retireAt != 0u) {
+    if (weighted && !blended) { if (retW) { tear = 1.0; } }
+    else if (vertexRetired(binds[i])) { tear = 1.0; }
+  }
   outv[k] = vec4f(pos, bitcast<f32>(pack2x16float(vec2f(tear, dmg))));
   outv[k + 1u] = vec4f(nrm, bitcast<f32>(pack2x16float(vec2f(plastic, min(scrape, 60000.0)))));
 }
@@ -1925,7 +1940,7 @@ export function createShowcaseCarRenderer(device, opts = {}) {
     })),
   });
   const pipeLayout = device.createPipelineLayout({ bindGroupLayouts: [skinLayout] });
-  const skinPipe = device.createComputePipeline({ label: 'showcase-skin', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'skin' } });
+  let skinPipe = device.createComputePipeline({ label: 'showcase-skin', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'skin' } });
   const normalPipe = device.createComputePipeline({ label: 'showcase-node-normals', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeNormals' } });
   const framePipe = device.createComputePipeline({ label: 'showcase-node-frames', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeFrames' } });
   const compPipe = device.createComputePipeline({ label: 'showcase-node-components', layout: pipeLayout, compute: { module: skinModule, entryPoint: 'nodeComponents' } });
@@ -2973,6 +2988,15 @@ export function createShowcaseCarRenderer(device, opts = {}) {
       if (!['wide', 'loop', 'off'].includes(mode)) throw new Error(`showcase setSkinBatch: ${mode} (wide, loop or off)`);
       batchMode = mode;
       poolsDirty = true;
+    },
+    /**
+     * Checks: the one-by-one skin (setSkinBatch('off')) from another source's `skin`
+     * entry point (another build's SHOWCASE_SKIN_WGSL.skin, e.g. the code before a
+     * change), or null for this one's.
+     */
+    setSkinCode(code) {
+      const module = device.createShaderModule({ label: 'showcase-skin-ref', code: crease(code ?? SKIN_WGSL) });
+      skinPipe = device.createComputePipeline({ label: 'showcase-skin', layout: pipeLayout, compute: { module, entryPoint: 'skin' } });
     },
     /** The skinned vertices of car `id`'s level `k` as a range ({ buffer, offset, size }), for checks. */
     outRange(id, k = 0) { const lv = cars.get(id)?.levels[k]; return lv ? rng(lv.out) : null; },
