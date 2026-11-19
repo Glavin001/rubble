@@ -41,8 +41,8 @@ cargo test --release -p engine-world --test kernel_replay --no-run
 engine/tools/webgpu-profile/run.sh --page vehicle-lab.html --query 'mode=mountain&car=sedan&res=low&cars=8&terrain=ledges&timing=step' --name lab8 --replay 15
 ```
 
-It takes the GPU lock (`gpu-run.sh`: `~/.rubble-gpu-lock` by `mkdir` with the PID inside,
-then the repo's flock `~/.rubble/gpu.lock` through `with-gpu-lock.py`, which also kills the
+It takes the machine's GPU lock (`gpu-run.sh`: the flock `~/.rubble/gpu.lock` through
+`scripts/with-gpu-lock.py`, which every session's GPU jobs queue on, and which kills the
 whole process group after the limit), starts the system Chrome headless with unquantised
 timestamps (`--enable-webgpu-developer-features`, Dawn's `timestamp_quantization` off,
 `allow_unsafe_apis`; none of these changes the page's work), opens the page, and:
