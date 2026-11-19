@@ -111,7 +111,11 @@ fn main() -> anyhow::Result<()> {
         if let Some(fr) = prof {
             // --profile F: where frame F + 1's time goes (floor.rs profile).
             let mut groups = GROUPS.to_vec();
-            groups.push(("contact pass (boxes meet)", 1 << 12));
+            groups.push(("pair: boxes, publish, partner's nodes, triangle cull", 1 << 12));
+            groups.push(("pair: triangles x clusters", 1 << 17));
+            groups.push(("pair: cluster points' box test", 1 << 18));
+            groups.push(("pair: candidates' rule", 1 << 19));
+            groups.push(("pair: hit counts, owners' turns", 1 << 20));
             profile(&f, 2 * pairs, fr, time.max(9), &groups);
             return Ok(());
         }

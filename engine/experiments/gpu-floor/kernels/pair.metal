@@ -192,7 +192,8 @@
                 BAR;
                 // E: a lane a surviving triangle: the partner's clusters its padded box
                 // reaches, each a (triangle, cluster) item.
-                const uint ntri = (uint)TXI(15);
+                // (SKIP(17..20), timing only: the pass cut short from a stage on, on both bodies.)
+                const uint ntri = SKIP(17) ? 0u : (uint)TXI(15);
                 for (uint k = lid; k < ntri; k += LANES)
                 {
                     const uint t = XTRI[k];
@@ -210,7 +211,7 @@
                 BAR;
                 // F: a lane a (triangle, cluster): the cluster's points by the reference's
                 // padded box test.
-                const uint ntc = (uint)TXI(16);
+                const uint ntc = SKIP(18) ? 0u : (uint)TXI(16);
                 for (uint k = lid; k < ntc; k += LANES)
                 {
                     const uint w = XTC[k];
@@ -236,7 +237,7 @@
                 BAR;
                 // G: a lane a candidate: the contact rule (frame, held side, swept crossing,
                 // the side vote); a contact's side recorded, its hit kept.
-                const uint ncx = min((uint)TXI(17), (uint)XCND_CAP);
+                const uint ncx = SKIP(19) ? 0u : min((uint)TXI(17), (uint)XCND_CAP);
                 if (lid == 0 && (uint)TXI(17) > XCND_CAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 4u;
                 for (uint k = lid; k < ncx; k += LANES)
                 {
@@ -351,6 +352,8 @@
                     }
                 }
                 BAR;
+                if (!SKIP(20))
+                {
                 if (lid == 0u)
                 {
                     if ((uint)TXI(18) > HCAP) tgFlags[F_STATUS] = tgFlags[F_STATUS] | 2u;
@@ -532,6 +535,7 @@
                     }
                     }
                     XBAR; // the turn is applied
+                }
                 }
             }
             xstep++;
