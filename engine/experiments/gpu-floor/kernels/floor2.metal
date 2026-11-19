@@ -42,10 +42,14 @@ struct Params
 #define TGP(i) v3(tgPos[(i) * 3], tgPos[(i) * 3 + 1], tgPos[(i) * 3 + 2])
 #define TGV(i) v3(tgVel[(i) * 3], tgVel[(i) * 3 + 1], tgVel[(i) * 3 + 2])
 #define PUTV(vi, val) { V3 _v = (val); tgVec[(vi) * 3] = _v.x; tgVec[(vi) * 3 + 1] = _v.y; tgVec[(vi) * 3 + 2] = _v.z; }
-// Slot word: a (10 bits), b (10), alive (bit 20), slope on (21), deform asked (22), class (30..31).
-#define W_ALIVE (1u << 20)
-#define W_SLOPE (1u << 21)
-#define W_DEFORM (1u << 22)
+// Slot word of a two-node beam: 3·a (11 bits), 3·b (11), alive (bit 22), slope on (23),
+// deform asked (24), class (30..31). Of an aero triangle: its three nodes, 10 bits each.
+#define W_ALIVE (1u << 22)
+#define W_SLOPE (1u << 23)
+#define W_DEFORM (1u << 24)
+#define TG3P(o) v3(tgPos[o], tgPos[(o) + 1u], tgPos[(o) + 2u])
+#define TG3V(o) v3(tgVel[o], tgVel[(o) + 1u], tgVel[(o) + 2u])
+#define ENT_ADD(acc, e) { uint o3_ = (e) & 2047u; acc = acc + (Ps - TG3P(o3_)) * tgG[(e) >> 11]; }
 #define C_PLAIN 0u
 #define C_SUPPORT 1u
 #define C_AERO 2u
@@ -230,7 +234,7 @@ kernel void floorFrame(
         float4 st0 = recState[r * 3], st1 = recState[r * 3 + 1], ax = recState[r * 3 + 2];
         if (kind == K_JPLAIN || kind == K_JSUPPORT)
         {
-            w0[s] = a.x | a.y << 10 | (st1.w == 0.0f ? W_ALIVE : 0u) | (st1.z != 0.0f ? W_SLOPE : 0u) | (kind == K_JSUPPORT ? C_SUPPORT : C_PLAIN) << 30;
+            w0[s] = a.x * 3u | (a.y * 3u) << 11 | (st1.w == 0.0f ? W_ALIVE : 0u) | (st1.z != 0.0f ? W_SLOPE : 0u) | (kind == K_JSUPPORT ? C_SUPPORT : C_PLAIN) << 30;
             float4 kc = recK[r];
             hs = float4(kc.x, kc.y, st0.x, ax.x);
             if (st1.w == 0.0f)
@@ -404,10 +408,10 @@ kernel void floorFrame(
                 float gc = 0.0f;
                 if ((w & W_SLOPE) != 0u)
                 {
-                    uint a = w & 1023u, b = (w >> 10) & 1023u;
-                    V3 d = TGP(a) - TGP(b);
+                    uint a = w & 2047u, b = (w >> 11) & 2047u;
+                    V3 d = TG3P(a) - TG3P(b);
                     float inv = exactLength(dot3(d, d)).y;
-                    float du = dot3(TGV(a) - TGV(b), d) * inv - up[s];
+                    float du = dot3(TG3V(a) - TG3V(b), d) * inv - up[s];
 #if REGMODE < 2
                     gc = ((-0.5f * cc[s]) * du) * inv;
 #else
@@ -472,15 +476,15 @@ kernel void floorFrame(
         {
             V3 Ps = TGP(ni);
             V3 c = v3(0, 0, 0);
-            uint4 cur = uint4(0u);
-            for (uint k = 0; k < MAXENT; k++)
+            for (uint k = 0; k < MAXENT; k += 4u)
             {
-                // The leading scalar entries: (x_self − x_other)·g.
+                // The leading scalar entries, four a load: (x_self − x_other)·g.
                 if (k >= entScalar) break;
-                if ((k & 3u) == 0u) cur = ent4[(entStart >> 2) + (k >> 2)];
-                uint e = cur[k & 3u];
-                uint o3 = e & 2047u;
-                c = c + (Ps - v3(tgPos[o3], tgPos[o3 + 1u], tgPos[o3 + 2u])) * tgG[e >> 11];
+                uint4 cur = ent4[(entStart >> 2) + (k >> 2)];
+                ENT_ADD(c, cur.x);
+                if (k + 1u < entScalar) ENT_ADD(c, cur.y);
+                if (k + 2u < entScalar) ENT_ADD(c, cur.z);
+                if (k + 3u < entScalar) ENT_ADD(c, cur.w);
             }
             for (uint k = entScalar; k < MAXENT; k++)
             {
@@ -541,8 +545,8 @@ kernel void floorFrame(
                     w0[s] = w & ~W_SLOPE;
                     continue;
                 }
-                uint a = w & 1023u, b = (w >> 10) & 1023u;
-                V3 pa = TGP(a), pb = TGP(b), va = TGV(a), vb = TGV(b);
+                uint a = w & 2047u, b = (w >> 11) & 2047u;
+                V3 pa = TG3P(a), pb = TG3P(b), va = TG3V(a), vb = TG3V(b);
                 V3 d = pa - pb;
                 float2 li = exactLength(dot3(d, d));
 #if REGMODE >= 1
@@ -774,14 +778,14 @@ kernel void floorFrame(
             V3 f = v3(0.0f, massN * GRAVITY, 0.0f);
             // (A broken beam's scalar is zero: adding ±0 changes no bit of a sum that began at
             // +0 or at the weight, so it is the reference's skipped add.)
-            uint4 cur = uint4(0u);
-            for (uint k = 0; k < MAXENT; k++)
+            for (uint k = 0; k < MAXENT; k += 4u)
             {
                 if (k >= entScalar) break;
-                if ((k & 3u) == 0u) cur = ent4[(entStart >> 2) + (k >> 2)];
-                uint e = cur[k & 3u];
-                uint o3 = e & 2047u;
-                f = f + (Ps - v3(tgPos[o3], tgPos[o3 + 1u], tgPos[o3 + 2u])) * tgG[e >> 11];
+                uint4 cur = ent4[(entStart >> 2) + (k >> 2)];
+                ENT_ADD(f, cur.x);
+                if (k + 1u < entScalar) ENT_ADD(f, cur.y);
+                if (k + 2u < entScalar) ENT_ADD(f, cur.z);
+                if (k + 3u < entScalar) ENT_ADD(f, cur.w);
             }
             for (uint k = entScalar; k < MAXENT; k++)
             {
