@@ -4,7 +4,7 @@ An experiment, not engine code: nothing depends on this crate. It measures what 
 generated sedan (548 nodes, 3,581 beams, 528 collision triangles) costs on the GPU once the
 production kernels' generality is gone, with hand-written Metal kernels checked against
 the CPU reference (`engine-softbody`). Results and conclusions:
-`engine/docs/measurements/vehicle-perf-first-principles.md` §8.38.
+`engine/docs/measurements/vehicle-perf-first-principles.md` §8.39.
 
 Three mechanisms, one kernel path each:
 

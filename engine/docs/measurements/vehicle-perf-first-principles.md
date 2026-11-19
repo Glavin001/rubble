@@ -2294,6 +2294,77 @@ would be needed for per car to pay: the excluded cars' pairs listed beside the k
 (a pair region shared, not tested inline) and a build that keeps reading its list in its
 own pass; both change today's walk's code, measured first for its own cost.
 
+**Per car, listed beside the kept list: built, bit for bit, slower; reverted (2026-11-18;
+commits 14cbaa61 and after on `perf/keep-rolling`, reverted there).** The design named above,
+on main after #119, #122 and #123, behind a companion flag (8, `PERF_FLEET_CAR`, with 32768).
+
+- *Today's walk, measured first* (main's kernels, flag off, `--ab-profile`, 10 frames of 34
+  substeps, ms a frame / µs a pass): rolling gully t 25 6.19 / 182 (19 % of a 31.0 ms
+  frame), t 30 6.71 / 197 (20 %); ledges t 16 2.71 / 80 (14 %). The change to the walk itself
+  is one term: `vvPairAdd` adds the owner's first place after its kept list
+  (`fkWalkBase`, 0 unless a pass reuses the list with a car excluded); `vvTriangleCandsList`
+  is unchanged.
+- *What was built.* One predicate splits the pairs in every dispatch of a pass: a pair with
+  an excluded car (as owner or as the point's vehicle) is today's front's, every other pair
+  the kept list's. A pass that reuses the list with a car excluded (`FK_MIX`): the kept
+  pairs' tests for the others; today's gather (those pairs alone), grids, sorted copy and
+  walk for the excluded cars' pairs, the walk's pairs listed in the owner's pair region
+  after its kept list and tested in the listed pairs' dispatch (no inline tests). A build:
+  the padded gather of every pair (its box now also holds every point `flPoint`'s would,
+  whatever its speed), the list of the pairs of two cars not excluded, then in the same
+  pass the tests of its new list and, a part of a listed triangle a thread, the excluded
+  cars' pairs in the walk's own boxes; an owner past its room is excluded at that build
+  (FK_BACKOFF passes, doubled per build past it in a row), the others keep their lists. A
+  car with a node too fast for any build is excluded instead of sending the fleet to
+  today's path. A culprit of a list outlived in fewer than 8 passes is excluded for 68
+  passes; a car comes back only through a build; an excluded car's nodes are not tracked.
+- *Proofs.* `fast-check.sh` on 22 fixtures (1, 2, 4, 8 cars, ledges; the overflow moment,
+  eight cars at t 0.9; the rolling gully at t 20, 25, 28, 30 saved natively with
+  `--terrain rolling`): bit for bit with `RUBBLE_PERF_FLAGS=30932929 perf=8` (per car
+  against the fleet-wide list) and `perf=32776` (per car against off), 4 frames; 20 frames
+  on ledges t 16 and t 30, rolling t 25 and t 30, and t 0.9: bit for bit. Chrome's module
+  check found one barrier: the build's plan read a workgroup value inside lane 0's branch
+  (`workgroupUniformLoad` from non-uniform control flow, `explicit_beams_split_fleetplan`
+  and its variants); read before the branch, fixed: all 124 modules compile. The suites, Chrome's A/B and the 40 s
+  runs were not run: the change is slower on every fixture (below).
+- *Time* (ms a frame, 20 frames from one state each way, per car / fleet-wide list):
+
+| fixture | attempt 1 (as designed) | attempt 2 (+ the mixed walk culled by its candidates' box) | attempt 3 (+ the mixed walk's parts over the owners with candidates alone) |
+|---|---|---|---|
+| ledges, 8 cars, t 16 | 17.79 untimed (fleet-wide 14.60, off 16.85) | 19.19 / 15.50 | 19.41 / 15.45 |
+| rolling, t 25 | 36.42 untimed (fleet-wide 28.72, off 27.33) | 36.85 / 28.60 | 36.72 / 28.60 |
+| ledges, t 30 | | 25.90 / 19.45 | 26.08 / 19.59 |
+| ledges, t 0.9 (overflow) | | 13.57 / 11.71 | 13.44 / 11.81 |
+| rolling, t 30 | | | 35.18 / 29.32 |
+
+  Three attempts in a row, each slower, none a gain: stopped there.
+- *Why.* The per-owner counts of a mixed pass at ledges t 16 (`AB_COUNTS`): every one of
+  the eight owners had candidates of today's front (316 to 3,773), with all 528 of its
+  triangles listed, and a build every second frame for cover. One car is excluded almost
+  all the time (the culprit of the lists the fleet-wide run outlives: its 69 passes on
+  today's path in 20 frames), it returns through a build every 68 passes and is excluded
+  again at once; in a pile every other car touches it, so every owner gathers its points
+  and walks every listed triangle: the walk is today's (2.80 ms, 82 µs a pass, against
+  2.63 / 77 off), with the kept tests, the tracking and the builds on top. Culling a mixed
+  walk's triangles by the box of the owner's front candidates (attempt 2) and giving the
+  walk's parts only to owners with such candidates (attempt 3) changed nothing: those
+  candidates are a whole car beside every owner. On the rolling gully the list is now
+  kept (90 % of passes reuse it, where the fleet-wide list never builds: every build there
+  is past an owner's room), but builds come every 10 passes (65 in 20 frames, wild nodes)
+  and each one's tests of the excluded cars in the walk's own boxes cost 7.1 ms a frame in
+  the listed pairs' dispatch (0.6 off); the walk stays 7.3 to 7.8 ms.
+- *Found on the way: the fleet-wide list's own cost on today's main.* With 32768 the host
+  drops `PERF_FLEET_POST` (the levels' throttle updates) and the fused scans
+  (`fuseScansOn`), both default since §8.29 and §8.32. Rolling t 25, flag on against off:
+  the split levels 8.06 against 7.16 ms a frame, the scans' dispatch 0.37 against none, the
+  owners' parts 1.08 against 0.88, the walk the same (6.19): 28.72 against 27.33 ms
+  untimed. Ledges t 16: 14.60 against 16.85 (the walk 0.82 against 2.63). So on the
+  page's terrain the fleet-wide flag now costs about 1.4 ms a frame before any walk is
+  saved; making the kept list compatible with the throttle updates across the fleet and
+  with the fused scans is the cheaper next step than per car.
+
+The fleet-wide list (40a7c4fe's) stays as it was, off by default.
+
 ### 8.29 Contact groups of any size on the fleet-wide passes; the levels visit the owners with hits; the throttle updates across the fleet (2026-11-16)
 
 `contact-groups-design.md` §8 stage 3 (what is built: its §8.7). Two perf flags, both
@@ -3363,8 +3434,99 @@ them) or fewer levels (the rule's levels are the owners' partner conflicts; a fi
 by contact point and triangle node rather than by vehicle, would let more hits share a
 level).
 
+### 8.38 Physics first: what the lab's drawing costs the World, and the drawing giving way (2026-11-19)
 
-### 8.38 The floor measured directly: a purpose-built kernel for one sedan (2026-11-19)
+The owner's Chrome (M3 Max, a 120 Hz display), the derby with four cars apart: 121 FPS,
+World 52 steps a second (86 % of real time), GPU not ready 30 %. Measured here in
+headless Chrome on the same machine (`engine/tools/vehicle-lab/physics-first.sh`: the
+page's own real-time loop for 30 s, drawing as the page draws, then 8 s with nothing
+drawn, `window.__drawOff`; the drawing's parts with the World paused, `draw-cost.js`),
+1280×720, GPU timing per step on. Headless Chrome shows 60 frames a second; a faster
+display is `vehicle-lab-record.mjs --uncapped` (frames as fast as Chrome makes them, 80
+to 110 a second here). Other sessions' GPU jobs shared the GPU during some runs (through
+the lock, and the owner's own page): steps a second move by a few between runs.
+
+**What a picture costs** (GPU ms, the World paused, drawn alone):
+
+| | 4 cars | 8 cars | mountain, 8 cars |
+|---|---|---|---|
+| skinning (all cars) | 2.9 | 6.1 | 5.8 |
+| shadow map | 0.35 | 0.6 | 0.8 |
+| picture: the cars' opaque triangles | 3.2–4.2 | 4.3–6 | 6.7–10.6 |
+| picture: glass; colliders and sky (the props are instanced already) | 0.4; 0.4 | 0.4; 0.3 | 1.1; 0.6 |
+| **a picture** | **7.5–8.5** | **12.2–14** | **15.5–19.5** |
+| a World step (physics), cars apart / in contact | 6.3 / 12.5–13 | 7.2–8.8 / 16.4 | 16–20 |
+
+The drawing is not advanced graphics but it is not small either: 427,478 opaque
+triangles a car (2 cm edges, one level of detail) and a skin of 490,997 vertices a car
+read from 157 MB of binds. Readback copies are a few kB. A picture costs more than a
+World step while the cars are apart. Drawn every display frame it takes half the GPU's
+second (four cars apart at 60 Hz: 61 pictures × 8.3 ms = 50 %, the physics 38 %); at
+120 Hz it takes more than the GPU has, which is the owner's 86 %. Physics is delayed
+behind draws: steps and pictures share one queue, a picture submitted between two steps
+runs before the second, and a step the World is not ready for is lost time.
+
+**Built.**
+* `rubble::DrawPacer` (engine-world-wasm `draw_pacer.rs`, with tests): which display
+  frames are drawn. No picture queued behind one still on the GPU, or in a frame whose
+  step was refused, until the picture is older than the floor's interval; while steps
+  are refused (two in half a second) the drawing gives way a level at a time: every
+  display frame, 60 pictures a second, 30 (the floor, a control: 60, 30, 20 or 15), then
+  75 % and 50 % of the pixels (automatic render scale only); below every frame only
+  frames that took a step are drawn (each car skinned once a World step, each picture
+  the latest state). It comes back a level after 2 s with no step refused; a level that
+  loses again within its try waits twice as long (to 16 s). The page's controls:
+  "drawing gives way to physics" (on), "at least N pictures a second", live.
+* Three World steps in flight (`setStepsInFlight`, a control: 2 to 4; pacing only, the
+  same steps). Chrome lands a step's readback well after the GPU is done with it, and
+  with two in flight the World refused steps while the GPU was idle: four cars in
+  contact, nothing drawn, 47 steps a second with two (8.9–13 ms a step), 60 with three.
+  A/B in one run (giving way on, two then three, three times): 41–45 against 49–57
+  steps a second. The lab's readings (measurements, the camera, the derby's AI) arrive
+  one step (16.7 ms) later. The frame-locked recorder waits for every readback and is
+  unchanged.
+* A frame not drawn still reads back what its steps left (measurements, the derby's AI):
+  the lab's inputs no longer follow the drawing rate. The skin and the shadow map are
+  not redone when nothing they show changed (no step, the same lead, one level of
+  detail: the World paused). The debris effects' time step spans the steps of frames
+  not drawn. Polling a landed readback before refusing a step made no measurable
+  difference (kept: it is the right order).
+
+**Before and after** (headless Chrome; real time is 60 steps a second; frame interval
+p50 / p95 / worst ms after; drawing's GPU ms a picture and its share of the GPU's second):
+
+| | World steps/s, before → after | pictures/s | frame, after | drawing, before → after | physics alone (nothing drawn), before → after |
+|---|---|---|---|---|---|
+| derby, 4 cars apart, 60 Hz | 60 (99 %) → 59 (99 %) | 61 → 31 | 16.7 / 16.8 / 17 | 8.3 ms (50 %) → 8.3 (26 %) | |
+| derby, 4 cars apart, fast display (80–110 Hz) | 42 (70 %) → 61 (100 %) | 42 → 27 | 17.4 / 18.8 / 19 | 8.0 (34 %) → 8.5 (23 %) | |
+| derby, 4 cars in contact | 38 (63 %) → 48 (81 %) | 33 → 30 | 16.7 / 16.7 / 17 | 8.3 (27 %) → 9.2 (28 %) | 47 (79 %) → 60 (100 %); 12.4–13 ms a step |
+| derby, 4 cars in contact, fast display | 36 (61 %) → 47 (78 %) | 28 → 27 | 17.2 / 18.7 / 19 | 7.8 (22 %) → 9.3 (25 %) | 38 → 61 |
+| derby, 8 cars apart | 40 (67 %) → 59 (99 %) | 48 → 30 | 16.7 / 16.7 / 17 | 12.1 (58 %) → 12.1 (37 %) | |
+| derby, 8 cars in contact | 31 (52 %) → 36 (60 %) | 29 → 28 | 16.7 / 33.3 / 50 | 10.6 (31 %) → 12.5 (35 %) | 40 (67 %) → 60 (99 %); 16.4 ms a step |
+| mountain, 8 cars | 28 (46 %) → 35 (59 %) | 31 → 28 | 16.7 / 33.3 / 50 | 15.7 (49 %) → 14.5 (40 %) | 40 (67 %) → 48 (80 %); 17–20 ms a step |
+
+(Before, the page already halved its scale and drew every other step while steps were
+refused, so the pictures a second are similar in contact. The frame p95 of 33 ms with
+eight cars is the floor's picture drawn while the GPU is still busy: 30 pictures a
+second, as the floor asks; drawing only while the GPU is free gave 15 pictures a second,
+16.7 ms frames and 1–2 more steps a second.)
+
+**What is left, and whether it is physics.** Four cars: with nothing drawn the physics
+keeps real time in contact (13 ms a step); the gap left (81 %) is the 30 pictures a
+second at 9 ms. Eight cars in contact: the physics alone fills the GPU (16.4 ms × 60 =
+98 % of it), so any drawing costs steps; the floor's 30 pictures at 12.5 ms are the
+40 % missing. The mountain's eight cars: physics alone is 17–20 ms a step, 80 % of real
+time with nothing drawn: physics is the limit there. To make a picture close to free,
+the work left is in the drawing itself, lossless first:
+* skinning: 0.73 ms a car, 1.7× its bandwidth floor, and the cars of one model each read
+  the same 157 MB of binds; one pass reading a bind once for every car would take eight
+  cars' 6.1 ms toward 1 ms;
+* the cars' opaque picture follows the triangles (a quarter of the pixels takes off only
+  10–15 %): levels of detail for the generated car (a different picture by design, the
+  asset side: §8.30's follow-up).
+
+
+### 8.39 The floor measured directly: a purpose-built kernel for one sedan (2026-11-19)
 
 `engine/experiments/gpu-floor` (a workspace member nothing depends on): a hand-written
 Metal kernel for the lab's generated sedan alone, checked against the CPU reference, to
@@ -3702,36 +3864,39 @@ in place of the specified sequences 0 % there (memory-bound) and 5 % on the seco
 strict against fast +8 %. Second layout: the filter's over-the-triangle test −9 % at rest
 and −5 % after the crash; position and velocity side by side 0 %; the owning layout 0 %.
 
-**What to take back to production, in order of payoff.**
-1. *All 34 substeps in one dispatch, the state in registers and threadgroup memory, a hot
-   image between dispatches.* The first layout's per-substep dispatch cost +72 %;
-   production pays a dispatch per substep and reloads. This is most of the 3× at rest.
-2. *A beam's hot words in registers and one scalar an end through threadgroup memory,
-   gathered per node in the reference's order.* Exact, and it is what took 3.0 to 1.3 ms.
-   Needs slot loops written out (the compiler does not unroll them).
-3. *Compact lists, a lane an item, for everything rare*: contact nodes, self-collision
-   candidates, hits, and each stage of vehicle contact's search. A warp pays for its
-   slowest lane.
-4. *Vehicle contact on the bodies' own cores, in lockstep across cores*, detection on
-   both at once: 3.5 ms (4.2 strict) for a head-on pair against 15.4. Requires that every
-   word two workgroups share be stored atomically (measured above; a silent wrong answer
-   otherwise); what was stored atomically can be read with a plain vector load.
-5. *Hit passes from workgroup memory*: a slot a hit node, filled by the node's own lane,
-   so a hit's lane does not walk device memory. A phase of a few lanes costs its longest
-   chain: count device accesses one after another, not lanes.
-6. *Only the nodes a contact wrote read and clear their contact words* (bits a node, by
-   kind), instead of every node on every step after a contact.
-7. *Two pair lists*, a wide one rebuilt rarely and the working one filtered from it: the
-   same rows, and a crash's rebuilds a third as often from scratch.
-8. *The profiler's method*: a substep a dispatch from its own saved state, cut short
-   after each phase group, and every change then judged on the whole frame side by side.
-9. *A strict Metal build is fast math off plus `fp contract(off)`*: no XOR barriers, and
-   bit for bit with the CPU reference.
-10. *Check kernels on the CPU first.* The emulator found every logic bug of these kernels,
-   including a cross-core race, in seconds and without the GPU queue.
-Not worth taking: position and velocity interleaved, node-owned beams, unordered atomic
-sums, native math on a memory-bound path, results held in more registers a lane, rare
-work run inside the wide phases.
+**What to take back to production, ranked.** Gains are this kernel's own, on the scene
+named, each measured with only that change between the two figures (ms a frame, one sedan a
+body); "bit for bit" means the strict build with the technique in it matched the CPU
+reference's every state word on the GPU. Production's gain will differ: its kernels are
+Slang through wgpu, one dispatch a substep, and some of this it already has in another form.
+
+| # | technique | measured here | bit for bit | to port |
+|---|---|---|---|---|
+| 1 | All 34 substeps in one dispatch; the body's state in registers and workgroup memory; a hot-state image between dispatches | wall crash 5.84 → 3.40 (−42 %; a dispatch a substep costs +72 %) | yes | the largest single item, and structural: the World's per-substep host coupling has to move to once a frame |
+| 2 | A beam's hot words in registers (four slots a lane), one scalar an end through workgroup memory, each node gathering its beams in the reference's order; slot loops written out by hand | rest 3.00 → 1.32, wall 3.68 → 2.60 (−56 %, −29 %) | yes (the gather is the reference's sum, both ends) | needs every count a compile-time constant (+6 % as uniforms) and no array indexed by a loop variable |
+| 3 | Vehicle contact on the two bodies' own workgroups, in lockstep across cores (a device counter and a bounded spin), each body searching its own triangles, the owners' turns one after the other | head-on 3.5 fast / 4.2 strict against production's 15.4 (with 4 to 9 below); the change from a third workgroup doing the pass alone, 6.4 → 5.5 | yes | every word two workgroups share stored atomically (a plain store is not seen on another core: a silent wrong answer); two bodies a group so far |
+| 4 | Hit passes from workgroup memory: a slot a hit node (force, mass, hit count, staged sums), named by an atomic minimum, filled by the node's own lane | head-on 4.51 → 3.60 (−20 %); the owners' turns 1.53 → 0.85 | yes | the slots live in the beam scalars' array between two beam passes; at most 80 self hits and 63 a turn a substep (a status bit beyond) |
+| 5 | Two pair lists: a wide one from the clusters rarely, the working one filtered from it | head-on 4.88 → 4.43 (−9 %); wall crash's run 2.46 → 2.30 (−7 %) | yes (the same rows in the same order) | applies wherever a Verlet list is rebuilt often in a crash |
+| 6 | Only the nodes a contact wrote read and clear their contact words (four bits a node, by kind) | head-on 5.66 → 5.22 (−8 %); wall 2.52 → 2.24 strict (−11 %) | yes | check first whether production's node pass reads them for every node |
+| 7 | The pair filter also applies the rule's over-the-triangle test and checks a held side against this triangle | rest 1.41 → 1.29 (−9 %), wall −5 %; candidates 722 → 0–2 a substep at rest | yes (the rule's own tests) | only where a cheap filter feeds a separate full-rule pass; production runs the rule per pair |
+| 8 | What another workgroup stored atomically read with one plain vector load | head-on 5.22 → 4.87 (−7 %) | yes (measured; not guaranteed by the language) | with 3 only |
+| 9 | A body publishes its clusters' boxes for its partner's cull | head-on 3.60 → 3.50 (−3 %) | yes | with 3 only |
+| 10 | A row loop with no vector indexed by a variable (four points a load, by name) | rest 1.32 → 1.29 (−2 %) | yes | trivial |
+| 11 | Fast math with native functions | 10 to 20 % (rest 1.25 → 1.09, head-on 4.2 → 3.5) | **no**: within the closeness report above | an option, as now |
+
+Two that are not kernel changes and paid for all of the above: the strict Metal build is
+fast math off plus `#pragma clang fp contract(off)` (no XOR barriers; that is what made
+"bit for bit" checkable at all), and the two instruments, an emulator that runs the kernel
+source on the CPU against the reference (every logic bug here, a cross-core race among
+them, found without the GPU queue) and the profiler above with its rule (a change is kept
+only on a whole-frame comparison in one batch).
+
+Measured and not worth taking: position and velocity side by side (0 %); each node's lane
+owning three of its beams (0 %, and not bit for bit); unordered force sums through device
+atomics (+18 % slower, not bit for bit); the hits' sums held in the nodes' lanes'
+registers and a row's first candidate run inline (+7 %); the two-body rule run where a
+point passes its box (+5 %); a phase fewer in the hit passes (+1 to +5 %); velocity and
+force published only for reachable nodes (0 %, kept: it is exact and cheap).
 
 **Where the head-on's 3.5 ms still is, and what would be tried next.** By the profiler: the
 owners' turns 0.87 (ten short phases a substep for some thirty hits: the rule's passes each
